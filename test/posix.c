@@ -78,8 +78,9 @@ target_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
 {
 	(void)argument;
 	(void)id;
-	(void)offset;
-	memset(buffer, 't', length);
+	/* Keep components short enough for each writer's link profile. */
+	for (size_t i = 0; i < length; i++)
+		((unsigned char *)buffer)[i] = (offset + i) % 128 == 127 ? '/' : 't';
 	*transferred = length;
 	(void)error;
 	return (FSIMG_OK);
@@ -261,7 +262,8 @@ test_capability_records(void)
 			continue;
 		}
 		if (strcmp(info.name, "iso9660") == 0) {
-			CHECK(info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
+			CHECK(info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_WRITE |
+			    FSIMG_CAP_VERIFY));
 			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
 			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
 			    FSIMG_ENTRY_FIFO));
@@ -439,6 +441,7 @@ test_link_target_limits(void)
 	fsimg_format_info_t info;
 	fsimg_error_t error;
 	size_t cursor;
+	uint64_t limit;
 	unsigned tested;
 
 	fixture_open(&fixture);
@@ -449,16 +452,21 @@ test_link_target_limits(void)
 		    (info.entry_kinds & FSIMG_ENTRY_SYMLINK) == 0)
 			continue;
 		tested++;
-		CHECK(plan_link(&fixture, info.name, info.max_link_target_bytes,
+		/* The ISO capability record includes the reader's 1024-byte
+		 * limit; its interoperable writer profile permits 1023.
+		 */
+		limit = strcmp(info.name, "iso9660") == 0 ? 1023 :
+		    info.max_link_target_bytes;
+		CHECK(plan_link(&fixture, info.name, limit,
 		    &error) == FSIMG_OK);
-		if (info.max_link_target_bytes < FSIMG_SYMLINK_TARGET_MAX) {
+		if (limit < FSIMG_SYMLINK_TARGET_MAX) {
 			CHECK(plan_link(&fixture, info.name,
-			    info.max_link_target_bytes + 1, &error) ==
+			    limit + 1, &error) ==
 			    FSIMG_EUNSUPPORTED);
 			CHECK(strcmp(error.path, "/link") == 0);
 		} else {
 			CHECK(plan_link(&fixture, info.name,
-			    info.max_link_target_bytes + 1, &error) ==
+			    limit + 1, &error) ==
 			    FSIMG_EINVAL);
 		}
 	}

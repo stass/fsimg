@@ -187,6 +187,18 @@ module FsimgSpec
 
       def self.source_refusals = [
         Rule.new(
+          id: "fat.create.entry_kinds", category: "profile", policy: "must_reject", status: "FSIMG_EUNSUPPORTED",
+          scopes: ["input"], applies_to: ALWAYS, domain: Witnesses::CREATE_ENTRY_KINDS,
+          predicate: ->(source, _) { source.tree.all? { %w[file directory].include?(_1.type) } },
+          source: "#{WRITER}#metadata-and-determinism: FAT creation stores regular files and directories"
+        ),
+        Rule.new(
+          id: "fat.create.settings_applicable", category: "profile", policy: "must_reject", status: "FSIMG_EINVAL",
+          scopes: ["input"], applies_to: ALWAYS, domain: Witnesses::CREATE_SETTINGS_APPLICABLE,
+          predicate: ->(source, _) { (source.settings.keys - %i[size sector cluster]).empty? },
+          source: "specs/design-settings.md: a non-default filesystem setting must apply to the selected format"
+        ),
+        Rule.new(
           id: "fat.create.sector_bytes", category: "normative", policy: "must_reject", status: "FSIMG_EINVAL",
           scopes: ["input"], applies_to: setting?(:sector), domain: Witnesses::CREATE_SECTOR,
           predicate: ->(source, _) { SECTOR_BYTES.include?(source.settings.fetch(:sector)) },

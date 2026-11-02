@@ -119,6 +119,9 @@ destruction.
 Destructors accept NULL.
 A writer owns its immutable plan; plan and entry snapshots are borrowed.
 Iteration invalidates the previous current-entry snapshot.
+The common entry model excludes volume-root metadata: readers do not deliver
+it, writers use their format's root defaults and extraction does not restore
+the original root's owner, mode or times.
 .Sh READERS
 .Fn fsimg_reader_next
 enumerates depth-first in on-disk order and returns FSIMG_DONE at complete EOF.
@@ -285,12 +288,29 @@ Reproducible mode fixes timestamps, identifiers, ordering and padding.
 Optional losses follow the explicit allow-loss policy; required losses fail.
 A field the selected format does not store, as its capability record states,
 is an omission under the same policy, counted once per field.
+The capability record describes the union of reading and writing support;
+a writer profile can be narrower and reports its additional omissions during
+planning.
 An entry kind the format does not store always fails planning, as does a
 symbolic link whose target is longer than the record's
 max_link_target_bytes, which is zero exactly when the format stores no
 links.
 A format record whose max_label_bytes is zero has no volume label and accepts
 only a NULL label.
+ISO 9660 writes Rock Ridge and Joliet together. Its iso_level selects 1, 2
+or 3 (zero selects 3); levels 1 and 2 refuse files above UINT32_MAX bytes.
+Rock Ridge keeps source names within 255 UTF-8 bytes and link targets within
+1023 bytes, with target components at most 255 bytes.
+Joliet identifiers take aliases for case-insensitive lookup collisions.
+Creation time and attributes are omissions under the loss policy.
+The copied boot_bios and boot_efi image paths select unchanged, nonempty
+single-section regular files for El Torito BIOS and EFI entries.
+boot_load_sectors is the BIOS count in 512-byte sectors (zero selects 4),
+at most 65535 and within the file's allocated ISO blocks; a nonzero count
+without boot_bios is invalid.
+These settings are declared by FSIMG_SETTING_ISO_LEVEL and
+FSIMG_SETTING_ELTORITO.
+No boot information table or hybrid system area is written.
 The settings byte_order, volume_uuid, inode_capacity and reserve_percent
 select the byte order, the UUID in textual byte order, the inode capacity
 and the reserved-block percentage (default 3) of a format whose record's

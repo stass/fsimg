@@ -534,7 +534,7 @@ details_valid(const unsigned char *raw, size_t count_offset,
 }
 
 bool
-fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
+fsimg_wire_info_frame_valid(const fsimg_frame_t *frame)
 {
 	const unsigned char *raw = frame->payload;
 	uint64_t valid, capabilities, basis, scope;
@@ -566,8 +566,6 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame, uint64_t volume_limit)
 	    FSIMG_WIRE_INFO_DETAILS, FSIMG_VOLUME_DETAILS_MAX))
 		return (false);
 
-	if (fsimg_load_le64(raw + FSIMG_WIRE_INFO_VOLUME) > volume_limit)
-		return (false);
 	if (fsimg_load_le64(raw + FSIMG_WIRE_INFO_SECTOR) > UINT32_MAX ||
 	    fsimg_load_le64(raw + FSIMG_WIRE_INFO_CLUSTER) > UINT32_MAX)
 		return (false);

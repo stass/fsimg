@@ -63,9 +63,9 @@ static fsimg_status_t flush_block(directory_out_t *, fsimg_error_t *);
 static fsimg_status_t put_record(directory_out_t *,
     const iso_record_fields_t *, fsimg_error_t *);
 static fsimg_status_t split_entries(directory_out_t *, size_t,
-    const iso_row_t *, size_t, unsigned char *, size_t *, fsimg_error_t *);
+    const iso_record_plan_t *, size_t, unsigned char *, size_t *, fsimg_error_t *);
 static fsimg_status_t emit_dot(directory_out_t *, iso_hierarchy_t,
-    const iso_row_t *, const iso_row_t *, bool, fsimg_error_t *);
+    const iso_row_t *, const iso_row_t *, bool, uint32_t, fsimg_error_t *);
 static fsimg_status_t emit_child(directory_out_t *, iso_hierarchy_t,
     const iso_name_t *, fsimg_error_t *);
 static fsimg_status_t emit_directory(iso_plan_t *, iso_hierarchy_t,
@@ -289,7 +289,7 @@ put_record(directory_out_t *out, const iso_record_fields_t *fields,
  * in the continuation region.
  */
 static fsimg_status_t
-split_entries(directory_out_t *out, size_t length, const iso_row_t *row,
+split_entries(directory_out_t *out, size_t length, const iso_record_plan_t *record,
     size_t identifier_length, unsigned char *system_use,
     size_t *system_use_length, fsimg_error_t *error)
 {
@@ -304,13 +304,13 @@ split_entries(directory_out_t *out, size_t length, const iso_row_t *row,
 	    iso_record_room(identifier_length), &split, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (split.record_bytes != row->record_entries ||
-	    split.fragments != row->fragments)
+	if (split.record_bytes != record->record_entries ||
+	    split.fragments != record->fragments)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_WRITER, "ISO 9660 Rock Ridge entries disagree "
 		    "with their plan"));
 	for (unsigned i = 0; i < split.fragments; i++) {
-		if (split.fragment_bytes[i] != row->fragment_bytes[i])
+		if (split.fragment_bytes[i] != record->fragment_bytes[i])
 			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 			    FSIMG_OP_WRITER, "ISO 9660 Rock Ridge entries "
 			    "disagree with their plan"));
@@ -319,12 +319,12 @@ split_entries(directory_out_t *out, size_t length, const iso_row_t *row,
 	 * A position read from corrupt scratch must not wrap during packing.
 	 */
 	region_bytes = (uint64_t)plan->continuation_blocks * ISO_BLOCK_BYTES;
-	if (split.fragments != 0 && row->fragment_position >= region_bytes)
+	if (split.fragments != 0 && record->fragment_position >= region_bytes)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_WRITER, "ISO 9660 continuation position "
 		    "lies outside its region"));
 	iso_susp_assemble(plan->entries, &split, plan->continuation_block,
-	    row->fragment_position, system_use, plan->fragments, positions);
+	    record->fragment_position, system_use, plan->fragments, positions);
 	*system_use_length = split.record_bytes;
 	for (unsigned i = 0; i < split.fragments; i++) {
 		if (positions[i] > region_bytes ||
@@ -354,7 +354,7 @@ split_entries(directory_out_t *out, size_t length, const iso_row_t *row,
 static fsimg_status_t
 emit_dot(directory_out_t *out, iso_hierarchy_t hierarchy,
     const iso_row_t *self, const iso_row_t *row, bool parent,
-    fsimg_error_t *error)
+    uint32_t logical_parent, fsimg_error_t *error)
 {
 	static const unsigned char identifiers[2] = { 0x00, 0x01 };
 	unsigned char system_use[ISO_RECORD_MAX];
@@ -373,9 +373,13 @@ emit_dot(directory_out_t *out, iso_hierarchy_t hierarchy,
 	if (hierarchy == ISO_PRIMARY) {
 		if (!parent && self->number[ISO_PRIMARY] == 1)
 			input.record = ISO_RR_ROOT_SELF;
+		else if (parent && self->relocation_alias != 0) {
+			input.record = ISO_RR_PARENT_LINK;
+			input.link_block = logical_parent;
+		}
 		length = iso_rr_encode(&input, out->plan->entries);
 		if (input.record == ISO_RR_ROOT_SELF) {
-			status = split_entries(out, length, self, 1, system_use,
+			status = split_entries(out, length, &self->child, 1, system_use,
 			    &fields.system_use_length, error);
 			if (status != FSIMG_OK)
 				return (status);
@@ -395,8 +399,8 @@ emit_dot(directory_out_t *out, iso_hierarchy_t hierarchy,
 /* One child's records: a directory's one record naming its extent in
  * this hierarchy; a file's one record per section, contiguous from its
  * first block, every one but the last flagged multi-extent; a link's or
- * FIFO's empty record. In the primary hierarchy the first record carries
- * the child's Rock Ridge entries.
+ * FIFO's empty record. Every primary section carries the child's Rock
+ * Ridge entries, with continuation addresses derived in record order.
  */
 static fsimg_status_t
 emit_child(directory_out_t *out, iso_hierarchy_t hierarchy,
@@ -406,6 +410,7 @@ emit_child(directory_out_t *out, iso_hierarchy_t hierarchy,
 	unsigned char system_use[ISO_RECORD_MAX];
 	iso_record_fields_t fields;
 	iso_row_t row;
+	iso_record_plan_t record;
 	size_t length;
 	uint32_t sections;
 	fsimg_status_t status;
@@ -413,7 +418,8 @@ emit_child(directory_out_t *out, iso_hierarchy_t hierarchy,
 	status = iso_row_get(plan, name->id, &row, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (name->length != row.identifier[hierarchy])
+	if (name->role != ISO_NAME_RELOCATED &&
+	    name->length != row.identifier[hierarchy])
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_WRITER, "ISO 9660 name record disagrees with its row"));
 	bzero(&fields, sizeof(fields));
@@ -421,18 +427,24 @@ emit_child(directory_out_t *out, iso_hierarchy_t hierarchy,
 	fields.identifier_length = name->length;
 	bcopy(row.modified, fields.date, ISO_DATE7_BYTES);
 	if (hierarchy == ISO_PRIMARY) {
-		status = iso_child_entries(plan, name->id, &row, false, &length,
+		status = iso_check_child_entries(plan, name, &row, &length,
 		    error);
-		if (status == FSIMG_OK)
-			status = split_entries(out, length, &row, name->length,
-			    system_use, &fields.system_use_length, error);
+		if (status != FSIMG_OK)
+			return (status);
+		record = name->role == ISO_NAME_PLACEHOLDER ? row.placeholder : row.child;
+		status = split_entries(out, length, &record, name->length,
+		    system_use, &fields.system_use_length, error);
 		if (status != FSIMG_OK)
 			return (status);
 		fields.system_use = system_use;
 	}
+	if (name->role == ISO_NAME_PLACEHOLDER)
+		return (put_record(out, &fields, error));
 
 	if (row.kind == FSIMG_ENTRY_DIRECTORY) {
 		fields.flags = ISO_FLAG_DIRECTORY;
+		if (name->id == plan->relocation_id && hierarchy == ISO_PRIMARY)
+			fields.flags |= ISO_FLAG_HIDDEN;
 		fields.extent = row.block[hierarchy];
 		fields.data_length = row.bytes[hierarchy];
 		return (put_record(out, &fields, error));
@@ -441,6 +453,12 @@ emit_child(directory_out_t *out, iso_hierarchy_t hierarchy,
 		return (put_record(out, &fields, error));
 	sections = iso_sections(row.size);
 	for (uint32_t i = 0; i < sections; i++) {
+		if (hierarchy == ISO_PRIMARY && i != 0) {
+			status = split_entries(out, length, &record, name->length,
+			    system_use, &fields.system_use_length, error);
+			if (status != FSIMG_OK)
+				return (status);
+		}
 		fields.extent = row.size == 0 ? 0 : row.first_block +
 		    (uint32_t)(i * (ISO_SECTION_MAX / ISO_BLOCK_BYTES));
 		fields.data_length = iso_section_bytes(row.size, i);
@@ -448,7 +466,9 @@ emit_child(directory_out_t *out, iso_hierarchy_t hierarchy,
 		status = put_record(out, &fields, error);
 		if (status != FSIMG_OK)
 			return (status);
-		fields.system_use_length = 0;
+		if (hierarchy == ISO_PRIMARY)
+			for (unsigned f = 0; f < record.fragments; f++)
+				iso_place(&record.fragment_position, record.fragment_bytes[f]);
 	}
 	return (FSIMG_OK);
 }
@@ -466,27 +486,35 @@ emit_directory(iso_plan_t *plan, iso_hierarchy_t hierarchy,
 	iso_name_t name;
 	iso_row_t row, parent;
 	uint64_t cursor;
+	uint32_t logical_parent;
 	fsimg_status_t status;
 
 	status = iso_row_get(plan, id, &row, error);
 	if (status != FSIMG_OK)
 		return (status);
 	parent = row;
+	logical_parent = row.block[ISO_PRIMARY];
 	if (id != 0) {
-		status = fsimg_catalog_get(plan->common.writer, id, &catalog,
+		status = iso_catalog_get(plan, id, &catalog,
 		    error);
 		if (status == FSIMG_OK)
 			status = iso_row_get(plan, catalog->parent_id, &parent,
 			    error);
 		if (status != FSIMG_OK)
 			return (status);
+		logical_parent = parent.block[ISO_PRIMARY];
+		if (hierarchy == ISO_PRIMARY && row.relocation_alias != 0) {
+			status = iso_row_get(plan, row.physical_parent, &parent, error);
+			if (status != FSIMG_OK)
+				return (status);
+		}
 	}
 	out = (directory_out_t){ .plan = plan, .emit = emit,
 	    .first_block = row.block[hierarchy], .bytes = row.bytes[hierarchy] };
 	bzero(plan->block, ISO_BLOCK_BYTES);
-	status = emit_dot(&out, hierarchy, &row, &row, false, error);
+	status = emit_dot(&out, hierarchy, &row, &row, false, logical_parent, error);
 	if (status == FSIMG_OK)
-		status = emit_dot(&out, hierarchy, &row, &parent, true, error);
+		status = emit_dot(&out, hierarchy, &row, &parent, true, logical_parent, error);
 	if (status != FSIMG_OK)
 		return (status);
 
@@ -494,13 +522,15 @@ emit_directory(iso_plan_t *plan, iso_hierarchy_t hierarchy,
 	for (uint32_t i = 0; i < row.children[hierarchy]; i++) {
 		status = iso_name_next(plan->names[hierarchy], &cursor, raw,
 		    &name, error);
-		if (status == FSIMG_OK)
-			status = fsimg_session_charge(
-			    &plan->common.writer->session, 0, 0, 1, error);
-		if (status == FSIMG_OK)
-			status = emit_child(&out, hierarchy, &name, error);
 		if (status != FSIMG_OK)
 			return (status == FSIMG_DONE ? FSIMG_ECORRUPT : status);
+		status = fsimg_session_charge(&plan->common.writer->session,
+		    0, 0, 1, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = emit_child(&out, hierarchy, &name, error);
+		if (status != FSIMG_OK)
+			return (status);
 	}
 	status = flush_block(&out, error);
 	if (status != FSIMG_OK)
@@ -580,15 +610,22 @@ iso_write_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,
 	fsimg_status_t status;
 
 	status = emit_descriptors(plan, emit, error);
-	for (unsigned h = 0; status == FSIMG_OK && h < ISO_HIERARCHIES; h++)
+	if (status != FSIMG_OK)
+		return (status);
+	for (unsigned h = 0; h < ISO_HIERARCHIES; h++) {
 		status = emit_path_tables(plan, (iso_hierarchy_t)h, emit,
 		    error);
-	if (status == FSIMG_OK)
-		status = emit_boot_catalog(plan, emit, error);
-	for (unsigned h = 0; status == FSIMG_OK && h < ISO_HIERARCHIES; h++)
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	status = emit_boot_catalog(plan, emit, error);
+	if (status != FSIMG_OK)
+		return (status);
+	for (unsigned h = 0; h < ISO_HIERARCHIES; h++) {
 		status = emit_directories(plan, (iso_hierarchy_t)h, emit,
 		    error);
-	if (status == FSIMG_OK)
-		status = emit_files(plan, emit, error);
-	return (status);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (emit_files(plan, emit, error));
 }

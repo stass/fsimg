@@ -14,7 +14,7 @@ The harness is black-box and independently authored. It adds to the white-box C
 tests (`test/fat.c`, `test/fat-write.c`), the fixed external-oracle scripts
 such as `test/fat-integration.sh` and the libFuzzer targets, and replaces none
 of them; it never changes the comparison baseline. It serves FAT12, FAT16 and
-FAT32, exFAT and QNX6. The core (rules, cases, runner, reports) is
+FAT32, exFAT, QNX6 and ISO 9660. The core (rules, cases, runner, reports) is
 format-independent; each format adds its own layouts, model, rules, builder and
 tool adapters. The [plan](../docs/spec-testing-plan.md) orders the
 construction.
@@ -275,6 +275,15 @@ case-equivalent to a sibling. The source model also gives the layout the
 [writer design](design-fat-writer.md#geometry-and-allocation) states for
 an accepted source: its sector, cluster, FAT and root region sizes and
 its cluster count, computed with the specification's region arithmetic.
+A bounded source oracle may leave a derived planning relation unclassified
+without weakening known refusals. The ISO oracle classifies geometry,
+names, link targets and boot relationships, format ceilings and a provable
+minimum capacity: 26 metadata blocks, two more when booting, plus each
+regular file's rounded payload. Satisfying this lower bound does not prove
+exact capacity fit. Otherwise-valid explicit capacities therefore leave
+ISO's input scope unclassified; automatic-capacity creation witnesses remain
+fully classified. Every accepted output is independently decoded, and the
+native independent ISO checker owns exact layout and fit-boundary evidence.
 A creation case carries two classifications: `create` follows the source
 model's, and the reading stages follow the created image's, which the
 harness decodes once `create` accepts. The created image is classified
@@ -344,15 +353,33 @@ instead. A `base` names its `builder`, `tree` and `parameters`, and an
 optional `population` of `mtools` when mtools populates the builder's empty
 volume with the tree instead of the builder rendering it; a formatter
 writes no tree, so a formatter base always names it. A tree is a list of
-entries, each with a relative `path` and a `type` of `file` or `directory`;
-a directory has nothing more, and a file also has a `size` and a `content`
+entries, each with a relative `path` and a `type` of `file`, `directory`,
+`symlink` or `fifo`. A directory or FIFO has nothing more. A symbolic link
+has one authoritative `target` byte string, serialized as lowercase,
+even-length hexadecimal in the recipe. Its length and digest are derived
+from those bytes, never independently supplied. The target is nonempty,
+at most 1024 bytes and contains no NUL; a file or other kind carries no
+target. A file also has a `size` and a `content`
 of `zero`, `seeded` or `positional`, the last two with a `seed` and
 optional `holes`, the manifest's generated
 [content](design-mtree.md#generated-bytes) in the recipe's own fields. The
 harness generates each file's bytes from its seed and offset with its own
 function, never with PropCheck's random source, so a tree stays stable across
 upgrades, and the same function gives the `sha256digest` of each manifest
-line. `kind` names the case class: `valid`, `targeted`
+line. Special source kinds use manifest roots only: the harness writes
+`type=link link=...` or `type=fifo`, never a host symbolic link or FIFO.
+An explicitly chosen directory root containing those kinds is refused as
+a recipe error. Format rules decide whether a writer supports each kind;
+destination rules separately express the safe extractor's refusal to
+restore links and FIFOs. No accepted extraction may create them on the host.
+Creation settings have closed typed keys: `size`, `sector` and `cluster`
+are byte counts; `level` (1 through 3) and `bootload` (1 through 65535)
+are counts in the CLI's syntax; `boot` and `efiboot`
+are UTF-8 image paths without NUL, bounded to the CLI's 1024-byte setting
+text capacity. Counts are not checked against
+byte-capacity ceilings. The runner passes each value through an explicit
+option prefix in an argument array, without a shell or a format branch.
+`kind` names the case class: `valid`, `targeted`
 or `malformed`. `expected` maps each stage to its allowed outcomes separated by
 `|`: `accept`, `reject:STATUS` for each allowed status, or `reject:*` for any
 verdict status; `unclassified` alone marks a stage that checks a scope the

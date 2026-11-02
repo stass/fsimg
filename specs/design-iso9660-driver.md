@@ -403,15 +403,24 @@ other, as the [settings catalogue](design-settings.md) states.
 The plan object embeds `fsimg_plan_t`, the level, the label projections,
 the boot summary, the layout's block numbers, each hierarchy's name and
 path streams, and one paged array of rows
-keyed by catalog ID, row 0 the root. A row holds the kind, the size, the
+keyed by catalog ID, row 0 the root. One extra row is reserved at catalog
+count plus one for a generated relocation container; an adopted container
+uses its existing catalog ID. A driver-owned lookup supplies that synthetic
+entry to physical streams, while every source operation stays within the
+frozen catalog's ID range. A row holds the kind, the size, the
 section count, the encoded times, owner and mode, the logical and
 physical depth and path length, the physical parent for a relocated
 directory, and the results of later passes: each hierarchy's directory
 block, length and path-table number, the file's first data block, the
 encoded length of its Rock Ridge entries kept in the record, the number
 and lengths of its continuation fragments, the first fragment's relative
-position, and a link's encoded `SL` length and hash. Names are not in
-rows; they live in two sorted streams.
+position, and a link's encoded `SL` length and hash. Continuation fields
+belong to a record plan: a relocated directory has separate plans for its
+physical `RE` record and logical `CL` placeholder. The name stream's
+closed record roles distinguish ordinary files, directories, placeholders
+and relocated records, so directory spelling does not imply a physical
+directory flag or path-table descent. Names are not in rows; they live in
+two sorted streams.
 Planning runs these passes over the frozen catalog:
 
 1. **Entries.** In ID order: check each component against the 255-byte

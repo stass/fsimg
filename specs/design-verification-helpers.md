@@ -65,6 +65,12 @@ and symbolic-link targets. Directory selection and treatment of other kinds
 belong to the driver. A supported FIFO with initialized length zero needs no
 payload operation.
 
+The common report counts all delivered non-directories as `files`, links
+and FIFOs included, and their logical sizes in `logical_bytes`. A link's
+size is its target's byte length; a FIFO contributes zero bytes. The
+implicit root is included in `directories`. Payload-read accounting remains
+separate: metadata-decoded link targets do not cause payload image reads.
+
 ### Read and failure algorithm
 
 The helper visits exactly `[0, reader->initialized)` in logical byte offsets:

@@ -7,14 +7,9 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
 ## Scheduled
 
 * [High] **Oracles and corpus** (`test/iso9660-corpus.sh`, `docs/build.md`):
-  stage 0. Remaining evidence: Linux/FreeBSD kernel mounts; executable
-  OVMF/SeaBIOS boots; genisoimage and makefs producer/consumer measurements;
-  pycdlib integration and measurements; writer-image questions (36-byte PX,
-  extent-zero empty files, Rock Ridge on only the first multi-extent section,
-  oversized EFI sector counts, relocation and `.rr_moved` visibility, Joliet
-  `;1` identifiers and kernel/Windows consumers, ISO selection in hybrids,
-  and version-order ties); the 65,535-directory fixture with producer,
-  consumer and writer measurements; and bootable corpus images with an EFI
+  broaden makefs producer/consumer measurements and pycdlib integration;
+  compare the 65,535-directory fixture with external producers and consumers;
+  and add bootable corpus images with an EFI
   image in an appended partition past the volume (`xorriso
   -append_partition` with `--interval:appended_partition_2`, as Ubuntu
   images are built) and with initial-entry selection criteria
@@ -33,37 +28,6 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   cannot name the directory's path, so the message names the condition
   only. A common way for `prepare` to name a child would serve every
   driver.
-* [High] **Writer qualification and registration**
-  (`lib/formats/iso9660/descriptor.c`, `test/iso9660-integration.sh.in`):
-  stage 10. The writer lands unregistered, reached through
-  `fsimg_iso9660_write_format`. Remaining: the integration script's
-  writer cases; the Linux and FreeBSD kernel mounts in each view, which
-  the integration environment must permit. Registration merges the writer's
-  capability record into the reader's, whose metadata fields include the
-  creation time and attributes the writer does not store, so the writer
-  must then report those losses itself; and documents `level=`, `boot=`,
-  `efiboot=` and `bootload=` in the creation `-o` help and the man page's
-  CREATION settings.
-* [Medium] **Writer scale qualification** (`test/iso9660-scale.c`): measure
-  planning and emission of a wide catalog under a 16 MiB memory budget,
-  recording metadata I/O, peak scratch and RSS; the existing scale profiles
-  measure readers. Include the relocated 256-level writer tree and the
-  largest-volume plan when those stages land.
-* [Low] **Writer readability** (`lib/formats/iso9660/write-*.c`): several
-  passes chain fallible steps as `status == FSIMG_OK &&` conditions, and
-  `iso_child_entries` combines the target read, its checks, encoding and
-  the planning-or-emission comparison behind a boolean; the review asked
-  for named steps. Each continuation fragment is also its own small sink
-  write.
-* [Medium] **Deep trees by relocation** (`lib/formats/iso9660/write-plan.c`):
-  stage 11. Until it lands, planning refuses a tree that needs relocation,
-  by depth or by path length, naming the first directory to relocate.
-* [Medium] **El Torito writer** (`lib/formats/iso9660/eltorito.c`,
-  `write-emit.c`): stage 12, with the SeaBIOS and OVMF boot gates. The EFI
-  gate needs a UEFI application whose license allows it in the tree, or one
-  supplied from the environment.
-* [Medium] **Specification-driven rules** (`test/spec/lib/fsimg_spec/iso9660/`):
-  stage 13, the harness plug-in citing the format design's rules.
 
 ## Unscheduled
 

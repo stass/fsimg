@@ -343,13 +343,12 @@
   [research record](docs/ifs-research.md) holds the evidence; the
   [qualification work](docs/todo-ifs.md) lists the open items.
 
-* [High] **ISO 9660 write support** (`lib/formats/iso9660/`,
-  `lib/write/`, `include/fsimg.h`): write Rock Ridge and Joliet volumes
-  at a selectable interchange level with
-  relocation and El Torito boot entries. The [plan](docs/iso9660-plan.md)
-  orders the work; the [format](specs/design-iso9660.md) and
-  [driver](specs/design-iso9660-driver.md) designs are the contract; the
-  [ISO work list](docs/todo-iso9660.md) holds the open items.
+* [Low] **ISO 9660 corpus and extension coverage** (`test/iso9660-corpus.sh`,
+  `lib/formats/iso9660/`): the [ISO work list](docs/todo-iso9660.md) tracks
+  additional producer/corpus evidence, common root-metadata fidelity and
+  format extensions requiring separate designs. The
+  [plan](docs/iso9660-plan.md), [format](specs/design-iso9660.md) and
+  [driver](specs/design-iso9660-driver.md) define the supported profile.
 
 ## Bugs by subsystem
 

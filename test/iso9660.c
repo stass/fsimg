@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -48,6 +49,7 @@ static void test_info_metadata_views(void);
 static void remove_tree(int parent, const char *name);
 static fsimg_status_t extract(fixture_t *f, int parent, const char *selection);
 static void test_extraction_and_selection(void);
+static void test_extraction_budget_uses_selected_io_extent(void);
 static void test_image_faults(image_t *image);
 static void test_faults(void);
 static void test_exclusivity(void);
@@ -794,6 +796,124 @@ extract(fixture_t *f, int parent, const char *selection)
 		options.selection_count = 1;
 	}
 	return (fsimg_extract_at(f->reader, parent, "out", &options, NULL));
+}
+
+#define SHARED_FILE_BYTES (40u * 1024u)
+#define SHARED_FILE_COUNT 8u
+
+/* All payloads share an accessible extent. The descriptor declares more
+ * space than the stored image, so only the selected I/O length is a safe
+ * default budget for their cumulative logical extraction size.
+ */
+static image_t
+shared_extent_image(void)
+{
+	image_t image = image_new();
+	unsigned char *root = image.bytes + ROOT * BLOCK;
+	size_t position = DOT_PAIR_BYTES;
+	char name[16];
+
+	put32(image.bytes + 16 * BLOCK + VD_SPACE, 1024);
+	bzero(root + position, BLOCK - position);
+	for (unsigned i = 0; i < SHARED_FILE_COUNT; i++) {
+		CHECK(snprintf(name, sizeof(name), "F%03u.TXT;1", i) == 10);
+		position += record(root + position, name, strlen(name), DATA,
+		    SHARED_FILE_BYTES, 0);
+	}
+	return (image);
+}
+
+static void
+test_extraction_budget_uses_selected_io_extent(void)
+{
+	typedef struct output_case {
+		uint64_t context_limit;
+		uint64_t extraction_limit;
+		uint64_t expected_limit;
+		unsigned completed_files;
+		fsimg_status_t status;
+	} output_case_t;
+	static const output_case_t cases[] = {
+		{ .expected_limit = BLOCKS * BLOCK, .completed_files = 6,
+		  .status = FSIMG_ELIMIT },
+		{ .context_limit = SHARED_FILE_COUNT * SHARED_FILE_BYTES,
+		  .completed_files = SHARED_FILE_COUNT, .status = FSIMG_OK },
+		{ .extraction_limit = SHARED_FILE_COUNT * SHARED_FILE_BYTES,
+		  .completed_files = SHARED_FILE_COUNT, .status = FSIMG_OK },
+		{ .context_limit = 4 * SHARED_FILE_BYTES,
+		  .extraction_limit = SHARED_FILE_COUNT * SHARED_FILE_BYTES,
+		  .expected_limit = 4 * SHARED_FILE_BYTES, .completed_files = 4,
+		  .status = FSIMG_ELIMIT },
+		{ .context_limit = SHARED_FILE_COUNT * SHARED_FILE_BYTES,
+		  .extraction_limit = 2 * SHARED_FILE_BYTES,
+		  .expected_limit = 2 * SHARED_FILE_BYTES, .completed_files = 2,
+		  .status = FSIMG_ELIMIT }
+	};
+	image_t image = shared_extent_image();
+	unsigned char *prefixed;
+	fixture_t f;
+	fsimg_io_t *selected;
+	fsimg_read_options_t read_options;
+	fsimg_extract_options_t extract_options;
+	fsimg_options_t context_options;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	char temporary[] = "./iso-budget-XXXXXX", name[32];
+	struct stat st;
+	int parent;
+
+	/* A nonzero slice makes the backing object's extent differ too. */
+	prefixed = calloc(1, (size_t)image.stored + BLOCK);
+	CHECK(prefixed != NULL);
+	bcopy(image.bytes, prefixed + BLOCK, (size_t)image.stored);
+	free(image.bytes);
+	image.bytes = prefixed;
+	image.length += BLOCK;
+	image.stored += BLOCK;
+	CHECK(mkdtemp(temporary) != NULL);
+	parent = open(temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(parent >= 0);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_options_init(&context_options);
+		context_options.max_output_bytes = cases[i].context_limit;
+		fixture_new(&f, &image, &context_options);
+		CHECK(fsimg_io_slice(f.io, BLOCK, BLOCKS * BLOCK, &selected,
+		    NULL) == FSIMG_OK);
+		fsimg_read_options_init(&read_options);
+		CHECK(fsimg_reader_open(f.ctx, selected, &read_options, &f.reader,
+		    NULL) == FSIMG_OK);
+		fsimg_extract_options_init(&extract_options);
+		extract_options.max_output_bytes = cases[i].extraction_limit;
+		status = fsimg_extract_at(f.reader, parent, "out", &extract_options, &error);
+		if (status != cases[i].status)
+			fprintf(stderr, "shared extraction case %zu: expected %d, observed %d\n",
+			    i, cases[i].status, status);
+		CHECK(status == cases[i].status);
+		if (status == FSIMG_ELIMIT) {
+			CHECK(error.resource == FSIMG_RESOURCE_OUTPUT);
+			CHECK(error.limit == cases[i].expected_limit);
+			CHECK(error.observed ==
+			    (uint64_t)(cases[i].completed_files + 1) * SHARED_FILE_BYTES);
+			CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+		}
+		for (unsigned file = 0; file < SHARED_FILE_COUNT; file++) {
+			snprintf(name, sizeof(name), "out/F%03u.TXT", file);
+			if (file < cases[i].completed_files) {
+				CHECK(fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) == 0);
+				CHECK(st.st_size == SHARED_FILE_BYTES);
+			} else {
+				CHECK(faccessat(parent, name, F_OK, 0) == -1 && errno == ENOENT);
+			}
+		}
+		fsimg_reader_free(f.reader);
+		f.reader = NULL;
+		fsimg_io_free(selected);
+		fixture_free(&f);
+		remove_tree(parent, "out");
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(temporary) == 0);
+	free(image.bytes);
 }
 
 static void
@@ -5127,8 +5247,10 @@ main(int argc, char **argv)
 		return (0);
 	}
 	if (argc == 3 && (strcmp(argv[1], "--seed") == 0 ||
-	    strcmp(argv[1], "--seed-boot") == 0)) {
-		image_t image = image_new();
+	    strcmp(argv[1], "--seed-boot") == 0 ||
+	    strcmp(argv[1], "--seed-shared") == 0)) {
+		image_t image = strcmp(argv[1], "--seed-shared") == 0 ?
+		    shared_extent_image() : image_new();
 		FILE *file = fopen(argv[2], "wb");
 
 		if (strcmp(argv[1], "--seed-boot") == 0) {
@@ -5151,7 +5273,12 @@ main(int argc, char **argv)
 		test_verify_million_data_claims_spill_to_scratch();
 		return (failures == 0 ? 0 : 1);
 	}
+	if (argc == 2 && strcmp(argv[1], "--output-limit") == 0) {
+		test_extraction_budget_uses_selected_io_extent();
+		return (0);
+	}
 	CHECK(argc == 1);
+	test_extraction_budget_uses_selected_io_extent();
 	test_verifier();
 	test_joliet_views();
 	test_joliet_identifiers();

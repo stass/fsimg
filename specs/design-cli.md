@@ -820,7 +820,10 @@ disk GUID or MBR identifier, the selected partition's slot and whether a
 volume was selected, with the reason when none was. `i` follows it with one
 partition record per used slot: slot, type name, type GUID, unique GUID and
 name (GPT) or type byte and active flag (MBR), offset, length, the
-filesystem claim and format, and whether it is selected. A creation whose
+filesystem claim and format, and whether it is selected. Filesystem geometry
+in an info record is descriptor-declared and may exceed the available
+selected input on a truncated image; it does not change the selected I/O
+range or output ceilings. A creation whose
 stack names a scheme reports the planned disk the same way before its plan
 record: a stack record and the volume's partition record, with every
 identifier the plan derived. A verify record

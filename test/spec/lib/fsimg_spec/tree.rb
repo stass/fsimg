@@ -190,7 +190,13 @@ module FsimgSpec
     def self.of(entries) = from_walk(entries.map { walked_entry(_1) })
 
     # walked, a TreeWalk listing, in the known tree's form.
-    def self.from_walk(walked) = walked.map { _1.type == "directory" ? _1.with(size: nil) : _1 }.sort_by(&:path).freeze
+    def self.from_walk(walked) = walked.map do |entry|
+      case entry.type
+      in "directory" | "fifo" then entry.with(size: nil)
+      in "link" then entry.with(type: "symlink")
+      else entry
+      end
+    end.sort_by(&:path).freeze
 
     # The most differences of each kind a comparison names; it counts the
     # rest.
@@ -222,6 +228,11 @@ module FsimgSpec
 
     private_class_method def self.walked_entry(entry)
       return WalkedEntry.new(path: entry.path.b, type: "directory", size: nil, sha256: nil) if entry.type == "directory"
+      return WalkedEntry.new(path: entry.path.b, type: "fifo", size: nil, sha256: nil) if entry.type == "fifo"
+      if entry.type == "symlink"
+        return WalkedEntry.new(path: entry.path.b, type: "symlink", size: entry.target.bytesize,
+                               sha256: Digest::SHA256.hexdigest(entry.target))
+      end
 
       WalkedEntry.new(path: entry.path.b, type: "file", size: entry.size, sha256: FileContent.sha256(entry))
     end
@@ -235,6 +246,8 @@ module FsimgSpec
     # Writes entries under root, which must exist and be empty, and answers
     # nil when the host holds the tree, or why it does not.
     def self.write(root, entries)
+      raise RecipeError, "special source kinds require a manifest root" if entries.any? { %w[symlink fifo].include?(_1.type) }
+
       ordered = entries.sort_by { [_1.path.count("/"), _1.path] }
       refusal = ordered.lazy.filter_map { create(root.b, _1) }.first
       return refusal if refusal

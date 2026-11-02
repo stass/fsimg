@@ -23,7 +23,12 @@ module FsimgSpec
     def self.lines(tree) = tree.map { line(_1) }
 
     def self.line(entry)
-      keywords = entry.type == "directory" ? ["type=dir"] : file_keywords(entry)
+      keywords = case entry.type
+                 in "directory" then ["type=dir"]
+                 in "fifo" then ["type=fifo"]
+                 in "symlink" then ["type=link", "link=#{encode(entry.target)}"]
+                 in "file" then file_keywords(entry)
+                 end
       "#{["./".b + encode(entry.path), *keywords].join(" ")}\n".b
     end
 

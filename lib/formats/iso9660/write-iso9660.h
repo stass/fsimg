@@ -76,8 +76,22 @@ typedef enum iso_hierarchy {
 #define ISO_TIME_ACCESSED	0x01u
 #define ISO_TIME_CHANGED	0x02u
 
+/* A primary record's continuation pattern and first section's placement.
+ * Every section repeats the pattern; emission advances through its areas.
+ * A relocated directory has separate physical and logical placeholder plans.
+ */
+typedef struct iso_record_plan {
+	uint64_t	 fragment_position;
+	uint16_t	 fragment_bytes[ISO_FRAGMENTS_MAX];
+	uint8_t		 record_entries;
+	uint8_t		 fragments;
+} iso_record_plan_t;
+
 /*
- * One plan row per catalog ID, row 0 for the root. A row holds what the
+ * One plan row per catalog ID, row 0 for the root, plus a reserved row at
+ * count + 1 for a synthetic relocation container. Physical streams alone
+ * can reach that row; source operations stay in the catalog's ID domain.
+ * A row holds what the
  * entry's records need apart from its names, which live in the name
  * streams:
  *   kind		the entry kind
@@ -101,12 +115,14 @@ typedef enum iso_hierarchy {
  *   number[h]		a directory's path-table record number in h
  *   block[h], bytes[h]	a directory's extent in h: first block and length
  *   first_block	a file's first data block, 0 for an empty file
- *   record_entries	the Rock Ridge bytes the entry's primary record keeps,
- *			its CE included; for row 0 the root's first dot record
- *   fragments, fragment_bytes, fragment_position
- *			that record's continuation fragments: their count, each
- *			one's length, the first one's byte offset in the
- *			continuation region
+ *   child, placeholder	the primary record plans: kept system-use bytes,
+ *			fragment count, lengths and first byte position in the
+ *			continuation region. The root uses child for its dot
+ *			record. A relocated directory uses child for its physical
+ *			RE record and placeholder for its logical CL record.
+ *   physical_parent	the primary parent, the catalog parent unless relocated
+ *   relocation_alias	nonzero for a directory moved under the container;
+ *			its physical alias number, in catalog order
  *   target_bytes, target_hash
  *			a symbolic link's encoded SL entries: their length and
  *			FNV-1a hash, so emission can tell a changed target
@@ -116,8 +132,11 @@ typedef enum iso_hierarchy {
 typedef struct iso_row {
 	uint64_t	 size;
 	uint64_t	 group[ISO_HIERARCHIES];
-	uint64_t	 fragment_position;
+	iso_record_plan_t child;
+	iso_record_plan_t placeholder;
+	uint64_t	 physical_parent;
 	uint64_t	 target_hash;
+	uint32_t	 relocation_alias;	/* nonzero exactly when relocated */
 	uint32_t	 kind;
 	uint32_t	 mode;
 	uint32_t	 uid;
@@ -130,24 +149,21 @@ typedef struct iso_row {
 	uint32_t	 first_block;
 	uint16_t	 number[ISO_HIERARCHIES];
 	uint16_t	 path_length;
-	uint16_t	 fragment_bytes[ISO_FRAGMENTS_MAX];
 	uint16_t	 target_bytes;
 	uint8_t		 identifier[ISO_HIERARCHIES];
 	uint8_t		 level;
-	uint8_t		 record_entries;
-	uint8_t		 fragments;
 	uint8_t		 times;
 	unsigned char	 modified[ISO_DATE7_BYTES];
 	unsigned char	 accessed[ISO_DATE7_BYTES];
 	unsigned char	 changed[ISO_DATE7_BYTES];
 } iso_row_t;
 
-#define ISO_ROW_BYTES		144u	/* the last field ends at 141 */
+#define ISO_ROW_BYTES		176u	/* the last field ends at 172 */
 
 /*
  * Name-stream records, one per entry of a hierarchy, sorted by parent
  * and the hierarchy's order: the parent ID and the entry ID as u64, a
- * directory flag byte, then the identifier's bytes (UTF-16BE for Joliet).
+ * record-role byte, then the identifier's bytes (UTF-16BE for Joliet).
  * Path-stream records, one per directory in path-table order: the ID as
  * u64, the parent's path-table number as u16, then the identifier.
  */
@@ -157,6 +173,16 @@ typedef struct iso_row {
 #define ISO_PATH_STREAM_MAX	(ISO_PATH_STREAM_HEADER + \
 	ISO_JOLIET_IDENTIFIER_MAX)
 
+/* Record roles keep identifier spelling separate from physical kind:
+ * a placeholder uses a directory identifier with the ISO file flag.
+ */
+typedef enum iso_name_role {
+	ISO_NAME_FILE,
+	ISO_NAME_DIRECTORY,
+	ISO_NAME_PLACEHOLDER,
+	ISO_NAME_RELOCATED
+} iso_name_role_t;
+
 /* One decoded name-stream record; identifier borrows the caller's
  * record buffer.
  */
@@ -165,7 +191,7 @@ typedef struct iso_name {
 	uint64_t	 id;
 	const unsigned char *identifier;
 	size_t		 length;
-	bool		 directory;
+	iso_name_role_t	 role;
 } iso_name_t;
 
 /*
@@ -191,6 +217,8 @@ typedef struct iso_plan {
 	uint64_t	 boot_bios;		/* catalog ID, zero when absent */
 	uint64_t	 boot_efi;		/* catalog ID, zero when absent */
 	uint32_t	 boot_catalog_block;	/* zero without boot images */
+	uint64_t	 relocation_id;		/* zero without relocation */
+	fsimg_catalog_entry_t relocation_entry;	/* synthetic container only */
 	uint32_t	 level;
 	uint32_t	 directories[ISO_HIERARCHIES];
 	uint32_t	 path_bytes[ISO_HIERARCHIES];
@@ -225,7 +253,10 @@ typedef struct iso_split {
 typedef enum iso_rr_record {
 	ISO_RR_ROOT_SELF,	/* the root's first dot record */
 	ISO_RR_DOT,		/* any other dot record */
-	ISO_RR_CHILD		/* an entry's record in its parent */
+	ISO_RR_CHILD,		/* an entry's record in its parent */
+	ISO_RR_PLACEHOLDER,	/* logical directory record with CL */
+	ISO_RR_RELOCATED,	/* physical directory record with RE */
+	ISO_RR_PARENT_LINK	/* relocated directory's parent dot record */
 } iso_rr_record_t;
 
 extern const fsimg_writer_ops_t fsimg_iso9660_writer_ops;
@@ -237,15 +268,21 @@ fsimg_status_t iso_row_set(iso_plan_t *, uint64_t, const iso_row_t *,
     fsimg_error_t *);
 fsimg_status_t iso_name_next(fsimg_stream_t *, uint64_t *, unsigned char *,
     iso_name_t *, fsimg_error_t *);
+bool iso_name_directory(const iso_name_t *);
+fsimg_status_t iso_catalog_get(iso_plan_t *, uint64_t,
+    const fsimg_catalog_entry_t **, fsimg_error_t *);
 uint32_t iso_sections(uint64_t);
 uint32_t iso_section_bytes(uint64_t, uint32_t);
 size_t iso_record_room(size_t);
-fsimg_status_t iso_child_entries(iso_plan_t *, uint64_t, iso_row_t *,
-    bool, size_t *, fsimg_error_t *);
+fsimg_status_t iso_child_entries(iso_plan_t *, const iso_name_t *, iso_row_t *,
+    size_t *, fsimg_error_t *);
+fsimg_status_t iso_check_child_entries(iso_plan_t *, const iso_name_t *,
+    const iso_row_t *, size_t *, fsimg_error_t *);
 
 /* write-names.c */
 fsimg_status_t iso_write_names(iso_plan_t *, iso_hierarchy_t,
     fsimg_error_t *);
+fsimg_status_t iso_write_relocated_names(iso_plan_t *, fsimg_error_t *);
 bool iso_identifier(const iso_plan_t *, iso_hierarchy_t, const char *,
     size_t, bool, uint32_t, unsigned char *, size_t *);
 
@@ -257,6 +294,7 @@ typedef struct iso_rr_input {
 	size_t		 name_length;
 	size_t		 target_length;
 	iso_rr_record_t	 record;
+	uint32_t	 link_block;		/* PL's logical parent */
 } iso_rr_input_t;
 
 size_t iso_rr_encode(const iso_rr_input_t *, unsigned char *);

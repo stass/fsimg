@@ -1,0 +1,22 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+set -eu
+ulimit -c 0
+if test -z '@RUBY@'; then
+    echo 'SKIP: Ruby is required for ISO writer interoperability'
+    exit 77
+fi
+'@RUBY@' '@abs_top_srcdir@/test/iso9660-writer-test.rb'
+FSIMG_TOOL_ISOINFO='@ISOINFO@'
+FSIMG_TOOL_ISOVFY='@ISOVFY@'
+FSIMG_TOOL_XORRISO='@XORRISO@'
+FSIMG_TOOL_BSDTAR='@BSDTAR@'
+FSIMG_TOOL_SEVENZIP='@SEVENZIP@'
+export FSIMG_TOOL_ISOINFO FSIMG_TOOL_ISOVFY FSIMG_TOOL_XORRISO
+export FSIMG_TOOL_BSDTAR FSIMG_TOOL_SEVENZIP
+if test -z "$FSIMG_TOOL_ISOINFO$FSIMG_TOOL_ISOVFY$FSIMG_TOOL_XORRISO$FSIMG_TOOL_BSDTAR$FSIMG_TOOL_SEVENZIP"; then
+    echo 'SKIP: no independent ISO consumers are available'
+    exit 77
+fi
+exec '@RUBY@' '@abs_top_srcdir@/test/iso9660-writer.rb' '@abs_top_builddir@'

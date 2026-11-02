@@ -270,6 +270,13 @@ translation to the backing object; nested slice construction checks its own
 range. Drivers never receive an unrestricted backing descriptor. Disk values
 are decoded explicitly, without casting bytes to native C structs.
 
+Descriptor-declared filesystem geometry is informational and may exceed the
+available selected I/O extent on a truncated image. Reporting that geometry
+does not enlarge the I/O range or an extraction/output budget: those bounds
+derive from the opened view, the selected range and explicit limits. This
+keeps missing structures and content classified by the filesystem decoder,
+without granting authority to a reported geometry value.
+
 The [scalar byte codecs](design-binary-primitives.md) share unsigned endian
 loads and stores across image, scratch, and protocol codecs. They operate on
 spans their callers have already bounded; they do not grant permission to read
@@ -386,6 +393,14 @@ and payload read. The strict run utility, which FAT, exFAT and HFS Plus share,
 rejects every overlapping claim in its declared domain; it neither infers
 complete ownership nor defines sharing policy for other formats. QNX6's owner-bearing records, QNX4's claimed
 bitset, and ImageFS's reference and checksum checks keep their own representations.
+
+Verification reports count delivered non-directory entries as `files`,
+including symbolic links and FIFOs; `directories` includes the implicit
+root. `logical_bytes` sums non-directory logical sizes, including link-target
+bytes and zero-length FIFOs. `payload_bytes_read` counts image bytes read
+as payload, so targets decoded from metadata contribute logical bytes but
+no payload I/O. These definitions follow the common entry/content model
+and do not require format-specific counter categories.
 
 The [settings catalogue](design-settings.md) is the shared description of
 setting names, C representations, presence and defaults, syntax, and operation

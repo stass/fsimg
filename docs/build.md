@@ -2240,8 +2240,8 @@ fixtures.
 
 ### ISO 9660 writer checks
 
-The writer is not yet registered; `test-iso9660-write` reaches it through
-its unregistered descriptor and runs in the plain suite. It checks every
+`test-iso9660-write` reaches the writer through the public constructor and
+runs in the plain suite. It checks every
 image twice: with an independent checker written from the format design,
 which decodes the descriptors, both hierarchies, their path tables, every
 Rock Ridge entry through its continuation chain and the file data and
@@ -2291,14 +2291,124 @@ first without its `/`, so a target spanning several `SL` entries
 extracts wrong from fsimg, genisoimage and xorriso images alike; the
 comparison above excepts those targets.
 
-The macOS command `MAKEFLAGS=-j32 sh build-aux/ci-check.sh` passes the
-plain, ASan/UBSan, separate UBSan and distribution suites, each with
-66 passes and six environment skips; the CLI and specification suites run
-and pass. Install, scale and CLI RSS checks pass. Standalone LSan and MSan
-report unsupported on macOS; their Linux checks are separate.
-`gmake -j32 test-iso9660-write test-iso9660 test-iso9660-faults`, followed
-by all three executables, passes on FreeBSD 16. Kernel-mount qualification
-requires comparisons of each view's complete manifest on Linux and FreeBSD.
+The complete native gate is `MAKEFLAGS=-j32 sh build-aux/ci-check.sh`,
+run from the configured build directory (`MAKE=gmake` on FreeBSD). It
+includes the plain suite, ASan/UBSan, separate UBSan, install, scale, CLI
+RSS and distribution checks. Standalone LSan and MSan run on Linux and
+report unsupported on macOS and FreeBSD. Kernel mounts are separate
+qualification runs comparing each view's complete manifest.
+
+### ISO writer consumer qualification
+
+`test/iso9660-writer.sh` runs without a private corpus or H3 image. Its
+synthetic writer fixtures cover levels 1, 2 and 3, names and metadata,
+relocation, case collisions, and an ordinary populated `rr_moved`
+directory created through the CLI. The C fixture checker independently
+compares emitted bytes and metadata with the source specifications. The
+Ruby adapter then compares consumer listings and extracted bytes with
+complete fsimg manifests. File hashes stream in bounded chunks.
+`ISOINFO`, `ISOVFY`, `XORRISO`, `BSDTAR` and `SEVENZIP` select configure-time
+oracles. Missing consumers and inapplicable cases are reported explicitly;
+a fixture with no applicable consumer is skipped, never reported passed.
+
+Xorriso reads the medium, compares its Rock Ridge names, numeric metadata,
+observable modification times and link targets, then streams every regular
+file for an exact byte count and SHA-256 comparison. A successful media
+load alone is insufficient: a fake-consumer regression reports a wrong
+name with successful status and requires the comparison to fail. Isoinfo compares every namespace's paths,
+kinds and regular-file sizes. Isovfy checks the short
+fixture because its fixed buffers cannot hold the full fixture's long
+names and link targets. Libarchive checks numeric metadata and observable
+modification times, and extracts each regular file for a byte count and
+SHA-256 comparison. 7-Zip checks the Joliet listing and contents. On a
+case-sensitive host filesystem the adapters also extract complete trees.
+On a case-insensitive filesystem they report that whole-tree comparison
+unsupported and use listings plus per-file streaming extraction, which
+cannot overwrite a case-distinct sibling.
+
+Consumer display conventions are separate from the core name rules:
+
+* macOS libarchive emits decomposed Joliet names. Its adapter compares
+  canonical Unicode equivalence under NFC, with independent collision
+  checks on both expected and observed namespaces and unchanged content
+  hashes. This is not byte-identical path spelling.
+* Libarchive omits the final primary-file dot for an empty extension. Its
+  adapter removes that dot from files only. A source namespace containing
+  a file `FOO.` and directory `FOO` is not injective under that projection;
+  that consumer/view is reported unsupported, not silently collapsed.
+* Libarchive 3.7.4 and libisofs through xorriso 1.5.8.pl02 lose four
+  separators in the full fixture's 1,023-byte `/long-target` across `SL`
+  entries, yielding the same exact 1,019-byte target. Only that measured
+  target and resulting byte count are accepted as a consumer exception.
+  Unrelated target corruption still fails; kernel readers and fsimg
+  compare the original target exactly. Xorriso's own producer/reader also
+  loses six separators for a 1,023-byte target of 512 one-byte components,
+  proving the reader limitation independently of fsimg's encoder. Its
+  producer splits long text components to fill each `SL` entry, which
+  avoids the affected boundary in its three-255-byte-component fixture;
+  this packing choice does not fix the many-small-component case.
+* Libarchive suppresses the root `rr_moved` or `.rr_moved` directory entry,
+  including directory metadata, even when ordinary descendants exist.
+  The known fixture exception covers only that one directory entry; all
+  descendants and file hashes remain mandatory. Other oracles and kernel
+  readers require the complete directory entry and its metadata. These
+  observations agree with the reader's relocation-name heuristic in
+  [libarchive's ISO reader](https://github.com/libarchive/libarchive/blob/master/libarchive/archive_read_support_format_iso9660.c);
+  no implementation code is imported.
+
+The populated-directory fixture uses a 128 KiB volume so optical oracles
+can read a complete transfer window. Isoinfo 3.02a09 reports a short read
+on a valid smaller image; fsimg's minimum-volume tests remain independent
+of this consumer limitation.
+
+`FSIMG_ISO_LARGE=1 sh test/iso9660-writer.sh` adds a real sparse image
+containing an 8 GiB multi-extent file and a `UINT32_MAX`-byte single-section
+file. Large payload comparisons use streaming extraction instead of
+materializing large extracted files. The regular fixture's metadata tests
+and the independent sparse-section checker still run in the ordinary
+suite. Isoinfo 3.02a09 qualifies the multi-extent listing but its extraction
+returns only a section, so it does not qualify large-file payloads.
+
+`test/iso9660-kernel.rb IMAGE MANIFEST` is an explicit privileged
+qualification command, outside ordinary tests. Create the manifest with
+`ruby test/iso9660-writer.rb --manifest IMAGE BUILD-DIRECTORY`. The kernel
+runner mounts only a regular, non-symlink fixture file, read-only, beneath
+its own temporary root. Linux uses a disposable privileged container;
+FreeBSD uses a private vnode-backed md device. Cleanup is registered before
+the mount attempt and reports primary and cleanup failures together;
+failed unmounts never trigger recursive deletion through a retained mount.
+Fake-command regressions pin both failure paths.
+
+Each kernel view compares the entire `lstat` namespace, file bytes, link
+targets, owners, modes and every stored time the kernel exposes. Linux
+Joliet uses `norock,utf8,check=strict`; its primary view uses
+`norock,nojoliet,map=off`, preserving the ISO spelling before the common
+display rule removes `;1`. FreeBSD selects views with `-r`, `-j`, `-g` and
+`-C UTF-8`. Native FreeBSD cd9660 exposes multi-extent sections as individual
+directory records with a 32-bit section size. The large-file kernel case
+therefore reports `UNSUPPORTED` and exits 77; that is not a passing check.
+Fsimg, Linux and capable userspace readers compare all large-file bytes.
+
+### ISO writer scale checks
+
+`make check-scale` includes `test-iso9660-write-scale --wide` and
+`--capacity`. Both use the public writer with a 16 MiB context. The wide
+fixture generates one million empty files directly in the catalog,
+publishes the image, releases the writer, then fully verifies every
+offered view under the same aggregate budget. It records catalog admission
+plus planning time and I/O separately from emission and verification,
+charged memory and scratch peaks, descriptor peak and process RSS. The
+capacity fixture plans a one-file volume of `UINT32_MAX` blocks without
+creating an 8 TiB host file. Both check complete context resource release.
+
+The macOS wide run reports 37.517 seconds for catalog admission and
+planning, 3.228 seconds for emission, and 14.410 seconds for verification;
+the image is 182,583,296 bytes. It records 2,030,773 admission/planning I/O
+calls and 414,828 emission calls, 5,427,808 peak charged writer bytes,
+649,001,240 peak logical scratch bytes, 11 descriptors and 24,551,424
+process RSS bytes. The capacity plan reports 8,796,093,020,160 volume bytes,
+1,262,224 peak charged bytes and 2,367,488 RSS bytes. These are plain-build
+measurements; sanitizer runs are separate.
 
 ### ISO 9660 firmware checks
 
@@ -2308,7 +2418,7 @@ and creates its FAT12 EFI system image with fsimg. Both source fixtures
 are BSD-2-Clause under `test/fixtures/iso9660/`; no firmware application
 binary is imported or distributed. The test helper's `--create-boot`
 operation creates BIOS-only, EFI-only and combined images through the
-unregistered writer. Each boot image remains an ordinary file with its
+registered writer. Each boot image remains an ordinary file with its
 original bytes. The structural C tests check catalog checksums, exact file
 extents and payloads, every view's verification, setting refusals, BIOS
 load bounds and EFI sector-count boundaries independently.
@@ -2335,3 +2445,60 @@ checksum, so that mutation is a negative fsimg verification test. The
 firmware refusal test damages the validation key and confirms the BIOS
 marker is absent through the timeout. Firmware execution is evidence that
 the image boots, not that firmware validates its catalog's integrity.
+
+### ISO 9660 relocation checks
+
+`test-iso9660-write` exercises relocation by physical depth and path length,
+including logical depths 7, 8, 9, 16 and 256, several relocations under one
+parent and relocation inside moved subtrees. The independent checker walks
+the primary physical hierarchy and reconciles each CL placeholder with one
+RE record and its directory's PL parent, while checking both path tables,
+link counts, continuation ownership and every padding byte. A long-name
+fixture makes the logical record continue while the physical record fits,
+so the two record plans cannot accidentally share their placement.
+
+Additional cases adopt an empty source `.rr_moved`, refuse a nonempty or
+non-directory conflict only when relocation is needed, compare images
+across source order, cache size and scratch choice, and extract the logical
+tree before scanning and creating it again. The allocation, scratch and
+cancellation sweeps run on both ordinary and relocated trees. Source-read
+errors preserve their status; a target that becomes unrepresentable after
+planning is instead a source change.
+
+`test-iso9660-write --create-relocated FILE LEVEL` supplies a synthetic
+relocated tree to independent consumers. `--create-large FILE` writes a
+real sparse image with a multi-extent file and an exact 32-bit-size file,
+without a payload-sized memory sink. Its output parent must be private;
+large-image qualification hashes files by streaming rather than extraction
+to an allocated multi-gigabyte host file.
+
+### Declared geometry and selected input checks
+
+`test-protocol` accepts the full 64-bit descriptor-declared geometry range
+in an informational record. `test-worker --info-bounds` sends maximal
+geometry from a forged worker and then tries to stream more bytes than the
+selected input permits. Default, explicit-lower-limit and nonzero
+offset/length cases must all fail at the independent output bound without
+forwarding the oversized batch.
+
+`test-iso9660 --output-limit` extracts eight files sharing an accessible
+40 KiB extent from a 256 KiB selected view whose descriptor declares 2 MiB.
+The default refuses cumulative output beyond the selected view, while
+explicit context and extraction limits retain their precedence. A nonzero
+slice prefix also verifies that the budget uses the selected view rather
+than its larger backing object. The CLI shared-extent case exercises the
+same directory-writing path with default and explicit limits.
+
+`test/cli/iso_truncated_test.rb` derives metadata and payload positions from
+the independent ISO seed. An unused missing tail still permits information,
+listing and content delivery; missing file blocks instead produce the
+filesystem's corruption status for listing and extraction. The focused
+commands in a configured build directory are:
+
+```sh
+make -j32 fsimg test-protocol test-worker test-iso9660
+./test-protocol
+./test-worker --info-bounds
+./test-iso9660 --output-limit
+ruby ../test/cli/run.rb ./fsimg --name '/test_iso_(unused_missing|missing_payload)/'
+```

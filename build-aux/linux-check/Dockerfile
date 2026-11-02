@@ -14,7 +14,8 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' \
 	apt-get update && apt-get install -y \
 	autoconf automake libtool make pkg-config clang llvm gcc g++ \
 	zlib1g-dev liblzma-dev libzstd-dev mtools dosfstools exfatprogs fdisk gdisk zstd pigz \
-	ruby ruby-dev ruby-bundler python3 git ca-certificates xz-utils file dpkg-dev
+	ruby ruby-dev ruby-bundler python3 git ca-certificates xz-utils file dpkg-dev \
+	genisoimage xorriso libarchive-tools p7zip-full
 COPY build-msan-zlib.sh /usr/local/libexec/fsimg/build-msan-zlib.sh
 RUN source_parent=$(mktemp -d) && cd "$source_parent" && \
 	apt-get source zlib && \

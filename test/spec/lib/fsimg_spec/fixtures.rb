@@ -24,7 +24,8 @@ module FsimgSpec
   module Tools
     VARIABLES = {
       mkfs_fat: "MKFS_FAT", fsck_fat: "FSCK_FAT", newfs_msdos: "NEWFS_MSDOS", fsck_msdosfs: "FSCK_MSDOSFS",
-      mcopy: "MCOPY", mmd: "MMD", mdir: "MDIR", mtype: "MTYPE", fatcat: "FATCAT"
+      mcopy: "MCOPY", mmd: "MMD", mdir: "MDIR", mtype: "MTYPE", fatcat: "FATCAT",
+      isoinfo: "FSIMG_TOOL_ISOINFO", xorriso: "FSIMG_TOOL_XORRISO"
     }.freeze
 
     def self.find(environment) =

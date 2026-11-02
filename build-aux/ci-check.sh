@@ -23,9 +23,10 @@ if [ ! -f config.status ]; then
 fi
 
 "$make" check
-# The CLI and specification tests must run here, not skip.
+# The CLI, specification and ISO consumer tests must run here, not skip.
 grep -q '^:test-result: PASS' test/cli.sh.trs
 grep -q '^:test-result: PASS' test/spec.sh.trs
+grep -q '^:test-result: PASS' test/iso9660-writer.sh.trs
 "$make" check-install
 # The suite skips the sandbox test where a profile is unsupported; on hosts
 # with a sandbox backend it must run and pass.

@@ -933,8 +933,11 @@ order, locale and budget:
    plus, for a file, at most one `.`, that fits the level once its letters
    are uppercased, has that uppercased spelling as its natural identifier.
    In one directory, the first child in catalog order keeps a natural
-   identifier; a later child with the same one, which differs from it
-   only in case, takes an alias.
+   lookup key; a later child with the same key takes an alias. The key
+   removes the generated `;1` and an empty extension's terminal `.`, so
+   file and directory identifiers stay distinct in native readers that
+   omit both suffixes. A root key `RR_MOVED` takes an alias to reserve the
+   relocation container's identifier.
 2. **Alias.** Every other child takes an alias: its component with every
    byte outside letters, digits and `_` replaced by `_`, letters
    uppercased, the extension cut to 5 characters (3 at level 1) and the
@@ -947,9 +950,10 @@ order, locale and budget:
 An alias can equal no other identifier: two aliases differ in their
 numbers, and a natural identifier of the same shape reserved its number.
 Seven digits number more children than a directory can hold, since a
-directory's records fit in 32-bit lengths. Every file identifier carries a
-`.` and a version and no directory identifier does, so identifiers stay
-distinct after the reader removes `;1`. As for FAT's
+directory's records fit in 32-bit lengths. Primary directory identifiers
+contain no period, so a file with a nonempty extension cannot collide with
+a directory key; an empty extension leaves the same reserved alias shape
+for both kinds. As for FAT's
 [alias family](design-fat-writer.md), this needs no repeated search.
 
 ### Joliet names
@@ -957,14 +961,26 @@ distinct after the reader removes `;1`. As for FAT's
 A component is its own Joliet identifier when it encodes to UCS-2 without
 surrogates, holds no control character and none of `*`, `/`, `:`, `;`,
 `?` and `\`, and fits 64 code units as a directory or 62 as a file, which
-then adds `;1`, so every identifier holds at most 128 bytes. Otherwise it
-takes an alias by the primary rule over code units: unrepresentable
-characters become `_`, the name is cut to fit, and `_` and seven
-hexadecimal digits follow, from a family whose kept natural identifiers
-reserve their numbers. Natural identifiers are source names, which are
-unique in a directory, so identifiers stay distinct after the reader
-removes `;1`, and the writer's byte tie-break orders `foo;1` and `foo.;1`. Joliet identifiers are case-sensitive, as on every reader but
-Windows. Symbolic links and FIFOs are not in the Joliet hierarchy, which
+then adds `;1`, so every identifier holds at most 128 bytes. A name ending
+in `.` takes an alias because native Joliet readers remove terminal periods.
+Aliases never end in a period, including a file's empty-extension case.
+Otherwise it
+takes an alias over code units: unrepresentable characters become `_`,
+both kinds split at the last period, periods within the basename become
+`_`, and the basename is cut to fit `_` and seven hexadecimal digits. A
+nonempty extension contributes a period and at most five code units; an
+empty extension contributes neither. This common grammar makes the alias
+marker recognizable in every displayed key, for files and directories
+alike. Kept natural identifiers of that shape reserve their numbers
+regardless of hexadecimal letter case. Natural
+identifiers compete by displayed name, without the generated `;1`, under
+the shared locale-independent Unicode simple-uppercase mapping. The first
+in catalog order keeps its spelling and later case-equivalent names take
+aliases, including file/directory collisions. FreeBSD and default Linux
+Joliet lookups ignore case, so derived identifiers must remain distinct
+under this key even though Rock Ridge preserves each source name exactly.
+The writer's byte tie-break orders `foo;1` and `foo.;1`.
+Symbolic links and FIFOs are not in the Joliet hierarchy, which
 cannot describe them. Annex C lifts the eight-level limit for Joliet, so
 the Joliet tree is the logical tree at full depth; the writer does not
 apply Annex C's 240-byte path accounting, which no qualified reader
@@ -997,7 +1013,10 @@ most 1023 bytes with components of at most 255 bytes, else
 component, so these are the most every consumer reads. `NM` entries carry
 at most 250 name bytes each, with the continue flag on all but the last.
 A target is written as one root component per leading slash, then the
-rest split at each `/` into components, empty ones included, `.` and `..`
+rest split at each `/` into components, empty ones included; an all-root
+target also ends in an empty text component. This preserves the terminal
+slash on FreeBSD, which removes a final component separator when decoding.
+`.` and `..`
 as their flagged components; a component longer than 248 bytes is
 written as pieces, each but the last flagged to continue. `SL` entries
 carry whole component records, at most 255 bytes per entry. The root's
@@ -1020,7 +1039,11 @@ a fragment goes at the current position in the current continuation block
 when it fits there, and at the start of the next block otherwise, never
 crossing a block. Every entry's size is fixed before any address is known,
 since addresses have fixed widths, so sizing is one pass without
-iteration. Rock Ridge entries are written on a file's first section only.
+iteration. Every section of a file carries the same Rock Ridge metadata.
+Continuation areas are separate for each record; the fixed split pattern
+is repeated in section order. This preserves names and POSIX metadata in
+readers that assemble the file from its final section, as qualified
+producers do.
 
 ### File sections
 

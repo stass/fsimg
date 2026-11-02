@@ -323,9 +323,10 @@ fsimg_status_t fsimg_wire_error_decode(const unsigned char *, uint32_t,
 
 /* Typed field validation is independent of operation-specific message order.
  * An entry frame with content_only set must describe an entry with content:
- * a regular file or a symbolic link.
+ * a regular file or a symbolic link. INFO geometry is descriptive; the
+ * IMAGE selection and explicit limits own I/O and output bounds.
  */
-bool fsimg_wire_info_frame_valid(const fsimg_frame_t *, uint64_t);
+bool fsimg_wire_info_frame_valid(const fsimg_frame_t *);
 /* An image record of an input of the given size: without a container its
  * disk is that size, and a container's disk is what its tables declare. A
  * partition record lies within a disk of the given size, in a table of the

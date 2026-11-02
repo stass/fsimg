@@ -25,7 +25,7 @@ module IsoIntegration
 
   def display(path) = path.split("/", -1).map { _1.delete_suffix(";1") }.join("/")
 
-  def records(output) = output.lines.map { JSON.parse(_1) }
+  def records(output) = output.lines.map { JSON.parse(_1.dup.force_encoding(Encoding::UTF_8)) }
 
   def manifest(image)
     base = image.delete_suffix(".iso")
@@ -131,9 +131,10 @@ module IsoIntegration
              size: Integer(size, 10), date: date.split.join(" "), target: target }]
   end
 
-  def isoinfo_tree(image, view: "rockridge")
+  def isoinfo_tree(image, view: "rockridge", program: "isoinfo")
     header_pattern = /^Directory listing of (.*)\n$/
-    sections = command("isoinfo", view == "joliet" ? "-J" : "-R", "-j", "utf-8", "-l", "-i", image).lines.slice_before { header_pattern.match?(_1) }
+    flags = { "rockridge" => ["-R"], "joliet" => ["-J"], "primary" => [] }.fetch(view)
+    sections = command(program, *flags, "-j", "utf-8", "-l", "-i", image).lines.slice_before { header_pattern.match?(_1) }
     row_pattern = Regexp.new(
       '^\s*(?:\d+\s+)?([dlfp-][rwxstST-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+' \
       '(\w+\s+\d+\s+\d{4})\s+\[.*?\]\s(.*)$'
@@ -170,10 +171,15 @@ module IsoIntegration
     end.force_encoding(Encoding::UTF_8)
   end
 
-  def bsdtar_tree(image, view: "rockridge")
-    options = view == "joliet" ? ["--options", "iso9660:!rockridge"] : []
+  def bsdtar_tree(image, view: "rockridge", program: "bsdtar")
+    options = case view
+    when "rockridge" then []
+    when "joliet" then ["--options", "iso9660:!rockridge"]
+    when "primary" then ["--options", "iso9660:!rockridge,iso9660:!joliet"]
+    else raise Error, "unknown ISO view"
+    end
     # libarchive selects Joliet when its ISO reader has Rock Ridge disabled.
-    pairs = command("bsdtar", "-tv", *options, "--numeric-owner", "-f", image).lines.filter_map do |line|
+    pairs = command(program, "-tv", *options, "--numeric-owner", "-f", image).lines.filter_map do |line|
       row = line.match(Regexp.new(
         '^([dlp-][rwxstST-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+' \
         '(\w+\s+\d+\s+(?:\d{2}:\d{2}|\d{4}))\s(.*)\n$'
@@ -663,9 +669,11 @@ module IsoIntegration
   end
 end
 
-begin
-  exit(IsoIntegration.call(binary: ARGV.fetch(0)) ? 0 : 1)
-rescue IsoIntegration::Error => error
-  warn error.message
-  exit 1
+if $PROGRAM_NAME == __FILE__
+  begin
+    exit(IsoIntegration.call(binary: ARGV.fetch(0)) ? 0 : 1)
+  rescue IsoIntegration::Error => error
+    warn error.message
+    exit 1
+  end
 end

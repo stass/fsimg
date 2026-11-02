@@ -81,6 +81,7 @@ typedef enum worker_scenario {
 	SCENARIO_VHD_WHOLE_FILE,
 	SCENARIO_EXCESS_LOSS,
 	SCENARIO_LIMIT_LOSS,
+	SCENARIO_INFORMATIONAL_GEOMETRY,
 } worker_scenario_t;
 
 /* The point at which a forged worker interrupts its ordinary result stream. */
@@ -2625,7 +2626,25 @@ fake_worker(worker_scenario_t mode)
 	bzero(raw, FSIMG_WIRE_INFO_BYTES);
 	fsimg_store_le64(raw + 56, mode == SCENARIO_INVALID_TIME_BASIS ? UINT64_MAX : FSIMG_TIME_WALL);
 	fsimg_store_le64(raw + 64, FSIMG_VALIDATION_HEADER);
+	if (mode == SCENARIO_INFORMATIONAL_GEOMETRY) {
+		fsimg_store_le64(raw + FSIMG_WIRE_INFO_VALID, FSIMG_VOLUME_GEOMETRY);
+		fsimg_store_le64(raw + FSIMG_WIRE_INFO_VOLUME, UINT64_MAX);
+	}
 	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_INFO, raw, FSIMG_WIRE_INFO_BYTES, NULL) == FSIMG_OK);
+	if (mode == SCENARIO_INFORMATIONAL_GEOMETRY) {
+		bzero(raw, FSIMG_WIRE_ENTRY_BYTES);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_LENGTH, (uint64_t)mode + 1);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH, 2);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY, raw,
+		    FSIMG_WIRE_ENTRY_BYTES, NULL) == FSIMG_OK);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_NAME,
+		    "/x", 2, NULL) == FSIMG_OK);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY_END,
+		    NULL, 0, NULL) == FSIMG_OK);
+		bzero(raw, sizeof(raw));
+		CHECK(write(FSIMG_CHILD_DATA, raw, (size_t)mode + 1) == (ssize_t)mode + 1);
+	}
 	if (mode == SCENARIO_PARTIAL_EXTRACTION) {
 		output = openat(FSIMG_CHILD_OUTPUT, "partial", O_WRONLY | O_CREAT | O_EXCL, 0600);
 		CHECK(output != -1);
@@ -2667,6 +2686,8 @@ fake_worker(worker_scenario_t mode)
 	}
 	bzero(raw, FSIMG_WIRE_DONE_BYTES);
 	fsimg_store_le64(raw, mode == SCENARIO_LONG_LIST_NAME ? 1 : 0);
+	if (mode == SCENARIO_INFORMATIONAL_GEOMETRY)
+		fsimg_store_le64(raw + FSIMG_WIRE_DONE_ENTRIES, 1);
 	if (mode == SCENARIO_SKIPPED_EXTRACTION)
 		fsimg_store_le64(raw + FSIMG_WIRE_DONE_SKIPPED, 1);
 	if (mode == SCENARIO_OMITTED_EXTRACTION)
@@ -2677,6 +2698,78 @@ fake_worker(worker_scenario_t mode)
 	if (mode == SCENARIO_RUNTIME_FAILURE)
 		return (FSIMG_WORKER_RUNTIME_EXIT);
 	return (mode == SCENARIO_BAD_EXIT ? 1 : 0);
+}
+
+/* An oversized INFO claim cannot widen CAT's available-input default or
+ * an explicit lower output limit. The fake worker sends one batch larger
+ * than its entire input, so no bytes may escape before the limit failure.
+ */
+static void
+test_info_geometry_does_not_widen_output(void)
+{
+	typedef struct info_bound_case {
+		uint64_t offset;
+		uint64_t length;
+		uint64_t output_limit;
+	} info_bound_case_t;
+	static const info_bound_case_t cases[] = {
+		{ .offset = 0, .length = 0, .output_limit = 0 },
+		{ .offset = 0, .length = 0, .output_limit = 5 },
+		{ .offset = 3, .length = 7, .output_limit = 0 },
+		{ .offset = 3, .length = 0, .output_limit = 0 },
+		{ .offset = 3, .length = 7, .output_limit = 5 }
+	};
+	const worker_scenario_t mode = SCENARIO_INFORMATIONAL_GEOMETRY;
+	static const char *const members[] = { "/x" };
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	struct stat st;
+	uint64_t expected_limit;
+	int input, output;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fixture_open(&fixture);
+		input = openat(fixture.parent, "fake", O_CREAT | O_EXCL | O_WRONLY, 0700);
+		CHECK(input != -1);
+		CHECK(ftruncate(input, mode) == 0);
+		CHECK(fchmod(input, 0700) == 0);
+		CHECK(close(input) == 0);
+		input = openat(fixture.parent, "fake", O_RDONLY | O_CLOEXEC);
+		CHECK(input != -1);
+		fixture.request.input_fd = input;
+		CHECK(fsimg_input_prepare(input, NULL, NULL, &fixture.request.input,
+		    NULL) == FSIMG_OK);
+		fixture.request.kind = FSIMG_JOB_CAT;
+		fixture.request.members = members;
+		fixture.request.member_count = 1;
+		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
+		fixture.request.offset = cases[i].offset;
+		fixture.request.length = cases[i].length;
+		fixture.request.limits.max_output_bytes = cases[i].output_limit;
+		fixture.request.seconds = 5;
+		expected_limit = (uint64_t)mode - cases[i].offset;
+		if (cases[i].length != 0)
+			expected_limit = cases[i].length;
+		if (cases[i].output_limit != 0)
+			expected_limit = cases[i].output_limit;
+		output = openat(fixture.parent, "raw", O_CREAT | O_EXCL | O_RDWR, 0600);
+		CHECK(output != -1);
+		status = fsimg_worker_run(fixture.executable, &fixture.request, event,
+		    &fixture, output, NULL, &fixture.result, &error);
+		if (status != FSIMG_ELIMIT)
+			fprintf(stderr, "INFO geometry output bound %llu: status %d, %s\n",
+			    (unsigned long long)expected_limit, status, error.message);
+		CHECK(status == FSIMG_ELIMIT);
+		CHECK(fixture.info == 1 && error.resource == FSIMG_RESOURCE_OUTPUT);
+		CHECK(error.limit == expected_limit);
+		CHECK(fstat(output, &st) == 0 && st.st_size == 0);
+		CHECK(close(input) == 0);
+		CHECK(close(output) == 0);
+		CHECK(unlinkat(fixture.parent, "fake", 0) == 0);
+		CHECK(unlinkat(fixture.parent, "raw", 0) == 0);
+		fixture_close(&fixture);
+	}
 }
 
 static void
@@ -3179,6 +3272,11 @@ main(int argc, char **argv)
 		test_verbose_names_protocol();
 		return (0);
 	}
+	if (argc == 2 && strcmp(argv[1], "--info-bounds") == 0) {
+		signal(SIGPIPE, SIG_IGN);
+		test_info_geometry_does_not_widen_output();
+		return (0);
+	}
 	CHECK(argc == 1);
 
 #if defined(__has_feature)
@@ -3214,6 +3312,7 @@ main(int argc, char **argv)
 	test_inheritance();
 	test_verbose_names_protocol();
 	test_forged();
+	test_info_geometry_does_not_widen_output();
 	test_path_sequences();
 	test_forged_publication();
 	test_incomplete_extraction();

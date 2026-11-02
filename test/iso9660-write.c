@@ -100,6 +100,8 @@ typedef struct chk_entry {
 	uint64_t	 size;
 	uint64_t	 hash;
 	uint32_t	 extent;
+	uint32_t	 child_link;
+	uint32_t	 containing_directory;
 	uint32_t	 mode;
 	uint32_t	 uid;
 	uint32_t	 gid;
@@ -109,12 +111,14 @@ typedef struct chk_entry {
 	unsigned	 sections;
 	bool		 directory;
 	bool		 has_px;
+	bool		 relocated;
 } chk_entry_t;
 
 /* One directory found by a walk, for the path-table comparison. */
 typedef struct chk_dir {
 	uint32_t	 extent;
 	uint32_t	 parent;
+	uint32_t	 logical_parent;
 	unsigned char	 identifier[256];
 	size_t		 length;
 } chk_dir_t;
@@ -416,6 +420,9 @@ typedef struct chk_rr {
 	bool		 joining;
 	bool		 after_root;
 	bool		 component;
+	uint32_t	 child_link;
+	uint32_t	 parent_link;
+	bool		 relocated;
 } chk_rr_t;
 
 static void
@@ -545,6 +552,18 @@ chk_susp(chk_t *c, const unsigned char *area, size_t length, chk_rr_t *rr)
 			CHK(c, rr->target_length == 0 || rr->sl_open,
 			    "SL after the target ended");
 			chk_sl(c, rr, p + at + 4, n - 4);
+		} else if (bcmp(p + at, "CL", 2) == 0 ||
+		    bcmp(p + at, "PL", 2) == 0) {
+			CHK(c, n == 12, "relocation pointer length");
+			if (n != 12)
+				return;
+			if (p[at] == 'C')
+				rr->child_link = both32(c, p + at + 4);
+			else
+				rr->parent_link = both32(c, p + at + 4);
+		} else if (bcmp(p + at, "RE", 2) == 0) {
+			CHK(c, n == 4, "relocation marker length");
+			rr->relocated = true;
 		} else {
 			CHK(c, false, "unexpected SUSP entry");
 		}
@@ -552,6 +571,8 @@ chk_susp(chk_t *c, const unsigned char *area, size_t length, chk_rr_t *rr)
 	}
 	CHK(c, !rr->nm_open && !rr->sl_open && !rr->joining,
 	    "a name or target still continues");
+	CHK(c, rr->target_length == 0 || !rr->after_root,
+	    "slash-only target lacks its terminal empty text component");
 	rr->name[rr->name_length] = '\0';
 	rr->target[rr->target_length] = '\0';
 }
@@ -612,8 +633,8 @@ chk_primary_child(chk_t *c, chk_entry_t *e, const unsigned char *r,
 	bool directory = (r[25] & 0x02) != 0;
 	chk_rr_t rr;
 
-	check_primary_identifier(c, r + 33, n, directory);
 	chk_susp(c, r + used, r[0] - used, &rr);
+	check_primary_identifier(c, r + 33, n, directory || rr.child_link != 0);
 	CHK(c, rr.px && rr.tf && rr.name_length > 0 && !rr.sp && !rr.er,
 	    "primary record lacks PX, TF or NM");
 	e->mode = rr.mode;
@@ -622,15 +643,24 @@ chk_primary_child(chk_t *c, chk_entry_t *e, const unsigned char *r,
 	e->links = rr.links;
 	e->has_px = rr.px;
 	e->modified = rr.modified;
+	e->extent = le32(r + 2);
+	e->child_link = rr.child_link;
+	e->relocated = rr.relocated;
+	CHK(c, rr.parent_link == 0 && !(rr.relocated && rr.child_link != 0),
+	    "child relocation entries");
 	CHK(c, rr.modified == date7(c, r + 18),
 	    "recording date differs from TF modification");
 	snprintf(e->path, sizeof(e->path), "%s/%s", path, rr.name);
 	snprintf(e->display, sizeof(e->display), "%s/%.*s", display,
-	    directory ? (int)n : (int)n - 2, (const char *)r + 33);
+	    directory || rr.child_link != 0 ? (int)n : (int)n - 2,
+	    (const char *)r + 33);
 	bcopy(rr.target, e->target, rr.target_length + 1);
 	switch (rr.mode & S_TYPE) {
 	case S_DIR:
-		CHK(c, directory, "PX directory without the flag");
+		CHK(c, directory || rr.child_link != 0, "PX directory without flag or CL");
+		if (rr.child_link != 0)
+			CHK(c, !directory && le32(r + 2) == 0 && le32(r + 10) == 0,
+			    "CL placeholder is not an empty file record");
 		(*subdirectories)++;
 		break;
 	case S_FILE:
@@ -668,12 +698,13 @@ chk_directory(chk_t *c, unsigned h, const char *path, const char *display,
 	unsigned index = 0;
 	chk_rr_t rr;
 	chk_dir_t *d;
+	unsigned depth_limit = h == 0 ? 8 : 257;
 
-	CHK(c, ++c->depth <= 9, "hierarchy deeper than 8 levels");
+	CHK(c, ++c->depth <= depth_limit, "hierarchy exceeds its depth bound");
 	CHK(c, length != 0 && length % BLOCK == 0 && extent > 18 &&
 	    (uint64_t)extent + length / BLOCK <= c->blocks,
 	    "directory extent");
-	if (c->depth > 9 || length == 0 || length % BLOCK != 0 ||
+	if (c->depth > depth_limit || length == 0 || length % BLOCK != 0 ||
 	    (uint64_t)extent + length / BLOCK > c->blocks) {
 		c->depth--;
 		return;
@@ -706,7 +737,7 @@ chk_directory(chk_t *c, unsigned h, const char *path, const char *display,
 				break;
 			chk_explain(c, ((uint64_t)extent + b) * BLOCK + at, r[0]);
 			CHK(c, r[1] == 0 && r[26] == 0 && r[27] == 0 &&
-			    both16(c, r + 28) == 1 && (r[25] & ~0x82u) == 0 &&
+			    both16(c, r + 28) == 1 && (r[25] & ~0x83u) == 0 &&
 			    (n % 2 != 0 || r[33 + n] == 0),
 			    "record fields");
 			both32(c, r + 2);
@@ -734,6 +765,8 @@ chk_directory(chk_t *c, unsigned h, const char *path, const char *display,
 						    "SP not first");
 					if (index == 0)
 						self_links = rr.links;
+					else
+						d->logical_parent = rr.parent_link;
 				} else {
 					CHK(c, r[0] == 34, "Joliet dot record");
 				}
@@ -747,8 +780,17 @@ chk_directory(chk_t *c, unsigned h, const char *path, const char *display,
 				CHK(c, n == previous_length && bcmp(r + 33,
 				    previous, n) == 0 && !directory,
 				    "section run changes identifier");
-				CHK(c, r[0] == (used + 1) / 2 * 2,
-				    "later section carries system use");
+				if (h == 0) {
+					chk_susp(c, r + used, r[0] - used, &rr);
+					CHK(c, rr.px && rr.tf &&
+					    strcmp(rr.name, strrchr(e->path, '/') + 1) == 0 &&
+					    rr.mode == e->mode && rr.uid == e->uid &&
+					    rr.gid == e->gid && rr.modified == e->modified,
+					    "section Rock Ridge metadata differs");
+				} else {
+					CHK(c, r[0] == (used + 1) / 2 * 2,
+					    "Joliet section carries system use");
+				}
 				chk_data(c, e, le32(r + 2), le32(r + 10), false);
 				open_run = (r[25] & 0x80) != 0;
 				if (open_run)
@@ -758,6 +800,9 @@ chk_directory(chk_t *c, unsigned h, const char *path, const char *display,
 				continue;
 			}
 
+			if (h == 0)
+				CHK(c, strlen(display) + n <= 255,
+				    "primary physical path exceeds 255 bytes");
 			if (previous_length != 0) {
 				int order = h == 0 ? primary_order(previous,
 				    previous_length, previous_directory, r + 33,
@@ -783,6 +828,7 @@ chk_directory(chk_t *c, unsigned h, const char *path, const char *display,
 			bcopy(r + 33, e->identifier, n);
 			e->identifier_length = n;
 			e->directory = directory;
+			e->containing_directory = extent;
 			if (h == 0) {
 				chk_primary_child(c, e, r, path, display,
 				    &subdirectories);
@@ -892,6 +938,61 @@ chk_path_tables(chk_t *c, unsigned h)
 	CHK(c, at == c->path_bytes[h] && count == c->dir_count[h],
 	    "path table size or record count");
 	free(extents);
+}
+
+/* Reconcile the physical tree with its logical placeholders. This checks
+ * CL/RE/PL triples without building a second logical-tree walker.
+ */
+static void
+chk_relocations(chk_t *c)
+{
+	const chk_entry_t *container = NULL, *placeholder;
+	const chk_dir_t *directory;
+	size_t children = 0, relocated = 0, matches;
+
+	for (size_t i = 0; i < c->count[0]; i++) {
+		const chk_entry_t *entry = &c->entries[0][i];
+
+		if (strcmp(entry->path, "/.rr_moved") == 0)
+			container = entry;
+		if (entry->child_link != 0)
+			children++;
+	}
+	for (size_t i = 0; i < c->count[0]; i++) {
+		const chk_entry_t *entry = &c->entries[0][i];
+
+		if (!entry->relocated)
+			continue;
+		relocated++;
+		placeholder = NULL;
+		directory = NULL;
+		matches = 0;
+		for (size_t j = 0; j < c->count[0]; j++) {
+			if (c->entries[0][j].child_link == entry->extent) {
+				placeholder = &c->entries[0][j];
+				matches++;
+			}
+		}
+		for (size_t j = 0; j < c->dir_count[0]; j++)
+			if (c->dirs[0][j].extent == entry->extent)
+				directory = &c->dirs[0][j];
+		CHK(c, matches == 1 && placeholder != NULL && directory != NULL &&
+		    container != NULL, "relocation lacks one CL, RE, PL or container");
+		if (placeholder == NULL || directory == NULL || container == NULL)
+			continue;
+		CHK(c, entry->directory && entry->containing_directory == container->extent,
+		    "RE record outside the relocation container");
+		CHK(c, directory->logical_parent == placeholder->containing_directory,
+		    "PL does not name the logical parent");
+		CHK(c, directory->parent == container->extent,
+		    "relocated dot-dot does not name the physical parent");
+		CHK(c, strcmp(strrchr(entry->path, '/'), strrchr(placeholder->path, '/')) == 0 &&
+		    entry->mode == placeholder->mode && entry->uid == placeholder->uid &&
+		    entry->gid == placeholder->gid && entry->links == placeholder->links &&
+		    entry->modified == placeholder->modified,
+		    "logical and physical directory metadata differ");
+	}
+	CHK(c, children == relocated, "CL and RE counts differ");
 }
 
 /* A descriptor's identifier field of width bytes: text padded with
@@ -1045,6 +1146,7 @@ chk_image(chk_t *c, const unsigned char *img, uint64_t length,
 		    c->root_length[h], c->root_extent[h]);
 		chk_path_tables(c, h);
 	}
+	chk_relocations(c);
 	for (uint64_t i = 0; i < length; i++) {
 		if (c->explained[i] == 0 && img[i] != 0) {
 			CHK(c, false, "unexplained nonzero byte");
@@ -1100,11 +1202,15 @@ typedef struct fixture {
 	char		 directory[64];
 	int		 parent;
 	unsigned	 losses;
+	uint32_t	 lost_fields;
+	uint64_t	 target_reads;
 	uint64_t	 cancel_after;
 	uint64_t	 polls;
 	bool		 changed;
 	bool		 eof;
 	bool		 flip_target;
+	bool		 refuse_target_read;
+	bool		 join_target_components;
 } fixture_t;
 
 typedef struct memory_sink {
@@ -1159,11 +1265,17 @@ provider_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
 		const char *target = fixture->targets[id - TARGET_SOURCE];
 		size_t size = strlen(target);
 
+		fixture->target_reads++;
+
+		if (fixture->refuse_target_read)
+			return (FSIMG_EUNSUPPORTED);
 		*transferred = 0;
 		for (size_t i = 0; i < length && offset + i < size; i++) {
 			bytes[i] = (unsigned char)target[offset + i];
 			if (fixture->flip_target && offset + i == size - 1)
 				bytes[i] ^= 1;
+			if (fixture->join_target_components && offset + i == 255)
+				bytes[i] = 'a';
 			(*transferred)++;
 		}
 		return (FSIMG_OK);
@@ -1181,12 +1293,13 @@ provider_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
 }
 
 static void
-loss_report(void *argument, const char *path, uint32_t field FSIMG_UNUSED)
+loss_report(void *argument, const char *path, uint32_t field)
 {
 	fixture_t *fixture = argument;
 
 	CHECK(path[0] == '/');
 	fixture->losses++;
+	fixture->lost_fields |= field;
 }
 
 static bool
@@ -1198,7 +1311,7 @@ cancel_poll(void *argument)
 	    ++fixture->polls >= fixture->cancel_after);
 }
 
-/* Open a fixture over the unregistered writer. pages sizes the metadata
+/* Open a fixture over the registered writer. pages sizes the metadata
  * cache; scratch false keeps every metadata object in memory. A writer
  * construction failure leaves fixture->writer NULL and returns it.
  */
@@ -1229,9 +1342,7 @@ fixture_open_with(fixture_t *fixture, const fsimg_write_options_t *write_options
 	CHECK(fsimg_test_meta_cache(fixture->ctx, pages, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(fixture->ctx, &fixture->baseline, NULL) ==
 	    FSIMG_OK);
-	status = fsimg_writer_new_variant(fixture->ctx,
-	    &fsimg_iso9660_write_format,
-	    &fsimg_iso9660_write_format.variants[0], write_options,
+	status = fsimg_writer_new(fixture->ctx, "iso9660", write_options,
 	    &fixture->writer, NULL);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1692,6 +1803,56 @@ static const spec_t tree[] = {
 };
 #define TREE_COUNT	(sizeof(tree) / sizeof(tree[0]))
 
+/* A small relocated tree for fault sweeps and independent consumers. */
+static const spec_t relocation_tree[] = {
+	{ "/a", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/a/b", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/a/b/c", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/a/b/c/d", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/a/b/c/d/e", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/a/b/c/d/e/f", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/a/b/c/d/e/f/g", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/a/b/c/d/e/f/g/h", FSIMG_ENTRY_DIRECTORY, 0, 0, &owned_metadata, NULL },
+	{ "/a/b/c/d/e/f/g/h/leaf", FSIMG_ENTRY_FILE, 5001, 7, NULL, NULL },
+	{ "/a/b/c/d/e/f/g/i", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/a/b/c/d/e/f/g/i/leaf", FSIMG_ENTRY_FILE, 33, 8, NULL, NULL },
+	{ "/RR_MOVED", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/big", FSIMG_ENTRY_FILE, 70001, 11, NULL, NULL }
+};
+#define RELOCATION_COUNT (sizeof(relocation_tree) / sizeof(relocation_tree[0]))
+
+/* Case-insensitive consumers must distinguish every derived name. */
+static const spec_t case_tree[] = {
+	{ "/A", FSIMG_ENTRY_FILE, 1, 1, NULL, NULL },
+	{ "/a", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/B", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/b", FSIMG_ENTRY_FILE, 2, 2, NULL, NULL },
+	{ "/C", FSIMG_ENTRY_FILE, 3, 3, NULL, NULL },
+	{ "/c", FSIMG_ENTRY_FILE, 4, 4, NULL, NULL },
+	{ "/D", FSIMG_ENTRY_FILE, 5, 5, NULL, NULL },
+	{ "/d", FSIMG_ENTRY_FILE, 6, 6, NULL, NULL },
+	{ "/E", FSIMG_ENTRY_FILE, 7, 7, NULL, NULL },
+	{ "/e", FSIMG_ENTRY_FILE, 8, 8, NULL, NULL },
+	{ "/F", FSIMG_ENTRY_FILE, 9, 9, NULL, NULL },
+	{ "/f", FSIMG_ENTRY_FILE, 10, 10, NULL, NULL },
+	{ "/G", FSIMG_ENTRY_FILE, 11, 11, NULL, NULL },
+	{ "/g", FSIMG_ENTRY_FILE, 12, 12, NULL, NULL },
+	{ "/H", FSIMG_ENTRY_FILE, 13, 13, NULL, NULL },
+	{ "/h", FSIMG_ENTRY_FILE, 14, 14, NULL, NULL },
+	{ "/I", FSIMG_ENTRY_FILE, 15, 15, NULL, NULL },
+	{ "/i", FSIMG_ENTRY_FILE, 16, 16, NULL, NULL },
+	{ "/X", FSIMG_ENTRY_FILE, 17, 17, NULL, NULL },
+	{ "/x", FSIMG_ENTRY_FILE, 18, 18, NULL, NULL },
+	{ "/x_000000a", FSIMG_ENTRY_FILE, 19, 19, NULL, NULL },
+	{ "/\xc3\x89", FSIMG_ENTRY_FILE, 20, 20, NULL, NULL },
+	{ "/\xc3\xa9", FSIMG_ENTRY_FILE, 21, 21, NULL, NULL },
+	{ "/ztrail", FSIMG_ENTRY_FILE, 22, 22, NULL, NULL },
+	{ "/ztrail.", FSIMG_ENTRY_FILE, 23, 23, NULL, NULL },
+	{ "/zzdir.", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+	{ "/zzmany..", FSIMG_ENTRY_FILE, 24, 24, NULL, NULL }
+};
+#define CASE_COUNT (sizeof(case_tree) / sizeof(case_tree[0]))
+
 /*
  * Tests.
  */
@@ -1740,13 +1901,11 @@ test_tree(void)
 	free(reference.bytes);
 }
 
-/* A directory at physical level 9, and one whose path leaves no room
- * for the level's longest file identifier, need relocation, which the
- * writer refuses naming the directory; a tree that stays within both
- * bounds at level 1 plans.
+/* Relocation permits both deep trees and paths that exceed the primary
+ * hierarchy's physical path bound.
  */
 static void
-test_relocation_refused(void)
+test_relocation_planning(void)
 {
 	static const spec_t nine[] = {
 		{ "/1", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
@@ -1759,6 +1918,7 @@ test_relocation_refused(void)
 		{ "/1/2/3/4/5/6/7/8", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL }
 	};
 #define D31	"ABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
+#define D30	"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
 	/* Paths of 31, 63, 95, 127, 159, 191 and 223 bytes: the last
 	 * leaves less than 255 - 1 - 33 = 221 at level 3.
 	 */
@@ -1774,23 +1934,293 @@ test_relocation_refused(void)
 		{ "/" D31 "/" D31 "/" D31 "/" D31 "/" D31 "/" D31,
 		    FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
 		{ "/" D31 "/" D31 "/" D31 "/" D31 "/" D31 "/" D31 "/" D31,
-		    FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL }
+		    FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+		{ "/" D31 "/" D31 "/" D31 "/" D31 "/" D31 "/" D31 "/" D31 "/" D30,
+		    FSIMG_ENTRY_FILE, 1, 20, NULL, NULL }
 	};
 	fsimg_write_options_t options;
-	fsimg_error_t error;
+	fixture_t fixture;
+	memory_sink_t sink;
+	chk_expect_t expect = { 0 };
+	chk_t c;
+	const fsimg_plan_t *base;
+	iso_row_t moved;
 
 	reproducible_options(&options);
 	CHECK(plan_status(&options, nine, 7, NULL) == FSIMG_OK);
-	CHECK(plan_status(&options, nine, 8, &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strcmp(error.path, "/1/2/3/4/5/6/7/8") == 0);
+	CHECK(plan_status(&options, nine, 8, NULL) == FSIMG_OK);
 	CHECK(plan_status(&options, wide, 6, NULL) == FSIMG_OK);
-	CHECK(plan_status(&options, wide, 7, &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strncmp(error.path, "/" D31 "/", 33) == 0 &&
-	    strlen(error.path) == 7 * 32);
+	CHECK(plan_status(&options, wide, 7, NULL) == FSIMG_OK);
+	/* Seven 31-byte directories plus a 33-byte file identifier would
+	 * exceed the physical bound without path-length relocation.
+	 */
+	fixture_open(&fixture, &options);
+	add_specs(&fixture, wide, sizeof(wide) / sizeof(wide[0]), false);
+	CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+	chk_image(&c, sink.bytes, sink.length, &expect);
+	CHECK(c.errors == 0);
+	CHECK(fsimg_writer_plan(fixture.writer, &base, NULL) == FSIMG_OK);
+	CHECK(iso_row_get((iso_plan_t *)base, 7, &moved, NULL) == FSIMG_OK);
+	CHECK(moved.relocation_alias != 0);
+	chk_free(&c);
+	free(sink.bytes);
+	fixture_close(&fixture);
 	/* At level 1 the same names are aliases of 8 characters. */
 	options.iso_level = 1;
 	CHECK(plan_status(&options, wide, 7, NULL) == FSIMG_OK);
 #undef D31
+#undef D30
+}
+
+/* Deep logical paths survive relocation in Rock Ridge and Joliet. A
+ * 117-byte final component with all TF times makes the CL record continue
+ * while the physical RE record fits, exercising their separate plans.
+ */
+static void
+test_relocation_roundtrip(void)
+{
+	static const unsigned depths[] = { 7, 8, 9, 16, 256 };
+	static const fsimg_iso_view_t views[] = { FSIMG_ISO_VIEW_ROCKRIDGE,
+	    FSIMG_ISO_VIEW_JOLIET, FSIMG_ISO_VIEW_PRIMARY };
+	fsimg_write_options_t options;
+	fsimg_read_options_t read_options;
+	fsimg_verify_report_t report;
+	const fsimg_entry_t *entry;
+	const fsimg_plan_t *base;
+	fsimg_reader_t *reader;
+	fsimg_io_t *io;
+	iso_row_t row;
+	chk_expect_t expect = { 0 };
+	chk_t check;
+	fixture_t fixture;
+	memory_sink_t sink;
+	char (*paths)[1024];
+	spec_t *specs;
+	unsigned char bytes[5001];
+	size_t length;
+	unsigned depth, directories, files, count;
+	bool relocated;
+	fsimg_status_t status;
+
+	for (unsigned d = 0; d < sizeof(depths) / sizeof(depths[0]); d++) {
+		depth = depths[d];
+		/* The depth limit counts every path component. Keep the
+		 * deepest directory empty when it reaches that limit.
+		 */
+		count = depth + (depth < 256 ? 1 : 0);
+		paths = calloc(depth + 1, sizeof(*paths));
+		specs = calloc(depth + 1, sizeof(*specs));
+		CHECK(paths != NULL && specs != NULL);
+		for (unsigned i = 0; i < depth; i++) {
+			if (i != 0)
+				strcpy(paths[i], paths[i - 1]);
+			strcat(paths[i], "/");
+			length = strlen(paths[i]);
+			memset(paths[i] + length, 'd', i + 1 == depth ? 117 : 1);
+			specs[i] = (spec_t){ paths[i], FSIMG_ENTRY_DIRECTORY,
+			    0, 0, i + 1 == depth ? &owned_metadata : NULL, NULL };
+		}
+		snprintf(paths[depth], sizeof(paths[depth]), "%s/leaf", paths[depth - 1]);
+		specs[depth] = (spec_t){ paths[depth], FSIMG_ENTRY_FILE,
+		    sizeof(bytes), 7, NULL, NULL };
+		reproducible_options(&options);
+		fixture_open(&fixture, &options);
+		add_specs(&fixture, specs, count, false);
+		CHECK(fsimg_writer_plan(fixture.writer, &base, NULL) == FSIMG_OK);
+		relocated = ((const iso_plan_t *)base)->relocation_id != 0;
+		CHECK(relocated == (depth >= 8));
+		if (depth == 8) {
+			CHECK(iso_row_get((iso_plan_t *)base, depth, &row, NULL) == FSIMG_OK);
+			CHECK(row.child.fragments == 0 && row.placeholder.fragments != 0);
+		}
+		CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+		chk_image(&check, sink.bytes, sink.length, &expect);
+		CHECK(check.errors == 0);
+		chk_free(&check);
+		CHECK(memory_io(fixture.ctx, &sink, false, &io) == FSIMG_OK);
+		for (unsigned v = 0; v < 3; v++) {
+			fsimg_read_options_init(&read_options);
+			read_options.iso_view = views[v];
+			CHECK(fsimg_reader_open(fixture.ctx, io, &read_options,
+			    &reader, NULL) == FSIMG_OK);
+			directories = files = 0;
+			while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
+				if (entry->kind == FSIMG_ENTRY_DIRECTORY) {
+					directories++;
+					continue;
+				}
+				files++;
+				if (entry->size == 0)
+					continue; /* primary CL placeholder */
+				CHECK(entry->size == sizeof(bytes));
+				if (views[v] == FSIMG_ISO_VIEW_ROCKRIDGE)
+					CHECK(strcmp(entry->path, paths[depth]) == 0);
+				CHECK(fsimg_reader_read_at(reader, 0, bytes, sizeof(bytes),
+				    &length, NULL) == FSIMG_OK && length == sizeof(bytes));
+				for (unsigned i = 0; i < sizeof(bytes); i++)
+					CHECK(bytes[i] == content_byte(7, i));
+			}
+			CHECK(status == FSIMG_DONE);
+			if (views[v] != FSIMG_ISO_VIEW_PRIMARY) {
+				CHECK(files == count - depth);
+				CHECK(directories == depth +
+				    (views[v] == FSIMG_ISO_VIEW_ROCKRIDGE && relocated ? 1 : 0));
+			}
+			fsimg_reader_free(reader);
+			CHECK(fsimg_reader_open(fixture.ctx, io, &read_options,
+			    &reader, NULL) == FSIMG_OK);
+			CHECK(fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report,
+			    NULL) == FSIMG_OK && report.complete);
+			fsimg_reader_free(reader);
+		}
+		fsimg_io_free(io);
+		free(sink.bytes);
+		fixture_close(&fixture);
+		free(specs);
+		free(paths);
+	}
+}
+
+/* Relocation is reproducible across source order, cache and scratch
+ * choices. An empty source container is adopted; a conflicting one fails
+ * only when the physical hierarchy actually needs relocation.
+ */
+static void
+test_relocation_container(void)
+{
+	spec_t container = { "/.rr_moved", FSIMG_ENTRY_DIRECTORY,
+	    0, 0, &owned_metadata, NULL };
+	spec_t child = { "/.rr_moved/child", FSIMG_ENTRY_FILE, 1, 1, NULL, NULL };
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t reference, sink;
+	const fsimg_plan_t *base;
+	iso_row_t row;
+	chk_expect_t expect = { 0 };
+	chk_t check;
+
+	reproducible_options(&options);
+	fixture_open(&fixture, &options);
+	add_specs(&fixture, relocation_tree, RELOCATION_COUNT, false);
+	CHECK(emit_memory(&fixture, &reference, NULL) == FSIMG_OK);
+	fixture_close(&fixture);
+	CHECK(fixture_open_with(&fixture, &options, 1024, false) == FSIMG_OK);
+	add_specs(&fixture, relocation_tree, RELOCATION_COUNT, true);
+	CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+	CHECK(sink.length == reference.length &&
+	    bcmp(sink.bytes, reference.bytes, (size_t)sink.length) == 0);
+	free(sink.bytes);
+	free(reference.bytes);
+	fixture_close(&fixture);
+
+	fixture_open(&fixture, &options);
+	add_specs(&fixture, relocation_tree, RELOCATION_COUNT, false);
+	CHECK(add_one(&fixture, &container) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &base, NULL) == FSIMG_OK);
+	CHECK(((const iso_plan_t *)base)->relocation_entry.id == 0);
+	CHECK(iso_row_get((iso_plan_t *)base,
+	    ((const iso_plan_t *)base)->relocation_id, &row, NULL) == FSIMG_OK);
+	CHECK(row.uid == owned_metadata.uid && row.gid == owned_metadata.gid);
+	CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+	chk_image(&check, sink.bytes, sink.length, &expect);
+	CHECK(check.errors == 0);
+	CHECK(chk_find(&check, 0, "/.rr_moved") != NULL);
+	CHECK(chk_find(&check, 1, "/.rr_moved") == NULL);
+	chk_free(&check);
+	free(sink.bytes);
+	fixture_close(&fixture);
+
+	fixture_open(&fixture, &options);
+	add_specs(&fixture, relocation_tree, RELOCATION_COUNT, false);
+	CHECK(add_one(&fixture, &container) == FSIMG_OK);
+	CHECK(add_one(&fixture, &child) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &base, NULL) == FSIMG_EUNSUPPORTED);
+	fixture_close(&fixture);
+	container.kind = FSIMG_ENTRY_FILE;
+	CHECK(plan_status(&options, &container, 1, NULL) == FSIMG_OK);
+	fixture_open(&fixture, &options);
+	add_specs(&fixture, relocation_tree, RELOCATION_COUNT, false);
+	CHECK(add_one(&fixture, &container) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &base, NULL) == FSIMG_EUNSUPPORTED);
+	fixture_close(&fixture);
+}
+
+/* Extracting the logical tree leaves an empty relocation container. A
+ * writer adopts it when the extracted tree is scanned and created again.
+ * Safe extraction intentionally does not restore privileged metadata.
+ */
+static void
+test_relocation_extract_create(void)
+{
+	fsimg_write_options_t options;
+	fsimg_read_options_t read_options;
+	fsimg_extract_options_t extract_options;
+	fsimg_reader_t *reader;
+	fsimg_io_t *io;
+	const fsimg_entry_t *entry;
+	const spec_t *spec;
+	fixture_t original, recreated;
+	memory_sink_t source, result;
+	unsigned char bytes[1024];
+	uint64_t offset;
+	size_t length, found = 0;
+	int extracted;
+	fsimg_status_t status;
+
+	reproducible_options(&options);
+	options.flags |= FSIMG_WRITE_ALLOW_LOSS;
+	fixture_open(&original, &options);
+	add_specs(&original, relocation_tree, RELOCATION_COUNT, false);
+	CHECK(emit_memory(&original, &source, NULL) == FSIMG_OK);
+	CHECK(memory_io(original.ctx, &source, false, &io) == FSIMG_OK);
+	fsimg_read_options_init(&read_options);
+	CHECK(fsimg_reader_open(original.ctx, io, &read_options, &reader, NULL) == FSIMG_OK);
+	fsimg_extract_options_init(&extract_options);
+	extract_options.flags |= FSIMG_EXTRACT_ALLOW_LOSS;
+	CHECK(fsimg_extract_at(reader, original.parent, "extracted", &extract_options,
+	    NULL) == FSIMG_OK);
+	fsimg_reader_free(reader);
+	fsimg_io_free(io);
+	free(source.bytes);
+	extracted = openat(original.parent, "extracted",
+	    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	CHECK(extracted != -1);
+	fixture_open(&recreated, &options);
+	CHECK(fsimg_writer_add_tree(recreated.writer, extracted, "/", NULL) == FSIMG_OK);
+	CHECK(emit_memory(&recreated, &result, NULL) == FSIMG_OK);
+	CHECK(memory_io(recreated.ctx, &result, false, &io) == FSIMG_OK);
+	CHECK(fsimg_reader_open(recreated.ctx, io, &read_options, &reader, NULL) == FSIMG_OK);
+	while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
+		if (entry->kind != FSIMG_ENTRY_FILE)
+			continue;
+		spec = NULL;
+		for (size_t i = 0; i < RELOCATION_COUNT; i++)
+			if (strcmp(entry->path, relocation_tree[i].path) == 0)
+				spec = &relocation_tree[i];
+		CHECK(spec != NULL && entry->size == spec->size);
+		for (offset = 0; offset < entry->size; offset += length) {
+			CHECK(fsimg_reader_read_at(reader, offset, bytes, sizeof(bytes),
+			    &length, NULL) == FSIMG_OK && length != 0);
+			for (size_t i = 0; i < length; i++)
+				CHECK(bytes[i] == content_byte(spec->source, offset + i));
+		}
+		found++;
+	}
+	CHECK(status == FSIMG_DONE && found == 3);
+	fsimg_reader_free(reader);
+	fsimg_io_free(io);
+	free(result.bytes);
+	fixture_close(&recreated);
+	/* These fixed fixture paths contain only files and directories.
+	 * Remove children before parents beneath the private extracted root.
+	 */
+	for (size_t i = RELOCATION_COUNT; i > 0; i--)
+		CHECK(unlinkat(extracted, relocation_tree[i - 1].path + 1,
+		    relocation_tree[i - 1].kind == FSIMG_ENTRY_DIRECTORY ? AT_REMOVEDIR : 0) == 0);
+	CHECK(unlinkat(extracted, ".rr_moved", AT_REMOVEDIR) == 0);
+	CHECK(close(extracted) == 0);
+	CHECK(unlinkat(original.parent, "extracted", AT_REMOVEDIR) == 0);
+	fixture_close(&original);
 }
 
 /* The identifier of the entry at path in hierarchy h, as text: primary
@@ -1813,6 +2243,152 @@ check_identifier(const chk_t *c, unsigned h, const char *path,
 	if (strcmp(text, expected) != 0)
 		fprintf(stderr, "%s: %s, expected %s\n", path, text, expected);
 	CHECK(strcmp(text, expected) == 0);
+}
+
+/* Independent key for this ASCII/Latin-1 fixture, without the writer's
+ * Unicode mapping or name functions. Version suffixes do not distinguish
+ * file and directory lookups in case-insensitive consumers.
+ */
+static bool
+case_identifier_equal(const chk_entry_t *a, const chk_entry_t *b)
+{
+	size_t an = a->identifier_length / 2 - (a->directory ? 0 : 2);
+	size_t bn = b->identifier_length / 2 - (b->directory ? 0 : 2);
+	uint16_t ac, bc;
+
+	if (an != bn)
+		return (false);
+	for (size_t i = 0; i < an; i++) {
+		ac = be16(a->identifier + 2 * i);
+		bc = be16(b->identifier + 2 * i);
+		if ((ac >= 'a' && ac <= 'z') ||
+		    (ac >= 0xe0 && ac <= 0xfe && ac != 0xf7))
+			ac -= 0x20;
+		if ((bc >= 'a' && bc <= 'z') ||
+		    (bc >= 0xe0 && bc <= 0xfe && bc != 0xf7))
+			bc -= 0x20;
+		if (ac != bc)
+			return (false);
+	}
+	return (true);
+}
+
+/* Native primary lookups remove the version and an empty extension's
+ * period. File and directory keys must stay distinct under that view.
+ * This decoder uses only bytes from the emitted records.
+ */
+static size_t
+primary_lookup_length(const chk_entry_t *entry)
+{
+	size_t length = entry->identifier_length;
+
+	if (!entry->directory) {
+		CHECK(length >= 3 && entry->identifier[length - 2] == ';' &&
+		    entry->identifier[length - 1] == '1');
+		length -= 2;
+		if (entry->identifier[length - 1] == '.')
+			length--;
+	}
+	return (length);
+}
+
+static void
+test_primary_relocation_alias(void)
+{
+	const spec_t file = { "/rr_moved", FSIMG_ENTRY_FILE, 1, 1, NULL, NULL };
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	chk_expect_t expect = { 0 };
+	chk_t c;
+	const chk_entry_t *entry;
+
+	reproducible_options(&options);
+	fixture_open(&fixture, &options);
+	add_specs(&fixture, relocation_tree, RELOCATION_COUNT, false);
+	CHECK(add_one(&fixture, &file) == FSIMG_OK);
+	CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+	chk_image(&c, sink.bytes, sink.length, &expect);
+	CHECK(c.errors == 0);
+	entry = chk_find(&c, 0, file.path);
+	CHECK(entry != NULL);
+	CHECK(primary_lookup_length(entry) != 8 ||
+	    bcmp(entry->identifier, "RR_MOVED", 8) != 0);
+	chk_free(&c);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+static void
+test_primary_lookup_aliases(void)
+{
+	fsimg_write_options_t options;
+	memory_sink_t sink;
+	chk_t c;
+
+	for (unsigned level = 1; level <= 3; level++) {
+		reproducible_options(&options);
+		options.iso_level = level;
+		build_checked(&options, case_tree, CASE_COUNT, false, &sink, &c);
+		for (size_t i = 0; i < c.count[0]; i++) {
+			size_t length = primary_lookup_length(&c.entries[0][i]);
+
+			for (size_t j = i + 1; j < c.count[0]; j++)
+				CHECK(length != primary_lookup_length(&c.entries[0][j]) ||
+				    bcmp(c.entries[0][i].identifier,
+				    c.entries[0][j].identifier, length) != 0);
+		}
+		chk_free(&c);
+		free(sink.bytes);
+	}
+}
+
+static void
+test_joliet_case_aliases(void)
+{
+	fsimg_write_options_t options;
+	memory_sink_t sink;
+	chk_t c;
+
+	reproducible_options(&options);
+	build_checked(&options, case_tree, CASE_COUNT, false, &sink, &c);
+	for (size_t i = 0; i < c.count[1]; i++) {
+		size_t units = c.entries[1][i].identifier_length / 2 -
+		    (c.entries[1][i].directory ? 0 : 2);
+
+		CHECK(units != 0 && be16(c.entries[1][i].identifier + 2 * (units - 1)) != '.');
+		for (size_t j = i + 1; j < c.count[1]; j++)
+			CHECK(!case_identifier_equal(&c.entries[1][i], &c.entries[1][j]));
+	}
+	check_identifier(&c, 1, "/x_000000B", "x_000000B;1");
+	check_identifier(&c, 1, "/x_000000a", "x_000000a;1");
+	chk_free(&c);
+	free(sink.bytes);
+}
+
+static void
+test_joliet_alias_family(unsigned fixture)
+{
+	static const spec_t cases[][2] = {
+		{ { "/x..", FSIMG_ENTRY_FILE, 1, 1, NULL, NULL },
+		  { "/x._0000001", FSIMG_ENTRY_FILE, 2, 2, NULL, NULL } },
+		{ { "/x.", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+		  { "/x._0000001", FSIMG_ENTRY_FILE, 2, 2, NULL, NULL } },
+		{ { "/a?.txt", FSIMG_ENTRY_FILE, 1, 1, NULL, NULL },
+		  { "/a__0000001.txt", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL } }
+	};
+	fsimg_write_options_t options;
+	memory_sink_t sink;
+	chk_t c;
+
+	CHECK(fixture < sizeof(cases) / sizeof(cases[0]));
+	reproducible_options(&options);
+	build_checked(&options, cases[fixture], 2, false, &sink, &c);
+	for (size_t i = 0; i < c.count[1]; i++)
+		for (size_t j = i + 1; j < c.count[1]; j++)
+			CHECK(!case_identifier_equal(&c.entries[1][i], &c.entries[1][j]));
+	chk_free(&c);
+	free(sink.bytes);
 }
 
 /* The tree's identifiers at level 3 and level 1: natural ones uppercased,
@@ -1849,11 +2425,13 @@ test_identifiers(void)
 	check_identifier(&c, 0, "/dir/hello world.txt",
 	    "HELLO_WORLD_0000004.TXT;1");
 	check_identifier(&c, 0, "/deep/a/b/c/d/e/f", "F");
-	check_identifier(&c, 1, "/a.txt", "a.txt;1");
+	check_identifier(&c, 1, "/a_0000003.txt", "a_0000003.txt;1");
 	check_identifier(&c, 1, "/a_b_0000002", "a_b_0000002;1");
-	check_identifier(&c, 1, "/smile__0000003", "smile__0000003;1");
+	check_identifier(&c, 1, "/smile__0000004", "smile__0000004;1");
 	check_identifier(&c, 1, "/caf\xc3\xa9.txt", "caf\xc3\xa9.txt;1");
 	check_identifier(&c, 1, "/dir/Hello World.txt", "Hello World.txt;1");
+	check_identifier(&c, 1, "/dir/hello world_0000002.txt",
+	    "hello world_0000002.txt;1");
 	check_identifier(&c, 1, "/rr_moved", "rr_moved");
 	check_identifier(&c, 1,
 	    "/012345678901234567890123456789012345678901234567890123_0000001",
@@ -1974,6 +2552,56 @@ sparse_flush(void *argument FSIMG_UNUSED, fsimg_error_t *error FSIMG_UNUSED)
 	return (FSIMG_OK);
 }
 
+/* Flatten the independently framed SUSP chain of one sparse record.
+ * Continuation areas are metadata in the stored prefix and must advance
+ * across sections; sharing one would alias two metadata claims.
+ */
+static size_t
+sparse_rr_entries(const sparse_sink_t *sink, const unsigned char *record,
+    unsigned char *out, uint64_t *claimed_end)
+{
+	const unsigned char *area;
+	size_t used, room, at, length, total = 0;
+	uint64_t position, bytes;
+	bool continued;
+
+	used = 33 + record[32] + (record[32] % 2 == 0);
+	CHECK(used <= record[0]);
+	area = record + used;
+	room = record[0] - used;
+	for (unsigned fragments = 0;; fragments++) {
+		CHECK(fragments <= 16);
+		continued = false;
+		for (at = 0; at + 4 <= room && area[at] != 0; at += length) {
+			length = area[at + 2];
+			CHECK(length >= 4 && length <= room - at && area[at + 3] == 1);
+			if (bcmp(area + at, "CE", 2) == 0) {
+				CHECK(length == 28);
+				CHECK(le32(area + at + 4) == be32(area + at + 8));
+				CHECK(le32(area + at + 12) == be32(area + at + 16));
+				CHECK(le32(area + at + 20) == be32(area + at + 24));
+				position = (uint64_t)le32(area + at + 4) * BLOCK +
+				    le32(area + at + 12);
+				bytes = le32(area + at + 20);
+				CHECK(bytes != 0 && le32(area + at + 12) < BLOCK &&
+				    bytes <= BLOCK - le32(area + at + 12));
+				CHECK(position >= *claimed_end && position <= SPARSE_BYTES &&
+				    bytes <= SPARSE_BYTES - position);
+				*claimed_end = position + bytes;
+				area = sink->bytes + position;
+				room = (size_t)bytes;
+				continued = true;
+				break;
+			}
+			CHECK(length <= 4096 - total);
+			bcopy(area + at, out + total, length);
+			total += length;
+		}
+		if (!continued)
+			return (total);
+	}
+}
+
 /* Independently check the large file's directory-record run, without
  * materializing or hashing its all-zero multi-gigabyte payload. The sink
  * stores all metadata in its first MiB. Both endian copies, the section
@@ -1987,6 +2615,9 @@ check_large_sections(const sparse_sink_t *sink, unsigned hierarchy)
 	uint64_t start, end, at, next_extent = 0;
 	unsigned section = 0;
 	uint32_t length, extent;
+	unsigned char expected_rr[4096], observed_rr[4096];
+	size_t rr_length = 0, observed;
+	uint64_t claimed_end = 0;
 
 	descriptor = sink->bytes + (16 + hierarchy) * BLOCK;
 	start = (uint64_t)le32(descriptor + 158) * BLOCK;
@@ -2009,6 +2640,17 @@ check_large_sections(const sparse_sink_t *sink, unsigned hierarchy)
 			CHECK(length == be32(record + 14));
 			CHECK(extent == be32(record + 6));
 			CHECK(record[25] == (section < 2 ? 0x80 : 0));
+			if (hierarchy == 0) {
+				observed = sparse_rr_entries(sink, record, observed_rr, &claimed_end);
+				if (section == 0) {
+					CHECK(observed != 0);
+					rr_length = observed;
+					bcopy(observed_rr, expected_rr, observed);
+				} else {
+					CHECK(observed == rr_length &&
+					    bcmp(observed_rr, expected_rr, observed) == 0);
+				}
+			}
 			if (first == NULL) {
 				first = record;
 				next_extent = extent;
@@ -2016,8 +2658,9 @@ check_large_sections(const sparse_sink_t *sink, unsigned hierarchy)
 				CHECK(record[32] == first[32]);
 				CHECK(bcmp(record + 33, first + 33, first[32]) == 0);
 				CHECK(bcmp(record + 18, first + 18, 7) == 0);
-				CHECK(record[0] == 33 + record[32] +
-				    (record[32] % 2 == 0));
+				if (hierarchy != 0)
+					CHECK(record[0] == 33 + record[32] +
+					    (record[32] % 2 == 0));
 			}
 			CHECK(extent == next_extent);
 			next_extent += ((uint64_t)length + BLOCK - 1) / BLOCK;
@@ -2037,7 +2680,7 @@ static void
 test_large_file(void)
 {
 	static const spec_t large[] = {
-		{ "/huge", FSIMG_ENTRY_FILE,
+		{ "/z" FIFTY FIFTY FIFTY FIFTY FIFTY "abcd", FSIMG_ENTRY_FILE,
 		    UINT64_C(2) * 0xfffff800u + 4096, 0, NULL, NULL },
 		{ "/a-small", FSIMG_ENTRY_FILE, 3, 1, NULL, NULL },
 		{ "/exact", FSIMG_ENTRY_FILE, UINT32_MAX, 0, NULL, NULL }
@@ -2077,7 +2720,6 @@ test_large_file(void)
 	CHECK(strcmp(error.path, "/wrapping") == 0);
 	options.iso_level = 1;
 	CHECK(plan_status(&options, large, 1, &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strcmp(error.path, "/huge") == 0);
 	options.iso_level = 2;
 	CHECK(plan_status(&options, large, 1, NULL) == FSIMG_EUNSUPPORTED);
 	CHECK(plan_status(&options, large + 2, 1, NULL) == FSIMG_OK);
@@ -2622,11 +3264,153 @@ test_corrupt_continuation_position(void)
 	CHECK(fsimg_writer_plan(fixture.writer, &base, NULL) == FSIMG_OK);
 	plan = (iso_plan_t *)base;
 	CHECK(iso_row_get(plan, 0, &root, NULL) == FSIMG_OK);
-	CHECK(root.fragments != 0);
-	root.fragment_position = UINT64_MAX - 3;
+	CHECK(root.child.fragments != 0);
+	root.child.fragment_position = UINT64_MAX - 3;
 	CHECK(iso_row_set(plan, 0, &root, NULL) == FSIMG_OK);
 	CHECK(emit_memory(&fixture, &sink, &error) == FSIMG_ECORRUPT);
 	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+/* Source callbacks retain their error class when a target is reread. */
+static void
+test_target_source_error(void)
+{
+	static const spec_t link = {
+		"/link", FSIMG_ENTRY_SYMLINK, 0, 0, NULL, "file"
+	};
+	fsimg_write_options_t options;
+	const fsimg_plan_t *plan;
+	fsimg_error_t error;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	reproducible_options(&options);
+	fixture_open(&fixture, &options);
+	CHECK(add_one(&fixture, &link) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+	fixture.refuse_target_read = true;
+	CHECK(emit_memory(&fixture, &sink, &error) == FSIMG_EUNSUPPORTED);
+	CHECK(error.status == FSIMG_EUNSUPPORTED);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+/* A target reread can join two components without changing its byte
+ * length. Crossing the profile's component bound is then a source change.
+ */
+static void
+test_target_component_growth(void)
+{
+	static const spec_t link = {
+		"/link", FSIMG_ENTRY_SYMLINK, 0, 0, NULL, C255 "/b"
+	};
+	fsimg_write_options_t options;
+	const fsimg_plan_t *plan;
+	fsimg_error_t error;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	reproducible_options(&options);
+	fixture_open(&fixture, &options);
+	CHECK(add_one(&fixture, &link) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+	fixture.join_target_components = true;
+	CHECK(emit_memory(&fixture, &sink, &error) == FSIMG_ESOURCE_CHANGED);
+	CHECK(strcmp(error.path, "/link") == 0);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+/* Reader capabilities include fields the writer omits. Explicit losses
+ * must remain counted and required fields must remain refusals.
+ */
+static void
+test_writer_omissions(void)
+{
+	fsimg_metadata_t metadata = {
+		.valid = FSIMG_META_CREATED | FSIMG_META_ATTRIBUTES,
+		.attributes = FSIMG_ATTR_HIDDEN,
+		.created = { .seconds = 1000, .precision_ns = 1000000000,
+		    .basis = FSIMG_TIME_UTC }
+	};
+	spec_t file = { "/file", FSIMG_ENTRY_FILE, 1, 1, &metadata, NULL };
+	fsimg_write_options_t options;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_read_options_t read_options;
+	const fsimg_entry_t *entry;
+	fsimg_reader_t *reader;
+	fsimg_io_t *io;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	reproducible_options(&options);
+	options.flags &= ~FSIMG_WRITE_ALLOW_LOSS;
+	CHECK(plan_status(&options, &file, 1, NULL) == FSIMG_EUNSUPPORTED);
+	options.flags |= FSIMG_WRITE_ALLOW_LOSS;
+	metadata.required = FSIMG_META_CREATED;
+	CHECK(plan_status(&options, &file, 1, NULL) == FSIMG_EUNSUPPORTED);
+	metadata.required = FSIMG_META_ATTRIBUTES;
+	CHECK(plan_status(&options, &file, 1, NULL) == FSIMG_EUNSUPPORTED);
+	metadata.required = 0;
+	fixture_open(&fixture, &options);
+	CHECK(add_one(&fixture, &file) == FSIMG_OK);
+	CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+	CHECK(info.metadata_losses == 2 && fixture.losses == 1);
+	CHECK(fixture.lost_fields == (FSIMG_META_CREATED | FSIMG_META_ATTRIBUTES));
+	CHECK(memory_io(fixture.ctx, &sink, false, &io) == FSIMG_OK);
+	fsimg_read_options_init(&read_options);
+	CHECK(fsimg_reader_open(fixture.ctx, io, &read_options, &reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_next(reader, &entry, NULL) == FSIMG_OK);
+	CHECK((entry->metadata.valid & FSIMG_META_CREATED) == 0);
+	CHECK(entry->metadata.attributes == 0);
+	fsimg_reader_free(reader);
+	fsimg_io_free(io);
+	free(sink.bytes);
+	fixture_close(&fixture);
+	/* Even an explicitly supplied zero attributes field is an omission. */
+	metadata.valid = FSIMG_META_ATTRIBUTES;
+	for (unsigned i = 0; i < 2; i++) {
+		metadata.attributes = i == 0 ? 0 : FSIMG_ATTR_HIDDEN;
+		fixture_open(&fixture, &options);
+		CHECK(add_one(&fixture, &file) == FSIMG_OK);
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.metadata_losses == 1 && fixture.losses == 1);
+		CHECK(fixture.lost_fields == FSIMG_META_ATTRIBUTES);
+		fixture_close(&fixture);
+	}
+}
+
+/* The format's read bound is wider than its write profile. Refuse a
+ * declared 1024-byte target before a source read; accept 1023 bytes.
+ */
+static void
+test_writer_target_bound(void)
+{
+	char target[1025];
+	spec_t link = { "/link", FSIMG_ENTRY_SYMLINK, 0, 0, NULL, target };
+	fsimg_write_options_t options;
+	const fsimg_plan_t *plan;
+	fsimg_error_t error;
+	fixture_t fixture;
+
+	memset(target, '/', 1024);
+	target[1024] = '\0';
+	reproducible_options(&options);
+	fixture_open(&fixture, &options);
+	CHECK(add_one(&fixture, &link) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, &error) == FSIMG_EUNSUPPORTED);
+	CHECK(fixture.target_reads == 0 && strcmp(error.path, "/link") == 0);
+	fixture_close(&fixture);
+	target[1023] = '\0';
+	fixture_open(&fixture, &options);
+	CHECK(add_one(&fixture, &link) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+	CHECK(fixture.target_reads != 0);
 	fixture_close(&fixture);
 }
 
@@ -2725,7 +3509,7 @@ test_faults(void)
  * nothing is left behind.
  */
 static void
-test_injected(void)
+check_injected(const spec_t *specs, size_t count)
 {
 	fsimg_write_options_t options;
 	fixture_t fixture;
@@ -2739,7 +3523,7 @@ test_injected(void)
 	succeeded = false;
 	for (uint64_t attempt = 1; attempt < 8192 && !succeeded; attempt++) {
 		fixture_open(&fixture, &options);
-		add_specs(&fixture, tree, TREE_COUNT, false);
+		add_specs(&fixture, specs, count, false);
 		fsimg_test_fail_alloc_after(fixture.ctx, attempt);
 		status = emit_memory(&fixture, &sink, NULL);
 		fsimg_test_fail_alloc_after(fixture.ctx, 0);
@@ -2754,7 +3538,7 @@ test_injected(void)
 		for (uint64_t attempt = 1; attempt < 8192 && !succeeded;
 		    attempt++) {
 			fixture_open(&fixture, &options);
-			add_specs(&fixture, tree, TREE_COUNT, false);
+			add_specs(&fixture, specs, count, false);
 			fsimg_test_meta_fail_after(fixture.ctx,
 			    (fsimg_meta_fault_t)fault, attempt, EIO);
 			status = emit_memory(&fixture, &sink, NULL);
@@ -2771,7 +3555,7 @@ test_injected(void)
 	for (uint64_t attempt = 1; attempt < 100000 && !succeeded;
 	    attempt += attempt / 16 + 1) {
 		fixture_open(&fixture, &options);
-		add_specs(&fixture, tree, TREE_COUNT, false);
+		add_specs(&fixture, specs, count, false);
 		fixture.cancel_after = attempt;
 		fixture.polls = 0;
 		status = emit_memory(&fixture, &sink, NULL);
@@ -2783,12 +3567,20 @@ test_injected(void)
 	CHECK(succeeded);
 }
 
+static void
+test_injected(void)
+{
+	check_injected(tree, TREE_COUNT);
+	check_injected(relocation_tree, RELOCATION_COUNT);
+}
+
 /* --create PATH LEVEL [short]: write the tree at a level to a new file
  * for the external readers. short leaves out the entries whose names or
  * targets pass 200 bytes, which isovfy's fixed buffers cannot hold.
  */
 static int
-create_external(const char *path, const char *level, bool short_names)
+create_external(const char *path, const char *level, bool short_names,
+    const spec_t *specs, size_t count)
 {
 	fsimg_write_options_t options;
 	memory_sink_t sink;
@@ -2799,11 +3591,11 @@ create_external(const char *path, const char *level, bool short_names)
 	options.iso_level = (uint32_t)atoi(level);
 	options.label = "fsimg tree";
 	fixture_open(&fixture, &options);
-	for (size_t i = 0; i < TREE_COUNT; i++) {
-		if (short_names && (strlen(tree[i].path) > 200 ||
-		    (tree[i].target != NULL && strlen(tree[i].target) > 200)))
+	for (size_t i = 0; i < count; i++) {
+		if (short_names && (strlen(specs[i].path) > 200 ||
+		    (specs[i].target != NULL && strlen(specs[i].target) > 200)))
 			continue;
-		CHECK(add_one(&fixture, &tree[i]) == FSIMG_OK);
+		CHECK(add_one(&fixture, &specs[i]) == FSIMG_OK);
 	}
 	CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
 	fixture_close(&fixture);
@@ -2847,6 +3639,40 @@ create_boot_external(const char *path, const char *directory,
 	return (0);
 }
 
+/* A real sparse image lets independent readers and kernel mounts qualify
+ * multi-extent files without allocating a payload-sized memory sink.
+ */
+static int
+create_large_external(const char *path)
+{
+	static const spec_t files[] = {
+		{ "/huge", FSIMG_ENTRY_FILE,
+		    UINT64_C(2) * 0xfffff800u + 4096, 0, NULL, NULL },
+		{ "/exact", FSIMG_ENTRY_FILE, UINT32_MAX, 0, NULL, NULL },
+		{ "/small", FSIMG_ENTRY_FILE, 3, 1, NULL, NULL }
+	};
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	char *directory, *name;
+	int parent;
+
+	directory = strdup(path);
+	CHECK(directory != NULL);
+	name = strrchr(directory, '/');
+	CHECK(name != NULL && name != directory && name[1] != '\0');
+	*name++ = '\0';
+	parent = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	CHECK(parent != -1);
+	reproducible_options(&options);
+	fixture_open(&fixture, &options);
+	add_specs(&fixture, files, sizeof(files) / sizeof(files[0]), false);
+	CHECK(fsimg_writer_write_at(fixture.writer, parent, name, NULL) == FSIMG_OK);
+	fixture_close(&fixture);
+	CHECK(close(parent) == 0);
+	free(directory);
+	return (0);
+}
+
 /* Run one test; ISO9660_WRITE_DEBUG names each as it starts. */
 #define RUN(test) do { \
 	if (getenv("ISO9660_WRITE_DEBUG") != NULL) \
@@ -2859,11 +3685,20 @@ main(int argc, char **argv)
 {
 	if (argc == 6 && strcmp(argv[1], "--create-boot") == 0)
 		return (create_boot_external(argv[2], argv[3], argv[4], argv[5]));
+	if (argc == 4 && strcmp(argv[1], "--create-case") == 0)
+		return (create_external(argv[2], argv[3], false, case_tree, CASE_COUNT));
+	if (argc == 3 && strcmp(argv[1], "--create-large") == 0)
+		return (create_large_external(argv[2]));
 	if ((argc == 4 || argc == 5) && strcmp(argv[1], "--create") == 0)
 		return (create_external(argv[2], argv[3], argc == 5 &&
-		    strcmp(argv[4], "short") == 0));
+		    strcmp(argv[4], "short") == 0, tree, TREE_COUNT));
+	if (argc == 4 && strcmp(argv[1], "--create-relocated") == 0)
+		return (create_external(argv[2], argv[3], false,
+		    relocation_tree, RELOCATION_COUNT));
 	CHECK(argc == 1);
 	RUN(test_validation);
+	RUN(test_writer_omissions);
+	RUN(test_writer_target_bound);
 	RUN(test_corrupt_plan_size);
 	RUN(test_corrupt_continuation_position);
 	RUN(test_multiblock_path_tables);
@@ -2872,9 +3707,19 @@ main(int argc, char **argv)
 	RUN(test_boot_catalogs);
 	RUN(test_boot_refusals);
 	RUN(test_efi_sector_counts);
+	RUN(test_target_source_error);
+	RUN(test_target_component_growth);
 	RUN(test_empty);
-	RUN(test_relocation_refused);
+	RUN(test_relocation_planning);
+	RUN(test_relocation_roundtrip);
+	RUN(test_relocation_container);
+	RUN(test_relocation_extract_create);
 	RUN(test_tree);
+	RUN(test_primary_relocation_alias);
+	RUN(test_primary_lookup_aliases);
+	RUN(test_joliet_case_aliases);
+	for (unsigned fixture = 0; fixture < 3; fixture++)
+		test_joliet_alias_family(fixture);
 	RUN(test_identifiers);
 	RUN(test_record_boundaries);
 	RUN(test_large_file);

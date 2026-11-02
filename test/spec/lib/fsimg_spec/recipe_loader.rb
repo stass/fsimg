@@ -23,7 +23,7 @@ module FsimgSpec
     READING_KEYS = %i[base base_sha256 tool_versions mutations].freeze
     COMMON_KEYS = %i[schema_version id format stages kind intended_violation actual_violations isolation expected].freeze
     OPTIONAL_KEYS = %i[random_seed source_revision resource_limits reason].freeze
-    TREE_CONTENT_KEYS = %i[size content seed holes].freeze
+    TREE_CONTENT_KEYS = %i[size content seed holes target].freeze
     TEXT_BYTES = 64 << 20
     STRING_BYTES = 1 << 20
     MAX_MUTATIONS = 4096
@@ -136,7 +136,10 @@ module FsimgSpec
         # output ceiling bounds as it bounds the tree's content.
         raise RecipeError, "setting size #{size} exceeds #{@ceilings.output}" if size.is_a?(Integer) && size > @ceilings.output
 
-        Source.new(root:, tree: tree(tree), settings: within_image(settings, "setting"))
+        oversized = settings.find { |key, value| Source::BYTE_SETTINGS.include?(key) && value.is_a?(Integer) && value > @ceilings.image }
+        raise RecipeError, "setting #{oversized.first} #{oversized.last} exceeds #{@ceilings.image}" if oversized
+
+        Source.new(root:, tree: tree(tree), settings:)
       else
         raise RecipeError, "source is not an object of root, tree and settings"
       end
@@ -150,7 +153,7 @@ module FsimgSpec
       deep = loaded.find { _1.depth > @ceilings.depth || _1.image_path_bytes > @ceilings.path }
       raise RecipeError, "tree path #{FsimgSpec.shown(deep.path)} is deeper than #{@ceilings.depth} " \
                          "or, as an image path, longer than #{@ceilings.path} bytes" if deep
-      raise RecipeError, "tree content exceeds #{@ceilings.output} bytes" if loaded.sum { _1.size || 0 } > @ceilings.output
+      raise RecipeError, "tree content exceeds #{@ceilings.output} bytes" if loaded.sum(&:logical_size) > @ceilings.output
 
       loaded
     end
@@ -158,7 +161,15 @@ module FsimgSpec
     # An entry's path and type, and the content fields TreeEntry checks.
     def tree_entry(value)
       case value
-      in { path:, type:, **content } if (content.keys - TREE_CONTENT_KEYS).empty? then TreeEntry.new(path:, type:, **content)
+      in { path:, type:, **content } if (content.keys - TREE_CONTENT_KEYS).empty?
+        hex = content[:target]
+        if hex
+          unless hex.is_a?(String) && hex.bytesize.between?(2, 2048) && hex.bytesize.even? && hex.match?(/\A[0-9a-f]+\z/)
+            raise RecipeError, "link target is not bounded lowercase hexadecimal bytes"
+          end
+          content = content.merge(target: [hex].pack("H*"))
+        end
+        TreeEntry.new(path:, type:, **content)
       else raise RecipeError, "a tree entry is not an object of path, type and optionally #{TREE_CONTENT_KEYS.join(", ")}"
       end
     end

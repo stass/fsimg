@@ -308,6 +308,31 @@ static const contract_metadata_case_t ifs_metadata[] = {
 	OMITTED_CASES(FSIMG_META_CREATED),
 };
 
+/* Rock Ridge stores these POSIX values and kinds. Creation time is an
+ * explicit writer loss even though the reader accepts it from TF.
+ */
+static const contract_metadata_case_t iso_metadata[] = {
+	{ .id = "posix-exact", .kind = FSIMG_ENTRY_FILE,
+	    .source = { .valid = FSIMG_META_OWNER | FSIMG_META_MODE |
+	    FSIMG_META_MODIFIED, .uid = 1000, .gid = 100, .mode = 0640,
+	    .modified = TIME(Y2K, 0, FSIMG_TIME_UTC, 0) },
+	    .plan_status = FSIMG_OK, .checked = FSIMG_META_OWNER |
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED,
+	    .stored = { .uid = 1000, .gid = 100, .mode = 0640,
+	    .modified = TIME(Y2K, 0, FSIMG_TIME_OFFSET, 0) } },
+	{ .id = "fraction-dropped", .kind = FSIMG_ENTRY_FILE,
+	    .source = { .valid = FSIMG_META_MODIFIED,
+	    .modified = TIME(Y2K, 999000000, FSIMG_TIME_UTC, 0) },
+	    .plan_status = FSIMG_OK, .losses = 1,
+	    .loss_mask = FSIMG_META_MODIFIED, .checked = FSIMG_META_MODIFIED,
+	    .stored = { .modified = TIME(Y2K, 0, FSIMG_TIME_OFFSET, 0) } },
+	{ .id = "symlink-kind", .kind = FSIMG_ENTRY_SYMLINK,
+	    .plan_status = FSIMG_OK },
+	{ .id = "fifo-kind", .kind = FSIMG_ENTRY_FIFO,
+	    .plan_status = FSIMG_OK },
+	OMITTED_CASES(FSIMG_META_CREATED),
+};
+
 static const contract_entry_t qnx6_owned[] = {
 	{ .path = "/.boot", .kind = FSIMG_ENTRY_DIRECTORY },
 };
@@ -329,8 +354,12 @@ static fsimg_status_t materialize_iso(contract_volume_t *, fsimg_error_t *);
 
 static const contract_fs_profile_t fs_profiles[] = {
 	{ .id = "iso9660", .format = "iso9660", .coverage_profile = true,
-	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
-	    .materialize = materialize_iso, .max_fixture_bytes = MIB },
+	    .expected_capabilities = ALL_CAPABILITIES,
+	    .write = { .flags = WRITE_FLAGS },
+	    .materialize = materialize_iso,
+	    .metadata_cases = iso_metadata,
+	    .metadata_case_count = COUNT(iso_metadata),
+	    .max_fixture_bytes = MIB },
 	{ .id = "fat12", .format = "fat12", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,
 	    .write = { .flags = WRITE_FLAGS },
@@ -1744,9 +1773,9 @@ writer_whole_run(fixture_t *fixture, contract_volume_t *volume,
 /*
  * Scenario: writer limits. Each constrained resource is reached by the
  * small tree, and the refusal names that resource with an observation
- * beyond its limit. Memory is reached through aggregate accounting:
- * planned writers kept live in one context exhaust the smallest legal
- * budget, so another handle cannot escape the total.
+ * beyond its limit. Planned writers kept live in one context exhaust a
+ * shared memory or descriptor budget, so another handle cannot escape
+ * aggregate accounting. Which resource wins depends on the plan's storage.
  */
 #define LIVE_WRITERS_MAX	512
 static void
@@ -1793,10 +1822,10 @@ writer_limits(const contract_fs_profile_t *profile)
 		fixture_close(&fixture);
 	}
 
-	/* Memory: planned writers stay live in one context until the
-	 * smallest legal budget refuses one; no handle escapes the total.
+	/* Retain plans until aggregate accounting refuses another handle.
+	 * Scratch-backed plans can exhaust descriptors before memory.
 	 */
-	contract_phase("aggregate memory", 0);
+	contract_phase("aggregate resources", 0);
 	fixture_open(&fixture, profile, &smallest);
 	for (live = 0; live < LIVE_WRITERS_MAX; live++) {
 		fixture.writer = NULL;
@@ -1808,10 +1837,12 @@ writer_limits(const contract_fs_profile_t *profile)
 		writers[live] = fixture.writer;
 	}
 	CONTRACT_STATUS(status, FSIMG_ELIMIT, &error);
-	CONTRACT_CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
+	CONTRACT_CHECK(error.resource == FSIMG_RESOURCE_MEMORY ||
+	    error.resource == FSIMG_RESOURCE_DESCRIPTORS);
 	CONTRACT_CHECK(error.observed > error.limit && live > 0);
 	contract_baseline(fixture.ctx, &stats);
 	CONTRACT_CHECK(stats.memory_peak <= smallest.memory_bytes);
+	CONTRACT_CHECK(stats.descriptors_peak <= 16);
 	for (size_t i = 0; i < live; i++)
 		fsimg_writer_free(writers[i]);
 	fixture_close(&fixture);

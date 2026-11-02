@@ -1119,10 +1119,10 @@ typedef struct fsimg_format_info {
 typedef struct fsimg_verify_report {
 	fsimg_validation_scope_t scope;
 	bool		 complete;
-	uint64_t	 files;
+	uint64_t	 files; /* Delivered non-directory entries, links/FIFOs included. */
 	uint64_t	 directories; /* Includes the implicit root. */
-	uint64_t	 logical_bytes;
-	uint64_t	 payload_bytes_read;
+	uint64_t	 logical_bytes; /* Non-directory sizes, including link-target bytes. */
+	uint64_t	 payload_bytes_read; /* Image bytes read as payload, not metadata. */
 	uint64_t	 allocated_clusters;
 	uint64_t	 free_clusters;
 	uint64_t	 bad_clusters;

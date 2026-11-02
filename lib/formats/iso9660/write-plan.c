@@ -19,9 +19,9 @@
  *
  *   1. entries: one row per entry with its kind, size and encoded
  *	metadata, and each directory's link count;
- *   2. primary names (write-names.c), then the depth check: the writer
- *	does not relocate, so a directory the primary hierarchy could only
- *	hold by Rock Ridge relocation is refused;
+ *   2. primary names (write-names.c), then relocation: a physical
+ *	parent-first pass moves directories under the relocation container
+ *	and rebuilds the primary stream with CL placeholders and RE records;
  *   3. Joliet names (write-names.c);
  *   4. numbering: each hierarchy's directories in path-table order, a
  *	breadth-first walk of its name stream whose queue is the path
@@ -58,7 +58,7 @@ static fsimg_status_t plan_entry(iso_plan_t *, const fsimg_catalog_entry_t *,
 static fsimg_status_t plan_boot_entry(iso_plan_t *,
     const fsimg_catalog_entry_t *, fsimg_error_t *);
 static fsimg_status_t plan_entries(iso_plan_t *, fsimg_error_t *);
-static fsimg_status_t check_depth(iso_plan_t *, fsimg_error_t *);
+static fsimg_status_t relocate_directories(iso_plan_t *, fsimg_error_t *);
 static fsimg_status_t number_directories(iso_plan_t *, iso_hierarchy_t,
     fsimg_error_t *);
 static fsimg_status_t size_dot(iso_plan_t *, iso_row_t *, iso_rr_record_t,
@@ -184,6 +184,21 @@ encode_labels(iso_plan_t *plan)
  * Rows.
  */
 
+/* The physical hierarchy may add one metadata-only directory. Every
+ * driver lookup goes through this boundary; source operations continue
+ * to use only the frozen catalog's IDs.
+ */
+fsimg_status_t
+iso_catalog_get(iso_plan_t *plan, uint64_t id,
+    const fsimg_catalog_entry_t **catalog, fsimg_error_t *error)
+{
+	if (id != 0 && id == plan->relocation_entry.id) {
+		*catalog = &plan->relocation_entry;
+		return (FSIMG_OK);
+	}
+	return (fsimg_catalog_get(plan->common.writer, id, catalog, error));
+}
+
 fsimg_status_t
 iso_row_get(iso_plan_t *plan, uint64_t id, iso_row_t *row,
     fsimg_error_t *error)
@@ -197,7 +212,7 @@ iso_row_get(iso_plan_t *plan, uint64_t id, iso_row_t *row,
 	row->size = fsimg_load_le64(raw);
 	row->group[ISO_PRIMARY] = fsimg_load_le64(raw + 8);
 	row->group[ISO_JOLIET] = fsimg_load_le64(raw + 16);
-	row->fragment_position = fsimg_load_le64(raw + 24);
+	row->child.fragment_position = fsimg_load_le64(raw + 24);
 	row->target_hash = fsimg_load_le64(raw + 32);
 	row->kind = fsimg_load_le32(raw + 40);
 	row->mode = fsimg_load_le32(raw + 44);
@@ -215,17 +230,26 @@ iso_row_get(iso_plan_t *plan, uint64_t id, iso_row_t *row,
 	row->first_block = fsimg_load_le32(raw + 92);
 	row->path_length = fsimg_load_le16(raw + 100);
 	for (unsigned i = 0; i < ISO_FRAGMENTS_MAX; i++)
-		row->fragment_bytes[i] = fsimg_load_le16(raw + 102 + 2 * i);
+		row->child.fragment_bytes[i] = fsimg_load_le16(raw + 102 + 2 * i);
 	row->target_bytes = fsimg_load_le16(raw + 108);
 	row->level = raw[116];
-	row->record_entries = raw[117];
-	row->fragments = raw[118];
+	row->child.record_entries = raw[117];
+	row->child.fragments = raw[118];
 	row->times = raw[119];
 	bcopy(raw + 120, row->modified, ISO_DATE7_BYTES);
 	bcopy(raw + 127, row->accessed, ISO_DATE7_BYTES);
 	bcopy(raw + 134, row->changed, ISO_DATE7_BYTES);
+	row->placeholder.fragment_position = fsimg_load_le64(raw + 144);
+	for (unsigned i = 0; i < ISO_FRAGMENTS_MAX; i++)
+		row->placeholder.fragment_bytes[i] = fsimg_load_le16(raw + 152 + 2 * i);
+	row->placeholder.record_entries = raw[158];
+	row->placeholder.fragments = raw[159];
+	row->physical_parent = fsimg_load_le64(raw + 160);
+	row->relocation_alias = fsimg_load_le32(raw + 168);
 	if (row->size > ISO_VOLUME_BLOCKS_MAX * ISO_BLOCK_BYTES ||
-	    row->fragments > ISO_FRAGMENTS_MAX)
+	    row->relocation_alias > ISO_ALIAS_MAX ||
+	    row->child.fragments > ISO_FRAGMENTS_MAX ||
+	    row->placeholder.fragments > ISO_FRAGMENTS_MAX)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_WRITER, "ISO 9660 plan row is outside its limits"));
 	return (FSIMG_OK);
@@ -241,7 +265,7 @@ iso_row_set(iso_plan_t *plan, uint64_t id, const iso_row_t *row,
 	fsimg_store_le64(raw, row->size);
 	fsimg_store_le64(raw + 8, row->group[ISO_PRIMARY]);
 	fsimg_store_le64(raw + 16, row->group[ISO_JOLIET]);
-	fsimg_store_le64(raw + 24, row->fragment_position);
+	fsimg_store_le64(raw + 24, row->child.fragment_position);
 	fsimg_store_le64(raw + 32, row->target_hash);
 	fsimg_store_le32(raw + 40, row->kind);
 	fsimg_store_le32(raw + 44, row->mode);
@@ -259,15 +283,22 @@ iso_row_set(iso_plan_t *plan, uint64_t id, const iso_row_t *row,
 	fsimg_store_le32(raw + 92, row->first_block);
 	fsimg_store_le16(raw + 100, row->path_length);
 	for (unsigned i = 0; i < ISO_FRAGMENTS_MAX; i++)
-		fsimg_store_le16(raw + 102 + 2 * i, row->fragment_bytes[i]);
+		fsimg_store_le16(raw + 102 + 2 * i, row->child.fragment_bytes[i]);
 	fsimg_store_le16(raw + 108, row->target_bytes);
 	raw[116] = row->level;
-	raw[117] = row->record_entries;
-	raw[118] = row->fragments;
+	raw[117] = row->child.record_entries;
+	raw[118] = row->child.fragments;
 	raw[119] = row->times;
 	bcopy(row->modified, raw + 120, ISO_DATE7_BYTES);
 	bcopy(row->accessed, raw + 127, ISO_DATE7_BYTES);
 	bcopy(row->changed, raw + 134, ISO_DATE7_BYTES);
+	fsimg_store_le64(raw + 144, row->placeholder.fragment_position);
+	for (unsigned i = 0; i < ISO_FRAGMENTS_MAX; i++)
+		fsimg_store_le16(raw + 152 + 2 * i, row->placeholder.fragment_bytes[i]);
+	raw[158] = row->placeholder.record_entries;
+	raw[159] = row->placeholder.fragments;
+	fsimg_store_le64(raw + 160, row->physical_parent);
+	fsimg_store_le32(raw + 168, row->relocation_alias);
 	return (fsimg_array_set(plan->rows, id, raw, error));
 }
 
@@ -325,28 +356,29 @@ longest_component(const unsigned char *target, size_t length)
 /*
  * The Rock Ridge entries of entry id's record in its parent, into
  * plan->entries, their length in *length. A symbolic link's target is
- * read through the link-target read; its components are at most 255
- * bytes, the most libisofs reads, else EUNSUPPORTED. Planning stores the target's encoded
- * SL length and hash in row; emission requires the same, so a target
- * that changed between the two reads is a changed source.
+ * read through the common source lifecycle, with components of at most
+ * 255 bytes, and its encoded SL length and hash are stored in row. The
+ * emission wrapper compares that observed snapshot with the planned one.
  */
-fsimg_status_t
-iso_child_entries(iso_plan_t *plan, uint64_t id, iso_row_t *row,
-    bool planning, size_t *length, fsimg_error_t *error)
+static fsimg_status_t
+encode_child_entries(iso_plan_t *plan, const iso_name_t *name, iso_row_t *row,
+    fsimg_status_t component_refusal, size_t *length, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
 	const fsimg_catalog_entry_t *catalog;
 	iso_rr_input_t input;
+	unsigned char identifier[ISO_PRIMARY_IDENTIFIER_MAX];
 	size_t base, target_length;
+	size_t identifier_length;
 	uint64_t hash;
 	fsimg_status_t status;
 
 	bzero(&input, sizeof(input));
-	status = fsimg_catalog_get(writer, id, &catalog, error);
+	status = iso_catalog_get(plan, name->id, &catalog, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (row->kind == FSIMG_ENTRY_SYMLINK) {
-		status = fsimg_writer_link_target(writer, id, plan->target,
+		status = fsimg_writer_link_target(writer, name->id, plan->target,
 		    &target_length, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -357,13 +389,9 @@ iso_child_entries(iso_plan_t *plan, uint64_t id, iso_row_t *row,
 			fsimg_error_path(error, catalog->entry.path);
 			return (status);
 		}
-		/* A component that grew past the limit after planning
-		 * accepted the target is a changed source.
-		 */
 		if (longest_component(plan->target, target_length) >
 		    ISO_LINK_COMPONENT_MAX) {
-			status = fsimg_error_set(error, planning ?
-			    FSIMG_EUNSUPPORTED : FSIMG_ESOURCE_CHANGED, 0,
+			status = fsimg_error_set(error, component_refusal, 0,
 			    FSIMG_OP_WRITER, "ISO 9660 link target components "
 			    "are limited to 255 bytes");
 			fsimg_error_path(error, catalog->entry.path);
@@ -374,8 +402,23 @@ iso_child_entries(iso_plan_t *plan, uint64_t id, iso_row_t *row,
 	}
 	input.row = row;
 	input.record = ISO_RR_CHILD;
+	if (name->role == ISO_NAME_PLACEHOLDER)
+		input.record = ISO_RR_PLACEHOLDER;
+	else if (name->role == ISO_NAME_RELOCATED)
+		input.record = ISO_RR_RELOCATED;
 	input.name = strrchr(catalog->entry.path, '/') + 1;
 	input.name_length = strlen(input.name);
+	if (name->role == ISO_NAME_RELOCATED) {
+		if (row->relocation_alias == 0 ||
+		    !iso_identifier(plan, ISO_PRIMARY, input.name, input.name_length,
+		    true, row->relocation_alias, identifier, &identifier_length))
+			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+			    FSIMG_OP_WRITER, "invalid ISO 9660 relocation alias"));
+		if (name->length != identifier_length ||
+		    bcmp(name->identifier, identifier, identifier_length) != 0)
+			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+			    FSIMG_OP_WRITER, "ISO 9660 relocation alias disagrees with its row"));
+	}
 	*length = iso_rr_encode(&input, plan->entries);
 	if (row->kind != FSIMG_ENTRY_SYMLINK)
 		return (FSIMG_OK);
@@ -386,17 +429,46 @@ iso_child_entries(iso_plan_t *plan, uint64_t id, iso_row_t *row,
 	input.target_length = 0;
 	base = iso_rr_encode(&input, plan->entries + *length);
 	hash = iso_hash(plan->entries + base, *length - base);
-	if (planning) {
-		row->target_bytes = (uint16_t)(*length - base);
-		row->target_hash = hash;
-	} else if (row->target_bytes != *length - base ||
-	    row->target_hash != hash) {
-		status = fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
-		    FSIMG_OP_WRITER, "ISO 9660 link target changed since planning");
-		fsimg_error_path(error, catalog->entry.path);
-		return (status);
-	}
+	row->target_bytes = (uint16_t)(*length - base);
+	row->target_hash = hash;
 	return (FSIMG_OK);
+}
+
+fsimg_status_t
+iso_child_entries(iso_plan_t *plan, const iso_name_t *name, iso_row_t *row,
+    size_t *length, fsimg_error_t *error)
+{
+	return (encode_child_entries(plan, name, row, FSIMG_EUNSUPPORTED,
+	    length, error));
+}
+
+/* Rebuild an emitted record through the same encoder, then require the
+ * target snapshot planning recorded. An unrepresentable target after
+ * planning accepted it is a changed source, not a profile refusal.
+ */
+fsimg_status_t
+iso_check_child_entries(iso_plan_t *plan, const iso_name_t *name,
+    const iso_row_t *row, size_t *length, fsimg_error_t *error)
+{
+	iso_row_t encoded = *row;
+	const fsimg_catalog_entry_t *catalog;
+	fsimg_status_t status;
+
+	status = encode_child_entries(plan, name, &encoded, FSIMG_ESOURCE_CHANGED,
+	    length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (row->kind != FSIMG_ENTRY_SYMLINK ||
+	    (row->target_bytes == encoded.target_bytes &&
+	    row->target_hash == encoded.target_hash))
+		return (FSIMG_OK);
+	status = iso_catalog_get(plan, name->id, &catalog, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+	    FSIMG_OP_WRITER, "ISO 9660 link target changed since planning");
+	fsimg_error_path(error, catalog->entry.path);
+	return (status);
 }
 
 /*
@@ -552,11 +624,27 @@ plan_entry(iso_plan_t *plan, const fsimg_catalog_entry_t *catalog,
 		fsimg_error_path(error, entry->path);
 		return (status);
 	}
+	/* The shared capability record also describes the reader, whose
+	 * names, targets and metadata are wider than this writer profile.
+	 */
+	if (entry->kind == FSIMG_ENTRY_SYMLINK &&
+	    entry->size > ISO_LINK_TARGET_MAX) {
+		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_WRITER, "ISO 9660 link targets are limited to 1023 bytes");
+		fsimg_error_path(error, entry->path);
+		return (status);
+	}
+	status = fsimg_writer_loss(plan->common.writer, entry,
+	    entry->metadata.valid & (FSIMG_META_CREATED | FSIMG_META_ATTRIBUTES),
+	    "ISO 9660 cannot preserve creation time or attributes", error);
+	if (status != FSIMG_OK)
+		return (status);
 	status = plan_boot_entry(plan, catalog, error);
 	if (status != FSIMG_OK)
 		return (status);
 	bzero(&row, sizeof(row));
 	row.kind = entry->kind;
+	row.physical_parent = catalog->parent_id;
 	row.links = entry->kind == FSIMG_ENTRY_DIRECTORY ? 2 : 1;
 	status = encode_metadata(plan, entry, &row, error);
 	if (status != FSIMG_OK)
@@ -612,13 +700,18 @@ plan_entries(iso_plan_t *plan, fsimg_error_t *error)
 	root.level = 1;
 	iso_date7_encode(plan->fallback, root.modified);
 	status = iso_row_set(plan, 0, &root, error);
-	for (uint64_t id = 1; status == FSIMG_OK && id <= writer->count;
-	    id++) {
+	if (status != FSIMG_OK)
+		return (status);
+	for (uint64_t id = 1; id <= writer->count; id++) {
 		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
-		if (status == FSIMG_OK)
-			status = fsimg_catalog_get(writer, id, &catalog, error);
-		if (status == FSIMG_OK)
-			status = plan_entry(plan, catalog, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = iso_catalog_get(plan, id, &catalog, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = plan_entry(plan, catalog, error);
+		if (status != FSIMG_OK)
+			return (status);
 	}
 	if (status != FSIMG_OK)
 		return (status);
@@ -631,47 +724,129 @@ plan_entries(iso_plan_t *plan, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/*
- * Pass 2: the depth check. Each directory's physical level, the root
- * being 1, and physical path length, its parent's plus a separator below
- * the root and its primary identifier, follow from its parent's, which
- * catalog ID order computes first. ECMA-119 bounds the primary hierarchy
- * to 8 levels and 255-byte paths, so a directory at level 9, or whose
- * path leaves no room for a separator and the level's longest file
- * identifier, needs Rock Ridge relocation, which this writer does not
- * write: planning refuses it, naming the first such directory.
+/* Initialize the relocation container before the parent-first pass uses
+ * it. A synthetic ID follows the catalog, so numeric ID order cannot
+ * initialize this one physical parent for us.
  */
 static fsimg_status_t
-check_depth(iso_plan_t *plan, fsimg_error_t *error)
+make_relocation_directory(iso_plan_t *plan, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
 	const fsimg_catalog_entry_t *catalog;
+	iso_row_t row, root;
+	uint64_t id;
+	fsimg_status_t status;
+
+	for (id = 1; id <= writer->count; id++) {
+		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = iso_catalog_get(plan, id, &catalog, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (strcmp(catalog->entry.path, "/.rr_moved") != 0)
+			continue;
+		if (catalog->entry.kind != FSIMG_ENTRY_DIRECTORY ||
+		    catalog->children != 0) {
+			status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+			    FSIMG_OP_WRITER, "relocation needs an empty .rr_moved directory");
+			fsimg_error_path(error, "/.rr_moved");
+			return (status);
+		}
+		break;
+	}
+	if (id <= writer->count) {
+		status = iso_row_get(plan, id, &row, error);
+		if (status != FSIMG_OK)
+			return (status);
+	} else {
+		bzero(&row, sizeof(row));
+		row.kind = FSIMG_ENTRY_DIRECTORY;
+		row.mode = ISO_PX_DIRECTORY | ISO_DIRECTORY_PERMISSIONS;
+		row.links = 2;
+		iso_date7_encode(plan->fallback, row.modified);
+		plan->relocation_entry = (fsimg_catalog_entry_t){
+		    .id = id, .entry = { .path = "/.rr_moved",
+		    .kind = FSIMG_ENTRY_DIRECTORY } };
+		status = iso_row_get(plan, 0, &root, error);
+		if (status != FSIMG_OK)
+			return (status);
+		root.links++;
+		status = iso_row_set(plan, 0, &root, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	plan->relocation_id = id;
+	row.level = 2;
+	row.path_length = 8;
+	row.physical_parent = 0;
+	row.identifier[ISO_PRIMARY] = 8;
+	row.alias[ISO_PRIMARY] = 0;
+	return (iso_row_set(plan, id, &row, error));
+}
+
+/* A directory's physical level and path follow its already planned
+ * parent. Relocation replaces that parent with the initialized container;
+ * its own alias length is known independently of the numeric alias value.
+ * Logical parents and names stay in the frozen catalog and original stream.
+ */
+static fsimg_status_t
+relocate_directories(iso_plan_t *plan, fsimg_error_t *error)
+{
+	fsimg_writer_t *writer = plan->common.writer;
+	const fsimg_catalog_entry_t *catalog;
+	unsigned char identifier[ISO_PRIMARY_IDENTIFIER_MAX];
 	iso_row_t row, parent;
-	uint32_t longest, path;
+	uint32_t longest, path, relocated = 0;
+	const char *component;
+	size_t length;
 	fsimg_status_t status;
 
 	longest = plan->level == 1 ? LEVEL1_FILE_IDENTIFIER :
 	    FILE_IDENTIFIER_MAX;
 	for (uint64_t id = 1; id <= writer->count; id++) {
-		status = fsimg_catalog_get(writer, id, &catalog, error);
-		if (status == FSIMG_OK)
-			status = iso_row_get(plan, id, &row, error);
+		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (row.kind != FSIMG_ENTRY_DIRECTORY)
+		status = iso_catalog_get(plan, id, &catalog, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = iso_row_get(plan, id, &row, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (row.kind != FSIMG_ENTRY_DIRECTORY || id == plan->relocation_id)
 			continue;
-		status = iso_row_get(plan, catalog->parent_id, &parent, error);
+		status = iso_row_get(plan, row.physical_parent, &parent, error);
 		if (status != FSIMG_OK)
 			return (status);
-		path = parent.path_length + (catalog->parent_id == 0 ? 0 : 1) +
+		path = parent.path_length + (row.physical_parent == 0 ? 0 : 1) +
 		    row.identifier[ISO_PRIMARY];
 		if (parent.level + 1u > ISO_PHYSICAL_LEVEL_MAX ||
 		    path > ISO_PATH_MAX - 1 - longest) {
-			status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-			    FSIMG_OP_WRITER, "ISO 9660 directory needs Rock "
-			    "Ridge relocation, which this writer does not write");
-			fsimg_error_path(error, catalog->entry.path);
-			return (status);
+			/* The helper reads catalog snapshots. Re-fetch this entry
+			 * before using its component afterward.
+			 */
+			if (plan->relocation_id == 0) {
+				status = make_relocation_directory(plan, error);
+				if (status != FSIMG_OK)
+					return (status);
+			}
+			status = iso_catalog_get(plan, id, &catalog, error);
+			if (status != FSIMG_OK)
+				return (status);
+			component = strrchr(catalog->entry.path, '/') + 1;
+			row.relocation_alias = ++relocated;
+			iso_identifier(plan, ISO_PRIMARY, component, strlen(component),
+			    true, row.relocation_alias, identifier, &length);
+			row.physical_parent = plan->relocation_id;
+			status = iso_row_get(plan, plan->relocation_id, &parent, error);
+			if (status != FSIMG_OK)
+				return (status);
+			parent.links++;
+			status = iso_row_set(plan, plan->relocation_id, &parent, error);
+			if (status != FSIMG_OK)
+				return (status);
+			path = parent.path_length + 1 + (uint32_t)length;
 		}
 		row.level = (uint8_t)(parent.level + 1);
 		row.path_length = (uint16_t)path;
@@ -679,7 +854,9 @@ check_depth(iso_plan_t *plan, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	return (FSIMG_OK);
+	if (plan->relocation_id == 0)
+		return (FSIMG_OK);
+	return (iso_write_relocated_names(plan, error));
 }
 
 /*
@@ -746,7 +923,7 @@ number_directories(iso_plan_t *plan, iso_hierarchy_t hierarchy,
 			if (status != FSIMG_OK)
 				return (status == FSIMG_DONE ? FSIMG_ECORRUPT :
 				    status);
-			if (!name.directory)
+			if (!iso_name_directory(&name))
 				continue;
 			if (count == ISO_DIRECTORIES_MAX)
 				return (fsimg_error_set(error,
@@ -802,11 +979,11 @@ size_dot(iso_plan_t *plan, iso_row_t *row, iso_rr_record_t record,
 	if (status != FSIMG_OK)
 		return (status);
 	if (record == ISO_RR_ROOT_SELF) {
-		row->record_entries = (uint8_t)split.record_bytes;
-		row->fragments = (uint8_t)split.fragments;
+		row->child.record_entries = (uint8_t)split.record_bytes;
+		row->child.fragments = (uint8_t)split.fragments;
 		for (unsigned i = 0; i < split.fragments; i++)
-			row->fragment_bytes[i] = split.fragment_bytes[i];
-		row->fragment_position = iso_place(&plan->continuation_bytes,
+			row->child.fragment_bytes[i] = split.fragment_bytes[i];
+		row->child.fragment_position = iso_place(&plan->continuation_bytes,
 		    split.fragment_bytes[0]);
 		for (unsigned i = 1; i < split.fragments; i++)
 			iso_place(&plan->continuation_bytes,
@@ -819,16 +996,16 @@ size_dot(iso_plan_t *plan, iso_row_t *row, iso_rr_record_t record,
 	return (FSIMG_OK);
 }
 
-/* Size one child's records at *position in its directory. In the primary
- * hierarchy the first record carries the child's Rock Ridge entries and
- * the split, with its fragments placed, goes to the child's row; every
- * other record of a multi-section file is the bare record.
+/* Size one child's records at *position. Every primary section carries
+ * the same entries and split, with separate continuation areas. One
+ * pattern and its first position describe all sections without an index.
  */
 static fsimg_status_t
 size_child(iso_plan_t *plan, iso_hierarchy_t hierarchy,
     const iso_name_t *name, uint64_t *position, fsimg_error_t *error)
 {
 	iso_split_t split;
+	iso_record_plan_t *record;
 	iso_row_t row;
 	size_t length;
 	uint32_t sections;
@@ -840,33 +1017,34 @@ size_child(iso_plan_t *plan, iso_hierarchy_t hierarchy,
 	sections = row.kind == FSIMG_ENTRY_FILE ? iso_sections(row.size) : 1;
 	bzero(&split, sizeof(split));
 	if (hierarchy == ISO_PRIMARY) {
-		status = iso_child_entries(plan, name->id, &row, true, &length,
+		status = iso_child_entries(plan, name, &row, &length,
 		    error);
 		if (status == FSIMG_OK)
 			status = iso_susp_split(plan->entries, length,
 			    iso_record_room(name->length), &split, error);
 		if (status != FSIMG_OK)
 			return (status);
-		row.record_entries = (uint8_t)split.record_bytes;
-		row.fragments = (uint8_t)split.fragments;
-		for (unsigned i = 0; i < split.fragments; i++) {
-			row.fragment_bytes[i] = split.fragment_bytes[i];
-			if (i == 0)
-				row.fragment_position = iso_place(
-				    &plan->continuation_bytes,
+		record = name->role == ISO_NAME_PLACEHOLDER ?
+		    &row.placeholder : &row.child;
+		record->record_entries = (uint8_t)split.record_bytes;
+		record->fragments = (uint8_t)split.fragments;
+		for (unsigned i = 0; i < split.fragments; i++)
+			record->fragment_bytes[i] = split.fragment_bytes[i];
+		for (uint32_t section = 0; section < sections; section++) {
+			for (unsigned i = 0; i < split.fragments; i++) {
+				uint64_t placed = iso_place(&plan->continuation_bytes,
 				    split.fragment_bytes[i]);
-			else
-				iso_place(&plan->continuation_bytes,
-				    split.fragment_bytes[i]);
+
+				if (section == 0 && i == 0)
+					record->fragment_position = placed;
+			}
 		}
 		status = iso_row_set(plan, name->id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	iso_place(position, iso_record_length(name->length,
-	    split.record_bytes));
-	for (uint32_t i = 1; i < sections; i++)
-		iso_place(position, iso_record_length(name->length, 0));
+	for (uint32_t i = 0; i < sections; i++)
+		iso_place(position, iso_record_length(name->length, split.record_bytes));
 	return (FSIMG_OK);
 }
 
@@ -878,7 +1056,6 @@ static fsimg_status_t
 size_directory(iso_plan_t *plan, iso_hierarchy_t hierarchy, uint64_t id,
     fsimg_error_t *error)
 {
-	const fsimg_catalog_entry_t *catalog;
 	unsigned char raw[ISO_NAME_RECORD_MAX];
 	iso_name_t name;
 	iso_row_t row, parent;
@@ -892,18 +1069,15 @@ size_directory(iso_plan_t *plan, iso_hierarchy_t hierarchy, uint64_t id,
 	if (hierarchy == ISO_PRIMARY) {
 		parent = row;
 		if (id != 0) {
-			status = fsimg_catalog_get(plan->common.writer, id,
-			    &catalog, error);
-			if (status == FSIMG_OK)
-				status = iso_row_get(plan, catalog->parent_id,
-				    &parent, error);
+			status = iso_row_get(plan, row.physical_parent, &parent, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}
 		status = size_dot(plan, &row, id == 0 ? ISO_RR_ROOT_SELF :
 		    ISO_RR_DOT, &position, error);
 		if (status == FSIMG_OK)
-			status = size_dot(plan, &parent, ISO_RR_DOT, &position,
+			status = size_dot(plan, &parent,
+			    row.relocation_alias != 0 ? ISO_RR_PARENT_LINK : ISO_RR_DOT, &position,
 			    error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -916,14 +1090,15 @@ size_directory(iso_plan_t *plan, iso_hierarchy_t hierarchy, uint64_t id,
 	for (uint32_t i = 0; i < row.children[hierarchy]; i++) {
 		status = iso_name_next(plan->names[hierarchy], &cursor, raw,
 		    &name, error);
-		if (status == FSIMG_OK)
-			status = fsimg_session_charge(
-			    &plan->common.writer->session, 0, 0, 1, error);
-		if (status == FSIMG_OK)
-			status = size_child(plan, hierarchy, &name, &position,
-			    error);
 		if (status != FSIMG_OK)
 			return (status == FSIMG_DONE ? FSIMG_ECORRUPT : status);
+		status = fsimg_session_charge(&plan->common.writer->session,
+		    0, 0, 1, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = size_child(plan, hierarchy, &name, &position, error);
+		if (status != FSIMG_OK)
+			return (status);
 	}
 	bytes = ISO_BLOCKS(position) * ISO_BLOCK_BYTES;
 	if (bytes > UINT32_MAX - ISO_BLOCK_BYTES + 1) {
@@ -1152,21 +1327,32 @@ make_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 	encode_labels(plan);
 
 	status = fsimg_array_new(&writer->session, ISO_ROW_BYTES,
-	    writer->count + 1, &plan->rows, error);
-	if (status == FSIMG_OK)
-		status = plan_entries(plan, error);
-	if (status == FSIMG_OK)
-		status = iso_write_names(plan, ISO_PRIMARY, error);
-	if (status == FSIMG_OK)
-		status = check_depth(plan, error);
-	if (status == FSIMG_OK)
-		status = iso_write_names(plan, ISO_JOLIET, error);
-	for (unsigned h = 0; status == FSIMG_OK && h < ISO_HIERARCHIES; h++)
+	    writer->count + 2, &plan->rows, error);
+	if (status != FSIMG_OK)
+		goto fail;
+	status = plan_entries(plan, error);
+	if (status != FSIMG_OK)
+		goto fail;
+	status = iso_write_names(plan, ISO_PRIMARY, error);
+	if (status != FSIMG_OK)
+		goto fail;
+	status = relocate_directories(plan, error);
+	if (status != FSIMG_OK)
+		goto fail;
+	status = iso_write_names(plan, ISO_JOLIET, error);
+	if (status != FSIMG_OK)
+		goto fail;
+	for (unsigned h = 0; h < ISO_HIERARCHIES; h++) {
 		status = number_directories(plan, (iso_hierarchy_t)h, error);
-	for (unsigned h = 0; status == FSIMG_OK && h < ISO_HIERARCHIES; h++)
+		if (status != FSIMG_OK)
+			goto fail;
+	}
+	for (unsigned h = 0; h < ISO_HIERARCHIES; h++) {
 		status = size_directories(plan, (iso_hierarchy_t)h, error);
-	if (status == FSIMG_OK)
-		status = layout(plan, error);
+		if (status != FSIMG_OK)
+			goto fail;
+	}
+	status = layout(plan, error);
 	if (status != FSIMG_OK)
 		goto fail;
 	summarize(plan);

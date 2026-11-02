@@ -17,6 +17,7 @@ class CliTest < Minitest::Test
     stems = {
       "boot.IMG.GZ" => "boot",
       "disk.DMG" => "disk",
+      "optical.ISO" => "optical",
       "x.vhd.gz" => "x",
       "y.RAW" => "y",
       "a.b.img" => "a.b",

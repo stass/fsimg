@@ -188,7 +188,7 @@ class TestRecipe < Minitest::Test
     "parameter name that is no identifier" =>
       [/malformed parameter name "-o x"/, ->(r) { with_base(r, "parameters" => { "-o x" => 1 }) }],
     "tool name naming a parent directory" => [/malformed tool name "\.\."/, ->(r) { r.merge("tool_versions" => { ".." => "x" }) }],
-    "unknown tree entry type" => [/unknown type "symlink"/, ->(r) { with_entry(r, "type" => "symlink") }],
+    "unknown tree entry type" => [/unknown type "socket"/, ->(r) { with_entry(r, "type" => "socket") }],
     "tree path that is not UTF-8" => [/not UTF-8/, ->(r) { with_entry(r, "path" => NOT_UTF8) }],
     "empty tree path" => [/tree path "" is empty/, ->(r) { with_entry(r, "path" => "") }],
     "absolute tree path" => [/is absolute/, ->(r) { with_entry(r, "path" => "/etc/passwd") }],

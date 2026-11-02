@@ -48,8 +48,8 @@
 .Sh DESCRIPTION
 .Nm
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
-QNX6 Power-Safe and QNX4 volumes and QNX ImageFS images, and reads ISO 9660
-images through their Rock Ridge or primary hierarchy.
+QNX6 Power-Safe and QNX4 volumes, QNX ImageFS images and ISO 9660 images.
+ISO 9660 reading supports Rock Ridge, Joliet and the primary hierarchy.
 FAT volumes with more than two FAT copies are reported as unsupported.
 It requires no root privileges, mounts, kernel filesystem driver or external
 filesystem utility.
@@ -464,6 +464,8 @@ reports the selected view as the profile.
 The Rock Ridge view gives POSIX names of up to 1024 bytes, symbolic links,
 FIFOs, owner, mode and times, and shows a relocated deep directory under
 its original parent.
+The volume root is outside the common entry model; its own metadata is
+not delivered or restored during extraction.
 A name that is not UTF-8, such as one written in a legacy 8-bit encoding,
 omits its entry.
 Devices, sockets, sparse and zisofs-compressed files are unsupported.
@@ -828,6 +830,37 @@ alone stores an empty one.
 ImageFS stores one of at most 1024 bytes of UTF-8 text without control
 bytes; default
 .Pa / .
+.It Fl o Ar level=1|2|3
+ISO 9660 primary hierarchy interchange level; default 3.
+Rock Ridge and Joliet are both written at every level.
+Levels 1 and 2 refuse files larger than 4294967295 bytes; level 3 uses
+multiple contiguous sections for larger files.
+Deep trees use Rock Ridge relocation.
+The native FreeBSD cd9660 kernel does not combine multi-extent files;
+fsimg and other capable readers read their complete contents.
+Primary and Joliet identifiers receive aliases where native lookup would
+confuse two source entries; Rock Ridge preserves the exact source names.
+Names are at most 255 UTF-8 bytes and link targets at most 1023 bytes,
+with target components at most 255 bytes.
+Affected libarchive and libisofs readers lose separators across Rock Ridge
+symbolic-link entries; qualification records their precise consumer limits.
+Creation time and attributes are metadata losses under the selected policy.
+The volume root uses the format's default metadata.
+.It Fl o Ar boot=path
+ISO 9660 BIOS El Torito image, named by an absolute image path.
+It must be a nonempty regular file of one section.
+.It Fl o Ar efiboot=path
+ISO 9660 EFI El Torito image, under the same file rule.
+Its sector count is its length rounded up to 512-byte sectors, or zero
+when that count exceeds 65535.
+.It Fl o Ar bootload=count
+BIOS load count in 512-byte sectors, 1 to 65535; default 4.
+Requires
+.Ar boot
+and cannot extend past the boot file's allocated ISO blocks.
+Boot images are copied unchanged; no boot information table is patched,
+and no hybrid MBR or GPT system area is written.
+The catalog's integrity is checked, not whether firmware executes the image.
 .It Fl o Ar root=entries
 FAT12 and FAT16 root directory capacity in 32-byte entries, rounded up to a
 whole number of sectors' worth (16 per 512-byte sector), at most 65535 after

@@ -207,7 +207,35 @@ Standard input and decompression use a temporary spool, bounded by
 | QNX6 Power-Safe | Yes | Classic QNX 6.5.0 layout, either byte order |
 | QNX4 | Yes | QNX 6.5.0 `dinit` layout, including long names |
 | QNX ImageFS (IFS) | Yes | Either byte order; newly created bodies are nonbootable |
-| ISO 9660 | Read, extract and verify | Rock Ridge, Joliet or the primary hierarchy; El Torito boot entries in info; `W` fails on xorriso 1.5.8 images with Joliet subdirectories |
+| ISO 9660 | Yes | Rock Ridge, Joliet and primary views; levels 1 to 3, relocated deep trees, BIOS/EFI El Torito boot catalogs |
+
+ISO creation writes Rock Ridge and Joliet together. `-o level=1|2|3`
+selects the primary hierarchy's interchange level, default 3. `-o
+boot=/bios.img` and `-o efiboot=/efi.img` select ordinary image members as
+boot images; `-o bootload=N` sets the BIOS load count in 512-byte sectors,
+default 4. Boot files are copied unchanged: boot-information-table patching
+and hybrid system areas are outside the writer profile. Names are at most
+255 UTF-8 bytes and link targets at most 1023 bytes, with components at
+most 255 bytes. Creation times and attributes are reported metadata losses;
+required losses fail planning.
+Primary names that collide after removal of an empty extension, and Joliet
+names that collide under case-insensitive lookup, receive distinct aliases;
+Rock Ridge keeps the exact source names.
+
+Some consumers apply narrower conventions: affected libarchive and libisofs
+readers lose separators in multi-entry Rock Ridge link targets. Libarchive
+can also omit the entries
+for root directories named `rr_moved` or `.rr_moved`, even when their
+children remain readable. macOS libarchive Joliet listings
+can decompose Unicode names. Kernel and other-tool qualification is recorded
+in [the build documentation](docs/build.md#iso-9660-writer-checks).
+FreeBSD's native `cd9660` kernel does not combine level-3 multi-extent files;
+use fsimg or another capable reader for those files.
+Reading xorriso 1.5.8 images with self-referencing Joliet parent records
+fails in the Joliet view, and full verification rejects that corrupt tree.
+The common entry model excludes volume-root metadata: creation uses the
+format's root defaults, and extraction does not restore the original root's
+owner, mode or times.
 
 | Disk layer | Read | Create |
 | --- | --- | --- |

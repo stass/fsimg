@@ -1,5 +1,13 @@
 fsimg 0.1.0 (unreleased)
 
+ISO 9660 creation writes Rock Ridge and Joliet at interchange levels 1 to 3,
+with deep-directory relocation and multi-extent files. Joliet aliases avoid
+case-insensitive lookup collisions while Rock Ridge keeps exact source
+names. El Torito BIOS and EFI boot images are ordinary members selected by
+image path; their bytes remain unchanged. Creation-time and attribute losses
+are reported and required losses fail planning. Consumer-specific naming,
+link and large-file limitations are documented alongside qualification.
+
 ISO 9660 volumes can be inspected, listed, extracted and verified in their
 Rock Ridge, Joliet and primary views. Automatic view selection prefers
 Rock Ridge, then Joliet; `-o view=primary|rockridge|joliet` forces a view.
@@ -7,6 +15,12 @@ The reader supports multi-extent files, Rock Ridge symbolic links and
 relocated directories, and reports El Torito boot catalogs through info.
 Full verification checks every offered hierarchy, path tables, record
 order and allocation ownership under the documented reader profile.
+
+CLI information can report declared filesystem geometry beyond the available
+input when headers remain readable. Missing referenced structures or content
+retain filesystem errors; informational geometry does not enlarge selected
+I/O ranges or output limits. Default extraction budgets use the selected
+input length, including when several entries reference the same payload.
 
 zstd-compressed images are read and written over the system libzstd, an
 optional integration that `configure --with-zstd` controls (default auto)

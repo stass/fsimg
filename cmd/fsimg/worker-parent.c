@@ -161,7 +161,6 @@ typedef struct worker_supervisor {
 	 */
 	unsigned	 loss_examples;
 	uint64_t	 output_limit;
-	uint64_t	 volume_limit;
 	/* The read job's input file size, or the create job's planned disk. */
 	uint64_t	 disk_bytes;
 	/* The create job's planned output: the most bytes its image takes. */
@@ -293,8 +292,9 @@ deliver_event(worker_supervisor_t *state, fsimg_error_t *error)
 
 /*
  * A read job's volume lies within the disk its IMAGE record states: the
- * range --offset and --length name, or else the whole disk. That bounds
- * the INFO record's volume and, without -l output, what x -O may write.
+ * range --offset and --length name, or else the whole disk. Without
+ * -l output that range bounds what x -O may write. INFO's declared
+ * filesystem geometry is informational and cannot widen this authority.
  * False when the range does not fit the disk. The library's range
  * selection applies the same rule (a zero length runs to the disk's end);
  * the coordinator repeats it so its bound does not depend on the worker
@@ -304,15 +304,16 @@ static bool
 bound_volume(worker_supervisor_t *state)
 {
 	const fsimg_worker_request_t *request = state->request;
+	uint64_t selected_bytes;
 
 	if (request->offset > state->disk_bytes)
 		return (false);
-	state->volume_limit = request->length != 0 ? request->length :
+	selected_bytes = request->length != 0 ? request->length :
 	    state->disk_bytes - request->offset;
-	if (state->volume_limit > state->disk_bytes - request->offset)
+	if (selected_bytes > state->disk_bytes - request->offset)
 		return (false);
 	if (request->limits.max_output_bytes == 0)
-		state->output_limit = state->volume_limit;
+		state->output_limit = selected_bytes;
 	return (true);
 }
 
@@ -681,7 +682,7 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		break;
 	case FSIMG_FRAME_INFO:
 		if (kind >= FSIMG_JOB_CREATE || state->output_state != WORKER_WAIT_HEADER ||
-		    !fsimg_wire_info_frame_valid(frame, state->volume_limit))
+		    !fsimg_wire_info_frame_valid(frame))
 			return (worker_error(error, "invalid worker volume information"));
 		state->output_state = WORKER_OUTPUT_READY;
 		break;

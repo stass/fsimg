@@ -161,7 +161,9 @@ static const struct {
 };
 
 /* The only image suffixes the command keeps itself. */
-static const char *const generic_suffixes[] = { ".bin", ".dd", ".img", ".raw" };
+static const char *const generic_suffixes[] = {
+	".bin", ".dd", ".img", ".iso", ".raw"
+};
 
 typedef enum cli_limit_key {
 	CLI_LIMIT_SCRATCH, CLI_LIMIT_SPOOL, CLI_LIMIT_ENTRIES, CLI_LIMIT_DEPTH,

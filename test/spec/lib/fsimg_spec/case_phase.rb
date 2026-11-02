@@ -65,11 +65,18 @@ module FsimgSpec
     # name_trials:, shell:) with PendingCases, and
     # preflight_sample(directory). A run uses these; a test may pass its
     # own.
-    def self.suites = { "fat" => Fat::Suite }
+    def self.suites
+      require_relative "fat"
+      require_relative "iso9660"
+      { "fat" => Fat::Suite, "iso9660" => Iso9660::Suite }
+    end
 
     # The suite of a recipe's format: fat12, fat16 and fat32 are FAT's.
-    def self.suite_for(format, suites: CasePhase.suites) =
+    def self.suite_for(format, suites: CasePhase.suites)
+      return suites.fetch(format) if suites.key?(format)
+
       suites.fetch(format.sub(/\d+\z/, "")) { raise RecipeError, "no suite models the format #{FsimgSpec.shown(format)}" }
+    end
 
     # Creates the subdirectories of results and runs the preflight. The
     # preflight creates an image in the format of its creation recipe and

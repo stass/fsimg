@@ -71,7 +71,10 @@ module FsimgSpec
     SANITIZER_SUFFIX = "abort_on_error=0:log_path=stderr:exitcode=87"
     SANITIZER_VARIABLES = %w[ASAN_OPTIONS UBSAN_OPTIONS LSAN_OPTIONS MSAN_OPTIONS].freeze
     # The creation settings and the create option each becomes.
-    CREATE_SETTINGS = { size: ["-s"], sector: ["-o", "sector="], cluster: ["-o", "cluster="] }.freeze
+    CREATE_SETTINGS = {
+      size: ["-s"], sector: ["-o", "sector="], cluster: ["-o", "cluster="], level: ["-o", "level="],
+      bootload: ["-o", "bootload="], boot: ["-o", "boot="], efiboot: ["-o", "efiboot="]
+    }.freeze
 
     # fsimg is the binary's absolute path, and environment the harness's
     # own (ENV), from which PATH, the sanitizer options and the sandbox

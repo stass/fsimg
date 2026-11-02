@@ -223,8 +223,15 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	status = fsimg_format_open(reader, options->format, error);
 	if (status != FSIMG_OK)
 		goto fail;
-	reader->session.output_limit = ctx->options.max_output_bytes == 0 ?
-	    reader->info.volume_bytes : ctx->options.max_output_bytes;
+	/* Declared filesystem geometry can exceed the available input. The
+	 * selected I/O view funds the default; an explicit context limit was
+	 * already installed by session initialization.
+	 */
+	if (ctx->options.max_output_bytes == 0) {
+		status = fsimg_io_get_size(input, &reader->session.output_limit, error);
+		if (status != FSIMG_OK)
+			goto fail;
+	}
 	reader->path = fsimg_alloc(ctx, ctx->options.max_path_bytes, &detail);
 	if (reader->path == NULL) {
 		status = detail.status;

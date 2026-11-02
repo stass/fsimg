@@ -17,7 +17,7 @@ module FsimgSpec
   end
 
   # The fsimg format names the harness models.
-  MODELED_FORMATS = %w[fat12 fat16 fat32].freeze
+  MODELED_FORMATS = %w[fat12 fat16 fat32 iso9660].freeze
 
   # Parameter and setting names, and builder and tool names, which may also
   # hold dots and dashes, as in mkfs.fat. Neither kind can be empty, name
@@ -59,35 +59,53 @@ module FsimgSpec
   # seeded or positional with the seed its bytes follow from and holes,
   # [offset, length] ranges that read as zeros. A directory has none of
   # them: nil in their place and no holes.
-  class TreeEntry < Data.define(:path, :type, :size, :content, :seed, :holes)
+  class TreeEntry < Data.define(:path, :type, :size, :content, :seed, :holes, :target)
     include Checked
 
-    TYPES = %w[file directory].freeze
+    TYPES = %w[file directory symlink fifo].freeze
     CONTENTS = %w[zero seeded positional].freeze
     # The most ranges fsimg.holes names (specs/design-mtree.md#keywords).
     MAX_HOLES = 64
 
-    def initialize(path:, type:, size: nil, content: nil, seed: nil, holes: [])
+    def initialize(path:, type:, size: nil, content: nil, seed: nil, holes: [], target: nil)
       problem = TreeEntry.path_problem(path)
       raise RecipeError, "tree path #{FsimgSpec.shown(path)} #{problem}" if problem
       raise RecipeError, "#{path}: unknown type #{FsimgSpec.shown(type)}" unless TYPES.include?(type)
 
-      problem = if type == "file" then TreeEntry.content_problem(size:, content:, seed:, holes:)
-                elsif !(size.nil? && content.nil? && seed.nil? && holes == []) then "a directory has no size, content, seed or holes"
+      problem = if type == "file" && !target.nil? then "a file has no link target"
+                elsif type == "file" then TreeEntry.content_problem(size:, content:, seed:, holes:)
+                elsif !(size.nil? && content.nil? && seed.nil? && holes == []) then "a #{type} has no size, content, seed or holes"
+                elsif type == "symlink" then TreeEntry.target_problem(target)
+                elsif !target.nil? then "a #{type} has no link target"
                 end
       raise RecipeError, "#{path}: #{problem}" if problem
 
-      super(path:, type:, size:, content:, seed:, holes: holes.map { _1.dup.freeze }.freeze)
+      super(path:, type:, size:, content:, seed:, holes: holes.map { _1.dup.freeze }.freeze,
+            target: target&.dup&.b&.freeze)
     end
 
     # A file of size bytes of content, seeded unless named otherwise.
     def self.file(path, size:, content: "seeded", seed: nil, holes: []) = new(path:, type: "file", size:, content:, seed:, holes:)
 
     def self.directory(path) = new(path:, type: "directory")
+    def self.symlink(path, target:) = new(path:, type: "symlink", target:)
+    def self.fifo(path) = new(path:, type: "fifo")
 
     # The entry as a recipe and a cache key write it: a directory's path
     # and type alone, and a file's holes only when it has some.
-    def to_h = { path:, type:, size:, content:, seed:, holes: holes.empty? ? nil : holes }.compact
+    def to_h = { path:, type:, size:, content:, seed:, holes: holes.empty? ? nil : holes,
+                 target: target&.unpack1("H*") }.compact
+
+    # The bytes a file or decoded link target contributes; other kinds
+    # carry no content. A link's length is never separately supplied.
+    def logical_size = type == "symlink" ? target.bytesize : size || 0
+
+    def self.target_problem(target)
+      return "link target is not bytes" unless target.is_a?(String)
+      return "link target must hold 1 through 1024 non-NUL bytes" unless target.bytesize.between?(1, 1024) && !target.b.include?("\0".b)
+
+      nil
+    end
 
     def depth = path.count("/") + 1
 
@@ -178,18 +196,40 @@ module FsimgSpec
 
     ROOTS = %w[manifest directory].freeze
     # The settings create takes, each of which the runner passes as its
-    # option: the exact volume size, the sector size and the cluster size,
-    # in bytes.
-    SETTINGS = %i[cluster sector size].freeze
+    # option. Byte sizes, CLI counts and bounded path text remain distinct
+    # so a count is never compared with a byte-capacity ceiling.
+    BYTE_SETTINGS = %i[cluster sector size].freeze
+    COUNT_SETTINGS = %i[level bootload].freeze
+    COUNT_SYNTAX = {level: 1..3, bootload: 1..65535}.freeze
+    PATH_SETTINGS = %i[boot efiboot].freeze
+    SETTINGS = (BYTE_SETTINGS + COUNT_SETTINGS + PATH_SETTINGS).freeze
+    MAX_SETTING_PATH_BYTES = 1024
 
     def initialize(tree:, settings:, root: "manifest")
       raise RecipeError, "unknown source root #{FsimgSpec.shown(root)}" unless ROOTS.include?(root)
 
-      settings = RecipeValues.named_integers(settings, what: "setting")
+      RecipeValues.check_names(settings, what: "setting", pattern: PARAMETER_NAME)
       unknown = settings.keys - SETTINGS
       raise RecipeError, "unknown setting #{FsimgSpec.shown(unknown.first.to_s)}" if unknown.any?
 
-      super(tree: TreeEntry.tree(tree), settings:, root:)
+      counts = RecipeValues.named_integers(settings.except(*PATH_SETTINGS), what: "setting")
+      counts.each do |name, value|
+        next unless COUNT_SYNTAX.key?(name)
+
+        raise RecipeError, "setting #{name} is outside the CLI count syntax" unless COUNT_SYNTAX.fetch(name).cover?(value)
+      end
+      paths = settings.slice(*PATH_SETTINGS).to_h do |name, value|
+        unless value.is_a?(String) && value.encoding == Encoding::UTF_8 && value.valid_encoding? &&
+            value.bytesize.between?(1, MAX_SETTING_PATH_BYTES) && !value.include?("\0")
+          raise RecipeError, "setting #{name} is not a bounded UTF-8 image path"
+        end
+        [name, value.dup.freeze]
+      end
+      tree = TreeEntry.tree(tree)
+      raise RecipeError, "special source kinds require a manifest root" if root == "directory" &&
+        tree.any? { %w[symlink fifo].include?(_1.type) }
+
+      super(tree:, settings: counts.merge(paths).sort.to_h.freeze, root:)
     end
 
     def manifest? = root == "manifest"

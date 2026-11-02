@@ -27,8 +27,9 @@
  *
  * An alias therefore equals no other identifier: two aliases differ in
  * their numbers, and a natural identifier of the alias shape reserved its
- * number. Files carry ";1" and directories none, so identifiers stay
- * distinct after a reader removes ";1".
+ * number. Natural identifiers compete under the hierarchy's lookup key,
+ * including version removal and a primary file's empty-extension period.
+ * The same alias marker remains recognizable under that key for both kinds.
  *
  * The passes run over scratch streams, never an in-memory directory: the
  * natural identifiers sorted by parent, identifier and ID give the kept
@@ -78,10 +79,13 @@ static bool joliet_natural(const char *, size_t, bool, unsigned char *,
     size_t *);
 static size_t joliet_alias(const char *, size_t, bool, uint32_t,
     unsigned char *);
+static size_t primary_key_length(const unsigned char *, size_t);
+static size_t joliet_key_length(const unsigned char *, size_t);
 static bool alias_shape(const unsigned char *, size_t, size_t, uint32_t *);
 static bool reserved_number(iso_hierarchy_t, const unsigned char *, size_t,
     bool, uint32_t *);
-static bool eligible(iso_hierarchy_t, uint32_t);
+static bool eligible(const iso_plan_t *, iso_hierarchy_t,
+    const fsimg_catalog_entry_t *);
 static int pair_compare(const void *, size_t, const void *, size_t, void *);
 static int natural_compare(const void *, size_t, const void *, size_t,
     void *);
@@ -267,7 +271,8 @@ joliet_natural(const char *name, size_t length, bool directory,
 	if (fsimg_utf8_to_utf16(name, length, units, ISO_RR_NAME_MAX, &count,
 	    NULL) != FSIMG_OK)
 		return (false);
-	if (count > (directory ? ISO_JOLIET_UNITS_MAX :
+	if (count == 0 || units[count - 1] == '.' ||
+	    count > (directory ? ISO_JOLIET_UNITS_MAX :
 	    ISO_JOLIET_UNITS_MAX - 2))
 		return (false);
 	for (size_t i = 0; i < count; i++) {
@@ -286,8 +291,8 @@ joliet_natural(const char *name, size_t length, bool directory,
 
 /* The Joliet alias with number, the primary rule over characters: each
  * forbidden character, a non-BMP one written as a surrogate pair
- * included, becomes one '_'; a file splits at its last '.', its extension
- * cut to 5 units; the name is cut to leave room for "_" and seven hex
+ * included, becomes one '_'; both kinds split at the last '.', with a
+ * dot-free basename and an extension cut to 5 units; the name is cut to leave room for "_" and seven hex
  * digits, the '.' and extension when there was one, and a file's ";1".
  */
 static size_t
@@ -320,30 +325,28 @@ joliet_alias(const char *name, size_t length, bool directory,
 	extension = 0;
 	extension_start = mapped_count;
 	dot = false;
-	if (!directory) {
-		for (size_t i = mapped_count; i > 0; i--) {
-			if (mapped[i - 1] == '.') {
-				dot = true;
-				base = i - 1;
-				extension_start = i;
-				extension = mapped_count - i;
-				break;
-			}
+	/* Both kinds use one alias grammar, so every natural displayed
+	 * key reserves the same marker position irrespective of its kind.
+	 */
+	for (size_t i = mapped_count; i > 0; i--) {
+		if (mapped[i - 1] == '.') {
+			base = i - 1;
+			extension_start = i;
+			extension = mapped_count - i;
+			break;
 		}
-		if (extension > 5)
-			extension = 5;
 	}
-	if (directory)
-		room = ISO_JOLIET_UNITS_MAX - ALIAS_SUFFIX;
-	else
-		room = ISO_JOLIET_UNITS_MAX - 2 - ALIAS_SUFFIX -
-		    (dot ? 1 + extension : 0);
+	if (extension > 5)
+		extension = 5;
+	dot = extension != 0;
+	room = ISO_JOLIET_UNITS_MAX - (directory ? 0 : 2) - ALIAS_SUFFIX -
+	    (dot ? 1 + extension : 0);
 	if (base > room)
 		base = room;
 
 	at = 0;
 	for (size_t i = 0; i < base; i++, at += 2)
-		fsimg_store_be16(out + at, mapped[i]);
+		fsimg_store_be16(out + at, mapped[i] == '.' ? '_' : mapped[i]);
 	alias_digits(number, digits);
 	fsimg_store_be16(out + at, '_');
 	at += 2;
@@ -380,6 +383,8 @@ alias_shape(const unsigned char *identifier, size_t name_length, size_t unit,
 	for (size_t i = 0; i < ALIAS_SUFFIX; i++) {
 		c = unit == 1 ? identifier[first + i] :
 		    fsimg_load_be16(identifier + 2 * (first + i));
+		if (unit == 2)
+			c = fsimg_unicode_upper(c);
 		if (i == 0) {
 			if (c != '_')
 				return (false);
@@ -395,9 +400,9 @@ alias_shape(const unsigned char *identifier, size_t name_length, size_t unit,
 	return (true);
 }
 
-/* The alias number a kept natural identifier reserves, if any: its name
- * part, before a file's ";1" and last '.', or a directory's whole
- * identifier, has the alias shape.
+/* The alias number a kept natural identifier reserves, if any: the name
+ * before its extension has the alias shape. Primary directories have no
+ * extension; Joliet kinds share one displayed alias grammar.
  */
 static bool
 reserved_number(iso_hierarchy_t hierarchy, const unsigned char *identifier,
@@ -405,9 +410,10 @@ reserved_number(iso_hierarchy_t hierarchy, const unsigned char *identifier,
 {
 	size_t unit = hierarchy == ISO_PRIMARY ? 1 : 2, name;
 
-	name = length;
-	if (!directory) {
-		name -= 2 * unit;		/* ";1" */
+	name = hierarchy == ISO_JOLIET ? joliet_key_length(identifier, length) : length;
+	if (hierarchy == ISO_JOLIET || !directory) {
+		if (hierarchy == ISO_PRIMARY)
+			name -= 2 * unit;		/* ";1" */
 		for (size_t i = name / unit; i > 0; i--) {
 			uint32_t c = unit == 1 ? identifier[i - 1] :
 			    fsimg_load_be16(identifier + 2 * (i - 1));
@@ -449,10 +455,26 @@ iso_identifier(const iso_plan_t *plan, iso_hierarchy_t hierarchy,
 
 /* Joliet holds files and directories; the primary hierarchy every kind. */
 static bool
-eligible(iso_hierarchy_t hierarchy, uint32_t kind)
+eligible(const iso_plan_t *plan, iso_hierarchy_t hierarchy,
+    const fsimg_catalog_entry_t *catalog)
 {
-	return (hierarchy == ISO_PRIMARY || kind == FSIMG_ENTRY_FILE ||
-	    kind == FSIMG_ENTRY_DIRECTORY);
+	return (hierarchy == ISO_PRIMARY ||
+	    (catalog->id != plan->relocation_id &&
+	    (catalog->entry.kind == FSIMG_ENTRY_FILE ||
+	    catalog->entry.kind == FSIMG_ENTRY_DIRECTORY)));
+}
+
+/* Only physical directory records participate in path tables and descent. */
+static bool
+role_directory(iso_name_role_t role)
+{
+	return (role == ISO_NAME_DIRECTORY || role == ISO_NAME_RELOCATED);
+}
+
+bool
+iso_name_directory(const iso_name_t *name)
+{
+	return (role_directory(name->role));
 }
 
 /*
@@ -475,28 +497,80 @@ pair_compare(const void *a, size_t a_length FSIMG_UNUSED, const void *b,
 	return (0);
 }
 
-/* Natural records: parent, identifier bytes, then ID, so the first of
- * each equal identifier in a directory is the first in catalog order.
+/* Natural identifiers compete by their displayed lookup key. Joliet
+ * directories cannot contain ';', so only generated file identifiers end
+ * in ";1"; removing it derives the key without another record field.
+ */
+static size_t
+primary_key_length(const unsigned char *identifier, size_t length)
+{
+	if (length >= 3 && identifier[length - 2] == ';' &&
+	    identifier[length - 1] == '1') {
+		length -= 2;
+		if (identifier[length - 1] == '.')
+			length--;
+	}
+	return (length);
+}
+
+static size_t
+joliet_key_length(const unsigned char *identifier, size_t length)
+{
+	if (length >= 4 && fsimg_load_be16(identifier + length - 4) == ';' &&
+	    fsimg_load_be16(identifier + length - 2) == '1')
+		return (length - 4);
+	return (length);
+}
+
+static int
+natural_key_compare(iso_hierarchy_t hierarchy, const unsigned char *a,
+    size_t an, const unsigned char *b, size_t bn)
+{
+	size_t common;
+	uint32_t av, bv;
+	int order;
+
+	if (hierarchy == ISO_JOLIET) {
+		an = joliet_key_length(a, an);
+		bn = joliet_key_length(b, bn);
+		common = an < bn ? an : bn;
+		for (size_t i = 0; i < common; i += 2) {
+			av = fsimg_unicode_upper(fsimg_load_be16(a + i));
+			bv = fsimg_unicode_upper(fsimg_load_be16(b + i));
+			if (av != bv)
+				return (av < bv ? -1 : 1);
+		}
+	} else {
+		an = primary_key_length(a, an);
+		bn = primary_key_length(b, bn);
+		common = an < bn ? an : bn;
+		order = memcmp(a, b, common);
+		if (order != 0)
+			return (order);
+	}
+	return ((an > bn) - (an < bn));
+}
+
+/* Parent, lookup key, then ID: the first of an equal group is the first
+ * catalog entry, irrespective of its source kind or spelling.
  */
 static int
 natural_compare(const void *a, size_t a_length, const void *b,
-    size_t b_length, void *argument FSIMG_UNUSED)
+    size_t b_length, void *argument)
 {
+	const iso_hierarchy_t *hierarchy = argument;
 	const unsigned char *left = a, *right = b;
 	uint64_t av, bv;
-	size_t common;
 	int order;
 
 	av = fsimg_load_le64(left);
 	bv = fsimg_load_le64(right);
 	if (av != bv)
 		return (av < bv ? -1 : 1);
-	common = a_length < b_length ? a_length : b_length;
-	order = memcmp(left + 16, right + 16, common - 16);
+	order = natural_key_compare(*hierarchy, left + 16, a_length - 16,
+	    right + 16, b_length - 16);
 	if (order != 0)
 		return (order);
-	if (a_length != b_length)
-		return (a_length < b_length ? -1 : 1);
 	av = fsimg_load_le64(left + 8);
 	bv = fsimg_load_le64(right + 8);
 	return ((av > bv) - (av < bv));
@@ -582,11 +656,11 @@ name_compare(const void *a, size_t a_length, const void *b, size_t b_length,
 	if (av != bv)
 		return (av < bv ? -1 : 1);
 	if (*hierarchy == ISO_PRIMARY)
-		order = iso_primary_order(ai, an, left[16] != 0, bi, bn,
-		    right[16] != 0);
+		order = iso_primary_order(ai, an, role_directory(left[16]), bi, bn,
+		    role_directory(right[16]));
 	else
-		order = joliet_order(ai, an, left[16] != 0, bi, bn,
-		    right[16] != 0);
+		order = joliet_order(ai, an, role_directory(left[16]), bi, bn,
+		    role_directory(right[16]));
 	if (order != 0)
 		return (order);
 	common = an < bn ? an : bn;
@@ -640,12 +714,12 @@ iso_name_next(fsimg_stream_t *stream, uint64_t *cursor, unsigned char *raw,
 	    &length, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (length <= ISO_NAME_HEADER)
+	if (length <= ISO_NAME_HEADER || raw[16] > ISO_NAME_RELOCATED)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_WRITER, "invalid ISO 9660 name record"));
 	name->parent = fsimg_load_le64(raw);
 	name->id = fsimg_load_le64(raw + 8);
-	name->directory = raw[16] != 0;
+	name->role = (iso_name_role_t)raw[16];
 	name->identifier = raw + ISO_NAME_HEADER;
 	name->length = length - ISO_NAME_HEADER;
 	return (FSIMG_OK);
@@ -656,8 +730,8 @@ iso_name_next(fsimg_stream_t *stream, uint64_t *cursor, unsigned char *raw,
  */
 
 /* Step 1: every eligible child's natural identifier, or an alias request
- * for a child without one. In the primary hierarchy a root directory
- * naturally named RR_MOVED takes an alias, leaving that name to the
+ * for a child without one. In the primary hierarchy a root child
+ * with lookup key RR_MOVED takes an alias, leaving that name to the
  * relocation directory.
  */
 static fsimg_status_t
@@ -675,17 +749,18 @@ collect_naturals(names_pass_t *pass, fsimg_error_t *error)
 	for (uint64_t id = 1; id <= writer->count; id++) {
 		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
 		if (status == FSIMG_OK)
-			status = fsimg_catalog_get(writer, id, &catalog, error);
+			status = iso_catalog_get(plan, id, &catalog, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (!eligible(pass->hierarchy, catalog->entry.kind))
+		if (!eligible(plan, pass->hierarchy, catalog))
 			continue;
 		name = strrchr(catalog->entry.path, '/') + 1;
 		directory = catalog->entry.kind == FSIMG_ENTRY_DIRECTORY;
 		natural = iso_identifier(plan, pass->hierarchy, name,
 		    strlen(name), directory, 0, raw + 16, &length);
 		if (natural && pass->hierarchy == ISO_PRIMARY &&
-		    catalog->parent_id == 0 && directory && length == 8 &&
+		    catalog->parent_id == 0 &&
+		    primary_key_length(raw + 16, length) == 8 &&
 		    bcmp(raw + 16, "RR_MOVED", 8) == 0)
 			natural = false;
 		if (natural) {
@@ -735,9 +810,10 @@ keep_naturals(names_pass_t *pass, fsimg_error_t *error)
 			    FSIMG_OP_WRITER, "invalid ISO 9660 name record"));
 		parent = fsimg_load_le64(raw);
 		id = fsimg_load_le64(raw + 8);
-		if (previous_length == length &&
+		if (previous_length != 0 &&
 		    fsimg_load_le64(previous) == parent &&
-		    bcmp(previous + 16, raw + 16, length - 16) == 0) {
+		    natural_key_compare(pass->hierarchy, previous + 16,
+		    previous_length - 16, raw + 16, length - 16) == 0) {
 			status = append_pair(pass->aliases, parent, id, error);
 			if (status != FSIMG_OK)
 				return (status);
@@ -843,7 +919,7 @@ assign_aliases(names_pass_t *pass, fsimg_error_t *error)
 			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 			    FSIMG_OP_WRITER, "ISO 9660 alias numbers exhausted"));
 
-		status = fsimg_catalog_get(writer, id, &catalog, error);
+		status = iso_catalog_get(plan, id, &catalog, error);
 		if (status == FSIMG_OK)
 			status = iso_row_get(plan, id, &row, error);
 		if (status != FSIMG_OK)
@@ -879,16 +955,19 @@ build_name_stream(names_pass_t *pass, fsimg_error_t *error)
 
 	status = fsimg_stream_new(&writer->session, ISO_NAME_RECORD_MAX,
 	    &plan->names[pass->hierarchy], error);
-	for (uint64_t id = 1; status == FSIMG_OK && id <= writer->count;
-	    id++) {
+	if (status != FSIMG_OK)
+		return (status);
+	for (uint64_t id = 1; id <= writer->count; id++) {
 		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
-		if (status == FSIMG_OK)
-			status = fsimg_catalog_get(writer, id, &catalog, error);
-		if (status == FSIMG_OK)
-			status = iso_row_get(plan, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (!eligible(pass->hierarchy, row.kind))
+		status = iso_catalog_get(plan, id, &catalog, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = iso_row_get(plan, id, &row, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (!eligible(plan, pass->hierarchy, catalog))
 			continue;
 		name = strrchr(catalog->entry.path, '/') + 1;
 		directory = row.kind == FSIMG_ENTRY_DIRECTORY;
@@ -901,12 +980,12 @@ build_name_stream(names_pass_t *pass, fsimg_error_t *error)
 			    "ISO 9660 identifier disagrees with its plan row"));
 		fsimg_store_le64(raw, catalog->parent_id);
 		fsimg_store_le64(raw + 8, id);
-		raw[16] = directory ? 1 : 0;
+		raw[16] = directory ? ISO_NAME_DIRECTORY : ISO_NAME_FILE;
 		status = fsimg_stream_append(plan->names[pass->hierarchy], raw,
 		    ISO_NAME_HEADER + length, NULL, error);
+		if (status != FSIMG_OK)
+			return (status);
 	}
-	if (status != FSIMG_OK)
-		return (status);
 	return (sort_stream(&plan->names[pass->hierarchy], name_compare,
 	    &pass->hierarchy, error));
 }
@@ -985,25 +1064,31 @@ iso_write_names(iso_plan_t *plan, iso_hierarchy_t hierarchy,
 
 	status = fsimg_stream_new(session, NATURAL_RECORD_MAX, &pass.naturals,
 	    error);
-	if (status == FSIMG_OK)
-		status = fsimg_stream_new(session, 16, &pass.aliases, error);
-	if (status == FSIMG_OK)
-		status = fsimg_stream_new(session, 16, &pass.reservations,
-		    error);
-	if (status == FSIMG_OK)
-		status = collect_naturals(&pass, error);
-	if (status == FSIMG_OK)
-		status = sort_stream(&pass.naturals, natural_compare, NULL,
-		    error);
-	if (status == FSIMG_OK)
-		status = keep_naturals(&pass, error);
-	if (status == FSIMG_OK)
-		status = sort_stream(&pass.aliases, pair_compare, NULL, error);
-	if (status == FSIMG_OK)
-		status = sort_stream(&pass.reservations, pair_compare, NULL,
-		    error);
-	if (status == FSIMG_OK)
-		status = assign_aliases(&pass, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = fsimg_stream_new(session, 16, &pass.aliases, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = fsimg_stream_new(session, 16, &pass.reservations, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = collect_naturals(&pass, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = sort_stream(&pass.naturals, natural_compare, &pass.hierarchy, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = keep_naturals(&pass, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = sort_stream(&pass.aliases, pair_compare, NULL, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = sort_stream(&pass.reservations, pair_compare, NULL, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = assign_aliases(&pass, error);
+done:
 	fsimg_stream_free(pass.naturals);
 	fsimg_stream_free(pass.aliases);
 	fsimg_stream_free(pass.reservations);
@@ -1011,5 +1096,85 @@ iso_write_names(iso_plan_t *plan, iso_hierarchy_t hierarchy,
 		status = build_name_stream(&pass, error);
 	if (status == FSIMG_OK)
 		status = record_groups(&pass, error);
+	return (status);
+}
+
+/* Retain every logical name, turning moved directories into CL records,
+ * and add their physical RE records under the relocation container. The
+ * original parent keeps a record for every child, so no existing group
+ * becomes empty; rebuilding groups replaces every old nonempty group.
+ */
+fsimg_status_t
+iso_write_relocated_names(iso_plan_t *plan, fsimg_error_t *error)
+{
+	fsimg_stream_t *rewritten = NULL;
+	const fsimg_catalog_entry_t *catalog;
+	names_pass_t pass = { .plan = plan, .hierarchy = ISO_PRIMARY };
+	unsigned char raw[ISO_NAME_RECORD_MAX];
+	iso_name_t name;
+	iso_row_t row;
+	uint64_t cursor = 0;
+	const char *component;
+	size_t length;
+	fsimg_status_t status;
+
+	status = fsimg_stream_new(&plan->common.writer->session,
+	    ISO_NAME_RECORD_MAX, &rewritten, error);
+	if (status != FSIMG_OK)
+		return (status);
+	for (;;) {
+		status = iso_name_next(plan->names[ISO_PRIMARY], &cursor,
+		    raw, &name, error);
+		if (status == FSIMG_DONE)
+			break;
+		if (status != FSIMG_OK)
+			goto done;
+		status = fsimg_session_charge(&plan->common.writer->session,
+		    0, 0, 1, error);
+		if (status != FSIMG_OK)
+			goto done;
+		if (name.id == plan->relocation_id)
+			continue;
+		status = iso_row_get(plan, name.id, &row, error);
+		if (status != FSIMG_OK)
+			goto done;
+		if (row.relocation_alias != 0)
+			raw[16] = ISO_NAME_PLACEHOLDER;
+		status = fsimg_stream_append(rewritten, raw,
+		    ISO_NAME_HEADER + name.length, NULL, error);
+		if (status != FSIMG_OK)
+			goto done;
+		if (row.relocation_alias == 0)
+			continue;
+		status = iso_catalog_get(plan, name.id, &catalog, error);
+		if (status != FSIMG_OK)
+			goto done;
+		component = strrchr(catalog->entry.path, '/') + 1;
+		iso_identifier(plan, ISO_PRIMARY, component, strlen(component),
+		    true, row.relocation_alias, raw + ISO_NAME_HEADER, &length);
+		fsimg_store_le64(raw, plan->relocation_id);
+		raw[16] = ISO_NAME_RELOCATED;
+		status = fsimg_stream_append(rewritten, raw,
+		    ISO_NAME_HEADER + length, NULL, error);
+		if (status != FSIMG_OK)
+			goto done;
+	}
+	fsimg_store_le64(raw, 0);
+	fsimg_store_le64(raw + 8, plan->relocation_id);
+	raw[16] = ISO_NAME_DIRECTORY;
+	bcopy("RR_MOVED", raw + ISO_NAME_HEADER, 8);
+	status = fsimg_stream_append(rewritten, raw, ISO_NAME_HEADER + 8,
+	    NULL, error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = sort_stream(&rewritten, name_compare, &pass.hierarchy, error);
+	if (status != FSIMG_OK)
+		goto done;
+	fsimg_stream_free(plan->names[ISO_PRIMARY]);
+	plan->names[ISO_PRIMARY] = rewritten;
+	rewritten = NULL;
+	status = record_groups(&pass, error);
+done:
+	fsimg_stream_free(rewritten);
 	return (status);
 }

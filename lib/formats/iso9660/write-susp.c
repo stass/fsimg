@@ -204,19 +204,22 @@ sl_pack(unsigned char *out, size_t *entry, size_t *entry_bytes,
  * Encode a symbolic link's target of 1 to 1023 bytes as SL entries into
  * out, returning their length. The reader joins components with '/'
  * except after a root component, so the target is written as one root
- * component per leading slash, then the rest, when there is any, split at
+ * component per leading slash, then the rest split at
  * each '/' into components, empty ones included: "/a" is root and "a",
  * "a//b" is "a", "" and "b", "a/" is "a" and "". "." and ".." become
- * their flagged components. A component longer than 248 bytes is written
+ * their flagged components. All-root targets retain their terminal empty
+ * text component, as other targets ending in '/' do. A component longer
+ * than 248 bytes is written
  * as pieces of at most 248 bytes, each but the last flagged to continue
  * into the next without a separator. Component records are packed whole
  * into entries of at most 255 bytes, every entry but the last flagged to
  * continue.
  *
- * Every target byte becomes at most two component bytes, and an entry is
+ * Every target byte becomes at most two component bytes, plus at most two
+ * for the terminal empty component of an all-root target. An entry is
  * closed only when the next record, at most 250 bytes, does not fit, so
  * two consecutive entries carry more than 250 component bytes: a
- * 1023-byte target needs at most 2046 component bytes in 17 entries,
+ * 1023-byte target needs at most 2048 component bytes in 17 entries,
  * 2133 bytes with their headers.
  */
 size_t
@@ -233,7 +236,7 @@ iso_sl_encode(const unsigned char *target, size_t length, unsigned char *out)
 		sl_pack(out, &entry, &entry_bytes, record, record_bytes);
 	}
 	start = roots;
-	while (roots < length) {
+	for (;;) {
 		end = start;
 		while (end < length && target[end] != '/')
 			end++;
@@ -276,11 +279,28 @@ iso_rr_encode(const iso_rr_input_t *input, unsigned char *out)
 		at += sp_encode(out + at);
 	at += px_encode(input->row, out + at);
 	at += tf_encode(input->row, out + at);
-	if (input->record == ISO_RR_ROOT_SELF)
-		at += er_encode(out + at);
-	if (input->record != ISO_RR_CHILD)
+	switch (input->record) {
+	case ISO_RR_ROOT_SELF:
+		return (at + er_encode(out + at));
+	case ISO_RR_DOT:
 		return (at);
+	case ISO_RR_PARENT_LINK:
+		entry_header(out + at, "PL", 12);
+		iso_u32both_put(out + at + 4, input->link_block);
+		return (at + 12);
+	case ISO_RR_CHILD:
+	case ISO_RR_PLACEHOLDER:
+	case ISO_RR_RELOCATED:
+		break;
+	}
 	at += nm_encode(input->name, input->name_length, out + at);
+	if (input->record == ISO_RR_PLACEHOLDER) {
+		entry_header(out + at, "CL", 12);
+		iso_u32both_put(out + at + 4, input->row->block[ISO_PRIMARY]);
+		at += 12;
+	} else if (input->record == ISO_RR_RELOCATED) {
+		at += entry_header(out + at, "RE", 4);
+	}
 	if (input->target_length != 0)
 		at += iso_sl_encode(input->target, input->target_length,
 		    out + at);

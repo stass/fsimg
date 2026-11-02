@@ -41,6 +41,12 @@ FSIMG_DEV_TOOL([MTYPE], [mtype], [mtools file reading])
 FSIMG_DEV_TOOL([FATCAT], [fatcat], [pinned fatcat FAT oracle])
 FSIMG_DEV_TOOL([RUBY], [ruby], [Ruby 3.2 or later for development tools and tests])
 FSIMG_DEV_TOOL([PKG_CONFIG], [pkg-config], [pkg-config for installation checks])
+FSIMG_DEV_TOOL([ISOINFO], [isoinfo], [cdrtools ISO listing oracle])
+FSIMG_DEV_TOOL([ISOVFY], [isovfy], [cdrtools ISO verification oracle])
+FSIMG_DEV_TOOL([XORRISO], [xorriso], [xorriso ISO oracle])
+FSIMG_DEV_TOOL([BSDTAR], [bsdtar], [libarchive ISO oracle])
+AC_ARG_VAR([SEVENZIP], [7-Zip ISO oracle])
+AC_PATH_PROGS([SEVENZIP], [7zz 7z], [])
 FSIMG_DEV_TOOL([SGDISK], [sgdisk], [gptfdisk GPT partitioner], [$fsimg_sbin_path])
 FSIMG_DEV_TOOL([SFDISK], [sfdisk], [util-linux MBR and GPT partitioner],
     [$fsimg_sbin_path:/usr/local/opt/util-linux/sbin:/opt/homebrew/opt/util-linux/sbin])
@@ -161,12 +167,13 @@ AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integra
     test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh
     test/containers-integration.sh test/compression-integration.sh
     test/cli.sh test/baseline.sh test/spec.sh test/codec-integration.sh
-    test/iso9660-corpus-check.sh test/iso9660-integration.sh test/iso9660-boot.sh
+    test/iso9660-corpus-check.sh test/iso9660-integration.sh test/iso9660-boot.sh test/iso9660-writer.sh
     test/ifs-integration.sh],
     [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh
      test ! -f test/iso9660-corpus-check.sh || chmod +x test/iso9660-corpus-check.sh
      test ! -f test/iso9660-integration.sh || chmod +x test/iso9660-integration.sh
      test ! -f test/iso9660-boot.sh || chmod +x test/iso9660-boot.sh
+     test ! -f test/iso9660-writer.sh || chmod +x test/iso9660-writer.sh
      test ! -f test/codec-integration.sh || chmod +x test/codec-integration.sh
      test ! -f test/ifs-integration.sh || chmod +x test/ifs-integration.sh
      test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh

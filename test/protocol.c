@@ -24,6 +24,7 @@ static void test_error_padding(void);
 static void test_entry_records(void);
 static void test_invalid_entry_records(void);
 static void test_info_uuid(void);
+static void test_info_geometry_is_informational(void);
 static void test_info_label(void);
 static void test_info_mountpoint(void);
 static void test_job_posix_flags(void);
@@ -485,6 +486,26 @@ test_invalid_entry_records(void)
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
 }
 
+/* A filesystem can declare bytes beyond its available input. This record
+ * reports that declaration; the supervisor owns I/O and output authority.
+ */
+static void
+test_info_geometry_is_informational(void)
+{
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_INFO,
+	    .length = FSIMG_WIRE_INFO_BYTES };
+	fsimg_volume_info_t info;
+
+	bzero(&info, sizeof(info));
+	info.valid = FSIMG_VOLUME_GEOMETRY;
+	info.volume_bytes = UINT64_MAX;
+	info.time_basis = FSIMG_TIME_UTC;
+	info.scope = FSIMG_VALIDATION_HEADER;
+	strcpy(info.format, "iso9660");
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(fsimg_wire_info_frame_valid(&frame));
+}
+
 static void
 test_info_uuid(void)
 {
@@ -502,21 +523,21 @@ test_info_uuid(void)
 	info.scope = FSIMG_VALIDATION_HEADER;
 	strcpy(info.format, "qnx6");
 	fsimg_wire_info_encode(frame.payload, &info);
-	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(fsimg_wire_info_frame_valid(&frame));
 	CHECK(fsimg_load_le64(frame.payload + FSIMG_WIRE_INFO_VALID) ==
 	    (FSIMG_VOLUME_UUID | FSIMG_VOLUME_LABEL));
 	CHECK(bcmp(frame.payload + FSIMG_WIRE_INFO_UUID, uuid, sizeof(uuid)) == 0);
 	fsimg_store_le64(frame.payload + FSIMG_WIRE_INFO_VALID, 0x10);
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 
 	/* An absent UUID travels as zero bytes. */
 	info.valid = 0;
 	fsimg_wire_info_encode(frame.payload, &info);
 	for (unsigned i = 0; i < 16; i++)
 		CHECK(frame.payload[FSIMG_WIRE_INFO_UUID + i] == 0);
-	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(fsimg_wire_info_frame_valid(&frame));
 	frame.payload[FSIMG_WIRE_INFO_UUID + 15] = 1;
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 }
 
 /* The widest label a format stores, 48 bytes without a terminator on disk,
@@ -538,19 +559,19 @@ test_info_label(void)
 	info.scope = FSIMG_VALIDATION_HEADER;
 	strcpy(info.format, "qnx4");
 	fsimg_wire_info_encode(frame.payload, &info);
-	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(fsimg_wire_info_frame_valid(&frame));
 	CHECK(strlen((const char *)frame.payload + FSIMG_WIRE_INFO_LABEL) == 48);
 	CHECK(bcmp(frame.payload + FSIMG_WIRE_INFO_LABEL, info.label, 48) == 0);
 	frame.payload[FSIMG_WIRE_INFO_LABEL + 48] = 'L';
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 	frame.payload[FSIMG_WIRE_INFO_LABEL + 48] = '\0';
-	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(fsimg_wire_info_frame_valid(&frame));
 	/* The seven bytes between the label and the UUID are zero. */
 	frame.payload[FSIMG_WIRE_INFO_LABEL + 49] = 1;
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 	frame.payload[FSIMG_WIRE_INFO_LABEL + 49] = 0;
 	frame.payload[FSIMG_WIRE_INFO_UUID - 1] = 1;
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 }
 
 /* The widest mountpoint, 1024 bytes, and a full detail table travel whole.
@@ -582,7 +603,7 @@ test_info_mountpoint(void)
 		info.details[i].value = UINT64_MAX - i;
 	}
 	fsimg_wire_info_encode(frame.payload, &info);
-	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(fsimg_wire_info_frame_valid(&frame));
 	CHECK(strlen((const char *)mountpoint) == 1024);
 	CHECK(bcmp(mountpoint, info.mountpoint, 1024) == 0);
 	CHECK(fsimg_load_le64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT) ==
@@ -594,21 +615,21 @@ test_info_mountpoint(void)
 	    UINT64_MAX - 15);
 
 	mountpoint[1024] = 'm';
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 	mountpoint[1024] = '\0';
 	/* The seven bytes between the mountpoint and the detail count. */
 	frame.payload[FSIMG_WIRE_INFO_DETAIL_COUNT - 1] = 1;
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 	frame.payload[FSIMG_WIRE_INFO_DETAIL_COUNT - 1] = 0;
 	last[23] = 'n';
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 	last[23] = '\0';
 	last[0] = ' ';
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 	last[0] = 0x80;
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 	last[0] = 'p';
-	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(fsimg_wire_info_frame_valid(&frame));
 
 	/* An encoder caps the count; a frame above sixteen is refused. */
 	info.detail_count = FSIMG_VOLUME_DETAILS_MAX + 1;
@@ -617,18 +638,18 @@ test_info_mountpoint(void)
 	    FSIMG_VOLUME_DETAILS_MAX);
 	fsimg_store_le64(frame.payload + FSIMG_WIRE_INFO_DETAIL_COUNT,
 	    FSIMG_VOLUME_DETAILS_MAX + 1);
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 
 	/* Two details: an empty name is refused, as is any byte past them. */
 	info.detail_count = 2;
 	fsimg_wire_info_encode(frame.payload, &info);
-	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(fsimg_wire_info_frame_valid(&frame));
 	frame.payload[FSIMG_WIRE_INFO_DETAILS + 2 * FSIMG_WIRE_INFO_DETAIL_BYTES +
 	    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES] = 1;
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 	info.details[1].name[0] = '\0';
 	fsimg_wire_info_encode(frame.payload, &info);
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 
 	/* An absent mountpoint travels as zero bytes. */
 	info.detail_count = 0;
@@ -636,9 +657,9 @@ test_info_mountpoint(void)
 	fsimg_wire_info_encode(frame.payload, &info);
 	for (unsigned i = 0; i < FSIMG_WIRE_INFO_MOUNTPOINT_BYTES; i++)
 		CHECK(mountpoint[i] == 0);
-	CHECK(fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(fsimg_wire_info_frame_valid(&frame));
 	mountpoint[0] = '/';
-	CHECK(!fsimg_wire_info_frame_valid(&frame, 4096));
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
 }
 
 /* NAMES is meaningful only for planning, creation and extraction. All other
@@ -2007,6 +2028,7 @@ main(int argc, char **argv)
 	test_error_padding();
 	test_entry_records();
 	test_invalid_entry_records();
+	test_info_geometry_is_informational();
 	test_info_uuid();
 	test_info_label();
 	test_info_mountpoint();

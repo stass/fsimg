@@ -519,6 +519,18 @@ module FsimgSpec
 
       # An exact size of whole sectors, which gives the FAT16 volume 4101
       # clusters of 512 bytes; none; and sizes of a part sector.
+      CREATE_ENTRY_KINDS = lambda {
+        [Creation.new(label: "files_directories", violates: false),
+         Creation.new(label: "symlink", tree: [TreeEntry.symlink("link", target: "file")], violates: true),
+         Creation.new(label: "fifo", tree: [TreeEntry.fifo("pipe")], violates: true)]
+      }
+
+      CREATE_SETTINGS_APPLICABLE = lambda {
+        [Creation.new(label: "defaults", violates: false),
+         Creation.new(label: "iso_level", settings: { level: 3 }, violates: true),
+         Creation.new(label: "iso_boot", settings: { boot: "/missing" }, violates: true)]
+      }
+
       CREATE_VOLUME = lambda {
         [Creation.new(label: "2134016", format: "fat16", settings: { size: 2_134_016 }, violates: false),
          creation(size: 0, violates: true), creation(size: 1000, violates: true),
