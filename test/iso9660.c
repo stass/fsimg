@@ -4130,6 +4130,54 @@ test_verify_susp_without_rockridge_claims_root_continuation(void)
 }
 
 static void
+test_verify_susp_without_rockridge_parent_link_is_opaque(void)
+{
+	static const fsimg_iso_view_t views[] = {
+		FSIMG_ISO_VIEW_AUTO, FSIMG_ISO_VIEW_PRIMARY
+	};
+	image_t image = image_new();
+	susp_area_t handshake = {0}, parent_link = {0};
+	fsimg_verify_report_t report;
+	unsigned char *root = image.bytes + ROOT * BLOCK;
+	unsigned char *child = image.bytes + RR_DIRECTORY * BLOCK;
+	unsigned char *sp, self = 0, up = 1;
+	size_t length;
+
+	sp = susp_entry(&handshake, "SP", SP_BYTES);
+	sp[4] = 0xbe;
+	sp[5] = 0xef;
+	susp_er(&handshake, "FSIMG_TEST_EXTENSION", 1);
+	bzero(root, BLOCK);
+	length = record(root, &self, 1, ROOT, BLOCK, 2);
+	bcopy(handshake.bytes, root + length, handshake.length);
+	root[0] += handshake.length + (handshake.length % 2);
+	length = root[0];
+	length += record(root + length, &up, 1, ROOT, BLOCK, 2);
+	record(root + length, "A", 1, RR_DIRECTORY, BLOCK, 2);
+
+	/* An unknown extension's PL is framed, without relocation semantics. */
+	directory(child, RR_DIRECTORY, ROOT, BLOCK);
+	put32(susp_entry(&parent_link, "PL", LINK_BYTES) + 4, ROOT);
+	bcopy(parent_link.bytes, child + DOT_PAIR_BYTES, parent_link.length);
+	child[DOT_BYTES] += parent_link.length;
+	verify_path(image.bytes + 82 * BLOCK + 10, "A", 1,
+	    RR_DIRECTORY, 1, false);
+	verify_path(image.bytes + 83 * BLOCK + 10, "A", 1,
+	    RR_DIRECTORY, 1, true);
+	put32(image.bytes + 16 * BLOCK + VD_PATH_SIZE, 20);
+
+	for (unsigned v = 0; v < sizeof(views) / sizeof(views[0]); v++) {
+		const char *label = views[v] == FSIMG_ISO_VIEW_AUTO ?
+		    "SUSP without RR: parent PL under auto" :
+		    "SUSP without RR: parent PL under forced primary";
+
+		report = verify_expect(&image, views[v], 0, FSIMG_OK, NULL, label);
+		rr_equal(report.directories, 2, label);
+	}
+	free(image.bytes);
+}
+
+static void
 test_verify_susp_skip_without_rockridge_is_unsupported_but_lists(void)
 {
 	static const fsimg_iso_view_t views[] = {
@@ -5032,6 +5080,7 @@ test_verifier(void)
 	test_verify_file_metadata_overlap_is_corrupt();
 	test_verify_data_sharing_and_empty_sections();
 	test_verify_susp_without_rockridge_claims_root_continuation();
+	test_verify_susp_without_rockridge_parent_link_is_opaque();
 	test_verify_susp_skip_without_rockridge_is_unsupported_but_lists();
 	test_verify_continuations_share_blocks_but_not_bytes();
 	test_verify_continuation_inside_directory_is_corrupt();

@@ -491,8 +491,8 @@ susp_scan(fsimg_reader_t *reader, uint32_t block, uint32_t offset,
 }
 
 /* Frame both dot records of the directory at extent, which preparation
- * has checked, and note the directory as relocated when its parent record
- * carries PL.
+ * has checked, and, when Rock Ridge is present, note the directory as
+ * relocated when its parent record carries PL.
  */
 static fsimg_status_t
 dots_scan(fsimg_reader_t *reader, uint32_t extent, fsimg_error_t *error)
@@ -515,7 +515,10 @@ dots_scan(fsimg_reader_t *reader, uint32_t extent, fsimg_error_t *error)
 	if (status == FSIMG_OK)
 		status = susp_scan(reader, extent, self.length, &parent,
 		    iso->window.bytes + self.length, &parent_link, error);
-	if (status == FSIMG_OK && parent_link)
+	/* PL means relocation only under Rock Ridge; another SUSP extension's
+	 * entry of that name is framed and nothing more. */
+	if (status == FSIMG_OK && parent_link &&
+	    iso->rockridge == ISO_ROCKRIDGE_PRESENT)
 		status = relocation_note(iso->verify->relocated, extent, error);
 	return (status);
 }
