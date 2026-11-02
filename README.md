@@ -223,7 +223,7 @@ names that collide under case-insensitive lookup, receive distinct aliases;
 Rock Ridge keeps the exact source names.
 
 Some consumers apply narrower conventions: affected libarchive and libisofs
-readers lose separators in multi-entry Rock Ridge link targets. Libarchive
+readers can lose separators in Rock Ridge link targets. Libarchive
 can also omit the entries
 for root directories named `rr_moved` or `.rr_moved`, even when their
 children remain readable. macOS libarchive Joliet listings

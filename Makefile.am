@@ -342,6 +342,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/check-install.sh build-aux/check-installed.rb \
 	build-aux/fuzz.sh \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
+	build-aux/build-cdrtools.sh \
 	build-aux/build-msan-zlib.sh \
 	build-aux/linux-check.sh build-aux/linux-check/Dockerfile \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \

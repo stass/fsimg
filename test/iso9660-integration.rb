@@ -13,19 +13,24 @@ require "tmpdir"
 # filters; neither names nor its label enter this process or a log file.
 module IsoIntegration
   class Error < StandardError; end
+  COMMAND_ENVIRONMENT = { "LC_ALL" => "C.UTF-8", "TZ" => "UTC" }.freeze
 
   module_function
 
+  # Metadata commands emit UTF-8 bytes regardless of the process locale.
+  # Payload commands use the separate streaming digest path.
+  def utf8_text(output) = output.dup.force_encoding(Encoding::UTF_8)
+
   def command(*arguments)
-    output, error, status = Open3.capture3({ "LC_ALL" => "C", "TZ" => "UTC" }, *arguments)
+    output, error, status = Open3.capture3(COMMAND_ENVIRONMENT, *arguments)
     raise Error, "command failed (#{status.exitstatus}): #{error.strip}" unless status.success?
 
-    output
+    utf8_text(output)
   end
 
   def display(path) = path.split("/", -1).map { _1.delete_suffix(";1") }.join("/")
 
-  def records(output) = output.lines.map { JSON.parse(_1.dup.force_encoding(Encoding::UTF_8)) }
+  def records(output) = utf8_text(output).lines.map { JSON.parse(_1) }
 
   def manifest(image)
     base = image.delete_suffix(".iso")
@@ -137,7 +142,7 @@ module IsoIntegration
     sections = command(program, *flags, "-j", "utf-8", "-l", "-i", image).lines.slice_before { header_pattern.match?(_1) }
     row_pattern = Regexp.new(
       '^\s*(?:\d+\s+)?([dlfp-][rwxstST-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+' \
-      '(\w+\s+\d+\s+\d{4})\s+\[.*?\]\s(.*)$'
+      '(\w+\s+\d+\s+\d{4})\s+\[.*?\](.*)$'
     )
     pairs = sections.flat_map do |section|
       next [] if section.all? { _1.strip.empty? }
@@ -146,12 +151,26 @@ module IsoIntegration
       raise Error, "isoinfo section lacks directory header" unless header
 
       parent = header[1].delete_suffix("/")
-      section.drop(1).reject { _1.strip.empty? }.filter_map do |line|
+      rows = section.drop(1).reject { _1.strip.empty? }.map do |line|
         row = line.match(row_pattern)
         raise Error, "unparsed isoinfo row: #{line.inspect}" unless row
 
+        row
+      end
+      # The known first dot entry identifies the tool's fixed delimiter;
+      # removing that exact prefix preserves spaces belonging to a filename.
+      dot = rows.first&.[](6)&.delete_suffix(" ")&.match(/\A( +)\.\z/)
+      raise Error, "isoinfo section lacks first dot entry" unless dot
+
+      delimiter = dot[1]
+      rows.filter_map do |row|
+        # Ordinary rows append one display space; symlink rows end directly
+        # after the target, including an empty or space-terminated target.
+        member = row[1].start_with?("l") ? row[6] : row[6].delete_suffix(" ")
+        raise Error, "isoinfo row lacks fixed delimiter" unless member.start_with?(delimiter)
+
         name, values = listing_row(mode: row[1], uid: row[2], gid: row[3], size: row[4],
-                                  date: row[5], member: row[6].delete_suffix(" "))
+                                  date: row[5], member: member.delete_prefix(delimiter))
         next if %w[. ..].include?(name)
 
         ["#{parent}/#{name}", values]

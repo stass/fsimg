@@ -151,10 +151,10 @@ module IsoCorpus
     digest.hexdigest
   end
 
-  def content_digest(command)
+  def content_digest(command, environment: {})
     digest = Digest::SHA256.new
     size = 0
-    subprocess(command) do |output, errors, child|
+    subprocess(command, environment: environment) do |output, errors, child|
       diagnostics = Thread.new { errors.read }
       while (chunk = output.read(1024 * 1024))
         digest.update(chunk)

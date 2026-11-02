@@ -24,7 +24,7 @@ jobs:
           else
             sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
             sudo apt-get update
-            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config ruby ruby-dev ruby-bundler dpkg-dev liblzma-dev xz-utils libzstd-dev zstd genisoimage xorriso libarchive-tools p7zip-full
+            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config ruby ruby-dev ruby-bundler dpkg-dev liblzma-dev xz-utils libzstd-dev zstd genisoimage xorriso libarchive-tools p7zip-full curl bzip2
           fi
           echo "BUNDLE_PATH=$RUNNER_TEMP/spec-gems" >> "$GITHUB_ENV"
       - name: Instrumented zlib for MemorySanitizer
@@ -35,6 +35,11 @@ jobs:
           sh build-aux/build-msan-zlib.sh "$source_parent"/zlib-*/ "$RUNNER_TEMP/zlib-msan"
           rm -rf "$source_parent"
           echo "MSAN_ZLIB=$RUNNER_TEMP/zlib-msan" >> "$GITHUB_ENV"
+      - name: Cdrtools ISO oracles
+        if: runner.os == 'Linux'
+        run: |
+          sh build-aux/build-cdrtools.sh "$RUNNER_TEMP/fsimg-cdrtools"
+          echo "$RUNNER_TEMP/fsimg-cdrtools/bin" >> "$GITHUB_PATH"
       - name: Ruby version
         id: ruby
         run: echo "version=$(ruby -e 'print RUBY_VERSION')" >> "$GITHUB_OUTPUT"

@@ -1947,8 +1947,14 @@ and `isovfy` 3.02a09, `/usr/bin/bsdtar` 3.5.3 with libarchive 3.7.4,
 prefix. These tools run as external programs; no implementation code or
 producer image enters the repository.
 
-On Linux, `apt-get install genisoimage xorriso libarchive-tools` supplies
-additional oracles. FreeBSD supplies `makefs` and `mount_cd9660` in base;
+On Linux, `apt-get install genisoimage xorriso libarchive-tools p7zip-full`
+supplies additional oracles. The required cdrtools listing and verification
+oracles are built with `build-aux/build-cdrtools.sh NEW-DIRECTORY`; put its
+`bin` directory first in `PATH` before configuring. The builder verifies a
+pinned source archive and retains upstream source and licensing outside
+the repository. Cdrkit's `isoinfo` from genisoimage cannot follow Rock Ridge
+relocation even in its own producer's images, so it cannot replace this
+qualification tool. Genisoimage remains an independent producer. FreeBSD supplies `makefs` and `mount_cd9660` in base;
 `pkg install xorriso cdrtools libarchive 7-zip qemu` supplies the other
 families. Linux can use the cd9660 backend of kusumi/makefs, built outside
 the repository from its upstream checkout. Pycdlib is optional; the generator
@@ -2336,7 +2342,7 @@ Consumer display conventions are separate from the core name rules:
   adapter removes that dot from files only. A source namespace containing
   a file `FOO.` and directory `FOO` is not injective under that projection;
   that consumer/view is reported unsupported, not silently collapsed.
-* Libarchive 3.7.4 and libisofs through xorriso 1.5.8.pl02 lose four
+* Libarchive 3.7.4 and libisofs 1.5.8 in xorriso 1.5.8.pl02 lose four
   separators in the full fixture's 1,023-byte `/long-target` across `SL`
   entries, yielding the same exact 1,019-byte target. Only that measured
   target and resulting byte count are accepted as a consumer exception.
@@ -2347,14 +2353,30 @@ Consumer display conventions are separate from the core name rules:
   producer splits long text components to fill each `SL` entry, which
   avoids the affected boundary in its three-255-byte-component fixture;
   this packing choice does not fix the many-small-component case.
+* Xorriso 1.5.6 loses the doubled interior separator of `/odd`, changing
+  `a//b/./../c/` to `a/b/./../c/` in both listing and extraction. Only this
+  exact source/result pair is a consumer exception; its other seven link
+  targets and all regular-file hashes match. Its own producer also loses a
+  separator on a round trip. Fsimg and both kernels require exact targets.
 * Libarchive suppresses the root `rr_moved` or `.rr_moved` directory entry,
   including directory metadata, even when ordinary descendants exist.
   The known fixture exception covers only that one directory entry; all
   descendants and file hashes remain mandatory. Other oracles and kernel
-  readers require the complete directory entry and its metadata. These
-  observations agree with the reader's relocation-name heuristic in
+  readers require the complete directory entry and its metadata.
+  When extraction synthesizes that parent for its children, the adapter
+  checks its kind and size while omitting only metadata whose directory
+  header was demonstrably absent from the listing. These observations agree
+  with the reader's relocation-name heuristic in
   [libarchive's ISO reader](https://github.com/libarchive/libarchive/blob/master/libarchive/archive_read_support_format_iso9660.c);
   no implementation code is imported.
+
+The command environment uses `C.UTF-8` and UTC for both metadata listings
+and streamed payload reads. Captured text is decoded explicitly; payload
+bytes are hashed without transcoding. The required cdrtools observer uses
+explicit UTF-8 output for Joliet names, retaining the complete Unicode
+qualification profile. The listing parser
+learns fixed padding from each directory's dot record, preserving actual
+filename whitespace.
 
 The populated-directory fixture uses a 128 KiB volume so optical oracles
 can read a complete transfer window. Isoinfo 3.02a09 reports a short read

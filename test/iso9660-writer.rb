@@ -16,15 +16,19 @@ module IsoWriter
   class PrimaryProjectionCollision < Error; end
   Fixture = Data.define(:profile, :level)
   VIEWS = %w[rockridge joliet primary].freeze
-  ENVIRONMENT = { "LC_ALL" => "C", "TZ" => "UTC" }.freeze
   LONG_COMPONENT = (("0123456789" * 25) + "abcde").freeze
   LONG_TARGET = ("/usr/" + ([LONG_COMPONENT] * 3).join("/") + "/" + ("0123456789" * 25)).freeze
   LIBARCHIVE_LONG_TARGET = ("/usr" + (LONG_COMPONENT * 3) + ("0123456789" * 25)).freeze
+  LIBARCHIVE_LINK_EXCEPTIONS = { "/long-target" => [LONG_TARGET, LIBARCHIVE_LONG_TARGET].freeze }.freeze
+  XORRISO_LINK_EXCEPTIONS = LIBARCHIVE_LINK_EXCEPTIONS.merge(
+    "/odd" => ["a//b/./../c/", "a/b/./../c/"].freeze
+  ).freeze
 
   module_function
 
   def command(*arguments, combined: false)
-    IsoCorpus.capture(*arguments, environment: ENVIRONMENT, combined: combined)
+    output = IsoCorpus.capture(*arguments, environment: IsoIntegration::COMMAND_ENVIRONMENT, combined: combined)
+    IsoIntegration.utf8_text(output)
   rescue IsoCorpus::Error => error
     raise Error, error.message
   end
@@ -47,7 +51,7 @@ module IsoWriter
   def canonical_path(path:, view:) = view == "rockridge" ? path : IsoIntegration.display(path)
 
   def digest(command:)
-    hash, size = IsoCorpus.content_digest(command)
+    hash, size = IsoCorpus.content_digest(command, environment: IsoIntegration::COMMAND_ENVIRONMENT)
     { "sha256" => hash, "size" => size }
   rescue IsoCorpus::Error => error
     raise Error, error.message
@@ -108,7 +112,7 @@ module IsoWriter
     end)
   end
 
-  def compare(expected:, actual:, context:, metadata: true, multi_sl: false, omitted_directory: nil)
+  def compare(expected:, actual:, context:, metadata: true, target_exceptions: {}, omitted_directory: nil)
     missing = expected.keys - actual.keys
     extra = actual.keys - expected.keys
     # Affected libarchive versions suppress the root rr_moved directory
@@ -126,10 +130,12 @@ module IsoWriter
       end
 
       other = actual.fetch(path)
-      target_exception = multi_sl && path == "/long-target" && row["target"] == LONG_TARGET &&
-        other["target"] == LIBARCHIVE_LONG_TARGET &&
-        (!other.key?("size") || other.fetch("size") == LIBARCHIVE_LONG_TARGET.bytesize)
-      puts "EXCEPTION: #{context} multi-SL link target #{path.inspect}" if target_exception
+      source_target, observed_target = target_exceptions[path]
+      target_exception = source_target && row["kind"] == "symlink" && other["kind"] == "symlink" &&
+        row["target"] == source_target && other["target"] == observed_target &&
+        (!row.key?("size") || row.fetch("size") == source_target.bytesize) &&
+        (!other.key?("size") || other.fetch("size") == observed_target.bytesize)
+      puts "EXCEPTION: #{context} measured link target #{path.inspect}" if target_exception
       row.each do |field, value|
         next if value.nil?
         next if !metadata && %w[uid gid mode accessed changed].include?(field)
@@ -277,7 +283,8 @@ module IsoWriter
       fields = fields.merge("size" => row.fetch("size")) if row.fetch("kind") == "file"
       [path, fields]
     end
-    compare(expected: wanted, actual: actual, context: "xorriso Rock Ridge metadata", multi_sl: true)
+    compare(expected: wanted, actual: actual, context: "xorriso Rock Ridge metadata",
+            target_exceptions: XORRISO_LINK_EXCEPTIONS)
     expected.each do |path, row|
       next unless row.fetch("kind") == "file"
 
@@ -316,8 +323,9 @@ module IsoWriter
         .merge("modified_date" => Time.at(row.fetch("modified")).utc.strftime(precision))]
     end
     exception = find_libarchive_directory_exception(fixture: fixture, view: view)
+    exception = nil if listed.key?(exception)
     compare(expected: wanted, actual: listed, context: "bsdtar listing #{view}",
-            multi_sl: fixture.profile == :full, omitted_directory: exception)
+            target_exceptions: LIBARCHIVE_LINK_EXCEPTIONS, omitted_directory: exception)
     if fixture.profile == :large || !case_sensitive?(directory: scratch)
       puts "SKIP: bsdtar whole-tree extraction on case-insensitive host filesystem" unless fixture.profile == :large
       bsdtar_stream(image: image, view: view, expected: expected, program: program,
@@ -329,10 +337,17 @@ module IsoWriter
     command(program, "-x", *flags, "-f", image, "-C", root)
     actual = host_manifest(root: root, view: view)
     actual = libarchive_paths(rows: actual, view: view)
+    # When the archive omits this header, extracting its children may create
+    # the parent. Its kind remains observable; stored metadata is unavailable.
+    extracted_expected = if exception
+      expected.merge(exception => expected.fetch(exception).slice("kind", "size"))
+    else
+      expected
+    end
     # Extraction as an ordinary user does not restore foreign ownership;
     # the numeric listing below checks metadata without privilege.
-    compare(expected: expected, actual: actual, context: "bsdtar #{view}", metadata: false,
-            multi_sl: fixture.profile == :full && view == "rockridge",
+    compare(expected: extracted_expected, actual: actual, context: "bsdtar #{view}", metadata: false,
+            target_exceptions: view == "rockridge" ? LIBARCHIVE_LINK_EXCEPTIONS : {},
             omitted_directory: exception)
   end
 

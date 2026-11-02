@@ -10,6 +10,136 @@ require "tmpdir"
 require_relative "iso9660-writer"
 
 class IsoWriterTest < Minitest::Test
+  def test_consumer_text_commands_use_utf8_locale
+    arguments = [RbConfig.ruby, "-e", 'STDOUT.write(ENV.fetch("LC_ALL") + ":" + ENV.fetch("TZ"))']
+    assert_equal "C.UTF-8:UTC", IsoIntegration.command(*arguments)
+    assert_equal "C.UTF-8:UTC", IsoWriter.command(*arguments)
+  end
+
+  def test_consumer_payload_uses_utf8_locale_without_transcoding_bytes
+    code = 'abort "wrong locale" unless ENV["LC_ALL"] == "C.UTF-8" && ENV["TZ"] == "UTC"; STDOUT.binmode; STDOUT.write([255, 0, 195, 169].pack("C*"))'
+    bytes = [255, 0, 195, 169].pack("C*")
+    assert_equal({ "sha256" => Digest::SHA256.hexdigest(bytes), "size" => bytes.bytesize },
+                 IsoWriter.digest(command: [RbConfig.ruby, "-e", code]))
+  end
+
+  def test_isoinfo_preserves_filename_spaces_with_each_fixed_delimiter
+    [1, 2].each do |width|
+      rows = [".", "..", " leading", "trailing ", " both "].map do |name|
+        "---------- 1 0 0 1 Nov 14 2023 [ 40 00]#{' ' * width}#{name} \n"
+      end
+      listing = "Directory listing of /\n" + rows.join
+      with_listing_program(listing) do |program|
+        actual = IsoIntegration.isoinfo_tree("unused.iso", view: "joliet", program: program)
+        assert_equal ["/ leading", "/trailing ", "/ both "], actual.keys
+      end
+    end
+  end
+
+  def test_isoinfo_preserves_utf8_names_in_joliet_and_rock_ridge
+    listing = "Directory listing of /\n" + [".", "..", "caf\u00e9.txt", "\u20ac.txt"].map do |name|
+      "---------- 1 0 0 1 Nov 14 2023 [ 40 00]  #{name} \n"
+    end.join
+    with_listing_program(listing) do |program|
+      %w[joliet rockridge].each do |view|
+        actual = IsoIntegration.isoinfo_tree("unused.iso", view: view, program: program)
+        assert_equal ["/caf\u00e9.txt", "/\u20ac.txt"], actual.keys
+      end
+    end
+  end
+
+  def test_isoinfo_preserves_empty_and_space_terminated_symlink_targets
+    listing = "Directory listing of /\n" +
+      "drwxr-xr-x 1 0 0 2048 Nov 14 2023 [ 40 02]  . \n" +
+      "lrwxrwxrwx 1 0 0 0 Nov 14 2023 [ 0 00]  root -> \n" +
+      "lrwxrwxrwx 1 0 0 0 Nov 14 2023 [ 0 00]  spaced -> target \n"
+    with_listing_program(listing) do |program|
+      rows = IsoIntegration.isoinfo_tree("unused.iso", view: "rockridge", program: program)
+      assert_equal "", rows.fetch("/root").fetch(:target)
+      assert_equal "target ", rows.fetch("/spaced").fetch(:target)
+    end
+  end
+
+  def test_libarchive_synthesized_parent_has_no_stored_directory_metadata
+    Dir.mktmpdir("iso-synthesized-parent-") do |scratch|
+      skip "whole-tree extraction requires a case-sensitive filesystem" unless IsoWriter.case_sensitive?(directory: scratch)
+
+      program = File.join(scratch, "bsdtar")
+      File.write(program, <<~RUBY)
+        #!#{RbConfig.ruby}
+        # SPDX-License-Identifier: BSD-2-Clause
+        # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+        if ARGV.include?("-tv")
+          puts "-rw-r--r-- 1 0 0 1 Nov 14 2023 rr_moved/member" unless ARGV.include?("wrongkind.iso")
+        else
+          root = ARGV.fetch(ARGV.index("-C") + 1)
+          if ARGV.include?("wrongkind.iso")
+            File.binwrite(File.join(root, "rr_moved"), "")
+          else
+            Dir.mkdir(File.join(root, "rr_moved"))
+            member = File.join(root, "rr_moved/member")
+            File.binwrite(member, "x")
+            File.utime(1700000000, 1700000000, member)
+          end
+        end
+      RUBY
+      File.chmod(0o700, program)
+      expected = { "/rr_moved" => { "kind" => "directory", "size" => 0, "modified" => 1700000000 },
+                   "/rr_moved/member" => { "kind" => "file", "size" => 1, "modified" => 1700000000,
+                                           "uid" => 0, "gid" => 0, "mode" => 0o644,
+                                           "sha256" => Digest::SHA256.hexdigest("x") } }
+      fixture = IsoWriter::Fixture.new(profile: :nonempty_container, level: 3)
+      output, = capture_io do
+        IsoWriter.bsdtar(image: "unused.iso", view: "rockridge", expected: expected,
+                         program: program, scratch: scratch, fixture: fixture)
+      end
+      assert_includes output, "EXCEPTION"
+      wrongkind = File.join(scratch, "wrongkind")
+      Dir.mkdir(wrongkind)
+      error = assert_raises(IsoWriter::Error) do
+        capture_io do
+          IsoWriter.bsdtar(image: "wrongkind.iso", view: "rockridge", expected: expected.slice("/rr_moved"),
+                           program: program, scratch: wrongkind, fixture: fixture)
+        end
+      end
+      assert_includes error.message, "kind differs"
+    end
+  end
+
+  def test_xorriso_reports_only_the_exact_internal_empty_component_exception
+    listing = "lrwxrwxrwx 1 0 0 0 Nov 14 2023 '/odd' -> 'a/b/./../c/'\n"
+    expected = { "/odd" => { "kind" => "symlink", "target" => "a//b/./../c/",
+                             "mode" => 0o777, "uid" => 0, "gid" => 0, "modified" => 1700000000 } }
+    with_listing_program(listing) do |program|
+      output, = capture_io { IsoWriter.xorriso(image: "unused.iso", expected: expected, program: program) }
+      assert_includes output, "EXCEPTION"
+    end
+  end
+
+  def test_text_commands_decode_utf8_with_ascii_default_encoding
+    script = <<~'RUBY'
+      require ARGV.fetch(0)
+      listing = "-rw-r--r-- 1 0 0 1 Nov 14 2023 '/caf\u00e9.txt'\n"
+      arguments = [RbConfig.ruby, "-e", "STDOUT.write(#{listing.dump})"]
+      [IsoIntegration.command(*arguments), IsoWriter.command(*arguments)].each do |output|
+        rows = IsoWriter.xorriso_listing(output)
+        abort "wrong path" unless rows.keys == ["/caf\u00e9.txt"]
+      end
+    RUBY
+    library = File.expand_path("iso9660-writer", __dir__)
+    _output, errors, status = Open3.capture3(RbConfig.ruby, "-E", "US-ASCII", "-e", script, library)
+    assert status.success?, errors
+  end
+
+  def test_utf8_text_interpretation_preserves_source_bytes_and_encoding
+    output = "/caf\u00e9.txt".dup.force_encoding(Encoding::US_ASCII).freeze
+    bytes = output.bytes
+
+    assert_equal "/caf\u00e9.txt", IsoIntegration.utf8_text(output)
+    assert_equal Encoding::US_ASCII, output.encoding
+    assert_equal bytes, output.bytes
+  end
+
   def test_ndjson_names_decode_as_utf8_independently_of_capture_encoding
     output = "{\"path\":\"/caf\u00e9.txt\"}\n".dup.force_encoding(Encoding::US_ASCII).freeze
     bytes = output.bytes
@@ -71,16 +201,19 @@ class IsoWriterTest < Minitest::Test
     observed = { "/long-target" => { "kind" => "symlink", "size" => IsoWriter::LIBARCHIVE_LONG_TARGET.bytesize,
                                      "target" => IsoWriter::LIBARCHIVE_LONG_TARGET } }
     output, = capture_io do
-      IsoWriter.compare(expected: expected, actual: observed, context: "libarchive fixture", multi_sl: true)
+      IsoWriter.compare(expected: expected, actual: observed, context: "libarchive fixture",
+                        target_exceptions: IsoWriter::LIBARCHIVE_LINK_EXCEPTIONS)
     end
     assert_includes output, "EXCEPTION"
     wrong = { "/long-target" => observed.fetch("/long-target").merge("target" => "x" * 1019) }
     assert_raises(IsoWriter::Error) do
-      IsoWriter.compare(expected: expected, actual: wrong, context: "unrelated target corruption", multi_sl: true)
+      IsoWriter.compare(expected: expected, actual: wrong, context: "unrelated target corruption",
+                        target_exceptions: IsoWriter::LIBARCHIVE_LINK_EXCEPTIONS)
     end
     wrong_size = { "/long-target" => observed.fetch("/long-target").merge("size" => 1) }
     assert_raises(IsoWriter::Error) do
-      IsoWriter.compare(expected: expected, actual: wrong_size, context: "unrelated size corruption", multi_sl: true)
+      IsoWriter.compare(expected: expected, actual: wrong_size, context: "unrelated size corruption",
+                        target_exceptions: IsoWriter::LIBARCHIVE_LINK_EXCEPTIONS)
     end
   end
 
@@ -90,9 +223,43 @@ class IsoWriterTest < Minitest::Test
     listed = IsoWriter.xorriso_listing(text)
     assert_equal IsoWriter::LIBARCHIVE_LONG_TARGET.bytesize, listed.fetch("/long-target").fetch("size")
     output, = capture_io do
-      IsoWriter.compare(expected: expected, actual: listed, context: "link listing", multi_sl: true)
+      IsoWriter.compare(expected: expected, actual: listed, context: "link listing",
+                        target_exceptions: IsoWriter::XORRISO_LINK_EXCEPTIONS)
     end
     assert_includes output, "EXCEPTION"
+  end
+
+  def test_link_exceptions_require_exact_path_targets_sizes_and_symlink_kinds
+    source = { "kind" => "symlink", "size" => 12, "target" => "a//b/./../c/" }
+    measured = { "kind" => "symlink", "size" => 11, "target" => "a/b/./../c/" }
+    expected = { "/odd" => source }
+    actual = { "/odd" => measured }
+    assert_raises(IsoWriter::Error) { IsoWriter.compare(expected: expected, actual: actual, context: "strict default") }
+    assert_raises(IsoWriter::Error) do
+      IsoWriter.compare(expected: expected, actual: actual, context: "other consumer",
+                        target_exceptions: IsoWriter::LIBARCHIVE_LINK_EXCEPTIONS)
+    end
+    capture_io do
+      IsoWriter.compare(expected: expected, actual: actual, context: "measured xorriso",
+                        target_exceptions: IsoWriter::XORRISO_LINK_EXCEPTIONS)
+    end
+    [measured.merge("size" => 10), measured.merge("target" => "x" * 11),
+     measured.merge("kind" => "file")].each do |wrong|
+      assert_raises(IsoWriter::Error) do
+        IsoWriter.compare(expected: expected, actual: { "/odd" => wrong }, context: "other corruption",
+                          target_exceptions: IsoWriter::XORRISO_LINK_EXCEPTIONS)
+      end
+    end
+    [source.merge("size" => 13), source.merge("kind" => "file")].each do |wrong|
+      assert_raises(IsoWriter::Error) do
+        IsoWriter.compare(expected: { "/odd" => wrong }, actual: actual, context: "inconsistent source",
+                          target_exceptions: IsoWriter::XORRISO_LINK_EXCEPTIONS)
+      end
+    end
+    assert_raises(IsoWriter::Error) do
+      IsoWriter.compare(expected: { "/other" => source }, actual: { "/other" => measured }, context: "other path",
+                        target_exceptions: IsoWriter::XORRISO_LINK_EXCEPTIONS)
+    end
   end
 
   def test_directory_entry_exception_never_covers_descendants
@@ -142,6 +309,21 @@ class IsoWriterTest < Minitest::Test
   end
 
   private
+
+  def with_listing_program(output)
+    Dir.mktmpdir("iso-listing-test-") do |directory|
+      program = File.join(directory, "listing")
+      File.write(program, <<~RUBY)
+        #!#{RbConfig.ruby}
+        # SPDX-License-Identifier: BSD-2-Clause
+        # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+        STDOUT.binmode
+        STDOUT.write(#{output.b.dump})
+      RUBY
+      File.chmod(0o700, program)
+      yield program
+    end
+  end
 
   # Only fake executables receive these calls. The child's TMPDIR is also
   # beneath the disposable fixture, so a seeded cleanup failure leaves no

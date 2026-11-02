@@ -5,7 +5,7 @@
 # job (.github/workflows/check.yml), installed with their recommendations as
 # the job does (clang's sanitizer runtimes are one), plus what the GitHub
 # runner image provides and the tests use as oracles. The build context holds
-# only this file and the revision's test/spec Gemfile and Gemfile.lock.
+# this file, the tool builders and the revision's locked specification gems.
 FROM ubuntu:24.04
 LABEL fsimg-linux-check=1
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
@@ -15,7 +15,10 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' \
 	autoconf automake libtool make pkg-config clang llvm gcc g++ \
 	zlib1g-dev liblzma-dev libzstd-dev mtools dosfstools exfatprogs fdisk gdisk zstd pigz \
 	ruby ruby-dev ruby-bundler python3 git ca-certificates xz-utils file dpkg-dev \
-	genisoimage xorriso libarchive-tools p7zip-full
+	genisoimage xorriso libarchive-tools p7zip-full curl bzip2
+COPY build-cdrtools.sh /usr/local/libexec/fsimg/build-cdrtools.sh
+RUN sh /usr/local/libexec/fsimg/build-cdrtools.sh /opt/fsimg-cdrtools
+ENV PATH=/opt/fsimg-cdrtools/bin:$PATH
 COPY build-msan-zlib.sh /usr/local/libexec/fsimg/build-msan-zlib.sh
 RUN source_parent=$(mktemp -d) && cd "$source_parent" && \
 	apt-get source zlib && \

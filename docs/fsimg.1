@@ -842,8 +842,8 @@ Primary and Joliet identifiers receive aliases where native lookup would
 confuse two source entries; Rock Ridge preserves the exact source names.
 Names are at most 255 UTF-8 bytes and link targets at most 1023 bytes,
 with target components at most 255 bytes.
-Affected libarchive and libisofs readers lose separators across Rock Ridge
-symbolic-link entries; qualification records their precise consumer limits.
+Some libarchive and libisofs versions omit separators in Rock Ridge
+symbolic links; qualification records their precise consumer limits.
 Creation time and attributes are metadata losses under the selected policy.
 The volume root uses the format's default metadata.
 .It Fl o Ar boot=path
