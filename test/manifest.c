@@ -2232,7 +2232,8 @@ test_export_refusals(void)
 }
 
 /* bsdtar reads the manifest x --mtree writes, decoding every escaped name
- * to the bytes the image holds; it is skipped with a note when it is not
+ * to the bytes the image holds, which it lists raw or, outside a UTF-8
+ * locale, octal-escaped; it is skipped with a note when it is not
  * installed.
  */
 static void
@@ -2244,6 +2245,18 @@ test_export_read_by_bsdtar(void)
 	    "./a/b\n"
 	    "./a/b/c\n"
 	    "./caf\303\251\n"
+	    "./empty\n"
+	    "./sp ace\n"
+	    "./sp ace/hash#1\n";
+	/* Under a locale without UTF-8, bsdtar prints a name's bytes outside
+	 * ASCII as octal escapes; the name it decoded is the same.
+	 */
+	static const char expected_escaped[] =
+	    ".\n"
+	    "./a\n"
+	    "./a/b\n"
+	    "./a/b/c\n"
+	    "./caf\\303\\251\n"
 	    "./empty\n"
 	    "./sp ace\n"
 	    "./sp ace/hash#1\n";
@@ -2277,9 +2290,11 @@ test_export_read_by_bsdtar(void)
 		length = pread(fd, listing, sizeof(listing) - 1, 0);
 		CHECK(length == st.st_size);
 		listing[length] = '\0';
-		if (strcmp(listing, expected) != 0)
+		if (strcmp(listing, expected) != 0 &&
+		    strcmp(listing, expected_escaped) != 0)
 			printf("bsdtar listed:\n%s", listing);
-		CHECK(strcmp(listing, expected) == 0);
+		CHECK(strcmp(listing, expected) == 0 ||
+		    strcmp(listing, expected_escaped) == 0);
 	}
 	CHECK(close(fd) == 0);
 	free(text);

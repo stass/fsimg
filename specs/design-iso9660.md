@@ -984,17 +984,27 @@ Each record's entries, in this order:
 
 | Record | Entries |
 | --- | --- |
-| Root's first dot record | `SP`, `ER`, `PX`, `TF` |
+| Root's first dot record | `SP`, `PX`, `TF`, `ER` |
 | Every other dot record | `PX`, `TF`; and `PL` on a relocated directory's second dot record |
 | A file, link or FIFO | `PX`, `TF`, `NM`; `SL` for a link |
 | A directory in its parent | `PX`, `TF`, `NM`; `RE` when relocated |
 | A relocation placeholder | `PX` of the directory, `TF`, `NM`, `CL` |
 
 A Rock Ridge name is at most 255 bytes, the component limit of every
-target host, else `FSIMG_EUNSUPPORTED`. `NM` entries carry at most 250
-name bytes each, with the continue flag on all but the last; `SL` entries
-carry whole components, a component longer than an entry continuing in
-the next, at most 255 bytes per entry. Link counts are 1, or 2 plus the
+target host, else `FSIMG_EUNSUPPORTED`. A symbolic link's target is at
+most 1023 bytes with components of at most 255 bytes, else
+`FSIMG_EUNSUPPORTED`: libisofs refuses to read a longer target or
+component, so these are the most every consumer reads. `NM` entries carry
+at most 250 name bytes each, with the continue flag on all but the last.
+A target is written as one root component per leading slash, then the
+rest split at each `/` into components, empty ones included, `.` and `..`
+as their flagged components; a component longer than 248 bytes is
+written as pieces, each but the last flagged to continue. `SL` entries
+carry whole component records, at most 255 bytes per entry. The root's
+first dot record writes `ER` after `PX` and `TF`, so the record itself
+keeps `SP`, `PX` and `TF` and only `ER` continues, as mkisofs and xorriso
+write it: libarchive finds Rock Ridge only from an entry it decodes in
+the root's own record. Link counts are 1, or 2 plus the
 subdirectory count for a directory. `TF` carries modification, and access
 and attribute change when the entry has them, in 7-byte form.
 
@@ -1003,7 +1013,7 @@ keeps the longest prefix of them that fits with a 28-byte `CE` after it,
 and the rest form a chain of continuation fragments: each fragment takes
 the longest run of the remaining entries that fits 2048 bytes, keeping 28
 bytes for a `CE` to the next fragment when more remain. Entries are never
-split, so a 255-byte name and a 1024-byte target, even one made of
+split, so a 255-byte name and a 1023-byte target, even one made of
 slashes, fit in at most three fragments, well inside the reader's
 16-area bound. Fragments are placed in record emission order by next fit:
 a fragment goes at the current position in the current continuation block
@@ -1167,7 +1177,7 @@ shown, when reading unless the row says at verification.
 | Joliet | Levels 1 to 3; shared data with the primary hierarchy | Bad escape (not Joliet); geometry differing from the PVD (ECORRUPT); a forced `joliet` view over a damaged primary handshake (reads) |
 | El Torito | BIOS only, EFI only, BIOS and EFI, boot image as a file and not, an EFI image past the volume, selection criteria in the initial entry | Checksum, signature, media type, a section count past its entries, a catalog or image before the data area, a catalog past the volume or slice (ECORRUPT); unknown platform, extension entry, a second block of entries, two boot records (EUNSUPPORTED) |
 | Ownership | Primary and Joliet sharing data; `boot.cat` as a file; deduplicated files | File data over a directory, continuation or descriptor; two records sharing continuation bytes (ECORRUPT) |
-| Writer | Every acceptance row's valid witness that the writer profile can express, at each level; reordered sources; fixed sizes; relocation by depth and by path length; a round trip of an extracted relocated tree | Required metadata loss; a level 1 or 2 file above `2^32 - 1` bytes; a 256-byte Rock Ridge name; a boot setting naming a directory or a missing path; `bootload` past the image; a volume size too small |
+| Writer | Every acceptance row's valid witness that the writer profile can express, at each level; reordered sources; fixed sizes; relocation by depth and by path length; a round trip of an extracted relocated tree | Required metadata loss; a level 1 or 2 file above `2^32 - 1` bytes; a 256-byte Rock Ridge name; a 1024-byte link target or a 256-byte target component; a boot setting naming a directory or a missing path; `bootload` past the image; a volume size too small |
 
 ## Source keys
 

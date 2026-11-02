@@ -401,33 +401,38 @@ other, as the [settings catalogue](design-settings.md) states.
 ## Planning
 
 The plan object embeds `fsimg_plan_t`, the level, the label projections,
-the boot summary, the layout's block numbers, and one paged array of rows
+the boot summary, the layout's block numbers, each hierarchy's name and
+path streams, and one paged array of rows
 keyed by catalog ID, row 0 the root. A row holds the kind, the size, the
 section count, the encoded times, owner and mode, the logical and
 physical depth and path length, the physical parent for a relocated
 directory, and the results of later passes: each hierarchy's directory
 block, length and path-table number, the file's first data block, the
 encoded length of its Rock Ridge entries kept in the record, the number
-and lengths of its continuation fragments, and the first fragment's
-relative position. Names are not in rows; they live in two sorted streams.
+and lengths of its continuation fragments, the first fragment's relative
+position, and a link's encoded `SL` length and hash. Names are not in
+rows; they live in two sorted streams.
 Planning runs these passes over the frozen catalog:
 
 1. **Entries.** In ID order: check each component against the 255-byte
    Rock Ridge bound, `FSIMG_EUNSUPPORTED` above it; validate kind and
    metadata under the [metadata policy](design-metadata.md#writer-policy)
    with the [times and defaults](design-iso9660.md#times-and-defaults);
-   refuse a file above `2^32 - 1` bytes at levels 1 and 2; match the boot
-   settings' paths and check the boot files and `bootload`; read each
-   symbolic link's target through the
-   [link-target read](design-emission.md#encoded-link-targets) and encode its `SL`
-   entries' length; accumulate `initialized_bytes`.
+   refuse a file above `2^32 - 1` bytes at levels 1 and 2; count each
+   directory's subdirectories for its link count; accumulate
+   `initialized_bytes`.
 2. **Primary names.** `write-names.c` emits each eligible child's natural
    identifier with its logical parent and ID, sorts externally by parent
    and identifier, keeps the first of each equal group, and emits the
    reservations of kept identifiers in the alias family, sorted by parent
    and number. The children needing an alias, sorted by parent and ID,
-   are merged with the reservations to assign numbers. A relocated
-   directory's placeholder keeps the identifier this pass gives it.
+   are merged with the reservations to assign numbers. Every child's
+   final identifier then goes to the primary stream of `(physical parent,
+   identifier, ID)`, sorted by parent and the
+   [primary order](design-iso9660.md#ordering) with the writer's byte
+   tie-break, and each directory's row records its group: the frame
+   offset of its first child and the count. A relocated directory's
+   placeholder keeps the identifier this pass gives it.
 3. **Relocation.** One pass in catalog ID order, which visits a parent
    before its children, computes each directory's physical level and path
    length from its physical parent's and the length of its identifier,
@@ -436,35 +441,41 @@ Planning runs these passes over the frozen catalog:
    relocated directory's identifier in `RR_MOVED` is always an alias,
    whose length follows from its name and the level alone, so the pass
    needs no number. It adds the relocation directory, adopting an empty
-   source `.rr_moved` in the root when one exists.
-4. **Relocation names.** The relocated directories' aliases in `RR_MOVED`
-   are numbered in ID order. The primary stream of `(physical parent,
-   identifier, ID)` is then sorted by parent and the
-   [primary order](design-iso9660.md#ordering), with the writer's byte
-   tie-break, and a group table gives each directory's offset and count.
-5. **Joliet names.** Pass 2's rules over UTF-16 code units, without links
+   source `.rr_moved` in the root when one exists, numbers the relocated
+   directories' aliases in `RR_MOVED` in ID order and moves their stream
+   records under it.
+4. **Joliet names.** Pass 2's rules over UTF-16 code units, without links
    and FIFOs, over the logical tree, giving the Joliet stream and its
    group table.
-6. **Sizing.** One pass over each stream in order computes every record's
-   length, splits its Rock Ridge entries between the record and its
-   fragment chain with `write-susp.c`, places each fragment by next fit in
-   the continuation region, packs the records into blocks, and stores
-   each directory's length and each record's encoded lengths in its row.
-   Lengths depend only on entry sizes, never on addresses, so the pass runs
-   once.
-7. **Path tables.** For each hierarchy, a breadth-first pass numbers the
-   directories: a paged array maps number to ID, starting with the root,
-   and visiting number `i` appends its child directories from the group
-   table in sorted order, which is the path table's order. The pass sums
-   the table size and refuses more than 65535 directories with
+5. **Path tables.** For each hierarchy, a breadth-first walk numbers the
+   directories into a path stream of `(ID, parent number, identifier)`:
+   the root is record 1, and visiting record `i` appends its child
+   directories from its group in stream order, which is the path table's
+   order within one parent. The path stream is the walk's own queue, read
+   behind the records the walk appends, and afterwards lists the
+   directories in path-table order for sizing, layout and emission. The
+   pass sums the table size and refuses more than 65535 directories with
    `FSIMG_EUNSUPPORTED`.
-8. **Layout.** Assign blocks in the [layout order](design-iso9660.md#layout):
+6. **Sizing.** For each hierarchy, in path-table order, each directory's
+   records are measured and packed into blocks, and each directory's
+   length stored in its row. In the primary hierarchy each record's Rock
+   Ridge entries are encoded, a symbolic link's target read through the
+   [link-target read](design-emission.md#encoded-link-targets), and split
+   between the record and its fragment chain with `write-susp.c`; the
+   fragments are placed by next fit in the continuation region, which
+   follows path-table order because emission writes directories in it.
+   The row keeps the record's encoded length, its fragments' lengths and
+   the first one's position, and for a link the length and FNV-1a hash of
+   its `SL` entries, so emission recognizes a target that changed.
+   Lengths depend only on entry sizes, never on addresses, so the pass
+   runs once.
+7. **Layout.** Assign blocks in the [layout order](design-iso9660.md#layout):
    descriptors, path tables, the boot catalog, primary directories by
    number, the continuation region, Joliet directories by number, then
    each file's sections in ID order. Every sum is 64-bit; a volume above
    `2^32 - 1` blocks is `FSIMG_ERANGE`. A requested `volume_bytes` below the
    result is `FSIMG_ERANGE`; above it, the difference is zero padding.
-9. **Summary.** Fill `fsimg_plan_info_t`: `volume_bytes`, the blocks in
+8. **Summary.** Fill `fsimg_plan_info_t`: `volume_bytes`, the blocks in
    `allocation_units`, `metadata_bytes` for descriptors, path tables,
    directories, the continuation region and the boot catalog,
    `allocated_bytes` for metadata and file blocks, `initialized_bytes`,
@@ -533,10 +544,10 @@ Writer:
 | Condition | Status |
 | --- | --- |
 | A setting outside its rules; a label outside its rule; a boot path that names no regular non-empty one-section file; `bootload` past its image | `FSIMG_EINVAL` |
-| A component over 255 bytes; a file above `2^32 - 1` bytes at levels 1 and 2; more than 65535 directories in a hierarchy; a root child named `.rr_moved` that is not an empty directory when relocation is needed; a kind the profile lacks; a required metadata loss | `FSIMG_EUNSUPPORTED` |
+| A component over 255 bytes; a link target over 1023 bytes or with a component over 255 bytes; a file above `2^32 - 1` bytes at levels 1 and 2; more than 65535 directories in a hierarchy; a root child named `.rr_moved` that is not an empty directory when relocation is needed; a kind the profile lacks; a required metadata loss | `FSIMG_EUNSUPPORTED` |
 | A requested volume below the image; a volume above `2^32 - 1` blocks | `FSIMG_ERANGE` |
 | A plan row or stream record read back outside its limits; an encoded length that differs from the plan without a changed source | `FSIMG_ECORRUPT` |
-| A link target reread at emission whose encoding differs from the plan's | `FSIMG_ESOURCE_CHANGED` |
+| A link target reread at emission whose encoded length or hash differs from the plan's | `FSIMG_ESOURCE_CHANGED` |
 | Budget, scratch, work or file-descriptor exhaustion | `FSIMG_ELIMIT` |
 
 Diagnostics quote at most one bounded, rendered name and never record

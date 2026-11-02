@@ -2237,3 +2237,50 @@ Detection costs about 2 ms and at most about 150 KB of peak RSS more per
 open on these fixtures, within process-start noise. The comparison
 baseline records the larger prefix as extra bytes read by the small exFAT
 fixtures.
+
+### ISO 9660 writer checks
+
+The writer is not yet registered; `test-iso9660-write` reaches it through
+its unregistered descriptor and runs in the plain suite. It checks every
+image twice: with an independent checker written from the format design,
+which decodes the descriptors, both hierarchies, their path tables, every
+Rock Ridge entry through its continuation chain and the file data and
+requires every other byte to be zero over a poisoned sink; and with
+fsimg's reader in the automatic, Rock Ridge, Joliet and primary views and
+`W` with payload. It also pins identifiers and aliases, record and
+continuation boundaries, files above 4 GiB through a sparse sink,
+refusals, time losses, emission faults, and allocation, scratch and
+cancellation failures at every point.
+
+`./test-iso9660-write --create FILE LEVEL [short]` writes its test tree,
+which has every entry kind, aliased and non-BMP names, a 255-byte name,
+1023-byte link targets and an eight-level tree, for the external readers;
+`short` leaves out names and targets longer than 200 bytes. On Ubuntu
+24.04 with xorriso 1.5.6, genisoimage's `isoinfo` and `isovfy` 1.1.11,
+bsdtar 3.7.2 and p7zip 16.02, at levels 1, 2 and 3:
+
+* `xorriso -indev FILE -find /` loads the tree without a message;
+* `isovfy` finds no errors in the `short` images; it overflows a fixed
+  buffer on 255-byte names and long targets, and misparses
+  genisoimage's own long `SL` chains;
+* `isoinfo -d` reports Rock Ridge 1 and Joliet level 3, and `-f`, `-R -l`
+  and `-J -f` list the tree; `isoinfo` itself prints uid 1000 as 1750,
+  as it does for genisoimage images;
+* `bsdtar -x` in the Rock Ridge view extracts every file's bytes, owner,
+  mode and time, and every link target held in one `SL` entry, exactly,
+  and in the Joliet view (`--options iso9660:!rockridge`) the Joliet
+  names; `7z x` extracts the
+  Joliet tree with the same file contents.
+
+Two consumer limits shaped the writer. libisofs refuses on reading a link
+target over 1023 bytes or with a component over 255 bytes, so the writer
+stores at most that. libarchive finds Rock Ridge only from an entry it
+decodes in the root's first dot record, so that record keeps `SP`, `PX`
+and `TF` and only `ER` continues, as mkisofs and xorriso write it.
+libarchive also joins the first component of every `SL` entry after the
+first without its `/`, so a target spanning several `SL` entries
+extracts wrong from fsimg, genisoimage and xorriso images alike; the
+comparison above excepts those targets.
+
+Not run: the Linux and FreeBSD kernel mounts, since this container's
+kernel has no `isofs` and FreeBSD was not available, and macOS.

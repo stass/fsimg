@@ -38,6 +38,13 @@
 #define ISO_LABEL_TEXT_MAX	48u	/* 16 UTF-16 units as UTF-8 */
 #define ISO_ESCAPE_BYTES	32u
 #define ISO_SUSP_AREAS_MAX	16u	/* continuation areas per stream */
+#define ISO_DATE7_BYTES		7u
+#define ISO_DATE17_BYTES	17u
+/* The UTC seconds of 1900-01-01 00:00:00 and 2155-12-31 23:59:59, the
+ * span of the seven-byte recording date.
+ */
+#define ISO_DATE7_MIN		INT64_C(-2208988800)
+#define ISO_DATE7_MAX		INT64_C(5869583999)
 
 /* Volume descriptor types. */
 #define ISO_VD_BOOT		0u
@@ -96,6 +103,38 @@ typedef struct iso_path_record {
 	uint8_t		 length;		/* LEN_DI */
 	unsigned char	 identifier[255];
 } iso_path_record_t;
+
+/* What the writer encodes into one directory record (codec.c):
+ * identifier_length bytes of identifier and system_use_length bytes of
+ * system use, the extent, data length, flags and recording date.
+ */
+typedef struct iso_record_fields {
+	const unsigned char *identifier;
+	const unsigned char *system_use;
+	uint32_t	 extent;
+	uint32_t	 data_length;
+	size_t		 identifier_length;
+	size_t		 system_use_length;
+	uint8_t		 flags;
+	unsigned char	 date[ISO_DATE7_BYTES];
+} iso_record_fields_t;
+
+/* What the writer encodes into its primary or Joliet descriptor: the
+ * encoded label field, the geometry, the root directory and its recording
+ * date, the path tables and the creation and modification date.
+ */
+typedef struct iso_volume_fields {
+	uint32_t	 volume_space_size;
+	uint32_t	 path_table_bytes;
+	uint32_t	 path_table_l;
+	uint32_t	 path_table_m;
+	uint32_t	 root_extent;
+	uint32_t	 root_length;
+	bool		 joliet;
+	unsigned char	 label[ISO_LABEL_BYTES];
+	unsigned char	 root_date[ISO_DATE7_BYTES];
+	unsigned char	 date[ISO_DATE17_BYTES];
+} iso_volume_fields_t;
 
 /* A decoded volume descriptor. block, type, version and joliet_level are
  * set for every descriptor; the other fields only for the primary
@@ -326,8 +365,8 @@ fsimg_iso9660_reader_t *iso_state(const fsimg_reader_t *);
 fsimg_status_t iso_corrupt(fsimg_error_t *, const char *);
 fsimg_status_t iso_unsupported(fsimg_error_t *, const char *);
 
-/* codec.c: pure decoders over byte buffers, the only code that knows
- * field offsets.
+/* codec.c: pure decoders and encoders over byte buffers, the only code
+ * that knows field offsets besides eltorito.c.
  */
 bool iso_bytes_zero(const unsigned char *, size_t);
 fsimg_status_t iso_u16both(const unsigned char *, uint16_t *,
@@ -346,6 +385,17 @@ fsimg_status_t iso_descriptor_decode(const unsigned char *, uint32_t,
 fsimg_status_t iso_record_decode(const unsigned char *, size_t,
     iso_record_t *, fsimg_error_t *);
 void iso_path_header_decode(const unsigned char *, bool, iso_path_record_t *);
+void iso_u16both_put(unsigned char *, uint16_t);
+void iso_u32both_put(unsigned char *, uint32_t);
+bool iso_date7_encode(int64_t, unsigned char *);
+bool iso_date17_encode(int64_t, unsigned char *);
+size_t iso_record_length(size_t, size_t);
+size_t iso_record_encode(const iso_record_fields_t *, unsigned char *);
+void iso_volume_descriptor_encode(const iso_volume_fields_t *,
+    unsigned char *);
+void iso_terminator_encode(unsigned char *);
+size_t iso_path_record_encode(const iso_path_record_t *, bool,
+    unsigned char *);
 
 /* volume.c */
 fsimg_status_t iso_volume_open(fsimg_reader_t *, fsimg_error_t *);

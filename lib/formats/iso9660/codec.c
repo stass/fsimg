@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include <string.h>
 #include <strings.h>
 
 #include "fsimg-endian.h"
@@ -10,11 +11,12 @@
 #include "unicode.h"
 
 /*
- * Pure decoders for ISO 9660 structures: both-byte-order fields, the two
- * date forms, volume descriptors, directory records and path-table
- * records. They perform no
- * I/O and fill their outputs with validated values only; every failure
- * names its class (specs/design-iso9660.md).
+ * Pure decoders and encoders for ISO 9660 structures: both-byte-order
+ * fields, the two date forms, volume descriptors, directory records and
+ * path-table records. They perform no I/O. Decoders fill their outputs
+ * with validated values only, every failure naming its class
+ * (specs/design-iso9660.md); encoders are their exact inverses for the
+ * values the writer profile emits and initialize every byte they cover.
  */
 
 /* Byte offsets within a volume descriptor. */
@@ -34,6 +36,12 @@
 #define VD_PATH_TABLE_M		148u
 #define VD_PATH_TABLE_M_COPY	152u
 #define VD_ROOT			156u
+#define VD_SYSTEM		8u
+#define VD_VOLUME_SET		190u
+#define VD_PUBLISHER		318u
+#define VD_PREPARER		446u
+#define VD_APPLICATION		574u
+#define VD_COPYRIGHT		702u	/* three 37-byte file identifiers */
 #define VD_DATES		813u	/* four 17-byte dates */
 #define VD_STRUCTURE_VERSION	881u
 
@@ -50,8 +58,8 @@
 #define DR_IDENTIFIER_LENGTH	32u
 #define DR_IDENTIFIER		ISO_RECORD_IDENTIFIER
 
-#define DATE7_BYTES		7u
-#define DATE17_BYTES		17u
+#define DATE7_BYTES		ISO_DATE7_BYTES
+#define DATE17_BYTES		ISO_DATE17_BYTES
 #define DATE17_DIGITS		16u
 #define OFFSET_MIN		(-48)	/* 15-minute units west of UTC */
 #define OFFSET_MAX		52
@@ -479,4 +487,271 @@ iso_path_header_decode(const unsigned char *raw, bool big_endian,
 	    fsimg_load_le32(raw + 2);
 	out->parent = big_endian ? fsimg_load_be16(raw + 6) :
 	    fsimg_load_le16(raw + 6);
+}
+
+/*
+ * Encoders.
+ */
+
+void
+iso_u16both_put(unsigned char *field, uint16_t value)
+{
+	fsimg_store_le16(field, value);
+	fsimg_store_be16(field + 2, value);
+}
+
+void
+iso_u32both_put(unsigned char *field, uint32_t value)
+{
+	fsimg_store_le32(field, value);
+	fsimg_store_be32(field + 4, value);
+}
+
+/* The proleptic Gregorian date and time of day of UTC seconds since
+ * 1970-01-01, the inverse of fsimg_civil_days(): days are counted in
+ * 400-year eras of 146097 days from 0000-03-01, so no loop runs over the
+ * years. Valid for years 0 through 9999.
+ */
+static void
+civil_from_seconds(int64_t seconds, unsigned *year, unsigned *month,
+    unsigned *day, unsigned *clock)
+{
+	int64_t days, era, day_of_era, year_of_era, day_of_year, shifted;
+
+	days = seconds / 86400;
+	if (seconds % 86400 < 0)
+		days--;
+	*clock = (unsigned)(seconds - days * 86400);
+	days += 719468;
+	era = (days >= 0 ? days : days - 146096) / 146097;
+	day_of_era = days - era * 146097;
+	year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 -
+	    day_of_era / 146096) / 365;
+	day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 -
+	    year_of_era / 100);
+	shifted = (5 * day_of_year + 2) / 153;
+	*day = (unsigned)(day_of_year - (153 * shifted + 2) / 5 + 1);
+	*month = (unsigned)(shifted < 10 ? shifted + 3 : shifted - 9);
+	*year = (unsigned)(year_of_era + era * 400 + (*month <= 2 ? 1 : 0));
+}
+
+/* The seven-byte recording date of UTC seconds, at offset 0. False, with
+ * raw untouched, outside 1900-01-01 00:00:00 through 2155-12-31 23:59:59,
+ * the years the format's one-byte field counts from 1900.
+ */
+bool
+iso_date7_encode(int64_t seconds, unsigned char *raw)
+{
+	unsigned year, month, day, clock;
+
+	if (seconds < ISO_DATE7_MIN || seconds > ISO_DATE7_MAX)
+		return (false);
+	civil_from_seconds(seconds, &year, &month, &day, &clock);
+	raw[0] = (unsigned char)(year - 1900);
+	raw[1] = (unsigned char)month;
+	raw[2] = (unsigned char)day;
+	raw[3] = (unsigned char)(clock / 3600);
+	raw[4] = (unsigned char)(clock / 60 % 60);
+	raw[5] = (unsigned char)(clock % 60);
+	raw[6] = 0;
+	return (true);
+}
+
+/* The seventeen-byte descriptor date of whole UTC seconds within the
+ * seven-byte range: sixteen ASCII digits with zero hundredths, then a
+ * zero offset.
+ */
+bool
+iso_date17_encode(int64_t seconds, unsigned char *raw)
+{
+	unsigned year, month, day, clock;
+	unsigned fields[7];
+	static const unsigned widths[7] = { 4, 2, 2, 2, 2, 2, 2 };
+	size_t at;
+
+	if (seconds < ISO_DATE7_MIN || seconds > ISO_DATE7_MAX)
+		return (false);
+	civil_from_seconds(seconds, &year, &month, &day, &clock);
+	fields[0] = year;
+	fields[1] = month;
+	fields[2] = day;
+	fields[3] = clock / 3600;
+	fields[4] = clock / 60 % 60;
+	fields[5] = clock % 60;
+	fields[6] = 0;		/* hundredths */
+	at = 0;
+	for (unsigned i = 0; i < 7; i++) {
+		for (unsigned d = widths[i]; d > 0; d--) {
+			raw[at + d - 1] = (unsigned char)('0' + fields[i] % 10);
+			fields[i] /= 10;
+		}
+		at += widths[i];
+	}
+	raw[DATE17_DIGITS] = 0;
+	return (true);
+}
+
+/* An absent descriptor date: sixteen '0' digits and a zero offset. */
+static void
+date17_absent(unsigned char *raw)
+{
+	memset(raw, '0', DATE17_DIGITS);
+	raw[DATE17_DIGITS] = 0;
+}
+
+/* An identifier field of width bytes holding ASCII text padded with
+ * spaces: one byte per character, or for Joliet big-endian UCS-2 with
+ * U+0020 padding and, for an odd width, a final zero byte.
+ */
+static void
+text_field_put(unsigned char *field, size_t width, const char *text,
+    bool joliet)
+{
+	size_t length = strlen(text);
+
+	if (!joliet) {
+		memset(field, ' ', width);
+		bcopy(text, field, length < width ? length : width);
+		return;
+	}
+	for (size_t i = 0; i < width / 2; i++)
+		fsimg_store_be16(field + 2 * i,
+		    i < length ? (unsigned char)text[i] : ' ');
+	if (width % 2 != 0)
+		field[width - 1] = 0;
+}
+
+/* The length of a record with an identifier of identifier_length bytes
+ * and system_use_length bytes of system use: the identifier's pad byte
+ * when its length is even, then one zero byte when the total is odd, so
+ * every record length is even.
+ */
+size_t
+iso_record_length(size_t identifier_length, size_t system_use_length)
+{
+	size_t length;
+
+	length = DR_IDENTIFIER + identifier_length +
+	    (identifier_length % 2 == 0 ? 1 : 0) + system_use_length;
+	return (length + length % 2);
+}
+
+/* Encode one directory record into out, which holds
+ * iso_record_length() bytes: the extent and data length in both orders,
+ * the recording date, flags, volume sequence number 1, the identifier,
+ * its pad byte and the system use bytes, then a zero byte when needed
+ * for an even length. Returns that length.
+ */
+size_t
+iso_record_encode(const iso_record_fields_t *fields, unsigned char *out)
+{
+	size_t length, used;
+
+	length = iso_record_length(fields->identifier_length,
+	    fields->system_use_length);
+	bzero(out, length);
+	out[DR_LENGTH] = (unsigned char)length;
+	iso_u32both_put(out + DR_EXTENT, fields->extent);
+	iso_u32both_put(out + DR_DATA_LENGTH, fields->data_length);
+	bcopy(fields->date, out + DR_DATE, DATE7_BYTES);
+	out[DR_FLAGS] = fields->flags;
+	iso_u16both_put(out + DR_SEQUENCE, 1);
+	out[DR_IDENTIFIER_LENGTH] = (unsigned char)fields->identifier_length;
+	bcopy(fields->identifier, out + DR_IDENTIFIER,
+	    fields->identifier_length);
+	used = DR_IDENTIFIER + fields->identifier_length +
+	    (fields->identifier_length % 2 == 0 ? 1 : 0);
+	if (fields->system_use_length != 0)
+		bcopy(fields->system_use, out + used,
+		    fields->system_use_length);
+	return (length);
+}
+
+/* Encode a primary (joliet false) or Joliet level 3 supplementary
+ * descriptor into the 2048 bytes at out. Identifier fields are spaces but
+ * for the application identifier FSIMG; the expiration and effective
+ * dates are absent; reserved bytes and the application use field are
+ * zero.
+ */
+void
+iso_volume_descriptor_encode(const iso_volume_fields_t *fields,
+    unsigned char *out)
+{
+	iso_record_fields_t root;
+	bool joliet = fields->joliet;
+
+	bzero(out, ISO_BLOCK_BYTES);
+	out[VD_TYPE] = joliet ? ISO_VD_SUPPLEMENTARY : ISO_VD_PRIMARY;
+	bcopy("CD001", out + VD_IDENTIFIER, 5);
+	out[VD_VERSION] = 1;
+	text_field_put(out + VD_SYSTEM, 32, "", joliet);
+	bcopy(fields->label, out + VD_LABEL, ISO_LABEL_BYTES);
+	iso_u32both_put(out + VD_SPACE_SIZE, fields->volume_space_size);
+	if (joliet) {
+		out[VD_ESCAPES] = '%';
+		out[VD_ESCAPES + 1] = '/';
+		out[VD_ESCAPES + 2] = 'E';
+	}
+	iso_u16both_put(out + VD_SET_SIZE, 1);
+	iso_u16both_put(out + VD_SEQUENCE, 1);
+	iso_u16both_put(out + VD_BLOCK_SIZE, ISO_BLOCK_BYTES);
+	iso_u32both_put(out + VD_PATH_TABLE_SIZE, fields->path_table_bytes);
+	fsimg_store_le32(out + VD_PATH_TABLE_L, fields->path_table_l);
+	fsimg_store_be32(out + VD_PATH_TABLE_M, fields->path_table_m);
+
+	bzero(&root, sizeof(root));
+	root.identifier = (const unsigned char *)"";
+	root.identifier_length = 1;
+	root.extent = fields->root_extent;
+	root.data_length = fields->root_length;
+	root.flags = ISO_FLAG_DIRECTORY;
+	bcopy(fields->root_date, root.date, DATE7_BYTES);
+	iso_record_encode(&root, out + VD_ROOT);
+
+	text_field_put(out + VD_VOLUME_SET, 128, "", joliet);
+	text_field_put(out + VD_PUBLISHER, 128, "", joliet);
+	text_field_put(out + VD_PREPARER, 128, "", joliet);
+	text_field_put(out + VD_APPLICATION, 128, "FSIMG", joliet);
+	for (unsigned i = 0; i < 3; i++)
+		text_field_put(out + VD_COPYRIGHT + 37 * i, 37, "", joliet);
+	bcopy(fields->date, out + VD_DATES, DATE17_BYTES);
+	bcopy(fields->date, out + VD_DATES + DATE17_BYTES, DATE17_BYTES);
+	date17_absent(out + VD_DATES + 2 * DATE17_BYTES);
+	date17_absent(out + VD_DATES + 3 * DATE17_BYTES);
+	out[VD_STRUCTURE_VERSION] = 1;
+}
+
+/* The descriptor set terminator: type 255, CD001, version 1, zeros. */
+void
+iso_terminator_encode(unsigned char *out)
+{
+	bzero(out, ISO_BLOCK_BYTES);
+	out[VD_TYPE] = ISO_VD_TERMINATOR;
+	bcopy("CD001", out + VD_IDENTIFIER, 5);
+	out[VD_VERSION] = 1;
+}
+
+/* Encode a path-table record, type M when big_endian, else type L, into
+ * out: the header, the identifier and a zero pad byte when its length is
+ * odd. Returns the record's length.
+ */
+size_t
+iso_path_record_encode(const iso_path_record_t *record, bool big_endian,
+    unsigned char *out)
+{
+	size_t length;
+
+	length = ISO_PATH_HEADER_BYTES + record->length + record->length % 2;
+	bzero(out, length);
+	out[0] = record->length;
+	out[1] = record->ea_length;
+	if (big_endian) {
+		fsimg_store_be32(out + 2, record->extent);
+		fsimg_store_be16(out + 6, record->parent);
+	} else {
+		fsimg_store_le32(out + 2, record->extent);
+		fsimg_store_le16(out + 6, record->parent);
+	}
+	bcopy(record->identifier, out + ISO_PATH_HEADER_BYTES, record->length);
+	return (length);
 }

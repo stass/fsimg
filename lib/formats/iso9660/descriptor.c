@@ -4,7 +4,7 @@
 #include "config.h"
 
 #include "format.h"
-#include "iso9660.h"
+#include "write-iso9660.h"
 
 static fsimg_status_t iso_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
@@ -52,6 +52,52 @@ const fsimg_format_t fsimg_iso9660_format = {
 	.probe_bytes = ISO_PROBE_BYTES,
 	.probe = iso_probe,
 	.reader = &fsimg_iso9660_reader_ops
+};
+
+/* The writer's variant, unregistered: the reader's record with the
+ * fields only the writer stores, which are narrower than what the
+ * reader presents: no creation time and no attributes, since TF carries
+ * the modification, access and attribute change times and only the
+ * relocation directory is hidden; names of 255 bytes, every target host's
+ * component limit; link targets of 1023 bytes, the most libisofs reads;
+ * and the level setting.
+ */
+static const fsimg_format_variant_t iso_write_variants[] = {
+	{
+		.info = {
+			.name = "iso9660",
+			.profile = "rockridge/joliet/primary",
+			.entry_kinds = FSIMG_ENTRY_FILE |
+			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
+			    FSIMG_ENTRY_FIFO,
+			.metadata_fields = FSIMG_META_MODIFIED |
+			    FSIMG_META_ACCESSED | FSIMG_META_CHANGED |
+			    FSIMG_META_OWNER | FSIMG_META_MODE,
+			.sector_size_mask = ISO_BLOCK_BYTES,
+			.allocation_unit_size_mask = ISO_BLOCK_BYTES,
+			.write_allocation_unit_size_mask = ISO_BLOCK_BYTES,
+			.max_file_bytes = ISO_VOLUME_BLOCKS_MAX *
+			    ISO_BLOCK_BYTES,
+			.max_volume_bytes = ISO_VOLUME_BLOCKS_MAX *
+			    ISO_BLOCK_BYTES,
+			.max_name_utf16_units = ISO_RR_NAME_MAX,
+			.max_link_target_bytes = ISO_LINK_TARGET_MAX,
+			.max_label_bytes = ISO_LABEL_BYTES,
+			.write_settings = FSIMG_SETTING_ISO_LEVEL,
+			.read_settings = FSIMG_SETTING_ISO_VIEW
+		},
+		.id = 0
+	}
+};
+
+const fsimg_format_t fsimg_iso9660_write_format = {
+	.variants = iso_write_variants,
+	.variant_count = sizeof(iso_write_variants) /
+	    sizeof(iso_write_variants[0]),
+	.probe_bytes = ISO_PROBE_BYTES,
+	.probe = iso_probe,
+	.reader = &fsimg_iso9660_reader_ops,
+	.writer = &fsimg_iso9660_writer_ops
 };
 
 /* The identity signature is a volume descriptor at block 16: CD001 after a

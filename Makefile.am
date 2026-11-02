@@ -100,7 +100,9 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/iso9660/names.c lib/formats/iso9660/directory.c \
 	lib/formats/iso9660/read.c lib/formats/iso9660/eltorito.c \
 	lib/formats/iso9660/susp.c lib/formats/iso9660/rockridge.c \
-	lib/formats/iso9660/verify.c \
+	lib/formats/iso9660/verify.c lib/formats/iso9660/write-iso9660.h \
+	lib/formats/iso9660/write-names.c lib/formats/iso9660/write-susp.c \
+	lib/formats/iso9660/write-plan.c lib/formats/iso9660/write-emit.c \
 	compat/host.c compat/host.h compat/private.c compat/private.h \
 	lib/codec/codec.h lib/codec/lzo1x.c lib/codec/nrv2b.c \
 	lib/formats/ifs/ifs.h lib/formats/ifs/descriptor.c \
@@ -153,7 +155,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-metadata-loss \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
-	test-ifs test-iso9660 test-iso9660-faults \
+	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write test-scheme-planning \
 	test-containers test-compression test-gzip-write test-holes test-settings \
@@ -261,6 +263,8 @@ test_iso9660_LDADD = libfsimg.la
 test_iso9660_faults_SOURCES = test/iso9660-faults.c test/test.h \
 	test/iso9660-image.c test/iso9660-image.h
 test_iso9660_faults_LDADD = libfsimg.la
+test_iso9660_write_SOURCES = test/iso9660-write.c test/test.h
+test_iso9660_write_LDADD = libfsimg.la
 test_iso9660_scale_SOURCES = test/iso9660-scale.c test/test.h test/scale.h
 test_iso9660_scale_LDADD = libfsimg.la
 test_ifs_SOURCES = test/ifs.c test/test.h test/scale.h

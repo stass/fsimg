@@ -131,6 +131,7 @@ umask. Timestamp defaults follow the format's explicit policy:
 | QNX6 and ImageFS | UTC host clock sampled once during planning, within 0 through 4294967295 | Epoch within that same interval |
 | HFS Plus | UTC host clock sampled once during planning, within 1904-01-01 00:00:00 through 2040-02-06 06:28:15 UTC | Epoch within that same interval |
 | UDF | UTC host clock sampled once during planning, within years 1 through 9999 | Epoch within that same interval |
+| ISO 9660 | UTC host clock sampled once during planning, within 1900-01-01 00:00:00 through 2155-12-31 23:59:59 UTC | Epoch within that same interval |
 
 The seconds helpers do not sample a clock. Drivers resolve and validate the
 fallback once and use it for absent times, out-of-range optional times and

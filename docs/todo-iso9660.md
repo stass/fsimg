@@ -33,11 +33,18 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   cannot name the directory's path, so the message names the condition
   only. A common way for `prepare` to name a child would serve every
   driver.
-* [High] **Writer** (`lib/formats/iso9660/write-*.c`,
-  `test/iso9660-write.c`): stages 9 and 10. The writer lands unregistered
-  and is registered after every stage 10 consumer agrees in every view.
-  Registration documents `level=`, `boot=`, `efiboot=` and `bootload=` in
-  the creation `-o` help and the man page's CREATION settings.
+* [High] **Writer qualification and registration**
+  (`lib/formats/iso9660/descriptor.c`, `test/iso9660-integration.sh.in`):
+  stage 10. The writer lands unregistered, reached through
+  `fsimg_iso9660_write_format`. Remaining: the integration script's
+  writer cases; the Linux and FreeBSD kernel mounts in each view, which
+  this Linux container cannot run (no `isofs` module); macOS and FreeBSD
+  runs of `test-iso9660-write`. Registration merges the writer's
+  capability record into the reader's, whose metadata fields include the
+  creation time and attributes the writer does not store, so the writer
+  must then report those losses itself; and documents `level=`, `boot=`,
+  `efiboot=` and `bootload=` in the creation `-o` help and the man page's
+  CREATION settings.
 * [Medium] **Deep trees by relocation** (`lib/formats/iso9660/write-plan.c`):
   stage 11. Until it lands, planning refuses a tree that needs relocation,
   by depth or by path length, naming the first directory to relocate.
