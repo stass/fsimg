@@ -1,0 +1,18 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+set -eu
+ulimit -c 0
+if test -z '@RUBY@' || test -z "${FSIMG_SEABIOS:-}" ||
+    test -z "${FSIMG_OVMF_CODE:-}" || test -z "${FSIMG_OVMF_VARS:-}"; then
+    echo 'SKIP: Ruby and FSIMG_SEABIOS, FSIMG_OVMF_CODE, FSIMG_OVMF_VARS are required'
+    exit 77
+fi
+for tool in "${NASM:-nasm}" "${EFI_CC:-clang}" "${LLD_LINK:-lld-link}" \
+    "${QEMU_SYSTEM_X86_64:-qemu-system-x86_64}" xorriso; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "SKIP: missing firmware test tool: $tool"
+        exit 77
+    fi
+done
+exec '@RUBY@' '@abs_top_srcdir@/test/iso9660-boot.rb' '@abs_top_builddir@'

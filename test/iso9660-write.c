@@ -2130,6 +2130,201 @@ test_large_file(void)
 	fixture_close(&fixture);
 }
 
+/* Find a file extent in the primary root using only on-disk offsets. */
+static uint32_t
+boot_file_extent(const memory_sink_t *sink, const char *name)
+{
+	const unsigned char *descriptor = sink->bytes + 16 * BLOCK;
+	const unsigned char *record;
+	uint64_t at = (uint64_t)le32(descriptor + 158) * BLOCK;
+	uint64_t end = at + le32(descriptor + 166);
+
+	CHECK(end <= sink->length);
+	while (at < end) {
+		record = sink->bytes + at;
+		if (record[0] == 0) {
+			at += BLOCK - at % BLOCK;
+			continue;
+		}
+		CHECK(record[0] >= 34 && at + record[0] <= end);
+		CHECK(33u + record[32] <= record[0]);
+		if (record[32] == strlen(name) &&
+		    bcmp(record + 33, name, record[32]) == 0)
+			return (le32(record + 2));
+		at += record[0];
+	}
+	CHECK(false);
+	return (0);
+}
+
+/* BIOS, EFI and combined catalogs point at ordinary files, in every
+ * hierarchy. Check their wire format independently before using the reader.
+ */
+static void
+test_boot_catalogs(void)
+{
+	static const spec_t files[] = {
+		{ "/bios.img", FSIMG_ENTRY_FILE, 4096, 1, NULL, NULL },
+		{ "/efi.img", FSIMG_ENTRY_FILE, 8193, 2, NULL, NULL }
+	};
+	static const fsimg_iso_view_t views[] = { FSIMG_ISO_VIEW_ROCKRIDGE,
+	    FSIMG_ISO_VIEW_JOLIET, FSIMG_ISO_VIEW_PRIMARY };
+	fsimg_write_options_t options;
+	fsimg_read_options_t read_options;
+	fsimg_verify_report_t report;
+	fsimg_reader_t *reader;
+	fsimg_io_t *io;
+	memory_sink_t sink;
+	fixture_t fixture;
+	const unsigned char *record, *catalog, *entry;
+	uint32_t catalog_block, sum;
+
+	for (unsigned kinds = 1; kinds <= 3; kinds++) {
+		reproducible_options(&options);
+		options.boot_bios = (kinds & 1) != 0 ? "/bios.img" : NULL;
+		options.boot_efi = (kinds & 2) != 0 ? "/efi.img" : NULL;
+		fixture_open(&fixture, &options);
+		add_specs(&fixture, files, 2, false);
+		CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+		record = sink.bytes + 17 * BLOCK;
+		CHECK(record[0] == 0 && bcmp(record + 1, "CD001", 5) == 0);
+		CHECK(record[6] == 1 && bcmp(record + 7,
+		    "EL TORITO SPECIFICATION", 23) == 0);
+		catalog_block = le32(record + 71);
+		CHECK(catalog_block > 19 && catalog_block < sink.length / BLOCK);
+		catalog = sink.bytes + (uint64_t)catalog_block * BLOCK;
+		CHECK(catalog[0] == 1 && catalog[1] == (kinds == 2 ? 0xef : 0));
+		CHECK(catalog[30] == 0x55 && catalog[31] == 0xaa);
+		sum = 0;
+		for (unsigned i = 0; i < 32; i += 2)
+			sum += le16(catalog + i);
+		CHECK((sum & 0xffff) == 0);
+		entry = catalog + 32;
+		CHECK(entry[0] == 0x88 && entry[1] == 0);
+		CHECK(le16(entry + 6) == (kinds == 2 ? 17 : 4));
+		CHECK(le32(entry + 8) > catalog_block);
+		CHECK(le32(entry + 8) == boot_file_extent(&sink,
+		    kinds == 2 ? "EFI.IMG;1" : "BIOS.IMG;1"));
+		if (kinds == 3) {
+			CHECK(catalog[64] == 0x91 && catalog[65] == 0xef);
+			CHECK(le16(catalog + 66) == 1);
+			CHECK(catalog[96] == 0x88 && le16(catalog + 102) == 17);
+			CHECK(le32(catalog + 104) > le32(entry + 8));
+			CHECK(le32(catalog + 104) ==
+			    boot_file_extent(&sink, "EFI.IMG;1"));
+		}
+		for (unsigned f = 0; f < 2; f++) {
+			uint64_t offset = (uint64_t)boot_file_extent(&sink,
+			    f == 0 ? "BIOS.IMG;1" : "EFI.IMG;1") * BLOCK;
+
+			CHECK(offset + files[f].size <= sink.length);
+			for (uint64_t i = 0; i < files[f].size; i++)
+				CHECK(sink.bytes[offset + i] == content_byte(f + 1, i));
+		}
+		CHECK(all_zero(catalog + (kinds == 3 ? 128 : 64),
+		    BLOCK - (kinds == 3 ? 128 : 64)));
+		CHECK(memory_io(fixture.ctx, &sink, false, &io) == FSIMG_OK);
+		for (unsigned v = 0; v < 3; v++) {
+			fsimg_read_options_init(&read_options);
+			read_options.iso_view = views[v];
+			CHECK(fsimg_reader_open(fixture.ctx, io, &read_options,
+			    &reader, NULL) == FSIMG_OK);
+			CHECK(fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report,
+			    NULL) == FSIMG_OK);
+			CHECK(report.complete && report.files == 2);
+			fsimg_reader_free(reader);
+		}
+		fsimg_io_free(io);
+		free(sink.bytes);
+		fixture_close(&fixture);
+	}
+}
+
+/* Settings and image geometry fail during planning, before emission. */
+static void
+test_boot_refusals(void)
+{
+	static const spec_t images[] = {
+		{ "/boot", FSIMG_ENTRY_FILE, 0, 0, NULL, NULL },
+		{ "/boot", FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL },
+		{ "/boot", FSIMG_ENTRY_SYMLINK, 0, 0, NULL, "file" },
+		{ "/boot", FSIMG_ENTRY_FILE, UINT64_C(0x100000000), 0, NULL, NULL }
+	};
+	spec_t small = { "/boot", FSIMG_ENTRY_FILE, 1, 0, NULL, NULL };
+	fsimg_write_options_t options;
+	fixture_t fixture;
+
+	reproducible_options(&options);
+	options.boot_bios = "/boot";
+	CHECK(plan_status(&options, &small, 0, NULL) == FSIMG_EINVAL);
+	for (unsigned i = 0; i < sizeof(images) / sizeof(images[0]); i++)
+		CHECK(plan_status(&options, images + i, 1, NULL) == FSIMG_EINVAL);
+	CHECK(plan_status(&options, &small, 1, NULL) == FSIMG_OK);
+	options.boot_load_sectors = 5;
+	CHECK(plan_status(&options, &small, 1, NULL) == FSIMG_EINVAL);
+	options.boot_load_sectors = 4;
+	CHECK(plan_status(&options, &small, 1, NULL) == FSIMG_OK);
+	options.boot_bios = NULL;
+	CHECK(fixture_open_with(&fixture, &options, 1, true) == FSIMG_EINVAL);
+	fixture_close(&fixture);
+	options.boot_bios = "/boot";
+	options.boot_load_sectors = 65536;
+	CHECK(fixture_open_with(&fixture, &options, 1, true) == FSIMG_EINVAL);
+	fixture_close(&fixture);
+	options.boot_load_sectors = 0;
+	options.boot_bios = NULL;
+	options.boot_efi = "/boot";
+	CHECK(plan_status(&options, &small, 0, NULL) == FSIMG_EINVAL);
+	for (unsigned i = 0; i < sizeof(images) / sizeof(images[0]); i++)
+		CHECK(plan_status(&options, images + i, 1, NULL) == FSIMG_EINVAL);
+}
+
+/* EFI counts include a partial final sector and become zero above the
+ * catalog's 16-bit field. The sparse sink keeps the test payload bounded.
+ */
+static void
+test_efi_sector_counts(void)
+{
+	fsimg_write_options_t options;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_io_ops_t ops;
+	fsimg_io_t *io;
+	fixture_t fixture;
+	sparse_sink_t sink;
+	spec_t file = { "/boot", FSIMG_ENTRY_FILE, 0, 0, NULL, NULL };
+	uint32_t catalog;
+
+	for (unsigned extra = 0; extra < 2; extra++) {
+		reproducible_options(&options);
+		options.boot_efi = "/boot";
+		file.size = UINT64_C(65535) * 512 + extra;
+		fixture_open(&fixture, &options);
+		CHECK(add_one(&fixture, &file) == FSIMG_OK);
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		sink.length = info.volume_bytes;
+		sink.bytes = malloc(SPARSE_BYTES);
+		CHECK(sink.bytes != NULL);
+		memset(sink.bytes, POISON, SPARSE_BYTES);
+		fsimg_io_ops_init(&ops);
+		ops.get_size = sparse_size;
+		ops.read_at = sparse_read;
+		ops.write_at = sparse_write;
+		ops.zero_range = sparse_zero;
+		ops.flush = sparse_flush;
+		CHECK(fsimg_io_from_callbacks(fixture.ctx, &ops, &sink, &io,
+		    NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_emit(fixture.writer, io, NULL) == FSIMG_OK);
+		catalog = le32(sink.bytes + 17 * BLOCK + 71);
+		CHECK(le16(sink.bytes + (uint64_t)catalog * BLOCK + 38) ==
+		    (extra == 0 ? 65535 : 0));
+		fsimg_io_free(io);
+		free(sink.bytes);
+		fixture_close(&fixture);
+	}
+}
+
 /* Settings outside the profile are refused at construction. */
 static void
 test_validation(void)
@@ -2172,7 +2367,7 @@ test_validation(void)
 	fixture_close(&fixture);
 	o = options;
 	o.boot_bios = "/boot.img";
-	CHECK(fixture_open_with(&fixture, &o, 1, true) < FSIMG_OK);
+	CHECK(fixture_open_with(&fixture, &o, 1, true) == FSIMG_OK);
 	fixture_close(&fixture);
 	o = options;
 	o.label = "sixteen chars ok";
@@ -2485,6 +2680,8 @@ test_faults(void)
 	fsimg_status_t status;
 
 	reproducible_options(&options);
+	options.boot_bios = "/big";
+	options.boot_efi = "/big";
 	fixture_open(&fixture, &options);
 	add_specs(&fixture, tree, TREE_COUNT, false);
 	CHECK(emit_memory(&fixture, &reference, NULL) == FSIMG_OK);
@@ -2537,6 +2734,8 @@ test_injected(void)
 	bool succeeded;
 
 	reproducible_options(&options);
+	options.boot_bios = "/big";
+	options.boot_efi = "/big";
 	succeeded = false;
 	for (uint64_t attempt = 1; attempt < 8192 && !succeeded; attempt++) {
 		fixture_open(&fixture, &options);
@@ -2616,6 +2815,38 @@ create_external(const char *path, const char *level, bool short_names)
 	return (0);
 }
 
+/* Firmware qualification uses real files, scanned through common sources.
+ * A dash omits a platform; boot paths are image paths within directory.
+ */
+static int
+create_boot_external(const char *path, const char *directory,
+    const char *bios, const char *efi)
+{
+	fsimg_write_options_t options;
+	memory_sink_t sink;
+	fixture_t fixture;
+	FILE *out;
+	int source;
+
+	reproducible_options(&options);
+	options.flags |= FSIMG_WRITE_ALLOW_LOSS;
+	options.boot_bios = strcmp(bios, "-") == 0 ? NULL : bios;
+	options.boot_efi = strcmp(efi, "-") == 0 ? NULL : efi;
+	fixture_open(&fixture, &options);
+	source = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(source != -1);
+	CHECK(fsimg_writer_add_tree(fixture.writer, source, "/", NULL) == FSIMG_OK);
+	CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+	CHECK(close(source) == 0);
+	fixture_close(&fixture);
+	out = fopen(path, "wbx");
+	CHECK(out != NULL);
+	CHECK(fwrite(sink.bytes, 1, (size_t)sink.length, out) == sink.length);
+	CHECK(fclose(out) == 0);
+	free(sink.bytes);
+	return (0);
+}
+
 /* Run one test; ISO9660_WRITE_DEBUG names each as it starts. */
 #define RUN(test) do { \
 	if (getenv("ISO9660_WRITE_DEBUG") != NULL) \
@@ -2626,6 +2857,8 @@ create_external(const char *path, const char *level, bool short_names)
 int
 main(int argc, char **argv)
 {
+	if (argc == 6 && strcmp(argv[1], "--create-boot") == 0)
+		return (create_boot_external(argv[2], argv[3], argv[4], argv[5]));
 	if ((argc == 4 || argc == 5) && strcmp(argv[1], "--create") == 0)
 		return (create_external(argv[2], argv[3], argc == 5 &&
 		    strcmp(argv[4], "short") == 0));
@@ -2636,6 +2869,9 @@ main(int argc, char **argv)
 	RUN(test_multiblock_path_tables);
 	RUN(test_unicode_label);
 	RUN(test_directory_count_limit);
+	RUN(test_boot_catalogs);
+	RUN(test_boot_refusals);
+	RUN(test_efi_sector_counts);
 	RUN(test_empty);
 	RUN(test_relocation_refused);
 	RUN(test_tree);

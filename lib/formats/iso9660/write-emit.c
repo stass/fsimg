@@ -14,11 +14,13 @@
  * the system area, every unused byte of a directory block, a path-table
  * block or a continuation block, and every byte after a file's content
  * in its last block are zero already. The driver writes, in order:
- *   1. the primary descriptor, the Joliet descriptor and the terminator;
+ *   1. the primary descriptor, optional boot descriptor, Joliet descriptor
+ *	and terminator;
  *   2. each hierarchy's type-L and type-M path tables;
- *   3. each hierarchy's directories in path-table order, and with each
+ *   3. the boot catalog, when boot images were selected;
+ *   4. each hierarchy's directories in path-table order, and with each
  *	primary record its continuation fragments;
- *   4. each file's payload.
+ *   5. each file's payload.
  * Every byte comes from a row, a stream, the layout or a profile
  * constant, and records are packed by the same rule planning sized them
  * with, so a directory that does not end where planning said it would is
@@ -52,6 +54,8 @@ static fsimg_status_t sequence_flush(sequence_t *, fsimg_error_t *);
 static fsimg_status_t sequence_put(sequence_t *, const unsigned char *,
     size_t, fsimg_error_t *);
 static fsimg_status_t emit_descriptors(iso_plan_t *, fsimg_emit_t *,
+    fsimg_error_t *);
+static fsimg_status_t emit_boot_catalog(iso_plan_t *, fsimg_emit_t *,
     fsimg_error_t *);
 static fsimg_status_t emit_path_tables(iso_plan_t *, iso_hierarchy_t,
     fsimg_emit_t *, fsimg_error_t *);
@@ -101,7 +105,8 @@ sequence_put(sequence_t *sequence, const unsigned char *bytes, size_t length,
 	return (FSIMG_OK);
 }
 
-/* Step 1: blocks 16 to 18. Both descriptors carry the same geometry and
+/* Step 1: three or four blocks from block 16. Both volume descriptors carry
+ * the same geometry and
  * dates; each names its own hierarchy's root and path tables.
  */
 static fsimg_status_t
@@ -110,6 +115,8 @@ emit_descriptors(iso_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	unsigned char *raw = fsimg_emit_buffer(emit);
 	iso_volume_fields_t fields;
 	iso_row_t root;
+	bool boot = plan->boot_catalog_block != 0;
+	unsigned index, descriptors = boot ? 4 : 3;
 	fsimg_status_t status;
 
 	status = iso_row_get(plan, 0, &root, error);
@@ -127,13 +134,49 @@ emit_descriptors(iso_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 		bcopy(plan->label[h], fields.label, ISO_LABEL_BYTES);
 		bcopy(root.modified, fields.root_date, ISO_DATE7_BYTES);
 		bcopy(plan->volume_date, fields.date, ISO_DATE17_BYTES);
-		iso_volume_descriptor_encode(&fields,
-		    raw + h * ISO_BLOCK_BYTES);
+		index = h == ISO_JOLIET && boot ? 2 : h;
+		iso_volume_descriptor_encode(&fields, raw + index * ISO_BLOCK_BYTES);
 	}
-	iso_terminator_encode(raw + 2 * ISO_BLOCK_BYTES);
+	if (boot)
+		iso_boot_record_encode(plan->boot_catalog_block, raw + ISO_BLOCK_BYTES);
+	iso_terminator_encode(raw + (descriptors - 1) * ISO_BLOCK_BYTES);
 	return (fsimg_emit_write(emit,
 	    (uint64_t)ISO_SYSTEM_BLOCKS * ISO_BLOCK_BYTES, raw,
-	    3 * ISO_BLOCK_BYTES, error));
+	    descriptors * ISO_BLOCK_BYTES, error));
+}
+
+/* Boot entries name the same payload extents as the ordinary files. */
+static fsimg_status_t
+emit_boot_catalog(iso_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
+{
+	iso_boot_entry_t bios = { 0 }, efi = { 0 };
+	iso_row_t row;
+	uint64_t sectors;
+	fsimg_status_t status;
+
+	if (plan->boot_catalog_block == 0)
+		return (FSIMG_OK);
+	if (plan->boot_bios != 0) {
+		status = iso_row_get(plan, plan->boot_bios, &row, error);
+		if (status != FSIMG_OK)
+			return (status);
+		bios.image_block = row.first_block;
+		bios.sector_count = (uint16_t)
+		    plan->common.writer->options.boot_load_sectors;
+	}
+	if (plan->boot_efi != 0) {
+		status = iso_row_get(plan, plan->boot_efi, &row, error);
+		if (status != FSIMG_OK)
+			return (status);
+		efi.image_block = row.first_block;
+		sectors = (row.size + 511) / 512;
+		efi.sector_count = sectors <= UINT16_MAX ? (uint16_t)sectors : 0;
+	}
+	iso_boot_catalog_encode(plan->boot_bios != 0 ? &bios : NULL,
+	    plan->boot_efi != 0 ? &efi : NULL, plan->block);
+	return (fsimg_emit_write(emit,
+	    (uint64_t)plan->boot_catalog_block * ISO_BLOCK_BYTES,
+	    plan->block, ISO_BLOCK_BYTES, error));
 }
 
 /* Step 2: a hierarchy's two path tables, written together from its path
@@ -410,7 +453,7 @@ emit_child(directory_out_t *out, iso_hierarchy_t hierarchy,
 	return (FSIMG_OK);
 }
 
-/* Step 3 for directory id: its dot records, then its children in
+/* Step 4 for directory id: its dot records, then its children in
  * name-stream order, block by block.
  */
 static fsimg_status_t
@@ -468,7 +511,7 @@ emit_directory(iso_plan_t *plan, iso_hierarchy_t hierarchy,
 	return (FSIMG_OK);
 }
 
-/* Step 3: a hierarchy's directories in path-table order. */
+/* Step 4: a hierarchy's directories in path-table order. */
 static fsimg_status_t
 emit_directories(iso_plan_t *plan, iso_hierarchy_t hierarchy,
     fsimg_emit_t *emit, fsimg_error_t *error)
@@ -493,7 +536,7 @@ emit_directories(iso_plan_t *plan, iso_hierarchy_t hierarchy,
 	}
 }
 
-/* Step 4: each file's payload into its contiguous sections. An empty
+/* Step 5: each file's payload into its contiguous sections. An empty
  * file is a copy without regions, which still opens and validates its
  * source.
  */
@@ -540,6 +583,8 @@ iso_write_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,
 	for (unsigned h = 0; status == FSIMG_OK && h < ISO_HIERARCHIES; h++)
 		status = emit_path_tables(plan, (iso_hierarchy_t)h, emit,
 		    error);
+	if (status == FSIMG_OK)
+		status = emit_boot_catalog(plan, emit, error);
 	for (unsigned h = 0; status == FSIMG_OK && h < ISO_HIERARCHIES; h++)
 		status = emit_directories(plan, (iso_hierarchy_t)h, emit,
 		    error);

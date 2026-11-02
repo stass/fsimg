@@ -32,6 +32,7 @@
 #define VALIDATION_PLATFORM	1u
 #define VALIDATION_RESERVED	2u	/* two zero bytes */
 #define VALIDATION_KEY		30u	/* 55 AA */
+#define VALIDATION_CHECKSUM	28u
 
 /* Initial and section entry bytes and values. */
 #define BOOT_INDICATOR		0u
@@ -58,6 +59,53 @@
 #define PLATFORM_MAC		2u
 
 static const char eltorito_id[BR_ID_BYTES] = "EL TORITO SPECIFICATION";
+
+/* A boot descriptor naming the writer's hidden catalog. */
+void
+iso_boot_record_encode(uint32_t catalog, unsigned char *out)
+{
+	bzero(out, ISO_BLOCK_BYTES);
+	bcopy("CD001", out + 1, 5);
+	out[6] = 1;
+	bcopy(eltorito_id, out + BR_SYSTEM_ID, BR_ID_BYTES);
+	fsimg_store_le32(out + BR_CATALOG, catalog);
+}
+
+/* The writer packages every image unchanged, as no-emulation media. */
+static void
+boot_entry_encode(const iso_boot_entry_t *entry, unsigned char *out)
+{
+	out[BOOT_INDICATOR] = BOOTABLE;
+	fsimg_store_le16(out + BOOT_SECTOR_COUNT, entry->sector_count);
+	fsimg_store_le32(out + BOOT_IMAGE_BLOCK, entry->image_block);
+}
+
+/* One or both images are present. BIOS takes the initial entry; EFI is
+ * either that entry alone or one entry in a final EFI section. The caller
+ * supplies a block; zeroing it initializes all unused and reserved bytes.
+ */
+void
+iso_boot_catalog_encode(const iso_boot_entry_t *bios,
+    const iso_boot_entry_t *efi, unsigned char *out)
+{
+	uint32_t sum = 0;
+
+	bzero(out, ISO_BLOCK_BYTES);
+	out[0] = VALIDATION_HEADER_ID;
+	out[VALIDATION_PLATFORM] = bios != NULL ? ISO_BOOT_X86 : ISO_BOOT_EFI;
+	out[VALIDATION_KEY] = 0x55;
+	out[VALIDATION_KEY + 1] = 0xaa;
+	for (unsigned i = 0; i < ENTRY_BYTES; i += 2)
+		sum += fsimg_load_le16(out + i);
+	fsimg_store_le16(out + VALIDATION_CHECKSUM, (uint16_t)(0u - sum));
+	boot_entry_encode(bios != NULL ? bios : efi, out + ENTRY_BYTES);
+	if (bios != NULL && efi != NULL) {
+		out[2 * ENTRY_BYTES] = SECTION_LAST;
+		out[2 * ENTRY_BYTES + SECTION_PLATFORM] = ISO_BOOT_EFI;
+		fsimg_store_le16(out + 2 * ENTRY_BYTES + SECTION_COUNT, 1);
+		boot_entry_encode(efi, out + 3 * ENTRY_BYTES);
+	}
+}
 
 /* Platform IDs of the reader profile: x86, PowerPC, Mac and EFI. */
 static bool

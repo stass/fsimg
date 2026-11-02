@@ -2299,3 +2299,39 @@ report unsupported on macOS; their Linux checks are separate.
 `gmake -j32 test-iso9660-write test-iso9660 test-iso9660-faults`, followed
 by all three executables, passes on FreeBSD 16. Kernel-mount qualification
 requires comparisons of each view's complete manifest on Linux and FreeBSD.
+
+### ISO 9660 firmware checks
+
+`test/iso9660-boot.sh` assembles the project-owned BIOS image with NASM,
+cross-compiles the project-owned EFI application with clang and lld-link,
+and creates its FAT12 EFI system image with fsimg. Both source fixtures
+are BSD-2-Clause under `test/fixtures/iso9660/`; no firmware application
+binary is imported or distributed. The test helper's `--create-boot`
+operation creates BIOS-only, EFI-only and combined images through the
+unregistered writer. Each boot image remains an ordinary file with its
+original bytes. The structural C tests check catalog checksums, exact file
+extents and payloads, every view's verification, setting refusals, BIOS
+load bounds and EFI sector-count boundaries independently.
+
+The firmware check compares the catalogs with xorriso, then boots each
+applicable image in QEMU with SeaBIOS and OVMF. Each application reports
+a serial marker and exits through the test VM's debug port. VMs use TCG,
+have no network interface or host disk, and are killed after 20 seconds.
+Each OVMF run gets a disposable copy of the variable store. The check
+requires all three firmware paths and skips explicitly when they or its
+development tools are absent. For the Homebrew QEMU and lld packages:
+
+```sh
+LLD_LINK=/usr/local/opt/lld/bin/lld-link \
+FSIMG_SEABIOS=/usr/local/share/qemu/bios.bin \
+FSIMG_OVMF_CODE=/usr/local/share/qemu/edk2-x86_64-code.fd \
+FSIMG_OVMF_VARS=/usr/local/share/qemu/edk2-i386-vars.fd \
+    sh test/iso9660-boot.sh
+```
+
+The macOS firmware run passes BIOS-only, EFI-only and combined images with
+QEMU 11.1.2 and SeaBIOS 1.17.0. SeaBIOS executes a catalog with a flipped
+checksum, so that mutation is a negative fsimg verification test. The
+firmware refusal test damages the validation key and confirms the BIOS
+marker is absent through the timeout. Firmware execution is evidence that
+the image boots, not that firmware validates its catalog's integrity.

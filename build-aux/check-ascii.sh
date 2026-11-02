@@ -12,7 +12,7 @@ find "$1/include" "$1/lib" "$1/compat" "$1/cmd" "$1/test" "$1/.github" \
     -type f \( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.sh' \
     -o -name '*.yml' -o -name '*.am' -o -name '*.ac' -o -name '*.py' \
     -o -name '*.sh.in' -o -name '*.1' -o -name '*.3' -o -name '*.rb' \
-    -o -name '*.json' -o -name '*.patch' -o -name Dockerfile \
+    -o -name '*.json' -o -name '*.patch' -o -name '*.asm' -o -name Dockerfile \
     -o -name Gemfile -o -name Gemfile.lock \
     -o -path "$1/test/spec/bin/*" \) \
     -exec awk '/[^\001-\177]/ { print FILENAME ":" FNR ": non-ASCII byte"; bad=1 } END { if (bad) exit 1 }' {} +

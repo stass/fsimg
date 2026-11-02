@@ -168,14 +168,15 @@ TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
 	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
 	test/compression-integration.sh test/cli.sh test/baseline.sh \
-	test/spec.sh test/iso9660-corpus-check.sh test/iso9660-integration.sh
+	test/spec.sh test/iso9660-corpus-check.sh test/iso9660-integration.sh \
+	test/iso9660-boot.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
 	test/compression-integration.sh test/cli.sh test/baseline.sh \
 	test/spec.sh \
-	test/iso9660-corpus-check.sh test/iso9660-integration.sh \
+	test/iso9660-corpus-check.sh test/iso9660-integration.sh test/iso9660-boot.sh \
 	test/codec-integration.sh
 # The scalar codecs, built once with each signedness of plain char.
 test_endian_SOURCES = test/endian.c test/test.h lib/core/fsimg-endian.h
@@ -393,6 +394,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/iso9660-corpus-test.rb test/iso9660-corpus-check.sh.in \
 	test/iso9660-evidence.rb test/iso9660-integration.sh.in \
 	test/iso9660-integration.rb test/iso9660-scale.c test/iso9660-faults.c \
+	test/iso9660-boot.rb test/iso9660-boot.sh.in \
+	test/fixtures/iso9660/bios.asm test/fixtures/iso9660/efi.c \
 	test/iso9660-image.c test/iso9660-image.h \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \

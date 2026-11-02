@@ -55,6 +55,8 @@ static fsimg_status_t encode_metadata(iso_plan_t *, const fsimg_entry_t *,
     iso_row_t *, fsimg_error_t *);
 static fsimg_status_t plan_entry(iso_plan_t *, const fsimg_catalog_entry_t *,
     fsimg_error_t *);
+static fsimg_status_t plan_boot_entry(iso_plan_t *,
+    const fsimg_catalog_entry_t *, fsimg_error_t *);
 static fsimg_status_t plan_entries(iso_plan_t *, fsimg_error_t *);
 static fsimg_status_t check_depth(iso_plan_t *, fsimg_error_t *);
 static fsimg_status_t number_directories(iso_plan_t *, iso_hierarchy_t,
@@ -119,6 +121,12 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 {
 	static const char default_label[] = "CDROM";
 
+	if (options->boot_load_sectors > UINT16_MAX ||
+	    (options->boot_bios == NULL && options->boot_load_sectors != 0))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "bootload requires boot and must fit in 16 bits"));
+	if (options->boot_bios != NULL && options->boot_load_sectors == 0)
+		options->boot_load_sectors = 4;
 	if ((options->sector_bytes != 0 &&
 	    options->sector_bytes != ISO_BLOCK_BYTES) ||
 	    (options->allocation_unit_bytes != 0 &&
@@ -492,6 +500,39 @@ encode_metadata(iso_plan_t *plan, const fsimg_entry_t *entry, iso_row_t *row,
 	return (FSIMG_OK);
 }
 
+/* Match boot settings during the catalog pass. Each selected entry is an
+ * ordinary file; the catalog references its planned payload unchanged.
+ */
+static fsimg_status_t
+plan_boot_entry(iso_plan_t *plan, const fsimg_catalog_entry_t *catalog,
+    fsimg_error_t *error)
+{
+	const fsimg_write_options_t *options = &plan->common.writer->options;
+	const fsimg_entry_t *entry = &catalog->entry;
+	bool bios, efi;
+
+	bios = options->boot_bios != NULL &&
+	    strcmp(entry->path, options->boot_bios) == 0;
+	efi = options->boot_efi != NULL &&
+	    strcmp(entry->path, options->boot_efi) == 0;
+	if (!bios && !efi)
+		return (FSIMG_OK);
+	if (entry->kind != FSIMG_ENTRY_FILE || entry->size == 0 ||
+	    entry->size > UINT32_MAX)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    bios ? "boot must name a nonempty single-section regular file" :
+		    "efiboot must name a nonempty single-section regular file"));
+	if (bios && iso_boot_image_blocks((uint16_t)options->boot_load_sectors) >
+	    ISO_BLOCKS(entry->size))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "bootload exceeds the boot image's allocated blocks"));
+	if (bios)
+		plan->boot_bios = catalog->id;
+	if (efi)
+		plan->boot_efi = catalog->id;
+	return (FSIMG_OK);
+}
+
 /* One entry's row: its name within the Rock Ridge bound, its metadata, a
  * file's size within the level, and one more link on its parent when it
  * is a directory.
@@ -511,6 +552,9 @@ plan_entry(iso_plan_t *plan, const fsimg_catalog_entry_t *catalog,
 		fsimg_error_path(error, entry->path);
 		return (status);
 	}
+	status = plan_boot_entry(plan, catalog, error);
+	if (status != FSIMG_OK)
+		return (status);
 	bzero(&row, sizeof(row));
 	row.kind = entry->kind;
 	row.links = entry->kind == FSIMG_ENTRY_DIRECTORY ? 2 : 1;
@@ -576,7 +620,15 @@ plan_entries(iso_plan_t *plan, fsimg_error_t *error)
 		if (status == FSIMG_OK)
 			status = plan_entry(plan, catalog, error);
 	}
-	return (status);
+	if (status != FSIMG_OK)
+		return (status);
+	if (writer->options.boot_bios != NULL && plan->boot_bios == 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "boot names no file in the image"));
+	if (writer->options.boot_efi != NULL && plan->boot_efi == 0)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+		    "efiboot names no file in the image"));
+	return (FSIMG_OK);
 }
 
 /*
@@ -996,13 +1048,18 @@ layout(iso_plan_t *plan, fsimg_error_t *error)
 	uint64_t next, requested, table_blocks;
 	fsimg_status_t status;
 
-	/* The primary descriptor, the Joliet descriptor and the terminator. */
-	next = ISO_SYSTEM_BLOCKS + 3;
+	/* Three descriptors, plus the boot descriptor when images are selected. */
+	next = ISO_SYSTEM_BLOCKS + 3 +
+	    (plan->boot_bios != 0 || plan->boot_efi != 0 ? 1 : 0);
 	for (unsigned h = 0; h < ISO_HIERARCHIES; h++) {
 		table_blocks = ISO_BLOCKS(plan->path_bytes[h]);
 		plan->path_l[h] = (uint32_t)next;
 		plan->path_m[h] = (uint32_t)(next + table_blocks);
 		next += 2 * table_blocks;
+	}
+	if (plan->boot_bios != 0 || plan->boot_efi != 0) {
+		plan->boot_catalog_block = (uint32_t)next;
+		next++;
 	}
 	status = place_directories(plan, ISO_PRIMARY, &next, error);
 	if (status != FSIMG_OK)

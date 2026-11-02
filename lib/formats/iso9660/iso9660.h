@@ -408,6 +408,9 @@ fsimg_status_t iso_block_read(fsimg_reader_t *, uint64_t, fsimg_error_t *);
 const iso_descriptor_t *iso_hierarchy(const fsimg_iso9660_reader_t *);
 
 /* eltorito.c */
+void iso_boot_record_encode(uint32_t, unsigned char *);
+void iso_boot_catalog_encode(const iso_boot_entry_t *,
+    const iso_boot_entry_t *, unsigned char *);
 uint64_t iso_boot_image_blocks(uint16_t);
 fsimg_status_t iso_boot_record_decode(const unsigned char *, iso_boot_t *,
     fsimg_error_t *);

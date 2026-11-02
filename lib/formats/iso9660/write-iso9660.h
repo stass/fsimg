@@ -19,8 +19,9 @@
  * sizing and emission alike; write-emit.c writes every structure once.
  *
  * Block layout, in order: the system area (zero), the primary descriptor
- * at block 16, the Joliet descriptor, the terminator, the primary type-L
- * and type-M path tables and the Joliet ones, the primary directories in
+ * at block 16, an optional boot descriptor, the Joliet descriptor, the
+ * terminator, the primary type-L and type-M path tables and the Joliet
+ * ones, an optional boot catalog, the primary directories in
  * path-table order, the continuation blocks, the Joliet directories in
  * path-table order, each file's data in catalog ID order, then zero
  * blocks up to a requested volume size.
@@ -187,6 +188,9 @@ typedef struct iso_plan {
 	int64_t		 fallback;
 	uint64_t	 continuation_bytes;	/* the next-fit cursor's end */
 	uint64_t	 data_blocks;
+	uint64_t	 boot_bios;		/* catalog ID, zero when absent */
+	uint64_t	 boot_efi;		/* catalog ID, zero when absent */
+	uint32_t	 boot_catalog_block;	/* zero without boot images */
 	uint32_t	 level;
 	uint32_t	 directories[ISO_HIERARCHIES];
 	uint32_t	 path_bytes[ISO_HIERARCHIES];

@@ -83,7 +83,8 @@ static const fsimg_format_variant_t iso_write_variants[] = {
 			.max_name_utf16_units = ISO_RR_NAME_MAX,
 			.max_link_target_bytes = ISO_LINK_TARGET_MAX,
 			.max_label_bytes = ISO_LABEL_BYTES,
-			.write_settings = FSIMG_SETTING_ISO_LEVEL,
+			.write_settings = FSIMG_SETTING_ISO_LEVEL |
+			    FSIMG_SETTING_ELTORITO,
 			.read_settings = FSIMG_SETTING_ISO_VIEW
 		},
 		.id = 0
