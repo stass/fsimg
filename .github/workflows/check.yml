@@ -146,7 +146,7 @@ jobs:
               export FATCAT="$oracle_parent/fatcat/build/fatcat"
               # The interpreter bundle runs on, from its shebang: the Ruby
               # port may install only a versioned one, such as ruby33.
-              ruby=$(sed -n '1s/^#! *//p' "$(command -v bundle)")
+              ruby=$(sed -n "1s/^#! *//p" "$(command -v bundle)")
               test -x "$ruby"
               export BUNDLE_PATH="$oracle_parent/spec-gems"
               BUNDLE_FROZEN=true bundle install --gemfile=test/spec/Gemfile
