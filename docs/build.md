@@ -2182,6 +2182,42 @@ system use areas and continuation blocks from the input, so mutation
 concentrates on SUSP and Rock Ridge decoding; its seed comes from
 `test-iso9660 --susp-seed`.
 
+Reader qualification runs `sh ../build-aux/ci-check.sh` from the configured
+build directory. On macOS, `FSIMG_ISO_CORPUS` names the generated corpus
+and `FSIMG_ISO_H3` names the owner's read-only disc, so the ordinary,
+sanitizer and distribution suites include both integrations. FreeBSD uses
+`MAKE=gmake MAKEFLAGS=-j32 sh ../build-aux/ci-check.sh`, with the locked
+specification gems installed and the fatcat oracle built as described above.
+Linux runs `build-aux/linux-check.sh -r REV 'sh ../build-aux/ci-check.sh'`
+from the source root. A separate Linux build runs `../configure CC=gcc
+CXX=g++` and `make -j8 check`, including the CLI and tests under GCC's
+C11 `-O2 -Wpedantic -Werror` diagnostics.
+
+| Platform | Reader qualification |
+| --- | --- |
+| macOS | Full CI list passes; ordinary, ASan/UBSan, separate UBSan and distribution suites each report 65 passes and six environment skips. Corpus and H3 integration pass. |
+| Linux | Full CI list passes, including standalone LSan and MSan; ordinary, sanitizer and distribution suites each report 68 passes and three environment skips. The separate GCC suite also passes with those counts. |
+| FreeBSD 16 | Ordinary, ASan/UBSan, separate UBSan and distribution suites each report 65 passes and six environment skips; the specification suite and Capsicum test pass. All five ISO scale profiles pass. |
+
+The external ISO corpus and H3 are absent from the Linux and FreeBSD
+runs, where `iso9660-integration.sh` skips. The MSan build disables the
+optional xz and zstd profiles as described in the sanitizer instructions.
+
+The full FreeBSD CI list fails at the QNX4 wide-directory RSS bound.
+Running the remaining targets separately also reproduces the CLI RSS
+creation failure; QNX4 writer scale, ImageFS scale and `distcheck` pass.
+Both RSS issues are recorded in [TODO.md](../TODO.md#bugs-by-subsystem).
+Standalone LSan and MSan report unsupported-platform skips on macOS and
+FreeBSD.
+
+On macOS, `FUZZ_CC=/usr/local/opt/llvm/bin/clang
+FUZZ_CXX=/usr/local/opt/llvm/bin/clang++ make -j32 check-fuzz` passes all
+16 harnesses at 1,000 runs each. A separate ASan/UBSan ISO verifier run
+uses `-fork=4 -max_total_time=600 -max_len=1048576 -timeout=10` with
+primary, boot, Joliet, Rock Ridge and relocated-tree seeds. It completes
+308,995 inputs in 612 seconds with no crashes, timeouts or out-of-memory
+failures.
+
 The ISO probe's 34,816-byte prefix raises the registry's detection
 prefix from 8,704 bytes (QNX6) to 34,816 bytes; a volume shorter than the
 prefix is read whole. The measurement ran `fsimg i -f IMAGE` without a
