@@ -11,12 +11,13 @@
 #include "unicode.h"
 
 /*
- * Names of the primary view (specs/design-iso9660.md#displayed-names-and-keys).
- * An identifier is checked natively, then displayed without a final ";1":
- * other versions and a trailing '.' stay, so two identifiers that differ
- * only there stay apart, and two that become equal collide in namespace
- * validation. Bytes outside the portable name profile are not refused
- * here; preparation omits such an entry.
+ * Names of the primary and joliet views
+ * (specs/design-iso9660.md#displayed-names-and-keys). An identifier is
+ * checked natively, Joliet's decoded from UTF-16BE to UTF-8, then
+ * displayed without a final ";1": other versions and a trailing '.' stay,
+ * so two identifiers that differ only there stay apart, and two that
+ * become equal collide in namespace validation. Bytes outside the portable
+ * name profile are not refused here; preparation omits such an entry.
  */
 
 #define ISO_VERSION_MAX 32767u
@@ -51,12 +52,40 @@ without_version_one(const unsigned char *bytes, size_t length)
 	return (length);
 }
 
+/* Finish the displayed name of an identifier whose length bytes are in
+ * out: remove a final ";1" and NUL-terminate it. An identifier displaying
+ * as nothing, "." or ".." names no entry, and a query loses a final ";1"
+ * as the display rule does, so a displayed name still ending in one could
+ * never be selected and its spelling would select another entry; both are
+ * corrupt, and leave out empty.
+ */
+static fsimg_status_t
+display_finish(char *out, size_t length, size_t *shown, fsimg_error_t *error)
+{
+	const unsigned char *bytes = (const unsigned char *)out;
+
+	length = without_version_one(bytes, length);
+	out[length] = '\0';
+	if (length == 0 || (bytes[0] == '.' && (length == 1 ||
+	    (length == 2 && bytes[1] == '.')))) {
+		out[0] = '\0';
+		return (iso_corrupt(error,
+		    "ISO 9660 identifier displays as no name"));
+	}
+	if (without_version_one(bytes, length) != length) {
+		out[0] = '\0';
+		return (iso_corrupt(error,
+		    "ISO 9660 identifier displays with a final ;1"));
+	}
+	*shown = length;
+	return (FSIMG_OK);
+}
+
 /* Check a primary identifier of length bytes and write its displayed name,
  * NUL-terminated, to out. The native checks: no 0x00 or '/' byte, and in
- * a file identifier holding ';' a valid version after the last one. A
- * one-byte 0x00 or 0x01 identifier is a dot record out of place, and an
- * identifier displaying as nothing, "." or ".." names no entry; all are
- * corrupt.
+ * a file identifier holding ';' a valid version after the last one. Each
+ * failure is corrupt. A misplaced dot identifier never arrives here:
+ * run_add() refuses it in every view.
  */
 fsimg_status_t
 iso_primary_name(const unsigned char *identifier, size_t length,
@@ -68,8 +97,6 @@ iso_primary_name(const unsigned char *identifier, size_t length,
 	out[0] = '\0';
 	if (length == 0 || length > ISO_IDENTIFIER_MAX)
 		return (iso_corrupt(error, "invalid ISO 9660 identifier length"));
-	if (length == 1 && identifier[0] <= 0x01)
-		return (iso_corrupt(error, "misplaced ISO 9660 dot record"));
 	if (memchr(identifier, '\0', length) != NULL ||
 	    memchr(identifier, '/', length) != NULL)
 		return (iso_corrupt(error,
@@ -85,47 +112,119 @@ iso_primary_name(const unsigned char *identifier, size_t length,
 			return (iso_corrupt(error,
 			    "invalid ISO 9660 file version"));
 	}
-	length = without_version_one(identifier, length);
-	if (length == 0 || (identifier[0] == '.' && (length == 1 ||
-	    (length == 2 && identifier[1] == '.'))))
-		return (iso_corrupt(error,
-		    "ISO 9660 identifier displays as no name"));
-	/* A query loses a final ";1" as the display rule does, so a displayed
-	 * name ending in one could never be selected and its spelling would
-	 * select another entry.
-	 */
-	if (without_version_one(identifier, length) != length)
-		return (iso_corrupt(error,
-		    "ISO 9660 identifier displays with a final ;1"));
 	bcopy(identifier, out, length);
-	out[length] = '\0';
-	*shown = length;
-	return (FSIMG_OK);
+	return (display_finish(out, length, shown, error));
 }
 
-/* The label: the 32-byte volume identifier without trailing spaces or NUL
- * bytes, into out of ISO_LABEL_BYTES + 1 bytes. False when the rest is not
- * printable UTF-8, which leaves the volume without a reported label.
+/* Decode count big-endian UTF-16 code units at field to WTF-8 in out of
+ * capacity bytes and store the length written. A surrogate pair becomes its
+ * scalar and an unpaired surrogate the generalized three-byte form, so the
+ * result holds no 0x00 or '/' byte the units lack, keeps distinct
+ * identifiers distinct, and is not strict UTF-8 when a surrogate is
+ * unpaired. False when count exceeds an identifier's units or the output
+ * exceeds capacity; three bytes per unit always fit.
+ */
+static bool
+utf16be_decode(const unsigned char *field, size_t count, char *out,
+    size_t capacity, size_t *length)
+{
+	uint16_t units[ISO_IDENTIFIER_MAX / 2];
+
+	*length = 0;
+	if (count > sizeof(units) / sizeof(units[0]))
+		return (false);
+	for (size_t i = 0; i < count; i++)
+		units[i] = fsimg_load_be16(field + 2 * i);
+	return (fsimg_utf16_to_wtf8(units, count, out, capacity, length,
+	    NULL) == FSIMG_OK);
+}
+
+_Static_assert(ISO_IDENTIFIER_MAX / 2 * 3 <= ISO_NAME_MAX,
+    "a decoded Joliet identifier fits a displayed-name buffer");
+
+/* Check a Joliet identifier of length bytes and write its displayed name,
+ * NUL-terminated, to out (specs/design-iso9660.md#joliet-identifiers). The
+ * native checks: an even length, and no code unit 0x0000 or '/'. The
+ * identifier is decoded as UTF-16BE; a name with an unpaired surrogate is
+ * displayed, and preparation omits it under the portable name profile.
+ * Joliet carries no version for any reader, so ';' is an ordinary
+ * character and only the display rule's final ";1" is removed. Each
+ * failure is corrupt.
+ */
+fsimg_status_t
+iso_joliet_name(const unsigned char *identifier, size_t length, char *out,
+    size_t *shown, fsimg_error_t *error)
+{
+	uint16_t unit;
+	size_t decoded;
+
+	*shown = 0;
+	out[0] = '\0';
+	if (length == 0 || length > ISO_IDENTIFIER_MAX || length % 2 != 0)
+		return (iso_corrupt(error,
+		    "invalid ISO 9660 Joliet identifier length"));
+	for (size_t i = 0; i < length; i += 2) {
+		unit = fsimg_load_be16(identifier + i);
+		if (unit == 0x0000 || unit == '/')
+			return (iso_corrupt(error,
+			    "ISO 9660 Joliet identifier holds a NUL or a slash"));
+	}
+	if (!utf16be_decode(identifier, length / 2, out, ISO_NAME_MAX,
+	    &decoded)) {
+		out[0] = '\0';
+		return (iso_corrupt(error,
+		    "ISO 9660 Joliet identifier does not decode"));
+	}
+	return (display_finish(out, decoded, shown, error));
+}
+
+_Static_assert(ISO_LABEL_BYTES / 2 * 3 <= ISO_LABEL_TEXT_MAX &&
+    ISO_LABEL_BYTES <= ISO_LABEL_TEXT_MAX,
+    "a decoded label fits its buffer");
+
+/* The label of a primary or Joliet descriptor: its 32-byte volume
+ * identifier without trailing spaces or NULs, into out of
+ * ISO_LABEL_TEXT_MAX + 1 bytes. A primary label is its bytes, a Joliet
+ * label its 16 UTF-16BE code units as UTF-8. False, with out zeroed, when
+ * the rest is not printable UTF-8, which leaves the volume without a
+ * reported label.
  */
 bool
-iso_label_decode(const unsigned char *field, char *out)
+iso_label_decode(const iso_descriptor_t *descriptor, char *out)
 {
+	const unsigned char *field = descriptor->label;
 	size_t length, units;
 
-	out[0] = '\0';
-	length = ISO_LABEL_BYTES;
-	while (length > 0 && (field[length - 1] == ' ' ||
-	    field[length - 1] == '\0'))
-		length--;
-	for (size_t i = 0; i < length; i++) {
-		if (field[i] < 0x20 || field[i] == 0x7f)
+	if (descriptor->joliet_level != 0) {
+		units = ISO_LABEL_BYTES / 2;
+		while (units > 0 &&
+		    (fsimg_load_be16(field + 2 * (units - 1)) == ' ' ||
+		    fsimg_load_be16(field + 2 * (units - 1)) == 0x0000))
+			units--;
+		if (!utf16be_decode(field, units, out, ISO_LABEL_TEXT_MAX,
+		    &length)) {
+			bzero(out, ISO_LABEL_TEXT_MAX + 1);
 			return (false);
+		}
+	} else {
+		length = ISO_LABEL_BYTES;
+		while (length > 0 && (field[length - 1] == ' ' ||
+		    field[length - 1] == '\0'))
+			length--;
+		bcopy(field, out, length);
 	}
-	if (fsimg_utf8_to_utf16((const char *)field, length, NULL, 0, &units,
-	    NULL) != FSIMG_OK)
-		return (false);
-	bcopy(field, out, length);
 	out[length] = '\0';
+	for (size_t i = 0; i < length; i++) {
+		if ((unsigned char)out[i] < 0x20 || out[i] == 0x7f) {
+			bzero(out, ISO_LABEL_TEXT_MAX + 1);
+			return (false);
+		}
+	}
+	if (fsimg_utf8_to_utf16(out, length, NULL, 0, &units, NULL) !=
+	    FSIMG_OK) {
+		bzero(out, ISO_LABEL_TEXT_MAX + 1);
+		return (false);
+	}
 	return (true);
 }
 

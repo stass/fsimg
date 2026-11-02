@@ -451,14 +451,14 @@ images of the same trees.
 .Pp
 An ISO 9660 image is read through one view of its tree.
 .Ar view=auto ,
-the default, selects the Rock Ridge view when the image carries Rock Ridge
-and the primary hierarchy otherwise;
-.Ar view=rockridge
+the default, selects the Rock Ridge view when the image carries Rock Ridge,
+otherwise the Joliet view when it carries Joliet, and the primary
+hierarchy otherwise;
+.Ar view=rockridge ,
+.Ar view=joliet
 and
 .Ar view=primary
-force one and never fall back, and
-.Ar view=joliet
-is refused as unsupported.
+force one, refuse an image without it as unsupported and never fall back.
 .Cm i
 reports the selected view as the profile.
 The Rock Ridge view gives POSIX names of up to 1024 bytes, symbolic links,
@@ -471,8 +471,21 @@ Rock Ridge with a nonzero SUSP skip count is unsupported:
 .Ar view=rockridge
 refuses it, and
 .Ar view=auto
-reads the primary hierarchy.
-In the primary view a file version
+reads the Joliet or primary hierarchy.
+The Joliet view gives files and directories with their recording dates
+under Unicode names, including names outside the Basic Multilingual Plane;
+a name holding an unpaired UTF-16 surrogate omits its entry.
+xorriso 1.5.8 writes Joliet subdirectories whose parent records name
+themselves; such a Joliet tree is corrupt and
+.Ar view=joliet
+fails on it.
+.Ar view=auto
+reads those images through the Rock Ridge tree xorriso writes by default;
+one written without Rock Ridge fails under
+.Ar view=auto
+too and reads with
+.Ar view=primary .
+In the primary and Joliet views a final
 .Ql ;1
 is removed from displayed names and other versions are kept, so
 .Pa README.TXT;1

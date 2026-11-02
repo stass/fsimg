@@ -44,12 +44,15 @@ enum {
 #define MKISOFS_PLACEHOLDER 0xffffffeeu
 
 enum {
+	VD_LABEL = 40, VD_ESCAPE = 88,
 	VD_SPACE = 80, VD_SET = 120, VD_SEQUENCE = 124, VD_BLOCK = 128,
 	VD_PATH_SIZE = 132, VD_PATH_L = 140, VD_PATH_M = 148,
 	VD_ROOT = 156, VD_DATE = 813, VD_STRUCTURE = 881,
 	DR_XATTR = 1, DR_EXTENT = 2, DR_SIZE = 10, DR_DATE = 18,
 	DR_FLAGS = 25, DR_UNIT = 26, DR_GAP = 27, DR_SEQUENCE = 28,
-	DR_NAME_SIZE = 32, DR_NAME = 33
+	DR_NAME_SIZE = 32, DR_NAME = 33,
+	DETAIL_ROCKRIDGE = 0, DETAIL_JOLIET_LEVEL = 1,
+	DETAIL_ROOT_BLOCK = 5, DETAIL_PATH_TABLE_BYTES = 6
 };
 
 typedef struct image {
@@ -3831,6 +3834,486 @@ susp_seed(const char *path)
 	CHECK(fclose(file) == 0);
 }
 
+/* A second hierarchy uses independent directory and path-table blocks.
+ * Identifiers below are explicit UTF-16 code units from the format contract.
+ */
+#define JOLIET_ROOT 88u
+#define JOLIET_CHILD 89u
+
+/* Add a Joliet descriptor with its own root and both path tables. */
+static void
+joliet_add(image_t *image)
+{
+	unsigned char *p = image->bytes + 17 * BLOCK;
+	unsigned char zero = 0;
+
+	bcopy(image->bytes + 16 * BLOCK, p, BLOCK);
+	p[0] = 2;
+	bzero(p + VD_ESCAPE, 32);
+	bcopy("%/E", p + VD_ESCAPE, 3);
+	bzero(p + VD_LABEL, 32);
+	put32(p + VD_PATH_SIZE, 22);
+	bzero(p + VD_PATH_L, 16);
+	p[VD_PATH_L] = 90;
+	p[VD_PATH_M + 3] = 91;
+	record(p + VD_ROOT, &zero, 1, JOLIET_ROOT, BLOCK, 2);
+	descriptor(image->bytes + 18 * BLOCK, 255, 1);
+	directory(image->bytes + JOLIET_ROOT * BLOCK,
+	    JOLIET_ROOT, JOLIET_ROOT, BLOCK);
+	/* Path tables include an otherwise unused child to distinguish size. */
+	p = image->bytes + 90 * BLOCK;
+	p[0] = 1;
+	p[2] = JOLIET_ROOT;
+	p[6] = 1;
+	p[10] = 2;
+	p[12] = JOLIET_CHILD;
+	p[16] = 1;
+	p[19] = 'D';
+	p = image->bytes + 91 * BLOCK;
+	p[0] = 1;
+	p[5] = JOLIET_ROOT;
+	p[7] = 1;
+	p[10] = 2;
+	p[15] = JOLIET_CHILD;
+	p[17] = 1;
+	p[19] = 'D';
+}
+
+/* Write a directory record whose identifier is big-endian UTF-16. */
+static size_t
+joliet_record(unsigned char *p, const uint16_t *units, size_t count,
+    uint32_t extent, uint32_t size, unsigned flags)
+{
+	unsigned char name[220];
+
+	CHECK(count <= sizeof(name) / 2);
+	for (size_t i = 0; i < count; i++) {
+		name[2 * i] = units[i] >> 8;
+		name[2 * i + 1] = units[i];
+	}
+	return (record(p, name, count * 2, extent, size, flags));
+}
+
+/* Open the requested view and report an open failure with its row name. */
+static bool
+joliet_open(fixture_t *f, image_t *image, fsimg_iso_view_t view,
+    const char *row)
+{
+	fsimg_status_t status;
+
+	fixture_new(f, image, NULL);
+	status = open_image(f, view);
+	rr_status_equal(status, FSIMG_OK, row);
+	return (status == FSIMG_OK);
+}
+
+/* Check the ordered paths, end of enumeration, and omission count. */
+static void
+joliet_names(image_t *image, fsimg_iso_view_t view,
+    const char *const *paths, size_t count, uint64_t omitted, const char *row)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_stats_t stats;
+	fsimg_status_t status;
+
+	if (joliet_open(&f, image, view, row)) {
+		for (size_t i = 0; i < count; i++) {
+			status = fsimg_reader_next(f.reader, &entry, NULL);
+			rr_status_equal(status, FSIMG_OK, row);
+			if (status != FSIMG_OK)
+				break;
+			if (strcmp(entry->path, paths[i]) != 0) {
+				fprintf(stderr, "%s: expected path %s, observed %s\n",
+				    row, paths[i], entry->path);
+				failures++;
+			}
+		}
+		rr_status_equal(fsimg_reader_next(f.reader, &entry, NULL),
+		    FSIMG_DONE, row);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+		rr_equal(stats.omitted_entries, omitted, row);
+	}
+	fixture_free(&f);
+}
+
+/* Check the selected profile and its hierarchy and descriptor details. */
+static void
+joliet_profile(image_t *image, fsimg_iso_view_t view, const char *profile,
+    unsigned rockridge, unsigned level, const char *row)
+{
+	fixture_t f;
+	fsimg_volume_info_t info;
+
+	if (joliet_open(&f, image, view, row)) {
+		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+		rr_equal(strcmp(info.profile, profile), 0, row);
+		rr_equal(info.details[DETAIL_ROCKRIDGE].value, rockridge, row);
+		rr_equal(info.details[DETAIL_JOLIET_LEVEL].value, level, row);
+		if (strcmp(profile, "joliet") == 0) {
+			rr_equal(info.details[DETAIL_ROOT_BLOCK].value,
+			    JOLIET_ROOT, row);
+			rr_equal(info.details[DETAIL_PATH_TABLE_BYTES].value,
+			    22, row);
+		}
+	}
+	fixture_free(&f);
+}
+
+static void
+test_joliet_views(void)
+{
+	static const char escapes[] = { '@', 'C', 'E' };
+	static const char *const levels[] = {
+		"Joliet %/@ level 1", "Joliet %/C level 2", "Joliet %/E level 3"
+	};
+	static const char *const primary[] = { "/A.TXT" };
+	susp_area_t area = {0};
+	image_t image;
+
+	for (unsigned i = 0; i < 3; i++) {
+		image = image_new();
+		joliet_add(&image);
+		image.bytes[17 * BLOCK + VD_ESCAPE + 2] = escapes[i];
+		joliet_profile(&image, FSIMG_ISO_VIEW_AUTO, "joliet", 0,
+		    i + 1, levels[i]);
+		free(image.bytes);
+	}
+	image = image_new();
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_EUNSUPPORTED,
+	    "forced Joliet without descriptor");
+	joliet_add(&image);
+	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_EUNSUPPORTED,
+	    "forced Rock Ridge on Joliet-only image");
+	joliet_names(&image, FSIMG_ISO_VIEW_PRIMARY, primary, 1, 0,
+	    "forced primary lists primary names beside Joliet");
+	image.bytes[17 * BLOCK + VD_ESCAPE + 3] = 1;
+	joliet_profile(&image, FSIMG_ISO_VIEW_AUTO, "primary", 0, 0,
+	    "nonzero escape tail is not Joliet: auto primary");
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_EUNSUPPORTED,
+	    "nonzero escape tail is not Joliet: forced unsupported");
+	free(image.bytes);
+	image = rr_image(&area, 0);
+	joliet_add(&image);
+	joliet_profile(&image, FSIMG_ISO_VIEW_AUTO, "rockridge", 1, 3,
+	    "auto prefers Rock Ridge over Joliet");
+	image.bytes[ROOT * BLOCK + ROOT_SP + SUSP_LENGTH] = 3;
+	joliet_profile(&image, FSIMG_ISO_VIEW_JOLIET, "joliet", 3, 3,
+	    "forced Joliet ignores damaged primary handshake");
+	free(image.bytes);
+}
+
+static void
+test_joliet_identifiers(void)
+{
+	static const struct {
+		const char *row;
+		uint16_t units[12];
+		size_t count;
+		const char *displayed;
+		fsimg_status_t status;
+		bool omitted;
+	} rows[] = {
+		{ "Joliet BMP e acute and CJK", { 0xe9, 0x4e2d }, 2,
+		    "/\xc3\xa9\xe4\xb8\xad", FSIMG_OK, false },
+		{ "Joliet surrogate pair", { 0xd83d, 0xde00 }, 2,
+		    "/\xf0\x9f\x98\x80", FSIMG_OK, false },
+		{ "Joliet terminal high surrogate omitted", { 0xd83d }, 1,
+		    NULL, FSIMG_OK, true },
+		{ "Joliet high surrogate before ordinary unit omitted",
+		    { 0xd83d, 'A' }, 2, NULL, FSIMG_OK, true },
+		{ "Joliet lone low surrogate omitted", { 0xde00 }, 1,
+		    NULL, FSIMG_OK, true },
+		{ "Joliet U+0001 omitted", { 1 }, 1, NULL, FSIMG_OK, true },
+		{ "Joliet U+007F omitted", { 127 }, 1, NULL, FSIMG_OK, true },
+		{ "Joliet NUL corrupt", { 'A', 0 }, 2, NULL,
+		    FSIMG_ECORRUPT, false },
+		{ "Joliet slash corrupt", { 'A', '/' }, 2, NULL,
+		    FSIMG_ECORRUPT, false },
+		{ "Joliet version one display", { 'A','.','T','X','T',';', '1' },
+		    7, "/A.TXT", FSIMG_OK, false },
+		{ "Joliet version two retained", { 'A','.','T','X','T',';', '2' },
+		    7, "/A.TXT;2", FSIMG_OK, false },
+		{ "Joliet trailing dot retained", { 'A','.' }, 2,
+		    "/A.", FSIMG_OK, false },
+		{ "Joliet repeated version corrupt", { 'X',';','1',';','1' },
+		    5, NULL, FSIMG_ECORRUPT, false },
+		{ "Joliet empty display corrupt", { ';','1' }, 2,
+		    NULL, FSIMG_ECORRUPT, false },
+		{ "Joliet dot corrupt", { '.' }, 1, NULL,
+		    FSIMG_ECORRUPT, false },
+		{ "Joliet dot dot corrupt", { '.','.' }, 2, NULL,
+		    FSIMG_ECORRUPT, false }
+	};
+	static const uint16_t sibling[] = { 'B' };
+	/* 33 header bytes + 220 name bytes + one pad fill LEN_DR=254. */
+	static const unsigned lengths[] = { 64, 103, 110, 110 };
+	static const char *const long_rows[] = {
+		"Joliet 64 units", "Joliet 103 units", "Joliet maximum 110 units",
+		"Joliet maximum 110 three-byte units (330 UTF-8 bytes)"
+	};
+	image_t image;
+	unsigned char *root;
+	size_t size;
+	uint16_t units[110];
+	char path[332];
+	const char *paths[2];
+
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		image = image_new();
+		joliet_add(&image);
+		root = image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES;
+		size = joliet_record(root, rows[i].units, rows[i].count,
+		    DATA, 5, 0);
+		joliet_record(root + size, sibling, 1, DATA, 5, 0);
+		if (rows[i].status != FSIMG_OK) {
+			rr_status(&image, FSIMG_ISO_VIEW_JOLIET,
+			    rows[i].status, rows[i].row);
+		} else {
+			paths[0] = rows[i].omitted ? "/B" : rows[i].displayed;
+			paths[1] = "/B";
+			joliet_names(&image, FSIMG_ISO_VIEW_JOLIET, paths,
+			    rows[i].omitted ? 1 : 2, rows[i].omitted,
+			    rows[i].row);
+		}
+		free(image.bytes);
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		image = image_new();
+		joliet_add(&image);
+		path[0] = '/';
+		for (unsigned j = 0; j < lengths[i]; j++) {
+			units[j] = i == 3 ? 0x4e2d : 'a';
+			if (i == 3)
+				bcopy("\xe4\xb8\xad", path + 1 + j * 3, 3);
+			else
+				path[1 + j] = 'a';
+		}
+		path[1 + lengths[i] * (i == 3 ? 3 : 1)] = '\0';
+		joliet_record(image.bytes + JOLIET_ROOT * BLOCK +
+		    DOT_PAIR_BYTES, units, lengths[i], DATA, 5, 0);
+		paths[0] = path;
+		joliet_names(&image, FSIMG_ISO_VIEW_JOLIET, paths, 1, 0,
+		    long_rows[i]);
+		free(image.bytes);
+	}
+	image = image_new();
+	joliet_add(&image);
+	root = image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES;
+	record(root, "\0A\0", 3, DATA, 5, 0);
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_ECORRUPT,
+	    "Joliet odd identifier length corrupt");
+	free(image.bytes);
+}
+
+static void
+test_joliet_namespace(void)
+{
+	static const uint16_t a[] = { 'A' }, version[] = { 'A',';','1' };
+	static const uint16_t lower[] = { 'a' }, nfc[] = { 0xe9 };
+	static const uint16_t nfd[] = { 'e', 0x301 };
+	static const char *const paths[] = { "/A", "/a", "/\xc3\xa9", "/e\xcc\x81" };
+	image_t image = image_new();
+	unsigned char *root;
+	size_t offset;
+
+	joliet_add(&image);
+	root = image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES;
+	offset = joliet_record(root, a, 1, DATA, 5, 0);
+	joliet_record(root + offset, version, 3, DATA, 5, 0);
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_ECORRUPT,
+	    "Joliet A and A;1 collide after display");
+	bzero(root + offset, BLOCK - DOT_PAIR_BYTES - offset);
+	offset += joliet_record(root + offset, lower, 1, DATA, 5, 0);
+	offset += joliet_record(root + offset, nfc, 1, DATA, 5, 0);
+	joliet_record(root + offset, nfd, 2, DATA, 5, 0);
+	joliet_names(&image, FSIMG_ISO_VIEW_JOLIET, paths, 4, 0,
+	    "Joliet case and NFC/NFD spellings are distinct");
+	free(image.bytes);
+}
+
+static void
+test_joliet_tree(void)
+{
+	static const uint16_t d[] = { 'D' }, alias[] = { 'E' };
+	susp_area_t area = {0};
+	image_t image;
+	unsigned char *root, *child;
+	size_t size;
+
+	susp_nm(&area, "primary", 7, 0);
+	image = rr_image(&area, 0);
+	joliet_add(&image);
+	root = image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES;
+	child = image.bytes + JOLIET_CHILD * BLOCK;
+	size = joliet_record(root, d, 1, JOLIET_CHILD, BLOCK, 2);
+	directory(child, JOLIET_CHILD, JOLIET_ROOT, BLOCK);
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_OK,
+	    "Joliet subdirectory parent names parent");
+	put32(child + DOT_BYTES + DR_EXTENT, JOLIET_CHILD);
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_ECORRUPT,
+	    "Joliet subdirectory parent names itself corrupt");
+	joliet_profile(&image, FSIMG_ISO_VIEW_AUTO, "rockridge", 1, 3,
+	    "auto reads Rock Ridge beside corrupt Joliet parent");
+	rr_status(&image, FSIMG_ISO_VIEW_AUTO, FSIMG_OK,
+	    "auto walks Rock Ridge beside corrupt Joliet parent");
+	put32(child + DOT_BYTES + DR_EXTENT, JOLIET_ROOT);
+	joliet_record(root + size, alias, 1, JOLIET_CHILD, BLOCK, 2);
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_ECORRUPT,
+	    "two Joliet records opening one directory corrupt");
+	bzero(root + size, BLOCK - DOT_PAIR_BYTES - size);
+	put32(root + DR_EXTENT, JOLIET_ROOT);
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_ECORRUPT,
+	    "Joliet child names Joliet root corrupt");
+	free(image.bytes);
+}
+
+static void
+test_joliet_label(void)
+{
+	static const struct {
+		const char *row;
+		uint16_t units[16];
+		const char *label;
+	} rows[] = {
+		{ "Joliet label non-ASCII with space and NUL padding",
+		    { 0xe9, 0x4e2d, ' ', ' ', 0 }, "\xc3\xa9\xe4\xb8\xad" },
+		{ "Joliet label unpaired surrogate absent", { 0xd83d }, NULL },
+		{ "Joliet label control absent", { 'A', 1 }, NULL }
+	};
+	image_t image;
+	fixture_t f;
+	fsimg_volume_info_t info;
+	unsigned char *label;
+
+	for (unsigned i = 0; i < 3; i++) {
+		image = image_new();
+		joliet_add(&image);
+		label = image.bytes + 17 * BLOCK + VD_LABEL;
+		for (unsigned j = 0; j < 16; j++) {
+			label[2 * j] = rows[i].units[j] >> 8;
+			label[2 * j + 1] = rows[i].units[j];
+		}
+		if (joliet_open(&f, &image, FSIMG_ISO_VIEW_JOLIET,
+		    rows[i].row)) {
+			CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+			rr_equal((info.valid & FSIMG_VOLUME_LABEL) != 0,
+			    rows[i].label != NULL, rows[i].row);
+			if (rows[i].label != NULL &&
+			    (info.valid & FSIMG_VOLUME_LABEL) != 0)
+				rr_equal(strcmp(info.label, rows[i].label), 0,
+				    rows[i].row);
+		}
+		fixture_free(&f);
+		free(image.bytes);
+	}
+}
+
+static void
+test_joliet_content(void)
+{
+	static const uint16_t name[] = { 'A','.','T','X','T',';','1' };
+	static const fsimg_iso_view_t views[] = {
+		FSIMG_ISO_VIEW_PRIMARY, FSIMG_ISO_VIEW_JOLIET
+	};
+	image_t image = image_new();
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	unsigned char *p;
+	unsigned char buffer[BLOCK + 5];
+	unsigned char first[5] = {0};
+	size_t count, size;
+	fsimg_status_t status;
+	const char *row = "Joliet and primary shared extent content and metadata";
+
+	joliet_add(&image);
+	p = image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES;
+	size = joliet_record(p, name, 7, DATA, 5, 1);
+	bcopy("\106\1\1\1\0\0\4", p + DR_DATE, 7);
+	for (unsigned i = 0; i < 2; i++) {
+		if (joliet_open(&f, &image, views[i], row)) {
+			status = fsimg_reader_next(f.reader, &entry, NULL);
+			rr_status_equal(status, FSIMG_OK, row);
+			if (status == FSIMG_OK) {
+				rr_status_equal(fsimg_reader_read_at(f.reader, 0,
+				    buffer, 5, &count, NULL), FSIMG_OK, row);
+				rr_equal(count, 5, row);
+				rr_equal(bcmp(buffer, "hello", 5), 0, row);
+				if (i == 0)
+					bcopy(buffer, first, 5);
+				else {
+					rr_equal(bcmp(first, buffer, 5), 0, row);
+					rr_equal((entry->metadata.attributes &
+					    FSIMG_ATTR_HIDDEN) != 0, 1, row);
+					rr_equal((entry->metadata.valid &
+					    FSIMG_META_MODIFIED) != 0, 1, row);
+					rr_equal(entry->metadata.modified.seconds, 0, row);
+					rr_equal(entry->metadata.modified.offset_minutes, 60, row);
+				}
+			}
+		}
+		fixture_free(&f);
+	}
+	put32(p + DR_SIZE, BLOCK);
+	p[DR_FLAGS] = 0x80;
+	joliet_record(p + size, name, 7, DATA + 1, 5, 0);
+	bcopy("world", image.bytes + (DATA + 1) * BLOCK, 5);
+	row = "Joliet multi-extent file reads both sections";
+	if (joliet_open(&f, &image, FSIMG_ISO_VIEW_JOLIET, row)) {
+		status = fsimg_reader_next(f.reader, &entry, NULL);
+		rr_status_equal(status, FSIMG_OK, row);
+		if (status == FSIMG_OK) {
+			rr_equal(entry->size, BLOCK + 5, row);
+			rr_status_equal(fsimg_reader_read_at(f.reader, 0, buffer,
+			    sizeof(buffer), &count, NULL), FSIMG_OK, row);
+			rr_equal(count, sizeof(buffer), row);
+			rr_equal(bcmp(buffer, image.bytes + DATA * BLOCK, BLOCK), 0, row);
+			rr_equal(bcmp(buffer + BLOCK, "world", 5), 0, row);
+		}
+		rr_status_equal(walk(&f), FSIMG_OK, row);
+	}
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+static void
+test_joliet_selection(void)
+{
+	static const uint16_t name[] = { 'A','.','T','X','T',';','1' };
+	static const char *const queries[] = { "/A.TXT;1", "/A.TXT" };
+	image_t image = image_new();
+	fixture_t f;
+	char temporary[] = "./iso-joliet-selection-XXXXXX", buffer[5];
+	int parent, fd;
+	fsimg_status_t status;
+	const char *row = "Joliet versioned and displayed queries select same file";
+
+	joliet_add(&image);
+	joliet_record(image.bytes + JOLIET_ROOT * BLOCK + DOT_PAIR_BYTES,
+	    name, 7, DATA, 5, 0);
+	CHECK(mkdtemp(temporary) != NULL);
+	parent = open(temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(parent >= 0);
+	for (unsigned i = 0; i < 2; i++) {
+		if (joliet_open(&f, &image, FSIMG_ISO_VIEW_JOLIET, row)) {
+			status = extract(&f, parent, queries[i]);
+			rr_status_equal(status, FSIMG_OK, row);
+			if (status == FSIMG_OK) {
+				fd = openat(parent, "out/A.TXT", O_RDONLY | O_NOFOLLOW);
+				CHECK(fd >= 0);
+				CHECK(read(fd, buffer, sizeof(buffer)) == sizeof(buffer));
+				rr_equal(bcmp(buffer, "hello", 5), 0, row);
+				CHECK(close(fd) == 0);
+			}
+			remove_tree(parent, "out");
+		}
+		fixture_free(&f);
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(temporary) == 0);
+	free(image.bytes);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3872,6 +4355,13 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_joliet_views();
+	test_joliet_identifiers();
+	test_joliet_namespace();
+	test_joliet_tree();
+	test_joliet_label();
+	test_joliet_content();
+	test_joliet_selection();
 	test_susp_handshake_views();
 	test_susp_continuation_bounds();
 	test_susp_framing_and_precedence();

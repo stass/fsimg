@@ -131,9 +131,9 @@ module IsoIntegration
              size: Integer(size, 10), date: date.split.join(" "), target: target }]
   end
 
-  def isoinfo_tree(image)
+  def isoinfo_tree(image, view: "rockridge")
     header_pattern = /^Directory listing of (.*)\n$/
-    sections = command("isoinfo", "-R", "-l", "-i", image).lines.slice_before { header_pattern.match?(_1) }
+    sections = command("isoinfo", view == "joliet" ? "-J" : "-R", "-j", "utf-8", "-l", "-i", image).lines.slice_before { header_pattern.match?(_1) }
     row_pattern = Regexp.new(
       '^\s*(?:\d+\s+)?([dlfp-][rwxstST-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+' \
       '(\w+\s+\d+\s+\d{4})\s+\[.*?\]\s(.*)$'
@@ -170,8 +170,10 @@ module IsoIntegration
     end.force_encoding(Encoding::UTF_8)
   end
 
-  def bsdtar_tree(image)
-    pairs = command("bsdtar", "-tv", "--numeric-owner", "-f", image).lines.filter_map do |line|
+  def bsdtar_tree(image, view: "rockridge")
+    options = view == "joliet" ? ["--options", "iso9660:!rockridge"] : []
+    # libarchive selects Joliet when its ISO reader has Rock Ridge disabled.
+    pairs = command("bsdtar", "-tv", *options, "--numeric-owner", "-f", image).lines.filter_map do |line|
       row = line.match(Regexp.new(
         '^([dlp-][rwxstST-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+' \
         '(\w+\s+\d+\s+(?:\d{2}:\d{2}|\d{4}))\s(.*)\n$'
@@ -226,14 +228,14 @@ module IsoIntegration
     end
   end
 
-  def fsimg_tree(binary:, options:)
+  def fsimg_tree(binary:, options:, profile: "rockridge")
     opened = records(command(binary, "i", "--json", *options)).find { _1.fetch("type") == "info" }
-    raise Error, "info auto profile must be rockridge" unless opened && opened.fetch("profile") == "rockridge"
+    raise Error, "info profile must be #{profile}" unless opened && opened.fetch("profile") == profile
 
     decoded = records(command(binary, "t", "--json", *options))
     info = decoded.find { _1.fetch("type") == "info" }
-    unless info && info.fetch("profile") == "rockridge"
-      raise Error, "auto profile must be rockridge: #{info&.fetch('profile').inspect}"
+    unless info && info.fetch("profile") == profile
+      raise Error, "profile must be #{profile}: #{info&.fetch('profile').inspect}"
     end
 
     unique_pairs(decoded.select { _1.fetch("type") == "entry" }.map do |row|
@@ -247,10 +249,10 @@ module IsoIntegration
 
   def compare_verbose(binary:, options:, actual:)
     pairs = command(binary, "t", "-v", *options).lines.map do |line|
-      row = line.match(/^([dlp-][rwxstST-]{9})\s+(\d+|-)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+(".*")[\/@|*]?\n$/)
+      row = line.match(/^([dlp-][rwxstST?-]{9})\s+(\d+|-)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+(".*")[\/@|*]?\n$/)
       raise Error, "unparsed fsimg verbose row: #{line.inspect}" unless row
 
-      [JSON.parse(row[4]), { kind: kind(row[1]), mode: mode_bits(row[1]), date: row[3], size: row[2] }]
+      [JSON.parse(row[4]), { kind: kind(row[1]), mode: row[1].end_with?("?????????") ? nil : mode_bits(row[1]), date: row[3], size: row[2] }]
     end
     verbose = unique_pairs(pairs)
     same_paths(expected: actual, actual: verbose, oracle: "fsimg verbose")
@@ -388,6 +390,113 @@ module IsoIntegration
     failures.empty?
   end
 
+  # Isoinfo maps each non-BMP UTF-16 code unit to an underscore. Only
+  # that documented projection is allowed; all BMP names compare exactly.
+  def isoinfo_joliet_path(path)
+    path.codepoints.map { _1 > 0xffff ? "__" : _1.chr(Encoding::UTF_8) }.join
+  end
+
+  def joliet_manifest(image)
+    records(File.read(image.delete_suffix(".iso") + ".joliet.jsonl")).to_h do |row|
+      [display(row.fetch("path")), row]
+    end
+  end
+
+  def compare_view_contents(binary:, options:, image:, joliet_files:)
+    primary_rows = records(File.read(image.delete_suffix(".iso") + ".primary.jsonl"))
+    views = { "primary" => primary_rows }
+    rr_path = image.delete_suffix(".iso") + ".rockridge.jsonl"
+    if command("isoinfo", "-d", "-i", image).include?("Rock Ridge signatures version 1 found")
+      views["rockridge"] = records(File.read(rr_path))
+    end
+    # Manifests pair projected names by source digest and size. Compare
+    # multiplicities as well: duplicated or missing content must not pass.
+    views.each do |view, rows|
+      files = rows.select { _1.fetch("type") == "file" }
+      expected = files.map { [_1.fetch("size"), _1.fetch("sha256")] }.tally
+      if view == "primary"
+        field_equal(path: image, field: "#{view}/Joliet file content multiset",
+                    expected: expected, actual: joliet_files.values.tally)
+      else
+        # RR links and FIFOs are projected to zero-length regular files
+        # in the other trees. Pair regular files common to both views.
+        expected.each do |content, count|
+          available = joliet_files.values.tally.fetch(content, 0)
+          raise Error, "#{view}/Joliet common content #{content.inspect}: need #{count}, found #{available}" if count > available
+        end
+      end
+      files.each do |row|
+        path = view == "primary" ? display(row.fetch("path")) : row.fetch("path")
+        observed = content_digest(binary: binary, options: [*options, "-o", "view=#{view}"], path: path)
+        field_equal(path: path, field: "#{view}/Joliet paired SHA-256 and size",
+                    expected: [row.fetch("size"), row.fetch("sha256")], actual: observed)
+      end
+    end
+    views.keys.join("/")
+  end
+
+  def xorriso_joliet(binary:, image:, options:)
+    forced = [*options, "-o", "view=joliet"]
+    _output, error, status = Open3.capture3(binary, "t", "-v", *forced)
+    unless status.exitstatus == 1 && error.include?("parent record does not name its parent")
+      raise Error, "forced Joliet expected ECORRUPT exit 1 and parent diagnostic, " \
+                   "observed exit #{status.exitstatus}: #{error.strip}"
+    end
+    files = joliet_manifest(image).select { |_path, row| row.fetch("type") == "file" }
+      .transform_values { [_1.fetch("size"), _1.fetch("sha256")] }
+    paired = compare_view_contents(binary: binary, options: options, image: image, joliet_files: files)
+    puts "#{File.basename(image)}: Joliet ECORRUPT (parent names itself); " \
+         "#{paired} content agrees with Joliet source manifest; auto Rock Ridge checked separately"
+  end
+
+  def joliet(binary:, image:, options:)
+    if File.basename(image).start_with?("xorriso-")
+      return xorriso_joliet(binary: binary, image: image, options: options)
+    end
+
+    forced = [*options, "-o", "view=joliet"]
+    actual = fsimg_tree(binary: binary, options: forced, profile: "joliet")
+    compare_verbose(binary: binary, options: forced, actual: actual)
+    unicode = bsdtar_tree(image, view: "joliet")
+    # macOS libarchive decomposes BMP names (cafe + U+0301), whereas
+    # isoinfo preserves their on-disc spelling. Use bsdtar for non-BMP
+    # paths only; isoinfo checks every BMP path without normalization.
+    nonbmp = unicode.select { |path, _row| path.codepoints.any? { _1 > 0xffff } }
+    actual_nonbmp = actual.select { |path, _row| path.codepoints.any? { _1 > 0xffff } }
+    same_paths(expected: nonbmp, actual: actual_nonbmp, oracle: "bsdtar Joliet non-BMP")
+    oracle = isoinfo_tree(image, view: "joliet").to_h { |path, row| [display(path), row] }
+    projected = unique_pairs(actual.map { |path, row| [isoinfo_joliet_path(path), row] })
+    same_paths(expected: oracle, actual: projected, oracle: "isoinfo Joliet (non-BMP projection)")
+    manifest = joliet_manifest(image)
+    same_paths(expected: manifest, actual: projected, oracle: "Joliet manifest")
+    files = {}
+    actual.each do |path, entry|
+      projected_path = isoinfo_joliet_path(path)
+      reference = oracle.fetch(projected_path)
+      %i[kind size].each do |field|
+        next if field == :size && entry.fetch(:kind) != "file"
+
+        field_equal(path: path, field: "isoinfo Joliet #{field}",
+                    expected: reference.fetch(field), actual: entry.fetch(field))
+        if nonbmp.key?(path)
+          field_equal(path: path, field: "bsdtar Joliet non-BMP #{field}",
+                      expected: nonbmp.fetch(path).fetch(field), actual: entry.fetch(field))
+        end
+      end
+      row = manifest.fetch(projected_path)
+      field_equal(path: path, field: "Joliet manifest kind", expected: row.fetch("type"), actual: entry.fetch(:kind))
+      next unless entry.fetch(:kind) == "file"
+
+      observed = content_digest(binary: binary, options: forced, path: path)
+      field_equal(path: path, field: "Joliet manifest SHA-256 and size",
+                  expected: [row.fetch("size"), row.fetch("sha256")], actual: observed)
+      files[path] = observed
+    end
+    paired = compare_view_contents(binary: binary, options: options, image: image, joliet_files: files)
+    puts "#{File.basename(image)}: Joliet verbose/isoinfo/bsdtar/manifest ok " \
+         "(#{actual.size} paths, #{files.size} SHA-256); #{paired}/Joliet content agrees"
+  end
+
   def corpus(binary:, directory:, scratch:)
     images = Dir.glob(File.join(directory, "*.iso")).sort
     raise Error, "no producer images" if images.empty?
@@ -403,6 +512,15 @@ module IsoIntegration
         rescue Error, JSON::ParserError, KeyError, ArgumentError => error
           warn "#{label}: Rock Ridge comparison failed: #{error.message}"
           puts "#{label}: rockridge FAIL"
+          failed = true
+        end
+      end
+      if command("isoinfo", "-d", "-i", image).match?(/Joliet with UCS level [123] found/)
+        begin
+          joliet(binary: binary, image: image, options: [*forcing, "-f", image])
+        rescue Error, JSON::ParserError, KeyError, ArgumentError => error
+          warn "#{label}: Joliet comparison failed: #{error.message}"
+          puts "#{label}: Joliet FAIL"
           failed = true
         end
       end
@@ -465,19 +583,19 @@ module IsoIntegration
   end
 
   def private_disc(binary:, image:)
-    info = counts([binary, "i", "-f", image],
-                  ["awk", '/^Label:/ { next } /^Format:[[:space:]]+ISO9660$/ { n++ } END { print n+0 }'])
-    raise Error, "H3 format differs" unless info == [1]
+    profile = counts([binary, "i", "-f", image],
+                     ["awk", '/^Profile:[[:space:]]+joliet$/ { n++ } END { print n+0 }'])
+    raise Error, "H3 auto profile must be Joliet" unless profile == [1]
 
-    fsimg = counts([binary, "t", "-v", "-f", image],
-                   ["awk", '/^d/ { d++; next } /^-/ { f++ } END { print f+0, d+1 }'])
-    # Primary files have a numeric version; directory identifiers do not.
-    # This oracle classification includes empty directories and the root.
-    oracle = counts(["isoinfo", "-f", "-i", image],
-                    ["awk", '/;[0-9]+$/ { f++; next } /^\// { d++ } END { print f+0, d+1 }'])
-    puts "H3: fsimg files=#{fsimg[0]} directories=#{fsimg[1]}; " \
-         "isoinfo files=#{oracle[0]} directories=#{oracle[1]} (root included)"
-    raise Error, "H3 counts differ" unless fsimg == oracle && oracle == [7763, 2204]
+    oracle = counts(["isoinfo", "-J", "-l", "-i", image],
+                    ["awk", '/^d/ && $NF != "." && $NF != ".." { d++ } /^-/ { f++ } END { print f+0, d+1 }'])
+    %w[auto joliet].each do |view|
+      fsimg = counts([binary, "t", "-v", "-o", "view=#{view}", "-f", image],
+                     ["awk", '/^d/ { d++; next } /^-/ { f++ } END { print f+0, d+1 }'])
+      puts "H3 #{view}: fsimg files=#{fsimg[0]} directories=#{fsimg[1]}; " \
+           "isoinfo -J files=#{oracle[0]} directories=#{oracle[1]} (root included)"
+      raise Error, "H3 #{view} counts differ" unless fsimg == oracle && oracle == [7763, 2204]
+    end
   end
 
   def other_probes(binary:, scratch:)

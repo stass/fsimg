@@ -347,9 +347,12 @@ Every stage leaves `make -j32 check` passing and follows the gates below.
   in `names.c`, the `joliet` view.
 * Tests: the Joliet rows, levels 1 to 3, surrogate pairs and unpaired
   surrogates, odd lengths, long names, two Joliet descriptors.
-* **Gate:** names agree with `isoinfo -J` on every Joliet corpus image, and
-  the three views of each combined image deliver identical content for
-  the same files.
+* **Gate:** names agree with `isoinfo -J` on every Joliet corpus image
+  whose Joliet tree satisfies the [dot-record rules](../specs/design-iso9660.md#dot-records),
+  and the views each combined image offers deliver identical content for
+  the same files. The xorriso images, whose Joliet subdirectories name
+  themselves as parent, fail a forced `joliet` view as corrupt and read
+  through Rock Ridge under `auto`.
 
 ### 6. El Torito read
 

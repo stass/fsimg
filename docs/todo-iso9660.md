@@ -21,15 +21,9 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   (`-eltorito-selcrit`), which the El Torito comparison does not yet
   cover.
 * [High] **Reader** (`lib/formats/iso9660/`, `test/iso9660.c`,
-  `fuzz/iso9660.c`): stages 5, 7 and 8, the Joliet view, the verifier,
-  and interoperability, scale and fault evidence. The registered reader
-  presents the Rock Ridge and primary views:
-  * `view=auto` never selects `joliet`, and a forced `joliet` fails open
-    as unsupported, until stage 5 completes the
-    [selection rule](../specs/design-iso9660.md#view-selection);
-  * the format record's profile (`rockridge/primary`) gains `joliet` in
-    stage 5, and the man page's ISO paragraph and the README row change
-    with it;
+  `fuzz/iso9660.c`): stages 7 and 8, the verifier, and interoperability,
+  scale and fault evidence. The registered reader presents the Rock
+  Ridge, Joliet and primary views:
   * a Rock Ridge directory carrying `RE` that no `CL` names is left out of
     the view without an error, with its subtree, until stage 7's
     relocation match refuses it under `W`;

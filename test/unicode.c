@@ -11,6 +11,7 @@
 
 static void test_scalars(void);
 static void test_invalid(void);
+static void test_wtf8(void);
 static void test_paths_and_metadata(void);
 
 static void
@@ -80,6 +81,71 @@ test_invalid(void)
 }
 
 static void
+test_wtf8(void)
+{
+	static const struct {
+		const char *name;
+		uint16_t input[3];
+		size_t units;
+		const char *expected;
+		bool unpaired;
+	} rows[] = {
+		{ "surrogate pair", { 0xd83d, 0xde00 }, 2,
+		    "\xf0\x9f\x98\x80", false },
+		{ "terminal high surrogate", { 0xd83d }, 1,
+		    "\xed\xa0\xbd", true },
+		{ "high followed by ASCII", { 0xd83d, 'A' }, 2,
+		    "\xed\xa0\xbd" "A", true },
+		{ "high followed by high", { 0xd83d, 0xd800 }, 2,
+		    "\xed\xa0\xbd\xed\xa0\x80", true },
+		{ "lone low surrogate", { 0xde00 }, 1,
+		    "\xed\xb8\x80", true },
+		{ "BMP and ASCII", { 0xe9, 0x4e2d, 'A' }, 3,
+		    "\xc3\xa9\xe4\xb8\xad" "A", false }
+	};
+	char bytes[8];
+	size_t written, expected;
+	fsimg_status_t status;
+
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		expected = strlen(rows[i].expected);
+		memset(bytes, 0x7e, sizeof(bytes));
+		status = fsimg_utf16_to_wtf8(rows[i].input, rows[i].units,
+		    bytes, expected, &written, NULL);
+		if (status != FSIMG_OK || written != expected ||
+		    bcmp(bytes, rows[i].expected, expected) != 0 ||
+		    bytes[expected] != 0x7e) {
+			fprintf(stderr, "%s: WTF-8 bytes or length differ\n",
+			    rows[i].name);
+			exit(1);
+		}
+		status = fsimg_utf16_to_wtf8(rows[i].input, rows[i].units,
+		    NULL, 0, &written, NULL);
+		if (status != FSIMG_OK || written != expected) {
+			fprintf(stderr, "%s: WTF-8 counting mode differs\n",
+			    rows[i].name);
+			exit(1);
+		}
+		status = fsimg_utf16_to_wtf8(rows[i].input, rows[i].units,
+		    bytes, expected - 1, &written, NULL);
+		if (status != FSIMG_ERANGE || written != 0) {
+			fprintf(stderr, "%s: short WTF-8 buffer must fail\n",
+			    rows[i].name);
+			exit(1);
+		}
+		if (!rows[i].unpaired)
+			continue;
+		status = fsimg_utf16_to_utf8(rows[i].input, rows[i].units,
+		    bytes, sizeof(bytes), &written, NULL);
+		if (status != FSIMG_EINVAL || written != 0) {
+			fprintf(stderr, "%s: strict UTF-8 must reject surrogate\n",
+			    rows[i].name);
+			exit(1);
+		}
+	}
+}
+
+static void
 test_paths_and_metadata(void)
 {
 	const char *invalid[] = { "", "a", "/", "//a", "/a/", "/a//b",
@@ -132,6 +198,7 @@ main(void)
 {
 	test_scalars();
 	test_invalid();
+	test_wtf8();
 	test_paths_and_metadata();
 	return (0);
 }

@@ -12,14 +12,15 @@ static fsimg_status_t iso_probe(const unsigned char *, size_t, uint64_t,
 /* One public name for every view and level; the view is a read setting.
  * The reader presents the Rock Ridge view, with symbolic links, FIFOs,
  * owner, mode and four times under names of up to 1024 bytes, and the
- * primary hierarchy: files and directories with their recording dates and
- * hidden attribute. Multi-section files reach the volume's size.
+ * Joliet and primary hierarchies: files and directories with their
+ * recording dates and hidden attribute. Multi-section files reach the
+ * volume's size.
  */
 static const fsimg_format_variant_t iso_variants[] = {
 	{
 		.info = {
 			.name = "iso9660",
-			.profile = "rockridge/primary",
+			.profile = "rockridge/joliet/primary",
 			.entry_kinds = FSIMG_ENTRY_FILE |
 			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
 			    FSIMG_ENTRY_FIFO,

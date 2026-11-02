@@ -34,6 +34,7 @@
 #define ISO_SECTIONS_MAX	65535u
 #define ISO_NAME_MAX		1024u
 #define ISO_LABEL_BYTES		32u
+#define ISO_LABEL_TEXT_MAX	48u	/* 16 UTF-16 units as UTF-8 */
 #define ISO_ESCAPE_BYTES	32u
 #define ISO_SUSP_AREAS_MAX	16u	/* continuation areas per stream */
 
@@ -261,9 +262,10 @@ typedef struct iso_payload {
 
 /* Driver state behind the reader's private pointer, from open to close.
  * primary is the first primary descriptor and joliet the Joliet
- * descriptor when joliet_level is nonzero; view_root is the root record of
- * the selected view's hierarchy. readable_blocks is the smaller of the
- * volume and the whole blocks of the slice; nothing past it is read.
+ * descriptor when joliet_level is nonzero; iso_hierarchy() gives the
+ * descriptor of the selected view's hierarchy. readable_blocks is the
+ * smaller of the volume and the whole blocks of the slice; nothing past it
+ * is read.
  * current is the payload replay made current, and file the current
  * regular file's section index. boot is the El Torito boot summary.
  * window caches the block of descriptors, system area, boot catalog or
@@ -274,7 +276,6 @@ typedef struct iso_payload {
 typedef struct fsimg_iso9660_reader {
 	iso_descriptor_t primary;
 	iso_descriptor_t joliet;
-	iso_record_t	 view_root;
 	iso_payload_t	 current;
 	iso_boot_t	 boot;
 	fsimg_extent_index_t *file;
@@ -325,6 +326,7 @@ fsimg_status_t iso_extent_check(const fsimg_iso9660_reader_t *, uint64_t,
 fsimg_status_t iso_window_read(fsimg_reader_t *, iso_window_t *, uint64_t,
     fsimg_error_t *);
 fsimg_status_t iso_block_read(fsimg_reader_t *, uint64_t, fsimg_error_t *);
+const iso_descriptor_t *iso_hierarchy(const fsimg_iso9660_reader_t *);
 
 /* eltorito.c */
 uint64_t iso_boot_image_blocks(uint16_t);
@@ -347,11 +349,14 @@ fsimg_status_t iso_rr_decode(fsimg_reader_t *, const unsigned char *,
     fsimg_error_t *);
 
 /* names.c: identifier checks, displayed names and namespace keys. A
- * displayed-name buffer holds ISO_IDENTIFIER_MAX bytes and a NUL.
+ * displayed-name buffer holds ISO_NAME_MAX bytes and a NUL, a label buffer
+ * ISO_LABEL_TEXT_MAX bytes and a NUL.
  */
 fsimg_status_t iso_primary_name(const unsigned char *, size_t, bool, char *,
     size_t *, fsimg_error_t *);
-bool iso_label_decode(const unsigned char *, char *);
+fsimg_status_t iso_joliet_name(const unsigned char *, size_t, char *,
+    size_t *, fsimg_error_t *);
+bool iso_label_decode(const iso_descriptor_t *, char *);
 fsimg_status_t iso_keys(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_directory_keys_t *, fsimg_error_t *);
 fsimg_status_t iso_key(fsimg_reader_t *, const char *, unsigned char *,

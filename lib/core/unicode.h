@@ -33,6 +33,12 @@ fsimg_status_t fsimg_utf8_to_utf16(const char *, size_t, uint16_t *, size_t,
     size_t *, fsimg_error_t *);
 fsimg_status_t fsimg_utf16_to_utf8(const uint16_t *, size_t, char *, size_t,
     size_t *, fsimg_error_t *);
+/* As fsimg_utf16_to_utf8(), but an unpaired surrogate is written in the
+ * generalized three-byte form (WTF-8), which the portable name profile
+ * refuses, instead of failing: a reader's name then reaches omission.
+ */
+fsimg_status_t fsimg_utf16_to_wtf8(const uint16_t *, size_t, char *, size_t,
+    size_t *, fsimg_error_t *);
 /* Whether a component of length bytes lies in the portable name profile:
  * nonempty strict UTF-8 without NUL, slash, control bytes or DEL, and
  * neither "." nor "..". Each format bounds the length itself.

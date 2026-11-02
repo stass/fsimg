@@ -230,7 +230,8 @@ zero:
 A Joliet descriptor's volume flags must be zero, its geometry fields equal
 the primary descriptor's (volume space size, set size, sequence number and
 block size), and its root record satisfies the primary root's rules, else
-`FSIMG_ECORRUPT`. Its label is 32 bytes of big-endian UCS-2. A
+`FSIMG_ECORRUPT`. Its label is 32 bytes of big-endian UCS-2, decoded as
+an [identifier](#joliet-identifiers) is. A
 supplementary descriptor with any other escape sequence is framed and
 ignored. Two Joliet descriptors in one set are `FSIMG_EUNSUPPORTED`: no
 producer writes them, and choosing one would be a guess.
@@ -252,7 +253,7 @@ reader exposes exactly one, the **view**, for the whole reader session:
 | View | Tree | Names | Kinds and metadata |
 | --- | --- | --- | --- |
 | `rockridge` | Primary hierarchy with its SUSP entries | Rock Ridge names | Files, directories, symbolic links, FIFOs; owner, mode, Rock Ridge times |
-| `joliet` | The Joliet hierarchy | UCS-2 identifiers as UTF-8 | Files and directories; recording dates |
+| `joliet` | The Joliet hierarchy | UTF-16BE identifiers as UTF-8 | Files and directories; recording dates |
 | `primary` | Primary hierarchy without SUSP | ISO identifiers | Files and directories; recording dates |
 
 A view never consults another tree: a Joliet entry gets no POSIX metadata
@@ -368,7 +369,13 @@ record of where it has been:
 
 A directory then has exactly one possible parent and one record in it, so
 a cycle or a directory shared between parents fails one of the rules. A
-violation is `FSIMG_ECORRUPT`.
+violation is `FSIMG_ECORRUPT`. xorriso 1.5.8 (libisofs 1.5.8) writes every
+Joliet subdirectory's second record naming the directory itself, while
+mkisofs, libarchive and the H3 disc's producer name the parent; the rule
+applies, so such a Joliet hierarchy is corrupt, a forced `joliet` view and
+full verification fail on it. `auto` reads those images through the Rock
+Ridge xorriso writes by default; one written without Rock Ridge fails
+under `auto` too and reads in the `primary` view.
 
 The root record in a descriptor is a 34-byte record with `LEN_FI = 1`,
 identifier `0x00` and the directory flag, else `FSIMG_ECORRUPT`; its
@@ -464,8 +471,9 @@ writer enforces the character set and the limits.
 A Joliet identifier is big-endian UCS-2: its length is even, else
 `FSIMG_ECORRUPT`. The reader decodes it as UTF-16BE, accepting surrogate
 pairs, which producers write for names outside the Basic Multilingual
-Plane. The code unit `0x0000` and the character `/` are `FSIMG_ECORRUPT`.
-An unpaired surrogate is encoded in the generalized three-byte form that
+Plane. The code unit `0x0000` and the character `/` are `FSIMG_ECORRUPT`,
+as is an identifier whose [displayed name](#displayed-names-and-keys) is
+empty, `.` or `..`. An unpaired surrogate is encoded in the generalized three-byte form that
 UTF-8 forbids for surrogates; the result has no `0x00` or `/` byte, keeps
 distinct identifiers distinct, and is not strict UTF-8, so the entry is
 [omitted](design-directories.md#omitted-names). The reader accepts

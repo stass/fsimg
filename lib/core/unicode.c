@@ -103,9 +103,14 @@ fsimg_utf8_to_utf16(const char *input, size_t length, uint16_t *output,
 	return (FSIMG_OK);
 }
 
-fsimg_status_t
-fsimg_utf16_to_utf8(const uint16_t *input, size_t length, char *output,
-    size_t capacity, size_t *written, fsimg_error_t *error)
+/* Encode UTF-16 code units as UTF-8, a surrogate pair as its scalar. An
+ * unpaired surrogate is FSIMG_EINVAL, or with generalized set is written
+ * as its code point in the three-byte form strict UTF-8 refuses (WTF-8),
+ * which keeps distinct unit sequences distinct.
+ */
+static fsimg_status_t
+utf16_encode(const uint16_t *input, size_t length, char *output,
+    size_t capacity, size_t *written, bool generalized, fsimg_error_t *error)
 {
 	size_t count, units;
 	uint32_t scalar;
@@ -120,17 +125,14 @@ fsimg_utf16_to_utf8(const uint16_t *input, size_t length, char *output,
 	count = 0;
 	for (size_t i = 0; i < length; i++) {
 		scalar = input[i];
-		if (scalar >= 0xd800 && scalar <= 0xdbff) {
-			if (i + 1 == length || input[i + 1] < 0xdc00 ||
-			    input[i + 1] > 0xdfff)
-				return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-				    FSIMG_OP_CATALOG, "unpaired UTF-16 high surrogate"));
+		if (scalar >= 0xd800 && scalar <= 0xdbff && i + 1 < length &&
+		    input[i + 1] >= 0xdc00 && input[i + 1] <= 0xdfff) {
 			i++;
 			scalar = 0x10000 + ((scalar - 0xd800) << 10) +
 			    (input[i] - 0xdc00);
-		} else if (scalar >= 0xdc00 && scalar <= 0xdfff) {
+		} else if (scalar >= 0xd800 && scalar <= 0xdfff && !generalized) {
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_CATALOG, "unpaired UTF-16 low surrogate"));
+			    FSIMG_OP_CATALOG, "unpaired UTF-16 surrogate"));
 		}
 		units = scalar < 0x80 ? 1 : scalar < 0x800 ? 2 :
 		    scalar < 0x10000 ? 3 : 4;
@@ -154,6 +156,22 @@ fsimg_utf16_to_utf8(const uint16_t *input, size_t length, char *output,
 	}
 	*written = count;
 	return (FSIMG_OK);
+}
+
+fsimg_status_t
+fsimg_utf16_to_utf8(const uint16_t *input, size_t length, char *output,
+    size_t capacity, size_t *written, fsimg_error_t *error)
+{
+	return (utf16_encode(input, length, output, capacity, written, false,
+	    error));
+}
+
+fsimg_status_t
+fsimg_utf16_to_wtf8(const uint16_t *input, size_t length, char *output,
+    size_t capacity, size_t *written, fsimg_error_t *error)
+{
+	return (utf16_encode(input, length, output, capacity, written, true,
+	    error));
 }
 
 bool

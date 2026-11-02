@@ -51,6 +51,24 @@ iso_unsupported(fsimg_error_t *error, const char *message)
 	    message));
 }
 
+/* The profile: the selected view's name. Open never leaves the view auto,
+ * and the switch names every view so a new one fails -Wswitch.
+ */
+static const char *
+view_name(fsimg_iso_view_t view)
+{
+	switch (view) {
+	case FSIMG_ISO_VIEW_ROCKRIDGE:
+		return ("rockridge");
+	case FSIMG_ISO_VIEW_JOLIET:
+		return ("joliet");
+	case FSIMG_ISO_VIEW_PRIMARY:
+	case FSIMG_ISO_VIEW_AUTO:
+		break;
+	}
+	return ("primary");
+}
+
 /* The boot entries for platform; zero without El Torito. */
 static unsigned
 boot_platform_count(const iso_boot_t *boot, uint8_t platform)
@@ -75,8 +93,8 @@ report_details(const fsimg_iso9660_reader_t *iso, fsimg_volume_info_t *info)
 		{ "enhanced", iso->enhanced ? 1 : 0 },
 		{ "descriptors", iso->descriptors },
 		{ "terminator_block", iso->terminator_block },
-		{ "root_block", iso->view_root.extent },
-		{ "path_table_bytes", iso->primary.path_table_bytes },
+		{ "root_block", iso_hierarchy(iso)->root.extent },
+		{ "path_table_bytes", iso_hierarchy(iso)->path_table_bytes },
 		{ "system_area_used", iso->system_area_used ? 1 : 0 },
 		{ "missing_blocks", iso->primary.volume_space_size -
 		    iso->readable_blocks },
@@ -114,12 +132,11 @@ iso_open(fsimg_reader_t *reader,
 		return (status);
 
 	strcpy(info->format, "iso9660");
-	strcpy(info->profile, iso->view == FSIMG_ISO_VIEW_ROCKRIDGE ?
-	    "rockridge" : "primary");
+	strcpy(info->profile, view_name(iso->view));
 	info->valid |= FSIMG_VOLUME_GEOMETRY;
-	_Static_assert(ISO_LABEL_BYTES < sizeof(info->label),
+	_Static_assert(ISO_LABEL_TEXT_MAX < sizeof(info->label),
 	    "an ISO 9660 label fits the volume information");
-	if (iso_label_decode(iso->primary.label, info->label) &&
+	if (iso_label_decode(iso_hierarchy(iso), info->label) &&
 	    info->label[0] != '\0')
 		info->valid |= FSIMG_VOLUME_LABEL;
 	info->volume_bytes = (uint64_t)iso->primary.volume_space_size *

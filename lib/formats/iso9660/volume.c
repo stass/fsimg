@@ -233,10 +233,11 @@ system_area_scan(fsimg_reader_t *reader, fsimg_error_t *error)
 
 /* Select the view (specs/design-iso9660.md#view-selection). auto and a
  * forced rockridge run the handshake at the primary root; auto takes
- * Rock Ridge when it is present with a skip count of zero and otherwise
- * the primary view. A forced view never falls back: rockridge without a
- * readable Rock Ridge, and joliet, which this reader does not present,
- * are unsupported. A forced primary view never decodes the root's system
+ * Rock Ridge when it is present with a skip count of zero, otherwise
+ * Joliet when the volume has a Joliet descriptor, otherwise the primary
+ * view. A forced view never falls back: rockridge without a readable Rock
+ * Ridge, and joliet without a Joliet descriptor, are unsupported. A
+ * forced joliet or primary view never decodes the primary root's system
  * use area, so a damaged handshake cannot keep a caller from it.
  */
 static fsimg_status_t
@@ -254,19 +255,29 @@ view_select(fsimg_reader_t *reader, fsimg_error_t *error)
 		if (iso->rockridge == ISO_ROCKRIDGE_PRESENT)
 			view = FSIMG_ISO_VIEW_ROCKRIDGE;
 		else if (view == FSIMG_ISO_VIEW_AUTO)
-			view = FSIMG_ISO_VIEW_PRIMARY;
+			view = iso->joliet_level != 0 ? FSIMG_ISO_VIEW_JOLIET :
+			    FSIMG_ISO_VIEW_PRIMARY;
 		else
 			return (iso_unsupported(error, iso->rockridge ==
 			    ISO_ROCKRIDGE_SKIP ? "ISO 9660 Rock Ridge with a "
 			    "nonzero SUSP skip count is unsupported" :
 			    "requested ISO 9660 view is not available"));
 	}
-	if (view == FSIMG_ISO_VIEW_JOLIET)
+	if (view == FSIMG_ISO_VIEW_JOLIET && iso->joliet_level == 0)
 		return (iso_unsupported(error,
 		    "requested ISO 9660 view is not available"));
 	iso->view = view;
-	iso->view_root = iso->primary.root;
 	return (FSIMG_OK);
+}
+
+/* The descriptor whose hierarchy the view walks: the Joliet descriptor for
+ * the joliet view, the primary descriptor for the other two.
+ */
+const iso_descriptor_t *
+iso_hierarchy(const fsimg_iso9660_reader_t *iso)
+{
+	return (iso->view == FSIMG_ISO_VIEW_JOLIET ? &iso->joliet :
+	    &iso->primary);
 }
 
 fsimg_status_t

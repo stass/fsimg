@@ -18,7 +18,9 @@
  * first (cursor_next). The first two records are the dot records,
  * naming the directory and its parent; every later record, or run of
  * records sharing an identifier through the multi-extent flag, is one
- * entry.
+ * entry. The joliet view walks the Joliet descriptor's hierarchy and the
+ * other two the primary one; the joliet and primary views differ only in
+ * names.
  *
  * Three rules make the hierarchy a tree with no record of visited
  * directories: a directory's parent record names the walker's parent, no
@@ -155,7 +157,7 @@ directory_child_check(const fsimg_iso9660_reader_t *iso,
 	    ISO_BLOCKS(record->data_length)))
 		return (iso_corrupt(error,
 		    "ISO 9660 directory lies outside the volume"));
-	if (record->extent == iso->view_root.extent)
+	if (record->extent == iso_hierarchy(iso)->root.extent)
 		return (iso_corrupt(error,
 		    "ISO 9660 directory record names the root"));
 	return (FSIMG_OK);
@@ -344,7 +346,7 @@ relocation_target(fsimg_reader_t *reader, uint32_t directory, uint32_t child,
 	fsimg_status_t status;
 
 	*length = 0;
-	if (child == iso->view_root.extent)
+	if (child == iso_hierarchy(iso)->root.extent)
 		return (iso_corrupt(error,
 		    "Rock Ridge CL entry names the root"));
 	status = iso_extent_check(iso, child, 1, error);
@@ -431,13 +433,17 @@ iso_payload_decode(const fsimg_iso9660_reader_t *iso,
 
 /* The displayed name of a complete run in the view, the one derivation
  * preparation admits and replay compares, into out of ISO_NAME_MAX + 1
- * bytes: the Rock Ridge name when the run's first record has NM,
- * otherwise the primary displayed name.
+ * bytes: in the joliet view the decoded Joliet identifier; otherwise the
+ * Rock Ridge name when the run's first record has NM, which only the
+ * rockridge view decodes, else the primary displayed name.
  */
 static fsimg_status_t
-run_name(const iso_run_t *run, char *out, size_t *length,
-    fsimg_error_t *error)
+run_name(const fsimg_iso9660_reader_t *iso, const iso_run_t *run, char *out,
+    size_t *length, fsimg_error_t *error)
 {
+	if (iso->view == FSIMG_ISO_VIEW_JOLIET)
+		return (iso_joliet_name(run->identifier,
+		    run->first.identifier_length, out, length, error));
 	if ((run->rr.entries & RR_NM) != 0) {
 		bcopy(run->rr.name, out, run->rr.name_length + 1);
 		*length = run->rr.name_length;
@@ -465,7 +471,7 @@ run_admit(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 		return (FSIMG_OK);
 	bzero(&payload, sizeof(payload));
 	payload.kind = run->kind;
-	status = run_name(run, name, &length, error);
+	status = run_name(iso_state(reader), run, name, &length, error);
 	if (status != FSIMG_OK)
 		return (status);
 	payload.directory_extent = directory->extent;
@@ -511,8 +517,8 @@ iso_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 
 	relocated = false;
 	if (fsimg_directory_level(build) == 0) {
-		extent = iso->view_root.extent;
-		length = iso->view_root.data_length;
+		extent = iso_hierarchy(iso)->root.extent;
+		length = iso_hierarchy(iso)->root.data_length;
 		parent = extent;
 	} else {
 		if (iso->current.kind != FSIMG_ENTRY_DIRECTORY)
@@ -665,7 +671,7 @@ iso_replay(fsimg_reader_t *reader, const char *name,
 	    (run.kind == FSIMG_ENTRY_DIRECTORY && !opens))
 		return (iso_corrupt(error,
 		    "prepared ISO 9660 entry disagrees with its records"));
-	status = run_name(&run, shown, &shown_length, error);
+	status = run_name(iso, &run, shown, &shown_length, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (strcmp(shown, name) != 0)
