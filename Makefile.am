@@ -255,9 +255,11 @@ test_qnx4_SOURCES = test/qnx4.c test/test.h test/scale.h
 test_qnx4_LDADD = libfsimg.la
 test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h test/scale.h
 test_qnx4_write_LDADD = libfsimg.la
-test_iso9660_SOURCES = test/iso9660.c test/test.h
+test_iso9660_SOURCES = test/iso9660.c test/test.h \
+	test/iso9660-image.c test/iso9660-image.h
 test_iso9660_LDADD = libfsimg.la
-test_iso9660_faults_SOURCES = test/iso9660-faults.c test/test.h
+test_iso9660_faults_SOURCES = test/iso9660-faults.c test/test.h \
+	test/iso9660-image.c test/iso9660-image.h
 test_iso9660_faults_LDADD = libfsimg.la
 test_iso9660_scale_SOURCES = test/iso9660-scale.c test/test.h test/scale.h
 test_iso9660_scale_LDADD = libfsimg.la
@@ -387,6 +389,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/iso9660-corpus-test.rb test/iso9660-corpus-check.sh.in \
 	test/iso9660-evidence.rb test/iso9660-integration.sh.in \
 	test/iso9660-integration.rb test/iso9660-scale.c test/iso9660-faults.c \
+	test/iso9660-image.c test/iso9660-image.h \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \

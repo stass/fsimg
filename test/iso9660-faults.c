@@ -1,16 +1,16 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
-/* Reuse the independent encoder and its resource-accounting cleanup checks.
- * The acceptance entry point is renamed and never called here; this program
- * runs only the additional view/stage fault sweeps below. Keeping the encoder
- * in its existing file avoids edits to the shared fixture encoder.
- */
-#define main fsimg_iso9660_acceptance_main
-#include "iso9660.c"
-#undef main
+#include "config.h"
 
 #include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <strings.h>
+
+#include "internal.h"
+#include "test.h"
+#include "iso9660-image.h"
 
 #include "meta.h"
 
@@ -38,7 +38,6 @@ typedef struct short_source {
 	bool fired;
 } short_source_t;
 
-int fsimg_iso9660_acceptance_main(int, char **);
 static fsimg_status_t short_read(void *, uint64_t, void *, size_t, size_t *,
     fsimg_error_t *);
 static fsimg_status_t short_size(void *, uint64_t *, fsimg_error_t *);
