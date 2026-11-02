@@ -25,6 +25,16 @@
  * child names the root, and each directory child carries an extent key, so
  * namespace validation rejects two records opening one directory.
  *
+ * In the rockridge view every record's SUSP stream is decoded, and a run's
+ * first record gives its name, kind and metadata. Relocation keeps the
+ * same three rules (specs/design-iso9660.md#relocation): a placeholder
+ * record carrying CL is a directory entry opening the relocated directory,
+ * whose parent record carries PL naming the walker's parent instead; a
+ * directory reached through an ordinary record carries no PL; and the
+ * relocated directory's own record, carrying RE, is not an entry. Every
+ * directory therefore has one way in, and a relocation loop is never
+ * reached.
+ *
  * The payload of an admitted entry, little-endian, holds the containing
  * directory, the position of the entry's first record, its section count,
  * kind and relocation flag, and the directory a directory entry opens.
@@ -48,10 +58,14 @@ _Static_assert(ISO_PAYLOAD_BYTES <= FSIMG_DIRECTORY_PAYLOAD_BYTES,
  * identifier, the section count, the size so far, and the end block of the
  * last section holding data, which the next one must not precede. open is
  * set while the last record read carried the multi-extent flag, so the run
- * needs another section.
+ * needs another section. kind is the entry's kind in the view, and rr the
+ * Rock Ridge entries of the first record, all zero outside the rockridge
+ * view.
  */
 typedef struct iso_run {
 	iso_record_t	 first;
+	iso_rr_t	 rr;
+	fsimg_entry_kind_t kind;
 	uint64_t	 size;
 	uint64_t	 data_end;
 	uint32_t	 block;			/* the first record's position */
@@ -103,10 +117,11 @@ cursor_next(fsimg_reader_t *reader, iso_cursor_t *cursor,
 		end = cursor->length - (uint64_t)cursor->block * ISO_BLOCK_BYTES;
 		if (end > ISO_BLOCK_BYTES)
 			end = ISO_BLOCK_BYTES;
-		if (cursor->offset < end && iso->window[cursor->offset] != 0)
+		if (cursor->offset < end &&
+		    iso->window.bytes[cursor->offset] != 0)
 			break;
 		if (cursor->offset < ISO_BLOCK_BYTES &&
-		    !iso_bytes_zero(iso->window + cursor->offset,
+		    !iso_bytes_zero(iso->window.bytes + cursor->offset,
 		    ISO_BLOCK_BYTES - cursor->offset))
 			return (iso_corrupt(error, "ISO 9660 directory block "
 			    "holds bytes after its last record"));
@@ -115,14 +130,14 @@ cursor_next(fsimg_reader_t *reader, iso_cursor_t *cursor,
 	}
 	status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
 	if (status == FSIMG_OK)
-		status = iso_record_decode(iso->window, cursor->offset, record,
-		    error);
+		status = iso_record_decode(iso->window.bytes, cursor->offset,
+		    record, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (record->length > end - cursor->offset)
 		return (iso_corrupt(error,
 		    "ISO 9660 directory record extends past its directory"));
-	*raw = iso->window + cursor->offset;
+	*raw = iso->window.bytes + cursor->offset;
 	cursor->record_block = cursor->extent + cursor->block;
 	cursor->record_offset = cursor->offset;
 	cursor->offset += record->length;
@@ -220,14 +235,21 @@ run_add(const fsimg_iso9660_reader_t *iso, iso_run_t *run,
 
 /* The dot records: the first, at the directory's first byte, names the
  * directory itself with its length; the second, in the same block, names
- * parent, the walker's parent, which is the root itself for the root.
+ * parent, the walker's parent, which is the root itself for the root. In
+ * the rockridge view both streams are decoded, and the second carries PL
+ * exactly when the directory is relocated: its PL then names parent, and
+ * its extent the relocation directory, which only full verification
+ * checks against the RE record there.
  */
 static fsimg_status_t
 dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
-    uint32_t parent, fsimg_error_t *error)
+    uint32_t parent, bool relocated, fsimg_error_t *error)
 {
+	fsimg_iso9660_reader_t *iso = iso_state(reader);
 	const unsigned char *raw;
 	iso_record_t record;
+	iso_susp_t susp;
+	iso_rr_t rr;
 	fsimg_status_t status;
 
 	for (unsigned dot = 0; dot < 2; dot++) {
@@ -247,11 +269,93 @@ dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
 		    record.data_length != length))
 			return (iso_corrupt(error, "ISO 9660 directory's own "
 			    "record does not name it"));
-		if (dot == 1 && record.extent != parent)
+		bzero(&rr, sizeof(rr));
+		if (iso->view == FSIMG_ISO_VIEW_ROCKRIDGE) {
+			iso_susp_start(&susp, raw, cursor->record_block,
+			    cursor->record_offset, &record);
+			status = iso_rr_decode(reader, &susp, true, &rr, error);
+			if (status != FSIMG_OK)
+				return (status);
+		}
+		if (dot == 0)
+			continue;
+		if (relocated && ((rr.entries & RR_PL) == 0 ||
+		    rr.parent != parent))
+			return (iso_corrupt(error, "Rock Ridge relocated "
+			    "directory's PL does not name its parent"));
+		if (!relocated && (rr.entries & RR_PL) != 0)
+			return (iso_corrupt(error, "Rock Ridge PL on a "
+			    "directory not reached through CL"));
+		if (!relocated && record.extent != parent)
 			return (iso_corrupt(error, "ISO 9660 directory's parent "
 			    "record does not name its parent"));
 	}
 	return (FSIMG_OK);
+}
+
+/* Add the record at the cursor's last position to run, then in the
+ * rockridge view decode its stream: a run's first record gives the
+ * entry's name, kind and metadata, a later section's stream is framed and
+ * not interpreted. Elsewhere the directory flag gives the kind.
+ */
+static fsimg_status_t
+run_record(fsimg_reader_t *reader, iso_run_t *run, const iso_cursor_t *cursor,
+    const iso_record_t *record, const unsigned char *raw,
+    fsimg_error_t *error)
+{
+	fsimg_iso9660_reader_t *iso = iso_state(reader);
+	iso_susp_t susp;
+	fsimg_status_t status;
+
+	status = run_add(iso, run, cursor, record, raw, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (run->sections == 1)
+		run->kind = (record->flags & ISO_FLAG_DIRECTORY) != 0 ?
+		    FSIMG_ENTRY_DIRECTORY : FSIMG_ENTRY_FILE;
+	if (iso->view != FSIMG_ISO_VIEW_ROCKRIDGE)
+		return (FSIMG_OK);
+	iso_susp_start(&susp, raw, cursor->record_block, cursor->record_offset,
+	    record);
+	if (run->sections > 1)
+		return (iso_susp_frame(reader, &susp, error));
+	status = iso_rr_decode(reader, &susp, false, &run->rr, error);
+	if (status == FSIMG_OK)
+		status = iso_rr_kind(&run->rr, record, &run->kind, error);
+	return (status);
+}
+
+/* The directory a placeholder in directory relocates, child, which its CL
+ * names: not the root, and a directory whose dot records say it is child
+ * and carry PL naming directory. Its length is its own record's.
+ */
+static fsimg_status_t
+relocation_target(fsimg_reader_t *reader, uint32_t directory, uint32_t child,
+    uint32_t *length, fsimg_error_t *error)
+{
+	fsimg_iso9660_reader_t *iso = iso_state(reader);
+	iso_cursor_t cursor;
+	iso_record_t self;
+	fsimg_status_t status;
+
+	*length = 0;
+	if (child == iso->view_root.extent)
+		return (iso_corrupt(error,
+		    "Rock Ridge CL entry names the root"));
+	status = iso_extent_check(iso, child, 1, error);
+	if (status == FSIMG_OK)
+		status = iso_block_read(reader, child, error);
+	if (status == FSIMG_OK)
+		status = iso_record_decode(iso->window.bytes, 0, &self, error);
+	if (status == FSIMG_OK)
+		status = cursor_open(iso, child, self.data_length, &cursor,
+		    error);
+	if (status == FSIMG_OK)
+		status = dots_check(reader, &cursor, self.data_length,
+		    directory, true, error);
+	if (status == FSIMG_OK)
+		*length = self.data_length;
+	return (status);
 }
 
 static void
@@ -300,8 +404,14 @@ iso_payload_decode(const fsimg_iso9660_reader_t *iso,
 	    (out->relocated && iso->view != FSIMG_ISO_VIEW_ROCKRIDGE))
 		return (iso_corrupt(error, "invalid prepared ISO 9660 payload"));
 	switch (out->kind) {
+	case FSIMG_ENTRY_SYMLINK:
+	case FSIMG_ENTRY_FIFO:
+		if (iso->view != FSIMG_ISO_VIEW_ROCKRIDGE)
+			break;
+		/* FALLTHROUGH */
 	case FSIMG_ENTRY_FILE:
-		if (out->opened_extent != 0 || out->opened_length != 0)
+		if (out->opened_extent != 0 || out->opened_length != 0 ||
+		    out->relocated)
 			break;
 		return (FSIMG_OK);
 	case FSIMG_ENTRY_DIRECTORY:
@@ -316,20 +426,29 @@ iso_payload_decode(const fsimg_iso9660_reader_t *iso,
 
 /* The displayed name of a complete run in the view, the one derivation
  * preparation admits and replay compares, into out of ISO_NAME_MAX + 1
- * bytes.
+ * bytes: the Rock Ridge name when the run's first record has NM,
+ * otherwise the primary displayed name.
  */
 static fsimg_status_t
 run_name(const iso_run_t *run, char *out, size_t *length,
     fsimg_error_t *error)
 {
+	if ((run->rr.entries & RR_NM) != 0) {
+		bcopy(run->rr.name, out, run->rr.name_length + 1);
+		*length = run->rr.name_length;
+		return (FSIMG_OK);
+	}
 	return (iso_primary_name(run->identifier, run->first.identifier_length,
 	    (run->first.flags & ISO_FLAG_DIRECTORY) != 0, out, length, error));
 }
 
-/* Admit a complete run under its displayed name. */
+/* Admit a complete run under its displayed name. A Rock Ridge record
+ * carrying RE is not an entry: its directory is reached through its
+ * placeholder. A placeholder opens the directory its CL names.
+ */
 static fsimg_status_t
-run_admit(fsimg_directory_build_t *build, const iso_cursor_t *directory,
-    const iso_run_t *run, fsimg_error_t *error)
+run_admit(fsimg_reader_t *reader, fsimg_directory_build_t *build,
+    const iso_cursor_t *directory, const iso_run_t *run, fsimg_error_t *error)
 {
 	unsigned char raw[ISO_PAYLOAD_BYTES];
 	char name[ISO_NAME_MAX + 1];
@@ -337,9 +456,10 @@ run_admit(fsimg_directory_build_t *build, const iso_cursor_t *directory,
 	size_t length;
 	fsimg_status_t status;
 
+	if ((run->rr.entries & RR_RE) != 0)
+		return (FSIMG_OK);
 	bzero(&payload, sizeof(payload));
-	payload.kind = (run->first.flags & ISO_FLAG_DIRECTORY) != 0 ?
-	    FSIMG_ENTRY_DIRECTORY : FSIMG_ENTRY_FILE;
+	payload.kind = run->kind;
 	status = run_name(run, name, &length, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -348,7 +468,17 @@ run_admit(fsimg_directory_build_t *build, const iso_cursor_t *directory,
 	payload.record_block = run->block;
 	payload.record_offset = (uint16_t)run->offset;
 	payload.sections = (uint16_t)run->sections;
-	if (payload.kind == FSIMG_ENTRY_DIRECTORY) {
+	if ((run->rr.entries & RR_CL) != 0) {
+		if (run->sections != 1)
+			return (iso_corrupt(error, "Rock Ridge relocation "
+			    "placeholder has several sections"));
+		payload.relocated = true;
+		payload.opened_extent = run->rr.child;
+		status = relocation_target(reader, directory->extent,
+		    run->rr.child, &payload.opened_length, error);
+		if (status != FSIMG_OK)
+			return (status);
+	} else if (payload.kind == FSIMG_ENTRY_DIRECTORY) {
 		payload.opened_extent = run->first.extent;
 		payload.opened_length = run->first.data_length;
 	}
@@ -371,8 +501,10 @@ iso_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 	iso_record_t record;
 	iso_run_t run;
 	uint32_t extent, length, parent;
+	bool relocated;
 	fsimg_status_t status;
 
+	relocated = false;
 	if (fsimg_directory_level(build) == 0) {
 		extent = iso->view_root.extent;
 		length = iso->view_root.data_length;
@@ -384,10 +516,12 @@ iso_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 		extent = iso->current.opened_extent;
 		length = iso->current.opened_length;
 		parent = iso->current.directory_extent;
+		relocated = iso->current.relocated;
 	}
 	status = cursor_open(iso, extent, length, &cursor, error);
 	if (status == FSIMG_OK)
-		status = dots_check(reader, &cursor, length, parent, error);
+		status = dots_check(reader, &cursor, length, parent, relocated,
+		    error);
 	if (status != FSIMG_OK)
 		return (status);
 
@@ -397,9 +531,10 @@ iso_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 		if (status == FSIMG_DONE)
 			break;
 		if (status == FSIMG_OK)
-			status = run_add(iso, &run, &cursor, &record, raw, error);
+			status = run_record(reader, &run, &cursor, &record, raw,
+			    error);
 		if (status == FSIMG_OK && !run.open)
-			status = run_admit(build, &cursor, &run, error);
+			status = run_admit(reader, build, &cursor, &run, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
@@ -439,21 +574,20 @@ section_index(fsimg_reader_t *reader, const iso_record_t *record,
 	return (fsimg_extent_index_append(iso->file, &extent, error));
 }
 
-/* Read the run a payload locates again, checking every record as
- * preparation did, and index a file's sections.
+/* Read the run a payload locates again, checking and decoding every
+ * record as preparation did, and index a regular file's sections.
  */
 static fsimg_status_t
 run_reread(fsimg_reader_t *reader, const iso_payload_t *payload,
     iso_run_t *run, fsimg_error_t *error)
 {
-	fsimg_iso9660_reader_t *iso = iso_state(reader);
 	const unsigned char *raw;
 	iso_cursor_t cursor;
 	iso_record_t record;
 	uint64_t logical;
 	fsimg_status_t status;
 
-	status = cursor_open(iso, payload->directory_extent,
+	status = cursor_open(iso_state(reader), payload->directory_extent,
 	    payload->directory_length, &cursor, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -473,9 +607,9 @@ run_reread(fsimg_reader_t *reader, const iso_payload_t *payload,
 		/* The section's logical offset is the size before it. */
 		logical = run->size;
 		if (status == FSIMG_OK)
-			status = run_add(iso, run, &cursor, &record, raw, error);
-		if (status == FSIMG_OK &&
-		    (record.flags & ISO_FLAG_DIRECTORY) == 0)
+			status = run_record(reader, run, &cursor, &record, raw,
+			    error);
+		if (status == FSIMG_OK && run->kind == FSIMG_ENTRY_FILE)
 			status = section_index(reader, &record, logical, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -485,11 +619,13 @@ run_reread(fsimg_reader_t *reader, const iso_payload_t *payload,
 
 /* Make a replayed child current. Its payload came from scratch storage, so
  * the run is read again from the directory and must agree with it: the
- * same kind, section count, displayed name and, for a directory, the
- * directory it opens. That the payload's directory is the one being
- * listed is taken from the walker's private scratch, which preparation
- * wrote; whatever it names, every read stays within the volume. A regular
- * file's sections become the content index; a directory has no content.
+ * same kind, section count, displayed name and relocation, and for a
+ * directory the directory it opens. That the payload's directory is the
+ * one being listed is taken from the walker's private scratch, which
+ * preparation wrote; whatever it names, every read stays within the
+ * volume. A regular file's sections become the content index, and a
+ * symbolic link's decoded target its content; a directory or FIFO has no
+ * content.
  */
 fsimg_status_t
 iso_replay(fsimg_reader_t *reader, const char *name,
@@ -501,7 +637,7 @@ iso_replay(fsimg_reader_t *reader, const char *name,
 	iso_run_t run;
 	fsimg_metadata_t *metadata = &reader->entry.metadata;
 	size_t shown_length;
-	bool directory;
+	bool relocated, opens;
 	fsimg_status_t status;
 
 	fsimg_extent_index_free(iso->file);
@@ -512,11 +648,16 @@ iso_replay(fsimg_reader_t *reader, const char *name,
 		status = run_reread(reader, &payload, &run, error);
 	if (status != FSIMG_OK)
 		return (status);
-	directory = (run.first.flags & ISO_FLAG_DIRECTORY) != 0;
-	if (directory != (payload.kind == FSIMG_ENTRY_DIRECTORY) ||
-	    run.sections != payload.sections || (directory &&
-	    (run.first.extent != payload.opened_extent ||
-	    run.first.data_length != payload.opened_length)))
+	relocated = (run.rr.entries & RR_CL) != 0;
+	if (relocated)
+		opens = run.rr.child == payload.opened_extent;
+	else
+		opens = run.first.extent == payload.opened_extent &&
+		    run.first.data_length == payload.opened_length;
+	if (run.kind != payload.kind || run.sections != payload.sections ||
+	    relocated != payload.relocated ||
+	    (run.rr.entries & RR_RE) != 0 ||
+	    (run.kind == FSIMG_ENTRY_DIRECTORY && !opens))
 		return (iso_corrupt(error,
 		    "prepared ISO 9660 entry disagrees with its records"));
 	status = run_name(&run, shown, &shown_length, error);
@@ -528,15 +669,25 @@ iso_replay(fsimg_reader_t *reader, const char *name,
 
 	iso->current = payload;
 	reader->entry.kind = payload.kind;
-	reader->entry.size = directory ? 0 : run.size;
-	metadata->valid = FSIMG_META_ATTRIBUTES;
+	reader->entry.size = 0;
+	*metadata = run.rr.metadata;
+	metadata->valid |= FSIMG_META_ATTRIBUTES;
 	if ((run.first.flags & ISO_FLAG_HIDDEN) != 0)
 		metadata->attributes = FSIMG_ATTR_HIDDEN;
-	if (run.first.date_present) {
+	if ((metadata->valid & FSIMG_META_MODIFIED) == 0 &&
+	    run.first.date_present) {
 		metadata->valid |= FSIMG_META_MODIFIED;
 		metadata->modified = run.first.date;
 	}
-	if (!directory)
+	switch (payload.kind) {
+	case FSIMG_ENTRY_FILE:
+		reader->entry.size = run.size;
 		reader->initialized = run.size;
-	return (FSIMG_OK);
+		return (FSIMG_OK);
+	case FSIMG_ENTRY_SYMLINK:
+		return (fsimg_reader_set_link_target(reader, run.rr.target,
+		    run.rr.target_length, error));
+	default:
+		return (FSIMG_OK);
+	}
 }

@@ -290,6 +290,6 @@ iso_boot_open(fsimg_reader_t *reader, fsimg_error_t *error)
 		status = iso_block_read(reader, boot->catalog_block, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (catalog_decode(iso->window, iso->terminator_block + 1, boot,
-	    error));
+	return (catalog_decode(iso->window.bytes, iso->terminator_block + 1,
+	    boot, error));
 }

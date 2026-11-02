@@ -10,26 +10,31 @@ static fsimg_status_t iso_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
 /* One public name for every view and level; the view is a read setting.
- * The reader presents the primary hierarchy: files and directories with
- * their recording dates and hidden attribute, identifiers of at most 222
- * bytes, and multi-section files up to the volume's size.
+ * The reader presents the Rock Ridge view, with symbolic links, FIFOs,
+ * owner, mode and four times under names of up to 1024 bytes, and the
+ * primary hierarchy: files and directories with their recording dates and
+ * hidden attribute. Multi-section files reach the volume's size.
  */
 static const fsimg_format_variant_t iso_variants[] = {
 	{
 		.info = {
 			.name = "iso9660",
-			.profile = "primary",
+			.profile = "rockridge/primary",
 			.entry_kinds = FSIMG_ENTRY_FILE |
-			    FSIMG_ENTRY_DIRECTORY,
-			.metadata_fields = FSIMG_META_MODIFIED |
-			    FSIMG_META_ATTRIBUTES,
+			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
+			    FSIMG_ENTRY_FIFO,
+			.metadata_fields = FSIMG_META_CREATED |
+			    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |
+			    FSIMG_META_CHANGED | FSIMG_META_ATTRIBUTES |
+			    FSIMG_META_OWNER | FSIMG_META_MODE,
 			.sector_size_mask = ISO_BLOCK_BYTES,
 			.allocation_unit_size_mask = ISO_BLOCK_BYTES,
 			.max_file_bytes = ISO_VOLUME_BLOCKS_MAX *
 			    ISO_BLOCK_BYTES,
 			.max_volume_bytes = ISO_VOLUME_BLOCKS_MAX *
 			    ISO_BLOCK_BYTES,
-			.max_name_utf16_units = ISO_IDENTIFIER_MAX,
+			.max_name_utf16_units = ISO_NAME_MAX,
+			.max_link_target_bytes = ISO_NAME_MAX,
 			.max_label_bytes = ISO_LABEL_BYTES,
 			.read_settings = FSIMG_SETTING_ISO_VIEW
 		},

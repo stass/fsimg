@@ -12,8 +12,9 @@ if test ! -d "$FSIMG_ISO_CORPUS" || test ! -f "$FSIMG_ISO_H3"; then
     exit 77
 fi
 if test -z '@RUBY@' || ! command -v isoinfo >/dev/null 2>&1 ||
-    ! command -v xorriso >/dev/null 2>&1; then
-    echo 'SKIP: Ruby, isoinfo and xorriso are required'
+    ! command -v xorriso >/dev/null 2>&1 ||
+    ! command -v bsdtar >/dev/null 2>&1; then
+    echo 'SKIP: Ruby, isoinfo, xorriso and bsdtar are required'
     exit 77
 fi
 exec '@RUBY@' '@abs_top_srcdir@/test/iso9660-integration.rb' ./fsimg

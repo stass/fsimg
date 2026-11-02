@@ -2100,13 +2100,24 @@ FSIMG_ISO_H3="$HOME/PCM-3.1-v4.76-disc-image.iso" \
 sh test/iso9660-integration.sh
 ```
 
-For every corpus image, `fsimg t` and `fsimg x` in the primary view agree
-with the `*.primary.jsonl` manifest: paths with the final `;1` removed,
-kinds, sizes and the SHA-256 of every file. The isohybrid image is read
-with `-F iso9660/-`. Against the stage 0 corpus all 36 images agree. The
-H3 pipeline prints counts only and compares them with `isoinfo -f`:
-7,763 files and 2,204 directories including the root, in the primary
-view, with its 11-level hierarchy and exact directory lengths.
+For every corpus image, `fsimg t` and `fsimg x` with `-o view=primary`
+agree with the `*.primary.jsonl` manifest: paths with the final `;1`
+removed, kinds, sizes and the SHA-256 of every file. For every image
+carrying Rock Ridge, `fsimg i` must report the `rockridge` profile under
+`view=auto`, and `fsimg t -v` must agree with `isoinfo -R -l` and
+`bsdtar -tv` on paths, kinds, owner, mode, modification times to each
+tool's printed precision and link targets, and with the
+`*.rockridge.jsonl` manifest on content. A whole-tree `fsimg x -k` in the
+Rock Ridge view must create exactly the manifest's directories and files,
+with their SHA-256, and report its symbolic links and FIFOs as skipped,
+since safe extraction creates neither. bsdtar is skipped only for
+`xorriso-deep.iso`, whose relocation libarchive cannot connect. The
+script then needs `bsdtar` as well. The isohybrid image is read with
+`-F iso9660/-`. Against the stage 0 corpus all 36 images agree, 31 of
+them in the Rock Ridge view. The H3 pipeline prints counts only and
+compares them with `isoinfo -f`: 7,763 files and 2,204 directories
+including the root, read in the automatically selected primary view, with
+its 11-level hierarchy and exact directory lengths.
 
 For every corpus image, JSON info's boot catalog block agrees with live
 `isoinfo -d` and the saved descriptor report; boot entry, BIOS and EFI
@@ -2116,6 +2127,10 @@ report four zero boot details.
 
 `fuzz/iso9660.c` runs under `check-fuzz` with primary and BIOS-plus-EFI
 seeds that `test-iso9660 --seed` and `--seed-boot` write at run time.
+`fuzz/iso9660-susp.c` keeps a fixed synthetic block map and fills its
+system use areas and continuation blocks from the input, so mutation
+concentrates on SUSP and Rock Ridge decoding; its seed comes from
+`test-iso9660 --susp-seed`.
 
 The ISO probe's 34,816-byte prefix raises the registry's detection
 prefix from 8,704 bytes (QNX6) to 34,816 bytes; a volume shorter than the

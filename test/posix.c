@@ -262,8 +262,14 @@ test_capability_records(void)
 		}
 		if (strcmp(info.name, "iso9660") == 0) {
 			CHECK(info.capabilities == FSIMG_CAP_READ);
-			CHECK(info.metadata_fields == (FSIMG_META_MODIFIED |
-			    FSIMG_META_ATTRIBUTES));
+			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
+			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
+			    FSIMG_ENTRY_FIFO));
+			CHECK(info.metadata_fields == (FSIMG_META_CREATED |
+			    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |
+			    FSIMG_META_ATTRIBUTES | FSIMG_META_CHANGED |
+			    FSIMG_META_OWNER | FSIMG_META_MODE));
+			CHECK(info.max_link_target_bytes == 1024);
 			continue;
 		}
 		CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY));

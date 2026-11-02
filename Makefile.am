@@ -99,6 +99,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/iso9660/codec.c lib/formats/iso9660/volume.c \
 	lib/formats/iso9660/names.c lib/formats/iso9660/directory.c \
 	lib/formats/iso9660/read.c lib/formats/iso9660/eltorito.c \
+	lib/formats/iso9660/susp.c lib/formats/iso9660/rockridge.c \
 	compat/host.c compat/host.h compat/private.c compat/private.h \
 	lib/codec/codec.h lib/codec/lzo1x.c lib/codec/nrv2b.c \
 	lib/formats/ifs/ifs.h lib/formats/ifs/descriptor.c \
@@ -386,7 +387,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
 	test/codec-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c \
 	fuzz/protocol.c fuzz/image.c fuzz/container.c fuzz/plist.c fuzz/compression.c \
-	fuzz/mtree.c fuzz/codec.c fuzz/ifs.c fuzz/iso9660.c \
+	fuzz/mtree.c fuzz/codec.c fuzz/ifs.c fuzz/iso9660.c fuzz/iso9660-susp.c \
 	test/ifs-integration.sh.in \
 	test/ifs-native.rb \
 	test/cli.sh.in test/qualify-cli.rb \

@@ -48,8 +48,8 @@
 .Sh DESCRIPTION
 .Nm
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
-QNX6 Power-Safe and QNX4 volumes and QNX ImageFS images, and reads the
-primary hierarchy of ISO 9660 images.
+QNX6 Power-Safe and QNX4 volumes and QNX ImageFS images, and reads ISO 9660
+images through their Rock Ridge or primary hierarchy.
 FAT volumes with more than two FAT copies are reported as unsupported.
 It requires no root privileges, mounts, kernel filesystem driver or external
 filesystem utility.
@@ -449,14 +449,30 @@ lists and extracts fsimg's images as it does the
 .Ql mkifs
 images of the same trees.
 .Pp
-An ISO 9660 image is read through its primary hierarchy, which
-.Ar view=auto
-selects;
+An ISO 9660 image is read through one view of its tree.
+.Ar view=auto ,
+the default, selects the Rock Ridge view when the image carries Rock Ridge
+and the primary hierarchy otherwise;
 .Ar view=rockridge
 and
+.Ar view=primary
+force one and never fall back, and
 .Ar view=joliet
-are refused as unsupported.
-A file version
+is refused as unsupported.
+.Cm i
+reports the selected view as the profile.
+The Rock Ridge view gives POSIX names of up to 1024 bytes, symbolic links,
+FIFOs, owner, mode and times, and shows a relocated deep directory under
+its original parent.
+A name that is not UTF-8, such as one written in a legacy 8-bit encoding,
+omits its entry.
+Devices, sockets, sparse and zisofs-compressed files are unsupported.
+Rock Ridge with a nonzero SUSP skip count is unsupported:
+.Ar view=rockridge
+refuses it, and
+.Ar view=auto
+reads the primary hierarchy.
+In the primary view a file version
 .Ql ;1
 is removed from displayed names and other versions are kept, so
 .Pa README.TXT;1

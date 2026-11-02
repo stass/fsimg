@@ -472,12 +472,16 @@ capacity, because producers write them; the writer does not.
 
 ### Rock Ridge names
 
-A Rock Ridge name is the concatenation of the record's `NM` entries. The
-native checks: the name is 1 through 1024 bytes, holds no `0x00` or `/`,
-and is neither `.` nor `..`; an `NM` with the current or parent flag
-appears only on the dot records. A violation is `FSIMG_ECORRUPT`; a name
-over 1024 bytes is `FSIMG_EUNSUPPORTED`. A record without `NM` takes its
-[primary displayed name](#displayed-names-and-keys).
+A Rock Ridge name is the concatenation of the record's `NM` entries, every
+one but the last carrying the continue flag, bit 0. The native checks: the
+name is 1 through 1024 bytes, holds no `0x00` or `/`, and is neither `.`
+nor `..`; an `NM` after one without the continue flag, or a last `NM`
+still carrying it, makes two names or a truncated one; an `NM` with the
+current or parent flag appears only on the dot records. A violation is
+`FSIMG_ECORRUPT`; a name over 1024 bytes is `FSIMG_EUNSUPPORTED`. A record
+without `NM` takes its [primary displayed name](#displayed-names-and-keys).
+A dot record's `NM` and `SL` entries are framed and held to their
+length and version, and are not interpreted.
 
 ### Displayed names and keys
 
@@ -555,7 +559,13 @@ profile accepts a skip count of 0 only; a present Rock Ridge with another
 skip count is a view fsimg cannot read: forcing it or verifying the image
 is `FSIMG_EUNSUPPORTED`, and automatic selection passes it over for the
 next view, which info reports. Once `SP` is well formed, a malformed entry
-stream at the root is `FSIMG_ECORRUPT` whenever the handshake runs.
+stream at the root, or an `ER` whose identifier, description and source
+do not fit within it, is `FSIMG_ECORRUPT` whenever the handshake runs.
+Such a failure, and a root stream outside the profile's continuation
+limits (`FSIMG_EUNSUPPORTED`), fails the open under `auto` as well:
+only a nonzero skip count passes selection over to the next view, and a
+forced `primary` view, which never runs the handshake, still reads the
+image.
 
 ### Entry framing and continuation
 
@@ -568,15 +578,19 @@ ends the stream. `PD` is padding. An unknown signature is skipped by its
 length; one whose meaning would change content is not unknown, as the
 [Rock Ridge table](#entries) states.
 
-A `CE` entry, 28 bytes, gives a continuation area: block, byte offset and
-length, each `u32both`. The area lies within one block, offset plus length
-at most 2048, and its length is nonzero; the stream continues there after
-the current area ends. An area that crosses a block is
-`FSIMG_EUNSUPPORTED`, a profile rule that producers and the kernel readers
-keep. A record's stream visits at most 16 continuation areas, beyond which
-it is `FSIMG_EUNSUPPORTED`; an area that overlaps one already visited in
-the same stream is `FSIMG_ECORRUPT`, so a continuation cycle cannot be
-followed. An area holds at most one `CE`. Together the two bounds limit
+A `CE` entry, 28 bytes and version 1, gives a continuation area: block,
+byte offset and length, each `u32both`. The area lies within one block,
+offset plus length at most 2048, and its length is nonzero; the stream
+continues there after the current area ends. An area that crosses a block
+is `FSIMG_EUNSUPPORTED`, a profile rule that producers and the kernel
+readers keep. A record's stream visits at most 16 continuation areas,
+beyond which it is `FSIMG_EUNSUPPORTED`; an area that overlaps one already
+visited in the same stream, the record's own system use area included, is
+`FSIMG_ECORRUPT`, so a continuation cycle cannot be followed. An area
+holds at most one `CE`. Another `CE` length or version, an empty area, an
+area starting past its block or a second `CE` in one area is
+`FSIMG_ECORRUPT`, and these and the overlap are checked before the two
+profile limits, so a corrupt `CE` is reported as corruption. Together the two bounds limit
 one record's stream to its system use area and 32 KiB, whatever the image
 holds.
 
@@ -584,8 +598,8 @@ holds.
 
 ### Entries
 
-In the `rockridge` view every record's system use area is decoded as a
-SUSP stream. The entries:
+In the `rockridge` view every record's system use area, the dot records'
+included, is decoded as a SUSP stream. The entries:
 
 | Entry | Length | Contents | Rule |
 | --- | --- | --- | --- |
@@ -603,7 +617,10 @@ SUSP stream. The entries:
 
 Single-instance entries (`PX`, `PN`, `CL`, `PL`, `RE`, `TF`) appearing
 twice in one stream are `FSIMG_ECORRUPT`. A known entry with a version
-other than 1 is `FSIMG_ECORRUPT`.
+other than 1 is `FSIMG_ECORRUPT`. A refused entry, and a name or target
+over 1024 bytes, is reported only after the whole stream has decoded and
+the [kind checks](#kinds-and-metadata) have run, so corruption anywhere
+in the stream is reported as corruption.
 
 `TF` flags select, in this order, creation, modification, access,
 attribute change, backup, expiration and effective times; bit 7 selects
@@ -619,9 +636,11 @@ only for validity.
 link or FIFO. A directory type must agree with the directory flag, and the
 others must not have it, except on a relocation placeholder: a record
 carrying `CL` is a directory in this view whatever its flag, and its `PX`
-type, when present, must be directory. A disagreement is
-`FSIMG_ECORRUPT`. A character device, block device or socket is
-`FSIMG_EUNSUPPORTED` naming the entry. The permission bits `07777` are the
+type, when present, must be directory, and it carries no `RE`. A
+disagreement is `FSIMG_ECORRUPT`. A character device, block device or
+socket is `FSIMG_EUNSUPPORTED` naming the entry, as is a type outside the
+seven POSIX types. `PN` on an entry that is not a device is
+`FSIMG_ECORRUPT`. The permission bits `07777` are the
 mode, and uid and gid the owner; the link count and serial number are not
 interpreted. A record without `PX` takes its kind from the directory flag
 and has no owner or mode. Times come from `TF`; a missing modification
@@ -651,9 +670,11 @@ a root component, so the components root and `a` give `/a`. The entry
 flag's bit 0 says the next `SL` entry continues the target. The target is
 1 through 1024 bytes, `max_link_target_bytes`, else `FSIMG_EUNSUPPORTED`;
 an empty target, a component that overruns its entry, a flag byte with two
-of `0x02`, `0x04` and `0x08`, a `0x00` byte, or a final entry still flagged
-to continue is `FSIMG_ECORRUPT`. A symbolic link's size is its target's
-length and its content the target, through the
+of `0x02`, `0x04` and `0x08`, a `0x00` byte, an `SL` entry after one
+without the continue flag, or a final entry or final component still
+flagged to continue is `FSIMG_ECORRUPT`. A symbolic link has a target and
+no other entry has `SL`, else `FSIMG_ECORRUPT`. A symbolic link's size
+is its target's length and its content the target, through the
 [decoded link target](design-content.md#decoded-link-targets) of logical
 content; the data length of its ISO record is not its size. fsimg never
 resolves a target.
@@ -672,8 +693,8 @@ its intended parent's block.
 
 In the `rockridge` view:
 
-* a record with `CL` is a directory entry opening the extent `CL` names,
-  which is not the root's; that directory's first dot record must name
+* a record with `CL` is a directory entry of one section opening the
+  extent `CL` names, which is not the root's; that directory's first dot record must name
   that extent, and its second dot record must carry `PL` naming the
   walker's parent, the directory holding the placeholder, while that dot
   record's extent names the directory's physical parent;
@@ -681,7 +702,8 @@ In the `rockridge` view:
   every directory has exactly one way in: through `CL` when it carries
   `PL`, through its physical parent otherwise;
 * a record with `RE` is not an entry: its directory is reached only
-  through its placeholder;
+  through its placeholder; `RE` on a record without the directory flag is
+  `FSIMG_ECORRUPT`;
 * full verification requires every `RE` directory to be named by exactly
   one `CL`, whose target's physical parent is the directory holding the
   `RE` record, and every `CL` target to be such an `RE` directory.

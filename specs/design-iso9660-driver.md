@@ -106,7 +106,8 @@ next reads:
    the volume and the slice's whole blocks, and its shortfall is recorded
    for info. The content domain is `[(terminator + 1) * 2048, readable
    end)`.
-3. **System area.** One 32768-byte read records whether any byte is
+3. **System area.** Sixteen one-block reads, stopping at the first
+   nonzero byte, record whether any byte is
    nonzero, for info. Nothing is validated.
 4. **El Torito.** When a boot record exists, decode and validate the boot
    catalog's one block under the [boot-catalog rule](design-iso9660.md#boot-catalog).
@@ -118,28 +119,30 @@ next reads:
 
 The reader state then holds the decoded descriptors, the selected view and
 its root, whether the handshake ran and what it found, the boot summary,
-one block window for directory reads and one for continuation reads, and
-the 1024-byte name and link-target assembly buffers. Open reads at most
+and one block window for directory reads and one for continuation reads.
+Open reads at most
 16 + 65 + 1 + 1 blocks and the root's at most 16 continuation blocks.
 
 ## The SUSP cursor
 
 `susp.c` iterates one record's entry stream without allocating per entry.
 The cursor holds the current area, the record's system use bytes or a
-continuation area, and a fixed array of the at most 16 areas visited in
-this stream as `(block, offset, length)`. `iso_susp_next()` returns one
+continuation area, and a fixed array of the areas entered in this stream
+as `(block, offset, length)`: the system use area and at most 16
+continuation areas. `iso_susp_next()` returns one
 entry's signature, version and a bounded view of its contents, or the end
 of the stream:
 
 * a signature position with fewer than four bytes left, or a zero byte,
   ends the area; `ST` ends the stream;
 * an entry's length below 4 or past its area is `FSIMG_ECORRUPT`;
-* `CE` is consumed by the cursor, not returned: its area must lie in one
-  block within the readable volume, its offset plus length at most 2048,
-  the stream must have visited fewer than 16 areas, and the area must not
-  overlap a visited one; it becomes the next area when the current one
-  ends;
-* `PD` and unknown signatures are skipped by their length.
+* `CE` is consumed by the cursor, not returned: its area must be nonempty,
+  start in a block within the readable volume and overlap no area entered
+  (`FSIMG_ECORRUPT`), then end within that block and find the stream with
+  fewer than 16 continuation areas entered (`FSIMG_EUNSUPPORTED`); it
+  becomes the next area when the current one ends;
+* `PD` is skipped by its length; every other entry is returned, and the
+  decoder skips one it does not know.
 
 Every continuation area is one read of at most one block, served from the
 continuation window, which holds the last continuation block read, so the
@@ -149,12 +152,14 @@ bytes, so one record's stream decodes at most its system use area and
 32 KiB; a directory's decoding cost is bounded by its record count times
 that, and every record is charged when admitted.
 
-`rockridge.c` consumes a whole stream into an `iso_rr_t` and, on request,
-appends the name bytes to the name buffer and the target bytes to the
-link-target assembly buffer. It applies the
+`rockridge.c` consumes a whole stream into an `iso_rr_t`, which owns the
+name and link target it assembles in its 1024-byte buffers, so nothing
+else can overwrite them while preparation or replay uses them; a dot
+record's stream assembles neither. It applies the
 [entry table](design-iso9660.md#entries) and the
-[link rule](design-iso9660.md#symbolic-links). A refused entry, a device or
-`ZF`, is recorded as a class rather than failing at once, so preparation
+[link rule](design-iso9660.md#symbolic-links). A refused entry, a device,
+`ZF` or an over-long name or target, is recorded as a class rather than
+failing at once, so every corruption check runs first and preparation
 names the entry when it refuses it.
 
 ## Directories and names
@@ -481,10 +486,11 @@ constant, and every structure is written once.
 | Planning | One pass over the catalog, the name sorts per hierarchy, the relocation, sizing and numbering passes; rows in one paged array |
 | Emission | Payload bytes plus metadata proportional to entries and names; each link target read once more |
 
-Resident per reader: the decoded descriptors, the boot summary, two block
-windows, the cursor's 16-area array, and the 1024-byte name and
-link-target assembly buffers, beside the common walk's stack, path buffer
-and decoded-target buffer. The extent index, claim streams and
+Resident per reader: the decoded descriptors, the boot summary and two
+block windows, beside the common walk's stack, path buffer and
+decoded-target buffer; preparation and replay hold the cursor's 17-area
+array and one decoded record with its 1024-byte name and target buffers
+on the stack. The extent index, claim streams and
 path-table arrays are charged scratch. Every loop charges the session and
 observes cancellation.
 

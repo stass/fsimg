@@ -12,13 +12,17 @@
  * volume descriptor set starts at block 16.
  *
  * The data flow: the probe (descriptor.c) claims CD001 at block 16; open
- * (read.c, volume.c) scans the descriptors, checks the geometry and picks
- * the view's root; the walker's prepare (directory.c) frames each
+ * (read.c, volume.c) scans the descriptors, checks the geometry, decodes
+ * the El Torito boot catalog (eltorito.c) and picks the view's root; the
+ * walker's prepare (directory.c) frames each
  * directory's records and admits every entry with a payload locating its
  * first record; replay (directory.c) reads that run again, checks it
  * against the payload and indexes a file's sections; resolve (read.c)
  * looks offsets up in that index. codec.c decodes every structure, names.c
- * derives displayed names and keys.
+ * derives displayed names and keys. In the rockridge view susp.c iterates
+ * each record's System Use Sharing Protocol entries and rockridge.c
+ * decodes them into the entry's name, kind, metadata, link target and
+ * relocation pointers.
  */
 #define ISO_BLOCK_BYTES		2048u
 #define ISO_SYSTEM_BLOCKS	16u
@@ -31,6 +35,7 @@
 #define ISO_NAME_MAX		1024u
 #define ISO_LABEL_BYTES		32u
 #define ISO_ESCAPE_BYTES	32u
+#define ISO_SUSP_AREAS_MAX	16u	/* continuation areas per stream */
 
 /* Volume descriptor types. */
 #define ISO_VD_BOOT		0u
@@ -47,6 +52,12 @@
 #define ISO_FLAG_PROTECTION	0x10u
 #define ISO_FLAG_RESERVED	0x60u
 #define ISO_FLAG_MULTI_EXTENT	0x80u
+
+/* The rockridge detail: what the handshake at the primary root found. */
+#define ISO_ROCKRIDGE_ABSENT	0u
+#define ISO_ROCKRIDGE_PRESENT	1u
+#define ISO_ROCKRIDGE_SKIP	2u	/* present, unsupported skip count */
+#define ISO_ROCKRIDGE_UNKNOWN	3u	/* the handshake did not run */
 
 /* Blocks covering n bytes, in 64 bits so no 32-bit length can wrap. */
 #define ISO_BLOCKS(n)	(((uint64_t)(n) + ISO_BLOCK_BYTES - 1) / ISO_BLOCK_BYTES)
@@ -148,6 +159,78 @@ typedef struct iso_cursor {
 	uint32_t	 record_offset;		/* and its offset in that block */
 } iso_cursor_t;
 
+/* One cached volume block, block naming it while valid is set. */
+typedef struct iso_window {
+	uint64_t	 block;
+	bool		 valid;
+	unsigned char	 bytes[ISO_BLOCK_BYTES];
+} iso_window_t;
+
+/* An area of a SUSP entry stream: length bytes at offset of volume
+ * block number block.
+ */
+typedef struct iso_area {
+	uint32_t	 block;
+	uint16_t	 offset;
+	uint16_t	 length;
+} iso_area_t;
+
+/* One SUSP entry: its signature and version, and the length content bytes
+ * after its four-byte header, which stay valid until the next entry.
+ */
+typedef struct iso_entry {
+	const unsigned char *data;
+	size_t		 length;
+	char		 signature[2];
+	uint8_t		 version;
+} iso_entry_t;
+
+/* The SUSP cursor over one record's entry stream (susp.c): the current
+ * area's bytes and the position of its next entry, every area entered so
+ * far, the record's own first, and the continuation area a CE entry named
+ * for when the current area ends.
+ */
+typedef struct iso_susp {
+	const unsigned char *bytes;
+	size_t		 length;
+	size_t		 position;
+	iso_area_t	 areas[1 + ISO_SUSP_AREAS_MAX];
+	unsigned	 count;			/* areas entered */
+	iso_area_t	 next;
+	bool		 has_next;		/* the current area held a CE */
+	bool		 ended;			/* ST, or the last area ended */
+} iso_susp_t;
+
+/* The Rock Ridge entries of one record's stream (rockridge.c). entries
+ * holds an RR_ bit for each kind of entry seen. type is the PX file type
+ * bits and metadata the PX owner and mode and the TF times, each with its
+ * valid bit. name holds name_length bytes and a NUL, and target holds
+ * target_length bytes, both assembled only for a record that is not a dot
+ * record. child and parent are the CL and PL blocks. refusal names what
+ * the profile refuses, reported after every corruption check.
+ */
+#define RR_PX	0x001u
+#define RR_PN	0x002u
+#define RR_SL	0x004u
+#define RR_NM	0x008u
+#define RR_CL	0x010u
+#define RR_PL	0x020u
+#define RR_RE	0x040u
+#define RR_TF	0x080u
+
+typedef struct iso_rr {
+	fsimg_metadata_t metadata;
+	uint32_t	 entries;
+	uint32_t	 type;
+	uint32_t	 child;
+	uint32_t	 parent;
+	size_t		 name_length;
+	size_t		 target_length;
+	const char	*refusal;
+	char		 name[ISO_NAME_MAX + 1];
+	unsigned char	 target[ISO_NAME_MAX];
+} iso_rr_t;
+
 /* The prepared payload of one admitted entry (directory.c), which replay
  * decodes again from scratch storage: the containing directory, the
  * position of the entry's first record, its section count and kind, and
@@ -172,9 +255,10 @@ typedef struct iso_payload {
  * volume and the whole blocks of the slice; nothing past it is read.
  * current is the payload replay made current, and file the current
  * regular file's section index. boot is the El Torito boot summary.
- * window caches the one block last read, a descriptor, system-area, boot
- * catalog or directory block, window_block naming it while window_valid is
- * set.
+ * window caches the block of descriptors, system area, boot catalog or
+ * directory records being read, continuation the last SUSP continuation
+ * block, so a record's system use area and its continuation areas are
+ * readable together. rockridge is the handshake's ISO_ROCKRIDGE_ value.
  */
 typedef struct fsimg_iso9660_reader {
 	iso_descriptor_t primary;
@@ -185,14 +269,14 @@ typedef struct fsimg_iso9660_reader {
 	fsimg_extent_index_t *file;
 	fsimg_iso_view_t view;
 	uint64_t	 readable_blocks;
-	uint64_t	 window_block;
 	uint32_t	 descriptors;		/* before the terminator */
 	uint32_t	 terminator_block;
 	unsigned	 joliet_level;
+	unsigned	 rockridge;
 	bool		 enhanced;
 	bool		 system_area_used;
-	bool		 window_valid;
-	unsigned char	 window[ISO_BLOCK_BYTES];
+	iso_window_t	 window;
+	iso_window_t	 continuation;
 } fsimg_iso9660_reader_t;
 
 extern const fsimg_reader_ops_t fsimg_iso9660_reader_ops;
@@ -227,6 +311,8 @@ fsimg_status_t iso_volume_open(fsimg_reader_t *, fsimg_error_t *);
 bool iso_in_volume(const fsimg_iso9660_reader_t *, uint64_t, uint64_t);
 fsimg_status_t iso_extent_check(const fsimg_iso9660_reader_t *, uint64_t,
     uint64_t, fsimg_error_t *);
+fsimg_status_t iso_window_read(fsimg_reader_t *, iso_window_t *, uint64_t,
+    fsimg_error_t *);
 fsimg_status_t iso_block_read(fsimg_reader_t *, uint64_t, fsimg_error_t *);
 
 /* eltorito.c */
@@ -234,6 +320,21 @@ uint64_t iso_boot_image_blocks(uint16_t);
 fsimg_status_t iso_boot_record_decode(const unsigned char *, iso_boot_t *,
     fsimg_error_t *);
 fsimg_status_t iso_boot_open(fsimg_reader_t *, fsimg_error_t *);
+
+/* susp.c */
+void iso_susp_start(iso_susp_t *, const unsigned char *, uint32_t, uint32_t,
+    const iso_record_t *);
+fsimg_status_t iso_susp_next(fsimg_reader_t *, iso_susp_t *, iso_entry_t *,
+    fsimg_error_t *);
+fsimg_status_t iso_susp_frame(fsimg_reader_t *, iso_susp_t *,
+    fsimg_error_t *);
+fsimg_status_t iso_handshake(fsimg_reader_t *, fsimg_error_t *);
+
+/* rockridge.c */
+fsimg_status_t iso_rr_decode(fsimg_reader_t *, iso_susp_t *, bool,
+    iso_rr_t *, fsimg_error_t *);
+fsimg_status_t iso_rr_kind(const iso_rr_t *, const iso_record_t *,
+    fsimg_entry_kind_t *, fsimg_error_t *);
 
 /* names.c: identifier checks, displayed names and namespace keys. A
  * displayed-name buffer holds ISO_IDENTIFIER_MAX bytes and a NUL.

@@ -21,20 +21,26 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   (`-eltorito-selcrit`), which the El Torito comparison does not yet
   cover.
 * [High] **Reader** (`lib/formats/iso9660/`, `test/iso9660.c`,
-  `fuzz/iso9660.c`, `fuzz/iso9660-susp.c`): stages 4, 5, 7 and 8, the
-  Rock Ridge and Joliet views, the verifier, and
-  interoperability, scale and fault evidence. The registered reader
-  presents the primary view only:
-  * `view=auto` selects `primary` without the handshake, and forced
-    `rockridge` and `joliet` fail open as unsupported, until stages 4 and
-    5 implement the [selection rule](../specs/design-iso9660.md#view-selection);
-  * the format record's profile (`primary`), entry kinds, metadata fields
-    and name bound grow with those views, and the man page's ISO paragraph
-    and the README row change with them;
-  * the `rockridge` detail is 3 (unknown) until the handshake runs at
-    open;
+  `fuzz/iso9660.c`): stages 5, 7 and 8, the Joliet view, the verifier,
+  and interoperability, scale and fault evidence. The registered reader
+  presents the Rock Ridge and primary views:
+  * `view=auto` never selects `joliet`, and a forced `joliet` fails open
+    as unsupported, until stage 5 completes the
+    [selection rule](../specs/design-iso9660.md#view-selection);
+  * the format record's profile (`rockridge/primary`) gains `joliet` in
+    stage 5, and the man page's ISO paragraph and the README row change
+    with it;
+  * a Rock Ridge directory carrying `RE` that no `CL` names is left out of
+    the view without an error, with its subtree, until stage 7's
+    relocation match refuses it under `W`;
   * the format has no verifier, so `W` refuses it as unsupported, until
     stage 7.
+* [Low] **Root metadata** (`lib/read/`, `lib/formats/iso9660/`): the
+  format design gives the Rock Ridge root the owner, mode and times of its
+  own first dot record, but the walker delivers no metadata for the root
+  in any format, so the reader decodes and checks that stream and drops
+  them. A common root-metadata path would serve extraction of the root's
+  mode as well.
 * [Low] **Naming the refused entry** (`lib/formats/iso9660/directory.c`,
   `lib/read/directory.c`): the driver design asks that an associated,
   interleaved or other refused record fail preparation naming the entry.

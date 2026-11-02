@@ -31,9 +31,6 @@ const fsimg_reader_ops_t fsimg_iso9660_reader_ops = {
 	.resolve = iso_resolve
 };
 
-/* The rockridge detail's value when the handshake did not run. */
-#define ISO_ROCKRIDGE_UNKNOWN 3u
-
 fsimg_iso9660_reader_t *
 iso_state(const fsimg_reader_t *reader)
 {
@@ -73,7 +70,7 @@ static void
 report_details(const fsimg_iso9660_reader_t *iso, fsimg_volume_info_t *info)
 {
 	const fsimg_volume_detail_t details[] = {
-		{ "rockridge", ISO_ROCKRIDGE_UNKNOWN },
+		{ "rockridge", iso->rockridge },
 		{ "joliet_level", iso->joliet_level },
 		{ "enhanced", iso->enhanced ? 1 : 0 },
 		{ "descriptors", iso->descriptors },
@@ -117,7 +114,8 @@ iso_open(fsimg_reader_t *reader,
 		return (status);
 
 	strcpy(info->format, "iso9660");
-	strcpy(info->profile, "primary");
+	strcpy(info->profile, iso->view == FSIMG_ISO_VIEW_ROCKRIDGE ?
+	    "rockridge" : "primary");
 	info->valid |= FSIMG_VOLUME_GEOMETRY;
 	_Static_assert(ISO_LABEL_BYTES < sizeof(info->label),
 	    "an ISO 9660 label fits the volume information");

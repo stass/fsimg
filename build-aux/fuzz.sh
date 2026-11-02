@@ -149,6 +149,17 @@ if test ! -f "$iso_corpus/boot.seed"; then
     ./test-iso9660 --seed-boot "$iso_corpus/boot.seed"
 fi
 run_fuzzer "$work_dir/fuzz-iso9660" "$iso_corpus" 1048576 10
+# Fixed ISO geometry concentrates mutation on SUSP and Rock Ridge streams.
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    "$source_dir/fuzz/iso9660-susp.c" "$fuzz_library" $codec_libs -o "$work_dir/fuzz-iso9660-susp"
+susp_corpus=iso9660-susp-fuzz-corpus
+mkdir -p "$susp_corpus"
+if test ! -f "$susp_corpus/rockridge.seed"; then
+    ./test-iso9660 --susp-seed "$susp_corpus/rockridge.seed"
+fi
+run_fuzzer "$work_dir/fuzz-iso9660-susp" "$susp_corpus" 8704 10
 
 # ImageFS reads the exact slice with the decoder forced; the seed is a
 # generated image with every record kind, implicit parents and names

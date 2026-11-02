@@ -12,37 +12,49 @@
  * the descriptor scan, the geometry of each hierarchy, the system area, the
  * El Torito boot catalog and the view, each step failing before the next
  * reads. Open reads at most the 65 descriptor blocks, the 16 system-area
- * blocks and the boot catalog block, one at a time through the reader's
- * one-block window.
+ * blocks, the boot catalog block and, when the view may be Rock Ridge,
+ * the primary root's first block with its at most 16 continuation
+ * blocks, one at a time through the reader's block windows.
  */
 
-/* Read volume block number into the window unless the window holds it,
+/* Read volume block number into window unless the window holds it,
  * charging one work unit per read, so every walk over blocks observes the
  * session's limits and cancellation. The block lies within the readable
  * volume, which before the geometry is known is the slice's whole blocks.
  */
 fsimg_status_t
-iso_block_read(fsimg_reader_t *reader, uint64_t block, fsimg_error_t *error)
+iso_window_read(fsimg_reader_t *reader, iso_window_t *window, uint64_t block,
+    fsimg_error_t *error)
 {
 	fsimg_iso9660_reader_t *iso = iso_state(reader);
 	size_t transferred;
 	fsimg_status_t status;
 
-	if (iso->window_valid && iso->window_block == block)
+	if (window->valid && window->block == block)
 		return (FSIMG_OK);
 	if (block >= iso->readable_blocks)
 		return (iso_corrupt(error,
 		    "ISO 9660 structure lies past the end of the image"));
-	iso->window_valid = false;
+	window->valid = false;
 	status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
 	if (status == FSIMG_OK)
 		status = fsimg_reader_bytes(reader, block * ISO_BLOCK_BYTES,
-		    iso->window, ISO_BLOCK_BYTES, &transferred, error);
+		    window->bytes, ISO_BLOCK_BYTES, &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
-	iso->window_block = block;
-	iso->window_valid = true;
+	window->block = block;
+	window->valid = true;
 	return (FSIMG_OK);
+}
+
+/* Read a descriptor, system-area, boot catalog or directory block into
+ * the reader's window: every block but a SUSP continuation block.
+ */
+fsimg_status_t
+iso_block_read(fsimg_reader_t *reader, uint64_t block, fsimg_error_t *error)
+{
+	return (iso_window_read(reader, &iso_state(reader)->window, block,
+	    error));
 }
 
 /* Whether blocks blocks at start lie within the volume, without a sum
@@ -98,11 +110,11 @@ descriptors_scan(fsimg_reader_t *reader, fsimg_error_t *error)
 			    "has no terminator within 64 descriptors"));
 		status = iso_block_read(reader, block, error);
 		if (status == FSIMG_OK && i == ISO_DESCRIPTORS_MAX &&
-		    iso->window[0] != ISO_VD_TERMINATOR)
+		    iso->window.bytes[0] != ISO_VD_TERMINATOR)
 			return (iso_unsupported(error, "ISO 9660 descriptor set "
 			    "has no terminator within 64 descriptors"));
 		if (status == FSIMG_OK)
-			status = iso_descriptor_decode(iso->window, block,
+			status = iso_descriptor_decode(iso->window.bytes, block,
 			    &decoded, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -112,16 +124,16 @@ descriptors_scan(fsimg_reader_t *reader, fsimg_error_t *error)
 		if (decoded.type == ISO_VD_PRIMARY) {
 			if (!have_primary) {
 				iso->primary = decoded;
-				bcopy(iso->window, first_primary,
+				bcopy(iso->window.bytes, first_primary,
 				    sizeof(first_primary));
 				have_primary = true;
-			} else if (bcmp(iso->window, first_primary,
+			} else if (bcmp(iso->window.bytes, first_primary,
 			    sizeof(first_primary)) != 0)
 				return (iso_unsupported(error,
 				    "ISO 9660 primary descriptors differ"));
 		} else if (decoded.type == ISO_VD_BOOT) {
-			status = iso_boot_record_decode(iso->window, &iso->boot,
-			    error);
+			status = iso_boot_record_decode(iso->window.bytes,
+			    &iso->boot, error);
 			if (status != FSIMG_OK)
 				return (status);
 		} else if (decoded.type == ISO_VD_SUPPLEMENTARY) {
@@ -213,30 +225,48 @@ system_area_scan(fsimg_reader_t *reader, fsimg_error_t *error)
 		status = iso_block_read(reader, block, error);
 		if (status != FSIMG_OK)
 			return (status);
-		iso->system_area_used = !iso_bytes_zero(iso->window,
+		iso->system_area_used = !iso_bytes_zero(iso->window.bytes,
 		    ISO_BLOCK_BYTES);
 	}
 	return (FSIMG_OK);
 }
 
-/* The primary view is the one this reader presents: auto selects it, and
- * a forced Rock Ridge or Joliet view is a view the reader does not offer.
+/* Select the view (specs/design-iso9660.md#view-selection). auto and a
+ * forced rockridge run the handshake at the primary root; auto takes
+ * Rock Ridge when it is present with a skip count of zero and otherwise
+ * the primary view. A forced view never falls back: rockridge without a
+ * readable Rock Ridge, and joliet, which this reader does not present,
+ * are unsupported. A forced primary view never decodes the root's system
+ * use area, so a damaged handshake cannot keep a caller from it.
  */
 static fsimg_status_t
 view_select(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_iso9660_reader_t *iso = iso_state(reader);
+	fsimg_iso_view_t view = reader->options.iso_view;
+	fsimg_status_t status;
 
-	switch (reader->options.iso_view) {
-	case FSIMG_ISO_VIEW_AUTO:
-	case FSIMG_ISO_VIEW_PRIMARY:
-		iso->view = FSIMG_ISO_VIEW_PRIMARY;
-		iso->view_root = iso->primary.root;
-		return (FSIMG_OK);
-	default:
+	iso->rockridge = ISO_ROCKRIDGE_UNKNOWN;
+	if (view == FSIMG_ISO_VIEW_AUTO || view == FSIMG_ISO_VIEW_ROCKRIDGE) {
+		status = iso_handshake(reader, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (iso->rockridge == ISO_ROCKRIDGE_PRESENT)
+			view = FSIMG_ISO_VIEW_ROCKRIDGE;
+		else if (view == FSIMG_ISO_VIEW_AUTO)
+			view = FSIMG_ISO_VIEW_PRIMARY;
+		else
+			return (iso_unsupported(error, iso->rockridge ==
+			    ISO_ROCKRIDGE_SKIP ? "ISO 9660 Rock Ridge with a "
+			    "nonzero SUSP skip count is unsupported" :
+			    "requested ISO 9660 view is not available"));
+	}
+	if (view == FSIMG_ISO_VIEW_JOLIET)
 		return (iso_unsupported(error,
 		    "requested ISO 9660 view is not available"));
-	}
+	iso->view = view;
+	iso->view_root = iso->primary.root;
+	return (FSIMG_OK);
 }
 
 fsimg_status_t

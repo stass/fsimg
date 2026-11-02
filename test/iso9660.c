@@ -28,6 +28,20 @@
 #define BLOCKS 128u
 #define ROOT 84u
 #define DATA 104u
+#define RR_AREA 110u
+#define RR_DIRECTORY 85u
+
+enum {
+	DOT_BYTES = 34, DOT_PAIR_BYTES = 2 * DOT_BYTES,
+	SP_BYTES = 7, PX_BYTES = 36, CE_BYTES = 28, LINK_BYTES = 12,
+	SUSP_LENGTH = 2, SUSP_VERSION = 3, SUSP_PAYLOAD = 4,
+	ROOT_SP = DOT_BYTES, ROOT_ER = ROOT_SP + SP_BYTES,
+	ROOT_DOT_BYTES = 60, ROOT_CE_DOT_BYTES = 70,
+	CHILD_SUSP = 40, RELOCATED_CHILD = DOT_PAIR_BYTES + LINK_BYTES,
+	XORRISO_PLACEHOLDER = 43
+};
+/* Producer placeholder extents: docs/build.md, ISO producer observations. */
+#define MKISOFS_PLACEHOLDER 0xffffffeeu
 
 enum {
 	VD_SPACE = 80, VD_SET = 120, VD_SEQUENCE = 124, VD_BLOCK = 128,
@@ -44,6 +58,7 @@ typedef struct image {
 	uint64_t	 stored;
 	uint64_t	 high_read;
 	uint64_t	 reads;
+	uint64_t	 continuation_reads;
 	uint64_t	 fail_read;
 	bool		 eof;
 } image_t;
@@ -229,7 +244,7 @@ image_new(void)
 	p[7] = 1;
 	p = image.bytes + ROOT * BLOCK;
 	directory(p, ROOT, ROOT, BLOCK);
-	record(p + 68, "A.TXT;1", 7, DATA, 5, 0);
+	record(p + DOT_PAIR_BYTES, "A.TXT;1", 7, DATA, 5, 0);
 	memset(image.bytes + DATA * BLOCK, 0xa5, BLOCK);
 	bcopy("hello", image.bytes + DATA * BLOCK, 5);
 	return (image);
@@ -250,6 +265,8 @@ image_read(void *arg, uint64_t offset, void *buffer, size_t length,
 
 	CHECK(offset <= image->length && length <= image->length - offset);
 	image->reads++;
+	if (offset <= RR_AREA * BLOCK && offset + length > RR_AREA * BLOCK)
+		image->continuation_reads++;
 	*count = 0;
 	if (image->reads == image->fail_read)
 		return (image->eof ? FSIMG_OK : FSIMG_EIO);
@@ -682,9 +699,9 @@ test_tree(void)
 		bzero(p, BLOCK);
 		directory(p, block, depth == 0 ? ROOT : block - 1, BLOCK);
 		if (depth < 11)
-			record(p + 68, "DIR", 3, block + 1, BLOCK, 2);
+			record(p + DOT_PAIR_BYTES, "DIR", 3, block + 1, BLOCK, 2);
 		else
-			record(p + 68, "A.TXT;1", 7, DATA, 5, 0);
+			record(p + DOT_PAIR_BYTES, "A.TXT;1", 7, DATA, 5, 0);
 	}
 	expect(&image, FSIMG_OK, "12-level tree");
 	root[68 + DR_FLAGS] |= 0x80;
@@ -2067,6 +2084,1444 @@ test_boot_data_remains_tree_data(void)
 }
 /* End of El Torito fixtures. */
 
+/* SUSP wire encoders are independent of the reader. A child's stream lives
+ * in block 110 by default, leaving room for boundary-sized NM and SL data.
+ */
+#define RR_CHILD 94u
+typedef struct susp_area {
+	unsigned char bytes[BLOCK];
+	size_t length;
+} susp_area_t;
+
+static unsigned char *susp_entry(susp_area_t *, const char *, size_t);
+static void susp_px(susp_area_t *, unsigned, size_t);
+static void susp_nm(susp_area_t *, const void *, size_t, unsigned);
+static void susp_ce(susp_area_t *, unsigned, unsigned, unsigned);
+static void susp_sl(susp_area_t *, unsigned, unsigned, const void *, size_t);
+static void susp_er(susp_area_t *, const char *, unsigned);
+static image_t rr_image(const susp_area_t *, unsigned);
+static unsigned char *rr_child_directory(image_t *);
+static void rr_status(image_t *, fsimg_iso_view_t, fsimg_status_t,
+    const char *);
+static void rr_equal(uint64_t, uint64_t, const char *);
+static void rr_status_equal(fsimg_status_t, fsimg_status_t, const char *);
+static void rr_witness(image_t *, const char *, fsimg_entry_kind_t,
+    const void *, size_t, const char *);
+static void test_susp_handshake_views(void);
+static void test_susp_continuation_bounds(void);
+static void test_susp_framing_and_precedence(void);
+static void test_rr_kinds_and_singletons(void);
+static void test_rr_names_and_continuations(void);
+static void test_rr_link_components(void);
+static void test_rr_times(void);
+static void test_rr_shared_continuation(void);
+static void test_rr_omitted_names(void);
+static void rr_relocated_chain(unsigned, bool);
+static void test_rr_relocation(void);
+static void test_rr_dot_entries(void);
+static void test_rr_later_sections(void);
+static void test_rr_exact_queries(void);
+static void test_rr_known_versions(void);
+static void susp_seed(const char *);
+
+static unsigned char *
+susp_entry(susp_area_t *area, const char *signature, size_t length)
+{
+	unsigned char *p;
+
+	CHECK(length >= 4 && length <= 255);
+	CHECK(area->length + length <= sizeof(area->bytes));
+	p = area->bytes + area->length;
+	bzero(p, length);
+	bcopy(signature, p, 2);
+	p[2] = length;
+	p[3] = 1;
+	area->length += length;
+	return (p);
+}
+
+static void
+susp_px(susp_area_t *area, unsigned mode, size_t length)
+{
+	unsigned char *p = susp_entry(area, "PX", length);
+
+	put32(p + 4, mode);
+	put32(p + 12, 1);
+	put32(p + 20, 123);
+	put32(p + 28, 456);
+}
+
+static void
+susp_nm(susp_area_t *area, const void *name, size_t length, unsigned flags)
+{
+	unsigned char *p = susp_entry(area, "NM", 5 + length);
+
+	p[4] = flags;
+	bcopy(name, p + 5, length);
+}
+
+static void
+susp_ce(susp_area_t *area, unsigned block, unsigned offset, unsigned length)
+{
+	unsigned char *p = susp_entry(area, "CE", 28);
+
+	put32(p + 4, block);
+	put32(p + 12, offset);
+	put32(p + 20, length);
+}
+
+static void
+susp_sl(susp_area_t *area, unsigned flags, unsigned component,
+    const void *text, size_t length)
+{
+	unsigned char *p = susp_entry(area, "SL", 7 + length);
+
+	p[4] = flags;
+	p[5] = component;
+	p[6] = length;
+	bcopy(text, p + 7, length);
+}
+
+static void
+susp_er(susp_area_t *area, const char *identifier, unsigned version)
+{
+	size_t length = strlen(identifier);
+	unsigned char *p = susp_entry(area, "ER", 8 + length);
+
+	p[4] = length;
+	p[7] = version;
+	bcopy(identifier, p + 8, length);
+}
+
+static image_t
+rr_image(const susp_area_t *area, unsigned flags)
+{
+	image_t image = image_new();
+	susp_area_t handshake = {0}, continuation = {0};
+	unsigned char *root = image.bytes + ROOT * BLOCK;
+	unsigned char *p, self = 0, up = 1;
+	size_t length;
+
+	p = susp_entry(&handshake, "SP", 7);
+	p[4] = 0xbe;
+	p[5] = 0xef;
+	susp_er(&handshake, "RRIP_1991A", 1);
+	CHECK(handshake.length == 25);
+	bzero(root, BLOCK);
+	length = record(root, &self, 1, ROOT, BLOCK, 2);
+	bcopy(handshake.bytes, root + length, handshake.length);
+	root[0] += handshake.length + (handshake.length % 2);
+	record(root + root[0], &up, 1, ROOT, BLOCK, 2);
+	susp_ce(&continuation, RR_AREA, 0, area->length);
+	p = root + RR_CHILD;
+	length = record(p, "A.TXT;1", 7, DATA, 5, flags);
+	bcopy(continuation.bytes, p + length, continuation.length);
+	p[0] += continuation.length;
+	bcopy(area->bytes, image.bytes + RR_AREA * BLOCK, area->length);
+	return (image);
+}
+
+static unsigned char *
+rr_child_directory(image_t *image)
+{
+	unsigned char *child = image->bytes + ROOT * BLOCK + RR_CHILD;
+	unsigned char *contents = image->bytes + RR_DIRECTORY * BLOCK;
+
+	put32(child + DR_EXTENT, RR_DIRECTORY);
+	put32(child + DR_SIZE, BLOCK);
+	directory(contents, RR_DIRECTORY, ROOT, BLOCK);
+	return (contents);
+}
+
+static void
+rr_equal(uint64_t actual, uint64_t expected, const char *name)
+{
+	cases++;
+	if (actual != expected) {
+		fprintf(stderr, "%s: expected %" PRIu64
+		    ", observed %" PRIu64 "\n",
+		    name, expected, actual);
+		failures++;
+	}
+}
+
+static void
+rr_status_equal(fsimg_status_t actual, fsimg_status_t expected,
+    const char *name)
+{
+	cases++;
+	if (actual != expected) {
+		fprintf(stderr, "%s: expected %d, observed %d\n", name,
+		    expected, actual);
+		failures++;
+	}
+}
+
+static void
+rr_status(image_t *image, fsimg_iso_view_t view, fsimg_status_t expected,
+    const char *name)
+{
+	fixture_t f;
+	fsimg_status_t status;
+
+	fixture_new(&f, image, NULL);
+	status = open_image(&f, view);
+	if (status == FSIMG_OK)
+		status = walk(&f);
+	cases++;
+	if (status != expected) {
+		fprintf(stderr, "%s: expected %d, observed %d\n", name,
+		    expected, status);
+		failures++;
+	}
+	fixture_free(&f);
+}
+
+static void
+rr_witness(image_t *image, const char *path, fsimg_entry_kind_t kind,
+    const void *content, size_t size, const char *name)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	unsigned char buffer[2048];
+	size_t count;
+
+	fixture_new(&f, image, NULL);
+	status = open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE);
+	if (status == FSIMG_OK)
+		status = fsimg_reader_next(f.reader, &entry, NULL);
+	rr_status_equal(status, FSIMG_OK, name);
+	if (status == FSIMG_OK) {
+		rr_equal(strcmp(entry->path, path), 0, name);
+		rr_equal(entry->kind, kind, name);
+		rr_equal(entry->size, size, name);
+		if (content != NULL) {
+			status = fsimg_reader_read_at(f.reader, 0, buffer,
+			    sizeof(buffer), &count, NULL);
+			rr_status_equal(status, FSIMG_OK, name);
+			if (status == FSIMG_OK) {
+				rr_equal(count, size, name);
+				rr_equal(count == size &&
+				    bcmp(buffer, content, size) == 0, 1, name);
+			}
+		}
+		rr_status_equal(walk(&f), FSIMG_OK, name);
+	}
+	fixture_free(&f);
+}
+
+static void
+test_susp_handshake_views(void)
+{
+	static const struct {
+		const char *label;
+		const char *identifier;
+		unsigned offset, value, detail;
+		fsimg_status_t automatic, forced;
+	} rows[] = {
+		{ "SP alone", NULL, ROOT_ER, 0, 0,
+		    FSIMG_OK, FSIMG_EUNSUPPORTED },
+		{ "opaque bad SP", NULL, ROOT_SP + 4, 0, 0,
+		    FSIMG_OK, FSIMG_EUNSUPPORTED },
+		{ "ER length below SUSP header", NULL,
+		    ROOT_ER + SUSP_LENGTH, 3, 0, FSIMG_ECORRUPT,
+		    FSIMG_ECORRUPT },
+		{ "unsupported SP skip", NULL, ROOT_SP + 6, 1, 2,
+		    FSIMG_OK, FSIMG_EUNSUPPORTED },
+		{ "RRIP identifier", "RRIP_1991A", 0, 0, 1, FSIMG_OK,
+		    FSIMG_OK },
+		{ "P1282 identifier", "IEEE_P1282", 0, 0, 1, FSIMG_OK,
+		    FSIMG_OK },
+		{ "1282 identifier", "IEEE_1282", 0, 0, 1, FSIMG_OK, FSIMG_OK },
+		{ "unknown identifier", "NOT_RRIP", 0, 0, 0,
+		    FSIMG_OK, FSIMG_EUNSUPPORTED }
+	};
+	static const struct {
+		const char *label;
+		fsimg_iso_view_t view;
+	} views[] = {
+		{ "auto", FSIMG_ISO_VIEW_AUTO },
+		{ "forced RR", FSIMG_ISO_VIEW_ROCKRIDGE },
+		{ "primary", FSIMG_ISO_VIEW_PRIMARY }
+	};
+	/* Field 3 is the entry version; 4..6 are lengths; 7 is ER version. */
+	static const struct {
+		const char *label;
+		unsigned field, value;
+		fsimg_status_t automatic, forced;
+	} fields[] = {
+		{ "ER entry version", 3, 255, FSIMG_ECORRUPT, FSIMG_ECORRUPT },
+		{ "ER identifier bounds", 4, 255, FSIMG_ECORRUPT,
+		    FSIMG_ECORRUPT },
+		{ "ER description bounds", 5, 255, FSIMG_ECORRUPT,
+		    FSIMG_ECORRUPT },
+		{ "ER source bounds", 6, 255, FSIMG_ECORRUPT, FSIMG_ECORRUPT },
+		{ "ER unknown extension version", 7, 2,
+		    FSIMG_OK, FSIMG_EUNSUPPORTED }
+	};
+	susp_area_t area = {0};
+	image_t image;
+	fixture_t f;
+	fsimg_volume_info_t info;
+	unsigned char *root;
+	char label[128];
+
+	susp_px(&area, 0100640, PX_BYTES);
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		image = rr_image(&area, 0);
+		root = image.bytes + ROOT * BLOCK;
+		if (rows[i].identifier != NULL) {
+			susp_area_t er = {0};
+
+			susp_er(&er, rows[i].identifier, 1);
+			bzero(root + ROOT_ER, ROOT_DOT_BYTES - ROOT_ER);
+			bcopy(er.bytes, root + ROOT_ER, er.length);
+		} else
+			root[rows[i].offset] = rows[i].value;
+		for (unsigned v = 0; v < sizeof(views) / sizeof(views[0]);
+		    v++) {
+			fsimg_status_t expected = rows[i].automatic, status;
+			unsigned detail = rows[i].detail;
+
+			if (views[v].view == FSIMG_ISO_VIEW_ROCKRIDGE)
+				expected = rows[i].forced;
+			if (views[v].view == FSIMG_ISO_VIEW_PRIMARY) {
+				expected = FSIMG_OK;
+				detail = 3;
+			}
+			snprintf(label, sizeof(label), "%s / %s",
+			    rows[i].label, views[v].label);
+			fixture_new(&f, &image, NULL);
+			status = open_image(&f, views[v].view);
+			rr_status_equal(status, expected, label);
+			if (status == FSIMG_OK) {
+				CHECK(fsimg_reader_get_info(f.reader, &info,
+				    NULL) == FSIMG_OK);
+				rr_equal(info.details[0].value, detail, label);
+				rr_equal(strcmp(info.profile,
+				    detail == 1 ? "rockridge" : "primary"),
+				    0, label);
+				rr_status_equal(walk(&f), FSIMG_OK, label);
+			}
+			fixture_free(&f);
+		}
+		free(image.bytes);
+	}
+	for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+		image = rr_image(&area, 0);
+		image.bytes[ROOT * BLOCK + ROOT_ER + fields[i].field] =
+		    fields[i].value;
+		rr_status(&image, FSIMG_ISO_VIEW_AUTO,
+		    fields[i].automatic, fields[i].label);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    fields[i].forced, fields[i].label);
+		free(image.bytes);
+	}
+}
+
+static void
+test_susp_continuation_bounds(void)
+{
+	enum setup {
+		CROSS_BLOCK, EMPTY, BAD_LENGTH, BAD_VERSION, SELF, OVERLAP,
+		ORIGINAL, DUPLICATE, HANDSHAKE, OFFSET_OUTSIDE
+	};
+	static const struct {
+		const char *label;
+		enum setup setup;
+		fsimg_status_t expected;
+	} rows[] = {
+		{ "CE crosses block", CROSS_BLOCK, FSIMG_EUNSUPPORTED },
+		{ "CE empty", EMPTY, FSIMG_ECORRUPT },
+		{ "CE wrong length", BAD_LENGTH, FSIMG_ECORRUPT },
+		{ "CE version", BAD_VERSION, FSIMG_ECORRUPT },
+		{ "CE self reference", SELF, FSIMG_ECORRUPT },
+		{ "CE overlap", OVERLAP, FSIMG_ECORRUPT },
+		{ "CE original area overlap", ORIGINAL, FSIMG_ECORRUPT },
+		{ "two CE in area", DUPLICATE, FSIMG_ECORRUPT },
+		{ "ER in continuation", HANDSHAKE, FSIMG_OK },
+		{ "CE offset at block end", OFFSET_OUTSIDE, FSIMG_ECORRUPT }
+	};
+	susp_area_t area = {0}, next = {0};
+	image_t image;
+	unsigned char *p;
+
+	susp_px(&area, 0100644, PX_BYTES);
+	for (unsigned count = 16; count <= 17; count++) {
+		image = rr_image(&area, 0);
+		for (unsigned i = 0; i < count; i++) {
+			bzero(&next, sizeof(next));
+			if (i + 1 < count)
+				susp_ce(&next, 20 + i + 1, 0, CE_BYTES);
+			else
+				susp_entry(&next, "PD", CE_BYTES);
+			bcopy(next.bytes, image.bytes + (20 + i) * BLOCK,
+			    CE_BYTES);
+		}
+		p = image.bytes + ROOT * BLOCK + RR_CHILD + CHILD_SUSP;
+		put32(p + 4, 20);
+		put32(p + 20, CE_BYTES);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    count == 16 ? FSIMG_OK : FSIMG_EUNSUPPORTED,
+		    count == 16 ? "exactly 16 CE areas" : "17 CE areas");
+		if (count == 16)
+			rr_witness(&image, "/A.TXT", FSIMG_ENTRY_FILE,
+			    "hello", 5,
+			    "16 CE areas preserve content");
+		free(image.bytes);
+	}
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		image = rr_image(&area, 0);
+		p = image.bytes + ROOT * BLOCK + RR_CHILD + CHILD_SUSP;
+		switch (rows[i].setup) {
+		case CROSS_BLOCK: put32(p + 12, BLOCK - 1); break;
+		case EMPTY: put32(p + 20, 0); break;
+		case BAD_LENGTH: p[SUSP_LENGTH] = 26; break;
+		case BAD_VERSION: p[SUSP_VERSION] = 2; break;
+		case SELF:
+		case OVERLAP:
+			/* Both ranges have valid framing: CE + PD and its PD
+			 * suffix (or the same stream for SELF). Without overlap
+			 * rejection, only SELF cycles.
+			 */
+			bzero(&next, sizeof(next));
+			if (rows[i].setup == SELF)
+				susp_ce(&next, RR_AREA, 0, PX_BYTES);
+			else
+				susp_ce(&next, RR_AREA, CE_BYTES, 8);
+			susp_entry(&next, "PD", 8);
+			bcopy(next.bytes, image.bytes + RR_AREA * BLOCK,
+			    next.length);
+			break;
+		case ORIGINAL:
+			put32(p + 4, ROOT);
+			put32(p + 12, RR_CHILD + CHILD_SUSP);
+			put32(p + 20, CE_BYTES);
+			break;
+		case DUPLICATE:
+			bcopy(p, p + CE_BYTES, CE_BYTES);
+			image.bytes[ROOT * BLOCK + RR_CHILD] += CE_BYTES;
+			break;
+		case HANDSHAKE:
+			bzero(&next, sizeof(next));
+			susp_er(&next, "RRIP_1991A", 1);
+			bcopy(next.bytes, image.bytes + 20 * BLOCK,
+			    next.length);
+			bzero(&next, sizeof(next));
+			susp_ce(&next, 20, 0, 18);
+			/* Grow root ER into CE, preserving the siblings. */
+			p = image.bytes + ROOT * BLOCK;
+			memmove(p + ROOT_CE_DOT_BYTES, p + ROOT_DOT_BYTES,
+			    BLOCK - ROOT_CE_DOT_BYTES);
+			p[0] = ROOT_CE_DOT_BYTES;
+			bcopy(next.bytes, p + ROOT_ER, CE_BYTES);
+			break;
+		case OFFSET_OUTSIDE: put32(p + 12, BLOCK); break;
+		}
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    rows[i].expected, rows[i].label);
+		free(image.bytes);
+	}
+}
+
+static void
+test_susp_framing_and_precedence(void)
+{
+	static const struct {
+		const char *label, *prefix;
+		unsigned mode, flags, tail_length, tail_version;
+		bool stop;
+		fsimg_status_t expected;
+	} rows[] = {
+		{ "unknown and PD skipped", "XY", 0, 0, 4, 1, false,
+		    FSIMG_OK },
+		{ "ST ends stream", "XY", 0, 0, 3, 1, true, FSIMG_OK },
+		{ "entry below 4", "XY", 0, 0, 3, 1, false, FSIMG_ECORRUPT },
+		{ "entry past area", "XY", 0, 0, 5, 1, false, FSIMG_ECORRUPT },
+		{ "ZF then corrupt PX", "ZF", 0, 0, 36, 2, false,
+		    FSIMG_ECORRUPT },
+		{ "SF then corrupt PX", "SF", 0, 0, 36, 2, false,
+		    FSIMG_ECORRUPT },
+		{ "device then corrupt PX", NULL, 0020600, 0, 36, 2, false,
+		    FSIMG_ECORRUPT },
+		{ "ZF refused", "ZF", 0, 0, 0, 0, false, FSIMG_EUNSUPPORTED },
+		{ "SF refused", "SF", 0, 0, 0, 0, false, FSIMG_EUNSUPPORTED },
+		{ "ZF with directory PX but clear flag", "ZF", 0040755, 0,
+		    0, 0, false, FSIMG_ECORRUPT },
+		{ "device PX with directory flag", NULL, 0020600, 2,
+		    0, 0, false, FSIMG_ECORRUPT }
+	};
+	susp_area_t area;
+	image_t image;
+	unsigned char *p;
+
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		bzero(&area, sizeof(area));
+		if (rows[i].mode != 0)
+			susp_px(&area, rows[i].mode, PX_BYTES);
+		if (rows[i].prefix != NULL)
+			susp_entry(&area, rows[i].prefix, 4);
+		if (rows[i].tail_length != 0) {
+			if (strcmp(rows[i].prefix == NULL ? "" :
+			    rows[i].prefix, "XY") == 0) {
+				susp_entry(&area, "PD", 4);
+				if (rows[i].stop)
+					susp_entry(&area, "ST", 4);
+				p = susp_entry(&area, "XY", 4);
+			} else
+				p = susp_entry(&area, "PX", PX_BYTES);
+			p[SUSP_LENGTH] = rows[i].tail_length;
+			p[SUSP_VERSION] = rows[i].tail_version;
+		}
+		image = rr_image(&area, rows[i].flags);
+		if (rows[i].flags != 0) {
+			/* Keep ISO directory geometry valid so only PX's kind
+			 * contradicts the directory flag.
+			 */
+			rr_child_directory(&image);
+		}
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    rows[i].expected, rows[i].label);
+		free(image.bytes);
+	}
+}
+
+static void
+test_rr_kinds_and_singletons(void)
+{
+	static const struct {
+		const char *label;
+		unsigned mode, px_length;
+		fsimg_entry_kind_t kind;
+		const char *content;
+		size_t size;
+		bool device;
+	} kinds[] = {
+		{ "PX regular file", 0100640, 36, FSIMG_ENTRY_FILE,
+		    "hello", 5, false },
+		{ "PX directory", 0040750, 44, FSIMG_ENTRY_DIRECTORY,
+		    NULL, 0, false },
+		{ "PX symlink", 0120777, 36, FSIMG_ENTRY_SYMLINK,
+		    "a", 1, false },
+		{ "PX FIFO", 0010600, 44, FSIMG_ENTRY_FIFO, NULL, 0, false },
+		{ "PX character device refused", 0020600, 36, 0, NULL, 0,
+		    true },
+		{ "PX block device refused", 0060600, 44, 0, NULL, 0, true },
+		{ "PX socket refused", 0140600, 36, 0, NULL, 0, false },
+		{ "PX unknown type refused", 0030600, 44, 0, NULL, 0, false }
+	};
+	static const struct {
+		const char *label, *signature;
+		unsigned length, mode, flags;
+		fsimg_status_t single;
+	} singletons[] = {
+		{ "duplicate PX", "PX", 36, 0, 0, FSIMG_OK },
+		{ "duplicate TF", "TF", 5, 0, 0, FSIMG_OK },
+		{ "duplicate PL", "PL", 12, 0, 0, FSIMG_OK },
+		{ "duplicate RE on directory", "RE", 4, 0040755, 2, FSIMG_OK },
+		{ "duplicate PN on device", "PN", 20, 0020600, 0,
+		    FSIMG_EUNSUPPORTED }
+	};
+	static const struct {
+		const char *label, *extra;
+		unsigned mode, length, version;
+	} invalid[] = {
+		{ "PX length 40", NULL, 0100644, 40, 1 },
+		{ "PX dir flag mismatch", NULL, 0040755, 36, 1 },
+		{ "link missing SL", NULL, 0120777, 36, 1 },
+		{ "SL on file", "SL", 0100644, 36, 1 },
+		{ "PN on file", "PN", 0100644, 36, 1 },
+		{ "RE on file", "RE", 0100644, 36, 1 },
+		{ "known entry version 2", NULL, 0100644, 36, 2 }
+	};
+	susp_area_t area;
+	image_t image;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	unsigned char *p;
+
+	for (unsigned i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		bzero(&area, sizeof(area));
+		susp_px(&area, kinds[i].mode, kinds[i].px_length);
+		if (kinds[i].kind == FSIMG_ENTRY_SYMLINK)
+			susp_sl(&area, 0, 0, "a", 1);
+		if (kinds[i].device)
+			susp_entry(&area, "PN", 20);
+		image = rr_image(&area,
+		    kinds[i].kind == FSIMG_ENTRY_DIRECTORY ? 2 : 0);
+		if (kinds[i].kind == FSIMG_ENTRY_DIRECTORY)
+			rr_child_directory(&image);
+		if (kinds[i].kind != 0) {
+			rr_witness(&image, "/A.TXT", kinds[i].kind,
+			    kinds[i].content, kinds[i].size, kinds[i].label);
+			fixture_new(&f, &image, NULL);
+			if (open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE) ==
+			    FSIMG_OK &&
+			    fsimg_reader_next(f.reader, &entry, NULL) ==
+			    FSIMG_OK) {
+				rr_equal(entry->metadata.valid &
+				    (FSIMG_META_OWNER | FSIMG_META_MODE),
+				    FSIMG_META_OWNER | FSIMG_META_MODE,
+				    kinds[i].label);
+				rr_equal(entry->metadata.uid, 123,
+				    kinds[i].label);
+				rr_equal(entry->metadata.gid, 456,
+				    kinds[i].label);
+				rr_equal(entry->metadata.mode,
+				    kinds[i].mode & 07777,
+				    kinds[i].label);
+			}
+			fixture_free(&f);
+		} else
+			rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+			    FSIMG_EUNSUPPORTED, kinds[i].label);
+		free(image.bytes);
+	}
+	for (unsigned i = 0; i < sizeof(singletons) / sizeof(singletons[0]);
+	    i++) {
+		bzero(&area, sizeof(area));
+		if (singletons[i].mode != 0)
+			susp_px(&area, singletons[i].mode, PX_BYTES);
+		p = susp_entry(&area, singletons[i].signature,
+		    singletons[i].length);
+		if (strcmp(singletons[i].signature, "PX") == 0) {
+			/* A valid ordinary-file PX, not a zero file type. */
+			area.length = 0;
+			susp_px(&area, 0100644, PX_BYTES);
+		}
+		image = rr_image(&area, singletons[i].flags);
+		/* RE marks this physical alias; it is omitted from the tree. */
+		if (singletons[i].flags != 0)
+			rr_child_directory(&image);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    singletons[i].single, singletons[i].label);
+		free(image.bytes);
+		/* Copy the valid singleton, preserving all its wire fields. */
+		p = area.bytes + area.length - singletons[i].length;
+		bcopy(p, area.bytes + area.length, singletons[i].length);
+		area.length += singletons[i].length;
+		image = rr_image(&area, singletons[i].flags);
+		if (singletons[i].flags != 0)
+			rr_child_directory(&image);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    FSIMG_ECORRUPT, singletons[i].label);
+		free(image.bytes);
+	}
+	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		bzero(&area, sizeof(area));
+		susp_px(&area, invalid[i].mode, invalid[i].length);
+		area.bytes[SUSP_VERSION] = invalid[i].version;
+		if (invalid[i].extra != NULL) {
+			if (strcmp(invalid[i].extra, "SL") == 0)
+				susp_sl(&area, 0, 0, "a", 1);
+			else
+				susp_entry(&area, invalid[i].extra,
+				    strcmp(invalid[i].extra, "PN") ==
+				    0 ? 20 : 4);
+		}
+		image = rr_image(&area, 0);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
+		    invalid[i].label);
+		free(image.bytes);
+	}
+}
+
+static void
+test_rr_names_and_continuations(void)
+{
+	static const struct {
+		const char *label, *text;
+		size_t length;
+		unsigned flags;
+		bool second;
+	} invalid[] = {
+		{ "empty NM", "", 0, 0, false },
+		{ "dot NM", ".", 1, 0, false },
+		{ "parent NM", "..", 2, 0, false },
+		{ "slash NM", "a/b", 3, 0, false },
+		{ "NUL NM", "a\0b", 3, 0, false },
+		{ "dangling NM", "a", 1, 1, false },
+		{ "current NM outside dot", "a", 1, 2, false },
+		{ "parent NM outside dot", "a", 1, 4, false },
+		{ "NM after ended name", "a", 1, 0, true }
+	};
+	susp_area_t area = {0}, next = {0};
+	image_t image;
+	unsigned char text[1025];
+	char path[1027];
+
+	susp_nm(&area, "caf\xc3\xa9", 5, 0);
+	image = rr_image(&area, 0);
+	rr_witness(&image, "/caf\xc3\xa9", FSIMG_ENTRY_FILE, "hello", 5,
+	    "UTF-8 NM witness");
+	free(image.bytes);
+	memset(text, 'n', sizeof(text));
+	for (unsigned size = 1024; size <= 1025; size++) {
+		bzero(&area, sizeof(area));
+		for (unsigned offset = 0; offset < size;) {
+			unsigned count = size - offset > 200 ?
+			    200 : size - offset;
+
+			susp_nm(&area, text + offset, count,
+			    offset + count < size);
+			offset += count;
+		}
+		image = rr_image(&area, 0);
+		path[0] = '/';
+		bcopy(text, path + 1, size);
+		path[size + 1] = 0;
+		if (size == 1024)
+			rr_witness(&image, path, FSIMG_ENTRY_FILE, "hello",
+			    5, "1024 byte NM");
+		else
+			rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+			    FSIMG_EUNSUPPORTED, "1025 byte NM");
+		free(image.bytes);
+		if (size == 1025) {
+			/* TF selects modify but omits its seven-byte date. */
+			susp_entry(&area, "TF", 5)[4] = 2;
+			image = rr_image(&area, 0);
+			rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+			    FSIMG_ECORRUPT, "overlong NM then corrupt TF");
+			free(image.bytes);
+		}
+	}
+	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		bzero(&area, sizeof(area));
+		susp_nm(&area, invalid[i].text, invalid[i].length,
+		    invalid[i].flags);
+		if (invalid[i].second)
+			susp_nm(&area, "b", 1, 0);
+		image = rr_image(&area, 0);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
+		    invalid[i].label);
+		free(image.bytes);
+	}
+	bzero(&area, sizeof(area));
+	susp_nm(&area, "exact;", 6, 1);
+	susp_ce(&area, 111, 0, 6);
+	susp_nm(&next, "1", 1, 0);
+	image = rr_image(&area, 0);
+	bcopy(next.bytes, image.bytes + 111 * BLOCK, next.length);
+	rr_witness(&image, "/exact;1", FSIMG_ENTRY_FILE, "hello", 5,
+	    "NM across CE exact bytes");
+	free(image.bytes);
+}
+
+static void
+test_rr_link_components(void)
+{
+	static const struct {
+		const char *label, *target, *second;
+		unsigned flags, length;
+		fsimg_status_t expected;
+	} components[] = {
+		{ "SL ordinary", "a/b", "b", 0, 1, FSIMG_OK },
+		{ "SL continued component", "ab", "b", 1, 1, FSIMG_OK },
+		{ "SL current", "./b", "b", 2, 0, FSIMG_OK },
+		{ "SL parent", "../b", "b", 4, 0, FSIMG_OK },
+		{ "SL root", "/a", "a", 8, 0, FSIMG_OK },
+		{ "SL volume root refused", NULL, "b", 16, 0,
+		    FSIMG_EUNSUPPORTED },
+		{ "SL host refused", NULL, "b", 32, 0, FSIMG_EUNSUPPORTED },
+		{ "SL current plus parent", NULL, "b", 6, 0, FSIMG_ECORRUPT },
+		{ "SL current plus root", NULL, "b", 10, 0, FSIMG_ECORRUPT },
+		{ "SL parent plus root", NULL, "b", 12, 0, FSIMG_ECORRUPT }
+	};
+	static const struct {
+		const char *label;
+		unsigned length, flags, component, text_length, text;
+		bool second;
+	} invalid[] = {
+		{ "dangling SL entry", 8, 1, 0, 1, 'a', false },
+		{ "dangling SL component", 8, 0, 1, 1, 'a', false },
+		{ "SL component overrun", 8, 0, 0, 2, 'a', false },
+		{ "empty SL target", 5, 0, 0, 0, 0, false },
+		{ "SL component NUL", 8, 0, 0, 1, 0, false },
+		{ "SL after ended target", 8, 0, 0, 1, 'a', true },
+		{ "SL multiple meanings", 8, 0, 2 | 8, 1, 'a', false }
+	};
+	susp_area_t area, next;
+	image_t image;
+	unsigned char *p, text[1025];
+
+	for (unsigned i = 0; i < sizeof(components) / sizeof(components[0]);
+	    i++) {
+		bzero(&area, sizeof(area));
+		susp_px(&area, 0120777, 44);
+		susp_sl(&area, 1, components[i].flags, "a",
+		    components[i].length);
+		susp_sl(&area, 0, 0, components[i].second, 1);
+		image = rr_image(&area, 0);
+		if (components[i].expected == FSIMG_OK)
+			rr_witness(&image, "/A.TXT", FSIMG_ENTRY_SYMLINK,
+			    components[i].target, strlen(components[i].target),
+			    components[i].label);
+		else
+			rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+			    components[i].expected, components[i].label);
+		free(image.bytes);
+		if (components[i].flags == 0x20) {
+			susp_entry(&area, "TF", 5)[4] = 2;
+			image = rr_image(&area, 0);
+			rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+			    FSIMG_ECORRUPT, "host SL then corrupt TF");
+			free(image.bytes);
+		}
+	}
+	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		bzero(&area, sizeof(area));
+		susp_px(&area, 0120777, PX_BYTES);
+		p = susp_entry(&area, "SL", invalid[i].length);
+		p[4] = invalid[i].flags;
+		if (invalid[i].length > 5) {
+			p[5] = invalid[i].component;
+			p[6] = invalid[i].text_length;
+			p[7] = invalid[i].text;
+		}
+		if (invalid[i].second)
+			susp_sl(&area, 0, 0, "b", 1);
+		image = rr_image(&area, 0);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
+		    invalid[i].label);
+		free(image.bytes);
+	}
+	memset(text, 'a', sizeof(text));
+	for (unsigned size = 1024; size <= 1025; size++) {
+		bzero(&area, sizeof(area));
+		susp_px(&area, 0120777, 36);
+		for (unsigned offset = 0; offset < size;) {
+			unsigned count = size - offset > 200 ?
+			    200 : size - offset;
+			bool more = offset + count < size;
+
+			susp_sl(&area, more, more, text + offset, count);
+			offset += count;
+		}
+		image = rr_image(&area, 0);
+		if (size == 1024)
+			rr_witness(&image, "/A.TXT", FSIMG_ENTRY_SYMLINK,
+			    text, size, "1024 byte SL target");
+		else
+			rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+			    FSIMG_EUNSUPPORTED, "1025 byte SL target");
+		free(image.bytes);
+		if (size == 1025) {
+			susp_entry(&area, "TF", 5)[4] = 2;
+			image = rr_image(&area, 0);
+			rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+			    FSIMG_ECORRUPT, "overlong SL then corrupt TF");
+			free(image.bytes);
+		}
+	}
+	bzero(&area, sizeof(area));
+	bzero(&next, sizeof(next));
+	susp_px(&area, 0120777, 36);
+	susp_sl(&area, 1, 1, "tar", 3);
+	susp_sl(&next, 0, 0, "get", 3);
+	susp_ce(&area, 111, 0, next.length);
+	image = rr_image(&area, 0);
+	bcopy(next.bytes, image.bytes + 111 * BLOCK, next.length);
+	rr_witness(&image, "/A.TXT", FSIMG_ENTRY_SYMLINK, "target", 6,
+	    "SL across CE");
+	free(image.bytes);
+}
+
+static void
+test_rr_times(void)
+{
+	static const unsigned char short_date[] = { 70, 1, 1, 0, 0, 1, 0 };
+	static const unsigned char long_date[] = {
+		'1', '9', '7', '0', '0', '1', '0', '1', '0', '0', '0', '0',
+		'0', '1', '1', '2',
+		0 /* Zone: UTC, in signed 15-minute units. */
+	};
+	susp_area_t area;
+	image_t image;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	unsigned char *p;
+	fsimg_status_t status;
+
+	static const struct {
+		const char *label;
+		unsigned width, flags, count, nanoseconds, precision;
+		const unsigned char *date;
+		bool omit;
+		fsimg_status_t expected;
+	} rows[] = {
+		{ "TF short four dates", 7, 15, 4, 0, 1000000000,
+		    short_date, false, FSIMG_OK },
+		{ "TF long four dates", 17, 143, 4, 120000000, 10000000,
+		    long_date, false, FSIMG_OK },
+		{ "TF short excess dates", 7, 1, 4, 0, 1000000000,
+		    short_date, false, FSIMG_ECORRUPT },
+		{ "recording date without TF", 7, 0, 0, 0, 1000000000,
+		    short_date, true, FSIMG_OK },
+		{ "TF creation preserves recording modify", 7, 1, 1, 0,
+		    1000000000, short_date, false, FSIMG_OK }
+	};
+
+	for (unsigned form = 0; form < sizeof(rows) / sizeof(rows[0]); form++) {
+		unsigned width = rows[form].width;
+
+		bzero(&area, sizeof(area));
+		susp_px(&area, 0106754, 44);
+		if (!rows[form].omit) {
+			p = susp_entry(&area, "TF",
+			    5 + rows[form].count * width);
+			p[4] = rows[form].flags;
+			for (unsigned i = 0; i < rows[form].count; i++)
+				bcopy(rows[form].date, p + 5 + i * width,
+				    width);
+		}
+		image = rr_image(&area, 0);
+		bcopy(short_date,
+		    image.bytes + ROOT * BLOCK + RR_CHILD + DR_DATE, 7);
+		fixture_new(&f, &image, NULL);
+		status = open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE);
+		if (status == FSIMG_OK)
+			status = fsimg_reader_next(f.reader, &entry, NULL);
+		rr_status_equal(status, rows[form].expected, rows[form].label);
+		if (status == FSIMG_OK) {
+			rr_equal(entry->metadata.modified.seconds, 1,
+			    rows[form].label);
+			rr_equal(entry->metadata.valid & FSIMG_META_MODIFIED,
+			    FSIMG_META_MODIFIED, rows[form].label);
+			rr_equal(entry->metadata.modified.nanoseconds,
+			    rows[form].nanoseconds, rows[form].label);
+			rr_equal(entry->metadata.modified.precision_ns,
+			    rows[form].precision, rows[form].label);
+			if (rows[form].count == 4) {
+				rr_equal(entry->metadata.valid &
+				    (FSIMG_META_CREATED | FSIMG_META_ACCESSED |
+				    FSIMG_META_CHANGED),
+				    FSIMG_META_CREATED |
+				    FSIMG_META_ACCESSED | FSIMG_META_CHANGED,
+				    rows[form].label);
+				rr_equal(entry->metadata.created.seconds, 1,
+				    rows[form].label);
+				rr_equal(entry->metadata.accessed.seconds,
+				    1, rows[form].label);
+				rr_equal(entry->metadata.changed.seconds, 1,
+				    rows[form].label);
+			}
+			if (rows[form].count == 1) {
+				rr_equal(entry->metadata.created.seconds, 1,
+				    rows[form].label);
+				rr_equal(entry->metadata.valid &
+				    (FSIMG_META_ACCESSED | FSIMG_META_CHANGED),
+				    0, rows[form].label);
+			}
+		}
+		fixture_free(&f);
+		free(image.bytes);
+	}
+}
+
+static void
+test_rr_shared_continuation(void)
+{
+	enum {
+		DOT_PX = 64, DOT_CE = ROOT_DOT_BYTES - 1,
+		PARENT_RECORD = DOT_CE + CE_BYTES + 1,
+		PARENT_CE = PARENT_RECORD + DOT_BYTES,
+		PARENT_BYTES = DOT_BYTES + CE_BYTES,
+		FIRST_CHILD = PARENT_RECORD + PARENT_BYTES
+	};
+	susp_area_t area = {0};
+	image_t image;
+	fixture_t f;
+	unsigned char *p, up = 1;
+	size_t length;
+	char name[16];
+
+	susp_px(&area, 0100644, PX_BYTES);
+	image = rr_image(&area, 0);
+	/* Dot records and children use disjoint areas in the same block. */
+	bzero(&area, sizeof(area));
+	susp_px(&area, 0040755, PX_BYTES);
+	bcopy(area.bytes, image.bytes + RR_AREA * BLOCK + DOT_PX, area.length);
+	p = image.bytes + ROOT * BLOCK;
+	bzero(p + DOT_CE, BLOCK - DOT_CE);
+	bzero(&area, sizeof(area));
+	susp_ce(&area, RR_AREA, DOT_PX, PX_BYTES);
+	bcopy(area.bytes, p + DOT_CE, area.length);
+	p[0] = PARENT_RECORD;
+	record(p + PARENT_RECORD, &up, 1, ROOT, BLOCK, 2);
+	bcopy(area.bytes, p + PARENT_CE, area.length);
+	p[PARENT_RECORD] = PARENT_BYTES;
+	p += FIRST_CHILD;
+	for (unsigned i = 0; i < 24; i++) {
+		snprintf(name, sizeof(name), "F%02u;1", i);
+		length = record(p, name, strlen(name), DATA, 5, 0);
+		bzero(&area, sizeof(area));
+		susp_ce(&area, RR_AREA, 0, PX_BYTES);
+		bcopy(area.bytes, p + length, area.length);
+		p[0] += area.length;
+		p += p[0];
+	}
+	fixture_new(&f, &image, NULL);
+	rr_status_equal(open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE),
+	    FSIMG_OK, "shared CE open");
+	rr_status_equal(walk(&f), FSIMG_OK, "shared CE walk");
+	/* Preparation and replay reuse the same cached block. */
+	rr_equal(image.continuation_reads, 1,
+	    "24 children share one continuation block");
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+static void
+test_rr_omitted_names(void)
+{
+	susp_area_t area = {0};
+	image_t image;
+	fixture_t f;
+	fsimg_stats_t stats;
+	fsimg_extract_options_t options;
+	const fsimg_entry_t *entry;
+	char temporary[] = "./iso-rr-XXXXXX";
+	unsigned char *p;
+	int parent;
+
+	susp_nm(&area, "caf\xe9", 4, 0);
+	image = rr_image(&area, 0);
+	p = image.bytes + ROOT * BLOCK + RR_CHILD;
+	record(p + p[0], "B;1", 3, DATA, 5, 0);
+	fixture_new(&f, &image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	rr_equal(strcmp(entry->path, "/B"), 0,
+	    "Latin-1 NM omitted; sibling retained");
+	rr_status_equal(walk(&f), FSIMG_OK, "omitted name listing ends");
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	rr_equal(stats.omitted_entries, 1, "one omitted NM");
+	fixture_free(&f);
+	CHECK(mkdtemp(temporary) != NULL);
+	parent = open(temporary, O_RDONLY | O_DIRECTORY);
+	CHECK(parent >= 0);
+	for (unsigned skip = 0; skip < 2; skip++) {
+		fixture_new(&f, &image, NULL);
+		CHECK(open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE) == FSIMG_OK);
+		fsimg_extract_options_init(&options);
+		options.flags |= skip ? FSIMG_EXTRACT_SKIP_UNSUPPORTED : 0;
+		rr_status_equal(fsimg_extract_at(f.reader, parent, "out",
+		    &options, NULL),
+		    skip ? FSIMG_OK : FSIMG_EUNSUPPORTED,
+		    skip ? "extract omitted NM with skip" :
+		    "extract omitted NM without skip");
+		fixture_free(&f);
+		remove_tree(parent, "out");
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(temporary) == 0);
+	free(image.bytes);
+}
+
+/* Logical chains use blocks 40..59; relocated dots name physical parent
+ * ROOT and carry PL naming the logical predecessor. RE records at ROOT
+ * are physical directory aliases hidden from this view.
+ */
+static void
+rr_relocated_chain(unsigned depth, bool several)
+{
+	susp_area_t area, link, parent_link;
+	image_t image;
+	unsigned char *root, *p;
+	unsigned char self = 0, up = 1;
+	char name[16], expected_path[128], label[96];
+	size_t length, root_offset, count;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	unsigned directories, files;
+	unsigned char content[5];
+
+	snprintf(label, sizeof(label),
+	    "relocation depth %u / several %u", depth, several);
+	bzero(&area, sizeof(area));
+	susp_px(&area, 0040755, 36);
+	image = rr_image(&area, 0);
+	root = image.bytes + ROOT * BLOCK;
+	bzero(root + RR_CHILD, BLOCK - RR_CHILD);
+	root_offset = RR_CHILD;
+	for (unsigned level = 0; level < depth; level++) {
+		unsigned block = 40 + level;
+		unsigned predecessor = level == 0 ? ROOT : block - 1;
+		unsigned extent = block, size = BLOCK, flags = 2;
+		bool relocated = level == 7 || (several && level > 7);
+
+		p = image.bytes + block * BLOCK;
+		length = record(p, &self, 1, block, BLOCK, 2);
+		length += record(p + length, &up, 1,
+		    relocated ? ROOT : predecessor, BLOCK, 2);
+		if (relocated) {
+			bzero(&parent_link, sizeof(parent_link));
+			put32(susp_entry(&parent_link, "PL", 12) + 4,
+			    predecessor);
+			bcopy(parent_link.bytes, p + length,
+			    parent_link.length);
+			p[DOT_BYTES] += parent_link.length;
+		}
+		bzero(&link, sizeof(link));
+		susp_px(&link, 0040755, 36);
+		if (relocated)
+			put32(susp_entry(&link, "CL", 12) + 4, block);
+		p = level == 0 ? root + root_offset :
+		    image.bytes + predecessor * BLOCK +
+		    ((level == 8 || (level > 8 && several)) ?
+		    RELOCATED_CHILD : DOT_PAIR_BYTES);
+		snprintf(name, sizeof(name), "D%02u", level);
+		if (relocated) {
+			extent = several ? MKISOFS_PLACEHOLDER :
+			    XORRISO_PLACEHOLDER;
+			size = 0;
+			flags = 0;
+		}
+		length = record(p, name, strlen(name), extent, size,
+		    flags);
+		bcopy(link.bytes, p + length, link.length);
+		p[0] += link.length;
+		if (level == 0)
+			root_offset += p[0];
+		if (relocated) {
+			p = root + root_offset;
+			snprintf(name, sizeof(name), "R%02u", level);
+			length = record(p, name, strlen(name), block, BLOCK, 2);
+			bzero(&link, sizeof(link));
+			susp_entry(&link, "RE", 4);
+			bcopy(link.bytes, p + length, link.length);
+			p[0] += link.length;
+			root_offset += p[0];
+		}
+	}
+	/* A payload under the deepest directory checks the CL content path. */
+	p = image.bytes + (40 + depth - 1) * BLOCK;
+	length = DOT_PAIR_BYTES;
+	if (depth == 8 || (several && depth > 8))
+		length += LINK_BYTES;
+	record(p + length, "FILE;1", 6, DATA, 5, 0);
+	expected_path[0] = 0;
+	for (unsigned level = 0; level < depth; level++) {
+		snprintf(name, sizeof(name), "/D%02u", level);
+		strcat(expected_path, name);
+	}
+	strcat(expected_path, "/FILE");
+	fixture_new(&f, &image, NULL);
+	status = open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE);
+	directories = 0;
+	files = 0;
+	if (status == FSIMG_OK) {
+		while ((status = fsimg_reader_next(f.reader, &entry,
+		    NULL)) == FSIMG_OK) {
+			if (entry->kind == FSIMG_ENTRY_FILE) {
+				rr_equal(strcmp(entry->path, expected_path),
+				    0, label);
+				rr_status_equal(fsimg_reader_read_at(f.reader,
+				    0, content, sizeof(content), &count, NULL),
+				    FSIMG_OK, label);
+				rr_equal(count == 5 &&
+				    bcmp(content, "hello", 5) == 0, 1, label);
+				files++;
+			} else {
+				rr_equal(entry->kind, FSIMG_ENTRY_DIRECTORY,
+				    label);
+				directories++;
+			}
+		}
+	}
+	rr_status_equal(status, FSIMG_DONE, label);
+	rr_equal(directories, depth, label);
+	rr_equal(files, 1, label);
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+static void
+test_rr_relocation(void)
+{
+	enum setup {
+		DOT_FLAG_CLEAR, MISSING_PL, WRONG_PL, ORDINARY_PL, ROOT_CL,
+		ALIAS, LOOP, VALID, PRIMARY, DUPLICATE_CL, CL_RE
+	};
+	static const struct {
+		const char *label;
+		enum setup setup;
+		fsimg_status_t expected;
+	} rows[] = {
+		{ "CL target dot flag clear", DOT_FLAG_CLEAR, FSIMG_ECORRUPT },
+		{ "CL missing PL", MISSING_PL, FSIMG_ECORRUPT },
+		{ "PL wrong parent", WRONG_PL, FSIMG_ECORRUPT },
+		{ "PL ordinary directory", ORDINARY_PL, FSIMG_ECORRUPT },
+		{ "CL root", ROOT_CL, FSIMG_ECORRUPT },
+		{ "CL and ordinary alias", ALIAS, FSIMG_ECORRUPT },
+		{ "relocation loop", LOOP, FSIMG_ECORRUPT },
+		{ "CL placeholder valid", VALID, FSIMG_OK },
+		{ "primary placeholder", PRIMARY, FSIMG_OK },
+		{ "duplicate CL on valid placeholder", DUPLICATE_CL,
+		    FSIMG_ECORRUPT },
+		{ "CL and RE on directory PX placeholder", CL_RE,
+		    FSIMG_ECORRUPT }
+	};
+	susp_area_t area, parent_link;
+	image_t image;
+	unsigned char *root, *p;
+	size_t length;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+
+	for (unsigned depth = 8; depth <= 20; depth++) {
+		for (unsigned several = 0; several < 2; several++)
+			rr_relocated_chain(depth, several != 0);
+	}
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		bzero(&area, sizeof(area));
+		susp_px(&area, 0040755, 36);
+		put32(susp_entry(&area, "CL", 12) + 4, 85);
+		image = rr_image(&area, 0);
+		root = image.bytes + ROOT * BLOCK;
+		p = root + RR_CHILD;
+		put32(p + DR_SIZE, 0);
+		put32(p + DR_EXTENT, MKISOFS_PLACEHOLDER);
+		p = image.bytes + 85 * BLOCK;
+		directory(p, 85, ROOT, BLOCK);
+		bzero(&parent_link, sizeof(parent_link));
+		put32(susp_entry(&parent_link, "PL", 12) + 4, ROOT);
+		bcopy(parent_link.bytes, p + DOT_PAIR_BYTES, 12);
+		p[DOT_BYTES] += 12;
+		switch (rows[i].setup) {
+		case DOT_FLAG_CLEAR: p[DR_FLAGS] = 0; break;
+		case MISSING_PL: bzero(p + DOT_PAIR_BYTES, 12); break;
+		case WRONG_PL:
+			put32(p + DOT_PAIR_BYTES + SUSP_PAYLOAD, 86);
+			break;
+		case ORDINARY_PL: /* PL on an ordinary directory. */
+			bzero(image.bytes + RR_AREA * BLOCK + PX_BYTES, 12);
+			put32(root + RR_CHILD + DR_EXTENT, 85);
+			put32(root + RR_CHILD + DR_SIZE, BLOCK);
+			root[RR_CHILD + DR_FLAGS] = 2;
+			break;
+		case ROOT_CL:
+			put32(image.bytes + RR_AREA * BLOCK + PX_BYTES +
+			    SUSP_PAYLOAD, ROOT);
+			break;
+		case ALIAS: /* Same extent through CL and an ordinary record. */
+			record(root + RR_CHILD + root[RR_CHILD], "B", 1, 85,
+			    BLOCK, 2);
+			break;
+		case LOOP:
+			/* CL returns to its own directory; PL mismatches. */
+			length = record(p + RELOCATED_CHILD, "LOOP", 4,
+			    MKISOFS_PLACEHOLDER, 0, 0);
+			bcopy(area.bytes, p + RELOCATED_CHILD + length,
+			    area.length);
+			p[RELOCATED_CHILD] += area.length;
+			break;
+		case VALID: break;
+		case PRIMARY: break;
+		case DUPLICATE_CL:
+		case CL_RE:
+			/* Extend the independently checked VALID row. */
+			if (rows[i].setup == DUPLICATE_CL)
+				put32(susp_entry(&area, "CL",
+				    LINK_BYTES) + 4, 85);
+			else {
+				susp_entry(&area, "RE", 4);
+				root[RR_CHILD + DR_FLAGS] = 2;
+				put32(root + RR_CHILD + DR_EXTENT, 85);
+				put32(root + RR_CHILD + DR_SIZE, BLOCK);
+			}
+			bcopy(area.bytes, image.bytes + RR_AREA * BLOCK,
+			    area.length);
+			/* The child's CE must expose the appended singleton. */
+			put32(root + RR_CHILD + CHILD_SUSP + 20, area.length);
+			break;
+		}
+		if (rows[i].setup != PRIMARY)
+			rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+			    rows[i].expected, rows[i].label);
+		else {
+			fixture_new(&f, &image, NULL);
+			CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) ==
+			    FSIMG_OK);
+			CHECK(fsimg_reader_next(f.reader, &entry, NULL) ==
+			    FSIMG_OK);
+			rr_equal(entry->kind, FSIMG_ENTRY_FILE,
+			    "primary placeholder empty file");
+			rr_equal(entry->size, 0,
+			    "primary placeholder zero size");
+			fixture_free(&f);
+		}
+		free(image.bytes);
+	}
+}
+
+static void
+test_rr_dot_entries(void)
+{
+	static const struct {
+		const char *label;
+		unsigned version;
+		fsimg_status_t expected;
+	} rows[] = {
+		{ "dot NM current and SL ignored", 1, FSIMG_OK },
+		{ "dot NM bad entry version", 2, FSIMG_ECORRUPT }
+	};
+	susp_area_t area = {0}, dot;
+	image_t image;
+	unsigned char *p, self = 0, up = 1;
+	size_t offset, length;
+
+	susp_px(&area, 0040755, PX_BYTES);
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		image = rr_image(&area, 2);
+		p = rr_child_directory(&image);
+		bzero(&dot, sizeof(dot));
+		susp_nm(&dot, "", 0, 2);
+		dot.bytes[SUSP_VERSION] = rows[i].version;
+		/* CURRENT and PARENT together are corrupt if interpreted. */
+		susp_sl(&dot, 0, 2 | 4, "", 0);
+		length = record(p, &self, 1, RR_DIRECTORY, BLOCK, 2);
+		bcopy(dot.bytes, p + length, dot.length);
+		p[0] += dot.length + (dot.length % 2);
+		offset = p[0];
+		p += offset;
+		length = record(p, &up, 1, ROOT, BLOCK, 2);
+		bcopy(dot.bytes, p + length, dot.length);
+		p[0] += dot.length + (dot.length % 2);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    rows[i].expected, rows[i].label);
+		free(image.bytes);
+	}
+}
+
+static void
+test_rr_later_sections(void)
+{
+	susp_area_t area = {0};
+	image_t image;
+	unsigned char *p;
+	size_t length;
+
+	susp_px(&area, 0100644, 36);
+	image = rr_image(&area, 0x80);
+	p = image.bytes + ROOT * BLOCK + RR_CHILD;
+	put32(p + DR_SIZE, BLOCK);
+	p += p[0];
+	length = record(p, "A.TXT;1", 7, DATA + 1, 0, 0);
+	bzero(&area, sizeof(area));
+	susp_entry(&area, "ZF", 4);
+	/* Semantically invalid, correctly framed. */
+	susp_entry(&area, "PX", 4);
+	bcopy(area.bytes, p + length, area.length);
+	p[0] += area.length;
+	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_OK,
+	    "later section SUSP framed only");
+	p[length + 2] = 3;
+	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
+	    "later section framing invalid");
+	free(image.bytes);
+}
+
+static void
+test_rr_exact_queries(void)
+{
+	static const struct {
+		const char *path;
+		fsimg_status_t expected;
+	} queries[] = {
+		{ "/Exact;1", FSIMG_OK },
+		{ "/Exact", FSIMG_EINVAL },
+		{ "/exact;1", FSIMG_EINVAL }
+	};
+	susp_area_t area = {0};
+	image_t image;
+	fixture_t f;
+	char temporary[] = "./iso-query-XXXXXX";
+	int parent;
+
+	susp_nm(&area, "Exact;1", 7, 0);
+	image = rr_image(&area, 0);
+	CHECK(mkdtemp(temporary) != NULL);
+	parent = open(temporary, O_RDONLY | O_DIRECTORY);
+	CHECK(parent >= 0);
+	for (unsigned i = 0; i < 3; i++) {
+		fixture_new(&f, &image, NULL);
+		CHECK(open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE) == FSIMG_OK);
+		rr_status_equal(extract(&f, parent, queries[i].path),
+		    queries[i].expected, queries[i].path);
+		fixture_free(&f);
+		remove_tree(parent, "out");
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(temporary) == 0);
+	free(image.bytes);
+}
+
+static void
+test_rr_known_versions(void)
+{
+	static const char *const signatures[] = {
+		"PX", "PN", "SL", "NM", "CL", "PL", "RE", "TF", "RR", "SF", "ZF"
+	};
+	static const unsigned lengths[] = { 36, 20, 5, 5, 12, 12, 4, 5, 5,
+	    4, 4 };
+	susp_area_t area;
+	image_t image;
+	char label[64];
+
+	for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		bzero(&area, sizeof(area));
+		susp_entry(&area, signatures[i], lengths[i])[3] = 2;
+		image = rr_image(&area, 0);
+		snprintf(label, sizeof(label), "%s version 2 is corrupt",
+		    signatures[i]);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
+		    label);
+		free(image.bytes);
+	}
+}
+
+static void
+susp_seed(const char *path)
+{
+	unsigned char seed[512 + 4 * BLOCK] = {0};
+	susp_area_t area = {0};
+	unsigned char *p;
+	FILE *file;
+
+	p = susp_entry(&area, "SP", 7);
+	p[4] = 0xbe;
+	p[5] = 0xef;
+	susp_er(&area, "RRIP_1991A", 1);
+	bcopy(area.bytes, seed, area.length);
+	bzero(&area, sizeof(area));
+	susp_px(&area, 0100644, 36);
+	susp_nm(&area, "fi", 2, 1);
+	susp_ce(&area, 110, 0, 7);
+	bcopy(area.bytes, seed + 128, area.length);
+	bzero(&area, sizeof(area));
+	susp_px(&area, 0120777, 44);
+	susp_sl(&area, 1, 1, "fi", 2);
+	susp_ce(&area, 111, 0, 9);
+	bcopy(area.bytes, seed + 256, area.length);
+	bzero(&area, sizeof(area));
+	susp_px(&area, 0040755, 36);
+	bcopy(area.bytes, seed + 384, area.length);
+	bzero(&area, sizeof(area));
+	susp_nm(&area, "le", 2, 0);
+	bcopy(area.bytes, seed + 512, area.length);
+	bzero(&area, sizeof(area));
+	susp_sl(&area, 0, 0, "le", 2);
+	bcopy(area.bytes, seed + 512 + BLOCK, area.length);
+	file = fopen(path, "wb");
+	CHECK(file != NULL);
+	CHECK(fwrite(seed, 1, sizeof(seed), file) == sizeof(seed));
+	CHECK(fclose(file) == 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2103,7 +3558,25 @@ main(int argc, char **argv)
 		free(image.bytes);
 		return (0);
 	}
+	if (argc == 3 && strcmp(argv[1], "--susp-seed") == 0) {
+		susp_seed(argv[2]);
+		return (0);
+	}
 	CHECK(argc == 1);
+	test_susp_handshake_views();
+	test_susp_continuation_bounds();
+	test_susp_framing_and_precedence();
+	test_rr_kinds_and_singletons();
+	test_rr_names_and_continuations();
+	test_rr_link_components();
+	test_rr_times();
+	test_rr_shared_continuation();
+	test_rr_omitted_names();
+	test_rr_relocation();
+	test_rr_dot_entries();
+	test_rr_later_sections();
+	test_rr_exact_queries();
+	test_rr_known_versions();
 	test_boot_platforms_and_sections();
 	test_boot_entry_variants();
 	test_boot_catalog_capacity();
