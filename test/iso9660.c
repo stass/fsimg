@@ -4112,6 +4112,8 @@ test_joliet_namespace(void)
 	static const uint16_t a[] = { 'A' }, version[] = { 'A',';','1' };
 	static const uint16_t lower[] = { 'a' }, nfc[] = { 0xe9 };
 	static const uint16_t nfd[] = { 'e', 0x301 };
+	static const uint16_t unpaired[] = { 0xd83d };
+	static const uint16_t unpaired_version[] = { 0xd83d, ';', '1' };
 	static const char *const paths[] = { "/A", "/a", "/\xc3\xa9", "/e\xcc\x81" };
 	image_t image = image_new();
 	unsigned char *root;
@@ -4129,6 +4131,22 @@ test_joliet_namespace(void)
 	joliet_record(root + offset, nfd, 2, DATA, 5, 0);
 	joliet_names(&image, FSIMG_ISO_VIEW_JOLIET, paths, 4, 0,
 	    "Joliet case and NFC/NFD spellings are distinct");
+
+	/* Omitted names still participate in display-name collision checks. */
+	bzero(root, BLOCK - DOT_PAIR_BYTES);
+	offset = joliet_record(root, unpaired, 1, DATA, 5, 0);
+	joliet_names(&image, FSIMG_ISO_VIEW_JOLIET, NULL, 0, 1,
+	    "Joliet unpaired collision name alone is omitted");
+	joliet_record(root + offset, unpaired_version, 3, DATA, 5, 0);
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_ECORRUPT,
+	    "Joliet omitted surrogate and surrogate;1 collide after display");
+	bzero(root, BLOCK - DOT_PAIR_BYTES);
+	offset = joliet_record(root, unpaired_version, 3, DATA, 5, 0);
+	joliet_names(&image, FSIMG_ISO_VIEW_JOLIET, NULL, 0, 1,
+	    "Joliet versioned unpaired collision name alone is omitted");
+	joliet_record(root + offset, unpaired, 1, DATA, 5, 0);
+	rr_status(&image, FSIMG_ISO_VIEW_JOLIET, FSIMG_ECORRUPT,
+	    "Joliet omitted surrogate;1 and surrogate collide after display");
 	free(image.bytes);
 }
 
@@ -4178,6 +4196,10 @@ test_joliet_label(void)
 	} rows[] = {
 		{ "Joliet label non-ASCII with space and NUL padding",
 		    { 0xe9, 0x4e2d, ' ', ' ', 0 }, "\xc3\xa9\xe4\xb8\xad" },
+		{ "Joliet maximum 16-unit label with non-BMP pairs",
+		    { 0xd83d, 0xde00, 'A', 'B', 'C', 'D', 'E', 'F',
+		      'G', 'H', 'I', 'J', 'K', 'L', 0xd83d, 0xde01 },
+		    "\xf0\x9f\x98\x80" "ABCDEFGHIJKL" "\xf0\x9f\x98\x81" },
 		{ "Joliet label unpaired surrogate absent", { 0xd83d }, NULL },
 		{ "Joliet label control absent", { 'A', 1 }, NULL }
 	};
@@ -4186,7 +4208,7 @@ test_joliet_label(void)
 	fsimg_volume_info_t info;
 	unsigned char *label;
 
-	for (unsigned i = 0; i < 3; i++) {
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
 		image = image_new();
 		joliet_add(&image);
 		label = image.bytes + 17 * BLOCK + VD_LABEL;

@@ -94,6 +94,8 @@ test_wtf8(void)
 		    "\xf0\x9f\x98\x80", false },
 		{ "terminal high surrogate", { 0xd83d }, 1,
 		    "\xed\xa0\xbd", true },
+		{ "low surrogate beyond input length", { 0xd83d, 0xde00 }, 1,
+		    "\xed\xa0\xbd", true },
 		{ "high followed by ASCII", { 0xd83d, 'A' }, 2,
 		    "\xed\xa0\xbd" "A", true },
 		{ "high followed by high", { 0xd83d, 0xd800 }, 2,
