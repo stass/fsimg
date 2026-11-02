@@ -2252,6 +2252,15 @@ continuation boundaries, files above 4 GiB through a sparse sink,
 refusals, time losses, emission faults, and allocation, scratch and
 cancellation failures at every point.
 
+The sparse large-file fixture also checks each hierarchy's multi-extent
+directory-record run independently of the reader: both byte orders, section
+lengths and flags, identifiers, dates and contiguous extents. This check
+does not materialize or hash the multi-gigabyte payload. Additional boundary
+fixtures cover path tables crossing blocks, 65,535 total directories and
+refusal of one more, and BMP labels with multibyte UTF-8 characters. Corrupt
+scratch rows exercise oversized file sizes and continuation positions that
+would wrap during block alignment; both fail with `FSIMG_ECORRUPT`.
+
 `./test-iso9660-write --create FILE LEVEL [short]` writes its test tree,
 which has every entry kind, aliased and non-BMP names, a 255-byte name,
 1023-byte link targets and an eight-level tree, for the external readers;
@@ -2282,5 +2291,11 @@ first without its `/`, so a target spanning several `SL` entries
 extracts wrong from fsimg, genisoimage and xorriso images alike; the
 comparison above excepts those targets.
 
-Not run: the Linux and FreeBSD kernel mounts, since this container's
-kernel has no `isofs` and FreeBSD was not available, and macOS.
+The macOS command `MAKEFLAGS=-j32 sh build-aux/ci-check.sh` passes the
+plain, ASan/UBSan, separate UBSan and distribution suites, each with
+66 passes and six environment skips; the CLI and specification suites run
+and pass. Install, scale and CLI RSS checks pass. Standalone LSan and MSan
+report unsupported on macOS; their Linux checks are separate.
+`gmake -j32 test-iso9660-write test-iso9660 test-iso9660-faults`, followed
+by all three executables, passes on FreeBSD 16. Kernel-mount qualification
+requires comparisons of each view's complete manifest on Linux and FreeBSD.

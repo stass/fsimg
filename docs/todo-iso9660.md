@@ -38,18 +38,17 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   stage 10. The writer lands unregistered, reached through
   `fsimg_iso9660_write_format`. Remaining: the integration script's
   writer cases; the Linux and FreeBSD kernel mounts in each view, which
-  this Linux container cannot run (no `isofs` module); macOS and FreeBSD
-  runs of `test-iso9660-write`. Registration merges the writer's
+  the integration environment must permit. Registration merges the writer's
   capability record into the reader's, whose metadata fields include the
   creation time and attributes the writer does not store, so the writer
   must then report those losses itself; and documents `level=`, `boot=`,
   `efiboot=` and `bootload=` in the creation `-o` help and the man page's
   CREATION settings.
-* [Medium] **Writer test coverage** (`test/iso9660-write.c`): the
-  independent checker never sees a multi-section image, since the 8 GiB
-  fixture is checked only through the reader; path tables longer than one
-  block, the 65535-directory refusal, a non-ASCII label and a corrupt
-  plan row read back are untested.
+* [Medium] **Writer scale qualification** (`test/iso9660-scale.c`): measure
+  planning and emission of a wide catalog under a 16 MiB memory budget,
+  recording metadata I/O, peak scratch and RSS; the existing scale profiles
+  measure readers. Include the relocated 256-level writer tree and the
+  largest-volume plan when those stages land.
 * [Low] **Writer readability** (`lib/formats/iso9660/write-*.c`): several
   passes chain fallible steps as `status == FSIMG_OK &&` conditions, and
   `iso_child_entries` combines the target read, its checks, encoding and

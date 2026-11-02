@@ -19,6 +19,7 @@
 #include "internal.h"
 #include "meta.h"
 #include "test.h"
+#include "write-iso9660.h"
 
 /*
  * ISO 9660 writer tests. The writer is reached through its unregistered
@@ -963,19 +964,30 @@ chk_descriptor(chk_t *c, unsigned h, const chk_expect_t *expect)
 		CHK(c, strcmp(decoded, label) == 0, "Joliet label");
 	} else {
 		size_t length = strlen(label);
+		unsigned char projected[32];
+		size_t characters = 0;
+
+		/* The label is valid BMP UTF-8. Each leading byte starts one
+		 * character; continuation bytes add no primary character.
+		 */
+		memset(projected, ' ', sizeof(projected));
+		for (size_t i = 0; i < length; i++) {
+			unsigned char e = (unsigned char)label[i];
+
+			if ((e & 0xc0) == 0x80)
+				continue;
+			if (e >= 'a' && e <= 'z')
+				e = (unsigned char)(e - 'a' + 'A');
+			if (!((e >= 'A' && e <= 'Z') ||
+			    (e >= '0' && e <= '9') || e == '_'))
+				e = '_';
+			CHECK(characters < sizeof(projected));
+			projected[characters++] = e;
+		}
 
 		for (size_t i = 0; i < 32; i++) {
-			unsigned char e = ' ';
-
-			if (i < length) {
-				e = (unsigned char)label[i];
-				if (e >= 'a' && e <= 'z')
-					e = (unsigned char)(e - 'a' + 'A');
-				if (!((e >= 'A' && e <= 'Z') ||
-				    (e >= '0' && e <= '9') || e == '_'))
-					e = '_';
-			}
-			CHK(c, d[40 + i] == e, "primary label projection");
+			CHK(c, d[40 + i] == projected[i],
+			    "primary label projection");
 		}
 	}
 	chk_explain(c, (uint64_t)(16 + h) * BLOCK, BLOCK);
@@ -1962,6 +1974,60 @@ sparse_flush(void *argument FSIMG_UNUSED, fsimg_error_t *error FSIMG_UNUSED)
 	return (FSIMG_OK);
 }
 
+/* Independently check the large file's directory-record run, without
+ * materializing or hashing its all-zero multi-gigabyte payload. The sink
+ * stores all metadata in its first MiB. Both endian copies, the section
+ * lengths, flags, identifiers, dates and contiguous addresses must agree.
+ */
+static void
+check_large_sections(const sparse_sink_t *sink, unsigned hierarchy)
+{
+	static const uint32_t lengths[] = { 0xfffff800u, 0xfffff800u, 4096 };
+	const unsigned char *descriptor, *record, *first = NULL;
+	uint64_t start, end, at, next_extent = 0;
+	unsigned section = 0;
+	uint32_t length, extent;
+
+	descriptor = sink->bytes + (16 + hierarchy) * BLOCK;
+	start = (uint64_t)le32(descriptor + 158) * BLOCK;
+	end = start + le32(descriptor + 166);
+	CHECK(end <= SPARSE_BYTES);
+	for (at = start; at < end;) {
+		record = sink->bytes + at;
+		if (record[0] == 0) {
+			at += BLOCK - at % BLOCK;
+			continue;
+		}
+		CHECK(record[0] >= 34 && at % BLOCK + record[0] <= BLOCK);
+		CHECK(at + record[0] <= end);
+		CHECK(33u + record[32] + (record[32] % 2 == 0) <= record[0]);
+		length = le32(record + 10);
+		extent = le32(record + 2);
+		if (length == lengths[0] ||
+		    (first != NULL && section < 3)) {
+			CHECK(section < 3 && length == lengths[section]);
+			CHECK(length == be32(record + 14));
+			CHECK(extent == be32(record + 6));
+			CHECK(record[25] == (section < 2 ? 0x80 : 0));
+			if (first == NULL) {
+				first = record;
+				next_extent = extent;
+			} else {
+				CHECK(record[32] == first[32]);
+				CHECK(bcmp(record + 33, first + 33, first[32]) == 0);
+				CHECK(bcmp(record + 18, first + 18, 7) == 0);
+				CHECK(record[0] == 33 + record[32] +
+				    (record[32] % 2 == 0));
+			}
+			CHECK(extent == next_extent);
+			next_extent += ((uint64_t)length + BLOCK - 1) / BLOCK;
+			section++;
+		}
+		at += record[0];
+	}
+	CHECK(section == 3);
+}
+
 /* A file above 4 GiB is refused at levels 1 and 2 and written at level 3
  * as sections of 0xfffff800 bytes and a final one with the rest; a file
  * of 2^32 - 1 bytes is one section at every level. The level 3 image is
@@ -2034,6 +2100,8 @@ test_large_file(void)
 	CHECK(fsimg_io_from_callbacks(fixture.ctx, &ops, &sink, &io, NULL) ==
 	    FSIMG_OK);
 	CHECK(fsimg_writer_emit(fixture.writer, io, NULL) == FSIMG_OK);
+	check_large_sections(&sink, 0);
+	check_large_sections(&sink, 1);
 
 	for (size_t v = 0; v < sizeof(views) / sizeof(views[0]); v++) {
 		fsimg_read_options_init(&read_options);
@@ -2250,6 +2318,123 @@ test_times(void)
 	free(sink.bytes);
 }
 
+/* Both path tables span several blocks, including records split across
+ * block boundaries; the independent checker walks their exact byte sizes.
+ */
+static void
+test_multiblock_path_tables(void)
+{
+	char names[256][16];
+	spec_t specs[256];
+	fsimg_write_options_t options;
+	memory_sink_t sink;
+	chk_t c;
+
+	for (unsigned i = 0; i < 256; i++) {
+		snprintf(names[i], sizeof(names[i]), "/DIR%04u", i);
+		specs[i] = (spec_t){ names[i], FSIMG_ENTRY_DIRECTORY,
+		    0, 0, NULL, NULL };
+	}
+	reproducible_options(&options);
+	build_checked(&options, specs, 256, false, &sink, &c);
+	CHECK(c.path_bytes[0] > BLOCK && c.path_bytes[1] > BLOCK);
+	CHECK(c.dir_count[0] == 257 && c.dir_count[1] == 257);
+	chk_free(&c);
+	free(sink.bytes);
+}
+
+/* Each BMP character occupies one primary character and one Joliet unit. */
+static void
+test_unicode_label(void)
+{
+	fsimg_write_options_t options;
+	memory_sink_t sink;
+	chk_t c;
+
+	reproducible_options(&options);
+	options.label = "caf\xc3\xa9-\xe6\x97\xa5";
+	build_checked(&options, tree, 0, false, &sink, &c);
+	CHECK(bcmp(sink.bytes + 16 * BLOCK + 40, "CAF___", 6) == 0);
+	chk_free(&c);
+	free(sink.bytes);
+}
+
+/* Path-table directory numbers include the root and fit in 16 bits. */
+static void
+test_directory_count_limit(void)
+{
+	fsimg_write_options_t options;
+	const fsimg_plan_t *plan;
+	fixture_t fixture;
+	char path[16];
+	spec_t directory = { path, FSIMG_ENTRY_DIRECTORY, 0, 0, NULL, NULL };
+
+	reproducible_options(&options);
+	for (unsigned count = 65534; count <= 65535; count++) {
+		fixture_open(&fixture, &options);
+		for (unsigned i = 0; i < count; i++) {
+			snprintf(path, sizeof(path), "/D%05u", i);
+			CHECK(add_one(&fixture, &directory) == FSIMG_OK);
+		}
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) ==
+		    (count == 65534 ? FSIMG_OK : FSIMG_EUNSUPPORTED));
+		fixture_close(&fixture);
+	}
+}
+
+/* A row read from scratch must bound a file before section arithmetic. */
+static void
+test_corrupt_plan_size(void)
+{
+	static const spec_t file = {
+		"/file", FSIMG_ENTRY_FILE, 1, 1, NULL, NULL
+	};
+	fsimg_write_options_t options;
+	const fsimg_plan_t *base;
+	unsigned char raw[ISO_ROW_BYTES];
+	iso_plan_t *plan;
+	iso_row_t row;
+	fixture_t fixture;
+
+	reproducible_options(&options);
+	fixture_open(&fixture, &options);
+	CHECK(add_one(&fixture, &file) == FSIMG_OK);
+	CHECK(fsimg_writer_plan(fixture.writer, &base, NULL) == FSIMG_OK);
+	plan = (iso_plan_t *)base;
+	CHECK(fsimg_array_get(plan->rows, 1, raw, NULL) == FSIMG_OK);
+	memset(raw, 0xff, 8);
+	CHECK(fsimg_array_set(plan->rows, 1, raw, NULL) == FSIMG_OK);
+	CHECK(iso_row_get(plan, 1, &row, NULL) == FSIMG_ECORRUPT);
+	fixture_close(&fixture);
+}
+
+/* A continuation position must be checked before next-fit rounding can
+ * wrap it back into an apparently valid region.
+ */
+static void
+test_corrupt_continuation_position(void)
+{
+	fsimg_write_options_t options;
+	const fsimg_plan_t *base;
+	fsimg_error_t error;
+	iso_plan_t *plan;
+	iso_row_t root;
+	memory_sink_t sink;
+	fixture_t fixture;
+
+	reproducible_options(&options);
+	fixture_open(&fixture, &options);
+	CHECK(fsimg_writer_plan(fixture.writer, &base, NULL) == FSIMG_OK);
+	plan = (iso_plan_t *)base;
+	CHECK(iso_row_get(plan, 0, &root, NULL) == FSIMG_OK);
+	CHECK(root.fragments != 0);
+	root.fragment_position = UINT64_MAX - 3;
+	CHECK(iso_row_set(plan, 0, &root, NULL) == FSIMG_OK);
+	CHECK(emit_memory(&fixture, &sink, &error) == FSIMG_ECORRUPT);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
 /* An empty catalog: the root alone in both hierarchies. */
 static void
 test_empty(void)
@@ -2446,6 +2631,11 @@ main(int argc, char **argv)
 		    strcmp(argv[4], "short") == 0));
 	CHECK(argc == 1);
 	RUN(test_validation);
+	RUN(test_corrupt_plan_size);
+	RUN(test_corrupt_continuation_position);
+	RUN(test_multiblock_path_tables);
+	RUN(test_unicode_label);
+	RUN(test_directory_count_limit);
 	RUN(test_empty);
 	RUN(test_relocation_refused);
 	RUN(test_tree);

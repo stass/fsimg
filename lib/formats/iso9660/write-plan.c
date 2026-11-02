@@ -216,7 +216,8 @@ iso_row_get(iso_plan_t *plan, uint64_t id, iso_row_t *row,
 	bcopy(raw + 120, row->modified, ISO_DATE7_BYTES);
 	bcopy(raw + 127, row->accessed, ISO_DATE7_BYTES);
 	bcopy(raw + 134, row->changed, ISO_DATE7_BYTES);
-	if (row->fragments > ISO_FRAGMENTS_MAX)
+	if (row->size > ISO_VOLUME_BLOCKS_MAX * ISO_BLOCK_BYTES ||
+	    row->fragments > ISO_FRAGMENTS_MAX)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_WRITER, "ISO 9660 plan row is outside its limits"));
 	return (FSIMG_OK);

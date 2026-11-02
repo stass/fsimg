@@ -253,6 +253,7 @@ split_entries(directory_out_t *out, size_t length, const iso_row_t *row,
 	iso_plan_t *plan = out->plan;
 	iso_split_t split;
 	uint64_t positions[ISO_FRAGMENTS_MAX];
+	uint64_t region_bytes;
 	size_t at;
 	fsimg_status_t status;
 
@@ -271,16 +272,26 @@ split_entries(directory_out_t *out, size_t length, const iso_row_t *row,
 			    FSIMG_OP_WRITER, "ISO 9660 Rock Ridge entries "
 			    "disagree with their plan"));
 	}
+	/* Bound the stored position before assembly rounds it to a block.
+	 * A position read from corrupt scratch must not wrap during packing.
+	 */
+	region_bytes = (uint64_t)plan->continuation_blocks * ISO_BLOCK_BYTES;
+	if (split.fragments != 0 && row->fragment_position >= region_bytes)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_WRITER, "ISO 9660 continuation position "
+		    "lies outside its region"));
 	iso_susp_assemble(plan->entries, &split, plan->continuation_block,
 	    row->fragment_position, system_use, plan->fragments, positions);
 	*system_use_length = split.record_bytes;
-	at = 0;
 	for (unsigned i = 0; i < split.fragments; i++) {
-		if (positions[i] + split.fragment_bytes[i] >
-		    (uint64_t)plan->continuation_blocks * ISO_BLOCK_BYTES)
+		if (positions[i] > region_bytes ||
+		    split.fragment_bytes[i] > region_bytes - positions[i])
 			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 			    FSIMG_OP_WRITER, "ISO 9660 continuation fragment "
 			    "lies outside its region"));
+	}
+	at = 0;
+	for (unsigned i = 0; i < split.fragments; i++) {
 		status = fsimg_emit_write(out->emit,
 		    (uint64_t)plan->continuation_block * ISO_BLOCK_BYTES +
 		    positions[i], plan->fragments + at,
