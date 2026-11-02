@@ -52,7 +52,7 @@ static void test_image_faults(image_t *image);
 static void test_faults(void);
 static void test_exclusivity(void);
 static void test_smallest_volume(void);
-static void permutations(const unsigned char templates[6][BLOCK],
+static void permutations(unsigned char templates[6][BLOCK],
     unsigned *order,
     unsigned used, unsigned depth);
 static void test_descriptor_permutations(void);
@@ -1096,7 +1096,7 @@ test_smallest_volume(void)
 }
 
 static void
-permutations(const unsigned char templates[6][BLOCK], unsigned *order,
+permutations(unsigned char templates[6][BLOCK], unsigned *order,
     unsigned used, unsigned depth)
 {
 	image_t image;

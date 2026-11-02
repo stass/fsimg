@@ -293,7 +293,7 @@ claims_sweep(fsimg_session_t *session, fsimg_stream_t *claims,
     uint64_t *allocated, fsimg_error_t *error)
 {
 	unsigned char raw[CLAIM_BYTES];
-	claim_t claim, metadata;
+	claim_t claim = { 0 }, metadata;
 	uint64_t cursor, data_end, covered, first, last;
 	size_t length;
 	bool open, have_metadata;
