@@ -247,7 +247,8 @@ run_add(const fsimg_iso9660_reader_t *iso, iso_run_t *run,
  * carries CL or RE, and the second carries PL exactly when the directory
  * is relocated: its PL then names parent, and its extent the relocation
  * directory, which only full verification checks against the RE record
- * there.
+ * there. The two records are checked as a pair: a refusal in either is
+ * reported only once both have passed their checks.
  */
 static fsimg_status_t
 dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
@@ -257,6 +258,7 @@ dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
 	const unsigned char *raw;
 	iso_record_t record;
 	iso_rr_t rr;
+	const char *refusal = NULL;
 	fsimg_status_t status;
 
 	for (unsigned dot = 0; dot < 2; dot++) {
@@ -285,19 +287,29 @@ dots_check(fsimg_reader_t *reader, iso_cursor_t *cursor, uint32_t length,
 			if (status != FSIMG_OK)
 				return (status);
 		}
-		if (dot == 0)
-			continue;
-		if (relocated && ((rr.entries & RR_PL) == 0 ||
-		    rr.parent != parent))
-			return (iso_corrupt(error, "Rock Ridge relocated "
-			    "directory's PL does not name its parent"));
-		if (!relocated && (rr.entries & RR_PL) != 0)
-			return (iso_corrupt(error, "Rock Ridge PL on a "
-			    "directory not reached through CL"));
-		if (!relocated && record.extent != parent)
-			return (iso_corrupt(error, "ISO 9660 directory's parent "
-			    "record does not name its parent"));
+		if (dot == 1) {
+			/* The parent record's relocation rules. */
+			if (relocated && ((rr.entries & RR_PL) == 0 ||
+			    rr.parent != parent))
+				return (iso_corrupt(error, "Rock Ridge "
+				    "relocated directory's PL does not name "
+				    "its parent"));
+			if (!relocated && (rr.entries & RR_PL) != 0)
+				return (iso_corrupt(error, "Rock Ridge PL on a "
+				    "directory not reached through CL"));
+			if (!relocated && record.extent != parent)
+				return (iso_corrupt(error, "ISO 9660 "
+				    "directory's parent record does not name "
+				    "its parent"));
+		}
+		if (refusal == NULL)
+			refusal = rr.refusal;
 	}
+	/* Both records have passed every check; only now is a refusal
+	 * reported.
+	 */
+	if (refusal != NULL)
+		return (iso_unsupported(error, refusal));
 	return (FSIMG_OK);
 }
 
@@ -453,9 +465,12 @@ run_name(const fsimg_iso9660_reader_t *iso, const iso_run_t *run, char *out,
 	    (run->first.flags & ISO_FLAG_DIRECTORY) != 0, out, length, error));
 }
 
-/* Admit a complete run under its displayed name. A Rock Ridge record
- * carrying RE is not an entry: its directory is reached through its
- * placeholder. A placeholder opens the directory its CL names.
+/* Admit a complete run under its displayed name, the step that finishes
+ * an entry's preparation: a refusal its first record's stream noted is
+ * reported here, after every check of the run and, for a placeholder, of
+ * the directory it opens. A Rock Ridge record carrying RE is not an
+ * entry: its directory is reached through its placeholder. A placeholder
+ * opens the directory its CL names.
  */
 static fsimg_status_t
 run_admit(fsimg_reader_t *reader, fsimg_directory_build_t *build,
@@ -468,7 +483,7 @@ run_admit(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 	fsimg_status_t status;
 
 	if ((run->rr.entries & RR_RE) != 0)
-		return (FSIMG_OK);
+		return (iso_rr_refusal(&run->rr, error));
 	bzero(&payload, sizeof(payload));
 	payload.kind = run->kind;
 	status = run_name(iso_state(reader), run, name, &length, error);
@@ -493,6 +508,9 @@ run_admit(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 		payload.opened_extent = run->first.extent;
 		payload.opened_length = run->first.data_length;
 	}
+	status = iso_rr_refusal(&run->rr, error);
+	if (status != FSIMG_OK)
+		return (status);
 	payload_encode(&payload, raw);
 	return (fsimg_directory_admit(build, name, raw, sizeof(raw), error));
 }
@@ -631,8 +649,11 @@ run_reread(fsimg_reader_t *reader, const iso_payload_t *payload,
 /* Make a replayed child current. Its payload came from scratch storage, so
  * the run is read again from the directory and must agree with it: the
  * same kind, section count, displayed name and relocation, and for a
- * directory the directory it opens. That the payload's directory is the
- * one being listed is taken from the walker's private scratch, which
+ * directory the directory it opens. A record the profile refuses has no
+ * kind (rr_kind()), so it fails that agreement: preparation admitted none,
+ * and one found here means the image changed. That the payload's
+ * directory is the one being listed is taken from the walker's private
+ * scratch, which
  * preparation wrote; whatever it names, every read stays within the
  * volume. A regular file's sections become the content index, and a
  * symbolic link's decoded target its content; a directory or FIFO has no

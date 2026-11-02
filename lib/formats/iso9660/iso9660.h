@@ -208,8 +208,11 @@ typedef struct iso_susp {
  * valid bit. name holds name_length bytes and a NUL, and target holds
  * target_length bytes, both assembled only for a record that is not a dot
  * record. child and parent are the CL and PL blocks. refusal names what
- * the profile refuses, reported after every corruption check. kind is the
- * entry's kind, valid only when decoding succeeded.
+ * the profile refuses (always FSIMG_EUNSUPPORTED); decoding does not
+ * report it, iso_rr_refusal() does once the caller's own checks have
+ * passed. A SUSP profile limit is the exception: it ends decoding and is
+ * reported at once. kind is the entry's kind, valid only when decoding succeeded
+ * and nothing was refused; a refused record has kind 0, which is no kind.
  */
 #define RR_PX	0x001u
 #define RR_PN	0x002u
@@ -347,6 +350,7 @@ fsimg_status_t iso_handshake(fsimg_reader_t *, fsimg_error_t *);
 fsimg_status_t iso_rr_decode(fsimg_reader_t *, const unsigned char *,
     uint32_t, uint32_t, const iso_record_t *, iso_rr_role_t, iso_rr_t *,
     fsimg_error_t *);
+fsimg_status_t iso_rr_refusal(const iso_rr_t *, fsimg_error_t *);
 
 /* names.c: identifier checks, displayed names and namespace keys. A
  * displayed-name buffer holds ISO_NAME_MAX bytes and a NUL, a label buffer

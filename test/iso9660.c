@@ -709,7 +709,8 @@ test_tree(void)
 		bzero(p, BLOCK);
 		directory(p, block, depth == 0 ? ROOT : block - 1, BLOCK);
 		if (depth < 11)
-			record(p + DOT_PAIR_BYTES, "DIR", 3, block + 1, BLOCK, 2);
+			record(p + DOT_PAIR_BYTES, "DIR", 3, block + 1,
+			    BLOCK, 2);
 		else
 			record(p + DOT_PAIR_BYTES, "A.TXT;1", 7, DATA, 5, 0);
 	}
@@ -1238,7 +1239,7 @@ test_image_faults(image_t *image)
 		    "truncation at each block boundary");
 	}
 	image->length = BLOCKS * BLOCK;
-	/* Sweep every cancellation checkpoint in open, then in open and walk. */
+	/* Sweep cancellation checkpoints in open, then in open and walk. */
 	for (unsigned operation = 0; operation < 2; operation++) {
 		for (remaining = 0;; remaining++) {
 			unsigned budget = remaining;
@@ -1888,9 +1889,11 @@ test_boot_catalog_capacity(void)
 	boot_info(&image, "62 boot entries fill catalog",
 	    BOOT_CATALOG, 62, 1, 61);
 	boot_le16(catalog + 66, 62);
-	expect_open(&image, FSIMG_EUNSUPPORTED, "62 section entries exceed catalog");
+	expect_open(&image, FSIMG_EUNSUPPORTED,
+	    "62 section entries exceed catalog");
 	boot_header(catalog + 64, 0x90, 0xef, 61);
-	expect_open(&image, FSIMG_EUNSUPPORTED, "further header exceeds catalog");
+	expect_open(&image, FSIMG_EUNSUPPORTED,
+	    "further header exceeds catalog");
 	free(image.bytes);
 }
 
@@ -2263,17 +2266,21 @@ rr_dot_image(const susp_area_t *dot, bool root, bool parent)
 
 		p = image.bytes + extent * BLOCK;
 		bzero(p, BLOCK);
-		for (unsigned char identifier = 0; identifier < 2; identifier++) {
+		for (unsigned char identifier = 0; identifier < 2;
+		    identifier++) {
 			bzero(&area, sizeof(area));
 			if (level == 0 && identifier == 0) {
-				unsigned char *sp = susp_entry(&area, "SP", SP_BYTES);
+				unsigned char *sp;
 
+				sp = susp_entry(&area, "SP", SP_BYTES);
 				sp[4] = 0xbe;
 				sp[5] = 0xef;
 				susp_er(&area, "RRIP_1991A", 1);
 			}
-			if (root == (level == 0) && parent == (identifier == 1)) {
-				bcopy(dot->bytes, area.bytes + area.length, dot->length);
+			if (root == (level == 0) &&
+			    parent == (identifier == 1)) {
+				bcopy(dot->bytes, area.bytes + area.length,
+				    dot->length);
 				area.length += dot->length;
 			}
 			length = record(p, &identifier, 1,
@@ -2885,7 +2892,8 @@ test_rr_link_components(void)
 		    FSIMG_EUNSUPPORTED },
 		{ "SL host continued refused", NULL, "b", 0x21, 0,
 		    FSIMG_EUNSUPPORTED },
-		{ "SL current plus parent", NULL, "b", 0x06, 0, FSIMG_ECORRUPT },
+		{ "SL current plus parent", NULL, "b", 0x06, 0,
+		    FSIMG_ECORRUPT },
 		{ "SL current plus root", NULL, "b", 0x0a, 0, FSIMG_ECORRUPT },
 		{ "SL parent plus root", NULL, "b", 0x0c, 0, FSIMG_ECORRUPT },
 		{ "SL volume root parent current", NULL, "b", 0x16, 0,
@@ -3348,36 +3356,102 @@ rr_relocated_chain(unsigned depth, bool several)
 	free(image.bytes);
 }
 
+/* A zero PL omits it; controls and refusal rows share the same PX. */
+static void
+rr_parent_stream(susp_area_t *area, unsigned parent, const char *refusal)
+{
+	bzero(area, sizeof(*area));
+	susp_px(area, 0040755, PX_BYTES);
+	if (parent != 0)
+		put32(susp_entry(area, "PL", LINK_BYTES) + 4, parent);
+	if (refusal != NULL)
+		susp_entry(area, refusal, 4);
+}
+
 static void
 test_rr_relocation(void)
 {
 	enum setup {
 		DOT_FLAG_CLEAR, MISSING_PL, WRONG_PL, ORDINARY_PL, ROOT_CL,
-		ALIAS, LOOP, VALID, PRIMARY, DUPLICATE_CL, CL_RE
+		ALIAS, LOOP, VALID, PRIMARY, DUPLICATE_CL, CL_RE, RE_REFUSED,
+		SEVERAL
 	};
 	static const struct {
 		const char *label;
 		enum setup setup;
 		fsimg_status_t expected;
+		const char *placeholder_refusal, *parent_refusal, *dot_refusal;
 	} rows[] = {
-		{ "CL target dot flag clear", DOT_FLAG_CLEAR, FSIMG_ECORRUPT },
-		{ "CL missing PL", MISSING_PL, FSIMG_ECORRUPT },
-		{ "PL wrong parent", WRONG_PL, FSIMG_ECORRUPT },
-		{ "PL ordinary directory", ORDINARY_PL, FSIMG_ECORRUPT },
-		{ "CL root", ROOT_CL, FSIMG_ECORRUPT },
-		{ "CL and ordinary alias", ALIAS, FSIMG_ECORRUPT },
-		{ "relocation loop", LOOP, FSIMG_ECORRUPT },
-		{ "CL placeholder valid", VALID, FSIMG_OK },
-		{ "primary placeholder", PRIMARY, FSIMG_OK },
-		{ "duplicate CL on valid placeholder", DUPLICATE_CL,
-		    FSIMG_ECORRUPT },
-		{ "CL and RE on directory PX placeholder", CL_RE,
-		    FSIMG_ECORRUPT }
+		{ .label = "CL target dot flag clear",
+		    .setup = DOT_FLAG_CLEAR,
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "CL missing PL",
+		    .setup = MISSING_PL,
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "PL wrong parent",
+		    .setup = WRONG_PL,
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "PL ordinary directory",
+		    .setup = ORDINARY_PL,
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "CL root",
+		    .setup = ROOT_CL,
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "CL and ordinary alias",
+		    .setup = ALIAS,
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "relocation loop",
+		    .setup = LOOP,
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "CL placeholder valid",
+		    .setup = VALID,
+		    .expected = FSIMG_OK },
+		{ .label = "primary placeholder",
+		    .setup = PRIMARY,
+		    .expected = FSIMG_OK },
+		{ .label = "duplicate CL on valid placeholder",
+		    .setup = DUPLICATE_CL,
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "CL and RE on directory PX placeholder",
+		    .setup = CL_RE,
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "PL wrong parent with ZF",
+		    .setup = WRONG_PL,
+		    .expected = FSIMG_ECORRUPT,
+		    .parent_refusal = "ZF" },
+		{ .label = "PL wrong parent with SF",
+		    .setup = WRONG_PL,
+		    .expected = FSIMG_ECORRUPT,
+		    .parent_refusal = "SF" },
+		{ .label = "CL missing PL with parent ZF",
+		    .setup = MISSING_PL,
+		    .expected = FSIMG_ECORRUPT,
+		    .parent_refusal = "ZF" },
+		{ .label = "ZF placeholder target missing PL",
+		    .setup = MISSING_PL,
+		    .expected = FSIMG_ECORRUPT,
+		    .placeholder_refusal = "ZF" },
+		{ .label = "ZF placeholder valid target",
+		    .setup = VALID,
+		    .expected = FSIMG_EUNSUPPORTED,
+		    .placeholder_refusal = "ZF" },
+		{ .label = "ZF on skipped RE directory",
+		    .setup = RE_REFUSED,
+		    .expected = FSIMG_EUNSUPPORTED,
+		    .placeholder_refusal = "ZF" },
+		{ .label = "CL missing PL with dot ZF", .setup = MISSING_PL,
+		    .expected = FSIMG_ECORRUPT, .dot_refusal = "ZF" },
+		{ .label = "valid PL with parent ZF", .setup = VALID,
+		    .expected = FSIMG_EUNSUPPORTED, .parent_refusal = "ZF" },
+		{ .label = "ZF placeholder has several sections",
+		    .setup = SEVERAL, .expected = FSIMG_ECORRUPT,
+		    .placeholder_refusal = "ZF" }
 	};
-	susp_area_t area, parent_link;
+	susp_area_t area, parent_link, dot;
 	image_t image;
 	unsigned char *root, *p;
 	size_t length;
+	unsigned parent;
 	fixture_t f;
 	const fsimg_entry_t *entry;
 
@@ -3388,23 +3462,54 @@ test_rr_relocation(void)
 	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
 		bzero(&area, sizeof(area));
 		susp_px(&area, 0040755, 36);
-		put32(susp_entry(&area, "CL", 12) + 4, 85);
+		if (rows[i].setup == RE_REFUSED)
+			susp_entry(&area, "RE", 4);
+		else
+			put32(susp_entry(&area, "CL", 12) + 4, 85);
+		if (rows[i].placeholder_refusal != NULL)
+			susp_entry(&area, rows[i].placeholder_refusal, 4);
 		image = rr_image(&area, 0);
 		root = image.bytes + ROOT * BLOCK;
 		p = root + RR_CHILD;
-		put32(p + DR_SIZE, 0);
-		put32(p + DR_EXTENT, MKISOFS_PLACEHOLDER);
+		if (rows[i].setup == RE_REFUSED) {
+			put32(p + DR_EXTENT, RR_DIRECTORY);
+			put32(p + DR_SIZE, BLOCK);
+			p[DR_FLAGS] = 2;
+		} else {
+			put32(p + DR_SIZE, 0);
+			put32(p + DR_EXTENT, MKISOFS_PLACEHOLDER);
+		}
 		p = image.bytes + 85 * BLOCK;
 		directory(p, 85, ROOT, BLOCK);
-		bzero(&parent_link, sizeof(parent_link));
-		put32(susp_entry(&parent_link, "PL", 12) + 4, ROOT);
-		bcopy(parent_link.bytes, p + DOT_PAIR_BYTES, 12);
-		p[DOT_BYTES] += 12;
+		if (rows[i].dot_refusal != NULL) {
+			bzero(&dot, sizeof(dot));
+			susp_px(&dot, 0040755, PX_BYTES);
+			susp_entry(&dot, rows[i].dot_refusal, 4);
+			bcopy(dot.bytes, p + DOT_BYTES, dot.length);
+			p[0] += dot.length;
+		}
+		parent = ROOT;
+		if (rows[i].setup == MISSING_PL)
+			parent = 0;
+		else if (rows[i].setup == WRONG_PL)
+			parent = RR_DIRECTORY + 1;
+		rr_parent_stream(&parent_link, parent, rows[i].parent_refusal);
+		length = record(p + p[0], "\1", 1, ROOT, BLOCK, 2);
+		bcopy(parent_link.bytes, p + p[0] + length,
+		    parent_link.length);
+		p[p[0]] = length + parent_link.length;
 		switch (rows[i].setup) {
 		case DOT_FLAG_CLEAR: p[DR_FLAGS] = 0; break;
-		case MISSING_PL: bzero(p + DOT_PAIR_BYTES, 12); break;
-		case WRONG_PL:
-			put32(p + DOT_PAIR_BYTES + SUSP_PAYLOAD, 86);
+		case MISSING_PL: break;
+		case WRONG_PL: break;
+		case SEVERAL:
+			p = root + RR_CHILD;
+			put32(p + DR_EXTENT, DATA);
+			put32(p + DR_SIZE, BLOCK);
+			p[DR_FLAGS] = 0x80;
+			/* Complete the same run with non-overlapping file data. */
+			record(p + p[0], p + DR_NAME, p[DR_NAME_SIZE],
+			    DATA + 1, 5, 0);
 			break;
 		case ORDINARY_PL: /* PL on an ordinary directory. */
 			bzero(image.bytes + RR_AREA * BLOCK + PX_BYTES, 12);
@@ -3420,16 +3525,20 @@ test_rr_relocation(void)
 			record(root + RR_CHILD + root[RR_CHILD], "B", 1, 85,
 			    BLOCK, 2);
 			break;
-		case LOOP:
+		case LOOP: {
 			/* CL returns to its own directory; PL mismatches. */
-			length = record(p + RELOCATED_CHILD, "LOOP", 4,
+			size_t child_offset = p[0] + p[p[0]];
+
+			length = record(p + child_offset, "LOOP", 4,
 			    MKISOFS_PLACEHOLDER, 0, 0);
-			bcopy(area.bytes, p + RELOCATED_CHILD + length,
+			bcopy(area.bytes, p + child_offset + length,
 			    area.length);
-			p[RELOCATED_CHILD] += area.length;
+			p[child_offset] += area.length;
 			break;
+		}
 		case VALID: break;
 		case PRIMARY: break;
+		case RE_REFUSED: break;
 		case DUPLICATE_CL:
 		case CL_RE:
 			/* Extend the independently checked VALID row. */
@@ -3487,7 +3596,7 @@ test_rr_dot_entries(void)
 		{ "directory PX control", NULL, 0040755, 0, FSIMG_OK, NULL },
 		{ "CL on dot", "CL", 0040755, 12, FSIMG_ECORRUPT, NULL },
 		{ "RE on dot", "RE", 0040755, 4, FSIMG_ECORRUPT, NULL },
-		{ "PL on first dot", "PL", 0040755, 12, FSIMG_ECORRUPT,
+		{ "PL on non-relocated dot", "PL", 0040755, 12, FSIMG_ECORRUPT,
 		    NULL },
 		{ "regular PX", NULL, 0100644, 0, FSIMG_ECORRUPT, NULL },
 		{ "PN on directory", "PN", 0040755, 20, FSIMG_ECORRUPT,
@@ -3502,7 +3611,8 @@ test_rr_dot_entries(void)
 		    FSIMG_ECORRUPT, NULL },
 		{ "ZF then CL", "CL", 0040755, 12, FSIMG_ECORRUPT, "ZF" },
 		{ "SF then RE", "RE", 0040755, 4, FSIMG_ECORRUPT, "SF" },
-		{ "ZF then PL", "PL", 0040755, 12, FSIMG_ECORRUPT, "ZF" }
+		{ "ZF then PL", "PL", 0040755, 12, FSIMG_ECORRUPT, "ZF" },
+		{ "SF then PL", "PL", 0040755, 12, FSIMG_ECORRUPT, "SF" }
 	};
 	static const struct {
 		const char *label;
@@ -3512,6 +3622,19 @@ test_rr_dot_entries(void)
 		{ "root parent", true, true },
 		{ "subdirectory dot", false, false },
 		{ "subdirectory parent", false, true }
+	};
+	static const struct {
+		const char *label;
+		bool root, cross_block;
+		fsimg_status_t expected;
+	} pairs[] = {
+		{ .label = "subdirectory dot ZF before forbidden parent PL",
+		    .expected = FSIMG_ECORRUPT },
+		{ .label = "root dot ZF before forbidden parent PL",
+		    .root = true, .expected = FSIMG_ECORRUPT },
+		{ .label = "documented exception: parent CE crosses block "
+		    "before forbidden PL check", .cross_block = true,
+		    .expected = FSIMG_EUNSUPPORTED }
 	};
 	susp_area_t area = {0}, dot;
 	char label[96];
@@ -3549,10 +3672,6 @@ test_rr_dot_entries(void)
 		susp_px(&dot, checks[i].mode, PX_BYTES);
 		for (unsigned j = 0;
 		    j < sizeof(positions) / sizeof(positions[0]); j++) {
-			if (checks[i].signature != NULL &&
-			    strcmp(checks[i].signature, "PL") == 0 &&
-			    positions[j].parent)
-				continue;
 			image = rr_dot_image(&dot, positions[j].root,
 			    positions[j].parent);
 			snprintf(label, sizeof(label), "%s: %s",
@@ -3561,6 +3680,30 @@ test_rr_dot_entries(void)
 			    checks[i].expected, label);
 			free(image.bytes);
 		}
+	}
+	for (unsigned i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++) {
+		bzero(&dot, sizeof(dot));
+		if (!pairs[i].cross_block) {
+			susp_px(&dot, 0040755, PX_BYTES);
+			susp_entry(&dot, "ZF", 4);
+		}
+		image = rr_dot_image(&dot, pairs[i].root, false);
+		rr_parent_stream(&dot, ROOT, NULL);
+		if (pairs[i].cross_block)
+			susp_ce(&dot, RR_AREA, BLOCK - 2, 4);
+		p = image.bytes +
+		    (pairs[i].root ? ROOT : RR_DIRECTORY) * BLOCK;
+		p += p[0];
+		length = p[0];
+		/* Preserve the root's child after enlarging its '..'. */
+		if (pairs[i].root)
+			bcopy(p + length, p + length + dot.length,
+			    p[length]);
+		bcopy(dot.bytes, p + length, dot.length);
+		p[0] += dot.length;
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    pairs[i].expected, pairs[i].label);
+		free(image.bytes);
 	}
 }
 
@@ -3632,7 +3775,7 @@ test_rr_faults(void)
 	susp_px(&area, 0120777, PX_BYTES);
 	susp_sl(&area, 0x00, 0x00, "target", 6);
 	image = rr_image(&area, 0);
-	/* Locate the continuation callback independently of other read counts. */
+	/* Locate the continuation callback independently of other reads. */
 	fixture_new(&f, &image, NULL);
 	rr_status_equal(open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE), FSIMG_OK,
 	    "Rock Ridge fault fixture open");
@@ -3665,7 +3808,8 @@ test_rr_faults(void)
 	 * fixture_free checks that every failed prefix releases its resources.
 	 */
 	for (unsigned operation = 0;
-	    operation < sizeof(operations) / sizeof(operations[0]); operation++) {
+	    operation < sizeof(operations) / sizeof(operations[0]);
+	    operation++) {
 		for (unsigned n = 1;; n++) {
 			fixture_new(&f, &image, NULL);
 			status = open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE);
@@ -3673,19 +3817,24 @@ test_rr_faults(void)
 			    operations[operation].label);
 			fsimg_test_fail_alloc_after(f.ctx, n);
 			if (status == FSIMG_OK)
-				status = fsimg_reader_next(f.reader, &entry, NULL);
+				status = fsimg_reader_next(f.reader, &entry,
+				    NULL);
 			if (status == FSIMG_OK) {
 				rr_equal(entry->kind, FSIMG_ENTRY_SYMLINK,
 				    operations[operation].label);
 				if (operations[operation].read_target) {
-					status = fsimg_reader_read_at(f.reader, 0,
-					    buffer, sizeof(buffer), &count, NULL);
+					status = fsimg_reader_read_at(f.reader,
+					    0, buffer, sizeof(buffer), &count,
+					    NULL);
 					if (status == FSIMG_OK) {
-						rr_equal(count, 6,
-						    operations[operation].label);
+						const char *name;
+
+						name =
+						    operations[operation].label;
+						rr_equal(count, 6, name);
 						rr_equal(count == 6 &&
-						    bcmp(buffer, "target", 6) == 0, 1,
-						    operations[operation].label);
+						    bcmp(buffer, "target",
+						    6) == 0, 1, name);
 					}
 				}
 			}
@@ -3712,6 +3861,14 @@ test_rr_faults(void)
 static void
 test_rr_later_sections(void)
 {
+	static const struct {
+		const char *label;
+		unsigned flags;
+		fsimg_status_t expected;
+	} devices[] = {
+		{ "device PX missing last section", 0x80, FSIMG_ECORRUPT },
+		{ "device PX valid single section", 0, FSIMG_EUNSUPPORTED }
+	};
 	susp_area_t area = {0};
 	image_t image;
 	unsigned char *p;
@@ -3735,6 +3892,28 @@ test_rr_later_sections(void)
 	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
 	    "later section framing invalid");
 	free(image.bytes);
+	bzero(&area, sizeof(area));
+	susp_px(&area, 0100644, PX_BYTES);
+	susp_entry(&area, "ZF", 4);
+	image = rr_image(&area, 0);
+	p = image.bytes + ROOT * BLOCK + RR_CHILD;
+	p[DR_NAME] = '/';
+	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
+	    "ZF without NM with invalid primary identifier");
+	free(image.bytes);
+	/* A refused device's run must still be checked for completeness. */
+	for (unsigned i = 0; i < sizeof(devices) / sizeof(devices[0]); i++) {
+		bzero(&area, sizeof(area));
+		susp_px(&area, 0020600, PX_BYTES);
+		susp_entry(&area, "PN", 20);
+		image = rr_image(&area, devices[i].flags);
+		p = image.bytes + ROOT * BLOCK + RR_CHILD;
+		/* Whole blocks satisfy the size rule for non-final sections. */
+		put32(p + DR_SIZE, BLOCK);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    devices[i].expected, devices[i].label);
+		free(image.bytes);
+	}
 }
 
 static void

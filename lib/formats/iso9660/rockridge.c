@@ -14,11 +14,17 @@
  * which owns what it decodes: PX owner, mode and file type; TF times; the
  * name its NM entries assemble; the link target its SL entries assemble;
  * and the CL, PL and RE relocation pointers. Every length, version and
- * repetition is checked as the entry table states; what the profile
- * refuses (SF, ZF, a volume-root or host link component, a name or target
- * over 1024 bytes) is noted and reported only after every corruption
- * check, so corruption anywhere in the stream takes precedence. rr_kind() then runs the kind checks against
- * PX and the record's directory flag, and refuses or names the kind.
+ * repetition is checked as the entry table states. rr_kind() then runs
+ * the kind checks against PX and the record's directory flag. What the
+ * profile refuses (SF, ZF, a volume-root or host link component, a name
+ * or target over 1024 bytes, a device, a socket, an unknown type) is not
+ * returned from here: it is noted in iso_rr_t.refusal, the record is left
+ * without a kind, and the caller that finishes the record, after its own
+ * checks of the record in context, reports it through iso_rr_refusal().
+ * So corruption in the stream or in the record's context is reported
+ * before such a refusal. The one exception is a SUSP profile limit, which
+ * susp.c reports at once: the stream cannot be read past it, and every
+ * later check depends on what it holds.
  *
  * A name or target is assembled across entries: NM and SL entries carry a
  * continue flag, every one but the last of a record must carry it, and no
@@ -67,6 +73,16 @@ typedef struct rr_assembly {
 	bool		 name_long;	/* the name outgrew ISO_NAME_MAX */
 	bool		 target_long;	/* the target outgrew ISO_NAME_MAX */
 } rr_assembly_t;
+
+/* Note that the profile refuses rr's record; the first refusal noted is
+ * the one reported.
+ */
+static void
+rr_refuse(iso_rr_t *rr, const char *refusal)
+{
+	if (rr->refusal == NULL)
+		rr->refusal = refusal;
+}
 
 static bool
 entry_is(const iso_entry_t *entry, const char *signature)
@@ -188,7 +204,7 @@ name_append(iso_rr_t *rr, rr_assembly_t *assembly,
 		    "Rock Ridge name holds a NUL or a slash"));
 	if (assembly->name_long || length > ISO_NAME_MAX - rr->name_length) {
 		assembly->name_long = true;
-		rr->refusal = "Rock Ridge name is longer than 1024 bytes";
+		rr_refuse(rr, "Rock Ridge name is longer than 1024 bytes");
 		return (FSIMG_OK);
 	}
 	bcopy(bytes, rr->name + rr->name_length, length);
@@ -233,8 +249,8 @@ target_append(iso_rr_t *rr, rr_assembly_t *assembly, const void *bytes,
 	if (assembly->target_long ||
 	    length > ISO_NAME_MAX - rr->target_length) {
 		assembly->target_long = true;
-		rr->refusal =
-		    "Rock Ridge link target is longer than 1024 bytes";
+		rr_refuse(rr,
+		    "Rock Ridge link target is longer than 1024 bytes");
 		return;
 	}
 	bcopy(bytes, rr->target + rr->target_length, length);
@@ -267,8 +283,8 @@ component_append(iso_rr_t *rr, rr_assembly_t *assembly, unsigned flags,
 	 */
 	if (special == SL_VOLUME_ROOT || special == SL_HOST) {
 		assembly->component_refused = true;
-		rr->refusal = "Rock Ridge volume-root or host link components "
-		    "are unsupported";
+		rr_refuse(rr, "Rock Ridge volume-root or host link "
+		    "components are unsupported");
 		assembly->joining = (flags & RR_FLAG_CONTINUE) != 0;
 		return (FSIMG_OK);
 	}
@@ -390,11 +406,11 @@ entry_decode(const iso_entry_t *entry, bool dot, iso_rr_t *rr,
 		return (iso_corrupt(error,
 		    "Rock Ridge entry has an unknown version"));
 	if (entry_is(entry, "SF")) {
-		rr->refusal = "Rock Ridge sparse files are unsupported";
+		rr_refuse(rr, "Rock Ridge sparse files are unsupported");
 		return (FSIMG_OK);
 	}
 	if (entry_is(entry, "ZF")) {
-		rr->refusal = "zisofs compressed files are unsupported";
+		rr_refuse(rr, "zisofs compressed files are unsupported");
 		return (FSIMG_OK);
 	}
 	if (entry_is(entry, "PX")) {
@@ -432,23 +448,24 @@ entry_decode(const iso_entry_t *entry, bool dot, iso_rr_t *rr,
 	return (FSIMG_OK);
 }
 
-/* The kind of the entry whose record is record and whose stream decoded
- * into rr (specs/design-iso9660.md#kinds-and-metadata). First the
- * corruption checks, on the PX type or, without PX, the type the
- * directory flag implies: a placeholder carrying CL is a directory and
- * carries no RE; otherwise the type is a directory exactly when the flag
- * is set, RE marks only a directory, SL belongs to a symbolic link and PN
- * to a device. Then the refusals: an entry the stream refused, a device or
- * socket, and a type outside the seven POSIX types.
+/* Set rr->kind for the record whose stream decoded into rr
+ * (specs/design-iso9660.md#kinds-and-metadata). The corruption checks run
+ * on the PX type or, without PX, the type the directory flag implies: a
+ * placeholder carrying CL is a directory and carries no RE; otherwise the
+ * type is a directory exactly when the flag is set, RE marks only a
+ * directory, SL belongs to a symbolic link and PN to a device. A device,
+ * a socket and a type outside the seven POSIX types are noted as
+ * refusals. A record with any refusal is then left without a kind (0, no
+ * fsimg_entry_kind_t), so an entry whose refusal went unreported would
+ * fail admission, its payload decoding as invalid, rather than be admitted.
  */
 static fsimg_status_t
-rr_kind(const iso_rr_t *rr, const iso_record_t *record,
-    fsimg_entry_kind_t *kind, fsimg_error_t *error)
+rr_kind(iso_rr_t *rr, const iso_record_t *record, fsimg_error_t *error)
 {
 	bool flagged = (record->flags & ISO_FLAG_DIRECTORY) != 0;
 	uint32_t type;
 
-	*kind = FSIMG_ENTRY_FILE;
+	rr->kind = FSIMG_ENTRY_FILE;
 	if ((rr->entries & RR_PX) != 0)
 		type = rr->type;
 	else
@@ -473,39 +490,55 @@ rr_kind(const iso_rr_t *rr, const iso_record_t *record,
 		return (iso_corrupt(error,
 		    "Rock Ridge PN entry on an entry that is not a device"));
 
-	if (rr->refusal != NULL)
-		return (iso_unsupported(error, rr->refusal));
 	switch (type) {
 	case RR_TYPE_FILE:
-		*kind = FSIMG_ENTRY_FILE;
-		return (FSIMG_OK);
+		break;
 	case RR_TYPE_DIRECTORY:
-		*kind = FSIMG_ENTRY_DIRECTORY;
-		return (FSIMG_OK);
+		rr->kind = FSIMG_ENTRY_DIRECTORY;
+		break;
 	case RR_TYPE_LINK:
-		*kind = FSIMG_ENTRY_SYMLINK;
-		return (FSIMG_OK);
+		rr->kind = FSIMG_ENTRY_SYMLINK;
+		break;
 	case RR_TYPE_FIFO:
-		*kind = FSIMG_ENTRY_FIFO;
-		return (FSIMG_OK);
+		rr->kind = FSIMG_ENTRY_FIFO;
+		break;
 	case RR_TYPE_CHARACTER:
 	case RR_TYPE_BLOCK:
 	case RR_TYPE_SOCKET:
-		return (iso_unsupported(error,
-		    "Rock Ridge devices and sockets are unsupported"));
+		rr_refuse(rr, "Rock Ridge devices and sockets are unsupported");
+		break;
 	default:
-		return (iso_unsupported(error,
-		    "Rock Ridge file type is unsupported"));
+		rr_refuse(rr, "Rock Ridge file type is unsupported");
+		break;
 	}
+	if (rr->refusal != NULL)
+		rr->kind = (fsimg_entry_kind_t)0;
+	return (FSIMG_OK);
+}
+
+/* Report what decoding rr noted as refused, FSIMG_EUNSUPPORTED, or
+ * FSIMG_OK when nothing was. A caller calls it once the record has passed
+ * every check of its own.
+ */
+fsimg_status_t
+iso_rr_refusal(const iso_rr_t *rr, fsimg_error_t *error)
+{
+	if (rr->refusal == NULL)
+		return (FSIMG_OK);
+	return (iso_unsupported(error, rr->refusal));
 }
 
 /* Decode the SUSP stream of record, in role, into rr and derive rr->kind.
  * raw holds the decoded record, which lies at offset of volume block
  * number block. This is the only interpreting decoder of a stream, so no
- * caller can skip the kind checks or the refusals. A dot record's stream
- * takes every check but the interpretation of its NM and SL entries,
- * which are framed and not assembled, and carries no CL or RE, nor PL on
- * the first dot record. An entry's name is not empty, "." or "..", its
+ * caller can skip the kind checks. Besides a SUSP profile limit it
+ * returns only corruption, I/O and resource failures; a refusal stays in
+ * rr->refusal for iso_rr_refusal(). An entry cannot skip that call
+ * unnoticed, having no kind; a dot record yields no entry, so dots_check()
+ * is the one that reports its refusal. A dot record's stream takes every
+ * check but the interpretation of its NM and SL entries, which are
+ * framed and not assembled, and carries no CL or RE, nor PL on the first
+ * dot record. An entry's name is not empty, "." or "..", its
  * target is not empty unless a refused component was dropped from it, and
  * neither ends on a continue flag; the name is NUL-terminated.
  */
@@ -548,5 +581,5 @@ iso_rr_decode(fsimg_reader_t *reader, const unsigned char *raw,
 	    (role == ISO_RR_SELF && (rr->entries & RR_PL) != 0)))
 		return (iso_corrupt(error,
 		    "Rock Ridge relocation entry on a dot record"));
-	return (rr_kind(rr, record, &rr->kind, error));
+	return (rr_kind(rr, record, error));
 }

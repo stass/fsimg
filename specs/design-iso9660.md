@@ -632,10 +632,24 @@ included, is decoded as a SUSP stream. The entries:
 
 Single-instance entries (`PX`, `PN`, `CL`, `PL`, `RE`, `TF`) appearing
 twice in one stream are `FSIMG_ECORRUPT`. A known entry with a version
-other than 1 is `FSIMG_ECORRUPT`. A refused entry, and a name or target
-over 1024 bytes, is reported only after the whole stream has decoded and
-the [kind checks](#kinds-and-metadata) have run, so corruption anywhere
-in the stream is reported as corruption.
+other than 1 is `FSIMG_ECORRUPT`. A refused entry, a refused kind and a
+name or target over 1024 bytes are reported only after the whole stream
+has decoded, the [kind checks](#kinds-and-metadata) have run and the
+record has passed its own checks in the directory: for an entry, its name,
+the remaining sections of its file-section run and, for a placeholder, its
+target directory; for a dot record, the dot-record and
+[relocation](#relocation) rules of both dot records of its directory. Such
+corruption is therefore reported as corruption. Three kinds of refusal
+are not deferred: a refusal of the ISO 9660 record itself (an associated
+file, a record format or protection, an interleaved file, an extended
+attribute record
+on a directory) and a file-section limit refuse the record as it is read,
+before its stream is decoded, and a SUSP profile limit (a continuation
+area that crosses a block, more than 16 continuation areas) ends decoding
+at once, because the stream cannot be read past it and the checks that
+follow depend on it.
+Checks that span the whole directory, such as name collisions, and later
+records of the directory are not ordered before a refusal.
 
 `TF` flags select, in this order, creation, modification, access,
 attribute change, backup, expiration and effective times; bit 7 selects
