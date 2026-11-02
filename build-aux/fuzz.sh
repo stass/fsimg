@@ -145,6 +145,9 @@ mkdir -p "$iso_corpus"
 if test ! -f "$iso_corpus/primary.seed"; then
     ./test-iso9660 --seed "$iso_corpus/primary.seed"
 fi
+if test ! -f "$iso_corpus/boot.seed"; then
+    ./test-iso9660 --seed-boot "$iso_corpus/boot.seed"
+fi
 run_fuzzer "$work_dir/fuzz-iso9660" "$iso_corpus" 1048576 10
 
 # ImageFS reads the exact slice with the decoder forced; the seed is a

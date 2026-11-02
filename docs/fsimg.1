@@ -591,6 +591,10 @@ references and chain address, its record counts by inode flag nibble, and
 the numbers of implicit directories, shadowed records, omitted subtrees,
 references to omitted entries and references a shadowed record also
 carries.
+An ISO 9660 image's details include its El Torito boot catalog's block,
+0 without one, and its boot entries in total, for x86 and for EFI.
+The boot catalog and boot images appear in the tree only as files the
+image also names.
 When no single partition holds a filesystem,
 .Cm i
 still reports the table and states that no volume is selected; every other

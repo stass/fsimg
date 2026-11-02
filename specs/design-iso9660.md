@@ -701,8 +701,9 @@ directory sits under its physical parent.
 An El Torito boot record is a type-0 descriptor whose boot system
 identifier, bytes 7 to 38, is `EL TORITO SPECIFICATION` followed by zero
 bytes; bytes 39 to 70 are zero and bytes 71 to 74 hold the boot catalog's
-block, `u32le`, within the volume. More than one El Torito boot record is
-`FSIMG_EUNSUPPORTED`.
+block, `u32le`, after the descriptor set and within the volume and the
+slice. More than one El Torito boot record is `FSIMG_EUNSUPPORTED`; a boot
+record with another identifier is ignored.
 
 ### Boot catalog
 
@@ -711,24 +712,34 @@ The boot catalog is a run of 32-byte entries starting at that block:
 | Entry | Bytes | Rule |
 | --- | --- | --- |
 | Validation | 0 header `0x01`; 1 platform; 2-3 zero; 4-27 identifier; 28-29 checksum, `u16le`; 30-31 `55 AA` | The sixteen `u16le` words sum to zero modulo 65536 |
-| Initial | 0 indicator `0x88` or `0x00`; 1 media type; 2-3 load segment; 4 system type; 5 zero; 6-7 sector count, `u16le`; 8-11 image block, `u32le`; 12-31 zero | Media type 0 to 4 |
+| Initial | 0 indicator `0x88` or `0x00`; 1 media type; 2-3 load segment; 4 system type; 5 zero; 6-7 sector count, `u16le`; 8-11 image block, `u32le`; 12-31 unused | Media type 0 to 4; bytes 12-31 are not checked, since producers write selection criteria there |
 | Section header | 0 `0x90` (more follow) or `0x91` (last); 1 platform; 2-3 entry count, `u16le`; 4-31 identifier | Count at least 1 |
-| Section entry | As initial, with selection criteria in 12-31 | An extension flag in bit 5 of byte 1 is `FSIMG_EUNSUPPORTED` |
+| Section entry | As initial, with flags in byte 1 and selection criteria in 12-31 | Media type in bits 0-3 of byte 1, 0 to 4; bit 4 zero; an extension flag in bit 5 is `FSIMG_EUNSUPPORTED` |
 
 The validation entry and the initial entry come first. Section headers and
-their entries follow until a header marked last has its entries; without
-section headers, the boot catalog ends after the initial entry. The
-profile bounds a boot catalog to its first block, 64 entries, beyond which
-it is `FSIMG_EUNSUPPORTED`. Platform IDs 0 (x86), 1 (PowerPC), 2 (Mac) and
+their entries follow until a header marked last has its entries; when the
+entry after the initial entry is not a section header, the boot catalog
+ends after the initial entry, and the entry after the entries of a header
+not marked last is another section header. The count is the only
+authority: a count running past its section's entries reads what follows
+as section entries, and is caught only when one of them fails its checks,
+as zero bytes do with an image at block 0. The profile bounds a boot
+catalog to its first block, 64 entries, beyond which it is
+`FSIMG_EUNSUPPORTED`. Platform IDs 0 (x86), 1 (PowerPC), 2 (Mac) and
 `0xEF` (EFI) are accepted; another is `FSIMG_EUNSUPPORTED`. A failed check
 is `FSIMG_ECORRUPT`.
 
 The sector count is in 512-byte virtual sectors and says what firmware
 loads, not how long the image is. A boot image's extent therefore covers
-at least `ceil(count * 512 / 2048)` blocks and at least one, and lies
-within the volume. Boot entries are volume facts, reported by info and
-checked by verification, never entries in a tree; a boot catalog or boot
-image that is also a file in a hierarchy is that file's ordinary data.
+at least `ceil(count * 512 / 2048)` blocks and at least one, and starts
+after the descriptor set. It may run past the volume: an EFI image in a
+partition appended after the volume, as `xorriso -append_partition` with
+`--interval:appended_partition_2` writes, is named by its block in the
+same address space. Boot images are not read, so neither the volume's end
+nor a missing tail fails them. Boot entries are volume facts, reported by
+info and checked by verification, never entries in a tree; a boot catalog
+or boot image that is also a file in a hierarchy is that file's ordinary
+data.
 
 ## Ownership
 
@@ -736,7 +747,7 @@ Full verification checks that every block has at most one kind of owner.
 The owners are the system area, each descriptor, each path table and its
 copies, each directory, each continuation area, the boot catalog, and the
 data: file sections, with their extended attribute records, and boot
-images. The sharing rules:
+images, each for its part within the volume. The sharing rules:
 
 * data may overlap data: Joliet and primary records name one file's
   extents, deduplicating producers share identical content, and a boot
@@ -777,6 +788,7 @@ blocks are legal.
 | `SF`, `ZF` | Absent | `FSIMG_EUNSUPPORTED` |
 | Name and target lengths | At most 1024 bytes | `FSIMG_EUNSUPPORTED` |
 | El Torito platforms | 0, 1, 2, `0xEF` | `FSIMG_EUNSUPPORTED` |
+| El Torito boot records | At most one | `FSIMG_EUNSUPPORTED` |
 | El Torito boot catalog | One block, 64 entries; no extension entries | `FSIMG_EUNSUPPORTED` |
 
 The reader profile is broader than the writer's: it accepts every level's
@@ -1070,7 +1082,7 @@ shown, when reading unless the row says at verification.
 | Rock Ridge | Every kind; 36- and 44-byte `PX`; 1024-byte name and target; `NM` and `SL` across continuations; short and long `TF` | Type disagreeing with the flag, duplicate `PX`, `TF` length mismatch, dangling `SL` continuation, `NM` with a slash (ECORRUPT); device (EUNSUPPORTED); `ZF`, `SF` (EUNSUPPORTED) |
 | Relocation | Depths 9 to 20 through one and several relocations; placeholders with a directory `PX` | `CL` to a non-directory, missing `PL`, `PL` on an ordinary directory, `RE` without `CL`, a loop (ECORRUPT) |
 | Joliet | Levels 1 to 3; shared data with the primary hierarchy | Bad escape (not Joliet); geometry differing from the PVD (ECORRUPT); a forced `joliet` view over a damaged primary handshake (reads) |
-| El Torito | BIOS only, EFI only, BIOS and EFI, boot image as a file and not | Checksum, signature, media type, count past the boot catalog, image past the volume (ECORRUPT); unknown platform, extension entry, a second block of entries (EUNSUPPORTED) |
+| El Torito | BIOS only, EFI only, BIOS and EFI, boot image as a file and not, an EFI image past the volume, selection criteria in the initial entry | Checksum, signature, media type, a section count past its entries, a catalog or image before the data area, a catalog past the volume or slice (ECORRUPT); unknown platform, extension entry, a second block of entries, two boot records (EUNSUPPORTED) |
 | Ownership | Primary and Joliet sharing data; `boot.cat` as a file; deduplicated files | File data over a directory, continuation or descriptor; two records sharing continuation bytes (ECORRUPT) |
 | Writer | Every acceptance row's valid witness that the writer profile can express, at each level; reordered sources; fixed sizes; relocation by depth and by path length; a round trip of an extracted relocated tree | Required metadata loss; a level 1 or 2 file above `2^32 - 1` bytes; a 256-byte Rock Ridge name; a boot setting naming a directory or a missing path; `bootload` past the image; a volume size too small |
 

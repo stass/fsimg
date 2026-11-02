@@ -9,10 +9,11 @@
 
 /*
  * Opening an ISO 9660 volume (specs/design-iso9660-driver.md#probe-and-open):
- * the descriptor scan, the geometry of each hierarchy, the system area and
- * the view, each step failing before the next reads. Open reads at most
- * the 65 descriptor blocks and the 16 system-area blocks, one at a time
- * through the reader's one-block window.
+ * the descriptor scan, the geometry of each hierarchy, the system area, the
+ * El Torito boot catalog and the view, each step failing before the next
+ * reads. Open reads at most the 65 descriptor blocks, the 16 system-area
+ * blocks and the boot catalog block, one at a time through the reader's
+ * one-block window.
  */
 
 /* Read volume block number into the window unless the window holds it,
@@ -74,8 +75,9 @@ iso_extent_check(const fsimg_iso9660_reader_t *iso, uint64_t start,
 }
 
 /* Read descriptors from block 16 until the terminator, at most 64 before
- * it, keeping the first primary descriptor and the Joliet descriptor. A
- * later primary descriptor must repeat the first byte for byte.
+ * it, keeping the first primary descriptor, the Joliet descriptor and the
+ * El Torito boot record. A later primary descriptor must repeat the first
+ * byte for byte.
  */
 static fsimg_status_t
 descriptors_scan(fsimg_reader_t *reader, fsimg_error_t *error)
@@ -117,6 +119,11 @@ descriptors_scan(fsimg_reader_t *reader, fsimg_error_t *error)
 			    sizeof(first_primary)) != 0)
 				return (iso_unsupported(error,
 				    "ISO 9660 primary descriptors differ"));
+		} else if (decoded.type == ISO_VD_BOOT) {
+			status = iso_boot_record_decode(iso->window, &iso->boot,
+			    error);
+			if (status != FSIMG_OK)
+				return (status);
 		} else if (decoded.type == ISO_VD_SUPPLEMENTARY) {
 			if (decoded.version == 2)
 				iso->enhanced = true;
@@ -248,6 +255,8 @@ iso_volume_open(fsimg_reader_t *reader, fsimg_error_t *error)
 		status = geometry_check(iso, error);
 	if (status == FSIMG_OK)
 		status = system_area_scan(reader, error);
+	if (status == FSIMG_OK)
+		status = iso_boot_open(reader, error);
 	if (status == FSIMG_OK)
 		status = view_select(reader, error);
 	if (status != FSIMG_OK)

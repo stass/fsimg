@@ -13,11 +13,16 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   extent-zero empty files, Rock Ridge on only the first multi-extent section,
   oversized EFI sector counts, relocation and `.rr_moved` visibility, Joliet
   `;1` identifiers and kernel/Windows consumers, ISO selection in hybrids,
-  and version-order ties); and the 65,535-directory fixture with producer,
-  consumer and writer measurements.
+  and version-order ties); the 65,535-directory fixture with producer,
+  consumer and writer measurements; and bootable corpus images with an EFI
+  image in an appended partition past the volume (`xorriso
+  -append_partition` with `--interval:appended_partition_2`, as Ubuntu
+  images are built) and with initial-entry selection criteria
+  (`-eltorito-selcrit`), which the El Torito comparison does not yet
+  cover.
 * [High] **Reader** (`lib/formats/iso9660/`, `test/iso9660.c`,
-  `fuzz/iso9660.c`, `fuzz/iso9660-susp.c`): stages 4 to 8, the Rock Ridge
-  and Joliet views, El Torito inspection, the verifier, and
+  `fuzz/iso9660.c`, `fuzz/iso9660-susp.c`): stages 4, 5, 7 and 8, the
+  Rock Ridge and Joliet views, the verifier, and
   interoperability, scale and fault evidence. The registered reader
   presents the primary view only:
   * `view=auto` selects `primary` without the handshake, and forced
@@ -27,8 +32,7 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
     and name bound grow with those views, and the man page's ISO paragraph
     and the README row change with them;
   * the `rockridge` detail is 3 (unknown) until the handshake runs at
-    open, and the `boot_catalog_block`, `boot_entries`, `boot_x86` and
-    `boot_efi` details are added with El Torito in stage 6;
+    open;
   * the format has no verifier, so `W` refuses it as unsupported, until
     stage 7.
 * [Low] **Naming the refused entry** (`lib/formats/iso9660/directory.c`,

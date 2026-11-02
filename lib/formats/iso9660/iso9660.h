@@ -96,6 +96,41 @@ typedef struct iso_descriptor {
 	unsigned char	 label[ISO_LABEL_BYTES];
 } iso_descriptor_t;
 
+/* El Torito (eltorito.c). One catalog block holds 64 entries; less the
+ * validation entry and one section header, at most 62 are boot entries.
+ */
+#define ISO_BOOT_ENTRIES_MAX	62u
+#define ISO_BOOT_X86		0x00u	/* platform IDs info counts */
+#define ISO_BOOT_EFI		0xefu
+
+/* One validated El Torito boot entry, initial or section: its platform
+ * from the validation entry or its section header, and the image's
+ * extent, image_block for at least iso_boot_image_blocks(sector_count)
+ * blocks. The image starts after the descriptor set; it is never read and
+ * may run past the volume, as an EFI image in an appended partition does,
+ * so a claim on it covers only its part within the volume.
+ */
+typedef struct iso_boot_entry {
+	uint32_t	 image_block;
+	uint16_t	 load_segment;
+	uint16_t	 sector_count;		/* 512-byte virtual sectors */
+	uint8_t		 platform;
+	uint8_t		 media_type;		/* 0 to 4 */
+	uint8_t		 system_type;
+	bool		 bootable;
+} iso_boot_entry_t;
+
+/* The boot summary: present when the descriptor set holds an El Torito
+ * boot record, whose boot catalog is the one block catalog_block within
+ * the volume and the slice, holding entry_count entries.
+ */
+typedef struct iso_boot {
+	iso_boot_entry_t entries[ISO_BOOT_ENTRIES_MAX];
+	uint32_t	 catalog_block;
+	unsigned	 entry_count;
+	bool		 present;
+} iso_boot_t;
+
 /* A directory being read record by record, the one framing walk shared by
  * preparation and replay. The directory is length bytes at block extent,
  * spanning blocks blocks. The next record is read at byte offset of the
@@ -136,14 +171,17 @@ typedef struct iso_payload {
  * the selected view's hierarchy. readable_blocks is the smaller of the
  * volume and the whole blocks of the slice; nothing past it is read.
  * current is the payload replay made current, and file the current
- * regular file's section index. window caches one directory block,
- * window_block naming it while window_valid is set.
+ * regular file's section index. boot is the El Torito boot summary.
+ * window caches the one block last read, a descriptor, system-area, boot
+ * catalog or directory block, window_block naming it while window_valid is
+ * set.
  */
 typedef struct fsimg_iso9660_reader {
 	iso_descriptor_t primary;
 	iso_descriptor_t joliet;
 	iso_record_t	 view_root;
 	iso_payload_t	 current;
+	iso_boot_t	 boot;
 	fsimg_extent_index_t *file;
 	fsimg_iso_view_t view;
 	uint64_t	 readable_blocks;
@@ -190,6 +228,12 @@ bool iso_in_volume(const fsimg_iso9660_reader_t *, uint64_t, uint64_t);
 fsimg_status_t iso_extent_check(const fsimg_iso9660_reader_t *, uint64_t,
     uint64_t, fsimg_error_t *);
 fsimg_status_t iso_block_read(fsimg_reader_t *, uint64_t, fsimg_error_t *);
+
+/* eltorito.c */
+uint64_t iso_boot_image_blocks(uint16_t);
+fsimg_status_t iso_boot_record_decode(const unsigned char *, iso_boot_t *,
+    fsimg_error_t *);
+fsimg_status_t iso_boot_open(fsimg_reader_t *, fsimg_error_t *);
 
 /* names.c: identifier checks, displayed names and namespace keys. A
  * displayed-name buffer holds ISO_IDENTIFIER_MAX bytes and a NUL.

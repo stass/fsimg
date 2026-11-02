@@ -2108,8 +2108,14 @@ H3 pipeline prints counts only and compares them with `isoinfo -f`:
 7,763 files and 2,204 directories including the root, in the primary
 view, with its 11-level hierarchy and exact directory lengths.
 
-`fuzz/iso9660.c` runs under `check-fuzz` with a seed that
-`test-iso9660 --seed` writes at run time.
+For every corpus image, JSON info's boot catalog block agrees with live
+`isoinfo -d` and the saved descriptor report; boot entry, BIOS and EFI
+counts agree with `xorriso -report_el_torito plain`. All 36 stage 0 corpus
+images agree, including the nine bootable images; non-bootable images
+report four zero boot details.
+
+`fuzz/iso9660.c` runs under `check-fuzz` with primary and BIOS-plus-EFI
+seeds that `test-iso9660 --seed` and `--seed-boot` write at run time.
 
 The ISO probe's 34,816-byte prefix raises the registry's detection
 prefix from 8,704 bytes (QNX6) to 34,816 bytes; a volume shorter than the

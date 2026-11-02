@@ -207,7 +207,7 @@ Standard input and decompression use a temporary spool, bounded by
 | QNX6 Power-Safe | Yes | Classic QNX 6.5.0 layout, either byte order |
 | QNX4 | Yes | QNX 6.5.0 `dinit` layout, including long names |
 | QNX ImageFS (IFS) | Yes | Either byte order; newly created bodies are nonbootable |
-| ISO 9660 | Read and extract | The primary hierarchy; no full verification |
+| ISO 9660 | Read and extract | The primary hierarchy; El Torito boot entries in info; no full verification |
 
 | Disk layer | Read | Create |
 | --- | --- | --- |

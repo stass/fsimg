@@ -112,6 +112,28 @@ static void test_empty_section_extents(void);
 static void test_descriptor_limit_terminator(void);
 static void test_label_nul_padding(void);
 
+/* El Torito fixture helpers and cases. */
+static void boot_le16(unsigned char *p, uint16_t value);
+static void boot_le32(unsigned char *p, uint32_t value);
+static void boot_record(unsigned char *p, uint32_t catalog);
+static void boot_checksum(unsigned char *p);
+static void boot_validation(unsigned char *p, unsigned platform);
+static void boot_entry(unsigned char *p, unsigned media, uint16_t sectors,
+    uint32_t image_block);
+static void boot_header(unsigned char *p, unsigned marker, unsigned platform,
+    uint16_t count);
+static image_t boot_image(unsigned platform);
+static void boot_efi_section(image_t *image);
+static void boot_info(image_t *image, const char *name, uint64_t catalog,
+    uint64_t entries, uint64_t x86, uint64_t efi);
+static void test_boot_platforms_and_sections(void);
+static void test_boot_entry_variants(void);
+static void test_boot_catalog_capacity(void);
+static void test_boot_validation_mutations(void);
+static void test_boot_entry_mutations(void);
+static void test_boot_extent_bounds(void);
+static void test_boot_data_remains_tree_data(void);
+
 static unsigned failures;
 static unsigned cases;
 
@@ -869,9 +891,12 @@ test_info_metadata_views(void)
 	static const char *const details[] = {
 		"rockridge", "joliet_level", "enhanced", "descriptors",
 		"terminator_block", "root_block", "path_table_bytes",
-		"system_area_used", "missing_blocks"
+		"system_area_used", "missing_blocks", "boot_catalog_block",
+		"boot_entries", "boot_x86", "boot_efi"
 	};
-	static const uint64_t values[] = { 3, 0, 0, 1, 17, ROOT, 10, 0, 0 };
+	static const uint64_t values[] = {
+		3, 0, 0, 1, 17, ROOT, 10, 0, 0, 0, 0, 0, 0
+	};
 	typedef struct date_case {
 		unsigned char bytes[7];
 		int64_t seconds;
@@ -902,8 +927,8 @@ test_info_metadata_views(void)
 	CHECK(info.time_basis == FSIMG_TIME_OFFSET);
 	CHECK(info.scope == FSIMG_VALIDATION_HEADER);
 	CHECK(info.capabilities == FSIMG_CAP_READ);
-	CHECK(info.detail_count == 9);
-	for (unsigned i = 0; i < 9; i++) {
+	CHECK(info.detail_count == 13);
+	for (unsigned i = 0; i < 13; i++) {
 		CHECK(strcmp(info.details[i].name, details[i]) == 0);
 		CHECK(info.details[i].value == values[i]);
 	}
@@ -1566,6 +1591,434 @@ test_label_nul_padding(void)
 	free(image.bytes);
 }
 
+/* El Torito fixtures: wire fields from the catalog specification, with no
+ * driver codecs. Catalog block 100 and image block 104 follow terminator 18.
+ */
+#define BOOT_CATALOG 100u
+
+static void
+boot_le16(unsigned char *p, uint16_t value)
+{
+	p[0] = value;
+	p[1] = value >> 8;
+}
+
+static void
+boot_le32(unsigned char *p, uint32_t value)
+{
+	for (unsigned i = 0; i < 4; i++)
+		p[i] = value >> (8 * i);
+}
+
+static void
+boot_record(unsigned char *p, uint32_t catalog)
+{
+	descriptor(p, 0, 1);
+	bcopy("EL TORITO SPECIFICATION", p + 7, 23);
+	boot_le32(p + 71, catalog);
+}
+
+static void
+boot_checksum(unsigned char *p)
+{
+	uint32_t sum = 0;
+
+	boot_le16(p + 28, 0);
+	for (unsigned i = 0; i < 32; i += 2)
+		sum += p[i] + 256u * p[i + 1];
+	boot_le16(p + 28, (uint16_t)(0u - sum));
+}
+
+static void
+boot_validation(unsigned char *p, unsigned platform)
+{
+	bzero(p, 32);
+	p[0] = 1;
+	p[1] = platform;
+	memset(p + 4, 'V', 24);
+	p[30] = 0x55;
+	p[31] = 0xaa;
+	boot_checksum(p);
+}
+
+static void
+boot_entry(unsigned char *p, unsigned media, uint16_t sectors,
+    uint32_t image_block)
+{
+	bzero(p, 32);
+	p[0] = 0x88;
+	p[1] = media;
+	boot_le16(p + 2, 0x7c0);
+	p[4] = 0x83;
+	boot_le16(p + 6, sectors);
+	boot_le32(p + 8, image_block);
+}
+
+static void
+boot_header(unsigned char *p, unsigned marker, unsigned platform,
+    uint16_t count)
+{
+	bzero(p, 32);
+	p[0] = marker;
+	p[1] = platform;
+	boot_le16(p + 2, count);
+	memset(p + 4, 'S', 28);
+}
+
+static image_t
+boot_image(unsigned platform)
+{
+	image_t image = image_new();
+	unsigned char *catalog = image.bytes + BOOT_CATALOG * BLOCK;
+
+	boot_record(image.bytes + 17 * BLOCK, BOOT_CATALOG);
+	descriptor(image.bytes + 18 * BLOCK, 255, 1);
+	boot_validation(catalog, platform);
+	boot_entry(catalog + 32, 0, 4, DATA);
+	return (image);
+}
+
+static void
+boot_efi_section(image_t *image)
+{
+	unsigned char *catalog = image->bytes + BOOT_CATALOG * BLOCK;
+
+	boot_header(catalog + 64, 0x91, 0xef, 1);
+	boot_entry(catalog + 96, 0, 4, DATA + 1);
+}
+
+/* Assert names, order and values, including zero counters for ignored
+ * records. expect() also walks the ordinary hierarchy for each witness.
+ */
+static void
+boot_info(image_t *image, const char *name, uint64_t catalog,
+    uint64_t entries, uint64_t x86, uint64_t efi)
+{
+	static const char *const names[] = {
+		"boot_catalog_block", "boot_entries", "boot_x86", "boot_efi"
+	};
+	const uint64_t values[] = { catalog, entries, x86, efi };
+	fsimg_volume_info_t info;
+	fixture_t f;
+
+	expect(image, FSIMG_OK, name);
+	fixture_new(&f, image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.detail_count == 13);
+	for (unsigned i = 0; i < 4; i++) {
+		if (strcmp(info.details[9 + i].name, names[i]) != 0 ||
+		    info.details[9 + i].value != values[i]) {
+			fprintf(stderr, "%s: %s expected %" PRIu64
+			    ", observed %" PRIu64 "\n", name, names[i],
+			    values[i], info.details[9 + i].value);
+			failures++;
+		}
+	}
+	fixture_free(&f);
+}
+
+static void
+test_boot_platforms_and_sections(void)
+{
+	typedef struct boot_platform_case {
+		const char *name;
+		unsigned platform;
+		unsigned x86;
+		unsigned efi;
+	} boot_platform_case_t;
+	static const boot_platform_case_t platforms[] = {
+		{ "BIOS initial entry", 0, 1, 0 },
+		{ "EFI initial entry", 0xef, 0, 1 },
+		{ "PowerPC initial entry", 1, 0, 0 },
+		{ "Mac initial entry", 2, 0, 0 }
+	};
+	image_t image;
+	unsigned char *catalog;
+
+	for (unsigned i = 0; i < 4; i++) {
+		image = boot_image(platforms[i].platform);
+		boot_info(&image, platforms[i].name, BOOT_CATALOG, 1,
+		    platforms[i].x86, platforms[i].efi);
+		free(image.bytes);
+	}
+	image = boot_image(0);
+	boot_efi_section(&image);
+	boot_info(&image, "BIOS initial and EFI section",
+	    BOOT_CATALOG, 2, 1, 1);
+	catalog = image.bytes + BOOT_CATALOG * BLOCK;
+	boot_header(catalog + 64, 0x90, 1, 1);
+	boot_header(catalog + 128, 0x90, 2, 1);
+	boot_entry(catalog + 160, 0, 4, DATA);
+	boot_header(catalog + 192, 0x91, 0xef, 1);
+	boot_entry(catalog + 224, 0, 4, DATA);
+	boot_info(&image, "PowerPC Mac and EFI sections",
+	    BOOT_CATALOG, 4, 1, 1);
+	free(image.bytes);
+}
+
+static void
+test_boot_entry_variants(void)
+{
+	image_t image = boot_image(0);
+	unsigned char *catalog = image.bytes + BOOT_CATALOG * BLOCK;
+
+	memset(catalog + 44, 0x5a, 20);
+	boot_info(&image, "initial entry selection criteria accepted",
+	    BOOT_CATALOG, 1, 1, 0);
+	for (unsigned media = 0; media <= 4; media++) {
+		char name[64];
+
+		CHECK(snprintf(name, sizeof(name), "initial media type %u",
+		    media) > 0);
+		catalog[33] = media;
+		boot_info(&image, name, BOOT_CATALOG, 1, 1, 0);
+	}
+	catalog[32] = 0;
+	boot_info(&image, "non-bootable initial counted",
+	    BOOT_CATALOG, 1, 1, 0);
+	memset(catalog + 64, 0xa5, BLOCK - 64);
+	boot_info(&image, "non-header tail ignored", BOOT_CATALOG, 1, 1, 0);
+	bzero(catalog + 64, BLOCK - 64);
+	boot_efi_section(&image);
+	memset(catalog + 108, 0x5a, 20);
+	catalog[96] = 0;
+	for (unsigned media = 0; media <= 4; media++) {
+		char name[64];
+
+		CHECK(snprintf(name, sizeof(name),
+		    "section media %u with flags and criteria", media) > 0);
+		catalog[97] = 0xc0 | media;
+		boot_info(&image, name, BOOT_CATALOG, 2, 1, 1);
+	}
+	free(image.bytes);
+	image = boot_image(0);
+	image.bytes[17 * BLOCK + 7] = 'X';
+	boot_info(&image, "different boot system ignored", 0, 0, 0, 0);
+	boot_record(image.bytes + 17 * BLOCK, BOOT_CATALOG);
+	image.bytes[17 * BLOCK + 38] = 1;
+	boot_info(&image, "nonzero boot system padding ignored", 0, 0, 0, 0);
+	free(image.bytes);
+}
+
+static void
+test_boot_catalog_capacity(void)
+{
+	image_t image = boot_image(0);
+	unsigned char *catalog = image.bytes + BOOT_CATALOG * BLOCK;
+
+	boot_header(catalog + 64, 0x91, 0xef, 61);
+	for (unsigned i = 3; i < 64; i++)
+		boot_entry(catalog + i * 32, 0, 4, DATA);
+	boot_info(&image, "62 boot entries fill catalog",
+	    BOOT_CATALOG, 62, 1, 61);
+	boot_le16(catalog + 66, 62);
+	expect(&image, FSIMG_EUNSUPPORTED, "62 section entries exceed catalog");
+	boot_header(catalog + 64, 0x90, 0xef, 61);
+	expect(&image, FSIMG_EUNSUPPORTED, "further header exceeds catalog");
+	free(image.bytes);
+}
+
+static void
+test_boot_validation_mutations(void)
+{
+	typedef struct boot_validation_case {
+		const char *name;
+		unsigned offset;
+		unsigned value;
+		bool checksum;
+		fsimg_status_t status;
+	} boot_validation_case_t;
+	static const boot_validation_case_t mutations[] = {
+		{ "validation header ID", 0, 2, true, FSIMG_ECORRUPT },
+		{ "validation key byte 30", 30, 0, true, FSIMG_ECORRUPT },
+		{ "validation key byte 31", 31, 0, true, FSIMG_ECORRUPT },
+		{ "validation checksum plus one", 28, 0, false,
+		    FSIMG_ECORRUPT },
+		{ "validation ID breaks checksum", 4, 'W', false,
+		    FSIMG_ECORRUPT },
+		{ "validation reserved byte 2", 2, 1, true, FSIMG_ECORRUPT },
+		{ "validation reserved byte 3", 3, 1, true, FSIMG_ECORRUPT },
+		{ "validation platform unknown", 1, 3, true,
+		    FSIMG_EUNSUPPORTED }
+	};
+
+	for (unsigned i = 0; i < sizeof(mutations) / sizeof(mutations[0]);
+	    i++) {
+		image_t image = boot_image(0);
+		unsigned char *catalog = image.bytes + BOOT_CATALOG * BLOCK;
+
+		if (mutations[i].offset == 28)
+			boot_le16(catalog + 28,
+			    (uint16_t)(catalog[28] + 256u * catalog[29] + 1));
+		else
+			catalog[mutations[i].offset] = mutations[i].value;
+		if (mutations[i].checksum)
+			boot_checksum(catalog);
+		expect(&image, mutations[i].status, mutations[i].name);
+		free(image.bytes);
+	}
+}
+
+static void
+test_boot_entry_mutations(void)
+{
+	typedef struct boot_entry_case {
+		const char *name;
+		unsigned offset;
+		unsigned value;
+		fsimg_status_t status;
+	} boot_entry_case_t;
+	static const boot_entry_case_t mutations[] = {
+		{ "initial indicator", 32, 0x44, FSIMG_ECORRUPT },
+		{ "initial media 5", 33, 5, FSIMG_ECORRUPT },
+		{ "initial media 0x10", 33, 0x10, FSIMG_ECORRUPT },
+		{ "initial unused byte", 37, 1, FSIMG_ECORRUPT },
+		{ "section indicator", 96, 1, FSIMG_ECORRUPT },
+		{ "section media nibble 5", 97, 5, FSIMG_ECORRUPT },
+		{ "section reserved bit 4", 97, 0x10, FSIMG_ECORRUPT },
+		{ "section unused byte", 101, 1, FSIMG_ECORRUPT },
+		{ "section extension flag", 97, 0x20, FSIMG_EUNSUPPORTED },
+		{ "section count zero", 66, 0, FSIMG_ECORRUPT },
+		{ "section platform unknown", 65, 3, FSIMG_EUNSUPPORTED },
+		{ "section count past real entries", 66, 2, FSIMG_ECORRUPT }
+	};
+	image_t image;
+	unsigned char *catalog;
+
+	for (unsigned i = 0; i < sizeof(mutations) / sizeof(mutations[0]);
+	    i++) {
+		image = boot_image(0);
+		boot_efi_section(&image);
+		catalog = image.bytes + BOOT_CATALOG * BLOCK;
+		catalog[mutations[i].offset] = mutations[i].value;
+		expect(&image, mutations[i].status, mutations[i].name);
+		free(image.bytes);
+	}
+	image = boot_image(0);
+	boot_efi_section(&image);
+	catalog = image.bytes + BOOT_CATALOG * BLOCK;
+	boot_le16(catalog + 66, 65535);
+	expect(&image, FSIMG_ECORRUPT,
+	    "last section count 65535 runs into zero entry");
+	boot_header(catalog + 64, 0x90, 0xef, 2);
+	boot_header(catalog + 128, 0x91, 0, 1);
+	boot_entry(catalog + 160, 0, 4, DATA);
+	expect(&image, FSIMG_ECORRUPT,
+	    "more section count runs over following last header");
+	bzero(catalog + 128, 64);
+	boot_header(catalog + 64, 0x90, 0xef, 1);
+	expect(&image, FSIMG_ECORRUPT, "non-header after more section");
+	catalog[64] = 0x91;
+	image.bytes[17 * BLOCK + 39] = 1;
+	expect(&image, FSIMG_ECORRUPT, "boot identifier nonzero");
+	image.bytes[17 * BLOCK + 39] = 0;
+	boot_record(image.bytes + 18 * BLOCK, BOOT_CATALOG);
+	descriptor(image.bytes + 19 * BLOCK, 255, 1);
+	expect(&image, FSIMG_EUNSUPPORTED, "two El Torito boot records");
+	free(image.bytes);
+}
+
+static void
+test_boot_extent_bounds(void)
+{
+	typedef struct boot_catalog_case {
+		const char *name;
+		uint32_t block;
+	} boot_catalog_case_t;
+	static const boot_catalog_case_t catalogs[] = {
+		{ "catalog past volume", BLOCKS },
+		{ "catalog in system area", 15 },
+		{ "catalog on descriptor", 17 },
+		{ "catalog on terminator", 18 }
+	};
+	static const boot_catalog_case_t images[] = {
+		{ "image at block zero", 0 },
+		{ "image in system area", 15 },
+		{ "image on primary descriptor", 16 },
+		{ "image on boot record", 17 },
+		{ "image on terminator", 18 }
+	};
+	image_t image = boot_image(0);
+	unsigned char *entry = image.bytes + BOOT_CATALOG * BLOCK + 32;
+
+	/* A valid catalog in the system area isolates the data-area rule. */
+	bcopy(image.bytes + BOOT_CATALOG * BLOCK, image.bytes + 15 * BLOCK,
+	    BLOCK);
+	for (unsigned i = 0; i < sizeof(catalogs) / sizeof(catalogs[0]); i++) {
+		boot_record(image.bytes + 17 * BLOCK, catalogs[i].block);
+		expect(&image, FSIMG_ECORRUPT, catalogs[i].name);
+	}
+	/* Leave the catalog readable in the slice but outside the volume. */
+	bcopy(image.bytes + BOOT_CATALOG * BLOCK,
+	    image.bytes + (BLOCKS - 1) * BLOCK, BLOCK);
+	put32(image.bytes + 16 * BLOCK + VD_SPACE, BLOCKS - 1);
+	boot_record(image.bytes + 17 * BLOCK, BLOCKS - 1);
+	expect(&image, FSIMG_ECORRUPT, "catalog in slice past volume");
+	put32(image.bytes + 16 * BLOCK + VD_SPACE, BLOCKS);
+	boot_record(image.bytes + 17 * BLOCK, BOOT_CATALOG);
+	image.length = BOOT_CATALOG * BLOCK;
+	expect(&image, FSIMG_ECORRUPT, "catalog past truncated slice");
+	image.length = BLOCKS * BLOCK;
+	for (unsigned i = 0; i < sizeof(images) / sizeof(images[0]); i++) {
+		boot_entry(entry, 0, 4, images[i].block);
+		expect(&image, FSIMG_ECORRUPT, images[i].name);
+	}
+	boot_validation(image.bytes + BOOT_CATALOG * BLOCK, 0xef);
+	boot_entry(entry, 0, 4, BLOCKS);
+	boot_info(&image, "EFI image past volume accepted",
+	    BOOT_CATALOG, 1, 0, 1);
+	boot_entry(entry, 0, 65535, UINT32_MAX);
+	boot_info(&image, "EFI image end past 2^32 blocks accepted",
+	    BOOT_CATALOG, 1, 0, 1);
+	boot_entry(entry, 0, 5, BLOCKS - 1);
+	boot_info(&image, "sector count crossing volume end accepted",
+	    BOOT_CATALOG, 1, 0, 1);
+	boot_entry(entry, 0, 0, BLOCKS);
+	boot_info(&image, "zero sector count past volume accepted",
+	    BOOT_CATALOG, 1, 0, 1);
+	boot_validation(image.bytes + BOOT_CATALOG * BLOCK, 0);
+	boot_entry(entry, 0, 0, BLOCKS - 1);
+	boot_info(&image, "zero sectors at last block", BOOT_CATALOG, 1, 1, 0);
+	image.length = (BLOCKS - 1) * BLOCK;
+	boot_info(&image, "boot image in missing slice tail",
+	    BOOT_CATALOG, 1, 1, 0);
+	free(image.bytes);
+}
+
+static void
+test_boot_data_remains_tree_data(void)
+{
+	image_t image = boot_image(0);
+	unsigned char *file = image.bytes + ROOT * BLOCK + 68;
+	const fsimg_entry_t *entry;
+	fixture_t f;
+
+	/* The only tree file is A.TXT: the boot image is its ordinary data. */
+	check_file(&image, 5, 0, "hello", 5);
+	fixture_new(&f, &image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/A.TXT") == 0);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_DONE);
+	fixture_free(&f);
+	/* Moving the boot image does not introduce a tree entry. */
+	boot_entry(image.bytes + BOOT_CATALOG * BLOCK + 32, 0, 4, DATA + 1);
+	check_file(&image, 5, 0, "hello", 5);
+	/* Publish the catalog as the sole tree file and compare every byte. */
+	bzero(file, BLOCK - 68);
+	record(file, "BOOT.CAT;1", 10, BOOT_CATALOG, BLOCK, 0);
+	fixture_new(&f, &image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/BOOT.CAT") == 0);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_DONE);
+	fixture_free(&f);
+	check_file(&image, BLOCK, 0, image.bytes + BOOT_CATALOG * BLOCK, BLOCK);
+	free(image.bytes);
+}
+/* End of El Torito fixtures. */
+
 int
 main(int argc, char **argv)
 {
@@ -1585,10 +2038,16 @@ main(int argc, char **argv)
 		    &variant, NULL) == FSIMG_EFORMAT);
 		return (0);
 	}
-	if (argc == 3 && strcmp(argv[1], "--seed") == 0) {
+	if (argc == 3 && (strcmp(argv[1], "--seed") == 0 ||
+	    strcmp(argv[1], "--seed-boot") == 0)) {
 		image_t image = image_new();
 		FILE *file = fopen(argv[2], "wb");
 
+		if (strcmp(argv[1], "--seed-boot") == 0) {
+			free(image.bytes);
+			image = boot_image(0);
+			boot_efi_section(&image);
+		}
 		CHECK(file != NULL);
 		CHECK(fwrite(image.bytes, 1, image.length, file) ==
 		    image.length);
@@ -1597,6 +2056,14 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_boot_platforms_and_sections();
+	test_boot_entry_variants();
+	test_boot_catalog_capacity();
+	test_boot_validation_mutations();
+	test_boot_entry_mutations();
+	test_boot_extent_bounds();
+	test_boot_data_remains_tree_data();
+
 	test_displayed_version_suffix();
 	test_empty_section_extents();
 	test_descriptor_limit_terminator();

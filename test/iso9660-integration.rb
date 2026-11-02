@@ -70,6 +70,40 @@ module IsoIntegration
     end
   end
 
+  def boot_catalog_block(descriptors)
+    sectors = descriptors.scan(/boot catalog is in sector (\d+)/i).flatten
+    raise Error, "multiple boot catalogs in oracle" if sectors.size > 1
+
+    sectors.empty? ? 0 : Integer(sectors.fetch(0), 10)
+  end
+
+  def compare_boot(image:, binary:, options:)
+    report = command("xorriso", "-indev", image, "-report_el_torito", "plain")
+    rows = report.lines.grep(/(?:El Torito )?Boot img\s*:/i)
+    platforms = rows.map do |row|
+      match = row.match(/Boot img\s*:\s+\d+\s+(\S+)/i)
+      raise Error, "unrecognized xorriso boot row" unless match
+
+      match[1]
+    end
+    sector = boot_catalog_block(command("isoinfo", "-d", "-i", image))
+    saved_sector = boot_catalog_block(File.read("#{image}.descriptors"))
+    raise Error, "saved and live isoinfo boot catalogs differ" unless sector == saved_sector
+    raise Error, "xorriso and isoinfo disagree on boot presence" unless sector.positive? == !rows.empty?
+
+    expected = { "boot_catalog_block" => sector, "boot_entries" => rows.size,
+                 "boot_x86" => platforms.count("BIOS"), "boot_efi" => platforms.count("UEFI") }
+    info = records(command(binary, "i", "--json", *options)).select { _1.fetch("type") == "info" }
+    raise Error, "expected one volume information record" unless info.size == 1
+
+    details = info.fetch(0).fetch("details")
+    actual = expected.keys.to_h { [_1, Integer(details.fetch(_1), 10)] }
+    raise Error, "boot details differ: oracle #{expected.inspect}, fsimg #{actual.inspect}" unless expected == actual
+
+    "ok (isoinfo catalog=#{sector}; xorriso entries=#{rows.size} BIOS=#{platforms.count('BIOS')} " \
+      "UEFI=#{platforms.count('UEFI')}; fsimg #{actual.values.join('/')})"
+  end
+
   def corpus(binary:, directory:, scratch:)
     images = Dir.glob(File.join(directory, "*.iso")).sort
     raise Error, "no producer images" if images.empty?
@@ -81,6 +115,7 @@ module IsoIntegration
       options = [*forcing, "-o", "view=primary", "-f", image]
       listing = "FAIL"
       extraction = "FAIL"
+      boot = "FAIL"
       reasons = []
       begin
         expected = manifest(image)
@@ -108,7 +143,12 @@ module IsoIntegration
       ensure
         FileUtils.remove_entry_secure(destination) if destination && File.directory?(destination)
       end
-      puts "#{label}: listing #{listing}, extraction #{extraction}"
+      begin
+        boot = compare_boot(image: image, binary: binary, options: options)
+      rescue Error, JSON::ParserError, KeyError, ArgumentError, Errno::ENOENT => error
+        reasons << "boot: #{error.message}"
+      end
+      puts "#{label}: listing #{listing}, extraction #{extraction}, boot #{boot}"
       reasons.each { warn "#{label}: #{_1}" }
       failed ||= !reasons.empty?
     end

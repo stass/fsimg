@@ -66,7 +66,7 @@ holding validated values only:
 | `iso_record_t` | Length, extended attribute blocks, extent, data length, date, flags, identifier offset and length, system use offset and length |
 | `iso_path_record_t` | Identifier length and bytes, extent, parent number |
 | `iso_rr_t` | Presence bits and values of `PX`, `TF`, `CL`, `PL`, `RE`; the name length; the link-target length; the refused-entry class |
-| `iso_boot_t` | Boot catalog block, entry count, and per entry the platform, media type, load segment, sector count and image block |
+| `iso_boot_t` | Boot catalog block, entry count, and per entry the platform, boot indicator, media type, load segment, system type, sector count and image block |
 
 `iso_record_decode()` applies the [framing rule](design-iso9660.md#framing-rule)
 and the [flag table](design-iso9660.md#flags) to bytes already bounded to
@@ -295,8 +295,8 @@ It runs:
    views are known; a Rock Ridge view with an unsupported skip count makes
    verification `FSIMG_EUNSUPPORTED`.
 2. **Header claims.** The system area, each descriptor block, each path
-   table and its copies, the boot catalog and each boot image's extent go
-   into the claim stream.
+   table and its copies, the boot catalog and the part of each boot
+   image's extent within the volume go into the claim stream.
 3. **Walks.** The common walker runs once per offered view, with the
    driver's walk view set before each start and a finished walker released
    between them, under the [several-walks rule](design-directories.md#several-walks).

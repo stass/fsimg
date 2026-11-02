@@ -54,6 +54,17 @@ iso_unsupported(fsimg_error_t *error, const char *message)
 	    message));
 }
 
+/* The boot entries for platform; zero without El Torito. */
+static unsigned
+boot_platform_count(const iso_boot_t *boot, uint8_t platform)
+{
+	unsigned count = 0;
+
+	for (unsigned i = 0; i < boot->entry_count; i++)
+		count += boot->entries[i].platform == platform;
+	return (count);
+}
+
 /* The named details, in the order the driver design's volume information
  * documents. The table is sized by its initializer, so a detail that
  * would not fit the volume information fails the build.
@@ -71,7 +82,11 @@ report_details(const fsimg_iso9660_reader_t *iso, fsimg_volume_info_t *info)
 		{ "path_table_bytes", iso->primary.path_table_bytes },
 		{ "system_area_used", iso->system_area_used ? 1 : 0 },
 		{ "missing_blocks", iso->primary.volume_space_size -
-		    iso->readable_blocks }
+		    iso->readable_blocks },
+		{ "boot_catalog_block", iso->boot.catalog_block },
+		{ "boot_entries", iso->boot.entry_count },
+		{ "boot_x86", boot_platform_count(&iso->boot, ISO_BOOT_X86) },
+		{ "boot_efi", boot_platform_count(&iso->boot, ISO_BOOT_EFI) }
 	};
 
 	_Static_assert(sizeof(details) <= sizeof(info->details),

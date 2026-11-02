@@ -98,7 +98,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/iso9660/iso9660.h lib/formats/iso9660/descriptor.c \
 	lib/formats/iso9660/codec.c lib/formats/iso9660/volume.c \
 	lib/formats/iso9660/names.c lib/formats/iso9660/directory.c \
-	lib/formats/iso9660/read.c \
+	lib/formats/iso9660/read.c lib/formats/iso9660/eltorito.c \
 	compat/host.c compat/host.h compat/private.c compat/private.h \
 	lib/codec/codec.h lib/codec/lzo1x.c lib/codec/nrv2b.c \
 	lib/formats/ifs/ifs.h lib/formats/ifs/descriptor.c \
