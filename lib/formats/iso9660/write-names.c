@@ -11,8 +11,7 @@
 #include "write-iso9660.h"
 
 /*
- * Primary and Joliet identifiers (specs/design-iso9660.md#primary-names
- * and #joliet-names). Each child of a directory gets its identifier in
+ * Primary and Joliet identifiers. Each child of a directory gets its identifier in
  * one hierarchy in two steps, independent of host order and budgets:
  *
  * 1. Natural. A component that the hierarchy can spell exactly, within
@@ -559,8 +558,11 @@ joliet_order(const unsigned char *a, size_t a_length, bool a_directory,
 
 /* Name-stream records: parent, then the hierarchy's order, then the
  * identifier's bytes, the writer's tie-break for identifiers the order
- * finds equal, such as a directory FOO and a file FOO.;1. Identifiers in
- * one directory are distinct, so the order is total.
+ * finds equal, such as a directory FOO and a file FOO.;1. The primary
+ * order alone is not transitive across ties of different versions, but
+ * every file the writer names carries version 1, so it orders by name and
+ * extension only, a weak order; identifiers in one directory are
+ * distinct, so with the tie-break the order is total.
  */
 static int
 name_compare(const void *a, size_t a_length, const void *b, size_t b_length,
@@ -894,7 +896,7 @@ build_name_stream(names_pass_t *pass, fsimg_error_t *error)
 		    directory, row.alias[pass->hierarchy],
 		    raw + ISO_NAME_HEADER, &length) ||
 		    length != row.identifier[pass->hierarchy])
-			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 			    FSIMG_OP_WRITER,
 			    "ISO 9660 identifier disagrees with its plan row"));
 		fsimg_store_le64(raw, catalog->parent_id);

@@ -489,8 +489,8 @@ The common emission object has already zeroed the sink. The driver emits:
 
 1. The primary descriptor, the boot record, the Joliet descriptor and the
    terminator, each encoded by `codec.c` and `eltorito.c`.
-2. Each hierarchy's type-L and type-M path tables, from the number-to-ID
-   array and the name streams.
+2. Each hierarchy's type-L and type-M path tables, from its path stream
+   and the directories' rows.
 3. The boot catalog block.
 4. The primary directories in number order: the two dot records, then the
    directory's group from the primary stream, each child's records with

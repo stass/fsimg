@@ -10,8 +10,7 @@
 #include "write-iso9660.h"
 
 /*
- * Rock Ridge entries for the writer (specs/design-iso9660.md#rock-ridge-
- * entries-and-continuation). Planning and emission both call these
+ * Rock Ridge entries for the writer. Planning and emission both call these
  * functions with the same row, name and target, so the entries emission
  * writes are byte for byte the ones planning sized and placed.
  *
@@ -202,7 +201,7 @@ sl_pack(unsigned char *out, size_t *entry, size_t *entry_bytes,
 }
 
 /*
- * Encode a symbolic link's target of 1 to 1024 bytes as SL entries into
+ * Encode a symbolic link's target of 1 to 1023 bytes as SL entries into
  * out, returning their length. The reader joins components with '/'
  * except after a root component, so the target is written as one root
  * component per leading slash, then the rest, when there is any, split at
@@ -217,7 +216,7 @@ sl_pack(unsigned char *out, size_t *entry, size_t *entry_bytes,
  * Every target byte becomes at most two component bytes, and an entry is
  * closed only when the next record, at most 250 bytes, does not fit, so
  * two consecutive entries carry more than 250 component bytes: a
- * 1024-byte target needs at most 2048 component bytes in 17 entries,
+ * 1023-byte target needs at most 2046 component bytes in 17 entries,
  * 2133 bytes with their headers.
  */
 size_t
@@ -338,7 +337,7 @@ iso_susp_split(const unsigned char *entries, size_t length, size_t room,
 
 	while (at < length) {
 		if (split->fragments == ISO_FRAGMENTS_MAX)
-			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 			    FSIMG_OP_WRITER,
 			    "ISO 9660 Rock Ridge entries exceed their fragments"));
 		start = at;
@@ -360,9 +359,10 @@ iso_susp_split(const unsigned char *entries, size_t length, size_t room,
 	return (FSIMG_OK);
 }
 
-/* Place length bytes by next fit at *cursor, a byte offset in the
- * continuation region: at the cursor when they fit in its block, else at
- * the start of the next block, never crossing one. Returns the position
+/* Place length bytes by next fit at *cursor, a byte offset in a region
+ * of 2048-byte blocks, the continuation region or a directory: at the
+ * cursor when they fit in its block, else at the start of the next
+ * block, never crossing one. Returns the position
  * and advances the cursor past it.
  */
 uint64_t

@@ -284,6 +284,53 @@ primary_order(const unsigned char *a, size_t an, bool ad,
 	return ((int)an - (int)bn);
 }
 
+/* The writer's Joliet order: over 16-bit units, the name before the
+ * first '.', then the extension before ";1", each padded with U+0020; a
+ * directory's whole identifier is its name; then the identifier bytes.
+ */
+static int
+joliet_order(const unsigned char *a, size_t an, bool ad,
+    const unsigned char *b, size_t bn, bool bd)
+{
+	const unsigned char *id[2] = { a, b };
+	size_t units[2] = { ad ? an / 2 : an / 2 - 2, bd ? bn / 2 : bn / 2 - 2 };
+	size_t name[2], ext_start[2], ext[2], n;
+	bool directory[2] = { ad, bd };
+
+	for (unsigned s = 0; s < 2; s++) {
+		name[s] = ext_start[s] = units[s];
+		ext[s] = 0;
+		for (size_t i = 0; !directory[s] && i < units[s]; i++) {
+			if (be16(id[s] + 2 * i) == '.') {
+				name[s] = i;
+				ext_start[s] = i + 1;
+				ext[s] = units[s] - i - 1;
+				break;
+			}
+		}
+	}
+	n = name[0] > name[1] ? name[0] : name[1];
+	for (size_t i = 0; i < n; i++) {
+		int ca = i < name[0] ? be16(a + 2 * i) : ' ';
+		int cb = i < name[1] ? be16(b + 2 * i) : ' ';
+
+		if (ca != cb)
+			return (ca - cb);
+	}
+	n = ext[0] > ext[1] ? ext[0] : ext[1];
+	for (size_t i = 0; i < n; i++) {
+		int ca = i < ext[0] ? be16(a + 2 * (ext_start[0] + i)) : ' ';
+		int cb = i < ext[1] ? be16(b + 2 * (ext_start[1] + i)) : ' ';
+
+		if (ca != cb)
+			return (ca - cb);
+	}
+	n = an < bn ? an : bn;
+	if (memcmp(a, b, n) != 0)
+		return (memcmp(a, b, n));
+	return ((int)an - (int)bn);
+}
+
 /* A primary identifier under the writer profile at the level. */
 static void
 check_primary_identifier(chk_t *c, const unsigned char *id, size_t n,
@@ -380,8 +427,11 @@ chk_sl(chk_t *c, chk_rr_t *rr, const unsigned char *p, size_t n)
 		unsigned flags = p[at], length = p[at + 1];
 		const char *text = (const char *)p + at + 2;
 
-		CHK(c, at + 2 + length <= n, "SL component overruns");
-		if (at + 2 + length > n)
+		CHK(c, at + 2 + length <= n &&
+		    rr->target_length + length + 3 < TARGET_BYTES,
+		    "SL component overruns its entry or the target");
+		if (at + 2 + length > n ||
+		    rr->target_length + length + 3 >= TARGET_BYTES)
 			return;
 		if (rr->component && !rr->joining && !rr->after_root)
 			rr->target[rr->target_length++] = '/';
@@ -710,11 +760,12 @@ chk_directory(chk_t *c, unsigned h, const char *path, const char *display,
 			if (previous_length != 0) {
 				int order = h == 0 ? primary_order(previous,
 				    previous_length, previous_directory, r + 33,
-				    n, directory) : 0;
+				    n, directory) : joliet_order(previous,
+				    previous_length, previous_directory, r + 33,
+				    n, directory);
 
-				CHK(c, h != 0 || order < 0,
-				    "records out of order");
-				if (h == 0 && order >= 0 && !c->quiet)
+				CHK(c, order < 0, "records out of order");
+				if (order >= 0 && !c->quiet)
 					fprintf(stderr, "  %.*s then %.*s\n",
 					    (int)previous_length, previous, (int)n,
 					    r + 33);
@@ -1562,7 +1613,8 @@ plan_status(const fsimg_write_options_t *options, const spec_t *specs,
 	FIFTY
 #define S64	"////////////////////////////////////////////////////////////////"
 #define S1024	S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64
-#define S1023	(S1024 + 1)
+#define S1023	S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 S64 \
+	"///////////////////////////////////////////////////////////////"
 
 static const fsimg_metadata_t owned_metadata = {
 	.valid = FSIMG_META_OWNER | FSIMG_META_MODE | FSIMG_META_MODIFIED |
@@ -1583,7 +1635,7 @@ static const fsimg_metadata_t owned_metadata = {
  * the level's limits, outside Joliet's characters and outside the BMP; a
  * root directory naturally named RR_MOVED; a tree eight levels deep;
  * empty, sub-block and multi-block files; links of every component
- * shape, a 255-byte name and 1024-byte targets that continue; owner,
+ * shape, a 255-byte name and 1023-byte targets that continue; owner,
  * mode and times off the defaults.
  */
 static const spec_t tree[] = {
@@ -1924,6 +1976,12 @@ test_large_file(void)
 		{ "/a-small", FSIMG_ENTRY_FILE, 3, 1, NULL, NULL },
 		{ "/exact", FSIMG_ENTRY_FILE, UINT32_MAX, 0, NULL, NULL }
 	};
+	static const spec_t beyond[] = {
+		{ "/near-max", FSIMG_ENTRY_FILE, UINT64_C(0xffffffff) * 2048 + 1,
+		    0, NULL, NULL },
+		{ "/wrapping", FSIMG_ENTRY_FILE, UINT64_C(0xfffffffffffff801),
+		    0, NULL, NULL }
+	};
 	static const fsimg_iso_view_t views[] = { FSIMG_ISO_VIEW_ROCKRIDGE,
 	    FSIMG_ISO_VIEW_JOLIET, FSIMG_ISO_VIEW_PRIMARY };
 	fsimg_write_options_t options;
@@ -1943,6 +2001,14 @@ test_large_file(void)
 	unsigned found;
 
 	reproducible_options(&options);
+	/* Above the largest volume, whose section and block counts would
+	 * wrap or loop, a file is refused before any is computed.
+	 */
+	CHECK(plan_status(&options, beyond, 1, &error) == FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.path, "/near-max") == 0);
+	CHECK(plan_status(&options, beyond + 1, 1, &error) ==
+	    FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.path, "/wrapping") == 0);
 	options.iso_level = 1;
 	CHECK(plan_status(&options, large, 1, &error) == FSIMG_EUNSUPPORTED);
 	CHECK(strcmp(error.path, "/huge") == 0);

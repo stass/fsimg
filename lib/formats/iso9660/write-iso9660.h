@@ -9,7 +9,7 @@
 #include "iso9660.h"
 
 /*
- * The ISO 9660 writer (specs/design-iso9660.md#writer-profile). One
+ * The ISO 9660 writer. One
  * profile: a primary hierarchy at interchange level 1, 2 or 3 carrying
  * Rock Ridge entries, and a Joliet level 3 hierarchy, both over the same
  * file data. Planning (write-plan.c) runs fixed passes over the frozen
@@ -37,7 +37,7 @@ typedef enum iso_hierarchy {
 #define ISO_CE_BYTES		28u
 #define ISO_FRAGMENTS_MAX	3u	/* continuation fragments per record */
 /* Rock Ridge entries of one record before the split: PX, TF, NM entries
- * for a 255-byte name and SL entries for a 1024-byte target, whose
+ * for a 255-byte name and SL entries for a 1023-byte target, whose
  * components take at most two bytes per target byte, with headers.
  */
 #define ISO_RR_ENTRIES_MAX	4096u
@@ -109,7 +109,8 @@ typedef enum iso_hierarchy {
  *   target_bytes, target_hash
  *			a symbolic link's encoded SL entries: their length and
  *			FNV-1a hash, so emission can tell a changed target
- * Rows are stored in ISO_ROW_BYTES little-endian bytes (write-plan.c).
+ * Rows are stored in ISO_ROW_BYTES little-endian bytes, at the offsets
+ * iso_row_get() and iso_row_set() name.
  */
 typedef struct iso_row {
 	uint64_t	 size;
@@ -140,7 +141,7 @@ typedef struct iso_row {
 	unsigned char	 changed[ISO_DATE7_BYTES];
 } iso_row_t;
 
-#define ISO_ROW_BYTES		176u
+#define ISO_ROW_BYTES		144u	/* the last field ends at 141 */
 
 /*
  * Name-stream records, one per entry of a hierarchy, sorted by parent

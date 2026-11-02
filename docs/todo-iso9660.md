@@ -45,6 +45,17 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   must then report those losses itself; and documents `level=`, `boot=`,
   `efiboot=` and `bootload=` in the creation `-o` help and the man page's
   CREATION settings.
+* [Medium] **Writer test coverage** (`test/iso9660-write.c`): the
+  independent checker never sees a multi-section image, since the 8 GiB
+  fixture is checked only through the reader; path tables longer than one
+  block, the 65535-directory refusal, a non-ASCII label and a corrupt
+  plan row read back are untested.
+* [Low] **Writer readability** (`lib/formats/iso9660/write-*.c`): several
+  passes chain fallible steps as `status == FSIMG_OK &&` conditions, and
+  `iso_child_entries` combines the target read, its checks, encoding and
+  the planning-or-emission comparison behind a boolean; the review asked
+  for named steps. Each continuation fragment is also its own small sink
+  write.
 * [Medium] **Deep trees by relocation** (`lib/formats/iso9660/write-plan.c`):
   stage 11. Until it lands, planning refuses a tree that needs relocation,
   by depth or by path length, naming the first directory to relocate.

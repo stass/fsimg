@@ -12,7 +12,7 @@
 #include "write-iso9660.h"
 
 /*
- * Planning (specs/design-iso9660-driver.md#planning) runs fixed passes
+ * Planning runs fixed passes
  * over the frozen catalog. Every pass reads rows and streams the earlier
  * passes wrote, and every size is fixed before any block number, so each
  * pass runs once:
@@ -348,9 +348,13 @@ iso_child_entries(iso_plan_t *plan, uint64_t id, iso_row_t *row,
 			fsimg_error_path(error, catalog->entry.path);
 			return (status);
 		}
+		/* A component that grew past the limit after planning
+		 * accepted the target is a changed source.
+		 */
 		if (longest_component(plan->target, target_length) >
 		    ISO_LINK_COMPONENT_MAX) {
-			status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+			status = fsimg_error_set(error, planning ?
+			    FSIMG_EUNSUPPORTED : FSIMG_ESOURCE_CHANGED, 0,
 			    FSIMG_OP_WRITER, "ISO 9660 link target components "
 			    "are limited to 255 bytes");
 			fsimg_error_path(error, catalog->entry.path);
@@ -513,6 +517,17 @@ plan_entry(iso_plan_t *plan, const fsimg_catalog_entry_t *catalog,
 	if (status != FSIMG_OK)
 		return (status);
 	if (entry->kind == FSIMG_ENTRY_FILE) {
+		/* Bound the size first: every section and block count below
+		 * is computed from it in 64 bits and must neither wrap nor
+		 * outgrow the largest volume.
+		 */
+		if (entry->size > ISO_VOLUME_BLOCKS_MAX * ISO_BLOCK_BYTES) {
+			status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+			    FSIMG_OP_WRITER, "ISO 9660 files are limited to "
+			    "2^32 - 1 blocks");
+			fsimg_error_path(error, entry->path);
+			return (status);
+		}
 		if (entry->size > UINT32_MAX && plan->level < 3) {
 			status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 			    FSIMG_OP_WRITER, "ISO 9660 files above 4 GiB "
@@ -601,7 +616,7 @@ check_depth(iso_plan_t *plan, fsimg_error_t *error)
 		    path > ISO_PATH_MAX - 1 - longest) {
 			status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 			    FSIMG_OP_WRITER, "ISO 9660 directory needs Rock "
-			    "Ridge relocation, which is not yet written");
+			    "Ridge relocation, which this writer does not write");
 			fsimg_error_path(error, catalog->entry.path);
 			return (status);
 		}
@@ -744,7 +759,7 @@ size_dot(iso_plan_t *plan, iso_row_t *row, iso_rr_record_t record,
 			iso_place(&plan->continuation_bytes,
 			    split.fragment_bytes[i]);
 	} else if (split.fragments != 0) {
-		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_WRITER, "ISO 9660 dot record entries continue"));
 	}
 	iso_place(position, iso_record_length(1, split.record_bytes));
