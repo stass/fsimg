@@ -362,6 +362,9 @@ module IsoIntegration
 
   def rockridge(binary:, image:, options:)
     actual = fsimg_tree(binary: binary, options: options)
+    forced = fsimg_tree(binary: binary, options: [*options, "-o", "view=rockridge"])
+    raise Error, "forced Rock Ridge and automatic view differ" unless forced == actual
+
     results = []
     failures = []
     steps = {

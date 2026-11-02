@@ -2091,8 +2091,9 @@ corpus source files and the evidence reader.
 
 `test-iso9660` builds every acceptance fixture in memory with its own
 encoder, which shares no code with the driver, and runs in the plain
-suite. `test/iso9660-integration.sh` compares the primary view with a
-corpus and the owner's disc; it skips with status 77 unless given them:
+suite. `test/iso9660-integration.sh` compares the primary, Rock Ridge and
+Joliet views with a corpus and reads the owner's disc; it skips with
+status 77 unless given them:
 
 ```sh
 FSIMG_ISO_CORPUS="$HOME/.cache/fsimg-iso/corpus" \
@@ -2114,16 +2115,65 @@ since safe extraction creates neither. bsdtar is skipped only for
 `xorriso-deep.iso`, whose relocation libarchive cannot connect. The
 script then needs `bsdtar` as well. The isohybrid image is read with
 `-F iso9660/-`. Against the stage 0 corpus all 36 images agree, 31 of
-them in the Rock Ridge view. The H3 pipeline prints counts only and
-compares them with `isoinfo -f`: 7,763 files and 2,204 directories
-including the root, read in the automatically selected primary view, with
-its 11-level hierarchy and exact directory lengths.
+them in the Rock Ridge view. Forced Rock Ridge must match automatic
+selection. Joliet names, kinds, sizes and file digests agree with its
+manifest and the independent listings, with the documented xorriso
+parent-record refusals. The H3 pipeline discards diagnostics and filters
+listings directly to counts: 7,763 files and 2,204 directories including
+the root, in automatic and forced Joliet views, compared with
+`isoinfo -J -l`. Information confirms automatic Joliet selection; `W`
+succeeds under automatic and primary selection. No H3 member name or
+volume label enters a transcript or temporary file.
 
 For every corpus image, JSON info's boot catalog block agrees with live
 `isoinfo -d` and the saved descriptor report; boot entry, BIOS and EFI
 counts agree with `xorriso -report_el_torito plain`. All 36 stage 0 corpus
 images agree, including the nine bootable images; non-bootable images
 report four zero boot details.
+
+`make check-scale` runs `test-iso9660-scale` with `--wide`, `--deep`,
+`--depth-limit`, `--sections` and `--capacity`, each in a separate process.
+Its callback generates sectors on demand without an image file or an
+in-memory catalog. Only private, disposable metadata scratch reaches the
+host filesystem. Each case uses a 16 MiB resource memory budget and checks
+memory, scratch and descriptor accounting after freeing the reader and I/O.
+The million-entry case walks and verifies one directory of empty files
+and spills directory metadata to scratch. The separate million-data-claim
+acceptance fixture exercises the verifier's claim-sort spill. The Rock
+Ridge cases walk 256 directory
+levels below the root and assert a depth-limit error on level 257. The
+4 TiB file has 1,025 Level 3 sections separated by unreferenced blocks;
+reads on both sides of every boundary check the physical callback offset.
+Its verification checks metadata and ownership without reading 4 TiB of
+zero payload. The capacity case reads a file in the final block and
+verifies a small tree in a volume of
+4,294,967,295 logical blocks (8,796,093,020,160 bytes).
+
+Reference macOS native measurements, in bytes except calls and passes:
+
+| Case | Source read calls | All I/O calls | Metadata passes | Peak scratch | Peak charged memory | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Million-entry directory, walk and W | 95,280 | 278,956 | 4.000 | 132,000,643 | 5,364,225 | 12,378,112 |
+| Rock Ridge, 256 levels | 276 | 276 | 1.000 | 0 | 1,145,097 | 2,297,856 |
+| Rock Ridge, level 257 refused | 276 | 276 | 0.996 | 0 | 1,145,097 | 2,297,856 |
+| 4 TiB file, boundary reads and W | 2,189 | 2,189 | 4.000 | 0 | 1,200,501 | 2,400,256 |
+| Maximum block count, content and W | 43 | 43 | 2.000 | 0 | 1,150,193 | 2,363,392 |
+
+Metadata passes are callback directory-sector deliveries divided by the
+number of directory sectors; the refused walk is a partial pass. All I/O
+calls include scratch transfers, whereas source read calls count only the
+image callback. RSS is `getrusage(RUSAGE_SELF).ru_maxrss`, converted to
+bytes on platforms reporting KiB; separate processes avoid inherited peaks
+from other profiles. Measurements cover macOS; Linux and FreeBSD scale
+comparisons are not available here.
+
+`test-iso9660-faults` supplements the acceptance tests with stage-separated
+allocation, scratch open/resize/read/write, positive short read, EOF and
+cancellation sweeps for Rock Ridge, Joliet and bootable images. It checks
+open, walk, file content and payload verification; every injected attempt
+releases memory, scratch and descriptors. A zero checkpoint count means
+that operation needs no allocation or scratch I/O. The independent ISO
+profile in `test-driver-contracts` exercises the common reader contracts.
 
 `fuzz/iso9660.c` runs under `check-fuzz` with primary and BIOS-plus-EFI
 seeds that `test-iso9660 --seed` and `--seed-boot` write at run time.

@@ -153,14 +153,14 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-metadata-loss \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
-	test-ifs test-iso9660 \
+	test-ifs test-iso9660 test-iso9660-faults \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write test-scheme-planning \
 	test-containers test-compression test-gzip-write test-holes test-settings \
 	header-c \
 	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
 # layers-compose is a helper of test/layers-integration.sh, not a test.
-check_PROGRAMS = $(test_programs) layers-compose
+check_PROGRAMS = $(test_programs) layers-compose test-iso9660-scale
 TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
@@ -257,6 +257,10 @@ test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h test/scale.h
 test_qnx4_write_LDADD = libfsimg.la
 test_iso9660_SOURCES = test/iso9660.c test/test.h
 test_iso9660_LDADD = libfsimg.la
+test_iso9660_faults_SOURCES = test/iso9660-faults.c test/test.h
+test_iso9660_faults_LDADD = libfsimg.la
+test_iso9660_scale_SOURCES = test/iso9660-scale.c test/test.h test/scale.h
+test_iso9660_scale_LDADD = libfsimg.la
 test_ifs_SOURCES = test/ifs.c test/test.h test/scale.h
 test_ifs_LDADD = libfsimg.la
 test_ifs_write_SOURCES = test/ifs-write.c test/test.h
@@ -382,7 +386,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/iso9660-corpus.sh test/iso9660-corpus.rb \
 	test/iso9660-corpus-test.rb test/iso9660-corpus-check.sh.in \
 	test/iso9660-evidence.rb test/iso9660-integration.sh.in \
-	test/iso9660-integration.rb \
+	test/iso9660-integration.rb test/iso9660-scale.c test/iso9660-faults.c \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
@@ -508,7 +512,12 @@ baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	    { rm -f $(srcdir)/test/baseline.txt.new; exit 1; }
 	mv $(srcdir)/test/baseline.txt.new $(srcdir)/test/baseline.txt
 check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scale \
-	    test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-ifs
+	    test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-ifs test-iso9660-scale
+	./test-iso9660-scale --wide
+	./test-iso9660-scale --deep
+	./test-iso9660-scale --depth-limit
+	./test-iso9660-scale --sections
+	./test-iso9660-scale --capacity
 	./test-meta-sort --scale
 	./test-catalog --wide 100000
 	./test-catalog --scale 100000
