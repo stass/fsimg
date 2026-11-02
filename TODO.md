@@ -407,13 +407,6 @@
   FreeBSD only. Adopt settings as an object that never consults the host's
   hole report.
 
-* [Low] **test-worker's process-group setup races**
-  (`test/worker.c`, relay and `coordinator_case_survives_failure` scenarios):
-  under a loaded `make -j32 check` on macOS, child `setpgid(0, 0)` and parent
-  `setpgid(child, child)` checks can fail. Record errno and distinguish
-  concurrent group creation from a child that has already exited; establish
-  group ownership without depending on which process runs first.
-
 * [Medium] **Worker sanitizer exit after an error frame is lost**
   (`cmd/fsimg/worker-parent.c`): after the parser worker sends its final
   `FSIMG_FRAME_ERROR`, `finish_operation()` calls `cleanup_operation()`, which

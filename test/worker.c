@@ -783,6 +783,7 @@ static int raw_intermediate(const worker_fixture_t *);
 static void create_request(worker_fixture_t *, const char *);
 static void test_container_create(void);
 static void test_compressed_create(void);
+static pid_t fork_process_group(void);
 static void test_transport(worker_scenario_t);
 static int fake_worker(worker_scenario_t);
 static int fake_output(void);
@@ -2884,6 +2885,40 @@ test_forged(void)
 	}
 }
 
+/* The parent creates the group while the child waits for a release byte.
+ * The child cannot fork, exec or exit before setpgid succeeds, and only the
+ * parent changes group membership, avoiding concurrent group creation.
+ */
+static pid_t
+fork_process_group(void)
+{
+	pid_t child;
+	ssize_t count;
+	int ready[2];
+	char release;
+
+	CHECK(pipe(ready) == 0);
+	child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		CHECK(close(ready[1]) == 0);
+		do {
+			count = read(ready[0], &release, 1);
+		} while (count == -1 && errno == EINTR);
+		CHECK(count == 1 && release == 'G');
+		CHECK(close(ready[0]) == 0);
+	} else {
+		CHECK(close(ready[0]) == 0);
+		CHECK(setpgid(child, child) == 0);
+		do {
+			count = write(ready[1], "G", 1);
+		} while (count == -1 && errno == EINTR);
+		CHECK(count == 1);
+		CHECK(close(ready[1]) == 0);
+	}
+	return (child);
+}
+
 /* A separate process group bounds regressions that deliberately stop draining
  * a pipe. Killing that group also reaps the fixture's worker on a broken tree.
  */
@@ -2979,10 +3014,8 @@ test_transport(worker_scenario_t mode)
 	fixture.request.kind = mode == SCENARIO_STARTUP_NONREADER || mode == SCENARIO_STARTUP_ERROR || mode == SCENARIO_BLOCKED_WARNING ?
 	    FSIMG_JOB_INFO : FSIMG_JOB_CAT;
 	fixture.request.seconds = mode == SCENARIO_STALLED_RELAY || mode == SCENARIO_SLOW_CONSUMER ? 0 : 1;
-	child = fork();
-	CHECK(child != -1);
+	child = fork_process_group();
 	if (child == 0) {
-		CHECK(setpgid(0, 0) == 0);
 		consumer = -1;
 		if (mode == SCENARIO_BLOCKED_WARNING)
 			CHECK(dup2(output, STDERR_FILENO) == STDERR_FILENO);
@@ -3023,7 +3056,6 @@ test_transport(worker_scenario_t mode)
 		}
 		_exit(0);
 	}
-	CHECK(setpgid(child, child) == 0 || errno == EACCES);
 	finished = false;
 	for (unsigned i = 0; i < 400; i++) {
 		waited = waitpid(child, &outcome, WNOHANG);
@@ -3565,14 +3597,11 @@ coordinator_test_case(const coordinator_case_t *test)
 	if (test->requested_compression != NULL)
 		strcpy(fixture.request.compression, test->requested_compression);
 
-	child = fork();
-	CHECK(child != -1);
+	child = fork_process_group();
 	if (child == 0) {
-		CHECK(setpgid(0, 0) == 0);
 		coordinator_run_case(&fixture, test, input[0], output);
 		_exit(0);
 	}
-	CHECK(setpgid(child, child) == 0 || errno == EACCES);
 	if (output[1] != -1) {
 		CHECK(close(output[1]) == 0);
 		output[1] = -1;
