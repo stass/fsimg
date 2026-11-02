@@ -648,8 +648,12 @@ before its stream is decoded, and a SUSP profile limit (a continuation
 area that crosses a block, more than 16 continuation areas) ends decoding
 at once, because the stream cannot be read past it and the checks that
 follow depend on it.
-Checks that span the whole directory, such as name collisions, and later
-records of the directory are not ordered before a refusal.
+The promise ends there: a refused record is not checked further.
+Checks that span the whole directory, such as name collisions, later
+records of the directory, and the content range of a refused file's
+sections, which replay checks for delivered files, are not ordered before
+a refusal, so a refused record may hide such corruption. Either way the
+image does not read or verify completely; only the status differs.
 
 `TF` flags select, in this order, creation, modification, access,
 attribute change, backup, expiration and effective times; bit 7 selects
