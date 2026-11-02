@@ -74,6 +74,8 @@ static void fixture_free(fixture_t *f);
 static fsimg_status_t open_image(fixture_t *f, fsimg_iso_view_t view);
 static fsimg_status_t walk(fixture_t *f);
 static void expect(image_t *image, fsimg_status_t expected, const char *name);
+static void expect_open(image_t *image, fsimg_status_t expected,
+    const char *name);
 static void probe_expect(image_t *image, fsimg_status_t expected,
     const char *name);
 static void test_probe(void);
@@ -91,6 +93,7 @@ static void remove_tree(int parent, const char *name);
 static fsimg_status_t extract(fixture_t *f, int parent, const char *selection);
 static void test_extraction_and_selection(void);
 static bool cancelled(void *argument);
+static void test_image_faults(image_t *image);
 static void test_faults(void);
 static void test_exclusivity(void);
 static void test_smallest_volume(void);
@@ -340,6 +343,26 @@ expect(image_t *image, fsimg_status_t expected, const char *name)
 		    expected, status);
 		failures++;
 	}
+	fixture_free(&f);
+}
+
+/* Catalog validation must finish before a reader is published for info. */
+static void
+expect_open(image_t *image, fsimg_status_t expected, const char *name)
+{
+	fixture_t f;
+	fsimg_status_t status;
+
+	fixture_new(&f, image, NULL);
+	status = open_image(&f, FSIMG_ISO_VIEW_PRIMARY);
+	cases++;
+	if (status != expected) {
+		fprintf(stderr, "%s: open expected %d, observed %d\n", name,
+		    expected, status);
+		failures++;
+	}
+	if (status != FSIMG_OK)
+		CHECK(f.reader == NULL);
 	fixture_free(&f);
 }
 
@@ -1102,16 +1125,15 @@ cancelled(void *argument)
 }
 
 static void
-test_faults(void)
+test_image_faults(image_t *image)
 {
-	image_t image = image_new();
 	fixture_t f;
 	fsimg_options_t options;
 	fsimg_status_t status;
 	const fsimg_entry_t *entry;
 	unsigned remaining;
 	unsigned char buffer[8];
-	uint64_t reads;
+	uint64_t open_reads, reads;
 	bool allocation_hit;
 	size_t count;
 	char temporary[] = "./iso-fault-XXXXXX";
@@ -1124,7 +1146,7 @@ test_faults(void)
 	 * constructed objects are released before their context is checked. */
 	for (unsigned operation = 0; operation < 4; operation++) {
 		for (unsigned n = 1;; n++) {
-			fixture_new(&f, &image, NULL);
+			fixture_new(&f, image, NULL);
 			fsimg_test_fail_alloc_after(f.ctx, n);
 			status = open_image(&f, FSIMG_ISO_VIEW_PRIMARY);
 			if (status == FSIMG_OK && operation == 1)
@@ -1150,21 +1172,26 @@ test_faults(void)
 			CHECK(n < 10000);
 		}
 	}
-	image.reads = 0;
-	fixture_new(&f, &image, NULL);
+	image->reads = 0;
+	fixture_new(&f, image, NULL);
 	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+	open_reads = image->reads;
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_read_at(f.reader, 0, buffer, sizeof(buffer),
 	    &count, NULL) == FSIMG_OK);
-	reads = image.reads;
+	reads = image->reads;
 	fixture_free(&f);
 	for (unsigned eof = 0; eof < 2; eof++) {
 		for (uint64_t n = 1; n <= reads; n++) {
-			image.reads = 0;
-			image.fail_read = n;
-			image.eof = eof != 0;
-			fixture_new(&f, &image, NULL);
+			image->reads = 0;
+			image->fail_read = n;
+			image->eof = eof != 0;
+			fixture_new(&f, image, NULL);
 			status = open_image(&f, FSIMG_ISO_VIEW_PRIMARY);
+			if (n <= open_reads) {
+				CHECK(status == FSIMG_EIO);
+				CHECK(f.reader == NULL);
+			}
 			if (status == FSIMG_OK)
 				status = fsimg_reader_next(f.reader, &entry,
 				    NULL);
@@ -1176,39 +1203,49 @@ test_faults(void)
 			fixture_free(&f);
 		}
 	}
-	image.fail_read = 0;
+	image->fail_read = 0;
 	for (unsigned blocks = 0; blocks < BLOCKS; blocks++) {
-		image.length = blocks * BLOCK;
-		expect(&image, blocks < 17 ? FSIMG_EFORMAT :
+		image->length = blocks * BLOCK;
+		expect(image, blocks < 17 ? FSIMG_EFORMAT :
 		    blocks <= DATA ? FSIMG_ECORRUPT : FSIMG_OK,
 		    "truncation at each block boundary");
 	}
-	image.length = BLOCKS * BLOCK;
-	for (remaining = 0; remaining < 2; remaining++) {
-		unsigned budget = remaining;
+	image->length = BLOCKS * BLOCK;
+	/* Sweep every cancellation checkpoint in open, then in open and walk. */
+	for (unsigned operation = 0; operation < 2; operation++) {
+		for (remaining = 0;; remaining++) {
+			unsigned budget = remaining;
 
-		fsimg_options_init(&options);
-		options.cancelled = cancelled;
-		options.cancel_argument = &budget;
-		fixture_new(&f, &image, &options);
-		status = open_image(&f, FSIMG_ISO_VIEW_PRIMARY);
-		if (status == FSIMG_OK)
-			status = walk(&f);
-		CHECK(status == FSIMG_ECANCELLED);
-		fixture_free(&f);
+			fsimg_options_init(&options);
+			options.cancelled = cancelled;
+			options.cancel_argument = &budget;
+			fixture_new(&f, image, &options);
+			status = open_image(&f, FSIMG_ISO_VIEW_PRIMARY);
+			if (status != FSIMG_OK)
+				CHECK(f.reader == NULL);
+			if (status == FSIMG_OK && operation == 1)
+				status = walk(&f);
+			if (remaining < 2)
+				CHECK(status == FSIMG_ECANCELLED);
+			CHECK(status == FSIMG_OK || status == FSIMG_ECANCELLED);
+			fixture_free(&f);
+			if (status == FSIMG_OK)
+				break;
+			CHECK(remaining < 10000);
+		}
 	}
 	fsimg_options_init(&options);
 	options.max_work = 1;
-	fixture_new(&f, &image, &options);
+	fixture_new(&f, image, &options);
 	status = open_image(&f, FSIMG_ISO_VIEW_PRIMARY);
 	if (status == FSIMG_OK)
 		status = walk(&f);
 	CHECK(status == FSIMG_ELIMIT);
 	fixture_free(&f);
-	record(image.bytes + ROOT * BLOCK + 108, "B;1", 3, DATA, 5, 0);
+	record(image->bytes + ROOT * BLOCK + 108, "B;1", 3, DATA, 5, 0);
 	fsimg_options_init(&options);
 	options.max_entries = 1;
-	fixture_new(&f, &image, &options);
+	fixture_new(&f, image, &options);
 	status = open_image(&f, FSIMG_ISO_VIEW_PRIMARY);
 	if (status == FSIMG_OK)
 		status = walk(&f);
@@ -1216,6 +1253,17 @@ test_faults(void)
 	fixture_free(&f);
 	CHECK(close(parent) == 0);
 	CHECK(rmdir(temporary) == 0);
+}
+
+static void
+test_faults(void)
+{
+	image_t image = image_new();
+
+	test_image_faults(&image);
+	free(image.bytes);
+	image = boot_image(0);
+	test_image_faults(&image);
 	free(image.bytes);
 }
 
@@ -1813,9 +1861,9 @@ test_boot_catalog_capacity(void)
 	boot_info(&image, "62 boot entries fill catalog",
 	    BOOT_CATALOG, 62, 1, 61);
 	boot_le16(catalog + 66, 62);
-	expect(&image, FSIMG_EUNSUPPORTED, "62 section entries exceed catalog");
+	expect_open(&image, FSIMG_EUNSUPPORTED, "62 section entries exceed catalog");
 	boot_header(catalog + 64, 0x90, 0xef, 61);
-	expect(&image, FSIMG_EUNSUPPORTED, "further header exceeds catalog");
+	expect_open(&image, FSIMG_EUNSUPPORTED, "further header exceeds catalog");
 	free(image.bytes);
 }
 
@@ -1855,7 +1903,7 @@ test_boot_validation_mutations(void)
 			catalog[mutations[i].offset] = mutations[i].value;
 		if (mutations[i].checksum)
 			boot_checksum(catalog);
-		expect(&image, mutations[i].status, mutations[i].name);
+		expect_open(&image, mutations[i].status, mutations[i].name);
 		free(image.bytes);
 	}
 }
@@ -1892,30 +1940,30 @@ test_boot_entry_mutations(void)
 		boot_efi_section(&image);
 		catalog = image.bytes + BOOT_CATALOG * BLOCK;
 		catalog[mutations[i].offset] = mutations[i].value;
-		expect(&image, mutations[i].status, mutations[i].name);
+		expect_open(&image, mutations[i].status, mutations[i].name);
 		free(image.bytes);
 	}
 	image = boot_image(0);
 	boot_efi_section(&image);
 	catalog = image.bytes + BOOT_CATALOG * BLOCK;
 	boot_le16(catalog + 66, 65535);
-	expect(&image, FSIMG_ECORRUPT,
+	expect_open(&image, FSIMG_ECORRUPT,
 	    "last section count 65535 runs into zero entry");
 	boot_header(catalog + 64, 0x90, 0xef, 2);
 	boot_header(catalog + 128, 0x91, 0, 1);
 	boot_entry(catalog + 160, 0, 4, DATA);
-	expect(&image, FSIMG_ECORRUPT,
+	expect_open(&image, FSIMG_ECORRUPT,
 	    "more section count runs over following last header");
 	bzero(catalog + 128, 64);
 	boot_header(catalog + 64, 0x90, 0xef, 1);
-	expect(&image, FSIMG_ECORRUPT, "non-header after more section");
+	expect_open(&image, FSIMG_ECORRUPT, "non-header after more section");
 	catalog[64] = 0x91;
 	image.bytes[17 * BLOCK + 39] = 1;
-	expect(&image, FSIMG_ECORRUPT, "boot identifier nonzero");
+	expect_open(&image, FSIMG_ECORRUPT, "boot identifier nonzero");
 	image.bytes[17 * BLOCK + 39] = 0;
 	boot_record(image.bytes + 18 * BLOCK, BOOT_CATALOG);
 	descriptor(image.bytes + 19 * BLOCK, 255, 1);
-	expect(&image, FSIMG_EUNSUPPORTED, "two El Torito boot records");
+	expect_open(&image, FSIMG_EUNSUPPORTED, "two El Torito boot records");
 	free(image.bytes);
 }
 
@@ -1947,22 +1995,22 @@ test_boot_extent_bounds(void)
 	    BLOCK);
 	for (unsigned i = 0; i < sizeof(catalogs) / sizeof(catalogs[0]); i++) {
 		boot_record(image.bytes + 17 * BLOCK, catalogs[i].block);
-		expect(&image, FSIMG_ECORRUPT, catalogs[i].name);
+		expect_open(&image, FSIMG_ECORRUPT, catalogs[i].name);
 	}
 	/* Leave the catalog readable in the slice but outside the volume. */
 	bcopy(image.bytes + BOOT_CATALOG * BLOCK,
 	    image.bytes + (BLOCKS - 1) * BLOCK, BLOCK);
 	put32(image.bytes + 16 * BLOCK + VD_SPACE, BLOCKS - 1);
 	boot_record(image.bytes + 17 * BLOCK, BLOCKS - 1);
-	expect(&image, FSIMG_ECORRUPT, "catalog in slice past volume");
+	expect_open(&image, FSIMG_ECORRUPT, "catalog in slice past volume");
 	put32(image.bytes + 16 * BLOCK + VD_SPACE, BLOCKS);
 	boot_record(image.bytes + 17 * BLOCK, BOOT_CATALOG);
 	image.length = BOOT_CATALOG * BLOCK;
-	expect(&image, FSIMG_ECORRUPT, "catalog past truncated slice");
+	expect_open(&image, FSIMG_ECORRUPT, "catalog past truncated slice");
 	image.length = BLOCKS * BLOCK;
 	for (unsigned i = 0; i < sizeof(images) / sizeof(images[0]); i++) {
 		boot_entry(entry, 0, 4, images[i].block);
-		expect(&image, FSIMG_ECORRUPT, images[i].name);
+		expect_open(&image, FSIMG_ECORRUPT, images[i].name);
 	}
 	boot_validation(image.bytes + BOOT_CATALOG * BLOCK, 0xef);
 	boot_entry(entry, 0, 4, BLOCKS);
