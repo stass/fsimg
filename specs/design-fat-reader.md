@@ -131,6 +131,11 @@ pass checks entries, mirrored copies, free/bad/reserved values, and allocation
 against the sorted ownership stream. Allocated unowned clusters and references
 to free/bad clusters fail. FAT32 FSInfo free-count hints are checked when known;
 its next-free hint is range-checked rather than treated as allocation authority.
+With the extended boot signature, the boot-sector label must equal the root
+volume-label entry, both compared as decoded text without trailing spaces. An
+absent root label counts as `NO NAME`, the boot label formatters write for an
+unlabeled volume, so any other boot label without a root entry, including a
+blank one, is a disagreement, as `fsck.fat` reports it.
 Payload read-through is a separate flag and report scope.
 
 The common reader owns the input borrow, session, entry snapshot, state, and

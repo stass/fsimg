@@ -1179,7 +1179,8 @@ Fatcat's non-512-sector subcheck is explicitly skipped, and its Unicode name
 decoding is not an oracle; native checks and mtools cover those features.
 
 `./test-fat --volume-labels` covers native formatter labels with the archive
-bit and malformed label placement/allocation/attributes. Automatic FAT sizing
+bit, malformed label placement/allocation/attributes, and verification's
+agreement of boot-sector and root labels. Automatic FAT sizing
 keeps sixteen clusters away from the type cutovers as Microsoft recommends;
 `./test-fat-write --type-margins` verifies both sides and retains exact legal
 minimum counts. Native formatter fixtures specify both total sector count and

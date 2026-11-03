@@ -145,7 +145,8 @@ static fsimg_status_t
 verify_reserved(fsimg_reader_t *reader, const fsimg_verify_report_t *report,
     fsimg_error_t *error)
 {
-	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
+	const fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
+	const fat_geometry_t *g = &fat->geometry;
 	unsigned char primary[512], backup[512], info[512];
 	uint32_t free_count, next_free;
 	size_t transferred;
@@ -153,9 +154,13 @@ verify_reserved(fsimg_reader_t *reader, const fsimg_verify_report_t *report,
 
 	if (!reader->info.clean || reader->info.io_error)
 		return (fsimg_fat_corrupt(error, "FAT volume is dirty or records an I/O error"));
-	if (fsimg_fat_state(reader)->root_label_seen &&
-	    (reader->info.valid & FSIMG_VOLUME_LABEL) != 0 &&
-	    strcmp(fsimg_fat_state(reader)->root_label, reader->info.label) != 0)
+	/* A boot label, present with the extended boot signature, must match the
+	 * root label entry. An unlabeled volume has no entry, and formatters
+	 * write "NO NAME" in its boot sector.
+	 */
+	if ((reader->info.valid & FSIMG_VOLUME_LABEL) != 0 &&
+	    strcmp(fat->root_label_seen ? fat->root_label : "NO NAME",
+	    reader->info.label) != 0)
 		return (fsimg_fat_corrupt(error, "FAT boot and root volume labels disagree"));
 	if (g->variant != 32)
 		return (FSIMG_OK);

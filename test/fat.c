@@ -67,6 +67,14 @@ typedef struct orphan_case {
 	bool		 deleted_after_dot;
 } orphan_case_t;
 
+typedef struct boot_label_case {
+	const char	*name;
+	const char	*boot_label;
+	const char	*root_label;
+	fsimg_status_t	 status;
+	unsigned char	 signature;
+} boot_label_case_t;
+
 static void put16(unsigned char *, uint16_t);
 static void put32(unsigned char *, uint32_t);
 static void write_bytes(fixture_t *, uint64_t, const void *, size_t);
@@ -76,6 +84,7 @@ static void short_entry(unsigned char *, const char *, bool, uint32_t, uint32_t)
 static void fixture_init(fixture_t *, unsigned);
 static void fixture_geometry(fixture_t *, unsigned, unsigned, unsigned);
 static void fixture_layout(fixture_t *, unsigned, unsigned, unsigned, unsigned);
+static void fixture_add_root_label(fixture_t *, const char *);
 static void test_geometry_matrix(void);
 static void test_cluster_ceiling(unsigned);
 static void fixture_open(fixture_t *);
@@ -110,6 +119,7 @@ static void test_cancellation(void);
 static void test_slices(void);
 static void test_long_names(void);
 static void test_volume_labels(void);
+static void test_boot_label_without_root_label(void);
 static void test_cached_name(void);
 static void test_cached_index(void);
 static void test_range_reads(void);
@@ -291,13 +301,15 @@ fixture_layout(fixture_t *f, unsigned variant, unsigned sector_bytes,
 		put32(boot + 36, table_sectors);
 		put32(boot + 44, 2);
 		put16(boot + 48, 1);
-		put16(boot + 50, 6);
+		put16(boot + 50, 6); /* BPB_BkBootSec */
+		/* FAT32 BS_BootSig and BS_VolLab. */
 		boot[66] = 0x29;
-		bcopy("FSIMG TEST ", boot + 71, 11);
+		bcopy("NO NAME    ", boot + 71, 11);
 	} else {
 		put16(boot + 22, (uint16_t)table_sectors);
+		/* FAT12/16 BS_BootSig and BS_VolLab. */
 		boot[38] = 0x29;
-		bcopy("FSIMG TEST ", boot + 43, 11);
+		bcopy("NO NAME    ", boot + 43, 11);
 	}
 	boot[510] = 0x55;
 	boot[511] = 0xaa;
@@ -352,6 +364,23 @@ fixture_layout(fixture_t *f, unsigned variant, unsigned sector_bytes,
 	CHECK(mkdtemp(f->directory) != NULL);
 	f->scratch = open(f->directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 	CHECK(f->scratch != -1);
+}
+
+/* The default fixture root holds exactly two live slots, so shifting them
+ * down one slot to insert the label is lossless.
+ */
+static void
+fixture_add_root_label(fixture_t *f, const char *label)
+{
+	unsigned char root[512];
+
+	CHECK(pread(f->fd, root, sizeof(root), (off_t)f->root_offset) ==
+	    sizeof(root));
+	bcopy(root, root + 32, 64);
+	bzero(root, 32);
+	bcopy(label, root, 11);
+	root[11] = 0x08;
+	write_bytes(f, f->root_offset, root, sizeof(root));
 }
 
 static void
@@ -1885,6 +1914,106 @@ long_records(unsigned char *records, const uint16_t *name, size_t length,
 }
 
 static void
+test_boot_label_without_root_label(void)
+{
+	static const unsigned variants[] = { 12, 16, 32 };
+	static const boot_label_case_t cases[] = {
+		{
+			.name = "named boot label without root label",
+			.boot_label = "FSIMG TEST ", .signature = 0x29,
+			.root_label = NULL,
+			.status = FSIMG_ECORRUPT
+		},
+		{
+			.name = "blank boot label without root label",
+			.boot_label = "           ", .signature = 0x29,
+			.root_label = NULL,
+			.status = FSIMG_ECORRUPT
+		},
+		{
+			.name = "NO NAME boot label without root label",
+			.boot_label = "NO NAME    ", .signature = 0x29,
+			.root_label = NULL,
+			.status = FSIMG_OK
+		},
+		{
+			.name = "matching boot and root labels",
+			.boot_label = "FSIMG TEST ", .signature = 0x29,
+			.root_label = "FSIMG TEST ", .status = FSIMG_OK
+		},
+		{
+			.name = "matching NO NAME boot and root labels",
+			.boot_label = "NO NAME    ", .signature = 0x29,
+			.root_label = "NO NAME    ", .status = FSIMG_OK
+		},
+		{
+			.name = "NO NAME boot label with named root label",
+			.boot_label = "NO NAME    ", .signature = 0x29,
+			.root_label = "FSIMG TEST ", .status = FSIMG_ECORRUPT
+		},
+		{
+			.name = "named boot bytes without extended signature",
+			.boot_label = "FSIMG TEST ", .signature = 0,
+			.root_label = NULL,
+			.status = FSIMG_OK
+		}
+	};
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	unsigned label_offset, signature_offset;
+	fsimg_status_t status;
+
+	for (unsigned v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+		/* BS_VolLab and BS_BootSig differ between FAT32 and FAT12/16. */
+		label_offset = variants[v] == 32 ? 71 : 43;
+		signature_offset = variants[v] == 32 ? 66 : 38;
+		for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			const boot_label_case_t *c = &cases[i];
+			const char *message = c->status == FSIMG_OK ? "" :
+			    "FAT boot and root volume labels disagree";
+			bool complete = c->status == FSIMG_OK;
+
+			fixture_init(&f, variants[v]);
+			write_bytes(&f, label_offset, c->boot_label, 11);
+			write_bytes(&f, signature_offset, &c->signature, 1);
+			/* BPB_BkBootSec selects sector 6 in the fixture. Keep its
+			 * copy identical to the primary boot sector.
+			 */
+			if (variants[v] == 32) {
+				write_bytes(&f, 6 * f.sector_bytes + label_offset,
+				    c->boot_label, 11);
+				write_bytes(&f, 6 * f.sector_bytes + signature_offset,
+				    &c->signature, 1);
+			}
+			if (c->root_label != NULL)
+				fixture_add_root_label(&f, c->root_label);
+			fixture_open(&f);
+			check_fixture_listing(&f, c->name);
+
+			CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader,
+			    NULL) == FSIMG_OK);
+			bzero(&error, sizeof(error));
+			status = fsimg_verify(f.reader, 0, &report, &error);
+			if (status != c->status)
+				fprintf(stderr, "FAT%u %s: expected status %s, got %s\n",
+				    variants[v], c->name, fsimg_status_string(c->status),
+				    fsimg_status_string(status));
+			CHECK(status == c->status);
+			if (strcmp(error.message, message) != 0)
+				fprintf(stderr, "FAT%u %s: expected error.message \"%s\", got \"%s\"\n",
+				    variants[v], c->name, message, error.message);
+			CHECK(strcmp(error.message, message) == 0);
+			if (report.complete != complete)
+				fprintf(stderr, "FAT%u %s: expected report.complete=%d, got %d\n",
+				    variants[v], c->name, complete, report.complete);
+			CHECK(report.complete == complete);
+			fixture_close(&f);
+		}
+	}
+}
+
+static void
 test_volume_labels(void)
 {
 	const unsigned variants[] = { 12, 16, 32 };
@@ -1896,10 +2025,9 @@ test_volume_labels(void)
 	for (unsigned variant = 0; variant < 3; variant++) {
 		for (unsigned scenario = 0; scenario < 9; scenario++) {
 			fixture_init(&f, variants[variant]);
+			/* This test only lists; boot/root label agreement is not checked. */
+			fixture_add_root_label(&f, "FSIMG TEST ");
 			CHECK(pread(f.fd, root, sizeof(root), (off_t)f.root_offset) == sizeof(root));
-			bcopy(root, root + 32, 64);
-			bzero(root, 32);
-			bcopy("FSIMG TEST ", root, 11);
 			root[11] = scenario == 1 ? 0x28 : 0x08;
 			if (scenario == 2)
 				root[11] |= 0x10;
@@ -2494,6 +2622,7 @@ main(int argc, char **argv)
 	}
 	if (argc == 2 && strcmp(argv[1], "--volume-labels") == 0) {
 		test_volume_labels();
+		test_boot_label_without_root_label();
 		return (0);
 	}
 	if (argc == 2 && strcmp(argv[1], "--long-names") == 0) {
@@ -2590,5 +2719,6 @@ main(int argc, char **argv)
 	test_fragmented_verify();
 	test_report_outputs();
 	test_capability_bounds();
+	test_boot_label_without_root_label();
 	return (0);
 }
