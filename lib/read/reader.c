@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
@@ -188,9 +189,15 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 		options = &defaults;
 	}
 	if (options->size != sizeof(*options) ||
-	    options->version != FSIMG_OPTIONS_VERSION || options->flags != 0)
+	    options->version != FSIMG_OPTIONS_VERSION ||
+	    (options->flags & ~FSIMG_READ_ASSUME_IDENTITY) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_READER, "invalid read options size, version or flags"));
+	/* Only a caller naming the format can vouch for its identity. */
+	if ((options->flags & FSIMG_READ_ASSUME_IDENTITY) != 0 &&
+	    options->format == NULL)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_READER, "assumed identity requires a named format"));
 	for (unsigned i = 0; i < 4; i++) {
 		if (options->reserved[i] != 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
@@ -565,6 +572,35 @@ fsimg_verify_payload(fsimg_reader_t *reader, unsigned char *buffer,
 }
 
 fsimg_status_t
+fsimg_reader_identity(fsimg_reader_t *reader, bool holds, const char *refusal,
+    const char *phrase, fsimg_error_t *error)
+{
+	if (holds)
+		return (FSIMG_OK);
+	if ((reader->options.flags & FSIMG_READ_ASSUME_IDENTITY) == 0)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_READER, refusal));
+	if (reader->assumed_identity == NULL)
+		reader->assumed_identity = phrase;
+	return (FSIMG_OK);
+}
+
+/* Full verification certifies the volume as its format, which an assumed
+ * identity is not: the volume fails before any work, the reader untouched,
+ * naming the identity check the open skipped.
+ */
+static fsimg_status_t
+assumed_identity_failed(const fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	char message[sizeof(error->message)];
+
+	snprintf(message, sizeof(message), "%s identity was assumed: %s",
+	    reader->info.format, reader->assumed_identity);
+	return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_VERIFY,
+	    message));
+}
+
+fsimg_status_t
 fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
     fsimg_error_t *error)
 {
@@ -588,6 +624,8 @@ fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
 	if (reader->ops->verify == NULL)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_VERIFY, "format has no full verification"));
+	if (reader->assumed_identity != NULL)
+		return (assumed_identity_failed(reader, error));
 	out->scope = (flags & FSIMG_VERIFY_PAYLOAD) != 0 ?
 	    FSIMG_VALIDATION_PAYLOAD : FSIMG_VALIDATION_STRUCTURAL;
 	/* Full verification checks what delivery omits, so the walker

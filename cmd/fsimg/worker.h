@@ -46,6 +46,10 @@ typedef enum fsimg_confinement {
  * through the library's entry callback (c -v, x -v).
  */
 #define FSIMG_JOB_NAMES 0x20u
+/* Reading only, with a named filesystem: the user vouches for the
+ * identity of the layers the stack names (--force).
+ */
+#define FSIMG_JOB_FORCE 0x40u
 
 /*
  * The worker's single-descriptor capabilities, the prepared descriptors it

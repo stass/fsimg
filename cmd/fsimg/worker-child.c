@@ -892,6 +892,8 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 
 	fsimg_image_options_init(&options);
 	options.stack = request->stack;
+	if ((request->flags & FSIMG_JOB_FORCE) != 0)
+		options.flags |= FSIMG_IMAGE_ASSUME_IDENTITY;
 	options.layers.gpt_sector_bytes = request->layers.gpt_sector_bytes;
 	bcopy(request->compression, options.compression,
 	    sizeof(options.compression));
@@ -997,6 +999,8 @@ read_job(worker_child_t *child, fsimg_error_t *error)
 	options = child->request.read;
 	options.format = format[0] == '\0' ? NULL : format;
 	options.fat_codepage = child->request.codepage;
+	if ((child->request.flags & FSIMG_JOB_FORCE) != 0)
+		options.flags |= FSIMG_READ_ASSUME_IDENTITY;
 	status = fsimg_reader_open(child->ctx, child->volume, &options, &child->reader, error);
 	if (status != FSIMG_OK)
 		return (status);

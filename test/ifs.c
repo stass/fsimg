@@ -1945,7 +1945,7 @@ probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes)
 	fsimg_error_t error;
 	fsimg_status_t status;
 
-	status = fsimg_ifs_format.probe(prefix, length, volume_bytes, &variant,
+	status = fsimg_ifs_format.probe(prefix, length, volume_bytes, false, &variant,
 	    &error);
 	/* A claim names the format's one variant. */
 	CHECK(status != FSIMG_OK || variant == fsimg_ifs_format.variants);

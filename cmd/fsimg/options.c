@@ -66,6 +66,7 @@
 /* getopt_long values of the long-only options, above every short letter. */
 enum {
 	OPT_COMPRESS = 256,
+	OPT_FORCE,
 	OPT_FORMATS,
 	OPT_FREE_SPACE,
 	OPT_INFO,
@@ -119,6 +120,7 @@ static const cli_option_t option_table[] = {
 	{ 'x', "-x", MODES_ALL, 0 },
 	{ 'z', "-z", MODES_IMAGE, 0 },
 	{ OPT_COMPRESS, "--compress", MODES_IMAGE, 0 },
+	{ OPT_FORCE, "--force", MODES_READ, 0 },
 	{ OPT_FORMATS, "--formats", MODES_ALL, 0 },
 	{ OPT_FREE_SPACE, "--free-space", MODES_CREATE, 0 },
 	{ OPT_INFO, "--info", MODES_ALL, 0 },
@@ -133,6 +135,7 @@ static const cli_option_t option_table[] = {
 
 static const struct option long_options[] = {
 	{ "compress", required_argument, NULL, OPT_COMPRESS },
+	{ "force", no_argument, NULL, OPT_FORCE },
 	{ "formats", no_argument, NULL, OPT_FORMATS },
 	{ "free-space", required_argument, NULL, OPT_FREE_SPACE },
 	{ "info", no_argument, NULL, OPT_INFO },
@@ -1446,6 +1449,13 @@ interpret_read(cli_parse_t *parse)
 		if (strcmp(options->scratch, "-") == 0)
 			return (syntax(parse, "-T - conflicts with an image on standard input"));
 		request->input.kind = FSIMG_INPUT_STREAM;
+	}
+	/* --force vouches for a filesystem the user names. */
+	if (option_count(parse, OPT_FORCE) != 0) {
+		if (request->stack.slots[FSIMG_LAYER_FILESYSTEM].state !=
+		    FSIMG_SLOT_NAMED)
+			return (syntax(parse, "--force requires a filesystem in -F"));
+		request->flags |= FSIMG_JOB_FORCE;
 	}
 	if (fsimg_job_format(request)[0] == '\0' || parse->reserved)
 		return (FSIMG_OK);

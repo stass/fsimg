@@ -16,11 +16,11 @@ static fsimg_status_t empty_read(void *, uint64_t, void *, size_t, size_t *,
     fsimg_error_t *);
 static fsimg_status_t empty_size(void *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t fake_probe(unsigned, size_t, fsimg_error_t *);
-static fsimg_status_t fake_probe_0(const unsigned char *, size_t, uint64_t,
+static fsimg_status_t fake_probe_0(const unsigned char *, size_t, uint64_t, bool,
     const fsimg_format_variant_t **, fsimg_error_t *);
-static fsimg_status_t fake_probe_1(const unsigned char *, size_t, uint64_t,
+static fsimg_status_t fake_probe_1(const unsigned char *, size_t, uint64_t, bool,
     const fsimg_format_variant_t **, fsimg_error_t *);
-static fsimg_status_t fake_probe_2(const unsigned char *, size_t, uint64_t,
+static fsimg_status_t fake_probe_2(const unsigned char *, size_t, uint64_t, bool,
     const fsimg_format_variant_t **, fsimg_error_t *);
 static void fake_reset(fsimg_status_t, fsimg_status_t, fsimg_status_t);
 static void test_probe_contract(void);
@@ -74,7 +74,7 @@ fake_probe(unsigned index, size_t length, fsimg_error_t *error)
 
 static fsimg_status_t
 fake_probe_0(const unsigned char *prefix FSIMG_UNUSED, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED,
+    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity FSIMG_UNUSED,
     const fsimg_format_variant_t **variant FSIMG_UNUSED, fsimg_error_t *error)
 {
 	return (fake_probe(0, length, error));
@@ -82,7 +82,7 @@ fake_probe_0(const unsigned char *prefix FSIMG_UNUSED, size_t length,
 
 static fsimg_status_t
 fake_probe_1(const unsigned char *prefix FSIMG_UNUSED, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED,
+    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity FSIMG_UNUSED,
     const fsimg_format_variant_t **variant FSIMG_UNUSED, fsimg_error_t *error)
 {
 	return (fake_probe(1, length, error));
@@ -90,7 +90,7 @@ fake_probe_1(const unsigned char *prefix FSIMG_UNUSED, size_t length,
 
 static fsimg_status_t
 fake_probe_2(const unsigned char *prefix FSIMG_UNUSED, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED,
+    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity FSIMG_UNUSED,
     const fsimg_format_variant_t **variant FSIMG_UNUSED, fsimg_error_t *error)
 {
 	return (fake_probe(2, length, error));
@@ -303,7 +303,7 @@ test_fat_identification_precedes_geometry(void)
 	prefix[513] = 0x8f;
 	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
 	    2880 * 512, &claimed, &error) == FSIMG_EFORMAT);
-	CHECK(fsimg_fat_format.probe(prefix, sizeof(prefix), 2880 * 512,
+	CHECK(fsimg_fat_format.probe(prefix, sizeof(prefix), 2880 * 512, false,
 	    &variant, &error) == FSIMG_EFORMAT);
 	CHECK(strcmp(error.message, "unrecognized volume boot record") == 0);
 	prefix[513] = 0xff;
@@ -358,7 +358,7 @@ test_unsigned_tiny_fat_requires_complete_head(void)
 	CHECK(claimed == &fsimg_fat_format);
 	CHECK(fsimg_format_claim(registry, 1, NULL, volume, 514,
 	    sizeof(volume), &claimed, &error) == FSIMG_EFORMAT);
-	CHECK(fsimg_fat_format.probe(volume, 514, sizeof(volume),
+	CHECK(fsimg_fat_format.probe(volume, 514, sizeof(volume), false,
 	    &variant, &error) == FSIMG_EFORMAT);
 	CHECK(strcmp(error.message, "unrecognized volume boot record") == 0);
 }

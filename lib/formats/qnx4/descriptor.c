@@ -11,7 +11,7 @@
 _Static_assert(QNX4_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
     "the QNX4 link-target limit lies within the entry model's ceiling");
 
-static fsimg_status_t qnx4_probe(const unsigned char *, size_t, uint64_t,
+static fsimg_status_t qnx4_probe(const unsigned char *, size_t, uint64_t, bool,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
 /* The native profile, the only variant: 512-byte blocks, names of up to
@@ -66,6 +66,7 @@ const fsimg_format_t fsimg_qnx4_format = {
  */
 static fsimg_status_t
 qnx4_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
+    bool assume_identity FSIMG_UNUSED,
     const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	*variant = &qnx4_variants[0];

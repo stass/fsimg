@@ -348,17 +348,46 @@ A read-side stack forces the slots it names, forces empty the slots it marks
 `-`, and leaves the rest to detection. `fat32` forces the filesystem decoder
 but still unwraps a DMG and a GPT around it; `fat32/-/-` forces the whole
 stack. A forced layer runs only its own probe and open with full validation;
-an absent signature is `FSIMG_EFORMAT`. Forcing a filesystem narrows the
+an absent signature is `FSIMG_EFORMAT` unless its identity is assumed
+(below). Forcing a filesystem narrows the
 step-3 filesystem probes to that one; `-` in the scheme slot removes the
-scheme probes; `-` in the container slot skips step 2. Forcing never
-disables a check.
+scheme probes; `-` in the container slot skips step 2.
+
+Forcing never disables validation. A forced layer still checks its
+identity, and its absent identity is `FSIMG_EFORMAT`, unless the caller
+vouches for it: with an assumed identity (`--force`,
+`FSIMG_IMAGE_ASSUME_IDENTITY` and `FSIMG_READ_ASSUME_IDENTITY`) every
+layer the stack names, and a compression forced by name, skips its
+identity checks and runs every validation check. Detected layers, and
+slots the stack leaves unspecified or empty, are unaffected. Identity is
+the evidence that the bytes are this layer: the signature or magic, and
+for a trailer its tie to the input length, which the trailer's own
+ranges are checked against regardless. Validation is everything that
+keeps decoding safe: the version and header constants that decide how
+bytes are decoded, checksums, table contents, bounds and declared
+geometry. A signature that also locates what is decoded stays a check,
+since without it nothing is found to decode: ifsboot finds its startup
+header by its signature at a boot-prefix offset, and a forced
+`gpt:sector` reads the `EFI PART` header at that sector. The MBR's
+identity is the `0x55AA` signature and at least one used entry; its
+legal entry fields, the exclusion of a protective `0xEE` entry, which
+makes the disk a GPT, and of an entry starting at sector 0, which makes
+it a bare volume, are validation, since its open relies on every entry
+lying after the MBR sector. A layer whose identity was
+assumed fails full verification with `FSIMG_ECORRUPT` naming the assumed
+check, as a filesystem does
+([format contracts](design-formats.md#format-descriptors-and-profiles));
+listing and extraction proceed. The CLI accepts `--force` only beside a
+named filesystem, and when a read naming a filesystem fails its identity
+check, the error suggests `--force`.
 
 Compression is not a slot, so no stack forces it: the
 [step-1 rule](#peeling-order) decides it whether or not a stack is given,
 and an explicit read-side stack only resolves a step-1 ambiguity. The image
 options force a compression by its registered name instead, as `-z` forces
 gzip; a forced compression runs only its own probe, and an input it does
-not claim fails as any forced layer with an absent signature does.
+not claim fails as any forced layer with an absent signature does,
+unless the caller assumes its identity.
 
 One survey runs every probe a step needs, layers and filesystems alike,
 and counts the claims under one rule: a probe's `FSIMG_EFORMAT` is no
@@ -1266,8 +1295,12 @@ Layers add attack surface before any filesystem byte is read. The rules:
   proves, never from a reused file's old contents or a host's report of its
   holes. Alignment padding, reserved table fields and the MBR code area are
   emitted as zeros.
-* **Forcing selects, never relaxes.** A forced layer runs full validation;
-  the range selector bypasses the scheme but not the slice checks.
+* **Forcing selects, never relaxes validation.** A forced layer runs full
+  validation, an assumed identity included: it waives only the evidence
+  that tells one format from another, never a check that keeps decoding
+  in bounds, and full verification refuses the layer whose identity was
+  assumed. The range selector bypasses the scheme but not the slice
+  checks.
 * **No path from a name.** Partition names and DMG `Name` strings are
   displayed through the CLI's escaping and never used to open anything.
 

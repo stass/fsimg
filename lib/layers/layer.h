@@ -1091,11 +1091,12 @@ void fsimg_disk_plan_codec(const fsimg_disk_plan_t *, char *, size_t);
 
 /* What the filesystem probes, the one forced by name or all of them, say
  * about the volume at a byte range of an I/O object; format receives the
- * identified format's name, empty without a match.
+ * identified format's name, empty without a match. The bool is the
+ * caller vouching for the forced format's identity.
  */
 fsimg_status_t fsimg_volume_claim(fsimg_ctx_t *, fsimg_io_t *,
-    fsimg_session_t *, uint64_t, uint64_t, const char *, fsimg_claim_t *,
-    char [static 16], fsimg_error_t *);
+    fsimg_session_t *, uint64_t, uint64_t, const char *, bool,
+    fsimg_claim_t *, char [static 16], fsimg_error_t *);
 /* A read-only slice of an opened image's file over the container section
  * of that name (lib/layers/image.c), for unwrap.
  */

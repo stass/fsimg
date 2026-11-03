@@ -360,7 +360,14 @@ A format descriptor has independently optional reader and writer operations
 and is the only holder of its format's identity and capabilities. Common
 lifecycle and reporting code never branches on a format. Detection uses one
 bounded probe contract. The [format contracts](design-formats.md#format-descriptors-and-profiles)
-define descriptors and probing. The reader is a lazy iterator with content
+define descriptors and probing. Every format and layer divides its checks
+into identity, the evidence that the bytes are this format, and
+validation, everything that keeps decoding safe. A caller that forces a
+format may assume its identity (`--force`): the driver skips the identity
+checks that failed, records them, and common verification refuses the
+volume; forcing never disables validation
+([detection and forcing](design-layers.md#detection-and-forcing)). The
+reader is a lazy iterator with content
 access to its current entry. The writer consumes a complete logical catalog,
 not necessarily an in-memory tree. Shared code supplies I/O, resources, codecs,
 source access, and diagnostics; format-specific geometry and allocation models

@@ -122,6 +122,8 @@ static void test_corrupt_iso_gpt_is_ambiguous(void);
 static void test_fat_gpt_is_ambiguous(void);
 static void test_mbr_addressable_limit(void);
 static void test_bare_volume(void);
+static void test_assumed_identity_selects_unvouched_fat(void);
+static void test_image_assume_identity_requires_named_slot_or_compression(void);
 static void test_forcing(void);
 static void write_seed(const char *, const memory_disk_t *);
 
@@ -1432,6 +1434,84 @@ test_bare_volume(void)
 	free(disk.bytes);
 }
 
+static void
+test_assumed_identity_selects_unvouched_fat(void)
+{
+	memory_disk_t disk = disk_new(FAT_BYTES);
+	fixture_t f;
+	fsimg_image_options_t image_options;
+	fsimg_read_options_t read_options;
+	fsimg_io_t *volume;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	unsigned char data[900], expected[900];
+	size_t count;
+	unsigned char *file = disk.bytes + 13 * 512 + 32;
+
+	make_fat12(disk.bytes);
+	bzero(disk.bytes, 3);
+	bzero(disk.bytes + 510, 2);
+	for (unsigned table = 0; table < 2; table++) {
+		unsigned char *head = disk.bytes + (1 + table * 6) * 512;
+		head[0] = 0, head[1] = 0, head[2] = 3;
+		/* Keep directory cluster 2; the file follows 3 -> 4 -> EOC. */
+		head[4] = 0x4f, head[5] = 0, head[6] = 0xff, head[7] = 0x0f;
+	}
+	bcopy("HELLO   TXT", file, 11);
+	file[11] = 0x20;
+	put16(file + 26, 3);
+	put32(file + 28, sizeof(expected));
+	for (size_t i = 0; i < sizeof(expected); i++)
+		expected[i] = (unsigned char)(i * 37);
+	bcopy(expected, disk.bytes + 28 * 512, sizeof(expected));
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "fat12", 0, NULL) == FSIMG_OK);
+	CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_AUTOMATIC },
+	    &volume, NULL) == FSIMG_EFORMAT);
+	fsimg_image_free(f.image);
+	f.image = NULL;
+	fsimg_image_options_init(&image_options);
+	CHECK(fsimg_stack_parse("fat12", &image_options.stack, NULL) == FSIMG_OK);
+	image_options.flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(fsimg_image_open(f.ctx, f.io, &image_options, &f.image, NULL) == FSIMG_OK);
+	CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_AUTOMATIC },
+	    &volume, NULL) == FSIMG_OK);
+	fsimg_read_options_init(&read_options);
+	read_options.format = "fat12";
+	read_options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, volume, &read_options, &reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_next(reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/DIR") == 0);
+	CHECK(fsimg_reader_next(reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/HELLO.TXT") == 0);
+	CHECK(fsimg_reader_read_at(reader, 0, data, sizeof(data), &count, NULL) == FSIMG_OK);
+	CHECK(count == sizeof(data) && bcmp(data, expected, sizeof(data)) == 0);
+	CHECK(fsimg_reader_next(reader, &entry, NULL) == FSIMG_DONE);
+	fsimg_reader_free(reader);
+	fsimg_io_free(volume);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void
+test_image_assume_identity_requires_named_slot_or_compression(void)
+{
+	memory_disk_t disk = disk_new(FAT_BYTES);
+	fixture_t f;
+	fsimg_image_options_t options;
+
+	make_fat12(disk.bytes);
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	fsimg_image_free(f.image);
+	f.image = NULL;
+	fsimg_image_options_init(&options);
+	options.flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(fsimg_image_open(f.ctx, f.io, &options, &f.image, NULL) == FSIMG_EINVAL);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
 /* Forcing selects and never relaxes: an absent forced signature is an
  * unrecognized image, and layers this build lacks are unsupported.
  */
@@ -1533,6 +1613,8 @@ main(int argc, char **argv)
 	test_fat_gpt_is_ambiguous();
 	test_mbr_addressable_limit();
 	test_bare_volume();
+	test_assumed_identity_selects_unvouched_fat();
+	test_image_assume_identity_requires_named_slot_or_compression();
 	test_forcing();
 	return (0);
 }

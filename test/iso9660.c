@@ -137,7 +137,7 @@ probe_expect(image_t *image, fsimg_status_t expected, const char *name)
 	size_t prefix = image->length < 17 * BLOCK ? image->length : 17 * BLOCK;
 
 	status = fsimg_iso9660_format.probe(image->bytes, prefix,
-	    image->length, &variant, NULL);
+	    image->length, false, &variant, NULL);
 	cases++;
 	if (status != expected) {
 		fprintf(stderr, "probe %s: expected %d, observed %d\n", name,
@@ -1451,7 +1451,7 @@ test_exclusivity(void)
 	image_t image = image_new();
 
 	for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
-		CHECK(formats[i]->probe(image.bytes, 17 * BLOCK, image.length,
+		CHECK(formats[i]->probe(image.bytes, 17 * BLOCK, image.length, false,
 		    &variant, NULL) == (i == 5 ? FSIMG_OK : FSIMG_EFORMAT));
 	}
 	free(image.bytes);
@@ -1668,7 +1668,7 @@ test_other_format_probes(void)
 		CHECK(fsimg_writer_emit(writer, io, NULL) == FSIMG_OK);
 		CHECK(fsimg_iso9660_format.probe(image.bytes,
 		    image.length < 17 * BLOCK ? image.length : 17 * BLOCK,
-		    image.length, &variant, NULL) == FSIMG_EFORMAT);
+		    image.length, false, &variant, NULL) == FSIMG_EFORMAT);
 		fsimg_io_free(io);
 		fsimg_writer_free(writer);
 		fsimg_ctx_free(ctx);
@@ -5545,7 +5545,7 @@ main(int argc, char **argv)
 		count = fread(prefix, 1, sizeof(prefix), file);
 		CHECK(!ferror(file));
 		CHECK(fclose(file) == 0);
-		CHECK(fsimg_iso9660_format.probe(prefix, count, st.st_size,
+		CHECK(fsimg_iso9660_format.probe(prefix, count, st.st_size, false,
 		    &variant, NULL) == FSIMG_EFORMAT);
 		return (0);
 	}

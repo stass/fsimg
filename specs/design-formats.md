@@ -60,8 +60,27 @@ likewise, and the volume signature selects the variant. Detection follows one bo
   `FSIMG_EFORMAT`.
 * A forced format runs only that descriptor's probe and open, with full
   validation; an absent signature is `FSIMG_EFORMAT`. Forcing selects a
-  decoder; it never skips checks or falls back to another decoder after a
-  failure. A recognized format without a reader is `FSIMG_EUNSUPPORTED`.
+  decoder; it never falls back to another decoder after a failure. A
+  recognized format without a reader is `FSIMG_EUNSUPPORTED`.
+* Every format's checks divide into **identity** and **validation**.
+  Identity is the evidence that the bytes are this format and not another:
+  magic numbers, signatures, OEM names, boot signatures and the reserved
+  values a formatter writes only to be recognized. Validation is everything
+  that keeps decoding untrusted bytes safe and meaningful: the version and
+  layout constants that decide how bytes are decoded, geometry, bounds,
+  checksums, allocation chains, directories and names. Each format's
+  section below names its identity checks; every other check is validation.
+* With an assumed identity (`--force`, `FSIMG_READ_ASSUME_IDENTITY`) the
+  caller vouches that the volume is the format it forces, which the flag
+  requires. The probe and open skip that format's identity checks, so a
+  damaged magic or a formatter that never wrote one does not block
+  reading, and run every validation check. Forcing never disables
+  validation. Each identity check that failed is recorded when the volume
+  opens, and full verification of such a volume fails with
+  `FSIMG_ECORRUPT` before any other work, naming the first check that was
+  assumed: an assumed identity is never certified. Listing, reading and
+  extraction proceed. A volume whose identity checks all pass reads and
+  verifies exactly as without the flag.
 * Recognition establishes neither supported reading, nor writing, nor complete
   validation. Those depend on the opened driver's checks and capabilities.
 
@@ -95,6 +114,16 @@ loads. FAT32 uses the relevant bits and declared active/mirrored table policy;
 it does not silently choose an arbitrary table when copies disagree.
 Full verification checks copy consistency and allocation ownership according
 to the declared policy; normal reads report their narrower scope.
+
+FAT's identity checks are the voucher for the BPB, the PC boot signature
+or the first FAT's echo of the media byte, and the two reserved table
+entries, `FAT[0]` holding the media entry and `FAT[1]` the end-of-chain
+ones. Traversal never reads either entry. The legal fixed BPB, the exFAT
+exclusion, the cluster-count variant and every region and table check are
+validation, so an assumed identity reads an Atari ST disk with no jump,
+no `0x55AA` and garbage in its reserved entries, and still refuses a BPB
+that cannot describe the volume
+([FAT reader](design-fat-reader.md#identification-and-geometry)).
 
 The writer owns variant-specific root-directory handling, long-name slot
 counts, deterministic short aliases, reserved entries, table copies, and FAT32
@@ -162,6 +191,13 @@ behavior, large allocation units, and wide directories within the format limit.
 The [scale acceptance cases](architecture.md#acceptance-contract) test gigantic
 logical volumes independently from large entry and fragment counts.
 
+exFAT's identity checks are the jump `EB 76 90`, the `EXFAT` file
+system name and the `0x55AA` boot signature of the main and backup boot
+sectors. The zero legacy BPB region is a must-be-zero field the
+specification requires and stays validation, as do the boot checksum, the
+extended boot signatures, the revision, the geometry and the agreement of
+the two boot regions.
+
 ## QNX6 Power-Safe
 
 The [QNX6 design](design-qnx6.md) defines classic, bootless, MMI, and extended
@@ -179,6 +215,15 @@ research imports no GPL code. Porsche HDD compatibility also requires exact
 disk composition and any other filesystem present, particularly QNX4; it is
 not implied by a `qnx6` format capability.
 
+QNX6's identity check is the superblock magic, at byte 8192 and in the
+second superblock, in either byte order. The magic also selects the byte
+order and the layout, so under an assumed identity a damaged magic at
+byte 8192 is read as the standard layout, the superblock there decoded in
+the byte order whose header CRC matches, and neither matching is corrupt;
+the bootless and MMI layouts are recognized only by their magic. The
+header CRC, the version, the block size, the bootless and MMI layout
+classifications and every geometry check are validation.
+
 ## QNX4
 
 The [QNX4 design](design-qnx4.md) defines the 512-byte-block, extent-based
@@ -190,6 +235,10 @@ navigation partition; an unobserved value is unsupported, a contradiction is
 corrupt. The [driver design](design-qnx4-driver.md) defines the code. QNX4
 has no magic number: the probe's identity signature is the root record of
 block 2, and `open` completes recognition.
+The identity checks are that record's name `/` and its status byte;
+the root record being a directory, its extent's bounds, and the
+expected empty table records after it are validation, since traversal
+starts from that extent.
 
 The writer reproduces the native formatter's default layout with one
 contiguous extent per object. Native check, mount, modify and remount
@@ -225,6 +274,10 @@ does for QNX6 and QNX4; wrapping a bootable body, built by `mkifs` or
 unwrapped from an existing boot image, is the `ifsboot` container's, gated
 by a native boot.
 
+ImageFS's identity check is the `imagefs` signature at offset 0. The
+header flags that select the byte order, the header bounds, the spare
+words, the table alignment and the checksum are validation.
+
 ## HFS Plus and HFSX
 
 The [HFS Plus design](design-hfsplus.md) defines Apple's HFS Plus volume
@@ -233,6 +286,10 @@ macOS observation: the volume header at byte 1024 and its alternate, forks
 of eight extents continued in the extents overflow tree, the allocation
 bitmap, and the catalog and attributes B-trees. HFSX's case sensitivity is
 the catalog header's comparison type, never inferred from the signature.
+The identity check is the volume header's signature, `H+` or `HX`; under
+an assumed identity the forced name selects the variant the signature
+would. The version, the block size, the forks, the B-tree headers and
+everything after them are validation.
 Names are decomposed UTF-16 compared under pinned tables that native
 observation accepts row for row. The reader resolves file hard links,
 decodes transparent compression of the zlib, LZVN and LZFSE types, reads
@@ -261,7 +318,9 @@ cloned data streams, transparent compression, snapshots and sealed volumes.
 The probe's identity signature is the `NXSB` magic with the superblock's
 object kind and identifier; `open` selects the newest complete checkpoint
 and one volume, chosen by the `volume=` read setting when the container
-holds several, and a snapshot by `snapshot=`. Encryption and Fusion are
+holds several, and a snapshot by `snapshot=`. The identity check
+is the `NXSB` magic; the object kind and identifier, the checksums and
+every checkpoint and tree check are validation. Encryption and Fusion are
 recognized and unsupported. The [driver design](design-apfs-driver.md)
 defines the code.
 
@@ -281,7 +340,10 @@ descriptor, a file set, file entries with allocation descriptors and
 directories of file identifier descriptors with OSTA compressed Unicode
 names. Its probe's identity signature is the recognition sequence's
 `BEA01`, `NSR02` or `NSR03` and `TEA01`, and `open` completes recognition
-from the anchor. The reader covers physical, metadata, sparable and virtual
+from the anchor. The identity checks are the recognition sequence's
+identifiers; the anchor and every descriptor's tag identifier, checksum,
+CRC and location are validation, since they locate and frame every
+structure the reader decodes. The reader covers physical, metadata, sparable and virtual
 partitions, each behind its own acceptance gate, and reads an ISO 9660
 bridge through its UDF view only. Its acceptance tables follow the
 standards and are corroborated by the mkudffs, genisoimage and pycdlib
@@ -312,7 +374,13 @@ platforms are closed. Full verification walks every view the image offers.
 The [driver design](design-iso9660-driver.md) defines the code.
 
 The probe's identity signature is `CD001` at block 16 with a known
-descriptor type, so its own prefix is 34816 bytes. Common detection sizes
+descriptor type, so its own prefix is 34816 bytes. The identity
+check is the `CD001` standard identifier of the first volume descriptor,
+at block 16. The same identifier on every later descriptor frames the
+descriptor set against the blocks after it, such as a UDF bridge's
+recognition sequence, and is validation, as are the descriptor type and
+version, the both-endian fields, the block size and every directory and
+path check. Common detection sizes
 its buffer from the maximum descriptor prefix, including UDF's 131072 bytes. An isohybrid image, whose system area also holds a partition
 table, draws a scheme claim as well; since ISO 9660 reserves that area,
 detection reads the bare volume and reports the scheme

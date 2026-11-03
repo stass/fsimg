@@ -1734,6 +1734,29 @@ published_names(fsimg_cli_display_t *display)
 	}
 }
 
+/* Whether to suggest --force: a read other than W that names a
+ * filesystem without --force failed with FSIMG_EFORMAT from the reader,
+ * or from detection rather than from a layer, which names itself in path.
+ * That is how an absent identity fails; the status cannot tell it from
+ * the few other refusals of a forced name, such as a FAT variant that
+ * contradicts the cluster count, which --force then reports unchanged.
+ */
+static bool
+force_would_help(const fsimg_cli_display_t *display,
+    const fsimg_error_t *error)
+{
+	const fsimg_worker_request_t *request = &display->options->request;
+
+	return (error->status == FSIMG_EFORMAT &&
+	    (error->operation == FSIMG_OP_READER ||
+	    (error->operation == FSIMG_OP_IMAGE && error->path[0] == '\0')) &&
+	    !fsimg_job_has_roots(request->kind) &&
+	    request->kind != FSIMG_JOB_VERIFY &&
+	    (request->flags & FSIMG_JOB_FORCE) == 0 &&
+	    request->stack.slots[FSIMG_LAYER_FILESYSTEM].state ==
+	    FSIMG_SLOT_NAMED);
+}
+
 static void
 failure(fsimg_cli_display_t *display)
 {
@@ -1814,6 +1837,9 @@ failure(fsimg_cli_display_t *display)
 		    (unsigned long long)error->limit, (unsigned long long)error->observed);
 	if (error->offset_valid)
 		append(display, " at byte %llu", (unsigned long long)error->offset);
+	if (force_would_help(display, error))
+		append(display, "; use --force to read it as %s anyway",
+		    fsimg_job_format(&display->options->request));
 	append(display, "\n");
 	if (error->output_state == FSIMG_OUTPUT_INCOMPLETE)
 		append(display, "fsimg: output is incomplete\n");

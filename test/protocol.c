@@ -40,6 +40,7 @@ static void test_job_zstd_levels_roundtrip_and_reject_wide_wire_value(void);
 static void test_zstd_unverified_record_requires_verified_zstd(void);
 static void test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void);
 static void test_xz_unverified_record_requires_verified_xz(void);
+static void test_job_force_roundtrips_only_for_reads_with_named_filesystem(void);
 static void test_job_layers(void);
 static void test_job_catalogue(void);
 static void other_value(const fsimg_setting_t *, fsimg_setting_value_t *);
@@ -1278,6 +1279,50 @@ test_job_selection(void)
 	    &capabilities, NULL) == FSIMG_EINVAL);
 }
 
+static void
+test_job_force_roundtrips_only_for_reads_with_named_filesystem(void)
+{
+	static const fsimg_job_kind_t reads[] = {
+		FSIMG_JOB_INFO, FSIMG_JOB_LIST, FSIMG_JOB_EXTRACT, FSIMG_JOB_VERIFY
+	};
+	static const fsimg_job_kind_t writes[] = { FSIMG_JOB_CREATE, FSIMG_JOB_PLAN };
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	for (size_t i = 0; i < sizeof(reads) / sizeof(reads[0]); i++) {
+		fsimg_worker_request_init(&request);
+		request.kind = reads[i];
+		request.flags = FSIMG_JOB_FORCE;
+		CHECK(fsimg_stack_parse("fat12", &request.stack, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		CHECK(decoded.flags == FSIMG_JOB_FORCE && decoded.kind == reads[i]);
+		CHECK(strcmp(fsimg_job_format(&decoded), "fat12") == 0);
+		CHECK(fsimg_stack_parse("gpt", &request.stack, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_EINVAL);
+		bzero(&request.stack, sizeof(request.stack));
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_EINVAL);
+	}
+	for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); i++) {
+		fsimg_worker_request_init(&request);
+		request.kind = writes[i];
+		request.root_paths = image_root;
+		request.root_count = 1;
+		request.flags = FSIMG_JOB_FORCE;
+		CHECK(fsimg_stack_parse("fat12", &request.stack, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_EINVAL);
+	}
+}
+
 /* Every layer setting crosses the job wire unchanged. Unknown MBR flags,
  * an identifier past 32 bits or present without its flag, a gzip level
  * past 32 bits, nonzero padding and unterminated text each fail, so a
@@ -2184,6 +2229,7 @@ main(int argc, char **argv)
 	test_read_job_members_roundtrip();
 	test_select_volume_replaces_read_job_members();
 	test_read_job_zero_members_is_invalid();
+	test_job_force_roundtrips_only_for_reads_with_named_filesystem();
 	test_job_layers();
 	test_job_catalogue();
 	test_image_records();

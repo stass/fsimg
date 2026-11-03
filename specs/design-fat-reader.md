@@ -39,6 +39,25 @@ unsupported feature of a recognized volume, whichever form identified it.
 A boot record identified by the signature alone has its media echo checked
 at open (below).
 
+FAT's identity checks are the voucher, the PC boot signature or the media
+echo, and the reserved entries checked at open, `FAT[0]` holding the media
+entry and `FAT[1]` a reserved end-of-chain value. A caller that forces a
+FAT name and assumes its identity (`--force`) waives all three: the Atari
+ST formatter writes neither voucher and leaves its reserved entries as
+garbage, and traversal never reads `FAT[0]` or `FAT[1]`, since no cluster
+number below 2 is valid. Everything else is validation and still runs: the
+legal BPB, the exFAT exclusion (an exFAT boot record has no legal BPB in
+any case), the variant match, every region and table check, the mirror
+comparison of the reserved entries and all traversal checks. Open records
+the first waived check that failed, in the order voucher, `FAT[0]`,
+`FAT[1]`, and full verification then fails with `FSIMG_ECORRUPT` before
+walking the volume, for example `fat12 identity was assumed: the boot
+record has no PC boot signature and the first FAT does not repeat the
+media byte`. An assumed `FAT[1]` holds no clean or error flags worth
+decoding, so the volume reports the flagless state FAT12 always reports,
+clean and without an I/O error. A volume whose identity checks all pass
+reads and verifies exactly as without the flag.
+
 Opening validates the sector size, power-of-two sectors per cluster,
 reserved area, table count, table capacity, root layout, and declared length
 against its input slice.

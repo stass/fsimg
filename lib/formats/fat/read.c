@@ -149,6 +149,7 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	uint32_t first, second;
 	size_t prefix_bytes, transferred;
 	fsimg_status_t status;
+	bool reserved_valid;
 
 	status = fsimg_io_get_size(reader->input, &length, error);
 	if (status != FSIMG_OK)
@@ -159,7 +160,8 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_fat_geometry_decode(prefix, prefix_bytes, length, &geometry,
+	status = fsimg_fat_geometry_decode(prefix, prefix_bytes, length,
+	    (reader->options.flags & FSIMG_READ_ASSUME_IDENTITY) != 0, &geometry,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -179,19 +181,34 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	reader->content_domain.length = (uint64_t)geometry.clusters *
 	    geometry.cluster_bytes;
 	reader->content_domain.unit_bytes = geometry.cluster_bytes;
-	/* FAT[0] echoes the media byte. Identification may rest on the PC boot
-	 * signature alone, and otherwise checked only the leading bytes of the
-	 * first table. Check the whole entry in the active table before
-	 * comparing mirrors: a non-FAT boot sector with that signature whose
-	 * fields happen to form a legal BPB then fails for that reason, not as
-	 * disagreeing copies.
+	/* The voucher and both reserved entries are FAT's identity evidence,
+	 * checked in that order through fsimg_reader_identity(): a caller
+	 * assuming the identity waives them, and full verification refuses
+	 * the volume. Traversal never reads FAT[0] or FAT[1], since no cluster
+	 * number below 2 is valid; everything else, the mirror comparison
+	 * included, is validation and always runs. Without the assumption
+	 * geometry decoding has already refused an unvouched boot record.
+	 */
+	status = fsimg_reader_identity(reader, geometry.vouched,
+	    "unrecognized volume boot record", "the boot record has no PC boot "
+	    "signature and the first FAT does not repeat the media byte", error);
+	if (status != FSIMG_OK)
+		return (status);
+	/* FAT[0] echoes the media byte. A voucher may be the PC boot signature
+	 * alone, or the leading bytes of the first table. Check the whole
+	 * entry in the active table before comparing mirrors: a non-FAT boot
+	 * sector with that signature whose fields happen to form a legal BPB
+	 * then fails for that reason, not as disagreeing copies.
 	 */
 	status = table_value(reader, geometry.active_table, 0, &first, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (first != fsimg_fat_media_entry(&geometry))
-		return (fsimg_fat_corrupt(error,
-		    "FAT media descriptor does not match the BPB"));
+	status = fsimg_reader_identity(reader,
+	    first == fsimg_fat_media_entry(&geometry),
+	    "FAT media descriptor does not match the BPB",
+	    "FAT[0] does not repeat the media byte", error);
+	if (status != FSIMG_OK)
+		return (status);
 	/* The mirrors must agree on both reserved entries; FAT[0] is already
 	 * checked, so this call only compares its copies.
 	 */
@@ -201,10 +218,14 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	status = fsimg_fat_table_get(reader, 1, &second, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if ((geometry.variant == 12 && second < 0xff8) ||
-	    (geometry.variant == 16 && (second & 0x3fff) != 0x3fff) ||
-	    (geometry.variant == 32 && (second & 0x03ffffff) != 0x03ffffff))
-		return (fsimg_fat_corrupt(error, "invalid FAT reserved entries"));
+	reserved_valid = (geometry.variant == 12 && second >= 0xff8) ||
+	    (geometry.variant == 16 && (second & 0x3fff) == 0x3fff) ||
+	    (geometry.variant == 32 && (second & 0x03ffffff) == 0x03ffffff);
+	status = fsimg_reader_identity(reader, reserved_valid,
+	    "invalid FAT reserved entries",
+	    "FAT[1] is not a reserved end-of-chain entry", error);
+	if (status != FSIMG_OK)
+		return (status);
 	strcpy(reader->info.format, variant->info.name);
 	strcpy(reader->info.profile, variant->info.profile);
 	reader->info.valid = FSIMG_VOLUME_GEOMETRY;
@@ -214,9 +235,12 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	reader->info.allocation_unit_bytes = geometry.cluster_bytes;
 	reader->info.time_basis = FSIMG_TIME_WALL;
 	reader->info.scope = FSIMG_VALIDATION_HEADER;
-	reader->info.clean = geometry.variant == 12 ||
+	/* FAT12 has no clean or error flags, and an assumed FAT[1] holds none
+	 * worth decoding: both report the flagless state.
+	 */
+	reader->info.clean = geometry.variant == 12 || !reserved_valid ||
 	    (second & (geometry.variant == 16 ? 0x8000u : 0x08000000u)) != 0;
-	reader->info.io_error = geometry.variant != 12 &&
+	reader->info.io_error = geometry.variant != 12 && reserved_valid &&
 	    (second & (geometry.variant == 16 ? 0x4000u : 0x04000000u)) == 0;
 	if (prefix[geometry.variant == 32 ? 66 : 38] == 0x29) {
 		status = fsimg_fat_label(prefix + (geometry.variant == 32 ? 71 : 43),

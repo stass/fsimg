@@ -144,3 +144,90 @@ class CliTest < Minitest::Test
   end
 
 end
+
+class CliTest < Minitest::Test
+  def test_named_fat_without_force_suggests_assuming_identity
+    write_atari_floppy
+    {
+      "fat12/-/-" => "unrecognized volume boot record",
+      "fat12" => "no partition table or filesystem recognized"
+    }.each do |stack, reason|
+      result = invoke(arguments: ["t", "-F", stack, "-f", "atari.img"], expected: 1)
+      assert_includes(result.stderr.lines,
+        "fsimg: #{reason}; use --force to read it as fat12 anyway\n".b, stack)
+    end
+  end
+
+  def test_force_lists_and_extracts_atari_file_across_clusters
+    payload = write_atari_floppy
+    result = invoke(arguments: ["t", "-F", "fat12", "--force", "-f", "atari.img"])
+    assert_equal(["\"/HELLO.TXT\"\n".b], result.stdout.lines)
+    invoke(arguments: ["x", "-F", "fat12", "--force", "-f", "atari.img"])
+    assert_equal(payload, (@root / "atari/HELLO.TXT").binread)
+  end
+
+  def test_force_verification_reports_assumed_identity
+    write_atari_floppy
+    result = invoke(arguments: ["W", "-F", "fat12", "--force", "-f", "atari.img"], expected: 1)
+    assert_includes(result.stderr, "fat12 identity was assumed: the boot record has no PC boot " \
+      "signature and the first FAT does not repeat the media byte".b)
+  end
+
+  def test_force_requires_a_named_filesystem_and_a_read_mode
+    result = invoke(arguments: ["t", "--force", "-f", "unused.img"], expected: 2)
+    assert_includes(result.stderr, "--force requires a filesystem in -F".b)
+    result = invoke(arguments: ["c", "--force", "-F", "fat12", "-f", "unused.img"], expected: 2)
+    assert_includes(result.stderr, "does not apply to mode".b)
+  end
+
+  def test_automatic_detection_failure_does_not_suggest_force
+    write_atari_floppy
+    result = invoke(arguments: ["t", "-f", "atari.img"], expected: 1)
+    assert_includes(result.stderr, "no partition table or filesystem recognized".b)
+    refute_includes(result.stderr, "--force".b)
+  end
+
+  def test_force_verifies_a_signed_fat_volume
+    human_image
+    invoke(arguments: ["W", "-F", "fat12", "--force", "-f", "human.img"])
+  end
+
+  def test_force_preserves_iso_listing_and_verification
+    image_fixture(name: "force.iso", format: "iso9660")
+    plain = invoke(arguments: ["t", "-F", "iso9660", "-f", "force.iso"])
+    forced = invoke(arguments: ["t", "-F", "iso9660", "--force", "-f", "force.iso"])
+    assert_includes(plain.stdout.lines, "\"/HELLO.TXT\"\n".b)
+    assert_equal(plain.stdout, forced.stdout)
+    invoke(arguments: ["W", "-F", "iso9660", "--force", "-f", "force.iso"])
+  end
+
+  private
+
+  def write_atari_floppy
+    # Independent FAT12 layout: 720 sectors, two three-sector FATs, a
+    # one-sector fixed root, and 712 data clusters. Cluster 2 points to 3.
+    # Neither boot signature nor reserved FAT entries vouch for identity.
+    image = "\0".b * (720 * 512)
+    image[0, 3] = "\x60\x38\0".b
+    image[11, 2] = [512].pack("v")
+    image.setbyte(13, 1)
+    image[14, 2] = [1].pack("v")
+    image.setbyte(16, 2)
+    image[17, 2] = [16].pack("v")
+    image[19, 2] = [720].pack("v")
+    image.setbyte(21, 0xF8)
+    image[22, 2] = [3].pack("v")
+    [512, 4 * 512].each do |offset|
+      image[offset, 6] = [0, 0, 3, 3, 0xF0, 0xFF].pack("C*")
+    end
+    root = 7 * 512
+    image[root, 11] = "HELLO   TXT".b
+    image.setbyte(root + 11, 0x20)
+    image[root + 26, 2] = [2].pack("v")
+    payload = (0...900).map { (_1 * 37) % 256 }.pack("C*")
+    image[root + 28, 4] = [payload.bytesize].pack("V")
+    image[8 * 512, payload.bytesize] = payload
+    (@root / "atari.img").binwrite(image)
+    payload
+  end
+end

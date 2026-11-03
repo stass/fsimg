@@ -997,7 +997,9 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    get_field(raw, JOB_SANDBOX) > FSIMG_SANDBOX_OFF ||
 	    (get_field(raw, JOB_FLAGS) & ~(FSIMG_JOB_RECURSIVE | FSIMG_JOB_PAYLOAD |
 	    FSIMG_JOB_VERBOSE | FSIMG_JOB_SKIP_UNSUPPORTED | FSIMG_JOB_STDOUT |
-	    FSIMG_JOB_NAMES)) != 0 ||
+	    FSIMG_JOB_NAMES | FSIMG_JOB_FORCE)) != 0 ||
+	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_FORCE) != 0 &&
+	    fsimg_job_has_roots((fsimg_job_kind_t)get_field(raw, JOB_KIND))) ||
 	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_STDOUT) != 0 &&
 	    get_field(raw, JOB_KIND) != FSIMG_JOB_CREATE) ||
 	    ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_NAMES) != 0 &&
@@ -1087,6 +1089,10 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		    JOB_FORMAT_BYTES);
 	}
 	if (fsimg_stack_validate(&request->stack, error) != FSIMG_OK)
+		return (invalid_job(error));
+	if ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_FORCE) != 0 &&
+	    request->stack.slots[FSIMG_LAYER_FILESYSTEM].state !=
+	    FSIMG_SLOT_NAMED)
 		return (invalid_job(error));
 	for (job_field_t field = JOB_DEPTH; field <= JOB_FDS; field++) {
 		if (get_field(raw, field) > UINT32_MAX)

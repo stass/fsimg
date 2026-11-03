@@ -6,7 +6,7 @@
 #include "format.h"
 #include "write-iso9660.h"
 
-static fsimg_status_t iso_probe(const unsigned char *, size_t, uint64_t,
+static fsimg_status_t iso_probe(const unsigned char *, size_t, uint64_t, bool,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
 /* One public name for every view and level; the view is a read setting.
@@ -71,8 +71,8 @@ const fsimg_format_t fsimg_iso9660_format = {
  */
 static fsimg_status_t
 iso_probe(const unsigned char *prefix, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED, const fsimg_format_variant_t **variant,
-    fsimg_error_t *error)
+    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity FSIMG_UNUSED,
+    const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	const unsigned char *descriptor;
 	uint32_t space_size;

@@ -45,6 +45,15 @@ them, and the catalog refuses them. `t` marks a socket `=`, `t -v` shows
 `socket` with `device=native,MAJOR,MINOR`. Extraction never creates them:
 it fails naming the entry, or `-k` skips and counts it.
 
+`--force` reads a volume whose identity checks fail as the filesystem
+`-F` names, keeping every validation check: an Atari ST FAT12 floppy, with
+no x86 jump, no 0x55AA and garbage in its first FAT entries, lists and
+extracts with `fsimg t -F fat12 --force`. `W` on such a volume fails,
+naming the identity check that was assumed. A read that names a
+filesystem and fails its identity check suggests `--force`. The library
+flags are `FSIMG_READ_ASSUME_IDENTITY` and `FSIMG_IMAGE_ASSUME_IDENTITY`.
+FAT is the one format whose identity checks they waive.
+
 CLI information can report declared filesystem geometry beyond the available
 input when headers remain readable. Missing referenced structures or content
 retain filesystem errors; informational geometry does not enlarge selected

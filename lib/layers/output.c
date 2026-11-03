@@ -477,7 +477,7 @@ identify_volume(fsimg_ctx_t *ctx, fsimg_io_t *volume, uint64_t length,
 
 	fsimg_session_init(&session, ctx, "volume identification", 0);
 	status = fsimg_volume_claim(ctx, volume, &session, 0, length, forced,
-	    &claim, name, error);
+	    false, &claim, name, error);
 	if (status == FSIMG_OK && claim != FSIMG_CLAIM_FORMAT)
 		name[0] = '\0';
 	return (status);
@@ -579,7 +579,7 @@ check_carried_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
 	/* A corrupt or unsupported claim is a claim; the open reports it. */
 	fsimg_session_init(&session, ctx, "volume identification", 0);
 	status = fsimg_volume_claim(ctx, input, &session, 0, length, carried,
-	    &claim, filesystem, error);
+	    false, &claim, filesystem, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (claim == FSIMG_CLAIM_NONE) {

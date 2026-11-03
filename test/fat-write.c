@@ -376,7 +376,7 @@ test_roundtrip(const char *format)
 		fsimg_io_free(output);
 		check_contents(&fixture, &sinks[pass]);
 		CHECK(fsimg_fat_geometry_decode(sinks[pass].bytes,
-		    sinks[pass].length, info.volume_bytes, &geometry, NULL) == FSIMG_OK);
+		    sinks[pass].length, info.volume_bytes, false, &geometry, NULL) == FSIMG_OK);
 		/* Allocations form a prefix. Every free byte must overwrite poison. */
 		used_end = geometry.data_offset + info.allocated_bytes;
 		for (uint64_t i = used_end; i < info.volume_bytes; i++)
@@ -1295,7 +1295,7 @@ test_root_entry_geometry(void)
 				CHECK(info.root_entries == expected);
 				CHECK(fsimg_load_le16(sink.bytes + 17) == expected);
 				CHECK(fsimg_fat_geometry_decode(sink.bytes,
-				    sink.length, sink.length, &geometry, NULL) == FSIMG_OK);
+				    sink.length, sink.length, false, &geometry, NULL) == FSIMG_OK);
 				/* BPB reserved sectors + FAT count * FAT sectors. */
 				root_offset = (fsimg_load_le16(sink.bytes + 14) +
 				    (uint64_t)sink.bytes[16] *
@@ -1765,7 +1765,7 @@ test_minimize_tiny_files_and_constraints(void)
 		CHECK(info[0].allocation_unit_bytes == 2048);
 		CHECK(info[0].free_bytes >= 12345);
 		CHECK(fsimg_fat_geometry_decode(sinks[0].bytes, sinks[0].length,
-		    sinks[0].length, &geometry, NULL) == FSIMG_OK);
+		    sinks[0].length, false, &geometry, NULL) == FSIMG_OK);
 		if (c != 2)
 			CHECK(geometry.root_entries == 16);
 		check_minimize_image(&fixture, &sinks[0], &info[0], 2, 1);

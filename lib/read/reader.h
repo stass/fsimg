@@ -113,6 +113,12 @@ struct fsimg_reader {
 	 * only.
 	 */
 	fsimg_read_options_t options;
+	/* The first identity check a forced open waived although it failed,
+	 * a static phrase such as "FAT[0] does not repeat the media byte", or
+	 * NULL. Only fsimg_reader_identity() sets it, so fsimg_verify(),
+	 * which refuses the volume while it is set, sees every waived check.
+	 */
+	const char	*assumed_identity;
 	fsimg_volume_info_t info;
 	fsimg_entry_t	 entry;
 	/* The current file's initialized length: bytes below it come from
@@ -160,6 +166,15 @@ fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
 fsimg_status_t fsimg_reader_set_link_target(fsimg_reader_t *,
     const void *, size_t, fsimg_error_t *);
 fsimg_status_t fsimg_reader_stable(fsimg_reader_t *, fsimg_error_t *);
+/* The one way a driver's open treats an identity check, the evidence that
+ * the bytes are its format: when holds is false it fails with
+ * FSIMG_ECORRUPT and the refusal message, unless the caller assumes the
+ * identity (FSIMG_READ_ASSUME_IDENTITY), when it records the phrase in
+ * assumed_identity for full verification to refuse and returns FSIMG_OK.
+ * A validation check never goes through it.
+ */
+fsimg_status_t fsimg_reader_identity(fsimg_reader_t *, bool, const char *,
+    const char *, fsimg_error_t *);
 /* Account the walker's current entry in a verification report, the one
  * place a verifier counts entries: a delivered directory, or a delivered
  * file or other entry with its logical bytes. An entry that is not

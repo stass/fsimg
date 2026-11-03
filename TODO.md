@@ -553,6 +553,26 @@
 
 ## Planned features
 
+* [Medium] **Assumed identity for the remaining formats and layers**
+  (`lib/formats/*/descriptor.c`, `lib/layers/`,
+  [format contracts](specs/design-formats.md#format-descriptors-and-profiles),
+  [detection and forcing](specs/design-layers.md#detection-and-forcing)):
+  `--force` and the assume-identity flags skip FAT's identity checks only.
+  exFAT, ISO 9660, QNX4, QNX6 and ImageFS receive `assume_identity` in
+  their probes and ignore it, and the containers, schemes and compressions
+  receive nothing, so they still refuse a damaged magic. Split each one's
+  identity checks from its validation as its spec section names them,
+  record the waived check in `reader->assumed_identity` (or the layer's
+  equivalent, which full verification of the image must refuse), and test
+  each with a damaged signature. Until then the CLI's `--force` hint also
+  appears for those formats, where the flag changes nothing.
+
+* [Low] **Fuzz the assumed-identity path** (`fuzz/fat.c`): with
+  `--force`, any bytes with a legal BPB reach FAT traversal with arbitrary
+  reserved entries. The FAT fuzzer opens with default options; add an
+  iteration forcing `fat12`/`fat16`/`fat32` with
+  `FSIMG_READ_ASSUME_IDENTITY`.
+
 * [Low] **Native evidence for 1024-byte link targets on QNX4 and QNX6**
   (`tools/qnx/`, `docs/qnx4-research.md`, `docs/qnx6-research.md`): the
   QNX4 and QNX6 limits of 1023 bytes are the bound fsimg holds evidence

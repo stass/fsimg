@@ -339,6 +339,43 @@ and
 .Cm i
 also accept:
 .Bl -tag -width Ds
+.It Fl Fl force
+Assume the identity of every layer
+.Fl F
+names, and of a compression forced with
+.Fl Fl compress
+or
+.Fl z :
+skip the checks that tell one format from another, such as a magic number,
+a signature or FAT's boot signature and media echo, and keep every check
+of geometry, bounds, checksums, chains, directories and names.
+Of the formats and layers fsimg reads, FAT alone has such checks waived:
+for every other one the option reads exactly as a plain
+.Fl F
+does.
+It requires a filesystem in
+.Fl F ;
+without one it is a syntax error.
+An Atari ST floppy, which has neither an x86 jump nor 0x55AA and leaves its
+first FAT entries as garbage, reads with
+.Ql fsimg t -F fat12 --force -f disk.st .
+.Cm t ,
+.Cm x
+and
+.Cm i
+proceed;
+.Cm W
+fails, naming the identity check that was assumed, since such an image is
+not a valid volume of its format.
+When a read other than
+.Cm W
+whose
+.Fl F
+names a filesystem fails because that filesystem's identity is absent, the
+error ends with
+.Ql use --force to read it as NAME anyway ;
+an image no format recognizes under automatic detection draws no such
+suggestion.
 .It Fl Fl partition Ns = Ns Ar N | Ns Cm name= Ns Ar text | Ns Cm type= Ns Ar name
 The partition holding the volume: slot
 .Ar N ,
@@ -732,6 +769,11 @@ check the DMG block-table and sparse-image checksums.
 A container field no known rule checks, hbcifs's 0x14 and 0x1c, is named as
 unverified beside the container and makes the verification incomplete;
 every other check still passes or fails the command.
+A volume read with
+.Fl Fl force
+whose identity checks failed fails
+.Cm W
+at once, naming the first assumed check.
 It performs no repair.
 .Sh CREATION
 Operands are host paths, as for

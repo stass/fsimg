@@ -9,7 +9,7 @@
 _Static_assert(QNX6_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
     "the QNX6 link-target limit lies within the entry model's ceiling");
 
-static fsimg_status_t qnx6_probe(const unsigned char *, size_t, uint64_t,
+static fsimg_status_t qnx6_probe(const unsigned char *, size_t, uint64_t, bool,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
 /* The classic profile, read and written at every classic block size. Files
@@ -65,8 +65,8 @@ const fsimg_format_t fsimg_qnx6_format = {
  */
 static fsimg_status_t
 qnx6_probe(const unsigned char *prefix, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED, const fsimg_format_variant_t **variant,
-    fsimg_error_t *error)
+    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity FSIMG_UNUSED,
+    const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	const unsigned char *header;
 	uint32_t block_size;

@@ -55,6 +55,11 @@ struct fsimg_image {
 	fsimg_layer_options_t layers;
 	/* The compression the options force, NULL to detect one. */
 	const fsimg_layer_t *forced_compression;
+	/* The caller vouches for the identity of each layer it names
+	 * (FSIMG_IMAGE_ASSUME_IDENTITY); the forced filesystem's probe
+	 * receives it.
+	 */
+	bool		 assume_identity;
 	/* The adopted spool, NULL once the container step proves it unused;
 	 * spooled is its read-only view when it holds the file.
 	 */
@@ -128,7 +133,7 @@ static size_t probe_bytes(const fsimg_layer_t *);
 static size_t survey_bytes(fsimg_layer_kind_t, const fsimg_layer_t *, size_t);
 static fsimg_status_t probe_layer(const fsimg_layer_t *, const probe_input_t *,
     fsimg_error_t *);
-static fsimg_status_t survey(unsigned, const probe_input_t *, const char *,
+static fsimg_status_t survey(unsigned, const probe_input_t *, const char *, bool,
     fsimg_survey_t *, fsimg_error_t *);
 static const char *forced_filesystem(const fsimg_image_t *);
 static fsimg_status_t validate_forced_stack(const fsimg_image_options_t *,
@@ -286,6 +291,19 @@ fsimg_image_open_stream(fsimg_ctx_t *ctx, int stream_fd,
 	return (open_image(ctx, NULL, stream_fd, options, out, error));
 }
 
+/* Whether the stack names any layer, which a caller vouching for
+ * identities must.
+ */
+static bool
+names_layer(const fsimg_stack_t *stack)
+{
+	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
+		if (stack->slots[slot].state == FSIMG_SLOT_NAMED)
+			return (true);
+	}
+	return (false);
+}
+
 /* What an open checks before it adopts the spool or reads a byte. */
 static fsimg_status_t
 check_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
@@ -301,7 +319,7 @@ check_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
 	if (file != NULL && fsimg_io_context(file) != ctx)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "image input belongs to another context"));
-	if (options->flags != 0)
+	if ((options->flags & ~FSIMG_IMAGE_ASSUME_IDENTITY) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "unknown image option flags"));
 	if (options->spool_fd < -1)
@@ -316,6 +334,10 @@ check_open(fsimg_ctx_t *ctx, fsimg_io_t *file,
 	    sizeof(options->compression), false, compression, error);
 	if (status != FSIMG_OK)
 		return (status);
+	if ((options->flags & FSIMG_IMAGE_ASSUME_IDENTITY) != 0 &&
+	    *compression == NULL && !names_layer(&options->stack))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "assumed identity requires a named layer"));
 	return (validate_forced_stack(options, *compression, error));
 }
 
@@ -378,6 +400,8 @@ open_image(fsimg_ctx_t *ctx, fsimg_io_t *file, int stream_fd,
 	image->forced = options->stack;
 	image->layers = options->layers;
 	image->forced_compression = compression;
+	image->assume_identity =
+	    (options->flags & FSIMG_IMAGE_ASSUME_IDENTITY) != 0;
 	image->spool = spool;
 	fsimg_session_init(&image->session, ctx, "image layers", 0);
 	status = peel_compression(image, stream_fd, error);
@@ -504,8 +528,8 @@ decide_compression(fsimg_image_t *image, const probe_input_t *input,
 			image->compression = forced;
 		return (layer_failed(forced, status, error));
 	}
-	status = survey(SURVEY(FSIMG_LAYER_COMPRESSION), input, NULL, counts,
-	    error);
+	status = survey(SURVEY(FSIMG_LAYER_COMPRESSION), input, NULL, false,
+	    counts, error);
 	if (status != FSIMG_OK || compressions->claims == 0)
 		return (status);
 	/* A compression claimed, so every other claim here makes it
@@ -513,7 +537,7 @@ decide_compression(fsimg_image_t *image, const probe_input_t *input,
 	 */
 	kinds = SURVEY(FSIMG_LAYER_SCHEME) | SURVEY(FSIMG_LAYER_FILESYSTEM) |
 	    (seekable ? SURVEY(FSIMG_LAYER_CONTAINER) : 0);
-	status = survey(kinds, input, NULL, others, error);
+	status = survey(kinds, input, NULL, false, others, error);
 	if (status != FSIMG_OK)
 		return (status);
 	claims = compressions->claims;
@@ -657,13 +681,15 @@ claim_volume(fsimg_image_t *image, uint64_t offset, uint64_t length,
     fsimg_error_t *error)
 {
 	return (fsimg_volume_claim(image->ctx, image->disk, &image->session,
-	    offset, length, forced_filesystem(image), claim, format, error));
+	    offset, length, forced_filesystem(image), image->assume_identity,
+	    claim, format, error));
 }
 
 fsimg_status_t
 fsimg_volume_claim(fsimg_ctx_t *ctx, fsimg_io_t *io, fsimg_session_t *session,
-    uint64_t offset, uint64_t length, const char *forced, fsimg_claim_t *claim,
-    char format[static FORMAT_NAME_BYTES], fsimg_error_t *error)
+    uint64_t offset, uint64_t length, const char *forced, bool assume_identity,
+    fsimg_claim_t *claim, char format[static FORMAT_NAME_BYTES],
+    fsimg_error_t *error)
 {
 	fsimg_survey_t counts[SURVEY_KINDS];
 	const fsimg_survey_t *filesystems = &counts[FSIMG_LAYER_FILESYSTEM];
@@ -680,8 +706,8 @@ fsimg_volume_claim(fsimg_ctx_t *ctx, fsimg_io_t *io, fsimg_session_t *session,
 	if (status != FSIMG_OK)
 		return (status);
 	input.prefix = prefix;
-	status = survey(SURVEY(FSIMG_LAYER_FILESYSTEM), &input, forced, counts,
-	    error);
+	status = survey(SURVEY(FSIMG_LAYER_FILESYSTEM), &input, forced,
+	    assume_identity, counts, error);
 	fsimg_dealloc(prefix);
 	if (status != FSIMG_OK)
 		return (status);
@@ -809,7 +835,7 @@ probe_layer(const fsimg_layer_t *layer, const probe_input_t *input,
  */
 static fsimg_status_t
 survey(unsigned kinds, const probe_input_t *input,
-    const char *forced_filesystem, fsimg_survey_t *counts,
+    const char *forced_filesystem, bool assume_identity, fsimg_survey_t *counts,
     fsimg_error_t *error)
 {
 	const fsimg_layer_t *layer;
@@ -828,9 +854,9 @@ survey(unsigned kinds, const probe_input_t *input,
 	}
 	if ((kinds & SURVEY(FSIMG_LAYER_FILESYSTEM)) == 0)
 		return (FSIMG_OK);
-	return (fsimg_format_identify(forced_filesystem, input->prefix,
-	    input->length, input->bytes, &counts[FSIMG_LAYER_FILESYSTEM],
-	    error));
+	return (fsimg_format_identify(forced_filesystem, assume_identity,
+	    input->prefix, input->length, input->bytes,
+	    &counts[FSIMG_LAYER_FILESYSTEM], error));
 }
 
 /*
@@ -876,8 +902,8 @@ identify_container(fsimg_image_t *image, const fsimg_layer_t *forced,
 			*container = forced;
 		return (status);
 	}
-	status = survey(SURVEY(FSIMG_LAYER_CONTAINER), &input, NULL, counts,
-	    error);
+	status = survey(SURVEY(FSIMG_LAYER_CONTAINER), &input, NULL, false,
+	    counts, error);
 	fsimg_dealloc(prefix);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1092,7 +1118,7 @@ identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
 	}
 	status = survey(SURVEY(FSIMG_LAYER_SCHEME) |
 	    SURVEY(FSIMG_LAYER_FILESYSTEM), &input, forced_filesystem(image),
-	    counts, error);
+	    image->assume_identity, counts, error);
 	fsimg_dealloc(prefix);
 	if (status != FSIMG_OK)
 		return (status);

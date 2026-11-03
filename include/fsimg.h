@@ -601,7 +601,14 @@ typedef struct fsimg_layer_inputs {
 	fsimg_io_t	*ifsboot_prefix;
 } fsimg_layer_inputs_t;
 
-/* No image option flags are defined; flags must be zero.
+/* FSIMG_IMAGE_ASSUME_IDENTITY: the caller vouches for the identity of
+ * every layer it names, each slot the stack names and the compression
+ * option, which requires at least one of them; detected layers are
+ * unaffected. A named layer whose identity checks fail is then read as
+ * that layer instead of failing with FSIMG_EFORMAT. Validation (geometry,
+ * bounds, structures, checksums) is never skipped, and a format without a
+ * separable identity check reads exactly as without the flag. No other
+ * flag is defined; flags must hold no other bit.
  *
  * compression forces the input's compression, as -z does: a registered
  * compression's name, NUL-terminated, whose probe alone runs at the
@@ -619,6 +626,8 @@ typedef struct fsimg_layer_inputs {
  * container decodes into it, as hbcifs does, and otherwise closes it, and
  * open_stream() requires it.
  */
+#define FSIMG_IMAGE_ASSUME_IDENTITY 0x01u
+
 typedef struct fsimg_image_options {
 	size_t		 size;
 	uint32_t	 version;
@@ -1077,6 +1086,15 @@ typedef enum fsimg_iso_view {
 	FSIMG_ISO_VIEW_JOLIET = 2,
 	FSIMG_ISO_VIEW_PRIMARY = 3
 } fsimg_iso_view_t;
+
+/* FSIMG_READ_ASSUME_IDENTITY: the caller vouches that the volume is the
+ * format it names, which the flag requires (FSIMG_EINVAL without one).
+ * Opening then skips that format's identity checks, the evidence that the
+ * bytes are this format, and keeps every validation check. fsimg_verify()
+ * on a volume whose identity checks failed fails with FSIMG_ECORRUPT
+ * naming the check that was assumed. No other flag is defined.
+ */
+#define FSIMG_READ_ASSUME_IDENTITY 0x01u
 
 typedef struct fsimg_read_options {
 	size_t		 size;

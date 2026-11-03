@@ -98,11 +98,14 @@ fsimg_fat_media_entry(const fat_geometry_t *g)
 
 /* boot holds the first length bytes of the volume: the boot record and
  * the rest of the identification prefix, which is all identification reads
- * (specs/design-fat-reader.md#identification-and-geometry).
+ * (specs/design-fat-reader.md#identification-and-geometry). With
+ * assume_identity the caller vouches for FAT, so a boot record with
+ * neither voucher decodes, marked unvouched; every BPB check still runs.
  */
 fsimg_status_t
 fsimg_fat_geometry_decode(const unsigned char *boot, size_t length,
-    uint64_t input_bytes, fat_geometry_t *g, fsimg_error_t *error)
+    uint64_t input_bytes, bool assume_identity, fat_geometry_t *g,
+    fsimg_error_t *error)
 {
 	static const unsigned char exfat_reserved[53] = { 0 };
 	uint64_t total_sectors, fat_sectors, root_sectors, data_sector, capacity;
@@ -121,7 +124,8 @@ fsimg_fat_geometry_decode(const unsigned char *boot, size_t length,
 	 * from being reported as corrupt FAT. Every check after them is
 	 * corruption or an unsupported feature of a recognized FAT volume.
 	 */
-	if (!pc_boot_signature(boot) && !media_echoed(boot, length))
+	g->vouched = pc_boot_signature(boot) || media_echoed(boot, length);
+	if (!g->vouched && !assume_identity)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "unrecognized volume boot record"));
 	/* exFAT zeroes the legacy BPB region through byte 63. OEM text alone is

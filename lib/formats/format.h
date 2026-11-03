@@ -29,6 +29,13 @@ struct fsimg_format_variant {
  * FSIMG_OK it also names the variant it identified, so a claim reported
  * without opening the volume names a public format.
  *
+ * assume_identity is true only for a forced format whose caller vouches
+ * for its identity (FSIMG_READ_ASSUME_IDENTITY): the probe then skips its
+ * identity checks and runs every validation check, so the bytes still
+ * decode safely; the open waives the same checks through
+ * fsimg_reader_identity(), which records them. A format whose identity is
+ * inseparable from its layout ignores it.
+ *
  * reader and writer are independently optional.
  *
  * exact_volume is true for a format whose volume must end where its slot
@@ -52,7 +59,7 @@ struct fsimg_format {
 	const fsimg_format_variant_t *variants;
 	size_t		 variant_count;
 	size_t		 probe_bytes;
-	fsimg_status_t	(*probe)(const unsigned char *, size_t, uint64_t,
+	fsimg_status_t	(*probe)(const unsigned char *, size_t, uint64_t, bool,
 			    const fsimg_format_variant_t **, fsimg_error_t *);
 	fsimg_status_t	(*byte_order)(const unsigned char *, size_t,
 			    fsimg_byte_order_t *, fsimg_error_t *);
@@ -78,7 +85,8 @@ extern const fsimg_format_t fsimg_iso9660_format;
  * claim's verdict and reason are kept with its claimant, a filesystem
  * format (with its variant on a match) or an image layer. A survey that
  * ran a forced probe alone keeps that probe's verdict even when it does
- * not claim, since its absent signature is the answer.
+ * not claim, since its absent signature is the answer. assume_identity
+ * reaches the forced probe alone (struct fsimg_format).
  */
 struct fsimg_layer;
 
@@ -106,14 +114,15 @@ fsimg_claim_t fsimg_survey_claim(const fsimg_survey_t *);
 const fsimg_format_t *fsimg_format_find(const char *,
     const fsimg_format_variant_t **);
 void fsimg_format_survey(const fsimg_format_t *const *, size_t,
-    const fsimg_format_t *, const unsigned char *, size_t, uint64_t,
+    const fsimg_format_t *, bool, const unsigned char *, size_t, uint64_t,
     fsimg_survey_t *);
 /* The registry's survey for the image layers: every reader format, or the
  * one named by forced_name, which must name a format with a reader. The
  * prefix needs at most fsimg_format_probe_bytes(forced_name) bytes.
  */
-fsimg_status_t fsimg_format_identify(const char *, const unsigned char *,
-    size_t, uint64_t, fsimg_survey_t *, fsimg_error_t *);
+fsimg_status_t fsimg_format_identify(const char *, bool,
+    const unsigned char *, size_t, uint64_t, fsimg_survey_t *,
+    fsimg_error_t *);
 size_t fsimg_format_probe_bytes(const char *);
 fsimg_status_t fsimg_format_claim(const fsimg_format_t *const *, size_t,
     const fsimg_format_t *, const unsigned char *, size_t, uint64_t,
