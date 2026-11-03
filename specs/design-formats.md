@@ -196,7 +196,12 @@ system name and the `0x55AA` boot signature of the main and backup boot
 sectors. The zero legacy BPB region is a must-be-zero field the
 specification requires and stays validation, as do the boot checksum, the
 extended boot signatures, the revision, the geometry and the agreement of
-the two boot regions.
+the two boot regions. Detection still needs the zero region to tell an
+exFAT boot sector from a FAT one carrying the same name; under an assumed
+identity a nonzero byte there is `FSIMG_ECORRUPT`, as open reports it.
+The boot checksum covers the jump, the name and `0x55AA` as they are, so an
+assumed identity reads a volume whose formatter wrote other bytes there and
+sealed them, not one whose identity was damaged after formatting.
 
 ## QNX6 Power-Safe
 

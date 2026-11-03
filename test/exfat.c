@@ -2165,6 +2165,147 @@ test_minimize_tie_prefers_recommended_cluster_count(void)
 	}
 }
 
+static void
+seal_identity_boot_region(exfat_fixture_t *f, unsigned sector)
+{
+	unsigned char *region = f->image + sector * 512;
+	uint32_t checksum = 0;
+
+	for (size_t i = 0; i < 11 * 512; i++) {
+		if (i == 106 || i == 107 || i == 112)
+			continue;
+		checksum = (checksum >> 1) | (checksum << 31);
+		checksum += region[i];
+	}
+	for (unsigned i = 0; i < 512; i += 4)
+		put32(region + 11 * 512 + i, checksum);
+}
+
+static void
+check_exfat_assumed_identity(exfat_fixture_t *f, const char *message)
+{
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	const fsimg_entry_t *entry;
+	unsigned char data[1024], expected[1024];
+	size_t count;
+
+	fsimg_read_options_init(&options);
+	options.format = "exfat";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &error) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/Data.bin") == 0);
+	CHECK(entry->size == sizeof(data));
+	CHECK(fsimg_reader_read_at(f->reader, 0, data, sizeof(data), &count,
+	    NULL) == FSIMG_OK);
+	CHECK(count == sizeof(data));
+	bzero(expected, sizeof(expected));
+	for (size_t i = 0; i < 512; i++)
+		expected[i] = (unsigned char)(i * 37);
+	expected[512] = 0x7b;
+	CHECK(bcmp(data, expected, sizeof(data)) == 0);
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_DONE);
+	CHECK(entry == NULL);
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f->reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	CHECK(!report.complete);
+	CHECK(strcmp(error.message, message) == 0);
+}
+
+static void
+test_exfat_assumed_identity_reads_volume_without_jump(void)
+{
+	exfat_fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	fixture_new(&f);
+	bzero(f.image, 3);
+	seal_identity_boot_region(&f, 0);
+	fsimg_read_options_init(&options);
+	options.format = "exfat";
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_EFORMAT);
+	check_exfat_assumed_identity(&f, "exfat identity was assumed: "
+	    "the main boot sector lacks the exFAT jump, name or boot signature");
+	fixture_free(&f);
+}
+
+static void
+test_exfat_assumed_identity_reads_volume_without_backup_signature(void)
+{
+	exfat_fixture_t f;
+
+	fixture_new(&f);
+	bzero(f.image + 12 * 512 + 510, 2);
+	seal_identity_boot_region(&f, 12);
+	check_exfat_assumed_identity(&f, "exfat identity was assumed: "
+	    "the backup boot sector lacks the exFAT jump, name or boot signature");
+	fixture_free(&f);
+}
+
+static void
+test_exfat_assumed_identity_rejects_invalid_boot_checksum(void)
+{
+	exfat_fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	fixture_new(&f);
+	bzero(f.image, 3);
+	fsimg_read_options_init(&options);
+	options.format = "exfat";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "invalid exFAT boot checksum") == 0);
+	fixture_free(&f);
+}
+
+static void
+test_exfat_assumed_identity_rejects_nonzero_must_be_zero(void)
+{
+	exfat_fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	fixture_new(&f);
+	bzero(f.image, 3);
+	f.image[11] = 1;
+	seal_identity_boot_region(&f, 0);
+	fsimg_read_options_init(&options);
+	options.format = "exfat";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "nonzero exFAT MustBeZero bytes") == 0);
+	fixture_free(&f);
+}
+
+static void
+test_exfat_intact_volume_with_assume_identity_verifies(void)
+{
+	exfat_fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+
+	fixture_new(&f);
+	fsimg_read_options_init(&options);
+	options.format = "exfat";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_free(&f);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2274,5 +2415,10 @@ main(int argc, char **argv)
 	test_benign_entries(true);
 	test_label_validation();
 	test_upcase_work_limit();
+	test_exfat_assumed_identity_reads_volume_without_jump();
+	test_exfat_assumed_identity_reads_volume_without_backup_signature();
+	test_exfat_assumed_identity_rejects_invalid_boot_checksum();
+	test_exfat_assumed_identity_rejects_nonzero_must_be_zero();
+	test_exfat_intact_volume_with_assume_identity_verifies();
 	return (0);
 }

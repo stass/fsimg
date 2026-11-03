@@ -30,9 +30,19 @@ boot_region(fsimg_reader_t *reader, uint64_t base, exfat_geometry_t *g,
 	status = fsimg_reader_bytes(reader, base, boot, sizeof(boot), &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (bcmp(boot, "\xeb\x76\x90" "EXFAT   ", 11) != 0 ||
-	    boot[510] != 0x55 || boot[511] != 0xaa)
-		return (exfat_corrupt(error, "invalid exFAT boot identity or signature"));
+	/* The jump, the name and 0x55AA are the identity evidence; a caller
+	 * assuming the identity waives them, and every check below is
+	 * validation. The checksum still covers these bytes as they are.
+	 */
+	status = fsimg_reader_identity(reader,
+	    bcmp(boot, "\xeb\x76\x90" "EXFAT   ", 11) == 0 &&
+	    boot[510] == 0x55 && boot[511] == 0xaa,
+	    "invalid exFAT boot identity or signature", base == 0 ?
+	    "the main boot sector lacks the exFAT jump, name or boot signature" :
+	    "the backup boot sector lacks the exFAT jump, name or boot signature",
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
 	if (boot[108] < 9 || boot[108] > 12 || boot[109] > 25 - boot[108])
 		return (exfat_corrupt(error, "invalid exFAT sector or cluster shift"));
 	g->sector_bytes = 1u << boot[108];
