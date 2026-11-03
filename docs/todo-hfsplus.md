@@ -41,7 +41,11 @@ the evidence and provenance.
   `specs/design-layers.md`): the layer design refuses `ULFO` chunks as
   unsupported. Once stage 5 imports the LZFSE decoder, the DMG reader can
   decode them through the same wrapper.
-* [Low] **Apple Partition Map** (`lib/layers/`, `specs/design-layers.md`):
-  older Mac disk images partition with APM, which the layers do not read,
-  so their HFS Plus volumes are reachable only through `--offset` and
-  `--length`.
+* [Medium] **Apple Partition Map** (`lib/layers/`, `specs/design-layers.md`):
+  older Mac disk images and CDs partition with APM, which the layers do not
+  read, so their volumes are reachable only through `--offset` and
+  `--length`. A read-only APM scheme (driver descriptor map, partition map
+  entries, 512- and 2048-byte blocks) is independent of the HFS Plus reader
+  and can land first. Real specimen: the Firefox 1.5.0.1 UDZO DMG
+  (archive.org; `~/fsimg-corpus/edge/dmg/`) holds a DDM, an APM and one
+  `Apple_HFS` partition carrying HFS Plus.
