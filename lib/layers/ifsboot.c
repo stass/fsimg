@@ -277,7 +277,8 @@ static const struct boot_machine *find_machine(uint32_t);
 static fsimg_status_t check_bounds(const boot_header_t *, uint64_t,
     fsimg_error_t *);
 static fsimg_status_t ifsboot_probe(const unsigned char *, size_t,
-    const unsigned char *, size_t, uint64_t, fsimg_error_t *);
+    const unsigned char *, size_t, uint64_t, fsimg_identity_t *,
+    fsimg_error_t *);
 static fsimg_status_t read_header(const fsimg_container_input_t *,
     boot_header_t *, fsimg_error_t *);
 static fsimg_status_t read_bytes(const fsimg_container_input_t *, uint64_t,
@@ -547,10 +548,14 @@ decode_header(const unsigned char *prefix, size_t length, uint64_t file_bytes,
 	return (check_bounds(header, file_bytes, error));
 }
 
+/* The startup signature both identifies the header and locates it among
+ * the boot-prefix offsets, so nothing is waived for an assumed identity.
+ */
 static fsimg_status_t
 ifsboot_probe(const unsigned char *prefix, size_t prefix_length,
     const unsigned char *tail FSIMG_UNUSED, size_t tail_length FSIMG_UNUSED,
-    uint64_t file_bytes, fsimg_error_t *error)
+    uint64_t file_bytes, fsimg_identity_t *identity FSIMG_UNUSED,
+    fsimg_error_t *error)
 {
 	boot_header_t header;
 

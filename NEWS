@@ -53,7 +53,19 @@ naming the identity check that was assumed. A read that names a
 filesystem and fails its identity check suggests `--force`. The library
 flags are `FSIMG_READ_ASSUME_IDENTITY` and `FSIMG_IMAGE_ASSUME_IDENTITY`.
 Every filesystem honours them: FAT, exFAT, ISO 9660, QNX4, QNX6 and
-ImageFS; containers, partition schemes and compressions do not.
+ImageFS.
+
+`--force` also vouches for the layers `-F` names and a compression `-z`
+or `--compress` forces, and needs only one of them: an MBR without its
+0x55AA signature reads with `fsimg t -F mbr --force`, and so do a VHD
+whose size tie fails, or whose cookie is gone under a matching checksum,
+a sparse image, hbcifs or DMG without its magic or trailer tie, and a
+gzip image whose first magic is damaged. Every validation check still
+applies, `W` fails naming the layer and the assumed check, and a read
+that fails because a layer it forces lacks its identity suggests
+`--force` naming that layer. GPT, ifsboot, xz and zstd have no identity
+check to waive: their signatures locate the headers that are decoded,
+or the codec library checks them.
 
 CLI information can report declared filesystem geometry beyond the available
 input when headers remain readable. Missing referenced structures or content

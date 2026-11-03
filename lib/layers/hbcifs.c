@@ -60,7 +60,8 @@ static const unsigned char hbcifs_field_18[4] = { 0x02, 0x01, 0x01, 0x00 };
 static fsimg_status_t hbcifs_failure(fsimg_error_t *, fsimg_status_t,
     const char *);
 static fsimg_status_t hbcifs_probe(const unsigned char *, size_t,
-    const unsigned char *, size_t, uint64_t, fsimg_error_t *);
+    const unsigned char *, size_t, uint64_t, fsimg_identity_t *,
+    fsimg_error_t *);
 static size_t keep_history(unsigned char *, size_t);
 static fsimg_status_t stream_failure(const fsimg_lzo1x_decoder_t *,
     fsimg_error_t *, const char *);
@@ -114,7 +115,8 @@ hbcifs_failure(fsimg_error_t *error, fsimg_status_t status,
 static fsimg_status_t
 hbcifs_probe(const unsigned char *prefix, size_t length,
     const unsigned char *tail FSIMG_UNUSED, size_t tail_length FSIMG_UNUSED,
-    uint64_t file_bytes, fsimg_error_t *error)
+    uint64_t file_bytes, fsimg_identity_t *identity FSIMG_UNUSED,
+    fsimg_error_t *error)
 {
 	if (length < sizeof(hbcifs_identity) ||
 	    bcmp(prefix + HEADER_IDENTITY, hbcifs_identity,
@@ -342,7 +344,7 @@ hbcifs_open(const fsimg_container_input_t *input, fsimg_container_t *out,
 	if (status != FSIMG_OK)
 		return (status);
 	status = hbcifs_probe(header, sizeof(header), NULL, 0,
-	    input->file_bytes, error);
+	    input->file_bytes, NULL, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (input->spool == NULL)

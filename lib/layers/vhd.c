@@ -60,7 +60,8 @@ typedef struct vhd_plan {
 
 static fsimg_status_t vhd_corrupt(fsimg_error_t *, const char *);
 static fsimg_status_t vhd_probe(const unsigned char *, size_t,
-    const unsigned char *, size_t, uint64_t, fsimg_error_t *);
+    const unsigned char *, size_t, uint64_t, fsimg_identity_t *,
+    fsimg_error_t *);
 static fsimg_status_t footer_check(const unsigned char *, uint64_t,
     fsimg_error_t *);
 static fsimg_status_t read_footer(const fsimg_container_input_t *,
@@ -121,7 +122,7 @@ vhd_corrupt(fsimg_error_t *error, const char *check)
 static fsimg_status_t
 vhd_probe(const unsigned char *prefix, size_t prefix_length,
     const unsigned char *tail, size_t tail_length, uint64_t file_bytes,
-    fsimg_error_t *error)
+    fsimg_identity_t *identity FSIMG_UNUSED, fsimg_error_t *error)
 {
 	uint64_t data_offset;
 	uint32_t type;
@@ -161,7 +162,8 @@ footer_check(const unsigned char *footer, uint64_t file_bytes,
 	uint32_t sum;
 	fsimg_status_t status;
 
-	status = vhd_probe(NULL, 0, footer, VHD_FOOTER_BYTES, file_bytes, error);
+	status = vhd_probe(NULL, 0, footer, VHD_FOOTER_BYTES, file_bytes, NULL,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
 	sum = 0;

@@ -95,7 +95,7 @@ typedef struct gzip_encoder {
 } gzip_encoder_t;
 
 static fsimg_status_t gzip_probe(const unsigned char *, size_t,
-    fsimg_error_t *);
+    fsimg_identity_t *, fsimg_error_t *);
 static fsimg_status_t gzip_decode(fsimg_spool_input_t *, fsimg_spool_t *,
     bool *, fsimg_error_t *);
 static fsimg_status_t gzip_plan(const fsimg_layer_options_t *, uint32_t,
@@ -145,7 +145,8 @@ const fsimg_compression_ops_t fsimg_gzip_compression = {
 };
 
 static fsimg_status_t
-gzip_probe(const unsigned char *prefix, size_t length, fsimg_error_t *error)
+gzip_probe(const unsigned char *prefix, size_t length,
+    fsimg_identity_t *identity FSIMG_UNUSED, fsimg_error_t *error)
 {
 	if (length < 4 || prefix[0] != 0x1f || prefix[1] != 0x8b ||
 	    prefix[2] != GZIP_METHOD_DEFLATE || (prefix[3] & GZIP_RESERVED) != 0)
@@ -268,7 +269,7 @@ read_header(gzip_decoder_t *decoder, fsimg_error_t *error)
 			    "bytes follow the last gzip member"));
 		if (status != FSIMG_OK)
 			return (status);
-		if (i == 3 && gzip_probe(header, 4, error) != FSIMG_OK)
+		if (i == 3 && gzip_probe(header, 4, NULL, error) != FSIMG_OK)
 			return (gzip_corrupt(error, decoder->member == 1 ?
 			    "gzip header is invalid" :
 			    "bytes follow the last gzip member"));

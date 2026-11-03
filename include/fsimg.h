@@ -607,8 +607,11 @@ typedef struct fsimg_layer_inputs {
  * unaffected. A named layer whose identity checks fail is then read as
  * that layer instead of failing with FSIMG_EFORMAT. Validation (geometry,
  * bounds, structures, checksums) is never skipped, and a format without a
- * separable identity check reads exactly as without the flag. No other
- * flag is defined; flags must hold no other bit.
+ * separable identity check reads exactly as without the flag.
+ * fsimg_image_verify() on an image a named layer's failed identity check
+ * was waived for fails with FSIMG_ECORRUPT once the scheme is detected,
+ * before any verification pass, naming the layer and the check. No other flag is defined; flags must hold no other
+ * bit.
  *
  * compression forces the input's compression, as -z does: a registered
  * compression's name, NUL-terminated, whose probe alone runs at the

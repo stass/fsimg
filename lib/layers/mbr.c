@@ -38,9 +38,9 @@ typedef struct mbr_entry {
 } mbr_entry_t;
 
 static bool decode_entry(const unsigned char *, mbr_entry_t *);
-static bool partition_table_shape(const unsigned char *);
+static bool partition_table_shape(const unsigned char *, fsimg_identity_t *);
 static fsimg_status_t mbr_probe(const unsigned char *, size_t, uint64_t,
-    fsimg_error_t *);
+    fsimg_identity_t *, fsimg_error_t *);
 static fsimg_status_t mbr_corrupt(fsimg_error_t *, const char *, unsigned,
     unsigned);
 static fsimg_status_t mbr_open(const fsimg_scheme_input_t *,
@@ -95,22 +95,22 @@ decode_entry(const unsigned char *raw, mbr_entry_t *entry)
 	    entry->type != 0 && entry->sectors != 0);
 }
 
-/* The identity of a partition table, since a FAT boot sector carries the
- * same signature: the signature, every entry unused or legal, at least
- * one used, none of GPT's protective type, so a hybrid MBR is a GPT disk,
- * and none starting at sector 0. Such an entry would contain the table
- * itself; the writers that record one (isohybrid, mformat, mkfs.fat
- * --mbr, mkudffs) describe the volume beginning there, which is then read
- * as a bare volume.
+/* The shape of a partition table, since a FAT boot sector carries the
+ * same signature. Identity, which an assumed identity waives: the
+ * signature and at least one used entry. Validation, which holds always:
+ * every entry unused or legal, none of GPT's protective type, so a hybrid
+ * MBR is a GPT disk, and none starting at sector 0. Such an entry would
+ * contain the table itself; the writers that record one (isohybrid,
+ * mformat, mkfs.fat --mbr, mkudffs) describe the volume beginning there,
+ * which is then read as a bare volume, and open relies on every entry
+ * lying after the MBR sector.
  */
 static bool
-partition_table_shape(const unsigned char *sector)
+partition_table_shape(const unsigned char *sector, fsimg_identity_t *identity)
 {
 	mbr_entry_t entry;
 	unsigned used;
 
-	if (sector[MBR_SIGNATURE] != 0x55 || sector[MBR_SIGNATURE + 1] != 0xaa)
-		return (false);
 	used = 0;
 	for (unsigned i = 0; i < MBR_SLOTS; i++) {
 		if (!decode_entry(sector + MBR_ENTRIES + i * MBR_ENTRY_BYTES, &entry))
@@ -121,14 +121,20 @@ partition_table_shape(const unsigned char *sector)
 			return (false);
 		used++;
 	}
-	return (used != 0);
+	return (fsimg_identity_holds(identity, sector[MBR_SIGNATURE] == 0x55 &&
+	    sector[MBR_SIGNATURE + 1] == 0xaa,
+	    "the MBR has no 0x55AA signature") &&
+	    fsimg_identity_holds(identity, used != 0,
+	    "the MBR has no used partition entry"));
 }
 
 static fsimg_status_t
 mbr_probe(const unsigned char *prefix, size_t length,
-    uint64_t disk_bytes FSIMG_UNUSED, fsimg_error_t *error)
+    uint64_t disk_bytes FSIMG_UNUSED, fsimg_identity_t *identity,
+    fsimg_error_t *error)
 {
-	if (length < MBR_SECTOR_BYTES || !partition_table_shape(prefix))
+	if (length < MBR_SECTOR_BYTES ||
+	    !partition_table_shape(prefix, identity))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no MBR partition table"));
 	return (FSIMG_OK);
@@ -154,8 +160,8 @@ mbr_corrupt(fsimg_error_t *error, const char *check, unsigned slot,
 }
 
 /*
- * Decode the four slots and require each used one, which identity already
- * places after the MBR sector, to end within the disk and within the 2^32
+ * Decode the four slots and require each used one, which the shape's
+ * validation already places after the MBR sector, to end within the disk and within the 2^32
  * sectors an entry can address, and not to overlap another used slot.
  * Extended partitions are listed with their type; they hold logical
  * partitions this profile does not read.
@@ -176,7 +182,7 @@ mbr_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 	    sizeof(sector), &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (!partition_table_shape(sector))
+	if (!partition_table_shape(sector, input->identity))
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
 		    "MBR partition table changed after it was identified"));
 	disk_sectors = input->disk_bytes / MBR_SECTOR_BYTES;

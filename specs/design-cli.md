@@ -217,12 +217,14 @@ identity checks, the magic numbers and signatures that tell one format from
 another, and keeps every validation check
 ([format contracts](design-formats.md#format-descriptors-and-profiles)), so
 `fsimg t -F fat12 --force -f atari.st` reads an Atari ST floppy that has
-neither an x86 jump nor `0x55AA`. It requires a filesystem in `-F`;
-without one it is a syntax error. `W` on a volume or layer whose identity
+neither an x86 jump nor `0x55AA`. It requires `-F` to name a layer, or a
+compression forced with `--compress` or `-z`; without one it is a syntax
+error, as it is for the worker's job decode. `W` on a volume or layer whose identity
 was assumed fails, naming the assumed check; `t`, `x` and `i` proceed. When
-a read other than `W` whose `-F` names a filesystem fails because that
-filesystem's identity is absent, the error ends with `; use --force to read it as NAME
-anyway`. A failure under automatic detection never suggests it.
+a read other than `W` fails because the identity of a filesystem `-F`
+names, or of a layer `-F` or `-z` forces, is absent, the error ends with
+`; use --force to read it as NAME anyway`, NAME being that filesystem or
+layer. A failure under automatic detection never suggests it.
 
 Compression is not a slot: it wraps the whole image on its way to or from
 the file. On create, `--compress=NAME` selects the compression the registry

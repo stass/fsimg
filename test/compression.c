@@ -1436,7 +1436,7 @@ test_xz_headers_indexes_and_checks_reject_damage(void)
 		cut.length = keep;
 		/* Forcing xz requires its complete six-byte signature. */
 		if (keep < 6) {
-			CHECK(fsimg_xz_compression.probe(xz.bytes, keep, NULL) ==
+			CHECK(fsimg_xz_compression.probe(xz.bytes, keep, NULL, NULL) ==
 			    FSIMG_EFORMAT);
 			continue;
 		}
@@ -2333,7 +2333,7 @@ test_zstd_legacy_frames_are_never_decoded(void)
 	append(&joined, legacy.bytes, legacy.length);
 	CHECK(zstd_expect_failure(&joined, FSIMG_ECORRUPT,
 	    "trailing bytes that are not a frame at compressed byte 12") == 3);
-	CHECK(fsimg_zstd_compression.probe(raw, sizeof(raw), &error) ==
+	CHECK(fsimg_zstd_compression.probe(raw, sizeof(raw), NULL, &error) ==
 	    FSIMG_EFORMAT);
 	CHECK(strcmp(error.message, "no zstd signature") == 0);
 	fixture_init(&f, 0);

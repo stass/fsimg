@@ -305,7 +305,8 @@ static fsimg_status_t dmg_corrupt(fsimg_error_t *, const char *);
 static bool koly_range_end(const unsigned char *, size_t, uint64_t *);
 static bool ranges_overlap(uint64_t, uint64_t, uint64_t, uint64_t);
 static fsimg_status_t dmg_probe(const unsigned char *, size_t,
-    const unsigned char *, size_t, uint64_t, fsimg_error_t *);
+    const unsigned char *, size_t, uint64_t, fsimg_identity_t *,
+    fsimg_error_t *);
 static fsimg_status_t trailer_layout(const unsigned char *, uint64_t,
     fsimg_error_t *);
 static fsimg_status_t trailer_decode(const unsigned char *, uint64_t,
@@ -447,7 +448,8 @@ ranges_overlap(uint64_t a, uint64_t a_end, uint64_t b, uint64_t b_end)
 static fsimg_status_t
 dmg_probe(const unsigned char *prefix FSIMG_UNUSED, size_t prefix_length
     FSIMG_UNUSED, const unsigned char *tail, size_t tail_length,
-    uint64_t file_bytes, fsimg_error_t *error)
+    uint64_t file_bytes, fsimg_identity_t *identity FSIMG_UNUSED,
+    fsimg_error_t *error)
 {
 	uint64_t trailer_start, xml_end, rsrc_end;
 	bool xml_abuts, rsrc_abuts;
@@ -522,7 +524,8 @@ trailer_decode(const unsigned char *raw, uint64_t file_bytes,
 	uint64_t sectors;
 	fsimg_status_t status;
 
-	status = dmg_probe(NULL, 0, raw, KOLY_HEADER_BYTES, file_bytes, error);
+	status = dmg_probe(NULL, 0, raw, KOLY_HEADER_BYTES, file_bytes, NULL,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = trailer_layout(raw, file_bytes, error);

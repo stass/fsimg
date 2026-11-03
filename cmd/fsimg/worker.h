@@ -46,8 +46,9 @@ typedef enum fsimg_confinement {
  * through the library's entry callback (c -v, x -v).
  */
 #define FSIMG_JOB_NAMES 0x20u
-/* Reading only, with a named filesystem: the user vouches for the
- * identity of the layers the stack names (--force).
+/* Reading only, with a layer forced by name (fsimg_job_forces_layer): the
+ * user vouches for the identity of the layers the stack names and of a
+ * forced compression (--force).
  */
 #define FSIMG_JOB_FORCE 0x40u
 
@@ -290,6 +291,10 @@ bool fsimg_job_has_roots(fsimg_job_kind_t);
 bool fsimg_job_names_entries(fsimg_job_kind_t);
 /* The filesystem the stack names, or "" when its slot is not named. */
 const char *fsimg_job_format(const fsimg_worker_request_t *);
+/* Whether a read job forces a layer by name, a stack slot or a
+ * compression, which FSIMG_JOB_FORCE requires.
+ */
+bool fsimg_job_forces_layer(const fsimg_worker_request_t *);
 /*
  * What a create or plan job writes around its disk: its compression,
  * "" for none and for every other job; whether its output is an

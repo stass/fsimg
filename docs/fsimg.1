@@ -351,12 +351,37 @@ or
 skip the checks that tell one format from another, such as a magic number,
 a signature or FAT's boot signature and media echo, and keep every check
 of geometry, bounds, checksums, chains, directories and names.
-Every filesystem fsimg reads has such checks waived; for a container,
-partition scheme or compression the option reads exactly as a plain
+Every filesystem fsimg reads has such checks waived; of the layers, the
+.Cm mbr
+signature and used entry, the
+.Cm vhd
+cookie, when the footer checksum still matches, and size tie, the
+.Cm simg
+magic, the
+.Cm hbcifs
+identity, the
+.Cm dmg
+.Ql koly
+signature and trailer tie, and the first
+.Cm gzip
+member's magic.
+For every other layer the option reads exactly as a plain
 .Fl F
-does.
-It requires a filesystem in
-.Fl F ;
+does: the signatures of
+.Cm gpt
+and
+.Cm ifsboot
+locate the headers that are decoded, and
+.Cm xz
+and
+.Cm zstd
+leave the magic to their codec library, so a damaged one stays unreadable.
+It requires
+.Fl F
+to name a layer, or a compression forced with
+.Fl Fl compress
+or
+.Fl z ;
 without one it is a syntax error.
 An Atari ST floppy, which has neither an x86 jump nor 0x55AA and leaves its
 first FAT entries as garbage, reads with
@@ -371,11 +396,16 @@ fails, naming the identity check that was assumed, since such an image is
 not a valid volume of its format.
 When a read other than
 .Cm W
-whose
+fails because the identity of a filesystem
 .Fl F
-names a filesystem fails because that filesystem's identity is absent, the
-error ends with
-.Ql use --force to read it as NAME anyway ;
+names, or of a layer
+.Fl F ,
+.Fl Fl compress
+or
+.Fl z
+forces, is absent, the error ends with
+.Ql use --force to read it as NAME anyway ,
+naming that filesystem or layer;
 an image no format recognizes under automatic detection draws no such
 suggestion.
 .It Fl Fl partition Ns = Ns Ar N | Ns Cm name= Ns Ar text | Ns Cm type= Ns Ar name

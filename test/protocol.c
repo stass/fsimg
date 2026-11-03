@@ -40,7 +40,7 @@ static void test_job_zstd_levels_roundtrip_and_reject_wide_wire_value(void);
 static void test_zstd_unverified_record_requires_verified_zstd(void);
 static void test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void);
 static void test_xz_unverified_record_requires_verified_xz(void);
-static void test_job_force_roundtrips_only_for_reads_with_named_filesystem(void);
+static void test_job_force_requires_a_read_and_named_layer_or_compression(void);
 static void test_job_layers(void);
 static void test_job_catalogue(void);
 static void other_value(const fsimg_setting_t *, fsimg_setting_value_t *);
@@ -1280,7 +1280,7 @@ test_job_selection(void)
 }
 
 static void
-test_job_force_roundtrips_only_for_reads_with_named_filesystem(void)
+test_job_force_requires_a_read_and_named_layer_or_compression(void)
 {
 	static const fsimg_job_kind_t reads[] = {
 		FSIMG_JOB_INFO, FSIMG_JOB_LIST, FSIMG_JOB_EXTRACT, FSIMG_JOB_VERIFY
@@ -1301,14 +1301,27 @@ test_job_force_roundtrips_only_for_reads_with_named_filesystem(void)
 		    &capabilities, NULL) == FSIMG_OK);
 		CHECK(decoded.flags == FSIMG_JOB_FORCE && decoded.kind == reads[i]);
 		CHECK(strcmp(fsimg_job_format(&decoded), "fat12") == 0);
-		CHECK(fsimg_stack_parse("gpt", &request.stack, NULL) == FSIMG_OK);
+		CHECK(fsimg_stack_parse("mbr", &request.stack, NULL) == FSIMG_OK);
 		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
-		    &capabilities, NULL) == FSIMG_EINVAL);
+		    &capabilities, NULL) == FSIMG_OK);
+		CHECK(decoded.flags == FSIMG_JOB_FORCE && decoded.kind == reads[i]);
+		CHECK(decoded.stack.slots[FSIMG_LAYER_FILESYSTEM].state ==
+		    FSIMG_SLOT_UNSPECIFIED);
+		CHECK(decoded.stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_NAMED);
+		CHECK(strcmp(decoded.stack.slots[FSIMG_LAYER_SCHEME].name, "mbr") == 0);
 		bzero(&request.stack, sizeof(request.stack));
 		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 		    &capabilities, NULL) == FSIMG_EINVAL);
+		strcpy(request.compression, "gzip");
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		CHECK(decoded.flags == FSIMG_JOB_FORCE && decoded.kind == reads[i]);
+		CHECK(strcmp(decoded.compression, "gzip") == 0);
+		for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++)
+			CHECK(decoded.stack.slots[slot].state == FSIMG_SLOT_UNSPECIFIED);
 	}
 	for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); i++) {
 		fsimg_worker_request_init(&request);
@@ -2229,7 +2242,7 @@ main(int argc, char **argv)
 	test_read_job_members_roundtrip();
 	test_select_volume_replaces_read_job_members();
 	test_read_job_zero_members_is_invalid();
-	test_job_force_roundtrips_only_for_reads_with_named_filesystem();
+	test_job_force_requires_a_read_and_named_layer_or_compression();
 	test_job_layers();
 	test_job_catalogue();
 	test_image_records();

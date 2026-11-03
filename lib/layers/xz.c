@@ -83,7 +83,7 @@ static void lzma_bind(fsimg_codec_memory_t *, fsimg_ctx_t *,
     lzma_allocator *, lzma_stream *);
 static void xz_version(char *, size_t);
 static fsimg_status_t xz_probe(const unsigned char *, size_t,
-    fsimg_error_t *);
+    fsimg_identity_t *, fsimg_error_t *);
 static fsimg_status_t xz_decode(fsimg_spool_input_t *, fsimg_spool_t *,
     bool *, fsimg_error_t *);
 static fsimg_status_t xz_plan(const fsimg_layer_options_t *, uint32_t,
@@ -162,7 +162,8 @@ xz_version(char *out, size_t capacity)
 }
 
 static fsimg_status_t
-xz_probe(const unsigned char *prefix, size_t length, fsimg_error_t *error)
+xz_probe(const unsigned char *prefix, size_t length,
+    fsimg_identity_t *identity FSIMG_UNUSED, fsimg_error_t *error)
 {
 	if (length < sizeof(xz_magic) || bcmp(prefix, xz_magic,
 	    sizeof(xz_magic)) != 0)

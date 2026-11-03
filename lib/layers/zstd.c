@@ -103,7 +103,7 @@ static void zstd_free_shim(void *, void *);
 static ZSTD_customMem zstd_bind(fsimg_codec_memory_t *, fsimg_ctx_t *);
 static void zstd_version(char *, size_t);
 static fsimg_status_t zstd_probe(const unsigned char *, size_t,
-    fsimg_error_t *);
+    fsimg_identity_t *, fsimg_error_t *);
 static fsimg_status_t zstd_decode(fsimg_spool_input_t *, fsimg_spool_t *,
     bool *, fsimg_error_t *);
 static fsimg_status_t zstd_plan(const fsimg_layer_options_t *, uint32_t,
@@ -183,7 +183,8 @@ zstd_version(char *out, size_t capacity)
 
 /* A frame's magic number, or a skippable frame's, 0x184D2A50 to 5F. */
 static fsimg_status_t
-zstd_probe(const unsigned char *prefix, size_t length, fsimg_error_t *error)
+zstd_probe(const unsigned char *prefix, size_t length,
+    fsimg_identity_t *identity FSIMG_UNUSED, fsimg_error_t *error)
 {
 	if (length >= 4 && prefix[1] == 0x2a && prefix[2] == 0x4d &&
 	    prefix[3] == 0x18 && (prefix[0] & 0xf0) == 0x50)

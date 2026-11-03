@@ -124,6 +124,12 @@ static void test_mbr_addressable_limit(void);
 static void test_bare_volume(void);
 static void test_assumed_identity_selects_unvouched_fat(void);
 static void test_image_assume_identity_requires_named_slot_or_compression(void);
+static void test_assumed_mbr_signature_selects_partition_bytes(void);
+static void test_assumed_mbr_signature_is_reported_before_verification(void);
+static void test_assumed_mbr_empty_table_is_reported_before_verification(void);
+static void test_signed_mbr_with_assume_identity_verifies(void);
+static void test_assumed_mbr_still_validates_entries(void);
+static void test_assume_identity_does_not_change_mbr_detection(void);
 static void test_forcing(void);
 static void write_seed(const char *, const memory_disk_t *);
 
@@ -1512,6 +1518,191 @@ test_image_assume_identity_requires_named_slot_or_compression(void)
 	free(disk.bytes);
 }
 
+/* One partition at LBA 1, with recognizable bytes on both sides of it. */
+static memory_disk_t
+single_partition_mbr(void)
+{
+	memory_disk_t disk = disk_new(FAT_BYTES + 2 * 512);
+
+	make_fat12(disk.bytes + 512);
+	mbr_entry(disk.bytes, 0, 0x80, 0x01, 1, FAT_BYTES / 512);
+	disk.bytes[0] = 0x5a;
+	disk.bytes[512 + FAT_BYTES] = 0xa5;
+	return (disk);
+}
+
+/* Reopen the fixture's I/O, assuming only identities named by this stack. */
+static void
+reopen_assuming_identity(fixture_t *f, const char *stack)
+{
+	fsimg_image_options_t options;
+
+	fsimg_image_free(f->image);
+	f->image = NULL;
+	fsimg_image_options_init(&options);
+	CHECK(fsimg_stack_parse(stack, &options.stack, NULL) == FSIMG_OK);
+	options.flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(fsimg_image_open(f->ctx, f->io, &options, &f->image, NULL) == FSIMG_OK);
+}
+
+static void
+test_assumed_mbr_signature_selects_partition_bytes(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fsimg_io_t *volume;
+	fixture_t f;
+	unsigned char *data;
+	uint64_t length;
+	size_t count, offset;
+
+	bzero(disk.bytes + 510, 2);
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "fat12/mbr/-", 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.path, "mbr") == 0);
+
+	reopen_assuming_identity(&f, "fat12/mbr/-");
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "mbr") == 0);
+	CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_INDEX,
+	    .index = 1 }, &volume, NULL) == FSIMG_OK);
+	CHECK(fsimg_io_get_size(volume, &length, NULL) == FSIMG_OK);
+	CHECK(length == FAT_BYTES);
+	data = malloc((size_t)length);
+	CHECK(data != NULL);
+	for (offset = 0; offset < (size_t)length; offset += count) {
+		CHECK(fsimg_io_read_at(volume, offset, data + offset,
+		    (size_t)length - offset, &count, NULL) == FSIMG_OK);
+		CHECK(count > 0 && count <= (size_t)length - offset);
+	}
+	CHECK(bcmp(data, disk.bytes + 512, (size_t)length) == 0);
+	CHECK(fsimg_io_read_at(volume, length, data, 1, &count, NULL) == FSIMG_ERANGE);
+	CHECK(count == 0);
+	free(data);
+	fsimg_io_free(volume);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+/* Resolve identity first, then verify must refuse without further I/O. */
+static void
+expect_assumed_mbr_verify_failure(memory_disk_t *disk, const char *message)
+{
+	fsimg_layer_report_t report;
+	fsimg_image_info_t info;
+	fsimg_stats_t before, after;
+	fsimg_error_t error;
+	fixture_t f;
+
+	fixture_init(&f);
+	CHECK(fixture_open(&f, disk, "mbr", 0, NULL) == FSIMG_OK);
+	reopen_assuming_identity(&f, "mbr");
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "mbr") == 0);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, message) == 0);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
+	CHECK(after.io_calls == before.io_calls);
+	CHECK(after.read_bytes == before.read_bytes);
+	fixture_free(&f);
+}
+
+static void
+test_assumed_mbr_signature_is_reported_before_verification(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+
+	bzero(disk.bytes + 510, 2);
+	expect_assumed_mbr_verify_failure(&disk,
+	    "mbr identity was assumed: the MBR has no 0x55AA signature");
+	free(disk.bytes);
+}
+
+static void
+test_assumed_mbr_empty_table_is_reported_before_verification(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+
+	bzero(disk.bytes + 446, 4 * 16);
+	expect_assumed_mbr_verify_failure(&disk,
+	    "mbr identity was assumed: the MBR has no used partition entry");
+	free(disk.bytes);
+}
+
+static void
+test_signed_mbr_with_assume_identity_verifies(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+	fsimg_layer_report_t report;
+	fixture_t f;
+
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "mbr", 0, NULL) == FSIMG_OK);
+	reopen_assuming_identity(&f, "mbr");
+	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete && report.partitions == 1);
+	CHECK(strcmp(report.scheme, "mbr") == 0);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void
+test_assumed_mbr_still_validates_entries(void)
+{
+	static const struct {
+		uint8_t status;
+		uint8_t type;
+		uint32_t first_lba;
+		uint32_t sectors;
+	} invalid[] = {
+		{ 0x80, 0x01, 0, 2048 },
+		{ 0x80, 0xee, 1, 2048 },
+		{ 0x01, 0x01, 1, 2048 },
+		{ 0x80, 0x00, 1, 2048 },
+		{ 0x80, 0x01, 1, 0 }
+	};
+	memory_disk_t disk;
+	fsimg_image_info_t info;
+	fixture_t f;
+
+	for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		disk = single_partition_mbr();
+		mbr_entry(disk.bytes, 0, invalid[i].status, invalid[i].type,
+		    invalid[i].first_lba, invalid[i].sectors);
+		bzero(disk.bytes + 510, 2);
+		fixture_init(&f);
+		CHECK(fixture_open(&f, &disk, "mbr", 0, NULL) == FSIMG_OK);
+		reopen_assuming_identity(&f, "mbr");
+		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_EFORMAT);
+		fixture_free(&f);
+		free(disk.bytes);
+	}
+}
+
+static void
+test_assume_identity_does_not_change_mbr_detection(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+	fsimg_image_info_t info;
+	fsimg_error_t plain, assumed;
+	fixture_t f;
+
+	bzero(disk.bytes + 510, 2);
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "fat12", 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, &plain) == FSIMG_EFORMAT);
+	reopen_assuming_identity(&f, "fat12");
+	CHECK(fsimg_image_get_info(f.image, &info, &assumed) == FSIMG_EFORMAT);
+	CHECK(strcmp(plain.message, assumed.message) == 0);
+	CHECK(strcmp(plain.path, assumed.path) == 0);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
 /* Forcing selects and never relaxes: an absent forced signature is an
  * unrecognized image, and layers this build lacks are unsupported.
  */
@@ -1616,5 +1807,11 @@ main(int argc, char **argv)
 	test_assumed_identity_selects_unvouched_fat();
 	test_image_assume_identity_requires_named_slot_or_compression();
 	test_forcing();
+	test_assumed_mbr_signature_selects_partition_bytes();
+	test_assumed_mbr_signature_is_reported_before_verification();
+	test_assumed_mbr_empty_table_is_reported_before_verification();
+	test_signed_mbr_with_assume_identity_verifies();
+	test_assumed_mbr_still_validates_entries();
+	test_assume_identity_does_not_change_mbr_detection();
 	return (0);
 }

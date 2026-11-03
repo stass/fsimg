@@ -200,8 +200,13 @@ FSIMG_IMAGE_ASSUME_IDENTITY in the image options' flags does the same for
 every layer the options name, each named slot of the stack and a forced
 compression, and requires one of them; detected layers are unaffected.
 A format whose identity checks all pass reads exactly as without the flag.
-Every filesystem format honours the flags; the containers, partition
-schemes and compressions read exactly as without them.
+Every filesystem format honours the flags; of the layers, mbr, vhd,
+simg, hbcifs, dmg and gzip do.
+Every other layer reads exactly as without them.
+.Fn fsimg_image_verify
+on an image whose layer identity checks failed returns FSIMG_ECORRUPT
+once the scheme is detected and before any verification pass, naming the
+layer and its first assumed check.
 .Pp
 Every path the library emits other than an entry's own path is rendered:
 the path of an error and of the loss callback.

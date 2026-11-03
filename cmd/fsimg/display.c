@@ -1734,28 +1734,48 @@ published_names(fsimg_cli_display_t *display)
 	}
 }
 
-/* Whether to suggest --force: a read other than W that names a
- * filesystem without --force failed with FSIMG_EFORMAT from the reader,
- * or from detection rather than from a layer, which names itself in path.
- * That is how an absent identity fails, and every filesystem waives its
- * identity checks under --force; the status cannot tell it from
- * the few other refusals of a forced name, such as a FAT variant that
- * contradicts the cluster count, which --force then reports unchanged.
+/* Whether the read forces the layer of this name: a scheme or container
+ * slot names it, or it is the forced compression.
  */
 static bool
-force_would_help(const fsimg_cli_display_t *display,
-    const fsimg_error_t *error)
+forces_layer(const fsimg_worker_request_t *request, const char *name)
+{
+	return ((request->stack.slots[FSIMG_LAYER_SCHEME].state ==
+	    FSIMG_SLOT_NAMED &&
+	    strcmp(request->stack.slots[FSIMG_LAYER_SCHEME].name, name) == 0) ||
+	    (request->stack.slots[FSIMG_LAYER_CONTAINER].state ==
+	    FSIMG_SLOT_NAMED &&
+	    strcmp(request->stack.slots[FSIMG_LAYER_CONTAINER].name, name) == 0) ||
+	    strcmp(request->compression, name) == 0);
+}
+
+/*
+ * What to suggest --force for, or NULL: a read other than W without
+ * --force failed with FSIMG_EFORMAT, as an absent identity fails. A layer
+ * names itself in path, and is suggested when the read forces it by name;
+ * a failure from the reader, or from detection, which leaves path empty,
+ * suggests the filesystem -F names. The status cannot tell an absent
+ * identity from the few other refusals of a forced name, such as a FAT
+ * variant that contradicts the cluster count, which --force then reports
+ * unchanged.
+ */
+static const char *
+force_candidate(const fsimg_cli_display_t *display, const fsimg_error_t *error)
 {
 	const fsimg_worker_request_t *request = &display->options->request;
 
-	return (error->status == FSIMG_EFORMAT &&
-	    (error->operation == FSIMG_OP_READER ||
-	    (error->operation == FSIMG_OP_IMAGE && error->path[0] == '\0')) &&
-	    !fsimg_job_has_roots(request->kind) &&
-	    request->kind != FSIMG_JOB_VERIFY &&
-	    (request->flags & FSIMG_JOB_FORCE) == 0 &&
-	    request->stack.slots[FSIMG_LAYER_FILESYSTEM].state ==
-	    FSIMG_SLOT_NAMED);
+	if (error->status != FSIMG_EFORMAT ||
+	    fsimg_job_has_roots(request->kind) ||
+	    request->kind == FSIMG_JOB_VERIFY ||
+	    (request->flags & FSIMG_JOB_FORCE) != 0)
+		return (NULL);
+	if (error->operation == FSIMG_OP_IMAGE && error->path[0] != '\0')
+		return (forces_layer(request, error->path) ? error->path : NULL);
+	if ((error->operation == FSIMG_OP_READER ||
+	    error->operation == FSIMG_OP_IMAGE) &&
+	    fsimg_job_format(request)[0] != '\0')
+		return (fsimg_job_format(request));
+	return (NULL);
 }
 
 static void
@@ -1768,6 +1788,7 @@ failure(fsimg_cli_display_t *display)
 	static const char *const states[] = { "absent", "incomplete", "published", "uncertain" };
 	const fsimg_error_t *error = display->failure;
 	const fsimg_layer_t *layer;
+	const char *candidate;
 	const char *resource, *state;
 
 	resource = (unsigned)error->resource < sizeof(resources) / sizeof(resources[0]) ?
@@ -1838,9 +1859,10 @@ failure(fsimg_cli_display_t *display)
 		    (unsigned long long)error->limit, (unsigned long long)error->observed);
 	if (error->offset_valid)
 		append(display, " at byte %llu", (unsigned long long)error->offset);
-	if (force_would_help(display, error))
+	candidate = force_candidate(display, error);
+	if (candidate != NULL)
 		append(display, "; use --force to read it as %s anyway",
-		    fsimg_job_format(&display->options->request));
+		    candidate);
 	append(display, "\n");
 	if (error->output_state == FSIMG_OUTPUT_INCOMPLETE)
 		append(display, "fsimg: output is incomplete\n");

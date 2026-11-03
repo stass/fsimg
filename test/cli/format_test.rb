@@ -173,9 +173,9 @@ class CliTest < Minitest::Test
       "signature and the first FAT does not repeat the media byte".b)
   end
 
-  def test_force_requires_a_named_filesystem_and_a_read_mode
+  def test_force_requires_a_named_layer_or_compression_and_a_read_mode
     result = invoke(arguments: ["t", "--force", "-f", "unused.img"], expected: 2)
-    assert_includes(result.stderr, "--force requires a filesystem in -F".b)
+    assert_includes(result.stderr, "--force requires a layer in -F or a forced compression".b)
     result = invoke(arguments: ["c", "--force", "-F", "fat12", "-f", "unused.img"], expected: 2)
     assert_includes(result.stderr, "does not apply to mode".b)
   end

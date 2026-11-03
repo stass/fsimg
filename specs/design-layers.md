@@ -366,20 +366,35 @@ ranges are checked against regardless. Validation is everything that
 keeps decoding safe: the version and header constants that decide how
 bytes are decoded, checksums, table contents, bounds and declared
 geometry. A signature that also locates what is decoded stays a check,
-since without it nothing is found to decode: ifsboot finds its startup
-header by its signature at a boot-prefix offset, and a forced
-`gpt:sector` reads the `EFI PART` header at that sector. The MBR's
-identity is the `0x55AA` signature and at least one used entry; its
-legal entry fields, the exclusion of a protective `0xEE` entry, which
-makes the disk a GPT, and of an entry starting at sector 0, which makes
-it a bare volume, are validation, since its open relies on every entry
-lying after the MBR sector. A layer whose identity was
-assumed fails full verification with `FSIMG_ECORRUPT` naming the assumed
-check, as a filesystem does
-([format contracts](design-formats.md#format-descriptors-and-profiles));
-listing and extraction proceed. The CLI accepts `--force` only beside a
-named filesystem, and when a read naming a filesystem fails its identity
-check, the error suggests `--force`.
+since without it nothing is found to decode, so such a layer has no
+identity to assume and reads under `--force` exactly as without it:
+ifsboot finds its startup header by its signature at a boot-prefix
+offset; GPT reads the `EFI PART` header at LBA 1 of the sector size its
+signature fixes (or `gpt:sector`), and the header and its backup are what
+the table is decoded from, so a GPT whose signatures are gone stays
+unreadable; and xz and zstd hand the whole stream, magic included, to the
+codec library, which checks the magic itself. Each layer's section names
+its identity checks. A layer whose identity was assumed fails full
+verification with `FSIMG_ECORRUPT` naming the assumed check ("mbr
+identity was assumed: the MBR has no 0x55AA signature"), as a filesystem
+does ([format contracts](design-formats.md#format-descriptors-and-profiles));
+listing and extraction proceed.
+
+A layer driver waives an identity check only through one funnel,
+`fsimg_identity_holds()`, given the identity record the image hands the
+probe and the open (or decode) of a layer the caller vouches for, and NULL
+for every other layer. A check that fails with a record present is
+recorded there, the first one per layer, and passes; without a record it
+fails as before. A forced probe is therefore still a function of its
+bytes, apart from noting a waived check. `fsimg_image_verify()` refuses
+an image whose records hold a check before any work, so no waived check
+escapes verification whichever call waived it.
+
+The CLI accepts `--force` beside a layer `-F` names or a compression `-z`
+or `--compress` forces, and refuses it otherwise; the worker's job decode
+refuses such a job too. When a read whose `-F` names a filesystem fails
+its identity check, or a read fails because a layer it forces lacks its
+identity, the error suggests `--force` naming that filesystem or layer.
 
 Compression is not a slot, so no stack forces it: the
 [step-1 rule](#peeling-order) decides it whether or not a stack is given,
@@ -1363,7 +1378,10 @@ at LBA 0, or the `EFI PART` signature at offset 512 or 4096. The signature's
 offset fixes `S`; a signature at both offsets is ambiguous and needs `gpt` in
 the forced stack with `gpt:sector`; a protective MBR with the signature at
 neither offset is a claim whose header is missing, so it is corrupt rather
-than read as something else. Validation then requires: header CRC32, this
+than read as something else. GPT has no identity to assume: the header
+signature at LBA 1 is where the table is decoded from, so a forced `gpt`
+under `--force` reads exactly as without it, and a GPT whose header
+signatures are gone stays unreadable. Validation then requires: header CRC32, this
 LBA 1, alternate LBA equal to the disk's last LBA, entry size 128, entry
 count from 1 to 1024, entry array within the disk and before the first usable
 LBA, entry array CRC32, first usable not after last usable and last usable
@@ -1409,6 +1427,11 @@ disk, and no used entry starting at sector 0. An entry at sector 0 would
 contain the MBR itself; the writers that record one, isohybrid, `mformat`,
 `mkfs.fat` with a whole-disk MBR and `mkudffs --bootarea=mbr`, describe the
 volume that begins at sector 0, so the disk is read as that bare volume.
+Of these, the signature and at least one used entry are identity, which an
+assumed identity waives ("the MBR has no 0x55AA signature", "the MBR has no
+used partition entry"); the legal entry fields and the two exclusions are
+validation and hold under `--force` too, since open relies on every entry
+lying after the MBR sector, and a probe refusing them is `FSIMG_EFORMAT`.
 Validation then requires first LBA plus count within the disk, and no
 overlap between used entries; a failure is `FSIMG_ECORRUPT`. Extended
 partitions (types 0x05, 0x0F and 0x85) are listed with their type and are

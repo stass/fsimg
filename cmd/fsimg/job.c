@@ -719,6 +719,17 @@ fsimg_job_names_entries(fsimg_job_kind_t kind)
 	return (fsimg_job_has_roots(kind) || kind == FSIMG_JOB_EXTRACT);
 }
 
+bool
+fsimg_job_forces_layer(const fsimg_worker_request_t *request)
+{
+	for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
+		if (request->stack.slots[slot].state == FSIMG_SLOT_NAMED)
+			return (true);
+	}
+	return (!fsimg_job_has_roots(request->kind) &&
+	    request->compression[0] != '\0');
+}
+
 const char *
 fsimg_job_compression(const fsimg_worker_request_t *request)
 {
@@ -1090,10 +1101,6 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	}
 	if (fsimg_stack_validate(&request->stack, error) != FSIMG_OK)
 		return (invalid_job(error));
-	if ((get_field(raw, JOB_FLAGS) & FSIMG_JOB_FORCE) != 0 &&
-	    request->stack.slots[FSIMG_LAYER_FILESYSTEM].state !=
-	    FSIMG_SLOT_NAMED)
-		return (invalid_job(error));
 	for (job_field_t field = JOB_DEPTH; field <= JOB_FDS; field++) {
 		if (get_field(raw, field) > UINT32_MAX)
 			return (invalid_job(error));
@@ -1157,6 +1164,9 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	if (fsimg_compression_named(request->compression,
 	    sizeof(request->compression), fsimg_job_has_roots(request->kind),
 	    &compression, error) != FSIMG_OK)
+		return (invalid_job(error));
+	if ((request->flags & FSIMG_JOB_FORCE) != 0 &&
+	    !fsimg_job_forces_layer(request))
 		return (invalid_job(error));
 	bcopy(raw + JOB_LABEL_OFFSET, request->label_storage, JOB_LABEL_BYTES);
 	request->write.label = raw[JOB_LABEL_PRESENT] == 0 ? NULL :

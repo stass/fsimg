@@ -56,14 +56,37 @@ typedef struct fsimg_scheme_table {
 	fsimg_scheme_kind_t kind;
 } fsimg_scheme_table_t;
 
+/*
+ * The identity record of one layer the caller vouches for
+ * (FSIMG_IMAGE_ASSUME_IDENTITY): assumed is the first identity check its
+ * probe, open or decode waived although it failed, a static phrase such
+ * as "the MBR has no 0x55AA signature", or NULL. The image owns one per
+ * layer kind and hands it only to a layer the caller named; every other
+ * call receives NULL. fsimg_image_verify() refuses an image while a record
+ * holds a check.
+ */
+typedef struct fsimg_identity {
+	const char	*assumed;
+} fsimg_identity_t;
+
+/* The one way a layer treats an identity check, the evidence that the
+ * bytes are this layer: whether the caller may go on. A check that holds
+ * passes; one that fails passes only with a record, where it is noted.
+ * Validation, anything that keeps decoding in bounds, never goes through
+ * it.
+ */
+bool fsimg_identity_holds(fsimg_identity_t *, bool, const char *);
+
 /* What a scheme's open reads from: the disk, the session that charges its
- * reads, and the read-side settings.
+ * reads, the read-side settings, and the scheme's identity record (NULL
+ * unless the caller vouches for it).
  */
 typedef struct fsimg_scheme_input {
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*disk;
 	fsimg_session_t	*session;
 	const fsimg_layer_options_t *options;
+	fsimg_identity_t *identity;
 	uint64_t	 disk_bytes;
 } fsimg_scheme_input_t;
 
@@ -143,7 +166,10 @@ typedef struct fsimg_scheme_partition_args {
  * probe follows the filesystem probe contract: a pure function of at most
  * probe_bytes of the disk prefix and the disk length, FSIMG_EFORMAT without
  * the identity signature, and otherwise a claim: FSIMG_OK, or
- * FSIMG_ECORRUPT or FSIMG_EUNSUPPORTED with a reason.
+ * FSIMG_ECORRUPT or FSIMG_EUNSUPPORTED with a reason. Its identity
+ * checks, and open's, go through fsimg_identity_holds() with the record
+ * the image passes, so a forced scheme the caller vouches for claims
+ * without them; the record is the probe's one side effect.
  *
  * open validates every table check the profile names and fills the table;
  * any failure is final, never a fallback to another decoder. On failure it
@@ -171,7 +197,7 @@ typedef struct fsimg_scheme_partition_args {
 typedef struct fsimg_scheme_ops {
 	size_t		 probe_bytes;
 	fsimg_status_t	(*probe)(const unsigned char *, size_t, uint64_t,
-			    fsimg_error_t *);
+			    fsimg_identity_t *, fsimg_error_t *);
 	fsimg_status_t	(*open)(const fsimg_scheme_input_t *,
 			    fsimg_scheme_table_t *, fsimg_error_t *);
 	fsimg_status_t	(*verify)(const fsimg_scheme_input_t *,
@@ -359,8 +385,9 @@ fsimg_status_t fsimg_plist_parse(fsimg_ctx_t *, fsimg_io_t *,
 
 typedef struct fsimg_spool fsimg_spool_t;
 
-/* What a container reads: the file, its length, and the session that
- * charges its reads and decoding. spool is the image's free spool, given
+/* What a container reads: the file, its length, the session that charges
+ * its reads and decoding, and the container's identity record (NULL unless
+ * the caller vouches for it). spool is the image's free spool, given
  * only to the open of a spooled container and NULL for every other call;
  * that open decodes into it and seals it for its disk, and the image
  * keeps the spool until it is freed, after the disk that reads it.
@@ -370,6 +397,7 @@ typedef struct fsimg_container_input {
 	fsimg_io_t	*file;
 	fsimg_session_t	*session;
 	fsimg_spool_t	*spool;
+	fsimg_identity_t *identity;
 	uint64_t	 file_bytes;
 } fsimg_container_input_t;
 
@@ -586,7 +614,9 @@ typedef struct fsimg_container_writer {
  * its last FSIMG_CONTAINER_TAIL_BYTES (fewer for a shorter file) and the
  * file length: FSIMG_EFORMAT without its identity, and otherwise a claim,
  * FSIMG_OK or FSIMG_ECORRUPT or FSIMG_EUNSUPPORTED with a reason. A
- * trailer claims only when its ranges end at the file's end.
+ * trailer claims only when its ranges end at the file's end. Identity
+ * checks in probe, open and verify go through fsimg_identity_holds() with
+ * the record the image passes, as a scheme's do.
  *
  * open validates every table and yields the disk; any failure is final and
  * leaves nothing allocated. verify performs the checks that read beyond
@@ -624,7 +654,7 @@ typedef struct fsimg_container_ops {
 	size_t		 probe_bytes;
 	fsimg_status_t	(*probe)(const unsigned char *, size_t,
 			    const unsigned char *, size_t, uint64_t,
-			    fsimg_error_t *);
+			    fsimg_identity_t *, fsimg_error_t *);
 	fsimg_status_t	(*open)(const fsimg_container_input_t *,
 			    fsimg_container_t *, fsimg_error_t *);
 	fsimg_status_t	(*verify)(const fsimg_container_input_t *,
@@ -672,7 +702,8 @@ void fsimg_spool_free(fsimg_spool_t *);
  * first the bytes the probes already read (prefix), then the rest of a
  * seekable file through session from offset, or of a stream descriptor
  * (fd, file NULL) until its end. A decoder charges its work to session
- * for either. read fills at most length bytes and
+ * for either. identity is the compression's identity record, NULL unless
+ * the caller vouches for it. read fills at most length bytes and
  * transfers zero only at the end of the input; it polls cancellation.
  */
 typedef struct fsimg_spool_input {
@@ -684,6 +715,7 @@ typedef struct fsimg_spool_input {
 	uint64_t	 offset;
 	uint64_t	 file_bytes;
 	int		 fd;
+	fsimg_identity_t *identity;
 } fsimg_spool_input_t;
 
 fsimg_status_t fsimg_spool_input_read(fsimg_spool_input_t *, unsigned char *, size_t,
@@ -735,7 +767,9 @@ typedef struct fsimg_compressor_ops {
 /*
  * A whole-file compression. probe follows the bounded probe contract on
  * at most probe_bytes of the file's prefix: FSIMG_EFORMAT without its
- * identity, otherwise a claim. decode reads the whole source and appends
+ * identity, otherwise a claim; its identity checks, and decode's, go
+ * through fsimg_identity_holds() with the record the image passes, as a
+ * scheme's do. decode reads the whole source and appends
  * the decoded bytes to the spool, checking every member as it ends and
  * charging every compressed byte it reads, headers and trailers included,
  * and every byte it produces to the source's session as work; a
@@ -757,7 +791,8 @@ typedef struct fsimg_compressor_ops {
  */
 typedef struct fsimg_compression_ops {
 	size_t		 probe_bytes;
-	fsimg_status_t	(*probe)(const unsigned char *, size_t, fsimg_error_t *);
+	fsimg_status_t	(*probe)(const unsigned char *, size_t,
+			    fsimg_identity_t *, fsimg_error_t *);
 	fsimg_status_t	(*decode)(fsimg_spool_input_t *, fsimg_spool_t *,
 			    bool *, fsimg_error_t *);
 	const char	*unverified;

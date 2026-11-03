@@ -90,7 +90,7 @@ static uint32_t gpt_crc32(const unsigned char *, size_t);
 static bool protective_mbr(const unsigned char *, size_t);
 static bool signature_at(const unsigned char *, size_t, size_t);
 static fsimg_status_t gpt_probe(const unsigned char *, size_t, uint64_t,
-    fsimg_error_t *);
+    fsimg_identity_t *, fsimg_error_t *);
 static fsimg_status_t gpt_corrupt(fsimg_error_t *, const char *,
     const char *);
 static void guid_swap(const unsigned char *, unsigned char *);
@@ -196,10 +196,13 @@ signature_at(const unsigned char *prefix, size_t length, size_t offset)
 /* The identity is a protective MBR or a header signature at LBA 1 of
  * either sector size. A protective MBR without a header is a GPT whose
  * header is missing, so it is a corrupt claim rather than something else.
+ * Nothing here is waived for an assumed identity: the header signature is
+ * where open decodes the table from, so a GPT without one is unreadable.
  */
 static fsimg_status_t
 gpt_probe(const unsigned char *prefix, size_t length,
-    uint64_t disk_bytes FSIMG_UNUSED, fsimg_error_t *error)
+    uint64_t disk_bytes FSIMG_UNUSED, fsimg_identity_t *identity FSIMG_UNUSED,
+    fsimg_error_t *error)
 {
 	bool protective, header;
 

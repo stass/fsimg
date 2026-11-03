@@ -1450,11 +1450,11 @@ interpret_read(cli_parse_t *parse)
 			return (syntax(parse, "-T - conflicts with an image on standard input"));
 		request->input.kind = FSIMG_INPUT_STREAM;
 	}
-	/* --force vouches for a filesystem the user names. */
+	/* --force vouches for the layers the user names. */
 	if (option_count(parse, OPT_FORCE) != 0) {
-		if (request->stack.slots[FSIMG_LAYER_FILESYSTEM].state !=
-		    FSIMG_SLOT_NAMED)
-			return (syntax(parse, "--force requires a filesystem in -F"));
+		if (!fsimg_job_forces_layer(request))
+			return (syntax(parse,
+			    "--force requires a layer in -F or a forced compression"));
 		request->flags |= FSIMG_JOB_FORCE;
 	}
 	if (fsimg_job_format(request)[0] == '\0' || parse->reserved)

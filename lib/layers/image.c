@@ -55,11 +55,15 @@ struct fsimg_image {
 	fsimg_layer_options_t layers;
 	/* The compression the options force, NULL to detect one. */
 	const fsimg_layer_t *forced_compression;
-	/* The caller vouches for the identity of each layer it names
-	 * (FSIMG_IMAGE_ASSUME_IDENTITY); the forced filesystem's probe
-	 * receives it.
+	/* The layer kinds whose identity the caller vouches for
+	 * (FSIMG_IMAGE_ASSUME_IDENTITY), as SURVEY bits: each slot the
+	 * options name and a forced compression, fixed at open, so a
+	 * filesystem a container carries is never vouched for. identity
+	 * holds each kind's record, which vouch() hands to that kind's
+	 * forced probe and open alone.
 	 */
-	bool		 assume_identity;
+	unsigned	 vouched;
+	fsimg_identity_t identity[FSIMG_LAYER_COMPRESSION + 1];
 	/* The adopted spool, NULL once the container step proves it unused;
 	 * spooled is its read-only view when it holds the file.
 	 */
@@ -132,7 +136,9 @@ static bool probing(const fsimg_layer_t *);
 static size_t probe_bytes(const fsimg_layer_t *);
 static size_t survey_bytes(fsimg_layer_kind_t, const fsimg_layer_t *, size_t);
 static fsimg_status_t probe_layer(const fsimg_layer_t *, const probe_input_t *,
-    fsimg_error_t *);
+    fsimg_identity_t *, fsimg_error_t *);
+static fsimg_identity_t *vouch(fsimg_image_t *, fsimg_layer_kind_t);
+static bool vouched(const fsimg_image_t *, fsimg_layer_kind_t);
 static fsimg_status_t survey(unsigned, const probe_input_t *, const char *, bool,
     fsimg_survey_t *, fsimg_error_t *);
 static const char *forced_filesystem(const fsimg_image_t *);
@@ -400,8 +406,14 @@ open_image(fsimg_ctx_t *ctx, fsimg_io_t *file, int stream_fd,
 	image->forced = options->stack;
 	image->layers = options->layers;
 	image->forced_compression = compression;
-	image->assume_identity =
-	    (options->flags & FSIMG_IMAGE_ASSUME_IDENTITY) != 0;
+	if ((options->flags & FSIMG_IMAGE_ASSUME_IDENTITY) != 0) {
+		for (unsigned slot = 0; slot < FSIMG_STACK_SLOTS; slot++) {
+			if (options->stack.slots[slot].state == FSIMG_SLOT_NAMED)
+				image->vouched |= SURVEY(slot);
+		}
+		if (compression != NULL)
+			image->vouched |= SURVEY(FSIMG_LAYER_COMPRESSION);
+	}
 	image->spool = spool;
 	fsimg_session_init(&image->session, ctx, "image layers", 0);
 	status = peel_compression(image, stream_fd, error);
@@ -523,7 +535,8 @@ decide_compression(fsimg_image_t *image, const probe_input_t *input,
 	fsimg_status_t status;
 
 	if (forced != NULL) {
-		status = probe_layer(forced, input, error);
+		status = probe_layer(forced, input,
+		    vouch(image, FSIMG_LAYER_COMPRESSION), error);
 		if (status == FSIMG_OK)
 			image->compression = forced;
 		return (layer_failed(forced, status, error));
@@ -623,7 +636,8 @@ fill_spool(fsimg_image_t *image, int stream_fd, const unsigned char *block,
 	fsimg_spool_input_t source = { .ctx = image->ctx, .prefix = block,
 	    .prefix_length = block_length, .file = image->input,
 	    .session = &image->session, .offset = block_length,
-	    .file_bytes = image->file_bytes, .fd = stream_fd };
+	    .file_bytes = image->file_bytes, .fd = stream_fd,
+	    .identity = vouch(image, FSIMG_LAYER_COMPRESSION) };
 	const fsimg_layer_t *compression = image->compression;
 	fsimg_status_t status;
 
@@ -681,8 +695,8 @@ claim_volume(fsimg_image_t *image, uint64_t offset, uint64_t length,
     fsimg_error_t *error)
 {
 	return (fsimg_volume_claim(image->ctx, image->disk, &image->session,
-	    offset, length, forced_filesystem(image), image->assume_identity,
-	    claim, format, error));
+	    offset, length, forced_filesystem(image),
+	    vouched(image, FSIMG_LAYER_FILESYSTEM), claim, format, error));
 }
 
 fsimg_status_t
@@ -751,7 +765,38 @@ container_input(fsimg_image_t *image, fsimg_spool_t *spool,
 	input->file = image->input;
 	input->session = &image->session;
 	input->spool = spool;
+	input->identity = vouch(image, FSIMG_LAYER_CONTAINER);
 	input->file_bytes = image->file_bytes;
+}
+
+/* Whether the caller vouches for the identity of the layer of this kind. */
+static bool
+vouched(const fsimg_image_t *image, fsimg_layer_kind_t kind)
+{
+	return ((image->vouched & SURVEY(kind)) != 0);
+}
+
+/* The identity record a call into the layer of this kind receives: the
+ * image's record of that kind when the caller vouches for the layer, the
+ * one it forced, else NULL.
+ */
+static fsimg_identity_t *
+vouch(fsimg_image_t *image, fsimg_layer_kind_t kind)
+{
+	return (vouched(image, kind) ? &image->identity[kind] : NULL);
+}
+
+bool
+fsimg_identity_holds(fsimg_identity_t *identity, bool holds,
+    const char *check)
+{
+	if (holds)
+		return (true);
+	if (identity == NULL)
+		return (false);
+	if (identity->assumed == NULL)
+		identity->assumed = check;
+	return (true);
 }
 
 /* Whether a layer runs a probe at the step of its kind: a scheme, a
@@ -808,10 +853,12 @@ survey_bytes(fsimg_layer_kind_t kind, const fsimg_layer_t *forced,
 	return (want);
 }
 
-/* One layer's probe on its share of the prefix. */
+/* One layer's probe on its share of the prefix, with the identity record
+ * of a forced layer the caller vouches for, else NULL.
+ */
 static fsimg_status_t
 probe_layer(const fsimg_layer_t *layer, const probe_input_t *input,
-    fsimg_error_t *error)
+    fsimg_identity_t *identity, fsimg_error_t *error)
 {
 	size_t length;
 
@@ -819,11 +866,12 @@ probe_layer(const fsimg_layer_t *layer, const probe_input_t *input,
 	    probe_bytes(layer);
 	if (layer->kind == FSIMG_LAYER_SCHEME)
 		return (layer->scheme->probe(input->prefix, length, input->bytes,
-		    error));
+		    identity, error));
 	if (layer->kind == FSIMG_LAYER_COMPRESSION)
-		return (layer->compression->probe(input->prefix, length, error));
+		return (layer->compression->probe(input->prefix, length,
+		    identity, error));
 	return (layer->container->probe(input->prefix, length, input->tail,
-	    input->tail_length, input->bytes, error));
+	    input->tail_length, input->bytes, identity, error));
 }
 
 /*
@@ -848,7 +896,7 @@ survey(unsigned kinds, const probe_input_t *input,
 		if ((kinds & SURVEY(layer->kind)) == 0 || !probing(layer))
 			continue;
 		fsimg_error_clear(&detail);
-		status = probe_layer(layer, input, &detail);
+		status = probe_layer(layer, input, NULL, &detail);
 		if (fsimg_survey_count(&counts[layer->kind], status, &detail))
 			counts[layer->kind].layer = layer;
 	}
@@ -896,7 +944,8 @@ identify_container(fsimg_image_t *image, const fsimg_layer_t *forced,
 		return (status);
 	input.prefix = prefix;
 	if (forced != NULL) {
-		status = probe_layer(forced, &input, error);
+		status = probe_layer(forced, &input,
+		    vouch(image, FSIMG_LAYER_CONTAINER), error);
 		fsimg_dealloc(prefix);
 		if (status == FSIMG_OK)
 			*container = forced;
@@ -1110,7 +1159,8 @@ identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
 		return (status);
 	input.prefix = prefix;
 	if (forced != NULL) {
-		status = probe_layer(forced, &input, error);
+		status = probe_layer(forced, &input,
+		    vouch(image, FSIMG_LAYER_SCHEME), error);
 		fsimg_dealloc(prefix);
 		if (status == FSIMG_OK)
 			*scheme = forced;
@@ -1118,7 +1168,7 @@ identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
 	}
 	status = survey(SURVEY(FSIMG_LAYER_SCHEME) |
 	    SURVEY(FSIMG_LAYER_FILESYSTEM), &input, forced_filesystem(image),
-	    image->assume_identity, counts, error);
+	    vouched(image, FSIMG_LAYER_FILESYSTEM), counts, error);
 	fsimg_dealloc(prefix);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1162,6 +1212,7 @@ scheme_input(fsimg_image_t *image, fsimg_scheme_input_t *input)
 	input->disk = image->disk;
 	input->session = &image->session;
 	input->options = &image->layers;
+	input->identity = vouch(image, FSIMG_LAYER_SCHEME);
 	input->disk_bytes = image->disk_bytes;
 }
 
@@ -1652,6 +1703,34 @@ append_unverified(fsimg_layer_report_t *out, const char *entries)
 	    used == 0 ? "" : ",", entries);
 }
 
+/*
+ * Full verification certifies each layer as its format, which an assumed
+ * identity is not: the image fails, naming the first layer, outermost
+ * first, whose record holds a waived check. The scheme's record is
+ * complete once its detection has run.
+ */
+static fsimg_status_t
+assumed_identity_failed(const fsimg_image_t *image, fsimg_error_t *error)
+{
+	const fsimg_layer_t *layers[] = { image->compression, image->container,
+	    image->scheme };
+	char message[sizeof(error->message)];
+	const char *assumed;
+
+	for (size_t i = 0; i < sizeof(layers) / sizeof(layers[0]); i++) {
+		if (layers[i] == NULL)
+			continue;
+		assumed = image->identity[layers[i]->kind].assumed;
+		if (assumed == NULL)
+			continue;
+		snprintf(message, sizeof(message), "%s identity was assumed: %s",
+		    layers[i]->name, assumed);
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
+		    message));
+	}
+	return (FSIMG_OK);
+}
+
 /* Opening the container and the table already performed every check
  * reading needs; verify adds the passes that read beyond the tables, the
  * container's first, and reports the scope reached. What a decode or a
@@ -1678,6 +1757,11 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "missing layer report or unknown verification flags"));
 	bzero(out, sizeof(*out));
+	status = detect_scheme(image, error);
+	if (status == FSIMG_OK)
+		status = assumed_identity_failed(image, error);
+	if (status != FSIMG_OK)
+		return (status);
 	payload = (flags & FSIMG_VERIFY_PAYLOAD) != 0;
 	/* Every member was checked as the spool filled, except for the check
 	 * a member without one could not have.
@@ -1690,8 +1774,13 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 			append_unverified(out,
 			    image->compression->compression->unverified);
 	}
+	/* The records were refused above, so verification's own identity
+	 * checks are strict: a check failing now, the input changed since
+	 * open, is never waived.
+	 */
 	if (image->container != NULL) {
 		container_input(image, NULL, &container);
+		container.identity = NULL;
 		status = image->container->container->verify(&container,
 		    &image->opened, payload, error);
 		if (status != FSIMG_OK)
@@ -1707,6 +1796,7 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 		return (status);
 	if (image->scheme != NULL) {
 		scheme_input(image, &input);
+		input.identity = NULL;
 		status = image->scheme->scheme->verify(&input, &image->table, error);
 		if (status != FSIMG_OK)
 			return (layer_failed(image->scheme, status, error));
