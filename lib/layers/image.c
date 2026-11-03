@@ -1705,8 +1705,8 @@ append_unverified(fsimg_layer_report_t *out, const char *entries)
 
 /*
  * Full verification certifies each layer as its format, which an assumed
- * identity is not: the image fails, naming the first layer, outermost
- * first, whose record holds a waived check. The scheme's record is
+ * identity is not: the image fails as the first layer, outermost first,
+ * whose record holds a waived check, naming the check. The scheme's record is
  * complete once its detection has run.
  */
 static fsimg_status_t
@@ -1725,8 +1725,8 @@ assumed_identity_failed(const fsimg_image_t *image, fsimg_error_t *error)
 			continue;
 		snprintf(message, sizeof(message), "%s identity was assumed: %s",
 		    layers[i]->name, assumed);
-		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
-		    message));
+		return (layer_failed(layers[i], fsimg_error_set(error,
+		    FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE, message), error));
 	}
 	return (FSIMG_OK);
 }

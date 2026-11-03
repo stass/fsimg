@@ -115,12 +115,12 @@ hbcifs_failure(fsimg_error_t *error, fsimg_status_t status,
 static fsimg_status_t
 hbcifs_probe(const unsigned char *prefix, size_t length,
     const unsigned char *tail FSIMG_UNUSED, size_t tail_length FSIMG_UNUSED,
-    uint64_t file_bytes, fsimg_identity_t *identity FSIMG_UNUSED,
-    fsimg_error_t *error)
+    uint64_t file_bytes, fsimg_identity_t *identity, fsimg_error_t *error)
 {
 	if (length < sizeof(hbcifs_identity) ||
-	    bcmp(prefix + HEADER_IDENTITY, hbcifs_identity,
-	    sizeof(hbcifs_identity)) != 0)
+	    !fsimg_identity_holds(identity, bcmp(prefix + HEADER_IDENTITY,
+	    hbcifs_identity, sizeof(hbcifs_identity)) == 0,
+	    "the header has no hbcifs identity"))
 		return (hbcifs_failure(error, FSIMG_EFORMAT,
 		    "no hbcifs identity"));
 	if (length < HBCIFS_HEADER_BYTES || file_bytes < HBCIFS_HEADER_BYTES)
@@ -344,7 +344,7 @@ hbcifs_open(const fsimg_container_input_t *input, fsimg_container_t *out,
 	if (status != FSIMG_OK)
 		return (status);
 	status = hbcifs_probe(header, sizeof(header), NULL, 0,
-	    input->file_bytes, NULL, error);
+	    input->file_bytes, input->identity, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (input->spool == NULL)

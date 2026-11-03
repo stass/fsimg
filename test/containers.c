@@ -202,6 +202,8 @@ static void fixture_init(fixture_t *, uint64_t, uint64_t);
 static void fixture_free(fixture_t *);
 static fsimg_status_t fixture_open(fixture_t *, memory_file_t *, const char *,
     fsimg_error_t *);
+static fsimg_status_t fixture_open_flags(fixture_t *, memory_file_t *,
+    const char *, uint32_t, fsimg_error_t *);
 static fsimg_status_t read_exact(fsimg_io_t *, uint64_t, void *, size_t,
     fsimg_error_t *);
 static fsimg_status_t read_disk(fixture_t *, uint64_t, void *, size_t,
@@ -776,10 +778,17 @@ fixture_free(fixture_t *f)
 	CHECK(rmdir(f->directory) == 0);
 }
 
-/* Open an image of file, forcing the stack text when given. */
 static fsimg_status_t
 fixture_open(fixture_t *f, memory_file_t *file, const char *stack,
     fsimg_error_t *error)
+{
+	return (fixture_open_flags(f, file, stack, 0, error));
+}
+
+/* Open an image of file, forcing the stack text when given. */
+static fsimg_status_t
+fixture_open_flags(fixture_t *f, memory_file_t *file, const char *stack,
+    uint32_t flags, fsimg_error_t *error)
 {
 	fsimg_image_options_t options;
 	fsimg_io_ops_t ops;
@@ -792,6 +801,7 @@ fixture_open(fixture_t *f, memory_file_t *file, const char *stack,
 	ops.get_size = file_size;
 	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, file, &f->io, NULL) == FSIMG_OK);
 	fsimg_image_options_init(&options);
+	options.flags = flags;
 	if (stack != NULL)
 		CHECK(fsimg_stack_parse(stack, &options.stack, NULL) == FSIMG_OK);
 	return (fsimg_image_open(f->ctx, f->io, &options, &f->image, error));
@@ -2520,6 +2530,322 @@ write_seed(const char *path, memory_file_t file)
 	free(file.bytes);
 }
 
+/* Recompute the independent encoder's checksum after patching a footer. */
+static void
+vhd_reseal(memory_file_t *file)
+{
+	unsigned char *footer = file->bytes + file->length - 512;
+	uint32_t sum = 0;
+
+	bzero(footer + 64, 4);
+	for (unsigned i = 0; i < 512; i++)
+		sum += footer[i];
+	put_be32(footer + 64, ~sum);
+}
+
+/* Naming the filesystem must not waive an unnamed container's identity.
+ * Both opens either report the same error or expose the damaged file as
+ * a bare disk, including its container metadata bytes.
+ */
+static void
+expect_unchanged_container_detection(memory_file_t *file)
+{
+	fsimg_image_info_t info;
+	fsimg_error_t plain, assumed;
+	fsimg_status_t status, forced_status;
+	fixture_t f;
+
+	fixture_init(&f, 16 * MIB, 0);
+	status = fixture_open(&f, file, DETECT, &plain);
+	forced_status = fixture_open_flags(&f, file, DETECT,
+	    FSIMG_IMAGE_ASSUME_IDENTITY, &assumed);
+	CHECK(forced_status == status);
+	if (status != FSIMG_OK) {
+		CHECK(strcmp(plain.path, assumed.path) == 0);
+		CHECK(strcmp(plain.message, assumed.message) == 0);
+	} else {
+		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+		CHECK(info.container[0] == '\0');
+		expect_disk(&f, file->bytes, file->length);
+		CHECK(fixture_open(&f, file, DETECT, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+		CHECK(info.container[0] == '\0');
+		expect_disk(&f, file->bytes, file->length);
+	}
+	fixture_free(&f);
+}
+
+/* Read the intact image through the library, then require identical disk
+ * bytes after assuming the damaged container's identity. Verification
+ * must refuse before doing any more I/O, even with payload checks requested.
+ */
+static void
+expect_assumed_container(memory_file_t *intact, memory_file_t *damaged,
+    const char *layer, const char *message)
+{
+	fsimg_image_info_t info;
+	fsimg_layer_report_t report;
+	fsimg_stats_t before, after;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	unsigned char *expected;
+	uint64_t length;
+	fixture_t f;
+	char stack[64];
+
+	snprintf(stack, sizeof(stack), "fat12/-/%s", layer);
+	expect_unchanged_container_detection(damaged);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, intact, stack, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	length = info.disk_bytes;
+	expected = malloc((size_t)length);
+	CHECK(expected != NULL);
+	CHECK(read_disk(&f, 0, expected, (size_t)length, NULL) == FSIMG_OK);
+
+	CHECK(fixture_open(&f, damaged, stack, &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.path, layer) == 0);
+	status = fixture_open_flags(&f, damaged, stack,
+	    FSIMG_IMAGE_ASSUME_IDENTITY, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "%s: assumed identity open returned %s: %s\n",
+		    layer, fsimg_status_string(status), error.message);
+	CHECK(status == FSIMG_OK);
+
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.container, layer) == 0);
+	expect_disk(&f, expected, length);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.path, layer) == 0);
+	CHECK(strcmp(error.message, message) == 0);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
+	CHECK(after.io_calls == before.io_calls);
+	CHECK(after.read_bytes == before.read_bytes);
+	free(expected);
+	fixture_free(&f);
+}
+
+static void
+test_assumed_vhd_cookie(void)
+{
+	unsigned char *disk = disk_new(64 * KIB);
+	memory_file_t intact, damaged;
+
+	disk_pattern(disk, 64 * KIB, 5);
+	intact = vhd_encode(disk, 64 * KIB, 64 * KIB);
+	damaged = vhd_encode(disk, 64 * KIB, 64 * KIB);
+	bzero(damaged.bytes + damaged.length - 512, 8);
+	vhd_reseal(&damaged);
+	expect_assumed_container(&intact, &damaged, "vhd",
+	    "vhd identity was assumed: the footer has no conectix cookie");
+	free(damaged.bytes);
+	free(intact.bytes);
+	free(disk);
+}
+
+/* An intact open waives nothing. Verification must reject an identity
+ * check that fails after the live backing buffer changes.
+ */
+static void
+test_assumed_vhd_cookie_changed_after_open(void)
+{
+	unsigned char *disk = disk_new(64 * KIB);
+	fsimg_layer_report_t report;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	memory_file_t file;
+	fixture_t f;
+
+	disk_pattern(disk, 64 * KIB, 5);
+	file = vhd_encode(disk, 64 * KIB, 64 * KIB);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open_flags(&f, &file, "fat12/-/vhd",
+	    FSIMG_IMAGE_ASSUME_IDENTITY, &error) == FSIMG_OK);
+	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
+	    &error) == FSIMG_OK);
+	CHECK(report.complete && strcmp(report.container, "vhd") == 0);
+
+	/* file_read copies from this buffer on every callback. Resealing
+	 * keeps the cookie as the only invalid footer field.
+	 */
+	bzero(file.bytes + file.length - 512, 8);
+	vhd_reseal(&file);
+	status = fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
+	    &error);
+	CHECK(status != FSIMG_OK);
+	CHECK(status == FSIMG_EFORMAT);
+	CHECK(strcmp(error.path, "vhd") == 0);
+	CHECK(strcmp(error.message, "no VHD footer") == 0);
+	CHECK(!report.complete && report.container[0] == '\0');
+	fixture_free(&f);
+	free(file.bytes);
+	free(disk);
+}
+
+static void
+test_assumed_vhd_size_tie(void)
+{
+	unsigned char *disk = disk_new(64 * KIB);
+	memory_file_t intact, damaged;
+
+	disk_pattern(disk, 64 * KIB, 5);
+	intact = vhd_encode(disk, 64 * KIB, 64 * KIB);
+	/* The encoder includes the changed size in the footer checksum. */
+	damaged = vhd_encode(disk, 64 * KIB, 32 * KIB);
+	expect_assumed_container(&intact, &damaged, "vhd",
+	    "vhd identity was assumed: the footer's current size is not the file length less the footer");
+	free(damaged.bytes);
+	free(intact.bytes);
+	free(disk);
+}
+
+static void
+test_assumed_simg_magic(void)
+{
+	unsigned char *disk = disk_new(64 * 4096);
+	simg_spec_t spec = simg_sample(disk);
+	memory_file_t intact = simg_encode(&spec);
+	memory_file_t damaged = simg_encode(&spec);
+
+	bzero(damaged.bytes, 4);
+	expect_assumed_container(&intact, &damaged, "simg",
+	    "simg identity was assumed: the header has no sparse image magic");
+	free(damaged.bytes);
+	free(intact.bytes);
+	free(disk);
+}
+
+static void
+test_assumed_dmg_signature(void)
+{
+	unsigned char *disk = disk_new(MIB);
+	dmg_spec_t spec = dmg_whole_disk(disk, 2048);
+	memory_file_t intact, damaged;
+
+	disk_pattern(disk, 64 * SECTOR, 1);
+	intact = dmg_encode(&spec);
+	damaged = dmg_encode(&spec);
+	bzero(damaged.bytes + damaged.length - 512, 4);
+	expect_assumed_container(&intact, &damaged, "dmg",
+	    "dmg identity was assumed: the trailer has no koly signature");
+	free(damaged.bytes);
+	free(intact.bytes);
+	free(disk);
+}
+
+static void
+test_assumed_dmg_trailer_tie(void)
+{
+	unsigned char *disk = disk_new(MIB);
+	dmg_spec_t spec = dmg_whole_disk(disk, 2048);
+	memory_file_t intact, damaged;
+
+	disk_pattern(disk, 64 * SECTOR, 1);
+	/* A complete plist precedes 16 resource bytes and the trailer.
+	 * Declaring the resource fork absent leaves a gap after the plist;
+	 * its offset and length still locate the complete, readable XML.
+	 */
+	spec.resource_bytes = 16;
+	intact = dmg_encode(&spec);
+	damaged = dmg_encode(&spec);
+	put_be64(damaged.bytes + damaged.length - 512 + KOLY_RSRC_LENGTH, 0);
+	expect_assumed_container(&intact, &damaged, "dmg",
+	    "dmg identity was assumed: neither the plist nor the resource fork ends at the trailer");
+	free(damaged.bytes);
+	free(intact.bytes);
+	free(disk);
+}
+
+/* The flag waives identity, never format validation. Each invalid field
+ * is tried with both intact and damaged identity bytes.
+ */
+static void
+expect_assumed_container_refused(memory_file_t *file, const char *layer)
+{
+	fsimg_error_t error;
+	fixture_t f;
+
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open_flags(&f, file, layer, FSIMG_IMAGE_ASSUME_IDENTITY,
+	    &error) != FSIMG_OK);
+	CHECK(strcmp(error.path, layer) == 0);
+	fixture_free(&f);
+}
+
+static void
+test_assumed_containers_still_validate(void)
+{
+	unsigned char *disk = disk_new(64 * KIB);
+	simg_spec_t sparse = { .disk = disk, .block_bytes = 4096, .chunks = 1,
+	    .chunk = { { .type = SIMG_RAW, .blocks = 16 } } };
+	dmg_spec_t dmg = { .disk = disk, .sectors = 128, .tables = 1,
+	    .table = { { .count = 128, .runs = 1,
+	    .run = { { .type = RUN_RAW, .sectors = 128 } } } } };
+	memory_file_t file;
+	unsigned char *footer;
+
+	file = vhd_encode(disk, 64 * KIB, 64 * KIB);
+	footer = file.bytes + file.length - 512;
+	footer[64] ^= 1;
+	expect_assumed_container_refused(&file, "vhd");
+	bzero(footer, 8);
+	expect_assumed_container_refused(&file, "vhd");
+	bcopy("conectix", footer, 8);
+	vhd_reseal(&file);
+
+	put_be32(footer + 60, 3);
+	vhd_reseal(&file);
+	expect_assumed_container_refused(&file, "vhd");
+	bzero(footer, 8);
+	vhd_reseal(&file);
+	expect_assumed_container_refused(&file, "vhd");
+	bcopy("conectix", footer, 8);
+
+	put_be32(footer + 60, 2);
+	put_be32(footer + 12, 0x00020000);
+	vhd_reseal(&file);
+	expect_assumed_container_refused(&file, "vhd");
+	bzero(footer, 8);
+	vhd_reseal(&file);
+	expect_assumed_container_refused(&file, "vhd");
+
+	free(file.bytes);
+
+	file = simg_encode(&sparse);
+	put_le16(file.bytes + 6, 1);
+	expect_assumed_container_refused(&file, "simg");
+	bzero(file.bytes, 4);
+	expect_assumed_container_refused(&file, "simg");
+	put_le32(file.bytes, 0xed26ff3au);
+
+	put_le16(file.bytes + 6, 0);
+	put_le32(file.bytes + 12, 4097);
+	expect_assumed_container_refused(&file, "simg");
+	bzero(file.bytes, 4);
+	expect_assumed_container_refused(&file, "simg");
+
+	free(file.bytes);
+
+	file = dmg_encode(&dmg);
+	footer = file.bytes + file.length - 512;
+	put_be32(footer + 4, 5);
+	expect_assumed_container_refused(&file, "dmg");
+	bzero(footer, 4);
+	expect_assumed_container_refused(&file, "dmg");
+	bcopy("koly", footer, 4);
+
+	put_be32(footer + 4, 4);
+	put_be32(footer + 8, 511);
+	expect_assumed_container_refused(&file, "dmg");
+	bzero(footer, 4);
+	expect_assumed_container_refused(&file, "dmg");
+
+	free(file.bytes);
+	free(disk);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2566,7 +2892,27 @@ main(int argc, char **argv)
 		free(disk);
 		return (0);
 	}
+	if (argc == 3 && strcmp(argv[1], "--assumed-identity") == 0) {
+		if (strcmp(argv[2], "vhd-cookie") == 0)
+			test_assumed_vhd_cookie();
+		else if (strcmp(argv[2], "vhd-cookie-after-open") == 0)
+			test_assumed_vhd_cookie_changed_after_open();
+		else if (strcmp(argv[2], "vhd-size") == 0)
+			test_assumed_vhd_size_tie();
+		else if (strcmp(argv[2], "simg") == 0)
+			test_assumed_simg_magic();
+		else if (strcmp(argv[2], "dmg-signature") == 0)
+			test_assumed_dmg_signature();
+		else if (strcmp(argv[2], "dmg-tie") == 0)
+			test_assumed_dmg_trailer_tie();
+		else if (strcmp(argv[2], "validation") == 0)
+			test_assumed_containers_still_validate();
+		else
+			CHECK(!"unknown assumed-identity test");
+		return (0);
+	}
 	CHECK(argc == 1);
+
 	test_crc_oracle();
 	test_dmg_read();
 	test_dmg_legacy_resource_fork();
@@ -2593,5 +2939,12 @@ main(int argc, char **argv)
 	test_vast_declared_zeros();
 	test_truncated_container();
 	test_many_zero_records();
+	test_assumed_containers_still_validate();
+	test_assumed_vhd_cookie();
+	test_assumed_vhd_cookie_changed_after_open();
+	test_assumed_vhd_size_tie();
+	test_assumed_simg_magic();
+	test_assumed_dmg_signature();
+	test_assumed_dmg_trailer_tie();
 	return (0);
 }

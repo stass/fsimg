@@ -263,7 +263,9 @@ frames (`cat a.zst b.zst`), and with a skippable frame.
 
 Identity: the four magic bytes `28 B5 2F FD`, or a skippable magic
 `5x 2A 4D 18`. A skippable first frame is a claim, since `zstd -d` reads
-such a file; what follows it must be a frame.
+such a file; what follows it must be a frame. An assumed identity
+(`--force`) waives nothing: libzstd reads the magic itself, so a frame
+whose magic is damaged stays unreadable.
 
 Writing: one frame from `ZSTD_compressStream2` with `ZSTD_e_continue` per
 piece and one `ZSTD_e_end`, on a context whose parameters are set
@@ -341,7 +343,9 @@ padding, and with `-T0` (several blocks in one stream).
 
 Identity: the six magic bytes `FD 37 7A 58 5A 00`. The stream flags and
 header CRC32 are checked after the claim, by the library, and a failure
-there is `FSIMG_ECORRUPT`, never a fall-through.
+there is `FSIMG_ECORRUPT`, never a fall-through. An assumed identity
+(`--force`) waives nothing: liblzma reads the magic itself, so a stream
+whose magic is damaged stays unreadable.
 
 Writing: one stream of one block from `lzma_easy_encoder` with the preset
 `xz:level` names and the check `xz:check` names, fed with `LZMA_RUN` per

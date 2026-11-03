@@ -310,7 +310,7 @@ static fsimg_status_t dmg_probe(const unsigned char *, size_t,
 static fsimg_status_t trailer_layout(const unsigned char *, uint64_t,
     fsimg_error_t *);
 static fsimg_status_t trailer_decode(const unsigned char *, uint64_t,
-    dmg_trailer_t *, fsimg_error_t *);
+    fsimg_identity_t *, dmg_trailer_t *, fsimg_error_t *);
 static fsimg_status_t read_trailer(const fsimg_container_input_t *,
     dmg_trailer_t *, fsimg_error_t *);
 static fsimg_status_t table_header(dmg_walk_t *, fsimg_error_t *);
@@ -436,11 +436,14 @@ ranges_overlap(uint64_t a, uint64_t a_end, uint64_t b, uint64_t b_end)
 }
 
 /*
- * The identity: "koly", version 4 and header size 512 in the last 512
- * bytes, and the plist or the resource fork ending exactly where the
- * trailer begins, which ties the trailer to this file's length. Current
- * hdiutil writes no resource fork and ends the plist at the trailer; older
- * hdiutil writes a legacy resource fork between the plist and the trailer.
+ * The identity: "koly" in the last 512 bytes, and the plist or the
+ * resource fork ending exactly where the trailer begins, which ties the
+ * trailer to this file's length; an assumed identity waives both, and
+ * trailer_layout checks the ranges against the trailer regardless.
+ * Version 4 and header size 512, which decide how the trailer is decoded,
+ * are validation. Current hdiutil writes no resource fork and ends the
+ * plist at the trailer; older hdiutil writes a legacy resource fork
+ * between the plist and the trailer.
  * A resource fork of length 0 is absent, whatever its offset. A bare
  * volume whose last sector holds a stray trailer of another file's length
  * draws no claim.
@@ -448,14 +451,15 @@ ranges_overlap(uint64_t a, uint64_t a_end, uint64_t b, uint64_t b_end)
 static fsimg_status_t
 dmg_probe(const unsigned char *prefix FSIMG_UNUSED, size_t prefix_length
     FSIMG_UNUSED, const unsigned char *tail, size_t tail_length,
-    uint64_t file_bytes, fsimg_identity_t *identity FSIMG_UNUSED,
-    fsimg_error_t *error)
+    uint64_t file_bytes, fsimg_identity_t *identity, fsimg_error_t *error)
 {
 	uint64_t trailer_start, xml_end, rsrc_end;
 	bool xml_abuts, rsrc_abuts;
 
 	if (tail_length < KOLY_HEADER_BYTES || file_bytes < KOLY_HEADER_BYTES ||
-	    bcmp(tail + KOLY_SIGNATURE, "koly", 4) != 0 ||
+	    !fsimg_identity_holds(identity,
+	    bcmp(tail + KOLY_SIGNATURE, "koly", 4) == 0,
+	    "the trailer has no koly signature") ||
 	    fsimg_load_be32(tail + KOLY_VERSION_FIELD) != KOLY_VERSION ||
 	    fsimg_load_be32(tail + KOLY_HEADER_SIZE) != KOLY_HEADER_BYTES)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
@@ -466,7 +470,8 @@ dmg_probe(const unsigned char *prefix FSIMG_UNUSED, size_t prefix_length
 	rsrc_abuts = fsimg_load_be64(tail + KOLY_RSRC_LENGTH) != 0 &&
 	    koly_range_end(tail, KOLY_RSRC_OFFSET, &rsrc_end) &&
 	    rsrc_end == trailer_start;
-	if (!xml_abuts && !rsrc_abuts)
+	if (!fsimg_identity_holds(identity, xml_abuts || rsrc_abuts,
+	    "neither the plist nor the resource fork ends at the trailer"))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no DMG trailer"));
 	return (FSIMG_OK);
@@ -519,12 +524,12 @@ trailer_layout(const unsigned char *raw, uint64_t file_bytes,
  */
 static fsimg_status_t
 trailer_decode(const unsigned char *raw, uint64_t file_bytes,
-    dmg_trailer_t *trailer, fsimg_error_t *error)
+    fsimg_identity_t *identity, dmg_trailer_t *trailer, fsimg_error_t *error)
 {
 	uint64_t sectors;
 	fsimg_status_t status;
 
-	status = dmg_probe(NULL, 0, raw, KOLY_HEADER_BYTES, file_bytes, NULL,
+	status = dmg_probe(NULL, 0, raw, KOLY_HEADER_BYTES, file_bytes, identity,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -580,7 +585,8 @@ read_trailer(const fsimg_container_input_t *input, dmg_trailer_t *trailer,
 	    &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (trailer_decode(raw, input->file_bytes, trailer, error));
+	return (trailer_decode(raw, input->file_bytes, input->identity, trailer,
+	    error));
 }
 
 /* A table's header is complete: decode it and check that it lies in the

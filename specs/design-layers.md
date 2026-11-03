@@ -387,8 +387,9 @@ for every other layer. A check that fails with a record present is
 recorded there, the first one per layer, and passes; without a record it
 fails as before. A forced probe is therefore still a function of its
 bytes, apart from noting a waived check. `fsimg_image_verify()` refuses
-an image whose records hold a check before any work, so no waived check
-escapes verification whichever call waived it.
+an image whose records hold a check once scheme detection has run and
+before any verification pass, whose own identity checks then receive no
+record, so no waived check escapes verification whichever call waived it.
 
 The CLI accepts `--force` beside a layer `-F` names or a compression `-z`
 or `--compress` forces, and refuses it otherwise; the worker's job decode
@@ -1529,7 +1530,12 @@ Reading: the probe claims on identity, tied to the file length it receives:
 range or a resource fork of nonzero length ending exactly at the trailer
 (offset plus length equal to the file length minus 512). Every `hdiutil`
 image ends its data fork exactly at the XML offset and the last of its XML
-and resource fork exactly at the trailer. Validation then requires: the data
+and resource fork exactly at the trailer. Of these, `koly` and the tie to
+the trailer are identity, which an assumed identity waives ("the trailer
+has no koly signature", "neither the plist nor the resource fork ends at
+the trailer"); version 4 and header size 512 decide how the trailer is
+decoded and are validation, and the ranges are checked against the
+trailer below whatever the tie says. Validation then requires: the data
 fork ending at or before the XML offset; the XML range, and a resource fork
 of nonzero length, each ending at or before the trailer, their offset plus
 length not overflowing; the resource fork sharing no byte with the data fork
@@ -1613,6 +1619,12 @@ length minus 512. A dynamic or differencing image (type 3 or 4) has no size
 tie, so its identity is the footer copy at offset 0 being byte-identical to
 the trailer and its data offset pointing inside the file; a bare volume
 whose last sector merely ends a stored dynamic VHD therefore draws no claim.
+For a fixed disk the cookie and the size tie are what an assumed identity
+waives ("the footer has no conectix cookie", "the footer's current size is
+not the file length less the footer"); the checksum covers the cookie, so
+a cookie waiver needs a footer resealed after the damage. The disk is the
+file less the footer whatever the current size says, and the disk type, checksum and
+constant fields stay validation.
 Validation then requires a correct checksum, format version
 0x00010000, data offset all ones, saved state 0 and current size a multiple
 of 512, each failure `FSIMG_ECORRUPT`; types 3 and 4 (dynamic and
@@ -1646,7 +1658,8 @@ as zeros. Total blocks and total chunks are 32-bit fields: a disk whose
 block count exceeds 2^32 - 1 (16 TiB at the default block size) is refused
 at plan time as unsupported by the container, naming the field.
 
-Reading: identity is the magic. Validation then requires major version 1
+Reading: identity is the magic, which an assumed identity waives ("the
+header has no sparse image magic"). Validation then requires major version 1
 (another major version is `FSIMG_EUNSUPPORTED`), minor version 0 and the
 header sizes, a block size that is a nonzero multiple of 4, every chunk
 header within the file with a total size consistent with its type, a
@@ -1779,7 +1792,8 @@ largest observed is 65059.
 Reading: the probe claims on identity at each prefix-table offset in table
 order, inside the 1344-byte prefix it declares: the signature and
 `header_size` 256 at `B`, tied to the prefix by `preboot_size == B`. The
-first tie decides, and no other offset is ever examined. Validation then
+first tie decides, and no other offset is ever examined. The signature
+locates the header, so an assumed identity waives nothing here. Validation then
 requires, as unsupported, a value outside the version, `flags1`, machine
 and compression tables; and, as corrupt, a bound violation: `startup_size`
 at least 260 and a multiple of 4, `stored_size` a multiple of 4 and at
@@ -2074,7 +2088,8 @@ runs to the end of the file. Header fields are little-endian:
 | 0x1c | 4 | Unidentified; bytes `49 4f 33 f3` | Reported; unverified |
 | 0x20 | 32 | Zero | Closed table: zero |
 
-Reading: identity is the eight bytes at offset 0. Validation then requires
+Reading: identity is the eight bytes at offset 0, which an assumed identity
+waives ("the header has no hbcifs identity"). Validation then requires
 the payload length equal to the file length minus 64 and a nonzero
 decoded length, since an ImageFS starts with a header, else
 `FSIMG_ECORRUPT`; and the values the closed table names at 0x10, 0x18 and
@@ -2145,8 +2160,10 @@ level, and the first covers the nine-bit literals zlib-ng's fastest level
 can emit, so the bound does not depend on the zlib the library runs
 against; the sink refuses a byte past it as an internal error.
 
-Reading: identity is the identification bytes, method 8 and zero reserved
-flag bits. The optional fields are bounded reads (FEXTRA
+Reading: identity is the first member's identification bytes, which an
+assumed identity waives ("the first member has no 1f 8b magic"); method 8
+and zero reserved flag bits decide the decoding and are validation, as a
+later member's identification bytes are. The optional fields are bounded reads (FEXTRA
 by its 16-bit length; FNAME and FCOMMENT as zero-terminated strings of at
 most 64 KiB counting the terminator, discarded); the header CRC16 is checked
 when present, and a failure is corrupt. A second member's identification

@@ -97,6 +97,7 @@ typedef struct fixture {
 	fsimg_io_t	*io;
 	fsimg_image_t	*image;
 	uint64_t	 baseline_memory;
+	uint32_t	 image_flags;	/* Flags supplied to image open */
 	uint64_t	 fail_allocation;	/* Injected into the open; 0 none */
 	char		 directory[PATH_MAX];
 	int		 directory_fd;
@@ -554,6 +555,7 @@ open_file(fixture_t *f, memory_file_t *file, const char *stack, int spool,
 	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, file, &f->io, NULL) == FSIMG_OK);
 	fsimg_image_options_init(&options);
 	options.spool_fd = spool;
+	options.flags = f->image_flags;
 	if (stack != NULL)
 		CHECK(fsimg_stack_parse(stack, &options.stack, NULL) == FSIMG_OK);
 	fsimg_test_fail_alloc_after(f->ctx, f->fail_allocation);
@@ -1346,6 +1348,107 @@ write_seed(const char *path, const char *decoded)
 	return (0);
 }
 
+/* Assumption changes only the named container's identity decision. */
+static void
+test_assumed_hbcifs_identity(void)
+{
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+	fsimg_image_info_t info;
+	fsimg_layer_report_t report;
+	fsimg_stats_t before, after;
+	fsimg_error_t plain, assumed;
+	fsimg_io_t *disk;
+	unsigned char *expected;
+	size_t transferred;
+	memory_file_t file;
+	container_t c;
+	buffer_t bytes;
+	fixture_t f;
+
+	container_imagefs(&c);
+	bytes = container_file(&c);
+	fixture_init(&f, 0, 0);
+	CHECK(open_buffer(&f, &file, &bytes, "ifs/-/hbcifs", NULL) == FSIMG_OK);
+	CHECK(fsimg_image_select(f.image, &selector, &disk, NULL) == FSIMG_OK);
+	expected = malloc(c.plain_length);
+	CHECK(expected != NULL);
+	CHECK(fsimg_io_read_exact(disk, 0, expected, c.plain_length,
+	    &transferred, NULL) == FSIMG_OK);
+	fsimg_io_free(disk);
+	fixture_free(&f);
+
+	/* The identity is six letters followed by two NUL bytes. */
+	bzero(bytes.bytes, 8);
+	fixture_init(&f, 0, 0);
+	CHECK(open_buffer(&f, &file, &bytes, "ifs/-/hbcifs", &plain) ==
+	    FSIMG_EFORMAT);
+	CHECK(strcmp(plain.path, "hbcifs") == 0);
+	fixture_free(&f);
+
+	/* Naming only ifs leaves container detection unchanged. */
+	fixture_init(&f, 0, 0);
+	CHECK(open_buffer(&f, &file, &bytes, "ifs", NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, &plain) == FSIMG_EFORMAT);
+	fixture_free(&f);
+	fixture_init(&f, 0, 0);
+	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(open_buffer(&f, &file, &bytes, "ifs", NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, &assumed) == FSIMG_EFORMAT);
+	CHECK(strcmp(plain.path, assumed.path) == 0);
+	CHECK(strcmp(plain.message, assumed.message) == 0);
+	fixture_free(&f);
+
+	fixture_init(&f, 0, 0);
+	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(open_buffer(&f, &file, &bytes, "ifs/-/hbcifs", NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.container, "hbcifs") == 0);
+	expect_disk(&f, expected, c.plain_length);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
+	    &assumed) == FSIMG_ECORRUPT);
+	CHECK(strcmp(assumed.path, "hbcifs") == 0);
+	CHECK(strcmp(assumed.message,
+	    "hbcifs identity was assumed: the header has no hbcifs identity") == 0);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
+	CHECK(after.io_calls == before.io_calls);
+	CHECK(after.read_bytes == before.read_bytes);
+	fixture_free(&f);
+	free(expected);
+	free(bytes.bytes);
+	container_free(&c);
+}
+
+static void
+test_assumed_hbcifs_still_validates_payload_length(void)
+{
+	fsimg_error_t error;
+	memory_file_t file;
+	container_t c;
+	buffer_t bytes;
+	fixture_t f;
+
+	container_imagefs(&c);
+	bytes = container_file(&c);
+	put_le32(bytes.bytes + 0x0c, (uint32_t)c.stream.length + 1);
+	fixture_init(&f, 0, 0);
+	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(open_buffer(&f, &file, &bytes, "ifs/-/hbcifs", &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strcmp(error.path, "hbcifs") == 0);
+	CHECK(strstr(error.message, "payload length") != NULL);
+	fixture_free(&f);
+
+	bzero(bytes.bytes, 8);
+	fixture_init(&f, 0, 0);
+	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(open_buffer(&f, &file, &bytes, "ifs/-/hbcifs", &error) != FSIMG_OK);
+	CHECK(strcmp(error.path, "hbcifs") == 0);
+	fixture_free(&f);
+	free(bytes.bytes);
+	container_free(&c);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1353,7 +1456,13 @@ main(int argc, char **argv)
 		return (disk_cksum(argv[2]));
 	if ((argc == 3 || argc == 4) && strcmp(argv[1], "--seed-hbcifs") == 0)
 		return (write_seed(argv[2], argc == 4 ? argv[3] : NULL));
+	if (argc == 2 && strcmp(argv[1], "--assumed-identity") == 0) {
+		test_assumed_hbcifs_still_validates_payload_length();
+		test_assumed_hbcifs_identity();
+		return (0);
+	}
 	CHECK(signal(SIGPIPE, SIG_IGN) != SIG_ERR);
+
 	test_capability();
 	test_profile_facts();
 	test_open();
@@ -1365,6 +1474,8 @@ main(int argc, char **argv)
 	test_second_spool();
 	test_work_limit();
 	test_faults();
+	test_assumed_hbcifs_still_validates_payload_length();
+	test_assumed_hbcifs_identity();
 	printf("hbcifs tests passed\n");
 	return (0);
 }

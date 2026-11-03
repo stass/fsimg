@@ -63,7 +63,7 @@ static fsimg_status_t vhd_probe(const unsigned char *, size_t,
     const unsigned char *, size_t, uint64_t, fsimg_identity_t *,
     fsimg_error_t *);
 static fsimg_status_t footer_check(const unsigned char *, uint64_t,
-    fsimg_error_t *);
+    fsimg_identity_t *, fsimg_error_t *);
 static fsimg_status_t read_footer(const fsimg_container_input_t *,
     unsigned char *, fsimg_error_t *);
 static fsimg_status_t vhd_open(const fsimg_container_input_t *,
@@ -122,19 +122,25 @@ vhd_corrupt(fsimg_error_t *error, const char *check)
 static fsimg_status_t
 vhd_probe(const unsigned char *prefix, size_t prefix_length,
     const unsigned char *tail, size_t tail_length, uint64_t file_bytes,
-    fsimg_identity_t *identity FSIMG_UNUSED, fsimg_error_t *error)
+    fsimg_identity_t *identity, fsimg_error_t *error)
 {
 	uint64_t data_offset;
 	uint32_t type;
 
+	/* The cookie and a fixed disk's size tie are identity; the disk is
+	 * the file less the footer whatever the current size says.
+	 */
 	if (tail_length < VHD_FOOTER_BYTES ||
-	    bcmp(tail + FOOTER_COOKIE, "conectix", 8) != 0)
+	    !fsimg_identity_holds(identity,
+	    bcmp(tail + FOOTER_COOKIE, "conectix", 8) == 0,
+	    "the footer has no conectix cookie"))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no VHD footer"));
 	type = fsimg_load_be32(tail + FOOTER_DISK_TYPE);
-	if (type == VHD_FIXED &&
+	if (type == VHD_FIXED && fsimg_identity_holds(identity,
 	    fsimg_load_be64(tail + FOOTER_CURRENT_SIZE) ==
-	    file_bytes - VHD_FOOTER_BYTES)
+	    file_bytes - VHD_FOOTER_BYTES,
+	    "the footer's current size is not the file length less the footer"))
 		return (FSIMG_OK);
 	if (type == VHD_DYNAMIC || type == VHD_DIFFERENCING) {
 		data_offset = fsimg_load_be64(tail + FOOTER_DATA_OFFSET);
@@ -157,13 +163,13 @@ vhd_probe(const unsigned char *prefix, size_t prefix_length,
  */
 static fsimg_status_t
 footer_check(const unsigned char *footer, uint64_t file_bytes,
-    fsimg_error_t *error)
+    fsimg_identity_t *identity, fsimg_error_t *error)
 {
 	uint32_t sum;
 	fsimg_status_t status;
 
-	status = vhd_probe(NULL, 0, footer, VHD_FOOTER_BYTES, file_bytes, NULL,
-	    error);
+	status = vhd_probe(NULL, 0, footer, VHD_FOOTER_BYTES, file_bytes,
+	    identity, error);
 	if (status != FSIMG_OK)
 		return (status);
 	sum = 0;
@@ -199,7 +205,8 @@ read_footer(const fsimg_container_input_t *input, unsigned char *footer,
 	    &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (footer_check(footer, input->file_bytes, error));
+	return (footer_check(footer, input->file_bytes, input->identity,
+	    error));
 }
 
 /* The disk is the file before the footer: one raw chunk. */

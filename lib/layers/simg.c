@@ -176,14 +176,16 @@ simg_corrupt(fsimg_error_t *error, const char *check)
 	    message));
 }
 
-/* The identity is the magic. */
+/* The identity is the magic, which an assumed identity waives. */
 static fsimg_status_t
 simg_probe(const unsigned char *prefix, size_t prefix_length,
     const unsigned char *tail FSIMG_UNUSED, size_t tail_length FSIMG_UNUSED,
-    uint64_t file_bytes FSIMG_UNUSED, fsimg_identity_t *identity FSIMG_UNUSED,
+    uint64_t file_bytes FSIMG_UNUSED, fsimg_identity_t *identity,
     fsimg_error_t *error)
 {
-	if (prefix_length < 4 || fsimg_load_le32(prefix + HEADER_MAGIC) != SIMG_MAGIC)
+	if (prefix_length < 4 || !fsimg_identity_holds(identity,
+	    fsimg_load_le32(prefix + HEADER_MAGIC) == SIMG_MAGIC,
+	    "the header has no sparse image magic"))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no sparse image magic"));
 	return (FSIMG_OK);
@@ -214,8 +216,8 @@ read_header(const fsimg_container_input_t *input, simg_header_t *header,
 	status = read_bytes(input, 0, raw, sizeof(raw), error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = simg_probe(raw, sizeof(raw), NULL, 0, input->file_bytes, NULL,
-	    error);
+	status = simg_probe(raw, sizeof(raw), NULL, 0, input->file_bytes,
+	    input->identity, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (fsimg_load_le16(raw + HEADER_MAJOR) != 1)
