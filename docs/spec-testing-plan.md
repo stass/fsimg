@@ -673,7 +673,8 @@ the expectations their rules derive.
 | `fat.bpb.num_fats` | Nonzero | normative | `info`: `EFORMAT` for zero |
 | `fat.bpb.num_fats.supported` | fsimg reads one or two FATs | profile (`optional_feature`) | `info`: `EUNSUPPORTED` for 3, 254 and 255 |
 | `fat.bpb.media` | `0xF0` or `0xF8`-`0xFF` | normative | `info`: `EFORMAT` |
-| `fat.bpb.total_sectors` | Exactly one of `BPB_TotSec16` and `BPB_TotSec32` is nonzero; FAT32 uses `BPB_TotSec32` | normative | `info`: `ECORRUPT`; a FAT12 volume that counts only in `BPB_TotSec32` is accepted |
+| `fat.bpb.total_sectors` | At least one of `BPB_TotSec16` and `BPB_TotSec32` is nonzero; FAT32 requires `BPB_TotSec16` zero and `BPB_TotSec32` nonzero | normative | `info`: `ECORRUPT`; a FAT12 volume that counts only in `BPB_TotSec32` is accepted |
+| `fat.bpb.total_sectors.tot_sec32_zero` | On FAT12/16 with a nonzero `BPB_TotSec16`, `BPB_TotSec32` is zero | advisory (`must_accept`) | Accepted by `info`; nonzero `BPB_TotSec16` supplies the sector count, ignoring `BPB_TotSec32` even when it holds boot code from before DOS 3.31 beyond the image's sector count |
 | `fat.bpb.fat_size` | `BPB_FATSz16` nonzero for FAT12/16 and zero for FAT32 | normative | `info`: `ECORRUPT` |
 | `fat.bpb.root_entries` | `BPB_RootEntCnt` zero for FAT32 and nonzero for FAT12/16 | normative | `info`: `ECORRUPT` |
 | `fat.bpb.root_entries.aligned` | On FAT12/16, the root region fills whole sectors | advisory (`must_accept`) | Accepted by `info`; the root region is rounded up |

@@ -178,16 +178,28 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	reader->content_domain.length = (uint64_t)geometry.clusters *
 	    geometry.cluster_bytes;
 	reader->content_domain.unit_bytes = geometry.cluster_bytes;
+	/* FAT[0] echoes the media byte. Check it in the active table before
+	 * comparing mirrors: a non-FAT boot sector whose fields happen to form
+	 * a legal BPB then fails for that reason, not as disagreeing copies.
+	 */
+	mask = geometry.variant == 12 ? 0xfff :
+	    geometry.variant == 16 ? 0xffff : 0x0fffffff;
+	status = table_value(reader, geometry.active_table, 0, &first, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (first != ((mask & ~0xffu) | geometry.media))
+		return (fsimg_fat_corrupt(error,
+		    "FAT media descriptor does not match the BPB"));
+	/* The mirrors must agree on both reserved entries; FAT[0] is already
+	 * checked, so this call only compares its copies.
+	 */
 	status = fsimg_fat_table_get(reader, 0, &first, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = fsimg_fat_table_get(reader, 1, &second, error);
 	if (status != FSIMG_OK)
 		return (status);
-	mask = geometry.variant == 12 ? 0xfff :
-	    geometry.variant == 16 ? 0xffff : 0x0fffffff;
-	if (first != ((mask & ~0xffu) | geometry.media) ||
-	    (geometry.variant == 12 && second < 0xff8) ||
+	if ((geometry.variant == 12 && second < 0xff8) ||
 	    (geometry.variant == 16 && (second & 0x3fff) != 0x3fff) ||
 	    (geometry.variant == 32 && (second & 0x03ffffff) != 0x03ffffff))
 		return (fsimg_fat_corrupt(error, "invalid FAT reserved entries"));

@@ -330,6 +330,15 @@ module FsimgSpec
           source: cite("3.1", "BPB_TotSec16 and BPB_TotSec32")
         ),
         Rule.new(
+          id: "fat.bpb.total_sectors.tot_sec32_zero", category: "advisory", policy: "must_accept", scopes: ["open"],
+          applies_to: ->(model, _) { FsimgSpec.derive(model.geometry.variant) { _1 != "fat32" } },
+          domain: Witnesses::TOT_SEC32_ZERO,
+          predicate: ->(model, _) { FsimgSpec.derive(model.common) { |c| c.bpb_tot_sec16.zero? || c.bpb_tot_sec32.zero? } },
+          source: "#{cite("3.1", "BPB_TotSec16")}: on FAT12/16 with a nonzero BPB_TotSec16, BPB_TotSec32 is 0. " \
+                  "Compatibility: boot sectors from before DOS 3.31 hold boot code at offset 32; " \
+                  "specs/design-fat-reader.md#identification-and-geometry reads BPB_TotSec16 when it is nonzero"
+        ),
+        Rule.new(
           id: "fat.bpb.fat_size", category: "normative", policy: "must_reject", status: "FSIMG_ECORRUPT",
           scopes: ["open"], applies_to: ALWAYS, domain: Witnesses::FAT_SIZE,
           predicate: ->(model, _) { FsimgSpec.derive(model.common, model.geometry.variant) { |c, v| c.bpb_fat_sz16.zero? == (v == "fat32") } },
@@ -358,11 +367,10 @@ module FsimgSpec
       # volume.
       def self.regions_fit(geometry) = FsimgSpec.derive(geometry.first_data_sector, geometry.total_sectors) { _1 <= _2 }
 
-      # Exactly one of BPB_TotSec16 and BPB_TotSec32 counts the sectors, and
-      # a FAT32 volume uses BPB_TotSec32. Both set, or both zero, breaks the
-      # first part whatever the variant.
+      # At least one of BPB_TotSec16 and BPB_TotSec32 is nonzero, and a
+      # FAT32 volume counts in BPB_TotSec32 with BPB_TotSec16 zero.
       def self.total_sectors_hold(common, variant)
-        return false if common.bpb_tot_sec16.zero? == common.bpb_tot_sec32.zero?
+        return false if common.bpb_tot_sec16.zero? && common.bpb_tot_sec32.zero?
 
         FsimgSpec.derive(variant) { _1 != "fat32" || common.bpb_tot_sec16.zero? }
       end

@@ -256,28 +256,37 @@ module FsimgSpec
       }
 
       # In order: a FAT12 volume that counts only in BPB_TotSec32, which
-      # the rule allows; both counts set; both zero; and both set on the
-      # FAT32 base. There BPB_TotSec16 counts too few sectors for FAT32, so
-      # the volume decodes as FAT16 and breaks the FAT12/16 rules of its
-      # FAT32 fields as well.
+      # the rule allows; and both zero.
       #
-      # Last, a volume that counts only in BPB_TotSec16 and still has
-      # FAT32's 65525 clusters, which breaks the FAT32 clause: two reserved
-      # sectors without a backup record and one one-sector FAT leave room
-      # for them, but the FAT cannot hold them, so the case also breaks
-      # fat.geometry.fat_capacity.
+      # Last, FAT32 volumes with BPB_TotSec16 set, beside a nonzero or
+      # zero BPB_TotSec32. Two reserved sectors without a backup record
+      # and one one-sector FAT leave room for at least 65525 clusters,
+      # so both break the FAT32 clause. The FAT cannot hold those
+      # clusters, so they also break fat.geometry.fat_capacity.
       TOTAL_SECTORS = lambda { |layouts|
         [
           Variation.new(label: "tot_sec32_only", base: "fat12", violates: false,
                         mutations: [common(:bpb_tot_sec16, 0), common(:bpb_tot_sec32, layouts.fetch("fat12").total_sectors)]),
-          Variation.new(label: "both_set", base: "fat16", violates: true,
-                        mutations: [common(:bpb_tot_sec32, layouts.fetch("fat16").total_sectors)]),
           Variation.new(label: "both_zero", base: "fat12", violates: true, mutations: [common(:bpb_tot_sec16, 0)]),
           Variation.new(label: "fat32_both_set", base: "fat32", violates: true,
-                        mutations: [common(:bpb_tot_sec16, 0xFFFF)]),
+                        mutations: [common(:bpb_rsvd_sec_cnt, 2), common(:bpb_num_fats, 1), fat32(:bpb_fat_sz32, 1),
+                                    fat32(:bpb_bk_boot_sec, 0), common(:bpb_tot_sec16, 0xFFFF)]),
           Variation.new(label: "fat32_tot_sec16_only", base: "fat32", violates: true,
                         mutations: [common(:bpb_rsvd_sec_cnt, 2), common(:bpb_num_fats, 1), fat32(:bpb_fat_sz32, 1),
                                     fat32(:bpb_bk_boot_sec, 0), common(:bpb_tot_sec16, 0xFFFF), common(:bpb_tot_sec32, 0)])
+        ]
+      }
+
+      # Both counts set on FAT16, and a FAT12 boot sector from before DOS 3.31 with
+      # boot-code bytes FA 33 C0 8E at offset 32. Those bytes would count
+      # far more sectors than the image holds, but BPB_TotSec16 supplies
+      # the sector count, so only the advisory rule breaks.
+      TOT_SEC32_ZERO = lambda { |layouts|
+        [
+          Variation.new(label: "both_set", base: "fat16", violates: true,
+                        mutations: [common(:bpb_tot_sec32, layouts.fetch("fat16").total_sectors)]),
+          Variation.new(label: "fat12_boot_code", base: "fat12", violates: true,
+                        mutations: [common(:bpb_tot_sec32, 0x8EC0_33FA)])
         ]
       }
 

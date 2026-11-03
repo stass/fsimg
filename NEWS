@@ -329,6 +329,9 @@ long-name/short-alias ambiguity. Allocation chains, directory ownership, random
 access indexes, and global allocation verification use bounded resources.
 Names use pinned CP437 and Unicode simple-uppercase tables; timestamps retain
 wall-clock semantics. Reader and writer capabilities are reported independently.
+Volumes formatted before DOS 3.31, whose boot code occupies the later 32-bit
+sector-count field, open by their 16-bit count. A boot sector whose first FAT
+entry does not echo its media byte is reported as such.
 
 Format detection runs every format's bounded probe over the image prefix and
 opens only an unambiguous claim; several claims require an explicit format. A

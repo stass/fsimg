@@ -96,8 +96,10 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	    (g->media != 0xf0 && g->media < 0xf8))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "boot record has no legal FAT BPB"));
-	if (fsimg_load_le16(boot + 19) != 0 && fsimg_load_le32(boot + 32) != 0)
-		return (fsimg_fat_corrupt(error, "conflicting FAT sector counts"));
+	/* A nonzero 16-bit count or table size wins and the 32-bit field is not
+	 * read: boot sectors from before DOS 3.31 keep boot code at offsets 32
+	 * and 36.
+	 */
 	total_sectors = fsimg_load_le16(boot + 19);
 	if (total_sectors == 0)
 		total_sectors = fsimg_load_le32(boot + 32);

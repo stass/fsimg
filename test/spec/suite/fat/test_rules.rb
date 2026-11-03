@@ -239,6 +239,16 @@ class TestFatRules < Minitest::Test
     end
   end
 
+  # Boot code from before DOS 3.31 at offset 32 is ignored beside BPB_TotSec16,
+  # even when those bytes would count far more sectors than the image.
+  def test_fat12_boot_code_in_tot_sec32_breaks_only_the_advisory_rule
+    with_cases do |cases|
+      recipe = cases.call(witness("fat.bpb.total_sectors.tot_sec32_zero.fat12_boot_code")).kase.recipe
+
+      assert_equal ["fat.bpb.total_sectors.tot_sec32_zero"], recipe.actual_violations.map(&:rule)
+    end
+  end
+
   # The FAT12 volume without BPB_FATSz16 reads the rest of its boot
   # sector as a valid FAT32 extension, so it breaks fat.bpb.fat_size alone.
   def test_fat12_without_fat_sz16_isolates_its_rule
@@ -266,7 +276,7 @@ class TestFatRules < Minitest::Test
   # and, with its mutations, to the same image.
   def test_saved_recipe_replays_to_identical_bytes
     with_cases do |cases|
-      classified = cases.call(witness("fat.bpb.total_sectors.both_set"))
+      classified = cases.call(witness("fat.bpb.total_sectors.tot_sec32_zero.both_set"))
       loaded = FsimgSpec::Recipe.load(classified.kase.recipe.dump, ceilings: CEILINGS)
       Dir.mktmpdir do |directory|
         base = Fat::Bases.render(loaded.base, cache: FsimgSpec::FixtureCache.new(directory), ceilings: CEILINGS)

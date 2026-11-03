@@ -104,6 +104,8 @@ static void test_geometry(void);
 static void test_thresholds(void);
 static void test_deep_tree(void);
 static void test_detection(void);
+static void test_tot_sec16_overrides_boot_code(void);
+static void test_media_check_precedes_mirror_comparison(void);
 static void test_corruption(void);
 static void test_limits(void);
 static void test_failures(void);
@@ -1147,6 +1149,83 @@ test_detection(void)
 		    FSIMG_EFORMAT);
 		fixture_close(&f);
 	}
+}
+
+static void
+test_tot_sec16_overrides_boot_code(void)
+{
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_volume_info_t info;
+	const fsimg_entry_t *entry;
+	uint32_t tot_sec16;
+	unsigned char boot[512];
+	static const unsigned char boot_code[] = { 0xfa, 0x33, 0xc0, 0x8e };
+
+	/* Before DOS 3.31, boot code starts at offset 30 without an extended BPB.
+	 * TotSec16 takes precedence over boot code in the TotSec32 position.
+	 */
+	fixture_init(&f, 12);
+	CHECK(pread(f.fd, boot, sizeof(boot), 0) == sizeof(boot));
+	tot_sec16 = fsimg_load_le16(boot + 19);
+	CHECK(tot_sec16 != 0);
+	CHECK((uint64_t)tot_sec16 * f.sector_bytes == f.bytes);
+	memset(boot + 30, 0xcc, 32);
+	bcopy(boot_code, boot + 32, sizeof(boot_code));
+	write_bytes(&f, 0, boot, sizeof(boot));
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.volume_bytes == (uint64_t)tot_sec16 * f.sector_bytes);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/HELLO.TXT") == 0);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_close(&f);
+}
+
+static void
+test_media_check_precedes_mirror_comparison(void)
+{
+	fixture_t f;
+	fsimg_error_t error;
+	static const unsigned char bad_media = 0x55;
+
+	/* A bad first-table media byte takes precedence over a mirror mismatch. */
+	fixture_init(&f, 12);
+	CHECK(f.tables == 2);
+	write_bytes(&f, f.fat_offset, &bad_media, 1);
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message,
+	    "FAT media descriptor does not match the BPB") == 0);
+	fixture_close(&f);
+
+	/* Matching tables still must echo the BPB media descriptor. */
+	fixture_init(&f, 12);
+	CHECK(f.tables == 2);
+	write_bytes(&f, f.fat_offset, &bad_media, 1);
+	write_bytes(&f, f.fat_offset + f.table_bytes, &bad_media, 1);
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message,
+	    "FAT media descriptor does not match the BPB") == 0);
+	fixture_close(&f);
+
+	/* A bad second-table media byte remains a mirror disagreement. */
+	fixture_init(&f, 12);
+	CHECK(f.tables == 2);
+	write_bytes(&f, f.fat_offset + f.table_bytes, &bad_media, 1);
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "mirrored FAT entries disagree") == 0);
+	fixture_close(&f);
 }
 
 static void
@@ -2696,6 +2775,8 @@ main(int argc, char **argv)
 	test_deep_descriptors();
 	test_walker_poisoned();
 	test_detection();
+	test_tot_sec16_overrides_boot_code();
+	test_media_check_precedes_mirror_comparison();
 	test_corruption();
 	test_limits();
 	test_failures();

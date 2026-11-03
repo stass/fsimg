@@ -14,6 +14,13 @@ sector size, power-of-two sectors per cluster, reserved area, table count,
 table capacity, root layout, and declared length against its input slice.
 The reserved area, the tables and the root region must end within the
 declared volume, and a data region of at least one cluster must follow them.
+A nonzero `BPB_TotSec16` is the sector count and a nonzero `BPB_FATSz16` the
+table size; the 32-bit field at offset 32 or 36 is consulted only when its
+16-bit counterpart is zero. Boot sectors from before DOS 3.31 keep boot code
+at those offsets, so a nonzero value there beside a nonzero 16-bit field is
+ignored rather than treated as a conflict; Linux and mtools read the fields
+the same way. A FAT32 volume counts its sectors in `BPB_TotSec32`, and a
+nonzero `BPB_TotSec16` cannot describe enough sectors for one.
 Cluster count determines the variant at the 4,085 and 65,525 boundaries.
 The last valid cluster is `MAX = CountOfClusters + 1`; links above MAX and
 below the variant's bad-cluster marker are reserved. A cluster count whose
@@ -36,9 +43,12 @@ validation. Opening does not enumerate directories or read file payloads.
 One bounded table window serves FAT entry decoding, including FAT12 entries
 crossing a window boundary. Mirrored tables must agree for every decoded entry;
 full verification compares all meaningful entries. FAT32 nonmirrored mode uses
-only its declared active table. Reserved entries, dirty/error flags, FSInfo
-contents, and the backup boot record are checked within their named
-verification scope.
+only its declared active table. Opening requires the active table's first
+entry to echo the BPB media byte before it compares any mirrored entry, so a
+non-FAT boot sector whose fields happen to form a legal BPB fails as a media
+descriptor mismatch rather than as disagreeing mirrors. Reserved entries,
+dirty/error flags, FSInfo contents, and the backup boot record are checked
+within their named verification scope.
 Mirrored mode ignores the inactive selector nibble. Full verification also
 requires the declared backup BPB bytes to match the primary copy, including
 ignored fields: readability of the active volume and consistency of its recovery
