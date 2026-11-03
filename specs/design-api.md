@@ -532,7 +532,7 @@ timestamp interpretation, and header-level validation scope, with validity bits
 for unknown totals. Querying it does not traverse directories or certify the
 whole volume; full verification has its own report.
 
-Three fields of the record are sized by formats whose header carries more
+Four fields of the record are sized by formats whose header carries more
 than a short label, and each changes the public record's layout, so
 changing them is an ABI change of `fsimg_volume_info_t`. The record has no
 size or version field, so its layout is pre-stable like the rest of the
@@ -554,6 +554,17 @@ interface and freezes at the first declared stable release:
   without interpreting a name. Counts a driver collects while opening
   belong here, never a value that would need a traversal the record does
   not disclose.
+* `texts[16]` with `text_count`: the same table for header text,
+  `fsimg_volume_text_t`, each an ASCII `name[24]` of at most 23 bytes and a
+  `value[193]`, validated UTF-8 of at most 192 bytes and a terminator, the
+  longest UTF-8 decoding of a 128-byte UCS-2 field. A driver fills at most
+  16 in a fixed order it documents, reporting only a value it has checked
+  to be printable, so a value never carries a control character; the CLI
+  still escapes it as it escapes any text. ISO 9660's
+  [descriptor text and dates](design-iso9660.md#descriptor-text-and-dates)
+  are its only user. The table is format-neutral like the details and
+  carries no cross-format meaning: a name is the driver's, and no field of
+  the record means "publisher" for every format.
 
 The matching write settings are typed fields of `fsimg_write_options_t`
 behind `FSIMG_SETTING_*` bits, as the
@@ -568,14 +579,21 @@ above. No ImageFS write setting names a boot program or a
 startup script: the ImageFS writer writes
 [nonbootable bodies](design-ifs.md#bootable-bodies) only.
 
-ISO 9660 has four typed fields in `fsimg_write_options_t`, whose layout,
+ISO 9660 has typed fields in `fsimg_write_options_t`, whose layout,
 like the rest of the interface, freezes at the first declared stable
 release: `iso_level`, zero selecting 3, under
-`FSIMG_SETTING_ISO_LEVEL`; and under `FSIMG_SETTING_ELTORITO`
+`FSIMG_SETTING_ISO_LEVEL`; under `FSIMG_SETTING_ELTORITO`
 `boot_bios` and `boot_efi`, copied absolute image paths of files in the
 writer's own catalog with NULL for none, and `boot_load_sectors`, zero
-selecting 4. A boot path names an entry of the image being written, never
-a host file, so the fields carry no descriptor and grant no authority; the
+selecting 4; and under `FSIMG_SETTING_ISO_DESCRIPTOR` the primary
+descriptor's text and dates: `iso_volume_set`, `iso_publisher`,
+`iso_preparer`, `iso_application`, `iso_copyright`, `iso_abstract` and
+`iso_biblio`, copied strings with NULL selecting the default and `""` a
+field of spaces, and `iso_created`, `iso_modified`, `iso_expires` and
+`iso_effective`, Unix seconds each behind a presence flag
+(`iso_created_set` and so on), since zero is an instant. A boot path names
+an entry of the image being written, never a host file, so the fields
+carry no descriptor and grant no authority; the
 [ISO driver design](design-iso9660-driver.md#writer-settings) states their
 rules.
 

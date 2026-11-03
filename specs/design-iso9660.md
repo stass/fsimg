@@ -190,17 +190,17 @@ else `FSIMG_ECORRUPT`. The precision is ten milliseconds.
 | 148 | 4 | Type-M path table block, `u32be` | Within the volume |
 | 152 | 4 | Optional type-M copy, `u32be` | Zero or within the volume |
 | 156 | 34 | Root directory record | See [dot records](#dot-records) |
-| 190 | 128 | Volume set identifier | Not interpreted |
-| 318 | 128 | Publisher identifier | Not interpreted |
-| 446 | 128 | Data preparer identifier | Not interpreted |
-| 574 | 128 | Application identifier | Not interpreted |
-| 702 | 37 | Copyright file identifier | Not interpreted |
-| 739 | 37 | Abstract file identifier | Not interpreted |
-| 776 | 37 | Bibliographic file identifier | Not interpreted |
-| 813 | 17 | Volume creation date | Valid or absent |
-| 830 | 17 | Volume modification date | Valid or absent |
-| 847 | 17 | Volume expiration date | Valid or absent |
-| 864 | 17 | Volume effective date | Valid or absent |
+| 190 | 128 | Volume set identifier | [Descriptor text](#descriptor-text-and-dates), a-characters |
+| 318 | 128 | Publisher identifier | Descriptor text, a-characters |
+| 446 | 128 | Data preparer identifier | Descriptor text, a-characters |
+| 574 | 128 | Application identifier | Descriptor text, a-characters |
+| 702 | 37 | Copyright file identifier | Descriptor text, file identifier |
+| 739 | 37 | Abstract file identifier | Descriptor text, file identifier |
+| 776 | 37 | Bibliographic file identifier | Descriptor text, file identifier |
+| 813 | 17 | Volume creation date | Valid or absent; reported |
+| 830 | 17 | Volume modification date | Valid or absent; reported |
+| 847 | 17 | Volume expiration date | Valid or absent; reported |
+| 864 | 17 | Volume effective date | Valid or absent; reported |
 | 881 | 1 | File structure version | 1 |
 | 883 | 512 | Application use | Not interpreted |
 
@@ -209,6 +209,86 @@ does not interpret them: producers have written into them, and no reader
 depends on them. Full verification checks the [ownership](#ownership) of
 every block the descriptor names, not its reserved bytes. The writer
 writes zeros there.
+
+### Descriptor text and dates
+
+The eleven fields from offset 190 to 880 describe the volume to a person:
+who published and prepared it, which program wrote it, which root files
+hold its copyright, abstract and bibliography, and when it was created,
+changed, expires and takes effect. Each is one row of a closed table,
+`(key, offset, width, class)`, with three classes. Every rule below is a
+rule of a class, not of a field: the writer encodes each row from its
+setting through its class's one encoder, and the reader decodes each row
+through its class's one decoder and reports it under the row's key.
+
+| Key | Offset | Width | Class |
+| --- | ---: | ---: | --- |
+| `volume_set` | 190 | 128 | a-characters |
+| `publisher` | 318 | 128 | a-characters |
+| `preparer` | 446 | 128 | a-characters |
+| `application` | 574 | 128 | a-characters |
+| `copyright_file` | 702 | 37 | File identifier |
+| `abstract_file` | 739 | 37 | File identifier |
+| `biblio_file` | 776 | 37 | File identifier |
+| `created` | 813 | 17 | Digit date |
+| `modified` | 830 | 17 | Digit date |
+| `expires` | 847 | 17 | Digit date |
+| `effective` | 864 | 17 | Digit date |
+
+**a-characters** are the uppercase letters `A` to `Z`, the digits, `_`,
+space and `! " % & ' ( ) * + , - . / : ; < = > ?`. A **file identifier**
+field holds d-characters (`A` to `Z`, digits and `_`), the separators `.`
+and `;`, and space; the format means it to name a file of the root
+directory in the form of a [primary identifier](#primary-identifiers). A
+text field is filled with spaces after its text. A **digit date** is a
+[descriptor date](#descriptor-dates).
+
+The format gives a leading `_` in the publisher, preparer and application
+fields a meaning: the rest of the field names a root file holding the text.
+fsimg neither follows nor checks that convention in either direction: `_`
+is an a-character, so the writer stores it as given and the reader reports
+it as stored. Likewise no file identifier field is checked against the root
+directory: the fields are informational, a reader that wants the file looks
+it up by the identifier it reports, and a writer check would have to
+predict the [alias](#primary-names) a source name receives.
+
+*Writing.* Each text field is a setting of the [writer](#settings-and-sizing).
+A supplied value must be at most the field's width in bytes and consist of
+its class's characters, else `FSIMG_EINVAL` naming the key; the empty
+string is legal and stores a field of spaces. There is no projection: the
+label projects because one label names every format and its exact form
+survives in the Joliet descriptor, whereas these fields are ISO-specific
+text the user typed with no second copy, so a silent change of case or
+character would misreport what was asked for. A date setting is an instant
+in Unix seconds, encoded as its UTC calendar fields with hundredths `00`
+and offset 0; it must fall within year 1 through 9999, the digit date's own
+range, else `FSIMG_EINVAL`. The absent dates are the format's sixteen `0`
+digits with a zero offset. [Defaults](#times-and-defaults) are the
+application identifier `FSIMG`, spaces elsewhere, the creation and
+modification dates the volume's planning time, and the other two dates
+absent, so these settings change no byte of an image created without them.
+
+The supplementary descriptor's text fields are not settings: a Joliet
+descriptor carries the defaults, `FSIMG` and spaces as UCS-2 units, each
+odd 37-byte field ending in a zero byte, whatever the primary descriptor's
+fields hold; its four dates equal the primary descriptor's.
+
+*Reading.* The reader decodes the [view](#views)'s descriptor, as it does
+for the label: the primary descriptor's bytes for `rockridge` and
+`primary`, the Joliet descriptor's UCS-2 units for `joliet`. A text field
+is **reported** when, after its trailing spaces and NUL bytes are removed,
+it is not empty and is printable: for the primary descriptor every byte is
+`0x20` to `0x7e`, and for the Joliet descriptor the units decode, as the
+Joliet label does, to UTF-8 without a control character. The field's
+characters are not checked against its class, because qualified producers
+write lowercase letters and other printable characters there and the field
+is informational; a field that is not reported is silently omitted. A
+date is reported when present, rendered in UTC as `YYYY-MM-DD HH:MM:SS`
+with its hundredths dropped, the form of the listing's modification time;
+a present date whose UTC year leaves 1 through 9999 is not reported. No
+content of a text field is an error at open or at verification. A
+malformed date is `FSIMG_ECORRUPT` at open, as the descriptor date rule
+says, in either descriptor.
 
 ### Supplementary descriptors and Joliet
 
@@ -1113,6 +1193,9 @@ catalog's integrity, not that firmware runs the image.
 | `boot_bios` | `boot=PATH` | Absent by default; an absolute image path |
 | `boot_efi` | `efiboot=PATH` | Absent by default; an absolute image path |
 | `boot_load_sectors` | `bootload=N` | 1 to 65535, default 4; only with `boot` |
+| `iso_volume_set`, `iso_publisher`, `iso_preparer`, `iso_application` | `volset=`, `publisher=`, `preparer=`, `application=` | At most 128 [a-characters](#descriptor-text-and-dates); NULL selects spaces, `FSIMG` for the application |
+| `iso_copyright`, `iso_abstract`, `iso_biblio` | `copyright=`, `abstract=`, `biblio=` | At most 37 [file identifier](#descriptor-text-and-dates) characters; NULL selects spaces |
+| `iso_created`, `iso_modified`, `iso_expires`, `iso_effective` | `created=`, `modified=`, `expires=`, `effective=` | Unix seconds within year 1 through 9999, each behind its presence flag; absent selects the [default](#times-and-defaults) |
 | `label` | `-L` | At most 16 characters of the Basic Multilingual Plane without controls; NULL selects `CDROM`, and the CLI passes its own default |
 
 The label is the Joliet volume identifier exactly, and the primary volume
@@ -1135,13 +1218,20 @@ with offset 0; `TF` carries the entry's times the same way. A time outside
 1900 to 2155, a sub-second part or an offset basis that is not UTC is
 encoded under the [loss policy](design-metadata-loss.md) as a counted
 optional loss; an absent time takes the fallback. Reproducible mode makes
-every time and both volume dates the epoch, and refuses an epoch outside
-the 7-byte range with `FSIMG_EINVAL`; otherwise the volume dates and the
-fallback are the planning clock. Absent owner and mode take uid and gid 0
-and mode `0755` for directories, `0644` for files and `0777` for links
-and FIFOs, as for the QNX formats. Expiration and effective dates are
-absent. The application identifier is `FSIMG`; the other identifier
-fields are spaces.
+every time and the fallback the epoch, and refuses an epoch outside the
+7-byte range with `FSIMG_EINVAL`; otherwise the fallback is the planning
+clock, sampled once. Absent owner and mode take uid and gid 0 and mode
+`0755` for directories, `0644` for files and `0777` for links and FIFOs,
+as for the QNX formats.
+
+The volume's creation and modification dates default to the fallback, so
+they are the epoch in reproducible mode and the planning clock otherwise;
+the expiration and effective dates default to absent. A date given as a
+[setting](#settings-and-sizing) is stored as given in every mode,
+reproducible included: reproducibility removes the clock and the
+environment from the output, and a caller's value is neither. The
+application identifier defaults to `FSIMG` and the other text fields to
+spaces.
 
 ## Deterministic planning and emission
 
@@ -1173,7 +1263,7 @@ Failure classes:
 | `FSIMG_EFORMAT` | No `CD001` descriptor at block 16; a volume shorter than 17 blocks |
 | `FSIMG_ECORRUPT` | Disagreeing copies of a `both` field; a referenced extent outside the volume or the slice; a record crossing a block; nonzero block tail padding; a dot-record rule; a broken section run; identifiers equal after `;1`; malformed SUSP or Rock Ridge entries; a continuation overlap; a relocation mismatch; inconsistent path tables; unsorted primary records; an ownership conflict; a bad El Torito checksum |
 | `FSIMG_EUNSUPPORTED` | A profile value outside its table; a forced view the image lacks; a device, associated or interleaved file; zisofs or sparse files |
-| `FSIMG_EINVAL` | A selection component the view cannot represent; a writer setting outside its rules |
+| `FSIMG_EINVAL` | A selection component the view cannot represent; a writer setting outside its rules, such as a descriptor text field with a character outside its class or longer than its width, or a volume date outside year 1 through 9999 |
 | `FSIMG_ERANGE` | A requested volume smaller than the image; an image beyond `2^32 - 1` blocks |
 | `FSIMG_ELIMIT` | Budget, scratch, work, depth or file-descriptor exhaustion |
 
@@ -1186,6 +1276,7 @@ shown, when reading unless the row says at verification.
 | --- | --- | --- |
 | Probe | PVD at block 16; boot record at 16 and PVD at 17; the smallest volume each producer writes | No `CD001` (EFORMAT); 16 blocks (EFORMAT); block size 512 (EUNSUPPORTED); disagreeing halves (ECORRUPT) |
 | Descriptor set | PVD, SVD, boot record, partition, enhanced, terminator in any legal order; trailing UDF recognition sequence | No terminator within 64 (EUNSUPPORTED); missing PVD (ECORRUPT); nonzero terminator byte (ECORRUPT); two Joliet SVDs (EUNSUPPORTED); differing second PVD (EUNSUPPORTED) |
+| Descriptor text and dates | Every text field at its full width and empty; lowercase and punctuation outside the class, reported; a leading `_`, reported verbatim; UCS-2 text in the SVD read by the `joliet` view; all four dates present, with a nonzero offset and nonzero hundredths; years 1 and 9999 | A control byte, a byte above `0x7e` or an unpaired surrogate in a field (opens and verifies; the field is not reported); a non-digit, month 13 or year 0 in any date (ECORRUPT); a date at year 1 with an offset that moves its UTC year to 0 (opens; the date is not reported) |
 | Geometry | Slice longer than the volume; slice missing unreferenced tail blocks | An extent past the volume by one block, and with a length near `2^32` blocks (ECORRUPT); a referenced block past a short slice (ECORRUPT) |
 | Records | Records filling a block exactly; empty-tail blocks; 2048-byte boundaries; a directory length of its exact record bytes | Odd length, length 33, crossing a block, a record past the directory length, nonzero tail padding, a zero directory length, `LEN_FI` past the record (ECORRUPT); reserved flags (ECORRUPT); interleave (EUNSUPPORTED) |
 | Dot records and tree | Root and nested directories | Wrong self or parent extent (ECORRUPT); a child naming the root (ECORRUPT); two records opening one directory (ECORRUPT); a misplaced dot identifier (ECORRUPT) |
@@ -1200,7 +1291,7 @@ shown, when reading unless the row says at verification.
 | Joliet | Levels 1 to 3; shared data with the primary hierarchy | Bad escape (not Joliet); geometry differing from the PVD (ECORRUPT); a forced `joliet` view over a damaged primary handshake (reads) |
 | El Torito | BIOS only, EFI only, BIOS and EFI, boot image as a file and not, an EFI image past the volume, selection criteria in the initial entry | Checksum, signature, media type, a section count past its entries, a catalog or image before the data area, a catalog past the volume or slice (ECORRUPT); unknown platform, extension entry, a second block of entries, two boot records (EUNSUPPORTED) |
 | Ownership | Primary and Joliet sharing data; `boot.cat` as a file; deduplicated files | File data over a directory, continuation or descriptor; two records sharing continuation bytes (ECORRUPT) |
-| Writer | Every acceptance row's valid witness that the writer profile can express, at each level; reordered sources; fixed sizes; relocation by depth and by path length; a round trip of an extracted relocated tree | Required metadata loss; a level 1 or 2 file above `2^32 - 1` bytes; a 256-byte Rock Ridge name; a 1024-byte link target or a 256-byte target component; a boot setting naming a directory or a missing path; `bootload` past the image; a volume size too small |
+| Writer | Every acceptance row's valid witness that the writer profile can express, at each level; reordered sources; fixed sizes; relocation by depth and by path length; a round trip of an extracted relocated tree; every descriptor text field at its full width, empty and absent, each read back in all three views; all four dates set, at years 1 and 9999, in reproducible mode and not | Required metadata loss; a level 1 or 2 file above `2^32 - 1` bytes; a 256-byte Rock Ridge name; a 1024-byte link target or a 256-byte target component; a boot setting naming a directory or a missing path; `bootload` past the image; a volume size too small; a 129-byte or lowercase a-character field, a 38-byte file identifier or one with `/`, a date at year 0 or 10000 (EINVAL naming the key) |
 
 ## Source keys
 

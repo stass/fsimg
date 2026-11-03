@@ -270,7 +270,18 @@ ISO 9660 takes `level=1|2|3`, the primary hierarchy's interchange level,
 default 3; `boot=PATH` and `efiboot=PATH`, image paths of at most 1024
 bytes naming files in the tree being created that become El Torito BIOS
 and EFI boot images, never host paths; and `bootload=N`, the BIOS entry's 512-byte load sectors,
-default 4, only with `boot=`. Its `-s` pads the volume with zero blocks,
+default 4, only with `boot=`. Its primary descriptor's text fields are
+`volset=`, `publisher=`, `preparer=` and `application=`, each at most 128
+a-characters, and `copyright=`, `abstract=` and `biblio=`, each at most 37
+file identifier characters, with an empty value storing a field of spaces;
+its volume dates are `created=`, `modified=`, `expires=` and `effective=`,
+each a signed Unix epoch in the `-e` grammar within year 1 through 9999,
+stored as given with or without `-R`; the
+[format design](design-iso9660.md#descriptor-text-and-dates) states the
+character classes and defaults. The worker job carries each text in a
+field of its width and a terminator with a presence bit, and each date as
+eight bytes with a presence bit, since an empty text and a zero date are
+values. Its `-s` pads the volume with zero blocks,
 and `--free-space` fails, since the format has no free space. On read,
 `view=auto|rockridge|joliet|primary` chooses the
 [view](design-iso9660.md#view-selection); it applies to whatever ISO 9660
@@ -596,9 +607,10 @@ with each partition's index, type, name, offset, length and whether it holds
 a supported filesystem, marking the selected one; then the volume: format and
 profile, volume and allocation geometry, label, mountpoint and volume UUID
 when the format has them, time basis, implemented capabilities, validation
-scope, and the volume's named details in the order the driver filled them,
+scope, the volume's named details in the order the driver filled them,
 one `name: value` line each in the human form and one `details` object
-keyed by name in the `--json` volume record. When no
+keyed by name in the `--json` volume record, and its named texts the same
+way, escaped like any text, under a `texts` object. When no
 partition is selected and none is unambiguous, `i` still succeeds with the
 stack and table and reports the volume section as unselected, so the user
 can choose; every other mode fails. `i` claims no verification and no

@@ -183,8 +183,9 @@ the [ImageFS driver design](design-ifs-driver.md#writer-settings) states;
 FAT12 and FAT16 store the fixed root capacity under
 `FSIMG_SETTING_ROOT_ENTRIES`; APFS stores the volume UUID and the case
 sensitivity under `FSIMG_SETTING_CASE_SENSITIVE`; ISO 9660 stores its
-interchange level under `FSIMG_SETTING_ISO_LEVEL` and its El Torito boot
-images under `FSIMG_SETTING_ELTORITO`, as the
+interchange level under `FSIMG_SETTING_ISO_LEVEL`, its El Torito boot
+images under `FSIMG_SETTING_ELTORITO` and its primary descriptor's text
+and dates under `FSIMG_SETTING_ISO_DESCRIPTOR`, as the
 [ISO driver design](design-iso9660-driver.md#writer-settings) states),
 and writer construction rejects a non-default value of any other one with
 `FSIMG_EINVAL` before the driver's `validate` runs, so no driver has to

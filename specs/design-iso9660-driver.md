@@ -290,6 +290,22 @@ selected view's hierarchy, `system_area_used` (1 when a byte of blocks 0 to
 `boot_catalog_block` (0 without El Torito), `boot_entries`, `boot_x86` and
 `boot_efi` (entries per platform). Every value is known when open returns.
 
+The named texts, under the keys and rules of the format design's
+[descriptor text and dates](design-iso9660.md#descriptor-text-and-dates),
+in table order: `volume_set`, `publisher`, `preparer`, `application`,
+`copyright_file`, `abstract_file`, `biblio_file`, `created`, `modified`,
+`expires` and `effective`. Each is filled from the selected view's
+descriptor, so the three views report the primary descriptor's bytes or the
+Joliet descriptor's units as they report the label; a field that is empty,
+not printable or an absent date is skipped rather than reported empty,
+exactly as an invalid label leaves `FSIMG_VOLUME_LABEL` clear, so
+`text_count` is the number of fields the descriptor carries legibly. The
+decoded descriptor keeps the seven fields' raw bytes and the four decoded
+dates from open, since open already reads and checks them, and no block is
+read again for information. The eleven values fit the information record's
+text table, whose entry holds the longest UTF-8 decoding of a 128-byte
+UCS-2 field, and the build checks that they fit.
+
 ## Verification
 
 Full verification checks the whole volume and every view the image offers.
@@ -382,7 +398,8 @@ their defaults, which the common settings check enforces since the record
 lacks their bits; `volume_serial` ignored; the label within the
 [label rule](design-iso9660.md#settings-and-sizing); an epoch within 1900
 to 2155 in reproducible mode. The format-specific fields, behind
-`FSIMG_SETTING_ISO_LEVEL` and `FSIMG_SETTING_ELTORITO`:
+`FSIMG_SETTING_ISO_LEVEL`, `FSIMG_SETTING_ELTORITO` and
+`FSIMG_SETTING_ISO_DESCRIPTOR`:
 
 | Field | CLI setting | Meaning |
 | --- | --- | --- |
@@ -390,9 +407,23 @@ to 2155 in reproducible mode. The format-specific fields, behind
 | `boot_bios` | `boot=PATH` | Copied; NULL for none; an absolute image path within the path limit |
 | `boot_efi` | `efiboot=PATH` | As `boot_bios` |
 | `boot_load_sectors` | `bootload=N` | Zero selects 4; at most 65535; nonzero only with `boot_bios` |
+| `iso_volume_set`, `iso_publisher`, `iso_preparer`, `iso_application` | `volset=TEXT`, `publisher=TEXT`, `preparer=TEXT`, `application=TEXT` | Copied; NULL selects the default; at most 128 a-characters, the empty string included |
+| `iso_copyright`, `iso_abstract`, `iso_biblio` | `copyright=TEXT`, `abstract=TEXT`, `biblio=TEXT` | Copied; NULL selects spaces; at most 37 file identifier characters, the empty string included |
+| `iso_created`, `iso_modified`, `iso_expires`, `iso_effective`, each with its `_set` flag | `created=SECONDS`, `modified=SECONDS`, `expires=SECONDS`, `effective=SECONDS` | Unix seconds in the `-e` grammar; a clear flag with a nonzero value is `FSIMG_EINVAL`; within year 1 through 9999 |
 
 The keys are bare filesystem keys, as the [layer design](design-layers.md#layer-settings)
-spells them. Whether a boot path names a suitable file is checked by
+spells them. `validate` checks each descriptor text against its class and
+width and each present date against the digit date's range, naming the
+key in `error.path`, under the format design's
+[descriptor text rules](design-iso9660.md#descriptor-text-and-dates); the
+checks are one function per class over the closed field table, not one
+per field. The seven texts are pointers like the mountpoint and boot paths:
+copied at construction, bounded by their widths, with NULL and `""`
+distinct because an empty field is a value. The CLI bounds each text by its
+width and a terminator, and the worker job carries each in a field of that
+size with a presence bit, and each date as eight bytes with a presence bit,
+so a transported empty text or zero date stays distinct from an absent one.
+Whether a boot path names a suitable file is checked by
 planning against the frozen catalog. The capability record's
 `read_settings` names `FSIMG_SETTING_ISO_VIEW`, so the common reader
 accepts a non-default `iso_view` for this format and refuses it for every
@@ -401,7 +432,9 @@ other, as the [settings catalogue](design-settings.md) states.
 ## Planning
 
 The plan object embeds `fsimg_plan_t`, the level, the label projections,
-the boot summary, the layout's block numbers, each hierarchy's name and
+the primary descriptor's encoded text fields and four dates, which
+validation and the fallback settle before any pass runs and emission copies
+into the descriptor, the boot summary, the layout's block numbers, each hierarchy's name and
 path streams, and one paged array of rows
 keyed by catalog ID, row 0 the root. One extra row is reserved at catalog
 count plus one for a generated relocation container; an adopted container
@@ -552,7 +585,7 @@ Writer:
 
 | Condition | Status |
 | --- | --- |
-| A setting outside its rules; a label outside its rule; a boot path that names no regular non-empty one-section file; `bootload` past its image | `FSIMG_EINVAL` |
+| A setting outside its rules; a label outside its rule; a descriptor text field with a character outside its class or longer than its width; a volume date outside year 1 through 9999, or nonzero without its presence flag; a boot path that names no regular non-empty one-section file; `bootload` past its image | `FSIMG_EINVAL` |
 | A component over 255 bytes; a link target over 1023 bytes or with a component over 255 bytes; a file above `2^32 - 1` bytes at levels 1 and 2; more than 65535 directories in a hierarchy; a root child named `.rr_moved` that is not an empty directory when relocation is needed; a kind the profile lacks; a required metadata loss | `FSIMG_EUNSUPPORTED` |
 | A requested volume below the image; a volume above `2^32 - 1` blocks | `FSIMG_ERANGE` |
 | A plan row or stream record read back outside its limits; an encoded length that differs from the plan without a changed source | `FSIMG_ECORRUPT` |
@@ -584,6 +617,47 @@ poison, and pins the alias, fragment-chain and relocation rules with
 trees built to hit each boundary. Fault tests inject allocation, scratch,
 short-read, short-write, EOF, source-change and cancellation failures at
 every stage and check cleanup.
+
+The descriptor text and dates are tested at each layer, every passing case
+beside a seeded failure that proves the check ran:
+
+* **Codec.** Each class's encoder and decoder on the closed field table:
+  a full-width text, an empty text, a date at year 1 and at 9999, each
+  decoded back equal; against a 129-byte text, a lowercase letter, a `/`
+  in a file identifier and a date at year 0 and 10000 refused; a decoded
+  field's bytes compared with the test's own offset table, so an offset
+  or width copied wrongly fails.
+* **Writer.** Every setting given, the image read back in all three
+  views: `rockridge` and `primary` report the primary text, `joliet`
+  reports `FSIMG` and spaces, and all three the same dates; an image with
+  no setting byte-identical to one with the defaults given explicitly, and
+  its descriptor's text and date bytes equal to a stored vector of
+  `FSIMG`, spaces and absent dates; `application=` empty yields spaces; a
+  date given in reproducible
+  mode is stored, and a date left out is the epoch; each refusal names its
+  key in `error.path`.
+* **Reader.** Synthetic descriptors with a control byte, a byte above
+  `0x7e`, lowercase text, a leading `_`, an unpaired surrogate in the
+  Joliet descriptor, a date with a nonzero offset and hundredths, and a
+  date whose UTC year leaves the range: open and full verification
+  succeed, and exactly the reportable fields appear; a non-digit, month
+  13 or year 0 in any of the four dates is `FSIMG_ECORRUPT` at open.
+  External corpus images report their producers' application identifiers,
+  compared with `xorriso -pvd_info`.
+* **CLI.** Each key accepted and transported through the worker job, with
+  an empty value and a zero date distinct from omission; a duplicate key,
+  a value over its width, a character outside its class and a signed
+  seconds value with a plus sign or suffix refused naming the key; `i`
+  prints the texts in table order in the human form and under `texts` in
+  JSON, with the CLI's ordinary escaping, checked against a synthetic
+  image whose field holds `"` and a backslash, since a reported field is
+  printable and those are the characters the escaping touches.
+* **Specification harness.** Input rules `create.descriptor_text` and
+  `create.descriptor_dates`, written from the format design with their
+  own class tables, with a valid witness and a violating mutation each;
+  the `xorriso -pvd_info` and `isoinfo -d` oracles compare every text and
+  date the recipe sets with the created image, and record them on reading
+  cases.
 
 Scale tests record I/O calls, metadata passes, peak scratch and RSS: a
 directory of a million entries, which must spill; a Rock Ridge tree 256

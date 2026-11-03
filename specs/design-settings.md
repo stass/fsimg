@@ -117,6 +117,8 @@ Public option initialization and catalogue default tests agree on these values:
 | Filesystem snapshot (read) | `NULL`, the live view |
 | ISO level, boot load sectors | Zero, requesting levels 3 and 4 sectors |
 | ISO boot images | `NULL` |
+| ISO descriptor texts | `NULL`, the format's default text; a pointer to `""` is an explicit field of spaces |
+| ISO volume dates | Absent: the `_set` flag false and the seconds zero |
 | ISO view (read) | `FSIMG_ISO_VIEW_AUTO`, zero |
 | File input | `NULL` |
 
@@ -164,7 +166,8 @@ The finite syntax classes cover the existing grammar:
 | Boolean | Exactly `yes` or `no` |
 | Named choice | `endian=little|big`, `case=insensitive|sensitive`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437`, `view=auto|rockridge|joliet|primary` |
 | UUID | RFC 4122 text converted to textual byte order; nil permitted for the filesystem UUID, refused for layer identifiers; the filesystem's own validation may still refuse nil, as APFS does outside reproducible mode |
-| Text | GPT type/name, MBR type, mountpoint, snapshot name, ISO `boot` and `efiboot` image paths; checked destination capacity, with format meaning checked by its owner; the snapshot name is UTF-8 of 1 to 255 bytes, held in a 256-byte CLI slot and carried in the worker job as a length-prefixed field of at most 255 bytes; a boot image path holds at most 1024 bytes on the command line and travels in a 1025-byte job field with its own presence bit, since an empty path is a value the library refuses |
+| Signed seconds | ISO `created`, `modified`, `expires` and `effective`; the `-e` epoch grammar, an optional leading minus and decimal digits, into an `int64_t` with its presence flag; the range is the owning format's |
+| Text | GPT type/name, MBR type, mountpoint, snapshot name, ISO `boot` and `efiboot` image paths and the ISO descriptor texts `volset`, `publisher`, `preparer`, `application`, `copyright`, `abstract` and `biblio`; checked destination capacity, with format meaning checked by its owner; the snapshot name is UTF-8 of 1 to 255 bytes, held in a 256-byte CLI slot and carried in the worker job as a length-prefixed field of at most 255 bytes; a boot image path holds at most 1024 bytes on the command line and travels in a 1025-byte job field with its own presence bit, since an empty path is a value the library refuses; a descriptor text holds at most its field's 128 or 37 bytes and travels in a field of that width and a terminator with a presence bit, since an empty text is a value |
 | File path | A host operand retained by the CLI for descriptor preparation |
 
 Choice entries pair spellings with values of the row's declared type. Lexical
