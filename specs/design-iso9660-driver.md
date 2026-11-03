@@ -275,7 +275,8 @@ volume_space_size * 2048` with 2048-byte sectors and allocation units and
 descriptor, the primary volume identifier without trailing spaces or NUL
 bytes for
 `rockridge` and `primary` and the decoded Joliet identifier for `joliet`,
-reported under `FSIMG_VOLUME_LABEL` only when it is valid printable UTF-8;
+reported under `FSIMG_VOLUME_LABEL` only when it is not empty and is printable by the one rule the
+[descriptor text fields](design-iso9660.md#descriptor-text-and-dates) follow;
 the time basis `FSIMG_TIME_OFFSET`; and never `FSIMG_VOLUME_FREE` or
 `FSIMG_VOLUME_UUID`, since the format has neither free space nor an
 identity.
@@ -407,20 +408,20 @@ to 2155 in reproducible mode. The format-specific fields, behind
 | `boot_bios` | `boot=PATH` | Copied; NULL for none; an absolute image path within the path limit |
 | `boot_efi` | `efiboot=PATH` | As `boot_bios` |
 | `boot_load_sectors` | `bootload=N` | Zero selects 4; at most 65535; nonzero only with `boot_bios` |
-| `iso_volume_set`, `iso_publisher`, `iso_preparer`, `iso_application` | `volset=TEXT`, `publisher=TEXT`, `preparer=TEXT`, `application=TEXT` | Copied; NULL selects the default; at most 128 a-characters, the empty string included |
-| `iso_copyright`, `iso_abstract`, `iso_biblio` | `copyright=TEXT`, `abstract=TEXT`, `biblio=TEXT` | Copied; NULL selects spaces; at most 37 file identifier characters, the empty string included |
+| `iso_volume_set`, `iso_publisher`, `iso_preparer`, `iso_application` | `volset=TEXT`, `publisher=TEXT`, `preparer=TEXT`, `application=TEXT` | Copied; NULL selects the default; at most 64 a-characters, the empty string included |
+| `iso_copyright`, `iso_abstract`, `iso_biblio` | `copyright=TEXT`, `abstract=TEXT`, `biblio=TEXT` | Copied; NULL selects spaces; at most 18 file identifier characters, the empty string included |
 | `iso_created`, `iso_modified`, `iso_expires`, `iso_effective`, each with its `_set` flag | `created=SECONDS`, `modified=SECONDS`, `expires=SECONDS`, `effective=SECONDS` | Unix seconds in the `-e` grammar; a clear flag with a nonzero value is `FSIMG_EINVAL`; within year 1 through 9999 |
 
 The keys are bare filesystem keys, as the [layer design](design-layers.md#layer-settings)
 spells them. `validate` checks each descriptor text against its class and
-width and each present date against the digit date's range, naming the
+capacity and each present date against the digit date's range, naming the
 key in `error.path`, under the format design's
 [descriptor text rules](design-iso9660.md#descriptor-text-and-dates); the
 checks are one function per class over the closed field table, not one
 per field. The seven texts are pointers like the mountpoint and boot paths:
-copied at construction, bounded by their widths, with NULL and `""`
+copied at construction, bounded by their capacities, with NULL and `""`
 distinct because an empty field is a value. The CLI bounds each text by its
-width and a terminator, and the worker job carries each in a field of that
+capacity and a terminator, and the worker job carries each in a field of that
 size with a presence bit, and each date as eight bytes with a presence bit,
 so a transported empty text or zero date stays distinct from an absent one.
 Whether a boot path names a suitable file is checked by
@@ -585,7 +586,7 @@ Writer:
 
 | Condition | Status |
 | --- | --- |
-| A setting outside its rules; a label outside its rule; a descriptor text field with a character outside its class or longer than its width; a volume date outside year 1 through 9999, or nonzero without its presence flag; a boot path that names no regular non-empty one-section file; `bootload` past its image | `FSIMG_EINVAL` |
+| A setting outside its rules; a label outside its rule; a descriptor text field with a character outside its class or longer than its capacity in the Joliet descriptor (64 or 18 characters); a volume date outside year 1 through 9999, or nonzero without its presence flag; a boot path that names no regular non-empty one-section file; `bootload` past its image | `FSIMG_EINVAL` |
 | A component over 255 bytes; a link target over 1023 bytes or with a component over 255 bytes; a file above `2^32 - 1` bytes at levels 1 and 2; more than 65535 directories in a hierarchy; a root child named `.rr_moved` that is not an empty directory when relocation is needed; a kind the profile lacks; a required metadata loss | `FSIMG_EUNSUPPORTED` |
 | A requested volume below the image; a volume above `2^32 - 1` blocks | `FSIMG_ERANGE` |
 | A plan row or stream record read back outside its limits; an encoded length that differs from the plan without a changed source | `FSIMG_ECORRUPT` |
@@ -622,17 +623,18 @@ The descriptor text and dates are tested at each layer, every passing case
 beside a seeded failure that proves the check ran:
 
 * **Codec.** Each class's encoder and decoder on the closed field table:
-  a full-width text, an empty text, a date at year 1 and at 9999, each
-  decoded back equal; against a 129-byte text, a lowercase letter, a `/`
+  a text of 64 characters (18 for a file identifier), an empty text, a
+  date at year 1 and at 9999, each decoded back equal; against a
+  65-character text, a lowercase letter, a `/`
   in a file identifier and a date at year 0 and 10000 refused; a decoded
   field's bytes compared with the test's own offset table, so an offset
   or width copied wrongly fails.
 * **Writer.** Every setting given, the image read back in all three
   views: `rockridge` and `primary` report the primary text, `joliet`
-  reports `FSIMG` and spaces, and all three the same dates; an image with
+  reports the same texts, and all three the same dates; an image with
   no setting byte-identical to one with the defaults given explicitly, and
   its descriptor's text and date bytes equal to a stored vector of
-  `FSIMG`, spaces and absent dates; `application=` empty yields spaces; a
+  `FSIMG`, spaces and absent dates; `application=` empty yields spaces in both descriptors; a 65-character a-character text and a 19-character file identifier refused; a
   date given in reproducible
   mode is stored, and a date left out is the epoch; each refusal names its
   key in `error.path`.

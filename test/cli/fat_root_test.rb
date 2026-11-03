@@ -29,7 +29,7 @@ class CliTest < Minitest::Test
 
   def test_creation_help_lists_root_setting
     result = invoke(arguments: ["c", "-h"])
-    assert_match(/-o key=value\s+Setting:[^\n]*\n\s+reserve, mountpoint, root, level, boot, efiboot or/, result.stdout)
+    assert_match(/-o key=value\s+Setting:[^\n]*\n\s+reserve, mountpoint, root, level, boot, efiboot,/, result.stdout)
   end
 
   def test_formats_without_a_fixed_root_report_zero_only_in_json

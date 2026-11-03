@@ -76,6 +76,41 @@ class Iso9660RulesTest < Minitest::Test
     end
   end
 
+  def test_descriptor_input_rules_check_each_class_and_each_date
+    with_cases do |cases, registry|
+      %w[descriptor_text descriptor_dates].each do |suffix|
+        rule = registry.fetch("iso9660.create.#{suffix}")
+        rule.domain.call.each do |witness|
+          result = cases.create(witness)
+          assert_nil(result.defect)
+          assert_equal(witness.intended ? [rule.id] : [], result.kase.source_classification.rule_ids)
+        end
+      end
+      {%i[volset publisher preparer application] => [64, "@"],
+        %i[copyright abstract biblio] => [18, "/"]}.each do |keys, (capacity, forbidden)|
+        keys.each do |key|
+          assert(Iso::Rules.descriptor_text?({key => "A" * capacity}), key)
+          assert(Iso::Rules.descriptor_text?({key => ""}), key)
+          refute(Iso::Rules.descriptor_text?({key => "A" * (capacity + 1)}), key)
+          refute(Iso::Rules.descriptor_text?({key => forbidden}), key)
+          refute(Iso::Rules.descriptor_text?({key => "lowercase"}), key)
+        end
+      end
+    end
+  end
+
+  def test_descriptor_recipe_preserves_empty_text_and_signed_seconds
+    settings = {application: "", publisher: "_PUB", created: -62_135_596_800, modified: 253_402_300_799,
+      expires: 0, effective: 1}
+    source = FsimgSpec::Source.new(tree: [], settings:)
+    assert_equal(settings, source.settings)
+    assert(source.settings.frozen?)
+    assert(source.settings.fetch(:application).frozen?)
+    [{application: "A\0B"}, {publisher: "A" * 130}, {created: -(1 << 63) - 1}, {expires: 1 << 63}].each do |bad|
+      assert_raises(FsimgSpec::RecipeError) { FsimgSpec::Source.new(tree: [], settings: bad) }
+    end
+  end
+
   private
 
   def with_cases

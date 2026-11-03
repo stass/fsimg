@@ -16,6 +16,15 @@ relocated directories, and reports El Torito boot catalogs through info.
 Full verification checks every offered hierarchy, path tables, record
 order and allocation ownership under the documented reader profile.
 
+ISO 9660 volume descriptors carry the volume set, publisher, preparer and
+application identifiers, the copyright, abstract and bibliographic file
+identifiers, and the creation, modification, expiration and effective dates.
+`-o volset=`, `publisher=`, `preparer=`, `application=`, `copyright=`,
+`abstract=`, `biblio=`, `created=`, `modified=`, `expires=` and `effective=`
+set them for both the primary and Joliet descriptors, and `info` reports them
+for the selected view. Primary-view labels and texts are reported only when
+they are printable ASCII.
+
 CLI information can report declared filesystem geometry beyond the available
 input when headers remain readable. Missing referenced structures or content
 retain filesystem errors; informational geometry does not enlarge selected

@@ -73,7 +73,11 @@ module FsimgSpec
     # The creation settings and the create option each becomes.
     CREATE_SETTINGS = {
       size: ["-s"], sector: ["-o", "sector="], cluster: ["-o", "cluster="], level: ["-o", "level="],
-      bootload: ["-o", "bootload="], boot: ["-o", "boot="], efiboot: ["-o", "efiboot="]
+      bootload: ["-o", "bootload="], boot: ["-o", "boot="], efiboot: ["-o", "efiboot="],
+      volset: ["-o", "volset="], publisher: ["-o", "publisher="], preparer: ["-o", "preparer="],
+      application: ["-o", "application="], copyright: ["-o", "copyright="], abstract: ["-o", "abstract="],
+      biblio: ["-o", "biblio="], created: ["-o", "created="], modified: ["-o", "modified="],
+      expires: ["-o", "expires="], effective: ["-o", "effective="]
     }.freeze
 
     # fsimg is the binary's absolute path, and environment the harness's

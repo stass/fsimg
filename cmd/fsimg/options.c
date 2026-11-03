@@ -838,6 +838,11 @@ convert_setting(cli_parse_t *parse, const fsimg_setting_t *row,
 	case FSIMG_SYNTAX_BYTES:
 	case FSIMG_SYNTAX_COUNT:
 		return (convert_number(parse, row, value, word, out));
+	case FSIMG_SYNTAX_SECONDS:
+		if (fsimg_cli_epoch(value, &out->i64, parse->error) != FSIMG_OK)
+			return (syntax_naming(parse,
+			    "setting requires a signed decimal Unix epoch", word));
+		return (FSIMG_OK);
 	case FSIMG_SYNTAX_HEX32:
 		if (!parse_hex32(value, &out->u32))
 			return (syntax_naming(parse,

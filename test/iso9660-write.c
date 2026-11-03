@@ -3676,6 +3676,324 @@ create_large_external(const char *path)
 	return (0);
 }
 
+/* These offsets and widths are ECMA-119 fields, independent of the
+ * driver's field table. The option offsets only select public inputs.
+ */
+static const struct {
+	const char *key;
+	const char *name;
+	size_t member;
+	unsigned offset;
+	unsigned width;
+} descriptor_texts[] = {
+	{ "volset", "volume_set", offsetof(fsimg_write_options_t,
+	    iso_volume_set), 190, 128 },
+	{ "publisher", "publisher", offsetof(fsimg_write_options_t,
+	    iso_publisher), 318, 128 },
+	{ "preparer", "preparer", offsetof(fsimg_write_options_t,
+	    iso_preparer), 446, 128 },
+	{ "application", "application", offsetof(fsimg_write_options_t,
+	    iso_application), 574, 128 },
+	{ "copyright", "copyright_file", offsetof(fsimg_write_options_t,
+	    iso_copyright), 702, 37 },
+	{ "abstract", "abstract_file", offsetof(fsimg_write_options_t,
+	    iso_abstract), 739, 37 },
+	{ "biblio", "biblio_file", offsetof(fsimg_write_options_t,
+	    iso_biblio), 776, 37 }
+};
+
+static void
+descriptor_text_set(fsimg_write_options_t *options, unsigned field,
+    const char *value)
+{
+	const char **member = (const char **)((unsigned char *)options +
+	    descriptor_texts[field].member);
+
+	*member = value;
+}
+
+static void
+descriptor_date_set(fsimg_write_options_t *options, unsigned field,
+    int64_t seconds, bool present)
+{
+	int64_t *values[] = { &options->iso_created, &options->iso_modified,
+	    &options->iso_expires, &options->iso_effective };
+	bool *flags[] = { &options->iso_created_set, &options->iso_modified_set,
+	    &options->iso_expires_set, &options->iso_effective_set };
+
+	*values[field] = seconds;
+	*flags[field] = present;
+}
+
+static void
+descriptor_image(const fsimg_write_options_t *options, memory_sink_t *sink)
+{
+	fixture_t fixture;
+
+	fixture_open(&fixture, options);
+	CHECK(emit_memory(&fixture, sink, NULL) == FSIMG_OK);
+	fixture_close(&fixture);
+}
+
+static void
+check_descriptor_text(const memory_sink_t *sink, unsigned field,
+    const char *value)
+{
+	unsigned width = descriptor_texts[field].width;
+	unsigned offset = descriptor_texts[field].offset;
+	unsigned char primary[128], joliet[128];
+	size_t length = strlen(value);
+
+	CHECK(length <= width / 2);
+	memset(primary, ' ', width);
+	bcopy(value, primary, length);
+	bzero(joliet, sizeof(joliet));
+	for (unsigned i = 0; i < width / 2; i++)
+		joliet[2 * i + 1] = i < length ? value[i] : ' ';
+	if (bcmp(sink->bytes + 16 * BLOCK + offset, primary, width) != 0 ||
+	    bcmp(sink->bytes + 17 * BLOCK + offset, joliet, width) != 0)
+		fprintf(stderr, "descriptor bytes differ for %s\n",
+		    descriptor_texts[field].key);
+	CHECK(bcmp(sink->bytes + 16 * BLOCK + offset, primary, width) == 0);
+	CHECK(bcmp(sink->bytes + 17 * BLOCK + offset, joliet, width) == 0);
+}
+
+static void
+test_descriptor_text_bytes_and_roundtrip(void)
+{
+	static const fsimg_iso_view_t views[] = { FSIMG_ISO_VIEW_PRIMARY,
+	    FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ISO_VIEW_JOLIET };
+	static const char *const dates[] = { "created", "modified",
+	    "expires", "effective" };
+	fsimg_write_options_t options;
+	fsimg_read_options_t read_options;
+	fsimg_volume_info_t info;
+	fsimg_verify_report_t report;
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+	memory_sink_t sink;
+	fixture_t fixture;
+	char values[7][65];
+
+	reproducible_options(&options);
+	for (unsigned i = 0; i < 7; i++) {
+		memset(values[i], 'A' + i, descriptor_texts[i].width / 2);
+		values[i][descriptor_texts[i].width / 2] = '\0';
+		descriptor_text_set(&options, i, values[i]);
+	}
+	for (unsigned i = 0; i < 4; i++)
+		descriptor_date_set(&options, i, 0, true);
+	fixture_open(&fixture, &options);
+	CHECK(emit_memory(&fixture, &sink, NULL) == FSIMG_OK);
+	for (unsigned i = 0; i < 7; i++)
+		check_descriptor_text(&sink, i, values[i]);
+	for (unsigned i = 0; i < 4; i++) {
+		CHECK(bcmp(sink.bytes + 16 * BLOCK + 813 + 17 * i,
+		    "1970010100000000\0", 17) == 0);
+		CHECK(bcmp(sink.bytes + 17 * BLOCK + 813 + 17 * i,
+		    "1970010100000000\0", 17) == 0);
+	}
+	CHECK(memory_io(fixture.ctx, &sink, false, &input) == FSIMG_OK);
+	for (unsigned view = 0; view < 3; view++) {
+		fsimg_read_options_init(&read_options);
+		read_options.iso_view = views[view];
+		CHECK(fsimg_reader_open(fixture.ctx, input, &read_options,
+		    &reader, NULL) == FSIMG_OK);
+		CHECK(fsimg_reader_get_info(reader, &info, NULL) == FSIMG_OK);
+		CHECK(info.text_count == 11);
+		for (unsigned i = 0; i < 11; i++) {
+			CHECK(strcmp(info.texts[i].name, i < 7 ?
+			    descriptor_texts[i].name : dates[i - 7]) == 0);
+			CHECK(strcmp(info.texts[i].value, i < 7 ? values[i] :
+			    "1970-01-01 00:00:00") == 0);
+		}
+		CHECK(fsimg_verify(reader, 0, &report, NULL) == FSIMG_OK);
+		CHECK(report.complete);
+		fsimg_reader_free(reader);
+	}
+	fsimg_io_free(input);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+static void
+test_descriptor_fields_and_settings_rows_match(void)
+{
+	CHECK(iso_descriptor_settings_match());
+}
+
+static void
+test_descriptor_defaults_and_empty_text(void)
+{
+	fsimg_write_options_t options;
+	memory_sink_t defaults, explicit_defaults, empty;
+
+	reproducible_options(&options);
+	descriptor_image(&options, &defaults);
+	for (unsigned i = 0; i < 7; i++) {
+		const char *value = i == 3 ? "FSIMG" : "";
+
+		check_descriptor_text(&defaults, i, value);
+		descriptor_text_set(&options, i, value);
+	}
+	options.iso_created = options.iso_modified = options.epoch;
+	options.iso_created_set = options.iso_modified_set = true;
+	descriptor_image(&options, &explicit_defaults);
+	CHECK(defaults.length == explicit_defaults.length);
+	CHECK(bcmp(defaults.bytes, explicit_defaults.bytes, defaults.length) == 0);
+	for (unsigned descriptor = 16; descriptor <= 17; descriptor++) {
+		CHECK(bcmp(defaults.bytes + descriptor * BLOCK + 813,
+		    "2023111422132000\0" "2023111422132000\0"
+		    "0000000000000000\0" "0000000000000000\0", 68) == 0);
+	}
+	for (unsigned i = 0; i < 7; i++)
+		descriptor_text_set(&options, i, "");
+	descriptor_image(&options, &empty);
+	for (unsigned i = 0; i < 7; i++)
+		check_descriptor_text(&empty, i, "");
+	free(empty.bytes);
+	free(explicit_defaults.bytes);
+	free(defaults.bytes);
+}
+
+static void
+test_descriptor_date_boundaries_and_reproducibility(void)
+{
+	static const struct {
+		int64_t seconds;
+		const char *bytes;
+	} dates[] = {
+		{ -INT64_C(62135596800), "0001010100000000\0" },
+		{ INT64_C(253402300799), "9999123123595900\0" }
+	};
+	fsimg_write_options_t options;
+	memory_sink_t first, second;
+
+	for (unsigned boundary = 0; boundary < 2; boundary++) {
+		reproducible_options(&options);
+		for (unsigned field = 0; field < 4; field++)
+			descriptor_date_set(&options, field,
+			    dates[boundary].seconds, true);
+		descriptor_image(&options, &first);
+		descriptor_image(&options, &second);
+		CHECK(first.length == second.length);
+		CHECK(bcmp(first.bytes, second.bytes, first.length) == 0);
+		for (unsigned descriptor = 16; descriptor <= 17; descriptor++) {
+			for (unsigned field = 0; field < 4; field++)
+				CHECK(bcmp(first.bytes + descriptor * BLOCK +
+				    813 + 17 * field, dates[boundary].bytes, 17) == 0);
+		}
+		free(second.bytes);
+		options.flags &= ~FSIMG_WRITE_REPRODUCIBLE;
+		descriptor_image(&options, &second);
+		for (unsigned descriptor = 16; descriptor <= 17; descriptor++)
+			CHECK(bcmp(first.bytes + descriptor * BLOCK + 813,
+			    second.bytes + descriptor * BLOCK + 813, 68) == 0);
+		free(second.bytes);
+		free(first.bytes);
+	}
+}
+
+static void
+test_descriptor_invalid_settings_name_the_key(void)
+{
+	static const char *const date_keys[] = { "created", "modified",
+	    "expires", "effective" };
+	static const int64_t invalid_dates[] = { -INT64_C(62135596801),
+	    INT64_C(253402300800), INT64_MIN, INT64_MAX };
+	fsimg_write_options_t options;
+	fsimg_options_t context_options;
+	fsimg_error_t error;
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	char value[130];
+
+	fsimg_options_init(&context_options);
+	CHECK(fsimg_ctx_new(&context_options, &ctx, NULL) == FSIMG_OK);
+	for (unsigned field = 0; field < 7; field++) {
+		for (unsigned mutation = 0; mutation < 5; mutation++) {
+			reproducible_options(&options);
+			memset(value, 'A', sizeof(value));
+			value[mutation == 0 ? descriptor_texts[field].width / 2 +
+			    1 : mutation == 1 ? sizeof(value) - 1 : 1] = '\0';
+			if (mutation >= 2)
+				value[0] = mutation == 2 ? 'a' :
+				    mutation == 3 ? '\033' : field < 4 ? '@' : '/';
+			descriptor_text_set(&options, field, value);
+			CHECK(fsimg_writer_new(ctx, "iso9660", &options,
+			    &writer, &error) == FSIMG_EINVAL);
+			CHECK(writer == NULL);
+			CHECK(strcmp(error.path, descriptor_texts[field].key) == 0);
+		}
+	}
+	for (unsigned field = 0; field < 4; field++) {
+		for (unsigned mutation = 0; mutation < 5; mutation++) {
+			reproducible_options(&options);
+			descriptor_date_set(&options, field,
+			    mutation < 4 ? invalid_dates[mutation] : 1,
+			    mutation < 4);
+			CHECK(fsimg_writer_new(ctx, "iso9660", &options,
+			    &writer, &error) == FSIMG_EINVAL);
+			CHECK(writer == NULL);
+			CHECK(strcmp(error.path, date_keys[field]) == 0);
+		}
+	}
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_descriptor_codec_character_classes_and_date_limits(void)
+{
+	static const char a_characters[] =
+	    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ !\"%&'()*+,-./:;<=>?";
+	static const char file_characters[] =
+	    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.; ";
+	static const int64_t seconds[] = { -INT64_C(62135596800),
+	    0, INT64_C(253402300799) };
+	unsigned char raw[128];
+	fsimg_timestamp_t decoded;
+	char text[130];
+	bool present;
+
+	for (unsigned class = 0; class < 2; class++) {
+		const char *members = class == 0 ? a_characters : file_characters;
+		iso_field_class_t kind = class == 0 ? ISO_CLASS_A_CHARACTERS :
+		    ISO_CLASS_FILE_IDENTIFIER;
+		unsigned width = class == 0 ? 128 : 37;
+
+		for (unsigned character = 1; character <= 255; character++) {
+			text[0] = (char)character;
+			text[1] = '\0';
+			CHECK(iso_text_encode(kind, text, raw, width) ==
+			    (strchr(members, character) != NULL));
+		}
+		CHECK(iso_text_encode(kind, "", raw, width));
+		for (unsigned i = 0; i < width; i++)
+			CHECK(raw[i] == ' ');
+		memset(text, 'A', sizeof(text));
+		text[width / 2] = '\0';
+		CHECK(iso_text_encode(kind, text, raw, width));
+		text[width / 2] = 'A';
+		text[width / 2 + 1] = '\0';
+		CHECK(!iso_text_encode(kind, text, raw, width));
+		memset(text, 'A', 129);
+		text[129] = '\0';
+		CHECK(!iso_text_encode(kind, text, raw, width));
+	}
+	for (unsigned i = 0; i < 3; i++) {
+		CHECK(iso_date17_encode(seconds[i], raw));
+		CHECK(iso_date17_decode(raw, &present, &decoded, NULL) == FSIMG_OK);
+		CHECK(present && decoded.seconds == seconds[i]);
+		CHECK(decoded.nanoseconds == 0 && raw[16] == 0);
+	}
+	CHECK(!iso_date17_encode(-INT64_C(62135596801), raw));
+	CHECK(!iso_date17_encode(INT64_C(253402300800), raw));
+	iso_date17_absent(raw);
+	CHECK(bcmp(raw, "0000000000000000\0", 17) == 0);
+	CHECK(iso_date17_decode(raw, &present, &decoded, NULL) == FSIMG_OK);
+	CHECK(!present);
+}
+
 /* Run one test; ISO9660_WRITE_DEBUG names each as it starts. */
 #define RUN(test) do { \
 	if (getenv("ISO9660_WRITE_DEBUG") != NULL) \
@@ -3699,6 +4017,12 @@ main(int argc, char **argv)
 		return (create_external(argv[2], argv[3], false,
 		    relocation_tree, RELOCATION_COUNT));
 	CHECK(argc == 1);
+	RUN(test_descriptor_codec_character_classes_and_date_limits);
+	RUN(test_descriptor_text_bytes_and_roundtrip);
+	RUN(test_descriptor_fields_and_settings_rows_match);
+	RUN(test_descriptor_defaults_and_empty_text);
+	RUN(test_descriptor_date_boundaries_and_reproducibility);
+	RUN(test_descriptor_invalid_settings_name_the_key);
 	RUN(test_validation);
 	RUN(test_writer_omissions);
 	RUN(test_writer_target_bound);

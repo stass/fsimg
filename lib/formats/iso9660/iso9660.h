@@ -45,6 +45,14 @@
  */
 #define ISO_DATE7_MIN		INT64_C(-2208988800)
 #define ISO_DATE7_MAX		INT64_C(5869583999)
+/* The UTC seconds of 0001-01-01 00:00:00 and 9999-12-31 23:59:59, the span
+ * of the seventeen-byte descriptor date.
+ */
+#define ISO_DATE17_MIN		INT64_C(-62135596800)
+#define ISO_DATE17_MAX		INT64_C(253402300799)
+
+/* A rendered descriptor date, YYYY-MM-DD HH:MM:SS, and its terminator. */
+#define ISO_DATE_TEXT_BYTES	20u
 
 /* Volume descriptor types. */
 #define ISO_VD_BOOT		0u
@@ -119,9 +127,50 @@ typedef struct iso_record_fields {
 	unsigned char	 date[ISO_DATE7_BYTES];
 } iso_record_fields_t;
 
+/*
+ * The descriptor text and date fields (specs/design-iso9660.md, descriptor
+ * text and dates): eleven fields from offset 190 through 880, each a row of
+ * one closed table of three classes. Every rule is a rule of a class; the
+ * writer encodes and the reader decodes each row through its class's one
+ * function. offset is from the first field, so the fields lie contiguously
+ * in a ISO_DESCRIPTOR_BYTES image of bytes 190 to 880. key names the field
+ * in the reader's report and setting is the writer's -o key, which names the
+ * row of the settings table that holds its value. slot is the row's index
+ * among the rows of its kind, the text rows or the date rows, which indexes
+ * the reader's decoded dates. The writer's defaults are the row's: an unset
+ * text is unset_text, NULL for none, and an unset date is the build date when unset_dated
+ * and absent otherwise.
+ */
+#define ISO_DESCRIPTOR_FIELD_BASE	190u
+#define ISO_DESCRIPTOR_BYTES		691u
+#define ISO_DESCRIPTOR_TEXTS		7u	/* the rows before the dates */
+#define ISO_DESCRIPTOR_DATES		4u
+#define ISO_DESCRIPTOR_FIELDS \
+	(ISO_DESCRIPTOR_TEXTS + ISO_DESCRIPTOR_DATES)
+
+typedef enum iso_field_class {
+	ISO_CLASS_A_CHARACTERS,
+	ISO_CLASS_FILE_IDENTIFIER,
+	ISO_CLASS_DATE
+} iso_field_class_t;
+
+typedef struct iso_descriptor_field {
+	const char	*key;
+	const char	*setting;
+	unsigned	 slot;
+	unsigned	 offset;
+	unsigned	 width;
+	iso_field_class_t class;
+	const char	*unset_text;
+	bool		 unset_dated;
+} iso_descriptor_field_t;
+
+extern const iso_descriptor_field_t iso_descriptor_fields[ISO_DESCRIPTOR_FIELDS];
+
 /* What the writer encodes into its primary or Joliet descriptor: the
  * encoded label field, the geometry, the root directory and its recording
- * date, the path tables and the creation and modification date.
+ * date, the path tables and the descriptor image of the text and date
+ * fields, whose texts the Joliet descriptor mirrors.
  */
 typedef struct iso_volume_fields {
 	uint32_t	 volume_space_size;
@@ -133,13 +182,15 @@ typedef struct iso_volume_fields {
 	bool		 joliet;
 	unsigned char	 label[ISO_LABEL_BYTES];
 	unsigned char	 root_date[ISO_DATE7_BYTES];
-	unsigned char	 date[ISO_DATE17_BYTES];
+	unsigned char	 descriptor[ISO_DESCRIPTOR_BYTES];
 } iso_volume_fields_t;
 
 /* A decoded volume descriptor. block, type, version and joliet_level are
  * set for every descriptor; the other fields only for the primary
  * descriptor and a Joliet supplementary descriptor (joliet_level 1 to 3),
- * any other descriptor being framed and ignored. A primary descriptor's
+ * any other descriptor being framed and ignored. fields holds the text
+ * rows' raw bytes and, per date row, whether it is present and its UTC
+ * seconds; open has checked every date. A primary descriptor's
  * geometry (volume_space_size, block_size, set_size, sequence) has passed
  * the reader profile when decoding succeeds; a Joliet descriptor's is only
  * decoded, and is trusted once volume.c finds it equal to the primary's.
@@ -160,6 +211,9 @@ typedef struct iso_descriptor {
 	uint8_t		 version;
 	uint8_t		 joliet_level;		/* zero unless Joliet */
 	unsigned char	 label[ISO_LABEL_BYTES];
+	unsigned char	 fields[ISO_DESCRIPTOR_BYTES];
+	bool		 date_present[ISO_DESCRIPTOR_DATES];
+	int64_t		 date_seconds[ISO_DESCRIPTOR_DATES];
 } iso_descriptor_t;
 
 /* El Torito (eltorito.c). One catalog block holds 64 entries; less the
@@ -389,6 +443,10 @@ void iso_u16both_put(unsigned char *, uint16_t);
 void iso_u32both_put(unsigned char *, uint32_t);
 bool iso_date7_encode(int64_t, unsigned char *);
 bool iso_date17_encode(int64_t, unsigned char *);
+void iso_date17_absent(unsigned char *);
+bool iso_date17_format(int64_t, char *);
+bool iso_text_encode(iso_field_class_t, const char *, unsigned char *,
+    size_t);
 size_t iso_record_length(size_t, size_t);
 size_t iso_record_encode(const iso_record_fields_t *, unsigned char *);
 void iso_volume_descriptor_encode(const iso_volume_fields_t *,
@@ -440,6 +498,7 @@ fsimg_status_t iso_primary_name(const unsigned char *, size_t, bool, char *,
 fsimg_status_t iso_joliet_name(const unsigned char *, size_t, char *,
     size_t *, fsimg_error_t *);
 bool iso_label_decode(const iso_descriptor_t *, char *);
+void iso_texts_report(const iso_descriptor_t *, fsimg_volume_info_t *);
 fsimg_status_t iso_keys(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_directory_keys_t *, fsimg_error_t *);
 fsimg_status_t iso_key(fsimg_reader_t *, const char *, unsigned char *,

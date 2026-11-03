@@ -121,7 +121,7 @@ module FsimgSpec
 
         ->(directory, model) do
           image = recipe.reading? ? Runner::IMAGE : Runner::CREATED
-          observations = Oracles.observe(@shell, image:, chdir: directory, model:)
+          observations = Oracles.observe(@shell, image:, chdir: directory, model:, settings: recipe.source&.settings || {})
           disagreements = recipe.reading? ? [] : Oracles.disagreements(observations)
           problem = disagreements.empty? ? nil : "the oracles disagree with the created image: #{disagreements.join('; ')}"
           Observed.new(observations:, problem:)

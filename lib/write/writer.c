@@ -34,8 +34,10 @@ static fsimg_status_t fit_volume(const fsimg_format_t *,
 static fsimg_status_t writer_new_stack(fsimg_ctx_t *, const fsimg_stack_t *,
     const fsimg_format_t *, const fsimg_format_variant_t *,
     const fsimg_write_options_t *, fsimg_writer_t **, fsimg_error_t *);
-static fsimg_status_t copy_boot_path(fsimg_writer_t *, const char *,
-    const char **, char **, fsimg_error_t *);
+static fsimg_status_t check_boot_path(fsimg_writer_t *, const char *,
+    const char *, fsimg_error_t *);
+static fsimg_status_t copy_texts(fsimg_writer_t *, fsimg_write_options_t *,
+    fsimg_error_t *);
 static fsimg_status_t plan_disk(fsimg_writer_t *, fsimg_error_t *);
 static bool writer_encoded(const fsimg_writer_t *);
 static fsimg_status_t emit_volume(void *, fsimg_io_t *, fsimg_error_t *);
@@ -278,26 +280,21 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	    writer->disk.scheme != NULL && writer->disk.fixed)
 		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "minimization conflicts with a fixed disk size");
-	/* The driver validates the writer's own boot path copies, already
-	 * known to be absolute image paths within the path limit.
+	/* The driver validates the writer's own copies of the texts, the boot
+	 * paths known to be absolute image paths within the path limit.
 	 */
 	if (status == FSIMG_OK)
-		status = copy_boot_path(writer, "boot", &selected.boot_bios,
-		    &writer->boot_bios, error);
+		status = check_boot_path(writer, "boot", selected.boot_bios, error);
 	if (status == FSIMG_OK)
-		status = copy_boot_path(writer, "efiboot", &selected.boot_efi,
-		    &writer->boot_efi, error);
+		status = check_boot_path(writer, "efiboot", selected.boot_efi, error);
+	if (status == FSIMG_OK)
+		status = copy_texts(writer, &selected, error);
 	if (status == FSIMG_OK)
 		status = driver->writer->validate(&selected, variant->id, error);
 	if (status == FSIMG_OK && writer->disk.scheme != NULL &&
 	    writer->disk.fixed)
 		status = fit_volume(driver, variant, &writer->disk, &selected,
 		    error);
-	if (status == FSIMG_OK && selected.mountpoint != NULL &&
-	    strnlen(selected.mountpoint, sizeof(writer->mountpoint)) ==
-	    sizeof(writer->mountpoint))
-		status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
-		    "mountpoint exceeds common backing capacity");
 	length = 0;
 	if (status == FSIMG_OK && variant->info.max_label_bytes != 0) {
 		if (selected.label == NULL)
@@ -322,48 +319,118 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 		bcopy(selected.label, writer->label, length + 1);
 		writer->options.label = writer->label;
 	}
-	if (selected.mountpoint != NULL) {
-		bcopy(selected.mountpoint, writer->mountpoint,
-		    strlen(selected.mountpoint) + 1);
-		writer->options.mountpoint = writer->mountpoint;
-	}
 	*out = writer;
 	return (FSIMG_OK);
 }
 
-/* Copy the borrowed boot image path at *path, when there is one, into
- * *copy, which the writer owns and frees, and point *path at the copy. The
- * path names an entry of the image being written, so it is an absolute
- * image path within the path limit; whether the catalog holds a suitable
- * file there is planning's question. A failure names the setting's key.
+/* Whether a boot image path, when there is one, is an absolute image path
+ * within the path limit; whether the catalog holds a suitable file there
+ * is planning's question. A failure names the setting's key.
  */
 static fsimg_status_t
-copy_boot_path(fsimg_writer_t *writer, const char *key, const char **path,
-    char **copy, fsimg_error_t *error)
+check_boot_path(fsimg_writer_t *writer, const char *key, const char *path,
+    fsimg_error_t *error)
 {
-	fsimg_error_t detail;
 	uint32_t depth;
 	size_t length;
 	fsimg_status_t status;
 
-	if (*path == NULL)
+	if (path == NULL)
 		return (FSIMG_OK);
-	status = fsimg_path_validate(writer->ctx, *path, false, &length,
-	    &depth, error);
+	status = fsimg_path_validate(writer->ctx, path, false, &length, &depth,
+	    error);
 	if (status != FSIMG_OK) {
 		if (error != NULL)
 			error->operation = FSIMG_OP_WRITER;
 		fsimg_error_path(error, key);
-		return (status);
 	}
-	*copy = fsimg_alloc(writer->ctx, length + 1, &detail);
-	if (*copy == NULL) {
+	return (status);
+}
+
+/* The capacity, terminator included, the writer allows a text of row: the
+ * row's own, or for an image path the context's path limit.
+ */
+static size_t
+text_capacity(const fsimg_ctx_t *ctx, const fsimg_setting_t *row)
+{
+	return (row->image_path ? (size_t)ctx->options.max_path_bytes + 1 :
+	    row->text_bytes);
+}
+
+/*
+ * Give the writer its own copy of every pointer text of options and point
+ * the options at the copies, so no text need outlive the caller. The texts
+ * are the text rows of the settings table, so a text setting added there is
+ * copied here with no further change. The copies share one block,
+ * writer->texts, which the writer frees; a text that fills its capacity
+ * (text_capacity) is refused, naming its key, so a pointer is never trusted
+ * past the capacity its row declares.
+ */
+static fsimg_status_t
+copy_texts(fsimg_writer_t *writer, fsimg_write_options_t *options,
+    fsimg_error_t *error)
+{
+	const fsimg_setting_slice_t *slice = &fsimg_filesystem_settings;
+	const fsimg_setting_records_t records = { .write = options };
+	const fsimg_setting_targets_t targets = { .write = options };
+	const fsimg_setting_t *row;
+	fsimg_setting_value_t value;
+	fsimg_error_t detail;
+	char key[48];
+	size_t capacity, length, total = 0;
+	char *next;
+
+	for (size_t i = 0; i < slice->count; i++) {
+		row = &slice->rows[i];
+		if (!fsimg_setting_is_borrowed_text(row))
+			continue;
+		fsimg_setting_load(row, &records, &value);
+		if (value.text == NULL)
+			continue;
+		capacity = text_capacity(writer->ctx, row);
+		length = strnlen(value.text, capacity);
+		if (length == capacity) {
+			fsimg_setting_key(row, key, sizeof(key));
+			fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+			    "text exceeds its setting's capacity");
+			fsimg_error_path(error, key);
+			return (FSIMG_EINVAL);
+		}
+		total += length + 1;
+	}
+	if (total == 0)
+		return (FSIMG_OK);
+	writer->texts = fsimg_alloc(writer->ctx, total, &detail);
+	if (writer->texts == NULL) {
 		if (error != NULL)
 			*error = detail;
 		return (detail.status);
 	}
-	bcopy(*path, *copy, length + 1);
-	*path = *copy;
+	/* The first pass measured each text. The bytes are the caller's, so a
+	 * text that grew since, from another thread, must not overrun the
+	 * block: measure again within the same bound and refuse any text that
+	 * no longer fits what remains.
+	 */
+	next = writer->texts;
+	for (size_t i = 0; i < slice->count; i++) {
+		row = &slice->rows[i];
+		if (!fsimg_setting_is_borrowed_text(row))
+			continue;
+		fsimg_setting_load(row, &records, &value);
+		if (value.text == NULL)
+			continue;
+		capacity = text_capacity(writer->ctx, row);
+		length = strnlen(value.text, capacity);
+		if (length == capacity ||
+		    length + 1 > (size_t)(writer->texts + total - next))
+			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_WRITER, "text changed while copied"));
+		bcopy(value.text, next, length);
+		next[length] = '\0';
+		value.text = next;
+		fsimg_setting_store(row, &targets, &value);
+		next += length + 1;
+	}
 	return (FSIMG_OK);
 }
 
@@ -482,8 +549,7 @@ fsimg_writer_free(fsimg_writer_t *writer)
 	fsimg_dealloc(writer->record);
 	fsimg_dealloc(writer->source_record);
 	fsimg_disk_plan_free(&writer->disk);
-	fsimg_dealloc(writer->boot_bios);
-	fsimg_dealloc(writer->boot_efi);
+	fsimg_dealloc(writer->texts);
 	fsimg_dealloc(writer);
 }
 

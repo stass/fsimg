@@ -153,7 +153,25 @@ module FsimgSpec
                  source: "specs/design-iso9660.md##{anchor}")
       end
 
+      # Character classes and capacities are independent of the C codec.
+      A_TEXT_KEYS = %i[volset publisher preparer application].freeze
+      FILE_TEXT_KEYS = %i[copyright abstract biblio].freeze
+      DATE_KEYS = %i[created modified expires effective].freeze
+      A_CHARACTERS = /\A[A-Z0-9_ !"%&'()*+,\.\/:;<=>?\-]*\z/
+      FILE_CHARACTERS = /\A[A-Z0-9_.; ]*\z/
+
+      def descriptor_text?(settings)
+        settings.slice(*A_TEXT_KEYS, *FILE_TEXT_KEYS).all? do |key, value|
+          capacity, characters = A_TEXT_KEYS.include?(key) ? [64, A_CHARACTERS] : [18, FILE_CHARACTERS]
+          value.bytesize <= capacity && characters.match?(value)
+        end
+      end
+
       def creation_rules = [
+        input_rule(id: "descriptor_text", anchor: "descriptor-text-and-dates", status: "FSIMG_EINVAL",
+          predicate: ->(source, _) { descriptor_text?(source.settings) }),
+        input_rule(id: "descriptor_dates", anchor: "descriptor-text-and-dates", status: "FSIMG_EINVAL",
+          predicate: ->(source, _) { source.settings.slice(*DATE_KEYS).values.all? { (-62_135_596_800..253_402_300_799).cover?(_1) } }),
         input_rule(id: "geometry", anchor: "settings-and-sizing", status: "FSIMG_EINVAL",
           predicate: ->(source, _) { (!source.settings.key?(:sector) || source.settings[:sector] == BLOCK) &&
             (!source.settings.key?(:cluster) || source.settings[:cluster] == BLOCK) &&

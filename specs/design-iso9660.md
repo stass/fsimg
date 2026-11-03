@@ -253,13 +253,18 @@ it up by the identifier it reports, and a writer check would have to
 predict the [alias](#primary-names) a source name receives.
 
 *Writing.* Each text field is a setting of the [writer](#settings-and-sizing).
-A supplied value must be at most the field's width in bytes and consist of
-its class's characters, else `FSIMG_EINVAL` naming the key; the empty
-string is legal and stores a field of spaces. There is no projection: the
-label projects because one label names every format and its exact form
-survives in the Joliet descriptor, whereas these fields are ISO-specific
-text the user typed with no second copy, so a silent change of case or
-character would misreport what was asked for. A date setting is an instant
+A supplied value must consist of its class's characters and fit the
+**capacity** of its field in both descriptors, else `FSIMG_EINVAL` naming
+the key; the empty string is legal and stores a field of spaces. The
+writer always writes a Joliet descriptor, which mirrors the text fields as
+UCS-2 units, so the capacity is the smaller of the two: 64 characters for
+an a-character field (128 bytes of units) and 18 for a file identifier
+field (37 bytes hold 18 units and one final zero byte), against the primary
+field's 128 and 37 bytes. There is no projection: the label projects
+because one label names every format and its exact form survives in the
+Joliet descriptor, whereas these fields are ISO-specific text the user
+typed with no second copy, so a silent change of case or character, or a
+truncation, would misreport what was asked for. A date setting is an instant
 in Unix seconds, encoded as its UTC calendar fields with hundredths `00`
 and offset 0; it must fall within year 1 through 9999, the digit date's own
 range, else `FSIMG_EINVAL`. The absent dates are the format's sixteen `0`
@@ -268,18 +273,19 @@ application identifier `FSIMG`, spaces elsewhere, the creation and
 modification dates the volume's planning time, and the other two dates
 absent, so these settings change no byte of an image created without them.
 
-The supplementary descriptor's text fields are not settings: a Joliet
-descriptor carries the defaults, `FSIMG` and spaces as UCS-2 units, each
-odd 37-byte field ending in a zero byte, whatever the primary descriptor's
-fields hold; its four dates equal the primary descriptor's.
+The Joliet descriptor carries the same seven texts as the primary
+descriptor, each a character per big-endian UCS-2 unit (the characters are
+ASCII, so the mirror widens each byte), padded with U+0020 units and, in a
+37-byte field, a final zero byte; and the same four dates as the primary
+descriptor's, byte for byte.
 
-*Reading.* The reader decodes the [view](#views)'s descriptor, as it does
-for the label: the primary descriptor's bytes for `rockridge` and
+*Reading.* The reader decodes the [view](#views)'s descriptor, the volume
+label by the same decoder and rule: the primary descriptor's bytes for `rockridge` and
 `primary`, the Joliet descriptor's UCS-2 units for `joliet`. A text field
 is **reported** when, after its trailing spaces and NUL bytes are removed,
 it is not empty and is printable: for the primary descriptor every byte is
-`0x20` to `0x7e`, and for the Joliet descriptor the units decode, as the
-Joliet label does, to UTF-8 without a control character. The field's
+`0x20` to `0x7e`, and for the Joliet descriptor the units decode to UTF-8 without a control
+character, the C1 controls U+0080 to U+009F included, and without an unpaired surrogate. The field's
 characters are not checked against its class, because qualified producers
 write lowercase letters and other printable characters there and the field
 is informational; a field that is not reported is silently omitted. A
@@ -1193,8 +1199,8 @@ catalog's integrity, not that firmware runs the image.
 | `boot_bios` | `boot=PATH` | Absent by default; an absolute image path |
 | `boot_efi` | `efiboot=PATH` | Absent by default; an absolute image path |
 | `boot_load_sectors` | `bootload=N` | 1 to 65535, default 4; only with `boot` |
-| `iso_volume_set`, `iso_publisher`, `iso_preparer`, `iso_application` | `volset=`, `publisher=`, `preparer=`, `application=` | At most 128 [a-characters](#descriptor-text-and-dates); NULL selects spaces, `FSIMG` for the application |
-| `iso_copyright`, `iso_abstract`, `iso_biblio` | `copyright=`, `abstract=`, `biblio=` | At most 37 [file identifier](#descriptor-text-and-dates) characters; NULL selects spaces |
+| `iso_volume_set`, `iso_publisher`, `iso_preparer`, `iso_application` | `volset=`, `publisher=`, `preparer=`, `application=` | At most 64 [a-characters](#descriptor-text-and-dates); NULL selects spaces, `FSIMG` for the application |
+| `iso_copyright`, `iso_abstract`, `iso_biblio` | `copyright=`, `abstract=`, `biblio=` | At most 18 [file identifier](#descriptor-text-and-dates) characters; NULL selects spaces |
 | `iso_created`, `iso_modified`, `iso_expires`, `iso_effective` | `created=`, `modified=`, `expires=`, `effective=` | Unix seconds within year 1 through 9999, each behind its presence flag; absent selects the [default](#times-and-defaults) |
 | `label` | `-L` | At most 16 characters of the Basic Multilingual Plane without controls; NULL selects `CDROM`, and the CLI passes its own default |
 
@@ -1291,7 +1297,7 @@ shown, when reading unless the row says at verification.
 | Joliet | Levels 1 to 3; shared data with the primary hierarchy | Bad escape (not Joliet); geometry differing from the PVD (ECORRUPT); a forced `joliet` view over a damaged primary handshake (reads) |
 | El Torito | BIOS only, EFI only, BIOS and EFI, boot image as a file and not, an EFI image past the volume, selection criteria in the initial entry | Checksum, signature, media type, a section count past its entries, a catalog or image before the data area, a catalog past the volume or slice (ECORRUPT); unknown platform, extension entry, a second block of entries, two boot records (EUNSUPPORTED) |
 | Ownership | Primary and Joliet sharing data; `boot.cat` as a file; deduplicated files | File data over a directory, continuation or descriptor; two records sharing continuation bytes (ECORRUPT) |
-| Writer | Every acceptance row's valid witness that the writer profile can express, at each level; reordered sources; fixed sizes; relocation by depth and by path length; a round trip of an extracted relocated tree; every descriptor text field at its full width, empty and absent, each read back in all three views; all four dates set, at years 1 and 9999, in reproducible mode and not | Required metadata loss; a level 1 or 2 file above `2^32 - 1` bytes; a 256-byte Rock Ridge name; a 1024-byte link target or a 256-byte target component; a boot setting naming a directory or a missing path; `bootload` past the image; a volume size too small; a 129-byte or lowercase a-character field, a 38-byte file identifier or one with `/`, a date at year 0 or 10000 (EINVAL naming the key) |
+| Writer | Every acceptance row's valid witness that the writer profile can express, at each level; reordered sources; fixed sizes; relocation by depth and by path length; a round trip of an extracted relocated tree; every descriptor text field at its longest accepted text (64 characters, 18 for a file identifier), empty and absent, each read back in all three views; all four dates set, at years 1 and 9999, in reproducible mode and not | Required metadata loss; a level 1 or 2 file above `2^32 - 1` bytes; a 256-byte Rock Ridge name; a 1024-byte link target or a 256-byte target component; a boot setting naming a directory or a missing path; `bootload` past the image; a volume size too small; a 65-character or lowercase a-character field, a 19-character file identifier or one with `/`, a date at year 0 or 10000 (EINVAL naming the key) |
 
 ## Source keys
 

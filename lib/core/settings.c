@@ -55,6 +55,9 @@ typedef unsigned char id16_t[16];
 	FSIMG_NO_PRESENCE)
 #define U64(rec, member)	BIND(rec, member, FSIMG_KIND_U64, uint64_t,	\
 	FSIMG_NO_PRESENCE)
+#define I64_SET_(type, record_id, member, flag)	BIND_(type, record_id,	\
+	member, FSIMG_KIND_I64, int64_t, PRESENCE_OFFSET(type, flag))
+#define I64_SET(...)		I64_SET_(__VA_ARGS__)
 #define FLAG(rec, member)	BIND(rec, member, FSIMG_KIND_BOOL, bool,	\
 	FSIMG_NO_PRESENCE)
 #define ID16(rec, member)	BIND(rec, member, FSIMG_KIND_ID16, id16_t,	\
@@ -78,9 +81,12 @@ typedef unsigned char id16_t[16];
 	.kind = FSIMG_KIND_TEXT, .offset = offsetof(type, member),	\
 	.size = TEXT_SIZE(type, member), .presence = FSIMG_NO_PRESENCE
 #define TEXT(...)		TEXT_(__VA_ARGS__)
-/* A layer value member and the bool member that marks it present. */
-#define FLAG_OFFSET(flag)	(offsetof(fsimg_layer_options_t, flag) +	\
-	0 * sizeof((bool *)NULL == &MEMBER(fsimg_layer_options_t, flag)))
+/* A value member and the bool member of the same record that marks it
+ * present.
+ */
+#define PRESENCE_OFFSET(type, flag)	(offsetof(type, flag) +		\
+	0 * sizeof((bool *)NULL == &MEMBER(type, flag)))
+#define FLAG_OFFSET(flag)	PRESENCE_OFFSET(fsimg_layer_options_t, flag)
 #define U32_SET(member, flag)	BIND(RECORD_LAYERS, member, FSIMG_KIND_U32,	\
 	uint32_t, FLAG_OFFSET(flag))
 #define FLAG_SET(member, flag)	BIND(RECORD_LAYERS, member, FSIMG_KIND_BOOL, \
@@ -132,14 +138,21 @@ static const fsimg_setting_choice_t xz_check_choices[] = {
  * side's ISO 9660 view; and the format-specific write fields, each tied
  * to its FSIMG_SETTING_* bit. The mountpoint is a borrowed pointer, NULL
  * for the format's default and "" for an explicit empty path; the command
- * bounds it by the 1025 bytes and terminator of the worker record's
- * mountpoint field. root, the FAT12/16 fixed root's entry count, is
+ * and the writer bound it by the capacity of the volume
+ * information's mountpoint. root, the FAT12/16 fixed root's entry count, is
  * bounded by its 16-bit on-disk field; the writer rounds it up to whole
  * sectors. The El Torito boot paths are image paths, borrowed like the
  * mountpoint; the command bounds each by FSIMG_BOOT_PATH_TEXT_BYTES, the
- * worker record's field, and the writer by the context's path limit.
+ * worker record's field, and the writer by the context's path limit
+ * (image_path).
  * bootload, the BIOS entry's load sectors, is bounded by its 16-bit
- * on-disk field.
+ * on-disk field. The ISO descriptor texts are borrowed pointers like the
+ * mountpoint, bounded by FSIMG_ISO_TEXT_BYTES and FSIMG_ISO_FILE_TEXT_BYTES,
+ * the capacities of their fields in the Joliet descriptor with a
+ * terminator; the four dates are signed Unix seconds behind presence flags,
+ * their range the driver's. The pointer texts and the dates are this
+ * table's alone: the writer copies each text row, and the command's job
+ * record carries the descriptor rows, by walking it.
  */
 static const fsimg_setting_t filesystem_rows[] = {
 	{ .key = "sector", U32(RECORD_WRITE, sector_bytes),
@@ -168,7 +181,8 @@ static const fsimg_setting_t filesystem_rows[] = {
 	    .syntax = FSIMG_SYNTAX_COUNT, .max = 100, .initial = { .u32 = 3 },
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_RESERVE },
 	{ .key = "mountpoint", TEXT_POINTER(RECORD_WRITE, mountpoint),
-	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = 1025 + 1,
+	    .syntax = FSIMG_SYNTAX_TEXT,
+	    .text_bytes = sizeof(((fsimg_volume_info_t *)0)->mountpoint),
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_MOUNTPOINT },
 	{ .key = "root", U32(RECORD_WRITE, fat_root_entries),
 	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT16_MAX, .nonzero = true,
@@ -179,13 +193,48 @@ static const fsimg_setting_t filesystem_rows[] = {
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_LEVEL },
 	{ .key = "boot", TEXT_POINTER(RECORD_WRITE, boot_bios),
 	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_BOOT_PATH_TEXT_BYTES,
+	    .image_path = true,
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ELTORITO },
 	{ .key = "efiboot", TEXT_POINTER(RECORD_WRITE, boot_efi),
 	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_BOOT_PATH_TEXT_BYTES,
+	    .image_path = true,
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ELTORITO },
 	{ .key = "bootload", U32(RECORD_WRITE, boot_load_sectors),
 	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT16_MAX, .nonzero = true,
-	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ELTORITO }
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ELTORITO },
+	{ .key = "volset", TEXT_POINTER(RECORD_WRITE, iso_volume_set),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_ISO_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "publisher", TEXT_POINTER(RECORD_WRITE, iso_publisher),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_ISO_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "preparer", TEXT_POINTER(RECORD_WRITE, iso_preparer),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_ISO_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "application", TEXT_POINTER(RECORD_WRITE, iso_application),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_ISO_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "copyright", TEXT_POINTER(RECORD_WRITE, iso_copyright),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_ISO_FILE_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "abstract", TEXT_POINTER(RECORD_WRITE, iso_abstract),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_ISO_FILE_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "biblio", TEXT_POINTER(RECORD_WRITE, iso_biblio),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_ISO_FILE_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "created", I64_SET(RECORD_WRITE, iso_created, iso_created_set),
+	    .syntax = FSIMG_SYNTAX_SECONDS,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "modified", I64_SET(RECORD_WRITE, iso_modified, iso_modified_set),
+	    .syntax = FSIMG_SYNTAX_SECONDS,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "expires", I64_SET(RECORD_WRITE, iso_expires, iso_expires_set),
+	    .syntax = FSIMG_SYNTAX_SECONDS,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "effective", I64_SET(RECORD_WRITE, iso_effective, iso_effective_set),
+	    .syntax = FSIMG_SYNTAX_SECONDS,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR }
 };
 
 /*
@@ -486,6 +535,9 @@ load_member(const fsimg_setting_t *row, const unsigned char *member,
 	case FSIMG_KIND_U64:
 		bcopy(member, &value->u64, sizeof(value->u64));
 		break;
+	case FSIMG_KIND_I64:
+		bcopy(member, &value->i64, sizeof(value->i64));
+		break;
 	case FSIMG_KIND_BOOL:
 		value->flag = bool_byte(member);
 		break;
@@ -535,6 +587,9 @@ store_member(const fsimg_setting_t *row, unsigned char *member,
 		break;
 	case FSIMG_KIND_U64:
 		bcopy(&value->u64, member, sizeof(value->u64));
+		break;
+	case FSIMG_KIND_I64:
+		bcopy(&value->i64, member, sizeof(value->i64));
 		break;
 	case FSIMG_KIND_BOOL:
 		bcopy(&value->flag, member, sizeof(value->flag));
@@ -596,6 +651,8 @@ values_equal(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 		return (a->u32 == b->u32);
 	case FSIMG_KIND_U64:
 		return (a->u64 == b->u64);
+	case FSIMG_KIND_I64:
+		return (a->i64 == b->i64);
 	case FSIMG_KIND_BOOL:
 		return (a->flag == b->flag);
 	case FSIMG_KIND_BYTE_ORDER:
@@ -679,6 +736,21 @@ fsimg_setting_is_default(const fsimg_setting_t *row,
 		return (!presence_flag(row, record));
 	load_member(row, record + row->offset, &value);
 	return (values_equal(row, &value, &row->initial));
+}
+
+bool
+fsimg_setting_is_borrowed_text(const fsimg_setting_t *row)
+{
+	return (row->record == FSIMG_RECORD_WRITE &&
+	    row->kind == FSIMG_KIND_TEXT_POINTER);
+}
+
+bool
+fsimg_setting_is_date(const fsimg_setting_t *row)
+{
+	return (row->record == FSIMG_RECORD_WRITE && row->kind == FSIMG_KIND_I64 &&
+	    row->syntax == FSIMG_SYNTAX_SECONDS &&
+	    row->presence != FSIMG_NO_PRESENCE);
 }
 
 /* FSIMG_EINVAL naming the row's canonical key. */

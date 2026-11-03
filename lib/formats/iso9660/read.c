@@ -132,8 +132,7 @@ iso_open(fsimg_reader_t *reader,
 	info->valid |= FSIMG_VOLUME_GEOMETRY;
 	_Static_assert(ISO_LABEL_TEXT_MAX < sizeof(info->label),
 	    "an ISO 9660 label fits the volume information");
-	if (iso_label_decode(iso_hierarchy(iso), info->label) &&
-	    info->label[0] != '\0')
+	if (iso_label_decode(iso_hierarchy(iso), info->label))
 		info->valid |= FSIMG_VOLUME_LABEL;
 	info->volume_bytes = (uint64_t)iso->primary.volume_space_size *
 	    ISO_BLOCK_BYTES;
@@ -146,6 +145,7 @@ iso_open(fsimg_reader_t *reader,
 	info->clean = true;
 	info->io_error = false;
 	report_details(iso, info);
+	iso_texts_report(iso_hierarchy(iso), info);
 	return (FSIMG_OK);
 }
 

@@ -317,6 +317,13 @@ fsimg_wire_entry_encode(unsigned char *raw, const fsimg_entry_t *entry,
 		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_MODE, metadata->mode);
 }
 
+_Static_assert(sizeof(((fsimg_volume_text_t *)NULL)->name) ==
+    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
+    "the wire text name holds the public text name");
+_Static_assert(sizeof(((fsimg_volume_text_t *)NULL)->value) ==
+    FSIMG_WIRE_INFO_TEXT_VALUE_BYTES,
+    "the wire text value holds the public text value");
+
 _Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->label) ==
     FSIMG_WIRE_INFO_LABEL_BYTES, "the wire label holds the public label");
 _Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->mountpoint) ==
@@ -353,6 +360,30 @@ fsimg_wire_details_encode(unsigned char *raw, size_t count_offset,
 	}
 }
 
+/* The named texts as the info record lays them out: the count, then one
+ * entry of FSIMG_WIRE_INFO_TEXT_BYTES per text, its name and then its
+ * value, at most FSIMG_VOLUME_TEXTS_MAX of them; raw is zeroed.
+ */
+static void
+texts_encode(unsigned char *raw, const fsimg_volume_info_t *info)
+{
+	uint32_t count = info->text_count;
+
+	if (count > FSIMG_VOLUME_TEXTS_MAX)
+		count = FSIMG_VOLUME_TEXTS_MAX;
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_TEXT_COUNT, count);
+	for (uint32_t i = 0; i < count; i++) {
+		unsigned char *text = raw + FSIMG_WIRE_INFO_TEXTS +
+		    i * FSIMG_WIRE_INFO_TEXT_BYTES;
+		const fsimg_volume_text_t *source = &info->texts[i];
+
+		bcopy(source->name, text, strnlen(source->name,
+		    sizeof(source->name) - 1));
+		bcopy(source->value, text + FSIMG_WIRE_INFO_DETAIL_NAME_BYTES,
+		    strnlen(source->value, sizeof(source->value) - 1));
+	}
+}
+
 /* Strings are copied up to their terminators, which the reader guarantees
  * inside each fixed array; the zeroed record supplies the wire terminator.
  */
@@ -385,6 +416,7 @@ fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
 	fsimg_wire_details_encode(raw, FSIMG_WIRE_INFO_DETAIL_COUNT,
 	    FSIMG_WIRE_INFO_DETAILS, FSIMG_VOLUME_DETAILS_MAX, info->details,
 	    info->detail_count);
+	texts_encode(raw, info);
 }
 
 /* Only a used slot crosses the boundary, so the record has no used flag. */
@@ -533,6 +565,46 @@ details_valid(const unsigned char *raw, size_t count_offset,
 	return (true);
 }
 
+/* The text table texts_encode() writes: at most FSIMG_VOLUME_TEXTS_MAX used
+ * entries, each a nonempty name of printable ASCII, distinct from the
+ * others, and a terminated value, and zeros after them. A value's bytes are the display's to escape.
+ */
+static bool
+texts_valid(const unsigned char *raw)
+{
+	uint64_t count = fsimg_load_le64(raw + FSIMG_WIRE_INFO_TEXT_COUNT);
+
+	if (count > FSIMG_VOLUME_TEXTS_MAX)
+		return (false);
+	for (uint64_t i = 0; i < FSIMG_VOLUME_TEXTS_MAX; i++) {
+		const unsigned char *text = raw + FSIMG_WIRE_INFO_TEXTS +
+		    i * FSIMG_WIRE_INFO_TEXT_BYTES;
+		const unsigned char *value = text +
+		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES;
+
+		if (i >= count) {
+			if (!bytes_zero(text, FSIMG_WIRE_INFO_TEXT_BYTES))
+				return (false);
+			continue;
+		}
+		if (text[0] == '\0' || !word_field_valid(text,
+		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES) ||
+		    memchr(value, '\0', FSIMG_WIRE_INFO_TEXT_VALUE_BYTES) ==
+		    NULL || !string_field_valid(value,
+		    FSIMG_WIRE_INFO_TEXT_BYTES -
+		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES))
+			return (false);
+		for (uint64_t k = 0; k < i; k++) {
+			if (strncmp((const char *)text, (const char *)raw +
+			    FSIMG_WIRE_INFO_TEXTS +
+			    k * FSIMG_WIRE_INFO_TEXT_BYTES,
+			    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES) == 0)
+				return (false);
+		}
+	}
+	return (true);
+}
+
 bool
 fsimg_wire_info_frame_valid(const fsimg_frame_t *frame)
 {
@@ -563,7 +635,8 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame)
 	    raw[FSIMG_WIRE_INFO_MOUNTPOINT] != '\0')
 		return (false);
 	if (!details_valid(raw, FSIMG_WIRE_INFO_DETAIL_COUNT,
-	    FSIMG_WIRE_INFO_DETAILS, FSIMG_VOLUME_DETAILS_MAX))
+	    FSIMG_WIRE_INFO_DETAILS, FSIMG_VOLUME_DETAILS_MAX) ||
+	    !texts_valid(raw))
 		return (false);
 
 	if (fsimg_load_le64(raw + FSIMG_WIRE_INFO_SECTOR) > UINT32_MAX ||

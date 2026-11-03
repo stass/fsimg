@@ -17,6 +17,47 @@ module FsimgSpec
     Hierarchy = Data.define(:descriptor, :root, :directories, :records, :paths_l, :paths_m, :susp, :rockridge)
     PathRecord = Data.define(:raw, :identifier, :extent, :parent, :attribute_blocks)
 
+    # Decode informational fields independently of the C field codec. Text
+    # does not obey the writer's character classes on externally made discs.
+    module DescriptorMetadata
+      TEXTS = {"volume_set" => [190, 128], "publisher" => [318, 128], "preparer" => [446, 128],
+        "application" => [574, 128], "copyright_file" => [702, 37], "abstract_file" => [739, 37],
+        "biblio_file" => [776, 37]}.freeze
+      DATES = {"created" => 813, "modified" => 830, "expires" => 847, "effective" => 864}.freeze
+      module_function
+
+      def texts(raw, joliet: false)
+        TEXTS.filter_map do |key, (offset, width)|
+          field = raw.byteslice(offset, width)
+          value = if joliet
+            decode_units(field.byteslice(0, width / 2 * 2))
+          else
+            field.sub(/[ \x00]+\z/n, "").then { |text| text if text.bytes.all? { (32..126).cover?(_1) } }
+          end
+          [key, value] if value && !value.empty?
+        end.to_h
+      end
+
+      def dates(raw)
+        DATES.filter_map do |key, offset|
+          field = raw.byteslice(offset, 17)
+          next unless Rules.date17?(field) && !["\0".b * 16, "0" * 16].include?(field.byteslice(0, 16))
+
+          year, month, day, hour, minute, second = field.unpack("a4a2a2a2a2a2").map(&:to_i)
+          time = Time.utc(year, month, day, hour, minute, second) - field.byteslice(16, 1).unpack1("c") * 900
+          [key, format("%04d-%02d-%02d %02d:%02d:%02d", time.year, time.month, time.day, time.hour, time.min, time.sec)] if (1..9999).cover?(time.year)
+        end.to_h
+      end
+
+      def decode_units(bytes)
+        value = bytes.force_encoding(Encoding::UTF_16BE).encode(Encoding::UTF_8).sub(/[ \x00]+\z/, "")
+        value unless value.codepoints.any? { _1 < 32 || (127..159).cover?(_1) }
+      rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError
+        nil
+      end
+      private_class_method :decode_units
+    end
+
     # The independent model holds decoded bytes, not fsimg's interpretation.
     # Bad framing remains a fact for rules to judge. Only reaching a work or
     # digest bound makes its dependent scopes unclassified. Fixed layouts
@@ -54,6 +95,9 @@ module FsimgSpec
           entries = catalogs.flat_map { Catalog.decode(_1.last).entries }
           details = {"boot_catalog_block" => catalogs.first&.fetch(1) || 0, "boot_entries" => entries.size,
                      "boot_x86" => entries.count { _1.platform == 0 }, "boot_efi" => entries.count { _1.platform == 0xef }}
+          selected = view == "joliet" ? joliet.descriptor : volume
+          metadata = DescriptorMetadata.texts(selected.raw, joliet: view == "joliet").merge(DescriptorMetadata.dates(selected.raw))
+          problems << "info descriptor texts differ" unless info.first.fetch("texts") == metadata
           problems + details.filter_map { |field, value| "info #{field} differs" unless info.first.fetch("details").fetch(field).to_s == value.to_s }
         in _ if FsimgSpec.undefined?(tree) then []
         in "ls"

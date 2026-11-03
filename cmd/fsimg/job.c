@@ -10,6 +10,7 @@
 #include "fsimg-endian.h"
 #include "internal.h"
 #include "layer.h"
+#include "settings.h"
 #include "worker.h"
 
 /* Each numeric field occupies eight little-endian bytes. Fixed strings
@@ -50,8 +51,19 @@
  * terminator, then one byte whose bits say which of the two paths is
  * present, since an empty path is a value, and five zero bytes. The file
  * settings travel as descriptors, one capability bit each, never in the
- * record. Three eight-byte fields close the record: image input kind,
- * byte length and transfer quantum.
+ * record. Three eight-byte fields follow: image input kind, byte length
+ * and transfer quantum. The ISO 9660 descriptor settings close the
+ * record: the dates as eight signed little-endian bytes each; the texts,
+ * back to back in FSIMG_JOB_DESCRIPTOR_TEXT_BYTES, each in the capacity of
+ * its setting, NUL-terminated and zero after the terminator; one byte whose
+ * bits say which of the texts is present and one for the dates, since an
+ * empty text and a zero date are values; and six zero bytes. The texts and
+ * dates are the descriptor rows of the settings table, in its order, so
+ * a new descriptor setting changes the record's size: it adds its bytes to
+ * FSIMG_JOB_DESCRIPTOR_TEXT_BYTES or FSIMG_JOB_DESCRIPTOR_DATES and so to
+ * FSIMG_JOB_BYTES (protocol.h), and no more than eight texts or eight dates
+ * fit the presence bytes. iso_layout refuses a table that disagrees with
+ * these, so every job fails to encode rather than lose a setting.
  * These enums name wire positions and sizes only and are independent of
  * native struct layout or padding.
  *
@@ -132,7 +144,14 @@ typedef enum job_string_field {
 	JOB_BOOT_RESERVED = JOB_BOOT_PRESENT + 1,
 	JOB_INPUT_KIND = JOB_BOOT_RESERVED + 5,
 	JOB_INPUT_LENGTH = JOB_INPUT_KIND + 8,
-	JOB_INPUT_QUANTUM = JOB_INPUT_LENGTH + 8
+	JOB_INPUT_QUANTUM = JOB_INPUT_LENGTH + 8,
+	JOB_ISO_DATES_OFFSET = JOB_INPUT_QUANTUM + 8,
+	JOB_ISO_TEXTS_OFFSET = JOB_ISO_DATES_OFFSET +
+	    8 * FSIMG_JOB_DESCRIPTOR_DATES,
+	JOB_ISO_TEXT_PRESENT = JOB_ISO_TEXTS_OFFSET +
+	    FSIMG_JOB_DESCRIPTOR_TEXT_BYTES,
+	JOB_ISO_DATE_PRESENT = JOB_ISO_TEXT_PRESENT + 1,
+	JOB_ISO_RESERVED = JOB_ISO_DATE_PRESENT + 1
 } job_string_field_t;
 
 /* Bits of JOB_IFSBOOT_SET: field n of the ifsboot settings is set, and the
@@ -141,6 +160,31 @@ typedef enum job_string_field {
 #define JOB_IFSBOOT_VIRTUAL_SET	(1u << JOB_IFSBOOT_FIELDS)
 #define JOB_IFSBOOT_VIRTUAL	0x01u
 #define JOB_IFSBOOT_RAW		0x02u
+
+/*
+ * Where each descriptor setting travels: the rows of the settings table
+ * that carry FSIMG_SETTING_ISO_DESCRIPTOR, texts and dates in table order.
+ * A text takes its row's text_bytes in the texts region, a date eight bytes
+ * in the dates region, and a field's presence bit is its place among the
+ * texts or among the dates. The layout is computed from the table rather
+ * than listed, and is refused (false) unless it fills the two regions and
+ * the presence bytes exactly, so a table and a record that disagree fail
+ * every job rather than lose a setting.
+ */
+typedef struct iso_slot {
+	const fsimg_setting_t *row;
+	unsigned	 wire;		/* the field's offset in the record */
+	unsigned	 bytes;		/* its size, a text's terminator included */
+	unsigned	 bit;		/* its presence bit */
+	bool		 date;
+} iso_slot_t;
+
+enum { JOB_ISO_SLOTS = 16 };
+
+typedef struct iso_layout {
+	iso_slot_t	 slots[JOB_ISO_SLOTS];
+	size_t		 count;
+} iso_layout_t;
 
 /* Bits of JOB_BOOT_PRESENT. */
 #define JOB_BOOT_BIOS	0x01u
@@ -185,8 +229,8 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_MOUNTPOINT_OFFSET,
     "the layer fields do not overlap");
 _Static_assert(JOB_RESERVED_OFFSET + 7 == JOB_IFSBOOT_OFFSET &&
-    JOB_INPUT_QUANTUM + 8 == FSIMG_JOB_BYTES,
-    "the prepared image description closes the record");
+    JOB_ISO_RESERVED + 6 == FSIMG_JOB_BYTES,
+    "the ISO descriptor settings close the record");
 _Static_assert(FSIMG_JOB_BOOT_PATH_BYTES == FSIMG_BOOT_PATH_TEXT_BYTES &&
     sizeof(((fsimg_worker_request_t *)0)->boot_bios_storage) ==
     FSIMG_JOB_BOOT_PATH_BYTES &&
@@ -194,9 +238,9 @@ _Static_assert(FSIMG_JOB_BOOT_PATH_BYTES == FSIMG_BOOT_PATH_TEXT_BYTES &&
     FSIMG_JOB_BOOT_PATH_BYTES,
     "the record and the request hold every boot path the command accepts");
 _Static_assert(sizeof(((fsimg_worker_request_t *)0)->mountpoint_storage) ==
-    FSIMG_JOB_MOUNTPOINT_BYTES && FSIMG_JOB_MOUNTPOINT_BYTES >
+    FSIMG_JOB_MOUNTPOINT_BYTES && FSIMG_JOB_MOUNTPOINT_BYTES >=
     sizeof(((fsimg_volume_info_t *)0)->mountpoint),
-    "the request holds the mountpoint, and the writer refuses a long one");
+    "the request holds every mountpoint the command accepts");
 _Static_assert(sizeof(((fsimg_layer_options_t *)0)->gpt_type) ==
     JOB_GPT_TYPE_BYTES &&
     sizeof(((fsimg_layer_options_t *)0)->gpt_name) == JOB_GPT_NAME_BYTES &&
@@ -256,7 +300,13 @@ static const int *capability_field(const fsimg_worker_request_t *,
     fsimg_capability_t);
 static fsimg_status_t invalid_job(fsimg_error_t *);
 static bool string_field_valid(const unsigned char *, size_t);
+static bool field_zero(const unsigned char *, size_t);
 static bool boot_path_fits(const char *);
+static bool encode_iso_descriptor(const fsimg_write_options_t *,
+    unsigned char *);
+static bool iso_descriptor_valid(const unsigned char *);
+static void decode_iso_descriptor(const unsigned char *,
+    fsimg_worker_request_t *);
 static void decode_boot_path(const unsigned char *, unsigned, unsigned,
     char *, const char **);
 static void encode_layers(const fsimg_layer_options_t *, unsigned char *);
@@ -299,6 +349,17 @@ string_field_valid(const unsigned char *field, size_t bytes)
 	return (true);
 }
 
+/* Whether every byte of a field is zero. */
+static bool
+field_zero(const unsigned char *field, size_t bytes)
+{
+	for (size_t i = 0; i < bytes; i++) {
+		if (field[i] != 0)
+			return (false);
+	}
+	return (true);
+}
+
 /* Whether an optional boot image path fits its field with its terminator. */
 static bool
 boot_path_fits(const char *path)
@@ -318,6 +379,142 @@ decode_boot_path(const unsigned char *raw, unsigned offset, unsigned bit,
 		return;
 	bcopy(raw + offset, storage, FSIMG_JOB_BOOT_PATH_BYTES);
 	*path = storage;
+}
+
+/* Lay out the descriptor settings of the record from the settings table. */
+static bool
+iso_layout(iso_layout_t *layout)
+{
+	const fsimg_setting_slice_t *table = &fsimg_filesystem_settings;
+	const fsimg_setting_t *row;
+	iso_slot_t *slot;
+	unsigned text_bytes = 0, texts = 0, dates = 0;
+
+	layout->count = 0;
+	for (size_t i = 0; i < table->count; i++) {
+		row = &table->rows[i];
+		if (row->support != FSIMG_SETTING_ISO_DESCRIPTOR ||
+		    (!fsimg_setting_is_borrowed_text(row) && !fsimg_setting_is_date(row)))
+			continue;
+		if (layout->count == JOB_ISO_SLOTS)
+			return (false);
+		slot = &layout->slots[layout->count++];
+		slot->row = row;
+		slot->date = fsimg_setting_is_date(row);
+		if (slot->date) {
+			slot->wire = JOB_ISO_DATES_OFFSET + 8 * dates;
+			slot->bytes = 8;
+			slot->bit = dates++;
+		} else {
+			slot->wire = JOB_ISO_TEXTS_OFFSET + text_bytes;
+			slot->bytes = (unsigned)row->text_bytes;
+			slot->bit = texts++;
+			text_bytes += slot->bytes;
+		}
+	}
+	return (texts <= 8 && dates <= 8 && texts != 0 &&
+	    text_bytes == FSIMG_JOB_DESCRIPTOR_TEXT_BYTES &&
+	    dates == FSIMG_JOB_DESCRIPTOR_DATES);
+}
+
+/* Place the descriptor settings of options in the zeroed record: a setting
+ * that is not set stays zero. False when a text does not fit its field with
+ * a terminator, or the table does not fit the record.
+ */
+static bool
+encode_iso_descriptor(const fsimg_write_options_t *options, unsigned char *raw)
+{
+	const fsimg_setting_records_t records = { .write = options };
+	iso_layout_t layout;
+	const iso_slot_t *slot;
+	fsimg_setting_value_t value;
+	size_t length;
+	unsigned char *present;
+
+	if (!iso_layout(&layout))
+		return (false);
+	for (size_t i = 0; i < layout.count; i++) {
+		slot = &layout.slots[i];
+		if (fsimg_setting_is_default(slot->row, &records))
+			continue;
+		fsimg_setting_load(slot->row, &records, &value);
+		if (slot->date) {
+			fsimg_store_le64(raw + slot->wire, (uint64_t)value.i64);
+			present = &raw[JOB_ISO_DATE_PRESENT];
+		} else {
+			length = strnlen(value.text, slot->bytes);
+			if (length == slot->bytes)
+				return (false);
+			bcopy(value.text, raw + slot->wire, length);
+			present = &raw[JOB_ISO_TEXT_PRESENT];
+		}
+		*present = (unsigned char)(*present | 1u << slot->bit);
+	}
+	return (true);
+}
+
+/* Whether the descriptor settings are canonical: the present bits name only
+ * existing fields, each text field is terminated and zero after its
+ * terminator, and a field that is not present is all zero.
+ */
+static bool
+iso_descriptor_valid(const unsigned char *raw)
+{
+	iso_layout_t layout;
+	const iso_slot_t *slot;
+	const unsigned char *field;
+	unsigned char present, all[2] = { 0, 0 };
+
+	if (!iso_layout(&layout))
+		return (false);
+	for (size_t i = 0; i < layout.count; i++) {
+		slot = &layout.slots[i];
+		field = raw + slot->wire;
+		present = raw[slot->date ? JOB_ISO_DATE_PRESENT : JOB_ISO_TEXT_PRESENT];
+		all[slot->date] = (unsigned char)(all[slot->date] | 1u << slot->bit);
+		if ((present >> slot->bit & 1u) == 0 ?
+		    !field_zero(field, slot->bytes) :
+		    (!slot->date && !string_field_valid(field, slot->bytes)))
+			return (false);
+	}
+	if ((raw[JOB_ISO_TEXT_PRESENT] & ~all[0]) != 0 ||
+	    (raw[JOB_ISO_DATE_PRESENT] & ~all[1]) != 0)
+		return (false);
+	for (unsigned i = JOB_ISO_RESERVED; i < FSIMG_JOB_BYTES; i++) {
+		if (raw[i] != 0)
+			return (false);
+	}
+	return (true);
+}
+
+/* Set the request's descriptor texts, which point into its storage, and
+ * dates from a record iso_descriptor_valid accepted.
+ */
+static void
+decode_iso_descriptor(const unsigned char *raw, fsimg_worker_request_t *request)
+{
+	const fsimg_setting_targets_t targets = { .write = &request->write };
+	iso_layout_t layout;
+	const iso_slot_t *slot;
+	fsimg_setting_value_t value;
+
+	if (!iso_layout(&layout))
+		return;
+	bcopy(raw + JOB_ISO_TEXTS_OFFSET, request->iso_text_storage,
+	    FSIMG_JOB_DESCRIPTOR_TEXT_BYTES);
+	for (size_t i = 0; i < layout.count; i++) {
+		slot = &layout.slots[i];
+		if ((raw[slot->date ? JOB_ISO_DATE_PRESENT : JOB_ISO_TEXT_PRESENT] >>
+		    slot->bit & 1u) == 0)
+			continue;
+		bzero(&value, sizeof(value));
+		if (slot->date)
+			value.i64 = fsimg_wire_get_signed64(raw + slot->wire);
+		else
+			value.text = request->iso_text_storage +
+			    (slot->wire - JOB_ISO_TEXTS_OFFSET);
+		fsimg_setting_store(slot->row, &targets, &value);
+	}
 }
 
 /* The layer settings after gpt:sector, which travels with the selection. */
@@ -778,6 +975,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	fsimg_store_le64(raw + JOB_INPUT_KIND, request->input.kind);
 	fsimg_store_le64(raw + JOB_INPUT_LENGTH, request->input.length);
 	fsimg_store_le64(raw + JOB_INPUT_QUANTUM, request->input.quantum);
+	if (!encode_iso_descriptor(&request->write, raw))
+		return (invalid_job(error));
 	return (FSIMG_OK);
 }
 
@@ -867,6 +1066,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
+	if (!iso_descriptor_valid(raw))
+		return (invalid_job(error));
 	if (!string_field_valid(raw + JOB_SCHEME_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_CONTAINER_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_PARTITION_TEXT_OFFSET,
@@ -976,6 +1177,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    request->boot_bios_storage, &request->write.boot_bios);
 	decode_boot_path(raw, JOB_BOOT_EFI_OFFSET, JOB_BOOT_EFI,
 	    request->boot_efi_storage, &request->write.boot_efi);
+	decode_iso_descriptor(raw, request);
 	*selection_length = get_field(raw, JOB_SELECTION);
 	*capabilities = (unsigned)get_field(raw, JOB_CAPABILITIES);
 	/* Each path is at least "/" and its terminator. An image path is

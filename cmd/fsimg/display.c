@@ -408,9 +408,12 @@ help(fsimg_cli_display_t *display)
 		append(display, "%s%s", help_budgets, help_memory);
 		append(display, "    -n              Without W, report a plan without creating an image\n"
 		    "    -o key=value    Setting: sector, cluster, endian, uuid, inodes,\n"
-		    "                    reserve, mountpoint, root, level, boot, efiboot or\n"
-		    "                    bootload, or layer:key for a layer the\n"
-		    "                    stack or the compression selects, such as\n"
+		    "                    reserve, mountpoint, root, level, boot, efiboot,\n"
+		    "                    bootload, volset, publisher, preparer,\n"
+		    "                    application, copyright, abstract, biblio,\n"
+		    "                    created, modified, expires or effective, or\n"
+		    "                    layer:key for a layer the stack or the\n"
+		    "                    compression selects, such as\n"
 		    "                    gpt:type=esp, dmg:compress=none or gzip:level=9\n"
 		    "    -p              Import owner, group and permission bits\n"
 		    "    -R              Create reproducible image bytes\n");
@@ -937,6 +940,39 @@ volume_details(fsimg_cli_display_t *display, const unsigned char *raw)
 	    FSIMG_WIRE_INFO_DETAILS, false);
 }
 
+/*
+ * The volume's named texts in the driver's order, printed without
+ * interpreting a name: "name":"value" members of a JSON object, or one
+ * "name: "value"" line each. A value is escaped as any text is, so no
+ * control character reaches a terminal. The protocol checked the count and
+ * every name.
+ */
+static void
+volume_texts(fsimg_cli_display_t *display, const unsigned char *raw)
+{
+	uint64_t count = fsimg_load_le64(raw + FSIMG_WIRE_INFO_TEXT_COUNT);
+
+	for (uint64_t i = 0; i < count; i++) {
+		const unsigned char *text = raw + FSIMG_WIRE_INFO_TEXTS +
+		    i * FSIMG_WIRE_INFO_TEXT_BYTES;
+		const char *value = (const char *)text +
+		    FSIMG_WIRE_INFO_DETAIL_NAME_BYTES;
+
+		if (display->options->json) {
+			if (i != 0)
+				append(display, ",");
+			string_value(display, (const char *)text);
+			append(display, ":");
+		} else {
+			prose(display, (const char *)text);
+			append(display, ": ");
+		}
+		string_value(display, value);
+		if (!display->options->json)
+			append(display, "\n");
+	}
+}
+
 static void
 volume(fsimg_cli_display_t *display, const unsigned char *raw)
 {
@@ -996,6 +1032,8 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 		    fsimg_load_le64(raw + FSIMG_WIRE_INFO_CLEAN) ? "true" : "false",
 		    fsimg_load_le64(raw + FSIMG_WIRE_INFO_IO_ERROR) ? "true" : "false");
 		volume_details(display, raw);
+		append(display, "},\"texts\":{");
+		volume_texts(display, raw);
 		append(display, "}}\n");
 		return;
 	}
@@ -1039,6 +1077,7 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 	    (fsimg_load_le64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_WRITE) != 0 ? ", write" : "",
 	    (fsimg_load_le64(raw + FSIMG_WIRE_INFO_CAPABILITIES) & FSIMG_CAP_VERIFY) != 0 ? ", verify" : "");
 	volume_details(display, raw);
+	volume_texts(display, raw);
 }
 
 /*

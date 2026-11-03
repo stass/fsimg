@@ -415,10 +415,13 @@ test_options(void)
 	fsimg_cli_release(&options);
 	memcpy(longest, "mountpoint=", 11);
 	memset(longest + 11, 'm', 1025);
-	longest[sizeof(longest) - 1] = '\0';
+	longest[11 + 1024] = '\0';
 	CHECK(parse(text_longest, &options) == FSIMG_OK);
-	CHECK(strlen(options.request.write.mountpoint) == 1025);
+	CHECK(strlen(options.request.write.mountpoint) == 1024);
 	fsimg_cli_release(&options);
+	longest[11 + 1024] = 'm';
+	longest[sizeof(longest) - 1] = '\0';
+	check_syntax(text_longest);
 	memcpy(longer, "mountpoint=", 11);
 	memset(longer + 11, 'm', 1026);
 	longer[sizeof(longer) - 1] = '\0';
@@ -998,11 +1001,11 @@ test_setting_values(void)
 	check_syntax(absent_default);
 	check_syntax(read_default);
 	check_syntax(forced_default);
-	/* The command's mountpoint capacity is the job record's field. */
+	/* The command's mountpoint capacity fits the job record's field. */
 	mountpoint = fsimg_setting_find(&fsimg_filesystem_settings,
 	    "mountpoint", strlen("mountpoint"));
 	CHECK(mountpoint != NULL &&
-	    mountpoint->text_bytes == FSIMG_JOB_MOUNTPOINT_BYTES);
+	    mountpoint->text_bytes <= FSIMG_JOB_MOUNTPOINT_BYTES);
 }
 
 /* x creates a fresh directory named after the image unless -E or -O. */

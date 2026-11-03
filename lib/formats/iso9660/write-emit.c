@@ -107,7 +107,7 @@ sequence_put(sequence_t *sequence, const unsigned char *bytes, size_t length,
 
 /* Step 1: three or four blocks from block 16. Both volume descriptors carry
  * the same geometry and
- * dates; each names its own hierarchy's root and path tables.
+ * text and dates; each names its own hierarchy's root and path tables.
  */
 static fsimg_status_t
 emit_descriptors(iso_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
@@ -133,7 +133,7 @@ emit_descriptors(iso_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 		fields.root_length = root.bytes[h];
 		bcopy(plan->label[h], fields.label, ISO_LABEL_BYTES);
 		bcopy(root.modified, fields.root_date, ISO_DATE7_BYTES);
-		bcopy(plan->volume_date, fields.date, ISO_DATE17_BYTES);
+		bcopy(plan->descriptor, fields.descriptor, ISO_DESCRIPTOR_BYTES);
 		index = h == ISO_JOLIET && boot ? 2 : h;
 		iso_volume_descriptor_encode(&fields, raw + index * ISO_BLOCK_BYTES);
 	}

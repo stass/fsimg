@@ -198,8 +198,10 @@ typedef struct iso_name {
  * The plan. rows holds one row per catalog ID; names[h] is hierarchy h's
  * sorted name stream and paths[h] its directories in path-table order,
  * which is also the order their directories are laid out and emitted.
- * fallback is the time of absent modification times and both volume
- * dates: the epoch when reproducible, else the planning clock. The block
+ * fallback is the time of absent modification times and of the creation
+ * and modification dates the settings leave out: the epoch when
+ * reproducible, else the planning clock. descriptor is the encoded image
+ * of the descriptor's text and date fields (iso_descriptor_fields). The block
  * fields are the layout's; volume_blocks counts every block, padding
  * included. target and entries are planning's and emission's buffers for
  * a link target and one record's Rock Ridge entries; block and fragments
@@ -228,7 +230,7 @@ typedef struct iso_plan {
 	uint32_t	 continuation_blocks;
 	uint32_t	 volume_blocks;
 	unsigned char	 label[ISO_HIERARCHIES][ISO_LABEL_BYTES];
-	unsigned char	 volume_date[ISO_DATE17_BYTES];
+	unsigned char	 descriptor[ISO_DESCRIPTOR_BYTES];
 	unsigned char	 target[FSIMG_SYMLINK_TARGET_MAX];
 	unsigned char	 entries[ISO_RR_ENTRIES_MAX];
 	unsigned char	 block[ISO_BLOCK_BYTES];
@@ -260,6 +262,7 @@ typedef enum iso_rr_record {
 } iso_rr_record_t;
 
 extern const fsimg_writer_ops_t fsimg_iso9660_writer_ops;
+bool iso_descriptor_settings_match(void);
 
 /* write-plan.c */
 fsimg_status_t iso_row_get(iso_plan_t *, uint64_t, iso_row_t *,

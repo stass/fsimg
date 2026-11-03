@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
@@ -63,6 +64,47 @@
 #define DATE17_DIGITS		16u
 #define OFFSET_MIN		(-48)	/* 15-minute units west of UTC */
 #define OFFSET_MAX		52
+
+const iso_descriptor_field_t iso_descriptor_fields[ISO_DESCRIPTOR_FIELDS] = {
+	{ .key = "volume_set", .setting = "volset", .slot = 0,
+	    .offset = 0,
+	    .width = 128, .class = ISO_CLASS_A_CHARACTERS },
+	{ .key = "publisher", .setting = "publisher", .slot = 1,
+	    .offset = VD_PUBLISHER - VD_VOLUME_SET,
+	    .width = 128, .class = ISO_CLASS_A_CHARACTERS },
+	{ .key = "preparer", .setting = "preparer", .slot = 2,
+	    .offset = VD_PREPARER - VD_VOLUME_SET,
+	    .width = 128, .class = ISO_CLASS_A_CHARACTERS },
+	{ .key = "application", .setting = "application", .slot = 3,
+	    .offset = VD_APPLICATION - VD_VOLUME_SET,
+	    .width = 128, .class = ISO_CLASS_A_CHARACTERS,
+	    .unset_text = "FSIMG" },
+	{ .key = "copyright_file", .setting = "copyright", .slot = 4,
+	    .offset = VD_COPYRIGHT - VD_VOLUME_SET,
+	    .width = 37, .class = ISO_CLASS_FILE_IDENTIFIER },
+	{ .key = "abstract_file", .setting = "abstract", .slot = 5,
+	    .offset = VD_COPYRIGHT + 37 - VD_VOLUME_SET,
+	    .width = 37, .class = ISO_CLASS_FILE_IDENTIFIER },
+	{ .key = "biblio_file", .setting = "biblio", .slot = 6,
+	    .offset = VD_COPYRIGHT + 74 - VD_VOLUME_SET,
+	    .width = 37, .class = ISO_CLASS_FILE_IDENTIFIER },
+	{ .key = "created", .setting = "created", .slot = 0,
+	    .offset = VD_DATES - VD_VOLUME_SET,
+	    .width = DATE17_BYTES, .class = ISO_CLASS_DATE, .unset_dated = true },
+	{ .key = "modified", .setting = "modified", .slot = 1,
+	    .offset = VD_DATES + 17 - VD_VOLUME_SET,
+	    .width = DATE17_BYTES, .class = ISO_CLASS_DATE, .unset_dated = true },
+	{ .key = "expires", .setting = "expires", .slot = 2,
+	    .offset = VD_DATES + 34 - VD_VOLUME_SET,
+	    .width = DATE17_BYTES, .class = ISO_CLASS_DATE },
+	{ .key = "effective", .setting = "effective", .slot = 3,
+	    .offset = VD_DATES + 51 - VD_VOLUME_SET,
+	    .width = DATE17_BYTES, .class = ISO_CLASS_DATE }
+};
+_Static_assert(ISO_DESCRIPTOR_FIELD_BASE == VD_VOLUME_SET &&
+    VD_DATES + 4 * DATE17_BYTES - VD_VOLUME_SET == ISO_DESCRIPTOR_BYTES &&
+    VD_STRUCTURE_VERSION - VD_VOLUME_SET == ISO_DESCRIPTOR_BYTES,
+    "the descriptor fields fill bytes 190 to 880");
 
 bool
 iso_bytes_zero(const unsigned char *bytes, size_t length)
@@ -299,11 +341,14 @@ volume_decode(const unsigned char *raw, iso_descriptor_t *out,
 	out->path_table_m = fsimg_load_be32(raw + VD_PATH_TABLE_M);
 	out->path_table_m_copy = fsimg_load_be32(raw + VD_PATH_TABLE_M_COPY);
 	bcopy(raw + VD_LABEL, out->label, ISO_LABEL_BYTES);
-	for (unsigned i = 0; i < 4; i++) {
+	bcopy(raw + ISO_DESCRIPTOR_FIELD_BASE, out->fields, ISO_DESCRIPTOR_BYTES);
+	for (unsigned i = 0; i < ISO_DESCRIPTOR_DATES; i++) {
 		status = iso_date17_decode(raw + VD_DATES + i * DATE17_BYTES,
 		    &present, &date, error);
 		if (status != FSIMG_OK)
 			return (status);
+		out->date_present[i] = present;
+		out->date_seconds[i] = date.seconds;
 	}
 
 	/* The root record: 34 bytes, the identifier 0x00, a directory. */
@@ -557,8 +602,8 @@ iso_date7_encode(int64_t seconds, unsigned char *raw)
 	return (true);
 }
 
-/* The seventeen-byte descriptor date of whole UTC seconds within the
- * seven-byte range: sixteen ASCII digits with zero hundredths, then a
+/* The seventeen-byte descriptor date of whole UTC seconds within years 1
+ * through 9999: sixteen ASCII digits with zero hundredths, then a
  * zero offset.
  */
 bool
@@ -569,7 +614,7 @@ iso_date17_encode(int64_t seconds, unsigned char *raw)
 	static const unsigned widths[7] = { 4, 2, 2, 2, 2, 2, 2 };
 	size_t at;
 
-	if (seconds < ISO_DATE7_MIN || seconds > ISO_DATE7_MAX)
+	if (seconds < ISO_DATE17_MIN || seconds > ISO_DATE17_MAX)
 		return (false);
 	civil_from_seconds(seconds, &year, &month, &day, &clock);
 	fields[0] = year;
@@ -592,11 +637,29 @@ iso_date17_encode(int64_t seconds, unsigned char *raw)
 }
 
 /* An absent descriptor date: sixteen '0' digits and a zero offset. */
-static void
-date17_absent(unsigned char *raw)
+void
+iso_date17_absent(unsigned char *raw)
 {
 	memset(raw, '0', DATE17_DIGITS);
 	raw[DATE17_DIGITS] = 0;
+}
+
+/* The UTC calendar form of an instant, YYYY-MM-DD HH:MM:SS, into out of
+ * ISO_DATE_TEXT_BYTES: the form a listing shows a modification time in.
+ * False, with out untouched, outside years 1 through 9999, where a
+ * descriptor date whose offset moves its UTC year to 0 lands.
+ */
+bool
+iso_date17_format(int64_t seconds, char *out)
+{
+	unsigned year, month, day, clock;
+
+	if (seconds < ISO_DATE17_MIN || seconds > ISO_DATE17_MAX)
+		return (false);
+	civil_from_seconds(seconds, &year, &month, &day, &clock);
+	snprintf(out, ISO_DATE_TEXT_BYTES, "%04u-%02u-%02u %02u:%02u:%02u",
+	    year, month, day, clock / 3600, clock / 60 % 60, clock % 60);
+	return (true);
 }
 
 /* An identifier field of width bytes holding ASCII text padded with
@@ -667,11 +730,90 @@ iso_record_encode(const iso_record_fields_t *fields, unsigned char *out)
 	return (length);
 }
 
+/* Whether c is an a-character: an uppercase letter, a digit, an underscore,
+ * a space or one of ! " % & ' ( ) * + , - . / : ; < = > ?.
+ */
+static bool
+a_character(unsigned char c)
+{
+	return ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+	    (c != '\0' && strchr("_ !\"%&'()*+,-./:;<=>?", c) != NULL));
+}
+
+/* Whether c is a character of a file identifier field: a d-character,
+ * a separator dot or semicolon, or a space.
+ */
+static bool
+file_identifier_character(unsigned char c)
+{
+	return ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
+	    c == '.' || c == ';' || c == ' ');
+}
+
+/* Encode text into the width-byte primary field of a text class, padded
+ * with spaces. False, leaving field untouched, when a character is outside
+ * the class or the text is longer than the field's capacity, width / 2:
+ * the Joliet descriptor mirrors the field as UCS-2 units, which hold half
+ * as many characters (a 37-byte field holds 18 and a zero byte).
+ */
+bool
+iso_text_encode(iso_field_class_t class, const char *text,
+    unsigned char *field, size_t width)
+{
+	size_t length = strlen(text);
+	bool (*member)(unsigned char) = class == ISO_CLASS_A_CHARACTERS ?
+	    a_character : file_identifier_character;
+
+	if (length > width / 2)
+		return (false);
+	for (size_t i = 0; i < length; i++) {
+		if (!member((unsigned char)text[i]))
+			return (false);
+	}
+	memset(field, ' ', width);
+	bcopy(text, field, length);
+	return (true);
+}
+
+/* Widen the first width / 2 bytes of a primary text field into big-endian
+ * UCS-2 units, which the classes keep ASCII; an odd width ends in a zero
+ * byte.
+ */
+static void
+text_field_widen(const unsigned char *primary, size_t width,
+    unsigned char *field)
+{
+	for (size_t i = 0; i < width / 2; i++)
+		fsimg_store_be16(field + 2 * i, primary[i]);
+	if (width % 2 != 0)
+		field[width - 1] = 0;
+}
+
+/* Copy the descriptor image of the eleven text and date fields into a
+ * descriptor at out: the primary descriptor takes it as it is and the
+ * Joliet descriptor widens each text, with the dates unchanged.
+ */
+static void
+descriptor_fields_put(const unsigned char *image, bool joliet,
+    unsigned char *out)
+{
+	const iso_descriptor_field_t *row;
+
+	for (unsigned i = 0; i < ISO_DESCRIPTOR_FIELDS; i++) {
+		row = &iso_descriptor_fields[i];
+		if (joliet && row->class != ISO_CLASS_DATE)
+			text_field_widen(image + row->offset, row->width,
+			    out + ISO_DESCRIPTOR_FIELD_BASE + row->offset);
+		else
+			bcopy(image + row->offset, out + ISO_DESCRIPTOR_FIELD_BASE +
+			    row->offset, row->width);
+	}
+}
+
 /* Encode a primary (joliet false) or Joliet level 3 supplementary
- * descriptor into the 2048 bytes at out. Identifier fields are spaces but
- * for the application identifier FSIMG; the expiration and effective
- * dates are absent; reserved bytes and the application use field are
- * zero.
+ * descriptor into the 2048 bytes at out. The text and date fields come
+ * from the descriptor image; reserved bytes and the application use field
+ * are zero.
  */
 void
 iso_volume_descriptor_encode(const iso_volume_fields_t *fields,
@@ -708,16 +850,7 @@ iso_volume_descriptor_encode(const iso_volume_fields_t *fields,
 	bcopy(fields->root_date, root.date, DATE7_BYTES);
 	iso_record_encode(&root, out + VD_ROOT);
 
-	text_field_put(out + VD_VOLUME_SET, 128, "", joliet);
-	text_field_put(out + VD_PUBLISHER, 128, "", joliet);
-	text_field_put(out + VD_PREPARER, 128, "", joliet);
-	text_field_put(out + VD_APPLICATION, 128, "FSIMG", joliet);
-	for (unsigned i = 0; i < 3; i++)
-		text_field_put(out + VD_COPYRIGHT + 37 * i, 37, "", joliet);
-	bcopy(fields->date, out + VD_DATES, DATE17_BYTES);
-	bcopy(fields->date, out + VD_DATES + DATE17_BYTES, DATE17_BYTES);
-	date17_absent(out + VD_DATES + 2 * DATE17_BYTES);
-	date17_absent(out + VD_DATES + 3 * DATE17_BYTES);
+	descriptor_fields_put(fields->descriptor, joliet, out);
 	out[VD_STRUCTURE_VERSION] = 1;
 }
 

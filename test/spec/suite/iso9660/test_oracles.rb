@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
+require "tmpdir"
 require "fsimg_spec/iso9660"
 
 class Iso9660OraclesTest < Minitest::Test
@@ -58,7 +59,74 @@ class Iso9660OraclesTest < Minitest::Test
     assert_equal "disagrees", result.state
   end
 
+  def test_descriptor_oracles_compare_text_and_dates_instead_of_exit_status
+    raw = "\0".b * 2048
+    Iso::DescriptorMetadata::TEXTS.each_value { |offset, width| raw[offset, width] = " ".b * width }
+    raw[190, 3] = "SET"
+    raw[574, 3] = "APP"
+    raw[813, 17] = "1970010100000000\0".b
+    volume = Iso::Descriptor.new(offset: 16 * 2048, raw:, fields: Fields.new(space_le: 96))
+    model = Model.new(image_length: 96 * 2048, volume:)
+    xorriso = "Volume Set Id: 'SET'\nApp Id: 'APP'\nCreation Time: 1970010100000000\n"
+    isoinfo = "Volume set id: SET\nApplication id: APP\n"
+
+    [[:xorriso, xorriso], [:isoinfo, isoinfo]].each do |tool, report|
+      assert_equal("agrees", Iso::Oracles.metadata_report(report, model:, tool:, settings: {application: "APP", created: 0}).state)
+      bad = report.sub("APP", "OTHER")
+      assert_equal("disagrees", Iso::Oracles.metadata_report(bad, model:, tool:).state)
+      assert_equal("disagrees", Iso::Oracles.metadata_report(report, model:, tool:, settings: {application: "WRONG"}).state)
+    end
+    bad_date = xorriso.sub("1970010100000000", "1970010200000000")
+    assert_equal("disagrees", Iso::Oracles.metadata_report(bad_date, model:, tool: :xorriso).state)
+    assert_equal("disagrees", Iso::Oracles.metadata_report(xorriso, model:, tool: :xorriso, settings: {created: 1}).state)
+  end
+
+  def test_descriptor_oracles_explicitly_report_absent_tools
+    shell = Shell.new(tools: {}, execute: ->(_arguments) { flunk("an absent oracle must not run") })
+    model = Model.new(image_length: 96 * 2048, volume: Volume.new(fields: Fields.new(space_le: 96)))
+    observed = Iso::Oracles.observe(shell, image: "image.iso", chdir: "/fixture", model:)
+    assert_equal(%w[isoinfo xorriso], observed.keys)
+    assert(observed.values.all? { _1.state == "unavailable" })
+  end
+
+  def test_descriptor_creation_agrees_with_xorriso
+    check_descriptor_creation_oracle(name: "xorriso")
+  end
+
+  def test_descriptor_creation_agrees_with_isoinfo
+    check_descriptor_creation_oracle(name: "isoinfo")
+  end
+
   private
+
+  def check_descriptor_creation_oracle(name:)
+    fsimg = ENV.fetch("FSIMG_BIN", "")
+    skip("FSIMG_BIN names no fsimg binary") unless File.executable?(fsimg)
+    tool = FsimgSpec::Tools.find(ENV.to_h)[name.to_sym]
+    skip("configured #{name} is absent") unless tool
+
+    Dir.mktmpdir("iso-descriptor-oracle-") do |directory|
+      profile = FsimgSpec.fetch_profile("quick")
+      setup = FsimgSpec::CasePhase.prepare(results: directory, profile:, build_directory: directory, environment: ENV.to_h)
+      skip(setup.shell.unavailable_reason) if setup.shell.unavailable_reason
+      registry = Iso::Rules.registry
+      settings = %w[descriptor_text descriptor_dates].map do |suffix|
+        registry.fetch("iso9660.create.#{suffix}").domain.call.find { _1.intended.nil? }.source.settings
+      end.reduce(&:merge)
+      # A 64 KiB generated file keeps the image beyond isoinfo's 48-block
+      # descriptor window, without creating a payload file on the host.
+      source = FsimgSpec::Source.new(tree: [FsimgSpec::TreeEntry.file("FILE.TXT", size: 65536, content: "zero")], settings:)
+      witness = Iso::Witnesses::Creation.new(id: "iso9660.create.metadata.#{name}", source:, intended: nil,
+        rules: %w[iso9660.create.descriptor_text iso9660.create.descriptor_dates])
+      cases = Iso::Cases.new(registry:, cache: setup.cache, ceilings: profile.ceilings,
+        name_trials: setup.name_trials, shell: setup.shell)
+      classified = cases.create(witness)
+      result = FsimgSpec::CasePhase.result_of(classified, setup:, cases_directory: File.join(directory, "cases"))
+      observation = result.observations.fetch(name)
+      assert_equal("agrees", observation.state, observation.detail)
+      assert_equal("passed", result.verdict, result.detail)
+    end
+  end
 
   def observe(blocks:, status: 0, stdout: "", stderr: "")
     execution = Execution.new(launch_error: nil, ended_by: nil, leftover: false, signal: nil,

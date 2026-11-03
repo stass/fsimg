@@ -6,16 +6,6 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
 
 ## Scheduled
 
-* [Medium] **Descriptor text and dates** (`include/fsimg.h`,
-  `lib/core/settings.c`, `lib/formats/iso9660/`, `cmd/fsimg/`,
-  `test/spec/lib/fsimg_spec/iso9660/`): the format design's
-  [descriptor text and dates](../specs/design-iso9660.md#descriptor-text-and-dates)
-  and the driver design's [volume information](../specs/design-iso9660-driver.md#volume-information)
-  and [writer settings](../specs/design-iso9660-driver.md#writer-settings)
-  specify the `FSIMG_SETTING_ISO_DESCRIPTOR` write fields, the information
-  record's `texts` table, the CLI keys and the worker job fields, the
-  signed-seconds syntax class, and the harness rules and `-pvd_info`
-  comparison; none of them exists in the tree.
 * [High] **Oracles and corpus** (`test/iso9660-corpus.sh`, `docs/build.md`):
   broaden makefs producer/consumer measurements and pycdlib integration;
   compare the 65,535-directory fixture with external producers and consumers;

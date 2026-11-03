@@ -60,6 +60,7 @@ typedef enum fsimg_setting_kind {
 	FSIMG_KIND_NONE,		/* No member */
 	FSIMG_KIND_U32,			/* uint32_t */
 	FSIMG_KIND_U64,			/* uint64_t */
+	FSIMG_KIND_I64,			/* int64_t */
 	FSIMG_KIND_BOOL,		/* bool */
 	FSIMG_KIND_BYTE_ORDER,		/* fsimg_byte_order_t */
 	FSIMG_KIND_DMG_COMPRESSION,	/* fsimg_dmg_compression_t */
@@ -79,6 +80,7 @@ typedef enum fsimg_setting_kind {
  */
 typedef union fsimg_setting_value {
 	uint64_t	 u64;
+	int64_t		 i64;
 	uint32_t	 u32;
 	bool		 flag;
 	fsimg_byte_order_t byte_order;
@@ -95,6 +97,7 @@ typedef union fsimg_setting_value {
 typedef enum fsimg_setting_syntax {
 	FSIMG_SYNTAX_BYTES,	/* An unsigned quantity with an optional binary unit */
 	FSIMG_SYNTAX_COUNT,	/* An unsigned decimal count */
+	FSIMG_SYNTAX_SECONDS,	/* Signed decimal seconds: the -e epoch grammar */
 	FSIMG_SYNTAX_HEX32,	/* 0x or 0X and one to eight hexadecimal digits */
 	FSIMG_SYNTAX_BOOL,	/* Exactly yes or no */
 	FSIMG_SYNTAX_CHOICE,	/* One of the row's choice spellings */
@@ -115,6 +118,13 @@ typedef enum fsimg_setting_syntax {
  * record's field: a path of at most 1024 bytes and its terminator.
  */
 #define FSIMG_BOOT_PATH_TEXT_BYTES	1025u
+
+/* The command's capacity for an ISO 9660 descriptor text, the worker
+ * record's field: an a-character text of at most 64 characters or a file
+ * identifier of at most 18, and the terminator.
+ */
+#define FSIMG_ISO_TEXT_BYTES		65u
+#define FSIMG_ISO_FILE_TEXT_BYTES	19u
 
 /* A row without a presence flag. */
 #define FSIMG_NO_PRESENCE	SIZE_MAX
@@ -144,9 +154,12 @@ typedef struct fsimg_setting_choice {
  * row's spellings, or the only numbers a numeric row accepts. max bounds a
  * number below its kind's range, and nonzero refuses zero (or the nil
  * UUID) on the command line, where a zero would read as the default the
- * key cannot request. text_bytes is the command's capacity for a text,
- * its terminator included, when it is narrower than the member's or the
- * member is a pointer; zero uses size.
+ * key cannot request. text_bytes is the capacity for a text, its
+ * terminator included, when it is narrower than the member's or the member
+ * is a pointer: the command's bound on a value, and the writer's on a
+ * pointer text it copies; zero uses size. An image_path text names an
+ * entry of the image, so the writer bounds it by the context's path limit
+ * instead and text_bytes bounds only the command.
  *
  * scope holds FSIMG_SCOPE_* bits. support is the FSIMG_SETTING_* bit a
  * format's capability record must carry for the row to hold anything but
@@ -170,6 +183,7 @@ typedef struct fsimg_setting {
 	unsigned	 scope;
 	uint32_t	 support;
 	bool		 nonzero;
+	bool		 image_path;
 } fsimg_setting_t;
 
 /* A contiguous run of rows with one owner. */
@@ -177,6 +191,17 @@ typedef struct fsimg_setting_slice {
 	const fsimg_setting_t *rows;
 	size_t		 count;
 } fsimg_setting_slice_t;
+
+/*
+ * The write record's members a copy or a transport must treat member by
+ * member, found by walking fsimg_filesystem_settings rather than by naming
+ * them: a text is a borrowed const char * the writer copies so it need not
+ * outlive the caller, and the command's job record carries; a date is an
+ * int64_t behind a presence flag. Every text row has a nonzero text_bytes,
+ * the longest text the command accepts with its terminator.
+ */
+bool fsimg_setting_is_borrowed_text(const fsimg_setting_t *);
+bool fsimg_setting_is_date(const fsimg_setting_t *);
 
 /* The records a check or load reads; a NULL record holds every default. */
 typedef struct fsimg_setting_records {

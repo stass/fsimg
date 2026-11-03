@@ -178,54 +178,128 @@ iso_joliet_name(const unsigned char *identifier, size_t length, char *out,
 	return (display_finish(out, decoded, shown, error));
 }
 
+/* Whether the UTF-8 text holds no control character: none below U+0020,
+ * U+007F, and none of U+0080 to U+009F, whose encoding is 0xc2 and a
+ * continuation byte below 0xa0. The text is already valid UTF-8.
+ */
+static bool
+utf8_printable(const char *text, size_t length)
+{
+	const unsigned char *bytes = (const unsigned char *)text;
+
+	for (size_t i = 0; i < length; i++) {
+		if (bytes[i] < 0x20 || bytes[i] == 0x7f ||
+		    (bytes[i] == 0xc2 && i + 1 < length &&
+		    bytes[i + 1] >= 0x80 && bytes[i + 1] < 0xa0))
+			return (false);
+	}
+	return (true);
+}
+
+/* The one decoder of a descriptor's text: a label or a text field of width
+ * bytes, its trailing spaces and NULs removed, into out of out_size bytes,
+ * the longest decoded text and a NUL. A primary field is its bytes, each
+ * printable ASCII; a Joliet field its UTF-16BE units, a final odd byte
+ * ignored, decoded to UTF-8 without a control character, C1 included, or an
+ * unpaired surrogate. False, with out zeroed, when the field is empty or not
+ * printable: such a field is not reported
+ * (specs/design-iso9660.md#descriptor-text-and-dates).
+ */
+static bool
+text_decode(const unsigned char *field, size_t width, bool joliet, char *out,
+    size_t out_size)
+{
+	size_t length, units;
+
+	if (joliet) {
+		units = width / 2;
+		while (units > 0 &&
+		    (fsimg_load_be16(field + 2 * (units - 1)) == ' ' ||
+		    fsimg_load_be16(field + 2 * (units - 1)) == 0x0000))
+			units--;
+		if (units == 0 ||
+		    !utf16be_decode(field, units, out, out_size - 1, &length))
+			goto refuse;
+		out[length] = '\0';
+		if (!utf8_printable(out, length) ||
+		    fsimg_utf8_to_utf16(out, length, NULL, 0, &units, NULL) !=
+		    FSIMG_OK)
+			goto refuse;
+		return (true);
+	}
+	length = width;
+	while (length > 0 && (field[length - 1] == ' ' ||
+	    field[length - 1] == '\0'))
+		length--;
+	if (length == 0 || length >= out_size)
+		goto refuse;
+	for (size_t i = 0; i < length; i++) {
+		if (field[i] < 0x20 || field[i] > 0x7e)
+			goto refuse;
+	}
+	bcopy(field, out, length);
+	out[length] = '\0';
+	return (true);
+refuse:
+	bzero(out, out_size);
+	return (false);
+}
+
 _Static_assert(ISO_LABEL_BYTES / 2 * 3 <= ISO_LABEL_TEXT_MAX &&
     ISO_LABEL_BYTES <= ISO_LABEL_TEXT_MAX,
     "a decoded label fits its buffer");
 
 /* The label of a primary or Joliet descriptor: its 32-byte volume
- * identifier without trailing spaces or NULs, into out of
- * ISO_LABEL_TEXT_MAX + 1 bytes. A primary label is its bytes, a Joliet
- * label its 16 UTF-16BE code units as UTF-8. False, with out zeroed, when
- * the rest is not printable UTF-8, which leaves the volume without a
- * reported label.
+ * identifier, decoded by text_decode into out of ISO_LABEL_TEXT_MAX + 1
+ * bytes. False, with out zeroed, when it is empty or not printable, which
+ * leaves the volume without a reported label.
  */
 bool
 iso_label_decode(const iso_descriptor_t *descriptor, char *out)
 {
-	const unsigned char *field = descriptor->label;
-	size_t length, units;
+	return (text_decode(descriptor->label, ISO_LABEL_BYTES,
+	    descriptor->joliet_level != 0, out, ISO_LABEL_TEXT_MAX + 1));
+}
 
-	if (descriptor->joliet_level != 0) {
-		units = ISO_LABEL_BYTES / 2;
-		while (units > 0 &&
-		    (fsimg_load_be16(field + 2 * (units - 1)) == ' ' ||
-		    fsimg_load_be16(field + 2 * (units - 1)) == 0x0000))
-			units--;
-		if (!utf16be_decode(field, units, out, ISO_LABEL_TEXT_MAX,
-		    &length)) {
-			bzero(out, ISO_LABEL_TEXT_MAX + 1);
-			return (false);
+_Static_assert(ISO_DESCRIPTOR_FIELDS <= FSIMG_VOLUME_TEXTS_MAX,
+    "the descriptor fields fit the volume information's text table");
+_Static_assert(128 / 2 * 3 < sizeof(((fsimg_volume_text_t *)0)->value),
+    "a 128-byte UCS-2 field decodes into a text value");
+
+/* The descriptor's text and date rows, in table order, as the volume
+ * information's named texts: each row that is legible, so the count is the
+ * number of fields the descriptor carries legibly. A text row is decoded
+ * from the raw bytes open kept and a date row rendered from its checked
+ * instant; an empty, unprintable or absent field, or a date outside years
+ * 1 through 9999, is skipped.
+ */
+void
+iso_texts_report(const iso_descriptor_t *descriptor, fsimg_volume_info_t *info)
+{
+	bool joliet = descriptor->joliet_level != 0;
+
+	bzero(info->texts, sizeof(info->texts));
+	info->text_count = 0;
+	for (unsigned i = 0; i < ISO_DESCRIPTOR_FIELDS; i++) {
+		const iso_descriptor_field_t *row = &iso_descriptor_fields[i];
+		fsimg_volume_text_t *text = &info->texts[info->text_count];
+		bool reported;
+
+		if (row->class == ISO_CLASS_DATE)
+			reported = descriptor->date_present[row->slot] &&
+			    iso_date17_format(descriptor->date_seconds[row->slot],
+			    text->value);
+		else
+			reported = text_decode(descriptor->fields + row->offset,
+			    row->width, joliet, text->value, sizeof(text->value));
+		if (!reported) {
+			bzero(text, sizeof(*text));
+			continue;
 		}
-	} else {
-		length = ISO_LABEL_BYTES;
-		while (length > 0 && (field[length - 1] == ' ' ||
-		    field[length - 1] == '\0'))
-			length--;
-		bcopy(field, out, length);
+		/* Every key is shorter than the name, so it stays terminated. */
+		bcopy(row->key, text->name, strlen(row->key));
+		info->text_count++;
 	}
-	out[length] = '\0';
-	for (size_t i = 0; i < length; i++) {
-		if ((unsigned char)out[i] < 0x20 || out[i] == 0x7f) {
-			bzero(out, ISO_LABEL_TEXT_MAX + 1);
-			return (false);
-		}
-	}
-	if (fsimg_utf8_to_utf16(out, length, NULL, 0, &units, NULL) !=
-	    FSIMG_OK) {
-		bzero(out, ISO_LABEL_TEXT_MAX + 1);
-		return (false);
-	}
-	return (true);
 }
 
 /* The namespace keys of a stored component: its exact bytes, and for a

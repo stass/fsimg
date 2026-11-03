@@ -217,6 +217,20 @@ module FsimgSpec
 
       def creation_for_rule(id)
         standard = [TreeEntry.file("FILE.TXT", size: 9, content: "zero")]
+        if %w[iso9660.create.descriptor_text iso9660.create.descriptor_dates].include?(id)
+          values = if id.end_with?("descriptor_text")
+            [{volset: "SET", publisher: "_PUB.TXT", preparer: "PREP", application: "APP",
+              copyright: "COPY.TXT;1", abstract: "ABSTRACT.TXT;1", biblio: "BIB.TXT;1"},
+             {publisher: "lowercase"}]
+          else
+            [{created: -62_135_596_800, modified: 253_402_300_799, expires: 0, effective: 1},
+             {effective: 253_402_300_800}]
+          end
+          return values.zip([nil, id]).map do |settings, intended|
+            Creation.new(id: "#{id}.#{intended ? 'invalid' : 'valid'}",
+              source: Source.new(tree: standard, settings:), intended:, rules: [id])
+          end
+        end
         invalid_tree, settings = case id.delete_prefix("iso9660.create.")
                                 in "geometry" then [standard, {sector: 1024}]
                                 in "name_bytes" then [[TreeEntry.file("n" * 256, size: 1, content: "zero")], {}]

@@ -202,8 +202,11 @@ module FsimgSpec
     COUNT_SETTINGS = %i[level bootload].freeze
     COUNT_SYNTAX = {level: 1..3, bootload: 1..65535}.freeze
     PATH_SETTINGS = %i[boot efiboot].freeze
-    SETTINGS = (BYTE_SETTINGS + COUNT_SETTINGS + PATH_SETTINGS).freeze
+    TEXT_SETTINGS = %i[volset publisher preparer application copyright abstract biblio].freeze
+    DATE_SETTINGS = %i[created modified expires effective].freeze
+    SETTINGS = (BYTE_SETTINGS + COUNT_SETTINGS + PATH_SETTINGS + TEXT_SETTINGS + DATE_SETTINGS).freeze
     MAX_SETTING_PATH_BYTES = 1024
+    MAX_DESCRIPTOR_TEXT_BYTES = 64 # the command's capacity, an a-character field
 
     def initialize(tree:, settings:, root: "manifest")
       raise RecipeError, "unknown source root #{FsimgSpec.shown(root)}" unless ROOTS.include?(root)
@@ -212,7 +215,7 @@ module FsimgSpec
       unknown = settings.keys - SETTINGS
       raise RecipeError, "unknown setting #{FsimgSpec.shown(unknown.first.to_s)}" if unknown.any?
 
-      counts = RecipeValues.named_integers(settings.except(*PATH_SETTINGS), what: "setting")
+      counts = RecipeValues.named_integers(settings.except(*PATH_SETTINGS, *TEXT_SETTINGS, *DATE_SETTINGS), what: "setting")
       counts.each do |name, value|
         next unless COUNT_SYNTAX.key?(name)
 
@@ -225,11 +228,24 @@ module FsimgSpec
         end
         [name, value.dup.freeze]
       end
+      texts = settings.slice(*TEXT_SETTINGS).to_h do |name, value|
+        unless value.is_a?(String) && value.encoding == Encoding::UTF_8 && value.valid_encoding? &&
+            value.bytesize <= MAX_DESCRIPTOR_TEXT_BYTES && !value.include?("\0")
+          raise RecipeError, "setting #{name} is not bounded UTF-8 descriptor text"
+        end
+        [name, value.dup.freeze]
+      end
+      dates = settings.slice(*DATE_SETTINGS)
+      dates.each do |name, value|
+        unless value.is_a?(Integer) && (-(1 << 63)...(1 << 63)).cover?(value)
+          raise RecipeError, "setting #{name} is not signed int64 seconds"
+        end
+      end
       tree = TreeEntry.tree(tree)
       raise RecipeError, "special source kinds require a manifest root" if root == "directory" &&
         tree.any? { %w[symlink fifo].include?(_1.type) }
 
-      super(tree:, settings: counts.merge(paths).sort.to_h.freeze, root:)
+      super(tree:, settings: counts.merge(paths, texts, dates).sort.to_h.freeze, root:)
     end
 
     def manifest? = root == "manifest"

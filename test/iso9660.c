@@ -142,6 +142,218 @@ probe_expect(image_t *image, fsimg_status_t expected, const char *name)
 	}
 }
 
+/* Independent wire positions, deliberately not the driver's field table. */
+static const struct {
+	const char *name;
+	unsigned offset;
+	unsigned width;
+} info_text_fields[] = {
+	{ "volume_set", 190, 128 }, { "publisher", 318, 128 },
+	{ "preparer", 446, 128 }, { "application", 574, 128 },
+	{ "copyright_file", 702, 37 }, { "abstract_file", 739, 37 },
+	{ "biblio_file", 776, 37 }
+};
+
+static image_t
+info_descriptor_image(void)
+{
+	image_t image = image_new();
+
+	joliet_add(&image);
+	/* The metadata tests need only the root in the Joliet hierarchy. */
+	put32(image.bytes + 17 * BLOCK + VD_PATH_SIZE, 10);
+	bzero(image.bytes + 90 * BLOCK + 10, BLOCK - 10);
+	bzero(image.bytes + 91 * BLOCK + 10, BLOCK - 10);
+	return (image);
+}
+
+static void
+check_info_text(image_t *image, fsimg_iso_view_t view, unsigned field,
+    const char *expected)
+{
+	fixture_t fixture;
+	fsimg_volume_info_t info;
+	fsimg_verify_report_t report;
+
+	fixture_new(&fixture, image, NULL);
+	CHECK(open_image(&fixture, view) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(fixture.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.text_count == (expected == NULL ? 0u : 1u));
+	if (expected != NULL) {
+		CHECK(strcmp(info.texts[0].name, info_text_fields[field].name) == 0);
+		CHECK(strcmp(info.texts[0].value, expected) == 0);
+	}
+	CHECK(fsimg_verify(fixture.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_free(&fixture);
+}
+
+static void
+test_descriptor_text_printability_and_view_selection(void)
+{
+	static const struct {
+		const char *bytes;
+		size_t length;
+		const char *reported;
+	} cases[] = {
+		{ "lowercase / @ \\\"", 17, "lowercase / @ \\\"" },
+		{ "_ROOT.TXT;1", 11, "_ROOT.TXT;1" },
+		{ "A\0 \0", 4, "A" },
+		{ "A\0B", 3, NULL },
+		{ "\033[31m", 5, NULL },
+		{ "A\177", 2, NULL },
+		{ "A\200", 2, NULL },
+		{ " \0", 2, NULL }
+	};
+	image_t image;
+	unsigned char *field;
+
+	for (unsigned row = 0; row < 7; row++) {
+		char expected[129];
+
+		image = info_descriptor_image();
+		memset(expected, 'A', info_text_fields[row].width);
+		expected[info_text_fields[row].width] = '\0';
+		memset(image.bytes + 16 * BLOCK + info_text_fields[row].offset,
+		    'A', info_text_fields[row].width);
+		check_info_text(&image, FSIMG_ISO_VIEW_PRIMARY, row, expected);
+		free(image.bytes);
+	}
+	for (unsigned row = 0; row < 7; row++) {
+		for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+			image = info_descriptor_image();
+			field = image.bytes + 16 * BLOCK + info_text_fields[row].offset;
+			memset(field, ' ', info_text_fields[row].width);
+			bcopy(cases[c].bytes, field, cases[c].length);
+			check_info_text(&image, FSIMG_ISO_VIEW_PRIMARY, row,
+			    cases[c].reported);
+			/* The SVD is empty: using the primary text would be wrong. */
+			check_info_text(&image, FSIMG_ISO_VIEW_JOLIET, row, NULL);
+			free(image.bytes);
+		}
+	}
+}
+
+static void
+test_descriptor_joliet_unicode_and_hostile_units(void)
+{
+	static const struct {
+		uint16_t units[4];
+		const char *reported;
+	} cases[] = {
+		{ { 'a', 0xe9, 0x4e2d, 0 }, "a\xc3\xa9\xe4\xb8\xad" },
+		{ { 0xd83d, 0xde00, 0, 0 }, "\xf0\x9f\x98\x80" },
+		{ { 'A', 0, ' ', 0 }, "A" },
+		{ { 'A', 0, 'B', 0 }, NULL },
+		{ { 'A', 1, 0, 0 }, NULL },
+		{ { 'A', 0x85, 0, 0 }, NULL },
+		{ { 0xd83d, 0, 0, 0 }, NULL },
+		{ { 0xde00, 0, 0, 0 }, NULL }
+	};
+	image_t image;
+	unsigned char *field;
+
+	for (unsigned row = 0; row < 7; row++) {
+		char expected[193];
+		unsigned units = info_text_fields[row].width / 2;
+
+		image = info_descriptor_image();
+		field = image.bytes + 17 * BLOCK + info_text_fields[row].offset;
+		for (unsigned i = 0; i < units; i++) {
+			field[2 * i] = 0x4e;
+			field[2 * i + 1] = 0x2d;
+			bcopy("\xe4\xb8\xad", expected + 3 * i, 3);
+		}
+		expected[3 * units] = '\0';
+		check_info_text(&image, FSIMG_ISO_VIEW_JOLIET, row, expected);
+		free(image.bytes);
+	}
+	for (unsigned row = 0; row < 7; row++) {
+		for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+			image = info_descriptor_image();
+			field = image.bytes + 17 * BLOCK + info_text_fields[row].offset;
+			for (unsigned i = 0; i < info_text_fields[row].width / 2; i++) {
+				uint16_t unit = i < 4 ? cases[c].units[i] : ' ';
+
+				field[2 * i] = unit >> 8;
+				field[2 * i + 1] = unit;
+			}
+			check_info_text(&image, FSIMG_ISO_VIEW_JOLIET, row,
+			    cases[c].reported);
+			check_info_text(&image, FSIMG_ISO_VIEW_PRIMARY, row, NULL);
+			free(image.bytes);
+		}
+	}
+}
+
+static void
+test_descriptor_dates_offset_fraction_and_utc_range(void)
+{
+	static const char *const names[] = { "created", "modified",
+	    "expires", "effective" };
+	static const struct {
+		const char *raw;
+		const char *reported;
+	} cases[] = {
+		{ "1970010101000099\004", "1970-01-01 00:00:00" },
+		{ "1969123123000042\374", "1970-01-01 00:00:00" },
+		{ "0001010100000000\0", "0001-01-01 00:00:00" },
+		{ "9999123123595900\0", "9999-12-31 23:59:59" },
+		{ "0001010100000000\001", NULL },
+		{ "9999123123595900\377", NULL },
+		{ "0000000000000000\0", NULL }
+	};
+	fsimg_volume_info_t info;
+	fsimg_verify_report_t report;
+	fixture_t fixture;
+	image_t image;
+
+	for (unsigned date = 0; date < 4; date++) {
+		for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+			image = info_descriptor_image();
+			for (unsigned descriptor = 16; descriptor <= 17; descriptor++)
+				bcopy(cases[c].raw, image.bytes + descriptor * BLOCK +
+				    813 + 17 * date, 17);
+			for (unsigned view = 0; view < 2; view++) {
+				fixture_new(&fixture, &image, NULL);
+				CHECK(open_image(&fixture, view == 0 ?
+				    FSIMG_ISO_VIEW_PRIMARY : FSIMG_ISO_VIEW_JOLIET) == FSIMG_OK);
+				CHECK(fsimg_reader_get_info(fixture.reader, &info, NULL) == FSIMG_OK);
+				CHECK(info.text_count == (cases[c].reported == NULL ? 0u : 1u));
+				if (cases[c].reported != NULL) {
+					CHECK(strcmp(info.texts[0].name, names[date]) == 0);
+					CHECK(strcmp(info.texts[0].value, cases[c].reported) == 0);
+				}
+				CHECK(fsimg_verify(fixture.reader, 0, &report, NULL) == FSIMG_OK);
+				CHECK(report.complete);
+				fixture_free(&fixture);
+			}
+			free(image.bytes);
+		}
+	}
+}
+
+static void
+test_descriptor_malformed_dates_fail_at_open_in_either_descriptor(void)
+{
+	static const char *const invalid[] = { "19700101000000X0\0",
+	    "1970130100000000\0", "0000010100000000\0" };
+	image_t image;
+
+	for (unsigned descriptor = 16; descriptor <= 17; descriptor++) {
+		for (unsigned date = 0; date < 4; date++) {
+			for (unsigned mutation = 0; mutation < 3; mutation++) {
+				image = info_descriptor_image();
+				bcopy(invalid[mutation], image.bytes + descriptor * BLOCK +
+				    813 + 17 * date, 17);
+				expect_open(&image, FSIMG_ECORRUPT,
+				    "malformed descriptor date fails before info");
+				free(image.bytes);
+			}
+		}
+	}
+}
+
 static void
 test_probe(void)
 {
@@ -5320,6 +5532,10 @@ main(int argc, char **argv)
 	test_section_count_boundary();
 	test_other_format_probes();
 	test_supplementary_info();
+	test_descriptor_text_printability_and_view_selection();
+	test_descriptor_joliet_unicode_and_hostile_units();
+	test_descriptor_dates_offset_fraction_and_utc_range();
+	test_descriptor_malformed_dates_fail_at_open_in_either_descriptor();
 	test_probe();
 	test_descriptors();
 	test_geometry();

@@ -79,7 +79,22 @@ static const member_t write_members[] = {
 	WRITE_MEMBER(iso_level, uint32_t),
 	WRITE_MEMBER(boot_load_sectors, uint32_t),
 	WRITE_MEMBER(boot_bios, const char *),
-	WRITE_MEMBER(boot_efi, const char *)
+	WRITE_MEMBER(boot_efi, const char *),
+	WRITE_MEMBER(iso_volume_set, const char *),
+	WRITE_MEMBER(iso_publisher, const char *),
+	WRITE_MEMBER(iso_preparer, const char *),
+	WRITE_MEMBER(iso_application, const char *),
+	WRITE_MEMBER(iso_copyright, const char *),
+	WRITE_MEMBER(iso_abstract, const char *),
+	WRITE_MEMBER(iso_biblio, const char *),
+	WRITE_MEMBER(iso_created, int64_t),
+	WRITE_MEMBER(iso_modified, int64_t),
+	WRITE_MEMBER(iso_expires, int64_t),
+	WRITE_MEMBER(iso_effective, int64_t),
+	WRITE_MEMBER(iso_created_set, bool),
+	WRITE_MEMBER(iso_modified_set, bool),
+	WRITE_MEMBER(iso_expires_set, bool),
+	WRITE_MEMBER(iso_effective_set, bool)
 };
 
 static const member_t read_members[] = {
@@ -250,7 +265,8 @@ test_member_bindings(void)
 			}
 			mark_member(coverage, capacity, row->offset, row->size);
 			if (row->presence != FSIMG_NO_PRESENCE) {
-				CHECK(row->record == FSIMG_RECORD_LAYERS);
+				CHECK(row->record == FSIMG_RECORD_LAYERS ||
+				    row->record == FSIMG_RECORD_WRITE);
 				mark_member(coverage, capacity, row->presence,
 				    sizeof(bool));
 			}
@@ -388,6 +404,10 @@ test_rows(void)
 				    row->kind == FSIMG_KIND_U64);
 				CHECK(row->max != 0 && (row->kind ==
 				    FSIMG_KIND_U64 || row->max <= UINT32_MAX));
+				break;
+			case FSIMG_SYNTAX_SECONDS:
+				CHECK(row->kind == FSIMG_KIND_I64 &&
+				    row->presence != FSIMG_NO_PRESENCE);
 				break;
 			case FSIMG_SYNTAX_HEX32:
 				CHECK(row->kind == FSIMG_KIND_U32);

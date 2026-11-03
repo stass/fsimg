@@ -628,6 +628,15 @@ typedef struct fsimg_volume_detail {
 	uint64_t	 value;
 } fsimg_volume_detail_t;
 
+/* One named header text a driver reports: an ASCII name of at most 23
+ * bytes and a value of validated UTF-8 of at most 192 bytes, each with its
+ * terminator. A value never holds a control character.
+ */
+typedef struct fsimg_volume_text {
+	char		 name[24];
+	char		 value[193];
+} fsimg_volume_text_t;
+
 #define FSIMG_IMAGE_DETAILS_MAX 24u
 
 /* stack is the canonical text of the layers found: the container and the
@@ -811,6 +820,32 @@ typedef struct fsimg_write_options {
 	uint32_t	 boot_load_sectors;
 	const char	*boot_bios;
 	const char	*boot_efi;
+	/* FSIMG_SETTING_ISO_DESCRIPTOR: the primary descriptor's text and
+	 * dates, mirrored in the Joliet descriptor. Each text is copied; NULL
+	 * selects the default (FSIMG for the application, spaces elsewhere)
+	 * and "" stores a field of spaces. The first four hold at most 64
+	 * a-characters, the last three at most 18 file identifier
+	 * characters. Each date is Unix seconds within year 1 through 9999,
+	 * meaningful only behind its _set flag, since zero is an instant;
+	 * an unset created or modified date is the volume's planning time,
+	 * the epoch in reproducible mode, and an unset expires or effective
+	 * date is absent.
+	 */
+	const char	*iso_volume_set;
+	const char	*iso_publisher;
+	const char	*iso_preparer;
+	const char	*iso_application;
+	const char	*iso_copyright;
+	const char	*iso_abstract;
+	const char	*iso_biblio;
+	int64_t		 iso_created;
+	int64_t		 iso_modified;
+	int64_t		 iso_expires;
+	int64_t		 iso_effective;
+	bool		 iso_created_set;
+	bool		 iso_modified_set;
+	bool		 iso_expires_set;
+	bool		 iso_effective_set;
 	/* Borrowed for construction and copied; NULL selects every default. */
 	const fsimg_layer_options_t *layers;
 	/* The file settings: the record is copied at construction and its I/O
@@ -1014,6 +1049,7 @@ void fsimg_writer_free(fsimg_writer_t *);
 #define FSIMG_VOLUME_UUID 0x08u
 #define FSIMG_VOLUME_MOUNTPOINT 0x10u
 #define FSIMG_VOLUME_DETAILS_MAX 16u
+#define FSIMG_VOLUME_TEXTS_MAX 16u
 #define FSIMG_VERIFY_PAYLOAD 0x01u
 
 /* The ISO 9660 view a reader presents: AUTO selects Rock Ridge, then
@@ -1069,6 +1105,11 @@ typedef struct fsimg_volume_info {
 	 */
 	uint32_t	 detail_count;
 	fsimg_volume_detail_t details[FSIMG_VOLUME_DETAILS_MAX];
+	/* Format-specific named header texts, in the order the driver
+	 * documents; text_count of them are filled and the rest are zero.
+	 */
+	uint32_t	 text_count;
+	fsimg_volume_text_t texts[FSIMG_VOLUME_TEXTS_MAX];
 } fsimg_volume_info_t;
 
 /* Format-specific fields of fsimg_write_options_t and fsimg_read_options_t,
@@ -1080,12 +1121,13 @@ typedef struct fsimg_volume_info {
 #define FSIMG_SETTING_RESERVE 0x08u
 #define FSIMG_SETTING_MOUNTPOINT 0x10u
 #define FSIMG_SETTING_ROOT_ENTRIES 0x20u
-/* iso_level; boot_bios, boot_efi and boot_load_sectors; and the read
- * option iso_view.
+/* iso_level; boot_bios, boot_efi and boot_load_sectors; the read option
+ * iso_view; and the iso_ descriptor texts and dates.
  */
 #define FSIMG_SETTING_ISO_LEVEL 0x40u
 #define FSIMG_SETTING_ELTORITO 0x80u
 #define FSIMG_SETTING_ISO_VIEW 0x100u
+#define FSIMG_SETTING_ISO_DESCRIPTOR 0x200u
 
 typedef struct fsimg_format_info {
 	char		 name[16];

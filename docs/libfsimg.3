@@ -146,6 +146,13 @@ FSIMG_VOLUME_MOUNTPOINT set in valid.
 Format-specific values follow in details, detail_count of at most
 FSIMG_VOLUME_DETAILS_MAX entries in the driver's order, each a name of
 printable ASCII of up to 23 bytes and a 64-bit value.
+Header text follows in texts, text_count of at most FSIMG_VOLUME_TEXTS_MAX
+entries in the driver's order, each a name of printable ASCII of up to 23
+bytes and a value of valid UTF-8 of up to 192 bytes without a control
+character.
+An ISO 9660 image reports the selected view's descriptor text fields and
+dates there, omitting a field that is empty or not printable and an absent
+date.
 An ImageFS reports its mount flags, boot and script inode references, chain
 address, record counts by inode flag nibble, and the numbers of implicit
 directories, shadowed records, omitted subtrees, references to omitted

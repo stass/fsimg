@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 4050u
+#define FSIMG_JOB_BYTES 4407u
 /* The job record's mountpoint field: one byte more than the longest
  * mountpoint any format stores, 1024 bytes, and its NUL, so the writer,
  * not the record, refuses a longer one.
@@ -18,6 +18,17 @@
  * its NUL, the command's capacity for the setting.
  */
 #define FSIMG_JOB_BOOT_PATH_BYTES 1025u
+/* The ISO 9660 descriptor settings of the job record: the descriptor rows
+ * of the settings table, found by walking it. Their texts lie back to back
+ * in table order, each in its row's text_bytes, FSIMG_JOB_DESCRIPTOR_TEXT_BYTES
+ * in all (four a-character texts of 65 bytes and three file identifiers of
+ * 19), and their dates take 8 bytes each, FSIMG_JOB_DESCRIPTOR_DATES of
+ * them. Adding a descriptor row means changing these two constants and
+ * FSIMG_JOB_BYTES with them; the job layout check refuses a table that
+ * disagrees, so every job fails to encode and decode, never drops a setting.
+ */
+#define FSIMG_JOB_DESCRIPTOR_TEXT_BYTES 317u
+#define FSIMG_JOB_DESCRIPTOR_DATES 4u
 #define FSIMG_WIRE_ERROR_BYTES 592u
 
 /* Result layouts use byte offsets into explicitly encoded buffers. These
@@ -38,7 +49,7 @@ typedef enum fsimg_wire_error_field {
 	FSIMG_WIRE_ERROR_MESSAGE = 336
 } fsimg_wire_error_field_t;
 
-#define FSIMG_WIRE_INFO_BYTES 1768u
+#define FSIMG_WIRE_INFO_BYTES 5360u
 typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_VALID = 0,
 	FSIMG_WIRE_INFO_CAPABILITIES = 8,
@@ -57,19 +68,29 @@ typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_UUID = 200,
 	FSIMG_WIRE_INFO_MOUNTPOINT = 216, /* 1024 bytes and a NUL, then zeros */
 	FSIMG_WIRE_INFO_DETAIL_COUNT = 1248,
-	FSIMG_WIRE_INFO_DETAILS = 1256	/* 16 of a 24-byte name and a value */
+	FSIMG_WIRE_INFO_DETAILS = 1256,	/* 16 of a 24-byte name and a value */
+	FSIMG_WIRE_INFO_TEXT_COUNT = 1768,
+	FSIMG_WIRE_INFO_TEXTS = 1776	/* 16 of a 24-byte name and a value */
 } fsimg_wire_info_field_t;
 #define FSIMG_WIRE_INFO_LABEL_BYTES 49u
 #define FSIMG_WIRE_INFO_MOUNTPOINT_BYTES 1025u
 #define FSIMG_WIRE_INFO_DETAIL_NAME_BYTES 24u
 #define FSIMG_WIRE_INFO_DETAIL_BYTES 32u
+#define FSIMG_WIRE_INFO_TEXT_VALUE_BYTES 193u
+#define FSIMG_WIRE_INFO_TEXT_BYTES 224u	/* name, value and zero padding */
 _Static_assert(FSIMG_WIRE_INFO_UUID + 16 == FSIMG_WIRE_INFO_MOUNTPOINT,
     "the mountpoint follows the volume UUID");
 _Static_assert(FSIMG_WIRE_INFO_MOUNTPOINT + FSIMG_WIRE_INFO_MOUNTPOINT_BYTES <=
     FSIMG_WIRE_INFO_DETAIL_COUNT, "the detail count follows the mountpoint");
 _Static_assert(FSIMG_WIRE_INFO_DETAILS + FSIMG_VOLUME_DETAILS_MAX *
-    FSIMG_WIRE_INFO_DETAIL_BYTES == FSIMG_WIRE_INFO_BYTES,
-    "the info record ends with the details");
+    FSIMG_WIRE_INFO_DETAIL_BYTES == FSIMG_WIRE_INFO_TEXT_COUNT,
+    "the text count follows the details");
+_Static_assert(FSIMG_WIRE_INFO_TEXTS + FSIMG_VOLUME_TEXTS_MAX *
+    FSIMG_WIRE_INFO_TEXT_BYTES == FSIMG_WIRE_INFO_BYTES,
+    "the info record ends with the texts");
+_Static_assert(FSIMG_WIRE_INFO_DETAIL_NAME_BYTES +
+    FSIMG_WIRE_INFO_TEXT_VALUE_BYTES <= FSIMG_WIRE_INFO_TEXT_BYTES,
+    "a wire text holds its name and value");
 
 /* The image a read job opened: the layers around its volume. STACK is the
  * canonical text of the forced and detected slots with the selected

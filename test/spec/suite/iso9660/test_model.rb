@@ -467,6 +467,27 @@ class Iso9660ModelTest < Minitest::Test
     end
   end
 
+  def test_descriptor_metadata_uses_literal_offsets_and_omits_unprintable_fields
+    raw = "\0".b * 2048
+    fields = [["volume_set", 190, 128], ["publisher", 318, 128], ["preparer", 446, 128],
+      ["application", 574, 128], ["copyright_file", 702, 37], ["abstract_file", 739, 37], ["biblio_file", 776, 37]]
+    expected = fields.each_with_index.to_h do |(name, offset, width), index|
+      value = "text_#{index}"
+      raw[offset, width] = value.b.ljust(width, " ")
+      [name, value]
+    end
+    assert_equal(expected, Iso::DescriptorMetadata.texts(raw))
+    raw[318] = "\e".b
+    raw[446] = "\x80".b
+    raw[574, 4] = "A\0B ".b
+    assert_equal(expected.except("publisher", "preparer", "application"), Iso::DescriptorMetadata.texts(raw))
+    [813, 830, 847, 864].each { raw[_1, 17] = "1970010101000099\x04".b }
+    assert_equal(%w[created modified expires effective].to_h { [_1, "1970-01-01 00:00:00"] },
+      Iso::DescriptorMetadata.dates(raw))
+    raw[847, 17] = "0001010100000000\x01".b
+    refute(Iso::DescriptorMetadata.dates(raw).key?("expires"))
+  end
+
   private
 
   def classification(model) = Iso::Rules.registry.classify(model,

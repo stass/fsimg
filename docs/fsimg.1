@@ -648,6 +648,33 @@ references to omitted entries and references a shadowed record also
 carries.
 An ISO 9660 image's details include its El Torito boot catalog's block,
 0 without one, and its boot entries in total, for x86 and for EFI.
+.Cm i
+also reports the selected view's descriptor text and dates, one
+.Ar name : Li value
+line each, or under
+.Li texts
+in the JSON record: the volume set, publisher, preparer, application,
+copyright, abstract and bibliography fields as
+.Li volume_set ,
+.Li publisher ,
+.Li preparer ,
+.Li application ,
+.Li copyright_file ,
+.Li abstract_file
+and
+.Li biblio_file ,
+and the dates as
+.Li created ,
+.Li modified ,
+.Li expires
+and
+.Li effective
+in UTC as
+.Li YYYY-MM-DD HH:MM:SS .
+A field that is empty, holds a nonprintable byte, or a date that is absent,
+is omitted.
+In the primary view the volume label and these texts are shown only when
+they are printable ASCII.
 The boot catalog and boot images appear in the tree only as files the
 image also names.
 When no single partition holds a filesystem,
@@ -861,6 +888,38 @@ and cannot extend past the boot file's allocated ISO blocks.
 Boot images are copied unchanged; no boot information table is patched,
 and no hybrid MBR or GPT system area is written.
 The catalog's integrity is checked, not whether firmware executes the image.
+.It Fl o Ar volset=text | publisher=text | preparer=text | application=text
+ISO 9660 descriptor text, written to the primary descriptor and mirrored in
+the Joliet descriptor.
+Each is at most 64 characters of uppercase letters, digits, space and
+.Li _ ! \&" % & ' ( ) * + , - . / : ; < = > ? ;
+any other character is refused, never changed, with status 1.
+A longer value is a syntax error, with status 2.
+An empty value stores spaces.
+Default spaces, and
+.Li FSIMG
+for the application.
+.It Fl o Ar copyright=name | abstract=name | biblio=name
+ISO 9660 descriptor file identifier, at most 18 characters of uppercase
+letters, digits,
+.Li _ ,
+.Li \&.
+and
+.Li \&;
+and space, naming a file of the root directory by convention.
+It is not checked against the root directory.
+Default spaces.
+.It Fl o Ar created=seconds | modified=seconds | expires=seconds | effective=seconds
+ISO 9660 volume dates as a signed Unix epoch, as for
+.Fl e ,
+from year 1 through year 9999, stored as given with or without
+.Fl R .
+Reading omits a date whose UTC year, after its offset, leaves 1 through
+9999.
+Default the creation and modification dates the planning time (the epoch
+with
+.Fl R )
+and the other two absent.
 .It Fl o Ar root=entries
 FAT12 and FAT16 root directory capacity in 32-byte entries, rounded up to a
 whole number of sectors' worth (16 per 512-byte sector), at most 65535 after

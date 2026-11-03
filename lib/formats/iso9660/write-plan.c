@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "fsimg-endian.h"
+#include "settings.h"
 #include "unicode.h"
 #include "write-iso9660.h"
 
@@ -47,7 +48,10 @@ static fsimg_status_t make_plan(fsimg_writer_t *, fsimg_error_t *);
 static void free_plan(fsimg_plan_t *);
 static bool label_valid(const char *);
 static size_t longest_component(const unsigned char *, size_t);
+static fsimg_status_t encode_descriptor(const fsimg_write_options_t *, int64_t,
+    unsigned char *, const char **);
 static void encode_labels(iso_plan_t *);
+static fsimg_status_t descriptor_error(const char *, fsimg_error_t *);
 static fsimg_status_t encode_time(iso_plan_t *, const fsimg_entry_t *,
     uint32_t, const fsimg_timestamp_t *, unsigned char *, bool *,
     fsimg_error_t *);
@@ -109,6 +113,115 @@ label_valid(const char *label)
 	return (true);
 }
 
+/* Whether the descriptor field table and the settings table agree: every
+ * field names a descriptor row of the settings table of the matching kind
+ * and capacity (a text row holds the characters its field does, and a
+ * terminator), and every descriptor text or date row is named by exactly
+ * one field. The two tables are linked only by the key's spelling, so this
+ * is what keeps one from drifting from the other.
+ */
+bool
+iso_descriptor_settings_match(void)
+{
+	const fsimg_setting_slice_t *table = &fsimg_filesystem_settings;
+	const fsimg_setting_t *setting;
+	unsigned named;
+
+	for (unsigned i = 0; i < ISO_DESCRIPTOR_FIELDS; i++) {
+		const iso_descriptor_field_t *field = &iso_descriptor_fields[i];
+
+		setting = fsimg_setting_find(table, field->setting,
+		    strlen(field->setting));
+		if (setting == NULL || setting->support != FSIMG_SETTING_ISO_DESCRIPTOR)
+			return (false);
+		if (field->class == ISO_CLASS_DATE) {
+			if (!fsimg_setting_is_date(setting))
+				return (false);
+		} else if (!fsimg_setting_is_borrowed_text(setting) ||
+		    setting->text_bytes != field->width / 2 + 1) {
+			return (false);
+		}
+	}
+	for (size_t i = 0; i < table->count; i++) {
+		setting = &table->rows[i];
+		if (setting->support != FSIMG_SETTING_ISO_DESCRIPTOR)
+			continue;
+		named = 0;
+		for (unsigned k = 0; k < ISO_DESCRIPTOR_FIELDS; k++)
+			named += strcmp(setting->key,
+			    iso_descriptor_fields[k].setting) == 0;
+		if (named != 1)
+			return (false);
+	}
+	return (true);
+}
+
+/* Encode the descriptor's eleven text and date fields from the options
+ * into image, the bytes 190 to 880 of a descriptor laid out by
+ * iso_descriptor_fields. Each row reads its value from the settings row
+ * its setting key names, and goes through its class's one encoder; an
+ * unset text is the row's unset text, a creation or modification date left
+ * out is fallback, and any other date left out is absent. FSIMG_EINVAL,
+ * naming the setting in *bad_key when it is not NULL, for the first value
+ * its class refuses; FSIMG_ESTATE when a field names no settings row,
+ * which iso_descriptor_settings_match rules out.
+ */
+static fsimg_status_t
+encode_descriptor(const fsimg_write_options_t *options, int64_t fallback,
+    unsigned char *image, const char **bad_key)
+{
+	const fsimg_setting_records_t records = { .write = options };
+	const iso_descriptor_field_t *row;
+	const fsimg_setting_t *setting;
+	fsimg_setting_value_t value;
+	unsigned char *field;
+	bool encoded, set;
+
+	for (unsigned i = 0; i < ISO_DESCRIPTOR_FIELDS; i++) {
+		row = &iso_descriptor_fields[i];
+		field = image + row->offset;
+		setting = fsimg_setting_find(&fsimg_filesystem_settings, row->setting,
+		    strlen(row->setting));
+		/* The tables are checked to agree before any field is
+		 * encoded, so a missing row is a defect in the tables, not
+		 * in the caller's options.
+		 */
+		if (setting == NULL)
+			return (FSIMG_ESTATE);
+		fsimg_setting_load(setting, &records, &value);
+		if (row->class != ISO_CLASS_DATE) {
+			if (value.text == NULL)
+				value.text = row->unset_text != NULL ? row->unset_text : "";
+			encoded = iso_text_encode(row->class, value.text, field,
+			    row->width);
+		} else {
+			set = !fsimg_setting_is_default(setting, &records);
+			if (set || row->unset_dated) {
+				encoded = iso_date17_encode(set ? value.i64 : fallback, field);
+			} else {
+				iso_date17_absent(field);
+				encoded = true;
+			}
+		}
+		if (!encoded) {
+			if (bad_key != NULL)
+				*bad_key = row->setting;
+			return (FSIMG_EINVAL);
+		}
+	}
+	return (FSIMG_OK);
+}
+
+/* FSIMG_EINVAL for a descriptor setting a class refuses, naming its key. */
+static fsimg_status_t
+descriptor_error(const char *key, fsimg_error_t *error)
+{
+	fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
+	    "ISO 9660 descriptor text or date outside its field's rules");
+	fsimg_error_path(error, key);
+	return (FSIMG_EINVAL);
+}
+
 /* The common options with the writer profile's rules: 2048-byte sectors
  * and allocation units, an exact size in whole blocks or none, no free
  * space to reserve, level 1 to 3 (zero selects 3), a reproducible epoch
@@ -120,6 +233,9 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
     fsimg_error_t *error)
 {
 	static const char default_label[] = "CDROM";
+	unsigned char image[ISO_DESCRIPTOR_BYTES];
+	const char *bad_key;
+	fsimg_status_t status;
 
 	if (options->boot_load_sectors > UINT16_MAX ||
 	    (options->boot_bios == NULL && options->boot_load_sectors != 0))
@@ -137,6 +253,15 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 	    (options->epoch < ISO_DATE7_MIN || options->epoch > ISO_DATE7_MAX)))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "invalid ISO 9660 geometry, level, free space or reproducible epoch"));
+	if (!iso_descriptor_settings_match())
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "ISO 9660 descriptor fields and settings disagree"));
+	status = encode_descriptor(options, 0, image, &bad_key);
+	if (status == FSIMG_EINVAL)
+		return (descriptor_error(bad_key, error));
+	if (status != FSIMG_OK)
+		return (fsimg_error_set(error, status, 0, FSIMG_OP_WRITER,
+		    "ISO 9660 descriptor settings are not in the table"));
 	if (options->label == NULL)
 		options->label = default_label;
 	else if (!label_valid(options->label))
@@ -1323,7 +1448,12 @@ make_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 		}
 		plan->fallback = (int64_t)now;
 	}
-	iso_date17_encode(plan->fallback, plan->volume_date);
+	if (encode_descriptor(&writer->options, plan->fallback,
+	    plan->descriptor, NULL) != FSIMG_OK) {
+		status = fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "validated descriptor settings no longer encode");
+		goto fail;
+	}
 	encode_labels(plan);
 
 	status = fsimg_array_new(&writer->session, ISO_ROW_BYTES,

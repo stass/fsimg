@@ -270,10 +270,14 @@ ISO 9660 takes `level=1|2|3`, the primary hierarchy's interchange level,
 default 3; `boot=PATH` and `efiboot=PATH`, image paths of at most 1024
 bytes naming files in the tree being created that become El Torito BIOS
 and EFI boot images, never host paths; and `bootload=N`, the BIOS entry's 512-byte load sectors,
-default 4, only with `boot=`. Its primary descriptor's text fields are
-`volset=`, `publisher=`, `preparer=` and `application=`, each at most 128
-a-characters, and `copyright=`, `abstract=` and `biblio=`, each at most 37
+default 4, only with `boot=`. Its descriptor text fields, mirrored in the
+Joliet descriptor, are
+`volset=`, `publisher=`, `preparer=` and `application=`, each at most 64
+a-characters, and `copyright=`, `abstract=` and `biblio=`, each at most 18
 file identifier characters, with an empty value storing a field of spaces;
+a text longer than its capacity is a syntax error (status 2), since the
+setting row bounds it, while a character outside the field's class passes
+to the library, which refuses it (status 1, naming the key);
 its volume dates are `created=`, `modified=`, `expires=` and `effective=`,
 each a signed Unix epoch in the `-e` grammar within year 1 through 9999,
 stored as given with or without `-R`; the

@@ -83,7 +83,7 @@ Use `fsimg -h` for an overview or `fsimg c -h` for help with a command.
 ### Inspect a disk or compressed image
 
 ```sh
-fsimg if disk.img                         # Layers, partitions, volume details
+fsimg if disk.img                         # Layers, partitions, volume details and texts
 fsimg tvf disk.img                        # Long listing
 fsimg tf disk.img --partition=2           # Select a partition explicitly
 fsimg tf disk.img --partition=name=EFI /EFI
@@ -213,7 +213,12 @@ ISO creation writes Rock Ridge and Joliet together. `-o level=1|2|3`
 selects the primary hierarchy's interchange level, default 3. `-o
 boot=/bios.img` and `-o efiboot=/efi.img` select ordinary image members as
 boot images; `-o bootload=N` sets the BIOS load count in 512-byte sectors,
-default 4. Boot files are copied unchanged: boot-information-table patching
+default 4. `-o volset=`, `publisher=`, `preparer=`, `application=` (at most
+64 characters of uppercase letters, digits and the ISO a-character
+punctuation) and `copyright=`, `abstract=`, `biblio=` (at most 18 file
+identifier characters) set the descriptor text, mirrored in Joliet; and
+`-o created=`, `modified=`, `expires=`, `effective=` set the volume dates as
+signed Unix epochs; nothing is changed or truncated silently. Boot files are copied unchanged: boot-information-table patching
 and hybrid system areas are outside the writer profile. Names are at most
 255 UTF-8 bytes and link targets at most 1023 bytes, with components at
 most 255 bytes. Creation times and attributes are reported metadata losses;

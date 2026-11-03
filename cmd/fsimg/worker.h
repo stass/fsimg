@@ -203,6 +203,11 @@ typedef struct fsimg_worker_request {
 	 */
 	char		 boot_bios_storage[FSIMG_JOB_BOOT_PATH_BYTES];
 	char		 boot_efi_storage[FSIMG_JOB_BOOT_PATH_BYTES];
+	/* Decoder-owned backing only; the write.iso_ texts are the
+	 * authoritative values, each pointing into this region at its row's
+	 * place in the record.
+	 */
+	char		 iso_text_storage[FSIMG_JOB_DESCRIPTOR_TEXT_BYTES];
 } fsimg_worker_request_t;
 
 typedef struct fsimg_worker_result {

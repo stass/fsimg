@@ -249,16 +249,12 @@ struct fsimg_writer {
 	unsigned	 variant;
 	/* A label of at most 48 bytes and its terminator. */
 	char		 label[49];
-	/* A mountpoint as long as the volume information reports, and its
-	 * terminator.
+	/* The pointer texts of the options (the text rows of the settings
+	 * table: the mountpoint, the El Torito boot paths, the ISO 9660
+	 * descriptor texts), copied at construction into this one block; the
+	 * options point into it, and NULL when no text is set.
 	 */
-	char		 mountpoint[sizeof(((fsimg_volume_info_t *)0)->mountpoint)];
-	/* The El Torito boot image paths, copied from the options at
-	 * construction (options.boot_bios and boot_efi point here); NULL for
-	 * none.
-	 */
-	char		*boot_bios;
-	char		*boot_efi;
+	char		*texts;
 };
 
 /* Common collection is private; public construction selects a format driver.

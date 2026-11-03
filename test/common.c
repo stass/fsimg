@@ -1285,8 +1285,8 @@ test_writer_owns_validated_boot_paths(void)
 	bios[1] = efi[1] = 'X';
 	CHECK(strcmp(writer->options.boot_bios, "/boot/image") == 0);
 	CHECK(strcmp(writer->options.boot_efi, "/efi/image") == 0);
-	CHECK(writer->options.boot_bios == writer->boot_bios);
-	CHECK(writer->options.boot_efi == writer->boot_efi);
+	CHECK(writer->options.boot_bios == writer->texts);
+	CHECK(writer->options.boot_efi == writer->texts + sizeof("/boot/image"));
 	fsimg_writer_free(writer);
 	for (unsigned field = 0; field < 2; field++) {
 		for (size_t i = 0; i < 2; i++) {
@@ -1310,6 +1310,131 @@ test_writer_owns_validated_boot_paths(void)
 	fsimg_ctx_free(ctx);
 }
 
+/* A variant that stores every text the writer copies. */
+static const fsimg_format_variant_t text_variant = {
+	.info = { .name = "test-texts", .entry_kinds = FSIMG_ENTRY_FILE |
+	    FSIMG_ENTRY_DIRECTORY, .max_file_bytes = UINT64_MAX,
+	    .max_volume_bytes = UINT64_MAX, .write_settings =
+	    FSIMG_SETTING_ELTORITO | FSIMG_SETTING_MOUNTPOINT |
+	    FSIMG_SETTING_ISO_DESCRIPTOR }
+};
+static const fsimg_format_t text_format = {
+	.variants = &text_variant, .variant_count = 1, .writer = &link_writer_ops
+};
+
+static fsimg_status_t
+text_writer_new(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
+    fsimg_writer_t **writer, fsimg_error_t *error)
+{
+	return (fsimg_writer_new_variant(ctx, &text_format, &text_variant,
+	    options, writer, error));
+}
+
+static void
+test_writer_copies_every_text_and_ignores_later_changes(void)
+{
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	char volset[] = "set", mountpoint[] = "/mnt", bios[] = "/boot/image";
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	fsimg_write_options_init(&options);
+	options.iso_volume_set = volset;
+	options.mountpoint = mountpoint;
+	options.boot_bios = bios;
+	CHECK(text_writer_new(ctx, &options, &writer, NULL) == FSIMG_OK);
+	volset[0] = mountpoint[1] = bios[1] = 'X';
+	CHECK(writer->options.iso_volume_set != volset);
+	CHECK(strcmp(writer->options.iso_volume_set, "set") == 0);
+	CHECK(writer->options.mountpoint != mountpoint);
+	CHECK(strcmp(writer->options.mountpoint, "/mnt") == 0);
+	CHECK(strcmp(writer->options.boot_bios, "/boot/image") == 0);
+	fsimg_writer_free(writer);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_writer_refuses_a_text_past_its_capacity_naming_the_key(void)
+{
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	fsimg_error_t error;
+	char volset[66], mountpoint[1026];
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	memset(volset, 'A', 64);
+	volset[64] = '\0';
+	fsimg_write_options_init(&options);
+	options.iso_volume_set = volset;
+	CHECK(text_writer_new(ctx, &options, &writer, &error) == FSIMG_OK);
+	fsimg_writer_free(writer);
+	volset[64] = 'A';
+	volset[65] = '\0';
+	CHECK(text_writer_new(ctx, &options, &writer, &error) == FSIMG_EINVAL);
+	CHECK(writer == NULL && strcmp(error.path, "volset") == 0);
+	options.iso_volume_set = NULL;
+	memset(mountpoint, 'm', 1024);
+	mountpoint[0] = '/';
+	mountpoint[1024] = '\0';
+	options.mountpoint = mountpoint;
+	CHECK(text_writer_new(ctx, &options, &writer, &error) == FSIMG_OK);
+	fsimg_writer_free(writer);
+	mountpoint[1024] = 'm';
+	mountpoint[1025] = '\0';
+	CHECK(text_writer_new(ctx, &options, &writer, &error) == FSIMG_EINVAL);
+	CHECK(writer == NULL && strcmp(error.path, "mountpoint") == 0);
+	fsimg_ctx_free(ctx);
+}
+
+/* A boot path is bounded by the context's path limit, not the command's. */
+static void
+test_writer_accepts_a_boot_path_up_to_the_context_limit(void)
+{
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	static char path[3000];
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	memset(path, 'b', sizeof(path) - 1);
+	path[0] = '/';
+	path[sizeof(path) - 1] = '\0';
+	fsimg_write_options_init(&options);
+	options.boot_bios = path;
+	CHECK(text_writer_new(ctx, &options, &writer, NULL) == FSIMG_OK);
+	CHECK(strcmp(writer->options.boot_bios, path) == 0);
+	fsimg_writer_free(writer);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_writer_text_copy_allocation_failure_is_reported(void)
+{
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	uint64_t plain;
+	char volset[] = "set";
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	fsimg_write_options_init(&options);
+	fsimg_test_fail_alloc_after(ctx, 0);
+	CHECK(text_writer_new(ctx, &options, &writer, NULL) == FSIMG_OK);
+	plain = ctx->allocation_attempts;
+	fsimg_writer_free(writer);
+	/* The copy block is the one allocation a text adds. */
+	options.iso_volume_set = volset;
+	fsimg_test_fail_alloc_after(ctx, plain + 1);
+	CHECK(text_writer_new(ctx, &options, &writer, NULL) == FSIMG_ENOMEM);
+	CHECK(writer == NULL);
+	fsimg_test_fail_alloc_after(ctx, 0);
+	CHECK(text_writer_new(ctx, &options, &writer, NULL) == FSIMG_OK);
+	fsimg_writer_free(writer);
+	fsimg_ctx_free(ctx);
+}
+
 int
 main(void)
 {
@@ -1318,6 +1443,10 @@ main(void)
 	test_link_read_failures_during_planning_publish_nothing();
 	test_host_link_reads_and_retargeted_link_names_image_path();
 	test_writer_owns_validated_boot_paths();
+	test_writer_copies_every_text_and_ignores_later_changes();
+	test_writer_refuses_a_text_past_its_capacity_naming_the_key();
+	test_writer_accepts_a_boot_path_up_to_the_context_limit();
+	test_writer_text_copy_allocation_failure_is_reported();
 	test_decoded_link_host_change_during_verification_is_terminal();
 	test_decoded_link_cancellation_during_verification_is_terminal();
 	test_decoded_link_allocation_failure_during_advance_is_terminal();

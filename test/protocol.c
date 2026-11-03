@@ -849,7 +849,7 @@ test_job_mountpoint(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 24 + 2080 + 24);
+	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 24 + 2080 + 24 + 357);
 	memset(longest, 'm', FIELD - 1);
 	memset(longer, 'm', FIELD);
 	fsimg_worker_request_init(&request);
@@ -1272,6 +1272,9 @@ other_value(const fsimg_setting_t *row, fsimg_setting_value_t *value)
 	case FSIMG_KIND_U64:
 		value->u64 = UINT64_C(1) << 40;
 		break;
+	case FSIMG_KIND_I64:
+		value->i64 = -INT64_C(62135596800);
+		break;
 	case FSIMG_KIND_BOOL:
 		value->flag = true;
 		break;
@@ -1298,6 +1301,8 @@ same_value(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 		return (a->u32 == b->u32);
 	case FSIMG_KIND_U64:
 		return (a->u64 == b->u64);
+	case FSIMG_KIND_I64:
+		return (a->i64 == b->i64);
 	case FSIMG_KIND_BOOL:
 		return (a->flag == b->flag);
 	case FSIMG_KIND_ISO_VIEW:
@@ -1551,7 +1556,7 @@ test_image_records(void)
 static void
 test_job_device_input(void)
 {
-	enum { KIND = FSIMG_JOB_BYTES - 24, LENGTH = KIND + 8,
+	enum { KIND = FSIMG_JOB_BYTES - 24 - 357, LENGTH = KIND + 8,
 	    QUANTUM = LENGTH + 8, CAPABILITIES = 23 * 8 };
 	static const struct {
 		unsigned offset;
@@ -1731,7 +1736,7 @@ test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == 4050);
+	CHECK(FSIMG_JOB_BYTES == 4407);
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
 	request.root_paths = image_root;
@@ -1877,7 +1882,7 @@ test_iso_jobs_have_canonical_wire_bytes(void)
 
 	iso_wire_place_string(create_tail, 24, "/b/bios.img");
 	iso_wire_place_string(efi_tail, 1049, "/efi/boot.img");
-	CHECK(FSIMG_JOB_BYTES == 4050);
+	CHECK(FSIMG_JOB_BYTES == 4407);
 	fsimg_worker_request_init(&request);
 	CHECK(request.read.iso_view == FSIMG_ISO_VIEW_AUTO);
 	request.kind = FSIMG_JOB_CREATE;
@@ -1990,6 +1995,75 @@ test_iso_jobs_reject_malformed_fields(void)
 	}
 }
 
+static void
+test_info_text_records_reject_invalid_counts_and_strings(void)
+{
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_INFO,
+	    .length = FSIMG_WIRE_INFO_BYTES };
+	fsimg_volume_info_t info;
+	unsigned char canonical[FSIMG_WIRE_INFO_BYTES];
+	unsigned char *text = frame.payload + FSIMG_WIRE_INFO_TEXTS;
+	static const uint64_t bad_counts[] = { 17, UINT64_MAX,
+	    UINT64_C(1) << 32 };
+
+	bzero(&info, sizeof(info));
+	info.time_basis = FSIMG_TIME_UTC;
+	info.scope = FSIMG_VALIDATION_HEADER;
+	strcpy(info.format, "iso9660");
+	info.text_count = 1;
+	strcpy(info.texts[0].name, "application");
+	strcpy(info.texts[0].value, "A \"QUOTED\" \\ APPLICATION");
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(FSIMG_WIRE_INFO_TEXT_COUNT == 1768);
+	CHECK(FSIMG_WIRE_INFO_TEXTS == 1776);
+	CHECK(FSIMG_WIRE_INFO_TEXT_BYTES == 224);
+	CHECK(fsimg_load_le64(frame.payload + 1768) == 1);
+	CHECK(strcmp((char *)text, "application") == 0);
+	CHECK(strcmp((char *)text + 24, info.texts[0].value) == 0);
+	CHECK(fsimg_wire_info_frame_valid(&frame));
+	bcopy(frame.payload, canonical, sizeof(canonical));
+
+	for (unsigned i = 0; i < sizeof(bad_counts) / sizeof(bad_counts[0]); i++) {
+		fsimg_store_le64(frame.payload + 1768, bad_counts[i]);
+		CHECK(!fsimg_wire_info_frame_valid(&frame));
+	}
+	fsimg_store_le64(frame.payload + 1768, 0);
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
+	bcopy(canonical, frame.payload, sizeof(canonical));
+	text[224] = 'X';
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
+	bcopy(canonical, frame.payload, sizeof(canonical));
+	memset(text + 24, 'X', 193);
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
+	bcopy(canonical, frame.payload, sizeof(canonical));
+	text[217] = 1;
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
+	bcopy(canonical, frame.payload, sizeof(canonical));
+	text[0] = '\0';
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
+
+	/* Two texts of one name are not a report the encoder writes. */
+	info.text_count = 2;
+	strcpy(info.texts[1].name, "application");
+	strcpy(info.texts[1].value, "OTHER");
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(!fsimg_wire_info_frame_valid(&frame));
+	strcpy(info.texts[1].name, "publisher");
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(fsimg_wire_info_frame_valid(&frame));
+
+	/* The capacity itself is valid, including a 192-byte value. */
+	for (unsigned i = 0; i < FSIMG_VOLUME_TEXTS_MAX; i++) {
+		snprintf(info.texts[i].name, sizeof(info.texts[i].name),
+		    "text_%u", i);
+		memset(info.texts[i].value, 'A', 192);
+		info.texts[i].value[192] = '\0';
+	}
+	info.text_count = FSIMG_VOLUME_TEXTS_MAX;
+	fsimg_wire_info_encode(frame.payload, &info);
+	CHECK(fsimg_wire_info_frame_valid(&frame));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2028,6 +2102,7 @@ main(int argc, char **argv)
 	test_error_padding();
 	test_entry_records();
 	test_invalid_entry_records();
+	test_info_text_records_reject_invalid_counts_and_strings();
 	test_info_geometry_is_informational();
 	test_info_uuid();
 	test_info_label();

@@ -1437,6 +1437,21 @@ test_wrap_settings(void)
 	options.boot_load_sectors = defaults.boot_load_sectors;
 	options.boot_bios = defaults.boot_bios;
 	options.boot_efi = defaults.boot_efi;
+	options.iso_volume_set = defaults.iso_volume_set;
+	options.iso_publisher = defaults.iso_publisher;
+	options.iso_preparer = defaults.iso_preparer;
+	options.iso_application = defaults.iso_application;
+	options.iso_copyright = defaults.iso_copyright;
+	options.iso_abstract = defaults.iso_abstract;
+	options.iso_biblio = defaults.iso_biblio;
+	options.iso_created = defaults.iso_created;
+	options.iso_modified = defaults.iso_modified;
+	options.iso_expires = defaults.iso_expires;
+	options.iso_effective = defaults.iso_effective;
+	options.iso_created_set = defaults.iso_created_set;
+	options.iso_modified_set = defaults.iso_modified_set;
+	options.iso_expires_set = defaults.iso_expires_set;
+	options.iso_effective_set = defaults.iso_effective_set;
 	options.layers = defaults.layers;
 	options.inputs = defaults.inputs;
 	bcopy(defaults.compression, options.compression,
