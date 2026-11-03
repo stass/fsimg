@@ -82,8 +82,20 @@ directory ambiguous.
 
 Directory chains are fully walked even after an end marker so allocated tails
 cannot hide cycles or shared directory clusters. A paged exact bitset claims
-each directory cluster once. Nonroot directories require first-position dot
-and dotdot entries with the correct self/parent clusters and no file payload.
+each directory cluster once.
+
+Dot and dotdot entries, the short entries named `.` and `..`, are structural
+records and never children. The walker derives each directory's self and parent
+clusters from traversal, so reading consumes nothing from them: it skips them
+wherever they occur without examining their other fields, and reads a directory
+that lacks them. Producers differ here. macOS marks them hidden, KolibriOS
+sets case flags in their NT reserved byte, and damaged volumes omit or
+misplace them. A dot record directly after a live long-name sequence orphans
+that sequence and is corruption.
+Full verification, like `fsck.fat`, requires nonroot directories to begin with
+dot and dotdot entries with the correct self/parent clusters and no file
+payload, and rejects a dot record anywhere else, including the root. It ignores
+their NT reserved byte, whose case flags have no name to apply to.
 The dotdot entry uses cluster zero when its parent is the root, in every FAT
 variant, including FAT32.
 Volume labels occur only at root and have no allocation. The root is implicit.

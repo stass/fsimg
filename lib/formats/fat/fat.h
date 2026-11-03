@@ -61,8 +61,11 @@ typedef struct fat_lfn {
 /* Driver state behind the reader's private pointer, from open to close. */
 typedef struct fsimg_fat_reader fsimg_fat_reader_t;
 
-/* The current locator is the entry's first cluster and the cluster its
- * ".." record names, set by replay; content state belongs to it.
+/* The current locator is the entry's first cluster and its parent's cluster
+ * as traversal found it (the cluster its ".." record must name), set by
+ * replay; content state belongs to it. The ownership stream exists exactly
+ * while fsimg_fat_verify walks the volume, so it also marks full
+ * verification.
  */
 struct fsimg_fat_reader {
 	fat_geometry_t	 geometry;

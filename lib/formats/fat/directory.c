@@ -10,9 +10,11 @@
 #include "fsimg-endian.h"
 
 /* FAT's part of directory preparation (specs/design-directories.md): decode
- * one directory's slots, validate its dot records and admit each child.
+ * one directory's slots and admit each child. Dot records are never children;
+ * only verification examines them.
  * The private payload is the child's 32-byte short entry followed by the
- * little-endian cluster its ".." record must name.
+ * little-endian cluster its ".." record must name; only verification
+ * compares the record with it.
  */
 #define FAT_PAYLOAD_BYTES 36u
 
@@ -24,9 +26,11 @@ typedef struct directory_pass {
 	uint32_t	 level;
 	uint32_t	 self_cluster;
 	uint32_t	 parent_cluster;
+	bool		 verify;
 	bool		 ended;
 } directory_pass_t;
 
+static bool dot_record(const unsigned char *);
 static fsimg_status_t validate_dot(directory_pass_t *, const unsigned char *,
     fsimg_error_t *);
 static fsimg_status_t decode_slot(directory_pass_t *, const unsigned char *,
@@ -36,6 +40,17 @@ static fsimg_status_t read_directory_run(directory_pass_t *,
 static fsimg_status_t claim_run(directory_pass_t *, const fsimg_extent_t *,
     fsimg_error_t *);
 
+static bool
+dot_record(const unsigned char *raw)
+{
+	return (bcmp(raw, ".          ", 11) == 0 ||
+	    bcmp(raw, "..         ", 11) == 0);
+}
+
+/* Verification only: slots 0 and 1 of a nonroot directory must be "." naming
+ * this directory and ".." naming its parent. The NT reserved byte is ignored:
+ * its case flags have no name to apply to, and KolibriOS sets them.
+ */
 static fsimg_status_t
 validate_dot(directory_pass_t *pass, const unsigned char *raw,
     fsimg_error_t *error)
@@ -47,9 +62,10 @@ validate_dot(directory_pass_t *pass, const unsigned char *raw,
 	fsimg_status_t status;
 
 	expected = pass->slots == 0 ? pass->self_cluster : pass->parent_cluster;
-	if (bcmp(raw, pass->slots == 0 ? ".          " : "..         ", 11) != 0 ||
-	    raw[11] != 0x10 || raw[12] != 0 || fsimg_load_le32(raw + 28) != 0)
-		return (fsimg_fat_corrupt(error, "missing or invalid FAT dot directory record"));
+	if (bcmp(raw, pass->slots == 0 ? ".          " : "..         ", 11) != 0)
+		return (fsimg_fat_corrupt(error, "FAT directory lacks dot records"));
+	if (raw[11] != 0x10 || fsimg_load_le32(raw + 28) != 0)
+		return (fsimg_fat_corrupt(error, "invalid FAT dot directory record"));
 	cluster = fsimg_load_le16(raw + 26);
 	if (g->variant == 32)
 		cluster |= (uint32_t)fsimg_load_le16(raw + 20) << 16;
@@ -80,7 +96,7 @@ decode_slot(directory_pass_t *pass, const unsigned char *raw,
 	uint32_t cluster;
 	fsimg_status_t status;
 
-	if (pass->level != 0 && pass->slots < 2) {
+	if (pass->verify && pass->level != 0 && pass->slots < 2) {
 		status = validate_dot(pass, raw, error);
 		if (status == FSIMG_OK)
 			pass->slots++;
@@ -102,6 +118,17 @@ decode_slot(directory_pass_t *pass, const unsigned char *raw,
 	}
 	if (raw[11] == 0x0f)
 		return (fsimg_fat_lfn_slot(&pass->lfn, raw, error));
+	/* Reading takes a directory's self and parent clusters from traversal,
+	 * so it skips short entries named "." or ".." wherever they are, without
+	 * examining their other fields: producers omit, misplace or decorate
+	 * them. Verification checked the leading pair above and rejects any
+	 * other through the name rules below.
+	 */
+	if (!pass->verify && dot_record(raw)) {
+		if (pass->lfn.active)
+			return (fsimg_fat_corrupt(error, "orphaned FAT long-name sequence"));
+		return (FSIMG_OK);
+	}
 	if ((raw[11] & 0x08) != 0) {
 		/* Native formatters can retain the archive bit on a volume label.
 		 * It still has no data allocation and never becomes a child entry.
@@ -209,6 +236,8 @@ fsimg_fat_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 	pass.reader = reader;
 	pass.build = build;
 	pass.level = fsimg_directory_level(build);
+	/* Verification is the walk that records ownership (see fat.h). */
+	pass.verify = fat->owners != NULL;
 	if (pass.level == 0) {
 		status = fsimg_bitset_new(&reader->session,
 		    (uint64_t)g->clusters + 2, &fat->directory_clusters, error);

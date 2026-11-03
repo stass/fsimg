@@ -51,6 +51,22 @@ typedef struct fixture {
 	char		 directory[64];
 } fixture_t;
 
+typedef struct misplaced_dot_case {
+	const char	*name;
+	const char	*reason;
+	unsigned	 dot_slot;
+	unsigned	 dotdot_slot;
+	unsigned	 empty_slot;
+	bool		 root;
+} misplaced_dot_case_t;
+
+typedef struct orphan_case {
+	const char	*name;
+	const char	*dot_name;
+	uint32_t	 dot_cluster;
+	bool		 deleted_after_dot;
+} orphan_case_t;
+
 static void put16(unsigned char *, uint16_t);
 static void put32(unsigned char *, uint32_t);
 static void write_bytes(fixture_t *, uint64_t, const void *, size_t);
@@ -68,6 +84,12 @@ static fsimg_status_t image_read(void *, uint64_t, void *, size_t, size_t *,
     fsimg_error_t *);
 static fsimg_status_t image_size(void *, uint64_t *, fsimg_error_t *);
 static void test_variants(void);
+static void check_fixture_listing(fixture_t *, const char *);
+static void test_dot_records_ntres_ignored(unsigned);
+static void test_directory_without_dot_records(unsigned);
+static void test_dot_record_clusters_ignored_when_listing(unsigned);
+static void test_misplaced_dot_records_skipped_when_listing(unsigned);
+static void test_long_name_before_misplaced_dot_record_rejected(unsigned);
 static void test_names(void);
 static void test_geometry(void);
 static void test_thresholds(void);
@@ -366,6 +388,225 @@ fixture_close(fixture_t *f)
 	CHECK(close(f->fd) == 0);
 	CHECK(close(f->scratch) == 0);
 	CHECK(rmdir(f->directory) == 0);
+}
+
+/* An exact listing also excludes dot records and any unexpected children. */
+static void
+check_fixture_listing(fixture_t *f, const char *case_name)
+{
+	static const char *const paths[] = {
+		"/HELLO.TXT", "/SUB", "/SUB/EMPTY"
+	};
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+
+	CHECK(fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL) == FSIMG_OK);
+	for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		status = fsimg_reader_next(f->reader, &entry, NULL);
+		if (status != FSIMG_OK || strcmp(entry->path, paths[i]) != 0)
+			fprintf(stderr, "FAT%u %s: expected listing entry %s, got %s (%s)\n",
+			    f->variant, case_name, paths[i],
+			    entry == NULL ? "NULL" : entry->path, fsimg_status_string(status));
+		CHECK(status == FSIMG_OK);
+		CHECK(strcmp(entry->path, paths[i]) == 0);
+	}
+	status = fsimg_reader_next(f->reader, &entry, NULL);
+	if (status != FSIMG_DONE || entry != NULL)
+		fprintf(stderr, "FAT%u %s: expected end of listing, got %s\n",
+		    f->variant, case_name, fsimg_status_string(status));
+	CHECK(status == FSIMG_DONE);
+	CHECK(entry == NULL);
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+}
+
+static void
+test_dot_records_ntres_ignored(unsigned variant)
+{
+	fixture_t f;
+	fsimg_verify_report_t report;
+	unsigned char ntres = 0x50;
+
+	fixture_init(&f, variant);
+	/* KolibriOS sets reserved NTRes bits on both structural records. */
+	write_bytes(&f, cluster_offset(&f, 7) + 12, &ntres, 1);
+	write_bytes(&f, cluster_offset(&f, 7) + 32 + 12, &ntres, 1);
+	fixture_open(&f);
+	check_fixture_listing(&f, "reserved NTRes bits on dots");
+
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_close(&f);
+}
+
+static void
+test_directory_without_dot_records(unsigned variant)
+{
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	unsigned char directory[512];
+	struct stat st;
+
+	fixture_init(&f, variant);
+	bzero(directory, sizeof(directory));
+	short_entry(directory, "EMPTY      ", false, 0, 0);
+	write_bytes(&f, cluster_offset(&f, 7), directory, sizeof(directory));
+	fixture_open(&f);
+	check_fixture_listing(&f, "directory without dot records");
+
+	/* Extraction uses ordinary reading, so EMPTY is still accessible. */
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_extract_at(f.reader, f.scratch, "output", NULL, NULL) == FSIMG_OK);
+	CHECK(fstatat(f.scratch, "output/SUB/EMPTY", &st, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(S_ISREG(st.st_mode) && st.st_size == 0);
+	CHECK(unlinkat(f.scratch, "output/SUB/EMPTY", 0) == 0);
+	CHECK(unlinkat(f.scratch, "output/SUB", AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(f.scratch, "output/HELLO.TXT", 0) == 0);
+	CHECK(unlinkat(f.scratch, "output", AT_REMOVEDIR) == 0);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "FAT directory lacks dot records") == 0);
+	CHECK(!report.complete);
+	fixture_close(&f);
+}
+
+static void
+test_dot_record_clusters_ignored_when_listing(unsigned variant)
+{
+	static const char *const cases[] = { "wrong dot", "wrong dotdot" };
+	fixture_t f;
+	unsigned char raw[32];
+
+	for (unsigned slot = 0; slot < 2; slot++) {
+		fixture_init(&f, variant);
+		short_entry(raw, slot == 0 ? ".          " : "..         ", true, 9, 0);
+		write_bytes(&f, cluster_offset(&f, 7) + slot * 32, raw, sizeof(raw));
+		fixture_open(&f);
+		check_fixture_listing(&f, cases[slot]);
+		fixture_close(&f);
+	}
+}
+
+static void
+test_misplaced_dot_records_skipped_when_listing(unsigned variant)
+{
+	static const misplaced_dot_case_t cases[] = {
+		{
+			.name = "children before both dots",
+			.reason = "FAT directory lacks dot records",
+			.dot_slot = 2, .dotdot_slot = 1, .empty_slot = 0
+		},
+		{
+			.name = "stray dot after EMPTY",
+			.reason = "invalid FAT short-name byte",
+			.dot_slot = 3, .dotdot_slot = 1, .empty_slot = 2
+		},
+		{
+			.name = "dot record in the root",
+			.reason = "invalid FAT short-name byte",
+			.root = true, .dot_slot = 2
+		}
+	};
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	unsigned char directory[512];
+	unsigned char raw[32];
+	fsimg_status_t status;
+
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		const misplaced_dot_case_t *c = &cases[i];
+
+		fixture_init(&f, variant);
+		if (c->root) {
+			short_entry(raw, ".          ", true, 0, 0);
+			write_bytes(&f, f.root_offset + c->dot_slot * 32, raw, sizeof(raw));
+		} else {
+			bzero(directory, sizeof(directory));
+			/* Retain the leading dot when adding a stray one. */
+			short_entry(directory, ".          ", true, 7, 0);
+			short_entry(directory + c->dot_slot * 32, ".          ", true, 7, 0);
+			short_entry(directory + c->dotdot_slot * 32, "..         ", true, 0, 0);
+			short_entry(directory + c->empty_slot * 32, "EMPTY      ", false, 0, 0);
+			write_bytes(&f, cluster_offset(&f, 7), directory, sizeof(directory));
+		}
+		fixture_open(&f);
+		check_fixture_listing(&f, c->name);
+
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+		bzero(&error, sizeof(error));
+		status = fsimg_verify(f.reader, 0, &report, &error);
+		if (status != FSIMG_ECORRUPT || strcmp(error.message, c->reason) != 0 ||
+		    report.complete)
+			fprintf(stderr, "FAT%u %s: expected incomplete verification with %s, got %s (%s)\n",
+			    variant, c->name, c->reason, fsimg_status_string(status), error.message);
+		CHECK(status == FSIMG_ECORRUPT);
+		CHECK(strcmp(error.message, c->reason) == 0);
+		CHECK(!report.complete);
+		fixture_close(&f);
+	}
+}
+
+static void
+test_long_name_before_misplaced_dot_record_rejected(unsigned variant)
+{
+	static const orphan_case_t cases[] = {
+		{ .name = "LFN, dot, deleted slot", .dot_name = ".          ",
+		    .dot_cluster = 7, .deleted_after_dot = true },
+		{ .name = "LFN, dotdot, deleted slot", .dot_name = "..         ",
+		    .dot_cluster = 0, .deleted_after_dot = true },
+		{ .name = "LFN, dot, matching short entry", .dot_name = ".          ",
+		    .dot_cluster = 7 },
+		{ .name = "LFN, dotdot, matching short entry", .dot_name = "..         ",
+		    .dot_cluster = 0 }
+	};
+	fixture_t f;
+	fsimg_error_t error;
+	const fsimg_entry_t *entry;
+	unsigned char records[96], raw[32];
+	const uint16_t name[] = { 'L', 'o', 'n', 'g' };
+	size_t length;
+	fsimg_status_t status;
+
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		const orphan_case_t *c = &cases[i];
+
+		fixture_init(&f, variant);
+		short_entry(raw, "SHORT      ", false, 0, 0);
+		/* The LFN checksum matches the live entry after the dot, so it
+		 * could attach across the skipped dot. A deleted slot instead
+		 * discards the LFN, hiding it from the end-marker check.
+		 */
+		length = long_records(records, name, sizeof(name) / sizeof(name[0]), raw);
+		CHECK(length == 64);
+		bcopy(raw, records + 64, sizeof(raw));
+		if (c->deleted_after_dot)
+			records[64] = 0xe5;
+		short_entry(records + 32, c->dot_name, true, c->dot_cluster, 0);
+		write_bytes(&f, cluster_offset(&f, 7) + 96, records, sizeof(records));
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, "/HELLO.TXT") == 0);
+		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, "/SUB") == 0);
+
+		bzero(&error, sizeof(error));
+		status = fsimg_reader_next(f.reader, &entry, &error);
+		if (status != FSIMG_ECORRUPT ||
+		    strcmp(error.message, "orphaned FAT long-name sequence") != 0 || entry != NULL)
+			fprintf(stderr, "FAT%u %s: expected orphaned FAT long-name sequence and no entry, got %s (%s)\n",
+			    variant, c->name, fsimg_status_string(status), error.message);
+		CHECK(status == FSIMG_ECORRUPT);
+		CHECK(strcmp(error.message, "orphaned FAT long-name sequence") == 0);
+		CHECK(entry == NULL);
+		fixture_close(&f);
+	}
 }
 
 static void
@@ -758,13 +999,15 @@ static void
 test_walker_poisoned(void)
 {
 	fixture_t f;
-	unsigned char dot[32];
+	unsigned char child[32];
 
 	fixture_init(&f, 16);
 	make_deep_tree(&f, 4);
-	/* /D00/D01 names the wrong parent, so preparing it fails. */
-	short_entry(dot, "..         ", true, 7, 0);
-	write_bytes(&f, cluster_offset(&f, 21) + 32, dot, sizeof(dot));
+	/* Replace the D02 entry in /D00/D01 with a file whose name
+	 * has a forbidden leading space.
+	 */
+	short_entry(child, " SPACE  TXT", false, 0, 0);
+	write_bytes(&f, cluster_offset(&f, 21) + 64, child, sizeof(child));
 	fixture_open(&f);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	f.reader->state = FSIMG_READER_ITERATING;
@@ -1421,6 +1664,12 @@ test_edge_cases(void)
 			fprintf(stderr, "fixture %s: %s (%s)\n", cases[scenario],
 			    fsimg_status_string(status), error.message);
 		CHECK(status == expected);
+		if (scenario == 3 || scenario == 4) {
+			if (strcmp(error.message, "FAT dot record has wrong directory cluster") != 0)
+				fprintf(stderr, "fixture %s: expected wrong directory cluster, got %s\n",
+				    cases[scenario], error.message);
+			CHECK(strcmp(error.message, "FAT dot record has wrong directory cluster") == 0);
+		}
 		fixture_close(&f);
 	}
 }
@@ -2300,6 +2549,13 @@ main(int argc, char **argv)
 	}
 	CHECK(argc == 1);
 	test_variants();
+	for (unsigned variant = 16; variant <= 32; variant += 16) {
+		test_dot_records_ntres_ignored(variant);
+		test_directory_without_dot_records(variant);
+		test_dot_record_clusters_ignored_when_listing(variant);
+		test_misplaced_dot_records_skipped_when_listing(variant);
+		test_long_name_before_misplaced_dot_record_rejected(variant);
+	}
 	test_geometry_matrix();
 	test_cluster_ceiling(12);
 	test_cluster_ceiling(16);
