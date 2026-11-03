@@ -190,10 +190,13 @@ typedef struct iso_volume_fields {
  * descriptor and a Joliet supplementary descriptor (joliet_level 1 to 3),
  * any other descriptor being framed and ignored. fields holds the text
  * rows' raw bytes and, per date row, whether it is present and its UTC
- * seconds; open has checked every date. A primary descriptor's
+ * seconds. A primary descriptor's
  * geometry (volume_space_size, block_size, set_size, sequence) has passed
  * the reader profile when decoding succeeds; a Joliet descriptor's is only
  * decoded, and is trusted once volume.c finds it equal to the primary's.
+ * malformed_date records a volume date that open read as absent because it
+ * does not decode, for full verification to fail on. The Joliet copy stays
+ * zero unless a Joliet descriptor was kept.
  */
 typedef struct iso_descriptor {
 	iso_record_t	 root;
@@ -210,6 +213,7 @@ typedef struct iso_descriptor {
 	uint8_t		 type;
 	uint8_t		 version;
 	uint8_t		 joliet_level;		/* zero unless Joliet */
+	bool		 malformed_date;
 	unsigned char	 label[ISO_LABEL_BYTES];
 	unsigned char	 fields[ISO_DESCRIPTOR_BYTES];
 	bool		 date_present[ISO_DESCRIPTOR_DATES];

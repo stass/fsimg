@@ -21,7 +21,8 @@ names its precise format-design heading.
 | Requirements | Rules | Checking scope |
 | --- | --- | --- |
 | Descriptor identity, supported profile, scan bound, terminator and primary agreement | `identity`, `descriptor.identity`, `descriptor.profile`, `descriptor.limit`, `descriptor.terminator`, `primary.present`, `primary.duplicates` | Open |
-| Numeric copies, geometry, embedded root and dates | `numeric.copies`, `geometry.profile`, `geometry.volume`, `root.descriptor`, `root.range`, `descriptor.dates` | Open |
+| Numeric copies, geometry and embedded root | `numeric.copies`, `geometry.profile`, `geometry.volume`, `root.descriptor`, `root.range` | Open |
+| Primary and Joliet descriptor dates, read as absent when malformed | `descriptor.dates` | Verification |
 | Joliet descriptor agreement/count and decoded identifiers | `joliet.geometry`, `joliet.count`, `names.joliet` | Open; directory or verification |
 | Record framing, copies, profile, flags, dates and dot relations | `directory.framing`, `directory.copies`, `directory.profile`, `directory.flags`, `directory.dates`, `directory.dots` | Embedded root at open; directory or verification |
 | Primary identifiers, displayed-name/extent uniqueness and physical order | `names.primary`, `names.unique`, `primary.order` | Directory or verification |

@@ -54,7 +54,7 @@ module FsimgSpec
              predicate: ->(m, _) { volumes(m).all? { root_shape?(_1.fields.root_record) } }),
         rule(id: "root.range", scope: "open", anchor: "logical-blocks-and-addresses", applies_to: VOLUME,
              predicate: ->(m, _) { volumes(m).all? { root_range?(_1.fields) } && Layout.decode(Layout::DirectoryHeader, m.volume.fields.root_record).extent_le < m.image_length / BLOCK }),
-        rule(id: "descriptor.dates", scope: "open", anchor: "descriptor-dates", applies_to: VOLUME,
+        rule(id: "descriptor.dates", scope: "verification", anchor: "descriptor-dates", applies_to: VOLUME,
              predicate: ->(m, _) { volumes(m).all? { _1.fields.dates.bytes.each_slice(17).all? { |bytes| date17?(bytes.pack("C*")) } } }),
         rule(id: "joliet.geometry", scope: "open", anchor: "supplementary-descriptors-and-joliet", applies_to: VOLUME,
              predicate: ->(m, _) { joliets(m).all? { _1.fields.volume_flags.zero? && geometry(_1.fields) == geometry(m.volume.fields) } }),

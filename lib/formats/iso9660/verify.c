@@ -1053,12 +1053,12 @@ verify_free(fsimg_iso9660_reader_t *iso)
 	iso->verify = NULL;
 }
 
-/* Full verification: the handshake when open skipped it, the header
- * claims, the walks, then the claim sweep, each hierarchy's path tables
- * and the relocation match. The report counts the counted walk's entries
- * and every walk's payload bytes; allocated units are the blocks some
- * claim covers, and no block is free or bad. The selected view is restored
- * on every exit.
+/* Full verification: the handshake when open skipped it, the volume dates
+ * open read as absent, the header claims, the walks, then the claim sweep,
+ * each hierarchy's path tables and the relocation match. The report
+ * counts the counted walk's entries and every walk's payload bytes;
+ * allocated units are the blocks some claim covers, and no block is free
+ * or bad. The selected view is restored on every exit.
  */
 fsimg_status_t
 iso_verify(fsimg_reader_t *reader, unsigned flags,
@@ -1083,6 +1083,12 @@ iso_verify(fsimg_reader_t *reader, unsigned flags,
 	if (status == FSIMG_OK && iso->susp_skip != 0)
 		status = iso_unsupported(error,
 		    "ISO 9660 SUSP has an unsupported SP skip count");
+	if (status == FSIMG_OK && iso->primary.malformed_date)
+		status = iso_corrupt(error,
+		    "invalid ISO 9660 primary descriptor date");
+	if (status == FSIMG_OK && iso->joliet.malformed_date)
+		status = iso_corrupt(error,
+		    "invalid ISO 9660 Joliet descriptor date");
 	if (status == FSIMG_OK)
 		status = verify_new(reader, error);
 	if (status == FSIMG_OK)

@@ -28,6 +28,13 @@ Open ISO 9660 work, ordered by the [ISO 9660 plan](iso9660-plan.md). The
   cannot name the directory's path, so the message names the condition
   only. A common way for `prepare` to name a child would serve every
   driver.
+* [Low] **Harness Joliet selection** (`test/spec/lib/fsimg_spec/iso9660/rules.rb`):
+  `joliets` takes any type-2 descriptor whose first three escape bytes
+  name a Joliet level, while the format design requires version 1 and
+  zeros after the sequence. An enhanced descriptor, or one with trailing
+  escape bytes, is then held to the Joliet rules (`joliet.geometry`,
+  `descriptor.dates`) that fsimg rightly does not apply to it. No current
+  witness builds such a descriptor.
 
 ## Unscheduled
 

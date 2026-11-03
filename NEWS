@@ -14,7 +14,9 @@ Rock Ridge, then Joliet; `-o view=primary|rockridge|joliet` forces a view.
 The reader supports multi-extent files, Rock Ridge symbolic links and
 relocated directories, and reports El Torito boot catalogs through info.
 Full verification checks every offered hierarchy, path tables, record
-order and allocation ownership under the documented reader profile.
+order and allocation ownership under the documented reader profile. A
+volume descriptor date that does not decode reads as absent, so early
+discs such as Kodak Photo CDs open; full verification fails on it.
 
 ISO 9660 volume descriptors carry the volume set, publisher, preparer and
 application identifiers, the copyright, abstract and bibliographic file

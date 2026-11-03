@@ -39,6 +39,17 @@ class Iso9660RulesTest < Minitest::Test
     end
   end
 
+  def test_descriptor_date_violation_runs_verification_stage
+    with_cases do |cases, registry|
+      witness = registry.fetch("iso9660.descriptor.dates").domain.call.find(&:intended)
+      classified = cases.call(witness)
+      assert_nil classified.defect
+      assert_equal ["verify"], classified.kase.recipe.stages
+      refute classified.kase.expected.fetch("verify").accept
+      assert_equal [FsimgSpec::Status.parse("FSIMG_ECORRUPT")], classified.kase.expected.fetch("verify").statuses
+    end
+  end
+
   def test_rule_sources_name_existing_format_anchors
     source = File.read(File.expand_path("../../../../specs/design-iso9660.md", __dir__))
     counts = Hash.new(0)

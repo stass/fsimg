@@ -33,6 +33,10 @@ enum {
 static void expect(image_t *image, fsimg_status_t expected, const char *name);
 static void expect_open(image_t *image, fsimg_status_t expected,
     const char *name);
+static fsimg_verify_report_t verify_expect(image_t *image,
+    fsimg_iso_view_t view, unsigned flags, fsimg_status_t expected,
+    const char *message, const char *name);
+static image_t verify_tree(bool joliet);
 static void probe_expect(image_t *image, fsimg_status_t expected,
     const char *name);
 static void test_probe(void);
@@ -334,20 +338,35 @@ test_descriptor_dates_offset_fraction_and_utc_range(void)
 }
 
 static void
-test_descriptor_malformed_dates_fail_at_open_in_either_descriptor(void)
+test_descriptor_malformed_dates_read_absent_in_either_descriptor(void)
 {
+	static const char *const names[] = { "created", "modified",
+	    "expires", "effective" };
 	static const char *const invalid[] = { "19700101000000X0\0",
 	    "1970130100000000\0", "0000010100000000\0" };
+	fsimg_volume_info_t info;
+	fsimg_iso_view_t view;
+	fixture_t fixture;
 	image_t image;
 
 	for (unsigned descriptor = 16; descriptor <= 17; descriptor++) {
+		view = descriptor == 16 ? FSIMG_ISO_VIEW_PRIMARY :
+		    FSIMG_ISO_VIEW_JOLIET;
 		for (unsigned date = 0; date < 4; date++) {
 			for (unsigned mutation = 0; mutation < 3; mutation++) {
 				image = info_descriptor_image();
 				bcopy(invalid[mutation], image.bytes + descriptor * BLOCK +
 				    813 + 17 * date, 17);
-				expect_open(&image, FSIMG_ECORRUPT,
-				    "malformed descriptor date fails before info");
+				fixture_new(&fixture, &image, NULL);
+				CHECK(open_image(&fixture, view) == FSIMG_OK);
+				CHECK(fsimg_reader_get_info(fixture.reader, &info, NULL) == FSIMG_OK);
+				/* The fixture's other dates and texts are absent too. */
+				CHECK(info.text_count == 0);
+				fixture_free(&fixture);
+				verify_expect(&image, view, 0, FSIMG_ECORRUPT,
+				    descriptor == 16 ?
+				    "invalid ISO 9660 primary descriptor date" :
+				    "invalid ISO 9660 Joliet descriptor date", names[date]);
 				free(image.bytes);
 			}
 		}
@@ -392,7 +411,17 @@ test_probe(void)
 static void
 test_descriptors(void)
 {
+	static const struct {
+		const char *date;
+		const char *name;
+	} invalid_dates[] = {
+		{ "2023023000000000", "primary date with Feb 30" },
+		{ "202X020500000000", "primary date with non-digit" },
+		{ "2023130500000000", "primary date with month 13" },
+		{ "0000020500000000", "primary date with year 0" }
+	};
 	image_t image;
+	fixture_t f;
 	unsigned char primary[BLOCK];
 	unsigned char *p, *next;
 	static const unsigned kinds[] = { 1, 2, 3, 0, 2 };
@@ -482,14 +511,62 @@ test_descriptors(void)
 	p[VD_STRUCTURE] = 2;
 	expect(&image, FSIMG_EUNSUPPORTED, "file structure version");
 	p[VD_STRUCTURE] = 1;
-	bcopy("2023023000000000", p + VD_DATE, 16);
-	expect(&image, FSIMG_ECORRUPT, "invalid descriptor date");
-	memset(p + VD_DATE, '0', 16);
+	for (size_t i = 0; i < sizeof(invalid_dates) / sizeof(invalid_dates[0]);
+	    i++) {
+		bcopy(invalid_dates[i].date, p + VD_DATE, DATE17 - 1);
+		expect(&image, FSIMG_OK, invalid_dates[i].name);
+		verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+		    "invalid ISO 9660 primary descriptor date",
+		    invalid_dates[i].name);
+		bzero(p + VD_DATE, DATE17);
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		char name[64];
+
+		bcopy("19920205102039\0\0", p + VD_DATE + i * DATE17,
+		    DATE17 - 1);
+		p[VD_DATE + i * DATE17 + DATE17 - 1] = 0xec;
+		CHECK(snprintf(name, sizeof(name),
+		    "Kodak descriptor date at offset %u",
+		    VD_DATE + i * DATE17) > 0);
+		expect(&image, FSIMG_OK, name);
+		verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+		    "invalid ISO 9660 primary descriptor date", name);
+		bzero(p + VD_DATE + i * DATE17, DATE17);
+	}
+	memset(p + VD_DATE, '0', DATE17 - 1);
 	expect(&image, FSIMG_OK, "ASCII absent date");
-	bzero(p + VD_DATE, 17);
-	expect(&image, FSIMG_OK, "binary absent date");
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "ASCII absent date");
+	bzero(p + VD_DATE, DATE17);
+	expect(&image, FSIMG_OK, "binary absent dates");
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "binary absent dates");
+	bcopy("1992020510203942", p + VD_DATE, DATE17 - 1);
+	p[VD_DATE + DATE17 - 1] = 0xec;
+	expect(&image, FSIMG_OK,
+	    "valid descriptor date with hundredths and offset");
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "valid descriptor date with hundredths and offset");
+	bzero(p + VD_DATE, DATE17);
 	put32(p + VD_SPACE, 17);
 	expect(&image, FSIMG_ECORRUPT, "descriptor beyond declared space");
+	free(image.bytes);
+
+	image = verify_tree(true);
+	next = image.bytes + 17 * BLOCK;
+	expect(&image, FSIMG_OK, "valid Joliet descriptor with absent dates");
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_OK, NULL,
+	    "valid Joliet descriptor with absent dates");
+	bcopy("2023023000000000", next + VD_DATE, DATE17 - 1);
+	expect(&image, FSIMG_OK, "invalid Joliet descriptor date (Feb 30)");
+	verify_expect(&image, FSIMG_ISO_VIEW_PRIMARY, 0, FSIMG_ECORRUPT,
+	    "invalid ISO 9660 Joliet descriptor date",
+	    "invalid Joliet descriptor date (Feb 30)");
+	fixture_new(&f, &image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_JOLIET) == FSIMG_OK);
+	CHECK(walk(&f) == FSIMG_OK);
+	fixture_free(&f);
 	free(image.bytes);
 }
 
@@ -1158,6 +1235,20 @@ test_extraction_and_selection(void)
 		fixture_free(&f);
 		remove_tree(parent, "out");
 	}
+	bcopy("19920205102039\0\0", image.bytes + 16 * BLOCK + VD_DATE,
+	    DATE17 - 1);
+	image.bytes[16 * BLOCK + VD_DATE + DATE17 - 1] = 0xec;
+	fixture_new(&f, &image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+	CHECK(extract(&f, parent, NULL) == FSIMG_OK);
+	fd = openat(parent, "out/A.TXT", O_RDONLY | O_NOFOLLOW);
+	CHECK(fd >= 0);
+	CHECK(read(fd, buffer, sizeof(buffer)) == 5);
+	CHECK(bcmp(buffer, "hello", 5) == 0);
+	CHECK(close(fd) == 0);
+	fixture_free(&f);
+	remove_tree(parent, "out");
+	bzero(image.bytes + 16 * BLOCK + VD_DATE, DATE17);
 	/* Extraction must concatenate sections and discard extent padding. */
 	put32(image.bytes + ROOT * BLOCK + 68 + DR_SIZE, BLOCK);
 	image.bytes[ROOT * BLOCK + 68 + DR_FLAGS] = 0x80;
@@ -5535,7 +5626,7 @@ main(int argc, char **argv)
 	test_descriptor_text_printability_and_view_selection();
 	test_descriptor_joliet_unicode_and_hostile_units();
 	test_descriptor_dates_offset_fraction_and_utc_range();
-	test_descriptor_malformed_dates_fail_at_open_in_either_descriptor();
+	test_descriptor_malformed_dates_read_absent_in_either_descriptor();
 	test_probe();
 	test_descriptors();
 	test_geometry();

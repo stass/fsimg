@@ -62,7 +62,7 @@ holding validated values only:
 
 | Type | Fields |
 | --- | --- |
-| `iso_descriptor_t` | Type, version, block, and for a primary or supplementary descriptor the volume space size, path table size and blocks, root record, label bytes, dates, Joliet level |
+| `iso_descriptor_t` | Type, version, block, and for a primary or supplementary descriptor the volume space size, path table size and blocks, root record, label bytes, dates and whether one was malformed, Joliet level |
 | `iso_record_t` | Length, extended attribute blocks, extent, data length, date, flags, identifier offset and length, system use offset and length |
 | `iso_path_record_t` | Identifier length and bytes, extent, parent number |
 | `iso_rr_t` | Presence bits and values of `PX`, `TF`, `CL`, `PL`, `RE`; the name length; the link-target length; the refused-entry class |
@@ -318,10 +318,14 @@ It runs:
    nonzero skip count makes verification `FSIMG_EUNSUPPORTED`, with or
    without Rock Ridge, since the cursor reads no stream behind skipped
    bytes.
-2. **Header claims.** The system area, each descriptor block, each path
+2. **Descriptor dates.** A primary or Joliet descriptor date that open
+   read as absent because it is
+   [malformed](design-iso9660.md#descriptor-dates) makes verification
+   `FSIMG_ECORRUPT`; open records it in the decoded descriptor.
+3. **Header claims.** The system area, each descriptor block, each path
    table and its copies, the boot catalog and the part of each boot
    image's extent within the volume go into the claim stream.
-3. **Walks.** The common walker runs once per offered view, with the
+4. **Walks.** The common walker runs once per offered view, with the
    driver's walk view set before each start and a finished walker released
    between them, under the [several-walks rule](design-directories.md#several-walks).
    The selected view is first and counted: `fsimg_verify_account()`
@@ -344,7 +348,7 @@ It runs:
    when replay or a placeholder's check reads it again.
    Each walk admits and charges its entries, so verifying an image with
    three views charges the entry limit three times.
-4. **Claims.** Each claim is `(start byte, end byte, class, hierarchy)`:
+5. **Claims.** Each claim is `(start byte, end byte, class, hierarchy)`:
    directories, path tables, the boot catalog, descriptors and data
    rounded to whole blocks, continuation areas exact. The stream is sorted
    externally by start, end and class, and one sweep applies the
@@ -357,7 +361,7 @@ It runs:
    are the identical boot-catalog interval, which sorts just before the
    data claims identical to it, so the exception is a comparison with the
    previous metadata claim. Each sweep step charges the session.
-5. **Path tables.** For each hierarchy, both tables are decoded in
+6. **Path tables.** For each hierarchy, both tables are decoded in
    lockstep, record by record, requiring equal records, the
    [ordering rules](design-iso9660.md#path-tables) and the exact size;
    optional copies are compared byte for byte. Each record's parent extent
@@ -366,7 +370,7 @@ It runs:
    every physical directory record, `(opened extent, the containing
    directory's extent, identifier)`, admitted or not, are sorted by extent
    and must be equal.
-6. **Relocation.** The `rockridge` walk emits the extent of each
+7. **Relocation.** The `rockridge` walk emits the extent of each
    directory it enters through `CL`. The `primary` walk, which frames
    every record's SUSP stream when the volume uses SUSP, emits the
    extent of each directory whose second dot record carries `PL`, having
@@ -374,7 +378,7 @@ It runs:
    two lists must be equal; neither repeats an extent, since each walk
    prepares a directory once. `RE` takes no part: mkisofs and xorriso mark
    their relocation directory itself with `RE` and no `CL` names it.
-7. **El Torito.** Open validated the boot catalog; its extents are in the
+8. **El Torito.** Open validated the boot catalog; its extents are in the
    claim stream.
 
 The report counts the selected view's delivered files and directories,
@@ -643,7 +647,9 @@ beside a seeded failure that proves the check ran:
   Joliet descriptor, a date with a nonzero offset and hundredths, and a
   date whose UTC year leaves the range: open and full verification
   succeed, and exactly the reportable fields appear; a non-digit, month
-  13 or year 0 in any of the four dates is `FSIMG_ECORRUPT` at open.
+  13, year 0 or zero-byte hundredths in any of the four dates of either
+  descriptor opens, lists and extracts with the date absent, and full
+  verification is `FSIMG_ECORRUPT`.
   External corpus images report their producers' application identifiers,
   compared with `xorriso -pvd_info`.
 * **CLI.** Each key accepted and transported through the worker job, with

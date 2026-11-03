@@ -341,11 +341,20 @@ volume_decode(const unsigned char *raw, iso_descriptor_t *out,
 	out->path_table_m_copy = fsimg_load_be32(raw + VD_PATH_TABLE_M_COPY);
 	bcopy(raw + VD_LABEL, out->label, ISO_LABEL_BYTES);
 	bcopy(raw + ISO_DESCRIPTOR_FIELD_BASE, out->fields, ISO_DESCRIPTOR_BYTES);
+	/* The four volume dates describe the volume to a person and no file
+	 * depends on them, so a malformed one reads as absent rather than
+	 * refusing the volume; full verification fails on malformed_date.
+	 * Rock Ridge timestamps and recording dates, which are entry metadata,
+	 * stay strict.
+	 */
 	for (unsigned i = 0; i < ISO_DESCRIPTOR_DATES; i++) {
-		status = iso_date17_decode(raw + VD_DATES + i * DATE17_BYTES,
-		    &present, &date, error);
-		if (status != FSIMG_OK)
-			return (status);
+		if (iso_date17_decode(raw + VD_DATES + i * DATE17_BYTES,
+		    &present, &date, NULL) != FSIMG_OK) {
+			out->malformed_date = true;
+			out->date_present[i] = false;
+			out->date_seconds[i] = 0;
+			continue;
+		}
 		out->date_present[i] = present;
 		out->date_seconds[i] = date.seconds;
 	}

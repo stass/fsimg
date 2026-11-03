@@ -169,7 +169,16 @@ sixteen ASCII digits `YYYYMMDDHHMMSScc`, with `cc` hundredths of a second,
 then the offset byte of the recording date. Sixteen `0` digits, or sixteen
 zero bytes, with a zero offset mean absent. Otherwise every digit must be a
 decimal digit and the fields must form a valid date, year 1 through 9999,
-else `FSIMG_ECORRUPT`. The precision is ten milliseconds.
+else the date is malformed. The precision is ten milliseconds.
+
+A malformed Rock Ridge long timestamp is `FSIMG_ECORRUPT`, as a malformed
+recording date is, since it is an entry's metadata. A malformed date in a
+primary or Joliet descriptor is read as absent, and full verification
+fails on it with `FSIMG_ECORRUPT`, because a qualified producer writes
+digits there. The four volume dates describe the volume to a person and
+nothing else reads them, so a reader that refused the volume over one
+would lose every file to protect a field no file depends on; a 1992 Kodak
+Photo CD writes its hundredths as two zero bytes, for example.
 
 ## Primary and supplementary descriptors
 
@@ -197,10 +206,10 @@ else `FSIMG_ECORRUPT`. The precision is ten milliseconds.
 | 702 | 37 | Copyright file identifier | Descriptor text, file identifier |
 | 739 | 37 | Abstract file identifier | Descriptor text, file identifier |
 | 776 | 37 | Bibliographic file identifier | Descriptor text, file identifier |
-| 813 | 17 | Volume creation date | Valid or absent; reported |
-| 830 | 17 | Volume modification date | Valid or absent; reported |
-| 847 | 17 | Volume expiration date | Valid or absent; reported |
-| 864 | 17 | Volume effective date | Valid or absent; reported |
+| 813 | 17 | Volume creation date | [Descriptor date](#descriptor-dates); reported |
+| 830 | 17 | Volume modification date | Descriptor date; reported |
+| 847 | 17 | Volume expiration date | Descriptor date; reported |
+| 864 | 17 | Volume effective date | Descriptor date; reported |
 | 881 | 1 | File structure version | 1 |
 | 883 | 512 | Application use | Not interpreted |
 
@@ -293,8 +302,9 @@ date is reported when present, rendered in UTC as `YYYY-MM-DD HH:MM:SS`
 with its hundredths dropped, the form of the listing's modification time;
 a present date whose UTC year leaves 1 through 9999 is not reported. No
 content of a text field is an error at open or at verification. A
-malformed date is `FSIMG_ECORRUPT` at open, as the descriptor date rule
-says, in either descriptor.
+malformed date, in either descriptor, is read as absent and not reported,
+and full verification fails on it, as the
+[descriptor date rule](#descriptor-dates) says.
 
 ### Supplementary descriptors and Joliet
 
@@ -1282,7 +1292,7 @@ shown, when reading unless the row says at verification.
 | --- | --- | --- |
 | Probe | PVD at block 16; boot record at 16 and PVD at 17; the smallest volume each producer writes | No `CD001` (EFORMAT); 16 blocks (EFORMAT); block size 512 (EUNSUPPORTED); disagreeing halves (ECORRUPT) |
 | Descriptor set | PVD, SVD, boot record, partition, enhanced, terminator in any legal order; trailing UDF recognition sequence | No terminator within 64 (EUNSUPPORTED); missing PVD (ECORRUPT); nonzero terminator byte (ECORRUPT); two Joliet SVDs (EUNSUPPORTED); differing second PVD (EUNSUPPORTED) |
-| Descriptor text and dates | Every text field at its full width and empty; lowercase and punctuation outside the class, reported; a leading `_`, reported verbatim; UCS-2 text in the SVD read by the `joliet` view; all four dates present, with a nonzero offset and nonzero hundredths; years 1 and 9999 | A control byte, a byte above `0x7e` or an unpaired surrogate in a field (opens and verifies; the field is not reported); a non-digit, month 13 or year 0 in any date (ECORRUPT); a date at year 1 with an offset that moves its UTC year to 0 (opens; the date is not reported) |
+| Descriptor text and dates | Every text field at its full width and empty; lowercase and punctuation outside the class, reported; a leading `_`, reported verbatim; UCS-2 text in the SVD read by the `joliet` view; all four dates present, with a nonzero offset and nonzero hundredths; years 1 and 9999 | A control byte, a byte above `0x7e` or an unpaired surrogate in a field (opens and verifies; the field is not reported); a non-digit, month 13, year 0 or zero-byte hundredths in any date (opens; the date is not reported; ECORRUPT at verification); a date at year 1 with an offset that moves its UTC year to 0 (opens; the date is not reported) |
 | Geometry | Slice longer than the volume; slice missing unreferenced tail blocks | An extent past the volume by one block, and with a length near `2^32` blocks (ECORRUPT); a referenced block past a short slice (ECORRUPT) |
 | Records | Records filling a block exactly; empty-tail blocks; 2048-byte boundaries; a directory length of its exact record bytes | Odd length, length 33, crossing a block, a record past the directory length, nonzero tail padding, a zero directory length, `LEN_FI` past the record (ECORRUPT); reserved flags (ECORRUPT); interleave (EUNSUPPORTED) |
 | Dot records and tree | Root and nested directories | Wrong self or parent extent (ECORRUPT); a child naming the root (ECORRUPT); two records opening one directory (ECORRUPT); a misplaced dot identifier (ECORRUPT) |
