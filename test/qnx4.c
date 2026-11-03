@@ -5322,6 +5322,152 @@ number(const char *text)
 	return ((uint64_t)value);
 }
 
+/* Keep the public tree small while retaining the formatter's system records. */
+static void
+identity_volume(gen_t *g)
+{
+	gen_init(g, GEN_DEFAULT_N);
+	gen_file(g, OBJ_ROOT, "hello", (const unsigned char *)"hello", 5);
+	gen_finish(g);
+}
+
+/* Reading remains available after identity is waived; verification refuses it. */
+static void
+check_qnx4_assumed_identity(fixture_t *f, const char *message)
+{
+	static const char *const paths[] = { "/.boot", "/.altboot", "/hello" };
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_volume_info_t info;
+	fsimg_error_t error;
+	const fsimg_entry_t *entry;
+	unsigned char data[5];
+	size_t count;
+
+	fsimg_read_options_init(&options);
+	options.format = "qnx4";
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &error) == FSIMG_EFORMAT);
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &error) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f->reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.clean);
+	for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, paths[i]) == 0);
+	}
+	CHECK(entry->size == sizeof(data));
+	CHECK(fsimg_reader_read_at(f->reader, 0, data,
+	    sizeof(data), &count, NULL) == FSIMG_OK);
+	CHECK(count == sizeof(data));
+	CHECK(bcmp(data, "hello", sizeof(data)) == 0);
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_DONE);
+	CHECK(entry == NULL);
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f->reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	CHECK(!report.complete);
+	CHECK(strcmp(error.message, message) == 0);
+}
+
+static void
+test_qnx4_assumed_identity_reads_volume_with_damaged_root_name(void)
+{
+	gen_t g;
+	fixture_t f;
+
+	identity_volume(&g);
+	g.image[512] = 'X';
+	fixture_new(&f, g.image, g.length);
+	check_qnx4_assumed_identity(&f, "qnx4 identity was assumed: "
+	    "root-block record 0 lacks the name / or a status of 0x01 or 0x21");
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_qnx4_assumed_identity_reads_volume_with_damaged_root_status(void)
+{
+	gen_t g;
+	fixture_t f;
+
+	identity_volume(&g);
+	g.image[512 + INODE_STATUS] = 0;
+	fixture_new(&f, g.image, g.length);
+	check_qnx4_assumed_identity(&f, "qnx4 identity was assumed: "
+	    "root-block record 0 lacks the name / or a status of 0x01 or 0x21");
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_qnx4_assumed_identity_rejects_nondirectory_root(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	identity_volume(&g);
+	fixture_new(&f, g.image, g.length);
+	g.image[512] = 'X';
+	put16(g.image + 512 + INODE_MODE, 0100644);
+	fsimg_read_options_init(&options);
+	options.format = "qnx4";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "QNX4 root record is not a directory") == 0);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_qnx4_assumed_identity_rejects_root_extent_outside_volume(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	identity_volume(&g);
+	fixture_new(&f, g.image, g.length);
+	g.image[512] = 'X';
+	put32(g.image + 512 + INODE_FIRST, g.blocks + 1);
+	fsimg_read_options_init(&options);
+	options.format = "qnx4";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "QNX4 root directory lies outside the volume") == 0);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_qnx4_intact_volume_with_assume_identity_verifies(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+
+	identity_volume(&g);
+	fixture_new(&f, g.image, g.length);
+	fsimg_read_options_init(&options);
+	options.format = "qnx4";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5377,5 +5523,10 @@ main(int argc, char **argv)
 	if (skipped != 0)
 		printf("SKIP: %u sparse-volume cases; every other case passed\n",
 		    skipped);
+	test_qnx4_assumed_identity_reads_volume_with_damaged_root_name();
+	test_qnx4_assumed_identity_reads_volume_with_damaged_root_status();
+	test_qnx4_assumed_identity_rejects_nondirectory_root();
+	test_qnx4_assumed_identity_rejects_root_extent_outside_volume();
+	test_qnx4_intact_volume_with_assume_identity_verifies();
 	return (skipped == 0 ? 0 : 77);
 }

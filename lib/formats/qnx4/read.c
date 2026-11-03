@@ -89,10 +89,12 @@ qnx4_open(fsimg_reader_t *reader,
 	reader->info.time_basis = FSIMG_TIME_UTC;
 	reader->info.scope = FSIMG_VALIDATION_HEADER;
 	/* The root record's clean bit is set by the formatter and on unmount
-	 * and clear while the volume is mounted.
+	 * and clear while the volume is mounted: identity allows 0x01, mounted,
+	 * and 0x21, clean. Any other status is an assumed identity whose bit
+	 * means nothing, which reports the clean state.
 	 */
-	reader->info.clean = (qnx4->root[QNX4_RECORD_ROOT].status &
-	    QNX4_STATUS_CLEAN) != 0;
+	reader->info.clean = qnx4->root[QNX4_RECORD_ROOT].status !=
+	    QNX4_STATUS_USED;
 	reader->info.io_error = false;
 	return (FSIMG_OK);
 }

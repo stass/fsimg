@@ -255,8 +255,12 @@ bool qnx4_bytes_zero(const unsigned char *, size_t);
 
 /* volume.c: geometry, the root block and the format-owned objects. */
 fsimg_status_t qnx4_volume_open(fsimg_reader_t *, fsimg_error_t *);
-/* descriptor.c: the root block's identity, for the probe and for open. */
-fsimg_status_t qnx4_root_block_identity(const unsigned char *, uint64_t,
+/* descriptor.c: the root block's identity and its validation, for the
+ * probe and for open.
+ */
+bool qnx4_root_identity(const unsigned char *);
+bool qnx4_root_is_directory(const unsigned char *);
+fsimg_status_t qnx4_root_block_validate(const unsigned char *, uint64_t,
     fsimg_error_t *);
 fsimg_status_t qnx4_root_fixed_slot(fsimg_reader_t *, unsigned,
     const unsigned char *, fsimg_error_t *);

@@ -136,7 +136,17 @@ check_root_block(fsimg_reader_t *reader, fsimg_error_t *error)
 		    &qnx4->root[i]);
 
 	record = &qnx4->root[QNX4_RECORD_ROOT];
-	status = qnx4_root_block_identity(qnx4->root_block,
+	/* Record 0's name and status are the identity, which a caller
+	 * assuming it waives; everything after is validation.
+	 */
+	status = fsimg_reader_identity(reader,
+	    qnx4_root_identity(qnx4->root_block),
+	    "no QNX4 root directory record",
+	    "root-block record 0 lacks the name / or a status of 0x01 or 0x21",
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = qnx4_root_block_validate(qnx4->root_block,
 	    qnx4->geometry.volume_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);

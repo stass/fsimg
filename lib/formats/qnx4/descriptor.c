@@ -59,45 +59,71 @@ const fsimg_format_t fsimg_qnx4_format = {
  * volume carries that at byte 512: a FAT volume has its reserved sectors
  * or tables there, exFAT its boot region and QNX6 its boot area.
  *
- * Once the signature matches, the probe claims the image. The root
- * directory's first extent must lie inside the slice, and records 1 to 4
- * must be the four table records the formatter writes; open validates the
- * rest, including where the root directory must start.
+ * Only the name and the status are identity: a caller assuming the
+ * identity skips them, and the directory mode, validation, is then refused
+ * as open refuses it. Once the signature matches, the probe claims the
+ * image. The root directory's first extent must lie inside the slice, and
+ * records 1 to 4 must be the four table records the formatter writes; open
+ * validates the rest, including where the root directory must start.
  */
 static fsimg_status_t
 qnx4_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    bool assume_identity FSIMG_UNUSED,
-    const fsimg_format_variant_t **variant, fsimg_error_t *error)
+    bool assume_identity, const fsimg_format_variant_t **variant,
+    fsimg_error_t *error)
 {
+	const unsigned char *block;
+
 	*variant = &qnx4_variants[0];
 	if (length < QNX4_PROBE_BYTES)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no QNX4 root block"));
-	return (qnx4_root_block_identity(prefix + QNX4_BLOCK_BYTES,
-	    volume_bytes, error));
+	block = prefix + QNX4_BLOCK_BYTES;
+	if (!assume_identity &&
+	    (!qnx4_root_identity(block) || !qnx4_root_is_directory(block)))
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "no QNX4 root directory record"));
+	return (qnx4_root_block_validate(block, volume_bytes, error));
 }
 
-/* The root block's identity, shared by the probe and by open, which
- * checks the bytes it reads again: record 0 is "/" with a directory mode
- * and status 0x01 or 0x21, its first extent lies in the slice, and records
- * 1 to 4 have empty names and their table statuses.
+/* The root block's identity: record 0 is named "/" with fifteen NULs and
+ * has status 0x01 or 0x21.
  */
-fsimg_status_t
-qnx4_root_block_identity(const unsigned char *block, uint64_t volume_bytes,
-    fsimg_error_t *error)
+bool
+qnx4_root_identity(const unsigned char *block)
 {
 	static const unsigned char root_name[QNX4_DIRECT_NAME_MAX] = "/";
+	uint8_t status = block[0x3f];
+
+	return (bcmp(block, root_name, sizeof(root_name)) == 0 &&
+	    (status == QNX4_STATUS_USED ||
+	    status == (QNX4_STATUS_USED | QNX4_STATUS_CLEAN)));
+}
+
+bool
+qnx4_root_is_directory(const unsigned char *block)
+{
+	qnx4_inode_t record;
+
+	qnx4_inode_decode(block, &record);
+	return ((record.mode & QNX4_MODE_TYPE) == QNX4_MODE_DIRECTORY);
+}
+
+/* The root block's validation, shared by the probe and by open, which
+ * checks the bytes it reads again: record 0 is a directory whose first
+ * extent lies in the slice, and records 1 to 4 have empty names and their
+ * table statuses. Traversal starts from that extent.
+ */
+fsimg_status_t
+qnx4_root_block_validate(const unsigned char *block, uint64_t volume_bytes,
+    fsimg_error_t *error)
+{
 	qnx4_inode_t record;
 	uint64_t last;
 
 	qnx4_inode_decode(block, &record);
-	if (bcmp(block, root_name, sizeof(root_name)) != 0 ||
-	    (record.status != QNX4_STATUS_USED &&
-	    record.status != (QNX4_STATUS_USED | QNX4_STATUS_CLEAN)) ||
-	    (record.mode & QNX4_MODE_TYPE) != QNX4_MODE_DIRECTORY)
-		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
-		    FSIMG_OP_READER, "no QNX4 root directory record"));
-
+	if ((record.mode & QNX4_MODE_TYPE) != QNX4_MODE_DIRECTORY)
+		return (qnx4_corrupt(error,
+		    "QNX4 root record is not a directory"));
 	if (record.first_extent.first == 0 || record.first_extent.blocks == 0)
 		return (qnx4_corrupt(error, "QNX4 root directory has no extent"));
 	last = (uint64_t)record.first_extent.first +

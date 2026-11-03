@@ -68,8 +68,13 @@ The probe inspects 1024 bytes: the loader block and the root block. QNX4 has
 no magic number, so the identity signature is root-block record 0: the name
 `/` followed by fifteen NUL bytes, a status of `0x01` or `0x21`, and a
 directory mode type. Without it the probe makes no claim (`FSIMG_EFORMAT`).
-With it the probe checks that the first extent's block is nonzero and that
-the extent lies inside the slice, else `FSIMG_ECORRUPT`; and that records 1
+Under an [assumed identity](design-formats.md#format-descriptors-and-profiles)
+the probe and open skip the name and the status, QNX4's identity checks,
+and open records them; the directory mode is then validation, and a root
+record of another type is `FSIMG_ECORRUPT`. An assumed status reports the
+volume clean, since its clean bit means nothing. With the signature, or
+under an assumed identity, the probe checks that the first extent's block
+is nonzero and that the extent lies inside the slice, else `FSIMG_ECORRUPT`; and that records 1
 to 4 have 16-NUL name fields and the statuses of the format design's table
 (`0x11`, with `0x13` allowed on records 2 and 3), else
 `FSIMG_EUNSUPPORTED`. It then claims the image with `FSIMG_OK`. The probe performs no I/O and allocates nothing. Exclusivity
