@@ -106,6 +106,15 @@ static void test_thresholds(void);
 static void test_deep_tree(void);
 static void test_detection(void);
 static void test_tot_sec16_overrides_boot_code(void);
+static void test_non_pc_boot_records(void);
+static void test_unsigned_tiny_fat_open(void);
+static void test_pc98_boot_record(void);
+static void test_unsigned_media_mismatch_is_not_fat(void);
+static void test_identified_unsigned_geometry_is_corruption(void);
+static void test_unsigned_fat16_head_does_not_check_fourth_byte(void);
+static void test_unsigned_fat16_and_fat32_identification(void);
+static void test_forced_unsigned_fat12_variant(void);
+static void test_geometry_decode_short_boot_record(void);
 static void test_media_check_precedes_mirror_comparison(void);
 static void test_corruption(void);
 static void test_limits(void);
@@ -878,13 +887,13 @@ test_cluster_ceiling(unsigned variant)
 		put32(boot + 36, 2097152);
 		put32(boot + 32, 32 + 4194304 + 0x0ffffff5);
 		put32(boot + 44, 0x0ffffff6);
-		CHECK(fsimg_fat_geometry_decode(boot, UINT64_MAX, &geometry, NULL) == FSIMG_OK);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, &geometry, NULL) == FSIMG_OK);
 		CHECK(fsimg_fat_cluster_valid(&geometry, 0x0ffffff6));
 		put32(boot + 44, 0x0ffffff7);
-		CHECK(fsimg_fat_geometry_decode(boot, UINT64_MAX, &geometry, NULL) == FSIMG_ECORRUPT);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, &geometry, NULL) == FSIMG_ECORRUPT);
 		put32(boot + 44, 2);
 		put32(boot + 32, 32 + 4194304 + 0x0ffffff6);
-		CHECK(fsimg_fat_geometry_decode(boot, UINT64_MAX, &geometry, NULL) == FSIMG_ECORRUPT);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, &geometry, NULL) == FSIMG_ECORRUPT);
 		fixture_close(&f);
 		return;
 	}
@@ -1016,7 +1025,7 @@ test_thresholds(void)
 			put16(boot + 22, (uint16_t)table_sectors);
 		else
 			put32(boot + 36, table_sectors);
-		CHECK(fsimg_fat_geometry_decode(boot, (uint64_t)sectors * 512, &geometry, NULL) == FSIMG_OK);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), (uint64_t)sectors * 512, &geometry, NULL) == FSIMG_OK);
 		CHECK(geometry.variant == variant && geometry.clusters == clusters);
 		fixture_close(&f);
 	}
@@ -1259,6 +1268,253 @@ test_tot_sec16_overrides_boot_code(void)
 	fixture_close(&f);
 }
 
+/* Non-PC boot records identify FAT by the media echo, regardless of jump. */
+static void
+test_non_pc_boot_records(void)
+{
+	static const unsigned char jumps[][3] = {
+		{ 0x60, 0x38, 0x00 }, /* Atari ST BRA.S */
+		{ 0x00, 0x00, 0x00 }, /* Atari disk without a jump */
+		{ 0xeb, 0xfe, 0x90 }  /* MSX-DOS jump to self */
+	};
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_volume_info_t info;
+	const fsimg_entry_t *entry;
+	static const unsigned char no_signature[2] = { 0, 0 };
+
+	for (size_t i = 0; i < sizeof(jumps) / sizeof(jumps[0]); i++) {
+		fixture_init(&f, 12);
+		CHECK(f.fat_offset + 3 <= 8192);
+		write_bytes(&f, 0, jumps[i], sizeof(jumps[i]));
+		write_bytes(&f, 510, no_signature, sizeof(no_signature));
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+		    FSIMG_OK);
+		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+		CHECK(strcmp(info.format, "fat12") == 0);
+		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, "/HELLO.TXT") == 0);
+		fsimg_reader_free(f.reader);
+		f.reader = NULL;
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+		    FSIMG_OK);
+		CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+		CHECK(report.complete);
+		fixture_close(&f);
+	}
+}
+
+/* Opening reads the whole volume when unsigned FAT12 is shorter than 8 KiB. */
+static void
+test_unsigned_tiny_fat_open(void)
+{
+	fixture_t f;
+	fsimg_volume_info_t info;
+	const fsimg_entry_t *entry;
+	unsigned char volume[4096] = { 0 };
+
+	volume[0] = 0x60, volume[1] = 0x38; /* Atari ST BRA.S */
+	put16(volume + 11, 512);
+	volume[13] = 1;
+	put16(volume + 14, 1);
+	volume[16] = 1;
+	put16(volume + 17, 16);
+	put16(volume + 19, 8);
+	volume[21] = 0xf8;
+	put16(volume + 22, 1);
+	volume[512] = 0xf8, volume[513] = 0xff, volume[514] = 0xff;
+
+	fixture_init(&f, 12);
+	CHECK(ftruncate(f.fd, sizeof(volume)) == 0);
+	f.bytes = sizeof(volume);
+	write_bytes(&f, 0, volume, sizeof(volume));
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.format, "fat12") == 0);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_DONE);
+	CHECK(entry == NULL);
+	fixture_close(&f);
+}
+
+/* PC-98's 1024-byte sectors put the identifying echo in the second sector. */
+static void
+test_pc98_boot_record(void)
+{
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_volume_info_t info;
+	const fsimg_entry_t *entry;
+	static const unsigned char no_signature[2] = { 0, 0 };
+
+	fixture_geometry(&f, 12, 1024, 1);
+	CHECK(f.fat_offset + 3 <= 8192);
+	write_bytes(&f, 510, no_signature, sizeof(no_signature));
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.format, "fat12") == 0);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/HELLO.TXT") == 0);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_close(&f);
+}
+
+/* A bad echo is corruption only when the PC signature identifies FAT. */
+static void
+test_unsigned_media_mismatch_is_not_fat(void)
+{
+	fixture_t f;
+	fsimg_error_t error;
+	static const unsigned char unsigned_jump[3] = { 0x60, 0x38, 0x00 };
+	static const unsigned char no_signature[2] = { 0, 0 };
+	static const unsigned char bad_media = 0x55;
+
+	for (unsigned pc_signature = 0; pc_signature < 2; pc_signature++) {
+		fixture_init(&f, 12);
+		if (pc_signature == 0) {
+			write_bytes(&f, 0, unsigned_jump, sizeof(unsigned_jump));
+			write_bytes(&f, 510, no_signature, sizeof(no_signature));
+		}
+		/* Change every table so the failure cannot be mirror disagreement. */
+		for (unsigned table = 0; table < f.tables; table++)
+			write_bytes(&f, f.fat_offset + table * f.table_bytes,
+			    &bad_media, 1);
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) ==
+		    (pc_signature != 0 ? FSIMG_ECORRUPT : FSIMG_EFORMAT));
+		if (pc_signature != 0)
+			CHECK(strcmp(error.message,
+			    "FAT media descriptor does not match the BPB") == 0);
+		else
+			CHECK(strcmp(error.message,
+			    "unrecognized image format") == 0);
+		fixture_close(&f);
+	}
+}
+
+/* The media echo identifies FAT before geometry validation. */
+static void
+test_identified_unsigned_geometry_is_corruption(void)
+{
+	fixture_t f;
+	fsimg_error_t error;
+	unsigned char total_sectors[2];
+	static const unsigned char unsigned_jump[3] = { 0x60, 0x38, 0x00 };
+	static const unsigned char no_signature[2] = { 0, 0 };
+
+	for (unsigned pc_signature = 0; pc_signature < 2; pc_signature++) {
+		fixture_init(&f, 12);
+		CHECK(f.bytes / f.sector_bytes < UINT16_MAX);
+		put16(total_sectors, (uint16_t)(f.bytes / f.sector_bytes + 1));
+		write_bytes(&f, 19, total_sectors, sizeof(total_sectors));
+		if (pc_signature == 0) {
+			write_bytes(&f, 0, unsigned_jump, sizeof(unsigned_jump));
+			write_bytes(&f, 510, no_signature, sizeof(no_signature));
+		}
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) ==
+		    FSIMG_ECORRUPT);
+		fixture_close(&f);
+	}
+}
+
+/* FAT16's third head byte belongs to FAT[1], not FAT[0]. */
+static void
+test_unsigned_fat16_head_does_not_check_fourth_byte(void)
+{
+	fixture_t f;
+	static const unsigned char no_signature[2] = { 0, 0 };
+	/* Clear the dirty/error flags, retaining the reserved low six bits. */
+	static const unsigned char fourth = 0x3f;
+
+	fixture_init(&f, 16);
+	write_bytes(&f, 510, no_signature, sizeof(no_signature));
+	for (unsigned table = 0; table < f.tables; table++)
+		write_bytes(&f, f.fat_offset + table * f.table_bytes + 3,
+		    &fourth, 1);
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	fixture_close(&f);
+}
+
+/* Unsigned identification requires the first FAT head inside the prefix. */
+static void
+test_unsigned_fat16_and_fat32_identification(void)
+{
+	fixture_t f;
+	fsimg_error_t error;
+	fsimg_verify_report_t report;
+	const fsimg_entry_t *entry;
+	static const unsigned char no_signature[2] = { 0, 0 };
+
+	fixture_init(&f, 16);
+	CHECK(f.fat_offset + 3 <= 8192);
+	write_bytes(&f, 510, no_signature, sizeof(no_signature));
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/HELLO.TXT") == 0);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_close(&f);
+
+	/* This FAT32 fixture's 32 reserved sectors put table 0 beyond 8 KiB.
+	 * Identification rejects it before reading its backup boot record.
+	 */
+	fixture_init(&f, 32);
+	CHECK(f.fat_offset >= 8192);
+	write_bytes(&f, 510, no_signature, sizeof(no_signature));
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "unrecognized image format") == 0);
+	fixture_close(&f);
+}
+
+/* Forcing a variant still checks an unsigned volume's cluster-count type. */
+static void
+test_forced_unsigned_fat12_variant(void)
+{
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+	static const unsigned char no_signature[2] = { 0, 0 };
+
+	fixture_init(&f, 12);
+	write_bytes(&f, 510, no_signature, sizeof(no_signature));
+	fixture_open(&f);
+	fsimg_read_options_init(&options);
+	options.format = "fat12";
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader, NULL) == FSIMG_OK);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+	options.format = "fat16";
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader, &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "forced format differs from FAT cluster-count type") == 0);
+	fixture_close(&f);
+}
+
+/* Geometry decoding rejects a buffer shorter than the boot record. */
+static void
+test_geometry_decode_short_boot_record(void)
+{
+	unsigned char boot[511] = { 0 };
+	fat_geometry_t geometry;
+	fsimg_error_t error;
+
+	CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), sizeof(boot),
+	    &geometry, &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "volume is smaller than a boot record") == 0);
+}
+
 static void
 test_media_check_precedes_mirror_comparison(void)
 {
@@ -1316,12 +1572,12 @@ test_geometry(void)
 		put16(boot + 22, 32);
 		sectors = 1 + 64 + 32 + clusters;
 		put16(boot + 19, (uint16_t)sectors);
-		CHECK(fsimg_fat_geometry_decode(boot, (uint64_t)sectors * 512, &geometry, NULL) == FSIMG_OK);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), (uint64_t)sectors * 512, &geometry, NULL) == FSIMG_OK);
 		CHECK(geometry.variant == (clusters == 4084 ? 12 : 16));
 	}
 	/* An illegal fixed BPB field means the record is not FAT at all. */
 	boot[13] = 3;
-	CHECK(fsimg_fat_geometry_decode(boot, UINT64_MAX, &geometry, NULL) == FSIMG_EFORMAT);
+	CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, &geometry, NULL) == FSIMG_EFORMAT);
 	fixture_close(&f);
 
 	/* Cluster 2730 starts at byte 4095 of a packed FAT12 table. Its second
@@ -2465,7 +2721,7 @@ test_capability_bounds(void)
 		uint64_t clusters = variant == 0 ? 4084 : 65524;
 		sectors = 65535 + 2 * UINT64_C(65535) + 512 + (clusters + 1) * 128 - 1;
 		put32(boot + 32, (uint32_t)sectors);
-		CHECK(fsimg_fat_geometry_decode(boot, sectors * 4096, &geometry, NULL) == FSIMG_OK);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), sectors * 4096, &geometry, NULL) == FSIMG_OK);
 		cursor = variant;
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 		CHECK(format.max_volume_bytes >= geometry.volume_bytes);
@@ -2849,6 +3105,15 @@ main(int argc, char **argv)
 	test_walker_poisoned();
 	test_detection();
 	test_tot_sec16_overrides_boot_code();
+	test_non_pc_boot_records();
+	test_unsigned_tiny_fat_open();
+	test_pc98_boot_record();
+	test_unsigned_fat16_head_does_not_check_fourth_byte();
+	test_unsigned_fat16_and_fat32_identification();
+	test_forced_unsigned_fat12_variant();
+	test_geometry_decode_short_boot_record();
+	test_unsigned_media_mismatch_is_not_fat();
+	test_identified_unsigned_geometry_is_corruption();
 	test_media_check_precedes_mirror_comparison();
 	test_corruption();
 	test_limits();

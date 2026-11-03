@@ -49,6 +49,22 @@ class TestFatWitnessesFsimg < Minitest::Test
     end
   end
 
+  # safety_only permits rejection in the general rule policy. These
+  # supported identities specifically must open successfully,
+  # even though their PC boot fields violate the normative requirements.
+  def test_media_echo_identifies_non_pc_volumes_at_open
+    with_run do |run|
+      %w[atari no_jump msx].each do |label|
+        result = run.call(witness("fat.boot.identity.#{label}", REGISTRY), REGISTRY)
+        stages = result.stages
+
+        assert_equal "passed", result.verdict, result.detail
+        assert_equal ["info"], stages.map(&:stage), label
+        assert_equal ["accepted"], stages.map { _1.outcome.kind }, label
+      end
+    end
+  end
+
   private
 
   def altered(id, &change) = FsimgSpec::Registry.new(REGISTRY.rules.map { _1.id == id ? change.call(_1) : _1 })

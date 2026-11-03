@@ -108,6 +108,69 @@ class TestFatModel < Minitest::Test
     assert FsimgSpec.undefined?(model.common)
     assert FsimgSpec.undefined?(model.fat32_extension)
     assert FsimgSpec.undefined?(model.geometry.variant)
+    assert FsimgSpec.undefined?(model.first_fat_entry)
+  end
+
+  def test_first_fat_head_requires_three_bytes_of_table_zero
+    image = FAT16_SECTOR.ljust(4 * 512, "\0") + "\xF8\xFF\xFF".b
+
+    assert_equal "\xF8\xFF\xFF".b, decode(image).first_fat_head
+    assert FsimgSpec.undefined?(decode(image.byteslice(0, image.bytesize - 1)).first_fat_head)
+    assert FsimgSpec.undefined?(decode(FAT16_SECTOR.byteslice(0, 20)).first_fat_head)
+  end
+
+  def test_identity_uses_table_zero_even_when_fat32_selects_another_table
+    bpb = FAT32_BPB.merge(bpb_rsvd_sec_cnt: 1)
+    boot = self.class.boot_sector(bpb, Layout::Fat32Extension, FAT32_EXTENSION.merge(bpb_ext_flags: 0x81))
+    boot = boot.byteslice(0, 510) + "\0\0".b
+    image = boot + "\xF8\xFF\xFF\x0F".b
+    image = image.ljust((1 + 1024) * 512, "\0") + [0x0FFF_FFF0].pack("V")
+    model = decode(image)
+
+    assert_equal 0x0FFF_FFF0, model.first_fat_entry
+    assert_equal true, FsimgSpec::Fat::Rules.identity(model)
+    assert_equal false, FsimgSpec::Fat::Rules.media_echo(model)
+  end
+
+  def test_unsigned_identity_precedes_geometry_and_requires_mtools_head
+    boot = self.class.boot_sector(FAT16_BPB.merge(bpb_sec_per_clus: 0), Layout::Fat16Extension, FAT16_EXTENSION)
+    boot = boot.byteslice(0, 510) + "\0\0".b
+    image = boot.ljust(4 * 512, "\0") + "\xF8\xFF\xFF\x42".b
+
+    assert_equal true, FsimgSpec::Fat::Rules.identity(decode(image))
+    bad_head = boot.ljust(4 * 512, "\0") + "\xF8\x8F\xFF".b
+    assert_equal false, FsimgSpec::Fat::Rules.identity(decode(bad_head))
+  end
+
+  def test_first_fat_entry_uses_the_variant_width_and_masks_reserved_bits
+    fat12 = self.class.boot_sector(FAT16_BPB.merge(bpb_tot_sec32: 1000), Layout::Fat16Extension, FAT16_EXTENSION)
+    [[fat12, 4 * 512, [0xAFF8].pack("v"), 0xFF8],
+     [FAT16_SECTOR, 4 * 512, [0xFFF8].pack("v"), 0xFFF8],
+     [FAT32_SECTOR, 32 * 512, [0xAFFF_FFF8].pack("V"), 0x0FFF_FFF8]].each do |boot, offset, entry, expected|
+      image = boot.ljust(offset, "\0") + entry
+
+      assert_equal expected, decode(image).first_fat_entry, "entry at #{offset}"
+      assert FsimgSpec.undefined?(decode(image.byteslice(0, image.bytesize - 1)).first_fat_entry)
+    end
+  end
+
+  def test_first_fat_entry_uses_the_active_fat_only_when_mirroring_is_disabled
+    [0x0001, 0x0081].each do |flags|
+      boot = self.class.boot_sector(FAT32_BPB, Layout::Fat32Extension, FAT32_EXTENSION.merge(bpb_ext_flags: flags))
+      image = boot.ljust(32 * 512, "\0") + [0x0FFF_FFF0].pack("V")
+      image = image.ljust((32 + 1024) * 512, "\0") + [0x0FFF_FFF8].pack("V")
+      expected = flags == 0x0081 ? 0x0FFF_FFF8 : 0x0FFF_FFF0
+
+      assert_equal expected, decode(image).first_fat_entry, "flags #{flags}"
+    end
+  end
+
+  def test_fat32_cluster_count_without_its_extension_leaves_first_entry_undefined
+    boot = self.class.boot_sector(FAT16_BPB.merge(bpb_tot_sec32: 1_048_576), Layout::Fat16Extension, FAT16_EXTENSION)
+    model = decode(boot)
+
+    assert_equal "fat32", model.geometry.variant
+    assert FsimgSpec.undefined?(model.first_fat_entry)
   end
 
   # The scopes beyond the boot sector follow from the tree: unknown, it

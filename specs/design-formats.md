@@ -40,11 +40,16 @@ likewise, and the volume signature selects the variant. Detection follows one bo
   reads once through the reader's session and cuts to the volume length. The
   probe is a pure function of those bytes and the volume length: it performs
   no I/O, never opens the volume, and allocates no driver state.
-* A probe first tests its identity signature: fixed bytes that no other
-  registered format can legitimately carry at those offsets. exFAT's is its
-  jump and `EXFAT` name with a zero legacy BPB. FAT's is the jump and boot
-  signature, a legal fixed BPB, and not the exFAT signature, so other boot
-  records that carry a BPB, such as NTFS, are not FAT claims. Only after that
+* A probe first tests its identity signature: fixed bytes, at fixed offsets
+  or at offsets its own header fields give, that no other registered format
+  can legitimately carry there. exFAT's is its
+  jump and `EXFAT` name with a zero legacy BPB. FAT's is a legal fixed BPB
+  without the exFAT signature, vouched for either by the PC boot signature
+  (an x86 jump and `0x55AA`) or by a first FAT that begins, after the
+  reserved sectors and inside the probe prefix, with the BPB media byte and
+  two bytes of ones, so other boot records that carry a BPB,
+  such as NTFS, are not FAT claims
+  ([FAT reader](design-fat-reader.md#identification-and-geometry)). Only after that
   signature matches can the probe claim the image, as a match, recognized but
   unsupported, or corrupt. Without the signature it returns no claim
   (`FSIMG_EFORMAT`).

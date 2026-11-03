@@ -27,18 +27,31 @@ module FsimgSpec
     # It is Undefined with the boot sector, with the variant of a volume
     # that has a FAT32 extension, or when the image ends before the record.
     #
-    # The model does not decode the allocation tables or directories. tree
-    # is the known tree the case says its image holds, an Array of
-    # WalkedEntry that KnownTree builds: an unmutated base its recipe's
-    # tree, an image fsimg created the source tree the harness wrote
+    # first_fat_entry is the active table's FAT[0], with its variant's
+    # meaningful bits, or Undefined when its BPB inputs or bytes are absent.
+    # Beyond this entry the model does not decode allocation tables or
+    # directories. first_fat_head is the three leading bytes of table 0,
+    # independent of geometry or the active selector, or Undefined when the
+    # BPB or those bytes are absent.
+    #
+    # tree is the known tree the case says its image holds, an Array of
+    # WalkedEntry that KnownTree builds: an unmutated base has its recipe's
+    # tree, and an image fsimg created has the source tree the harness wrote
     # (specs/design-spec-testing.md#cases). A mutated image's tree is
-    # Undefined, and every scope that reads it is unclassified, derived from
-    # it rather than listed.
+    # Undefined. Every scope that reads it is derived as unclassified.
     class Model < Data.define(:image_length, :common, :fat32_extension, :extension, :signature, :fsinfo, :geometry,
-                             :tree)
+                             :tree, :first_fat_entry, :first_fat_head)
       # The boot sector records lie in the volume's first 512 bytes,
       # whatever BPB_BytsPerSec says.
       BOOT_SECTOR_BYTES = 512
+      # FAT12 needs two bytes to recover its low twelve bits; FAT32's
+      # high four bits are reserved and never part of the entry value.
+      EntryFormat = Data.define(:width, :directive, :mask)
+      FIRST_ENTRY_FORMATS = {
+        "fat12" => EntryFormat.new(width: 2, directive: "v", mask: 0xFFF),
+        "fat16" => EntryFormat.new(width: 2, directive: "v", mask: 0xFFFF),
+        "fat32" => EntryFormat.new(width: 4, directive: "V", mask: 0x0FFF_FFFF)
+      }.freeze
       # What each scope of an image (SCOPE_STAGES but input, which a
       # SourceModel answers) reads beyond the boot sector. Every scope is
       # listed, so a scope missing here can never pass for decoded. The
@@ -61,13 +74,14 @@ module FsimgSpec
         fat32_extension = FsimgSpec.derive(common) { _1.bpb_fat_sz16.zero? }
         extension = FsimgSpec.derive(fat32_extension) { record(_1 ? Layout::Fat32Extension : Layout::Fat16Extension, sector) }
         geometry = geometry(common, fat32_extension, extension)
+        first_fat_entry = first_entry(image, common:, fat32_extension:, extension:, geometry:)
         new(
           image_length: image.length,
           common:, fat32_extension:, extension:,
           signature: record(Layout::Signature, sector),
           fsinfo: fsinfo(image, common:, fat32_extension:, extension:, variant: geometry.variant),
           geometry:,
-          tree:
+          tree:, first_fat_entry:, first_fat_head: first_head(image, common)
         )
       end
 
@@ -193,6 +207,41 @@ module FsimgSpec
 
             record(Layout::FsInfo, image.read(sector * common.bpb_byts_per_sec, Layout::FsInfo.new.num_bytes))
           end
+        end
+      end
+
+      # Identification reads table 0 at the fixed BPB offset, before
+      # interpreting geometry or a FAT32 active-table selector.
+      private_class_method def self.first_head(image, common)
+        FsimgSpec.derive(common) do |bpb|
+          offset = bpb.bpb_rsvd_sec_cnt * bpb.bpb_byts_per_sec
+          bytes = image.read(offset, 3)
+          bytes.bytesize == 3 ? bytes : Undefined.new(reason: "first FAT head needs bytes #{offset}-#{offset + 2}")
+        end
+      end
+
+      # Section 4 locates FAT[0] at the start of the active table. The
+      # low ExtFlags nibble selects that table only with mirroring off.
+      private_class_method def self.first_entry(image, common:, fat32_extension:, extension:, geometry:)
+        location = FsimgSpec.derive(common, geometry.variant, geometry.fat_size) do |bpb, variant, fat_size|
+          next Undefined.new(reason: "FAT32 cluster count without a FAT32 extension") if variant == "fat32" && !fat32_extension
+
+          active = if variant == "fat32"
+                     FsimgSpec.derive(extension) { (_1.bpb_ext_flags & 0x80).zero? ? 0 : _1.bpb_ext_flags & 0x0F }
+                   else 0
+                   end
+          FsimgSpec.derive(active) do |table|
+            next Undefined.new(reason: "active FAT #{table} is outside the table count") if table >= bpb.bpb_num_fats
+
+            [(bpb.bpb_rsvd_sec_cnt + (table * fat_size)) * bpb.bpb_byts_per_sec, FIRST_ENTRY_FORMATS.fetch(variant)]
+          end
+        end
+        return location if FsimgSpec.undefined?(location)
+
+        offset, format = location
+        bytes = image.read(offset, format.width)
+        if bytes.bytesize == format.width then bytes.unpack1(format.directive) & format.mask
+        else Undefined.new(reason: "FAT[0] needs bytes #{offset}-#{offset + format.width - 1}")
         end
       end
 

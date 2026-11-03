@@ -91,7 +91,12 @@ class TestFatCreationsFsimg < Minitest::Test
   # blind spot's reason. The read-back still judges the volume and,
   # where the host has it, agrees, so the case passes; and the rules
   # still judge it: an image whose boot signature is cleared fails
-  # create.
+  # create. safety_only permits a reader to accept such an image, but
+  # create must emit an image that violates no rule, including normative
+  # PC boot requirements (specs/design-spec-testing.md#expectation-derivation).
+  # FAT32's reserved area also puts its echo beyond the identity prefix,
+  # so clearing its signature violates the identity profile. The PC
+  # boot rules apply only to an identified volume.
   def test_fsck_msdosfs_does_not_judge_a_created_image_at_the_cutovers
     Dir.mktmpdir do |stubs|
       checker = self.class.failing_checker(File.join(stubs, "fsck_msdosfs"))
@@ -110,7 +115,8 @@ class TestFatCreationsFsimg < Minitest::Test
           _, result = run.call("fat.create.cluster_count.#{cutover}", alter: unsigned)
 
           assert_equal ["failed", ["create"]], [result.verdict, result.stages.map(&:stage)], cutover
-          assert_match(/\Acreate: the image it wrote violates fat\.boot\.signature/, result.detail)
+          violations = cutover.start_with?("fat32") ? ["fat.boot.identity"] : ["fat.boot.signature"]
+          assert_equal "create: the image it wrote violates #{violations.join(', ')}", result.detail
         end
       end
     end

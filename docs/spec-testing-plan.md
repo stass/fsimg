@@ -658,15 +658,17 @@ runs every reading stage. On an unmutated base, each stage asserts
 acceptance, and `ls`, `extract` and `verify` compare their records with the
 base's known tree; a mutated base leaves the directory, file and
 verification scopes unclassified, so there `ls`, `extract` and `verify`
-assert only that they run without a fault. All 153 deterministic
+assert only that they run without a fault. All 166 deterministic
 witnesses, and the 70 creation witnesses of the `quick` profile, agree with
 the expectations their rules derive.
 
 | Rule ID | Requirement | Category | fsimg (observed) |
 | --- | --- | --- | --- |
 | `fat.boot.present` | The image holds the 512-byte boot sector | normative | `info`: `EFORMAT` for FAT12 images cut to 0, 36, 62 and 511 bytes and a FAT32 image cut to 90 |
-| `fat.boot.jump` | `BS_jmpBoot` is `EB ?? 90` or `E9 ?? ??` | normative | `info`: `EFORMAT` (no claim) |
-| `fat.boot.signature` | `0x55 0xAA` at offsets 510 and 511 | normative | `info`: `EFORMAT` |
+| `fat.boot.jump` | `BS_jmpBoot` is `EB ?? 90` or `E9 ?? ??`; judged on a volume `fat.boot.identity` identifies | normative (`safety_only`) | `info`: accepted, the first FAT echoing the media byte |
+| `fat.boot.signature` | `0x55 0xAA` at offsets 510 and 511; judged on a volume `fat.boot.identity` identifies | normative (`safety_only`) | `info`: accepted, the first FAT echoing the media byte |
+| `fat.boot.identity` | The PC boot signature, or the first FAT beginning with `BPB_Media`, `0xFF`, `0xFF` within the first 8 KiB | profile | `info`: `EFORMAT` without the echo and with the first FAT at byte 8704; Atari, jumpless and MSX boot records accepted |
+| `fat.fat.media` | The active table's `FAT[0]` is `BPB_Media` with every higher bit set, on an identified volume | normative | `info`: `ECORRUPT` for FAT12, FAT16 and FAT32 with the media byte changed in every copy |
 | `fat.bpb.bytes_per_sector` | 512, 1024, 2048 or 4096 | normative | `info`: `EFORMAT` |
 | `fat.bpb.sectors_per_cluster` | Power of two, 1-128 | normative | `info`: `EFORMAT` |
 | `fat.bpb.reserved_sectors` | Nonzero | normative | `info`: `EFORMAT` |

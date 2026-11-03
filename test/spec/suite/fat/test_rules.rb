@@ -28,6 +28,69 @@ class TestFatRules < Minitest::Test
     assert_equal ids.size, ids.uniq.size
   end
 
+  def test_pc_boot_requirements_are_normative_with_safety_only_policy
+    %w[fat.boot.jump fat.boot.signature].each do |id|
+      rule = REGISTRY.fetch(id)
+
+      assert_equal ["normative", "safety_only", nil], [rule.category, rule.policy, rule.status], id
+    end
+  end
+
+  # These images meet the reader's identity profile while violating the
+  # specification's PC boot requirements. Their targeted classification
+  # preserves both facts rather than calling the images normative FAT.
+  def test_non_pc_identity_witnesses_satisfy_the_profile_and_keep_normative_violations
+    with_cases do |cases|
+      { "atari" => %w[fat.boot.jump fat.boot.signature], "no_jump" => ["fat.boot.jump"],
+        "msx" => ["fat.boot.signature"] }.each do |label, expected|
+        classified = cases.call(witness("fat.boot.identity.#{label}"))
+
+        assert_nil classified.defect
+        assert_equal expected, classified.kase.recipe.actual_violations.map(&:rule), label
+        assert_equal ["info"], classified.kase.recipe.stages
+      end
+    end
+  end
+
+  def test_media_mismatch_is_corruption_and_unsigned_identity_failure_is_format
+    with_cases do |cases|
+      %w[fat12 fat16 fat32].each do |variant|
+        classified = cases.call(witness("fat.fat.media.#{variant}"))
+
+        assert_equal ["fat.fat.media"], classified.kase.recipe.actual_violations.map(&:rule), variant
+        assert_equal "reject:FSIMG_ECORRUPT", classified.kase.expected.fetch("info").to_s
+      end
+      beyond = cases.call(witness("fat.boot.identity.echo_beyond_prefix"))
+
+      assert_equal "\xF8\xFF\xFF".b, beyond.model.first_fat_head
+      assert_includes beyond.kase.recipe.actual_violations.map(&:rule), "fat.boot.identity"
+      %w[no_echo echo_beyond_prefix].each do |label|
+        classified = cases.call(witness("fat.boot.identity.#{label}"))
+        expectation = FsimgSpec::Expectation.derive(classified.kase.classification, "info")
+
+        assert_equal "reject:FSIMG_EFORMAT", expectation.to_s, label
+      end
+    end
+  end
+
+  # Breaking a PC boot field on an echo-identified base still violates
+  # that field's rule; applicability does not hide its targeted witnesses.
+  def test_pc_boot_field_witnesses_violate_their_rule_on_identified_volumes
+    with_cases do |cases|
+      targeted = WITNESSES.select { %w[fat.boot.jump fat.boot.signature].include?(_1.intended) }
+
+      refute_empty targeted
+      targeted.each do |item|
+        classified = cases.call(item)
+
+        assert_nil classified.defect, item.id
+        assert_equal true, Fat::Rules.identity(classified.model), item.id
+        assert_includes classified.kase.recipe.actual_violations.map(&:rule), item.intended, item.id
+        assert_equal ["info"], classified.kase.recipe.stages, item.id
+      end
+    end
+  end
+
   # Classification is the generator's check: a valid witness violates
   # nothing, and a targeted one violates its intended rule.
   def test_every_witness_classifies_as_its_generator_meant

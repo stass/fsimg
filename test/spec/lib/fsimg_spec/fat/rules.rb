@@ -9,9 +9,8 @@ module FsimgSpec
     # 2005 by section and field, as the PDF numbers them; each profile rule
     # cites the fsimg design that states the policy.
     #
-    # Every rule but the name and destination rules reads the boot sector,
-    # which the reader checks when it opens the volume
-    # (specs/design-fat-reader.md#identification-and-geometry), so its
+    # The boot sector and FAT[0] rules run when the reader opens the volume
+    # (specs/design-fat-reader.md#identification-and-geometry), so their
     # scope is open. That includes the range of BPB_FSInfo and
     # BPB_BkBootSec; the structures they locate are checked within the
     # verification scope. The name rules read the tree's names, which the
@@ -95,8 +94,8 @@ module FsimgSpec
 
       def self.cite(section, field) = "#{SPECIFICATION}, section #{section}, #{field}"
 
-      # The boot sector and the volume's identity signature: without them,
-      # no FAT decoder claims the image (specs/design-formats.md).
+      # The specification's PC boot requirements are normative, while
+      # the reader's identity profile also recognizes non-PC media echoes.
       def self.boot_rules = [
         Rule.new(
           id: "fat.boot.present", category: "normative", policy: "must_reject", status: "FSIMG_EFORMAT", scopes: ["open"],
@@ -106,15 +105,56 @@ module FsimgSpec
                   "the first sector of the volume"
         ),
         Rule.new(
-          id: "fat.boot.jump", category: "normative", policy: "must_reject", status: "FSIMG_EFORMAT", scopes: ["open"],
-          applies_to: ALWAYS, domain: Witnesses::JUMP,
+          id: "fat.boot.jump", category: "normative", policy: "safety_only", scopes: ["open"],
+          applies_to: ->(model, _) { Rules.identity(model) }, domain: Witnesses::JUMP,
           predicate: ->(model, _) { FsimgSpec.derive(model.common) { Rules.jump?(_1.bs_jmp_boot) } },
           source: cite("3.1", "BS_jmpBoot")
         ),
-        field_rule("fat.boot.signature", category: "normative", policy: "must_reject", status: "FSIMG_EFORMAT",
+        field_rule("fat.boot.signature", category: "normative", policy: "safety_only",
+                                         applies_to: ->(model, _) { Rules.identity(model) },
                                          domain: Domain.new(legal: [0xAA55], invalid: [0, 0x55AA], boundaries: [0xAA55]),
-                                         source: cite("3.2 and 3.3", "Signature_word"))
+                                         source: cite("3.2 and 3.3", "Signature_word")),
+        # A media mismatch is corruption only after FAT identification.
+        Rule.new(
+          id: "fat.fat.media", category: "normative", policy: "must_reject", status: "FSIMG_ECORRUPT", scopes: ["open"],
+          applies_to: ->(model, _) { Rules.identity(model) }, domain: Witnesses::FAT_MEDIA,
+          predicate: ->(model, _) { Rules.media_echo(model) },
+          source: "#{cite('4', 'FAT[0]: BPB_Media in the low eight bits, all other bits set')}; " \
+                  "specs/design-fat-reader.md#identification-and-geometry"
+        ),
+        Rule.new(
+          id: "fat.boot.identity", category: "profile", policy: "must_reject", status: "FSIMG_EFORMAT", scopes: ["open"],
+          applies_to: ALWAYS, domain: Witnesses::IDENTITY,
+          predicate: ->(model, _) { Rules.identity(model) },
+          source: "specs/design-fat-reader.md#identification-and-geometry"
+        )
       ]
+
+      # Section 4's entry widths exclude FAT32's reserved high nibble.
+      MEDIA_HIGH_BITS = { "fat12" => 0xF00, "fat16" => 0xFF00, "fat32" => 0x0FFF_FF00 }.freeze
+      IDENTITY_PREFIX_BYTES = 8192
+
+      def self.media_echo(model)
+        FsimgSpec.derive(model.common, model.geometry.variant, model.first_fat_entry) do |bpb, variant, entry|
+          entry == (MEDIA_HIGH_BITS.fetch(variant) | bpb.bpb_media)
+        end
+      end
+
+      # A PC signature identifies the volume without a table read. The
+      # alternative is the strict form of mtools' check, the three-byte head
+      # of table 0 within the identification prefix, independent of variant
+      # and active table.
+      # Missing bytes reject identity rather than leaving it unclassified.
+      def self.identity(model)
+        pc = FsimgSpec.derive(model.common, model.signature) { jump?(_1.bs_jmp_boot) && _2.signature_word == 0xAA55 }
+        return true if pc == true
+
+        echo = FsimgSpec.derive(model.common, model.first_fat_head) do |bpb, head|
+          head == [bpb.bpb_media, 0xFF, 0xFF].pack("C*") &&
+            bpb.bpb_rsvd_sec_cnt * bpb.bpb_byts_per_sec + 3 <= IDENTITY_PREFIX_BYTES
+        end
+        echo == true
+      end
 
       NAMES_SOURCE = "specs/design-fat-reader.md, Names and metadata"
 

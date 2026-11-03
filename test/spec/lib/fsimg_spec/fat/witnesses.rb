@@ -34,10 +34,12 @@ module FsimgSpec
       # parameters that replace the base's, the tree the builder writes
       # into it, mutations of the rendered image, the format forced with
       # -t, and whether the witness is meant to violate the rule.
-      class Variation < Data.define(:label, :base, :parameters, :tree, :mutations, :forced_format, :violates)
+      class Variation < Data.define(:label, :base, :parameters, :tree, :mutations, :forced_format, :violates, :intended)
         include Checked
 
-        def initialize(label:, base:, violates:, parameters: {}, tree: [], mutations: [], forced_format: nil) = super
+        # intended names a collateral rule when this variation satisfies
+        # its generating rule but deliberately violates another one.
+        def initialize(label:, base:, violates:, parameters: {}, tree: [], mutations: [], forced_format: nil, intended: nil) = super
       end
 
       # A case before classification: its id, its builder parameters, tree
@@ -180,7 +182,7 @@ module FsimgSpec
         parameters = BASES.fetch(variation.base).merge(variation.parameters)
         Witness.new(id: "#{rule.id}.#{variation.label}", parameters:, tree: variation.tree,
                     mutations: with_backup_copies(parameters, variation.mutations), forced_format: variation.forced_format,
-                    intended: variation.violates ? rule.id : nil, rule: rule.id)
+                    intended: variation.intended || (variation.violates ? rule.id : nil), rule: rule.id)
       end
 
       # mutations, with each change to the boot sector followed by the same
@@ -253,6 +255,42 @@ module FsimgSpec
           Variation.new(label: hex, base: "fat12", violates:,
                         mutations: [Mutation::ReplaceBytes.new(offset: 0, bytes: [hex].pack("H*"))])
         end
+      }
+
+      # Change the media byte in every table, preserving mirror agreement
+      # and the entry's higher bits. The echo witness leaves FAT12 unchanged.
+      private_class_method def self.bad_media(layout)
+        (0...layout.fat_count).map do |copy|
+          Mutation::SetInteger.new(op: "set_u8", offset: layout.fat_offset(copy), value: layout.media ^ 1)
+        end
+      end
+
+      FAT_MEDIA = lambda { |layouts|
+        [Variation.new(label: "echo", base: "fat12", violates: false)] + layouts.map do |base, layout|
+          Variation.new(label: base, base:, violates: true, mutations: bad_media(layout))
+        end
+      }
+
+      # Non-PC jumps and a missing PC signature can still identify FAT
+      # through the echo. Seventeen reserved 512-byte sectors put FAT[0]
+      # beyond the 8192-byte prefix without damaging the geometry.
+      # no_echo changes byte 0 of every copy, preserving mirror agreement.
+      # Identified non-PC cases target the PC rule they violate, so they
+      # run at that rule's first checking stage rather than as valid cases.
+      IDENTITY = lambda { |layouts|
+        atari = Mutation::ReplaceBytes.new(offset: 0, bytes: "\x60\x38\x00".b)
+        unsigned = Rules::FIELDS.fetch("fat.boot.signature").mutation(0)
+        [
+          Variation.new(label: "atari", base: "fat12", violates: false, intended: "fat.boot.jump", mutations: [atari, unsigned]),
+          Variation.new(label: "no_jump", base: "fat12", violates: false, intended: "fat.boot.jump",
+                        mutations: [Mutation::ReplaceBytes.new(offset: 0, bytes: "\0\0\0".b)]),
+          Variation.new(label: "msx", base: "fat12", violates: false, intended: "fat.boot.signature",
+                        mutations: [Mutation::ReplaceBytes.new(offset: 0, bytes: "\xEB\xFE\x90".b), unsigned]),
+          Variation.new(label: "no_echo", base: "fat12", violates: true,
+                        mutations: [atari, unsigned, *bad_media(layouts.fetch("fat12"))]),
+          Variation.new(label: "echo_beyond_prefix", base: "fat12", violates: true,
+                        parameters: { reserved_sectors: 17 }, mutations: [atari, unsigned])
+        ]
       }
 
       # In order: a FAT12 volume that counts only in BPB_TotSec32, which

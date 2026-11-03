@@ -37,6 +37,9 @@
 
 static fsimg_status_t entry_timestamp(fsimg_metadata_t *, uint32_t,
     uint16_t, uint16_t, unsigned, fsimg_error_t *);
+static bool media_echoed(const unsigned char *, size_t);
+static bool pc_boot_signature(const unsigned char *);
+
 fsimg_status_t
 fsimg_fat_corrupt(fsimg_error_t *error, const char *message)
 {
@@ -55,9 +58,51 @@ fsimg_fat_cluster_offset(const fat_geometry_t *g, uint32_t cluster)
 	return (g->data_offset + (uint64_t)(cluster - 2) * g->cluster_bytes);
 }
 
+/* The PC boot signature: an x86 jump (EB ?? 90 or E9 ?? ??) and 0x55AA at
+ * offset 510.
+ */
+static bool
+pc_boot_signature(const unsigned char *boot)
+{
+	return (((boot[0] == 0xeb && boot[2] == 0x90) || boot[0] == 0xe9) &&
+	    boot[510] == 0x55 && boot[511] == 0xaa);
+}
+
+/* The strict form of mtools' media check: the first FAT, after the reserved
+ * sectors the BPB declares, begins with BPB_Media and two bytes of ones.
+ * The three bytes hold FAT[0] and FAT[1] on FAT12, FAT[0] and the low byte
+ * of FAT[1] on FAT16, and the low three bytes of FAT[0] on FAT32. The
+ * bytes must lie in the prefix.
+ */
+static bool
+media_echoed(const unsigned char *boot, size_t length)
+{
+	uint64_t offset;
+
+	offset = (uint64_t)fsimg_load_le16(boot + 14) * fsimg_load_le16(boot + 11);
+	if (offset > length || length - offset < 3)
+		return (false);
+	return (boot[offset] == boot[21] && boot[offset + 1] == 0xff &&
+	    boot[offset + 2] == 0xff);
+}
+
+/* FAT[0] holds the media byte with every higher bit of the entry set. */
+uint32_t
+fsimg_fat_media_entry(const fat_geometry_t *g)
+{
+	uint32_t mask;
+
+	mask = g->variant == 12 ? 0xfff : g->variant == 16 ? 0xffff : 0x0fffffff;
+	return ((mask & ~0xffu) | g->media);
+}
+
+/* boot holds the first length bytes of the volume: the boot record and
+ * the rest of the identification prefix, which is all identification reads
+ * (specs/design-fat-reader.md#identification-and-geometry).
+ */
 fsimg_status_t
-fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
-    fat_geometry_t *g, fsimg_error_t *error)
+fsimg_fat_geometry_decode(const unsigned char *boot, size_t length,
+    uint64_t input_bytes, fat_geometry_t *g, fsimg_error_t *error)
 {
 	static const unsigned char exfat_reserved[53] = { 0 };
 	uint64_t total_sectors, fat_sectors, root_sectors, data_sector, capacity;
@@ -65,14 +110,18 @@ fsimg_fat_geometry_decode(const unsigned char *boot, uint64_t input_bytes,
 	uint16_t flags;
 
 	bzero(g, sizeof(*g));
-	/* The identity signature is the jump, the boot signature and a legal
-	 * fixed BPB. Without it this is not a FAT volume (FSIMG_EFORMAT), which
+	if (length < 512)
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "volume is smaller than a boot record"));
+	/* The identity is a legal fixed BPB, not exFAT's, vouched for by the
+	 * PC boot signature or by the first FAT echoing the media byte. The
+	 * voucher, the exFAT test and the BPB legality checks below make it;
+	 * each failure means this is not a FAT volume (FSIMG_EFORMAT), which
 	 * keeps other boot records that carry a BPB, such as an MBR or NTFS,
-	 * from being reported as corrupt FAT. Every later check is corruption
-	 * of a recognized FAT volume.
+	 * from being reported as corrupt FAT. Every check after them is
+	 * corruption or an unsupported feature of a recognized FAT volume.
 	 */
-	if (!((boot[0] == 0xeb && boot[2] == 0x90) || boot[0] == 0xe9) ||
-	    boot[510] != 0x55 || boot[511] != 0xaa)
+	if (!pc_boot_signature(boot) && !media_echoed(boot, length))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "unrecognized volume boot record"));
 	/* exFAT zeroes the legacy BPB region through byte 63. OEM text alone is

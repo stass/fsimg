@@ -14,6 +14,12 @@
  * so geometry decoding must refuse any larger count before a reader exists.
  */
 #define FAT_READ_TABLES 2u
+/* The prefix identification reads, at probe and at open. Two of the largest
+ * supported sectors hold the start of the first FAT of any volume with one
+ * reserved sector, whose echo of the media byte identifies a boot record
+ * without the PC boot signature.
+ */
+#define FAT_PROBE_BYTES (2u * 4096u)
 
 typedef struct fat_geometry {
 	uint64_t	 volume_bytes;
@@ -88,8 +94,9 @@ struct fsimg_fat_reader {
 fsimg_status_t fsimg_fat_corrupt(fsimg_error_t *, const char *);
 bool fsimg_fat_cluster_valid(const fat_geometry_t *, uint32_t);
 uint64_t fsimg_fat_cluster_offset(const fat_geometry_t *, uint32_t);
-fsimg_status_t fsimg_fat_geometry_decode(const unsigned char *, uint64_t,
-    fat_geometry_t *, fsimg_error_t *);
+fsimg_status_t fsimg_fat_geometry_decode(const unsigned char *, size_t,
+    uint64_t, fat_geometry_t *, fsimg_error_t *);
+uint32_t fsimg_fat_media_entry(const fat_geometry_t *);
 fsimg_status_t fsimg_fat_short_name(const unsigned char *, char *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_name_validate(const char *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_label(const unsigned char *, char *, fsimg_error_t *);

@@ -9,9 +9,39 @@ examples, with provenance in [references](../docs/references.md).
 
 ## Identification and geometry
 
-Opening reads the 512-byte boot prefix and validates the jump, signature,
-sector size, power-of-two sectors per cluster, reserved area, table count,
-table capacity, root layout, and declared length against its input slice.
+A FAT volume is a boot record with a legal fixed BPB that either carries
+the PC boot signature or whose first FAT echoes its media byte. The legal
+fixed BPB has a supported sector size, a power-of-two sectors per cluster,
+nonzero reserved sector and table counts, a defined media byte, and no
+exFAT signature. The PC boot signature is an x86 jump (`EB ?? 90` or
+`E9 ?? ??`) with `0x55AA` at offset 510. The echo is the strict form of
+the media check mtools makes: the first FAT, after the reserved sectors the
+BPB declares, begins with `BPB_Media` and two bytes of ones. The three
+bytes hold `FAT[0]` and `FAT[1]` on FAT12, `FAT[0]` and the low byte of
+`FAT[1]` on FAT16, and the low three bytes of `FAT[0]` on FAT32, so an
+unsigned FAT12 or FAT16 volume whose `FAT[1]` is a legal end-of-chain value
+other than all ones is not identified. mtools also accepts a first
+FAT beginning with three zero bytes, which some Atari disks carry; fsimg
+does not, since zeros vouch for nothing. The echo identifies FAT disks
+written for other machines, which lack `0x55AA` and often the x86 jump:
+Atari ST disks begin with a 68000 branch or no jump at all, MSX-DOS disks
+with `EB FE 90`, and NEC PC-98 disks use 1024-byte sectors.
+
+Identification, at probe and at open, reads the same prefix: the first
+8 KiB of the volume, or the whole volume when it is shorter. Two of the
+largest supported sectors hold the start of the first FAT of any volume
+with one reserved sector, as on every non-PC floppy. A boot record with
+neither the signature nor the echo inside the prefix, including one whose
+first FAT lies beyond it, is not FAT (`FSIMG_EFORMAT`), which keeps other
+boot records that carry a BPB, such as an MBR or NTFS, from being reported
+as corrupt FAT. Once identified, every later check is corruption or an
+unsupported feature of a recognized volume, whichever form identified it.
+A boot record identified by the signature alone has its media echo checked
+at open (below).
+
+Opening validates the sector size, power-of-two sectors per cluster,
+reserved area, table count, table capacity, root layout, and declared length
+against its input slice.
 The reserved area, the tables and the root region must end within the
 declared volume, and a data region of at least one cluster must follow them.
 A nonzero `BPB_TotSec16` is the sector count and a nonzero `BPB_FATSz16` the

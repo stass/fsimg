@@ -131,7 +131,10 @@ rules. For example, the specification allows any nonzero FAT count
 (`fat.bpb.num_fats.supported`, profile). Profile rules are reported separately,
 so fsimg's policy never rewrites the specification. A noncanonical, recoverable
 or advisory divergence is never declared invalid merely because one
-implementation dislikes it.
+implementation dislikes it. A format's identity rule is the one profile
+rule that gates normative ones: a volume the format does not identify is not
+judged against that format, so the FAT boot-field and `FAT[0]` rules apply
+only where `fat.boot.identity` holds.
 
 The **policy** says what the stages that check a violation must do:
 

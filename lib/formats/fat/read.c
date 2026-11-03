@@ -140,26 +140,27 @@ fsimg_status_t
 fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
     fsimg_error_t *error)
 {
-	unsigned char boot[512];
+	unsigned char prefix[FAT_PROBE_BYTES];
 	fat_geometry_t geometry;
 	const fsimg_format_variant_t *variant;
 	fsimg_fat_reader_t *fat;
 	fsimg_error_t detail;
 	uint64_t length;
-	uint32_t first, second, mask;
-	size_t transferred;
+	uint32_t first, second;
+	size_t prefix_bytes, transferred;
 	fsimg_status_t status;
 
 	status = fsimg_io_get_size(reader->input, &length, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (length < sizeof(boot))
-		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
-		    FSIMG_OP_READER, "volume is smaller than a boot record"));
-	status = fsimg_reader_bytes(reader, 0, boot, sizeof(boot), &transferred, error);
+	/* Identification reads the same prefix the probe saw. */
+	prefix_bytes = length < sizeof(prefix) ? (size_t)length : sizeof(prefix);
+	status = fsimg_reader_bytes(reader, 0, prefix, prefix_bytes, &transferred,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_fat_geometry_decode(boot, length, &geometry, error);
+	status = fsimg_fat_geometry_decode(prefix, prefix_bytes, length, &geometry,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
 	variant = fsimg_fat_variant(geometry.variant);
@@ -178,16 +179,17 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	reader->content_domain.length = (uint64_t)geometry.clusters *
 	    geometry.cluster_bytes;
 	reader->content_domain.unit_bytes = geometry.cluster_bytes;
-	/* FAT[0] echoes the media byte. Check it in the active table before
-	 * comparing mirrors: a non-FAT boot sector whose fields happen to form
-	 * a legal BPB then fails for that reason, not as disagreeing copies.
+	/* FAT[0] echoes the media byte. Identification may rest on the PC boot
+	 * signature alone, and otherwise checked only the leading bytes of the
+	 * first table. Check the whole entry in the active table before
+	 * comparing mirrors: a non-FAT boot sector with that signature whose
+	 * fields happen to form a legal BPB then fails for that reason, not as
+	 * disagreeing copies.
 	 */
-	mask = geometry.variant == 12 ? 0xfff :
-	    geometry.variant == 16 ? 0xffff : 0x0fffffff;
 	status = table_value(reader, geometry.active_table, 0, &first, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (first != ((mask & ~0xffu) | geometry.media))
+	if (first != fsimg_fat_media_entry(&geometry))
 		return (fsimg_fat_corrupt(error,
 		    "FAT media descriptor does not match the BPB"));
 	/* The mirrors must agree on both reserved entries; FAT[0] is already
@@ -216,8 +218,8 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	    (second & (geometry.variant == 16 ? 0x8000u : 0x08000000u)) != 0;
 	reader->info.io_error = geometry.variant != 12 &&
 	    (second & (geometry.variant == 16 ? 0x4000u : 0x04000000u)) == 0;
-	if (boot[geometry.variant == 32 ? 66 : 38] == 0x29) {
-		status = fsimg_fat_label(boot + (geometry.variant == 32 ? 71 : 43),
+	if (prefix[geometry.variant == 32 ? 66 : 38] == 0x29) {
+		status = fsimg_fat_label(prefix + (geometry.variant == 32 ? 71 : 43),
 		    reader->info.label, error);
 		if (status != FSIMG_OK)
 			return (status);

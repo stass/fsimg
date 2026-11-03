@@ -342,8 +342,14 @@ access indexes, and global allocation verification use bounded resources.
 Names use pinned CP437 and Unicode simple-uppercase tables; timestamps retain
 wall-clock semantics. Reader and writer capabilities are reported independently.
 Volumes formatted before DOS 3.31, whose boot code occupies the later 32-bit
-sector-count field, open by their 16-bit count. A boot sector whose first FAT
-entry does not echo its media byte is reported as such.
+sector-count field, open by their 16-bit count. A boot sector with the PC
+boot signature whose first FAT entry does not echo its media byte is
+reported as such. FAT disks written
+for other machines, such as Atari ST, MSX-DOS and NEC PC-98 floppies, lack
+the 0x55AA signature and often the x86 jump; they are recognized when their
+first FAT, within the first 8 KiB, begins with the BPB media byte and two
+bytes of ones. Atari disks whose first FAT begins with zeros, which mtools
+accepts, are not recognized.
 
 Format detection runs every format's bounded probe over the image prefix and
 opens only an unambiguous claim; several claims require an explicit format. A

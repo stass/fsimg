@@ -25,7 +25,9 @@ static fsimg_status_t fake_probe_2(const unsigned char *, size_t, uint64_t,
 static void fake_reset(fsimg_status_t, fsimg_status_t, fsimg_status_t);
 static void test_probe_contract(void);
 static void test_driver_probes(void);
+static void test_fat_identification_precedes_geometry(void);
 static void test_short_volumes(void);
+static void test_unsigned_tiny_fat_requires_complete_head(void);
 
 /* Each fake descriptor reports a scripted claim and records what it saw. */
 static fsimg_status_t fake_result[FAKE_COUNT];
@@ -193,10 +195,7 @@ test_probe_contract(void)
 	CHECK(claimed == NULL);
 }
 
-/* The registered probes claim only their own identity signatures: another
- * boot record carrying a BPB is unrecognized, not corrupt FAT, while a FAT
- * record whose regions exceed the volume is a corrupt FAT claim.
- */
+/* Signed records identify their driver before full geometry validation. */
 static void
 test_driver_probes(void)
 {
@@ -254,6 +253,116 @@ test_driver_probes(void)
 	    UINT64_C(1) << 30, &claimed, &error) == FSIMG_EFORMAT);
 }
 
+/* Unsigned FAT identification precedes geometry validation. */
+static void
+test_fat_identification_precedes_geometry(void)
+{
+	const fsimg_format_t *const registry[] = {
+		&fsimg_fat_format, &fsimg_exfat_format
+	};
+	const fsimg_format_t *claimed;
+	const fsimg_format_variant_t *variant;
+	unsigned char prefix[8704];
+	fsimg_error_t error;
+
+	/* A 1.44 MB FAT12 BPB with an Atari jump and no PC signature. */
+	bzero(prefix, sizeof(prefix));
+	prefix[0] = 0x60, prefix[1] = 0x38;
+	prefix[11] = 0x00, prefix[12] = 0x02;
+	prefix[13] = 1;
+	prefix[14] = 1;
+	prefix[16] = 2;
+	prefix[17] = 0xe0;
+	prefix[19] = 0x40, prefix[20] = 0x0b;
+	prefix[21] = 0xf0;
+	prefix[22] = 9;
+	prefix[512] = 0xf0, prefix[513] = 0xff, prefix[514] = 0xff;
+
+	/* The media echo identifies FAT only when all its bytes were seen. */
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    2880 * 512, &claimed, &error) == FSIMG_OK);
+	CHECK(claimed == &fsimg_fat_format);
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, 512,
+	    2880 * 512, &claimed, &error) == FSIMG_EFORMAT);
+	prefix[512] = 0x00;
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    2880 * 512, &claimed, &error) == FSIMG_EFORMAT);
+	prefix[512] = 0xf0;
+
+	/* An identified unsigned volume has the same geometry classification. */
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    2879 * 512, &claimed, &error) == FSIMG_ECORRUPT);
+
+	/* Three tables are unsupported after identification, even unsigned. */
+	prefix[16] = 3;
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    2880 * 512, &claimed, &error) == FSIMG_EUNSUPPORTED);
+	prefix[16] = 2;
+
+	/* FAT12 FAT[1] = 0xFF8 keeps FAT[0] intact but breaks mtools' head. */
+	prefix[513] = 0x8f;
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    2880 * 512, &claimed, &error) == FSIMG_EFORMAT);
+	CHECK(fsimg_fat_format.probe(prefix, sizeof(prefix), 2880 * 512,
+	    &variant, &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "unrecognized volume boot record") == 0);
+	prefix[513] = 0xff;
+
+	/* The last sector in the 8 KiB prefix can supply the media echo. */
+	bzero(prefix + 512, 3);
+	prefix[14] = 15;
+	prefix[7680] = 0xf0, prefix[7681] = 0xff, prefix[7682] = 0xff;
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    2880 * 512, &claimed, &error) == FSIMG_OK);
+	CHECK(claimed == &fsimg_fat_format);
+
+	/* Even a larger supplied buffer cannot extend the probe's prefix. */
+	bzero(prefix + 7680, 3);
+	prefix[14] = 16;
+	prefix[8192] = 0xf0, prefix[8193] = 0xff, prefix[8194] = 0xff;
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    2880 * 512, &claimed, &error) == FSIMG_EFORMAT);
+
+	/* A PC signature claims FAT without checking the table's media echo. */
+	prefix[14] = 1;
+	bcopy("\xeb\x3c\x90", prefix, 3);
+	prefix[510] = 0x55, prefix[511] = 0xaa;
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    2880 * 512, &claimed, &error) == FSIMG_OK);
+	CHECK(claimed == &fsimg_fat_format);
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    2879 * 512, &claimed, &error) == FSIMG_ECORRUPT);
+}
+
+/* A tiny unsigned volume needs all three identifying FAT head bytes. */
+static void
+test_unsigned_tiny_fat_requires_complete_head(void)
+{
+	const fsimg_format_t *const registry[] = { &fsimg_fat_format };
+	const fsimg_format_t *claimed;
+	const fsimg_format_variant_t *variant;
+	unsigned char volume[4096] = { 0 };
+	fsimg_error_t error;
+
+	volume[12] = 2; /* 512-byte sectors */
+	volume[13] = 1;
+	volume[14] = 1;
+	volume[16] = 1;
+	volume[17] = 16;
+	volume[19] = 8;
+	volume[21] = 0xf8;
+	volume[22] = 1;
+	volume[512] = 0xf8, volume[513] = 0xff, volume[514] = 0xff;
+	CHECK(fsimg_format_claim(registry, 1, NULL, volume, sizeof(volume),
+	    sizeof(volume), &claimed, &error) == FSIMG_OK);
+	CHECK(claimed == &fsimg_fat_format);
+	CHECK(fsimg_format_claim(registry, 1, NULL, volume, 514,
+	    sizeof(volume), &claimed, &error) == FSIMG_EFORMAT);
+	CHECK(fsimg_fat_format.probe(volume, 514, sizeof(volume),
+	    &variant, &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "unrecognized volume boot record") == 0);
+}
+
 /* Volumes too short for any signature are unrecognized, forced or not. A
  * volume that carries exFAT's signature but is too short for exFAT is a
  * corrupt exFAT claim, and the driver never reads past the volume.
@@ -301,6 +410,8 @@ main(void)
 {
 	test_probe_contract();
 	test_driver_probes();
+	test_fat_identification_precedes_geometry();
+	test_unsigned_tiny_fat_requires_complete_head();
 	test_short_volumes();
 	return (0);
 }
