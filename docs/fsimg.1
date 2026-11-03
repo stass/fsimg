@@ -351,8 +351,8 @@ or
 skip the checks that tell one format from another, such as a magic number,
 a signature or FAT's boot signature and media echo, and keep every check
 of geometry, bounds, checksums, chains, directories and names.
-Of the formats and layers fsimg reads, FAT alone has such checks waived:
-for every other one the option reads exactly as a plain
+Every filesystem fsimg reads has such checks waived; for a container,
+partition scheme or compression the option reads exactly as a plain
 .Fl F
 does.
 It requires a filesystem in

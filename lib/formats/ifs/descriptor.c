@@ -63,19 +63,20 @@ const fsimg_format_t fsimg_ifs_format = {
  * begins with it. Once it matches, the probe claims the image: the flags
  * byte must select a native byte order, and the three sizes must satisfy
  * the header bounds against the volume. Open applies the remaining header
- * rules. A prefix shorter than the fixed header is no claim.
+ * rules. A prefix shorter than the fixed header is no claim. A caller
+ * assuming the identity skips the signature, the only identity check.
  */
 static fsimg_status_t
 ifs_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    bool assume_identity FSIMG_UNUSED,
-    const fsimg_format_variant_t **variant, fsimg_error_t *error)
+    bool assume_identity, const fsimg_format_variant_t **variant,
+    fsimg_error_t *error)
 {
 	ifs_header_t header;
 	fsimg_status_t status;
 
 	*variant = &ifs_variants[0];
-	if (length < IFS_HEADER_BYTES ||
-	    bcmp(prefix, IFS_SIGNATURE, IFS_SIGNATURE_BYTES) != 0)
+	if (length < IFS_HEADER_BYTES || (!assume_identity &&
+	    bcmp(prefix, IFS_SIGNATURE, IFS_SIGNATURE_BYTES) != 0))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no ImageFS signature"));
 	status = ifs_header_decode(prefix, &header, error);

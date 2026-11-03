@@ -86,9 +86,15 @@ read_header(fsimg_reader_t *reader, fsimg_error_t *error)
 	status = ifs_read_exact(reader, 0, bytes, sizeof(bytes), error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (bcmp(bytes, IFS_SIGNATURE, IFS_SIGNATURE_BYTES) != 0)
-		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
-		    FSIMG_OP_READER, "no ImageFS signature"));
+	/* The signature is the identity, which a caller assuming it waives;
+	 * every header rule below is validation.
+	 */
+	status = fsimg_reader_identity(reader,
+	    bcmp(bytes, IFS_SIGNATURE, IFS_SIGNATURE_BYTES) == 0,
+	    "no ImageFS signature", "the header does not begin with imagefs",
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
 	status = ifs_header_decode(bytes, header, error);
 	if (status != FSIMG_OK)
 		return (status);

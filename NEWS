@@ -52,7 +52,8 @@ extracts with `fsimg t -F fat12 --force`. `W` on such a volume fails,
 naming the identity check that was assumed. A read that names a
 filesystem and fails its identity check suggests `--force`. The library
 flags are `FSIMG_READ_ASSUME_IDENTITY` and `FSIMG_IMAGE_ASSUME_IDENTITY`.
-FAT is the one format whose identity checks they waive.
+Every filesystem honours them: FAT, exFAT, ISO 9660, QNX4, QNX6 and
+ImageFS; containers, partition schemes and compressions do not.
 
 CLI information can report declared filesystem geometry beyond the available
 input when headers remain readable. Missing referenced structures or content

@@ -200,8 +200,8 @@ FSIMG_IMAGE_ASSUME_IDENTITY in the image options' flags does the same for
 every layer the options name, each named slot of the stack and a forced
 compression, and requires one of them; detected layers are unaffected.
 A format whose identity checks all pass reads exactly as without the flag.
-FAT is the one format whose identity checks the flags waive; every other
-format and layer reads exactly as without them.
+Every filesystem format honours the flags; the containers, partition
+schemes and compressions read exactly as without them.
 .Pp
 Every path the library emits other than an entry's own path is rendered:
 the path of an error and of the loss callback.

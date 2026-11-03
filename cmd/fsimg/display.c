@@ -1737,7 +1737,8 @@ published_names(fsimg_cli_display_t *display)
 /* Whether to suggest --force: a read other than W that names a
  * filesystem without --force failed with FSIMG_EFORMAT from the reader,
  * or from detection rather than from a layer, which names itself in path.
- * That is how an absent identity fails; the status cannot tell it from
+ * That is how an absent identity fails, and every filesystem waives its
+ * identity checks under --force; the status cannot tell it from
  * the few other refusals of a forced name, such as a FAT variant that
  * contradicts the cluster count, which --force then reports unchanged.
  */

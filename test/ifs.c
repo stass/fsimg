@@ -5187,6 +5187,110 @@ manifest(const char *path)
 	return (status == FSIMG_OK ? 0 : 1);
 }
 
+static void
+identity_volume(gen_t *g)
+{
+	gen_init(g);
+	gen_root(g);
+	gen_file(g, "hello", "hello");
+	gen_finish(g);
+}
+
+/* Reading remains available after identity is waived; verification refuses it. */
+static void
+check_ifs_assumed_identity(fixture_t *f, const char *message)
+{
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	const fsimg_entry_t *entry;
+	unsigned char data[5];
+	size_t count;
+
+	fsimg_read_options_init(&options);
+	options.format = "ifs";
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &error) == FSIMG_EFORMAT);
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &error) == FSIMG_OK);
+
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/hello") == 0);
+	CHECK(entry->size == sizeof(data));
+	CHECK(fsimg_reader_read_at(f->reader, 0, data,
+	    sizeof(data), &count, NULL) == FSIMG_OK);
+	CHECK(count == sizeof(data));
+	CHECK(bcmp(data, "hello", sizeof(data)) == 0);
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_DONE);
+	CHECK(entry == NULL);
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f->reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	CHECK(!report.complete);
+	CHECK(strcmp(error.message, message) == 0);
+}
+
+static void
+test_ifs_assumed_identity_reads_volume_without_signature(void)
+{
+	gen_t g;
+	fixture_t f;
+
+	identity_volume(&g);
+	bzero(g.image, 7);
+	fixture_open(&f, g.image, g.length, 0);
+	check_ifs_assumed_identity(&f, "ifs identity was assumed: "
+	    "the header does not begin with imagefs");
+	fixture_close(&f);
+	gen_free(&g);
+}
+
+static void
+test_ifs_assumed_identity_rejects_nonzero_header_spares(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	identity_volume(&g);
+	fixture_open(&f, g.image, g.length, 0);
+	bzero(g.image, 7);
+	put32(&g, g.image + H_SPARE, 1);
+	fsimg_read_options_init(&options);
+	options.format = "ifs";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.message, "ImageFS header spare words are nonzero") == 0);
+	fixture_close(&f);
+	gen_free(&g);
+}
+
+static void
+test_ifs_intact_volume_with_assume_identity_verifies(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+
+	identity_volume(&g);
+	fixture_open(&f, g.image, g.length, 0);
+	fsimg_read_options_init(&options);
+	options.format = "ifs";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_close(&f);
+	gen_free(&g);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5232,5 +5336,8 @@ main(int argc, char **argv)
 	test_extract();
 	test_faults();
 	test_scale(false);
+	test_ifs_assumed_identity_reads_volume_without_signature();
+	test_ifs_assumed_identity_rejects_nonzero_header_spares();
+	test_ifs_intact_volume_with_assume_identity_verifies();
 	return (0);
 }
