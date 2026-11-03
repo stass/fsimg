@@ -92,6 +92,7 @@ static void test_cached_name(void);
 static void test_cached_index(void);
 static void test_range_reads(void);
 static void test_trailing_duplicate_claim(void);
+static void test_cross_linked_files_name_shared_clusters(void);
 static void test_fragmented_verify(void);
 static void make_fragmented_file(fixture_t *, uint32_t);
 static void baseline_fragmented(void);
@@ -2106,6 +2107,7 @@ test_trailing_duplicate_claim(void)
 	fixture_t f;
 	fsimg_verify_report_t report;
 	fsimg_error_t error;
+	char expected[128];
 	unsigned char raw[64];
 	uint32_t last;
 
@@ -2118,9 +2120,50 @@ test_trailing_duplicate_claim(void)
 	fixture_open(&f);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
-	if (strstr(error.message, "overlapping ownership claims") == NULL)
-		fprintf(stderr, "trailing duplicate: %s\n", error.message);
-	CHECK(strstr(error.message, "overlapping ownership claims") != NULL);
+	snprintf(expected, sizeof(expected),
+	    "FAT cluster %" PRIu32 " is claimed by more than one owner", last);
+	if (strcmp(error.message, expected) != 0)
+		fprintf(stderr, "trailing duplicate: expected: %s\nactual: %s\n",
+		    expected, error.message);
+	CHECK(strcmp(error.message, expected) == 0);
+	CHECK(!report.complete);
+	fixture_close(&f);
+}
+
+/* Like dosfstools' check-chain_to_other_file, two distinct chain prefixes
+ * merge into a shared tail: 3->4->7->8 and 5->6->7->8.
+ */
+static void
+test_cross_linked_files_name_shared_clusters(void)
+{
+	const char expected[] =
+	    "FAT clusters 7-8 are claimed by more than one owner";
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	unsigned char root[512];
+
+	fixture_init(&f, 16);
+	set_cluster(&f, 3, 4);
+	set_cluster(&f, 4, 7);
+	set_cluster(&f, 5, 6);
+	set_cluster(&f, 6, 7);
+	set_cluster(&f, 7, 8);
+	set_cluster(&f, 8, f.eoc);
+	/* Replace HELLO.TXT and SUB; cluster 9 is no longer owned. */
+	set_cluster(&f, 9, 0);
+	bzero(root, sizeof(root));
+	short_entry(root, "FILEA   BIN", false, 3, 4 * f.cluster_bytes);
+	short_entry(root + 32, "FILEB   BIN", false, 5, 4 * f.cluster_bytes);
+	write_bytes(&f, f.root_offset, root, sizeof(root));
+
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	if (strcmp(error.message, expected) != 0)
+		fprintf(stderr, "cross-linked files: expected: %s\nactual: %s\n",
+		    expected, error.message);
+	CHECK(strcmp(error.message, expected) == 0);
 	CHECK(!report.complete);
 	fixture_close(&f);
 }
@@ -2287,6 +2330,7 @@ main(int argc, char **argv)
 	test_cached_index();
 	test_range_reads();
 	test_trailing_duplicate_claim();
+	test_cross_linked_files_name_shared_clusters();
 	test_fragmented_verify();
 	test_report_outputs();
 	test_capability_bounds();

@@ -214,8 +214,8 @@ typedef struct fsimg_owner_run {
 } fsimg_owner_run_t;
 
 fsimg_status_t fsimg_owner_runs_new(fsimg_session_t *session,
-    uint64_t first_unit, uint64_t end_unit, fsimg_owner_runs_t **out,
-    fsimg_error_t *error);
+    const char *unit, uint64_t first_unit, uint64_t end_unit,
+    fsimg_owner_runs_t **out, fsimg_error_t *error);
 fsimg_status_t fsimg_owner_runs_append(fsimg_owner_runs_t *runs,
     uint64_t first, uint64_t count, fsimg_error_t *error);
 fsimg_status_t fsimg_owner_runs_seal(fsimg_owner_runs_t *runs,
@@ -225,8 +225,11 @@ fsimg_status_t fsimg_owner_runs_next(fsimg_owner_runs_t *runs,
 void fsimg_owner_runs_free(fsimg_owner_runs_t *runs);
 ```
 
-`new` initializes `*out` to NULL and borrows the existing reader session until
-`free`. It rejects reversed bounds with `FSIMG_EINVAL`. The wrapper owns one
+`new` initializes `*out` to NULL and borrows the existing reader session and
+the unit name until `free`. It rejects a missing unit name and reversed bounds
+with `FSIMG_EINVAL`. The unit name is the singular noun for one unit in the
+format's own numbering, such as `FAT cluster` or `exFAT cluster`; diagnostics
+use it, and a plural adds `s`. The wrapper owns one
 stream, its replacement during sorting, and one cursor. The caller never owns
 a second sorted-stream handle. `free(NULL)` is harmless. The driver installs
 its owned pointer only after construction succeeds and clears it when released;
@@ -296,15 +299,19 @@ merge fan-in, cache pages, descriptors and simultaneous input/output storage.
 `next` reads through a local candidate cursor. It checks the returned length is
 16 **before** loading either field, applies the append range checks again, and
 calculates the checked endpoint. Scratch is untrusted even after successful
-append and sort. It rejects a candidate whose first unit is below the previous
-accepted end. Because accepted intervals are nonempty and ordered, this one
-comparison detects backward order, nesting, partial overlap, exact duplicates,
-and a second run inside a long earlier run. It does not need an active interval
-set or an all-pairs comparison. Adjacency (`next.first == previous.end`) is legal;
-gaps are legal until the driver's allocation scan interprets them.
+append and sort. A candidate whose first unit is below the previous accepted
+first unit breaks the sort order, which only damaged scratch can do, and fails
+as a scratch decoding error. It rejects a candidate whose first unit is below
+the previous accepted end as an overlap. Because accepted intervals are
+nonempty and ordered, this one comparison detects nesting, partial overlap,
+exact duplicates, and a second run inside a long earlier run, and the shared
+units are exactly the candidate's units below that end. It does not need an
+active interval set or an all-pairs comparison. Adjacency
+(`next.first == previous.end`) is legal; gaps are legal until the driver's
+allocation scan interprets them.
 
 Only after all checks succeed does the wrapper publish the interval and commit
-its cursor and previous endpoint. The first record is distinguished by the
+its cursor and previous interval. The first record is distinguished by the
 absence of a previous interval, not by treating unit zero as invalid. End is
 `FSIMG_DONE`, never a sentinel unit value. Empty sorted streams end immediately;
 repeated end calls remain stable. The final interval can end exactly at the
@@ -323,9 +330,10 @@ No successful verifier leaves an unread suffix of ownership claims.
 
 | Condition | Result and ownership |
 | --- | --- |
-| Invalid private pointer, output, or reversed constructor bounds | `FSIMG_EINVAL`, no image verdict |
+| Invalid private pointer, output, missing unit name, or reversed constructor bounds | `FSIMG_EINVAL`, no image verdict |
 | Incorrect lifecycle call | `FSIMG_ESTATE`, no image verdict |
-| Out-of-domain or empty claim, malformed decoded interval, forbidden overlap | `FSIMG_ECORRUPT`; helper identifies the generic condition and bounded unit range |
+| Out-of-domain or empty claim, malformed decoded interval | `FSIMG_ECORRUPT`; helper identifies the generic condition and bounded unit range |
+| Forbidden overlap | `FSIMG_ECORRUPT`; the message names the shared range with the unit name, such as `FAT clusters 13-14 are claimed by more than one owner` |
 | Invalid scratch framing or truncated record | Existing metadata error, normally `FSIMG_ECORRUPT`, propagated without pretending it proves image corruption |
 | Store I/O error or unexpected backing-file EOF | `FSIMG_EIO` with existing OS detail |
 | Scratch, memory, descriptor or work budget exhausted | Existing `FSIMG_ELIMIT` with resource details; allocation failure remains `FSIMG_ENOMEM` where applicable |

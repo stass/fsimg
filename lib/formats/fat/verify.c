@@ -203,7 +203,7 @@ fsimg_fat_verify(fsimg_reader_t *reader, unsigned flags,
 	buffer = NULL;
 	reader->session.progress.phase = "FAT verification";
 	/* One exclusive domain: the heap's cluster numbers. */
-	status = fsimg_owner_runs_new(&reader->session, 2,
+	status = fsimg_owner_runs_new(&reader->session, "FAT cluster", 2,
 	    (uint64_t)fat->geometry.clusters + 2, &fat->owners, error);
 	if (status != FSIMG_OK)
 		goto done;

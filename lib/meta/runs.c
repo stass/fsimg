@@ -30,16 +30,20 @@ typedef enum owner_runs_state {
 } owner_runs_state_t;
 
 /* The stream is the unsorted claims while collecting and the sorted ones
- * afterwards; it is the only store the object owns. stream_offset is the
- * byte offset of the next sorted frame. previous_end is the end unit of the
- * last interval next published, meaningful once have_previous is set.
+ * afterwards; it is the only store the object owns. unit names one unit in
+ * diagnostics, such as "FAT cluster", and is borrowed until free.
+ * stream_offset is the byte offset of the next sorted frame. previous_first
+ * and previous_end bound the last interval next published, meaningful once
+ * have_previous is set.
  */
 struct fsimg_owner_runs {
 	fsimg_session_t	*session;
 	fsimg_stream_t	*stream;
+	const char	*unit;
 	uint64_t	 first_unit;
 	uint64_t	 end_unit;
 	uint64_t	 stream_offset;
+	uint64_t	 previous_first;
 	uint64_t	 previous_end;
 	owner_runs_state_t state;
 	bool		 have_previous;
@@ -110,8 +114,9 @@ runs_fail(fsimg_owner_runs_t *runs, fsimg_status_t status)
 }
 
 fsimg_status_t
-fsimg_owner_runs_new(fsimg_session_t *session, uint64_t first_unit,
-    uint64_t end_unit, fsimg_owner_runs_t **out, fsimg_error_t *error)
+fsimg_owner_runs_new(fsimg_session_t *session, const char *unit,
+    uint64_t first_unit, uint64_t end_unit, fsimg_owner_runs_t **out,
+    fsimg_error_t *error)
 {
 	fsimg_owner_runs_t *runs;
 	fsimg_error_t detail;
@@ -119,7 +124,8 @@ fsimg_owner_runs_new(fsimg_session_t *session, uint64_t first_unit,
 
 	if (out != NULL)
 		*out = NULL;
-	if (session == NULL || out == NULL || first_unit > end_unit)
+	if (session == NULL || unit == NULL || out == NULL ||
+	    first_unit > end_unit)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_VERIFY,
 		    "invalid ownership-run domain"));
 	runs = fsimg_alloc(session->ctx, sizeof(*runs), &detail);
@@ -130,6 +136,7 @@ fsimg_owner_runs_new(fsimg_session_t *session, uint64_t first_unit,
 	}
 	bzero(runs, sizeof(*runs));
 	runs->session = session;
+	runs->unit = unit;
 	runs->first_unit = first_unit;
 	runs->end_unit = end_unit;
 	runs->state = OWNER_RUNS_COLLECTING;
@@ -213,19 +220,21 @@ fsimg_owner_runs_seal(fsimg_owner_runs_t *runs, fsimg_error_t *error)
 
 /* Publish the next sorted interval, or FSIMG_DONE after the last. Scratch is
  * untrusted, so each record is checked again: its length before any field
- * is loaded, then the claim rules. A record starting before the previous
- * interval's end overlaps it; with nonempty intervals in sorted order that
- * one comparison rejects duplicates, nesting and crossing alike. Adjacent
- * intervals are legal. The cursor and previous end advance only after every
- * check passes.
+ * is loaded, then the claim rules and the sort order, since a record
+ * starting before the previous one can only be damaged scratch. A record
+ * starting before the previous interval's end overlaps it; with nonempty
+ * intervals in sorted order that one comparison rejects duplicates, nesting
+ * and crossing alike, and the overlap is the record's units below that end.
+ * Adjacent intervals are legal. The cursor and previous interval advance
+ * only after every check passes.
  */
 fsimg_status_t
 fsimg_owner_runs_next(fsimg_owner_runs_t *runs, fsimg_owner_run_t *out,
     fsimg_error_t *error)
 {
 	unsigned char record[RUN_RECORD_BYTES];
-	char message[128];
-	uint64_t stream_offset, first, count;
+	char message[sizeof(((fsimg_error_t *)NULL)->message)];
+	uint64_t stream_offset, first, count, shared_end;
 	size_t length;
 	fsimg_status_t status;
 
@@ -252,19 +261,32 @@ fsimg_owner_runs_next(fsimg_owner_runs_t *runs, fsimg_owner_run_t *out,
 	if (length != RUN_RECORD_BYTES)
 		return (runs_fail(runs, fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_METADATA, "malformed ownership scratch record")));
-	/* Append admitted only valid claims, so an invalid one here is
-	 * damaged scratch. An overlap may come from the image or scratch.
+	/* Append admitted only valid claims and sealing sorted them, so an
+	 * invalid or out-of-order one here is damaged scratch. An overlap may
+	 * come from the image or scratch.
 	 */
 	first = fsimg_load_le64(record);
 	count = fsimg_load_le64(record + 8);
-	if (claim_check(runs, first, count, NULL) != FSIMG_OK)
+	if (claim_check(runs, first, count, NULL) != FSIMG_OK ||
+	    (runs->have_previous && first < runs->previous_first))
 		return (runs_fail(runs, fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_METADATA, "invalid ownership scratch record")));
 	if (runs->have_previous && first < runs->previous_end) {
-		snprintf(message, sizeof(message),
-		    "overlapping ownership claims: unit %" PRIu64
-		    " is inside a claim ending before unit %" PRIu64,
-		    first, runs->previous_end);
+		/* Sorted order puts this claim's first unit inside the previous
+		 * interval, so the shared units run from it to whichever end
+		 * comes first. claim_check bounded first + count by the domain
+		 * end.
+		 */
+		shared_end = first + count < runs->previous_end ?
+		    first + count : runs->previous_end;
+		if (shared_end - first == 1)
+			snprintf(message, sizeof(message), "%s %" PRIu64
+			    " is claimed by more than one owner", runs->unit,
+			    first);
+		else
+			snprintf(message, sizeof(message), "%ss %" PRIu64 "-%"
+			    PRIu64 " are claimed by more than one owner",
+			    runs->unit, first, shared_end - 1);
 		return (runs_fail(runs, fsimg_error_set(error, FSIMG_ECORRUPT, 0,
 		    FSIMG_OP_VERIFY, message)));
 	}
@@ -272,6 +294,7 @@ fsimg_owner_runs_next(fsimg_owner_runs_t *runs, fsimg_owner_run_t *out,
 	out->first = first;
 	out->end = first + count;
 	runs->stream_offset = stream_offset;
+	runs->previous_first = out->first;
 	runs->previous_end = out->end;
 	runs->have_previous = true;
 	return (FSIMG_OK);

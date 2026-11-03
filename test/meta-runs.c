@@ -24,6 +24,8 @@
  * rules, order and overlap verdicts. No driver is involved.
  */
 
+static const char unit_name[] = "test unit";
+
 #define FRAME_BYTES	8u
 #define RECORD_BYTES	16u
 #define STORED_BYTES	(FRAME_BYTES + RECORD_BYTES)
@@ -47,6 +49,7 @@ static void put_record(unsigned char *, uint64_t, uint64_t);
 static void test_codec_and_domains(void);
 static void test_claim_rules(void);
 static void test_order_and_overlap(void);
+static void test_overlap_messages_name_shared_units(void);
 static void test_spilled_sort(void);
 static void test_lifecycle(void);
 static void test_scratch_corruption(void);
@@ -173,8 +176,8 @@ test_codec_and_domains(void)
 	size_t length;
 
 	fixture_open(&fixture, 16);
-	CHECK(fsimg_owner_runs_new(&fixture.session, high, UINT64_MAX, &runs,
-	    NULL) == FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, high,
+	    UINT64_MAX, &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, UINT64_MAX - 2, 2, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, high, 3, NULL) == FSIMG_OK);
 	stream = fsimg_test_owner_runs_stream(runs);
@@ -188,8 +191,8 @@ test_codec_and_domains(void)
 	expect_runs(runs, wide, 2);
 	fsimg_owner_runs_free(runs);
 
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, 9, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 9,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 1, 8, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 0, 1, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
@@ -197,13 +200,13 @@ test_codec_and_domains(void)
 	fsimg_owner_runs_free(runs);
 
 	/* An empty domain admits no claim but is a valid, empty inventory. */
-	CHECK(fsimg_owner_runs_new(&fixture.session, 5, 5, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 5, 5,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
 	expect_runs(runs, NULL, 0);
 	fsimg_owner_runs_free(runs);
-	CHECK(fsimg_owner_runs_new(&fixture.session, 5, 5, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 5, 5,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 5, 1, NULL) == FSIMG_ECORRUPT);
 	fsimg_owner_runs_free(runs);
 	fixture_close(&fixture);
@@ -230,8 +233,8 @@ test_claim_rules(void)
 
 	fixture_open(&fixture, 16);
 	for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
-		CHECK(fsimg_owner_runs_new(&fixture.session, 10, 20, &runs,
-		    NULL) == FSIMG_OK);
+		CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 10, 20,
+		    &runs, NULL) == FSIMG_OK);
 		CHECK(fsimg_owner_runs_append(runs, invalid[i].first,
 		    invalid[i].count, &error) == FSIMG_ECORRUPT);
 		CHECK(error.operation == FSIMG_OP_VERIFY);
@@ -241,8 +244,8 @@ test_claim_rules(void)
 		CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_ESTATE);
 		fsimg_owner_runs_free(runs);
 	}
-	CHECK(fsimg_owner_runs_new(&fixture.session, 10, 20, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 10, 20,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 12, 8, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 10, 2, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
@@ -251,11 +254,15 @@ test_claim_rules(void)
 
 	/* Reversed bounds are an invalid domain; a degenerate one is not. */
 	runs = (fsimg_owner_runs_t *)&fixture;
-	CHECK(fsimg_owner_runs_new(&fixture.session, 3, 2, &runs, &error) ==
-	    FSIMG_EINVAL);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 3, 2,
+	    &runs, &error) == FSIMG_EINVAL);
 	CHECK(runs == NULL);
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, 1, NULL, NULL) ==
-	    FSIMG_EINVAL);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 1,
+	    NULL, NULL) == FSIMG_EINVAL);
+	runs = (fsimg_owner_runs_t *)&fixture;
+	CHECK(fsimg_owner_runs_new(&fixture.session, NULL, 0, 1, &runs,
+	    &error) == FSIMG_EINVAL);
+	CHECK(runs == NULL);
 	fixture_close(&fixture);
 }
 
@@ -282,8 +289,8 @@ test_order_and_overlap(void)
 
 	fixture_open(&fixture, 16);
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-		CHECK(fsimg_owner_runs_new(&fixture.session, 0, 16, &runs,
-		    NULL) == FSIMG_OK);
+		CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 16,
+		    &runs, NULL) == FSIMG_OK);
 		for (size_t j = 0; j < cases[i].claims; j++)
 			CHECK(fsimg_owner_runs_append(runs, cases[i].first[j],
 			    cases[i].count[j], NULL) == FSIMG_OK);
@@ -296,7 +303,7 @@ test_order_and_overlap(void)
 			    FSIMG_DONE);
 		} else
 			expect_corrupt_next(runs, cases[i].good,
-			    "overlapping ownership claims");
+			    "claimed by more than one owner");
 		fsimg_owner_runs_free(runs);
 	}
 
@@ -304,8 +311,8 @@ test_order_and_overlap(void)
 	 * published, in either order of their lengths.
 	 */
 	for (unsigned order = 0; order < 2; order++) {
-		CHECK(fsimg_owner_runs_new(&fixture.session, 0, 16, &runs,
-		    NULL) == FSIMG_OK);
+		CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 16,
+		    &runs, NULL) == FSIMG_OK);
 		CHECK(fsimg_owner_runs_append(runs, 5, order == 0 ? 1 : 3,
 		    NULL) == FSIMG_OK);
 		CHECK(fsimg_owner_runs_append(runs, 5, order == 0 ? 3 : 1,
@@ -313,7 +320,63 @@ test_order_and_overlap(void)
 		CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
 		CHECK(fsimg_owner_runs_next(runs, &run, NULL) == FSIMG_OK);
 		CHECK(run.first == 5 && run.end == (order == 0 ? 6u : 8u));
-		expect_corrupt_next(runs, 0, "overlapping ownership claims");
+		expect_corrupt_next(runs, 0, "claimed by more than one owner");
+		fsimg_owner_runs_free(runs);
+	}
+	fixture_close(&fixture);
+}
+
+/* The diagnostic names only the intersection, with an inclusive last unit,
+ * whether the later claim crosses, nests, or shares the first unit.
+ */
+static void
+test_overlap_messages_name_shared_units(void)
+{
+	static const struct {
+		uint64_t first, count;
+		uint64_t later_first, later_count;
+		const char *message;
+	} cases[] = {
+		{ .first = 3, .count = 4, .later_first = 5, .later_count = 4,
+		    .message =
+		    "test units 5-6 are claimed by more than one owner" },
+		{ .first = 3, .count = 4, .later_first = 6, .later_count = 2,
+		    .message =
+		    "test unit 6 is claimed by more than one owner" },
+		{ .first = 2, .count = 8, .later_first = 4, .later_count = 2,
+		    .message =
+		    "test units 4-5 are claimed by more than one owner" },
+		{ .first = 5, .count = 1, .later_first = 5, .later_count = 3,
+		    .message =
+		    "test unit 5 is claimed by more than one owner" },
+		{ .first = 5, .count = 3, .later_first = 5, .later_count = 1,
+		    .message =
+		    "test unit 5 is claimed by more than one owner" }
+	};
+	runs_fixture_t fixture;
+	fsimg_owner_runs_t *runs;
+	fsimg_owner_run_t run;
+	fsimg_error_t error;
+
+	fixture_open(&fixture, 16);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 16,
+		    &runs, NULL) == FSIMG_OK);
+		CHECK(fsimg_owner_runs_append(runs, cases[i].first,
+		    cases[i].count, NULL) == FSIMG_OK);
+		CHECK(fsimg_owner_runs_append(runs, cases[i].later_first,
+		    cases[i].later_count, NULL) == FSIMG_OK);
+		CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
+
+		CHECK(fsimg_owner_runs_next(runs, &run, NULL) == FSIMG_OK);
+		CHECK(fsimg_owner_runs_next(runs, &run, &error) ==
+		    FSIMG_ECORRUPT);
+		CHECK(error.operation == FSIMG_OP_VERIFY);
+		CHECK(run.first == 0 && run.end == 0);
+		if (strcmp(error.message, cases[i].message) != 0)
+			fprintf(stderr, "expected: %s\nactual: %s\n",
+			    cases[i].message, error.message);
+		CHECK(strcmp(error.message, cases[i].message) == 0);
 		fsimg_owner_runs_free(runs);
 	}
 	fixture_close(&fixture);
@@ -334,8 +397,8 @@ test_spilled_sort(void)
 
 	for (uint32_t pages = 1; pages <= 64; pages *= 64) {
 		fixture_open(&fixture, pages);
-		CHECK(fsimg_owner_runs_new(&fixture.session, 0, claims * 2, &runs,
-		    NULL) == FSIMG_OK);
+		CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0,
+		    claims * 2, &runs, NULL) == FSIMG_OK);
 		/* Claim i is [2i, 2i + 1) or, every third, [2i, 2i + 2); a
 		 * multiplicative permutation scatters the append order.
 		 */
@@ -374,8 +437,8 @@ test_lifecycle(void)
 	fsimg_owner_runs_free(NULL);
 
 	/* Free while collecting, with claims appended. */
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, 8, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 8,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 3, 5, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_next(runs, &run, NULL) == FSIMG_ESTATE);
 	CHECK(fsimg_owner_runs_append(runs, 0, 1, NULL) == FSIMG_OK);
@@ -383,8 +446,8 @@ test_lifecycle(void)
 	check_resources(&fixture);
 
 	/* One interval ending at the domain end; free while reading. */
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, 8, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 8,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 3, 5, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_ESTATE);
@@ -394,15 +457,15 @@ test_lifecycle(void)
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_ESTATE);
 	fsimg_owner_runs_free(runs);
 
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, 8, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 8,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 3, 5, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
 	fsimg_owner_runs_free(runs);
 
 	/* Empty input ends at once and stays ended. */
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, 8, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 8,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
 	expect_runs(runs, NULL, 0);
 	fsimg_owner_runs_free(runs);
@@ -411,18 +474,41 @@ test_lifecycle(void)
 	CHECK(fsimg_owner_runs_append(NULL, 0, 1, NULL) == FSIMG_EINVAL);
 	CHECK(fsimg_owner_runs_seal(NULL, NULL) == FSIMG_EINVAL);
 	CHECK(fsimg_owner_runs_next(NULL, &run, NULL) == FSIMG_EINVAL);
-	CHECK(fsimg_owner_runs_new(NULL, 0, 1, &runs, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_owner_runs_new(NULL, unit_name, 0, 1, &runs, NULL) ==
+	    FSIMG_EINVAL);
 	fixture_close(&fixture);
 }
 
 /* Scratch is untrusted. Short records reach the comparator without being
  * decoded and fail at the cursor as scratch damage; valid-length records
- * whose fields changed after sorting fail the claim or order checks before
+ * whose fields changed after sorting fail scratch or overlap checks before
  * anything is published; damaged framing fails in the stream layer.
  */
 static void
 test_scratch_corruption(void)
 {
+	static const struct {
+		uint64_t first, count;
+		const char *message;
+		fsimg_operation_t operation;
+	} damage_cases[] = {
+		/* Second record starts inside the first. */
+		{ .first = 3, .count = 2,
+		    .message = "test unit 3 is claimed by more than one owner",
+		    .operation = FSIMG_OP_VERIFY },
+		/* Second record starts before the first. */
+		{ .first = 1, .count = 2,
+		    .message = "invalid ownership scratch record",
+		    .operation = FSIMG_OP_METADATA },
+		/* Second record ends past the domain. */
+		{ .first = 8, .count = 57,
+		    .message = "invalid ownership scratch record",
+		    .operation = FSIMG_OP_METADATA },
+		/* Second record is empty. */
+		{ .first = 8, .count = 0,
+		    .message = "invalid ownership scratch record",
+		    .operation = FSIMG_OP_METADATA }
+	};
 	unsigned char record[RECORD_BYTES], frame[FRAME_BYTES];
 	runs_fixture_t fixture;
 	fsimg_owner_runs_t *runs;
@@ -432,8 +518,8 @@ test_scratch_corruption(void)
 
 	fixture_open(&fixture, 16);
 	for (size_t length = 0; length < RECORD_BYTES; length++) {
-		CHECK(fsimg_owner_runs_new(&fixture.session, 0, 64, &runs,
-		    NULL) == FSIMG_OK);
+		CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 64,
+		    &runs, NULL) == FSIMG_OK);
 		CHECK(fsimg_owner_runs_append(runs, 8, 2, NULL) == FSIMG_OK);
 		memset(record, 0xff, sizeof(record));
 		CHECK(fsimg_stream_append(fsimg_test_owner_runs_stream(runs),
@@ -441,7 +527,8 @@ test_scratch_corruption(void)
 		CHECK(fsimg_owner_runs_append(runs, 2, 2, NULL) == FSIMG_OK);
 		CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
 		/* Shorter records order first: the cursor meets one at once. */
-		CHECK(fsimg_owner_runs_next(runs, &run, &error) == FSIMG_ECORRUPT);
+		CHECK(fsimg_owner_runs_next(runs, &run, &error) ==
+		    FSIMG_ECORRUPT);
 		CHECK(error.operation == FSIMG_OP_METADATA);
 		CHECK(strstr(error.message, "scratch") != NULL);
 		CHECK(run.first == 0 && run.end == 0);
@@ -449,37 +536,36 @@ test_scratch_corruption(void)
 	}
 
 	/* Damage written into the sorted records: { 2, 2 } then { 8, 2 }. */
-	for (unsigned damage = 0; damage < 4; damage++) {
-		CHECK(fsimg_owner_runs_new(&fixture.session, 0, 64, &runs,
-		    NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(damage_cases) / sizeof(damage_cases[0]);
+	    i++) {
+		CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 64,
+		    &runs, NULL) == FSIMG_OK);
 		CHECK(fsimg_owner_runs_append(runs, 8, 2, NULL) == FSIMG_OK);
 		CHECK(fsimg_owner_runs_append(runs, 2, 2, NULL) == FSIMG_OK);
 		CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
 		stream = fsimg_test_owner_runs_stream(runs);
-		switch (damage) {
-		case 0:	/* second record now starts inside the first */
-			put_record(record, 3, 2);
-			break;
-		case 1:	/* second record now starts before the first */
-			put_record(record, 1, 2);
-			break;
-		case 2:	/* second record now ends past the domain */
-			put_record(record, 8, 57);
-			break;
-		default: /* second record is now empty */
-			put_record(record, 8, 0);
-			break;
-		}
-		CHECK(fsimg_store_write(stream->store, STORED_BYTES + FRAME_BYTES,
-		    record, sizeof(record), NULL) == FSIMG_OK);
-		expect_corrupt_next(runs, 1, damage < 2 ?
-		    "overlapping ownership claims" : "scratch");
+		put_record(record, damage_cases[i].first,
+		    damage_cases[i].count);
+		CHECK(fsimg_store_write(stream->store,
+		    STORED_BYTES + FRAME_BYTES, record, sizeof(record), NULL) ==
+		    FSIMG_OK);
+		CHECK(fsimg_owner_runs_next(runs, &run, NULL) == FSIMG_OK);
+		CHECK(run.first == 2 && run.end == 4);
+		CHECK(fsimg_owner_runs_next(runs, &run, &error) ==
+		    FSIMG_ECORRUPT);
+		CHECK(error.operation == damage_cases[i].operation);
+		CHECK(run.first == 0 && run.end == 0);
+		if (strcmp(error.message, damage_cases[i].message) != 0)
+			fprintf(stderr, "expected: %s\nactual: %s\n",
+			    damage_cases[i].message, error.message);
+		CHECK(strcmp(error.message, damage_cases[i].message) == 0);
+		CHECK(fsimg_owner_runs_next(runs, &run, NULL) == FSIMG_ESTATE);
 		fsimg_owner_runs_free(runs);
 	}
 
 	/* Damage written before sorting: { 8, 2 } becomes empty. */
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, 64, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 64,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 8, 2, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 2, 2, NULL) == FSIMG_OK);
 	put_record(record, 8, 0);
@@ -490,8 +576,8 @@ test_scratch_corruption(void)
 	fsimg_owner_runs_free(runs);
 
 	/* A frame claiming more than the record maximum. */
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, 64, &runs, NULL) ==
-	    FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, 64,
+	    &runs, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_append(runs, 2, 2, NULL) == FSIMG_OK);
 	CHECK(fsimg_owner_runs_seal(runs, NULL) == FSIMG_OK);
 	fsimg_store_le64(frame, (uint64_t)(RECORD_BYTES + 1) << 32 | 1);
@@ -524,8 +610,8 @@ test_failures(void)
 	reached_success = false;
 	for (uint64_t attempt = 1; !reached_success && attempt <= 256; attempt++) {
 		fsimg_test_fail_alloc_after(fixture.ctx, attempt);
-		status = fsimg_owner_runs_new(&fixture.session, 0, claims * 2,
-		    &runs, &error);
+		status = fsimg_owner_runs_new(&fixture.session, unit_name, 0,
+		    claims * 2, &runs, &error);
 		for (uint64_t i = 0; status == FSIMG_OK && i < claims; i++)
 			status = fsimg_owner_runs_append(runs, (claims - 1 - i) * 2,
 			    1, &error);
@@ -553,8 +639,8 @@ test_failures(void)
 		for (uint64_t nth = 1; nth <= 40; nth += 13) {
 			fsimg_test_meta_fail_after(fixture.ctx,
 			    (fsimg_meta_fault_t)point, nth, ENOSPC);
-			status = fsimg_owner_runs_new(&fixture.session, 0,
-			    claims * 2, &runs, &error);
+			status = fsimg_owner_runs_new(&fixture.session,
+			    unit_name, 0, claims * 2, &runs, &error);
 			for (uint64_t i = 0; status == FSIMG_OK && i < claims; i++)
 				status = fsimg_owner_runs_append(runs,
 				    (claims - 1 - i) * 2, 1, &error);
@@ -578,8 +664,8 @@ test_failures(void)
 	}
 
 	/* Cancellation during the sort fails the seal. */
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, claims * 2, &runs,
-	    NULL) == FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, claims * 2,
+	    &runs, NULL) == FSIMG_OK);
 	for (uint64_t i = 0; i < claims; i++)
 		CHECK(fsimg_owner_runs_append(runs, (claims - 1 - i) * 2, 1,
 		    NULL) == FSIMG_OK);
@@ -592,8 +678,8 @@ test_failures(void)
 
 	/* A work limit reached while collecting fails the append. */
 	fixture.ctx->options.max_work = fixture.session.progress.work + 4;
-	CHECK(fsimg_owner_runs_new(&fixture.session, 0, claims * 2, &runs,
-	    NULL) == FSIMG_OK);
+	CHECK(fsimg_owner_runs_new(&fixture.session, unit_name, 0, claims * 2,
+	    &runs, NULL) == FSIMG_OK);
 	status = FSIMG_OK;
 	for (uint64_t i = 0; status == FSIMG_OK && i < claims; i++)
 		status = fsimg_owner_runs_append(runs, (claims - 1 - i) * 2, 1,
@@ -612,6 +698,7 @@ main(int argc, char **argv FSIMG_UNUSED)
 	test_codec_and_domains();
 	test_claim_rules();
 	test_order_and_overlap();
+	test_overlap_messages_name_shared_units();
 	test_spilled_sort();
 	test_lifecycle();
 	test_scratch_corruption();

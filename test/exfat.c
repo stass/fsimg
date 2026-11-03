@@ -55,6 +55,8 @@ static size_t cluster_offset(unsigned);
 static unsigned char *file_set(exfat_fixture_t *);
 static void fix_boot(exfat_fixture_t *);
 static void fix_set(exfat_fixture_t *);
+static void fix_set_at(unsigned char *);
+static void put_name(unsigned char *, const char *);
 static void make_image(exfat_fixture_t *);
 static void compressed_upcase(exfat_fixture_t *, upcase_scenario_t);
 static bool cancelled(void *);
@@ -93,6 +95,7 @@ static void payload_hooks(exfat_fixture_t *);
 static void test_verify_payload(void);
 static void test_verify_payload_failures(void);
 static void test_trailing_duplicate_claim(void);
+static void test_cross_linked_files_name_shared_clusters(void);
 static uint32_t fragment_cluster(unsigned, unsigned);
 static void make_fragmented_file(exfat_fixture_t *, unsigned);
 static void baseline_zero_tail(void);
@@ -175,7 +178,12 @@ fix_boot(exfat_fixture_t *f)
 static void
 fix_set(exfat_fixture_t *f)
 {
-	unsigned char *set = file_set(f);
+	fix_set_at(file_set(f));
+}
+
+static void
+fix_set_at(unsigned char *set)
+{
 	uint16_t checksum = 0;
 	size_t length = ((size_t)set[1] + 1) * 32;
 
@@ -186,12 +194,25 @@ fix_set(exfat_fixture_t *f)
 	put16(set + 2, checksum);
 }
 
+/* Fixture file names contain eight ASCII characters. */
+static void
+put_name(unsigned char *set, const char *name)
+{
+	unsigned char upper_name[16];
+
+	for (unsigned i = 0; i < 8; i++) {
+		put16(set + 66 + i * 2, (uint16_t)name[i]);
+		upper_name[i * 2] = (unsigned char)(name[i] >= 'a' && name[i] <= 'z' ?
+		    name[i] - 32 : name[i]);
+		upper_name[i * 2 + 1] = 0;
+	}
+	put16(set + 36, (uint16_t)rotate_sum(upper_name, sizeof(upper_name), 16));
+}
+
 static void
 make_image(exfat_fixture_t *f)
 {
 	unsigned char *boot, *fat, *bitmap, *upcase, *root, *set;
-	unsigned char upper_name[16];
-	const char name[] = "Data.bin";
 	uint16_t mapped;
 
 	bzero(f->image, IMAGE_BYTES);
@@ -257,13 +278,7 @@ make_image(exfat_fixture_t *f)
 	put32(set + 52, FILE_CLUSTER);
 	put64(set + 56, 1024);
 	set[64] = 0xc1;
-	for (unsigned i = 0; i < 8; i++) {
-		put16(set + 66 + i * 2, (uint16_t)name[i]);
-		upper_name[i * 2] = (unsigned char)(name[i] >= 'a' && name[i] <= 'z' ?
-		    name[i] - 32 : name[i]);
-		upper_name[i * 2 + 1] = 0;
-	}
-	put16(set + 36, (uint16_t)rotate_sum(upper_name, sizeof(upper_name), 16));
+	put_name(set, "Data.bin");
 	fix_set(f);
 	fix_boot(f);
 	for (unsigned i = 0; i < 512; i++)
@@ -1570,6 +1585,7 @@ test_trailing_duplicate_claim(void)
 	exfat_fixture_t f;
 	fsimg_verify_report_t report;
 	fsimg_error_t error;
+	char expected[128];
 	unsigned char *fat, *bitmap;
 
 	fixture_new(&f);
@@ -1584,9 +1600,63 @@ test_trailing_duplicate_claim(void)
 	bitmap[(last - 2) / 8] |= (unsigned char)(1u << ((last - 2) % 8));
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
-	if (strstr(error.message, "overlapping ownership claims") == NULL)
-		fprintf(stderr, "trailing duplicate: %s\n", error.message);
-	CHECK(strstr(error.message, "overlapping ownership claims") != NULL);
+	snprintf(expected, sizeof(expected),
+	    "exFAT cluster %" PRIu32 " is claimed by more than one owner", last);
+	if (strcmp(error.message, expected) != 0)
+		fprintf(stderr, "trailing duplicate: expected: %s\nactual: %s\n",
+		    expected, error.message);
+	CHECK(strcmp(error.message, expected) == 0);
+	CHECK(!report.complete);
+	fixture_free(&f);
+}
+
+/* Two FAT-chained files merge after distinct two-cluster prefixes:
+ * Data.bin is 260->261->264->265; Twin.bin is 262->263->264->265.
+ * System allocations remain intact and the bitmap marks every file cluster.
+ */
+static void
+test_cross_linked_files_name_shared_clusters(void)
+{
+	const uint32_t shared = FILE_CLUSTER + 4;
+	exfat_fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	unsigned char *fat, *bitmap, *set, *second;
+	char expected[128];
+
+	fixture_new(&f);
+	fat = f.image + 24 * 512;
+	bitmap = f.image + cluster_offset(2);
+	put32(fat + FILE_CLUSTER * 4, FILE_CLUSTER + 1);
+	put32(fat + (FILE_CLUSTER + 1) * 4, shared);
+	put32(fat + (FILE_CLUSTER + 2) * 4, FILE_CLUSTER + 3);
+	put32(fat + (FILE_CLUSTER + 3) * 4, shared);
+	put32(fat + shared * 4, shared + 1);
+	put32(fat + (shared + 1) * 4, UINT32_MAX);
+	for (uint32_t cluster = FILE_CLUSTER; cluster <= shared + 1; cluster++)
+		bitmap[(cluster - 2) / 8] |=
+		    (unsigned char)(1u << ((cluster - 2) % 8));
+
+	set = file_set(&f);
+	set[33] = 1; /* AllocationPossible, with NoFatChain clear. */
+	put64(set + 40, 4 * 512);
+	put64(set + 56, 4 * 512);
+	fix_set(&f);
+	second = set + 96;
+	bcopy(set, second, 96);
+	put32(second + 52, FILE_CLUSTER + 2);
+	put_name(second, "Twin.bin");
+	fix_set_at(second);
+
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	snprintf(expected, sizeof(expected),
+	    "exFAT clusters %" PRIu32 "-%" PRIu32
+	    " are claimed by more than one owner", shared, shared + 1);
+	if (strcmp(error.message, expected) != 0)
+		fprintf(stderr, "cross-linked files: expected: %s\nactual: %s\n",
+		    expected, error.message);
+	CHECK(strcmp(error.message, expected) == 0);
 	CHECK(!report.complete);
 	fixture_free(&f);
 }
@@ -2184,6 +2254,7 @@ main(int argc, char **argv)
 	test_verify_payload();
 	test_verify_payload_failures();
 	test_trailing_duplicate_claim();
+	test_cross_linked_files_name_shared_clusters();
 	test_content_guard("changed");
 	test_content_guard("changed-range");
 	test_content_guard("cancel");
