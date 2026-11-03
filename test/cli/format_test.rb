@@ -192,6 +192,28 @@ class CliTest < Minitest::Test
     invoke(arguments: ["W", "-F", "fat12", "--force", "-f", "human.img"])
   end
 
+  def test_named_iso_without_force_suggests_assuming_identity
+    write_iso_without_standard_identifier
+    result = invoke(arguments: ["t", "-F", "iso9660", "-f", "assumed.iso"], expected: 1)
+    assert_match(/; use --force to read it as iso9660 anyway\n\z/, result.stderr)
+  end
+
+  def test_force_lists_and_extracts_iso_without_standard_identifier
+    write_iso_without_standard_identifier
+    result = invoke(arguments: ["t", "-F", "iso9660", "--force", "-f", "assumed.iso"])
+    assert_includes(result.stdout.lines, "\"/HELLO.TXT\"\n".b)
+    invoke(arguments: ["x", "-F", "iso9660", "--force", "-f", "assumed.iso"])
+    assert_equal("hello\n".b, (@root / "assumed/HELLO.TXT").binread)
+    assert_equal(@payload, (@root / "assumed/nested/caf\u00e9.txt").binread)
+  end
+
+  def test_force_iso_verification_reports_assumed_identity
+    write_iso_without_standard_identifier
+    result = invoke(arguments: ["W", "-F", "iso9660", "--force", "-f", "assumed.iso"], expected: 1)
+    assert_includes(result.stderr,
+      "iso9660 identity was assumed: block 16 lacks the CD001 standard identifier".b)
+  end
+
   def test_force_preserves_iso_listing_and_verification
     image_fixture(name: "force.iso", format: "iso9660")
     plain = invoke(arguments: ["t", "-F", "iso9660", "-f", "force.iso"])
@@ -202,6 +224,14 @@ class CliTest < Minitest::Test
   end
 
   private
+
+  def write_iso_without_standard_identifier
+    image_fixture(name: "assumed.iso", format: "iso9660")
+    File.open(@root / "assumed.iso", "r+b") do |file|
+      file.seek(32769)
+      file.write("\0".b * 5)
+    end
+  end
 
   def write_atari_floppy
     # Independent FAT12 layout: 720 sectors, two three-sector FATs, a

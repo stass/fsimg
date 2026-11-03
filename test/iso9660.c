@@ -5756,6 +5756,119 @@ test_verifier(void)
 	test_verify_million_data_claims_spill_to_scratch();
 }
 
+/* Reading remains available after identity is waived; verification refuses it. */
+static void
+check_iso9660_assumed_identity(fixture_t *f, const char *message)
+{
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	const fsimg_entry_t *entry;
+	unsigned char data[5];
+	size_t count;
+
+	fsimg_read_options_init(&options);
+	options.format = "iso9660";
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &error) == FSIMG_EFORMAT);
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &error) == FSIMG_OK);
+
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/A.TXT") == 0);
+	CHECK(entry->size == sizeof(data));
+	CHECK(fsimg_reader_read_at(f->reader, 0, data,
+	    sizeof(data), &count, NULL) == FSIMG_OK);
+	CHECK(count == sizeof(data));
+	CHECK(bcmp(data, "hello", sizeof(data)) == 0);
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_DONE);
+	CHECK(entry == NULL);
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f->reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	CHECK(!report.complete);
+	CHECK(strcmp(error.message, message) == 0);
+}
+
+static void
+test_iso9660_assumed_identity_reads_volume_without_standard_identifier(void)
+{
+	image_t image = image_new();
+	fixture_t f;
+
+	bzero(image.bytes + 16 * BLOCK + 1, 5);
+	fixture_new(&f, &image, NULL);
+	check_iso9660_assumed_identity(&f, "iso9660 identity was assumed: "
+	    "block 16 lacks the CD001 standard identifier");
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+static void
+test_iso9660_assumed_identity_rejects_later_missing_identifier(void)
+{
+	image_t image = image_new();
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	fixture_new(&f, &image, NULL);
+	bzero(image.bytes + 16 * BLOCK + 1, 5);
+	bzero(image.bytes + 17 * BLOCK + 1, 5);
+	fsimg_read_options_init(&options);
+	options.format = "iso9660";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "ISO 9660 volume descriptor lacks CD001") == 0);
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+static void
+test_iso9660_assumed_identity_rejects_unknown_descriptor_type(void)
+{
+	image_t image = image_new();
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	fixture_new(&f, &image, NULL);
+	bzero(image.bytes + 16 * BLOCK + 1, 5);
+	image.bytes[16 * BLOCK] = 5;
+	fsimg_read_options_init(&options);
+	options.format = "iso9660";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_EUNSUPPORTED);
+
+	fixture_free(&f);
+	free(image.bytes);
+}
+
+static void
+test_iso9660_intact_volume_with_assume_identity_verifies(void)
+{
+	image_t image = image_new();
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+
+	fixture_new(&f, &image, NULL);
+	fsimg_read_options_init(&options);
+	options.format = "iso9660";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_free(&f);
+	free(image.bytes);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5872,6 +5985,10 @@ main(int argc, char **argv)
 	test_extraction_and_selection();
 	test_faults();
 	test_exclusivity();
+	test_iso9660_assumed_identity_reads_volume_without_standard_identifier();
+	test_iso9660_assumed_identity_rejects_later_missing_identifier();
+	test_iso9660_assumed_identity_rejects_unknown_descriptor_type();
+	test_iso9660_intact_volume_with_assume_identity_verifies();
 	printf("ISO 9660: %u classified cases, %u failures\n", cases, failures);
 	return (failures == 0 ? 0 : 1);
 }

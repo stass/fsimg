@@ -64,31 +64,38 @@ const fsimg_format_t fsimg_iso9660_format = {
 	.reserved_system_area = true
 };
 
-/* The identity signature is a volume descriptor at block 16: CD001 after a
+/* Detection's signature is a volume descriptor at block 16: CD001 after a
  * type the profile lists (specs/design-iso9660-driver.md#probe-and-open).
  * No other probe's structures hold it there, and no probe scans for it
  * elsewhere, so CD001 inside another format's data draws a second claim
- * only at block 16. With the identity the probe claims the image. A
+ * only at block 16. Only CD001 is identity: a caller assuming the identity
+ * skips it, and an unknown type is then refused as open refuses it. With
+ * the signature the probe claims the image. A
  * primary descriptor at block 16 is checked further for its block size
  * and volume size; any other first descriptor is left to open, which
  * finds the primary descriptor.
  */
 static fsimg_status_t
 iso_probe(const unsigned char *prefix, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity FSIMG_UNUSED,
+    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity,
     const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	const unsigned char *descriptor;
 	uint32_t space_size;
+	bool known;
 
 	*variant = &iso_variants[0];
 	if (length < ISO_PROBE_BYTES)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no ISO 9660 volume descriptor"));
 	descriptor = prefix + ISO_SYSTEM_BLOCKS * ISO_BLOCK_BYTES;
-	if (!iso_identity(descriptor))
+	known = iso_descriptor_type_known(descriptor[0]);
+	if (!assume_identity && (!iso_identity(descriptor) || !known))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no ISO 9660 volume descriptor"));
+	if (!known)
+		return (iso_unsupported(error,
+		    "unsupported ISO 9660 volume descriptor type or version"));
 	if (descriptor[0] != ISO_VD_PRIMARY)
 		return (FSIMG_OK);
 	return (iso_geometry_decode(descriptor, &space_size, error));

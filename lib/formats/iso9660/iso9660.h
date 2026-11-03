@@ -437,6 +437,7 @@ fsimg_status_t iso_date7_decode(const unsigned char *, bool *,
 fsimg_status_t iso_date17_decode(const unsigned char *, bool *,
     fsimg_timestamp_t *, fsimg_error_t *);
 bool iso_identity(const unsigned char *);
+bool iso_descriptor_type_known(uint8_t);
 fsimg_status_t iso_geometry_decode(const unsigned char *, uint32_t *,
     fsimg_error_t *);
 fsimg_status_t iso_descriptor_decode(const unsigned char *, uint32_t,

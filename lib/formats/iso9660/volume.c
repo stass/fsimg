@@ -113,6 +113,17 @@ descriptors_scan(fsimg_reader_t *reader, fsimg_error_t *error)
 		    iso->window.bytes[0] != ISO_VD_TERMINATOR)
 			return (iso_unsupported(error, "ISO 9660 descriptor set "
 			    "has no terminator within 64 descriptors"));
+		/* CD001 at block 16 is the identity, which a caller assuming
+		 * it waives; on every later descriptor it frames the set.
+		 */
+		if (status == FSIMG_OK && i == 0)
+			status = fsimg_reader_identity(reader,
+			    iso_identity(iso->window.bytes),
+			    "ISO 9660 volume descriptor lacks CD001",
+			    "block 16 lacks the CD001 standard identifier", error);
+		else if (status == FSIMG_OK && !iso_identity(iso->window.bytes))
+			status = iso_corrupt(error,
+			    "ISO 9660 volume descriptor lacks CD001");
 		if (status == FSIMG_OK)
 			status = iso_descriptor_decode(iso->window.bytes, block,
 			    &decoded, error);

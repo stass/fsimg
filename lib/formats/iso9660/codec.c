@@ -229,16 +229,21 @@ iso_date17_decode(const unsigned char *raw, bool *present,
 	return (FSIMG_OK);
 }
 
-/* The identity signature at the start of block 16: the standard identifier
- * CD001 after a type in the profile table.
+/* The standard identifier CD001 of a volume descriptor. At block 16 it is
+ * the format's identity; on every later descriptor it frames the set and
+ * is validation.
  */
 bool
 iso_identity(const unsigned char *descriptor)
 {
-	uint8_t type = descriptor[VD_TYPE];
+	return (bcmp(descriptor + VD_IDENTIFIER, "CD001", 5) == 0);
+}
 
-	return (bcmp(descriptor + VD_IDENTIFIER, "CD001", 5) == 0 &&
-	    (type <= ISO_VD_PARTITION || type == ISO_VD_TERMINATOR));
+/* Whether a descriptor type is in the profile table. */
+bool
+iso_descriptor_type_known(uint8_t type)
+{
+	return (type <= ISO_VD_PARTITION || type == ISO_VD_TERMINATOR);
 }
 
 /* The reader profile's geometry: a nonzero volume of 2048-byte blocks. */
@@ -393,8 +398,9 @@ joliet_level(const unsigned char *escapes)
 	return (0);
 }
 
-/* Decode the volume descriptor at block number under the descriptor scan
- * rule and the profile's type and version tables. A primary and a Joliet
+/* Decode the volume descriptor at block number under the profile's type
+ * and version tables. The caller has checked its CD001, identity at block
+ * 16 and validation after it. A primary and a Joliet
  * descriptor are decoded in full; a boot record, a partition descriptor,
  * an enhanced or other supplementary descriptor is framed and ignored.
  */
@@ -408,13 +414,9 @@ iso_descriptor_decode(const unsigned char *raw, uint32_t block,
 	out->block = block;
 	out->type = raw[VD_TYPE];
 	out->version = raw[VD_VERSION];
-	if (bcmp(raw + VD_IDENTIFIER, "CD001", 5) != 0)
-		return (iso_corrupt(error,
-		    "ISO 9660 volume descriptor lacks CD001"));
 	if (out->type == ISO_VD_SUPPLEMENTARY && out->version == 2)
 		return (FSIMG_OK);	/* enhanced */
-	if (out->version != 1 || (out->type > ISO_VD_PARTITION &&
-	    out->type != ISO_VD_TERMINATOR))
+	if (out->version != 1 || !iso_descriptor_type_known(out->type))
 		return (iso_unsupported(error,
 		    "unsupported ISO 9660 volume descriptor type or version"));
 	switch (out->type) {
