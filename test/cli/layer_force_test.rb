@@ -64,6 +64,26 @@ class CliTest < Minitest::Test
       "vhd identity was assumed: the footer has no conectix cookie".b)
   end
 
+  def test_force_reads_gzip_with_missing_magic_but_refuses_verification
+    image_fixture(name: "volume.img", format: "fat12", size: "1M")
+    image = gzip_bytes((@root / "volume.img").binread)
+    image[0, 2] = "\0\0".b
+    (@root / "disk.gz").binwrite(image)
+
+    result = invoke(arguments: ["t", "-z", "-F", "fat12", "-f", "disk.gz"], expected: 1)
+    assert_match(/; use --force to read it as gzip anyway\n\z/n, result.stderr)
+
+    [[], ["-F", "fat12"]].each do |stack|
+      records = completed(invoke(arguments: ["t", "-z", "--force", "--json", *stack, "-f", "disk.gz"]))
+      paths = records.select { _1.fetch("type") == "entry" }.map { _1.fetch("path") }
+      assert_equal(["/HELLO.TXT", "/nested", "/nested/caf\u00e9.txt"].to_set, paths.to_set)
+    end
+
+    result = invoke(arguments: ["W", "-z", "--force", "-f", "disk.gz"], expected: 1)
+    assert_includes(result.stderr,
+      "gzip identity was assumed: the first member has no 1f 8b magic".b)
+  end
+
   private
 
   def write_unsigned_mbr_disk

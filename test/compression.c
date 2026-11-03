@@ -90,6 +90,7 @@ typedef struct fixture {
 	fsimg_image_t	*image;
 	uint64_t	 baseline_memory;
 	uint64_t	 fail_allocation;	/* Injected into the open; 0 none */
+	unsigned	 image_flags;
 	bool		 overstate_compression_length;
 	char		 directory[PATH_MAX];
 	int		 directory_fd;
@@ -332,6 +333,7 @@ open_file(fixture_t *f, memory_file_t *file, const char *compression,
 	snprintf(options.compression, sizeof(options.compression), "%s",
 	    compression);
 	options.spool_fd = spool;
+	options.flags = f->image_flags;
 	if (stack != NULL)
 		CHECK(fsimg_stack_parse(stack, &options.stack, NULL) == FSIMG_OK);
 	fsimg_test_fail_alloc_after(f->ctx, f->fail_allocation);
@@ -350,6 +352,7 @@ open_pipe(fixture_t *f, int stream, const char *compression, int spool,
 	snprintf(options.compression, sizeof(options.compression), "%s",
 	    compression);
 	options.spool_fd = spool;
+	options.flags = f->image_flags;
 	return (fsimg_image_open_stream(f->ctx, stream, &options, &f->image,
 	    error));
 }
@@ -2797,12 +2800,260 @@ write_seed_buffer(const char *directory, const char *name, const buffer_t *buffe
 	CHECK(close(directory_fd) == 0);
 }
 
+static void test_forced_gzip_requires_magic_without_assumption(void);
+static void test_assumed_gzip_reads_original_disk(void);
+static void test_assumed_gzip_refuses_verification(void);
+static void test_assumed_gzip_stream_reads_original_disk(void);
+static void test_assumed_gzip_still_validates_members(void);
+static void test_assume_identity_leaves_gzip_detection_unchanged(void);
+static void test_assume_identity_leaves_codec_magic_required(void);
+
+static void
+test_forced_gzip_requires_magic_without_assumption(void)
+{
+	unsigned char *data = pattern(16 * KIB, 31);
+	buffer_t gzip = gzip_of(data, 16 * KIB);
+	memory_file_t file = { .bytes = gzip.bytes, .length = gzip.length };
+	fsimg_error_t error;
+	fixture_t f;
+
+	bzero(gzip.bytes, 2);
+	fixture_init(&f, 0);
+	CHECK(open_file(&f, &file, "gzip", "fat12/-/-", spool_new(&f),
+	    &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.path, "gzip") == 0);
+	fixture_free(&f);
+	free(gzip.bytes);
+	free(data);
+}
+
+static void
+test_assumed_gzip_reads_original_disk(void)
+{
+	unsigned char *data = pattern(16 * KIB, 31);
+	buffer_t gzip = gzip_of(data, 16 * KIB);
+	memory_file_t file = { .bytes = gzip.bytes, .length = gzip.length };
+	fixture_t f;
+
+	bzero(gzip.bytes, 2);
+	fixture_init(&f, 0);
+	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(open_file(&f, &file, "gzip", "fat12/-/-", spool_new(&f),
+	    NULL) == FSIMG_OK);
+	expect_disk(&f, data, 16 * KIB);
+	fixture_free(&f);
+	free(gzip.bytes);
+	free(data);
+}
+
+static void
+test_assumed_gzip_refuses_verification(void)
+{
+	unsigned char *data = pattern(16 * KIB, 31);
+	buffer_t gzip = gzip_of(data, 16 * KIB);
+	memory_file_t file = { .bytes = gzip.bytes, .length = gzip.length };
+	fsimg_layer_report_t report;
+	fsimg_stats_t before, after;
+	fsimg_error_t error;
+	fixture_t f;
+
+	bzero(gzip.bytes, 2);
+	fixture_init(&f, 0);
+	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(open_file(&f, &file, "gzip", "fat12/-/-", spool_new(&f),
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message,
+	    "gzip identity was assumed: the first member has no 1f 8b magic") == 0);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
+	CHECK(after.io_calls == before.io_calls);
+	CHECK(after.read_bytes == before.read_bytes);
+	fixture_free(&f);
+	free(gzip.bytes);
+	free(data);
+}
+
+static void
+test_assumed_gzip_stream_reads_original_disk(void)
+{
+	unsigned char *data = pattern(16 * KIB, 31);
+	buffer_t gzip = gzip_of(data, 16 * KIB);
+	fixture_t f;
+	pid_t child;
+	int stream;
+
+	bzero(gzip.bytes, 2);
+	fixture_init(&f, 0);
+	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	child = feed(gzip.bytes, gzip.length, &stream);
+	CHECK(open_pipe(&f, stream, "gzip", spool_new(&f), NULL) == FSIMG_OK);
+	CHECK(close(stream) == 0);
+	reap(child);
+	expect_disk(&f, data, 16 * KIB);
+	fixture_free(&f);
+	free(gzip.bytes);
+	free(data);
+}
+
+static void
+test_assumed_gzip_still_validates_members(void)
+{
+	unsigned char *data = pattern(16 * KIB, 31);
+	buffer_t gzip;
+	memory_file_t file;
+	fsimg_error_t error;
+	fixture_t f;
+	size_t second_member;
+
+	/* Method and reserved flags are validation even in the first header. */
+	for (unsigned field = 2; field <= 3; field++) {
+		gzip = gzip_of(data, 16 * KIB);
+		gzip.bytes[field] = field == 2 ? 7 : 0x20;
+		file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
+		fixture_init(&f, 0);
+		f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+		CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
+		    &error) != FSIMG_OK);
+		CHECK(strcmp(error.path, "gzip") == 0);
+		fixture_free(&f);
+		free(gzip.bytes);
+	}
+
+	/* Only the first member's magic may be waived. */
+	gzip = gzip_of(data, 16 * KIB);
+	second_member = gzip.length;
+	member_append(&gzip, &(member_t){ .data = data, .length = 16 * KIB });
+	bzero(gzip.bytes + second_member, 2);
+	file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
+	fixture_init(&f, 0);
+	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.path, "gzip") == 0);
+	CHECK(strcmp(error.message, "bytes follow the last gzip member") == 0);
+	fixture_free(&f);
+	free(gzip.bytes);
+
+	gzip = gzip_of(data, 16 * KIB);
+	gzip.bytes[gzip.length - 8] ^= 1;
+	file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
+	fixture_init(&f, 0);
+	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.path, "gzip") == 0);
+	CHECK(strcmp(error.message, "gzip member CRC32 mismatch") == 0);
+	fixture_free(&f);
+	free(gzip.bytes);
+	free(data);
+}
+
+static void
+test_assume_identity_leaves_gzip_detection_unchanged(void)
+{
+	unsigned char *data = pattern(16 * KIB, 31);
+	buffer_t gzip = gzip_of(data, 16 * KIB);
+	memory_file_t file = { .bytes = gzip.bytes, .length = gzip.length };
+	fsimg_image_info_t info;
+	fixture_t f;
+
+	bzero(gzip.bytes, 2);
+	for (unsigned assume = 0; assume <= 1; assume++) {
+		fixture_init(&f, 0);
+		f.image_flags = assume == 0 ? 0 : FSIMG_IMAGE_ASSUME_IDENTITY;
+		CHECK(open_file(&f, &file, "", "fat12/-/-", spool_new(&f),
+		    NULL) == FSIMG_OK);
+		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+		CHECK(info.compression[0] == '\0');
+		expect_disk(&f, gzip.bytes, gzip.length);
+		fixture_free(&f);
+	}
+	free(gzip.bytes);
+	free(data);
+}
+
+static void
+test_assume_identity_leaves_codec_magic_required(void)
+{
+#if defined(FSIMG_XZ) || defined(FSIMG_ZSTD)
+	unsigned char *data = pattern(16 * KIB, 31);
+	const char *names[] = {
+#ifdef FSIMG_XZ
+		"xz",
+#endif
+#ifdef FSIMG_ZSTD
+		"zstd",
+#endif
+	};
+	buffer_t encoded;
+	memory_file_t file;
+	fsimg_error_t plain, assumed;
+	fsimg_status_t status;
+	fixture_t f;
+
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		encoded = (buffer_t){ 0 };
+#ifdef FSIMG_XZ
+		if (strcmp(names[i], "xz") == 0)
+			encoded = xz_of(data, 16 * KIB, LZMA_CHECK_CRC64, false);
+#endif
+#ifdef FSIMG_ZSTD
+		if (strcmp(names[i], "zstd") == 0)
+			encoded = zstd_of(data, 16 * KIB, 1, true, true);
+#endif
+		bzero(encoded.bytes, 4);
+		file = (memory_file_t){ .bytes = encoded.bytes,
+		    .length = encoded.length };
+		fixture_init(&f, 0);
+		status = open_file(&f, &file, names[i], NULL, spool_new(&f), &plain);
+		CHECK(status == FSIMG_EFORMAT);
+		CHECK(strcmp(plain.path, names[i]) == 0);
+		fixture_free(&f);
+		fixture_init(&f, 0);
+		f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
+		CHECK(open_file(&f, &file, names[i], NULL, spool_new(&f),
+		    &assumed) == status);
+		CHECK(strcmp(plain.path, assumed.path) == 0);
+		CHECK(strcmp(plain.message, assumed.message) == 0);
+		fixture_free(&f);
+		free(encoded.bytes);
+	}
+	free(data);
+#else
+	printf("SKIP: codec identity tests require liblzma or libzstd\n");
+#endif
+}
+
 int
 main(int argc, char **argv)
 {
 	unsigned char *data;
 	member_t members[2];
 	buffer_t gzip = { 0 };
+	static const struct {
+		const char *name;
+		void (*run)(void);
+	} identity_tests[] = {
+		{ "gzip-magic", test_forced_gzip_requires_magic_without_assumption },
+		{ "gzip-read", test_assumed_gzip_reads_original_disk },
+		{ "gzip-verify", test_assumed_gzip_refuses_verification },
+		{ "gzip-stream", test_assumed_gzip_stream_reads_original_disk },
+		{ "gzip-validation", test_assumed_gzip_still_validates_members },
+		{ "gzip-detection", test_assume_identity_leaves_gzip_detection_unchanged },
+		{ "codec-magic", test_assume_identity_leaves_codec_magic_required }
+	};
+
+	if (argc == 3 && strcmp(argv[1], "--assumed-compression") == 0) {
+		for (size_t i = 0; i < sizeof(identity_tests) / sizeof(identity_tests[0]); i++) {
+			if (strcmp(argv[2], identity_tests[i].name) != 0)
+				continue;
+			identity_tests[i].run();
+			return (0);
+		}
+		CHECK(!"unknown compression identity test");
+	}
 
 	/* A small two-member file seeds the gzip fuzzer's corpus. */
 	if (argc == 3 && strcmp(argv[1], "--seed-gzip") == 0) {
@@ -2894,6 +3145,8 @@ main(int argc, char **argv)
 	test_streams();
 	test_faults();
 	test_spool_write_failure();
+	for (size_t i = 0; i < sizeof(identity_tests) / sizeof(identity_tests[0]); i++)
+		identity_tests[i].run();
 	printf("compression tests passed\n");
 	return (0);
 }

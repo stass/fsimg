@@ -144,11 +144,17 @@ const fsimg_compression_ops_t fsimg_gzip_compression = {
 	.version = fsimg_zlib_version
 };
 
+/* The identity is the identification bytes, which an assumed identity
+ * waives; method 8 and zero reserved flags decide how the member is
+ * decoded and are validation.
+ */
 static fsimg_status_t
 gzip_probe(const unsigned char *prefix, size_t length,
-    fsimg_identity_t *identity FSIMG_UNUSED, fsimg_error_t *error)
+    fsimg_identity_t *identity, fsimg_error_t *error)
 {
-	if (length < 4 || prefix[0] != 0x1f || prefix[1] != 0x8b ||
+	if (length < 4 || !fsimg_identity_holds(identity,
+	    prefix[0] == 0x1f && prefix[1] == 0x8b,
+	    "the first member has no 1f 8b magic") ||
 	    prefix[2] != GZIP_METHOD_DEFLATE || (prefix[3] & GZIP_RESERVED) != 0)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no gzip signature"));
@@ -249,8 +255,9 @@ skip_text(gzip_decoder_t *decoder, uLong *crc, const char *too_long,
 
 /*
  * A member header. The first member's identification, method and reserved
- * flags are what the probe claimed; a later member failing them is bytes
- * after the last member.
+ * flags are what the probe claimed, checked with the same identity record;
+ * a later member's are validation, and failing them is bytes after the
+ * last member.
  */
 static fsimg_status_t
 read_header(gzip_decoder_t *decoder, fsimg_error_t *error)
@@ -269,7 +276,9 @@ read_header(gzip_decoder_t *decoder, fsimg_error_t *error)
 			    "bytes follow the last gzip member"));
 		if (status != FSIMG_OK)
 			return (status);
-		if (i == 3 && gzip_probe(header, 4, NULL, error) != FSIMG_OK)
+		if (i == 3 && gzip_probe(header, 4,
+		    decoder->member == 1 ? decoder->source->identity : NULL,
+		    error) != FSIMG_OK)
 			return (gzip_corrupt(error, decoder->member == 1 ?
 			    "gzip header is invalid" :
 			    "bytes follow the last gzip member"));

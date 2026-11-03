@@ -562,23 +562,22 @@
 
 ## Planned features
 
-* [Medium] **Assumed identity for the layers** (`lib/layers/`,
-  [detection and forcing](specs/design-layers.md#detection-and-forcing)):
-  `--force` and the assume-identity flags skip the identity checks of
-  every filesystem, but the containers, schemes and compressions receive
-  nothing, so they still refuse a damaged magic. Split each one's
-  identity checks from its validation as its spec section names them,
-  record the waived check in the layer's equivalent of
-  `reader->assumed_identity`, which full verification of the image must
-  refuse, and test each with a damaged signature.
+* [Low] **`--force` hint for layers that waive nothing**
+  (`cmd/fsimg/display.c` `force_candidate`): a forced gpt, ifsboot, xz or
+  zstd failing with `FSIMG_EFORMAT` still suggests `--force`, which then
+  reports the same error. A per-layer fact in the registry saying whether
+  the layer has a waivable identity would let the hint skip them.
 
 * [Low] **Fuzz the assumed-identity path** (`fuzz/fat.c`, `fuzz/qnx4.c`,
-  `fuzz/qnx6.c`, `fuzz/iso9660.c`, `fuzz/ifs.c`): with `--force`, bytes
-  without a format's magic reach its traversal, such as any legal BPB with
-  arbitrary FAT reserved entries or a QNX6 header whose byte order the CRC
-  decides. The fuzzers open with default options; add an iteration forcing
-  each format (`fat12`/`fat16`/`fat32`, `qnx4`, `qnx6`, `iso9660`, `ifs`)
-  with `FSIMG_READ_ASSUME_IDENTITY`. exFAT has no fuzzer.
+  `fuzz/qnx6.c`, `fuzz/iso9660.c`, `fuzz/ifs.c`, `fuzz/container.c`,
+  `fuzz/compression.c`, `fuzz/image.c`): with `--force`, bytes without a
+  format's magic reach its traversal, such as any legal BPB with arbitrary
+  FAT reserved entries or a QNX6 header whose byte order the CRC decides,
+  and bytes without a magic reach the open of a forced mbr, vhd, simg,
+  hbcifs, dmg or gzip. The fuzzers open with default options; add
+  iterations forcing each filesystem (`fat12`/`fat16`/`fat32`, `qnx4`,
+  `qnx6`, `iso9660`, `ifs`) with `FSIMG_READ_ASSUME_IDENTITY` and each of
+  those layers with `FSIMG_IMAGE_ASSUME_IDENTITY`. exFAT has no fuzzer.
 
 * [Low] **Native evidence for 1024-byte link targets on QNX4 and QNX6**
   (`tools/qnx/`, `docs/qnx4-research.md`, `docs/qnx6-research.md`): the
