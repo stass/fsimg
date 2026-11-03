@@ -89,6 +89,17 @@ static void test_missing_extraction_member_names_error(void);
 static fsimg_status_t posix_replay(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_error_t *);
 static void present_posix_kinds(extract_fixture_t *);
+static fsimg_status_t device_replay(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_error_t *);
+static void present_device_kinds(extract_fixture_t *);
+static fsimg_status_t file_device_number_replay(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_error_t *);
+static fsimg_status_t socket_device_number_replay(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_error_t *);
+static void test_replay_refuses_device_number_on_nondevice(void);
+static void test_extraction_refuses_devices_and_sockets(void);
+static void test_skipped_devices_and_sockets_are_recorded_in_manifest(void);
+static void test_single_member_output_refuses_devices_and_sockets(void);
 static void test_unsupported_kinds(void);
 static void test_link_content(void);
 static bool inheritable_acl(int, const char *);
@@ -100,6 +111,7 @@ static void test_inherited_acl(void);
  */
 static const fsimg_reader_ops_t *fat_reader_ops;
 static fsimg_reader_ops_t posix_reader_ops;
+static fsimg_reader_ops_t device_reader_ops;
 static bool last_root_entry_seen;
 
 /* The four-byte "short" becomes a symbolic link whose target is its content;
@@ -128,6 +140,244 @@ present_posix_kinds(extract_fixture_t *fixture)
 	posix_reader_ops = *fat_reader_ops;
 	posix_reader_ops.replay = posix_replay;
 	fixture->reader->ops = &posix_reader_ops;
+}
+
+/* Replace three files after FAT replay. The short file's content state must
+ * also be cleared because a device has neither a size nor initialized bytes.
+ */
+static fsimg_status_t
+device_replay(fsimg_reader_t *reader, const char *name,
+    const unsigned char *payload, size_t length, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fat_reader_ops->replay(reader, name, payload, length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (strcmp(name, "short") == 0) {
+		reader->entry.kind = FSIMG_ENTRY_CHAR_DEVICE;
+		reader->entry.metadata.valid |= FSIMG_META_DEVICE;
+		reader->entry.metadata.dev_major = 4;
+		reader->entry.metadata.dev_minor = 2;
+	} else if (strcmp(name, "Long root name.txt") == 0)
+		reader->entry.kind = FSIMG_ENTRY_BLOCK_DEVICE;
+	else if (strcmp(name, "ZERO") == 0)
+		reader->entry.kind = FSIMG_ENTRY_SOCKET;
+	else
+		return (FSIMG_OK);
+	reader->entry.size = 0;
+	reader->initialized = 0;
+	return (FSIMG_OK);
+}
+
+static void
+present_device_kinds(extract_fixture_t *fixture)
+{
+	fat_reader_ops = fixture->reader->ops;
+	device_reader_ops = *fat_reader_ops;
+	device_reader_ops.replay = device_replay;
+	fixture->reader->ops = &device_reader_ops;
+}
+
+/* Attach a device number to a regular file without changing its kind. */
+static fsimg_status_t
+file_device_number_replay(fsimg_reader_t *reader, const char *name,
+    const unsigned char *payload, size_t length, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fat_reader_ops->replay(reader, name, payload, length, error);
+	if (status == FSIMG_OK && strcmp(name, "ZERO") == 0) {
+		CHECK(reader->entry.kind == FSIMG_ENTRY_FILE);
+		reader->entry.metadata.valid |= FSIMG_META_DEVICE;
+		reader->entry.metadata.dev_major = 4;
+		reader->entry.metadata.dev_minor = 2;
+	}
+	return (status);
+}
+
+/* The same invalid metadata on a socket must fail in the replay funnel too. */
+static fsimg_status_t
+socket_device_number_replay(fsimg_reader_t *reader, const char *name,
+    const unsigned char *payload, size_t length, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = file_device_number_replay(reader, name, payload, length, error);
+	if (status == FSIMG_OK && strcmp(name, "ZERO") == 0)
+		reader->entry.kind = FSIMG_ENTRY_SOCKET;
+	return (status);
+}
+
+static void
+test_replay_refuses_device_number_on_nondevice(void)
+{
+	static const fsimg_reader_ops_t variants[] = {
+		{ .replay = file_device_number_replay },
+		{ .replay = socket_device_number_replay }
+	};
+	extract_fixture_t fixture;
+	fsimg_reader_ops_t ops;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); i++) {
+		fixture_open(&fixture);
+		fat_reader_ops = fixture.reader->ops;
+		ops = *fat_reader_ops;
+		ops.replay = variants[i].replay;
+		fixture.reader->ops = &ops;
+		while ((status = fsimg_reader_next(fixture.reader, &entry,
+		    &error)) == FSIMG_OK)
+			continue;
+		CHECK(status == FSIMG_ESTATE);
+		CHECK(strcmp(error.message,
+		    "a device number on an entry that is not a device") == 0);
+		fixture_close(&fixture);
+	}
+}
+
+static void
+test_extraction_refuses_devices_and_sockets(void)
+{
+	static const char *const members[] = {
+		"/A/short", "/Long root name.txt", "/ZERO"
+	};
+	extract_fixture_t fixture;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	int root;
+
+	/* The whole tree stops at its first device. */
+	fixture_open(&fixture);
+	present_device_kinds(&fixture);
+	CHECK(mkdirat(fixture.parent, "output", 0700) == 0);
+	root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
+	CHECK(root != -1);
+	fsimg_extract_options_init(&options);
+	CHECK(fsimg_extract_into(fixture.reader, root, &options, NULL,
+	    &error) == FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.path, "/A/short") == 0);
+	CHECK(strcmp(error.message,
+	    "safe extraction creates only regular files and directories") == 0);
+	CHECK(close(root) == 0);
+	remove_tree(fixture.parent, "output");
+	fixture_close(&fixture);
+
+	/* Each selected kind must also take the refusal path. */
+	for (size_t i = 0; i < sizeof(members) / sizeof(members[0]); i++) {
+		fixture_open(&fixture);
+		present_device_kinds(&fixture);
+		CHECK(mkdirat(fixture.parent, "output", 0700) == 0);
+		root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
+		CHECK(root != -1);
+		fsimg_extract_options_init(&options);
+		options.selections = &members[i];
+		options.selection_count = 1;
+		CHECK(fsimg_extract_into(fixture.reader, root, &options, NULL,
+		    &error) == FSIMG_EUNSUPPORTED);
+		CHECK(strcmp(error.path, members[i]) == 0);
+		CHECK(strcmp(error.message,
+		    "safe extraction creates only regular files and directories") == 0);
+		CHECK(close(root) == 0);
+		remove_tree(fixture.parent, "output");
+		fixture_close(&fixture);
+	}
+}
+
+static void
+test_skipped_devices_and_sockets_are_recorded_in_manifest(void)
+{
+	static const char *const paths[] = {
+		"A/short", "Long root name.txt", "ZERO"
+	};
+	static const char *const records[] = {
+		"./A/short type=char ",
+		"./Long\\040root\\040name.txt type=block ",
+		"./ZERO type=socket "
+	};
+	extract_fixture_t fixture;
+	fsimg_extract_options_t options;
+	fsimg_extract_result_t result;
+	struct stat st;
+	char manifest[4096], *line, *next, *device;
+	unsigned seen[3] = { 0 };
+	ssize_t length;
+	int fd, root;
+
+	fixture_open(&fixture);
+	present_device_kinds(&fixture);
+	fd = openat(fixture.parent, "manifest", O_RDWR | O_CREAT | O_EXCL, 0600);
+	CHECK(fd != -1);
+	CHECK(mkdirat(fixture.parent, "output", 0700) == 0);
+	root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
+	CHECK(root != -1);
+	fsimg_extract_options_init(&options);
+	options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+	options.manifest_fd = fd;
+	CHECK(fsimg_extract_into(fixture.reader, root, &options, &result,
+	    NULL) == FSIMG_OK);
+	CHECK(result.skipped_entries == 3);
+	for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		CHECK(fstatat(root, paths[i], &st, AT_SYMLINK_NOFOLLOW) == -1);
+		CHECK(errno == ENOENT);
+	}
+	CHECK(fstatat(root, "A/nested/file", &st, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(S_ISREG(st.st_mode) && st.st_size == FILE_BYTES);
+	CHECK(close(root) == 0);
+
+	CHECK(fstat(fd, &st) == 0 && st.st_size < (off_t)sizeof(manifest));
+	length = pread(fd, manifest, sizeof(manifest) - 1, 0);
+	CHECK(length >= 0 && length == st.st_size);
+	manifest[length] = '\0';
+	for (line = manifest; *line != '\0'; line = next + 1) {
+		next = strchr(line, '\n');
+		CHECK(next != NULL);
+		*next = '\0';
+		for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); i++) {
+			if (strncmp(line, records[i], strlen(records[i])) != 0)
+				continue;
+			seen[i]++;
+			device = strstr(line, "device=");
+			if (i == 0) {
+				CHECK(device != NULL && device > line && device[-1] == ' ');
+				CHECK(strcmp(device, "device=native,4,2") == 0);
+			} else
+				CHECK(device == NULL);
+		}
+	}
+	for (size_t i = 0; i < sizeof(seen) / sizeof(seen[0]); i++)
+		CHECK(seen[i] == 1);
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(fixture.parent, "manifest", 0) == 0);
+	remove_tree(fixture.parent, "output");
+	fixture_close(&fixture);
+}
+
+static void
+test_single_member_output_refuses_devices_and_sockets(void)
+{
+	static const char *const members[] = {
+		"/A/short", "/Long root name.txt", "/ZERO"
+	};
+	extract_fixture_t fixture;
+	fsimg_selection_t *selection;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error;
+
+	for (size_t i = 0; i < sizeof(members) / sizeof(members[0]); i++) {
+		fixture_open(&fixture);
+		present_device_kinds(&fixture);
+		CHECK(fsimg_selection_new(fixture.reader, &members[i], 1,
+		    FSIMG_SELECTION_FILE, &selection, NULL) == FSIMG_OK);
+		CHECK(fsimg_selection_next(selection, &entry, &error) == FSIMG_EINVAL);
+		CHECK(entry == NULL);
+		CHECK(strcmp(error.path, members[i]) == 0);
+		CHECK(strstr(error.message, "wrong entry kind") != NULL);
+		fsimg_selection_free(selection);
+		fixture_close(&fixture);
+	}
 }
 
 /* By default a link or FIFO fails extraction and names the entry; with
@@ -1331,6 +1581,10 @@ main(int argc, char **argv)
 	test_extraction_reports_completed_and_skipped_entries();
 	test_failed_extraction_reports_only_completed_entries();
 	test_unsupported_kinds();
+	test_replay_refuses_device_number_on_nondevice();
+	test_extraction_refuses_devices_and_sockets();
+	test_skipped_devices_and_sockets_are_recorded_in_manifest();
+	test_single_member_output_refuses_devices_and_sockets();
 	test_link_content();
 	test_inherited_acl();
 	return (0);

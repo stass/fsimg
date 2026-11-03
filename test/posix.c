@@ -55,6 +55,7 @@ static void add_tree(fsimg_writer_t *, tree_metadata_t);
 static void emit_image(posix_fixture_t *, fsimg_writer_t *, const char *);
 static bool images_equal(posix_fixture_t *, const char *, const char *);
 static void test_capability_records(void);
+static void test_writers_refuse_devices_and_sockets(void);
 static void test_omitted_fields(const char *);
 static void test_forbidden_losses(const char *);
 static void test_unsupported_kinds(const char *);
@@ -231,6 +232,10 @@ test_capability_records(void)
 	count = 0;
 	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK) {
 		count++;
+		if ((info.entry_kinds & (FSIMG_ENTRY_CHAR_DEVICE |
+		    FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET)) != 0)
+			CHECK((info.entry_kinds & FSIMG_ENTRY_FILE) != 0);
+		CHECK((info.metadata_fields & FSIMG_META_DEVICE) == 0);
 		CHECK((info.max_link_target_bytes == 0) ==
 		    ((info.entry_kinds & FSIMG_ENTRY_SYMLINK) == 0));
 		CHECK(info.max_link_target_bytes <= FSIMG_SYMLINK_TARGET_MAX);
@@ -283,6 +288,51 @@ test_capability_records(void)
 			CHECK(info.max_label_bytes == 11);
 	}
 	CHECK(count == 8);
+}
+
+static void
+test_writers_refuse_devices_and_sockets(void)
+{
+	static const fsimg_entry_kind_t kinds[] = {
+		FSIMG_ENTRY_CHAR_DEVICE, FSIMG_ENTRY_BLOCK_DEVICE, FSIMG_ENTRY_SOCKET
+	};
+	posix_fixture_t fixture;
+	fsimg_format_info_t info;
+	fsimg_writer_t *writer;
+	fsimg_error_t error;
+	fsimg_entry_t entry = { .path = "/device" };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	size_t cursor;
+	unsigned tested;
+
+	fixture_open(&fixture);
+	cursor = 0;
+	tested = 0;
+	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK) {
+		if ((info.capabilities & FSIMG_CAP_WRITE) == 0)
+			continue;
+		tested++;
+		for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+			writer = new_writer(&fixture, info.name, true);
+			entry.kind = kinds[i];
+			entry.metadata.valid = 0;
+			CHECK(fsimg_writer_add(writer, &entry, NULL, &error) == FSIMG_EINVAL);
+			CHECK(strcmp(error.message,
+			    "entry kind, size and source disagree") == 0);
+			fsimg_writer_free(writer);
+		}
+		writer = new_writer(&fixture, info.name, true);
+		entry.kind = FSIMG_ENTRY_FILE;
+		entry.metadata.valid = FSIMG_META_DEVICE;
+		entry.metadata.dev_major = 4;
+		entry.metadata.dev_minor = 2;
+		CHECK(fsimg_writer_add(writer, &entry, &zero, &error) == FSIMG_EINVAL);
+		CHECK(strcmp(error.message,
+		    "a device number is valid only on a device") == 0);
+		fsimg_writer_free(writer);
+	}
+	CHECK(tested != 0);
+	fixture_close(&fixture);
 }
 
 /* Optional owner, mode and change time are counted once per field and
@@ -479,6 +529,7 @@ int
 main(void)
 {
 	test_capability_records();
+	test_writers_refuse_devices_and_sockets();
 	test_link_target_limits();
 	for (size_t i = 0; i < sizeof(writer_formats) / sizeof(writer_formats[0]); i++) {
 		test_omitted_fields(writer_formats[i]);

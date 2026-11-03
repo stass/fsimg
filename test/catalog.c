@@ -412,6 +412,7 @@ test_invalid_kinds(void)
 		fsimg_source_kind_t source;
 		uint32_t valid;
 		uint32_t mode;
+		const char *message;
 	} cases[] = {
 		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 6 },
 		{ .kind = FSIMG_ENTRY_SYMLINK, .size = 6, .source = FSIMG_SOURCE_ZERO },
@@ -423,7 +424,10 @@ test_invalid_kinds(void)
 		{ .kind = (fsimg_entry_kind_t)16 },
 		{ .kind = (fsimg_entry_kind_t)0 },
 		{ .kind = FSIMG_ENTRY_FIFO, .valid = FSIMG_META_MODE, .mode = 010000 },
-		{ .kind = FSIMG_ENTRY_FIFO, .valid = 0x80 }
+		{ .kind = FSIMG_ENTRY_FIFO, .valid = 0x100,
+		    .message = "invalid metadata validity or requirements" },
+		{ .kind = FSIMG_ENTRY_FIFO, .valid = FSIMG_META_DEVICE,
+		    .message = "a device number is valid only on a device" }
 	};
 	catalog_fixture_t fixture;
 	fsimg_entry_t entry;
@@ -441,6 +445,8 @@ test_invalid_kinds(void)
 		CHECK(fsimg_writer_add(fixture.writer, &entry,
 		    cases[i].source != 0 ? &source : NULL, &error) == FSIMG_EINVAL);
 		CHECK(fixture.writer->state == FSIMG_WRITER_FAILED);
+		if (cases[i].message != NULL)
+			CHECK(strcmp(error.message, cases[i].message) == 0);
 		fixture_close(&fixture);
 	}
 }

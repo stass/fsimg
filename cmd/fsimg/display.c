@@ -40,7 +40,7 @@ static void metadata_fields(fsimg_cli_display_t *, uint64_t);
 static void entry_kinds(fsimg_cli_display_t *, uint64_t);
 static const char *kind_name(uint64_t);
 static void uuid_value(fsimg_cli_display_t *, const unsigned char *);
-static void owner_fields(fsimg_cli_display_t *, const unsigned char *, uint64_t);
+static void posix_fields(fsimg_cli_display_t *, const unsigned char *, uint64_t);
 static void format_details(fsimg_cli_display_t *, const fsimg_format_info_t *);
 static void layer(fsimg_cli_display_t *, const fsimg_layer_info_t *);
 static void string_value(fsimg_cli_display_t *, const char *);
@@ -497,7 +497,7 @@ metadata_fields(fsimg_cli_display_t *display, uint64_t fields)
 {
 	static const char *const names[] = {
 		"creation time", "modification time", "access time", "attributes",
-		"change time", "owner", "mode"
+		"change time", "owner", "mode", "device number"
 	};
 	bool first = true;
 
@@ -517,6 +517,9 @@ kind_name(uint64_t kind)
 	case FSIMG_ENTRY_DIRECTORY: return ("directory");
 	case FSIMG_ENTRY_SYMLINK: return ("symlink");
 	case FSIMG_ENTRY_FIFO: return ("fifo");
+	case FSIMG_ENTRY_CHAR_DEVICE: return ("char_device");
+	case FSIMG_ENTRY_BLOCK_DEVICE: return ("block_device");
+	case FSIMG_ENTRY_SOCKET: return ("socket");
 	}
 	return ("unknown");
 }
@@ -573,9 +576,9 @@ uuid_value(fsimg_cli_display_t *display, const unsigned char *uuid)
 		    "-" : "", uuid[i]);
 }
 
-/* JSON owner and mode, each null when its field is absent. */
+/* JSON owner, mode and device number, each null when its field is absent. */
 static void
-owner_fields(fsimg_cli_display_t *display, const unsigned char *raw,
+posix_fields(fsimg_cli_display_t *display, const unsigned char *raw,
     uint64_t valid)
 {
 	if ((valid & FSIMG_META_OWNER) != 0)
@@ -589,6 +592,14 @@ owner_fields(fsimg_cli_display_t *display, const unsigned char *raw,
 		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_MODE));
 	else
 		append(display, ",\"mode\":null");
+	if ((valid & FSIMG_META_DEVICE) != 0)
+		append(display, ",\"dev_major\":%llu,\"dev_minor\":%llu",
+		    (unsigned long long)fsimg_load_le64(raw +
+		    FSIMG_WIRE_ENTRY_DEV_MAJOR),
+		    (unsigned long long)fsimg_load_le64(raw +
+		    FSIMG_WIRE_ENTRY_DEV_MINOR));
+	else
+		append(display, ",\"dev_major\":null,\"dev_minor\":null");
 }
 
 static const char *
@@ -1207,25 +1218,28 @@ civil_time(int64_t seconds, char *text, size_t capacity)
 
 /* The -v listing's columns before the name: the kind and nine permission
  * characters, or nine '?' when the format stores no mode; the logical
- * length of a file or link, or '-'; and the modification time, or '-'.
+ * length of a file or link, a device's "major, minor" as ls shows it, or
+ * '-'; and the modification time, or '-'.
  * Unknown-offset times encode their calendar fields as UTC seconds, so one
  * conversion serves every basis.
  */
 static void
 long_listing_columns(fsimg_cli_display_t *display, const unsigned char *raw)
 {
-	static const char kinds[] = "-dlp";
 	static const char permissions[] = "rwxrwxrwx";
 	uint64_t valid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_VALID);
 	uint64_t kind = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_KIND);
 	uint64_t mode = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_MODE);
-	char column[40];	/* the widest time: a 12-digit signed year */
+	char column[40];	/* each column in turn; the widest is a time */
 
 	switch (kind) {
-	case FSIMG_ENTRY_FILE: column[0] = kinds[0]; break;
-	case FSIMG_ENTRY_DIRECTORY: column[0] = kinds[1]; break;
-	case FSIMG_ENTRY_SYMLINK: column[0] = kinds[2]; break;
-	case FSIMG_ENTRY_FIFO: column[0] = kinds[3]; break;
+	case FSIMG_ENTRY_FILE: column[0] = '-'; break;
+	case FSIMG_ENTRY_DIRECTORY: column[0] = 'd'; break;
+	case FSIMG_ENTRY_SYMLINK: column[0] = 'l'; break;
+	case FSIMG_ENTRY_FIFO: column[0] = 'p'; break;
+	case FSIMG_ENTRY_CHAR_DEVICE: column[0] = 'c'; break;
+	case FSIMG_ENTRY_BLOCK_DEVICE: column[0] = 'b'; break;
+	case FSIMG_ENTRY_SOCKET: column[0] = 's'; break;
 	default: column[0] = '?'; break;
 	}
 	for (unsigned i = 0; i < 9; i++) {
@@ -1239,7 +1253,15 @@ long_listing_columns(fsimg_cli_display_t *display, const unsigned char *raw)
 	if (kind == FSIMG_ENTRY_FILE || kind == FSIMG_ENTRY_SYMLINK)
 		append(display, "%12llu ",
 		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_LENGTH));
-	else
+	else if ((valid & FSIMG_META_DEVICE) != 0) {
+		/* Validation bounded both words to 32 bits, so the pair fits. */
+		snprintf(column, sizeof(column), "%llu, %llu",
+		    (unsigned long long)fsimg_load_le64(raw +
+		    FSIMG_WIRE_ENTRY_DEV_MAJOR),
+		    (unsigned long long)fsimg_load_le64(raw +
+		    FSIMG_WIRE_ENTRY_DEV_MINOR));
+		append(display, "%12s ", column);
+	} else
 		append(display, "%12s ", "-");
 	if ((valid & FSIMG_META_MODIFIED) != 0) {
 		civil_time(fsimg_wire_get_signed64(raw + FSIMG_WIRE_ENTRY_MODIFIED +
@@ -1255,9 +1277,12 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 	uint64_t valid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_VALID);
 	uint64_t kind = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_KIND);
 
-	/* Human listings mark a link with @ and a FIFO with |, as ls -F does. */
+	/* Human listings mark a link with @, a FIFO with | and a socket with
+	 * =, as ls -F does; like ls -F, they leave a device unmarked.
+	 */
 	display->entry_marker = kind == FSIMG_ENTRY_SYMLINK ? "@" :
-	    kind == FSIMG_ENTRY_FIFO ? "|" : "";
+	    kind == FSIMG_ENTRY_FIFO ? "|" :
+	    kind == FSIMG_ENTRY_SOCKET ? "=" : "";
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"entry\",\"kind\":\"%s\",\"size_bytes\":",
 		    kind_name(kind));
@@ -1272,7 +1297,7 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 		timestamp(display, raw + FSIMG_WIRE_ENTRY_ACCESSED, (valid & FSIMG_META_ACCESSED) != 0);
 		append(display, ",\"changed\":");
 		timestamp(display, raw + FSIMG_WIRE_ENTRY_CHANGED, (valid & FSIMG_META_CHANGED) != 0);
-		owner_fields(display, raw, valid);
+		posix_fields(display, raw, valid);
 		append(display, ",\"path\":\"");
 	} else {
 		/* Only t -v adds the long columns; c -v and x -v name

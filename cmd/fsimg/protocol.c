@@ -16,7 +16,7 @@
 static void encode_time(unsigned char *, const fsimg_timestamp_t *, bool);
 static bool time_field_valid(const unsigned char *);
 static bool bytes_zero(const unsigned char *, size_t);
-static bool entry_metadata_valid(const unsigned char *);
+static bool entry_metadata_valid(const unsigned char *, uint64_t);
 static fsimg_status_t protocol_error(fsimg_error_t *, const char *);
 static fsimg_status_t transfer_frame_bytes(int, void *, size_t, bool,
     fsimg_error_t *);
@@ -315,6 +315,12 @@ fsimg_wire_entry_encode(unsigned char *raw, const fsimg_entry_t *entry,
 	}
 	if ((metadata->valid & FSIMG_META_MODE) != 0)
 		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_MODE, metadata->mode);
+	if ((metadata->valid & FSIMG_META_DEVICE) != 0) {
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_DEV_MAJOR,
+		    metadata->dev_major);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_DEV_MINOR,
+		    metadata->dev_minor);
+	}
 }
 
 _Static_assert(sizeof(((fsimg_volume_text_t *)NULL)->name) ==
@@ -472,10 +478,11 @@ bytes_zero(const unsigned char *raw, size_t length)
 }
 
 /* Every field has the range its public type and documented bits allow;
- * an absent field must be zero, as the encoder writes it.
+ * an absent field must be zero, as the encoder writes it. A device number
+ * is valid only on a character or block device.
  */
 static bool
-entry_metadata_valid(const unsigned char *raw)
+entry_metadata_valid(const unsigned char *raw, uint64_t entry_kind)
 {
 	static const struct {
 		uint32_t	 field;
@@ -486,7 +493,7 @@ entry_metadata_valid(const unsigned char *raw)
 		{ FSIMG_META_ACCESSED, FSIMG_WIRE_ENTRY_ACCESSED },
 		{ FSIMG_META_CHANGED, FSIMG_WIRE_ENTRY_CHANGED }
 	};
-	uint64_t valid, required, attributes, uid, gid, mode;
+	uint64_t valid, required, attributes, uid, gid, mode, major, minor;
 
 	valid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_VALID);
 	required = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_REQUIRED);
@@ -494,9 +501,15 @@ entry_metadata_valid(const unsigned char *raw)
 	uid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_UID);
 	gid = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_GID);
 	mode = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_MODE);
+	major = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_DEV_MAJOR);
+	minor = fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_DEV_MINOR);
 	if ((valid & ~(uint64_t)FSIMG_META_KNOWN) != 0 || (required & ~valid) != 0 ||
 	    attributes > 15 || uid > UINT32_MAX || gid > UINT32_MAX ||
-	    mode > FSIMG_MODE_BITS)
+	    mode > FSIMG_MODE_BITS || major > UINT32_MAX || minor > UINT32_MAX)
+		return (false);
+	if (!fsimg_device_number_fits((uint32_t)entry_kind, (uint32_t)valid))
+		return (false);
+	if ((valid & FSIMG_META_DEVICE) == 0 && (major != 0 || minor != 0))
 		return (false);
 	if ((valid & FSIMG_META_OWNER) == 0 && (uid != 0 || gid != 0))
 		return (false);
@@ -827,7 +840,8 @@ fsimg_wire_verify_frame_valid(const fsimg_frame_t *frame, bool payload)
 
 /* The kind is one of the closed set, with the size that kind allows:
  * any file length, a link target of 1 through FSIMG_SYMLINK_TARGET_MAX
- * bytes, the entry model's ceiling, and zero for directories and FIFOs.
+ * bytes, the entry model's ceiling, and zero for directories, FIFOs,
+ * devices and sockets.
  */
 bool
 fsimg_wire_entry_frame_valid(const fsimg_frame_t *frame, bool content_only,
@@ -855,6 +869,9 @@ fsimg_wire_entry_frame_valid(const fsimg_frame_t *frame, bool content_only,
 		break;
 	case FSIMG_ENTRY_DIRECTORY:
 	case FSIMG_ENTRY_FIFO:
+	case FSIMG_ENTRY_CHAR_DEVICE:
+	case FSIMG_ENTRY_BLOCK_DEVICE:
+	case FSIMG_ENTRY_SOCKET:
 		if (length != 0)
 			return (false);
 		has_content = false;
@@ -864,5 +881,5 @@ fsimg_wire_entry_frame_valid(const fsimg_frame_t *frame, bool content_only,
 	}
 	if (content_only && !has_content)
 		return (false);
-	return (entry_metadata_valid(raw));
+	return (entry_metadata_valid(raw, entry_kind));
 }

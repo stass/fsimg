@@ -289,6 +289,7 @@ fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
 #define FSIMG_META_CHANGED 0x10u
 #define FSIMG_META_OWNER 0x20u
 #define FSIMG_META_MODE 0x40u
+#define FSIMG_META_DEVICE 0x80u
 #define FSIMG_ATTR_READONLY 0x01u
 #define FSIMG_ATTR_HIDDEN 0x02u
 #define FSIMG_ATTR_SYSTEM 0x04u
@@ -298,13 +299,18 @@ fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
  * A symbolic link's size is its target length, 1 through 1024 bytes and
  * within the format's max_link_target_bytes, and its content is the target
  * without a terminator; fsimg never resolves it.
- * Directory and FIFO sizes are zero and they have no content.
+ * Directory, FIFO, device and socket sizes are zero and they have no
+ * content. Character devices, block devices and sockets are read-only:
+ * readers report them, and a writer never receives one.
  */
 typedef enum fsimg_entry_kind {
 	FSIMG_ENTRY_FILE = 1,
 	FSIMG_ENTRY_DIRECTORY = 2,
 	FSIMG_ENTRY_SYMLINK = 4,
-	FSIMG_ENTRY_FIFO = 8
+	FSIMG_ENTRY_FIFO = 8,
+	FSIMG_ENTRY_CHAR_DEVICE = 16,
+	FSIMG_ENTRY_BLOCK_DEVICE = 32,
+	FSIMG_ENTRY_SOCKET = 64
 } fsimg_entry_kind_t;
 
 typedef enum fsimg_time_basis {
@@ -331,9 +337,12 @@ typedef struct fsimg_timestamp {
 } fsimg_timestamp_t;
 
 /* Required is a subset of valid. Unknown bits are rejected. The common
- * catalog preserves every valid field; format planning checks fidelity.
- * OWNER governs uid and gid; MODE governs the permission bits 07777, never
- * file-type bits; CHANGED is the inode change time.
+ * catalog preserves every valid field it accepts; format planning checks
+ * fidelity. OWNER governs uid and gid; MODE governs the permission bits
+ * 07777, never file-type bits; CHANGED is the inode change time. DEVICE
+ * governs the stored device number of a character or block device, decoded
+ * per format, and is valid on no other kind; the catalog, which holds
+ * neither kind, refuses it.
  */
 typedef struct fsimg_metadata {
 	uint32_t	 valid;
@@ -342,6 +351,8 @@ typedef struct fsimg_metadata {
 	uint32_t	 uid;
 	uint32_t	 gid;
 	uint32_t	 mode;
+	uint32_t	 dev_major;
+	uint32_t	 dev_minor;
 	fsimg_timestamp_t created;
 	fsimg_timestamp_t modified;
 	fsimg_timestamp_t accessed;

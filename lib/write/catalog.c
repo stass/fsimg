@@ -221,7 +221,7 @@ fsimg_writer_collect(fsimg_writer_t *writer, const fsimg_entry_t *entry,
 	    FSIMG_ORIGIN_SCANNED : FSIMG_ORIGIN_PROGRAMMATIC))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CATALOG, "entry kind, size and source disagree"));
-	status = fsimg_metadata_validate(&entry->metadata, error);
+	status = fsimg_metadata_validate(&entry->metadata, entry->kind, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (!fsimg_add_u64(writer->payload_bytes, entry->size, &payload_bytes))
@@ -336,7 +336,8 @@ decode_entry(fsimg_writer_t *writer, const unsigned char *bytes, size_t length,
 	    &path_length, &depth, error);
 	if (status != FSIMG_OK)
 		goto invalid;
-	status = fsimg_metadata_validate(&out->entry.metadata, error);
+	status = fsimg_metadata_validate(&out->entry.metadata, out->entry.kind,
+	    error);
 	if (status == FSIMG_OK)
 		return (FSIMG_OK);
 invalid:

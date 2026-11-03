@@ -13,6 +13,7 @@ static void test_scalars(void);
 static void test_invalid(void);
 static void test_wtf8(void);
 static void test_paths_and_metadata(void);
+static void test_device_metadata(void);
 
 static void
 test_scalars(void)
@@ -175,24 +176,52 @@ test_paths_and_metadata(void)
 	CHECK(fsimg_path_validate(ctx, "/123456789012345", false, &length,
 	    &depth, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_PATH);
-	CHECK(fsimg_metadata_validate(&metadata, NULL) == FSIMG_OK);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_FILE,
+	    NULL) == FSIMG_OK);
 	metadata.required = FSIMG_META_CREATED;
-	CHECK(fsimg_metadata_validate(&metadata, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_FILE,
+	    NULL) == FSIMG_EINVAL);
 	metadata.valid = FSIMG_META_CREATED;
 	metadata.created = (fsimg_timestamp_t){ .seconds = INT64_MIN,
 	    .precision_ns = 1, .basis = FSIMG_TIME_UTC };
-	CHECK(fsimg_metadata_validate(&metadata, NULL) == FSIMG_OK);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_FILE,
+	    NULL) == FSIMG_OK);
 	metadata.created.nanoseconds = 1000000000;
-	CHECK(fsimg_metadata_validate(&metadata, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_FILE,
+	    NULL) == FSIMG_EINVAL);
 	metadata.created.nanoseconds = 0;
 	metadata.created.basis = FSIMG_TIME_OFFSET;
 	metadata.created.offset_minutes = -1440;
-	CHECK(fsimg_metadata_validate(&metadata, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_FILE,
+	    NULL) == FSIMG_EINVAL);
 	metadata.created.offset_minutes = 60;
-	CHECK(fsimg_metadata_validate(&metadata, NULL) == FSIMG_OK);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_FILE,
+	    NULL) == FSIMG_OK);
 	metadata.created.basis = FSIMG_TIME_WALL;
-	CHECK(fsimg_metadata_validate(&metadata, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_FILE,
+	    NULL) == FSIMG_EINVAL);
 	fsimg_ctx_free(ctx);
+}
+
+static void
+test_device_metadata(void)
+{
+	fsimg_metadata_t metadata = { .valid = FSIMG_META_DEVICE,
+	    .dev_major = 4, .dev_minor = 2 };
+	fsimg_error_t error;
+
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_FILE,
+	    &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.message,
+	    "a device number is valid only on a device") == 0);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_SOCKET,
+	    &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.message,
+	    "a device number is valid only on a device") == 0);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_CHAR_DEVICE,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_metadata_validate(&metadata, FSIMG_ENTRY_BLOCK_DEVICE,
+	    NULL) == FSIMG_OK);
 }
 
 int
@@ -202,5 +231,6 @@ main(void)
 	test_invalid();
 	test_wtf8();
 	test_paths_and_metadata();
+	test_device_metadata();
 	return (0);
 }

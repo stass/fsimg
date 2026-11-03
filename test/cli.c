@@ -41,6 +41,10 @@ static void test_stdout_extraction_refuses_several_members(void);
 static void test_parent_member_is_refused(void);
 static void test_stems(void);
 static void test_long_listing(void);
+static fsimg_entry_t listing_entry(const char *, fsimg_entry_kind_t,
+    uint32_t, uint32_t, uint32_t);
+static void test_device_and_socket_listing(void);
+static void test_device_and_socket_json_listing(void);
 static void test_staged_verification_failure(void);
 static void test_compressed_verification_spool_limit(void);
 static void test_names(bool);
@@ -1418,6 +1422,126 @@ test_long_listing(void)
 	}
 }
 
+/* Listing cases share a mode and UTC timestamp; each names its valid fields. */
+static fsimg_entry_t
+listing_entry(const char *path, fsimg_entry_kind_t kind, uint32_t valid,
+    uint32_t major, uint32_t minor)
+{
+	return ((fsimg_entry_t){ .path = path, .kind = kind,
+	    .metadata = { .valid = valid, .mode = 0666,
+	    .modified = { .seconds = 951782400, .precision_ns = 1000000000,
+	    .basis = FSIMG_TIME_UTC }, .dev_major = major, .dev_minor = minor } });
+}
+
+static void
+test_device_and_socket_listing(void)
+{
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_entry_t entry;
+	char output[4096];
+
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_LIST;
+	options.scratch = "-";
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	entry = listing_entry("/c", FSIMG_ENTRY_CHAR_DEVICE, 0, 0, 0);
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strcmp(output, "\"/c\"\n") == 0);
+	entry = listing_entry("/b", FSIMG_ENTRY_BLOCK_DEVICE, 0, 0, 0);
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strcmp(output, "\"/b\"\n") == 0);
+	entry = listing_entry("/s", FSIMG_ENTRY_SOCKET, 0, 0, 0);
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strcmp(output, "\"/s\"=\n") == 0);
+
+	options.verbosity = 1;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	entry = listing_entry("/s", FSIMG_ENTRY_SOCKET,
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED, 0, 0);
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strcmp(output,
+	    "srw-rw-rw-            - 2000-02-29 00:00:00 \"/s\"=\n") == 0);
+	entry = listing_entry("/c", FSIMG_ENTRY_CHAR_DEVICE,
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED, 0, 0);
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strcmp(output,
+	    "crw-rw-rw-            - 2000-02-29 00:00:00 \"/c\"\n") == 0);
+	entry = listing_entry("/b", FSIMG_ENTRY_BLOCK_DEVICE,
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED, 0, 0);
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strcmp(output,
+	    "brw-rw-rw-            - 2000-02-29 00:00:00 \"/b\"\n") == 0);
+
+	entry = listing_entry("/b", FSIMG_ENTRY_BLOCK_DEVICE,
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED | FSIMG_META_DEVICE, 4, 2);
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strcmp(output,
+	    "brw-rw-rw-         4, 2 2000-02-29 00:00:00 \"/b\"\n") == 0);
+	entry = listing_entry("/c", FSIMG_ENTRY_CHAR_DEVICE,
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED | FSIMG_META_DEVICE, 4, 2);
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strcmp(output,
+	    "crw-rw-rw-         4, 2 2000-02-29 00:00:00 \"/c\"\n") == 0);
+	entry = listing_entry("/c", FSIMG_ENTRY_CHAR_DEVICE,
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED | FSIMG_META_DEVICE,
+	    UINT32_MAX, UINT32_MAX);
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strcmp(output, "crw-rw-rw- 4294967295, 4294967295 "
+	    "2000-02-29 00:00:00 \"/c\"\n") == 0);
+}
+
+static void
+test_device_and_socket_json_listing(void)
+{
+	static const fsimg_entry_kind_t kinds[] = {
+		FSIMG_ENTRY_CHAR_DEVICE, FSIMG_ENTRY_BLOCK_DEVICE,
+		FSIMG_ENTRY_SOCKET, FSIMG_ENTRY_FILE
+	};
+	static const char *const kind_members[] = {
+		"\"kind\":\"char_device\"", "\"kind\":\"block_device\"",
+		"\"kind\":\"socket\"", "\"kind\":\"file\""
+	};
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_entry_t entry = { .path = "/x" };
+	char output[4096];
+
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_LIST;
+	options.scratch = "-";
+	options.json = true;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	entry.metadata.valid = FSIMG_META_MODE;
+	entry.metadata.mode = 0666;
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		entry.kind = kinds[i];
+		list_entry(&display, &entry, output, sizeof(output));
+		CHECK(strstr(output, kind_members[i]) != NULL);
+		CHECK(strstr(output,
+		    "\"mode\":438,\"dev_major\":null,\"dev_minor\":null") != NULL);
+		if (entry.kind != FSIMG_ENTRY_CHAR_DEVICE &&
+		    entry.kind != FSIMG_ENTRY_BLOCK_DEVICE)
+			continue;
+		entry.metadata.valid |= FSIMG_META_DEVICE;
+		entry.metadata.dev_major = 4;
+		entry.metadata.dev_minor = 2;
+		list_entry(&display, &entry, output, sizeof(output));
+		CHECK(strstr(output, kind_members[i]) != NULL);
+		CHECK(strstr(output,
+		    "\"mode\":438,\"dev_major\":4,\"dev_minor\":2") != NULL);
+		entry.metadata.valid &= ~FSIMG_META_DEVICE;
+	}
+	entry.metadata.valid = 0;
+	list_entry(&display, &entry, output, sizeof(output));
+	CHECK(strstr(output,
+	    "\"mode\":null,\"dev_major\":null,\"dev_minor\":null") != NULL);
+}
+
 /* Human listings mark links and FIFOs after the quoted name, in the style of
  * ls -F; JSON names every kind and carries the POSIX fields or null.
  */
@@ -2245,6 +2369,8 @@ main(int argc, char **argv)
 	test_parent_member_is_refused();
 	test_stems();
 	test_long_listing();
+	test_device_and_socket_listing();
+	test_device_and_socket_json_listing();
 	test_volume_controls();
 	test_posix_options();
 	test_posix_listing(false);

@@ -1622,6 +1622,12 @@ kind_name(fsimg_entry_kind_t kind)
 		return ("link");
 	case FSIMG_ENTRY_FIFO:
 		return ("fifo");
+	case FSIMG_ENTRY_CHAR_DEVICE:
+		return ("char");
+	case FSIMG_ENTRY_BLOCK_DEVICE:
+		return ("block");
+	case FSIMG_ENTRY_SOCKET:
+		return ("socket");
 	}
 	return ("?");
 }

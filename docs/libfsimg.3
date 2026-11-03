@@ -131,6 +131,12 @@ profile,
 strict UTF-8 without control bytes or DEL, is omitted: it and its subtree are
 never returned, no selection can name it, and each omitted subtree root is
 counted in the context statistics' omitted_entries.
+Besides files, directories, symbolic links and FIFOs, a reader can return
+the read-only kinds FSIMG_ENTRY_CHAR_DEVICE, FSIMG_ENTRY_BLOCK_DEVICE and
+FSIMG_ENTRY_SOCKET, of size zero with no content; a device whose image
+stores its number has FSIMG_META_DEVICE valid and the format's major and
+minor in dev_major and dev_minor.
+No writer stores these kinds, and the extractor never creates them.
 .Fn fsimg_reader_read_at
 reads only the current regular file or symbolic link, clips to EOF and returns
 confirmed bytes separately from status.
@@ -200,6 +206,8 @@ Paths are absolute UTF-8 image paths.
 Entries are regular files, directories, symbolic links, whose size is the
 target length of 1 through 1024 bytes and whose provider or host source
 supplies the target, and FIFOs, which have neither size nor source.
+A device or socket kind, or an FSIMG_META_DEVICE field, fails collection
+with FSIMG_EINVAL.
 Metadata validity bits cover creation, modification, access and change times,
 attributes, owner (uid and gid) and the permission bits 07777.
 Host scanning records symbolic links without following them, rejects
@@ -598,7 +606,7 @@ Logical lengths including holes count against output limits.
 Failure after creation can leave private incomplete output.
 The default restores no host timestamps.
 Owners, permission bits and change times are never restored.
-A symbolic link, FIFO or other kind fails extraction unless
+A symbolic link, FIFO, device, socket or other kind fails extraction unless
 FSIMG_EXTRACT_SKIP_UNSUPPORTED omits it and counts it in the context
 statistics' skipped_entries.
 An omitted entry within the selected scope fails extraction the same way

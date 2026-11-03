@@ -22,6 +22,8 @@ static void test_job_mountpoint(void);
 static void test_selection_budget(void);
 static void test_error_padding(void);
 static void test_entry_records(void);
+static void test_device_and_socket_entry_records(void);
+static void test_invalid_device_and_socket_entry_records(void);
 static void test_invalid_entry_records(void);
 static void test_info_uuid(void);
 static void test_info_geometry_is_informational(void);
@@ -437,6 +439,94 @@ test_entry_records(void)
 	CHECK(entry_frame_valid(&entry, false) && entry_frame_valid(&entry, true));
 }
 
+static void
+test_device_and_socket_entry_records(void)
+{
+	static const fsimg_entry_kind_t kinds[] = {
+		FSIMG_ENTRY_CHAR_DEVICE, FSIMG_ENTRY_BLOCK_DEVICE, FSIMG_ENTRY_SOCKET
+	};
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_ENTRY,
+	    .length = FSIMG_WIRE_ENTRY_BYTES };
+	fsimg_entry_t entry = { .path = "/x" };
+	unsigned char *raw = frame.payload;
+
+	CHECK(FSIMG_WIRE_ENTRY_DEV_MAJOR == 232);
+	CHECK(FSIMG_WIRE_ENTRY_DEV_MINOR == 240);
+	CHECK(FSIMG_WIRE_ENTRY_BYTES == 248);
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		entry.kind = kinds[i];
+		CHECK(entry_frame_valid(&entry, false));
+		CHECK(!entry_frame_valid(&entry, true));
+		if (entry.kind == FSIMG_ENTRY_SOCKET)
+			continue;
+		entry.metadata.valid = FSIMG_META_DEVICE;
+		entry.metadata.dev_major = UINT32_MAX;
+		entry.metadata.dev_minor = UINT32_MAX;
+		fsimg_wire_entry_encode(raw, &entry, 2);
+		CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_DEV_MAJOR) == UINT32_MAX);
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_DEV_MINOR) == UINT32_MAX);
+		entry.metadata.valid = 0;
+		fsimg_wire_entry_encode(raw, &entry, 2);
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_DEV_MAJOR) == 0);
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_DEV_MINOR) == 0);
+		CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	}
+}
+
+static void
+test_invalid_device_and_socket_entry_records(void)
+{
+	static const fsimg_entry_kind_t noncontent_kinds[] = {
+		FSIMG_ENTRY_CHAR_DEVICE, FSIMG_ENTRY_BLOCK_DEVICE, FSIMG_ENTRY_SOCKET
+	};
+	static const fsimg_entry_kind_t nondevice_kinds[] = {
+		FSIMG_ENTRY_SOCKET, FSIMG_ENTRY_FILE, FSIMG_ENTRY_FIFO,
+		FSIMG_ENTRY_DIRECTORY
+	};
+	static const uint64_t unknown_kinds[] = { 128, 3, 0 };
+	static const size_t device_words[] = {
+		FSIMG_WIRE_ENTRY_DEV_MAJOR, FSIMG_WIRE_ENTRY_DEV_MINOR
+	};
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_ENTRY,
+	    .length = FSIMG_WIRE_ENTRY_BYTES };
+	fsimg_entry_t entry;
+	unsigned char *raw = frame.payload;
+
+	for (size_t i = 0; i < sizeof(noncontent_kinds) /
+	    sizeof(noncontent_kinds[0]); i++) {
+		entry = (fsimg_entry_t){ .path = "/x",
+		    .kind = noncontent_kinds[i], .size = 1 };
+		CHECK(!entry_frame_valid(&entry, false));
+	}
+	for (size_t i = 0; i < sizeof(nondevice_kinds) /
+	    sizeof(nondevice_kinds[0]); i++) {
+		entry = (fsimg_entry_t){ .path = "/x",
+		    .kind = nondevice_kinds[i],
+		    .metadata = { .valid = FSIMG_META_DEVICE } };
+		CHECK(!entry_frame_valid(&entry, false));
+	}
+	for (size_t i = 0; i < sizeof(device_words) / sizeof(device_words[0]); i++) {
+		entry = (fsimg_entry_t){ .path = "/x",
+		    .kind = FSIMG_ENTRY_CHAR_DEVICE,
+		    .metadata = { .valid = FSIMG_META_DEVICE } };
+		fsimg_wire_entry_encode(raw, &entry, 2);
+		fsimg_store_le64(raw + device_words[i], UINT64_C(1) << 32);
+		CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+		entry = (fsimg_entry_t){ .path = "/x",
+		    .kind = FSIMG_ENTRY_CHAR_DEVICE };
+		fsimg_wire_entry_encode(raw, &entry, 2);
+		fsimg_store_le64(raw + device_words[i], 1);
+		CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	}
+	for (size_t i = 0; i < sizeof(unknown_kinds) / sizeof(unknown_kinds[0]); i++) {
+		entry = (fsimg_entry_t){ .path = "/x", .kind = FSIMG_ENTRY_FILE };
+		fsimg_wire_entry_encode(raw, &entry, 2);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, unknown_kinds[i]);
+		CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	}
+}
+
 /* The supervisor rejects every record the worker could not legitimately
  * produce, so a compromised worker cannot smuggle an unknown kind or mode.
  */
@@ -472,14 +562,14 @@ test_invalid_entry_records(void)
 	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_UID, UINT64_C(1) << 32);
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	fsimg_wire_entry_encode(raw, &entry, 2);
-	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_VALID, 0x80);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_VALID, 0x100);
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	for (uint64_t kind = 0; kind <= 16; kind++) {
 		fsimg_wire_entry_encode(raw, &entry, 2);
 		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, kind);
 		CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096) ==
 		    (kind == FSIMG_ENTRY_FILE || kind == FSIMG_ENTRY_DIRECTORY ||
-		    kind == FSIMG_ENTRY_FIFO));
+		    kind == FSIMG_ENTRY_FIFO || kind == FSIMG_ENTRY_CHAR_DEVICE));
 	}
 	/* Absent attributes and timestamps must arrive as zero bytes. */
 	fsimg_wire_entry_encode(raw, &entry, 2);
@@ -2108,6 +2198,8 @@ main(int argc, char **argv)
 	test_selection_budget();
 	test_error_padding();
 	test_entry_records();
+	test_device_and_socket_entry_records();
+	test_invalid_device_and_socket_entry_records();
 	test_invalid_entry_records();
 	test_info_text_records_reject_invalid_counts_and_strings();
 	test_info_geometry_is_informational();

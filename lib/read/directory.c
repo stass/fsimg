@@ -580,6 +580,10 @@ make_current(fsimg_reader_t *reader, walk_level_t *level, size_t length,
 	    reader->initialized != reader->link_length))
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
 		    "decoded link target does not match the replayed entry"));
+	if (!fsimg_device_number_fits(reader->entry.kind,
+	    reader->entry.metadata.valid))
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "a device number on an entry that is not a device"));
 	/* No content exists past the logical length, whatever the driver set. */
 	if (reader->initialized > reader->entry.size)
 		reader->initialized = reader->entry.size;

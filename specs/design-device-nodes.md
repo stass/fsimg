@@ -26,34 +26,31 @@ extractor creates regular files and directories only, and already skips or
 refuses symbolic links and FIFOs, so reading these kinds does not change
 what reaches the host.
 
-## What the code does today
+## Where the code lives
 
-* `fsimg_entry_kind_t` (`include/fsimg.h`) has four values, `FILE` 1,
-  `DIRECTORY` 2, `SYMLINK` 4 and `FIFO` 8; `FSIMG_ENTRY_KNOWN` in
-  `lib/core/internal.h` is their union.
+* The kinds and the field are in `include/fsimg.h`; `FSIMG_ENTRY_KNOWN`,
+  `FSIMG_META_KNOWN` and `fsimg_device_number_fits()`, the field's one
+  rule, are in `lib/core/internal.h`.
 * The Rock Ridge decoder (`lib/formats/iso9660/rockridge.c`) decodes `PX`
-  types for character device, block device and socket as refusals, checks a
-  `PN` entry's length and both-byte-order halves and discards the values,
-  and reports `PN` on a non-device as `FSIMG_ECORRUPT`.
-* The catalog (`lib/write/catalog.c`, `entry_shape_valid()`) accepts the
-  closed relation between kind, size and source for the four kinds and
-  rejects every other kind value with `FSIMG_EINVAL`. The manifest parser
-  (`lib/source/mtree.c`) refuses `type=block`, `type=char` and
-  `type=socket` as unsupported, naming the keyword. The host scanner opens
-  every object no-follow and nonblocking and rejects anything but a regular
-  file or directory; a socket or driverless device fails its open with
-  `ENXIO`, reported as `FSIMG_EUNSUPPORTED`.
+  types and the `PN` entry.
+* The catalog (`lib/write/catalog.c`, `entry_shape_valid()`) holds the
+  closed relation between kind, size and source for the writable kinds, and
+  `fsimg_metadata_validate()` (`lib/core/unicode.c`) the metadata rules. The
+  manifest parser (`lib/source/mtree.c`) refuses `type=block`, `type=char`
+  and `type=socket`, naming the keyword. The host scanner opens every
+  object no-follow and nonblocking and rejects anything but a regular file
+  or directory; a socket or driverless device fails its open with `ENXIO`,
+  reported as `FSIMG_EUNSUPPORTED`.
+* The reader's replay funnel (`lib/read/directory.c`) checks every entry a
+  driver replays before publishing it.
 * The extractor (`lib/extract/extract.c`) creates files and directories and
-  routes every other kind through `skip_unsupported()`: `FSIMG_EUNSUPPORTED`
-  naming the entry, or under `FSIMG_EXTRACT_SKIP_UNSUPPORTED` a count in
-  `skipped_entries` and a manifest line. The selector refuses a single `x
-  -O` member that is not a file or symbolic link with `FSIMG_EINVAL`,
-  "selected image path has the wrong entry kind".
-* The worker's entry record (`cmd/fsimg/protocol.c`,
-  `fsimg_wire_entry_frame_valid()`) admits the four kinds with the size each
-  allows; `cmd/fsimg/display.c` marks a link `@` and a FIFO `|`, prints
-  `-dlp` as the `-v` kind character, and writes `kind` names in JSON;
-  `lib/extract/mtree-writer.c` writes `type=dir`, `file`, `link` or `fifo`.
+  routes every other kind through `skip_unsupported()`. The selector
+  (`lib/read/selection.c`) refuses a single `x -O` member that is not a
+  file or symbolic link.
+* The worker's entry record and its validation are in
+  `cmd/fsimg/protocol.c` (`fsimg_wire_entry_frame_valid()`); listings and
+  JSON in `cmd/fsimg/display.c`; manifest lines in
+  `lib/extract/mtree-writer.c`.
 
 ## Design
 
@@ -95,14 +92,24 @@ them.
 ### Read-only by construction
 
 The writer side rejects these kinds through rules that already exist, so
-the read-only contract needs no new mask, option or check:
+the read-only contract needs no new mask or option; the one new rule is
+the device number field's:
 
 * The catalog's closed kind, size and source relation lists the four
   writable kinds. The three new kinds are not added to it, so
-  `fsimg_writer_add_entry()` with one of them fails with `FSIMG_EINVAL`,
+  `fsimg_writer_add()` with one of them fails with `FSIMG_EINVAL`,
   "entry kind, size and source disagree", as any non-storable kind value
   does. A catalog therefore never carries a device or socket, no writer
   receives one, and common planning needs no case for them.
+* The field's rule, `FSIMG_META_DEVICE` only on a character or block
+  device, is one predicate applied at each boundary an entry crosses: the
+  catalog's metadata validation, the reader's replay funnel and the
+  parent's frame validation. Since no catalog kind is a device, the catalog
+  refuses the field on every entry with `FSIMG_EINVAL`, "a device number is
+  valid only on a device", and its record needs no slot for it. A reader
+  driver that sets the field on another kind fails the walk with
+  `FSIMG_ESTATE`, so a listing, manifest or verification never shows a
+  device number on a file.
 * `fsimg_format_info_t.entry_kinds` keeps its one meaning for the writable
   kinds, read and written. For the three read-only kinds it means the
   format's reader reports them; `--formats` lists them with the others. No
@@ -217,7 +224,9 @@ kinds add no new way to make a reader deliver or claim bytes.
 | HFS Plus device or socket with a non-empty fork | `FSIMG_ECORRUPT` |
 | APFS device number field on a non-device | `FSIMG_ECORRUPT` |
 | QNX4, QNX6, ImageFS type bits naming a device or socket | `FSIMG_EUNSUPPORTED`, the directory's preparation fails naming the entry, unchanged |
-| `fsimg_writer_add_entry()` with a device or socket kind | `FSIMG_EINVAL`, the catalog's kind, size and source relation |
+| `fsimg_writer_add()` with a device or socket kind | `FSIMG_EINVAL`, the catalog's kind, size and source relation |
+| `fsimg_writer_add()` with `FSIMG_META_DEVICE` valid | `FSIMG_EINVAL`, the catalog's metadata validation |
+| A reader driver reporting `FSIMG_META_DEVICE` on another kind | `FSIMG_ESTATE` from the replay funnel |
 | Manifest `type=char`, `type=block`, `type=socket` | `FSIMG_EUNSUPPORTED` naming the keyword, unchanged |
 | Host source tree holding a device or socket | `FSIMG_EUNSUPPORTED` from the scanner, unchanged |
 | Extraction reaching a device or socket | `FSIMG_EUNSUPPORTED` naming the entry; with `-k` skipped and counted |
@@ -229,9 +238,9 @@ kinds add no new way to make a reader deliver or claim bytes.
 Each passing case has a seeded failure that proves the check ran.
 
 * `test/posix.c`: the capability test over every registered record asserts
-  the device-kind and `metadata_fields` relations above; `add_entry()` of
+  the device-kind and `metadata_fields` relations above; `fsimg_writer_add()` of
   each new kind fails with `FSIMG_EINVAL` for every writer, and the seeded
-  failure accepts one.
+  failure accepts one; so does a file carrying `FSIMG_META_DEVICE`.
 * `test/iso9660.c` and `test/iso9660-faults.c`: a synthesized Rock Ridge
   image with a character device, a block device and a socket beside the
   other kinds lists all of them with kind, owner, mode and times; a `PN`

@@ -785,6 +785,9 @@ test_keyword_classes(void)
 		{ "a type=file flags=uchg\n", FSIMG_EUNSUPPORTED, 1, "flags" },
 		{ "a type=block\n", FSIMG_EUNSUPPORTED, 1, "\"type\"" },
 		{ "a type=char\n", FSIMG_EUNSUPPORTED, 1, "\"type\"" },
+		{ "./dev/null type=char mode=0666 uid=0 gid=0 "
+		    "time=946684800.000000000 device=native,1,3\n",
+		    FSIMG_EUNSUPPORTED, 1, "\"type\"" },
 		{ "a type=socket\n", FSIMG_EUNSUPPORTED, 1, "\"type\"" },
 		{ "a type=file mode=u+rwx\n", FSIMG_EUNSUPPORTED, 1,
 		    "symbolic" },
@@ -830,11 +833,13 @@ test_keyword_classes(void)
 	    "a type=file nlink=2 inode=12 device=native,1,4 resdevice=88 "
 	    "tags=a,b uname=root gname=wheel uid=0 gid=0 flags=none\n"
 	    "d type=dir size=4096 nlink=3\n"
-	    "p type=fifo size=0\n"
+	    "p type=fifo size=0 device=native,1,3\n"
 	    "/unset nlink tags\n");
 	CHECK(result->count == 3);
 	CHECK(result->entries[0].metadata.valid == FSIMG_META_OWNER);
 	CHECK(result->entries[1].size == 0 && result->entries[2].size == 0);
+	CHECK(result->entries[2].kind == FSIMG_ENTRY_FIFO);
+	CHECK((result->entries[2].metadata.valid & FSIMG_META_DEVICE) == 0);
 	check_refusals(refusals, sizeof(refusals) / sizeof(refusals[0]));
 }
 

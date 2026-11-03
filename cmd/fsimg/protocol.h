@@ -208,7 +208,7 @@ typedef enum fsimg_wire_plan_field {
 _Static_assert(FSIMG_WIRE_PLAN_CODEC + FSIMG_WIRE_PLAN_CODEC_BYTES ==
     FSIMG_WIRE_PLAN_BYTES, "the plan record ends with the codec");
 
-#define FSIMG_WIRE_ENTRY_BYTES 232u
+#define FSIMG_WIRE_ENTRY_BYTES 248u
 typedef enum fsimg_wire_entry_field {
 	FSIMG_WIRE_ENTRY_KIND = 0,
 	FSIMG_WIRE_ENTRY_LENGTH = 8,
@@ -222,10 +222,12 @@ typedef enum fsimg_wire_entry_field {
 	FSIMG_WIRE_ENTRY_CHANGED = 168,
 	FSIMG_WIRE_ENTRY_UID = 208,
 	FSIMG_WIRE_ENTRY_GID = 216,
-	FSIMG_WIRE_ENTRY_MODE = 224
+	FSIMG_WIRE_ENTRY_MODE = 224,
+	FSIMG_WIRE_ENTRY_DEV_MAJOR = 232,
+	FSIMG_WIRE_ENTRY_DEV_MINOR = 240
 } fsimg_wire_entry_field_t;
-_Static_assert(FSIMG_WIRE_ENTRY_MODE + 8 == FSIMG_WIRE_ENTRY_BYTES,
-    "the entry record ends with the mode");
+_Static_assert(FSIMG_WIRE_ENTRY_DEV_MINOR + 8 == FSIMG_WIRE_ENTRY_BYTES,
+    "the entry record ends with the device number");
 
 #define FSIMG_WIRE_TIME_BYTES 40u
 typedef enum fsimg_wire_time_field {

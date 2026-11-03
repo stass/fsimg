@@ -253,13 +253,17 @@ timestamp_valid(const fsimg_timestamp_t *timestamp)
 }
 
 fsimg_status_t
-fsimg_metadata_validate(const fsimg_metadata_t *metadata, fsimg_error_t *error)
+fsimg_metadata_validate(const fsimg_metadata_t *metadata,
+    fsimg_entry_kind_t kind, fsimg_error_t *error)
 {
 	fsimg_error_clear(error);
 	if ((metadata->valid & ~FSIMG_META_KNOWN) != 0 ||
 	    (metadata->required & ~metadata->valid) != 0)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 		    FSIMG_OP_CATALOG, "invalid metadata validity or requirements"));
+	if (!fsimg_device_number_fits(kind, metadata->valid))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_CATALOG, "a device number is valid only on a device"));
 	if (((metadata->valid & FSIMG_META_CREATED) != 0 &&
 	    !timestamp_valid(&metadata->created)) ||
 	    ((metadata->valid & FSIMG_META_MODIFIED) != 0 &&

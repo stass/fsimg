@@ -682,7 +682,7 @@ reviewed commit:
 1. **Common model, command line and records.** The three kinds and
    `FSIMG_META_DEVICE` in the public header and `FSIMG_ENTRY_KNOWN`; the
    capability test's device-kind relations; the catalog test that
-   `add_entry()` refuses them; the entry record's two device words with the
+   `fsimg_writer_add()` refuses them; the entry record's two device words with the
    parent's validation; the `t`, `t -v`, `--json` and `--formats` output;
    extraction's fail-or-skip of the kinds, which the extractor's existing
    rule gives; `x -O` refusal; and the manifest writer's `type` names and

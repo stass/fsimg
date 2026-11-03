@@ -1558,8 +1558,8 @@ Output uses private directories and regular files, no links, no merge,
 no privileged metadata and no host timestamp restoration.
 Every entry is created exclusively, so an object another process adds
 concurrently is a collision failure.
-An image entry of another kind, such as a symbolic link or FIFO, fails the
-extraction and is named in the error, unless
+An image entry of another kind, such as a symbolic link, FIFO, device or
+socket, fails the extraction and is named in the error, unless
 .Fl k
 skips it.
 So does an entry a QNX4, QNX6, ImageFS or ISO 9660 reader omits because
@@ -1615,8 +1615,20 @@ A field the image does not store is left out.
 The digest is computed from the bytes written as they are copied.
 An entry
 .Fl k
-skips, such as a symbolic link or FIFO, is still listed, without a digest;
+skips, such as a symbolic link, FIFO, device or socket, is still listed,
+without a digest;
 the manifest is its only record.
+A device's line carries
+.Cm type Ns = Ns Li char
+or
+.Li block
+and, when the image stores its number,
+.Cm device Ns = Ns Li native , Ns Ar major , Ns Ar minor ;
+a socket's carries
+.Cm type Ns = Ns Li socket .
+Such a manifest is a record only:
+.Cm c
+refuses those types when it is read back.
 An entry
 .Fl k
 omits for a name outside the profile is never visited and has no line, so
@@ -1679,17 +1691,33 @@ Diagnostics and bounded progress use stderr; payloads and records use stdout.
 Successful creation and extraction are silent by default.
 Listings contain one quoted pathname per line, without a completion trailer;
 a symbolic link is marked with
-.Ql @
-and a FIFO with
+.Ql @ ,
+a FIFO with
 .Ql |
-after the quoted name.
+and a socket with
+.Ql =
+after the quoted name, as
+.Ql ls -F
+marks them; a device is not marked.
 The long listing of
 .Cm t Fl v
 prefixes each name with three columns: the kind
-.Pq Ql - , d , l No or Ql p
+.Po
+.Ql - ,
+.Ql d ,
+.Ql l ,
+.Ql p ,
+.Ql c ,
+.Ql b
+or
+.Ql s
+.Pc
 followed by nine permission characters, or nine
 .Ql \&?
-when the format stores no mode; the logical length of a file or link, or
+when the format stores no mode; the logical length of a file or link, a
+device's number as
+.Ql major, minor
+when the image stores one, or
 .Ql - ;
 and the modification time as
 .Ql YYYY-MM-DD HH:MM:SS
@@ -1753,8 +1781,10 @@ Large integers are decimal strings; bounded geometry, flags, nanoseconds and
 offset minutes are JSON integers.
 Unknown values are null.
 Timestamp records state basis and precision.
-Entry records name their kind as file, directory, symlink or fifo and carry
-change time, uid, gid and mode, each null when absent.
+Entry records name their kind as file, directory, symlink, fifo,
+char_device, block_device or socket and carry change time, uid, gid, mode,
+dev_major and dev_minor, each null when absent; only a device carries a
+device number.
 Information records also give the mountpoint, null when absent, and details,
 an object of each named format detail's decimal string value.
 Format records name their kind: filesystem, scheme, container or

@@ -35,6 +35,16 @@ scheme in hybrid_scheme, and the CLI notes on stderr that `-F gpt` or
 mformat, mkfs.fat --mbr, isohybrid and mkudffs write over the volume
 beginning there, is no partition table, so such disks read as that volume.
 
+The entry model has three read-only kinds, character device, block device
+and socket, with an optional device number (`FSIMG_META_DEVICE`,
+`dev_major` and `dev_minor`). Readers may report them; no writer stores
+them, and the catalog refuses them. `t` marks a socket `=`, `t -v` shows
+`c`, `b` and `s` and a device's `major, minor`, `--json` names the kinds
+`char_device`, `block_device` and `socket` with `dev_major` and
+`dev_minor`, and `x --mtree` records them as `type=char`, `block` or
+`socket` with `device=native,MAJOR,MINOR`. Extraction never creates them:
+it fails naming the entry, or `-k` skips and counts it.
+
 CLI information can report declared filesystem geometry beyond the available
 input when headers remain readable. Missing referenced structures or content
 retain filesystem errors; informational geometry does not enlarge selected

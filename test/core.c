@@ -32,6 +32,7 @@ typedef struct callback_state {
 static void test_arithmetic(void);
 static void test_context(void);
 static void test_descriptor_cleanup(void);
+static void test_entry_metadata_definitions(void);
 static void test_sha256_split_updates(void);
 static void test_sha256_vectors(void);
 static void check_render(const char *, const bool *, size_t, const char *,
@@ -92,6 +93,33 @@ test_arithmetic(void)
 	result = UINT64_MAX - 1;
 	fsimg_stat_add(&result, 2);
 	CHECK(result == UINT64_MAX);
+}
+
+static void
+test_entry_metadata_definitions(void)
+{
+	CHECK((FSIMG_ENTRY_KNOWN & FSIMG_ENTRY_CHAR_DEVICE) != 0);
+	CHECK((FSIMG_ENTRY_KNOWN & FSIMG_ENTRY_BLOCK_DEVICE) != 0);
+	CHECK((FSIMG_ENTRY_KNOWN & FSIMG_ENTRY_SOCKET) != 0);
+	CHECK((FSIMG_META_KNOWN & FSIMG_META_DEVICE) != 0);
+
+	CHECK(fsimg_device_number_fits(FSIMG_ENTRY_FILE, 0));
+	CHECK(fsimg_device_number_fits(FSIMG_ENTRY_DIRECTORY, 0));
+	CHECK(fsimg_device_number_fits(FSIMG_ENTRY_SYMLINK, 0));
+	CHECK(fsimg_device_number_fits(FSIMG_ENTRY_FIFO, 0));
+	CHECK(fsimg_device_number_fits(FSIMG_ENTRY_CHAR_DEVICE, 0));
+	CHECK(fsimg_device_number_fits(FSIMG_ENTRY_BLOCK_DEVICE, 0));
+	CHECK(fsimg_device_number_fits(FSIMG_ENTRY_SOCKET, 0));
+
+	CHECK(fsimg_device_number_fits(FSIMG_ENTRY_CHAR_DEVICE,
+	    FSIMG_META_DEVICE));
+	CHECK(fsimg_device_number_fits(FSIMG_ENTRY_BLOCK_DEVICE,
+	    FSIMG_META_DEVICE));
+	CHECK(!fsimg_device_number_fits(FSIMG_ENTRY_FILE, FSIMG_META_DEVICE));
+	CHECK(!fsimg_device_number_fits(FSIMG_ENTRY_DIRECTORY, FSIMG_META_DEVICE));
+	CHECK(!fsimg_device_number_fits(FSIMG_ENTRY_SYMLINK, FSIMG_META_DEVICE));
+	CHECK(!fsimg_device_number_fits(FSIMG_ENTRY_FIFO, FSIMG_META_DEVICE));
+	CHECK(!fsimg_device_number_fits(FSIMG_ENTRY_SOCKET, FSIMG_META_DEVICE));
 }
 
 static void
@@ -523,6 +551,7 @@ int
 main(void)
 {
 	test_arithmetic();
+	test_entry_metadata_definitions();
 	test_context();
 	test_descriptor_cleanup();
 	test_sha256_vectors();

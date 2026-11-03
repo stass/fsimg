@@ -13,9 +13,22 @@
 /* The closed sets of public metadata fields and entry kinds. */
 #define FSIMG_META_KNOWN	(FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
 	FSIMG_META_ACCESSED | FSIMG_META_ATTRIBUTES | FSIMG_META_CHANGED |	\
-	FSIMG_META_OWNER | FSIMG_META_MODE)
+	FSIMG_META_OWNER | FSIMG_META_MODE | FSIMG_META_DEVICE)
 #define FSIMG_ENTRY_KNOWN	(FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |	\
-	FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO)
+	FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO | FSIMG_ENTRY_CHAR_DEVICE |	\
+	FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET)
+
+/* The device number's one rule: FSIMG_META_DEVICE is valid only on a
+ * character or block device. The catalog, the reader's replay funnel and
+ * the worker's parent each apply it; since the catalog holds no device
+ * kind, it refuses the field for every entry.
+ */
+static inline bool
+fsimg_device_number_fits(uint32_t kind, uint32_t valid)
+{
+	return ((valid & FSIMG_META_DEVICE) == 0 ||
+	    kind == FSIMG_ENTRY_CHAR_DEVICE || kind == FSIMG_ENTRY_BLOCK_DEVICE);
+}
 /* The entry model's bound on a symbolic-link target, chosen as the longest
  * any supported format stores. It sizes every target buffer and bounds the
  * host scan; each format's capability record states its own limit in

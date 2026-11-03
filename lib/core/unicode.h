@@ -46,7 +46,11 @@ fsimg_status_t fsimg_utf16_to_wtf8(const uint16_t *, size_t, char *, size_t,
 bool fsimg_name_in_portable_profile(const char *, size_t);
 fsimg_status_t fsimg_path_validate(fsimg_ctx_t *, const char *, bool,
     size_t *, uint32_t *, fsimg_error_t *);
+/* Whether an entry's metadata can enter the writer's catalog: known,
+ * consistent masks, valid values, and a device number only on a device,
+ * which the catalog's kinds never are.
+ */
 fsimg_status_t fsimg_metadata_validate(const fsimg_metadata_t *,
-    fsimg_error_t *);
+    fsimg_entry_kind_t, fsimg_error_t *);
 
 #endif

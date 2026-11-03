@@ -17,13 +17,15 @@
 #include "mtree-writer.h"
 
 #define MTREE_WRITER_BUFFER_BYTES 65536u
-/* The longest plain keyword text, every field at its widest: " type=fifo"
- * (10), " mode=7777" (10), " uid=4294967295 gid=4294967295" (30),
+/* The longest plain keyword text, every field at its widest: " type=socket"
+ * (12), " mode=7777" (10), " uid=4294967295 gid=4294967295" (30),
  * " time=-9223372036854775808.4294967295" (37, the nanoseconds field as
- * wide as its uint32_t can print), " size=18446744073709551615
- * sha256digest=" (40) and 64 hexadecimal digits.
+ * wide as its uint32_t can print), " device=native,4294967295,4294967295"
+ * (36), " size=18446744073709551615 sha256digest=" (40) and 64 hexadecimal
+ * digits. No entry carries both a device number and a digest, but the
+ * bound does not rely on it.
  */
-#define MTREE_KEYWORDS_MAX (10u + 10u + 30u + 37u + 40u + 64u)
+#define MTREE_KEYWORDS_MAX (12u + 10u + 30u + 37u + 36u + 40u + 64u)
 #define MTREE_KEYWORDS_BYTES 256u
 _Static_assert(MTREE_KEYWORDS_MAX < MTREE_KEYWORDS_BYTES,
     "the keyword buffer holds the longest keywords and a NUL");
@@ -239,10 +241,10 @@ put_text(fsimg_mtree_writer_t *writer, const char *text, fsimg_error_t *error)
 }
 
 /* The keywords that need no escape, each with its leading space, in one
- * fixed order: type, mode, uid and gid, time, then size and sha256digest
- * for a copied file. A field the entry does not carry is left out, so the
- * manifest's reader sees it absent, as the image reported it. The text
- * is at most MTREE_KEYWORDS_MAX bytes.
+ * fixed order: type, mode, uid and gid, time, then a device's number, or a
+ * copied file's size and sha256digest. A field the entry does not
+ * carry is left out, so the manifest's reader sees it absent, as the image
+ * reported it. The text is at most MTREE_KEYWORDS_MAX bytes.
  */
 static void
 format_keywords(const fsimg_mtree_record_t *record,
@@ -266,6 +268,12 @@ format_keywords(const fsimg_mtree_record_t *record,
 		length += (size_t)snprintf(text + length,
 		    MTREE_KEYWORDS_BYTES - length, " time=%" PRId64 ".%09" PRIu32,
 		    record->modified_seconds, record->modified_nanoseconds);
+	/* bsdtar's form, which the BSD and macOS mtree(8) read. */
+	if ((entry->metadata.valid & FSIMG_META_DEVICE) != 0)
+		length += (size_t)snprintf(text + length,
+		    MTREE_KEYWORDS_BYTES - length,
+		    " device=native,%" PRIu32 ",%" PRIu32,
+		    entry->metadata.dev_major, entry->metadata.dev_minor);
 	if (record->digest == NULL)
 		return;
 	length += (size_t)snprintf(text + length, MTREE_KEYWORDS_BYTES - length,
@@ -312,6 +320,12 @@ kind_name(fsimg_entry_kind_t kind)
 		return ("link");
 	case FSIMG_ENTRY_FIFO:
 		return ("fifo");
+	case FSIMG_ENTRY_CHAR_DEVICE:
+		return ("char");
+	case FSIMG_ENTRY_BLOCK_DEVICE:
+		return ("block");
+	case FSIMG_ENTRY_SOCKET:
+		return ("socket");
 	case FSIMG_ENTRY_FILE:
 		break;
 	}
