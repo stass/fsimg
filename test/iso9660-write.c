@@ -2020,7 +2020,10 @@ test_relocation_roundtrip(void)
 			specs[i] = (spec_t){ paths[i], FSIMG_ENTRY_DIRECTORY,
 			    0, 0, i + 1 == depth ? &owned_metadata : NULL, NULL };
 		}
-		snprintf(paths[depth], sizeof(paths[depth]), "%s/leaf", paths[depth - 1]);
+		length = strlen(paths[depth - 1]);
+		CHECK(length <= sizeof(paths[depth]) - sizeof("/leaf"));
+		bcopy(paths[depth - 1], paths[depth], length);
+		bcopy("/leaf", paths[depth] + length, sizeof("/leaf"));
 		specs[depth] = (spec_t){ paths[depth], FSIMG_ENTRY_FILE,
 		    sizeof(bytes), 7, NULL, NULL };
 		reproducible_options(&options);
