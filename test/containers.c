@@ -39,6 +39,13 @@
 #define MIB		(UINT64_C(1024) * 1024)
 #define SECTOR		512u
 
+/* Fields in the koly trailer patched by malformed-image tests. */
+#define KOLY_RSRC_LENGTH	48u	/* koly resource fork length field */
+#define KOLY_XML_LENGTH	224u	/* koly XML length field */
+
+/* The legacy resource fork size of a real hdiutil image is odd. */
+#define LEGACY_RESOURCE_BYTES	0x3a0fu
+
 #define RUN_ZERO	0x00000000u
 #define RUN_RAW		0x00000001u
 #define RUN_IGNORE	0x00000002u
@@ -103,6 +110,12 @@ typedef struct dmg_table {
  * plist text in the root dict, zlib streams encoding zlib_delta bytes more
  * (or fewer) than their runs, a data fork declared fork_extra bytes longer
  * than written, and a first table checksum xored with table_crc_flip.
+ * resource_bytes appends that many 0xa5 bytes between the plist and koly.
+ * resource_offset overrides the koly fork offset when nonzero, otherwise
+ * the offset locates the appended bytes or is zero when none are written.
+ * resource_length overrides the koly fork length when nonzero, otherwise
+ * the length is resource_bytes.
+ * empty_ignore_length sets the compressed length of zero-sector Ignore runs.
  */
 typedef struct dmg_spec {
 	const unsigned char *disk;
@@ -115,6 +128,10 @@ typedef struct dmg_spec {
 	int		 zlib_delta;
 	uint64_t	 fork_extra;
 	uint32_t	 table_crc_flip;
+	size_t		 resource_bytes;
+	uint64_t	 resource_offset;
+	uint64_t	 resource_length;
+	uint64_t	 empty_ignore_length;
 } dmg_spec_t;
 
 /* One sparse-image chunk. total overrides the chunk's total size when
@@ -196,6 +213,9 @@ static void expect_dmg_fails(const dmg_spec_t *, fsimg_status_t, const char *);
 static void expect_payload_fails(memory_file_t, bool, const char *);
 static void test_crc_oracle(void);
 static void test_dmg_read(void);
+static void test_dmg_legacy_resource_fork(void);
+static void test_dmg_resource_fork_failures(void);
+static void test_dmg_empty_ignore_run(void);
 static void test_dmg_table_shapes(void);
 static void test_dmg_seeded_failures(void);
 static void test_dmg_plist_limits(void);
@@ -498,7 +518,9 @@ dmg_table_encode(const dmg_spec_t *spec, unsigned index, buffer_t *fork,
 		put_be64(entry + 8, run->sector);
 		put_be64(entry + 16, run->sectors);
 		put_be64(entry + 24, offset + run->offset_bias);
-		put_be64(entry + 32, encoded);
+		put_be64(entry + 32,
+		    run->type == RUN_IGNORE && run->sectors == 0 ?
+		    spec->empty_ignore_length : encoded);
 		buffer_append(mish, entry, sizeof(entry));
 	}
 	if (index == 0)
@@ -564,6 +586,12 @@ dmg_encode(const dmg_spec_t *spec)
 	put_be32(koly + 8, 512);
 	put_be32(koly + 12, 1);
 	put_be64(koly + 32, fork_length + spec->fork_extra);
+	if (spec->resource_bytes != 0)
+		put_be64(koly + 40, fork_length + xml.length);
+	if (spec->resource_offset != 0)
+		put_be64(koly + 40, spec->resource_offset);
+	put_be64(koly + 48, spec->resource_length != 0 ?
+	    spec->resource_length : spec->resource_bytes);
 	put_be32(koly + 56, spec->segment_number);
 	put_be32(koly + 60, spec->segment_count);
 	bcopy(segment_id, koly + 64, sizeof(segment_id));
@@ -578,6 +606,8 @@ dmg_encode(const dmg_spec_t *spec)
 	put_be32(koly + 488, 1);
 	put_be64(koly + 492, spec->sectors);
 	buffer_append(&file, xml.bytes, xml.length);
+	for (size_t i = 0; i < spec->resource_bytes; i++)
+		buffer_append(&file, "\xa5", 1);
 	buffer_append(&file, koly, sizeof(koly));
 	free(xml.bytes);
 	free(mish.bytes);
@@ -939,6 +969,201 @@ test_dmg_read(void)
 	expect_disk(&f, disk, MIB);
 	fixture_free(&f);
 	free(file.bytes);
+	free(disk);
+}
+
+/* Older hdiutil writes a legacy resource fork between the plist and koly,
+ * which the reader skips.
+ */
+static void
+test_dmg_legacy_resource_fork(void)
+{
+	unsigned char *disk = disk_new(MIB);
+	fsimg_layer_report_t report;
+	fsimg_image_info_t info;
+	memory_file_t file;
+	dmg_spec_t spec;
+	fixture_t f;
+
+	disk_pattern(disk, 64 * SECTOR, 1);
+	disk_pattern(disk + 128 * SECTOR, 1024 * SECTOR, 2);
+	disk_pattern(disk + 1280 * SECTOR, 768 * SECTOR, 3);
+	spec = dmg_whole_disk(disk, 2048);
+	spec.resource_bytes = LEGACY_RESOURCE_BYTES;
+	file = dmg_encode(&spec);
+
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.container, "dmg") == 0);
+	expect_disk(&f, disk, MIB);
+	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
+	    NULL) == FSIMG_OK);
+	CHECK(report.scope == FSIMG_VALIDATION_PAYLOAD);
+	fixture_free(&f);
+	free(file.bytes);
+
+	/* An absent fork's offset is ignored. */
+	spec = dmg_whole_disk(disk, 2048);
+	spec.resource_offset = UINT64_MAX;
+	file = dmg_encode(&spec);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	expect_disk(&f, disk, MIB);
+	fixture_free(&f);
+	free(file.bytes);
+	free(disk);
+}
+
+/* The plist and resource fork lie before the trailer, and the fork overlaps
+ * neither the data fork nor the plist.
+ */
+static void
+test_dmg_resource_fork_failures(void)
+{
+	unsigned char *disk = disk_new(MIB);
+	fsimg_image_info_t info;
+	uint64_t plist_end;
+	memory_file_t file;
+	dmg_spec_t base, spec;
+	fixture_t f;
+
+	disk_pattern(disk, 64 * SECTOR, 1);
+	disk_pattern(disk + 128 * SECTOR, 1024 * SECTOR, 2);
+	disk_pattern(disk + 1280 * SECTOR, 768 * SECTOR, 3);
+	base = dmg_whole_disk(disk, 2048);
+	file = dmg_encode(&base);
+	plist_end = file.length - 512;
+	free(file.bytes);
+
+	/* A fork ending at the trailer cannot share a plist byte. */
+	spec = base;
+	spec.resource_bytes = LEGACY_RESOURCE_BYTES;
+	spec.resource_offset = plist_end - 1;
+	spec.resource_length = LEGACY_RESOURCE_BYTES + 1;
+	expect_dmg_fails(&spec, FSIMG_ECORRUPT,
+	    "DMG koly resource fork overlaps the data fork or plist");
+
+	/* A plist ending at the trailer cannot hide data-fork overlap. */
+	spec = base;
+	spec.resource_offset = 1;
+	spec.resource_length = 1;
+	expect_dmg_fails(&spec, FSIMG_ECORRUPT,
+	    "DMG koly resource fork overlaps the data fork or plist");
+
+	/* A fork cannot extend into the trailer. */
+	spec = base;
+	spec.resource_offset = plist_end;
+	spec.resource_length = 1;
+	expect_dmg_fails(&spec, FSIMG_ECORRUPT,
+	    "DMG koly resource fork overruns the trailer");
+
+	/* The resource-fork end cannot overflow. */
+	spec = base;
+	spec.resource_offset = UINT64_MAX;
+	spec.resource_length = 2;
+	expect_dmg_fails(&spec, FSIMG_ECORRUPT,
+	    "DMG koly resource fork overruns the trailer");
+
+	/* A fork ending at the trailer still requires a bounded plist. */
+	spec = base;
+	spec.resource_bytes = LEGACY_RESOURCE_BYTES;
+	file = dmg_encode(&spec);
+	put_be64(file.bytes + file.length - 512 + KOLY_XML_LENGTH, UINT64_MAX);
+	expect_open_fails(file, DETECT, FSIMG_ECORRUPT,
+	    "DMG koly plist overruns the trailer");
+
+	/* Neither extent ending at the trailer means no DMG claim. */
+	spec = base;
+	spec.resource_bytes = LEGACY_RESOURCE_BYTES;
+	spec.resource_length = spec.resource_bytes - 1;
+	file = dmg_encode(&spec);
+	expect_open_fails(file, "fat12/-/dmg", FSIMG_EFORMAT, "no DMG trailer");
+
+	/* An unclaimed file opens as a plain disk with no container. */
+	file = dmg_encode(&spec);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(info.container[0] == '\0');
+	fixture_free(&f);
+	free(file.bytes);
+
+	/* An absent fork at the trailer cannot claim a plist separated by a gap. */
+	spec = base;
+	spec.resource_bytes = LEGACY_RESOURCE_BYTES;
+	spec.resource_offset = plist_end + spec.resource_bytes;
+	file = dmg_encode(&spec);
+	put_be64(file.bytes + file.length - 512 + KOLY_RSRC_LENGTH, 0);
+	expect_open_fails(file, "fat12/-/dmg", FSIMG_EFORMAT, "no DMG trailer");
+
+	/* An unclaimed file opens as a plain disk with no container. */
+	file = dmg_encode(&spec);
+	put_be64(file.bytes + file.length - 512 + KOLY_RSRC_LENGTH, 0);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(info.container[0] == '\0');
+	fixture_free(&f);
+	free(file.bytes);
+	free(disk);
+}
+
+/* Older hdiutil ends a table with a zero-sector Ignore run before the
+ * terminator, which covers nothing.
+ */
+static void
+test_dmg_empty_ignore_run(void)
+{
+	unsigned char *disk = disk_new(MIB);
+	fsimg_layer_report_t report;
+	memory_file_t file;
+	dmg_spec_t spec;
+	fixture_t f;
+
+	disk_pattern(disk, 64 * SECTOR, 1);
+	disk_pattern(disk + 128 * SECTOR, 1024 * SECTOR, 2);
+	disk_pattern(disk + 1280 * SECTOR, 768 * SECTOR, 3);
+	spec = dmg_whole_disk(disk, 2048);
+	spec.table[0].run[spec.table[0].runs] = (dmg_run_t){
+		.type = RUN_IGNORE, .sector = 2048, .sectors = 0
+	};
+	spec.table[0].runs++;
+	file = dmg_encode(&spec);
+
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	expect_disk(&f, disk, MIB);
+	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
+	    NULL) == FSIMG_OK);
+	fixture_free(&f);
+	free(file.bytes);
+
+	/* A zero-sector Zero run still fails at the same table position. */
+	spec.table[0].run[spec.table[0].runs - 1].type = RUN_ZERO;
+	expect_dmg_fails(&spec, FSIMG_ECORRUPT, "DMG run covers zero sectors");
+
+	/* A zero-sector Ignore run before the data runs also covers nothing. */
+	spec = dmg_whole_disk(disk, 2048);
+	bcopy(&spec.table[0].run[0], &spec.table[0].run[1],
+	    spec.table[0].runs * sizeof(spec.table[0].run[0]));
+	spec.table[0].runs++;
+	spec.table[0].run[0] = (dmg_run_t){ .type = RUN_IGNORE, .sector = 0 };
+	file = dmg_encode(&spec);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	expect_disk(&f, disk, MIB);
+	fixture_free(&f);
+	free(file.bytes);
+
+	/* A zero-sector Ignore run cannot carry compressed bytes. */
+	spec.empty_ignore_length = 1;
+	expect_dmg_fails(&spec, FSIMG_ECORRUPT, "DMG run covers zero sectors");
+
+	/* A zero-sector Ignore run cannot start beyond the table. */
+	spec.empty_ignore_length = 0;
+	spec.table[0].run[0].sector = spec.table[0].count + 1;
+	expect_dmg_fails(&spec, FSIMG_ECORRUPT, "DMG run covers zero sectors");
 	free(disk);
 }
 
@@ -2344,6 +2569,9 @@ main(int argc, char **argv)
 	CHECK(argc == 1);
 	test_crc_oracle();
 	test_dmg_read();
+	test_dmg_legacy_resource_fork();
+	test_dmg_resource_fork_failures();
+	test_dmg_empty_ignore_run();
 	test_dmg_table_shapes();
 	test_dmg_seeded_failures();
 	test_dmg_plist_limits();

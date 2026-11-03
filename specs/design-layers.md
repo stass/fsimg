@@ -1393,7 +1393,10 @@ Oracles: `hdiutil imageinfo`, `hdiutil verify`, `hdiutil attach` (the
 evidence that macOS mounts the volume), `hdiutil create`/`convert` as the
 producer of images fsimg must read, `qemu-img info`/`convert`, and `7z l`.
 
-File order: data fork of chunks, XML plist, 512-byte koly trailer at the end.
+File order: data fork of chunks, XML plist, an optional legacy resource
+fork, 512-byte koly trailer at the end. Current `hdiutil` writes no resource
+fork; older `hdiutil` writes one between the plist and the trailer, carrying
+the tables again in the classic resource format. fsimg writes none.
 All integers are big-endian. The trailer:
 
 | Offset | Size | Field |
@@ -1405,8 +1408,8 @@ All integers are big-endian. The trailer:
 | 16 | 8 | Running data fork offset (0) |
 | 24 | 8 | Data fork offset |
 | 32 | 8 | Data fork length |
-| 40 | 8 | Resource fork offset (0) |
-| 48 | 8 | Resource fork length (0) |
+| 40 | 8 | Resource fork offset (0; ignored when the length is 0) |
+| 48 | 8 | Resource fork length (0, no resource fork) |
 | 56 | 4 | Segment number (1; `hdiutil create` writes 0) |
 | 60 | 4 | Segment count (1; `hdiutil create` writes 0) |
 | 64 | 16 | Segment ID |
@@ -1467,10 +1470,15 @@ has the empty CRC, zero. Run types:
 
 Reading: the probe claims on identity, tied to the file length it receives:
 `koly`, version 4 and header size 512 in the last 512 bytes, and the XML
-range ending exactly at the trailer (XML offset plus XML length equal to the
-file length minus 512). Every `hdiutil` image ends its data fork exactly at
-the XML offset and its XML exactly at the trailer. Validation then requires:
-the data fork ending at or before the XML offset; a single segment, segment
+range or a resource fork of nonzero length ending exactly at the trailer
+(offset plus length equal to the file length minus 512). Every `hdiutil`
+image ends its data fork exactly at the XML offset and the last of its XML
+and resource fork exactly at the trailer. Validation then requires: the data
+fork ending at or before the XML offset; the XML range, and a resource fork
+of nonzero length, each ending at or before the trailer, their offset plus
+length not overflowing; the resource fork sharing no byte with the data fork
+or the XML. The resource fork's bytes are never read: the tables come from
+the plist. Validation further requires a single segment, segment
 number and count both 1 (`hdiutil convert`) or both 0 (`hdiutil create`),
 any other pair being a multi-segment image, which is unsupported; sector
 count times 512 as the disk length; checksum types 0 or 2, a CRC32 of 32
@@ -1482,7 +1490,11 @@ length within the data fork, raw runs with compressed length equal to sector
 count times 512, zero and ignore runs with compressed length zero, compressed
 runs with a nonzero compressed length and a decompressed length of at most
 16 MiB, and a nonzero sector count for every run other than a comment or the
-terminator, which carry zero by definition. A table holds exactly its
+terminator, which carry zero by definition. Older `hdiutil` also writes an
+Ignore run of zero sectors at a table's end, before its terminator: an Ignore
+run of zero sectors with compressed length zero and its sector at or before
+the table's end covers nothing and is skipped, wherever in the table it
+appears. A table holds exactly its
 declared run count and ends with its one terminator. Run sector counts are
 summed per table and must equal the table's count. The index's tiling pass
 then proves that the tables and runs together cover exactly the declared
