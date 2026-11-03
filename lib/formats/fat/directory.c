@@ -17,6 +17,8 @@
  * compares the record with it.
  */
 #define FAT_PAYLOAD_BYTES 36u
+/* Read-only, hidden, system and archive: attributes a dot record may carry. */
+#define DOT_IGNORED_ATTRIBUTES 0x27u
 
 typedef struct directory_pass {
 	fsimg_reader_t	*reader;
@@ -48,8 +50,11 @@ dot_record(const unsigned char *raw)
 }
 
 /* Verification only: slots 0 and 1 of a nonroot directory must be "." naming
- * this directory and ".." naming its parent. The NT reserved byte is ignored:
- * its case flags have no name to apply to, and KolibriOS sets them.
+ * this directory and ".." naming its parent. As in fsck.fat, the attribute
+ * byte must carry the directory bit and may add the read-only, hidden, system
+ * and archive bits; macOS sets the hidden bit. A volume-label or reserved bit
+ * is corruption here. The NT reserved byte is ignored: its case flags have no
+ * name to apply to, and KolibriOS sets them.
  */
 static fsimg_status_t
 validate_dot(directory_pass_t *pass, const unsigned char *raw,
@@ -64,7 +69,8 @@ validate_dot(directory_pass_t *pass, const unsigned char *raw,
 	expected = pass->slots == 0 ? pass->self_cluster : pass->parent_cluster;
 	if (bcmp(raw, pass->slots == 0 ? ".          " : "..         ", 11) != 0)
 		return (fsimg_fat_corrupt(error, "FAT directory lacks dot records"));
-	if (raw[11] != 0x10 || fsimg_load_le32(raw + 28) != 0)
+	if ((raw[11] & ~DOT_IGNORED_ATTRIBUTES) != 0x10 ||
+	    fsimg_load_le32(raw + 28) != 0)
 		return (fsimg_fat_corrupt(error, "invalid FAT dot directory record"));
 	cluster = fsimg_load_le16(raw + 26);
 	if (g->variant == 32)

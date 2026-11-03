@@ -95,6 +95,7 @@ static fsimg_status_t image_size(void *, uint64_t *, fsimg_error_t *);
 static void test_variants(void);
 static void check_fixture_listing(fixture_t *, const char *);
 static void test_dot_records_ntres_ignored(unsigned);
+static void test_dot_record_attribute_bits(unsigned);
 static void test_directory_without_dot_records(unsigned);
 static void test_dot_record_clusters_ignored_when_listing(unsigned);
 static void test_misplaced_dot_records_skipped_when_listing(unsigned);
@@ -469,6 +470,77 @@ test_dot_records_ntres_ignored(unsigned variant)
 	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
 	CHECK(report.complete);
 	fixture_close(&f);
+}
+
+static void
+test_dot_record_attribute_bits(unsigned variant)
+{
+	typedef struct {
+		unsigned char attribute;
+		bool valid;
+		const char *why;
+		unsigned slot;
+	} dot_attribute_case_t;
+	static const dot_attribute_case_t cases[] = {
+		{ .attribute = 0x12, .valid = true,
+		    .why = "macOS hidden dots", .slot = 0 },
+		{ .attribute = 0x13, .valid = true,
+		    .why = "read-only and hidden", .slot = 0 },
+		{ .attribute = 0x30, .valid = true,
+		    .why = "archive bit", .slot = 0 },
+		{ .attribute = 0x37, .valid = true,
+		    .why = "every ignorable bit", .slot = 0 },
+		{ .attribute = 0x18, .valid = false,
+		    .why = "volume-label bit", .slot = 0 },
+		{ .attribute = 0x02, .valid = false,
+		    .why = "no directory bit", .slot = 1 },
+		{ .attribute = 0x0f, .valid = false,
+		    .why = "long-name attribute", .slot = 0 },
+		{ .attribute = 0x50, .valid = false,
+		    .why = "reserved bit 0x40", .slot = 1 },
+		{ .attribute = 0x90, .valid = false,
+		    .why = "reserved bit 0x80", .slot = 0 }
+	};
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		const dot_attribute_case_t *c = &cases[i];
+
+		fixture_init(&f, variant);
+		write_bytes(&f, cluster_offset(&f, 7) + c->slot * 32 + 11,
+		    &c->attribute, 1);
+		if (c->valid)
+			write_bytes(&f, cluster_offset(&f, 7) + 32 + 11,
+			    &c->attribute, 1);
+		fixture_open(&f);
+		if (c->valid)
+			check_fixture_listing(&f, c->why);
+
+		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
+		CHECK(status == FSIMG_OK);
+		bzero(&error, sizeof(error));
+		status = fsimg_verify(f.reader, 0, &report, &error);
+		if (status != (c->valid ? FSIMG_OK : FSIMG_ECORRUPT) ||
+		    report.complete != c->valid || (!c->valid &&
+		    strcmp(error.message, "invalid FAT dot directory record") != 0))
+			fprintf(stderr, "FAT%u dot attribute 0x%02x (%s): "
+			    "got %s (%s), complete=%d\n", variant,
+			    c->attribute, c->why, fsimg_status_string(status),
+			    error.message, report.complete);
+		if (c->valid) {
+			CHECK(status == FSIMG_OK);
+			CHECK(report.complete);
+		} else {
+			CHECK(status == FSIMG_ECORRUPT);
+			CHECK(strcmp(error.message,
+			    "invalid FAT dot directory record") == 0);
+			CHECK(!report.complete);
+		}
+		fixture_close(&f);
+	}
 }
 
 static void
@@ -2759,6 +2831,7 @@ main(int argc, char **argv)
 	test_variants();
 	for (unsigned variant = 16; variant <= 32; variant += 16) {
 		test_dot_records_ntres_ignored(variant);
+		test_dot_record_attribute_bits(variant);
 		test_directory_without_dot_records(variant);
 		test_dot_record_clusters_ignored_when_listing(variant);
 		test_misplaced_dot_records_skipped_when_listing(variant);

@@ -104,8 +104,11 @@ misplace them. A dot record directly after a live long-name sequence orphans
 that sequence and is corruption.
 Full verification, like `fsck.fat`, requires nonroot directories to begin with
 dot and dotdot entries with the correct self/parent clusters and no file
-payload, and rejects a dot record anywhere else, including the root. It ignores
-their NT reserved byte, whose case flags have no name to apply to.
+payload, and rejects a dot record anywhere else, including the root. Their
+attribute byte must have the directory bit; the read-only, hidden, system and
+archive bits are ignored, while a volume-label bit, a long-name attribute or a
+reserved bit is corruption. Verification also ignores their NT reserved byte,
+whose case flags have no name to apply to.
 The dotdot entry uses cluster zero when its parent is the root, in every FAT
 variant, including FAT32.
 Volume labels occur only at root and have no allocation. The root is implicit.
