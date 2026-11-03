@@ -8,6 +8,7 @@ require 'find'
 require 'json'
 require 'open3'
 require 'shellwords'
+require 'socket'
 
 module IsoCorpus
   class Error < StandardError; end
@@ -187,6 +188,9 @@ module IsoCorpus
 
   def source_manifest(tree, path) = write_manifest(path, source_rows(tree))
 
+  # Libisofs stores the packed host dev_t in PN, not the host major/minor split.
+  def pn_words(rdev) = { dev_major: rdev >> 32, dev_minor: rdev & 0xffffffff }
+
   def list_view(image:, flags:, base:)
     listing = capture('isoinfo', *flags, '-l', '-i', image, diagnostics: base + '.listing.stderr')
     File.write(base + '.listing', listing)
@@ -309,6 +313,7 @@ module IsoCorpus
       write_manifest(base + '.jsonl', rows.values.sort_by { _1[:path] })
     end
 
+    # Records the skip and returns; this is not Minitest's skip.
     def skip(message)
       puts "skip: #{message}"
       File.open(File.join(@output, 'skips.txt'), 'a') { _1.puts "skip: #{message}" }
@@ -332,8 +337,6 @@ module IsoCorpus
       FileUtils.mkdir_p(File.join(rr, 'directory'))
       File.symlink('file', File.join(rr, 'link'))
       File.mkfifo(File.join(rr, 'fifo'))
-      # Device fixtures must never create host driver endpoints.
-      skip('device files: privileged mknod fixtures omitted')
       24.times { write(tree: rr, path: format('%02d-', _1) + ('n' * 235), content: "long name\n") }
       names = (0...20).map { format('D%02d', _1) }
       (1..names.size).map { names.take(_1) }.each do |ancestors|
@@ -357,6 +360,40 @@ module IsoCorpus
       write(tree: File.join(sources, 'boot'), path: 'bios.img', content: "\0" * 2048)
       write(tree: File.join(sources, 'boot'), path: 'efi.img', content: "\0" * (1440 * 1024))
       sources
+    end
+
+    def device_disc(program:, version:, sources:)
+      tree = File.join(sources, 'devices')
+      dev = File.join(tree, 'dev')
+      FileUtils.mkdir_p(dev)
+      write(tree: tree, path: 'file', content: "device corpus\n")
+      begin
+        # A relative bind avoids the Unix socket address length limit.
+        Dir.chdir(dev) { UNIXServer.new('socket').close }
+      rescue SystemCallError => error
+        skip("xorriso-devices socket: #{error.message}")
+      end
+      # Only stat and map existing nodes; never create host driver endpoints.
+      nodes = { '/dev/null' => '/dev/null' }
+      block = %w[/dev/disk0 /dev/sda /dev/vda /dev/nvme0n1 /dev/ada0 /dev/da0].find do |path|
+        File.lstat(path).blockdev?
+      rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR
+        false
+      end
+      if block
+        nodes[block] = '/dev/block'
+      else
+        skip('xorriso-devices block member: no standard block device could be statted')
+      end
+      words = nodes.to_h { |host, path| [path, pn_words(File.lstat(host).rdev)] }
+      image = File.join(@output, 'xorriso-devices.iso')
+      command = [program, '-no_rc', '-outdev', image, '-map', tree, '/',
+                 *nodes.flat_map { |host, path| ['-map', host, path] }]
+      record_image(name: 'xorriso-devices', tool: 'xorriso', version: version,
+                   command: command, tree: tree, direct: true)
+      write_manifest(image.delete_suffix('.iso') + '.devices.jsonl',
+                     words.map { |path, fields| { path: path, **fields } })
+      words
     end
 
     def record_image(name:, tool:, version:, command:, tree:, direct: false)
@@ -452,6 +489,7 @@ module IsoCorpus
               record_image(name: item.name, tool: tool, version: version,
                            command: [program] + item.options, tree: item.tree)
             end
+            device_disc(program: program, version: version, sources: sources) if tool == 'xorriso'
           end
         rescue Error => error
           skip("#{name}: #{error.message}")

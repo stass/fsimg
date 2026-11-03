@@ -11,10 +11,13 @@ static fsimg_status_t iso_probe(const unsigned char *, size_t, uint64_t, bool,
 
 /* One public name for every view and level; the view is a read setting.
  * The reader presents the Rock Ridge view, with symbolic links, FIFOs,
- * owner, mode and four times under names of up to 1024 bytes, and the
- * Joliet and primary hierarchies: files and directories with their
- * recording dates and hidden attribute. Multi-section files reach the
- * volume's size.
+ * devices and sockets, owner, mode, device numbers and four times under
+ * names of up to 1024 bytes, and the Joliet and primary hierarchies: files
+ * and directories with their recording dates and hidden attribute.
+ * Multi-section files reach the volume's size. Devices and sockets are
+ * read-only kinds (specs/design-device-nodes.md): the catalog never holds
+ * one, so the writer never meets them, and no writer stores a device
+ * number, so metadata_fields does not list it.
  */
 static const fsimg_format_variant_t iso_variants[] = {
 	{
@@ -23,7 +26,8 @@ static const fsimg_format_variant_t iso_variants[] = {
 			.profile = "rockridge/joliet/primary",
 			.entry_kinds = FSIMG_ENTRY_FILE |
 			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
-			    FSIMG_ENTRY_FIFO,
+			    FSIMG_ENTRY_FIFO | FSIMG_ENTRY_CHAR_DEVICE |
+			    FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET,
 			.metadata_fields = FSIMG_META_CREATED |
 			    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |
 			    FSIMG_META_CHANGED | FSIMG_META_ATTRIBUTES |

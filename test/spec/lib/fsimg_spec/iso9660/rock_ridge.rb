@@ -11,7 +11,8 @@ module FsimgSpec
     module RockRidge
       Target = Data.define(:bytes, :length, :framed, :supported, :components)
       Component = Data.define(:flags, :bytes)
-      KINDS = { 0o100000 => "file", 0o040000 => "directory", 0o120000 => "symlink", 0o010000 => "fifo" }.freeze
+      KINDS = { 0o100000 => "file", 0o040000 => "directory", 0o120000 => "symlink", 0o010000 => "fifo",
+                0o020000 => "char_device", 0o060000 => "block_device", 0o140000 => "socket" }.freeze
       module_function
 
       def extension_shape?(raw) = raw.bytesize >= 8 &&

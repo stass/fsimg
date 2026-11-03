@@ -425,8 +425,14 @@ iso_payload_decode(const fsimg_iso9660_reader_t *iso,
 	    (out->relocated && iso->view != FSIMG_ISO_VIEW_ROCKRIDGE))
 		return (iso_corrupt(error, "invalid prepared ISO 9660 payload"));
 	switch (out->kind) {
+	/* Only the Rock Ridge view yields these kinds; in another view
+	 * the record is a file, so such a payload is invalid.
+	 */
 	case FSIMG_ENTRY_SYMLINK:
 	case FSIMG_ENTRY_FIFO:
+	case FSIMG_ENTRY_CHAR_DEVICE:
+	case FSIMG_ENTRY_BLOCK_DEVICE:
+	case FSIMG_ENTRY_SOCKET:
 		if (iso->view != FSIMG_ISO_VIEW_ROCKRIDGE)
 			break;
 		/* FALLTHROUGH */
@@ -665,8 +671,8 @@ run_reread(fsimg_reader_t *reader, const iso_payload_t *payload,
  * scratch, which
  * preparation wrote; whatever it names, every read stays within the
  * volume. A regular file's sections become the content index, and a
- * symbolic link's decoded target its content; a directory or FIFO has no
- * content.
+ * symbolic link's decoded target its content; a directory, FIFO, device
+ * or socket has no content, and a device carries its PN number.
  */
 fsimg_status_t
 iso_replay(fsimg_reader_t *reader, const char *name,

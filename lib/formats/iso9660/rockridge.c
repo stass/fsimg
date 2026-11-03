@@ -11,13 +11,13 @@
 /*
  * Rock Ridge entries (specs/design-iso9660.md#rock-ridge). iso_rr_decode()
  * is the one decoder of a record's SUSP stream; it fills an iso_rr_t,
- * which owns what it decodes: PX owner, mode and file type; TF times; the
- * name its NM entries assemble; the link target its SL entries assemble;
- * and the CL, PL and RE relocation pointers. Every length, version and
- * repetition is checked as the entry table states. rr_kind() then runs
- * the kind checks against PX and the record's directory flag. What the
- * profile refuses (SF, ZF, a volume-root or host link component, a name
- * or target over 1024 bytes, a device, a socket, an unknown type) is not
+ * which owns what it decodes: PX owner, mode and file type; PN device
+ * number; TF times; the name its NM entries assemble; the link target its
+ * SL entries assemble; and the CL, PL and RE relocation pointers. Every
+ * length, version and repetition is checked as the entry table states.
+ * rr_kind() then runs the kind checks against PX and the record's
+ * directory flag. What the profile refuses (SF, ZF, a volume-root or host link component, a name
+ * or target over 1024 bytes, a type outside the seven POSIX types) is not
  * returned from here: it is noted in iso_rr_t.refusal, the record is left
  * without a kind, and the caller that finishes the record, after its own
  * checks of the record in context, reports it through iso_rr_refusal().
@@ -366,11 +366,16 @@ pointer_decode(const iso_entry_t *entry, uint32_t bit, uint32_t *block,
 	return (status);
 }
 
-/* PN: a device number in two both-order halves, checked and not used. */
+/* PN: a device number in two both-order words, high then low, reported as
+ * stored: the high word is dev_major and the low word dev_minor. A system
+ * with a 32-bit dev_t stores zero and its packed number; that reads as
+ * major 0 and the packed value, since the packing is not in the image.
+ * rr_kind() admits PN on exactly the devices, so the field set here never
+ * reaches another kind.
+ */
 static fsimg_status_t
 pn_decode(const iso_entry_t *entry, iso_rr_t *rr, fsimg_error_t *error)
 {
-	uint32_t half;
 	fsimg_status_t status;
 
 	if (entry->length != PN_LENGTH)
@@ -378,9 +383,13 @@ pn_decode(const iso_entry_t *entry, iso_rr_t *rr, fsimg_error_t *error)
 		    "Rock Ridge PN entry has an invalid length"));
 	status = single_note(rr, RR_PN, error);
 	if (status == FSIMG_OK)
-		status = iso_u32both(entry->data, &half, error);
+		status = iso_u32both(entry->data, &rr->metadata.dev_major,
+		    error);
 	if (status == FSIMG_OK)
-		status = iso_u32both(entry->data + 8, &half, error);
+		status = iso_u32both(entry->data + 8, &rr->metadata.dev_minor,
+		    error);
+	if (status == FSIMG_OK)
+		rr->metadata.valid |= FSIMG_META_DEVICE;
 	return (status);
 }
 
@@ -453,11 +462,12 @@ entry_decode(const iso_entry_t *entry, bool dot, iso_rr_t *rr,
  * on the PX type or, without PX, the type the directory flag implies: a
  * placeholder carrying CL is a directory and carries no RE; otherwise the
  * type is a directory exactly when the flag is set, RE marks only a
- * directory, SL belongs to a symbolic link and PN to a device. A device,
- * a socket and a type outside the seven POSIX types are noted as
- * refusals. A record with any refusal is then left without a kind (0, no
- * fsimg_entry_kind_t), so an entry whose refusal went unreported would
- * fail admission, its payload decoding as invalid, rather than be admitted.
+ * directory, SL belongs to a symbolic link, and PN to exactly the
+ * character and block devices, which RRIP requires to carry it. A type
+ * outside the seven POSIX types is noted as a refusal. A record with any
+ * refusal is then left without a kind (0, no fsimg_entry_kind_t), so an
+ * entry whose refusal went unreported would fail admission, its payload
+ * decoding as invalid, rather than be admitted.
  */
 static fsimg_status_t
 rr_kind(iso_rr_t *rr, const iso_record_t *record, fsimg_error_t *error)
@@ -485,10 +495,10 @@ rr_kind(iso_rr_t *rr, const iso_record_t *record, fsimg_error_t *error)
 	if (((rr->entries & RR_SL) != 0) != (type == RR_TYPE_LINK))
 		return (iso_corrupt(error,
 		    "Rock Ridge link target and file type disagree"));
-	if ((rr->entries & RR_PN) != 0 && type != RR_TYPE_CHARACTER &&
-	    type != RR_TYPE_BLOCK)
+	if (((rr->entries & RR_PN) != 0) !=
+	    (type == RR_TYPE_CHARACTER || type == RR_TYPE_BLOCK))
 		return (iso_corrupt(error,
-		    "Rock Ridge PN entry on an entry that is not a device"));
+		    "Rock Ridge device number and file type disagree"));
 
 	switch (type) {
 	case RR_TYPE_FILE:
@@ -503,9 +513,13 @@ rr_kind(iso_rr_t *rr, const iso_record_t *record, fsimg_error_t *error)
 		rr->kind = FSIMG_ENTRY_FIFO;
 		break;
 	case RR_TYPE_CHARACTER:
+		rr->kind = FSIMG_ENTRY_CHAR_DEVICE;
+		break;
 	case RR_TYPE_BLOCK:
+		rr->kind = FSIMG_ENTRY_BLOCK_DEVICE;
+		break;
 	case RR_TYPE_SOCKET:
-		rr_refuse(rr, "Rock Ridge devices and sockets are unsupported");
+		rr->kind = FSIMG_ENTRY_SOCKET;
 		break;
 	default:
 		rr_refuse(rr, "Rock Ridge file type is unsupported");

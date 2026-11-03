@@ -127,7 +127,7 @@ module FsimgSpec
         rule(id: "rr.sl.profile", scope: "directories", anchor: "symbolic-links", category: "profile", status: "FSIMG_EUNSUPPORTED",
              predicate: ->(m, _) { link_records(m).all? { target = RockRidge.target(_1); !target.framed || !RockRidge.components_valid?(target) || (target.length <= 1024 && target.supported) } }),
         rule(id: "extract.safe_kinds", scope: "destination", anchor: "kinds-and-metadata", category: "profile", status: "FSIMG_EUNSUPPORTED",
-             predicate: ->(m, _) { FsimgSpec.derive(m.tree) { |tree| tree.none? { %w[symlink fifo].include?(_1.type) } } }),
+             predicate: ->(m, _) { FsimgSpec.derive(m.tree) { |tree| tree.all? { %w[file directory].include?(_1.type) } } }),
         rule(id: "extract.omitted_names", scope: "destination", anchor: "displayed-names-and-keys", category: "profile", status: "FSIMG_EUNSUPPORTED",
              predicate: ->(m, _) { m.omitted_names.empty? }),
         rule(id: "rr.unsupported", scope: "directories", anchor: "entries", status: "FSIMG_EUNSUPPORTED", category: "profile",
@@ -612,8 +612,8 @@ module FsimgSpec
         kind = RockRidge.kind(record)
         signatures = record.entries.map { _1.fields.signature }
         px = record.entries.find { _1.fields.signature == "PX" && [36, 44].include?(_1.raw.bytesize) }
-        device = px && [0o020000, 0o060000].include?(px.raw.byteslice(4, 4).unpack1("V") & 0o170000)
-        return false if signatures.include?("PN") && !device
+        device = %w[char_device block_device].include?(kind)
+        return false if signatures.include?("PN") != device
 
         directory = record.fields.flags & 2 != 0
         child = signatures.include?("CL")
@@ -626,7 +626,7 @@ module FsimgSpec
         return false if signatures.include?("RE") && !directory
         return false if child && (kind != "directory" || signatures.include?("RE"))
         return false if kind == "directory" && !directory && !child
-        return false if %w[file symlink fifo].include?(kind) && directory
+        return false if %w[file symlink fifo char_device block_device socket].include?(kind) && directory
         return false if kind == "symlink" && !signatures.include?("SL")
         return false if kind != "symlink" && signatures.include?("SL")
 

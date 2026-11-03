@@ -249,8 +249,11 @@ Each passing case has a seeded failure that proves the check ran.
   reads both at `4294967295`; a device without `PN` and a `PN` on a file
   are `FSIMG_ECORRUPT`; a `PN` of another length is `FSIMG_ECORRUPT`; the
   socket has no device field; `W` passes on the valid image and fails on
-  each mutation. The oracle corpus adds a disc with a `dev` directory,
-  compared with `xorriso -find` output for kind and device number.
+  each mutation. The oracle corpus adds an xorriso-built disc with a
+  `dev` directory mapping existing host nodes by `stat` alone and a
+  socket from its private source tree, compared with the independent
+  listing for kind and with the mapped node's host `rdev`, as libisofs
+  stores it in `PN` (high and low 32 bits), for the device number.
 * The UDF, HFS Plus and APFS synthesizers, when those readers exist, add
   the equivalent witnesses from each table row and mutations: the attribute
   absent, on a file and misframed; a non-empty fork on a device; the

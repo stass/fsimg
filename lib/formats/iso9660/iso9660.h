@@ -316,15 +316,16 @@ typedef struct iso_susp {
 
 /* The Rock Ridge entries of one record's stream (rockridge.c). entries
  * holds an RR_ bit for each kind of entry seen. type is the PX file type
- * bits and metadata the PX owner and mode and the TF times, each with its
- * valid bit. name holds name_length bytes and a NUL, and target holds
- * target_length bytes, both assembled only for a record that is not a dot
- * record. child and parent are the CL and PL blocks. refusal names what
- * the profile refuses (always FSIMG_EUNSUPPORTED); decoding does not
- * report it, iso_rr_refusal() does once the caller's own checks have
- * passed. A SUSP profile limit is the exception: it ends decoding and is
- * reported at once. kind is the entry's kind, valid only when decoding succeeded
- * and nothing was refused; a refused record has kind 0, which is no kind.
+ * bits and metadata the PX owner and mode, the PN device number and the
+ * TF times, each with its valid bit. name holds name_length bytes and a
+ * NUL, and target holds target_length bytes, both assembled only for a
+ * record that is not a dot record. child and parent are the CL and PL
+ * blocks. refusal names what the profile refuses (always
+ * FSIMG_EUNSUPPORTED); decoding does not report it, iso_rr_refusal() does
+ * once the caller's own checks have passed. A SUSP profile limit is the
+ * exception: it ends decoding and is reported at once. kind is the entry's
+ * kind, valid only when decoding succeeded and nothing was refused; a
+ * refused record has kind 0, which is no kind.
  */
 #define RR_PX	0x001u
 #define RR_PN	0x002u

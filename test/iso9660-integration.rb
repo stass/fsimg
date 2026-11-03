@@ -125,7 +125,12 @@ module IsoIntegration
   end
 
   def kind(text)
-    { "-" => "file", "d" => "directory", "l" => "symlink", "p" => "fifo", "f" => "fifo" }.fetch(text[0])
+    { "-" => "file", "d" => "directory", "l" => "symlink", "p" => "fifo", "f" => "fifo",
+      "c" => "char_device", "b" => "block_device", "s" => "socket" }.fetch(text[0])
+  end
+
+  def manifest_kind(type)
+    { "link" => "symlink", "characterSpecial" => "char_device", "blockSpecial" => "block_device" }.fetch(type, type)
   end
 
   def listing_row(mode:, uid:, gid:, size:, date:, member:)
@@ -141,7 +146,7 @@ module IsoIntegration
     flags = { "rockridge" => ["-R"], "joliet" => ["-J"], "primary" => [] }.fetch(view)
     sections = command(program, *flags, "-j", "utf-8", "-l", "-i", image).lines.slice_before { header_pattern.match?(_1) }
     row_pattern = Regexp.new(
-      '^\s*(?:\d+\s+)?([dlfp-][rwxstST-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+' \
+      '^\s*(?:\d+\s+)?([bcdlfps-][rwxstST-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+' \
       '(\w+\s+\d+\s+\d{4})\s+\[.*?\](.*)$'
     )
     pairs = sections.flat_map do |section|
@@ -200,12 +205,13 @@ module IsoIntegration
     # libarchive selects Joliet when its ISO reader has Rock Ridge disabled.
     pairs = command(program, "-tv", *options, "--numeric-owner", "-f", image).lines.filter_map do |line|
       row = line.match(Regexp.new(
-        '^([dlp-][rwxstST-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+' \
+        '^([bcdlps-][rwxstST-]{9})\s+\d+\s+(\d+)\s+(\d+)\s+(\d+(?:,\s*\d+)?)\s+' \
         '(\w+\s+\d+\s+(?:\d{2}:\d{2}|\d{4}))\s(.*)\n$'
       ))
       raise Error, "unparsed bsdtar row: #{line.inspect}" unless row
 
-      name, values = listing_row(mode: row[1], uid: row[2], gid: row[3], size: row[4],
+      size = %w[b c].include?(row[1][0]) ? "0" : row[4]
+      name, values = listing_row(mode: row[1], uid: row[2], gid: row[3], size: size,
                                 date: row[5], member: bsdtar_name(row[6]))
       next if name == "." || name == "./"
 
@@ -267,6 +273,7 @@ module IsoIntegration
       target = row.fetch("kind") == "symlink" ? command(binary, "x", "-O", *options, row.fetch("path")) : nil
       [row.fetch("path"), { kind: row.fetch("kind"), size: Integer(row.fetch("size_bytes"), 10),
                              uid: row.fetch("uid"), gid: row.fetch("gid"), mode: row.fetch("mode"),
+                             dev_major: row.fetch("dev_major"), dev_minor: row.fetch("dev_minor"),
                              modified: Integer(row.fetch("modified").fetch("seconds"), 10),
                              offset_minutes: row.fetch("modified").fetch("offset_minutes"), target: target }]
     end)
@@ -274,7 +281,7 @@ module IsoIntegration
 
   def compare_verbose(binary:, options:, actual:)
     pairs = command(binary, "t", "-v", *options).lines.map do |line|
-      row = line.match(/^([dlp-][rwxstST?-]{9})\s+(\d+|-)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+(".*")[\/@|*]?\n$/)
+      row = line.match(/^([bcdlps-][rwxstST?-]{9})\s+(\d+(?:,\s*\d+)?|-)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+(".*")[\/@|*=]?\n$/)
       raise Error, "unparsed fsimg verbose row: #{line.inspect}" unless row
 
       [JSON.parse(row[4]), { kind: kind(row[1]), mode: row[1].end_with?("?????????") ? nil : mode_bits(row[1]), date: row[3], size: row[2] }]
@@ -323,10 +330,25 @@ module IsoIntegration
     rows.each do |row|
       path = row.fetch("path")
       entry = actual.fetch(path) { raise Error, "manifest path missing: #{path.inspect}" }
-      expected_kind = row.fetch("type") == "link" ? "symlink" : row.fetch("type")
+      expected_kind = manifest_kind(row.fetch("type"))
       field_equal(path: path, field: "manifest kind", expected: expected_kind, actual: entry.fetch(:kind))
       if row.fetch("type") == "link"
         field_equal(path: path, field: "manifest target", expected: row.fetch("target"), actual: entry.fetch(:target))
+      end
+    end
+    devices = actual.select { |_path, entry| %w[char_device block_device].include?(entry.fetch(:kind)) }
+    unless devices.empty?
+      device_path = image.delete_suffix(".iso") + ".devices.jsonl"
+      raise Error, "device manifest absent" unless File.file?(device_path)
+
+      device_rows = records(File.read(device_path))
+      expected_devices = unique_pairs(device_rows.map { [_1.fetch("path"), _1] })
+      same_paths(expected: expected_devices, actual: devices, oracle: "device manifest")
+      expected_devices.each do |path, row|
+        %i[dev_major dev_minor].each do |field|
+          field_equal(path: path, field: "device manifest #{field}",
+                      expected: row.fetch(field.to_s), actual: devices.fetch(path).fetch(field))
+        end
       end
     end
     expected_files.each do |path, row|
@@ -343,7 +365,7 @@ module IsoIntegration
 
     rows = records(File.read(manifest_path))
     expected = unique_pairs(rows.map do |row|
-      kind = row.fetch("type") == "link" ? "symlink" : row.fetch("type")
+      kind = manifest_kind(row.fetch("type"))
       [row.fetch("path"), { kind: kind, size: kind == "file" ? row.fetch("size") : 0,
                             sha256: row.fetch("sha256") }]
     end)
@@ -356,20 +378,18 @@ module IsoIntegration
     end.uniq.to_h do |path|
       [path, { kind: "directory", size: 0, sha256: nil }]
     end
-    skipped = expected.select { |_path, entry| %w[symlink fifo].include?(entry.fetch(:kind)) }
+    skipped = expected.reject { |_path, entry| %w[file directory].include?(entry.fetch(:kind)) }
     expected = ancestors.merge(expected).reject { |path, _entry| skipped.key?(path) }
     supported = actual.select { |_path, entry| %w[file directory].include?(entry.fetch(:kind)) }
     Dir.mktmpdir("rr-extraction-", Dir.pwd) do |destination|
-      _output, diagnostic, status = Open3.capture3(
-        { "LC_ALL" => "C", "TZ" => "UTC" }, binary, "x", *options, "-E", "-k", "-v", "-C", destination
+      output, diagnostic, status = Open3.capture3(
+        { "LC_ALL" => "C", "TZ" => "UTC" }, binary, "x", *options, "-E", "-k", "--json", "-C", destination
       )
       raise Error, "extraction failed (#{status.exitstatus}): #{diagnostic.strip}" unless status.success?
 
-      skipped_names = diagnostic.lines.filter_map do |line|
-        row = line.match(/\A(".*")[@|]\n\z/)
-        JSON.parse(row[1]) if row
-      end
-      field_equal(path: image, field: "skipped paths", expected: skipped.keys.sort, actual: skipped_names.sort)
+      summary = records(output).last
+      field_equal(path: image, field: "skipped count", expected: skipped.size,
+                  actual: Integer(summary.fetch("skipped_entries"), 10))
       observed = extracted(destination)
       same_paths(expected: expected, actual: observed, oracle: "extraction manifest")
       same_paths(expected: supported, actual: observed, oracle: "extraction listing")
@@ -531,6 +551,7 @@ module IsoIntegration
     failures = %w[auto primary].filter_map do |view|
       selection = view == "auto" ? [] : ["-o", "view=primary"]
       _output, diagnostic, status = Open3.capture3(binary, "W", *selection, "-f", image)
+      note = diagnostic.delete_prefix("fsimg: warning: OS sandbox unavailable; continuing without confinement\n")
       if parent_rule
         unless status.exitstatus == 1 && diagnostic.include?("directory's parent record does not name its parent")
           "W #{view}: expected Joliet parent-rule failure; exit=#{status.exitstatus}: #{diagnostic.strip}"
@@ -538,7 +559,7 @@ module IsoIntegration
       elsif !status.success?
         "W #{view}: expected success; exit=#{status.exitstatus}: #{diagnostic.strip}"
       elsif File.basename(image).include?("isohybrid") &&
-          !diagnostic.match?(/\Afsimg: note: the disk also carries a (gpt|mbr) partition table; use -F \1 to read its partitions\n\z/)
+          !note.match?(/\Afsimg: note: the disk also carries a (gpt|mbr) partition table; use -F \1 to read its partitions\n\z/)
         "W #{view}: expected one hybrid partition-table note: #{diagnostic.inspect}"
       end
     end

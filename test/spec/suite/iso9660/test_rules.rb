@@ -110,6 +110,29 @@ class Iso9660RulesTest < Minitest::Test
     end
   end
 
+  def test_device_witnesses_classify_kinds_and_require_pn_exactly_on_devices
+    with_cases do |cases, _registry|
+      Iso::Witnesses.device_regressions.each do |witness|
+        classified = cases.call(witness)
+        assert_nil classified.defect, witness.id
+        violations = classified.kase.classification.without_destination.violations
+        if witness.intended
+          assert_includes violations.map { _1.rule.id }, witness.intended, witness.id
+          assert_equal [FsimgSpec::Status.parse("FSIMG_ECORRUPT")],
+            classified.kase.expected.fetch("ls").statuses, witness.id
+        else
+          assert_empty violations, witness.id
+          entry = classified.model.tree.fetch(0)
+          assert_equal({"char" => "char_device", "block" => "block_device", "socket" => "socket"}
+            .fetch(witness.id.split(".").last), entry.type, witness.id)
+          assert_nil entry.size, witness.id
+          assert_nil entry.sha256, witness.id
+          assert_includes classified.kase.classification.rule_ids, "iso9660.extract.safe_kinds", witness.id
+        end
+      end
+    end
+  end
+
   def test_descriptor_recipe_preserves_empty_text_and_signed_seconds
     settings = {application: "", publisher: "_PUB", created: -62_135_596_800, modified: 253_402_300_799,
       expires: 0, effective: 1}

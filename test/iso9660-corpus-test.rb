@@ -7,8 +7,69 @@ require 'tmpdir'
 require 'rbconfig'
 require_relative 'iso9660-corpus'
 require_relative 'iso9660-evidence'
+require_relative 'iso9660-integration'
 
 class IsoCorpusTest < Minitest::Test
+  def test_device_manifest_absence_raises_integration_error
+    Dir.mktmpdir('iso-devices-') do |directory|
+      image = File.join(directory, 'devices.iso')
+      File.write(image.delete_suffix('.iso') + '.rockridge.jsonl',
+                 JSON.generate({ path: '/dev/null', type: 'characterSpecial' }) + "\n")
+      error = assert_raises(IsoIntegration::Error) do
+        IsoIntegration.compare_rr_manifest(binary: 'unused', options: [], image: image,
+                                           actual: { '/dev/null' => { kind: 'char_device' } })
+      end
+      assert_equal 'device manifest absent', error.message
+    end
+  end
+
+  def test_pn_words_preserve_both_halves_of_the_packed_device_number
+    assert_equal({ dev_major: 0, dev_minor: 0x03000002 }, IsoCorpus.pn_words(0x03000002))
+    assert_equal({ dev_major: 0x12345678, dev_minor: 0x9abcdef0 },
+                 IsoCorpus.pn_words(0x123456789abcdef0))
+    assert_equal({ dev_major: 0xffffffff, dev_minor: 0xffffffff },
+                 IsoCorpus.pn_words(0xffffffffffffffff))
+  end
+
+  def test_xorriso_device_disc_lists_device_words_and_extracts_only_ordinary_entries
+    program = IsoCorpus.executable('xorriso')
+    skip('xorriso and isoinfo required for device corpus') unless program && IsoCorpus.executable('isoinfo')
+    binary = File.expand_path('fsimg')
+    skip('run in the build directory after make to compare the device corpus with fsimg') unless File.executable?(binary)
+
+    Dir.mktmpdir('iso-devices-') do |directory|
+      corpus = IsoCorpus::Corpus.new(directory)
+      words = corpus.device_disc(program: program, version: 'test', sources: File.join(directory, 'sources'))
+      image = File.join(directory, 'xorriso-devices.iso')
+      oracle = File.readlines(image.delete_suffix('.iso') + '.rockridge.jsonl').map { JSON.parse(_1) }
+      kinds = { 'file' => 'file', 'directory' => 'directory', 'socket' => 'socket',
+                'characterSpecial' => 'char_device', 'blockSpecial' => 'block_device' }
+      expected = oracle.to_h { [_1.fetch('path'), kinds.fetch(_1.fetch('type'))] }
+      assert_equal 'char_device', expected.fetch('/dev/null')
+      assert_equal 'block_device', expected.fetch('/dev/block') if words.key?('/dev/block')
+      assert_equal 'socket', expected.fetch('/dev/socket') if File.socket?(File.join(directory, 'sources/devices/dev/socket'))
+      assert_equal 'file', expected.fetch('/file')
+      entries = IsoCorpus.capture(binary, 't', '--json', '-f', image).lines.map { JSON.parse(_1) }
+        .select { _1.fetch('type') == 'entry' }.to_h { [_1.fetch('path'), _1] }
+      assert_equal expected, entries.transform_values { _1.fetch('kind') }
+      words.each do |path, fields|
+        fields.each { |field, value| assert_equal value, entries.fetch(path).fetch(field.to_s), "#{path} #{field}" }
+      end
+
+      destination = File.join(directory, 'extract')
+      Dir.mkdir(destination)
+      output = IsoCorpus.capture(binary, 'x', '-k', '--json', '-f', image, '-C', destination)
+      summary = output.lines.map { JSON.parse(_1) }.last
+      assert_equal expected.values.count { %w[char_device block_device socket].include?(_1) },
+                   Integer(summary.fetch('skipped_entries'), 10)
+      extracted = IsoCorpus.source_rows(destination)
+      assert extracted.all? { %w[directory file].include?(_1.fetch(:type)) }
+      files = extracted.select { _1.fetch(:type) == 'file' }
+      assert_equal 1, files.size
+      assert_equal Digest::SHA256.hexdigest("device corpus\n"), files.first.fetch(:sha256)
+    end
+  end
+
   def test_cli_gives_children_private_working_and_temporary_directories_without_cores
     Dir.mktmpdir('iso-corpus-') do |directory|
       destination = File.join(directory, 'output')
@@ -367,6 +428,9 @@ class IsoCorpusTest < Minitest::Test
       Directory listing of /
               30 drwxr-xr-x   2  501   20       2048 Nov  1 2026 [     30 02] directory
       frw-r--r--   1  501   20          0 Nov  1 2026 [     32 00] fifo
+      crw-rw-rw-   1  501   20          0 Nov  1 2026 [     32 00] null
+      brw-r-----   1  501   20          0 Nov  1 2026 [     32 00] block
+      srwxr-xr-x   1  501   20          0 Nov  1 2026 [     32 00] socket
       lrwxr-xr-x   1  501   20          0 Nov  1 2026 [     32 00] link -> file
       -rw-r--r--   1  501   20       2048 Nov  1 2026 [     32 80] BIG.BIN;1
       -rw-r--r--   1  501   20          4 Nov  1 2026 [     33 00] BIG.BIN;1
@@ -374,6 +438,9 @@ class IsoCorpusTest < Minitest::Test
     rows = IsoCorpus.decode_listing(listing)
     assert_equal 'directory', rows.fetch('/directory')[:type]
     assert_equal 'fifo', rows.fetch('/fifo')[:type]
+    assert_equal 'characterSpecial', rows.fetch('/null')[:type]
+    assert_equal 'blockSpecial', rows.fetch('/block')[:type]
+    assert_equal 'socket', rows.fetch('/socket')[:type]
     assert_equal 4, rows.fetch('/link')[:size]
     assert_equal 'file', rows.fetch('/link')[:target]
     assert_equal 2052, rows.fetch('/BIG.BIN;1')[:size]

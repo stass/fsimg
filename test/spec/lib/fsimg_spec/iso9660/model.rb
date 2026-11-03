@@ -434,8 +434,8 @@ module FsimgSpec
               target = RockRidge.target(record)
               tree << WalkedEntry.new(path: member.freeze, type: "symlink", size: target.length,
                                      sha256: Digest::SHA256.hexdigest(target.bytes))
-            elsif hierarchy.rockridge && RockRidge.kind(record) == "fifo"
-              tree << WalkedEntry.new(path: member.freeze, type: "fifo", size: nil, sha256: nil)
+            elsif hierarchy.rockridge && %w[fifo char_device block_device socket].include?(RockRidge.kind(record))
+              tree << WalkedEntry.new(path: member.freeze, type: RockRidge.kind(record), size: nil, sha256: nil)
             else
               size = run.sum { _1.fields.data_bytes_le }
               digest = digest(run)

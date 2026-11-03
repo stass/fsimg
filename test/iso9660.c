@@ -2547,10 +2547,11 @@ test_rr_kinds_and_singletons(void)
 		{ "PX symlink", 0120777, 36, FSIMG_ENTRY_SYMLINK,
 		    "a", 1, false },
 		{ "PX FIFO", 0010600, 44, FSIMG_ENTRY_FIFO, NULL, 0, false },
-		{ "PX character device refused", 0020600, 36, 0, NULL, 0,
-		    true },
-		{ "PX block device refused", 0060600, 44, 0, NULL, 0, true },
-		{ "PX socket refused", 0140600, 36, 0, NULL, 0, false },
+		{ "PX character device", 0020600, 36, FSIMG_ENTRY_CHAR_DEVICE,
+		    NULL, 0, true },
+		{ "PX block device", 0060600, 44, FSIMG_ENTRY_BLOCK_DEVICE,
+		    NULL, 0, true },
+		{ "PX socket", 0140600, 36, FSIMG_ENTRY_SOCKET, NULL, 0, false },
 		{ "PX unknown type refused", 0030600, 44, 0, NULL, 0, false }
 	};
 	static const struct {
@@ -2562,8 +2563,7 @@ test_rr_kinds_and_singletons(void)
 		{ "duplicate TF", "TF", 5, 0, 0, FSIMG_OK },
 		{ "duplicate PL", "PL", 12, 0, 0, FSIMG_OK },
 		{ "duplicate RE on directory", "RE", 4, 0040755, 2, FSIMG_OK },
-		{ "duplicate PN on device", "PN", 20, 0020600, 0,
-		    FSIMG_EUNSUPPORTED }
+		{ "duplicate PN on device", "PN", 20, 0020600, 0, FSIMG_OK }
 	};
 	static const struct {
 		const char *label, *extra;
@@ -2592,6 +2592,8 @@ test_rr_kinds_and_singletons(void)
 			susp_entry(&area, "PN", 20);
 		image = rr_image(&area,
 		    kinds[i].kind == FSIMG_ENTRY_DIRECTORY ? 2 : 0);
+		if (kinds[i].device || kinds[i].kind == FSIMG_ENTRY_SOCKET)
+			put32(image.bytes + ROOT * BLOCK + RR_CHILD + DR_SIZE, 0);
 		if (kinds[i].kind == FSIMG_ENTRY_DIRECTORY)
 			rr_child_directory(&image);
 		if (kinds[i].kind != 0) {
@@ -2665,6 +2667,202 @@ test_rr_kinds_and_singletons(void)
 		image = rr_image(&area, 0);
 		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
 		    invalid[i].label);
+		free(image.bytes);
+	}
+}
+
+/* One ordered directory shared with the CLI tests. Inline system-use data
+ * keeps the PN mutations independent of continuation framing.
+ */
+static image_t
+rr_devices_image(void)
+{
+	static const struct {
+		const char *name;
+		unsigned mode, major, minor;
+	} rows[] = {
+		{ "A.CHAR;1", 0020640, 4, 2 },
+		{ "B.BLOCK;1", 0060640, 0, 0x0402 },
+		{ "C.SOCKET;1", 0140640, 0, 0 },
+		{ "D.TXT;1", 0100640, 0, 0 },
+		{ "E.TXT;1", 0100640, 0, 0 }
+	};
+	static const unsigned char date[] = { 70, 1, 1, 0, 0, 1, 0 };
+	susp_area_t area = {0};
+	image_t image = rr_image(&area, 0);
+	unsigned char *root = image.bytes + ROOT * BLOCK, *p;
+	size_t offset = RR_CHILD, joliet_offset = DOT_PAIR_BYTES, length;
+
+	joliet_add(&image);
+	verify_table_root(&image, 17, JOLIET_ROOT, 90, 91);
+	bzero(root + offset, BLOCK - offset);
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		uint16_t units[16];
+		size_t name_length = strlen(rows[i].name);
+
+		CHECK(name_length <= sizeof(units) / sizeof(units[0]));
+		for (unsigned n = 0; n < name_length; n++)
+			units[n] = (unsigned char)rows[i].name[n];
+		joliet_offset += joliet_record(image.bytes + JOLIET_ROOT * BLOCK +
+		    joliet_offset, units, name_length, DATA, i < 3 ? 0 : 5, 0);
+		bzero(&area, sizeof(area));
+		susp_px(&area, rows[i].mode, PX_BYTES);
+		if (i < 2) {
+			p = susp_entry(&area, "PN", 20);
+			put32(p + 4, rows[i].major);
+			put32(p + 12, rows[i].minor);
+		}
+		p = susp_entry(&area, "TF", 33);
+		p[4] = 15;
+		for (unsigned t = 0; t < 4; t++)
+			bcopy(date, p + 5 + 7 * t, sizeof(date));
+		length = record(root + offset, rows[i].name,
+		    strlen(rows[i].name), DATA, i < 3 ? 0 : 5, 0);
+		bcopy(area.bytes, root + offset + length, area.length);
+		root[offset] += area.length + area.length % 2;
+		offset += root[offset];
+	}
+	return (image);
+}
+
+static void
+test_rr_devices(void)
+{
+	static const fsimg_entry_kind_t kinds[] = {
+		FSIMG_ENTRY_CHAR_DEVICE, FSIMG_ENTRY_BLOCK_DEVICE,
+		FSIMG_ENTRY_SOCKET, FSIMG_ENTRY_FILE, FSIMG_ENTRY_FILE
+	};
+	static const char *paths[] = {
+		"/A.CHAR", "/B.BLOCK", "/C.SOCKET", "/D.TXT", "/E.TXT"
+	};
+	image_t image = rr_devices_image();
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_verify_report_t report;
+	fsimg_status_t status;
+	unsigned char buffer[5];
+	size_t count;
+
+	fixture_new(&f, &image, NULL);
+	status = open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE);
+	rr_status_equal(status, FSIMG_OK, "device directory open");
+	for (unsigned i = 0; status == FSIMG_OK && i < 5; i++) {
+		status = fsimg_reader_next(f.reader, &entry, NULL);
+		rr_status_equal(status, FSIMG_OK, paths[i]);
+		if (status != FSIMG_OK)
+			break;
+		rr_equal(strcmp(entry->path, paths[i]), 0, paths[i]);
+		rr_equal(entry->kind, kinds[i], paths[i]);
+		rr_equal(entry->size, i < 3 ? 0 : 5, paths[i]);
+		rr_equal(entry->metadata.valid, FSIMG_META_ATTRIBUTES |
+		    FSIMG_META_MODE | FSIMG_META_OWNER |
+		    FSIMG_META_CREATED | FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |
+		    FSIMG_META_CHANGED | (i < 2 ? FSIMG_META_DEVICE : 0), paths[i]);
+		rr_equal(entry->metadata.mode, 0640, paths[i]);
+		rr_equal(entry->metadata.uid, 123, paths[i]);
+		rr_equal(entry->metadata.gid, 456, paths[i]);
+		rr_equal(entry->metadata.created.seconds, 1, paths[i]);
+		rr_equal(entry->metadata.modified.seconds, 1, paths[i]);
+		rr_equal(entry->metadata.accessed.seconds, 1, paths[i]);
+		rr_equal(entry->metadata.changed.seconds, 1, paths[i]);
+		if (i < 2) {
+			rr_equal(entry->metadata.dev_major, i == 0 ? 4 : 0, paths[i]);
+			rr_equal(entry->metadata.dev_minor, i == 0 ? 2 : 1026, paths[i]);
+		}
+		if (i >= 3) {
+			rr_status_equal(fsimg_reader_read_at(f.reader, 0, buffer,
+			    sizeof(buffer), &count, NULL), FSIMG_OK, paths[i]);
+			rr_equal(count, 5, paths[i]);
+			rr_equal(bcmp(buffer, "hello", 5), 0, paths[i]);
+		}
+	}
+	if (status == FSIMG_OK)
+		rr_status_equal(fsimg_reader_next(f.reader, &entry, NULL),
+		    FSIMG_DONE, "device directory end");
+	fixture_free(&f);
+	report = verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0,
+	    FSIMG_OK, NULL, "verify device directory");
+	if (report.complete) {
+		rr_equal(report.files, 5, "verify counts devices as files");
+		rr_equal(report.logical_bytes, 10, "verify devices have zero bytes");
+	}
+	for (unsigned view = 0; view < 2; view++) {
+		fixture_new(&f, &image, NULL);
+		rr_status_equal(open_image(&f, view == 0 ? FSIMG_ISO_VIEW_PRIMARY :
+		    FSIMG_ISO_VIEW_JOLIET), FSIMG_OK, "plain device directory open");
+		for (unsigned i = 0; i < 5; i++) {
+			status = fsimg_reader_next(f.reader, &entry, NULL);
+			rr_status_equal(status, FSIMG_OK, "plain device record");
+			if (status != FSIMG_OK)
+				break;
+			rr_equal(strcmp(entry->path, paths[i]), 0, paths[i]);
+			rr_equal(entry->kind, FSIMG_ENTRY_FILE, paths[i]);
+			rr_equal(entry->size, i < 3 ? 0 : 5, paths[i]);
+			rr_equal(entry->metadata.valid & FSIMG_META_DEVICE, 0, paths[i]);
+		}
+		fixture_free(&f);
+	}
+	free(image.bytes);
+}
+
+static void
+test_rr_device_numbers_and_corruption(void)
+{
+	static const struct {
+		const char *label;
+		unsigned mode, pn_length, pn_count;
+		fsimg_status_t expected;
+	} rows[] = {
+		{ "maximum PN words", 0020640, 20, 1, FSIMG_OK },
+		{ "character without PN", 0020640, 20, 0, FSIMG_ECORRUPT },
+		{ "block without PN", 0060640, 20, 0, FSIMG_ECORRUPT },
+		{ "PN on regular file", 0100640, 20, 1, FSIMG_ECORRUPT },
+		{ "PN on FIFO", 0010640, 20, 1, FSIMG_ECORRUPT },
+		{ "PN on symbolic link", 0120640, 20, 1, FSIMG_ECORRUPT },
+		{ "PN on socket", 0140640, 20, 1, FSIMG_ECORRUPT },
+		{ "short PN on device", 0020640, 12, 1, FSIMG_ECORRUPT },
+		{ "long PN on device", 0060640, 28, 1, FSIMG_ECORRUPT },
+		{ "duplicate PN", 0020640, 20, 2, FSIMG_ECORRUPT }
+	};
+	susp_area_t area;
+	image_t image;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	unsigned char *p;
+	fsimg_status_t status;
+
+	for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		bzero(&area, sizeof(area));
+		susp_px(&area, rows[i].mode, PX_BYTES);
+		if (rows[i].mode == 0120640)
+			susp_sl(&area, 0, 0, "target", 6);
+		for (unsigned n = 0; n < rows[i].pn_count; n++) {
+			p = susp_entry(&area, "PN", rows[i].pn_length);
+			if (rows[i].pn_length >= 20) {
+				put32(p + 4, UINT32_MAX);
+				put32(p + 12, UINT32_MAX);
+			}
+		}
+		image = rr_image(&area, 0);
+		put32(image.bytes + ROOT * BLOCK + RR_CHILD + DR_SIZE, 0);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, rows[i].expected,
+		    rows[i].label);
+		verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0,
+		    rows[i].expected, NULL, rows[i].label);
+		if (rows[i].expected == FSIMG_OK) {
+			fixture_new(&f, &image, NULL);
+			status = open_image(&f, FSIMG_ISO_VIEW_ROCKRIDGE);
+			if (status == FSIMG_OK)
+				status = fsimg_reader_next(f.reader, &entry, NULL);
+			rr_status_equal(status, FSIMG_OK, rows[i].label);
+			if (status == FSIMG_OK) {
+				rr_equal(entry->metadata.valid & FSIMG_META_DEVICE,
+				    FSIMG_META_DEVICE, rows[i].label);
+				rr_equal(entry->metadata.dev_major, UINT32_MAX, rows[i].label);
+				rr_equal(entry->metadata.dev_minor, UINT32_MAX, rows[i].label);
+			}
+			fixture_free(&f);
+		}
 		free(image.bytes);
 	}
 }
@@ -3744,9 +3942,16 @@ test_rr_later_sections(void)
 		const char *label;
 		unsigned flags;
 		fsimg_status_t expected;
-	} devices[] = {
-		{ "device PX missing last section", 0x80, FSIMG_ECORRUPT },
-		{ "device PX valid single section", 0, FSIMG_EUNSUPPORTED }
+	} unsupported_types[] = {
+		{ "unsupported PX type missing last section", 0x80,
+		    FSIMG_ECORRUPT },
+		{ "unsupported PX type valid single section", 0,
+		    FSIMG_EUNSUPPORTED }
+	}, devices[] = {
+		{ "character device missing last section", 0x80,
+		    FSIMG_ECORRUPT },
+		{ "character device complete two-section run", 0x80, FSIMG_OK },
+		{ "character device valid single section", 0, FSIMG_OK }
 	};
 	susp_area_t area = {0};
 	image_t image;
@@ -3780,7 +3985,20 @@ test_rr_later_sections(void)
 	rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_ECORRUPT,
 	    "ZF without NM with invalid primary identifier");
 	free(image.bytes);
-	/* A refused device's run must still be checked for completeness. */
+	/* A refused PX type's run must still be checked for completeness. */
+	for (unsigned i = 0;
+	    i < sizeof(unsupported_types) / sizeof(unsupported_types[0]); i++) {
+		bzero(&area, sizeof(area));
+		susp_px(&area, 0030600, PX_BYTES);
+		image = rr_image(&area, unsupported_types[i].flags);
+		p = image.bytes + ROOT * BLOCK + RR_CHILD;
+		/* Whole blocks satisfy the size rule for non-final sections. */
+		put32(p + DR_SIZE, BLOCK);
+		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
+		    unsupported_types[i].expected, unsupported_types[i].label);
+		free(image.bytes);
+	}
+	/* Supported devices also require complete runs. */
 	for (unsigned i = 0; i < sizeof(devices) / sizeof(devices[0]); i++) {
 		bzero(&area, sizeof(area));
 		susp_px(&area, 0020600, PX_BYTES);
@@ -3789,8 +4007,16 @@ test_rr_later_sections(void)
 		p = image.bytes + ROOT * BLOCK + RR_CHILD;
 		/* Whole blocks satisfy the size rule for non-final sections. */
 		put32(p + DR_SIZE, BLOCK);
+		if (devices[i].flags == 0x80 &&
+		    devices[i].expected == FSIMG_OK) {
+			p += p[0];
+			record(p, "A.TXT;1", 7, DATA + 1, 0, 0);
+		}
 		rr_status(&image, FSIMG_ISO_VIEW_ROCKRIDGE,
 		    devices[i].expected, devices[i].label);
+		if (devices[i].expected == FSIMG_OK)
+			rr_witness(&image, "/A.TXT", FSIMG_ENTRY_CHAR_DEVICE,
+			    NULL, 0, devices[i].label);
 		free(image.bytes);
 	}
 }
@@ -5551,7 +5777,8 @@ main(int argc, char **argv)
 	}
 	if (argc == 3 && (strcmp(argv[1], "--seed") == 0 ||
 	    strcmp(argv[1], "--seed-boot") == 0 ||
-	    strcmp(argv[1], "--seed-shared") == 0)) {
+	    strcmp(argv[1], "--seed-shared") == 0 ||
+	    strcmp(argv[1], "--seed-devices") == 0)) {
 		image_t image = strcmp(argv[1], "--seed-shared") == 0 ?
 		    shared_extent_image() : image_new();
 		FILE *file = fopen(argv[2], "wb");
@@ -5560,6 +5787,10 @@ main(int argc, char **argv)
 			free(image.bytes);
 			image = boot_image(0);
 			boot_efi_section(&image);
+		}
+		if (strcmp(argv[1], "--seed-devices") == 0) {
+			free(image.bytes);
+			image = rr_devices_image();
 		}
 		CHECK(file != NULL);
 		CHECK(fwrite(image.bytes, 1, image.length, file) ==
@@ -5594,6 +5825,8 @@ main(int argc, char **argv)
 	test_susp_continuation_bounds();
 	test_susp_framing_and_precedence();
 	test_rr_kinds_and_singletons();
+	test_rr_devices();
+	test_rr_device_numbers_and_corruption();
 	test_rr_names_and_continuations();
 	test_rr_link_components();
 	test_rr_times();

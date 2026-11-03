@@ -1167,7 +1167,11 @@ typedef struct fsimg_format_info {
 	char		 name[16];
 	char		 profile[40];
 	unsigned	 capabilities;
-	/* Masks of the FSIMG_ENTRY_* kinds and FSIMG_META_* fields stored. */
+	/*
+	 * Masks of the FSIMG_ENTRY_* kinds and FSIMG_META_* fields stored. A
+	 * read-only kind (device or socket) in entry_kinds means the reader
+	 * reports it; no writer stores one.
+	 */
 	uint32_t	 entry_kinds;
 	uint32_t	 metadata_fields;
 	/* Bit n denotes a legal size of 2^n bytes. */

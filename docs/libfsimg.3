@@ -137,6 +137,8 @@ FSIMG_ENTRY_SOCKET, of size zero with no content; a device whose image
 stores its number has FSIMG_META_DEVICE valid and the format's major and
 minor in dev_major and dev_minor.
 No writer stores these kinds, and the extractor never creates them.
+A format's entry_kinds lists a read-only kind when its reader reports it,
+so the mask is not a test of what a writer can store.
 .Fn fsimg_reader_read_at
 reads only the current regular file or symbolic link, clips to EOF and returns
 confirmed bytes separately from status.

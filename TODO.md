@@ -390,6 +390,15 @@
   explicitly, or record the destination in its own field, so it holds by
   construction.
 
+* [Low] **A host name collision during extraction names no entry**
+  (`lib/extract/extract.c` `creation_failed`): extracting the FreeBSD 1.0
+  install CD onto a case-insensitive macOS volume fails at
+  `/filesys/usr/bin/mail` after `/filesys/usr/bin/Mail` with only
+  "exclusive output file creation failed: File exists" and the retained
+  destination; the colliding image entry is not named. Name the entry
+  being created, which also settles "A failed extraction keeps any error
+  path" for this path.
+
 * [Low] **The job record moves ifsboot settings type-blind**
   (`cmd/fsimg/job.c` `ifsboot_fields`): the table copies `uint32_t` and
   `bool` members with `bcopy` at `offsetof` positions, so a widened member

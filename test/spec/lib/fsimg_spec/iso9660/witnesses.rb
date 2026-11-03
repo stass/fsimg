@@ -81,7 +81,7 @@ module FsimgSpec
         "rr.name_profile" => change(parameters: CONTINUATION, mutations: long_name),
         "rr.pointers" => change(parameters: RELOCATION, mutations: [bytes(file(parameters: RELOCATION, index: 4) + 100, [Builder::RELOCATED + 1].pack("N"))]),
         "rr.kind" => change(parameters: RR, mutations: [both32(system_use(parameters: RR) + 4, 0o40755)]),
-        "rr.kind_profile" => change(parameters: RR, mutations: [both32(system_use(parameters: RR) + 4, 0o140644)]),
+        "rr.kind_profile" => change(parameters: RR, mutations: [both32(system_use(parameters: RR) + 4, 0o030644)]),
         "rr.sl.framing" => change(parameters: SYMLINK, mutations: [u8(link_sl + 6, 255)]),
         "rr.sl.components" => change(parameters: SYMLINK, mutations: [u8(link_sl + 5, 6)]),
         "rr.sl.profile" => change(parameters: SYMLINK, mutations: refused_link),
@@ -119,7 +119,33 @@ module FsimgSpec
         combined + boundaries.each_with_index.map do |parameters, index|
           Witness.new(id: "iso9660.link_boundary.#{index}", parameters:, mutations: [], intended: nil,
             rules: %w[iso9660.rr.sl.framing iso9660.rr.sl.components iso9660.rr.sl.profile])
-        end + invalid + scope_regressions
+        end + invalid + scope_regressions + device_regressions
+      end
+
+      # Every accepted kind has a PN mutation paired with it. These replace
+      # the sole child, leaving geometry and the RR handshake unchanged.
+      def device_regressions
+        pn = Builder.entry("PN", Builder.both32(4) + Builder.both32(2))
+        rows = [
+          ["char", 0o020640, pn, nil],
+          ["block", 0o060640, Builder.entry("PN", Builder.both32(0) + Builder.both32(0x0402)), nil],
+          ["socket", 0o140640, "".b, nil],
+          ["char_missing_pn", 0o020640, "".b, "rr.kind"],
+          ["block_missing_pn", 0o060640, "".b, "rr.kind"],
+          ["file_pn", 0o100640, pn, "rr.kind"],
+          ["socket_pn", 0o140640, pn, "rr.kind"],
+          ["short_pn", 0o020640, Builder.entry("PN", Builder.both32(4)), "rr.lengths"],
+          ["duplicate_pn", 0o020640, pn * 2, "rr.singletons"]
+        ]
+        rows.map do |name, mode, number, broken|
+          px = Builder.entry("PX", [mode, 1, 123, 456].map { Builder.both32(_1) }.join.b)
+          record = Builder.record(identifier: "FILE.TXT;1", extent: Builder::DATA, bytes: 0,
+            flags: 0, system_use: px + number + Builder.tf + Builder.nm("FILE.TXT"))
+          rule = broken && "iso9660.#{broken}"
+          Witness.new(id: "iso9660.device.#{name}", parameters: RR,
+            mutations: [bytes(file(parameters: RR), record)], intended: rule,
+            rules: [rule || "iso9660.rr.kind"].freeze)
+        end
       end
 
       # These paired facts distinguish framing scope from RR semantics,

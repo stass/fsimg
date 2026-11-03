@@ -444,6 +444,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/members_test.rb \
 	test/cli/merged_operands_test.rb \
 	test/cli/minimize_test.rb \
+	test/cli/iso_devices_test.rb \
 	test/cli/iso_settings_test.rb test/cli/iso_truncated_test.rb \
 	test/cli/isohybrid_test.rb \
 	test/cli/fat_root_test.rb \
