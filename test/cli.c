@@ -18,6 +18,7 @@
 #include "settings.h"
 #include "test.h"
 
+static void test_image_hybrid_field(void);
 static void test_numbers(void);
 static fsimg_status_t parse(char *const *, fsimg_cli_options_t *);
 static fsimg_status_t parse_status(char *const *, bool *);
@@ -1704,6 +1705,36 @@ test_format_masks(bool json)
 	CHECK(details && links);
 }
 
+/* IMAGE's hybrid name crosses the worker trust boundary. */
+static void
+test_image_hybrid_field(void)
+{
+	static const char *invalid[] = { "dmg", "fat12", "x\033" };
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_IMAGE,
+	    .length = FSIMG_WIRE_IMAGE_BYTES };
+	char *hybrid = (char *)frame.payload + FSIMG_WIRE_IMAGE_HYBRID;
+
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	strcpy(hybrid, "gpt");
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	strcpy(hybrid, "mbr");
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		strcpy(hybrid, invalid[i]);
+		CHECK(!fsimg_wire_image_frame_valid(&frame));
+	}
+	memset(hybrid, 'g', FSIMG_WIRE_IMAGE_HYBRID_BYTES);
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	bzero(hybrid, FSIMG_WIRE_IMAGE_HYBRID_BYTES);
+
+	strcpy((char *)frame.payload + FSIMG_WIRE_IMAGE_SCHEME, "gpt");
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_SECTOR, 512);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_SLOTS, 128);
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	strcpy(hybrid, "gpt");
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+}
+
 static void
 test_zstd_verification_attributes_unchecked_checksum(void)
 {
@@ -2197,6 +2228,7 @@ main(int argc, char **argv)
 	test_minimize_options();
 	test_minimize_plan_display(false);
 	test_minimize_plan_display(true);
+	test_image_hybrid_field();
 	test_numbers();
 	test_options();
 	test_modes();

@@ -153,7 +153,6 @@ Q17 with the evidence that closes each. Their consumers:
 | Q4, Q5, Q6, Q9, Q11, Q14 native acceptance of writer choices | 8 |
 | Q7 symbolic-link component types | 1 for reading, 8 for writing |
 | Q8 LVID counts | 1 |
-| Q16 whole-disk MBR | owner decision at the stage 1 review, before stage 3 tests it |
 | Q17 how write-once images from other writers end | 1, consumed by 10 |
 
 ## Work packages
@@ -412,10 +411,10 @@ and close at the stage 1 design review.
    EFE, matching the Linux kernel's default; if a native reader rejects them
    (Q5) the writer stops inlining regular files.
 7. **Whole-disk MBR (Q16).** mkudffs's `--bootarea=mbr` writes an MBR whose
-   one entry starts at LBA 0, which the MBR probe claims and finds corrupt,
-   so detection fails on such a disk. Either the MBR probe makes no claim
-   for an entry at LBA 0 that spans the disk, a layer-design change, or the
-   image reads only with the scheme forced empty.
+   one entry starts at LBA 0. The MBR identity excludes such an entry, so
+   the disk reads as the bare UDF volume; the UDF descriptor also declares
+   its reserved system area, so a partition table elsewhere in it yields to
+   the volume under the layer design's system-area rule.
 8. **No degraded reading** (design decision 7).
 
 ## Risks

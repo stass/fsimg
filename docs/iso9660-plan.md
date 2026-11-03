@@ -114,7 +114,7 @@ Non-goals:
 | --- | --- |
 | Descriptors, hierarchies, names, SUSP, Rock Ridge, Joliet, El Torito, content, verification | The `iso9660` filesystem driver (`lib/formats/iso9660/`), on an ordinary `fsimg_io_t` |
 | A partition table or container around a volume | The [layer design](../specs/design-layers.md), unchanged |
-| An isohybrid image's MBR or GPT | Detection's ambiguity rule: `-F iso9660/-` reads the ISO, `--partition` a partition |
+| An isohybrid image's MBR or GPT | Detection's system-area rule: the ISO is read and the scheme reported; `-F gpt` or `-F mbr` reads a partition |
 | Traversal, paths, selection, namespace validation | The common walker |
 | Delivery of file bytes and decoded link targets | Common content |
 | Source copies and link-target reads | The common writer |
@@ -247,7 +247,7 @@ in [the ISO TODO](todo-iso9660.md).
 | Producers write relocation placeholders with a directory `PX` and a clear flag, as the reader expects | `xorriso`, `genisoimage`, `makefs` deep trees | Relocation reading |
 | Consumers show the logical tree of a relocated writer image, and show or hide `.rr_moved` without depending on it | Linux, FreeBSD, libarchive | Relocation stage |
 | Joliet consumers accept 62-unit file names with `;1` and 64-unit directory names | Linux `isofs`, libarchive, Windows where available | Writer |
-| Every isohybrid image in the corpus draws both claims and reads with `-F iso9660/-` | Distribution ISOs | Owner decision 7 |
+| Every isohybrid image in the corpus draws both claims, reads as ISO 9660 unforced and as partitions with the scheme forced | Distribution ISOs | Owner decision 7 |
 | Consumers read a hierarchy with 65535 directories | `xorriso` and writer images of a wide tree | Writer limit |
 
 ## Work packages
@@ -583,9 +583,12 @@ the rest at the stage 1 gate:
    and GRUB BIOS images that do need it are a recorded limitation. Adding
    it later means a member's bytes differ from its source, which needs its
    own design.
-7. **Hybrid images.** An isohybrid image is ambiguous under the detection
-   rule, and `-F iso9660/-` resolves it. No rule ranks a filesystem claim
-   above a scheme claim.
+7. **Hybrid images.** ISO 9660 reserves its system area for boot and
+   partition data, so an isohybrid image's partition table does not contest
+   the volume: unforced detection reads the ISO, the image information names
+   the scheme, and the CLI notes that `-F gpt` or `-F mbr` reads the
+   partitions. Every other filesystem claim alongside a scheme claim stays
+   ambiguous.
 8. **Strict primary order.** Full verification fails an unsorted
    directory or path table of the primary hierarchy. Joliet order is not
    checked, because the H3 disc's Joliet hierarchy is unsorted while its

@@ -310,10 +310,11 @@ of the next:
 Steps 2 and 3 apply the format-detection rule: exactly one claim decides; no
 claim at the container step means no container, and at the scheme step an
 unrecognised image (`FSIMG_EFORMAT`); several claims are ambiguous and
-require a forced slot. Step 1 has its own outcome rule, stated with the
-step. Probes claim on **identity**: the signature, the format's fixed
-constants where the [profile](#layer-profiles) names them (a version, a
-header size, a method byte) and, for a trailer, its tie to the input length.
+require a forced slot, except the system-area pairing below. Step 1 has
+its own outcome rule, stated with the step. Probes claim on **identity**:
+the signature, the format's fixed constants where the
+[profile](#layer-profiles) names them (a version, a header size, a method
+byte) and, for a trailer, its tie to the input length.
 Everything a profile validates after the claim, checksums, table contents
 and declared geometry beyond that tie, makes a claim `FSIMG_ECORRUPT` or
 `FSIMG_EUNSUPPORTED` and never falls through to another decoder, so a GPT
@@ -321,10 +322,27 @@ with a damaged header CRC is reported as a damaged GPT, not read as a bare
 volume, and a dynamic VHD is reported as unsupported, not as a raw disk with
 an odd tail. Running scheme and filesystem probes together at step 3 is what
 makes a FAT boot sector whose code region happens to resemble a partition
-table an explicit ambiguity rather than a silent misread. An isohybrid ISO
-9660 image is the same case by design: its system area holds an MBR or GPT
-so that the file is also a partitioned disk, both claims are genuine, and
-`-F iso9660/-` or `--partition` chooses the reading.
+table an explicit ambiguity rather than a silent misread.
+
+One pairing is not a rivalry. A format whose volume begins with a system
+area it reserves for boot and partition data, ISO 9660 and UDF with their
+first 32 KiB, never reads that area, so a partition table there cannot
+contest the volume: it is the same disk's second reading. An isohybrid
+image puts its MBR or GPT there so that the file is also a partitioned
+disk. When the step-3 survey holds exactly one scheme claim and one
+filesystem claim, both matches, and the filesystem is such a format, the
+disk is read as the bare volume, and the image information names the
+scheme (`hybrid_scheme`) so that a caller can tell the user; the CLI prints
+a one-line note naming `-F gpt` or `-F mbr`, which forces the scheme and
+reads the partitions. A corrupt or unsupported claim on either side, a
+second claim of either kind, and every other filesystem paired with a
+scheme stay ambiguous. The table itself is validated only when the forced
+scheme reads it, since the volume does not depend on it. A forced
+scheme slot, named or `-`, runs no such survey. A partition selection does
+not force the scheme: on such a disk it fails, naming the scheme to force.
+The rule trusts the identities: an ISO 9660 descriptor left at 32 KiB on a
+disk later repartitioned without clearing it reads as that stale volume,
+and the note names the table it hides.
 
 A read-side stack forces the slots it names, forces empty the slots it marks
 `-`, and leaves the rest to detection. `fat32` forces the filesystem decoder
@@ -1354,12 +1372,16 @@ the shape of the entry area, since a FAT boot sector carries the same
 signature: every entry all zero or with a legal status (0x00 or 0x80), a
 nonzero type and a nonzero count, at least one entry used, and no entry of
 type 0xEE, which belongs to GPT's protective MBR, so a hybrid MBR is a GPT
-disk. Validation then requires each used entry to start after the MBR's own
-sector (first LBA at least 1), first LBA plus count within the disk, and no
+disk, and no used entry starting at sector 0. An entry at sector 0 would
+contain the MBR itself; the writers that record one, isohybrid, `mformat`,
+`mkfs.fat` with a whole-disk MBR and `mkudffs --bootarea=mbr`, describe the
+volume that begins at sector 0, so the disk is read as that bare volume.
+Validation then requires first LBA plus count within the disk, and no
 overlap between used entries; a failure is `FSIMG_ECORRUPT`. Extended
 partitions (types 0x05, 0x0F and 0x85) are listed with their type and are
 unsupported as a selection: logical partitions inside them need their own
-profile. A sector whose bytes also draw a filesystem claim is ambiguous, as
+profile. A sector whose bytes also draw a filesystem claim is ambiguous,
+unless the filesystem reserves its system area, as
 [detection](#detection-and-forcing) states.
 
 ### DMG (UDIF)

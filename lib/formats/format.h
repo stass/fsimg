@@ -36,6 +36,13 @@ struct fsimg_format_variant {
  * volume-length rule). The disk plan then refuses any layer that can make
  * the slot longer than the volume (specs/design-layers.md#exact-volumes).
  *
+ * reserved_system_area is true for a format whose volume begins with a
+ * system area it reserves for boot and partition data and never reads,
+ * as ISO 9660's first 32 KiB. A partition table there is the same disk's
+ * second reading rather than a rival to the volume, so detection reads
+ * such a disk as the bare volume and reports the scheme
+ * (specs/design-layers.md#detection-and-forcing).
+ *
  * byte_order is optional: for a format stored in either byte order, a pure
  * function of the probe prefix of a volume the probe claims, giving the
  * order it is stored in, so a container that packages the volume can
@@ -52,6 +59,7 @@ struct fsimg_format {
 	const fsimg_reader_ops_t *reader;
 	const fsimg_writer_ops_t *writer;
 	bool		 exact_volume;
+	bool		 reserved_system_area;
 };
 
 /* The registered descriptors; the registry in format.c lists them. */

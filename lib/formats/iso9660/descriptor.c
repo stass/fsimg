@@ -56,7 +56,8 @@ const fsimg_format_t fsimg_iso9660_format = {
 	.probe_bytes = ISO_PROBE_BYTES,
 	.probe = iso_probe,
 	.reader = &fsimg_iso9660_reader_ops,
-	.writer = &fsimg_iso9660_writer_ops
+	.writer = &fsimg_iso9660_writer_ops,
+	.reserved_system_area = true
 };
 
 /* The identity signature is a volume descriptor at block 16: CD001 after a

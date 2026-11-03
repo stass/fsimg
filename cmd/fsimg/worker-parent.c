@@ -344,8 +344,9 @@ slot_name(const fsimg_worker_request_t *request, fsimg_layer_kind_t kind)
  * Whether an IMAGE record names the layers its request forces. A named
  * scheme or container slot reports that layer and an emptied one none; a
  * create job writes an unspecified slot empty, while a read job detects
- * it, and then any layer is its answer. The compression is likewise the
- * one the request names, which a read job leaves empty for detection.
+ * it, and then any layer is its answer. Only that detection can find a
+ * hybrid scheme. The compression is likewise the one the request names,
+ * which a read job leaves empty for detection.
  */
 static bool
 layers_expected(const fsimg_worker_request_t *request,
@@ -358,6 +359,10 @@ layers_expected(const fsimg_worker_request_t *request,
 	bool reading;
 
 	reading = !fsimg_job_has_roots(request->kind);
+	if (raw[FSIMG_WIRE_IMAGE_HYBRID] != '\0' && (!reading ||
+	    request->stack.slots[FSIMG_LAYER_SCHEME].state !=
+	    FSIMG_SLOT_UNSPECIFIED))
+		return (false);
 	for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
 		if (reading && request->stack.slots[slots[i]].state ==
 		    FSIMG_SLOT_UNSPECIFIED)

@@ -97,8 +97,11 @@ decode_entry(const unsigned char *raw, mbr_entry_t *entry)
 
 /* The identity of a partition table, since a FAT boot sector carries the
  * same signature: the signature, every entry unused or legal, at least
- * one used, and none of GPT's protective type, so a hybrid MBR is a GPT
- * disk.
+ * one used, none of GPT's protective type, so a hybrid MBR is a GPT disk,
+ * and none starting at sector 0. Such an entry would contain the table
+ * itself; the writers that record one (isohybrid, mformat, mkfs.fat
+ * --mbr, mkudffs) describe the volume beginning there, which is then read
+ * as a bare volume.
  */
 static bool
 partition_table_shape(const unsigned char *sector)
@@ -114,7 +117,7 @@ partition_table_shape(const unsigned char *sector)
 			return (false);
 		if (!entry.used)
 			continue;
-		if (entry.type == MBR_PROTECTIVE_TYPE)
+		if (entry.type == MBR_PROTECTIVE_TYPE || entry.first_lba == 0)
 			return (false);
 		used++;
 	}
@@ -151,11 +154,11 @@ mbr_corrupt(fsimg_error_t *error, const char *check, unsigned slot,
 }
 
 /*
- * Decode the four slots and require each used one to start after the MBR
- * sector, to end within the disk and within the 2^32 sectors an entry can
- * address, and not to overlap another used slot. Extended partitions are
- * listed with their type; they hold logical partitions this profile does
- * not read.
+ * Decode the four slots and require each used one, which identity already
+ * places after the MBR sector, to end within the disk and within the 2^32
+ * sectors an entry can address, and not to overlap another used slot.
+ * Extended partitions are listed with their type; they hold logical
+ * partitions this profile does not read.
  */
 static fsimg_status_t
 mbr_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
@@ -182,9 +185,6 @@ mbr_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 		if (!entries[i].used)
 			continue;
 		end = entries[i].first_lba + entries[i].sectors;
-		if (entries[i].first_lba == 0)
-			return (mbr_corrupt(error, "overlaps the master boot record",
-			    i + 1, 0));
 		if (end > MBR_ADDRESSABLE_SECTORS)
 			return (mbr_corrupt(error,
 			    "ends beyond the sectors an entry can address", i + 1, 0));

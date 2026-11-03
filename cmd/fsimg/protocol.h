@@ -102,8 +102,11 @@ _Static_assert(FSIMG_WIRE_INFO_DETAIL_NAME_BYTES +
  * compression's qualified entry first and then the container's fields,
  * which makes its verification incomplete. DISK is the
  * disk the container yields, or the input file's length without one.
+ * HYBRID is the image information's hybrid_scheme: on a bare volume, the
+ * registered scheme whose table the volume's system area also holds, or
+ * empty.
  */
-#define FSIMG_WIRE_IMAGE_BYTES 1184u
+#define FSIMG_WIRE_IMAGE_BYTES 1200u
 #define FSIMG_WIRE_IMAGE_UNSELECTED 0x1u	/* i only: no volume follows */
 #define FSIMG_WIRE_IMAGE_VERIFIED 0x2u		/* W only: layers verified */
 typedef enum fsimg_wire_image_field {
@@ -130,7 +133,8 @@ typedef enum fsimg_wire_image_field {
 	FSIMG_WIRE_IMAGE_UNVERIFIED = 248,
 	FSIMG_WIRE_IMAGE_DETAIL_COUNT = 280,
 	FSIMG_WIRE_IMAGE_DETAILS = 288,
-	FSIMG_WIRE_IMAGE_REASON = 1056
+	FSIMG_WIRE_IMAGE_REASON = 1056,
+	FSIMG_WIRE_IMAGE_HYBRID = 1184
 } fsimg_wire_image_field_t;
 #define FSIMG_WIRE_IMAGE_STACK_BYTES 64u
 #define FSIMG_WIRE_IMAGE_CODECS_BYTES 32u
@@ -142,8 +146,11 @@ _Static_assert(FSIMG_WIRE_IMAGE_UNVERIFIED +
 _Static_assert(FSIMG_WIRE_IMAGE_DETAILS + FSIMG_IMAGE_DETAILS_MAX *
     FSIMG_WIRE_INFO_DETAIL_BYTES == FSIMG_WIRE_IMAGE_REASON,
     "the reason follows the details");
+#define FSIMG_WIRE_IMAGE_HYBRID_BYTES 16u
 _Static_assert(FSIMG_WIRE_IMAGE_REASON + FSIMG_WIRE_IMAGE_REASON_BYTES ==
-    FSIMG_WIRE_IMAGE_BYTES, "the image record ends with the reason");
+    FSIMG_WIRE_IMAGE_HYBRID, "the hybrid scheme follows the reason");
+_Static_assert(FSIMG_WIRE_IMAGE_HYBRID + FSIMG_WIRE_IMAGE_HYBRID_BYTES ==
+    FSIMG_WIRE_IMAGE_BYTES, "the image record ends with the hybrid scheme");
 
 /* One used partition-table slot, for i. */
 #define FSIMG_WIRE_PARTITION_BYTES 224u

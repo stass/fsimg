@@ -525,18 +525,21 @@ module IsoIntegration
          "(#{actual.size} paths, #{files.size} SHA-256); #{paired}/Joliet content agrees"
   end
 
-  def verify_corpus_image(binary:, image:, forcing:)
+  def verify_corpus_image(binary:, image:)
     parent_rule_images = %w[xorriso-joliet.iso xorriso-joliet-long.iso xorriso-joliet-utf16.iso]
     parent_rule = parent_rule_images.include?(File.basename(image))
     failures = %w[auto primary].filter_map do |view|
       selection = view == "auto" ? [] : ["-o", "view=primary"]
-      _output, diagnostic, status = Open3.capture3(binary, "W", *forcing, *selection, "-f", image)
+      _output, diagnostic, status = Open3.capture3(binary, "W", *selection, "-f", image)
       if parent_rule
         unless status.exitstatus == 1 && diagnostic.include?("directory's parent record does not name its parent")
           "W #{view}: expected Joliet parent-rule failure; exit=#{status.exitstatus}: #{diagnostic.strip}"
         end
       elsif !status.success?
         "W #{view}: expected success; exit=#{status.exitstatus}: #{diagnostic.strip}"
+      elsif File.basename(image).include?("isohybrid") &&
+          !diagnostic.match?(/\Afsimg: note: the disk also carries a (gpt|mbr) partition table; use -F \1 to read its partitions\n\z/)
+        "W #{view}: expected one hybrid partition-table note: #{diagnostic.inspect}"
       end
     end
     raise Error, failures.join("; ") unless failures.empty?
@@ -551,9 +554,8 @@ module IsoIntegration
     failed = false
     images.each_with_index do |image, index|
       label = File.basename(image)
-      forcing = label.include?("isohybrid") ? ["-F", "iso9660/-"] : []
       begin
-        verify_corpus_image(binary: binary, image: image, forcing: forcing)
+        verify_corpus_image(binary: binary, image: image)
       rescue Error => error
         warn "#{label}: verification failed: #{error.message}"
         failed = true
@@ -561,7 +563,7 @@ module IsoIntegration
 
       if command("isoinfo", "-d", "-i", image).match?(/^Rock Ridge signatures version 1 found/)
         begin
-          agreement = rockridge(binary: binary, image: image, options: [*forcing, "-f", image])
+          agreement = rockridge(binary: binary, image: image, options: ["-f", image])
           failed = true unless agreement
         rescue Error, JSON::ParserError, KeyError, ArgumentError => error
           warn "#{label}: Rock Ridge comparison failed: #{error.message}"
@@ -571,14 +573,14 @@ module IsoIntegration
       end
       if command("isoinfo", "-d", "-i", image).match?(/Joliet with UCS level [123] found/)
         begin
-          joliet(binary: binary, image: image, options: [*forcing, "-f", image])
+          joliet(binary: binary, image: image, options: ["-f", image])
         rescue Error, JSON::ParserError, KeyError, ArgumentError => error
           warn "#{label}: Joliet comparison failed: #{error.message}"
           puts "#{label}: Joliet FAIL"
           failed = true
         end
       end
-      options = [*forcing, "-o", "view=primary", "-f", image]
+      options = ["-o", "view=primary", "-f", image]
       listing = "FAIL"
       extraction = "FAIL"
       boot = "FAIL"

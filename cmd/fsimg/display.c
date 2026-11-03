@@ -2051,6 +2051,7 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 	fsimg_format_info_t info;
 	fsimg_layer_info_t layer_info;
 	fsimg_status_t status;
+	const char *hybrid;
 	bool diagnostic, first;
 
 	display->used = 0;
@@ -2132,6 +2133,17 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 	} else {
 		if (display->phase == FSIMG_CLI_OUTPUT_DONE)
 			return (FSIMG_DONE);
+		/* Detection read an isohybrid image's volume; the record's
+		 * validation made the scheme a registered name.
+		 */
+		hybrid = (const char *)display->image + FSIMG_WIRE_IMAGE_HYBRID;
+		if (!display->hybrid_noted && hybrid[0] != '\0') {
+			display->hybrid_noted = true;
+			append(display, "fsimg: note: the disk also carries a "
+			    "%s partition table; use -F %s to read its "
+			    "partitions\n", hybrid, hybrid);
+			return (finish_span(display, true, text, error));
+		}
 		if (options->command == FSIMG_CLI_PROCESS && !options->json &&
 		    display->phase == FSIMG_CLI_OUTPUT_RECORDS) {
 			display->phase = FSIMG_CLI_OUTPUT_SUMMARY;

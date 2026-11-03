@@ -2063,7 +2063,7 @@ consumer claims do not imply qualification of the fsimg writer.
 | Relocation placeholder shape | Xorriso and mkisofs CL placeholders have flag 0, directory PX mode `040755` and zero data length. Xorriso uses extent 43; mkisofs uses sentinels `0xffffffee`, `0xfffffff0`, `0xffffffef`. The placeholder's extent does not locate its directory: CL does. Libarchive's deep-tree producer crashes with signal 11; the failed file is excluded from the image manifest. |
 | Relocated logical tree and relocation-directory visibility | Isoinfo follows the xorriso tree; `-R -l` includes placeholder directory rows which `-R -f` omits. Libarchive 3.7.4 fails to connect the xorriso CL/RE pointers and leaves a partial mtree with nonzero status. |
 | Joliet 62-unit files and 64-unit directories | The producers emit these lengths. Xorriso and mkisofs omit `;1` from Joliet file identifiers. Isoinfo is lossy for non-BMP UTF-16 names even with `-j utf-8`; bsdtar reads the surrogate pair as Unicode. |
-| Isohybrid ambiguity and explicit ISO selection | Xorriso's synthetic hybrid has an ISO hierarchy plus MBR and GPT structures, reported by `-report_system_area plain`. |
+| Isohybrid detection as ISO 9660 | Xorriso's synthetic hybrid has an ISO hierarchy plus MBR and GPT structures, reported by `-report_system_area plain`. |
 
 Owner decision 8 requires strict primary order; Joliet order is not checked
 because of H3's Joliet inversions. The remaining oracle work is tracked in
@@ -2119,8 +2119,8 @@ Rock Ridge view must create exactly the manifest's directories and files,
 with their SHA-256, and report its symbolic links and FIFOs as skipped,
 since safe extraction creates neither. bsdtar is skipped only for
 `xorriso-deep.iso`, whose relocation libarchive cannot connect. The
-script then needs `bsdtar` as well. The isohybrid image is read with
-`-F iso9660/-`. Against the stage 0 corpus all 36 images agree, 31 of
+script then needs `bsdtar` as well. The isohybrid image is read without
+forcing, and `W` must print one note naming its partition table. Against the stage 0 corpus all 36 images agree, 31 of
 them in the Rock Ridge view. Forced Rock Ridge must match automatic
 selection. Joliet names, kinds, sizes and file digests agree with its
 manifest and the independent listings, with the documented xorriso

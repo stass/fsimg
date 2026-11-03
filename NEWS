@@ -25,6 +25,14 @@ set them for both the primary and Joliet descriptors, and `info` reports them
 for the selected view. Primary-view labels and texts are reported only when
 they are printable ASCII.
 
+Isohybrid ISO 9660 images read as their ISO volume without forcing: ISO
+9660 reserves its system area for boot and partition data, so a GPT or MBR
+there no longer makes detection ambiguous. The image information names the
+scheme in hybrid_scheme, and the CLI notes on stderr that `-F gpt` or
+`-F mbr` reads the partitions. An MBR entry starting at sector 0, as
+mformat, mkfs.fat --mbr, isohybrid and mkudffs write over the volume
+beginning there, is no partition table, so such disks read as that volume.
+
 CLI information can report declared filesystem geometry beyond the available
 input when headers remain readable. Missing referenced structures or content
 retain filesystem errors; informational geometry does not enlarge selected

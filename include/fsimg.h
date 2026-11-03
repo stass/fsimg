@@ -652,6 +652,10 @@ typedef struct fsimg_volume_text {
  * decompressed input; a plan reports its planned disk as the file.
  * disk_bytes is the disk the container yields, or file_bytes without one.
  * GUIDs are in textual (RFC 4122) byte order.
+ * hybrid_scheme names the scheme whose table detection also found on a
+ * disk it read as a bare volume because the volume's format reserves its
+ * leading system area for such tables, as an isohybrid ISO 9660 image
+ * does; forcing that scheme reads the partitions. It is empty otherwise.
  * selected is the slot of the last partition select() returned, zero for
  * none. The scope is the validation the tables received. details holds the
  * container's header fields in the order its profile documents, such as
@@ -665,6 +669,7 @@ typedef struct fsimg_image_info {
 	char		 container[16];
 	char		 codecs[32];
 	char		 scheme[16];
+	char		 hybrid_scheme[16];
 	unsigned char	 container_guid[16];
 	unsigned char	 disk_guid[16];
 	uint64_t	 chunk_count;

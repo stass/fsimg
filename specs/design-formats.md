@@ -309,7 +309,9 @@ The [driver design](design-iso9660-driver.md) defines the code.
 The probe's identity signature is `CD001` at block 16 with a known
 descriptor type, so its own prefix is 34816 bytes. Common detection sizes
 its buffer from the maximum descriptor prefix, including UDF's 131072 bytes. An isohybrid image, whose system area also holds a partition
-table, draws a scheme claim as well and is ambiguous until forced.
+table, draws a scheme claim as well; since ISO 9660 reserves that area,
+detection reads the bare volume and reports the scheme
+([detection](design-layers.md#detection-and-forcing)).
 
 The writer has one profile: a Rock Ridge primary hierarchy at interchange
 level 1, 2 or 3, default 3, a Joliet hierarchy, relocation of deep

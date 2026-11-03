@@ -73,9 +73,12 @@ struct fsimg_image {
 	const fsimg_layer_t *container;
 	fsimg_container_t opened;
 	/* The scheme step's result once detected is set; scheme stays NULL
-	 * for a bare volume, and table is then empty.
+	 * for a bare volume, and table is then empty. hybrid is the scheme
+	 * that also claimed a bare volume whose format reserves its system
+	 * area, NULL otherwise; its table is not read.
 	 */
 	const fsimg_layer_t *scheme;
+	const fsimg_layer_t *hybrid;
 	fsimg_scheme_table_t table;
 	bool		 detected;
 	uint32_t	 cursor;	/* Slots next_partition has returned */
@@ -148,8 +151,10 @@ static fsimg_status_t claim_container(fsimg_image_t *,
     const fsimg_layer_t **, fsimg_error_t *);
 static void adopt_carried_stack(fsimg_image_t *, const fsimg_layer_t *);
 static fsimg_status_t peel_container(fsimg_image_t *, fsimg_error_t *);
+static bool table_in_system_area(const fsimg_survey_t *,
+    const fsimg_survey_t *);
 static fsimg_status_t identify_disk(fsimg_image_t *, const fsimg_layer_t *,
-    const fsimg_layer_t **, fsimg_error_t *);
+    const fsimg_layer_t **, const fsimg_layer_t **, fsimg_error_t *);
 static fsimg_status_t detect_scheme(fsimg_image_t *, fsimg_error_t *);
 static void scheme_input(fsimg_image_t *, fsimg_scheme_input_t *);
 static fsimg_status_t select_slice(fsimg_image_t *, uint64_t, uint64_t,
@@ -1029,17 +1034,35 @@ peel_container(fsimg_image_t *image, fsimg_error_t *error)
 }
 
 /*
+ * Whether the scheme step's claims are an isohybrid image: one scheme and
+ * one filesystem both match, and the filesystem reserves the system area
+ * the table lies in, so the table cannot contest the volume. A damaged
+ * claim on either side keeps the ambiguity rather than reading past it.
+ */
+static bool
+table_in_system_area(const fsimg_survey_t *schemes,
+    const fsimg_survey_t *filesystems)
+{
+	return (fsimg_survey_claim(schemes) == FSIMG_CLAIM_FORMAT &&
+	    fsimg_survey_claim(filesystems) == FSIMG_CLAIM_FORMAT &&
+	    filesystems->format->reserved_system_area);
+}
+
+/*
  * The scheme step's probes, run on one prefix of the disk: the forced
  * scheme's alone, or every scheme's together with the filesystem probes.
- * On success *scheme is the scheme that claimed, or NULL for a bare volume.
- * Unforced, exactly one claim decides; none is an unrecognized disk and
- * several are an ambiguity. A scheme claim that is corrupt or unsupported
- * fails with its probe's reason, naming the scheme, never falling back
- * to a bare volume.
+ * On success *scheme is the scheme that claimed, or NULL for a bare volume,
+ * and *hybrid the scheme whose table lies in that bare volume's reserved
+ * system area (table_in_system_area), or NULL. Unforced, exactly one claim
+ * decides, apart from that pairing; none is an unrecognized disk and
+ * several are an ambiguity. A scheme claim that is corrupt or
+ * unsupported fails with its probe's reason, naming the scheme, never
+ * falling back to a bare volume.
  */
 static fsimg_status_t
 identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
-    const fsimg_layer_t **scheme, fsimg_error_t *error)
+    const fsimg_layer_t **scheme, const fsimg_layer_t **hybrid,
+    fsimg_error_t *error)
 {
 	fsimg_survey_t counts[SURVEY_KINDS];
 	const fsimg_survey_t *schemes = &counts[FSIMG_LAYER_SCHEME];
@@ -1049,6 +1072,7 @@ identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
 	fsimg_status_t status;
 
 	*scheme = NULL;
+	*hybrid = NULL;
 	input.tail = NULL;
 	input.tail_length = 0;
 	input.bytes = image->disk_bytes;
@@ -1073,11 +1097,16 @@ identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
 	if (status != FSIMG_OK)
 		return (status);
 
-	/* Nothing claimed; both kinds claimed; several schemes claimed; one
-	 * scheme claimed but its table is damaged or unsupported. Otherwise
-	 * one scheme claimed, or the filesystems (one, or several left for the
-	 * reader to report) make it a bare volume.
+	/* An isohybrid image is a bare volume that names its table. Otherwise:
+	 * nothing claimed is an unrecognized disk; both kinds claimed is an
+	 * ambiguity; several schemes are an ambiguity; one scheme whose table
+	 * is damaged or unsupported fails. One scheme, or filesystems alone
+	 * (one, or several left for the reader to report), decide.
 	 */
+	if (table_in_system_area(schemes, filesystems)) {
+		*hybrid = schemes->layer;
+		return (FSIMG_OK);
+	}
 	if (schemes->claims + filesystems->claims == 0)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no partition table or filesystem recognized"));
@@ -1118,7 +1147,7 @@ static fsimg_status_t
 detect_scheme(fsimg_image_t *image, fsimg_error_t *error)
 {
 	const fsimg_stack_slot_t *slot;
-	const fsimg_layer_t *forced, *scheme;
+	const fsimg_layer_t *forced, *scheme, *hybrid;
 	fsimg_scheme_input_t input;
 	fsimg_status_t status;
 	uint64_t logical_sector;
@@ -1133,7 +1162,7 @@ detect_scheme(fsimg_image_t *image, fsimg_error_t *error)
 	}
 	forced = slot->state == FSIMG_SLOT_NAMED ? fsimg_layer_find(slot->name) :
 	    NULL;
-	status = identify_disk(image, forced, &scheme, error);
+	status = identify_disk(image, forced, &scheme, &hybrid, error);
 	if (status != FSIMG_OK)
 		return (layer_failed(forced, status, error));
 	if (scheme != NULL) {
@@ -1156,6 +1185,7 @@ detect_scheme(fsimg_image_t *image, fsimg_error_t *error)
 		}
 	}
 	image->scheme = scheme;
+	image->hybrid = hybrid;
 	image->detected = true;
 	return (FSIMG_OK);
 }
@@ -1222,6 +1252,9 @@ fsimg_image_get_info(fsimg_image_t *image, fsimg_image_info_t *out,
 		    image->scheme->name);
 		snprintf(out->scheme, sizeof(out->scheme), "%s", image->scheme->name);
 	}
+	if (image->hybrid != NULL)
+		snprintf(out->hybrid_scheme, sizeof(out->hybrid_scheme), "%s",
+		    image->hybrid->name);
 	fsimg_stack_format(&stack, out->stack, sizeof(out->stack));
 	bcopy(image->table.disk_guid, out->disk_guid, sizeof(out->disk_guid));
 	out->disk_bytes = image->disk_bytes;
@@ -1482,6 +1515,7 @@ fsimg_image_select(fsimg_image_t *image, const fsimg_selector_t *selector,
 	const fsimg_partition_record_t *record = NULL;
 	fsimg_error_t local;
 	fsimg_status_t status;
+	char message[128];
 
 	if (error == NULL)
 		error = &local;
@@ -1512,6 +1546,16 @@ fsimg_image_select(fsimg_image_t *image, const fsimg_selector_t *selector,
 		return (status);
 	if (selector->kind == FSIMG_SELECT_AUTOMATIC)
 		return (select_automatic(image, volume, error));
+	/* A selector does not force the scheme an isohybrid image's volume
+	 * took precedence over.
+	 */
+	if (image->hybrid != NULL) {
+		snprintf(message, sizeof(message), "the disk is read as its "
+		    "volume; force the %s scheme to select a partition",
+		    image->hybrid->name);
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    message));
+	}
 	if (image->scheme == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "the disk has no partition table"));

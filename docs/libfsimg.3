@@ -486,6 +486,16 @@ A stack that names a scheme or another filesystem with a container that
 carries one filesystem, ifsboot or hbcifs, or forces one around such a
 container when it is detected, fails with FSIMG_EINVAL naming the
 container.
+A disk that both a partition table and a filesystem claim is ambiguous
+unless the stack forces the scheme slot, with one exception: ISO 9660
+reserves its system area for boot and partition data, so an isohybrid
+image whose GPT or MBR lies there, both identities matching, is read as
+its ISO 9660 volume, a partition selector on it fails with FSIMG_EINVAL,
+and
+.Fn fsimg_image_get_info
+names the scheme in hybrid_scheme, otherwise empty; forcing the scheme
+reads its partitions.
+An MBR entry starting at sector 0 is no partition table.
 .Fn fsimg_layer_next
 reports each container's chunk encodings and the version of the library
 each container and compression uses.

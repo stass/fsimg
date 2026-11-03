@@ -163,6 +163,8 @@ typedef struct fsimg_cli_display {
 	bool		 entry_diagnostic;
 	bool		 overflow;
 	bool		 progress_started;
+	/* The IMAGE record's hybrid scheme has been noted on stderr. */
+	bool		 hybrid_noted;
 	/* cW: events come from the verification worker of the staged image. */
 	bool		 verifying_staged;
 } fsimg_cli_display_t;

@@ -351,6 +351,9 @@ On GPT, basic, fat12, fat16, fat32 and exfat all name the basic-data type, so
 each selects any basic-data partition.
 Without it the volume is the one partition holding a recognized filesystem;
 a disk without a partition table is itself the volume.
+An isohybrid image is read as its ISO 9660 volume unless
+.Fl F
+names its scheme, so a partition selection on it needs that stack.
 .It Fl Fl offset Ns = Ns Ar bytes
 Volume offset within the disk; default zero.
 .It Fl Fl length Ns = Ns Ar bytes
@@ -375,6 +378,17 @@ is refused as ambiguous; force the scheme slot to choose:
 names the table and
 .Ql fat12/-
 forces it empty.
+An ISO 9660 volume, whose leading system area is reserved for boot and
+partition data, is the exception when both identities match: the volume
+is read, with a note naming the scheme, and the table is checked only
+when the forced scheme reads it;
+.Fl Fl partition
+then needs that scheme forced too.
+An ISO 9660 descriptor left behind on a repartitioned disk is read the
+same way, so force the scheme to read the new table.
+An MBR entry starting at sector 0, as mformat and isohybrid write over the
+volume that begins there, is no partition table, and the disk is that bare
+volume.
 QNX6 locates its second superblock in the last whole 4096-byte unit of the
 slice, so
 .Fl Fl length
@@ -520,10 +534,13 @@ with its subtree; the primary view shows it, and
 checks its records there without interpreting their Rock Ridge entries.
 The allocated units it reports are the blocks some structure or file
 claims; unused blocks are legal and none is reported free.
-An image whose system area holds a partition table matches both the scheme
-and the filesystem;
-.Fl F Ar iso9660/-
-reads the filesystem.
+An image whose system area also holds a partition table, an isohybrid
+image, is read as its ISO 9660 volume, since the format reserves that area
+for such data; a note on standard error names the scheme, and
+.Fl F Ar gpt
+or
+.Fl F Ar mbr
+reads the partitions instead.
 .Pp
 A gzip-compressed image, a file or standard input, is detected from its
 first bytes and decoded, member after member as

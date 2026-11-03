@@ -62,11 +62,11 @@ The driver follows every common contract:
 
 The driver reads and writes a bare volume. An isohybrid image, whose system
 area holds an MBR or GPT that makes the same file a partitioned disk, has
-two valid readings: the scheme probe and the ISO probe both claim it, so
-detection reports an ambiguity under the existing
-[rule](design-layers.md#detection-and-forcing), and `-F iso9660/-` reads the
-ISO while `--partition` reads a partition. No probe gives one reading
-priority.
+two valid readings: the scheme probe and the ISO probe both claim it.
+Because ISO 9660 reserves its system area for such data, detection reads
+the ISO and names the scheme in the image information under the
+[system-area rule](design-layers.md#detection-and-forcing), and forcing the
+scheme, `-F gpt` or `-F mbr`, reads a partition.
 
 ## Volume layout
 

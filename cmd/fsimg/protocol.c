@@ -664,9 +664,10 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame)
  * verified image names unverified entries: the compression's own entry
  * first when it has one, then a container's fields, so without a
  * container the list is empty or exactly the compression's entry. Without
- * a scheme every table field is zero;
- * with one, the sector size is GPT's or MBR's and the selection lies in
- * the table. The caller checks the file against the input it knows.
+ * a scheme every table field is zero, and the hybrid scheme is empty or
+ * a registered scheme; with one, the hybrid scheme is empty, the sector
+ * size is GPT's or MBR's and the selection lies in the table. The caller
+ * checks the file against the input it knows.
  */
 bool
 fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
@@ -692,7 +693,9 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	    FSIMG_WIRE_IMAGE_CODECS_BYTES) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_COMPRESSION, '\0', 16) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_REASON, '\0',
-	    FSIMG_WIRE_IMAGE_REASON_BYTES) == NULL)
+	    FSIMG_WIRE_IMAGE_REASON_BYTES) == NULL ||
+	    memchr(raw + FSIMG_WIRE_IMAGE_HYBRID, '\0',
+	    FSIMG_WIRE_IMAGE_HYBRID_BYTES) == NULL)
 		return (false);
 	if (!details_valid(raw, FSIMG_WIRE_IMAGE_DETAIL_COUNT,
 	    FSIMG_WIRE_IMAGE_DETAILS, FSIMG_IMAGE_DETAILS_MAX) ||
@@ -731,6 +734,16 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	    raw[FSIMG_WIRE_IMAGE_REASON] == '\0' || selected != 0 :
 	    raw[FSIMG_WIRE_IMAGE_REASON] != '\0')
 		return (false);
+	/* A hybrid scheme, which the display prints, only beside a bare
+	 * volume.
+	 */
+	if (raw[FSIMG_WIRE_IMAGE_HYBRID] != '\0') {
+		layer = fsimg_layer_find((const char *)raw +
+		    FSIMG_WIRE_IMAGE_HYBRID);
+		if (layer == NULL || layer->scheme == NULL ||
+		    raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0')
+			return (false);
+	}
 	scheme = raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0';
 	if (!scheme)
 		return (sector == 0 && slots == 0 && selected == 0 && checked == 0 &&

@@ -124,8 +124,11 @@ byte 0, QNX4 its root record at 512, QNX6 its superblock at 8192 and ImageFS
 its header at 0, and none places `BEA01`, `NSR` and `TEA01` at consecutive
 recognition slots; a UDF volume's first 32 KiB carry none of their
 signatures unless a writer put a boot record there, such as mkudffs's
-whole-disk MBR, whose treatment the layer design decides (research question
-Q16).
+whole-disk MBR. Its one entry starts at sector 0, which the MBR identity
+excludes, and a partition table elsewhere in the system area yields to the
+volume under the layer design's
+[system-area rule](design-layers.md#detection-and-forcing), so the UDF
+descriptor declares that its system area is reserved.
 
 `open` completes recognition in a fixed order; each step fails before the
 next reads:

@@ -115,6 +115,11 @@ static void test_gpt_seeded_failures(void);
 static void test_gpt_sector_sizes(void);
 static void test_mbr_read(void);
 static void test_mbr_seeded_failures(void);
+static void test_mbr_zero_lba_is_not_a_table(void);
+static void test_iso_system_area_scheme(void);
+static void test_iso_corrupt_gpt_is_ambiguous(void);
+static void test_corrupt_iso_gpt_is_ambiguous(void);
+static void test_fat_gpt_is_ambiguous(void);
 static void test_mbr_addressable_limit(void);
 static void test_bare_volume(void);
 static void test_forcing(void);
@@ -1112,8 +1117,7 @@ test_mbr_seeded_failures(void)
 		const char	*check;
 	} corrupt[] = {
 		{ { 2048, 3000 }, { 2048, 100 }, "MBR partitions 1 and 2 overlap" },
-		{ { 2048, 0 }, { 8192, 0 }, "MBR partition 1 extends beyond the disk" },
-		{ { 0, 0 }, { 100, 0 }, "MBR partition 1 overlaps the master boot record" }
+		{ { 2048, 0 }, { 8192, 0 }, "MBR partition 1 extends beyond the disk" }
 	};
 	memory_disk_t disk;
 	fsimg_image_info_t info;
@@ -1169,6 +1173,204 @@ test_mbr_seeded_failures(void)
 	CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_AUTOMATIC },
 	    &volume, NULL) == FSIMG_OK);
 	expect_volume_lists(&f, volume, "/DIR");
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+/* A used entry at sector zero describes a whole disk, not a partition. */
+static void
+test_mbr_zero_lba_is_not_a_table(void)
+{
+	memory_disk_t disk;
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fsimg_io_t *volume;
+	fixture_t f;
+
+	fixture_init(&f);
+	for (unsigned entries = 1; entries <= 2; entries++) {
+		disk = disk_new(4 * MIB);
+		mbr_entry(disk.bytes, 0, 0x00, 0x01, 0, 100);
+		if (entries == 2)
+			mbr_entry(disk.bytes, 1, 0x00, 0x01, 2048, 2048);
+		CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+		CHECK(strcmp(error.message,
+		    "no partition table or filesystem recognized") == 0);
+		CHECK(fixture_open(&f, &disk, "mbr", 0, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+		CHECK(strcmp(error.message, "no MBR partition table") == 0);
+		free(disk.bytes);
+	}
+
+	disk = disk_new(FAT_BYTES);
+	make_fat12(disk.bytes);
+	mbr_entry(disk.bytes, 0, 0x00, 0x01, 0, FAT_BYTES / 512);
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "") == 0);
+	CHECK(strcmp(info.hybrid_scheme, "") == 0);
+	CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_AUTOMATIC },
+	    &volume, NULL) == FSIMG_OK);
+	expect_volume_lists(&f, volume, "/DIR");
+	CHECK(fixture_open(&f, &disk, "mbr", 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "no MBR partition table") == 0);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+/* A boot descriptor at block 16 suffices for ISO's identity probe. Its
+ * system area can hold a table without making the bare ISO ambiguous.
+ * Only detection is tested here; CLI fixtures contain a complete ISO.
+ */
+static void
+test_iso_system_area_scheme(void)
+{
+	static const struct {
+		const char	*stack;
+		const char	*scheme;
+		const char	*hybrid;
+	} cases[] = {
+		{ NULL, "", "gpt" },
+		{ "iso9660", "", "gpt" },
+		{ "gpt", "gpt", "" },
+		{ "iso9660/-", "", "" }
+	};
+	gpt_partition_t partition = {
+		ESP_GUID, name_efi, MIB / 512, 2 * MIB / 512 - 1
+	};
+	memory_disk_t disk = disk_new(4 * MIB);
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fsimg_io_t *volume;
+	fixture_t f;
+
+	make_fat12(disk.bytes + MIB);
+	gpt_build(&disk, 512, &partition, 1);
+	bcopy("\000CD001\001", disk.bytes + 32768, 7);
+	fixture_init(&f);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		CHECK(fixture_open(&f, &disk, cases[i].stack, 0, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+		CHECK(strcmp(info.scheme, cases[i].scheme) == 0);
+		CHECK(strcmp(info.hybrid_scheme, cases[i].hybrid) == 0);
+		CHECK(info.partition_count ==
+		    (cases[i].scheme[0] == '\0' ? 0 : GPT_ENTRIES));
+		if (cases[i].stack == NULL) {
+			CHECK(select_with(&f, (fsimg_selector_t){
+			    .kind = FSIMG_SELECT_INDEX, .index = 1 },
+			    &volume, &error) == FSIMG_EINVAL);
+			CHECK(strcmp(error.message, "the disk is read as its "
+			    "volume; force the gpt scheme to select a "
+			    "partition") == 0);
+		}
+		if (cases[i].scheme[0] != '\0') {
+			CHECK(select_with(&f, (fsimg_selector_t){
+			    .kind = FSIMG_SELECT_AUTOMATIC }, &volume, NULL) == FSIMG_OK);
+			expect_volume_lists(&f, volume, "/DIR");
+			CHECK(select_with(&f, (fsimg_selector_t){
+			    .kind = FSIMG_SELECT_INDEX, .index = 1 },
+			    &volume, NULL) == FSIMG_OK);
+			expect_volume_lists(&f, volume, "/DIR");
+		}
+	}
+	free(disk.bytes);
+
+	disk = disk_new(4 * MIB);
+	make_fat12(disk.bytes + MIB);
+	mbr_entry(disk.bytes, 0, 0x00, 0x01, MIB / 512, FAT_BYTES / 512);
+	bcopy("\000CD001\001", disk.bytes + 32768, 7);
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "") == 0);
+	CHECK(strcmp(info.hybrid_scheme, "mbr") == 0);
+	CHECK(info.partition_count == 0);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+/* A protective MBR claims GPT even when its header is missing. ISO's
+ * reserved system area does not excuse a corrupt partition-table claim.
+ */
+static void
+test_iso_corrupt_gpt_is_ambiguous(void)
+{
+	memory_disk_t disk = disk_new(4 * MIB);
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fixture_t f;
+
+	mbr_entry(disk.bytes, 0, 0x00, 0xee, 1, disk.length / 512 - 1);
+	bcopy("\000CD001\001", disk.bytes + 32768, 7);
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "gpt", 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message,
+	    "GPT protective MBR has no GPT header at LBA 1") == 0);
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+	CHECK(strstr(error.message,
+	    "both a partition table and a filesystem") != NULL);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+/* A primary descriptor invokes ISO's geometry probe. Its zero volume
+ * space size is corrupt, so a valid GPT cannot become a hybrid hint.
+ */
+static void
+test_corrupt_iso_gpt_is_ambiguous(void)
+{
+	gpt_partition_t partition = {
+		ESP_GUID, name_efi, MIB / 512, 2 * MIB / 512 - 1
+	};
+	memory_disk_t disk = disk_new(4 * MIB);
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fixture_t f;
+
+	gpt_build(&disk, 512, &partition, 1);
+	bcopy("\001CD001\001", disk.bytes + 32768, 7);
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "gpt", 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "gpt") == 0);
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+	CHECK(strstr(error.message,
+	    "both a partition table and a filesystem") != NULL);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+/* FAT's probe uses only the boot sector. The GPT encoder preserves its
+ * BPB while replacing FAT data with GPT metadata; no FAT read is attempted.
+ * A filesystem without a reserved system area remains ambiguous with GPT.
+ */
+static void
+test_fat_gpt_is_ambiguous(void)
+{
+	gpt_partition_t partition = {
+		ESP_GUID, name_efi, MIB / 512, 2 * MIB / 512 - 1
+	};
+	memory_disk_t disk = disk_new(4 * MIB);
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fixture_t f;
+
+	make_fat12(disk.bytes);
+	/* Clear the primary GPT area, including any FAT directory bytes. */
+	bzero(disk.bytes + 512, 512 + GPT_ENTRIES * 128);
+	gpt_build(&disk, 512, &partition, 1);
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "gpt", 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "gpt") == 0);
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+	CHECK(strstr(error.message,
+	    "both a partition table and a filesystem") != NULL);
 	fixture_free(&f);
 	free(disk.bytes);
 }
@@ -1324,6 +1526,11 @@ main(int argc, char **argv)
 	test_gpt_sector_sizes();
 	test_mbr_read();
 	test_mbr_seeded_failures();
+	test_mbr_zero_lba_is_not_a_table();
+	test_iso_system_area_scheme();
+	test_iso_corrupt_gpt_is_ambiguous();
+	test_corrupt_iso_gpt_is_ambiguous();
+	test_fat_gpt_is_ambiguous();
 	test_mbr_addressable_limit();
 	test_bare_volume();
 	test_forcing();

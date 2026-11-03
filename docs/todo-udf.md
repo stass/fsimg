@@ -17,11 +17,6 @@ the questions and follow-ups that outlive a single stage.
   so no Linux tool produces a metadata partition. A NetBSD `makefs` or
   `newfs_udf` image, a Windows 2.50 volume or a BD-ROM structure survey is
   needed before the metadata stage lands (Q12).
-* [Medium] **Whole-disk UDF behind an MBR** (`lib/layers/mbr.c`,
-  `specs/design-layers.md`): `mkudffs --bootarea=mbr` records one MBR entry
-  starting at LBA 0 and spanning the disk, which the MBR probe claims and
-  validation rejects, so such a disk reads only with the scheme forced
-  empty. Decide whether the MBR probe declines such an entry (Q16).
 * [Medium] **Partition types for UDF volumes** (`specs/design-layers.md`):
   the layer design's GPT and MBR type tables have no `udf` row, so a scheme
   around a UDF volume has no derived type. mkudffs uses MBR type `0x07`;

@@ -606,6 +606,8 @@ send_image(const fsimg_image_info_t *info, const fsimg_layer_report_t *report,
 	    sizeof(info->disk_guid));
 	bcopy(info->scheme, raw + FSIMG_WIRE_IMAGE_SCHEME,
 	    strnlen(info->scheme, sizeof(info->scheme) - 1));
+	bcopy(info->hybrid_scheme, raw + FSIMG_WIRE_IMAGE_HYBRID,
+	    strnlen(info->hybrid_scheme, FSIMG_WIRE_IMAGE_HYBRID_BYTES - 1));
 	return (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_IMAGE, raw,
 	    sizeof(raw), error));
 }
