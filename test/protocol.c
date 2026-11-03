@@ -56,8 +56,15 @@ write_seed(const char *path)
 {
 	fsimg_worker_request_t request;
 	fsimg_error_t error = { .status = FSIMG_ECORRUPT };
-	unsigned char raw[FSIMG_JOB_BYTES];
+	unsigned char raw[FSIMG_WIRE_INFO_BYTES];
 	int fd;
+
+	_Static_assert(sizeof(raw) >= FSIMG_JOB_BYTES &&
+	    sizeof(raw) >= FSIMG_WIRE_PLAN_BYTES &&
+	    sizeof(raw) >= FSIMG_WIRE_ENTRY_BYTES &&
+	    sizeof(raw) >= FSIMG_WIRE_VERIFY_BYTES &&
+	    sizeof(raw) >= FSIMG_WIRE_ERROR_BYTES,
+	    "seed buffer must hold every encoded record");
 
 	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
 	CHECK(fd != -1);

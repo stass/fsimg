@@ -3,7 +3,6 @@
  */
 #include "config.h"
 
-#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
@@ -602,6 +601,16 @@ iso_date7_encode(int64_t seconds, unsigned char *raw)
 	return (true);
 }
 
+/* The low width decimal digits of value, zero-padded, into out[0..width). */
+static void
+store_digits(unsigned char *out, unsigned value, unsigned width)
+{
+	for (unsigned d = width; d > 0; d--) {
+		out[d - 1] = (unsigned char)('0' + value % 10);
+		value /= 10;
+	}
+}
+
 /* The seventeen-byte descriptor date of whole UTC seconds within years 1
  * through 9999: sixteen ASCII digits with zero hundredths, then a
  * zero offset.
@@ -610,28 +619,17 @@ bool
 iso_date17_encode(int64_t seconds, unsigned char *raw)
 {
 	unsigned year, month, day, clock;
-	unsigned fields[7];
-	static const unsigned widths[7] = { 4, 2, 2, 2, 2, 2, 2 };
-	size_t at;
 
 	if (seconds < ISO_DATE17_MIN || seconds > ISO_DATE17_MAX)
 		return (false);
 	civil_from_seconds(seconds, &year, &month, &day, &clock);
-	fields[0] = year;
-	fields[1] = month;
-	fields[2] = day;
-	fields[3] = clock / 3600;
-	fields[4] = clock / 60 % 60;
-	fields[5] = clock % 60;
-	fields[6] = 0;		/* hundredths */
-	at = 0;
-	for (unsigned i = 0; i < 7; i++) {
-		for (unsigned d = widths[i]; d > 0; d--) {
-			raw[at + d - 1] = (unsigned char)('0' + fields[i] % 10);
-			fields[i] /= 10;
-		}
-		at += widths[i];
-	}
+	store_digits(raw, year, 4);
+	store_digits(raw + 4, month, 2);
+	store_digits(raw + 6, day, 2);
+	store_digits(raw + 8, clock / 3600, 2);
+	store_digits(raw + 10, clock / 60 % 60, 2);
+	store_digits(raw + 12, clock % 60, 2);
+	store_digits(raw + 14, 0, 2);		/* hundredths */
 	raw[DATE17_DIGITS] = 0;
 	return (true);
 }
@@ -652,13 +650,22 @@ iso_date17_absent(unsigned char *raw)
 bool
 iso_date17_format(int64_t seconds, char *out)
 {
+	static const char form[] = "0000-00-00 00:00:00";
+	unsigned char *text = (unsigned char *)out;
 	unsigned year, month, day, clock;
 
+	_Static_assert(sizeof(form) == ISO_DATE_TEXT_BYTES,
+	    "the date text and its NUL fill ISO_DATE_TEXT_BYTES");
 	if (seconds < ISO_DATE17_MIN || seconds > ISO_DATE17_MAX)
 		return (false);
 	civil_from_seconds(seconds, &year, &month, &day, &clock);
-	snprintf(out, ISO_DATE_TEXT_BYTES, "%04u-%02u-%02u %02u:%02u:%02u",
-	    year, month, day, clock / 3600, clock / 60 % 60, clock % 60);
+	bcopy(form, text, sizeof(form));
+	store_digits(text, year, 4);
+	store_digits(text + 5, month, 2);
+	store_digits(text + 8, day, 2);
+	store_digits(text + 11, clock / 3600, 2);
+	store_digits(text + 14, clock / 60 % 60, 2);
+	store_digits(text + 17, clock % 60, 2);
 	return (true);
 }
 

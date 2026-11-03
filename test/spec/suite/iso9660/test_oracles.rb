@@ -81,6 +81,37 @@ class Iso9660OraclesTest < Minitest::Test
     assert_equal("disagrees", Iso::Oracles.metadata_report(xorriso, model:, tool: :xorriso, settings: {created: 1}).state)
   end
 
+  def test_descriptor_recipe_text_ignores_trailing_spaces
+    model = descriptor_model(application: "APP ")
+    reports = {xorriso: "App Id: 'APP'\n", isoinfo: "Application id: APP\n"}
+
+    reports.each do |tool, report|
+      result = Iso::Oracles.metadata_report(report, model:, tool:, settings: {application: "APP "})
+      assert_equal("agrees", result.state, "#{tool}: #{result.detail}")
+    end
+  end
+
+  def test_descriptor_recipe_all_space_text_is_not_reported
+    model = descriptor_model(publisher: " ")
+
+    %i[xorriso isoinfo].each do |tool|
+      result = Iso::Oracles.metadata_report("", model:, tool:, settings: {publisher: " "})
+      assert_equal("agrees", result.state, "#{tool}: #{result.detail}")
+    end
+  end
+
+  def test_descriptor_recipe_preserves_trailing_control_whitespace
+    model = descriptor_model(application: "APP")
+    reports = {xorriso: "App Id: 'APP'\n", isoinfo: "Application id: APP\n"}
+
+    reports.each do |tool, report|
+      ["\t", "\n", "\v", "\f", "\r"].each do |suffix|
+        result = Iso::Oracles.metadata_report(report, model:, tool:, settings: {application: "APP#{suffix} \0"})
+        assert_equal("disagrees", result.state, "#{tool}: #{suffix.inspect}")
+      end
+    end
+  end
+
   def test_descriptor_oracles_explicitly_report_absent_tools
     shell = Shell.new(tools: {}, execute: ->(_arguments) { flunk("an absent oracle must not run") })
     model = Model.new(image_length: 96 * 2048, volume: Volume.new(fields: Fields.new(space_le: 96)))
@@ -98,6 +129,15 @@ class Iso9660OraclesTest < Minitest::Test
   end
 
   private
+
+  def descriptor_model(**texts)
+    raw = "\0".b * 2048
+    Iso::DescriptorMetadata::TEXTS.each do |name, (offset, width)|
+      raw[offset, width] = texts.fetch(name.to_sym, "").ljust(width, " ").b
+    end
+    volume = Iso::Descriptor.new(offset: 16 * 2048, raw:, fields: Fields.new(space_le: 96))
+    Model.new(image_length: 96 * 2048, volume:)
+  end
 
   def check_descriptor_creation_oracle(name:)
     fsimg = ENV.fetch("FSIMG_BIN", "")

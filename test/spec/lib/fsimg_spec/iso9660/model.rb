@@ -26,13 +26,15 @@ module FsimgSpec
       DATES = {"created" => 813, "modified" => 830, "expires" => 847, "effective" => 864}.freeze
       module_function
 
+      def trim_text(value) = value.sub(/[ \x00]+\z/, "")
+
       def texts(raw, joliet: false)
         TEXTS.filter_map do |key, (offset, width)|
           field = raw.byteslice(offset, width)
           value = if joliet
             decode_units(field.byteslice(0, width / 2 * 2))
           else
-            field.sub(/[ \x00]+\z/n, "").then { |text| text if text.bytes.all? { (32..126).cover?(_1) } }
+            trim_text(field).then { |text| text if text.bytes.all? { (32..126).cover?(_1) } }
           end
           [key, value] if value && !value.empty?
         end.to_h
@@ -50,7 +52,7 @@ module FsimgSpec
       end
 
       def decode_units(bytes)
-        value = bytes.force_encoding(Encoding::UTF_16BE).encode(Encoding::UTF_8).sub(/[ \x00]+\z/, "")
+        value = trim_text(bytes.force_encoding(Encoding::UTF_16BE).encode(Encoding::UTF_8))
         value unless value.codepoints.any? { _1 < 32 || (127..159).cover?(_1) }
       rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError
         nil

@@ -84,7 +84,7 @@ module FsimgSpec
       end
 
       def recipe_value(name, value) =
-        DATE_LABELS.key?(name) ? Time.at(value).utc.strftime("%Y-%m-%d %H:%M:%S") : value
+        DATE_LABELS.key?(name) ? Time.at(value).utc.strftime("%Y-%m-%d %H:%M:%S") : DescriptorMetadata.trim_text(value)
 
       # The descriptor fields the tool reports differently from the image.
       def tool_problems(text, fields:, raw:, tool:)

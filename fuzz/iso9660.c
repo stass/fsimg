@@ -3,6 +3,7 @@
  */
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 
 #include "fsimg.h"
@@ -46,6 +47,7 @@ exercise(const uint8_t *data, size_t size, const char *format,
 	fuzz_input_t input = { .data = data, .size = size };
 	fsimg_options_t options;
 	fsimg_read_options_t read_options;
+	fsimg_volume_info_t info;
 	fsimg_io_ops_t ops;
 	fsimg_ctx_t *ctx;
 	fsimg_io_t *io;
@@ -80,6 +82,32 @@ exercise(const uint8_t *data, size_t size, const char *format,
 	read_options.iso_view = view;
 	if (fsimg_reader_open(ctx, io, &read_options, &reader, NULL) ==
 	    FSIMG_OK) {
+		/* Check the fsimg_volume_info_t contract. */
+		if (fsimg_reader_get_info(reader, &info, NULL) == FSIMG_OK) {
+			if (info.text_count > FSIMG_VOLUME_TEXTS_MAX)
+				abort();
+			for (uint32_t i = 0; i < info.text_count; i++) {
+				if (memchr(info.texts[i].name, '\0',
+				    sizeof(info.texts[i].name)) == NULL ||
+				    memchr(info.texts[i].value, '\0',
+				    sizeof(info.texts[i].value)) == NULL)
+					abort();
+			}
+			for (uint32_t i = info.text_count;
+			    i < FSIMG_VOLUME_TEXTS_MAX; i++) {
+				const unsigned char *text =
+				    (const unsigned char *)&info.texts[i];
+
+				for (size_t j = 0; j < sizeof(info.texts[i]); j++) {
+					if (text[j] != 0)
+						abort();
+				}
+			}
+			if (memchr(info.label, '\0', sizeof(info.label)) == NULL ||
+			    memchr(info.mountpoint, '\0',
+			    sizeof(info.mountpoint)) == NULL)
+				abort();
+		}
 		while (fsimg_reader_next(reader, &entry, NULL) == FSIMG_OK) {
 			if (entry->kind != FSIMG_ENTRY_FILE)
 				continue;
