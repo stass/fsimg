@@ -176,7 +176,8 @@ The unencrypted-container reader accepts:
 * case-insensitive and case-sensitive volumes, with hashed or plain
   directory keys;
 * regular files, directories, symbolic links and FIFOs, with hard links
-  exposed as separate entries;
+  exposed as separate entries, and character devices, block devices and
+  sockets as read-only kinds;
 * sparse files, clones, and transparent compression with the zlib, LZVN and
   LZFSE codecs.
 
@@ -739,7 +740,7 @@ unsupported.
 | `0040000` | 4 | `FSIMG_ENTRY_DIRECTORY` | Directory records |
 | `0120000` | 10 | `FSIMG_ENTRY_SYMLINK` | Target from the symbolic-link attribute |
 | `0010000` | 1 | `FSIMG_ENTRY_FIFO` | None |
-| `0020000`, `0060000`, `0140000` | 2, 6, 12 | unsupported | Device or socket: the directory's preparation fails naming it, under the [metadata contract](design-metadata.md#entry-kinds) |
+| `0020000`, `0060000`, `0140000` | 2, 6, 12 | `FSIMG_ENTRY_CHAR_DEVICE`, `FSIMG_ENTRY_BLOCK_DEVICE`, `FSIMG_ENTRY_SOCKET` | None; read-only kinds of the [device node design](design-device-nodes.md#readers). A device's number is the [device number extended field](#extended-fields) when present |
 | other | | | `FSIMG_ECORRUPT` |
 
 A directory record's type must equal its inode's mode type. Entry metadata
@@ -764,7 +765,10 @@ sizes and padding must fit the record exactly; the used-data count must
 equal the padded sum. A field type appears at most once. The meaning of a
 type depends on the record kind. Inode fields the reader decodes: the data
 stream (type 8, 40 bytes), the name (type 4, NUL-terminated UTF-8), the
-sparse byte count (type 13) and the device number (type 14). A directory
+sparse byte count (type 13) and the device number (type 14, 4 bytes: the
+macOS `dev_t`, bits 24 to 31 `dev_major` and bits 0 to 23 `dev_minor`,
+valid only on a character or block device, `FSIMG_ECORRUPT` on another
+kind, and a device without it has no number). A directory
 record's sibling ID is type 1. Other known types are validated by size and
 ignored; an unknown type with a valid size is ignored when its flags do not
 mark it data-dependent, and is unsupported otherwise. Padding bytes are
@@ -1175,7 +1179,8 @@ the container's size (E1).
 ## Information and capabilities
 
 The capability record names `apfs` with the profile `apfs-unicode-<version>`,
-files, directories, symbolic links and FIFOs, owner, mode and all four
+files, directories, symbolic links and FIFOs, the read-only devices and
+sockets, owner, mode and all four
 timestamps; block sizes 4096 through 65536 for reading and 4096 for writing,
 in both the sector and allocation-unit masks since APFS addresses whole
 blocks;
@@ -1198,7 +1203,7 @@ checkpoint was passed over. Its details, in order: `volume_index`,
 | Condition | Status |
 | --- | --- |
 | No `NXSB` signature | `FSIMG_EFORMAT` |
-| Recognized but outside the profile: features in the refusal tables, encryption, Fusion, noncontiguous areas, revert or rolling state, unknown data-dependent fields or content-changing flags, device or socket entries, names above 1022 bytes, link targets above 1023 bytes, LZBITMAP or unknown compression, tree height above 16 levels, sealed hash types other than SHA-256 | `FSIMG_EUNSUPPORTED` |
+| Recognized but outside the profile: features in the refusal tables, encryption, Fusion, noncontiguous areas, revert or rolling state, unknown data-dependent fields or content-changing flags, names above 1022 bytes, link targets above 1023 bytes, LZBITMAP or unknown compression, tree height above 16 levels, sealed hash types other than SHA-256 | `FSIMG_EUNSUPPORTED` |
 | Checksum, header, range, ordering, tiling, tie, hash, count, reference, tombstoned required object, namespace collision or allocation inconsistency | `FSIMG_ECORRUPT` |
 | No `volume=` for a container with several volumes, a `volume=` naming an empty or out-of-range slot, an unknown or malformed snapshot name, any other invalid setting, a name outside the writer's rules, colliding names | `FSIMG_EINVAL` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
@@ -1216,7 +1221,7 @@ free space, attribute data or buffer contents.
 | Volumes | One and several volumes, each role E10 provides, case-insensitive and case-sensitive personalities | Missing selection with several volumes, empty slot, index mismatch, duplicate UUIDs, every refused feature bit |
 | Records | Every kind in each tree, extended fields at their boundaries, names of 1 to 255 bytes and every Unicode class of E4 | Truncated values, overlapping fields, misaligned field data, wrong hash or length, invalid UTF-8, embedded NUL or slash, dot names, wrong record variant, type disagreeing with mode |
 | Content | Files of 0, 1, 4095, 4096, 4097 bytes and above 4 GiB, many extents, holes in both forms, preallocated extents past the size, clones and their overwritten branches, every supported compression type with one and many chunks | Gaps, overlaps, unaligned lengths, extent past both the rounded size and the allocated bytes, extent past `N`, crypto ID outside the table, short or long decoded chunks, chunk table overruns |
-| Links | Hard links across directories, symbolic links of 1 and 1023 bytes, FIFOs | Mismatched link counts, missing sibling records, directory with two parents, directory cycle, link target of 1024 bytes |
+| Links and kinds | Hard links across directories, symbolic links of 1 and 1023 bytes, FIFOs, a character and a block device with and without the device number field, a socket | Mismatched link counts, missing sibling records, directory with two parents, directory cycle, link target of 1024 bytes, the device number field on a file |
 | Verification | Every native fixture verifies; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found | Each mutation reports its class; a report is never complete after an unsupported object |
 | Writer | Empty, small, deep, wide (forcing multi-level trees), large-file and nearly full containers in both personalities; byte identity across source order, budget, scratch and time zone; poison scan of unused bytes | Colliding names under each personality, oversized names and labels, times outside the range, sizes that do not fit |
 

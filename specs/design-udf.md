@@ -604,7 +604,7 @@ Every FE, EFE and USE carries a 20-byte ICB tag at offset 16: [E1], [N1]
 | 9 | FIFO | `FSIMG_ENTRY_FIFO` |
 | 12 | Symbolic link | `FSIMG_ENTRY_SYMLINK` |
 | 13 | Stream directory | never an entry; walked by verification |
-| 6, 7, 10 | Block device, character device, socket | `FSIMG_EUNSUPPORTED` naming the entry |
+| 6, 7, 10 | Block device, character device, socket | `FSIMG_ENTRY_BLOCK_DEVICE`, `FSIMG_ENTRY_CHAR_DEVICE`, `FSIMG_ENTRY_SOCKET`, read-only kinds of the [device node design](design-device-nodes.md#readers); no body. A device's number is the device specification [extended attribute](#extended-attributes), required on exactly types 6 and 7 |
 | 249 | Real-time file | `FSIMG_EUNSUPPORTED` naming the entry |
 | 248, 250, 251, 252 | VAT, metadata, mirror, bitmap file | internal; named from a directory, `FSIMG_ECORRUPT` |
 | 0 | Unknown | internal for a 1.50 VAT; named from a directory, `FSIMG_EUNSUPPORTED` |
@@ -649,7 +649,14 @@ subtype (u8, 1), 3 reserved bytes and an attribute length (u32, at least 12,
 a multiple of 4), tiling the area exactly. File times (type 5) supplies the
 creation time of an FE: after the 12-byte attribute header, a data length
 (u32), an existence mask (u32) whose bit 0 marks a creation time, then the
-12-byte times in mask order, which the data length covers. Implementation-use (2048) and application-use
+12-byte times in mask order, which the data length covers. Device
+specification (type 12, subtype 1) supplies a device's number: after the
+12-byte header, an implementation-use length (u32), the major (u32) and
+minor (u32) identifiers, then the implementation-use bytes the length
+covers, all within the attribute; they become `dev_major` and `dev_minor`.
+It is required on a block or character device and corrupt on any other
+file type, as the [device node design](design-device-nodes.md#readers)
+states. Implementation-use (2048) and application-use
 (65536) attributes are skipped after their framing is checked, as UDF
 defines them skippable; any other type is skipped after its framing is
 checked, since none changes how fsimg reads the entry. A framing failure is
@@ -973,7 +980,7 @@ owns the metadata file's, mirror's and bitmap file's blocks like any file's.
 | Access types | per profile |
 | ICB strategy | 4 |
 | Allocation | `short_ad`, `long_ad`, inline, AED chains, all four extent types |
-| Kinds | directory, regular file, symbolic link, FIFO |
+| Kinds | directory, regular file, symbolic link, FIFO; block device, character device and socket read-only |
 | Names | CS0 8 and 16; outside the profile omitted or refused as tabled |
 | Symbolic-link targets | 1 to 1024 bytes |
 | Metadata | owner, mode, four timestamps, hidden, archive, system |
@@ -981,7 +988,8 @@ owns the metadata file's, mirror's and bitmap file's blocks like any file's.
 | Integrity | open or closed |
 | Bridges | the UDF view; ISO 9660 structures not interpreted |
 
-The capability advertises files, directories, symbolic links and FIFOs;
+The capability advertises files, directories, symbolic links and FIFOs, and
+the read-only block device, character device and socket;
 owner, mode, the four timestamps and attributes; 512- to 4096-byte sectors
 and allocation units; names of up to 254 UTF-16 units, the eight-bit maximum;
 a 126-byte label; and a 1024-byte link-target limit.
@@ -989,7 +997,7 @@ a 126-byte label; and a 1024-byte link-target limit.
 Unsupported here, each with a `FSIMG_EUNSUPPORTED` result rather than a
 guess: block sizes above 4096, multi-volume sets, more than one physical
 partition, strategy 4096, indirect entries, external extended-attribute
-files, real-time files, transformed or versioned files, devices, sockets and
+files, real-time files, transformed or versioned files and
 Secure UDF. Later sessions of a multisession image are a limitation rather
 than a detected case: a flat image carries no table of contents, so the
 reader reads the session whose anchor is at block 256 of the slice. A later

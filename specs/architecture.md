@@ -395,9 +395,9 @@ complete ownership nor defines sharing policy for other formats. QNX6's owner-be
 bitset, and ImageFS's reference and checksum checks keep their own representations.
 
 Verification reports count delivered non-directory entries as `files`,
-including symbolic links and FIFOs; `directories` includes the implicit
-root. `logical_bytes` sums non-directory logical sizes, including link-target
-bytes and zero-length FIFOs. `payload_bytes_read` counts image bytes read
+including symbolic links, FIFOs, devices and sockets; `directories` includes
+the implicit root. `logical_bytes` sums non-directory logical sizes,
+including link-target bytes and the zero lengths of the content-less kinds. `payload_bytes_read` counts image bytes read
 as payload, so targets decoded from metadata contribute logical bytes but
 no payload I/O. These definitions follow the common entry/content model
 and do not require format-specific counter categories.
@@ -627,10 +627,13 @@ name nor own partition discovery, boot code, or other volumes. A replacement
 Porsche HDD requires a qualified disk layout and every constituent filesystem,
 including QNX4 where present. The [POSIX metadata design](design-metadata.md)
 is the one common representation of owner, mode, change time, symbolic links
-and FIFOs: a format advertises a field or kind only through its capability
-record, planning applies one loss policy to every field, and hardlink
-topology has no representation until a design adds one. Fidelity claims do not
-weaken the safe extractor's file/directory-only contract. This keeps device
+and FIFOs, and the [device node design](design-device-nodes.md) adds
+character devices, block devices and sockets as kinds every reader may
+report and no writer stores: a format advertises a field or kind only
+through its capability record, planning applies one loss policy to every
+field, and hardlink topology has no representation until a design adds one.
+Fidelity claims do not weaken the safe extractor's file/directory-only
+contract. This keeps device
 compatibility evidence separate from a successful filesystem parse.
 
 Plan initialized payload counts describe format-initialized file extents,

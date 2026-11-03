@@ -675,6 +675,29 @@ of every tree, and a writer registered once independent consumers agree
 in every view, followed by Rock Ridge relocation and boot-gated El Torito
 writing.
 
+Device nodes and sockets follow the
+[device node design](../specs/design-device-nodes.md), each stage one
+reviewed commit:
+
+1. **Common model, command line and records.** The three kinds and
+   `FSIMG_META_DEVICE` in the public header and `FSIMG_ENTRY_KNOWN`; the
+   capability test's device-kind relations; the catalog test that
+   `add_entry()` refuses them; the entry record's two device words with the
+   parent's validation; the `t`, `t -v`, `--json` and `--formats` output;
+   extraction's fail-or-skip of the kinds, which the extractor's existing
+   rule gives; `x -O` refusal; and the manifest writer's `type` names and
+   `device` keyword. Complete: the protocol, CLI and mtree tests of the
+   design pass with no reader yet producing the kinds.
+2. **ISO 9660 Rock Ridge reader.** `PX` device and socket types admitted,
+   `PN` decoded into the field and required on exactly the devices, the
+   synthesized witnesses and mutations of the acceptance matrix, and a
+   corpus disc with a `dev` directory compared with xorriso. Complete: the
+   FreeBSD 1.0 installation CD lists, verifies and extracts under `-k`.
+3. **Other readers.** QNX4, QNX6 and ImageFS keep the device types
+   unsupported, with a regression test each; UDF, HFS Plus and APFS take
+   their table rows when their readers are implemented, as part of those
+   plans.
+
 Other extensions receive their own designs before code: a
 reader-only NTFS profile with an independent corpus; additional
 offline-writable formats; and optional archive integration. Their order

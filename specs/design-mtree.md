@@ -44,9 +44,9 @@ catalog sorts entries by path and resolves equal paths by rank
 `FSIMG_WRITE_IMPORT_POSIX`. The CLI worker receives the opened roots of
 the create operands and nothing it could resolve a pathname against. The safe
 extractor (`lib/extract/extract.c`) creates files and directories with private
-modes, restores no owner, mode or change time, and creates no links or
-FIFOs, so an extracted QNX6 tree loses exactly the fields a manifest can
-carry. The manifest parser, `lib/source/mtree.c` (`fsimg_mtree_parse()`),
+modes, restores no owner, mode or change time, and creates no links, FIFOs,
+devices or sockets, so an extracted QNX6 tree loses exactly the fields a
+manifest can carry. The manifest parser, `lib/source/mtree.c` (`fsimg_mtree_parse()`),
 implements the [grammar](#grammar) and the parser's bounds: it reads a
 manifest through a read callback, one bounded logical line at a time, and
 hands each entry line to an entry callback as a decoded, validated entry
@@ -523,11 +523,20 @@ documentation states.
 ./bin/sh type=file mode=0555 uid=0 gid=0 time=946684800.000000000 size=1183848 sha256digest=...
 ./lib/libc.so type=link mode=0777 uid=0 gid=0 time=946684800.000000000 link=libc.so.7
 ./var/run/log type=fifo mode=0666 uid=0 gid=0 time=946684800.000000000
+./dev/null type=char mode=0666 uid=0 gid=0 time=946684800.000000000 device=native,1,3
+./dev/sd0 type=block mode=0640 uid=0 gid=5 time=946684800.000000000 device=native,4,0
+./var/run/log.sock type=socket mode=0666 uid=0 gid=0 time=946684800.000000000
 ```
 
-Each line has the path, `type`, then `mode`, `uid`, `gid` when their fields
+Each line has the path, `type` (`dir`, `file`, `link`, `fifo`, `char`,
+`block` or `socket`), then `mode`, `uid`, `gid` when their fields
 are valid, `time` when the modification time is valid, `size` and
-`sha256digest` for a file, and `link` for a symbolic link. Names and link
+`sha256digest` for a file, `link` for a symbolic link, and `device` for a
+device with a valid device number, in the keyword's `format,major,minor`
+form with the format `native` and the entry's `dev_major` and `dev_minor`
+in decimal, as the [device node design](design-device-nodes.md) states;
+the parser refuses the three device types when such a manifest is read
+back. Names and link
 targets are encoded with `\ooo` for every byte outside `0x21` through `0x7E`
 and for `\` and `#`, so the line is plain ASCII. `time` is nine fractional
 digits. A wall-clock or offset modification time is written as the instant

@@ -348,7 +348,7 @@ reader exposes exactly one, the **view**, for the whole reader session:
 
 | View | Tree | Names | Kinds and metadata |
 | --- | --- | --- | --- |
-| `rockridge` | Primary hierarchy with its SUSP entries | Rock Ridge names | Files, directories, symbolic links, FIFOs; owner, mode, Rock Ridge times |
+| `rockridge` | Primary hierarchy with its SUSP entries | Rock Ridge names | Files, directories, symbolic links, FIFOs, devices and sockets; owner, mode, device numbers, Rock Ridge times |
 | `joliet` | The Joliet hierarchy | UTF-16BE identifiers as UTF-8 | Files and directories; recording dates |
 | `primary` | Primary hierarchy without SUSP | ISO identifiers | Files and directories; recording dates |
 
@@ -723,7 +723,7 @@ included, is decoded as a SUSP stream. The entries:
 | Entry | Length | Contents | Rule |
 | --- | --- | --- | --- |
 | `PX` | 36 or 44 | Mode, link count, uid, gid, and in the 44-byte form the serial number, each `u32both` | Another length is `FSIMG_ECORRUPT` |
-| `PN` | 20 | Device number | Allowed only on a device, which is unsupported |
+| `PN` | 20 | Device number, two `u32both` words | Required on exactly the character and block devices; [Kinds and metadata](#kinds-and-metadata) |
 | `SL` | 5 or more | Flags, then components | [Symbolic links](#symbolic-links) |
 | `NM` | 5 or more | Flags, then name bytes | [Rock Ridge names](#rock-ridge-names); bit 0 continues the name |
 | `CL` | 12 | Child directory block | [Relocation](#relocation) |
@@ -770,13 +770,16 @@ only for validity.
 ### Kinds and metadata
 
 `PX` mode's type bits give the kind: regular file, directory, symbolic
-link or FIFO. A directory type must agree with the directory flag, and the
+link, FIFO, or the read-only character device, block device or socket of
+the [device node design](design-device-nodes.md#readers). A directory type
+must agree with the directory flag, and the
 others must not have it, except on a relocation placeholder: a record
 carrying `CL` is a directory in this view whatever its flag, and its `PX`
 type, when present, must be directory, and it carries no `RE`. A
-disagreement is `FSIMG_ECORRUPT`. A character device, block device or
-socket is `FSIMG_EUNSUPPORTED` naming the entry, as is a type outside the
-seven POSIX types. `PN` on an entry that is not a device is
+disagreement is `FSIMG_ECORRUPT`. A type outside the
+seven POSIX types is `FSIMG_EUNSUPPORTED` naming the entry. A character or
+block device carries `PN`, whose high word is `dev_major` and low word
+`dev_minor` as stored; a device without `PN`, or `PN` on any other kind, is
 `FSIMG_ECORRUPT`. The permission bits `07777` are the
 mode, and uid and gid the owner; the link count and serial number are not
 interpreted. A record without `PX` takes its kind from the directory flag
@@ -962,7 +965,7 @@ blocks are legal.
 | `ER` identifiers for Rock Ridge | `RRIP_1991A`, `IEEE_P1282`, `IEEE_1282` | The view is absent |
 | Continuation areas | Within one block; at most 16 per stream | `FSIMG_EUNSUPPORTED` |
 | `PX` lengths | 36, 44 | `FSIMG_ECORRUPT` |
-| Rock Ridge kinds | File, directory, symbolic link, FIFO | `FSIMG_EUNSUPPORTED` |
+| Rock Ridge kinds | File, directory, symbolic link, FIFO, character device, block device, socket | `FSIMG_EUNSUPPORTED` |
 | `SF`, `ZF` | Absent | `FSIMG_EUNSUPPORTED` |
 | Name and target lengths | At most 1024 bytes | `FSIMG_EUNSUPPORTED` |
 | El Torito platforms | 0, 1, 2, `0xEF` | `FSIMG_EUNSUPPORTED` |
@@ -1278,7 +1281,7 @@ Failure classes:
 | --- | --- |
 | `FSIMG_EFORMAT` | No `CD001` descriptor at block 16; a volume shorter than 17 blocks |
 | `FSIMG_ECORRUPT` | Disagreeing copies of a `both` field; a referenced extent outside the volume or the slice; a record crossing a block; nonzero block tail padding; a dot-record rule; a broken section run; identifiers equal after `;1`; malformed SUSP or Rock Ridge entries; a continuation overlap; a relocation mismatch; inconsistent path tables; unsorted primary records; an ownership conflict; a bad El Torito checksum |
-| `FSIMG_EUNSUPPORTED` | A profile value outside its table; a forced view the image lacks; a device, associated or interleaved file; zisofs or sparse files |
+| `FSIMG_EUNSUPPORTED` | A profile value outside its table; a forced view the image lacks; an associated or interleaved file; zisofs or sparse files |
 | `FSIMG_EINVAL` | A selection component the view cannot represent; a writer setting outside its rules, such as a descriptor text field with a character outside its class or longer than its width, or a volume date outside year 1 through 9999 |
 | `FSIMG_ERANGE` | A requested volume smaller than the image; an image beyond `2^32 - 1` blocks |
 | `FSIMG_ELIMIT` | Budget, scratch, work, depth or file-descriptor exhaustion |
@@ -1302,7 +1305,7 @@ shown, when reading unless the row says at verification.
 | Names | `A.TXT;1`, `A.TXT;2`, `README.;1` beside directory `README`, relaxed lowercase identifiers, long Joliet names, non-BMP Joliet names, Rock Ridge UTF-8 names | `A.TXT` beside `A.TXT;1` (ECORRUPT); version 0 or 32768 (ECORRUPT); odd Joliet length (ECORRUPT); unpaired surrogate (omitted); Latin-1 Rock Ridge name (omitted) |
 | Order | Sorted primary directories and path tables, versions descending, `FOO` and `FOO.;1` in either order; an unsorted Joliet hierarchy | Swapped unequal primary neighbours (ECORRUPT at verification) |
 | SUSP | `SP` alone; `ER` in a continuation; 16 continuation areas; unknown entries | Bad check bytes at root (opaque, view absent); length below 4 or past the area (ECORRUPT); 17 areas, an area crossing a block (EUNSUPPORTED); self-referencing or overlapping continuation (ECORRUPT); nonzero skip (EUNSUPPORTED for the view) |
-| Rock Ridge | Every kind; 36- and 44-byte `PX`; 1024-byte name and target; `NM` and `SL` across continuations; short and long `TF` | Type disagreeing with the flag, duplicate `PX`, `TF` length mismatch, dangling `SL` continuation, `NM` with a slash (ECORRUPT); device (EUNSUPPORTED); `ZF`, `SF` (EUNSUPPORTED) |
+| Rock Ridge | Every kind, devices with `PN` words `4, 2`, `0, 0x0402` and both `0xffffffff`, a socket; 36- and 44-byte `PX`; 1024-byte name and target; `NM` and `SL` across continuations; short and long `TF` | Type disagreeing with the flag, duplicate `PX`, `TF` length mismatch, dangling `SL` continuation, `NM` with a slash, a device without `PN`, `PN` on a file or socket, `PN` of another length (ECORRUPT); a type outside the seven (EUNSUPPORTED); `ZF`, `SF` (EUNSUPPORTED) |
 | Relocation | Depths 9 to 20 through one and several relocations; placeholders with a directory `PX`; a relocation directory carrying `RE` that no `CL` names, as mkisofs and xorriso write it | `CL` to a non-directory, missing `PL`, `PL` on an ordinary directory, a `PL` directory no `CL` enters, a loop (ECORRUPT) |
 | Joliet | Levels 1 to 3; shared data with the primary hierarchy | Bad escape (not Joliet); geometry differing from the PVD (ECORRUPT); a forced `joliet` view over a damaged primary handshake (reads) |
 | El Torito | BIOS only, EFI only, BIOS and EFI, boot image as a file and not, an EFI image past the volume, selection criteria in the initial entry | Checksum, signature, media type, a section count past its entries, a catalog or image before the data area, a catalog past the volume or slice (ECORRUPT); unknown platform, extension entry, a second block of entries, two boot records (EUNSUPPORTED) |

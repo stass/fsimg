@@ -285,8 +285,10 @@ by a validated node buffer.
    by their exact stored units, validate them and count them, but do not
    admit them; record the private data folder's node ID when it is seen.
 4. Classify every other child with `hfsplus_link_kind()` and the kind
-   table: a directory stub, a socket or a device fails preparation with
-   `FSIMG_EUNSUPPORTED`, so no child of the directory is exposed; a file
+   table: a directory stub fails preparation with
+   `FSIMG_EUNSUPPORTED`, so no child of the directory is exposed; a socket
+   or a device is admitted as its read-only kind, a device with the
+   `special` word decoded as the format design states; a file
    stub is resolved now, and the indirect node's record takes the stub's
    place for everything but the name; a file with `ownerFlags` `0x20` has
    its compression attribute read and its type checked now, so an
@@ -536,7 +538,7 @@ Reader:
 | Condition | Status |
 | --- | --- |
 | No identity signature; slice shorter than 1536 bytes; a forced variant that contradicts the signature | `FSIMG_EFORMAT` |
-| Signature-version pairing; volume bits outside the table, 29 or 30; tree parameters outside the table; catalog flags outside the table or `0x1000`; sockets, devices and directory hard links; names with `:`, NUL, `.` or `..`; link targets above 1023 bytes or with NUL; compression types outside the table, inline sizes above 65536, compression attributes in fork records; a journal with transactions or on another device; an unobserved attribute record type | `FSIMG_EUNSUPPORTED` |
+| Signature-version pairing; volume bits outside the table, 29 or 30; tree parameters outside the table; catalog flags outside the table or `0x1000`; directory hard links; names with `:`, NUL, `.` or `..`; link targets above 1023 bytes or with NUL; compression types outside the table, inline sizes above 65536, compression attributes in fork records; a journal with transactions or on another device; an unobserved attribute record type | `FSIMG_EUNSUPPORTED` |
 | Geometry, header, fork, extent, overflow, node framing, key, order, separator, sibling, map, record, thread, kind, name encoding, count, link, attribute, compression, journal, wrapper or bitmap inconsistency | `FSIMG_ECORRUPT` |
 | Unrepresentable selection component | `FSIMG_EINVAL` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |

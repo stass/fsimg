@@ -243,9 +243,12 @@ The mode's type bits select the entry kind: [X1], [Q6]
 | `0120000` | symbolic link | the target, `size` bytes, 1 to 1023; a longer one is `FSIMG_EUNSUPPORTED` | exactly `ceil(size / 512)` blocks |
 | `0010000` | FIFO | none | any; the blocks are the FIFO's own and never delivered |
 
-Any other type, including device nodes, is `FSIMG_EUNSUPPORTED`: the
+Any other type is `FSIMG_EUNSUPPORTED`: the
 containing directory's preparation fails, and nothing is fabricated or
-omitted. The native filesystem keeps no allocation past a regular file's
+omitted. The device and socket types of the [device node
+design](design-device-nodes.md#readers) are among them: QNX keeps devices
+in the process manager's namespace, the inode has no device-number field,
+and no native record of such a type is observed. The native filesystem keeps no allocation past a regular file's
 size, with or without its overallocation option, so the exact-allocation rule
 is an observation, not a policy. A FIFO is the one observed exception: native
 `mkfifo` records size 5120 and ten blocks it never writes, so the reader

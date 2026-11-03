@@ -162,8 +162,8 @@ rule.
 | `W`, `i`, `--formats` | Capability, geometry and sandbox details on stderr | Nothing further |
 
 A `c -v` or `x -v` name line is the default `t` line on stderr: the quoted,
-escaped image path, a symbolic link marked `@` and a FIFO `|`, never a host
-path. The names are the library's
+escaped image path, a symbolic link marked `@`, a FIFO `|` and a socket `=`,
+never a host path. The names are the library's
 [entry callback](design-api.md#options-context-and-callbacks), relayed
 through the listing's entry records, so one escaping, one path limit and one
 entries limit serve every mode. Creation names each entry as planning admits
@@ -559,15 +559,16 @@ leading to the member; with no member it lists the root's direct children.
 It differs from GNU tar's `--no-recursion`, which selects only each named
 member itself, and every entry when no member is named. `-n` keeps its one
 meaning, the create plan. The default listing has one
-quoted, escaped image path per line, a symbolic link marked with `@` and a
-FIFO with `|` after the name, and no completion trailer.
+quoted, escaped image path per line, a symbolic link marked with `@`, a FIFO
+with `|` and a socket with `=` after the name, as `ls -F` marks them (a
+device has no mark), and no completion trailer.
 
 `-v` gives the long listing, one line per entry:
 
 | Column | Content |
 | --- | --- |
-| mode | Kind character `-`, `d`, `l` or `p`, then nine permission characters when the entry has a valid mode and nine `?` when the format stores none |
-| size | Logical content length in bytes for regular files and symbolic links; `-` for directories and FIFOs |
+| mode | Kind character `-`, `d`, `l`, `p`, `c`, `b` or `s`, then nine permission characters when the entry has a valid mode and nine `?` when the format stores none |
+| size | Logical content length in bytes for regular files and symbolic links; `major, minor` (for example `4, 2`) for a device with a valid device number; `-` for directories, FIFOs, sockets and devices without one |
 | mtime | `YYYY-MM-DD HH:MM:SS` from the modification timestamp: UTC for UTC and known-offset instants, the recorded calendar fields for an unknown-offset time; `-` when absent |
 | name | As in the default listing |
 

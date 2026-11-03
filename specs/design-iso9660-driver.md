@@ -157,8 +157,9 @@ name and link target it assembles in its 1024-byte buffers, so nothing
 else can overwrite them while preparation or replay uses them; a dot
 record's stream assembles neither. It applies the
 [entry table](design-iso9660.md#entries) and the
-[link rule](design-iso9660.md#symbolic-links). A refused entry, a device,
-`ZF` or an over-long name or target, is recorded as a class rather than
+[link rule](design-iso9660.md#symbolic-links). A refused entry, a type
+outside the seven, `ZF` or an over-long name or target, is recorded as a
+class rather than
 failing at once, so every corruption check runs first and preparation
 names the entry when it refuses it.
 
@@ -192,7 +193,8 @@ exists, and none is needed. Under verification, preparation also compares
 each run's identifier with the previous one under the hierarchy's
 [order](design-iso9660.md#ordering) and emits the [claims](#verification)
 of the directory, its records' sections and its continuation areas. A
-run's refusal (associated, interleaved, device, `ZF`, `SF`) fails the
+run's refusal (associated, interleaved, a type outside the seven, `ZF`,
+`SF`) fails the
 preparation with `FSIMG_EUNSUPPORTED` naming the entry, after its name is
 known.
 
@@ -581,7 +583,7 @@ Reader:
 | Condition | Status |
 | --- | --- |
 | No identity at block 16; a volume shorter than 34816 bytes | `FSIMG_EFORMAT` |
-| A [profile](design-iso9660.md#reader-profile) value outside its table; a forced view the image lacks; an associated, interleaved, device, sparse or zisofs entry; a name or target over 1024 bytes | `FSIMG_EUNSUPPORTED` |
+| A [profile](design-iso9660.md#reader-profile) value outside its table; a forced view the image lacks; an associated, interleaved, sparse or zisofs entry; a name or target over 1024 bytes | `FSIMG_EUNSUPPORTED` |
 | Disagreeing field copies; a referenced structure outside the volume or the slice; a framing, dot-record, tree, section, name, SUSP, Rock Ridge, relocation, boot-catalog or date violation; a repeated name or directory; under verification, an order, path-table, ownership or relocation-match violation | `FSIMG_ECORRUPT` |
 | A selection component outside the portable name profile; a non-default read setting the opened format does not declare | `FSIMG_EINVAL` |
 | Budget, scratch, work, depth or file-descriptor exhaustion | `FSIMG_ELIMIT` |

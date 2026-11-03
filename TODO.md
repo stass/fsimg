@@ -60,9 +60,10 @@
   held content extents, the 4096-byte key bound, CRC-32C and normalization
   tables, the `case=` write setting); the reader, verifier, compression
   through the imported `lzfse` decoders, and a writer registered only after
-  `fsck_apfs -n`, mount and write-after-create pass. Whether socket and
-  device entries on native Data volumes need common entry kinds waits for
-  the plan's evidence (owner decision 5).
+  `fsck_apfs -n`, mount and write-after-create pass. Socket and device
+  entries are the read-only kinds of `specs/design-device-nodes.md`; the
+  plan's evidence decides whether macOS always writes the device number
+  extended field, which would tighten the APFS rule for a device without it.
 
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and

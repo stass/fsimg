@@ -244,8 +244,11 @@ cannot sandbox it or account for allocations it makes independently.
 `fsimg_entry_t` is a public value descriptor with a `const char *path`, entry
 kind, `uint64_t size`, and `fsimg_metadata_t metadata`. Its kinds are regular
 file, directory, symbolic link and FIFO, as the [POSIX metadata
-design](design-metadata.md) defines them; a symbolic link's size and content
-are its target. Directory and FIFO sizes are zero.
+design](design-metadata.md) defines them, and the read-only character
+device, block device and socket of the [device node
+design](design-device-nodes.md), which readers report and the catalog
+refuses; a symbolic link's size and content
+are its target. Every kind but file and symbolic link has size zero.
 Root is implicit; all other paths are absolute image paths with validated UTF-8
 components and explicit parent directory entries. An entry a reader
 [omits](design-directories.md#omitted-names) for a name outside its profile

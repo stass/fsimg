@@ -493,7 +493,7 @@ The kind comes from the record type and the type bits of `fileMode`:
 | File | `0120000` | Symbolic link |
 | File | `010000` | FIFO |
 | File | 0, with all of `fileMode` zero | Regular file; owner and mode absent |
-| File | `0140000`, `020000`, `060000` | Socket, character or block device: an unsupported kind |
+| File | `0140000`, `020000`, `060000` | Socket, character device, block device: read-only kinds under the [device node design](design-device-nodes.md#readers) |
 | Either | another value | `FSIMG_ECORRUPT` |
 
 A zero `fileMode` is legal: creators older than Mac OS X left BSD
@@ -698,7 +698,7 @@ verification. The flag `0x0004` tells the reader whether to look;
 verification checks the relation between the flag and the tree that E5
 shows native volumes keep, including after the last attribute is removed.
 
-## Symbolic links and FIFOs
+## Symbolic links, FIFOs, devices and sockets
 
 A symbolic link is a file record with `S_IFLNK`; its target is the data
 fork's first `logicalSize` bytes, which is the entry's size, and its
@@ -707,7 +707,11 @@ containing a NUL byte, is `FSIMG_EUNSUPPORTED`: 1023 bytes is the longest
 target fsimg holds evidence for, the bound the capability record states.
 The bytes are never interpreted, resolved or translated between `/` and
 `:`. A FIFO is a file record with `S_IFIFO`, size zero and no delivered
-content; its forks are claimed like any file's. [TN], [R]
+content; its forks are claimed like any file's. A socket and a character
+or block device are file records with the matching type, both forks empty,
+else `FSIMG_ECORRUPT`; a device's `special` is the macOS `dev_t`, bits 24
+to 31 `dev_major` and bits 0 to 23 `dev_minor`, and a socket's `special` is
+not interpreted. [TN], [R]
 
 ## Hard links and private directories
 
@@ -941,7 +945,7 @@ never creates a wrapper: a usable one is a complete classic HFS volume.
 | Trees | The tree parameter table; depth at most 16; node maps chained |
 | Catalog flags | The closed table; `0x1000` unsupported |
 | Comparators | Folded and binary catalogs; binary attribute names |
-| Kinds | Regular, directory, symbolic link, FIFO; file hard links resolved; sockets, devices and directory hard links unsupported |
+| Kinds | Regular, directory, symbolic link, FIFO; sockets and devices read-only; file hard links resolved; directory hard links unsupported |
 | Names | 1 to 255 units, decomposed; `:` and NUL outside the private names unsupported |
 | Symbolic-link targets | 1 to 1023 bytes |
 | Compression | Types 1, 3, 4, 7, 8, 11 and 12 |

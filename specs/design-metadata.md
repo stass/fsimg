@@ -9,9 +9,12 @@ timestamps and generic attributes every format shares. This document defines
 that representation once, for the [C API](design-api.md), the
 [catalog](design-sources.md), the host scanner, the [safe
 extractor](design-security.md#safe-extraction), the [CLI](design-cli.md) and
-every format driver. A driver advertises a field or kind only when it can
-read and write it with the fidelity stated here; FAT and exFAT advertise none
-of the additions and treat them under the existing loss policy.
+every format driver. The [device node design](design-device-nodes.md) adds
+character devices, block devices and sockets as read-only kinds under the
+same model. A driver advertises a field or kind only when it can read it,
+and for a writable kind or field write it, with the fidelity stated here;
+FAT and exFAT advertise none of the additions and treat them under the
+existing loss policy.
 
 ## Entry kinds
 
@@ -24,16 +27,22 @@ capability record lists its supported kinds as a mask:
 | `FSIMG_ENTRY_DIRECTORY` | 2 | Zero | None | None |
 | `FSIMG_ENTRY_SYMLINK` | 4 | Target byte length, 1 through 1024, within the format's `max_link_target_bytes` | The target bytes, without a terminator | Provider or host |
 | `FSIMG_ENTRY_FIFO` | 8 | Zero | None | None |
+| `FSIMG_ENTRY_CHAR_DEVICE` | 16 | Zero | None | Read-only |
+| `FSIMG_ENTRY_BLOCK_DEVICE` | 32 | Zero | None | Read-only |
+| `FSIMG_ENTRY_SOCKET` | 64 | Zero | None | Read-only |
 
 A symbolic link's target is ordinary content: a reader delivers it through
 `read_at()` and `next_range()`, and a writer receives it through the entry's
 source like a file's payload. The target is not validated as a path and is
 never resolved by fsimg, but it never contains a NUL byte: collection rejects
 the zero source for a link, and a provider's target is checked when it is
-read. Every other on-disk object kind, such as a socket or
-device node, is unsupported: a reader whose directory contains one fails that
-directory's preparation with `FSIMG_EUNSUPPORTED` naming the entry, and a
-writer never receives one because the catalog rejects unknown kind values.
+read. The three read-only kinds are the [device node
+design](design-device-nodes.md)'s: a reader reports them, the catalog
+refuses them, so no writer receives one, and the extractor never creates
+them. Any other on-disk object kind is unsupported: a reader whose directory
+contains one fails that directory's preparation with `FSIMG_EUNSUPPORTED`
+naming the entry, and a writer never receives one because the catalog
+rejects unknown kind values.
 
 ## Metadata fields
 
@@ -44,6 +53,7 @@ writer never receives one because the catalog rejects unknown kind values.
 | `FSIMG_META_CHANGED` | `changed` | Inode change time, an `fsimg_timestamp_t` with the common basis rules |
 | `FSIMG_META_OWNER` | `uid`, `gid` | Numeric owner and group identifiers, `uint32_t` |
 | `FSIMG_META_MODE` | `mode` | Permission bits `07777`: the twelve POSIX permission, setuid, setgid and sticky bits; no file-type bits |
+| `FSIMG_META_DEVICE` | `dev_major`, `dev_minor` | The stored device number of a character or block device as two `uint32_t` words, decoded per format as the [device node design](design-device-nodes.md#readers) states; valid on no other kind, and never in a capability record's `metadata_fields` |
 
 One further bit governs no value:
 
@@ -137,7 +147,8 @@ in its `rockridge` view and only the recording date in the others; FAT and
 exFAT readers set nothing new. The safe
 extractor keeps its profile: it creates regular files and directories with
 private modes, never restores owners, permission bits or change times, and
-creates no symbolic links or FIFOs. By default an unsupported kind fails the
+creates no symbolic links, FIFOs, devices or sockets. By default a kind it
+does not create fails the
 extraction with `FSIMG_EUNSUPPORTED` naming the entry. The option
 `FSIMG_EXTRACT_SKIP_UNSUPPORTED`, CLI `-k`, instead skips such entries and
 reports their count in the context statistics' `skipped_entries`, which the
@@ -156,15 +167,19 @@ symbolic link directly with `x -O` writes its target bytes, which is the
 content the entry declares.
 
 `t --json` records carry `kind` as a name (`file`, `directory`, `symlink`,
-`fifo`) and the new fields when valid and null otherwise, with
+`fifo`, `char_device`, `block_device`, `socket`) and the new fields when
+valid and null otherwise, with
 `extra_data` true when that bit is set and null otherwise; human listings mark
-a symbolic link with `@` and a FIFO with `|` after the quoted name, in the
-style of `ls -F`. Info (`i`) prints the volume UUID when valid, and `--formats`
-lists the additional kinds and fields a format advertises.
+a symbolic link with `@`, a FIFO with `|` and a socket with `=` after the
+quoted name, in the style of `ls -F`. Info (`i`) prints the volume UUID when
+valid, and `--formats` lists the additional kinds and fields a format
+advertises.
 
 ## Capability records
 
-`fsimg_format_info_t.entry_kinds` and `metadata_fields` use the masks above.
+`fsimg_format_info_t.entry_kinds` and `metadata_fields` use the masks above;
+for the three read-only kinds `entry_kinds` states that the reader reports
+them, as the catalog never carries one to a writer.
 The record also gains `max_label_bytes`, the format's encoded on-disk label
 capacity in bytes (11 for FAT, 22 for exFAT's eleven UTF-16 units, 48 for
 QNX4, 510 for HFS Plus's 255 UTF-16 units, 255 for an APFS volume name,

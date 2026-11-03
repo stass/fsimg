@@ -224,9 +224,9 @@ and hash, and the value: the child inode at least 16 (or in the volume-group
 space) and a type in the format design's table. It admits the child with a
 17-byte payload: the child inode (u64), the record type (u8) and the sibling
 ID or zero (u64), little-endian. Admission charges the entry; the walker's
-key sort then rejects equivalent names. A device or socket type fails the
-directory's preparation with `FSIMG_EUNSUPPORTED` naming the entry, as the
-metadata contract requires.
+key sort then rejects equivalent names. A device or socket type is admitted
+as its read-only kind, a device's number taken from the inode's device
+number extended field when present, as the format design states.
 
 `replay` re-validates the payload, looks the child inode up through the
 lookup cursor, validates it, and checks its mode type against the record
