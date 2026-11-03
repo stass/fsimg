@@ -87,6 +87,15 @@ zero without one at 8192 is a recognized bootless or MMI layout and claims
 positions is ambiguous and also unsupported. The probe performs no I/O and
 allocates nothing.
 
+Under an [assumed identity](design-formats.md#format-descriptors-and-profiles)
+a header without the magic, at byte 8192 in the probe and at either header
+in open, takes the byte order whose stored CRC matches its contents, and
+open records the missing magic. A header whose CRC matches in neither or in
+both byte orders is `FSIMG_ECORRUPT`. A magic at byte zero still selects
+the bootless or MMI layout and is unsupported. Pair agreement compares the
+headers from the CRC on, so a magic missing from one header alone does not
+make equal serials disagree.
+
 `open` reads both header areas with exact 512-byte reads and validates each
 header completely:
 

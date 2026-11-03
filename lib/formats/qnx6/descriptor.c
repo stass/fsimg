@@ -62,10 +62,14 @@ const fsimg_format_t fsimg_qnx6_format = {
  * A magic only at byte zero is a bootless or MMI layout, and magics at both
  * positions are ambiguous; both are recognized but unsupported. open
  * validates both headers completely.
+ *
+ * A caller assuming the identity has a missing magic at byte 8192 read as
+ * the standard layout, in the byte order whose header CRC matches; a magic
+ * at byte zero still selects the bootless or MMI layout.
  */
 static fsimg_status_t
 qnx6_probe(const unsigned char *prefix, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity FSIMG_UNUSED,
+    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity,
     const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	const unsigned char *header;
@@ -76,7 +80,8 @@ qnx6_probe(const unsigned char *prefix, size_t length,
 	at_zero = length >= 4 && qnx6_magic_order(prefix, &big);
 	at_header = length >= QNX6_PROBE_BYTES &&
 	    qnx6_magic_order(prefix + QNX6_HEADER_OFFSET, &big);
-	if (!at_zero && !at_header)
+	if (!at_zero && !at_header &&
+	    (!assume_identity || length < QNX6_PROBE_BYTES))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no QNX6 superblock magic"));
 	if (at_zero)
@@ -84,8 +89,12 @@ qnx6_probe(const unsigned char *prefix, size_t length,
 		    "QNX6 magic at byte 0 and 8192 is ambiguous" :
 		    "QNX6 bootless or MMI layout is not supported"));
 	header = prefix + QNX6_HEADER_OFFSET;
-	if (qnx6_crc32(header + 8, QNX6_HEADER_BYTES - 8) !=
-	    qnx6_u32(header + 4, big))
+	if (at_header) {
+		if (qnx6_crc32(header + 8, QNX6_HEADER_BYTES - 8) !=
+		    qnx6_u32(header + 4, big))
+			return (qnx6_corrupt(error,
+			    "QNX6 header checksum mismatch"));
+	} else if (!qnx6_crc_order(header, &big))
 		return (qnx6_corrupt(error, "QNX6 header checksum mismatch"));
 	block_size = qnx6_u32(header + 48, big);
 	if (qnx6_u16(header + 28, big) != QNX6_VERSION ||

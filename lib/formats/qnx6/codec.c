@@ -87,6 +87,23 @@ qnx6_magic_order(const unsigned char *p, bool *big)
 	return (false);
 }
 
+/* The byte order of a 512-byte header whose magic an assumed identity
+ * waived: the one in which the stored CRC matches the CRC of bytes 8 to
+ * 511. Neither matching is a failed checksum. Both matching, a CRC whose
+ * bytes read the same either way, decides nothing, and is refused alike
+ * rather than guessed.
+ */
+bool
+qnx6_crc_order(const unsigned char *header, bool *big)
+{
+	uint32_t crc = qnx6_crc32(header + 8, QNX6_HEADER_BYTES - 8);
+	bool little_matches = qnx6_u32(header + 4, false) == crc;
+	bool big_matches = qnx6_u32(header + 4, true) == crc;
+
+	*big = big_matches;
+	return (little_matches != big_matches);
+}
+
 /* An 80-byte header tree descriptor: length, sixteen references, depth, a
  * mode byte that is 1 in the classic profile and six zero extension bytes.
  * Returns whether the mode and extension bytes are classic.

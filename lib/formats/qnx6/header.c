@@ -75,11 +75,28 @@ candidate_read(fsimg_reader_t *reader, uint64_t offset, uint64_t second_header,
 	    &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (!qnx6_magic_order(c->raw, &c->big_endian))
-		return (qnx6_corrupt(error, "QNX6 header magic is missing"));
-	if (qnx6_crc32(c->raw + 8, sizeof(c->raw) - 8) !=
-	    qnx6_u32(c->raw + 4, c->big_endian))
-		return (qnx6_corrupt(error, "QNX6 header checksum mismatch"));
+	/* The magic is the identity and also gives the byte order. A caller
+	 * assuming the identity waives a missing magic, and the CRC, which
+	 * never covers the magic, then decides the order; either way the CRC
+	 * must match.
+	 */
+	if (qnx6_magic_order(c->raw, &c->big_endian)) {
+		if (qnx6_crc32(c->raw + 8, sizeof(c->raw) - 8) !=
+		    qnx6_u32(c->raw + 4, c->big_endian))
+			return (qnx6_corrupt(error,
+			    "QNX6 header checksum mismatch"));
+	} else {
+		status = fsimg_reader_identity(reader, false,
+		    "QNX6 header magic is missing",
+		    offset == QNX6_HEADER_OFFSET ?
+		    "the first superblock lacks the QNX6 magic" :
+		    "the second superblock lacks the QNX6 magic", error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (!qnx6_crc_order(c->raw, &c->big_endian))
+			return (qnx6_corrupt(error,
+			    "QNX6 header checksum mismatch"));
+	}
 	qnx6_header_decode(c->raw, c->big_endian, h);
 
 	/* Recognized headers outside the classic profile are unsupported. */
@@ -149,8 +166,12 @@ pair_select(qnx6_candidate_t *first, qnx6_candidate_t *second,
 	    a->groups != b->groups ||
 	    ((a->flags ^ b->flags) & ~QNX6_FLAG_MOUNTED) != 0)
 		return (qnx6_corrupt(error, "QNX6 headers describe different volumes"));
+	/* Equal serials compare from the CRC on: the magic is identity, and
+	 * with the byte orders equal two present magics are equal anyway.
+	 */
 	if (a->serial == b->serial) {
-		if (bcmp(first->raw, second->raw, sizeof(first->raw)) != 0)
+		if (bcmp(first->raw + 4, second->raw + 4,
+		    sizeof(first->raw) - 4) != 0)
 			return (qnx6_corrupt(error,
 			    "QNX6 headers have equal serials but different snapshots"));
 		*selected = first;

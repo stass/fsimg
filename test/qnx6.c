@@ -3887,6 +3887,166 @@ emit_seed(const char *path)
 	gen_free(&g);
 }
 
+/* Both headers describe the same snapshot and have equal serials. */
+static void
+identity_volume(qnx6_gen_t *g, bool big)
+{
+	gen_init(g, 1024, big, 1048576, GEN_INODES, 0x100);
+	gen_file(g, 1, "hello", (const unsigned char *)"hello", 5);
+	gen_commit(g, 0, 1, true, true);
+}
+
+/* Reading remains available after identity is waived; verification refuses it. */
+static void
+check_qnx6_assumed_identity(fixture_t *f, const char *message,
+    fsimg_status_t unforced_status)
+{
+	static const char *const paths[] = { "/.boot", "/hello" };
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	const fsimg_entry_t *entry;
+	unsigned char data[5];
+	size_t count;
+
+	fsimg_read_options_init(&options);
+	options.format = "qnx6";
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &error) == unforced_status);
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    &error) == FSIMG_OK);
+
+	for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_OK);
+		CHECK(strcmp(entry->path, paths[i]) == 0);
+	}
+	CHECK(entry->size == sizeof(data));
+	CHECK(fsimg_reader_read_at(f->reader, 0, data,
+	    sizeof(data), &count, NULL) == FSIMG_OK);
+	CHECK(count == sizeof(data));
+	CHECK(bcmp(data, "hello", sizeof(data)) == 0);
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_DONE);
+	CHECK(entry == NULL);
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+	CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f->reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	CHECK(!report.complete);
+	CHECK(strcmp(error.message, message) == 0);
+}
+
+static void
+test_qnx6_assumed_identity_reads_volume_without_first_magic(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+
+	identity_volume(&g, false);
+	bzero(g.image + 8192, 4);
+	fixture_gen(&f, &g, 0);
+	check_qnx6_assumed_identity(&f, "qnx6 identity was assumed: "
+	    "the first superblock lacks the QNX6 magic", FSIMG_EFORMAT);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_qnx6_assumed_identity_reads_volume_without_second_magic(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+
+	identity_volume(&g, false);
+	bzero(g.image + g.second, 4);
+	fixture_gen(&f, &g, 0);
+	check_qnx6_assumed_identity(&f, "qnx6 identity was assumed: "
+	    "the second superblock lacks the QNX6 magic", FSIMG_ECORRUPT);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_qnx6_assumed_identity_reads_volume_without_big_endian_first_magic(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+
+	identity_volume(&g, true);
+	bzero(g.image + 8192, 4);
+	fixture_gen(&f, &g, 0);
+	check_qnx6_assumed_identity(&f, "qnx6 identity was assumed: "
+	    "the first superblock lacks the QNX6 magic", FSIMG_EFORMAT);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_qnx6_assumed_identity_rejects_invalid_header_crc(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	identity_volume(&g, false);
+	fixture_gen(&f, &g, 0);
+	bzero(g.image + 8192, 4);
+	g.image[8192 + 4] ^= 1;
+	fsimg_read_options_init(&options);
+	options.format = "qnx6";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "QNX6 header checksum mismatch") == 0);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_qnx6_assumed_identity_rejects_bootless_layout(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+
+	identity_volume(&g, false);
+	fixture_gen(&f, &g, 0);
+	bcopy(g.image + 8192, g.image, 512);
+	bzero(g.image + 8192, 4);
+	fsimg_read_options_init(&options);
+	options.format = "qnx6";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    &error) == FSIMG_EUNSUPPORTED);
+
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_qnx6_intact_volume_with_assume_identity_verifies(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+
+	identity_volume(&g, false);
+	fixture_gen(&f, &g, 0);
+	fsimg_read_options_init(&options);
+	options.format = "qnx6";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, NULL) == FSIMG_OK);
+	CHECK(report.complete);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3928,5 +4088,11 @@ main(int argc, char **argv)
 	if (skipped != 0)
 		printf("SKIP: %u sparse-volume cases; every other case passed\n",
 		    skipped);
+	test_qnx6_assumed_identity_reads_volume_without_first_magic();
+	test_qnx6_assumed_identity_reads_volume_without_second_magic();
+	test_qnx6_assumed_identity_reads_volume_without_big_endian_first_magic();
+	test_qnx6_assumed_identity_rejects_invalid_header_crc();
+	test_qnx6_assumed_identity_rejects_bootless_layout();
+	test_qnx6_intact_volume_with_assume_identity_verifies();
 	return (skipped == 0 ? 0 : 77);
 }

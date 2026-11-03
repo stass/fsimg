@@ -224,7 +224,8 @@ QNX6's identity check is the superblock magic, at byte 8192 and in the
 second superblock, in either byte order. The magic also selects the byte
 order and the layout, so under an assumed identity a damaged magic at
 byte 8192 is read as the standard layout, the superblock there decoded in
-the byte order whose header CRC matches, and neither matching is corrupt;
+the byte order whose header CRC matches, and a CRC matching in neither
+or both orders is corrupt;
 the bootless and MMI layouts are recognized only by their magic. The
 header CRC, the version, the block size, the bootless and MMI layout
 classifications and every geometry check are validation.

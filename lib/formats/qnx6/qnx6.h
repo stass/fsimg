@@ -247,6 +247,7 @@ uint64_t qnx6_u64(const unsigned char *, bool);
 uint32_t qnx6_crc32(const unsigned char *, size_t);
 uint32_t qnx6_name_checksum(const unsigned char *, size_t);
 bool qnx6_magic_order(const unsigned char *, bool *);
+bool qnx6_crc_order(const unsigned char *, bool *);
 void qnx6_header_decode(const unsigned char *, bool, qnx6_header_t *);
 void qnx6_inode_decode(const unsigned char *, bool, qnx6_inode_t *);
 void qnx6_slot_decode(const unsigned char *, bool, qnx6_slot_t *);
