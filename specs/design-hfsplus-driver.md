@@ -167,22 +167,26 @@ verification.
 A slice shorter than `N * B` opens by the
 [common rule for a truncated volume](architecture.md#byte-and-object-boundaries):
 `info` reports `N * B`, and the reader core derives the missing bytes from
-it. The real volume may run up to one block further, which would free its
-last block for content; `t` counts that block as reserved all the same, and a
-fork reaching it fails as outside the content domain, which it could not be
-read from anyway.
+it. `N * B` is then only a lower bound on `V`: the real volume may run up to
+one block further, which frees its last block for content, so `t` cannot be
+known. Such a volume reserves no tail and its content domain runs to `N`. The
+read funnel refuses whatever the slice does not hold, and bytes the slice does
+hold in the last block are harmless.
 
-Declared geometry sizes nothing and drives no walk here, so nothing has to
-stop at the slice's end. Node buffers follow the bounded `nodeSize`, and an
-extent index and the directory scratch grow by records actually read. Searches
-descend by height, and every cursor scan ends on its keys: strictly ascending
-catalog and attribute keys, and overflow keys whose start block must grow. A
-sibling chain therefore visits a node in the slice at most once, whatever
-`totalNodes` declares. No fork has a hole, so no extent index needs a stopped
-mark. A tree node, a journal record or a file's block past the end fails
-`FSIMG_ECORRUPT` in the read funnel when something refers to it: at open for
-what open reads, at listing for a directory's records and its attributes, on
-a read for file content.
+Declared geometry sizes nothing here, so nothing has to stop at the slice's
+end. Node buffers follow the bounded `nodeSize`, and an extent index and the
+directory scratch grow by records actually read. Searches descend by height.
+A looping sibling chain ends at the cap on leaves a cursor enters from one
+position, fixed when the tree opens at the smaller of `totalNodes` and the
+nodes the slice can hold, `slice / M`: a leaf is read whole from the slice, so
+one more is `FSIMG_ECORRUPT`, whatever `totalNodes` declares and whichever keys
+the caller checks. Every cursor scan also checks its keys, strictly ascending
+catalog and attribute keys and overflow keys whose start block must grow, and
+those normally refuse a loop at its first repeated key. No fork has a hole, so
+no extent index needs a stopped mark. A tree node, a journal record or a file's
+block past the end fails `FSIMG_ECORRUPT` in the read funnel when something
+refers to it: at open for what open reads, at listing for a directory's records
+and its attributes, on a read for file content.
 
 A cut that loses only bytes past `N * B` leaves no proof. Such a slice is
 judged as a volume of its own length, so an alternate header not at
@@ -260,8 +264,9 @@ driver-private cache to keep coherent or to bound.
   return the wrong record unnoticed.
 * **The leaf cursor** advances through a leaf's records and then along
   `fLink`, requiring each next node to be a leaf whose `bLink` names the node
-  just left. Its caller checks key order, which is what ends a scan on a
-  looping chain.
+  just left. Its caller checks key order. The cursor refuses more leaves than
+  the cap the tree fixed at open, the smaller of `totalNodes` and `slice / M`,
+  so a looping chain ends whatever its caller checks.
 * **Level iteration**, used by verification alone, walks one level's sibling
   chain from its leftmost node, found by descending the first index record of
   each level.

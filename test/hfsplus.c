@@ -381,13 +381,13 @@ test_identity_geometry(void)
 	expect_status("zero blocks", hfsplus_header_check(&header,
 	    &error), FSIMG_ECORRUPT, &error);
 	header.total_blocks = 9;
-	expect_status("blocks exceed slice", hfsplus_header_check(&header,
-	    &error), FSIMG_OK, &error);
+	expect_status("nonzero allocation block count",
+	    hfsplus_header_check(&header, &error), FSIMG_OK, &error);
 	/* Both operands are uint32_t: their product cannot overflow uint64_t. */
 	header.total_blocks = UINT32_MAX;
 	header.block_size = UINT32_C(0x80000000);
-	expect_status("largest encoded product", hfsplus_header_check(&header,
-	    &error), FSIMG_OK, &error);
+	expect_status("maximum legal block size and count",
+	    hfsplus_header_check(&header, &error), FSIMG_OK, &error);
 	for (uint32_t b = 512; b <= 4096; b *= 2) {
 		gen_plan_init(&plan);
 		plan.block_size = b;
@@ -4933,7 +4933,8 @@ check_truncated_volume(const gen_image_t *image, size_t length,
 	    info.missing_bytes == image->length - length);
 
 	/* Verification must refuse the missing tail before driver work, leaving
-	 * this reader untouched and usable for listing and content. */
+	 * this reader untouched and usable for listing and content.
+	 */
 	CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
 	status = fsimg_verify(reader, 0, &report, &error);
 	expect_status(scenario, status, FSIMG_ECORRUPT,
@@ -4991,7 +4992,8 @@ test_truncated_volume(void)
 	    sizeof(payload) - 1);
 
 	/* An unaligned slice reaching all allocated blocks has no missing tail
-	 * to explain its partial sector. */
+	 * to explain its partial sector.
+	 */
 	extended = realloc(image.bytes, image.length + 1);
 	CHECK(extended != NULL);
 	image.bytes = extended;
@@ -5006,6 +5008,94 @@ test_truncated_volume(void)
 }
 
 static void
+check_truncated_file_listed(const gen_image_t *slice, size_t size)
+{
+	fixture_t f;
+	fsimg_reader_t *reader = public_reader(&f, slice);
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+
+	if (reader != NULL) {
+		status = fsimg_reader_next(reader, &entry, &error);
+		expect_status("file past cut is listed", status, FSIMG_OK, &error);
+		if (status == FSIMG_OK) {
+			expect_true("file past cut name and size",
+			    strcmp(entry->path, "/a") == 0 && entry->size == size);
+			expect_status("missing payload does not stop listing",
+			    fsimg_reader_next(reader, &entry, &error),
+			    FSIMG_DONE, &error);
+		}
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+}
+
+static void
+check_truncated_file_read(const gen_image_t *slice)
+{
+	fixture_t f;
+	fsimg_reader_t *reader = public_reader(&f, slice);
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	unsigned char byte;
+	size_t count;
+
+	if (reader != NULL) {
+		status = fsimg_reader_next(reader, &entry, &error);
+		expect_status("select file past cut for reading", status,
+		    FSIMG_OK, &error);
+		if (status == FSIMG_OK) {
+			status = fsimg_reader_read_at(reader, 0, &byte, 1,
+			    &count, &error);
+			expect_status("read file past cut", status,
+			    FSIMG_ECORRUPT, &error);
+			expect_true("read file past cut names truncation",
+			    strstr(error.message, "truncated") != NULL);
+		}
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+}
+
+static void
+check_truncated_file_extract(const gen_image_t *slice)
+{
+	fixture_t f;
+	fsimg_reader_t *reader;
+	fsimg_extract_options_t options;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	char temporary[] = "hfsplus-truncated-XXXXXX";
+	int parent, root;
+
+	CHECK(mkdtemp(temporary) != NULL);
+	parent = open(temporary, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(parent != -1);
+	reader = public_reader(&f, slice);
+	if (reader != NULL) {
+		fsimg_extract_options_init(&options);
+		status = fsimg_extract_at(reader, parent, "out", &options, &error);
+		expect_status("extract file past cut", status, FSIMG_ECORRUPT,
+		    &error);
+		expect_true("extract file past cut names truncation",
+		    strstr(error.message, "truncated") != NULL);
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	root = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (root != -1) {
+		CHECK(unlinkat(root, "a", 0) == 0 || errno == ENOENT);
+		CHECK(close(root) == 0);
+		CHECK(unlinkat(parent, "out", AT_REMOVEDIR) == 0);
+	} else
+		CHECK(errno == ENOENT);
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(temporary) == 0);
+}
+
+static void
 test_truncated_file(void)
 {
 	static const unsigned char payload[] = "file beyond the cut";
@@ -5013,17 +5103,8 @@ test_truncated_file(void)
 	    .type = 2, .data = payload, .data_size = sizeof(payload) - 1 };
 	gen_plan_t plan;
 	gen_image_t image, slice;
-	fixture_t f;
-	fsimg_reader_t *reader;
-	const fsimg_entry_t *entry;
-	fsimg_extract_options_t options;
-	fsimg_error_t error = { 0 };
-	fsimg_status_t status;
-	unsigned char byte, *fork;
-	size_t count;
+	unsigned char *fork;
 	uint32_t block;
-	char temporary[] = "hfsplus-truncated-XXXXXX";
-	int parent, root;
 
 	gen_plan_init(&plan);
 	plan.objects = &object;
@@ -5037,61 +5118,9 @@ test_truncated_file(void)
 	    sizeof(payload) - 1);
 	slice = image;
 	slice.length = (size_t)(block - 1) * plan.block_size;
-	reader = public_reader(&f, &slice);
-	if (reader != NULL) {
-		status = fsimg_reader_next(reader, &entry, &error);
-		expect_status("file past cut is listed", status, FSIMG_OK, &error);
-		if (status == FSIMG_OK) {
-			expect_true("file past cut name and size",
-			    strcmp(entry->path, "/a") == 0 &&
-			    entry->size == sizeof(payload) - 1);
-			expect_status("missing payload does not stop listing",
-			    fsimg_reader_next(reader, &entry, &error),
-			    FSIMG_DONE, &error);
-		}
-		fsimg_reader_free(reader);
-	}
-	fixture_close(&f);
-	reader = public_reader(&f, &slice);
-	if (reader != NULL) {
-		status = fsimg_reader_next(reader, &entry, &error);
-		expect_status("select file past cut for reading", status,
-		    FSIMG_OK, &error);
-		if (status == FSIMG_OK) {
-			status = fsimg_reader_read_at(reader, 0, &byte, 1,
-			    &count, &error);
-			expect_status("read file past cut", status,
-			    FSIMG_ECORRUPT, &error);
-			expect_true("read file past cut names truncation",
-			    strstr(error.message, "truncated") != NULL);
-		}
-		fsimg_reader_free(reader);
-	}
-	fixture_close(&f);
-
-	CHECK(mkdtemp(temporary) != NULL);
-	parent = open(temporary, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	CHECK(parent != -1);
-	reader = public_reader(&f, &slice);
-	if (reader != NULL) {
-		fsimg_extract_options_init(&options);
-		status = fsimg_extract_at(reader, parent, "out", &options, &error);
-		expect_status("extract file past cut", status, FSIMG_ECORRUPT,
-		    &error);
-		expect_true("extract file past cut names truncation",
-		    strstr(error.message, "truncated") != NULL);
-		fsimg_reader_free(reader);
-	}
-	fixture_close(&f);
-	root = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	if (root != -1) {
-		CHECK(unlinkat(root, "a", 0) == 0 || errno == ENOENT);
-		CHECK(close(root) == 0);
-		CHECK(unlinkat(parent, "out", AT_REMOVEDIR) == 0);
-	} else
-		CHECK(errno == ENOENT);
-	CHECK(close(parent) == 0);
-	CHECK(rmdir(temporary) == 0);
+	check_truncated_file_listed(&slice, sizeof(payload) - 1);
+	check_truncated_file_read(&slice);
+	check_truncated_file_extract(&slice);
 	gen_free(&image);
 }
 
@@ -5116,31 +5145,498 @@ test_truncated_metadata(void)
 	gen_free(&image);
 }
 
+/* Run the same public operations for both resource measurements. */
+static fsimg_stats_t
+check_surviving_file(const char *scenario, const gen_image_t *slice,
+    uint64_t volume_bytes, const unsigned char *payload, size_t size)
+{
+	fixture_t f;
+	fsimg_reader_t *reader = NULL;
+	const fsimg_entry_t *entry;
+	fsimg_volume_info_t info;
+	fsimg_stats_t stats;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	unsigned char bytes[64];
+	size_t count = 0;
+
+	CHECK(size <= sizeof(bytes));
+	fixture_init(&f, slice, 0, 0);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &reader, &error);
+	expect_status(scenario, status, FSIMG_OK, &error);
+	if (status != FSIMG_OK)
+		goto done;
+	status = fsimg_reader_get_info(reader, &info, &error);
+	expect_status(scenario, status, FSIMG_OK, &error);
+	if (status == FSIMG_OK)
+		expect_true(scenario, info.volume_bytes == volume_bytes &&
+		    info.missing_bytes == volume_bytes - slice->length);
+	status = fsimg_reader_next(reader, &entry, &error);
+	expect_status(scenario, status, FSIMG_OK, &error);
+	if (status != FSIMG_OK)
+		goto done;
+	expect_true(scenario, strcmp(entry->path, "/a") == 0 &&
+	    entry->kind == FSIMG_ENTRY_FILE && entry->size == size);
+	status = fsimg_reader_read_at(reader, 0, bytes, sizeof(bytes), &count,
+	    &error);
+	expect_status(scenario, status, FSIMG_OK, &error);
+	if (status != FSIMG_OK)
+		goto done;
+	expect_true(scenario, count == size && bcmp(bytes, payload, size) == 0);
+	expect_status(scenario, fsimg_reader_next(reader, &entry, &error),
+	    FSIMG_DONE, &error);
+done:
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	return (stats);
+}
+
+static void
+test_truncated_last_block(void)
+{
+	static const unsigned char payload[] = "last allocation block";
+	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+	    .type = 2, .data = payload, .data_size = sizeof(payload) - 1 };
+	gen_plan_t plan;
+	gen_image_t image, slice;
+	fixture_t f;
+	fsimg_error_t error = { 0 };
+	unsigned char *fork;
+	uint32_t block;
+
+	gen_plan_init(&plan);
+	plan.objects = &object;
+	plan.object_count = 1;
+	gen_build(&plan, &image);
+	CHECK(plan.block_size == 4096);
+	block = plan.total_blocks - 1;
+	fork = catalog_data(&image, 2, 2) + FILE_DATA_FORK;
+	gen_store(fork + FORK_START, block, 4);
+	bcopy(payload, image.bytes + (uint64_t)block * plan.block_size,
+	    sizeof(payload) - 1);
+	slice = image;
+	slice.length = (size_t)block * plan.block_size + 2048;
+	(void)check_surviving_file("truncated last block holds surviving file",
+	    &slice, (uint64_t)plan.total_blocks * plan.block_size, payload,
+	    sizeof(payload) - 1);
+
+	/* The startup fork is validated at open without reading its payload. */
+	fork = image.bytes + VOLUME_HEADER + GEN_STARTUP_FORK;
+	gen_store(fork, sizeof(payload) - 1, 8);
+	gen_store(fork + FORK_BLOCKS, 1, 4);
+	gen_store(fork + FORK_START, block, 4);
+	gen_store(fork + FORK_COUNT, 1, 4);
+	fixture_init(&f, &slice, 0, 0);
+	expect_status("truncated last block holds special fork",
+	    fixture_open(&f, -1, false, &error), FSIMG_OK, &error);
+	fixture_close(&f);
+	gen_free(&image);
+}
+
 static void
 test_truncated_largest_volume(void)
+{
+	static const unsigned char payload[] = "small stored file";
+	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+	    .type = 2, .data = payload, .data_size = sizeof(payload) - 1 };
+	gen_plan_t plan;
+	gen_image_t image, slice;
+	fixture_t f;
+	fsimg_stats_t intact, truncated, stats;
+	fsimg_error_t error = { 0 };
+	uint64_t product;
+	uint32_t used;
+
+	gen_plan_init(&plan);
+	plan.objects = &object;
+	plan.object_count = 1;
+	gen_build(&plan, &image);
+	intact = check_surviving_file("intact resource baseline", &image,
+	    image.length, payload, sizeof(payload) - 1);
+	used = plan.total_blocks -
+	    (uint32_t)gen_load(image.bytes + VOLUME_FREE_BLOCKS, 4);
+	gen_store(image.bytes + VOLUME_HEADER + 44, UINT32_MAX, 4);
+	gen_store(image.bytes + VOLUME_FREE_BLOCKS, UINT32_MAX - used, 4);
+	slice = image;
+	slice.length /= 2;
+	product = (uint64_t)UINT32_MAX * plan.block_size;
+	truncated = check_surviving_file("largest block count surviving file",
+	    &slice, product, payload, sizeof(payload) - 1);
+	expect_true("declared volume size does not increase memory or scratch",
+	    truncated.memory_peak == intact.memory_peak &&
+	    truncated.scratch_peak == intact.scratch_peak);
+
+	gen_store(image.bytes + VOLUME_HEADER + 40, UINT32_C(0x80000000), 4);
+	product = (uint64_t)UINT32_MAX * UINT32_C(0x80000000);
+	expect_true("largest legal geometry product is exact",
+	    product == UINT64_C(0x7fffffff80000000));
+	slice.length = 4096;
+	expect_status("largest encoded geometry probe", image_probe(&slice),
+	    FSIMG_OK, NULL);
+	fixture_init(&f, &slice, 0, 10000);
+	expect_status("largest block size tree read exceeds slice",
+	    fixture_open(&f, -1, false, &error), FSIMG_ECORRUPT, &error);
+	expect_true("largest block size tree read names truncation",
+	    strstr(error.message, "truncated") != NULL);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	expect_true("largest encoded geometry charges no scratch",
+	    stats.scratch_peak == 0);
+	fixture_close(&f);
+	gen_free(&image);
+}
+
+static void
+test_truncated_sibling_loop(void)
 {
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_stats_t stats;
+	hfsplus_cursor_t cursor;
 	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	unsigned char *fork, *header;
+	uint64_t leaf;
+	uint32_t nodes = 1000000;
 
 	gen_plan_init(&plan);
 	gen_build(&plan, &image);
-	/* A tiny slice declaring the largest volume must not size allocations
-	 * or walks from that declaration. Its small forks remain inconsistent. */
-	gen_store(image.bytes + VOLUME_HEADER + 40, UINT32_C(0x80000000), 4);
-	gen_store(image.bytes + VOLUME_HEADER + 44, UINT32_MAX, 4);
-	image.length = 4096;
-	expect_status("largest volume tiny slice probe", image_probe(&image),
-	    FSIMG_OK, NULL);
-	fixture_init(&f, &image, 0, 10000);
-	expect_status("largest volume tiny slice open", fixture_open(&f, -1,
-	    false, &error), FSIMG_ECORRUPT, &error);
-	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
-	expect_true("largest volume bounded memory and scratch",
-	    stats.memory_peak < 2 * 1024 * 1024 && stats.scratch_peak == 0);
+	image.length /= 2;
+	gen_store(image.bytes + VOLUME_HEADER + 44, 2 * nodes, 4);
+	gen_store(image.bytes + VOLUME_FREE_BLOCKS, 0, 4);
+	fork = image.bytes + VOLUME_HEADER + GEN_CATALOG_FORK;
+	gen_store(fork, (uint64_t)nodes * plan.block_size, 8);
+	gen_store(fork + FORK_BLOCKS, nodes, 4);
+	gen_store(fork + FORK_COUNT, nodes, 4);
+	header = image.bytes + gen_node_offset(&image, GEN_CATALOG, 0);
+	gen_store(header + NODE_DESCRIPTOR + TREE_TOTAL_NODES, nodes, 4);
+	leaf = gen_node_offset(&image, GEN_CATALOG,
+	    image.trees[GEN_CATALOG].first_leaf);
+	gen_store(image.bytes + leaf, image.trees[GEN_CATALOG].first_leaf, 4);
+	gen_store(image.bytes + leaf + 4,
+	    image.trees[GEN_CATALOG].first_leaf, 4);
+
+	/* More than enough work for one visit per slice node, but not for the
+	 * hostile declared node count. No key-order checks hide the visit cap.
+	 */
+	fixture_init(&f, &image, 0, 100000);
+	status = fixture_open(&f, -1, false, &error);
+	expect_status("truncated sibling loop opens", status, FSIMG_OK, &error);
+	if (status == FSIMG_OK) {
+		fsimg_hfsplus_reader_t *state = f.reader.driver;
+		hfsplus_tree_t *tree = &state->catalog;
+
+		hfsplus_cursor_init(&cursor, tree, tree->search_node);
+		status = hfsplus_cursor_seek(&cursor,
+		    image.trees[GEN_CATALOG].first_leaf, 0, &error);
+		expect_status("truncated sibling loop seek", status, FSIMG_OK,
+		    &error);
+		while (status == FSIMG_OK)
+			status = hfsplus_cursor_next(&cursor, &error);
+		expect_status("truncated sibling loop stops at physical cap", status,
+		    FSIMG_ECORRUPT, &error);
+		expect_true("truncated sibling loop names looping chain",
+		    strstr(error.message, "HFS Plus sibling chain loops") != NULL);
+		expect_true("truncated sibling loop bounds entered leaves",
+		    cursor.leaves <= image.length / tree->header.node_size);
+	}
 	fixture_close(&f);
+	gen_free(&image);
+}
+
+/* Move one block-sized leaf while keeping the header and index readable. */
+static void
+relocate_tree_leaf(gen_image_t *image, gen_tree_id_t kind,
+    unsigned fork_offset, uint32_t leaf, uint32_t block)
+{
+	gen_tree_t *tree = &image->trees[kind];
+	unsigned char *fork = image->bytes + VOLUME_HEADER + fork_offset;
+	uint32_t first = (uint32_t)gen_load(fork + FORK_START, 4);
+
+	CHECK(tree->node_size == image->block_size && leaf > 0 &&
+	    leaf < tree->nodes);
+	bcopy(image->bytes + gen_node_offset(image, kind, leaf),
+	    image->bytes + (uint64_t)block * image->block_size,
+	    image->block_size);
+	bzero(fork + FORK_START, 64);
+	gen_store(fork + FORK_START, first, 4);
+	gen_store(fork + FORK_COUNT, leaf, 4);
+	gen_store(fork + FORK_START + 8, block, 4);
+	gen_store(fork + FORK_COUNT + 8, 1, 4);
+	if (leaf + 1 < tree->nodes) {
+		gen_store(fork + FORK_START + 16, first + leaf + 1, 4);
+		gen_store(fork + FORK_COUNT + 16, tree->nodes - leaf - 1, 4);
+	}
+}
+
+static void
+test_truncated_catalog_leaf(void)
+{
+	gen_child_t child = { .name = name_a, .units = 1, .id = 32 };
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+
+	gen_plan_init(&plan);
+	plan.children = &child;
+	plan.child_count = 1;
+	plan.records_per_node = 2;
+	gen_build(&plan, &image);
+	/* Leaf one holds the root and its thread; leaf two holds the child. */
+	relocate_tree_leaf(&image, GEN_CATALOG, GEN_CATALOG_FORK, 2,
+	    plan.total_blocks - 4);
+	image.length /= 2;
+	reader = public_reader(&f, &image);
+	if (reader != NULL) {
+		status = fsimg_reader_next(reader, &entry, &error);
+		expect_status("catalog child leaf past cut fails listing", status,
+		    FSIMG_ECORRUPT, &error);
+		expect_true("catalog child leaf past cut names truncation",
+		    strstr(error.message, "truncated") != NULL);
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	gen_free(&image);
+}
+
+static void
+check_truncated_open(const char *scenario, const gen_image_t *image)
+{
+	fixture_t f;
+	fsimg_error_t error = { 0 };
+
+	fixture_init(&f, image, 0, 0);
+	expect_status(scenario, fixture_open(&f, -1, false, &error),
+	    FSIMG_ECORRUPT, &error);
+	expect_true(scenario, strstr(error.message, "truncated") != NULL);
+	fixture_close(&f);
+}
+
+static void
+test_truncated_attributes_header(void)
+{
+	gen_plan_t plan;
+	gen_image_t image;
+
+	gen_plan_init(&plan);
+	plan.attributes = true;
+	gen_build(&plan, &image);
+	image.length = gen_node_offset(&image, GEN_ATTRIBUTES, 0);
+	check_truncated_open("attributes header past cut fails open", &image);
+	gen_free(&image);
+}
+
+static void
+test_truncated_journal_info(void)
+{
+	gen_plan_t plan;
+	gen_image_t image;
+
+	gen_plan_init(&plan);
+	plan.journal = true;
+	gen_build(&plan, &image);
+	bcopy(image.bytes + image.journal_info,
+	    image.bytes + (uint64_t)(plan.total_blocks - 4) * plan.block_size,
+	    plan.block_size);
+	gen_store(image.bytes + VOLUME_JIB, plan.total_blocks - 4, 4);
+	image.length /= 2;
+	check_truncated_open("journal info block past cut fails open", &image);
+	gen_free(&image);
+}
+
+static void
+test_truncated_journal_header(void)
+{
+	gen_plan_t plan;
+	gen_image_t image;
+	unsigned char *fork;
+	uint32_t block;
+
+	gen_plan_init(&plan);
+	plan.journal = true;
+	gen_build(&plan, &image);
+	block = plan.total_blocks - (uint32_t)(plan.journal_size /
+	    plan.block_size) - 2;
+	bcopy(image.bytes + image.journal_header,
+	    image.bytes + (uint64_t)block * plan.block_size,
+	    (size_t)plan.journal_size);
+	fork = catalog_data(&image, 2, 2) + FILE_DATA_FORK;
+	gen_store(fork + FORK_START, block, 4);
+	gen_store(image.bytes + image.journal_info + JIB_OFFSET,
+	    (uint64_t)block * plan.block_size, 8);
+	image.length /= 2;
+	check_truncated_open("journal header past cut fails open", &image);
+	gen_free(&image);
+}
+
+static void
+test_truncated_overflow_leaf(void)
+{
+	gen_child_t child = { .name = name_a, .units = 1, .id = 32,
+	    .data_extents = 9 };
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	unsigned char byte;
+	size_t count;
+
+	gen_plan_init(&plan);
+	plan.children = &child;
+	plan.child_count = 1;
+	plan.node_size[GEN_EXTENTS] = plan.block_size;
+	gen_build(&plan, &image);
+	relocate_tree_leaf(&image, GEN_EXTENTS, GEN_EXTENTS_FORK,
+	    image.trees[GEN_EXTENTS].first_leaf, plan.total_blocks - 4);
+	image.length /= 2;
+	reader = public_reader(&f, &image);
+	if (reader != NULL) {
+		status = fsimg_reader_next(reader, &entry, &error);
+		expect_status("file with missing overflow leaf is listed", status,
+		    FSIMG_OK, &error);
+		if (status == FSIMG_OK) {
+			/* Fork resolution is deferred until content is requested. */
+			status = fsimg_reader_read_at(reader,
+			    (uint64_t)8 * plan.block_size, &byte, 1, &count, &error);
+			expect_status("overflow extent leaf past cut fails read",
+			    status, FSIMG_ECORRUPT, &error);
+			expect_true("overflow extent leaf past cut names truncation",
+			    strstr(error.message, "truncated") != NULL);
+		}
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	gen_free(&image);
+}
+
+static void
+test_truncated_file_straddles_cut(void)
+{
+	unsigned char payload[4096], bytes[32];
+	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+	    .type = 2, .data = payload, .data_size = sizeof(payload) };
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	size_t count;
+	uint32_t block;
+
+	for (size_t i = 0; i < sizeof(payload); i++)
+		payload[i] = (unsigned char)i;
+	gen_plan_init(&plan);
+	plan.objects = &object;
+	plan.object_count = 1;
+	gen_build(&plan, &image);
+	block = plan.total_blocks - 4;
+	gen_store(catalog_data(&image, 2, 2) + FILE_DATA_FORK + FORK_START,
+	    block, 4);
+	bcopy(payload, image.bytes + (uint64_t)block * plan.block_size,
+	    sizeof(payload));
+	image.length = (size_t)block * plan.block_size + 2048;
+	reader = public_reader(&f, &image);
+	if (reader != NULL) {
+		status = fsimg_reader_next(reader, &entry, &error);
+		expect_status("straddling file is listed", status, FSIMG_OK, &error);
+		if (status == FSIMG_OK) {
+			status = fsimg_reader_read_at(reader, 2016, bytes,
+			    sizeof(bytes), &count, &error);
+			expect_status("straddling file before cut reads", status,
+			    FSIMG_OK, &error);
+			expect_true("straddling file before cut exact bytes",
+			    count == sizeof(bytes) &&
+			    bcmp(bytes, payload + 2016, sizeof(bytes)) == 0);
+			status = fsimg_reader_read_at(reader, 2048, bytes, 1,
+			    &count, &error);
+			expect_status("straddling file after cut fails", status,
+			    FSIMG_ECORRUPT, &error);
+			expect_true("straddling file after cut names truncation",
+			    strstr(error.message, "truncated") != NULL);
+		}
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	gen_free(&image);
+}
+
+static void
+test_truncated_file_output_limit(void)
+{
+	static const unsigned char payload[] = "stored prefix";
+	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+	    .type = 2, .data = payload, .data_size = sizeof(payload) - 1 };
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	unsigned char *fork;
+	uint64_t size;
+
+	gen_plan_init(&plan);
+	plan.objects = &object;
+	plan.object_count = 1;
+	gen_build(&plan, &image);
+	image.length /= 2;
+	size = image.length + plan.block_size;
+	fork = catalog_data(&image, 2, 2) + FILE_DATA_FORK;
+	gen_store(fork, size, 8);
+	gen_store(fork + FORK_BLOCKS, size / plan.block_size, 4);
+	gen_store(fork + FORK_COUNT, size / plan.block_size, 4);
+	reader = public_reader(&f, &image);
+	if (reader != NULL) {
+		status = fsimg_reader_next(reader, &entry, &error);
+		expect_status("file larger than slice is listed", status,
+		    FSIMG_OK, &error);
+		if (status == FSIMG_OK) {
+			expect_true("file exceeds slice output ceiling",
+			    entry->size > image.length &&
+			    reader->session.output_limit == image.length);
+			status = fsimg_reader_charge_file(reader, &error);
+			expect_status("missing last stored byte outranks output limit",
+			    status, FSIMG_ECORRUPT, &error);
+			expect_true("output charge last byte names truncation",
+			    strstr(error.message, "truncated") != NULL);
+		}
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	gen_free(&image);
+}
+
+static void
+test_truncated_longer_slice(void)
+{
+	static const unsigned char payload[] = "complete file";
+	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+	    .type = 2, .data = payload, .data_size = sizeof(payload) - 1 };
+	gen_plan_t plan;
+	gen_image_t image;
+	unsigned char *extended;
+
+	gen_plan_init(&plan);
+	plan.objects = &object;
+	plan.object_count = 1;
+	gen_build(&plan, &image);
+	extended = realloc(image.bytes, image.length + 4096);
+	CHECK(extended != NULL);
+	image.bytes = extended;
+	bzero(image.bytes + image.length, 4096);
+	image.length += 4096;
+	(void)check_surviving_file("slice longer than allocation geometry",
+	    &image, image.length, payload, sizeof(payload) - 1);
 	gen_free(&image);
 }
 
@@ -5154,7 +5650,7 @@ main(int argc, char **argv)
 	}
 	if (argc == 3 && strcmp(argv[1], "--native-content") == 0)
 		return (native_content(argv[2]));
-	CHECK(argc == 1 || (argc == 2 && strcmp(argv[1], ".") == 0));
+	CHECK(argc == 1);
 	CHECK(setvbuf(stdout, NULL, _IOLBF, 0) == 0);
 	test_root_fields();
 	test_attribute_record_lengths();
@@ -5183,6 +5679,16 @@ main(int argc, char **argv)
 	test_truncated_file();
 	test_truncated_metadata();
 	test_truncated_largest_volume();
+	test_truncated_last_block();
+	test_truncated_sibling_loop();
+	test_truncated_catalog_leaf();
+	test_truncated_attributes_header();
+	test_truncated_journal_info();
+	test_truncated_journal_header();
+	test_truncated_overflow_leaf();
+	test_truncated_file_straddles_cut();
+	test_truncated_file_output_limit();
+	test_truncated_longer_slice();
 	test_headers();
 	test_tree_parameters();
 	test_attributes_tree_accepts_binary_compare_pair();

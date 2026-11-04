@@ -18,7 +18,8 @@
  * expected height down from the header's depth and requires each node to show
  * exactly that height, so it ends within the depth, however the child numbers
  * point. A walk along a sibling chain counts the leaves it enters and refuses
- * more than the tree has nodes.
+ * more than the tree's max_leaves, which the slice bounds whatever totalNodes
+ * declares.
  *
  * Nothing here retains a node beyond the buffers callers name: a later search
  * rereads its path.
@@ -267,6 +268,7 @@ hfsplus_tree_open(fsimg_reader_t *reader, hfsplus_tree_t *tree,
 	hfsplus_btree_t header;
 	fsimg_error_t detail;
 	fsimg_status_t status;
+	uint64_t slice_nodes;
 
 	*tree = (hfsplus_tree_t){ .reader = reader, .kind = kind };
 	status = hfsplus_fork_index(reader, id, HFSPLUS_FORK_DATA, fork,
@@ -290,6 +292,10 @@ hfsplus_tree_open(fsimg_reader_t *reader, hfsplus_tree_t *tree,
 	if (status != FSIMG_OK)
 		return (status);
 	tree->header = header;
+	slice_nodes = hfsplus_state(reader)->geometry.slice_bytes /
+	    header.node_size;
+	tree->max_leaves = slice_nodes < header.total_nodes ?
+	    (uint32_t)slice_nodes : header.total_nodes;
 
 	tree->search_node = fsimg_alloc(reader->ctx, header.node_size, &detail);
 	if (tree->search_node == NULL) {
@@ -469,8 +475,8 @@ enter_leaf(hfsplus_cursor_t *cursor, uint32_t number, fsimg_error_t *error)
 {
 	fsimg_status_t status;
 
-	/* A chain visiting more leaves than the tree has nodes is a loop. */
-	if (cursor->leaves >= cursor->tree->header.total_nodes)
+	/* A chain entering more leaves than the slice can hold is a loop. */
+	if (cursor->leaves >= cursor->tree->max_leaves)
 		return (hfsplus_corrupt(error, "HFS Plus sibling chain loops"));
 	status = hfsplus_node_read(cursor->tree, number, cursor->buffer,
 	    HFSPLUS_NODE_LEAF, 1, &cursor->node, error);

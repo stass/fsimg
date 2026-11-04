@@ -53,8 +53,9 @@ scan_record(const hfsplus_akey_t *key, const hfsplus_record_t *record,
 
 /* One lower-bound search for (id, "", 0), which no attribute key equals
  * because a name has at least one unit, then a walk while fileID matches. An
- * absent tree holds nothing. The walk checks key order, and the cursor's
- * visit bound ends a looping sibling chain whatever its keys say.
+ * absent tree holds nothing. The walk checks key order, which refuses a looping
+ * sibling chain at its first repeated key; the cursor's cap on leaves, which the
+ * slice bounds, ends one whatever its keys say.
  */
 fsimg_status_t
 hfsplus_attr_scan(fsimg_reader_t *reader, uint32_t id, bool compressed,

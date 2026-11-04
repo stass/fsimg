@@ -107,9 +107,11 @@ check_identity(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 
 /* Decode the header, apply the attribute table and derive the content domain
  * [r * B, (N - t) * B), where r blocks overlap [0, 1536) and t blocks below N
- * overlap [V - 1024, V). V is the slice's length, or N * B when a shorter slice
- * proves the volume's tail is gone: the volume keeps the geometry it declares,
- * and the read funnel refuses what the slice does not hold.
+ * overlap [V - 1024, V). V is the slice's length when it reaches N * B. A
+ * shorter slice proves the volume's tail is gone and reports N * B, but that is
+ * only a lower bound on V, so t cannot be known and is taken as 0: the volume
+ * keeps the geometry it declares, the read funnel refuses what the slice does
+ * not hold, and bytes it does hold in the last block are harmless.
  */
 static fsimg_status_t
 derive_geometry(fsimg_reader_t *reader, uint64_t slice_bytes,
@@ -132,6 +134,7 @@ derive_geometry(fsimg_reader_t *reader, uint64_t slice_bytes,
 	allocation_bytes = (uint64_t)header->total_blocks * header->block_size;
 	volume_bytes = allocation_bytes > slice_bytes ? allocation_bytes :
 	    slice_bytes;
+	/* N * B is whole sectors, so this fires only on a slice reaching it. */
 	if (volume_bytes % 512 != 0)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus volume length is not whole sectors"));
@@ -149,12 +152,17 @@ derive_geometry(fsimg_reader_t *reader, uint64_t slice_bytes,
 	blocks = header->total_blocks;
 	first = (uint32_t)((RESERVED_HEAD_BYTES + (uint64_t)block_size - 1) /
 	    block_size);
-	tail_block = (volume_bytes - RESERVED_TAIL_BYTES) / block_size;
-	end = tail_block < blocks ? (uint32_t)tail_block : blocks;
+	if (allocation_bytes > slice_bytes)
+		end = blocks;
+	else {
+		tail_block = (volume_bytes - RESERVED_TAIL_BYTES) / block_size;
+		end = tail_block < blocks ? (uint32_t)tail_block : blocks;
+	}
 	if (first >= end)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus volume leaves no blocks for content"));
 	g->volume_bytes = volume_bytes;
+	g->slice_bytes = slice_bytes;
 	g->block_size = block_size;
 	g->blocks = blocks;
 	g->first_block = first;

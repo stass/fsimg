@@ -486,10 +486,11 @@ static const hfsplus_owned_name_t hfsplus_owned_names[HFSPLUS_OWNED_COUNT]
  */
 typedef struct hfsplus_geometry {
 	uint64_t	 volume_bytes;	/* V, past the slice when it is truncated */
+	uint64_t	 slice_bytes;	/* what the input holds */
 	uint32_t	 block_size;	/* B */
 	uint32_t	 blocks;	/* N */
 	uint32_t	 first_block;	/* r */
-	uint32_t	 end_block;	/* N - t */
+	uint32_t	 end_block;	/* N - t, or N on a truncated volume */
 } hfsplus_geometry_t;
 
 /* Which on-disk keys a tree holds: a closed set btree.c dispatches on. */
@@ -527,6 +528,9 @@ typedef union hfsplus_key {
  * record and the buffer of one node that searches reuse. A tree is absent while
  * present is false, as an attributes tree can be, and then nothing else in it
  * is meaningful. Both pointers are owned and freed by hfsplus_tree_free().
+ * max_leaves is the most leaves a cursor enters from one position: totalNodes,
+ * or the nodes the slice can hold when that is fewer, since a leaf is read whole
+ * from the slice.
  */
 typedef struct hfsplus_tree {
 	fsimg_reader_t		*reader;
@@ -535,6 +539,7 @@ typedef struct hfsplus_tree {
 	hfsplus_btree_t		 header;
 	hfsplus_tree_kind_t	 kind;
 	hfsplus_compare_t	 compare;	/* catalog name order */
+	uint32_t		 max_leaves;
 	bool			 present;
 } hfsplus_tree_t;
 
@@ -742,8 +747,9 @@ int hfsplus_akey_compare(const hfsplus_akey_t *, const hfsplus_akey_t *);
  *
  * hfsplus_cursor_next() moves to the next record, along fLink past a leaf's
  * last, requiring each next leaf's bLink to name the one left and refusing more
- * leaves than the tree has nodes, so a looping chain ends. The caller reading
- * forward checks key order. hfsplus_cursor_record() frames the current record.
+ * leaves than the tree's max_leaves, so a looping chain ends whatever the caller
+ * checks. The caller reading forward checks key order. hfsplus_cursor_record()
+ * frames the current record.
  */
 void hfsplus_cursor_init(hfsplus_cursor_t *, hfsplus_tree_t *, unsigned char *);
 fsimg_status_t hfsplus_btree_search(hfsplus_cursor_t *, const hfsplus_key_t *,
