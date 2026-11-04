@@ -54,6 +54,15 @@ class CliTest < Minitest::Test
       total: "noticed 40 losses; 8 examples omitted", output: "./tail")
   end
 
+  def test_salvage_collision_remains_a_loss_and_reports_partial
+    salvage_collision_fixture
+    result = invoke(arguments: %w[x --salvage -f collision.img], expected: 1)
+
+    assert_includes(result.stderr,
+      'fsimg: salvage: "/foo.partial": skipped with any children: its output name is taken')
+    assert_salvage_closing_lines(result, total: "noticed 2 losses", output: "./collision")
+  end
+
   def test_salvage_verbose_entry_names_the_shortened_output
     salvage_fat_fixture
     result = invoke(arguments: %w[x --salvage -v -f tail.img], expected: 1)
@@ -161,38 +170,89 @@ class CliTest < Minitest::Test
 
     assert_equal(-8, error.fetch("code"))
     refute(error.key?("salvage_losses"))
-    refute_includes(result.stderr, "noticed")
-    refute_includes(result.stderr, "salvage extraction lost part of the image")
+    refute_includes(error.fetch("message"), "noticed")
+    refute_includes(error.fetch("message"), "salvage extraction lost part of the image")
   end
 
   def test_salvage_implies_skip_unsupported_and_still_warns_about_the_link
-    (@root / "linked").mkdir
-    (@root / "linked/file").binwrite("data".b)
-    File.symlink("file", @root / "linked/link")
-    invoke(arguments: %w[c -S off -F qnx4 -f link.img -C linked .])
+    salvage_link_fixture
+    result = invoke(arguments: %w[x --salvage -f link.img])
+
+    assert_equal("data".b, (@root / "link/etc/motd").binread)
+    refute(File.symlink?(@root / "link/bin/sh"))
+    refute_path_exists(@root / "link/bin/sh")
+    assert_includes(result.stderr,
+      "fsimg: warning: 1 entry of an unsupported kind was skipped\n")
+    refute_includes(result.stderr, "salvage extraction lost part of the image")
+    refute_includes(result.stderr, "fsimg: salvage:")
+  end
+
+  def test_salvage_json_counts_a_clean_symlink_as_a_skip_without_losses
+    salvage_link_fixture
+    result = invoke(arguments: %w[x --salvage --json -f link.img])
+
+    summary = completed(result).last
+    assert_equal("1", summary.fetch("skipped_entries"))
+    refute_includes(result.stderr, '"type":"salvage_loss"')
+  end
+
+  def test_salvage_counts_damage_separately_from_a_skipped_symlink
+    salvage_link_fixture(damaged: true)
     result = invoke(arguments: %w[x --salvage -f link.img], expected: 1)
 
-    assert_equal("data".b, (@root / "link/file").binread)
-    refute_path_exists(@root / "link/link")
+    assert_equal("da".b, (@root / "link/etc/motd.partial").binread)
     assert_includes(result.stderr,
-      'fsimg: salvage: "/link": skipped with any children: safe extraction cannot create its kind or name')
-    assert_includes(result.stderr, "1 entry of an unsupported kind was skipped")
+      "fsimg: warning: 1 entry of an unsupported kind was skipped\n")
     assert_salvage_closing_lines(result, total: "noticed 1 loss", output: "./link")
   end
 
-  def test_salvage_counts_an_omitted_out_of_profile_name_as_an_unsupported_loss
-    (@root / "omitted.img").binwrite(ifs_image(payload: "data".b, motd: "mo\xe9td".b))
-    result = invoke(arguments: %w[x --salvage --json -f omitted.img], expected: 1)
+  def test_salvage_json_counts_only_damage_alongside_a_skipped_symlink
+    salvage_link_fixture(damaged: true)
+    result = invoke(arguments: %w[x --salvage --json -f link.img], expected: 1)
     losses = records(result, stream: :stderr).select { _1.fetch("type") == "salvage_loss" }
 
-    assert_equal(["/bin/sh", '/etc/mo\xe9td'], losses.map { _1.fetch("path_excerpt") })
-    assert_equal(%w[unsupported unsupported], losses.map { _1.fetch("kind") })
+    assert_equal(["shortened"], losses.map { _1.fetch("kind") })
+    assert_equal(["/etc/motd.partial"], losses.map { _1.fetch("path_excerpt") })
     error = failed(result)
-    assert_equal("2", error.fetch("salvage_losses"))
+    assert_equal("1", error.fetch("salvage_losses"))
+    assert_equal("1", error.fetch("skipped_entries"))
+    assert_equal("0", error.fetch("omitted_entries"))
+  end
+
+  def test_salvage_omits_out_of_profile_names_without_losses
+    (@root / "omitted.img").binwrite(ifs_image(payload: "data".b, motd: "mo\xe9td".b))
+    result = invoke(arguments: %w[x --salvage --json -f omitted.img])
+    summary = completed(result).last
+
+    assert_equal("1", summary.fetch("skipped_entries"))
+    assert_equal("1", summary.fetch("omitted_entries"))
+    refute_includes(result.stderr, '"type":"salvage_loss"')
     refute_path_exists(@root / "omitted/etc/mo\xe9td".b)
   end
 
   private
+
+  # The damaged /foo creates foo.partial before the intact entry of that name.
+  # The two entries share the first two readable bytes of the payload.
+  def salvage_collision_fixture
+    header = ifs_image(payload: "data".b).byteslice(0, 100)
+    table = ->(offset) do
+      [ifs_record(mode: 0o100644, inode: 2, path: "foo".b,
+        tail: [offset, 4].pack("L>L>")),
+        ifs_record(mode: 0o100644, inode: 3, path: "foo.partial".b,
+          tail: [offset, 2].pack("L>L>"))].join.b + "\0".b * 4
+    end
+    data_offset = header.bytesize + table.call(0).bytesize
+    header[8, 12] = [data_offset + 8, data_offset, 100].pack("L>*")
+    (@root / "collision.img").binwrite(header + table.call(data_offset) + "da".b)
+  end
+
+  def salvage_link_fixture(damaged: false)
+    image = ifs_image(payload: "data".b)
+    # Leave two payload bytes readable; the symlink's metadata stays intact.
+    image = image.byteslice(0, image[12, 4].unpack1("L>") + 2) if damaged
+    (@root / "link.img").binwrite(image)
+  end
 
   def assert_salvage_closing_lines(result, total:, output:)
     assert_equal(["fsimg: salvage: #{total}\n",

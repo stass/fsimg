@@ -195,7 +195,7 @@ main(int argc, char **argv)
 	output_status = fsimg_output_run(executable, fsimg_cli_final, &display,
 	    STDOUT_FILENO, reporting_deadline, &interrupted, &budget, &output_error);
 	if (output_status != FSIMG_OK) {
-		if (status == FSIMG_OK) {
+		if (fsimg_cli_job_finished(status)) {
 			status = output_status;
 			error = output_error;
 			output_failure_state(&paths, &error);

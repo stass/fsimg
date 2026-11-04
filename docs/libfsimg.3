@@ -712,7 +712,8 @@ appended, holding the bytes before the first noticed damage; the entry callback
 reports it under that name.
 A directory or entry the format's decoder rejects, a file with no recoverable
 bytes and an entry whose output name is taken are skipped and the walk continues.
-With FSIMG_EXTRACT_SKIP_UNSUPPORTED each entry it leaves out is a loss too.
+What FSIMG_EXTRACT_SKIP_UNSUPPORTED leaves out is counted as under that flag and
+is not a loss.
 The context's loss callback receives the path and one FSIMG_LOSS_* kind in its
 mask for the first FSIMG_LOSS_EXAMPLES losses, a shortened file under its
 original path; salvage_losses in the statistics holds the total.

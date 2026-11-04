@@ -2345,7 +2345,6 @@ test_salvage_loss_diagnostics_without_verbose(void)
 		{ FSIMG_LOSS_DIRECTORY, "directory", "listing skipped: damaged" },
 		{ FSIMG_LOSS_ENTRY, "entry", "entry skipped: damaged" },
 		{ FSIMG_LOSS_COLLISION, "collision", "skipped with any children: its output name is taken" },
-		{ FSIMG_LOSS_UNSUPPORTED, "unsupported", "skipped with any children: safe extraction cannot create its kind or name" }
 	};
 	fsimg_cli_options_t options = { 0 };
 	fsimg_cli_paths_t paths = { 0 };

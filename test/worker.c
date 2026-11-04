@@ -100,6 +100,7 @@ typedef enum worker_scenario {
 	SCENARIO_SALVAGE_TWO_KINDS,
 	SCENARIO_SALVAGE_METADATA_KIND,
 	SCENARIO_SALVAGE_UNKNOWN_KIND,
+	SCENARIO_SALVAGE_ABOVE_KINDS,
 	SCENARIO_SALVAGE_SEPARATE_ALLOWANCE,
 	SCENARIO_SALVAGE_EXCESS_LOSS,
 	SCENARIO_SALVAGE_ERROR_PARTIAL,
@@ -2981,6 +2982,11 @@ fake_worker(worker_scenario_t mode)
 			fields |= FSIMG_LOSS_SKIPPED;
 		if (mode == SCENARIO_SALVAGE_METADATA_KIND)
 			fields |= FSIMG_META_OWNER;
+		/* The first bit above the salvage loss kinds is rejected because
+		 * it names no defined kind of image damage.
+		 */
+		if (mode == SCENARIO_SALVAGE_ABOVE_KINDS)
+			fields = 0x200000;
 		if (mode == SCENARIO_SALVAGE_UNKNOWN_KIND)
 			fields |= UINT64_C(1) << 63;
 		if (mode == SCENARIO_SALVAGE_SEPARATE_ALLOWANCE ||
@@ -3284,9 +3290,10 @@ test_salvage_error_and_done_before_bad_exit_remain_failures(void)
 
 		status = run(&fixture, &error);
 		if (cases[i] == SCENARIO_SALVAGE_ERROR_PARTIAL) {
-			CHECK(status == FSIMG_EPARTIAL);
+			CHECK(status == FSIMG_EIO);
+			CHECK(error.operation == FSIMG_OP_CONTEXT);
 			CHECK(fixture.result.salvage_losses == 0);
-			CHECK(strcmp(error.message, "hostile partial error without losses") == 0);
+			CHECK(strcmp(error.message, "invalid worker error fields") == 0);
 		} else {
 			CHECK(status == FSIMG_EIO);
 			CHECK(fixture.result.salvage_losses == 1);

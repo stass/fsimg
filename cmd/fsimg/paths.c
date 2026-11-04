@@ -1314,6 +1314,12 @@ fsimg_cli_publish_mtree(const fsimg_cli_options_t *options,
 }
 
 bool
+fsimg_cli_job_finished(fsimg_status_t status)
+{
+	return (status == FSIMG_OK || status == FSIMG_EPARTIAL);
+}
+
+bool
 fsimg_cli_published(const fsimg_cli_paths_t *paths)
 {
 	return (paths->image.published || paths->manifest.published);
@@ -1454,8 +1460,7 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 			cleanup = failure;
 	}
 	/* A partial tree is retained, so it is flushed like a complete one. */
-	if ((status == FSIMG_OK || status == FSIMG_EPARTIAL) &&
-	    paths->destination_parent != -1 &&
+	if (fsimg_cli_job_finished(status) && paths->destination_parent != -1 &&
 	    fsync(paths->destination_parent) == -1 && cleanup == 0)
 		cleanup = errno;
 	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++)
@@ -1475,7 +1480,7 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 	request->root_paths = NULL;
 	request->root_count = 0;
 	if (cleanup != 0) {
-		if (status == FSIMG_OK)
+		if (fsimg_cli_job_finished(status))
 			status = fsimg_error_set(error, fsimg_cli_published(paths) ?
 			    FSIMG_EDURABILITY : FSIMG_EIO,
 			    cleanup, FSIMG_OP_IO, "private capability cleanup incomplete");

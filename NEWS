@@ -20,8 +20,8 @@ guarantee of completeness or trustworthiness. A damaged `foo` becomes
 listing or entry, a file with no recoverable bytes and a taken output name are
 skipped. Losses are reported with their paths and a total, and any loss exits 1
 with the tree retained as incomplete. `.partial` marks only noticed damage, so a
-clean name is no proof. It implies `-k`, and every extraction safety rule stays
-in force. The library option is `FSIMG_EXTRACT_SALVAGE`, returning
+clean name is no proof. It implies `-k`, whose skips are not losses, and every
+extraction safety rule stays in force. The library option is `FSIMG_EXTRACT_SALVAGE`, returning
 `FSIMG_EPARTIAL`.
 
 ISO 9660 creation writes Rock Ridge and Joliet at interchange levels 1 to 3,

@@ -1735,8 +1735,8 @@ with any children; nothing is overwritten and no other name is tried.
 .Fl Fl salvage
 implies
 .Fl k ,
-and each entry it leaves out counts as a loss, so an undamaged image holding a
-symbolic link gives status 1.
+whose skipped and omitted entries are reported as usual and are not losses, so an
+undamaged image holding a symbolic link gives status 0.
 .Pp
 Every extraction safety rule and limit still applies and the sandbox gains no
 authority.

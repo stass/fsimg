@@ -609,9 +609,6 @@ skip_unsupported(extract_state_t *state, const fsimg_entry_t *entry,
 		return (status);
 	state->skipped_entries++;
 	fsimg_stat_add(&state->reader->ctx->stats.skipped_entries, 1);
-	if (state->reader->salvage.enabled)
-		fsimg_reader_salvage_loss(state->reader, entry->path, NULL,
-		    FSIMG_LOSS_UNSUPPORTED);
 	return (FSIMG_OK);
 }
 

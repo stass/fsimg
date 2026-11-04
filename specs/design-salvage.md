@@ -109,9 +109,10 @@ rejects cannot be told from image damage and is reported as a loss, like the
 damage that decoding exists to notice.
 
 An entry safe extraction cannot create, by its kind or its name, would end the
-walk under the ordinary policy, so `--salvage` implies `-k` and each one is a loss
-of kind `FSIMG_LOSS_UNSUPPORTED`, its children going with it. The library option
-alone keeps the ordinary policy.
+walk under the ordinary policy, so `--salvage` implies `-k`. Each one is reported
+and counted as a skip or omission, as `-k` does, its children going with it. It
+says nothing about damage, so it is not a loss, and a clean image holding a
+symbolic link succeeds. The library option alone keeps the ordinary policy.
 
 All existing limits and cumulative accounting apply. Salvage adds no work
 ceiling or separate budget. A caller can set `max_work`; heavy damage can be
@@ -128,10 +129,12 @@ notices; its absence promises neither an intact file nor trustworthy bytes.
 
 Any loss returns `FSIMG_EPARTIAL` and CLI exit 1, with the private tree retained
 and identified as incomplete. A terminal failure takes precedence and retains
-its ordinary error. A capped report carries bounded loss examples and the total
-number of noticed losses, even when examples are omitted; unknown descendants
-are not counted as known losses. Reports identify shortened and skipped paths
-and their causes. The library does not print diagnostics. Completing the walk
+its ordinary error, including one found after the walk: a failure in cleanup,
+such as flushing the destination's parent, or in the final report replaces the
+partial result, whose total goes with it. A capped report carries bounded loss
+examples and the total number of noticed losses, even when examples are omitted;
+unknown descendants are not counted as known losses. Reports identify shortened
+and skipped paths and their causes. The library does not print diagnostics. Completing the walk
 without a noticed loss returns ordinary success, with no integrity guarantee.
 
 The library reports through the context's loss callback, the rendered path with
@@ -142,9 +145,13 @@ reports a shortened file under its output name.
 
 A CLI worker reports a completed walk the same way whether or not it lost
 anything: its completion frame carries the count, and the coordinator turns a
-nonzero count into `FSIMG_EPARTIAL`, so no worker can report a clean result with
-losses. Loss examples and metadata loss examples have separate allowances, and
-a count below the examples sent is a protocol violation.
+nonzero count into `FSIMG_EPARTIAL`, so a worker reporting losses cannot report a
+clean result. Loss examples and metadata loss examples have separate allowances. A
+count below the examples sent, a count on a job not asked to salvage, and an
+error frame carrying `FSIMG_EPARTIAL` are protocol violations. A count of zero
+remains the worker's word, like a
+[verification verdict](design-security.md#coordinator-and-worker), since the coordinator has no view of
+the volume.
 
 ## Tests and acceptance evidence
 

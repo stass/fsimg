@@ -201,6 +201,11 @@ fsimg_status_t fsimg_cli_publish(const fsimg_cli_options_t *, fsimg_cli_paths_t 
     const fsimg_worker_result_t *, const volatile sig_atomic_t *, fsimg_error_t *);
 fsimg_status_t fsimg_cli_publish_mtree(const fsimg_cli_options_t *,
     fsimg_cli_paths_t *, const volatile sig_atomic_t *, fsimg_error_t *);
+/* Whether the job ran to its end, complete or with salvage losses, so its output
+ * is flushed. Only such an outcome gives way to a failure found after the job, in
+ * cleanup or the final report; an earlier failure stays, since it names the cause.
+ */
+bool fsimg_cli_job_finished(fsimg_status_t);
 /* Whether any output, the image or the --mtree manifest, was published:
  * a later failure then reports the output published, since it exists and
  * must not be recreated blindly.

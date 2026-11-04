@@ -564,14 +564,17 @@ completion: if that delivery alone fails, extracted content may already be
 complete, while the command still conservatively reports incomplete output.
 
 `--salvage` follows the [salvage design](design-salvage.md). It implies `-k`,
-and rejects `-O`, `--mtree` and member operands as usage errors. It makes no
+whose skipped and omitted entries are reported as usual and are not losses, and
+rejects `-O`, `--mtree` and member operands as usage errors. It makes no
 promise about the tree: `.partial` marks only noticed damage. Each of the first
 32 losses is reported on stderr with its path and cause, a shortened file under
 its output name, followed by the total and the number of examples omitted. Any
 loss exits 1 with the tree retained and reported as incomplete; JSON gives each
 example a `salvage_loss` record, and the `error` record of status `incomplete
-extraction` carries `salvage_losses`. A terminal failure keeps its ordinary
-error. Completing with no noticed loss is ordinary success.
+extraction` carries `salvage_losses`, `skipped_entries` and `omitted_entries`. A
+terminal failure keeps its ordinary error, and a failure in cleanup or the final
+report after the walk replaces the partial result, its total and counts going
+with it. Completing with no noticed loss is ordinary success.
 
 `x -O` takes exactly one member, a regular file or a symbolic link (whose
 bytes are its target), and writes its logical bytes to stdout, including

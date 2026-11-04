@@ -238,7 +238,7 @@ fsimg_wire_error_decode(const unsigned char *raw, uint32_t length,
 		return (protocol_error(error, "invalid worker error frame length"));
 	code = fsimg_load_le64(raw + FSIMG_WIRE_ERROR_STATUS);
 	flags = fsimg_load_le64(raw + FSIMG_WIRE_ERROR_FLAGS);
-	if (code < (uint64_t)(int64_t)FSIMG_EPARTIAL ||
+	if (code < (uint64_t)(int64_t)FSIMG_EDURABILITY ||
 	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OS_ERROR) > INT32_MAX ||
 	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_OPERATION) > FSIMG_OP_IMAGE ||
 	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_RESOURCE) > FSIMG_RESOURCE_SPOOL ||

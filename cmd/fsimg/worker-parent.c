@@ -278,7 +278,7 @@ deliver_event(worker_supervisor_t *state, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	status = state->event(state->argument, &state->decoder.frame, &text, error);
-	if (status > FSIMG_OK || status < FSIMG_EPARTIAL)
+	if (status > FSIMG_OK || status < FSIMG_EDURABILITY)
 		return (worker_error(error, "invalid worker event callback status"));
 	if (status != FSIMG_OK) {
 		if (error != NULL && error->status != status)

@@ -18,6 +18,7 @@
 
 #include "extract.h"
 #include "fsimg-endian.h"
+#include "internal.h"
 #include "test.h"
 
 typedef struct fake_driver {
@@ -135,9 +136,8 @@ record_loss(void *argument, const char *path, uint32_t mask)
 {
 	fixture_t *f = argument;
 
-	if ((mask & (FSIMG_LOSS_DIRECTORY | FSIMG_LOSS_ENTRY |
-	    FSIMG_LOSS_SHORTENED | FSIMG_LOSS_SKIPPED | FSIMG_LOSS_COLLISION |
-	    FSIMG_LOSS_UNSUPPORTED)) == 0)
+	/* Observe every non-metadata callback, including an invalid loss kind. */
+	if ((mask & ~FSIMG_META_KNOWN) == 0)
 		return;
 	CHECK(strlen(path) < sizeof(f->loss_path));
 	if (f->reports == 0) {
@@ -1188,7 +1188,7 @@ test_salvage_rejects_selection_and_manifest_before_creating_destination(void)
 }
 
 static void
-test_skipped_unsupported_entries_are_losses_only_under_salvage(void)
+test_skipped_unsupported_entries_are_not_salvage_losses(void)
 {
 	fixture_t f;
 	fsimg_extract_options_t options;
@@ -1211,12 +1211,11 @@ test_skipped_unsupported_entries_are_losses_only_under_salvage(void)
 			if (salvage)
 				options.flags |= FSIMG_EXTRACT_SALVAGE;
 			CHECK(fsimg_extract_into(f.reader, root, &options, &result, &error) ==
-			    (salvage ? FSIMG_EPARTIAL : FSIMG_OK));
-			CHECK(result.salvage_losses == salvage);
+			    FSIMG_OK);
+			CHECK(result.salvage_losses == 0);
 			CHECK(result.skipped_entries == (omitted ? 0 : 1));
 			CHECK(result.omitted_entries == omitted);
-			expect_losses(&f, salvage, salvage,
-			    omitted ? "/\\xff" : "/bad", FSIMG_LOSS_UNSUPPORTED);
+			expect_losses(&f, 0, 0, NULL, 0);
 			CHECK(faccessat(root, "bad", F_OK, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
 			CHECK(close(root) == 0);
 			remove_tree(parent, "out");
@@ -1246,10 +1245,12 @@ test_clean_salvage_succeeds_and_into_reports_per_operation_losses(void)
 		root = openat(parent, "root", O_RDONLY | O_DIRECTORY);
 		CHECK(root != -1);
 		fsimg_extract_options_init(&options);
-		options.flags |= FSIMG_EXTRACT_SALVAGE;
+		options.flags |= FSIMG_EXTRACT_SALVAGE | FSIMG_EXTRACT_SKIP_UNSUPPORTED;
 		CHECK(fsimg_extract_into(f.reader, root, &options, &result, &error) ==
 		    (damaged ? FSIMG_EPARTIAL : FSIMG_OK));
 		CHECK(result.salvage_losses == damaged);
+		CHECK(result.skipped_entries == 0);
+		CHECK(result.omitted_entries == 0);
 		CHECK(f.reader->state == FSIMG_READER_DONE);
 		expect_losses(&f, damaged, damaged, "/bad", FSIMG_LOSS_DIRECTORY);
 		expect_extracted_file(root, "a/inner", 1);
@@ -3309,7 +3310,7 @@ main(void)
 	test_file_salvage_prefix_bytes_partial_names_collisions_and_output_limits();
 	test_terminal_content_failure_takes_precedence_over_directory_loss();
 	test_one_cluster_file_work_ignores_long_chain_and_late_cycle();
-	test_skipped_unsupported_entries_are_losses_only_under_salvage();
+	test_skipped_unsupported_entries_are_not_salvage_losses();
 	CHECK(regression_failures == 0);
 	return (0);
 }

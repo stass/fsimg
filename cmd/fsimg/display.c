@@ -593,9 +593,7 @@ salvage_example(fsimg_cli_display_t *display, const unsigned char *raw)
 		{ FSIMG_LOSS_SKIPPED, "skipped",
 		    "skipped: no recoverable bytes, or its name is too long" },
 		{ FSIMG_LOSS_COLLISION, "collision",
-		    "skipped with any children: its output name is taken" },
-		{ FSIMG_LOSS_UNSUPPORTED, "unsupported",
-		    "skipped with any children: safe extraction cannot create its kind or name" }
+		    "skipped with any children: its output name is taken" }
 	};
 	const uint64_t fields = fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS);
 	const bool json = display->options->json;
@@ -1952,8 +1950,11 @@ failure(fsimg_cli_display_t *display)
 		append(display, ",\"retained_output\":");
 		string_value(display, retained_output(display));
 		if (error->status == FSIMG_EPARTIAL)
-			append(display, ",\"salvage_losses\":\"%llu\"",
-			    (unsigned long long)display->result->salvage_losses);
+			append(display, ",\"salvage_losses\":\"%llu\",\"skipped_entries\":\"%llu\","
+			    "\"omitted_entries\":\"%llu\"",
+			    (unsigned long long)display->result->salvage_losses,
+			    (unsigned long long)display->result->skipped_entries,
+			    (unsigned long long)display->result->omitted_entries);
 		append(display, ",\"retained_manifest\":");
 		string_value(display, display->paths->manifest.retained);
 		append(display, ",\"retained_scratch\":");
