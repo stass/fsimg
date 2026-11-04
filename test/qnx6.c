@@ -1452,6 +1452,7 @@ check_sample(uint32_t block_size, bool big, uint32_t flags)
 	CHECK(status == FSIMG_OK);
 	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
 	CHECK(strcmp(info.format, "qnx6") == 0 && info.clean);
+	CHECK(info.detail_count == 0 && info.missing_bytes == 0);
 	CHECK(info.allocation_unit_bytes == block_size &&
 	    info.allocation_units == g.blocks && info.volume_bytes == g.length);
 	CHECK((info.valid & FSIMG_VOLUME_UUID) != 0 && info.uuid[0] == 0x10 &&
@@ -1658,6 +1659,7 @@ test_geometry(void)
 	fixture_t f;
 	unsigned char *bigger;
 	uint64_t length, data_end, entries;
+	fsimg_volume_info_t info;
 
 	/* A short filesystem whose slice extends past D + N * B: the second
 	 * header is at the slice end and the gap is never read.
@@ -1674,6 +1676,9 @@ test_geometry(void)
 	f.forbid_first = data_end;
 	f.forbid_end = length / 4096 * 4096 - 4096;
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.volume_bytes == length && info.missing_bytes == 0);
+	CHECK(info.detail_count == 0);
 	CHECK(walk_all(&f, &entries, NULL) == FSIMG_OK && entries == 17);
 	fixture_free(&f);
 	CHECK(run_image(bigger, -1, length, RUN_VERIFY, NULL) == FSIMG_OK);
@@ -1697,10 +1702,638 @@ test_geometry(void)
 	free(bigger);
 	gen_free(&g);
 
-	/* N must fit before the second header. */
+	/* A valid declaration beyond S2 proves truncation, even when both
+	 * physical headers remain present. Verification refuses the volume.
+	 */
 	sample(&g, &s);
 	header_put32(&g, 60, g.blocks + 4);
-	expect(&g, RUN_LIST, FSIMG_ECORRUPT, "N past the second header");
+	put64(&g, g.image + 8192 + 152, (g.blocks + 4 + 7) / 8);
+	put64(&g, g.image + g.second + 152, (g.blocks + 4 + 7) / 8);
+	gen_reseal(&g, 8192);
+	gen_reseal(&g, g.second);
+	expect(&g, RUN_LIST, FSIMG_OK, "N past the second header");
+	expect(&g, RUN_VERIFY, FSIMG_ECORRUPT, "truncated declaration");
+	gen_free(&g);
+}
+
+/* The declaration is independent of the slice length and includes the area
+ * reserved for the second header, even when the last data block is partial.
+ */
+static uint64_t
+truncated_declared(const qnx6_gen_t *g)
+{
+	uint64_t end = GEN_DATA + (uint64_t)g->blocks * g->block_size;
+
+	return ((end + 4095) / 4096 * 4096 + 4096);
+}
+
+static void
+check_truncated_info(fixture_t *f, const qnx6_gen_t *g)
+{
+	fsimg_volume_info_t info;
+	uint64_t declared = truncated_declared(g);
+
+	CHECK(fsimg_reader_get_info(f->reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.volume_bytes == declared);
+	CHECK(info.missing_bytes == declared - f->length);
+	CHECK(info.missing_bytes != 0);
+	CHECK(info.allocation_units == g->blocks);
+	CHECK(info.detail_count == 1);
+	CHECK(strcmp(info.details[0].name, "second_header_missing") == 0);
+	CHECK(info.details[0].value == 1);
+}
+
+static void
+check_truncated_verify(qnx6_gen_t *g, uint64_t length)
+{
+	fsimg_error_t error = {0};
+	char message[128];
+
+	CHECK(run_image(g->image, -1, length, RUN_VERIFY, &error) ==
+	    FSIMG_ECORRUPT);
+	snprintf(message, sizeof(message), "image is truncated: %" PRIu64
+	    " declared bytes are missing", truncated_declared(g) - length);
+	if (strcmp(error.message, message) != 0)
+		fprintf(stderr, "verify cut at %" PRIu64 ": expected '%s', got '%s'\n",
+		    length, message, error.message);
+	CHECK(strcmp(error.message, message) == 0);
+}
+
+/* Compare every name and every file/link byte with the intact snapshot.
+ * The intact fixture is already covered by the generator's content oracle.
+ */
+static void
+check_truncated_tail(qnx6_gen_t *g, uint64_t length)
+{
+	fixture_t whole, cut;
+	const fsimg_entry_t *a, *b;
+	unsigned char expected[8192], actual[8192];
+	uint64_t offset;
+	size_t want, got;
+	fsimg_status_t status;
+
+	fixture_gen(&whole, g, 0);
+	fixture_new(&cut, g->image, length, 0);
+	/* No second-header read is permitted on the truncated path. These
+	 * cuts leave enough free tail that this area holds no live blocks.
+	 */
+	cut.forbid_first = length / 4096 * 4096 - 4096;
+	cut.forbid_end = cut.forbid_first + 512;
+	CHECK(fsimg_reader_open(whole.ctx, whole.io, NULL, &whole.reader,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_open(cut.ctx, cut.io, NULL, &cut.reader,
+	    NULL) == FSIMG_OK);
+	check_truncated_info(&cut, g);
+	while ((status = fsimg_reader_next(whole.reader, &a, NULL)) == FSIMG_OK) {
+		CHECK(fsimg_reader_next(cut.reader, &b, NULL) == FSIMG_OK);
+		CHECK(strcmp(a->path, b->path) == 0);
+		CHECK(a->kind == b->kind && a->size == b->size);
+		if (a->kind != FSIMG_ENTRY_FILE && a->kind != FSIMG_ENTRY_SYMLINK)
+			continue;
+		for (offset = 0; offset < a->size; offset += want) {
+			CHECK(fsimg_reader_read_at(whole.reader, offset, expected,
+			    sizeof(expected), &want, NULL) == FSIMG_OK);
+			CHECK(fsimg_reader_read_at(cut.reader, offset, actual,
+			    sizeof(actual), &got, NULL) == FSIMG_OK);
+			CHECK(want != 0 && got == want);
+			CHECK(bcmp(expected, actual, got) == 0);
+		}
+	}
+	CHECK(status == FSIMG_DONE);
+	CHECK(fsimg_reader_next(cut.reader, &b, NULL) == FSIMG_DONE);
+	fixture_free(&cut);
+	fixture_free(&whole);
+	check_truncated_verify(g, length);
+}
+
+static void
+test_truncated_verify(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+
+	sample(&g, &s);
+	check_truncated_verify(&g, GEN_DATA +
+	    (uint64_t)g.next_block * g.block_size + 8192);
+	gen_free(&g);
+}
+
+static void
+test_truncated_tail(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+	uint64_t end;
+
+	for (uint32_t b = 512; b <= 4096; b *= 2) {
+		for (unsigned big = 0; big < 2; big++) {
+			sample_build(&g, &s, b, big != 0, 0x100, 1048576);
+			/* Keep all allocated blocks and some free blocks. */
+			check_truncated_tail(&g, GEN_DATA +
+			    (uint64_t)g.next_block * b + 8192);
+			end = GEN_DATA + (uint64_t)g.blocks * b;
+			CHECK(end % 4096 == 0);
+			check_truncated_tail(&g, end);
+			gen_free(&g);
+		}
+	}
+	/* The final data block need not end at a header-area boundary. */
+	sample(&g, &s);
+	g.blocks--;
+	header_put32(&g, 60, g.blocks);
+	*bitmap_byte(&g, g.blocks) |= (unsigned char)(1u << (g.blocks % 8));
+	end = GEN_DATA + (uint64_t)g.blocks * g.block_size;
+	CHECK(end % 4096 != 0);
+	check_truncated_tail(&g, end);
+	gen_free(&g);
+}
+
+/* Listing never asks for the missing payload. */
+static void
+check_truncated_late_listing(qnx6_gen_t *g, uint64_t length)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	bool seen = false;
+
+	fixture_new(&f, g->image, length, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	while ((status = fsimg_reader_next(f.reader, &entry, NULL)) == FSIMG_OK)
+		seen |= strcmp(entry->path, "/late") == 0;
+	CHECK(status == FSIMG_DONE && seen);
+	fixture_free(&f);
+}
+
+/* Put content after the directories, so listing survives its removal. */
+static void
+check_truncated_late_file(bool big, unsigned surviving_blocks)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	unsigned char *bytes, buffer[1024];
+	uint32_t file, block;
+	uint64_t length;
+	size_t count;
+	fsimg_status_t status;
+	bool seen = false;
+
+	gen_init(&g, 1024, big, 1048576, GEN_INODES, 0x100);
+	bytes = pattern(3072, 9);
+	file = gen_file(&g, 1, "late", bytes, 3072);
+	gen_commit(&g, 0, 1, true, true);
+	block = g.next_block;
+	for (unsigned i = 0; i < 3; i++) {
+		bcopy(bytes + i * 1024, block_at(&g, block + i), 1024);
+		put32(&g, gen_inode_bytes(&g, file) + 36 + i * 4, block + i);
+		gen_set_bit(&g, block + i, true);
+		*bitmap_byte(&g, block + i) |=
+		    (unsigned char)(1u << ((block + i) % 8));
+	}
+	CHECK(run_image(g.image, -1, g.length, RUN_LIST, NULL) == FSIMG_OK);
+	length = GEN_DATA + (uint64_t)(block + surviving_blocks) * 1024;
+	/* Complete listing is independent of the missing file content. */
+	check_truncated_late_listing(&g, length);
+	fixture_new(&f, g.image, length, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	while ((status = fsimg_reader_next(f.reader, &entry, NULL)) == FSIMG_OK) {
+		if (strcmp(entry->path, "/late") != 0)
+			continue;
+		seen = true;
+		if (surviving_blocks != 0) {
+			CHECK(fsimg_reader_read_at(f.reader, 0, buffer,
+			    sizeof(buffer), &count, NULL) == FSIMG_OK);
+			CHECK(count == sizeof(buffer) && bcmp(buffer, bytes, count) == 0);
+		}
+		CHECK(fsimg_reader_read_at(f.reader, surviving_blocks * 1024,
+		    buffer, sizeof(buffer), &count, NULL) == FSIMG_ECORRUPT);
+		break;
+	}
+	CHECK(seen);
+	fixture_free(&f);
+	free(bytes);
+	gen_free(&g);
+}
+
+static void
+check_truncated_late_directory(bool big)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	uint32_t dir;
+	uint64_t length, entries;
+
+	gen_init(&g, 1024, big, 1048576, GEN_INODES, 0x100);
+	dir = gen_dir(&g, 1, "late-dir");
+	gen_commit(&g, 0, 1, true, true);
+	length = GEN_DATA + (uint64_t)g.objects[dir].blocks[0] * 1024;
+	fixture_new(&f, g.image, length, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(walk_all(&f, &entries, NULL) == FSIMG_ECORRUPT);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_truncated_references(void)
+{
+	for (unsigned big = 0; big < 2; big++) {
+		check_truncated_late_file(big != 0, 0);
+		check_truncated_late_file(big != 0, 1);
+		check_truncated_late_directory(big != 0);
+	}
+}
+
+static void
+test_truncated_system(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+	fixture_t f;
+	uint64_t end, cuts[4];
+	fsimg_error_t error;
+
+	sample(&g, &s);
+	end = GEN_DATA + 2 * (uint64_t)g.reservation * g.block_size;
+	cuts[0] = end - 1;
+	cuts[1] = GEN_DATA + (end - GEN_DATA) / 2;
+	cuts[2] = GEN_DATA + (uint64_t)g.bitmap_refs[0] * g.block_size + 1;
+	cuts[3] = GEN_DATA + (uint64_t)g.inode_leaf0 * g.block_size + 64;
+	for (size_t i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+		fixture_new(&f, g.image, cuts[i], 0);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader,
+		    &error) == FSIMG_ECORRUPT);
+		CHECK(strcmp(error.message,
+		    "image is truncated inside the QNX6 system trees") == 0);
+		fixture_free(&f);
+	}
+	gen_free(&g);
+}
+
+/* A finite boundary matrix, not a fuzzer. The callback asserts that every
+ * physical read stays inside the supplied slice.
+ */
+static void
+check_truncated_boundary(qnx6_gen_t *g, uint64_t length)
+{
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_status_t status;
+	uint64_t entries;
+
+	for (unsigned assumed = 0; assumed < 2; assumed++) {
+		/* Assumed identity still needs the four-byte magic location.
+		 * Shorter slices are covered by the short-volume identity tests.
+		 */
+		if (assumed != 0 && length < 8196)
+			continue;
+		fixture_new(&f, g->image, length, 0);
+		fsimg_read_options_init(&options);
+		if (assumed != 0) {
+			options.format = "qnx6";
+			options.flags = FSIMG_READ_ASSUME_IDENTITY;
+		}
+		status = fsimg_reader_open(f.ctx, f.io, &options, &f.reader, NULL);
+		if (status == FSIMG_OK)
+			status = walk_all(&f, &entries, NULL);
+		if (assumed == 0 && length < 8704)
+			CHECK(status == FSIMG_EFORMAT);
+		else if (length < GEN_DATA +
+		    2 * (uint64_t)g->reservation * g->block_size)
+			CHECK(status == FSIMG_ECORRUPT);
+		else if (length >= g->length)
+			CHECK(status == FSIMG_OK);
+		/* The generator puts all live blocks below next_block. These
+		 * cuts lose only free tail and the second header.
+		 */
+		else if (length >= GEN_DATA +
+		    (uint64_t)g->next_block * g->block_size)
+			CHECK(status == FSIMG_OK);
+		else {
+			if (status != FSIMG_OK && status != FSIMG_ECORRUPT)
+				fprintf(stderr, "cut=%" PRIu64 " assumed=%u status=%d\n",
+				    length, assumed, status);
+			CHECK(status == FSIMG_OK || status == FSIMG_ECORRUPT);
+		}
+		fixture_free(&f);
+	}
+}
+
+static void
+test_truncated_boundaries(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+	uint64_t boundaries[8], end;
+
+	for (unsigned big = 0; big < 2; big++) {
+		sample_build(&g, &s, 1024, big != 0, 0x100, 262144);
+		end = GEN_DATA + (uint64_t)g.blocks * g.block_size;
+		boundaries[0] = 8192;
+		boundaries[1] = 8704;
+		boundaries[2] = GEN_DATA;
+		boundaries[3] = GEN_DATA + 2 * (uint64_t)g.reservation * g.block_size;
+		boundaries[4] = end;
+		boundaries[5] = g.second;
+		boundaries[6] = g.length;
+		boundaries[7] = 4096;
+		for (size_t i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); i++) {
+			check_truncated_boundary(&g, boundaries[i] - 1);
+			check_truncated_boundary(&g, boundaries[i]);
+			if (boundaries[i] < g.length)
+				check_truncated_boundary(&g, boundaries[i] + 1);
+		}
+		for (uint32_t b = 0; b < g.next_block; b++) {
+			if (((g.bitmap[b / 8] >> (b % 8)) & 1) == 0)
+				continue;
+			end = GEN_DATA + (uint64_t)(b + 1) * g.block_size;
+			check_truncated_boundary(&g, end - 1);
+			check_truncated_boundary(&g, end);
+			check_truncated_boundary(&g, end + 1);
+		}
+		gen_free(&g);
+	}
+}
+
+static void
+test_truncated_snapshots(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	uint64_t length;
+	bool first_seen;
+	fsimg_status_t status;
+
+	for (unsigned newer = 0; newer < 2; newer++) {
+		gen_init(&g, 1024, false, 1048576, GEN_INODES, 0x100);
+		gen_file(&g, 1, "first", (const unsigned char *)"1", 1);
+		gen_commit(&g, 0, newer ? 3 : 1, true, false);
+		gen_file(&g, 1, "second", (const unsigned char *)"2", 1);
+		gen_commit(&g, g.reservation, 2, false, true);
+		length = GEN_DATA + (uint64_t)g.next_block * g.block_size + 8192;
+		fixture_new(&f, g.image, length, 0);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+		check_truncated_info(&f, &g);
+		first_seen = false;
+		/* Documented behaviour: a cut selects the first snapshot alone,
+		 * even when the missing second header described a newer one.
+		 */
+		while ((status = fsimg_reader_next(f.reader, &entry, NULL)) == FSIMG_OK) {
+			first_seen |= strcmp(entry->path, "/first") == 0;
+			CHECK(strcmp(entry->path, "/second") != 0);
+		}
+		CHECK(status == FSIMG_DONE && first_seen);
+		fixture_free(&f);
+		check_truncated_verify(&g, length);
+		gen_free(&g);
+	}
+}
+
+/* Leave a valid second candidate at the cut's S2. It must not rescue an
+ * invalid first header or first snapshot on the truncated path.
+ */
+static void
+relocate_second_to_cut(qnx6_gen_t *g, uint64_t length)
+{
+	uint64_t second = length / 4096 * 4096 - 4096;
+
+	bcopy(g->image + g->second, g->image + second, 512);
+}
+
+static void
+check_truncated_bad_first_crc(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+	uint64_t length;
+
+	sample(&g, &s);
+	length = g.length - 8192;
+	relocate_second_to_cut(&g, length);
+	g.image[8192 + 511] ^= 1;
+	CHECK(run_image(g.image, -1, length, RUN_LIST, NULL) == FSIMG_ECORRUPT);
+	gen_free(&g);
+}
+
+static void
+check_truncated_bad_first_groups(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+	uint64_t length;
+
+	sample(&g, &s);
+	length = g.length - 8192;
+	relocate_second_to_cut(&g, length);
+	put32(&g, g.image + 8192 + 68, 0);
+	gen_reseal(&g, 8192);
+	CHECK(run_image(g.image, -1, length, RUN_LIST, NULL) == FSIMG_ECORRUPT);
+	gen_free(&g);
+}
+
+static void
+check_truncated_bad_first_bitmap(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+	uint64_t length;
+
+	sample(&g, &s);
+	gen_commit(&g, g.reservation, 2, false, true);
+	length = GEN_DATA + (uint64_t)g.next_block * g.block_size + 8192;
+	relocate_second_to_cut(&g, length);
+	/* Corrupt only the first snapshot's bitmap. */
+	block_at(&g, get32(&g, g.image + 8192 + 160))[0] &=
+	    (unsigned char)~1u;
+	CHECK(run_image(g.image, -1, length, RUN_LIST, NULL) == FSIMG_ECORRUPT);
+	gen_free(&g);
+}
+
+static void
+check_truncated_non_system_inode_reference(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+	uint64_t length;
+	fsimg_status_t status;
+
+	sample(&g, &s);
+	gen_commit(&g, g.reservation, 2, false, true);
+	length = GEN_DATA + (uint64_t)g.next_block * g.block_size + 8192;
+	relocate_second_to_cut(&g, length);
+	/* A native-shaped descriptor with a non-system reference. */
+	put32(&g, g.image + 8192 + 72 + 8, g.blocks - 1);
+	gen_reseal(&g, 8192);
+	status = run_image(g.image, -1, length, RUN_LIST, NULL);
+	CHECK(status == FSIMG_ECORRUPT || status == FSIMG_EUNSUPPORTED);
+	gen_free(&g);
+}
+
+static void
+test_truncated_refusals(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+
+	check_truncated_bad_first_crc();
+	check_truncated_bad_first_groups();
+	check_truncated_bad_first_bitmap();
+	check_truncated_non_system_inode_reference();
+
+	/* A fitting first header still requires the second at the slice end,
+	 * even when the slice was cut from a longer partition.
+	 */
+	sample(&g, &s);
+	g.blocks -= 32;
+	header_put32(&g, 60, g.blocks);
+	header_put32(&g, 64, g.blocks - g.next_block);
+	put64(&g, g.image + 8192 + 152, (g.blocks + 7) / 8);
+	gen_reseal(&g, 8192);
+	CHECK(run_image(g.image, -1, g.length - 4096, RUN_LIST, NULL) == FSIMG_ECORRUPT);
+	gen_free(&g);
+
+	/* Only the second declares truncation: the fitting first requires a
+	 * pair describing the same volume, so there is no truncated fallback.
+	 */
+	sample(&g, &s);
+	put32(&g, g.image + g.second + 60, g.blocks + 4);
+	put64(&g, g.image + g.second + 152, (g.blocks + 4 + 7) / 8);
+	gen_reseal(&g, g.second);
+	expect(&g, RUN_LIST, FSIMG_ECORRUPT, "only second N raised");
+	gen_free(&g);
+}
+
+/* A native N = 2^24 volume needs only a few MiB of system trees. The
+ * sparse generator avoids allocating its 64-GiB declared data domain.
+ */
+static void
+check_truncated_huge_system_run(void)
+{
+	const gen_shape_t shape = {
+		.length = (UINT64_C(1) << 24) * 4096 + 16384,
+		.block_size = 4096,
+		.inodes = GEN_INODES,
+		.objects = GEN_INODES,
+		.flags = 0x100,
+		.sparse = true
+	};
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_stats_t stats;
+	fsimg_error_t error;
+	uint64_t end;
+
+	if (!gen_create(&g, &shape))
+		return;
+	CHECK(g.blocks == (UINT32_C(1) << 24));
+	gen_commit(&g, 0, 1, true, true);
+	end = GEN_DATA + 2 * (uint64_t)g.reservation * g.block_size;
+	CHECK(end < 8 * 1024 * 1024);
+	fixture_limited(&f, g.image, g.image_fd, end, 0, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.scratch_peak <= end);
+	fixture_free(&f);
+
+	/* Both snapshots' reservation must fit, even though the first tree
+	 * itself is complete at this cut.
+	 */
+	fixture_limited(&f, g.image, g.image_fd, end - 1, 0, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) == FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message,
+	    "image is truncated inside the QNX6 system trees") == 0);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.scratch_peak <= end - 1);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_truncated_huge(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_stats_t stats[2];
+	fsimg_error_t error;
+	unsigned char *h;
+	const uint32_t counts[] = { UINT32_C(0x10000000), UINT32_C(0xfffffff0) };
+	uint64_t bytes;
+
+	check_truncated_huge_system_run();
+
+	/* Only a header is stored. Native tree lengths/depths describe huge
+	 * geometry without asking the generator to allocate that geometry.
+	 * Comparing peaks, as in FAT's huge-volume test, catches allocations
+	 * proportional to N; a resource-limit error is not an acceptable EOF.
+	 */
+	for (unsigned i = 0; i < 2; i++) {
+		gen_init(&g, 4096, false, 1048576, GEN_INODES, 0x100);
+		gen_commit(&g, 0, 1, true, true);
+		h = g.image + 8192;
+		put32(&g, h + 60, counts[i]);
+		put32(&g, h + 52, UINT32_C(0x10000000));
+		bytes = (uint64_t)UINT32_C(0x10000000) * 128;
+		put64(&g, h + 72, bytes);
+		h[72 + 72] = (unsigned char)gen_depth(bytes / 4096, 1024);
+		bytes = ((uint64_t)counts[i] + 7) / 8;
+		put64(&g, h + 152, bytes);
+		h[152 + 72] = (unsigned char)gen_depth((bytes + 4095) / 4096, 1024);
+		gen_reseal(&g, 8192);
+		fixture_new(&f, g.image, 8704, 0);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader,
+		    &error) == FSIMG_ECORRUPT);
+		CHECK(strcmp(error.message,
+		    "image is truncated inside the QNX6 system trees") == 0);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &stats[i], NULL) == FSIMG_OK);
+		fixture_free(&f);
+		gen_free(&g);
+	}
+	CHECK(stats[1].memory_peak <= stats[0].memory_peak);
+	CHECK(stats[1].scratch_peak <= stats[0].scratch_peak);
+
+	/* The entire system run survives, but the bitmap tree refers beyond
+	 * the slice: accepting the header must not make the reference safe.
+	 */
+	gen_init(&g, 4096, false, 1048576, GEN_INODES, 0x100);
+	gen_commit(&g, 0, 1, true, true);
+	put32(&g, g.image + 8192 + 152 + 8, g.blocks - 1);
+	gen_reseal(&g, 8192);
+	fixture_new(&f, g.image, GEN_DATA +
+	    2 * (uint64_t)g.reservation * g.block_size, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_ECORRUPT);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_truncated_hostile(void)
+{
+	qnx6_gen_t g;
+	sample_t s;
+	fixture_t f;
+	uint64_t entries;
+
+	sample(&g, &s);
+	gen_file(&g, 1, "newer", (const unsigned char *)"2", 1);
+	gen_commit(&g, g.reservation, 2, false, true);
+	/* Accepted and documented: rewriting the first header with a larger
+	 * N and a valid CRC hides an intact, newer second snapshot. The native
+	 * tree depth is unchanged; the bitmap length follows the raised N.
+	 */
+	put64(&g, g.image + 8192 + 152, (g.blocks + 4 + 7) / 8);
+	put32(&g, g.image + 8192 + 60, g.blocks + 4);
+	gen_reseal(&g, 8192);
+	g.blocks += 4;
+	fixture_gen(&f, &g, 0);
+	f.forbid_first = g.second;
+	f.forbid_end = g.second + 512;
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	check_truncated_info(&f, &g);
+	CHECK(walk_all(&f, &entries, NULL) == FSIMG_OK && entries == 17);
+	fixture_free(&f);
+	check_truncated_verify(&g, g.length);
 	gen_free(&g);
 }
 
@@ -2722,8 +3355,7 @@ test_eof(void)
 	qnx6_gen_t g;
 	sample_t s;
 	fixture_t f;
-	fsimg_status_t status, expected;
-	uint64_t entries, floor, length, bitmap, inode, root, payload, table;
+	uint64_t entries, bitmap, inode, root, payload, table;
 	char path[1100];
 	int fd, input;
 
@@ -2760,29 +3392,7 @@ test_eof(void)
 	check_eof(&g, table + 1, g.block_size, EOF_VERIFY, 0,
 	    "EOF in the inode-table pass");
 
-	/* A slice cut short has its second header where the cut puts it,
-	 * which holds no header unless the cut leaves the last 4096-byte unit
-	 * whole; with less than the first header there is no classic magic.
-	 * The cuts fall at each 4096-byte boundary and halfway between, and
-	 * reads never pass the slice's end.
-	 */
-	floor = g.length / 4096 * 4096;
-	fixture_gen(&f, &g, 0);
-	for (length = 0; length < g.length; length += 2048) {
-		expected = length >= floor ? FSIMG_OK : length < 8192 + 512 ?
-		    FSIMG_EFORMAT : FSIMG_ECORRUPT;
-		fixture_resize(&f, length);
-		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
-		if (status == FSIMG_OK)
-			status = walk_all(&f, &entries, NULL);
-		fsimg_reader_free(f.reader);
-		f.reader = NULL;
-		if (status != expected)
-			fprintf(stderr, "truncated to %" PRIu64 ": %d\n", length,
-			    status);
-		CHECK(status == expected);
-	}
-	fixture_free(&f);
+	/* Physical slice boundaries are covered by test_truncated_boundaries. */
 
 	/* An image file that shrinks after open is a changed source. */
 	fixture_gen(&f, &g, 0);
@@ -4143,6 +4753,15 @@ main(int argc, char **argv)
 	test_matrix();
 	test_shapes();
 	test_hard_links();
+	test_truncated_verify();
+	test_truncated_tail();
+	test_truncated_references();
+	test_truncated_system();
+	test_truncated_boundaries();
+	test_truncated_snapshots();
+	test_truncated_refusals();
+	test_truncated_huge();
+	test_truncated_hostile();
 	test_geometry();
 	test_snapshots();
 	test_probe();

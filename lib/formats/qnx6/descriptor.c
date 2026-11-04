@@ -61,7 +61,7 @@ const fsimg_format_t fsimg_qnx6_format = {
  * The probe then checks the header CRC, version 4 and a classic block size.
  * A magic only at byte zero is a bootless or MMI layout, and magics at both
  * positions are ambiguous; both are recognized but unsupported. open
- * validates both headers completely.
+ * validates the headers completely.
  */
 static fsimg_status_t
 qnx6_probe(const unsigned char *prefix, size_t length,

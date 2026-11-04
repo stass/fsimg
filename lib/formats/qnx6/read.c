@@ -126,6 +126,13 @@ qnx6_open(fsimg_reader_t *reader,
 	 */
 	reader->info.clean = (qnx6->header.flags & QNX6_FLAG_MOUNTED) == 0;
 	reader->info.io_error = false;
+	if (qnx6->geometry.second_header_missing) {
+		reader->info.details[0] = (fsimg_volume_detail_t){
+			.name = "second_header_missing",
+			.value = 1
+		};
+		reader->info.detail_count = 1;
+	}
 	return (FSIMG_OK);
 }
 

@@ -551,6 +551,15 @@
 
 ## Security residuals
 
+* [Medium] **QNX6 walk cost on a crafted truncated volume**
+  (`lib/formats/qnx6/tree.c`): references are checked against `N`, which on a
+  truncated volume can far exceed the slice, so an image can give a walk
+  `slice / 4` leaves, `B / 4` times an intact image of that size. A crafted
+  33.6 MiB image took 36 s and 109 MiB of scratch inside `fsimg_reader_open`. It
+  is linear in file bytes and budgeted, and `max_work` is unlimited by default.
+  Stopping a walk at its first leaf past the slice, with an index lookup miss
+  mapped to `FSIMG_ECORRUPT`, would bound it by blocks in the slice.
+
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that
   declares an internal function such as `fsimg_writer_new_variant()` itself

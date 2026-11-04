@@ -11,7 +11,9 @@
 /* Header candidates, validation, pair agreement, snapshot selection and the
  * geometry the selected header establishes. The first header sits at byte
  * 8192 and the second in the last whole 4096-byte unit of the slice, so the
- * slice length V fixes where the second header is, independent of N.
+ * slice length V fixes where the second header is, independent of N. A first
+ * header whose N blocks do not fit before that position proves the image was
+ * cut, and is then read alone.
  */
 
 typedef struct qnx6_candidate {
@@ -21,12 +23,16 @@ typedef struct qnx6_candidate {
 	unsigned char	 raw[QNX6_HEADER_BYTES];
 } qnx6_candidate_t;
 
-static fsimg_status_t candidate_read(fsimg_reader_t *, uint64_t, uint64_t,
+static fsimg_status_t candidate_read(fsimg_reader_t *, uint64_t,
     qnx6_candidate_t *, fsimg_error_t *);
 static fsimg_status_t system_tree_check(const qnx6_tree_t *, uint64_t,
     uint32_t, unsigned, uint64_t *, fsimg_error_t *);
+static uint64_t blocks_end(const qnx6_header_t *);
+static uint64_t system_run_bytes(const qnx6_candidate_t *);
 static fsimg_status_t pair_select(qnx6_candidate_t *, qnx6_candidate_t *,
     qnx6_candidate_t **, fsimg_error_t *);
+static fsimg_status_t truncated_size(const qnx6_candidate_t *, uint64_t,
+    uint64_t *, fsimg_error_t *);
 
 /* A system tree must have exactly its native length, the minimal depth for
  * that length and at most depth 2; *blocks receives its block count.
@@ -68,8 +74,8 @@ qnx6_layout_refused(bool at_header, fsimg_error_t *error)
 	    "QNX6 bootless or MMI layout is not supported"));
 }
 
-/* Refuse a magic at byte zero. The slice holds both positions: its length
- * was checked. An open under an assumed identity reaches this unprobed.
+/* Refuse a magic at byte zero. An open under an assumed identity reaches this
+ * unprobed, and a slice too short to hold a position fails its read.
  */
 static fsimg_status_t
 layout_check(fsimg_reader_t *reader, fsimg_error_t *error)
@@ -91,14 +97,16 @@ layout_check(fsimg_reader_t *reader, fsimg_error_t *error)
 }
 
 /* Read and completely validate one header. Every field the driver later
- * uses is checked here, so selection compares only valid headers.
+ * uses is checked here, so selection compares only valid headers. Whether its
+ * blocks fit the slice is the caller's question: the answer tells a truncated
+ * volume from an intact one, and does not make a header invalid.
  */
 static fsimg_status_t
-candidate_read(fsimg_reader_t *reader, uint64_t offset, uint64_t second_header,
-    qnx6_candidate_t *c, fsimg_error_t *error)
+candidate_read(fsimg_reader_t *reader, uint64_t offset, qnx6_candidate_t *c,
+    fsimg_error_t *error)
 {
 	qnx6_header_t *h = &c->header;
-	uint64_t end, inode_bytes, bitmap_blocks, inode_blocks, reservation;
+	uint64_t inode_bytes, bitmap_blocks, inode_blocks, reservation;
 	uint64_t leaves;
 	uint32_t features;
 	unsigned depth;
@@ -148,10 +156,7 @@ candidate_read(fsimg_reader_t *reader, uint64_t offset, uint64_t second_header,
 	/* Counts and geometry. */
 	if (h->reserve > 100 || h->groups == 0 || h->groups > 64)
 		return (qnx6_corrupt(error, "QNX6 reserve or group count is out of range"));
-	if (h->block_count == 0 ||
-	    !fsimg_mul_u64(h->block_count, h->block_size, &end) ||
-	    !fsimg_add_u64(end, QNX6_DATA_ORIGIN, &end) || end > second_header)
-		return (qnx6_corrupt(error, "QNX6 blocks do not fit before the second header"));
+	/* A free count below N also requires N >= 1. */
 	if (h->inode_count < 2 || h->free_inodes >= h->inode_count ||
 	    h->free_blocks >= h->block_count)
 		return (qnx6_corrupt(error, "QNX6 inode or free counts are out of range"));
@@ -181,6 +186,24 @@ candidate_read(fsimg_reader_t *reader, uint64_t offset, uint64_t second_header,
 		return (qnx6_corrupt(error, "QNX6 system reservation does not fit"));
 	c->reservation = (uint32_t)reservation;
 	return (FSIMG_OK);
+}
+
+/* The byte past the N blocks. N has 32 bits and a validated B at most 13, so
+ * this cannot overflow.
+ */
+static uint64_t
+blocks_end(const qnx6_header_t *h)
+{
+	return (QNX6_DATA_ORIGIN + (uint64_t)h->block_count * h->block_size);
+}
+
+/* The bytes of the system run: R blocks and their twins. 2R <= N, so this
+ * cannot overflow either.
+ */
+static uint64_t
+system_run_bytes(const qnx6_candidate_t *c)
+{
+	return ((uint64_t)c->reservation * 2 * c->header.block_size);
 }
 
 /* Both headers must describe one volume. The larger serial selects the
@@ -215,7 +238,32 @@ pair_select(qnx6_candidate_t *first, qnx6_candidate_t *second,
 	return (FSIMG_OK);
 }
 
-/* Read both headers, select the snapshot and establish the geometry, the
+/* The declared size of a volume whose first header proved it truncated, by its
+ * own N rather than by any failure of the other header. N sizes the block and
+ * inode bitsets at open, so the system run holding both system trees must be in
+ * the slice, which bounds N / 8 and the inode capacity by what the file holds.
+ * An intact volume has this from 2R <= N.
+ *
+ * *volume_bytes receives the smallest volume holding the blocks and a second
+ * header. The caller's test was D + N * B > S2, so its round-up is at least
+ * S2 + 4096, the slice's last whole unit, and the result exceeds the slice: the
+ * reader core reports bytes missing and refuses verification by construction.
+ */
+static fsimg_status_t
+truncated_size(const qnx6_candidate_t *first, uint64_t slice_bytes,
+    uint64_t *volume_bytes, fsimg_error_t *error)
+{
+	uint64_t end = blocks_end(&first->header);
+
+	if (QNX6_DATA_ORIGIN + system_run_bytes(first) > slice_bytes)
+		return (qnx6_corrupt(error,
+		    "image is truncated inside the QNX6 system trees"));
+	*volume_bytes = (end + QNX6_HEADER_AREA - 1) / QNX6_HEADER_AREA *
+	    QNX6_HEADER_AREA + QNX6_HEADER_AREA;
+	return (FSIMG_OK);
+}
+
+/* Read the headers, select the snapshot and establish the geometry, the
  * system domain and the content domain. Nothing is read from the blocks yet.
  */
 fsimg_status_t
@@ -224,18 +272,15 @@ qnx6_headers_read(fsimg_reader_t *reader, fsimg_error_t *error)
 	fsimg_qnx6_reader_t *qnx6 = qnx6_state(reader);
 	qnx6_geometry_t *g = &qnx6->geometry;
 	qnx6_candidate_t *candidates, *selected = NULL;
-	uint64_t volume_bytes, second_header, system_bytes;
+	uint64_t slice_bytes, volume_bytes, second_header, system_bytes;
 	fsimg_error_t detail;
 	fsimg_status_t status;
 
-	status = fsimg_io_get_size(reader->input, &volume_bytes, error);
+	status = fsimg_io_get_size(reader->input, &slice_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);
-	second_header = volume_bytes / QNX6_HEADER_AREA * QNX6_HEADER_AREA;
-	if (volume_bytes > INT64_MAX ||
-	    second_header < QNX6_DATA_ORIGIN + QNX6_HEADER_AREA * 2)
-		return (qnx6_corrupt(error, "QNX6 slice is too small for two headers"));
-	second_header -= QNX6_HEADER_AREA;
+	if (slice_bytes > INT64_MAX)
+		return (qnx6_corrupt(error, "QNX6 slice is too large"));
 	status = layout_check(reader, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -246,20 +291,33 @@ qnx6_headers_read(fsimg_reader_t *reader, fsimg_error_t *error)
 			*error = detail;
 		return (detail.status);
 	}
-	status = candidate_read(reader, QNX6_HEADER_OFFSET, second_header,
-	    &candidates[0], error);
-	if (status == FSIMG_OK)
-		status = candidate_read(reader, second_header, second_header,
-		    &candidates[1], error);
-	if (status == FSIMG_OK)
-		status = pair_select(&candidates[0], &candidates[1], &selected,
+	status = candidate_read(reader, QNX6_HEADER_OFFSET, &candidates[0], error);
+	if (status != FSIMG_OK)
+		goto done;
+	/* The first header's read holds the slice to at least 8704 bytes, so
+	 * this cannot wrap. With D + N * B <= S2 and N >= 1, S2 lies past D;
+	 * the second header must then agree on N, so it fits as well.
+	 */
+	second_header = slice_bytes / QNX6_HEADER_AREA * QNX6_HEADER_AREA -
+	    QNX6_HEADER_AREA;
+	volume_bytes = slice_bytes;
+	if (blocks_end(&candidates[0].header) > second_header) {
+		g->second_header_missing = true;
+		selected = &candidates[0];
+		status = truncated_size(selected, slice_bytes, &volume_bytes,
 		    error);
+	} else {
+		status = candidate_read(reader, second_header, &candidates[1],
+		    error);
+		if (status == FSIMG_OK)
+			status = pair_select(&candidates[0], &candidates[1],
+			    &selected, error);
+	}
 	if (status != FSIMG_OK)
 		goto done;
 
 	qnx6->header = selected->header;
 	g->volume_bytes = volume_bytes;
-	g->second_header = second_header;
 	g->block_size = selected->header.block_size;
 	g->pointers = g->block_size / 4;
 	g->blocks = selected->header.block_count;
@@ -267,7 +325,7 @@ qnx6_headers_read(fsimg_reader_t *reader, fsimg_error_t *error)
 	g->reservation = selected->reservation;
 	g->groups = selected->header.groups;
 	g->big_endian = selected->big_endian;
-	system_bytes = (uint64_t)g->reservation * 2 * g->block_size;
+	system_bytes = system_run_bytes(selected);
 	qnx6->system_domain = (fsimg_extent_domain_t){
 		.offset = QNX6_DATA_ORIGIN,
 		.length = system_bytes,

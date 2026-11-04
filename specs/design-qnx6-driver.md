@@ -71,11 +71,14 @@ value, so an emitted record never contains an unspecified byte.
 
 ## Geometry, headers and the reservation
 
-`qnx6_geometry_t` holds the slice length `V`, the data origin `D = 12288`,
-the block size `B`, `P = B / 4`, the block count `N`, the second header
-position `S2 = floor(V / 4096) * 4096 - 4096`, the byte order, the inode
-capacity, and the system reservation `R`. Products and sums use the checked
-64-bit helpers; a geometry that fails a check is corrupt, never clamped.
+`qnx6_geometry_t` holds the volume's size, the data origin `D = 12288`,
+the block size `B`, `P = B / 4`, the block count `N`, the byte order, the inode
+capacity, and the system reservation `R`. The size is the slice length `V`, or on
+a [truncated volume](design-qnx6.md#truncated-volumes) the declared size. The
+reader finds the second header from the slice, at
+`S2 = floor(V / 4096) * 4096 - 4096`. Products and sums a field can overflow use
+the checked 64-bit helpers; a geometry that fails a check is corrupt, never
+clamped.
 
 The probe inspects 8704 bytes. A classic magic at byte 8192 in either byte
 order is the identity signature; the probe then checks the CRC, the version
@@ -96,13 +99,13 @@ layout and is unsupported. Pair agreement compares the
 headers from the CRC on, so a magic missing from one header alone does not
 make equal serials disagree.
 
-`open` reads both header areas with exact 512-byte reads and validates each
-header completely:
+`open` reads the first header area, then the second, with exact 512-byte reads
+and validates each header completely:
 
 * magic, CRC and byte order; version 4; flags other than the mounted bit
   `0x1` in `{0, 0x100}`; reserve at
   most 100; groups 1 through 64; block size in `{512, 1024, 2048, 4096}`;
-* `S2 > 12288`, `D + N * B <= S2`, and `N >= 1`;
+* `N >= 1`;
 * inode capacity at least 2 with `128 * capacity` representable, and the
   inode-table length equal to it; bitmap length equal to `ceil(N / 8)`;
   long-name length a multiple of `B`; the fourth tree empty with sentinel
@@ -119,6 +122,15 @@ mounted bit, which is snapshot state. The larger serial is
 selected; equal serials require byte-identical headers and are otherwise
 `FSIMG_ECORRUPT` as an ambiguous tie. Only the selected header's descriptors
 are used afterwards.
+
+Validation of a header does not depend on where the second header is. After the
+first header validates, `D + N * B` decides the path. When it fits before the
+slice's `S2`, the second header is read and must agree, so it fits too, and
+`S2 > 12288` follows from `N >= 1`. When it does not fit, the volume is
+[truncated](design-qnx6.md#truncated-volumes): `open` selects the first header
+without reading a second, requires the system run `[D, D + 2R * B)` in the slice,
+takes the declared size as `V` and reports the one volume detail this driver has,
+`second_header_missing`, with value 1. An intact volume has no details.
 
 The reservation `R` is derived, not read: it is the block count of the bitmap
 tree plus the block count of the inode tree, both computed from the geometry

@@ -118,8 +118,8 @@ typedef struct qnx6_slot {
  * other object lives in [2R, N).
  */
 typedef struct qnx6_geometry {
-	uint64_t	 volume_bytes;
-	uint64_t	 second_header;
+	uint64_t	 volume_bytes;	/* the slice, or declared when truncated */
+	uint64_t	 second_header;	/* where the writer emits it */
 	uint32_t	 block_size;
 	uint32_t	 pointers;
 	uint32_t	 blocks;
@@ -127,6 +127,7 @@ typedef struct qnx6_geometry {
 	uint32_t	 reservation;
 	uint32_t	 groups;		/* allocation-group count */
 	bool		 big_endian;
+	bool		 second_header_missing;	/* read from the first alone */
 } qnx6_geometry_t;
 
 /* The layout of a tree the writer emits (tree.c): n leaves at minimal

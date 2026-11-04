@@ -314,12 +314,15 @@ the second header from `N`. The boot loaders of measured volumes record the
 same slice-end sector. [X1], [X2], [H1], [L2]
 
 The strict reader takes `V` from its slice: the partition, or a bare image
-file's length. It requires `S2 > 12288` and `D + N * B <= S2`, and reads the
-second header only at `S2`. It never treats bytes between `D + N * B` and
-`S2` as filesystem data. A filesystem image padded past its slice end, or one
-whose second header sits at `D + N * B` short of the slice end, fails
-validation as it does on QNX. The bootless layout's second-header rule is
-not established by this evidence and is qualified with that profile.
+file's length. An intact volume has `D + N * B <= S2`, which implies
+`S2 > 12288` since `N >= 1`, and the reader looks for its second header only at
+`S2`. It never treats bytes between `D + N * B` and `S2` as filesystem data. A
+filesystem image padded past its slice end, or one whose second header sits at
+`D + N * B` short of the slice end, fails validation as it does on QNX. A valid
+first header with `D + N * B > S2` declares more than the slice holds, and the
+volume is read as [truncated](#truncated-volumes). The bootless layout's
+second-header rule is not established by this evidence and is qualified with
+that profile.
 
 A header at byte zero may be an older format. The PCM's QNX 6.3.2 checker
 reads its first header at byte zero only when sector 0 lacks an x86 boot
@@ -435,7 +438,7 @@ complete 504-byte test inputs with stored values. Tests must cover both disk
 byte orders and a changed byte near offset 511; checking only decoded fields
 misses part of the integrity domain.
 
-fsimg's strict snapshot policy validates both headers before selection: magic,
+fsimg's strict snapshot policy validates each header it reads before selection: magic,
 CRC, byte order, profile, geometry, counts, tree capacities, and ranges.
 Stable identity, creation time, block size, block count, inode capacity, group
 count, layout, and compatible feature interpretation must agree; serials, free
@@ -448,9 +451,64 @@ A freshly formatted native volume has two identical serial-1 headers, so
 equal serials are the normal state of an unmodified volume. QNX itself
 takes the first header on a tie. [X1], [X2]
 There is no guessed wraparound ordering. The default strict reader requires
-both headers to validate and does not silently fall back to an older snapshot
-after a checksum or tree failure. Every subsequent metadata read uses the
-selected descriptor, including inode-table and long-name roots. [L2]
+both headers to validate, except on a [truncated volume](#truncated-volumes), and
+never falls back to an older snapshot after a checksum or tree failure. Every
+subsequent metadata read uses the selected descriptor, including inode-table
+and long-name roots. [L2]
+
+### Truncated volumes
+
+An image can end before the volume it declares, under the
+[common rule for a truncated volume](architecture.md#byte-and-object-boundaries).
+The first header, at the start of the volume, survives such a cut and the second,
+at its end, does not. A first header that passes every check above and has
+`D + N * B > S2` proves the cut: its own count of blocks does not fit before
+the position the slice gives the second header. The reader then takes that
+header as the selected descriptor and neither reads `S2` nor compares serials,
+since whatever bytes the cut left there are not a header.
+
+QNX 6.5.0 likewise skips a header it cannot read in favor of the other, as
+[power loss](#power-loss) records. The first header may hold the older of the
+volume's two snapshots, so what is read may be one commit older than the live
+volume. Blocks only that older snapshot uses are free in the newer bitmap and may
+have been rewritten after the newer commit, so its content is not guaranteed
+either. Nothing left in the image can tell. The volume information reports the
+detail `second_header_missing` as 1. The declared volume size is the smallest
+that holds the blocks and a second header,
+`ceil((D + N * B) / 4096) * 4096 + 4096`. That always exceeds `V`, so
+`missing_bytes` is nonzero and full verification fails, which keeps this path
+from passing for an intact volume.
+
+This is the only reading from one header, and the proof is a property of the first
+header alone, not a response to a failure:
+
+* a bad first header is refused, whatever follows it;
+* a valid first header with `D + N * B <= S2` needs a valid second header at
+  `S2`, and a missing or disagreeing one is refused, including when a cut left a
+  filesystem shorter than its partition in that state;
+* a checksum or tree failure after a header was accepted fails the open or read
+  that found it, and never retries with another snapshot.
+
+`N` belongs to whoever wrote the image. A crafted first header with a larger `N`
+on an intact volume takes this path and reads the first header's snapshot even
+when a newer second header is present. That shows no bytes a writer of the image
+could not have shown in any other consistent volume, and the result reports a
+truncated volume and fails verification.
+
+The whole system run, `[D, D + 2R * B)`, must lie in the slice, or the open is
+`FSIMG_ECORRUPT`. On an intact volume this follows from `2R <= N`. Since `R` holds
+both system trees, the run's presence bounds `N / 8` and the inode capacity, and
+so the block and inode bitsets, by bytes the file really holds, and a tiny file
+declaring a huge volume fails before anything is sized from `N`. A cut inside the
+run is refused even if the selected snapshot's trees happen to survive it, which
+loses little: a native volume's run is a small fraction of it.
+
+A walk checks its references against `N`, not the slice, because a file past the
+end still lists. So `N` can admit more leaves than a file of this size could as an
+intact volume, by up to `B / 4` times: `slice / 4` leaves, each visited at open or
+when listed, charged to the scratch and work budgets. The cost stays linear in
+bytes the file holds, since every leaf reference sits in an indirect block in the
+slice.
 
 ## Tree descriptors and addressing
 
@@ -959,7 +1017,8 @@ The minimum format matrix includes:
 | Area | Required cases |
 | --- | --- |
 | Geometry/probe | Both endians; all classic blocks; sector-aligned length with a nonempty 4096-alignment tail; bootless and MMI distinctions; forced-format checks; bounded slices; truncated headers; overflow; competing valid interpretations; modern large-block rejection |
-| Second header | Filesystem filling its slice; short filesystem with the second header at the slice end; valid header only at `D + N * B` short of the slice end (rejected); padded image file (rejected); `S2 <= 12288` (rejected); stale bytes between `D + N * B` and `S2` never read as data |
+| Second header | Filesystem filling its slice; short filesystem with the second header at the slice end; valid header only at `D + N * B` short of the slice end (rejected); padded image file (rejected); stale bytes between `D + N * B` and `S2` never read as data |
+| Truncated volume | Cut with everything referenced surviving, in both byte orders and all classic blocks, reporting the declared size, the missing bytes and `second_header_missing`; cut at `D + N * B`; a referenced file or directory past the end; cut inside the system run; a tiny file declaring a huge `N`; every boundary and a mid-sector count; verification refused; first header older and newer than the second; a first header with `D + N * B <= S2` and a lost second header; a bad first header; a crafted larger `N` on an intact volume |
 | Snapshots | Either header newer; different namespaces in the two views; shared unchanged system block; active/inactive allocation differences; equal conflicting serials; bad CRC in either header; poisoned padding through byte 511 |
 | Trees | Zero-length object; valid block zero; 16/17 leaves; each indirect transition; fragmented leaves; maximum depth; overflowed capacity; unused required pointer; out-of-range pointer; ancestor cycle; same-block branches; metadata/data overlap |
 | Inodes | First/last ID; zero/out-of-range ID; truncated table; each accepted state; directory with status 3; nonzero link/extension word; unsupported special type and extension; timestamp boundaries |

@@ -481,6 +481,12 @@ QNX6 locates its second superblock in the last whole 4096-byte unit of the
 slice, so
 .Fl Fl length
 must be the exact partition length.
+A QNX6 image too short to hold the blocks its first superblock declares is read
+from that superblock alone, and
+.Cm i
+reports second_header_missing.
+That may be the older snapshot, whose freed blocks a later commit may have
+rewritten, so what is extracted is not guaranteed to be the volume's content.
 QNX4 derives its block count from the slice length, so
 .Fl Fl length
 must be its exact partition length too.
