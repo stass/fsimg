@@ -607,11 +607,17 @@ typedef struct fsimg_layer_inputs {
  * unaffected. A named layer whose identity checks fail is then read as
  * that layer instead of failing with FSIMG_EFORMAT. Validation (geometry,
  * bounds, structures, checksums) is never skipped, and a format without a
- * separable identity check reads exactly as without the flag.
+ * separable identity check reads exactly as without the flag. Identity is
+ * waived only at the forced layer's own probe and open, and never during
+ * detection. A stack that names a filesystem must fix the volume's
+ * location: fsimg_image_select() with FSIMG_SELECT_AUTOMATIC returns
+ * FSIMG_EINVAL unless the scheme slot is empty, forced so or emptied by a
+ * container carrying the filesystem; the filesystem itself is opened by a
+ * reader with FSIMG_READ_ASSUME_IDENTITY.
  * fsimg_image_verify() on an image a named layer's failed identity check
  * was waived for fails with FSIMG_ECORRUPT once the scheme is detected,
- * before any verification pass, naming the layer and the check. No other flag is defined; flags must hold no other
- * bit.
+ * before any verification pass, naming the layer and the check. No other
+ * flag is defined; flags must hold no other bit.
  *
  * compression forces the input's compression, as -z does: a registered
  * compression's name, NUL-terminated, whose probe alone runs at the
@@ -1091,8 +1097,9 @@ typedef enum fsimg_iso_view {
 } fsimg_iso_view_t;
 
 /* FSIMG_READ_ASSUME_IDENTITY: the caller vouches that the volume is the
- * format it names, which the flag requires (FSIMG_EINVAL without one).
- * Opening then skips that format's identity checks, the evidence that the
+ * format it names, which the flag requires (FSIMG_EINVAL without one). The
+ * input is the volume's location, so no probe runs: opening goes straight
+ * to that format's driver, skips its identity checks, the evidence that the
  * bytes are this format, and keeps every validation check. fsimg_verify()
  * on a volume whose identity checks failed fails with FSIMG_ECORRUPT
  * naming the check that was assumed. No other flag is defined.

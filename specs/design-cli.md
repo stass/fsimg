@@ -216,15 +216,28 @@ and of a compression forced with `--compress` or `-z`: each skips its
 identity checks, the magic numbers and signatures that tell one format from
 another, and keeps every validation check
 ([format contracts](design-formats.md#format-descriptors-and-profiles)), so
-`fsimg t -F fat12 --force -f atari.st` reads an Atari ST floppy that has
+`fsimg t -F fat12/- --force -f atari.st` reads an Atari ST floppy that has
 neither an x86 jump nor `0x55AA`. It requires `-F` to name a layer, or a
 compression forced with `--compress` or `-z`; without one it is a syntax
-error, as it is for the worker's job decode. `W` on a volume or layer whose identity
-was assumed fails, naming the assumed check; `t`, `x` and `i` proceed. When
-a read other than `W` fails because the identity of a filesystem `-F`
-names, or of a layer `-F` or `-z` forces, is absent, the error ends with
-`; use --force to read it as NAME anyway`, NAME being that filesystem or
-layer. A failure under automatic detection never suggests it.
+error, as it is for the worker's job decode. When `-F` names a filesystem,
+`--force` also requires the volume's location, since detection never
+assumes an identity: the scheme slot forced empty (`-F fat12/-`, the whole
+disk or the disk a container carries), `--partition`, or `--offset` and
+`--length`. Otherwise it is the syntax error
+`--force needs the volume's location: use -F fs/- or --partition`, and the
+worker's job decode refuses such a job too. `W` on a volume or layer whose
+identity was assumed fails, naming the assumed check; `t`, `x` and `i`
+proceed. When a read other than `W` fails because the identity of a
+filesystem `-F` names is absent, the error ends with the command that reads
+it: `; use -F fat12/- --force to read it as fat12 anyway` when the scheme is
+left to detection or forced empty,
+`; use -F qnx4/mbr --partition 2 --force to read it as qnx4 anyway` with the
+partition the command selects, and `--partition N` for one to choose when it
+forces a scheme without selecting. A failed layer `-F` or `-z` forces draws
+the same command when `-F` also names a filesystem, NAME then being the layer.
+A command naming no filesystem, or selecting by name, type or range, ends with
+`; use --force to read it as NAME anyway`. A failure under automatic
+detection never suggests it.
 
 Compression is not a slot: it wraps the whole image on its way to or from
 the file. On create, `--compress=NAME` selects the compression the registry

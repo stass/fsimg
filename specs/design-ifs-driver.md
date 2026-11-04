@@ -76,8 +76,8 @@ which must satisfy the [header bounds](design-ifs.md#header-bounds) against
 the volume length, else `FSIMG_ECORRUPT`. The probe then claims the image
 with `FSIMG_OK`. It performs no I/O and allocates nothing; a prefix shorter
 than `0x58` bytes is no claim. Under an [assumed
-identity](design-formats.md#format-descriptors-and-profiles) the probe and
-open skip the signature, the only identity check, and open records it;
+identity](design-formats.md#format-descriptors-and-profiles) open skips the
+signature, the only identity check, and records it;
 every header rule still applies. Exclusivity rests on the identity. FAT and
 exFAT carry a jump at offset 0, never `imagefs`. A QNX6 boot area and a
 QNX4 loader block are uninterpreted bytes, and no capture of either begins

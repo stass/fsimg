@@ -730,6 +730,15 @@ fsimg_job_forces_layer(const fsimg_worker_request_t *request)
 	    request->compression[0] != '\0');
 }
 
+bool
+fsimg_job_force_located(const fsimg_worker_request_t *request)
+{
+	return (request->stack.slots[FSIMG_LAYER_FILESYSTEM].state !=
+	    FSIMG_SLOT_NAMED ||
+	    request->stack.slots[FSIMG_LAYER_SCHEME].state == FSIMG_SLOT_EMPTY ||
+	    request->selector != FSIMG_SELECT_AUTOMATIC);
+}
+
 const char *
 fsimg_job_compression(const fsimg_worker_request_t *request)
 {
@@ -1166,7 +1175,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    &compression, error) != FSIMG_OK)
 		return (invalid_job(error));
 	if ((request->flags & FSIMG_JOB_FORCE) != 0 &&
-	    !fsimg_job_forces_layer(request))
+	    (!fsimg_job_forces_layer(request) ||
+	    !fsimg_job_force_located(request)))
 		return (invalid_job(error));
 	bcopy(raw + JOB_LABEL_OFFSET, request->label_storage, JOB_LABEL_BYTES);
 	request->write.label = raw[JOB_LABEL_PRESENT] == 0 ? NULL :

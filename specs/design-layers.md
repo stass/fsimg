@@ -380,6 +380,20 @@ identity was assumed: the MBR has no 0x55AA signature"), as a filesystem
 does ([format contracts](design-formats.md#format-descriptors-and-profiles));
 listing and extraction proceed.
 
+Identity is waived only at the open of the forced layer, its own forced probe
+included, or at the open of a forced filesystem at a fixed location, never
+during detection. A survey, the one way probes compete, receives no identity
+record and its filesystem probes have no way to waive anything, so an assumed
+claim never stands beside a real one. A filesystem's identity has no probe to
+pass: a stack naming a filesystem under an assumed identity must fix the
+volume's location, by the scheme slot forced empty (the whole disk, or the
+disk a container carries) or by a selector (a partition of a forced or a
+detected scheme, the whole disk or a range). Automatic selection goes by what
+probes claim, so `fsimg_image_select()` refuses it there with `FSIMG_EINVAL`.
+At the fixed location the reader opens the forced filesystem directly, with
+`FSIMG_READ_ASSUME_IDENTITY`, without a probe; that flag is the only way an
+assumed identity reaches a filesystem.
+
 A layer driver waives an identity check only through one funnel,
 `fsimg_identity_holds()`, given the identity record the image hands the
 probe and the open (or decode) of a layer the caller vouches for, and NULL
@@ -392,10 +406,12 @@ before any verification pass, whose own identity checks then receive no
 record, so no waived check escapes verification whichever call waived it.
 
 The CLI accepts `--force` beside a layer `-F` names or a compression `-z`
-or `--compress` forces, and refuses it otherwise; the worker's job decode
-refuses such a job too. When a read whose `-F` names a filesystem fails
-its identity check, or a read fails because a layer it forces lacks its
-identity, the error suggests `--force` naming that filesystem or layer.
+or `--compress` forces, and refuses it otherwise, as it refuses a named
+filesystem without a location; the worker's job decode refuses such jobs too.
+When a read whose `-F` names a filesystem fails its identity check, the error
+suggests the command that reads it ([CLI](design-cli.md)); when a read fails
+because a layer it forces lacks its identity, it suggests `--force` naming
+that layer.
 
 Compression is not a slot, so no stack forces it: the
 [step-1 rule](#peeling-order) decides it whether or not a stack is given,

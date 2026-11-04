@@ -57,10 +57,11 @@ struct fsimg_image {
 	const fsimg_layer_t *forced_compression;
 	/* The layer kinds whose identity the caller vouches for
 	 * (FSIMG_IMAGE_ASSUME_IDENTITY), as SURVEY bits: each slot the
-	 * options name and a forced compression, fixed at open, so a
-	 * filesystem a container carries is never vouched for. identity
-	 * holds each kind's record, which vouch() hands to that kind's
-	 * forced probe and open alone.
+	 * options name and a forced compression, fixed at open. identity
+	 * holds each layer kind's record, which vouch() hands to that kind's
+	 * forced probe and open alone. A filesystem gets no record: the
+	 * reader waives its identity at open, and its bit only makes
+	 * fsimg_image_select() insist on a fixed location.
 	 */
 	unsigned	 vouched;
 	fsimg_identity_t identity[FSIMG_LAYER_COMPRESSION + 1];
@@ -139,7 +140,7 @@ static fsimg_status_t probe_layer(const fsimg_layer_t *, const probe_input_t *,
     fsimg_identity_t *, fsimg_error_t *);
 static fsimg_identity_t *vouch(fsimg_image_t *, fsimg_layer_kind_t);
 static bool vouched(const fsimg_image_t *, fsimg_layer_kind_t);
-static fsimg_status_t survey(unsigned, const probe_input_t *, const char *, bool,
+static fsimg_status_t survey(unsigned, const probe_input_t *, const char *,
     fsimg_survey_t *, fsimg_error_t *);
 static const char *forced_filesystem(const fsimg_image_t *);
 static fsimg_status_t validate_forced_stack(const fsimg_image_options_t *,
@@ -541,8 +542,8 @@ decide_compression(fsimg_image_t *image, const probe_input_t *input,
 			image->compression = forced;
 		return (layer_failed(forced, status, error));
 	}
-	status = survey(SURVEY(FSIMG_LAYER_COMPRESSION), input, NULL, false,
-	    counts, error);
+	status = survey(SURVEY(FSIMG_LAYER_COMPRESSION), input, NULL, counts,
+	    error);
 	if (status != FSIMG_OK || compressions->claims == 0)
 		return (status);
 	/* A compression claimed, so every other claim here makes it
@@ -550,7 +551,7 @@ decide_compression(fsimg_image_t *image, const probe_input_t *input,
 	 */
 	kinds = SURVEY(FSIMG_LAYER_SCHEME) | SURVEY(FSIMG_LAYER_FILESYSTEM) |
 	    (seekable ? SURVEY(FSIMG_LAYER_CONTAINER) : 0);
-	status = survey(kinds, input, NULL, false, others, error);
+	status = survey(kinds, input, NULL, others, error);
 	if (status != FSIMG_OK)
 		return (status);
 	claims = compressions->claims;
@@ -695,15 +696,13 @@ claim_volume(fsimg_image_t *image, uint64_t offset, uint64_t length,
     fsimg_error_t *error)
 {
 	return (fsimg_volume_claim(image->ctx, image->disk, &image->session,
-	    offset, length, forced_filesystem(image),
-	    vouched(image, FSIMG_LAYER_FILESYSTEM), claim, format, error));
+	    offset, length, forced_filesystem(image), claim, format, error));
 }
 
 fsimg_status_t
 fsimg_volume_claim(fsimg_ctx_t *ctx, fsimg_io_t *io, fsimg_session_t *session,
-    uint64_t offset, uint64_t length, const char *forced, bool assume_identity,
-    fsimg_claim_t *claim, char format[static FORMAT_NAME_BYTES],
-    fsimg_error_t *error)
+    uint64_t offset, uint64_t length, const char *forced, fsimg_claim_t *claim,
+    char format[static FORMAT_NAME_BYTES], fsimg_error_t *error)
 {
 	fsimg_survey_t counts[SURVEY_KINDS];
 	const fsimg_survey_t *filesystems = &counts[FSIMG_LAYER_FILESYSTEM];
@@ -720,8 +719,8 @@ fsimg_volume_claim(fsimg_ctx_t *ctx, fsimg_io_t *io, fsimg_session_t *session,
 	if (status != FSIMG_OK)
 		return (status);
 	input.prefix = prefix;
-	status = survey(SURVEY(FSIMG_LAYER_FILESYSTEM), &input, forced,
-	    assume_identity, counts, error);
+	status = survey(SURVEY(FSIMG_LAYER_FILESYSTEM), &input, forced, counts,
+	    error);
 	fsimg_dealloc(prefix);
 	if (status != FSIMG_OK)
 		return (status);
@@ -879,12 +878,13 @@ probe_layer(const fsimg_layer_t *layer, const probe_input_t *input,
  * the layer registry's schemes, containers and compressions and the
  * format registry's filesystems (only forced_filesystem's when one is
  * named), each kind counted in counts[kind] under the one claim rule
- * (fsimg_survey_count). Each step reads its outcome from the counts.
+ * (fsimg_survey_count). Each step reads its outcome from the counts. A
+ * survey is detection, so no probe in it waives an identity check: layers
+ * get no record, and filesystem probes cannot waive one.
  */
 static fsimg_status_t
 survey(unsigned kinds, const probe_input_t *input,
-    const char *forced_filesystem, bool assume_identity, fsimg_survey_t *counts,
-    fsimg_error_t *error)
+    const char *forced_filesystem, fsimg_survey_t *counts, fsimg_error_t *error)
 {
 	const fsimg_layer_t *layer;
 	fsimg_error_t detail;
@@ -902,9 +902,8 @@ survey(unsigned kinds, const probe_input_t *input,
 	}
 	if ((kinds & SURVEY(FSIMG_LAYER_FILESYSTEM)) == 0)
 		return (FSIMG_OK);
-	return (fsimg_format_identify(forced_filesystem, assume_identity,
-	    input->prefix, input->length, input->bytes,
-	    &counts[FSIMG_LAYER_FILESYSTEM], error));
+	return (fsimg_format_identify(forced_filesystem, input->prefix,
+	    input->length, input->bytes, &counts[FSIMG_LAYER_FILESYSTEM], error));
 }
 
 /*
@@ -951,8 +950,7 @@ identify_container(fsimg_image_t *image, const fsimg_layer_t *forced,
 			*container = forced;
 		return (status);
 	}
-	status = survey(SURVEY(FSIMG_LAYER_CONTAINER), &input, NULL, false,
-	    counts, error);
+	status = survey(SURVEY(FSIMG_LAYER_CONTAINER), &input, NULL, counts, error);
 	fsimg_dealloc(prefix);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1168,7 +1166,7 @@ identify_disk(fsimg_image_t *image, const fsimg_layer_t *forced,
 	}
 	status = survey(SURVEY(FSIMG_LAYER_SCHEME) |
 	    SURVEY(FSIMG_LAYER_FILESYSTEM), &input, forced_filesystem(image),
-	    vouched(image, FSIMG_LAYER_FILESYSTEM), counts, error);
+	    counts, error);
 	fsimg_dealloc(prefix);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1618,6 +1616,16 @@ fsimg_image_select(fsimg_image_t *image, const fsimg_selector_t *selector,
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "invalid partition selector"));
 
+	/* Automatic selection goes by what the probes claim, and a filesystem
+	 * whose identity is vouched for needs no claim: only the caller can say
+	 * where it is, by a selector or by forcing the scheme slot empty.
+	 */
+	if (selector->kind == FSIMG_SELECT_AUTOMATIC &&
+	    vouched(image, FSIMG_LAYER_FILESYSTEM) &&
+	    image->forced.slots[FSIMG_LAYER_SCHEME].state != FSIMG_SLOT_EMPTY)
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		    "an assumed filesystem identity needs the volume's location: "
+		    "force the scheme slot empty or select a partition"));
 	status = detect_scheme(image, error);
 	if (status != FSIMG_OK)
 		return (status);

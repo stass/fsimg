@@ -1455,6 +1455,9 @@ interpret_read(cli_parse_t *parse)
 		if (!fsimg_job_forces_layer(request))
 			return (syntax(parse,
 			    "--force requires a layer in -F or a forced compression"));
+		if (!fsimg_job_force_located(request))
+			return (syntax(parse, "--force needs the volume's location: "
+			    "use -F fs/- or --partition"));
 		request->flags |= FSIMG_JOB_FORCE;
 	}
 	if (fsimg_job_format(request)[0] == '\0' || parse->reserved)

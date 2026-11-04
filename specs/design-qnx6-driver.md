@@ -88,11 +88,11 @@ positions is ambiguous and also unsupported. The probe performs no I/O and
 allocates nothing.
 
 Under an [assumed identity](design-formats.md#format-descriptors-and-profiles)
-a header without the magic, at byte 8192 in the probe and at either header
-in open, takes the byte order whose stored CRC matches its contents, and
-open records the missing magic. A header whose CRC matches in neither or in
-both byte orders is `FSIMG_ECORRUPT`. A magic at byte zero still selects
-the bootless or MMI layout and is unsupported. Pair agreement compares the
+a header without the magic, at either position, takes the byte order whose
+stored CRC matches its contents, and open records the missing magic. A header
+whose CRC matches in neither or in both byte orders is `FSIMG_ECORRUPT`. Open
+checks byte zero itself, so a magic there still selects the bootless or MMI
+layout and is unsupported. Pair agreement compares the
 headers from the CRC on, so a magic missing from one header alone does not
 make equal serials disagree.
 
@@ -498,7 +498,7 @@ Every emitted byte comes from a row, the geometry or a profile constant.
 
 | Operation | Work and residency |
 | --- | --- |
-| Probe and open | Two 512-byte reads, the indirect blocks of the three system trees, the bitmap self-check pages, and inode 1; scratch for three indexes, a bitset of `N` bits and one of an inode count's bits |
+| Probe and open | Two 512-byte reads, a check of the magic at byte zero, the indirect blocks of the three system trees, the bitmap self-check pages, and inode 1; scratch for three indexes, a bitset of `N` bits and one of an inode count's bits |
 | Listing | Per directory: its tree walk, one slot pass and the common key sort; per inode's first name: its tree walk. No file payload is read |
 | Content | One extent lookup per request after the walk at exposure |
 | Verification | One traversal, two external sorts of streams proportional to blocks visited and slots, one bitmap pass of `ceil(N / 8)` bytes and one inode-table pass of `128 * capacity` bytes |

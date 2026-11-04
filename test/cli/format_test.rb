@@ -153,22 +153,25 @@ class CliTest < Minitest::Test
       "fat12" => "no partition table or filesystem recognized"
     }.each do |stack, reason|
       result = invoke(arguments: ["t", "-F", stack, "-f", "atari.img"], expected: 1)
+      suggested = stack == "fat12/-/-" ? stack : "fat12/-"
       assert_includes(result.stderr.lines,
-        "fsimg: #{reason}; use --force to read it as fat12 anyway\n".b, stack)
+        "fsimg: #{reason}; use -F #{suggested} --force to read it as fat12 anyway\n".b, stack)
+      retry_result = invoke(arguments: ["t", "-F", suggested, "--force", "-f", "atari.img"])
+      assert_equal(["\"/HELLO.TXT\"\n".b], retry_result.stdout.lines)
     end
   end
 
   def test_force_lists_and_extracts_atari_file_across_clusters
     payload = write_atari_floppy
-    result = invoke(arguments: ["t", "-F", "fat12", "--force", "-f", "atari.img"])
+    result = invoke(arguments: ["t", "-F", "fat12/-", "--force", "-f", "atari.img"])
     assert_equal(["\"/HELLO.TXT\"\n".b], result.stdout.lines)
-    invoke(arguments: ["x", "-F", "fat12", "--force", "-f", "atari.img"])
+    invoke(arguments: ["x", "-F", "fat12/-", "--force", "-f", "atari.img"])
     assert_equal(payload, (@root / "atari/HELLO.TXT").binread)
   end
 
   def test_force_verification_reports_assumed_identity
     write_atari_floppy
-    result = invoke(arguments: ["W", "-F", "fat12", "--force", "-f", "atari.img"], expected: 1)
+    result = invoke(arguments: ["W", "-F", "fat12/-", "--force", "-f", "atari.img"], expected: 1)
     assert_includes(result.stderr, "fat12 identity was assumed: the boot record has no PC boot " \
       "signature and the first FAT does not repeat the media byte".b)
   end
@@ -189,27 +192,27 @@ class CliTest < Minitest::Test
 
   def test_force_verifies_a_signed_fat_volume
     human_image
-    invoke(arguments: ["W", "-F", "fat12", "--force", "-f", "human.img"])
+    invoke(arguments: ["W", "-F", "fat12/-", "--force", "-f", "human.img"])
   end
 
   def test_named_iso_without_force_suggests_assuming_identity
     write_iso_without_standard_identifier
     result = invoke(arguments: ["t", "-F", "iso9660", "-f", "assumed.iso"], expected: 1)
-    assert_match(/; use --force to read it as iso9660 anyway\n\z/, result.stderr)
+    assert_match(%r{; use -F iso9660/- --force to read it as iso9660 anyway\n\z}, result.stderr)
   end
 
   def test_force_lists_and_extracts_iso_without_standard_identifier
     write_iso_without_standard_identifier
-    result = invoke(arguments: ["t", "-F", "iso9660", "--force", "-f", "assumed.iso"])
+    result = invoke(arguments: ["t", "-F", "iso9660/-", "--force", "-f", "assumed.iso"])
     assert_includes(result.stdout.lines, "\"/HELLO.TXT\"\n".b)
-    invoke(arguments: ["x", "-F", "iso9660", "--force", "-f", "assumed.iso"])
+    invoke(arguments: ["x", "-F", "iso9660/-", "--force", "-f", "assumed.iso"])
     assert_equal("hello\n".b, (@root / "assumed/HELLO.TXT").binread)
     assert_equal(@payload, (@root / "assumed/nested/caf\u00e9.txt").binread)
   end
 
   def test_force_iso_verification_reports_assumed_identity
     write_iso_without_standard_identifier
-    result = invoke(arguments: ["W", "-F", "iso9660", "--force", "-f", "assumed.iso"], expected: 1)
+    result = invoke(arguments: ["W", "-F", "iso9660/-", "--force", "-f", "assumed.iso"], expected: 1)
     assert_includes(result.stderr,
       "iso9660 identity was assumed: block 16 lacks the CD001 standard identifier".b)
   end
@@ -217,10 +220,10 @@ class CliTest < Minitest::Test
   def test_force_preserves_iso_listing_and_verification
     image_fixture(name: "force.iso", format: "iso9660")
     plain = invoke(arguments: ["t", "-F", "iso9660", "-f", "force.iso"])
-    forced = invoke(arguments: ["t", "-F", "iso9660", "--force", "-f", "force.iso"])
+    forced = invoke(arguments: ["t", "-F", "iso9660/-", "--force", "-f", "force.iso"])
     assert_includes(plain.stdout.lines, "\"/HELLO.TXT\"\n".b)
     assert_equal(plain.stdout, forced.stdout)
-    invoke(arguments: ["W", "-F", "iso9660", "--force", "-f", "force.iso"])
+    invoke(arguments: ["W", "-F", "iso9660/-", "--force", "-f", "force.iso"])
   end
 
   private

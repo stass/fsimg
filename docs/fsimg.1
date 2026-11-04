@@ -383,9 +383,20 @@ to name a layer, or a compression forced with
 or
 .Fl z ;
 without one it is a syntax error.
+A filesystem
+.Fl F
+names also needs the volume's location, since detection never assumes an
+identity: the scheme slot forced empty, as in
+.Ql -F fat12/- ,
+.Fl Fl partition ,
+or
+.Fl Fl offset
+and
+.Fl Fl length ;
+without one it is a syntax error too.
 An Atari ST floppy, which has neither an x86 jump nor 0x55AA and leaves its
 first FAT entries as garbage, reads with
-.Ql fsimg t -F fat12 --force -f disk.st .
+.Ql fsimg t -F fat12/- --force -f disk.st .
 .Cm t ,
 .Cm x
 and
@@ -398,14 +409,22 @@ When a read other than
 .Cm W
 fails because the identity of a filesystem
 .Fl F
-names, or of a layer
+names is absent, the error ends with the command that reads it, such as
+.Ql use -F fat12/- --force to read it as fat12 anyway
+or
+.Ql use -F qnx4/mbr --partition 2 --force to read it as qnx4 anyway ;
+.Ql --partition N
+stands for a partition to choose.
+A layer
 .Fl F ,
 .Fl Fl compress
 or
 .Fl z
-forces, is absent, the error ends with
-.Ql use --force to read it as NAME anyway ,
-naming that filesystem or layer;
+forces draws the same command when
+.Fl F
+also names a filesystem.
+A command naming no filesystem, or selecting by name, type or range, ends with
+.Ql use --force to read it as NAME anyway ;
 an image no format recognizes under automatic detection draws no such
 suggestion.
 .It Fl Fl partition Ns = Ns Ar N | Ns Cm name= Ns Ar text | Ns Cm type= Ns Ar name

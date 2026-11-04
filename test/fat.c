@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
+#include "force-short.h"
 #include "config.h"
 
 #include <sys/types.h>
@@ -3240,6 +3241,29 @@ test_fragmented_verify(void)
 	CHECK(metadata_calls[0] == metadata_calls[1]);
 }
 
+static void test_fat_assumed_identity_rejects_short_volumes(void);
+
+static void
+test_fat_assumed_identity_rejects_short_volumes(void)
+{
+	fixture_t f;
+	fsimg_io_t *volume;
+	uint64_t lengths[2];
+
+	check_force_short_volumes("fat12", 8192);
+	fixture_init(&f, 12);
+	fixture_open(&f);
+	lengths[0] = f.bytes / 2;
+	lengths[1] = 512 + 1;
+	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		CHECK(fsimg_io_slice(f.io, 0, lengths[i], &volume, NULL) ==
+		    FSIMG_OK);
+		check_force_truncated_volume(f.ctx, volume, "fat12");
+		fsimg_io_free(volume);
+	}
+	fixture_close(&f);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3328,6 +3352,7 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_fat_assumed_identity_rejects_short_volumes();
 	test_variants();
 	for (unsigned variant = 16; variant <= 32; variant += 16) {
 		test_dot_records_ntres_ignored(variant);

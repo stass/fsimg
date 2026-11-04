@@ -259,7 +259,6 @@ fsimg_status_t qnx4_volume_open(fsimg_reader_t *, fsimg_error_t *);
  * probe and for open.
  */
 bool qnx4_root_identity(const unsigned char *);
-bool qnx4_root_is_directory(const unsigned char *);
 fsimg_status_t qnx4_root_block_validate(const unsigned char *, uint64_t,
     fsimg_error_t *);
 fsimg_status_t qnx4_root_fixed_slot(fsimg_reader_t *, unsigned,

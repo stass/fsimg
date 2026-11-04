@@ -98,8 +98,8 @@ fsimg_fat_media_entry(const fat_geometry_t *g)
 
 /* boot holds the first length bytes of the volume: the boot record and
  * the rest of the identification prefix, which is all identification reads
- * (specs/design-fat-reader.md#identification-and-geometry). With
- * assume_identity the caller vouches for FAT, so a boot record with
+ * (specs/design-fat-reader.md#identification-and-geometry). Open passes
+ * assume_identity for a caller vouching for FAT, so a boot record with
  * neither voucher decodes, marked unvouched; every BPB check still runs.
  */
 fsimg_status_t

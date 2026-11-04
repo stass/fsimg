@@ -61,8 +61,8 @@ fsimg_format_find(const char *name, const fsimg_format_variant_t **variant)
  * cleared first, so a claim never carries stale bytes.
  */
 static fsimg_status_t
-format_probe(const fsimg_format_t *format, bool assume_identity,
-    const unsigned char *prefix, size_t length, uint64_t volume_bytes,
+format_probe(const fsimg_format_t *format, const unsigned char *prefix,
+    size_t length, uint64_t volume_bytes,
     const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	fsimg_status_t status;
@@ -71,8 +71,7 @@ format_probe(const fsimg_format_t *format, bool assume_identity,
 	*variant = NULL;
 	if (length > format->probe_bytes)
 		length = format->probe_bytes;
-	status = format->probe(prefix, length, volume_bytes, assume_identity,
-	    variant, error);
+	status = format->probe(prefix, length, volume_bytes, variant, error);
 	/* A claim always names a variant: the probe's, else the first. */
 	if (*variant == NULL)
 		*variant = &format->variants[0];
@@ -115,13 +114,12 @@ fsimg_survey_claim(const fsimg_survey_t *survey)
 
 /* Run the forced probe, or every probe in the registry, under the claim
  * rule. Several claims are counted, not resolved: what they mean is the
- * caller's decision. Only a forced probe can assume its identity.
+ * caller's decision.
  */
 void
 fsimg_format_survey(const fsimg_format_t *const *registry, size_t count,
-    const fsimg_format_t *forced, bool assume_identity,
-    const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    fsimg_survey_t *survey)
+    const fsimg_format_t *forced, const unsigned char *prefix, size_t length,
+    uint64_t volume_bytes, fsimg_survey_t *survey)
 {
 	const fsimg_format_variant_t *variant;
 	const fsimg_format_t *format;
@@ -135,8 +133,8 @@ fsimg_format_survey(const fsimg_format_t *const *registry, size_t count,
 	}
 	for (size_t i = 0; i < count; i++) {
 		format = registry[i];
-		status = format_probe(format, forced != NULL && assume_identity,
-		    prefix, length, volume_bytes, &variant, &detail);
+		status = format_probe(format, prefix, length, volume_bytes, &variant,
+		    &detail);
 		if (fsimg_survey_count(survey, status, &detail)) {
 			survey->format = format;
 			survey->variant = status == FSIMG_OK ? variant : NULL;
@@ -157,17 +155,16 @@ fsimg_format_survey(const fsimg_format_t *const *registry, size_t count,
  */
 static fsimg_status_t
 format_claim(const fsimg_format_t *const *registry, size_t count,
-    const fsimg_format_t *forced, bool assume_identity,
-    const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    const fsimg_format_t **claimed, const fsimg_format_variant_t **variant,
-    fsimg_error_t *error)
+    const fsimg_format_t *forced, const unsigned char *prefix, size_t length,
+    uint64_t volume_bytes, const fsimg_format_t **claimed,
+    const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	fsimg_survey_t survey;
 
 	*claimed = NULL;
 	*variant = NULL;
-	fsimg_format_survey(registry, count, forced, assume_identity, prefix,
-	    length, volume_bytes, &survey);
+	fsimg_format_survey(registry, count, forced, prefix, length, volume_bytes,
+	    &survey);
 	if (survey.format == NULL)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "unrecognized image format"));
@@ -195,8 +192,8 @@ fsimg_format_claim(const fsimg_format_t *const *registry, size_t count,
 {
 	const fsimg_format_variant_t *variant;
 
-	return (format_claim(registry, count, forced, false, prefix, length,
-	    volume_bytes, claimed, &variant, error));
+	return (format_claim(registry, count, forced, prefix, length, volume_bytes,
+	    claimed, &variant, error));
 }
 
 /* The prefix the forced reader format's probe reads, or the largest any
@@ -222,9 +219,9 @@ fsimg_format_probe_bytes(const char *forced_name)
 }
 
 fsimg_status_t
-fsimg_format_identify(const char *forced_name, bool assume_identity,
-    const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    fsimg_survey_t *survey, fsimg_error_t *error)
+fsimg_format_identify(const char *forced_name, const unsigned char *prefix,
+    size_t length, uint64_t volume_bytes, fsimg_survey_t *survey,
+    fsimg_error_t *error)
 {
 	const fsimg_format_variant_t *variant;
 	const fsimg_format_t *forced;
@@ -236,8 +233,8 @@ fsimg_format_identify(const char *forced_name, bool assume_identity,
 			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 			    FSIMG_OP_READER, "unsupported reader format"));
 	}
-	fsimg_format_survey(formats, FORMAT_COUNT, forced, assume_identity,
-	    prefix, length, volume_bytes, survey);
+	fsimg_format_survey(formats, FORMAT_COUNT, forced, prefix, length,
+	    volume_bytes, survey);
 	return (FSIMG_OK);
 }
 
@@ -273,7 +270,9 @@ format_read_prefix(fsimg_reader_t *reader, size_t length,
 /* Select a driver and open the volume with it, in three stages: size the
  * prefix (the forced descriptor's, or the largest any descriptor declares, cut
  * to the volume), read it once and claim, then open the claimed driver.
- * Probes never perform I/O or allocate driver state themselves.
+ * Probes never perform I/O or allocate driver state themselves. A caller
+ * vouching for the forced format's identity skips the first two: no probe
+ * runs, since a probe is an identity test, and the driver's open decides.
  */
 fsimg_status_t
 fsimg_format_open(fsimg_reader_t *reader, const char *forced_name,
@@ -294,22 +293,27 @@ fsimg_format_open(fsimg_reader_t *reader, const char *forced_name,
 			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 			    FSIMG_OP_READER, "unsupported reader format"));
 	}
-	length = fsimg_format_probe_bytes(forced_name);
-	status = fsimg_io_get_size(reader->input, &volume_bytes, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (length > volume_bytes)
-		length = (size_t)volume_bytes;
+	if ((reader->options.flags & FSIMG_READ_ASSUME_IDENTITY) != 0) {
+		/* The options' check made the flag require a forced name. */
+		claimed = forced;
+		identified = variant;
+	} else {
+		length = fsimg_format_probe_bytes(forced_name);
+		status = fsimg_io_get_size(reader->input, &volume_bytes, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (length > volume_bytes)
+			length = (size_t)volume_bytes;
 
-	status = format_read_prefix(reader, length, &prefix, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = format_claim(formats, FORMAT_COUNT, forced,
-	    (reader->options.flags & FSIMG_READ_ASSUME_IDENTITY) != 0, prefix,
-	    length, volume_bytes, &claimed, &identified, error);
-	fsimg_dealloc(prefix);
-	if (status != FSIMG_OK)
-		return (status);
+		status = format_read_prefix(reader, length, &prefix, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = format_claim(formats, FORMAT_COUNT, forced, prefix, length,
+		    volume_bytes, &claimed, &identified, error);
+		fsimg_dealloc(prefix);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 	/* The format is chosen: a non-default read setting must be one its
 	 * record accepts, before its driver opens.
 	 */

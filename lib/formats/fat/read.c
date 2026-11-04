@@ -154,7 +154,7 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	status = fsimg_io_get_size(reader->input, &length, error);
 	if (status != FSIMG_OK)
 		return (status);
-	/* Identification reads the same prefix the probe saw. */
+	/* Identification reads the same prefix the probe reads. */
 	prefix_bytes = length < sizeof(prefix) ? (size_t)length : sizeof(prefix);
 	status = fsimg_reader_bytes(reader, 0, prefix, prefix_bytes, &transferred,
 	    error);

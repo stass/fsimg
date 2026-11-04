@@ -82,10 +82,9 @@ with a type of 0, 1, 2, 3 or 255 at 32768; without it, or with a shorter
 volume, the probe makes no claim (`FSIMG_EFORMAT`). High Sierra (`CDROM` at
 offset 9), a UDF recognition sequence (`BEA01`) and CD-i never carry it.
 Under an [assumed identity](design-formats.md#format-descriptors-and-profiles)
-the probe and open skip `CD001` at block 16, the only identity check, and
-open records it; the type at block 16 is then validation, an unknown one
-`FSIMG_EUNSUPPORTED` as open reports it, and every later descriptor still
-needs `CD001`.
+open skips `CD001` at block 16, the only identity check, and records it; the
+type at block 16 is then validation, an unknown one `FSIMG_EUNSUPPORTED`, and
+every later descriptor still needs `CD001`.
 With the identity the probe claims the image; when block 16 is the primary
 descriptor it also decodes the logical block size and the volume space
 size, failing with `FSIMG_ECORRUPT` for disagreeing copies or a zero size

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
+#include "force-short.h"
 #include "config.h"
 
 #include <sys/types.h>
@@ -137,7 +138,7 @@ probe_expect(image_t *image, fsimg_status_t expected, const char *name)
 	size_t prefix = image->length < 17 * BLOCK ? image->length : 17 * BLOCK;
 
 	status = fsimg_iso9660_format.probe(image->bytes, prefix,
-	    image->length, false, &variant, NULL);
+	    image->length, &variant, NULL);
 	cases++;
 	if (status != expected) {
 		fprintf(stderr, "probe %s: expected %d, observed %d\n", name,
@@ -1451,7 +1452,7 @@ test_exclusivity(void)
 	image_t image = image_new();
 
 	for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
-		CHECK(formats[i]->probe(image.bytes, 17 * BLOCK, image.length, false,
+		CHECK(formats[i]->probe(image.bytes, 17 * BLOCK, image.length,
 		    &variant, NULL) == (i == 5 ? FSIMG_OK : FSIMG_EFORMAT));
 	}
 	free(image.bytes);
@@ -1668,7 +1669,7 @@ test_other_format_probes(void)
 		CHECK(fsimg_writer_emit(writer, io, NULL) == FSIMG_OK);
 		CHECK(fsimg_iso9660_format.probe(image.bytes,
 		    image.length < 17 * BLOCK ? image.length : 17 * BLOCK,
-		    image.length, false, &variant, NULL) == FSIMG_EFORMAT);
+		    image.length, &variant, NULL) == FSIMG_EFORMAT);
 		fsimg_io_free(io);
 		fsimg_writer_free(writer);
 		fsimg_ctx_free(ctx);
@@ -5869,6 +5870,30 @@ test_iso9660_intact_volume_with_assume_identity_verifies(void)
 	free(image.bytes);
 }
 
+static void test_iso9660_assumed_identity_rejects_short_volumes(void);
+
+static void
+test_iso9660_assumed_identity_rejects_short_volumes(void)
+{
+	image_t image = image_new();
+	fixture_t f;
+	fsimg_io_t *volume;
+	uint64_t lengths[2];
+
+	check_force_short_volumes("iso9660", 34816);
+	fixture_new(&f, &image, NULL);
+	lengths[0] = image.length / 2;
+	lengths[1] = 17 * BLOCK + 1;
+	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		CHECK(fsimg_io_slice(f.io, 0, lengths[i], &volume, NULL) ==
+		    FSIMG_OK);
+		check_force_truncated_volume(f.ctx, volume, "iso9660");
+		fsimg_io_free(volume);
+	}
+	fixture_free(&f);
+	free(image.bytes);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5884,7 +5909,7 @@ main(int argc, char **argv)
 		count = fread(prefix, 1, sizeof(prefix), file);
 		CHECK(!ferror(file));
 		CHECK(fclose(file) == 0);
-		CHECK(fsimg_iso9660_format.probe(prefix, count, st.st_size, false,
+		CHECK(fsimg_iso9660_format.probe(prefix, count, st.st_size,
 		    &variant, NULL) == FSIMG_EFORMAT);
 		return (0);
 	}
@@ -5925,6 +5950,7 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_iso9660_assumed_identity_rejects_short_volumes();
 	test_extraction_budget_uses_selected_io_extent();
 	test_verifier();
 	test_joliet_views();

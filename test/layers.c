@@ -1477,7 +1477,7 @@ test_assumed_identity_selects_unvouched_fat(void)
 	fsimg_image_free(f.image);
 	f.image = NULL;
 	fsimg_image_options_init(&image_options);
-	CHECK(fsimg_stack_parse("fat12", &image_options.stack, NULL) == FSIMG_OK);
+	CHECK(fsimg_stack_parse("fat12/-", &image_options.stack, NULL) == FSIMG_OK);
 	image_options.flags = FSIMG_IMAGE_ASSUME_IDENTITY;
 	CHECK(fsimg_image_open(f.ctx, f.io, &image_options, &f.image, NULL) == FSIMG_OK);
 	CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_AUTOMATIC },
@@ -1760,6 +1760,175 @@ write_seed(const char *path, const memory_disk_t *disk)
 	CHECK(fclose(file) == 0);
 }
 
+static void test_force_location_named_fs_automatic(void);
+
+static void
+test_force_location_named_fs_automatic(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+	fsimg_image_info_t info;
+	fsimg_io_t *volume = NULL;
+	fixture_t f;
+
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "fat12", 0, NULL) == FSIMG_OK);
+	reopen_assuming_identity(&f, "fat12");
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "mbr") == 0);
+	CHECK(info.partition_count == 4);
+	CHECK(select_with(&f, (fsimg_selector_t){
+	    .kind = FSIMG_SELECT_AUTOMATIC },
+	    &volume, NULL) == FSIMG_EINVAL);
+	CHECK(volume == NULL);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void test_force_location_named_scheme_automatic(void);
+
+static void
+test_force_location_named_scheme_automatic(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+	fsimg_image_info_t info;
+	fsimg_io_t *volume = NULL;
+	fixture_t f;
+
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "fat12/mbr", 0, NULL) == FSIMG_OK);
+	reopen_assuming_identity(&f, "fat12/mbr");
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "mbr") == 0);
+	CHECK(info.partition_count == 4);
+	CHECK(select_with(&f, (fsimg_selector_t){
+	    .kind = FSIMG_SELECT_AUTOMATIC },
+	    &volume, NULL) == FSIMG_EINVAL);
+	CHECK(volume == NULL);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void test_force_location_empty_scheme_automatic(void);
+
+static void
+test_force_location_empty_scheme_automatic(void)
+{
+	memory_disk_t disk = disk_new(FAT_BYTES);
+	fsimg_image_info_t info;
+	fsimg_io_t *volume = NULL;
+	fixture_t f;
+
+	make_fat12(disk.bytes);
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "fat12/-", 0, NULL) == FSIMG_OK);
+	reopen_assuming_identity(&f, "fat12/-");
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "") == 0);
+	CHECK(info.partition_count == 0);
+	CHECK(select_with(&f, (fsimg_selector_t){
+	    .kind = FSIMG_SELECT_AUTOMATIC },
+	    &volume, NULL) == FSIMG_OK);
+	expect_volume_lists(&f, volume, "/DIR");
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void test_force_location_named_scheme_index(void);
+
+static void
+test_force_location_named_scheme_index(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+	fsimg_image_info_t info;
+	fsimg_io_t *volume = NULL;
+	fixture_t f;
+
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "fat12/mbr", 0, NULL) == FSIMG_OK);
+	reopen_assuming_identity(&f, "fat12/mbr");
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "mbr") == 0);
+	CHECK(info.partition_count == 4);
+	CHECK(select_with(&f, (fsimg_selector_t){
+	    .kind = FSIMG_SELECT_INDEX, .index = 1 },
+	    &volume, NULL) == FSIMG_OK);
+	expect_volume_lists(&f, volume, "/DIR");
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void test_force_location_detected_scheme_index(void);
+
+static void
+test_force_location_detected_scheme_index(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+	fsimg_image_info_t info;
+	fsimg_io_t *volume = NULL;
+	fixture_t f;
+
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "fat12", 0, NULL) == FSIMG_OK);
+	reopen_assuming_identity(&f, "fat12");
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "mbr") == 0);
+	CHECK(info.partition_count == 4);
+	CHECK(select_with(&f, (fsimg_selector_t){
+	    .kind = FSIMG_SELECT_INDEX, .index = 1 },
+	    &volume, NULL) == FSIMG_OK);
+	expect_volume_lists(&f, volume, "/DIR");
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void test_force_location_unnamed_fs_automatic(void);
+
+static void
+test_force_location_unnamed_fs_automatic(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+	fsimg_image_info_t info;
+	fsimg_io_t *volume = NULL;
+	fixture_t f;
+
+	/* A scheme-only spelling leaves the filesystem slot unspecified. */
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "mbr", 0, NULL) == FSIMG_OK);
+	reopen_assuming_identity(&f, "mbr");
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "mbr") == 0);
+	CHECK(info.partition_count == 4);
+	CHECK(select_with(&f, (fsimg_selector_t){
+	    .kind = FSIMG_SELECT_AUTOMATIC },
+	    &volume, NULL) == FSIMG_OK);
+	expect_volume_lists(&f, volume, "/DIR");
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void test_force_location_unforced_automatic(void);
+
+static void
+test_force_location_unforced_automatic(void)
+{
+	memory_disk_t disk = single_partition_mbr();
+	fsimg_image_info_t info;
+	fsimg_io_t *volume = NULL;
+	fixture_t f;
+
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, "fat12", 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(strcmp(info.scheme, "mbr") == 0);
+	CHECK(info.partition_count == 4);
+	CHECK(select_with(&f, (fsimg_selector_t){
+	    .kind = FSIMG_SELECT_AUTOMATIC },
+	    &volume, NULL) == FSIMG_OK);
+	expect_volume_lists(&f, volume, "/DIR");
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1786,6 +1955,13 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_force_location_named_fs_automatic();
+	test_force_location_named_scheme_automatic();
+	test_force_location_empty_scheme_automatic();
+	test_force_location_named_scheme_index();
+	test_force_location_detected_scheme_index();
+	test_force_location_unnamed_fs_automatic();
+	test_force_location_unforced_automatic();
 	test_crc_oracle();
 	test_stack_grammar();
 	test_stack_rejections();

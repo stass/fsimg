@@ -562,6 +562,15 @@
 
 ## Planned features
 
+* [Low] **`--force` hint for a filesystem in a detected table**
+  (`cmd/fsimg/display.c` `force_hint`): the parent does not know which step
+  failed, so `-F qnx4` on a partitioned disk whose QNX4 identity is damaged
+  (`no recognized filesystem in any partition`) suggests `-F qnx4/- --force`,
+  which reads the whole disk as QNX4 and fails validation; `--partition N` is
+  what works. `-F fat12 --partition 1` on a disk with no recognizable table
+  suggests adding `--force`, which fails the same way. An error field saying
+  a table was found would let the hint choose.
+
 * [Low] **`--force` hint for layers that waive nothing**
   (`cmd/fsimg/display.c` `force_candidate`): a forced gpt, ifsboot, xz or
   zstd failing with `FSIMG_EFORMAT` still suggests `--force`, which then

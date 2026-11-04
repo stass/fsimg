@@ -56,6 +56,40 @@ system_tree_check(const qnx6_tree_t *tree, uint64_t length, uint32_t block_size,
 	return (FSIMG_OK);
 }
 
+/* A magic at byte zero selects the bootless or MMI layout, or with one at
+ * byte 8192 too an ambiguous one; neither is supported. The probe and
+ * open refuse both alike. at_header is whether byte 8192 holds a magic.
+ */
+fsimg_status_t
+qnx6_layout_refused(bool at_header, fsimg_error_t *error)
+{
+	return (qnx6_unsupported(error, at_header ?
+	    "QNX6 magic at byte 0 and 8192 is ambiguous" :
+	    "QNX6 bootless or MMI layout is not supported"));
+}
+
+/* Refuse a magic at byte zero. The slice holds both positions: its length
+ * was checked. An open under an assumed identity reaches this unprobed.
+ */
+static fsimg_status_t
+layout_check(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	unsigned char magic[4];
+	size_t transferred;
+	fsimg_status_t status;
+	bool big;
+
+	status = fsimg_reader_bytes(reader, 0, magic, sizeof(magic), &transferred,
+	    error);
+	if (status != FSIMG_OK || !qnx6_magic_order(magic, &big))
+		return (status);
+	status = fsimg_reader_bytes(reader, QNX6_HEADER_OFFSET, magic,
+	    sizeof(magic), &transferred, error);
+	if (status != FSIMG_OK)
+		return (status);
+	return (qnx6_layout_refused(qnx6_magic_order(magic, &big), error));
+}
+
 /* Read and completely validate one header. Every field the driver later
  * uses is checked here, so selection compares only valid headers.
  */
@@ -202,6 +236,9 @@ qnx6_headers_read(fsimg_reader_t *reader, fsimg_error_t *error)
 	    second_header < QNX6_DATA_ORIGIN + QNX6_HEADER_AREA * 2)
 		return (qnx6_corrupt(error, "QNX6 slice is too small for two headers"));
 	second_header -= QNX6_HEADER_AREA;
+	status = layout_check(reader, error);
+	if (status != FSIMG_OK)
+		return (status);
 
 	candidates = fsimg_alloc(reader->ctx, 2 * sizeof(*candidates), &detail);
 	if (candidates == NULL) {

@@ -187,7 +187,8 @@ directories and logical bytes count only entries iteration would return.
 No reader modifies or repairs an input image.
 .Pp
 FSIMG_READ_ASSUME_IDENTITY in the read options' flags, which requires the
-options to name a format, vouches that the volume is that format: opening
+options to name a format, vouches that the volume is that format: no probe
+runs, and opening
 skips the format's identity checks, the evidence such as a magic number or
 FAT's boot signature, media echo and reserved entries that tells it from
 other formats, and runs every validation check of geometry, bounds,
@@ -197,8 +198,15 @@ on a volume whose identity checks failed returns FSIMG_ECORRUPT before any
 other work, naming the first assumed check; enumeration and reading
 proceed.
 FSIMG_IMAGE_ASSUME_IDENTITY in the image options' flags does the same for
-every layer the options name, each named slot of the stack and a forced
-compression, and requires one of them; detected layers are unaffected.
+every layer the options name, each named layer slot of the stack and a forced
+compression, and requires a named slot or that compression; detected layers
+are unaffected, and detection never assumes an identity.
+A stack naming a filesystem must fix the volume's location:
+.Fn fsimg_image_select
+with FSIMG_SELECT_AUTOMATIC returns FSIMG_EINVAL unless the scheme slot is
+empty.
+The filesystem itself needs FSIMG_READ_ASSUME_IDENTITY on the reader that
+opens the selected volume.
 A format whose identity checks all pass reads exactly as without the flag.
 Every filesystem format honours the flags; of the layers, mbr, vhd,
 simg, hbcifs, dmg and gzip do.

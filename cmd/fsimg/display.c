@@ -1778,6 +1778,45 @@ force_candidate(const fsimg_cli_display_t *display, const fsimg_error_t *error)
 	return (NULL);
 }
 
+/*
+ * Suggest --force for candidate. A command naming no filesystem, or selecting
+ * by name, type or range, only needs the flag. Otherwise the volume must be
+ * located, so the command is spelled out: the partition it selects, or the
+ * disk as the volume when it leaves the scheme to detection, or a partition
+ * to choose when it forces the scheme.
+ */
+static void
+force_hint(fsimg_cli_display_t *display, const char *candidate)
+{
+	const fsimg_worker_request_t *request = &display->options->request;
+	const fsimg_stack_slot_t *scheme, *container;
+	bool by_index;
+
+	by_index = request->selector == FSIMG_SELECT_INDEX;
+	if (fsimg_job_format(request)[0] == '\0' ||
+	    (!by_index && request->selector != FSIMG_SELECT_AUTOMATIC)) {
+		append(display, "; use --force to read it as %s anyway", candidate);
+		return;
+	}
+	scheme = &request->stack.slots[FSIMG_LAYER_SCHEME];
+	container = &request->stack.slots[FSIMG_LAYER_CONTAINER];
+	append(display, "; use -F %s", fsimg_job_format(request));
+	if (scheme->state == FSIMG_SLOT_NAMED)
+		append(display, "/%s", scheme->name);
+	else if (!by_index)
+		append(display, "/-");
+	if (container->state == FSIMG_SLOT_NAMED)
+		append(display, "/%s", container->name);
+	else if (container->state == FSIMG_SLOT_EMPTY)
+		append(display, "/-");
+	if (by_index)
+		append(display, " --partition %u",
+		    (unsigned)request->partition_index);
+	else if (scheme->state == FSIMG_SLOT_NAMED)
+		append(display, " --partition N");
+	append(display, " --force to read it as %s anyway", candidate);
+}
+
 static void
 failure(fsimg_cli_display_t *display)
 {
@@ -1861,8 +1900,7 @@ failure(fsimg_cli_display_t *display)
 		append(display, " at byte %llu", (unsigned long long)error->offset);
 	candidate = force_candidate(display, error);
 	if (candidate != NULL)
-		append(display, "; use --force to read it as %s anyway",
-		    candidate);
+		force_hint(display, candidate);
 	append(display, "\n");
 	if (error->output_state == FSIMG_OUTPUT_INCOMPLETE)
 		append(display, "fsimg: output is incomplete\n");

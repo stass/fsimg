@@ -6,7 +6,7 @@
 #include "format.h"
 #include "write-iso9660.h"
 
-static fsimg_status_t iso_probe(const unsigned char *, size_t, uint64_t, bool,
+static fsimg_status_t iso_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
 /* One public name for every view and level; the view is a read setting.
@@ -68,34 +68,27 @@ const fsimg_format_t fsimg_iso9660_format = {
  * type the profile lists (specs/design-iso9660-driver.md#probe-and-open).
  * No other probe's structures hold it there, and no probe scans for it
  * elsewhere, so CD001 inside another format's data draws a second claim
- * only at block 16. Only CD001 is identity: a caller assuming the identity
- * skips it, and an unknown type is then refused as open refuses it. With
- * the signature the probe claims the image. A
+ * only at block 16. With the signature the probe claims the image. A
  * primary descriptor at block 16 is checked further for its block size
  * and volume size; any other first descriptor is left to open, which
  * finds the primary descriptor.
  */
 static fsimg_status_t
 iso_probe(const unsigned char *prefix, size_t length,
-    uint64_t volume_bytes FSIMG_UNUSED, bool assume_identity,
+    uint64_t volume_bytes FSIMG_UNUSED,
     const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	const unsigned char *descriptor;
 	uint32_t space_size;
-	bool known;
 
 	*variant = &iso_variants[0];
 	if (length < ISO_PROBE_BYTES)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no ISO 9660 volume descriptor"));
 	descriptor = prefix + ISO_SYSTEM_BLOCKS * ISO_BLOCK_BYTES;
-	known = iso_descriptor_type_known(descriptor[0]);
-	if (!assume_identity && (!iso_identity(descriptor) || !known))
+	if (!iso_identity(descriptor) || !iso_descriptor_type_known(descriptor[0]))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no ISO 9660 volume descriptor"));
-	if (!known)
-		return (iso_unsupported(error,
-		    "unsupported ISO 9660 volume descriptor type or version"));
 	if (descriptor[0] != ISO_VD_PRIMARY)
 		return (FSIMG_OK);
 	return (iso_geometry_decode(descriptor, &space_size, error));

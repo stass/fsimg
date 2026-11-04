@@ -11,7 +11,8 @@
 _Static_assert(QNX4_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
     "the QNX4 link-target limit lies within the entry model's ceiling");
 
-static fsimg_status_t qnx4_probe(const unsigned char *, size_t, uint64_t, bool,
+static bool qnx4_root_is_directory(const unsigned char *);
+static fsimg_status_t qnx4_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
 /* The native profile, the only variant: 512-byte blocks, names of up to
@@ -59,17 +60,14 @@ const fsimg_format_t fsimg_qnx4_format = {
  * volume carries that at byte 512: a FAT volume has its reserved sectors
  * or tables there, exFAT its boot region and QNX6 its boot area.
  *
- * Only the name and the status are identity: a caller assuming the
- * identity skips them, and the directory mode, validation, is then refused
- * as open refuses it. Once the signature matches, the probe claims the
- * image. The root directory's first extent must lie inside the slice, and
- * records 1 to 4 must be the four table records the formatter writes; open
- * validates the rest, including where the root directory must start.
+ * Once the signature matches, the probe claims the image. The root
+ * directory's first extent must lie inside the slice, and records 1 to 4
+ * must be the four table records the formatter writes; open validates the
+ * rest, including where the root directory must start.
  */
 static fsimg_status_t
 qnx4_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    bool assume_identity, const fsimg_format_variant_t **variant,
-    fsimg_error_t *error)
+    const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	const unsigned char *block;
 
@@ -78,8 +76,7 @@ qnx4_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no QNX4 root block"));
 	block = prefix + QNX4_BLOCK_BYTES;
-	if (!assume_identity &&
-	    (!qnx4_root_identity(block) || !qnx4_root_is_directory(block)))
+	if (!qnx4_root_identity(block) || !qnx4_root_is_directory(block))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no QNX4 root directory record"));
 	return (qnx4_root_block_validate(block, volume_bytes, error));
@@ -99,7 +96,7 @@ qnx4_root_identity(const unsigned char *block)
 	    status == (QNX4_STATUS_USED | QNX4_STATUS_CLEAN)));
 }
 
-bool
+static bool
 qnx4_root_is_directory(const unsigned char *block)
 {
 	qnx4_inode_t record;

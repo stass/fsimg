@@ -286,7 +286,7 @@ test_mtree_LDADD = libfsimg.la
 test_manifest_SOURCES = test/manifest.c test/test.h test/digest.c \
 	test/digest.h test/socket.c test/socket.h
 test_manifest_LDADD = libfsimg.la
-test_fat_SOURCES = test/fat.c test/test.h \
+test_fat_SOURCES = test/fat.c test/test.h test/force-short.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_LDADD = libfsimg.la
 test_fat_write_SOURCES = test/fat-write.c test/test.h \
@@ -429,7 +429,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/fixtures.rb \
 	test/cli/images.rb \
 	test/cli/records.rb \
-	test/cli/format_test.rb \
+	test/cli/format_test.rb test/cli/force_location_test.rb \
 	test/cli/formats_test.rb \
 	test/cli/helpers_test.rb \
 	test/cli/human_commands_test.rb \

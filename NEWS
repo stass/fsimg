@@ -48,12 +48,16 @@ it fails naming the entry, or `-k` skips and counts it.
 `--force` reads a volume whose identity checks fail as the filesystem
 `-F` names, keeping every validation check: an Atari ST FAT12 floppy, with
 no x86 jump, no 0x55AA and garbage in its first FAT entries, lists and
-extracts with `fsimg t -F fat12 --force`. `W` on such a volume fails,
-naming the identity check that was assumed. A read that names a
-filesystem and fails its identity check suggests `--force`. The library
-flags are `FSIMG_READ_ASSUME_IDENTITY` and `FSIMG_IMAGE_ASSUME_IDENTITY`.
-Every filesystem honours them: FAT, exFAT, ISO 9660, QNX4, QNX6 and
-ImageFS.
+extracts with `fsimg t -F fat12/- --force`. Detection never assumes an
+identity, so `--force` with a filesystem needs the volume's location: the
+scheme slot forced empty, `--partition`, or `--offset` and `--length`. `W`
+on such a volume fails, naming the identity check that was assumed. A read
+that names a filesystem and fails its identity check suggests the command
+that reads it, such as `-F qnx4/mbr --partition 2 --force`. The library
+flags are `FSIMG_READ_ASSUME_IDENTITY` and `FSIMG_IMAGE_ASSUME_IDENTITY`;
+with the image flag, `fsimg_image_select()` refuses automatic selection under
+a named filesystem unless the scheme slot is empty. Every filesystem honours
+them: FAT, exFAT, ISO 9660, QNX4, QNX6 and ImageFS.
 
 `--force` also vouches for the layers `-F` names and a compression `-z`
 or `--compress` forces, and needs only one of them: an MBR without its

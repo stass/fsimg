@@ -69,11 +69,11 @@ no magic number, so the identity signature is root-block record 0: the name
 `/` followed by fifteen NUL bytes, a status of `0x01` or `0x21`, and a
 directory mode type. Without it the probe makes no claim (`FSIMG_EFORMAT`).
 Under an [assumed identity](design-formats.md#format-descriptors-and-profiles)
-the probe and open skip the name and the status, QNX4's identity checks,
-and open records them; the directory mode is then validation, and a root
+open skips the name and the status, QNX4's identity checks, and records
+them; the directory mode is then validation, and a root
 record of another type is `FSIMG_ECORRUPT`. An assumed status reports the
-volume clean, since its clean bit means nothing. With the signature, or
-under an assumed identity, the probe checks that the first extent's block
+volume clean, since its clean bit means nothing. Open always, and the probe
+once the signature matches, check that the first extent's block
 is nonzero and that the extent lies inside the slice, else `FSIMG_ECORRUPT`; and that records 1
 to 4 have 16-NUL name fields and the statuses of the format design's table
 (`0x11`, with `0x13` allowed on records 2 and 3), else

@@ -21,7 +21,7 @@
 #define FAT_SMALL_VOLUME_BYTES(clusters)				\
 	((UINT64_C(65535) * 3 + 512 + UINT64_C(clusters) * 128 - 1) * 4096)
 
-static fsimg_status_t fat_probe(const unsigned char *, size_t, uint64_t, bool,
+static fsimg_status_t fat_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
 static const fsimg_reader_ops_t fat_reader = {
@@ -135,19 +135,17 @@ fsimg_fat_variant(unsigned id)
  * first FAT make the claim, and the remaining geometry checks decide
  * between a match, an unsupported table count, FAT32 revision or field, and
  * corruption. The variant follows from the cluster count, as it does when
- * the volume is opened. A caller assuming FAT's identity waives the
- * voucher, never a geometry check.
+ * the volume is opened.
  */
 static fsimg_status_t
 fat_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    bool assume_identity, const fsimg_format_variant_t **variant,
-    fsimg_error_t *error)
+    const fsimg_format_variant_t **variant, fsimg_error_t *error)
 {
 	fat_geometry_t geometry;
 	fsimg_status_t status;
 
 	status = fsimg_fat_geometry_decode(prefix, length, volume_bytes,
-	    assume_identity, &geometry, error);
+	    false, &geometry, error);
 	if (status == FSIMG_OK)
 		*variant = fsimg_fat_variant(geometry.variant);
 	return (status);

@@ -6,7 +6,7 @@ class CliTest < Minitest::Test
   def test_force_hint_names_mbr_when_filesystem_and_scheme_are_named
     write_unsigned_mbr_disk
     result = invoke(arguments: ["t", "-F", "fat12/mbr/-", "-f", "disk.img"], expected: 1)
-    assert_match(/; use --force to read it as mbr anyway\n\z/n, result.stderr)
+    assert_match(/; use -F fat12\/mbr\/- --partition N --force to read it as mbr anyway\n\z/n, result.stderr)
   end
 
   def test_force_hint_names_mbr_when_only_scheme_is_named
@@ -17,21 +17,21 @@ class CliTest < Minitest::Test
 
   def test_force_lists_files_in_an_unsigned_mbr_partition
     write_unsigned_mbr_disk
-    records = completed(invoke(arguments: ["t", "--json", "-F", "fat12/mbr/-", "--force", "-f", "disk.img"]))
+    records = completed(invoke(arguments: ["t", "--json", "-F", "fat12/mbr/-", "--partition", "1", "--force", "-f", "disk.img"]))
     paths = records.select { _1.fetch("type") == "entry" }.map { _1.fetch("path") }
     assert_equal(["/HELLO.TXT", "/nested", "/nested/caf\u00e9.txt"].to_set, paths.to_set)
   end
 
   def test_force_extracts_identical_bytes_from_an_unsigned_mbr_partition
     write_unsigned_mbr_disk
-    invoke(arguments: ["x", "-F", "fat12/mbr/-", "--force", "-f", "disk.img"])
+    invoke(arguments: ["x", "-F", "fat12/mbr/-", "--partition", "1", "--force", "-f", "disk.img"])
     assert_equal("hello\n".b, (@root / "disk/HELLO.TXT").binread)
     assert_equal(@payload, (@root / "disk/nested/caf\u00e9.txt").binread)
   end
 
   def test_force_verification_reports_assumed_mbr_identity
     write_unsigned_mbr_disk
-    result = invoke(arguments: ["W", "-F", "fat12/mbr/-", "--force", "-f", "disk.img"], expected: 1)
+    result = invoke(arguments: ["W", "-F", "fat12/mbr/-", "--partition", "1", "--force", "-f", "disk.img"], expected: 1)
     assert_includes(result.stderr,
       "mbr identity was assumed: the MBR has no 0x55AA signature".b)
   end
@@ -53,7 +53,7 @@ class CliTest < Minitest::Test
     (@root / "disk.vhd").binwrite(image)
 
     result = invoke(arguments: ["t", "-F", "fat12/-/vhd", "-f", "disk.vhd"], expected: 1)
-    assert_match(/; use --force to read it as vhd anyway\n\z/n, result.stderr)
+    assert_match(/; use -F fat12\/-\/vhd --force to read it as vhd anyway\n\z/n, result.stderr)
 
     records = completed(invoke(arguments: ["t", "--json", "-F", "fat12/-/vhd", "--force", "-f", "disk.vhd"]))
     paths = records.select { _1.fetch("type") == "entry" }.map { _1.fetch("path") }
@@ -71,9 +71,9 @@ class CliTest < Minitest::Test
     (@root / "disk.gz").binwrite(image)
 
     result = invoke(arguments: ["t", "-z", "-F", "fat12", "-f", "disk.gz"], expected: 1)
-    assert_match(/; use --force to read it as gzip anyway\n\z/n, result.stderr)
+    assert_match(/; use -F fat12\/- --force to read it as gzip anyway\n\z/n, result.stderr)
 
-    [[], ["-F", "fat12"]].each do |stack|
+    [[], ["-F", "fat12/-"]].each do |stack|
       records = completed(invoke(arguments: ["t", "-z", "--force", "--json", *stack, "-f", "disk.gz"]))
       paths = records.select { _1.fetch("type") == "entry" }.map { _1.fetch("path") }
       assert_equal(["/HELLO.TXT", "/nested", "/nested/caf\u00e9.txt"].to_set, paths.to_set)

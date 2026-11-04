@@ -1295,7 +1295,7 @@ test_job_force_requires_a_read_and_named_layer_or_compression(void)
 		fsimg_worker_request_init(&request);
 		request.kind = reads[i];
 		request.flags = FSIMG_JOB_FORCE;
-		CHECK(fsimg_stack_parse("fat12", &request.stack, NULL) == FSIMG_OK);
+		CHECK(fsimg_stack_parse("fat12/-", &request.stack, NULL) == FSIMG_OK);
 		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 		    &capabilities, NULL) == FSIMG_OK);
@@ -1329,7 +1329,7 @@ test_job_force_requires_a_read_and_named_layer_or_compression(void)
 		request.root_paths = image_root;
 		request.root_count = 1;
 		request.flags = FSIMG_JOB_FORCE;
-		CHECK(fsimg_stack_parse("fat12", &request.stack, NULL) == FSIMG_OK);
+		CHECK(fsimg_stack_parse("fat12/-", &request.stack, NULL) == FSIMG_OK);
 		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 		    &capabilities, NULL) == FSIMG_EINVAL);
@@ -2219,6 +2219,107 @@ test_info_text_records_reject_invalid_counts_and_strings(void)
 	CHECK(fsimg_wire_info_frame_valid(&frame));
 }
 
+static void test_force_location_job_automatic_fs(void);
+
+static void
+test_force_location_job_automatic_fs(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.flags = FSIMG_JOB_FORCE;
+	request.selector = FSIMG_SELECT_AUTOMATIC;
+	CHECK(fsimg_stack_parse("fat12", &request.stack, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+}
+
+static void test_force_location_job_automatic_scheme(void);
+
+static void
+test_force_location_job_automatic_scheme(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.flags = FSIMG_JOB_FORCE;
+	request.selector = FSIMG_SELECT_AUTOMATIC;
+	CHECK(fsimg_stack_parse("fat12/mbr", &request.stack, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+}
+
+static void test_force_location_job_empty_scheme(void);
+
+static void
+test_force_location_job_empty_scheme(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.flags = FSIMG_JOB_FORCE;
+	request.selector = FSIMG_SELECT_AUTOMATIC;
+	CHECK(fsimg_stack_parse("fat12/-", &request.stack, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+}
+
+static void test_force_location_job_partition(void);
+
+static void
+test_force_location_job_partition(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.flags = FSIMG_JOB_FORCE;
+	request.selector = FSIMG_SELECT_INDEX;
+	request.partition_index = 1;
+	CHECK(fsimg_stack_parse("fat12/mbr", &request.stack, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+}
+
+static void test_force_location_job_scheme_only(void);
+
+static void
+test_force_location_job_scheme_only(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.flags = FSIMG_JOB_FORCE;
+	request.selector = FSIMG_SELECT_AUTOMATIC;
+	CHECK(fsimg_stack_parse("mbr", &request.stack, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2227,6 +2328,11 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_force_location_job_automatic_fs();
+	test_force_location_job_automatic_scheme();
+	test_force_location_job_empty_scheme();
+	test_force_location_job_partition();
+	test_force_location_job_scheme_only();
 	test_iso_jobs_have_canonical_wire_bytes();
 	test_iso_jobs_reject_malformed_fields();
 	test_job_zstd_levels_roundtrip_and_reject_wide_wire_value();

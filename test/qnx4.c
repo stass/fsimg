@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
+#include "force-short.h"
 #include "config.h"
 
 #include <sys/types.h>
@@ -5468,6 +5469,31 @@ test_qnx4_intact_volume_with_assume_identity_verifies(void)
 	gen_free(&g);
 }
 
+static void test_qnx4_assumed_identity_rejects_short_volumes(void);
+
+static void
+test_qnx4_assumed_identity_rejects_short_volumes(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_io_t *volume;
+	uint64_t lengths[2];
+
+	check_force_short_volumes("qnx4", 1024);
+	identity_volume(&g);
+	fixture_new(&f, g.image, g.length);
+	lengths[0] = g.length / 2;
+	lengths[1] = 1024 + 1;
+	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		CHECK(fsimg_io_slice(f.io, 0, lengths[i], &volume, NULL) ==
+		    FSIMG_OK);
+		check_force_truncated_volume(f.ctx, volume, "qnx4");
+		fsimg_io_free(volume);
+	}
+	fixture_free(&f);
+	gen_free(&g);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5487,6 +5513,7 @@ main(int argc, char **argv)
 		return (skipped == 0 ? 0 : 77);
 	}
 	CHECK(argc == 1);
+	test_qnx4_assumed_identity_rejects_short_volumes();
 	test_codecs();
 	test_sample();
 	test_hard_links();

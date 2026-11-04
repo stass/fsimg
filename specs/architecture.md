@@ -363,9 +363,9 @@ bounded probe contract. The [format contracts](design-formats.md#format-descript
 define descriptors and probing. Every format and layer divides its checks
 into identity, the evidence that the bytes are this format, and
 validation, everything that keeps decoding safe. A caller that forces a
-format may assume its identity (`--force`): the driver skips the identity
-checks that failed, records them, and common verification refuses the
-volume; forcing never disables validation
+format may assume its identity (`--force`): at open, never during detection,
+the driver skips the identity checks that failed, records them, and common
+verification refuses the volume; forcing never disables validation
 ([detection and forcing](design-layers.md#detection-and-forcing)). The
 reader is a lazy iterator with content
 access to its current entry. The writer consumes a complete logical catalog,

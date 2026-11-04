@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
+#include "force-short.h"
 #include "config.h"
 
 #include <sys/types.h>
@@ -2306,6 +2307,28 @@ test_exfat_intact_volume_with_assume_identity_verifies(void)
 	fixture_free(&f);
 }
 
+static void test_exfat_assumed_identity_rejects_short_volumes(void);
+
+static void
+test_exfat_assumed_identity_rejects_short_volumes(void)
+{
+	exfat_fixture_t f;
+	fsimg_io_t *volume;
+	uint64_t lengths[2];
+
+	check_force_short_volumes("exfat", 64);
+	fixture_new(&f);
+	lengths[0] = f.length / 2;
+	lengths[1] = 24 * 512 + 1;
+	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		CHECK(fsimg_io_slice(f.io, 0, lengths[i], &volume, NULL) ==
+		    FSIMG_OK);
+		check_force_truncated_volume(f.ctx, volume, "exfat");
+		fsimg_io_free(volume);
+	}
+	fixture_free(&f);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2372,6 +2395,7 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_exfat_assumed_identity_rejects_short_volumes();
 	test_minimize_tie_prefers_recommended_cluster_count();
 	test_minimize_large_and_tiny_files();
 	test_minimize_constraints_and_limits();

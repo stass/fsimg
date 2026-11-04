@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
+#include "force-short.h"
 #include "config.h"
 
 #include <sys/types.h>
@@ -1945,7 +1946,7 @@ probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes)
 	fsimg_error_t error;
 	fsimg_status_t status;
 
-	status = fsimg_ifs_format.probe(prefix, length, volume_bytes, false, &variant,
+	status = fsimg_ifs_format.probe(prefix, length, volume_bytes, &variant,
 	    &error);
 	/* A claim names the format's one variant. */
 	CHECK(status != FSIMG_OK || variant == fsimg_ifs_format.variants);
@@ -5291,6 +5292,31 @@ test_ifs_intact_volume_with_assume_identity_verifies(void)
 	gen_free(&g);
 }
 
+static void test_ifs_assumed_identity_rejects_short_volumes(void);
+
+static void
+test_ifs_assumed_identity_rejects_short_volumes(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_io_t *volume;
+	uint64_t lengths[2];
+
+	check_force_short_volumes("ifs", 88);
+	identity_volume(&g);
+	fixture_open(&f, g.image, g.length, 0);
+	lengths[0] = g.length / 2;
+	lengths[1] = GEN_HEADER + 1;
+	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		CHECK(fsimg_io_slice(f.io, 0, lengths[i], &volume, NULL) ==
+		    FSIMG_OK);
+		check_force_truncated_volume(f.ctx, volume, "ifs");
+		fsimg_io_free(volume);
+	}
+	fixture_close(&f);
+	gen_free(&g);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5317,6 +5343,7 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_ifs_assumed_identity_rejects_short_volumes();
 	test_sample();
 	test_probe();
 	test_header_bounds();

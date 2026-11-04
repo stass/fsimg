@@ -70,13 +70,15 @@ likewise, and the volume signature selects the variant. Detection follows one bo
   layout constants that decide how bytes are decoded, geometry, bounds,
   checksums, allocation chains, directories and names. Each format's
   section below names its identity checks; every other check is validation.
-* With an assumed identity (`--force`, `FSIMG_READ_ASSUME_IDENTITY`) the
-  caller vouches that the volume is the format it forces, which the flag
-  requires. The probe and open skip that format's identity checks, so a
-  damaged magic or a formatter that never wrote one does not block
-  reading, and run every validation check. Forcing never disables
-  validation. Each identity check that failed is recorded when the volume
-  opens, and full verification of such a volume fails with
+* Probes are pure identity tests, the same whoever asks, so detection never
+  sees an assumed identity. With an assumed identity (`--force`,
+  `FSIMG_READ_ASSUME_IDENTITY`) the caller vouches that the input is a volume
+  of the format it forces, which the flag requires, and no probe runs: open
+  skips that format's identity checks, so a damaged magic or a formatter that
+  never wrote one does not block reading, and runs every validation check,
+  which includes all a probe makes, at any input length. Forcing never
+  disables validation. Each identity check that failed is recorded when the
+  volume opens, and full verification of such a volume fails with
   `FSIMG_ECORRUPT` before any other work, naming the first check that was
   assumed: an assumed identity is never certified. Listing, reading and
   extraction proceed. A volume whose identity checks all pass reads and
