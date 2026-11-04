@@ -85,8 +85,10 @@ rounding; bytes beyond the volume are never read. It may also be shorter,
 as rips that lose the final pad blocks are: the readable volume ends at the
 slice, every structure the reader uses must lie within it, and one that
 does not is a truncated image, `FSIMG_ECORRUPT` when it is referenced. A
-missing tail that nothing references is not a finding; info reports its
-length.
+missing tail that nothing references is not a finding when opening, listing or
+extracting; info reports its length in `missing_bytes`, and full verification
+fails on it, by the
+[common rule](architecture.md#byte-and-object-boundaries).
 
 ### The system area
 

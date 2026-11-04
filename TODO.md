@@ -562,6 +562,11 @@
 
 ## Planned features
 
+* [Medium] **Best-effort salvage extraction** (`lib/extract`, `cmd/fsimg`): a
+  flag to extract what can be read from a corrupt image, continuing past a
+  corrupt file or directory and reporting every loss, instead of stopping at
+  the first `FSIMG_ECORRUPT`. Needs its own design doc.
+
 * [Low] **`--force` hint for a filesystem in a detected table**
   (`cmd/fsimg/display.c` `force_hint`): the parent does not know which step
   failed, so `-F qnx4` on a partitioned disk whose QNX4 identity is damaged

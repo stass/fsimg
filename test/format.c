@@ -11,6 +11,8 @@
 #include "test.h"
 
 #define FAKE_COUNT	3
+/* One reserved sector, two nine-sector FATs, fourteen fixed-root sectors. */
+#define FAT12_METADATA_BYTES ((1 + 2 * 9 + 14) * 512)
 
 static fsimg_status_t empty_read(void *, uint64_t, void *, size_t, size_t *,
     fsimg_error_t *);
@@ -224,7 +226,10 @@ test_driver_probes(void)
 	CHECK(fsimg_format_claim(registry, 2, &fsimg_exfat_format, boot,
 	    sizeof(boot), 2880 * 512, &claimed, &error) == FSIMG_EFORMAT);
 	CHECK(fsimg_format_claim(registry, 2, NULL, boot, sizeof(boot),
-	    2879 * 512, &claimed, &error) == FSIMG_ECORRUPT);
+	    2879 * 512, &claimed, &error) == FSIMG_OK);
+	CHECK(claimed == &fsimg_fat_format);
+	CHECK(fsimg_format_claim(registry, 2, NULL, boot, sizeof(boot),
+	    FAT12_METADATA_BYTES - 1, &claimed, &error) == FSIMG_ECORRUPT);
 	CHECK(fsimg_format_claim(registry, 2, NULL, boot, 511, 2880 * 512,
 	    &claimed, &error) == FSIMG_EFORMAT);
 
@@ -291,7 +296,10 @@ test_fat_identification_precedes_geometry(void)
 
 	/* An identified unsigned volume has the same geometry classification. */
 	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
-	    2879 * 512, &claimed, &error) == FSIMG_ECORRUPT);
+	    2879 * 512, &claimed, &error) == FSIMG_OK);
+	CHECK(claimed == &fsimg_fat_format);
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    FAT12_METADATA_BYTES - 1, &claimed, &error) == FSIMG_ECORRUPT);
 
 	/* Three tables are unsupported after identification, even unsigned. */
 	prefix[16] = 3;
@@ -331,7 +339,10 @@ test_fat_identification_precedes_geometry(void)
 	    2880 * 512, &claimed, &error) == FSIMG_OK);
 	CHECK(claimed == &fsimg_fat_format);
 	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
-	    2879 * 512, &claimed, &error) == FSIMG_ECORRUPT);
+	    2879 * 512, &claimed, &error) == FSIMG_OK);
+	CHECK(claimed == &fsimg_fat_format);
+	CHECK(fsimg_format_claim(registry, 2, NULL, prefix, sizeof(prefix),
+	    FAT12_METADATA_BYTES - 1, &claimed, &error) == FSIMG_ECORRUPT);
 }
 
 /* A tiny unsigned volume needs all three identifying FAT head bytes. */

@@ -49,7 +49,7 @@ typedef enum fsimg_wire_error_field {
 	FSIMG_WIRE_ERROR_MESSAGE = 336
 } fsimg_wire_error_field_t;
 
-#define FSIMG_WIRE_INFO_BYTES 5360u
+#define FSIMG_WIRE_INFO_BYTES 5368u
 typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_VALID = 0,
 	FSIMG_WIRE_INFO_CAPABILITIES = 8,
@@ -70,7 +70,8 @@ typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_DETAIL_COUNT = 1248,
 	FSIMG_WIRE_INFO_DETAILS = 1256,	/* 16 of a 24-byte name and a value */
 	FSIMG_WIRE_INFO_TEXT_COUNT = 1768,
-	FSIMG_WIRE_INFO_TEXTS = 1776	/* 16 of a 24-byte name and a value */
+	FSIMG_WIRE_INFO_TEXTS = 1776,	/* 16 of a 24-byte name and a value */
+	FSIMG_WIRE_INFO_MISSING = 5360
 } fsimg_wire_info_field_t;
 #define FSIMG_WIRE_INFO_LABEL_BYTES 49u
 #define FSIMG_WIRE_INFO_MOUNTPOINT_BYTES 1025u
@@ -86,8 +87,10 @@ _Static_assert(FSIMG_WIRE_INFO_DETAILS + FSIMG_VOLUME_DETAILS_MAX *
     FSIMG_WIRE_INFO_DETAIL_BYTES == FSIMG_WIRE_INFO_TEXT_COUNT,
     "the text count follows the details");
 _Static_assert(FSIMG_WIRE_INFO_TEXTS + FSIMG_VOLUME_TEXTS_MAX *
-    FSIMG_WIRE_INFO_TEXT_BYTES == FSIMG_WIRE_INFO_BYTES,
-    "the info record ends with the texts");
+    FSIMG_WIRE_INFO_TEXT_BYTES == FSIMG_WIRE_INFO_MISSING,
+    "the missing byte count follows the texts");
+_Static_assert(FSIMG_WIRE_INFO_MISSING + 8 == FSIMG_WIRE_INFO_BYTES,
+    "the info record ends with the missing byte count");
 _Static_assert(FSIMG_WIRE_INFO_DETAIL_NAME_BYTES +
     FSIMG_WIRE_INFO_TEXT_VALUE_BYTES <= FSIMG_WIRE_INFO_TEXT_BYTES,
     "a wire text holds its name and value");

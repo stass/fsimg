@@ -8,11 +8,19 @@ class CliTest < Minitest::Test
 
     info = completed(invoke(arguments: ["i", "--json", "-S", "off", "-f", "tail.img"]))
       .find { _1.fetch("type") == "info" }
-    assert_equal("1", info.fetch("details").fetch("missing_blocks"))
+    assert_equal("2048", info.fetch("missing_bytes"))
     entries = completed(invoke(arguments: ["t", "--json", "-S", "off", "-f", "tail.img"]))
       .select { _1.fetch("type") == "entry" }
     assert_equal(["/A.TXT"], entries.map { _1.fetch("path") })
     assert_equal("hello".b, invoke(arguments: ["x", "-O", "-S", "off", "-f", "tail.img", "/A.TXT"]).stdout)
+  end
+
+  def test_iso_truncated_verification_refuses_missing_tail
+    check_iso_truncated_verification(payload: [])
+  end
+
+  def test_iso_truncated_payload_verification_refuses_missing_tail
+    check_iso_truncated_verification(payload: ["-d"])
   end
 
   def test_iso_missing_payload_is_corruption_instead_of_protocol_fault
@@ -52,6 +60,14 @@ class CliTest < Minitest::Test
   end
 
   private
+
+  def check_iso_truncated_verification(payload:)
+    iso_truncated_fixture(name: "tail.img", missing_payload: false)
+    error = failed(invoke(arguments: ["W", *payload, "--json", "-S", "off", "-f", "tail.img"], expected: 1))
+    assert_equal(-5, error.fetch("code"))
+    assert_includes(error.fetch("message"), "truncated")
+    assert_includes(error.fetch("message"), "2048")
+  end
 
   def iso_truncated_fixture(name:, missing_payload:)
     helper = @executable.dirname / "test-iso9660"

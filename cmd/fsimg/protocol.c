@@ -400,6 +400,7 @@ fsimg_wire_info_encode(unsigned char *raw, const fsimg_volume_info_t *info)
 	fsimg_store_le64(raw + FSIMG_WIRE_INFO_VALID, info->valid);
 	fsimg_store_le64(raw + FSIMG_WIRE_INFO_CAPABILITIES, info->capabilities);
 	fsimg_store_le64(raw + FSIMG_WIRE_INFO_VOLUME, info->volume_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_INFO_MISSING, info->missing_bytes);
 	fsimg_store_le64(raw + FSIMG_WIRE_INFO_UNITS, info->allocation_units);
 	fsimg_store_le64(raw + FSIMG_WIRE_INFO_FREE, info->free_bytes);
 	fsimg_store_le64(raw + FSIMG_WIRE_INFO_SECTOR, info->sector_bytes);

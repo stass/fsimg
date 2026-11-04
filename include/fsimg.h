@@ -1127,7 +1127,12 @@ typedef struct fsimg_volume_info {
 	char		 label[49];
 	/* A 16-byte volume identity in textual (RFC 4122) byte order. */
 	unsigned char	 uuid[16];
+	/* The size the volume declares, which a truncated image's input may
+	 * not reach. missing_bytes is how far it does not: the declared bytes
+	 * past the end of the input, zero when the input holds them all.
+	 */
 	uint64_t	 volume_bytes;
+	uint64_t	 missing_bytes;
 	uint64_t	 allocation_units;
 	uint64_t	 free_bytes;
 	uint32_t	 sector_bytes;

@@ -1,5 +1,11 @@
 fsimg 0.1.0 (unreleased)
 
+An image shorter than the filesystem it declares still opens, lists and
+extracts while everything those touch survives, such as a FAT image cut after
+its last allocated cluster. A referenced file or structure past the end fails
+as corrupt, and `W` fails on every truncated image, ISO 9660 included. `i` and
+the library's volume information report how many bytes are missing.
+
 ISO 9660 creation writes Rock Ridge and Joliet at interchange levels 1 to 3,
 with deep-directory relocation and multi-extent files. Joliet aliases avoid
 case-insensitive lookup collisions while Rock Ridge keeps exact source

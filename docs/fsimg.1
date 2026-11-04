@@ -751,6 +751,14 @@ partition's slot, type, size, offset, filesystem and name, marking the
 selected one; then header validation, geometry, label, volume UUID when the
 format has one, the mountpoint and named format details when the format
 records them, time basis and known capabilities.
+A volume declaring more bytes than the image holds shows how many are
+missing, and the JSON info record carries missing_bytes, zero for a whole
+volume.
+Such a truncated image still lists and extracts as long as nothing those
+commands touch lies in the missing tail; a referenced file or structure past
+the end of the image fails as corrupt.
+.Cm W
+fails on every truncated image, naming how many bytes are missing.
 An ImageFS's details are its header's mount flags, boot and script inode
 references and chain address, its record counts by inode flag nibble, and
 the numbers of implicit directories, shadowed records, omitted subtrees,

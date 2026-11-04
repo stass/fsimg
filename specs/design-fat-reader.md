@@ -59,10 +59,25 @@ clean and without an I/O error. A volume whose identity checks all pass
 reads and verifies exactly as without the flag.
 
 Opening validates the sector size, power-of-two sectors per cluster,
-reserved area, table count, table capacity, root layout, and declared length
-against its input slice.
+reserved area, table count, table capacity and root layout.
 The reserved area, the tables and the root region must end within the
 declared volume, and a data region of at least one cluster must follow them.
+The declared sector count decides the cluster count and so the variant, and
+it may exceed the input slice, on the
+[common rule for a truncated volume](architecture.md#byte-and-object-boundaries):
+a data region cut short costs nothing until something refers to it. The
+reserved area, every table and the fixed root must lie within the slice, and
+one that does not is `FSIMG_ECORRUPT` at open. That also bounds what declared
+geometry can size: the table capacity check bounds the cluster count by the
+table bytes, so the metadata scaled by the cluster count, the directory-cluster
+bitset and a file's extent index, stays proportional to bytes the file really
+holds.
+
+A directory cluster past the end fails `FSIMG_ECORRUPT` when walked and a
+file's logical bytes past the end fail when read, though the slack after a
+file's last byte may be missing. Listing reads no file data, so it succeeds
+with a file past the end. Full verification fails on any truncated volume,
+before this driver's verification runs.
 A nonzero `BPB_TotSec16` is the sector count and a nonzero `BPB_FATSz16` the
 table size; the 32-bit field at offset 32 or 36 is consulted only when its
 16-bit counterpart is zero. Boot sectors from before DOS 3.31 keep boot code

@@ -173,9 +173,17 @@ fsimg_fat_geometry_decode(const unsigned char *boot, size_t length,
 	 * Keep region arithmetic in 64 bits, subtract metadata only after proving
 	 * it fits, and classify by data clusters rather than the label string.
 	 */
-	if (fat_sectors == 0 || total_sectors <= data_sector ||
-	    g->volume_bytes > input_bytes)
-		return (fsimg_fat_corrupt(error, "FAT regions exceed the bounded volume"));
+	if (fat_sectors == 0 || total_sectors <= data_sector)
+		return (fsimg_fat_corrupt(error, "FAT regions exceed the declared volume"));
+	/* The declared length may exceed a truncated input: a data region cut
+	 * short costs nothing until something refers to it. The tables and the
+	 * fixed root must be there, and the capacity check below bounds the
+	 * cluster count by those table bytes, so metadata scaled by clusters
+	 * stays proportional to what the file holds.
+	 */
+	if (data_sector * g->sector_bytes > input_bytes)
+		return (fsimg_fat_corrupt(error,
+		    "image is truncated inside the FAT tables or fixed root"));
 	g->clusters = (uint32_t)((total_sectors - data_sector) / sectors_per_cluster);
 	if (g->clusters == 0)
 		return (fsimg_fat_corrupt(error, "FAT volume has no data clusters"));

@@ -293,9 +293,9 @@ run the handshake), `joliet_level` (0 to 3), `enhanced` (1 when an
 enhanced descriptor exists), `descriptors` (the count before the
 terminator), `terminator_block`, `root_block` and `path_table_bytes` of the
 selected view's hierarchy, `system_area_used` (1 when a byte of blocks 0 to
-15 is nonzero), `missing_blocks` (the volume's blocks past the slice),
-`boot_catalog_block` (0 without El Torito), `boot_entries`, `boot_x86` and
-`boot_efi` (entries per platform). Every value is known when open returns.
+15 is nonzero), `boot_catalog_block` (0 without El Torito), `boot_entries`,
+`boot_x86` and `boot_efi` (entries per platform). Every value is known when
+open returns.
 
 The named texts, under the keys and rules of the format design's
 [descriptor text and dates](design-iso9660.md#descriptor-text-and-dates),

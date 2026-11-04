@@ -317,8 +317,7 @@ creation case, including every drawn tree, is a manifest case.
 
 A case is serialized as a versioned JSON recipe. The example below is
 `single_rule` because the independent builder renders the 1000-byte sector size
-coherently; the same field patched into a formatter base would also violate
-`fat.geometry.within_image`.
+coherently.
 
 ```json
 {

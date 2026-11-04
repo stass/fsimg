@@ -149,16 +149,30 @@ fsimg_reader_set_link_target(fsimg_reader_t *reader, const void *bytes,
 	return (FSIMG_OK);
 }
 
+/*
+ * The one read path of every driver, so the one place a volume longer than its
+ * slice is told apart: whatever a driver asks for past the slice is a truncated
+ * image, and no driver checks its own reads against the tail. The identity
+ * check comes first, so a host file that shrank after opening reports the
+ * change.
+ */
 fsimg_status_t
 fsimg_reader_bytes(fsimg_reader_t *reader, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
+	uint64_t slice;
 	fsimg_status_t status;
 
 	*transferred = 0;
 	status = fsimg_reader_stable(reader, error);
 	if (status != FSIMG_OK)
 		return (status);
+	status = fsimg_io_get_size(reader->input, &slice, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!fsimg_range_fits(offset, length, slice))
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_READER,
+		    "image is truncated"));
 	status = fsimg_io_read_session(reader->input, &reader->session, offset,
 	    buffer, length, transferred, error);
 	if (status != FSIMG_OK)
@@ -174,6 +188,7 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	fsimg_read_options_t defaults;
 	fsimg_error_t detail;
 	fsimg_reader_t *reader;
+	uint64_t slice;
 	fsimg_status_t status;
 
 	if (out != NULL)
@@ -232,13 +247,16 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 		goto fail;
 	/* Declared filesystem geometry can exceed the available input. The
 	 * selected I/O view funds the default; an explicit context limit was
-	 * already installed by session initialization.
+	 * already installed by session initialization. Drivers report what the
+	 * volume declares, and only here is that compared with the slice.
 	 */
-	if (ctx->options.max_output_bytes == 0) {
-		status = fsimg_io_get_size(input, &reader->session.output_limit, error);
-		if (status != FSIMG_OK)
-			goto fail;
-	}
+	status = fsimg_io_get_size(input, &slice, error);
+	if (status != FSIMG_OK)
+		goto fail;
+	if (ctx->options.max_output_bytes == 0)
+		reader->session.output_limit = slice;
+	reader->info.missing_bytes = reader->info.volume_bytes > slice ?
+	    reader->info.volume_bytes - slice : 0;
 	reader->path = fsimg_alloc(ctx, ctx->options.max_path_bytes, &detail);
 	if (reader->path == NULL) {
 		status = detail.status;
@@ -430,6 +448,35 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 	return (FSIMG_OK);
 }
 
+/*
+ * Charge a file's declared size to the output budget before it is copied. The
+ * default budget is the slice, so on a truncated volume a lost file commonly
+ * shows first as an overrun. One read of its last byte goes through the funnel
+ * and tells the two apart: a file past the end is corrupt, while one whose last
+ * byte is there keeps the limit error, since its extents are shared or the limit
+ * is the caller's. Any other failure of that read outranks the limit. Either way
+ * the copy does not start.
+ */
+fsimg_status_t
+fsimg_reader_charge_file(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	uint64_t size = reader->entry.size;
+	fsimg_error_t detail;
+	unsigned char last;
+	size_t count;
+	fsimg_status_t probe, status;
+
+	status = fsimg_session_charge(&reader->session, 0, size, 1, error);
+	if (status != FSIMG_ELIMIT || reader->info.missing_bytes == 0 || size == 0)
+		return (status);
+	probe = fsimg_reader_read_at(reader, size - 1, &last, 1, &count, &detail);
+	if (probe == FSIMG_OK || probe == FSIMG_ELIMIT)
+		return (status);
+	if (error != NULL)
+		*error = detail;
+	return (probe);
+}
+
 fsimg_status_t
 fsimg_reader_read_at(fsimg_reader_t *reader, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
@@ -600,6 +647,22 @@ assumed_identity_failed(const fsimg_reader_t *reader, fsimg_error_t *error)
 	    message));
 }
 
+/* A volume missing part of itself is not a verified volume, whatever
+ * references the tail: it fails before any work, the reader untouched, and
+ * no driver needs a truncation check of its own.
+ */
+static fsimg_status_t
+truncated_failed(const fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	char message[sizeof(error->message)];
+
+	snprintf(message, sizeof(message),
+	    "image is truncated: %llu declared bytes are missing",
+	    (unsigned long long)reader->info.missing_bytes);
+	return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_VERIFY,
+	    message));
+}
+
 fsimg_status_t
 fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
     fsimg_error_t *error)
@@ -624,6 +687,8 @@ fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
 	if (reader->ops->verify == NULL)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_VERIFY, "format has no full verification"));
+	if (reader->info.missing_bytes != 0)
+		return (truncated_failed(reader, error));
 	if (reader->assumed_identity != NULL)
 		return (assumed_identity_failed(reader, error));
 	out->scope = (flags & FSIMG_VERIFY_PAYLOAD) != 0 ?

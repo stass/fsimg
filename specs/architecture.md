@@ -273,9 +273,40 @@ are decoded explicitly, without casting bytes to native C structs.
 Descriptor-declared filesystem geometry is informational and may exceed the
 available selected I/O extent on a truncated image. Reporting that geometry
 does not enlarge the I/O range or an extraction/output budget: those bounds
-derive from the opened view, the selected range and explicit limits. This
-keeps missing structures and content classified by the filesystem decoder,
-without granting authority to a reported geometry value.
+derive from the opened view, the selected range and explicit limits. Every
+format treats a volume longer than its slice by the same rules:
+
+* **One funnel.** `fsimg_reader_bytes` is the read path of every driver. A
+  request outside the slice is `FSIMG_ECORRUPT`, "image is truncated", and
+  drivers add no tail checks of their own. Its source-identity check runs
+  first, so a host file that shrank after opening reports
+  `FSIMG_ESOURCE_CHANGED`, not truncation.
+* **Metadata that sizes resources must be present.** Whatever an open
+  allocates or trusts from declared geometry lies within the slice before an
+  allocation is sized from it, so a tiny file declaring a huge volume cannot
+  amplify memory or scratch use.
+* **A missing tail nothing references does not stop reading.** Open, list and
+  extract succeed when everything they touch is in the slice. A referenced
+  structure or file past the end fails `FSIMG_ECORRUPT`, and a partial
+  extraction is not success. Output is charged at a file's declared size before
+  it is copied, so on a truncated volume an overrun first reads the file's last
+  byte through the funnel: a file past the end fails the same way, and one whose
+  last byte is there keeps the resource limit error, since its extents are shared
+  or the limit is the caller's.
+* **Reporting.** `fsimg_volume_info_t.missing_bytes` is the declared bytes
+  past the slice, derived once by the reader core after the driver opens.
+  No driver computes it.
+* **Full verification fails on every truncated image.** `fsimg_verify` fails
+  `FSIMG_ECORRUPT`, naming the truncation and the missing byte count, whenever
+  `missing_bytes` is nonzero, before the driver's verification runs: a volume
+  missing part of itself is not a verified volume, whatever references the
+  tail. No driver has a truncation check of its own in verification. A format
+  that opens a truncated volume declares a `volume_bytes` beyond the slice, so
+  this holds by construction.
+
+Layers whose index, footer or stream end sits at the end of their input (DMG,
+VHD, simg, gzip, xz, zstd and the boot containers) lose it when truncated, and
+stay `FSIMG_ECORRUPT`.
 
 The [scalar byte codecs](design-binary-primitives.md) share unsigned endian
 loads and stores across image, scratch, and protocol codecs. They operate on

@@ -22,11 +22,17 @@
 #include "fsimg-endian.h"
 #include "test.h"
 
+#define BPB_TOTAL_SECTORS16 19
+#define BPB_TOTAL_SECTORS32 32
+#define BPB_FAT_SECTORS32 36
+
 /* This fixture builder encodes disk fields directly, independently of the
  * production geometry/name/chain helpers. Real formatter fixtures are checked
- * separately by fat-integration.sh. The image is a fresh sparse ordinary file.
+ * separately by fat-integration.sh. Backing is a sparse file or a memory prefix.
  */
 typedef struct fixture {
+	unsigned char	*memory;
+	size_t		 stored;
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*io;
 	fsimg_reader_t	*reader;
@@ -85,6 +91,8 @@ static void short_entry(unsigned char *, const char *, bool, uint32_t, uint32_t)
 static void fixture_init(fixture_t *, unsigned);
 static void fixture_geometry(fixture_t *, unsigned, unsigned, unsigned);
 static void fixture_layout(fixture_t *, unsigned, unsigned, unsigned, unsigned);
+static void fixture_build(fixture_t *, unsigned, unsigned, unsigned, unsigned,
+    bool, uint32_t, uint32_t);
 static void fixture_add_root_label(fixture_t *, const char *);
 static void test_geometry_matrix(void);
 static void test_cluster_ceiling(unsigned);
@@ -119,7 +127,7 @@ static void test_non_pc_boot_records(void);
 static void test_unsigned_tiny_fat_open(void);
 static void test_pc98_boot_record(void);
 static void test_unsigned_media_mismatch_is_not_fat(void);
-static void test_identified_unsigned_geometry_is_corruption(void);
+static void test_identified_unsigned_missing_tail_opens(void);
 static void test_unsigned_fat16_head_does_not_check_fourth_byte(void);
 static void test_unsigned_fat16_and_fat32_identification(void);
 static void test_forced_unsigned_fat12_variant(void);
@@ -177,7 +185,11 @@ put32(unsigned char *p, uint32_t value)
 static void
 write_bytes(fixture_t *f, uint64_t offset, const void *bytes, size_t length)
 {
-	CHECK(pwrite(f->fd, bytes, length, (off_t)offset) == (ssize_t)length);
+	if (f->memory != NULL) {
+		CHECK(offset <= f->stored && length <= f->stored - offset);
+		bcopy(bytes, f->memory + offset, length);
+	} else
+		CHECK(pwrite(f->fd, bytes, length, (off_t)offset) == (ssize_t)length);
 }
 
 static void
@@ -194,7 +206,10 @@ set_cluster(fixture_t *f, uint32_t cluster, uint32_t value)
 	for (unsigned copy = 0; copy < f->tables; copy++) {
 		uint64_t address = f->fat_offset + copy * f->table_bytes + offset;
 		if (f->variant == 12) {
-			CHECK(pread(f->fd, bytes, 2, (off_t)address) == 2);
+			if (f->memory != NULL)
+				bcopy(f->memory + address, bytes, 2);
+			else
+				CHECK(pread(f->fd, bytes, 2, (off_t)address) == 2);
 			packed = (uint16_t)(bytes[0] + 256 * bytes[1]);
 			if ((cluster & 1) != 0)
 				packed = (uint16_t)((packed & 15) | (value << 4));
@@ -243,6 +258,7 @@ image_read(void *argument, uint64_t offset, void *buffer, size_t length,
 	ssize_t count;
 	bool fail;
 
+	CHECK(offset <= f->bytes && length <= f->bytes - offset);
 	f->calls++;
 	if (offset >= f->data_offset && offset != f->root_offset &&
 	    offset != cluster_offset(f, 7))
@@ -252,7 +268,15 @@ image_read(void *argument, uint64_t offset, void *buffer, size_t length,
 		length = (size_t)f->short_bytes;
 	if (fail && length > 7)
 		length = 7;
-	count = pread(f->fd, buffer, length, (off_t)offset);
+	if (f->memory != NULL) {
+		bzero(buffer, length);
+		if (offset < f->stored)
+			bcopy(f->memory + offset, buffer,
+			    length < f->stored - offset ? length :
+			    f->stored - (size_t)offset);
+		count = (ssize_t)length;
+	} else
+		count = pread(f->fd, buffer, length, (off_t)offset);
 	*transferred = count > 0 ? (size_t)count : 0;
 	if (fail || count < 0)
 		return (fsimg_error_set(error, FSIMG_EIO, EIO,
@@ -278,6 +302,18 @@ static void
 fixture_layout(fixture_t *f, unsigned variant, unsigned sector_bytes,
     unsigned sectors_per_cluster, unsigned tables)
 {
+	fixture_build(f, variant, sector_bytes, sectors_per_cluster, tables,
+	    false, 0, 0);
+}
+
+/* Memory fixtures retain metadata and the first ten clusters; the unused
+ * free tail is implicitly zero, independent of the declared volume size.
+ */
+static void
+fixture_build(fixture_t *f, unsigned variant, unsigned sector_bytes,
+    unsigned sectors_per_cluster, unsigned tables, bool memory,
+    uint32_t clusters, uint32_t total_sectors)
+{
 	unsigned char boot[512], root[512], directory[512], data[512], info[512];
 	uint32_t sectors, reserved, table_sectors, root_sectors, file_clusters;
 	char name[] = "fat-image-XXXXXX";
@@ -287,6 +323,8 @@ fixture_layout(fixture_t *f, unsigned variant, unsigned sector_bytes,
 	f->sector_bytes = sector_bytes;
 	f->cluster_bytes = sector_bytes * sectors_per_cluster;
 	f->clusters = variant == 12 ? 3000 : variant == 16 ? 5000 : 70000;
+	if (clusters != 0)
+		f->clusters = clusters;
 	f->eoc = variant == 12 ? 0xfff : variant == 16 ? 0xffff : 0x0fffffff;
 	reserved = variant == 32 ? 32 : 1;
 	table_sectors = ((f->clusters + 2) * variant + 8 * sector_bytes - 1) /
@@ -295,15 +333,24 @@ fixture_layout(fixture_t *f, unsigned variant, unsigned sector_bytes,
 	f->tables = tables;
 	sectors = reserved + tables * table_sectors + root_sectors +
 	    f->clusters * sectors_per_cluster;
+	if (total_sectors != 0)
+		sectors = total_sectors;
 	f->bytes = (uint64_t)sectors * sector_bytes;
 	f->fat_offset = (uint64_t)reserved * sector_bytes;
 	f->table_bytes = (uint64_t)table_sectors * sector_bytes;
 	f->data_offset = (reserved + tables * (uint64_t)table_sectors + root_sectors) * sector_bytes;
 	f->root_offset = variant == 32 ? f->data_offset :
 	    f->fat_offset + tables * f->table_bytes;
-	f->fd = mkstemp(name);
-	CHECK(f->fd != -1 && unlink(name) == 0);
-	CHECK(ftruncate(f->fd, (off_t)f->bytes) == 0);
+	f->fd = -1;
+	if (memory) {
+		f->stored = (size_t)(f->data_offset + 10 * f->cluster_bytes);
+		f->memory = calloc(1, f->stored);
+		CHECK(f->memory != NULL);
+	} else {
+		f->fd = mkstemp(name);
+		CHECK(f->fd != -1 && unlink(name) == 0);
+		CHECK(ftruncate(f->fd, (off_t)f->bytes) == 0);
+	}
 
 	bzero(boot, sizeof(boot));
 	boot[0] = 0xeb;
@@ -437,7 +484,9 @@ fixture_close(fixture_t *f)
 		CHECK(stats.memory_bytes < 2048);
 		fsimg_ctx_free(f->ctx);
 	}
-	CHECK(close(f->fd) == 0);
+	if (f->fd != -1)
+		CHECK(close(f->fd) == 0);
+	free(f->memory);
 	CHECK(close(f->scratch) == 0);
 	CHECK(rmdir(f->directory) == 0);
 }
@@ -1346,6 +1395,7 @@ test_assumed_identity_still_validates_geometry(void)
 	fixture_t f;
 	fsimg_read_options_t options;
 	fsimg_error_t error;
+	fsimg_volume_info_t info;
 	unsigned char field[2];
 
 	fsimg_read_options_init(&options);
@@ -1368,7 +1418,9 @@ test_assumed_identity_still_validates_geometry(void)
 	write_bytes(&f, 19, field, sizeof(field));
 	fixture_open(&f);
 	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader, &error) ==
-	    FSIMG_ECORRUPT);
+	    FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.missing_bytes == f.sector_bytes);
 	fixture_close(&f);
 }
 
@@ -1647,10 +1699,11 @@ test_unsigned_media_mismatch_is_not_fat(void)
 
 /* The media echo identifies FAT before geometry validation. */
 static void
-test_identified_unsigned_geometry_is_corruption(void)
+test_identified_unsigned_missing_tail_opens(void)
 {
 	fixture_t f;
 	fsimg_error_t error;
+	fsimg_volume_info_t info;
 	unsigned char total_sectors[2];
 	static const unsigned char unsigned_jump[3] = { 0x60, 0x38, 0x00 };
 	static const unsigned char no_signature[2] = { 0, 0 };
@@ -1666,7 +1719,9 @@ test_identified_unsigned_geometry_is_corruption(void)
 		}
 		fixture_open(&f);
 		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) ==
-		    FSIMG_ECORRUPT);
+		    FSIMG_OK);
+		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+		CHECK(info.missing_bytes == f.sector_bytes);
 		fixture_close(&f);
 	}
 }
@@ -2096,7 +2151,7 @@ test_host_change(void)
 	char path[32];
 	int readonly, output;
 
-	for (unsigned scenario = 0; scenario < 2; scenario++) {
+	for (unsigned scenario = 0; scenario < 3; scenario++) {
 		fixture_init(&f, 16);
 		fixture_open(&f);
 		strcpy(path, "fat-host-XXXXXX");
@@ -2112,12 +2167,18 @@ test_host_change(void)
 		CHECK(readonly != -1 && unlink(path) == 0);
 		CHECK(fsimg_io_from_fd(f.ctx, readonly, FSIMG_IO_READ, &host, NULL) == FSIMG_OK);
 		CHECK(fsimg_reader_open(f.ctx, host, NULL, &f.reader, NULL) == FSIMG_OK);
-		if (scenario == 1) {
+		if (scenario != 0) {
 			CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 			CHECK(fsimg_reader_next_range(f.reader, 0, &range, NULL) == FSIMG_OK);
 		}
 
-		CHECK(pwrite(output, "X", 1, (off_t)cluster_offset(&f, 3)) == 1);
+		if (scenario == 2) {
+			CHECK(ftruncate(output, (off_t)f.data_offset) == 0);
+			CHECK(fsimg_reader_bytes(f.reader, f.bytes + 1, &byte, 1,
+			    &count, NULL) == FSIMG_ESOURCE_CHANGED);
+			CHECK(count == 0);
+		} else
+			CHECK(pwrite(output, "X", 1, (off_t)cluster_offset(&f, 3)) == 1);
 		/* Make the metadata change visible even on coarse timestamp clocks. */
 		{
 			const struct timespec changed[2] = {
@@ -2126,7 +2187,9 @@ test_host_change(void)
 
 			CHECK(futimens(output, changed) == 0);
 		}
-		if (scenario == 0)
+		if (scenario == 2)
+			CHECK(fsimg_reader_read_at(f.reader, 0, &byte, 1, &count, NULL) == FSIMG_ESOURCE_CHANGED);
+		else if (scenario == 0)
 			CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_ESOURCE_CHANGED);
 		else
 			CHECK(fsimg_reader_next_range(f.reader, 0, &range, NULL) == FSIMG_ESOURCE_CHANGED);
@@ -2582,8 +2645,17 @@ test_slices(void)
 	f.reader = NULL;
 
 	CHECK(fsimg_io_slice(slice, 0, old_length - 1, &short_slice, NULL) == FSIMG_OK);
-	CHECK(fsimg_reader_open(f.ctx, short_slice, NULL, &other, NULL) == FSIMG_ECORRUPT);
-	CHECK(other == NULL);
+	CHECK(fsimg_reader_open(f.ctx, short_slice, NULL, &other, NULL) == FSIMG_OK);
+	{
+		fsimg_volume_info_t info;
+
+		CHECK(fsimg_reader_get_info(other, &info, NULL) == FSIMG_OK);
+		CHECK(info.volume_bytes == old_length && info.missing_bytes == 1);
+	}
+	CHECK(fsimg_verify(other, 0, &report, NULL) == FSIMG_ECORRUPT);
+	CHECK(!report.complete);
+	fsimg_reader_free(other);
+	other = NULL;
 	fsimg_io_free(short_slice);
 	CHECK(fsimg_reader_open(f.ctx, nested, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_open(f.ctx, nested, NULL, &other, NULL) == FSIMG_OK);
@@ -3304,32 +3376,717 @@ test_fragmented_verify(void)
 	CHECK(metadata_calls[0] == metadata_calls[1]);
 }
 
-static void test_fat_assumed_identity_rejects_short_volumes(void);
+static void
+truncated_fixture(fixture_t *f, unsigned variant)
+{
+	const unsigned sector_bytes = 512, tables = 2;
+	const unsigned sectors_per_cluster = variant == 16 ? 8 : 1;
+	const bool memory_backing = true;
+	/* FAT16 exceeds 65535 sectors; the other variants use builder defaults. */
+	const uint32_t clusters = variant == 16 ? 33243 : 0;
+	const uint32_t total_sectors = variant == 16 ? 266240 : 0;
+
+	fixture_build(f, variant, sector_bytes, sectors_per_cluster, tables,
+	    memory_backing, clusters, total_sectors);
+}
 
 static void
-test_fat_assumed_identity_rejects_short_volumes(void)
+truncated_open(fixture_t *f)
+{
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+
+	status = fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "FAT%u slice=%" PRIu64 ": %s (%s)\n",
+		    f->variant, f->bytes, fsimg_status_string(status), error.message);
+	CHECK(status == FSIMG_OK);
+}
+
+static void
+check_truncated_verify(fixture_t *f, uint64_t missing)
+{
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	uint64_t calls;
+	char decimal[32];
+
+	CHECK(snprintf(decimal, sizeof(decimal), "%" PRIu64, missing) > 0);
+	for (unsigned payload = 0; payload < 2; payload++) {
+		fsimg_reader_free(f->reader);
+		f->reader = NULL;
+		truncated_open(f);
+		calls = f->calls;
+		bzero(&error, sizeof(error));
+		CHECK(fsimg_verify(f->reader, payload ? FSIMG_VERIFY_PAYLOAD : 0,
+		    &report, &error) == FSIMG_ECORRUPT);
+		CHECK(strstr(error.message, "truncated") != NULL);
+		CHECK(strstr(error.message, decimal) != NULL);
+		CHECK(!report.complete && report.files == 0 && report.directories == 0);
+		CHECK(report.payload_bytes_read == 0 && f->calls == calls);
+	}
+}
+
+static void
+check_truncated_extract(fixture_t *f)
+{
+	unsigned char bytes[1101];
+	ssize_t count;
+	int fd;
+
+	CHECK(fsimg_extract_at(f->reader, f->scratch, "output", NULL, NULL) == FSIMG_OK);
+	fd = openat(f->scratch, "output/HELLO.TXT", O_RDONLY | O_NOFOLLOW);
+	CHECK(fd != -1);
+	count = read(fd, bytes, sizeof(bytes));
+	CHECK(count == 1100);
+	for (unsigned i = 0; i < 1100; i++)
+		CHECK(bytes[i] == (unsigned char)(i * 37));
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(f->scratch, "output/HELLO.TXT", 0) == 0);
+	CHECK(unlinkat(f->scratch, "output/SUB/EMPTY", 0) == 0);
+	CHECK(unlinkat(f->scratch, "output/SUB", AT_REMOVEDIR) == 0);
+	CHECK(unlinkat(f->scratch, "output", AT_REMOVEDIR) == 0);
+}
+
+static void
+check_truncated_tail(fixture_t *f, uint64_t declared)
+{
+	fsimg_volume_info_t info;
+
+	fixture_open(f);
+	truncated_open(f);
+	CHECK(fsimg_reader_get_info(f->reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.volume_bytes == declared);
+	CHECK(info.missing_bytes == declared - f->bytes);
+	{
+		fat_geometry_t geometry;
+
+		CHECK(fsimg_fat_geometry_decode(f->memory, 512, f->bytes,
+		    &geometry, NULL) == FSIMG_OK);
+		CHECK(geometry.variant == f->variant && geometry.clusters == f->clusters);
+		CHECK(geometry.volume_bytes == declared);
+	}
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+	check_fixture_listing(f, "truncated free tail");
+	truncated_open(f);
+	check_truncated_extract(f);
+	check_truncated_verify(f, declared - f->bytes);
+}
+
+static void
+test_truncated_tail(unsigned variant)
 {
 	fixture_t f;
-	fsimg_io_t *volume;
-	uint64_t lengths[2];
+	uint64_t declared;
+	const uint32_t first_free_cluster = variant == 16 ? 8 : 10;
 
-	check_force_short_volumes("fat12", 8192);
-	fixture_init(&f, 12);
+	truncated_fixture(&f, variant);
+	declared = f.bytes;
+	if (variant == 16)
+		CHECK(declared == UINT64_C(136314880));
+	f.bytes = cluster_offset(&f, first_free_cluster);
+	check_truncated_tail(&f, declared);
+	fixture_close(&f);
+}
+
+static void
+test_truncated_file_slack(void)
+{
+	fixture_t f;
+	uint64_t declared;
+
+	truncated_fixture(&f, 12);
+	declared = f.bytes;
+	/* Only the last cluster's unused slack is missing. */
+	set_cluster(&f, 3, 5);
+	set_cluster(&f, 5, 9);
+	set_cluster(&f, 9, f.eoc);
+	for (unsigned i = 0; i < 512; i++)
+		f.memory[cluster_offset(&f, 5) + i] = (unsigned char)((512 + i) * 37);
+	for (unsigned i = 0; i < 76; i++)
+		f.memory[cluster_offset(&f, 9) + i] = (unsigned char)((1024 + i) * 37);
+	f.bytes = cluster_offset(&f, 9) + 76;
+	check_truncated_tail(&f, declared);
+	fixture_close(&f);
+}
+
+static void
+test_truncated_file_reference(void)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	unsigned char bytes[1100];
+	size_t count;
+
+	truncated_fixture(&f, 12);
+	f.bytes = cluster_offset(&f, 9);
 	fixture_open(&f);
-	lengths[0] = f.bytes / 2;
-	lengths[1] = 512 + 1;
-	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
-		CHECK(fsimg_io_slice(f.io, 0, lengths[i], &volume, NULL) ==
-		    FSIMG_OK);
-		check_force_truncated_volume(f.ctx, volume, "fat12");
-		fsimg_io_free(volume);
+	check_fixture_listing(&f, "missing file payload does not affect listing");
+	truncated_open(&f);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/HELLO.TXT") == 0);
+	CHECK(fsimg_reader_read_at(f.reader, 0, bytes, sizeof(bytes),
+	    &count, &error) == FSIMG_ECORRUPT);
+	CHECK(count < sizeof(bytes));
+	CHECK(strstr(error.message, "truncated") != NULL);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+	truncated_open(&f);
+	CHECK(fsimg_extract_at(f.reader, f.scratch, "output", NULL,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	if (unlinkat(f.scratch, "output/HELLO.TXT", 0) != 0)
+		CHECK(errno == ENOENT);
+	CHECK(unlinkat(f.scratch, "output", AT_REMOVEDIR) == 0);
+	fixture_close(&f);
+}
+
+static void
+test_truncated_directory_reference(void)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+
+	truncated_fixture(&f, 12);
+	short_entry(f.memory + f.root_offset + 32, "SUB        ", true, 11, 0);
+	set_cluster(&f, 11, f.eoc);
+	f.bytes = cluster_offset(&f, 10);
+	fixture_open(&f);
+	truncated_open(&f);
+	do {
+		status = fsimg_reader_next(f.reader, &entry, &error);
+	} while (status == FSIMG_OK);
+	CHECK(status == FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	fixture_close(&f);
+}
+
+typedef enum open_mode { DETECT, NAMED, ASSUMED } open_mode_t;
+typedef enum metadata_boundary {
+	FIRST_TABLE, SECOND_TABLE, FIXED_ROOT, METADATA_END, DATA_START
+} metadata_boundary_t;
+typedef enum metadata_result { FAIL_OPEN, FAIL_WALK, OPEN_OK } metadata_result_t;
+typedef struct metadata_cut {
+	const char *name;
+	metadata_boundary_t boundary;
+	bool fixed_root_only;
+	bool fat32_only;
+	metadata_result_t result;
+} metadata_cut_t;
+
+static void
+check_metadata_cut(unsigned variant, const metadata_cut_t *cut, open_mode_t mode)
+{
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_volume_info_t info;
+	fsimg_status_t status, expected;
+	const fsimg_entry_t *entry;
+	const char *format, *mode_name;
+
+	truncated_fixture(&f, variant);
+	switch (cut->boundary) {
+	case FIRST_TABLE:
+		f.bytes = f.fat_offset + 1;
+		break;
+	case SECOND_TABLE:
+		f.bytes = f.fat_offset + f.table_bytes + 1;
+		break;
+	case FIXED_ROOT:
+		f.bytes = f.root_offset + 1;
+		break;
+	case METADATA_END:
+		f.bytes = f.data_offset - 1;
+		break;
+	case DATA_START:
+		f.bytes = f.data_offset;
+		break;
 	}
+	switch (variant) {
+	case 12: format = "fat12"; break;
+	case 16: format = "fat16"; break;
+	default: format = "fat32"; break;
+	}
+	switch (mode) {
+	case DETECT: mode_name = "detect"; break;
+	case NAMED: mode_name = "named"; break;
+	default: mode_name = "assumed"; break;
+	}
+	fixture_open(&f);
+	fsimg_read_options_init(&options);
+	if (mode != DETECT)
+		options.format = format;
+	if (mode == ASSUMED)
+		options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	status = fsimg_reader_open(f.ctx, f.io, &options, &f.reader, NULL);
+	expected = cut->result == FAIL_OPEN ? FSIMG_ECORRUPT : FSIMG_OK;
+	if (status != expected)
+		fprintf(stderr, "FAT%u cut=%s mode=%s open: expected %d, got %d\n",
+		    variant, cut->name, mode_name, expected, status);
+	CHECK(status == expected);
+	if (cut->result == FAIL_OPEN)
+		CHECK(f.reader == NULL);
+	else if (cut->result == FAIL_WALK) {
+		status = fsimg_reader_next(f.reader, &entry, NULL);
+		if (status != FSIMG_ECORRUPT)
+			fprintf(stderr, "FAT%u cut=%s mode=%s walk: expected %d, got %d\n",
+			    variant, cut->name, mode_name, FSIMG_ECORRUPT, status);
+		CHECK(status == FSIMG_ECORRUPT);
+	} else {
+		status = fsimg_reader_get_info(f.reader, &info, NULL);
+		if (status != FSIMG_OK)
+			fprintf(stderr, "FAT%u cut=%s mode=%s info: expected %d, got %d\n",
+			    variant, cut->name, mode_name, FSIMG_OK, status);
+		CHECK(status == FSIMG_OK);
+		if (info.missing_bytes != info.volume_bytes - f.bytes)
+			fprintf(stderr, "FAT%u cut=%s mode=%s missing bytes: expected %" PRIu64 ", got %" PRIu64 "\n",
+			    variant, cut->name, mode_name,
+			    info.volume_bytes - f.bytes, info.missing_bytes);
+		CHECK(info.missing_bytes == info.volume_bytes - f.bytes);
+	}
+	fixture_close(&f);
+}
+
+static void
+test_truncated_metadata(void)
+{
+	const unsigned variants[] = {12, 16, 32};
+	const open_mode_t modes[] = {DETECT, NAMED, ASSUMED};
+	const metadata_cut_t cuts[] = {
+		{.name = "first table", .boundary = FIRST_TABLE, .result = FAIL_OPEN},
+		{.name = "second table", .boundary = SECOND_TABLE, .result = FAIL_OPEN},
+		{.name = "fixed root", .boundary = FIXED_ROOT,
+		 .fixed_root_only = true, .result = FAIL_OPEN},
+		{.name = "metadata end", .boundary = METADATA_END, .result = FAIL_OPEN},
+		{.name = "data start", .boundary = DATA_START,
+		 .fixed_root_only = true, .result = OPEN_OK},
+		{.name = "data start", .boundary = DATA_START,
+		 .fat32_only = true, .result = FAIL_WALK}
+	};
+
+	for (unsigned v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+		unsigned variant = variants[v];
+
+		for (unsigned c = 0; c < sizeof(cuts) / sizeof(cuts[0]); c++) {
+			const metadata_cut_t *cut = &cuts[c];
+
+			if ((cut->fixed_root_only && variant == 32) ||
+			    (cut->fat32_only && variant != 32))
+				continue;
+			for (unsigned m = 0; m < sizeof(modes) / sizeof(modes[0]); m++)
+				check_metadata_cut(variant, cut, modes[m]);
+		}
+	}
+}
+
+static void
+test_whole_and_longer_slices(void)
+{
+	fixture_t f;
+	fsimg_volume_info_t info;
+	uint64_t declared;
+
+	for (unsigned longer = 0; longer < 2; longer++) {
+		truncated_fixture(&f, 12);
+		declared = f.bytes;
+		f.bytes += longer * 123;
+		fixture_open(&f);
+		truncated_open(&f);
+		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+		CHECK(info.volume_bytes == declared && info.missing_bytes == 0);
+		for (unsigned payload = 0; payload < 2; payload++) {
+			fsimg_verify_report_t report;
+
+			CHECK(fsimg_verify(f.reader, payload ? FSIMG_VERIFY_PAYLOAD : 0,
+			    &report, NULL) == FSIMG_OK);
+			CHECK(report.complete);
+			fsimg_reader_free(f.reader);
+			f.reader = NULL;
+			truncated_open(&f);
+		}
+
+		fixture_close(&f);
+	}
+}
+
+static void
+test_reader_byte_bounds(void)
+{
+	fixture_t f;
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+	uint64_t calls;
+	unsigned char bytes[2];
+	size_t count;
+
+	truncated_fixture(&f, 12);
+	fixture_open(&f);
+	truncated_open(&f);
+	for (unsigned overflow = 0; overflow < 2; overflow++) {
+		calls = f.calls;
+		bytes[0] = bytes[1] = 0xa5;
+		count = 99;
+		status = fsimg_reader_bytes(f.reader,
+		    overflow ? UINT64_MAX : f.bytes - 1, bytes,
+		    sizeof(bytes), &count, &error);
+		if (status != FSIMG_ECORRUPT)
+			fprintf(stderr, "read beyond slice: %s (%s), count=%zu\n",
+			    fsimg_status_string(status), error.message, count);
+		CHECK(status == FSIMG_ECORRUPT);
+		CHECK(strcmp(error.message, "image is truncated") == 0);
+		CHECK(count == 0 && f.calls == calls);
+		CHECK(bytes[0] == 0xa5 && bytes[1] == 0xa5);
+	}
+	fixture_close(&f);
+}
+
+typedef enum truncated_operation {
+	TRUNCATED_READ,
+	TRUNCATED_VERIFY,
+	TRUNCATED_VERIFY_PAYLOAD
+} truncated_operation_t;
+
+static bool
+truncated_status_allowed(fsimg_status_t status, uint64_t slice)
+{
+	return (status == FSIMG_OK || status == FSIMG_ECORRUPT ||
+	    (slice < 512 && status == FSIMG_EFORMAT));
+}
+
+static fsimg_status_t
+read_truncated_files(fsimg_reader_t *reader)
+{
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	unsigned char bytes[1100];
+	size_t count;
+
+	while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
+		if (entry->kind != FSIMG_ENTRY_FILE)
+			continue;
+		status = fsimg_reader_read_at(reader, 0, bytes, sizeof(bytes), &count, NULL);
+		CHECK(status == FSIMG_OK || status == FSIMG_ECORRUPT);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (status == FSIMG_DONE ? FSIMG_OK : status);
+}
+
+static void
+check_truncated_cut(fixture_t *f, uint64_t whole)
+{
+	const truncated_operation_t operations[] = {
+		TRUNCATED_READ, TRUNCATED_VERIFY, TRUNCATED_VERIFY_PAYLOAD
+	};
+	fsimg_verify_report_t report;
+	fsimg_status_t status;
+
+	fixture_open(f);
+	for (unsigned i = 0; i < sizeof(operations) / sizeof(operations[0]); i++) {
+		truncated_operation_t operation = operations[i];
+
+		status = fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL);
+		if (f->bytes == whole)
+			CHECK(status == FSIMG_OK);
+		if (status == FSIMG_OK) {
+			if (operation == TRUNCATED_READ)
+				status = read_truncated_files(f->reader);
+			else {
+				status = fsimg_verify(f->reader,
+				    operation == TRUNCATED_VERIFY_PAYLOAD ? FSIMG_VERIFY_PAYLOAD : 0,
+				    &report, NULL);
+				CHECK(status == (f->bytes == whole ? FSIMG_OK : FSIMG_ECORRUPT));
+			}
+		}
+		if (!truncated_status_allowed(status, f->bytes))
+			fprintf(stderr, "FAT sweep cut=%" PRIu64 " operation=%u status=%d\n",
+			    f->bytes, operation, status);
+		CHECK(truncated_status_allowed(status, f->bytes));
+		fsimg_reader_free(f->reader);
+		f->reader = NULL;
+	}
+	fsimg_io_free(f->io);
+	f->io = NULL;
+	fsimg_ctx_free(f->ctx);
+	f->ctx = NULL;
+}
+
+static void
+test_truncated_sweep(void)
+{
+	fixture_t f;
+	uint64_t whole;
+
+	truncated_fixture(&f, 12);
+	whole = f.data_offset + 10 * f.cluster_bytes;
+	put16(f.memory + BPB_TOTAL_SECTORS16, (uint16_t)(whole / 512));
+	for (uint64_t cut = 0; cut <= whole; cut += 512) {
+		f.bytes = cut;
+		check_truncated_cut(&f, whole);
+		if (cut < whole) {
+			f.bytes = cut + 257;
+			check_truncated_cut(&f, whole);
+		}
+	}
+	fixture_close(&f);
+}
+
+static void
+huge_geometry_fixture(fixture_t *f, unsigned sectors_per_cluster)
+{
+	const unsigned variant = 32, sector_bytes = 512, tables = 2;
+	const uint32_t clusters = 70014; /* Full capacity of a 547-sector FAT32. */
+	const uint32_t default_total_sectors = 0;
+	const bool memory_backing = true;
+
+	fixture_build(f, variant, sector_bytes, sectors_per_cluster, tables,
+	    memory_backing, clusters, default_total_sectors);
+}
+
+static void
+test_truncated_memory_cost_independent_of_declared_size(void)
+{
+	fixture_t f;
+	fsimg_stats_t stats[2];
+	fsimg_volume_info_t info;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	uint64_t declared[2];
+	const unsigned cluster_sectors[] = {1, 128};
+
+	/* Equal tables and cluster counts isolate the cost of the declared size. */
+	for (unsigned i = 0; i < 2; i++) {
+		huge_geometry_fixture(&f, cluster_sectors[i]);
+		declared[i] = f.bytes;
+		f.bytes = f.data_offset; /* Both tables present, all data omitted. */
+		CHECK(f.table_bytes == 547 * f.sector_bytes);
+		fixture_open(&f);
+		truncated_open(&f);
+		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+		CHECK(info.volume_bytes == declared[i]);
+		CHECK(info.missing_bytes == declared[i] - f.bytes);
+		/* Walking allocates the directory bitset before reading the root. */
+		CHECK(fsimg_reader_next(f.reader, &entry, &error) == FSIMG_ECORRUPT);
+		CHECK(strstr(error.message, "truncated") != NULL);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &stats[i], NULL) == FSIMG_OK);
+		check_force_truncated_volume(f.ctx, f.io, "fat32");
+		fixture_close(&f);
+	}
+	CHECK(declared[1] > UINT64_C(4000000000));
+	CHECK(stats[1].memory_peak <= stats[0].memory_peak);
+	CHECK(stats[1].scratch_peak <= stats[0].scratch_peak);
+}
+
+static void
+test_truncated_one_extra_cluster_refused(void)
+{
+	fixture_t f;
+	const unsigned cluster_sectors[] = {1, 128};
+	uint64_t declared;
+
+	for (unsigned i = 0; i < 2; i++) {
+		huge_geometry_fixture(&f, cluster_sectors[i]);
+		declared = f.bytes;
+		f.bytes = f.data_offset;
+		/* One more data cluster cannot fit in the allocation tables. */
+		put32(f.memory + BPB_TOTAL_SECTORS32,
+		    (uint32_t)(declared / f.sector_bytes) + cluster_sectors[i]);
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_ECORRUPT);
+		CHECK(f.reader == NULL);
+		fixture_close(&f);
+	}
+}
+
+static void
+test_truncated_absent_tables_refused(void)
+{
+	fixture_t f;
+	const unsigned cluster_sectors[] = {1, 128};
+	const uint32_t declared_table_sectors = 32768;
+
+	for (unsigned i = 0; i < 2; i++) {
+		huge_geometry_fixture(&f, cluster_sectors[i]);
+		/* An enormous declaration does not excuse absent tables. */
+		f.bytes = f.sector_bytes;
+		put32(f.memory + BPB_TOTAL_SECTORS32, UINT32_MAX - 1);
+		put32(f.memory + BPB_FAT_SECTORS32, declared_table_sectors);
+		fixture_open(&f);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_ECORRUPT);
+		CHECK(f.reader == NULL);
+		fixture_close(&f);
+	}
+}
+
+static void
+test_truncated_assumed_identity_verify(void)
+{
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_error_t error = {0};
+
+	truncated_fixture(&f, 12);
+	fixture_assume_identity(&f);
+	f.bytes = cluster_offset(&f, 10);
+	fixture_open(&f);
+	fsimg_read_options_init(&options);
+	options.format = "fat12";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader, &error) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	if (strstr(error.message, "truncated") == NULL)
+		fprintf(stderr, "truncated assumed-identity verify: %s\n", error.message);
+	fixture_close(&f);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	CHECK(!report.complete);
+}
+
+static void
+test_truncated_extract_output_budget(void)
+{
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+	const uint32_t file_bytes = 3000000;
+	uint32_t file_clusters;
+
+	truncated_fixture(&f, 16);
+	short_entry(f.memory + f.root_offset, "A       BIN", false, 3, file_bytes);
+	file_clusters = (file_bytes + f.cluster_bytes - 1) / f.cluster_bytes;
+	for (uint32_t cluster = 3; cluster < 3 + file_clusters; cluster++)
+		set_cluster(&f, cluster, cluster + 1 < 3 + file_clusters ? cluster + 1 : f.eoc);
+	bzero(f.memory + f.root_offset + 32, 32);
+	f.bytes = 2000000;
+	fixture_open(&f);
+	truncated_open(&f);
+	fsimg_extract_options_init(&options);
+	options.max_output_bytes = f.bytes;
+	status = fsimg_extract_at(f.reader, f.scratch, "output", &options, &error);
+	if (status != FSIMG_ECORRUPT)
+		fprintf(stderr, "truncated extraction budget: %s (%s)\n",
+		    fsimg_status_string(status), error.message);
+	CHECK(unlinkat(f.scratch, "output", AT_REMOVEDIR) == 0);
+	fixture_close(&f);
+	CHECK(status == FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+}
+
+static void
+test_truncated_present_file_source_change_outranks_output_limit(void)
+{
+	fixture_t f;
+	fsimg_options_t options;
+	fsimg_volume_info_t info;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+	const uint64_t output_limit = 1000;
+	const struct timespec changed[2] = {
+		{ .tv_nsec = UTIME_OMIT }, { .tv_sec = 1 }
+	};
+	char path[] = "fat-charge-host-XXXXXX";
+	int output, readonly;
+
+	truncated_fixture(&f, 16);
+	f.bytes = cluster_offset(&f, 8);
+	output = mkstemp(path);
+	CHECK(output != -1);
+	CHECK(write(output, f.memory, (size_t)f.bytes) == (ssize_t)f.bytes);
+	readonly = open(path, O_RDONLY | O_CLOEXEC);
+	CHECK(readonly != -1 && unlink(path) == 0);
+	fsimg_options_init(&options);
+	options.scratch_directory_fd = f.scratch;
+	options.max_output_bytes = output_limit;
+	CHECK(fsimg_ctx_new(&options, &f.ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_io_from_fd(f.ctx, readonly, FSIMG_IO_READ, &f.io, NULL) == FSIMG_OK);
+	truncated_open(&f);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.missing_bytes > 0);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(entry->kind == FSIMG_ENTRY_FILE);
+	CHECK(strcmp(entry->path, "/HELLO.TXT") == 0);
+	CHECK(entry->size > output_limit);
+	CHECK(cluster_offset(&f, 3) + entry->size <= f.bytes);
+
+	/* Change the payload and force a distinct identity on coarse clocks. */
+	CHECK(pwrite(output, "X", 1, (off_t)cluster_offset(&f, 3)) == 1);
+	CHECK(futimens(output, changed) == 0);
+	status = fsimg_reader_charge_file(f.reader, &error);
+	if (status != FSIMG_ESOURCE_CHANGED)
+		fprintf(stderr, "truncated present file with changed host and small output budget: expected FSIMG_ESOURCE_CHANGED, got %s (%d): %s\n",
+		    fsimg_status_string(status), status, error.message);
+
+	fixture_close(&f);
+	CHECK(close(readonly) == 0 && close(output) == 0);
+	CHECK(status == FSIMG_ESOURCE_CHANGED);
+}
+
+/* Three 128 KiB files exceed the CLI's default budget for a 300000-byte slice.
+ * The first two are present; the third extends past the slice. Only metadata
+ * needs writing; the CLI fixture helper extends and truncates the slice.
+ */
+static void
+write_output_budget_seed(const char *path)
+{
+	fixture_t f;
+	const unsigned variant = 16, sector_bytes = 512, tables = 2;
+	const unsigned sectors_per_cluster = 1;
+	const bool memory_backing = true;
+	const uint32_t file_bytes = 128 * 1024;
+	const uint32_t default_clusters = 0, default_total_sectors = 0;
+	const char *names[] = {"A       BIN", "B       BIN", "C       BIN"};
+	uint32_t file_clusters, first;
+	int fd;
+
+	fixture_build(&f, variant, sector_bytes, sectors_per_cluster, tables,
+	    memory_backing, default_clusters, default_total_sectors);
+	file_clusters = file_bytes / f.cluster_bytes;
+	for (unsigned i = 0; i < 3; i++) {
+		first = 2 + i * file_clusters;
+		short_entry(f.memory + f.root_offset + i * 32, names[i], false,
+		    first, file_bytes);
+		for (uint32_t c = first; c < first + file_clusters; c++)
+			set_cluster(&f, c, c + 1 < first + file_clusters ? c + 1 : f.eoc);
+	}
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	CHECK(fd != -1);
+	CHECK(write(fd, f.memory, (size_t)f.data_offset) == (ssize_t)f.data_offset);
+	CHECK(close(fd) == 0);
+	fixture_close(&f);
+}
+
+static void
+write_truncated_seed(const char *path)
+{
+	fixture_t f;
+	int fd;
+
+	truncated_fixture(&f, 16);
+	f.bytes = cluster_offset(&f, 8);
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	CHECK(fd != -1);
+	CHECK(write(fd, f.memory, (size_t)f.bytes) == (ssize_t)f.bytes);
+	CHECK(close(fd) == 0);
 	fixture_close(&f);
 }
 
 int
 main(int argc, char **argv)
 {
+	if (argc == 3 && strcmp(argv[1], "--seed-output-budget") == 0) {
+		write_output_budget_seed(argv[2]);
+		return (0);
+	}
+	if (argc == 3 && strcmp(argv[1], "--seed-truncated") == 0) {
+		write_truncated_seed(argv[2]);
+		return (0);
+	}
 	/* Measurement records only on stdout; test/baseline.sh parses them. */
 	if (argc == 2 && strcmp(argv[1], "--baseline") == 0) {
 		baseline_fragmented();
@@ -3415,7 +4172,20 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
-	test_fat_assumed_identity_rejects_short_volumes();
+	check_force_short_volumes("fat12", 8192);
+	test_truncated_tail(16);
+	test_truncated_tail(12);
+	test_truncated_tail(32);
+	test_truncated_file_slack();
+	test_truncated_file_reference();
+	test_truncated_directory_reference();
+	test_truncated_metadata();
+	test_truncated_memory_cost_independent_of_declared_size();
+	test_truncated_one_extra_cluster_refused();
+	test_truncated_absent_tables_refused();
+	test_whole_and_longer_slices();
+	test_reader_byte_bounds();
+	test_truncated_sweep();
 	test_variants();
 	for (unsigned variant = 16; variant <= 32; variant += 16) {
 		test_dot_records_ntres_ignored(variant);
@@ -3455,7 +4225,7 @@ main(int argc, char **argv)
 	test_boot_voucher_is_the_signature_or_the_media_echo();
 	test_unvouched_oversized_regions_are_not_fat();
 	test_unsigned_media_mismatch_is_not_fat();
-	test_identified_unsigned_geometry_is_corruption();
+	test_identified_unsigned_missing_tail_opens();
 	test_media_check_precedes_mirror_comparison();
 	test_corruption();
 	test_limits();
@@ -3481,5 +4251,8 @@ main(int argc, char **argv)
 	test_report_outputs();
 	test_capability_bounds();
 	test_boot_label_without_root_label();
+	test_truncated_extract_output_budget();
+	test_truncated_assumed_identity_verify();
+	test_truncated_present_file_source_change_outranks_output_limit();
 	return (0);
 }

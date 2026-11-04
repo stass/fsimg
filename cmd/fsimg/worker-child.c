@@ -748,7 +748,7 @@ cat_job(worker_child_t *child, fsimg_error_t *error)
 	status = fsimg_selection_next(child->selector, &entry, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_session_charge(&child->reader->session, 0, entry->size, 1, error);
+	status = fsimg_reader_charge_file(child->reader, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = send_entry(entry, error);

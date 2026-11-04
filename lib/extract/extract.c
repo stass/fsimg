@@ -448,7 +448,7 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 	status = prepare_times(state, entry, times, &set_times, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_session_charge(&state->reader->session, 0, entry->size, 1, error);
+	status = fsimg_reader_charge_file(state->reader, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = fsimg_fd_reserve(ctx, error);

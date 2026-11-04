@@ -149,6 +149,11 @@ cluster bytes.
 .Pp
 .Fn fsimg_reader_get_info
 reports header scope, not complete filesystem verification.
+Its volume_bytes is the size the volume declares and missing_bytes the declared
+bytes past the end of the input, zero when the input holds them all; a read
+that needs a missing byte fails with FSIMG_ECORRUPT, and
+.Fn fsimg_verify
+fails with it whenever missing_bytes is nonzero.
 A format that records a mount point reports it in mountpoint, with
 FSIMG_VOLUME_MOUNTPOINT set in valid.
 Format-specific values follow in details, detail_count of at most

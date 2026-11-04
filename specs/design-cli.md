@@ -226,8 +226,9 @@ disk or the disk a container carries), `--partition`, or `--offset` and
 `--length`. Otherwise it is the syntax error
 `--force needs the volume's location: use -F fs/- or --partition`, and the
 worker's job decode refuses such a job too. `W` on a volume or layer whose
-identity was assumed fails, naming the assumed check; `t`, `x` and `i`
-proceed. When a read other than `W` fails because the identity of a
+identity was assumed fails, naming the assumed check; a truncated volume whose
+own identity was assumed reports the truncation first. `t`, `x` and `i` proceed.
+When a read other than `W` fails because the identity of a
 filesystem `-F` names is absent, the error ends with the command that reads
 it: `; use -F fat12/- --force to read it as fat12 anyway` when the scheme is
 left to detection or forced empty,
@@ -868,10 +869,11 @@ name (GPT) or type byte and active flag (MBR), offset, length, the
 filesystem claim and format, and whether it is selected. Filesystem geometry
 in an info record is descriptor-declared and may exceed the available
 selected input on a truncated image; it does not change the selected I/O
-range or output ceilings. A creation whose
-stack names a scheme reports the planned disk the same way before its plan
-record: a stack record and the volume's partition record, with every
-identifier the plan derived. A verify record
+range or output ceilings. `missing_bytes` says how far it exceeds the input,
+zero for a whole volume, and the text form shows it only when nonzero. A
+creation whose stack names a scheme reports the planned disk the same way
+before its plan record: a stack record and the volume's partition record, with
+every identifier the plan derived. A verify record
 also names the verified scheme, the partitions whose bounds it checked and
 the selected slot, each null when the selection read no table. Byte
 quantities, counts, Unix seconds and nanosecond precision are decimal

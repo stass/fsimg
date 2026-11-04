@@ -682,7 +682,7 @@ the expectations their rules derive.
 | `fat.bpb.root_entries.aligned` | On FAT12/16, the root region fills whole sectors | advisory (`must_accept`) | Accepted by `info`; the root region is rounded up |
 | `fat.geometry.regions` | The total sector count includes the reserved area, the FATs and the root region | normative | `info`: `ECORRUPT` |
 | `fat.geometry.data_region` | Where the regions fit, at least one data cluster follows them | profile | `info`: `ECORRUPT` |
-| `fat.geometry.within_image` | The declared volume fits within the image or slice | normative | `info`: `ECORRUPT` |
+| `fat.geometry.within_image` | The reserved area, the FATs and the fixed root end within the image or slice | profile | `info`: `ECORRUPT` |
 | `fat.geometry.fat_capacity` | Each FAT holds `CountOfClusters + 2` entries | normative | `info`: `ECORRUPT` |
 | `fat.geometry.max_cluster` | The largest cluster number stays below the bad-cluster marker | normative (`safety_only`) | `info`: `ECORRUPT` on its one witness, which also exceeds the image and its FAT |
 | `fat.geometry.forced_variant` | A format forced with `-F` matches the variant the cluster count selects | profile | `info`: `EFORMAT` on a mismatch; a matching `-F` is accepted |

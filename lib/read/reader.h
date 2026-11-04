@@ -166,6 +166,10 @@ fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
 fsimg_status_t fsimg_reader_set_link_target(fsimg_reader_t *,
     const void *, size_t, fsimg_error_t *);
 fsimg_status_t fsimg_reader_stable(fsimg_reader_t *, fsimg_error_t *);
+/* Charge the current file's declared size to the output budget before it is
+ * copied. A failure can leave the reader aborted, so the copy must not start.
+ */
+fsimg_status_t fsimg_reader_charge_file(fsimg_reader_t *, fsimg_error_t *);
 /* The one way a driver's open treats an identity check, the evidence that
  * the bytes are its format: when holds is false it fails with
  * FSIMG_ECORRUPT and the refusal message, unless the caller assumes the

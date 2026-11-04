@@ -1025,6 +1025,8 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, "null");
 		append(display, ",\"volume_bytes\":");
 		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_VOLUME));
+		append(display, ",\"missing_bytes\":");
+		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_MISSING));
 		append(display, ",\"allocation_units\":");
 		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_UNITS));
 		append(display, ",\"free_bytes\":");
@@ -1071,6 +1073,10 @@ volume(fsimg_cli_display_t *display, const unsigned char *raw)
 	}
 	append(display, "\nVolume size:  ");
 	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_VOLUME));
+	if (fsimg_load_le64(raw + FSIMG_WIRE_INFO_MISSING) != 0) {
+		append(display, "\nMissing:      ");
+		byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_MISSING));
+	}
 	append(display, "\nSector size:  ");
 	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_INFO_SECTOR));
 	append(display, format_counts_blocks((const char *)raw +

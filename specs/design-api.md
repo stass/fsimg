@@ -533,7 +533,10 @@ Opening performs bounded identification and geometry checks. The fixed-size
 volume information record exposes format/profile, geometry, label, capabilities,
 timestamp interpretation, and header-level validation scope, with validity bits
 for unknown totals. Querying it does not traverse directories or certify the
-whole volume; full verification has its own report.
+whole volume; full verification has its own report. `volume_bytes` is the
+size the volume declares and `missing_bytes` the
+[declared bytes past the input](architecture.md#byte-and-object-boundaries),
+zero when the input holds them all.
 
 Four fields of the record are sized by formats whose header carries more
 than a short label, and each changes the public record's layout, so

@@ -302,6 +302,27 @@ class TestFatRules < Minitest::Test
     end
   end
 
+  def test_metadata_must_fit_the_image_but_the_declared_tail_may_be_absent
+    with_cases do |cases|
+      %w[fat12 fat16 fat32].each do |variant|
+        base = witness("fat.valid.#{variant}")
+        layout = Fat::Builder::Layout.new(base.parameters)
+        data_offset = layout.first_data_sector * layout.bytes_per_sector
+        declared_bytes = layout.total_sectors * layout.bytes_per_sector
+        { data_offset - layout.bytes_per_sector => false, data_offset - 1 => false,
+          data_offset => true, declared_bytes - 1 => true }.each do |length, accepts|
+          changed = base.with(mutations: [FsimgSpec::Mutation::Truncate.new(length:)],
+                              intended: accepts ? nil : "fat.geometry.within_image")
+          classified = cases.call(changed)
+
+          assert_nil classified.defect, "#{variant}: #{length} bytes"
+          assert_equal accepts ? "accept" : "reject:FSIMG_ECORRUPT", classified.kase.expected.fetch("info").to_s,
+                       "#{variant}: #{length} bytes"
+        end
+      end
+    end
+  end
+
   # Boot code from before DOS 3.31 at offset 32 is ignored beside BPB_TotSec16,
   # even when those bytes would count far more sectors than the image.
   def test_fat12_boot_code_in_tot_sec32_breaks_only_the_advisory_rule

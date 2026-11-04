@@ -387,10 +387,12 @@ module FsimgSpec
         end
       }
 
+      # The data region starts after the reserved area, every FAT and the
+      # fixed root. Cut into that metadata by one byte and by one sector.
       WITHIN_IMAGE = lambda { |layouts|
         layout = layouts.fetch("fat12")
-        bytes = layout.total_sectors * layout.bytes_per_sector
-        [1, layout.bytes_per_sector, bytes - Model::BOOT_SECTOR_BYTES].map do |short|
+        bytes = layout.first_data_sector * layout.bytes_per_sector
+        [1, layout.bytes_per_sector].map do |short|
           Variation.new(label: "short_#{short}", base: "fat12", violates: true, mutations: [Mutation::Truncate.new(length: bytes - short)])
         end
       }

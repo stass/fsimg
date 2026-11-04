@@ -572,6 +572,47 @@ test_descriptors(void)
 }
 
 static void
+test_verify_missing_tail(void)
+{
+	image_t image = image_new();
+	const uint64_t lengths[] = {
+		BLOCKS * BLOCK, (BLOCKS + 1) * BLOCK,
+		(BLOCKS - 1) * BLOCK, BLOCKS * BLOCK - 17
+	};
+	fsimg_volume_info_t info;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	fixture_t f;
+	uint64_t missing, calls;
+	char decimal[32];
+
+	for (unsigned i = 0; i < 4; i++) {
+		image.length = lengths[i];
+		missing = image.length < BLOCKS * BLOCK ? BLOCKS * BLOCK - image.length : 0;
+		for (unsigned payload = 0; payload < 2; payload++) {
+			fixture_new(&f, &image, NULL);
+			CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+			CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+			CHECK(info.missing_bytes == missing);
+			calls = image.reads;
+			bzero(&error, sizeof(error));
+			CHECK(fsimg_verify(f.reader, payload ? FSIMG_VERIFY_PAYLOAD : 0,
+			    &report, &error) == (missing ? FSIMG_ECORRUPT : FSIMG_OK));
+			CHECK(report.complete == (missing == 0));
+			if (missing != 0) {
+				CHECK(snprintf(decimal, sizeof(decimal), "%" PRIu64, missing) > 0);
+				CHECK(strstr(error.message, "truncated") != NULL);
+				CHECK(strstr(error.message, decimal) != NULL);
+				CHECK(report.files == 0 && report.directories == 0);
+				CHECK(report.payload_bytes_read == 0 && image.reads == calls);
+			}
+			fixture_free(&f);
+		}
+	}
+	free(image.bytes);
+}
+
+static void
 test_geometry(void)
 {
 	image_t image = image_new();
@@ -583,12 +624,16 @@ test_geometry(void)
 	image.length += BLOCK;
 	expect(&image, FSIMG_OK, "longer slice");
 	CHECK(image.high_read <= BLOCKS * BLOCK);
+	fixture_new(&f, &image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.missing_bytes == 0);
+	fixture_free(&f);
 	image.length = (BLOCKS - 1) * BLOCK;
 	fixture_new(&f, &image, NULL);
 	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
 	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
-	CHECK(strcmp(info.details[8].name, "missing_blocks") == 0);
-	CHECK(info.details[8].value == 1);
+	CHECK(info.missing_bytes == BLOCK);
 	CHECK(walk(&f) == FSIMG_OK);
 	fixture_free(&f);
 	put32(file + DR_EXTENT, BLOCKS);
@@ -607,6 +652,11 @@ test_geometry(void)
 	p[VD_PATH_L] = 82;
 	image.length--;
 	expect(&image, FSIMG_OK, "partial unreferenced final block");
+	fixture_new(&f, &image, NULL);
+	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.missing_bytes == 1);
+	fixture_free(&f);
 	free(image.bytes);
 }
 
@@ -964,11 +1014,11 @@ test_info_metadata_views(void)
 	static const char *const details[] = {
 		"rockridge", "joliet_level", "enhanced", "descriptors",
 		"terminator_block", "root_block", "path_table_bytes",
-		"system_area_used", "missing_blocks", "boot_catalog_block",
+		"system_area_used", "boot_catalog_block",
 		"boot_entries", "boot_x86", "boot_efi"
 	};
 	static const uint64_t values[] = {
-		3, 0, 0, 1, 17, ROOT, 10, 0, 0, 0, 0, 0, 0
+		3, 0, 0, 1, 17, ROOT, 10, 0, 0, 0, 0, 0
 	};
 	typedef struct date_case {
 		unsigned char bytes[7];
@@ -1000,8 +1050,8 @@ test_info_metadata_views(void)
 	CHECK(info.time_basis == FSIMG_TIME_OFFSET);
 	CHECK(info.scope == FSIMG_VALIDATION_HEADER);
 	CHECK(info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
-	CHECK(info.detail_count == 13);
-	for (unsigned i = 0; i < 13; i++) {
+	CHECK(info.detail_count == 12);
+	for (unsigned i = 0; i < 12; i++) {
 		CHECK(strcmp(info.details[i].name, details[i]) == 0);
 		CHECK(info.details[i].value == values[i]);
 	}
@@ -1835,13 +1885,13 @@ boot_info(image_t *image, const char *name, uint64_t catalog,
 	fixture_new(&f, image, NULL);
 	CHECK(open_image(&f, FSIMG_ISO_VIEW_PRIMARY) == FSIMG_OK);
 	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
-	CHECK(info.detail_count == 13);
+	CHECK(info.detail_count == 12);
 	for (unsigned i = 0; i < 4; i++) {
-		if (strcmp(info.details[9 + i].name, names[i]) != 0 ||
-		    info.details[9 + i].value != values[i]) {
+		if (strcmp(info.details[8 + i].name, names[i]) != 0 ||
+		    info.details[8 + i].value != values[i]) {
 			fprintf(stderr, "%s: %s expected %" PRIu64
 			    ", observed %" PRIu64 "\n", name, names[i],
-			    values[i], info.details[9 + i].value);
+			    values[i], info.details[8 + i].value);
 			failures++;
 		}
 	}
@@ -5626,14 +5676,12 @@ test_verify_payload_reads_sections_once_per_offered_view(void)
 	/* Headers and all trees remain readable; the final section is absent. */
 	image.length = (DATA + 1) * BLOCK;
 	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, FSIMG_VERIFY_PAYLOAD,
-	    FSIMG_ECORRUPT, "extent is empty, misaligned or outside its allocation domain",
+	    FSIMG_ECORRUPT, "truncated",
 	    "section past readable image fails payload W");
-	/* Content-index construction rejects the absent section even without
-	 * payload verification, before fsimg_verify_payload runs.
-	 */
+	/* Full verification refuses the missing tail before walking. */
 	verify_expect(&image, FSIMG_ISO_VIEW_ROCKRIDGE, 0, FSIMG_ECORRUPT,
-	    "extent is empty, misaligned or outside its allocation domain",
-	    "content index rejects absent section without payload");
+	    "truncated",
+	    "missing section fails verification without payload");
 
 	free(image.bytes);
 }
@@ -6001,6 +6049,7 @@ main(int argc, char **argv)
 	test_descriptor_malformed_dates_read_absent_in_either_descriptor();
 	test_probe();
 	test_descriptors();
+	test_verify_missing_tail();
 	test_geometry();
 	test_records();
 	test_tree();

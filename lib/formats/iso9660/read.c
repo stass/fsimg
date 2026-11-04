@@ -92,8 +92,6 @@ report_details(const fsimg_iso9660_reader_t *iso, fsimg_volume_info_t *info)
 		{ "root_block", iso_hierarchy(iso)->root.extent },
 		{ "path_table_bytes", iso_hierarchy(iso)->path_table_bytes },
 		{ "system_area_used", iso->system_area_used ? 1 : 0 },
-		{ "missing_blocks", iso->primary.volume_space_size -
-		    iso->readable_blocks },
 		{ "boot_catalog_block", iso->boot.catalog_block },
 		{ "boot_entries", iso->boot.entry_count },
 		{ "boot_x86", boot_platform_count(&iso->boot, ISO_BOOT_X86) },

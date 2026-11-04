@@ -433,12 +433,13 @@ module FsimgSpec
           source: "specs/design-fat-reader.md#identification-and-geometry: a data region of at least one cluster"
         ),
         Rule.new(
-          id: "fat.geometry.within_image", category: "normative", policy: "must_reject", status: "FSIMG_ECORRUPT",
+          id: "fat.geometry.within_image", category: "profile", policy: "must_reject", status: "FSIMG_ECORRUPT",
           scopes: ["open"], applies_to: ALWAYS, domain: Witnesses::WITHIN_IMAGE,
           predicate: lambda { |model, _|
-            FsimgSpec.derive(model.geometry.total_sectors, model.geometry.bytes_per_sector) { _1 * _2 <= model.image_length }
+            FsimgSpec.derive(model.geometry.first_data_sector, model.geometry.bytes_per_sector) { _1 * _2 <= model.image_length }
           },
-          source: "#{cite("3.1", "BPB_TotSec16 and BPB_TotSec32")}: the count includes every sector of the volume"
+          source: "specs/design-fat-reader.md#identification-and-geometry and specs/architecture.md#byte-and-object-boundaries: " \
+                  "the reserved area, all FATs and the fixed root end within the image; the declared tail may be absent"
         ),
         Rule.new(
           id: "fat.geometry.fat_capacity", category: "normative", policy: "must_reject", status: "FSIMG_ECORRUPT",
