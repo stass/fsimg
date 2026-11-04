@@ -153,11 +153,14 @@ special cases rather than handling each case.
    into the strict run utility. Reachability is then one count comparison.
 8. **Comparators are proven against macOS.** The fold and decomposition
    tables are generated from pinned Unicode data and accepted only when an
-   exhaustive native observation agrees row for row. A writer whose order
+   exhaustive native observation agrees on every row it can observe, the
+   jointly constrained rows under their chain constraint. A writer whose order
    differs from macOS's would emit catalogs macOS cannot search.
 9. **Names are stored decomposed and displayed as macOS shows them.** `/` and
-   `:` are exchanged at the boundary, as macOS does. Namespace keys decompose
-   and fold, so every spelling selects the same entry.
+   `:`, and U+0000 and U+2400, are exchanged at the boundary, as macOS does.
+   Namespace keys decompose and fold, so every spelling selects the same
+   entry; a stored spelling the tables do not reproduce is refused, never
+   shown under a name that cannot select it.
 10. **Apple data is a marked loss, not a silent one.** One common bit marks
     entries whose resource fork or stored attributes are not delivered;
     extraction counts it under the existing loss policy. A full Apple data
@@ -198,7 +201,7 @@ stage that consumes it.
 | Index keys equal to their child's first key after native deletions; whether `fsck_hfs` accepts a one-record non-root index node, which greedy packing can produce and which gains a packer rule only if refused | E9, stage 9 | Verifier, writer packer |
 | Names and BSD information on volumes from Mac OS 9 and early Mac OS X | E10 | Reader tables, name rules |
 | Wrapper layout | E11 | Stage 10 |
-| `fsck_hfs` and macOS acceptance of fsimg's choices: `fsim`, the smallest volume, a one-node extents tree, the attributes tree choice, the private folders choice | Stage 9 | Writer registration |
+| `fsck_hfs` and macOS acceptance of fsimg's choices: `fsim`, the smallest volume, one-node extents and attributes trees, 4096-byte catalog nodes at every size, no private folders | Stage 9 | Writer registration |
 
 ## Work packages
 
@@ -259,7 +262,14 @@ Each experiment varies one property on disposable volumes:
   table digests, and for each evidence question either an answer with its
   capture or an open status naming the feature it blocks.
 * **Gate:** every evidence row is answered or explicitly open, and no open
-  row is needed by stages 3 to 7. E3 must be complete.
+  row is needed by stages 3 to 7. E3 must be complete. Two rows stay open
+  with an answer in the design rather than in evidence: the Unicode 2.1
+  spellings of a Mac OS 8.1 to 9 writer, for which no HFS Plus specimen
+  with non-ASCII names was found and which the reader refuses explicitly
+  as a name its tables do not reproduce; and hard-linked symbolic links,
+  which macOS does not create and which the indirect node's own kind
+  covers on synthetic fixtures. The archive.org images that E10 decodes
+  are for local testing only.
 
 ### 2. Design revision and tables
 
@@ -272,10 +282,14 @@ Each experiment varies one property on disposable volumes:
   `tools/gen-fat-tables.rb` does. Each exceptions row names its observation.
   `docs/references.md` records the inputs, digests and regeneration
   command.
-* **Gate:** the generated tables equal the E3 observation row for row on
-  both comparators, the NetBSD comparison's differences are each explained
-  in the research record, and the review subagent has checked the designs
-  against the record, the common contracts and the readability standard.
+* **Gate:** the generated tables pass the format design's
+  [observable-rows gate](../specs/design-hfsplus.md#unicode-tables-and-their-evidence)
+  against the E3 tables on both comparators: determined rows equal,
+  ambiguous rows satisfy the chain constraint, ignorable rows match, and
+  pair-only rows ascend within each surrogate group; the NetBSD
+  comparison's differences are each explained in the research record; and
+  the review subagent has checked the designs against the record, the
+  common contracts and the readability standard.
 
 ### 3. Reader: probe, open, trees, forks, catalog and names
 
@@ -483,7 +497,7 @@ once the verifier exists.
 
 ## Owner decisions
 
-The owner has settled all six:
+The owner has settled these:
 
 1. **Order.** Reader and verifier first; the writer registered after native
    qualification.
@@ -497,12 +511,29 @@ The owner has settled all six:
    identifier as a detail.
 6. **Reader registration before compression.** Stage 3 registers the reader,
    which refuses compressed files explicitly until stages 4 and 5.
+7. **U+2400 and U+0000.** The writer stores an input U+2400 as U+0000 and
+   the reader displays a stored U+0000 as U+2400, the exchange macOS makes
+   (E3), beside `:` and `/`.
+8. **Writer refusals.** The writer refuses, as invalid names, U+FFFE,
+   U+FFFF and surrogate encodings, which macOS stores as ASCII percent text
+   and fsimg never writes; a name holding the adjacent marks U+0306 U+0307
+   or U+0308 U+030D after decomposition, which `fsck_hfs -n` calls illegal;
+   and, on `hfsplus`, a name of ignorable units alone. The reader accepts
+   all of these as macOS stores them.
+9. **Unicode table gate.** The generated tables are compared with the E3
+   observation's observable rows under the format design's gate; the
+   unobservable rows keep the derivation rule, with NetBSD's table as the
+   witness.
+10. **Archival images.** The Internet Archive images of the Mac OS 8.1 to 9
+    and early Mac OS X era are used for local testing only: they stay
+    outside the repository, are never redistributed, and are cited by item
+    identifier.
 
 ## Risks
 
 * **Comparator exactness.** A fold or decomposition row that differs from
   macOS makes valid volumes fail as corrupt and writer catalogs unsearchable.
-  The exhaustive E3 observation and the row-for-row gate address it; a later
+  The exhaustive E3 observation and the observable-rows gate address it; a later
   macOS that changes its tables would be noticed by the integration script.
 * **HFS Plus support on macOS.** Current macOS still mounts HFS Plus read and
   write. If a future release drops write support, native qualification

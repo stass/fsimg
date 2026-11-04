@@ -111,8 +111,12 @@ next reads:
    the catalog comparator from the signature and `keyCompareType`; require
    `totalNodes * M` to equal the fork's `logicalSize`.
 6. **Journal.** With bit 13 set, read the 180-byte info block and the
-   44-byte header and apply the reader policy table. Record the journal's
-   block range and the info block's block for the root's format-owned files.
+   44-byte header and apply the reader policy table; on a wrapped volume
+   the header is sought at the offset from the embedded start and then
+   from the wrapper's start, as the format design's
+   [info block rule](design-hfsplus.md#journal-info-block) states. Record
+   the journal's block range and the info block's block for the root's
+   format-owned files.
 7. **Root.** Look up the thread `(2, "")` and require a folder thread with
    parent 1; look up the primary `(1, name)` it names and require a folder
    record with `folderID` 2. The name is the label; a name the
@@ -187,11 +191,12 @@ driver-private cache to keep coherent or to bound.
   follows, at each index node, the greatest index key not above the search
   key, requiring each child to be below `totalNodes`, of the expected kind,
   and of height exactly one less, so a descent ends within `treeDepth`
-  steps. Every catalog search uses the volume's comparator. A search for a
-  thread `(id, "")` or a folder's first child lands on the thread unless a
-  primary in that range has a name that folds to nothing, which the caller
-  then refuses as an equal key, so even a mistaken fold table cannot make
-  such a search return the wrong record unnoticed.
+  steps. Every catalog search uses the volume's comparator, under which an
+  empty name precedes every nonempty one, so a search for a thread
+  `(id, "")` lands on the thread even when a child's name folds to nothing;
+  the caller still requires the record it lands on to be the thread, so a
+  mistaken fold table cannot make such a search return the wrong record
+  unnoticed.
 * **The leaf cursor** advances through a leaf's records and then along
   `fLink`, requiring each next node to be a leaf whose `bLink` names the node
   just left. Its caller checks key order, which is what ends a scan on a
@@ -203,9 +208,12 @@ driver-private cache to keep coherent or to bound.
 ## Catalog records and links
 
 `hfsplus_record_validate()` checks a catalog record against the format
-design's record and flag tables and maps it to a kind with the kind table.
-`hfsplus_thread_lookup()` searches `(id, "")`, requires a thread whose type
-matches the expected kind, and returns its parent and name.
+design's record and flag tables; for a file record it runs
+`hfsplus_link_kind()` first and maps only a record that is neither stub to
+a kind with the kind table, because a stub's `fileMode` is not its kind:
+`0100000` on current macOS and 0 on the Mac OS X 10.0 and 10.1 discs (E4,
+E10). `hfsplus_thread_lookup()` searches `(id, "")`, requires a thread
+whose type matches the expected kind, and returns its parent and name.
 
 `hfsplus_link_kind()` applies the format design's
 [stub tests](design-hfsplus.md#file-hard-links) to a file record: a file
@@ -216,14 +224,18 @@ Finder codes looks the data folder up by one keyed search in the root and
 keeps its node ID and date in the reader state; a record without the codes
 costs nothing. On a volume without a data folder only the root's date can
 match, and a record that matches it is a stub whose indirect node
-`hfsplus_link_resolve()` then cannot find.
+`hfsplus_link_resolve()` then cannot find. The chain fields, the indirect
+node's reserved word and the stub's `ownerID` and `groupID`, are decoded
+as bytes and never read.
 
 `hfsplus_link_resolve()` turns a file stub into its indirect node: the
 stub's `special` must be nonzero and its forks empty; the indirect node is
 found by a keyed search for `iNode` followed by the decimal reference in
 the private data folder. It must be a file record that is not itself a
-stub, of kind regular file or symbolic link. A missing private folder or
-indirect node is `FSIMG_ECORRUPT`. A directory stub is an unsupported kind.
+stub, of kind regular file or symbolic link; the symbolic-link case has no
+native capture, since macOS makes no such link (E4), and is covered by the
+generator alone. A missing private folder or indirect node is
+`FSIMG_ECORRUPT`. A directory stub is an unsupported kind.
 
 The record-to-entry mapping fills the kind, the size (the data fork's
 `logicalSize`, or the compressed size), and the metadata: owner and mode
@@ -236,9 +248,8 @@ and `FSIMG_META_EXTRA_DATA` from the attribute scan and the resource fork.
 search for `(id, "", 0)` in the attributes tree and a cursor walk while
 `fileID` matches. It validates each record, reports whether any
 [stored attribute](design-hfsplus.md#stored-attributes-and-the-extra-data-mark)
-exists, which excludes a consumed `com.apple.decmpfs` and the format's own
-bookkeeping names, and returns the compression attribute's inline value
-when present. The scan runs only for a
+exists, which excludes only a consumed `com.apple.decmpfs`, and returns
+the compression attribute's inline value when present. The scan runs only for a
 record with flag `0x0004` or `ownerFlags` `0x20`; an object with no
 attributes costs nothing. A compression attribute held in a fork record,
 rather than inline, is `FSIMG_EUNSUPPORTED` until observed.
@@ -251,10 +262,12 @@ zlib streams use the common
 [allocation adapter](design-binary-primitives.md), so their state is charged
 to the same context. A compressed entry's content state holds the type, the
 uncompressed size, the resource fork's index for chunked types and the
-chunk table's location; the table entries of chunk `i` and its successor are
-read when chunk `i` is first needed, through a small window over the table,
-so the table is never held whole, and the chunk is checked against them and
-the fork. Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is
+chunk table's location, which for types 8 and 12 is the table end the
+fork's first word states, validated against the chunk count and the fork
+and never computed from the count; the table entries of chunk `i` and its
+successor are read when chunk `i` is first needed, through a small window
+over the table, so the table is never held whole, and the chunk is checked
+against them and the fork. Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is
 the window's current chunk, charges the bytes consumed and produced as
 work, and returns the decoded span. A codec error, a chunk that decodes to
 the wrong length, or one stored beyond the input bound is `FSIMG_ECORRUPT`.
@@ -280,7 +293,10 @@ by a validated node buffer.
    the previous one; a thread or an equal or smaller key is
    `FSIMG_ECORRUPT`. Key order is what ends a scan along a corrupt sibling
    chain.
-3. Validate each record and its name under the format design's name table.
+3. Validate each record and its name under the format design's name table,
+   which includes decomposing the stored units and requiring the result to
+   equal them; the decomposed units are what `keys` folds, so the check
+   costs no second pass.
    At the root, recognize the [format-owned children](design-hfsplus.md#private-directories-and-format-owned-files)
    by their exact stored units, validate them and count them, but do not
    admit them; record the private data folder's node ID when it is seen.
@@ -309,9 +325,10 @@ recorded (1), the four times as stored (16), and for a folder its
 bytes. The effective record is the indirect node's for a stub, so that is
 the record the leaf location names. `keys` emits one key, the
 [namespace key](design-hfsplus.md#namespace-keys); `key` maps a query
-component the same way, and one that is not valid UTF-8 or decomposes past
-255 units is `FSIMG_EINVAL`. The ambiguity text names sibling names that are
-equivalent under HFS Plus lookup, classified `FSIMG_ECORRUPT`.
+component the same way, after the `:` to `/` and U+2400 to U+0000
+exchanges, and one that is not valid UTF-8 or decomposes past 255 units is
+`FSIMG_EINVAL`. The ambiguity text names sibling names that are equivalent
+under HFS Plus lookup, classified `FSIMG_ECORRUPT`.
 
 `replay` re-validates the payload's ranges and fills the entry from it
 alone, so listing a directory reads no node twice. It builds nothing: the
@@ -400,7 +417,11 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    sequential pass in windows: a claimed clear bit and an allocated
    unclaimed bit are `FSIMG_ECORRUPT`; the padding bits must be zero; the
    clear bits must equal `freeBlocks` and set `FSIMG_VOLUME_FREE`.
-8. **Alternate header.** Compare the fields the format design names.
+8. **Alternate header.** Compare the fields the format design names: the
+   signature, version, `blockSize`, `totalBlocks` and the five fork-data
+   records. An alternate without a header signature, such as the zeroed
+   sectors of a specimen whose container dropped them (E10), fails here
+   and nowhere earlier.
 
 HFS Plus storage is exclusive: no two forks share a block, and a hard link
 shares an indirect node through the catalog, not extents. So the strict run
@@ -452,7 +473,9 @@ Planning runs a fixed sequence of passes over the frozen catalog:
 
 1. **Entries.** For each catalog ID in order: encode the name as the format
    design's [writer names](design-hfsplus.md#writer-names) rule states, or fail
-   with `FSIMG_EINVAL`; refuse the reserved root names; check kind and
+   with `FSIMG_EINVAL`, which covers the percent-text values, an
+   all-ignorable name on `hfsplus` and the two mark pairs `fsck_hfs`
+   refuses; refuse the reserved root names; check kind and
    metadata through the common policy, selecting owner, mode and times; count
    the entry into its parent's row; accumulate the data fork's blocks for
    every candidate block size, for the sizing search; and append two records
@@ -467,8 +490,8 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    recording each leaf's first key in the level-1 stream, then each level
    from the previous one, until one node remains. Node counts give the
    catalog's used nodes, and map nodes come from a fixed-point step on
-   `totalNodes`. The extents tree, and the attributes tree when the native
-   formatter makes one, is its header node. The node sizes are fixed, so
+   `totalNodes`. The extents tree and the attributes tree are each one
+   header node. The node sizes are fixed, so
    the node counts depend on the catalog alone and packing runs once; each
    candidate block size only rounds the three forks up to whole allocation
    blocks, a constant-time step.
@@ -480,7 +503,7 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    default order.
 5. **Layout.** Assign first blocks in the fixed order of the format design's
    [layout](design-hfsplus.md#layout): the bitmap at `r`, the extents tree,
-   the catalog tree, the attributes tree, then each file's and symbolic
+   the attributes tree, the catalog tree, then each file's and symbolic
    link's data fork in catalog ID order. The last block used is `A - 1`.
 6. **Summary.** Fill `fsimg_plan_info_t`: volume, metadata, allocated, free
    and initialized bytes, the 512-byte sector, the block size and `N` as
@@ -538,7 +561,7 @@ Reader:
 | Condition | Status |
 | --- | --- |
 | No identity signature; slice shorter than 1536 bytes; a forced variant that contradicts the signature | `FSIMG_EFORMAT` |
-| Signature-version pairing; volume bits outside the table, 29 or 30; tree parameters outside the table; catalog flags outside the table or `0x1000`; directory hard links; names with `:`, NUL, `.` or `..`; link targets above 1023 bytes or with NUL; compression types outside the table, inline sizes above 65536, compression attributes in fork records; a journal with transactions or on another device; an unobserved attribute record type | `FSIMG_EUNSUPPORTED` |
+| Signature-version pairing; volume bits outside the table, 29 or 30; tree parameters outside the table; catalog flags outside the table or `0x1000`; directory hard links; names with `:`, U+2400, `.` or `..`, or not their own decomposition; link targets above 1023 bytes or with NUL; compression types outside the table, inline sizes above 65536, compression attributes in fork records; a journal with transactions or on another device; an unobserved attribute record type | `FSIMG_EUNSUPPORTED` |
 | Geometry, header, fork, extent, overflow, node framing, key, order, separator, sibling, map, record, thread, kind, name encoding, count, link, attribute, compression, journal, wrapper or bitmap inconsistency | `FSIMG_ECORRUPT` |
 | Unrepresentable selection component | `FSIMG_EINVAL` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
@@ -547,7 +570,7 @@ Writer:
 
 | Condition | Status |
 | --- | --- |
-| Setting outside its rule; a name or label outside 1 to 255 units after encoding; equivalent siblings; a reserved root name | `FSIMG_EINVAL` |
+| Setting outside its rule; a name or label outside 1 to 255 units after encoding, invalid UTF-8 or a percent-text value, all-ignorable on `hfsplus`, or holding a mark pair `fsck_hfs` refuses; equivalent siblings; a reserved root name | `FSIMG_EINVAL` |
 | A file needing more than `2^32 - 1` blocks; a kind the profile lacks or a link target above 1023 bytes, from the common capability check; a time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
 | Content that does not fit the exact size or `2^32 - 1` blocks; a non-reproducible format time outside 1904 to 2040 | `FSIMG_ERANGE` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
@@ -571,10 +594,13 @@ every native capture found through `FSIMG_HFSPLUS_NATIVE`, using the
 manifest of names, sizes, modes, times and checksums each capture records.
 
 `test/hfsplus-unicode.c` checks the generated tables: the digest of each
-table's serialization equals the digest the research record pins from the
-native observation, and spot vectors cover each range rule. The macOS
-integration script repeats the observation on a fresh native volume and
-compares every row, so a host change is noticed.
+table's serialization equals the one `docs/references.md` records for the
+pinned inputs, and spot vectors cover each range rule, the exception rows,
+the all-ignorable name's rank and the two exchanges. The generator's check
+mode applies the format design's observable-rows gate to the E3 tables
+where `FSIMG_HFSPLUS_NATIVE` holds them, and the macOS integration script
+repeats the observation on a fresh native volume and runs the same gate,
+so a host change is noticed.
 
 `test/hfsplus-write.c` creates images through the public API and reads them
 back through its own independent checker, written from the format design
