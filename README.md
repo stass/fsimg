@@ -208,6 +208,7 @@ Standard input and decompression use a temporary spool, bounded by
 | QNX4 | Yes | QNX 6.5.0 `dinit` layout, including long names |
 | QNX ImageFS (IFS) | Yes | Either byte order; newly created bodies are nonbootable |
 | ISO 9660 | Yes | Rock Ridge, Joliet and primary views; levels 1 to 3, relocated deep trees, BIOS/EFI El Torito boot catalogs |
+| HFS Plus, HFSX | Read and extract | Uncompressed files; a compressed file or a volume in an HFS wrapper is reported as not supported |
 
 ISO creation writes Rock Ridge and Joliet together. `-o level=1|2|3`
 selects the primary hierarchy's interchange level, default 3. `-o
@@ -255,8 +256,8 @@ owner, mode or times.
 | Harman-Becker `hbcifs` | LZO1X ImageFS container | No |
 
 Run `fsimg --formats` for the capabilities in your build. Container support
-does not add support for the filesystem inside it: an HFS+ or APFS DMG, for
-example, cannot be listed or extracted.
+does not add support for the filesystem inside it: an APFS DMG, for example,
+cannot be listed or extracted.
 
 fsimg creates new images and reads existing ones; it does not edit or repair
 them in place. QNX support targets the layouts above, rather than every

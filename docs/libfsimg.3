@@ -38,6 +38,9 @@ lists
 The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT,
 classic QNX6 Power-Safe volumes in either byte order, QNX4 volumes, and
 nonbootable QNX ImageFS images in either byte order.
+It reads, and does not create, HFS Plus and HFSX volumes, reporting a
+transparently compressed file or a volume in a classic HFS wrapper as
+.Dv FSIMG_EUNSUPPORTED .
 A format without full verification has no verify capability, and
 .Fn fsimg_verify
 fails on it with

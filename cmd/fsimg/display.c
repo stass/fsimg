@@ -1035,7 +1035,8 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 static bool
 format_counts_blocks(const char *format)
 {
-	return (strcmp(format, "qnx4") == 0 || strcmp(format, "qnx6") == 0);
+	return (strcmp(format, "qnx4") == 0 || strcmp(format, "qnx6") == 0 ||
+	    strcmp(format, "hfsplus") == 0 || strcmp(format, "hfsx") == 0);
 }
 
 /* The volume's named details in the driver's order, values in decimal. */

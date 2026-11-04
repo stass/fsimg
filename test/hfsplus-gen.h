@@ -32,13 +32,62 @@ typedef struct gen_child {
 	uint32_t	 resource_extents;
 } gen_child_t;
 
+/* Explicit catalog objects. Zero parent means root; type is 1 or 2.
+ * Names are supplied in stored UTF-16 form. Content is really allocated;
+ * fragmented content uses one block per run with unused blocks between.
+ */
+typedef struct gen_object {
+	const uint16_t	*name;
+	size_t		 units;
+	uint32_t	 parent;
+	uint32_t	 id;
+	uint16_t	 type;
+	uint16_t	 flags;
+	uint16_t	 mode;
+	uint32_t	 dates[5];
+	uint32_t	 owner;
+	uint32_t	 group;
+	uint32_t	 special;
+	uint32_t	 reserved;
+	uint8_t		 admin_flags;
+	uint8_t		 owner_flags;
+	unsigned char	 finder[32];
+	const unsigned char *data;
+	const unsigned char *resource;
+	size_t		 data_size;
+	size_t		 resource_size;
+	bool		 fragmented;
+	bool		 omit_thread;
+} gen_object_t;
+
+typedef struct gen_attr_value {
+	uint32_t	 id;
+	uint32_t	 start;
+	uint32_t	 type;
+	const uint16_t	*name;
+	size_t		 units;
+	const unsigned char *value;
+	size_t		 size;
+	/* Optional raw fork/extents body, excluding type and reserved word. */
+	const unsigned char *body;
+	size_t		 body_size;
+} gen_attr_value_t;
+
 typedef struct gen_attribute {
 	uint32_t	 file_id;
 	uint32_t	 start_block;
 	uint16_t	 name;
 } gen_attribute_t;
 
+typedef struct gen_record gen_record_t;
+
 typedef struct gen_plan {
+	const gen_object_t *objects;
+	size_t		 object_count;
+	const gen_attr_value_t *values;
+	size_t		 value_count;
+	/* Called after sorting, before packing, for deliberately invalid records. */
+	void (*mutate_catalog)(gen_record_t *, size_t);
 	const gen_attribute_t *attribute_records;
 	size_t		 attribute_count;
 
@@ -58,6 +107,7 @@ typedef struct gen_plan {
 	bool		 catalog_overflow;
 	bool		 journal;
 	bool		 journal_file;
+	bool		 journal_info_file;
 	bool		 journal_little_endian;
 	uint32_t	 journal_flags;
 	uint64_t	 journal_size;
@@ -65,12 +115,12 @@ typedef struct gen_plan {
 	uint64_t	 journal_end;
 } gen_plan_t;
 
-typedef struct gen_record {
+struct gen_record {
 	unsigned char	 bytes[800];
 	size_t		 length;
 	size_t		 key_length;
 	uint64_t	 offset;
-} gen_record_t;
+};
 
 typedef struct gen_tree {
 	gen_record_t	*records;

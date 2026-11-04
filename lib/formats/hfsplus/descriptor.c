@@ -9,7 +9,6 @@
 #include "fsimg-endian.h"
 #include "hfsplus.h"
 
-#define HFSPLUS_LINK_TARGET_MAX		1023u
 #define HFSPLUS_LABEL_BYTES		510u	/* 255 UTF-16 units */
 #define HFSPLUS_BLOCK_MIN		512u
 
@@ -29,7 +28,9 @@ static fsimg_status_t hfsplus_probe(const unsigned char *, size_t, uint64_t,
 #define HFSPLUS_VARIANT_INFO(variant_name)				\
 	.name = (variant_name),						\
 	.entry_kinds = FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |	\
-	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO,			\
+	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO |			\
+	    FSIMG_ENTRY_CHAR_DEVICE | FSIMG_ENTRY_BLOCK_DEVICE |	\
+	    FSIMG_ENTRY_SOCKET,						\
 	.metadata_fields = FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
 	    FSIMG_META_ACCESSED | FSIMG_META_CHANGED |			\
 	    FSIMG_META_OWNER | FSIMG_META_MODE,				\

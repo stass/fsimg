@@ -16,6 +16,9 @@ evidence and provenance.
   common changes the format design lists: the `FSIMG_META_EXTRA_DATA` bit,
   the 765-byte label, decoded content spans and the imported LZFSE and LZVN
   decoders.
+* [High] **Contract profile and fuzz harness** (`test/driver-contracts.c`,
+  `fuzz/hfsplus.c`): plan stage 3. `check_registry` leaves `hfsplus` and `hfsx`
+  out of its coverage-profile rule until each has a profile.
 * [Medium] **Writer and native qualification** (`lib/formats/hfsplus/`,
   `tools/hfsplus/qualify.rb`): plan stages 8 and 9, with the seconds
   helper's origin and the `hfs` partition type default. The writer stays

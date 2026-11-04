@@ -336,7 +336,9 @@ by a validated node buffer.
    one parent only: a second parent, a cycle back to an ancestor, or a
    folder record reusing another folder's ID fails here with
    `FSIMG_ECORRUPT`. The namespace is a tree by construction and needs no
-   visited-folder set. The root's thread names parent 1 and the label.
+   visited-folder set. The parent and stored name it compares are the key of
+   the folder's own record, read at the leaf location its payload holds. The
+   root's thread names parent 1 and the label, which open has checked.
 2. Advance the cursor while the parent ID is `d`. Each record must be a file
    or folder primary, strictly ascending under the volume's comparator after
    the previous one; a thread or an equal or smaller key is
@@ -348,7 +350,10 @@ by a validated node buffer.
    costs no second pass.
    At the root, recognize the [format-owned children](design-hfsplus.md#private-directories-and-format-owned-files)
    by their exact stored units, from the one table in `hfsplus.h`, validate
-   them and count them, but do not admit them.
+   them and count them, but do not admit them. Open has already found
+   `.journal` and checked its fork, so on a journaled volume this step checks
+   `.journal_info_block`: its presence, and its one extent starting at the
+   header's block.
 4. Classify every other child with `hfsplus_link_kind()` and the kind
    table: a directory stub fails preparation with
    `FSIMG_EUNSUPPORTED`, so no child of the directory is exposed; a socket
@@ -397,7 +402,9 @@ walker advances; a sequential read advances one extent cursor and batches
 adjacent blocks, and a random offset costs one binary search. A compressed
 file's content is decoded spans from the decode window. An indirect node's
 fork is read for each stub that names it. `reader->initialized` is the
-entry's size; HFS Plus has no uninitialized tail.
+entry's size; HFS Plus has no uninitialized tail. A symbolic link's target
+is read once when its index is built, so a NUL byte fails the first read of
+the target; a listing, which reads no content, does not see it.
 
 ## Verification
 

@@ -47,6 +47,14 @@
 /* The most units one unit decomposes into. */
 #define HFSPLUS_UNIT_DECOMP_MAX		4u
 
+/* The longest symbolic-link target the reader holds evidence for. */
+#define HFSPLUS_LINK_TARGET_MAX		1023u
+
+/* The catalog flags and BSD owner flag the reader acts on. */
+#define HFSPLUS_FLAG_ATTRIBUTES		0x0004u
+#define HFSPLUS_FLAG_FOLDER_COUNT	0x0010u
+#define HFSPLUS_OWNER_COMPRESSED	0x20u
+
 /* Catalog record types, the first two bytes of a leaf record's data. */
 #define HFSPLUS_RECORD_FOLDER		1u
 #define HFSPLUS_RECORD_FILE		2u
@@ -566,6 +574,35 @@ typedef enum hfsplus_journal_state {
 	HFSPLUS_JOURNAL_UNINITIALIZED
 } hfsplus_journal_state_t;
 
+/* Bits of a child's flags byte. */
+#define HFSPLUS_CHILD_OWNER_MODE	0x01u	/* owner and mode are valid */
+#define HFSPLUS_CHILD_FOLDER_COUNT	0x02u	/* folder_count is recorded */
+#define HFSPLUS_CHILD_FLAGS		0x03u
+
+/* One admitted child, what its 64-byte prepared payload encodes (the driver
+ * design's Directories and names): everything replay delivers, without reading
+ * a node, and the location of the effective record, the indirect node's for a
+ * hard-link stub, for what must read it again.
+ */
+typedef struct hfsplus_child {
+	uint64_t		 size;
+	uint32_t		 id;		/* the effective record's node ID */
+	uint32_t		 leaf;		/* its leaf node */
+	uint32_t		 stub_id;	/* the stub's node ID, or zero */
+	uint32_t		 owner;
+	uint32_t		 group;
+	uint32_t		 special;	/* a device's dev_t, or zero */
+	uint32_t		 valence;	/* a folder's children */
+	uint32_t		 folder_count;	/* a folder's child folders */
+	hfsplus_dates_t		 dates;
+	fsimg_entry_kind_t	 kind;
+	uint16_t		 record;	/* the record's index in leaf */
+	uint16_t		 mode;		/* the permission bits */
+	uint8_t			 flags;		/* HFSPLUS_CHILD_* */
+	uint8_t			 compression;	/* the type, zero for none */
+	bool			 extra_data;
+} hfsplus_child_t;
+
 /* The driver's state behind fsimg_reader_t. */
 typedef struct fsimg_hfsplus_reader {
 	hfsplus_header_t	 header;
@@ -586,6 +623,19 @@ typedef struct fsimg_hfsplus_reader {
 	uint32_t		 journal_info_block;
 	uint32_t		 journal_start;
 	uint32_t		 journal_blocks;
+	/* The file hard-link data folder, looked up by the first record carrying
+	 * a stub's Finder codes. private_data_id and private_data_date are
+	 * meaningful under private_data_present.
+	 */
+	bool			 private_data_known;
+	bool			 private_data_present;
+	uint32_t		 private_data_id;
+	uint32_t		 private_data_date;
+	/* The entry replay made current, and its data fork's index, built on the
+	 * first resolve and released when the walker advances.
+	 */
+	hfsplus_child_t		 current;
+	fsimg_extent_index_t	*file;
 	/* The root's name by the display mapping, without a terminator when
 	 * label_valid: a refused name leaves it absent.
 	 */
@@ -658,6 +708,9 @@ fsimg_status_t hfsplus_node_read(hfsplus_tree_t *, uint32_t, unsigned char *,
 void hfsplus_node_record(const hfsplus_tree_t *, const unsigned char *,
     uint16_t, const unsigned char **, size_t *);
 
+/* Attribute keys in the tree's order, for a caller reading forward. */
+int hfsplus_akey_compare(const hfsplus_akey_t *, const hfsplus_akey_t *);
+
 /* hfsplus_cursor_init(cursor, tree, buffer) binds a cursor to a tree and a
  * buffer of its node size. It stands on nothing until a search.
  *
@@ -676,12 +729,18 @@ void hfsplus_node_record(const hfsplus_tree_t *, const unsigned char *,
  * lookup of exactly the stored units, for the format-owned files and threads:
  * *found says whether the record reached carries them. It reads into the
  * catalog's search buffer, from which *record borrows until the next search.
+ * hfsplus_catalog_locate() is that lookup through the caller's cursor, which
+ * then stands on the record for a caller that keeps its location.
  *
  * hfsplus_catalog_key_init(key, parent, name, units, error) and
  * hfsplus_attribute_key_init(key, file_id, start_block, name, units, error)
  * copy a stored name into a search key, so the name may then be overwritten.
  * name may be NULL with no units. A name over its tree's bound is
  * FSIMG_ECORRUPT and leaves the key untouched.
+ *
+ * hfsplus_cursor_seek(cursor, leaf, record, error) stands the cursor on a record
+ * by a location an earlier position gave: the leaf is read and validated again,
+ * and a record index past its last is FSIMG_ECORRUPT.
  *
  * hfsplus_cursor_next() moves to the next record, along fLink past a leaf's
  * last, requiring each next leaf's bLink to name the one left and refusing more
@@ -695,10 +754,14 @@ fsimg_status_t hfsplus_btree_find_equivalent(hfsplus_cursor_t *,
     const hfsplus_key_t *, bool *, fsimg_error_t *);
 fsimg_status_t hfsplus_catalog_find_exact(hfsplus_tree_t *,
     const hfsplus_key_t *, hfsplus_record_t *, bool *, fsimg_error_t *);
+fsimg_status_t hfsplus_catalog_locate(hfsplus_cursor_t *,
+    const hfsplus_key_t *, hfsplus_record_t *, bool *, fsimg_error_t *);
 fsimg_status_t hfsplus_catalog_key_init(hfsplus_key_t *, uint32_t,
     const unsigned char *, size_t, fsimg_error_t *);
 fsimg_status_t hfsplus_attribute_key_init(hfsplus_key_t *, uint32_t, uint32_t,
     const unsigned char *, size_t, fsimg_error_t *);
+fsimg_status_t hfsplus_cursor_seek(hfsplus_cursor_t *, uint32_t, uint16_t,
+    fsimg_error_t *);
 fsimg_status_t hfsplus_cursor_next(hfsplus_cursor_t *, fsimg_error_t *);
 fsimg_status_t hfsplus_cursor_record(const hfsplus_cursor_t *,
     hfsplus_record_t *, fsimg_error_t *);
@@ -712,5 +775,80 @@ fsimg_status_t hfsplus_cursor_record(const hfsplus_cursor_t *,
 fsimg_status_t hfsplus_volume_open(fsimg_reader_t *,
     const fsimg_format_variant_t *, fsimg_error_t *);
 fsimg_status_t hfsplus_journal_open(fsimg_reader_t *, fsimg_error_t *);
+
+/* What the stub tests decide of a file record. */
+typedef enum hfsplus_link {
+	HFSPLUS_LINK_NONE,
+	HFSPLUS_LINK_FILE,
+	HFSPLUS_LINK_DIRECTORY
+} hfsplus_link_t;
+
+/* A validated folder or file record: kind says which of the two records is
+ * meaningful, zero for a stub, whose fileMode is not its kind.
+ */
+typedef struct hfsplus_primary {
+	hfsplus_folder_t	 folder;
+	hfsplus_file_t		 file;
+	fsimg_entry_kind_t	 kind;
+	hfsplus_link_t		 link;
+} hfsplus_primary_t;
+
+/* Catalog records and links (catalog.c).
+ *
+ * hfsplus_record_validate() checks a primary record against the format design's
+ * record, flag and kind tables, a file record's stub tests first. A thread or a
+ * record of another type is FSIMG_ECORRUPT.
+ *
+ * hfsplus_link_resolve() turns a file stub into its indirect node by the keyed
+ * search for its name in the private data folder: primary then holds the indirect
+ * node's record and the cursor, which reads through the catalog's search buffer,
+ * stands on it. The node's own kind decides, a regular file or a symbolic link.
+ *
+ * hfsplus_thread_lookup() searches (id, "") through the cursor and requires a
+ * thread of the given type; *thread borrows its name from the cursor's buffer,
+ * on which the cursor stands.
+ *
+ * hfsplus_child_fill() maps a validated record, not a stub, to its child's
+ * kind, size, owner, mode and dates, the kind's rules checked; it sets the
+ * location and extra data to none.
+ */
+fsimg_status_t hfsplus_record_validate(fsimg_reader_t *,
+    const hfsplus_record_t *, hfsplus_primary_t *, fsimg_error_t *);
+/* The flag and kind tables for the root, which no other folder's rules fit: its
+ * ID is 2 and nothing lists it.
+ */
+fsimg_status_t hfsplus_root_validate(const hfsplus_folder_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_link_resolve(fsimg_reader_t *, hfsplus_primary_t *,
+    hfsplus_cursor_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_thread_lookup(hfsplus_cursor_t *, uint32_t, uint16_t,
+    hfsplus_thread_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_child_fill(const hfsplus_primary_t *, hfsplus_child_t *,
+    fsimg_error_t *);
+
+/* Attributes (attributes.c). hfsplus_attr_scan(reader, id, compressed, scan,
+ * error) validates the attribute records of one node ID. compressed says the
+ * object is a compressed file, whose com.apple.decmpfs is then its content, not
+ * a stored attribute: scan->stored reports the rest and scan->compression the
+ * attribute, whose header scan->cmpf holds. An attribute of that name held in
+ * a fork record is FSIMG_EUNSUPPORTED.
+ */
+typedef struct hfsplus_attr_scan {
+	hfsplus_cmpf_t	 cmpf;
+	bool		 stored;
+	bool		 compression;
+} hfsplus_attr_scan_t;
+
+fsimg_status_t hfsplus_attr_scan(fsimg_reader_t *, uint32_t, bool,
+    hfsplus_attr_scan_t *, fsimg_error_t *);
+
+/* The directory callbacks (directory.c). */
+fsimg_status_t hfsplus_prepare(fsimg_reader_t *, fsimg_directory_build_t *,
+    fsimg_error_t *);
+fsimg_status_t hfsplus_replay(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_error_t *);
+fsimg_status_t hfsplus_keys(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_directory_keys_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_key(fsimg_reader_t *, const char *, unsigned char *,
+    size_t *, fsimg_error_t *);
 
 #endif

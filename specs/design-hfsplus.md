@@ -1287,8 +1287,8 @@ and a wrapped volume with a never-initialized journal reads normally.
 | Journal | Unjournaled, or journaled with an empty or uninitialized local journal; on a wrapped volume, only an uninitialized one |
 | Wrapper | Read; outer volume not verified; an initialized journal inside it unsupported |
 
-The reader capability advertises files, directories, symbolic links and
-FIFOs; owner, mode and the created, modified, changed and accessed times in
+The reader capability advertises files, directories, symbolic links, FIFOs
+and the read-only socket and device kinds; owner, mode and the created, modified, changed and accessed times in
 whole UTC seconds; 255-unit names; a label of 255 UTF-16 units, so
 `max_label_bytes` is 510, which the volume information's 765-byte UTF-8
 label holds; a link-target limit

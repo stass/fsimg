@@ -20,13 +20,24 @@
 static fsimg_status_t hfsplus_open(fsimg_reader_t *,
     const fsimg_format_variant_t *, fsimg_error_t *);
 static void hfsplus_close(fsimg_reader_t *);
+static fsimg_status_t hfsplus_resolve(fsimg_reader_t *, uint64_t,
+    fsimg_extent_t *, fsimg_error_t *);
+static fsimg_status_t index_current(fsimg_reader_t *, fsimg_error_t *);
+static fsimg_status_t link_target_check(fsimg_reader_t *, fsimg_error_t *);
 static bool volume_clean(const fsimg_hfsplus_reader_t *);
 static void detail_add(fsimg_volume_info_t *, const char *, uint64_t);
 static void report_info(fsimg_reader_t *);
 
 const fsimg_reader_ops_t fsimg_hfsplus_reader_ops = {
 	.open = hfsplus_open,
-	.close = hfsplus_close
+	.close = hfsplus_close,
+	.prepare = hfsplus_prepare,
+	.replay = hfsplus_replay,
+	.keys = hfsplus_keys,
+	.key = hfsplus_key,
+	.ambiguous = "HFS Plus directory holds equivalent names",
+	.name_profile = FSIMG_NAME_PROFILE_NONE,
+	.resolve = hfsplus_resolve
 };
 
 fsimg_hfsplus_reader_t *
@@ -159,6 +170,90 @@ hfsplus_close(fsimg_reader_t *reader)
 	hfsplus_tree_free(&hfsplus->attributes);
 	fsimg_dealloc(hfsplus->catalog_scan_node);
 	fsimg_extent_index_free(hfsplus->bitmap);
+	fsimg_extent_index_free(hfsplus->file);
 	fsimg_dealloc(hfsplus);
 	reader->driver = NULL;
+}
+
+/* A target holding a NUL cannot be a path. This is the one read of the target
+ * outside delivery, which it precedes, so a listing still reads no content.
+ */
+static fsimg_status_t
+link_target_check(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
+	unsigned char target[HFSPLUS_LINK_TARGET_MAX];
+	size_t bytes = (size_t)hfsplus->current.size;
+	fsimg_status_t status;
+
+	status = hfsplus_fork_read(reader, hfsplus->file, 0, target, bytes,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (memchr(target, '\0', bytes) != NULL)
+		return (hfsplus_unsupported(error,
+		    "HFS Plus symbolic link's target holds a NUL byte"));
+	return (FSIMG_OK);
+}
+
+/* Read the current entry's effective record again by its location, require it to
+ * be the file listing delivered, and index its data fork. The search buffer is
+ * free: no search is under way between advances.
+ */
+static fsimg_status_t
+index_current(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
+	const hfsplus_child_t *current = &hfsplus->current;
+	hfsplus_cursor_t cursor;
+	hfsplus_record_t record;
+	hfsplus_file_t file;
+	fsimg_status_t status;
+
+	hfsplus_cursor_init(&cursor, &hfsplus->catalog,
+	    hfsplus->catalog.search_node);
+	status = hfsplus_cursor_seek(&cursor, current->leaf, current->record,
+	    error);
+	if (status == FSIMG_OK)
+		status = hfsplus_cursor_record(&cursor, &record, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!hfsplus_file_decode(record.data, record.data_bytes, &file) ||
+	    file.id != current->id ||
+	    file.data_fork.logical_size != current->size)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus file record changed since it was listed"));
+	status = hfsplus_fork_index(reader, file.id, HFSPLUS_FORK_DATA,
+	    &file.data_fork, &hfsplus->file, NULL, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (hfsplus->file == NULL)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus file with content has no allocation"));
+	if (current->kind != FSIMG_ENTRY_SYMLINK)
+		return (FSIMG_OK);
+	status = link_target_check(reader, error);
+	if (status != FSIMG_OK) {
+		fsimg_extent_index_free(hfsplus->file);
+		hfsplus->file = NULL;
+	}
+	return (status);
+}
+
+/* The fork index is built by the first request and released when the walker
+ * advances; a listing never builds one.
+ */
+static fsimg_status_t
+hfsplus_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *extent,
+    fsimg_error_t *error)
+{
+	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
+	fsimg_status_t status;
+
+	if (hfsplus->file == NULL) {
+		status = index_current(reader, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (fsimg_extent_index_lookup(hfsplus->file, offset, extent, error));
 }

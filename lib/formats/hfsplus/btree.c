@@ -55,7 +55,6 @@ static fsimg_status_t check_header_framing(const hfsplus_tree_t *,
 static fsimg_status_t split_record(const hfsplus_tree_t *,
     const unsigned char *, size_t, hfsplus_record_t *, fsimg_error_t *);
 static int ekey_compare(const hfsplus_ekey_t *, const hfsplus_ekey_t *);
-static int akey_compare(const hfsplus_akey_t *, const hfsplus_akey_t *);
 static fsimg_status_t key_order(const hfsplus_tree_t *, const hfsplus_key_t *,
     const hfsplus_record_t *, int *, fsimg_error_t *);
 static fsimg_status_t index_child(const hfsplus_tree_t *, const unsigned char *,
@@ -343,8 +342,8 @@ ekey_compare(const hfsplus_ekey_t *a, const hfsplus_ekey_t *b)
 /* Attribute keys compare by fileID, then name as unsigned units on either
  * variant, then startBlock, although the name follows it in the bytes.
  */
-static int
-akey_compare(const hfsplus_akey_t *a, const hfsplus_akey_t *b)
+int
+hfsplus_akey_compare(const hfsplus_akey_t *a, const hfsplus_akey_t *b)
 {
 	int order;
 
@@ -402,7 +401,7 @@ key_order(const hfsplus_tree_t *tree, const hfsplus_key_t *search,
 			.units = search->attribute.units
 		};
 		if (decoded)
-			*order = akey_compare(&stored_attribute,
+			*order = hfsplus_akey_compare(&stored_attribute,
 			    &wanted_attribute);
 		break;
 	default:
@@ -599,18 +598,16 @@ hfsplus_btree_find_equivalent(hfsplus_cursor_t *cursor,
  * so the one record the search reaches decides.
  */
 fsimg_status_t
-hfsplus_catalog_find_exact(hfsplus_tree_t *catalog, const hfsplus_key_t *key,
+hfsplus_catalog_locate(hfsplus_cursor_t *cursor, const hfsplus_key_t *key,
     hfsplus_record_t *record, bool *found, fsimg_error_t *error)
 {
-	hfsplus_cursor_t cursor;
 	hfsplus_ckey_t stored;
 	fsimg_status_t status;
 
-	hfsplus_cursor_init(&cursor, catalog, catalog->search_node);
-	status = hfsplus_btree_find_equivalent(&cursor, key, found, error);
+	status = hfsplus_btree_find_equivalent(cursor, key, found, error);
 	if (status != FSIMG_OK || !*found)
 		return (status);
-	status = hfsplus_cursor_record(&cursor, record, error);
+	status = hfsplus_cursor_record(cursor, record, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (!hfsplus_ckey_decode(record->key, record->key_bytes, &stored))
@@ -618,6 +615,35 @@ hfsplus_catalog_find_exact(hfsplus_tree_t *catalog, const hfsplus_key_t *key,
 	*found = stored.units == key->catalog.units &&
 	    bcmp(stored.name, key->catalog.name,
 	    2 * (size_t)stored.units) == 0;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+hfsplus_catalog_find_exact(hfsplus_tree_t *catalog, const hfsplus_key_t *key,
+    hfsplus_record_t *record, bool *found, fsimg_error_t *error)
+{
+	hfsplus_cursor_t cursor;
+
+	hfsplus_cursor_init(&cursor, catalog, catalog->search_node);
+	return (hfsplus_catalog_locate(&cursor, key, record, found, error));
+}
+
+fsimg_status_t
+hfsplus_cursor_seek(hfsplus_cursor_t *cursor, uint32_t number, uint16_t record,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	cursor->valid = false;
+	cursor->leaves = 0;
+	status = enter_leaf(cursor, number, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (record >= cursor->node.records)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus record location lies outside its leaf"));
+	cursor->record = record;
+	cursor->valid = true;
 	return (FSIMG_OK);
 }
 

@@ -3,6 +3,18 @@
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
 class CliTest < Minitest::Test
+  def test_hfsplus_detection_rejects_foreign_filesystems
+    %w[fat12 fat16 fat32 exfat qnx4 qnx6 ifs].each do |format|
+      image = "foreign-#{format}.img"
+      image_fixture(name: image, format: format)
+      detected = completed(invoke(arguments: ["i", "--json", "-f", image]))
+      assert_equal(format, detected.find { _1.fetch("type") == "info" }.fetch("format"))
+      error = failed(invoke(arguments: ["t", "--json", "-F", "hfsplus", "-f", image], expected: 1))
+      assert_equal(-4, error.fetch("code"), format)
+      assert_equal("no partition table or filesystem recognized", error.fetch("message"), format)
+    end
+  end
+
   def test_formats_report_capabilities_and_settings
 
     decoded = completed(invoke(arguments: ["--formats", "--json"]))
@@ -17,7 +29,9 @@ class CliTest < Minitest::Test
         "qnx6",
         "qnx4",
         "ifs",
-        "iso9660"
+        "iso9660",
+        "hfsplus",
+        "hfsx"
       ].to_set,
       formats.keys.to_set
     )
@@ -90,7 +104,7 @@ class CliTest < Minitest::Test
     assert_nil(layers.fetch("vhd").fetch("codec_version"), "layers vhd codec version nil")
     assert_equal(".vhd", layers.fetch("vhd").fetch("suffix"), "layers vhd suffix")
     assert_nil(layers.fetch("gpt").fetch("suffix"), "layers gpt suffix nil")
-    assert(formats.all? { |_name, record| record.fetch("capabilities") == 7 }, "filesystem capabilities match their supported operations: #{formats.transform_values { _1.fetch("capabilities") }.inspect}")
+    assert(formats.all? { |name, record| record.fetch("capabilities") == (%w[hfsplus hfsx].include?(name) ? 1 : 7) }, "filesystem capabilities match their supported operations: #{formats.transform_values { _1.fetch("capabilities") }.inspect}")
     assert_equal(((32 * 1024) * 1024), formats.fetch("exfat").fetch("write_cluster_bytes")[-1])
     assert(formats.fetch("exfat").fetch("max_file_bytes").is_a?(String), "formats exfat max file bytes is a String")
     capabilities = decoded.find { |record| record.fetch("type") == "capabilities" }

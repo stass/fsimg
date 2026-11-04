@@ -91,7 +91,9 @@ The driver supplies the error classification and diagnostic text for an
 ambiguous namespace. Entry names travel only in path fields, never in
 message text: common code names the second of the colliding entries through
 the error's rendered path and describes the first by its position in the
-directory in the message, never by raw key bytes.
+directory in the message, never by raw key bytes. A driver whose refusal of one
+child fails the directory, such as an unsupported kind, names that child the
+same way, with `fsimg_directory_name_child()`.
 
 ## Selection
 

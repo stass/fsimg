@@ -40,6 +40,14 @@ static void pack_tree(const gen_plan_t *, gen_tree_id_t, gen_tree_t *,
 static uint32_t allocate_blocks(uint32_t *, uint64_t, uint32_t);
 static uint64_t tree_position(const gen_image_t *, gen_tree_id_t, uint64_t);
 
+static uint16_t sort_unit(uint16_t unit, bool folded);
+static int catalog_order(const gen_record_t *a, const gen_record_t *b, bool folded);
+static int extent_order(const void *left, const void *right);
+static void sort_catalog(gen_tree_t *tree, bool folded);
+static void object_fork(gen_image_t *image, uint32_t *next, unsigned char *fork,
+    const gen_object_t *object, bool resource);
+static void object_records(const gen_plan_t *plan, gen_image_t *image, uint32_t *next);
+
 void
 gen_store(unsigned char *p, uint64_t value, size_t width)
 {
@@ -112,7 +120,8 @@ folder_record(const gen_plan_t *plan)
 
 	gen_store(data, 1, 2);
 	gen_store(data + 4, plan->child_count +
-	    (plan->journal && plan->journal_file ? 1 : 0), 4);
+	    (plan->journal && plan->journal_file ? 1 : 0) +
+	    (plan->journal && plan->journal_info_file ? 1 : 0), 4);
 	gen_store(data + 8, 2, 4);
 	r.length += 88;
 	return (r);
@@ -379,6 +388,176 @@ gen_journal_header(unsigned char *p, bool little, uint64_t start,
 		p[36 + i] = header[little ? 3 - i : i];
 }
 
+/* A deliberately small independent comparator: ASCII folding and the native
+ * NUL/private-name and ignorable-name rows used by these fixtures. Other
+ * Unicode-order fixtures use binary HFSX, so no driver table is an oracle.
+ */
+static uint16_t
+sort_unit(uint16_t unit, bool folded)
+{
+	if (!folded)
+		return (unit);
+	if (unit >= 'A' && unit <= 'Z')
+		return ((uint16_t)(unit + 'a' - 'A'));
+	if (unit == 0)
+		return (0xffff);
+	if (unit == 0x200c || unit == 0x200d)
+		return (0);
+	return (unit);
+}
+
+static int
+catalog_order(const gen_record_t *a, const gen_record_t *b, bool folded)
+{
+	uint32_t ap = (uint32_t)gen_load(a->bytes + 2, 4);
+	uint32_t bp = (uint32_t)gen_load(b->bytes + 2, 4);
+	size_t an = (size_t)gen_load(a->bytes + 6, 2);
+	size_t bn = (size_t)gen_load(b->bytes + 6, 2);
+	uint16_t av[255], bv[255];
+	size_t ac = 0, bc = 0;
+
+	if (ap != bp)
+		return (ap < bp ? -1 : 1);
+	if (an == 0 || bn == 0)
+		return (an == bn ? 0 : (an == 0 ? -1 : 1));
+	for (size_t i = 0; i < an; i++) {
+		uint16_t unit = sort_unit((uint16_t)gen_load(a->bytes + 8 + 2 * i, 2), folded);
+
+		if (!folded || unit != 0)
+			av[ac++] = unit;
+	}
+	for (size_t i = 0; i < bn; i++) {
+		uint16_t unit = sort_unit((uint16_t)gen_load(b->bytes + 8 + 2 * i, 2), folded);
+
+		if (!folded || unit != 0)
+			bv[bc++] = unit;
+	}
+	for (size_t i = 0; i < ac && i < bc; i++) {
+		if (av[i] != bv[i])
+			return (av[i] < bv[i] ? -1 : 1);
+	}
+	return (ac == bc ? 0 : (ac < bc ? -1 : 1));
+}
+
+static int
+extent_order(const void *left, const void *right)
+{
+	const gen_record_t *a = left, *b = right;
+	uint64_t av, bv;
+	static const struct {
+		size_t offset;
+		size_t width;
+	} fields[] = {
+		{ 4, 4 }, { 2, 1 }, { 8, 4 }
+	};
+
+	for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+		av = gen_load(a->bytes + fields[i].offset, fields[i].width);
+		bv = gen_load(b->bytes + fields[i].offset, fields[i].width);
+		if (av != bv)
+			return (av < bv ? -1 : 1);
+	}
+	return (0);
+}
+
+static void
+sort_catalog(gen_tree_t *tree, bool folded)
+{
+	for (size_t i = 1; i < tree->record_count; i++) {
+		gen_record_t value = tree->records[i];
+		size_t j = i;
+
+		while (j > 0 && catalog_order(&tree->records[j - 1],
+		    &value, folded) > 0) {
+			tree->records[j] = tree->records[j - 1];
+			j--;
+		}
+		tree->records[j] = value;
+	}
+}
+
+static void
+object_fork(gen_image_t *image, uint32_t *next, unsigned char *fork,
+    const gen_object_t *object, bool resource)
+{
+	const unsigned char *bytes = resource ? object->resource : object->data;
+	size_t size = resource ? object->resource_size : object->data_size;
+	uint32_t b = image->block_size;
+	uint32_t blocks = (uint32_t)((size + b - 1) / b);
+	uint32_t first = allocate_blocks(next,
+	    (uint64_t)blocks * b * (object->fragmented ? 2 : 1), b);
+
+	CHECK((uint64_t)*next * b < image->length - 1024);
+	encode_fork(fork, size, first, blocks);
+	if (blocks == 0)
+		return;
+	if (object->fragmented) {
+		bzero(fork + 16, 64);
+		for (uint32_t i = 0; i < blocks && i < 8; i++) {
+			gen_store(fork + 16 + 8 * i, first + 2 * i, 4);
+			gen_store(fork + 20 + 8 * i, 1, 4);
+		}
+		overflow_records(&image->trees[GEN_EXTENTS], object->id,
+		    resource ? 255 : 0, blocks, first);
+	}
+	for (size_t i = 0; i < size; i++)
+		image->bytes[(size_t)first * b + (object->fragmented ?
+		    2 * (i / b) * b + i % b : i)] = bytes == NULL ? 0 : bytes[i];
+}
+
+static void
+object_records(const gen_plan_t *plan, gen_image_t *image, uint32_t *next)
+{
+	for (size_t i = 0; i < plan->object_count; i++) {
+		const gen_object_t *o = &plan->objects[i];
+		uint32_t parent = o->parent == 0 ? 2 : o->parent;
+		gen_record_t r = catalog_key(parent, o->name, o->units);
+		unsigned char *d = r.bytes + r.key_length;
+		uint32_t children = 0, folders = 0;
+
+		gen_store(d, o->type, 2);
+		gen_store(d + 2, o->flags, 2);
+		gen_store(d + 8, o->id, 4);
+		for (unsigned t = 0; t < 5; t++)
+			gen_store(d + 12 + 4 * t, o->dates[t], 4);
+		gen_store(d + 32, o->owner, 4);
+		gen_store(d + 36, o->group, 4);
+		d[40] = o->admin_flags;
+		d[41] = o->owner_flags;
+		gen_store(d + 42, o->mode, 2);
+		gen_store(d + 44, o->special, 4);
+		bcopy(o->finder, d + 48, 32);
+		if (o->type == 1) {
+			for (size_t j = 0; j < plan->object_count; j++) {
+				if (plan->objects[j].parent == o->id) {
+					children++;
+					folders += plan->objects[j].type == 1;
+				}
+			}
+			gen_store(d + 4, children, 4);
+			gen_store(d + 84, folders, 4);
+			r.length += 88;
+		} else {
+			gen_store(d + 4, o->reserved, 4);
+			object_fork(image, next, d + 88, o, false);
+			object_fork(image, next, d + 168, o, true);
+			r.length += 248;
+		}
+		add_record(&image->trees[GEN_CATALOG], &r);
+		if (o->omit_thread)
+			continue;
+		r = catalog_key(o->id, NULL, 0);
+		d = r.bytes + r.key_length;
+		gen_store(d, o->type == 1 ? 3 : 4, 2);
+		gen_store(d + 4, parent, 4);
+		gen_store(d + 8, o->units, 2);
+		for (size_t j = 0; j < o->units; j++)
+			gen_store(d + 10 + 2 * j, o->name[j], 2);
+		r.length += 10 + 2 * o->units;
+		add_record(&image->trees[GEN_CATALOG], &r);
+	}
+}
+
 void
 gen_build(const gen_plan_t *plan, gen_image_t *image)
 {
@@ -433,6 +612,15 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 		    (uint32_t)(plan->journal_size / b));
 		add_record(&image->trees[GEN_CATALOG], &record);
 	}
+	if (plan->journal && plan->journal_info_file) {
+		static const uint16_t info_name[] = { '.', 'j', 'o', 'u', 'r', 'n',
+		    'a', 'l', '_', 'i', 'n', 'f', 'o', '_', 'b', 'l', 'o', 'c', 'k' };
+		gen_child_t child = { .name = info_name, .units = 19, .id = 17 };
+
+		record = file_record(&child, 0, 0, b);
+		encode_fork(record.bytes + record.key_length + 88, b, info_block, 1);
+		add_record(&image->trees[GEN_CATALOG], &record);
+	}
 	for (size_t i = 0; i < plan->child_count; i++) {
 		const gen_child_t *child = &plan->children[i];
 
@@ -455,6 +643,28 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 					    (unsigned char)(j + k);
 		}
 	}
+	if (plan->object_count != 0) {
+		uint32_t children = 0, folders = 0;
+
+		object_records(plan, image, &next);
+		for (size_t i = 0; i < plan->object_count; i++) {
+			if (plan->objects[i].parent == 0 || plan->objects[i].parent == 2) {
+				children++;
+				folders += plan->objects[i].type == 1;
+			}
+		}
+		gen_store(image->trees[GEN_CATALOG].records[0].bytes +
+		    image->trees[GEN_CATALOG].records[0].key_length + 4,
+		    children + plan->child_count +
+		    (plan->journal && plan->journal_file ? 1 : 0) +
+		    (plan->journal && plan->journal_info_file ? 1 : 0), 4);
+		gen_store(image->trees[GEN_CATALOG].records[0].bytes +
+		    image->trees[GEN_CATALOG].records[0].key_length + 84, folders, 4);
+		sort_catalog(&image->trees[GEN_CATALOG], plan->compare_type != 0xbc);
+	}
+	if (plan->mutate_catalog != NULL)
+		plan->mutate_catalog(image->trees[GEN_CATALOG].records,
+		    image->trees[GEN_CATALOG].record_count);
 	pack_tree(plan, GEN_CATALOG, &image->trees[GEN_CATALOG],
 	    &packed[GEN_CATALOG]);
 	if (plan->catalog_overflow) {
@@ -481,6 +691,10 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 		extents->records[0] = record;
 		allocate_blocks(&next, tree_bytes + 8u * b, b);
 	}
+	if (image->trees[GEN_EXTENTS].record_count > 1)
+		qsort(image->trees[GEN_EXTENTS].records,
+		    image->trees[GEN_EXTENTS].record_count, sizeof(gen_record_t),
+		    extent_order);
 	pack_tree(plan, GEN_EXTENTS, &image->trees[GEN_EXTENTS],
 	    &packed[GEN_EXTENTS]);
 	for (size_t i = 0; i < plan->attribute_count; i++) {
@@ -497,6 +711,39 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 		record.length = record.key_length + 16;
 		add_record(&image->trees[GEN_ATTRIBUTES], &record);
 	}
+	for (size_t i = 0; i < plan->value_count; i++) {
+		const gen_attr_value_t *a = &plan->values[i];
+		unsigned char *d;
+
+		bzero(&record, sizeof(record));
+		record.key_length = 14 + 2 * a->units;
+		CHECK(record.key_length + 16 + a->size <= sizeof(record.bytes));
+		gen_store(record.bytes, record.key_length - 2, 2);
+		gen_store(record.bytes + 4, a->id, 4);
+		gen_store(record.bytes + 8, a->start, 4);
+		gen_store(record.bytes + 12, a->units, 2);
+		for (size_t j = 0; j < a->units; j++)
+			gen_store(record.bytes + 14 + 2 * j, a->name[j], 2);
+		d = record.bytes + record.key_length;
+		gen_store(d, a->type, 4);
+		if (a->type == 0x10) {
+			gen_store(d + 12, a->size, 4);
+			if (a->size != 0)
+				bcopy(a->value, d + 16, a->size);
+			record.length = record.key_length + 16 + a->size;
+			/* The value length excludes the B-tree's even-byte padding. */
+			if (record.length % 2 != 0)
+				record.length++;
+		} else {
+			size_t length = a->type == 0x20 ? 88 : 72;
+
+			CHECK(a->body_size <= length - 8);
+			if (a->body_size != 0)
+				bcopy(a->body, d + 8, a->body_size);
+			record.length = record.key_length + length;
+		}
+		add_record(&image->trees[GEN_ATTRIBUTES], &record);
+	}
 	if (plan->attributes)
 		pack_tree(plan, GEN_ATTRIBUTES, &image->trees[GEN_ATTRIBUTES],
 		    &packed[GEN_ATTRIBUTES]);
@@ -508,7 +755,16 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 	gen_store(header + 8, 0x31302e30, 4);
 	gen_store(header + 12, info_block, 4);
 	gen_store(header + 16, 123456, 4);
-	gen_store(header + 32, plan->child_count + (plan->journal ? 1 : 0), 4);
+	uint32_t files = (uint32_t)plan->child_count +
+	    (plan->journal && plan->journal_file ? 1 : 0) +
+	    (plan->journal && plan->journal_info_file ? 1 : 0);
+	uint32_t folders = 0;
+	for (size_t i = 0; i < plan->object_count; i++) {
+		files += plan->objects[i].type == 2;
+		folders += plan->objects[i].type == 1;
+	}
+	gen_store(header + 32, files, 4);
+	gen_store(header + 36, folders, 4);
 	gen_store(header + 40, b, 4);
 	gen_store(header + 44, plan->total_blocks, 4);
 	gen_store(header + 64, 1000000, 4);

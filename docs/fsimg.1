@@ -50,6 +50,9 @@
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
 QNX6 Power-Safe and QNX4 volumes, QNX ImageFS images and ISO 9660 images.
 ISO 9660 reading supports Rock Ridge, Joliet and the primary hierarchy.
+It also reads, but does not create, HFS Plus and HFSX volumes; a transparently
+compressed file and a volume inside a classic HFS wrapper are reported as not
+supported.
 FAT volumes with more than two FAT copies are reported as unsupported.
 It requires no root privileges, mounts, kernel filesystem driver or external
 filesystem utility.
@@ -185,8 +188,8 @@ for directory extraction, under the ordinary destination checks.
 .It Fl F Ar stack
 The image's layers, inner to outer, separated by
 .Ql / ;
-the filesystem name is fat12, fat16, fat32, exfat, qnx6, qnx4, ifs or
-iso9660.
+the filesystem name is fat12, fat16, fat32, exfat, qnx6, qnx4, ifs, iso9660,
+hfsplus or hfsx.
 Required for
 .Cm c .
 The slots are the filesystem, the partition scheme (gpt or mbr) and the
@@ -484,6 +487,17 @@ having extra data, which
 shows and extraction reports as a metadata loss.
 Every entry's Finder information, BSD flags and backup date are outside the
 entry model and are neither delivered nor marked.
+Each name of a hard link is a separate entry with the file's own content and
+metadata.
+A directory holding a name no image path can select, a stored
+.Ql \&: ,
+U+2400,
+.Ql \&. ,
+.Ql \&.\&. ,
+or a spelling that is not its own decomposition, or holding a directory hard
+link or a compressed file, cannot be listed at all, and
+.Fl k
+does not pass over it.
 QNX6 locates its second superblock in the last whole 4096-byte unit of the
 slice, so
 .Fl Fl length

@@ -787,7 +787,8 @@ test_variants(void)
 {
 	static const unsigned variants[] = { 16, 12, 32 };
 	static const char *const names[] = {
-		"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs", "iso9660"
+		"fat12", "fat16", "fat32", "exfat", "qnx6", "qnx4", "ifs",
+		"iso9660", "hfsplus", "hfsx"
 	};
 	fixture_t f;
 	fsimg_read_options_t options;
@@ -805,8 +806,12 @@ test_variants(void)
 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 		CHECK(strcmp(format.name, names[i]) == 0);
-		CHECK(format.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_WRITE |
-		    FSIMG_CAP_VERIFY));
+		if (strcmp(format.name, "hfsplus") == 0 ||
+		    strcmp(format.name, "hfsx") == 0)
+			CHECK(format.capabilities == FSIMG_CAP_READ);
+		else
+			CHECK(format.capabilities == (FSIMG_CAP_READ |
+			    FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
 	}
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);

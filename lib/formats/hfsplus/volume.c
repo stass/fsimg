@@ -483,6 +483,9 @@ open_root(fsimg_reader_t *reader, fsimg_error_t *error)
 	    folder.id != HFSPLUS_ID_ROOT)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus root record is not folder 2"));
+	status = hfsplus_root_validate(&folder, error);
+	if (status != FSIMG_OK)
+		return (status);
 	hfsplus->root = folder;
 
 	hfsplus->label_valid =

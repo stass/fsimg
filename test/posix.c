@@ -240,6 +240,21 @@ test_capability_records(void)
 		CHECK((info.max_link_target_bytes == 0) ==
 		    ((info.entry_kinds & FSIMG_ENTRY_SYMLINK) == 0));
 		CHECK(info.max_link_target_bytes <= FSIMG_SYMLINK_TARGET_MAX);
+		if (strcmp(info.name, "hfsplus") == 0 ||
+		    strcmp(info.name, "hfsx") == 0) {
+			CHECK(info.capabilities == FSIMG_CAP_READ);
+			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
+			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
+			    FSIMG_ENTRY_FIFO | FSIMG_ENTRY_CHAR_DEVICE |
+			    FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET));
+			CHECK(info.metadata_fields == (FSIMG_META_CREATED |
+			    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |
+			    FSIMG_META_CHANGED | FSIMG_META_OWNER | FSIMG_META_MODE));
+			CHECK(info.max_link_target_bytes == 1023);
+			CHECK(info.max_name_utf16_units == 255);
+			CHECK(info.max_label_bytes == 510);
+			continue;
+		}
 		if (strcmp(info.name, "ifs") == 0) {
 			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
 			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
@@ -289,7 +304,7 @@ test_capability_records(void)
 		else
 			CHECK(info.max_label_bytes == 11);
 	}
-	CHECK(count == 8);
+	CHECK(count == 10);
 }
 
 static void

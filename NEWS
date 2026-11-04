@@ -24,6 +24,11 @@ clean name is no proof. It implies `-k`, whose skips are not losses, and every
 extraction safety rule stays in force. The library option is `FSIMG_EXTRACT_SALVAGE`, returning
 `FSIMG_EPARTIAL`.
 
+HFS Plus and HFSX volumes can be inspected, listed and extracted: data forks,
+POSIX metadata, hard links as separate entries, and a mark on entries with a
+resource fork or extended attributes. Transparently compressed files and
+volumes in a classic HFS wrapper are reported as not supported.
+
 ISO 9660 creation writes Rock Ridge and Joliet at interchange levels 1 to 3,
 with deep-directory relocation and multi-extent files. Joliet aliases avoid
 case-insensitive lookup collisions while Rock Ridge keeps exact source

@@ -37,6 +37,14 @@ class CliTest < Minitest::Test
     assert_equal(0x7f, iso.fetch("metadata_fields"))
     assert_equal(1024, iso.fetch("max_link_target_bytes"))
     assert_equal(0x2c0, iso.fetch("write_settings"))
+    %w[hfsplus hfsx].each do |name|
+      hfs = formats.delete(name)
+      assert_equal(1, hfs.fetch("capabilities"), name)
+      assert_equal(127, hfs.fetch("entry_kinds"), name)
+      assert_equal(0x77, hfs.fetch("metadata_fields"), name)
+      assert_equal(1023, hfs.fetch("max_link_target_bytes"), name)
+      assert_equal(0, hfs.fetch("write_settings"), name)
+    end
     formats.each do |name, record|
       assert_equal(%w[fat12 fat16].include?(name) ? 32 : 0, record.fetch("write_settings"), "#{name} write settings")
       assert_equal(3, record.fetch("entry_kinds"), "#{name} supports only files and directories")
