@@ -359,6 +359,11 @@
   call"`, failing the run; its replay passes. Find the call that raises it and retry
   the interrupted call.
 
+* [Low] **Worker latency check fails under load** (`test/worker.c`, the
+  `fastest_ms < 50` check): a parallel `make check` can fail it with no defect, as
+  the fastest of ten operations took 145 ms while the machine ran the suite. It
+  passes alone. Compare against a measured baseline, or move it out of `make check`.
+
 * [Low] **Quick specification profile over its ceiling** (`test/spec/`,
   `specs/design-spec-testing.md`): the design caps the quick profile at about 60 s
   added to `make check`, but `test/spec.sh` takes several minutes. Bring it back
