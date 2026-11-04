@@ -484,7 +484,7 @@ object_fork(gen_image_t *image, uint32_t *next, unsigned char *fork,
 	size_t size = resource ? object->resource_size : object->data_size;
 	uint32_t b = image->block_size;
 	uint32_t blocks = (uint32_t)((size + b - 1) / b);
-	uint32_t first = allocate_blocks(next,
+	uint32_t first = blocks == 0 ? 0 : allocate_blocks(next,
 	    (uint64_t)blocks * b * (object->fragmented ? 2 : 1), b);
 
 	CHECK((uint64_t)*next * b < image->length - 1024);

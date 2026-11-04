@@ -33,6 +33,13 @@ end
 class HfsplusNativeTest < Minitest::Test
   include CliProcesses
   include CliRecords
+  include CliFixtures
+
+  CLI_SAMPLE_PER_CAPTURE = 8
+  CLI_MEMBER_BYTE_CAP = 1024 * 1024
+  # Smallest observed file payload among captures with directories and links:
+  # 204 file bytes, 21 entries, in a 16 MiB image.
+  HOST_EXTRACTION_CAPTURE = "h-hfsplus-16777216-e5"
 
   Expectation = Data.define(:pattern, :status, :code, :message, :path)
   EXPECTED = [
@@ -131,6 +138,8 @@ class HfsplusNativeTest < Minitest::Test
       TALLY.add(:entries, 1)
     end
     compare_content(image: image, entries: entries, expected: expected, name: name)
+    compare_cli(image: image, expected: expected, manifest: manifest, name: name)
+    compare_host_extraction(image: image, expected: expected, late_logs: late_logs, name: name) if name == HOST_EXTRACTION_CAPTURE
     TALLY.add(:captures, 1)
     assert_nil(differing, "#{name}: first differing path #{differing} (manifest=#{expected.key?(differing)}, image=#{actual.key?(differing)})")
   end
@@ -163,6 +172,95 @@ class HfsplusNativeTest < Minitest::Test
       offset += size
     end
     assert_equal(offset, result.stdout.bytesize, "#{name}: no trailing stream bytes")
+  end
+
+  def cli_sample(expected)
+    eligible = expected.sort.select do |path, entry|
+      %w[file link].include?(entry.fetch("kind")) && entry.fetch("size") <= CLI_MEMBER_BYTE_CAP
+    end
+    nonempty = eligible.select { |path, entry| entry.fetch("kind") == "file" && entry.fetch("size").positive? }
+    by_size = nonempty.sort_by { |path, entry| [entry.fetch("size"), path] }
+    # Reserve the size extremes and a link, then spread the remaining choices
+    # across sorted paths. Deduplication keeps small captures within the cap.
+    required = [by_size.first, by_size.last, eligible.find { |path, entry| entry.fetch("kind") == "link" }].compact.uniq
+    remaining = eligible - required
+    slots = [CLI_SAMPLE_PER_CAPTURE - required.length, remaining.length].min
+    spread = Array.new(slots) do |index|
+      remaining.fetch(slots == 1 ? remaining.length / 2 : index * (remaining.length - 1) / (slots - 1))
+    end
+    (required + spread).sort
+  end
+
+  def compare_cli_bytes(image:, path:, wanted:, name:)
+    # As in the sequential oracle, a mode-0000 null hash cannot attest bytes.
+    return if wanted.fetch("kind") == "file" && wanted.fetch("sha256").nil?
+
+    result = invoke(root: Dir.pwd, arguments: ["x", "-O", "-f", image, path])
+    assert_equal(wanted.fetch("size"), result.stdout.bytesize, "#{name}: #{path}: x -O size")
+    if wanted.fetch("kind") == "link"
+      assert_equal(wanted.fetch("target").b, result.stdout, "#{name}: #{path}: x -O target")
+    else
+      assert_equal(wanted.fetch("sha256"), Digest::SHA256.hexdigest(result.stdout), "#{name}: #{path}: x -O sha256")
+    end
+    TALLY.add(:cli_content_members)
+    TALLY.add(:cli_content_bytes, result.stdout.bytesize)
+  end
+
+  def compare_cli(image:, expected:, manifest:, name:)
+    # i inspects a volume, not members. Selected t records supply the member
+    # metadata; x -O supplies raw bytes and does not accept --json.
+    information = completed(invoke(root: Dir.pwd, arguments: ["i", "--json", "-f", image]))
+      .find { _1.fetch("type") == "info" }
+    refute_nil(information, "#{name}: i volume information")
+    assert_equal(manifest.fetch("variant"), information.fetch("format"), "#{name}: i format")
+    assert_equal(manifest.fetch("size"), Integer(information.fetch("volume_bytes")), "#{name}: i volume size")
+    TALLY.add(:cli_info_captures)
+    cli_sample(expected).each do |path, wanted|
+      records = completed(invoke(root: Dir.pwd, arguments: ["t", "--json", "-f", image, path]))
+      entry = records.find { _1.fetch("type") == "entry" && _1.fetch("path") == path }
+      refute_nil(entry, "#{name}: #{path}: selected member")
+      kind = wanted.fetch("kind") == "link" ? "symlink" : wanted.fetch("kind")
+      assert_equal(kind, entry.fetch("kind"), "#{name}: #{path}: selected kind")
+      assert_equal(wanted.fetch("size"), Integer(entry.fetch("size_bytes")), "#{name}: #{path}: selected size")
+      assert_equal(Integer(wanted.fetch("mode"), 8), entry.fetch("mode"), "#{name}: #{path}: selected mode")
+      TALLY.add(:cli_metadata_members)
+      compare_cli_bytes(image: image, path: path, wanted: wanted, name: name)
+    end
+  end
+
+  def compare_host_extraction(image:, expected:, late_logs:, name:)
+    Dir.mktmpdir("cli-native-", Dir.pwd) do |temporary|
+      root = Pathname.new(temporary)
+      destination = private_directory(root: root, name: "extracted")
+      extracted = completed(invoke(root: root, arguments: ["x", "-k", "--json", "-f", image, "-E", "-C", "extracted"]))
+      # Safe extraction skips links and other unsupported kinds and creates
+      # private modes, without restoring image modes or timestamps. Link
+      # targets are checked by x -O. Only files/directories belong on the host.
+      supported = expected.select { |path, entry| %w[file directory].include?(entry.fetch("kind")) }
+      assert_equal(expected.length - supported.length, Integer(extracted.last.fetch("skipped_entries")), "#{name}: host skipped kinds")
+      paths = destination.glob("**/*", File::FNM_DOTMATCH)
+        .reject { _1 == destination / "." }
+        .map { "/#{_1.relative_path_from(destination)}" }.sort
+      # Ignore only unmount-created event logs already identified by listing;
+      # all manifest paths, including .fseventsd, must still be present.
+      assert_nil(HfsplusNativePaths.find_difference(expected: supported.keys, actual: paths, late_logs: late_logs), "#{name}: host paths differ")
+      supported.each do |path, wanted|
+        host = destination / path.delete_prefix("/")
+        stat = host.lstat
+        assert_equal(wanted.fetch("kind"), stat.ftype, "#{name}: #{path}: host kind")
+        assert_equal(wanted.fetch("kind") == "directory" ? 0o700 : 0o600, stat.mode & 0o7777, "#{name}: #{path}: private host mode")
+        if wanted.fetch("kind") == "file"
+          assert_equal(wanted.fetch("size"), stat.size, "#{name}: #{path}: host size")
+          # A null manifest hash has the same host-policy limitation as the
+          # sequential check; size and kind remain independently comparable.
+          unless wanted.fetch("sha256").nil?
+            assert_equal(wanted.fetch("sha256"), Digest::SHA256.file(host).hexdigest, "#{name}: #{path}: host sha256")
+          end
+        end
+        TALLY.add(:host_entries)
+      end
+      TALLY.add(:host_extractions)
+    end
   end
 
   public
@@ -204,5 +302,9 @@ Minitest.after_run do
     puts "#{name} | #{counts[:passed]} | #{counts[:failed]} | #{counts[:skipped]}"
   end
   puts "Native trees: #{totals[:captures]} captures compared, #{totals[:entries]} entries compared, " \
-    "#{totals[:bytes]} file bytes hashed, #{totals[:targets]} symlink targets compared, #{totals[:refusals]} refusals checked; skipped #{totals[:skips]} captures, #{totals[:null_hashes]} null file hashes (mode-0000), #{totals[:fseventsd_logs]} late fseventsd logs; timestamps and ownership not compared"
+    "#{totals[:bytes]} file bytes hashed, #{totals[:targets]} symlink targets compared, #{totals[:refusals]} refusals checked; " \
+    "#{totals[:cli_info_captures]} CLI info captures checked, #{totals[:cli_metadata_members]} CLI member metadata checks, " \
+    "#{totals[:cli_content_members]} x -O members compared (#{totals[:cli_content_bytes]} bytes), " \
+    "#{totals[:host_extractions]} host extractions (#{totals[:host_entries]} entries compared); " \
+    "skipped #{totals[:skips]} captures, #{totals[:null_hashes]} null file hashes (mode-0000), #{totals[:fseventsd_logs]} late fseventsd logs; timestamps and ownership not compared"
 end

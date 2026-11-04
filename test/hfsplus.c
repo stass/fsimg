@@ -3365,6 +3365,72 @@ expect_listing(const char *name, const gen_image_t *image,
 	}
 }
 
+/* Inspect serialized fork descriptors, without the reader's fork decoder or
+ * validator. Zero-count slots must be zero pairs and terminate the used prefix;
+ * raw byte checks catch invalid fixtures even when no content read opens them.
+ */
+static void
+check_generated_fork(const char *name, const unsigned char *fork)
+{
+	bool unused = false;
+
+	for (size_t i = 0; i < 8; i++) {
+		uint64_t start = gen_load(fork + 16 + 8 * i, 4);
+		uint64_t count = gen_load(fork + 20 + 8 * i, 4);
+
+		expect_true(name, count == 0 ? start == 0 : !unused);
+		unused |= count == 0;
+	}
+}
+
+static void
+test_generator_fork_descriptors(void)
+{
+	gen_object_t objects[] = {
+		{ .name = name_a, .units = 1, .id = 32, .type = 2 },
+		{ .name = name_b, .units = 1, .id = 33, .type = 2,
+		    .data_size = 1, .resource_size = 1 },
+		{ .name = name_c, .units = 1, .id = 34, .type = 2,
+		    .data_size = 9 * 4096, .resource_size = 9 * 4096,
+		    .fragmented = true }
+	};
+	gen_plan_t plan;
+	gen_image_t image;
+
+	gen_plan_init(&plan);
+	plan.objects = objects;
+	plan.object_count = sizeof(objects) / sizeof(objects[0]);
+	plan.attributes = true;
+	plan.journal = true;
+	plan.journal_file = true;
+	plan.journal_info_file = true;
+	gen_build(&plan, &image);
+	for (size_t offset = GEN_BITMAP_FORK; offset <= GEN_STARTUP_FORK;
+	    offset += 80) {
+		check_generated_fork("generated volume special fork descriptors",
+		    image.bytes + image.header + offset);
+		check_generated_fork("generated alternate header fork descriptors",
+		    image.bytes + image.length - 1024 + offset);
+	}
+	const gen_tree_t *tree = &image.trees[GEN_CATALOG];
+
+	for (size_t i = 0; i < tree->record_count; i++) {
+		const unsigned char *record = image.bytes + tree->records[i].offset;
+		const unsigned char *data = record + 2 + gen_load(record, 2);
+		char name[96];
+
+		if (gen_load(data, 2) != 2)
+			continue;
+		snprintf(name, sizeof(name), "generated file %llu data fork descriptors",
+		    (unsigned long long)gen_load(data + 8, 4));
+		check_generated_fork(name, data + FILE_DATA_FORK);
+		snprintf(name, sizeof(name), "generated file %llu resource fork descriptors",
+		    (unsigned long long)gen_load(data + 8, 4));
+		check_generated_fork(name, data + FILE_RESOURCE_FORK);
+	}
+	gen_free(&image);
+}
+
 static void
 test_folder_counts_and_parents(void)
 {
@@ -4079,40 +4145,273 @@ test_prepared_entries(void)
 		{ .name = name_c, .units = 1, .id = 34, .type = 2, .data_size = 1 },
 		{ .name = name_d, .units = 1, .id = 35, .type = 1 }
 	};
+	typedef enum prepared_mutation {
+		PREPARED_FIELD,
+		PREPARED_NODE_COUNT,
+		PREPARED_SYMLINK_FIELD,
+		PREPARED_LOCATION,
+		PREPARED_BAD_NAME,
+		PREPARED_UNCHANGED
+	} prepared_mutation_t;
+	typedef enum prepared_followup {
+		PREPARED_ADVANCE,
+		PREPARED_ENTER_FOLDER,
+		PREPARED_READ_FILE
+	} prepared_followup_t;
+	typedef enum prepared_probe {
+		PREPARED_NO_PROBE,
+		PREPARED_LENGTH_PROBE,
+		PREPARED_NAME_PROBE
+	} prepared_probe_t;
+	/* Each row names its fixture, mutation, observing operation and result. */
 	static const struct {
 		const char *name;
+		uint16_t fixture_type;
+		prepared_mutation_t mutation;
 		size_t offset;
 		uint64_t value;
 		size_t width;
-	} invalid[] = {
-		{ "prepared unknown kind refused", PREPARED_KIND, 255, 1 },
-		{ "prepared leaf at node count refused", PREPARED_LEAF, 0, 4 },
-		{ "prepared leaf above node count refused", PREPARED_LEAF, UINT32_MAX, 4 },
-		{ "prepared reserved id refused", PREPARED_ID, 15, 4 },
-		{ "prepared mode outside permission bits refused", PREPARED_MODE, 010000, 2 },
-		{ "prepared unknown flags refused", PREPARED_FLAGS, 0x80, 1 },
-		{ "prepared compression refused", PREPARED_COMPRESSION, 1, 1 },
-		{ "prepared file valence refused", PREPARED_VALENCE, 1, 4 },
-		{ "prepared file special field refused", PREPARED_SPECIAL, 1, 4 },
-		{ "prepared empty symlink refused", PREPARED_SIZE, 0, 8 },
-		{ "prepared oversized symlink refused", PREPARED_SIZE, 1024, 8 },
-		{ "prepared FIFO with bytes refused", PREPARED_KIND, FSIMG_ENTRY_FIFO, 1 },
-		{ "prepared extra data outside boolean refused", PREPARED_EXTRA, 2, 1 },
-		{ "prepared owner without owner mode flag refused", PREPARED_OWNER, 1, 4 },
-		{ "prepared group without owner mode flag refused", PREPARED_GROUP, 1, 4 },
-		{ "prepared mode without owner mode flag refused", PREPARED_MODE, 0644, 2 },
-		{ "prepared folder count without flag refused", PREPARED_FOLDER_COUNT, 1, 4 },
-		{ "prepared folder count flag on file refused", PREPARED_FLAGS, HFSPLUS_CHILD_FOLDER_COUNT, 1 },
-		{ "prepared folder count on folder without flag refused", PREPARED_FOLDER_COUNT, 1, 4 }
+		uint32_t target_id;
+		uint16_t target_type;
+		prepared_followup_t followup;
+		prepared_probe_t probe;
+		fsimg_status_t expected;
+		const char *diagnostic;
+	} cases[] = {
+		{ .name = "prepared unknown kind refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_KIND,
+		    .value = 255,
+		    .width = 1,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared leaf at node count refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_NODE_COUNT,
+		    .offset = PREPARED_LEAF,
+		    .width = 4,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared leaf above node count refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_LEAF,
+		    .value = UINT32_MAX,
+		    .width = 4,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared reserved id refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_ID,
+		    .value = 15,
+		    .width = 4,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared mode outside permission bits refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_MODE,
+		    .value = 010000,
+		    .width = 2,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared unknown flags refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_FLAGS,
+		    .value = 0x80,
+		    .width = 1,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared compression refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_COMPRESSION,
+		    .value = 1,
+		    .width = 1,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared file valence refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_VALENCE,
+		    .value = 1,
+		    .width = 4,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared file special field refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_SPECIAL,
+		    .value = 1,
+		    .width = 4,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared empty symlink refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_SYMLINK_FIELD,
+		    .offset = PREPARED_SIZE,
+		    .width = 8,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared oversized symlink refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_SYMLINK_FIELD,
+		    .offset = PREPARED_SIZE,
+		    .value = 1024,
+		    .width = 8,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared FIFO with bytes refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_KIND,
+		    .value = FSIMG_ENTRY_FIFO,
+		    .width = 1,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared extra data outside boolean refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_EXTRA,
+		    .value = 2,
+		    .width = 1,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared owner without owner mode flag refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_OWNER,
+		    .value = 1,
+		    .width = 4,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared group without owner mode flag refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_GROUP,
+		    .value = 1,
+		    .width = 4,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared mode without owner mode flag refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_MODE,
+		    .value = 0644,
+		    .width = 2,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared folder count without flag refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_FOLDER_COUNT,
+		    .value = 1,
+		    .width = 4,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared folder count flag on file refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_FLAGS,
+		    .value = HFSPLUS_CHILD_FOLDER_COUNT,
+		    .width = 1,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared folder count on folder without flag refused",
+		    .fixture_type = 1,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_FOLDER_COUNT,
+		    .value = 1,
+		    .width = 4,
+		    .followup = PREPARED_ADVANCE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared HFS Plus entry payload" },
+		{ .name = "prepared entry baseline",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_UNCHANGED,
+		    .followup = PREPARED_ADVANCE,
+		    .probe = PREPARED_LENGTH_PROBE,
+		    .expected = FSIMG_OK },
+		{ .name = "prepared folder location names another folder",
+		    .fixture_type = 1,
+		    .mutation = PREPARED_LOCATION,
+		    .target_id = 35,
+		    .target_type = 1,
+		    .followup = PREPARED_ENTER_FOLDER,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "HFS Plus folder record changed since it was listed" },
+		{ .name = "prepared record past leaf end refused",
+		    .fixture_type = 1,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_RECORD,
+		    .value = UINT16_MAX,
+		    .width = 2,
+		    .followup = PREPARED_ENTER_FOLDER,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "HFS Plus record location lies outside its leaf" },
+		{ .name = "prepared file location names another file",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_LOCATION,
+		    .target_id = 34,
+		    .target_type = 2,
+		    .followup = PREPARED_READ_FILE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "HFS Plus file record changed since it was listed" },
+		{ .name = "prepared file size disagrees with record",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_FIELD,
+		    .offset = PREPARED_SIZE,
+		    .value = 2,
+		    .width = 8,
+		    .followup = PREPARED_READ_FILE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "HFS Plus file record changed since it was listed" },
+		{ .name = "prepared file location names a folder",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_LOCATION,
+		    .target_id = 35,
+		    .target_type = 1,
+		    .followup = PREPARED_READ_FILE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "HFS Plus file record changed since it was listed" },
+		{ .name = "prepared invalid UTF-8 name refused",
+		    .fixture_type = 2,
+		    .mutation = PREPARED_BAD_NAME,
+		    .followup = PREPARED_ADVANCE,
+		    .probe = PREPARED_NAME_PROBE,
+		    .expected = FSIMG_ECORRUPT,
+		    .diagnostic = "invalid prepared directory record" }
 	};
-	size_t invalid_count = sizeof(invalid) / sizeof(invalid[0]);
 	gen_plan_t plan;
 	gen_image_t image;
 
 	gen_plan_init(&plan);
 	plan.objects = objects;
 	plan.object_count = sizeof(objects) / sizeof(objects[0]);
-	for (size_t scenario = 0; scenario < invalid_count + 7; scenario++) {
+	for (size_t scenario = 0; scenario < sizeof(cases) / sizeof(cases[0]);
+	    scenario++) {
+		unsigned before_failures = failures;
 		fixture_t f;
 		fsimg_reader_t *reader;
 		const fsimg_entry_t *entry;
@@ -4122,16 +4421,14 @@ test_prepared_entries(void)
 		unsigned char payload[PREPARED_BYTES], byte;
 		uint64_t cursor;
 		size_t count;
-		/* The last invalid row checks a folder without its count flag. */
-		bool folder = scenario == invalid_count - 1 ||
-		    scenario == invalid_count + 1 || scenario == invalid_count + 2;
-		const char *name = "prepared entry baseline";
-		const char *message = NULL;
+		const char *name = cases[scenario].name;
+		const char *message = cases[scenario].diagnostic;
+		bool folder = cases[scenario].fixture_type == 1;
 
-		objects[1].type = folder ? 1 : 2;
+		objects[1].type = cases[scenario].fixture_type;
 		objects[1].data_size = folder ? 0 : 1;
 		gen_build(&plan, &image);
-		expect_listing("prepared entry source baseline", &image, FSIMG_DONE, NULL);
+		expect_listing(name, &image, FSIMG_DONE, NULL);
 		reader = public_reader(&f, &image);
 		CHECK(reader != NULL);
 		CHECK(fsimg_reader_next(reader, &entry, &error) == FSIMG_OK);
@@ -4141,53 +4438,33 @@ test_prepared_entries(void)
 		/* 8-byte frame, class, one-byte name and NUL precede payload. */
 		CHECK(fsimg_store_read(store, cursor + 11, payload,
 		    sizeof(payload), &error) == FSIMG_OK);
-		if (scenario < invalid_count) {
-			name = invalid[scenario].name;
-			message = "invalid prepared HFS Plus entry payload";
-			store_payload(payload, invalid[scenario].offset,
-			    scenario == 1 ? image.trees[GEN_CATALOG].nodes : invalid[scenario].value,
-			    invalid[scenario].width);
-			if (scenario == 9 || scenario == 10)
-				payload[PREPARED_KIND] = FSIMG_ENTRY_SYMLINK;
-		} else switch (scenario - invalid_count) {
-		case 0:
+		switch (cases[scenario].mutation) {
+		case PREPARED_SYMLINK_FIELD:
+			payload[PREPARED_KIND] = FSIMG_ENTRY_SYMLINK;
+			/* FALLTHROUGH */
+		case PREPARED_FIELD:
+			store_payload(payload, cases[scenario].offset,
+			    cases[scenario].value, cases[scenario].width);
 			break;
-		case 1:
-			name = "prepared folder location names another folder";
-			payload_location(&image, payload, 35, 1);
-			message = "HFS Plus folder record changed since it was listed";
+		case PREPARED_NODE_COUNT:
+			store_payload(payload, PREPARED_LEAF,
+			    image.trees[GEN_CATALOG].nodes, 4);
 			break;
-		case 2:
-			name = "prepared record past leaf end refused";
-			store_payload(payload, PREPARED_RECORD, UINT16_MAX, 2);
-			message = "HFS Plus record location lies outside its leaf";
+		case PREPARED_LOCATION:
+			payload_location(&image, payload, cases[scenario].target_id,
+			    cases[scenario].target_type);
 			break;
-		case 3:
-			name = "prepared file location names another file";
-			payload_location(&image, payload, 34, 2);
-			message = "HFS Plus file record changed since it was listed";
-			break;
-		case 4:
-			name = "prepared file size disagrees with record";
-			store_payload(payload, PREPARED_SIZE, 2, 8);
-			message = "HFS Plus file record changed since it was listed";
-			break;
-		case 5:
-			name = "prepared file location names a folder";
-			payload_location(&image, payload, 35, 1);
-			message = "HFS Plus file record changed since it was listed";
-			break;
-		case 6:
-			name = "prepared invalid UTF-8 name refused";
+		case PREPARED_BAD_NAME:
 			/* The shared walker validates UTF-8 before driver replay. */
 			byte = 0xff;
 			CHECK(fsimg_store_write(store, cursor + 9, &byte, 1, &error) == FSIMG_OK);
-			message = "invalid prepared directory record";
+			break;
+		case PREPARED_UNCHANGED:
 			break;
 		}
 		CHECK(fsimg_store_write(store, cursor + 11, payload,
 		    sizeof(payload), &error) == FSIMG_OK);
-		if (scenario == invalid_count) {
+		if (cases[scenario].probe == PREPARED_LENGTH_PROBE) {
 			static const struct {
 				const char *name;
 				size_t length;
@@ -4211,7 +4488,7 @@ test_prepared_entries(void)
 			expect_status("driver replay accepts 60-byte payload", status,
 			    FSIMG_OK, &error);
 		}
-		if (scenario == invalid_count + 6) {
+		if (cases[scenario].probe == PREPARED_NAME_PROBE) {
 			fsimg_directory_keys_t keys;
 			char scratch_name[2] = { 0 };
 
@@ -4233,27 +4510,28 @@ test_prepared_entries(void)
 			    "invalid prepared HFS Plus file name");
 		}
 		status = fsimg_reader_next(reader, &entry, &error);
-		if ((folder && scenario >= invalid_count) ||
-		    (scenario >= invalid_count + 3 && scenario <= invalid_count + 5)) {
+		if (cases[scenario].followup != PREPARED_ADVANCE) {
 			expect_status(name, status, FSIMG_OK, &error);
 			if (status == FSIMG_OK) {
-				if (folder)
+				if (cases[scenario].followup == PREPARED_ENTER_FOLDER)
 					status = fsimg_reader_next(reader, &entry, &error);
 				else
 					status = fsimg_reader_read_at(reader, 0, &byte, 1, &count, &error);
 			}
 		}
-		expect_status(name, status, message == NULL ? FSIMG_OK : FSIMG_ECORRUPT, &error);
+		expect_status(name, status, cases[scenario].expected, &error);
 		if (message != NULL)
 			expect_diagnostic(name, &error, message);
 		else {
-			expect_true("valid prepared file retains its name", strcmp(entry->path, "/b") == 0);
-			expect_status("valid prepared file can be read", fsimg_reader_read_at(
+			expect_true(name, strcmp(entry->path, "/b") == 0);
+			expect_status(name, fsimg_reader_read_at(
 			    reader, 0, &byte, 1, &count, &error), FSIMG_OK, &error);
-			expect_true("valid prepared file returns its byte", count == 1 && byte == 0);
+			expect_true(name, count == 1 && byte == 0);
 		}
 		fsimg_reader_free(reader);
 		fixture_close(&f);
+		if (failures != before_failures)
+			fprintf(stderr, "prepared case failed: %s\n", name);
 		gen_free(&image);
 	}
 }
@@ -4652,6 +4930,7 @@ main(int argc, char **argv)
 	test_thread_lookup_refuses_a_malformed_key_after_following_a_leaf();
 	test_child_refusals_name_the_whole_path();
 	test_prepared_entries();
+	test_generator_fork_descriptors();
 	test_journal_info_identity();
 	test_probe_exclusivity();
 	test_folder_counts_and_parents();
