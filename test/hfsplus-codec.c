@@ -12,6 +12,22 @@
 #include "hfsplus.h"
 #include "test.h"
 
+enum {
+	EXTENT_KEY_PAD = 3,
+	ATTRIBUTE_KEY_PAD = 2,
+	ATTRIBUTE_KEY_FILE_ID = 4,
+	ATTRIBUTE_KEY_START = 8,
+	ATTRIBUTE_KEY_UNITS = 12,
+	ATTRIBUTE_KEY_NAME = 14,
+	CATALOG_KEY_PARENT = 2,
+	CATALOG_KEY_NAME = 8,
+	COMPRESSION_TYPE = 4,
+	COMPRESSION_SIZE = 8,
+	RESOURCE_MAP = 4,
+	RESOURCE_DATA_LENGTH = 8,
+	RESOURCE_MAP_LENGTH = 12
+};
+
 /* All disk positions below come from specs/design-hfsplus.md's tables. */
 static void
 put_be(unsigned char *p, uint64_t value, size_t width)
@@ -228,7 +244,7 @@ test_header_and_forks(void)
 	CHECK(hfsplus_fork_decode(f, sizeof(f), &fork));
 	check_fork(&fork, 0x20304050);
 	make_extents(e, 0x31425360);
-	check_span(decode_extents, e, 64, sizeof(extents), false, "extents");
+	check_span(decode_extents, e, 64, sizeof(extents), true, "extents");
 	CHECK(hfsplus_extents_decode(e, sizeof(e), extents));
 	check_extents(extents, 0x31425360);
 }
@@ -283,15 +299,11 @@ test_tree_headers(void)
 
 /* Key lengths frame the name; catalog thread keys alone permit zero units. */
 static void
-test_keys(void)
+test_extent_keys(void)
 {
-	unsigned char p[526] = {0}, e[12] = {0};
-	hfsplus_ckey_t c;
-	hfsplus_akey_t a;
+	unsigned char e[12] = {0};
 	hfsplus_ekey_t ext;
-	static const size_t counts[] = {0, 1, 127, 128, 255, 256};
-	size_t i, j, n, size, fixed, limit, out_size;
-	decode_t decode;
+	size_t i;
 
 	put_be(e, 10, 2);
 	put_be(e + 4, 0x89abcdef, 4);
@@ -308,51 +320,87 @@ test_keys(void)
 	put_be(e, 11, 2);
 	reject(decode_ekey, e, 12, sizeof(ext), "ekey length 11");
 	put_be(e, 10, 2);
-	e[3] = 1;
+	e[EXTENT_KEY_PAD] = 1;
 	reject(decode_ekey, e, 12, sizeof(ext), "ekey pad");
-	for (j = 0; j < 2; j++) {
-		fixed = j == 0 ? 8 : 14;
-		limit = j == 0 ? 255 : 127;
-		decode = j == 0 ? decode_ckey : decode_akey;
-		out_size = j == 0 ? sizeof(c) : sizeof(a);
+}
+
+static void
+test_named_key_framing(void)
+{
+	unsigned char p[526] = {0};
+	hfsplus_ckey_t c;
+	hfsplus_akey_t a;
+	static const size_t counts[] = {0, 1, 127, 128, 255, 256};
+	static const struct {
+		const char *name;
+		size_t name_offset;
+		size_t id_offset;
+		size_t limit;
+		size_t out_size;
+		decode_t decode;
+		bool attribute;
+	} layouts[] = {
+		{ "catalog key", CATALOG_KEY_NAME, CATALOG_KEY_PARENT, 255,
+		    sizeof(c), decode_ckey, false },
+		{ "attribute key", ATTRIBUTE_KEY_NAME, ATTRIBUTE_KEY_FILE_ID, 127,
+		    sizeof(a), decode_akey, true }
+	};
+	size_t i, j, n, size, fixed, out_size;
+	decode_t decode;
+	char name[96], refusal[128];
+
+	for (j = 0; j < sizeof(layouts) / sizeof(layouts[0]); j++) {
+		fixed = layouts[j].name_offset;
+		decode = layouts[j].decode;
+		out_size = layouts[j].out_size;
 		for (i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
 			n = counts[i];
+			snprintf(name, sizeof(name), "%s units=%zu",
+			    layouts[j].name, n);
 			size = fixed + 2 * n;
 			bzero(p, sizeof(p));
 			put_be(p, size - 2, 2);
-			put_be(p + (j == 0 ? 2 : 4), 0x89abcdef, 4);
-			if (j != 0)
-				put_be(p + 8, 0x12345678, 4);
+			put_be(p + layouts[j].id_offset, 0x89abcdef, 4);
+			if (layouts[j].attribute)
+				put_be(p + ATTRIBUTE_KEY_START, 0x12345678, 4);
 			put_be(p + fixed - 2, n, 2);
 			for (size_t k = 0; k < n; k++)
 				put_be(p + fixed + 2 * k, 0x3100 + k, 2);
-			if (n > limit || (j != 0 && n == 0)) {
-				reject(decode, p, size, out_size, "key unit bound");
+			if (n > layouts[j].limit ||
+			    (layouts[j].attribute && n == 0)) {
+				reject(decode, p, size, out_size, name);
 				continue;
 			}
-			check_span(decode, p, size, out_size, false,
-			    j == 0 ? "ckey" : "akey");
-			if (j == 0) {
-				case_check(hfsplus_ckey_decode(p, size, &c), "ckey fields", n);
+			check_span(decode, p, size, out_size, false, name);
+			if (!layouts[j].attribute) {
+				case_check(hfsplus_ckey_decode(p, size, &c),
+				    "catalog key decode", n);
 				case_check(c.parent == 0x89abcdef && c.units == n,
 				    "catalog key fields", n);
-				case_check(c.name == p + 8, "catalog name pointer", n);
+				case_check(c.name == p + CATALOG_KEY_NAME,
+				    "catalog name pointer", n);
 			} else {
-				case_check(hfsplus_akey_decode(p, size, &a), "akey fields", n);
+				case_check(hfsplus_akey_decode(p, size, &a),
+				    "attribute key decode", n);
 				case_check(a.file_id == 0x89abcdef && a.units == n,
 				    "attribute key fields", n);
-				case_check(a.start_block == 0x12345678 && a.name == p + 14,
+				case_check(a.start_block == 0x12345678 &&
+				    a.name == p + ATTRIBUTE_KEY_NAME,
 				    "attribute key block and pointer", n);
 			}
 			put_be(p, size, 2);
-			reject(decode, p, size + 2, out_size, "key length plus two");
+			snprintf(refusal, sizeof(refusal), "%s: length plus two", name);
+			reject(decode, p, size + 2, out_size, refusal);
 			put_be(p, size - 4, 2);
-			reject(decode, p, size, out_size, "key length minus two");
+			snprintf(refusal, sizeof(refusal), "%s: length minus two", name);
+			reject(decode, p, size, out_size, refusal);
 			put_be(p, 0xffff, 2);
-			reject(decode, p, size, out_size, "key length ffff");
+			snprintf(refusal, sizeof(refusal), "%s: length ffff", name);
+			reject(decode, p, size, out_size, refusal);
 			put_be(p, size - 2, 2);
 			put_be(p + fixed - 2, 0xffff, 2);
-			reject(decode, p, size, out_size, "name length ffff");
+			snprintf(refusal, sizeof(refusal), "%s: units ffff", name);
+			reject(decode, p, size, out_size, refusal);
 		}
 	}
 }
@@ -479,13 +527,13 @@ test_attributes(void)
 	reject(decode_attr, p, 20, sizeof(attr), "inline ffffffff");
 	put_be(p, 0x20, 4);
 	make_fork(p + 8, 0x31323334);
-	check_span(decode_attr, p, 88, sizeof(attr), false, "attribute fork");
+	check_span(decode_attr, p, 88, sizeof(attr), true, "attribute fork");
 	CHECK(hfsplus_attr_decode(p, 88, &attr));
 	CHECK(attr.type == 0x20 && attr.data_size == 0 && attr.data_offset == 0);
 	check_fork(&attr.fork, 0x31323334);
 	put_be(p, 0x30, 4);
 	make_extents(p + 8, 0x45464748);
-	check_span(decode_attr, p, 72, sizeof(attr), false, "attribute extents");
+	check_span(decode_attr, p, 72, sizeof(attr), true, "attribute extents");
 	CHECK(hfsplus_attr_decode(p, 72, &attr));
 	CHECK(attr.type == 0x30 && attr.data_size == 0 && attr.data_offset == 0);
 	check_extents(attr.extents, 0x45464748);
@@ -627,20 +675,15 @@ test_journals(void)
 
 /* Compression framing mixes little-endian metadata with resource BE words. */
 static void
-test_compression(void)
+test_compression_header(void)
 {
-	unsigned char p[24] = {0}, bad[16];
+	unsigned char p[16] = {0}, bad[16];
 	hfsplus_cmpf_t cmpf;
-	hfsplus_rsrc_t rsrc;
-	hfsplus_rsrc_table_t table;
-	hfsplus_chunk_t chunk, before;
-	uint32_t word, old;
 	size_t i;
-	static const uint32_t indices[] = {0, 1, 2, UINT32_MAX};
 
 	bcopy("fpmc", p, 4);
-	put_le(p + 4, 0x12345678, 4);
-	put_le(p + 8, UINT64_C(0x7fffffffffffffff), 8);
+	put_le(p + COMPRESSION_TYPE, 0x12345678, 4);
+	put_le(p + COMPRESSION_SIZE, UINT64_C(0x7fffffffffffffff), 8);
 	check_span(decode_cmpf, p, 16, sizeof(cmpf), false, "cmpf");
 	CHECK(hfsplus_cmpf_decode(p, 16, &cmpf));
 	CHECK(cmpf.type == 0x12345678);
@@ -650,33 +693,55 @@ test_compression(void)
 		bad[i] ^= 1;
 		reject(decode_cmpf, bad, 16, sizeof(cmpf), "cmpf magic byte");
 	}
-	put_le(p + 8, UINT64_C(0x8000000000000000), 8);
+	put_le(p + COMPRESSION_SIZE, UINT64_C(0x8000000000000000), 8);
 	reject(decode_cmpf, p, 16, sizeof(cmpf), "cmpf signed size bound");
+}
+
+static void
+test_resource_header(void)
+{
+	unsigned char p[16] = {0};
+	hfsplus_rsrc_t rsrc;
+	hfsplus_rsrc_table_t table;
+
 	put_be(p, 0x12345678, 4);
-	put_be(p + 4, 0x23456789, 4);
-	put_be(p + 8, 0x3456789a, 4);
-	put_be(p + 12, 0x456789ab, 4);
+	put_be(p + RESOURCE_MAP, 0x23456789, 4);
+	put_be(p + RESOURCE_DATA_LENGTH, 0x3456789a, 4);
+	put_be(p + RESOURCE_MAP_LENGTH, 0x456789ab, 4);
 	check_span(decode_rsrc, p, 16, sizeof(rsrc), false, "resource");
 	CHECK(hfsplus_rsrc_decode(p, 16, &rsrc));
 	CHECK(rsrc.data_offset == 0x12345678 && rsrc.map_offset == 0x23456789);
 	CHECK(rsrc.data_length == 0x3456789a && rsrc.map_length == 0x456789ab);
-	put_le(p + 4, 0x89abcdef, 4);
+	put_le(p + RESOURCE_MAP, 0x89abcdef, 4);
 	check_span(decode_rsrc_table, p, 8, sizeof(table), false, "resource table");
 	CHECK(hfsplus_rsrc_table_decode(p, 8, &table));
 	CHECK(table.resource_length == 0x12345678 && table.chunk_count == 0x89abcdef);
-	put_le(p + 8, 0x12345678, 4);
-	put_le(p + 12, 0x23456789, 4);
-	put_le(p + 16, 0x3456789a, 4);
-	put_le(p + 20, 0x456789ab, 4);
-	/* The entry array starts after the separately decoded table header. */
-	check_span(decode_pair, p + 8, 8, sizeof(chunk), false, "chunk pair");
-	check_span(decode_word, p + 8, 4, sizeof(word), false, "chunk word");
+}
+
+static void
+test_chunk_index_bounds(void)
+{
+	unsigned char p[16] = {0};
+	hfsplus_chunk_t chunk, before;
+	uint32_t word, old;
+	size_t i;
+	static const uint32_t indices[] = {
+		0, 1, 2, 0x20000000, 0x40000000, UINT32_MAX
+	};
+
+	put_le(p, 0x12345678, 4);
+	put_le(p + 4, 0x23456789, 4);
+	put_le(p + 8, 0x3456789a, 4);
+	put_le(p + 12, 0x456789ab, 4);
+	/* These spans begin at the first entry, after the table header. */
+	check_span(decode_pair, p, 8, sizeof(chunk), false, "chunk pair");
+	check_span(decode_word, p, 4, sizeof(word), false, "chunk word");
 	for (i = 0; i < sizeof(indices) / sizeof(indices[0]); i++) {
 		memset(&chunk, 0xa5, sizeof(chunk));
 		bcopy(&chunk, &before, sizeof(chunk));
 		word = old = 0xa5a5a5a5;
 		if (indices[i] < 2) {
-			case_check(hfsplus_chunk_pair_decode(p + 8, 16,
+			case_check(hfsplus_chunk_pair_decode(p, 16,
 			    indices[i], &chunk), "pair decode", indices[i]);
 			case_check(chunk.offset ==
 			    (indices[i] == 0 ? 0x12345678u : 0x3456789au),
@@ -684,33 +749,132 @@ test_compression(void)
 			case_check(chunk.length ==
 			    (indices[i] == 0 ? 0x23456789u : 0x456789abu),
 			    "pair length LE", indices[i]);
-			case_check(hfsplus_chunk_word_decode(p + 8, 8,
+			case_check(hfsplus_chunk_word_decode(p, 8,
 			    indices[i], &word), "word decode", indices[i]);
 			case_check(word ==
 			    (indices[i] == 0 ? 0x12345678u : 0x23456789u),
 			    "word value LE", indices[i]);
 		} else {
-			case_check(!hfsplus_chunk_pair_decode(p + 8, 16, indices[i], &chunk),
+			case_check(!hfsplus_chunk_pair_decode(p, 16, indices[i], &chunk),
 			    "pair index", indices[i]);
 			case_check(bcmp(&chunk, &before, sizeof(chunk)) == 0,
 			    "pair failure atomicity", indices[i]);
-			case_check(!hfsplus_chunk_word_decode(p + 8, 8, indices[i], &word),
+			case_check(!hfsplus_chunk_word_decode(p, 8, indices[i], &word),
 			    "word index", indices[i]);
 			case_check(word == old, "word failure atomicity", indices[i]);
 		}
 	}
 }
 
+/* Constructors own their units and reject oversized names atomically. */
+static void
+test_search_key_bounds(void)
+{
+	static const struct {
+		const char *name;
+		bool attribute;
+		uint16_t bound;
+	} rows[] = {
+		{ "catalog constructor", false, 255 },
+		{ "attribute constructor", true, 127 }
+	};
+	unsigned char name[512];
+	hfsplus_key_t key, before;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	for (size_t i = 0; i < sizeof(name); i++)
+		name[i] = (unsigned char)i;
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		for (unsigned extra = 0; extra < 2; extra++) {
+			memset(&key, 0xa5, sizeof(key));
+			bcopy(&key, &before, sizeof(key));
+			uint16_t units = rows[i].bound + extra;
+			status = rows[i].attribute ? hfsplus_attribute_key_init(
+			    &key, 32, 9, name, units, &error) :
+			    hfsplus_catalog_key_init(&key, 2, name, units, &error);
+			case_check(status == (extra == 0 ? FSIMG_OK :
+			    FSIMG_ECORRUPT), rows[i].name, units);
+			if (extra != 0)
+				case_check(bcmp(&key, &before, sizeof(key)) == 0,
+				    rows[i].name, units);
+			else if (rows[i].attribute)
+				case_check(key.attribute.file_id == 32 &&
+				    key.attribute.start_block == 9 &&
+				    key.attribute.units == units &&
+				    bcmp(key.attribute.name, name, 2 * units) == 0,
+				    rows[i].name, units);
+			else
+				case_check(key.catalog.parent == 2 &&
+				    key.catalog.units == units &&
+				    bcmp(key.catalog.name, name, 2 * units) == 0,
+				    rows[i].name, units);
+		}
+		status = rows[i].attribute ? hfsplus_attribute_key_init(
+		    &key, 32, 9, NULL, 0, &error) :
+		    hfsplus_catalog_key_init(&key, 2, NULL, 0, &error);
+		case_check(status == FSIMG_OK && (rows[i].attribute ?
+		    key.attribute.units : key.catalog.units) == 0,
+		    rows[i].name, 0);
+	}
+}
+
+/* The design lists an attribute pad, without a zero-value requirement. */
+static void
+test_attribute_key_pad(void)
+{
+	unsigned char raw[16] = {0};
+	hfsplus_akey_t key;
+
+	put_be(raw, 14, 2);
+	put_be(raw + ATTRIBUTE_KEY_PAD, 0x1234, 2);
+	put_be(raw + ATTRIBUTE_KEY_FILE_ID, 32, 4);
+	put_be(raw + ATTRIBUTE_KEY_UNITS, 1, 2);
+	put_be(raw + ATTRIBUTE_KEY_NAME, 'a', 2);
+	case_check(hfsplus_akey_decode(raw, sizeof(raw), &key),
+	    "attribute nonzero pad accepted", sizeof(raw));
+	CHECK(key.file_id == 32 && key.units == 1 && key.name == raw + ATTRIBUTE_KEY_NAME);
+}
+
+static void
+test_older_journal_magic(void)
+{
+	static const struct {
+		const char *name;
+		unsigned char bytes[4];
+		size_t length;
+		bool older;
+	} rows[] = {
+		{ "older big endian", {0x4a, 0x48, 0x44, 0x52}, 4, true },
+		{ "older little endian", {0x52, 0x44, 0x48, 0x4a}, 4, true },
+		{ "older short buffer", {0x4a, 0x48, 0x44, 0x52}, 3, false },
+		{ "empty buffer", {0}, 0, false },
+		{ "current magic", {0x4a, 0x4e, 0x4c, 0x78}, 4, false }
+	};
+
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+		case_check(hfsplus_journal_is_older_form(rows[i].bytes,
+		    rows[i].length) == rows[i].older, rows[i].name,
+		    rows[i].length);
+}
+
 int
 main(void)
+
 {
 	test_header_and_forks();
 	test_tree_headers();
-	test_keys();
+	test_extent_keys();
+	test_named_key_framing();
+	test_search_key_bounds();
+	test_attribute_key_pad();
+	test_older_journal_magic();
 	test_catalog_records();
 	test_attributes();
 	test_locations();
 	test_journals();
-	test_compression();
+	test_compression_header();
+	test_resource_header();
+	test_chunk_index_bounds();
 	return (0);
 }

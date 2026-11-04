@@ -417,8 +417,10 @@ catalog 4096 up to 128 MiB and at 1 GiB with blocks of 512 to 2048, 8192 at
 1 GiB with blocks of 4096 and above (E1); volumes from 2001 to 2003 have
 extents nodes of 1024 and catalog nodes of 4096 (E10). The
 bad-close flag (`0x01`) is accepted and makes the volume unclean in `info`.
-Other flag bits, another `keyCompareType`, `btreeType` or `maxKeyLength`
-are `FSIMG_EUNSUPPORTED` until observed. HFSX's comparison is
+A power-of-two `nodeSize` outside the tree's range, other flag bits, another
+`keyCompareType`, `btreeType` or `maxKeyLength` are `FSIMG_EUNSUPPORTED`
+until observed; a `nodeSize` that is no power of two is `FSIMG_ECORRUPT`.
+HFSX's comparison is
 taken from the catalog header, never inferred from the `HX` signature: an
 HFSX volume can be case-insensitive. [TN], [HF]
 
@@ -1178,6 +1180,10 @@ its offset counted from the embedded volume's start as E11 records it.
 
 ### Journal header
 
+macOS's journal code also accepts an older `magic`, `0x4A484452`, at open and
+at replay, converts it to the current value and checks the checksum only of a
+current header. The reader refuses it. [HJ]
+
 At the journal's offset is a 44-byte header: `magic` `0x4A4E4C78`, `endian`
 `0x12345678`, `start` (8), `end` (8), `size` (8), `blhdr_size` (4),
 `checksum` (4) and `jhdr_size` (4). The journal writes its header in the
@@ -1214,7 +1220,12 @@ it; the rule stands unless one does. [TN], [R]
 | Journaled; wrapped volume; local journal (flag `0x1`) | `FSIMG_EUNSUPPORTED`: macOS's own paths disagree on the stored offset's base, so fsimg cannot establish which location controls replay |
 | Journaled; `start != end` after the wrap rule | `FSIMG_EUNSUPPORTED`: the base structures may be stale until a mount replays the journal (the volume header of E8's interrupted image counts 1135 files and the replay makes it 1137) |
 | Journaled; flag `0x2` | `FSIMG_EUNSUPPORTED`: the journal is on another device |
+| Journaled; header magic `0x4A484452`, in either byte order | `FSIMG_EUNSUPPORTED`: an older journal header form the reader does not decode |
 | Journaled; info block or header invalid, `.journal` missing, or its fork disagreeing with the info block | `FSIMG_ECORRUPT` |
+
+Open checks the header and the trees before the journal, so a pending
+journal's stale base structures can fail one of those earlier checks with
+`FSIMG_ECORRUPT` instead of reaching the refusal above, as that order requires.
 
 A volume whose journaling `diskutil disableJournal` turned off has bit 13
 clear, no journal files and `journalInfoBlock` still set (E8); the first
@@ -1578,6 +1589,7 @@ Provenance details are in the research record.
 [HF]: https://github.com/apple-oss-distributions/hfs/blob/main/core/hfs_format.h
 [NB]: https://github.com/NetBSD/src/blob/trunk/sys/fs/hfs/libhfs.c
 [HL]: https://github.com/apple-oss-distributions/hfs/blob/main/core/hfs_link.c
+[HJ]: https://github.com/apple-oss-distributions/hfs/blob/main/core/hfs_journal.c
 [DC]: https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/decmpfs.h
 [UC]: https://www.unicode.org/Public/3.2-Update/UnicodeData-3.2.0.txt
 [R]: ../docs/hfsplus-plan.md#1-native-evidence-corpus

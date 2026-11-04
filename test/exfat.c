@@ -709,7 +709,37 @@ test_label_validation(void)
 			CHECK(writer == NULL);
 		}
 		fixture_free(&f);
+	}	/* Eleven three-byte BMP characters fit the 33-byte UTF-8 bound. */
+	static const struct {
+		const char *name;
+		const char *label;
+		fsimg_status_t expected;
+	} rows[] = {
+		{ "11 ASCII label units", "abcdefghijk", FSIMG_OK },
+		{ "33 UTF-8 label bytes",
+		    "\xe4\xb8\x80\xe4\xb8\x80\xe4\xb8\x80"
+		    "\xe4\xb8\x80\xe4\xb8\x80\xe4\xb8\x80"
+		    "\xe4\xb8\x80\xe4\xb8\x80\xe4\xb8\x80"
+		    "\xe4\xb8\x80\xe4\xb8\x80", FSIMG_OK },
+		{ "34 UTF-8 label bytes",
+		    "\xe4\xb8\x80\xe4\xb8\x80\xe4\xb8\x80"
+		    "\xe4\xb8\x80\xe4\xb8\x80\xe4\xb8\x80"
+		    "\xe4\xb8\x80\xe4\xb8\x80\xe4\xb8\x80"
+		    "\xe4\xb8\x80\xe4\xb8\x80x", FSIMG_EINVAL }
+	};
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		fixture_new(&f);
+		fsimg_write_options_init(&options);
+		options.label = rows[i].label;
+		status = fsimg_writer_new(f.ctx, "exfat", &options, &writer, NULL);
+		if (status != rows[i].expected)
+			fprintf(stderr, "%s: expected %d, got %d\n",
+			    rows[i].name, rows[i].expected, status);
+		CHECK(status == rows[i].expected);
+		fsimg_writer_free(writer);
+		fixture_free(&f);
 	}
+
 }
 
 static void

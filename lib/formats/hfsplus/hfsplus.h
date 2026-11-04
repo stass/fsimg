@@ -132,8 +132,8 @@ typedef struct hfsplus_ekey {
 	uint8_t		 fork_type;	/* 0x00 data, 0xff resource */
 } hfsplus_ekey_t;
 
-/* A catalog key. name borrows the big-endian units from the decoded buffer
- * and is valid as long as that buffer's contents are.
+/* A catalog key as a record stores it. name borrows the big-endian units from
+ * the decoded buffer and is valid as long as that buffer's contents are.
  */
 typedef struct hfsplus_ckey {
 	const unsigned char	*name;
@@ -191,7 +191,7 @@ typedef struct hfsplus_thread {
 	uint16_t		 units;
 } hfsplus_thread_t;
 
-/* An attribute key. name borrows as in hfsplus_ckey_t. */
+/* An attribute key as a record stores it. name borrows as in hfsplus_ckey_t. */
 typedef struct hfsplus_akey {
 	const unsigned char	*name;
 	uint32_t		 file_id;
@@ -273,11 +273,22 @@ typedef enum hfsplus_compare {
 	HFSPLUS_COMPARE_BINARY
 } hfsplus_compare_t;
 
-/* Record decoders (codec.c). Each takes a record's bytes and their length,
- * returns false when the length or a field that frames the record is wrong,
- * and then leaves its output untouched. A decoder reads nothing past length.
- * The false return is FSIMG_ECORRUPT in every caller. Field values are
- * otherwise the caller's to validate.
+/* Record decoders (codec.c). Each takes bytes and their length, returns false
+ * when the length or a field that frames the record is wrong, and then leaves
+ * its output untouched. A decoder reads nothing past length. The false return
+ * is FSIMG_ECORRUPT in every caller. Field values are otherwise the caller's
+ * to validate.
+ *
+ * length means one of three things:
+ * - The exact record: the extents, folder, file and thread records and the
+ *   fork and extents attribute records are refused at any other length. An
+ *   inline attribute record's value must fit, and bytes after it are accepted.
+ * - A minimum buffer: the header, fork data, node descriptor, B-tree header,
+ *   journal info block, journal header, master directory block, catalog type,
+ *   compression header, resource header and chunk table header read a fixed
+ *   prefix of what may be a longer buffer.
+ * - The span a key must fit: the three key decoders, whose own length field
+ *   says how many bytes the key takes.
  */
 bool hfsplus_header_decode(const unsigned char *, size_t, hfsplus_header_t *);
 bool hfsplus_fork_decode(const unsigned char *, size_t, hfsplus_fork_t *);
@@ -296,14 +307,20 @@ bool hfsplus_attr_decode(const unsigned char *, size_t, hfsplus_attr_t *);
 bool hfsplus_jib_decode(const unsigned char *, size_t, hfsplus_jib_t *);
 bool hfsplus_journal_decode(const unsigned char *, size_t,
     hfsplus_journal_t *);
+/* Whether the buffer starts with the older journal magic in either byte order:
+ * a header form the reader refuses rather than decodes.
+ */
+bool hfsplus_journal_is_older_form(const unsigned char *, size_t);
 bool hfsplus_mdb_decode(const unsigned char *, size_t, hfsplus_mdb_t *);
 bool hfsplus_cmpf_decode(const unsigned char *, size_t, hfsplus_cmpf_t *);
 bool hfsplus_rsrc_decode(const unsigned char *, size_t, hfsplus_rsrc_t *);
 bool hfsplus_rsrc_table_decode(const unsigned char *, size_t,
     hfsplus_rsrc_table_t *);
-/* Entry index of a table whose bytes and length are given: the pairs of a
- * type 4 table, which begin after hfsplus_rsrc_table_t, or the words of a
- * type 8 or 12 table, which begin at the fork's start.
+/* hfsplus_chunk_pair_decode() and hfsplus_chunk_word_decode(), given (table,
+ * table_bytes, index, out), decode entry `index` of a chunk table, false when
+ * it lies outside table_bytes. table is the first entry: for a
+ * pair, of a type 4 table, the byte after hfsplus_rsrc_table_t; for a word, of
+ * a type 8 or 12 table, the fork's start.
  */
 bool hfsplus_chunk_pair_decode(const unsigned char *, size_t, uint32_t,
     hfsplus_chunk_t *);
@@ -474,14 +491,28 @@ typedef enum hfsplus_tree_kind {
 	HFSPLUS_TREE_ATTRIBUTES
 } hfsplus_tree_kind_t;
 
-/* A search key; the member is the one the tree's kind selects. Name
- * pointers borrow from the caller, which keeps them away from the buffer the
- * search reads into.
+/* The search keys of the named trees own their big-endian units, so nothing a
+ * search reads can change the key it is looking for. A key is filled only by
+ * hfsplus_catalog_key_init() or hfsplus_attribute_key_init().
  */
+typedef struct hfsplus_catalog_search {
+	unsigned char	 name[2 * HFSPLUS_NAME_UNITS_MAX];
+	uint32_t	 parent;
+	uint16_t	 units;
+} hfsplus_catalog_search_t;
+
+typedef struct hfsplus_attribute_search {
+	unsigned char	 name[2 * HFSPLUS_ATTR_NAME_UNITS_MAX];
+	uint32_t	 file_id;
+	uint32_t	 start_block;
+	uint16_t	 units;
+} hfsplus_attribute_search_t;
+
+/* A search key; the member is the one the tree's kind selects. */
 typedef union hfsplus_key {
-	hfsplus_ekey_t	 extents;
-	hfsplus_ckey_t	 catalog;
-	hfsplus_akey_t	 attribute;
+	hfsplus_ekey_t			 extents;
+	hfsplus_catalog_search_t	 catalog;
+	hfsplus_attribute_search_t	 attribute;
 } hfsplus_key_t;
 
 /* One tree: the fork index its nodes are read through, its validated header
@@ -584,8 +615,9 @@ fsimg_status_t hfsplus_header_check(const hfsplus_header_t *, uint64_t,
  *
  * hfsplus_fork_index(reader, file_id, fork_type, fork, index, records, error)
  * builds a new extent index of the fork's blocks, inline then overflow, in
- * logical order, NULL for a fork of zero blocks. *records is the number of
- * overflow records it consumed; it may be NULL. Every failure leaves no index.
+ * logical order, NULL for a fork of zero blocks. *records, which verification
+ * sums and open passes NULL for, is the number of overflow records it consumed.
+ * Every failure leaves no index and no records.
  * A fork that needs overflow requires the extents tree to be open. The extents
  * tree's own fork (HFSPLUS_ID_EXTENTS) must sum to totalBlocks inline, so
  * resolving it never reads it.
@@ -602,14 +634,18 @@ fsimg_status_t hfsplus_fork_read(fsimg_reader_t *, fsimg_extent_index_t *,
 
 /* The B-tree reader (btree.c), the only code that interprets node framing.
  *
- * hfsplus_tree_open() takes the tree whose kind and fork the caller set, reads
- * node 0, checks it against the tree parameter table and that totalNodes * M
- * is the fork's logical_size, and allocates the search buffer.
+ * hfsplus_tree_open(reader, tree, kind, id, fork, error) sets every field of
+ * the tree but a catalog's compare, which is the volume's choice from the
+ * header: it resolves the data fork of file `id`, reads node 0, checks it
+ * against the tree parameter table and that totalNodes * M is the fork's
+ * logical_size, and allocates the search buffer. A fork of zero blocks leaves
+ * the tree absent, which is not a failure; the caller decides whether it may
+ * be.
  * hfsplus_tree_free() releases the buffer and the fork index of a tree in any
  * state.
  */
 fsimg_status_t hfsplus_tree_open(fsimg_reader_t *, hfsplus_tree_t *,
-    uint64_t, fsimg_error_t *);
+    hfsplus_tree_kind_t, uint32_t, const hfsplus_fork_t *, fsimg_error_t *);
 void hfsplus_tree_free(hfsplus_tree_t *);
 
 /* Read and validate node `number` into a buffer of the tree's node size: its
@@ -631,8 +667,21 @@ void hfsplus_node_record(const hfsplus_tree_t *, const unsigned char *,
  * when no record is. Height strictly decreases on the descent, so it ends
  * within the tree's depth.
  *
- * hfsplus_btree_find() is the search for an exact key: *found says whether the
- * cursor stands on a record carrying it.
+ * hfsplus_btree_find_equivalent() is that search, with *found saying whether
+ * the record reached ranks equal to the key in the tree's order. On a folded
+ * catalog that is a name folding equal, possibly another spelling, which is
+ * what a path component selects.
+ *
+ * hfsplus_catalog_find_exact(catalog, key, record, found, error) is the one
+ * lookup of exactly the stored units, for the format-owned files and threads:
+ * *found says whether the record reached carries them. It reads into the
+ * catalog's search buffer, from which *record borrows until the next search.
+ *
+ * hfsplus_catalog_key_init(key, parent, name, units, error) and
+ * hfsplus_attribute_key_init(key, file_id, start_block, name, units, error)
+ * copy a stored name into a search key, so the name may then be overwritten.
+ * name may be NULL with no units. A name over its tree's bound is
+ * FSIMG_ECORRUPT and leaves the key untouched.
  *
  * hfsplus_cursor_next() moves to the next record, along fLink past a leaf's
  * last, requiring each next leaf's bLink to name the one left and refusing more
@@ -642,15 +691,23 @@ void hfsplus_node_record(const hfsplus_tree_t *, const unsigned char *,
 void hfsplus_cursor_init(hfsplus_cursor_t *, hfsplus_tree_t *, unsigned char *);
 fsimg_status_t hfsplus_btree_search(hfsplus_cursor_t *, const hfsplus_key_t *,
     fsimg_error_t *);
-fsimg_status_t hfsplus_btree_find(hfsplus_cursor_t *, const hfsplus_key_t *,
-    bool *, fsimg_error_t *);
+fsimg_status_t hfsplus_btree_find_equivalent(hfsplus_cursor_t *,
+    const hfsplus_key_t *, bool *, fsimg_error_t *);
+fsimg_status_t hfsplus_catalog_find_exact(hfsplus_tree_t *,
+    const hfsplus_key_t *, hfsplus_record_t *, bool *, fsimg_error_t *);
+fsimg_status_t hfsplus_catalog_key_init(hfsplus_key_t *, uint32_t,
+    const unsigned char *, size_t, fsimg_error_t *);
+fsimg_status_t hfsplus_attribute_key_init(hfsplus_key_t *, uint32_t, uint32_t,
+    const unsigned char *, size_t, fsimg_error_t *);
 fsimg_status_t hfsplus_cursor_next(hfsplus_cursor_t *, fsimg_error_t *);
 fsimg_status_t hfsplus_cursor_record(const hfsplus_cursor_t *,
     hfsplus_record_t *, fsimg_error_t *);
 
 /* Open (volume.c): the fixed step order of the driver design, with the journal
  * step apart. hfsplus_journal_open() applies the info block's flags table to
- * the open catalog.
+ * the open catalog. It is external, and the reader's wrapped field settable,
+ * only so tests can reach the table's wrapped row, which open cannot while it
+ * refuses every wrapper at its first step.
  */
 fsimg_status_t hfsplus_volume_open(fsimg_reader_t *,
     const fsimg_format_variant_t *, fsimg_error_t *);

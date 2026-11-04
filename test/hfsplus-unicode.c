@@ -502,29 +502,11 @@ test_capture_vectors(void)
 
 /* Excluded BMP ranges and all supplementary values retain their units. */
 static void
-test_decomposition_boundaries(void)
+test_decomposition_exclusions(void)
 {
-	static const uint32_t supplementary[] = {
-		0x1d15e, 0x1d15f, 0x1d160, 0x1d161, 0x1d162, 0x1d163,
-		0x1d164, 0x1d1bb, 0x1d1bc, 0x1d1bd, 0x1d1be, 0x1d1bf, 0x1d1c0,
-		0x10000, 0x1f600, 0x10ffff
-	};
-	static const name_vector_t examples[] = {
-		{ .name = "class zero expands before sort",
-		  .input = {0x61, 0x0f72, 0x0f73}, .input_count = 3,
-		  .stored = {0x61, 0x0f71, 0x0f72, 0x0f72}, .stored_count = 4 },
-		{ .name = "mark then supplementary",
-		  .input = {0x61, 0x0300, 0xd834, 0xdd65}, .input_count = 4,
-		  .stored = {0x61, 0x0300, 0xd834, 0xdd65}, .stored_count = 4 },
-		{ .name = "supplementary then mark",
-		  .input = {0x61, 0xd834, 0xdd65, 0x0300}, .input_count = 4,
-		  .stored = {0x61, 0xd834, 0xdd65, 0x0300}, .stored_count = 4 }
-	};
-	uint16_t input[255], actual[766], expected[255], unit, pair[2];
-	unsigned char before[8], after[8];
+	uint16_t unit, actual[3];
 	uint32_t u;
-	size_t i, n, k;
-	const name_vector_t *row;
+	size_t n;
 
 	for (u = 0x2000; u <= 0xfaff; u++) {
 		if (u > 0x2fff && u < 0xf900)
@@ -535,6 +517,20 @@ test_decomposition_boundaries(void)
 		case_check(hfsplus_decompose(&unit, 1, actual, 1, &n) &&
 		    n == 1 && actual[0] == unit, "excluded name", u, n);
 	}
+}
+
+static void
+test_supplementary_decomposition(void)
+{
+	static const uint32_t supplementary[] = {
+		0x1d15e, 0x1d15f, 0x1d160, 0x1d161, 0x1d162, 0x1d163,
+		0x1d164, 0x1d1bb, 0x1d1bc, 0x1d1bd, 0x1d1be, 0x1d1bf, 0x1d1c0,
+		0x10000, 0x1f600, 0x10ffff
+	};
+	uint16_t pair[2], actual[3];
+	uint32_t u;
+	size_t i, n;
+
 	for (i = 0; i < sizeof(supplementary) / sizeof(supplementary[0]); i++) {
 		u = supplementary[i] - 0x10000;
 		pair[0] = (uint16_t)(0xd800 + (u >> 10));
@@ -543,6 +539,30 @@ test_decomposition_boundaries(void)
 		    n == 2 && bcmp(pair, actual, sizeof(pair)) == 0,
 		    "supplementary pair", supplementary[i], n);
 	}
+}
+
+static void
+test_decomposition_mark_boundaries(void)
+{
+	static const name_vector_t examples[] = {
+		{ .name = "leading combining marks",
+		  .input = {0x0301, 0x0323, 0x61}, .input_count = 3,
+		  .stored = {0x0323, 0x0301, 0x61}, .stored_count = 3 },
+		{ .name = "class zero expands before sort",
+		  .input = {0x61, 0x0f72, 0x0f73}, .input_count = 3,
+		  .stored = {0x61, 0x0f71, 0x0f72, 0x0f72}, .stored_count = 4 },
+		{ .name = "mark then supplementary",
+		  .input = {0x61, 0x0300, 0xd834, 0xdd65}, .input_count = 4,
+		  .stored = {0x61, 0x0300, 0xd834, 0xdd65}, .stored_count = 4 },
+		{ .name = "supplementary then mark",
+		  .input = {0x61, 0xd834, 0xdd65, 0x0300}, .input_count = 4,
+		  .stored = {0x61, 0xd834, 0xdd65, 0x0300}, .stored_count = 4 }
+	};
+	uint16_t actual[8];
+	unsigned char before[8], after[8];
+	size_t i, n;
+	const name_vector_t *row;
+
 	for (i = 0; i < sizeof(examples) / sizeof(examples[0]); i++) {
 		row = &examples[i];
 		case_check(hfsplus_decompose(row->input, row->input_count,
@@ -550,6 +570,21 @@ test_decomposition_boundaries(void)
 		    bcmp(actual, row->stored, n * sizeof(*actual)) == 0,
 		    row->name, row->input[0], row->input_count);
 	}
+	/* Sorting cannot cross the supplementary pair, in either direction. */
+	store_units(examples[2].stored, 4, before);
+	store_units(examples[3].stored, 4, after);
+	CHECK(hfsplus_name_compare(HFSPLUS_COMPARE_FOLDED,
+	    before, 4, after, 4) != 0);
+	CHECK(hfsplus_name_compare(HFSPLUS_COMPARE_BINARY,
+	    before, 4, after, 4) != 0);
+}
+
+static void
+test_decomposition_capacity(void)
+{
+	uint16_t unit, actual[4];
+	size_t i, n;
+
 	unit = 0x01fa; /* A + ring above + acute: a three-unit table entry. */
 	memset(actual, 0xa5, sizeof(actual));
 	CHECK(hfsplus_decompose(&unit, 1, actual, 3, &n));
@@ -560,6 +595,14 @@ test_decomposition_boundaries(void)
 		CHECK(!hfsplus_decompose(&unit, 1, actual, i, &n));
 		case_check(actual[i] == 0xa5a5, "capacity guard", unit, i);
 	}
+}
+
+static void
+test_long_hangul_decomposition(void)
+{
+	uint16_t input[255], actual[766];
+	size_t i, n;
+
 	for (i = 0; i < 255; i++)
 		input[i] = 0xac01; /* Three jamo each. */
 	CHECK(!hfsplus_decompose(input, 255, actual, 255, &n));
@@ -567,6 +610,14 @@ test_decomposition_boundaries(void)
 	for (i = 0; i < 765; i += 3)
 		case_check(actual[i] == 0x1100 && actual[i + 1] == 0x1161 &&
 		    actual[i + 2] == 0x11a8, "long Hangul", 0xac01, i);
+}
+
+static void
+test_combining_run_stable_sort(void)
+{
+	uint16_t input[255], actual[255], expected[255];
+	size_t i, n, k;
+
 	/* Classes 240, 230 (two alternating marks), 220, 1, descending. */
 	for (i = 0; i < 51; i++) {
 		input[i] = 0x0345;
@@ -586,13 +637,6 @@ test_decomposition_boundaries(void)
 		expected[k++] = input[i];
 	CHECK(hfsplus_decompose(input, 255, actual, 255, &n) && n == 255);
 	CHECK(bcmp(actual, expected, sizeof(expected)) == 0);
-	/* Sorting cannot cross the supplementary pair, in either direction. */
-	store_units(examples[1].stored, 4, before);
-	store_units(examples[2].stored, 4, after);
-	CHECK(hfsplus_name_compare(HFSPLUS_COMPARE_FOLDED,
-	    before, 4, after, 4) != 0);
-	CHECK(hfsplus_name_compare(HFSPLUS_COMPARE_BINARY,
-	    before, 4, after, 4) != 0);
 }
 
 /* Stored slash and NUL exchange with colon and U+2400, without a terminator. */
@@ -644,11 +688,27 @@ test_name_admission(void)
 {
 	static const struct {
 		const char *name;
-		uint16_t units[12];
+		uint16_t units[32];
 		size_t count;
 		fsimg_status_t status;
 	} rows[] = {
 		{ .name = "empty", .count = 0, .status = FSIMG_ECORRUPT },
+		{ .name = "private data folder",
+		  .units = {0, 0, 0, 0, 'H', 'F', 'S', '+', ' ', 'P', 'r',
+		      'i', 'v', 'a', 't', 'e', ' ', 'D', 'a', 't', 'a'},
+		  .count = 21, .status = FSIMG_OK },
+		{ .name = "private directory folder",
+		  .units = {'.', 'H', 'F', 'S', '+', ' ', 'P', 'r', 'i', 'v',
+		      'a', 't', 'e', ' ', 'D', 'i', 'r', 'e', 'c', 't', 'o',
+		      'r', 'y', ' ', 'D', 'a', 't', 'a', 0xd},
+		  .count = 29, .status = FSIMG_OK },
+		{ .name = "FFFE", .units = {0xfffe}, .count = 1,
+		  .status = FSIMG_OK },
+		{ .name = "FFFF", .units = {0xffff}, .count = 1,
+		  .status = FSIMG_OK },
+		{ .name = "ESC", .units = {0x1b}, .count = 1,
+		  .status = FSIMG_OK },
+
 		{ .name = "high surrogate", .units = {0xd800}, .count = 1,
 		  .status = FSIMG_ECORRUPT },
 		{ .name = "low surrogate", .units = {0xdc00}, .count = 1,
@@ -968,13 +1028,46 @@ test_key_bounds(void)
 	}
 }
 
+/* Walk the independent L/V/T product in lexical order. The observed jamo
+ * tuple must advance once per syllable, with no omissions or duplicates.
+ */
+static void
+test_hangul_sweep(void)
+{
+	uint16_t actual[3], syllable = 0xac00;
+	size_t count, visited = 0;
+
+	for (uint16_t leading = 0x1100; leading <= 0x1112; leading++) {
+		for (uint16_t vowel = 0x1161; vowel <= 0x1175; vowel++) {
+			/* 0 means no trailing jamo, followed by all 27 trails. */
+			for (unsigned trail = 0; trail <= 27; trail++) {
+				count = hfsplus_unit_decompose(syllable, actual);
+				case_check(count == (trail == 0 ? 2u : 3u) &&
+				    actual[0] == leading && actual[1] == vowel &&
+				    (trail == 0 || actual[2] == 0x11a7 + trail),
+				    "Hangul L/V/T product", syllable, count);
+				visited++;
+				syllable++;
+			}
+		}
+	}
+	CHECK(visited == 11172 && syllable == 0xd7a4);
+}
+
 int
-main(void)
+main(
+void)
 {
 	test_table_digests();
 	test_hangul();
 	test_capture_vectors();
-	test_decomposition_boundaries();
+	test_decomposition_exclusions();
+	test_supplementary_decomposition();
+	test_decomposition_mark_boundaries();
+	test_decomposition_capacity();
+	test_long_hangul_decomposition();
+	test_combining_run_stable_sort();
+	test_hangul_sweep();
 	test_path_exchanges();
 	test_name_admission();
 	test_comparators();

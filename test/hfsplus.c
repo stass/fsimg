@@ -13,12 +13,42 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "format.h"
 #include "hfsplus-gen.h"
 #include "hfsplus.h"
 #include "reader.h"
 #include "test.h"
+
+/* Byte positions from the volume, B-tree and catalog layout tables. */
+enum {
+	VOLUME_HEADER = 1024,
+	VOLUME_ATTRIBUTES = VOLUME_HEADER + 4,
+	VOLUME_MOUNTED = VOLUME_HEADER + 8,
+	VOLUME_JIB = VOLUME_HEADER + 12,
+	VOLUME_FREE_BLOCKS = VOLUME_HEADER + 48,
+	VOLUME_NEXT_ID = VOLUME_HEADER + 64,
+	NODE_DESCRIPTOR = 14,
+	NODE_KIND = 8,
+	NODE_HEIGHT = 9,
+	NODE_RECORDS = 10,
+	TREE_ROOT = 2,
+	TREE_FIRST_LEAF = 10,
+	TREE_LAST_LEAF = 14,
+	TREE_NODE_SIZE = 18,
+	TREE_MAX_KEY = 20,
+	TREE_TOTAL_NODES = 22,
+	FORK_BLOCKS = 12,
+	FORK_START = 16,
+	FORK_COUNT = 20,
+	FILE_DATA_FORK = 88,
+	FILE_RESOURCE_FORK = 168,
+	JIB_OFFSET = 36,
+	JIB_SIZE = 44,
+	JOURNAL_CHECKSUM = 36,
+	CATALOG_NAME = 8
+};
 
 /* Tests collect failures so an engine defect does not hide later cases. */
 static unsigned failures;
@@ -42,6 +72,7 @@ typedef struct mutation {
 	uint64_t	 value;
 	unsigned	 width;
 	fsimg_status_t	 expected;
+	const char	*diagnostic;
 } mutation_t;
 
 static void expect_status(const char *, fsimg_status_t, fsimg_status_t,
@@ -200,7 +231,7 @@ static fsimg_status_t
 image_open(const gen_image_t *image, int forced, bool assume)
 {
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 	fsimg_status_t status;
 
 	fixture_init(&f, image, 0, 0);
@@ -213,7 +244,7 @@ static fsimg_status_t
 image_probe(const gen_image_t *image)
 {
 	const fsimg_format_variant_t *variant;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 
 	return (fsimg_hfsplus_format.probe(image->bytes,
 	    image->length < 1536 ? image->length : 1536, image->length,
@@ -224,7 +255,7 @@ static void
 mutate_open(gen_image_t *image, const mutation_t *mutation)
 {
 	unsigned char saved[8];
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 	fixture_t f;
 	fsimg_status_t status;
 
@@ -236,6 +267,13 @@ mutate_open(gen_image_t *image, const mutation_t *mutation)
 	fixture_init(&f, image, 0, 0);
 	status = fixture_open(&f, -1, false, &error);
 	expect_status(mutation->name, status, mutation->expected, &error);
+	if (mutation->diagnostic != NULL) {
+		if (strstr(error.message, mutation->diagnostic) == NULL)
+			fprintf(stderr, "%s: diagnostic: %s\n",
+			    mutation->name, error.message);
+		expect_true(mutation->name,
+		    strstr(error.message, mutation->diagnostic) != NULL);
+	}
 	fixture_close(&f);
 	bcopy(saved, image->bytes + mutation->offset, mutation->width);
 }
@@ -246,7 +284,7 @@ test_identity_geometry(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 	hfsplus_header_t header;
 
 	gen_plan_init(&plan);
@@ -299,14 +337,14 @@ test_identity_geometry(void)
 	expect_status("short open", image_open(&image, -1, false),
 	    FSIMG_EFORMAT, NULL);
 	image.length = (size_t)plan.block_size * plan.total_blocks;
-	gen_store(image.bytes + 1024, 0x4244, 2);
-	gen_store(image.bytes + 1024 + 124, 0x482b, 2);
+	gen_store(image.bytes + VOLUME_HEADER, 0x4244, 2);
+	gen_store(image.bytes + VOLUME_HEADER + 124, 0x482b, 2);
 	expect_status("wrapper probe", image_probe(&image), FSIMG_OK, NULL);
 	expect_status("wrapper open", image_open(&image, -1, false),
 	    FSIMG_EUNSUPPORTED, NULL);
 	expect_status("forced hfsx wrapper", image_open(&image, 1, false),
 	    FSIMG_EFORMAT, NULL);
-	gen_store(image.bytes + 1024 + 124, 0, 2);
+	gen_store(image.bytes + VOLUME_HEADER + 124, 0, 2);
 	expect_status("classic HFS probe", image_probe(&image), FSIMG_EFORMAT,
 	    NULL);
 	/* Reader identity contract: a lost signature is corruption. */
@@ -382,19 +420,19 @@ test_headers(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 
 	gen_plan_init(&plan);
 	gen_build(&plan, &image);
 	expect_status("header baseline", image_open(&image, -1, false),
 	    FSIMG_OK, NULL);
 	const mutation_t cases[] = {
-		{ "expanded timestamps", 1028, 1u << 29, 4,
-		    FSIMG_EUNSUPPORTED },
-		{ "content protection", 1028, 1u << 30, 4, FSIMG_EUNSUPPORTED },
-		{ "unknown attribute", 1028, 1, 4, FSIMG_EUNSUPPORTED },
-		{ "too many free blocks", 1072, 513, 4, FSIMG_ECORRUPT },
-		{ "reserved next ID", 1088, 15, 4, FSIMG_ECORRUPT }
+		{ "expanded timestamps", VOLUME_ATTRIBUTES, 1u << 29, 4,
+		    FSIMG_EUNSUPPORTED, NULL },
+		{ "content protection", VOLUME_ATTRIBUTES, 1u << 30, 4, FSIMG_EUNSUPPORTED, NULL },
+		{ "unknown attribute", VOLUME_ATTRIBUTES, 1, 4, FSIMG_EUNSUPPORTED, NULL },
+		{ "too many free blocks", VOLUME_FREE_BLOCKS, 513, 4, FSIMG_ECORRUPT, NULL },
+		{ "reserved next ID", VOLUME_NEXT_ID, 15, 4, FSIMG_ECORRUPT, NULL }
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
 		mutate_open(&image, &cases[i]);
@@ -403,7 +441,7 @@ test_headers(void)
 			continue;
 		if (bit == 13)
 			continue;
-		gen_store(image.bytes + 1028, UINT32_C(1) << bit, 4);
+		gen_store(image.bytes + VOLUME_ATTRIBUTES, UINT32_C(1) << bit, 4);
 		fixture_init(&f, &image, 0, 0);
 		expect_status("single accepted attribute bit", fixture_open(&f,
 		    -1, false, &error), FSIMG_OK, &error);
@@ -411,9 +449,9 @@ test_headers(void)
 		    f.reader.info.clean == (bit == 8));
 		fixture_close(&f);
 	}
-	gen_store(image.bytes + 1028, 0x100, 4);
+	gen_store(image.bytes + VOLUME_ATTRIBUTES, 0x100, 4);
 	for (unsigned bit = 11; bit <= 14; bit += 3) {
-		gen_store(image.bytes + 1028, 0x100u | (1u << bit), 4);
+		gen_store(image.bytes + VOLUME_ATTRIBUTES, 0x100u | (1u << bit), 4);
 		fixture_init(&f, &image, 0, 0);
 		expect_status("inconsistent clean-bit volume opens",
 		    fixture_open(&f, -1, false, &error), FSIMG_OK, &error);
@@ -421,36 +459,41 @@ test_headers(void)
 		    !f.reader.info.clean);
 		fixture_close(&f);
 	}
-	gen_store(image.bytes + 1028, 0x100, 4);
-	gen_store(image.bytes + 1032, 0x46534b21, 4);
+	gen_store(image.bytes + VOLUME_ATTRIBUTES, 0x100, 4);
+	gen_store(image.bytes + VOLUME_MOUNTED, 0x46534b21, 4);
 	fixture_init(&f, &image, 0, 0);
 	expect_status("failed replay marker", fixture_open(&f, -1, false,
 	    &error), FSIMG_OK, &error);
 	expect_true("failed replay unclean", !f.reader.info.clean);
 	fixture_close(&f);
-	gen_store(image.bytes + 1032, 0, 4);
+	gen_store(image.bytes + VOLUME_MOUNTED, 0, 4);
 	const unsigned required[] = { GEN_BITMAP_FORK, GEN_EXTENTS_FORK,
 	    GEN_CATALOG_FORK };
 	for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++) {
 		unsigned char saved[80];
 
-		bcopy(image.bytes + 1024 + required[i], saved, 80);
-		bzero(image.bytes + 1024 + required[i], 80);
-		expect_status("missing required fork", image_open(&image, -1,
-		    false), FSIMG_ECORRUPT, NULL);
-		bcopy(saved, image.bytes + 1024 + required[i], 80);
+		bcopy(image.bytes + VOLUME_HEADER + required[i], saved, 80);
+		bzero(image.bytes + VOLUME_HEADER + required[i], 80);
+		fixture_init(&f, &image, 0, 0);
+		expect_status("missing required fork", fixture_open(&f, -1,
+		    false, &error), FSIMG_ECORRUPT, &error);
+		if (required[i] == GEN_CATALOG_FORK)
+			expect_true("missing catalog diagnostic",
+			    strstr(error.message, "catalog is missing") != NULL);
+		fixture_close(&f);
+		bcopy(saved, image.bytes + VOLUME_HEADER + required[i], 80);
 		uint64_t fork = 1024 + required[i];
 		const mutation_t faults[] = {
 			{ "special fork nonzero start zero count", fork + 20, 0,
-			    4, FSIMG_ECORRUPT },
+			    4, FSIMG_ECORRUPT, NULL },
 			{ "special fork reserved extent", fork + 16, 0, 4,
-			    FSIMG_ECORRUPT },
+			    FSIMG_ECORRUPT, NULL },
 			{ "special fork past volume", fork + 16,
-			    plan.total_blocks, 4, FSIMG_ECORRUPT },
+			    plan.total_blocks, 4, FSIMG_ECORRUPT, NULL },
 			{ "special fork size above allocation", fork,
-			    UINT64_MAX, 8, FSIMG_ECORRUPT },
+			    UINT64_MAX, 8, FSIMG_ECORRUPT, NULL },
 			{ "special fork huge block claim", fork + 12,
-			    UINT32_MAX, 4, FSIMG_ECORRUPT }
+			    UINT32_MAX, 4, FSIMG_ECORRUPT, NULL }
 		};
 		for (size_t j = 0; j < sizeof(faults) / sizeof(faults[0]); j++)
 			mutate_open(&image, &faults[j]);
@@ -464,7 +507,7 @@ test_tree_parameters(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 
 	for (unsigned t = 0; t < GEN_TREE_COUNT; t++) {
 		for (unsigned bound = 0; bound < 2; bound++) {
@@ -472,6 +515,14 @@ test_tree_parameters(void)
 			plan.attributes = true;
 			plan.node_size[t] = bound == 1 ? 32768 : (t ==
 			    GEN_EXTENTS ? 512 : 4096);
+			static const uint16_t name[] = { 'f' };
+			gen_child_t child = { .name = name, .units = 1,
+			    .id = 32, .data_extents = 9 };
+			static const gen_attribute_t attribute = { 32, 0, 'a' };
+			plan.attribute_records = &attribute;
+			plan.attribute_count = 1;
+			plan.children = &child;
+			plan.child_count = 1;
 			gen_build(&plan, &image);
 			expect_status("tree node size bound", image_open(&image,
 			    -1, false), FSIMG_OK, NULL);
@@ -482,32 +533,43 @@ test_tree_parameters(void)
 			    (t == GEN_CATALOG ? GEN_CATALOG_FORK :
 			    GEN_ATTRIBUTES_FORK));
 			const mutation_t cases[] = {
-				{ "node below minimum", h + 18,
+				{ "node below minimum", h + TREE_NODE_SIZE,
 				    t == GEN_EXTENTS ? 256 : 2048, 2,
-				    FSIMG_EUNSUPPORTED },
-				{ "node size not power two", h + 18, 513, 2,
-				    FSIMG_ECORRUPT },
-				{ "wrong max key", h + 20, 11, 2,
-				    FSIMG_EUNSUPPORTED },
+				    FSIMG_EUNSUPPORTED, NULL },
+				{ "node size not power two", h + TREE_NODE_SIZE, 513, 2,
+				    FSIMG_ECORRUPT, NULL },
+				{ "wrong max key", h + TREE_MAX_KEY, 11, 2,
+				    FSIMG_EUNSUPPORTED, NULL },
 				{ "wrong B-tree type", h + 36, 1, 1,
-				    FSIMG_EUNSUPPORTED },
+				    FSIMG_EUNSUPPORTED, NULL },
 				{ "unknown compare", h + 37, 1, 1,
-				    FSIMG_EUNSUPPORTED },
-				{ "depth seventeen", h, 17, 2, FSIMG_ECORRUPT },
-				{ "root at totalNodes", h + 2,
-				    image.trees[t].nodes, 4, FSIMG_ECORRUPT },
-				{ "wrong totalNodes", h + 22,
+				    FSIMG_EUNSUPPORTED, NULL },
+				{ "depth seventeen", h, 17, 2, FSIMG_ECORRUPT,
+				    "tree is too deep" },
+				{ "first leaf zero", h + TREE_FIRST_LEAF, 0, 4, FSIMG_ECORRUPT,
+				    "root or leaf ends lie outside it" },
+				{ "first leaf at totalNodes", h + TREE_FIRST_LEAF,
+				    image.trees[t].nodes, 4, FSIMG_ECORRUPT,
+				    "root or leaf ends lie outside it" },
+				{ "last leaf zero", h + TREE_LAST_LEAF, 0, 4, FSIMG_ECORRUPT,
+				    "root or leaf ends lie outside it" },
+				{ "last leaf at totalNodes", h + TREE_LAST_LEAF,
+				    image.trees[t].nodes, 4, FSIMG_ECORRUPT,
+				    "root or leaf ends lie outside it" },
+				{ "root at totalNodes", h + TREE_ROOT,
+				    image.trees[t].nodes, 4, FSIMG_ECORRUPT, NULL },
+				{ "wrong totalNodes", h + TREE_TOTAL_NODES,
 				    image.trees[t].nodes + 1, 4,
-				    FSIMG_ECORRUPT },
+				    FSIMG_ECORRUPT, NULL },
 				{ "fork shorter than declared nodes", fork,
 				    gen_load(image.bytes + fork, 8) - 1, 8,
-				    FSIMG_ECORRUPT },
+				    FSIMG_ECORRUPT, NULL },
 				{ "header kind", h - 6, 255, 1,
-				    FSIMG_ECORRUPT },
+				    FSIMG_ECORRUPT, NULL },
 				{ "header height", h - 5, 1, 1,
-				    FSIMG_ECORRUPT },
+				    FSIMG_ECORRUPT, NULL },
 				{ "header record count", h - 4, 2, 2,
-				    FSIMG_ECORRUPT }
+				    FSIMG_ECORRUPT, NULL }
 			};
 			for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]);
 			    i++)
@@ -531,7 +593,7 @@ test_tree_parameters(void)
 				mutation_t m = { "tree flag outside table",
 				    h + 38,
 				    flags ^ (UINT32_C(1) << bit), 4,
-				    FSIMG_EUNSUPPORTED };
+				    FSIMG_EUNSUPPORTED, NULL };
 
 				snprintf(name, sizeof(name),
 				    "tree=%u size=%u flag bit=%u",
@@ -604,10 +666,13 @@ check_tree_walk(fixture_t *f, gen_image_t *image, gen_tree_id_t id)
 	hfsplus_cursor_t cursor;
 	hfsplus_record_t record;
 	hfsplus_key_t key = { 0 };
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 	fsimg_status_t status;
 	size_t count = 0;
 
+	if (id == GEN_CATALOG)
+		CHECK(hfsplus_catalog_key_init(&key, 0, NULL, 0, &error) ==
+		    FSIMG_OK);
 	hfsplus_cursor_init(&cursor, tree, tree->search_node);
 	status = hfsplus_btree_search(&cursor, &key, &error);
 	expect_status("lower bound below all records", status, FSIMG_OK,
@@ -638,7 +703,7 @@ test_tree_search(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 	hfsplus_cursor_t cursor;
 	hfsplus_key_t key;
 	hfsplus_record_t record;
@@ -670,13 +735,15 @@ test_tree_search(void)
 			unsigned char name[2];
 
 			gen_store(name, names[i][0], 2);
-			key.catalog = (hfsplus_ckey_t){ .parent = 2,
-			    .name = name, .units = 1 };
+			CHECK(hfsplus_catalog_key_init(&key, 2, name, 1,
+			    &error) == FSIMG_OK);
 			expect_status("catalog exact find",
-			    hfsplus_btree_find(&cursor, &key, &found, &error),
+			    hfsplus_btree_find_equivalent(&cursor, &key, &found, &error),
 			    FSIMG_OK, &error);
 			expect_true("catalog exact hit", found);
 			gen_store(name, names[i][0] - 1, 2);
+			CHECK(hfsplus_catalog_key_init(&key, 2, name, 1,
+			    &error) == FSIMG_OK);
 			expect_status("catalog between keys",
 			    hfsplus_btree_search(&cursor, &key, &error),
 			    FSIMG_OK, &error);
@@ -689,17 +756,19 @@ test_tree_search(void)
 				    gen_load(record.key + 8, 2) == names[i][0]);
 			}
 			expect_status("catalog exact miss",
-			    hfsplus_btree_find(&cursor, &key, &found, &error),
+			    hfsplus_btree_find_equivalent(&cursor, &key, &found, &error),
 			    FSIMG_OK, &error);
 			expect_true("catalog exact absent", !found);
 		}
-		key.catalog = (hfsplus_ckey_t){ .parent = UINT32_MAX };
+		CHECK(hfsplus_catalog_key_init(&key, UINT32_MAX, NULL, 0,
+		    &error) == FSIMG_OK);
 		expect_status("above all catalog keys",
 		    hfsplus_btree_search(&cursor, &key, &error), FSIMG_OK,
 		    &error);
 		expect_true("above all invalid", !cursor.valid);
-		key.catalog = (hfsplus_ckey_t){ .parent = 2 };
-		expect_status("empty thread key", hfsplus_btree_find(&cursor,
+		CHECK(hfsplus_catalog_key_init(&key, 2, NULL, 0,
+		    &error) == FSIMG_OK);
+		expect_status("empty thread key", hfsplus_btree_find_equivalent(&cursor,
 		    &key, &found, &error), FSIMG_OK, &error);
 		expect_true("thread exact hit", found);
 		hfsplus_cursor_init(&cursor, &state->extents,
@@ -708,13 +777,14 @@ test_tree_search(void)
 			key.extents = (hfsplus_ekey_t){ .file_id = 32 + i,
 			    .start_block = 8 };
 			expect_status("extents exact find",
-			    hfsplus_btree_find(&cursor, &key, &found, &error),
+			    hfsplus_btree_find_equivalent(&cursor, &key, &found, &error),
 			    FSIMG_OK, &error);
 			expect_true("extents hit", found);
 			key.extents.start_block = 9;
 			expect_status("extents lower bound between records",
 			    hfsplus_btree_search(&cursor, &key, &error),
 			    FSIMG_OK, &error);
+			expect_true("extents lower bound valid", cursor.valid);
 			if (cursor.valid) {
 				expect_status("extents lower bound record",
 				    hfsplus_cursor_record(&cursor, &record,
@@ -723,7 +793,7 @@ test_tree_search(void)
 				    gen_load(record.key + 8, 4) == 16);
 			}
 			expect_status("extents miss",
-			    hfsplus_btree_find(&cursor, &key, &found, &error),
+			    hfsplus_btree_find_equivalent(&cursor, &key, &found, &error),
 			    FSIMG_OK, &error);
 			expect_true("extents exact absent", !found);
 		}
@@ -744,7 +814,7 @@ test_tree_faults(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 	hfsplus_node_t node;
 	const unsigned char *bytes;
 	size_t length;
@@ -758,45 +828,48 @@ test_tree_faults(void)
 	uint64_t leaf = gen_node_offset(&image, GEN_CATALOG, 1);
 	uint64_t h = gen_node_offset(&image, GEN_CATALOG, 0);
 	uint32_t size = plan.node_size[GEN_CATALOG];
-	uint64_t child = root + 14 + gen_load(image.bytes + root + 14, 2) + 2;
+	uint64_t child = root + NODE_DESCRIPTOR +
+	    gen_load(image.bytes + root + NODE_DESCRIPTOR, 2) + 2;
 	uint64_t child_node = gen_node_offset(&image, GEN_CATALOG,
 	    (uint32_t)gen_load(image.bytes + child, 4));
 	const mutation_t cases[] = {
 		{ "leaf offset zero not 14", leaf + size - 2, 16, 2,
-		    FSIMG_ECORRUPT },
-		{ "offset odd", leaf + size - 4, 101, 2, FSIMG_ECORRUPT },
-		{ "offsets overlap", leaf + size - 4, 14, 2, FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
+		{ "offset odd", leaf + size - 4, 101, 2, FSIMG_ECORRUPT, NULL },
+		{ "offsets overlap", leaf + size - 4, 14, 2, FSIMG_ECORRUPT, NULL },
 		{ "offsets out of order", leaf + size - 4, 12, 2,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
 		{ "offset beyond node", leaf + size - 6, size + 2, 2,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
 		{ "record overlaps offset table", leaf + size - 6, size - 4, 2,
-		    FSIMG_ECORRUPT },
-		{ "record count exceeds node", leaf + 10, 65535, 2,
-		    FSIMG_ECORRUPT },
-		{ "empty leaf", leaf + 10, 0, 2, FSIMG_ECORRUPT },
-		{ "empty index", root + 10, 0, 2, FSIMG_ECORRUPT },
-		{ "key longer than record", leaf + 14, 500, 2, FSIMG_ECORRUPT },
-		{ "key exceeds maxKeyLength", leaf + 14, 518, 2,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
+		{ "record count exceeds node", leaf + NODE_RECORDS, 65535, 2,
+		    FSIMG_ECORRUPT, "does not fit it" },
+		{ "empty leaf", leaf + NODE_RECORDS, 0, 2, FSIMG_ECORRUPT,
+		    "holds no records" },
+		{ "empty index", root + NODE_RECORDS, 0, 2, FSIMG_ECORRUPT,
+		    "holds no records" },
+		{ "key longer than record", leaf + NODE_DESCRIPTOR, 500, 2, FSIMG_ECORRUPT, NULL },
+		{ "key exceeds maxKeyLength", leaf + NODE_DESCRIPTOR, 518, 2,
+		    FSIMG_ECORRUPT, NULL },
 		{ "catalog key name length disagrees", leaf + 20, 255, 2,
-		    FSIMG_ECORRUPT },
-		{ "child is header", child, 0, 4, FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
+		{ "child is header", child, 0, 4, FSIMG_ECORRUPT, NULL },
 		{ "child is itself", child, image.trees[GEN_CATALOG].root, 4,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
 		{ "child at totalNodes", child, image.trees[GEN_CATALOG].nodes,
-		    4, FSIMG_ECORRUPT },
+		    4, FSIMG_ECORRUPT, NULL },
 		{ "child past totalNodes", child,
-		    image.trees[GEN_CATALOG].nodes + 1, 4, FSIMG_ECORRUPT },
-		{ "child wrong height", child, 1, 4, FSIMG_ECORRUPT },
-		{ "child equal height", child_node + 9,
-		    image.trees[GEN_CATALOG].depth, 1, FSIMG_ECORRUPT },
+		    image.trees[GEN_CATALOG].nodes + 1, 4, FSIMG_ECORRUPT, NULL },
+		{ "child wrong height", child, 1, 4, FSIMG_ECORRUPT, NULL },
+		{ "child equal height", child_node + NODE_HEIGHT,
+		    image.trees[GEN_CATALOG].depth, 1, FSIMG_ECORRUPT, NULL },
 		{ "index data not four bytes", root + size - 4,
 		    gen_load(image.bytes + root + size - 4, 2) + 2, 2,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, "not a child number" },
 		{ "header offsets misplaced", h + size - 4, 118, 2,
-		    FSIMG_ECORRUPT },
-		{ "depth zero with root", h + 14, 0, 2, FSIMG_ECORRUPT }
+		    FSIMG_ECORRUPT, NULL },
+		{ "depth zero with root", h + 14, 0, 2, FSIMG_ECORRUPT, NULL }
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
 		mutate_open(&image, &cases[i]);
@@ -809,8 +882,8 @@ test_tree_faults(void)
 	unsigned char saved[4096];
 	bcopy(image.bytes + leaf, saved, size);
 	bzero(image.bytes + leaf, size);
-	image.bytes[leaf + 8] = 2;
-	gen_store(image.bytes + leaf + 10, 1, 2);
+	image.bytes[leaf + NODE_KIND] = 2;
+	gen_store(image.bytes + leaf + NODE_RECORDS, 1, 2);
 	gen_store(image.bytes + leaf + size - 2, 14, 2);
 	gen_store(image.bytes + leaf + size - 4, 46, 2);
 	expect_status("short map record", hfsplus_node_read(&state->catalog, 1,
@@ -830,6 +903,7 @@ test_tree_faults(void)
 	 */
 	hfsplus_cursor_t cursor;
 	hfsplus_key_t key = { 0 };
+	CHECK(hfsplus_catalog_key_init(&key, 0, NULL, 0, &error) == FSIMG_OK);
 	uint64_t second = gen_node_offset(&image, GEN_CATALOG, 2);
 	gen_store(image.bytes + second + 4, 0, 4);
 	hfsplus_cursor_init(&cursor, &state->catalog,
@@ -863,7 +937,7 @@ test_node_framing(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 	hfsplus_node_t node;
 	unsigned char saved[2];
 
@@ -874,7 +948,7 @@ test_node_framing(void)
 	fsimg_hfsplus_reader_t *state = f.reader.driver;
 	uint64_t leaf = gen_node_offset(&image, GEN_CATALOG, 1);
 	uint32_t size = plan.node_size[GEN_CATALOG];
-	uint16_t records = (uint16_t)gen_load(image.bytes + leaf + 10, 2);
+	uint16_t records = (uint16_t)gen_load(image.bytes + leaf + NODE_RECORDS, 2);
 	uint64_t last = leaf + size - 2 * (records + 1);
 	CHECK(records >= 3);
 	/* Offset[2] descends, but the first record still frames its valid key.
@@ -883,16 +957,18 @@ test_node_framing(void)
 	const mutation_t cases[] = {
 		{ "node read descending middle offset", leaf + size - 6,
 		    gen_load(image.bytes + leaf + size - 4, 2) - 2, 2,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
 		{ "node read odd offset", leaf + size - 4,
 		    gen_load(image.bytes + leaf + size - 4, 2) + 1, 2,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
 		{ "node read first offset not 14", leaf + size - 2, 16, 2,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
 		{ "node read last offset into table", last,
-		    size - 2 * (records + 1) + 2, 2, FSIMG_ECORRUPT },
-		{ "node read record count too large", leaf + 10, 65535, 2,
-		    FSIMG_ECORRUPT }
+		    size - 2 * (records + 1) + 2, 2, FSIMG_ECORRUPT, NULL },
+		{ "node read empty leaf", leaf + NODE_RECORDS, 0, 2,
+		    FSIMG_ECORRUPT, "holds no records" },
+		{ "node read record count too large", leaf + NODE_RECORDS, 65535, 2,
+		    FSIMG_ECORRUPT, "does not fit it" }
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		const mutation_t *m = &cases[i];
@@ -902,8 +978,17 @@ test_node_framing(void)
 		expect_status(m->name, hfsplus_node_read(&state->catalog, 1,
 		    state->catalog.search_node, HFSPLUS_NODE_LEAF, 1, &node,
 		    &error), m->expected, &error);
+		if (m->diagnostic != NULL)
+			expect_true(m->name, strstr(error.message,
+			    m->diagnostic) != NULL);
 		bcopy(saved, image.bytes + m->offset, m->width);
 	}
+	expect_status("node at totalNodes", hfsplus_node_read(
+	    &state->catalog, state->catalog.header.total_nodes,
+	    state->catalog.search_node, HFSPLUS_NODE_LEAF, 1, &node,
+	    &error), FSIMG_ECORRUPT, &error);
+	expect_true("node number bound diagnostic",
+	    strstr(error.message, "lies outside its tree") != NULL);
 	fixture_close(&f);
 	gen_free(&image);
 }
@@ -916,7 +1001,7 @@ test_record_key_bounds(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 	hfsplus_cursor_t cursor;
 	hfsplus_record_t record;
 	hfsplus_key_t key = { 0 };
@@ -939,6 +1024,7 @@ test_record_key_bounds(void)
 	CHECK(fixture_open(&f, -1, false, &error) == FSIMG_OK);
 	fsimg_hfsplus_reader_t *state = f.reader.driver;
 	hfsplus_tree_t *tree = &state->catalog;
+	CHECK(hfsplus_catalog_key_init(&key, 0, NULL, 0, &error) == FSIMG_OK);
 	uint32_t size = tree->header.node_size;
 	for (unsigned index = 0; index < 2; index++) {
 		uint32_t number = index == 0 ? 1 : tree->header.root_node;
@@ -953,11 +1039,11 @@ test_record_key_bounds(void)
 			 * For maxKeyLength, give it room plus four data bytes
 			 * so the record-length check cannot reject it.
 			 */
-			gen_store(image.bytes + location + 14, key_length, 2);
+			gen_store(image.bytes + location + NODE_DESCRIPTOR, key_length, 2);
 			gen_store(image.bytes + location + 20,
 			    (key_length - 6) / 2, 2);
 			if (fault == 1) {
-				gen_store(image.bytes + location + 10, 1, 2);
+				gen_store(image.bytes + location + NODE_RECORDS, 1, 2);
 				gen_store(image.bytes + location + size - 4,
 				    14 + 2 + key_length + 4, 2);
 			}
@@ -997,7 +1083,7 @@ index_child_fork(fixture_t *f, const gen_image_t *image, uint8_t type,
 
 	CHECK(hfsplus_fork_decode(image->bytes + record->offset +
 	    record->key_length +
-	    (type == 0 ? 88 : 168), 80, &fork));
+	    (type == 0 ? FILE_DATA_FORK : FILE_RESOURCE_FORK), 80, &fork));
 	return (hfsplus_fork_index(&f->reader, 32, type, &fork, index, NULL,
 	    error));
 }
@@ -1011,7 +1097,7 @@ test_forks(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 	fsimg_extent_index_t *index;
 	hfsplus_fork_t fork;
 
@@ -1059,14 +1145,23 @@ test_forks(void)
 		}
 		const gen_record_t *record =
 		    &image.trees[GEN_CATALOG].records[2];
-		uint64_t location = record->offset + record->key_length + 88;
+		uint64_t location = record->offset + record->key_length + FILE_DATA_FORK;
 		CHECK(hfsplus_fork_decode(image.bytes + location, 80, &fork));
+		uint64_t records = UINT64_MAX;
+		expect_status("fragmented fork record count", hfsplus_fork_index(
+		    &f.reader, 32, 0, &fork, &index, &records, &error),
+		    FSIMG_OK, &error);
+		expect_true("true overflow record count", records ==
+		    (counts[n] > 8 ? (counts[n] - 1) / 8 : 0));
+		fsimg_extent_index_free(index);
+		records = UINT64_MAX;
 		fork.logical_size = (uint64_t)fork.total_blocks *
 		    plan.block_size + 1;
 		expect_status("logical size beyond allocation",
 		    hfsplus_fork_index(&f.reader,
-		    32, 0, &fork, &index, NULL, &error), FSIMG_ECORRUPT,
+		    32, 0, &fork, &index, &records, &error), FSIMG_ECORRUPT,
 		    &error);
+		expect_true("failing fork resets records", records == 0);
 		CHECK(index == NULL);
 		fixture_close(&f);
 		gen_free(&image);
@@ -1083,13 +1178,13 @@ test_forks(void)
 	uint64_t overflow = image.trees[GEN_EXTENTS].records[0].offset;
 	uint64_t next = image.trees[GEN_EXTENTS].records[1].offset;
 	const mutation_t mutations[] = {
-		{ "overflow gap", next + 8, 17, 4, FSIMG_ECORRUPT },
-		{ "overflow repeat", next + 8, 8, 4, FSIMG_ECORRUPT },
-		{ "overflow overlap", next + 8, 15, 4, FSIMG_ECORRUPT },
+		{ "overflow gap", next + 8, 17, 4, FSIMG_ECORRUPT, NULL },
+		{ "overflow repeat", next + 8, 8, 4, FSIMG_ECORRUPT, NULL },
+		{ "overflow overlap", next + 8, 15, 4, FSIMG_ECORRUPT, NULL },
 		{ "overflow nonzero start zero count", overflow + 16, 0, 4,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
 		{ "overflow used after unused", overflow + 12, 0, 8,
-		    FSIMG_ECORRUPT }
+		    FSIMG_ECORRUPT, NULL }
 	};
 	for (size_t i = 0; i < sizeof(mutations) / sizeof(mutations[0]); i++) {
 		unsigned char saved[8];
@@ -1112,23 +1207,51 @@ test_forks(void)
 	    index_child_fork(&f, &image, 0, &index, &error),
 	    FSIMG_ECORRUPT, &error);
 	fsimg_extent_index_free(index);
+	expect_true("short overflow diagnostic", strstr(error.message,
+	    "overflow record is malformed") != NULL);
+	/* The final leaf record has its key plus enough trailing bytes to
+	 * reach 100 bytes; a minimum-length decoder would accept it.
+	 */
+	gen_store(image.bytes + record_end, next - extent_leaf + 100, 2);
+	expect_status("100-byte overflow leaf record",
+	    index_child_fork(&f, &image, 0, &index, &error),
+	    FSIMG_ECORRUPT, &error);
+	expect_true("long overflow diagnostic", strstr(error.message,
+	    "overflow record is malformed") != NULL);
+	fsimg_extent_index_free(index);
 	gen_store(image.bytes + record_end, saved_end, 2);
+
 	unsigned char saved[64];
 	bcopy(image.bytes + overflow + 12, saved, 64);
 	bzero(image.bytes + overflow + 12, 64);
 	expect_status("zero-block overflow record", index_child_fork(&f, &image,
 	    0,
 	    &index, &error), FSIMG_ECORRUPT, &error);
+	expect_true("zero-block overflow diagnostic", strstr(error.message,
+	    "overflow record holds no blocks") != NULL);
 	fsimg_extent_index_free(index);
 	bcopy(saved, image.bytes + overflow + 12, 64);
 	uint64_t location = image.trees[GEN_CATALOG].records[2].offset +
 	    image.trees[GEN_CATALOG].records[2].key_length + 88;
 	CHECK(hfsplus_fork_decode(image.bytes + location, 80, &fork));
-	fork.total_blocks = 16;
-	fork.logical_size = 16u * plan.block_size;
-	expect_status("extra overflow after last", hfsplus_fork_index(&f.reader,
+	fork.total_blocks = 15;
+	fork.logical_size = 15u * plan.block_size;
+	expect_status("overflow overshoots totalBlocks", hfsplus_fork_index(&f.reader,
 	    32, 0,
 	    &fork, &index, NULL, &error), FSIMG_ECORRUPT, &error);
+	expect_true("overflow overshoot diagnostic", strstr(error.message,
+	    "extents exceed its totalBlocks") != NULL);
+	fsimg_extent_index_free(index);
+	/* Eight inline blocks and the first eight-block overflow record
+	 * complete this fork. The record at logical block 16 is extra.
+	 */
+	fork.total_blocks = 16;
+	fork.logical_size = 16u * plan.block_size;
+	bzero(&error, sizeof(error));
+	expect_status("extra overflow after last", hfsplus_fork_index(&f.reader,
+	    32, 0, &fork, &index, NULL, &error), FSIMG_ECORRUPT, &error);
+	expect_true("extra overflow diagnostic", strstr(error.message,
+	    "fork has an extra overflow record") != NULL);
 	fsimg_extent_index_free(index);
 	for (unsigned fault = 0; fault < 9; fault++) {
 		const char *names[] = {
@@ -1152,7 +1275,7 @@ test_forks(void)
 		case 3: fork.extents[0].start = plan.total_blocks; break;
 		case 4: fork.extents[0].start = plan.total_blocks - 2;
 			fork.extents[0].count = 2; fork.total_blocks = 2; break;
-		case 5: fork.total_blocks = 0; break;
+		case 5: fork.total_blocks = 0; fork.logical_size = 0; break;
 		case 6: fork = (hfsplus_fork_t){ .logical_size = 1 }; break;
 		case 7: fork.total_blocks = UINT32_MAX; break;
 		case 8: fork.total_blocks = 2; break;
@@ -1161,6 +1284,12 @@ test_forks(void)
 		expect_status(names[fault], hfsplus_fork_index(&f.reader,
 		    fault == 8 ? 3 : 32, 0, &fork, &index, NULL, &error),
 		    FSIMG_ECORRUPT, &error);
+		if (fault == 8)
+			expect_true(names[fault], strstr(error.message,
+			    "extents tree's fork needs overflow") != NULL);
+		if (fault == 5)
+			expect_true(names[fault], strstr(error.message,
+			    "extents exceed its totalBlocks") != NULL);
 		if (fault == 7)
 			expect_true("huge fork rejected before extent walk",
 			    f.reader.session.progress.work == work);
@@ -1180,7 +1309,7 @@ test_forks(void)
 	    FSIMG_OK, NULL);
 	mutation_t missing = { "catalog overflow missing",
 	    image.trees[GEN_EXTENTS].records[0].offset + 8,
-	    9, 4, FSIMG_ECORRUPT };
+	    9, 4, FSIMG_ECORRUPT, NULL };
 	mutate_open(&image, &missing);
 	gen_free(&image);
 
@@ -1226,7 +1355,7 @@ test_journals(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 
 	for (unsigned little = 0; little < 2; little++) {
 		gen_plan_init(&plan);
@@ -1235,30 +1364,40 @@ test_journals(void)
 		gen_build(&plan, &image);
 		expect_status("journal clean byte order", image_open(&image, -1,
 		    false), FSIMG_OK, NULL);
-		gen_store(image.bytes + 1028, 1u << 13, 4);
+		gen_store(image.bytes + VOLUME_ATTRIBUTES, 1u << 13, 4);
 		expect_status("journal attribute alone", image_open(&image, -1,
 		    false), FSIMG_OK, NULL);
-		gen_store(image.bytes + 1028, 0x2100, 4);
-		const uint64_t positions[][2] = {
-			{ 1024, 1024 }, { 262144, 512 }, { 262144, 262144 },
-			{ 512, 1024 }, { 1024, 512 }, { 0, 512 }, { 512, 0 },
-			{ 262656, 512 }, { 512, 262656 }, { 513, 512 }, { 512,
-			    513 }
+		gen_store(image.bytes + VOLUME_ATTRIBUTES, 0x2100, 4);
+		static const struct {
+			const char *name;
+			uint64_t start;
+			uint64_t end;
+			fsimg_status_t expected;
+		} positions[] = {
+			{ "clean interior", VOLUME_HEADER, 1024, FSIMG_OK },
+			{ "start wraps", 262144, 512, FSIMG_OK },
+			{ "both wrap", 262144, 262144, FSIMG_OK },
+			{ "end wraps", 512, 262144, FSIMG_OK },
+			{ "pending forward", 512, 1024, FSIMG_EUNSUPPORTED },
+			{ "pending backward", VOLUME_HEADER, 512, FSIMG_EUNSUPPORTED },
+			{ "start zero", 0, 512, FSIMG_ECORRUPT },
+			{ "end zero", 512, 0, FSIMG_ECORRUPT },
+			{ "start past size", 262656, 512, FSIMG_ECORRUPT },
+			{ "end past size", 512, 262656, FSIMG_ECORRUPT },
+			{ "start unaligned", 513, 512, FSIMG_ECORRUPT },
+			{ "end unaligned", 512, 513, FSIMG_ECORRUPT }
 		};
 		for (size_t i = 0; i < sizeof(positions) / sizeof(positions[0]);
 		    i++) {
 			char name[96];
 
-			snprintf(name, sizeof(name),
-			    "journal endian=%u start=%llu end=%llu",
-			    little, (unsigned long long)positions[i][0],
-			    (unsigned long long)positions[i][1]);
+			snprintf(name, sizeof(name), "journal endian=%u %s",
+			    little, positions[i].name);
 			gen_journal_header(image.bytes + image.journal_header,
-			    little != 0,
-			    positions[i][0], positions[i][1], 262144);
+			    little != 0, positions[i].start, positions[i].end,
+			    262144);
 			expect_status(name, image_open(&image, -1, false),
-			    i < 3 ? FSIMG_OK : (i < 5 ? FSIMG_EUNSUPPORTED :
-			    FSIMG_ECORRUPT), NULL);
+			    positions[i].expected, NULL);
 		}
 		const uint64_t sizes[] = { 261632, UINT64_C(1073742336),
 		    524288 };
@@ -1273,21 +1412,29 @@ test_journals(void)
 		uint64_t data = image.journal_record +
 		    image.trees[GEN_CATALOG].records[2].key_length;
 		const mutation_t mutations[] = {
+			{ "older journal big endian", image.journal_header,
+			    0x4a484452, 4, FSIMG_EUNSUPPORTED,
+			    "older header form" },
+			{ "older journal little endian", image.journal_header,
+			    0x5244484a, 4, FSIMG_EUNSUPPORTED,
+			    "older header form" },
 			{ "journal bad magic", image.journal_header, 0, 4,
-			    FSIMG_ECORRUPT },
-			{ "journal bad checksum", image.journal_header + 36, 0,
-			    4, FSIMG_ECORRUPT },
-			{ "journal info reserved block", 1036, 0, 4,
-			    FSIMG_ECORRUPT },
-			{ "journal info past content", 1036,
-			    plan.total_blocks - 1, 4, FSIMG_ECORRUPT },
-			{ "journal not file", data, 1, 2, FSIMG_ECORRUPT },
-			{ "journal wrong length", data + 88, 262143, 8,
-			    FSIMG_ECORRUPT },
-			{ "journal wrong offset", image.journal_info + 36,
-			    image.journal_header + 4096, 8, FSIMG_ECORRUPT },
-			{ "journal info wrong size", image.journal_info + 44,
-			    262143, 8, FSIMG_ECORRUPT }
+			    FSIMG_ECORRUPT, NULL },
+			{ "journal bad checksum", image.journal_header + JOURNAL_CHECKSUM, 0,
+			    4, FSIMG_ECORRUPT, NULL },
+			{ "journal info reserved block", VOLUME_JIB, 0, 4,
+			    FSIMG_ECORRUPT,
+			    "journal info block lies outside the content domain" },
+			{ "journal info past content", VOLUME_JIB,
+			    plan.total_blocks - 1, 4, FSIMG_ECORRUPT,
+			    "journal info block lies outside the content domain" },
+			{ "journal not file", data, 1, 2, FSIMG_ECORRUPT, NULL },
+			{ "journal wrong offset", image.journal_info + JIB_OFFSET,
+			    image.journal_header + 4096, 8, FSIMG_ECORRUPT,
+			    "disagrees with the journal info block" },
+			{ "journal info wrong size", image.journal_info + JIB_SIZE,
+			    258048, 8, FSIMG_ECORRUPT,
+			    "disagrees with the journal info block" }
 		};
 		for (size_t i = 0; i < sizeof(mutations) / sizeof(mutations[0]);
 		    i++)
@@ -1295,14 +1442,14 @@ test_journals(void)
 		/* Split its one extent while preserving size and allocated
 		 * blocks. */
 		unsigned char saved[80];
-		bcopy(image.bytes + data + 88, saved, 80);
-		gen_store(image.bytes + data + 108, 32, 4);
-		gen_store(image.bytes + data + 112,
+		bcopy(image.bytes + data + FILE_DATA_FORK, saved, 80);
+		gen_store(image.bytes + data + FILE_DATA_FORK + FORK_COUNT, 32, 4);
+		gen_store(image.bytes + data + FILE_DATA_FORK + FORK_START + 8,
 		    image.journal_header / 4096 + 32, 4);
-		gen_store(image.bytes + data + 116, 32, 4);
+		gen_store(image.bytes + data + FILE_DATA_FORK + FORK_COUNT + 8, 32, 4);
 		expect_status("journal two extents", image_open(&image, -1,
 		    false), FSIMG_ECORRUPT, NULL);
-		bcopy(saved, image.bytes + data + 88, 80);
+		bcopy(saved, image.bytes + data + FILE_DATA_FORK, 80);
 		fixture_init(&f, &image, 0, 0);
 		CHECK(fixture_open(&f, -1, false, &error) == FSIMG_OK);
 		((fsimg_hfsplus_reader_t *)f.reader.driver)->wrapped = true;
@@ -1313,12 +1460,12 @@ test_journals(void)
 		/* A merely similar name cannot satisfy the journal requirement.
 		 */
 		mutation_t similar = { "journal similar stored name",
-		    image.journal_record + 8 + 14, 'm', 2, FSIMG_ECORRUPT };
+		    image.journal_record + CATALOG_NAME + 14, 'm', 2, FSIMG_ECORRUPT, NULL };
 		mutate_open(&image, &similar);
 		fixture_init(&f, &image, 0, 0);
 		CHECK(fixture_open(&f, -1, false, &error) == FSIMG_OK);
 		unsigned char journal_name[16];
-		bcopy(image.bytes + image.journal_record + 8, journal_name, 16);
+		bcopy(image.bytes + image.journal_record + CATALOG_NAME, journal_name, 16);
 		for (unsigned i = 1; i < 8; i++) {
 			unsigned char *unit = image.bytes + image.journal_record
 			    + 8 + 2 * i;
@@ -1327,15 +1474,21 @@ test_journals(void)
 		}
 		fsimg_hfsplus_reader_t *state = f.reader.driver;
 		hfsplus_cursor_t cursor;
-		hfsplus_key_t key = { .catalog = {
-		    .parent = 2, .name = journal_name, .units = 8 } };
+		hfsplus_key_t key;
+		CHECK(hfsplus_catalog_key_init(&key, 2, journal_name, 8,
+		    &error) == FSIMG_OK);
 		bool found;
 		hfsplus_cursor_init(&cursor, &state->catalog,
 		    state->catalog.search_node);
 		expect_status("folded journal search",
-		    hfsplus_btree_find(&cursor,
+		    hfsplus_btree_find_equivalent(&cursor,
 		    &key, &found, &error), FSIMG_OK, &error);
 		expect_true("folded journal search finds .JOURNAL", found);
+		hfsplus_record_t record;
+		expect_status("exact journal lookup", hfsplus_catalog_find_exact(
+		    &state->catalog, &key, &record, &found, &error), FSIMG_OK,
+		    &error);
+		expect_true("exact lookup refuses folded spelling", !found);
 		fixture_close(&f);
 		/* The journal identity is exact stored units even on a folded
 		 * tree. */
@@ -1344,35 +1497,45 @@ test_journals(void)
 		gen_free(&image);
 	}
 	for (unsigned present = 0; present < 2; present++) {
-		const unsigned flags[] = { 0, 1, 2, 3, 4, 5, 6 };
+		static const struct {
+			unsigned flags;
+			fsimg_status_t without_file;
+			fsimg_status_t with_file;
+		} flags[] = {
+			{ 0, FSIMG_ECORRUPT, FSIMG_ECORRUPT },
+			{ 1, FSIMG_ECORRUPT, FSIMG_OK },
+			{ 2, FSIMG_EUNSUPPORTED, FSIMG_EUNSUPPORTED },
+			{ 3, FSIMG_EUNSUPPORTED, FSIMG_EUNSUPPORTED },
+			{ 4, FSIMG_ECORRUPT, FSIMG_ECORRUPT },
+			{ 5, FSIMG_ECORRUPT, FSIMG_OK },
+			{ 6, FSIMG_EUNSUPPORTED, FSIMG_EUNSUPPORTED }
+		};
 
 		for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
 			char name[96];
 
 			snprintf(name, sizeof(name), "journal flags=%u file=%u",
-			    flags[i], present);
+			    flags[i].flags, present);
 			gen_plan_init(&plan);
 			plan.journal = true;
 			plan.journal_file = present != 0;
-			plan.journal_flags = flags[i];
+			plan.journal_flags = flags[i].flags;
 			gen_build(&plan, &image);
-			fsimg_status_t expected = (flags[i] & 2) != 0 ?
-			    FSIMG_EUNSUPPORTED :
-			    ((flags[i] & 1) != 0 && present != 0 ? FSIMG_OK :
-			    FSIMG_ECORRUPT);
+			fsimg_status_t expected = present == 0 ?
+			    flags[i].without_file : flags[i].with_file;
 			expect_status(name, image_open(&image, -1, false),
 			    expected, NULL);
-			if ((flags[i] & 2) != 0) {
-				gen_store(image.bytes + image.journal_info + 36,
+			if ((flags[i].flags & 2) != 0) {
+				gen_store(image.bytes + image.journal_info + JIB_OFFSET,
 				    UINT64_MAX, 8);
-				gen_store(image.bytes + image.journal_info + 44,
+				gen_store(image.bytes + image.journal_info + JIB_SIZE,
 				    1, 8);
 				expect_status(
 				    "external journal ignores location",
 				    image_open(&image, -1, false),
 				    FSIMG_EUNSUPPORTED, NULL);
 			}
-			if (flags[i] == 5 && present != 0) {
+			if (flags[i].flags == 5 && present != 0) {
 				fixture_init(&f, &image, 0, 0);
 				f.fail_offset = image.journal_header;
 				CHECK(fixture_open(&f, -1, false,
@@ -1388,11 +1551,69 @@ test_journals(void)
 			}
 			/* With bit 13 clear, the same stored file is ordinary
 			 * data. */
-			gen_store(image.bytes + 1028, 0x100, 4);
+			gen_store(image.bytes + VOLUME_ATTRIBUTES, 0x100, 4);
 			expect_status("unjournaled ignores journal metadata",
 			    image_open(&image, -1, false), FSIMG_OK, NULL);
 			gen_free(&image);
 		}
+	}
+}
+
+/* Each row isolates one location clause, with every other clause satisfied. */
+static void
+test_journal_location_clauses(void)
+{
+	static const struct {
+		const char *name;
+		uint32_t flags;
+		uint64_t size;
+		uint32_t count;
+		bool past_end;
+		bool wrong_offset;
+		const char *diagnostic;
+	} rows[] = {
+		{ "journal count past domain", 1, 262144, 64, true, false,
+		    "lies outside the content domain" },
+		{ "journal fork not whole blocks", 1, 262143, 64, false, false,
+		    "disagrees with the journal info block" },
+		{ "uninitialized journal offset mismatch", 5, 262144, 64,
+		    false, true, "disagrees with the journal info block" },
+		{ "uninitialized journal size mismatch", 5, 258048, 64,
+		    false, false, "disagrees with the journal info block" }
+	};
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_error_t error = { 0 };
+
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		gen_plan_init(&plan);
+		plan.journal = true;
+		plan.journal_flags = rows[i].flags;
+		gen_build(&plan, &image);
+		uint64_t data = image.journal_record +
+		    image.trees[GEN_CATALOG].records[2].key_length;
+		uint64_t start = rows[i].past_end ? plan.total_blocks - 2 :
+		    image.journal_header / plan.block_size;
+		gen_store(image.bytes + data + FILE_DATA_FORK + FORK_START, start, 4);
+		gen_store(image.bytes + data + FILE_DATA_FORK + FORK_BLOCKS, rows[i].count, 4);
+		gen_store(image.bytes + data + FILE_DATA_FORK + FORK_COUNT, rows[i].count, 4);
+		/* For the fractional-block case, fork size and JIB size agree.
+		 * The flags=5 size case keeps the fork's original whole size.
+		 */
+		if (rows[i].flags != 5)
+			gen_store(image.bytes + data + FILE_DATA_FORK, rows[i].size, 8);
+		gen_store(image.bytes + image.journal_info + JIB_SIZE, rows[i].size, 8);
+		gen_store(image.bytes + image.journal_info + JIB_OFFSET,
+		    start * plan.block_size + (rows[i].wrong_offset ? 4096 : 0),
+		    8);
+		fixture_init(&f, &image, 0, 0);
+		expect_status(rows[i].name, fixture_open(&f, -1, false, &error),
+		    FSIMG_ECORRUPT, &error);
+		expect_true(rows[i].name, strstr(error.message,
+		    rows[i].diagnostic) != NULL);
+		fixture_close(&f);
+		gen_free(&image);
 	}
 }
 
@@ -1406,30 +1627,41 @@ test_journal_size_limits(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
-	const uint64_t bad_sizes[] = { 258048, UINT64_C(1073745920) };
+	fsimg_error_t error = { 0 };
+	static const struct {
+		const char *name;
+		uint64_t size;
+		uint32_t blocks;
+		fsimg_status_t expected;
+	} rows[] = {
+		{ "journal below 256 KiB", 258048, 512, FSIMG_ECORRUPT },
+		{ "journal exactly 1 GiB", UINT64_C(1073741824), 300000,
+		    FSIMG_OK },
+		{ "journal above 1 GiB", UINT64_C(1073745920), 300000,
+		    FSIMG_ECORRUPT }
+	};
 
-	for (unsigned i = 0; i < 2; i++) {
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
 		gen_plan_init(&plan);
 		plan.journal = true;
-		if (i == 1)
-			plan.total_blocks = 300000;
+		plan.total_blocks = rows[i].blocks;
 		gen_build(&plan, &image);
 		expect_status("journal size baseline", image_open(&image, -1,
 		    false), FSIMG_OK, NULL);
 		uint64_t data = image.journal_record +
 		    image.trees[GEN_CATALOG].records[2].key_length;
-		uint64_t size = bad_sizes[i];
-		gen_store(image.bytes + image.journal_info + 44, size, 8);
-		gen_store(image.bytes + data + 88, size, 8);
-		gen_store(image.bytes + data + 100, size / plan.block_size, 4);
-		gen_store(image.bytes + data + 108, size / plan.block_size, 4);
+		uint64_t size = rows[i].size;
+		gen_store(image.bytes + image.journal_info + JIB_SIZE, size, 8);
+		gen_store(image.bytes + data + FILE_DATA_FORK, size, 8);
+		gen_store(image.bytes + data + FILE_DATA_FORK + FORK_BLOCKS,
+		    size / plan.block_size, 4);
+		gen_store(image.bytes + data + FILE_DATA_FORK + FORK_COUNT,
+		    size / plan.block_size, 4);
 		gen_journal_header(image.bytes + image.journal_header, false,
 		    512, 512, size);
 		fixture_init(&f, &image, 0, 0);
-		expect_status(i == 0 ? "journal below 256 KiB" :
-		    "journal above 1 GiB",
-		    fixture_open(&f, -1, false, &error), FSIMG_ECORRUPT,
+		expect_status(rows[i].name,
+		    fixture_open(&f, -1, false, &error), rows[i].expected,
 		    &error);
 		fixture_close(&f);
 		gen_free(&image);
@@ -1439,78 +1671,86 @@ test_journal_size_limits(void)
 static void
 test_labels_info(void)
 {
-	static const char *details[] = { "journal", "catalog_node_bytes",
-		"extents_node_bytes", "attributes_node_bytes", "files",
-		    "folders",
-		"next_catalog_id", "volume_id", "last_mounted", "create_date" };
-	static const uint16_t labels[][2] = {
-		{ 'A', 0 }, { 0, 0 }, { '/', 0 }, { 0x2400, 0 }, { ':', 0 },
-		{ 0xd800, 0 }, { 0xe9, 0 }, { '.', 0 }
+	static const struct {
+		const char *name;
+		uint64_t value;
+	} details[] = {
+		{ "journal", 0 }, { "catalog_node_bytes", 4096 },
+		{ "extents_node_bytes", 512 }, { "attributes_node_bytes", 0 },
+		{ "files", 0 }, { "folders", 0 }, { "next_catalog_id", 1000000 },
+		{ "volume_id", UINT64_C(0x123456789abcdef0) },
+		{ "last_mounted", 0x31302e30 }, { "create_date", 123456 }
 	};
-	static const char *expected[] = { "A", "\xe2\x90\x80", ":", "", "", "",
-	    "", "" };
+	static const struct {
+		const char *name;
+		uint16_t unit;
+		size_t units;
+		bool valid;
+		const char *display;
+	} labels[] = {
+		{ "ASCII label", 'A', 1, true, "A" },
+		{ "NUL label", 0, 1, true, "\xe2\x90\x80" },
+		{ "slash label", '/', 1, true, ":" },
+		{ "NUL symbol label", 0x2400, 1, false, "" },
+		{ "colon label", ':', 1, false, "" },
+		{ "surrogate label", 0xd800, 1, false, "" },
+		{ "precomposed label", 0xe9, 1, false, "" },
+		{ "dot label", '.', 1, false, "" },
+		{ "255 BMP units", 0x4e00, 255, true, NULL },
+		{ "empty label", 0, 0, false, "" }
+	};
 	uint16_t wide[255];
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 
-	for (size_t i = 0; i < 10; i++) {
+	for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
 		gen_plan_init(&plan);
-		if (i < 8) {
-			plan.label = labels[i];
-			plan.label_units = 1;
-		} else if (i == 8) {
-			for (size_t j = 0; j < 255; j++)
-				wide[j] = 0x4e00;
-			plan.label = wide;
-			plan.label_units = 255;
-		} else
-			plan.label_units = 0;
+		for (size_t j = 0; j < labels[i].units; j++)
+			wide[j] = labels[i].unit;
+		plan.label = wide;
+		plan.label_units = labels[i].units;
 		gen_build(&plan, &image);
 		fixture_init(&f, &image, 0, 0);
 		fsimg_status_t status = fixture_open(&f, -1, false, &error);
-		expect_status("label fixture opens", status, FSIMG_OK, &error);
+		expect_status(labels[i].name, status, FSIMG_OK, &error);
 		if (status == FSIMG_OK) {
 			const fsimg_volume_info_t *info = &f.reader.info;
-			bool valid = i < 3 || i == 8;
+			bool valid = labels[i].valid;
 
-			expect_true("label validity",
+			expect_true(labels[i].name,
 			    ((info->valid & FSIMG_VOLUME_LABEL) != 0) == valid);
-			if (i < 8)
-				expect_true("label display mapping",
-				    strcmp(info->label, expected[i]) == 0);
-			else if (i == 8) {
-				expect_true("765-byte label terminated",
+			if (labels[i].display != NULL)
+				expect_true(labels[i].name,
+				    strcmp(info->label, labels[i].display) == 0);
+			else {
+				expect_true(labels[i].name,
 				    strlen(info->label) == 765 &&
 				    info->label[765] == '\0');
 				for (unsigned j = 0; j < 255; j++)
-					expect_true("BMP label bytes",
+					expect_true(labels[i].name,
 					    bcmp(info->label + 3 * j,
 					    "\xe4\xb8\x80", 3) == 0);
-			} else
-				expect_true("empty label absent",
-				    info->label[0] == '\0');
-			expect_true("volume geometry info",
+			}
+			expect_true(labels[i].name,
 			    info->volume_bytes == image.length &&
 			    info->sector_bytes == 512 &&
 			    info->allocation_unit_bytes == plan.block_size
 			    &&
 			    info->allocation_units == plan.total_blocks);
-			expect_true("format info", strcmp(info->format,
+			expect_true(labels[i].name, strcmp(info->format,
 			    "hfsplus") == 0);
-			expect_true("valid bits",
+			expect_true(labels[i].name,
 			    info->valid == (FSIMG_VOLUME_GEOMETRY | (valid ?
 			    FSIMG_VOLUME_LABEL : 0)));
-			expect_true("detail count", info->detail_count == 10);
-			const uint64_t values[] = { 0, 4096, 512, 0, 0, 0,
-			    1000000,
-			    UINT64_C(0x123456789abcdef0), 0x31302e30, 123456 };
-			for (unsigned j = 0; j < 10; j++)
-				expect_true("ordered volume detail",
+			expect_true(labels[i].name, info->detail_count == 10);
+			for (size_t j = 0; j < sizeof(details) / sizeof(details[0]);
+			    j++)
+				expect_true(labels[i].name,
 				    strcmp(info->details[j].name,
-				    details[j]) == 0 &&
-				    info->details[j].value == values[j]);
+				    details[j].name) == 0 &&
+				    info->details[j].value == details[j].value);
 		}
 		fixture_close(&f);
 		/* Every label fixture is paired with a root identity failure.
@@ -1518,7 +1758,7 @@ test_labels_info(void)
 		uint64_t data = image.root_record +
 		    image.trees[GEN_CATALOG].records[0].key_length;
 		mutation_t wrong_id = { "root primary not folder 2", data + 8,
-		    3, 4, FSIMG_ECORRUPT };
+		    3, 4, FSIMG_ECORRUPT, NULL };
 		mutate_open(&image, &wrong_id);
 		gen_free(&image);
 	}
@@ -1529,15 +1769,15 @@ test_labels_info(void)
 	uint64_t thread = image.root_thread + 8;
 	const mutation_t roots[] = {
 		{ "root thread missing", image.root_thread + 2, 3, 4,
-		    FSIMG_ECORRUPT },
-		{ "root thread wrong type", thread, 4, 2, FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
+		{ "root thread wrong type", thread, 4, 2, FSIMG_ECORRUPT, NULL },
 		{ "root thread wrong parent", thread + 4, 2, 4,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
 		{ "root thread fold-equal spelling", thread + 10, 't', 2,
-		    FSIMG_ECORRUPT },
+		    FSIMG_ECORRUPT, NULL },
 		{ "root primary missing", image.root_record + 2, 0, 4,
-		    FSIMG_ECORRUPT },
-		{ "root primary not folder", primary, 2, 2, FSIMG_ECORRUPT }
+		    FSIMG_ECORRUPT, NULL },
+		{ "root primary not folder", primary, 2, 2, FSIMG_ECORRUPT, NULL }
 	};
 	for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
 		mutate_open(&image, &roots[i]);
@@ -1550,7 +1790,7 @@ test_faults(void)
 	gen_plan_t plan;
 	gen_image_t image;
 	fixture_t f;
-	fsimg_error_t error;
+	fsimg_error_t error = { 0 };
 
 	gen_plan_init(&plan);
 	plan.journal = true;
@@ -1676,6 +1916,39 @@ native_compare(const char *header, const fsimg_hfsplus_reader_t *state)
 	    4) == 0);
 }
 
+/* Inflate one capture into the memory input fixture; no temporary image. */
+static bool
+native_gzip(const char *path, gen_image_t *image)
+{
+	gzFile stream;
+	unsigned char *bytes;
+	size_t capacity = 1024 * 1024;
+	int count;
+
+	stream = gzopen(path, "rb");
+	if (stream == NULL)
+		return (false);
+	image->bytes = malloc(capacity);
+	CHECK(image->bytes != NULL);
+	for (;;) {
+		if (capacity - image->length < 1024 * 1024) {
+			CHECK(capacity <= SIZE_MAX / 2);
+			capacity *= 2;
+			bytes = realloc(image->bytes, capacity);
+			CHECK(bytes != NULL);
+			image->bytes = bytes;
+		}
+		count = gzread(stream, image->bytes + image->length,
+		    1024 * 1024);
+		CHECK(count >= 0);
+		if (count == 0)
+			break;
+		image->length += (size_t)count;
+	}
+	CHECK(gzclose(stream) == Z_OK);
+	return (true);
+}
+
 static void
 test_native(void)
 {
@@ -1683,10 +1956,11 @@ test_native(void)
 	struct dirent *entry;
 	DIR *dir;
 	char image_path[4096], fields_path[4096];
-	unsigned captures = 0;
+	unsigned captures = 0, missing = 0;
 
 	if (directory == NULL) {
-		puts("SKIP: FSIMG_HFSPLUS_NATIVE unset; native captures not read (a skip is not a pass)");
+		puts("SKIP: FSIMG_HFSPLUS_NATIVE unset; native captures not read "
+		    "(a skip is not a pass)");
 		return;
 	}
 	dir = opendir(directory);
@@ -1717,9 +1991,16 @@ test_native(void)
 			continue;
 		fd = open(image_path, O_RDONLY | O_CLOEXEC);
 		if (fd == -1) {
-			CHECK(fclose(fields) == 0);
-			continue;
+			CHECK(snprintf(image_path, sizeof(image_path),
+			    "%s/%s/image.img.gz", directory,
+			    entry->d_name) < (int)sizeof(image_path));
+			if (!native_gzip(image_path, &empty)) {
+				missing++;
+				CHECK(fclose(fields) == 0);
+				continue;
+			}
 		}
+
 		CHECK(fstat(fileno(fields),
 		    &st) == 0 && st.st_size >= 0 && st.st_size < 16 * 1024 *
 		    1024);
@@ -1730,11 +2011,14 @@ test_native(void)
 		CHECK(fclose(fields) == 0);
 		header = json_scalar(json, "volume_header");
 		fixture_init(&f, &empty, 0, 0);
-		fsimg_io_free(f.io);
-		CHECK(fsimg_io_from_fd(f.ctx, fd, FSIMG_IO_READ, &f.io,
-		    &error) == FSIMG_OK);
-		f.reader.input = f.io;
-		CHECK(fsimg_io_get_size(f.io, &f.length, &error) == FSIMG_OK);
+		if (fd != -1) {
+			fsimg_io_free(f.io);
+			CHECK(fsimg_io_from_fd(f.ctx, fd, FSIMG_IO_READ, &f.io,
+			    &error) == FSIMG_OK);
+			f.reader.input = f.io;
+			CHECK(fsimg_io_get_size(f.io, &f.length, &error) == FSIMG_OK);
+		}
+
 		bzero(prefix, sizeof(prefix));
 		CHECK(fsimg_io_read_at(f.io, 0, prefix, sizeof(prefix),
 		    &transferred, &error) == FSIMG_OK);
@@ -1748,7 +2032,9 @@ test_native(void)
 		if (classic) {
 			printf("%s: not claimed, classic HFS\n", entry->d_name);
 			fixture_close(&f);
-			CHECK(close(fd) == 0);
+			if (fd != -1)
+				CHECK(close(fd) == 0);
+			free(empty.bytes);
 			free(json);
 			captures++;
 			continue;
@@ -1770,12 +2056,204 @@ test_native(void)
 		expect_status(entry->d_name, status, expected, &error);
 		expect_true("native volume header comparison", matches);
 		fixture_close(&f);
-		CHECK(close(fd) == 0);
+		if (fd != -1)
+			CHECK(close(fd) == 0);
+		free(empty.bytes);
 		free(json);
 		captures++;
 	}
 	CHECK(closedir(dir) == 0);
+	printf("Native captures: %u read, %u without an image\n", captures,
+	    missing);
 	expect_true("native captures found", captures != 0);
+}
+
+/* Attribute keys sort by ID, name, then logical start, on both variants. */
+static void
+test_attribute_search(void)
+{
+	static const gen_attribute_t attributes[] = {
+		{ .file_id = 31, .name = 'z', .start_block = 9 },
+		{ .file_id = 32, .name = 'A', .start_block = 0 },
+		{ .file_id = 32, .name = 'A', .start_block = 2 },
+		{ .file_id = 32, .name = 'a', .start_block = 0 },
+		{ .file_id = 33, .name = 'A', .start_block = 0 }
+	};
+	static const struct {
+		const char *name;
+		gen_attribute_t key;
+		size_t next;
+		bool found;
+	} rows[] = {
+		{ "file ID order", { 30, 9, 'z' }, 0, false },
+		{ "name order before start", { 32, 99, '@' }, 1, false },
+		{ "start block order", { 32, 1, 'A' }, 2, false },
+		{ "binary name order", { 32, 99, 'Z' }, 3, false },
+		{ "exact attribute", { 32, 2, 'A' }, 2, true }
+	};
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_error_t error = { 0 };
+	hfsplus_cursor_t cursor;
+	hfsplus_key_t key;
+	hfsplus_record_t record;
+	unsigned char name[2];
+	bool found;
+
+	for (unsigned variant = 0; variant < 2; variant++) {
+		gen_plan_init(&plan);
+		plan.hfsx = variant != 0;
+		plan.attributes = true;
+		plan.attribute_records = attributes;
+		plan.attribute_count = sizeof(attributes) / sizeof(attributes[0]);
+		plan.records_per_node = 2;
+		gen_build(&plan, &image);
+		fixture_init(&f, &image, 0, 0);
+		CHECK(fixture_open(&f, -1, false, &error) == FSIMG_OK);
+		fsimg_hfsplus_reader_t *state = f.reader.driver;
+		hfsplus_cursor_init(&cursor, &state->attributes,
+		    state->attributes.search_node);
+		for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+			gen_store(name, rows[i].key.name, 2);
+			CHECK(hfsplus_attribute_key_init(&key, rows[i].key.file_id,
+			    rows[i].key.start_block, name, 1, &error) == FSIMG_OK);
+			expect_status(rows[i].name, hfsplus_btree_search(&cursor,
+			    &key, &error), FSIMG_OK, &error);
+			expect_true(rows[i].name, cursor.valid);
+			if (cursor.valid) {
+				CHECK(hfsplus_cursor_record(&cursor, &record,
+				    &error) == FSIMG_OK);
+				const gen_record_t *wanted =
+				    &image.trees[GEN_ATTRIBUTES].records[rows[i].next];
+				expect_true(rows[i].name, record.key_bytes ==
+				    wanted->key_length && bcmp(record.key,
+				    wanted->bytes, record.key_bytes) == 0);
+			}
+			expect_status(rows[i].name, hfsplus_btree_find_equivalent(
+			    &cursor, &key, &found, &error), FSIMG_OK, &error);
+			expect_true(rows[i].name, found == rows[i].found);
+		}
+		fixture_close(&f);
+		gen_free(&image);
+	}
+}
+
+static void
+test_empty_tree_search(void)
+{
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_error_t error = { 0 };
+	hfsplus_cursor_t cursor;
+	hfsplus_key_t key = { 0 };
+
+	gen_plan_init(&plan);
+	gen_build(&plan, &image);
+	uint64_t header = gen_node_offset(&image, GEN_EXTENTS, 0) +
+	    NODE_DESCRIPTOR;
+	const mutation_t nodes[] = {
+		{ "empty tree with root", header + TREE_ROOT, 1, 4,
+		    FSIMG_ECORRUPT, "empty tree names nodes" },
+		{ "empty tree with first leaf", header + TREE_FIRST_LEAF, 1, 4,
+		    FSIMG_ECORRUPT, "empty tree names nodes" },
+		{ "empty tree with last leaf", header + TREE_LAST_LEAF, 1, 4,
+		    FSIMG_ECORRUPT, "empty tree names nodes" }
+	};
+	CHECK(gen_load(image.bytes + header, 2) == 0);
+	for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++)
+		mutate_open(&image, &nodes[i]);
+	fixture_init(&f, &image, 0, 0);
+	CHECK(fixture_open(&f, -1, false, &error) == FSIMG_OK);
+	fsimg_hfsplus_reader_t *state = f.reader.driver;
+	CHECK(state->extents.header.tree_depth == 0);
+	hfsplus_cursor_init(&cursor, &state->extents,
+	    state->extents.search_node);
+	expect_status("empty tree lower bound", hfsplus_btree_search(&cursor,
+	    &key, &error), FSIMG_OK, &error);
+	expect_true("empty tree has no lower bound", !cursor.valid);
+	fixture_close(&f);
+	gen_free(&image);
+}
+
+/* The thread's borrowed name lives in the very buffer the lookup reuses. */
+static void
+test_catalog_key_owns_thread_name(void)
+{
+	static const uint16_t child_name[] = { 'a' };
+	gen_child_t child = { .name = child_name, .units = 1, .id = 32 };
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_error_t error = { 0 };
+	hfsplus_key_t key;
+	hfsplus_record_t record;
+	hfsplus_thread_t thread;
+	hfsplus_folder_t folder;
+	unsigned char saved[510];
+	bool found;
+
+	gen_plan_init(&plan);
+	plan.children = &child;
+	plan.child_count = 1;
+	plan.records_per_node = 2;
+	gen_build(&plan, &image);
+	fixture_init(&f, &image, 0, 0);
+	CHECK(fixture_open(&f, -1, false, &error) == FSIMG_OK);
+	fsimg_hfsplus_reader_t *state = f.reader.driver;
+	/* An index read replaces the thread's leaf bytes during lookup. */
+	CHECK(state->catalog.header.tree_depth > 1);
+	CHECK(hfsplus_catalog_key_init(&key, 2, NULL, 0, &error) == FSIMG_OK);
+	CHECK(hfsplus_catalog_find_exact(&state->catalog, &key, &record,
+	    &found, &error) == FSIMG_OK && found);
+	CHECK(hfsplus_thread_decode(record.data, record.data_bytes, &thread));
+	bcopy(thread.name, saved, 2 * thread.units);
+	CHECK(hfsplus_catalog_key_init(&key, thread.parent, thread.name,
+	    thread.units, &error) == FSIMG_OK);
+	CHECK(hfsplus_catalog_find_exact(&state->catalog, &key, &record,
+	    &found, &error) == FSIMG_OK);
+	expect_true("thread name survives exact search", bcmp(key.catalog.name,
+	    saved, 2 * key.catalog.units) == 0 && key.catalog.units ==
+	    plan.label_units);
+	expect_true("thread finds root primary", found &&
+	    hfsplus_folder_decode(record.data, record.data_bytes, &folder) &&
+	    folder.id == 2);
+	fixture_close(&f);
+	gen_free(&image);
+}
+
+static void
+test_content_domain_empty(void)
+{
+	static const struct {
+		const char *name;
+		uint32_t block_size;
+		uint32_t blocks;
+	} rows[] = {
+		{ "N of one", 4096, 1 },
+		{ "first equals end", 512, 3 },
+		{ "first exceeds end", 512, 2 }
+	};
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_error_t error = { 0 };
+
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		gen_plan_init(&plan);
+		gen_build(&plan, &image);
+		gen_store(image.bytes + image.header + 40, rows[i].block_size, 4);
+		gen_store(image.bytes + image.header + 44, rows[i].blocks, 4);
+		gen_store(image.bytes + image.header + 48, 0, 4);
+		fixture_init(&f, &image, 0, 0);
+		expect_status(rows[i].name, fixture_open(&f, -1, false, &error),
+		    FSIMG_ECORRUPT, &error);
+		expect_true(rows[i].name, strstr(error.message,
+		    "leaves no blocks for content") != NULL);
+		fixture_close(&f);
+		gen_free(&image);
+	}
 }
 
 int
@@ -1786,12 +2264,17 @@ main(void)
 	test_headers();
 	test_tree_parameters();
 	test_tree_search();
+	test_attribute_search();
+	test_empty_tree_search();
+	test_catalog_key_owns_thread_name();
+	test_content_domain_empty();
 	test_tree_faults();
 	test_node_framing();
 	test_record_key_bounds();
 	test_forks();
 	test_journals();
 	test_journal_size_limits();
+	test_journal_location_clauses();
 	test_labels_info();
 	test_faults();
 	test_native();

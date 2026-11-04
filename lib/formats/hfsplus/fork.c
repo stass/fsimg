@@ -115,7 +115,6 @@ walk_overflow(fork_walk_t *walk, uint32_t file_id, uint8_t fork_type,
 	hfsplus_ekey_t stored;
 	hfsplus_key_t key;
 	uint64_t blocks;
-	bool found;
 	fsimg_status_t status;
 
 	hfsplus_cursor_init(&cursor, &hfsplus->extents,
@@ -125,13 +124,13 @@ walk_overflow(fork_walk_t *walk, uint32_t file_id, uint8_t fork_type,
 		.fork_type = fork_type,
 		.start_block = (uint32_t)walk->appended
 	};
-	status = hfsplus_btree_find(&cursor, &key, &found, error);
+	status = hfsplus_btree_search(&cursor, &key, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (!found)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus fork's overflow record is missing"));
 
+	/* The caller has a block to find, so a missing first record fails here
+	 * as a later one would.
+	 */
 	while (walk->appended < walk->total) {
 		if (!cursor.valid)
 			return (hfsplus_corrupt(error,
@@ -141,7 +140,6 @@ walk_overflow(fork_walk_t *walk, uint32_t file_id, uint8_t fork_type,
 			return (status);
 		if (!hfsplus_ekey_decode(record.key, record.key_bytes,
 		    &stored) ||
-		    record.data_bytes != HFSPLUS_EXTENT_RECORD_BYTES ||
 		    !hfsplus_extents_decode(record.data, record.data_bytes,
 		    extents))
 			return (hfsplus_corrupt(error,
@@ -222,6 +220,8 @@ hfsplus_fork_index(fsimg_reader_t *reader, uint32_t file_id, uint8_t fork_type,
 	fsimg_status_t status;
 
 	*index = NULL;
+	if (records != NULL)
+		*records = 0;
 	consumed = 0;
 	status = check_fork(&hfsplus_state(reader)->geometry, fork,
 	    &inline_blocks, error);
@@ -234,8 +234,6 @@ hfsplus_fork_index(fsimg_reader_t *reader, uint32_t file_id, uint8_t fork_type,
 	    inline_blocks != fork->total_blocks)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus extents tree's fork needs overflow"));
-	if (records != NULL)
-		*records = 0;
 	if (fork->total_blocks == 0)
 		return (FSIMG_OK);
 

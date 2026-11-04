@@ -209,7 +209,9 @@ compare_folded(const unsigned char *a, size_t a_units,
 	return (0);
 }
 
-/* Big-endian units order as their bytes do. */
+/* Big-endian units order as their bytes do. The caller has handled empty
+ * names, so both pointers are valid.
+ */
 static int
 compare_binary(const unsigned char *a, size_t a_units,
     const unsigned char *b, size_t b_units)
@@ -218,7 +220,7 @@ compare_binary(const unsigned char *a, size_t a_units,
 	int order;
 
 	common = a_units < b_units ? a_units : b_units;
-	order = common == 0 ? 0 : memcmp(a, b, 2 * common);
+	order = memcmp(a, b, 2 * common);
 	if (order != 0)
 		return (order);
 	if (a_units == b_units)

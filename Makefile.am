@@ -273,7 +273,7 @@ test_qnx4_write_LDADD = libfsimg.la
 test_hfsplus_codec_SOURCES = test/hfsplus-codec.c test/test.h
 test_hfsplus_codec_LDADD = libfsimg.la
 test_hfsplus_SOURCES = test/hfsplus.c test/hfsplus-gen.c test/hfsplus-gen.h test/test.h
-test_hfsplus_LDADD = libfsimg.la
+test_hfsplus_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_hfsplus_unicode_SOURCES = test/hfsplus-unicode.c test/test.h \
 	test/digest.c test/digest.h
 test_hfsplus_unicode_LDADD = libfsimg.la

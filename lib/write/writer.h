@@ -247,7 +247,9 @@ struct fsimg_writer {
 	bool		 catalog_ready;
 	bool		 output_root_known;
 	unsigned	 variant;
-	/* A label of at most 48 bytes and its terminator. */
+	/* The label and its terminator: the longest any format takes is 255
+	 * UTF-16 units, each at most three bytes of UTF-8.
+	 */
 	char		 label[766];
 	/* The pointer texts of the options (the text rows of the settings
 	 * table: the mountpoint, the El Torito boot paths, the ISO 9660

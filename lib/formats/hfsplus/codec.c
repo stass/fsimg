@@ -120,12 +120,12 @@ hfsplus_fork_decode(const unsigned char *raw, size_t length,
 	return (true);
 }
 
-/* Fills HFSPLUS_EXTENTS_PER_RECORD descriptors. */
+/* An extents record is exactly its eight descriptors. */
 bool
 hfsplus_extents_decode(const unsigned char *raw, size_t length,
     hfsplus_extent_t *extents)
 {
-	if (length < HFSPLUS_EXTENT_RECORD_BYTES)
+	if (length != HFSPLUS_EXTENT_RECORD_BYTES)
 		return (false);
 
 	extents_decode(raw, extents);
@@ -318,10 +318,11 @@ hfsplus_akey_decode(const unsigned char *raw, size_t length,
 	return (true);
 }
 
-/* A known type's fields must fit length; an inline record may pad its odd
- * value to the two-byte record alignment. A type this function does not know
- * is returned, with no other field set, for attributes.c to refuse as
- * FSIMG_EUNSUPPORTED, which differs from a malformed record.
+/* A fork or extents record is exactly its bytes. An inline record's value must
+ * fit length and any bytes after it are accepted, as the format design allows.
+ * A type this function does not know is returned, with no other field set, for
+ * attributes.c to refuse as FSIMG_EUNSUPPORTED, which differs from a malformed
+ * record.
  */
 bool
 hfsplus_attr_decode(const unsigned char *raw, size_t length,
@@ -344,12 +345,12 @@ hfsplus_attr_decode(const unsigned char *raw, size_t length,
 			return (false);
 		break;
 	case HFSPLUS_ATTR_FORK:
-		if (length < HFSPLUS_ATTR_FORK_BYTES)
+		if (length != HFSPLUS_ATTR_FORK_BYTES)
 			return (false);
 		fork_decode(raw + 8, &decoded.fork);
 		break;
 	case HFSPLUS_ATTR_EXTENTS:
-		if (length < HFSPLUS_ATTR_EXTENTS_BYTES)
+		if (length != HFSPLUS_ATTR_EXTENTS_BYTES)
 			return (false);
 		extents_decode(raw + 8, decoded.extents);
 		break;
@@ -430,6 +431,17 @@ hfsplus_journal_decode(const unsigned char *raw, size_t length,
 	journal->blhdr_size = journal_load32(raw + 32, little_endian);
 	journal->jhdr_size = journal_load32(raw + 40, little_endian);
 	return (true);
+}
+
+bool
+hfsplus_journal_is_older_form(const unsigned char *raw, size_t length)
+{
+	const uint32_t older_magic = 0x4a484452;
+
+	if (length < 4)
+		return (false);
+	return (fsimg_load_be32(raw) == older_magic ||
+	    fsimg_load_le32(raw) == older_magic);
 }
 
 bool

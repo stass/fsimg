@@ -113,7 +113,8 @@ check_parameters(const hfsplus_tree_t *tree, const hfsplus_btree_t *header,
 
 /* The header record's structure: the fork holds exactly its nodes, and an
  * empty tree, of depth zero, names no nodes while any other names real ones.
- * Verification owns the fields no read depends on.
+ * A tree of no nodes at all fails when node 0 is read. Verification owns the
+ * fields no read depends on.
  */
 static fsimg_status_t
 check_header_fields(const hfsplus_btree_t *header, uint64_t logical_size,
@@ -122,8 +123,7 @@ check_header_fields(const hfsplus_btree_t *header, uint64_t logical_size,
 	uint64_t fork_bytes;
 
 	if (!fsimg_mul_u64(header->total_nodes, header->node_size,
-	    &fork_bytes) ||
-	    fork_bytes != logical_size || header->total_nodes == 0)
+	    &fork_bytes) || fork_bytes != logical_size)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus tree's node count disagrees with its fork"));
 	if (header->tree_depth > HFSPLUS_BTREE_DEPTH_MAX)
@@ -243,7 +243,8 @@ hfsplus_node_record(const hfsplus_tree_t *tree, const unsigned char *buffer,
 
 fsimg_status_t
 hfsplus_tree_open(fsimg_reader_t *reader, hfsplus_tree_t *tree,
-    uint64_t logical_size, fsimg_error_t *error)
+    hfsplus_tree_kind_t kind, uint32_t id, const hfsplus_fork_t *fork,
+    fsimg_error_t *error)
 {
 	unsigned char start[HFSPLUS_NODE_DESCRIPTOR_BYTES +
 	    HFSPLUS_BTREE_HEADER_BYTES];
@@ -252,7 +253,11 @@ hfsplus_tree_open(fsimg_reader_t *reader, hfsplus_tree_t *tree,
 	fsimg_error_t detail;
 	fsimg_status_t status;
 
-	tree->reader = reader;
+	*tree = (hfsplus_tree_t){ .reader = reader, .kind = kind };
+	status = hfsplus_fork_index(reader, id, HFSPLUS_FORK_DATA, fork,
+	    &tree->fork, NULL, error);
+	if (status != FSIMG_OK || tree->fork == NULL)
+		return (status);
 
 	/* The node size is in the node; read just enough to learn it. */
 	status = hfsplus_fork_read(reader, tree->fork, 0, start, sizeof(start),
@@ -265,7 +270,8 @@ hfsplus_tree_open(fsimg_reader_t *reader, hfsplus_tree_t *tree,
 		    "HFS Plus tree header is malformed"));
 	status = check_parameters(tree, &header, error);
 	if (status == FSIMG_OK)
-		status = check_header_fields(&header, logical_size, error);
+		status = check_header_fields(&header, fork->logical_size,
+		    error);
 	if (status != FSIMG_OK)
 		return (status);
 	tree->header = header;
@@ -361,30 +367,43 @@ static fsimg_status_t
 key_order(const hfsplus_tree_t *tree, const hfsplus_key_t *search,
     const hfsplus_record_t *record, int *order, fsimg_error_t *error)
 {
-	hfsplus_key_t stored;
+	hfsplus_ekey_t stored_extents;
+	hfsplus_ckey_t stored_catalog, wanted_catalog;
+	hfsplus_akey_t stored_attribute, wanted_attribute;
 	bool decoded;
 
 	switch (tree->kind) {
 	case HFSPLUS_TREE_EXTENTS:
 		decoded = hfsplus_ekey_decode(record->key, record->key_bytes,
-		    &stored.extents);
+		    &stored_extents);
 		if (decoded)
-			*order = ekey_compare(&stored.extents,
+			*order = ekey_compare(&stored_extents,
 			    &search->extents);
 		break;
 	case HFSPLUS_TREE_CATALOG:
 		decoded = hfsplus_ckey_decode(record->key, record->key_bytes,
-		    &stored.catalog);
+		    &stored_catalog);
+		wanted_catalog = (hfsplus_ckey_t){
+			.name = search->catalog.name,
+			.parent = search->catalog.parent,
+			.units = search->catalog.units
+		};
 		if (decoded)
 			*order = hfsplus_ckey_compare(tree->compare,
-			    &stored.catalog, &search->catalog);
+			    &stored_catalog, &wanted_catalog);
 		break;
 	case HFSPLUS_TREE_ATTRIBUTES:
 		decoded = hfsplus_akey_decode(record->key, record->key_bytes,
-		    &stored.attribute);
+		    &stored_attribute);
+		wanted_attribute = (hfsplus_akey_t){
+			.name = search->attribute.name,
+			.file_id = search->attribute.file_id,
+			.start_block = search->attribute.start_block,
+			.units = search->attribute.units
+		};
 		if (decoded)
-			*order = akey_compare(&stored.attribute,
-			    &search->attribute);
+			*order = akey_compare(&stored_attribute,
+			    &wanted_attribute);
 		break;
 	default:
 		decoded = false;
@@ -396,7 +415,9 @@ key_order(const hfsplus_tree_t *tree, const hfsplus_key_t *search,
 }
 
 /* The child to follow from an index node: the greatest index key not above the
- * search key, or the first when the search key precedes them all.
+ * search key, or the first when the search key precedes them all. The first
+ * record is that fallback, and hfsplus_node_read() has required an index node
+ * to hold one, so *child is always set on success.
  */
 static fsimg_status_t
 index_child(const hfsplus_tree_t *tree, const unsigned char *buffer,
@@ -420,9 +441,8 @@ index_child(const hfsplus_tree_t *tree, const unsigned char *buffer,
 		status = key_order(tree, key, &record, &order, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (order > 0 && i != 0)
-			break;
-		*child = fsimg_load_be32(record.data);
+		if (i == 0 || order <= 0)
+			*child = fsimg_load_be32(record.data);
 		if (order >= 0)
 			break;
 	}
@@ -525,8 +545,38 @@ hfsplus_btree_search(hfsplus_cursor_t *cursor, const hfsplus_key_t *key,
 }
 
 fsimg_status_t
-hfsplus_btree_find(hfsplus_cursor_t *cursor, const hfsplus_key_t *key,
-    bool *found, fsimg_error_t *error)
+hfsplus_catalog_key_init(hfsplus_key_t *key, uint32_t parent,
+    const unsigned char *name, size_t units, fsimg_error_t *error)
+{
+	if (units > HFSPLUS_NAME_UNITS_MAX)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus catalog name is longer than a key holds"));
+	key->catalog.parent = parent;
+	key->catalog.units = (uint16_t)units;
+	if (units != 0)
+		bcopy(name, key->catalog.name, 2 * units);
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+hfsplus_attribute_key_init(hfsplus_key_t *key, uint32_t file_id,
+    uint32_t start_block, const unsigned char *name, size_t units,
+    fsimg_error_t *error)
+{
+	if (units > HFSPLUS_ATTR_NAME_UNITS_MAX)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus attribute name is longer than a key holds"));
+	key->attribute.file_id = file_id;
+	key->attribute.start_block = start_block;
+	key->attribute.units = (uint16_t)units;
+	if (units != 0)
+		bcopy(name, key->attribute.name, 2 * units);
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+hfsplus_btree_find_equivalent(hfsplus_cursor_t *cursor,
+    const hfsplus_key_t *key, bool *found, fsimg_error_t *error)
 {
 	hfsplus_record_t record;
 	int order;
@@ -542,6 +592,32 @@ hfsplus_btree_find(hfsplus_cursor_t *cursor, const hfsplus_key_t *key,
 	if (status != FSIMG_OK)
 		return (status);
 	*found = order == 0;
+	return (FSIMG_OK);
+}
+
+/* A valid folded catalog cannot hold two names folding equal under one parent,
+ * so the one record the search reaches decides.
+ */
+fsimg_status_t
+hfsplus_catalog_find_exact(hfsplus_tree_t *catalog, const hfsplus_key_t *key,
+    hfsplus_record_t *record, bool *found, fsimg_error_t *error)
+{
+	hfsplus_cursor_t cursor;
+	hfsplus_ckey_t stored;
+	fsimg_status_t status;
+
+	hfsplus_cursor_init(&cursor, catalog, catalog->search_node);
+	status = hfsplus_btree_find_equivalent(&cursor, key, found, error);
+	if (status != FSIMG_OK || !*found)
+		return (status);
+	status = hfsplus_cursor_record(&cursor, record, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!hfsplus_ckey_decode(record->key, record->key_bytes, &stored))
+		return (hfsplus_corrupt(error, "HFS Plus key is malformed"));
+	*found = stored.units == key->catalog.units &&
+	    bcmp(stored.name, key->catalog.name,
+	    2 * (size_t)stored.units) == 0;
 	return (FSIMG_OK);
 }
 
@@ -571,7 +647,6 @@ hfsplus_cursor_record(const hfsplus_cursor_t *cursor, hfsplus_record_t *record,
 	size_t length;
 
 	hfsplus_node_record(cursor->tree, cursor->buffer, cursor->record,
-    &bytes,
-	    &length);
+	    &bytes, &length);
 	return (split_record(cursor->tree, bytes, length, record, error));
 }

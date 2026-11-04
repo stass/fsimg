@@ -483,6 +483,20 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 	}
 	pack_tree(plan, GEN_EXTENTS, &image->trees[GEN_EXTENTS],
 	    &packed[GEN_EXTENTS]);
+	for (size_t i = 0; i < plan->attribute_count; i++) {
+		const gen_attribute_t *attribute = &plan->attribute_records[i];
+
+		bzero(&record, sizeof(record));
+		gen_store(record.bytes, 14, 2);
+		gen_store(record.bytes + 4, attribute->file_id, 4);
+		gen_store(record.bytes + 8, attribute->start_block, 4);
+		gen_store(record.bytes + 12, 1, 2);
+		gen_store(record.bytes + 14, attribute->name, 2);
+		record.key_length = 16;
+		gen_store(record.bytes + record.key_length, 0x10, 4);
+		record.length = record.key_length + 16;
+		add_record(&image->trees[GEN_ATTRIBUTES], &record);
+	}
 	if (plan->attributes)
 		pack_tree(plan, GEN_ATTRIBUTES, &image->trees[GEN_ATTRIBUTES],
 		    &packed[GEN_ATTRIBUTES]);

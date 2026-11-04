@@ -52,16 +52,19 @@ heights and sibling links are validated once.
 
 The shared big-endian [scalar codecs](design-binary-primitives.md) decode
 and encode integers in byte buffers; the record codecs check each record's
-span before any field is read. Decoded records are C structures with `_t`
-typedefs holding only validated values:
+span before any field is read. Every type in this table is a raw decoded form:
+the codec has checked its shape and the fields that frame it, and its other
+values are the caller's to validate. The validated forms are those the driver
+derives from them, `hfsplus_geometry_t` and `hfsplus_tree_t`, whose header
+`hfsplus_tree_open()` has checked against the tree parameter table.
 
 | Type | Fields |
 | --- | --- |
 | `hfsplus_extent_t` | `start`, `count` (u32 blocks) |
 | `hfsplus_fork_t` | `logical_size`, `total_blocks`, eight `hfsplus_extent_t` |
 | `hfsplus_header_t` | Every header field of the format design's table, the five forks decoded |
-| `hfsplus_node_t` | Descriptor fields and the validated record offsets of one node buffer |
-| `hfsplus_btree_t` | Header record fields, the tree's node size, comparator and fork index |
+| `hfsplus_node_t` | Descriptor fields of one node |
+| `hfsplus_btree_t` | Header record fields |
 | `hfsplus_ekey_t` | `file_id`, `start_block` and `fork_type` of an extents overflow key |
 | `hfsplus_ckey_t` | `parent`, `units` (count) and a borrowed pointer to the big-endian units in the node buffer |
 | `hfsplus_folder_t`, `hfsplus_file_t`, `hfsplus_thread_t` | The record fields; Finder information kept as raw bytes for the type and creator tests |
@@ -73,7 +76,9 @@ typedefs holding only validated values:
 | `hfsplus_rsrc_t`, `hfsplus_rsrc_table_t`, `hfsplus_chunk_t` | A type 4 resource fork's header, its resource length and chunk count, and one chunk's offset and length |
 
 A borrowed key pointer is valid until its node buffer is reused, which the
-B-tree reader's cursor discipline below fixes. Encoding is the exact inverse
+B-tree reader's cursor discipline below fixes. A search key is a different
+type, which holds its own copy of the name, so no node read can change what a
+search looks for. Encoding is the exact inverse
 and fills every reserved byte with zero, so an emitted record never contains
 an unspecified byte.
 
@@ -106,12 +111,13 @@ next reads:
 3. **Extents tree.** Build its fork index from the eight inline extents
    alone, require their sum to equal `totalBlocks`, read node 0 and check
    the header record against the tree parameter table.
-4. **Special forks.** Resolve the catalog, bitmap, attributes and startup
-   forks through the fork resolver, whose overflow lookups now work. A
-   zero attributes or startup fork means absent.
-5. **Catalog and attributes trees.** Read and check each header node; select
-   the catalog comparator from the signature and `keyCompareType`; require
-   `totalNodes * M` to equal the fork's `logicalSize`.
+4. **Catalog tree.** Resolve its fork through the fork resolver, whose
+   overflow lookups now work; read and check its header node, requiring
+   `totalNodes * M` to equal the fork's `logicalSize`; select the comparator
+   from the signature and `keyCompareType`.
+5. **Attributes tree and remaining forks.** Open the attributes tree as the
+   catalog's, without a comparator, and resolve the bitmap and startup forks.
+   A zero attributes or startup fork means absent.
 6. **Journal.** With bit 13 set, read the 180-byte info block and
    dispatch on its flags first, by the format design's
    [flags table](design-hfsplus.md#journal-info-block), whose rows apply in

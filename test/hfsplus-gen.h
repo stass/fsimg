@@ -32,7 +32,16 @@ typedef struct gen_child {
 	uint32_t	 resource_extents;
 } gen_child_t;
 
+typedef struct gen_attribute {
+	uint32_t	 file_id;
+	uint32_t	 start_block;
+	uint16_t	 name;
+} gen_attribute_t;
+
 typedef struct gen_plan {
+	const gen_attribute_t *attribute_records;
+	size_t		 attribute_count;
+
 	const gen_child_t *children;
 	size_t		 child_count;
 	const uint16_t	*label;

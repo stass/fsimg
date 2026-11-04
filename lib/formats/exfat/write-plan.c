@@ -68,10 +68,13 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 	options->sector_bytes = sector;
 	if (options->label == NULL)
 		options->label = "NO NAME";
-	length = strnlen(options->label, 48);
-	if (length == 48)
+	/* Bound the length before converting: 11 UTF-16 units are at most 33
+	 * bytes of UTF-8, 3 for a one-unit character and 4 for a two-unit one.
+	 */
+	length = strnlen(options->label, 34);
+	if (length == 34)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-		    FSIMG_OP_WRITER, "exFAT label exceeds UTF-8 backing capacity"));
+		    FSIMG_OP_WRITER, "exFAT label exceeds 11 UTF-16 units"));
 	status = fsimg_utf8_to_utf16(options->label, length, label, 11, &units, error);
 	if (status != FSIMG_OK)
 		return (status);

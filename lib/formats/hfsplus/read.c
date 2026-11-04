@@ -110,9 +110,9 @@ report_info(fsimg_reader_t *reader)
 
 	detail_add(info, "journal", hfsplus->journal);
 	detail_add(info, "catalog_node_bytes",
-    hfsplus->catalog.header.node_size);
+	    hfsplus->catalog.header.node_size);
 	detail_add(info, "extents_node_bytes",
-    hfsplus->extents.header.node_size);
+	    hfsplus->extents.header.node_size);
 	detail_add(info, "attributes_node_bytes", hfsplus->attributes.present ?
 	    hfsplus->attributes.header.node_size : 0);
 	detail_add(info, "files", header->file_count);

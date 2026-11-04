@@ -14,14 +14,17 @@
  * Opening a volume completes recognition in a fixed order, each step failing
  * before the next reads:
  *
- * 1. the identity; a wrapper is refused, its work is in docs/todo-hfsplus.md;
- * 2. the header, its attribute table and the geometry;
- * 3. the extents tree, whose fork resolves from its inline extents alone;
- * 4. the catalog, bitmap, attributes and startup forks, whose overflow lookups
- *    now work;
- * 5. the catalog and attributes trees and the catalog's comparator;
- * 6. the journal, under the info block's flags table;
- * 7. the root folder through its thread, whose name is the label.
+ * 1. check_identity(): the identity; a wrapper is refused, its work is in
+ *    docs/todo-hfsplus.md;
+ * 2. derive_geometry(): the header, its attribute table and the geometry;
+ * 3. open_extents_tree(): the extents tree, whose fork resolves from its inline
+ *    extents alone;
+ * 4. open_catalog_tree(): the catalog tree, whose fork's overflow lookups now
+ *    work, and its comparator;
+ * 5. open_remaining_forks(): the attributes tree and the bitmap and startup
+ *    forks;
+ * 6. hfsplus_journal_open(): the journal, under the info block's flags table;
+ * 7. open_root(): the root folder through its thread, whose name is the label.
  *
  * Open reads at most the header, three header nodes, a few search paths and
  * the two journal records.
@@ -53,12 +56,12 @@ static fsimg_status_t check_identity(fsimg_reader_t *,
 static fsimg_status_t derive_geometry(fsimg_reader_t *, uint64_t,
     const unsigned char *, fsimg_error_t *);
 static fsimg_status_t open_extents_tree(fsimg_reader_t *, fsimg_error_t *);
-static fsimg_status_t open_special_forks(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t select_comparator(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t allocate_scan_node(fsimg_reader_t *, fsimg_error_t *);
-static fsimg_status_t find_catalog_record(fsimg_reader_t *, uint32_t,
-    const unsigned char *, uint16_t, hfsplus_cursor_t *, hfsplus_record_t *,
-    bool *, fsimg_error_t *);
+static fsimg_status_t open_catalog_tree(fsimg_reader_t *, fsimg_error_t *);
+static fsimg_status_t open_remaining_forks(fsimg_reader_t *, fsimg_error_t *);
+static fsimg_status_t journal_state_from_flags(const fsimg_hfsplus_reader_t *,
+    uint32_t, hfsplus_journal_state_t *, fsimg_error_t *);
 static fsimg_status_t journal_location(fsimg_reader_t *, const hfsplus_jib_t *,
     hfsplus_extent_t *, fsimg_error_t *);
 static fsimg_status_t journal_header_check(fsimg_reader_t *,
@@ -165,57 +168,16 @@ static fsimg_status_t
 open_extents_tree(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
-	const hfsplus_fork_t *fork = &hfsplus->header.extents_file;
 	fsimg_status_t status;
 
-	hfsplus->extents.kind = HFSPLUS_TREE_EXTENTS;
-	status = hfsplus_fork_index(reader, HFSPLUS_ID_EXTENTS,
-	    HFSPLUS_FORK_DATA, fork, &hfsplus->extents.fork, NULL, error);
+	status = hfsplus_tree_open(reader, &hfsplus->extents,
+	    HFSPLUS_TREE_EXTENTS, HFSPLUS_ID_EXTENTS,
+	    &hfsplus->header.extents_file, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (hfsplus->extents.fork == NULL)
+	if (!hfsplus->extents.present)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus extents tree is missing"));
-	return (hfsplus_tree_open(reader, &hfsplus->extents, fork->logical_size,
-	    error));
-}
-
-/* Resolve the other forks through the now working overflow lookups. A zero
- * attributes or startup fork means the volume has none; the startup file is
- * validated and held by nothing, since no read needs it.
- */
-static fsimg_status_t
-open_special_forks(fsimg_reader_t *reader, fsimg_error_t *error)
-{
-	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
-	const hfsplus_header_t *header = &hfsplus->header;
-	fsimg_extent_index_t *startup;
-	fsimg_status_t status;
-
-	status = hfsplus_fork_index(reader, HFSPLUS_ID_CATALOG,
-	    HFSPLUS_FORK_DATA,
-	    &header->catalog_file, &hfsplus->catalog.fork, NULL, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (hfsplus->catalog.fork == NULL)
-		return (hfsplus_corrupt(error, "HFS Plus catalog is missing"));
-	status = hfsplus_fork_index(reader, HFSPLUS_ID_ALLOCATION,
-	    HFSPLUS_FORK_DATA, &header->allocation_file, &hfsplus->bitmap, NULL,
-	    error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (hfsplus->bitmap == NULL)
-		return (hfsplus_corrupt(error, "HFS Plus bitmap is missing"));
-	status = hfsplus_fork_index(reader, HFSPLUS_ID_ATTRIBUTES,
-	    HFSPLUS_FORK_DATA, &header->attributes_file,
-	    &hfsplus->attributes.fork, NULL, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = hfsplus_fork_index(reader, HFSPLUS_ID_STARTUP,
-	    HFSPLUS_FORK_DATA, &header->startup_file, &startup, NULL, error);
-	if (status != FSIMG_OK)
-		return (status);
-	fsimg_extent_index_free(startup);
 	return (FSIMG_OK);
 }
 
@@ -258,38 +220,53 @@ allocate_scan_node(fsimg_reader_t *reader, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/* Find the catalog record of exactly (parent, name) by stored units. A folded
- * catalog's search also lands on a spelling that folds equal, which is another
- * name. The record borrows from the catalog's search buffer until its next
- * search.
- */
 static fsimg_status_t
-find_catalog_record(fsimg_reader_t *reader, uint32_t parent,
-    const unsigned char *name, uint16_t units, hfsplus_cursor_t *cursor,
-    hfsplus_record_t *record, bool *found, fsimg_error_t *error)
+open_catalog_tree(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
-	hfsplus_ckey_t stored;
-	hfsplus_key_t key;
 	fsimg_status_t status;
 
-	key.catalog = (hfsplus_ckey_t){
-		.name = name,
-		.parent = parent,
-		.units = units
-	};
-	hfsplus_cursor_init(cursor, &hfsplus->catalog,
-	    hfsplus->catalog.search_node);
-	status = hfsplus_btree_find(cursor, &key, found, error);
-	if (status != FSIMG_OK || !*found)
-		return (status);
-	status = hfsplus_cursor_record(cursor, record, error);
+	status = hfsplus_tree_open(reader, &hfsplus->catalog,
+	    HFSPLUS_TREE_CATALOG, HFSPLUS_ID_CATALOG,
+	    &hfsplus->header.catalog_file, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (!hfsplus_ckey_decode(record->key, record->key_bytes, &stored))
-		return (hfsplus_corrupt(error, "HFS Plus key is malformed"));
-	*found = stored.units == units && (units == 0 ||
-	    bcmp(stored.name, name, 2 * (size_t)units) == 0);
+	if (!hfsplus->catalog.present)
+		return (hfsplus_corrupt(error, "HFS Plus catalog is missing"));
+	status = select_comparator(reader, error);
+	if (status != FSIMG_OK)
+		return (status);
+	return (allocate_scan_node(reader, error));
+}
+
+/* A zero attributes or startup fork means the volume has none; the startup file
+ * is validated and held by nothing, since no read needs it.
+ */
+static fsimg_status_t
+open_remaining_forks(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
+	const hfsplus_header_t *header = &hfsplus->header;
+	fsimg_extent_index_t *startup;
+	fsimg_status_t status;
+
+	status = hfsplus_tree_open(reader, &hfsplus->attributes,
+	    HFSPLUS_TREE_ATTRIBUTES, HFSPLUS_ID_ATTRIBUTES,
+	    &header->attributes_file, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = hfsplus_fork_index(reader, HFSPLUS_ID_ALLOCATION,
+	    HFSPLUS_FORK_DATA, &header->allocation_file, &hfsplus->bitmap, NULL,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (hfsplus->bitmap == NULL)
+		return (hfsplus_corrupt(error, "HFS Plus bitmap is missing"));
+	status = hfsplus_fork_index(reader, HFSPLUS_ID_STARTUP,
+	    HFSPLUS_FORK_DATA, &header->startup_file, &startup, NULL, error);
+	if (status != FSIMG_OK)
+		return (status);
+	fsimg_extent_index_free(startup);
 	return (FSIMG_OK);
 }
 
@@ -304,14 +281,18 @@ journal_location(fsimg_reader_t *reader, const hfsplus_jib_t *jib,
 	const hfsplus_owned_name_t *name =
 	    &hfsplus_owned_names[HFSPLUS_OWNED_JOURNAL];
 	uint32_t block_size = hfsplus_state(reader)->geometry.block_size;
-	hfsplus_cursor_t cursor;
+	hfsplus_key_t key;
 	hfsplus_record_t record;
 	hfsplus_file_t file;
 	bool found;
 	fsimg_status_t status;
 
-	status = find_catalog_record(reader, HFSPLUS_ID_ROOT, name->units,
-	    name->count, &cursor, &record, &found, error);
+	status = hfsplus_catalog_key_init(&key, HFSPLUS_ID_ROOT, name->units,
+	    name->count, error);
+	if (status == FSIMG_OK)
+		status = hfsplus_catalog_find_exact(
+		    &hfsplus_state(reader)->catalog, &key, &record, &found,
+		    error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (!found)
@@ -353,6 +334,9 @@ journal_header_check(fsimg_reader_t *reader, const hfsplus_jib_t *jib,
 	    sizeof(raw), &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
+	if (hfsplus_journal_is_older_form(raw, sizeof(raw)))
+		return (hfsplus_unsupported(error,
+		    "HFS Plus journal has an older header form fsimg does not decode"));
 	if (!hfsplus_journal_decode(raw, sizeof(raw), &journal))
 		return (hfsplus_corrupt(error,
 		    "HFS Plus journal header is malformed or fails its checksum"));
@@ -380,7 +364,34 @@ journal_header_check(fsimg_reader_t *reader, const hfsplus_jib_t *jib,
 	return (FSIMG_OK);
 }
 
-/* Apply the info block's flags table, whose first matching row decides. */
+/* The info block's flags table of the format design, one row per test in its
+ * order; the first matching row decides.
+ */
+static fsimg_status_t
+journal_state_from_flags(const fsimg_hfsplus_reader_t *hfsplus, uint32_t flags,
+    hfsplus_journal_state_t *state, fsimg_error_t *error)
+{
+	if ((flags & JIB_FLAG_EXTERNAL) != 0)
+		return (hfsplus_unsupported(error,
+		    "HFS Plus journal is on another device"));
+	if ((flags & JIB_FLAG_IN_VOLUME) == 0)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus journal info block has no location flag"));
+	if ((flags & JIB_FLAG_NEEDS_INIT) != 0) {
+		*state = HFSPLUS_JOURNAL_UNINITIALIZED;
+		return (FSIMG_OK);
+	}
+	if (hfsplus->wrapped)
+		return (hfsplus_unsupported(error,
+		    "HFS Plus journal inside a wrapper has no established location"));
+	*state = HFSPLUS_JOURNAL_CLEAN;
+	return (FSIMG_OK);
+}
+
+/* Read the info block and apply its flags: the table decides the state, every
+ * state but a refusal requires the location rule, and only a local initialized
+ * journal has a header to read.
+ */
 fsimg_status_t
 hfsplus_journal_open(fsimg_reader_t *reader, fsimg_error_t *error)
 {
@@ -390,8 +401,8 @@ hfsplus_journal_open(fsimg_reader_t *reader, fsimg_error_t *error)
 	uint32_t info_block = hfsplus->header.journal_info_block;
 	hfsplus_extent_t extent;
 	hfsplus_jib_t jib;
+	hfsplus_journal_state_t state;
 	size_t transferred;
-	bool uninitialized;
 	fsimg_status_t status;
 
 	if ((hfsplus->header.attributes & ATTRIBUTE_JOURNALED) == 0)
@@ -408,24 +419,14 @@ hfsplus_journal_open(fsimg_reader_t *reader, fsimg_error_t *error)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus journal info block is short"));
 
-	if ((jib.flags & JIB_FLAG_EXTERNAL) != 0)
-		return (hfsplus_unsupported(error,
-		    "HFS Plus journal is on another device"));
-	if ((jib.flags & JIB_FLAG_IN_VOLUME) == 0)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus journal info block has no location flag"));
-	uninitialized = (jib.flags & JIB_FLAG_NEEDS_INIT) != 0;
-	if (!uninitialized && hfsplus->wrapped)
-		return (hfsplus_unsupported(error,
-		    "HFS Plus journal inside a wrapper has no established location"));
-
-	status = journal_location(reader, &jib, &extent, error);
-	if (status == FSIMG_OK && !uninitialized)
+	status = journal_state_from_flags(hfsplus, jib.flags, &state, error);
+	if (status == FSIMG_OK)
+		status = journal_location(reader, &jib, &extent, error);
+	if (status == FSIMG_OK && state == HFSPLUS_JOURNAL_CLEAN)
 		status = journal_header_check(reader, &jib, &extent, error);
 	if (status != FSIMG_OK)
 		return (status);
-	hfsplus->journal = uninitialized ? HFSPLUS_JOURNAL_UNINITIALIZED :
-	    HFSPLUS_JOURNAL_CLEAN;
+	hfsplus->journal = state;
 	hfsplus->journal_info_block = info_block;
 	hfsplus->journal_start = extent.start;
 	hfsplus->journal_blocks = extent.count;
@@ -441,18 +442,19 @@ static fsimg_status_t
 open_root(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
-	unsigned char name[HFSPLUS_KEY_BYTES_MAX];
-	hfsplus_cursor_t cursor;
+	hfsplus_key_t key;
 	hfsplus_record_t record;
 	hfsplus_thread_t thread;
 	hfsplus_folder_t folder;
 	fsimg_error_t refused;
-	uint16_t units;
 	bool found;
 	fsimg_status_t status;
 
-	status = find_catalog_record(reader, HFSPLUS_ID_ROOT, NULL, 0, &cursor,
-	    &record, &found, error);
+	status = hfsplus_catalog_key_init(&key, HFSPLUS_ID_ROOT, NULL, 0,
+	    error);
+	if (status == FSIMG_OK)
+		status = hfsplus_catalog_find_exact(&hfsplus->catalog, &key,
+		    &record, &found, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (!found)
@@ -464,11 +466,14 @@ open_root(fsimg_reader_t *reader, fsimg_error_t *error)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus root thread is not a folder thread under the root's parent"));
 
-	/* The next search overwrites the buffer the thread borrows from. */
-	units = thread.units;
-	bcopy(thread.name, name, 2 * (size_t)units);
-	status = find_catalog_record(reader, HFSPLUS_ID_ROOT_PARENT, name,
-	    units, &cursor, &record, &found, error);
+	/* The key keeps the name for the label: this search overwrites the
+	 * buffer the thread borrows it from.
+	 */
+	status = hfsplus_catalog_key_init(&key, HFSPLUS_ID_ROOT_PARENT,
+	    thread.name, thread.units, error);
+	if (status == FSIMG_OK)
+		status = hfsplus_catalog_find_exact(&hfsplus->catalog, &key,
+		    &record, &found, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (!found)
@@ -481,9 +486,10 @@ open_root(fsimg_reader_t *reader, fsimg_error_t *error)
 	hfsplus->root = folder;
 
 	hfsplus->label_valid =
-	    hfsplus_name_admit(name, units, &refused) == FSIMG_OK &&
-	    hfsplus_name_to_path(name, units, hfsplus->label,
-	    &hfsplus->label_bytes, &refused) == FSIMG_OK;
+	    hfsplus_name_admit(key.catalog.name, key.catalog.units,
+	    &refused) == FSIMG_OK &&
+	    hfsplus_name_to_path(key.catalog.name, key.catalog.units,
+	    hfsplus->label, &hfsplus->label_bytes, &refused) == FSIMG_OK;
 	return (FSIMG_OK);
 }
 
@@ -492,7 +498,6 @@ hfsplus_volume_open(fsimg_reader_t *reader,
     const fsimg_format_variant_t *forced,
     fsimg_error_t *error)
 {
-	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	unsigned char prefix[HFSPLUS_PROBE_BYTES];
 	uint64_t volume_bytes;
 	size_t transferred;
@@ -515,22 +520,9 @@ hfsplus_volume_open(fsimg_reader_t *reader,
 	if (status == FSIMG_OK)
 		status = open_extents_tree(reader, error);
 	if (status == FSIMG_OK)
-		status = open_special_forks(reader, error);
-	if (status != FSIMG_OK)
-		return (status);
-
-	hfsplus->catalog.kind = HFSPLUS_TREE_CATALOG;
-	status = hfsplus_tree_open(reader, &hfsplus->catalog,
-	    hfsplus->header.catalog_file.logical_size, error);
+		status = open_catalog_tree(reader, error);
 	if (status == FSIMG_OK)
-		status = select_comparator(reader, error);
-	if (status == FSIMG_OK)
-		status = allocate_scan_node(reader, error);
-	if (status == FSIMG_OK && hfsplus->attributes.fork != NULL) {
-		hfsplus->attributes.kind = HFSPLUS_TREE_ATTRIBUTES;
-		status = hfsplus_tree_open(reader, &hfsplus->attributes,
-		    hfsplus->header.attributes_file.logical_size, error);
-	}
+		status = open_remaining_forks(reader, error);
 	if (status == FSIMG_OK)
 		status = hfsplus_journal_open(reader, error);
 	if (status == FSIMG_OK)
