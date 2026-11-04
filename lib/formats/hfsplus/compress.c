@@ -8,6 +8,7 @@
 #include <zlib.h>
 
 #include "codec-memory.h"
+#include "codec.h"
 #include "hfsplus.h"
 
 /*
@@ -21,18 +22,29 @@
 #define TYPE_STORED		1u	/* the attribute's bytes, unencoded */
 #define TYPE_ZLIB_INLINE	3u
 #define TYPE_ZLIB_FORK		4u
+#define TYPE_LZVN_INLINE	7u
+#define TYPE_LZVN_FORK		8u
+#define TYPE_LZFSE_INLINE	11u
+#define TYPE_LZFSE_FORK		12u
 
 #define ZLIB_RAW_MARKER		0xffu
+#define LZVN_RAW_MARKER		0x06u	/* the code that ends an LZVN stream */
+
+_Static_assert(HFSPLUS_CHUNK_BYTES <= FSIMG_LZFSE_OUTPUT_MAX &&
+    HFSPLUS_CHUNK_STORED_MAX <= FSIMG_LZFSE_INPUT_MAX,
+    "every chunk is within the imported decoders' bounds");
 
 /* One charged allocation per reader, made by the first compressed file resolved
  * and released at close. output holds chunk `chunk`'s length decoded bytes while
  * valid; input holds the bytes being decoded. inflating says stream needs
  * inflateEnd; memory is its allocation adapter, which charges zlib's state to
- * the same context and stays beside it for its whole life.
+ * the same context and stays beside it for its whole life. lzfse_scratch is the
+ * LZFSE decoder's state, charged and allocated for the first LZFSE file.
  */
 struct hfsplus_window {
 	fsimg_codec_memory_t	 memory;
 	z_stream		 stream;
+	void			*lzfse_scratch;
 	uint64_t		 chunk;
 	size_t			 length;
 	bool			 inflating;
@@ -45,6 +57,10 @@ static fsimg_status_t window_ready(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t zlib_failed(const hfsplus_window_t *, int,
     fsimg_error_t *);
 static fsimg_status_t zlib_decode(fsimg_reader_t *, hfsplus_window_t *, size_t,
+    size_t, fsimg_error_t *);
+static fsimg_status_t lzvn_decode(hfsplus_window_t *, size_t, size_t,
+    fsimg_error_t *);
+static fsimg_status_t lzfse_decode(fsimg_reader_t *, hfsplus_window_t *, size_t,
     size_t, fsimg_error_t *);
 static fsimg_status_t window_decode(fsimg_reader_t *, size_t, size_t,
     fsimg_error_t *);
@@ -68,12 +84,16 @@ hfsplus_compress_check(const hfsplus_file_t *file,
 	switch (scan->cmpf.type) {
 	case TYPE_STORED:
 	case TYPE_ZLIB_INLINE:
+	case TYPE_LZVN_INLINE:
+	case TYPE_LZFSE_INLINE:
 		if (scan->cmpf.uncompressed_size > HFSPLUS_CHUNK_BYTES)
 			return (hfsplus_unsupported(error,
 			    "HFS Plus inline compressed file is larger than "
 			    "the decode window"));
 		return (FSIMG_OK);
 	case TYPE_ZLIB_FORK:
+	case TYPE_LZVN_FORK:
+	case TYPE_LZFSE_FORK:
 		return (FSIMG_OK);
 	default:
 		return (hfsplus_unsupported(error,
@@ -85,13 +105,16 @@ bool
 hfsplus_compress_known(uint8_t type)
 {
 	return (type == TYPE_STORED || type == TYPE_ZLIB_INLINE ||
-	    type == TYPE_ZLIB_FORK);
+	    type == TYPE_ZLIB_FORK || type == TYPE_LZVN_INLINE ||
+	    type == TYPE_LZVN_FORK || type == TYPE_LZFSE_INLINE ||
+	    type == TYPE_LZFSE_FORK);
 }
 
 bool
 hfsplus_compress_consumes_fork(uint8_t type)
 {
-	return (type == TYPE_ZLIB_FORK);
+	return (type == TYPE_ZLIB_FORK || type == TYPE_LZVN_FORK ||
+	    type == TYPE_LZFSE_FORK);
 }
 
 void
@@ -111,6 +134,8 @@ hfsplus_compress_free(fsimg_hfsplus_reader_t *hfsplus)
 		return;
 	if (window->inflating)
 		inflateEnd(&window->stream);
+	if (window->lzfse_scratch != NULL)
+		fsimg_dealloc(window->lzfse_scratch);
 	fsimg_dealloc(window);
 	hfsplus->window = NULL;
 }
@@ -191,6 +216,63 @@ zlib_decode(fsimg_reader_t *reader, hfsplus_window_t *window, size_t stored,
 	return (FSIMG_OK);
 }
 
+/* The raw marker's rule, then the imported decoder, bounded by exactly expected
+ * bytes of output; a stream ending short of them is the image's fault too.
+ */
+static fsimg_status_t
+lzvn_decode(hfsplus_window_t *window, size_t stored, size_t expected,
+    fsimg_error_t *error)
+{
+	fsimg_codec_step_t step;
+	fsimg_status_t status;
+
+	if (stored != 0 && window->input[0] == LZVN_RAW_MARKER) {
+		if (stored - 1 != expected)
+			return (hfsplus_corrupt(error,
+			    "HFS Plus raw chunk has the wrong length"));
+		bcopy(window->input + 1, window->output, expected);
+		return (FSIMG_OK);
+	}
+	status = fsimg_lzvn_decode(window->input, stored, window->output,
+	    expected, &step, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (step.produced != expected)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus LZVN chunk does not decode to its length"));
+	return (FSIMG_OK);
+}
+
+/* The imported decoder, bounded the same way, with its state charged on the first
+ * use. LZFSE has no raw marker: incompressible content is an uncompressed block.
+ */
+static fsimg_status_t
+lzfse_decode(fsimg_reader_t *reader, hfsplus_window_t *window, size_t stored,
+    size_t expected, fsimg_error_t *error)
+{
+	fsimg_codec_step_t step;
+	fsimg_status_t status;
+	fsimg_error_t detail;
+
+	if (window->lzfse_scratch == NULL) {
+		window->lzfse_scratch = fsimg_alloc(reader->ctx,
+		    fsimg_lzfse_scratch_bytes(), &detail);
+		if (window->lzfse_scratch == NULL) {
+			if (error != NULL)
+				*error = detail;
+			return (detail.status);
+		}
+	}
+	status = fsimg_lzfse_decode(window->input, stored, window->output,
+	    expected, window->lzfse_scratch, &step, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (step.produced != expected)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus LZFSE chunk does not decode to its length"));
+	return (FSIMG_OK);
+}
+
 /* Decode the current entry's stored bytes, in input, to output: expected bytes
  * or a failure. The work is charged first, which also polls for cancellation.
  * The output is not valid until the caller says so.
@@ -217,6 +299,12 @@ window_decode(fsimg_reader_t *reader, size_t stored, size_t expected,
 	case TYPE_ZLIB_INLINE:
 	case TYPE_ZLIB_FORK:
 		return (zlib_decode(reader, window, stored, expected, error));
+	case TYPE_LZVN_INLINE:
+	case TYPE_LZVN_FORK:
+		return (lzvn_decode(window, stored, expected, error));
+	case TYPE_LZFSE_INLINE:
+	case TYPE_LZFSE_FORK:
+		return (lzfse_decode(reader, window, stored, expected, error));
 	default:
 		return (hfsplus_corrupt(error,
 		    "invalid prepared HFS Plus compression type"));

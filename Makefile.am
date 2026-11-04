@@ -31,12 +31,12 @@ pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libfsimg.pc
 dist_man_MANS = docs/fsimg.1 docs/libfsimg.3
 dist_doc_DATA = LICENSE README.md docs/examples.md docs/references.md third-party/Unicode-LICENSE.txt \
-	third-party/FreeBSD-sha256-LICENSE.txt
+	third-party/FreeBSD-sha256-LICENSE.txt third-party/lzfse-LICENSE.txt
 examplesdir = $(datadir)/fsimg/examples
 dist_examples_DATA = examples/example.h examples/create-tree.c examples/provider.c \
 	examples/read-slice.c examples/extract.c
 lib_LTLIBRARIES = libfsimg.la
-noinst_LTLIBRARIES = libfsimg-core.la
+noinst_LTLIBRARIES = libfsimg-core.la libfsimg-lzfse.la
 libfsimg_la_SOURCES =
 libfsimg_la_LIBADD = libfsimg-core.la
 libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
@@ -113,6 +113,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/iso9660/write-plan.c lib/formats/iso9660/write-emit.c \
 	compat/host.c compat/host.h compat/private.c compat/private.h \
 	lib/codec/codec.h lib/codec/bzip2.c lib/codec/lzo1x.c lib/codec/nrv2b.c \
+	lib/codec/lzfse.c \
 	lib/formats/ifs/ifs.h lib/formats/ifs/descriptor.c \
 	lib/formats/ifs/records.c lib/formats/ifs/volume.c \
 	lib/formats/ifs/tree.c lib/formats/ifs/names.c \
@@ -124,7 +125,16 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 # vendored. The optional compression libraries join it when configure
 # found them (specs/design-compression-libs.md): each profile's source is
 # compiled only under its conditional, and distributed in every build.
-libfsimg_core_la_LIBADD = $(ZLIB_LIBS) $(ZSTD_LIBS) $(LZMA_LIBS)
+libfsimg_core_la_LIBADD = libfsimg-lzfse.la $(ZLIB_LIBS) $(ZSTD_LIBS) $(LZMA_LIBS)
+# Apple's imported decoders keep their own style, so they build alone, relaxing
+# only the warnings docs/references.md lists. NDEBUG, because the library must
+# not abort; the switch in place of computed goto, which is not C11.
+libfsimg_lzfse_la_SOURCES = lib/codec/lzfse/lzfse_decode_base.c \
+	lib/codec/lzfse/lzfse_fse.c lib/codec/lzfse/lzfse_fse.h \
+	lib/codec/lzfse/lzfse_internal.h lib/codec/lzfse/lzfse_tunables.h \
+	lib/codec/lzfse/lzvn_decode_base.c lib/codec/lzfse/lzvn_decode_base.h
+libfsimg_lzfse_la_CPPFLAGS = -DNDEBUG -DHAVE_LABELS_AS_VALUES=0
+libfsimg_lzfse_la_CFLAGS = $(AM_CFLAGS) -Wno-sign-compare -Wno-unused-label
 if FSIMG_ZSTD
 libfsimg_core_la_SOURCES += lib/layers/zstd.c
 endif

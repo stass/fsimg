@@ -300,6 +300,9 @@ FSE_INLINE void fse_out_push32(fse_out_stream32 *s, fse_bit_count n,
 FSE_INLINE int fse_in_checked_init64(fse_in_stream64 *s, fse_bit_count n,
                                      const uint8_t **pbuf,
                                      const uint8_t *buf_start) {
+  //  fsimg: a v1 block header gives n unchecked; refuse it before the sum.
+  if (n < -7 || n > 0)
+    return -1; // out of range
   if (n) {
     if (*pbuf < buf_start + 8)
       return -1; // out of range
@@ -329,6 +332,9 @@ FSE_INLINE int fse_in_checked_init64(fse_in_stream64 *s, fse_bit_count n,
 FSE_INLINE int fse_in_checked_init32(fse_in_stream32 *s, fse_bit_count n,
                                      const uint8_t **pbuf,
                                      const uint8_t *buf_start) {
+  //  fsimg: a v1 block header gives n unchecked; refuse it before the sum.
+  if (n < -7 || n > 0)
+    return -1; // out of range
   if (n) {
     if (*pbuf < buf_start + 4)
       return -1; // out of range
@@ -362,6 +368,10 @@ FSE_INLINE int fse_in_checked_flush64(fse_in_stream64 *s, const uint8_t **pbuf,
                                       const uint8_t *buf_start) {
   //  Get number of bits to add to bring us into the desired range.
   fse_bit_count nbits = (63 - s->accum_nbits) & -8;
+  //  fsimg: with nothing to load, the 8-byte load below reaches one byte past
+  //  the payload after an init with n == 0.
+  if (nbits == 0)
+    return 0; // OK
   //  Convert bits to bytes and decrement buffer address, then load new data.
   const uint8_t *buf = (*pbuf) - (nbits >> 3);
   if (buf < buf_start) {
@@ -393,7 +403,9 @@ FSE_INLINE int fse_in_checked_flush32(fse_in_stream32 *s, const uint8_t **pbuf,
 
     *pbuf = buf;
 
-    uint32_t incoming = *((uint32_t *)buf);
+    //  fsimg: buf has no alignment; load through memcpy like the 64-bit stream.
+    uint32_t incoming;
+    memcpy(&incoming, buf, 4);
 
     // Update the state object and verify its validity (in DEBUG).
     s->accum = (s->accum << nbits) | fse_mask_lsb32(incoming, nbits);
@@ -561,7 +573,7 @@ FSE_INLINE int fse_check_freq(const uint16_t *freq_table,
                               const size_t table_size,
                               const size_t number_of_states) {
   size_t sum_of_freq = 0;
-  for (int i = 0; i < table_size; i++) {
+  for (size_t i = 0; i < table_size; i++) {
     sum_of_freq += freq_table[i];
   }
   return (sum_of_freq > number_of_states) ? -1 : 0;

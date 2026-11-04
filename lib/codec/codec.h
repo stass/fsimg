@@ -156,6 +156,40 @@ fsimg_status_t fsimg_bzip2_decode(fsimg_ctx_t *, const uint8_t *in,
 uint64_t fsimg_bzip2_stream_bound(uint64_t decoded);
 
 /*
+ * The bounds of one LZFSE or LZVN stream: a decoded chunk, and its encoded form,
+ * which holds the output of the largest raw block or marker with a margin above
+ * every encoder's worst case.
+ */
+#define FSIMG_LZFSE_OUTPUT_MAX	65536u
+#define FSIMG_LZFSE_INPUT_MAX	69632u
+
+/* The bytes of scratch fsimg_lzfse_decode() needs. */
+size_t fsimg_lzfse_scratch_bytes(void);
+
+/*
+ * Decode one whole LZFSE stream, in[0..in_len) with in_len at most
+ * FSIMG_LZFSE_INPUT_MAX, into out[0..capacity) with capacity at most
+ * FSIMG_LZFSE_OUTPUT_MAX; the capacity is the output bound. scratch holds
+ * fsimg_lzfse_scratch_bytes() bytes with an allocation's alignment, charged to
+ * the caller's context; the decoder allocates nothing. A larger bound or a NULL
+ * pointer is FSIMG_EINVAL. Success means the end block was the last thing in the
+ * input: step->done is set, step->consumed is in_len and the output is
+ * out[0..step->produced). Output beyond the capacity, input after the end, an
+ * unterminated stream and any invalid block are FSIMG_ECORRUPT. Bytes of out past
+ * step->produced may have been overwritten. step must not be NULL.
+ */
+fsimg_status_t fsimg_lzfse_decode(const uint8_t *in, size_t in_len,
+    uint8_t *out, size_t capacity, void *scratch, fsimg_codec_step_t *,
+    fsimg_error_t *);
+
+/*
+ * Decode one raw LZVN stream, without the LZFSE block framing, the same way; it
+ * needs no scratch.
+ */
+fsimg_status_t fsimg_lzvn_decode(const uint8_t *in, size_t in_len,
+    uint8_t *out, size_t capacity, fsimg_codec_step_t *, fsimg_error_t *);
+
+/*
  * The LZO1X encoder: one block in, one complete stream out, end marker
  * included, in one call. Its only state is a 64 KiB table of input
  * positions, allocated once through the context and reused for every

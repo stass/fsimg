@@ -872,7 +872,7 @@ The import follows these rules:
   again file by file.
 * **Assurance.** The imported code parses untrusted image bytes, so it gets
   the project codecs' treatment: the bounds tests above adapted to its
-  streams, `fuzz/codec.c` cases under ASan and UBSan, and execution inside
+  streams, `fuzz/lzfse.c` cases under ASan and UBSan, and execution inside
   the confined worker under the same syscall profile. The adapter's tests
   compare its output with the reference command-line tool's on streams
   produced by that tool and by macOS (APFS evidence E7), built outside the

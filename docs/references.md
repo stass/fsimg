@@ -131,6 +131,66 @@ terms. Its development gems, pinned in `test/spec/Gemfile.lock`, are Minitest
 (MIT) with its dependencies drb (BSD-2-Clause) and prism (MIT), PropCheck (MIT)
 and BinData (BSD-2-Clause); none is vendored or becomes a runtime dependency.
 
+## LZFSE and LZVN decoders
+
+`lib/codec/lzfse/` holds the decoder half of Apple's reference implementation,
+<https://github.com/lzfse/lzfse>, under its BSD-3-Clause license, at commit
+`e634ca58b4821d9f3d560cdc6df5dec02ffc93fd`, the tip of its master branch. Each
+file's header was checked before import and each carries that notice;
+`third-party/lzfse-LICENSE.txt` repeats it for binary distributions. Watch that
+repository's issues and any Apple security advisory naming `lzfse`: an upstream
+fix is imported as a new pinned commit and audited again, file by file. Apple's
+xnu and hfs sources are APSL and contribute facts only, never code; this project
+is separate from them.
+
+| File | SHA-256 of the upstream file |
+| --- | --- |
+| `src/lzfse_decode_base.c` | `721b4061e4e655f0940b7cabcf506356c152716526e630981caf0e708d2f73d9` |
+| `src/lzfse_fse.c` | `a97e309975487af269456a4e87ef516aedaf82ce469e37971fd5676f9cd5956b` |
+| `src/lzfse_fse.h` | `4e5c2228a4bb5e5f3faf4639d5688bc7caa5cf0c0f3a971ada4fbe3631f3a533` |
+| `src/lzfse_internal.h` | `d08dc29d5440775de279d36783729131329df10cffd43ec6eff7dcfceef9f570` |
+| `src/lzfse_tunables.h` | `99d435ca45b32ba0cc273a2862ba714762610513eed469bc590bb092ea476b36` |
+| `src/lzvn_decode_base.c` | `434647c83d4f3ed95c11465c5a3ec46f992ec94843928138039ea40be623957d` |
+| `src/lzvn_decode_base.h` | `d4c13bbf13b3616c1b1472e80b117857f1339a29a48006e5aad450bcd6204c09` |
+| `LICENSE` | `2a20082c2219edbbdb2e862a0566ba4f762a564ade7c04b09250ae4464bc4b32` |
+
+`lzfse_decode.c` and `lzfse.h`, the buffer interface with its allocation path, are
+not imported: the wrapper, `lib/codec/lzfse.c`, calls the two state machines
+directly. Neither are the encoder files or the command-line tool. All the
+upstream files are ASCII. Every change below is marked `fsimg:` in place, except
+the last two:
+
+* `lzfse_internal.h`: the external symbols take the `fsimg_apple_` prefix through
+  four `#define` lines.
+* `lzfse_fse.c`: the encoder table and frequency normalization are removed.
+* `lzfse_fse.h`, a defect: `fse_in_checked_flush64()` always loads eight bytes, so
+  with nothing to load after an initial stream of `n == 0` it reads one byte past
+  the payload, which a hostile block can place at the end of the input. It now
+  returns first when there is nothing to load.
+* `lzfse_fse.h`, a defect: both `fse_in_checked_init` functions refuse an `n`
+  outside `[-7, 0]` before adding to it, since a v1 block header gives `n`
+  unchecked and the sum could overflow.
+* `lzfse_fse.h`, a defect: `fse_in_checked_flush32()` loads through `memcpy`
+  instead of a misaligned `uint32_t` dereference. This path runs on hosts that do
+  not select the 64-bit stream, including Linux on arm64.
+* `lzfse_decode_base.c`, a defect on a 32-bit host: the block header's checks
+  against the end of the input compare sizes, because a pointer plus a 32-bit
+  field from the stream can wrap.
+* `lzvn_decode_base.c`, a defect: `sml_m` and `lrg_m` refuse a distance of zero,
+  which only a stream with no earlier match can have. They use the previous
+  distance without the check the other opcodes make, so such a match copied each
+  output byte onto itself and passed whatever the buffer held as decoded data.
+* `lzfse_fse.h`: `fse_check_freq()`'s loop index is `size_t`, because the wrapper
+  includes this header under the project's warnings.
+* The build, `libfsimg-lzfse.la` in `Makefile.am`: `-Wno-sign-compare` and
+  `-Wno-unused-label`, for the upstream code's own comparisons and the labels of
+  the computed goto it does not use here; `-DHAVE_LABELS_AS_VALUES=0`, its switch
+  in place of the computed goto, which is not C11; and `-DNDEBUG`, because the
+  library must not abort. The assertions state invariants the reading of these
+  paths found to hold on hostile input.
+
+The defect fixes above are not yet offered upstream.
+
 ## exFAT reference
 
 The [Microsoft exFAT specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification)

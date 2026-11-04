@@ -27,6 +27,13 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 //  break the compressor, or result in a compressed data format that is
 //  incompatible.
 
+//  fsimg: external symbols carry a prefix, so an embedding application can also
+//  link upstream.
+#define lzfse_decode fsimg_apple_lzfse_decode
+#define lzvn_decode fsimg_apple_lzvn_decode
+#define fse_init_decoder_table fsimg_apple_fse_init_decoder_table
+#define fse_init_value_decoder_table fsimg_apple_fse_init_value_decoder_table
+
 #include "lzfse_fse.h"
 #include "lzfse_tunables.h"
 #include <limits.h>

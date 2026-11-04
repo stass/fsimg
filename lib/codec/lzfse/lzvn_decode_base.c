@@ -514,6 +514,10 @@ sml_m:
   if (src_len <= opc_len)
     return; // source truncated
   M = (size_t)extract(opc, 0, 4);
+  //  fsimg: no match has set a distance yet; copy_match would repeat the bytes
+  //  already in the output buffer as if they were decoded.
+  if (D == 0)
+    goto invalid_match_distance;
   PTR_LEN_INC(src_ptr, src_len, opc_len);
   goto copy_match;
 
@@ -531,6 +535,9 @@ lrg_m:
   if (src_len <= opc_len)
     return; // source truncated
   M = src_ptr[1] + 16;
+  //  fsimg: as in sml_m.
+  if (D == 0)
+    goto invalid_match_distance;
   PTR_LEN_INC(src_ptr, src_len, opc_len);
   goto copy_match;
 

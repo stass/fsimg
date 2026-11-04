@@ -388,7 +388,8 @@ int lzfse_decode(lzfse_decoder_state *s) {
           const lzfse_compressed_block_header_v2 *header2 =
               (const lzfse_compressed_block_header_v2 *)s->src; // not aligned, OK
           header_size = lzfse_decode_v2_header_size(header2);
-          if (s->src + header_size > s->src_end)
+          //  fsimg: compare sizes; the pointer sum can wrap on a 32-bit host.
+          if (header_size > (size_t)(s->src_end - s->src))
             return LZFSE_STATUS_SRC_EMPTY; // SRC truncated
           int decodeStatus = lzfse_decode_v1(&header1, header2);
           if (decodeStatus != 0)
@@ -406,9 +407,10 @@ int lzfse_decode(lzfse_decoder_state *s) {
         // price of a more complex state maintenance.
         // For DST, we can't easily require space for the entire decoded block,
         // because it may expand to something very very large.
-        if (s->src + header_size + header1.n_literal_payload_bytes +
+        //  fsimg: compare sizes; the pointer sum can wrap on a 32-bit host.
+        if ((uint64_t)header_size + header1.n_literal_payload_bytes +
                 header1.n_lmd_payload_bytes >
-            s->src_end)
+            (uint64_t)(s->src_end - s->src))
           return LZFSE_STATUS_SRC_EMPTY; // need all encoded block
 
         // Sanity checks
