@@ -78,16 +78,23 @@ module HfsPlusCapture
 
     def shown_command(argv) = argv.map { _1.match?(%r{\A[\w/.@:=+,-]+\z}) ? _1 : _1.shellescape }.join(" ")
 
-    # Run argv, log it, return [combined output, success]. The [cmd, cmd] form
-    # of the program keeps a lone element from being handed to a shell.
+    # Run argv, log it, return [combined output, success].
     def run(*argv)
+      out, code = run_status(*argv)
+      [out, code == 0]
+    end
+
+    # Run argv, log it, return [combined output, exit status]; the status is
+    # nil when the program cannot start or dies of a signal. The [cmd, cmd]
+    # form of the program keeps a lone element from being handed to a shell.
+    def run_status(*argv)
       out, status = Open3.capture2e([argv.first, argv.first], *argv.drop(1))
       shown = out.lines.first(OUTPUT_LINES).map(&:chomp)
       @lines.push("$ #{shown_command(argv)}", *shown.map { "  #{_1}" }, "  [exit #{status.exitstatus}]")
-      [out, status.success?]
+      [out, status.exitstatus]
     rescue SystemCallError => e
       @lines.push("$ #{shown_command(argv)}", "  [#{e.message}]")
-      ["", false]
+      ["", nil]
     end
   end
 

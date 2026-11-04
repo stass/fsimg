@@ -47,7 +47,9 @@
 # per comparator for marks that decompose into marks (class0-VARIANT.tsv,
 # class0-differences.tsv), and one more per comparator for runs of marks and
 # marks after a precomposed starter (marks-VARIANT.tsv, marks-fsck.tsv,
-# marks-commands.txt), see `run_small_names`.
+# marks-commands.txt), and one small volume per name of the sequences the
+# repair routine of `fsck_hfs` flags, per comparator (fsck-sequences.tsv,
+# fsck-sequences-commands.txt), see `run_small_names`.
 #
 # Usage: unicode-probe.rb [--variant hfsplus|hfsx] [--analyze-only] [--sample N]
 #                         [--overwrite] [--small-names]
@@ -411,8 +413,8 @@ module HfsPlusUnicodeProbe
 
   def fsck_verdict(attachments, log, image)
     attachments.with(image) do |device|
-      output, ok = log.run("fsck_hfs", "-d", "-n", device.sub("/dev/disk", "/dev/rdisk"))
-      { ok: ok, illegal_names: output.lines.grep(/illegal name is|replacement name is/).map(&:strip), last_line: output.lines.last.to_s.strip }
+      output, status = log.run_status("fsck_hfs", "-d", "-n", device.sub("/dev/disk", "/dev/rdisk"))
+      { ok: status == 0, status: status, illegal_names: output.lines.grep(/illegal name is|replacement name is/).map(&:strip), last_line: output.lines.last.to_s.strip }
     end
   end
 
@@ -940,8 +942,8 @@ module HfsPlusUnicodeProbe
   end
 
   # Create the one name `cps` on a copy of the formatted `template`, unmount,
-  # check, and read the catalog back.
-  def fsck_row(log, attachments, template, image, mount, variant, name, cps)
+  # check, and read the catalog back: the verdict and the stored units.
+  def probe_name(log, attachments, template, image, mount, variant, name, cps)
     FileUtils.cp(template, image)
     attempt = attachments.with(image, mountpoint: mount) do
       require_mount_point(mount)
@@ -952,8 +954,70 @@ module HfsPlusUnicodeProbe
     leaf = leaves[attempt.ino]
     raise Error, "#{name} on #{variant}: #{attempt.failure || "created but not in the catalog"}" unless leaf
 
-    FsckRow.new(name: name, variant: variant, values: cps.map { hex(_1) }.join("+"), stored_units: units_text(leaf.units),
+    [verdict, units_text(leaf.units)]
+  end
+
+  def fsck_row(log, attachments, template, image, mount, variant, name, cps)
+    verdict, stored = probe_name(log, attachments, template, image, mount, variant, name, cps)
+    FsckRow.new(name: name, variant: variant, values: cps.map { hex(_1) }.join("+"), stored_units: stored,
                 fsck_ok: verdict[:ok], fsck_result: verdict[:last_line], illegal: verdict[:illegal_names].join(" / "))
+  end
+
+  # What `fsck_hfs -d -n` does with one name of the sequence table: its exit
+  # status, and whether it reports an illegal name (flagged) and which.
+  SequenceRow = Data.define(:name, :variant, :values, :stored_units, :fsck_exit, :flagged, :illegal) do
+    def cells = to_h.values
+  end
+  SEQUENCE_COLUMNS = %w[name variant values stored_units fsck_exit flagged illegal].freeze
+
+  # The adjacent sequences the Apple repair routine for pre-10.2 names is read
+  # to flag, other than the two mark pairs of FSCK_SEQUENCES: a compatibility
+  # base then a mark, a Greek letter then U+030D, and the Indic and Thai or Lao
+  # base then nukta or vowel pairs. Each is tried alone in a name; the six that are not Greek also after `a`.
+  SEQUENCE_BASES = { "00A8+030D" => [0xA8, 0x30D], "09AC+09BC" => [0x9AC, 0x9BC], "0A21+0A3C" => [0xA21, 0xA3C],
+                     "0B2F+0B3C" => [0xB2F, 0xB3C], "0E4D+0E32" => [0xE4D, 0xE32], "0ECD+0EB2" => [0xECD, 0xEB2] }.freeze
+  GREEK_BEFORE_030D = [0x391, 0x395, 0x397, 0x399, 0x39F, 0x3A5, 0x3A9, 0x3B1, 0x3B5, 0x3B7, 0x3B9, 0x3BF, 0x3C5, 0x3C9, 0x3D2].freeze
+
+  # Two Tibetan sequences whose stored order differs from the input's, and the
+  # controls that must not be flagged: another mark after a Greek letter, the
+  # reversed Thai pair and a lone Bengali letter.
+  SEQUENCE_OTHERS = { "tibetan:0FB2+0F80+0F71" => [0xFB2, 0xF80, 0xF71], "tibetan:0FB3+0F80+0F71" => [0xFB3, 0xF80, 0xF71],
+                      "control:0391+0301" => [0x391, 0x301], "control:0E32+0E4D-reversed" => [0xE32, 0xE4D],
+                      "control:09AC-alone" => [0x9AC] }.freeze
+
+  def sequence_cases
+    greek = GREEK_BEFORE_030D.to_h { |g| ["#{hex(g)}+030D", [g, 0x30D]] }
+    after_a = SEQUENCE_BASES.map { |id, cps| ["after-a:#{id}", [0x61, *cps]] }
+    SEQUENCE_BASES.merge(greek).map { |id, cps| ["bare:#{id}", cps] } + after_a + SEQUENCE_OTHERS.to_a
+  end
+
+  def sequence_row(log, attachments, template, image, mount, variant, name, cps)
+    verdict, stored = probe_name(log, attachments, template, image, mount, variant, name, cps)
+    SequenceRow.new(name: name, variant: variant, values: cps.map { hex(_1) }.join("+"), stored_units: stored, fsck_exit: verdict[:status].to_s,
+                    flagged: verdict[:illegal_names].any? { _1.start_with?("illegal name") } ? "yes" : "no", illegal: verdict[:illegal_names].join(" / "))
+  end
+
+  # fsck-sequences.tsv, one row per name and comparator, and the commands of
+  # this part in fsck-sequences-commands.txt, so that the earlier files stay
+  # those of their own runs.
+  def run_fsck_sequences(cfg, out)
+    log = HfsPlusCapture::Log.new
+    attachments = HfsPlusCapture::Attachments.new(log)
+    template = File.join(cfg.work, "small-template.img")
+    image = File.join(cfg.work, "small.img")
+    mount = File.join(cfg.work, "small.mnt")
+    FileUtils.mkdir_p(mount)
+    leftover = nil
+    begin
+      rows = cfg.variants.flat_map do |variant|
+        format_volume(log, attachments, template, variant, bytes: SMALL_VOLUME_BYTES)
+        sequence_cases.map { |name, cps| sequence_row(log, attachments, template, image, mount, variant, name, cps) }
+      end
+      write_tsv(File.join(out, "fsck-sequences.tsv"), SEQUENCE_COLUMNS, rows)
+    ensure
+      leftover = finish_run(attachments, log, out, [template, image], mount, keep_image: cfg.keep_image, commands: "fsck-sequences-commands.txt")
+    end
+    raise leftover if leftover
   end
 
   # Values of class 0 that decompose into marks of nonzero class, with no
@@ -1124,6 +1188,7 @@ module HfsPlusUnicodeProbe
     raise leftover if leftover
 
     run_marks(cfg, data, out)
+    run_fsck_sequences(cfg, out)
     write_digests(out)
   end
 

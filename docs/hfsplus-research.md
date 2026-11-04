@@ -303,7 +303,10 @@ longer runs of marks and marks after precomposed starters, `marks-fsck.tsv` its
 `fsck_hfs -d -n` verdict, and `marks-commands.txt` its commands. The tool
 refuses to replace an existing directory without `--overwrite`; the `marks`
 files were added to a capture whose other files are byte for byte the first
-run's, so `commands.txt` is that run's.
+run's, so `commands.txt` is that run's. `fsck-sequences.tsv` was added the same
+way, with `fsck-sequences-commands.txt`: one 8 MiB volume per name and
+comparator, with the stored units, the exit status of `fsck_hfs -d -n` and the
+illegal and replacement names it prints.
 
 SHA-256, `e3-small-names/`:
 
@@ -313,6 +316,8 @@ SHA-256, `e3-small-names/`:
 7fa94662aadf1d7db55a68e6f77c770a4c03181652cfb22a4b6e078e530c23d1  class0-hfsx-differences.tsv
 62389a69ef25443b2af30dcc169fd656eb5ec5d17bda9429fbafd06789ed0d63  class0-hfsx.tsv
 7250642374cc13b8bf824fd99dd18e1c6f20c5fc4b3568096fcd24d1a5fedc63  commands.txt
+378acf247e6e394b717ff001b7f6153596d2a1c63b59da0fe08d8fe9a7b63a3d  fsck-sequences-commands.txt
+00faaa45ba9b9d45fcc8d8da087c9fc5bb98d8c7ab688f74c27ce8ed219016a0  fsck-sequences.tsv
 bfa659d23b2274101e693efd5f38ebd9372e725c136ce00139d6221a2b84fcb4  fsck.tsv
 c0af88516fa54e91de78525743714008679be2dc3e49c2b6b4ce01ce5d9ad03e  marks-commands.txt
 6b6f09e9d5ac192184d4405cb94e7d94ce2251f00317f7a6a032c77f55e8d4bb  marks-fsck.tsv
@@ -932,6 +937,21 @@ U+0301 U+030D, so the check is on the adjacent sequence. A stored U+0000 (three 
 an ordinary unit on `HX`) and `a:b`, which stores U+002F, each exit 0. The
 volume holding such a name fails this `fsck_hfs` (version hfs-715.160.9),
 wherever the name came from.
+
+The 21 base sequences of the repair routine (see the cross-check) were then run
+the same way (`fsck-sequences.tsv`, 32 names per comparator). On `H+` and on `HX`
+alike, with identical rows, each of these makes `fsck_hfs -d -n` exit 8 and print
+an illegal name, alone in a name and, for the six that do not use a Greek
+letter, after `a`: U+00A8 U+030D (replacement U+00A8 U+0301); U+030D after each
+of U+0391, U+0395, U+0397, U+0399, U+039F, U+03A5, U+03A9, U+03B1, U+03B5,
+U+03B7, U+03B9, U+03BF, U+03C5, U+03C9 and U+03D2 (the letter and U+0301);
+U+09AC U+09BC (U+09B0); U+0A21 U+0A3C (U+0A5C); U+0B2F U+0B3C (U+0B5F);
+U+0E4D U+0E32 (U+0E33); and U+0ECD U+0EB2 (U+0EB3). The driver stores every one as
+given, in the order given. U+0FB2 or U+0FB3 followed by U+0F80 U+0F71 is stored
+as the first, U+0F71, U+0F80 (class 129 before class 130), and `fsck_hfs` exits
+0 on it. Three controls exit 0 too: U+0391 U+0301, U+0E32 U+0E4D and U+09AC
+alone. No sequence was stored differently from its input except the two
+Tibetan ones.
 
 What cannot be observed. A fold row is visible only through a stored unit. Of
 the 14194 units that no POSIX name stores alone, 12146 appear in no stored name:
@@ -1820,8 +1840,10 @@ strings).
 * The E3 pair probe tried every ordered pair of the 327 marks after `a`, so
   it could see only the two mark-mark pairs. The other 21 are base-then-mark
   or base-then-base and were not probed. The source says `fsck_hfs -n`
-  flags all 23; it is **not tested here** that the 21 are flagged by the
-  host's `fsck_hfs`, only read.
+  flags all 23. The host's `fsck_hfs -d -n` was run on each of the 21 (E3,
+  `fsck-sequences.tsv`) and flagged every one, exit 8, on both comparators;
+  its replacement names are those the source gives. The two Tibetan sequences
+  are not stored in the input order and are not flagged as stored.
 
 ### The all-ignorable name (question 4)
 

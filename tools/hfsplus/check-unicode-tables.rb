@@ -21,7 +21,7 @@ module CheckUnicodeTables
   PINS = {
     "e3-hfsplus/SHA256SUMS" => "6f33f14e50f361139c8457b009a11764fb950141753c0e4ac17d051ad16c02e2",
     "e3-hfsx/SHA256SUMS" => "90bfe9d53fc699366c03fb25b9135522419d82eef858521d922aa307ab2dc404",
-    "e3-small-names/SHA256SUMS" => "cef674df30523a47aec01ba0b4bad0df4d5a6236f77619d86c3146bc7eec946f",
+    "e3-small-names/SHA256SUMS" => "f60315f4096dcb8d7f3ae5cbf4c8d5c47fc17dae02c79b9bc793dcb449b7f6e9",
     "unicode-3.2.0/UnicodeData-3.2.0.txt" => "5e444028b6e76d96f9dc509609c5e3222bf609056f35e5fcde7e6fb8a58cd446",
     "netbsd-libhfs/libhfs.c" => "d4aeef80a6b06232340182da3d74bc91e03bfc39de084713eac2d714f10d7f94"
   }.freeze
