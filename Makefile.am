@@ -174,7 +174,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify \
 	test-salvage-terminal test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
-	test-hfsplus-codec test-hfsplus test-hfsplus-unicode \
+	test-lzfse test-hfsplus-codec test-hfsplus test-hfsplus-unicode \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write test-scheme-planning \
@@ -285,9 +285,12 @@ test_qnx4_SOURCES = test/qnx4.c test/test.h test/scale.h
 test_qnx4_LDADD = libfsimg.la
 test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h test/scale.h
 test_qnx4_write_LDADD = libfsimg.la
+test_lzfse_SOURCES = test/lzfse.c test/lzfse-vectors.h test/test.h
+test_lzfse_LDADD = libfsimg.la
 test_hfsplus_codec_SOURCES = test/hfsplus-codec.c test/test.h
 test_hfsplus_codec_LDADD = libfsimg.la
-test_hfsplus_SOURCES = test/hfsplus.c test/hfsplus-gen.c test/hfsplus-gen.h test/test.h
+test_hfsplus_SOURCES = test/hfsplus.c test/hfsplus-gen.c test/hfsplus-gen.h \
+	test/lzfse-vectors.h test/test.h
 test_hfsplus_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_hfsplus_unicode_SOURCES = test/hfsplus-unicode.c test/test.h \
 	test/digest.c test/digest.h
@@ -461,7 +464,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
 	test/codec-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/hfsplus.c \
 	fuzz/protocol.c fuzz/image.c fuzz/container.c fuzz/plist.c fuzz/compression.c \
-	fuzz/mtree.c fuzz/codec.c fuzz/bzip2.c fuzz/ifs.c fuzz/iso9660.c fuzz/iso9660-susp.c \
+	fuzz/mtree.c fuzz/codec.c fuzz/bzip2.c fuzz/lzfse.c fuzz/ifs.c fuzz/iso9660.c \
+	fuzz/iso9660-susp.c \
 	test/ifs-integration.sh.in \
 	test/ifs-native.rb \
 	test/cli.sh.in test/qualify-cli.rb \
@@ -612,14 +616,14 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
 	MallocSpaceEfficient=1 ./test-ifs --scale
 check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-hfsplus test-ifs \
-	    test-iso9660 test-codec \
+	    test-iso9660 test-codec test-lzfse \
 	    test-protocol test-layers test-containers test-compression \
 	    test-hbcifs test-mtree test-ifsboot test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
 check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-hfsplus test-ifs \
 	    test-iso9660 \
-	    test-codec test-protocol test-layers test-containers \
+	    test-codec test-lzfse test-protocol test-layers test-containers \
 	    test-compression test-hbcifs test-mtree test-ifsboot test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) FUZZ_SECONDS=600 $(SHELL) $(top_srcdir)/build-aux/fuzz.sh

@@ -43,12 +43,8 @@ class HfsplusNativeTest < Minitest::Test
 
   Expectation = Data.define(:pattern, :status, :code, :message, :path)
   EXPECTED = [
-    Expectation.new(pattern: /\Ah-hfsplus-8388608-e6-zlib\z/, status: :ok, code: nil,
+    Expectation.new(pattern: /e6-(?!sweep\z)/, status: :ok, code: nil,
       message: nil, path: nil),
-    Expectation.new(pattern: /e6-ditto\z/, status: :refused, code: -6,
-      message: "HFS Plus compression type is not supported", path: "/mixed-196608"),
-    Expectation.new(pattern: /e6-(?:lzvn|lzfse)\z/, status: :refused, code: -6,
-      message: "HFS Plus compression type is not supported", path: "/forced-mixed-196608"),
     Expectation.new(pattern: /e4-dirlinks-J\z/, status: :refused, code: -6,
       message: "HFS Plus directory hard link is not supported", path: "/dl1/a/d"),
     Expectation.new(pattern: /e8-interrupted\z/, status: :refused, code: -6,
@@ -156,8 +152,15 @@ class HfsplusNativeTest < Minitest::Test
   def compare_content(image:, entries:, expected:, name:)
     content = entries.select { %w[file symlink].include?(_1.fetch("kind")) }
     helper = @executable.dirname / "test-hfsplus"
-    result = invoke(executable: helper, root: Dir.pwd, arguments: ["--native-content", image], timeout: 120)
+    result = invoke(executable: helper, root: Dir.pwd, arguments: ["--native-content", image], expected: nil, timeout: 120)
+    result.stderr.each_line do |line|
+      next unless (match = /\Acompression type (\d+): (\d+)/.match(line))
+
+      TALLY.add("compression_type_#{match[1]}".to_sym, Integer(match[2]))
+    end
+    assert_equal(0, result.status, "#{name}: native content: #{result.stderr}")
     offset = 0
+
     content.each do |entry|
       path = entry.fetch("path")
       size = Integer(entry.fetch("size_bytes"))
@@ -312,7 +315,11 @@ end
 
 Minitest.after_run do
   totals = HfsplusNativeTest::TALLY.totals
+  totals.select { |key, _| key.to_s.start_with?("compression_type_") }.sort.each do |key, count|
+    puts "Native #{key}: #{count}"
+  end
   puts "Native group | passed | failed | skipped"
+
   HfsplusNativeTest::TALLY.groups.sort.each do |name, counts|
     puts "#{name} | #{counts[:passed]} | #{counts[:failed]} | #{counts[:skipped]}"
   end

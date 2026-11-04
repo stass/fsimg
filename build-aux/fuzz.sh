@@ -6,7 +6,7 @@
 #
 # Run from the top of a configured build directory holding test-fat,
 # test-exfat, test-qnx6, test-qnx4, test-hfsplus, test-ifs, test-iso9660,
-# test-codec, test-protocol, test-layers, test-containers, test-compression,
+# test-codec, test-lzfse, test-protocol, test-layers, test-containers, test-compression,
 # test-hbcifs, test-mtree, test-ifsboot and test/spec.sh, which write the
 # seeds, with MAKE naming
 # the make program that drives that build (sanitize.sh inherits it).
@@ -194,6 +194,19 @@ if test ! -f "$ifs_corpus/sample.seed"; then
     ./test-ifs --seed "$ifs_corpus/sample.seed"
 fi
 run_fuzzer "$work_dir/fuzz-ifs" "$ifs_corpus" 1048576 10
+
+# The imported decoders use exact input allocations and a guarded output bound.
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/lib/core" -I"$source_dir/lib/codec" \
+    "$source_dir/fuzz/lzfse.c" "$fuzz_library" $codec_libs -o "$work_dir/fuzz-lzfse"
+lzfse_corpus=lzfse-fuzz-corpus
+mkdir -p "$lzfse_corpus"
+if test ! -f "$lzfse_corpus/lzfse-v1.seed"; then
+    ./test-lzfse --seed "$lzfse_corpus"
+fi
+run_fuzzer "$work_dir/fuzz-lzfse" "$lzfse_corpus" 70000 10
 
 # The stream decoders parse every compressed byte of an untrusted boot
 # image. The harness decodes each LZO1X stream whole and in pieces and

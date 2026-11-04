@@ -518,7 +518,16 @@ encoder: it is encoded by an encoder kept across inputs and by a fresh
 one, which must give the same bytes within a buffer of exactly the bound,
 the stream must decode to the block, and a capacity one byte below the
 bound must be refused with nothing written; `test-codec --seed` writes
-such seeds as `lzoenc-*.seed`. The same target builds `fuzz/protocol.c` and runs 1000 mutations
+such seeds as `lzoenc-*.seed`.
+
+`fuzz/lzfse.c` drives the LZFSE and raw LZVN wrappers with exact-size
+input allocations and a guarded output buffer. The first byte chooses the
+decoder and a capacity through 65536; `test-lzfse --seed DIR` supplies the
+block vectors. Its input ceiling is 70000 bytes and timeout ten seconds.
+`make test-lzfse && ./test-lzfse` checks every block kind, exact bounds,
+truncated prefixes, malformed headers and scratch reuse with encoder-produced
+vectors; it needs no encoder at test time.
+The same target builds `fuzz/protocol.c` and runs 1000 mutations
 with a 64 KiB input ceiling and five-second timeout. It exercises production
 framing, job codecs, and typed INFO/PLAN/ENTRY/VERIFY validators. Worker
 lifecycle ordering is covered by `test-worker`, not inferred from pure wire

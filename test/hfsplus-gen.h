@@ -181,4 +181,13 @@ void gen_store(unsigned char *, uint64_t, size_t);
 uint64_t gen_load(const unsigned char *, size_t);
 void gen_journal_header(unsigned char *, bool, uint64_t, uint64_t, uint64_t);
 
+/* Stored streams for independently framed compressed resource chunks. */
+typedef struct gen_compressed_chunk {
+	const unsigned char *bytes;
+	size_t length;
+} gen_compressed_chunk_t;
+
+unsigned char *gen_compressed_resource(const gen_compressed_chunk_t *, size_t,
+    size_t *);
+
 #endif

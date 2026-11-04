@@ -68,6 +68,10 @@ static fsimg_status_t fork_open(fsimg_reader_t *, const hfsplus_file_t *,
     fsimg_error_t *);
 static fsimg_status_t chunk_locate(fsimg_reader_t *, uint64_t, uint64_t *,
     size_t *, fsimg_error_t *);
+static fsimg_status_t word_table_open(fsimg_reader_t *, const hfsplus_file_t *,
+    fsimg_error_t *);
+static fsimg_status_t word_chunk_locate(fsimg_reader_t *, uint64_t, uint64_t *,
+    size_t *, fsimg_error_t *);
 static fsimg_status_t chunk_load(fsimg_reader_t *, uint64_t, fsimg_error_t *);
 
 fsimg_status_t
@@ -369,6 +373,49 @@ fork_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 	return (FSIMG_OK);
 }
 
+/* Index the resource fork and check the table that types 8 and 12 begin it with:
+ * count + 1 little-endian offset words from the fork's start. The first word is
+ * the table's end, which must hold the words and lie in the fork. Its length is
+ * the writer's choice, so it is never computed from the count, and words between
+ * the last offset and the table's end are not read. All the rest of the fork is
+ * the payload interval.
+ */
+static fsimg_status_t
+word_table_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
+    fsimg_error_t *error)
+{
+	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
+	hfsplus_compressed_t *compressed = &hfsplus->compressed;
+	unsigned char raw[HFSPLUS_CHUNK_WORD_BYTES];
+	uint64_t count;
+	uint32_t table_end;
+	fsimg_status_t status;
+
+	status = hfsplus_fork_index(reader, file->id, HFSPLUS_FORK_RESOURCE,
+	    &file->resource_fork, &hfsplus->file, NULL, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (hfsplus->file == NULL || file->resource_fork.logical_size < sizeof(raw))
+		return (hfsplus_corrupt(error,
+		    "HFS Plus compressed file's resource fork is too short"));
+	status = hfsplus_fork_read(reader, hfsplus->file, 0, raw, sizeof(raw),
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	(void)hfsplus_chunk_word_decode(raw, sizeof(raw), 0, &table_end);
+	count = hfsplus->current.size / HFSPLUS_CHUNK_BYTES +
+	    (hfsplus->current.size % HFSPLUS_CHUNK_BYTES != 0);
+	if (table_end < (count + 1) * HFSPLUS_CHUNK_WORD_BYTES ||
+	    table_end > file->resource_fork.logical_size)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus compressed file's chunk table is malformed"));
+	compressed->table_offset = 0;
+	compressed->payload_start = table_end;
+	compressed->payload_end = file->resource_fork.logical_size;
+	compressed->chunks = count;
+	return (FSIMG_OK);
+}
+
 /* Open the current entry's compressed content, on its first resolve. Its record
  * must still be what listing admitted. An inline payload decodes here, once and
  * whole, its record scanned again only for this; a fork's chunks wait until each
@@ -402,7 +449,9 @@ hfsplus_compress_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compression attribute changed since it was listed"));
 	if (hfsplus_compress_consumes_fork(current->compression)) {
-		status = fork_open(reader, file, error);
+		status = current->compression == TYPE_ZLIB_FORK ?
+		    fork_open(reader, file, error) :
+		    word_table_open(reader, file, error);
 		if (status != FSIMG_OK) {
 			fsimg_extent_index_free(hfsplus->file);
 			hfsplus->file = NULL;
@@ -469,6 +518,38 @@ chunk_locate(fsimg_reader_t *reader, uint64_t chunk, uint64_t *offset,
 	return (FSIMG_OK);
 }
 
+/* Chunk `chunk`'s span in a type 8 or 12 table: its offset word to its successor,
+ * so a chunk's neighbours are the two words that define it. The table holds both
+ * words, since its end was checked against the count and the fork.
+ */
+static fsimg_status_t
+word_chunk_locate(fsimg_reader_t *reader, uint64_t chunk, uint64_t *offset,
+    size_t *stored, fsimg_error_t *error)
+{
+	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
+	const hfsplus_compressed_t *compressed = &hfsplus->compressed;
+	unsigned char raw[2 * HFSPLUS_CHUNK_WORD_BYTES];
+	uint32_t end, start;
+	fsimg_status_t status;
+
+	status = hfsplus_fork_read(reader, hfsplus->file,
+	    compressed->table_offset + chunk * HFSPLUS_CHUNK_WORD_BYTES, raw,
+	    sizeof(raw), error);
+	if (status != FSIMG_OK)
+		return (status);
+	(void)hfsplus_chunk_word_decode(raw, sizeof(raw), 0, &start);
+	(void)hfsplus_chunk_word_decode(raw, sizeof(raw), 1, &end);
+	if (end < start)
+		return (hfsplus_corrupt(error, "HFS Plus chunks overlap"));
+	if (start < compressed->payload_start || end > compressed->payload_end ||
+	    end - start > HFSPLUS_CHUNK_STORED_MAX)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus chunk lies outside the resource data"));
+	*offset = start;
+	*stored = end - start;
+	return (FSIMG_OK);
+}
+
 static fsimg_status_t
 chunk_load(fsimg_reader_t *reader, uint64_t chunk, fsimg_error_t *error)
 {
@@ -479,7 +560,9 @@ chunk_load(fsimg_reader_t *reader, uint64_t chunk, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	window->valid = false;
-	status = chunk_locate(reader, chunk, &offset, &stored, error);
+	status = hfsplus->current.compression == TYPE_ZLIB_FORK ?
+	    chunk_locate(reader, chunk, &offset, &stored, error) :
+	    word_chunk_locate(reader, chunk, &offset, &stored, error);
 	if (status == FSIMG_OK)
 		status = hfsplus_fork_read(reader, hfsplus->file, offset,
 		    window->input, stored, error);

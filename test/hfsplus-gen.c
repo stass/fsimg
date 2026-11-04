@@ -868,3 +868,30 @@ gen_free(gen_image_t *image)
 	free(image->bytes);
 	bzero(image, sizeof(*image));
 }
+
+/* Types 8 and 12 start with count + 1 LE successor offsets at fork byte zero.
+ * No classic resource-file header surrounds this table or its payload.
+ */
+unsigned char *
+gen_compressed_resource(const gen_compressed_chunk_t *chunks, size_t count,
+    size_t *size)
+{
+	size_t cursor = 4 * (count + 1);
+	size_t capacity = cursor;
+	unsigned char *out;
+
+	for (size_t i = 0; i < count; i++)
+		capacity += chunks[i].length;
+	out = calloc(1, capacity);
+	CHECK(out != NULL);
+	for (size_t i = 0; i <= count; i++) {
+		for (size_t j = 0; j < 4; j++)
+			out[4 * i + j] = (unsigned char)(cursor >> (8 * j));
+		if (i != count) {
+			bcopy(chunks[i].bytes, out + cursor, chunks[i].length);
+			cursor += chunks[i].length;
+		}
+	}
+	*size = capacity;
+	return (out);
+}
