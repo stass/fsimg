@@ -45,12 +45,21 @@ module HfsPlusPopulate
   # Raised when a program a step runs fails; its output is the message.
   class ToolFailed < StandardError; end
 
+  # What a step reports besides success: text it observed, or text describing
+  # a refusal it expected. A step that returns neither has nothing to report.
+  Observation = Data.define(:text)
+  Refusal = Data.define(:text)
+
   # Run `step` against `root`, appending what happened to `attempts`. An
-  # action that returns a String has observed something, which is kept as the
-  # attempt's `output`.
+  # Observation is kept as the attempt's `output`; a Refusal makes the attempt
+  # `ok: false, refused: true` with its text as `output`.
   def attempt(attempts, step, root)
-    result = step.action.call(root)
-    attempts << { step: step.step, path: step.path, ok: true }.merge(result.is_a?(String) ? { output: result } : {})
+    outcome = case step.action.call(root)
+              in Observation => seen then { ok: true, output: seen.text }
+              in Refusal => refused then { ok: false, refused: true, output: refused.text }
+              else { ok: true }
+              end
+    attempts << { step: step.step, path: step.path, **outcome }
   rescue SystemCallError, ToolFailed => e
     attempts << { step: step.step, path: step.path, ok: false, error: e.class.name.delete_prefix("Errno::"), message: e.message }
   end
@@ -140,6 +149,16 @@ module HfsPlusPopulate
 
   def step(name, path, &action) = Step.new(name, path, action)
 
+  def observe(text) = Observation.new(text)
+
+  def refuse(text) = Refusal.new(text)
+
+  # 32 bytes of Finder information as hex: type, creator, flags, then zeros.
+  def finder_info(type, creator, flags) = (type.b + creator.b + [flags].pack("n") + ("\0" * 22).b).unpack1("H*")
+
+  # The last `length` characters of `text`, or all of it if it is shorter.
+  def tail(text, length) = text[[text.length - length, 0].max..]
+
   def pattern(length, seed) = Array.new(length) { (_1 * 7 + seed) & 0xff }.pack("C*")
 
   def write_file(root, rel, content) = File.binwrite(File.join(root, rel), content)
@@ -154,7 +173,7 @@ module HfsPlusPopulate
   end
 
   # One line about what `lstat` of `path` reports, or the error it gives.
-  def observe(path)
+  def lstat_line(path)
     st = File.lstat(path)
     format("%s kind=%s ino=%d nlink=%d mode=%04o uid=%d size=%d mtime=%d birth=%d", File.basename(path), st.ftype, st.ino,
            st.nlink, st.mode & 0o7777, st.uid, st.size, st.mtime.to_i, st.birthtime.to_i)

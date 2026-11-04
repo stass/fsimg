@@ -5,7 +5,7 @@
 
 # What experiment E6 puts on a mounted volume: files of several sizes and
 # contents compressed by one tool, which is afsctool with a codec or ditto.
-# Each step writes a file, compresses it, and returns what `afsctool -v`
+# Each step writes a file, compresses it, and observes what `afsctool -v`
 # reports of the result (the kernel hides the attribute and the fork, so the
 # bytes themselves are read from the unmounted image by fields.rb).
 #
@@ -52,10 +52,14 @@ module HfsPlusPopulateCompression
   def compress_step(tool, name, bytes, force: false)
     P.step("compress-#{tool}", name) do |root|
       path = File.join(root, name)
-      write_and_compress(tool, path, bytes, force)
-      P.tool("afsctool", "-v", path)
-    rescue P::ToolFailed => e
-      "#{e.message}\n#{File.exist?(path) ? "file size #{File.size(path)}" : 'no file'}"
+      begin
+        write_and_compress(tool, path, bytes, force)
+      rescue P::ToolFailed => e
+        # The tool declining to compress is a result of the experiment; the
+        # report that follows is not, and its failure fails the step.
+        next P.refuse("#{e.message}\n#{File.exist?(path) ? "file size #{File.size(path)}" : 'no file'}")
+      end
+      P.observe(P.tool("afsctool", "-v", path))
     end
   end
 

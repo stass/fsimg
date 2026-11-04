@@ -48,7 +48,9 @@ module HfsPlusFields
   NODE_KINDS = { -1 => "leaf", 0 => "index", 1 => "header", 2 => "map" }.freeze
   FORK_NAMES = %i[allocation extents catalog attributes startup].freeze
 
-  Extent = Data.define(:start, :count)
+  Extent = Data.define(:start, :count) do
+    def to_s = "#{start}+#{count}"
+  end
   Fork = Data.define(:logical_size, :clump_size, :total_blocks, :extents) do
     def empty? = logical_size.zero? && total_blocks.zero? && extents.all? { _1.count.zero? }
   end
@@ -191,7 +193,7 @@ module HfsPlusFields
 
   def fork_report(fork)
     { logical_size: fork.logical_size, clump_size: fork.clump_size, total_blocks: fork.total_blocks,
-      extents: fork.extents.reject { _1.count.zero? }.map { "#{_1.start}+#{_1.count}" } }
+      extents: fork.extents.reject { _1.count.zero? }.map(&:to_s) }
   end
 
   # ---- boot area and volume header ----
@@ -351,7 +353,8 @@ module HfsPlusFields
 
   # ---- index nodes ----
 
-  INDEX_EXAMPLES = 8
+  # How many examples of a finding a report lists, however many there are.
+  EXAMPLES_SHOWN = 8
 
   # The key at the front of a record, its two-byte length field included.
   def record_key(slice)
@@ -370,51 +373,93 @@ module HfsPlusFields
     slice.unpack1("@#{slice.bytesize - 4}N")
   end
 
+  IndexEntry = Data.define(:position, :key, :child)
+  IndexNode = Data.define(:number, :height, :entries)
+  IndexChild = Data.define(:height, :kind, :first_key)
+
+  # A count of findings and the first EXAMPLES_SHOWN of them: the report stays
+  # small however many findings a hostile image forces.
+  Findings = Data.define(:count, :examples) do
+    def plus(items) = Findings.new(count + items.size, (examples + items).first(EXAMPLES_SHOWN))
+  end
+
+  # What the walk has accumulated over the levels read so far.
+  IndexWalk = Data.define(:levels, :lone, :mismatches, :reads)
+
+  # One index node's records: each key and the child it names. Nothing is
+  # read for the children here.
+  def index_node(volume, fork, tree, number)
+    raw = read_node(volume, fork, number, tree[:node_size])
+    desc = descriptor(raw)
+    raise Malformed, "node #{number} on an index level has kind #{desc.kind}" unless desc.kind.zero?
+
+    entries = record_slices(raw, desc.num_records).each_with_index.map do |slice, position|
+      key = record_key(slice)
+      IndexEntry.new(position, key, index_child(slice, key))
+    end
+    IndexNode.new(number, desc.height, entries)
+  end
+
+  # A child's height, kind and the key of its first record.
+  def index_child_probe(volume, fork, tree, number)
+    raw = read_node(volume, fork, number, tree[:node_size])
+    desc = descriptor(raw)
+    first = desc.num_records.zero? ? "".b : record_key(record_slices(raw, desc.num_records).first)
+    IndexChild.new(desc.height, desc.kind, first)
+  end
+
+  # The children one level names must be distinct, and all the children of the
+  # walk must fit in the tree: each node is then read as a child at most once.
+  def check_index_children(children, reads, limit)
+    twice = children.tally.find { _2 > 1 }
+    raise Malformed, "child #{twice.first} is named by two index records" if twice
+    raise Malformed, "the index walk names #{reads + children.size} children in a tree of #{limit} nodes" if reads + children.size > limit
+  end
+
+  # The reducer: fold one level (its nodes and the probes of their children)
+  # into the walk.
+  def fold_index_level(walk, root, nodes, probes)
+    nodes.each do |node|
+      node.entries.each do |e|
+        next if probes.fetch(e.child).height == node.height - 1
+
+        raise Malformed, "child #{e.child} of #{node.number} has height #{probes.fetch(e.child).height}, not #{node.height - 1}"
+      end
+    end
+    counts = nodes.map { _1.entries.size }
+    lone = nodes.filter_map { _1.number if _1.entries.size == 1 && _1.number != root }
+    differing = nodes.flat_map do |node|
+      node.entries.reject { _1.key == probes.fetch(_1.child).first_key }.map do |e|
+        { node: node.number, record: e.position, child: e.child, index_key: hex(e.key), first_key: hex(probes.fetch(e.child).first_key) }
+      end
+    end
+    level = { height: nodes.first.height, nodes: nodes.size, records: counts.sum, min_records: counts.min, max_records: counts.max }
+    walk.with(levels: walk.levels + [level], lone: walk.lone.plus(lone), mismatches: walk.mismatches.plus(differing),
+              reads: walk.reads + probes.size)
+  end
+
   # The index levels of a tree from the root down. Every index node is read once
-  # and every child once, for its first key. The report counts nodes and records
-  # per level, the index nodes other than the root with a single record, and the
+  # and every distinct child once, for its first key, and the children together
+  # cannot outnumber the tree's nodes. The report counts nodes and records per
+  # level, the index nodes other than the root with a single record, and the
   # index records whose key differs from the first key of the child they name;
-  # the first INDEX_EXAMPLES of each are listed with their keys in hex.
+  # the first EXAMPLES_SHOWN of each are listed with their keys in hex.
   def index_report(volume, fork, tree)
     return { levels: [] } if tree[:depth] < 2
 
-    read = lambda do |number|
-      raw = read_node(volume, fork, number, tree[:node_size])
-      [descriptor(raw), raw]
-    end
-    seen = Set.new
+    limit = [tree[:total_nodes], MAX_NODES].min
+    walk = IndexWalk.new(levels: [], lone: Findings.new(0, []), mismatches: Findings.new(0, []), reads: 0)
     level = [tree[:root_node]]
-    levels = []
-    lone = []
-    mismatches = []
     until level.empty?
-      nodes = level.map do |number|
-        raise Malformed, "index node #{number} is reached twice" unless seen.add?(number)
-        raise Malformed, "more than #{MAX_NODES} nodes in the index walk" if seen.size > MAX_NODES
-
-        desc, raw = read.(number)
-        raise Malformed, "node #{number} on an index level has kind #{desc.kind}" unless desc.kind.zero?
-
-        [number, desc, record_slices(raw, desc.num_records)]
-      end
-      level = nodes.flat_map do |number, desc, slices|
-        lone << number if slices.size == 1 && number != tree[:root_node]
-        slices.each_with_index.filter_map do |slice, position|
-          key = record_key(slice)
-          child = index_child(slice, key)
-          child_desc, child_raw = read.(child)
-          first = child_desc.num_records.zero? ? "".b : record_key(record_slices(child_raw, child_desc.num_records).first)
-          raise Malformed, "child #{child} of #{number} has height #{child_desc.height}, not #{desc.height - 1}" unless child_desc.height == desc.height - 1
-
-          mismatches << { node: number, record: position, child: child, index_key: hex(key), first_key: hex(first) } unless key == first
-          child if child_desc.kind.zero?
-        end
-      end
-      counts = nodes.map { _3.size }
-      levels << { height: nodes.first[1].height, nodes: nodes.size, records: counts.sum, min_records: counts.min, max_records: counts.max }
+      nodes = level.map { index_node(volume, fork, tree, _1) }
+      children = nodes.flat_map { |node| node.entries.map(&:child) }
+      check_index_children(children, walk.reads, limit)
+      probes = children.to_h { [_1, index_child_probe(volume, fork, tree, _1)] }
+      walk = fold_index_level(walk, tree[:root_node], nodes, probes)
+      level = children.select { probes.fetch(_1).kind.zero? }
     end
-    { levels: levels, one_record_non_root_index_nodes: lone.size, one_record_examples: lone.first(INDEX_EXAMPLES),
-      key_mismatches: mismatches.size, key_mismatch_examples: mismatches.first(INDEX_EXAMPLES) }
+    { levels: walk.levels, one_record_non_root_index_nodes: walk.lone.count, one_record_examples: walk.lone.examples,
+      key_mismatches: walk.mismatches.count, key_mismatch_examples: walk.mismatches.examples }
   end
 
   # ---- allocation bitmap and layout ----
@@ -487,9 +532,11 @@ module HfsPlusFields
   end
 
   def file_record(data)
-    _, flags, reserved, id, *dates = fields_at(data, 0, 32, "nnNNNNNNN")
+    _, flags, link_word, id, *dates = fields_at(data, 0, 32, "nnNNNNNNN")
     user_info = bytes_at(data, 48, 16)
-    { type: "file", flags: format("0x%04X", flags), reserved: reserved, id: id, dates: date_fields(dates),
+    # The word after the flags is the hard-link chain head on an indirect node
+    # file; elsewhere it is reserved.
+    { type: "file", flags: format("0x%04X", flags), link_word: link_word, id: id, dates: date_fields(dates),
       bsd: bsd_report(bytes_at(data, 32, 16)), file_type: four_chars(user_info.byteslice(0, 4)),
       creator: four_chars(user_info.byteslice(4, 4)), user_info: hex(user_info), finder_info: hex(bytes_at(data, 64, 16)),
       text_encoding: fields_at(data, 80, 4, "N").first,
@@ -655,7 +702,7 @@ module HfsPlusFields
 
   # The catalog's file records that carry ownerFlags 0x20, with their forks.
   def compressed_catalog_files(volume, fork, tree)
-    leaf_slices(volume, fork, tree).filter_map do |slice|
+    errors, files = leaf_slices(volume, fork, tree).filter_map do |slice|
       parent, name, data_at = catalog_key(slice)
       data = slice.byteslice(data_at..) || +""
       next unless data.bytesize == FILE_RECORD_BYTES && fields_at(data, 0, 2, "n").first == 2
@@ -663,26 +710,55 @@ module HfsPlusFields
 
       { parent: parent, name: name, id: fields_at(data, 8, 4, "N").first,
         data_fork: parse_fork(bytes_at(data, 88, 80)), rsrc_fork: parse_fork(bytes_at(data, 168, 80)) }
-    end
+    rescue Error => e
+      { error: "catalog record: #{e.message}" }
+    end.partition { _1.key?(:error) }
+    files + errors.first(EXAMPLES_SHOWN)
+  end
+
+  # The decmpfs attribute of each file that has one, keyed by file ID. A record
+  # that cannot be decoded is kept as its Error under the file ID in its key,
+  # so that file's entry reports it; a later decoded decmpfs record of the same
+  # file replaces it.
+  def decmpfs_attributes(slices)
+    slices.filter_map do |slice|
+      attribute = parse_attribute(slice)
+      [attribute.file_id, attribute] if attribute.name == DECMPFS_NAME
+    rescue Error => e
+      [slice.unpack1("@4N"), e] if slice.bytesize >= 8
+    end.sort_by { |_, found| found.is_a?(Error) ? 0 : 1 }.to_h
   end
 
   # Every compressed file with its decmpfs header and the head of its resource
-  # fork's chunk table, read from the volume and not through the mount.
+  # fork's chunk table, read from the volume and not through the mount. One
+  # undecodable record or fork is reported in its own entry.
   def compression_report(volume, forks, trees)
-    attributes = leaf_slices(volume, forks[:attributes], trees[:attributes]).map { parse_attribute(_1) }
-    decmpfs = attributes.select { _1.name == DECMPFS_NAME }.to_h { [_1.file_id, _1] }
+    decmpfs = decmpfs_attributes(leaf_slices(volume, forks[:attributes], trees[:attributes]))
     compressed_catalog_files(volume, forks[:catalog], trees[:catalog]).map do |file|
-      compressed_file_report(volume, file, decmpfs[file[:id]])
+      file.key?(:error) ? file : compressed_file_report(volume, file, decmpfs[file[:id]])
     end
   end
 
   def compressed_file_report(volume, file, attribute)
-    report = file.slice(:parent, :name, :id).merge(data_fork: fork_report(file[:data_fork]), rsrc_fork: fork_report(file[:rsrc_fork]))
-    return report.merge(decmpfs: "absent") unless attribute
-    return report.merge(decmpfs: "not inline: #{attribute_report(attribute)[:kind]}") unless attribute.type == 0x10
+    entry = file.slice(:parent, :name, :id).merge(data_fork: fork_report(file[:data_fork]), rsrc_fork: fork_report(file[:rsrc_fork]))
+    case attribute
+    in nil then entry.merge(decmpfs: "absent")
+    in Error then entry.merge(error: "attribute record: #{attribute.message}")
+    in { type: } if ATTRIBUTE_KINDS[type] != "inline" then entry.merge(decmpfs: "not inline: #{attribute_report(attribute)[:kind]}")
+    else
+      header = decmpfs_header(inline_value(attribute))
+      entry.merge(decmpfs: header, resource_table: resource_table_or_error(volume, file[:rsrc_fork], header))
+    end
+  rescue Error => e
+    entry.merge(error: e.message)
+  end
 
-    header = decmpfs_header(inline_value(attribute))
-    report.merge(decmpfs: header, resource_table: resource_table(volume, file[:rsrc_fork], header))
+  # The table, or why it could not be read: a fork whose table lies past its
+  # first eight extents is reported by that message, not followed.
+  def resource_table_or_error(volume, fork, header)
+    resource_table(volume, fork, header)
+  rescue Error => e
+    { error: e.message }
   end
 
   def decmpfs_header(value)
@@ -718,9 +794,11 @@ module HfsPlusFields
     head = fork_prefix(volume, fork, data_off, 8)
     resource_len = fields_at(head, 0, 4, "N").first
     count = fields_at(head, 4, 4, "V").first
-    pairs = fields_at(fork_prefix(volume, fork, data_off + 8, 8 * [count, MAX_TABLE_ENTRIES].min), 0, 8 * [count, MAX_TABLE_ENTRIES].min, "V*").each_slice(2).to_a
+    shown = [count, MAX_TABLE_ENTRIES].min
+    pairs = fields_at(fork_prefix(volume, fork, data_off + 8, 8 * shown), 0, 8 * shown, "V*").each_slice(2).to_a
     { fork_size: fork.logical_size, data_offset: data_off, map_offset: map_off, data_length: data_len, map_length: map_len,
       resource_length: resource_len, chunk_count: count, pairs: pairs.map { "#{_1}+#{_2}" },
+      **(shown < count ? { truncated: "#{shown} of #{count} pairs shown" } : {}),
       chunk_heads: pairs.first(8).map { |offset, _| hex(fork_prefix(volume, fork, data_off + 4 + offset, 4)) },
       header_hex: hex(fork_prefix(volume, fork, 0, 32)), map_head: hex(fork_prefix(volume, fork, map_off, 32)) }
   end
@@ -749,7 +827,13 @@ module HfsPlusFields
     flags = fields_at(block, 0, 4, "N").first
     offset, size = fields_at(block, 36, 16, "Q>Q>")
     report = { info_flags: format("0x%08X", flags), device_signature: hex(bytes_at(block, 4, 32)), offset: offset, size: size }
-    inside = journal_header_report(volume, offset, size)
+    inside = begin
+      journal_header_report(volume, offset, size)
+    rescue Error => e
+      raise if volume.base.zero?
+
+      { header: "unreadable counting from the volume: #{e.message}" }
+    end
     return report.merge(inside) if inside.key?(:magic) || volume.base.zero?
 
     # Inside a wrapper the offset may count from the start of the image instead.
@@ -768,7 +852,7 @@ module HfsPlusFields
     magic, endian, start, finish, jsize, blhdr, checksum, jhdr = raw.unpack(big ? "NNQ>Q>Q>NNN" : "VVQ<Q<Q<VVV")
     report = { byte_order: big ? "big" : "little", magic: format("0x%08X", magic), endian: format("0x%08X", endian), start: start,
                end: finish, size: jsize, blhdr_size: blhdr, checksum: format("0x%08X", checksum), jhdr_size: jhdr }
-    start == finish ? report : report.merge(first_transaction: transaction_report(volume, offset, size, start, big))
+    start == finish ? report : report.merge(first_transaction: transaction_report(volume, offset, size, start, jhdr, big))
   end
 
   BLOCK_LIST_HEADER_BYTES = 16
@@ -778,9 +862,13 @@ module HfsPlusFields
   # The block list header at the journal's `start`, and its first block infos: a
   # header of two counts, the bytes the transaction uses, a checksum and a pad,
   # then entries of block number (8), size (4) and a four-byte link.
-  def transaction_report(volume, offset, size, start, big)
+  # The transactions live between the journal header (jhdr_size bytes) and the
+  # end of the journal. The result is a Hash whether or not `start` is usable.
+  def transaction_report(volume, offset, size, start, jhdr, big)
+    return { error: "start #{start} is not in [#{jhdr}, #{size}), after the journal header" } unless (jhdr...size).cover?(start)
+
     length = [BLOCK_LIST_HEADER_BYTES + BLOCK_INFO_SHOWN * BLOCK_INFO_BYTES, size - start].min
-    return "start #{start} leaves no room in the journal of #{size}" if start.negative? || length < BLOCK_LIST_HEADER_BYTES
+    return { error: "start #{start} leaves no room for a block list header in the journal of #{size}" } if length < BLOCK_LIST_HEADER_BYTES
 
     raw = volume.read(offset + start, length)
     max_blocks, num_blocks, bytes_used, checksum, pad = raw.unpack(big ? "nnNNN" : "vvVVV")
@@ -798,64 +886,85 @@ module HfsPlusFields
   HFS_EXTENTS_NODE_BYTES = 512
   MAX_HFS_EXTENT_NODES = 4096
 
-  # A classic HFS master directory block with an embedded HFS Plus volume.
+  # The fixed-width fields of a master directory block: name => [offset, template].
+  # The extents and catalog file extent records and the volume name are decoded
+  # apart, from their own offsets.
+  MDB_FIELDS = {
+    create: [2, "N"], modify: [6, "N"], attributes: [10, "n"], file_count: [12, "n"], bitmap_sector: [14, "n"],
+    alloc_ptr: [16, "n"], total_blocks: [18, "n"], block_size: [20, "N"], clump_size: [24, "N"], first_block: [28, "n"],
+    next_id: [30, "N"], free_blocks: [34, "n"], embed_signature: [124, "n"], embed_start: [126, "n"], embed_count: [128, "n"],
+    extents_file_bytes: [130, "N"], catalog_file_bytes: [146, "N"]
+  }.freeze
+  MDB_BYTES = 162
+  MDB_EXTENTS_FILE_AT = 134
+  MDB_CATALOG_FILE_AT = 150
+  MDB_NAME_AT = 36
+  MDB_NAME_MAX = 27
+  PACK_WIDTH = { "N" => 4, "n" => 2 }.freeze
+
+  def mdb_fields(mdb) = MDB_FIELDS.transform_values { |offset, template| fields_at(mdb, offset, PACK_WIDTH.fetch(template), template).first }
+
+  # A classic HFS master directory block with an embedded HFS Plus volume. The
+  # embedded volume's location is computed before the outer volume's own fields,
+  # so a damaged optional outer field cannot hide the volume the caller needs.
   def wrapper_report(volume)
-    mdb = volume.read(1024, 162)
+    mdb = volume.read(1024, MDB_BYTES)
     return nil unless mdb.byteslice(0, 2) == "BD".b
 
-    block_size = fields_at(mdb, 20, 4, "N").first
-    first_block = fields_at(mdb, 28, 2, "n").first
-    embed_sig = fields_at(mdb, 124, 2, "n").first
-    start, count = fields_at(mdb, 126, 4, "nn")
-    report = { hfs_block_size: block_size, first_allocation_block: first_block, embed_signature: format("0x%04X", embed_sig),
-               embed_start: start, embed_count: count, outer: hfs_volume_report(volume, mdb) }
+    m = mdb_fields(mdb)
     # Only a wrapper that declares an embedded HFS Plus volume locates one.
-    return report unless embed_sig == EMBED_SIGNATURE
-
-    report.merge(embedded_volume_offset: first_block * 512 + start * block_size)
+    located = m[:embed_signature] == EMBED_SIGNATURE ? { embedded_volume_offset: m[:first_block] * 512 + m[:embed_start] * m[:block_size] } : {}
+    outer = begin
+      hfs_volume_report(volume, mdb, m)
+    rescue Error => e
+      { error: e.message }
+    end
+    { hfs_block_size: m[:block_size], first_allocation_block: m[:first_block], embed_signature: format("0x%04X", m[:embed_signature]),
+      embed_start: m[:embed_start], embed_count: m[:embed_count], outer: outer, **located }
   end
 
   # The outer volume's own fields: the master directory block, the extent
   # records it holds for the extents and catalog files, whether its bitmap
   # allocates the embedded range, and the extents file's records, which show the
   # bad block file (file ID 5) if there is one.
-  def hfs_volume_report(volume, mdb)
-    create, modify, attributes, files, bitmap_start, alloc_ptr, blocks, block_size, clump, first_block, next_id, free =
-      fields_at(mdb, 2, 34, "NNnnnnnNNnNn")
-    name_length = mdb.getbyte(36)
-    extents_extents = hfs_extent_list(mdb.byteslice(134, HFS_EXTENT_RECORD_BYTES))
+  def hfs_volume_report(volume, mdb, m)
+    name_length = mdb.getbyte(MDB_NAME_AT)
+    extents_extents = hfs_extent_list(mdb.byteslice(MDB_EXTENTS_FILE_AT, HFS_EXTENT_RECORD_BYTES))
     {
-      create_date: date_field(create), modify_date: date_field(modify), attributes: format("0x%04X", attributes), file_count: files,
-      volume_bitmap_sector: bitmap_start, alloc_ptr: alloc_ptr, total_blocks: blocks, block_size: block_size, clump_size: clump,
-      first_block_sector: first_block, next_catalog_id: next_id, free_blocks: free,
-      name: name_length > 27 ? "(length #{name_length})" : mdb.byteslice(37, name_length).dup.force_encoding("MacRoman").encode("UTF-8"),
-      extents_file_bytes: fields_at(mdb, 130, 4, "N").first, extents_file_extents: extents_extents,
-      catalog_file_bytes: fields_at(mdb, 146, 4, "N").first, catalog_file_extents: hfs_extent_list(mdb.byteslice(150, HFS_EXTENT_RECORD_BYTES)),
-      bitmap: hfs_bitmap_report(volume, bitmap_start, blocks, mdb), extents_file_records: hfs_extents_records(volume, extents_extents, block_size, first_block)
+      create_date: date_field(m[:create]), modify_date: date_field(m[:modify]), attributes: format("0x%04X", m[:attributes]),
+      file_count: m[:file_count], volume_bitmap_sector: m[:bitmap_sector], alloc_ptr: m[:alloc_ptr], total_blocks: m[:total_blocks],
+      block_size: m[:block_size], clump_size: m[:clump_size], first_block_sector: m[:first_block], next_catalog_id: m[:next_id],
+      free_blocks: m[:free_blocks],
+      name: name_length > MDB_NAME_MAX ? "(length #{name_length})" : mdb.byteslice(MDB_NAME_AT + 1, name_length).dup.force_encoding("MacRoman").encode("UTF-8"),
+      extents_file_bytes: m[:extents_file_bytes], extents_file_extents: extents_extents.map(&:to_s),
+      catalog_file_bytes: m[:catalog_file_bytes],
+      catalog_file_extents: hfs_extent_list(mdb.byteslice(MDB_CATALOG_FILE_AT, HFS_EXTENT_RECORD_BYTES)).map(&:to_s),
+      bitmap: hfs_bitmap_report(volume, m), extents_file_records: hfs_extents_records(volume, extents_extents, m[:block_size], m[:first_block])
     }
   end
 
   # Three (start, count) pairs of allocation blocks, the unused ones dropped.
-  def hfs_extent_list(raw) = raw.unpack("n*").each_slice(2).reject { _2.zero? }.map { "#{_1}+#{_2}" }
+  def hfs_extent_list(raw) = raw.unpack("n*").each_slice(2).reject { _2.zero? }.map { Extent.new(*_1) }
 
-  def hfs_bitmap_report(volume, bitmap_start, blocks, mdb)
-    bits = Bits.of(volume.read(bitmap_start * 512, (blocks + 7) / 8), blocks)
-    start, count = fields_at(mdb, 126, 4, "nn")
+  def hfs_bitmap_report(volume, m)
+    blocks = m[:total_blocks]
+    bits = Bits.of(volume.read(m[:bitmap_sector] * 512, (blocks + 7) / 8), blocks)
+    start = m[:embed_start]
+    count = m[:embed_count]
     { set_bits: bits.set_count, first_clear: bits.first_clear, embedded_range_all_set: (start...start + count).all? { bits.set?(_1) } }
   end
 
   # The leaf records of the outer extents file as "file ID fork start: extents".
   # Its header node says where the first leaf is; nodes are 512 bytes.
-  def hfs_extents_records(volume, extent_words, block_size, first_block)
-    return [] if extent_words.empty?
+  def hfs_extents_records(volume, extents, block_size, first_block)
+    return [] if extents.empty?
 
-    ranges = extent_words.map { _1.split("+").map(&:to_i) }
     read_node = lambda do |number|
       at = number * HFS_EXTENTS_NODE_BYTES
-      start, count = ranges.first
-      raise Malformed, "outer extents node #{number} is beyond its first extent" if at + HFS_EXTENTS_NODE_BYTES > count * block_size
+      first = extents.first
+      raise Malformed, "outer extents node #{number} is beyond its first extent" if at + HFS_EXTENTS_NODE_BYTES > first.count * block_size
 
-      volume.read(first_block * 512 + start * block_size + at, HFS_EXTENTS_NODE_BYTES)
+      volume.read(first_block * 512 + first.start * block_size + at, HFS_EXTENTS_NODE_BYTES)
     end
     first_leaf = fields_at(read_node.(0), 14 + 10, 4, "N").first
     seen = Set.new

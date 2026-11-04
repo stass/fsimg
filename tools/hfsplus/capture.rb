@@ -24,8 +24,7 @@
 # `@DEV@` in a --format command stands for the raw device of the attached
 # image. --hdiutil-fs FS formats with `hdiutil create` instead, and --import
 # IMAGE records an image another tool made (--command says how). --populate
-# names a profile of the PROFILES table: e2, e4, e5, e6-zlib,
-# e6-lzvn, e6-lzfse, e6-ditto, e6-sweep, e7, e9-create, e9-delete, e9-thin or e9-sparse.
+# names a profile of the PROFILES table; `capture.rb --help` lists them.
 require "digest"
 require "fileutils"
 require "json"
@@ -317,7 +316,7 @@ module HfsPlusCapture
       o.on("--hdiutil-fs FS") { opts[:hdiutil_fs] = _1 }
       o.on("--import IMAGE") { opts[:import] = _1 }
       o.on("--command TEXT") { opts[:command] = _1 }
-      o.on("--populate PROFILE", PROFILES.keys) { opts[:populate] = _1 }
+      o.on("--populate PROFILE", PROFILES.keys, "one of: #{PROFILES.keys.join(', ')}") { opts[:populate] = _1 }
       o.on("--discard-image") { opts[:discard_image] = true }
     end.parse!(argv)
     missing = %i[variant size option].reject { opts[_1] }

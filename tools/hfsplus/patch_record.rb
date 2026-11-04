@@ -4,17 +4,19 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
-# Rewrite fields of one catalog file record in place, in a copy of an image,
+# Write a copy of an image with fields of one catalog file record rewritten,
 # so that macOS can be shown a record it will not create itself: a file whose
 # Finder type and creator are `hlnk`/`hfs+`, a chosen creation date or link
 # reference, a flag word. The file record is found by its name, which must
 # occur exactly once as the key of a file record. Only research copies are
 # patched; no checksum covers a catalog record, so the volume still mounts.
 #
-#   patch_record.rb IMAGE NAME [--type CODE] [--creator CODE] [--create-date SECONDS_SINCE_1904]
-#                              [--flags N] [--special N]
+#   patch_record.rb SRC DEST NAME [--type CODE] [--creator CODE] [--create-date SECONDS_SINCE_1904]
+#                                 [--flags N] [--special N]
 #
-# A code is four characters or `0x` and eight hex digits.
+# SRC is only read. DEST is created exclusively: it must not exist, must not be
+# SRC and must not lie under the captures root, so no kept capture can be
+# altered. A code is four characters or `0x` and eight hex digits.
 require "optparse"
 
 module HfsPlusPatchRecord
@@ -28,6 +30,9 @@ module HfsPlusPatchRecord
   TYPE_AT = 48
   CREATOR_AT = 52
   FILE_RECORD_BYTES = 248
+  CAPTURES_ROOT = File.join(Dir.home, "hfsplus-captures")
+  # Each option's value range: the width of the field it is packed into.
+  RANGES = { create_date: 0..0xFFFF_FFFF, flags: 0..0xFFFF, special: 0..0xFFFF_FFFF }.freeze
 
   module_function
 
@@ -55,6 +60,26 @@ module HfsPlusPatchRecord
     text.b
   end
 
+  # Refuse a value its field cannot hold, so `pack` does not truncate it.
+  def check_ranges(options)
+    RANGES.each do |name, range|
+      raise Error, "--#{name.to_s.tr('_', '-')} #{options[name]} is outside #{range}" if options[name] && !range.cover?(options[name])
+    end
+  end
+
+  # The path with symlinks resolved in every existing part; DEST does not exist yet.
+  def resolved(path)
+    dir = File.realpath(File.dirname(path))
+    File.join(dir, File.basename(path))
+  end
+
+  # DEST must be a new file, not SRC and not inside the captures root.
+  def check_dest(src, dest)
+    target = resolved(dest)
+    root = File.realpath(CAPTURES_ROOT) if File.exist?(CAPTURES_ROOT)
+    raise Error, "#{dest} is #{src}" if target == File.realpath(src)
+    raise Error, "#{dest} is under the captures root #{root}" if root && (target == root || target.start_with?("#{root}/"))
+  end
 
   # Every offset where `needle` occurs in `image`, overlapping ones included.
   def occurrences(image, needle)
@@ -75,19 +100,21 @@ module HfsPlusPatchRecord
   def main(argv)
     options = {}
     parser = OptionParser.new do |o|
-      o.banner = "usage: patch_record.rb IMAGE NAME [options]"
+      o.banner = "usage: patch_record.rb SRC DEST NAME [options]"
       o.on("--type CODE") { options[:type] = _1 }
       o.on("--creator CODE") { options[:creator] = _1 }
       o.on("--create-date N", Integer) { options[:create_date] = _1 }
       o.on("--flags N", Integer) { options[:flags] = _1 }
       o.on("--special N", Integer) { options[:special] = _1 }
     end
-    path, name = parser.parse(argv)
-    abort(parser.help) unless path && name
+    src, dest, name = parser.parse(argv)
+    abort(parser.help) unless src && dest && name
 
-    image = File.binread(path)
+    check_ranges(options)
+    check_dest(src, dest)
+    image = File.binread(src)
     patch(image, find_record(image, name), options)
-    File.binwrite(path, image)
+    File.open(dest, File::WRONLY | File::CREAT | File::EXCL, 0o644) { _1.write(image) }
     0
   rescue Error, OptionParser::ParseError, SystemCallError => e
     warn "patch_record.rb: #{e.message}"

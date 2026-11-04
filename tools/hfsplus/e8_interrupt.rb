@@ -54,16 +54,25 @@ module HfsPlusInterrupt
     run(*%w[hdiutil detach], *(force ? ["-force"] : []), target)
   end
 
+  # Attach `image` (unmounted, or at `mountpoint`), yield its device, and always
+  # detach it again, forced and best effort: a detach failure here must not hide
+  # the error that brought us here, and the block may already have detached it.
+  def with_attached(image, mountpoint: nil)
+    device = attach(image, mountpoint: mountpoint)
+    yield device
+  ensure
+    begin
+      detach(device, force: true) if device
+    rescue Error
+      nil
+    end
+  end
+
   # A fresh journaled volume in `image`: formatted through an unmounted attachment.
   def format_journaled(image)
     FileUtils.rm_f(image)
     run("mkfile", "-n", IMAGE_BYTES.to_s, image)
-    device = attach(image)
-    begin
-      run("newfs_hfs", "-J", "-v", "E8", "-b", "4096", device.sub("/dev/", "/dev/r"))
-    ensure
-      detach(device)
-    end
+    with_attached(image) { |device| run("newfs_hfs", "-J", "-v", "E8", "-b", "4096", device.sub("/dev/", "/dev/r")) }
   end
 
   # What the decoder says about the journal and the volume header.
@@ -88,58 +97,86 @@ module HfsPlusInterrupt
     nil
   end
 
-  # Interrupt one session; returns the path of the image that was left.
+  # Interrupt one session; the image at `image` is what the session left.
   def interrupt(trial, image, workdir)
     mount = File.join(workdir, "mnt")
-    FileUtils.mkdir_p(mount)
-    attach(image, mountpoint: mount)
-    pid = spawn_writer(mount)
-    sleep(trial.delay)
-    case trial.mode
+    Dir.mkdir(mount)
+    with_attached(image, mountpoint: mount) do
+      pid = spawn_writer(mount)
+      begin
+        sleep(trial.delay)
+        end_session(trial.mode, image, mount, workdir)
+      ensure
+        stop(pid)
+      end
+    end
+  end
+
+  def end_session(mode, image, mount, workdir)
+    case mode
     when "force" then detach(mount, force: true)
     when "snapshot"
       copy = File.join(workdir, "snapshot.img")
       FileUtils.cp(image, copy)
       detach(mount, force: true)
       FileUtils.mv(copy, image)
-    else raise Error, "unknown mode #{trial.mode}"
+    else raise Error, "unknown mode #{mode}"
     end
-    image
-  ensure
-    stop(pid) if pid
-    detach_leftover(mount)
-  end
-
-  # Detach the mount point if the session did not already end.
-  def detach_leftover(mount)
-    detach(mount, force: true) if mount && File.directory?(mount) && system("mount | grep -q ' on #{mount} '")
-  rescue Error
-    nil
   end
 
   # Mount the interrupted image again, as a user would, and unmount it.
   def remount(image, workdir)
     mount = File.join(workdir, "mnt2")
-    FileUtils.mkdir_p(mount)
-    attach(image, mountpoint: mount)
-    seen = Dir.children(mount).count { _1.start_with?("w") }
-    detach(mount)
-    seen
+    Dir.mkdir(mount)
+    with_attached(image, mountpoint: mount) do
+      seen = Dir.children(mount).count { _1.start_with?("w") }
+      detach(mount)
+      seen
+    end
+  end
+
+  # Only the first trial that left transactions is kept.
+  def keep?(options, interrupted)
+    keep = options[:keep]
+    keep && interrupted[:start] != interrupted[:end] && !File.exist?(File.join(keep, "interrupted.img"))
+  end
+
+  def trial_result(trial, interrupted, seen, remounted)
+    { trial: trial.number, mode: trial.mode, delay: trial.delay, interrupted: interrupted,
+      files_seen_after_remount: seen, remounted: remounted }
+  end
+
+  # A directory on another device than its parent has a volume mounted on it.
+  def mountpoint?(path) = File.stat(path).dev != File.stat(File.dirname(path)).dev
+
+  # Empty and remove the work directory. A mount point that is still mounted is
+  # never removed, since that would delete the volume's files: it is reported.
+  # (The writer can leave files in an unmounted mount point after a forced detach.)
+  def remove_workdir(dir)
+    Dir.children(dir).each do |name|
+      path = File.join(dir, name)
+      raise Error, "#{path} is still a mount point" if File.directory?(path) && mountpoint?(path)
+
+      FileUtils.rm_rf(path)
+    end
+    Dir.rmdir(dir)
+  rescue Error, SystemCallError => e
+    warn "e8_interrupt.rb: #{dir} not removed: #{e.message}"
   end
 
   def trial(trial, options)
-    Dir.mktmpdir("e8-", options.fetch(:work)) do |dir|
-      image = File.join(dir, "v.img")
-      format_journaled(image)
-      interrupt(trial, image, dir)
-      after = journal_state(image)
-      kept = options[:keep] && after[:start] != after[:end] && !File.exist?(File.join(options[:keep], "interrupted.img"))
-      FileUtils.cp(image, File.join(options[:keep], "interrupted.img")) if kept
-      seen = remount(image, dir)
-      FileUtils.cp(image, File.join(options[:keep], "remounted.img")) if kept
-      { trial: trial.number, mode: trial.mode, delay: trial.delay, interrupted: after, files_seen_after_remount: seen,
-        remounted: journal_state(image) }
-    end
+    dir = Dir.mktmpdir("e8-", options.fetch(:work))
+    image = File.join(dir, "v.img")
+    format_journaled(image)
+    interrupt(trial, image, dir)
+    interrupted = journal_state(image)
+    kept = keep?(options, interrupted)
+    FileUtils.cp(image, File.join(options[:keep], "interrupted.img")) if kept
+    seen = remount(image, dir)
+    FileUtils.cp(image, File.join(options[:keep], "remounted.img")) if kept
+    trial_result(trial, interrupted, seen, journal_state(image))
+  ensure
+    remove_workdir(dir) if dir
   end
 
   def main(argv)
@@ -152,6 +189,8 @@ module HfsPlusInterrupt
       o.on("--work DIR") { options[:work] = _1 }
     end.parse!(argv)
     FileUtils.mkdir_p(options[:keep]) if options[:keep]
+    FileUtils.mkdir_p(options[:work])
+    options[:work] = File.realpath(options[:work])
     (1..options[:trials]).each do |number|
       puts JSON.generate(trial(Trial.new(number, options[:mode], options[:delay]), options))
       $stdout.flush

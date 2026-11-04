@@ -13,7 +13,7 @@
 # e9_create makes the tree. e9_delete, run on a volume e9_create made, removes
 # every third file of every directory, all of d07 and the files 500 to 1499 of
 # d20, so that scattered and contiguous runs of catalog records disappear. Each
-# step returns what it did. e9_thin, run on a volume e9_delete left, removes
+# step observes what it did. e9_thin, run on a volume e9_delete left, removes
 # every file whose number is not a multiple of THIN_EVERY, so that most leaf
 # nodes hold one record or none; e9_sparse does the same with SPARSE_EVERY, a
 # prime, so that few leaf nodes of any index node survive.
@@ -51,7 +51,7 @@ module HfsPlusPopulateLarge
       Dir.mkdir(dir)
       FILES_PER_DIRECTORY.times { File.write(File.join(dir, file_name(_1)), "") }
     end
-    "created #{DIRECTORIES * FILES_PER_DIRECTORY} files in #{DIRECTORIES} directories"
+    P.observe("created #{DIRECTORIES * FILES_PER_DIRECTORY} files in #{DIRECTORIES} directories")
   end
 
   def delete(root)
@@ -60,13 +60,13 @@ module HfsPlusPopulateLarge
       indexes.map { File.join(root, dir_name(d), file_name(_1)) }
     end
     doomed.each { File.delete(_1) }
-    "deleted #{doomed.size} files"
+    P.observe("deleted #{doomed.size} files")
   end
 
   # The file number is the five digits after "file-".
   def thin(root, every)
     doomed = Dir.glob(File.join(root, "d*", "file-*")).reject { File.basename(_1)[5, 5].to_i % every == 0 }
     doomed.each { File.delete(_1) }
-    "deleted #{doomed.size} files"
+    P.observe("deleted #{doomed.size} files")
   end
 end

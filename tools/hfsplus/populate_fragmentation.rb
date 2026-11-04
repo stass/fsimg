@@ -43,7 +43,7 @@ module HfsPlusPopulateFragmentation
       end
     rescue Errno::ENOSPC
       FileUtils.rm_f(File.join(root, format("fill/f%04d", count)))
-      "filled with #{count} files"
+      P.observe("filled with #{count} files")
     end
   end
 
@@ -51,7 +51,7 @@ module HfsPlusPopulateFragmentation
     P.step("punch", "fill/f0001") do |root|
       holes = (1...HOLE_FILES).step(2).to_a
       holes.each { File.delete(File.join(root, format("fill/f%04d", _1))) }
-      "deleted #{holes.size} files"
+      P.observe("deleted #{holes.size} files")
     end
   end
 
@@ -70,7 +70,7 @@ module HfsPlusPopulateFragmentation
       File.binwrite(path, "")
       target = name.start_with?("rsrc") ? "#{path}/..namedfork/rsrc" : path
       File.binwrite(target, bytes)
-      "wrote #{Digest::SHA256.hexdigest(bytes)}, reads #{Digest::SHA256.file(target).hexdigest}"
+      P.observe("wrote #{Digest::SHA256.hexdigest(bytes)}, reads #{Digest::SHA256.file(target).hexdigest}")
     end
   end
 end

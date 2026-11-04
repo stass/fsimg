@@ -6,7 +6,7 @@
 # What experiment E4 puts on a mounted volume: hard links made and unmade, a
 # link to a symbolic link, an attempted directory link, and ordinary files
 # whose Finder information carries the codes a link stub carries. Steps that
-# observe something return it as a String; `HfsPlusPopulate.attempt` keeps it.
+# observe something return `HfsPlusPopulate.observe(text)`, which `attempt` keeps.
 #
 #   hl2/{a,b}        one file with two names, in two folders
 #   hl3/{x,y,z}      one file with three names
@@ -35,14 +35,14 @@ module HfsPlusPopulateLinks
        %w[hl2/a hl2/b].each { P.mkdir_p(root, _1) }
        P.write_file(root, "hl2/a/orig", "two names\n")
        File.link(File.join(root, "hl2/a/orig"), File.join(root, "hl2/b/second"))
-       observe_all(root, %w[hl2/a/orig hl2/b/second])
+       P.observe(observe_all(root, %w[hl2/a/orig hl2/b/second]))
      end,
      P.step("link-3", "hl3/x/orig") do |root|
        %w[hl3/x hl3/y hl3/z].each { P.mkdir_p(root, _1) }
        P.write_file(root, "hl3/x/orig", "three names\n")
        File.link(File.join(root, "hl3/x/orig"), File.join(root, "hl3/y/second"))
        File.link(File.join(root, "hl3/x/orig"), File.join(root, "hl3/z/third"))
-       observe_all(root, %w[hl3/x/orig hl3/y/second hl3/z/third])
+       P.observe(observe_all(root, %w[hl3/x/orig hl3/y/second hl3/z/third]))
      end]
   end
 
@@ -63,7 +63,7 @@ module HfsPlusPopulateLinks
       names.drop(1).each { File.link(File.join(root, names.first), File.join(root, _1)) }
       before = observe_all(root, names)
       names.reject { _1 == keep }.each { File.unlink(File.join(root, _1)) }
-      "before:\n#{before}\nafter:\n#{observe_all(root, names)}"
+      P.observe("before:\n#{before}\nafter:\n#{observe_all(root, names)}")
     end
   end
 
@@ -75,11 +75,11 @@ module HfsPlusPopulateLinks
        P.write_file(root, "sl/target", "symlink target\n")
        File.symlink("target", File.join(root, "sl/link1"))
        File.link(File.join(root, "sl/link1"), File.join(root, "sl/follow"))
-       observe_all(root, %w[sl/target sl/link1 sl/follow])
+       P.observe(observe_all(root, %w[sl/target sl/link1 sl/follow]))
      end,
      P.step("symlink-link-nofollow", "sl/nofollow") do |root|
        P.tool("ln", "-P", File.join(root, "sl/link1"), File.join(root, "sl/nofollow"))
-       observe_all(root, %w[sl/link1 sl/nofollow])
+       P.observe(observe_all(root, %w[sl/link1 sl/nofollow]))
      end]
   end
 
@@ -99,7 +99,7 @@ module HfsPlusPopulateLinks
        File.link(File.join(root, "meta/a"), File.join(root, "meta/b"))
        File.chmod(0o600, File.join(root, "meta/b"))
        File.utime(T0, T0, File.join(root, "meta/b"))
-       observe_all(root, %w[meta/a meta/b])
+       P.observe(observe_all(root, %w[meta/a meta/b]))
      end]
   end
 
@@ -109,8 +109,8 @@ module HfsPlusPopulateLinks
       "code-alis-MACS" => %w[alis MACS].push(0x8000) }.map do |name, (type, creator, flags)|
       P.step("finder-codes", name) do |root|
         P.write_file(root, name, "ordinary #{name}\n")
-        P.tool("xattr", "-wx", "com.apple.FinderInfo", finder_info(type, creator, flags), File.join(root, name))
-        "#{P.observe(File.join(root, name))}\ncontent: #{File.read(File.join(root, name)).inspect}"
+        P.tool("xattr", "-wx", "com.apple.FinderInfo", P.finder_info(type, creator, flags), File.join(root, name))
+        P.observe("#{P.lstat_line(File.join(root, name))}\ncontent: #{File.read(File.join(root, name)).inspect}")
       end
     end
   end
@@ -130,14 +130,11 @@ module HfsPlusPopulateLinks
        P.tool("SetFile", "-d", "01/02/2020 03:04:05", root)
        P.write_file(root, "rd/a", "after the root was re-dated\n")
        File.link(File.join(root, "rd/a"), File.join(root, "rd/b"))
-       ["root birth=#{File.stat(root).birthtime.to_i}", observe_all(root, %w[hl2/a/orig hl2/b/second rd/a rd/b])].join("\n")
+       P.observe(["root birth=#{File.stat(root).birthtime.to_i}", observe_all(root, %w[hl2/a/orig hl2/b/second rd/a rd/b])].join("\n"))
      end]
   end
 
   # ---- helpers ----
 
-  def observe_all(root, names) = names.map { P.observe(File.join(root, _1)) }.join("\n")
-
-  # 32 bytes of Finder information: type, creator, flags, then zeros.
-  def finder_info(type, creator, flags) = (type.b + creator.b + [flags].pack("n") + ("\0" * 22).b).unpack1("H*")
+  def observe_all(root, names) = names.map { P.lstat_line(File.join(root, _1)) }.join("\n")
 end

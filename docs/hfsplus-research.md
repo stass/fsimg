@@ -219,18 +219,22 @@ diskimage-class=CRawDiskImage -nomount V`, detached again.
 Further probes of E4 to E6, each a hand-typed observation outside a capture
 directory.
 
-* Look-alike stubs (E4). Copy `h-hfsplus-8388608-e4/image.img` to `V`, read the
-   `createDate` of the root folder (ID 2) and of the private data folder (ID
-   16) from its `fields.json`, and patch ten of the `stubtest-*` files:
-   `ruby tools/hfsplus/patch_record.rb V stubtest-a --type hlnk --creator hfs+
-   --create-date PRIVATE --special 21 --flags 0x22` for `a`, with `--create-date
-   ROOT` for `b`, no `--create-date` for `c`, `--creator 0x00000000` for `d`,
-   `--type 0x00000000` for `e`, no `--flags` for `f`, and `--type fdrp --creator
-   MACS --special 20 --flags 0x22` for `g` (`h` without `--create-date`, `i`
-   without `--flags`, `j` with `--special 5`). Mount `V` writable and run
-   `stat -f 'ino=%i nlink=%l size=%z' stubtest-X; cat stubtest-X` on each.
-   `ROOT` is the date after the profile's `SetFile -d` step; the run shows the
-   private date and the root date both read as links.
+* Look-alike stubs (E4). Read the `createDate` of the root folder (ID 2) and of
+   the private data folder (ID 16) from `h-hfsplus-8388608-e4/fields.json`, and
+   patch ten of the `stubtest-*` files of `h-hfsplus-8388608-e4/image.img`.
+   `patch_record.rb SRC DEST NAME` reads SRC, writes a new file DEST and
+   refuses a DEST that exists, is SRC or lies under `~/hfsplus-captures`, so the
+   ten patches chain: the first reads the capture's image and writes `V.1`, each
+   later one reads the previous copy and writes the next, up to `V.10`. The
+   commands are `ruby tools/hfsplus/patch_record.rb SRC DEST stubtest-a --type
+   hlnk --creator hfs+ --create-date PRIVATE --special 21 --flags 0x22` for `a`,
+   with `--create-date ROOT` for `b`, no `--create-date` for `c`, `--creator
+   0x00000000` for `d`, `--type 0x00000000` for `e`, no `--flags` for `f`, and
+   `--type fdrp --creator MACS --special 20 --flags 0x22` for `g` (`h` without
+   `--create-date`, `i` without `--flags`, `j` with `--special 5`). Mount
+   `V.10` writable and run `stat -f 'ino=%i nlink=%l size=%z' stubtest-X; cat
+   stubtest-X` on each. `ROOT` is the date after the profile's `SetFile -d`
+   step; the run shows the private date and the root date both read as links.
 * Link codes (E4). On a mounted fresh volume run `xattr -wx
    com.apple.FinderInfo
    686c6e6b6866732b000000000000000000000000000000000000000000000000 f`
@@ -813,8 +817,11 @@ were given codes, dates, flags and `special` 21, the indirect node of `hl2`:
 | `hlnk`/`hfs+`, private date, flags `0x0082` (no chain bit) | a link: the chain bit is not part of the file test |
 | `fdrp`/`MACS`, flags `0x0022`, `special` 20 (also with `special` 5, without the chain bit, with another date), private date | ordinary files |
 
-The stub test is type `hlnk`, creator `hfs+` and a `createDate` equal to the
-private data folder's or the root's. After the root's `createDate` was set
+The stub test needs type `hlnk` and creator `hfs+`. Observed accepted:
+`createDate` equal to the private data folder's or the root's. Observed
+refused: the file's own date. Not tried: the volume header's date, and a
+`special` that names no node. The evidence is hand-typed mounts of patched
+copies, not a capture. After the root's `createDate` was set
 earlier (`SetFile -d`), links made earlier still read as links and a new stub
 took the private folder's date, so the dates the test accepts include the
 private folder's and the date given to new stubs is only the private
@@ -855,7 +862,7 @@ volumes OK. The attributes tree of both has node size 8192, `attributes`
 
 | Question | Observation |
 | --- | --- |
-| Inline limit | values of 0, 1, 2, 3, 5, 7, 17 bytes and up to 3802 bytes are `0x10` inline records; 3803 bytes and above are `0x20` fork records. Fork records of 3803 to 4000 bytes take one block, 5000 and 8000 bytes two, 70000 bytes 18 (one extent, `750+18`). No `0x30` record appears: the forks hold at most one extent |
+| Inline limit | values of 0, 1, 2, 3, 5, 7, 17 bytes and up to 3802 bytes (measured at a 16-unit name, 8192-byte nodes) are `0x10` inline records; 3803 bytes and above are `0x20` fork records. Fork records of 3803 to 4000 bytes take one block, 5000 and 8000 bytes two, 70000 bytes 18 (one extent, `750+18`). No `0x30` record appears: the forks hold at most one extent |
 | Name order | names compare as UTF-16 code units, unfolded: `com.fsimg.CASE`, `com.fsimg.Case` and `com.fsimg.case` are three attributes in that order, on HFS Plus and on HFSX alike. A 127-unit name, `a:b/c`, `café` and a supplementary character are stored; a 128-unit name fails with `ENAMETOOLONG` (`Errno 63`, the attribute-names probe) |
 | ACL | `chmod +a` stores `com.apple.system.Security`, an inline record of 68 bytes for one entry and 92 for two, and sets catalog flag `0x0008` with `0x0004` (`0x008E` on the file, `0x008C` on a folder). The value begins `01 2c c1 6d` |
 | Finder information | `xattr -wx com.apple.FinderInfo` creates no attribute record and sets no flag bit (file `0x0082`, folder `0x0080`); `xattr -px` reads the 32 bytes back (`TEXT`, `ttxt`, flags `0x4000` in the file; flags `0x0400` in the folder) |
@@ -868,7 +875,9 @@ Evidence rows. Answered: attribute name comparison (code-unit order, case
 sensitive on both variants); whether flag `0x0004` stays in step (it is cleared
 with the last attribute, so verification may require it equal to "the object
 has a record"); macOS's own attribute names. Largest inline attribute: 3802
-bytes.
+bytes, measured with the 16-unit name `com.fsimg.sz3802` in an attributes tree
+of 8192-byte nodes; whether the limit varies with the name length or the node
+size is not established.
 
 ### E6 Compression
 
@@ -877,13 +886,13 @@ Status: answered.
 Procedure. `capture.rb --populate e6-TOOL` for TOOL `zlib`, `lzvn` and `lzfse`
 (`afsctool -c -T CODEC -s 0 -v`) and `ditto` (`ditto --hfsCompression`), each on
 HFS Plus (`h-hfsplus-8388608-e6-TOOL`) and `lzfse` also on HFSX
-(`h-hfsx-8388608-e6-lzfse`); `e6-sweep` on `h-hfsplus-100663296-e6-sweep` (its
-image removed; the fields remain). Content is deterministic text, random bytes
+(`h-hfsx-8388608-e6-lzfse`); `e6-sweep` on `h-hfsplus-100663296-e6-sweep` (the
+capture keeps fields only). Content is deterministic text, random bytes
 or zeros of 0, 1, 65535, 65536, 65537 and 200000 bytes, text of 131073, 262145,
 393217 and 589825 bytes, and a 196608-byte file whose second 65536-byte chunk is
 random (`mixed`); `afsctool` also runs with `-L` (`forced-*`). Every manifest
 records SHA-256 of the file read through the kernel, which decompresses it, so
-a stage 4 or 5 gate compares an extraction with it. `fields.rb` reads the
+the digest is of the decompressed bytes. `fields.rb` reads the
 `com.apple.decmpfs` attribute and the resource fork from the unmounted image
 (its `compression` section). `fsck_hfs -n` reports every volume OK.
 
@@ -916,12 +925,17 @@ file of 2000 to 16000 bytes (`fit-ditto-*`) uncompressed, and writes zeros of
 65536 bytes inline.
 
 Largest inline size. Every tool writes zeros of 65536 bytes inline (types 3, 7,
-11, 7: payloads of 84, 498, 184 and 498 bytes) and 65537 bytes in the resource
-fork, at 1, 4, 16 MiB too; no inline file is larger than 65536 bytes. By
-payload, `afsctool` stores text inline up to the largest attribute observed,
-3612 bytes for zlib (12000 bytes of text), 3247 for LZFSE (10000), 3293 for
-LZVN (8000), and moves the next size to the resource fork (16000 bytes of text
-zlib, 12000 LZFSE, 10000 LZVN).
+11, 7: attribute sizes of 100, 514, 200 and 514 bytes, payloads of 84, 498, 184
+and 498) and 65537 bytes in the resource fork, at 1, 4, 16 MiB too; no inline
+file is larger than 65536 bytes. Sizes below are whole attribute sizes, the
+16-byte decmpfs header plus the payload. `afsctool` stores text inline up to
+the largest attribute observed, 3612 bytes for zlib (payload 3596, from 12000
+bytes of text), 3247 for LZFSE (3231, from 10000), 3293 for LZVN (3277, from
+8000), and moves the next size tried to the resource fork (16000 bytes of text
+zlib, 12000 LZFSE, 10000 LZVN). All three are below the 3802 bytes of the
+largest inline attribute measured in E5, but the sizes tried are 2000 bytes
+apart and the attribute that would have followed is not observed, so the data
+neither show that the compression limit equals 3802 nor contradict it.
 
 Raw markers. A zlib payload or chunk stored raw begins `ff`: the one-byte files
 (`ff25`, `ff66`, `ff00`), the one-byte last chunk of 65537 (`ff6f`) and the
@@ -950,14 +964,15 @@ the first offset: `afsctool` writes `count + 1` ascending offsets (the first
 `8 * count` bytes (1 chunk: `[8, 19458]`; 2: `[16, 19515, 19528, 0]`; 4: five
 offsets and three zeros, first offset 32; 7: first offset 56; 10: first offset
 80). `ditto` writes no padding: the first offset is `4 * (count + 1)`
-(`[16, 25811, 51642, 51644]` for 3 chunks, 44 for 10). Chunk `i` spans
+(`[16, 25811, 51642, 51644]` for 3 chunks, 44 for 10). For one chunk the two
+rules coincide, a first offset of 8. Chunk `i` spans
 `[offset[i], offset[i + 1])`. LZVN chunks begin with the LZVN opcode bytes
 (`e0`, `ef`) and end with `06`; LZFSE chunks begin `bvx2`, the last short chunk
 `bvx-`.
 
 Evidence rows. Answered: header, types written per tool, raw markers (zlib
 `ff`, LZVN `06`, LZFSE none), type 4, 8 and 12 framings, largest inline size
-(65536 uncompressed; the attribute holds up to the observed 3612 bytes), data
+(65536 uncompressed; the largest attribute observed is 3612 bytes, whole attribute size, for zlib), data
 fork size (0 on every type).
 
 ### E7 Fragmentation
@@ -1031,15 +1046,15 @@ the creating host's byte order (little-endian, `78 4C 4E 4A 78 56 34 12`),
 | Mounted, `sync`, decoded in place (probe) | 512, 17408 | `0x80002000` | One transaction of 4 blocks, 16896 bytes, not yet written back |
 | Cleanly unmounted (`e8-newfs-J-mounted`) | 63488, 63488 | `0x80002100` | `lastMountedVersion` `HFSJ`, `writeCount` 6 |
 | `hdiutil detach -force` while writing | equal in 20 of 20 trials (for example 316928), none differ | `0x80002100` in 20 of 20 | A forced detach unmounts cleanly and closes the journal |
-| Backing image copied while writing | differ in 10 of 20 trials: none of 8 at 0.1 and 0.3 seconds (still 512, 512), 2 of 4 at 0.6, 4 of 4 at 1.5 and 3.0 | `0x80002000` | Stale (below) |
-| The same image mounted again | equal in all 40 remounts (`start` = `end` = 510976 in `e8-remounted`) | `0x80002100` | Replay done |
+| Backing image copied while writing (a copy torn during writes) | differ in 10 of 20 trials: none of 8 at 0.1 and 0.3 seconds (still 512, 512), 2 of 4 at 0.6, 4 of 4 at 1.5 and 3.0 | `0x80002000` | Stale (below) |
+| The same image mounted again | equal after all 40 remounts (`start` = `end` = 510976 in `e8-remounted`); 10 of the 40 began with transactions pending, the other 30 began clean | `0x80002100` | Replay, seen for those 10 only, through a macOS mount |
 
 Rule that separates the states. The journal is a circular log whose header
 `start` and `end` are byte offsets into the journal, each at least `jhdr_size`
 (512) and below `size`. `start` = `end` means no transaction is pending, at any
 position: the clean volumes above sit at 63488, 113664 (the NPS `hfsjtest1`
 specimens), 159744, 316928 and so on. `start` is not equal to `end` when
-transactions are pending, and `start` may be greater than `end` once the log has
+transactions are pending (this rule is observed on these images only), and `start` may be greater than `end` once the log has
 wrapped (207872 and 144384, 334336 and 270848 in `trials.jsonl`). A volume never
 mounted since `newfs_hfs -J` has no header at all (info flags bit 2 set, header
 zero) and holds no transactions.
@@ -1086,8 +1101,11 @@ Evidence rows answered: journal info block flags from `newfs_hfs -J` (`0x5`) and
 journal files' presence and forks, the state after an interrupted session, and the
 files after journaling is disabled. Not established: a pending transaction from
 `hdiutil detach -force` (20 of 20 force trials left none), so only the image-copy
-procedure, which reproduces what a crash leaves, produces `start` not equal to
-`end` natively; its yield depends on timing (0 of 8 under 0.6 seconds, 10 of 12 at
+procedure produced `start` not equal to `end` natively. A copy taken while the
+writer runs shows what a copy torn during writes looks like: it can be torn
+between the journal header, the journal body and the volume header, so it is not
+evidence of what a crash leaves. Replay was seen only through a macOS mount.
+The copy procedure's yield depends on timing (0 of 8 under 0.6 seconds, 10 of 12 at
 0.6 seconds and later, and the four 3.0-second trials are identical copies of one
 state).
 
@@ -1105,9 +1123,8 @@ seventh name carries one to six extra characters), `e9-delete` (every third file
 every directory, all of `d07` and the files 500 to 1499 of `d20`: 35350 files),
 `e9-thin` (every file whose number is not a multiple of 50) and `e9-sparse` (every
 file whose number is not a multiple of 997). Each stage's `fsck_hfs -n` reports the
-volume OK. Creating 3000 empty files took 0.52 seconds in a probe (Throwaway probes), and
-the 100000-file capture, formatting and checks included, ran from 22:50 to 22:51
-by its file times, so the files are made with plain `File.write` calls. The images and manifests are kept gzipped (`image.img.gz`,
+volume OK. Creating 3000 empty files took 0.52 seconds in a probe (Throwaway probes), so
+the files are made with plain `File.write` calls. The images and manifests are kept gzipped (`image.img.gz`,
 `manifest.json.gz`, about 6 MiB per capture); `fields-index.json` beside each
 `fields.json` is `fields.rb --json --index --records 5` of the image.
 
@@ -1119,7 +1136,13 @@ by its file times, so the files are made with plain `File.write` calls. The imag
 | `e9-sparse` | 13 | 134 | 56 | 3 | 52 | 52 (1 to 2) |
 
 Catalog records are a file or folder record and its thread record each (200120 =
-2 * (100006 + 54)). The catalog fork is 314572800 bytes in one extent
+2 * (100006 + 54)). The file counts do not follow from the deletions alone:
+`e9-delete` deleted 35350 files, and 100006 - 35350 = 64656, but its volume
+header says 64659. The two manifests list the visible trees: `e9-delete` has
+two `.fseventsd` log files that `e9-create` lacks (`00000000c752d940`,
+`00000000c752d941`), which accounts for two of the three, as macOS wrote them
+between the mounts. The third file is in neither manifest, and its origin is
+not established. The catalog fork is 314572800 bytes in one extent
 (`15366+76800`), 76800 nodes, and `fork_size_matches_nodes` is true.
 
 Map nodes. The catalog's header node holds 3840 map bytes (`4096 - 256`, 30720
@@ -1130,8 +1153,8 @@ offset 14, so its record offsets are `[14, 4090]` and two bytes lie between the 
 of the record and the 4-byte offset table at 4092. The three maps cover 95936 bits
 (`30720 + 2 * 32608`); bits at and beyond 76800 are zero; the map nodes themselves
 are marked in use (the formatted volume has 4 bits set and the first clear bit is 4:
-nodes 0 to 3). The record length was
-observed at node size 4096 only: `-n e=1024 -I e=1700` and `-n e=2048 -I e=3400`
+nodes 0 to 3). The record length `M - 20` was
+observed at node size `M` = 4096 only: `-n e=1024 -I e=1700` and `-n e=2048 -I e=3400`
 leave the extents tree at 512 and 256 nodes, and an 8192-byte catalog tree needs
 more than 63488 nodes (about 500 MiB) to have map nodes, which was not tried.
 
@@ -1140,8 +1163,10 @@ compared with the first key of its child (8203, 7960, 2283 and 56 leaf children
 at level 2 and the level 2 nodes under each root): an index record's key equals the
 first key of the child it names in every stage (`key_mismatches` 0) and the child's
 height is one less. After the deletions this is not trivial: 2343 of the 7960 level-2
-keys of `e9-delete` are not keys of `e9-create`, so macOS rewrites an index key when
-its child's first record is deleted.
+keys of `e9-delete` are not keys of `e9-create`. From these set differences it is
+inferred, not observed directly, that macOS rewrites an index key when its
+child's first record is deleted: no capture holds an index key before and after a
+single deletion.
 
 One-record non-root index nodes. `e9-sparse` has 48 of them (nodes 134, 266, 397,
 527, 788, ...) among 52 level-2 nodes, below a root of 52 records, and `fsck_hfs -n`
@@ -1225,12 +1250,15 @@ whose only record is the key (file ID 5, data fork, start block 0) with the exte
 bitmap sets every block. `drAtrb` `0x8300` has bits 15, 9 and 8 set. The outer
 volume holds five files (`drNmFls`) that the decoder does not list.
 
-Journaled wrapper. `mkfs.hfsplus -w -J` writes the journal info block's offset
-(12288) relative to the embedded volume, with flags `0x5` and no header. After macOS
-mounts the volume (it does mount the wrapped volume, writable and journaled) the
-offset reads 57344 = 45056 + 12288 and the journal header (`78 4C 4E 4A`) is at image
-byte 57344: the offset then counts from the start of the image, not from the
-embedded volume. `fields.rb` reports `offset_counts_from: image` for that case.
+Journaled wrapper. One `mkfs.hfsplus -w -J` image of 16 MiB
+(`h-hfsplus-16777216-e11-mkfs-w-J`) has the journal info block's offset (12288)
+relative to the embedded volume, with flags `0x5` and no header. After one macOS
+mount (it does mount the wrapped volume, writable and journaled) the offset
+reads 57344 = 45056 + 12288 and the journal header (`78 4C 4E 4A`) is at image
+byte 57344: in this observation the offset counts from the start of the image,
+not from the embedded volume. This is one observation, not a rule; whether a
+native wrapper behaves the same is not established. `fields.rb` reports
+`offset_counts_from: image` when the header is found only that way.
 
 Evidence row answered: wrapper layout. The macOS side of a wrapper cannot be made
 natively here (no tool formats one), so wrapped volumes come from `mkfs.hfsplus -w`
