@@ -35,7 +35,7 @@ static void prose(fsimg_cli_display_t *, const char *);
 static void byte_size(fsimg_cli_display_t *, uint64_t);
 static void usage(fsimg_cli_display_t *, bool);
 static void help(fsimg_cli_display_t *);
-static void loss_notice(fsimg_cli_display_t *);
+static void completion_notices(fsimg_cli_display_t *);
 static void salvage_example(fsimg_cli_display_t *, const unsigned char *);
 static void salvage_notice(fsimg_cli_display_t *);
 static void metadata_fields(fsimg_cli_display_t *, uint64_t);
@@ -545,7 +545,7 @@ entry_kinds(fsimg_cli_display_t *display, uint64_t kinds)
 }
 
 static void
-loss_notice(fsimg_cli_display_t *display)
+completion_notices(fsimg_cli_display_t *display)
 {
 	uint64_t losses = display->result->metadata_losses;
 	uint64_t skipped = display->result->skipped_entries;
@@ -2001,7 +2001,7 @@ failure(fsimg_cli_display_t *display)
 		return;
 	}
 	if (error->status == FSIMG_EPARTIAL) {
-		loss_notice(display);
+		completion_notices(display);
 		salvage_notice(display);
 	}
 	append(display, "fsimg: ");
@@ -2391,7 +2391,7 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 		if (options->command == FSIMG_CLI_PROCESS && !options->json &&
 		    display->phase == FSIMG_CLI_OUTPUT_RECORDS) {
 			display->phase = FSIMG_CLI_OUTPUT_SUMMARY;
-			loss_notice(display);
+			completion_notices(display);
 			if (display->used != 0)
 				return (finish_span(display, true, text, error));
 		}

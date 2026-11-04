@@ -475,7 +475,9 @@ enter_leaf(hfsplus_cursor_t *cursor, uint32_t number, fsimg_error_t *error)
 {
 	fsimg_status_t status;
 
-	/* A chain entering more leaves than the slice can hold is a loop. */
+	/* A chain entering more leaves than the tree declares (totalNodes) or
+	 * the slice holds, whichever is smaller, is a loop.
+	 */
 	if (cursor->leaves >= cursor->tree->max_leaves)
 		return (hfsplus_corrupt(error, "HFS Plus sibling chain loops"));
 	status = hfsplus_node_read(cursor->tree, number, cursor->buffer,

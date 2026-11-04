@@ -123,7 +123,9 @@ ceil(1536 / B)` and `t` the number of blocks below `N` that overlap
 occupy, is `[r * B, (N - t) * B)`. It is the domain every
 [extent index](design-content.md#extent-index) of the reader declares. For
 `B = 4096` and `V = N * B`, `r = 1` and `t = 1`: the first and last blocks
-are reserved. [TN]
+are reserved. A truncated volume has lost its tail, so the alternate header
+is not there to protect: it reserves no tail, `t = 0`, and its content
+domain ends at `N * B`. [TN]
 
 ### Probe identity
 

@@ -121,6 +121,7 @@ derive_geometry(fsimg_reader_t *reader, uint64_t slice_bytes,
 	hfsplus_header_t *header = &hfsplus->header;
 	hfsplus_geometry_t *g = &hfsplus->geometry;
 	uint64_t allocation_bytes, tail_block, volume_bytes;
+	bool truncated;
 	uint32_t block_size, blocks, first, end;
 	fsimg_status_t status;
 
@@ -132,8 +133,8 @@ derive_geometry(fsimg_reader_t *reader, uint64_t slice_bytes,
 		return (status);
 	/* Both operands are 32 bits wide, so the product cannot overflow. */
 	allocation_bytes = (uint64_t)header->total_blocks * header->block_size;
-	volume_bytes = allocation_bytes > slice_bytes ? allocation_bytes :
-	    slice_bytes;
+	truncated = allocation_bytes > slice_bytes;
+	volume_bytes = truncated ? allocation_bytes : slice_bytes;
 	/* N * B is whole sectors, so this fires only on a slice reaching it. */
 	if (volume_bytes % 512 != 0)
 		return (hfsplus_corrupt(error,
@@ -152,7 +153,7 @@ derive_geometry(fsimg_reader_t *reader, uint64_t slice_bytes,
 	blocks = header->total_blocks;
 	first = (uint32_t)((RESERVED_HEAD_BYTES + (uint64_t)block_size - 1) /
 	    block_size);
-	if (allocation_bytes > slice_bytes)
+	if (truncated)
 		end = blocks;
 	else {
 		tail_block = (volume_bytes - RESERVED_TAIL_BYTES) / block_size;

@@ -486,7 +486,7 @@ static const hfsplus_owned_name_t hfsplus_owned_names[HFSPLUS_OWNED_COUNT]
  */
 typedef struct hfsplus_geometry {
 	uint64_t	 volume_bytes;	/* V, past the slice when it is truncated */
-	uint64_t	 slice_bytes;	/* what the input holds */
+	uint64_t	 slice_bytes;	/* input length at open; only caps leaves */
 	uint32_t	 block_size;	/* B */
 	uint32_t	 blocks;	/* N */
 	uint32_t	 first_block;	/* r */

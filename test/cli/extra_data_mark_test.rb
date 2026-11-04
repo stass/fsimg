@@ -6,9 +6,9 @@ class CliTest < Minitest::Test
   EXTRA_DATA_PATHS = %w[/dir /dir/clean /dir/inner /forked /plain /tagged].freeze
   EXTRA_DATA_MARKED_PATHS = %w[/dir/inner /forked /tagged].freeze
   EXTRA_DATA_SINGULAR_NOTICE =
-    "fsimg: note: 1 entry carries extra data not listed; t -v marks it\n".freeze
+    "fsimg: note: 1 entry carries extra data not listed; t -v marks it\n"
   EXTRA_DATA_PLURAL_NOTICE =
-    "fsimg: note: 3 entries carry extra data not listed; t -v marks them\n".freeze
+    "fsimg: note: 3 entries carry extra data not listed; t -v marks them\n"
 
   def test_extra_data_verbose_listing_marks_only_entries_with_forks_or_attributes
     extra_data_image
@@ -23,7 +23,6 @@ class CliTest < Minitest::Test
       # Stored zero dates denote the HFS epoch, 1904-01-01 UTC.
       expected = "#{mode}#{marked ? '@' : ' '}#{size} 1904-01-01 00:00:00 \"#{path}\"\n"
       assert_equal(expected, line, path)
-      assert_equal(marked ? "@" : " ", line.byteslice(10, 1), path)
     end
     assert_empty(extra_data_stderr(result))
   end
@@ -33,8 +32,6 @@ class CliTest < Minitest::Test
     result = invoke(arguments: %w[t -f marks.img])
 
     assert_equal(extra_data_names(EXTRA_DATA_PATHS), result.stdout)
-    refute_includes(result.stdout, "@")
-    assert_match(/\Afsimg: note: \d+ entr(y|ies) carr(y|ies)/, extra_data_stderr(result))
     assert_equal(EXTRA_DATA_PLURAL_NOTICE, extra_data_stderr(result))
   end
 
@@ -62,12 +59,36 @@ class CliTest < Minitest::Test
     assert_equal(EXTRA_DATA_SINGULAR_NOTICE, extra_data_stderr(result))
   end
 
-  def test_extra_data_deep_member_listing_includes_ancestor_without_counting_it
+  def test_extra_data_deep_member_listing_includes_unmarked_ancestor_and_reports_marked_file
     extra_data_image
     result = invoke(arguments: %w[t -f marks.img /dir/inner])
 
     assert_equal(extra_data_names(%w[/dir /dir/inner]), result.stdout)
     assert_equal(EXTRA_DATA_SINGULAR_NOTICE, extra_data_stderr(result))
+  end
+
+  def test_extra_data_failed_walk_prints_no_completion_notice
+    extra_data_image(option: "--split-catalog")
+    path = @root / "marks.img"
+    File.truncate(path, path.size / 2)
+
+    result = invoke(arguments: %w[t -f marks.img], expected: 1)
+
+    # Entries must have been delivered before the missing leaf ends the walk.
+    assert_includes(result.stdout, "\"/dir\"\n")
+    assert_includes(result.stderr, "truncated")
+    [result.stdout, result.stderr].each do |output|
+      refute_includes(output, "extra data not listed")
+      refute_includes(output, "fsimg: note:")
+    end
+  end
+
+  def test_extra_data_symlink_verbose_listing_marks_mode_and_name
+    extra_data_image(option: "--symlink")
+    result = invoke(arguments: %w[t -v -f marks.img /l])
+
+    assert_equal("lrwxrwxrwx@           5 1904-01-01 00:00:00 \"/l\"@\n", result.stdout)
+    assert_empty(extra_data_stderr(result))
   end
 
   def test_extra_data_double_verbose_listing_has_no_notice
@@ -104,7 +125,6 @@ class CliTest < Minitest::Test
     # The FAT fixture has six known bytes and the reproducible 1980 epoch;
     # FAT does not store POSIX modes.
     assert_equal("-?????????            6 1980-01-01 00:00:00 \"/HELLO.TXT\"\n", verbose.stdout)
-    assert_equal(" ", verbose.stdout.byteslice(10, 1))
     assert_empty(extra_data_stderr(verbose))
     assert_equal("\"/HELLO.TXT\"\n", plain.stdout)
     assert_empty(extra_data_stderr(plain))
@@ -116,9 +136,10 @@ class CliTest < Minitest::Test
   def extra_data_stderr(result) =
     result.stderr.sub(/\Afsimg: warning: OS sandbox unavailable; continuing without confinement\n/n, "".b)
 
-  def extra_data_image
+  def extra_data_image(option: nil)
     helper = @executable.dirname / "hfsplus-marks"
-    result = run_process([helper, @root / "marks.img"], cwd: @root)
+    arguments = [helper, @root / "marks.img", *Array(option)]
+    result = run_process(arguments, cwd: @root)
     assert_equal(0, result.status, result.stderr)
     assert_empty(result.stdout)
     assert_empty(result.stderr)

@@ -29,6 +29,8 @@ enum {
 	VOLUME_ATTRIBUTES = VOLUME_HEADER + 4,
 	VOLUME_MOUNTED = VOLUME_HEADER + 8,
 	VOLUME_JIB = VOLUME_HEADER + 12,
+	VOLUME_BLOCK_SIZE = VOLUME_HEADER + 40,
+	VOLUME_TOTAL_BLOCKS = VOLUME_HEADER + 44,
 	VOLUME_FREE_BLOCKS = VOLUME_HEADER + 48,
 	VOLUME_NEXT_ID = VOLUME_HEADER + 64,
 	NODE_DESCRIPTOR = 14,
@@ -5096,6 +5098,66 @@ check_truncated_file_extract(const gen_image_t *slice)
 }
 
 static void
+test_truncated_unused_tail_extract(void)
+{
+	static const unsigned char payload[] = "surviving extracted bytes";
+	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+	    .type = 2, .data = payload, .data_size = sizeof(payload) - 1 };
+	gen_plan_t plan;
+	gen_image_t image, slice;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	fsimg_extract_options_t options;
+	fsimg_error_t error = { 0 };
+	unsigned char bytes[sizeof(payload)];
+	char temporary[] = "hfsplus-surviving-XXXXXX";
+	size_t count = 0;
+	int parent, root, fd;
+
+	gen_plan_init(&plan);
+	plan.objects = &object;
+	plan.object_count = 1;
+	gen_build(&plan, &image);
+	/* The generator places payload and metadata before this unused tail. */
+	slice = image;
+	slice.length /= 2;
+	CHECK(mkdtemp(temporary) != NULL);
+	parent = open(temporary, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(parent != -1);
+	reader = public_reader(&f, &slice);
+	if (reader != NULL) {
+		fsimg_extract_options_init(&options);
+		expect_status("extract with only unused tail missing",
+		    fsimg_extract_at(reader, parent, "out", &options, &error),
+		    FSIMG_OK, &error);
+		root = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+		CHECK(root != -1);
+		fd = openat(root, "a", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+		CHECK(fd != -1);
+		while (count < sizeof(bytes)) {
+			ssize_t got = read(fd, bytes + count, sizeof(bytes) - count);
+
+			CHECK(got >= 0);
+			if (got == 0)
+				break;
+			count += (size_t)got;
+		}
+		expect_true("truncated volume extracts exact surviving bytes",
+		    count == sizeof(payload) - 1 &&
+		    bcmp(bytes, payload, sizeof(payload) - 1) == 0);
+		CHECK(close(fd) == 0);
+		CHECK(unlinkat(root, "a", 0) == 0);
+		CHECK(close(root) == 0);
+		CHECK(unlinkat(parent, "out", AT_REMOVEDIR) == 0);
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(temporary) == 0);
+	gen_free(&image);
+}
+
+static void
 test_truncated_file(void)
 {
 	static const unsigned char payload[] = "file beyond the cut";
@@ -5242,9 +5304,7 @@ test_truncated_largest_volume(void)
 	    .type = 2, .data = payload, .data_size = sizeof(payload) - 1 };
 	gen_plan_t plan;
 	gen_image_t image, slice;
-	fixture_t f;
-	fsimg_stats_t intact, truncated, stats;
-	fsimg_error_t error = { 0 };
+	fsimg_stats_t intact, truncated;
 	uint64_t product;
 	uint32_t used;
 
@@ -5256,7 +5316,7 @@ test_truncated_largest_volume(void)
 	    image.length, payload, sizeof(payload) - 1);
 	used = plan.total_blocks -
 	    (uint32_t)gen_load(image.bytes + VOLUME_FREE_BLOCKS, 4);
-	gen_store(image.bytes + VOLUME_HEADER + 44, UINT32_MAX, 4);
+	gen_store(image.bytes + VOLUME_TOTAL_BLOCKS, UINT32_MAX, 4);
 	gen_store(image.bytes + VOLUME_FREE_BLOCKS, UINT32_MAX - used, 4);
 	slice = image;
 	slice.length /= 2;
@@ -5267,21 +5327,42 @@ test_truncated_largest_volume(void)
 	    truncated.memory_peak == intact.memory_peak &&
 	    truncated.scratch_peak == intact.scratch_peak);
 
-	gen_store(image.bytes + VOLUME_HEADER + 40, UINT32_C(0x80000000), 4);
-	product = (uint64_t)UINT32_MAX * UINT32_C(0x80000000);
-	expect_true("largest legal geometry product is exact",
-	    product == UINT64_C(0x7fffffff80000000));
+	gen_free(&image);
+}
+
+static void
+test_truncated_largest_block_size(void)
+{
+	gen_plan_t plan;
+	gen_image_t image, slice;
+	fixture_t f;
+	fsimg_stats_t intact, truncated;
+	fsimg_error_t error = { 0 };
+
+	gen_plan_init(&plan);
+	gen_build(&plan, &image);
+	fixture_init(&f, &image, 0, 10000);
+	expect_status("intact block size resource baseline",
+	    fixture_open(&f, -1, false, &error), FSIMG_OK, &error);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &intact, NULL) == FSIMG_OK);
+	fixture_close(&f);
+
+	/* Keep this fixture's own block count and free count. */
+	gen_store(image.bytes + VOLUME_BLOCK_SIZE, UINT32_C(0x80000000), 4);
+	slice = image;
 	slice.length = 4096;
-	expect_status("largest encoded geometry probe", image_probe(&slice),
+	expect_status("largest block size probe", image_probe(&slice),
 	    FSIMG_OK, NULL);
 	fixture_init(&f, &slice, 0, 10000);
 	expect_status("largest block size tree read exceeds slice",
 	    fixture_open(&f, -1, false, &error), FSIMG_ECORRUPT, &error);
 	expect_true("largest block size tree read names truncation",
 	    strstr(error.message, "truncated") != NULL);
-	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
-	expect_true("largest encoded geometry charges no scratch",
-	    stats.scratch_peak == 0);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &truncated, NULL) == FSIMG_OK);
+	expect_true("largest block size stays within intact memory bound",
+	    truncated.memory_peak <= intact.memory_peak);
+	expect_true("largest block size charges no scratch",
+	    truncated.scratch_peak == 0);
 	fixture_close(&f);
 	gen_free(&image);
 }
@@ -5293,6 +5374,7 @@ test_truncated_sibling_loop(void)
 	gen_image_t image;
 	fixture_t f;
 	hfsplus_cursor_t cursor;
+	fsimg_stats_t intact, truncated;
 	fsimg_error_t error = { 0 };
 	fsimg_status_t status;
 	unsigned char *fork, *header;
@@ -5301,8 +5383,22 @@ test_truncated_sibling_loop(void)
 
 	gen_plan_init(&plan);
 	gen_build(&plan, &image);
+	fixture_init(&f, &image, 0, 100000);
+	status = fixture_open(&f, -1, false, &error);
+	expect_status("intact sibling resource baseline", status, FSIMG_OK,
+	    &error);
+	if (status == FSIMG_OK) {
+		fsimg_hfsplus_reader_t *state = f.reader.driver;
+		hfsplus_tree_t *tree = &state->catalog;
+
+		expect_true("intact tree caps leaves at total nodes",
+		    tree->max_leaves == tree->header.total_nodes);
+	}
+	CHECK(fsimg_ctx_get_stats(f.ctx, &intact, NULL) == FSIMG_OK);
+	fixture_close(&f);
 	image.length /= 2;
-	gen_store(image.bytes + VOLUME_HEADER + 44, 2 * nodes, 4);
+
+	gen_store(image.bytes + VOLUME_TOTAL_BLOCKS, 2 * nodes, 4);
 	gen_store(image.bytes + VOLUME_FREE_BLOCKS, 0, 4);
 	fork = image.bytes + VOLUME_HEADER + GEN_CATALOG_FORK;
 	gen_store(fork, (uint64_t)nodes * plan.block_size, 8);
@@ -5326,6 +5422,8 @@ test_truncated_sibling_loop(void)
 		fsimg_hfsplus_reader_t *state = f.reader.driver;
 		hfsplus_tree_t *tree = &state->catalog;
 
+		expect_true("truncated tree caps leaves at slice node count",
+		    tree->max_leaves == image.length / tree->header.node_size);
 		hfsplus_cursor_init(&cursor, tree, tree->search_node);
 		status = hfsplus_cursor_seek(&cursor,
 		    image.trees[GEN_CATALOG].first_leaf, 0, &error);
@@ -5338,8 +5436,11 @@ test_truncated_sibling_loop(void)
 		expect_true("truncated sibling loop names looping chain",
 		    strstr(error.message, "HFS Plus sibling chain loops") != NULL);
 		expect_true("truncated sibling loop bounds entered leaves",
-		    cursor.leaves <= image.length / tree->header.node_size);
+		    cursor.leaves == tree->max_leaves);
 	}
+	CHECK(fsimg_ctx_get_stats(f.ctx, &truncated, NULL) == FSIMG_OK);
+	expect_true("inflated total nodes stays within intact memory bound",
+	    truncated.memory_peak <= intact.memory_peak);
 	fixture_close(&f);
 	gen_free(&image);
 }
@@ -5676,9 +5777,11 @@ main(int argc, char **argv)
 	test_names_listing();
 	test_identity_geometry();
 	test_truncated_volume();
+	test_truncated_unused_tail_extract();
 	test_truncated_file();
 	test_truncated_metadata();
 	test_truncated_largest_volume();
+	test_truncated_largest_block_size();
 	test_truncated_last_block();
 	test_truncated_sibling_loop();
 	test_truncated_catalog_leaf();
