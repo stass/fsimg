@@ -61,7 +61,8 @@ typedef enum fsimg_status {
 	FSIMG_ECANCELLED = -10,
 	FSIMG_ESOURCE_CHANGED = -11,
 	FSIMG_EEXISTS = -12,
-	FSIMG_EDURABILITY = -13
+	FSIMG_EDURABILITY = -13,
+	FSIMG_EPARTIAL = -14
 } fsimg_status_t;
 ```
 
@@ -70,6 +71,8 @@ corrupt recognized format are distinct. Unsupported on-disk features are not
 silently treated as corrupt or ignored. `FSIMG_ELIMIT` identifies a configured
 budget; `FSIMG_ENOMEM` identifies allocator failure despite available budget.
 OS ENOSPC and descriptor failures retain their original OS code in `FSIMG_EIO`.
+`FSIMG_EPARTIAL` means a salvage extraction finished its walk after noticing a
+loss; only that operation returns it.
 
 Every fallible operation returns a status and accepts an optional
 `fsimg_error_t *`. Errors have fixed-size storage: status, OS error, operation
@@ -110,7 +113,7 @@ their output's descriptors travel in the sink.
 | Scratch directory descriptor | Authorized parent for private metadata scratch; `-1` disables spill |
 | Progress callback and argument | Receives bounded counters and phase, never an accumulated event list |
 | Cancellation callback and argument | Polled at each batch and external-sort pass; true requests cancellation |
-| Loss-report callback and argument | Receives explicit optional-metadata losses with a rendered, never truncated path; counts remain available when detailed reporting is capped |
+| Loss-report callback and argument | Receives explicit optional-metadata losses, and the salvage losses of the [salvage design](design-salvage.md#results-and-reporting), with a rendered, never truncated path; counts remain available when detailed reporting is capped |
 | Entry callback and argument | Receives each entry the writer admits to its plan or the extractor finishes, borrowed for the call; never an accumulated list |
 
 ```c
@@ -912,8 +915,8 @@ The CLI's error frame carries the path in a field of the same 256 bytes, so
 it transports the rendered path and the flag unchanged. The statistics'
 `skipped_entries` counts entries of unsupported kinds the extractor skipped
 on request, and `omitted_entries` the omitted subtree roots the walker
-passed; both are cumulative over the context, and each operation's result
-reports its own count.
+passed; `salvage_losses` counts the losses salvage extraction noticed. Each is
+cumulative over the context, and each operation's result reports its own count.
 Cumulative I/O statistics saturate at `UINT64_MAX`; live-resource counters are
 checked before reservation and retain their exact value on failure. Allocation
 accounting includes the context and alignment-preserving allocation headers.

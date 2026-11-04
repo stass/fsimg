@@ -89,6 +89,7 @@ struct fsimg_directory_build {
 	uint64_t	 base;		/* offset of the directory's first record */
 	size_t		 path_length;
 	uint32_t	 level;
+	bool		 rejected;	/* salvage steps over the failure */
 };
 
 static fsimg_status_t classify(const fsimg_reader_t *, const char *, size_t,
@@ -106,6 +107,10 @@ static fsimg_status_t ambiguity_error(fsimg_directory_build_t *, uint64_t,
     uint64_t, fsimg_error_t *);
 static fsimg_status_t validate_namespace(fsimg_directory_build_t *,
     fsimg_error_t *);
+static bool decode_rejected(const fsimg_reader_t *, const fsimg_error_t *,
+    fsimg_status_t);
+static fsimg_status_t build_listing(fsimg_directory_build_t *, fsimg_error_t *);
+static void report_skipped_listing(fsimg_reader_t *, uint32_t, size_t);
 static fsimg_status_t prepare_level(fsimg_reader_t *, uint32_t, size_t, bool,
     bool, fsimg_error_t *);
 static fsimg_status_t walk_start(fsimg_reader_t *, fsimg_error_t *);
@@ -379,6 +384,10 @@ ambiguity_error(fsimg_directory_build_t *build, uint64_t first,
 	(void)snprintf(message, sizeof(message),
 	    "%s: collides with entry %" PRIu64 " of its directory",
 	    reader->ops->ambiguous, position);
+	/* The one failure of validation that is the image's: every other comes
+	 * from scratch storage or from the records it returned.
+	 */
+	build->rejected = reader->salvage.enabled;
 	status = corrupt(error, message);
 	name_walker_path(reader, error);
 	return (status);
@@ -434,12 +443,76 @@ validate_namespace(fsimg_directory_build_t *build, fsimg_error_t *error)
 	return (status);
 }
 
+/* Whether salvage steps over this failure of a driver callback: the driver's
+ * decoder rejecting the image. The operation an error names tells that apart
+ * from everything else the callback can reach: a decoder and the image read
+ * funnel report FSIMG_OP_READER, while scratch storage, including the extent
+ * index's own checks, host I/O and resource admission report their own
+ * operations, even for FSIMG_ECORRUPT. Under FSIMG_OP_READER, the other statuses
+ * are changed input and broken driver contracts. Anything not named here is
+ * terminal. A driver's own check of a prepared record reports like its decoder
+ * and is stepped over too, since the two cannot be told apart. Without salvage
+ * failure may be NULL, and is not read.
+ */
+static bool
+decode_rejected(const fsimg_reader_t *reader, const fsimg_error_t *failure,
+    fsimg_status_t status)
+{
+	return (reader->salvage.enabled && failure->status == status &&
+	    failure->operation == FSIMG_OP_READER &&
+	    (status == FSIMG_ECORRUPT || status == FSIMG_EUNSUPPORTED));
+}
+
+/* Have the driver admit the directory's children and validate their namespace.
+ * The keys stay on build for the caller to release.
+ */
+static fsimg_status_t
+build_listing(fsimg_directory_build_t *build, fsimg_error_t *failure)
+{
+	fsimg_reader_t *reader = build->reader;
+	fsimg_status_t status;
+
+	status = fsimg_stream_new(&reader->session, KEY_RECORD_BYTES, &build->keys,
+	    failure);
+	if (status != FSIMG_OK)
+		return (status);
+	status = reader->ops->prepare(reader, build, failure);
+	if (status != FSIMG_OK) {
+		build->rejected = decode_rejected(reader, failure, status);
+		return (status);
+	}
+	return (validate_namespace(build, failure));
+}
+
+/* Report the listing of the directory at level as lost. Naming a collision
+ * may have written a child's name into reader->path past the directory's own.
+ */
+static void
+report_skipped_listing(fsimg_reader_t *reader, uint32_t level,
+    size_t path_length)
+{
+	if (level == 0) {
+		fsimg_reader_salvage_loss(reader, "/", NULL,
+		    FSIMG_LOSS_DIRECTORY);
+		return;
+	}
+	reader->path[path_length] = '\0';
+	fsimg_reader_salvage_loss(reader, reader->path, reader->walk->omitted,
+	    FSIMG_LOSS_DIRECTORY);
+}
+
 /* Prepare the directory at level: the root, or the current entry's
  * directory, which is hidden when it or an ancestor is omitted, and in
  * scope when its omitted children are counted. Its records
  * are stacked on the walker stream and its keys go to a stream of their
- * own, released once the namespace is validated. The level becomes visible
- * only after validation succeeds.
+ * own, released once the namespace is validated. A level with records becomes
+ * visible only after validation succeeds.
+ *
+ * Under salvage a listing the decoder or namespace validation rejects is
+ * reported and published as an empty level, so the next advance finds it
+ * exhausted and resumes the parent, or ends the walk at the root. Such a
+ * failure never reaches the caller, so salvage collects each failure in detail
+ * and hands on only a terminal one.
  */
 static fsimg_status_t
 prepare_level(fsimg_reader_t *reader, uint32_t level, size_t path_length,
@@ -448,24 +521,29 @@ prepare_level(fsimg_reader_t *reader, uint32_t level, size_t path_length,
 	fsimg_walk_t *walk = reader->walk;
 	fsimg_directory_build_t build;
 	fsimg_stream_mark_t base;
+	fsimg_error_t detail, *failure;
 	fsimg_status_t status;
 
+	fsimg_error_clear(&detail);
+	failure = reader->salvage.enabled ? &detail : error;
 	base = fsimg_stream_mark(walk->records);
 	build = (fsimg_directory_build_t){ .reader = reader, .walk = walk,
 	    .base = base.offset, .path_length = path_length, .level = level };
-	status = fsimg_stream_new(&reader->session, KEY_RECORD_BYTES, &build.keys,
-	    error);
-	if (status == FSIMG_OK)
-		status = reader->ops->prepare(reader, &build, error);
-	if (status == FSIMG_OK)
-		status = validate_namespace(&build, error);
+	status = build_listing(&build, failure);
 	fsimg_stream_free(build.keys);
+	if (build.rejected) {
+		/* A rewind that fails here leaves records behind: terminal. */
+		status = fsimg_stream_rewind(walk->records, base, failure);
+		if (status == FSIMG_OK)
+			report_skipped_listing(reader, level, path_length);
+	}
 	if (status != FSIMG_OK) {
 		/* A partial directory leaves nothing on the stack. The caller also
-		 * poisons the walker, so this rewind cannot fail in a way that
-		 * matters: base is a mark of this unsealed stream.
+		 * poisons the walker, so this rewind's own failure does not matter.
 		 */
 		(void)fsimg_stream_rewind(walk->records, base, NULL);
+		if (reader->salvage.enabled && error != NULL)
+			*error = detail;
 		return (status);
 	}
 	walk->levels[level] = (walk_level_t){ .base = base,
@@ -547,7 +625,9 @@ pass_omitted_root(fsimg_reader_t *reader, fsimg_error_t *error)
  * checked again before the driver re-validates the payload. An omitted
  * entry is replayed like any other; only its delivery differs. A directory
  * is descended on the next advance unless it is not delivered and the
- * operation, not full verification, delivers entries.
+ * operation, not full verification, delivers entries. Under salvage an entry
+ * the decoder rejects is reported and leaves no current entry, record_length
+ * zero, so the advance moves on to the next record.
  */
 static fsimg_status_t
 make_current(fsimg_reader_t *reader, walk_level_t *level, size_t length,
@@ -555,6 +635,7 @@ make_current(fsimg_reader_t *reader, walk_level_t *level, size_t length,
 {
 	fsimg_walk_t *walk = reader->walk;
 	record_view_t view;
+	fsimg_error_t detail, *failure;
 	bool delivered;
 	fsimg_status_t status;
 
@@ -567,10 +648,20 @@ make_current(fsimg_reader_t *reader, walk_level_t *level, size_t length,
 	bzero(&reader->entry, sizeof(reader->entry));
 	reader->initialized = 0;
 	reader->link_length = 0;
+	fsimg_error_clear(&detail);
+	failure = reader->salvage.enabled ? &detail : error;
 	status = reader->ops->replay(reader, view.name, view.payload,
-	    view.payload_length, error);
-	if (status != FSIMG_OK)
+	    view.payload_length, failure);
+	if (decode_rejected(reader, failure, status)) {
+		fsimg_reader_salvage_loss(reader, reader->path, walk->omitted,
+		    FSIMG_LOSS_ENTRY);
+		return (FSIMG_OK);
+	}
+	if (status != FSIMG_OK) {
+		if (reader->salvage.enabled && error != NULL)
+			*error = detail;
 		return (status);
+	}
 	/* A decoded target is the whole of a symbolic link's content, so every
 	 * consumer, listing, ranges and accounting alike, sees its length.
 	 */
@@ -665,8 +756,13 @@ advance(fsimg_reader_t *reader, fsimg_error_t *error)
 		level = &walk->levels[walk->depth];
 		status = fsimg_stream_next(walk->records, &level->cursor,
 		    walk->record, sizeof(walk->record), &length, error);
-		if (status == FSIMG_OK)
-			return (make_current(reader, level, length, error));
+		if (status == FSIMG_OK) {
+			status = make_current(reader, level, length, error);
+			/* Salvage stepped over the record if it left no entry. */
+			if (status != FSIMG_OK || walk->record_length != 0)
+				return (status);
+			continue;
+		}
 		if (status != FSIMG_DONE)
 			return (status);
 		/* An exhausted directory releases its records to the stack. */
@@ -776,6 +872,12 @@ fsimg_walk_skip(fsimg_reader_t *reader, fsimg_error_t *error)
 		    FSIMG_OP_READER, "directory descent is not pending"));
 	reader->walk->pending = false;
 	return (FSIMG_OK);
+}
+
+fsimg_stream_t *
+fsimg_test_walk_records(const fsimg_reader_t *reader)
+{
+	return (reader->walk == NULL ? NULL : reader->walk->records);
 }
 
 void

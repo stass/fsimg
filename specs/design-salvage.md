@@ -76,6 +76,15 @@ Classification follows the operation that fails, not a public error code:
   finalization, scratch/index storage and reporting. Changed input, output
   failures and scratch failures never become recoverable image damage.
 
+The error's operation identifies a decoder's failure: a driver's prepare or
+replay rejecting the image reports `FSIMG_ECORRUPT` or `FSIMG_EUNSUPPORTED` under
+`FSIMG_OP_READER`, and scratch storage reports `FSIMG_OP_METADATA` even for
+corruption it detects, the extent index's checks included. Everything else is
+terminal, so a new failure is terminal until a decoder declares it. A scratch
+record that scratch storage delivers intact and a driver's own decoding then
+rejects cannot be told from image damage and is reported as a loss, like the
+damage that decoding exists to notice.
+
 All existing limits and cumulative accounting apply. Salvage adds no work
 ceiling or separate budget. A caller can set `max_work`; heavy damage can be
 slow when it does not. Resource exhaustion terminates extraction.
@@ -96,6 +105,11 @@ number of noticed losses, even when examples are omitted; unknown descendants
 are not counted as known losses. Reports identify shortened and skipped paths
 and their causes. The library does not print diagnostics. Completing the walk
 without a noticed loss returns ordinary success, with no integrity guarantee.
+
+The library reports through the context's loss callback, the rendered path with
+one `FSIMG_LOSS_*` kind as its cause, for the first `FSIMG_LOSS_EXAMPLES` losses
+of a reader. `salvage_losses` in the statistics and the extraction result holds
+the total, and the callback's consumer keeps the examples.
 
 ## Tests and acceptance evidence
 

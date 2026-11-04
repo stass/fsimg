@@ -99,6 +99,22 @@ fsimg_stat_add(uint64_t *value, uint64_t amount)
 		*value = UINT64_MAX;
 }
 
+void
+fsimg_loss_notify(fsimg_ctx_t *ctx, const char *path, const bool *omitted,
+    uint32_t mask)
+{
+	if (ctx->options.loss == NULL)
+		return;
+	/* The buffer holds the rendering of any path within the path limit,
+	 * which bounds every path reported here.
+	 */
+	(void)fsimg_path_render(path, omitted, ctx->loss_path,
+	    ctx->loss_path_bytes);
+	ctx->in_callback = true;
+	ctx->options.loss(ctx->options.loss_argument, ctx->loss_path, mask);
+	ctx->in_callback = false;
+}
+
 uint64_t
 fsimg_report_loss(fsimg_ctx_t *ctx, const char *path, uint32_t fields)
 {
@@ -110,17 +126,7 @@ fsimg_report_loss(fsimg_ctx_t *ctx, const char *path, uint32_t fields)
 	for (uint32_t rest = fields & FSIMG_META_KNOWN; rest != 0; rest &= rest - 1)
 		count++;
 	fsimg_stat_add(&ctx->stats.metadata_losses, count);
-	if (ctx->options.loss != NULL) {
-		/* The buffer holds the rendering of any path within the path
-		 * limit, which bounds every path reported here.
-		 */
-		(void)fsimg_path_render(path, NULL, ctx->loss_path,
-		    ctx->loss_path_bytes);
-		ctx->in_callback = true;
-		ctx->options.loss(ctx->options.loss_argument, ctx->loss_path,
-		    fields);
-		ctx->in_callback = false;
-	}
+	fsimg_loss_notify(ctx, path, NULL, fields);
 	return (count);
 }
 
@@ -346,6 +352,7 @@ fsimg_status_string(fsimg_status_t status)
 	case FSIMG_ESOURCE_CHANGED: return ("source changed");
 	case FSIMG_EEXISTS: return ("output exists");
 	case FSIMG_EDURABILITY: return ("durability uncertain");
+	case FSIMG_EPARTIAL: return ("incomplete extraction");
 	}
 	return ("unknown status");
 }

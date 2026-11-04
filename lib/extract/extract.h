@@ -14,6 +14,7 @@ typedef struct fsimg_extract_result {
 	 */
 	uint64_t	 omitted_entries;
 	uint64_t	 logical_bytes; /* File lengths charged, including partial files. */
+	uint64_t	 salvage_losses; /* Losses FSIMG_EXTRACT_SALVAGE noticed. */
 } fsimg_extract_result_t;
 
 /* root is borrowed and must name the coordinator's exclusively created empty

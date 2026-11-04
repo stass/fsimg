@@ -54,6 +54,16 @@ fsimg_reader_abort(fsimg_reader_t *reader, fsimg_status_t status)
 	return (status);
 }
 
+void
+fsimg_reader_salvage_loss(fsimg_reader_t *reader, const char *path,
+    const bool *omitted, uint32_t kind)
+{
+	fsimg_stat_add(&reader->salvage.losses, 1);
+	fsimg_stat_add(&reader->ctx->stats.salvage_losses, 1);
+	if (reader->salvage.losses <= FSIMG_LOSS_EXAMPLES)
+		fsimg_loss_notify(reader->ctx, path, omitted, kind);
+}
+
 fsimg_status_t
 fsimg_reader_end_scope(fsimg_reader_t *reader)
 {

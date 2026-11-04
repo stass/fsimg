@@ -22,7 +22,8 @@ module FsimgSpec
     "FSIMG_ECANCELLED" => -10,
     "FSIMG_ESOURCE_CHANGED" => -11,
     "FSIMG_EEXISTS" => -12,
-    "FSIMG_EDURABILITY" => -13
+    "FSIMG_EDURABILITY" => -13,
+    "FSIMG_EPARTIAL" => -14
   }.freeze
 
   # The keys of fsimg -l (cmd/fsimg/options.c).

@@ -151,7 +151,7 @@ example_extract_LDADD = libfsimg.la
 test_programs = test-core test-endian test-endian-unsigned-char \
 	test-private test-io test-device test-meta test-meta-sort test-meta-runs test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
-	test-common test-driver-contracts test-layer-contracts test-codec-memory \
+	test-common test-salvage test-driver-contracts test-layer-contracts test-codec-memory \
 	test-metadata-loss test-wrap-truncated \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
@@ -303,6 +303,8 @@ test_layer_contracts_SOURCES = test/layer-contracts.c test/contract.c \
 test_layer_contracts_LDADD = libfsimg.la
 test_common_SOURCES = test/common.c test/test.h
 test_common_LDADD = libfsimg.la
+test_salvage_SOURCES = test/salvage.c test/test.h
+test_salvage_LDADD = libfsimg.la
 
 test_emit_SOURCES = test/emit.c test/test.h
 test_emit_LDADD = libfsimg.la

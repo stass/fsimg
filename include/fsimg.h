@@ -42,7 +42,8 @@ typedef enum fsimg_status {
 	FSIMG_ECANCELLED = -10,
 	FSIMG_ESOURCE_CHANGED = -11,
 	FSIMG_EEXISTS = -12,
-	FSIMG_EDURABILITY = -13
+	FSIMG_EDURABILITY = -13,
+	FSIMG_EPARTIAL = -14
 } fsimg_status_t;
 
 typedef enum fsimg_operation {
@@ -112,7 +113,10 @@ typedef bool (*fsimg_cancel_fn_t)(void *);
  * is rendered, never truncated: every backslash is written "\\", so it
  * holds "\\" where fsimg_entry_t.path holds "\". Error paths are rendered
  * the same way, and in a name a reader omits, every byte outside 0x20 to
- * 0x7e is written "\xNN" in lowercase hex.
+ * 0x7e is written "\xNN" in lowercase hex. Under FSIMG_EXTRACT_SALVAGE the
+ * mask can instead be one FSIMG_LOSS_* kind, never combined with a
+ * FSIMG_META_* field; the extraction reports its first FSIMG_LOSS_EXAMPLES
+ * such losses this way and counts them all in salvage_losses.
  */
 typedef void (*fsimg_loss_fn_t)(void *, const char *, uint32_t);
 /* entry is borrowed for this callback, its path the entry's own unrendered
@@ -173,6 +177,10 @@ typedef struct fsimg_stats {
 	 * FSIMG_EXTRACT_SKIP_UNSUPPORTED.
 	 */
 	uint64_t	 skipped_entries;
+	/* Every loss salvage extraction noticed; damage it did not notice and
+	 * entries below a skipped listing are not counted.
+	 */
+	uint64_t	 salvage_losses;
 	/* Logical spool bytes reserved, and the allocated blocks sampled once
 	 * a spool is filled, which holes for zero input keep below them.
 	 */
@@ -290,6 +298,14 @@ fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
 #define FSIMG_META_OWNER 0x20u
 #define FSIMG_META_MODE 0x40u
 #define FSIMG_META_DEVICE 0x80u
+
+/* What a salvage extraction lost, in the loss callback's mask: the child
+ * listing of the directory at path, the root's being "/", or the entry at
+ * path, which is not delivered.
+ */
+#define FSIMG_LOSS_DIRECTORY 0x10000u
+#define FSIMG_LOSS_ENTRY 0x20000u
+#define FSIMG_LOSS_EXAMPLES 32u
 #define FSIMG_ATTR_READONLY 0x01u
 #define FSIMG_ATTR_HIDDEN 0x02u
 #define FSIMG_ATTR_SYSTEM 0x04u
@@ -1271,6 +1287,7 @@ fsimg_status_t fsimg_format_next(size_t *, fsimg_format_info_t *,
 #define FSIMG_EXTRACT_TIMES 0x02u
 #define FSIMG_EXTRACT_WALL_OFFSET 0x04u
 #define FSIMG_EXTRACT_SKIP_UNSUPPORTED 0x08u
+#define FSIMG_EXTRACT_SALVAGE 0x10u
 
 typedef struct fsimg_extract_options {
 	size_t		 size;
@@ -1312,6 +1329,14 @@ typedef struct fsimg_extract_options {
  * the bytes written, and a link's target. The file is flushed before
  * success; on failure it holds a partial manifest, which is not to be
  * published. The descriptor is borrowed, never duplicated or closed.
+ *
+ * SALVAGE extracts what it can of a damaged image, with no guarantee of
+ * completeness or trustworthiness (specs/design-salvage.md). It takes the
+ * whole volume, so a selection or a manifest_fd is FSIMG_EINVAL. A directory
+ * or entry the format's decoder rejects is reported as a loss and the walk
+ * continues; any other failure ends the extraction with its ordinary error.
+ * A completed walk that noticed a loss returns FSIMG_EPARTIAL, the private
+ * output retained and marked incomplete; one that noticed none is FSIMG_OK.
  */
 void fsimg_extract_options_init(fsimg_extract_options_t *);
 fsimg_status_t fsimg_extract_at(fsimg_reader_t *, int, const char *,

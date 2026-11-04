@@ -37,6 +37,11 @@ typedef struct fsimg_format_variant fsimg_format_variant_t;
  * ambiguous	the corruption message for two entries sharing a key.
  * name_profile	how preparation classes children by name.
  *
+ * prepare and replay report a decoder's rejection of the image as FSIMG_ECORRUPT
+ * or FSIMG_EUNSUPPORTED under FSIMG_OP_READER, and no storage, I/O or limit failure
+ * that way: salvage extraction steps over exactly those, so more replays and
+ * prepares can follow one, with the claims already made still in effect.
+ *
  * Content callback (specs/design-content.md). Common delivery owns reads and
  * range queries of the current file; the driver only resolves storage:
  * resolve	return one validated extent of the current file containing
@@ -90,6 +95,15 @@ typedef struct fsimg_omission {
 	bool		 refuse;
 	bool		 uncounted;
 } fsimg_omission_t;
+
+/* Salvage's side of the walk, set by extraction before its first advance.
+ * While enabled, the walker steps over a listing or entry the driver's decoder
+ * rejects (specs/design-salvage.md); losses counts what was noticed.
+ */
+typedef struct fsimg_salvage {
+	uint64_t	 losses;
+	bool		 enabled;
+} fsimg_salvage_t;
 
 typedef enum fsimg_reader_state {
 	FSIMG_READER_NEW,
@@ -146,11 +160,18 @@ struct fsimg_reader {
 	fsimg_extent_domain_t content_domain;
 	fsimg_reader_state_t state;
 	fsimg_omission_t omission;
+	fsimg_salvage_t	 salvage;
 	fsimg_walk_t	*walk;
 	char		*path;
 	bool		 host_identity;
 };
 
+/* Count one noticed salvage loss of kind, a FSIMG_LOSS_* value, for the reader
+ * and its context, and report the first FSIMG_LOSS_EXAMPLES to the loss
+ * callback. path and omitted are as fsimg_path_render() takes them.
+ */
+void fsimg_reader_salvage_loss(fsimg_reader_t *, const char *, const bool *,
+    uint32_t);
 fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
 /* Declare the current entry's content a symbolic-link target the driver
@@ -240,6 +261,8 @@ fsimg_status_t fsimg_walk_skip(fsimg_reader_t *, fsimg_error_t *);
  */
 fsimg_status_t fsimg_walk_restart(fsimg_reader_t *, fsimg_error_t *);
 void fsimg_walk_free(fsimg_reader_t *);
+/* Test hook: the walker's record stream, or NULL without one. */
+fsimg_stream_t *fsimg_test_walk_records(const fsimg_reader_t *);
 /* Test hook: the scratch store and frame offset of the record the next
  * advance replays. Both are zero before traversal starts.
  */

@@ -105,7 +105,8 @@ extract_options(fsimg_reader_t *reader, const fsimg_extract_options_t *input,
 	}
 	if (options->version != FSIMG_OPTIONS_VERSION ||
 	    (options->flags & ~(FSIMG_EXTRACT_ALLOW_LOSS | FSIMG_EXTRACT_TIMES |
-	    FSIMG_EXTRACT_WALL_OFFSET | FSIMG_EXTRACT_SKIP_UNSUPPORTED)) != 0 ||
+	    FSIMG_EXTRACT_WALL_OFFSET | FSIMG_EXTRACT_SKIP_UNSUPPORTED |
+	    FSIMG_EXTRACT_SALVAGE)) != 0 ||
 	    options->wall_offset_minutes <= -1440 || options->wall_offset_minutes >= 1440 ||
 	    ((options->flags & FSIMG_EXTRACT_WALL_OFFSET) == 0 &&
 	    options->wall_offset_minutes != 0))
@@ -116,6 +117,10 @@ extract_options(fsimg_reader_t *reader, const fsimg_extract_options_t *input,
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_EXTRACT, "nonzero reserved extraction option"));
 	}
+	if ((options->flags & FSIMG_EXTRACT_SALVAGE) != 0 &&
+	    (options->selection_count != 0 || options->manifest_fd != -1))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_EXTRACT,
+		    "salvage extraction takes neither a selection nor a manifest"));
 	if (options->manifest_fd != -1) {
 		if (options->manifest_fd < 0)
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
@@ -670,6 +675,8 @@ fsimg_extract_into(fsimg_reader_t *reader, int root,
 	 */
 	reader->omission.refuse =
 	    (state.options.flags & FSIMG_EXTRACT_SKIP_UNSUPPORTED) == 0;
+	reader->salvage.enabled =
+	    (state.options.flags & FSIMG_EXTRACT_SALVAGE) != 0;
 	limit = state.options.max_output_bytes;
 	if (limit != 0) {
 		if (reader->ctx->options.max_output_bytes != 0 &&
@@ -732,6 +739,7 @@ done:
 		result->skipped_entries = state.skipped_entries;
 		result->omitted_entries = reader->omission.count;
 		result->logical_bytes = reader->session.output_bytes;
+		result->salvage_losses = reader->salvage.losses;
 	}
 	while (state.depth != 0) {
 		fsimg_fd_release(reader->ctx, state.directories[state.depth].fd);
@@ -745,6 +753,10 @@ done:
 	fsimg_selection_free(state.selection);
 	if (status != FSIMG_OK)
 		return (fsimg_reader_abort(reader, status));
+	/* The walk finished, so the reader is done rather than failed. */
+	if (reader->salvage.losses != 0)
+		return (fsimg_error_set(error, FSIMG_EPARTIAL, 0, FSIMG_OP_EXTRACT,
+		    "salvage extraction lost part of the image"));
 	return (FSIMG_OK);
 }
 
@@ -756,7 +768,7 @@ fsimg_extract_at(fsimg_reader_t *reader, int parent, const char *name,
 	fsimg_ctx_t *ctx;
 	fsimg_status_t status;
 	int root, result, saved;
-	bool created;
+	bool created, retained;
 
 	status = extract_options(reader, options, &selected, error);
 	if (status != FSIMG_OK)
@@ -775,18 +787,25 @@ fsimg_extract_at(fsimg_reader_t *reader, int parent, const char *name,
 		return (status);
 	}
 	status = fsimg_extract_into(reader, root, &selected, NULL, error);
-	if (status == FSIMG_OK && fsync(root) == -1)
+	/* A partial tree is retained, so it is flushed like a complete one. */
+	retained = status == FSIMG_OK || status == FSIMG_EPARTIAL;
+	if (retained && fsync(root) == -1) {
 		status = fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_EXTRACT, "extraction root flush failed");
+		retained = false;
+	}
 	result = close(root);
 	saved = errno;
 	fsimg_fd_release(ctx, -1);
-	if (status == FSIMG_OK && result == -1)
+	if (retained && result == -1) {
 		status = fsimg_error_set(error, FSIMG_EIO, saved,
 		    FSIMG_OP_EXTRACT, "extraction root close failed");
+		retained = false;
+	}
 	if (status == FSIMG_OK)
 		return (FSIMG_OK);
-	fsimg_reader_abort(reader, status);
+	if (!retained)
+		fsimg_reader_abort(reader, status);
 	report_destination(error, name);
 	return (status);
 }

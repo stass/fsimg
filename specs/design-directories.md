@@ -314,4 +314,6 @@ failure in preparation, replay, a driver callback, I/O, a resource limit,
 cancellation, or a source change is terminal. The walker invalidates the
 snapshot and releases every prepared directory it holds. A partially prepared
 directory is released by preparation before the error is returned. Driver
-cleanup accepts partial construction and repeated calls.
+cleanup accepts partial construction and repeated calls. The one exception is
+[salvage extraction](design-salvage.md#directories-and-reader-state), which steps
+over a listing or entry the decoder rejects and leaves the walker running.

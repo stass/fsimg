@@ -603,6 +603,15 @@
   prefixes, skipped bad directories and capped loss reports with totals, using
   existing limits and unchanged extraction safety rules.
 
+* [Medium] **Image damage the extent index reports as scratch** (`lib/meta/extent.c`,
+  `lib/formats/{qnx6,iso9660}/`): salvage classifies by the error's operation, so
+  these end the extraction instead of skipping a listing or entry. A QNX6 directory
+  past the slice stops its index, and the lookup fails `FSIMG_OP_METADATA` "image
+  is truncated" (`extent.c:275`, `qnx6/tree.c:444`). An ISO 9660 file section
+  inside the volume but outside the content domain fails its append
+  (`iso9660/directory.c:187,618`). Reporting them under `FSIMG_OP_READER` fixes both
+  but changes the operation strict callers see on those paths.
+
 * [Low] **Salvage ranges after interior damage** (`lib/read`, `lib/formats/`):
   deferred extension to the prefix-only [salvage policy](specs/design-salvage.md).
   Design recovery of independently located intact later ranges with explicit
