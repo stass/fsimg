@@ -41,6 +41,17 @@ evidence and provenance.
   `specs/design-layers.md`): the layer design refuses `ULFO` chunks as
   unsupported. Once stage 5 imports the LZFSE decoder, the DMG reader can
   decode them through the same wrapper.
+* [Medium] **bzip2 and LZMA chunks in DMG** (`lib/layers/dmg.c`,
+  `specs/design-layers.md`): the layer design refuses bzip2 (`UDBZ`) and
+  LZMA (`ULMO`) chunks as unsupported. Most DMGs of macOS releases from 10.4
+  on are `UDBZ`, so the corpus's modern specimens (Firefox, VLC, Transmission)
+  stay unreadable. An `ULMO` chunk is a plain xz stream, which the xz layer's
+  liblzma binding could decode when that library is present. The first chunk
+  of such a DMG is an xz stream at file offset 0, so the xz probe also claims
+  the file and autodetection reports the input as ambiguous until the DMG's
+  full identity (the trailer tie) outranks the bare xz magic. bzip2 needs a
+  decoder fsimg does not link, a dependency decision under
+  [the compression design](../specs/design-compression-libs.md).
 * [Medium] **Apple Partition Map** (`lib/layers/`, `specs/design-layers.md`):
   older Mac disk images and CDs partition with APM, which the layers do not
   read, so their volumes are reachable only through `--offset` and
