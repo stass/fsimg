@@ -1642,8 +1642,8 @@ a cookie waiver needs a footer resealed after the damage. The disk is the
 file less the footer whatever the current size says, and the disk type, checksum and
 constant fields stay validation.
 Validation then requires a correct checksum, format version
-0x00010000, data offset all ones, saved state 0 and current size a multiple
-of 512, each failure `FSIMG_ECORRUPT`; types 3 and 4 (dynamic and
+0x00010000, data offset all ones, saved state 0 and a disk length that is a
+multiple of 512, each failure `FSIMG_ECORRUPT`; types 3 and 4 (dynamic and
 differencing) are `FSIMG_EUNSUPPORTED`. The disk is the file before the
 footer.
 

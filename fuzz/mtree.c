@@ -172,7 +172,8 @@ check_entry(fsimg_ctx_t *ctx, const fsimg_mtree_entry_t *entry)
 	if ((entry->entry.metadata.valid & FSIMG_META_MODE) != 0 &&
 	    entry->entry.metadata.mode > FSIMG_MODE_BITS)
 		abort();
-	if (fsimg_metadata_validate(&entry->entry.metadata, &error) != FSIMG_OK)
+	if (fsimg_metadata_validate(&entry->entry.metadata,
+	    entry->entry.kind, &error) != FSIMG_OK)
 		abort();
 }
 

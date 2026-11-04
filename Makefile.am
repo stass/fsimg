@@ -357,7 +357,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/iso9660-plan.md docs/todo-iso9660.md \
 	specs/README.md specs/principles.md specs/architecture.md \
 	specs/style.md specs/design-api.md specs/design-storage.md \
-	specs/design-device-input.md \
+	specs/design-device-input.md specs/design-device-nodes.md \
 	specs/design-sources.md specs/design-fat-reader.md specs/design-fat-writer.md \
 	specs/design-extraction-worker.md specs/design-exfat.md specs/design-qnx6.md \
 	specs/design-qnx6-driver.md specs/design-qnx4.md specs/design-qnx4-driver.md \
@@ -430,6 +430,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/images.rb \
 	test/cli/records.rb \
 	test/cli/format_test.rb test/cli/force_location_test.rb \
+	test/cli/layer_force_test.rb \
 	test/cli/formats_test.rb \
 	test/cli/helpers_test.rb \
 	test/cli/human_commands_test.rb \

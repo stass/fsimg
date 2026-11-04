@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
  */
-#include "force-short.h"
 #include "config.h"
+#include "force-short.h"
 
 #include <sys/types.h>
 #include <sys/resource.h>
