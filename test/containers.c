@@ -3246,6 +3246,63 @@ test_dmg_bzip2_failed_decode_retry(void)
 }
 
 static void
+test_dmg_bzip2_failed_decode_evicts_lru(void)
+{
+	uint8_t *disk = disk_new(133 * SECTOR);
+	uint8_t out[SECTOR];
+	dmg_spec_t spec = bz_dmg(disk, 133, bz_sector512,
+	    sizeof(bz_sector512));
+	memory_file_t file;
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+	fsimg_io_t *selected;
+	fsimg_error_t error;
+	fixture_t f;
+	size_t fork_bytes;
+
+	/* The raw prefix keeps opening and selection out of the cache. */
+	memset(disk + 128 * SECTOR, 'B', SECTOR);
+	memset(disk + 129 * SECTOR, 'A', 4 * SECTOR);
+	spec.table[0] = (dmg_table_t){ 0, 133, 6,
+	    { { RUN_RAW, 0, 128, 0 }, { RUN_ZLIB, 128, 1, 0 },
+	      { RUN_BZIP2, 129, 1, 0 }, { RUN_BZIP2, 130, 1, 0 },
+	      { RUN_BZIP2, 131, 1, 0 }, { RUN_BZIP2, 132, 1, 0 } } };
+	file = dmg_encode(&spec);
+	for (fork_bytes = 0; bcmp(file.bytes + fork_bytes, "<?xml", 5) != 0;
+	    fork_bytes++)
+		;
+
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_select(f.image, &selector, &selected, NULL) ==
+	    FSIMG_OK);
+	/* Fill all four slots, leaving the B-filled zlib chunk least used. */
+	for (unsigned sector = 128; sector < 132; sector++) {
+		CHECK(read_exact(selected, sector * SECTOR, out, sizeof(out),
+		    &error) == FSIMG_OK);
+		CHECK(bcmp(out, disk + sector * SECTOR, sizeof(out)) == 0);
+	}
+
+	/* The last run ends at the data fork boundary. Spoil its block CRC
+	 * so decoding overwrites the victim with A bytes before failing.
+	 */
+	file.bytes[fork_bytes - sizeof(bz_sector512) + 10] ^= 1;
+	CHECK(read_exact(selected, 132 * SECTOR, out, sizeof(out), &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "bzip2: block checksum mismatch") == 0);
+	CHECK(error.operation == FSIMG_OP_IMAGE);
+	CHECK(error.offset_valid && error.offset == 132 * SECTOR);
+
+	CHECK(read_exact(selected, 128 * SECTOR, out, sizeof(out), &error) ==
+	    FSIMG_OK);
+	for (size_t i = 0; i < sizeof(out); i++)
+		CHECK(out[i] == 'B');
+	fsimg_io_free(selected);
+	fixture_free(&f);
+	free(file.bytes);
+	free(disk);
+}
+
+static void
 test_dmg_bzip2_read(void)
 {
 	uint8_t disk[SECTOR];
@@ -3423,6 +3480,7 @@ main(int argc, char **argv)
 	test_dmg_bzip2_lower_read_error();
 	test_dmg_bzip2_allocation_failures();
 	test_dmg_bzip2_failed_decode_retry();
+	test_dmg_bzip2_failed_decode_evicts_lru();
 	test_dmg_bzip2_read();
 	test_dmg_bzip2_decoded_lengths();
 	test_dmg_bzip2_encoded_lengths();

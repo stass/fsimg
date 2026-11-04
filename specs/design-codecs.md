@@ -624,8 +624,9 @@ images from 10.4 on are `UDBZ`. fsimg decodes them with a project-owned
 decoder for the same reasons as the other owned codecs: the working agreement
 permits zlib as the only linked library, `libbz2` is not a system library
 everywhere fsimg runs, and the decoder is small next to the bounds checks any
-decoder of untrusted bzip2 needs. It is written from the format's description;
-no code comes from `libbzip2` or another implementation.
+decoder of untrusted bzip2 needs. It is project-written from public descriptions of the
+bzip2 format and is checked against `libbzip2` as a test oracle only; no code
+comes from `libbzip2` or another implementation.
 
 ### The stream
 
@@ -766,8 +767,10 @@ has at most 900,000 entries and 20 bits index them.
 
 **Initialization.** Bytes reach the output only from the walk through the block's
 transformed bytes, all written before it starts. A walk is a fixed number of
-steps over a table whose every entry is initialized, even when a malformed block's
-permutation is several cycles, which the checksum then refuses.
+steps over a table whose every entry is initialized, so a malformed block's
+permutation, even of several cycles, is traversed within bounds and always
+terminates. The checksum does not reject it: it covers the walk's output, and a
+permutation can produce bytes that match.
 
 ## Concurrency and failure
 

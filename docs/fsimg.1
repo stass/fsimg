@@ -744,8 +744,8 @@ must not be a terminal.
 A DMG, a fixed VHD or an Android sparse image is read as the disk it
 holds, detected from the file's first bytes and its last 512 bytes, or
 forced by naming it in the stack's container slot.
-DMG chunks may be stored, zero, free or zlib-compressed; other DMG
-compressions (ADC, bzip2, LZFSE, LZMA), multi-segment DMGs and dynamic or
+DMG chunks may be stored, zero, free, zlib-compressed or
+bzip2-compressed; other DMG compressions (ADC, LZFSE, LZMA), multi-segment DMGs and dynamic or
 differencing VHDs are refused as unsupported.
 A QNX boot image is read as the ImageFS it carries, detected from its
 startup header at offset 0 or behind the 1088-byte x86 BIOS loader, or

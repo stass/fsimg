@@ -515,9 +515,11 @@ bzip2_link_entries(bzip2_work_t *work, size_t entries)
 
 /*
  * Walk from the origin through the linked entries, expanding runs and
- * folding every output byte into the block's checksum. Any permutation of a
- * malformed block, even of several cycles, walks over initialized entries
- * for exactly entries steps and fails the checksum.
+ * folding every output byte into the block's checksum. The walk takes exactly
+ * entries steps over initialized entries, so a malformed permutation, even
+ * of several cycles, cannot read out of range or fail to terminate. The
+ * checksum does not reject such a block: it covers only the bytes the walk
+ * produces.
  */
 static fsimg_status_t
 bzip2_write_text(bzip2_decoder_t *decoder, const bzip2_block_t *block,
