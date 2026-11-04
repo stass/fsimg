@@ -12,10 +12,16 @@ evidence and provenance.
   non-ASCII names stay unobserved, and no Finder-made alias or Time Machine
   volume is in the corpus.
 * [High] **Reader, compression and verifier** (`lib/formats/hfsplus/`,
-  `lib/read/`, `lib/codec/`): plan stages 2 to 7. They bring four of the
-  common changes the format design lists: the `FSIMG_META_EXTRA_DATA` bit,
-  the 765-byte label, decoded content spans and the imported LZFSE and LZVN
+  `lib/read/`, `lib/codec/`): plan stages 5 to 7. They bring the last of the
+  common changes the format design lists, the imported LZFSE and LZVN
   decoders.
+* [Medium] **Default output budget on a compressed volume** (`lib/read/reader.c`):
+  the default output budget is the slice, and a compressed file charges its
+  decoded size, so a volume whose files decode to more than its own length
+  fails with `FSIMG_ELIMIT` unless the caller raises the limit. No capture or
+  corpus specimen reaches it. The owner decides whether a compressed volume
+  funds a larger default, since the budget is also what bounds a bomb across
+  many files.
 * [Medium] **Writer and native qualification** (`lib/formats/hfsplus/`,
   `tools/hfsplus/qualify.rb`): plan stages 8 and 9, with the seconds
   helper's origin and the `hfs` partition type default. The writer stays

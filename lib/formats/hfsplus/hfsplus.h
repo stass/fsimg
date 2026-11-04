@@ -35,6 +35,8 @@
 #define HFSPLUS_RSRC_TABLE_BYTES	8u
 #define HFSPLUS_CHUNK_PAIR_BYTES	8u
 #define HFSPLUS_CHUNK_WORD_BYTES	4u
+#define HFSPLUS_CHUNK_BYTES		65536u	/* a chunk's decoded length */
+#define HFSPLUS_CHUNK_STORED_MAX	69632u	/* its stored bound */
 
 /* A name holds at most 255 units; each is at most three UTF-8 bytes, a
  * surrogate pair four for its two.
@@ -607,6 +609,22 @@ typedef struct hfsplus_child {
 	bool			 extra_data;
 } hfsplus_child_t;
 
+/* The current entry's compressed content, open from its first resolve until the
+ * walker advances. A fork's table is described in fork offsets: entries start at
+ * table_offset, a chunk's offset counts from chunk_base, and every chunk lies in
+ * [payload_start, payload_end). All but open are zero for an inline payload.
+ */
+typedef struct hfsplus_compressed {
+	uint64_t	 chunk_base;
+	uint64_t	 table_offset;
+	uint64_t	 payload_start;
+	uint64_t	 payload_end;
+	uint64_t	 chunks;
+	bool		 open;
+} hfsplus_compressed_t;
+
+typedef struct hfsplus_window hfsplus_window_t;
+
 /* The driver's state behind fsimg_reader_t. */
 typedef struct fsimg_hfsplus_reader {
 	hfsplus_header_t	 header;
@@ -635,11 +653,15 @@ typedef struct fsimg_hfsplus_reader {
 	bool			 private_data_present;
 	uint32_t		 private_data_id;
 	uint32_t		 private_data_date;
-	/* The entry replay made current, and its data fork's index, built on the
-	 * first resolve and released when the walker advances.
+	/* The entry replay made current, and the index of the fork holding its
+	 * content, built on the first resolve and released when the walker
+	 * advances: the data fork, or a compressed file's resource fork.
 	 */
 	hfsplus_child_t		 current;
 	fsimg_extent_index_t	*file;
+	hfsplus_compressed_t	 compressed;
+	/* The decode window, from the first compressed file resolved to close. */
+	hfsplus_window_t	*window;
 	/* The root's name by the display mapping, without a terminator when
 	 * label_valid: a refused name leaves it absent.
 	 */
@@ -829,21 +851,50 @@ fsimg_status_t hfsplus_thread_lookup(hfsplus_cursor_t *, uint32_t, uint16_t,
 fsimg_status_t hfsplus_child_fill(const hfsplus_primary_t *, hfsplus_child_t *,
     fsimg_error_t *);
 
-/* Attributes (attributes.c). hfsplus_attr_scan(reader, id, compressed, scan,
- * error) validates the attribute records of one node ID. compressed says the
- * object is a compressed file, whose com.apple.decmpfs is then its content, not
- * a stored attribute: scan->stored reports the rest and scan->compression the
- * attribute, whose header scan->cmpf holds. An attribute of that name held in
- * a fork record is FSIMG_EUNSUPPORTED.
+/* Attributes (attributes.c). hfsplus_attr_scan(reader, id, compressed, payload,
+ * scan, error) validates the attribute records of one node ID. compressed says
+ * the object is a compressed file, whose com.apple.decmpfs is then its content,
+ * not a stored attribute: scan->stored reports the rest and scan->compression
+ * the attribute, whose header scan->cmpf holds. An attribute of that name held
+ * in a fork record is FSIMG_EUNSUPPORTED. payload, when not NULL, is a buffer of
+ * HFSPLUS_CHUNK_STORED_MAX bytes that receives what follows the header, its
+ * length in scan->payload_bytes, since the scan's later nodes overwrite the node
+ * holding it; a listing passes NULL and reads no payload.
  */
 typedef struct hfsplus_attr_scan {
 	hfsplus_cmpf_t	 cmpf;
+	size_t		 payload_bytes;
 	bool		 stored;
 	bool		 compression;
 } hfsplus_attr_scan_t;
 
 fsimg_status_t hfsplus_attr_scan(fsimg_reader_t *, uint32_t, bool,
-    hfsplus_attr_scan_t *, fsimg_error_t *);
+    unsigned char *, hfsplus_attr_scan_t *, fsimg_error_t *);
+
+/* Transparent compression (compress.c).
+ *
+ * hfsplus_compress_check() is the one decision on a compressed file's record and
+ * attribute, made at listing and again on first resolve: the attribute exists,
+ * the data fork is empty, and the type and inline size are ones this reader
+ * decodes. hfsplus_compress_known() says a type passed it, and
+ * hfsplus_compress_consumes_fork() that its content is the resource fork.
+ *
+ * hfsplus_compress_open() opens the current entry's content from its record,
+ * which the caller has read again. hfsplus_compress_resolve() then returns the
+ * held extent containing an offset, valid until the next resolve or advance.
+ * hfsplus_compress_reset() forgets the current entry at the walker's advance and
+ * hfsplus_compress_free() releases the window at close.
+ */
+fsimg_status_t hfsplus_compress_check(const hfsplus_file_t *,
+    const hfsplus_attr_scan_t *, fsimg_error_t *);
+bool hfsplus_compress_known(uint8_t);
+bool hfsplus_compress_consumes_fork(uint8_t);
+fsimg_status_t hfsplus_compress_open(fsimg_reader_t *, const hfsplus_file_t *,
+    fsimg_error_t *);
+fsimg_status_t hfsplus_compress_resolve(fsimg_reader_t *, uint64_t,
+    fsimg_extent_t *, fsimg_error_t *);
+void hfsplus_compress_reset(fsimg_hfsplus_reader_t *);
+void hfsplus_compress_free(fsimg_hfsplus_reader_t *);
 
 /* The directory callbacks (directory.c). */
 fsimg_status_t hfsplus_prepare(fsimg_reader_t *, fsimg_directory_build_t *,

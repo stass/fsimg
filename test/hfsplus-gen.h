@@ -139,7 +139,7 @@ typedef struct gen_plan {
 } gen_plan_t;
 
 struct gen_record {
-	unsigned char	 bytes[800];
+	unsigned char	 bytes[4096];
 	size_t		 length;
 	size_t		 key_length;
 	uint64_t	 offset;

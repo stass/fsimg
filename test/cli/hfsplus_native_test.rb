@@ -43,16 +43,18 @@ class HfsplusNativeTest < Minitest::Test
 
   Expectation = Data.define(:pattern, :status, :code, :message, :path)
   EXPECTED = [
+    Expectation.new(pattern: /\Ah-hfsplus-8388608-e6-zlib\z/, status: :ok, code: nil,
+      message: nil, path: nil),
     Expectation.new(pattern: /e6-ditto\z/, status: :refused, code: -6,
-      message: "HFS Plus compressed file is not supported", path: "/mixed-196608"),
-    Expectation.new(pattern: /e6-(?:zlib|lzvn|lzfse)\z/, status: :refused, code: -6,
-      message: "HFS Plus compressed file is not supported", path: "/forced-mixed-196608"),
+      message: "HFS Plus compression type is not supported", path: "/mixed-196608"),
+    Expectation.new(pattern: /e6-(?:lzvn|lzfse)\z/, status: :refused, code: -6,
+      message: "HFS Plus compression type is not supported", path: "/forced-mixed-196608"),
     Expectation.new(pattern: /e4-dirlinks-J\z/, status: :refused, code: -6,
       message: "HFS Plus directory hard link is not supported", path: "/dl1/a/d"),
     Expectation.new(pattern: /e8-interrupted\z/, status: :refused, code: -6,
       message: "HFS Plus journal holds transactions; mount the volume to replay", path: ""),
-    Expectation.new(pattern: /e6-sweep\z/, status: :refused, code: -6,
-      message: "HFS Plus compressed file is not supported", path: /\A\/(?:fit|sweep)-/),
+    Expectation.new(pattern: /e6-sweep\z/, status: :skipped, code: nil,
+      message: "native sweep has no image", path: nil),
     Expectation.new(pattern: /mkfs-w(?:-J(?:-mounted)?)?\z/, status: :refused, code: -6,
       message: "HFS Plus volume inside an HFS wrapper is not supported", path: ""),
     Expectation.new(pattern: /\Ah-(?:hfsplus|hfsx)-/, status: :ok, code: nil,
@@ -81,6 +83,13 @@ class HfsplusNativeTest < Minitest::Test
   def compare_capture(manifest_path)
     directory = File.dirname(manifest_path)
     name = File.basename(directory)
+    expectation = EXPECTED.find { _1.pattern.match?(name) }
+    refute_nil(expectation, "native capture needs an expected status: #{name}")
+    if expectation.status == :skipped
+      TALLY.add(:skips)
+      warn("SKIP: #{name}: #{expectation.message}")
+      skip("#{name}: #{expectation.message}")
+    end
     image = %w[image.img image.img.gz].map { File.join(directory, _1) }.find { File.file?(_1) }
     unless image
       TALLY.add(:skips, 1)
@@ -90,8 +99,6 @@ class HfsplusNativeTest < Minitest::Test
     # Capture fixtures may link an image; the CLI requires its regular-file path.
     image = File.realpath(image)
     manifest = JSON.parse(File.read(manifest_path))
-    expectation = EXPECTED.find { _1.pattern.match?(name) }
-    refute_nil(expectation, "native capture needs an expected status: #{name}")
     refusal = expectation.status == :refused
     result = invoke(root: Dir.pwd, arguments: ["t", "--json", "-f", image], expected: refusal ? 1 : 0, timeout: 120)
     if refusal
@@ -139,7 +146,9 @@ class HfsplusNativeTest < Minitest::Test
     end
     compare_content(image: image, entries: entries, expected: expected, name: name)
     compare_cli(image: image, expected: expected, manifest: manifest, name: name)
-    compare_host_extraction(image: image, expected: expected, late_logs: late_logs, name: name) if name == HOST_EXTRACTION_CAPTURE
+    if [HOST_EXTRACTION_CAPTURE, "h-hfsplus-8388608-e6-zlib"].include?(name)
+      compare_host_extraction(image: image, expected: expected, late_logs: late_logs, name: name)
+    end
     TALLY.add(:captures, 1)
     assert_nil(differing, "#{name}: first differing path #{differing} (manifest=#{expected.key?(differing)}, image=#{actual.key?(differing)})")
   end
@@ -244,6 +253,7 @@ class HfsplusNativeTest < Minitest::Test
       # Ignore only unmount-created event logs already identified by listing;
       # all manifest paths, including .fseventsd, must still be present.
       assert_nil(HfsplusNativePaths.find_difference(expected: supported.keys, actual: paths, late_logs: late_logs), "#{name}: host paths differ")
+      hashed_files = 0
       supported.each do |path, wanted|
         host = destination / path.delete_prefix("/")
         stat = host.lstat
@@ -255,9 +265,14 @@ class HfsplusNativeTest < Minitest::Test
           # sequential check; size and kind remain independently comparable.
           unless wanted.fetch("sha256").nil?
             assert_equal(wanted.fetch("sha256"), Digest::SHA256.file(host).hexdigest, "#{name}: #{path}: host sha256")
+            hashed_files += 1
           end
         end
         TALLY.add(:host_entries)
+      end
+      if name == "h-hfsplus-8388608-e6-zlib"
+        assert_equal(29, hashed_files, "#{name}: all extracted files compared by SHA-256")
+        puts "#{name}: #{hashed_files} extracted files compared by SHA-256"
       end
       TALLY.add(:host_extractions)
     end

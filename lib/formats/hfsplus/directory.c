@@ -82,8 +82,6 @@ static bool owned_name(const hfsplus_prepare_t *, const hfsplus_ckey_t *,
     hfsplus_owned_t *);
 static fsimg_status_t prepare_owned(hfsplus_prepare_t *, hfsplus_owned_t,
     const hfsplus_record_t *, fsimg_error_t *);
-static fsimg_status_t compressed_refuse(const hfsplus_file_t *,
-    const hfsplus_attr_scan_t *, fsimg_error_t *);
 static fsimg_status_t attributes_classify(fsimg_reader_t *,
     const hfsplus_primary_t *, uint32_t, bool *, hfsplus_attr_scan_t *,
     fsimg_error_t *);
@@ -191,7 +189,9 @@ payload_decode(const fsimg_hfsplus_reader_t *hfsplus,
 		valid = false;
 	if (!valid || child->id < HFSPLUS_ID_FIRST_USER ||
 	    child->leaf >= hfsplus->catalog.header.total_nodes ||
-	    payload[PAYLOAD_EXTRA] > 1 || child->compression != 0 ||
+	    payload[PAYLOAD_EXTRA] > 1 ||
+	    (child->compression != 0 && (child->kind != FSIMG_ENTRY_FILE ||
+	    !hfsplus_compress_known(child->compression))) ||
 	    child->mode > FSIMG_MODE_BITS ||
 	    (child->flags & ~HFSPLUS_CHILD_FLAGS) != 0)
 		return (hfsplus_corrupt(error,
@@ -346,25 +346,6 @@ prepare_owned(hfsplus_prepare_t *prepare, hfsplus_owned_t owned,
 	}
 }
 
-/* The one refusal of a compressed file: this reader delivers no decoded
- * content, and its empty data fork must never read as an empty file. The
- * attribute must exist and the data fork be empty, whatever the type.
- */
-static fsimg_status_t
-compressed_refuse(const hfsplus_file_t *file, const hfsplus_attr_scan_t *scan,
-    fsimg_error_t *error)
-{
-	if (!scan->compression)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus compressed file has no compression attribute"));
-	if (file->data_fork.logical_size != 0 ||
-	    file->data_fork.total_blocks != 0)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus compressed file has a nonempty data fork"));
-	return (hfsplus_unsupported(error,
-	    "HFS Plus compressed file is not supported"));
-}
-
 /* Whether the child with this effective record is compressed, and what its
  * attributes hold: the scan runs only for a record whose flags say to look, and
  * is empty otherwise.
@@ -383,7 +364,7 @@ attributes_classify(fsimg_reader_t *reader, const hfsplus_primary_t *primary,
 		bzero(scan, sizeof(*scan));
 		return (FSIMG_OK);
 	}
-	return (hfsplus_attr_scan(reader, id, *compressed, scan, error));
+	return (hfsplus_attr_scan(reader, id, *compressed, NULL, scan, error));
 }
 
 static fsimg_status_t
@@ -399,7 +380,9 @@ admit_child(hfsplus_prepare_t *prepare, hfsplus_child_t *child,
 
 /* Step 4 of the driver design and step 3's record check, for a child whose name
  * is in prepare->path: classify the record, then admit the child or refuse it.
- * A stub takes its indirect node's record for everything but the name.
+ * A stub takes its indirect node's record for everything but the name. A
+ * compressed file's size is the attribute's, the data fork being empty, and the
+ * resource fork that holds its chunks is content, not extra data.
  */
 static fsimg_status_t
 prepare_named(hfsplus_prepare_t *prepare, const hfsplus_record_t *record,
@@ -437,11 +420,17 @@ prepare_named(hfsplus_prepare_t *prepare, const hfsplus_record_t *record,
 	    &scan, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (compressed)
-		return (compressed_refuse(&primary.file, &scan, error));
+	if (compressed) {
+		status = hfsplus_compress_check(&primary.file, &scan, error);
+		if (status != FSIMG_OK)
+			return (status);
+		child.size = scan.cmpf.uncompressed_size;
+		child.compression = (uint8_t)scan.cmpf.type;
+	}
 	child.extra_data = scan.stored ||
 	    (primary.kind != FSIMG_ENTRY_DIRECTORY &&
-	    primary.file.resource_fork.logical_size > 0);
+	    primary.file.resource_fork.logical_size > 0 &&
+	    !hfsplus_compress_consumes_fork(child.compression));
 	return (admit_child(prepare, &child, error));
 }
 
@@ -605,6 +594,7 @@ hfsplus_replay(fsimg_reader_t *reader, const char *name,
 
 	fsimg_extent_index_free(hfsplus->file);
 	hfsplus->file = NULL;
+	hfsplus_compress_reset(hfsplus);
 	status = payload_decode(hfsplus, payload, length, &child, error);
 	if (status != FSIMG_OK)
 		return (status);

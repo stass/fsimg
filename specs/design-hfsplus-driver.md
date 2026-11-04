@@ -347,8 +347,9 @@ header's relations fix, with `D` the data offset: the table interval
 pairs, and the payload interval from its end to `D` plus the data length.
 When chunk `i` is first needed, the reader reads its entries through a
 small window over the table, so the table is never held whole: for type 4
-the pair of chunk `i` from the table interval, which carries the chunk's
-own length, and for types 8 and 12 the words `i` and `i + 1`, whose
+the pair of chunk `i` and its neighbours' pairs from the table interval, the
+former carrying the chunk's own length and the others bounding it, and for
+types 8 and 12 the words `i` and `i + 1`, whose
 difference is the length. The chunk, whose type 4 offset is counted from
 the count, is checked against the payload interval or, for types 8 and
 12, against the table's end `T` and `logicalSize`. Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is

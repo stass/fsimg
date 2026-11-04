@@ -108,7 +108,7 @@
   [driver design](specs/design-hfsplus-driver.md) describe a reader and
   verifier for native volumes, transparent compression included, and an
   unjournaled writer registered after native macOS qualification; only the
-  reader of uncompressed content is implemented. The [plan](docs/hfsplus-plan.md) orders the stages, from
+  reader of uncompressed and zlib-compressed content is implemented. The [plan](docs/hfsplus-plan.md) orders the stages, from
   the native evidence corpus to wrapped volumes, and the
   [work breakdown](docs/todo-hfsplus.md) holds the open items and decisions.
 

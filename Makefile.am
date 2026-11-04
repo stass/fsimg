@@ -80,6 +80,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/hfsplus/descriptor.c lib/formats/hfsplus/volume.c \
 	lib/formats/hfsplus/fork.c lib/formats/hfsplus/btree.c \
 	lib/formats/hfsplus/catalog.c lib/formats/hfsplus/attributes.c \
+	lib/formats/hfsplus/compress.c \
 	lib/formats/hfsplus/directory.c lib/formats/hfsplus/read.c \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \

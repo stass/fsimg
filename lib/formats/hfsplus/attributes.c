@@ -16,7 +16,8 @@ static const unsigned char decmpfs_name[2 * DECMPFS_UNITS] = {
 };
 
 static fsimg_status_t scan_record(const hfsplus_akey_t *,
-    const hfsplus_record_t *, bool, hfsplus_attr_scan_t *, fsimg_error_t *);
+    const hfsplus_record_t *, bool, unsigned char *, hfsplus_attr_scan_t *,
+    fsimg_error_t *);
 
 /* Classify one record of the node ID. A compressed file's com.apple.decmpfs is
  * its content, not stored data; on any other object that name is an ordinary
@@ -24,9 +25,11 @@ static fsimg_status_t scan_record(const hfsplus_akey_t *,
  */
 static fsimg_status_t
 scan_record(const hfsplus_akey_t *key, const hfsplus_record_t *record,
-    bool compressed, hfsplus_attr_scan_t *scan, fsimg_error_t *error)
+    bool compressed, unsigned char *payload, hfsplus_attr_scan_t *scan,
+    fsimg_error_t *error)
 {
 	hfsplus_attr_t attr;
+	size_t bytes;
 
 	if (!hfsplus_attr_decode(record->data, record->data_bytes, &attr))
 		return (hfsplus_corrupt(error,
@@ -48,6 +51,15 @@ scan_record(const hfsplus_akey_t *key, const hfsplus_record_t *record,
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compression attribute's header is malformed"));
 	scan->compression = true;
+	if (payload == NULL)
+		return (FSIMG_OK);
+	bytes = attr.data_size - HFSPLUS_CMPF_BYTES;
+	if (bytes > HFSPLUS_CHUNK_STORED_MAX)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus compression attribute's payload is too long"));
+	bcopy(record->data + attr.data_offset + HFSPLUS_CMPF_BYTES, payload,
+	    bytes);
+	scan->payload_bytes = bytes;
 	return (FSIMG_OK);
 }
 
@@ -59,7 +71,7 @@ scan_record(const hfsplus_akey_t *key, const hfsplus_record_t *record,
  */
 fsimg_status_t
 hfsplus_attr_scan(fsimg_reader_t *reader, uint32_t id, bool compressed,
-    hfsplus_attr_scan_t *scan, fsimg_error_t *error)
+    unsigned char *payload, hfsplus_attr_scan_t *scan, fsimg_error_t *error)
 {
 	hfsplus_tree_t *tree = &hfsplus_state(reader)->attributes;
 	unsigned char previous_name[2 * HFSPLUS_ATTR_NAME_UNITS_MAX];
@@ -90,7 +102,8 @@ hfsplus_attr_scan(fsimg_reader_t *reader, uint32_t id, bool compressed,
 			    "HFS Plus attribute keys are out of order"));
 		if (key.file_id != id)
 			break;
-		status = scan_record(&key, &record, compressed, scan, error);
+		status = scan_record(&key, &record, compressed, payload, scan,
+		    error);
 		if (status != FSIMG_OK)
 			break;
 		bcopy(key.name, previous_name, 2 * (size_t)key.units);
