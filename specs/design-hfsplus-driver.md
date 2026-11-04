@@ -159,8 +159,9 @@ verification.
 
 1. Validate the fork data against the format design's
    [extent rules](design-hfsplus.md#extent-rules): descriptor order, domain,
-   the inline sum not above `totalBlocks`, `logicalSize <= totalBlocks * B`
-   in checked arithmetic.
+   the inline sum not above `totalBlocks`, `totalBlocks` not above the
+   content domain's blocks, `logicalSize <= totalBlocks * B` in checked
+   arithmetic.
 2. Append the used inline extents in order; adjacent extents coalesce.
 3. While the appended blocks fall short of `totalBlocks`, search the extents
    tree for `(file ID, fork type, appended)` and require the record found
@@ -179,8 +180,8 @@ records claim. The resolver returns the number of overflow records it
 consumed. Under verification it also appends the fork's runs to the
 ownership claims, so no other code converts an extent into a claim.
 
-The extents tree itself is resolved by step 2 alone; requiring its inline
-sum to equal `totalBlocks` at open is what makes its own resolution
+The extents tree itself is resolved by step 2 alone; the resolver requires
+its inline sum to equal `totalBlocks`, which is what makes its own resolution
 non-recursive.
 
 ## The B-tree reader
@@ -192,8 +193,8 @@ the descriptor and the offset table against the format design's
 [node rules](design-hfsplus.md#nodes-and-records). Callers state the kind and
 height they expect, and a mismatch is `FSIMG_ECORRUPT`.
 
-The reader holds a fixed set of buffers of the largest node size among its
-trees, charged at open: one for the catalog cursor that a directory scan
+The reader holds a fixed set of buffers, each of its tree's node size,
+charged at open as each tree opens: one for the catalog cursor that a directory scan
 keeps, one for catalog searches made while that cursor is live, and one each
 for the extents and attributes trees. A search reuses its tree's search
 buffer at every level and leaves only the leaf in it. No node is retained

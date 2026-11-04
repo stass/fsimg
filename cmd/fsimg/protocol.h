@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 4407u
+#define FSIMG_JOB_BYTES 5119u
 /* The job record's mountpoint field: one byte more than the longest
  * mountpoint any format stores, 1024 bytes, and its NUL, so the writer,
  * not the record, refuses a longer one.
@@ -49,7 +49,7 @@ typedef enum fsimg_wire_error_field {
 	FSIMG_WIRE_ERROR_MESSAGE = 336
 } fsimg_wire_error_field_t;
 
-#define FSIMG_WIRE_INFO_BYTES 5368u
+#define FSIMG_WIRE_INFO_BYTES 6080u
 typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_VALID = 0,
 	FSIMG_WIRE_INFO_CAPABILITIES = 8,
@@ -64,16 +64,16 @@ typedef enum fsimg_wire_info_field {
 	FSIMG_WIRE_INFO_IO_ERROR = 80,
 	FSIMG_WIRE_INFO_FORMAT = 88,
 	FSIMG_WIRE_INFO_PROFILE = 104,
-	FSIMG_WIRE_INFO_LABEL = 144,	/* 48 bytes and a NUL, then zeros */
-	FSIMG_WIRE_INFO_UUID = 200,
-	FSIMG_WIRE_INFO_MOUNTPOINT = 216, /* 1024 bytes and a NUL, then zeros */
-	FSIMG_WIRE_INFO_DETAIL_COUNT = 1248,
-	FSIMG_WIRE_INFO_DETAILS = 1256,	/* 16 of a 24-byte name and a value */
-	FSIMG_WIRE_INFO_TEXT_COUNT = 1768,
-	FSIMG_WIRE_INFO_TEXTS = 1776,	/* 16 of a 24-byte name and a value */
-	FSIMG_WIRE_INFO_MISSING = 5360
+	FSIMG_WIRE_INFO_LABEL = 144,	/* 765 bytes and a NUL, then zeros */
+	FSIMG_WIRE_INFO_UUID = 912,
+	FSIMG_WIRE_INFO_MOUNTPOINT = 928, /* 1024 bytes and a NUL, then zeros */
+	FSIMG_WIRE_INFO_DETAIL_COUNT = 1960,
+	FSIMG_WIRE_INFO_DETAILS = 1968,	/* 16 of a 24-byte name and a value */
+	FSIMG_WIRE_INFO_TEXT_COUNT = 2480,
+	FSIMG_WIRE_INFO_TEXTS = 2488,	/* 16 of a 24-byte name and a value */
+	FSIMG_WIRE_INFO_MISSING = 6072
 } fsimg_wire_info_field_t;
-#define FSIMG_WIRE_INFO_LABEL_BYTES 49u
+#define FSIMG_WIRE_INFO_LABEL_BYTES 766u
 #define FSIMG_WIRE_INFO_MOUNTPOINT_BYTES 1025u
 #define FSIMG_WIRE_INFO_DETAIL_NAME_BYTES 24u
 #define FSIMG_WIRE_INFO_DETAIL_BYTES 32u

@@ -1154,8 +1154,10 @@ typedef struct fsimg_volume_info {
 	unsigned	 capabilities;
 	char		 format[16];
 	char		 profile[40];
-	/* A label of at most 48 bytes and its terminator. */
-	char		 label[49];
+	/* A label of at most 765 bytes of UTF-8 and its terminator: the longest
+	 * encoding of an HFS Plus volume name of 255 UTF-16 units.
+	 */
+	char		 label[766];
 	/* A 16-byte volume identity in textual (RFC 4122) byte order. */
 	unsigned char	 uuid[16];
 	/* The size the volume declares, which a truncated image's input may

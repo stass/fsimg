@@ -248,7 +248,7 @@ struct fsimg_writer {
 	bool		 output_root_known;
 	unsigned	 variant;
 	/* A label of at most 48 bytes and its terminator. */
-	char		 label[49];
+	char		 label[766];
 	/* The pointer texts of the options (the text rows of the settings
 	 * table: the mountpoint, the El Torito boot paths, the ISO 9660
 	 * descriptor texts), copied at construction into this one block; the

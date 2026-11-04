@@ -365,6 +365,7 @@ test_job_label(void)
 {
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES];
+	char label[767];
 	uint64_t selection;
 	unsigned capabilities;
 
@@ -380,36 +381,39 @@ test_job_label(void)
 	CHECK(strcmp(decoded.write.label, "MYLABEL") == 0);
 	CHECK(selection == 2 && capabilities == FSIMG_JOB_CAP_ROOTS);
 
-	/* The longest label any format stores, QNX4's 48 bytes, round-trips;
+	/* The maximum label of 765 bytes, round-trips;
 	 * one byte more does not encode.
 	 */
-	request.write.label = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV";
-	CHECK(strlen(request.write.label) == 48);
+	memset(label, 'L', 765);
+	label[765] = '\0';
+	request.write.label = label;
+	CHECK(strlen(request.write.label) == 765);
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_OK);
 	CHECK(strcmp(decoded.write.label, request.write.label) == 0);
-	request.write.label = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVW";
+	label[765] = 'L';
+	label[766] = '\0';
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
 
 	/* The worker refuses every other encoding of the strings: a label with
-	 * no terminator in its 49 bytes (216 to 264) or a byte after its
-	 * terminator, a presence byte (265) other than 0 or 1 or marking a
+	 * no terminator in its 766 bytes (216 to 981) or a byte after its
+	 * terminator, a presence byte (982) other than 0 or 1 or marking a
 	 * label absent, nonzero padding before the UUID, and a byte after the
 	 * format name's terminator.
 	 */
 	request.write.label = "MYLABEL";
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
-	memset(raw + 216 + 7, 'X', 41);
-	CHECK(job_decodes(raw, 216 + 48, 0));
-	CHECK(!job_decodes(raw, 216 + 48, 'X'));
+	memset(raw + 216 + 7, 'X', 758);
+	CHECK(job_decodes(raw, 216 + 765, 0));
+	CHECK(!job_decodes(raw, 216 + 765, 'X'));
 	request.write.label = "MYLABEL";
 	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
 	CHECK(job_decodes(raw, 216 + 8, 0));
 	CHECK(!job_decodes(raw, 216 + 8, 'X'));
-	CHECK(!job_decodes(raw, 265, 2));
-	CHECK(!job_decodes(raw, 265, 0));
-	CHECK(!job_decodes(raw, 271, 1));
+	CHECK(!job_decodes(raw, 982, 2));
+	CHECK(!job_decodes(raw, 982, 0));
+	CHECK(!job_decodes(raw, 983, 1));
 	CHECK(!job_decodes(raw, 200 + 15, 'X'));
 
 	/* An explicit empty exFAT label differs from the default selected by NULL. */
@@ -715,7 +719,7 @@ test_info_uuid(void)
 	CHECK(!fsimg_wire_info_frame_valid(&frame));
 }
 
-/* The widest label a format stores, 48 bytes without a terminator on disk,
+/* The widest label a format stores, 765 bytes without a terminator,
  * travels whole; a label field without its terminator is refused.
  */
 static void
@@ -727,24 +731,24 @@ test_info_label(void)
 
 	bzero(&info, sizeof(info));
 	info.valid = FSIMG_VOLUME_LABEL;
-	memset(info.label, 'L', 48);
-	info.label[48] = '\0';
+	memset(info.label, 'L', 765);
+	info.label[765] = '\0';
 	info.volume_bytes = 4096;
 	info.time_basis = FSIMG_TIME_UTC;
 	info.scope = FSIMG_VALIDATION_HEADER;
 	strcpy(info.format, "qnx4");
 	fsimg_wire_info_encode(frame.payload, &info);
 	CHECK(fsimg_wire_info_frame_valid(&frame));
-	CHECK(strlen((const char *)frame.payload + FSIMG_WIRE_INFO_LABEL) == 48);
-	CHECK(bcmp(frame.payload + FSIMG_WIRE_INFO_LABEL, info.label, 48) == 0);
-	frame.payload[FSIMG_WIRE_INFO_LABEL + 48] = 'L';
+	CHECK(strlen((const char *)frame.payload + FSIMG_WIRE_INFO_LABEL) == 765);
+	CHECK(bcmp(frame.payload + FSIMG_WIRE_INFO_LABEL, info.label, 765) == 0);
+	frame.payload[FSIMG_WIRE_INFO_LABEL + 765] = 'L';
 	CHECK(!fsimg_wire_info_frame_valid(&frame));
-	frame.payload[FSIMG_WIRE_INFO_LABEL + 48] = '\0';
+	frame.payload[FSIMG_WIRE_INFO_LABEL + 765] = '\0';
 	CHECK(fsimg_wire_info_frame_valid(&frame));
-	/* The seven bytes between the label and the UUID are zero. */
-	frame.payload[FSIMG_WIRE_INFO_LABEL + 49] = 1;
+	/* The two bytes between the label and the UUID are zero. */
+	frame.payload[FSIMG_WIRE_INFO_LABEL + 766] = 1;
 	CHECK(!fsimg_wire_info_frame_valid(&frame));
-	frame.payload[FSIMG_WIRE_INFO_LABEL + 49] = 0;
+	frame.payload[FSIMG_WIRE_INFO_LABEL + 766] = 0;
 	frame.payload[FSIMG_WIRE_INFO_UUID - 1] = 1;
 	CHECK(!fsimg_wire_info_frame_valid(&frame));
 }
@@ -980,7 +984,7 @@ test_job_qnx6_settings(void)
 {
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES], mutated[FSIMG_JOB_BYTES];
-	static const unsigned bad[] = { 270, 288, 289, 300, 308 };
+	static const unsigned bad[] = { 983, 1000, 1001, 1012, 1020 };
 	uint64_t selection;
 	unsigned capabilities;
 
@@ -1008,16 +1012,16 @@ test_job_qnx6_settings(void)
 	}
 }
 
-/* The mountpoint travels in a field of 1026 bytes from byte 832, after the
+/* The mountpoint travels in a field of 1026 bytes from byte 1544, after the
  * spool limit, the gzip level and the compression, with a presence byte at
- * 1858 and zero padding to the ifsboot settings at 1866. NULL and the
+ * 2570 and zero padding to the ifsboot settings at 2578. NULL and the
  * empty string stay distinct, the longest value that fits round-trips,
  * and every other encoding is refused.
  */
 static void
 test_job_mountpoint(void)
 {
-	enum { FIELD = 1026, MOUNTPOINT = 832, PRESENT = 832 + 1026 };
+	enum { FIELD = 1026, MOUNTPOINT = 1544, PRESENT = 1544 + 1026 };
 	static char longest[FIELD], longer[FIELD + 1];
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES];
@@ -1072,7 +1076,7 @@ test_job_mountpoint(void)
 }
 
 /*
- * The ifsboot settings travel from byte 1866: the machine and the five
+ * The ifsboot settings travel from byte 2578: the machine and the five
  * addresses as six 64-bit values, a byte of presence bits (bit n for value
  * n, bit 6 for the virtual setting), a byte of values (0x01 virtual, 0x02
  * compress=none) and six zero bytes to the record's end. A setting set to
@@ -1084,7 +1088,7 @@ test_job_mountpoint(void)
 static void
 test_job_ifsboot_settings(void)
 {
-	enum { CAPABILITIES = 23 * 8, VALUES = 1866, SET = VALUES + 6 * 8,
+	enum { CAPABILITIES = 23 * 8, VALUES = 2578, SET = VALUES + 6 * 8,
 	    BITS = SET + 1, PADDING = BITS + 1 };
 	fsimg_worker_request_t request, decoded;
 	fsimg_layer_options_t *layers = &request.layers;
@@ -1186,10 +1190,10 @@ test_job_roots(void)
 	 * capability, and a sequence too short for the count are refused.
 	 */
 	bcopy(raw, mutated, sizeof(raw));
-	fsimg_store_le64(mutated + 312, 129);
+	fsimg_store_le64(mutated + 1024, 129);
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
-	fsimg_store_le64(mutated + 312, 0);
+	fsimg_store_le64(mutated + 1024, 0);
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 	bcopy(raw, mutated, sizeof(raw));
@@ -1291,11 +1295,11 @@ test_read_job_zero_members_is_invalid(void)
 	/* cmd/fsimg/job.c JOB_PATHS_OFFSET holds the eight-byte path count.
 	 * Check the valid record before corrupting it so layout drift fails.
 	 */
-	CHECK(fsimg_load_le64(raw + 312) == request.member_count);
+	CHECK(fsimg_load_le64(raw + 1024) == request.member_count);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection_length,
 	    &capabilities, NULL) == FSIMG_OK);
 	CHECK(decoded.member_count == request.member_count);
-	fsimg_store_le64(raw + 312, 0);
+	fsimg_store_le64(raw + 1024, 0);
 	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection_length,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 }
@@ -1311,8 +1315,8 @@ test_job_selection(void)
 		unsigned	 offset;
 		uint64_t	 value;
 	} bad[] = {
-		{ 320, FSIMG_SELECT_DISK + 1 }, { 328, UINT64_C(1) << 32 },
-		{ 336, UINT64_C(1) << 32 }
+		{ 1032, FSIMG_SELECT_DISK + 1 }, { 1040, UINT64_C(1) << 32 },
+		{ 1048, UINT64_C(1) << 32 }
 	};
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES], mutated[FSIMG_JOB_BYTES];
@@ -1342,16 +1346,16 @@ test_job_selection(void)
 		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
 	}
 	bcopy(raw, mutated, sizeof(raw));
-	mutated[344 + FSIMG_LAYER_CONTAINER] = FSIMG_SLOT_NAMED + 1;
+	mutated[1056 + FSIMG_LAYER_CONTAINER] = FSIMG_SLOT_NAMED + 1;
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 	bcopy(raw, mutated, sizeof(raw));
-	memset(mutated + 384, 'A', 112);
+	memset(mutated + 1096, 'A', 112);
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 	bcopy(raw, mutated, sizeof(raw));
-	mutated[344 + FSIMG_LAYER_CONTAINER] = FSIMG_SLOT_NAMED;
-	strcpy((char *)mutated + 368, "mbr");
+	mutated[1056 + FSIMG_LAYER_CONTAINER] = FSIMG_SLOT_NAMED;
+	strcpy((char *)mutated + 1080, "mbr");
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 }
@@ -1425,10 +1429,10 @@ test_job_layers(void)
 		unsigned	 offset;
 		uint64_t	 value;
 	} bad[] = {
-		{ 512, UINT64_C(1) << 32 }, { 520, 4 }, { 520, 0x100 },
-		{ 808, UINT64_C(1) << 32 }
+		{ 1224, UINT64_C(1) << 32 }, { 1232, 4 }, { 1232, 0x100 },
+		{ 1520, UINT64_C(1) << 32 }
 	};
-	static const unsigned text_ends[] = { 599, 711, 727 };
+	static const unsigned text_ends[] = { 1311, 1423, 1439 };
 	static const unsigned char guid[16] = { 0x11, 0x22, 0x33, 0x44, 0x55,
 	    0x66, 0x47, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01 };
 	fsimg_worker_request_t request, decoded;
@@ -1464,7 +1468,7 @@ test_job_layers(void)
 		    &selection, &capabilities, NULL) == FSIMG_EINVAL);
 	}
 	bcopy(raw, mutated, sizeof(raw));
-	mutated[520] = 0x02;
+	mutated[1232] = 0x02;
 	CHECK(fsimg_job_decode(mutated, sizeof(mutated), &decoded, &selection,
 	    &capabilities, NULL) == FSIMG_EINVAL);
 	/* The last byte of each text field: the full GPT type's and name's
@@ -2101,14 +2105,14 @@ test_job_minimize_flag(void)
 static void
 test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void)
 {
-	enum { XZ_LEVEL = 1922, XZ_CHECK = 1930 };
+	enum { XZ_LEVEL = 2634, XZ_CHECK = 2642 };
 	static const uint32_t levels[] = { 0, 6, 9 };
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES];
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == 4407);
+	CHECK(FSIMG_JOB_BYTES == 5119);
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
 	request.root_paths = image_root;
@@ -2167,7 +2171,7 @@ test_xz_unverified_record_requires_verified_xz(void)
 static void
 test_job_zstd_levels_roundtrip_and_reject_wide_wire_value(void)
 {
-	enum { ZSTD_LEVEL = 1938 };
+	enum { ZSTD_LEVEL = 2650 };
 	static const uint32_t levels[] = { 0, 3, 19 };
 	fsimg_worker_request_t request, decoded;
 	unsigned char raw[FSIMG_JOB_BYTES];
@@ -2227,7 +2231,7 @@ test_zstd_unverified_record_requires_verified_zstd(void)
  * EFI path 1049, presence 2074, reserved 2075..2079, input kind 2080,
  * input length 2088, and transfer quantum 2096.
  */
-enum { ISO_WIRE_BASE = 1946, ISO_WIRE_TAIL_BYTES = 2104 };
+enum { ISO_WIRE_BASE = 2658, ISO_WIRE_TAIL_BYTES = 2104 };
 
 static void
 iso_wire_place_string(unsigned char *expected, size_t offset, const char *text)
@@ -2254,7 +2258,7 @@ test_iso_jobs_have_canonical_wire_bytes(void)
 
 	iso_wire_place_string(create_tail, 24, "/b/bios.img");
 	iso_wire_place_string(efi_tail, 1049, "/efi/boot.img");
-	CHECK(FSIMG_JOB_BYTES == 4407);
+	CHECK(FSIMG_JOB_BYTES == 5119);
 	fsimg_worker_request_init(&request);
 	CHECK(request.read.iso_view == FSIMG_ISO_VIEW_AUTO);
 	request.kind = FSIMG_JOB_CREATE;
@@ -2386,20 +2390,20 @@ test_info_text_records_reject_invalid_counts_and_strings(void)
 	strcpy(info.texts[0].name, "application");
 	strcpy(info.texts[0].value, "A \"QUOTED\" \\ APPLICATION");
 	fsimg_wire_info_encode(frame.payload, &info);
-	CHECK(FSIMG_WIRE_INFO_TEXT_COUNT == 1768);
-	CHECK(FSIMG_WIRE_INFO_TEXTS == 1776);
+	CHECK(FSIMG_WIRE_INFO_TEXT_COUNT == 2480);
+	CHECK(FSIMG_WIRE_INFO_TEXTS == 2488);
 	CHECK(FSIMG_WIRE_INFO_TEXT_BYTES == 224);
-	CHECK(fsimg_load_le64(frame.payload + 1768) == 1);
+	CHECK(fsimg_load_le64(frame.payload + 2480) == 1);
 	CHECK(strcmp((char *)text, "application") == 0);
 	CHECK(strcmp((char *)text + 24, info.texts[0].value) == 0);
 	CHECK(fsimg_wire_info_frame_valid(&frame));
 	bcopy(frame.payload, canonical, sizeof(canonical));
 
 	for (unsigned i = 0; i < sizeof(bad_counts) / sizeof(bad_counts[0]); i++) {
-		fsimg_store_le64(frame.payload + 1768, bad_counts[i]);
+		fsimg_store_le64(frame.payload + 2480, bad_counts[i]);
 		CHECK(!fsimg_wire_info_frame_valid(&frame));
 	}
-	fsimg_store_le64(frame.payload + 1768, 0);
+	fsimg_store_le64(frame.payload + 2480, 0);
 	CHECK(!fsimg_wire_info_frame_valid(&frame));
 	bcopy(canonical, frame.payload, sizeof(canonical));
 	text[224] = 'X';

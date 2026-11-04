@@ -1530,7 +1530,7 @@ code ran. The minimum matrix:
 
 | Area | Required cases |
 | --- | --- |
-| Probe and geometry | Each signature and version pairing; slice shorter than 1536 bytes and not a multiple of 512; `B` of 0, 511, 513, 512 to 65536 and `2^31`; `N` of 0, 1 and above `V / B`; `N * B` overflow; every reserved-block layout from `B = 512` to `B = 4096`; probe exclusivity against FAT, exFAT, QNX4, QNX6 and ImageFS fixtures in both directions; a forced format |
+| Probe and geometry | Each signature and version pairing; slice shorter than 1536 bytes and not a multiple of 512; `B` of 0, 511, 513, 512 to 65536 and `2^31`; `N` of 0, 1 and above `V / B`; the largest `N` and `B` together; every reserved-block layout from `B = 512` to `B = 4096`; probe exclusivity against FAT, exFAT, QNX4, QNX6 and ImageFS fixtures in both directions; a forced format |
 | Header | Every attribute bit alone, bits 29 and 30 refused, an unknown bit; `FSK!`; `freeBlocks` above `N`; `nextCatalogID` below 16 and below a used ID with and without bit 12; a missing catalog or extents fork; an alternate header that disagrees in each compared field and one that is zero-filled, both `FSIMG_ECORRUPT`, and a read failure injected on the alternate's sectors kept as `FSIMG_EIO` |
 | Forks | 0, 1, 8 and 9 extents on data and resource forks; 17 extents over two overflow records; a gap, overlap, repeat and extra overflow record; a zero-count used descriptor; a used descriptor after an unused one; an extent into the reserved blocks, past `N` and across the tail; `logicalSize` above allocation; an extents tree needing overflow; bad-block records |
 | Bitmap | A referenced clear block; an allocated orphan; two forks sharing a block; a set padding bit; a short bitmap; `freeBlocks` off by one |

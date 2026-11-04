@@ -77,6 +77,9 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/fat/write-emit.c lib/formats/hfsplus/hfsplus.h \
 	lib/formats/hfsplus/codec.c lib/formats/hfsplus/unicode.c \
 	lib/formats/hfsplus/unicode-tables.h \
+	lib/formats/hfsplus/descriptor.c lib/formats/hfsplus/volume.c \
+	lib/formats/hfsplus/fork.c lib/formats/hfsplus/btree.c \
+	lib/formats/hfsplus/read.c \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
@@ -159,7 +162,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify \
 	test-salvage-terminal test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
-	test-hfsplus-codec test-hfsplus-unicode \
+	test-hfsplus-codec test-hfsplus test-hfsplus-unicode \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write test-scheme-planning \
@@ -269,6 +272,8 @@ test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h test/scale.h
 test_qnx4_write_LDADD = libfsimg.la
 test_hfsplus_codec_SOURCES = test/hfsplus-codec.c test/test.h
 test_hfsplus_codec_LDADD = libfsimg.la
+test_hfsplus_SOURCES = test/hfsplus.c test/hfsplus-gen.c test/hfsplus-gen.h test/test.h
+test_hfsplus_LDADD = libfsimg.la
 test_hfsplus_unicode_SOURCES = test/hfsplus-unicode.c test/test.h \
 	test/digest.c test/digest.h
 test_hfsplus_unicode_LDADD = libfsimg.la

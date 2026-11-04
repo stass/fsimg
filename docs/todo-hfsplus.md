@@ -28,7 +28,8 @@ evidence and provenance.
   common design for them, through the catalog, scanner, extractor, manifest
   and CLI, would let HFS Plus round-trip them.
 * [Low] **Wrapped volumes** (`lib/formats/hfsplus/volume.c`): plan stage 10,
-  reading HFS Plus embedded in a classic HFS wrapper.
+  reading HFS Plus embedded in a classic HFS wrapper, which open refuses with
+  `FSIMG_EUNSUPPORTED` until then; the `wrapper_offset` detail comes with it.
 * [Low] **Directory hard links** (`lib/formats/hfsplus/catalog.c`): refused
   as an unsupported kind, which leaves Time Machine volumes unreadable past
   the first one. Following them needs a visited set and a path-explosion

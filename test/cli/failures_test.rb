@@ -19,7 +19,7 @@ class CliTest < Minitest::Test
         "-F",
         "qnx4",
         "-L",
-        ("A" * 49),
+        ("A" * 766),
         "-C",
         "source",
         "."
@@ -27,6 +27,26 @@ class CliTest < Minitest::Test
     ].each do |arguments|
       failed(invoke(arguments: arguments, expected: 2))
     end
+    error = failed(
+      invoke(
+        arguments: [
+          "c",
+          "--json",
+          "-F",
+          "qnx4",
+          "-L",
+          ("A" * 49),
+          "-f",
+          "oversized-label.img",
+          "-C",
+          "source",
+          "."
+        ],
+        expected: 1
+      )
+    )
+    assert_equal("absent", error.fetch("output_state"), "a label refused by the format leaves no partial output")
+    refute((root / "oversized-label.img").exist?, "a label refused by the format leaves no output image")
     # An empty standard input is an unrecognised image, not a hang on
     # whatever input the test runner happens to hold.
     assert_equal(

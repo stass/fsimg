@@ -351,7 +351,7 @@ test_options(void)
 		0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67
 	};
 	fsimg_cli_options_t options;
-	char label[50];
+	char label[767];
 	char *large_label[] = { "fsimg", "-cn", "-F", "exfat", "-L", label, ".", NULL };
 
 	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)

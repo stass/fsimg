@@ -193,7 +193,7 @@ typedef struct gen {
 	bool		 finished;
 	bool		 sparse;
 	int		 image_fd;	/* a sparse volume's file, or -1 */
-	char		 label[49];
+	char		 label[766];
 } gen_t;
 
 static void put16(unsigned char *, uint16_t);
