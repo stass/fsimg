@@ -178,7 +178,7 @@ class CliTest < Minitest::Test
     drain = Thread.new do
       bytes = String.new(encoding: Encoding::BINARY)
       loop do
-        chunk = reader.read(257)
+        chunk = reader.read(1024)
         break if chunk.nil?
         bytes << chunk
         sleep(0.002)
