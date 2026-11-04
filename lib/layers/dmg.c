@@ -66,6 +66,8 @@ enum {
 	KOLY_DATA_CHECKSUM = 80,
 	KOLY_XML_OFFSET = 216,
 	KOLY_XML_LENGTH = 224,
+	KOLY_CODESIG_OFFSET = 296,
+	KOLY_CODESIG_LENGTH = 304,
 	KOLY_MASTER_CHECKSUM = 352,
 	KOLY_VARIANT = 488,
 	KOLY_SECTOR_COUNT = 492
@@ -436,15 +438,16 @@ ranges_overlap(uint64_t a, uint64_t a_end, uint64_t b, uint64_t b_end)
 }
 
 /*
- * The identity: "koly" in the last 512 bytes, and the plist or the
- * resource fork ending exactly where the trailer begins, which ties the
- * trailer to this file's length; an assumed identity waives both, and
+ * The identity: "koly" in the last 512 bytes, and the plist, the resource
+ * fork or the code signature ending exactly where the trailer begins, which
+ * ties the trailer to this file's length; an assumed identity waives both, and
  * trailer_layout checks the ranges against the trailer regardless.
  * Version 4 and header size 512, which decide how the trailer is decoded,
  * are validation. Current hdiutil writes no resource fork and ends the
  * plist at the trailer; older hdiutil writes a legacy resource fork
- * between the plist and the trailer.
- * A resource fork of length 0 is absent, whatever its offset. A bare
+ * between the plist and the trailer, and a signed image carries its code
+ * signature there.
+ * A resource fork or a signature of length 0 is absent, whatever its offset. A bare
  * volume whose last sector holds a stray trailer of another file's length
  * draws no claim.
  */
@@ -453,8 +456,8 @@ dmg_probe(const unsigned char *prefix FSIMG_UNUSED, size_t prefix_length
     FSIMG_UNUSED, const unsigned char *tail, size_t tail_length,
     uint64_t file_bytes, fsimg_identity_t *identity, fsimg_error_t *error)
 {
-	uint64_t trailer_start, xml_end, rsrc_end;
-	bool xml_abuts, rsrc_abuts;
+	uint64_t trailer_start, xml_end, rsrc_end, codesig_end;
+	bool xml_abuts, rsrc_abuts, codesig_abuts;
 
 	if (tail_length < KOLY_HEADER_BYTES || file_bytes < KOLY_HEADER_BYTES ||
 	    !fsimg_identity_holds(identity,
@@ -470,8 +473,13 @@ dmg_probe(const unsigned char *prefix FSIMG_UNUSED, size_t prefix_length
 	rsrc_abuts = fsimg_load_be64(tail + KOLY_RSRC_LENGTH) != 0 &&
 	    koly_range_end(tail, KOLY_RSRC_OFFSET, &rsrc_end) &&
 	    rsrc_end == trailer_start;
-	if (!fsimg_identity_holds(identity, xml_abuts || rsrc_abuts,
-	    "neither the plist nor the resource fork ends at the trailer"))
+	codesig_abuts = fsimg_load_be64(tail + KOLY_CODESIG_LENGTH) != 0 &&
+	    koly_range_end(tail, KOLY_CODESIG_OFFSET, &codesig_end) &&
+	    codesig_end == trailer_start;
+	if (!fsimg_identity_holds(identity,
+	    xml_abuts || rsrc_abuts || codesig_abuts,
+	    "neither the plist, the resource fork nor the code signature ends "
+	    "at the trailer"))
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0, FSIMG_OP_IMAGE,
 		    "no DMG trailer"));
 	return (FSIMG_OK);
@@ -481,16 +489,27 @@ dmg_probe(const unsigned char *prefix FSIMG_UNUSED, size_t prefix_length
  * The file layout of a claimed trailer: the data fork ends at or before
  * the plist, the plist ends at or before the trailer, and a resource fork,
  * when present, ends at or before the trailer and shares no byte with the
- * data fork or the plist. Whichever of the plist and resource fork the
- * probe found abutting the trailer, the other is checked here. fsimg reads
- * its tables from the plist and never reads the resource fork's bytes.
+ * data fork or the plist; a code signature, when present, obeys the same
+ * rules. Whichever of the plist, resource fork and signature the probe found
+ * abutting the trailer, the others are checked here. fsimg reads its tables
+ * from the plist and never reads the other two forks' bytes.
  */
 static fsimg_status_t
 trailer_layout(const unsigned char *raw, uint64_t file_bytes,
     fsimg_error_t *error)
 {
 	uint64_t trailer_start, data_offset, data_end, xml_offset, xml_end;
-	uint64_t rsrc_offset, rsrc_end;
+	uint64_t fork_offset, fork_end;
+	static const struct {
+		size_t		 field;		/* offset field; length follows */
+		const char	*overrun;
+		const char	*overlap;
+	} extra_forks[] = {
+		{ KOLY_RSRC_OFFSET, "koly resource fork overruns the trailer",
+		    "koly resource fork overlaps the data fork or plist" },
+		{ KOLY_CODESIG_OFFSET, "koly code signature overruns the trailer",
+		    "koly code signature overlaps the data fork or plist" }
+	};
 
 	trailer_start = file_bytes - KOLY_HEADER_BYTES;
 	data_offset = fsimg_load_be64(raw + KOLY_DATA_OFFSET);
@@ -501,17 +520,21 @@ trailer_layout(const unsigned char *raw, uint64_t file_bytes,
 	if (!koly_range_end(raw, KOLY_XML_OFFSET, &xml_end) ||
 	    xml_end > trailer_start)
 		return (dmg_corrupt(error, "koly plist overruns the trailer"));
-	if (fsimg_load_be64(raw + KOLY_RSRC_LENGTH) == 0)
-		return (FSIMG_OK);
-	rsrc_offset = fsimg_load_be64(raw + KOLY_RSRC_OFFSET);
-	if (!koly_range_end(raw, KOLY_RSRC_OFFSET, &rsrc_end) ||
-	    rsrc_end > trailer_start)
-		return (dmg_corrupt(error,
-		    "koly resource fork overruns the trailer"));
-	if (ranges_overlap(rsrc_offset, rsrc_end, data_offset, data_end) ||
-	    ranges_overlap(rsrc_offset, rsrc_end, xml_offset, xml_end))
-		return (dmg_corrupt(error,
-		    "koly resource fork overlaps the data fork or plist"));
+	for (size_t i = 0; i < sizeof(extra_forks) / sizeof(extra_forks[0]);
+	    i++) {
+		size_t field = extra_forks[i].field;
+
+		if (fsimg_load_be64(raw + field + 8) == 0)
+			continue;
+		fork_offset = fsimg_load_be64(raw + field);
+		if (!koly_range_end(raw, field, &fork_end) ||
+		    fork_end > trailer_start)
+			return (dmg_corrupt(error, extra_forks[i].overrun));
+		if (ranges_overlap(fork_offset, fork_end, data_offset,
+		    data_end) || ranges_overlap(fork_offset, fork_end,
+		    xml_offset, xml_end))
+			return (dmg_corrupt(error, extra_forks[i].overlap));
+	}
 	return (FSIMG_OK);
 }
 
@@ -619,11 +642,10 @@ table_header(dmg_walk_t *walk, fsimg_error_t *error)
  * A run is complete: decode it and check what every reader of the table
  * relies on. Runs end with one terminator; a comment or the terminator
  * covers no sectors and every other run covers at least one, within its
- * table. The exception is a free-space run of zero sectors, which older
- * hdiutil writes at the table's end before the terminator: one with no
- * compressed bytes and its sector at or before the table's end covers
- * nothing and is
- * skipped, wherever it appears.
+ * table. The exception is a zero-fill or free-space run of zero sectors,
+ * which older hdiutil writes at the table's end before the terminator: one
+ * with no compressed bytes and its sector at or before the table's end
+ * covers nothing and is skipped, wherever it appears.
  */
 static fsimg_status_t
 table_run(dmg_walk_t *walk, fsimg_error_t *error)
@@ -648,8 +670,9 @@ table_run(dmg_walk_t *walk, fsimg_error_t *error)
 		walk->terminated = run.type == RUN_TERMINATOR;
 		return (FSIMG_OK);
 	}
-	if (run.type == RUN_IGNORE && run.sectors == 0 &&
-	    run.compressed_length == 0 && run.sector <= walk->table.sector_count)
+	if ((run.type == RUN_IGNORE || run.type == RUN_ZERO) &&
+	    run.sectors == 0 && run.compressed_length == 0 &&
+	    run.sector <= walk->table.sector_count)
 		return (FSIMG_OK);
 	if (run.sectors == 0)
 		return (dmg_corrupt(error, "run covers zero sectors"));

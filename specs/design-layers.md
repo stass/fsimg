@@ -1575,7 +1575,10 @@ All integers are big-endian. The trailer:
 | 80 | 136 | Data fork checksum: type (2 = CRC32, 0 = none), bit size (32), 32 x 32-bit values |
 | 216 | 8 | XML offset |
 | 224 | 8 | XML length |
-| 232 | 120 | Reserved |
+| 232 | 64 | Reserved |
+| 296 | 8 | Code signature offset |
+| 304 | 8 | Code signature length (0, no signature) |
+| 312 | 40 | Reserved |
 | 352 | 136 | Master checksum, same layout |
 | 488 | 4 | Image variant (2; `hdiutil` writes 1 beside per-region tables) |
 | 492 | 8 | Sector count |
@@ -1629,20 +1632,23 @@ has the empty CRC, zero. Run types:
 
 Reading: the probe claims on identity, tied to the file length it receives:
 `koly`, version 4 and header size 512 in the last 512 bytes, and the XML
-range or a resource fork of nonzero length ending exactly at the trailer
-(offset plus length equal to the file length minus 512). Every `hdiutil`
-image ends its data fork exactly at the XML offset and the last of its XML
-and resource fork exactly at the trailer. Of these, `koly` and the tie to
+range, a resource fork of nonzero length or a code signature of nonzero
+length ending exactly at the trailer (offset plus length equal to the file
+length minus 512). Every `hdiutil` image ends its data fork exactly at the
+XML offset and the last of its XML, resource fork and code signature exactly
+at the trailer; a signed image carries its signature between the plist and
+the trailer. Of these, `koly` and the tie to
 the trailer are identity, which an assumed identity waives ("the trailer
-has no koly signature", "neither the plist nor the resource fork ends at
-the trailer"); version 4 and header size 512 decide how the trailer is
+has no koly signature", "neither the plist, the resource fork nor the code
+signature ends at the trailer"); version 4 and header size 512 decide how the trailer is
 decoded and are validation, and the ranges are checked against the
 trailer below whatever the tie says. Validation then requires: the data
-fork ending at or before the XML offset; the XML range, and a resource fork
-of nonzero length, each ending at or before the trailer, their offset plus
-length not overflowing; the resource fork sharing no byte with the data fork
-or the XML. The resource fork's bytes are never read: the tables come from
-the plist. Validation further requires a single segment, segment
+fork ending at or before the XML offset; the XML range, a resource fork
+of nonzero length and a code signature of nonzero length, each ending at or
+before the trailer, their offset plus length not overflowing; the resource
+fork and the signature each sharing no byte with the data fork or the XML.
+Neither the resource fork's bytes nor the signature's are read: the tables
+come from the plist, and fsimg verifies no signature. Validation further requires a single segment, segment
 number and count both 1 (`hdiutil convert`) or both 0 (`hdiutil create`),
 any other pair being a multi-segment image, which is unsupported; sector
 count times 512 as the disk length; checksum types 0 or 2, a CRC32 of 32
@@ -1654,11 +1660,11 @@ length within the data fork, raw runs with compressed length equal to sector
 count times 512, zero and ignore runs with compressed length zero, compressed
 runs with a nonzero compressed length and a decompressed length of at most
 16 MiB, and a nonzero sector count for every run other than a comment or the
-terminator, which carry zero by definition. Older `hdiutil` also writes an
-Ignore run of zero sectors at a table's end, before its terminator: an Ignore
-run of zero sectors with compressed length zero and its sector at or before
-the table's end covers nothing and is skipped, wherever in the table it
-appears. A table holds exactly its
+terminator, which carry zero by definition. Older `hdiutil` also writes
+Zero fill and Ignore runs of zero sectors at a table's end, before its
+terminator: a Zero fill or Ignore run of zero sectors with compressed length
+zero and its sector at or before the table's end covers nothing and is
+skipped, wherever in the table it appears. A table holds exactly its
 declared run count and ends with its one terminator. Run sector counts are
 summed per table and must equal the table's count. The index's tiling pass
 then proves that the tables and runs together cover exactly the declared
