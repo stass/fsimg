@@ -235,7 +235,8 @@ test_capability_records(void)
 		if ((info.entry_kinds & (FSIMG_ENTRY_CHAR_DEVICE |
 		    FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET)) != 0)
 			CHECK((info.entry_kinds & FSIMG_ENTRY_FILE) != 0);
-		CHECK((info.metadata_fields & FSIMG_META_DEVICE) == 0);
+		CHECK((info.metadata_fields &
+		    (FSIMG_META_DEVICE | FSIMG_META_EXTRA_DATA)) == 0);
 		CHECK((info.max_link_target_bytes == 0) ==
 		    ((info.entry_kinds & FSIMG_ENTRY_SYMLINK) == 0));
 		CHECK(info.max_link_target_bytes <= FSIMG_SYMLINK_TARGET_MAX);

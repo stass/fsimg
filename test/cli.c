@@ -44,6 +44,7 @@ static void test_long_listing(void);
 static fsimg_entry_t listing_entry(const char *, fsimg_entry_kind_t,
     uint32_t, uint32_t, uint32_t);
 static void test_device_and_socket_listing(void);
+static void test_extra_data_listing(void);
 static void test_device_and_socket_json_listing(void);
 static void test_staged_verification_failure(void);
 static void test_compressed_verification_spool_limit(void);
@@ -1494,6 +1495,39 @@ test_device_and_socket_listing(void)
 }
 
 static void
+test_extra_data_listing(void)
+{
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_entry_t entry = listing_entry("/x", FSIMG_ENTRY_FILE,
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED, 0, 0);
+	char absent[4096], present[4096];
+	size_t absent_length, present_length;
+
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_LIST;
+	options.scratch = "-";
+	for (unsigned style = 0; style < 3; style++) {
+		options.verbosity = style == 1 ? 1 : 0;
+		options.json = style == 2;
+		fsimg_cli_display_init(&display, &options, &result, &paths);
+		entry.metadata.valid &= ~FSIMG_META_EXTRA_DATA;
+		absent_length = list_entry(&display, &entry, absent, sizeof(absent));
+		entry.metadata.valid |= FSIMG_META_EXTRA_DATA;
+		present_length = list_entry(&display, &entry, present, sizeof(present));
+		if (options.json) {
+			CHECK(strstr(absent, "\"extra_data\":null") != NULL);
+			CHECK(strstr(present, "\"extra_data\":true") != NULL);
+		} else {
+			CHECK(absent_length == present_length);
+			CHECK(memcmp(absent, present, absent_length) == 0);
+		}
+	}
+}
+
+static void
 test_device_and_socket_json_listing(void)
 {
 	static const fsimg_entry_kind_t kinds[] = {
@@ -1761,6 +1795,19 @@ test_rendered_paths(bool json)
 		CHECK(strstr(output, "\"/c\\\\\\\\d\"") != NULL);
 	else
 		CHECK(strstr(output, "\"/c\\\\d\"") != NULL);
+
+	if (!json) {
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_FIELDS,
+		    FSIMG_META_EXTRA_DATA);
+		CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+		CHECK(strstr(display.buffer,
+		    "fsimg: metadata example: extra data could not be preserved exactly for") != NULL);
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_FIELDS,
+		    FSIMG_META_OWNER | FSIMG_META_MODE | FSIMG_META_EXTRA_DATA);
+		CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+		CHECK(strstr(display.buffer,
+		    "fsimg: metadata example: owner, mode, extra data could not be preserved exactly for") != NULL);
+	}
 
 	fsimg_error_set(&error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_EXTRACT,
 	    "safe extraction cannot deliver this name");
@@ -2489,6 +2536,7 @@ main(int argc, char **argv)
 	test_stems();
 	test_long_listing();
 	test_device_and_socket_listing();
+	test_extra_data_listing();
 	test_device_and_socket_json_listing();
 	test_volume_controls();
 	test_posix_options();

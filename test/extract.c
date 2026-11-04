@@ -44,7 +44,7 @@ static void fixture_open(extract_fixture_t *);
 static void fixture_open_with_entries(extract_fixture_t *,
     const fsimg_entry_t *, size_t);
 static void fixture_open_format(extract_fixture_t *, const fsimg_entry_t *,
-    size_t, const char *, entry_log_t *);
+    size_t, const char *, entry_log_t *, unsigned *);
 static void test_extraction_reports_completed_and_skipped_entries(void);
 static void test_failed_extraction_reports_only_completed_entries(void);
 static fsimg_status_t link_validate(void *, uint64_t, fsimg_error_t *);
@@ -96,6 +96,10 @@ static fsimg_status_t file_device_number_replay(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_error_t *);
 static fsimg_status_t socket_device_number_replay(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_error_t *);
+static fsimg_status_t extra_data_replay(fsimg_reader_t *, const char *,
+    const unsigned char *, size_t, fsimg_error_t *);
+static void record_extra_data_loss(void *, const char *, uint32_t);
+static void test_extraction_extra_data_loss(void);
 static void test_replay_refuses_device_number_on_nondevice(void);
 static void test_extraction_refuses_devices_and_sockets(void);
 static void test_skipped_devices_and_sockets_are_recorded_in_manifest(void);
@@ -113,6 +117,7 @@ static const fsimg_reader_ops_t *fat_reader_ops;
 static fsimg_reader_ops_t posix_reader_ops;
 static fsimg_reader_ops_t device_reader_ops;
 static bool last_root_entry_seen;
+static fsimg_metadata_t extra_data_metadata;
 
 /* The four-byte "short" becomes a symbolic link whose target is its content;
  * the empty root file becomes a FIFO.
@@ -140,6 +145,82 @@ present_posix_kinds(extract_fixture_t *fixture)
 	posix_reader_ops = *fat_reader_ops;
 	posix_reader_ops.replay = posix_replay;
 	fixture->reader->ops = &posix_reader_ops;
+}
+
+/* Isolate the selected file's metadata so strict extraction tests only
+ * the extra-data omission, independently of FAT timestamp losses.
+ */
+static fsimg_status_t
+extra_data_replay(fsimg_reader_t *reader, const char *name,
+    const unsigned char *payload, size_t length, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fat_reader_ops->replay(reader, name, payload, length, error);
+	if (status == FSIMG_OK && strcmp(name, "short") == 0)
+		reader->entry.metadata = extra_data_metadata;
+	return (status);
+}
+
+static void
+record_extra_data_loss(void *argument, const char *path, uint32_t fields)
+{
+	unsigned *calls = argument;
+
+	if ((fields & FSIMG_META_EXTRA_DATA) == 0)
+		return;
+	CHECK(strcmp(path, "/A/short") == 0);
+	(*calls)++;
+}
+
+static void
+test_extraction_extra_data_loss(void)
+{
+	extract_fixture_t fixture;
+	fsimg_reader_ops_t ops;
+	fsimg_extract_options_t options;
+	fsimg_stats_t before, after;
+	fsimg_error_t error;
+	uint64_t baseline_losses = 0;
+	unsigned calls;
+	const char *selection = "/A/short";
+
+	/* Baseline, optional omission, required omission, forbidden loss. */
+	for (unsigned scenario = 0; scenario < 4; scenario++) {
+		calls = 0;
+		fixture_open_format(&fixture, NULL, 0, "fat16", NULL, &calls);
+		fat_reader_ops = fixture.reader->ops;
+		ops = *fat_reader_ops;
+		ops.replay = extra_data_replay;
+		fixture.reader->ops = &ops;
+		extra_data_metadata = (fsimg_metadata_t){
+		    .valid = scenario == 0 ? 0 : FSIMG_META_EXTRA_DATA,
+		    .required = scenario == 2 ? FSIMG_META_EXTRA_DATA : 0 };
+		fsimg_extract_options_init(&options);
+		options.selections = &selection;
+		options.selection_count = 1;
+		if (scenario == 3)
+			options.flags &= ~FSIMG_EXTRACT_ALLOW_LOSS;
+		CHECK(fsimg_ctx_get_stats(fixture.ctx, &before, NULL) == FSIMG_OK);
+		if (scenario < 2) {
+			CHECK(fsimg_extract_at(fixture.reader, fixture.parent,
+			    "output", &options, NULL) == FSIMG_OK);
+			CHECK(fsimg_ctx_get_stats(fixture.ctx, &after, NULL) == FSIMG_OK);
+			if (scenario == 0)
+				baseline_losses = after.metadata_losses - before.metadata_losses;
+			else
+				CHECK(after.metadata_losses - before.metadata_losses ==
+				    baseline_losses + 1);
+			CHECK(calls == scenario);
+		} else {
+			CHECK(fsimg_extract_at(fixture.reader, fixture.parent,
+			    "output", &options, &error) == FSIMG_EUNSUPPORTED);
+			CHECK(calls == 0);
+		}
+		if (faccessat(fixture.parent, "output", F_OK, 0) == 0)
+			remove_tree(fixture.parent, "output");
+		fixture_close(&fixture);
+	}
 }
 
 /* Replace three files after FAT replay. The short file's content state must
@@ -610,12 +691,12 @@ static void
 fixture_open_with_entries(extract_fixture_t *fixture,
     const fsimg_entry_t *extra, size_t count)
 {
-	fixture_open_format(fixture, extra, count, "fat16", NULL);
+	fixture_open_format(fixture, extra, count, "fat16", NULL, NULL);
 }
 
 static void
 fixture_open_format(extract_fixture_t *fixture, const fsimg_entry_t *extra,
-    size_t count, const char *format, entry_log_t *log)
+    size_t count, const char *format, entry_log_t *log, unsigned *extra_losses)
 {
 	fsimg_options_t options;
 	fsimg_source_ops_t sources;
@@ -633,6 +714,8 @@ fixture_open_format(extract_fixture_t *fixture, const fsimg_entry_t *extra,
 	options.memory_bytes = UINT64_C(16) * 1024 * 1024;
 	options.entry = log == NULL ? NULL : record_entry;
 	options.entry_argument = log;
+	options.loss = extra_losses == NULL ? NULL : record_extra_data_loss;
+	options.loss_argument = extra_losses;
 	options.cancelled = cancelled;
 	options.cancel_argument = fixture;
 	CHECK(fsimg_ctx_new(&options, &fixture->ctx, NULL) == FSIMG_OK);
@@ -1581,6 +1664,7 @@ main(int argc, char **argv)
 	test_extraction_reports_completed_and_skipped_entries();
 	test_failed_extraction_reports_only_completed_entries();
 	test_unsupported_kinds();
+	test_extraction_extra_data_loss();
 	test_replay_refuses_device_number_on_nondevice();
 	test_extraction_refuses_devices_and_sockets();
 	test_skipped_devices_and_sockets_are_recorded_in_manifest();
@@ -1632,7 +1716,7 @@ test_extraction_reports_completed_and_skipped_entries(void)
 	struct stat st;
 	int root;
 
-	fixture_open_format(&fixture, extra, 2, "qnx6", &log);
+	fixture_open_format(&fixture, extra, 2, "qnx6", &log, NULL);
 	CHECK(log.count == 0);
 	CHECK(mkdirat(fixture.parent, "output", 0700) == 0);
 	root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
@@ -1675,7 +1759,7 @@ test_failed_extraction_reports_only_completed_entries(void)
 	fsimg_error_t error;
 	int root;
 
-	fixture_open_format(&fixture, &extra, 1, "qnx6", &log);
+	fixture_open_format(&fixture, &extra, 1, "qnx6", &log, NULL);
 	CHECK(mkdirat(fixture.parent, "output", 0700) == 0);
 	root = openat(fixture.parent, "output", O_RDONLY | O_DIRECTORY);
 	CHECK(root != -1);

@@ -38,6 +38,7 @@ static void fixture_open(loss_fixture_t *);
 static uint64_t context_losses(loss_fixture_t *);
 static fsimg_writer_t *new_writer(loss_fixture_t *, const char *, uint32_t);
 static void add_file(fsimg_writer_t *, const fsimg_entry_t *);
+static void test_extra_data_omission(void);
 static void test_operation_counts_each_field_once(void);
 static void test_operation_refusal_has_no_effects(void);
 static void test_operation_rejects_absent_fields(void);
@@ -244,6 +245,48 @@ test_omission_and_encoding_losses_share_one_total(void)
 	CHECK(fixture.calls == 2);
 	fsimg_writer_free(writer);
 	fsimg_ctx_free(fixture.ctx);
+}
+
+/* The catalog retains a valueless field; planning treats it as an omission. */
+static void
+test_extra_data_omission(void)
+{
+	fsimg_entry_t entry = { .path = "/extra\\data",
+	    .kind = FSIMG_ENTRY_FILE,
+	    .metadata = { .valid = FSIMG_META_EXTRA_DATA } };
+	loss_fixture_t fixture;
+	fsimg_writer_t *writer;
+	const fsimg_catalog_entry_t *current;
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	fsimg_error_t error;
+
+	for (unsigned scenario = 0; scenario < 3; scenario++) {
+		fixture_open(&fixture);
+		entry.metadata.required = scenario == 1 ? FSIMG_META_EXTRA_DATA : 0;
+		writer = new_writer(&fixture, "qnx6",
+		    scenario == 2 ? FSIMG_WRITE_ALLOW_LOSS : 0);
+		add_file(writer, &entry);
+		if (scenario == 0) {
+			CHECK(fsimg_writer_plan(writer, &plan, NULL) == FSIMG_OK);
+			CHECK(fsimg_catalog_get(writer, 1, &current, NULL) == FSIMG_OK);
+			CHECK(strcmp(current->entry.path, entry.path) == 0);
+			CHECK(current->entry.metadata.valid == FSIMG_META_EXTRA_DATA);
+			CHECK(current->entry.metadata.required == entry.metadata.required);
+			CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+			CHECK(info.metadata_losses == 1 && context_losses(&fixture) == 1);
+			CHECK(fixture.calls == 1);
+			CHECK(fixture.masks[0] == FSIMG_META_EXTRA_DATA);
+			CHECK(strcmp(fixture.paths[0], "/extra\\\\data") == 0);
+		} else {
+			CHECK(fsimg_writer_plan(writer, &plan, &error) == FSIMG_EUNSUPPORTED);
+			CHECK(plan == NULL);
+			CHECK(strcmp(error.path, "/extra\\\\data") == 0);
+			CHECK(fixture.calls == 0 && context_losses(&fixture) == 0);
+		}
+		fsimg_writer_free(writer);
+		fsimg_ctx_free(fixture.ctx);
+	}
 }
 
 /* /A's allowed omission and time loss are observed before the driver
@@ -473,6 +516,7 @@ main(void)
 	test_operation_refusal_has_no_effects();
 	test_operation_rejects_absent_fields();
 	test_omission_and_encoding_losses_share_one_total();
+	test_extra_data_omission();
 	test_late_refusal_keeps_earlier_observations();
 	test_summary_refusal_reports_nothing();
 	test_qnx4_owner_pair_is_one_loss();

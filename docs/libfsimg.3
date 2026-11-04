@@ -141,6 +141,16 @@ minor in dev_major and dev_minor.
 No writer stores these kinds, and the extractor never creates them.
 A format's entry_kinds lists a read-only kind when its reader reports it,
 so the mask is not a test of what a writer can store.
+.Pp
+A reader sets FSIMG_META_EXTRA_DATA, which governs no value, on an entry with
+stored data the entry model does not carry, such as an HFS Plus resource fork
+or extended attributes; its absence says nothing for a format that never sets
+it.
+No capability record lists the bit, the extractor reports it as a loss among
+the entry's fields, and a writer treats a catalog entry carrying it as an
+omission under the loss policy.
+Fields an HFS Plus volume stores for every entry outside the entry model, its
+Finder information, BSD flags and backup date, are neither returned nor marked.
 .Fn fsimg_reader_read_at
 reads only the current regular file or symbolic link, clips to EOF and returns
 confirmed bytes separately from status.

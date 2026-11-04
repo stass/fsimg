@@ -503,7 +503,7 @@ metadata_fields(fsimg_cli_display_t *display, uint64_t fields)
 {
 	static const char *const names[] = {
 		"creation time", "modification time", "access time", "attributes",
-		"change time", "owner", "mode", "device number"
+		"change time", "owner", "mode", "device number", "extra data"
 	};
 	bool first = true;
 
@@ -650,7 +650,9 @@ uuid_value(fsimg_cli_display_t *display, const unsigned char *uuid)
 		    "-" : "", uuid[i]);
 }
 
-/* JSON owner, mode and device number, each null when its field is absent. */
+/* JSON owner, mode, device number and extra-data mark, each null when its
+ * field is absent.
+ */
 static void
 posix_fields(fsimg_cli_display_t *display, const unsigned char *raw,
     uint64_t valid)
@@ -674,6 +676,8 @@ posix_fields(fsimg_cli_display_t *display, const unsigned char *raw,
 		    FSIMG_WIRE_ENTRY_DEV_MINOR));
 	else
 		append(display, ",\"dev_major\":null,\"dev_minor\":null");
+	append(display, ",\"extra_data\":%s",
+	    (valid & FSIMG_META_EXTRA_DATA) != 0 ? "true" : "null");
 }
 
 static const char *

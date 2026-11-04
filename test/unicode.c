@@ -204,6 +204,25 @@ test_paths_and_metadata(void)
 }
 
 static void
+test_extra_data_metadata(void)
+{
+	static const fsimg_entry_kind_t kinds[] = {
+		FSIMG_ENTRY_FILE, FSIMG_ENTRY_DIRECTORY, FSIMG_ENTRY_SYMLINK,
+		FSIMG_ENTRY_CHAR_DEVICE, FSIMG_ENTRY_BLOCK_DEVICE
+	};
+	fsimg_metadata_t metadata;
+
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		metadata = (fsimg_metadata_t){ .valid = FSIMG_META_EXTRA_DATA };
+		CHECK(fsimg_metadata_validate(&metadata, kinds[i], NULL) == FSIMG_OK);
+		metadata.required = FSIMG_META_EXTRA_DATA;
+		CHECK(fsimg_metadata_validate(&metadata, kinds[i], NULL) == FSIMG_OK);
+		metadata.valid = 0;
+		CHECK(fsimg_metadata_validate(&metadata, kinds[i], NULL) == FSIMG_EINVAL);
+	}
+}
+
+static void
 test_device_metadata(void)
 {
 	fsimg_metadata_t metadata = { .valid = FSIMG_META_DEVICE,
@@ -231,6 +250,7 @@ main(void)
 	test_invalid();
 	test_wtf8();
 	test_paths_and_metadata();
+	test_extra_data_metadata();
 	test_device_metadata();
 	return (0);
 }

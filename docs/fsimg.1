@@ -477,6 +477,13 @@ same way, so force the scheme to read the new table.
 An MBR entry starting at sector 0, as mformat and isohybrid write over the
 volume that begins there, is no partition table, and the disk is that bare
 volume.
+An HFS Plus or HFSX entry delivers its data fork and POSIX metadata.
+An entry with a resource fork or stored extended attributes is marked as
+having extra data, which
+.Fl Fl json
+shows and extraction reports as a metadata loss.
+Every entry's Finder information, BSD flags and backup date are outside the
+entry model and are neither delivered nor marked.
 QNX6 locates its second superblock in the last whole 4096-byte unit of the
 slice, so
 .Fl Fl length
@@ -1680,6 +1687,10 @@ not trusted.
 Selected paths and necessary ancestors are preserved below the image root.
 Output uses private directories and regular files, no links, no merge,
 no privileged metadata and no host timestamp restoration.
+Extraction delivers an entry's data and never its other stored data, so an
+entry marked as extra data, such as an HFS Plus file with a resource fork or
+extended attributes, counts that field as a metadata loss and names it in a
+verbose example.
 Every entry is created exclusively, so an object another process adds
 concurrently is a collision failure.
 An image entry of another kind, such as a symbolic link, FIFO, device or
@@ -1913,6 +1924,9 @@ finalization.
 On success, optional metadata loss produces one notice counting affected fields,
 not files.
 Verbose examples are sampled and truncated path excerpts are labeled.
+A verbose example names each field: the times, attributes, owner, mode, device
+number or, for an entry marked with stored data outside the entry model, extra
+data.
 Failed commands do not append metadata-loss notices to their error reports.
 Sandbox warnings remain visible before processing.
 Errors explain the failure and any relevant OS error without numeric errno
@@ -1956,6 +1970,9 @@ Entry records name their kind as file, directory, symlink, fifo,
 char_device, block_device or socket and carry change time, uid, gid, mode,
 dev_major and dev_minor, each null when absent; only a device carries a
 device number.
+An entry record's extra_data is true when the entry has stored data the entry
+model does not carry, such as an HFS Plus resource fork or extended attributes,
+and null otherwise.
 Information records also give the mountpoint, null when absent, and details,
 an object of each named format detail's decimal string value.
 Format records name their kind: filesystem, scheme, container or

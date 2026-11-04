@@ -424,7 +424,7 @@ test_invalid_kinds(void)
 		{ .kind = (fsimg_entry_kind_t)16 },
 		{ .kind = (fsimg_entry_kind_t)0 },
 		{ .kind = FSIMG_ENTRY_FIFO, .valid = FSIMG_META_MODE, .mode = 010000 },
-		{ .kind = FSIMG_ENTRY_FIFO, .valid = 0x100,
+		{ .kind = FSIMG_ENTRY_FIFO, .valid = 0x200,
 		    .message = "invalid metadata validity or requirements" },
 		{ .kind = FSIMG_ENTRY_FIFO, .valid = FSIMG_META_DEVICE,
 		    .message = "a device number is valid only on a device" }

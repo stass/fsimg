@@ -91,6 +91,8 @@ typedef enum worker_scenario {
 	SCENARIO_VHD_WHOLE_FILE,
 	SCENARIO_EXCESS_LOSS,
 	SCENARIO_LIMIT_LOSS,
+	SCENARIO_EXTRA_DATA_LOSS,
+	SCENARIO_UNKNOWN_LOSS,
 	SCENARIO_INFORMATIONAL_GEOMETRY,
 	SCENARIO_SALVAGE_DONE,
 	SCENARIO_SALVAGE_FORGED_CLEAN,
@@ -2811,12 +2813,18 @@ fake_worker(worker_scenario_t mode)
 	/* As many valid metadata loss examples as a worker may send, or one
 	 * more, then an otherwise correct job.
 	 */
-	if (mode == SCENARIO_LIMIT_LOSS || mode == SCENARIO_EXCESS_LOSS) {
+	if (mode == SCENARIO_LIMIT_LOSS || mode == SCENARIO_EXCESS_LOSS ||
+	    mode == SCENARIO_EXTRA_DATA_LOSS || mode == SCENARIO_UNKNOWN_LOSS) {
+		uint32_t fields = FSIMG_META_MODIFIED;
+
+		if (mode == SCENARIO_EXTRA_DATA_LOSS)
+			fields = FSIMG_META_EXTRA_DATA;
+		else if (mode == SCENARIO_UNKNOWN_LOSS)
+			fields = 0x200;
 		for (unsigned i = 0; i < FSIMG_WIRE_LOSS_EVENTS +
 		    (mode == SCENARIO_EXCESS_LOSS ? 1 : 0); i++) {
 			bzero(raw, FSIMG_WIRE_LOSS_BYTES + 1);
-			fsimg_store_le64(raw + FSIMG_WIRE_LOSS_FIELDS,
-			    FSIMG_META_MODIFIED);
+			fsimg_store_le64(raw + FSIMG_WIRE_LOSS_FIELDS, fields);
 			fsimg_store_le64(raw + FSIMG_WIRE_LOSS_LENGTH, 1);
 			raw[FSIMG_WIRE_LOSS_PATH] = 'X';
 			if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_LOSS,
@@ -3351,7 +3359,8 @@ test_forged(void)
 		SCENARIO_INFO_WITHOUT_IMAGE, SCENARIO_IMAGE_WRONG_DISK,
 		SCENARIO_PARTITION_OUTSIDE, SCENARIO_PARTITION_UNSELECTED_LIST,
 		SCENARIO_VHD_WHOLE_FILE, SCENARIO_EXCESS_LOSS, SCENARIO_LIMIT_LOSS,
-		SCENARIO_VERIFY_UNVERIFIED_IMAGE
+		SCENARIO_VERIFY_UNVERIFIED_IMAGE, SCENARIO_EXTRA_DATA_LOSS,
+		SCENARIO_UNKNOWN_LOSS
 #ifdef FSIMG_TEST_ASAN
 		, SCENARIO_ASAN_FAILURE
 #endif
@@ -3383,7 +3392,7 @@ test_forged(void)
 			fixture.request.kind = FSIMG_JOB_LIST;
 			expected = FSIMG_OK;
 		}
-		if (mode == SCENARIO_LIMIT_LOSS)
+		if (mode == SCENARIO_LIMIT_LOSS || mode == SCENARIO_EXTRA_DATA_LOSS)
 			expected = FSIMG_OK;
 		/* Only i may report a disk without a selected volume. */
 		if (mode == SCENARIO_PARTITION_UNSELECTED_LIST)

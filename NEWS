@@ -69,6 +69,11 @@ them, and the catalog refuses them. `t` marks a socket `=`, `t -v` shows
 `socket` with `device=native,MAJOR,MINOR`. Extraction never creates them:
 it fails naming the entry, or `-k` skips and counts it.
 
+An entry can carry `FSIMG_META_EXTRA_DATA`, a validity bit with no value,
+saying that it has stored data the entry model does not carry. `t --json`
+shows it as `extra_data`, extraction counts it as a metadata loss, and verbose
+loss examples name it as extra data; a writer treats it as an omission.
+
 `--force` reads a volume whose identity checks fail as the filesystem
 `-F` names, keeping every validation check: an Atari ST FAT12 floppy, with
 no x86 jump, no 0x55AA and garbage in its first FAT entries, lists and

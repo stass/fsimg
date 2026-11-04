@@ -21,6 +21,7 @@ static void test_job_label(void);
 static void test_job_mountpoint(void);
 static void test_selection_budget(void);
 static void test_error_padding(void);
+static void test_extra_data_entry_records(void);
 static void test_entry_records(void);
 static void test_device_and_socket_entry_records(void);
 static void test_invalid_device_and_socket_entry_records(void);
@@ -487,6 +488,52 @@ test_entry_records(void)
 	CHECK(entry_frame_valid(&entry, false) && entry_frame_valid(&entry, true));
 }
 
+/* Extra data has no value slots, on either content or directory entries. */
+static void
+test_extra_data_entry_records(void)
+{
+	static const fsimg_entry_kind_t kinds[] = {
+		FSIMG_ENTRY_FILE, FSIMG_ENTRY_DIRECTORY
+	};
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_ENTRY,
+	    .length = FSIMG_WIRE_ENTRY_BYTES };
+	fsimg_entry_t entry = { .path = "/x" };
+	unsigned char *raw = frame.payload;
+
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		entry.kind = kinds[i];
+		entry.metadata = (fsimg_metadata_t){
+		    .valid = FSIMG_META_EXTRA_DATA,
+		    .required = FSIMG_META_EXTRA_DATA };
+		fsimg_wire_entry_encode(raw, &entry, 2);
+		CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_KIND) == kinds[i]);
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_VALID) ==
+		    FSIMG_META_EXTRA_DATA);
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_REQUIRED) ==
+		    FSIMG_META_EXTRA_DATA);
+		for (size_t offset = FSIMG_WIRE_ENTRY_ATTRIBUTES;
+		    offset < FSIMG_WIRE_ENTRY_BYTES; offset += 8)
+			CHECK(fsimg_load_le64(raw + offset) == 0);
+
+		entry.metadata.valid |= FSIMG_META_OWNER | FSIMG_META_MODE;
+		entry.metadata.uid = 42;
+		entry.metadata.gid = 7;
+		entry.metadata.mode = 0644;
+		fsimg_wire_entry_encode(raw, &entry, 2);
+		CHECK(fsimg_wire_entry_frame_valid(&frame, false, 4096));
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_VALID) ==
+		    entry.metadata.valid);
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_UID) == 42);
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_GID) == 7);
+		CHECK(fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_MODE) == 0644);
+
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_VALID,
+		    FSIMG_META_OWNER | FSIMG_META_MODE);
+		CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
+	}
+}
+
 static void
 test_device_and_socket_entry_records(void)
 {
@@ -610,7 +657,7 @@ test_invalid_entry_records(void)
 	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_UID, UINT64_C(1) << 32);
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	fsimg_wire_entry_encode(raw, &entry, 2);
-	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_VALID, 0x100);
+	fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_VALID, 0x200);
 	CHECK(!fsimg_wire_entry_frame_valid(&frame, false, 4096));
 	for (uint64_t kind = 0; kind <= 16; kind++) {
 		fsimg_wire_entry_encode(raw, &entry, 2);
@@ -2587,6 +2634,7 @@ main(int argc, char **argv)
 	test_selection_budget();
 	test_error_padding();
 	test_entry_records();
+	test_extra_data_entry_records();
 	test_device_and_socket_entry_records();
 	test_invalid_device_and_socket_entry_records();
 	test_invalid_entry_records();

@@ -49,6 +49,7 @@ preserved, irrespective of how many components of that field differ:
 | `FSIMG_META_OWNER` | The owner/group pair, even when both identifiers are changed |
 | `FSIMG_META_MODE` | The permission field, irrespective of the number of differing bits |
 | `FSIMG_META_ATTRIBUTES` | The generic attribute field, irrespective of the number of differing flags |
+| `FSIMG_META_EXTRA_DATA` | The extra-data mark, irrespective of how much data it stands for |
 
 For example, a QNX4 owner and group both above 65534 produce one owner loss.
 A timestamp whose basis, fraction and reproducible value all differ produces

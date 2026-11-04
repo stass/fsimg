@@ -298,6 +298,12 @@ fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
 #define FSIMG_META_OWNER 0x20u
 #define FSIMG_META_MODE 0x40u
 #define FSIMG_META_DEVICE 0x80u
+/* The entry has stored data the entry model does not carry, such as an HFS
+ * Plus resource fork or extended attributes. The bit governs no value and no
+ * format's metadata_fields lists it; since nothing restores or stores that
+ * data, extraction and writing report it as a loss of the entry's.
+ */
+#define FSIMG_META_EXTRA_DATA 0x100u
 
 /* What a salvage extraction lost, in the loss callback's mask: the child
  * listing of the directory at path, the root's being "/"; the entry at path,
