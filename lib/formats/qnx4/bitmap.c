@@ -78,13 +78,14 @@ bits_set(fsimg_reader_t *reader, uint64_t first, uint64_t count, bool *all,
 	return (FSIMG_OK);
 }
 
-/* Check the bitmap against the geometry before any record is trusted, in
+/* Check the bitmap against the geometry before any walk relies on it, in
  * two bounded windows: the first window must mark the loader, the root
  * block and the bitmap blocks it describes allocated, and the last bitmap
  * block must mark every bit from N to the end of its last used byte
  * allocated and hold 0xff in every byte after that. Those bits describe no
- * block, so they never count as free. The rest of the bitmap's own blocks
- * are checked by full verification.
+ * block, so they never count as free. A truncated volume's N is 8 * size,
+ * which leaves no such bits; its 0xff bytes are checked all the same. The
+ * rest of the bitmap's own blocks are checked by full verification.
  */
 fsimg_status_t
 qnx4_bitmap_open(fsimg_reader_t *reader, fsimg_error_t *error)

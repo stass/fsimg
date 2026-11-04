@@ -36,6 +36,7 @@
 #define QNX4_LABEL_BYTES	48u
 #define QNX4_ROOT_RECORDS	5u
 #define QNX4_ROOT_FIXED_SLOTS	6u	/* ".", "..", .bitmap and three links */
+#define QNX4_ROOT_BITMAP_SLOT	2u
 
 /* Record status bits. A directory slot is free without USED and LINK, an
  * .inodes slot without USED; the bytes of a free slot carry no meaning.
@@ -144,11 +145,12 @@ typedef struct qnx4_longname {
 	bool		 tail_zero;	/* byte 0x1ff */
 } qnx4_longname_t;
 
-/* The geometry derived from the slice length: N blocks, of which blocks 3
- * to 2 + B hold the bitmap's ceil(N / 8) bytes.
+/* The geometry derived from the slice length, or from .bitmap's size when
+ * that proves the slice lost its tail: N blocks, of which blocks 3 to 2 + B
+ * hold the bitmap's ceil(N / 8) bytes.
  */
 typedef struct qnx4_geometry {
-	uint64_t	 volume_bytes;
+	uint64_t	 volume_bytes;		/* N * 512 */
 	uint32_t	 blocks;		/* N */
 	uint32_t	 bitmap_blocks;		/* B = ceil(N / 4096) */
 	uint32_t	 bitmap_bytes;		/* ceil(N / 8) */

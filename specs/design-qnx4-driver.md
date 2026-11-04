@@ -23,7 +23,7 @@ share no code, since they decode different records.
 | `qnx4.h` | Private types, constants and prototypes shared by the files below |
 | `descriptor.c` | `fsimg_qnx4_format`: the `qnx4` name, its capability record, the probe and the reader and writer operations |
 | `codec.c` | Little-endian integer codecs and decode/encode of the 64-byte inode record, 64-byte link record, 512-byte extent block and 512-byte long-name record; pure functions without I/O |
-| `volume.c` | Geometry from the slice length, the root block, the root directory's fixed slots, discovery of `.bitmap`, `.inodes`, `.longfilenames` and `lost+found` |
+| `volume.c` | Geometry from the slice length and `.bitmap`'s size, the root block, the root directory's fixed slots, discovery of `.bitmap`, `.inodes`, `.longfilenames` and `lost+found` |
 | `extent.c` | The extent walker: first extent and chain validation, index construction, ownership claims |
 | `bitmap.c` | The bitmap pager: self-check at open and the allocated-bit query |
 | `inode.c` | Record positions, link resolution through the `.inodes` locator, record validation and the record-to-entry mapping |
@@ -85,21 +85,30 @@ QNX4 root block carries no other format's signature at its offsets.
 `open` completes recognition in a fixed order; each step fails before the
 next reads:
 
-1. **Geometry.** The slice length must be a multiple of 512; `N` is the
-   quotient, `B = ceil(N / 4096)`, and `N` must be at least 43 and at most
-   `2^31`. `qnx4_geometry_t` holds `N`, `B`, the slice length and the
-   content domain `[(2 + B) * 512, N * 512)`.
-2. **Root block.** Decode the five records against the format design's
-   root-block table and require the zero ranges. Record 0's first extent
-   must start at `3 + B`. Decode the label; an invalid one is recorded as
-   absent, so `info` omits it and verification reports the volume
-   incomplete.
+1. **Root block.** Decode the five records against the format design's
+   root-block table and require the zero ranges. Decode the label; an invalid
+   one is recorded as absent, so `info` omits it and verification reports the
+   volume incomplete.
+2. **Geometry.** Read `.bitmap`'s record, root slot 2, from where record 0's
+   first extent starts. A size above `ceil(floor(slice bytes / 512) / 8)`
+   proves truncation and gives `N = size * 8`; otherwise the slice length must
+   be a multiple of 512 and `N` is the quotient. `B = ceil(N / 4096)`, and `N`
+   must be at least 43 and at most `2^31`. Record 0's first extent must start
+   at `3 + B` and the record must match the root-slot table for this `N`. A
+   size can only be judged through `B`: one that changes `B` fails, and any
+   other overstatement reads as truncation, which full verification fails all
+   the same. The root's first block is in the slice and `B` blocks of bitmap
+   lie before it, so the whole bitmap is in the slice however large a forged
+   size declares `N`. `qnx4_geometry_t` holds `N`, `B`, the declared bytes
+   `N * 512` and the content domain `[(2 + B) * 512, N * 512)`, which can reach
+   past a truncated slice: a read there fails in the reader funnel.
 3. **Bitmap pager.** Create the pager over blocks `3` to `2 + B` from the
    geometry alone and run its bounded self-check (below). No object can be
    walked before this step, because every walk checks allocation bits.
 4. **Claims.** Create the claimed-block bitset in scratch, `N` bits with
    bit `b - 1` for block `b`, the bitmap's own layout, and claim blocks `1`
-   through `2 + B` with one range claim.
+   through `2 + B` with one range claim. Its `N / 8` bytes are the bitmap's,
+   which geometry placed in the slice.
 5. **Root slots.** Walk record 0's extents under the allocated policy, a
    non-claiming read, and validate slots 0 to 5 against the root-slot
    table: the dots' targets, slot 2 a direct `.bitmap` record with extent
@@ -177,7 +186,7 @@ way, and the content domain rejects them at index construction as well.
 ## The bitmap pager
 
 The bitmap's position is fixed by the geometry, so the pager exists before
-any record is trusted. `qnx4_blocks_allocated()` answers whether every
+any walk relies on it. `qnx4_blocks_allocated()` answers whether every
 block of a run in `[1, N]` is allocated; for each block `b` it reads the
 4 KiB window containing byte
 `floor((b - 1) / 8)` of the bitmap bytes at volume offset
@@ -469,7 +478,7 @@ Reader:
 | --- | --- |
 | No root signature in block 2; image shorter than 1024 bytes | `FSIMG_EFORMAT` |
 | Recognized but unobserved: a status, type byte, reserved or spare byte, `.inodes` status or name field, zero root-block record 4, extent-block fill, kind, size above `2^31 - 1`, link target above 1023 bytes, `lost+found`'s `..` naming `(2, 0)`; a used slot in `lost+found` or an invalid label under `verify` | `FSIMG_EUNSUPPORTED` |
-| Slice length not a multiple of 512; `N` outside `[43, 2^31]`; root extent not at `3 + B`; bitmap position, size or padding; used with link; empty name, NUL, slash or dot name; range, chain, count, signature, first-copy, claim, dot-entry, link-target, long-name, link-count, occupancy or free-bit inconsistency | `FSIMG_ECORRUPT` |
+| Slice length not a multiple of 512 without proof of truncation; `N` outside `[43, 2^31]`; root extent not at `3 + B`; bitmap position, size or padding; used with link; empty name, NUL, slash or dot name; range, chain, count, signature, first-copy, claim, dot-entry, link-target, long-name, link-count, occupancy or free-bit inconsistency | `FSIMG_ECORRUPT` |
 | Unrepresentable selection component | `FSIMG_EINVAL` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
 

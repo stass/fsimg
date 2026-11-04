@@ -108,10 +108,13 @@ qnx4_root_is_directory(const unsigned char *block)
 /* The root block's validation, shared by the probe and by open, which
  * checks the bytes it reads again: record 0 is a directory whose first
  * extent lies in the slice, and records 1 to 4 have empty names and their
- * table statuses. Traversal starts from that extent.
+ * table statuses. Traversal starts from that extent, and on a truncated
+ * volume too it must be there: a directory's extents are all within its
+ * size and open reads every slot, so a cut inside the extent loses
+ * referenced metadata.
  */
 fsimg_status_t
-qnx4_root_block_validate(const unsigned char *block, uint64_t volume_bytes,
+qnx4_root_block_validate(const unsigned char *block, uint64_t slice_bytes,
     fsimg_error_t *error)
 {
 	qnx4_inode_t record;
@@ -125,7 +128,7 @@ qnx4_root_block_validate(const unsigned char *block, uint64_t volume_bytes,
 		return (qnx4_corrupt(error, "QNX4 root directory has no extent"));
 	last = (uint64_t)record.first_extent.first +
 	    record.first_extent.blocks - 1;
-	if (last > volume_bytes / QNX4_BLOCK_BYTES)
+	if (last > slice_bytes / QNX4_BLOCK_BYTES)
 		return (qnx4_corrupt(error,
 		    "QNX4 root directory lies outside the volume"));
 	for (unsigned i = QNX4_RECORD_INODES; i < QNX4_ROOT_RECORDS; i++) {

@@ -71,6 +71,18 @@ image is read as a slice given with `--offset` and `--length`; without
 `--length` the slice runs to the end of the image and `N` follows from that.
 [X1]
 
+A slice that lost the volume's tail is recognized from `.bitmap`, whose size
+is the formatted `ceil(N / 8)`: a size above
+`ceil(floor(slice bytes / 512) / 8)` proves the cut. `N` is then `size * 8`,
+at most 7 blocks above the formatted count, the slice need not be a multiple
+of 512, and a size above `2^28` is out of range. The declared bytes therefore
+always exceed the slice, and the volume follows the
+[rules for a truncated image](architecture.md#byte-and-object-boundaries). A
+cut too short to change `ceil(N / 8)` proves nothing: the slice is judged as a
+volume of its own length. A damaged size that overstates the bitmap without
+changing `B` is indistinguishable from a cut and reads as one, so full
+verification fails it as truncated.
+
 The smallest volume the native formatter accepts is 43 blocks, at which no
 block is free; the largest `N` is `2^31`. The reader accepts any `N` from 43
 to `2^31` whose bitmap and root structures validate; the writer emits volumes
@@ -325,8 +337,10 @@ record with a single extent `(3, B)` and size `ceil(N / 8)`; bits from `N` to
 the end of the last used byte are set, and the bytes from the size to the end
 of block `2 + B` are `0xff`. The native formatter writes all of that, and the
 checker derives the same length from the device size, so `N` is the slice's
-block count and nothing else. A `.bitmap` record that differs in position,
-extent, size or padding is `FSIMG_ECORRUPT`. [X1], [H1]
+block count unless the size proves the slice truncated. A `.bitmap` record that
+differs in position, extent, size or padding is `FSIMG_ECORRUPT`. [X1], [H1]
+On a truncated slice `N = size * 8` leaves no bits past `N`, the `0xff` bytes
+are still checked, and the whole bitmap must lie in the slice.
 
 Blocks 1 and 2 and the bitmap's own blocks are allocated. Every block an
 object references must be allocated, and full verification requires that
@@ -554,7 +568,7 @@ and every referenced slot is used. [X1], [H1]
 
 | Property | Accepted |
 | --- | --- |
-| Block count | 43 to `2^31`, from the slice length |
+| Block count | 43 to `2^31`, from the slice length, or from `.bitmap`'s size on a truncated slice |
 | Root block | the five records and zero ranges as tabled; an invalid label is omitted, not fatal |
 | Root directory | first extent at `3 + B`; slots 0 to 5 as tabled; `.longfilenames` by name |
 | Statuses, type byte, reserved and spare bytes | the closed tables |

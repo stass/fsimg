@@ -5469,28 +5469,493 @@ test_qnx4_intact_volume_with_assume_identity_verifies(void)
 	gen_free(&g);
 }
 
-static void test_qnx4_assumed_identity_rejects_short_volumes(void);
+static void test_qnx4_assumed_identity_checks_truncated_geometry(void);
 
 static void
-test_qnx4_assumed_identity_rejects_short_volumes(void)
+test_qnx4_assumed_identity_checks_truncated_geometry(void)
 {
 	gen_t g;
 	fixture_t f;
 	fsimg_io_t *volume;
+	fsimg_read_options_t options;
+	fsimg_volume_info_t info;
+	fsimg_error_t error;
 	uint64_t lengths[2];
 
 	check_force_short_volumes("qnx4", 1024);
 	identity_volume(&g);
 	fixture_new(&f, g.image, g.length);
+	fsimg_read_options_init(&options);
+	options.format = "qnx4";
+	options.flags = FSIMG_READ_ASSUME_IDENTITY;
 	lengths[0] = g.length / 2;
 	lengths[1] = 1024 + 1;
 	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
 		CHECK(fsimg_io_slice(f.io, 0, lengths[i], &volume, NULL) ==
 		    FSIMG_OK);
-		check_force_truncated_volume(f.ctx, volume, "qnx4");
+		if (i == 0) {
+			CHECK(fsimg_reader_open(f.ctx, volume, &options,
+			    &f.reader, &error) == FSIMG_OK);
+			CHECK(fsimg_reader_get_info(f.reader, &info, NULL) ==
+			    FSIMG_OK);
+			CHECK(info.missing_bytes == g.length - lengths[i]);
+			fsimg_reader_free(f.reader);
+			f.reader = NULL;
+			check_force_truncated_volume(f.ctx, volume, "qnx4");
+		} else {
+			CHECK(fsimg_reader_open(f.ctx, volume, &options,
+			    &f.reader, &error) == FSIMG_ECORRUPT);
+			CHECK(strstr(error.message,
+			    "root directory lies outside the volume") != NULL);
+		}
 		fsimg_io_free(volume);
 	}
 	fixture_free(&f);
+	g.image[GEN_BLOCK] = 'X';
+	fixture_new(&f, g.image, g.length / 2);
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader, &error) ==
+	    FSIMG_OK);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.missing_bytes == g.length / 2);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+/* A small tree with a free tail; every payload has an explicit byte oracle. */
+static void
+truncated_tree(gen_t *g, uint32_t blocks)
+{
+	uint32_t dir;
+
+	gen_init(g, blocks);
+	gen_file(g, OBJ_ROOT, "one", (const unsigned char *)"first", 5);
+	dir = gen_dir(g, OBJ_ROOT, "dir");
+	gen_file(g, dir, "two", (const unsigned char *)"second", 6);
+	gen_finish(g);
+	CHECK(g->next_block + 8 <= blocks);
+}
+
+static void
+check_truncated_tail(gen_t *g, uint64_t length)
+{
+	const char *const paths[] = {
+		"/.boot", "/.altboot", "/one", "/dir", "/dir/two"
+	};
+	fixture_t f;
+	fsimg_volume_info_t info;
+	fsimg_error_t error = {0};
+	fsimg_extract_result_t result;
+	fsimg_verify_report_t report;
+	const fsimg_entry_t *entry;
+	uint64_t declared, entries;
+	unsigned seen = 0;
+	size_t i;
+	char missing[32];
+	char label[96];
+	fsimg_status_t status;
+
+	declared = (uint64_t)get32(record_of(g, OBJ_BITMAP) + INODE_SIZE) *
+	    8 * GEN_BLOCK;
+	CHECK(length >= (uint64_t)(g->next_block - 1) * GEN_BLOCK);
+	fixture_new(&f, g->image, length);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
+	snprintf(label, sizeof(label), "free tail N=%" PRIu32 " cut=%" PRIu64,
+	    g->blocks, length);
+	expect_outcome(label, "open", FSIMG_OK, status, &error);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.volume_bytes == declared);
+	CHECK(info.missing_bytes != 0);
+	CHECK(info.missing_bytes == declared - length);
+	entries = 0;
+	while ((status = fsimg_reader_next(f.reader, &entry, &error)) ==
+	    FSIMG_OK) {
+		entries++;
+		for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++)
+			if (strcmp(entry->path, paths[i]) == 0)
+				break;
+		CHECK(i < sizeof(paths) / sizeof(paths[0]));
+		CHECK((seen & (1u << i)) == 0);
+		seen |= 1u << i;
+		if (strcmp(entry->path, "/one") == 0)
+			check_content(&f, (const unsigned char *)"first", 5);
+		else if (strcmp(entry->path, "/dir/two") == 0)
+			check_content(&f, (const unsigned char *)"second", 6);
+	}
+	CHECK(status == FSIMG_DONE && entries == 5 && seen == 0x1f);
+	fixture_free(&f);
+
+	/* Only extraction writes payloads to disk. */
+	fixture_new(&f, g->image, length);
+	CHECK(extract_members(&f, NULL, 0, false, &result, &error) == FSIMG_OK);
+	check_file(&f, "out/one", "first", 5);
+	check_file(&f, "out/dir/two", "second", 6);
+	check_file(&f, "out/.boot", "", 0);
+	check_file(&f, "out/.altboot", "", 0);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+
+	CHECK(verify_image(g->image, length, NULL, &error) == FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	snprintf(missing, sizeof(missing), "%" PRIu64, declared - length);
+	CHECK(strstr(error.message, missing) != NULL);
+	fixture_new(&f, g->image, length);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	CHECK(strstr(error.message, missing) != NULL);
+	fixture_free(&f);
+}
+
+static void
+test_truncated_tail(void)
+{
+	const uint32_t blocks[] = { 128, 131 };
+	gen_t g;
+
+	for (size_t i = 0; i < sizeof(blocks) / sizeof(blocks[0]); i++) {
+		truncated_tree(&g, blocks[i]);
+		check_truncated_tail(&g, 112 * GEN_BLOCK);
+		check_truncated_tail(&g, 112 * GEN_BLOCK + 100);
+		gen_free(&g);
+	}
+}
+
+static void
+test_truncated_file(void)
+{
+	gen_t g;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	fsimg_extract_options_t options;
+	const char *const members[] = { "/late" };
+	unsigned char byte;
+	size_t count;
+	uint64_t entries;
+	bool early, late;
+	fsimg_status_t status;
+
+	gen_init(&g, 128);
+	gen_file(&g, OBJ_ROOT, "early", (const unsigned char *)"ok", 2);
+	gen_skip(&g, 96 - g.next_block);
+	gen_file(&g, OBJ_ROOT, "late", (const unsigned char *)"lost", 4);
+	gen_finish(&g);
+	fixture_new(&f, g.image, 80 * GEN_BLOCK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	early = late = false;
+	entries = 0;
+	while ((status = fsimg_reader_next(f.reader, &entry, &error)) ==
+	    FSIMG_OK) {
+		entries++;
+		if (strcmp(entry->path, "/early") == 0) {
+			early = true;
+			check_content(&f, (const unsigned char *)"ok", 2);
+		}
+		if (strcmp(entry->path, "/late") == 0)
+			late = true;
+	}
+	CHECK(status == FSIMG_DONE && entries == 4 && early && late);
+	fixture_free(&f);
+	fixture_new(&f, g.image, 80 * GEN_BLOCK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	do {
+		CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	} while (strcmp(entry->path, "/late") != 0);
+	CHECK(fsimg_reader_read_at(f.reader, 0, &byte, 1, &count, &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "image is truncated") == 0);
+	fixture_free(&f);
+
+	fixture_new(&f, g.image, 80 * GEN_BLOCK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	fsimg_extract_options_init(&options);
+	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+
+	/* Charging a missing file for extraction reports corruption, not a limit. */
+	fixture_new(&f, g.image, 80 * GEN_BLOCK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	fsimg_extract_options_init(&options);
+	options.selections = members;
+	options.selection_count = 1;
+	options.max_output_bytes = 1;
+	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", &options, &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	remove_tree(f.scratch, "out");
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+/* Reject forged geometry before it can size metadata storage. */
+static void
+expect_truncated_open(gen_t *g, uint64_t length, const char *label,
+    const char *message)
+{
+	fixture_t f;
+	fsimg_stats_t stats;
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+
+	fixture_new(&f, g->image, length);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
+	expect_outcome(label, "open", FSIMG_ECORRUPT, status, &error);
+	if (message != NULL) {
+		if (strstr(error.message, message) == NULL)
+			fprintf(stderr, "%s: expected %s, got %s\n", label,
+			    message, error.message);
+		CHECK(strstr(error.message, message) != NULL);
+	}
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.memory_peak < 2 * 1024 * 1024);
+	CHECK(stats.scratch_peak < 64 * 1024);
+	fixture_free(&f);
+}
+
+static void
+test_truncated_metadata(void)
+{
+	gen_t g;
+	unsigned char *bitmap;
+	uint32_t first;
+
+	gen_init(&g, 4104);
+	gen_finish(&g);
+	CHECK(g.bitmap_blocks == 2);
+	CHECK(get32(record_of(&g, OBJ_BITMAP) + INODE_SIZE) == 513);
+	CHECK(get32(block_at(&g, 2) + INODE_FIRST) == 5);
+	expect_truncated_open(&g, 3 * GEN_BLOCK + 100,
+	    "root bound on cut inside second bitmap block",
+	    "root directory lies outside the volume");
+	gen_free(&g);
+
+	truncated_tree(&g, 128);
+	first = g.objects[OBJ_ROOT].extents[0].first;
+	expect_truncated_open(&g, offset_of(first) + 300,
+	    "root bound on cut inside first root block",
+	    "root directory lies outside the volume");
+	expect_truncated_open(&g, offset_of(first + 7) + 100,
+	    "root bound on cut inside root extent",
+	    "root directory lies outside the volume");
+	first = g.objects[OBJ_INODES].extents[0].first;
+	expect_truncated_open(&g, offset_of(first) + 10,
+	    "inside inodes signature", NULL);
+	bitmap = record_of(&g, OBJ_BITMAP);
+	put32(bitmap + INODE_SIZE, 2);
+	put32(block_at(&g, 2) + INODE_BLOCKS, 1);
+	put32(block_at(&g, 2) + INODE_SIZE, GEN_BLOCK);
+	expect_truncated_open(&g, 4 * GEN_BLOCK, "proven N below minimum",
+	    "out of range");
+	put32(block_at(&g, 2) + INODE_BLOCKS, 8);
+	put32(block_at(&g, 2) + INODE_SIZE, 8 * GEN_BLOCK);
+	put32(bitmap + INODE_SIZE, UINT32_C(1) << 28);
+	put32(bitmap + INODE_BLOCKS, UINT32_C(1) << 19);
+	expect_truncated_open(&g, 12 * GEN_BLOCK,
+	    "bitmap at cap with mismatched root", "does not follow");
+	put32(block_at(&g, 2) + INODE_FIRST, 3 + (UINT32_C(1) << 19));
+	expect_truncated_open(&g, 12 * GEN_BLOCK,
+	    "root bound on forged root position",
+	    "root directory lies outside the volume");
+	put32(bitmap + INODE_SIZE, (UINT32_C(1) << 28) + 1);
+	put32(block_at(&g, 2) + INODE_FIRST, 4);
+	expect_truncated_open(&g, 12 * GEN_BLOCK, "bitmap above cap",
+	    "out of range");
+	put32(bitmap + INODE_SIZE, 17);
+	put32(bitmap + INODE_BLOCKS, 1);
+	expect_truncated_open(&g, 12 * GEN_BLOCK, "small proven bitmap", NULL);
+	put32(bitmap + INODE_SIZE, 512);
+	/* B stays one; the root and .inodes signature survive, but the
+	 * lost+found scan reaches missing bytes. The truncation diagnostic
+	 * proves the declared size was accepted.
+	 */
+	expect_truncated_open(&g, 12 * GEN_BLOCK, "one-block forged bitmap",
+	    "truncated");
+	gen_free(&g);
+}
+
+static void
+test_truncated_bitmap_overstatement(void)
+{
+	const uint32_t sizes[] = { 33, 512 };
+	gen_t g;
+	fixture_t f;
+	fsimg_volume_info_t info;
+	fsimg_stats_t stats;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	uint64_t entries;
+
+	truncated_tree(&g, 256);
+	CHECK(g.bitmap_blocks == 1);
+	CHECK(get32(record_of(&g, OBJ_BITMAP) + INODE_SIZE) == 32);
+	/* An overstatement preserving B is indistinguishable from a real cut. */
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		put32(record_of(&g, OBJ_BITMAP) + INODE_SIZE, sizes[i]);
+		fixture_new(&f, g.image, g.length);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) ==
+		    FSIMG_OK);
+		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+		CHECK(info.volume_bytes == (uint64_t)sizes[i] * 8 * GEN_BLOCK);
+		CHECK(info.missing_bytes == info.volume_bytes - g.length);
+		if (sizes[i] == 33)
+			CHECK(info.missing_bytes == 4096);
+		entries = 0;
+		while ((status = fsimg_reader_next(f.reader, &entry, &error)) ==
+		    FSIMG_OK)
+			entries++;
+		CHECK(status == FSIMG_DONE && entries == 5);
+		fsimg_reader_free(f.reader);
+		f.reader = NULL;
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+		    FSIMG_OK);
+		CHECK(fsimg_verify(f.reader, 0, &report, &error) == FSIMG_ECORRUPT);
+		CHECK(strstr(error.message, "truncated") != NULL);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+		CHECK(stats.scratch_peak < 64 * 1024);
+		fixture_free(&f);
+	}
+	put32(record_of(&g, OBJ_BITMAP) + INODE_SIZE, 513);
+	expect_truncated_open(&g, g.length, "bitmap changes B",
+	    "does not follow");
+	gen_free(&g);
+}
+
+static void
+test_truncated_records(void)
+{
+	gen_t g;
+	unsigned char *bitmap;
+	uint64_t cut = 112 * GEN_BLOCK;
+	fsimg_error_t error = {0};
+
+	truncated_tree(&g, 131);
+	bitmap = record_of(&g, OBJ_BITMAP);
+	put32(bitmap + INODE_FIRST, 4);
+	expect_truncated_open(&g, cut, "truncated bitmap position", NULL);
+	put32(bitmap + INODE_FIRST, 3);
+	put16(bitmap + INODE_EXTENTS, 2);
+	expect_truncated_open(&g, cut, "truncated bitmap extents", NULL);
+	put16(bitmap + INODE_EXTENTS, 1);
+	put32(bitmap + INODE_BLOCKS, 2);
+	expect_truncated_open(&g, cut, "truncated bitmap blocks", NULL);
+	put32(bitmap + INODE_BLOCKS, 1);
+	put32(block_at(&g, 2) + INODE_FIRST, 5);
+	expect_truncated_open(&g, cut, "truncated root position", NULL);
+	put32(block_at(&g, 2) + INODE_FIRST, 4);
+	block_at(&g, 3)[511] = 0xfe;
+	expect_truncated_open(&g, cut, "truncated bitmap padding", NULL);
+	block_at(&g, 3)[511] = 0xff;
+	gen_set_bit(&g, 1, false);
+	expect_truncated_open(&g, cut, "truncated system bit", NULL);
+	gen_set_bit(&g, 1, true);
+	gen_set_bit(&g, 132, false);
+	CHECK(run_image(g.image, g.length, NULL, &error) == FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "marks blocks past N free") != NULL);
+	/* On the truncated path N is 136, so this bit describes a block. */
+	CHECK(run_image(g.image, cut, NULL, NULL) == FSIMG_OK);
+	gen_free(&g);
+}
+
+static void
+test_truncated_unproven(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_error_t error = {0};
+
+	truncated_tree(&g, 131);
+	fixture_new(&f, g.image, g.length);
+	fixture_resize(&f, g.length + 100);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "not whole blocks") != NULL);
+	fixture_free(&f);
+	expect_length(&g, g.length - 1, FSIMG_ECORRUPT,
+	    "one byte cut without proof");
+	expect_length(&g, g.length - GEN_BLOCK, FSIMG_ECORRUPT,
+	    "one block cut without proof");
+	fixture_new(&f, g.image, g.length);
+	fixture_resize(&f, 137 * GEN_BLOCK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) ==
+	    FSIMG_ECORRUPT);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_truncated_sweep(void)
+{
+	const int deltas[] = { -1, 0, 1, 100 };
+	gen_t g;
+	sample_t s;
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_volume_info_t info;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t entries;
+	int64_t cut;
+	bool opened_cut = false;
+
+	sample_build(&g, &s, 256);
+	CHECK(g.next_block + 8 <= g.blocks);
+	for (uint64_t boundary = 0; boundary <= g.length;
+	    boundary += GEN_BLOCK) {
+		for (size_t i = 0; i < sizeof(deltas) / sizeof(deltas[0]); i++) {
+			cut = (int64_t)boundary + deltas[i];
+			if (cut < 0 || (uint64_t)cut > g.length)
+				continue;
+			/* Independent readers let verification run even when a
+			 * payload read fails, and let listing visit every entry.
+			 */
+			for (unsigned operation = 0; operation < 4; operation++) {
+				fixture_new(&f, g.image, (uint64_t)cut);
+				bzero(&error, sizeof(error));
+				status = fsimg_reader_open(f.ctx, f.io, NULL,
+				    &f.reader, &error);
+				if ((uint64_t)cut == g.length)
+					CHECK(status == FSIMG_OK);
+				if (status == FSIMG_OK) {
+					CHECK(fsimg_reader_get_info(f.reader, &info,
+					    NULL) == FSIMG_OK);
+					if ((uint64_t)cut < g.length)
+						opened_cut = true;
+					if (operation == 0) {
+						const fsimg_entry_t *entry;
+
+						do {
+							status = fsimg_reader_next(f.reader,
+							    &entry, &error);
+						} while (status == FSIMG_OK);
+						if (status == FSIMG_DONE)
+							status = FSIMG_OK;
+					} else if (operation == 1)
+						status = walk_all(&f, &entries, &error);
+					else {
+						status = fsimg_verify(f.reader,
+						    operation == 3 ? FSIMG_VERIFY_PAYLOAD : 0,
+						    &report,
+						    &error);
+						if (info.missing_bytes != 0)
+							CHECK(status != FSIMG_OK);
+					}
+				}
+				if (status != FSIMG_OK && status != FSIMG_ECORRUPT &&
+				    !(cut < 1024 && status == FSIMG_EFORMAT))
+					fprintf(stderr, "cut %" PRId64 " operation %u: %d %s\n",
+					    cut, operation, status, error.message);
+				CHECK(status == FSIMG_OK || status == FSIMG_ECORRUPT ||
+				    (cut < 1024 && status == FSIMG_EFORMAT));
+				fixture_free(&f);
+			}
+		}
+	}
+	CHECK(opened_cut);
 	gen_free(&g);
 }
 
@@ -5513,11 +5978,18 @@ main(int argc, char **argv)
 		return (skipped == 0 ? 0 : 77);
 	}
 	CHECK(argc == 1);
-	test_qnx4_assumed_identity_rejects_short_volumes();
+	test_qnx4_assumed_identity_checks_truncated_geometry();
 	test_codecs();
 	test_sample();
 	test_hard_links();
 	test_geometry();
+	test_truncated_metadata();
+	test_truncated_unproven();
+	test_truncated_sweep();
+	test_truncated_tail();
+	test_truncated_file();
+	test_truncated_records();
+	test_truncated_bitmap_overstatement();
 	test_bitmap();
 	test_bitmap_first_window();
 	test_root_block();

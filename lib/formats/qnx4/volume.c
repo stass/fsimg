@@ -13,8 +13,9 @@
  * Opening a volume completes recognition in a fixed order, each step
  * failing before the next one reads:
  *
- * 1. geometry from the slice length alone;
- * 2. the root block's five records, zero ranges and label;
+ * 1. the root block's five records, zero ranges and label;
+ * 2. geometry from the slice length and the .bitmap record, which the root
+ *    block locates and which then must agree with it;
  * 3. the bitmap's bounded self-check, so every later walk can check
  *    allocation;
  * 4. claims of the loader, the root block and the bitmap;
@@ -41,8 +42,10 @@ typedef struct lost_scan {
 	bool		 used;
 } lost_scan_t;
 
-static fsimg_status_t derive_geometry(fsimg_reader_t *, fsimg_error_t *);
-static fsimg_status_t check_root_block(fsimg_reader_t *, fsimg_error_t *);
+static fsimg_status_t derive_geometry(fsimg_reader_t *, uint64_t,
+    fsimg_error_t *);
+static fsimg_status_t check_root_block(fsimg_reader_t *, uint64_t,
+    fsimg_error_t *);
 static void decode_label(fsimg_qnx4_reader_t *);
 static fsimg_status_t root_slot(void *, uint64_t, uint64_t,
     const unsigned char *, fsimg_error_t *);
@@ -57,26 +60,59 @@ static fsimg_status_t open_lost_found(fsimg_reader_t *, fsimg_error_t *);
 
 /* N is the slice length in blocks, B = ceil(N / 4096) bitmap blocks hold
  * its ceil(N / 8) bitmap bytes, and object storage lies past the bitmap.
+ *
+ * No record stores N, but .bitmap's size is the formatted volume's
+ * ceil(N / 8). A size above the slice's own ceil(N / 8) proves the slice
+ * lost its tail: N is then size * 8, at most 7 blocks above the formatted
+ * count, and the slice may end inside a block. Since the size exceeds
+ * ceil(blocks / 8), N is at least the slice's whole blocks plus 8, so
+ * volume_bytes always exceeds the slice and the reader core reports the
+ * difference as missing. A cut too short to change ceil(N / 8) proves
+ * nothing and is judged as the whole-volume length it appears to be.
+ *
+ * The record is read from where the root block says the root directory
+ * starts, a position inside the slice but not yet trusted, so that position
+ * and the record are both checked against the N the record produced. A size
+ * alone can only be judged through B: one that changes B is refused, and
+ * any other overstatement reads as truncation, which full verification
+ * fails all the same.
+ *
+ * The root directory following the bitmap is also what bounds a forged
+ * size: the root block check keeps the root's first block in the slice, so
+ * every bitmap block lies before it, and N / 8 bytes are bytes the slice
+ * holds.
  */
 static fsimg_status_t
-derive_geometry(fsimg_reader_t *reader, fsimg_error_t *error)
+derive_geometry(fsimg_reader_t *reader, uint64_t slice_bytes,
+    fsimg_error_t *error)
 {
 	fsimg_qnx4_reader_t *qnx4 = qnx4_state(reader);
 	qnx4_geometry_t *g = &qnx4->geometry;
-	uint64_t volume_bytes, blocks;
+	uint32_t root_first = qnx4->root[QNX4_RECORD_ROOT].first_extent.first;
+	unsigned char raw[QNX4_RECORD_BYTES];
+	qnx4_inode_t bitmap;
+	uint64_t blocks;
+	size_t transferred;
 	fsimg_status_t status;
 
-	status = fsimg_io_get_size(reader->input, &volume_bytes, error);
+	status = fsimg_reader_bytes(reader,
+	    (uint64_t)(root_first - 1) * QNX4_BLOCK_BYTES +
+	    QNX4_ROOT_BITMAP_SLOT * QNX4_RECORD_BYTES, raw, sizeof(raw),
+	    &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (volume_bytes % QNX4_BLOCK_BYTES != 0)
+	qnx4_inode_decode(raw, &bitmap);
+
+	blocks = slice_bytes / QNX4_BLOCK_BYTES;
+	if (bitmap.size > (blocks + 7) / 8)
+		blocks = (uint64_t)bitmap.size * 8;
+	else if (slice_bytes % QNX4_BLOCK_BYTES != 0)
 		return (qnx4_corrupt(error,
 		    "QNX4 volume length is not whole blocks"));
-	blocks = volume_bytes / QNX4_BLOCK_BYTES;
 	if (blocks < QNX4_BLOCKS_MIN || blocks > QNX4_BLOCKS_MAX)
 		return (qnx4_corrupt(error,
 		    "QNX4 volume block count is out of range"));
-	g->volume_bytes = volume_bytes;
+	g->volume_bytes = blocks * QNX4_BLOCK_BYTES;
 	g->blocks = (uint32_t)blocks;
 	g->bitmap_blocks = (uint32_t)((blocks + QNX4_BITS_PER_BLOCK - 1) /
 	    QNX4_BITS_PER_BLOCK);
@@ -86,7 +122,10 @@ derive_geometry(fsimg_reader_t *reader, fsimg_error_t *error)
 		.length = (blocks - 2 - g->bitmap_blocks) * QNX4_BLOCK_BYTES,
 		.unit_bytes = QNX4_BLOCK_BYTES
 	};
-	return (FSIMG_OK);
+	if (root_first != 3 + g->bitmap_blocks)
+		return (qnx4_corrupt(error,
+		    "QNX4 root directory does not follow the bitmap"));
+	return (qnx4_root_fixed_slot(reader, QNX4_ROOT_BITMAP_SLOT, raw, error));
 }
 
 /* The label is the bytes at 0x1c0 before the first NUL, or all 48. It is
@@ -112,18 +151,17 @@ decode_label(fsimg_qnx4_reader_t *qnx4)
 
 /* Block 2: records 0 to 4 -- the root directory, .inodes, .boot, .altboot
  * and lost+found -- with the statuses and kinds the formatter writes, zero
- * from 0x140 to 0x1bf and from 0x1f0, and the label between. The root
- * directory's first extent starts right after the bitmap.
+ * from 0x140 to 0x1bf and from 0x1f0, and the label between.
  */
 static fsimg_status_t
-check_root_block(fsimg_reader_t *reader, fsimg_error_t *error)
+check_root_block(fsimg_reader_t *reader, uint64_t slice_bytes,
+    fsimg_error_t *error)
 {
 	static const uint16_t kinds[QNX4_ROOT_RECORDS] = {
 		QNX4_MODE_DIRECTORY, QNX4_MODE_FILE, QNX4_MODE_FILE,
 		QNX4_MODE_FILE, QNX4_MODE_DIRECTORY
 	};
 	fsimg_qnx4_reader_t *qnx4 = qnx4_state(reader);
-	qnx4_inode_t *record;
 	size_t transferred;
 	fsimg_status_t status;
 
@@ -135,7 +173,6 @@ check_root_block(fsimg_reader_t *reader, fsimg_error_t *error)
 		qnx4_inode_decode(qnx4->root_block + i * QNX4_RECORD_BYTES,
 		    &qnx4->root[i]);
 
-	record = &qnx4->root[QNX4_RECORD_ROOT];
 	/* Record 0's name and status are the identity, which a caller
 	 * assuming it waives; everything after is validation.
 	 */
@@ -146,8 +183,7 @@ check_root_block(fsimg_reader_t *reader, fsimg_error_t *error)
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = qnx4_root_block_validate(qnx4->root_block,
-	    qnx4->geometry.volume_bytes, error);
+	status = qnx4_root_block_validate(qnx4->root_block, slice_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);
 	for (unsigned i = 0; i < QNX4_ROOT_RECORDS; i++) {
@@ -163,9 +199,6 @@ check_root_block(fsimg_reader_t *reader, fsimg_error_t *error)
 	    !qnx4_bytes_zero(qnx4->root_block + 0x1f0, 0x10))
 		return (qnx4_unsupported(error,
 		    "QNX4 root block has nonzero reserved bytes"));
-	if (record->first_extent.first != 3 + qnx4->geometry.bitmap_blocks)
-		return (qnx4_corrupt(error,
-		    "QNX4 root directory does not follow the bitmap"));
 	decode_label(qnx4);
 	return (FSIMG_OK);
 }
@@ -270,6 +303,10 @@ open_inodes(fsimg_reader_t *reader, fsimg_error_t *error)
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
+	/* A record's size is below 2^31, so this set stays under 4 MiB of
+	 * charged storage even when most of the table lies past a truncated
+	 * slice's end, where its slots fail as they are read.
+	 */
 	qnx4->inode_slots = record->size / QNX4_RECORD_BYTES;
 	return (fsimg_bitset_new(&reader->session, qnx4->inode_slots,
 	    &qnx4->exposed, error));
@@ -440,13 +477,17 @@ qnx4_volume_open(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_qnx4_reader_t *qnx4 = qnx4_state(reader);
 	root_scan_t scan;
+	uint64_t slice_bytes;
 	bool claimed;
 	fsimg_status_t status;
 
-	status = derive_geometry(reader, error);
+	status = fsimg_io_get_size(reader->input, &slice_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = check_root_block(reader, error);
+	status = check_root_block(reader, slice_bytes, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = derive_geometry(reader, slice_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = qnx4_bitmap_open(reader, error);
@@ -454,7 +495,9 @@ qnx4_volume_open(fsimg_reader_t *reader, fsimg_error_t *error)
 		return (status);
 
 	/* Bit b - 1 of the claimed set is block b, as in the bitmap itself;
-	 * the loader, the root block and the bitmap are claimed at open.
+	 * the loader, the root block and the bitmap are claimed at open. The
+	 * set's N / 8 bytes are the bitmap's, which derive_geometry() placed
+	 * inside the slice, however large the volume declares itself.
 	 */
 	status = fsimg_bitset_new(&reader->session, qnx4->geometry.blocks,
 	    &qnx4->claimed, error);
