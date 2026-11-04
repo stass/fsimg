@@ -320,10 +320,14 @@ test_worker_SOURCES = test/worker.c test/test.h test/socket.c test/socket.h \
 	cmd/fsimg/worker.h cmd/fsimg/job.c cmd/fsimg/protocol.c cmd/fsimg/protocol.h \
 	cmd/fsimg/worker-parent.c cmd/fsimg/worker-child.c cmd/fsimg/worker-output.c \
 	cmd/fsimg/sandbox.c cmd/fsimg/sandbox.h compat/clock.c compat/spawn.c
-# The clock and stats queries are redirected through test/worker.c's hooks
-# to fail the coordinator's monotonic clock and report child memory peaks.
+# Test hooks inject clock failures and observe child memory, cancel reads
+# and charged work without changing the production worker.
+# glibc fortify's renamed read inline calls __read_alias and bypasses the hook.
+# Disable fortify for this target so every redirected read reaches the hook.
 test_worker_CPPFLAGS = $(AM_CPPFLAGS) -Dclock_gettime=fsimg_test_clock_gettime \
-	-Dfsimg_ctx_get_stats=fsimg_test_worker_get_stats
+	-Dfsimg_ctx_get_stats=fsimg_test_worker_get_stats \
+	-U_FORTIFY_SOURCE -Dread=fsimg_test_read \
+	-Dfsimg_ctx_new=fsimg_test_worker_ctx_new
 test_worker_LDADD = libfsimg-core.la
 test_staged_verify_SOURCES = $(fsimg_SOURCES) test/staged-verify.c test/test.h
 test_staged_verify_CPPFLAGS = $(AM_CPPFLAGS) -Dmain=fsimg_test_command_main

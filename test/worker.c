@@ -32,8 +32,13 @@
 #define WORKER_MEMORY_PEAK_OFFSET 8
 #define WORKER_MEMORY_REPORT_BYTES 24
 
-/* The test target redirects the child's final stats query through this hook. */
+/* Hooks below call the real read, context constructor and stats query. */
+#undef read
+#undef fsimg_ctx_new
 #undef fsimg_ctx_get_stats
+ssize_t read(int, void *, size_t);
+fsimg_status_t fsimg_ctx_new(const fsimg_options_t *, fsimg_ctx_t **,
+    fsimg_error_t *);
 fsimg_status_t fsimg_ctx_get_stats(fsimg_ctx_t *, fsimg_stats_t *,
     fsimg_error_t *);
 
@@ -660,6 +665,24 @@ static unsigned coordinator_clock_fail_from;
 static uint64_t coordinator_clock_fault_started;
 static bool report_worker_memory;
 
+/* Only marked real workers enable these hooks; parent reads pass through. */
+#define WORKER_CANCEL_REPORT (UINT64_MAX - 1)
+#define CANCEL_LISTING_FILES 4096
+/* fixture_open_with_entries also adds HELLO.TXT; listing omits the root. */
+#define CANCEL_LISTING_ENTRIES (CANCEL_LISTING_FILES + 1)
+#define CANCEL_TEST_INTERVAL 256
+/* Group permission bits encode the one read that returns EOF; zero observes. */
+#define CANCEL_READ_MODE_SHIFT 3
+#define CANCEL_READ_MODE_MAX 7
+static bool count_cancel_reads;
+static unsigned cancel_after_read;
+static uint64_t cancel_reads;
+static uint64_t cancel_work;
+static fsimg_cancel_fn_t cancel_callback;
+static void *cancel_callback_argument;
+static fsimg_progress_fn_t cancel_progress;
+static void *cancel_progress_argument;
+
 /* Create jobs in these tests copy one source directory to the image root. */
 static const char *const image_root[] = { "/" };
 
@@ -680,6 +703,9 @@ typedef struct worker_fixture {
 	uint64_t	 memory_peak;
 	uint64_t	 name_bytes;
 	uint64_t	 plan_losses;
+	uint64_t	 cancel_reads;
+	uint64_t	 cancel_work;
+	unsigned	 entries;
 	unsigned	 info;
 	unsigned	 plans;
 	unsigned	 images;
@@ -832,6 +858,64 @@ static unsigned test_forged_creation_staged_length(void);
 static unsigned test_forged_creation_stream_length(void);
 static void test_coordinator_regressions(void);
 
+/* EOF represents a coordinator that has gone away. Other descriptors and
+ * unmarked workers always use the real read, including its errno behavior.
+ */
+ssize_t
+fsimg_test_read(int fd, void *buffer, size_t length)
+{
+	if (count_cancel_reads && fd == FSIMG_CHILD_CANCEL) {
+		cancel_reads++;
+		if (cancel_after_read != 0 && cancel_reads == cancel_after_read)
+			return (0);
+	}
+	return (read(fd, buffer, length));
+}
+
+/* Exercise the child's callback directly after EOF, including polls that
+ * would skip the pipe read. EOF is injected only once by fsimg_test_read.
+ */
+static bool
+observe_cancelled(void *argument)
+{
+	(void)argument;
+	if (!cancel_callback(cancel_callback_argument))
+		return (false);
+	for (unsigned i = 0; i < CANCEL_TEST_INTERVAL; i++)
+		CHECK(cancel_callback(cancel_callback_argument));
+	return (true);
+}
+
+static void
+observe_cancel_work(void *argument, const fsimg_progress_t *progress)
+{
+	(void)argument;
+	if (progress->work > cancel_work)
+		cancel_work = progress->work;
+	if (cancel_progress != NULL)
+		cancel_progress(cancel_progress_argument, progress);
+}
+
+fsimg_status_t
+fsimg_test_worker_ctx_new(const fsimg_options_t *options, fsimg_ctx_t **ctx,
+    fsimg_error_t *error)
+{
+	fsimg_options_t observed;
+
+	if (!count_cancel_reads)
+		return (fsimg_ctx_new(options, ctx, error));
+	observed = *options;
+	cancel_callback = options->cancelled;
+	cancel_callback_argument = options->cancel_argument;
+	observed.cancelled = observe_cancelled;
+	observed.cancel_argument = NULL;
+	cancel_progress = options->progress;
+	cancel_progress_argument = options->progress_argument;
+	observed.progress = observe_cancel_work;
+	observed.progress_argument = NULL;
+	return (fsimg_ctx_new(&observed, ctx, error));
+}
+
 /* A marked progress frame carries charged memory without changing the wire
  * protocol. Only a worker child started on a marked image sets the flag,
  * so the parent's own contexts never emit the frame.
@@ -850,6 +934,13 @@ fsimg_test_worker_get_stats(fsimg_ctx_t *ctx, fsimg_stats_t *stats,
 		fsimg_store_le64(raw + WORKER_MEMORY_PEAK_OFFSET,
 		    stats->memory_peak);
 		/* A failed control channel must not abort the child's error path. */
+		(void)fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PROGRESS,
+		    raw, sizeof(raw), NULL);
+	}
+	if (status == FSIMG_OK && count_cancel_reads) {
+		fsimg_store_le64(raw, WORKER_CANCEL_REPORT);
+		fsimg_store_le64(raw + 8, cancel_reads);
+		fsimg_store_le64(raw + 16, cancel_work);
 		(void)fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_PROGRESS,
 		    raw, sizeof(raw), NULL);
 	}
@@ -1425,6 +1516,13 @@ event(void *argument, const fsimg_frame_t *frame,
 			return (FSIMG_ECANCELLED);
 	} else {
 		CHECK(fixture->ready);
+		if (frame->type == FSIMG_FRAME_ENTRY)
+			fixture->entries++;
+		if (frame->type == FSIMG_FRAME_PROGRESS &&
+		    fsimg_load_le64(frame->payload) == WORKER_CANCEL_REPORT) {
+			fixture->cancel_reads = fsimg_load_le64(frame->payload + 8);
+			fixture->cancel_work = fsimg_load_le64(frame->payload + 16);
+		}
 		if (frame->type == FSIMG_FRAME_INFO)
 			fixture->info++;
 		if (frame->type == FSIMG_FRAME_INFO && fixture->print_info) {
@@ -1491,6 +1589,117 @@ run(worker_fixture_t *fixture, fsimg_error_t *error)
 	fixture->ready = false;
 	return (fsimg_worker_run(fixture->executable, &fixture->request, event,
 	    fixture, -1, NULL, &fixture->result, error));
+}
+
+static void
+fixture_open_cancel_listing(worker_fixture_t *fixture)
+{
+	fsimg_entry_t *entries;
+	char (*paths)[24];
+	const size_t count = CANCEL_LISTING_FILES;
+
+	/* Empty image entries need neither host files nor payload bytes. */
+	entries = calloc(count, sizeof(*entries));
+	paths = calloc(count, sizeof(*paths));
+	CHECK(entries != NULL && paths != NULL);
+	for (size_t i = 0; i < count; i++) {
+		snprintf(paths[i], sizeof(paths[i]), "/entry-%04zu", count - i);
+		entries[i] = (fsimg_entry_t){ .path = paths[i],
+		    .kind = FSIMG_ENTRY_FILE };
+	}
+	fixture_open_with_entries(fixture, "ifs", entries, count);
+	free(paths);
+	free(entries);
+	fixture->request.kind = FSIMG_JOB_LIST;
+	fixture->request.sandbox = FSIMG_SANDBOX_OFF;
+}
+
+static void
+fixture_set_cancel_read(worker_fixture_t *fixture, unsigned after_read)
+{
+	CHECK(after_read <= CANCEL_READ_MODE_MAX);
+	CHECK(fchmod(fixture->input,
+	    0601 | (after_read << CANCEL_READ_MODE_SHIFT)) == 0);
+}
+
+static void
+test_cancel_at_second_read_stops_before_first_entry(worker_fixture_t *shared)
+{
+	worker_fixture_t fixture = *shared;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	fixture_set_cancel_read(&fixture, 2);
+	status = run(&fixture, &error);
+
+	CHECK(status == FSIMG_ECANCELLED);
+	CHECK(fixture.cancel_reads == 2);
+	CHECK(fixture.cancel_work > 0);
+	/* Raw IFS table walking, metadata storage and I/O charge one unit per
+	 * step. Allow two units per poll for slack without admitting a long
+	 * interval. Compressed layers can charge whole byte ranges; this
+	 * fixture uses an uncompressed image and no selection members
+	 * (selection can charge one unit per member).
+	 */
+	CHECK(fixture.cancel_work <= 2 * CANCEL_TEST_INTERVAL);
+	CHECK(fixture.entries == 0 && fixture.result.entries == 0);
+	puts("cancel at second read: PASS (bounded work, no entry or success frame)");
+}
+
+static void
+test_pending_cancel_stops_before_first_entry(worker_fixture_t *shared)
+{
+	worker_fixture_t fixture = *shared;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	fixture_set_cancel_read(&fixture, 1);
+	status = run(&fixture, &error);
+
+	CHECK(status == FSIMG_ECANCELLED);
+	CHECK(fixture.cancel_reads == 1);
+	/* fsimg_poll calls progress only when cancellation answers false. */
+	CHECK(fixture.cancel_work == 0);
+	CHECK(fixture.entries == 0 && fixture.result.entries == 0);
+	puts("pending cancel: PASS (first poll, sticky EOF, no entry or success frame)");
+}
+
+static void
+test_cancel_reads_bounded_by_charged_work(worker_fixture_t *shared)
+{
+	worker_fixture_t fixture = *shared;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t maximum_reads;
+
+	fixture_set_cancel_read(&fixture, 0);
+	status = run(&fixture, &error);
+
+	CHECK(status == FSIMG_OK);
+	CHECK(fixture.result.entries == CANCEL_LISTING_ENTRIES);
+	CHECK(fixture.entries == CANCEL_LISTING_ENTRIES);
+	CHECK(fixture.cancel_work >= 10000);
+	CHECK(fixture.cancel_reads > 0);
+	/* Progress precedes each charge. Its maximum work is conservative:
+	 * it excludes the last charge and other sessions' work. Allow one
+	 * pipe read per 64 units plus a small allowance for setup polls.
+	 */
+	maximum_reads = fixture.cancel_work / 64 + 8;
+	CHECK(fixture.cancel_reads <= maximum_reads);
+	puts("cancel reads bounded by charged work: PASS");
+}
+
+static void
+test_cancel_listing(void)
+{
+	worker_fixture_t fixture;
+
+	/* Each run gets fresh counters in its worker; only the image is shared. */
+	fixture_open_cancel_listing(&fixture);
+	test_pending_cancel_stops_before_first_entry(&fixture);
+	test_cancel_reads_bounded_by_charged_work(&fixture);
+	test_cancel_at_second_read_stops_before_first_entry(&fixture);
+	fixture_close(&fixture);
 }
 
 static void
@@ -3467,7 +3676,8 @@ main(int argc, char **argv)
 		CHECK(setrlimit(RLIMIT_CORE, &no_core) == 0);
 		CHECK(fcntl(200, F_GETFD) == -1 && errno == EBADF);
 		/* Marker modes: 0700 fake_worker, 0710 coordinator_worker_selected,
-		 * 0720 names_worker_selected, 0610 the stats hook.
+		 * 0720 names_worker_selected, 0610 the stats hook,
+		 * 06x1 cancel hooks (x encodes the EOF read number).
 		 */
 		if (names_worker_selected(&st))
 			return (fake_names_worker((size_t)st.st_size));
@@ -3477,6 +3687,13 @@ main(int argc, char **argv)
 			return (fake_worker((worker_scenario_t)st.st_size));
 		report_worker_memory = fstat(FSIMG_CHILD_INPUT, &st) == 0 &&
 		    (st.st_mode & S_IXGRP) != 0;
+		count_cancel_reads = fstat(FSIMG_CHILD_INPUT, &st) == 0 &&
+		    (st.st_mode & S_IXOTH) != 0;
+		if (count_cancel_reads) {
+			cancel_after_read = (st.st_mode >> CANCEL_READ_MODE_SHIFT) &
+			    CANCEL_READ_MODE_MAX;
+			report_worker_memory = false;
+		}
 		return (fsimg_worker_main());
 	}
 	if (argc == 2 && strcmp(argv[1], "--internal-input") == 0)
@@ -3513,6 +3730,7 @@ main(int argc, char **argv)
 		test_transport((worker_scenario_t)atoi(getenv("FSIMG_TEST_TRANSPORT")));
 		return (0);
 	}
+	test_cancel_listing();
 	test_cat_sizes_buffer_to_file_and_streams_partial_chunk();
 	test_operations("fat16");
 	test_operations("exfat");

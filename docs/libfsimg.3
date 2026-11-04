@@ -58,6 +58,8 @@ Payload copying, metadata, allocation indexes and sorting obey separate memory,
 scratch, spool, work and traversal limits.
 A handle is used serially; independent contexts may be used concurrently.
 Callbacks cannot re-enter an active context.
+The cancel and progress callbacks run on every charge and I/O step, which can
+reach hundreds of millions of calls in one large operation, so they must be cheap.
 .Pp
 The options' entry callback, with its entry_argument, observes each entry
 one at a time: it receives a borrowed

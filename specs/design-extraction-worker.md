@@ -123,8 +123,13 @@ mode warns about unavailable confinement before sending acknowledgement;
 required mode refuses to acknowledge an unavailable profile. Unexpected or
 partial setup failures always fail. Off mode is explicitly reported. The
 dedicated cancellation pipe remains open for the operation: EOF or a cancellation
-byte cancels the worker at its next I/O boundary, including after coordinator
-death. In-flight host calls retain their OS completion/interruption behavior.
+byte cancels the worker, including after coordinator death. The library polls on
+every charge and I/O step, so a system call per poll would dominate a large
+operation: the worker reads the pipe on its first poll and then once per 256, and
+a cancellation takes effect within that many polls, a bound in polls and not in
+time. A live coordinator stops the worker by signal as well, so the pipe alone
+decides only after coordinator death, when no supervisor remains. In-flight host
+calls retain their OS completion/interruption behavior.
 The coordinator supervises signals
 and deadlines and requires legal completion plus successful child exit. Output
 publication additionally requires the staged regular-file type and planned size

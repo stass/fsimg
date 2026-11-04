@@ -28,6 +28,8 @@ _Static_assert(FSIMG_SANDBOX_SETTINGS == FSIMG_FILE_SETTINGS,
 
 /* The largest piece a cat job reads and writes at once. */
 #define CAT_BUFFER_BYTES ((size_t)65536)
+/* Polls per read of the cancel pipe. */
+#define CHILD_CANCEL_INTERVAL 256u
 
 typedef struct worker_child {
 	fsimg_worker_request_t request;
@@ -54,6 +56,7 @@ typedef struct worker_child {
 	uint64_t	 paths_length;
 	const char	**members;
 	uint64_t	 last_progress;
+	uint32_t	 cancel_polls;
 	unsigned	 losses_sent;
 	unsigned	 salvage_losses_sent;
 	/* Raw filesystem capabilities remain here until an owner adopts them.
@@ -120,10 +123,19 @@ child_cancelled(void *argument)
 
 	if (child->channel_failed)
 		return (true);
+	/* The library polls on every charge and I/O step, so a system call per
+	 * poll would dominate a large listing. The worker's first poll reads,
+	 * and a later cancellation waits for at most the interval.
+	 */
+	if (child->cancel_polls++ % CHILD_CANCEL_INTERVAL != 0)
+		return (false);
 	count = read(FSIMG_CHILD_CANCEL, &byte, 1);
 	if (count == -1 && (errno == EAGAIN || errno == EINTR))
 		return (false);
-	/* EOF also means the coordinator died. No further output may be written. */
+	/* EOF also means the coordinator died. No further output may be written,
+	 * and the polls that do not read must give the same answer.
+	 */
+	child->channel_failed = true;
 	return (true);
 }
 

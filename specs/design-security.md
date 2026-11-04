@@ -178,8 +178,8 @@ worker cannot forge a successful publication by sending
 an early success frame: the coordinator also requires the correct state,
 successful worker exit, and successful final output checks. Truncated messages,
 unknown types, duplicate completion, child signals, and EOF before completion
-are errors. Cancellation and parent death stop new work when observed at host
-I/O boundaries. An in-flight kernel operation can complete or remain blocked
+are errors. Cancellation and parent death stop new work when the worker's
+periodic poll of its cancellation pipe observes them. An in-flight kernel operation can complete or remain blocked
 according to host behavior. The output relay holds only one bounded record;
 after coordinator death its next status write fails, preventing another record.
 

@@ -230,7 +230,7 @@ streaming representation. Cleanup of private scratch is descriptor-relative,
 does not follow links or recurse into worker-created directories, and has a
 finite entry bound; incomplete cleanup reports the retained location.
 
-Cancellation and deadline checks surround synchronous host calls but cannot
+Cancellation and deadline checks fall between synchronous host calls but cannot
 guarantee their interruption. In particular, device open and geometry queries
 run during coordinator preparation; a blocked driver can delay those checks.
 Worker supervision likewise cannot force an uninterruptible kernel read to

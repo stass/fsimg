@@ -358,10 +358,16 @@
   added to `make check`, but `test/spec.sh` takes several minutes. Bring it back
   under the ceiling with a smoke subset, or change the ceiling.
 
-* [Low] **ImageFS worst-case listing cost** (`lib/formats/ifs/`): a worst-case
-  64 MiB image takes about 26 s to list, truncated or intact, with `max_work`
-  unlimited by default. Find which pass dominates and whether it can be made
-  cheaper.
+* [Medium] **CLI relays a listing one entry at a time** (`cmd/fsimg/worker-parent.c`,
+  `worker-child.c`): a listing's cost is the three-process relay, not the reader.
+  `libfsimg` lists a 64 MiB ImageFS of 1.5 million empty files in about 14 CPU
+  seconds, where `fsimg t` takes minutes on a loaded host, nearly all of it system
+  time. Each entry is one frame: `supervise_operation` does a `poll`, a `wait4` and a
+  `read` for the header and again for the payload (`read_control`), then one
+  `write` to the output process, about nine context switches an entry. The cost is
+  linear in entries. Frames batched in the worker, or a `read_control` that drains
+  several frames per wakeup, would remove most of it; either changes the supervisor
+  protocol's pacing, which is security-relevant, so it needs a small design first.
 
 * [Low] **Spec harness oracle disagreements** (`test/spec/`): fatcat disagrees
   on `fat.directory.name` and `fat.directory.unique_names`, and xorriso on
