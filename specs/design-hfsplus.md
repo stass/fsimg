@@ -204,21 +204,27 @@ clears bit 8 and unmounting sets it again (E1, E2). Volumes from 2001 to
 Opening uses the primary header alone. Verification reads the alternate
 header at `V - 1024` and requires its signature, version, `blockSize`,
 `totalBlocks` and the five fork-data records to equal the primary's.
-Nothing else is compared: a mount rewrites the alternate when the catalog
-grows and not at the end of an ordinary session, and which other events
-rewrite it is not observed, so after native use it keeps the counts,
-`freeBlocks`, `nextAllocation`, `nextCatalogID`, `writeCount`,
-`modifyDate`, `lastMountedVersion` and `attributes` of an earlier moment
-(E2), and old discs differ in up to nine such fields while the fork records
-and geometry agree (E10). An alternate that is missing or unreadable, or
-holds no volume header, such as the all-zero sectors a disk-image container
-left out of the `mozilla-1.0-smi` specimen (E10), fails this comparison
-like a disagreeing one: verification reports `FSIMG_ECORRUPT` at its last
-step, after every other pass has run, and reading, listing and extraction,
-which use the primary alone, are unaffected. A primary that
-fails validation is never replaced by the alternate: fsimg does not
-repair, and a reader that silently chose between disagreeing copies could
-expose a stale catalog.
+Nothing else is compared: macOS rewrites the alternate when a special
+file's fork data changes, that is when the extents, catalog, allocation,
+attributes or startup file grows or moves, when the journal is turned on
+or off, and when the volume is resized; an ordinary mount, unmount or sync
+writes the primary alone (the record's Apple source cross-check, and E2).
+So after native use the alternate keeps the counts, `freeBlocks`,
+`nextAllocation`, `nextCatalogID`, `writeCount`, `modifyDate`,
+`lastMountedVersion` and `attributes` of an earlier moment (E2), and old
+discs differ in up to nine such fields while the fork records and geometry
+agree (E10). An alternate that holds no volume header, such as the
+all-zero sectors a disk-image container left out of the `mozilla-1.0-smi`
+specimen (E10), fails this comparison like a disagreeing one: verification
+reports `FSIMG_ECORRUPT` at its last step, after every other pass has run,
+and reading, listing and extraction, which use the primary alone, are
+unaffected. The 1024 bytes at `V - 1024` always lie inside the slice, so
+the read itself can fail only for operational reasons, and those keep
+their own classes: a read the I/O callback fails is `FSIMG_EIO`, and
+cancellation and resource exhaustion are reported as common code reports
+them, never recast as corruption. A primary that fails validation is never
+replaced by the alternate: fsimg does not repair, and a reader that
+silently chose between disagreeing copies could expose a stale catalog.
 
 ### Dates
 
@@ -367,12 +373,17 @@ The header record: [TN]
 The node map has one bit per node, most significant bit first, set for a
 node in use. When `totalNodes` exceeds the header map's `8 * (M - 256)`
 bits, the header's `fLink` names the first map node: kind 2, height 0,
-`bLink` 0, one record from offset 14 of `M - 20` bytes, its own `fLink`
-naming the next; the catalog of `h-hfsplus-671088640-e9-create` has two
-such nodes at `M = 4096` (E9). Map nodes are themselves marked in use. A map chain
-that loops, ends before covering `totalNodes`, or names a node outside the
-tree is `FSIMG_ECORRUPT`. Map bits at or beyond `totalNodes` are zero.
-[TN]
+`bLink` 0, one record from offset 14 whose length the node's offset table
+gives, its own `fLink` naming the next. The reader takes each map record's
+length from the validated offset table and requires the chain to cover
+`totalNodes`; it imposes no record length of its own, because the
+validated offsets and the coverage are what make the bits safe to read.
+The catalog of `h-hfsplus-671088640-e9-create` has two such nodes at
+`M = 4096`, each record `M - 20` bytes (E9); that is the layout the
+writer emits at its one catalog node size, and no other node size is
+observed. Map nodes are themselves marked in use. A map chain that
+loops, ends before covering `totalNodes`, or names a node outside the tree
+is `FSIMG_ECORRUPT`. Map bits at or beyond `totalNodes` are zero. [TN]
 
 ### Searching and order
 
@@ -598,9 +609,13 @@ It covers a stored U+003A `:` or U+2400, each of which already denotes a
 stored `/` or U+0000 so that no spelling is left for it, and a name that is
 not a fixed point of [decomposition](#decomposition), a spelling fsimg's
 tables do not reproduce; it covers any exchange the mapping gains later
-without a row of its own. Percent text such as `%EF%BF%BF`, which macOS
-stores for the UTF-8 of U+FFFE, U+FFFF and a surrogate value (E3), is ASCII
-and delivered as it is.
+without a row of its own. Percent text is ASCII and delivered as it is:
+macOS stores each byte of a three-byte UTF-8 spelling of U+FFFE, U+FFFF
+or a surrogate value, and each byte of malformed UTF-8, as `%` and two
+uppercase hex digits, so `%EF%BF%BF` for U+FFFF (E3, and the record's
+Apple source cross-check); `%` itself is never escaped, so a stored
+percent text is indistinguishable from a name typed that way, and the
+reader does not try to reverse it.
 
 These refusals fail the directory, as the
 [architecture](architecture.md#names-and-metadata) states for the formats
@@ -729,7 +744,7 @@ U+048E, U+04C5, U+04C9, U+04CD, U+04D4, U+04D8, U+04E0, U+04E8, the even
 units U+0500 to U+050E, U+2126, U+212A and U+212B. The Unicode data's
 permission notice is already in `third-party/Unicode-LICENSE.txt`.
 
-The tables are accepted by observation. E3 creates every BMP scalar value
+The tables are accepted by observation and confirmed by source. E3 creates every BMP scalar value
 and every supplementary value Unicode 3.2 assigns as a name on a native
 case-insensitive HFS Plus and a case-sensitive HFSX volume, records the
 stored units macOS returns, which names collide and the catalog order, and
@@ -768,13 +783,29 @@ vectors the gate compares. The writer capability is not registered until
 the gate passes, because a writer whose order differs from macOS's emits a
 catalog that macOS cannot search.
 
-`fsck_hfs -n` calls a name holding the adjacent marks U+0306 U+0307 or
-U+0308 U+030D an illegal name, anywhere in the name and after any starter,
-and the volume fails its check; macOS itself creates and stores such names
-(E3's small-names volumes, 16 spellings). The reader delivers them: the
-format defines nothing against them. The writer refuses them, under its
-[name rules](#writer-names), so an fsimg volume never fails `fsck_hfs`
-because of a name.
+The record's Apple source cross-check confirms every row: the fold table
+equals the three copies in Apple's kernel and `fsck_hfs` on all 65536
+units, the 30 exception units and the 16 ignorable units included; the
+970 decompositions and the 297 nonzero classes equal the kernel's; and
+NetBSD's table agrees. Apple's class table carries 25 more nonzero units,
+all assigned after Unicode 3.2.0, none of which belongs to the set that
+bounds a run, so they are never sorted, and class 0 for them gives the
+same names. The generated tables are therefore not altered.
+
+`fsck_hfs -n` calls a name holding one of 23 adjacent sequences, in the
+final sorted stored name, an illegal name, anywhere in the name and after
+any starter, and the volume fails its check: U+0306 U+0307; U+0308 U+030D;
+U+00A8 U+030D; U+030D after each of the Greek letters U+0391, U+0395,
+U+0397, U+0399, U+039F, U+03A5, U+03A9, U+03B1, U+03B5, U+03B7, U+03B9,
+U+03BF, U+03C5, U+03C9 and U+03D2; U+09AC U+09BC; U+0A21 U+0A3C; U+0B2F
+U+0B3C; U+0E4D U+0E32; and U+0ECD U+0EB2. They are the sequences a repair
+routine for names written under the pre-10.2 decomposition rules
+rewrites, and the host's `fsck_hfs` flags every one (E3, the record's
+`fsck-sequences.tsv`, and the cross-check). macOS itself creates and
+stores such names. The reader delivers them: the format defines nothing
+against them. The writer refuses them, under its
+[name rules](#writer-names), from one table in its name code, so an fsimg
+volume never fails `fsck_hfs` because of a name.
 
 ## Extended attributes
 
@@ -819,9 +850,10 @@ A stored attribute is a leaf record of this tree other than the
 holds data the entry model cannot carry, the ACL in
 `com.apple.system.Security` included, which macOS writes for `chmod +a` and
 on its `.fseventsd` folder (E2, E5); macOS keeps no attribute of its own on
-a file hard link's indirect node (E4, E5), and `com.apple.system.hfs.firstlink`
-belongs to directory-link targets in the private directory folder, which
-the reader does not walk. Finder information and the
+a file hard link's indirect node (E4, E5), and writes
+`com.apple.system.hfs.firstlink` only for directory hard links, keyed by
+the target folder in the private directory folder, which the reader does
+not walk (the record's Apple source cross-check). Finder information and the
 resource fork, which macOS also presents as attributes, are not stored
 here. An entry whose object has a stored attribute, or a resource fork with
 `logicalSize > 0` that compression does not consume, carries
@@ -868,14 +900,17 @@ stub (E4). [TN], [R]
 
 A file record is a file hard-link stub exactly when macOS treats it as one:
 its Finder type is `hlnk`, its creator `hfs+`, and its `createDate` equals
-the root folder's catalog `createDate` or the private data folder's. Both
-are UTC catalog dates; the volume header's `createDate`, which holds local
-time, is not one of them. A record with those codes and another date is an
+the root folder's catalog `createDate` or that of the file hard-link data
+folder, `\0\0\0\0HFS+ Private Data`. Both are UTC catalog dates; the
+volume header's `createDate`, which holds local time, is not one of them,
+and neither is the directory hard-link folder's date, which macOS never
+uses in this test. A record with those codes and another date is an
 ordinary file, as macOS reads it, and flag `0x0020` is not part of the
 test: a stub without it still reads as a link (E4's patched records). Both
-dates occur natively: current macOS dates new stubs from the private data
-folder, and the Mac OS X 10.0 disc's stubs match the root folder's date
-alone (E4, E10). The test is the macOS filesystem's [HL].
+dates occur natively: current macOS dates new stubs from the file hard-link
+data folder, and the Mac OS X 10.0 disc's stubs match the root folder's
+date alone (E4, E10). The test is the macOS filesystem's, the same for a
+lookup and for a listing [HL].
 
 What the records hold natively (E4, both variants): a stub has flags
 `0x0022`, Finder flags `0x0100`, text encoding 126, mode `0100444`, owner
@@ -901,28 +936,35 @@ stub with a nonempty fork is `FSIMG_ECORRUPT`. Verification checks that
 each indirect node's link count equals its stubs; the chain fields are not
 checked. macOS creates no hard link to a symbolic link: `link(2)` follows
 the link, `linkat(2)` without `AT_SYMLINK_FOLLOW` and `ln -P` fail with
-`ENOTSUP` (E4). An indirect node that is a symbolic link is therefore only
-ever written by another system, and the rule that the node's own kind
-decides covers it without a mechanism of its own; it is tested on
-synthetic fixtures only. [TN], [HF], [HL], [R]
+`ENOTSUP`, the one refusal in the kernel's link path (E4, the record's
+Apple source cross-check). Whether an older system or another
+implementation ever wrote one is not established. When reading, macOS
+resolves a stub to whatever record the indirect node holds without
+testing its kind, so the rule that the node's own kind decides follows
+macOS and is the safe default: it covers the case without a mechanism of
+its own, and is tested on synthetic fixtures only. [TN], [HF], [HL], [R]
 
 ### Directory hard links
 
 A directory hard link is a file record that refers to a folder named
 `dir_` and a number in the private directory folder. A record is one
 exactly when its Finder type is `fdrp`, its creator `MACS`, flag `0x0020` is
-set, its link reference is at least 16, and its `createDate` equals the
-root folder's catalog `createDate` or the private data folder's [HL]. The
+set, and its `createDate` equals the root folder's catalog `createDate` or
+the file hard-link data folder's, the same two dates as for a file stub:
+macOS creates both stub kinds with the file folder's date, and the
+directory folder's date is never used [HL]. The reference is not part of
+the identification, as it is not for a file stub; macOS's lookup accepts
+any value, and only its directory listing wants one of at least 16. The
 native stub (`h-hfsplus-16777216-e4-dirlinks-J`, where a journaled volume
 let `link(2)` succeed on a directory) passes every part: `fdrp`/`MACS` with
 Finder flags `0x8000`, flags `0x0022`, mode `0100444`, owner flags 2, all
-four dates equal to the private folders' creation date, which one mount
-gave both folders, `special` the target folder's ID, and empty forks; its
+four dates equal to the file hard-link data folder's `createDate`,
+`special` the target folder's ID, and empty forks; its
 target `dir_22` sits in `.HFS+ Private Directory Data\r` with flags
 `0x00A4`, the directory's own owner, mode and times, and `special` the
 number of names. A Finder folder alias carries the same codes and Finder
 flags but is an ordinary file: the look-alike of the same capture has flags
-`0x0082`, `special` 1 and its own date, so it fails three parts of the test
+`0x0082` and its own date, so it fails two parts of the test
 (E4). Directory hard links occur mainly in Time Machine backups. They are
 an unsupported kind: the directory holding one fails preparation with
 `FSIMG_EUNSUPPORTED` naming the link. Following such links safely needs a
@@ -935,14 +977,15 @@ not expose them; full verification checks and owns their contents:
 
 | Name (stored units) | Object | Rule |
 | --- | --- | --- |
-| Four U+0000 then `HFS+ Private Data` | Private data folder | A folder; holds indirect nodes and `temp` files of open-but-unlinked objects |
+| Four U+0000 then `HFS+ Private Data` | Private data folder, the file hard-link data folder | A folder; holds indirect nodes and `temp` files of open-but-unlinked objects; its `createDate` is the date both stub kinds carry |
 | `.HFS+ Private Directory Data` then U+000D | Private directory folder | A folder; holds directory hard-link targets |
-| `.journal` | Journal file | Format-owned only on a journaled volume, where its data fork is exactly the journal |
+| `.journal` | Journal file | Format-owned only on a journaled volume, where its data fork is exactly the journal, one extent of `size` bytes, and locates it under the [info block rule](#journal-info-block) |
 | `.journal_info_block` | Journal info block file | Format-owned only on a journaled volume, where its data fork is exactly the journal info block |
 
 On an unjournaled volume the two journal names are ordinary files. A
-private folder that is not a folder, or a journal file whose fork disagrees
-with the journal info block, is `FSIMG_ECORRUPT`. A `temp` file in the
+private folder that is not a folder, a journaled volume missing either
+journal file, or a journal file whose fork disagrees with the journal info
+block, is `FSIMG_ECORRUPT`. A `temp` file in the
 private data folder is a legal leftover of a volume not cleanly unmounted;
 verification owns its storage and counts it. Other root entries such as
 `.Trashes`, `.fseventsd` and `.HFS+ Private Directory Data` without its
@@ -1000,11 +1043,17 @@ incompressible content is an LZFSE uncompressed block, `bvx-` with a count
 and the bytes, which the decoder reads like any other block (E6). The
 decoded length equals the uncompressed size exactly. That size is at most
 65536 bytes, the decode window, so an inline payload decodes once and
-whole; a larger inline size is `FSIMG_EUNSUPPORTED` naming the entry. Every
-native compressor keeps a 65536-byte file inline and moves 65537 bytes to
-the resource fork, and the largest inline attribute observed is 3612 bytes
-(E6); a larger native size would widen this rule with a decoder that
-streams the payload, not with a larger window. [DC], [R]
+whole; a larger inline size is `FSIMG_EUNSUPPORTED` naming the entry. No
+size alone decides where a native compressor stores a file: the whole
+attribute, its 16-byte header included, is at most 3802 bytes, the size
+the kernel's attribute reader bounds and the largest ordinary attribute
+E5 measured, so a file stays inline only when its encoded form fits, and
+otherwise goes to the resource fork. Zeros of 65536 bytes stay inline,
+65537 bytes never do, and text of a few thousand bytes moves to the fork
+as soon as its encoding exceeds the bound; the largest inline compression
+attribute observed is 3612 bytes (E6, and the record's Apple source
+cross-check). A larger native inline size would widen this rule with a
+decoder that streams the payload, not with a larger window. [DC], [R]
 
 ### Resource-fork payloads
 
@@ -1021,16 +1070,26 @@ extents like any fork:
   `logicalSize` is the data offset plus the data length plus the map
   length; the data offset is 256 and the map 50 bytes on every native file
   (E6). The reader requires the relations and does not assume the
-  constants. [DC], [R]
-* **Types 8 and 12** begin the fork with a table of little-endian offsets
-  whose first word is the end of the table: chunk `i` spans
-  `[offset[i], offset[i + 1])`, the `count + 1` offsets ascend, and the last
-  is the end of the last chunk. The table's length is the writer's choice,
+  constants. The resource payload is the resource length of bytes after
+  the length word, and every chunk lies inside it, after the count and
+  its `count` pairs: a chunk that reaches past the resource payload, into
+  the map or beyond, is `FSIMG_ECORRUPT` even when it lies within the
+  fork. [DC], [R]
+* **Types 8 and 12** begin the fork, at offset zero, with a table of
+  `count + 1` little-endian words, the entry for chunk `i` at byte `4 * i`.
+  Three quantities are distinct: the table's base, which is fork offset
+  zero; the table's end `T`, which is the first word's value; and the chunk
+  offsets, which are the words themselves. Chunk `i` spans
+  `[offset[i], offset[i + 1])`, so `offset[0]` is `T`, the first chunk
+  starts where the table ends, the offsets ascend, and `offset[count]` is
+  the end of the last chunk. The reader takes `count` from the uncompressed
+  size, reads the words from offset zero, and requires `T` to lie in
+  `[4 * (count + 1), logicalSize]`: the table must hold its words, and it
+  cannot extend past the fork. The table's length is the writer's choice,
   not the chunk count's: `ditto` writes exactly `4 * (count + 1)` bytes,
-  `afsctool` pads the table with zero words to `8 * count` bytes (E6). The
-  reader takes the first word as the table end, requires it to hold the
-  `count + 1` words, and never computes it from the count; words past the
-  last offset are not interpreted. [DC], [R]
+  `afsctool` pads the table with zero words to `8 * count` bytes (E6), so
+  `T` is never computed from the count, and words between the last offset
+  and `T` are not interpreted. [DC], [R]
 
 The chunk count equals `ceil(uncompressed size / 65536)`. Every table and
 chunk lies within the fork's `logicalSize`; a stored chunk is at most 69632
@@ -1071,25 +1130,41 @@ reserved bytes. Flag `0x1` places the journal inside the volume, `0x2` on
 another device, and `0x4` marks it as never initialized: `newfs_hfs -J`
 and `mkfs.hfsplus -J` leave flags `0x5` and an all-zero journal, and the
 first mount writes `0x1` and the header (E1, E8). The block lies in the
-content domain, and the journal's range lies in the content domain and
-covers whole allocation blocks. The flags are read against this table, and
-the first matching row decides:
+content domain.
+
+The journal's place in the volume comes from the catalog, not from the
+info block: on a journaled volume the root holds the format-owned file
+`.journal`, whose data fork is exactly the journal, so the journal is the
+one extent of that fork, `size` bytes long, in the content domain and in
+whole allocation blocks, and the header, when there is one, is read at the
+extent's start (E1, E8). The info block's `offset` must then agree with
+that location, in one of two bases: counted from the volume's own start,
+or, on a [wrapped](#the-hfs-wrapper) volume, from the wrapper's start. Any
+other value, a `size` that differs from the fork's `logicalSize`, a fork
+of more than one extent, or a journaled volume without the file is
+`FSIMG_ECORRUPT`. An unwrapped volume has one base, so the rule is the
+same on both; nothing is converted, and nothing is searched for, because
+the location comes from the validated catalog fork rather than from
+the stored offset. With bit 13 clear, `journalInfoBlock` is not
+interpreted. The flags are read against this table, and the first
+matching row decides:
 
 | Flags | Rule |
 | --- | --- |
-| `0x4` set | Never initialized: no header is read; `offset` and `size` count from the volume's own start, as the formatters write them, and the range rule applies |
-| `0x1` set | Local journal: on an unwrapped volume the header is at `offset`; on a [wrapped](#the-hfs-wrapper) volume `offset` counts from the wrapper's start, so the reader converts it to `offset - embedded_start`, an `offset` below `embedded_start` being `FSIMG_ECORRUPT`, applies the range rule in embedded terms and reads the header there, once |
+| `0x4` set | Never initialized: no header is read; the location rule applies |
+| `0x1` set | Local journal: the location rule applies and the header is read at the fork's extent, once |
 | `0x2` set | External journal: no header is read |
 | Neither `0x1` nor `0x2` | `FSIMG_ECORRUPT` |
 
-The wrapped conversion rests on one observation: the one image
-`mkfs.hfsplus -w -J` wrote holds `offset` 12288 from the embedded start
-under flags `0x5`, and after one macOS mount it holds `0x1` and 57344, the
-embedded start plus 12288, with the header at image byte 57344 (E11). An
-offset the rule cannot place is `FSIMG_ECORRUPT`, never a search from the
-other start: a header planted at the second candidate could otherwise hide
-a real pending journal. With bit 13 clear, `journalInfoBlock` is not
-interpreted. [TN], [R]
+Two bases are admitted because macOS itself uses both: its early mount
+path takes the stored `offset` as counted from the embedded volume's
+start, and its late path adds the embedded start and writes the sum back,
+which is why the one `mkfs.hfsplus -w -J` image holds 12288 under flags
+`0x5` and 57344, the embedded start plus 12288, after one macOS mount, with
+the header at image byte 57344 (E11, and the record's Apple source
+cross-check). The fork's location is the same under either base, so no
+case list is needed and a header planted at a second candidate location
+cannot hide a pending journal. [TN], [R]
 
 ### Journal header
 
@@ -1103,23 +1178,32 @@ and `jhdr_size` 512 (E1, E8); a big-endian header comes from a PowerPC-era
 host and is read by the same rule. The checksum covers the 44 bytes with
 the checksum field zero: starting from zero, each byte `c` updates the sum
 `s` to `(s << 8) ^ (s + c)` in 32-bit arithmetic, and the stored value is
-the complement of the result. `size` equals the info block's size, and
-`start` and `end` lie in `[jhdr_size, size)`. `start == end` means no
+the complement of the result. `size` equals the info block's size and lies
+in 256 KiB to 1 GiB, the range macOS opens; `start` and `end` lie in
+`(0, size]` and are multiples of 512, the bounds macOS accepts, and a
+value equal to `size` is read as `jhdr_size`, the position the log wraps
+to, before the two are compared. After that, `start == end` means no
 transaction is pending, at whatever position the pair sits (63488, 113664,
 316928 and others on clean volumes), and residue of completed transactions
 past `end` means nothing; `start != end` means transactions are pending,
-and `start > end` is valid once the log has wrapped (E8). [TN], [R]
+and `start > end` is valid once the log has wrapped (E8, and the record's
+Apple source cross-check). A value outside these bounds is
+`FSIMG_ECORRUPT`, where macOS refuses the mount. A wrong checksum is also
+`FSIMG_ECORRUPT`: macOS only logs one and reads the state fields anyway,
+but fsimg, which never replays, cannot trust `start` and `end` from a
+header that fails its own check, and no native volume in the record fails
+it; the rule stands unless one does. [TN], [R]
 
 ### Reader policy
 
 | State | Reader |
 | --- | --- |
 | Bit 13 clear | Read normally |
-| Journaled; local journal; valid header; `start == end` | Read normally; `info` reports a clean journal |
+| Journaled; local journal; valid header; `start == end` after the wrap rule | Read normally; `info` reports a clean journal |
 | Journaled; info block flag `0x4` | Read normally; `info` reports an uninitialized journal, which holds no transactions |
-| Journaled; `start != end` | `FSIMG_EUNSUPPORTED`: the base structures may be stale until a mount replays the journal (the volume header of E8's interrupted image counts 1135 files and the replay makes it 1137) |
+| Journaled; `start != end` after the wrap rule | `FSIMG_EUNSUPPORTED`: the base structures may be stale until a mount replays the journal (the volume header of E8's interrupted image counts 1135 files and the replay makes it 1137) |
 | Journaled; flag `0x2` | `FSIMG_EUNSUPPORTED`: the journal is on another device |
-| Journaled; info block or header invalid, or an offset the info block rule cannot place | `FSIMG_ECORRUPT` |
+| Journaled; info block or header invalid, `.journal` missing, or its fork disagreeing with the info block in either base | `FSIMG_ECORRUPT` |
 
 A volume whose journaling `diskutil disableJournal` turned off has bit 13
 clear, no journal files and `journalInfoBlock` still set (E8); the first
@@ -1166,7 +1250,7 @@ volume, and no current macOS tool formats one. [TN], [R]
 | Trees | The tree parameter table; depth at most 16; node maps chained |
 | Catalog flags | The closed table; `0x1000` unsupported |
 | Comparators | Folded and binary catalogs; binary attribute names |
-| Kinds | Regular, directory, symbolic link, FIFO; sockets and devices read-only; file hard links resolved; directory hard links unsupported |
+| Kinds | Regular, directory, symbolic link, FIFO; sockets and devices read-only; file hard links resolved, the indirect node's own kind deciding, so a symbolic-link indirect node, which macOS does not create and no other writer is known to, reads as a symbolic link; directory hard links unsupported |
 | Names | 1 to 255 units, decomposed under Unicode 3.2 tables; `:`, U+2400, `.`, `..` and spellings the tables do not reproduce unsupported; a Mac OS 8.1 to 9.2 volume whose names follow Unicode 2.1 is refused explicitly until a specimen widens the tables |
 | Symbolic-link targets | 1 to 1023 bytes |
 | Compression | Types 1, 3, 4, 7, 8, 11 and 12 |
@@ -1281,7 +1365,8 @@ up to whole blocks; the 4096 bytes at those sizes are a
 [provisional value](#writer-profile). 4096 is also the catalog node size of
 every old volume (E10) and of the native tree whose map nodes E9 records,
 so the writer's map nodes, when a catalog needs them, have the one native
-layout observed. Greedy packing can leave a non-root index level whose last
+layout observed: one record from offset 14 of `M - 20` bytes, the layout
+E9 shows at `M = 4096`. Greedy packing can leave a non-root index level whose last
 node holds one record; macOS leaves such nodes itself and `fsck_hfs -n`
 accepts them (E9), so the packer has no rule against them.
 
@@ -1321,9 +1406,11 @@ names:
 * on `hfsplus`, a name whose units are all ignorable: its namespace key is
   empty, the key the record stream reserves for threads, and a name that
   no listing shows is not worth a second key form;
-* a name holding the adjacent marks U+0306 U+0307 or U+0308 U+030D after
-  decomposition, which `fsck_hfs -n` calls illegal (E3), so that an fsimg
-  volume never fails the native check.
+* a name holding, after decomposition and sorting, one of the 23 adjacent
+  sequences `fsck_hfs -n` [calls illegal](#unicode-tables-and-their-evidence)
+  (E3), so that an fsimg volume never fails the native check. The 23
+  sequences are one table in the writer's name code, applied to the final
+  stored units; the generated Unicode tables are not altered for them.
 
 Siblings whose namespace keys are equal
 under the variant, such as `A` and `a` on `hfsplus` or two spellings of `é`
@@ -1426,19 +1513,19 @@ code ran. The minimum matrix:
 | Area | Required cases |
 | --- | --- |
 | Probe and geometry | Each signature and version pairing; slice shorter than 1536 bytes and not a multiple of 512; `B` of 0, 511, 513, 512 to 65536 and `2^31`; `N` of 0, 1 and above `V / B`; `N * B` overflow; every reserved-block layout from `B = 512` to `B = 4096`; probe exclusivity against FAT, exFAT, QNX4, QNX6 and ImageFS fixtures in both directions; a forced format |
-| Header | Every attribute bit alone, bits 29 and 30 refused, an unknown bit; `FSK!`; `freeBlocks` above `N`; `nextCatalogID` below 16 and below a used ID with and without bit 12; a missing catalog or extents fork; an alternate header that disagrees in each compared field and one that is missing |
+| Header | Every attribute bit alone, bits 29 and 30 refused, an unknown bit; `FSK!`; `freeBlocks` above `N`; `nextCatalogID` below 16 and below a used ID with and without bit 12; a missing catalog or extents fork; an alternate header that disagrees in each compared field and one that is zero-filled, both `FSIMG_ECORRUPT`, and a read failure injected on the alternate's sectors kept as `FSIMG_EIO` |
 | Forks | 0, 1, 8 and 9 extents on data and resource forks; 17 extents over two overflow records; a gap, overlap, repeat and extra overflow record; a zero-count used descriptor; a used descriptor after an unused one; an extent into the reserved blocks, past `N` and across the tail; `logicalSize` above allocation; an extents tree needing overflow; bad-block records |
 | Bitmap | A referenced clear block; an allocated orphan; two forks sharing a block; a set padding bit; a short bitmap; `freeBlocks` off by one |
-| B-trees | Node sizes at each bound for each tree; header node faults in kind, height, record count and offsets; offsets overlapping, odd and out of node; a key longer than its record; equal and descending keys within a node and across siblings; an index key that differs from its child's first key by one unit; a child of the wrong height, the header or itself; sibling cycles and broken back links; `leafRecords`, `firstLeafNode`, `lastLeafNode` and `treeDepth` off; an unmarked used node and a marked free node; map chains of 0, 1 and 2 nodes, a looping and a short chain; a fork shorter than `totalNodes * M`; the variable-index flag toggled on each tree; empty extents and attributes trees |
+| B-trees | Node sizes at each bound for each tree; header node faults in kind, height, record count and offsets; offsets overlapping, odd and out of node; a key longer than its record; equal and descending keys within a node and across siblings; an index key that differs from its child's first key by one unit; a child of the wrong height, the header or itself; sibling cycles and broken back links; `leafRecords`, `firstLeafNode`, `lastLeafNode` and `treeDepth` off; an unmarked used node and a marked free node; map chains of 0, 1 and 2 nodes, a looping and a short chain, a map record shorter than `M - 20` that still covers `totalNodes`; a fork shorter than `totalNodes * M`; the variable-index flag toggled on each tree; empty extents and attributes trees |
 | Catalog | Each record type at its exact length, one byte short and one long, an unknown type; a missing, duplicated and mismatched thread; a thread naming the wrong parent or name; a folder entered from a second parent; a cycle disconnected from the root; parent missing or a file; `valence`, `folderCount`, `fileCount` and `folderCount` each off by one; every flag bit alone, `0x1000` refused, an unknown bit; every kind in the kind table; zero BSD information on a file and a folder; node IDs 9 to 15 |
-| Names | 1, 254 and 255 units; a surrogate pair at the limit; an unpaired surrogate; `:`, `/`, U+0000, U+2400, `.`, `..`, `Icon\r` and percent text; the private names exact and with one unit changed; prefix names `abc` and `abcd`, `a` and `aa`; `A` and `a` on both comparators; an exception unit against its lowercase; precomposed and decomposed `é`, Hangul, U+2000 to U+2FFF and U+F900 to U+FAFF units, a supplementary value with a Unicode decomposition, U+0F73 after U+0F72, ignorable units and an all-ignorable name before its siblings; the `fsck_hfs` mark pairs delivered; selection by every spelling; a stored name that is not its own decomposition refused; two all-ignorable siblings |
+| Names | 1, 254 and 255 units; a surrogate pair at the limit; an unpaired surrogate; `:`, `/`, U+0000, U+2400, `.`, `..`, `Icon\r` and percent text; the private names exact and with one unit changed; prefix names `abc` and `abcd`, `a` and `aa`; `A` and `a` on both comparators; an exception unit against its lowercase; precomposed and decomposed `é`, Hangul, U+2000 to U+2FFF and U+F900 to U+FAFF units, a supplementary value with a Unicode decomposition, U+0F73 after U+0F72, ignorable units and an all-ignorable name before its siblings; each of the 23 `fsck_hfs` sequences delivered; selection by every spelling; a stored name that is not its own decomposition refused; two all-ignorable siblings |
 | Unicode tables | The observable-rows gate of the [table evidence](#unicode-tables-and-their-evidence) on both comparators, and the digest of each generated table |
 | Attributes | Inline at 0, 1 and the largest inline size; fork records with 1, 8 and 9 extents; a continuation gap; an unknown record type; a name of 127 units and one of 128; names differing only in case; an attribute for a missing node ID; a flag disagreeing with the tree in each direction, a record with an attribute and a clear flag included; the extra-data mark on a resource fork, a stored attribute, a consumed compression attribute and none, listed and named in the extraction loss report |
 | Links and kinds | Symbolic links of 1, 1023 and 1024 bytes and one with a NUL; FIFOs, sockets and devices; hard-link stubs to files and symbolic links, two and three names across directories, a dangling stub, a zero reference, a link count off by one; a stub with `fileMode` 0; a stub dated from the root folder and one from the private data folder; `hlnk`/`hfs+` with another date, read as a file; a directory hard link refused and its Finder-alias look-alike read as a file; `temp` files |
-| Compression | Every type with content of 0, 1, 65535, 65536, 65537 and 200000 bytes; raw-marker chunks; a type 4 header, table and chunk out of range and a header whose relations fail; for types 8 and 12 a first word below `4 * (count + 1)`, beyond the fork, padded and unpadded; a chunk above the input bound; an inline size above 65536; an LZFSE `bvx-` block; overlapping and descending chunks; a chunk decoding one byte short and one long; an unknown type; a header shorter than 16 bytes; the flag without the attribute; the attribute without the flag; a nonempty data fork; sequential reading decoding each chunk once |
-| Journal | Unjournaled, clean empty journal in each byte order, uninitialized journal, transactions present with `start < end` and with `start > end`, `start == end` at a position other than `jhdr_size`, external journal, flags with neither `0x1` nor `0x2`, a bad checksum, magic or size; journal files absent on a journaled volume and present on an unjournaled one |
-| Wrapper | A wrapped volume with its embedded extent at the start, the middle and the end; an extent outside the outer slice; an embedded `HX`; a wrapped journal in each state: uninitialized, clean with the wrapper-relative offset, pending, and an offset below the embedded start |
-| Writer | Both variants; every block size of the writer profile; exact and automatic sizing at each bitmap-block boundary; an empty catalog; a full volume; names at each length after decomposition, each of the four reserved root names with the private data folder's spelled through four U+2400, colliding siblings on each variant, U+2400 stored as U+0000, and the refused names: percent-text values, an all-ignorable name on `hfsplus`, each `fsck_hfs` mark pair; label default, 255 units and 256; owner and mode extremes; times at 1904, 1970, 2040 and beyond as counted losses and refusals; symbolic links and FIFOs; a catalog wide enough for map nodes; byte identity across source order, cache size, scratch path and time zone; a poison scan of every unused byte |
+| Compression | Every type with content of 0, 1, 65535, 65536, 65537 and 200000 bytes; raw-marker chunks; a type 4 header, table and chunk out of range, a chunk inside the fork but past the resource payload, in the map, and a header whose relations fail; for types 8 and 12 a first word below `4 * (count + 1)`, beyond the fork, padded and unpadded, and a table whose words are read from offset zero while the first word points elsewhere; a chunk above the input bound; an inline size above 65536; an LZFSE `bvx-` block; overlapping and descending chunks; a chunk decoding one byte short and one long; an unknown type; a header shorter than 16 bytes; the flag without the attribute; the attribute without the flag; a nonempty data fork; sequential reading decoding each chunk once |
+| Journal | Unjournaled, clean empty journal in each byte order, uninitialized journal, transactions present with `start < end` and with `start > end`, `start == end` at a position other than `jhdr_size`, `start == size` with `end == jhdr_size` read as clean, `start` or `end` of 0, above `size` or not a multiple of 512, `size` below 256 KiB and above 1 GiB, external journal, flags with neither `0x1` nor `0x2`, a bad checksum, magic or size; journal files absent on a journaled volume and present on an unjournaled one; a `.journal` fork of two extents, of a length other than `size`, and at a start the info block's `offset` names in neither base |
+| Wrapper | A wrapped volume with its embedded extent at the start, the middle and the end; an extent outside the outer slice; an embedded `HX`; a wrapped journal in each state: uninitialized, clean with `offset` in the embedded base and in the wrapper's base, pending, and an `offset` matching the fork in neither base |
+| Writer | Both variants; every block size of the writer profile; exact and automatic sizing at each bitmap-block boundary; an empty catalog; a full volume; names at each length after decomposition, each of the four reserved root names with the private data folder's spelled through four U+2400, colliding siblings on each variant, U+2400 stored as U+0000, and the refused names: percent-text values, an all-ignorable name on `hfsplus`, each of the 23 `fsck_hfs` sequences, alone and after a starter, and a Greek letter with U+0301 accepted beside it; label default, 255 units and 256; owner and mode extremes; times at 1904, 1970, 2040 and beyond as counted losses and refusals; symbolic links and FIFOs; a catalog wide enough for map nodes; byte identity across source order, cache size, scratch path and time zone; a poison scan of every unused byte |
 | Failure | Allocation, scratch, short read, short write, premature EOF, source change, cancellation, flush and publication failures at every stage, each followed by a cleanup check |
 
 Independent acceptance is bidirectional: fsimg reads each native capture
@@ -1467,7 +1554,7 @@ Provenance details are in the research record.
 | NB | NetBSD `sys/fs/hfs/libhfs.c` (BSD-2-Clause): an independent folding table and comparators, a cross-check |
 | DC | Apple's open-source xnu `decmpfs.h` (APSL 2.0): the compression attribute's header and type numbers, read for facts only; the chunk framings and raw markers are fixed by native captures (E6), with implementations such as hfsfuse used only as black-box oracles |
 | UC | Unicode 3.2.0 `UnicodeData.txt`, under the Unicode license |
-| R | The native experiments E1 to E11 the plan defines, recorded in `docs/hfsplus-research.md` |
+| R | The native experiments E1 to E11 the plan defines, and the Apple source cross-check that follows them, recorded in `docs/hfsplus-research.md` |
 
 [TN]: https://developer.apple.com/library/archive/technotes/tn/tn1150.html
 [HF]: https://github.com/apple-oss-distributions/hfs/blob/main/core/hfs_format.h

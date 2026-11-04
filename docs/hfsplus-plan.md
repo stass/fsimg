@@ -69,6 +69,7 @@ Non-goals:
 | [The draft](../fsspecs/HFSPLUS_HFSX_FSIMG_SPEC.md) | Research draft, original prose | Questions, invariants (section 15), test matrix (section 17). Every uncertainty in its section 20 is a gate here, never a default |
 | Apple TN1150 | Vendor documentation; facts paraphrased, no text or sample code reproduced | Layout, B-trees, catalog, Unicode rules, hard links, journal, wrapper |
 | Apple `hfs_format.h`, `hfs_catalog.c`, `hfs_link.c` and xnu `decmpfs.h` | APSL 2.0; facts only, no code or declarations | Modern flags, the attribute key and records, private names, the link-stub tests and dates, the compression header and types |
+| The Apple `hfs` and `xnu` trees at tags `hfs-715.120.4` and `xnu-12377.121.6`: the kernel's and `fsck_hfs`'s folding tables, the name conversion and its data, the illegal-name repair routine, the link and journal paths, the volume flush and `decmpfs.c` | APSL 2.0; facts only, compared in the record's Apple source cross-check; their gap to the host's `hfs-715.160.9` and `xnu-12377.161.14` is stated there and not closed | Confirmation of the Unicode tables on every row, the 23 `fsck_hfs` sequences, the stub dates, the journal's offset bases and bounds, the alternate header's triggers, the inline attribute bound. Compression types and chunk tables stay evidence from E6: the compression kext's source is not public |
 | NetBSD `sys/fs/hfs/libhfs.c` | BSD-2-Clause | A second, independent derivation of the folding table, compared, not imported |
 | Unicode 3.2.0 character data | Unicode license, notice already in `third-party/Unicode-LICENSE.txt` | Input of the table generator |
 | Apple `lzfse` at a pinned commit | BSD-3-Clause | The imported LZFSE and LZVN decoders, under the [codec design](../specs/design-codecs.md#imported-lzfse-and-lzvn-decoders) |
@@ -189,7 +190,7 @@ stage that consumes it.
 | Header fields the alternate header keeps equal after native use | E1, E2 | Verification |
 | `newfs_hfs` empty-volume layout: object order, tree sizes and node sizes per block size, clump sizes, `writeCount`, `encodingsBitmap`, Finder information, the unused-node bit, root owner, mode and dates, `createDate` semantics | E1 | Writer profile |
 | Whether `newfs_hfs` creates the private folders and an attributes tree, and sets folder counts on HFS Plus and HFSX | E1 | Writer profile |
-| Map-node record length | E9 | Reader, writer packer |
+| Map-node record length | E9 | Writer packer; the reader takes it from the offset table |
 | Fold table, ignorable units, U+0000 ordering, decomposition table, combining order, supplementary characters | E3 | Unicode tables |
 | Attribute name comparison; whether flag `0x0004` stays in step with the tree after the last attribute is removed | E5 | Reader, verification |
 | Hard-link stub and indirect-node fields; the stub test (codes, dates, flag); whose metadata macOS reports; link counts; chain fields; hard-linked symbolic links; macOS's own attributes on indirect nodes | E4 | Reader |
@@ -268,11 +269,16 @@ Each experiment varies one property on disposable volumes:
   with non-ASCII names was found and which the reader refuses explicitly
   as a name its tables do not reproduce; and hard-linked symbolic links,
   which macOS does not create and which the indirect node's own kind
-  covers on synthetic fixtures. One test stays unrun: the directory-link
-  stub test on a hand-patched record, since the native stub and indirect
-  node of `h-hfsplus-16777216-e4-dirlinks-J` give the bytes the detection
-  needs and the patch tool sets too few fields to make one. The archive.org
-  images that E10 decodes are for local testing only.
+  covers on synthetic fixtures. One test stays unrun and is not needed:
+  the directory-link stub test on a hand-patched record, since the native
+  stub and indirect node of `h-hfsplus-16777216-e4-dirlinks-J` give the
+  bytes the detection needs, the Apple source cross-check gives the test
+  itself, and the patch tool sets too few fields to make one. The wrapped
+  journal's offset base, which E11 observed once, is explained by the
+  cross-check (two mount paths, two bases) and the design locates the
+  journal by the `.journal` fork, so the observation is evidence for the
+  two bases, not a rule of its own. The archive.org images that E10
+  decodes are for local testing only.
 
 ### 2. Design revision and tables
 
@@ -427,8 +433,10 @@ Each experiment varies one property on disposable volumes:
 
 * The wrapper path of `volume.c`; generator fixtures with the embedded
   volume at the start, middle and end of the outer volume; E11 captures.
-* **Gate:** wrapped fixtures read and verify as their embedded volume, and
-  the manual states that the outer HFS volume is not checked.
+* **Gate:** wrapped fixtures read and verify as their embedded volume, a
+  wrapped journal is located by its `.journal` fork with the info block's
+  `offset` accepted in either base, and the manual states that the outer
+  HFS volume is not checked.
 
 Unscheduled, each behind its own design: a common representation of
 resource forks, attributes, Finder information and BSD flags, and the HFS
@@ -526,10 +534,10 @@ The owner has settled these:
    (E3), beside `:` and `/`.
 8. **Writer refusals.** The writer refuses, as invalid names, U+FFFE,
    U+FFFF and surrogate encodings, which macOS stores as ASCII percent text
-   and fsimg never writes; a name holding the adjacent marks U+0306 U+0307
-   or U+0308 U+030D after decomposition, which `fsck_hfs -n` calls illegal;
-   and, on `hfsplus`, a name of ignorable units alone. The reader accepts
-   all of these as macOS stores them.
+   and fsimg never writes; a name holding, after decomposition, one of
+   the sequences `fsck_hfs` flags, the 23 the format design lists; and, on
+   `hfsplus`, a name of ignorable units alone. The reader accepts all of
+   these as macOS stores them.
 9. **Unicode table gate.** The generated tables are compared with the E3
    observation's observable rows under the format design's gate; the
    unobservable rows keep the derivation rule, lowercase on the folded

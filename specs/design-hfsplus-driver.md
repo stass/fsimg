@@ -110,15 +110,20 @@ next reads:
 5. **Catalog and attributes trees.** Read and check each header node; select
    the catalog comparator from the signature and `keyCompareType`; require
    `totalNodes * M` to equal the fork's `logicalSize`.
-6. **Journal.** With bit 13 set, read the 180-byte info block, place the
-   journal by the format design's
-   [info block rule](design-hfsplus.md#journal-info-block), whose first
-   matching row decides, read the 44-byte header at the one place that rule
-   names, if it names one, and apply the reader policy table. On a wrapped
-   volume a local journal's `offset` counts from the wrapper's start and is
-   converted to the embedded slice once; there is no second place to look.
-   Record the journal's block range and the info block's block for the
-   root's format-owned files.
+6. **Journal.** With bit 13 set, read the 180-byte info block; look up
+   `(2, ".journal")` by exact stored units and require a file record
+   whose data fork is one extent of `logicalSize` equal to the info
+   block's `size`, in the content domain; require the info block's
+   `offset` to equal that extent's byte start counted from the slice's
+   start or, on a wrapped volume, from the wrapper's start, as the format
+   design's [info block rule](design-hfsplus.md#journal-info-block)
+   states, whose first matching flags row then decides; read the 44-byte
+   header at the extent's start when that row says so, apply the wrap rule
+   to `start` and `end`, and apply the reader policy table. Nothing is
+   converted and no second place is looked at: the extent is the one
+   location, and `offset` is checked against it. Record the journal's
+   block range and the info block's block for the root's format-owned
+   files.
 7. **Root.** Look up the thread `(2, "")` and require a folder thread with
    parent 1; look up the primary `(1, name)` it names and require a folder
    record with `folderID` 2. The name is the label; a name the
@@ -130,9 +135,9 @@ The reader state then holds the geometry, the header, the three tree
 descriptors with their fork indexes, the bitmap's fork index, the journal
 ranges, the root record, the label when valid, and the private data folder's
 node ID once found. Open reads at most the header, the alternate header
-under verification only, three header nodes, a few search paths and the two
-journal records; it never reads the bitmap, a directory's records or any
-payload. `info` reports the geometry (`V` bytes, `N` units of `B`, a 512-byte
+under verification only, three header nodes, a few search paths, among
+them the `.journal` lookup, and the two journal records; it never reads
+the bitmap, a directory's records or any payload. `info` reports the geometry (`V` bytes, `N` units of `B`, a 512-byte
 sector), the label, the clean flag, the profile, and these details in this
 order: `journal` (0 none, 1 clean, 2 uninitialized), `catalog_node_bytes`,
 `extents_node_bytes`, `attributes_node_bytes` (0 without the tree),
@@ -152,8 +157,9 @@ verification.
    in checked arithmetic.
 2. Append the used inline extents in order; adjacent extents coalesce.
 3. While the appended blocks fall short of `totalBlocks`, search the extents
-   tree for the exact key `(file ID, fork type, appended)`; its absence is
-   `FSIMG_ECORRUPT`. Advance the leaf cursor from there: each record of the
+   tree for `(file ID, fork type, appended)` and require the record found
+   to carry exactly that key; anything else is `FSIMG_ECORRUPT`. Advance
+   the leaf cursor from there: each record of the
    same file and fork type must start exactly at the appended count and
    contribute at least one block, and appending stops when the count reaches
    `totalBlocks`. The record after the last must belong to another file or
@@ -188,17 +194,27 @@ buffer at every level and leaves only the leaf in it. No node is retained
 beyond those buffers: a later search rereads its path, so there is no
 driver-private cache to keep coherent or to bound.
 
-* **Search** finds the leaf record with the greatest key not above the search
-  key, or reports that the key precedes every record. From the root it
-  follows, at each index node, the greatest index key not above the search
-  key, requiring each child to be below `totalNodes`, of the expected kind,
-  and of height exactly one less, so a descent ends within `treeDepth`
-  steps. Every catalog search uses the volume's comparator, under which an
-  empty name precedes every nonempty one, so a search for a thread
-  `(id, "")` lands on the thread even when a child's name folds to nothing;
-  the caller still requires the record it lands on to be the thread, so a
-  mistaken fold table cannot make such a search return the wrong record
-  unnoticed.
+* **Search** is one operation, the lower bound: it positions the leaf
+  cursor on the first leaf record whose key is at or above the search key,
+  or reports that no record is. From the root it follows, at each index
+  node, the greatest index key not above the search key, or the first
+  index record when the search key precedes them all, requiring each child
+  to be below `totalNodes`, of the expected kind, and of height exactly one
+  less, so a descent ends within `treeDepth` steps; in the leaf it steps
+  past records below the key, and when the leaf holds none at or above it
+  the cursor advances along `fLink` to the next leaf's first record. Every
+  scan starts with this one operation and then reads forward: a lookup
+  requires the record found to carry the key it asked for; a scan of the
+  records of one owner, a thread followed by its children or the
+  attributes of one node ID, starts at the lower bound of the owner's
+  smallest possible key and reads while the owner matches, so the first
+  record of the owner is always the one the cursor stands on and no
+  predecessor is involved. Every catalog search uses the volume's
+  comparator, under which an empty name precedes every nonempty one, so a
+  search for a thread `(id, "")` lands on the thread even when a child's
+  name folds to nothing; the caller still requires the record it lands on
+  to be the thread, so a mistaken fold table cannot make such a search
+  return the wrong record unnoticed.
 * **The leaf cursor** advances through a leaf's records and then along
   `fLink`, requiring each next node to be a leaf whose `bLink` names the node
   just left. Its caller checks key order, which is what ends a scan on a
@@ -221,7 +237,9 @@ whose type matches the expected kind, and returns its parent and name.
 [stub tests](design-hfsplus.md#file-hard-links) to a file record: a file
 stub, a directory stub, or neither. The test compares the record's
 `createDate` with two dates: the root folder's, which open already read,
-and the private data folder's. The first record carrying either pair of
+and the private data folder's, the file hard-link data folder
+`\0\0\0\0HFS+ Private Data`, whose date both stub kinds carry; the
+directory hard-link folder's date is never consulted. The first record carrying either pair of
 Finder codes looks the data folder up by one keyed search in the root,
 requires the record found to be a folder whose stored units equal the name
 exactly, since the comparator search would also land on a case variant
@@ -251,11 +269,10 @@ and `FSIMG_META_EXTRA_DATA` from the attribute scan and the resource fork.
 ## Attributes and compression
 
 `hfsplus_attr_scan()` visits the attribute records of one node ID: one
-search for `(id, "", 0)` in the attributes tree and a cursor walk while
-`fileID` matches. The search returns the greatest key not above
-`(id, "", 0)`, which every attribute of `id` exceeds, because a name has at
-least one unit, so the cursor advances one record before it reads the
-first of them. It validates each record, reports whether any
+lower-bound search for `(id, "", 0)` in the attributes tree, which no
+attribute key equals because a name has at least one unit, so the cursor
+stands on the first attribute of `id` when there is one, and a cursor walk
+while `fileID` matches. It validates each record, reports whether any
 [stored attribute](design-hfsplus.md#stored-attributes-and-the-extra-data-mark)
 exists, which excludes only a consumed `com.apple.decmpfs`, and returns
 the compression attribute's inline value when present. The scan runs only for a
@@ -270,13 +287,18 @@ reader when the first compressed file is resolved and released at close.
 zlib streams use the common
 [allocation adapter](design-binary-primitives.md), so their state is charged
 to the same context. A compressed entry's content state holds the type, the
-uncompressed size, the resource fork's index for chunked types and the
-chunk table's location, which for types 8 and 12 is the table end the
-fork's first word states, validated against the chunk count and the fork
-and never computed from the count; the table entries of chunk `i` and its
-successor are read when chunk `i` is first needed, through a small window
-over the table, so the table is never held whole, and the chunk is checked
-against them and the fork. Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is
+uncompressed size, the resource fork's index for chunked types, the chunk
+count `ceil(size / 65536)`, and the chunk table's bounds. For types 8 and
+12 the table's base is fork offset zero and its end `T` is the first
+word's value, read from offset zero and required to lie in
+`[4 * (count + 1), logicalSize]`, never computed from the count; the
+chunk offsets are the words at `4 * i` for `i` in `[0, count]`, the first
+of them `T` itself. For type 4 the bounds are the resource payload after
+the count and its pairs, which the fork header's relations fix. The table
+entries of chunk `i` and its successor are read when chunk `i` is first
+needed, through a small window over the table's bounds, so the table is
+never held whole, and the chunk is checked against them and against the
+payload bounds. Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is
 the window's current chunk, charges the bytes consumed and produced as
 work, and returns the decoded span. A codec error, a chunk that decodes to
 the wrong length, or one stored beyond the input bound is `FSIMG_ECORRUPT`.
@@ -290,8 +312,8 @@ by a validated node buffer.
 
 `prepare` lists a directory by its node ID `d`:
 
-1. Search for `(d, "")` and require the first record to be `d`'s folder
-   thread, naming the parent the walker entered `d` from and the entry's
+1. Search for `(d, "")` and require the record the cursor stands on to be
+   `d`'s folder thread, naming the parent the walker entered `d` from and the entry's
    stored name. Each folder has one thread, so a folder can be entered from
    one parent only: a second parent, a cycle back to an ancestor, or a
    folder record reusing another folder's ID fails here with
@@ -312,8 +334,8 @@ by a validated node buffer.
 4. Classify every other child with `hfsplus_link_kind()` and the kind
    table: a directory stub fails preparation with
    `FSIMG_EUNSUPPORTED`, so no child of the directory is exposed; a socket
-   or a device is admitted as its read-only kind, a device with the
-   `special` word decoded as the format design states; a file
+   or a device is admitted as its read-only kind, a device with its
+   `special` word carried in the payload; a file
    stub is resolved now, and the indirect node's record takes the stub's
    place for everything but the name; a file with `ownerFlags` `0x20` has
    its compression attribute read and its type checked now, so an
@@ -329,9 +351,12 @@ record index (2), the stub's node ID or zero (4), the kind and the
 extra-data bit (1 each), the compression type (1, zero for none), the size
 (8), the owner and group (4 each), the permission bits (2), a flags byte
 saying whether owner and mode are valid and whether a folder count is
-recorded (1), the four times as stored (16), and for a folder its
-`valence` and folder count (4 each), which its own preparation checks: 60
-bytes. The effective record is the indirect node's for a stub, so that is
+recorded (1), the four times as stored (16), the stored `special` word
+(4), which for a device is the `dev_t` that `replay` splits into
+`FSIMG_META_DEVICE`'s major and minor as the format design states and
+which is zero for every other kind, and for a folder its `valence` and
+folder count (4 each), which its own preparation checks: 64 bytes, the
+whole bound. The effective record is the indirect node's for a stub, so that is
 the record the leaf location names. `keys` emits one key, the
 [namespace key](design-hfsplus.md#namespace-keys); `key` maps a query
 component the same way, after the `:` to `/` and U+2400 to U+0000
@@ -432,10 +457,12 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    clear bits must equal `freeBlocks`.
 8. **Alternate header.** Compare the fields the format design names: the
    signature, version, `blockSize`, `totalBlocks` and the five fork-data
-   records. An alternate that is missing, unreadable or without a header
-   signature, such as the zeroed sectors of a specimen whose container
-   dropped them (E10), fails here and nowhere earlier. `FSIMG_VOLUME_FREE`
-   is set only when this step, the last, succeeds.
+   records. An alternate without a header signature, such as the zeroed
+   sectors of a specimen whose container dropped them (E10), fails here
+   and nowhere earlier with `FSIMG_ECORRUPT`; a read the I/O callback
+   fails is `FSIMG_EIO`, and cancellation and exhaustion keep their
+   classes. `FSIMG_VOLUME_FREE` is set only when this step, the last,
+   succeeds.
 
 HFS Plus storage is exclusive: no two forks share a block, and a hard link
 shares an indirect node through the catalog, not extents. So the strict run
@@ -488,8 +515,9 @@ Planning runs a fixed sequence of passes over the frozen catalog:
 1. **Entries.** For each catalog ID in order: encode the name as the format
    design's [writer names](design-hfsplus.md#writer-names) rule states, or fail
    with `FSIMG_EINVAL`, which covers the percent-text values, an
-   all-ignorable name on `hfsplus` and the two mark pairs `fsck_hfs`
-   refuses; refuse a root entry whose key equals that of one of the four
+   all-ignorable name on `hfsplus` and the 23 sequences `fsck_hfs`
+   flags, held in one table in the name code and matched against the
+   final stored units; refuse a root entry whose key equals that of one of the four
    format-owned root names, from the one table in `hfsplus.h`; check kind and
    metadata through the common policy, selecting owner, mode and times; count
    the entry into its parent's row; accumulate the data fork's blocks for
@@ -585,7 +613,7 @@ Writer:
 
 | Condition | Status |
 | --- | --- |
-| Setting outside its rule; a name or label outside 1 to 255 units after encoding, invalid UTF-8 or a percent-text value, all-ignorable on `hfsplus`, or holding a mark pair `fsck_hfs` refuses; equivalent siblings; a reserved root name | `FSIMG_EINVAL` |
+| Setting outside its rule; a name or label outside 1 to 255 units after encoding, invalid UTF-8 or a percent-text value, all-ignorable on `hfsplus`, or holding a sequence `fsck_hfs` flags; equivalent siblings; a reserved root name | `FSIMG_EINVAL` |
 | A file needing more than `2^32 - 1` blocks; a kind the profile lacks or a link target above 1023 bytes, from the common capability check; a time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
 | Content that does not fit the exact size or `2^32 - 1` blocks; a non-reproducible format time outside 1904 to 2040 | `FSIMG_ERANGE` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
