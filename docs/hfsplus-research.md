@@ -141,10 +141,14 @@ header and alternate header, tree header nodes, node maps, allocation bitmap,
 private folders, Finder information and catalog records as text or JSON
 (`--json`), treating the image as untrusted; it also decodes the attributes and
 extents overflow leaf records and, for compressed files, the `decmpfs` header and
-the resource fork's chunk table. `capture.rb --populate` takes the profiles `e2`,
-`e4`, `e5`, `e6-zlib`, `e6-lzvn`, `e6-lzfse`, `e6-ditto`, `e6-sweep` and `e7`
-(`tools/hfsplus/populate*.rb`); `tools/hfsplus/patch_record.rb` rewrites fields of one
-catalog file record in a copy of an image.
+the resource fork's chunk table; `--index` walks the index nodes of each tree and
+compares every index key with the first key of the child it names. `capture.rb
+--populate` takes the profiles `e2`, `e4`, `e5`, `e6-zlib`, `e6-lzvn`,
+`e6-lzfse`, `e6-ditto`, `e6-sweep`, `e7`, `e9-create`, `e9-delete`, `e9-thin` and
+`e9-sparse` (`tools/hfsplus/populate*.rb`); `tools/hfsplus/patch_record.rb`
+rewrites fields of one catalog file record in a copy of an image, and
+`tools/hfsplus/e8_interrupt.rb` interrupts mounted journaled sessions and decodes
+the journal that is left.
 
 ### Throwaway probes
 
@@ -173,6 +177,43 @@ diskimage-class=CRawDiskImage -nomount V`, and detached again.
   `: > MNT/g; chgrp 80 MNT/g; ls -ln MNT/g`, detach, and read the record of
   `g` from `ruby tools/hfsplus/fields.rb --json --records 5000 V`: its `group`
   is 80 and its `owner` the mounting user.
+
+Probes of E8, E9 and E11, each a hand-typed observation outside a capture
+directory. `V` is a 32 MiB image made with `mkfile -n 33554432 V` and formatted
+with `newfs_hfs -J -v LV -b 4096` through `hdiutil attach -imagekey
+diskimage-class=CRawDiskImage -nomount V`, detached again.
+
+* Journal while mounted (E8). Mount `V` with `hdiutil attach -imagekey
+  diskimage-class=CRawDiskImage -mountpoint MNT V`, run `sync`, and decode the
+  image while it is mounted with `ruby tools/hfsplus/fields.rb V`: three of three
+  runs report `start` 512, `end` 17408 and `attributes` `0x80002000`, and
+  `first_transaction` holds `num_blocks` 4 and `bytes_used` 16896. After `hdiutil
+  detach MNT` the same decode reports `start` equal to `end` and `attributes`
+  `0x80002100`.
+* Journaling disabled (E8). Mount `V` as above, write one file, run `diskutil
+  disableJournal MNT` (it needs no privilege and prints `Journaling has been
+  disabled for volume`), detach, and decode: capture
+  `h-hfsplus-33554432-e8-journal-disabled` holds the result.
+* File creation speed (E9). Format a 64 MiB `V` with `newfs_hfs -v S`, mount it,
+  and time `Dir.mkdir("MNT/t"); 3000.times { File.write(format("MNT/t/file-%05d",
+  _1), "") }` in Ruby: 0.52 seconds.
+* Native `nextAllocation` (E9). `mkfile -n 671088640 V`, attach, `newfs_hfs -v E9
+  -b 4096 -n c=4096 -c c=76800` on the raw device, detach. `fsck_hfs -n` on the
+  attached device reports `Volume header needs minor repair` and exits 8. Writing
+  92166 (the block after the catalog) over the four bytes at 1024+52 of `V`, which
+  hold 860166, makes `fsck_hfs -n` report the volume OK.
+* Index keys after deletions (E9). Read the root of the catalog tree of
+  `h-hfsplus-671088640-e9-create` and of `h-hfsplus-671088640-e9-delete`, collect
+  the key of every record of every child of the root
+  and subtract the sets. After `gunzip -k` of the two `image.img.gz`, `ruby
+  tools/hfsplus/index_keys.rb CREATE.img DELETE.img` prints 8203 keys before, 7960
+  after, 2343 after that are not before.
+* Wrapped journaled volume mounted (E11). Copy
+  `h-hfsplus-16777216-e11-mkfs-w-J/image.img` to `V`, mount it with `hdiutil
+  attach -imagekey diskimage-class=CRawDiskImage -mountpoint MNT V` (macOS mounts
+  it: `hfs, local, nodev, nosuid, journaled, noowners, mounted by USER`), create a
+  file, detach, and decode. The journal info block's `offset` changes from 12288
+  to 57344 and the journal header is found at image byte 57344.
 
 Further probes of E4 to E6, each a hand-typed observation outside a capture
 directory.
@@ -750,16 +791,247 @@ The reader's extents-overflow lookup can be tested against these two images.
 
 ### E8 Journal
 
-Status: open.
+Status: answered, with one qualification: an interrupted session leaves
+transactions only in a copy of the image taken while it runs, never through
+`hdiutil detach -force`.
+
+Procedure. Captures `h-hfsplus-33554432-newfs-J-b4096` (E1),
+`h-hfsplus-33554432-hdiutil-hfsplusj` (E1) and
+`h-hfsplus-33554432-e8-newfs-J-mounted` (`newfs_hfs -J -v J1 -b 4096`, mounted,
+unmounted, no file written) give the clean volumes. `tools/hfsplus/e8_interrupt.rb`
+formats a fresh 32 MiB `newfs_hfs -J` volume per trial, mounts it, runs a writer that
+creates 4096-byte files without syncing until killed, and after a delay either
+runs `hdiutil detach -force` (`--mode force`) or copies the backing image while the
+writer runs and then force-detaches (`--mode snapshot`); it decodes the journal of
+what is left, mounts that image again, decodes once more, and prints one JSON line
+per trial. Delays of 0.1, 0.3, 0.6, 1.5 and 3.0 seconds, four trials each, in both
+modes: `e8-interrupt-trials/trials.jsonl`. Captures
+`h-hfsplus-33554432-e8-interrupted` (first snapshot trial at 1.5 seconds that left
+transactions), `h-hfsplus-33554432-e8-remounted` (the same image mounted once more;
+fields only) and `h-hfsplus-33554432-e8-journal-disabled` (`diskutil
+disableJournal`, see Throwaway probes). The writer stops at 7029 files, which fill the volume, and
+most trials from 1.5 seconds on interrupt a full volume. `fsck_hfs -n`
+prints `Volume is journaled.  No checking performed.` on every journaled volume, and
+the captures' `fsck_populated.passed` is true for that message; the decoder
+verifies them.
+
+Journal info block and header on a formatted, never mounted volume: `newfs_hfs -J`
+leaves the flags at `0x00000005` (bits 0 and 2), the offset at 12288 (block 3 with
+`B` 4096), the size at 524288 and the journal all zero. The first mount by macOS
+rewrites the flags to `0x00000001` and writes the header: magic and endian word in
+the creating host's byte order (little-endian, `78 4C 4E 4A 78 56 34 12`),
+`blhdr_size` 8192, `jhdr_size` 512; the first transaction starts at 512. A volume `hdiutil` journaled has
+`start` = `end` = 17408 (E1).
+
+| State | `start`, `end` | `attributes` | Volume header against the catalog |
+| --- | --- | --- | --- |
+| Formatted by `newfs_hfs -J`, never mounted | header zero, info flags `0x5` | `0x80002100` | Equal (E1) |
+| Mounted, `sync`, decoded in place (probe) | 512, 17408 | `0x80002000` | One transaction of 4 blocks, 16896 bytes, not yet written back |
+| Cleanly unmounted (`e8-newfs-J-mounted`) | 63488, 63488 | `0x80002100` | `lastMountedVersion` `HFSJ`, `writeCount` 6 |
+| `hdiutil detach -force` while writing | equal in 20 of 20 trials (for example 316928), none differ | `0x80002100` in 20 of 20 | A forced detach unmounts cleanly and closes the journal |
+| Backing image copied while writing | differ in 10 of 20 trials: none of 8 at 0.1 and 0.3 seconds (still 512, 512), 2 of 4 at 0.6, 4 of 4 at 1.5 and 3.0 | `0x80002000` | Stale (below) |
+| The same image mounted again | equal in all 40 remounts (`start` = `end` = 510976 in `e8-remounted`) | `0x80002100` | Replay done |
+
+Rule that separates the states. The journal is a circular log whose header
+`start` and `end` are byte offsets into the journal, each at least `jhdr_size`
+(512) and below `size`. `start` = `end` means no transaction is pending, at any
+position: the clean volumes above sit at 63488, 113664 (the NPS `hfsjtest1`
+specimens), 159744, 316928 and so on. `start` is not equal to `end` when
+transactions are pending, and `start` may be greater than `end` once the log has
+wrapped (207872 and 144384, 334336 and 270848 in `trials.jsonl`). A volume never
+mounted since `newfs_hfs -J` has no header at all (info flags bit 2 set, header
+zero) and holds no transactions.
+
+What a pending transaction looks like in `e8-interrupted` (`start` 512, `end`
+460800, `size` 524288): at the journal offset plus `start` is a block list header
+of two 16-bit counts (`max_blocks` 511, `num_blocks` 54), a 32-bit `bytes_used`
+(229888), a checksum word and a pad word, then 16-byte block infos of a 64-bit
+block number, a 32-bit size and a 32-bit word that differs per entry: entry 0
+holds block 0, size 0; the next ones block 7200 and 7192 with size 4096 and block 2
+with size 512. `max_blocks` is `(blhdr_size - 16) / 16`: 511 for 8192, 1023 for 16384 (the NPS
+specimens). The block numbers count 512-byte units: the two 4096-byte entries are
+8 apart and the 512-byte entry is block 2, the volume header at byte 1024. The volume header of the interrupted image says `fileCount` 1135 and
+the catalog holds 1135 files; after the second mount (replay) both say 1137, so the
+base structures lag the journal while `start` is not equal to `end`, and
+`attributes` bit 8 (`unmounted`) is clear.
+
+Journal files. On a `newfs_hfs -J` volume the root holds `.journal` (ID 16, type
+`jrnl`, creator `hfs+`, flags `0x0002`, mode `0100000`, owner 0, data fork 524288
+bytes in extent `3+128`) and `.journal_info_block` (ID 17, data fork 4096 bytes in
+extent `2+1`); after the first mount the private folders are IDs 18 and 19 and
+`.fseventsd` follows (ID 20), as in E2. Both journal files stay after unmounting
+and after an interrupted session. `diskutil disableJournal MNT` works unprivileged
+on a volume `hdiutil` mounted: it clears `attributes` bit 13 (`0x80002100` becomes
+`0x80000100`), removes `.journal` and `.journal_info_block` from the catalog (the
+root then holds only the user's file, the private folders and `.fseventsd`; file
+count 4, next catalog ID 25), frees their blocks (against `e8-newfs-J-mounted` the first clear
+allocation block moves from 259 to 2 and the set bits fall from 327 to 199), leaves
+`journalInfoBlock` at 2 and sets `lastMountedVersion` to `10.0`. `fsck_hfs -n` then
+checks the volume and reports it OK.
+
+The NPS `hfsjtest1` specimens, read with `fields.rb` and never mounted (10 MiB bare
+volumes, 4096-byte blocks, `attributes` `0x2100`: bit 31 clear, as on a volume
+unlike every volume of E1 and E2): both have info flags `0x1`, offset
+12288, size 8388608, little-endian header, `blhdr_size` 16384, `jhdr_size` 512 and
+`start` = `end` (113664 in gen0, 159744 in gen1). gen0's journal holds 163 nonzero
+sectors of 16384 and gen1's 240, among them a block list header at byte 512
+(gen0: `max_blocks` 1023, `num_blocks` 7, `bytes_used` 37888), consistent with
+residue of completed transactions. A reader that trusts only `start` and
+`end` reads both as clean.
+
+Evidence rows answered: journal info block flags from `newfs_hfs -J` (`0x5`) and
+`hdiutil` (`0x1`), the header's byte order (little-endian on macOS hosts), the
+journal files' presence and forks, the state after an interrupted session, and the
+files after journaling is disabled. Not established: a pending transaction from
+`hdiutil detach -force` (20 of 20 force trials left none), so only the image-copy
+procedure, which reproduces what a crash leaves, produces `start` not equal to
+`end` natively; its yield depends on timing (0 of 8 under 0.6 seconds, 10 of 12 at
+0.6 seconds and later, and the four 3.0-second trials are identical copies of one
+state).
 
 ### E9 Large trees
 
-Status: open.
+Status: answered.
+
+Procedure. `newfs_hfs -v E9 -b 4096 -n c=4096 -c c=76800` on a 640 MiB image
+(catalog clump of 76800 blocks, 300 MiB, so the catalog tree starts with 76800
+nodes of 4096 bytes and its node map needs map nodes), then four captures, each the
+image of the one before it copied and mounted again
+(`tools/hfsplus/populate_large.rb`): `h-hfsplus-671088640-e9-create` (50
+directories of 2000 empty files each, one directory level, 100000 files; every
+seventh name carries one to six extra characters), `e9-delete` (every third file of
+every directory, all of `d07` and the files 500 to 1499 of `d20`: 35350 files),
+`e9-thin` (every file whose number is not a multiple of 50) and `e9-sparse` (every
+file whose number is not a multiple of 997). Each stage's `fsck_hfs -n` reports the
+volume OK. Creating 3000 empty files took 0.52 seconds in a probe (Throwaway probes), and
+the 100000-file capture, formatting and checks included, ran from 22:50 to 22:51
+by its file times, so the files are made with plain `File.write` calls. The images and manifests are kept gzipped (`image.img.gz`,
+`manifest.json.gz`, about 6 MiB per capture); `fields-index.json` beside each
+`fields.json` is `fields.rb --json --index --records 5` of the image.
+
+| Stage | Files | Catalog leaf records | Leaf nodes | Depth | Root records | Level 2 index nodes (records each) |
+| --- | --- | --- | --- | --- | --- | --- |
+| `e9-create` | 100006 | 200120 | 8203 | 3 | 65 | 65 (61 to 132) |
+| `e9-delete` | 64659 | 129426 | 7960 | 3 | 64 | 64 (61 to 132) |
+| `e9-thin` | 1271 | 2650 | 2283 | 3 | 64 | 64 (13 to 50) |
+| `e9-sparse` | 13 | 134 | 56 | 3 | 52 | 52 (1 to 2) |
+
+Catalog records are a file or folder record and its thread record each (200120 =
+2 * (100006 + 54)). The catalog fork is 314572800 bytes in one extent
+(`15366+76800`), 76800 nodes, and `fork_size_matches_nodes` is true.
+
+Map nodes. The catalog's header node holds 3840 map bytes (`4096 - 256`, 30720
+bits), so 76800 nodes need map nodes: the header's `fLink` is node 2, and nodes 2
+and 3 are map nodes (kind 2, height 0, one record, `bLink` 0 on both, node 2's
+`fLink` 3, node 3's `fLink` 0). Each map record is 4076 bytes (`4096 - 20`) at
+offset 14, so its record offsets are `[14, 4090]` and two bytes lie between the end
+of the record and the 4-byte offset table at 4092. The three maps cover 95936 bits
+(`30720 + 2 * 32608`); bits at and beyond 76800 are zero; the map nodes themselves
+are marked in use (the formatted volume has 4 bits set and the first clear bit is 4:
+nodes 0 to 3). The record length was
+observed at node size 4096 only: `-n e=1024 -I e=1700` and `-n e=2048 -I e=3400`
+leave the extents tree at 512 and 256 nodes, and an 8192-byte catalog tree needs
+more than 63488 nodes (about 500 MiB) to have map nodes, which was not tried.
+
+Index keys. Every index record in the 249 index nodes of the four stages was
+compared with the first key of its child (8203, 7960, 2283 and 56 leaf children
+at level 2 and the level 2 nodes under each root): an index record's key equals the
+first key of the child it names in every stage (`key_mismatches` 0) and the child's
+height is one less. After the deletions this is not trivial: 2343 of the 7960 level-2
+keys of `e9-delete` are not keys of `e9-create`, so macOS rewrites an index key when
+its child's first record is deleted.
+
+One-record non-root index nodes. `e9-sparse` has 48 of them (nodes 134, 266, 397,
+527, 788, ...) among 52 level-2 nodes, below a root of 52 records, and `fsck_hfs -n`
+reports the volume OK. The native tree gets there by deleting records only: leaf
+nodes that still hold a record are never merged (2283 leaf nodes hold 2650 records
+in `e9-thin`), nodes left empty are freed, and the root is never collapsed (depth
+stays 3 with 134 leaf records). The three earlier stages have none.
+
+Evidence rows answered: map-node record length (`M - 20`, observed at `M` 4096);
+index keys equal to their child's first key after native deletions (yes); whether
+`fsck_hfs` accepts a one-record non-root index node (it accepts the 48 in
+`e9-sparse`, which macOS itself made), so the packer needs no rule against them.
+Not shown: that `fsck_hfs` accepts such a node as the *last* node of a level (the
+specimens' positions were not checked against the level ends).
+
+Native quirk found here: a volume formatted with a 76800-block catalog clump has
+`nextAllocation` 860166, beyond its 163840 blocks; `fsck_hfs -n` on the unmounted
+formatted volume reports `Volume header needs minor repair` (exit 8), and the
+first mount rewrites the field (2585 after the population). Setting the field to
+92166 by hand makes `fsck_hfs` report OK (Throwaway probes).
 
 ### E10 Old volumes
 
-Status: open.
+Status: open. It needs Mac OS 9 and early Mac OS X images, which the owner has not
+supplied; no native tool on this host produces them. It blocks the evidence row on
+names and BSD information on those volumes (reader tables and name rules).
 
 ### E11 Wrapper
 
-Status: open.
+Status: answered.
+
+Procedure. Linux, in the container of `build-aux/linux-check.sh` (`-r` a committed
+revision, the command `truncate -s SIZE img; mkfs.hfsplus ... img; fsck.hfsplus -n
+img`, the image passed out as gzip and base64). `mkfs.hfsplus` has `-w` ("add a HFS wrapper") and `-h` (a plain HFS
+volume); macOS `newfs_hfs` rejects `-w` (`illegal option`). Captures
+`h-hfsplus-16777216-e11-mkfs-w`, `h-hfsplus-67108864-e11-mkfs-w`,
+`h-hfsplus-16777216-e11-mkfs-w-b512` (`-w -b 512`), `h-hfsplus-16777216-e11-mkfs-w-J`
+(`-w -J`), `h-hfsplus-16777216-e11-mkfs-h-classic` (`-h`) and, for the macOS mount of
+the journaled one, `h-hfsplus-16777216-e11-mkfs-w-J-mounted`. The archival specimen
+is `h-hfsplus-9713664-e11-blender-2.28`: partition `2.hfs` of
+`blender-2.28-darwin-6.6-powerpc.dmg`, extracted statically with `7zz e -tdmg -so`
+(the dmg is not attached) and decoded with `fields.rb`; its `commands.txt` gives
+the checksum. `fields.rb` decodes the outer master directory block, the outer
+volume bitmap and the outer extents file's leaf records.
+
+| Field | Blender 2.28 | `mkfs.hfsplus -w` (16 MiB and 64 MiB) | `-w -b 512` |
+| --- | --- | --- | --- |
+| Image size | 9713664 | 16777216, 67108864 | 16777216 |
+| `drAlBlkSiz` | 4096 | 4096 | 512 |
+| `drAlBlSt` (512-byte sectors) | 8 | 8 | 11 |
+| Embed signature, start, count | `H+`, 10, 2360 | `H+`, 10, 4084 and 16372 | `H+`, 56, 32699 |
+| Embedded volume offset | 45056 | 45056 | 34304 |
+| `drNmAlBlks` | 2370 | 4094 and 16382 | 32755 |
+| `drFreeBks`, outer bitmap | 0, every block set | 0, every block set | 0, every block set |
+| `drAtrb` | `0x8300` | `0x8300` | `0x8300` |
+| `drNmFls`, `drNxtCNID` | 5, 21 | 5, 21 | 5, 21 |
+| Outer extents file | 4096 bytes, `0+1` | same | 1024 bytes, `0+2` |
+| Outer catalog file | 4096 bytes, `1+1` | same | 2048 bytes, `2+4` |
+| Outer extents-tree leaf record | file 5 data from 0: `10+2360` | `10+4084`, `10+16372` | `56+32699` |
+| Embedded `H+` | version 4, 4096-byte blocks, 2360 blocks | version 4, 4096, 4084 and 16372 | version 4, 512, 32699 |
+| Volume name | `untitled` | `untitled` (`-v WRAP` names the embedded volume) | same |
+
+Layout. Sectors 0 and 1 of the image are zero; the master directory block is at
+byte 1024 (`BD`); the outer bitmap starts at sector 3; the first allocation block
+starts at sector `drAlBlSt` (byte 4096 for `drAlBlSt` 8). Outer block 0 is the
+extents file, block 1 the catalog file, blocks 2 to 9 hold nothing the decoder
+reads, and blocks 10 to the end are the embedded volume: `embed_count` equals the
+embedded `totalBlocks` and the two block sizes are equal. The embedded volume's own
+bytes 0 to 1023 are zero, its volume header is at its byte 1024 (image byte 46080),
+and its alternate header is `embed_count * block_size - 1024` bytes into it (image
+byte 9,665,536 + 45056 = 9,710,592 in Blender, `0x942C00`). The alternate master
+directory block is at `image_size - 1024` (`0x943400` in Blender, signature `BD`),
+in the 2048 bytes that follow the last outer allocation block. Allocation block
+numbers and fork extents inside the embedded volume, including `journalInfoBlock`,
+count from the embedded start; the journal info block's byte `offset` is the
+exception (below).
+
+Bad block file. The outer extents file is a one-leaf HFS B-tree of 512-byte nodes
+whose only record is the key (file ID 5, data fork, start block 0) with the extent
+`10+2360`: the bad block file covers exactly the embedded range, and the outer volume
+bitmap sets every block. `drAtrb` `0x8300` has bits 15, 9 and 8 set. The outer
+volume holds five files (`drNmFls`) that the decoder does not list.
+
+Journaled wrapper. `mkfs.hfsplus -w -J` writes the journal info block's offset
+(12288) relative to the embedded volume, with flags `0x5` and no header. After macOS
+mounts the volume (it does mount the wrapped volume, writable and journaled) the
+offset reads 57344 = 45056 + 12288 and the journal header (`78 4C 4E 4A`) is at image
+byte 57344: the offset then counts from the start of the image, not from the
+embedded volume. `fields.rb` reports `offset_counts_from: image` for that case.
+
+Evidence row answered: wrapper layout. The macOS side of a wrapper cannot be made
+natively here (no tool formats one), so wrapped volumes come from `mkfs.hfsplus -w`
+and the one archival specimen, which agree in every field above except the
+geometry.
+

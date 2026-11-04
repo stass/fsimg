@@ -25,7 +25,7 @@
 # image. --hdiutil-fs FS formats with `hdiutil create` instead, and --import
 # IMAGE records an image another tool made (--command says how). --populate
 # names a profile of the PROFILES table: e2, e4, e5, e6-zlib,
-# e6-lzvn, e6-lzfse, e6-ditto, e6-sweep or e7.
+# e6-lzvn, e6-lzfse, e6-ditto, e6-sweep, e7, e9-create, e9-delete, e9-thin or e9-sparse.
 require "digest"
 require "fileutils"
 require "json"
@@ -38,6 +38,7 @@ require_relative "populate"
 require_relative "populate_attributes"
 require_relative "populate_compression"
 require_relative "populate_fragmentation"
+require_relative "populate_large"
 require_relative "populate_links"
 
 module HfsPlusCapture
@@ -56,7 +57,11 @@ module HfsPlusCapture
     "e4" => ->(_) { HfsPlusPopulateLinks.e4 },
     "e5" => ->(_) { HfsPlusPopulateAttributes.e5 },
     "e6-sweep" => ->(_) { HfsPlusPopulateCompression.e6_sweep },
-    "e7" => ->(block_size) { HfsPlusPopulateFragmentation.e7(block_size) }
+    "e7" => ->(block_size) { HfsPlusPopulateFragmentation.e7(block_size) },
+    "e9-create" => ->(_) { HfsPlusPopulateLarge.e9_create },
+    "e9-delete" => ->(_) { HfsPlusPopulateLarge.e9_delete },
+    "e9-thin" => ->(_) { HfsPlusPopulateLarge.e9_thin },
+    "e9-sparse" => ->(_) { HfsPlusPopulateLarge.e9_sparse }
   }.merge(HfsPlusPopulateCompression::TOOLS.to_h { |tool| ["e6-#{tool}", ->(_) { HfsPlusPopulateCompression.e6(tool) }] }).freeze
 
   Config = Data.define(:root, :variant, :size, :option, :formats, :hdiutil_fs, :import, :command, :populate, :discard_image) do
