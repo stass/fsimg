@@ -353,6 +353,11 @@
 
 ## Bugs by subsystem
 
+* [Low] **ImageFS worst-case listing cost** (`lib/formats/ifs/`): a worst-case
+  64 MiB image takes about 26 s to list, truncated or intact, with `max_work`
+  unlimited by default. Find which pass dominates and whether it can be made
+  cheaper.
+
 * [Low] **Spec harness oracle disagreements** (`test/spec/`): fatcat disagrees
   on `fat.directory.name` and `fat.directory.unique_names`, and xorriso on
   `iso9660.rr.sl.components`, `framing` and `profile`, in some seeded runs, while
