@@ -4133,6 +4133,30 @@ test_prepared_entries(void)
 		}
 		CHECK(fsimg_store_write(store, cursor + 11, payload,
 		    sizeof(payload), &error) == FSIMG_OK);
+		if (scenario == invalid_count) {
+			static const struct {
+				const char *name;
+				size_t length;
+			} lengths[] = {
+				{ "driver replay rejects 63-byte payload", 63 },
+				{ "driver replay rejects empty payload", 0 },
+				{ "driver replay rejects 65-byte payload", 65 }
+			};
+			unsigned char extended[65] = { 0 };
+
+			bcopy(payload, extended, sizeof(payload));
+			for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+				status = reader->ops->replay(reader, "b", extended,
+				    lengths[i].length, &error);
+				expect_status(lengths[i].name, status, FSIMG_ECORRUPT, &error);
+				expect_diagnostic(lengths[i].name, &error,
+				    "invalid prepared HFS Plus entry payload");
+			}
+			status = reader->ops->replay(reader, "b", payload,
+			    sizeof(payload), &error);
+			expect_status("driver replay accepts 64-byte payload", status,
+			    FSIMG_OK, &error);
+		}
 		if (scenario == invalid_count + 6) {
 			/* Exercise the driver guard while its reader is live; the
 			 * public advance closes it on the walker's earlier refusal. */
