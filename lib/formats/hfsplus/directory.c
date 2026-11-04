@@ -84,8 +84,6 @@ static fsimg_status_t admit_child(hfsplus_prepare_t *, hfsplus_child_t *,
 static void payload_encode(const hfsplus_child_t *, unsigned char *);
 static fsimg_status_t payload_decode(const fsimg_hfsplus_reader_t *,
     const unsigned char *, size_t, hfsplus_child_t *, fsimg_error_t *);
-static bool owned_name(const hfsplus_prepare_t *, const hfsplus_ckey_t *,
-    hfsplus_owned_t *);
 static fsimg_status_t prepare_owned(hfsplus_prepare_t *, hfsplus_owned_t,
     const hfsplus_record_t *, fsimg_error_t *);
 static fsimg_status_t attributes_classify(fsimg_reader_t *,
@@ -279,17 +277,13 @@ enter_folder(hfsplus_prepare_t *prepare, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/* Whether a root child is format-owned, by its exact stored units. The journal
- * files are format-owned only on a journaled volume and ordinary elsewhere.
- */
-static bool
-owned_name(const hfsplus_prepare_t *prepare, const hfsplus_ckey_t *key,
-    hfsplus_owned_t *owned)
+bool
+hfsplus_owned_find(const fsimg_hfsplus_reader_t *hfsplus,
+    const hfsplus_ckey_t *key, hfsplus_owned_t *owned)
 {
-	bool journaled = hfsplus_state(prepare->reader)->journal !=
-	    HFSPLUS_JOURNAL_NONE;
+	bool journaled = hfsplus->journal != HFSPLUS_JOURNAL_NONE;
 
-	if (!prepare->root)
+	if (key->parent != HFSPLUS_ID_ROOT)
 		return (false);
 	for (int i = 0; i < HFSPLUS_OWNED_COUNT; i++) {
 		if (!journaled && (i == HFSPLUS_OWNED_JOURNAL ||
@@ -464,7 +458,7 @@ prepare_child(hfsplus_prepare_t *prepare, const hfsplus_ckey_t *key,
 	size_t bytes;
 	fsimg_status_t status;
 
-	if (owned_name(prepare, key, &owned)) {
+	if (hfsplus_owned_find(hfsplus_state(prepare->reader), key, &owned)) {
 		status = prepare_owned(prepare, owned, record, error);
 		if (status == FSIMG_OK &&
 		    (owned == HFSPLUS_OWNED_PRIVATE_DATA ||

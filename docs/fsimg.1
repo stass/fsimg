@@ -50,9 +50,12 @@
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
 QNX6 Power-Safe and QNX4 volumes, QNX ImageFS images and ISO 9660 images.
 ISO 9660 reading supports Rock Ridge, Joliet and the primary hierarchy.
-It also reads, but does not create, HFS Plus and HFSX volumes; a transparently
-compressed file and a volume inside a classic HFS wrapper are reported as not
-supported.
+It also reads and verifies, but does not create, HFS Plus and HFSX volumes; a
+volume inside a classic HFS wrapper is reported as not supported.
+Verifying a volume that holds directory hard links, or whose name has no
+display form, is reported as not supported, and a disk image that left out the
+alternate volume header, as some old releases do, fails verification though it
+still lists and extracts.
 FAT volumes with more than two FAT copies are reported as unsupported.
 It requires no root privileges, mounts, kernel filesystem driver or external
 filesystem utility.

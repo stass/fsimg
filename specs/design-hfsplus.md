@@ -127,6 +127,16 @@ are reserved. A truncated volume has lost its tail, so the alternate header
 is not there to protect: it reserves no tail, `t = 0`, and its content
 domain ends at `N * B`. [TN]
 
+A formatter marks the last `ceil(1024 / B)` blocks below `N` for the
+alternate header wherever it lies: `newfs_hfs` marks them unconditionally
+(its `WriteBitmap`), and the `mozilla-1.3-machO` and `mozilla-1.7.13` volumes,
+whose Apple_HFS partitions end 2048 bytes past `N * B` at `B = 4096`, have
+block `N - 1` set and no owner (E10).
+Such a volume has `t = 0`, so the rule above leaves those blocks in the
+content domain: verification claims nothing for them and accepts them set or
+clear. Whether a host ever allocates one when its bit is clear, as `t = 0`
+permits, is unproven; no specimen does.
+
 ### Probe identity
 
 The identity signature has two parts. At offset 1024 is either a volume
@@ -220,8 +230,9 @@ So after native use the alternate keeps the counts, `freeBlocks`,
 `lastMountedVersion` and `attributes` of an earlier moment (E2), and old
 discs differ in up to nine such fields while the fork records and geometry
 agree (E10). An alternate that holds no volume header, such as the
-all-zero sectors a disk-image container left out of the `mozilla-1.0-smi`
-specimen (E10), fails this comparison like a disagreeing one: verification
+all-zero sectors a disk-image container left out of the `mozilla-1.0-smi`,
+`mozilla-1.3-machO` and `mozilla-1.7.13` specimens, whose last sectors its
+chunk table marks as ignored (E10), fails this comparison like a disagreeing one: verification
 reports `FSIMG_ECORRUPT` at its last step, after every other pass has run,
 and reading, listing and extraction, which use the primary alone, are
 unaffected. Verification never runs on a truncated volume, so the 1024
@@ -322,7 +333,8 @@ The bitmap file holds one bit per allocation block: block `b` is bit
 use. Its `logicalSize` is at least `ceil(N / 8)`; bits from `N` to the end
 of the last logical byte are zero, and verification requires them zero. The
 bitmap's own blocks, the B-tree files, every fork, the reserved blocks, the
-journal and bad blocks are set. `freeBlocks` counts the clear bits below
+journal and bad blocks are set, and a tail block of a volume with `t = 0` may
+be, by the [reserved rule](#allocation-blocks). `freeBlocks` counts the clear bits below
 `N`. [TN]
 
 ## B-trees

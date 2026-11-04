@@ -357,10 +357,10 @@ static fsimg_status_t materialize_iso(contract_volume_t *, fsimg_error_t *);
 
 static const contract_fs_profile_t fs_profiles[] = {
 	{ .id = "hfsplus", .format = "hfsplus", .coverage_profile = true,
-	    .expected_capabilities = FSIMG_CAP_READ,
+	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
 	    .materialize = materialize_hfsplus, .max_fixture_bytes = 2 * MIB },
 	{ .id = "hfsx", .format = "hfsx", .coverage_profile = true,
-	    .expected_capabilities = FSIMG_CAP_READ,
+	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
 	    .materialize = materialize_hfsx, .max_fixture_bytes = 2 * MIB },
 	{ .id = "iso9660", .format = "iso9660", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,
@@ -543,6 +543,7 @@ materialize_hfs(contract_volume_t *volume, bool hfsx)
 		object->data = payloads[i];
 	}
 	gen_plan_init(&plan);
+	plan.verification = true;
 	plan.hfsx = hfsx;
 	plan.compare_type = hfsx ? 0xbc : 0xcf;
 	plan.objects = objects;

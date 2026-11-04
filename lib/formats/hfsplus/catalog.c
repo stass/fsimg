@@ -46,7 +46,6 @@ static fsimg_status_t file_kind(const hfsplus_file_t *, fsimg_entry_kind_t *,
     fsimg_error_t *);
 static fsimg_status_t file_validate(fsimg_reader_t *, const hfsplus_record_t *,
     hfsplus_primary_t *, fsimg_error_t *);
-static fsimg_status_t private_data_lookup(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t link_kind(fsimg_reader_t *, const hfsplus_file_t *,
     hfsplus_link_t *, fsimg_error_t *);
 static bool fork_empty(const hfsplus_fork_t *);
@@ -204,8 +203,8 @@ hfsplus_record_validate(fsimg_reader_t *reader, const hfsplus_record_t *record,
  * data folder, and may never host indirect nodes. The cost falls only on a
  * volume holding a record with a stub's Finder codes.
  */
-static fsimg_status_t
-private_data_lookup(fsimg_reader_t *reader, fsimg_error_t *error)
+fsimg_status_t
+hfsplus_private_data_lookup(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	const hfsplus_owned_name_t *name =
@@ -258,7 +257,7 @@ link_kind(fsimg_reader_t *reader, const hfsplus_file_t *file,
 	if (!file_codes && !directory_codes)
 		return (FSIMG_OK);
 	if (!hfsplus->private_data_known) {
-		status = private_data_lookup(reader, error);
+		status = hfsplus_private_data_lookup(reader, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}

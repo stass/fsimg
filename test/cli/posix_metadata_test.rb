@@ -39,7 +39,7 @@ class CliTest < Minitest::Test
     assert_equal(0x2c0, iso.fetch("write_settings"))
     %w[hfsplus hfsx].each do |name|
       hfs = formats.delete(name)
-      assert_equal(1, hfs.fetch("capabilities"), name)
+      assert_equal(5, hfs.fetch("capabilities"), name)
       assert_equal(127, hfs.fetch("entry_kinds"), name)
       assert_equal(0x77, hfs.fetch("metadata_fields"), name)
       assert_equal(1023, hfs.fetch("max_link_target_bytes"), name)

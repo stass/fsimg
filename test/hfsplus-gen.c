@@ -25,6 +25,8 @@ typedef struct packed_tree {
 	gen_tree_t	*tree;
 } packed_tree_t;
 
+static void bitmap_mark(gen_image_t *, uint32_t, uint32_t);
+static void bitmap_extents(gen_image_t *, const unsigned char *);
 static void encode_fork(unsigned char *, uint64_t, uint32_t, uint32_t);
 static gen_record_t catalog_key(uint32_t, const uint16_t *, size_t);
 static gen_record_t folder_record(const gen_plan_t *);
@@ -93,7 +95,7 @@ encode_fork(unsigned char *p, uint64_t size, uint32_t first, uint32_t blocks)
 {
 	gen_store(p, size, 8);
 	gen_store(p + 12, blocks, 4);
-	gen_store(p + 16, first, 4);
+	gen_store(p + 16, blocks == 0 ? 0 : first, 4);
 	gen_store(p + 20, blocks, 4);
 }
 
@@ -643,6 +645,25 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 					    (unsigned char)(j + k);
 		}
 	}
+	if (plan->verification) {
+		gen_tree_t *catalog = &image->trees[GEN_CATALOG];
+		size_t primaries = catalog->record_count;
+
+		for (size_t i = 2; i < primaries; i++) {
+			const gen_record_t *primary = &catalog->records[i];
+			uint32_t id = (uint32_t)gen_load(primary->bytes +
+			    primary->key_length + 8, 4);
+			size_t units = (size_t)gen_load(primary->bytes + 6, 2);
+
+			record = catalog_key(id, NULL, 0);
+			gen_store(record.bytes + 8, 4, 2);
+			gen_store(record.bytes + 12, 2, 4);
+			gen_store(record.bytes + 16, units, 2);
+			bcopy(primary->bytes + 8, record.bytes + 18, 2 * units);
+			record.length += 10 + 2 * units;
+			add_record(catalog, &record);
+		}
+	}
 	if (plan->object_count != 0) {
 		uint32_t children = 0, folders = 0;
 
@@ -662,6 +683,9 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 		    image->trees[GEN_CATALOG].records[0].key_length + 84, folders, 4);
 		sort_catalog(&image->trees[GEN_CATALOG], plan->compare_type != 0xbc);
 	}
+	if (plan->verification)
+		sort_catalog(&image->trees[GEN_CATALOG],
+		    plan->compare_type != 0xbc);
 	if (plan->mutate_catalog != NULL)
 		plan->mutate_catalog(image->trees[GEN_CATALOG].records,
 		    image->trees[GEN_CATALOG].record_count);
@@ -690,6 +714,17 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 			extents->records[i] = extents->records[i - 1];
 		extents->records[0] = record;
 		allocate_blocks(&next, tree_bytes + 8u * b, b);
+	}
+	if (plan->bad_blocks != 0) {
+		uint32_t first = allocate_blocks(&next,
+		    (uint64_t)plan->bad_blocks * b, b);
+
+		record = (gen_record_t){ .key_length = 12, .length = 76 };
+		gen_store(record.bytes, 10, 2);
+		gen_store(record.bytes + 4, 5, 4);
+		gen_store(record.bytes + 12, first, 4);
+		gen_store(record.bytes + 16, plan->bad_blocks, 4);
+		add_record(&image->trees[GEN_EXTENTS], &record);
 	}
 	if (image->trees[GEN_EXTENTS].record_count > 1)
 		qsort(image->trees[GEN_EXTENTS].records,
@@ -838,6 +873,8 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 	    i < plan->total_blocks; i++)
 		image->bytes[(size_t)bitmap * b + i / 8] |= (unsigned
 		    char)(0x80u >> (i % 8));
+	if (plan->verification)
+		gen_rebuild_bitmap(image);
 	bcopy(header, image->bytes + image->length - 1024, 512);
 }
 
@@ -894,4 +931,69 @@ gen_compressed_resource(const gen_compressed_chunk_t *chunks, size_t count,
 	}
 	*size = capacity;
 	return (out);
+}
+
+/* Derive allocation from emitted disk records rather than allocation cursors:
+ * fragmented forks deliberately leave holes between their physical runs.
+ */
+static void
+bitmap_mark(gen_image_t *image, uint32_t first, uint32_t count)
+{
+	unsigned char *header = image->bytes + image->header;
+	uint32_t total = (uint32_t)gen_load(header + 44, 4);
+	uint64_t bitmap = gen_load(header + GEN_BITMAP_FORK + 16, 4) *
+	    image->block_size;
+
+	CHECK(first <= total && count <= total - first);
+	for (uint32_t i = first; i < first + count; i++)
+		image->bytes[bitmap + i / 8] |= (unsigned char)(0x80u >> (i % 8));
+}
+
+static void
+bitmap_extents(gen_image_t *image, const unsigned char *extents)
+{
+	for (unsigned i = 0; i < 8; i++)
+		bitmap_mark(image, (uint32_t)gen_load(extents + 8 * i, 4),
+		    (uint32_t)gen_load(extents + 8 * i + 4, 4));
+}
+
+void
+gen_rebuild_bitmap(gen_image_t *image)
+{
+	unsigned char *header = image->bytes + image->header;
+	uint32_t total = (uint32_t)gen_load(header + 44, 4), used = 0;
+	uint64_t bitmap = gen_load(header + GEN_BITMAP_FORK + 16, 4) *
+	    image->block_size;
+
+	bzero(image->bytes + bitmap, ((uint64_t)total + 7) / 8);
+	bitmap_mark(image, 0, (1536u + image->block_size - 1) /
+	    image->block_size);
+	bitmap_mark(image, (uint32_t)((image->length - 1024) /
+	    image->block_size), (1024u + image->block_size - 1) /
+	    image->block_size);
+	for (unsigned offset = GEN_BITMAP_FORK; offset <= GEN_STARTUP_FORK;
+	    offset += 80)
+		bitmap_extents(image, header + offset + 16);
+	for (unsigned t = 0; t < GEN_TREE_COUNT; t++) {
+		const gen_tree_t *tree = &image->trees[t];
+
+		for (size_t i = 0; i < tree->record_count; i++) {
+			const gen_record_t *r = &tree->records[i];
+			const unsigned char *d = image->bytes + r->offset +
+			    r->key_length;
+			uint64_t type = gen_load(d, t == GEN_CATALOG ? 2 : 4);
+
+			if (t == GEN_EXTENTS)
+				bitmap_extents(image, d);
+			if (t == GEN_CATALOG && type == 2) {
+				bitmap_extents(image, d + 104);
+				bitmap_extents(image, d + 184);
+			}
+			if (t == GEN_ATTRIBUTES && (type == 0x20 || type == 0x30))
+				bitmap_extents(image, d + (type == 0x20 ? 24 : 8));
+		}
+	}
+	for (uint32_t i = 0; i < total; i++)
+		used += (image->bytes[bitmap + i / 8] >> (7 - i % 8)) & 1;
+	gen_store(header + 48, total - used, 4);
 }

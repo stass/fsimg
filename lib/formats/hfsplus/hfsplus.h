@@ -404,6 +404,7 @@ fsimg_status_t hfsplus_query_key(hfsplus_compare_t, const char *, size_t,
 #define HFSPLUS_ID_ROOT			2u
 #define HFSPLUS_ID_EXTENTS		3u
 #define HFSPLUS_ID_CATALOG		4u
+#define HFSPLUS_ID_BAD_BLOCKS		5u
 #define HFSPLUS_ID_ALLOCATION		6u
 #define HFSPLUS_ID_STARTUP		7u
 #define HFSPLUS_ID_ATTRIBUTES		8u
@@ -690,8 +691,8 @@ fsimg_status_t hfsplus_header_check(const hfsplus_header_t *, fsimg_error_t *);
  *
  * hfsplus_fork_index(reader, file_id, fork_type, fork, index, records, error)
  * builds a new extent index of the fork's blocks, inline then overflow, in
- * logical order, NULL for a fork of zero blocks. *records, which verification
- * sums and open passes NULL for, is the number of overflow records it consumed.
+ * logical order, NULL for a fork of zero blocks. *records, when not NULL, is
+ * the number of overflow records it consumed.
  * Every failure leaves no index and no records.
  * A fork that needs overflow requires the extents tree to be open. The extents
  * tree's own fork (HFSPLUS_ID_EXTENTS) must sum to totalBlocks inline, so
@@ -699,6 +700,28 @@ fsimg_status_t hfsplus_header_check(const hfsplus_header_t *, fsimg_error_t *);
  */
 fsimg_status_t hfsplus_fork_index(fsimg_reader_t *, uint32_t, uint8_t,
     const hfsplus_fork_t *, fsimg_extent_index_t **, uint64_t *,
+    fsimg_error_t *);
+/* Verification's resolve of a fork: the same checks and the same overflow walk
+ * as hfsplus_fork_index(), with no index built, its extents appended to the
+ * claims and the overflow records it consumes added to *records. This is the
+ * one conversion of a fork's extents into claims.
+ *
+ * hfsplus_bad_blocks_claim() claims the records of the bad-block file, node ID
+ * 5, which has no fork data, adding to *records and setting *blocks.
+ *
+ * hfsplus_attr_fork_claim() checks and claims an attribute fork record's inline
+ * extents, giving their blocks, and hfsplus_attr_extents_claim() those of one
+ * continuation record, which must hold a block. The caller, who reads the
+ * attribute's records, checks that they continue up to totalBlocks.
+ */
+fsimg_status_t hfsplus_fork_claim(fsimg_reader_t *, fsimg_owner_runs_t *,
+    uint32_t, uint8_t, const hfsplus_fork_t *, uint64_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_bad_blocks_claim(fsimg_reader_t *, fsimg_owner_runs_t *,
+    uint64_t *, uint64_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_attr_fork_claim(fsimg_reader_t *, fsimg_owner_runs_t *,
+    const hfsplus_fork_t *, uint64_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_attr_extents_claim(fsimg_reader_t *,
+    fsimg_owner_runs_t *, const hfsplus_extent_t *, uint64_t *,
     fsimg_error_t *);
 /* Require a fork to be exactly one extent in the content domain, inline. */
 fsimg_status_t hfsplus_fork_one_extent(fsimg_reader_t *,
@@ -792,6 +815,35 @@ fsimg_status_t hfsplus_cursor_next(hfsplus_cursor_t *, fsimg_error_t *);
 fsimg_status_t hfsplus_cursor_record(const hfsplus_cursor_t *,
     hfsplus_record_t *, fsimg_error_t *);
 
+/* One level of a tree in sibling order, for verification: its current node is
+ * in the buffer. hfsplus_level_open() reads a level's leftmost node and requires
+ * its back link to be zero; hfsplus_level_next() follows fLink, requiring the
+ * next node's height and back link, and clears valid past the last.
+ * hfsplus_level_record() frames record `index`, below node.records. Nothing here
+ * bounds a looping chain: the caller's visited set does.
+ *
+ * hfsplus_index_child() decodes an index record's child, false when its data is
+ * not one. hfsplus_record_compare() compares two records' keys in the tree's
+ * order.
+ */
+typedef struct hfsplus_level {
+	hfsplus_tree_t	*tree;
+	unsigned char	*buffer;
+	hfsplus_node_t	 node;
+	uint32_t	 number;
+	unsigned	 height;
+	bool		 valid;
+} hfsplus_level_t;
+
+fsimg_status_t hfsplus_level_open(hfsplus_level_t *, hfsplus_tree_t *,
+    unsigned char *, uint32_t, unsigned, fsimg_error_t *);
+fsimg_status_t hfsplus_level_next(hfsplus_level_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_level_record(const hfsplus_level_t *, uint16_t,
+    hfsplus_record_t *, fsimg_error_t *);
+bool hfsplus_index_child(const hfsplus_record_t *, uint32_t *);
+fsimg_status_t hfsplus_record_compare(const hfsplus_tree_t *,
+    const hfsplus_record_t *, const hfsplus_record_t *, int *, fsimg_error_t *);
+
 /* Open (volume.c): the fixed step order of the driver design, with the journal
  * step apart. hfsplus_journal_open() applies the info block's flags table to
  * the open catalog. It is external, and the reader's wrapped field settable,
@@ -834,6 +886,9 @@ typedef struct hfsplus_primary {
  * thread of the given type; *thread borrows its name from the cursor's buffer,
  * on which the cursor stands.
  *
+ * hfsplus_private_data_lookup() finds the file hard-link data folder once by its
+ * exact stored units, setting private_data_known and what it says.
+ *
  * hfsplus_child_fill() maps a validated record, not a stub, to its child's
  * kind, size, owner, mode and dates, the kind's rules checked; it sets the
  * location and extra data to none.
@@ -848,6 +903,7 @@ fsimg_status_t hfsplus_link_resolve(fsimg_reader_t *, hfsplus_primary_t *,
     hfsplus_cursor_t *, fsimg_error_t *);
 fsimg_status_t hfsplus_thread_lookup(hfsplus_cursor_t *, uint32_t, uint16_t,
     hfsplus_thread_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_private_data_lookup(fsimg_reader_t *, fsimg_error_t *);
 fsimg_status_t hfsplus_child_fill(const hfsplus_primary_t *, hfsplus_child_t *,
     fsimg_error_t *);
 
@@ -883,6 +939,10 @@ fsimg_status_t hfsplus_attr_scan(fsimg_reader_t *, uint32_t, bool,
  * hfsplus_compress_open() opens the current entry's content from its record,
  * which the caller has read again. hfsplus_compress_resolve() then returns the
  * held extent containing an offset, valid until the next resolve or advance.
+ * hfsplus_compress_table_check() checks every entry of the open content's chunk
+ * table without decoding a chunk, for structural verification; an inline payload
+ * has none.
+ *
  * hfsplus_compress_reset() forgets the current entry at the walker's advance and
  * hfsplus_compress_free() releases the window at close.
  */
@@ -894,8 +954,23 @@ fsimg_status_t hfsplus_compress_open(fsimg_reader_t *, const hfsplus_file_t *,
     fsimg_error_t *);
 fsimg_status_t hfsplus_compress_resolve(fsimg_reader_t *, uint64_t,
     fsimg_extent_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_compress_table_check(fsimg_reader_t *, fsimg_error_t *);
 void hfsplus_compress_reset(fsimg_hfsplus_reader_t *);
 void hfsplus_compress_free(fsimg_hfsplus_reader_t *);
+
+/* Whether a catalog key names a format-owned child of the root, by its exact
+ * stored units; the journal files are format-owned only on a journaled volume
+ * (directory.c).
+ */
+bool hfsplus_owned_find(const fsimg_hfsplus_reader_t *, const hfsplus_ckey_t *,
+    hfsplus_owned_t *);
+
+/* Open the current entry's content, as its first resolve would (read.c). */
+fsimg_status_t hfsplus_content_open(fsimg_reader_t *, fsimg_error_t *);
+
+/* Full verification (verify.c). */
+fsimg_status_t hfsplus_verify(fsimg_reader_t *, unsigned,
+    fsimg_verify_report_t *, fsimg_error_t *);
 
 /* The directory callbacks (directory.c). */
 fsimg_status_t hfsplus_prepare(fsimg_reader_t *, fsimg_directory_build_t *,

@@ -447,6 +447,7 @@ index_child(const hfsplus_tree_t *tree, const unsigned char *buffer,
 {
 	hfsplus_record_t record;
 	const unsigned char *bytes;
+	uint32_t candidate;
 	size_t length;
 	int order;
 	fsimg_status_t status;
@@ -456,14 +457,14 @@ index_child(const hfsplus_tree_t *tree, const unsigned char *buffer,
 		status = split_record(tree, bytes, length, &record, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (record.data_bytes != INDEX_DATA_BYTES)
+		if (!hfsplus_index_child(&record, &candidate))
 			return (hfsplus_corrupt(error,
 			    "HFS Plus index record is not a child number"));
 		status = key_order(tree, key, &record, &order, error);
 		if (status != FSIMG_OK)
 			return (status);
 		if (i == 0 || order <= 0)
-			*child = fsimg_load_be32(record.data);
+			*child = candidate;
 		if (order >= 0)
 			break;
 	}
@@ -699,4 +700,109 @@ hfsplus_cursor_record(const hfsplus_cursor_t *cursor, hfsplus_record_t *record,
 	hfsplus_node_record(cursor->tree, cursor->buffer, cursor->record,
 	    &bytes, &length);
 	return (split_record(cursor->tree, bytes, length, record, error));
+}
+
+bool
+hfsplus_index_child(const hfsplus_record_t *record, uint32_t *child)
+{
+	if (record->data_bytes != INDEX_DATA_BYTES)
+		return (false);
+	*child = fsimg_load_be32(record->data);
+	return (true);
+}
+
+fsimg_status_t
+hfsplus_record_compare(const hfsplus_tree_t *tree, const hfsplus_record_t *a,
+    const hfsplus_record_t *b, int *order, fsimg_error_t *error)
+{
+	hfsplus_ekey_t extents_a, extents_b;
+	hfsplus_ckey_t catalog_a, catalog_b;
+	hfsplus_akey_t attribute_a, attribute_b;
+	bool decoded = false;
+
+	switch (tree->kind) {
+	case HFSPLUS_TREE_EXTENTS:
+		decoded = hfsplus_ekey_decode(a->key, a->key_bytes, &extents_a) &&
+		    hfsplus_ekey_decode(b->key, b->key_bytes, &extents_b);
+		if (decoded)
+			*order = ekey_compare(&extents_a, &extents_b);
+		break;
+	case HFSPLUS_TREE_CATALOG:
+		decoded = hfsplus_ckey_decode(a->key, a->key_bytes, &catalog_a) &&
+		    hfsplus_ckey_decode(b->key, b->key_bytes, &catalog_b);
+		if (decoded)
+			*order = hfsplus_ckey_compare(tree->compare, &catalog_a,
+			    &catalog_b);
+		break;
+	case HFSPLUS_TREE_ATTRIBUTES:
+		decoded = hfsplus_akey_decode(a->key, a->key_bytes, &attribute_a) &&
+		    hfsplus_akey_decode(b->key, b->key_bytes, &attribute_b);
+		if (decoded)
+			*order = hfsplus_akey_compare(&attribute_a, &attribute_b);
+		break;
+	}
+	if (!decoded)
+		return (hfsplus_corrupt(error, "HFS Plus key is malformed"));
+	return (FSIMG_OK);
+}
+
+/* A level's kind follows from its height, and a child of another kind or height
+ * fails the read, so the header, a map node and the node itself cannot stand in.
+ */
+static fsimg_status_t
+level_read(hfsplus_level_t *level, uint32_t number, fsimg_error_t *error)
+{
+	level->number = number;
+	return (hfsplus_node_read(level->tree, number, level->buffer,
+	    level->height == 1 ? HFSPLUS_NODE_LEAF : HFSPLUS_NODE_INDEX,
+	    level->height, &level->node, error));
+}
+
+fsimg_status_t
+hfsplus_level_open(hfsplus_level_t *level, hfsplus_tree_t *tree,
+    unsigned char *buffer, uint32_t first, unsigned height, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	*level = (hfsplus_level_t){ .tree = tree, .buffer = buffer,
+	    .height = height };
+	status = level_read(level, first, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (level->node.backward_link != 0)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus level's first node has a back link"));
+	level->valid = true;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+hfsplus_level_next(hfsplus_level_t *level, fsimg_error_t *error)
+{
+	uint32_t previous = level->number;
+	uint32_t next = level->node.forward_link;
+	fsimg_status_t status;
+
+	level->valid = false;
+	if (next == 0)
+		return (FSIMG_OK);
+	status = level_read(level, next, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (level->node.backward_link != previous)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus sibling's back link does not name its neighbour"));
+	level->valid = true;
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
+hfsplus_level_record(const hfsplus_level_t *level, uint16_t index,
+    hfsplus_record_t *record, fsimg_error_t *error)
+{
+	const unsigned char *bytes;
+	size_t length;
+
+	hfsplus_node_record(level->tree, level->buffer, index, &bytes, &length);
+	return (split_record(level->tree, bytes, length, record, error));
 }

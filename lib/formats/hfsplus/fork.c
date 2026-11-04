@@ -19,9 +19,13 @@
  * them in charged scratch, so a million-extent fork costs scratch and not RAM.
  */
 
+/* One fork's walk. Each extent goes to the index, to the claims, or to both
+ * when both are set; a walk with neither only checks.
+ */
 typedef struct fork_walk {
 	fsimg_reader_t		*reader;
 	fsimg_extent_index_t	*index;
+	fsimg_owner_runs_t	*claims;
 	uint64_t		 appended;	/* blocks so far */
 	uint32_t		 total;		/* the fork's totalBlocks */
 } fork_walk_t;
@@ -33,6 +37,8 @@ static fsimg_status_t append_extents(fork_walk_t *, const hfsplus_extent_t *,
 static fsimg_status_t walk_overflow(fork_walk_t *, uint32_t, uint8_t,
     uint64_t *, fsimg_error_t *);
 static fsimg_status_t check_fork(const hfsplus_geometry_t *,
+    const hfsplus_fork_t *, uint64_t *, fsimg_error_t *);
+static fsimg_status_t check_named_fork(fsimg_reader_t *, uint32_t,
     const hfsplus_fork_t *, uint64_t *, fsimg_error_t *);
 
 /* Check one record's eight descriptors against the extent rules and give the
@@ -90,9 +96,18 @@ append_extents(fork_walk_t *walk, const hfsplus_extent_t *extents,
 		run.logical_offset = walk->appended * block_size;
 		run.image_offset = (uint64_t)extents[i].start * block_size;
 		run.length = (uint64_t)extents[i].count * block_size;
-		status = fsimg_extent_index_append(walk->index, &run, error);
-		if (status != FSIMG_OK)
-			return (status);
+		if (walk->claims != NULL) {
+			status = fsimg_owner_runs_append(walk->claims,
+			    extents[i].start, extents[i].count, error);
+			if (status != FSIMG_OK)
+				return (status);
+		}
+		if (walk->index != NULL) {
+			status = fsimg_extent_index_append(walk->index, &run,
+			    error);
+			if (status != FSIMG_OK)
+				return (status);
+		}
 		walk->appended += extents[i].count;
 	}
 	return (FSIMG_OK);
@@ -210,6 +225,26 @@ check_fork(const hfsplus_geometry_t *geometry, const hfsplus_fork_t *fork,
 	return (FSIMG_OK);
 }
 
+/* The checks of a fork named by its file: the extents tree cannot hold its own
+ * continuation, which is what keeps resolving it from reading it.
+ */
+static fsimg_status_t
+check_named_fork(fsimg_reader_t *reader, uint32_t file_id,
+    const hfsplus_fork_t *fork, uint64_t *inline_blocks, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = check_fork(&hfsplus_state(reader)->geometry, fork, inline_blocks,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (file_id == HFSPLUS_ID_EXTENTS &&
+	    *inline_blocks != fork->total_blocks)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus extents tree's fork needs overflow"));
+	return (FSIMG_OK);
+}
+
 fsimg_status_t
 hfsplus_fork_index(fsimg_reader_t *reader, uint32_t file_id, uint8_t fork_type,
     const hfsplus_fork_t *fork, fsimg_extent_index_t **index, uint64_t *records,
@@ -223,17 +258,9 @@ hfsplus_fork_index(fsimg_reader_t *reader, uint32_t file_id, uint8_t fork_type,
 	if (records != NULL)
 		*records = 0;
 	consumed = 0;
-	status = check_fork(&hfsplus_state(reader)->geometry, fork,
-	    &inline_blocks, error);
+	status = check_named_fork(reader, file_id, fork, &inline_blocks, error);
 	if (status != FSIMG_OK)
 		return (status);
-	/* The extents tree cannot hold its own continuation: this is what keeps
-	 * resolving it from reading it.
-	 */
-	if (file_id == HFSPLUS_ID_EXTENTS &&
-	    inline_blocks != fork->total_blocks)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus extents tree's fork needs overflow"));
 	if (fork->total_blocks == 0)
 		return (FSIMG_OK);
 
@@ -258,6 +285,108 @@ hfsplus_fork_index(fsimg_reader_t *reader, uint32_t file_id, uint8_t fork_type,
 		*records = consumed;
 	*index = walk.index;
 	return (FSIMG_OK);
+}
+
+fsimg_status_t
+hfsplus_fork_claim(fsimg_reader_t *reader, fsimg_owner_runs_t *claims,
+    uint32_t file_id, uint8_t fork_type, const hfsplus_fork_t *fork,
+    uint64_t *records, fsimg_error_t *error)
+{
+	fork_walk_t walk = { .reader = reader, .claims = claims,
+	    .total = fork->total_blocks };
+	uint64_t inline_blocks;
+	fsimg_status_t status;
+
+	status = check_named_fork(reader, file_id, fork, &inline_blocks, error);
+	if (status == FSIMG_OK)
+		status = append_extents(&walk, fork->extents, error);
+	if (status == FSIMG_OK && walk.appended < walk.total)
+		status = walk_overflow(&walk, file_id, fork_type, records, error);
+	return (status);
+}
+
+/* The bad-block file has no fork data: its records start at logical block 0 and
+ * continue as any fork's do until another fork's key. A record of its node ID
+ * under the other fork type is left for the leaf record count to refuse.
+ */
+fsimg_status_t
+hfsplus_bad_blocks_claim(fsimg_reader_t *reader, fsimg_owner_runs_t *claims,
+    uint64_t *records, uint64_t *blocks, fsimg_error_t *error)
+{
+	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
+	fork_walk_t walk = { .reader = reader, .claims = claims };
+	hfsplus_extent_t extents[HFSPLUS_EXTENTS_PER_RECORD];
+	hfsplus_cursor_t cursor;
+	hfsplus_record_t record;
+	hfsplus_ekey_t stored;
+	hfsplus_key_t key;
+	uint64_t count;
+	fsimg_status_t status;
+
+	hfsplus_cursor_init(&cursor, &hfsplus->extents,
+	    hfsplus->extents.search_node);
+	key.extents = (hfsplus_ekey_t){ .file_id = HFSPLUS_ID_BAD_BLOCKS,
+	    .fork_type = HFSPLUS_FORK_DATA };
+	status = hfsplus_btree_search(&cursor, &key, error);
+	while (status == FSIMG_OK && cursor.valid) {
+		status = hfsplus_cursor_record(&cursor, &record, error);
+		if (status != FSIMG_OK)
+			break;
+		if (!hfsplus_ekey_decode(record.key, record.key_bytes, &stored))
+			return (hfsplus_corrupt(error,
+			    "HFS Plus overflow record is malformed"));
+		if (stored.file_id != HFSPLUS_ID_BAD_BLOCKS ||
+		    stored.fork_type != HFSPLUS_FORK_DATA)
+			break;
+		if (!hfsplus_extents_decode(record.data, record.data_bytes,
+		    extents) || stored.start_block != walk.appended)
+			return (hfsplus_corrupt(error,
+			    "HFS Plus bad-block records do not continue"));
+		status = check_descriptors(&hfsplus->geometry, extents, &count,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (count == 0)
+			return (hfsplus_corrupt(error,
+			    "HFS Plus overflow record holds no blocks"));
+		status = append_extents(&walk, extents, error);
+		if (status == FSIMG_OK)
+			status = hfsplus_cursor_next(&cursor, error);
+		(*records)++;
+	}
+	*blocks = walk.appended;
+	return (status);
+}
+
+fsimg_status_t
+hfsplus_attr_fork_claim(fsimg_reader_t *reader, fsimg_owner_runs_t *claims,
+    const hfsplus_fork_t *fork, uint64_t *inline_blocks, fsimg_error_t *error)
+{
+	fork_walk_t walk = { .reader = reader, .claims = claims };
+	fsimg_status_t status;
+
+	status = check_fork(&hfsplus_state(reader)->geometry, fork, inline_blocks,
+	    error);
+	if (status == FSIMG_OK)
+		status = append_extents(&walk, fork->extents, error);
+	return (status);
+}
+
+fsimg_status_t
+hfsplus_attr_extents_claim(fsimg_reader_t *reader, fsimg_owner_runs_t *claims,
+    const hfsplus_extent_t *extents, uint64_t *blocks, fsimg_error_t *error)
+{
+	fork_walk_t walk = { .reader = reader, .claims = claims };
+	fsimg_status_t status;
+
+	status = check_descriptors(&hfsplus_state(reader)->geometry, extents,
+	    blocks, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (*blocks == 0)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus attribute extents record holds no blocks"));
+	return (append_extents(&walk, extents, error));
 }
 
 fsimg_status_t

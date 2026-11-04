@@ -596,6 +596,28 @@ word_chunk_locate(fsimg_reader_t *reader, uint64_t chunk, uint64_t *offset,
 	return (FSIMG_OK);
 }
 
+fsimg_status_t
+hfsplus_compress_table_check(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
+	uint64_t offset;
+	size_t stored;
+	fsimg_status_t status;
+
+	for (uint64_t chunk = 0; chunk < hfsplus->compressed.chunks; chunk++) {
+		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
+		if (status != FSIMG_OK)
+			return (status);
+		status = chunk_table(hfsplus->current.compression) ==
+		    CHUNK_TABLE_RESOURCE ?
+		    chunk_locate(reader, chunk, &offset, &stored, error) :
+		    word_chunk_locate(reader, chunk, &offset, &stored, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (FSIMG_OK);
+}
+
 static fsimg_status_t
 chunk_load(fsimg_reader_t *reader, uint64_t chunk, fsimg_error_t *error)
 {

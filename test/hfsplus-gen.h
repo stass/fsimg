@@ -125,6 +125,9 @@ typedef struct gen_plan {
 	 * full. */
 	uint16_t	 records_per_node;
 	uint8_t		 compare_type;
+	/* Emit allocation accounting and threads for full verification. */
+	bool		 verification;
+	uint32_t	 bad_blocks;
 	bool		 hfsx;
 	bool		 attributes;
 	bool		 catalog_overflow;
@@ -176,6 +179,7 @@ typedef struct gen_image {
 void gen_plan_init(gen_plan_t *);
 void gen_build(const gen_plan_t *, gen_image_t *);
 void gen_free(gen_image_t *);
+void gen_rebuild_bitmap(gen_image_t *);
 uint64_t gen_node_offset(const gen_image_t *, gen_tree_id_t, uint32_t);
 void gen_store(unsigned char *, uint64_t, size_t);
 uint64_t gen_load(const unsigned char *, size_t);

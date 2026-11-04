@@ -536,8 +536,10 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    [exclusive run utility](design-verification-helpers.md#exclusive-ownership-run-utility)
    over `[0, N)`, and compare them with the bitmap's first `N` bits in one
    sequential pass in windows: a claimed clear bit and an allocated
-   unclaimed bit are `FSIMG_ECORRUPT`; the padding bits must be zero; the
-   clear bits must equal `freeBlocks`.
+   unclaimed bit are `FSIMG_ECORRUPT`, except the last `ceil(1024 / B)` blocks
+   of a volume with `t = 0`, which the formatter may have marked with no
+   owner; the padding bits must be zero; the clear bits must equal
+   `freeBlocks`.
 8. **Alternate header.** Compare the fields the format design names: the
    signature, version, `blockSize`, `totalBlocks` and the five fork-data
    records. An alternate without a header signature, such as the zeroed
@@ -555,9 +557,18 @@ every record exactly once; only the reserved head and tail and the
 bad-block records, which have no fork data, are claimed directly in step
 4. A cross-linked fork fails in step 7 whichever objects own it.
 
-Payload read-through, when requested, reads each delivered entry's content
-through common delivery during step 6, decoding compressed files
-completely. An indirect node is read once for each stub that names it, as
+Step 6 of a structural run reads what extraction would refuse without
+reading a file's data: a symbolic link's target, and for a compressed file
+its attribute and fork headers, an inline payload's decode and every entry
+of its chunk table, against its neighbours and the fork, with no chunk in a
+fork decoded. A plain file's forks were resolved in step 2.
+
+Payload read-through, when requested, reads each entry's content through
+common delivery during step 6, decoding compressed files completely, so
+every chunk and with it the whole table is checked. Its
+`payload_bytes_read` follows the [common rule](design-api.md): decoded spans
+and their encoded backing reads contribute no bytes, so a compressed file
+adds its decoded size to `logical_bytes` and nothing to that count. An indirect node is read once for each stub that names it, as
 extraction reads it, so no set of nodes already read is kept, and its bytes
 count once per stub.
 
@@ -670,7 +681,7 @@ byte comes from a row, a stream record, the geometry or a profile constant.
 | Probe and open | One 1536-byte read; three header nodes; the extents tree's inline index; a few search paths for the special forks' overflow and the root; the journal records |
 | Listing | Per directory: one search and one cursor scan of its records, its thread validated, the common key sort; per hard-link stub, one or two keyed searches; per flagged file, one attribute scan. No payload is read |
 | Content | Per entry, one leaf reread and one resolver walk on first resolve, then one index lookup per request; per compressed chunk, one table read and one decode |
-| Verification | Every node of every tree read once by level iteration plus once by its lower level's merge; the catalog and attributes passes; two external sorts and their merges; one bitmap pass of `ceil(N / 8)` bytes; scratch for the streams, the node bitsets and the ownership runs |
+| Verification | Every node of every tree read once by level iteration plus once by its lower level's merge; the catalog and attributes passes; external sorts of the object, link and inode streams and of the ownership claims, and their merges; one bitmap pass of the bitmap's `logicalSize`; scratch for the streams, the node bitsets and the ownership runs |
 | Planning | One pass over the catalog, one external sort of two records per entry, one packing pass per tree level, the raise-until-fit search |
 | Emission | Payload bytes plus one pass over the sorted records and level streams, and the bitmap |
 
@@ -727,7 +738,10 @@ refusal class and step a capture is expected to fail with, such as the
 interrupted journal, the mounted wrapped journal and the directory hard link
 (`FSIMG_EUNSUPPORTED`) and
 the specimen without an alternate header (`FSIMG_ECORRUPT` at
-verification's last step).
+verification's last step). Verification's expectations are the identifiers and
+statuses of `test/hfsplus-verify-expected.tsv`, resolved under
+`FSIMG_HFSPLUS_NATIVE`, `FSIMG_HFSPLUS_CORPUS` and, for a specimen in a container
+fsimg does not read, `FSIMG_HFSPLUS_DECODED`.
 
 `test/hfsplus-unicode.c` checks the generated tables: the digest of each
 table's serialization equals the one `docs/references.md` records for the

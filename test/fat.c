@@ -808,7 +808,7 @@ test_variants(void)
 		CHECK(strcmp(format.name, names[i]) == 0);
 		if (strcmp(format.name, "hfsplus") == 0 ||
 		    strcmp(format.name, "hfsx") == 0)
-			CHECK(format.capabilities == FSIMG_CAP_READ);
+			CHECK(format.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 		else
 			CHECK(format.capabilities == (FSIMG_CAP_READ |
 			    FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));

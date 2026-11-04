@@ -22,7 +22,6 @@ static fsimg_status_t hfsplus_open(fsimg_reader_t *,
 static void hfsplus_close(fsimg_reader_t *);
 static fsimg_status_t hfsplus_resolve(fsimg_reader_t *, uint64_t,
     fsimg_extent_t *, fsimg_error_t *);
-static fsimg_status_t content_open(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t link_target_check(fsimg_reader_t *, fsimg_error_t *);
 static bool volume_clean(const fsimg_hfsplus_reader_t *);
 static void detail_add(fsimg_volume_info_t *, const char *, uint64_t);
@@ -37,7 +36,8 @@ const fsimg_reader_ops_t fsimg_hfsplus_reader_ops = {
 	.key = hfsplus_key,
 	.ambiguous = "HFS Plus directory holds equivalent names",
 	.name_profile = FSIMG_NAME_PROFILE_NONE,
-	.resolve = hfsplus_resolve
+	.resolve = hfsplus_resolve,
+	.verify = hfsplus_verify
 };
 
 fsimg_hfsplus_reader_t *
@@ -202,8 +202,8 @@ link_target_check(fsimg_reader_t *reader, fsimg_error_t *error)
  * index of its data fork. The search buffer is free: no search is under way
  * between advances.
  */
-static fsimg_status_t
-content_open(fsimg_reader_t *reader, fsimg_error_t *error)
+fsimg_status_t
+hfsplus_content_open(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	const hfsplus_child_t *current = &hfsplus->current;
@@ -258,7 +258,7 @@ hfsplus_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *extent,
 	fsimg_status_t status;
 
 	if (compressed ? !hfsplus->compressed.open : hfsplus->file == NULL) {
-		status = content_open(reader, error);
+		status = hfsplus_content_open(reader, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
