@@ -997,6 +997,13 @@ finds no violation:
   U+FFFE, U+FFFF and the 2048 surrogate encodings spelled as this section explains
   and supplementary values as their pairs. The rows with no leaf are the 5 of
   `residual.tsv`.
+* Unicode data: every BMP combining class and every decomposition of the header
+  equals `UnicodeData-3.2.0.txt`'s (canonical, recursive, none in U+2000 to U+2FFF
+  or U+F900 to U+FAFF, Hangul by formula), read by the checker itself; 65536
+  classes and 970 decompositions compared. The checker also asserts the three
+  digests below, so a table change fails until they and this record are updated
+  deliberately, after review. Its self-test gives U+0031 class 230, and U+00C0 a
+  wrong decomposition, and requires the comparison alone to reject both.
 * Collisions: each colliding name has the catalog key of its representative.
 * Catalog order: sorting each directory's names by the comparator's key gives
   exactly `rank`, and no two siblings compare equal.

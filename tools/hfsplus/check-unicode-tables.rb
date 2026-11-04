@@ -45,6 +45,17 @@ module CheckUnicodeTables
     "between" => %w[0000 002F]
   }.freeze
 
+  # The SHA-256 of the three serializations (serialize_tables) that
+  # docs/hfsplus-research.md records. A table change moves one of them.
+  TABLE_DIGESTS = {
+    "fold" => "b8e22686df0e37d75ab4e0d24c83cf92a5cab407cb6ff722fa54384d6544be46",
+    "classes" => "0c753eab520b1374925dc1128228dfe56987f5284ee78837e116a89190ebc599",
+    "decompositions" => "654f209716fc62ecf5d15fff1063cc021d177bf2c0e97918b60ee93569c70496"
+  }.freeze
+
+  # Units the header never decomposes: docs/hfsplus-research.md's "Decomposition".
+  NOT_DECOMPOSED = [0x2000..0x2FFF, 0xF900..0xFAFF].freeze
+
   # The tables as the header gives them, flat per unit.
   Tables = Data.define(:fold, :classes, :decompositions)
   Comparator = Data.define(:name, :fold, :folded)
@@ -66,7 +77,7 @@ module CheckUnicodeTables
     text = File.read(header)
     tables = parse_header(text)
     print_digests(tables)
-    finish(check_header_digests(text, captures) + run_checks(captures, tables))
+    finish(check_header_digests(text, captures) + check_table_digests(tables) + run_checks(captures, tables))
   end
 
   def run_checks(captures, tables)
@@ -83,7 +94,9 @@ module CheckUnicodeTables
       check_sets(captures, tables, plus),
       check_sets(captures, tables, hfsx),
       witness(captures, tables, plus_rows),
-      self_test_marks(captures, tables)
+      check_unicode_data(captures, tables),
+      self_test_marks(captures, tables),
+      self_test_unicode_data(captures, tables)
     ].sum(NO_RESULT)
   end
 
@@ -501,16 +514,89 @@ module CheckUnicodeTables
     )
   end
 
-  # The digests docs/hfsplus-research.md pins, over serializations any
-  # implementation can compute: the folds as big-endian units, the classes as
-  # bytes, and each decomposition as its unit, its count and its units.
+  # The serializations any implementation can compute: the folds as big-endian
+  # units, the classes as bytes, and each decomposition as its unit, its count
+  # and its units.
+  def serialize_tables(tables) = {
+    "fold" => tables.fold.pack("n*"),
+    "classes" => tables.classes.pack("C*"),
+    "decompositions" => tables.decompositions.sort.flat_map { |unit, units| [unit, units.size, *units] }.pack("n*")
+  }
+
   def print_digests(tables)
-    fold = tables.fold.pack("n*")
-    classes = tables.classes.pack("C*")
-    decompositions = tables.decompositions.sort.flat_map { |unit, units| [unit, units.size, *units] }.pack("n*")
-    { "fold" => fold, "classes" => classes, "decompositions" => decompositions }.each do |name, bytes|
+    serialize_tables(tables).each do |name, bytes|
       puts format("SHA-256 %-15s %s", name, Digest::SHA256.hexdigest(bytes))
     end
+  end
+
+  # The pinned digests are a second line behind check_unicode_data: they also
+  # catch a change to the fold, which Unicode data alone does not give.
+  def check_table_digests(tables)
+    wrong = serialize_tables(tables).reject { |name, bytes| Digest::SHA256.hexdigest(bytes) == TABLE_DIGESTS.fetch(name) }
+    Result.new(
+      counts: { "table digests matching the record" => TABLE_DIGESTS.size - wrong.size },
+      violations: wrong.keys.map do
+        "the #{_1} table digest differs from the pinned one; update TABLE_DIGESTS and the record " \
+          "in docs/hfsplus-research.md deliberately, after review"
+      end
+    )
+  end
+
+  # The Unicode data --------------------------------------------------------
+
+  # Every BMP combining class and canonical decomposition of UnicodeData-3.2.0.txt,
+  # read here with no help from the generator. The data is the specification, so
+  # the header must equal it on all 65536 units, not just where a probe looked:
+  # the decomposition is full and recursive, absent from U+2000 to U+2FFF and
+  # U+F900 to U+FAFF, absent for supplementary values, and Hangul is a formula.
+  def unicode_expectation(captures)
+    records = File.readlines(File.join(captures, "unicode-3.2.0/UnicodeData-3.2.0.txt"), chomp: true)
+      .map { _1.split(";", -1) }
+      .map { |fields| [fields[0].to_i(16), fields[3].to_i, fields[5]] }
+      .select { |code, _, _| UNITS.cover?(code) }
+    direct = records
+      .reject { |code, _, decomposition| decomposition.empty? || decomposition.start_with?("<") || NOT_DECOMPOSED.any? { _1.cover?(code) } }
+      .to_h { |code, _, decomposition| [code, decomposition.split.map { _1.to_i(16) }] }
+    full = ->(unit) { direct.key?(unit) ? direct[unit].flat_map(&full) : [unit] }
+    classes = Array.new(UNITS.size, 0).tap { |all| records.each { |code, combining, _| all[code] = combining } }
+    { classes:, decompositions: direct.keys.sort.to_h { [_1, full.call(_1)] } }
+  end
+
+  def check_unicode_data(captures, tables)
+    expected = unicode_expectation(captures)
+    classes = UNITS.reject { tables.classes[_1] == expected[:classes][_1] }.map do
+      format("U+%04X has combining class %d, Unicode 3.2.0 has %d", _1, tables.classes[_1], expected[:classes][_1])
+    end
+    decompositions = (tables.decompositions.keys | expected[:decompositions].keys).sort
+      .reject { tables.decompositions[_1] == expected[:decompositions][_1] }.map do
+        format("U+%04X decomposes to %s, Unicode 3.2.0 gives %s", _1, spell(tables.decompositions[_1]), spell(expected[:decompositions][_1]))
+      end
+    Result.new(
+      counts: {
+        "unicode classes compared" => UNITS.size,
+        "unicode decompositions compared" => expected[:decompositions].size
+      },
+      violations: classes + decompositions
+    )
+  end
+
+  def spell(units) = units ? units.map { format("%04X", _1) }.join(" ") : "nothing"
+
+  # With the digest check left out, the Unicode comparison alone must reject a
+  # class that no probe vector touches (a digit before a mark) and a decomposition
+  # with a wrong unit.
+  def self_test_unicode_data(captures, tables)
+    digit = tables.classes.dup.tap { _1[0x31] = 230 }
+    decomposition = tables.decompositions.merge(0x00C0 => [0x0041, 0x0301])
+    mutants = {
+      "class of U+0031" => tables.with(classes: digit),
+      "decomposition of U+00C0" => tables.with(decompositions: decomposition)
+    }
+    accepted = mutants.select { |_, mutant| check_unicode_data(captures, mutant).violations.empty? }
+    Result.new(
+      counts: { "self-test unicode mutants rejected" => mutants.size - accepted.size },
+      violations: accepted.keys.map { "self-test #{_1}: the mutated table was accepted by the Unicode comparison" }
+    )
   end
 end
 
