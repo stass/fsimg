@@ -415,6 +415,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/hfsplus/populate_attributes.rb tools/hfsplus/populate_compression.rb \
 	tools/hfsplus/populate_fragmentation.rb tools/hfsplus/populate_large.rb \
 	tools/hfsplus/populate_links.rb \
+	tools/hfsplus/unicode-probe.rb \
 	third-party/Unicode-LICENSE.txt \
 	test/iso9660-corpus.sh test/iso9660-corpus.rb \
 	test/iso9660-corpus-test.rb test/iso9660-corpus-check.sh.in \
