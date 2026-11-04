@@ -23,6 +23,13 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 
 //  fsimg: the encoder table and frequency normalization are removed.
 
+// Initialize decoder table T[NSTATES].
+// NSTATES = sum FREQ[i] is the number of states (a power of 2)
+// NSYMBOLS is the number of symbols.
+// FREQ[NSYMBOLS] is a normalized histogram of symbol frequencies, with FREQ[i]
+// >= 0.
+// Some symbols may have a 0 frequency.  In that case, they should not be
+// present in the data.
 int fse_init_decoder_table(int nstates, int nsymbols,
                            const uint16_t *__restrict freq,
                            int32_t *__restrict t) {

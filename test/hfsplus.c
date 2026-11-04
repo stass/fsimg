@@ -112,6 +112,7 @@ static void test_tree_faults(void);
 static void test_node_framing(void);
 static void test_record_key_bounds(void);
 static void test_forks(void);
+static void test_compression_word_table_corruption(void);
 static void test_journals(void);
 static void test_journal_size_limits(void);
 static void test_labels_info(void);
@@ -3700,7 +3701,8 @@ test_compression_listing_failures(void)
 
 /* Payload failures must be deferred: preparation still lists both siblings. */
 static void
-compression_bad_content(const char *name, compression_case_t *c, size_t confirmed)
+compression_bad_content(const char *name, compression_case_t *c, size_t confirmed,
+    const char *message)
 {
 	gen_image_t image;
 	fixture_t f;
@@ -3722,6 +3724,8 @@ compression_bad_content(const char *name, compression_case_t *c, size_t confirme
 		memset(bytes, 0xa5, c->size + 1);
 		status = fsimg_reader_read_at(reader, 0, bytes, c->size, &count, &error);
 		expect_status(name, status, FSIMG_ECORRUPT, &error);
+		if (message != NULL)
+			expect_true(name, strcmp(error.message, message) == 0);
 		expect_true(name, count == confirmed && bytes[confirmed] == 0xa5);
 		if (confirmed != 0)
 			expect_true(name, bcmp(bytes, c->plain, confirmed) == 0);
@@ -3785,7 +3789,7 @@ test_compression_codec_corruption(void)
 				c.size = declared;
 			}
 			snprintf(name, sizeof(name), "test_compression_type%u_%s", type, damage[d]);
-			compression_bad_content(name, &c, 0);
+			compression_bad_content(name, &c, 0, NULL);
 			compression_case_free(&c);
 		}
 	}
@@ -3848,6 +3852,49 @@ typedef enum compression_damage {
 	CMP_RAW_WRONG_SIZE, CMP_BAD_ZLIB, CMP_TRUNCATED_ZLIB, CMP_TRAILING_ZLIB,
 	CMP_DICTIONARY
 } compression_damage_t;
+
+static void
+test_compression_word_table_corruption(void)
+{
+	static const struct {
+		const char *name;
+		uint32_t start;
+		uint32_t end;
+		size_t fork_size;
+		const char *message;
+	} cases[] = {
+		{ "table_overlaps_payload", 7, 16, 16,
+		    "HFS Plus compressed file's chunk table is malformed" },
+		{ "table_past_fork", 17, 16, 16,
+		    "HFS Plus compressed file's chunk table is malformed" },
+		{ "descending_offsets", 8, 7, 16,
+		    "HFS Plus chunks overlap" },
+		{ "stored_above_bound", 8, 8 + 69633, 8 + 69633,
+		    "HFS Plus chunk lies outside the resource data" }
+	};
+	char name[112];
+
+	for (unsigned type = 8; type <= 12; type += 4) {
+		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			compression_case_t c;
+
+			/* One logical chunk needs two words. The oversized chunk
+			 * stays inside its fork to isolate the stored-length bound.
+			 */
+			compression_case_init(&c, type, 1, 0);
+			c.resource = calloc(1, cases[i].fork_size);
+			CHECK(c.resource != NULL);
+			compression_le(c.resource, cases[i].start, 4);
+			compression_le(c.resource + 4, cases[i].end, 4);
+			c.objects[0].resource = c.resource;
+			c.objects[0].resource_size = cases[i].fork_size;
+			snprintf(name, sizeof(name), "test_compression_type%u_%s",
+			    type, cases[i].name);
+			compression_bad_content(name, &c, 0, cases[i].message);
+			compression_case_free(&c);
+		}
+	}
+}
 
 static void
 test_compression_resource_corruption(void)
@@ -4012,7 +4059,7 @@ test_compression_resource_corruption(void)
 		}
 		}
 		snprintf(name, sizeof(name), "test_compression_resource_%s", cases[i].name);
-		compression_bad_content(name, &c, confirmed);
+		compression_bad_content(name, &c, confirmed, NULL);
 		compression_case_free(&c);
 	}
 }
@@ -4034,7 +4081,7 @@ test_compression_inline_corruption(void)
 			    "test_compression_inline_%s_decode_%s",
 			    encoding == 0 ? "type1" : encoding == 1 ? "zlib" : "raw",
 			    longer ? "long" : "short");
-			compression_bad_content(name, &c, 0);
+			compression_bad_content(name, &c, 0, NULL);
 			compression_case_free(&c);
 		}
 	}
@@ -7198,6 +7245,7 @@ static void (*const tests[])(void) = {
 	test_compression_lzfse_scratch_budget,
 	test_compression_listing_failures,
 	test_compression_resource_corruption,
+	test_compression_word_table_corruption,
 	test_compression_inline_corruption,
 	test_compression_counted_reads,
 	test_compression_advance_invalidates_window,

@@ -584,12 +584,11 @@
 
 ## Security residuals
 
-* [Low] **LZFSE decode cost against stored bytes** (`lib/codec/lzfse/`,
-  `window_decode` in `lib/formats/hfsplus/compress.c`): a block can omit its tables
-  and declare 40000 literals that take no input bits, so a hostile 69632-byte chunk
-  of 32-byte blocks costs about 87 million symbol decodes, charged as its stored and
-  decoded bytes. Each chunk stays bounded and cancellation polls between chunks;
-  charge LZFSE work by the blocks' declared counts if `max_work` should hold it.
+* [Low] **Offer the LZFSE and LZVN defect fixes upstream** (`lib/codec/lzfse/`,
+  `docs/references.md`): `fse_in_checked_flush64()`'s read past the payload,
+  `fse_in_checked_init`'s unchecked `n`, `fse_in_checked_flush32()`'s misaligned
+  load, the block header's pointer wrap on a 32-bit host, and LZVN `sml_m` and
+  `lrg_m` accepting a distance of zero.
 
 * [Medium] **exFAT listing cost with shared allocations** (`exfat_replay` and
   `benign_allocation`, `lib/formats/exfat/`): files and benign entries index their

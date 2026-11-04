@@ -418,6 +418,18 @@ int lzfse_decode(lzfse_decoder_state *s) {
           return LZFSE_STATUS_ERROR;
         }
 
+        //  fsimg: a block's decode cost follows its header, not its payload: a
+        //  block can omit its tables and keep the previous ones, whose one-symbol
+        //  tables take no input bits and make no output. Every literal and match
+        //  yields output apart from padding, so a valid stream's n_literals +
+        //  3 * n_matches stays near capacity; a stream past four times that, with
+        //  one full block's literals of slack for a small output, is refused.
+        s->fsimg_declared_symbols +=
+            (uint64_t)header1.n_literals + 3 * (uint64_t)header1.n_matches;
+        if (s->fsimg_declared_symbols >
+            4 * ((uint64_t)(s->dst_end - s->dst_begin) + LZFSE_LITERALS_PER_BLOCK))
+          return LZFSE_STATUS_ERROR;
+
         // Skip header
         s->src += header_size;
 

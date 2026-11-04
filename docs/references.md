@@ -135,7 +135,7 @@ and BinData (BSD-2-Clause); none is vendored or becomes a runtime dependency.
 
 `lib/codec/lzfse/` holds the decoder half of Apple's reference implementation,
 <https://github.com/lzfse/lzfse>, under its BSD-3-Clause license, at commit
-`e634ca58b4821d9f3d560cdc6df5dec02ffc93fd`, the tip of its master branch. Each
+`e634ca58b4821d9f3d560cdc6df5dec02ffc93fd`. Each
 file's header was checked before import and each carries that notice;
 `third-party/lzfse-LICENSE.txt` repeats it for binary distributions. Watch that
 repository's issues and any Apple security advisory naming `lzfse`: an upstream
@@ -165,7 +165,7 @@ the last two:
 * `lzfse_fse.c`: the encoder table and frequency normalization are removed.
 * `lzfse_fse.h`, a defect: `fse_in_checked_flush64()` always loads eight bytes, so
   with nothing to load after an initial stream of `n == 0` it reads one byte past
-  the payload, which a hostile block can place at the end of the input. It now
+  the payload, which a hostile block can place at the end of the input. It
   returns first when there is nothing to load.
 * `lzfse_fse.h`, a defect: both `fse_in_checked_init` functions refuse an `n`
   outside `[-7, 0]` before adding to it, since a v1 block header gives `n`
@@ -180,6 +180,13 @@ the last two:
   which only a stream with no earlier match can have. They use the previous
   distance without the check the other opcodes make, so such a match copied each
   output byte onto itself and passed whatever the buffer held as decoded data.
+* `lzfse_decode_base.c` and `lzfse_internal.h`, a resource bound: a stream fails
+  once its blocks declare more than `4 * (capacity + 40000)` of `n_literals + 3 *
+  n_matches`. A block's decode cost follows those counts, not its payload: a
+  39-byte block with no tables of its own can decode 40000 literals and 10000
+  matches that take no input bits and make no output, about 6 s of CPU per MiB of
+  image. Each literal and match yields output apart from padding, so a valid stream
+  stays near `capacity`.
 * `lzfse_fse.h`: `fse_check_freq()`'s loop index is `size_t`, because the wrapper
   includes this header under the project's warnings.
 * The build, `libfsimg-lzfse.la` in `Makefile.am`: `-Wno-sign-compare` and
@@ -188,8 +195,6 @@ the last two:
   in place of the computed goto, which is not C11; and `-DNDEBUG`, because the
   library must not abort. The assertions state invariants the reading of these
   paths found to hold on hostile input.
-
-The defect fixes above are not yet offered upstream.
 
 ## exFAT reference
 

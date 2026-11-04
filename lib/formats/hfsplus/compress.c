@@ -53,6 +53,14 @@ struct hfsplus_window {
 	unsigned char		 output[HFSPLUS_CHUNK_BYTES];
 };
 
+/* Where a type's chunks are found in its resource fork. */
+typedef enum {
+	CHUNK_TABLE_NONE,	/* in the attribute: no resource fork */
+	CHUNK_TABLE_RESOURCE,	/* the resource map's block table, type 4 */
+	CHUNK_TABLE_WORDS	/* the fork's successor-offset words, types 8, 12 */
+} chunk_table_t;
+
+static chunk_table_t chunk_table(uint8_t);
 static fsimg_status_t window_ready(fsimg_reader_t *, fsimg_error_t *);
 static bool raw_marked(const hfsplus_window_t *, size_t, unsigned char);
 static fsimg_status_t raw_decode(hfsplus_window_t *, size_t, size_t,
@@ -61,10 +69,10 @@ static fsimg_status_t zlib_failed(const hfsplus_window_t *, int,
     fsimg_error_t *);
 static fsimg_status_t zlib_decode(fsimg_reader_t *, hfsplus_window_t *, size_t,
     size_t, fsimg_error_t *);
-static fsimg_status_t lzvn_decode(hfsplus_window_t *, size_t, size_t,
+static fsimg_status_t chunk_decode_lzvn(hfsplus_window_t *, size_t, size_t,
     fsimg_error_t *);
-static fsimg_status_t lzfse_decode(fsimg_reader_t *, hfsplus_window_t *, size_t,
-    size_t, fsimg_error_t *);
+static fsimg_status_t chunk_decode_lzfse(fsimg_reader_t *, hfsplus_window_t *,
+    size_t, size_t, fsimg_error_t *);
 static fsimg_status_t window_decode(fsimg_reader_t *, size_t, size_t,
     fsimg_error_t *);
 static fsimg_status_t fork_open(fsimg_reader_t *, const hfsplus_file_t *,
@@ -117,11 +125,27 @@ hfsplus_compress_known(uint8_t type)
 	    type == TYPE_LZFSE_FORK);
 }
 
+/* The one statement of which types keep their chunks in the resource fork, and
+ * in which table format, so a new type states its format rather than inherit one.
+ */
+static chunk_table_t
+chunk_table(uint8_t type)
+{
+	switch (type) {
+	case TYPE_ZLIB_FORK:
+		return (CHUNK_TABLE_RESOURCE);
+	case TYPE_LZVN_FORK:
+	case TYPE_LZFSE_FORK:
+		return (CHUNK_TABLE_WORDS);
+	default:
+		return (CHUNK_TABLE_NONE);
+	}
+}
+
 bool
 hfsplus_compress_consumes_fork(uint8_t type)
 {
-	return (type == TYPE_ZLIB_FORK || type == TYPE_LZVN_FORK ||
-	    type == TYPE_LZFSE_FORK);
+	return (chunk_table(type) != CHUNK_TABLE_NONE);
 }
 
 void
@@ -242,7 +266,7 @@ zlib_decode(fsimg_reader_t *reader, hfsplus_window_t *window, size_t stored,
  * bytes of output; a stream ending short of them is the image's fault too.
  */
 static fsimg_status_t
-lzvn_decode(hfsplus_window_t *window, size_t stored, size_t expected,
+chunk_decode_lzvn(hfsplus_window_t *window, size_t stored, size_t expected,
     fsimg_error_t *error)
 {
 	fsimg_codec_step_t step;
@@ -264,8 +288,8 @@ lzvn_decode(hfsplus_window_t *window, size_t stored, size_t expected,
  * use. LZFSE has no raw marker: incompressible content is an uncompressed block.
  */
 static fsimg_status_t
-lzfse_decode(fsimg_reader_t *reader, hfsplus_window_t *window, size_t stored,
-    size_t expected, fsimg_error_t *error)
+chunk_decode_lzfse(fsimg_reader_t *reader, hfsplus_window_t *window,
+    size_t stored, size_t expected, fsimg_error_t *error)
 {
 	fsimg_codec_step_t step;
 	fsimg_status_t status;
@@ -318,10 +342,10 @@ window_decode(fsimg_reader_t *reader, size_t stored, size_t expected,
 		return (zlib_decode(reader, window, stored, expected, error));
 	case TYPE_LZVN_INLINE:
 	case TYPE_LZVN_FORK:
-		return (lzvn_decode(window, stored, expected, error));
+		return (chunk_decode_lzvn(window, stored, expected, error));
 	case TYPE_LZFSE_INLINE:
 	case TYPE_LZFSE_FORK:
-		return (lzfse_decode(reader, window, stored, expected, error));
+		return (chunk_decode_lzfse(reader, window, stored, expected, error));
 	default:
 		return (hfsplus_corrupt(error,
 		    "invalid prepared HFS Plus compression type"));
@@ -462,7 +486,7 @@ hfsplus_compress_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compression attribute changed since it was listed"));
 	if (hfsplus_compress_consumes_fork(current->compression)) {
-		status = current->compression == TYPE_ZLIB_FORK ?
+		status = chunk_table(current->compression) == CHUNK_TABLE_RESOURCE ?
 		    fork_open(reader, file, error) :
 		    word_table_open(reader, file, error);
 		if (status != FSIMG_OK) {
@@ -577,7 +601,7 @@ chunk_load(fsimg_reader_t *reader, uint64_t chunk, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	window->valid = false;
-	status = hfsplus->current.compression == TYPE_ZLIB_FORK ?
+	status = chunk_table(hfsplus->current.compression) == CHUNK_TABLE_RESOURCE ?
 	    chunk_locate(reader, chunk, &offset, &stored, error) :
 	    word_chunk_locate(reader, chunk, &offset, &stored, error);
 	if (status == FSIMG_OK)

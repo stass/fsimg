@@ -24,7 +24,32 @@
  * [out, out + capacity) it is given: their wide copies run only with the margin
  * to the end checked first, and the imported files' recorded adaptations close
  * the paths that did not.
+ *
+ * A block's header does not bind what it decodes. The LZFSE machine ignores a
+ * compressed block's n_raw_bytes, and bounds an L by the literal buffer rather
+ * than by the block's n_literals, so an L past them copies bytes the block did
+ * not decode. Those are this stream's own earlier literals or zeroes, because
+ * the state starts zeroed per stream, so no other data can reach the output. The
+ * output check still holds: the machine stops at capacity whatever a header
+ * declares, and a caller compares step->produced to the length it expected.
+ *
+ * The imported loads are native-endian, and a big-endian LZVN distance would be
+ * swapped into a decode that succeeds with wrong bytes, so these decoders refuse
+ * such a host rather than guess.
  */
+
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define LZFSE_HOST_SUPPORTED	true
+#else
+#define LZFSE_HOST_SUPPORTED	false
+#endif
+
+/* The literal copy loads eight bytes at a time and an L is bounded by the buffer's
+ * end, so a load can pass that end by seven bytes; it stays inside the state.
+ */
+_Static_assert(offsetof(lzfse_decoder_state,
+    compressed_lzfse_block_state.literals) + LZFSE_LITERALS_PER_BLOCK + 64 + 7 <=
+    sizeof(lzfse_decoder_state), "literal over-read leaves the decoder state");
 
 static fsimg_status_t lzfse_fail(const uint8_t *, const uint8_t *,
     fsimg_status_t, const char *, fsimg_error_t *);
@@ -70,6 +95,9 @@ fsimg_lzfse_decode(const uint8_t *in, size_t in_len, uint8_t *out,
 	if (!lzfse_arguments_valid(in, in_len, out, capacity) || scratch == NULL)
 		return (lzfse_fail(in, in, FSIMG_EINVAL,
 		    "lzfse: invalid buffer arguments", error));
+	if (!LZFSE_HOST_SUPPORTED)
+		return (lzfse_fail(in, in, FSIMG_EUNSUPPORTED,
+		    "lzfse: decoder needs a little-endian host", error));
 
 	/* Zeroed scratch is the machine's start state, and what a block's
 	 * unwritten decoder tables and literals read as, so a stream sees nothing
@@ -91,7 +119,8 @@ fsimg_lzfse_decode(const uint8_t *in, size_t in_len, uint8_t *out,
 		break;
 	case LZFSE_STATUS_DST_FULL:
 		return (lzfse_fail(in, state->src, FSIMG_ECORRUPT,
-		    "lzfse: stream does not end within its output bound", error));
+		    "lzfse: stream exceeds its output bound or an LZVN block stops early",
+		    error));
 	case LZFSE_STATUS_SRC_EMPTY:
 		return (lzfse_fail(in, state->src, FSIMG_ECORRUPT,
 		    "lzfse: stream is truncated", error));
@@ -102,10 +131,10 @@ fsimg_lzfse_decode(const uint8_t *in, size_t in_len, uint8_t *out,
 	if (!state->end_of_stream)
 		return (lzfse_fail(in, state->src, FSIMG_ECORRUPT,
 		    "lzfse: stream has no end block", error));
-	step->done = true;
 	if (state->src != state->src_end)
 		return (lzfse_fail(in, state->src, FSIMG_ECORRUPT,
 		    "lzfse: trailing bytes after the end block", error));
+	step->done = true;
 	return (FSIMG_OK);
 }
 
@@ -120,6 +149,9 @@ fsimg_lzvn_decode(const uint8_t *in, size_t in_len, uint8_t *out,
 	if (!lzfse_arguments_valid(in, in_len, out, capacity))
 		return (lzfse_fail(in, in, FSIMG_EINVAL,
 		    "lzvn: invalid buffer arguments", error));
+	if (!LZFSE_HOST_SUPPORTED)
+		return (lzfse_fail(in, in, FSIMG_EUNSUPPORTED,
+		    "lzvn: decoder needs a little-endian host", error));
 
 	/* The machine returns at once on an empty output, so an empty capacity
 	 * gets one spare byte: an end marker still decodes there, and any byte
@@ -145,9 +177,9 @@ fsimg_lzvn_decode(const uint8_t *in, size_t in_len, uint8_t *out,
 	if (!state.end_of_stream)
 		return (lzfse_fail(in, state.src, FSIMG_ECORRUPT,
 		    "lzvn: stream does not reach its end marker", error));
-	step->done = true;
 	if (state.src != state.src_end)
 		return (lzfse_fail(in, state.src, FSIMG_ECORRUPT,
 		    "lzvn: trailing bytes after the end marker", error));
+	step->done = true;
 	return (FSIMG_OK);
 }

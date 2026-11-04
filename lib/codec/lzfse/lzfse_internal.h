@@ -276,6 +276,8 @@ typedef struct {
   lzfse_compressed_block_decoder_state compressed_lzfse_block_state;
   lzvn_compressed_block_decoder_state compressed_lzvn_block_state;
   uncompressed_block_decoder_state uncompressed_block_state;
+  //  fsimg: the symbol decodes the stream's block headers have declared.
+  uint64_t fsimg_declared_symbols;
 } lzfse_decoder_state;
 
 // MARK: - Block header objects

@@ -843,6 +843,9 @@ fsimg_status_t fsimg_lzvn_decode(const uint8_t *in, size_t in_len,
   detects overflow itself rather than relying on a short return, since the
   reference's buffer interface reports a full output the same way as a
   complete one.
+* Both decoders refuse a big-endian host with `FSIMG_EUNSUPPORTED`: the imported
+  loads are native-endian, and a swapped match distance would decode to wrong
+  bytes without an error. HFS Plus types 7, 8, 11 and 12 report unsupported there.
 * LZVN chunks in APFS are raw LZVN streams without the reference's block
   headers, so `fsimg_lzvn_decode()` drives the reference's LZVN state
   machine directly; LZFSE chunks carry their block headers and go through
