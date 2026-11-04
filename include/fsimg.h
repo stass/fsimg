@@ -1401,7 +1401,9 @@ typedef struct fsimg_part {
  * typed by gpt_type or mbr_type, else by the filesystem the stack names or
  * the volume's prefix identifies; without a scheme the volume is the
  * disk. A filesystem the stack names must open on the volume before any
- * output, and a truncation it proves is FSIMG_ECORRUPT. unwrap writes the
+ * output, as must one detection recognises and supports under an empty
+ * filesystem slot, and a truncation it proves is FSIMG_ECORRUPT, with no
+ * override. unwrap writes the
  * bytes a selector names. compose places count
  * volumes in order, each 1 MiB aligned, under a stack naming a scheme and
  * no filesystem; the layer options' partition fields must hold their

@@ -60,6 +60,8 @@ static fsimg_status_t check_input_whole(fsimg_ctx_t *, fsimg_io_t *,
     const char *, fsimg_error_t *);
 static fsimg_status_t check_named_input(fsimg_ctx_t *, fsimg_io_t *,
     uint64_t, const char *, char [static 16], fsimg_error_t *);
+static fsimg_status_t check_unnamed_input(fsimg_ctx_t *, fsimg_io_t *,
+    uint64_t, char [static 16], fsimg_error_t *);
 static fsimg_status_t check_carried_input(fsimg_ctx_t *, fsimg_io_t *,
     uint64_t, const fsimg_stack_t *, const fsimg_layer_t *, char [static 16],
     fsimg_byte_order_t *, fsimg_error_t *);
@@ -530,8 +532,8 @@ write_plan(fsimg_session_t *session, fsimg_disk_plan_t *plan,
  * reader core must find its declared volume all there: a truncated volume
  * is FSIMG_ECORRUPT naming the count, since a wrap would write it broken
  * into a new image. A cut the format cannot prove is no truncation here
- * (specs/architecture.md#byte-and-object-boundaries). Each refusal names
- * the input ("input").
+ * (specs/architecture.md#byte-and-object-boundaries). A NULL name leaves the
+ * format to detection. Each refusal names the input ("input").
  */
 static fsimg_status_t
 check_input_whole(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *named,
@@ -593,6 +595,33 @@ check_named_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
 }
 
 /*
+ * The input of a stack with an empty filesystem slot: raw bytes, unless
+ * detection recognises a filesystem, whose name filesystem receives. That
+ * claim must open whole as a named one must, and no override spares bytes that
+ * merely look like a cut volume. A corrupt claim names no format, so its open
+ * is detection again and only reports the probe's reason. No claim, several
+ * claims or an unsupported claim leave nothing to open, and a cut in such an
+ * input goes unseen.
+ */
+static fsimg_status_t
+check_unnamed_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
+    char filesystem[static 16], fsimg_error_t *error)
+{
+	fsimg_session_t session;
+	fsimg_claim_t claim;
+	fsimg_status_t status;
+
+	fsimg_session_init(&session, ctx, "volume identification", 0);
+	status = fsimg_volume_claim(ctx, input, &session, 0, length, NULL,
+	    &claim, filesystem, error);
+	if (status != FSIMG_OK ||
+	    (claim != FSIMG_CLAIM_FORMAT && claim != FSIMG_CLAIM_CORRUPT))
+		return (status);
+	return (check_input_whole(ctx, input,
+	    claim == FSIMG_CLAIM_FORMAT ? filesystem : NULL, error));
+}
+
+/*
  * The input of a container that carries a filesystem, before any output
  * is produced (specs/design-layers.md#prefix-tables-opaque-sections-and-
  * carried-volumes): the stack holds nothing but the carried filesystem,
@@ -650,7 +679,8 @@ check_carried_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
 
 /*
  * Wrap one raw volume. A filesystem the stack names must be the one the
- * volume holds and open whole, and a container that carries a filesystem
+ * volume holds and open whole, one detection recognises and supports under an
+ * empty slot must open whole, and a container that carries a filesystem
  * requires its input to hold that one and to verify. With a scheme the
  * volume is the one partition, typed by the layer settings or else by its
  * filesystem; without one it is the output.
@@ -702,7 +732,7 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 		status = check_named_input(ctx, input, length,
 		    stack.slots[FSIMG_LAYER_FILESYSTEM].name, filesystem, error);
 	else
-		status = identify_volume(ctx, input, length, filesystem, error);
+		status = check_unnamed_input(ctx, input, length, filesystem, error);
 	if (status != FSIMG_OK)
 		return (status);
 	/* One session charges the container's plan and the output. */

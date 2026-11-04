@@ -843,8 +843,20 @@ They are library operations with no command-line form.
   blocks](design-qnx4.md#blocks-and-the-block-count). A carried
   container runs the carried filesystem's full structural verification,
   which fails on a truncated volume with the same class and establishes
-  what the container's header depends on. A stack with neither takes the
-  input as raw bytes; its probe only types the partition.
+  what the container's header depends on.
+
+  A stack with neither has an empty filesystem slot and takes the input as
+  raw bytes unless detection recognises a filesystem in it. A single claim
+  that is not unsupported opens a reader as a named filesystem does, with the
+  same refusals, whatever their class, so a truncated volume is refused the
+  same way. An input drawing no claim, several claims or an unsupported claim
+  is raw without an open, and a cut in it goes unseen. The refusal has no
+  override: an input the caller means as raw bytes that merely looks like a
+  truncated filesystem is refused with no way through, and so is one its
+  driver refuses for any other reason, since an open's refusal does not
+  separate a cut from other damage. A cut GPT or MBR disk given as input draws
+  no filesystem claim and passes as raw: probes read a filesystem's start, and
+  a disk's tables are read only by opening it as an image.
 * **Unwrap** takes an opened image and a Disk, partition or Range selector and
   writes the selected bytes raw.
 * **Compose** takes an ordered list of volume images, each opened as an image

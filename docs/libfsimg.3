@@ -523,8 +523,9 @@ builds a disk from several volumes, one partition each; each compresses
 its output with the write options' compression.
 They copy the disk once and refuse an output that shares storage with an
 input before writing.
-A filesystem that a wrap's stack names is opened on the input before the
-disk is planned and before any output.
+A filesystem that a wrap's stack names, or that detection recognises and
+supports in the input of a stack with an empty filesystem slot, is opened on
+the input before the disk is planned and before any output.
 The open runs under the context's limits, in the caller's process, and a
 large volume may need the context's scratch directory.
 A volume its driver refuses keeps that error, and one its format proves
@@ -532,6 +533,12 @@ truncated fails with FSIMG_ECORRUPT naming the missing bytes.
 A cut that leaves no proof is not detected, such as a QNX4 volume that keeps
 its bitmap's size and loses only allocated whole blocks; only a carried
 container's input is fully verified.
+Under an empty filesystem slot, an input no probe claims is copied as raw
+bytes, as is one drawing several claims or a claim its probe calls
+unsupported, and a cut GPT or MBR disk, which draws no filesystem claim.
+There is no override: a raw input that merely looks like a truncated
+filesystem is refused with no way through, and so is one its driver refuses
+for any other reason.
 .Pp
 .Fn fsimg_image_open
 peels a DMG, fixed VHD, Android sparse image, QNX boot image or hbcifs
