@@ -5741,6 +5741,73 @@ test_truncated_longer_slice(void)
 	gen_free(&image);
 }
 
+/*
+ * Calling through a table keeps the compiler from inlining every test into
+ * main and summing their stack frames.
+ */
+static void (*const tests[])(void) = {
+	test_root_fields,
+	test_attribute_record_lengths,
+	test_distinct_dates,
+	test_corrupt_catalog_records_pin_diagnostics,
+	test_attribute_scan_refuses_a_malformed_key,
+	test_thread_lookup_refuses_a_malformed_key_after_following_a_leaf,
+	test_child_refusals_name_the_whole_path,
+	test_prepared_entries,
+	test_generator_fork_descriptors,
+	test_journal_info_identity,
+	test_probe_exclusivity,
+	test_folder_counts_and_parents,
+	test_catalog_exact_lengths,
+	test_names_selection_owned,
+	test_attribute_key_order,
+	test_mixed_round_trip,
+	test_catalog_listing,
+	test_catalog_flags_kinds,
+	test_symbolic_links,
+	test_hard_links,
+	test_attributes_compression,
+	test_names_listing,
+	test_identity_geometry,
+	test_truncated_volume,
+	test_truncated_unused_tail_extract,
+	test_truncated_file,
+	test_truncated_metadata,
+	test_truncated_largest_volume,
+	test_truncated_largest_block_size,
+	test_truncated_last_block,
+	test_truncated_sibling_loop,
+	test_truncated_catalog_leaf,
+	test_truncated_attributes_header,
+	test_truncated_journal_info,
+	test_truncated_journal_header,
+	test_truncated_overflow_leaf,
+	test_truncated_file_straddles_cut,
+	test_truncated_file_output_limit,
+	test_truncated_longer_slice,
+	test_headers,
+	test_tree_parameters,
+	test_attributes_tree_accepts_binary_compare_pair,
+	test_attributes_tree_preserves_code_unit_order,
+	test_attributes_tree_allows_fixed_keys_only_when_empty,
+	test_catalog_and_extents_keep_tree_parameters,
+	test_tree_search,
+	test_attribute_search,
+	test_empty_tree_search,
+	test_catalog_key_owns_thread_name,
+	test_content_domain_empty,
+	test_tree_faults,
+	test_node_framing,
+	test_record_key_bounds,
+	test_forks,
+	test_journals,
+	test_journal_size_limits,
+	test_journal_location_clauses,
+	test_labels_info,
+	test_faults,
+	test_native,
+};
+
 int
 main(int argc, char **argv)
 {
@@ -5753,66 +5820,8 @@ main(int argc, char **argv)
 		return (native_content(argv[2]));
 	CHECK(argc == 1);
 	CHECK(setvbuf(stdout, NULL, _IOLBF, 0) == 0);
-	test_root_fields();
-	test_attribute_record_lengths();
-	test_distinct_dates();
-	test_corrupt_catalog_records_pin_diagnostics();
-	test_attribute_scan_refuses_a_malformed_key();
-	test_thread_lookup_refuses_a_malformed_key_after_following_a_leaf();
-	test_child_refusals_name_the_whole_path();
-	test_prepared_entries();
-	test_generator_fork_descriptors();
-	test_journal_info_identity();
-	test_probe_exclusivity();
-	test_folder_counts_and_parents();
-	test_catalog_exact_lengths();
-	test_names_selection_owned();
-	test_attribute_key_order();
-	test_mixed_round_trip();
-	test_catalog_listing();
-	test_catalog_flags_kinds();
-	test_symbolic_links();
-	test_hard_links();
-	test_attributes_compression();
-	test_names_listing();
-	test_identity_geometry();
-	test_truncated_volume();
-	test_truncated_unused_tail_extract();
-	test_truncated_file();
-	test_truncated_metadata();
-	test_truncated_largest_volume();
-	test_truncated_largest_block_size();
-	test_truncated_last_block();
-	test_truncated_sibling_loop();
-	test_truncated_catalog_leaf();
-	test_truncated_attributes_header();
-	test_truncated_journal_info();
-	test_truncated_journal_header();
-	test_truncated_overflow_leaf();
-	test_truncated_file_straddles_cut();
-	test_truncated_file_output_limit();
-	test_truncated_longer_slice();
-	test_headers();
-	test_tree_parameters();
-	test_attributes_tree_accepts_binary_compare_pair();
-	test_attributes_tree_preserves_code_unit_order();
-	test_attributes_tree_allows_fixed_keys_only_when_empty();
-	test_catalog_and_extents_keep_tree_parameters();
-	test_tree_search();
-	test_attribute_search();
-	test_empty_tree_search();
-	test_catalog_key_owns_thread_name();
-	test_content_domain_empty();
-	test_tree_faults();
-	test_node_framing();
-	test_record_key_bounds();
-	test_forks();
-	test_journals();
-	test_journal_size_limits();
-	test_journal_location_clauses();
-	test_labels_info();
-	test_faults();
-	test_native();
+	for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); i++)
+		tests[i]();
 	printf("HFS Plus: %u assertions, %u failures\n", assertions, failures);
 	return (failures == 0 ? 0 : 1);
 }
