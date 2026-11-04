@@ -284,7 +284,7 @@ LZVN, never ZLIB or LZFSE, for every compressible file it compressed:
 So `afsctool` supplies ZLIB and LZFSE files, and either tool supplies LZVN.
 `afsctool` describes itself as for APFS and ZFS; it carries no refusal for HFS
 Plus. The `lzfse` command (Homebrew formula `lzfse` 1.0) encodes and decodes raw
-LZFSE streams (`lzfse -encode -i IN -o OUT`) and supplies the stage 5 test
+LZFSE streams (`lzfse -encode -i IN -o OUT`) and supplies LZFSE test
 vectors.
 
 Probes of E3, kept as a capture directory. `~/hfsplus-captures/e3-small-names/`
@@ -312,9 +312,8 @@ bfa659d23b2274101e693efd5f38ebd9372e725c136ce00139d6221a2b84fcb4  fsck.tsv
 ## Experiments
 
 Each experiment varies one property on disposable volumes, as the plan's stage
-1 table defines. Its heading carries its status; stage 1 fills in the
-procedure actually run, the observations and the table or field each
-consumer needs.
+1 table defines. Each section gives its status, the procedure
+actually run, the observations and the table or field each consumer needs.
 
 ### E1 Empty volumes
 
@@ -450,7 +449,7 @@ Evidence rows answered:
 * Volume attribute bits, catalog flags, B-tree flags, `keyCompareType`,
   `maxKeyLength` and node sizes on native volumes, before use: the tables
   above; E2 gives the state after use. The B-tree flag bit 0 (bad close) is
-  clear everywhere. Open until E10: old volumes.
+  clear everywhere. [E10](#e10-old-volumes) gives old volumes.
 * Header fields the alternate keeps equal after native use: E2.
 * `newfs_hfs` empty-volume layout: above. The root owner, mode and dates and
   the `createDate` semantics are the root record and date rows above;
@@ -1393,9 +1392,9 @@ joiner and directional controls ignorable, U+0000 sorting last). Every stored
 name equals its decomposition (22 of 22 and 23 of 23), and the leaf keys ascend
 strictly under the fold comparison on all four volumes (0 inversions, 0 equal
 neighbours over 11176, 12564, 3464 and 876 records). The smi volume has no
-non-ASCII name. The check is against the design's prose rules: E3 is open, so
-the accepted fold and decomposition tables do not exist yet, and Ruby's data is
-newer than Unicode 3.2.
+non-ASCII name. The check applies the design's prose rules, not the
+[E3](#e3-unicode) observation, using Ruby's Unicode data, which is newer than
+Unicode 3.2.
 
 Open. A Mac OS 8.1 to 9.2 writer's non-ASCII names, which the design says may
 follow Unicode 2.1, are unobserved: the only Mac OS 9-formatted volume has ASCII
