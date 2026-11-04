@@ -37,6 +37,7 @@ class HfsplusNativeTest < Minitest::Test
 
   CLI_SAMPLE_PER_CAPTURE = 8
   CLI_MEMBER_BYTE_CAP = 1024 * 1024
+  COMPRESSION_CAPTURE = "h-hfsplus-8388608-e6-zlib"
   # Smallest observed file payload among captures with directories and links:
   # 204 file bytes, 21 entries, in a 16 MiB image.
   HOST_EXTRACTION_CAPTURE = "h-hfsplus-16777216-e5"
@@ -49,8 +50,6 @@ class HfsplusNativeTest < Minitest::Test
       message: "HFS Plus directory hard link is not supported", path: "/dl1/a/d"),
     Expectation.new(pattern: /e8-interrupted\z/, status: :refused, code: -6,
       message: "HFS Plus journal holds transactions; mount the volume to replay", path: ""),
-    Expectation.new(pattern: /e6-sweep\z/, status: :skipped, code: nil,
-      message: "native sweep has no image", path: nil),
     Expectation.new(pattern: /mkfs-w(?:-J(?:-mounted)?)?\z/, status: :refused, code: -6,
       message: "HFS Plus volume inside an HFS wrapper is not supported", path: ""),
     Expectation.new(pattern: /\Ah-(?:hfsplus|hfsx)-/, status: :ok, code: nil,
@@ -79,19 +78,14 @@ class HfsplusNativeTest < Minitest::Test
   def compare_capture(manifest_path)
     directory = File.dirname(manifest_path)
     name = File.basename(directory)
-    expectation = EXPECTED.find { _1.pattern.match?(name) }
-    refute_nil(expectation, "native capture needs an expected status: #{name}")
-    if expectation.status == :skipped
-      TALLY.add(:skips)
-      warn("SKIP: #{name}: #{expectation.message}")
-      skip("#{name}: #{expectation.message}")
-    end
     image = %w[image.img image.img.gz].map { File.join(directory, _1) }.find { File.file?(_1) }
     unless image
       TALLY.add(:skips, 1)
       warn("SKIP: native manifest without image: #{manifest_path}")
       skip("native manifest without image: #{manifest_path}")
     end
+    expectation = EXPECTED.find { _1.pattern.match?(name) }
+    refute_nil(expectation, "native capture needs an expected status: #{name}")
     # Capture fixtures may link an image; the CLI requires its regular-file path.
     image = File.realpath(image)
     manifest = JSON.parse(File.read(manifest_path))
@@ -142,7 +136,7 @@ class HfsplusNativeTest < Minitest::Test
     end
     compare_content(image: image, entries: entries, expected: expected, name: name)
     compare_cli(image: image, expected: expected, manifest: manifest, name: name)
-    if [HOST_EXTRACTION_CAPTURE, "h-hfsplus-8388608-e6-zlib"].include?(name)
+    if [HOST_EXTRACTION_CAPTURE, COMPRESSION_CAPTURE].include?(name)
       compare_host_extraction(image: image, expected: expected, late_logs: late_logs, name: name)
     end
     TALLY.add(:captures, 1)
@@ -273,9 +267,8 @@ class HfsplusNativeTest < Minitest::Test
         end
         TALLY.add(:host_entries)
       end
-      if name == "h-hfsplus-8388608-e6-zlib"
+      if name == COMPRESSION_CAPTURE
         assert_equal(29, hashed_files, "#{name}: all extracted files compared by SHA-256")
-        puts "#{name}: #{hashed_files} extracted files compared by SHA-256"
       end
       TALLY.add(:host_extractions)
     end

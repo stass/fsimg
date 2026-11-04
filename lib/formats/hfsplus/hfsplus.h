@@ -856,10 +856,11 @@ fsimg_status_t hfsplus_child_fill(const hfsplus_primary_t *, hfsplus_child_t *,
  * the object is a compressed file, whose com.apple.decmpfs is then its content,
  * not a stored attribute: scan->stored reports the rest and scan->compression
  * the attribute, whose header scan->cmpf holds. An attribute of that name held
- * in a fork record is FSIMG_EUNSUPPORTED. payload, when not NULL, is a buffer of
- * HFSPLUS_CHUNK_STORED_MAX bytes that receives what follows the header, its
- * length in scan->payload_bytes, since the scan's later nodes overwrite the node
- * holding it; a listing passes NULL and reads no payload.
+ * in a fork record is FSIMG_EUNSUPPORTED. scan->payload_bytes is the length of
+ * what follows the header. payload, when not NULL, is a buffer of
+ * HFSPLUS_CHUNK_STORED_MAX bytes that receives those bytes, since the scan's
+ * later nodes overwrite the node holding them; a listing passes NULL and reads
+ * no payload.
  */
 typedef struct hfsplus_attr_scan {
 	hfsplus_cmpf_t	 cmpf;

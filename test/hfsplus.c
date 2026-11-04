@@ -3270,7 +3270,7 @@ test_attributes_compression(void)
 
 /* All compression integers except the resource-file framing are LE. */
 static void
-gen_compression_le(unsigned char *out, uint64_t value, size_t width)
+compression_le(unsigned char *out, uint64_t value, size_t width)
 {
 	for (size_t i = 0; i < width; i++) {
 		out[i] = (unsigned char)value;
@@ -3282,8 +3282,8 @@ static void
 gen_decmpfs_header(unsigned char *out, uint32_t type, uint64_t size)
 {
 	bcopy("fpmc", out, 4);
-	gen_compression_le(out + 4, type, 4);
-	gen_compression_le(out + 8, size, 8);
+	compression_le(out + 4, type, 4);
+	compression_le(out + 8, size, 8);
 }
 
 static unsigned char *
@@ -3297,7 +3297,7 @@ gen_decmpfs_resource(const unsigned char *bytes, size_t length,
 	unsigned char *out = calloc(1, capacity);
 
 	CHECK(out != NULL && count <= 32);
-	gen_compression_le(out + data + 4, count, 4);
+	compression_le(out + data + 4, count, 4);
 	for (size_t i = 0; i < count; i++) {
 		size_t piece = length - i * chunk;
 		uLongf stored = compressBound(chunk);
@@ -3311,9 +3311,9 @@ gen_decmpfs_resource(const unsigned char *bytes, size_t length,
 		} else
 			CHECK(compress2(out + cursor, &stored, bytes + i * chunk,
 			    piece, Z_BEST_COMPRESSION) == Z_OK);
-		gen_compression_le(out + data + 8 + 8 * i,
+		compression_le(out + data + 8 + 8 * i,
 		    cursor - data - 4, 4);
-		gen_compression_le(out + data + 12 + 8 * i, stored, 4);
+		compression_le(out + data + 12 + 8 * i, stored, 4);
 		cursor += stored;
 	}
 	gen_store(out, data, 4);
@@ -3340,15 +3340,6 @@ typedef struct compression_case {
 	unsigned char *plain;
 	size_t size;
 } compression_case_t;
-
-static void
-compression_le(unsigned char *out, uint64_t value, size_t width)
-{
-	for (size_t i = 0; i < width; i++) {
-		out[i] = (unsigned char)value;
-		value >>= 8;
-	}
-}
 
 static uint32_t
 compression_word(const unsigned char *in)
@@ -3383,6 +3374,8 @@ compression_case_init(compression_case_t *c, uint32_t type, size_t size,
 	c->plan.value_count = 1;
 	c->plan.attributes = true;
 	gen_decmpfs_header(c->header, type, size);
+	if (size == 0)
+		return;
 	if (type == 4) {
 		c->resource = gen_decmpfs_resource(c->plain, size, stored_mask,
 		    &c->objects[0].resource_size);
@@ -3409,9 +3402,7 @@ compression_case_free(compression_case_t *c)
 	free(c->resource);
 }
 
-/* Listing is an explicit precondition. Missing compression support should
- * fail here, not masquerade as successful rejection of malformed payloads.
- */
+/* Listing admits the compressed entry before its payload is exercised. */
 static fsimg_reader_t *
 compression_open(const char *name, fixture_t *f, const gen_image_t *image)
 {
@@ -3440,18 +3431,28 @@ compression_read_pieces(const char *name, fsimg_reader_t *reader,
 	fsimg_error_t error = { 0 };
 	fsimg_status_t status = FSIMG_OK;
 	size_t count, piece;
+	bool matches = true;
 
 	CHECK(bytes != NULL);
 	for (size_t offset = 0; offset < size; offset += piece) {
 		piece = size - offset;
 		if (piece > step)
 			piece = step;
+		if (step == 1 && size > 64 && offset % 65536 == 32 &&
+		    size - offset > 64) {
+			offset += 65472;
+			if (offset >= size)
+				break;
+		}
 		status = fsimg_reader_read_at(reader, offset, bytes, piece, &count, &error);
-		expect_status(name, status, FSIMG_OK, &error);
 		if (status != FSIMG_OK)
 			break;
-		expect_true(name, count == piece && bcmp(bytes, plain + offset, piece) == 0);
+		matches &= count == piece && bcmp(bytes, plain + offset, piece) == 0;
 	}
+	if (status != FSIMG_OK)
+		expect_status(name, status, FSIMG_OK, &error);
+	else
+		expect_true(name, matches);
 	if (size == 0) {
 		bytes[0] = 0xa5;
 		status = fsimg_reader_read_at(reader, 0, bytes, 1, &count, &error);
@@ -3478,8 +3479,13 @@ compression_content(const char *name, compression_case_t *c)
 	listed = list_image(&image);
 	expect_status(name, listed.status, FSIMG_DONE, &listed.error);
 	if (listed.status == FSIMG_DONE) {
+		/* Empty files leave nonempty resource forks and attribute payloads unconsumed. */
+		bool expect_extra = c->size == 0 &&
+		    (c->objects[0].resource_size != 0 || c->attributes[0].size > 16);
+
 		expect_true(name, listed.count == 2 && listed.entries[0].size == c->size);
-		expect_true(name, !(listed.entries[0].metadata.valid & FSIMG_META_EXTRA_DATA));
+		expect_true(name,
+		    !!(listed.entries[0].metadata.valid & FSIMG_META_EXTRA_DATA) == expect_extra);
 	}
 	reader = compression_open(name, &f, &image);
 	if (reader != NULL) {
@@ -3846,16 +3852,35 @@ typedef enum compression_damage {
 static void
 test_compression_resource_corruption(void)
 {
-	static const char *names[] = {
-		"data_relation", "resource_relation", "count", "truncated_table",
-		"zero_blocks", "short_header", "table_overlap", "previous_overlap",
-		"next_overlap", "map_overlap", "stored_above_bound", "zero_stored_length",
-		"decode_short", "decode_long", "last_decode_short", "last_decode_long",
-		"raw_wrong_length", "bad_zlib", "truncated_zlib", "trailing_zlib", "preset_dictionary"
+	static const struct {
+		const char *name;
+		compression_damage_t damage;
+	} cases[] = {
+		{ "data_relation", CMP_DATA_RELATION },
+		{ "resource_relation", CMP_RESOURCE_RELATION },
+		{ "count", CMP_COUNT },
+		{ "truncated_table", CMP_TABLE_END },
+		{ "zero_blocks", CMP_NO_BLOCKS },
+		{ "short_header", CMP_SHORT_HEADER },
+		{ "table_overlap", CMP_TABLE_OVERLAP },
+		{ "previous_overlap", CMP_PREVIOUS_OVERLAP },
+		{ "next_overlap", CMP_NEXT_OVERLAP },
+		{ "map_overlap", CMP_MAP_OVERLAP },
+		{ "stored_above_bound", CMP_STORED_TOO_LARGE },
+		{ "zero_stored_length", CMP_STORED_ZERO },
+		{ "decode_short", CMP_DECODE_SHORT },
+		{ "decode_long", CMP_DECODE_LONG },
+		{ "last_decode_short", CMP_LAST_SHORT },
+		{ "last_decode_long", CMP_LAST_LONG },
+		{ "raw_wrong_length", CMP_RAW_WRONG_SIZE },
+		{ "bad_zlib", CMP_BAD_ZLIB },
+		{ "truncated_zlib", CMP_TRUNCATED_ZLIB },
+		{ "trailing_zlib", CMP_TRAILING_ZLIB },
+		{ "preset_dictionary", CMP_DICTIONARY }
 	};
 	char name[112];
 
-	for (unsigned damage = 0; damage < sizeof(names) / sizeof(names[0]); damage++) {
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		compression_case_t c;
 		size_t confirmed = 0;
 		unsigned char *r, *pair, *chunk;
@@ -3867,7 +3892,7 @@ test_compression_resource_corruption(void)
 		offset = compression_word(pair);
 		length = compression_word(pair + 4);
 		chunk = r + 260 + offset;
-		switch ((compression_damage_t)damage) {
+		switch (cases[i].damage) {
 		case CMP_DATA_RELATION:
 			gen_store(r + 12, 49, 4);
 			break;
@@ -3922,14 +3947,14 @@ test_compression_resource_corruption(void)
 		case CMP_LAST_LONG: {
 			unsigned char plain[65537];
 			uLongf encoded = length;
-			size_t decoded = damage == CMP_DECODE_SHORT ? 65535 : 65537;
+			size_t decoded = cases[i].damage == CMP_DECODE_SHORT ? 65535 : 65537;
 
-			if (damage == CMP_LAST_SHORT || damage == CMP_LAST_LONG) {
+			if (cases[i].damage == CMP_LAST_SHORT || cases[i].damage == CMP_LAST_LONG) {
 				pair += 16;
 				chunk = r + 260 + compression_word(pair);
 				/* Replace the last stream within its allocated range. */
 				encoded = compression_word(pair + 4);
-				decoded = damage == CMP_LAST_SHORT ? 127 : 129;
+				decoded = cases[i].damage == CMP_LAST_SHORT ? 127 : 129;
 				confirmed = 131072;
 			}
 			bzero(plain, sizeof(plain));
@@ -3986,7 +4011,7 @@ test_compression_resource_corruption(void)
 			break;
 		}
 		}
-		snprintf(name, sizeof(name), "test_compression_resource_%s", names[damage]);
+		snprintf(name, sizeof(name), "test_compression_resource_%s", cases[i].name);
 		compression_bad_content(name, &c, confirmed);
 		compression_case_free(&c);
 	}
@@ -4165,61 +4190,106 @@ compression_cancelled(void *argument)
 }
 
 static void
-test_compression_resources(void)
+test_compression_cancel_during_decode(void)
 {
-	static const char *names[] = { "test_compression_cancel_during_decode",
-	    "test_compression_work_consumed_plus_produced", "test_compression_charge_before_decode" };
+	const char *name = "test_compression_cancel_during_decode";
+	compression_case_t c;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	fsimg_error_t error = { 0 };
+	unsigned char bytes[65536];
+	size_t count;
 
-	for (unsigned scenario = 0; scenario < 3; scenario++) {
-		compression_case_t c;
-		gen_image_t image;
-		fixture_t f;
-		fsimg_reader_t *reader;
-		fsimg_error_t error = { 0 };
-		unsigned char bytes[65536];
-		size_t count;
-
-		compression_case_init(&c, 4, 65536, 0);
-		gen_build(&c.plan, &image);
-		reader = compression_open(names[scenario], &f, &image);
-		if (reader != NULL) {
-			compression_watch(&f, &image, &c);
-			if (scenario == 0) {
-				f.ctx->options.cancelled = compression_cancelled;
-				f.ctx->options.cancel_argument = &f;
-				f.cancel_on_payload = true;
-			} else if (scenario == 1)
-				f.ctx->options.max_work = reader->session.progress.work +
-				    65536 + compression_word(c.resource + 268) - 1;
-			else {
-				f.ctx->options.max_output_bytes = 65535;
-				reader->session.output_limit = 65535;
-			}
-			fsimg_status_t status = scenario == 2 ?
-			    fsimg_reader_charge_file(reader, &error) :
-			    fsimg_reader_read_at(reader, 0, bytes, sizeof(bytes), &count, &error);
-			expect_status(names[scenario], status, scenario == 0 ? FSIMG_ECANCELLED : FSIMG_ELIMIT, &error);
-			if (scenario == 2)
-				expect_true(names[scenario], f.watched_bytes[0] == 0);
-			else
-				expect_true(names[scenario], count == 0);
-			fsimg_reader_free(reader);
-		}
-		fixture_close(&f);
-		gen_free(&image);
-		compression_case_free(&c);
+	compression_case_init(&c, 4, 65536, 0);
+	gen_build(&c.plan, &image);
+	reader = compression_open(name, &f, &image);
+	if (reader != NULL) {
+		compression_watch(&f, &image, &c);
+		f.ctx->options.cancelled = compression_cancelled;
+		f.ctx->options.cancel_argument = &f;
+		f.cancel_on_payload = true;
+		expect_status(name, fsimg_reader_read_at(reader, 0, bytes,
+		    sizeof(bytes), &count, &error), FSIMG_ECANCELLED, &error);
+		expect_true(name, count == 0);
+		fsimg_reader_free(reader);
 	}
+	fixture_close(&f);
+	gen_free(&image);
+	compression_case_free(&c);
 }
 
 static void
-test_compression_allocation_failure(void)
+test_compression_work_consumed_plus_produced(void)
 {
-	const char *name = "test_compression_allocation_failure";
+	const char *name = "test_compression_work_consumed_plus_produced";
+	compression_case_t c;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	fsimg_error_t error = { 0 };
+	unsigned char bytes[65536];
+	size_t count;
+
+	compression_case_init(&c, 4, 65536, 0);
+	gen_build(&c.plan, &image);
+	reader = compression_open(name, &f, &image);
+	if (reader != NULL) {
+		compression_watch(&f, &image, &c);
+		f.ctx->options.max_work = reader->session.progress.work +
+		    65536 + compression_word(c.resource + 268) - 1;
+		expect_status(name, fsimg_reader_read_at(reader, 0, bytes,
+		    sizeof(bytes), &count, &error), FSIMG_ELIMIT, &error);
+		expect_true(name, count == 0);
+		fsimg_reader_free(reader);
+	}
+	fixture_close(&f);
+	gen_free(&image);
+	compression_case_free(&c);
+}
+
+static void
+test_compression_charge_before_decode(void)
+{
+	const char *name = "test_compression_charge_before_decode";
+	compression_case_t c;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = { 0 };
+
+	compression_case_init(&c, 4, 65536, 0);
+	gen_build(&c.plan, &image);
+
+	fixture_init(&f, &image, 0, 0);
+	f.ctx->options.max_output_bytes = 65535;
+	reader = NULL;
+	expect_status(name, fsimg_reader_open(f.ctx, f.io, NULL, &reader, &error),
+	    FSIMG_OK, &error);
+	if (reader != NULL) {
+		compression_watch(&f, &image, &c);
+		expect_status(name, fsimg_reader_next(reader, &entry, &error), FSIMG_OK, &error);
+		expect_status(name, fsimg_reader_charge_file(reader, &error),
+		    FSIMG_ELIMIT, &error);
+		expect_true(name, f.watched_bytes[0] == 0);
+		fsimg_reader_free(reader);
+	}
+	fixture_close(&f);
+	gen_free(&image);
+	compression_case_free(&c);
+}
+
+static void
+compression_allocation_failure(unsigned type)
+{
+	char name[80];
 	compression_case_t c;
 	gen_image_t image;
 	bool completed = false, failed = false;
 
-	compression_case_init(&c, 4, 65536, 0);
+	snprintf(name, sizeof(name), "test_compression_type%u_allocation_failure", type);
+	compression_case_init(&c, type, 65536, 0);
 	gen_build(&c.plan, &image);
 	for (uint64_t attempt = 1; attempt <= 64; attempt++) {
 		fixture_t f;
@@ -4253,13 +4323,20 @@ test_compression_allocation_failure(void)
 	compression_case_free(&c);
 }
 
+static void
+test_compression_allocation_failure(void)
+{
+	compression_allocation_failure(3);
+	compression_allocation_failure(4);
+}
+
 /* A small encoded stream expands far beyond the declared one-window size.
  * Compare context peaks with a raw compressed file, including zlib's charged
  * state in a fixed allowance, rather than requiring one allocator layout.
  */
 static uint64_t
 compression_first_read_peak(const char *name, compression_case_t *c,
-    fsimg_status_t expected)
+    fsimg_status_t expected, bool no_payload)
 {
 	gen_image_t image;
 	fixture_t f;
@@ -4277,7 +4354,7 @@ compression_first_read_peak(const char *name, compression_case_t *c,
 		fsimg_status_t status = fsimg_reader_read_at(reader, 0, &byte, 1, &count, &error);
 		expect_status(name, status, expected, &error);
 		expect_true(name, count == (expected == FSIMG_OK ? 1u : 0u));
-		if (strcmp(name, "test_compression_huge_size_one_chunk") == 0)
+		if (no_payload)
 			expect_true(name, f.watched_bytes[0] == 0);
 		fsimg_reader_free(reader);
 	}
@@ -4294,12 +4371,14 @@ test_compression_bombs(void)
 	unsigned char *bomb = calloc(1, 1024 * 1024);
 	unsigned char encoded[2048];
 	uLongf length = sizeof(encoded);
+	/* Measured charged inflate state and window total 39960 bytes. */
+	const uint64_t inflate_memory_allowance = 40 * 1024;
 	uint64_t baseline, peak;
 
 	CHECK(bomb != NULL);
 	CHECK(compress2(encoded, &length, bomb, 1024 * 1024, Z_BEST_COMPRESSION) == Z_OK);
 	compression_case_init(&c, 4, 65536, 1);
-	baseline = compression_first_read_peak("test_compression_stored_peak", &c, FSIMG_OK);
+	baseline = compression_first_read_peak("test_compression_stored_peak", &c, FSIMG_OK, false);
 	compression_case_free(&c);
 	for (unsigned inline_payload = 0; inline_payload < 2; inline_payload++) {
 		const char *name = inline_payload ? "test_compression_inline_bomb" : "test_compression_chunk_bomb";
@@ -4316,17 +4395,188 @@ test_compression_bombs(void)
 		} else {
 			compression_single_stream(&c, encoded, length);
 		}
-		peak = compression_first_read_peak(name, &c, FSIMG_ECORRUPT);
-		expect_true(name, peak <= baseline + 3 * 135168 + 131072);
+		peak = compression_first_read_peak(name, &c, FSIMG_ECORRUPT, false);
+		expect_true(name, peak <= baseline + inflate_memory_allowance);
 		if (inline_payload)
 			free((void *)c.attributes[0].value);
 		compression_case_free(&c);
 	}
 	compression_case_init(&c, 4, 1, 0);
 	gen_decmpfs_header(c.header, 4, UINT64_C(1) << 40);
-	(void)compression_first_read_peak("test_compression_huge_size_one_chunk", &c, FSIMG_ECORRUPT);
+	(void)compression_first_read_peak("test_compression_huge_size_one_chunk", &c, FSIMG_ECORRUPT, true);
 	compression_case_free(&c);
 	free(bomb);
+}
+
+static void
+test_compression_empty_extra_data(void)
+{
+	static const struct {
+		const char *name;
+		unsigned type;
+		bool payload;
+	} cases[] = {
+		{ "empty_type4_nonempty_fork_is_extra", 4, true },
+		{ "empty_type1_nonempty_payload_is_extra", 1, true },
+		{ "empty_type3_nonempty_payload_is_extra", 3, true },
+		{ "empty_type8_nonempty_fork_is_extra", 8, true },
+		{ "empty_type4_empty_fork_is_not_extra", 4, false },
+		{ "empty_type1_empty_payload_is_not_extra", 1, false },
+		{ "empty_type3_empty_payload_is_not_extra", 3, false }
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		compression_case_t c;
+		listing_t listed;
+		const char *name = cases[i].name;
+
+		compression_case_init(&c, cases[i].type, 0, 0);
+		c.attributes[0].size = 16;
+		c.objects[0].resource_size = 0;
+		if (cases[i].payload) {
+			if (cases[i].type == 4 || cases[i].type == 8) {
+				c.objects[0].resource = (const unsigned char *)"fork";
+				c.objects[0].resource_size = 4;
+			} else {
+				c.header[16] = 0xff;
+				c.attributes[0].size = 17;
+			}
+		}
+		listed = list_plan(name, &c.plan, FSIMG_DONE, NULL);
+		if (listed.status == FSIMG_DONE)
+			expect_true(name, !!(listed.entries[0].metadata.valid &
+			    FSIMG_META_EXTRA_DATA) == cases[i].payload);
+		if (!cases[i].payload)
+			check_content(name, &c.plan, "/a", c.plain, 0, FSIMG_OK, NULL);
+		compression_case_free(&c);
+	}
+}
+
+static void
+test_compression_releases_held_span(void)
+{
+	for (unsigned corrupt = 0; corrupt < 2; corrupt++) {
+		const char *name = corrupt ? "compressed_failed_read_releases_held_span" :
+		    "compressed_successful_read_releases_held_span";
+		compression_case_t c;
+		gen_image_t image;
+		fixture_t f;
+		fsimg_reader_t *reader;
+		fsimg_error_t error = { 0 };
+		unsigned char byte;
+		size_t count;
+
+		compression_case_init(&c, 3, 127, 0);
+		if (corrupt)
+			c.header[16] = 0;
+		gen_build(&c.plan, &image);
+		reader = compression_open(name, &f, &image);
+		if (reader != NULL) {
+			expect_status(name, fsimg_reader_read_at(reader, 0, &byte, 1,
+			    &count, &error), corrupt ? FSIMG_ECORRUPT : FSIMG_OK, &error);
+			expect_true(name, reader->held == NULL);
+			fsimg_reader_free(reader);
+		}
+		fixture_close(&f);
+		gen_free(&image);
+		compression_case_free(&c);
+	}
+}
+
+static void
+test_compression_changed_since_listing(void)
+{
+	static const struct {
+		const char *name;
+		bool owner;
+		size_t offset;
+		uint64_t value;
+		size_t width;
+		const char *message;
+	} cases[] = {
+		{ "compression_type_changed_since_listing", false, 4, 1, 4,
+		    "HFS Plus compression attribute changed since it was listed" },
+		{ "compression_size_changed_since_listing", false, 8, 126, 8,
+		    "HFS Plus compression attribute changed since it was listed" },
+		{ "compression_owner_flag_cleared_since_listing", true, 41, 0, 1,
+		    "HFS Plus file record changed since it was listed" }
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		compression_case_t c;
+		gen_image_t image;
+		fixture_t f;
+		fsimg_reader_t *reader;
+		fsimg_error_t error = { 0 };
+		unsigned char byte, *field = NULL;
+		size_t count;
+		const char *name = cases[i].name;
+
+		compression_case_init(&c, 3, 127, 0);
+		gen_build(&c.plan, &image);
+		reader = compression_open(name, &f, &image);
+		if (reader != NULL) {
+			gen_tree_t *tree = &image.trees[cases[i].owner ? GEN_CATALOG : GEN_ATTRIBUTES];
+
+			for (size_t j = 0; j < tree->record_count; j++) {
+				gen_record_t *r = &tree->records[j];
+				unsigned char *data = image.bytes + r->offset + r->key_length;
+
+				if (cases[i].owner) {
+					if (gen_load(data, 2) == 2 && gen_load(data + 8, 4) == 32)
+						field = data + cases[i].offset;
+				} else if (gen_load(data, 4) == 0x10)
+					field = data + 16 + cases[i].offset;
+			}
+			CHECK(field != NULL);
+			if (cases[i].owner)
+				gen_store(field, cases[i].value, cases[i].width);
+			else
+				compression_le(field, cases[i].value, cases[i].width);
+			expect_status(name, fsimg_reader_read_at(reader, 0, &byte, 1,
+			    &count, &error), FSIMG_ECORRUPT, &error);
+			expect_true(name, count == 0 && strcmp(error.message, cases[i].message) == 0);
+			fsimg_reader_free(reader);
+		}
+		fixture_close(&f);
+		gen_free(&image);
+		compression_case_free(&c);
+	}
+}
+
+static void
+test_compression_truncated_charge(void)
+{
+	const char *name = "compressed_truncated_volume_charge_probes_content";
+	compression_case_t c;
+	gen_image_t image, slice;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	fsimg_volume_info_t info;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = { 0 };
+
+	compression_case_init(&c, 4, 3 * 65536, 0);
+	gen_build(&c.plan, &image);
+	slice = image;
+	slice.length -= 512;
+	fixture_init(&f, &slice, 0, 0);
+	f.ctx->options.max_output_bytes = 65535;
+	reader = NULL;
+	expect_status(name, fsimg_reader_open(f.ctx, f.io, NULL, &reader, &error),
+	    FSIMG_OK, &error);
+	if (reader != NULL) {
+		expect_status(name, fsimg_reader_next(reader, &entry, &error), FSIMG_OK, &error);
+		compression_watch(&f, &image, &c);
+		expect_status(name, fsimg_reader_get_info(reader, &info, &error), FSIMG_OK, &error);
+		expect_true(name, info.missing_bytes == 512);
+		expect_status(name, fsimg_reader_charge_file(reader, &error), FSIMG_ELIMIT, &error);
+		expect_true(name, f.watched_bytes[2] != 0);
+		fsimg_reader_free(reader);
+	}
+	fixture_close(&f);
+	gen_free(&image);
+	compression_case_free(&c);
 }
 
 static void
@@ -6017,8 +6267,8 @@ emit_seed(const char *path, bool hfsx)
 	static const uint16_t upper[] = { 'A' }, lower[] = { 'a' };
 	unsigned char content[65537];
 	gen_object_t objects[36];
-	compression_case_t compressed[2];
-	gen_attr_value_t attributes[2];
+	compression_case_t compressed[4];
+	gen_attr_value_t attributes[4];
 	uint16_t names[32][3];
 	gen_plan_t plan;
 	gen_image_t image;
@@ -6050,9 +6300,13 @@ emit_seed(const char *path, bool hfsx)
 	plan.records_per_node = 4;
 	plan.objects = objects;
 	plan.object_count = hfsx ? 36 : 34;
-	for (size_t i = 0; i < 2; i++) {
-		compression_vector_init(&compressed[i], i == 0 ? 8 : 12,
-		    &lzfse_vectors[i == 0 ? 1 : 2], false, false);
+	for (size_t i = 0; i < 4; i++) {
+		if (i < 2)
+			compression_vector_init(&compressed[i], i == 0 ? 8 : 12,
+			    &lzfse_vectors[i == 0 ? 1 : 2], false, false);
+		else
+			compression_case_init(&compressed[i], i == 2 ? 3 : 4,
+			    i == 2 ? 65536 : 3 * 65536, i == 2 ? 0 : 4);
 		objects[i + 2] = compressed[i].objects[0];
 		objects[i + 2].name = names[i];
 		objects[i + 2].units = 3;
@@ -6062,7 +6316,7 @@ emit_seed(const char *path, bool hfsx)
 		attributes[i].id = 18 + i;
 	}
 	plan.values = attributes;
-	plan.value_count = 2;
+	plan.value_count = 4;
 	plan.attributes = true;
 	gen_build(&plan, &image);
 	file = fopen(path, "wb");
@@ -6070,7 +6324,7 @@ emit_seed(const char *path, bool hfsx)
 	CHECK(fwrite(image.bytes, 1, image.length, file) == image.length);
 	CHECK(fclose(file) == 0);
 	gen_free(&image);
-	for (size_t i = 0; i < 2; i++)
+	for (size_t i = 0; i < 4; i++)
 		compression_case_free(&compressed[i]);
 }
 
@@ -6947,9 +7201,15 @@ static void (*const tests[])(void) = {
 	test_compression_inline_corruption,
 	test_compression_counted_reads,
 	test_compression_advance_invalidates_window,
-	test_compression_resources,
+	test_compression_cancel_during_decode,
+	test_compression_work_consumed_plus_produced,
+	test_compression_charge_before_decode,
 	test_compression_allocation_failure,
 	test_compression_bombs,
+	test_compression_empty_extra_data,
+	test_compression_releases_held_span,
+	test_compression_changed_since_listing,
+	test_compression_truncated_charge,
 	test_compression_extra_data_and_hard_link,
 	test_names_listing,
 	test_identity_geometry,

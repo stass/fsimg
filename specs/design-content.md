@@ -53,15 +53,28 @@ content interface. Extent lookup alone never authorizes exposing them.
 | Extent index (optional, `lib/meta/`) | Encoded extent records, bounded growth, ordering and coverage checks, sequential and binary lookup, cleanup |
 
 Delivery calls one driver operation: resolve offset `o < initialized` to an
-extent `(kind, logical_offset, length)` with
-`logical_offset <= o < logical_offset + length`. The kind is one of a closed
-set:
+extent `(logical_offset, image_offset, length)` with
+`logical_offset <= o < logical_offset + length`. The extent's kind is one of a
+closed set, which no field stores. Delivery derives it in one place, testing in
+this order:
 
-| Kind | Further field | Delivery |
+| Kind | Test | Delivery |
 | --- | --- | --- |
-| Mapped | `image_offset` | Reads the image range through bounded I/O |
-| Zero | none | Synthesizes zeros without reading, as for the uninitialized tail |
-| Held | `bytes`, borrowed | Copies from a charged buffer the driver owns and filled by decoding validated storage; the bytes stay valid until the driver's next `resolve` or the walker's next advance |
+| Held | `reader->held` is not NULL | Copies from a charged buffer the driver owns and filled by decoding validated storage; the bytes stay valid until the driver's next `resolve` or the walker's next advance |
+| Zero | `image_offset` is `FSIMG_EXTENT_ZERO` | Synthesizes zeros without reading, as for the uninitialized tail |
+| Mapped | Anything else | Reads the image range through bounded I/O |
+
+The order gives every combination one meaning: a held extent's `image_offset`
+means nothing whatever it contains, so an extent is never two kinds at once.
+The kind is not a field of `fsimg_extent_t` because that record is built in
+partly initialized locals and copied through every driver and the extent
+index, so a new field would be indeterminate in each driver not written for
+it, and clearing the extent before `resolve` does not survive such a copy.
+Neither test depends on a field a driver can forget. `image_offset` is what
+every mapped extent must already set. `reader->held` is set only by a driver
+that holds bytes, and delivery reads it into a local and clears it as soon as
+`resolve` returns, so it is NULL outside that call and a borrowed pointer never
+enters a record the index stores.
 
 The driver chooses how to answer: a sequential chain cursor, a direct
 block-tree lookup, or the extent index. Delivery checks containment, clips
@@ -92,22 +105,21 @@ allocation once.
 A format can leave a file's interior unrecorded: UDF's allocation descriptors
 of types 1 (allocated, not recorded) and 2 (not allocated) read as zeros
 wherever they appear, and NTFS's sparse runs behave the same way. An initialized
-length cannot describe them, since it covers only a tail. A resolved extent
-therefore has a kind: `FSIMG_EXTENT_DATA`, value zero, or
-`FSIMG_EXTENT_ZERO`, whose image offset is zero and meaningless, or
-`FSIMG_EXTENT_HELD`, whose bytes are borrowed as described above. Delivery
-clears the extent before calling `resolve`, so a driver that never sets the
-kind resolves data extents, and any other kind value is `FSIMG_ESTATE`.
+length cannot describe them, since it covers only a tail. A driver therefore
+resolves such a range to an extent whose image offset is `FSIMG_EXTENT_ZERO`,
+which is `UINT64_MAX`. No mapped extent, called a data extent below, can carry
+that value, because every one lies inside a domain whose end fits in
+`uint64_t`. Delivery clears the extent before calling `resolve`, so a driver
+that sets no image offset never produces the mark.
 
 * Delivery checks a zero extent's containment exactly as a data extent's,
   then fills the piece with zeros. It never reads storage for it and applies
   no content-domain check, since nothing is read; the source-stability check,
   cancellation and work charging still run, as for the zero tail.
-* The extent index keeps its three-field records and marks a zero record by
-  an image offset of `UINT64_MAX`, which no data record can carry because
-  every data record lies inside a domain whose end fits in `uint64_t`; the
-  mark is private to the index, so record size and scratch use do not change
-  for any format. A zero record is not checked against the domain; zero
+* The extent index keeps its three-field records and stores the same mark in
+  a zero record's image offset, so record size and scratch use do not change
+  for any format, and a lookup hands the mark to delivery with no translation.
+  A zero record is not checked against the domain; zero
   records coalesce with adjacent zero records and never with data records.
   Records of both kinds are whole units, so a driver appends a body's final
   extent, data or zero, rounded up to the unit; delivery clips to the

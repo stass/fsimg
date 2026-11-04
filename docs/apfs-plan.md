@@ -125,7 +125,7 @@ branch in common code:
 3. **Zero and held extents.** A driver's `resolve` may return a zero extent,
    a hole inside the initialized region that delivery synthesizes without
    reading, or a held extent, bytes the driver decoded into a charged buffer
-   it owns until the next resolve or advance ([content](../specs/design-content.md#operations)).
+   it owns until the next resolve or advance ([content](../specs/design-content.md#owners)).
 4. **Key bound.** The common namespace key buffer grows to 4096 bytes, room
    for the longest APFS comparison form of a 1022-byte name
    ([directories](../specs/design-directories.md#namespace)).

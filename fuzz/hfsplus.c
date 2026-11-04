@@ -100,7 +100,8 @@ read_content(fsimg_reader_t *reader, const fsimg_entry_t *entry, size_t *budget)
 {
 	unsigned char bytes[4096];
 	fsimg_range_t range;
-	uint64_t offset = 0;
+	uint64_t offset = entry->size > 65536 ? 65536 - 32 : 0;
+	bool seek_back = offset != 0;
 	size_t count, length;
 
 	if (entry->kind != FSIMG_ENTRY_FILE)
@@ -119,6 +120,10 @@ read_content(fsimg_reader_t *reader, const fsimg_entry_t *entry, size_t *budget)
 			abort();
 		offset += count;
 		*budget -= count;
+		if (seek_back && *budget != 0) {
+			offset = 0;
+			seek_back = false;
+		}
 	}
 }
 
@@ -138,7 +143,7 @@ exercise(const uint8_t *data, size_t size, const char *format, uint32_t flags)
 	const fsimg_entry_t *entry;
 	char paths[4][4096];
 	const char *member;
-	size_t path_count = 0, budget = 65536;
+	size_t path_count = 0, budget = 16 * 1024 * 1024;
 
 	fsimg_options_init(&options);
 	options.memory_bytes = 16 * 1024 * 1024;

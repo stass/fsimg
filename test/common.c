@@ -1538,9 +1538,7 @@ test_child_error_paths_obey_the_path_limit(void)
 	}
 }
 
-/* Keep these contract assertions independent: a missing held-span engine must
- * report every scenario, rather than aborting at the first unsupported span.
- */
+/* Independent assertions report every held-span contract violation. */
 static unsigned held_failures;
 
 static void

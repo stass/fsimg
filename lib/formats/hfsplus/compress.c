@@ -54,6 +54,9 @@ struct hfsplus_window {
 };
 
 static fsimg_status_t window_ready(fsimg_reader_t *, fsimg_error_t *);
+static bool raw_marked(const hfsplus_window_t *, size_t, unsigned char);
+static fsimg_status_t raw_decode(hfsplus_window_t *, size_t, size_t,
+    fsimg_error_t *);
 static fsimg_status_t zlib_failed(const hfsplus_window_t *, int,
     fsimg_error_t *);
 static fsimg_status_t zlib_decode(fsimg_reader_t *, hfsplus_window_t *, size_t,
@@ -164,6 +167,26 @@ window_ready(fsimg_reader_t *reader, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/* Zlib and LZVN share one rule and differ only in the marker: a stored span that
+ * begins with its codec's marker is that byte followed by the chunk, whole.
+ */
+static bool
+raw_marked(const hfsplus_window_t *window, size_t stored, unsigned char marker)
+{
+	return (stored != 0 && window->input[0] == marker);
+}
+
+static fsimg_status_t
+raw_decode(hfsplus_window_t *window, size_t stored, size_t expected,
+    fsimg_error_t *error)
+{
+	if (stored - 1 != expected)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus raw chunk has the wrong length"));
+	bcopy(window->input + 1, window->output, expected);
+	return (FSIMG_OK);
+}
+
 /* A zlib result that says nothing about the chunk: an allocation failure as the
  * adapter recorded it, or a fault of fsimg or of the zlib library.
  */
@@ -189,13 +212,8 @@ zlib_decode(fsimg_reader_t *reader, hfsplus_window_t *window, size_t stored,
 	z_stream *stream = &window->stream;
 	int code;
 
-	if (stored != 0 && window->input[0] == ZLIB_RAW_MARKER) {
-		if (stored - 1 != expected)
-			return (hfsplus_corrupt(error,
-			    "HFS Plus raw chunk has the wrong length"));
-		bcopy(window->input + 1, window->output, expected);
-		return (FSIMG_OK);
-	}
+	if (raw_marked(window, stored, ZLIB_RAW_MARKER))
+		return (raw_decode(window, stored, expected, error));
 	if (!window->inflating) {
 		fsimg_zlib_memory_bind(&window->memory, reader->ctx, stream);
 		code = inflateInit(stream);
@@ -230,13 +248,8 @@ lzvn_decode(hfsplus_window_t *window, size_t stored, size_t expected,
 	fsimg_codec_step_t step;
 	fsimg_status_t status;
 
-	if (stored != 0 && window->input[0] == LZVN_RAW_MARKER) {
-		if (stored - 1 != expected)
-			return (hfsplus_corrupt(error,
-			    "HFS Plus raw chunk has the wrong length"));
-		bcopy(window->input + 1, window->output, expected);
-		return (FSIMG_OK);
-	}
+	if (raw_marked(window, stored, LZVN_RAW_MARKER))
+		return (raw_decode(window, stored, expected, error));
 	status = fsimg_lzvn_decode(window->input, stored, window->output,
 	    expected, &step, error);
 	if (status != FSIMG_OK)
@@ -472,7 +485,10 @@ hfsplus_compress_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 
 /* Read chunk `chunk`'s table entry through a small window of it and its
  * neighbours, so the table is never held whole, and check it against them, the
- * table and the declared data: the chunk's offset counts from the count.
+ * table and the declared data: the chunk's offset counts from the count. raw has
+ * room for three pairs and only last - first + 1 of them are read, so it may be
+ * partly filled. Every index decoded here stays at or below last - first, which
+ * is at most 2, so each decode lies in the filled part and cannot fail.
  */
 static fsimg_status_t
 chunk_locate(fsimg_reader_t *reader, uint64_t chunk, uint64_t *offset,
@@ -520,7 +536,8 @@ chunk_locate(fsimg_reader_t *reader, uint64_t chunk, uint64_t *offset,
 
 /* Chunk `chunk`'s span in a type 8 or 12 table: its offset word to its successor,
  * so a chunk's neighbours are the two words that define it. The table holds both
- * words, since its end was checked against the count and the fork.
+ * words, since its end was checked against the count and the fork. raw is
+ * exactly those two words, so neither decode can fail.
  */
 static fsimg_status_t
 word_chunk_locate(fsimg_reader_t *reader, uint64_t chunk, uint64_t *offset,
@@ -581,7 +598,9 @@ chunk_load(fsimg_reader_t *reader, uint64_t chunk, fsimg_error_t *error)
 }
 
 /* The decoded span containing offset: the window's chunk, decoded unless it is
- * already there, so sequential reading decodes each chunk once.
+ * already there, so sequential reading decodes each chunk once. An inline file
+ * never reaches chunk_load: open left its window valid, and every offset is in
+ * chunk 0, as its size is at most one chunk.
  */
 fsimg_status_t
 hfsplus_compress_resolve(fsimg_reader_t *reader, uint64_t offset,

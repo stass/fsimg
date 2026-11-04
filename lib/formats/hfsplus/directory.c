@@ -382,7 +382,8 @@ admit_child(hfsplus_prepare_t *prepare, hfsplus_child_t *child,
  * is in prepare->path: classify the record, then admit the child or refuse it.
  * A stub takes its indirect node's record for everything but the name. A
  * compressed file's size is the attribute's, the data fork being empty, and the
- * resource fork that holds its chunks is content, not extra data.
+ * resource fork that holds its chunks is content, not extra data. At size 0 no
+ * read reaches its fork or payload, so whatever they hold is extra data.
  */
 static fsimg_status_t
 prepare_named(hfsplus_prepare_t *prepare, const hfsplus_record_t *record,
@@ -430,7 +431,9 @@ prepare_named(hfsplus_prepare_t *prepare, const hfsplus_record_t *record,
 	child.extra_data = scan.stored ||
 	    (primary.kind != FSIMG_ENTRY_DIRECTORY &&
 	    primary.file.resource_fork.logical_size > 0 &&
-	    !hfsplus_compress_consumes_fork(child.compression));
+	    (child.size == 0 ||
+	    !hfsplus_compress_consumes_fork(child.compression))) ||
+	    (compressed && child.size == 0 && scan.payload_bytes != 0);
 	return (admit_child(prepare, &child, error));
 }
 

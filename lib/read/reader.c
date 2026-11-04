@@ -383,6 +383,7 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
     size_t length, size_t *transferred, size_t *stored, fsimg_error_t *error)
 {
 	const fsimg_extent_domain_t *domain = &reader->content_domain;
+	const unsigned char *held;
 	unsigned char *buffer = out;
 	fsimg_extent_t extent;
 	uint64_t initialized, within, image;
@@ -425,8 +426,9 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 			break;
 		}
 		bzero(&extent, sizeof(extent));
-		reader->held = NULL;
 		status = reader->ops->resolve(reader, offset, &extent, error);
+		held = reader->held;
+		reader->held = NULL;
 		if (status != FSIMG_OK)
 			return (status);
 		/* The extent must contain offset; clip it to the request and to
@@ -444,14 +446,14 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 			piece = (size_t)(extent.length - within);
 		if (piece > initialized - offset)
 			piece = (size_t)(initialized - offset);
-		if (reader->held != NULL) {
+		if (held != NULL) {
 			status = fsimg_reader_stable(reader, error);
 			if (status == FSIMG_OK)
 				status = fsimg_session_charge(&reader->session,
 				    0, 0, 1, error);
 			if (status != FSIMG_OK)
 				return (status);
-			bcopy(reader->held + within, buffer + *transferred,
+			bcopy(held + within, buffer + *transferred,
 			    piece);
 			*transferred += piece;
 			offset += piece;
@@ -480,8 +482,9 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
  * default budget is the slice, so on a truncated volume a lost file commonly
  * shows first as an overrun. One read of its last stored byte goes through the
  * funnel and tells the two apart: a file past the end is corrupt, while one whose
- * last stored byte is there keeps the limit error, since its extents are shared
- * or the limit is the caller's. The bytes after the initialized length are zeros
+ * last stored byte is there keeps the limit error, since its extents are shared,
+ * its decoded size exceeds what it stores, or the limit is the caller's. The
+ * bytes after the initialized length are zeros
  * no read of the image supplies, so they prove nothing and a file storing none
  * keeps the limit. Any other failure of that read outranks the limit. Either way
  * the copy does not start.

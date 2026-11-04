@@ -51,15 +51,15 @@ scan_record(const hfsplus_akey_t *key, const hfsplus_record_t *record,
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compression attribute's header is malformed"));
 	scan->compression = true;
+	bytes = attr.data_size - HFSPLUS_CMPF_BYTES;
+	scan->payload_bytes = bytes;
 	if (payload == NULL)
 		return (FSIMG_OK);
-	bytes = attr.data_size - HFSPLUS_CMPF_BYTES;
 	if (bytes > HFSPLUS_CHUNK_STORED_MAX)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compression attribute's payload is too long"));
 	bcopy(record->data + attr.data_offset + HFSPLUS_CMPF_BYTES, payload,
 	    bytes);
-	scan->payload_bytes = bytes;
 	return (FSIMG_OK);
 }
 

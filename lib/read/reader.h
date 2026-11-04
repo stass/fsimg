@@ -176,7 +176,8 @@ struct fsimg_reader {
 	/* Set by resolve when the extent it returns is held rather than mapped:
 	 * its length bytes are here, in a charged buffer the driver owns, valid
 	 * until the next resolve or the walker's advance, and its image_offset
-	 * means nothing. Delivery clears it before each resolve.
+	 * means nothing. Delivery takes it into a local and clears it as resolve
+	 * returns, so it is NULL outside that call.
 	 */
 	const unsigned char *held;
 	/* The image range file storage can occupy, such as the FAT data
