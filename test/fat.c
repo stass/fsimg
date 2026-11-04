@@ -124,6 +124,8 @@ static void test_unsigned_fat16_head_does_not_check_fourth_byte(void);
 static void test_unsigned_fat16_and_fat32_identification(void);
 static void test_forced_unsigned_fat12_variant(void);
 static void test_geometry_decode_short_boot_record(void);
+static void test_boot_voucher_is_the_signature_or_the_media_echo(void);
+static void test_unvouched_oversized_regions_are_not_fat(void);
 static void test_media_check_precedes_mirror_comparison(void);
 static void test_corruption(void);
 static void test_limits(void);
@@ -896,13 +898,13 @@ test_cluster_ceiling(unsigned variant)
 		put32(boot + 36, 2097152);
 		put32(boot + 32, 32 + 4194304 + 0x0ffffff5);
 		put32(boot + 44, 0x0ffffff6);
-		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, false, &geometry, NULL) == FSIMG_OK);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, &geometry, NULL) == FSIMG_OK);
 		CHECK(fsimg_fat_cluster_valid(&geometry, 0x0ffffff6));
 		put32(boot + 44, 0x0ffffff7);
-		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, false, &geometry, NULL) == FSIMG_ECORRUPT);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, &geometry, NULL) == FSIMG_ECORRUPT);
 		put32(boot + 44, 2);
 		put32(boot + 32, 32 + 4194304 + 0x0ffffff6);
-		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, false, &geometry, NULL) == FSIMG_ECORRUPT);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, &geometry, NULL) == FSIMG_ECORRUPT);
 		fixture_close(&f);
 		return;
 	}
@@ -1034,7 +1036,7 @@ test_thresholds(void)
 			put16(boot + 22, (uint16_t)table_sectors);
 		else
 			put32(boot + 36, table_sectors);
-		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), (uint64_t)sectors * 512, false, &geometry, NULL) == FSIMG_OK);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), (uint64_t)sectors * 512, &geometry, NULL) == FSIMG_OK);
 		CHECK(geometry.variant == variant && geometry.clusters == clusters);
 		fixture_close(&f);
 	}
@@ -1747,6 +1749,67 @@ test_forced_unsigned_fat12_variant(void)
 	fixture_close(&f);
 }
 
+static void
+test_boot_voucher_is_the_signature_or_the_media_echo(void)
+{
+	fixture_t f;
+	unsigned char boot[8192];
+	size_t echo_offset;
+
+	fixture_init(&f, 12);
+	CHECK(pread(f.fd, boot, sizeof(boot), 0) == sizeof(boot));
+	echo_offset = (size_t)fsimg_load_le16(boot + 14) *
+	    fsimg_load_le16(boot + 11);
+	CHECK(echo_offset >= 512 && echo_offset + 3 <= sizeof(boot));
+
+	/* Only the PC boot signature vouches. */
+	bzero(boot + echo_offset, 3);
+	CHECK(fsimg_fat_boot_vouched(boot, sizeof(boot)) == true);
+	CHECK(fsimg_fat_boot_vouched(boot, 511) == false);
+
+	/* Only the media echo vouches. */
+	boot[510] = 0;
+	boot[511] = 0;
+	boot[echo_offset] = boot[21];
+	boot[echo_offset + 1] = 0xff;
+	boot[echo_offset + 2] = 0xff;
+	CHECK(fsimg_fat_boot_vouched(boot, sizeof(boot)) == true);
+	CHECK(fsimg_fat_boot_vouched(boot, echo_offset) == false);
+	CHECK(fsimg_fat_boot_vouched(boot, echo_offset + 2) == false);
+	CHECK(fsimg_fat_boot_vouched(boot, echo_offset + 3) == true);
+
+	/* Neither voucher is live. */
+	bzero(boot + echo_offset, 3);
+	CHECK(fsimg_fat_boot_vouched(boot, sizeof(boot)) == false);
+	fixture_close(&f);
+}
+
+static void
+test_unvouched_oversized_regions_are_not_fat(void)
+{
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+	unsigned char total_sectors[2];
+
+	fixture_init(&f, 12);
+	fixture_assume_identity(&f);
+	/* The fixed BPB fields are legal, but metadata exceeds one sector. */
+	put16(total_sectors, 1);
+	write_bytes(&f, 19, total_sectors, sizeof(total_sectors));
+	fixture_open(&f);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) ==
+	    FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "unrecognized image format") == 0);
+
+	fsimg_read_options_init(&options);
+	options.format = "fat12";
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &f.reader, &error) ==
+	    FSIMG_EFORMAT);
+	CHECK(strcmp(error.message, "unrecognized volume boot record") == 0);
+	fixture_close(&f);
+}
+
 /* Geometry decoding rejects a buffer shorter than the boot record. */
 static void
 test_geometry_decode_short_boot_record(void)
@@ -1755,7 +1818,7 @@ test_geometry_decode_short_boot_record(void)
 	fat_geometry_t geometry;
 	fsimg_error_t error;
 
-	CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), sizeof(boot), false,
+	CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), sizeof(boot),
 	    &geometry, &error) == FSIMG_EFORMAT);
 	CHECK(strcmp(error.message, "volume is smaller than a boot record") == 0);
 }
@@ -1817,12 +1880,12 @@ test_geometry(void)
 		put16(boot + 22, 32);
 		sectors = 1 + 64 + 32 + clusters;
 		put16(boot + 19, (uint16_t)sectors);
-		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), (uint64_t)sectors * 512, false, &geometry, NULL) == FSIMG_OK);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), (uint64_t)sectors * 512, &geometry, NULL) == FSIMG_OK);
 		CHECK(geometry.variant == (clusters == 4084 ? 12 : 16));
 	}
 	/* An illegal fixed BPB field means the record is not FAT at all. */
 	boot[13] = 3;
-	CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, false, &geometry, NULL) == FSIMG_EFORMAT);
+	CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), UINT64_MAX, &geometry, NULL) == FSIMG_EFORMAT);
 	fixture_close(&f);
 
 	/* Cluster 2730 starts at byte 4095 of a packed FAT12 table. Its second
@@ -2966,7 +3029,7 @@ test_capability_bounds(void)
 		uint64_t clusters = variant == 0 ? 4084 : 65524;
 		sectors = 65535 + 2 * UINT64_C(65535) + 512 + (clusters + 1) * 128 - 1;
 		put32(boot + 32, (uint32_t)sectors);
-		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), sectors * 4096, false, &geometry, NULL) == FSIMG_OK);
+		CHECK(fsimg_fat_geometry_decode(boot, sizeof(boot), sectors * 4096, &geometry, NULL) == FSIMG_OK);
 		cursor = variant;
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 		CHECK(format.max_volume_bytes >= geometry.volume_bytes);
@@ -3389,6 +3452,8 @@ main(int argc, char **argv)
 	test_unsigned_fat16_and_fat32_identification();
 	test_forced_unsigned_fat12_variant();
 	test_geometry_decode_short_boot_record();
+	test_boot_voucher_is_the_signature_or_the_media_echo();
+	test_unvouched_oversized_regions_are_not_fat();
 	test_unsigned_media_mismatch_is_not_fat();
 	test_identified_unsigned_geometry_is_corruption();
 	test_media_check_precedes_mirror_comparison();

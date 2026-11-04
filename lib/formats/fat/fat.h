@@ -42,10 +42,6 @@ typedef struct fat_geometry {
 	unsigned	 active_table;
 	unsigned char	 media;
 	bool		 mirrored;
-	/* The PC boot signature or the media echo identified the volume;
-	 * false only when the caller assumed its identity.
-	 */
-	bool		 vouched;
 } fat_geometry_t;
 
 /* Brent's detector and the geometry step limit bound every forward chain.
@@ -98,8 +94,9 @@ struct fsimg_fat_reader {
 fsimg_status_t fsimg_fat_corrupt(fsimg_error_t *, const char *);
 bool fsimg_fat_cluster_valid(const fat_geometry_t *, uint32_t);
 uint64_t fsimg_fat_cluster_offset(const fat_geometry_t *, uint32_t);
+bool fsimg_fat_boot_vouched(const unsigned char *, size_t);
 fsimg_status_t fsimg_fat_geometry_decode(const unsigned char *, size_t,
-    uint64_t, bool, fat_geometry_t *, fsimg_error_t *);
+    uint64_t, fat_geometry_t *, fsimg_error_t *);
 uint32_t fsimg_fat_media_entry(const fat_geometry_t *);
 fsimg_status_t fsimg_fat_short_name(const unsigned char *, char *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_name_validate(const char *, fsimg_error_t *);

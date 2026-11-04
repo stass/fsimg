@@ -144,8 +144,11 @@ fat_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
 	fat_geometry_t geometry;
 	fsimg_status_t status;
 
+	if (!fsimg_fat_boot_vouched(prefix, length))
+		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
+		    FSIMG_OP_READER, "unrecognized volume boot record"));
 	status = fsimg_fat_geometry_decode(prefix, length, volume_bytes,
-	    false, &geometry, error);
+	    &geometry, error);
 	if (status == FSIMG_OK)
 		*variant = fsimg_fat_variant(geometry.variant);
 	return (status);

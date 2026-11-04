@@ -98,14 +98,23 @@ fsimg_fat_media_entry(const fat_geometry_t *g)
 
 /* boot holds the first length bytes of the volume: the boot record and
  * the rest of the identification prefix, which is all identification reads
- * (specs/design-fat-reader.md#identification-and-geometry). Open passes
- * assume_identity for a caller vouching for FAT, so a boot record with
- * neither voucher decodes, marked unvouched; every BPB check still runs.
+ * (specs/design-fat-reader.md#identification-and-geometry). The probe tests
+ * the voucher before decoding, so a record nothing vouches for is refused as
+ * not FAT rather than judged corrupt by its geometry.
+ */
+bool
+fsimg_fat_boot_vouched(const unsigned char *boot, size_t length)
+{
+	return (length >= 512 &&
+	    (pc_boot_signature(boot) || media_echoed(boot, length)));
+}
+
+/* Decode the geometry of a boot record, vouched for or assumed to be FAT.
+ * Every BPB check runs either way.
  */
 fsimg_status_t
 fsimg_fat_geometry_decode(const unsigned char *boot, size_t length,
-    uint64_t input_bytes, bool assume_identity, fat_geometry_t *g,
-    fsimg_error_t *error)
+    uint64_t input_bytes, fat_geometry_t *g, fsimg_error_t *error)
 {
 	static const unsigned char exfat_reserved[53] = { 0 };
 	uint64_t total_sectors, fat_sectors, root_sectors, data_sector, capacity;
@@ -116,19 +125,14 @@ fsimg_fat_geometry_decode(const unsigned char *boot, size_t length,
 	if (length < 512)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "volume is smaller than a boot record"));
-	/* The identity is a legal fixed BPB, not exFAT's, vouched for by the
-	 * PC boot signature or by the first FAT echoing the media byte. The
-	 * voucher, the exFAT test and the BPB legality checks below make it;
-	 * each failure means this is not a FAT volume (FSIMG_EFORMAT), which
-	 * keeps other boot records that carry a BPB, such as an MBR or NTFS,
-	 * from being reported as corrupt FAT. Every check after them is
-	 * corruption or an unsupported feature of a recognized FAT volume.
-	 */
-	g->vouched = pc_boot_signature(boot) || media_echoed(boot, length);
-	if (!g->vouched && !assume_identity)
-		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
-		    FSIMG_OP_READER, "unrecognized volume boot record"));
-	/* exFAT zeroes the legacy BPB region through byte 63. OEM text alone is
+	/* After the voucher, the exFAT test and the BPB legality checks below
+	 * complete the identity: each failure means this is not a FAT volume
+	 * (FSIMG_EFORMAT), which keeps other boot records that carry a BPB,
+	 * such as an MBR or NTFS, from being reported as corrupt FAT. Every
+	 * check after them is corruption or an unsupported feature of a
+	 * recognized FAT volume.
+	 *
+	 * exFAT zeroes the legacy BPB region through byte 63. OEM text alone is
 	 * insufficient: a FAT formatter may legally use the same eight bytes.
 	 */
 	if (bcmp(boot + 3, "EXFAT   ", 8) == 0 &&

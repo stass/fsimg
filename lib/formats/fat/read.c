@@ -160,8 +160,7 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = fsimg_fat_geometry_decode(prefix, prefix_bytes, length,
-	    (reader->options.flags & FSIMG_READ_ASSUME_IDENTITY) != 0, &geometry,
+	status = fsimg_fat_geometry_decode(prefix, prefix_bytes, length, &geometry,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -186,10 +185,12 @@ fsimg_fat_open(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	 * assuming the identity waives them, and full verification refuses
 	 * the volume. Traversal never reads FAT[0] or FAT[1], since no cluster
 	 * number below 2 is valid; everything else, the mirror comparison
-	 * included, is validation and always runs. Without the assumption
-	 * geometry decoding has already refused an unvouched boot record.
+	 * included, is validation and always runs. Without the assumption the
+	 * probe has already refused an unvouched boot record as not FAT, so the
+	 * refusal here meets only bytes that changed since the probe read them.
 	 */
-	status = fsimg_reader_identity(reader, geometry.vouched,
+	status = fsimg_reader_identity(reader,
+	    fsimg_fat_boot_vouched(prefix, prefix_bytes),
 	    "unrecognized volume boot record", "the boot record has no PC boot "
 	    "signature and the first FAT does not repeat the media byte", error);
 	if (status != FSIMG_OK)
