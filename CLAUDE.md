@@ -253,7 +253,7 @@ Test names describe behaviour, such as
   confine all writes to disposable fixtures.
 * Fuzz format probes, on-disk parsers, allocation-chain traversal, directory
   enumeration, and filename conversion under sanitizers and finite limits.
-* Run the full suite under AddressSanitizer before committing changes touching
+* Run the full suite under AddressSanitizer before landing changes touching
   allocation, image parsing, I/O buffers, extraction, or library object
   lifetimes. Enable supported leak, use-after-return, and initialization-order
   checks; exercise allocation failure handling. Treat any ASan report as a
@@ -265,7 +265,15 @@ Test names describe behaviour, such as
   A skipped or unsupported sanitizer is not a passing check.
 * Implementation subagents do not run sanitizer or fuzz suites. The
   coordinating session runs them once, on the integrated tree, before the
-  work lands; subagents run the plain suite with `make -j32 check`.
+  work lands.
+* Run tests in proportion to the change. While developing, run only the affected
+  tests (`make -j32 check TESTS='test-fat'`). Run `make -j32 check-quick` once,
+  last, on the tree about to be committed; add `make check-spec` when the commit
+  changes a format's on-disk rules or the specification harness. After a later
+  test-only edit, rerun only the affected test; a comment or documentation edit
+  needs no rerun. Briefs to
+  subagents and Codex state this rule. `build-aux/ci-check.sh` and the platform
+  checks run once per landing, not per commit.
 * The coordinating session lands work only after `build-aux/ci-check.sh`
   passes in the macOS build directory. It is the list every native CI job
   runs, so a check CI runs is never skipped locally. Run it in the Linux

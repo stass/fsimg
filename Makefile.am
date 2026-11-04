@@ -163,13 +163,14 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
 # layers-compose is a helper of test/layers-integration.sh, not a test.
 check_PROGRAMS = $(test_programs) layers-compose test-iso9660-scale test-iso9660-write-scale
-TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
+QUICK_TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
 	test/compression-integration.sh test/cli.sh test/baseline.sh \
-	test/spec.sh test/iso9660-corpus-check.sh test/iso9660-integration.sh \
+	test/iso9660-corpus-check.sh test/iso9660-integration.sh \
 	test/iso9660-boot.sh test/iso9660-writer.sh
+TESTS = $(QUICK_TESTS) test/spec.sh
 nodist_check_SCRIPTS = test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
@@ -486,7 +487,7 @@ check-local: check-ascii check-fstat check-seek-holes
 .PHONY: check-lsan check-msan check-security
 .PHONY: check-scale check-fuzz check-fuzz-extended check-cli-rss check-extended
 .PHONY: check-integration baseline-record
-.PHONY: check-spec check-spec-extended check-spec-deep
+.PHONY: check-spec check-spec-extended check-spec-deep check-quick
 .PHONY: check-install
 check-install: all
 	+$(SHELL) $(top_srcdir)/build-aux/check-install.sh "$(abs_top_builddir)" \
@@ -579,6 +580,10 @@ check-extended: test-qualify test-fragment test-exfat-scale check-cli-rss \
 	./test-fragment --fragments 1048576
 	./test-exfat-scale --volume 33554432; result=$$?; test $$result = 0 -o $$result = 77
 	./test-exfat-scale --volume 33554432000; result=$$?; test $$result = 0 -o $$result = 77
+# The per-commit run: make check without the specification harness, its slowest
+# test. ci-check.sh runs make check, so the harness still gates landing.
+check-quick:
+	$(MAKE) $(AM_MAKEFLAGS) check TESTS="$(QUICK_TESTS)"
 # The specification-driven tests by profile; quick also runs in check.
 check-spec: fsimg test/spec.sh
 	./test/spec.sh quick; result=$$?; test $$result = 0 -o $$result = 77

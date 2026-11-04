@@ -104,6 +104,7 @@ cd build
 ../configure
 make
 make check
+make check-quick
 make check-install
 make check-security
 make check-integration
@@ -128,6 +129,9 @@ holds the one list of checks, from `make check` through the sanitizers,
 `check-extended` and fuzzing targets. The GCC jobs run `make check` and require the CLI suite to pass.
 On macOS the Homebrew `gcc` formula installs versioned drivers; configure a
 separate build directory with `../configure CC=gcc-<major> CXX=g++-<major>`.
+
+`check-quick` is `check` without the specification harness, its slowest test, and
+is the per-commit run; `ci-check.sh` runs the full `check`.
 
 `check` builds and runs native tests, C11/C++ header examples, checked library
 examples, CLI integration with an independent JSON decoder, and an ASCII

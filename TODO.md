@@ -353,6 +353,11 @@
 
 ## Bugs by subsystem
 
+* [Low] **Quick specification profile over its ceiling** (`test/spec/`,
+  `specs/design-spec-testing.md`): the design caps the quick profile at about 60 s
+  added to `make check`, but `test/spec.sh` takes several minutes. Bring it back
+  under the ceiling with a smoke subset, or change the ceiling.
+
 * [Low] **ImageFS worst-case listing cost** (`lib/formats/ifs/`): a worst-case
   64 MiB image takes about 26 s to list, truncated or intact, with `max_work`
   unlimited by default. Find which pass dominates and whether it can be made
