@@ -268,8 +268,11 @@ Each experiment varies one property on disposable volumes:
   with non-ASCII names was found and which the reader refuses explicitly
   as a name its tables do not reproduce; and hard-linked symbolic links,
   which macOS does not create and which the indirect node's own kind
-  covers on synthetic fixtures. The archive.org images that E10 decodes
-  are for local testing only.
+  covers on synthetic fixtures. One test stays unrun: the directory-link
+  stub test on a hand-patched record, since the native stub and indirect
+  node of `h-hfsplus-16777216-e4-dirlinks-J` give the bytes the detection
+  needs and the patch tool sets too few fields to make one. The archive.org
+  images that E10 decodes are for local testing only.
 
 ### 2. Design revision and tables
 
@@ -352,7 +355,11 @@ Each experiment varies one property on disposable volumes:
 * Tests: every verification row of the acceptance matrix, each corruption
   failing with its class; a report never complete after a skip; an absent
   label and a nonempty private directory folder refused before any work.
-* **Gate:** every native capture verifies, journaled ones included; every
+* **Gate:** each native capture and corpus specimen gives its expected
+  status, recorded in a manifest of expected results: complete
+  verification where the volume is clean, journaled captures included;
+  `FSIMG_EUNSUPPORTED` for `e8-interrupted` and `e4-dirlinks-J`;
+  `FSIMG_ECORRUPT` at the alternate step for `mozilla-1.0-smi`. Every
   corruption case fails with its class.
 
 ### 7. Reader interoperability, scale and faults
@@ -411,8 +418,10 @@ Each experiment varies one property on disposable volumes:
 * The record goes into `docs/hfsplus-research.md` under fsimg writer output.
   Registration covers the capability record, `--formats`, `README.md`,
   `docs/fsimg.1`, `docs/libfsimg.3` and `NEWS`.
-* **Gate:** every native cycle passes with no `fsck_hfs` finding. The
-  writer is registered only after that record exists.
+* **Gate:** every native cycle passes with no `fsck_hfs` finding, which
+  confirms the four [provisional values](../specs/design-hfsplus.md#writer-profile)
+  of the writer profile or replaces each refused one with its safe default.
+  The writer is registered only after that record exists.
 
 ### 10. Wrapped volumes
 
@@ -445,8 +454,9 @@ flowchart LR
     S6 --> S10[10. Wrapped volumes]
 ```
 
-The verifier follows every codec, so its gate covers every native capture,
-compressed ones included. Stage 7, stage 8 and stage 10 are independent
+The verifier follows every codec, so its gate covers each native capture,
+compressed ones included, against the manifest of expected results. Stage
+7, stage 8 and stage 10 are independent
 once the verifier exists.
 
 ## Gates for every stage
@@ -522,8 +532,9 @@ The owner has settled these:
    all of these as macOS stores them.
 9. **Unicode table gate.** The generated tables are compared with the E3
    observation's observable rows under the format design's gate; the
-   unobservable rows keep the derivation rule, with NetBSD's table as the
-   witness.
+   unobservable rows keep the derivation rule, lowercase on the folded
+   pages unless the unit decomposes, minus the 30 exceptions, with NetBSD's
+   table as the witness: it must equal the generated table on every row.
 10. **Archival images.** The Internet Archive images of the Mac OS 8.1 to 9
     and early Mac OS X era are used for local testing only: they stay
     outside the repository, are never redistributed, and are cited by item

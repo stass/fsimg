@@ -22,12 +22,12 @@ the module split, the tests and the gates; the drivers share no code.
 
 | File | Owns |
 | --- | --- |
-| `hfsplus.h` | Private types, constants and prototypes shared by the files below |
-| `descriptor.c` | `fsimg_hfsplus_format`: the `hfsplus` and `hfsx` names, their capability records, the probe and the reader operations; the unregistered writer descriptor until native qualification |
+| `hfsplus.h` | Private types, constants and prototypes shared by the files below, among them the one table of the four [format-owned root names](design-hfsplus.md#private-directories-and-format-owned-files) as stored units, which `directory.c` recognizes by and `write-plan.c` refuses by |
+| `descriptor.c` | `fsimg_hfsplus_format`: the `hfsplus` and `hfsx` names, their capability records, the probe, the reader operations and the writer descriptor |
 | `codec.c` | Big-endian decode and encode of the volume header, fork data, extent records, node descriptor, B-tree header record, catalog keys and records, attribute keys and records, journal info block and header, master directory block, and the little-endian compression header and chunk tables; pure functions without I/O |
-| `unicode.c` | UTF-16 and UTF-8 conversion with the `/` and `:` exchange, decomposition, the folded and binary comparators, namespace keys |
-| `unicode-tables.h` | The generated decomposition, combining-class and fold tables and their input digests |
-| `volume.c` | Open: the wrapper, the header and geometry, the journal policy, the special files, the three trees, the root and the private folders |
+| `unicode.c` | UTF-16 and UTF-8 conversion with the `/` and `:` and the U+0000 and U+2400 exchanges, decomposition, the folded and binary comparators, namespace keys |
+| `unicode-tables.h` | The generated decomposition, combining-class and fold tables, the fold table as a two-level table over the 65536 unit values, and their input digests |
+| `volume.c` | Open: the wrapper, the header and geometry, the journal policy, the special files, the three trees and the root |
 | `fork.c` | The fork resolver: inline and overflow extents into an extent index, continuity and domain checks, verification claims |
 | `btree.c` | The B-tree reader: node reads and framing, header records, keyed search, the leaf cursor, level iteration for verification |
 | `catalog.c` | Catalog record validation, the kind table, thread lookup, hard-link resolution, the record-to-entry mapping |
@@ -110,13 +110,15 @@ next reads:
 5. **Catalog and attributes trees.** Read and check each header node; select
    the catalog comparator from the signature and `keyCompareType`; require
    `totalNodes * M` to equal the fork's `logicalSize`.
-6. **Journal.** With bit 13 set, read the 180-byte info block and the
-   44-byte header and apply the reader policy table; on a wrapped volume
-   the header is sought at the offset from the embedded start and then
-   from the wrapper's start, as the format design's
-   [info block rule](design-hfsplus.md#journal-info-block) states. Record
-   the journal's block range and the info block's block for the root's
-   format-owned files.
+6. **Journal.** With bit 13 set, read the 180-byte info block, place the
+   journal by the format design's
+   [info block rule](design-hfsplus.md#journal-info-block), whose first
+   matching row decides, read the 44-byte header at the one place that rule
+   names, if it names one, and apply the reader policy table. On a wrapped
+   volume a local journal's `offset` counts from the wrapper's start and is
+   converted to the embedded slice once; there is no second place to look.
+   Record the journal's block range and the info block's block for the
+   root's format-owned files.
 7. **Root.** Look up the thread `(2, "")` and require a folder thread with
    parent 1; look up the primary `(1, name)` it names and require a folder
    record with `folderID` 2. The name is the label; a name the
@@ -220,9 +222,13 @@ whose type matches the expected kind, and returns its parent and name.
 stub, a directory stub, or neither. The test compares the record's
 `createDate` with two dates: the root folder's, which open already read,
 and the private data folder's. The first record carrying either pair of
-Finder codes looks the data folder up by one keyed search in the root and
-keeps its node ID and date in the reader state; a record without the codes
-costs nothing. On a volume without a data folder only the root's date can
+Finder codes looks the data folder up by one keyed search in the root,
+requires the record found to be a folder whose stored units equal the name
+exactly, since the comparator search would also land on a case variant
+such as `hfs+ private data` on a folded volume, which may never host
+indirect nodes, and keeps its node ID and date in the reader state; this
+is the one route to the folder, and a record without the codes costs
+nothing. On a volume without a data folder only the root's date can
 match, and a record that matches it is a stub whose indirect node
 `hfsplus_link_resolve()` then cannot find. The chain fields, the indirect
 node's reserved word and the stub's `ownerID` and `groupID`, are decoded
@@ -246,7 +252,10 @@ and `FSIMG_META_EXTRA_DATA` from the attribute scan and the resource fork.
 
 `hfsplus_attr_scan()` visits the attribute records of one node ID: one
 search for `(id, "", 0)` in the attributes tree and a cursor walk while
-`fileID` matches. It validates each record, reports whether any
+`fileID` matches. The search returns the greatest key not above
+`(id, "", 0)`, which every attribute of `id` exceeds, because a name has at
+least one unit, so the cursor advances one record before it reads the
+first of them. It validates each record, reports whether any
 [stored attribute](design-hfsplus.md#stored-attributes-and-the-extra-data-mark)
 exists, which excludes only a consumed `com.apple.decmpfs`, and returns
 the compression attribute's inline value when present. The scan runs only for a
@@ -298,8 +307,8 @@ by a validated node buffer.
    equal them; the decomposed units are what `keys` folds, so the check
    costs no second pass.
    At the root, recognize the [format-owned children](design-hfsplus.md#private-directories-and-format-owned-files)
-   by their exact stored units, validate them and count them, but do not
-   admit them; record the private data folder's node ID when it is seen.
+   by their exact stored units, from the one table in `hfsplus.h`, validate
+   them and count them, but do not admit them.
 4. Classify every other child with `hfsplus_link_kind()` and the kind
    table: a directory stub fails preparation with
    `FSIMG_EUNSUPPORTED`, so no child of the directory is exposed; a socket
@@ -376,7 +385,8 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    against what the iteration counted.
 2. **The catalog pass.** The catalog's leaf level, iterated in step 1, is
    the inventory: every record appears exactly once. For each primary
-   record the pass appends `(node ID, type, parent, name)` to an object
+   record the pass appends `(node ID, type, parent, name, has-attributes)`,
+   the last a bit holding catalog flag `0x0004`, to an object
    stream; resolves both forks of every file record through the fork
    resolver, which claims their runs and counts the overflow records they
    consume; counts files and folders, and separately the records whose
@@ -399,7 +409,10 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    thread stream and the attribute stream in one sequential pass: every
    primary has exactly one thread whose type, parent and name match, every
    thread has its primary, node IDs are unique, every attribute owner is a
-   primary, and `nextCatalogID` exceeds the largest ID unless bit 12 is set.
+   primary, a primary's has-attributes bit is set exactly when the
+   attribute stream holds its node ID, so a record with an attribute and a
+   clear flag is `FSIMG_ECORRUPT` rather than silently unmarked, and
+   `nextCatalogID` exceeds the largest ID unless bit 12 is set.
    Sort the link and inode streams by reference and merge them: every stub's
    reference names an indirect node, and every indirect node's link count
    equals its stubs. The overflow records consumed, plus the bad-block
@@ -416,12 +429,13 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    over `[0, N)`, and compare them with the bitmap's first `N` bits in one
    sequential pass in windows: a claimed clear bit and an allocated
    unclaimed bit are `FSIMG_ECORRUPT`; the padding bits must be zero; the
-   clear bits must equal `freeBlocks` and set `FSIMG_VOLUME_FREE`.
+   clear bits must equal `freeBlocks`.
 8. **Alternate header.** Compare the fields the format design names: the
    signature, version, `blockSize`, `totalBlocks` and the five fork-data
-   records. An alternate without a header signature, such as the zeroed
-   sectors of a specimen whose container dropped them (E10), fails here
-   and nowhere earlier.
+   records. An alternate that is missing, unreadable or without a header
+   signature, such as the zeroed sectors of a specimen whose container
+   dropped them (E10), fails here and nowhere earlier. `FSIMG_VOLUME_FREE`
+   is set only when this step, the last, succeeds.
 
 HFS Plus storage is exclusive: no two forks share a block, and a hard link
 shares an indirect node through the catalog, not extents. So the strict run
@@ -475,7 +489,8 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    design's [writer names](design-hfsplus.md#writer-names) rule states, or fail
    with `FSIMG_EINVAL`, which covers the percent-text values, an
    all-ignorable name on `hfsplus` and the two mark pairs `fsck_hfs`
-   refuses; refuse the reserved root names; check kind and
+   refuses; refuse a root entry whose key equals that of one of the four
+   format-owned root names, from the one table in `hfsplus.h`; check kind and
    metadata through the common policy, selecting owner, mode and times; count
    the entry into its parent's row; accumulate the data fork's blocks for
    every candidate block size, for the sizing search; and append two records
@@ -590,8 +605,13 @@ codec allows a stored form, journals and wrappers, and mutates them for the
 format design's [acceptance matrix](design-hfsplus.md#acceptance-matrix).
 Every valid fixture has a paired mutation that must fail with its class.
 Reading tests compare `info`, `t`, `x -O` and `x` on the fixtures and on
-every native capture found through `FSIMG_HFSPLUS_NATIVE`, using the
-manifest of names, sizes, modes, times and checksums each capture records.
+each native capture and corpus specimen found through
+`FSIMG_HFSPLUS_NATIVE`, against a manifest of expected results: the names,
+sizes, modes, times and checksums a readable capture records, or the
+refusal class and step a capture is expected to fail with, such as the
+interrupted journal and the directory hard link (`FSIMG_EUNSUPPORTED`) and
+the specimen without an alternate header (`FSIMG_ECORRUPT` at
+verification's last step).
 
 `test/hfsplus-unicode.c` checks the generated tables: the digest of each
 table's serialization equals the one `docs/references.md` records for the
@@ -608,8 +628,8 @@ like the generator, as well as through the reader and verifier. It compares
 bytes across source order, metadata cache size, scratch placement and time
 zone, scans every unused byte for poison, and checks the packer at node
 boundaries: records that exactly fill a node, one byte more, a non-root
-level whose last node holds one record, which native qualification also
-checks, and a catalog wide enough for map nodes.
+level whose last node holds one record, and a catalog wide enough for map
+nodes.
 Fault tests inject allocation, scratch, short-read, short-write, EOF,
 source-change and cancellation failures at every stage and check cleanup.
 

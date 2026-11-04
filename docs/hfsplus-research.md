@@ -901,8 +901,10 @@ and 0 on `H+`, and `newfs_hfs` has no option that makes either (`-s` selects
 
 ### E4 Hard links
 
-Status: answered, with two open items (hard-linked symbolic links; the
-directory hard-link stub test).
+Status: answered, with one open item (hard-linked symbolic links). The
+directory hard-link stub test has its native bytes, the stub and indirect
+node of `h-hfsplus-16777216-e4-dirlinks-J` below; the same test on a
+hand-patched record is not run.
 
 Procedure. `capture.rb --populate e4` on `h-hfsplus-8388608-e4` and
 `h-hfsx-8388608-e4` (block size 4096; `tools/hfsplus/populate_links.rb`). The
@@ -1027,8 +1029,9 @@ fields; macOS's own attributes on indirect nodes (none); the Finder alias and
 and indirect node on a journaled volume (above); that macOS creates no
 hard-linked symbolic link through `link(2)`, `linkat(2)` or `ln -P`. Open: the
 hard-linked symbolic link's native record, because none can be made; a reader
-meets one only on a volume another system wrote. Open: a directory-link stub
-test with a patched record against a missing target.
+meets one only on a volume another system wrote. Not run: a directory-link
+stub test with a patched record against a missing target; the native stub
+above supplies the bytes the detection needs.
 
 ### E5 Attributes
 
