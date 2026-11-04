@@ -23,7 +23,9 @@
 #
 # `@DEV@` in a --format command stands for the raw device of the attached
 # image. --hdiutil-fs FS formats with `hdiutil create` instead, and --import
-# IMAGE records an image another tool made (--command says how).
+# IMAGE records an image another tool made (--command says how). --populate
+# names a profile of the PROFILES table: e2, e4, e5, e6-zlib,
+# e6-lzvn, e6-lzfse, e6-ditto, e6-sweep or e7.
 require "digest"
 require "fileutils"
 require "json"
@@ -33,6 +35,10 @@ require "shellwords"
 require "tmpdir"
 require_relative "fields"
 require_relative "populate"
+require_relative "populate_attributes"
+require_relative "populate_compression"
+require_relative "populate_fragmentation"
+require_relative "populate_links"
 
 module HfsPlusCapture
   class Error < StandardError; end
@@ -42,6 +48,16 @@ module HfsPlusCapture
   OUTPUT_LINES = 40
   # What --option may hold: it becomes part of the capture directory's name.
   OPTION_PATTERN = /\A[\w.+-]+\z/
+
+  # The population profiles --populate accepts, each a function of the
+  # volume's allocation block size that returns the steps to run.
+  PROFILES = {
+    "e2" => ->(block_size) { HfsPlusPopulate.e2(block_size) },
+    "e4" => ->(_) { HfsPlusPopulateLinks.e4 },
+    "e5" => ->(_) { HfsPlusPopulateAttributes.e5 },
+    "e6-sweep" => ->(_) { HfsPlusPopulateCompression.e6_sweep },
+    "e7" => ->(block_size) { HfsPlusPopulateFragmentation.e7(block_size) }
+  }.merge(HfsPlusPopulateCompression::TOOLS.to_h { |tool| ["e6-#{tool}", ->(_) { HfsPlusPopulateCompression.e6(tool) }] }).freeze
 
   Config = Data.define(:root, :variant, :size, :option, :formats, :hdiutil_fs, :import, :command, :populate, :discard_image) do
     def name = "h-#{variant}-#{size}-#{option}"
@@ -208,7 +224,7 @@ module HfsPlusCapture
   # would delete the contents of a still-mounted volume. On failure the
   # directory is left in place.
   def populate(config, attachments, log, block_size)
-    steps = HfsPlusPopulate.e2(block_size)
+    steps = PROFILES.fetch(config.populate).call(block_size)
     mount = Dir.mktmpdir("hfsplus-mount")
     result = attachments.with(config.image, mountpoint: mount) do
       log.note("# mounted: #{`mount`.lines.grep(/#{Regexp.escape(mount)}/).map { _1[/\(([^)]*)\)/, 1] }.first}")
@@ -287,7 +303,7 @@ module HfsPlusCapture
   def parse(argv)
     opts = { root: DEFAULT_ROOT, formats: [], discard_image: false }
     OptionParser.new do |o|
-      o.banner = "usage: capture.rb --variant V --size BYTES --option NAME (--format CMD... | --hdiutil-fs FS | --import IMAGE) [--populate e2]"
+      o.banner = "usage: capture.rb --variant V --size BYTES --option NAME (--format CMD... | --hdiutil-fs FS | --import IMAGE) [--populate PROFILE]"
       o.on("--root DIR") { opts[:root] = _1 }
       o.on("--variant V", %w[hfsplus hfsx]) { opts[:variant] = _1 }
       o.on("--size BYTES", Integer) { opts[:size] = _1 }
@@ -296,7 +312,7 @@ module HfsPlusCapture
       o.on("--hdiutil-fs FS") { opts[:hdiutil_fs] = _1 }
       o.on("--import IMAGE") { opts[:import] = _1 }
       o.on("--command TEXT") { opts[:command] = _1 }
-      o.on("--populate PROFILE", %w[e2]) { opts[:populate] = _1 }
+      o.on("--populate PROFILE", PROFILES.keys) { opts[:populate] = _1 }
       o.on("--discard-image") { opts[:discard_image] = true }
     end.parse!(argv)
     missing = %i[variant size option].reject { opts[_1] }

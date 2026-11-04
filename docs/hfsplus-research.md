@@ -139,7 +139,12 @@ and writes `commands.txt`, `manifest.json`, `fields-formatted.json` and
 too. `tools/hfsplus/fields.rb IMAGE` decodes an image's boot area, volume
 header and alternate header, tree header nodes, node maps, allocation bitmap,
 private folders, Finder information and catalog records as text or JSON
-(`--json`), treating the image as untrusted.
+(`--json`), treating the image as untrusted; it also decodes the attributes and
+extents overflow leaf records and, for compressed files, the `decmpfs` header and
+the resource fork's chunk table. `capture.rb --populate` takes the profiles `e2`,
+`e4`, `e5`, `e6-zlib`, `e6-lzvn`, `e6-lzfse`, `e6-ditto`, `e6-sweep` and `e7`
+(`tools/hfsplus/populate*.rb`); `tools/hfsplus/patch_record.rb` rewrites fields of one
+catalog file record in a copy of an image.
 
 ### Throwaway probes
 
@@ -168,6 +173,32 @@ diskimage-class=CRawDiskImage -nomount V`, and detached again.
   `: > MNT/g; chgrp 80 MNT/g; ls -ln MNT/g`, detach, and read the record of
   `g` from `ruby tools/hfsplus/fields.rb --json --records 5000 V`: its `group`
   is 80 and its `owner` the mounting user.
+
+Further probes of E4 to E6, each a hand-typed observation outside a capture
+directory.
+
+* Look-alike stubs (E4). Copy `h-hfsplus-8388608-e4/image.img` to `V`, read the
+   `createDate` of the root folder (ID 2) and of the private data folder (ID
+   16) from its `fields.json`, and patch ten of the `stubtest-*` files:
+   `ruby tools/hfsplus/patch_record.rb V stubtest-a --type hlnk --creator hfs+
+   --create-date PRIVATE --special 21 --flags 0x22` for `a`, with `--create-date
+   ROOT` for `b`, no `--create-date` for `c`, `--creator 0x00000000` for `d`,
+   `--type 0x00000000` for `e`, no `--flags` for `f`, and `--type fdrp --creator
+   MACS --special 20 --flags 0x22` for `g` (`h` without `--create-date`, `i`
+   without `--flags`, `j` with `--special 5`). Mount `V` writable and run
+   `stat -f 'ino=%i nlink=%l size=%z' stubtest-X; cat stubtest-X` on each.
+   `ROOT` is the date after the profile's `SetFile -d` step; the run shows the
+   private date and the root date both read as links.
+* Link codes (E4). On a mounted fresh volume run `xattr -wx
+   com.apple.FinderInfo
+   686c6e6b6866732b000000000000000000000000000000000000000000000000 f`
+   (`Operation not permitted`), `SetFile -t hlnk -c hfs+ f` and `SetFile -t hlnk
+   f` (both `ERROR: Unexpected Error. (-5000)`, exit 2), `SetFile -t fdrp -c
+   MACS f` (exit 0), `ln -s f s; ln -P s s2` (`Operation not supported`) and
+   `mkdir d; ln d d2` (`ln: d: Is a directory`).
+* Attribute names (E5). On a mounted fresh volume `xattr -w NAME v f` with NAME
+   of 127 `b` characters succeeds and with 128 fails with `[Errno 63] File name
+   too long`.
 
 ## Compression writers
 
@@ -486,21 +517,236 @@ Status: open.
 
 ### E4 Hard links
 
-Status: open.
+Status: answered, with two open items (hard-linked symbolic links; the
+directory hard-link stub test).
+
+Procedure. `capture.rb --populate e4` on `h-hfsplus-8388608-e4` and
+`h-hfsx-8388608-e4` (block size 4096; `tools/hfsplus/populate_links.rb`). The
+tree holds one file with two names in two folders, one with three names in
+three, groups of three and two names unlinked until one, or none, is left, a
+link to a symbolic link, a directory link, mode and time changes made through
+one name, and ordinary files given link and alias Finder codes. `fsck_hfs -n`
+reports both volumes OK and the decoder finds no problem. HFS Plus and HFSX
+agree on every field below. The last step sets the root folder's creation date
+earlier with `SetFile -d` and makes one more link (`rd/`).
+
+What macOS adds. The first writable mount creates the private data folder
+(ID 16, flags `0x0010`, valence 0, owner 0, `createDate` set and the other
+dates 0) and `.HFS+ Private Directory Data\r` (ID 17). The first `link(2)` of a
+file `F` turns `F` into the indirect node and creates two stubs: the node
+`iNodeF` (named with the decimal CNID of `F`, kept) sits in the private data
+folder, and every name, the first included, is a new stub record with a new
+CNID.
+
+| Record | Observation |
+| --- | --- |
+| Stub | `flags` `0x0022` (thread, hard-link chain); file type `hlnk`, creator `hfs+`, Finder flags `0x0100`; both forks empty; text encoding 126; BSD `mode` `0100444`, `ownerFlags` `0x02`, `special` the indirect node's CNID; all four dates equal the private data folder's `createDate` (not the file's, not the root's); the 4-byte word at record offset 4 is 0 |
+| Indirect node | `iNodeN` in folder 16; `flags` `0x00A2` (thread, chain, date added); no Finder type or creator; BSD owner, group, mode and times of the file; `special` the link count; the word at record offset 4 holds the CNID of the newest stub; forks hold the content |
+| Chain | the node's word at offset 4 names the newest stub, the head; a stub's BSD `ownerID` is the next stub toward the head (0 at the head) and its `groupID` the next toward the oldest (0 at the tail). Three names, ids 29, 30, 31: node word 31; stub 31 owner 0 group 30; stub 30 owner 31 group 29; stub 29 owner 30 group 0 |
+| Unlinked to one | the node stays, `special` 1, its word names the remaining stub, and that stub stays a stub (`0x0022`, owner 0 group 0, `special` the node). A file whose last name is unlinked loses node and stubs |
+| Attributes on nodes | none. The attributes tree holds `com.apple.system.Security` (ACLs and `.fseventsd`) and no `com.apple.system.hfs.firstlink`; macOS keeps the head in the node's record word |
+
+Mounted view. `stat` of every name reports the indirect node's inode number
+(its CNID), mode, owner and times, and `nlink` from the node's `special`. After
+`chmod 0600` and a time change through the second name (`meta/b`), `meta/a`
+reports mode `0600` and the new time, and the node holds both: its `createDate`
+and `contentModDate` moved with the time. The stub's `0444` and `ownerFlags`
+are never reported. The same field gives an ordinary file its `nlink`: files
+patched to `special` 20 and 5 report `nlink` 20 and 5.
+
+Stub test. macOS refuses to create a file with the `hlnk`/`hfs+` codes:
+`xattr -wx com.apple.FinderInfo` fails with `EPERM`, and `SetFile -t hlnk`
+(with or without `-c hfs+`) exits 2 with error -5000 (the link-codes probe), so every
+finding below comes from `patch_record.rb`, which rewrites one record of a
+copy of `h-hfsplus-8388608-e4`'s image (the look-alike-stubs probe). Ten `stubtest-*` files
+were given codes, dates, flags and `special` 21, the indirect node of `hl2`:
+
+| Patched file | Read by macOS as |
+| --- | --- |
+| `hlnk`/`hfs+`, `createDate` = private data folder's | a link: content, inode and `nlink` 2 of node 21 |
+| same, `createDate` = root folder's (the root had been re-dated) | a link |
+| same, `createDate` = the file's own | an ordinary file |
+| `hlnk` with creator 0, or type 0 with `hfs+`, either with the private date | ordinary files |
+| `hlnk`/`hfs+`, private date, flags `0x0082` (no chain bit) | a link: the chain bit is not part of the file test |
+| `fdrp`/`MACS`, flags `0x0022`, `special` 20 (also with `special` 5, without the chain bit, with another date), private date | ordinary files |
+
+The stub test is type `hlnk`, creator `hfs+` and a `createDate` equal to the
+private data folder's or the root's. After the root's `createDate` was set
+earlier (`SetFile -d`), links made earlier still read as links and a new stub
+took the private folder's date, so the dates the test accepts include the
+private folder's and the date given to new stubs is only the private
+folder's. A Finder alias (`fdrp`/`MACS` with Finder flag `0x8000`, and
+`alis`/`MACS`) set through `xattr` is an ordinary file, as is every file whose
+Finder information carries `hlnk`/`hfs+` with another date. The `fdrp`/`MACS`
+rows cannot show the directory-link test: the target `dir_20` does not exist,
+so a passing test and a failed lookup cannot be told apart.
+
+Refusals. `link(2)` on a directory fails with `EPERM`. `link(2)` on a symbolic
+link follows it and links the target (`sl/follow` and `sl/target` share an
+inode with `nlink` 2); `ln -P`, which links the symbolic link itself, fails with
+`Operation not supported`. macOS here makes no hard-linked symbolic link and no
+directory link.
+
+Evidence rows. Answered: stub and indirect-node fields; the stub test (codes,
+dates, flag) for files; whose metadata macOS reports; link counts; chain
+fields; macOS's own attributes on indirect nodes (none); the Finder alias and
+`hlnk`/`hfs+` look-alikes read as ordinary files. Open: hard-linked symbolic
+links, because macOS cannot make one and the design's rule (a symbolic-link
+indirect node) has no native record; it blocks only acceptance of such a node,
+which the design already accepts without evidence. Open: the directory
+hard-link stub test against Finder aliases, because macOS makes no directory
+link and a hand-made stub cannot separate the test from a missing target; it
+blocks the design's directory-link detection rule being checked against
+native bytes, not the refusal itself.
 
 ### E5 Attributes
 
-Status: open.
+Status: answered.
+
+Procedure. `capture.rb --populate e5` on `h-hfsplus-16777216-e5` and
+`h-hfsx-16777216-e5` (block size 4096; `tools/hfsplus/populate_attributes.rb`),
+with `xattr(1)` setting and reading attributes. `fsck_hfs -n` reports both
+volumes OK. The attributes tree of both has node size 8192, `attributes`
+`0x00000006` (big keys, variable index keys); it holds 16 nodes after the profile.
+`fields.rb` decodes its leaf records of all three kinds.
+
+| Question | Observation |
+| --- | --- |
+| Inline limit | values of 0, 1, 2, 3, 5, 7, 17 bytes and up to 3802 bytes are `0x10` inline records; 3803 bytes and above are `0x20` fork records. Fork records of 3803 to 4000 bytes take one block, 5000 and 8000 bytes two, 70000 bytes 18 (one extent, `750+18`). No `0x30` record appears: the forks hold at most one extent |
+| Name order | names compare as UTF-16 code units, unfolded: `com.fsimg.CASE`, `com.fsimg.Case` and `com.fsimg.case` are three attributes in that order, on HFS Plus and on HFSX alike. A 127-unit name, `a:b/c`, `café` and a supplementary character are stored; a 128-unit name fails with `ENAMETOOLONG` (`Errno 63`, the attribute-names probe) |
+| ACL | `chmod +a` stores `com.apple.system.Security`, an inline record of 68 bytes for one entry and 92 for two, and sets catalog flag `0x0008` with `0x0004` (`0x008E` on the file, `0x008C` on a folder). The value begins `01 2c c1 6d` |
+| Finder information | `xattr -wx com.apple.FinderInfo` creates no attribute record and sets no flag bit (file `0x0082`, folder `0x0080`); `xattr -px` reads the 32 bytes back (`TEXT`, `ttxt`, flags `0x4000` in the file; flags `0x0400` in the folder) |
+| Resource fork | writing `FILE/..namedfork/rsrc` fills the record's resource fork (1, 100 and 5000 bytes: one, one and two blocks) with no attribute record; `xattr` lists `com.apple.ResourceFork` as a synthesized name |
+| Last attribute removed | flag `0x0004` is cleared with the last attribute: a file with one attribute removed, and a file with two removed, end at `0x0082`; a file with two and one removed keeps `0x0086`. A file that never had one is `0x0082` |
+| Symbolic link | `xattr -s` stores an attribute on the link; its record flags are `0x0006` |
+| Names macOS adds | only `com.apple.system.Security`, on `.fseventsd`, and `com.apple.decmpfs` on compressed files (E6). Files and folders made by `touch`, `mkdir`, `ln -s`, `ditto` and the hard links of E4 carry no attribute; none carries `com.apple.provenance`, `com.apple.quarantine`, `com.apple.lastuseddate#PS` or `com.apple.system.hfs.firstlink` |
+
+Evidence rows. Answered: attribute name comparison (code-unit order, case
+sensitive on both variants); whether flag `0x0004` stays in step (it is cleared
+with the last attribute, so verification may require it equal to "the object
+has a record"); macOS's own attribute names. Largest inline attribute: 3802
+bytes.
 
 ### E6 Compression
 
-Status: open. The writers above are established; the header, the raw markers,
-the type 4, 8 and 12 framings, the largest inline size and the data fork's size
-remain.
+Status: answered.
+
+Procedure. `capture.rb --populate e6-TOOL` for TOOL `zlib`, `lzvn` and `lzfse`
+(`afsctool -c -T CODEC -s 0 -v`) and `ditto` (`ditto --hfsCompression`), each on
+HFS Plus (`h-hfsplus-8388608-e6-TOOL`) and `lzfse` also on HFSX
+(`h-hfsx-8388608-e6-lzfse`); `e6-sweep` on `h-hfsplus-100663296-e6-sweep` (its
+image removed; the fields remain). Content is deterministic text, random bytes
+or zeros of 0, 1, 65535, 65536, 65537 and 200000 bytes, text of 131073, 262145,
+393217 and 589825 bytes, and a 196608-byte file whose second 65536-byte chunk is
+random (`mixed`); `afsctool` also runs with `-L` (`forced-*`). Every manifest
+records SHA-256 of the file read through the kernel, which decompresses it, so
+a stage 4 or 5 gate compares an extraction with it. `fields.rb` reads the
+`com.apple.decmpfs` attribute and the resource fork from the unmounted image
+(its `compression` section). `fsck_hfs -n` reports every volume OK.
+
+Header. The attribute is inline (`0x10`), with `magic` bytes `66 70 6d 63`, the
+type, and the uncompressed size, as the design states. The catalog record of a
+compressed file has `ownerFlags` `0x20`, flags `0x0086` (`0x0004` set), both
+fork sizes as below, and the data fork empty (`logicalSize` 0, no blocks) on
+every type. Compression adds no other attribute.
+
+Types written, by content and size (`.` none run, `-` left uncompressed):
+
+| Content | zlib | LZVN | LZFSE | ditto |
+| --- | --- | --- | --- | --- |
+| 0 bytes (any content) | - | - | - | - |
+| 1 byte (text, random, zeros) | 3 | - | 11 | - |
+| text 65535, 65536 | 4 | 8 | 12 | 8 |
+| text 65537, 131073 to 589825 | 4 | - | 12 | 8 |
+| text 200000 | 4 | 8 | 12 | 8 |
+| zeros 65535, 65536 | 3 | 7 | 11 | 7 |
+| zeros 65537 | 4 | - | 12 | 8 |
+| zeros 200000 | 4 | 8 | 12 | 8 |
+| random 65535 to 200000 | - | - | - | - |
+| mixed 196608 | - | 8 | 12 | 8 |
+
+`afsctool` zlib compresses `mixed` only with `-L` (type 4); LZVN and LZFSE
+compress it without. `-L` leaves random content uncompressed. `afsctool` LZVN
+leaves a file with a one-byte last chunk uncompressed (65537 and the shapes);
+`ditto` compresses them. `ditto` writes only types 7 and 8, leaves every text
+file of 2000 to 16000 bytes (`fit-ditto-*`) uncompressed, and writes zeros of
+65536 bytes inline.
+
+Largest inline size. Every tool writes zeros of 65536 bytes inline (types 3, 7,
+11, 7: payloads of 84, 498, 184 and 498 bytes) and 65537 bytes in the resource
+fork, at 1, 4, 16 MiB too; no inline file is larger than 65536 bytes. By
+payload, `afsctool` stores text inline up to the largest attribute observed,
+3612 bytes for zlib (12000 bytes of text), 3247 for LZFSE (10000), 3293 for
+LZVN (8000), and moves the next size to the resource fork (16000 bytes of text
+zlib, 12000 LZFSE, 10000 LZVN).
+
+Raw markers. A zlib payload or chunk stored raw begins `ff`: the one-byte files
+(`ff25`, `ff66`, `ff00`), the one-byte last chunk of 65537 (`ff6f`) and the
+random chunk of `forced-mixed`, 65537 bytes long. An LZVN chunk stored raw
+begins `06`: the `ditto` last chunk `0668` and its random chunk, 65537 bytes
+long (`0660c676`). `afsctool` LZVN compresses the random chunk instead, 66145
+bytes. LZFSE has no raw marker: an incompressible chunk or file is an LZFSE
+uncompressed block, `62 76 78 2d` (`bvx-`), a count and the bytes, 13 bytes for
+one byte (type 11 payload `6276782d 01000000 ...`), or a compressed block that
+grew (`bvx2`, 66280 bytes for the random chunk). The largest stored chunk
+observed is 66280 bytes.
+
+Type 4 (zlib). The fork begins with a 16-byte big-endian header: data offset
+256, map offset, data length and map length 50, then zeros to offset 256. At the
+data offset a big-endian resource length (data length minus 4), then a
+little-endian chunk count and `count` little-endian `(offset, length)` pairs,
+offsets relative to the count. For 200000 bytes of text: data offset 256, 4
+chunks, pairs `36+18779`, `18815+18713`, `37528+18722`, `56250+1146`; the first
+offset is `4 + 8 * count`. The map, 50 bytes at the map offset, starts with 24
+zeros and holds the bytes `66 70 6d 63` (`fpmc`) in its first 32 bytes. Fork size is `256 + data length + 50`
+(57706 here). Chunk counts equal `ceil(size / 65536)` in every file.
+
+Types 8 and 12. The fork begins with a table of little-endian words that ends at
+the first offset: `afsctool` writes `count + 1` ascending offsets (the first
+`8 * count`, the last the fork size) followed by zero words to fill the table to
+`8 * count` bytes (1 chunk: `[8, 19458]`; 2: `[16, 19515, 19528, 0]`; 4: five
+offsets and three zeros, first offset 32; 7: first offset 56; 10: first offset
+80). `ditto` writes no padding: the first offset is `4 * (count + 1)`
+(`[16, 25811, 51642, 51644]` for 3 chunks, 44 for 10). Chunk `i` spans
+`[offset[i], offset[i + 1])`. LZVN chunks begin with the LZVN opcode bytes
+(`e0`, `ef`) and end with `06`; LZFSE chunks begin `bvx2`, the last short chunk
+`bvx-`.
+
+Evidence rows. Answered: header, types written per tool, raw markers (zlib
+`ff`, LZVN `06`, LZFSE none), type 4, 8 and 12 framings, largest inline size
+(65536 uncompressed; the attribute holds up to the observed 3612 bytes), data
+fork size (0 on every type).
 
 ### E7 Fragmentation
 
-Status: open.
+Status: answered.
+
+Procedure. `capture.rb --populate e7` on `h-hfsplus-4194304-e7` and
+`h-hfsx-4194304-e7` (block size 4096; `tools/hfsplus/populate_fragmentation.rb`).
+One-block files fill the volume until `ENOSPC` (898 files), 60 of the first 120
+are deleted (the odd ones), a 20-block `decoy` takes the free runs longer than
+one block that remain beside the catalog, and four files write forks into the
+holes: `data-9` and `data-17` (data forks of 9 and 17 blocks), `rsrc-9` and
+`rsrc-17` (resource forks through `..namedfork/rsrc`). Each reads back with the
+checksum written. `fsck_hfs -n` reports both volumes OK; both agree.
+
+| File | Catalog record extents | Overflow records (key: fork, fileID, startBlock) |
+| --- | --- | --- |
+| `data-9` (ID 920) | 8, one block each (`279+1` ... `293+1`) | data, 920, 8: `295+1` |
+| `data-17` (921) | 8 | data, 921, 8: eight extents; data, 921, 16: `330+1` |
+| `rsrc-9` (922) | 8 in the resource fork | resource, 922, 8: `348+1` |
+| `rsrc-17` (923) | 8 in the resource fork | resource, 923, 8: eight extents; resource, 923, 16: `382+1` |
+
+The extents tree (node size 4096, one leaf of 6 records, depth 1) holds a
+76-byte record per eight extents: key length 10, fork type `0x00` (data) or
+`0xFF` (resource), fileID, and `startBlock`, the file-relative block where the
+record's first extent begins (8, then 16); then eight extent descriptors,
+unused ones zero. An overflow record is written only when a fork has more than
+eight extents; a fork of 9 extents has one record with one extent. The records
+sort by fileID, fork type, `startBlock`.
+
+Evidence row (data and resource forks of at least 9 and 17 extents) answered.
+The reader's extents-overflow lookup can be tested against these two images.
 
 ### E8 Journal
 

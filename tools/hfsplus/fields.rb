@@ -416,9 +416,9 @@ module HfsPlusFields
   end
 
   def file_record(data)
-    _, flags, _, id, *dates = fields_at(data, 0, 32, "nnNNNNNNN")
+    _, flags, reserved, id, *dates = fields_at(data, 0, 32, "nnNNNNNNN")
     user_info = bytes_at(data, 48, 16)
-    { type: "file", flags: format("0x%04X", flags), id: id, dates: date_fields(dates),
+    { type: "file", flags: format("0x%04X", flags), reserved: reserved, id: id, dates: date_fields(dates),
       bsd: bsd_report(bytes_at(data, 32, 16)), file_type: four_chars(user_info.byteslice(0, 4)),
       creator: four_chars(user_info.byteslice(4, 4)), user_info: hex(user_info), finder_info: hex(bytes_at(data, 64, 16)),
       text_encoding: fields_at(data, 80, 4, "N").first,
@@ -493,6 +493,184 @@ module HfsPlusFields
     { stats: stats, first_records: first, root_children: root_children, walk_problem: problem }.compact
   end
 
+  # ---- attributes, extents overflow and compression ----
+
+  MAX_LEAF_RECORDS = 1 << 20
+  MAX_TABLE_ENTRIES = 4096
+  PREVIEW_BYTES = 16
+  ATTRIBUTE_KINDS = { 0x10 => "inline", 0x20 => "fork", 0x30 => "extents" }.freeze
+  DECMPFS_NAME = "com.apple.decmpfs"
+  OWNER_FLAG_COMPRESSED = 0x20
+
+  # The raw leaf records of a tree in key order. A loop in the chain, a node
+  # that is not a leaf or more than MAX_LEAF_RECORDS records is Malformed.
+  def leaf_slices(volume, fork, tree)
+    seen = Set.new
+    slices = []
+    node = tree[:first_leaf]
+    until node.zero?
+      raise Malformed, "leaf chain loops at #{node}" unless seen.add?(node)
+
+      raw = read_node(volume, fork, node, tree[:node_size])
+      desc = descriptor(raw)
+      raise Malformed, "node #{node} on the leaf chain has kind #{desc.kind}" unless desc.kind == -1
+
+      slices.concat(record_slices(raw, desc.num_records))
+      raise Malformed, "more than #{MAX_LEAF_RECORDS} leaf records" if slices.size > MAX_LEAF_RECORDS
+
+      node = desc.flink
+    end
+    slices
+  end
+
+  # The records of a leaf chain: how many there are and the first `limit`
+  # decoded by the block.
+  def leaf_report(volume, fork, tree, limit, &decoder)
+    slices = leaf_slices(volume, fork, tree)
+    { count: slices.size, records: slices.first(limit).map(&decoder) }
+  end
+
+  # An attribute leaf record: key (length, pad, fileID, startBlock, name
+  # length, name units) then data that begins with its four-byte type.
+  AttributeRecord = Data.define(:file_id, :name, :start_block, :type, :data)
+
+  def parse_attribute(slice)
+    key_length, _, file_id, start_block, name_length = fields_at(slice, 0, 14, "nnNNn")
+    raise Malformed, "attribute key length #{key_length} disagrees with name length #{name_length}" unless key_length == 12 + 2 * name_length
+
+    data = bytes_at(slice, 2 + key_length, slice.bytesize - 2 - key_length)
+    AttributeRecord.new(file_id, name_text(bytes_at(slice, 14, 2 * name_length)), start_block, fields_at(data, 0, 4, "N").first, data)
+  end
+
+  # The value of an inline attribute: type, two reserved words, size, value.
+  def inline_value(attribute)
+    size = fields_at(attribute.data, 12, 4, "N").first
+    bytes_at(attribute.data, 16, size)
+  end
+
+  def attribute_report(attribute)
+    base = { file_id: attribute.file_id, name: attribute.name, start_block: attribute.start_block,
+             kind: ATTRIBUTE_KINDS.fetch(attribute.type, format("0x%X", attribute.type)) }
+    base.merge(attribute_body(attribute))
+  end
+
+  def attribute_body(attribute)
+    data = attribute.data
+    case attribute.type
+    when 0x10
+      value = inline_value(attribute)
+      { reserved: hex(bytes_at(data, 4, 8)), size: value.bytesize, value_head: hex(value.byteslice(0, PREVIEW_BYTES)),
+        value_sha256: Digest::SHA256.hexdigest(value), record_bytes_after_value: data.bytesize - 16 - value.bytesize }
+    when 0x20
+      { reserved: fields_at(data, 4, 4, "N").first, fork: fork_report(parse_fork(bytes_at(data, 8, 80))) }
+    when 0x30
+      { reserved: fields_at(data, 4, 4, "N").first, extents: extent_list(fields_at(data, 8, 64, "N*")) }
+    else
+      { data_head: hex(data.byteslice(0, PREVIEW_BYTES)) }
+    end
+  end
+
+  def extent_list(words) = words.each_slice(2).reject { _2.zero? }.map { "#{_1}+#{_2}" }
+
+  # An extents overflow leaf record: key (length 10, fork type, pad, fileID,
+  # startBlock) then eight extent descriptors.
+  def extent_record(slice)
+    key_length, fork_type, _, file_id, start_block = fields_at(slice, 0, 12, "nCCNN")
+    raise Malformed, "extents key length #{key_length} is not 10" unless key_length == 10
+
+    { fork: { 0 => "data", 0xFF => "resource" }.fetch(fork_type, fork_type), file_id: file_id, start_block: start_block,
+      extents: extent_list(fields_at(slice, 12, 64, "N*")) }
+  end
+
+  # The catalog's file records that carry ownerFlags 0x20, with their forks.
+  def compressed_catalog_files(volume, fork, tree)
+    leaf_slices(volume, fork, tree).filter_map do |slice|
+      parent, name, data_at = catalog_key(slice)
+      data = slice.byteslice(data_at..) || +""
+      next unless data.bytesize == FILE_RECORD_BYTES && fields_at(data, 0, 2, "n").first == 2
+      next if fields_at(data, 41, 1, "C").first.nobits?(OWNER_FLAG_COMPRESSED)
+
+      { parent: parent, name: name, id: fields_at(data, 8, 4, "N").first,
+        data_fork: parse_fork(bytes_at(data, 88, 80)), rsrc_fork: parse_fork(bytes_at(data, 168, 80)) }
+    end
+  end
+
+  # Every compressed file with its decmpfs header and the head of its resource
+  # fork's chunk table, read from the volume and not through the mount.
+  def compression_report(volume, forks, trees)
+    attributes = leaf_slices(volume, forks[:attributes], trees[:attributes]).map { parse_attribute(_1) }
+    decmpfs = attributes.select { _1.name == DECMPFS_NAME }.to_h { [_1.file_id, _1] }
+    compressed_catalog_files(volume, forks[:catalog], trees[:catalog]).map do |file|
+      compressed_file_report(volume, file, decmpfs[file[:id]])
+    end
+  end
+
+  def compressed_file_report(volume, file, attribute)
+    report = file.slice(:parent, :name, :id).merge(data_fork: fork_report(file[:data_fork]), rsrc_fork: fork_report(file[:rsrc_fork]))
+    return report.merge(decmpfs: "absent") unless attribute
+    return report.merge(decmpfs: "not inline: #{attribute_report(attribute)[:kind]}") unless attribute.type == 0x10
+
+    header = decmpfs_header(inline_value(attribute))
+    report.merge(decmpfs: header, resource_table: resource_table(volume, file[:rsrc_fork], header))
+  end
+
+  def decmpfs_header(value)
+    magic = bytes_at(value, 0, 4)
+    type, size = fields_at(value, 4, 12, "VQ<")
+    payload = value.byteslice(16..)
+    { magic: hex(magic), type: type, uncompressed_size: size, attribute_bytes: value.bytesize, payload_bytes: payload.bytesize,
+      payload_head: hex(payload.byteslice(0, PREVIEW_BYTES)), payload_tail: hex(payload.byteslice([payload.bytesize - 8, 0].max, 8)) }
+  end
+
+  # Read up to `length` bytes of a fork from `offset`, stopping at its logical size.
+  def fork_prefix(volume, fork, offset, length)
+    volume.read_fork(fork, offset, [[length, fork.logical_size - offset].min, 0].max)
+  end
+
+  CHUNK_BYTES = 65_536
+
+  def resource_table(volume, fork, header)
+    return "no resource fork" if fork.logical_size.zero?
+
+    chunks = header[:uncompressed_size].divmod(CHUNK_BYTES).then { |whole, rest| whole + (rest.zero? ? 0 : 1) }
+    case header[:type]
+    when 4 then classic_table(volume, fork).merge(expected_chunks: chunks)
+    when 8, 12 then offset_table(volume, fork).merge(expected_chunks: chunks)
+    else { unexpected_resource_fork_bytes: fork.logical_size }
+    end
+  end
+
+  # Type 4: 16-byte big-endian header, at the data offset a big-endian
+  # length, then a little-endian count and (offset, length) pairs.
+  def classic_table(volume, fork)
+    data_off, map_off, data_len, map_len = fields_at(fork_prefix(volume, fork, 0, 16), 0, 16, "N4")
+    head = fork_prefix(volume, fork, data_off, 8)
+    resource_len = fields_at(head, 0, 4, "N").first
+    count = fields_at(head, 4, 4, "V").first
+    pairs = fields_at(fork_prefix(volume, fork, data_off + 8, 8 * [count, MAX_TABLE_ENTRIES].min), 0, 8 * [count, MAX_TABLE_ENTRIES].min, "V*").each_slice(2).to_a
+    { fork_size: fork.logical_size, data_offset: data_off, map_offset: map_off, data_length: data_len, map_length: map_len,
+      resource_length: resource_len, chunk_count: count, pairs: pairs.map { "#{_1}+#{_2}" },
+      chunk_heads: pairs.first(8).map { |offset, _| hex(fork_prefix(volume, fork, data_off + 4 + offset, 4)) },
+      header_hex: hex(fork_prefix(volume, fork, 0, 32)), map_head: hex(fork_prefix(volume, fork, map_off, 32)) }
+  end
+
+  # Types 8 and 12: a table of little-endian words that ends where the first
+  # offset, the first word, says the chunks begin. The words are reported as
+  # found, up to MAX_TABLE_WORDS_SHOWN of them.
+  MAX_TABLE_WORDS_SHOWN = 24
+
+  def offset_table(volume, fork)
+    first = fields_at(fork_prefix(volume, fork, 0, 4), 0, 4, "V").first
+    raise Malformed, "first offset #{first} is not a table of 4 to #{4 * MAX_TABLE_ENTRIES} bytes" unless first.between?(4, 4 * MAX_TABLE_ENTRIES) && first.nobits?(3)
+
+    words = fields_at(fork_prefix(volume, fork, 0, first), 0, first, "V*")
+    offsets = words.take_while.with_index { |word, i| i.zero? || word > words[i - 1] }
+    { fork_size: fork.logical_size, first_offset: first, table_words: words.size, ascending_offsets: offsets.size,
+      words: words.first(MAX_TABLE_WORDS_SHOWN), words_after_offsets_are_zero: words.drop(offsets.size).all?(0),
+      last_offset_is_fork_size: offsets.last == fork.logical_size,
+      chunk_heads: offsets.each_cons(2).first(8).map { |start, _| hex(fork_prefix(volume, fork, start, 4)) } }
+  end
+
   # ---- journal ----
 
   def journal_report(volume, header)
@@ -546,6 +724,17 @@ module HfsPlusFields
     { error: e.message }
   end
 
+  # The decoded records of one tree; the catalog walk keeps its own statistics.
+  def leaf_records(problems, name, volume, fork, tree, limit)
+    section(problems, "#{name} records") do
+      case name
+      when :catalog then catalog_report(volume, fork, tree, limit)
+      when :attributes then leaf_report(volume, fork, tree, limit) { attribute_report(parse_attribute(_1)) }
+      when :extents then leaf_report(volume, fork, tree, limit) { extent_record(_1) }
+      end
+    end
+  end
+
   def tree_sections(volume, header, problems, limit)
     forks = header[:forks]
     %i[extents catalog attributes].to_h do |name|
@@ -554,7 +743,7 @@ module HfsPlusFields
 
       tree = section(problems, "#{name} tree") { tree_header_report(volume, fork) }
       report = tree.merge(present: true)
-      report[:records] = section(problems, "catalog records") { catalog_report(volume, fork, tree, limit) } if name == :catalog && !tree.key?(:error)
+      report[:records] = leaf_records(problems, name, volume, fork, tree, limit) unless tree.key?(:error)
       [name, report]
     end
   end
@@ -565,6 +754,7 @@ module HfsPlusFields
 
     volume = volume.with(block_size: header[:block_size])
     alternate = alternate_report(volume, header, problems)
+    trees = tree_sections(volume, header, problems, limit)
     {
       boot_area: section(problems, "boot area") { boot_report(volume) },
       volume_header: header_report(header),
@@ -572,8 +762,16 @@ module HfsPlusFields
       layout: section(problems, "layout") { layout_report(volume, header) },
       allocation_bitmap: section(problems, "allocation bitmap") { bitmap_report(volume, header) },
       journal: (section(problems, "journal") { journal_report(volume, header) } if header[:attributes][13] == 1 && header[:journal_info_block] != 0),
-      trees: tree_sections(volume, header, problems, limit)
+      trees: trees,
+      compression: compression_section(volume, header, trees, problems)
     }.compact
+  end
+
+  # Compressed files, when the volume has an attributes tree to hold decmpfs.
+  def compression_section(volume, header, trees, problems)
+    return unless %i[catalog attributes].all? { trees[_1][:present] && !trees[_1].key?(:error) }
+
+    section(problems, "compression") { compression_report(volume, header[:forks], trees) }
   end
 
   def alternate_report(volume, header, problems)

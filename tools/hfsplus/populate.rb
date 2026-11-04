@@ -22,6 +22,7 @@
 #   dir-mode-1777, dir-mode-0500                  directories with these modes
 #   size-1 again, given another owner and group   ownership changes
 require "fileutils"
+require "open3"
 
 module HfsPlusPopulate
   TIME_1904 = -2_082_844_800
@@ -41,11 +42,16 @@ module HfsPlusPopulate
       file_times + dir_and_link_times + file_modes + dir_modes + ownership
   end
 
-  # Run `step` against `root`, appending what happened to `attempts`.
+  # Raised when a program a step runs fails; its output is the message.
+  class ToolFailed < StandardError; end
+
+  # Run `step` against `root`, appending what happened to `attempts`. An
+  # action that returns a String has observed something, which is kept as the
+  # attempt's `output`.
   def attempt(attempts, step, root)
-    step.action.call(root)
-    attempts << { step: step.step, path: step.path, ok: true }
-  rescue SystemCallError => e
+    result = step.action.call(root)
+    attempts << { step: step.step, path: step.path, ok: true }.merge(result.is_a?(String) ? { output: result } : {})
+  rescue SystemCallError, ToolFailed => e
     attempts << { step: step.step, path: step.path, ok: false, error: e.class.name.delete_prefix("Errno::"), message: e.message }
   end
 
@@ -137,6 +143,26 @@ module HfsPlusPopulate
   def pattern(length, seed) = Array.new(length) { (_1 * 7 + seed) & 0xff }.pack("C*")
 
   def write_file(root, rel, content) = File.binwrite(File.join(root, rel), content)
+
+  # Run a program without a shell and return its combined output; a failure
+  # raises ToolFailed carrying the output.
+  def tool(*argv)
+    out, status = Open3.capture2e([argv.first, argv.first], *argv.drop(1))
+    raise ToolFailed, "#{argv.join(' ')}: exit #{status.exitstatus}: #{out.strip}" unless status.success?
+
+    out
+  end
+
+  # One line about what `lstat` of `path` reports, or the error it gives.
+  def observe(path)
+    st = File.lstat(path)
+    format("%s kind=%s ino=%d nlink=%d mode=%04o uid=%d size=%d mtime=%d birth=%d", File.basename(path), st.ftype, st.ino,
+           st.nlink, st.mode & 0o7777, st.uid, st.size, st.mtime.to_i, st.birthtime.to_i)
+  rescue SystemCallError => e
+    "#{File.basename(path)} #{e.class.name.delete_prefix('Errno::')}"
+  end
+
+  def mkdir_p(root, rel) = FileUtils.mkdir_p(File.join(root, rel))
 
   def other_group = Process.groups.reject { _1 == Process.gid }.first || 0
 end
