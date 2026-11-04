@@ -42,7 +42,13 @@
 #   commands.txt      the commands run
 #   SHA256SUMS        the digest of each file above
 #
+# `--small-names` instead writes OUT_ROOT/e3-small-names/: one small volume per
+# probe name for `fsck_hfs -n` verdicts and stored U+0000 (fsck.tsv), and one
+# volume per comparator for marks that decompose into marks (class0-VARIANT.tsv,
+# class0-differences.tsv), see `run_small_names`.
+#
 # Usage: unicode-probe.rb [--variant hfsplus|hfsx] [--analyze-only] [--sample N]
+#                         [--overwrite] [--small-names]
 require "digest"
 require "fileutils"
 require "json"
@@ -61,6 +67,8 @@ module HfsPlusUnicodeProbe
   CATALOG_CLUMP_BLOCKS = 256 * 1024 # 1 GiB, one extent: fields.rb reads only the first eight.
   VARIANTS = { "hfsplus" => [], "hfsx" => ["-s"] }.freeze
   SURROGATES = (0xD800..0xDFFF)
+  HIGH_SURROGATES = (0xD800..0xDBFF)
+  LOW_SURROGATES = (0xDC00..0xDFFF)
   HANGUL = (0xAC00..0xD7A3)
   COLUMNS = %w[id scope disposition representative pass readdir_units leaf_units rank].freeze
   # POSIX spellings the system stores as another unit: the Mac path separator
@@ -76,16 +84,43 @@ module HfsPlusUnicodeProbe
   ASCII_A = 0x61
   ASCII_B = 0x62
 
-  Config = Data.define(:unicode_data, :root, :work, :variants, :sample, :analyze_only, :keep_image)
+  # The `between` names the system may refuse, by value: U+0000 cannot reach a
+  # C path, and `a/b` names a directory that does not exist.
+  BETWEEN_REFUSALS = { 0x0000 => "path-terminator", 0x2F => "ENOENT" }.freeze
+  SEED_ID = "ab"
+  SUPPLEMENTARY_SCOPES = %w[supp coverage].freeze
+  # Volumes for `--small-names`: one name each, so a verdict belongs to one name.
+  SMALL_VOLUME_BYTES = 8 << 20
+
+  Config = Data.define(:unicode_data, :root, :work, :variants, :sample, :analyze_only, :keep_image, :overwrite, :small_names)
 
   # One probe: the bytes given to the system, and the scalar values they spell.
   Item = Data.define(:id, :scope, :cps, :name)
-  # What the driver did with one probe; filled in pass by pass.
-  Outcome = Struct.new(:disposition, :representative, :pass, :ino)
+  # One attempt to create a file: its inode, or the name of the failure.
+  Attempt = Data.define(:ino, :failure)
+  # What the driver did with one probe. Pass 0 decides the disposition and
+  # representative; `pass` and `ino` say where the probe was finally created.
+  Outcome = Data.define(:disposition, :representative, :pass, :ino)
   # One catalog leaf record of a file or folder.
   Leaf = Data.define(:parent, :units, :rank)
-  # One row of a SET.tsv file, as text.
-  Row = Data.define(*COLUMNS.map(&:to_sym))
+  # One row of a SET.tsv file.
+  Row = Data.define(*COLUMNS.map(&:to_sym)) do
+    def cells = to_h.values
+  end
+
+  # One row of fold.tsv; `unit` is the table index and the other fields are text.
+  FoldRow = Data.define(:unit, :status, :fold, :chain) do
+    def cells = [HfsPlusUnicodeProbe.hex(unit), status, fold, chain]
+  end
+
+  # One row of differences.tsv and residual.tsv.
+  Difference = Data.define(:set, :id, :check, :predicted, :observed) do
+    def cells = to_h.values
+  end
+
+  # One collision class on the catalog chain: its position (`rank`), the stored
+  # units its names show (`members`, ascending) and what order leaves of its fold.
+  ChainClass = Data.define(:rank, :members, :status, :fold)
 
   module_function
 
@@ -160,7 +195,7 @@ module HfsPlusUnicodeProbe
     marks = data.marks
     sets = {
       "alone" => values.map { |cp, scope| item(cps: [cp], scope: scope) },
-      "between" => [item(id: "ab", cps: [ASCII_A, ASCII_B], scope: "seed")] +
+      "between" => [item(id: SEED_ID, cps: [ASCII_A, ASCII_B], scope: "seed")] +
         values.map { |cp, scope| item(id: hex(cp), cps: [ASCII_A, cp, ASCII_B], scope: scope) },
       "pairs" => marks.product(marks).map { |m1, m2| item(id: "#{hex(m1)}+#{hex(m2)}", cps: [ASCII_A, m1, m2], scope: "pair") },
       "hangul" => HANGUL.flat_map { [item(cps: [_1], scope: "hangul"), item(cps: hangul_jamo(_1), scope: "hangul-jamo")] },
@@ -171,17 +206,17 @@ module HfsPlusUnicodeProbe
 
   # ---- the mounted volume ----
 
-  # Create one empty file, returning its inode or the name of the failure. A
-  # NUL ends a C path, so a name holding one cannot reach the system at all.
+  # Create one empty file. A NUL ends a C path, so a name holding one cannot
+  # reach the system at all.
   def create(path)
     io = IO.new(IO.sysopen(path, File::WRONLY | File::CREAT | File::EXCL, 0o644))
     ino = io.stat.ino
     io.close
-    ino
+    Attempt.new(ino: ino, failure: nil)
   rescue SystemCallError => e
-    e.class.name.split("::").last
+    Attempt.new(ino: nil, failure: e.class.name.split("::").last)
   rescue ArgumentError
-    "path-terminator"
+    Attempt.new(ino: nil, failure: "path-terminator")
   end
 
   # Which existing thing an unsuccessful name resolves to: an earlier name of
@@ -194,28 +229,28 @@ module HfsPlusUnicodeProbe
   end
 
   # One pass in the current directory; returns the items to retry in the next,
-  # those that collided with a name this pass created.
+  # those that collided with a name this pass created. Pass 0 decides each
+  # probe's disposition and representative: a later pass only records where a
+  # retried probe was finally created.
   def attempt_pass(pending, pass, outcomes)
     own = File.stat(".").ino
     parent = File.stat("..").ino
     created = {}
-    pending.select do |probe|
-      outcome = outcomes[probe.id] ||= Outcome.new
+    retry_next = []
+    pending.each do |probe|
       path = "./".b + probe.name
-      result = create(path)
-      if result.is_a?(Integer)
-        created[result] = probe.id
-        outcome.pass = pass
-        outcome.ino = result
-        outcome.disposition ||= "created"
-        outcome.representative ||= "self"
-        next false
+      attempt = create(path)
+      if attempt.ino
+        created[attempt.ino] = probe.id
+        decided = pass.zero? ? Outcome.new(disposition: "created", representative: "self", pass: nil, ino: nil) : outcomes.fetch(probe.id)
+        outcomes[probe.id] = decided.with(pass: pass, ino: attempt.ino)
+      else
+        collision = collided_with(path, created, own, parent)
+        outcomes[probe.id] = Outcome.new(disposition: attempt.failure, representative: collision, pass: nil, ino: nil) if pass.zero?
+        retry_next << probe if attempt.failure == "EEXIST" && !NOT_A_NAME.include?(collision)
       end
-      collision = collided_with(path, created, own, parent)
-      outcome.disposition ||= result
-      outcome.representative ||= collision
-      result == "EEXIST" && !NOT_A_NAME.include?(collision)
     end
+    retry_next
   end
 
   def probe_set(set, items)
@@ -254,7 +289,16 @@ module HfsPlusUnicodeProbe
 
   def name_units(name) = utf16(name.dup.force_encoding(Encoding::UTF_8).unpack("U*"))
 
+  # A directory that is not a mount point would take the probe names onto the
+  # host's own volume, so it is refused before any name is created.
+  def require_mount_point(mount)
+    return if File.stat(mount).dev != File.stat(File.dirname(mount)).dev
+
+    raise Error, "#{mount} is not a mount point"
+  end
+
   def observe_volume(mount, sets)
+    require_mount_point(mount)
     Dir.chdir(mount) do
       File.write(".metadata_never_index", "")
       sets.to_h do |set, items|
@@ -279,7 +323,9 @@ module HfsPlusUnicodeProbe
       volume = unsized.with(block_size: header[:block_size])
       fork = header[:forks].fetch(:catalog)
       tree = HfsPlusFields.tree_header_report(volume, fork)
-      leaves = walk_leaf_chain(volume, fork, tree)
+      leaves, records = walk_leaf_chain(volume, fork, tree)
+      raise Error, "the leaf chain holds #{records} records, the tree header says #{tree[:leaf_records]}" unless records == tree[:leaf_records]
+
       extents = fork.extents.count { _1.count.positive? }
       info = { signature: header[:signature], key_compare_type: format("0x%02X", tree[:key_compare_type]), node_size: tree[:node_size],
                depth: tree[:depth], leaf_records: tree[:leaf_records], total_nodes: tree[:total_nodes], free_nodes: tree[:free_nodes],
@@ -288,10 +334,13 @@ module HfsPlusUnicodeProbe
     end
   end
 
+  # The leaves by node ID, and the number of leaf records of every kind
+  # (threads included), which the tree header also counts.
   def walk_leaf_chain(volume, fork, tree)
     leaves = {}
     ranks = Hash.new(0)
     seen = Set.new
+    records = 0
     node = tree[:first_leaf]
     until node.zero?
       raise Error, "leaf chain loops at #{node}" unless seen.add?(node)
@@ -300,42 +349,49 @@ module HfsPlusUnicodeProbe
       desc = HfsPlusFields.descriptor(raw)
       raise Error, "node #{node} on the leaf chain has kind #{desc.kind}" unless desc.kind == -1
 
+      records += desc.num_records
       HfsPlusFields.record_slices(raw, desc.num_records).each do |slice|
         parent, _, data_at = HfsPlusFields.catalog_key(slice)
         type, _, _, cnid = slice.byteslice(data_at, 12).unpack("nnNN")
         next unless [1, 2].include?(type)
 
-        units = slice.byteslice(8, data_at - 8).unpack("n*").first(slice.byteslice(6, 2).unpack1("n"))
-        leaves[cnid] = Leaf.new(parent: parent, units: units, rank: ranks[parent])
+        # catalog_key has checked the name length: the key's units end at data_at.
+        leaves[cnid] = Leaf.new(parent: parent, units: slice.byteslice(8, data_at - 8).unpack("n*"), rank: ranks[parent])
         ranks[parent] += 1
       end
       node = desc.flink
     end
-    leaves
+    [leaves, records]
   end
 
   # ---- writing the observation ----
 
-  def out_dir(cfg, variant) = File.join(cfg.root, "e3-#{variant}")
+  # Sampled runs measure only; they never share a directory with the evidence.
+  def out_dir(cfg, variant) = File.join(cfg.root, "e3-#{variant}#{cfg.sample == 1 ? "" : "-sample#{cfg.sample}"}")
 
   def set_rows(items, observed, leaves)
     items.map do |probe|
       outcome = observed[:outcomes].fetch(probe.id)
       leaf = leaves[outcome.ino]
+      raise Error, "#{probe.id} was created but has no catalog leaf" if outcome.ino && !leaf
+
       listed = leaf && observed[:listings].dig(leaf.parent, 0, leaf.rank)
-      [probe.id, probe.scope, outcome.disposition, outcome.representative, outcome.pass || "-",
-       listed ? units_text(listed) : "-", leaf ? units_text(leaf.units) : "-", leaf ? leaf.rank : "-"]
+      raise Error, "#{probe.id} has no readdir entry at rank #{leaf.rank}" if leaf && !listed
+
+      Row.new(id: probe.id, scope: probe.scope, disposition: outcome.disposition, representative: outcome.representative,
+              pass: outcome.pass || "-", readdir_units: listed ? units_text(listed) : "-",
+              leaf_units: leaf ? units_text(leaf.units) : "-", rank: leaf ? leaf.rank : "-")
     end
   end
 
   def write_tsv(path, columns, rows)
     File.open(path, "w") do |file|
       file.write("# #{columns.join("\t")}\n")
-      rows.each { file.write("#{_1.join("\t")}\n") }
+      rows.each { file.write("#{_1.cells.join("\t")}\n") }
     end
   end
 
-  # A directory whose readdir count differs from its catalog children, which
+  # Directories whose readdir count differs from their catalog children, which
   # would make the join of listing position and leaf rank meaningless.
   def listing_count_mismatches(observed, leaves)
     counts = leaves.values.map(&:parent).tally
@@ -345,8 +401,95 @@ module HfsPlusUnicodeProbe
   def fsck_verdict(attachments, log, image)
     attachments.with(image) do |device|
       output, ok = log.run("fsck_hfs", "-d", "-n", device.sub("/dev/disk", "/dev/rdisk"))
-      { ok: ok, illegal_names: output.lines.grep(/illegal name is|replacement name is/).map(&:strip), last_line: output.lines.last.strip }
+      { ok: ok, illegal_names: output.lines.grep(/illegal name is|replacement name is/).map(&:strip), last_line: output.lines.last.to_s.strip }
     end
+  end
+
+  # What the tables rest on. A volume that fails one of these is not evidence,
+  # so each failure stops the run before anything is written.
+  def check_integrity(observed, leaves, clean)
+    problems = readdir_problems(observed, leaves)
+    problems << "fsck_hfs -n still fails after the illegal names are removed: #{clean[:last_line]}" unless clean[:ok]
+    raise Error, problems.join("; ") unless problems.empty?
+  end
+
+  # Where what readdir returned cannot be joined to the catalog leaves.
+  def readdir_problems(observed, leaves)
+    observed.each_with_object([]) do |(set, o), problems|
+      mismatched = listing_count_mismatches(o, leaves)
+      lost = o[:listings].values.flat_map(&:last)
+      problems << "#{set}: readdir lists a different number of names than the catalog holds in #{mismatched.size} directories" unless mismatched.empty?
+      problems << "#{set}: #{lost.size} names readdir returned cannot be found again, such as #{units_text(lost.first)}" unless lost.empty?
+    end
+  end
+
+  # ---- one disposable volume ----
+
+  def format_volume(log, attachments, image, variant, bytes:, catalog_clump: nil)
+    raise Error, "cannot create #{image}" unless log.run("mkfile", "-n", bytes.to_s, image).last
+
+    attachments.with(image) do |device|
+      raw = device.sub("/dev/disk", "/dev/rdisk")
+      clump = catalog_clump ? ["-c", "c=#{catalog_clump}"] : []
+      raise Error, "newfs_hfs failed on #{raw}" unless log.run("newfs_hfs", *VARIANTS.fetch(variant), "-v", "E3", "-b", BLOCK_BYTES.to_s, *clump, raw).last
+    end
+  end
+
+  def remove_illegal_names(mount)
+    FSCK_ILLEGAL_NAMES.map { File.join(mount, _1) }.each { File.unlink(_1) if File.exist?(_1) }
+  end
+
+  def refuse_existing_capture(out, cfg)
+    return if cfg.overwrite || !Dir.exist?(out) || Dir.empty?(out)
+
+    raise Error, "#{out} already holds a capture; --overwrite replaces it"
+  end
+
+  # Releases every device this run attached, keeps the commands run and removes
+  # the scratch files. It returns a failed release instead of raising it, so
+  # that it never hides the error already on its way out.
+  def finish_run(attachments, log, out, images, mount, keep_image:)
+    leftover = begin
+      attachments.release
+      nil
+    rescue HfsPlusCapture::Error => e
+      warn "unicode-probe: #{e.message}"
+      e
+    end
+    File.write(File.join(out, "commands.txt"), log.to_s)
+    FileUtils.rm_f(images) unless keep_image
+    remove_mount_directory(mount) unless leftover
+    leftover
+  end
+
+  # Never rm_rf: a mount point that is still mounted would lose the volume's files.
+  def remove_mount_directory(mount)
+    Dir.rmdir(mount)
+  rescue SystemCallError => e
+    warn "unicode-probe: cannot remove #{mount}: #{e.message}"
+  end
+
+  # Format, probe, check and read back one volume; write its tables.
+  def capture_volume(cfg, variant, sets, log, attachments, image, mount, out)
+    format_volume(log, attachments, image, variant, bytes: VOLUME_BYTES, catalog_clump: CATALOG_CLUMP_BLOCKS)
+    observed = attachments.with(image, mountpoint: mount) { observe_volume(mount, sets) }
+    verdict = fsck_verdict(attachments, log, image)
+    # The leaves are read before the mount that removes the two illegal names:
+    # that mount rewrites the catalog, and the ranks and inodes recorded while
+    # probing belong to the catalog as the probe left it.
+    leaves, info = read_leaves(image)
+    attachments.with(image, mountpoint: mount) { remove_illegal_names(mount) }
+    clean = fsck_verdict(attachments, log, image)
+    check_integrity(observed, leaves, clean)
+    sets.each { |set, items| write_tsv(File.join(out, "#{set}.tsv"), COLUMNS, set_rows(items, observed.fetch(set), leaves)) }
+    File.write(File.join(out, "volume.json"), JSON.pretty_generate(
+      variant: variant, sample: cfg.sample, image_allocated_bytes: File.stat(image).blocks * 512, tree: info,
+      fsck: verdict, fsck_without_illegal_names: clean,
+      sets: observed.transform_values do |o|
+        { directories: o[:directories].keys, seconds: o[:seconds], listing_count_mismatches: listing_count_mismatches(o, leaves),
+          readdir_names_not_found: o[:listings].values.flat_map(&:last).map { units_text(_1) } }
+      end
+    ))
   end
 
   def run_volume(cfg, variant, sets)
@@ -355,32 +498,15 @@ module HfsPlusUnicodeProbe
     image = File.join(cfg.work, "#{variant}.img")
     mount = File.join(cfg.work, "#{variant}.mnt")
     out = out_dir(cfg, variant)
+    refuse_existing_capture(out, cfg)
     FileUtils.mkdir_p([cfg.work, mount, out])
-    raise Error, "cannot create #{image}" unless log.run("mkfile", "-n", VOLUME_BYTES.to_s, image).last
-
-    attachments.with(image) do |device|
-      raw = device.sub("/dev/disk", "/dev/rdisk")
-      format_args = ["newfs_hfs", *VARIANTS.fetch(variant), "-v", "E3", "-b", BLOCK_BYTES.to_s, "-c", "c=#{CATALOG_CLUMP_BLOCKS}", raw]
-      raise Error, "newfs_hfs failed on #{raw}" unless log.run(*format_args).last
+    leftover = nil
+    begin
+      capture_volume(cfg, variant, sets, log, attachments, image, mount, out)
+    ensure
+      leftover = finish_run(attachments, log, out, [image], mount, keep_image: cfg.keep_image)
     end
-    observed = attachments.with(image, mountpoint: mount) { observe_volume(mount, sets) }
-    verdict = fsck_verdict(attachments, log, image)
-    leaves, info = read_leaves(image)
-    sets.each { |set, items| write_tsv(File.join(out, "#{set}.tsv"), COLUMNS, set_rows(items, observed.fetch(set), leaves)) }
-    attachments.with(image, mountpoint: mount) { FileUtils.rm_f(FSCK_ILLEGAL_NAMES.map { File.join(mount, _1) }) }
-    File.write(File.join(out, "volume.json"), JSON.pretty_generate(
-      variant: variant, sample: cfg.sample, image_allocated_bytes: File.stat(image).blocks * 512, tree: info,
-      fsck: verdict, fsck_without_illegal_names: fsck_verdict(attachments, log, image),
-      sets: observed.transform_values do |o|
-        { directories: o[:directories].keys, seconds: o[:seconds], listing_count_mismatches: listing_count_mismatches(o, leaves),
-          readdir_names_not_found: o[:listings].values.flat_map(&:last).map { units_text(_1) } }
-      end
-    ))
-  ensure
-    attachments&.release
-    File.write(File.join(out, "commands.txt"), log.to_s) if log && out && File.directory?(out)
-    FileUtils.rm_f(image) if image && !cfg.keep_image
-    FileUtils.rm_rf(mount) if mount
+    raise leftover if leftover
   end
 
   # ---- the Unicode 3.2.0 prediction ----
@@ -400,6 +526,9 @@ module HfsPlusUnicodeProbe
     end
 
     def stored(cps) = HfsPlusUnicodeProbe.utf16(canonical_order(cps.flat_map { decompose(_1) }))
+
+    # Whether the driver stores something other than the value itself.
+    def decomposes?(cp) = HANGUL.cover?(cp) || (!unchanged?(cp) && !@data.canonical(cp).nil?)
     def sort_key(units) = units.filter_map { fold(_1) }
 
     # The design's rule that an all-ignorable name folds onto its parent's thread.
@@ -418,10 +547,11 @@ module HfsPlusUnicodeProbe
     private
 
     def combining_class(cp) = @data.class_of(cp)
+    def unchanged?(cp) = UNCHANGED_DECOMPOSITION.any? { _1.cover?(cp) }
 
     def decompose(cp)
       return HfsPlusUnicodeProbe.hangul_jamo(cp) if HANGUL.cover?(cp)
-      return [cp] if UNCHANGED_DECOMPOSITION.any? { _1.cover?(cp) }
+      return [cp] if unchanged?(cp)
 
       mapped = @data.canonical(cp)
       mapped ? mapped.flat_map { decompose(_1) } : [cp]
@@ -468,11 +598,23 @@ module HfsPlusUnicodeProbe
   # ---- comparing a stored observation ----
 
   def read_rows(path)
-    File.foreach(path, chomp: true).drop(1).map { Row.new(*_1.split("\t", -1)) }
+    File.foreach(path, chomp: true).drop(1).map do |line|
+      fields = line.split("\t", -1)
+      raise Error, "#{path}: #{fields.size} fields in #{line.inspect}" unless fields.size == COLUMNS.size
+
+      row = Row.new(**COLUMNS.map(&:to_sym).zip(fields).to_h)
+      raise Error, "#{path}: #{row.id} is created but has no leaf" if row.disposition == "created" && [row.pass, row.readdir_units, row.leaf_units, row.rank].include?("-")
+
+      row
+    end
   end
 
-  # Replay pass 0 of a set under a prediction: what each name should store and
-  # which earlier name it should collide with.
+  def disagreement(set, id, check, predicted, observed) = (Difference.new(set: set, id: id, check: check, predicted: predicted, observed: observed) unless predicted == observed)
+
+  # Replay pass 0 of a set under a prediction, which is where every probe's
+  # disposition and representative were decided: the probes in creation order,
+  # each colliding with the first earlier probe that has the same predicted
+  # key. The later passes hold only probes that pass 0 already refused.
   def differences_of_set(set, items, rows, prediction)
     by_id = rows.to_h { [_1.id, _1] }
     first_with_key = {}
@@ -482,11 +624,11 @@ module HfsPlusUnicodeProbe
       key = prediction.sort_key(stored)
       expected = prediction.meets_thread?(key) ? "dir" : first_with_key.fetch(key, "self")
       first_with_key[key] ||= probe.id if row.disposition == "created"
-      next [[set, row.id, "refused", "created", "#{row.disposition}:#{row.representative}"]] unless %w[created EEXIST].include?(row.disposition)
+      next [disagreement(set, row.id, "refused", "created", "#{row.disposition}:#{row.representative}")] unless %w[created EEXIST].include?(row.disposition)
 
       suffix = probe.cps.any? { _1 > 0xFFFF } ? "-supplementary" : ""
-      [([set, row.id, "units#{suffix}", units_text(stored), row.leaf_units] if row.leaf_units != "-" && row.leaf_units != units_text(stored)),
-       ([set, row.id, "representative#{suffix}", expected, row.representative] if expected != row.representative)].compact
+      units = disagreement(set, row.id, "units#{suffix}", units_text(stored), row.leaf_units) unless row.leaf_units == "-"
+      [units, disagreement(set, row.id, "representative#{suffix}", expected, row.representative)].compact
     end
   end
 
@@ -496,7 +638,7 @@ module HfsPlusUnicodeProbe
       group.sort_by { _1.rank.to_i }.each_cons(2).filter_map do |a, b|
         ka = prediction.sort_key(parse_units(a.leaf_units))
         kb = prediction.sort_key(parse_units(b.leaf_units))
-        [set, "#{set}.#{pass}", "order", "#{b.id} before #{a.id}", "#{a.id} then #{b.id}"] if (ka <=> kb) != -1
+        Difference.new(set: set, id: "#{set}.#{pass}", check: "order", predicted: "#{b.id} before #{a.id}", observed: "#{a.id} then #{b.id}") if (ka <=> kb) != -1
       end
     end
   end
@@ -506,71 +648,195 @@ module HfsPlusUnicodeProbe
     units[1] if units.size == 3 && units.first == ASCII_A && units.last == ASCII_B
   end
 
-  # One row per UTF-16 unit, 0000 to FFFF, in the terms of a 65536-entry table,
-  # read from the `between` set, whose names reach `.` and `/`:
-  #
-  #   unit    the table index
-  #   status  determined: `fold` is the only value that catalog order and the
-  #                       collision class allow
-  #           ambiguous:  `fold` lists the class members order leaves possible;
-  #                       each gives the same comparison over every stored name
-  #           ignorable:  `aXb` collides with `ab`; `fold` is 0000
-  #           position:   U+0000, whose fold is known only by the unit that
-  #                       sorts just before it (`after:UNIT`), or `first`
-  #           unobservable: no name stores this unit; `fold` says why: decomposes,
-  #                       escaped, system-mapped, or surrogate for the units that
-  #                       appear only inside pairs
-  def fold_rows(between)
-    index = between.to_h { [_1.id, _1] }
-    ignorable = between.select { _1.representative == "ab" }.to_set { _1.id.to_i(16) }
-    classes = between.select { middle_unit(_1) }.group_by { _1.representative == "self" ? _1.id : _1.representative }
-    chain = classes.filter_map do |rep, members|
-      head = index[rep]
-      [head.rank.to_i, members.map { middle_unit(_1) }.uniq.sort] if head && head.pass == "0" && middle_unit(head)
-    end.sort_by(&:first).map(&:last)
-    nul_at = chain.index([0])
-    resolved = resolve_chain(chain.reject { _1 == [0] })
-    (0..0xFFFF).map do |unit|
-      if unit.zero? && nul_at then [hex(unit), "position", nul_at.zero? ? "first" : "after:#{hex(chain[nul_at - 1].last)}"]
-      elsif ignorable.include?(unit) then [hex(unit), "ignorable", "0000"]
-      elsif resolved.key?(unit) then [hex(unit), *resolved[unit]]
-      else [hex(unit), "unobservable", unobservable_reason(unit)]
+  # Every `between` row is created, collides with a name of the set, or is one
+  # of the two refusals that are path syntax; anything else stops the analysis
+  # rather than being read as an unobservable unit.
+  def check_between(between)
+    ids = between.to_set(&:id)
+    between.each do |row|
+      case row.disposition
+      when "created" then nil
+      when "EEXIST" then raise Error, "between: #{row.id} collided with #{row.representative}, which is not a name" unless ids.include?(row.representative)
+      else raise Error, "between: #{row.id} was refused with #{row.disposition}" unless BETWEEN_REFUSALS[row.id.to_i(16)] == row.disposition
       end
     end
   end
 
-  # Each class's fold is one of its members, and the folds ascend along the
-  # chain: bound every class from both sides, and it is determined when the
-  # bounds meet.
-  def resolve_chain(chain)
-    lows = chain.each_with_object([]) { |members, acc| acc << members.find { _1 > (acc.last || -1) } }
-    highs = chain.reverse.each_with_object([]) { |members, acc| acc << members.reverse.find { _1 < (acc.last || 0x10000) } }.reverse
-    chain.zip(lows, highs).each_with_object({}) do |(members, low, high), resolved|
-      possible = members.select { low && high && _1.between?(low, high) }
-      answer = possible.size == 1 ? ["determined", hex(possible.first)] : ["ambiguous", possible.map { hex(_1) }.join("|")]
-      members.each { resolved[_1] = answer }
+  # The collision classes of `between` in catalog order, each as the ascending
+  # stored units its names show. A class is named by its head, the pass 0 name
+  # that created it, and sits where its head sits. The ignorable units are not
+  # on the chain: their names collide with the seed `ab`, which stores no
+  # middle unit.
+  def catalog_chain(between)
+    index = between.to_h { [_1.id, _1] }
+    classes = between.select { middle_unit(_1) }.group_by { _1.representative == "self" ? _1.id : _1.representative }
+    classes.filter_map do |head_id, members|
+      next if head_id == SEED_ID
+
+      head = index.fetch(head_id) { raise Error, "between: #{members.first.id} collided with unknown #{head_id}" }
+      raise Error, "between: class head #{head_id} stores #{head.leaf_units}, not a single middle unit" unless middle_unit(head) && head.pass == "0"
+
+      [head.rank.to_i, members.map { middle_unit(_1) }.uniq.sort]
+    end.sort_by(&:first).map(&:last)
+  end
+
+  # The surrogate units that the supplementary names store, each with its group:
+  # `high` or `low`. Raises unless the names are as `check_pair_names` requires.
+  def pair_groups(between)
+    index = between.to_h { [_1.id, _1] }
+    pairs = between.select { SUPPLEMENTARY_SCOPES.include?(_1.scope) }.sort_by { _1.rank.to_i }
+    stored = pairs.map { parse_units(_1.leaf_units) }
+    check_pair_names(index, pairs, stored)
+    stored.flat_map { [[_1[1], "high"], [_1[2], "low"]] }.to_h
+  end
+
+  # Every supplementary value must store its own pair `a H L b`, created in
+  # pass 0, so that no two collide. The pairs must sort in strictly ascending
+  # unit order, in one run of ranks that starts right after the name U+D7FF and
+  # ends right before U+E000. And that order must force the units of each group
+  # apart (adjacent lows occur under one high, adjacent highs have overlapping
+  # lows), so that a table that folds two of them together cannot match.
+  def check_pair_names(index, pairs, stored)
+    own_pairs = pairs.all? { _1.disposition == "created" && _1.pass == "0" } &&
+                stored.all? { _1.size == 4 && _1.values_at(1, 2).zip([HIGH_SURROGATES, LOW_SURROGATES]).all? { |unit, group| group.cover?(unit) } }
+    raise Error, "between: a supplementary value does not store its own pair" unless own_pairs
+
+    ranks = pairs.map { _1.rank.to_i }
+    spans_between = ranks.each_cons(2).all? { _2 == _1 + 1 } && index.fetch("D7FF").rank.to_i + 1 == ranks.first && index.fetch("E000").rank.to_i - 1 == ranks.last
+    raise Error, "between: the supplementary names are not one rank span between D7FF and E000" unless spans_between
+    raise Error, "between: the supplementary names are not in ascending unit order" unless stored.map { _1[1, 2] }.each_cons(2).all? { (_1 <=> _2) == -1 }
+
+    lows_under = stored.group_by { _1[1] }.transform_values { |names| names.to_set { _1[2] } }
+    highs_forced = lows_under.keys.sort.each_cons(2).all? { |a, b| lows_under[a].max >= lows_under[b].min }
+    lows_together = lows_under.values.flat_map { |lows| lows.select { lows.include?(_1 + 1) } }.to_set
+    lows_forced = (LOW_SURROGATES.first...LOW_SURROGATES.last).all? { lows_together.include?(_1) }
+    raise Error, "between: the pair order does not force the surrogate units apart" unless highs_forced && lows_forced
+  end
+
+  # One row per UTF-16 unit, 0000 to FFFF, in the terms of a 65536-entry table,
+  # read from the `between` set, whose names reach `.` and `/`. Columns:
+  #
+  #   unit    the table index
+  #   status  determined: `fold` is the only value that catalog order allows
+  #                       (for a class of one member, by the axiom of `resolve_chain`)
+  #           ambiguous:  `fold` lists the members of the class that catalog
+  #                       order allows, `|` separated; see `chain` below
+  #           ignorable:  `aXb` collides with `ab`; `fold` is 0000
+  #           position:   U+0000, whose fold is known only by the unit that
+  #                       sorts just before it (`after:UNIT`), or `first`
+  #           pair-only:  the unit occurs in names only inside a surrogate pair;
+  #                       `fold` is its group, `high` (D800-DBFF) or `low`
+  #                       (DC00-DFFF); no name has one alone, so only the order
+  #                       within a group is observed, never a value
+  #           unobservable: no name stores this unit; `fold` says why: decomposes,
+  #                       escaped or system-mapped
+  #   fold    the value, `|`-separated values, `after:UNIT`, `first`, the group
+  #           of a pair-only unit, or the reason
+  #   chain   for determined and ambiguous rows, the position of the unit's
+  #           collision class on the catalog chain, 0-based, in catalog order
+  #           (U+0000's class is not on it); `-` otherwise
+  #
+  # What a table must satisfy to match this file: (1) all units with one chain
+  # value fold to one value; (2) that value is `fold` for a determined row, and
+  # one of the listed values for an ambiguous one; (3) the values of successive
+  # chain positions strictly ascend. Rule 3 makes the ambiguous choices joint:
+  # a row-by-row membership test is not enough, since in a class such as
+  # 0410|0430 the choice must stay below the next class's (0411|0431). For
+  # pair-only rows, the table's folds ascend strictly over each group in unit
+  # order.
+  def fold_rows(between, prediction)
+    check_between(between)
+    ordered = catalog_chain(between)
+    # U+0000 is the one unit whose fold is not a member of its class: the
+    # class [0] is the name U+2400, and its key sorts after everything
+    # storable. It is placed by its neighbour, apart from the resolved chain.
+    nul = ordered.index([0])
+    chain = resolve_chain(ordered.reject { _1 == [0] })
+    placed = chain.flat_map { |entry| entry.members.map { [_1, entry] } }.to_h
+    groups = pair_groups(between)
+    ignorable = between.select { _1.representative == SEED_ID }.to_set { _1.id.to_i(16) }
+    (0..0xFFFF).map do |unit|
+      entry = placed[unit]
+      if unit.zero? && nul
+        # The largest member names the class just before it, whatever its size.
+        FoldRow.new(unit: unit, status: "position", fold: nul.zero? ? "first" : "after:#{hex(ordered[nul - 1].last)}", chain: "-")
+      elsif ignorable.include?(unit)
+        FoldRow.new(unit: unit, status: "ignorable", fold: "0000", chain: "-")
+      elsif entry
+        FoldRow.new(unit: unit, status: entry.status, fold: entry.fold, chain: entry.rank.to_s)
+      elsif groups.key?(unit)
+        FoldRow.new(unit: unit, status: "pair-only", fold: groups[unit], chain: "-")
+      else
+        FoldRow.new(unit: unit, status: "unobservable", fold: unobservable_reason(unit, prediction), chain: "-")
+      end
     end
   end
 
-  def unobservable_reason(unit)
-    return "surrogate" if SURROGATES.cover?(unit)
-    return "escaped" if NONCHARACTERS_ESCAPED.cover?(unit)
+  # The classes' folds ascend along the chain, and a class's fold is one of its
+  # members (an axiom of this analysis; U+0000, whose class sorts after
+  # everything but whose fold is not a member of it, shows it is not true in
+  # general). Bound every class from both sides: the lowest value a class can
+  # take above its predecessor's lowest, and the highest below its successor's
+  # highest. A value is possible when it lies between its bounds, and a class
+  # is determined when one value is. A class with one member is therefore
+  # determined by the axiom alone. Several possible values are interchangeable
+  # only jointly, through a monotone choice along the chain. Classes that
+  # cannot ascend raise.
+  def resolve_chain(member_lists)
+    lows = lowest_ascending(member_lists)
+    highs = lowest_ascending(member_lists.reverse.map { |members| members.reverse.map(&:-@) }).map(&:-@).reverse
+    member_lists.zip(lows, highs).each_with_index.map do |(members, low, high), rank|
+      possible = members.select { _1.between?(low, high) }
+      raise Error, "chain class #{rank} (#{members.map { hex(_1) }.join("|")}) has no possible fold" if possible.empty?
 
-    SYSTEM_MAPPED.key?(unit) ? "system-mapped" : "decomposes"
+      ChainClass.new(rank: rank, members: members, status: possible.size == 1 ? "determined" : "ambiguous", fold: possible.map { hex(_1) }.join("|"))
+    end
   end
 
-  # Fold rows that disagree with a prediction, as [set, id, check, predicted, observed].
-  def fold_differences(fold, prediction)
-    fold.filter_map do |unit, status, value|
-      predicted = hex(prediction.fold(unit.to_i(16)) || 0)
-      agrees = case status
-               when "determined", "ignorable" then predicted == value
-               when "ambiguous" then value.split("|").include?(predicted)
+  # The smallest ascending choice: each class's lowest member above the one
+  # chosen before it. Member lists are ascending.
+  def lowest_ascending(member_lists)
+    member_lists.each_with_index.each_with_object([]) do |(members, rank), lows|
+      low = members.find { _1 > (lows.last || -Float::INFINITY) }
+      raise Error, "chain class #{rank} (#{members.map { hex(_1) }.join("|")}) cannot ascend above the classes before it" unless low
+
+      lows << low
+    end
+  end
+
+  def unobservable_reason(unit, prediction)
+    return "escaped" if NONCHARACTERS_ESCAPED.cover?(unit)
+    return "system-mapped" if SYSTEM_MAPPED.key?(unit)
+    return "decomposes" if prediction.decomposes?(unit)
+
+    raise Error, "U+#{hex(unit)} is stored by no name and no rule explains why"
+  end
+
+  # Fold rows that disagree with a prediction, row by row.
+  def fold_row_differences(fold, prediction)
+    fold.filter_map do |row|
+      predicted = hex(prediction.fold(row.unit) || 0)
+      agrees = case row.status
+               when "determined", "ignorable" then predicted == row.fold
+               when "ambiguous" then row.fold.split("|").include?(predicted)
                else true
                end
-      ["fold", unit, "fold", predicted, value] unless agrees
+      Difference.new(set: "fold", id: hex(row.unit), check: "fold", predicted: predicted, observed: row.fold) unless agrees
     end
   end
+
+  # The joint rule of `fold_rows`: every chain class folds to one value, and the
+  # values ascend along the chain. Row-by-row agreement does not imply it.
+  def chain_differences(fold, prediction)
+    classes = fold.reject { _1.chain == "-" }.group_by { _1.chain.to_i }.sort.map { |rank, rows| [rank, rows.map { prediction.fold(_1.unit) || 0 }.uniq] }
+    split = classes.select { _2.size > 1 }.map { |rank, values| Difference.new(set: "fold", id: "chain:#{rank}", check: "chain", predicted: values.map { hex(_1) }.join("|"), observed: "one value") }
+    descents = classes.select { _2.size == 1 }.each_cons(2).select { |(_, a), (_, b)| a.first >= b.first }.map do |(ra, a), (rb, b)|
+      Difference.new(set: "fold", id: "chain:#{ra},#{rb}", check: "chain", predicted: "#{hex(a.first)} then #{hex(b.first)}", observed: "ascending")
+    end
+    split + descents
+  end
+
+  def fold_differences(fold, prediction) = fold_row_differences(fold, prediction) + chain_differences(fold, prediction)
 
   def all_differences(sets, rows, fold, prediction)
     sets.flat_map do |set, items|
@@ -599,23 +865,25 @@ module HfsPlusUnicodeProbe
     out = out_dir(cfg, variant)
     folded = variant == "hfsplus"
     rows = sets.keys.to_h { [_1, read_rows(File.join(out, "#{_1}.tsv"))] }
-    fold = fold_rows(rows.fetch("between"))
-    write_tsv(File.join(out, "fold.tsv"), %w[unit status fold], fold)
+    fold = fold_rows(rows.fetch("between"), Prediction.new(data, folded: folded))
+    write_tsv(File.join(out, "fold.tsv"), %w[unit status fold chain], fold)
     differences = all_differences(sets, rows, fold, Prediction.new(data, folded: folded))
     write_tsv(File.join(out, "differences.tsv"), %w[set id check predicted observed], differences)
-    fold_exceptions = differences.select { _1[2] == "fold" && !_1[4].empty? }.to_h { [_1[1].to_i(16), _1[4].split("|").first.to_i(16)] }
+    # The first value of an ambiguous row would be an arbitrary choice; no such row disagrees.
+    fold_exceptions = differences.select { _1.check == "fold" && !_1.observed.empty? }.to_h { [_1.id.to_i(16), _1.observed.split("|").first.to_i(16)] }
     residual = all_differences(sets, rows, fold, Explained.new(data, folded: folded, fold_exceptions: fold_exceptions))
     write_tsv(File.join(out, "residual.tsv"), %w[set id check predicted observed], residual)
     File.write(File.join(out, "summary.json"), JSON.pretty_generate(
       variant: variant,
       sets: rows.transform_values { set_summary(_1) },
-      ignorable: ranges_text(rows.fetch("between").select { _1.representative == "ab" }.map { _1.id.to_i(16) }),
-      fold_status: fold.map { _1[1] }.tally,
-      fold_changed: ranges_text(fold.select { |unit, status, value| status == "determined" && unit != value }.map { _1.first.to_i(16) }),
+      ignorable: ranges_text(rows.fetch("between").select { _1.representative == SEED_ID }.map { _1.id.to_i(16) }),
+      fold_status: fold.map(&:status).tally,
+      fold_changed: ranges_text(fold.select { _1.status == "determined" && hex(_1.unit) != _1.fold }.map(&:unit)),
       fold_exceptions: ranges_text(fold_exceptions.keys),
-      unobservable: fold.select { _1[1] == "unobservable" }.map(&:last).tally,
-      differences: differences.map { "#{_1[0]}:#{_1[2]}" }.tally,
-      residual: residual.map { "#{_1[0]}:#{_1[1]}:#{_1[2]}" }
+      unobservable: fold.select { _1.status == "unobservable" }.map(&:fold).tally,
+      pair_only: fold.select { _1.status == "pair-only" }.map(&:fold).tally,
+      differences: differences.map { "#{_1.set}:#{_1.check}" }.tally,
+      residual: residual.map { "#{_1.set}:#{_1.id}:#{_1.check}" }
     ))
     write_digests(out)
   end
@@ -625,10 +893,114 @@ module HfsPlusUnicodeProbe
     File.write(File.join(out, "SHA256SUMS"), files.map { "#{Digest::SHA256.file(File.join(out, _1)).hexdigest}  #{_1}\n" }.join)
   end
 
+  # ---- small volumes ----
+
+  # What `fsck_hfs -n` says about one name on a volume of its own.
+  FsckRow = Data.define(:name, :variant, :values, :stored_units, :fsck_ok, :fsck_result, :illegal) do
+    def cells = to_h.values
+  end
+  FSCK_COLUMNS = %w[name variant values stored_units fsck_ok fsck_result illegal].freeze
+
+  # The two sequences `fsck_hfs` flags, where they sit in a name, and the
+  # controls: the reversed and the longer sequences it accepts, and the names
+  # that hold a stored U+0000, an ignorable unit and the system-mapped colon.
+  FSCK_SEQUENCES = [[0x306, 0x307], [0x308, 0x30D]].freeze
+  FSCK_POSITIONS = { "after-a" => [[0x61], []], "after-A" => [[0x41], []], "after-b" => [[0x62], []], "after-e" => [[0x65], []],
+                     "bare" => [[], []], "mid-name" => [[0x61, 0x62], [0x63]],
+                     "after-U+0103" => [[0x103], []], "after-U+00E4" => [[0xE4], []] }.freeze
+  FSCK_CONTROLS = { "reversed-0307-0306" => [0x61, 0x307, 0x306], "reversed-030D-0308" => [0x61, 0x30D, 0x308],
+                    "triple-0308-0301-030D" => [0x61, 0x308, 0x301, 0x30D], "plain" => [0x61],
+                    "nul-first" => [0x2400, 0x61], "nul-middle" => [0x61, 0x2400, 0x62], "nul-last" => [0x61, 0x2400],
+                    "ignorable-alone" => [0x200C], "colon" => [0x61, 0x3A, 0x62] }.freeze
+
+  def fsck_cases
+    flagged = FSCK_SEQUENCES.product(FSCK_POSITIONS.to_a).map do |sequence, (position, (before, after))|
+      ["#{position}:#{sequence.map { hex(_1) }.join("+")}", [*before, *sequence, *after]]
+    end
+    flagged + FSCK_CONTROLS.to_a
+  end
+
+  # Create the one name `cps` on a copy of the formatted `template`, unmount,
+  # check, and read the catalog back.
+  def fsck_row(log, attachments, template, image, mount, variant, name, cps)
+    FileUtils.cp(template, image)
+    attempt = attachments.with(image, mountpoint: mount) do
+      require_mount_point(mount)
+      Dir.chdir(mount) { create("./".b + cps.pack("U*").b) }
+    end
+    verdict = fsck_verdict(attachments, log, image)
+    leaves, = read_leaves(image)
+    leaf = leaves[attempt.ino]
+    raise Error, "#{name} on #{variant}: #{attempt.failure || "created but not in the catalog"}" unless leaf
+
+    FsckRow.new(name: name, variant: variant, values: cps.map { hex(_1) }.join("+"), stored_units: units_text(leaf.units),
+                fsck_ok: verdict[:ok], fsck_result: verdict[:last_line], illegal: verdict[:illegal_names].join(" / "))
+  end
+
+  # Values of class 0 that decompose into marks of nonzero class, with no
+  # starter before them: the one place where a class sort applied before
+  # decomposing would differ from one applied after.
+  def mark_only_decompositions(data, prediction)
+    data.assigned.select { _1 <= 0xFFFF && data.class_of(_1).zero? && prediction.decomposes?(_1) && data.class_of(prediction.stored([_1]).first).positive? }
+  end
+
+  # For each such value X that decomposes to D1 D2: X alone, its decomposition,
+  # the decomposition reversed, and the last mark before and after X.
+  def class0_items(data, prediction)
+    mark_only_decompositions(data, prediction).flat_map do |x|
+      d1, d2 = prediction.stored([x])
+      [[x], [d1, d2], [d2, d1], [d2, x], [x, d2]].map { item(cps: [ASCII_A, *_1], scope: "class0") }
+    end
+  end
+
+  def class0_table(log, attachments, template, image, mount, variant, data)
+    prediction = Prediction.new(data, folded: variant == "hfsplus")
+    items = class0_items(data, prediction)
+    FileUtils.cp(template, image)
+    observed = attachments.with(image, mountpoint: mount) { observe_volume(mount, { "class0" => items }) }
+    leaves, = read_leaves(image)
+    problems = readdir_problems(observed, leaves)
+    raise Error, problems.join("; ") unless problems.empty?
+
+    rows = set_rows(items, observed.fetch("class0"), leaves)
+    [rows, differences_of_set("class0", items, rows, prediction) + order_differences("class0", rows, prediction)]
+  end
+
+  # Evidence for the small-volume claims of the record, written to
+  # OUT_ROOT/e3-small-names/: fsck.tsv (one row per name and comparator),
+  # class0-VARIANT.tsv (the SET.tsv columns) and class0-VARIANT-differences.tsv
+  # (where the prediction, a stable class sort after decomposing, disagrees).
+  def run_small_names(cfg, data)
+    out = File.join(cfg.root, "e3-small-names")
+    refuse_existing_capture(out, cfg)
+    log = HfsPlusCapture::Log.new
+    attachments = HfsPlusCapture::Attachments.new(log)
+    template = File.join(cfg.work, "small-template.img")
+    image = File.join(cfg.work, "small.img")
+    mount = File.join(cfg.work, "small.mnt")
+    FileUtils.mkdir_p([cfg.work, mount, out])
+    leftover = nil
+    begin
+      fsck_rows = cfg.variants.flat_map do |variant|
+        format_volume(log, attachments, template, variant, bytes: SMALL_VOLUME_BYTES)
+        rows, differences = class0_table(log, attachments, template, image, mount, variant, data)
+        write_tsv(File.join(out, "class0-#{variant}.tsv"), COLUMNS, rows)
+        write_tsv(File.join(out, "class0-#{variant}-differences.tsv"), %w[set id check predicted observed], differences)
+        fsck_cases.map { |name, cps| fsck_row(log, attachments, template, image, mount, variant, name, cps) }
+      end
+      write_tsv(File.join(out, "fsck.tsv"), FSCK_COLUMNS, fsck_rows)
+    ensure
+      leftover = finish_run(attachments, log, out, [template, image], mount, keep_image: cfg.keep_image)
+    end
+    raise leftover if leftover
+
+    write_digests(out)
+  end
+
   # ---- command line ----
 
   def parse(argv)
-    options = { unicode_data: DEFAULT_DATA, root: DEFAULT_ROOT, work: DEFAULT_WORK, variants: VARIANTS.keys, sample: 1, analyze_only: false, keep_image: false }
+    options = { unicode_data: DEFAULT_DATA, root: DEFAULT_ROOT, work: DEFAULT_WORK, variants: VARIANTS.keys, sample: 1, analyze_only: false, keep_image: false, overwrite: false, small_names: false }
     OptionParser.new do |parser|
       parser.banner = "usage: unicode-probe.rb [options]"
       parser.on("--unicode-data PATH", "the pinned UnicodeData-3.2.0.txt") { options[:unicode_data] = _1 }
@@ -638,20 +1010,31 @@ module HfsPlusUnicodeProbe
       parser.on("--sample N", Integer, "keep every Nth probe, to measure") { options[:sample] = _1 }
       parser.on("--analyze-only", "rewrite the derived tables without a volume") { options[:analyze_only] = true }
       parser.on("--keep-image", "leave the image in the work directory") { options[:keep_image] = true }
+      parser.on("--overwrite", "replace an existing capture directory") { options[:overwrite] = true }
+      parser.on("--small-names", "run the small-volume probes into e3-small-names/") { options[:small_names] = true }
     end.parse!(argv)
+    raise Error, "--sample must be at least 1" if options[:sample] < 1
+    raise Error, "--analyze-only reads the whole probe set; it cannot be combined with --sample" if options[:analyze_only] && options[:sample] != 1
+
     Config.new(**options)
   end
 
   def main(argv)
     cfg = parse(argv)
     data = UnicodeTables.new(cfg.unicode_data)
+    if cfg.small_names
+      run_small_names(cfg, data)
+      return 0
+    end
+
     sets = probe_sets(data, cfg.sample)
     cfg.variants.each do |variant|
       run_volume(cfg, variant, sets) unless cfg.analyze_only
-      analyze(cfg, variant, sets, data)
+      # A sampled run measures only: its tables would describe a subset.
+      analyze(cfg, variant, sets, data) if cfg.sample == 1
     end
     0
-  rescue Error, HfsPlusFields::Error, HfsPlusCapture::Error, OptionParser::ParseError => e
+  rescue Error, HfsPlusFields::Error, HfsPlusCapture::Error, OptionParser::ParseError, SystemCallError => e
     warn "unicode-probe: #{e.message}"
     1
   end

@@ -287,6 +287,28 @@ Plus. The `lzfse` command (Homebrew formula `lzfse` 1.0) encodes and decodes raw
 LZFSE streams (`lzfse -encode -i IN -o OUT`) and supplies the stage 5 test
 vectors.
 
+Probes of E3, kept as a capture directory. `~/hfsplus-captures/e3-small-names/`
+holds `commands.txt` and the tables of `ruby tools/hfsplus/unicode-probe.rb
+--small-names`: one 8 MiB volume per name, formatted with `newfs_hfs -v E3 -b
+4096` (plus `-s`), mounted with `hdiutil attach -imagekey
+diskimage-class=CRawDiskImage -mountpoint MNT V`, holding the one name
+(`O_CREAT | O_EXCL`), detached, and checked with `fsck_hfs -d -n` on the raw
+device. `fsck.tsv` has the stored units and verdict of each name; the tool reads
+the units from the catalog leaves. `class0-VARIANT.tsv` holds one volume with
+the names that probe marks decomposing from class 0 values. The tool refuses
+to replace an existing directory without `--overwrite`.
+
+SHA-256, `e3-small-names/`:
+
+```
+7fa94662aadf1d7db55a68e6f77c770a4c03181652cfb22a4b6e078e530c23d1  class0-hfsplus-differences.tsv
+62389a69ef25443b2af30dcc169fd656eb5ec5d17bda9429fbafd06789ed0d63  class0-hfsplus.tsv
+7fa94662aadf1d7db55a68e6f77c770a4c03181652cfb22a4b6e078e530c23d1  class0-hfsx-differences.tsv
+62389a69ef25443b2af30dcc169fd656eb5ec5d17bda9429fbafd06789ed0d63  class0-hfsx.tsv
+7250642374cc13b8bf824fd99dd18e1c6f20c5fc4b3568096fcd24d1a5fedc63  commands.txt
+bfa659d23b2274101e693efd5f38ebd9372e725c136ce00139d6221a2b84fcb4  fsck.tsv
+```
+
 ## Experiments
 
 Each experiment varies one property on disposable volumes, as the plan's stage
@@ -559,18 +581,20 @@ Evidence rows answered:
 
 ### E3 Unicode
 
-Status: answered on both comparators for every value a POSIX name can carry.
-Every observed row is explained by Unicode 3.2.0 plus the rules below. Open:
-the fold rows of units no POSIX name can store (see "What cannot be observed").
+Status: answered, on `newfs_hfs`'s two comparators (`H+` with compare type
+`0xCF` and `HX` with `0xBC`), for every value a POSIX name can carry. Every
+observed row is explained by Unicode 3.2.0 plus the rules below. Open: the fold
+rows of units no POSIX name can store, and the compare types `newfs_hfs` cannot
+make (see "What cannot be observed").
 
 | Element | Answer |
 |---|---|
-| Fold table | `fold.tsv`, per unit, on `H+`. Unicode 3.2.0's simple lowercase on the folded pages, minus 30 rows that stay themselves |
+| Fold table | `fold.tsv`, per unit, on `H+`. Of the 443 units on the folded pages that have a Unicode 3.2.0 lowercase, 304 are observed: they fold to that lowercase, except 30 that stay themselves. The other 139 (from U+00C0 on) decompose, so no stored name holds them and their fold is not observed |
 | Ignorable units | U+200C to U+200F, U+202A to U+202E, U+206A to U+206F and U+FEFF on `H+`; none on `HX` |
 | U+0000 ordering | Reachable: the POSIX name U+2400 stores U+0000. It sorts after U+FFFD, the last storable unit, on `H+`, and first on `HX` |
 | Decomposition table | The prediction holds for every BMP value, including all of Hangul; no supplementary value decomposes |
-| Combining order | Stable sort by Unicode 3.2.0 class for all 297 BMP marks; the 30 supplementary marks behave as class 0 |
-| Supplementary characters | Stored as their surrogate pair, compared unit by unit, never folded, decomposed or reordered |
+| Combining order | Stable sort by Unicode 3.2.0 class, after decomposing, for every ordered pair of the 297 BMP marks after `a`, and for the three class 0 values that decompose into marks; the 30 supplementary marks behave as class 0 |
+| Supplementary characters | Stored as their surrogate pair, compared unit by unit, never folded or decomposed, and never reordered in the two-mark runs probed |
 
 Procedure. `tools/hfsplus/unicode-probe.rb` formats one disposable 8 GiB sparse
 volume per comparator with `newfs_hfs -v E3 -b 4096 -c c=262144` (plus `-s`
@@ -584,9 +608,15 @@ from an HFS volume and returns spellings the system cannot find again. After
 unmounting it runs `fsck_hfs -d -n` and walks the catalog leaf chain through
 `fields.rb`: the leaves hold the stored units and the sort order. It then
 removes the two names `fsck_hfs` calls illegal and runs `fsck_hfs` again. Each
-image allocates about 1.1 GiB and is deleted at the end. A run takes about three
-minutes per volume, of which the names are about 75 seconds: creating and listing
-a name costs about 70 microseconds from Ruby, so no helper is needed.
+image allocates 1.02 GiB and is deleted at the end. A run takes about three
+minutes per volume, of which the names are 53 seconds on `H+` and 92 on `HX`:
+creating and listing a name costs 86 and 150 microseconds from Ruby by
+`volume.json`, so no helper is needed. The run stops, writing no table, if
+`readdir` and the catalog disagree on a directory's names or count, if the leaf
+walk does not find the record count of the tree header, if a created name has no
+leaf, or if `fsck_hfs -n` still fails once its two illegal names are removed. A
+rerun refuses an existing capture directory without `--overwrite`;
+`--analyze-only` rewrites only the derived tables of the kept `SET.tsv` files.
 
 Input. `UnicodeData-3.2.0.txt` from
 <https://www.unicode.org/Public/3.2-Update/UnicodeData-3.2.0.txt>, in
@@ -621,16 +651,41 @@ one `#` header line, about 41 MB per comparator:
   `pass` (the `SET.N` holding the name), `readdir_units`, `leaf_units`
   (`.`-separated UTF-16 units) and `rank` (0-based among the directory's
   catalog children).
-* `fold.tsv`: `unit`, `status`, `fold`, one row for each of the 65536 table
-  indexes. `determined`: `fold` is the only member of the unit's collision class
-  that catalog order allows. `ambiguous`: order allows each listed member, and
-  each gives the same comparison over all stored names, since no storable unit
-  lies between them. `ignorable`: `aXb` collides with `ab`, `fold` is 0000.
-  `position`: U+0000, with the unit it sorts after or `first`. `unobservable`:
-  no name stores this unit, and `fold` says why.
+* `fold.tsv`: `unit`, `status`, `fold`, `chain`, one row for each of the 65536
+  table indexes. A collision class is the set of stored units whose `aXb`
+  names collide; the classes sit on a chain in catalog order, and `chain` is a
+  class's 0-based position on it (`-` for units not on it; U+0000's class is
+  left off, see `position`). `determined`: `fold` is the only member of the
+  unit's class that catalog order allows. A class with one stored member is
+  determined by an axiom of the analysis, that a class's fold is one of its
+  stored members; U+0000 shows the axiom is false in general, and for a unit
+  such as U+212B (below) the row is evidence of position on the chain only.
+  `ambiguous`: `fold` lists the members of the class that some ascending choice
+  along the chain allows (`|` separated). The members are interchangeable only
+  jointly, through a monotone choice along the chain, not one class at a time:
+  for 47 of the 124 ambiguous classes a storable unit lies between two members
+  (`0410|0430` has U+0411 between them, `2160|2170` has U+2161), and choosing
+  U+0430 for the first forces U+0431 for `0411|0431`. `ignorable`: `aXb`
+  collides with `ab`, `fold` is 0000. `position`: U+0000, with the unit it
+  sorts after (the largest member of the class before it) or `first`.
+  `pair-only`: the unit occurs in stored names only inside a surrogate pair;
+  `fold` is its group, `high` (D800 to DBFF) or `low` (DC00 to DFFF), and the
+  observation is order within a group, not a value (see "Supplementary
+  characters"). `unobservable`: no name stores this unit, and `fold` says why:
+  `decomposes`, `escaped` or `system-mapped`.
+
+  A table agrees with `fold.tsv` when (1) all units with one `chain` value get
+  one fold; (2) that fold is the `fold` of a determined row or one of the listed
+  values of an ambiguous one; and (3) the folds of successive chain positions
+  strictly ascend. Testing each ambiguous row for membership alone is not
+  enough, because it accepts choices that break rule 3. For `pair-only` rows
+  the table's folds strictly ascend over D800 to DBFF and over DC00 to DFFF in
+  unit order. Rows of the other statuses constrain nothing beyond their own
+  value.
 * `differences.tsv`: `set`, `id`, `check`, `predicted`, `observed`: every
   disagreement with `specs/design-hfsplus.md` as written, computed from the
-  pinned data. `residual.tsv`: the same after adding the rules of this section.
+  pinned data, with the joint rule of `fold.tsv` as check `chain`.
+  `residual.tsv`: the same after adding the rules of this section.
 * `volume.json` (tree shape, both `fsck_hfs` verdicts, per-set directories),
   `summary.json` (these counts), `commands.txt` and `SHA256SUMS`.
 
@@ -640,12 +695,12 @@ SHA-256, `e3-hfsplus/`:
 546d049928ee2557ef7ff0add83af7ff53b21db8d7963e241a43accf1a6047df  alone.tsv
 03ce83ec5be728278c483d8ca8a02823cb136dc6ff2b9ddb2ac73604743c058b  between.tsv
 5496255e6669edeef6daff50f59987c4dfbb542314f4acd97f085293ea90f238  commands.txt
-0881c19ae986f6aa727d7af96ca24c7385b8a3403635774bba8172b2150d552d  differences.tsv
-321f4840756f0d68ff1fadc7c4bd149a7dcba0520a198c55af3e491a0256db86  fold.tsv
+387381fd16cdf084644791a6dd04592444049f267c71c7e9a2e43906a7c112e0  differences.tsv
+ea56a78b3df351a9d4a2cc76df369d9ab14b6e9d3ff1c5c9a187b3250ad9164e  fold.tsv
 577705e9a730b2d105b7bcc708ad2de8edad8163a08c5036c4ca7c90beb828ec  hangul.tsv
 81b2d03dd3230dbdb184eb5aa61d1c48989f684bcc6f657d3f36d2de860e23f5  pairs.tsv
 2fac0f49e5d1c1b2e98708a23bf5f65cd80d9b23d73bae48b6283991c581406e  residual.tsv
-0608f756b76065bb394bee856bdb86e4a393e2fd94cd2fafed3ae823071e4bff  summary.json
+cab219a52250167dfa3a839dbdad7ec7b49318bf8eb24d0447806ec1d3b54380  summary.json
 db3cecc55bdd07ddd476155276ee87ab3373f61798931eb3768d36a1c0d2c36c  surrogates.tsv
 ff03becd2b89a95a57b05f1e994e3269602e57a4ec44383d40702fc3206e782d  volume.json
 ```
@@ -657,18 +712,19 @@ SHA-256, `e3-hfsx/`:
 74ff25021ba5e0abf51778b991ed4eb1c32f9fdbbb425664f84240b44b4e9d66  between.tsv
 a21f2f48e4d55b8a8f193e177d0accaa82fb7681e35c5a5654dacb22ca89eb55  commands.txt
 350851895351025e5f36c0717da0ddf314bb44dd1dccdc4b5a0608032f92761c  differences.tsv
-9ffda9b607d000d20734b0a57cc85ff2675dd22bd9bd96715d843efdf81d3055  fold.tsv
+375703e87e5e7e185d20b8fc8c515de7badecee268a66917544fbe4cd6eff802  fold.tsv
 577705e9a730b2d105b7bcc708ad2de8edad8163a08c5036c4ca7c90beb828ec  hangul.tsv
 81b2d03dd3230dbdb184eb5aa61d1c48989f684bcc6f657d3f36d2de860e23f5  pairs.tsv
 2fac0f49e5d1c1b2e98708a23bf5f65cd80d9b23d73bae48b6283991c581406e  residual.tsv
-0d036d156828554c31907c62d14d9817b4fc946654efb8de279a9dff0d438bf3  summary.json
+30517effff381619ecd5586b436046c89bea1c20a6daf79b940934fc156efb85  summary.json
 db3cecc55bdd07ddd476155276ee87ab3373f61798931eb3768d36a1c0d2c36c  surrogates.tsv
 91da3c9072a8f0127916f4b5ec4b9a133009d89d99b6d7e032f468fa04b1b53b  volume.json
 ```
 
-`fold.tsv` on `H+` holds 51073 `determined`, 252 `ambiguous`, 16 `ignorable`,
-1 `position` and 14194 `unobservable` rows; on `HX`, 51341 `determined`, 1
-`position` and 14194 `unobservable`.
+`fold.tsv` on `H+` holds 51073 `determined`, 252 `ambiguous` (124 classes), 16
+`ignorable`, 1 `position`, 2048 `pair-only` and 12146 `unobservable` rows; on
+`HX`, 51341 `determined`, 1 `position`, 2048 `pair-only` and 12146
+`unobservable`.
 
 Explanation. `residual.tsv` holds 5 rows on each comparator, all path syntax
 rather than comparison: U+0000 in `alone` and `between`, `.` and `/` alone
@@ -676,14 +732,20 @@ rather than comparison: U+0000 in `alone` and `between`, `.` and `/` alone
 disposition, collision, stored unit, catalog position and fold row follows from
 the pinned data and these rules, and `fsck_hfs -n`, whose key order check runs
 over the same 1.2 million records, finds the volume clean once its two illegal
-names are removed.
+names are removed. `differences.tsv` on `H+` holds 28 `chain` rows: the prediction
+folds the 30 exception units to their lowercase, which breaks the ascending
+order of the chain in 28 places; the exceptions remove them, and `HX` has none.
 
 Fold table. The classes on `H+` beyond the `HX` ones come from Unicode 3.2.0's
 simple lowercase on pages `0x00`, `0x01`, `0x03`, `0x04`, `0x05`, `0x21` and
 `0xFF`, and the Georgian capitals' mapping U+10A0 to U+10C5 onto U+10D0 to
-U+10F5. No fold changes a unit on any other page, and no fold occurs that this
-rule does not predict. These 30 units have a Unicode 3.2.0 lowercase but fold to
-themselves, and are the candidates for the exceptions file:
+U+10F5. Of the 443 units on those pages with a lowercase, 304 are observed (176
+`determined`, 128 `ambiguous`) and 139 are `unobservable`, because they
+decompose: the table row of those 139, from U+00C0 on, is not evidence, and
+"lowercase on the page" is not an observation for them. Among the observed rows
+no fold changes a unit on any other page, and no fold occurs that this rule does
+not predict. These 30 observed units on the folded pages have a Unicode 3.2.0
+lowercase but fold to themselves, and are the candidates for the exceptions file:
 
 | Units | Their Unicode 3.2.0 lowercase |
 |---|---|
@@ -695,11 +757,21 @@ themselves, and are the candidates for the exceptions file:
 | U+0500 to U+050E, even units | The next unit |
 | U+2126, U+212A, U+212B | U+03C9, U+006B, U+00E5 |
 
+The same rule needs no exception for 30 more observed units with a lowercase
+outside the folded pages: U+021C, U+0220, U+0222, U+0224 and U+24B6 to U+24CF
+fold to themselves because their pages are not folded. The Deseret case pairs
+are supplementary values, covered by the supplementary claim below. U+212B is
+observed by order only: its lowercase U+00E5 decomposes, so no stored name holds
+U+00E5, and the row says where U+212B sits on the chain, not that it folds to
+itself rather than to U+00E5.
+
 Ignorable units. On `H+` the 16 units above collapse: `aXb` collides with `ab`,
-and in another directory `aXb` is created and keeps the unit. A name of only
-ignorable units is legal: U+200C alone is created, stores the unit, and takes
-rank 0 among its siblings, after the folder's thread; the other 15 alone collide
-with it. So an empty folded key differs from a thread's empty name.
+and in another directory `aXb` is created and keeps the unit. A name of one
+ignorable unit is legal (names of several, or mixed with other units after the
+first, were not probed): U+200C alone is created, stores the unit, and takes
+rank 0 among its siblings that are not threads, since the leaf walk skips thread
+records; the other 15 alone collide with it. So an empty folded key differs from
+a thread's empty name.
 `fsck_hfs -n` accepts this. On `HX` nothing is ignorable, and all 16 are ordinary
 units.
 
@@ -707,7 +779,10 @@ U+0000. A POSIX path cannot carry U+0000, and the system's substitution reaches
 it: U+2400 in a POSIX name stores U+0000, and `readdir` returns U+2400 for it, in
 the same way `:` stores U+002F and `readdir` returns `:`. These are the only two
 values whose `readdir` form differs from the stored one, on both comparators.
-`fsck_hfs -n` accepts a stored U+0000 anywhere in a name. On `H+` the name sorts
+`fsck_hfs -n` accepts a stored U+0000 at the start, the middle and the end of a
+name: U+2400 stores U+0000 first in `U+2400 a`, in `a U+2400 b` and last in `a
+U+2400` (leaf units `0000.0061`, `0061.0000.0062` and `0061.0000`), on volumes
+of their own in `e3-small-names/`, with exit 0 on both comparators. On `H+` the name sorts
 last among 240588 siblings, after U+FFFD, and `a` U+0000 `b` sorts after `a`
 U+FFFD `b`; on `HX` it has rank 0.
 
@@ -721,9 +796,22 @@ Unicode 3.2.0, are stored as their own surrogate pairs. The canonical singletons
 give the only `HX` collisions: U+0340, U+0341, U+0343, U+0374, U+037E, U+0387 and
 the 20 U+1Fxx values collide with their targets.
 
-Combining order. Across all 327 squared ordered pairs, stored order equals a
-stable sort by Unicode 3.2.0 class for every pair of the 297 BMP marks,
-including the ones that decompose into marks. The 30 supplementary marks are not
+Combining order. The `pairs` set holds `a` followed by every ordered pair of the
+327 marks of nonzero class (327 squared names, not all marks and not longer
+runs). Stored order equals a stable sort by Unicode 3.2.0 class for every pair
+of the 297 BMP marks, including the ones that decompose into marks; the
+reorderings seen are all of two-mark runs. Three BMP values have class 0 yet
+decompose into marks with no starter: U+0F73 (U+0F71 U+0F72), U+0F75 (U+0F71
+U+0F74) and U+0F81 (U+0F71 U+0F80). `e3-small-names/class0-VARIANT.tsv` holds,
+for each, `a` with the value alone, its decomposition, the decomposition
+reversed, and its second mark before and after it. On both comparators each
+value stores its decomposition; `a` U+0F72 U+0F73 and `a` U+0F73 U+0F72 collide
+and store U+0F71 U+0F72 U+0F72, and the reversed decompositions collide with the
+value and store sorted, likewise for the other two. A stable class sort applied
+after decomposing predicts all 15 names (`class0-VARIANT-differences.tsv` is
+empty), and a sort applied before decomposing, with the class 0 value acting as a
+starter, is ruled out: it would keep U+0F72 ahead of U+0F71. The 30
+supplementary marks are not
 ordered: `a` U+0300 U+1D165 stays in the order given, on both comparators, as
 does `a` U+1D165 U+0300, which is why the two do not collide. This accounts for
 7421 `units-supplementary` and 7421 `representative-supplementary` rows in
@@ -732,9 +820,20 @@ does `a` U+1D165 U+0300, which is why the two do not collide. This accounts for
 Hangul. Every one of the 11172 syllables stores its two or three conjoining
 jamo, and its explicit jamo spelling collides with it, on both comparators.
 
-Supplementary characters. A value above U+FFFF is stored as its pair. No two
-collide, including the Deseret case pairs, and catalog order is unsigned unit
-order, so they sort between U+D7FF and U+E000 on both comparators.
+Supplementary characters. A value above U+FFFF is stored as its pair. None of
+the 177823 probed values collides with another, including the Deseret case
+pairs, and catalog order is unsigned unit order: in `between`, all 177823
+names occupy one run of ranks, in strictly ascending unit order, that starts
+right after `aU+D7FFb` and ends right before `aU+E000b`, on both comparators.
+The tool checks this when it derives `fold.tsv`. All 2048 surrogate units are
+therefore stored, but only as parts of pairs, and their rows are `pair-only`.
+A low unit is compared only with a low unit, in the same position of another
+pair; a high unit is compared with another high unit, and with a BMP unit
+standing in the same position of another name, which the run between U+D7FF and
+U+E000 bounds. What is observed is the order within each group: adjacent lows
+occur under one high, and adjacent highs have overlapping sets of lows, so no
+two units of a group compare equal. No name holds a surrogate unit alone, so no
+value of its fold is observed.
 
 Refused spellings. U+FFFE and U+FFFF are valid scalar values, yet the system
 stores each as the ASCII escape of its UTF-8, such as `%EF%BF%BF`, and `readdir`
@@ -744,23 +843,35 @@ same way. U+FDD0 to U+FDEF are stored unchanged.
 `fsck_hfs` and two mark pairs. The driver stores U+0306 U+0307 and U+0308 U+030D
 as given, on both comparators, and `fsck_hfs -n` calls a name holding either
 sequence an `Illegal name`, exiting 8. Under `-d` it proposes U+0310 and U+0308
-U+0301 as their replacements. Among all the pairs of marks these two alone are
-flagged. Small volumes holding one spelling each show the check is by adjacent sequence:
-it fires after `A`, `b`, `e` and with nothing before the marks, in the middle of
-a name, and after the precomposed U+0103 and U+00E4; it does not fire on the
-reversed marks or on U+0308 U+0301 U+030D. A stored U+0000, an all-ignorable name
-and a name holding U+002F each pass. Any volume holding such a name fails `fsck_hfs -n`, wherever the name
-came from.
+U+0301 as their replacements. Among all the ordered pairs of the 327 marks
+after `a` these two alone are flagged. `e3-small-names/` (`fsck.tsv`,
+`commands.txt`) holds 25 names per comparator, each alone on an 8 MiB volume.
+Each sequence, in 16 spellings in all, makes `fsck_hfs -n` exit 8 with an
+`Illegal name` after `a`, `A`, `b` and `e`, with nothing before the marks, in the
+middle of a name (`a b`, the marks, `c`), and after the precomposed U+0103 and U+00E4
+(stored `a` U+0306 U+0306 U+0307 and `a` U+0308 U+0306 U+0307 for the first
+sequence). It exits 0 on `a` U+0307 U+0306, `a` U+030D U+0308 and `a` U+0308
+U+0301 U+030D, so the check is on the adjacent sequence. A stored U+0000 (three positions), `U+200C` alone (ignorable on `H+`,
+an ordinary unit on `HX`) and `a:b`, which stores U+002F, each exit 0. The
+volume holding such a name fails this `fsck_hfs` (version hfs-715.160.9),
+wherever the name came from.
 
-What cannot be observed. A fold row is visible only through a stored unit, and
-these 14194 units are stored by no POSIX name: the 12142 that decompose, the 2048
-surrogates alone (their fold is consistent with identity, through the pairs),
-U+FFFE and U+FFFF, and U+003A and U+2400, which the system maps away. A catalog
-holding one is outside what macOS produces; none of these rows can be compared.
-U+0000 is therefore known to sort after every unit up to U+FFFD, and its relation
-to U+FFFE and U+FFFF is not observed. The pairs cover two marks after one
-starter; runs of three or more marks, ordering across a precomposed starter,
-unassigned supplementary noncharacters and other malformed UTF-8 are not probed.
+What cannot be observed. A fold row is visible only through a stored unit. Of
+the 14194 units that no POSIX name stores alone, 12146 appear in no stored name:
+the 12142 that decompose, U+FFFE and U+FFFF, and U+003A and U+2400, which the
+system maps away. The other 2048 are the surrogate units, which appear only as
+parts of pairs (`pair-only`): their order within each group is observed, never a
+value. A catalog holding one of the 12146 is outside what this driver produces
+on macOS, and for POSIX names none of those rows can be compared; no evidence
+here covers a catalog written by another implementation. U+0000 is known to sort
+after every unit up to U+FFFD, and its relation to U+FFFE and U+FFFF is not
+observed. The pairs cover two marks after one starter (plus the three class 0
+values above); runs of three or more marks, ordering across a precomposed
+starter, names of several ignorable units, unassigned supplementary
+noncharacters and other malformed UTF-8 are not probed. The `HX` answers cover
+compare type `0xBC` only: `specs/design-hfsplus.md` also allows `0xCF` on `HX`
+and 0 on `H+`, and `newfs_hfs` has no option that makes either (`-s` selects
+`0xBC`), so they were not probed.
 
 ### E4 Hard links
 
