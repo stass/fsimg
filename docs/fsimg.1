@@ -483,8 +483,11 @@ volume.
 An HFS Plus or HFSX entry delivers its data fork and POSIX metadata.
 An entry with a resource fork or stored extended attributes is marked as
 having extra data, which
+.Cm t Fl v
+shows with
+.Ql @ ,
 .Fl Fl json
-shows and extraction reports as a metadata loss.
+shows as a field and extraction reports as a metadata loss.
 Every entry's Finder information, BSD flags and backup date are outside the
 entry model and are neither delivered nor marked.
 Each name of a hard link is a separate entry with the file's own content and
@@ -1895,6 +1898,10 @@ and a socket with
 after the quoted name, as
 .Ql ls -F
 marks them; a device is not marked.
+The default listing keeps stdout to names: when listed entries have extra
+data, one note on stderr after the listing counts them and names
+.Cm t Fl v ,
+which marks each.
 The long listing of
 .Cm t Fl v
 prefixes each name with three columns: the kind
@@ -1910,7 +1917,10 @@ or
 .Pc
 followed by nine permission characters, or nine
 .Ql \&?
-when the format stores no mode; the logical length of a file or link, a
+when the format stores no mode, and
+.Ql @
+in place of the space after them when the entry has extra data; the logical
+length of a file or link, a
 device's number as
 .Ql major, minor
 when the image stores one, or

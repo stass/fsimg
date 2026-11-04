@@ -610,7 +610,7 @@ device has no mark), and no completion trailer.
 
 | Column | Content |
 | --- | --- |
-| mode | Kind character `-`, `d`, `l`, `p`, `c`, `b` or `s`, then nine permission characters when the entry has a valid mode and nine `?` when the format stores none |
+| mode | Kind character `-`, `d`, `l`, `p`, `c`, `b` or `s`, then nine permission characters when the entry has a valid mode and nine `?` when the format stores none, then one character: `@` when the entry has the [extra-data bit](design-metadata.md#metadata-fields), otherwise the space separating the mode from the size |
 | size | Logical content length in bytes for regular files and symbolic links; `major, minor` (for example `4, 2`) for a device with a valid device number; `-` for directories, FIFOs, sockets and devices without one |
 | mtime | `YYYY-MM-DD HH:MM:SS` from the modification timestamp: UTC for UTC and known-offset instants, the recorded calendar fields for an unknown-offset time; `-` when absent |
 | name | As in the default listing |
@@ -618,6 +618,17 @@ device has no mark), and no completion trailer.
 The long listing consults no locale or host timezone, so it is the same on
 every host. `--json` entry records carry the exact fields, basis and
 precision; `-v` with `--json` affects only stderr.
+
+The extra-data `@` takes the separator's place, as `ls -l` places its
+attribute mark after the mode, so marked and unmarked lines share one layout;
+a size filling its twelve columns abuts the mark. The `@` after a name is the
+symbolic link's, as above. The default listing keeps stdout to names, so it
+counts what `-v` would mark: when any listed entry has the bit, one line on
+stderr after the listing gives the count,
+`fsimg: note: 3 entries carry extra data not listed; t -v marks them`. A member
+selection counts the entries it listed. `-v` prints no such line, because each
+entry shows its mark, and neither does `--json`, whose `extra_data` field
+shows it.
 
 ## Verification, information and formats
 

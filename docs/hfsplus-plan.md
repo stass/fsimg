@@ -308,8 +308,8 @@ Each experiment varies one property on disposable volumes:
   `compress.c` decoding and `verify.c`. Registration of the reader for both
   names, the stack names, the build wiring and `EXTRA_DIST`.
 * The extra-data bit end to end: the header, the reader's entries, the
-  extractor's loss, `t --json`'s `extra_data` field, the worker's entry
-  record, the CLI's loss notice naming the field, and the manual pages,
+  extractor's loss, `t --json`'s `extra_data` field, `t -v`'s `@` and plain
+  `t`'s count on stderr, the worker's entry record, the CLI's loss notice naming the field, and the manual pages,
   which also list the HFS Plus fields outside the entry model: Finder
   information, BSD flags and the backup date. The 765-byte label in the volume
   information, the writer state and the job record.

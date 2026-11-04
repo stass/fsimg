@@ -550,6 +550,7 @@ loss_notice(fsimg_cli_display_t *display)
 	uint64_t losses = display->result->metadata_losses;
 	uint64_t skipped = display->result->skipped_entries;
 	uint64_t omitted = display->result->omitted_entries;
+	uint64_t unmarked = display->unmarked_extra_data;
 	const char *mode = display->options->mode;
 
 	/* Examples are a stderr detail: -vv in c and x, whose -v is the entry
@@ -571,6 +572,11 @@ loss_notice(fsimg_cli_display_t *display)
 		    (unsigned long long)omitted, omitted == 1 ?
 		    "entry with a name outside the profile was" :
 		    "entries with names outside the profile were");
+	if (unmarked != 0)
+		append(display, "fsimg: note: %llu %s extra data not listed; "
+		    "t -v marks %s\n", (unsigned long long)unmarked,
+		    unmarked == 1 ? "entry carries" : "entries carry",
+		    unmarked == 1 ? "it" : "them");
 }
 
 /* One salvage loss. A shortened file goes by the name it was created with,
@@ -1319,7 +1325,9 @@ civil_time(int64_t seconds, char *text, size_t capacity)
 }
 
 /* The -v listing's columns before the name: the kind and nine permission
- * characters, or nine '?' when the format stores no mode; the logical
+ * characters, or nine '?' when the format stores no mode, then '@' when the
+ * entry has extra data, in place of the space that otherwise separates the
+ * mode from the size, so a line's layout is the same either way; the logical
  * length of a file or link, a device's "major, minor" as ls shows it, or
  * '-'; and the modification time, or '-'.
  * Unknown-offset times encode their calendar fields as UTC seconds, so one
@@ -1350,8 +1358,9 @@ long_listing_columns(fsimg_cli_display_t *display, const unsigned char *raw)
 		else
 			column[1 + i] = (mode & (0400u >> i)) != 0 ? permissions[i] : '-';
 	}
-	column[10] = '\0';
-	append(display, "%s ", column);
+	column[10] = (valid & FSIMG_META_EXTRA_DATA) != 0 ? '@' : ' ';
+	column[11] = '\0';
+	append(display, "%s", column);
 	if (kind == FSIMG_ENTRY_FILE || kind == FSIMG_ENTRY_SYMLINK)
 		append(display, "%12llu ",
 		    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_ENTRY_LENGTH));
@@ -1403,11 +1412,15 @@ entry_start(fsimg_cli_display_t *display, const unsigned char *raw)
 		append(display, ",\"path\":\"");
 	} else {
 		/* Only t -v adds the long columns; c -v and x -v name
-		 * entries in the default listing form.
+		 * entries in the default listing form. Plain t shows no mark,
+		 * so it counts what -v would have marked.
 		 */
-		if (display->options->request.kind == FSIMG_JOB_LIST &&
-		    display->options->verbosity != 0)
-			long_listing_columns(display, raw);
+		if (display->options->request.kind == FSIMG_JOB_LIST) {
+			if (display->options->verbosity != 0)
+				long_listing_columns(display, raw);
+			else if ((valid & FSIMG_META_EXTRA_DATA) != 0)
+				display->unmarked_extra_data++;
+		}
 		append(display, "\"");
 	}
 	display->entry_open = true;

@@ -877,8 +877,9 @@ here. An entry whose object has a stored attribute, or a resource fork with
 `logicalSize > 0` that compression does not consume, carries
 `FSIMG_META_EXTRA_DATA`. The reader delivers its data fork and POSIX
 metadata; the resource fork, attribute names and attribute values are not
-delivered. The bit makes that omission visible in listings and in the
-extraction loss report, under the
+delivered. The bit makes that omission visible in
+[listings](design-cli.md#listing), where `t -v` marks the entry and plain `t`
+counts it, in `--json` and in the extraction loss report, under the
 [metadata design's rule](design-metadata.md#metadata-fields). [HF], [R]
 
 A record whose `fileID` names no catalog primary is `FSIMG_ECORRUPT` under

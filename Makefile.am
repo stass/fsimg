@@ -170,8 +170,9 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-containers test-compression test-gzip-write test-holes test-settings \
 	header-c \
 	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
-# layers-compose is a helper of test/layers-integration.sh, not a test.
-check_PROGRAMS = $(test_programs) layers-compose test-iso9660-scale test-iso9660-write-scale
+# Fixture generators support integration tests; they are not tests.
+check_PROGRAMS = $(test_programs) layers-compose hfsplus-marks \
+	test-iso9660-scale test-iso9660-write-scale
 QUICK_TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
@@ -253,6 +254,8 @@ test_holes_SOURCES = test/holes.c test/test.h
 test_holes_LDADD = libfsimg-core.la
 layers_compose_SOURCES = test/layers-compose.c
 layers_compose_LDADD = libfsimg.la
+hfsplus_marks_SOURCES = test/hfsplus-marks.c test/hfsplus-gen.c \
+	test/hfsplus-gen.h test/test.h
 test_posix_SOURCES = test/posix.c test/test.h
 test_posix_LDADD = libfsimg.la
 test_codec_SOURCES = test/codec.c test/test.h
@@ -461,6 +464,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/create_operands_test.rb \
 	test/cli/examples_test.rb \
 	test/cli/exfat_truncated_test.rb \
+	test/cli/extra_data_mark_test.rb \
 	test/cli/extract_here_test.rb \
 	test/cli/extraction_acls_test.rb \
 	test/cli/extraction_names_test.rb \

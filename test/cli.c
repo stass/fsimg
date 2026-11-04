@@ -1522,9 +1522,40 @@ test_extra_data_listing(void)
 			CHECK(strstr(present, "\"extra_data\":true") != NULL);
 		} else {
 			CHECK(absent_length == present_length);
-			CHECK(memcmp(absent, present, absent_length) == 0);
+			if (options.verbosity == 1) {
+				CHECK(strcmp(absent, "-rw-rw-rw-            0 "
+				    "2000-02-29 00:00:00 \"/x\"\n") == 0);
+				CHECK(absent[10] == ' ');
+				CHECK(present[10] == '@');
+				CHECK(memcmp(absent, present, 10) == 0);
+				CHECK(strcmp(absent + 11, present + 11) == 0);
+			} else {
+				CHECK(strcmp(absent, "\"/x\"\n") == 0);
+				CHECK(memcmp(absent, present, absent_length) == 0);
+			}
 		}
 	}
+
+	options.json = false;
+	options.verbosity = 1;
+	fsimg_cli_display_init(&display, &options, &result, &paths);
+	entry.size = 123456789012;
+	list_entry(&display, &entry, present, sizeof(present));
+	CHECK(strcmp(present, "-rw-rw-rw-@123456789012 "
+	    "2000-02-29 00:00:00 \"/x\"\n") == 0);
+
+	entry = listing_entry("/device", FSIMG_ENTRY_CHAR_DEVICE,
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED | FSIMG_META_DEVICE |
+	    FSIMG_META_EXTRA_DATA, 4, 2);
+	list_entry(&display, &entry, present, sizeof(present));
+	CHECK(strcmp(present, "crw-rw-rw-@        4, 2 "
+	    "2000-02-29 00:00:00 \"/device\"\n") == 0);
+
+	entry = listing_entry("/dir", FSIMG_ENTRY_DIRECTORY,
+	    FSIMG_META_MODE | FSIMG_META_MODIFIED | FSIMG_META_EXTRA_DATA, 0, 0);
+	list_entry(&display, &entry, present, sizeof(present));
+	CHECK(strcmp(present, "drw-rw-rw-@           - "
+	    "2000-02-29 00:00:00 \"/dir\"\n") == 0);
 }
 
 static void

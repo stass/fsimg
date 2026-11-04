@@ -156,6 +156,8 @@ typedef struct fsimg_cli_display {
 	unsigned char	 volume[FSIMG_WIRE_INFO_BYTES];
 	/* Human listing suffix for the open entry's kind. */
 	const char	*entry_marker;
+	/* Entries a plain t listed with the extra-data bit it cannot show. */
+	uint64_t	 unmarked_extra_data;
 	fsimg_validation_scope_t scope;
 	bool		 syntax;
 	bool		 entry_open;
