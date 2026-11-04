@@ -598,11 +598,6 @@
 
 ## Planned features
 
-* [Medium] **Best-effort salvage extraction** (`lib/extract`, `cmd/fsimg`):
-  implement the [salvage design](specs/design-salvage.md): shortened `.partial`
-  prefixes, skipped bad directories and capped loss reports with totals, using
-  existing limits and unchanged extraction safety rules.
-
 * [Low] **Salvage ranges after interior damage** (`lib/read`, `lib/formats/`):
   deferred extension to the prefix-only [salvage policy](specs/design-salvage.md).
   Design recovery of independently located intact later ranges with explicit

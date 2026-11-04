@@ -32,6 +32,7 @@ typedef struct fake_driver {
 	bool allocate;
 	bool seal;
 	bool omitted;
+	bool symlink;
 	unsigned repeated;
 	unsigned descents;
 	bool content_failure;
@@ -64,6 +65,10 @@ typedef struct fixture {
 	unsigned shortened;
 	unsigned skipped;
 	unsigned collisions;
+	bool capture_entries;
+	unsigned entry_reports;
+	char entry_paths[16][272];
+	uint64_t entry_sizes[16];
 	bool limit_output;
 } fixture_t;
 
@@ -131,7 +136,8 @@ record_loss(void *argument, const char *path, uint32_t mask)
 	fixture_t *f = argument;
 
 	if ((mask & (FSIMG_LOSS_DIRECTORY | FSIMG_LOSS_ENTRY |
-	    FSIMG_LOSS_SHORTENED | FSIMG_LOSS_SKIPPED | FSIMG_LOSS_COLLISION)) == 0)
+	    FSIMG_LOSS_SHORTENED | FSIMG_LOSS_SKIPPED | FSIMG_LOSS_COLLISION |
+	    FSIMG_LOSS_UNSUPPORTED)) == 0)
 		return;
 	CHECK(strlen(path) < sizeof(f->loss_path));
 	if (f->reports == 0) {
@@ -147,6 +153,22 @@ record_loss(void *argument, const char *path, uint32_t mask)
 	if (mask == FSIMG_LOSS_SHORTENED)
 		strcpy(f->shortened_path, path);
 	f->loss_mask = mask;
+}
+
+static void
+record_extracted_entry(void *argument, const fsimg_entry_t *entry)
+{
+	fixture_t *f = argument;
+	unsigned index;
+
+	if (!f->capture_entries)
+		return;
+	index = f->entry_reports++;
+
+	CHECK(index < 16);
+	CHECK(strlen(entry->path) < sizeof(f->entry_paths[index]));
+	strcpy(f->entry_paths[index], entry->path);
+	f->entry_sizes[index] = entry->size;
 }
 
 static fsimg_status_t
@@ -191,6 +213,8 @@ fixture_build(fixture_t *f, const char *format, const fsimg_entry_t *entries,
 	f->patterned = patterned;
 	fsimg_options_init(&options);
 	options.memory_bytes = 32u * 1024u * 1024u;
+	options.entry = record_extracted_entry;
+	options.entry_argument = f;
 	options.loss = record_loss;
 	options.loss_argument = f;
 	CHECK(fsimg_ctx_new(&options, &f->ctx, NULL) == FSIMG_OK);
@@ -226,6 +250,7 @@ fixture_build(fixture_t *f, const char *format, const fsimg_entry_t *entries,
 	CHECK(fsimg_writer_emit(writer, f->io, NULL) == FSIMG_OK);
 	fsimg_writer_free(writer);
 	f->reports = 0;
+	f->entry_reports = 0;
 }
 
 static void
@@ -478,7 +503,12 @@ fake_replay(fsimg_reader_t *reader, const char *name,
 		CHECK(write(fd, "occupied", 8) == 8);
 		CHECK(close(fd) == 0);
 	}
-	reader->entry.kind = payload[0];
+	reader->entry.kind = f->fake.symlink && strcmp(name, "bad") == 0 ?
+	    FSIMG_ENTRY_SYMLINK : payload[0];
+	if (reader->entry.kind == FSIMG_ENTRY_SYMLINK) {
+		reader->entry.size = 6;
+		return (fsimg_reader_set_link_target(reader, "target", 6, error));
+	}
 	if (reader->entry.kind == FSIMG_ENTRY_FILE)
 		reader->entry.size = reader->initialized = 3;
 	return (FSIMG_OK);
@@ -1155,6 +1185,45 @@ test_salvage_rejects_selection_and_manifest_before_creating_destination(void)
 	CHECK(close(manifest) == 0);
 	CHECK(close(parent) == 0);
 	CHECK(rmdir(directory) == 0);
+}
+
+static void
+test_skipped_unsupported_entries_are_losses_only_under_salvage(void)
+{
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_extract_result_t result;
+	fsimg_error_t error;
+	char directory[] = "salvage-unsupported-XXXXXX";
+	int parent, root;
+
+	parent = open_destination_parent(directory);
+	for (unsigned omitted = 0; omitted < 2; omitted++) {
+		for (unsigned salvage = 0; salvage < 2; salvage++) {
+			fake_open(&f);
+			f.fake.omitted = omitted != 0;
+			f.fake.symlink = omitted == 0;
+			CHECK(mkdirat(parent, "out", 0700) == 0);
+			root = openat(parent, "out", O_RDONLY | O_DIRECTORY);
+			CHECK(root != -1);
+			fsimg_extract_options_init(&options);
+			options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+			if (salvage)
+				options.flags |= FSIMG_EXTRACT_SALVAGE;
+			CHECK(fsimg_extract_into(f.reader, root, &options, &result, &error) ==
+			    (salvage ? FSIMG_EPARTIAL : FSIMG_OK));
+			CHECK(result.salvage_losses == salvage);
+			CHECK(result.skipped_entries == (omitted ? 0 : 1));
+			CHECK(result.omitted_entries == omitted);
+			expect_losses(&f, salvage, salvage,
+			    omitted ? "/\\xff" : "/bad", FSIMG_LOSS_UNSUPPORTED);
+			CHECK(faccessat(root, "bad", F_OK, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOENT);
+			CHECK(close(root) == 0);
+			remove_tree(parent, "out");
+			fixture_close(&f);
+		}
+	}
+	CHECK(close(parent) == 0 && rmdir(directory) == 0);
 }
 
 static void
@@ -3017,6 +3086,28 @@ expect_prefix_output(int output, const prefix_case_t *row)
 }
 
 static void
+expect_prefix_entry(const fixture_t *f, const prefix_case_t *row,
+    const char *name, uint64_t size)
+{
+	unsigned matches = 0;
+
+	for (unsigned i = 0; i < f->entry_reports; i++) {
+		if (strcmp(f->entry_paths[i] + 1, name) != 0)
+			continue;
+		if (f->entry_sizes[i] != size)
+			fprintf(stderr, "prefix %s/%s: /%s expected %llu bytes, got %llu\n",
+			    row->format, row->name, name, (unsigned long long)size,
+			    (unsigned long long)f->entry_sizes[i]);
+		CHECK(f->entry_sizes[i] == size);
+		matches++;
+	}
+	if (matches != 1)
+		fprintf(stderr, "prefix %s/%s: /%s expected one entry report, got %u\n",
+		    row->format, row->name, name, matches);
+	CHECK(matches == 1);
+}
+
+static void
 check_prefix_case(const prefix_case_t *row, bool salvage)
 {
 	fixture_t f;
@@ -3028,6 +3119,7 @@ check_prefix_case(const prefix_case_t *row, bool salvage)
 
 	parent = open_destination_parent(directory);
 	build_prefix_case(&f, row);
+	f.capture_entries = true;
 	fsimg_extract_options_init(&options);
 	if (salvage)
 		options.flags |= FSIMG_EXTRACT_SALVAGE;
@@ -3049,6 +3141,17 @@ check_prefix_case(const prefix_case_t *row, bool salvage)
 		output = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 		CHECK(output != -1);
 		expect_prefix_output(output, row);
+		if (row->shortened == 1 && row->loss_count == 1) {
+			bool iso = strcmp(row->format, "iso9660") == 0;
+
+			/* QNX writers also supply boot entries. Check each intended
+			 * sibling and shortened file once, independently of those extras.
+			 */
+			expect_prefix_entry(&f, row, row->output_name, row->prefix);
+			expect_prefix_entry(&f, row, iso ? "A" : "a", 512);
+			expect_prefix_entry(&f, row, iso ? "EMPTY" : "empty", 0);
+			expect_prefix_entry(&f, row, iso ? "Z" : "z", 512);
+		}
 		expect_losses(&f, row->loss_count, row->loss_count,
 		    row->loss_path, row->loss_mask);
 		CHECK(f.shortened == row->shortened);
@@ -3206,6 +3309,7 @@ main(void)
 	test_file_salvage_prefix_bytes_partial_names_collisions_and_output_limits();
 	test_terminal_content_failure_takes_precedence_over_directory_loss();
 	test_one_cluster_file_work_ignores_long_chain_and_late_cycle();
+	test_skipped_unsupported_entries_are_losses_only_under_salvage();
 	CHECK(regression_failures == 0);
 	return (0);
 }

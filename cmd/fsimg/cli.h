@@ -167,6 +167,10 @@ typedef struct fsimg_cli_display {
 	bool		 hybrid_noted;
 	/* cW: events come from the verification worker of the staged image. */
 	bool		 verifying_staged;
+	/* The salvage loss examples reported, which the total's count of those
+	 * omitted depends on.
+	 */
+	uint64_t	 salvage_examples;
 } fsimg_cli_display_t;
 
 fsimg_status_t fsimg_cli_number(const char *, bool, uint64_t *, fsimg_error_t *);

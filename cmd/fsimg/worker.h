@@ -52,6 +52,11 @@ typedef enum fsimg_confinement {
  * compression (--force).
  */
 #define FSIMG_JOB_FORCE 0x40u
+/* Extraction only: best-effort extraction of a damaged image (x --salvage,
+ * specs/design-salvage.md). A nonzero salvage_losses in the result makes the
+ * job FSIMG_EPARTIAL.
+ */
+#define FSIMG_JOB_SALVAGE 0x80u
 
 /*
  * The worker's single-descriptor capabilities, the prepared descriptors it
@@ -224,6 +229,7 @@ typedef struct fsimg_worker_result {
 	uint64_t	 image_bytes;
 	uint64_t	 skipped_entries;
 	uint64_t	 omitted_entries;
+	uint64_t	 salvage_losses;
 	fsimg_confinement_t confinement; /* UNKNOWN until a valid READY arrives. */
 } fsimg_worker_result_t;
 

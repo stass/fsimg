@@ -75,7 +75,8 @@ enum {
 	OPT_MTREE,
 	OPT_NO_RECURSION,
 	OPT_OFFSET,
-	OPT_PARTITION
+	OPT_PARTITION,
+	OPT_SALVAGE
 };
 
 typedef struct cli_option {
@@ -129,7 +130,8 @@ static const cli_option_t option_table[] = {
 	{ OPT_MTREE, "--mtree", MODE_EXTRACT, 0 },
 	{ OPT_NO_RECURSION, "--no-recursion", MODE_LIST, 0 },
 	{ OPT_OFFSET, "--offset", MODES_READ, 0 },
-	{ OPT_PARTITION, "--partition", MODES_READ, 0 }
+	{ OPT_PARTITION, "--partition", MODES_READ, 0 },
+	{ OPT_SALVAGE, "--salvage", MODE_EXTRACT, 0 }
 };
 #define OPTION_COUNT (sizeof(option_table) / sizeof(option_table[0]))
 
@@ -145,6 +147,7 @@ static const struct option long_options[] = {
 	{ "no-recursion", no_argument, NULL, OPT_NO_RECURSION },
 	{ "offset", required_argument, NULL, OPT_OFFSET },
 	{ "partition", required_argument, NULL, OPT_PARTITION },
+	{ "salvage", no_argument, NULL, OPT_SALVAGE },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -1384,6 +1387,17 @@ interpret_read(cli_parse_t *parse)
 		options->mtree = option_value(parse, OPT_MTREE);
 		if (options->mtree != NULL && options->mtree[0] == '\0')
 			return (syntax(parse, "--mtree requires a file name"));
+		if (option_count(parse, OPT_SALVAGE) != 0) {
+			if (request->kind == FSIMG_JOB_CAT)
+				return (syntax(parse, "--salvage conflicts with -O"));
+			if (options->mtree != NULL)
+				return (syntax(parse, "--salvage conflicts with --mtree"));
+			/* An entry safe extraction cannot create is a loss, not
+			 * the end of a best-effort walk.
+			 */
+			request->flags |= FSIMG_JOB_SALVAGE |
+			    FSIMG_JOB_SKIP_UNSUPPORTED;
+		}
 		break;
 	case MODE_LIST:
 		request->kind = FSIMG_JOB_LIST;
@@ -1440,6 +1454,8 @@ interpret_read(cli_parse_t *parse)
 	status = read_members(parse);
 	if (status != FSIMG_OK)
 		return (status);
+	if ((request->flags & FSIMG_JOB_SALVAGE) != 0 && options->member_count != 0)
+		return (syntax(parse, "--salvage takes no member selection"));
 	if (request->kind == FSIMG_JOB_EXTRACT && !options->extract_here &&
 	    !fsimg_cli_stem(options->image, options->stem, sizeof(options->stem)))
 		return (syntax_naming(parse,

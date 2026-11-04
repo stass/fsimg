@@ -54,8 +54,8 @@ copying is terminal under the existing failure contract.
 
 If a file's output name is taken, `foo.partial` or a clean name alike, exclusive
 creation reports the collision and salvage skips the file. It never overwrites
-or tries a numbered fallback. A suffixed name over the name limit is reported and
-skipped the same way. Name validation and the ordinary policy for unrepresentable
+or tries a numbered fallback. A suffixed name over the name limit, or a suffixed
+path over the path limit, is reported and skipped the same way. Name validation and the ordinary policy for unrepresentable
 names still apply.
 
 Each name is handled independently, including several names for one object.
@@ -108,6 +108,11 @@ record that scratch storage delivers intact and a driver's own decoding then
 rejects cannot be told from image damage and is reported as a loss, like the
 damage that decoding exists to notice.
 
+An entry safe extraction cannot create, by its kind or its name, would end the
+walk under the ordinary policy, so `--salvage` implies `-k` and each one is a loss
+of kind `FSIMG_LOSS_UNSUPPORTED`, its children going with it. The library option
+alone keeps the ordinary policy.
+
 All existing limits and cumulative accounting apply. Salvage adds no work
 ceiling or separate budget. A caller can set `max_work`; heavy damage can be
 slow when it does not. Resource exhaustion terminates extraction.
@@ -132,7 +137,14 @@ without a noticed loss returns ordinary success, with no integrity guarantee.
 The library reports through the context's loss callback, the rendered path with
 one `FSIMG_LOSS_*` kind as its cause, for the first `FSIMG_LOSS_EXAMPLES` losses
 of a reader. `salvage_losses` in the statistics and the extraction result holds
-the total, and the callback's consumer keeps the examples.
+the total, and the callback's consumer keeps the examples. The entry callback
+reports a shortened file under its output name.
+
+A CLI worker reports a completed walk the same way whether or not it lost
+anything: its completion frame carries the count, and the coordinator turns a
+nonzero count into `FSIMG_EPARTIAL`, so no worker can report a clean result with
+losses. Loss examples and metadata loss examples have separate allowances, and
+a count below the examples sent is a protocol violation.
 
 ## Tests and acceptance evidence
 

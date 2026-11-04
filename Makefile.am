@@ -456,6 +456,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/iso_settings_test.rb test/cli/iso_truncated_test.rb \
 	test/cli/isohybrid_test.rb \
 	test/cli/fat_root_test.rb test/cli/fat_truncated_test.rb \
+	test/cli/salvage_test.rb \
 	test/cli/qnx4_truncated_test.rb \
 	test/cli/qnx6_truncated_test.rb \
 	test/cli/scheme_truncated_test.rb \

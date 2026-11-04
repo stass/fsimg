@@ -12,8 +12,11 @@ module CliRecords
     )
     .freeze
 
-  def records(result)
-    decoded = result.stdout.lines(chomp: true).map { |line| JSON.parse(line) }
+  def records(result, stream: :stdout)
+    lines = result.public_send(stream).lines(chomp: true)
+    # JSON diagnostics share stderr with plain warning lines.
+    lines = lines.select { _1.start_with?("{") } if stream == :stderr
+    decoded = lines.map { |line| JSON.parse(line) }
     refute_empty(decoded, "CLI must emit JSON records")
     decoded.each_with_index do |record, index|
       assert_equal(1, record.fetch("schema"), "JSON record #{index} schema")

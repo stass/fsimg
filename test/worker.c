@@ -87,6 +87,18 @@ typedef enum worker_scenario {
 	SCENARIO_EXCESS_LOSS,
 	SCENARIO_LIMIT_LOSS,
 	SCENARIO_INFORMATIONAL_GEOMETRY,
+	SCENARIO_SALVAGE_DONE,
+	SCENARIO_SALVAGE_FORGED_CLEAN,
+	SCENARIO_SALVAGE_LOW_TOTAL,
+	SCENARIO_SALVAGE_UNREQUESTED_DONE,
+	SCENARIO_SALVAGE_UNREQUESTED_LOSS,
+	SCENARIO_SALVAGE_TWO_KINDS,
+	SCENARIO_SALVAGE_METADATA_KIND,
+	SCENARIO_SALVAGE_UNKNOWN_KIND,
+	SCENARIO_SALVAGE_SEPARATE_ALLOWANCE,
+	SCENARIO_SALVAGE_EXCESS_LOSS,
+	SCENARIO_SALVAGE_ERROR_PARTIAL,
+	SCENARIO_SALVAGE_BAD_EXIT,
 } worker_scenario_t;
 
 /* The point at which a forged worker interrupts its ordinary result stream. */
@@ -2736,8 +2748,62 @@ fake_worker(worker_scenario_t mode)
 		}
 		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY_END, NULL, 0, NULL) == FSIMG_OK);
 	}
+	if (mode == SCENARIO_SALVAGE_ERROR_PARTIAL) {
+		bzero(&error, sizeof(error));
+		error.status = FSIMG_EPARTIAL;
+		error.operation = FSIMG_OP_EXTRACT;
+		strcpy(error.message, "hostile partial error without losses");
+		fsimg_wire_error_encode(raw, &error);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ERROR,
+		    raw, FSIMG_WIRE_ERROR_BYTES, NULL) == FSIMG_OK);
+		return (1);
+	}
+	if (mode >= SCENARIO_SALVAGE_DONE && mode <= SCENARIO_SALVAGE_BAD_EXIT) {
+		unsigned examples = 1;
+		uint64_t fields = FSIMG_LOSS_SHORTENED;
+
+		if (mode == SCENARIO_SALVAGE_UNREQUESTED_DONE)
+			examples = 0;
+		if (mode == SCENARIO_SALVAGE_DONE)
+			examples = 2;
+		if (mode == SCENARIO_SALVAGE_LOW_TOTAL)
+			examples = 3;
+		if (mode == SCENARIO_SALVAGE_TWO_KINDS)
+			fields |= FSIMG_LOSS_SKIPPED;
+		if (mode == SCENARIO_SALVAGE_METADATA_KIND)
+			fields |= FSIMG_META_OWNER;
+		if (mode == SCENARIO_SALVAGE_UNKNOWN_KIND)
+			fields |= UINT64_C(1) << 63;
+		if (mode == SCENARIO_SALVAGE_SEPARATE_ALLOWANCE ||
+		    mode == SCENARIO_SALVAGE_EXCESS_LOSS)
+			examples = FSIMG_WIRE_LOSS_EVENTS +
+			    (mode == SCENARIO_SALVAGE_EXCESS_LOSS ? 1 : 0);
+		for (unsigned group = 0; group < 2; group++) {
+			if (group == 0 && mode != SCENARIO_SALVAGE_SEPARATE_ALLOWANCE)
+				continue;
+			for (unsigned i = 0; i < examples; i++) {
+				bzero(raw, FSIMG_WIRE_LOSS_BYTES + 2);
+				fsimg_store_le64(raw + FSIMG_WIRE_LOSS_FIELDS,
+				    group == 0 ? FSIMG_META_OWNER : fields);
+				fsimg_store_le64(raw + FSIMG_WIRE_LOSS_LENGTH, 2);
+				bcopy("/x", raw + FSIMG_WIRE_LOSS_PATH, 2);
+				if (fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_LOSS,
+				    raw, FSIMG_WIRE_LOSS_BYTES + 2, NULL) != FSIMG_OK)
+					return (0);
+			}
+		}
+	}
 	bzero(raw, FSIMG_WIRE_DONE_BYTES);
 	fsimg_store_le64(raw, mode == SCENARIO_LONG_LIST_NAME ? 1 : 0);
+	if (mode >= SCENARIO_SALVAGE_DONE && mode <= SCENARIO_SALVAGE_BAD_EXIT) {
+		fsimg_store_le64(raw + FSIMG_WIRE_DONE_SALVAGE,
+		    mode == SCENARIO_SALVAGE_FORGED_CLEAN ? 0 :
+		    mode == SCENARIO_SALVAGE_SEPARATE_ALLOWANCE ? 40 :
+		    mode == SCENARIO_SALVAGE_DONE || mode == SCENARIO_SALVAGE_LOW_TOTAL ? 2 : 1);
+		if (mode == SCENARIO_SALVAGE_SEPARATE_ALLOWANCE)
+			fsimg_store_le64(raw + FSIMG_WIRE_DONE_LOSSES, 32);
+	}
+
 	if (mode == SCENARIO_INFORMATIONAL_GEOMETRY)
 		fsimg_store_le64(raw + FSIMG_WIRE_DONE_ENTRIES, 1);
 	if (mode == SCENARIO_SKIPPED_EXTRACTION)
@@ -2749,7 +2815,7 @@ fake_worker(worker_scenario_t mode)
 		fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
 	if (mode == SCENARIO_RUNTIME_FAILURE)
 		return (FSIMG_WORKER_RUNTIME_EXIT);
-	return (mode == SCENARIO_BAD_EXIT ? 1 : 0);
+	return (mode == SCENARIO_BAD_EXIT || mode == SCENARIO_SALVAGE_BAD_EXIT ? 1 : 0);
 }
 
 /* An oversized INFO claim cannot widen CAT's available-input default or
@@ -2926,6 +2992,105 @@ test_omitted_extraction(void)
 	fixture_close(&fixture);
 }
 
+/* A successful child exit cannot turn noticed damage into clean success. */
+static void
+test_salvage_worker_totals_and_hostile_loss_frames(void)
+{
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	unsigned failures = 0;
+	bool partial, valid;
+	int fd;
+
+	for (worker_scenario_t mode = SCENARIO_SALVAGE_DONE;
+	    mode <= SCENARIO_SALVAGE_EXCESS_LOSS; mode++) {
+		fixture_open(&fixture);
+		fd = openat(fixture.parent, "fake", O_CREAT | O_EXCL | O_RDWR, 0700);
+		CHECK(fd != -1);
+		CHECK(ftruncate(fd, mode) == 0 && fchmod(fd, 0700) == 0);
+		CHECK(close(fd) == 0);
+		fd = openat(fixture.parent, "fake", O_RDONLY | O_CLOEXEC);
+		CHECK(fd != -1);
+		fixture.request.input_fd = fd;
+		CHECK(fsimg_input_prepare(fd, NULL, NULL, &fixture.request.input, NULL) == FSIMG_OK);
+		fixture.request.output_fd = fixture.output;
+		fixture.request.kind = FSIMG_JOB_EXTRACT;
+		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
+		if (mode != SCENARIO_SALVAGE_UNREQUESTED_DONE &&
+		    mode != SCENARIO_SALVAGE_UNREQUESTED_LOSS)
+			fixture.request.flags = FSIMG_JOB_SALVAGE;
+		partial = mode == SCENARIO_SALVAGE_DONE ||
+		    mode == SCENARIO_SALVAGE_SEPARATE_ALLOWANCE;
+		status = run(&fixture, &error);
+		valid = status == (partial ? FSIMG_EPARTIAL : FSIMG_EIO) &&
+		    error.status == status;
+		if (!valid) {
+			fprintf(stderr, "salvage worker scenario %d: expected %d, got %d: %s\n",
+			    mode, partial ? FSIMG_EPARTIAL : FSIMG_EIO, status, error.message);
+			failures++;
+		}
+		if (!partial && valid)
+			CHECK(error.operation == FSIMG_OP_CONTEXT);
+		if (partial && valid) {
+			CHECK(error.operation == FSIMG_OP_EXTRACT);
+			CHECK(strcmp(error.message, "salvage extraction lost part of the image") == 0);
+			CHECK(fixture.result.salvage_losses ==
+			    (mode == SCENARIO_SALVAGE_DONE ? 2 : 40));
+			CHECK(fixture.result.metadata_losses ==
+			    (mode == SCENARIO_SALVAGE_DONE ? 0 : 32));
+		}
+		CHECK(close(fd) == 0);
+		CHECK(unlinkat(fixture.parent, "fake", 0) == 0);
+		fixture_close(&fixture);
+	}
+	CHECK(failures == 0);
+}
+
+static void
+test_salvage_error_and_done_before_bad_exit_remain_failures(void)
+{
+	const worker_scenario_t cases[] = {
+		SCENARIO_SALVAGE_ERROR_PARTIAL, SCENARIO_SALVAGE_BAD_EXIT
+	};
+	worker_fixture_t fixture;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	int fd;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fixture_open(&fixture);
+		fd = openat(fixture.parent, "fake", O_CREAT | O_EXCL | O_RDWR, 0700);
+		CHECK(fd != -1);
+		CHECK(ftruncate(fd, cases[i]) == 0 && fchmod(fd, 0700) == 0);
+		CHECK(close(fd) == 0);
+		fd = openat(fixture.parent, "fake", O_RDONLY | O_CLOEXEC);
+		CHECK(fd != -1);
+		fixture.request.input_fd = fd;
+		CHECK(fsimg_input_prepare(fd, NULL, NULL, &fixture.request.input, NULL) == FSIMG_OK);
+		fixture.request.output_fd = fixture.output;
+		fixture.request.kind = FSIMG_JOB_EXTRACT;
+		fixture.request.sandbox = FSIMG_SANDBOX_OFF;
+		fixture.request.flags = FSIMG_JOB_SALVAGE;
+
+		status = run(&fixture, &error);
+		if (cases[i] == SCENARIO_SALVAGE_ERROR_PARTIAL) {
+			CHECK(status == FSIMG_EPARTIAL);
+			CHECK(fixture.result.salvage_losses == 0);
+			CHECK(strcmp(error.message, "hostile partial error without losses") == 0);
+		} else {
+			CHECK(status == FSIMG_EIO);
+			CHECK(fixture.result.salvage_losses == 1);
+			CHECK(error.operation == FSIMG_OP_CONTEXT);
+			CHECK(strcmp(error.message, "child process exited unsuccessfully") == 0);
+		}
+		CHECK(status != FSIMG_OK && error.status == status);
+		CHECK(close(fd) == 0);
+		CHECK(unlinkat(fixture.parent, "fake", 0) == 0);
+		fixture_close(&fixture);
+	}
+}
+
 static void
 test_forged_publication(void)
 {
@@ -3030,7 +3195,7 @@ test_forged(void)
 		if (mode == SCENARIO_LONG_LIST_NAME)
 			CHECK(fixture.name_bytes == 65535);
 		if (mode == SCENARIO_EXCESS_LOSS)
-			CHECK(strstr(error.message, "metadata loss examples") != NULL);
+			CHECK(strstr(error.message, "loss examples") != NULL);
 		CHECK(close(fd) == 0);
 		CHECK(unlinkat(fixture.parent, "fake", 0) == 0);
 		fixture_close(&fixture);
@@ -3389,6 +3554,8 @@ main(int argc, char **argv)
 		test_transport(SCENARIO_SLOW_CONSUMER);
 	}
 	test_coordinator_regressions();
+	test_salvage_worker_totals_and_hostile_loss_frames();
+	test_salvage_error_and_done_before_bad_exit_remain_failures();
 	return (0);
 }
 

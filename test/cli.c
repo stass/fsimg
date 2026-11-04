@@ -2331,6 +2331,126 @@ test_minimize_plan_display(bool json)
 	}
 }
 
+/* Loss paths are already rendered; shortening appends to even a tail excerpt. */
+static void
+test_salvage_loss_diagnostics_without_verbose(void)
+{
+	static const struct {
+		uint32_t kind;
+		const char *name;
+		const char *meaning;
+	} cases[] = {
+		{ FSIMG_LOSS_SHORTENED, "shortened", "shortened at the first noticed damage" },
+		{ FSIMG_LOSS_SKIPPED, "skipped", "skipped: no recoverable bytes, or its name is too long" },
+		{ FSIMG_LOSS_DIRECTORY, "directory", "listing skipped: damaged" },
+		{ FSIMG_LOSS_ENTRY, "entry", "entry skipped: damaged" },
+		{ FSIMG_LOSS_COLLISION, "collision", "skipped with any children: its output name is taken" },
+		{ FSIMG_LOSS_UNSUPPORTED, "unsupported", "skipped with any children: safe extraction cannot create its kind or name" }
+	};
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_worker_text_t text;
+	fsimg_frame_t frame;
+	const char *path = "/a\\\\b\\x22";
+	char expected[512];
+
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_EXTRACT;
+	options.request.flags = FSIMG_JOB_SALVAGE;
+	options.mode = "x";
+	options.scratch = "-";
+	for (unsigned json = 0; json < 2; json++) {
+		options.json = json != 0;
+		for (unsigned truncated = 0; truncated < 2; truncated++) {
+			for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+				fsimg_cli_display_init(&display, &options, &result, &paths);
+				bzero(&frame, sizeof(frame));
+				frame.type = FSIMG_FRAME_LOSS;
+				frame.length = FSIMG_WIRE_LOSS_BYTES + strlen(path);
+				fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_FIELDS, cases[i].kind);
+				fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_TRUNCATED, truncated);
+				fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_LENGTH, strlen(path));
+				bcopy(path, frame.payload + FSIMG_WIRE_LOSS_PATH, strlen(path));
+				CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+				if (json) {
+					snprintf(expected, sizeof(expected),
+					    "{\"schema\":1,\"type\":\"salvage_loss\",\"kind\":\"%s\","
+					    "\"path_truncated\":%s,\"path_excerpt\":\"/a\\\\\\\\b\\\\x22%s\"}\n",
+					    cases[i].name, truncated ? "true" : "false",
+					    cases[i].kind == FSIMG_LOSS_SHORTENED ? ".partial" : "");
+				} else {
+					snprintf(expected, sizeof(expected), "fsimg: salvage: \"%s%s\"%s: %s\n",
+					    path, cases[i].kind == FSIMG_LOSS_SHORTENED ? ".partial" : "",
+					    truncated ? " [path truncated]" : "", cases[i].meaning);
+					CHECK(text.diagnostic);
+				}
+				if (text.length != strlen(expected) ||
+				    bcmp(text.data, expected, text.length) != 0)
+					fprintf(stderr, "salvage %s json=%u truncated=%u: expected %s",
+					    cases[i].name, json, truncated, expected);
+				CHECK(text.length == strlen(expected));
+				CHECK(bcmp(text.data, expected, text.length) == 0);
+			}
+		}
+	}
+}
+
+static void
+test_salvage_loss_escapes_hostile_bytes_and_appends_to_full_excerpt(void)
+{
+	fsimg_cli_options_t options = { 0 };
+	fsimg_cli_paths_t paths = { 0 };
+	fsimg_worker_result_t result = { 0 };
+	fsimg_cli_display_t display;
+	fsimg_worker_text_t text;
+	fsimg_frame_t frame;
+	const char hostile[] = "/\033\"\377\342\200\256";
+	char excerpt[FSIMG_WIRE_LOSS_PATH_BYTES + 1], expected[512];
+
+	memset(excerpt, 'a', sizeof(excerpt) - 1);
+	excerpt[sizeof(excerpt) - 1] = '\0';
+	fsimg_worker_request_init(&options.request);
+	options.request.kind = FSIMG_JOB_EXTRACT;
+	options.request.flags = FSIMG_JOB_SALVAGE;
+	options.mode = "x";
+	options.scratch = "-";
+	for (unsigned json = 0; json < 2; json++) {
+		options.json = json != 0;
+		for (unsigned truncated = 0; truncated < 2; truncated++) {
+			const char *path = truncated ? excerpt : hostile;
+
+			fsimg_cli_display_init(&display, &options, &result, &paths);
+			bzero(&frame, sizeof(frame));
+			frame.type = FSIMG_FRAME_LOSS;
+			frame.length = FSIMG_WIRE_LOSS_BYTES + strlen(path);
+			fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_FIELDS, FSIMG_LOSS_SHORTENED);
+			fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_TRUNCATED, truncated);
+			fsimg_store_le64(frame.payload + FSIMG_WIRE_LOSS_LENGTH, strlen(path));
+			bcopy(path, frame.payload + FSIMG_WIRE_LOSS_PATH, strlen(path));
+			CHECK(fsimg_cli_event(&display, &frame, &text, NULL) == FSIMG_OK);
+			if (json) {
+				snprintf(expected, sizeof(expected),
+				    "{\"schema\":1,\"type\":\"salvage_loss\",\"kind\":\"shortened\","
+				    "\"path_truncated\":%s,\"path_excerpt\":\"%s.partial\"}\n",
+				    truncated ? "true" : "false",
+				    truncated ? excerpt : "/\\u001b\\\"\\\\xff\\u202e");
+			} else {
+				snprintf(expected, sizeof(expected),
+				    "fsimg: salvage: \"%s.partial\"%s: shortened at the first noticed damage\n",
+				    truncated ? excerpt : "/\\u001b\\\"\\xff\\u202e",
+				    truncated ? " [path truncated]" : "");
+			}
+			CHECK(text.length == strlen(expected));
+			CHECK(bcmp(text.data, expected, text.length) == 0);
+			for (size_t i = 0; i + 1 < text.length; i++)
+				CHECK(((const unsigned char *)text.data)[i] >= 32 &&
+				    ((const unsigned char *)text.data)[i] != 127);
+		}
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2396,6 +2516,8 @@ main(int argc, char **argv)
 	test_progress();
 	test_staged_verification_failure();
 	test_compressed_verification_spool_limit();
+	test_salvage_loss_diagnostics_without_verbose();
+	test_salvage_loss_escapes_hostile_bytes_and_appends_to_full_excerpt();
 	return (0);
 }
 

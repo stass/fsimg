@@ -698,6 +698,25 @@ unless FSIMG_EXTRACT_SKIP_UNSUPPORTED leaves it and its subtree out; it is
 counted in omitted_entries, never in skipped_entries.
 An entry name the host filesystem cannot represent, such as one longer than
 its component limit, fails with FSIMG_EUNSUPPORTED.
+.Pp
+FSIMG_EXTRACT_SALVAGE extracts what it can of a damaged image and promises
+nothing about completeness or trustworthiness: a
+.Ql .partial
+name marks only noticed damage, and a clean name is no proof.
+It takes the whole volume, so a selection or a manifest_fd is FSIMG_EINVAL.
+A damaged file is created as its name with
+.Ql .partial
+appended, holding the bytes before the first noticed damage; the entry callback
+reports it under that name.
+A directory or entry the format's decoder rejects, a file with no recoverable
+bytes and an entry whose output name is taken are skipped and the walk continues.
+With FSIMG_EXTRACT_SKIP_UNSUPPORTED each entry it leaves out is a loss too.
+The context's loss callback receives the path and one FSIMG_LOSS_* kind in its
+mask for the first FSIMG_LOSS_EXAMPLES losses, a shortened file under its
+original path; salvage_losses in the statistics holds the total.
+A completed walk that noticed a loss returns FSIMG_EPARTIAL with the private
+output retained and incomplete, and one that noticed none returns FSIMG_OK.
+Any other failure ends the extraction with its ordinary error.
 Explicit timestamp restoration requires a time-basis policy and does not
 change the embedding process's sandbox.
 .Sh EXAMPLES

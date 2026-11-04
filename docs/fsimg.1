@@ -1589,6 +1589,9 @@ names an image; see
 .Sx Manifests of an extraction .
 .It Fl O
 Write one member's logical bytes to stdout instead of extracting.
+.It Fl Fl salvage
+Attempt the whole volume of a damaged image; see
+.Sx Salvage .
 .El
 .Pp
 Both destinations must be private, judged on the opened directory alone: a
@@ -1703,6 +1706,53 @@ There is no directory-wide atomic publication or resume promise.
 If only final reporting fails, the destination may already contain complete
 content; the command still reports failure and conservatively marks its output
 incomplete.
+.Ss Salvage
+.Fl Fl salvage
+extracts what it can of an image that opens but is damaged.
+It promises nothing about the result: the recovered tree can be incomplete and
+its bytes can be wrong.
+A
+.Ql .partial
+name marks only damage
+.Nm
+noticed.
+A clean name is no proof of an intact file: a cross-linked block, for example,
+can appear in a file that keeps its name.
+.Pp
+A damaged file
+.Pa foo
+becomes
+.Pa foo.partial ,
+holding its bytes before the first noticed damage, with no zero filling and
+nothing from after the damage.
+A file with no recoverable bytes, or whose
+.Ql .partial
+name is too long, is skipped.
+A directory whose listing is damaged loses its children, and an entry that does
+not decode is skipped, while extraction continues with their siblings.
+An entry whose output name is already taken, a file or a directory, is skipped
+with any children; nothing is overwritten and no other name is tried.
+.Fl Fl salvage
+implies
+.Fl k ,
+and each entry it leaves out counts as a loss, so an undamaged image holding a
+symbolic link gives status 1.
+.Pp
+Every extraction safety rule and limit still applies and the sandbox gains no
+authority.
+Input failures, output failures, resource limits and cancellation still end
+the extraction with their ordinary error.
+Each of the first 32 losses is reported on standard error with its path and
+cause, followed by the total and the number of examples omitted.
+Any loss gives status 1, and the tree is retained and reported as incomplete.
+Completing with no noticed loss is ordinary success, not proof of integrity.
+.Fl Fl salvage
+rejects
+.Fl O ,
+.Fl Fl mtree
+and member operands.
+.Fl W
+and the other commands keep their contracts.
 .Ss Manifests of an extraction
 With
 .Fl Fl mtree ,
@@ -1930,7 +1980,9 @@ recurses into worker-created directories, and reports retained objects.
 .Sh EXIT STATUS
 .Ex -std
 Status 1 means operational failure, including corruption, unsupported required
-features, cancellation, partial output or uncertain durability.
+features, cancellation, partial output, a loss under
+.Fl Fl salvage
+or uncertain durability.
 Status 2 means invalid command syntax.
 A sandbox-unavailable warning under automatic mode alone is not failure.
 .Pp

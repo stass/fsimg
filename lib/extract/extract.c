@@ -21,6 +21,7 @@
 #include "unicode.h"
 
 #define EXTRACT_BUFFER_BYTES 65536u
+#define SALVAGE_SUFFIX ".partial"
 
 typedef struct extract_directory {
 	size_t		 path_length;
@@ -39,6 +40,8 @@ typedef struct extract_state {
 	char		*directory_path;
 	char		*entry_path;
 	uint64_t	 completed_entries;
+	/* The current file was created under its name with ".partial" appended. */
+	bool		 shortened;
 	uint64_t	 skipped_entries;
 	uint32_t	 depth;
 } extract_state_t;
@@ -470,9 +473,13 @@ salvage_file(extract_state_t *state, const fsimg_entry_t *entry, char *partial,
 	status = fsimg_reader_salvage_plan(state->reader, damaged, error);
 	if (status != FSIMG_OK || !*damaged)
 		return (status);
-	length = snprintf(partial, capacity, "%s.partial", *name);
-	/* Planning shortened the current entry, which entry points at. */
-	if (entry->size == 0 || length < 0 || (size_t)length >= capacity) {
+	length = snprintf(partial, capacity, "%s" SALVAGE_SUFFIX, *name);
+	/* Planning shortened the current entry, which entry points at. The
+	 * output's path is reported, so it must fit the path limit too.
+	 */
+	if (entry->size == 0 || length < 0 || (size_t)length >= capacity ||
+	    strlen(entry->path) + strlen(SALVAGE_SUFFIX) >=
+	    state->reader->ctx->options.max_path_bytes) {
 		fsimg_reader_salvage_loss(state->reader, entry->path, NULL,
 		    FSIMG_LOSS_SKIPPED);
 		return (FSIMG_DONE);
@@ -550,10 +557,32 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 	if (digest != NULL)
 		fsimg_sha256_final(digest, &hash);
 	status = fsimg_io_close_output(output, error);
-	if (status == FSIMG_OK && damaged)
+	if (status == FSIMG_OK && damaged) {
 		fsimg_reader_salvage_loss(state->reader, entry->path, NULL,
 		    FSIMG_LOSS_SHORTENED);
+		state->shortened = true;
+	}
 	return (status);
+}
+
+/* Report a completed entry, a shortened file under the name it was created
+ * with, which salvage_file checked fits the path limit.
+ */
+static void
+report_completed(extract_state_t *state, const fsimg_entry_t *entry)
+{
+	fsimg_entry_t shortened;
+
+	if (!state->shortened) {
+		fsimg_report_entry(state->reader->ctx, entry);
+		return;
+	}
+	state->shortened = false;
+	shortened = *entry;
+	snprintf(state->entry_path, state->reader->ctx->options.max_path_bytes,
+	    "%s" SALVAGE_SUFFIX, entry->path);
+	shortened.path = state->entry_path;
+	fsimg_report_entry(state->reader->ctx, &shortened);
 }
 
 /* The safe profile creates only regular files and directories. Any other
@@ -580,6 +609,9 @@ skip_unsupported(extract_state_t *state, const fsimg_entry_t *entry,
 		return (status);
 	state->skipped_entries++;
 	fsimg_stat_add(&state->reader->ctx->stats.skipped_entries, 1);
+	if (state->reader->salvage.enabled)
+		fsimg_reader_salvage_loss(state->reader, entry->path, NULL,
+		    FSIMG_LOSS_UNSUPPORTED);
 	return (FSIMG_OK);
 }
 
@@ -708,7 +740,7 @@ extract_entries(extract_state_t *state, fsimg_error_t *error)
 		/* The entry is complete, its manifest line recorded: report
 		 * it, the extractor's one entry callback.
 		 */
-		fsimg_report_entry(state->reader->ctx, entry);
+		report_completed(state, entry);
 	}
 	while (state->depth != 0) {
 		status = close_directory(state, error);

@@ -36,6 +36,8 @@ static void byte_size(fsimg_cli_display_t *, uint64_t);
 static void usage(fsimg_cli_display_t *, bool);
 static void help(fsimg_cli_display_t *);
 static void loss_notice(fsimg_cli_display_t *);
+static void salvage_example(fsimg_cli_display_t *, const unsigned char *);
+static void salvage_notice(fsimg_cli_display_t *);
 static void metadata_fields(fsimg_cli_display_t *, uint64_t);
 static void entry_kinds(fsimg_cli_display_t *, uint64_t);
 static const char *kind_name(uint64_t);
@@ -451,6 +453,10 @@ help(fsimg_cli_display_t *display)
 		append(display, "    --mtree=file    Also write an mtree(5) manifest of the extracted\n"
 		    "                    entries, digests and metadata to the new file\n");
 		append(display, "    -O              Write one member's bytes to stdout\n");
+		append(display, "    --salvage       Attempt the whole volume of a damaged image, with no\n"
+		    "                    guarantees; implies -k. Any noticed loss exits 1\n"
+		    "                    and retains the incomplete tree. A damaged foo\n"
+		    "                    becomes foo.partial; a clean name is no proof\n");
 		append(display, "%s%s", help_settings_read, help_policies);
 		append(display, "    -v              Name each entry on stderr; -vv adds progress and\n"
 		    "                    details\n");
@@ -565,6 +571,76 @@ loss_notice(fsimg_cli_display_t *display)
 		    (unsigned long long)omitted, omitted == 1 ?
 		    "entry with a name outside the profile was" :
 		    "entries with names outside the profile were");
+}
+
+/* One salvage loss. A shortened file goes by the name it was created with,
+ * which the library reports as its original path; the suffix is appended here,
+ * after the excerpt, so a truncated path keeps it. A collision's path is the
+ * entry's: the name taken can be that one or its .partial, a file or a directory.
+ */
+static void
+salvage_example(fsimg_cli_display_t *display, const unsigned char *raw)
+{
+	static const struct {
+		uint64_t	 kind;
+		const char	*name;
+		const char	*meaning;
+	} kinds[] = {
+		{ FSIMG_LOSS_DIRECTORY, "directory", "listing skipped: damaged" },
+		{ FSIMG_LOSS_ENTRY, "entry", "entry skipped: damaged" },
+		{ FSIMG_LOSS_SHORTENED, "shortened",
+		    "shortened at the first noticed damage" },
+		{ FSIMG_LOSS_SKIPPED, "skipped",
+		    "skipped: no recoverable bytes, or its name is too long" },
+		{ FSIMG_LOSS_COLLISION, "collision",
+		    "skipped with any children: its output name is taken" },
+		{ FSIMG_LOSS_UNSUPPORTED, "unsupported",
+		    "skipped with any children: safe extraction cannot create its kind or name" }
+	};
+	const uint64_t fields = fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS);
+	const bool json = display->options->json;
+	const bool truncated = fsimg_load_le64(raw + FSIMG_WIRE_LOSS_TRUNCATED) != 0;
+	const char *suffix = fields == FSIMG_LOSS_SHORTENED ? ".partial" : "";
+	const char *name = "unknown", *meaning = "unknown loss";
+
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		if (kinds[i].kind == fields) {
+			name = kinds[i].name;
+			meaning = kinds[i].meaning;
+		}
+	}
+	display->salvage_examples++;
+	if (json)
+		append(display, "{\"schema\":1,\"type\":\"salvage_loss\",\"kind\":\"%s\","
+		    "\"path_truncated\":%s,\"path_excerpt\":\"", name,
+		    truncated ? "true" : "false");
+	else
+		append(display, "fsimg: salvage: \"");
+	escape_span(display, raw + FSIMG_WIRE_LOSS_PATH,
+	    (size_t)fsimg_load_le64(raw + FSIMG_WIRE_LOSS_LENGTH),
+	    json ? ESCAPE_JSON : ESCAPE_RENDERED, false, true, NULL);
+	if (json)
+		append(display, "%s\"}\n", suffix);
+	else
+		append(display, "%s\"%s: %s\n", suffix,
+		    truncated ? " [path truncated]" : "", meaning);
+}
+
+/* The total of a partial extraction, and what its examples left out. */
+static void
+salvage_notice(fsimg_cli_display_t *display)
+{
+	uint64_t losses = display->result->salvage_losses;
+
+	if (losses == 0)
+		return;
+	append(display, "fsimg: salvage: noticed %llu loss%s",
+	    (unsigned long long)losses, losses == 1 ? "" : "es");
+	if (losses > display->salvage_examples)
+		append(display, "; %llu example%s omitted",
+		    (unsigned long long)(losses - display->salvage_examples),
+		    losses - display->salvage_examples == 1 ? "" : "s");
+	append(display, "\n");
 }
 
 /* A UUID's sixteen bytes in textual order, as RFC 4122 groups them. */
@@ -1875,6 +1951,9 @@ failure(fsimg_cli_display_t *display)
 		else append(display, "null");
 		append(display, ",\"retained_output\":");
 		string_value(display, retained_output(display));
+		if (error->status == FSIMG_EPARTIAL)
+			append(display, ",\"salvage_losses\":\"%llu\"",
+			    (unsigned long long)display->result->salvage_losses);
 		append(display, ",\"retained_manifest\":");
 		string_value(display, display->paths->manifest.retained);
 		append(display, ",\"retained_scratch\":");
@@ -1901,6 +1980,10 @@ failure(fsimg_cli_display_t *display)
 		append(display, "fsimg: a compressed image needs a spool in "
 		    "scratch, which -T - disables\n");
 		return;
+	}
+	if (error->status == FSIMG_EPARTIAL) {
+		loss_notice(display);
+		salvage_notice(display);
 	}
 	append(display, "fsimg: ");
 	prose(display, error->message[0] != '\0' ? error->message : fsimg_status_string(error->status));
@@ -2122,6 +2205,13 @@ fsimg_cli_event(void *argument, const fsimg_frame_t *frame,
 		    (unsigned long long)fsimg_load_le64(raw + 16));
 		break;
 	case FSIMG_FRAME_LOSS:
+		/* What salvage lost is the command's result, not a detail. */
+		if ((fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS) &
+		    FSIMG_WIRE_LOSS_SALVAGE) != 0) {
+			diagnostic = true;
+			salvage_example(display, raw);
+			break;
+		}
 		if (!options->json && (options->request.flags & FSIMG_JOB_VERBOSE) == 0)
 			break;
 		diagnostic = true;

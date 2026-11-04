@@ -1453,7 +1453,9 @@ fsimg_cli_cleanup(fsimg_cli_options_t *options, fsimg_cli_paths_t *paths,
 		else if (cleanup == 0)
 			cleanup = failure;
 	}
-	if (status == FSIMG_OK && paths->destination_parent != -1 &&
+	/* A partial tree is retained, so it is flushed like a complete one. */
+	if ((status == FSIMG_OK || status == FSIMG_EPARTIAL) &&
+	    paths->destination_parent != -1 &&
 	    fsync(paths->destination_parent) == -1 && cleanup == 0)
 		cleanup = errno;
 	for (fsimg_capability_t c = 0; c < FSIMG_CAPABILITY_COUNT; c++)

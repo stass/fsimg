@@ -303,15 +303,18 @@ fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
  * listing of the directory at path, the root's being "/"; the entry at path,
  * which is not delivered; the file at path, created shortened as its name with
  * ".partial" appended; the damaged file at path, skipped with no output because
- * no byte of it is recoverable or its suffixed name exceeds the name limit; or
+ * no byte of it is recoverable or its suffixed name or path exceeds its limit; or
  * the file or directory at path, skipped with any children because its output
- * name is taken.
+ * name is taken; or, under FSIMG_EXTRACT_SKIP_UNSUPPORTED, the entry at path,
+ * left out with any children because safe extraction cannot create its kind
+ * or its name.
  */
 #define FSIMG_LOSS_DIRECTORY 0x10000u
 #define FSIMG_LOSS_ENTRY 0x20000u
 #define FSIMG_LOSS_SHORTENED 0x40000u
 #define FSIMG_LOSS_SKIPPED 0x80000u
 #define FSIMG_LOSS_COLLISION 0x100000u
+#define FSIMG_LOSS_UNSUPPORTED 0x200000u
 #define FSIMG_LOSS_EXAMPLES 32u
 #define FSIMG_ATTR_READONLY 0x01u
 #define FSIMG_ATTR_HIDDEN 0x02u

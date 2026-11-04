@@ -160,10 +160,11 @@ typedef struct worker_supervisor {
 	uint64_t	 named_other_kinds;
 	/* A create job's PLAN entries, which its DONE repeats. */
 	uint64_t	 planned_entries;
-	/* Metadata loss examples received; a worker sends at most
-	 * FSIMG_WIRE_LOSS_EVENTS, and DONE carries the exact count.
+	/* Metadata and salvage loss examples received; a worker sends at most
+	 * FSIMG_WIRE_LOSS_EVENTS of each, and DONE carries the exact counts.
 	 */
 	unsigned	 loss_examples;
+	unsigned	 salvage_examples;
 	uint64_t	 output_limit;
 	/* The read job's input file size, or the create job's planned disk. */
 	uint64_t	 disk_bytes;
@@ -277,7 +278,7 @@ deliver_event(worker_supervisor_t *state, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	status = state->event(state->argument, &state->decoder.frame, &text, error);
-	if (status > FSIMG_OK || status < FSIMG_EDURABILITY)
+	if (status > FSIMG_OK || status < FSIMG_EPARTIAL)
 		return (worker_error(error, "invalid worker event callback status"));
 	if (status != FSIMG_OK) {
 		if (error != NULL && error->status != status)
@@ -504,6 +505,17 @@ names_match_plan(const worker_supervisor_t *state, uint64_t entries)
 	    entries == state->entry_count);
 }
 
+/* A LOSS frame holds metadata fields, or in a salvage job one kind of loss. */
+static bool
+loss_fields_valid(const worker_supervisor_t *state, uint64_t fields)
+{
+	if ((fields & FSIMG_WIRE_LOSS_SALVAGE) == 0)
+		return (fields != 0 && (fields & ~(uint64_t)FSIMG_META_KNOWN) == 0);
+	return ((state->request->flags & FSIMG_JOB_SALVAGE) != 0 &&
+	    (fields & ~(uint64_t)FSIMG_WIRE_LOSS_SALVAGE) == 0 &&
+	    (fields & (fields - 1)) == 0);
+}
+
 /* An extraction named each file and directory it completed and each entry
  * of another kind it skipped.
  */
@@ -622,6 +634,7 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 	fsimg_worker_text_t warning;
 	fsimg_error_t detail;
 	uint64_t path_limit, count, flags;
+	unsigned *examples;
 	fsimg_status_t status;
 
 	frame = &state->decoder.frame;
@@ -775,13 +788,15 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		if (frame->length < FSIMG_WIRE_LOSS_BYTES || frame->length > FSIMG_WIRE_LOSS_BYTES + FSIMG_WIRE_LOSS_PATH_BYTES ||
 		    fsimg_load_le64(raw + FSIMG_WIRE_LOSS_LENGTH) != frame->length - FSIMG_WIRE_LOSS_BYTES ||
 		    fsimg_load_le64(raw + FSIMG_WIRE_LOSS_TRUNCATED) > 1 ||
-		    fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS) == 0 ||
-		    (fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS) & ~(uint64_t)FSIMG_META_KNOWN) != 0)
-			return (worker_error(error, "invalid worker metadata loss frame"));
-		if (state->loss_examples == FSIMG_WIRE_LOSS_EVENTS)
+		    !loss_fields_valid(state, fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS)))
+			return (worker_error(error, "invalid worker loss frame"));
+		examples = (fsimg_load_le64(raw + FSIMG_WIRE_LOSS_FIELDS) &
+		    FSIMG_WIRE_LOSS_SALVAGE) != 0 ?
+		    &state->salvage_examples : &state->loss_examples;
+		if (*examples == FSIMG_WIRE_LOSS_EVENTS)
 			return (worker_error(error,
-			    "worker sent more metadata loss examples than allowed"));
-		state->loss_examples++;
+			    "worker sent more loss examples than allowed"));
+		(*examples)++;
 		break;
 	case FSIMG_FRAME_DONE:
 		if ((state->output_state != (kind == FSIMG_JOB_VERIFY ?
@@ -817,6 +832,11 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		    (state->request->flags & FSIMG_JOB_SKIP_UNSUPPORTED) == 0) &&
 		    state->result->omitted_entries != 0)
 			return (worker_error(error, "worker omitted entries it could not omit"));
+		state->result->salvage_losses = fsimg_load_le64(raw + FSIMG_WIRE_DONE_SALVAGE);
+		if (((state->request->flags & FSIMG_JOB_SALVAGE) == 0 &&
+		    state->result->salvage_losses != 0) ||
+		    state->result->salvage_losses < state->salvage_examples)
+			return (worker_error(error, "worker salvage count differs from its examples"));
 		if (!image_length_expected(state,
 		    fsimg_load_le64(raw + FSIMG_WIRE_DONE_IMAGE)) ||
 		    fsimg_load_le64(raw + FSIMG_WIRE_DONE_RAW) != (kind == FSIMG_JOB_CAT ?
@@ -1606,7 +1626,14 @@ fsimg_worker_run(const char *executable, const fsimg_worker_request_t *request,
 		status = start_processes(&state, executable, standard_output, error);
 	if (status == FSIMG_OK)
 		status = supervise_operation(&state, error);
-	return (finish_operation(&state, status, error));
+	status = finish_operation(&state, status, error);
+	/* The one way out of a successful job, so a worker reporting losses cannot
+	 * report a clean result. The tree is retained like any failed extraction's.
+	 */
+	if (status == FSIMG_OK && result->salvage_losses != 0)
+		return (fsimg_error_set(error, FSIMG_EPARTIAL, 0, FSIMG_OP_EXTRACT,
+		    "salvage extraction lost part of the image"));
+	return (status);
 }
 
 fsimg_status_t

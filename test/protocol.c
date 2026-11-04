@@ -184,6 +184,45 @@ test_error_codec(void)
 }
 
 static void
+test_partial_error_and_unknown_status(void)
+{
+	fsimg_error_t error = { .status = FSIMG_EPARTIAL,
+	    .operation = FSIMG_OP_EXTRACT };
+	fsimg_error_t decoded;
+	unsigned char raw[FSIMG_WIRE_ERROR_BYTES];
+
+	fsimg_wire_error_encode(raw, &error);
+	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_EPARTIAL);
+	CHECK(decoded.status == FSIMG_EPARTIAL);
+	fsimg_store_le64(raw, (uint64_t)(int64_t)-15);
+	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_EIO);
+}
+
+static void
+test_salvage_job_is_extract_only(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	for (fsimg_job_kind_t kind = FSIMG_JOB_INFO; kind <= FSIMG_JOB_PLAN; kind++) {
+		fsimg_worker_request_init(&request);
+		request.kind = kind;
+		request.flags = FSIMG_JOB_SALVAGE;
+		if (fsimg_job_has_roots(kind)) {
+			request.root_paths = image_root;
+			request.root_count = 1;
+		}
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK((fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK) == (kind == FSIMG_JOB_EXTRACT));
+		if (kind == FSIMG_JOB_EXTRACT)
+			CHECK(decoded.flags == FSIMG_JOB_SALVAGE);
+	}
+}
+
+static void
 test_error_padding(void)
 {
 	fsimg_error_t error = { .status = FSIMG_EIO };
@@ -2557,5 +2596,7 @@ main(int argc, char **argv)
 	test_job_posix_flags();
 	test_job_roots();
 	test_signed_wire_values();
+	test_partial_error_and_unknown_status();
+	test_salvage_job_is_extract_only();
 	return (0);
 }

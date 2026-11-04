@@ -55,6 +55,7 @@ typedef struct worker_child {
 	const char	**members;
 	uint64_t	 last_progress;
 	unsigned	 losses_sent;
+	unsigned	 salvage_losses_sent;
 	/* Raw filesystem capabilities remain here until an owner adopts them.
 	 * Roots FSIMG_CHILD_ROOTS + roots_adopted onwards are still raw. Each
 	 * is charged to ctx from prepare_context on. An adopter takes the
@@ -156,13 +157,19 @@ child_loss(void *argument, const char *path, uint32_t fields)
 {
 	worker_child_t *child = argument;
 	unsigned char raw[FSIMG_WIRE_LOSS_BYTES + FSIMG_WIRE_LOSS_PATH_BYTES];
+	unsigned *sent;
 	size_t length, start;
 
-	/* Frames provide bounded examples; DONE retains the exact aggregate. */
+	/* Frames provide bounded examples; DONE retains the exact aggregate.
+	 * Each kind of loss has its own allowance, so that metadata losses
+	 * cannot crowd out what salvage lost.
+	 */
+	sent = (fields & FSIMG_WIRE_LOSS_SALVAGE) != 0 ?
+	    &child->salvage_losses_sent : &child->losses_sent;
 	if (!child->processing || child->channel_failed ||
-	    child->losses_sent >= FSIMG_WIRE_LOSS_EVENTS)
+	    *sent >= FSIMG_WIRE_LOSS_EVENTS)
 		return;
-	child->losses_sent++;
+	(*sent)++;
 	/* The excerpt is the rendered path's tail, which names the entry. */
 	length = strlen(path);
 	start = fsimg_rendered_tail(path, length, FSIMG_WIRE_LOSS_PATH_BYTES);
@@ -845,6 +852,14 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 	options.selection_count = child->request.member_count;
 	if ((child->request.flags & FSIMG_JOB_SKIP_UNSUPPORTED) != 0)
 		options.flags |= FSIMG_EXTRACT_SKIP_UNSUPPORTED;
+	/* A job's members default to the root, which the library's salvage
+	 * refuses as a selection: it takes the whole volume, as no selection.
+	 */
+	if ((child->request.flags & FSIMG_JOB_SALVAGE) != 0) {
+		options.flags |= FSIMG_EXTRACT_SALVAGE;
+		options.selections = NULL;
+		options.selection_count = 0;
+	}
 	/* Lent to the library, which writes and flushes it; it stays charged
 	 * in raw_caps until it is closed below.
 	 */
@@ -854,6 +869,15 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 	child->result.entries = result.entries;
 	child->result.skipped_entries = result.skipped_entries;
 	child->result.logical_bytes = result.logical_bytes;
+	child->result.salvage_losses = result.salvage_losses;
+	/* The walk completed. DONE carries what it lost and the coordinator
+	 * alone decides the result, so the retained tree is flushed and closed
+	 * like a complete one.
+	 */
+	if (status == FSIMG_EPARTIAL) {
+		fsimg_error_clear(error);
+		status = FSIMG_OK;
+	}
 	if (status == FSIMG_OK && fsync(fd) == -1)
 		status = fsimg_error_set(error, FSIMG_EIO, errno,
 		    FSIMG_OP_EXTRACT, "worker extraction root flush failed");
@@ -1339,6 +1363,7 @@ fsimg_worker_main(void)
 	fsimg_store_le64(raw + FSIMG_WIRE_DONE_IMAGE, child.result.image_bytes);
 	fsimg_store_le64(raw + FSIMG_WIRE_DONE_SKIPPED, child.result.skipped_entries);
 	fsimg_store_le64(raw + FSIMG_WIRE_DONE_OMITTED, child.result.omitted_entries);
+	fsimg_store_le64(raw + FSIMG_WIRE_DONE_SALVAGE, child.result.salvage_losses);
 	status = fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE, raw, FSIMG_WIRE_DONE_BYTES, NULL);
 	return (status == FSIMG_OK ? 0 : 1);
 }

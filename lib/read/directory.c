@@ -609,8 +609,12 @@ pass_omitted_root(fsimg_reader_t *reader, fsimg_error_t *error)
 		return (FSIMG_OK);
 	fsimg_stat_add(&reader->omission.count, 1);
 	fsimg_stat_add(&reader->ctx->stats.omitted_entries, 1);
-	if (!reader->omission.refuse)
+	if (!reader->omission.refuse) {
+		if (reader->salvage.enabled)
+			fsimg_reader_salvage_loss(reader, reader->path,
+			    reader->walk->omitted, FSIMG_LOSS_UNSUPPORTED);
 		return (FSIMG_OK);
+	}
 	fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_EXTRACT,
 	    "safe extraction cannot deliver a name outside the format's name profile");
 	name_walker_path(reader, error);

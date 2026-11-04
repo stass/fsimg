@@ -249,7 +249,7 @@ typedef enum fsimg_wire_time_field {
 _Static_assert(FSIMG_WIRE_ENTRY_CHANGED + FSIMG_WIRE_TIME_BYTES ==
     FSIMG_WIRE_ENTRY_UID, "owner fields follow the last timestamp");
 
-#define FSIMG_WIRE_DONE_BYTES 56u
+#define FSIMG_WIRE_DONE_BYTES 64u
 typedef enum fsimg_wire_done_field {
 	FSIMG_WIRE_DONE_ENTRIES = 0,
 	FSIMG_WIRE_DONE_LOGICAL = 8,
@@ -257,10 +257,11 @@ typedef enum fsimg_wire_done_field {
 	FSIMG_WIRE_DONE_RAW = 24,
 	FSIMG_WIRE_DONE_IMAGE = 32,
 	FSIMG_WIRE_DONE_SKIPPED = 40,
-	FSIMG_WIRE_DONE_OMITTED = 48
+	FSIMG_WIRE_DONE_OMITTED = 48,
+	FSIMG_WIRE_DONE_SALVAGE = 56
 } fsimg_wire_done_field_t;
-_Static_assert(FSIMG_WIRE_DONE_OMITTED + 8 == FSIMG_WIRE_DONE_BYTES,
-    "the completion record ends with the omitted count");
+_Static_assert(FSIMG_WIRE_DONE_SALVAGE + 8 == FSIMG_WIRE_DONE_BYTES,
+    "the completion record ends with the salvage count");
 
 #define FSIMG_WIRE_VERIFY_BYTES 72u
 typedef enum fsimg_wire_verify_field {
@@ -277,7 +278,18 @@ typedef enum fsimg_wire_verify_field {
 
 #define FSIMG_WIRE_LOSS_BYTES 24u
 #define FSIMG_WIRE_LOSS_PATH_BYTES 256u
+/* The examples a worker may send of each of the two kinds of loss, metadata
+ * and salvage. DONE carries the exact totals.
+ */
 #define FSIMG_WIRE_LOSS_EVENTS 32u
+_Static_assert(FSIMG_LOSS_EXAMPLES <= FSIMG_WIRE_LOSS_EVENTS,
+    "the wire carries every salvage example the library reports");
+/* A LOSS frame's FIELDS is a nonzero set of FSIMG_META_* fields, or exactly one
+ * of these kinds.
+ */
+#define FSIMG_WIRE_LOSS_SALVAGE (FSIMG_LOSS_DIRECTORY | FSIMG_LOSS_ENTRY | \
+    FSIMG_LOSS_SHORTENED | FSIMG_LOSS_SKIPPED | FSIMG_LOSS_COLLISION | \
+    FSIMG_LOSS_UNSUPPORTED)
 typedef enum fsimg_wire_loss_field {
 	FSIMG_WIRE_LOSS_FIELDS = 0,
 	FSIMG_WIRE_LOSS_TRUNCATED = 8,
