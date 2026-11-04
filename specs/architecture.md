@@ -864,6 +864,9 @@ are defined by the [security specification](design-security.md).
 The [extraction and worker design](design-extraction-worker.md) defines
 descriptor ownership, postorder finalization, and the readiness/protocol boundary.
 
+The [salvage design](design-salvage.md) defines best-effort whole-volume extraction
+with shortened `.partial` files and skipped bad directories, without completeness or trust guarantees.
+
 ### Output and determinism
 
 Writer output covers every logical byte with either defined data or a proven

@@ -1,0 +1,112 @@
+<!-- SPDX-License-Identifier: BSD-2-Clause -->
+<!-- Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com> -->
+
+# Best-effort salvage extraction
+
+## Contract
+
+`--salvage` attempts whole-volume extraction from an openable damaged image.
+It makes **no guarantees about completeness or trustworthiness of its output**.
+It neither repairs the image nor verifies the recovered tree. Ordinary opening
+checks, verification, list and info retain their contracts. Salvage accepts no
+member selection, stdout extraction or mtree output.
+
+## Files
+
+For each regular file, salvage copies the logical prefix before the first
+noticed damage. A damaged `foo` becomes `foo.partial`, shorter than its declared
+length, with no zero filling and no recovery of intact later ranges. A file
+with no recoverable bytes is reported and skipped; no empty `.partial` is
+created. An undamaged empty file is extracted normally. Filesystem-defined
+zeros keep their ordinary meaning and never stand in for damaged content.
+
+The extractor completes the format's allocation/index pass before creating the
+file, including indexing that ordinary reading performs lazily. The pass uses
+the existing scratch-backed extent index and its stopped mark
+(`lib/meta/extent.c`). It preserves the prefix at image damage and determines
+the first unavailable logical byte from the indexed mappings and the readable
+slice. Whole indexed units can extend past the slice; the stopped mark alone
+is not a byte cutoff. ISO 9660's content domain admits only readable whole
+blocks. No mapping outside the content domain supplies recovered bytes.
+
+The prefix length and damage decision select the name at exclusive creation.
+There is no rename and no added sandbox authority. Copying uses only the
+planned prefix through ordinary content delivery. Damage encountered during
+copying is terminal under the existing failure contract.
+
+If `foo.partial` is taken, exclusive creation reports the collision and salvage
+skips the file. It never overwrites or tries a numbered fallback. Name validation
+and the ordinary policy for unrepresentable names still apply.
+
+Each name is handled independently, including several names for one object.
+An earlier name supplies no proof about a later name's content. There is no
+first-name-only recovery policy or retained proof of an object's cleanliness.
+
+## Directories and reader state
+
+A bad directory is reported and its child listing is skipped; extraction
+continues with its siblings. If the root listing is bad, the walk ends with
+that loss. The report does not invent a count of inaccessible descendants.
+
+The recovery point is the walker's descent into a child: its parent's prepared
+listing and cursor already identify the next sibling. On a directory decode
+or namespace-validation failure, preparation releases its temporary state and
+rewinds its appended records to the existing stream mark. A failed rewind is
+terminal. The walker keeps the parent level, clears pending descent and resumes
+there. Claims and resource charges already made remain in effect.
+
+Recovery happens inside the walker before failure poisons its stack or reaches
+`fsimg_reader_abort`, which frees the walk and closes driver state. The reader
+remains iterating after a handled loss; terminal failures leave it failed.
+`fsimg_reader_skip_directory` prunes a current directory before descent; it does
+not revive a failed reader. A failed entry decode during replay consumes that
+parent record, reports the entry loss and continues without descending.
+
+## Failure boundary and limits
+
+Classification follows the operation that fails, not a public error code:
+
+* Image decoding or allocation validation during file planning stops that file
+  at its first damage; directory decoding or namespace validation skips that
+  listing, and entry decoding during replay skips that entry.
+* Exclusive creation finding the chosen `.partial` name occupied skips and
+  reports that file.
+* Every other failing operation is terminal: opening checks, resource admission,
+  cancellation, host input I/O and stability checks, output creation/copying/
+  finalization, scratch/index storage and reporting. Changed input, output
+  failures and scratch failures never become recoverable image damage.
+
+All existing limits and cumulative accounting apply. Salvage adds no work
+ceiling or separate budget. A caller can set `max_work`; heavy damage can be
+slow when it does not. Resource exhaustion terminates extraction.
+
+Every extraction safety rule is unchanged: private root, descriptor-relative
+exclusive creation, no-follow protections, validated names, budgets, safe
+metadata policy and sandbox confinement. Bytes outside the content domain are
+never delivered. In-domain bytes are not proof of ownership: a cross-linked
+block can appear in a clean-named file. `.partial` marks only damage salvage
+notices; its absence promises neither an intact file nor trustworthy bytes.
+
+## Results and reporting
+
+Any loss returns `FSIMG_EPARTIAL` and CLI exit 1, with the private tree retained
+and identified as incomplete. A terminal failure takes precedence and retains
+its ordinary error. A capped report carries bounded loss examples and the total
+number of noticed losses, even when examples are omitted; unknown descendants
+are not counted as known losses. Reports identify shortened and skipped paths
+and their causes. The library does not print diagnostics. Completing the walk
+without a noticed loss returns ordinary success, with no integrity guarantee.
+
+## Tests and acceptance evidence
+
+* Pair clean, empty and defined-zero files with strict extraction; compare bytes.
+* For each format, damage a file before its first byte and midway; check exact
+  shortened prefixes, `.partial` names, no zero fill and readable siblings.
+* Damage child/root listings and replayed entries; check sibling recovery,
+  reader state, unknown descendant counts and terminal rewind failure.
+* Exercise occupied `.partial` names, including host-equivalent spellings, and
+  repeated object names; check no overwrite, fallback or alias proof.
+* Check capped reports with exact totals, partial status, exit 1 and retained
+  roots; inject terminal resource, I/O, changed-input, scratch and copy failures.
+* Exercise domain boundaries and extraction breakout attempts under the ordinary
+  sandbox; check rejected selection/stdout/mtree and unchanged verify/list/info.

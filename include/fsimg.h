@@ -1237,7 +1237,8 @@ typedef struct fsimg_verify_report {
 } fsimg_verify_report_t;
 
 /* Input and its storage remain borrowed and stable until reader destruction.
- * Opening checks headers only. next validates each directory's lookup namespace
+ * Opening validates format-required metadata, including ImageFS's full table.
+ * next validates each directory's lookup namespace
  * before exposing its children, then visits depth first in on-disk order.
  * The snapshot is borrowed until the next next call begins, fatal failure,
  * or destruction. Content functions address only the current regular file.

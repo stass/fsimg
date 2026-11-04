@@ -29,6 +29,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [Automatic sizing](design-sizing.md) | The default first-fit sizing policy and the minimization option, per format |
 | [Security](design-security.md) | Threat model, extraction, sandboxing, publication, and adversarial tests |
 | [Extraction and workers](design-extraction-worker.md) | Safe host output, bounded descriptor traversal, and worker protocol/lifecycle |
+| [Salvage extraction](design-salvage.md) | Best-effort whole-volume extraction with shortened `.partial` files and skipped bad directories; no completeness or trust guarantees |
 | [Filesystem formats](design-formats.md) | Format profiles and interoperability requirements |
 | [FAT reader](design-fat-reader.md) | FAT geometry, name profile, traversal, content indexing, and structural verification |
 | [FAT writer](design-fat-writer.md) | Deterministic aliases, bounded layout planning, geometry, metadata encoding, and emission |

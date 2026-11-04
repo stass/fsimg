@@ -588,10 +588,27 @@
 
 ## Planned features
 
-* [Medium] **Best-effort salvage extraction** (`lib/extract`, `cmd/fsimg`): a
-  flag to extract what can be read from a corrupt image, continuing past a
-  corrupt file or directory and reporting every loss, instead of stopping at
-  the first `FSIMG_ECORRUPT`. Needs its own design doc.
+* [Medium] **Best-effort salvage extraction** (`lib/extract`, `cmd/fsimg`):
+  implement the [salvage design](specs/design-salvage.md): shortened `.partial`
+  prefixes, skipped bad directories and capped loss reports with totals, using
+  existing limits and unchanged extraction safety rules.
+
+* [Low] **Salvage ranges after interior damage** (`lib/read`, `lib/formats/`):
+  deferred extension to the prefix-only [salvage policy](specs/design-salvage.md).
+  Design recovery of independently located intact later ranges with explicit
+  logical offsets, domain/claim checks and bounded metadata before adding
+  continuation to file planning.
+
+* [Medium] **Salvage open-check relaxation** (`lib/formats/{fat,exfat,iso9660,ifs,qnx4,qnx6}/`):
+  keep opening strict under the [salvage design](specs/design-salvage.md),
+  and design narrower refusal scopes from the per-reader
+  [open/prepare survey](docs/todo-salvage-open-checks.md). It separates
+  indispensable geometry/domain checks from recoverable system/catalog damage
+  and unrelated info/verification gates, with realistic damage and lockout
+  scope. ImageFS's complete catalog pass and QNX6's mandatory header pair
+  offer the broadest recovery opportunities; evaluate a sole valid committed
+  header and independent framed records without weakening bounds, ownership,
+  resource accounting or strict full verification.
 
 * [Low] **`--force` hint for a filesystem in a detected table**
   (`cmd/fsimg/display.c` `force_hint`): the parent does not know which step
