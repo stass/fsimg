@@ -353,7 +353,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/qnx6-research.md docs/qnx6-infrastructure.md docs/todo-qnx6.md \
 	docs/spec-testing-plan.md docs/qnx4-plan.md docs/qnx4-research.md \
 	docs/todo-qnx4.md docs/architecture-analysis.md docs/ifs-plan.md \
-	docs/ifs-research.md docs/todo-ifs.md \
+	docs/ifs-research.md docs/todo-ifs.md docs/todo-salvage-open-checks.md \
 	docs/hfsplus-plan.md docs/todo-hfsplus.md \
 	docs/apfs-plan.md \
 	docs/udf-plan.md docs/udf-research.md docs/todo-udf.md \
@@ -473,7 +473,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/verbose_names_test.rb test/cli/xz_test.rb \
 	test/cli/zstd_test.rb test/cli/compress_option_test.rb \
 	test/baseline.sh.in test/baseline.txt \
-	specs/design-security.md specs/design-formats.md specs/design-cli.md \
+	specs/design-salvage.md specs/design-security.md specs/design-formats.md specs/design-cli.md \
 	specs/design-spec-testing.md test/spec.sh.in \
 	test/spec/Gemfile test/spec/Gemfile.lock test/spec/run.rb \
 	test/spec/bundle.rb test/spec/bin test/spec/cases test/spec/lib \
