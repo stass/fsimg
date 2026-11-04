@@ -178,7 +178,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-salvage-terminal test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
 	test-lzfse test-hfsplus-codec test-hfsplus test-hfsplus-salvage \
-	test-hfsplus-verify test-hfsplus-unicode \
+	test-hfsplus-verify test-hfsplus-unicode test-hfsplus-write \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write test-scheme-planning \
@@ -305,6 +305,8 @@ test_hfsplus_verify_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_hfsplus_unicode_SOURCES = test/hfsplus-unicode.c test/test.h \
 	test/digest.c test/digest.h
 test_hfsplus_unicode_LDADD = libfsimg.la
+test_hfsplus_write_SOURCES = test/hfsplus-write.c test/test.h
+test_hfsplus_write_LDADD = libfsimg.la
 test_iso9660_SOURCES = test/iso9660.c test/test.h \
 	test/iso9660-image.c test/iso9660-image.h
 test_iso9660_LDADD = libfsimg.la

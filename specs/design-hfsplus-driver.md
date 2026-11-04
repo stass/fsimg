@@ -615,10 +615,10 @@ the tree sizes and node counts, the first block of every metadata file, the
 allocated count `A`, the format time, one paged array of rows keyed by
 catalog ID with row 0 for the root, and the sorted catalog record stream with
 the index-level streams the packer derived from it. A row holds the size, the
-data fork's first block and block count, the owner, mode and four times
-already selected under the metadata policy, the kind, the `valence` and the
-folder count; the node ID is `15 + id`, or 2 for the root, and is not
-stored. Rows and streams are the only per-entry state; nothing grows with
+data fork's first block and block count, the parent's node ID, which a
+thread's data needs, the owner, mode and four times already selected under the
+metadata policy, the kind, the `valence` and the folder count; the node ID is
+`15 + id`, or 2 for the root, and is not stored. Rows and streams are the only per-entry state; nothing grows with
 `N` but the bitmap the emission streams.
 
 Planning runs a fixed sequence of passes over the frozen catalog:

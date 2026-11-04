@@ -1,0 +1,1519 @@
+/* SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+ */
+#include "config.h"
+
+#include <inttypes.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <time.h>
+
+#include "format.h"
+#include "fsimg-endian.h"
+#include "test.h"
+#include "write-hfsplus.h"
+
+/* Planning has no output authority. Nodes are checked as they pass through
+ * a memory callback; even the map-boundary cases retain no volume image.
+ */
+static char scenario[192];
+static unsigned failures;
+
+typedef struct fixture fixture_t;
+typedef struct tree_check tree_check_t;
+typedef struct node_capture node_capture_t;
+
+static void add_entry(fixture_t *f, const char *path, unsigned kind,
+    uint64_t length, const fsimg_metadata_t *metadata);
+static void add_link(fixture_t *f);
+static uint16_t be16(const unsigned char *p);
+static uint32_t be32(const unsigned char *p);
+static uint64_t brute_blocks(uint32_t b, uint64_t free_bytes, uint64_t objects);
+static fsimg_status_t capture_node(void *arg, uint32_t number,
+    const unsigned char *bytes, fsimg_error_t *error);
+static unsigned char *capture_tree(fixture_t *f);
+static uint64_t ceil_div(uint64_t n, uint64_t d);
+static void check_geometry(hfsplus_plan_t *p, uint64_t n, uint32_t b,
+    uint32_t tail, uint64_t objects);
+static void check_header(tree_check_t *c, const unsigned char *raw);
+static void check_key_order(hfsplus_plan_t *p, unsigned entries);
+static void check_map(const unsigned char *map, uint64_t first, size_t bytes,
+    uint32_t used);
+static void check_stored_names(hfsplus_plan_t *p);
+static void collision_case(unsigned variant, const char *first,
+    const char *second, fsimg_status_t expected);
+static void compare_streams(fsimg_stream_t *a, fsimg_stream_t *b);
+static void context_open(fixture_t *f);
+static size_t data_length(const hfsplus_write_record_t *r);
+static void emit_checked(fsimg_session_t *session, hfsplus_tree_shape_t *shape,
+    fsimg_stream_t *records, fsimg_stream_t **levels);
+static void expect_setting(fsimg_write_options_t opts);
+static void fail(const char *condition, int line);
+static void fixture_close(fixture_t *f);
+static void fixture_open(fixture_t *f, unsigned variant,
+    const fsimg_write_options_t *opts);
+static fsimg_status_t inspect_node(void *argument, uint32_t number,
+    const unsigned char *raw, fsimg_error_t *error);
+static fsimg_status_t leaf_pattern(void *argument,
+    const hfsplus_write_record_t *r, unsigned char *bytes,
+    fsimg_error_t *error);
+static uint32_t level_first(const hfsplus_tree_shape_t *s, unsigned level);
+static void name_case(unsigned variant, const char *path,
+    fsimg_status_t expected, bool label);
+static void named(const char *fmt, ...);
+static fsimg_status_t no_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,
+    fsimg_error_t *error);
+static uint32_t nodes_without_maps(uint32_t leaves);
+static fsimg_write_options_t options_for(uint32_t block);
+static void pack_case(uint32_t files, unsigned final_units,
+    uint32_t expected_leaves, unsigned expected_depth, uint32_t expected_maps,
+    bool all_blocks);
+static hfsplus_plan_t *plan_ok(fixture_t *f);
+static fsimg_status_t plan_status(fixture_t *f, fsimg_error_t *error);
+static fsimg_status_t provider_read(void *arg, uint64_t id, uint64_t offset,
+    void *buffer, size_t length, size_t *done, fsimg_error_t *error);
+static fsimg_status_t provider_validate(void *arg, uint64_t id,
+    fsimg_error_t *error);
+static uint64_t small_demand(uint32_t b, uint64_t objects);
+static void test_bitmap_boundaries(void);
+static void test_determinism(void);
+static void test_key_order_and_mapping(void);
+static void test_metadata_policy(void);
+static void test_minimization(void);
+static void test_names(void);
+static void test_packing(void);
+static void test_rows_and_counts(void);
+static void test_settings_and_limits(void);
+static size_t utf8_unit(char *out, uint16_t unit);
+static bool zero_bytes(const unsigned char *p, size_t n);
+
+#define EXPECT(c) do { if (!(c)) fail(#c, __LINE__); } while (0)
+#define REQUIRE(c) do { if (!(c)) { fail(#c, __LINE__); exit(1); } } while (0)
+
+#define VARIANT(n, v) { .id = (v), .info = { .name = n, \
+	.entry_kinds = FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY | \
+	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO, \
+	.metadata_fields = FSIMG_META_CREATED | FSIMG_META_MODIFIED | \
+	    FSIMG_META_ACCESSED | FSIMG_META_CHANGED | FSIMG_META_MODE | \
+	    FSIMG_META_OWNER, .sector_size_mask = 1u << 9, \
+	.allocation_unit_size_mask = 0x1fe00u, \
+	.write_allocation_unit_size_mask = 0x1fe00u, \
+	.max_file_bytes = UINT64_MAX, .max_volume_bytes = UINT64_MAX, \
+	.max_name_utf16_units = 255, .max_label_bytes = 1024, \
+	.max_link_target_bytes = 1024, .write_settings = FSIMG_SETTING_VOLUME_UUID } }
+
+static const fsimg_format_variant_t variants[] = {
+	VARIANT("hfsplus", HFSPLUS_VARIANT_PLUS),
+	VARIANT("hfsx", HFSPLUS_VARIANT_X)
+};
+static const fsimg_writer_ops_t operations = {
+	hfsplus_write_validate, hfsplus_write_plan, no_emit, hfsplus_write_free
+};
+static const fsimg_format_t format = {
+	.variants = variants, .variant_count = 2, .writer = &operations
+};
+
+struct fixture {
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+};
+
+static void
+fail(const char *condition, int line)
+{
+	failures++;
+	fprintf(stderr, "%s: line %d: %s\n", scenario, line, condition);
+}
+
+static void
+named(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(scenario, sizeof(scenario), fmt, ap);
+	va_end(ap);
+}
+
+static uint64_t
+ceil_div(uint64_t n, uint64_t d)
+{
+	return (n / d + (n % d != 0));
+}
+
+static fsimg_status_t
+no_emit(fsimg_writer_t *writer FSIMG_UNUSED, fsimg_emit_t *emit FSIMG_UNUSED,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	return (FSIMG_EUNSUPPORTED);
+}
+
+static fsimg_write_options_t
+options_for(uint32_t block)
+{
+	fsimg_write_options_t options;
+
+	fsimg_write_options_init(&options);
+	options.flags = FSIMG_WRITE_REPRODUCIBLE | FSIMG_WRITE_ALLOW_LOSS;
+	options.epoch = 0;
+	options.label = "untitled";
+	options.allocation_unit_bytes = block;
+	return (options);
+}
+
+static void
+context_open(fixture_t *f)
+{
+	fsimg_options_t options;
+
+	bzero(f, sizeof(*f));
+	fsimg_options_init(&options);
+	options.memory_bytes = UINT64_C(256) * 1024 * 1024;
+	options.scratch_directory_fd = -1;
+	REQUIRE(fsimg_ctx_new(&options, &f->ctx, NULL) == FSIMG_OK);
+}
+
+static void
+fixture_open(fixture_t *f, unsigned variant, const fsimg_write_options_t *opts)
+{
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	context_open(f);
+	status = fsimg_writer_new_variant(f->ctx, &format, &variants[variant],
+	    opts, &f->writer, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "%s: construct: %d %s\n", scenario, status,
+		    error.message);
+	REQUIRE(status == FSIMG_OK);
+}
+
+static void
+fixture_close(fixture_t *f)
+{
+	fsimg_writer_free(f->writer);
+	fsimg_ctx_free(f->ctx);
+}
+
+static void
+add_entry(fixture_t *f, const char *path, unsigned kind, uint64_t length,
+    const fsimg_metadata_t *metadata)
+{
+	fsimg_entry_t entry = { .path = path, .kind = kind, .size = length };
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_ZERO };
+
+	if (metadata != NULL)
+		entry.metadata = *metadata;
+	REQUIRE(fsimg_writer_add(f->writer, &entry,
+	    kind == FSIMG_ENTRY_FILE || kind == FSIMG_ENTRY_SYMLINK ?
+	    &source : NULL, NULL) == FSIMG_OK);
+}
+
+static fsimg_status_t
+plan_status(fixture_t *f, fsimg_error_t *error)
+{
+	const fsimg_plan_t *plan;
+
+	return (fsimg_writer_plan(f->writer, &plan, error));
+}
+
+static hfsplus_plan_t *
+plan_ok(fixture_t *f)
+{
+	fsimg_error_t error;
+	fsimg_status_t status = plan_status(f, &error);
+
+	if (status != FSIMG_OK)
+		fprintf(stderr, "%s: plan: %d %s (%s)\n", scenario, status,
+		    error.message, error.path);
+	REQUIRE(status == FSIMG_OK);
+	return ((hfsplus_plan_t *)f->writer->plan);
+}
+
+/* Enumerate every N, rather than using the planner's fixed-point search.
+ * Empty and small catalogs have one leaf plus the header, so their three
+ * trees occupy 4096, 8192 and 8192 logical bytes independently of B.
+ */
+static uint64_t
+small_demand(uint32_t b, uint64_t objects)
+{
+	return (ceil_div(1536, b) + ceil_div(4096, b) +
+	    ceil_div(8192, b) * 2 + objects);
+}
+
+static uint64_t
+brute_blocks(uint32_t b, uint64_t free_bytes, uint64_t objects)
+{
+	uint64_t demand = small_demand(b, objects) + ceil_div(free_bytes, b) +
+	    ceil_div(1024, b);
+
+	for (uint64_t n = demand; ; n++)
+		if (demand + ceil_div(ceil_div(n, 8), b) <= n)
+			return (n);
+}
+
+static void
+check_geometry(hfsplus_plan_t *p, uint64_t n, uint32_t b, uint32_t tail,
+    uint64_t objects)
+{
+	fsimg_plan_info_t info;
+	const hfsplus_tree_shape_t *trees[] = {
+		&p->extents, &p->attributes, &p->catalog
+	};
+	uint64_t next = ceil_div(1536, b);
+	uint64_t bitmap = ceil_div(ceil_div(n, 8), b);
+
+	EXPECT(p->block_bytes == b);
+	EXPECT(p->total_blocks == n);
+	EXPECT(p->head_blocks == next);
+	EXPECT(p->tail_blocks == tail);
+	EXPECT(p->bitmap_blocks == bitmap);
+	next += bitmap;
+	for (unsigned i = 0; i < 3; i++) {
+		const hfsplus_tree_shape_t *s = trees[i];
+		uint64_t blocks = ceil_div((uint64_t)s->used_nodes *
+		    s->node_bytes, b);
+
+		EXPECT(s->first_block == next);
+		EXPECT(s->blocks == blocks);
+		EXPECT(s->total_nodes == blocks * b / s->node_bytes);
+		next += blocks;
+	}
+	EXPECT(p->allocated == next + objects);
+	REQUIRE(fsimg_plan_get_info(&p->common, &info, NULL) == FSIMG_OK);
+	EXPECT(info.volume_bytes == p->volume_bytes);
+	EXPECT(info.allocation_units == n);
+	EXPECT(info.allocation_unit_bytes == b);
+	EXPECT(info.sector_bytes == 512);
+	EXPECT(info.allocated_bytes == (p->allocated + tail) * (uint64_t)b);
+	EXPECT(info.free_bytes == (n - p->allocated - tail) * (uint64_t)b);
+	EXPECT(info.allocated_bytes + info.free_bytes == n * b);
+	EXPECT(info.metadata_bytes == (next + tail) * b + p->volume_bytes - n * b);
+}
+
+static void
+test_bitmap_boundaries(void)
+{
+	fixture_t f;
+	fsimg_write_options_t opts;
+	hfsplus_plan_t *p;
+	uint64_t target, free_blocks, n;
+
+	for (uint32_t b = 512; b <= 65536; b *= 2) {
+		for (unsigned k = 1; k <= 3; k++) {
+			for (int delta = -1; delta <= 1; delta++) {
+				target = (uint64_t)8 * b * k + delta;
+				free_blocks = target - small_demand(b, 0) -
+				    ceil_div(1024, b) - k;
+				opts = options_for(b);
+				opts.min_free_bytes = free_blocks * b - (delta == -1 ? b - 1 : 0);
+				n = brute_blocks(b, opts.min_free_bytes, 0);
+				named("bitmap B=%u k=%u delta=%d N=%" PRIu64,
+				    b, k, delta, n);
+				EXPECT(n == target + (delta == 1));
+				if (delta == 1) {
+					fsimg_write_options_t exact = opts;
+
+					exact.min_free_bytes -= b;
+					exact.volume_bytes = target * b;
+					fixture_open(&f, 0, &exact);
+					check_geometry(plan_ok(&f), target, b,
+					    (uint32_t)ceil_div(1024, b), 0);
+					fixture_close(&f);
+				}
+				fixture_open(&f, 0, &opts);
+				p = plan_ok(&f);
+				check_geometry(p, n, b, (uint32_t)ceil_div(1024, b), 0);
+				fixture_close(&f);
+
+				/* The last fitting demand before a bitmap transition
+				 * grows N by two when its free-space demand grows one.
+				 */
+				if (delta == 0) {
+					opts.min_free_bytes += b;
+					EXPECT(brute_blocks(b, opts.min_free_bytes, 0) == n + 2);
+					fixture_open(&f, 0, &opts);
+					p = plan_ok(&f);
+					check_geometry(p, n + 2, b,
+					    (uint32_t)ceil_div(1024, b), 0);
+					fixture_close(&f);
+					opts.min_free_bytes -= b;
+				}
+				opts.volume_bytes = n * b;
+				fixture_open(&f, 0, &opts);
+				check_geometry(plan_ok(&f), n, b,
+				    (uint32_t)ceil_div(1024, b), 0);
+				fixture_close(&f);
+				opts.volume_bytes -= b;
+				fixture_open(&f, 0, &opts);
+				EXPECT(plan_status(&f, NULL) == FSIMG_ERANGE);
+				fixture_close(&f);
+				for (uint32_t extra = 512; extra <= 1024; extra *= 2) {
+					if (b <= extra)
+						continue;
+					opts.volume_bytes = n * b + extra;
+					fixture_open(&f, 0, &opts);
+					check_geometry(plan_ok(&f), n, b,
+					    extra == 512 ? 1 : 0, 0);
+					fixture_close(&f);
+				}
+			}
+		}
+	}
+}
+
+static void
+expect_setting(fsimg_write_options_t opts)
+{
+	fixture_t f;
+	fsimg_writer_t *writer = NULL;
+
+	context_open(&f);
+	EXPECT(fsimg_writer_new_variant(f.ctx, &format, &variants[0], &opts,
+	    &writer, NULL) == FSIMG_EINVAL);
+	fsimg_writer_free(writer);
+	fsimg_ctx_free(f.ctx);
+}
+
+static void
+test_settings_and_limits(void)
+{
+	static const uint32_t invalid_blocks[] = { 1, 256, 513, 768, 131072 };
+	static const uint32_t invalid_sectors[] = { 1, 256, 1024, 4096 };
+	fixture_t f;
+	fsimg_write_options_t opts;
+	fsimg_error_t error;
+
+	for (size_t i = 0; i < sizeof(invalid_blocks) / sizeof(*invalid_blocks); i++) {
+		named("invalid allocation size %u", invalid_blocks[i]);
+		opts = options_for(invalid_blocks[i]);
+		expect_setting(opts);
+	}
+	for (size_t i = 0; i < sizeof(invalid_sectors) / sizeof(*invalid_sectors); i++) {
+		named("invalid sector size %u", invalid_sectors[i]);
+		opts = options_for(4096);
+		opts.sector_bytes = invalid_sectors[i];
+		expect_setting(opts);
+	}
+	named("invalid reproducible epochs");
+	opts = options_for(4096);
+	opts.epoch = -INT64_C(2082844801);
+	expect_setting(opts);
+	opts.epoch = INT64_C(2212122496);
+	expect_setting(opts);
+	named("unaligned exact volume");
+	opts = options_for(4096);
+	opts.volume_bytes = 65537;
+	expect_setting(opts);
+	named("exact volume over UINT32_MAX blocks");
+	opts = options_for(512);
+	opts.volume_bytes = (UINT64_C(1) << 32) * 512;
+	expect_setting(opts);
+	named("automatic volume over UINT32_MAX blocks");
+	opts = options_for(512);
+	opts.min_free_bytes = (uint64_t)UINT32_MAX * 512;
+	fixture_open(&f, 0, &opts);
+	EXPECT(plan_status(&f, NULL) == FSIMG_ERANGE);
+	fixture_close(&f);
+	named("file over UINT32_MAX blocks at explicit 512");
+	opts = options_for(512);
+	fixture_open(&f, 0, &opts);
+	add_entry(&f, "/huge", FSIMG_ENTRY_FILE, (UINT64_C(1) << 32) * 512, NULL);
+	EXPECT(plan_status(&f, &error) == FSIMG_EUNSUPPORTED);
+	EXPECT(strcmp(error.path, "/huge") == 0);
+	fixture_close(&f);
+}
+
+static void
+test_minimization(void)
+{
+	static const uint32_t order[] = { 4096, 512, 1024, 2048, 8192,
+		16384, 32768, 65536 };
+	fixture_t f;
+	fsimg_write_options_t opts;
+	hfsplus_plan_t *p;
+	uint64_t best, n, volume;
+	uint32_t best_block;
+	char path[32];
+
+	for (unsigned count = 0; count <= 6; count++) {
+		named("minimize %u small files", count);
+		best = UINT64_MAX;
+		best_block = 0;
+		for (unsigned i = 0; i < 8; i++) {
+			n = brute_blocks(order[i], 0, count);
+			volume = n * order[i];
+			if (volume < best) {
+				best = volume;
+				best_block = order[i];
+			}
+		}
+		opts = options_for(0);
+		opts.flags |= FSIMG_WRITE_MINIMIZE;
+		fixture_open(&f, 0, &opts);
+		for (unsigned i = 0; i < count; i++) {
+			snprintf(path, sizeof(path), "/file%u", i);
+			add_entry(&f, path, FSIMG_ENTRY_FILE, 1, NULL);
+		}
+		p = plan_ok(&f);
+		EXPECT(p->volume_bytes == best);
+		EXPECT(p->block_bytes == best_block);
+		check_geometry(p, best / best_block, best_block,
+		    (uint32_t)ceil_div(1024, best_block), count);
+		fixture_close(&f);
+	}
+	for (unsigned tie = 0; tie < 2; tie++) {
+		uint64_t free_bytes = tie == 0 ? 4170752 : 100633088;
+		unsigned tied = 0;
+
+		named("minimize tie %s", tie == 0 ? "increasing sizes" : "4096 first");
+		best = UINT64_MAX;
+		best_block = 0;
+		for (unsigned i = 0; i < 8; i++) {
+			volume = brute_blocks(order[i], free_bytes, 0) * order[i];
+			if (volume < best) {
+				best = volume;
+				best_block = order[i];
+				tied = 1;
+			} else if (volume == best) {
+				tied++;
+			}
+		}
+		EXPECT(tied >= 2);
+		EXPECT(best_block == (tie == 0 ? 512u : 4096u));
+		opts = options_for(0);
+		opts.flags |= FSIMG_WRITE_MINIMIZE;
+		opts.min_free_bytes = free_bytes;
+		fixture_open(&f, 0, &opts);
+		p = plan_ok(&f);
+		EXPECT(p->volume_bytes == best && p->block_bytes == best_block);
+		fixture_close(&f);
+	}
+	named("minimize file too large for 512-byte blocks");
+	opts = options_for(0);
+	opts.flags |= FSIMG_WRITE_MINIMIZE;
+	fixture_open(&f, 0, &opts);
+	add_entry(&f, "/huge", FSIMG_ENTRY_FILE, (UINT64_C(1) << 32) * 512, NULL);
+	p = plan_ok(&f);
+	EXPECT(p->block_bytes > 512);
+	fixture_close(&f);
+}
+
+/* A streaming checker compares leaf keys with the input and index keys
+ * with first keys observed from the actual emitted children. Only header,
+ * map and root nodes are retained. All other nodes are inspected and discarded.
+ */
+struct tree_check {
+	const hfsplus_tree_shape_t *shape;
+	fsimg_stream_t *records;
+	fsimg_stream_t *first_keys[HFSPLUS_BTREE_DEPTH_MAX];
+	uint64_t record_cursor;
+	uint64_t level_cursor[HFSPLUS_BTREE_DEPTH_MAX];
+	uint32_t level_seen[HFSPLUS_BTREE_DEPTH_MAX];
+	uint32_t nodes_seen;
+	uint32_t leaves_seen;
+	unsigned char header[8192];
+	unsigned char maps[2][4096];
+	unsigned char root[4096];
+};
+
+static uint16_t
+be16(const unsigned char *p)
+{
+	return ((uint16_t)((uint16_t)p[0] << 8 | p[1]));
+}
+
+static uint32_t
+be32(const unsigned char *p)
+{
+	return ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
+	    (uint32_t)p[2] << 8 | p[3]);
+}
+
+static bool
+zero_bytes(const unsigned char *p, size_t n)
+{
+	for (size_t i = 0; i < n; i++)
+		if (p[i] != 0)
+			return (false);
+	return (true);
+}
+
+static uint32_t
+level_first(const hfsplus_tree_shape_t *s, unsigned level)
+{
+	uint32_t first = 1;
+
+	for (unsigned i = 0; i < level; i++)
+		first += s->level_nodes[i];
+	return (first);
+}
+
+static size_t
+data_length(const hfsplus_write_record_t *r)
+{
+	switch (r->type) {
+	case HFSPLUS_RECORD_FOLDER:
+		return (88);
+	case HFSPLUS_RECORD_FILE:
+		return (248);
+	default:
+		return (10 + 2 * r->units);
+	}
+}
+
+static fsimg_status_t
+leaf_pattern(void *argument FSIMG_UNUSED, const hfsplus_write_record_t *r,
+    unsigned char *bytes, fsimg_error_t *error FSIMG_UNUSED)
+{
+	size_t length = data_length(r);
+
+	EXPECT(zero_bytes(bytes, length));
+	/* Leave alternating bytes untouched to check the emitter's zero fill. */
+	for (size_t i = 0; i < length; i += 2)
+		bytes[i] = (unsigned char)(r->id % 251 + 1);
+	return (FSIMG_OK);
+}
+
+static void
+check_map(const unsigned char *map, uint64_t first, size_t bytes,
+    uint32_t used)
+{
+	for (size_t i = 0; i < bytes; i++) {
+		unsigned char want = 0;
+
+		for (unsigned bit = 0; bit < 8; bit++)
+			if (first + 8 * i + bit < used)
+				want |= 0x80u >> bit;
+		EXPECT(map[i] == want);
+	}
+}
+
+static void
+check_header(tree_check_t *c, const unsigned char *raw)
+{
+	const hfsplus_tree_shape_t *s = c->shape;
+	hfsplus_btree_t h;
+	uint32_t root = s->depth == 0 ? 0 : level_first(s, s->depth - 1);
+	uint32_t m = s->node_bytes;
+
+	REQUIRE(hfsplus_btree_decode(raw + 14, 106, &h));
+	EXPECT(raw[8] == 1 && raw[9] == 0 && be16(raw + 10) == 3);
+	EXPECT(be32(raw) == (s->map_nodes == 0 ? 0 :
+	    s->used_nodes - s->map_nodes));
+	EXPECT(be32(raw + 4) == 0);
+	EXPECT(h.tree_depth == s->depth && h.root_node == root);
+	EXPECT(h.leaf_records == s->leaf_records);
+	EXPECT(h.first_leaf_node == (s->depth == 0 ? 0 : 1));
+	EXPECT(h.last_leaf_node == s->level_nodes[0]);
+	EXPECT(h.node_size == m && h.max_key_length == s->max_key_length);
+	EXPECT(h.total_nodes == s->total_nodes);
+	EXPECT(h.free_nodes == s->total_nodes - s->used_nodes);
+	EXPECT(h.clump_size == (uint64_t)s->total_nodes * m);
+	EXPECT(h.btree_type == 0 && h.key_compare_type == s->compare_type);
+	EXPECT(h.attributes == s->attributes);
+	EXPECT(be16(raw + m - 2) == 14);
+	EXPECT(be16(raw + m - 4) == 120);
+	EXPECT(be16(raw + m - 6) == 248);
+	EXPECT(be16(raw + m - 8) == m - 8);
+	EXPECT(zero_bytes(raw + 120, 128));
+	check_map(raw + 248, 0, m - 256, s->used_nodes);
+	bcopy(raw, c->header, m);
+}
+
+static fsimg_status_t
+inspect_node(void *argument, uint32_t number, const unsigned char *raw,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	tree_check_t *c = argument;
+	const hfsplus_tree_shape_t *s = c->shape;
+	unsigned char encoded[HFSPLUS_WRITE_RECORD_MAX];
+	unsigned char level_key[HFSPLUS_WRITE_RECORD_MAX];
+	hfsplus_write_record_t record;
+	hfsplus_node_t decoded;
+	hfsplus_ckey_t key;
+	uint32_t m = s->node_bytes, first, last;
+	uint16_t count = be16(raw + 10), start, end;
+	size_t length;
+	unsigned level = 0;
+
+	c->nodes_seen++;
+	REQUIRE(number < s->total_nodes);
+	if (number >= s->used_nodes) {
+		EXPECT(zero_bytes(raw, m));
+		return (FSIMG_OK);
+	}
+	REQUIRE(hfsplus_node_decode(raw, m, &decoded));
+	EXPECT(be16(raw + 12) == 0);
+	if (number == 0) {
+		check_header(c, raw);
+		return (FSIMG_OK);
+	}
+	if (number >= s->used_nodes - s->map_nodes) {
+		unsigned map = number - (s->used_nodes - s->map_nodes);
+
+		EXPECT(raw[8] == 2 && raw[9] == 0 && count == 1);
+		EXPECT(be32(raw + 4) == 0);
+		EXPECT(be32(raw) == (map + 1 < s->map_nodes ? number + 1 : 0));
+		EXPECT(be16(raw + m - 2) == 14);
+		EXPECT(be16(raw + m - 4) == m - 6);
+		EXPECT(zero_bytes(raw + m - 6, 2));
+		check_map(raw + 14, 8 * (m - 256) +
+		    (uint64_t)map * 8 * (m - 20), m - 20, s->used_nodes);
+		if (map < 2)
+			bcopy(raw, c->maps[map], m);
+		return (FSIMG_OK);
+	}
+	while (level + 1 < s->depth && number >= level_first(s, level + 1))
+		level++;
+	first = level_first(s, level);
+	last = first + s->level_nodes[level] - 1;
+	EXPECT(raw[8] == (level == 0 ? 255 : 0));
+	EXPECT(raw[9] == level + 1);
+	EXPECT(be32(raw + 4) == (number == first ? 0 : number - 1));
+	EXPECT(be32(raw) == (number == last ? 0 : number + 1));
+	EXPECT(count != 0);
+	EXPECT(be16(raw + m - 2) == 14);
+	for (unsigned i = 0; i < count; i++) {
+		start = be16(raw + m - 2 * (i + 1));
+		end = be16(raw + m - 2 * (i + 2));
+		REQUIRE(start < end && end <= m - 2 * (count + 1));
+		EXPECT((start & 1) == 0 && (end & 1) == 0);
+		REQUIRE(hfsplus_ckey_decode(raw + start, end - start, &key));
+		length = 8 + 2 * key.units;
+		if (i == 0)
+			REQUIRE(fsimg_stream_append(c->first_keys[level], raw + start,
+			    length, NULL, NULL) == FSIMG_OK);
+		EXPECT(be16(raw + start) == length - 2);
+		if (level == 0) {
+			REQUIRE(fsimg_stream_next(c->records, &c->record_cursor,
+			    encoded, sizeof(encoded), &length, NULL) == FSIMG_OK);
+			REQUIRE(hfsplus_write_record_decode(encoded, length, &record));
+			EXPECT(key.parent == record.parent);
+			EXPECT(key.units == (record.type == HFSPLUS_RECORD_FOLDER ||
+			    record.type == HFSPLUS_RECORD_FILE ? record.units : 0));
+			EXPECT(bcmp(key.name, record.name, 2 * key.units) == 0);
+			length = 8 + 2 * key.units;
+			EXPECT(end - start == length + data_length(&record));
+			for (size_t j = 0; j < data_length(&record); j++)
+				EXPECT(raw[start + length + j] == (j % 2 == 0 ?
+				    record.id % 251 + 1 : 0));
+			c->leaves_seen++;
+		} else {
+			REQUIRE(fsimg_stream_next(c->first_keys[level - 1],
+			    &c->level_cursor[level - 1], level_key,
+			    sizeof(level_key), &length, NULL) == FSIMG_OK);
+			EXPECT(key.parent == be32(level_key + 2));
+			EXPECT(key.units == be16(level_key + 6));
+			EXPECT(bcmp(key.name, level_key + 8, 2 * key.units) == 0);
+			length = 8 + 2 * key.units;
+			EXPECT(end - start == length + 4);
+			EXPECT(be32(raw + start + length) ==
+			    level_first(s, level - 1) + c->level_seen[level - 1]);
+			c->level_seen[level - 1]++;
+		}
+	}
+	end = be16(raw + m - 2 * (count + 1));
+	EXPECT(zero_bytes(raw + end, m - 2 * (count + 1) - end));
+	if (number != last) {
+		uint64_t cursor = level == 0 ? c->record_cursor :
+		    c->level_cursor[level - 1];
+		size_t next_bytes;
+
+		/* A non-final node is full precisely when the next complete
+		 * record and its extra offset slot cannot fit.
+		 */
+		if (level == 0) {
+			REQUIRE(fsimg_stream_next(c->records, &cursor, encoded,
+			    sizeof(encoded), &length, NULL) == FSIMG_OK);
+			REQUIRE(hfsplus_write_record_decode(encoded, length, &record));
+			next_bytes = 8 + data_length(&record);
+			if (record.type == HFSPLUS_RECORD_FILE ||
+			    record.type == HFSPLUS_RECORD_FOLDER)
+				next_bytes += 2 * record.units;
+		} else {
+			REQUIRE(fsimg_stream_next(c->first_keys[level - 1], &cursor,
+			    level_key, sizeof(level_key), &length, NULL) == FSIMG_OK);
+			next_bytes = length + 4;
+		}
+		EXPECT(end + next_bytes > m - 2 * (count + 2));
+	}
+	if (number == last)
+		REQUIRE(fsimg_stream_seal(c->first_keys[level], NULL) == FSIMG_OK);
+	if (level + 1 == s->depth) {
+		if (level != 0)
+			EXPECT(count == s->level_nodes[level - 1]);
+		bcopy(raw, c->root, m);
+	}
+	return (FSIMG_OK);
+}
+
+static void
+emit_checked(fsimg_session_t *session, hfsplus_tree_shape_t *shape,
+    fsimg_stream_t *records, fsimg_stream_t **levels)
+{
+	tree_check_t check = { .shape = shape, .records = records };
+	unsigned char node[8192];
+	hfsplus_tree_emit_t emit = {
+		.session = session, .shape = shape, .records = records,
+		.levels = levels, .node = node, .leaf_data = leaf_pattern,
+		.write = inspect_node, .argument = &check
+	};
+
+	for (unsigned i = 0; i < shape->depth; i++)
+		REQUIRE(fsimg_stream_new(session, HFSPLUS_WRITE_RECORD_MAX,
+		    &check.first_keys[i], NULL) == FSIMG_OK);
+	REQUIRE(hfsplus_tree_emit(&emit, NULL) == FSIMG_OK);
+	EXPECT(check.nodes_seen == shape->used_nodes);
+	EXPECT(check.leaves_seen == shape->leaf_records);
+	for (unsigned i = 0; i + 1 < shape->depth; i++)
+		EXPECT(check.level_seen[i] == shape->level_nodes[i]);
+	for (unsigned i = 0; i < shape->depth; i++)
+		fsimg_stream_free(check.first_keys[i]);
+}
+
+/* A one-unit file takes 258 bytes plus its two-byte table slot, hence
+ * fifteen fit. A one-unit index record and its slot take sixteen bytes,
+ * hence 255 fit. These arithmetic facts select shapes without consulting
+ * the production packer's result.
+ */
+static uint32_t
+nodes_without_maps(uint32_t leaves)
+{
+	uint32_t nodes = 1;
+
+	for (;;) {
+		nodes += leaves;
+		if (leaves == 1)
+			return (nodes);
+		leaves = (uint32_t)ceil_div(leaves, 255);
+	}
+}
+
+static void
+pack_case(uint32_t files, unsigned final_units, uint32_t expected_leaves,
+    unsigned expected_depth, uint32_t expected_maps, bool all_blocks)
+{
+	fixture_t f;
+	fsimg_session_t session;
+	fsimg_stream_t *records, *levels[HFSPLUS_BTREE_DEPTH_MAX] = { NULL };
+	hfsplus_tree_shape_t shape;
+	unsigned char raw[HFSPLUS_WRITE_RECORD_MAX], name[510] = { 0 };
+	hfsplus_write_record_t r = { .type = HFSPLUS_RECORD_FILE,
+		.units = 1, .name = name, .key = name, .key_bytes = 2 };
+	size_t length;
+	uint32_t used;
+
+	context_open(&f);
+	fsimg_session_init(&session, f.ctx, "hfsplus", 0);
+	REQUIRE(fsimg_stream_new(&session, sizeof(raw), &records, NULL) == FSIMG_OK);
+	for (uint32_t i = 0; i < files + (final_units != 0); i++) {
+		r.parent = i + 2;
+		r.id = i;
+		r.type = i == files ? HFSPLUS_RECORD_FOLDER : HFSPLUS_RECORD_FILE;
+		r.units = i == files ? final_units : 1;
+		r.key_bytes = 2 * r.units;
+		length = hfsplus_write_record_encode(&r, raw);
+		REQUIRE(fsimg_stream_append(records, raw, length, NULL, NULL) == FSIMG_OK);
+	}
+	REQUIRE(fsimg_stream_seal(records, NULL) == FSIMG_OK);
+	hfsplus_tree_shape_init(&shape, HFSPLUS_TREE_CATALOG, HFSPLUS_COMPARE_FOLDED);
+	EXPECT(shape.node_bytes == 4096 && shape.max_key_length == 516);
+	EXPECT(shape.compare_type == 0xcf && shape.attributes == 6);
+	REQUIRE(hfsplus_tree_pack(&session, records, &shape, levels, NULL) == FSIMG_OK);
+	used = nodes_without_maps(expected_leaves) + expected_maps;
+	EXPECT(shape.level_nodes[0] == expected_leaves);
+	for (uint32_t count = expected_leaves, level = 0; count != 0; level++) {
+		EXPECT(shape.level_nodes[level] == count);
+		count = count == 1 ? 0 : (uint32_t)ceil_div(count, 255);
+	}
+	EXPECT(shape.depth == expected_depth);
+	EXPECT(shape.map_nodes == expected_maps);
+	EXPECT(shape.used_nodes == used);
+	EXPECT(shape.leaf_records == files + (final_units != 0));
+	for (uint32_t b = 512; b <= 65536; b *= 2) {
+		hfsplus_tree_place(&shape, 7, b);
+		EXPECT(shape.first_block == 7);
+		EXPECT(shape.blocks == ceil_div((uint64_t)used * 4096, b));
+		EXPECT(shape.total_nodes == (uint64_t)shape.blocks * b / 4096);
+		if (all_blocks || b == 4096 || b == 65536)
+			emit_checked(&session, &shape, records, levels);
+	}
+	for (unsigned i = 0; i < HFSPLUS_BTREE_DEPTH_MAX; i++)
+		fsimg_stream_free(levels[i]);
+	fsimg_stream_free(records);
+	fsimg_ctx_free(f.ctx);
+}
+
+static void
+test_packing(void)
+{
+	static const uint32_t boundaries[] = { 30720, 30721, 63327, 63328 };
+	fixture_t f;
+	fsimg_session_t session;
+	hfsplus_tree_shape_t shape;
+	uint32_t leaves;
+
+	named("leaf exactly full: 15 files and 41-unit folder");
+	pack_case(15, 41, 1, 1, 0, true);
+	named("leaf one unit over: last leaf has one record");
+	pack_case(15, 42, 2, 2, 0, true);
+	named("index exactly full: 255 leaves");
+	pack_case(255 * 15, 0, 255, 2, 0, false);
+	named("index one over: singleton non-root index, two-record root");
+	pack_case(255 * 15 + 1, 0, 256, 3, 0, false);
+	for (unsigned i = 0; i < 4; i++) {
+		for (leaves = 1; nodes_without_maps(leaves) < boundaries[i]; leaves++)
+			;
+		REQUIRE(nodes_without_maps(leaves) == boundaries[i]);
+		named("map boundary used without maps=%u", boundaries[i]);
+		/* A map consumes a bit: 30720+32608-1 nodes leave space
+		 * for one map; the next demand needs two map nodes.
+		 */
+		pack_case((leaves - 1) * 15 + 1, 0, leaves, 3,
+		    i == 0 ? 0 : i == 3 ? 2 : 1, false);
+	}
+	context_open(&f);
+	fsimg_session_init(&session, f.ctx, "hfsplus", 0);
+	for (unsigned kind = 0; kind < 2; kind++) {
+		named("empty %s header", kind == 0 ? "extents" : "attributes");
+		hfsplus_tree_shape_init(&shape, kind == 0 ? HFSPLUS_TREE_EXTENTS :
+		    HFSPLUS_TREE_ATTRIBUTES, HFSPLUS_COMPARE_FOLDED);
+		EXPECT(shape.depth == 0 && shape.used_nodes == 1);
+		EXPECT(shape.node_bytes == (kind == 0 ? 4096 : 8192));
+		EXPECT(shape.max_key_length == (kind == 0 ? 10 : 266));
+		EXPECT(shape.attributes == (kind == 0 ? 2 : 6));
+		EXPECT(shape.compare_type == 0);
+		for (uint32_t b = 512; b <= 65536; b *= 2) {
+			hfsplus_tree_place(&shape, 3, b);
+			emit_checked(&session, &shape, NULL, NULL);
+		}
+	}
+	fsimg_ctx_free(f.ctx);
+}
+
+static size_t
+utf8_unit(char *out, uint16_t unit)
+{
+	if (unit < 0x80) {
+		out[0] = (char)unit;
+		return (1);
+	}
+	if (unit < 0x800) {
+		out[0] = (char)(0xc0 | unit >> 6);
+		out[1] = (char)(0x80 | (unit & 63));
+		return (2);
+	}
+	out[0] = (char)(0xe0 | unit >> 12);
+	out[1] = (char)(0x80 | ((unit >> 6) & 63));
+	out[2] = (char)(0x80 | (unit & 63));
+	return (3);
+}
+
+static void
+name_case(unsigned variant, const char *path, fsimg_status_t expected,
+    bool label)
+{
+	fsimg_write_options_t opts = options_for(4096);
+	fixture_t f;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	bool invalid_utf8 = strcmp(path, "/bad\xff") == 0 ||
+	    strcmp(path, "/\xed\xa0\x80") == 0;
+
+	if (label)
+		opts.label = path + 1;
+	context_open(&f);
+	status = fsimg_writer_new_variant(f.ctx, &format, &variants[variant],
+	    &opts, &f.writer, &error);
+	if (status != FSIMG_OK) {
+		EXPECT(status == expected && label);
+		fixture_close(&f);
+		return;
+	}
+	if (!label) {
+		fsimg_entry_t entry = { .path = path, .kind = FSIMG_ENTRY_FILE };
+		fsimg_source_t source = { .kind = FSIMG_SOURCE_ZERO };
+
+		status = fsimg_writer_add(f.writer, &entry, &source, &error);
+	}
+	if (status == FSIMG_OK)
+		status = plan_status(&f, &error);
+	if (status != expected)
+		fprintf(stderr, "%s: expected status %d, actual %d: %s (%s)\n",
+		    scenario, expected, status, error.message, error.path);
+	EXPECT(status == expected);
+	/* Common path validation rejects invalid UTF-8 without attaching a path. */
+	if (expected != FSIMG_OK && !label && !invalid_utf8) {
+		fsimg_error_t rendered = { 0 };
+
+		fsimg_error_path(&rendered, path);
+		if (strcmp(error.path, rendered.path) != 0)
+			fprintf(stderr, "%s: expected error path [%s], actual [%s]\n",
+			    scenario, rendered.path, error.path);
+		EXPECT(strcmp(error.path, rendered.path) == 0);
+	}
+	fixture_close(&f);
+}
+
+static void
+collision_case(unsigned variant, const char *first, const char *second,
+    fsimg_status_t expected)
+{
+	fsimg_write_options_t opts = options_for(4096);
+	fixture_t f;
+	fsimg_error_t error;
+
+	fixture_open(&f, variant, &opts);
+	add_entry(&f, first, FSIMG_ENTRY_FILE, 0, NULL);
+	add_entry(&f, second, FSIMG_ENTRY_FILE, 0, NULL);
+	EXPECT(plan_status(&f, &error) == expected);
+	if (expected != FSIMG_OK)
+		EXPECT(strcmp(error.path, second) == 0);
+	fixture_close(&f);
+}
+
+static void
+test_names(void)
+{
+	/* The 23 forbidden adjacent stored pairs, transcribed from the
+	 * Unicode evidence rather than obtained from the writer's table.
+	 */
+	static const uint16_t pairs[][2] = {
+		{ 0x0306, 0x0307 }, { 0x0308, 0x030d }, { 0x00a8, 0x030d },
+		{ 0x0391, 0x030d }, { 0x0395, 0x030d }, { 0x0397, 0x030d },
+		{ 0x0399, 0x030d }, { 0x039f, 0x030d }, { 0x03a5, 0x030d },
+		{ 0x03a9, 0x030d }, { 0x03b1, 0x030d }, { 0x03b5, 0x030d },
+		{ 0x03b7, 0x030d }, { 0x03b9, 0x030d }, { 0x03bf, 0x030d },
+		{ 0x03c5, 0x030d }, { 0x03c9, 0x030d }, { 0x03d2, 0x030d },
+		{ 0x09ac, 0x09bc }, { 0x0a21, 0x0a3c }, { 0x0b2f, 0x0b3c },
+		{ 0x0e4d, 0x0e32 }, { 0x0ecd, 0x0eb2 }
+	};
+	static const char *invalid[] = {
+		"/bad\xff", "/\xef\xbf\xbe", "/\xef\xbf\xbf", "/\xed\xa0\x80"
+	};
+	static const char *owned[] = {
+		"\xe2\x90\x80\xe2\x90\x80\xe2\x90\x80\xe2\x90\x80HFS+ Private Data",
+		".HFS+ Private Directory Data\r", ".journal", ".journal_info_block"
+	};
+	char path[1100], alternate[1100];
+	size_t length;
+	uint16_t ignorable;
+
+	for (ignorable = 1; ignorable != 0 && hfsplus_fold_unit(ignorable) != 0;
+	    ignorable++)
+		;
+	REQUIRE(ignorable != 0);
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (unsigned i = 0; i < 4; i++) {
+			named("variant %u invalid UTF-8/name scalar %u", variant, i);
+			name_case(variant, invalid[i], FSIMG_EINVAL, false);
+			name_case(variant, invalid[i], FSIMG_EINVAL, true);
+		}
+		for (unsigned count = 127; count <= 128; count++) {
+			named("variant %u decomposed length from %u e-acute", variant, count);
+			path[0] = '/';
+			length = 1;
+			for (unsigned i = 0; i < count; i++)
+				length += utf8_unit(path + length, 0x00e9);
+			if (count == 127)
+				path[length++] = 'x';
+			path[length] = '\0';
+			name_case(variant, path, count == 127 ? FSIMG_OK : FSIMG_EINVAL, false);
+			name_case(variant, path, count == 127 ? FSIMG_OK : FSIMG_EINVAL, true);
+		}
+		memset(path, 'a', 257);
+		path[0] = '/';
+		path[257] = '\0';
+		named("variant %u 256-unit ASCII name", variant);
+		name_case(variant, path, FSIMG_EINVAL, false);
+		for (unsigned i = 0; i < 23; i++) {
+			for (unsigned prefix = 0; prefix < 2; prefix++) {
+				named("variant %u forbidden pair %04x %04x prefix=%u",
+				    variant, pairs[i][0], pairs[i][1], prefix);
+				strcpy(path, prefix == 0 ? "/" : "/before");
+				length = strlen(path);
+				length += utf8_unit(path + length, pairs[i][0]);
+				length += utf8_unit(path + length, pairs[i][1]);
+				strcpy(path + length, "after");
+				name_case(variant, path, FSIMG_EINVAL, false);
+				name_case(variant, path, FSIMG_EINVAL, true);
+			}
+			for (unsigned near = 0; near < 2; near++) {
+				named("variant %u pair %u near miss %u", variant, i, near);
+				path[0] = '/';
+				length = 1;
+				if (near != 0) {
+					length += utf8_unit(path + length, pairs[i][0]);
+					path[length++] = 'x';
+				}
+				length += utf8_unit(path + length, pairs[i][1]);
+				path[length] = '\0';
+				name_case(variant, path, FSIMG_OK, false);
+			}
+		}
+		named("variant %u all-ignorable U+%04x", variant, ignorable);
+		path[0] = '/';
+		length = 1 + utf8_unit(path + 1, ignorable);
+		path[length] = '\0';
+		name_case(variant, path, variant == 0 ? FSIMG_EINVAL : FSIMG_OK, false);
+		named("variant %u case collision", variant);
+		collision_case(variant, "/A", "/a", variant == 0 ? FSIMG_EINVAL : FSIMG_OK);
+		named("variant %u canonical collision", variant);
+		collision_case(variant, "/e\xcc\x81", "/\xc3\xa9", FSIMG_EINVAL);
+		for (unsigned i = 0; i < 4; i++) {
+			fixture_t f;
+			fsimg_write_options_t opts = options_for(4096);
+
+			named("variant %u owned root name %u", variant, i);
+			snprintf(path, sizeof(path), "/%s", owned[i]);
+			name_case(variant, path, FSIMG_EINVAL, false);
+			fixture_open(&f, variant, &opts);
+			add_entry(&f, "/sub", FSIMG_ENTRY_DIRECTORY, 0, NULL);
+			snprintf(path, sizeof(path), "/sub/%s", owned[i]);
+			add_entry(&f, path, FSIMG_ENTRY_FILE, 0, NULL);
+			plan_ok(&f);
+			fixture_close(&f);
+			snprintf(alternate, sizeof(alternate), "/%s", owned[i]);
+			for (char *p = alternate; *p != '\0'; p++)
+				if (*p >= 'a' && *p <= 'z') {
+					*p -= 'a' - 'A';
+					break;
+				}
+			named("variant %u owned root name %u case variant", variant, i);
+			name_case(variant, alternate, variant == 0 ? FSIMG_EINVAL : FSIMG_OK, false);
+		}
+	}
+}
+
+static void
+check_stored_names(hfsplus_plan_t *p)
+{
+	unsigned char raw[HFSPLUS_WRITE_RECORD_MAX];
+	hfsplus_write_record_t r;
+	uint64_t cursor = 0;
+	size_t length;
+	bool mapped_null = false, mapped_slash = false, decomposed = false;
+
+	for (uint64_t i = 0; i < p->records->count; i++) {
+		REQUIRE(fsimg_stream_next(p->records, &cursor, raw, sizeof(raw),
+		    &length, NULL) == FSIMG_OK);
+		REQUIRE(hfsplus_write_record_decode(raw, length, &r));
+		if (r.type != HFSPLUS_RECORD_FILE)
+			continue;
+		if (r.units == 2 && be16(r.name) == 'n' && be16(r.name + 2) == 0)
+			mapped_null = true;
+		if (r.units == 2 && be16(r.name) == 's' && be16(r.name + 2) == '/')
+			mapped_slash = true;
+		if (r.units == 2 && be16(r.name) == 'e' && be16(r.name + 2) == 0x301)
+			decomposed = true;
+	}
+	EXPECT(mapped_null && mapped_slash && decomposed);
+}
+
+static void
+check_key_order(hfsplus_plan_t *p, unsigned entries)
+{
+	unsigned char raw[HFSPLUS_WRITE_RECORD_MAX], previous[510];
+	unsigned primary[64] = { 0 }, thread[64] = { 0 };
+	bool seen_parent[128] = { false };
+	hfsplus_write_record_t r;
+	hfsplus_ckey_t key, prev = { .name = previous };
+	uint64_t cursor = 0;
+	size_t length;
+
+	REQUIRE(entries < 64);
+	EXPECT(p->records->count == (entries + 1) * 2);
+	for (uint64_t i = 0; i < p->records->count; i++) {
+		REQUIRE(fsimg_stream_next(p->records, &cursor, raw, sizeof(raw),
+		    &length, NULL) == FSIMG_OK);
+		REQUIRE(hfsplus_write_record_decode(raw, length, &r));
+		key = (hfsplus_ckey_t){ .parent = r.parent, .name = r.name,
+			.units = r.type == HFSPLUS_RECORD_FILE ||
+			    r.type == HFSPLUS_RECORD_FOLDER ? r.units : 0 };
+		if (i != 0)
+			EXPECT(hfsplus_ckey_compare(p->compare, &prev, &key) < 0);
+		REQUIRE(r.id <= entries && r.parent < 128);
+		if (key.units == 0) {
+			thread[r.id]++;
+			EXPECT(r.parent == hfsplus_node_id(r.id));
+			EXPECT(!seen_parent[r.parent]);
+		} else {
+			primary[r.id]++;
+		}
+		seen_parent[r.parent] = true;
+		if (r.id == 0) {
+			if (key.units != 0)
+				EXPECT(r.parent == 1 && key.units == 8);
+			else
+				EXPECT(r.parent == 2 && r.units == 8);
+			EXPECT(bcmp(r.name, "\0u\0n\0t\0i\0t\0l\0e\0d", 16) == 0);
+		}
+		prev.parent = key.parent;
+		prev.units = key.units;
+		bcopy(key.name, previous, 2 * key.units);
+	}
+	for (unsigned i = 0; i <= entries; i++) {
+		EXPECT(primary[i] == 1);
+		EXPECT(thread[i] == 1);
+	}
+}
+
+static void
+test_key_order_and_mapping(void)
+{
+	static const char *paths[] = {
+		"/ASCII", "/ascii2", "/e\xcc\x80", "/\xc3\xa9", "/\xce\x91",
+		"/\xce\xb1x", "/\xea\xb0\x80", "/\xf0\x9f\x98\x80", "/n\xe2\x90\x80",
+		"/s:", "/ignore\xe2\x80\x8c", "/folder", "/folder/Child", "/folder/child2"
+	};
+	fixture_t f;
+	fsimg_write_options_t opts = options_for(4096);
+	hfsplus_plan_t *p;
+
+	for (unsigned variant = 0; variant < 2; variant++) {
+		named("variant %u real comparator order and stored names", variant);
+		fixture_open(&f, variant, &opts);
+		for (unsigned i = 0; i < sizeof(paths) / sizeof(*paths); i++)
+			add_entry(&f, paths[i], i == 11 ? FSIMG_ENTRY_DIRECTORY :
+			    FSIMG_ENTRY_FILE, 0, NULL);
+		p = plan_ok(&f);
+		check_key_order(p, sizeof(paths) / sizeof(*paths));
+		check_stored_names(p);
+		emit_checked(&f.writer->session, &p->catalog, p->records, p->levels);
+		fixture_close(&f);
+	}
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (unsigned i = 0; i < 3; i++) {
+			fsimg_status_t status;
+			fsimg_error_t error;
+
+			named("variant %u default label form %u", variant, i);
+			opts.label = i == 0 ? NULL : i == 1 ? "" : "untitled";
+			context_open(&f);
+			status = fsimg_writer_new_variant(f.ctx, &format,
+			    &variants[variant], &opts, &f.writer, &error);
+
+			if (status != FSIMG_OK)
+				fprintf(stderr, "%s: expected OK, actual %d: %s\n",
+				    scenario, status, error.message);
+			EXPECT(status == FSIMG_OK);
+			if (status == FSIMG_OK)
+				check_key_order(plan_ok(&f), 0);
+			fixture_close(&f);
+		}
+	}
+}
+
+static fsimg_status_t
+provider_validate(void *arg FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+provider_read(void *arg FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
+    uint64_t offset, void *buffer, size_t length, size_t *done,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	static const char target[] = "target";
+
+	REQUIRE(offset <= 6 && length <= 6 - offset);
+	bcopy(target + offset, buffer, length);
+	*done = length;
+	return (FSIMG_OK);
+}
+
+static void
+add_link(fixture_t *f)
+{
+	fsimg_source_ops_t ops;
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = 1 };
+	fsimg_entry_t entry = { .path = "/link", .kind = FSIMG_ENTRY_SYMLINK,
+		.size = 6 };
+
+	fsimg_source_ops_init(&ops);
+	ops.validate = provider_validate;
+	ops.read_at = provider_read;
+	REQUIRE(fsimg_writer_set_sources(f->writer, &ops, NULL, NULL) == FSIMG_OK);
+	REQUIRE(fsimg_writer_add(f->writer, &entry, &source, NULL) == FSIMG_OK);
+}
+
+static void
+test_rows_and_counts(void)
+{
+	static const char *paths[] = { "/dir", "/dir/child", "/empty", "/fifo",
+		"/link", "/payload" };
+	static const uint16_t modes[] = { 0040755, 0040755, 0040755, 0100644,
+		0010644, 0120755, 0100644 };
+	fixture_t f;
+	fsimg_write_options_t opts = options_for(4096);
+	hfsplus_plan_t *p;
+	hfsplus_row_t row;
+	const fsimg_catalog_entry_t *entry;
+	uint32_t next;
+
+	for (unsigned variant = 0; variant < 2; variant++) {
+		named("variant %u rows, counts, contiguous forks", variant);
+		fixture_open(&f, variant, &opts);
+		add_link(&f);
+		add_entry(&f, "/payload", FSIMG_ENTRY_FILE, 4097, NULL);
+		add_entry(&f, "/dir", FSIMG_ENTRY_DIRECTORY, 0, NULL);
+		add_entry(&f, "/dir/child", FSIMG_ENTRY_DIRECTORY, 0, NULL);
+		add_entry(&f, "/empty", FSIMG_ENTRY_FILE, 0, NULL);
+		add_entry(&f, "/fifo", FSIMG_ENTRY_FIFO, 0, NULL);
+		p = plan_ok(&f);
+		EXPECT(hfsplus_node_id(0) == 2);
+		EXPECT(p->next_catalog_id == 22);
+		EXPECT(p->file_count == 4 && p->folder_count == 2);
+		next = p->catalog.first_block + p->catalog.blocks;
+		for (unsigned i = 0; i <= 6; i++) {
+			REQUIRE(hfsplus_row_get(p, i, &row, NULL) == FSIMG_OK);
+			EXPECT(row.uid == 0 && row.gid == 0);
+			EXPECT(row.mode == modes[i]);
+			EXPECT(row.created == 2082844800u);
+			EXPECT(row.modified == 2082844800u);
+			EXPECT(row.accessed == 2082844800u);
+			EXPECT(row.changed == 2082844800u);
+			if (i == 0) {
+				EXPECT(row.parent == 1 && row.valence == 5 && row.folders == 1);
+				continue;
+			}
+			EXPECT(hfsplus_node_id(i) == 15 + i);
+			REQUIRE(fsimg_catalog_get(f.writer, i, &entry, NULL) == FSIMG_OK);
+			EXPECT(strcmp(entry->entry.path, paths[i - 1]) == 0);
+			EXPECT(row.parent == (i == 2 ? 16 : 2));
+			EXPECT(row.valence == (i == 1 ? 1u : 0u));
+			EXPECT(row.folders == (i == 1 ? 1u : 0u));
+			EXPECT(row.length == (i == 5 ? 6u : i == 6 ? 4097u : 0u));
+			EXPECT(row.blocks == (i == 5 ? 1u : i == 6 ? 2u : 0u));
+			if (row.blocks == 0)
+				EXPECT(row.first_block == 0);
+			else {
+				EXPECT(row.first_block == next);
+				next += row.blocks;
+			}
+		}
+		EXPECT(p->allocated == next);
+		check_geometry(p, brute_blocks(4096, 0, 3), 4096, 1, 3);
+		fixture_close(&f);
+		named("variant %u empty next catalog ID", variant);
+		fixture_open(&f, variant, &opts);
+		p = plan_ok(&f);
+		EXPECT(p->next_catalog_id == 16 && p->file_count == 0 && p->folder_count == 0);
+		fixture_close(&f);
+	}
+}
+
+static void
+test_metadata_policy(void)
+{
+	fixture_t f;
+	fsimg_write_options_t opts;
+	fsimg_metadata_t meta = {
+		.valid = FSIMG_META_OWNER | FSIMG_META_MODE | FSIMG_META_CREATED |
+		    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED | FSIMG_META_CHANGED,
+		.uid = 123, .gid = 456, .mode = 0610,
+		.created = { .seconds = -2082844800, .basis = FSIMG_TIME_UTC,
+		    .precision_ns = 1000000000 },
+		.modified = { .seconds = 0, .basis = FSIMG_TIME_UTC,
+		    .precision_ns = 1000000000 },
+		.accessed = { .seconds = 2212122495, .basis = FSIMG_TIME_UTC,
+		    .precision_ns = 1000000000 },
+		.changed = { .seconds = 2212122496, .basis = FSIMG_TIME_UTC,
+		    .precision_ns = 1000000000 }
+	};
+	hfsplus_plan_t *p;
+	hfsplus_row_t row;
+	fsimg_plan_info_t info;
+	fsimg_error_t error;
+
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (unsigned mode = 0; mode < 6; mode++) {
+			unsigned policy = mode % 3;
+
+			named("variant %u metadata policy %u bound %s", variant,
+			    policy, mode < 3 ? "upper" : "lower");
+			meta.changed.seconds = mode < 3 ? INT64_C(2212122496) :
+			    -INT64_C(2082844801);
+			opts = options_for(4096);
+			if (policy != 2)
+				opts.flags &= ~FSIMG_WRITE_REPRODUCIBLE;
+			if (policy == 1)
+				opts.flags &= ~FSIMG_WRITE_ALLOW_LOSS;
+			fixture_open(&f, variant, &opts);
+			add_entry(&f, "/dates", FSIMG_ENTRY_FILE, 0, &meta);
+			add_entry(&f, "/absent", FSIMG_ENTRY_FILE, 0, NULL);
+			if (policy == 1) {
+				EXPECT(plan_status(&f, &error) == FSIMG_EUNSUPPORTED);
+				EXPECT(strcmp(error.path, "/dates") == 0);
+				fixture_close(&f);
+				continue;
+			}
+			p = plan_ok(&f);
+			REQUIRE(hfsplus_row_get(p, 2, &row, NULL) == FSIMG_OK);
+			EXPECT(row.uid == 123 && row.gid == 456 && row.mode == 0100610);
+			EXPECT(row.created == (policy == 2 ? p->format_time : 0));
+			EXPECT(row.modified == (policy == 2 ? p->format_time : 2082844800u));
+			EXPECT(row.accessed == (policy == 2 ? p->format_time : UINT32_MAX));
+			EXPECT(row.changed == p->format_time);
+			REQUIRE(hfsplus_row_get(p, 1, &row, NULL) == FSIMG_OK);
+			EXPECT(row.created == p->format_time && row.modified == p->format_time);
+			EXPECT(row.accessed == p->format_time && row.changed == p->format_time);
+			REQUIRE(fsimg_plan_get_info(&p->common, &info, NULL) == FSIMG_OK);
+			EXPECT(info.metadata_losses == (policy == 2 ? 3u : 1u));
+			fixture_close(&f);
+		}
+	}
+}
+
+static void
+compare_streams(fsimg_stream_t *a, fsimg_stream_t *b)
+{
+	unsigned char one[HFSPLUS_WRITE_RECORD_MAX], two[HFSPLUS_WRITE_RECORD_MAX];
+	uint64_t ac = 0, bc = 0;
+	size_t an, bn;
+
+	if (a == NULL || b == NULL) {
+		EXPECT(a == b);
+		return;
+	}
+	EXPECT(a->count == b->count && a->end == b->end);
+	for (uint64_t i = 0; i < a->count; i++) {
+		REQUIRE(fsimg_stream_next(a, &ac, one, sizeof(one), &an, NULL) == FSIMG_OK);
+		REQUIRE(fsimg_stream_next(b, &bc, two, sizeof(two), &bn, NULL) == FSIMG_OK);
+		EXPECT(an == bn && bcmp(one, two, an) == 0);
+	}
+}
+
+struct node_capture {
+	unsigned char *bytes;
+	uint32_t node_bytes;
+};
+
+static fsimg_status_t
+capture_node(void *arg, uint32_t number, const unsigned char *bytes,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	node_capture_t *capture = arg;
+
+	bcopy(bytes, capture->bytes + (size_t)number * capture->node_bytes,
+	    capture->node_bytes);
+	return (FSIMG_OK);
+}
+
+static unsigned char *
+capture_tree(fixture_t *f)
+{
+	hfsplus_plan_t *p = (hfsplus_plan_t *)f->writer->plan;
+	node_capture_t capture = { .node_bytes = p->catalog.node_bytes };
+	unsigned char node[4096];
+	hfsplus_tree_emit_t emit = {
+		.session = &f->writer->session, .shape = &p->catalog,
+		.records = p->records, .levels = p->levels, .node = node,
+		.leaf_data = leaf_pattern, .write = capture_node, .argument = &capture
+	};
+
+	capture.bytes = calloc(p->catalog.total_nodes, p->catalog.node_bytes);
+	REQUIRE(capture.bytes != NULL);
+	REQUIRE(hfsplus_tree_emit(&emit, NULL) == FSIMG_OK);
+	return (capture.bytes);
+}
+
+static void
+test_determinism(void)
+{
+	fixture_t baseline, other;
+	fsimg_write_options_t opts = options_for(4096);
+	fsimg_sort_options_t sort = { .run_bytes = 4096, .fan_in = 2 };
+	hfsplus_plan_t *a, *b;
+	unsigned char ar[HFSPLUS_ROW_BYTES], br[HFSPLUS_ROW_BYTES];
+	unsigned char *anodes, *bnodes;
+	char path[64];
+	char *saved_tz = getenv("TZ") == NULL ? NULL : strdup(getenv("TZ"));
+
+	for (unsigned variant = 0; variant < 2; variant++) {
+		named("variant %u deterministic setup", variant);
+		fixture_open(&baseline, variant, &opts);
+		for (unsigned i = 0; i < 320; i++) {
+			snprintf(path, sizeof(path), "/file%03u", i);
+			add_entry(&baseline, path, FSIMG_ENTRY_FILE, i, NULL);
+		}
+		a = plan_ok(&baseline);
+		anodes = capture_tree(&baseline);
+		for (unsigned pass = 0; pass < 3; pass++) {
+			named("variant %u determinism reverse/sort/TZ pass %u", variant, pass);
+			REQUIRE(setenv("TZ", pass == 2 ? "Pacific/Honolulu" : "UTC0", 1) == 0);
+			tzset();
+			fixture_open(&other, variant, &opts);
+			for (unsigned j = 0; j < 320; j++) {
+				unsigned i = pass == 0 ? 319 - j : j;
+
+				snprintf(path, sizeof(path), "/file%03u", i);
+				add_entry(&other, path, FSIMG_ENTRY_FILE, i, NULL);
+			}
+			if (pass != 0) {
+				/* Custom preparation is an internal entry point. The
+				 * public planner owns preparation with default settings;
+				 * a prepared catalog goes straight to the driver here.
+				 */
+				REQUIRE(fsimg_writer_prepare(other.writer, &sort, NULL) == FSIMG_OK);
+				REQUIRE(hfsplus_write_plan(other.writer, NULL) == FSIMG_OK);
+				b = (hfsplus_plan_t *)other.writer->plan;
+			} else {
+				b = plan_ok(&other);
+			}
+			EXPECT(a->volume_bytes == b->volume_bytes);
+			EXPECT(a->block_bytes == b->block_bytes);
+			EXPECT(a->allocated == b->allocated);
+			EXPECT(a->total_blocks == b->total_blocks);
+			EXPECT(a->head_blocks == b->head_blocks && a->tail_blocks == b->tail_blocks);
+			EXPECT(a->bitmap_blocks == b->bitmap_blocks);
+			EXPECT(bcmp(&a->catalog, &b->catalog, sizeof(a->catalog)) == 0);
+			EXPECT(bcmp(&a->extents, &b->extents, sizeof(a->extents)) == 0);
+			EXPECT(bcmp(&a->attributes, &b->attributes, sizeof(a->attributes)) == 0);
+			for (unsigned i = 0; i <= 320; i++) {
+				REQUIRE(fsimg_array_get(a->rows, i, ar, NULL) == FSIMG_OK);
+				REQUIRE(fsimg_array_get(b->rows, i, br, NULL) == FSIMG_OK);
+				EXPECT(bcmp(ar, br, sizeof(ar)) == 0);
+			}
+			compare_streams(a->records, b->records);
+			for (unsigned i = 0; i < HFSPLUS_BTREE_DEPTH_MAX; i++)
+				compare_streams(a->levels[i], b->levels[i]);
+			bnodes = capture_tree(&other);
+			EXPECT(bcmp(anodes, bnodes, (size_t)a->catalog.total_nodes * 4096) == 0);
+			free(bnodes);
+			fixture_close(&other);
+		}
+		free(anodes);
+		fixture_close(&baseline);
+	}
+	if (saved_tz != NULL) {
+		REQUIRE(setenv("TZ", saved_tz, 1) == 0);
+		free(saved_tz);
+	} else {
+		REQUIRE(unsetenv("TZ") == 0);
+	}
+	tzset();
+}
+
+int
+main(void)
+{
+	test_bitmap_boundaries();
+	test_settings_and_limits();
+	test_minimization();
+	test_packing();
+	test_names();
+	test_key_order_and_mapping();
+	test_rows_and_counts();
+	test_metadata_policy();
+	test_determinism();
+	if (failures != 0)
+		fprintf(stderr, "hfsplus writer: %u failed checks\n", failures);
+	return (failures == 0 ? 0 : 1);
+}

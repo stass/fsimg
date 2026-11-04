@@ -423,7 +423,7 @@ check_selected(bool present, const fsimg_timestamp_t *time, uint32_t maximum,
 {
 	uint32_t out = 0xdeadbeefu;
 
-	CHECK(fsimg_time_select_u32(present, time, maximum, 1000, reproducible,
+	CHECK(fsimg_time_select_u32(present, time, 0, maximum, 1000, reproducible,
 	    &out) == exact);
 	CHECK(out == stored);
 }
@@ -476,6 +476,35 @@ test_whole_second_selection(void)
 	check_selected(true, &time, qnx4, true, 1000, false);
 }
 
+/* The 1904 epoch includes negative Unix seconds without signed overflow. */
+static void
+test_1904_second_selection(void)
+{
+	static const struct {
+		int64_t seconds;
+		uint32_t stored;
+		bool exact;
+	} cases[] = {
+		{ -INT64_C(2082844800), 0, true },
+		{ INT64_C(2212122495), UINT32_MAX, true },
+		{ -INT64_C(2082844801), 1000, false },
+		{ INT64_C(2212122496), 1000, false },
+		{ INT64_MIN, 1000, false },
+		{ INT64_MAX, 1000, false },
+		{ 0, 2082844800u, true }
+	};
+	fsimg_timestamp_t time = { .basis = FSIMG_TIME_UTC };
+	uint32_t stored;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		time.seconds = cases[i].seconds;
+		stored = 0xdeadbeefu;
+		CHECK(fsimg_time_select_u32(true, &time, INT64_C(2082844800),
+		    UINT32_MAX, 1000, false, &stored) == cases[i].exact);
+		CHECK(stored == cases[i].stored);
+	}
+}
+
 static void
 check_dos(int64_t seconds, uint32_t packed, unsigned char odd)
 {
@@ -522,6 +551,7 @@ main(void)
 	test_qnx4_owner_pair_is_one_loss();
 	test_fat_access_time_keeps_only_the_date();
 	test_whole_second_selection();
+	test_1904_second_selection();
 	test_dos_calendar();
 	return (0);
 }

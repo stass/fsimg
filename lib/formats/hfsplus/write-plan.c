@@ -162,21 +162,12 @@ name_encode(hfsplus_compare_t compare, const char *component, size_t length,
 	return (NULL);
 }
 
-/* The label's component: a NULL or empty label selects the native default. */
-static const char *
-label_component(const fsimg_write_options_t *options)
-{
-	if (options->label == NULL || options->label[0] == '\0')
-		return (DEFAULT_LABEL);
-	return (options->label);
-}
-
 fsimg_status_t
 hfsplus_write_validate(fsimg_write_options_t *options, unsigned variant,
     fsimg_error_t *error)
 {
 	hfsplus_name_t label;
-	const char *component, *refused;
+	const char *refused;
 	uint32_t block;
 
 	block = options->allocation_unit_bytes == 0 ?
@@ -191,9 +182,13 @@ hfsplus_write_validate(fsimg_write_options_t *options, unsigned variant,
 	    (options->epoch < EPOCH_MIN || options->epoch > EPOCH_MAX)))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "invalid HFS Plus geometry or reproducible epoch"));
-	component = label_component(options);
-	refused = name_encode(variant_compare(variant), component,
-	    strlen(component), &label);
+	/* A NULL or empty label selects the native default, a static string the
+	 * writer copies.
+	 */
+	if (options->label == NULL || options->label[0] == '\0')
+		options->label = DEFAULT_LABEL;
+	refused = name_encode(variant_compare(variant), options->label,
+	    strlen(options->label), &label);
 	if (refused != NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "HFS Plus label is outside the name rules"));
@@ -495,11 +490,11 @@ plan_root(hfsplus_plan_t *plan, fsimg_stream_t *unsorted, fsimg_error_t *error)
 	fsimg_writer_t *writer = plan->common.writer;
 	hfsplus_name_t label;
 	hfsplus_row_t root;
-	const char *component, *refused;
+	const char *refused;
 	fsimg_status_t status;
 
-	component = label_component(&writer->options);
-	refused = name_encode(plan->compare, component, strlen(component), &label);
+	refused = name_encode(plan->compare, writer->options.label,
+	    strlen(writer->options.label), &label);
 	if (refused != NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
 		    "HFS Plus label is outside the name rules"));
