@@ -131,6 +131,7 @@ fsimg_status_t fsimg_fat_table_get(fsimg_reader_t *, uint32_t, uint32_t *,
 void fsimg_fat_chain_init(fat_chain_t *, uint32_t, uint64_t);
 fsimg_status_t fsimg_fat_chain_run(fsimg_reader_t *, fat_chain_t *,
     fsimg_extent_t *, fsimg_error_t *);
+fsimg_status_t fsimg_fat_salvage_index(fsimg_reader_t *, fsimg_error_t *);
 fsimg_status_t fsimg_fat_owner_append(fsimg_reader_t *, const fsimg_extent_t *,
     fsimg_error_t *);
 

@@ -60,6 +60,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/io/io.h lib/io/input.h lib/io/input.c \
 	lib/read/directory.c lib/read/directory.h \
 	lib/read/reader.h lib/read/reader.c \
+	lib/read/salvage.c \
 	lib/read/selection.c lib/read/selection.h \
 	lib/layers/layer.h lib/layers/stack.c lib/layers/types.c \
 	lib/layers/image.c lib/layers/gpt.c lib/layers/mbr.c \

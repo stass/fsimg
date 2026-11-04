@@ -107,8 +107,6 @@ static fsimg_status_t ambiguity_error(fsimg_directory_build_t *, uint64_t,
     uint64_t, fsimg_error_t *);
 static fsimg_status_t validate_namespace(fsimg_directory_build_t *,
     fsimg_error_t *);
-static bool decode_rejected(const fsimg_reader_t *, const fsimg_error_t *,
-    fsimg_status_t);
 static fsimg_status_t build_listing(fsimg_directory_build_t *, fsimg_error_t *);
 static void report_skipped_listing(fsimg_reader_t *, uint32_t, size_t);
 static fsimg_status_t prepare_level(fsimg_reader_t *, uint32_t, size_t, bool,
@@ -443,20 +441,18 @@ validate_namespace(fsimg_directory_build_t *build, fsimg_error_t *error)
 	return (status);
 }
 
-/* Whether salvage steps over this failure of a driver callback: the driver's
- * decoder rejecting the image. The operation an error names tells that apart
- * from everything else the callback can reach: a decoder and the image read
- * funnel report FSIMG_OP_READER, while scratch storage, including the extent
- * index's own checks, host I/O and resource admission report their own
- * operations, even for FSIMG_ECORRUPT. Under FSIMG_OP_READER, the other statuses
- * are changed input and broken driver contracts. Anything not named here is
- * terminal. A driver's own check of a prepared record reports like its decoder
- * and is stepped over too, since the two cannot be told apart. Without salvage
- * failure may be NULL, and is not read.
+/* The operation an error names tells a decoder's rejection apart from everything
+ * else the callback can reach: a decoder, the image read funnel and a lookup past
+ * a stopped extent index report FSIMG_OP_READER, while scratch storage, including
+ * the extent index's own checks, host I/O and resource admission report their
+ * own operations, even for FSIMG_ECORRUPT. Under FSIMG_OP_READER, the other
+ * statuses are changed input and broken driver contracts. Anything not named here
+ * is terminal. A driver's own check of a prepared record reports like its decoder
+ * and is stepped over too, since the two cannot be told apart.
  */
-static bool
-decode_rejected(const fsimg_reader_t *reader, const fsimg_error_t *failure,
-    fsimg_status_t status)
+bool
+fsimg_reader_decode_rejected(const fsimg_reader_t *reader,
+    const fsimg_error_t *failure, fsimg_status_t status)
 {
 	return (reader->salvage.enabled && failure->status == status &&
 	    failure->operation == FSIMG_OP_READER &&
@@ -478,7 +474,7 @@ build_listing(fsimg_directory_build_t *build, fsimg_error_t *failure)
 		return (status);
 	status = reader->ops->prepare(reader, build, failure);
 	if (status != FSIMG_OK) {
-		build->rejected = decode_rejected(reader, failure, status);
+		build->rejected = fsimg_reader_decode_rejected(reader, failure, status);
 		return (status);
 	}
 	return (validate_namespace(build, failure));
@@ -648,11 +644,12 @@ make_current(fsimg_reader_t *reader, walk_level_t *level, size_t length,
 	bzero(&reader->entry, sizeof(reader->entry));
 	reader->initialized = 0;
 	reader->link_length = 0;
+	reader->salvage.bound = UINT64_MAX;
 	fsimg_error_clear(&detail);
 	failure = reader->salvage.enabled ? &detail : error;
 	status = reader->ops->replay(reader, view.name, view.payload,
 	    view.payload_length, failure);
-	if (decode_rejected(reader, failure, status)) {
+	if (fsimg_reader_decode_rejected(reader, failure, status)) {
 		fsimg_reader_salvage_loss(reader, reader->path, walk->omitted,
 		    FSIMG_LOSS_ENTRY);
 		return (FSIMG_OK);

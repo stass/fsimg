@@ -29,14 +29,31 @@ slice. Whole indexed units can extend past the slice; the stopped mark alone
 is not a byte cutoff. ISO 9660's content domain admits only readable whole
 blocks. No mapping outside the content domain supplies recovered bytes.
 
+The operation is common: `fsimg_reader_salvage_plan` resolves the file's extents
+from its first byte and stops at a lookup the driver rejects or at the end of
+the domain or slice. A format supplies its resolve and a replay that keeps the
+allocation before the damage instead of rejecting the entry. A planned file is
+shortened in the current entry, so its charge, output size and reads see only
+the prefix, and a garbage size field neither spends the budget nor ends the walk.
+A clean file over the budget is terminal.
+
+A linked cluster allocation keeps each cluster once. A cluster belongs to the
+prefix when its own link reads and validates, its allocation bit included, and
+the chain ends at its first repeat, found after the walk proves a cycle and
+before any repeat is delivered. A chain broken before the file's size ends the
+file there even past the initialized length; a chain longer than the size is not
+damage to the file. Past the slice the initialized length decides, since defined
+zeros need no storage.
+
 The prefix length and damage decision select the name at exclusive creation.
 There is no rename and no added sandbox authority. Copying uses only the
 planned prefix through ordinary content delivery. Damage encountered during
 copying is terminal under the existing failure contract.
 
 If `foo.partial` is taken, exclusive creation reports the collision and salvage
-skips the file. It never overwrites or tries a numbered fallback. Name validation
-and the ordinary policy for unrepresentable names still apply.
+skips the file. It never overwrites or tries a numbered fallback. A suffixed name
+over the name limit is reported and skipped the same way. Name validation and the
+ordinary policy for unrepresentable names still apply.
 
 Each name is handled independently, including several names for one object.
 An earlier name supplies no proof about a later name's content. There is no
@@ -79,7 +96,8 @@ Classification follows the operation that fails, not a public error code:
 The error's operation identifies a decoder's failure: a driver's prepare or
 replay rejecting the image reports `FSIMG_ECORRUPT` or `FSIMG_EUNSUPPORTED` under
 `FSIMG_OP_READER`, and scratch storage reports `FSIMG_OP_METADATA` even for
-corruption it detects, the extent index's checks included. Everything else is
+corruption it detects, the extent index's checks included. A lookup past a stopped
+index is the image ending, so it reports `FSIMG_OP_READER`. Everything else is
 terminal, so a new failure is terminal until a decoder declares it. A scratch
 record that scratch storage delivers intact and a driver's own decoding then
 rejects cannot be told from image damage and is reported as a loss, like the

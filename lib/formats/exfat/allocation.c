@@ -223,6 +223,63 @@ exfat_index_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
 	return (FSIMG_OK);
 }
 
+/* The cluster after a valid one of the current file, 0 at its end, as salvage
+ * follows it: a cluster the bitmap marks free rejects its link, and a contiguous
+ * stream links each cluster to the following one up to its rounded-up length.
+ * The prefix ends at a cluster's own bit, so each is read alone rather than in
+ * the batches of an ordinary index, at one more charged read per cluster.
+ */
+static fsimg_status_t
+salvage_link(fsimg_reader_t *reader, uint32_t cluster, uint32_t *next,
+    fsimg_error_t *error)
+{
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
+	const exfat_geometry_t *g = &exfat->geometry;
+	const exfat_stream_t *stream = &exfat->current;
+	bool allocated;
+	fsimg_status_t status;
+
+	status = exfat_bitmap_bit(reader, cluster, &allocated, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!allocated)
+		return (exfat_corrupt(error, "owned exFAT cluster is marked free"));
+	if (stream->contiguous) {
+		*next = (uint64_t)(cluster - stream->first + 1) * g->cluster_bytes <
+		    stream->length ? cluster + 1 : 0;
+		return (FSIMG_OK);
+	}
+	status = exfat_table_get(reader, cluster, next, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (*next == UINT32_MAX)
+		*next = 0;
+	else if (!exfat_cluster_valid(g, *next))
+		return (exfat_corrupt(error, "invalid or cyclic exFAT allocation chain"));
+	return (FSIMG_OK);
+}
+
+/* Under salvage replay indexes the current file's stream up to its first damage,
+ * whichever way the stream is allocated.
+ */
+fsimg_status_t
+exfat_salvage_index(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	fsimg_exfat_reader_t *exfat = exfat_state(reader);
+	const exfat_geometry_t *g = &exfat->geometry;
+	const fsimg_salvage_chain_t chain = {
+		.link = salvage_link,
+		.heap_offset = g->heap_offset,
+		.wanted = exfat->current.length / g->cluster_bytes +
+		    (exfat->current.length % g->cluster_bytes != 0),
+		.first = exfat->current.first,
+		.clusters = g->clusters,
+		.cluster_bytes = g->cluster_bytes
+	};
+
+	return (fsimg_reader_salvage_index(reader, &chain, &exfat->file, error));
+}
+
 /* Read complete metadata bytes through an index. Unlike content reads there
  * is no partial result: any failure fails the whole record.
  */

@@ -358,7 +358,8 @@ exfat_replay(fsimg_reader_t *reader, const char *name,
 	    directory, error);
 	if (status != FSIMG_OK || directory)
 		return (status);
-	status = exfat_index_build(reader, &exfat->current,
+	status = reader->salvage.enabled ? exfat_salvage_index(reader, error) :
+	    exfat_index_build(reader, &exfat->current,
 	    EXFAT_LENGTH_COVER_DATA, &exfat->file, error);
 	if (status == FSIMG_OK)
 		reader->initialized = exfat->current.valid_length;

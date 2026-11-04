@@ -5,10 +5,12 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -30,6 +32,10 @@ typedef struct fake_driver {
 	unsigned repeated;
 	unsigned descents;
 	bool content_failure;
+	uint64_t content_offset;
+	fsimg_status_t resolve_failure;
+	bool scratch_failure;
+	bool output_failure;
 	unsigned corrupt_validation;
 	const char *replay_name;
 } fake_driver_t;
@@ -43,18 +49,40 @@ typedef struct fixture {
 	unsigned char *bytes;
 	size_t length;
 	unsigned reports;
-	char loss_path[128];
+	char loss_path[1024];
+	char shortened_path[1024];
 	uint32_t loss_mask;
+	bool patterned;
+	uint64_t fail_start;
+	uint64_t fail_end;
+	fsimg_status_t read_failure;
+	unsigned shortened;
+	unsigned skipped;
+	unsigned collisions;
+	bool limit_output;
 } fixture_t;
 
 static fsimg_status_t
 memory_read(void *argument, uint64_t offset, void *buffer, size_t length,
-    size_t *count, fsimg_error_t *error FSIMG_UNUSED)
+    size_t *count, fsimg_error_t *error)
 {
 	fixture_t *f = argument;
 
+	if (f->read_failure != FSIMG_OK && offset < f->fail_end &&
+	    (offset >= f->fail_start || length > f->fail_start - offset)) {
+		*count = 0;
+		return (fsimg_error_set(error, f->read_failure, 0, FSIMG_OP_IO,
+		    "injected input failure"));
+	}
 	CHECK(offset <= f->length && length <= f->length - offset);
 	bcopy(f->bytes + offset, buffer, length);
+	if (f->limit_output) {
+		struct rlimit limit;
+
+		CHECK(getrlimit(RLIMIT_FSIZE, &limit) == 0);
+		limit.rlim_cur = 0;
+		CHECK(setrlimit(RLIMIT_FSIZE, &limit) == 0);
+	}
 	*count = length;
 	return (FSIMG_OK);
 }
@@ -97,12 +125,18 @@ record_loss(void *argument, const char *path, uint32_t mask)
 {
 	fixture_t *f = argument;
 
-	if ((mask & (FSIMG_LOSS_DIRECTORY | FSIMG_LOSS_ENTRY)) == 0)
+	if ((mask & (FSIMG_LOSS_DIRECTORY | FSIMG_LOSS_ENTRY |
+	    FSIMG_LOSS_SHORTENED | FSIMG_LOSS_SKIPPED | FSIMG_LOSS_COLLISION)) == 0)
 		return;
 	f->reports++;
+	f->shortened += mask == FSIMG_LOSS_SHORTENED;
+	f->skipped += mask == FSIMG_LOSS_SKIPPED;
+	f->collisions += mask == FSIMG_LOSS_COLLISION;
 
 	CHECK(strlen(path) < sizeof(f->loss_path));
 	strcpy(f->loss_path, path);
+	if (mask == FSIMG_LOSS_SHORTENED)
+		strcpy(f->shortened_path, path);
 	f->loss_mask = mask;
 }
 
@@ -113,12 +147,18 @@ source_validate(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
 	return (FSIMG_OK);
 }
 
+/* Provider IDs are indices into the entries[] passed to fixture_build. */
 static fsimg_status_t
-source_read(void *argument FSIMG_UNUSED, uint64_t id,
-    uint64_t offset FSIMG_UNUSED, void *buffer, size_t length, size_t *count,
+source_read(void *argument, uint64_t entry_index,
+    uint64_t offset, void *buffer, size_t length, size_t *count,
     fsimg_error_t *error FSIMG_UNUSED)
 {
-	memset(buffer, (int)('A' + id), length);
+	fixture_t *f = argument;
+	unsigned char *bytes = buffer;
+
+	for (size_t i = 0; i < length; i++)
+		bytes[i] = (unsigned char)('A' + entry_index +
+		    (f->patterned ? (offset + i) / 512 : 0));
 	*count = length;
 	return (FSIMG_OK);
 }
@@ -129,7 +169,8 @@ static const char *const paths[] = {
 };
 
 static void
-fixture_open_prefix(fixture_t *f, const char *format, size_t count)
+fixture_build(fixture_t *f, const char *format, const fsimg_entry_t *entries,
+    size_t count, bool patterned)
 {
 	fsimg_options_t options;
 	fsimg_write_options_t write_options;
@@ -138,6 +179,7 @@ fixture_open_prefix(fixture_t *f, const char *format, size_t count)
 	fsimg_writer_t *writer;
 
 	bzero(f, sizeof(*f));
+	f->patterned = patterned;
 	fsimg_options_init(&options);
 	options.memory_bytes = 32u * 1024u * 1024u;
 	options.loss = record_loss;
@@ -153,25 +195,42 @@ fixture_open_prefix(fixture_t *f, const char *format, size_t count)
 	fsimg_write_options_init(&write_options);
 	if (strcmp(format, "fat12") == 0)
 		write_options.volume_bytes = 1024u * 1024u;
+	if (patterned) {
+		write_options.volume_bytes = 8u * 1024u * 1024u;
+		write_options.allocation_unit_bytes = 512;
+	}
 	CHECK(fsimg_writer_new(f->ctx, format, &write_options, &writer, NULL) ==
 	    FSIMG_OK);
 	fsimg_source_ops_init(&sources);
 	sources.validate = source_validate;
 	sources.read_at = source_read;
-	CHECK(fsimg_writer_set_sources(writer, &sources, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_writer_set_sources(writer, &sources, f, NULL) == FSIMG_OK);
 	for (size_t i = 0; i < count; i++) {
-		bool file = i == 1 || i == 3 || i == 6 || i == 7;
-		fsimg_entry_t entry = { .path = paths[i],
-		    .kind = file ? FSIMG_ENTRY_FILE : FSIMG_ENTRY_DIRECTORY,
-		    .size = file ? 7 : 0 };
 		fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = i };
 
-		CHECK(fsimg_writer_add(writer, &entry, file ? &source : NULL,
+		CHECK(fsimg_writer_add(writer, &entries[i],
+		    entries[i].kind == FSIMG_ENTRY_FILE ? &source : NULL,
 		    NULL) == FSIMG_OK);
 	}
+
 	CHECK(fsimg_writer_emit(writer, f->io, NULL) == FSIMG_OK);
 	fsimg_writer_free(writer);
 	f->reports = 0;
+}
+
+static void
+fixture_open_prefix(fixture_t *f, const char *format, size_t count)
+{
+	fsimg_entry_t entries[sizeof(paths) / sizeof(paths[0])];
+
+	for (size_t i = 0; i < count; i++) {
+		bool file = i == 1 || i == 3 || i == 6 || i == 7;
+
+		entries[i] = (fsimg_entry_t){ .path = paths[i],
+		    .kind = file ? FSIMG_ENTRY_FILE : FSIMG_ENTRY_DIRECTORY,
+		    .size = file ? 7 : 0 };
+	}
+	fixture_build(f, format, entries, count, false);
 }
 
 static void
@@ -409,10 +468,31 @@ fake_resolve(fsimg_reader_t *reader, uint64_t offset FSIMG_UNUSED,
 {
 	fixture_t *f = reader->driver;
 
-	if (f->fake.content_failure && strcmp(reader->entry.path, "/c") == 0)
-		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_IO,
-		    "injected content I/O failure"));
-	*extent = (fsimg_extent_t){ .image_offset = 0, .length = 3 };
+	if (strcmp(reader->entry.path, "/c") == 0) {
+		if (f->fake.scratch_failure) {
+			fsimg_extent_index_t *index;
+			fsimg_status_t status;
+
+			fsimg_test_fail_alloc_after(f->ctx, 1);
+			status = fsimg_extent_index_new(&reader->session,
+			    &reader->content_domain, &index, error);
+			fsimg_test_fail_alloc_after(f->ctx, 0);
+			CHECK(status == FSIMG_ENOMEM && index == NULL);
+			return (status);
+		}
+		if (f->fake.resolve_failure != FSIMG_OK)
+			return (fsimg_error_set(error, f->fake.resolve_failure, 0,
+			    FSIMG_OP_READER, "injected resolve failure"));
+		f->limit_output = f->fake.output_failure;
+		if (f->fake.content_failure) {
+			f->fail_end = 3;
+			if (f->read_failure == FSIMG_OK)
+				f->read_failure = FSIMG_EIO;
+		}
+	}
+	*extent = (fsimg_extent_t){
+	    .image_offset = strcmp(reader->entry.path, "/c") == 0 ?
+	    f->fake.content_offset : 0, .length = 3 };
 	return (FSIMG_OK);
 }
 
@@ -460,18 +540,6 @@ corrupt_next_record(fixture_t *f, bool class_byte)
 	    &invalid, 1, NULL) == FSIMG_OK);
 }
 
-/* The one-slot LFN for z is followed by its short entry. Inflating that
- * entry's length needs a second cluster that the writer never allocated.
- */
-static void
-damage_file(fixture_t *f)
-{
-	static const unsigned char z[] = { 'z', 0, 0, 0, 0xff, 0xff };
-	unsigned char *name = find_bytes(f, z, sizeof(z));
-
-	fsimg_store_le32(name + 31 + 28, 65537);
-}
-
 static void
 expect_failure(fixture_t *f, fsimg_status_t status,
     fsimg_operation_t operation, const char *message, const char *path,
@@ -507,6 +575,9 @@ expect_losses(fixture_t *f, uint64_t total, unsigned reports,
 	CHECK(f->reports == reports);
 	if (reports != 0) {
 		CHECK(strcmp(f->loss_path, path) == 0);
+		if (f->loss_mask != mask)
+			fprintf(stderr, "loss %s: expected mask %#x, got %#x\n",
+			    path, mask, f->loss_mask);
 		CHECK(f->loss_mask == mask);
 	}
 }
@@ -1108,7 +1179,7 @@ test_clean_salvage_succeeds_and_into_reports_per_operation_losses(void)
 }
 
 static void
-test_damaged_file_content_is_terminal_with_salvage_enabled(void)
+test_content_io_failure_is_terminal_with_salvage_enabled(void)
 {
 	fixture_t f;
 	fsimg_error_t error;
@@ -1118,18 +1189,15 @@ test_damaged_file_content_is_terminal_with_salvage_enabled(void)
 
 	parent = open_destination_parent(directory);
 	for (unsigned salvage = 0; salvage < 2; salvage++) {
-		fixture_open(&f, "fat12");
-		damage_file(&f);
-		fixture_reader(&f);
+		fake_open(&f);
+		f.fake.content_failure = true;
 		fsimg_extract_options_init(&options);
 		if (salvage)
 			options.flags |= FSIMG_EXTRACT_SALVAGE;
 		CHECK(fsimg_extract_at(f.reader, parent, "out", &options, &error) ==
-		    FSIMG_ECORRUPT);
-		CHECK(error.status == FSIMG_ECORRUPT);
-		CHECK(error.operation == FSIMG_OP_READER);
-		CHECK(strcmp(error.message, "FAT file chain length differs from its size") == 0);
-		CHECK(strcmp(error.path, "out") == 0);
+		    FSIMG_EIO);
+		CHECK(error.status == FSIMG_EIO && error.operation == FSIMG_OP_IO);
+		CHECK(strcmp(error.message, "injected input failure") == 0);
 		CHECK(f.reader->state == FSIMG_READER_FAILED);
 		expect_losses(&f, 0, 0, NULL, 0);
 		remove_tree(parent, "out");
@@ -1156,7 +1224,7 @@ test_terminal_content_failure_takes_precedence_over_directory_loss(void)
 	options.flags |= FSIMG_EXTRACT_SALVAGE;
 	CHECK(fsimg_extract_at(f.reader, parent, "out", &options, &error) == FSIMG_EIO);
 	CHECK(error.status == FSIMG_EIO && error.operation == FSIMG_OP_IO);
-	CHECK(strcmp(error.message, "injected content I/O failure") == 0);
+	CHECK(strcmp(error.message, "injected input failure") == 0);
 	CHECK(strcmp(error.path, "out") == 0);
 	CHECK(f.reader->state == FSIMG_READER_FAILED);
 	expect_losses(&f, 1, 1, "/bad", FSIMG_LOSS_DIRECTORY);
@@ -1164,6 +1232,1022 @@ test_terminal_content_failure_takes_precedence_over_directory_loss(void)
 	CHECK(close(parent) == 0);
 	CHECK(rmdir(directory) == 0);
 	fixture_close(&f);
+}
+
+/* All file fixtures use 512-byte clusters. Each logical cluster has its own
+ * byte, independent of the table walk and of physical allocation order.
+ */
+typedef struct file_image {
+	bool exfat;
+	uint64_t table;
+	uint64_t table_bytes;
+	uint64_t heap;
+	uint32_t clusters;
+	uint32_t first;
+	unsigned copies;
+	unsigned char *record;
+} file_image_t;
+
+typedef enum file_damage {
+	FILE_CLEAN,
+	FILE_FREE,
+	FILE_BAD,
+	FILE_OUTSIDE,
+	FILE_SHORT,
+	FILE_CYCLE,
+	FILE_BITMAP,
+	FILE_TRUNCATED,
+	FILE_ZERO_TAIL,
+	FILE_TAIL_TRUNCATED,
+	FILE_TAIL_SHORT,
+	FILE_TAIL_BAD,
+	FILE_HUGE,
+	FILE_BUDGET,
+	FILE_COLLISION,
+	FILE_DIRECTORY_COLLISION,
+	FILE_HOST_COLLISION,
+	FILE_LATER_COLLISION,
+	FILE_LONG_NAME
+} file_damage_t;
+
+typedef struct file_case {
+	const char *name;
+	file_damage_t damage;
+	unsigned size_clusters;
+	/* Indices in the logical chain, not on-disk cluster numbers. */
+	unsigned damaged_link_index;
+	unsigned link_target_index;
+	size_t prefix;
+	bool contiguous;
+	bool exfat_only;
+	fsimg_status_t strict_fat;
+	fsimg_status_t strict_exfat;
+	fsimg_status_t salvage_status;
+	uint32_t loss_mask;
+	unsigned loss_count;
+} file_case_t;
+
+static const file_case_t file_cases[] = {
+	{ .name = "clean", .size_clusters = 9, .prefix = 4608,
+	    .strict_fat = FSIMG_OK, .strict_exfat = FSIMG_OK,
+	    .salvage_status = FSIMG_OK,
+	    .loss_mask = 0, .loss_count = 0 },
+	{ .name = "free-third", .damage = FILE_FREE, .size_clusters = 5,
+	    .damaged_link_index = 2, .prefix = 1024,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "bad-third", .damage = FILE_BAD, .size_clusters = 5,
+	    .damaged_link_index = 2, .prefix = 1024,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "outside-third", .damage = FILE_OUTSIDE, .size_clusters = 5,
+	    .damaged_link_index = 2, .prefix = 1024,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "free-first", .damage = FILE_FREE, .size_clusters = 5,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1 },
+	{ .name = "bad-first", .damage = FILE_BAD, .size_clusters = 5,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1 },
+	{ .name = "outside-first", .damage = FILE_OUTSIDE, .size_clusters = 5,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1 },
+	{ .name = "short-chain", .damage = FILE_SHORT, .size_clusters = 5,
+	    .damaged_link_index = 2, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "cycle-size-five", .damage = FILE_CYCLE, .size_clusters = 5,
+	    .damaged_link_index = 3, .link_target_index = 1, .prefix = 2048,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "cycle-size-seven", .damage = FILE_CYCLE, .size_clusters = 7,
+	    .damaged_link_index = 3, .link_target_index = 1, .prefix = 2048,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "cycle-size-nine", .damage = FILE_CYCLE, .size_clusters = 9,
+	    .damaged_link_index = 3, .link_target_index = 1, .prefix = 2048,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "self-cycle", .damage = FILE_CYCLE, .size_clusters = 2,
+	    .prefix = 512,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "cycle-to-first", .damage = FILE_CYCLE, .size_clusters = 6,
+	    .damaged_link_index = 2, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "whole-before-cycle", .damage = FILE_CYCLE, .size_clusters = 3,
+	    .damaged_link_index = 3, .link_target_index = 1, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_OK,
+	    .loss_mask = 0, .loss_count = 0 },
+	{ .name = "whole-before-end", .size_clusters = 3, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_OK,
+	    .salvage_status = FSIMG_OK,
+	    .loss_mask = 0, .loss_count = 0 },
+	{ .name = "bitmap-chained", .damage = FILE_BITMAP, .size_clusters = 5,
+	    .damaged_link_index = 2, .prefix = 1024, .exfat_only = true,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "bitmap-contiguous", .damage = FILE_BITMAP,
+	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1024,
+	    .contiguous = true, .exfat_only = true,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "bitmap-first", .damage = FILE_BITMAP,
+	    .size_clusters = 5, .exfat_only = true,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1 },
+	{ .name = "zero-tail", .damage = FILE_ZERO_TAIL, .size_clusters = 5,
+	    .prefix = 2560, .contiguous = true, .exfat_only = true,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_OK,
+	    .salvage_status = FSIMG_OK,
+	    .loss_mask = 0, .loss_count = 0 },
+	{ .name = "truncated-zero-tail", .damage = FILE_TAIL_TRUNCATED,
+	    .size_clusters = 5, .prefix = 2560, .contiguous = true,
+	    .exfat_only = true,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_OK,
+	    .salvage_status = FSIMG_OK,
+	    .loss_mask = 0, .loss_count = 0 },
+	{ .name = "short-chain-zero-tail", .damage = FILE_TAIL_SHORT,
+	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1536,
+	    .exfat_only = true,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "bad-chain-zero-tail", .damage = FILE_TAIL_BAD,
+	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1024,
+	    .exfat_only = true,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "truncated-run", .damage = FILE_TRUNCATED,
+	    .size_clusters = 9, .prefix = 2 * 512 + 137, .contiguous = true,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 2 },
+	{ .name = "truncated-fragments", .damage = FILE_TRUNCATED,
+	    .size_clusters = 9, .prefix = 2 * 512 + 137,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 2 },
+	{ .name = "huge-short-chain", .damage = FILE_HUGE,
+	    .damaged_link_index = 2, .prefix = 1536,
+	    .strict_fat = FSIMG_ELIMIT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "clean-over-budget", .damage = FILE_BUDGET,
+	    .size_clusters = 9, .prefix = 4608,
+	    .strict_fat = FSIMG_ELIMIT, .strict_exfat = FSIMG_ELIMIT,
+	    .salvage_status = FSIMG_ELIMIT,
+	    .loss_mask = 0, .loss_count = 0 },
+	{ .name = "occupied-partial", .damage = FILE_COLLISION,
+	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_COLLISION, .loss_count = 1 },
+	{ .name = "directory-partial", .damage = FILE_DIRECTORY_COLLISION,
+	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_COLLISION, .loss_count = 1 },
+	{ .name = "host-equivalent-partial", .damage = FILE_HOST_COLLISION,
+	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_COLLISION, .loss_count = 1 },
+	{ .name = "later-clean-partial", .damage = FILE_LATER_COLLISION,
+	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EEXISTS,
+	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	{ .name = "partial-name-too-long", .damage = FILE_LONG_NAME,
+	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1 }
+};
+
+static uint64_t
+file_cluster_offset(const file_image_t *image, uint32_t cluster)
+{
+	return (image->heap + (uint64_t)(cluster - 2) * 512);
+}
+
+static void
+file_table_set(fixture_t *f, const file_image_t *image, uint32_t cluster,
+    uint32_t value)
+{
+	for (unsigned copy = 0; copy < image->copies; copy++) {
+		unsigned char *slot = f->bytes + image->table +
+		    copy * image->table_bytes + cluster * (image->exfat ? 4 : 2);
+
+		if (image->exfat)
+			fsimg_store_le32(slot, value);
+		else
+			fsimg_store_le16(slot, (uint16_t)value);
+	}
+}
+
+static void
+file_set_checksum(unsigned char *set)
+{
+	uint16_t checksum = 0;
+	size_t length = ((size_t)set[1] + 1) * 32;
+
+	for (size_t i = 0; i < length; i++) {
+		if (i != 2 && i != 3)
+			checksum = (uint16_t)((checksum >> 1) |
+			    (checksum << 15)) + set[i];
+	}
+	fsimg_store_le16(set + 2, checksum);
+}
+
+/* Locate the writer's unique nine-cluster file, scanning directory slots.
+ * No other fixture entry has this size; payload clusters contain one byte.
+ */
+static void
+file_image_layout(fixture_t *f, const char *format, file_image_t *image)
+{
+	uint32_t sector, root_sectors;
+	unsigned char *boot = f->bytes;
+
+	bzero(image, sizeof(*image));
+	image->exfat = strcmp(format, "exfat") == 0;
+	if (image->exfat) {
+		sector = 1u << boot[108];
+		CHECK(sector == 512 && boot[109] == 0);
+		image->table = (uint64_t)fsimg_load_le32(boot + 80) * sector;
+		image->table_bytes = (uint64_t)fsimg_load_le32(boot + 84) * sector;
+		image->heap = (uint64_t)fsimg_load_le32(boot + 88) * sector;
+		image->clusters = fsimg_load_le32(boot + 92);
+		image->copies = boot[110];
+	} else {
+		sector = fsimg_load_le16(boot + 11);
+		CHECK(sector == 512 && boot[13] == 1);
+		image->table = (uint64_t)fsimg_load_le16(boot + 14) * sector;
+		image->table_bytes = (uint64_t)fsimg_load_le16(boot + 22) * sector;
+		image->copies = boot[16];
+		root_sectors = (fsimg_load_le16(boot + 17) * 32 + sector - 1) /
+		    sector;
+		image->heap = image->table + image->copies * image->table_bytes +
+		    root_sectors * sector;
+		image->clusters = (uint32_t)((f->length - image->heap) / 512);
+	}
+	for (size_t i = (size_t)image->heap; i + 96 <= f->length; i += 32) {
+		unsigned char *slot = f->bytes + i;
+
+		if (image->exfat) {
+			if (slot[0] != 0x85 || slot[32] != 0xc0 ||
+			    fsimg_load_le64(slot + 56) != 4608)
+				continue;
+			image->first = fsimg_load_le32(slot + 52);
+		} else {
+			if ((slot[11] & 0x18) != 0 || fsimg_load_le32(slot + 28) != 4608)
+				continue;
+			image->first = fsimg_load_le16(slot + 26);
+		}
+		image->record = slot;
+		return;
+	}
+	CHECK(false);
+}
+
+static void
+file_bitmap_set(fixture_t *f, const file_image_t *image, uint32_t cluster,
+    bool allocated)
+{
+	uint32_t root = fsimg_load_le32(f->bytes + 96);
+	unsigned char *directory = f->bytes + file_cluster_offset(image, root);
+	unsigned char *bitmap;
+
+	for (unsigned i = 0; i < 512; i += 32) {
+		if (directory[i] != 0x81)
+			continue;
+		bitmap = f->bytes + file_cluster_offset(image,
+		    fsimg_load_le32(directory + i + 20));
+		if (allocated)
+			bitmap[(cluster - 2) / 8] |=
+			    (unsigned char)(1u << ((cluster - 2) % 8));
+		else
+			bitmap[(cluster - 2) / 8] &=
+			    (unsigned char)~(1u << ((cluster - 2) % 8));
+		return;
+	}
+	CHECK(false);
+}
+
+static bool
+file_has_zero_tail(const file_case_t *row)
+{
+	return (row->damage == FILE_ZERO_TAIL ||
+	    row->damage == FILE_TAIL_TRUNCATED ||
+	    row->damage == FILE_TAIL_SHORT || row->damage == FILE_TAIL_BAD);
+}
+
+static bool
+file_has_collision(const file_case_t *row)
+{
+	return (row->damage == FILE_COLLISION ||
+	    row->damage == FILE_DIRECTORY_COLLISION ||
+	    row->damage == FILE_HOST_COLLISION ||
+	    row->damage == FILE_LATER_COLLISION);
+}
+
+/* Make physical adjacency independent of logical order. The table is also
+ * populated for NoFatChain streams so chained and contiguous cases share data.
+ */
+static void
+file_image_damage(fixture_t *f, file_image_t *image, const file_case_t *row)
+{
+	static const unsigned fragments[] = { 0, 2, 4, 6, 8, 1, 3, 5, 7 };
+	uint32_t clusters[9], value, end = image->exfat ? UINT32_MAX : 0xffff;
+	uint64_t size = (uint64_t)row->size_clusters * 512;
+	unsigned char *record = image->record;
+
+	for (unsigned i = 0; i < 9; i++)
+		clusters[i] = image->first + (row->contiguous ? i : fragments[i]);
+	for (unsigned i = 0; i < 9; i++) {
+		file_table_set(f, image, clusters[i], i == 8 ? end : clusters[i + 1]);
+		/* entries[2] supplies this file: one byte per logical cluster. */
+		memset(f->bytes + file_cluster_offset(image, clusters[i]),
+		    'A' + 2 + i, 512);
+	}
+	if (row->damage == FILE_HUGE)
+		size = (uint64_t)image->clusters * 512;
+	switch (row->damage) {
+	case FILE_FREE:
+	case FILE_TAIL_BAD:
+		file_table_set(f, image, clusters[row->damaged_link_index], 0);
+		break;
+	case FILE_BAD:
+		value = image->exfat ? UINT32_C(0xfffffff7) : 0xfff7;
+		file_table_set(f, image, clusters[row->damaged_link_index], value);
+		break;
+	case FILE_OUTSIDE:
+		file_table_set(f, image, clusters[row->damaged_link_index], image->clusters + 2);
+		break;
+	case FILE_SHORT:
+	case FILE_TAIL_SHORT:
+	case FILE_HUGE:
+	case FILE_COLLISION:
+	case FILE_DIRECTORY_COLLISION:
+	case FILE_HOST_COLLISION:
+	case FILE_LATER_COLLISION:
+	case FILE_LONG_NAME:
+		file_table_set(f, image, clusters[row->damaged_link_index], end);
+		break;
+	case FILE_CYCLE:
+		file_table_set(f, image, clusters[row->damaged_link_index], clusters[row->link_target_index]);
+		break;
+	case FILE_BITMAP:
+		file_bitmap_set(f, image, clusters[row->damaged_link_index], false);
+		break;
+	case FILE_TRUNCATED:
+	case FILE_TAIL_TRUNCATED:
+		f->length = (size_t)file_cluster_offset(image, clusters[2]) + 137;
+		break;
+	default:
+		break;
+	}
+	if (image->exfat) {
+		record[33] = row->contiguous ? 3 : 1;
+		fsimg_store_le64(record + 40, file_has_zero_tail(row) ? 700 : size);
+		fsimg_store_le64(record + 56, size);
+		file_set_checksum(record);
+	} else
+		fsimg_store_le32(record + 28, (uint32_t)size);
+	if (row->damage == FILE_TRUNCATED || row->damage == FILE_TAIL_TRUNCATED)
+		CHECK(fsimg_io_resize(f->io, f->length, NULL) == FSIMG_OK);
+}
+
+static void
+expect_absent(int root, const char *name)
+{
+	struct stat st;
+
+	CHECK(fstatat(root, name, &st, AT_SYMLINK_NOFOLLOW) == -1);
+	CHECK(errno == ENOENT);
+}
+
+static void
+expect_pattern_file(int root, const char *name, size_t length, unsigned entry_index,
+    size_t initialized)
+{
+	struct stat st;
+	unsigned char bytes[512];
+	size_t offset = 0, piece;
+	int fd;
+
+	fd = openat(root, name, O_RDONLY | O_NOFOLLOW);
+	if (fd == -1)
+		fprintf(stderr, "expected file %s (%zu bytes): %s\n",
+		    name, length, strerror(errno));
+	CHECK(fd != -1);
+	CHECK(fstat(fd, &st) == 0 && S_ISREG(st.st_mode));
+	CHECK(st.st_size == (off_t)length);
+	while (offset < length) {
+		piece = length - offset < sizeof(bytes) ? length - offset : sizeof(bytes);
+		CHECK(read(fd, bytes, piece) == (ssize_t)piece);
+		for (size_t i = 0; i < piece; i++) {
+			unsigned char expected = offset + i >= initialized ? 0 :
+			    (unsigned char)('A' + entry_index + (offset + i) / 512);
+
+			CHECK(bytes[i] == expected);
+		}
+		offset += piece;
+	}
+	CHECK(read(fd, bytes, 1) == 0);
+	CHECK(close(fd) == 0);
+}
+
+/* Both records have one name slot. Swap entire sets, including their checksum
+ * or short-name checksum, to put the occupied name before the damaged file.
+ */
+static void
+file_collision_order(fixture_t *f, const file_image_t *image,
+    const file_case_t *row)
+{
+	enum {
+		DIRECTORY_SLOT_BYTES = 32,
+		EXFAT_SET_BYTES = 3 * DIRECTORY_SLOT_BYTES,
+		FAT_SET_BYTES = 2 * DIRECTORY_SLOT_BYTES,
+		EXFAT_NAME_OFFSET = 2 * DIRECTORY_SLOT_BYTES + 2,
+		FAT_LONG_NAME_OFFSET = 1
+	};
+	unsigned char saved[EXFAT_SET_BYTES], wide[24] = { 0 };
+	unsigned char *other, *file;
+	const char *name = row->damage == FILE_HOST_COLLISION ?
+	    "FOO.PARTIAL" : "foo.partial";
+	size_t length = image->exfat ? EXFAT_SET_BYTES : FAT_SET_BYTES;
+
+	for (size_t i = 0; i < strlen(name); i++)
+		wide[i * 2] = (unsigned char)name[i];
+	other = find_bytes(f, wide, image->exfat ? strlen(name) * 2 : 10);
+	other -= image->exfat ? EXFAT_NAME_OFFSET : FAT_LONG_NAME_OFFSET;
+	file = image->record - (image->exfat ? 0 : DIRECTORY_SLOT_BYTES);
+	if ((other < file) == (row->damage != FILE_LATER_COLLISION))
+		return;
+	bcopy(file, saved, length);
+	bcopy(other, file, length);
+	bcopy(saved, other, length);
+}
+
+static bool
+host_ignores_case(int parent)
+{
+	struct stat st;
+	bool equivalent;
+	int fd;
+
+	fd = openat(parent, "case-probe", O_WRONLY | O_CREAT | O_EXCL, 0600);
+	CHECK(fd != -1);
+	equivalent = fstatat(parent, "CASE-PROBE", &st, AT_SYMLINK_NOFOLLOW) == 0;
+	CHECK(equivalent || errno == ENOENT);
+	CHECK(close(fd) == 0);
+	CHECK(unlinkat(parent, "case-probe", 0) == 0);
+	return (equivalent);
+}
+
+static void
+build_file_case(fixture_t *f, file_image_t *image, const char *format,
+    const file_case_t *row, const char *path, const char *occupied)
+{
+	/* /b is allocated before foo, below its truncated zero tail.
+	 * /z lies beyond a truncated initialized run and is also skipped.
+	 */
+	fsimg_entry_t entries[] = {
+		{ .path = "/a", .kind = FSIMG_ENTRY_FILE, .size = 512 },
+		{ .path = "/dir", .kind = FSIMG_ENTRY_DIRECTORY },
+		{ .path = path, .kind = FSIMG_ENTRY_FILE, .size = 4608 },
+		{ .path = "/empty", .kind = FSIMG_ENTRY_FILE },
+		{ .path = row->damage == FILE_TAIL_TRUNCATED ? "/b" :
+		    "/z", .kind = FSIMG_ENTRY_FILE, .size = 512 },
+		{ .path = occupied, .kind = row->damage ==
+		    FILE_DIRECTORY_COLLISION ? FSIMG_ENTRY_DIRECTORY :
+		    FSIMG_ENTRY_FILE, .size = row->damage ==
+		    FILE_DIRECTORY_COLLISION ? 0 : 512 }
+	};
+
+	fixture_build(f, format, entries, file_has_collision(row) ? 6 : 5, true);
+	file_image_layout(f, format, image);
+	file_image_damage(f, image, row);
+	if (file_has_collision(row))
+		file_collision_order(f, image, row);
+	fixture_reader(f);
+}
+
+static void
+check_completed_file_case(fixture_t *f, const file_case_t *row, int output,
+    const char *path, const char *partial, const char *occupied,
+    fsimg_status_t expected, const fsimg_error_t *error)
+{
+	bool truncated = row->damage == FILE_TRUNCATED;
+	bool damaged = row->prefix < (size_t)row->size_clusters * 512 ||
+	    row->damage == FILE_HUGE;
+	bool collision = file_has_collision(row);
+	bool skipped = row->prefix == 0 || collision || row->damage == FILE_LONG_NAME;
+
+	expect_pattern_file(output, "a", 512, 0, 512);
+	expect_pattern_file(output, "empty", 0, 3, 0);
+	if (truncated)
+		expect_absent(output, "z");
+	else
+		expect_pattern_file(output, row->damage == FILE_TAIL_TRUNCATED ?
+		    "b" : "z", 512, 4, 512);
+	if (!damaged) {
+		expect_pattern_file(output, path + 1, row->prefix, 2,
+		    file_has_zero_tail(row) ? 700 : row->prefix);
+		expect_absent(output, partial);
+	} else {
+		expect_absent(output, path + 1);
+		if (!skipped)
+			expect_pattern_file(output, partial, row->prefix, 2,
+			    file_has_zero_tail(row) ? 700 : row->prefix);
+		else if (!collision && row->damage != FILE_LONG_NAME)
+			expect_absent(output, partial);
+	}
+	if (collision) {
+		if (row->damage == FILE_DIRECTORY_COLLISION)
+			CHECK(directory_children(output, occupied + 1) == 0);
+		else
+			expect_pattern_file(output, occupied + 1, 512, 5, 512);
+	}
+	CHECK(directory_children(output, "dir") ==
+	    (collision || !skipped ? 1u : 0u));
+	expect_losses(f, row->loss_count, row->loss_count,
+	    truncated ? "/z" : path, row->loss_mask);
+	CHECK(f->shortened == (unsigned)(damaged && !skipped));
+	if (f->shortened != 0)
+		CHECK(strcmp(f->shortened_path, path) == 0);
+	CHECK(f->skipped == (unsigned)truncated +
+	    (unsigned)(damaged && skipped && !collision));
+	CHECK(f->collisions == (unsigned)collision);
+	CHECK(f->reader->state == FSIMG_READER_DONE);
+	if (expected == FSIMG_EPARTIAL)
+		CHECK(error->output_state == FSIMG_OUTPUT_INCOMPLETE);
+	if (row->damage == FILE_HUGE)
+		CHECK(f->reader->session.output_bytes == row->prefix + 1024);
+}
+
+static void
+check_failed_file_case(fixture_t *f, const file_image_t *image,
+    const file_case_t *row, int output, const char *path, const char *partial,
+    const char *occupied, bool salvage, fsimg_status_t expected,
+    const fsimg_error_t *error)
+{
+	bool collision = file_has_collision(row);
+
+	CHECK(error->status == expected);
+	if (!salvage) {
+		struct stat st;
+		int found;
+
+		/* Strict copying may retain a pre-sized incomplete file. */
+		found = fstatat(output, path + 1, &st, AT_SYMLINK_NOFOLLOW);
+		CHECK(found == 0 || errno == ENOENT);
+		if (found == 0) {
+			CHECK(S_ISREG(st.st_mode));
+			CHECK(st.st_size == (off_t)(row->damage == FILE_HUGE ?
+			    (uint64_t)image->clusters * 512 :
+			    (uint64_t)row->size_clusters * 512));
+		}
+	}
+	CHECK(f->reader->state == FSIMG_READER_FAILED);
+	if (!salvage || row->damage == FILE_BUDGET) {
+		if (collision && row->damage != FILE_LATER_COLLISION) {
+			if (row->damage == FILE_DIRECTORY_COLLISION)
+				CHECK(directory_children(output, occupied + 1) == 0);
+			else
+				expect_pattern_file(output, occupied + 1, 512, 5, 512);
+		} else if (row->damage != FILE_LONG_NAME)
+			expect_absent(output, partial);
+		expect_losses(f, 0, 0, NULL, 0);
+	} else {
+		expect_pattern_file(output, partial, row->prefix, 2, row->prefix);
+		expect_losses(f, 1, 1, path, FSIMG_LOSS_SHORTENED);
+	}
+}
+
+static void
+check_file_mode(const char *format, const file_case_t *row, int parent,
+    const char *path, const char *occupied, bool salvage,
+    fsimg_status_t expected)
+{
+	fixture_t f;
+	file_image_t image;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	char partial[272];
+	int output;
+
+	CHECK(snprintf(partial, sizeof(partial), "%s.partial", path + 1) <
+	    (int)sizeof(partial));
+	build_file_case(&f, &image, format, row, path, occupied);
+	fsimg_extract_options_init(&options);
+	if (salvage)
+		options.flags |= FSIMG_EXTRACT_SALVAGE;
+	if (row->damage == FILE_HUGE)
+		options.max_output_bytes = row->prefix + 1024;
+	if (row->damage == FILE_BUDGET)
+		options.max_output_bytes = 1000;
+	status = fsimg_extract_at(f.reader, parent, "out", &options, &error);
+	if (status != expected)
+		fprintf(stderr, "%s/%s %s: expected %s, got %s: %s\n",
+		    format, row->name, salvage ? "salvage" : "strict",
+		    fsimg_status_string(expected), fsimg_status_string(status),
+		    error.message);
+	CHECK(status == expected);
+	output = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(output != -1);
+	if (expected == FSIMG_OK || expected == FSIMG_EPARTIAL)
+		check_completed_file_case(&f, row, output, path, partial, occupied,
+		    expected, &error);
+	else
+		check_failed_file_case(&f, &image, row, output, path, partial,
+		    occupied, salvage, expected, &error);
+	CHECK(close(output) == 0);
+	remove_tree(parent, "out");
+	fixture_close(&f);
+}
+
+static void
+check_file_strict(const char *format, const file_case_t *row, int parent,
+    const char *path, const char *occupied)
+{
+	fsimg_status_t expected = strcmp(format, "exfat") == 0 ?
+	    row->strict_exfat : row->strict_fat;
+
+	check_file_mode(format, row, parent, path, occupied, false, expected);
+}
+
+static void
+check_file_salvage(const char *format, const file_case_t *row, int parent,
+    const char *path, const char *occupied)
+{
+	check_file_mode(format, row, parent, path, occupied, true,
+	    row->salvage_status);
+}
+
+static void
+check_file_extraction(const char *format, const file_case_t *row)
+{
+	char directory[] = "salvage-file-XXXXXX";
+	char long_path[256];
+	const char *path = "/dir/foo";
+	const char *occupied = row->damage == FILE_HOST_COLLISION ?
+	    "/dir/FOO.PARTIAL" : "/dir/foo.partial";
+	int parent;
+
+	if (row->exfat_only && strcmp(format, "exfat") != 0)
+		return;
+	fprintf(stderr, "file salvage: %s/%s\n", format, row->name);
+	parent = open_destination_parent(directory);
+	if (row->damage == FILE_HOST_COLLISION && !host_ignores_case(parent)) {
+		fprintf(stderr, "SKIP host-equivalent collision: case-sensitive host\n");
+		CHECK(close(parent) == 0);
+		CHECK(rmdir(directory) == 0);
+		return;
+	}
+	if (row->damage == FILE_LONG_NAME) {
+		bcopy("/dir/", long_path, 5);
+		memset(long_path + 5, 'n', 250);
+		long_path[255] = '\0';
+		path = long_path;
+	}
+	check_file_strict(format, row, parent, path, occupied);
+	check_file_salvage(format, row, parent, path, occupied);
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+}
+
+static void
+test_file_salvage_prefix_bytes_partial_names_collisions_and_output_limits(void)
+{
+	static const char *const formats[] = { "fat16", "exfat" };
+
+	for (size_t i = 0; i < sizeof(file_cases) / sizeof(file_cases[0]); i++) {
+		for (size_t j = 0; j < sizeof(formats) / sizeof(formats[0]); j++)
+			check_file_extraction(formats[j], &file_cases[i]);
+	}
+}
+
+static void
+test_resolve_corruption_skips_file_before_creation(void)
+{
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	char directory[] = "salvage-resolve-XXXXXX";
+	int parent, output;
+
+	parent = open_destination_parent(directory);
+	fake_open(&f);
+	f.fake.resolve_failure = FSIMG_ECORRUPT;
+	fsimg_extract_options_init(&options);
+	options.flags |= FSIMG_EXTRACT_SALVAGE;
+	status = fsimg_extract_at(f.reader, parent, "out", &options, &error);
+	if (status != FSIMG_EPARTIAL)
+		fprintf(stderr, "resolve corruption: expected incomplete extraction, "
+		    "got %s: %s\n", fsimg_status_string(status), error.message);
+	CHECK(status == FSIMG_EPARTIAL);
+	expect_losses(&f, 1, 1, "/c", FSIMG_LOSS_SKIPPED);
+	output = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(output != -1);
+	expect_absent(output, "c");
+	expect_absent(output, "c.partial");
+	CHECK(directory_children(output, ".") == 2);
+	CHECK(close(output) == 0);
+	remove_tree(parent, "out");
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+	fixture_close(&f);
+}
+
+static void
+test_file_pass_resource_and_state_failures_are_terminal(void)
+{
+	static const fsimg_status_t failures[] = {
+		FSIMG_ENOMEM, FSIMG_ESTATE
+	};
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	char directory[] = "salvage-pass-failure-XXXXXX";
+	int parent;
+
+	parent = open_destination_parent(directory);
+	for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); i++) {
+		fake_open(&f);
+		f.fake.scratch_failure = failures[i] == FSIMG_ENOMEM;
+		if (!f.fake.scratch_failure)
+			f.fake.resolve_failure = failures[i];
+		fsimg_extract_options_init(&options);
+		options.flags |= FSIMG_EXTRACT_SALVAGE;
+		CHECK(fsimg_extract_at(f.reader, parent, "out", &options, &error) ==
+		    failures[i]);
+		CHECK(error.status == failures[i]);
+		CHECK(error.operation == (f.fake.scratch_failure ? FSIMG_OP_ALLOCATE :
+		    FSIMG_OP_READER));
+		CHECK(f.reader->state == FSIMG_READER_FAILED);
+		expect_losses(&f, 0, 0, NULL, 0);
+		remove_tree(parent, "out");
+		fixture_close(&f);
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+}
+
+static void
+test_output_write_failure_after_content_read_is_terminal(void)
+{
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	struct rlimit limit;
+	void (*handler)(int);
+	char directory[] = "salvage-output-failure-XXXXXX";
+	int parent;
+
+	parent = open_destination_parent(directory);
+	fake_open(&f);
+	f.fake.output_failure = true;
+	CHECK(getrlimit(RLIMIT_FSIZE, &limit) == 0);
+	handler = signal(SIGXFSZ, SIG_IGN);
+	CHECK(handler != SIG_ERR);
+	fsimg_extract_options_init(&options);
+	options.flags |= FSIMG_EXTRACT_SALVAGE;
+	status = fsimg_extract_at(f.reader, parent, "out", &options, &error);
+	CHECK(setrlimit(RLIMIT_FSIZE, &limit) == 0);
+	CHECK(signal(SIGXFSZ, handler) != SIG_ERR);
+	CHECK(status == FSIMG_EIO && error.status == FSIMG_EIO);
+	CHECK(error.operation == FSIMG_OP_IO);
+	CHECK(error.os_error == EFBIG);
+	CHECK(f.reader->state == FSIMG_READER_FAILED);
+	expect_losses(&f, 0, 0, NULL, 0);
+	remove_tree(parent, "out");
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+	fixture_close(&f);
+}
+
+static void
+test_table_walk_changed_input_and_provider_io_failures_are_terminal(void)
+{
+	static const char *const formats[] = { "fat16", "exfat" };
+	static const fsimg_entry_t entries[] = {
+		{ .path = "/a", .kind = FSIMG_ENTRY_FILE, .size = 512 },
+		{ .path = "/dir", .kind = FSIMG_ENTRY_DIRECTORY },
+		{ .path = "/dir/foo", .kind = FSIMG_ENTRY_FILE, .size = 4608 },
+		{ .path = "/z", .kind = FSIMG_ENTRY_FILE, .size = 512 }
+	};
+	fixture_t f;
+	file_image_t image;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	char directory[] = "salvage-provider-failure-XXXXXX";
+	int parent;
+
+	parent = open_destination_parent(directory);
+	for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
+		/* The changed-input case fails in the table walk, before copying. */
+		for (unsigned failure_case = 0; failure_case < 3; failure_case++) {
+			fsimg_status_t expected = failure_case == 2 ?
+			    FSIMG_ESOURCE_CHANGED : FSIMG_EIO;
+
+			fixture_build(&f, formats[i], entries,
+			    sizeof(entries) / sizeof(entries[0]), true);
+			file_image_layout(&f, formats[i], &image);
+			/* A separate table page leaves directory walks readable and
+			 * requires file planning to call the input provider.
+			 */
+			image.first = 3000;
+			CHECK(image.first + 9 < image.clusters);
+			if (image.exfat) {
+				fsimg_store_le32(image.record + 52, image.first);
+				for (unsigned j = 0; j < 9; j++)
+					file_bitmap_set(&f, &image, image.first + j, true);
+			} else
+				fsimg_store_le16(image.record + 26, (uint16_t)image.first);
+			file_image_damage(&f, &image, &file_cases[0]);
+			fixture_reader(&f);
+			f.read_failure = expected;
+			if (failure_case == 1) {
+				f.fail_start = file_cluster_offset(&image, image.first);
+				f.fail_end = f.fail_start + 9 * 512;
+			} else {
+				f.fail_start = image.table +
+				    (image.first * (image.exfat ? 4 : 2) / 4096) * 4096;
+				f.fail_end = f.fail_start + 4096;
+			}
+			fsimg_extract_options_init(&options);
+			options.flags |= FSIMG_EXTRACT_SALVAGE;
+			CHECK(fsimg_extract_at(f.reader, parent, "out", &options,
+			    &error) == expected);
+			CHECK(error.status == expected && error.operation == FSIMG_OP_IO);
+			CHECK(strcmp(error.message, "injected input failure") == 0);
+			CHECK(f.reader->state == FSIMG_READER_FAILED);
+			expect_losses(&f, 0, 0, NULL, 0);
+			remove_tree(parent, "out");
+			fixture_close(&f);
+		}
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+}
+
+static void
+test_resolved_extents_outside_or_straddling_content_domain(void)
+{
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	char directory[] = "salvage-domain-XXXXXX";
+	unsigned char bytes[3];
+	int parent, output, fd;
+
+	parent = open_destination_parent(directory);
+	for (unsigned outside = 0; outside < 2; outside++) {
+		fake_open(&f);
+		/* a and bad/inside still resolve to the complete "yes" extent.
+		 * Only c starts later: at the end, or one byte before it.
+		 */
+		f.reader->content_domain.length = 3;
+		f.fake.content_offset = outside ? 3 : 2;
+		fsimg_extract_options_init(&options);
+		options.flags |= FSIMG_EXTRACT_SALVAGE;
+		CHECK(fsimg_extract_at(f.reader, parent, "out", &options, &error) ==
+		    FSIMG_EPARTIAL);
+		CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+		expect_losses(&f, 1, 1, "/c", outside ?
+		    FSIMG_LOSS_SKIPPED : FSIMG_LOSS_SHORTENED);
+		CHECK(f.reader->state == FSIMG_READER_DONE);
+		output = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+		CHECK(output != -1);
+		expect_absent(output, "c");
+		if (outside)
+			expect_absent(output, "c.partial");
+		else {
+			fd = openat(output, "c.partial", O_RDONLY | O_NOFOLLOW);
+			CHECK(fd != -1);
+			CHECK(read(fd, bytes, sizeof(bytes)) == 1);
+			CHECK(bytes[0] == 's');
+			CHECK(read(fd, bytes, sizeof(bytes)) == 0);
+			CHECK(close(fd) == 0);
+		}
+		CHECK(close(output) == 0);
+		remove_tree(parent, "out");
+		fixture_close(&f);
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+}
+
+/* Only the first cluster belongs to the file. The remaining links must not
+ * consume the reader session's work budget, even when they end in a cycle.
+ * A one-link control establishes that this budget fits ordinary extraction.
+ */
+static bool
+check_one_cluster_file_work(const char *format, unsigned chain_length,
+    bool cycle)
+{
+	static const fsimg_entry_t entries[] = {
+		{ .path = "/dir", .kind = FSIMG_ENTRY_DIRECTORY },
+		{ .path = "/dir/tiny", .kind = FSIMG_ENTRY_FILE, .size = 4608 }
+	};
+	fixture_t f;
+	file_image_t image;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	char directory[] = "salvage-file-work-XXXXXX";
+	uint32_t last_target;
+	int parent, output;
+
+	parent = open_destination_parent(directory);
+	fixture_build(&f, format, entries, 2, true);
+	file_image_layout(&f, format, &image);
+	image.first = 3000;
+	CHECK(image.first + chain_length < image.clusters);
+	last_target = cycle ? image.first + chain_length / 2 :
+	    image.exfat ? UINT32_MAX : 0xffff;
+	for (unsigned i = 0; i < chain_length; i++) {
+		file_table_set(&f, &image, image.first + i,
+		    i + 1 < chain_length ? image.first + i + 1 : last_target);
+		if (image.exfat)
+			file_bitmap_set(&f, &image, image.first + i, true);
+	}
+	memset(f.bytes + file_cluster_offset(&image, image.first), 'B', 512);
+	if (image.exfat) {
+		image.record[33] = 1; /* Chained allocation, not NoFatChain. */
+		fsimg_store_le32(image.record + 52, image.first);
+		fsimg_store_le64(image.record + 40, 512);
+		fsimg_store_le64(image.record + 56, 512);
+		file_set_checksum(image.record);
+	} else {
+		fsimg_store_le16(image.record + 26, (uint16_t)image.first);
+		fsimg_store_le32(image.record + 28, 512);
+	}
+	fixture_reader(&f);
+	/* Opening exFAT already charges its metadata validation. Bound
+	 * the additional extraction work equally for control and long chains.
+	 */
+	f.ctx->options.max_work = f.reader->session.progress.work + 256;
+	fsimg_extract_options_init(&options);
+	options.flags |= FSIMG_EXTRACT_SALVAGE;
+	status = fsimg_extract_at(f.reader, parent, "out", &options, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "%s one-cluster file, %u-link %s: expected success "
+		    "within 256 additional work units, got %s: %s\n", format, chain_length,
+		    cycle ? "cycle" : "chain", fsimg_status_string(status),
+		    error.message);
+	if (status == FSIMG_OK) {
+		output = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+		CHECK(output != -1);
+		expect_pattern_file(output, "dir/tiny", 512, 1, 512);
+		expect_absent(output, "dir/tiny.partial");
+		CHECK(close(output) == 0);
+		expect_losses(&f, 0, 0, NULL, 0);
+		CHECK(f.reader->state == FSIMG_READER_DONE);
+	}
+	remove_tree(parent, "out");
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+	fixture_close(&f);
+	return (status == FSIMG_OK);
+}
+
+static void
+test_one_cluster_file_work_ignores_long_chain_and_late_cycle(void)
+{
+	static const char *const formats[] = { "fat16", "exfat" };
+	unsigned failures = 0;
+
+	for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
+		CHECK(check_one_cluster_file_work(formats[i], 1, false));
+		failures += !check_one_cluster_file_work(formats[i], 8192, false);
+		failures += !check_one_cluster_file_work(formats[i], 8192, true);
+	}
+	CHECK(failures == 0);
 }
 
 int
@@ -1187,7 +2271,14 @@ main(void)
 	test_all_sibling_listings_rejected_retains_directories_and_returns_partial();
 	test_salvage_rejects_selection_and_manifest_before_creating_destination();
 	test_clean_salvage_succeeds_and_into_reports_per_operation_losses();
-	test_damaged_file_content_is_terminal_with_salvage_enabled();
+	test_content_io_failure_is_terminal_with_salvage_enabled();
+	test_resolve_corruption_skips_file_before_creation();
+	test_resolved_extents_outside_or_straddling_content_domain();
+	test_file_pass_resource_and_state_failures_are_terminal();
+	test_output_write_failure_after_content_read_is_terminal();
+	test_table_walk_changed_input_and_provider_io_failures_are_terminal();
+	test_file_salvage_prefix_bytes_partial_names_collisions_and_output_limits();
 	test_terminal_content_failure_takes_precedence_over_directory_loss();
+	test_one_cluster_file_work_ignores_long_chain_and_late_cycle();
 	return (0);
 }

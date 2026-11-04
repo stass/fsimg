@@ -33,6 +33,8 @@ static fsimg_status_t table_byte(fsimg_reader_t *, unsigned, uint64_t,
     unsigned char *, fsimg_error_t *);
 static fsimg_status_t table_value(fsimg_reader_t *, unsigned, uint32_t,
     uint32_t *, fsimg_error_t *);
+static fsimg_status_t chain_link(fsimg_reader_t *, uint32_t, uint32_t *,
+    fsimg_error_t *);
 static fsimg_status_t chain_take(fsimg_reader_t *, fat_chain_t *, uint32_t *,
     fsimg_error_t *);
 static fsimg_status_t build_index(fsimg_reader_t *, fsimg_error_t *);
@@ -277,6 +279,24 @@ fsimg_fat_chain_init(fat_chain_t *chain, uint32_t first, uint64_t expected)
 	chain->expected = expected;
 }
 
+/* The cluster after a valid one, 0 at the chain's end. */
+static fsimg_status_t
+chain_link(fsimg_reader_t *reader, uint32_t cluster, uint32_t *next,
+    fsimg_error_t *error)
+{
+	const fat_geometry_t *g = &fsimg_fat_state(reader)->geometry;
+	fsimg_status_t status;
+
+	status = fsimg_fat_table_get(reader, cluster, next, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (*next >= g->eoc_value)
+		*next = 0;
+	else if (!fsimg_fat_cluster_valid(g, *next))
+		return (fsimg_fat_corrupt(error, "FAT chain references free, bad or reserved storage"));
+	return (FSIMG_OK);
+}
+
 static fsimg_status_t
 chain_take(fsimg_reader_t *reader, fat_chain_t *chain, uint32_t *cluster,
     fsimg_error_t *error)
@@ -292,13 +312,9 @@ chain_take(fsimg_reader_t *reader, fat_chain_t *chain, uint32_t *cluster,
 	if (chain->expected == 0 &&
 	    chain->steps >= FAT_DIRECTORY_LIMIT / g->cluster_bytes)
 		return (fsimg_fat_corrupt(error, "FAT directory exceeds its byte limit"));
-	status = fsimg_fat_table_get(reader, chain->cluster, &next, error);
+	status = chain_link(reader, chain->cluster, &next, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (next >= g->eoc_value)
-		next = 0;
-	else if (!fsimg_fat_cluster_valid(g, next))
-		return (fsimg_fat_corrupt(error, "FAT chain references free, bad or reserved storage"));
 	*cluster = chain->cluster;
 	chain->steps++;
 	if (chain->expected != 0 &&
@@ -432,6 +448,26 @@ build_index(fsimg_reader_t *reader, fsimg_error_t *error)
 fail:
 	fsimg_extent_index_free(index);
 	return (status);
+}
+
+/* Under salvage replay builds the current file's whole index, up to its first
+ * damage, so resolve only ever looks it up.
+ */
+fsimg_status_t
+fsimg_fat_salvage_index(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	fsimg_fat_reader_t *fat = fsimg_fat_state(reader);
+	const fat_geometry_t *g = &fat->geometry;
+	const fsimg_salvage_chain_t chain = {
+		.link = chain_link,
+		.heap_offset = g->data_offset,
+		.wanted = (reader->entry.size + g->cluster_bytes - 1) / g->cluster_bytes,
+		.first = fat->current_cluster,
+		.clusters = g->clusters,
+		.cluster_bytes = g->cluster_bytes
+	};
+
+	return (fsimg_reader_salvage_index(reader, &chain, &fat->index, error));
 }
 
 /* Resolve offset within the current file. Common delivery owns the read,

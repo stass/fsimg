@@ -300,11 +300,17 @@ fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
 #define FSIMG_META_DEVICE 0x80u
 
 /* What a salvage extraction lost, in the loss callback's mask: the child
- * listing of the directory at path, the root's being "/", or the entry at
- * path, which is not delivered.
+ * listing of the directory at path, the root's being "/"; the entry at path,
+ * which is not delivered; the file at path, created shortened as its name with
+ * ".partial" appended; the damaged file at path, skipped with no output because
+ * no byte of it is recoverable or its suffixed name exceeds the name limit; or
+ * the damaged file at path, skipped because its ".partial" name is taken.
  */
 #define FSIMG_LOSS_DIRECTORY 0x10000u
 #define FSIMG_LOSS_ENTRY 0x20000u
+#define FSIMG_LOSS_SHORTENED 0x40000u
+#define FSIMG_LOSS_SKIPPED 0x80000u
+#define FSIMG_LOSS_COLLISION 0x100000u
 #define FSIMG_LOSS_EXAMPLES 32u
 #define FSIMG_ATTR_READONLY 0x01u
 #define FSIMG_ATTR_HIDDEN 0x02u
@@ -1335,6 +1341,9 @@ typedef struct fsimg_extract_options {
  * whole volume, so a selection or a manifest_fd is FSIMG_EINVAL. A directory
  * or entry the format's decoder rejects is reported as a loss and the walk
  * continues; any other failure ends the extraction with its ordinary error.
+ * A damaged file is created shortened, as its name with ".partial" appended
+ * and holding the bytes before the first noticed damage, or reported and
+ * skipped when it has none or that name is taken or too long.
  * A completed walk that noticed a loss returns FSIMG_EPARTIAL, the private
  * output retained and marked incomplete; one that noticed none is FSIMG_OK.
  */

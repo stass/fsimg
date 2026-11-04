@@ -271,9 +271,15 @@ fsimg_extent_index_lookup(fsimg_extent_index_t *index, uint64_t offset,
 	bool successor;
 	fsimg_status_t status;
 
+	/* Past a stopped index the image itself ends, which a reader reports like
+	 * any read past the slice; past any other index the caller broke its bound.
+	 */
+	if (fsimg_extent_index_stopped(index) &&
+	    offset >= fsimg_extent_index_length(index))
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_READER,
+		    "image is truncated"));
 	if (offset >= fsimg_extent_index_length(index))
 		return (extent_corrupt(error,
-		    fsimg_extent_index_stopped(index) ? "image is truncated" :
 		    "offset exceeds its indexed allocation"));
 	if (index->cache_valid && extent_contains(&index->cached, offset)) {
 		*out = index->cached;

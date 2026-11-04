@@ -319,7 +319,8 @@ fsimg_fat_replay(fsimg_reader_t *reader, const char *name,
 		return (status);
 	fat->current_parent = fsimg_load_le32(payload + 32);
 	reader->initialized = reader->entry.size;
-	return (FSIMG_OK);
+	return (reader->salvage.enabled ? fsimg_fat_salvage_index(reader, error) :
+	    FSIMG_OK);
 }
 
 _Static_assert(255 * 4 <= FSIMG_DIRECTORY_KEY_BYTES,

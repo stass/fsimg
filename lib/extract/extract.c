@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -434,8 +435,34 @@ hash_zeros(extract_state_t *state, fsimg_sha256_t *digest, uint64_t length,
 	return (FSIMG_OK);
 }
 
+/* Plan the current file under salvage (specs/design-salvage.md#files). A damaged
+ * file takes the name it is shortened under, in partial; one with nothing to
+ * create is reported and FSIMG_DONE.
+ */
+static fsimg_status_t
+salvage_file(extract_state_t *state, const fsimg_entry_t *entry, char *partial,
+    size_t capacity, const char **name, bool *damaged, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+	int length;
+
+	status = fsimg_reader_salvage_plan(state->reader, damaged, error);
+	if (status != FSIMG_OK || !*damaged)
+		return (status);
+	length = snprintf(partial, capacity, "%s.partial", *name);
+	/* Planning shortened the current entry, which entry points at. */
+	if (entry->size == 0 || length < 0 || (size_t)length >= capacity) {
+		fsimg_reader_salvage_loss(state->reader, entry->path, NULL,
+		    FSIMG_LOSS_SKIPPED);
+		return (FSIMG_DONE);
+	}
+	*name = partial;
+	return (FSIMG_OK);
+}
+
 /* Create and fill one file. A non-NULL digest receives the SHA-256 of the
- * bytes written; NULL hashes nothing.
+ * bytes written; NULL hashes nothing. FSIMG_DONE means salvage reported the file
+ * and created nothing for it.
  */
 static fsimg_status_t
 extract_file(extract_state_t *state, const fsimg_entry_t *entry,
@@ -446,10 +473,18 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 	struct timespec times[2];
 	fsimg_ctx_t *ctx;
 	fsimg_status_t status;
+	char partial[NAME_MAX + 1];
 	int fd, saved;
-	bool set_times;
+	bool damaged, set_times;
 
 	ctx = state->reader->ctx;
+	damaged = false;
+	if (state->reader->salvage.enabled) {
+		status = salvage_file(state, entry, partial, sizeof(partial), &name,
+		    &damaged, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 	status = prepare_times(state, entry, times, &set_times, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -464,6 +499,11 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 	if (fd == -1) {
 		saved = errno;
 		fsimg_fd_release(ctx, -1);
+		if (damaged && (saved == EEXIST || saved == ENAMETOOLONG)) {
+			fsimg_reader_salvage_loss(state->reader, entry->path, NULL,
+			    saved == EEXIST ? FSIMG_LOSS_COLLISION : FSIMG_LOSS_SKIPPED);
+			return (FSIMG_DONE);
+		}
 		return (creation_failed(saved,
 		    "exclusive output file creation failed", error));
 	}
@@ -486,7 +526,11 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 	}
 	if (digest != NULL)
 		fsimg_sha256_final(digest, &hash);
-	return (fsimg_io_close_output(output, error));
+	status = fsimg_io_close_output(output, error);
+	if (status == FSIMG_OK && damaged)
+		fsimg_reader_salvage_loss(state->reader, entry->path, NULL,
+		    FSIMG_LOSS_SHORTENED);
+	return (status);
 }
 
 /* The safe profile creates only regular files and directories. Any other
@@ -633,6 +677,9 @@ extract_entries(extract_state_t *state, fsimg_error_t *error)
 		} else {
 			status = extract_entry(state, entry, path_length, error);
 		}
+		/* Salvage reported the file and created nothing for it. */
+		if (status == FSIMG_DONE && state->reader->salvage.enabled)
+			continue;
 		if (status != FSIMG_OK)
 			return (status);
 		/* The entry is complete, its manifest line recorded: report

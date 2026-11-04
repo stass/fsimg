@@ -123,6 +123,7 @@ fsimg_status_t exfat_table_get(fsimg_reader_t *, uint32_t, uint32_t *,
     fsimg_error_t *);
 fsimg_status_t exfat_index_build(fsimg_reader_t *, const exfat_stream_t *,
     exfat_length_policy_t, fsimg_extent_index_t **, fsimg_error_t *);
+fsimg_status_t exfat_salvage_index(fsimg_reader_t *, fsimg_error_t *);
 fsimg_status_t exfat_index_read(fsimg_reader_t *, fsimg_extent_index_t *,
     uint64_t, void *, size_t, fsimg_error_t *);
 fsimg_status_t exfat_index_runs(fsimg_reader_t *, fsimg_extent_index_t *,

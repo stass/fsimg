@@ -98,12 +98,32 @@ typedef struct fsimg_omission {
 
 /* Salvage's side of the walk, set by extraction before its first advance.
  * While enabled, the walker steps over a listing or entry the driver's decoder
- * rejects (specs/design-salvage.md); losses counts what was noticed.
+ * rejects (specs/design-salvage.md); losses counts what was noticed. bound is
+ * the logical offset at which the current file's allocation broke, for a
+ * driver that finds that at replay; the walker sets it to UINT64_MAX before
+ * each replay. It reaches past the initialized length, where no lookup looks.
  */
 typedef struct fsimg_salvage {
 	uint64_t	 losses;
+	uint64_t	 bound;
 	bool		 enabled;
 } fsimg_salvage_t;
+
+/* A linked cluster allocation for fsimg_reader_salvage_index(). link reports the
+ * cluster after cluster, 0 at the chain's end, and rejects a damaged link like
+ * replay rejects an entry. clusters is the volume's count, and wanted how many
+ * the file's size calls for. Cluster 2 starts at heap_offset, and first is
+ * already known valid.
+ */
+typedef struct fsimg_salvage_chain {
+	fsimg_status_t (*link)(fsimg_reader_t *, uint32_t, uint32_t *,
+	    fsimg_error_t *);
+	uint64_t	 heap_offset;
+	uint64_t	 wanted;
+	uint32_t	 first;
+	uint32_t	 clusters;
+	uint32_t	 cluster_bytes;
+} fsimg_salvage_chain_t;
 
 typedef enum fsimg_reader_state {
 	FSIMG_READER_NEW,
@@ -172,6 +192,33 @@ struct fsimg_reader {
  */
 void fsimg_reader_salvage_loss(fsimg_reader_t *, const char *, const bool *,
     uint32_t);
+/* Whether salvage steps over this failure of a driver callback: the driver's
+ * decoder rejecting the image (specs/design-salvage.md#failure-boundary-and-limits).
+ * Without salvage failure may be NULL, and is not read.
+ */
+bool fsimg_reader_decode_rejected(const fsimg_reader_t *, const fsimg_error_t *,
+    fsimg_status_t);
+/* Plan the current regular file under salvage, before anything is created for
+ * it. Resolving its extents from the first byte finds the first one that is
+ * unavailable: a lookup the driver rejects, the end of the content domain or
+ * the end of the slice, whichever comes first, byte for byte. Damage shortens
+ * the current entry to that prefix and sets *damaged, so the charge, the output
+ * size and every read that follow see only the prefix. Any other failure is
+ * terminal and aborts the reader. A format supplies only resolve, whose lookup
+ * past a stopped extent index already rejects, and a replay that does not reject
+ * damage inside the allocation.
+ */
+fsimg_status_t fsimg_reader_salvage_plan(fsimg_reader_t *, bool *,
+    fsimg_error_t *);
+/* Index a linked allocation for fsimg_reader_salvage_plan() at replay. The index
+ * covers the clusters before the first damage, each once: the chain's end, a
+ * link the driver rejects, or the first repeat of a cycle. A chain cut short sets
+ * salvage.bound, and one that reaches past the slice stops the index. A chain
+ * longer than wanted is not damage to this file. Wanted zero leaves *out NULL.
+ * Every failure returned is terminal.
+ */
+fsimg_status_t fsimg_reader_salvage_index(fsimg_reader_t *,
+    const fsimg_salvage_chain_t *, fsimg_extent_index_t **, fsimg_error_t *);
 fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
 /* Declare the current entry's content a symbolic-link target the driver
@@ -188,8 +235,9 @@ fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
 fsimg_status_t fsimg_reader_set_link_target(fsimg_reader_t *,
     const void *, size_t, fsimg_error_t *);
 fsimg_status_t fsimg_reader_stable(fsimg_reader_t *, fsimg_error_t *);
-/* Charge the current file's declared size to the output budget before it is
- * copied. A failure can leave the reader aborted, so the copy must not start.
+/* Charge the current file's size to the output budget before it is copied: its
+ * declared size, or under salvage the prefix planning left it. A failure can
+ * leave the reader aborted, so the copy must not start.
  */
 fsimg_status_t fsimg_reader_charge_file(fsimg_reader_t *, fsimg_error_t *);
 /* The one way a driver's open treats an identity check, the evidence that

@@ -935,7 +935,15 @@ check_extent_index_end(bool stopped)
 	CHECK(found.length == extent.length);
 	CHECK(fsimg_extent_index_lookup(index, 512, &found, &error) ==
 	    FSIMG_ECORRUPT);
-	CHECK((strstr(error.message, "truncated") != NULL) == stopped);
+	CHECK(error.status == FSIMG_ECORRUPT);
+	if (error.operation != (stopped ? FSIMG_OP_READER : FSIMG_OP_METADATA))
+		fprintf(stderr, "%s extent index: expected %s, got operation %d: %s\n",
+		    stopped ? "stopped" : "unstopped",
+		    stopped ? "FSIMG_OP_READER" : "FSIMG_OP_METADATA",
+		    (int)error.operation, error.message);
+	CHECK(error.operation == (stopped ? FSIMG_OP_READER : FSIMG_OP_METADATA));
+	CHECK(strcmp(error.message, stopped ? "image is truncated" :
+	    "offset exceeds its indexed allocation") == 0);
 	fsimg_extent_index_free(index);
 	fixture_close(&fixture);
 }
@@ -1220,8 +1228,8 @@ main(int argc, char **argv)
 	test_scratch_overflow();
 	test_sort_work_limit();
 	test_extent_index_initial_stop();
-	test_extent_index_stopped_end();
 	test_extent_index_unstopped_end();
+	test_extent_index_stopped_end();
 	test_extent_index();
 	test_extent_scratch();
 	return (0);
