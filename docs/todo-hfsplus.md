@@ -6,13 +6,11 @@ Open HFS Plus work, ordered by the [HFS Plus plan](hfsplus-plan.md). The
 research record [`docs/hfsplus-research.md`](hfsplus-research.md) owns the
 evidence and provenance.
 
-* [High] **Native evidence corpus** (`tools/hfsplus/`,
-  `docs/hfsplus-research.md`): the `macos-15` runner's identities and
-  attach check still go into the record from the first CI log (plan stage 0),
-  and plan stage 1 (the experiments E1 to E11) has not run. The reader's closed
-  tables, the compression layouts, the writer's native defaults and, above
-  all, the E3 Unicode observation that the generated fold and decomposition
-  tables must match row for row all wait on it.
+* [Low] **Native evidence remainder** (`docs/hfsplus-research.md`,
+  `.github/workflows/check.yml`): the `macos-15` runner's identities and attach
+  check go into the record from the first CI log. A Mac OS 8.1 to 9.2 writer's
+  non-ASCII names stay unobserved, and no Finder-made alias or Time Machine
+  volume is in the corpus.
 * [High] **Reader, compression and verifier** (`lib/formats/hfsplus/`,
   `lib/read/`, `lib/codec/`): plan stages 2 to 7. They bring four of the
   common changes the format design lists: the `FSIMG_META_EXTRA_DATA` bit,
