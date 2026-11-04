@@ -138,10 +138,18 @@ exercise_stack(fsimg_ctx_t *ctx, fsimg_io_t *io, const char *stack,
 		return;
 	if (fsimg_image_get_info(image, &info, NULL) == FSIMG_OK) {
 		while (fsimg_image_next_partition(image, &partition, NULL) == FSIMG_OK) {
-			if (partition.used && (partition.length == 0 ||
-			    partition.offset > info.disk_bytes ||
-			    partition.length > info.disk_bytes - partition.offset))
-				abort();
+			if (partition.used) {
+				if (partition.length == 0) {
+					/* Clipping preserves a wholly missing slot's offset. */
+					if (partition.missing_bytes == 0 ||
+					    partition.offset < info.disk_bytes)
+						abort();
+				} else if (partition.offset > info.disk_bytes ||
+				    partition.length > info.disk_bytes - partition.offset ||
+				    (partition.missing_bytes != 0 &&
+				    partition.length != info.disk_bytes - partition.offset))
+					abort();
+			}
 		}
 		fsimg_image_verify(image, 0, &report, NULL);
 	}

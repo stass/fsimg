@@ -353,6 +353,12 @@
 
 ## Bugs by subsystem
 
+* [Low] **Spec harness oracle disagreements** (`test/spec/`): fatcat disagrees
+  on `fat.directory.name` and `fat.directory.unique_names`, and xorriso on
+  `iso9660.rr.sl.components`, `framing` and `profile`, in some seeded runs, while
+  `test/spec.sh` still passes. Find out whether each is an fsimg defect or an
+  oracle limit, then fix it or record the limit in the harness.
+
 * [Medium] **Post-read source-change payload evidence** (`test/exfat.c`):
   the helper's truncation case changes its source before the next read.
   Add a backing-identity resolver that confirms bytes and then changes the
