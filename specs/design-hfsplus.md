@@ -407,10 +407,21 @@ index node one more than its children. [TN]
 | --- | --- | ---: | --- | --- |
 | Extents | 512 to 32768 | 10 | big keys (`0x02`) set, variable index keys (`0x04`) clear | 0 |
 | Catalog | 4096 to 32768 | 516 | big keys and variable index keys set | `H+`: 0 or `0xCF`, folded; `HX`: `0xCF` folded or `0xBC` binary |
-| Attributes | 4096 to 32768 | 266 | big keys and variable index keys set | 0, as E1 confirms |
+| Attributes | 4096 to 32768 | 266 | big keys and variable index keys set; big keys alone in an empty tree | 0, or `0xBC` with `btreeType` `0xFF` |
 
-`btreeType` is 0 in all three; the technical note leaves the attributes
-tree's two fields to later definitions, so E1 confirms its values. Native
+`btreeType` is 0 in the extents and catalog trees. The technical note leaves
+the attributes tree's `btreeType` and `keyCompareType` to later definitions,
+so the evidence decides them: E1 shows 0 and 0 for the tools it ran, and
+volumes written by macOS in 2009 show `0xFF` and `0xBC`, the values macOS
+itself writes when it creates the tree. The pair is taken together: one value
+of either field with the other's from the other pair is outside the table.
+`keyCompareType` on an attributes tree never changes how its keys compare:
+the key's name is always compared unit by unit as unsigned 16-bit values,
+after the file ID, whichever pair the header holds. An empty attributes tree
+may have the variable index keys flag clear, as the python 3.3.5 installer
+volume's does (depth 0, no records, a header and no other node in use):
+with no index node, no index key exists for the flag to describe. A tree of
+any other depth needs the flag set. Native
 node sizes: `newfs_hfs`, `hdiutil` and `mkfs.hfsplus` write 4096 for the
 extents tree and 8192 for the attributes tree at every size, and for the
 catalog 4096 up to 128 MiB and at 1 GiB with blocks of 512 to 2048, 8192 at

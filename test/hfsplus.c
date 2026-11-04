@@ -91,6 +91,10 @@ static void mutate_open(gen_image_t *, const mutation_t *);
 static void test_identity_geometry(void);
 static void test_headers(void);
 static void test_tree_parameters(void);
+static void test_attributes_tree_accepts_binary_compare_pair(void);
+static void test_attributes_tree_preserves_code_unit_order(void);
+static void test_attributes_tree_allows_fixed_keys_only_when_empty(void);
+static void test_catalog_and_extents_keep_tree_parameters(void);
 static void test_tree_search(void);
 static void test_tree_faults(void);
 static void test_node_framing(void);
@@ -635,6 +639,224 @@ test_tree_parameters(void)
 			fixture_close(&f);
 			gen_free(&image);
 		}
+	}
+}
+
+static void
+test_attributes_tree_accepts_binary_compare_pair(void)
+{
+	static const struct {
+		const char *name;
+		uint8_t type;
+		uint8_t compare;
+		fsimg_status_t expected;
+	} cases[] = {
+		{ "attributes zero pair", 0, 0, FSIMG_OK },
+		{ "attributes binary compare pair", 0xff, 0xbc, FSIMG_OK },
+		{ "attributes mixed type pair", 0xff, 0, FSIMG_EUNSUPPORTED },
+		{ "attributes mixed compare pair", 0, 0xbc, FSIMG_EUNSUPPORTED },
+		{ "attributes unknown type with binary compare", 1, 0xbc,
+		    FSIMG_EUNSUPPORTED },
+		{ "attributes binary type with unknown compare", 0xff, 1,
+		    FSIMG_EUNSUPPORTED },
+		{ "attributes folded compare with zero type", 0, 0xcf,
+		    FSIMG_EUNSUPPORTED },
+		{ "attributes folded compare with binary type", 0xff, 0xcf,
+		    FSIMG_EUNSUPPORTED }
+	};
+	gen_plan_t plan;
+	gen_image_t image;
+	uint64_t header;
+
+	gen_plan_init(&plan);
+	plan.attributes = true;
+	gen_build(&plan, &image);
+	header = gen_node_offset(&image, GEN_ATTRIBUTES, 0) + NODE_DESCRIPTOR;
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		gen_store(image.bytes + header + 36, cases[i].type, 1);
+		gen_store(image.bytes + header + 37, cases[i].compare, 1);
+		expect_status(cases[i].name, image_open(&image, -1, false),
+		    cases[i].expected, NULL);
+	}
+	gen_free(&image);
+}
+
+/* The stored order separates case pairs and places non-ASCII units after
+ * ASCII. Folding would make A/a equal and move Z past a. Test both a single
+ * leaf and index descent, with the same order on HFS Plus and HFSX.
+ */
+static void
+test_attributes_tree_preserves_code_unit_order(void)
+{
+	static const gen_attribute_t attributes[] = {
+		{ .file_id = 32, .name = 'A' },
+		{ .file_id = 32, .name = 'Z' },
+		{ .file_id = 32, .name = 'a' },
+		{ .file_id = 32, .name = 'z' },
+		{ .file_id = 32, .name = 0x00c4 },
+		{ .file_id = 32, .name = 0x00e4 },
+		{ .file_id = 32, .name = 0x8000 }
+	};
+	const size_t count = sizeof(attributes) / sizeof(attributes[0]);
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_error_t error = { 0 };
+	hfsplus_cursor_t cursor;
+	hfsplus_key_t key;
+	hfsplus_record_t record;
+	fsimg_status_t status;
+	unsigned char name[2];
+	char scenario[96];
+	bool found;
+
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (unsigned indexed = 0; indexed < 2; indexed++) {
+			gen_plan_init(&plan);
+			plan.hfsx = variant != 0;
+			plan.attributes = true;
+			plan.attribute_records = attributes;
+			plan.attribute_count = count;
+			plan.records_per_node = indexed ? 2 : 0;
+			gen_build(&plan, &image);
+			uint64_t header = gen_node_offset(&image,
+			    GEN_ATTRIBUTES, 0) + NODE_DESCRIPTOR;
+			gen_store(image.bytes + header + 36, 0xff, 1);
+			gen_store(image.bytes + header + 37, 0xbc, 1);
+			CHECK(image.trees[GEN_ATTRIBUTES].depth ==
+			    (indexed ? 3 : 1));
+			snprintf(scenario, sizeof(scenario),
+			    "attributes code-unit order hfsx=%u indexed=%u opens",
+			    variant, indexed);
+			fixture_init(&f, &image, 0, 0);
+			status = fixture_open(&f, -1, false, &error);
+			expect_status(scenario, status, FSIMG_OK, &error);
+			if (status != FSIMG_OK) {
+				fixture_close(&f);
+				gen_free(&image);
+				continue;
+			}
+			fsimg_hfsplus_reader_t *state = f.reader.driver;
+			hfsplus_cursor_init(&cursor, &state->attributes,
+			    state->attributes.search_node);
+			for (size_t i = 0; i < count; i++) {
+				snprintf(scenario, sizeof(scenario),
+				    "attribute U+%04X lookup hfsx=%u indexed=%u",
+				    (unsigned)attributes[i].name, variant, indexed);
+				gen_store(name, attributes[i].name, 2);
+				CHECK(hfsplus_attribute_key_init(&key, 32, 0,
+				    name, 1, &error) == FSIMG_OK);
+				status = hfsplus_btree_find_equivalent(&cursor,
+				    &key, &found, &error);
+				expect_status(scenario, status, FSIMG_OK, &error);
+				expect_true(scenario, status == FSIMG_OK && found);
+				if (status != FSIMG_OK || !found)
+					continue;
+				CHECK(hfsplus_cursor_record(&cursor, &record,
+				    &error) == FSIMG_OK);
+				expect_true(scenario, record.key_bytes == 16 &&
+				    gen_load(record.key + 14, 2) == attributes[i].name);
+			}
+
+			/* List from below the first key, through every sibling. */
+			CHECK(hfsplus_attribute_key_init(&key, 32, 0, NULL, 0,
+			    &error) == FSIMG_OK);
+			status = hfsplus_btree_search(&cursor, &key, &error);
+			size_t listed = 0;
+			while (status == FSIMG_OK && cursor.valid) {
+				CHECK(hfsplus_cursor_record(&cursor, &record,
+				    &error) == FSIMG_OK);
+				snprintf(scenario, sizeof(scenario),
+				    "attribute listing entry=%zu hfsx=%u indexed=%u",
+				    listed, variant, indexed);
+				expect_true(scenario, listed < count &&
+				    record.key_bytes == 16 &&
+				    gen_load(record.key + 14, 2) ==
+				    attributes[listed].name);
+				listed++;
+				status = hfsplus_cursor_next(&cursor, &error);
+			}
+			expect_status("attributes code-unit listing completes",
+			    status, FSIMG_OK, &error);
+			expect_true("attributes listing finds every case variant",
+			    listed == count);
+			fixture_close(&f);
+			gen_free(&image);
+		}
+	}
+}
+
+static void
+test_attributes_tree_allows_fixed_keys_only_when_empty(void)
+{
+	static const gen_attribute_t attributes[] = {
+		{ .file_id = 32, .name = 'a' },
+		{ .file_id = 32, .name = 'b' },
+		{ .file_id = 32, .name = 'c' }
+	};
+	gen_plan_t plan;
+	gen_image_t image;
+	char scenario[96];
+
+	for (unsigned pair = 0; pair < 2; pair++) {
+		for (unsigned depth = 0; depth <= 2; depth++) {
+			gen_plan_init(&plan);
+			plan.attributes = true;
+			plan.attribute_records = attributes;
+			plan.attribute_count = depth == 0 ? 0 :
+			    sizeof(attributes) / sizeof(attributes[0]);
+			plan.records_per_node = depth == 2 ? 2 : 0;
+			gen_build(&plan, &image);
+			uint64_t header = gen_node_offset(&image,
+			    GEN_ATTRIBUTES, 0) + NODE_DESCRIPTOR;
+			CHECK(gen_load(image.bytes + header, 2) == depth);
+			if (depth == 0) {
+				CHECK(image.trees[GEN_ATTRIBUTES].record_count == 0);
+				CHECK(image.trees[GEN_ATTRIBUTES].nodes == 1);
+			}
+			gen_store(image.bytes + header + 36, pair ? 0xff : 0, 1);
+			gen_store(image.bytes + header + 37, pair ? 0xbc : 0, 1);
+			gen_store(image.bytes + header + 38, 0x02, 4);
+			snprintf(scenario, sizeof(scenario),
+			    "attributes fixed index keys depth=%u binary pair=%u",
+			    depth, pair);
+			expect_status(scenario, image_open(&image, -1, false),
+			    depth == 0 ? FSIMG_OK : FSIMG_EUNSUPPORTED, NULL);
+			gen_free(&image);
+		}
+	}
+}
+
+static void
+test_catalog_and_extents_keep_tree_parameters(void)
+{
+	static const uint16_t name[] = { 'f' };
+	gen_child_t child = { .name = name, .units = 1, .id = 32,
+	    .data_extents = 9 };
+	gen_plan_t plan;
+	gen_image_t image;
+
+	for (unsigned populated = 0; populated < 2; populated++) {
+		gen_plan_init(&plan);
+		plan.children = &child;
+		plan.child_count = populated;
+		gen_build(&plan, &image);
+		for (unsigned t = GEN_EXTENTS; t <= GEN_CATALOG; t++) {
+			uint64_t header = gen_node_offset(&image,
+			    (gen_tree_id_t)t, 0) + NODE_DESCRIPTOR;
+			const mutation_t cases[] = {
+				{ t == GEN_EXTENTS ? "extents reject binary type" :
+				    "catalog rejects binary type", header + 36,
+				    0xff, 1, FSIMG_EUNSUPPORTED, NULL },
+				{ t == GEN_EXTENTS ? "extents keep fixed index keys" :
+				    "catalog requires variable index keys", header + 38,
+				    0x02, 4, t == GEN_EXTENTS ? FSIMG_OK :
+				    FSIMG_EUNSUPPORTED, NULL }
+			};
+			for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+				mutate_open(&image, &cases[i]);
+		}
+		gen_free(&image);
 	}
 }
 
@@ -4021,6 +4243,10 @@ main(int argc, char **argv)
 	test_identity_geometry();
 	test_headers();
 	test_tree_parameters();
+	test_attributes_tree_accepts_binary_compare_pair();
+	test_attributes_tree_preserves_code_unit_order();
+	test_attributes_tree_allows_fixed_keys_only_when_empty();
+	test_catalog_and_extents_keep_tree_parameters();
 	test_tree_search();
 	test_attribute_search();
 	test_empty_tree_search();

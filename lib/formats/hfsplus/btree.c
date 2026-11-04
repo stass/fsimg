@@ -32,6 +32,8 @@
 #define MAX_KEY_ATTRIBUTES	266u
 #define FLAG_BIG_KEYS		0x02u
 #define FLAG_VARIABLE_KEYS	0x04u
+#define TYPE_RESERVED		0xffu	/* btreeType of macOS's attributes tree */
+#define COMPARE_BINARY		0xbcu	/* its keyCompareType; see below */
 
 /* The three header node records' fixed starts; the fourth entry of its offset
  * table is the map record's end.
@@ -66,13 +68,20 @@ static fsimg_status_t follow_chain(hfsplus_cursor_t *, fsimg_error_t *);
  * unobserved rather than contradictory, so unsupported; a node size that is
  * not a power of two has no meaning at all and is corruption. The catalog's
  * keyCompareType depends on the volume's signature and is volume.c's choice.
+ *
+ * An attributes tree's btreeType and keyCompareType come as one of two pairs,
+ * (0, 0) or (TYPE_RESERVED, COMPARE_BINARY), and the header's pair never
+ * changes how its keys compare: attribute names are always compared as
+ * unsigned code units. A tree with no index node, which is only an empty
+ * one, may omit the variable index keys flag, since no index key exists for
+ * the flag to describe.
  */
 static fsimg_status_t
 check_parameters(const hfsplus_tree_t *tree, const hfsplus_btree_t *header,
     fsimg_error_t *error)
 {
-	uint32_t node_min, max_key, flags;
-	uint8_t compare = 0;
+	uint32_t node_min, max_key, flags, found;
+	uint8_t type = 0, compare = 0;
 
 	switch (tree->kind) {
 	case HFSPLUS_TREE_EXTENTS:
@@ -90,6 +99,10 @@ check_parameters(const hfsplus_tree_t *tree, const hfsplus_btree_t *header,
 		node_min = NODE_SIZE_MIN_NAMED;
 		max_key = MAX_KEY_ATTRIBUTES;
 		flags = FLAG_BIG_KEYS | FLAG_VARIABLE_KEYS;
+		if (header->btree_type == TYPE_RESERVED) {
+			type = TYPE_RESERVED;
+			compare = COMPARE_BINARY;
+		}
 		break;
 	default:
 		return (hfsplus_corrupt(error,
@@ -102,9 +115,12 @@ check_parameters(const hfsplus_tree_t *tree, const hfsplus_btree_t *header,
 	if (header->node_size < node_min || header->node_size > NODE_SIZE_MAX)
 		return (hfsplus_unsupported(error,
 		    "HFS Plus tree's node size is outside the supported range"));
-	if (header->max_key_length != max_key || header->btree_type != 0 ||
-	    header->key_compare_type != compare ||
-	    (header->attributes & ~(uint32_t)HFSPLUS_BTREE_BAD_CLOSE) != flags)
+	found = header->attributes & ~(uint32_t)HFSPLUS_BTREE_BAD_CLOSE;
+	if (tree->kind == HFSPLUS_TREE_ATTRIBUTES && header->tree_depth == 0 &&
+	    found == FLAG_BIG_KEYS)
+		flags = FLAG_BIG_KEYS;
+	if (header->max_key_length != max_key || header->btree_type != type ||
+	    header->key_compare_type != compare || found != flags)
 		return (hfsplus_unsupported(error,
 		    "HFS Plus tree's parameters are outside the supported table"));
 	return (FSIMG_OK);
