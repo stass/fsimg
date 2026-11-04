@@ -127,16 +127,21 @@ fsimg_dos_time_encode(int64_t seconds, uint32_t *packed, unsigned char *odd)
  */
 bool
 fsimg_time_select_u32(bool present, const fsimg_timestamp_t *time,
-    uint32_t maximum, uint32_t fallback, bool reproducible, uint32_t *out)
+    int64_t origin, uint32_t maximum, uint32_t fallback, bool reproducible,
+    uint32_t *out)
 {
 	bool in_range;
 
 	*out = fallback;
 	if (!present)
 		return (true);
-	in_range = time->seconds >= 0 && time->seconds <= (int64_t)maximum;
+	/* The bounds move the origin across, so nothing can overflow: the sum
+	 * below is taken only for seconds these comparisons admitted.
+	 */
+	in_range = time->seconds >= -origin &&
+	    time->seconds <= (int64_t)maximum - origin;
 	if (in_range && !reproducible)
-		*out = (uint32_t)time->seconds;
+		*out = (uint32_t)(time->seconds + origin);
 	return (in_range && time->basis == FSIMG_TIME_UTC &&
-	    time->nanoseconds == 0 && time->seconds == (int64_t)*out);
+	    time->nanoseconds == 0 && time->seconds + origin == (int64_t)*out);
 }

@@ -197,7 +197,7 @@ encode_time(qnx4_plan_t *plan, const fsimg_entry_t *entry, uint32_t field,
 
 	present = (entry->metadata.valid & field) != 0;
 	reproducible = (writer->options.flags & FSIMG_WRITE_REPRODUCIBLE) != 0;
-	exact = fsimg_time_select_u32(present, time, QNX4_TIME_MAX,
+	exact = fsimg_time_select_u32(present, time, 0, QNX4_TIME_MAX,
 	    plan->format_time, reproducible, out);
 	if (exact)
 		return (FSIMG_OK);

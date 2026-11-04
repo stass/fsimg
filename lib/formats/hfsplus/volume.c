@@ -42,8 +42,6 @@
 #define JOURNAL_SIZE_MAX	(UINT64_C(1024) * 1024 * 1024)
 #define JOURNAL_ALIGN		512u
 
-#define COMPARE_TYPE_FOLDED	0xcfu
-#define COMPARE_TYPE_BINARY	0xbcu
 
 /* The bytes no fork can occupy: the boot blocks and primary header, and the
  * alternate header with the reserved sector after it.
@@ -206,9 +204,9 @@ select_comparator(fsimg_reader_t *reader, fsimg_error_t *error)
 	uint8_t type = hfsplus->catalog.header.key_compare_type;
 	bool variant_x = hfsplus->header.signature == HFSPLUS_SIGNATURE_X;
 
-	if (type == COMPARE_TYPE_FOLDED || (type == 0 && !variant_x))
+	if (type == HFSPLUS_COMPARE_TYPE_FOLDED || (type == 0 && !variant_x))
 		hfsplus->catalog.compare = HFSPLUS_COMPARE_FOLDED;
-	else if (type == COMPARE_TYPE_BINARY && variant_x)
+	else if (type == HFSPLUS_COMPARE_TYPE_BINARY && variant_x)
 		hfsplus->catalog.compare = HFSPLUS_COMPARE_BINARY;
 	else
 		return (hfsplus_unsupported(error,

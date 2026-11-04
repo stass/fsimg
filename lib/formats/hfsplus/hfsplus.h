@@ -370,6 +370,14 @@ int hfsplus_ckey_compare(hfsplus_compare_t, const hfsplus_ckey_t *,
  */
 fsimg_status_t hfsplus_name_to_path(const unsigned char *, size_t, char *,
     size_t *, fsimg_error_t *);
+/* hfsplus_path_to_units(component, length, decomposed, units) stores the
+ * host-order units an image path component selects, decomposed, in at most
+ * HFSPLUS_NAME_UNITS_MAX units: UTF-8 to units, the exchanges back, then
+ * decomposition. False when the component is not valid UTF-8 or the result
+ * exceeds a name's 255 units; decomposition never shortens a name, so input
+ * already past the bound fails as well.
+ */
+bool hfsplus_path_to_units(const char *, size_t, uint16_t *, size_t *);
 /* Apply the format design's name table to a stored name: FSIMG_ECORRUPT as
  * above, FSIMG_EUNSUPPORTED for "." and ".." and for a name its image path
  * does not map back to.
@@ -425,6 +433,15 @@ fsimg_status_t hfsplus_query_key(hfsplus_compare_t, const char *, size_t,
  * unclean in the information record.
  */
 #define HFSPLUS_BTREE_BAD_CLOSE		0x01u
+/* The tree parameters a reader checks and the writer stores: the header
+ * record's flags, maxKeyLength and keyCompareType.
+ */
+#define HFSPLUS_BTREE_BIG_KEYS		0x02u
+#define HFSPLUS_BTREE_VARIABLE_KEYS	0x04u
+#define HFSPLUS_MAX_KEY_CATALOG		516u
+#define HFSPLUS_MAX_KEY_ATTRIBUTES	266u
+#define HFSPLUS_COMPARE_TYPE_FOLDED	0xcfu
+#define HFSPLUS_COMPARE_TYPE_BINARY	0xbcu
 
 /* The four format-owned children of the root as stored units, big-endian:
  * the one table directory.c recognizes them by and write-plan.c refuses

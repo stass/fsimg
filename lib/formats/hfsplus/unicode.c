@@ -51,7 +51,6 @@ static int compare_folded(const unsigned char *, size_t,
     const unsigned char *, size_t);
 static int compare_binary(const unsigned char *, size_t,
     const unsigned char *, size_t);
-static bool map_query(const char *, size_t, uint16_t *, size_t *);
 static size_t key_encode(hfsplus_compare_t, const uint16_t *, size_t,
     unsigned char *);
 
@@ -284,14 +283,9 @@ hfsplus_name_to_path(const unsigned char *name, size_t units, char *path,
 	return (FSIMG_OK);
 }
 
-/* The stored units an image path component selects, decomposed: UTF-8 to
- * units, the exchanges back, then decomposition. False when the component is
- * not valid UTF-8 or the result exceeds a name's 255 units; decomposition
- * never shortens a name, so input already past the bound fails as well.
- */
-static bool
-map_query(const char *component, size_t length, uint16_t *decomposed,
-    size_t *decomposed_units)
+bool
+hfsplus_path_to_units(const char *component, size_t length,
+    uint16_t *decomposed, size_t *decomposed_units)
 {
 	uint16_t host[HFSPLUS_NAME_UNITS_MAX];
 	size_t units;
@@ -330,7 +324,7 @@ hfsplus_name_admit(const unsigned char *name, size_t units,
 		    FSIMG_OP_READER, "HFS Plus name is a dot name"));
 
 	units_load(name, units, stored);
-	if (!map_query(path, path_bytes, mapped, &mapped_units) ||
+	if (!hfsplus_path_to_units(path, path_bytes, mapped, &mapped_units) ||
 	    mapped_units != units ||
 	    bcmp(mapped, stored, units * sizeof(stored[0])) != 0)
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
@@ -393,7 +387,8 @@ hfsplus_query_key(hfsplus_compare_t compare, const char *component,
 	uint16_t decomposed[HFSPLUS_NAME_UNITS_MAX];
 	size_t decomposed_units;
 
-	if (!map_query(component, length, decomposed, &decomposed_units))
+	if (!hfsplus_path_to_units(component, length, decomposed,
+	    &decomposed_units))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_READER,
 		    "path component is not valid UTF-8 within 255 units"));
 

@@ -29,12 +29,7 @@
 #define NODE_SIZE_MIN_NAMED	4096u
 #define NODE_SIZE_MAX		32768u
 #define MAX_KEY_EXTENTS		10u
-#define MAX_KEY_CATALOG		516u
-#define MAX_KEY_ATTRIBUTES	266u
-#define FLAG_BIG_KEYS		0x02u
-#define FLAG_VARIABLE_KEYS	0x04u
 #define TYPE_RESERVED		0xffu	/* btreeType of macOS's attributes tree */
-#define COMPARE_BINARY		0xbcu	/* its keyCompareType; see below */
 
 /* The three header node records' fixed starts; the fourth entry of its offset
  * table is the map record's end.
@@ -71,7 +66,7 @@ static fsimg_status_t follow_chain(hfsplus_cursor_t *, fsimg_error_t *);
  * keyCompareType depends on the volume's signature and is volume.c's choice.
  *
  * An attributes tree's btreeType and keyCompareType come as one of two pairs,
- * (0, 0) or (TYPE_RESERVED, COMPARE_BINARY), and the header's pair never
+ * (0, 0) or (TYPE_RESERVED, HFSPLUS_COMPARE_TYPE_BINARY), and the header's pair never
  * changes how its keys compare: attribute names are always compared as
  * unsigned code units. A tree with no index node, which is only an empty
  * one, may omit the variable index keys flag, since no index key exists for
@@ -88,21 +83,21 @@ check_parameters(const hfsplus_tree_t *tree, const hfsplus_btree_t *header,
 	case HFSPLUS_TREE_EXTENTS:
 		node_min = NODE_SIZE_MIN_EXTENTS;
 		max_key = MAX_KEY_EXTENTS;
-		flags = FLAG_BIG_KEYS;
+		flags = HFSPLUS_BTREE_BIG_KEYS;
 		break;
 	case HFSPLUS_TREE_CATALOG:
 		node_min = NODE_SIZE_MIN_NAMED;
-		max_key = MAX_KEY_CATALOG;
-		flags = FLAG_BIG_KEYS | FLAG_VARIABLE_KEYS;
+		max_key = HFSPLUS_MAX_KEY_CATALOG;
+		flags = HFSPLUS_BTREE_BIG_KEYS | HFSPLUS_BTREE_VARIABLE_KEYS;
 		compare = header->key_compare_type;
 		break;
 	case HFSPLUS_TREE_ATTRIBUTES:
 		node_min = NODE_SIZE_MIN_NAMED;
-		max_key = MAX_KEY_ATTRIBUTES;
-		flags = FLAG_BIG_KEYS | FLAG_VARIABLE_KEYS;
+		max_key = HFSPLUS_MAX_KEY_ATTRIBUTES;
+		flags = HFSPLUS_BTREE_BIG_KEYS | HFSPLUS_BTREE_VARIABLE_KEYS;
 		if (header->btree_type == TYPE_RESERVED) {
 			type = TYPE_RESERVED;
-			compare = COMPARE_BINARY;
+			compare = HFSPLUS_COMPARE_TYPE_BINARY;
 		}
 		break;
 	default:
@@ -118,8 +113,8 @@ check_parameters(const hfsplus_tree_t *tree, const hfsplus_btree_t *header,
 		    "HFS Plus tree's node size is outside the supported range"));
 	found = header->attributes & ~(uint32_t)HFSPLUS_BTREE_BAD_CLOSE;
 	if (tree->kind == HFSPLUS_TREE_ATTRIBUTES && header->tree_depth == 0 &&
-	    found == FLAG_BIG_KEYS)
-		flags = FLAG_BIG_KEYS;
+	    found == HFSPLUS_BTREE_BIG_KEYS)
+		flags = HFSPLUS_BTREE_BIG_KEYS;
 	if (header->max_key_length != max_key || header->btree_type != type ||
 	    header->key_compare_type != compare || found != flags)
 		return (hfsplus_unsupported(error,

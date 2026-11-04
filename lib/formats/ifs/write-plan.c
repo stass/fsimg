@@ -183,7 +183,7 @@ encode_time(ifs_plan_t *plan, const fsimg_entry_t *entry, uint32_t *out,
 	present = (entry->metadata.valid & FSIMG_META_MODIFIED) != 0;
 	reproducible = (writer->options.flags & FSIMG_WRITE_REPRODUCIBLE) != 0;
 	exact = fsimg_time_select_u32(present, &entry->metadata.modified,
-	    UINT32_MAX, plan->fallback_time, reproducible, out);
+	    0, UINT32_MAX, plan->fallback_time, reproducible, out);
 	if (exact)
 		return (FSIMG_OK);
 	return (fsimg_writer_loss(writer, entry, FSIMG_META_MODIFIED,
