@@ -15,10 +15,13 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' \
 	autoconf automake libtool make pkg-config clang llvm gcc g++ \
 	zlib1g-dev liblzma-dev libzstd-dev mtools dosfstools exfatprogs fdisk gdisk zstd pigz \
 	ruby ruby-dev ruby-bundler python3 git ca-certificates xz-utils file dpkg-dev \
-	genisoimage xorriso libarchive-tools p7zip-full curl bzip2
+	genisoimage xorriso libarchive-tools p7zip-full curl bzip2 hfsprogs sleuthkit
 COPY build-cdrtools.sh /usr/local/libexec/fsimg/build-cdrtools.sh
 RUN sh /usr/local/libexec/fsimg/build-cdrtools.sh /opt/fsimg-cdrtools
 ENV PATH=/opt/fsimg-cdrtools/bin:$PATH
+COPY build-hfsfuse.sh /usr/local/libexec/fsimg/build-hfsfuse.sh
+RUN sh /usr/local/libexec/fsimg/build-hfsfuse.sh /opt/fsimg-hfsfuse
+ENV HFSDUMP=/opt/fsimg-hfsfuse/bin/hfsdump
 COPY build-msan-zlib.sh /usr/local/libexec/fsimg/build-msan-zlib.sh
 RUN source_parent=$(mktemp -d) && cd "$source_parent" && \
 	apt-get source zlib && \

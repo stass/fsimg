@@ -1182,6 +1182,23 @@ tools are installed through ports; ordinary builds/tests remain unprivileged.
 Fatcat's non-512-sector subcheck is explicitly skipped, and its Unicode name
 decoding is not an oracle; native checks and mtools cover those features.
 
+The HFS Plus work uses the hfsfuse `hfsdump` reader as an independent oracle,
+built the same way from a pinned upstream revision:
+
+```sh
+sh build-aux/build-hfsfuse.sh /tmp/fsimg-hfsfuse-oracle
+export HFSDUMP=/tmp/fsimg-hfsfuse-oracle/bin/hfsdump
+```
+
+The destination must be new, so remove it to retry. The helper needs Git, a C
+compiler and GNU make, which is `MAKE=gmake sh build-aux/build-hfsfuse.sh ...`
+where `make` is BSD make, builds only the `hfsdump` target, which carries its own libraries and needs no
+FUSE library, and verifies revision `eed780cbe0445893de6f4aa8d74461da00756984`.
+The Linux CI job and the `build-aux/linux-check.sh` image build it and
+export `HFSDUMP`, and install the `hfsprogs` and `sleuthkit` packages. The
+[HFS Plus research record](hfsplus-research.md) holds the native tool
+identities and the unprivileged procedure for attaching a raw image on macOS.
+
 `./test-fat --volume-labels` covers native formatter labels with the archive
 bit, malformed label placement/allocation/attributes, and verification's
 agreement of boot-sector and root labels. Automatic FAT sizing

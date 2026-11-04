@@ -24,7 +24,7 @@ jobs:
           else
             sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
             sudo apt-get update
-            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config ruby ruby-dev ruby-bundler dpkg-dev liblzma-dev xz-utils libzstd-dev zstd genisoimage xorriso libarchive-tools p7zip-full curl bzip2
+            sudo apt-get install -y autoconf automake libtool clang mtools dosfstools exfatprogs pkg-config ruby ruby-dev ruby-bundler dpkg-dev liblzma-dev xz-utils libzstd-dev zstd genisoimage xorriso libarchive-tools p7zip-full curl bzip2 hfsprogs sleuthkit
           fi
           echo "BUNDLE_PATH=$RUNNER_TEMP/spec-gems" >> "$GITHUB_ENV"
       - name: Instrumented zlib for MemorySanitizer
@@ -40,6 +40,27 @@ jobs:
         run: |
           sh build-aux/build-cdrtools.sh "$RUNNER_TEMP/fsimg-cdrtools"
           echo "$RUNNER_TEMP/fsimg-cdrtools/bin" >> "$GITHUB_PATH"
+      - name: HFS Plus oracles
+        if: runner.os == 'Linux'
+        run: |
+          sh build-aux/build-hfsfuse.sh "$RUNNER_TEMP/fsimg-hfsfuse"
+          echo "HFSDUMP=$RUNNER_TEMP/fsimg-hfsfuse/bin/hfsdump" >> "$GITHUB_ENV"
+      - name: Native tool identities
+        if: runner.os == 'macOS'
+        run: |
+          sw_vers
+          for tool in /usr/bin/hdiutil /sbin/newfs_hfs /sbin/fsck_hfs /usr/sbin/diskutil /usr/bin/ditto; do
+            echo "== $tool"
+            shasum -a 256 "$tool"
+            what "$tool" || true
+          done
+          # The runner must be able to format and check an attached image.
+          image="$RUNNER_TEMP/hfsplus-attach.img"
+          mkfile -n 32m "$image"
+          disk=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$image" | awk 'NR==1{print $1}')
+          newfs_hfs -v attach "/dev/r${disk#/dev/}"
+          fsck_hfs -n "/dev/r${disk#/dev/}"
+          hdiutil detach "$disk"
       - name: Ruby version
         id: ruby
         run: echo "version=$(ruby -e 'print RUBY_VERSION')" >> "$GITHUB_OUTPUT"

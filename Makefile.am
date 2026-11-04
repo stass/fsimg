@@ -357,7 +357,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/check-install.sh build-aux/check-installed.rb \
 	build-aux/fuzz.sh \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
-	build-aux/build-cdrtools.sh \
+	build-aux/build-cdrtools.sh build-aux/build-hfsfuse.sh \
 	build-aux/build-msan-zlib.sh \
 	build-aux/linux-check.sh build-aux/linux-check/Dockerfile \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \
@@ -366,7 +366,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/spec-testing-plan.md docs/qnx4-plan.md docs/qnx4-research.md \
 	docs/todo-qnx4.md docs/architecture-analysis.md docs/ifs-plan.md \
 	docs/ifs-research.md docs/todo-ifs.md docs/todo-salvage-open-checks.md \
-	docs/hfsplus-plan.md docs/todo-hfsplus.md \
+	docs/hfsplus-plan.md docs/hfsplus-research.md docs/todo-hfsplus.md \
 	docs/apfs-plan.md \
 	docs/udf-plan.md docs/udf-research.md docs/todo-udf.md \
 	docs/iso9660-plan.md docs/todo-iso9660.md \

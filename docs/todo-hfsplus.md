@@ -3,14 +3,16 @@
 Open HFS Plus work, ordered by the [HFS Plus plan](hfsplus-plan.md). The
 [format design](../specs/design-hfsplus.md) and the
 [driver design](../specs/design-hfsplus-driver.md) describe the target; the
-research record `docs/hfsplus-research.md`, which stage 1 creates, will own
-the evidence and provenance.
+research record [`docs/hfsplus-research.md`](hfsplus-research.md) owns the
+evidence and provenance.
 
 * [High] **Native evidence corpus** (`tools/hfsplus/`,
-  `docs/hfsplus-research.md`): plan stages 0 and 1 have not run. The reader's
-  closed tables, the compression layouts, the writer's native defaults and,
-  above all, the E3 Unicode observation that the generated fold and
-  decomposition tables must match row for row all wait on it.
+  `docs/hfsplus-research.md`): the `macos-15` runner's identities and
+  attach check still go into the record from the first CI log (plan stage 0),
+  and plan stage 1 (the experiments E1 to E11) has not run. The reader's closed
+  tables, the compression layouts, the writer's native defaults and, above
+  all, the E3 Unicode observation that the generated fold and decomposition
+  tables must match row for row all wait on it.
 * [High] **Reader, compression and verifier** (`lib/formats/hfsplus/`,
   `lib/read/`, `lib/codec/`): plan stages 2 to 7. They bring four of the
   common changes the format design lists: the `FSIMG_META_EXTRA_DATA` bit,
@@ -21,10 +23,6 @@ the evidence and provenance.
   helper's origin and the `hfs` partition type default. The writer stays
   unregistered until the macOS `fsck_hfs`, mount, modify and remount cycle
   is recorded.
-* [Medium] **Volume identifier setting** (`specs/design-hfsplus.md`): owner
-  decision 5 of the plan, open. The design takes the 64-bit identifier from
-  the first eight bytes of `volume_uuid`; settle it, or replace it with a
-  dedicated setting or zero, before stage 8.
 * [Medium] **Apple data representation** (`include/fsimg.h`,
   `specs/design-metadata.md`): resource forks, extended attributes, Finder
   information and BSD flags have no place in the entry model, so the reader

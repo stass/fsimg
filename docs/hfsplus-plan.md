@@ -483,7 +483,7 @@ once the verifier exists.
 
 ## Owner decisions
 
-The owner has settled the first four:
+The owner has settled all six:
 
 1. **Order.** Reader and verifier first; the writer registered after native
    qualification.
@@ -491,17 +491,12 @@ The owner has settled the first four:
    representation later.
 3. **LZVN and LZFSE.** Import Apple's BSD-3-Clause decoders.
 4. **Names.** `hfsplus` and `hfsx`; `hfs` stays reserved for classic HFS.
-
-Two remain open:
-
-5. **Volume identifier.** The design takes the 64-bit identifier in Finder
-   information words 6 and 7 from the first eight bytes of `volume_uuid`,
-   so the existing setting, the CLI's random default and `-R` all apply. The
-   alternatives are a dedicated 64-bit setting or always zero. The reader
-   reports the identifier as a detail in either case. Decide before stage 8.
-6. **Reader registration before compression.** Stage 3 registers a reader
-   that refuses compressed files explicitly; the alternative is to hold
-   registration until stage 5. Decide before stage 3 lands.
+5. **Volume identifier.** The 64-bit identifier in Finder information words 6
+   and 7 is the first eight bytes of `volume_uuid`, so the existing setting,
+   the CLI's random default and `-R` all apply. The reader reports the
+   identifier as a detail.
+6. **Reader registration before compression.** Stage 3 registers the reader,
+   which refuses compressed files explicitly until stages 4 and 5.
 
 ## Risks
 
