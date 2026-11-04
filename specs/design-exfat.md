@@ -53,14 +53,29 @@ minimum applies to the declared length, so a truncated slice may be smaller. The
 boot regions and the whole FAT must lie within the slice, since the heap offset
 must, and one that does not is `FSIMG_ECORRUPT` at open. That also bounds what
 declared geometry can size: the FAT capacity check bounds the cluster count by
-table bytes the slice holds, so the metadata scaled by the cluster count, the
-directory-cluster bitset and a stream's extent index, stays proportional to bytes
-the file really holds. The root directory, the upcase table and the bitmap bits
-of what opening claims are read while opening, so one past the end fails it. A
-later directory or a bitmap bit past the end fails when walked, a file's
-initialized bytes past the end fail when read, and the slack and the zeros after
-them may be missing. Full verification fails on any truncated volume, before this
-driver's verification runs.
+table bytes the slice holds, so the directory-cluster bitset stays proportional
+to bytes the file really holds.
+
+The FAT can still hold far more clusters than the file: a FAT filling the file
+gives about `slice / 4` clusters, where an intact volume of that size has about
+`slice / cluster size`. So a stream's allocation is walked no further than the
+slice: a chain stops at its first cluster past it, a contiguous stream records
+only the clusters starting inside it, and each walk then costs what one over an
+intact volume of this size can. The stream's extent index ends there. A stopped
+chain goes on for at least its stopping cluster and may go on to cover the stream's
+declared length, so only a chain already longer than an exact allocation allows is
+refused. The stopping cluster is not recorded or checked against the bitmap.
+
+A lookup past a stopped index is `FSIMG_ECORRUPT`. A directory whose terminator
+and every cluster after it up to the stop are whole in the slice lists. One whose
+slots run out before a terminator fails rather than appearing to end, and so does
+one the cut goes through, since slots after a terminator are still checked. The
+root directory, the upcase table and the bitmap bits of what opening
+claims are read while opening, so one past the end fails it. A later directory or
+a bitmap bit past the end fails when walked, a file's initialized bytes past the
+end fail when read, and the slack and the zeros after them may be missing. Full
+verification fails on any truncated volume, before this driver's verification
+runs.
 
 Table 4 places DriveSelect at byte 111 and PercentInUse at byte 112. Boot
 checksums exclude bytes 106, 107 and 112; DriveSelect remains covered.

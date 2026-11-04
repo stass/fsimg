@@ -551,14 +551,19 @@
 
 ## Security residuals
 
-* [Medium] **QNX6 walk cost on a crafted truncated volume**
-  (`lib/formats/qnx6/tree.c`): references are checked against `N`, which on a
-  truncated volume can far exceed the slice, so an image can give a walk
-  `slice / 4` leaves, `B / 4` times an intact image of that size. A crafted
-  33.6 MiB image took 36 s and 109 MiB of scratch inside `fsimg_reader_open`. It
-  is linear in file bytes and budgeted, and `max_work` is unlimited by default.
-  Stopping a walk at its first leaf past the slice, with an index lookup miss
-  mapped to `FSIMG_ECORRUPT`, would bound it by blocks in the slice.
+* [Medium] **exFAT listing cost with shared allocations** (`exfat_replay` and
+  `benign_allocation`, `lib/formats/exfat/`): files and benign entries index their
+  allocations when listed, without claiming them, so many entries naming one chain
+  or contiguous range cost entries times clusters, with a smaller constant for a
+  range. An intact 8 MiB image took 46 s and read 5.77 GB, about
+  50 minutes extrapolated to 64 MiB, and `max_work` is unlimited by default. Index
+  a file on its first read, as FAT and QNX6's later names do, and give benign
+  allocations a claim.
+
+* [Low] **`test-staged-verify` flake** (`test/staged-verify.c:249`): the parent's
+  `setpgid(child, child)` allows `EACCES` and `ESRCH`, and failed once in a loaded
+  `make -j32 check` on macOS with another errno; a rerun passed. Find which errno
+  a child that already exited or exec'd gives there.
 
 * [Low] **Shared-library export list** (`Makefile.am`, `lib/`): libfsimg
   exports every external symbol, internal ones included, so a consumer that

@@ -43,6 +43,10 @@ static int compare_bytes(const void *, size_t, const void *, size_t, void *);
 static void test_scratch_overflow(void);
 static void test_sort_work_limit(void);
 static void test_transactional_eviction(void);
+static void test_extent_index_initial_stop(void);
+static void check_extent_index_end(bool);
+static void test_extent_index_stopped_end(void);
+static void test_extent_index_unstopped_end(void);
 static void test_extent_index(void);
 static void test_extent_scratch(void);
 static fsimg_status_t count_extent(void *, const fsimg_extent_t *,
@@ -896,6 +900,59 @@ count_extent(void *arg, const fsimg_extent_t *extent, fsimg_error_t *error)
 }
 
 static void
+test_extent_index_initial_stop(void)
+{
+	fixture_t fixture;
+	fsimg_extent_index_t *index;
+
+	fixture_open(&fixture, 4, 1024 * 1024, 4);
+	CHECK(!fsimg_extent_index_stopped(NULL));
+	CHECK(fsimg_extent_index_new(&fixture.session, &extent_domain, &index,
+	    NULL) == FSIMG_OK);
+	CHECK(!fsimg_extent_index_stopped(index));
+	fsimg_extent_index_free(index);
+	fixture_close(&fixture);
+}
+
+static void
+check_extent_index_end(bool stopped)
+{
+	fixture_t fixture;
+	fsimg_extent_index_t *index;
+	fsimg_extent_t extent = { 0, 4096, 512 }, found;
+	fsimg_error_t error = {0};
+
+	fixture_open(&fixture, 4, 1024 * 1024, 4);
+	CHECK(fsimg_extent_index_new(&fixture.session, &extent_domain, &index,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_extent_index_append(index, &extent, NULL) == FSIMG_OK);
+	if (stopped)
+		fsimg_extent_index_stop(index);
+	CHECK(fsimg_extent_index_stopped(index) == stopped);
+	CHECK(fsimg_extent_index_lookup(index, 511, &found, &error) == FSIMG_OK);
+	CHECK(found.logical_offset == extent.logical_offset);
+	CHECK(found.image_offset == extent.image_offset);
+	CHECK(found.length == extent.length);
+	CHECK(fsimg_extent_index_lookup(index, 512, &found, &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK((strstr(error.message, "truncated") != NULL) == stopped);
+	fsimg_extent_index_free(index);
+	fixture_close(&fixture);
+}
+
+static void
+test_extent_index_stopped_end(void)
+{
+	check_extent_index_end(true);
+}
+
+static void
+test_extent_index_unstopped_end(void)
+{
+	check_extent_index_end(false);
+}
+
+static void
 test_extent_index(void)
 {
 	static const fsimg_extent_t invalid[] = {
@@ -1162,6 +1219,9 @@ main(int argc, char **argv)
 	test_transactional_eviction();
 	test_scratch_overflow();
 	test_sort_work_limit();
+	test_extent_index_initial_stop();
+	test_extent_index_stopped_end();
+	test_extent_index_unstopped_end();
 	test_extent_index();
 	test_extent_scratch();
 	return (0);

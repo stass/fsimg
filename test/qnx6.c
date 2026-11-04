@@ -1945,6 +1945,562 @@ test_truncated_references(void)
 	}
 }
 
+/* A large declared domain has a small, complete system run in memory.
+ * The fabricated tree has 65536 distinct, scattered leaves beyond EOF,
+ * but only its indirect blocks are stored. Stopping at its first leaf
+ * must bound both scratch records and charged work by the stored blocks.
+ */
+static uint64_t
+truncated_resource_image(qnx6_gen_t *g, bool names)
+{
+	const uint32_t leaves = UINT32_C(1) << 16;
+	unsigned char *descriptor, *raw;
+	uint32_t file = 0, root, branches, stored;
+
+	gen_init(g, 4096, false, 1048576, GEN_INODES, 0x100);
+	g->blocks = UINT32_C(1) << 20;
+	free(g->bitmap);
+	g->bitmap = calloc(g->blocks / 8 + g->block_size, 1);
+	CHECK(g->bitmap != NULL);
+	g->reservation = (uint32_t)(gen_tree_blocks(g->blocks / 8 /
+	    g->block_size, g->pointers) + g->inode_count * 128 /
+	    g->block_size);
+	g->next_block = 2 * g->reservation;
+	if (!names)
+		file = gen_file(g, 1, "large", NULL, 0);
+	gen_commit(g, 0, 1, true, true);
+
+	root = gen_alloc(g);
+	branches = g->next_block;
+	g->next_block += leaves / g->pointers;
+	stored = g->next_block;
+	CHECK(GEN_DATA + (uint64_t)stored * g->block_size < g->length);
+	CHECK(leaves >= 16 * stored);
+	memset(block_at(g, root), 0xff, g->block_size);
+	for (uint32_t k = 0; k < leaves / g->pointers; k++) {
+		put32(g, block_at(g, root) + k * 4, branches + k);
+		for (uint32_t j = 0; j < g->pointers; j++) {
+			uint32_t i = k * g->pointers + j;
+			uint32_t block = stored + (uint32_t)((uint64_t)i *
+			    32771 % (g->blocks - stored));
+
+			put32(g, block_at(g, branches + k) + j * 4, block);
+			*bitmap_byte(g, block) |=
+			    (unsigned char)(1u << (block % 8));
+		}
+	}
+	for (uint32_t block = root; block < stored; block++)
+		*bitmap_byte(g, block) |= (unsigned char)(1u << (block % 8));
+
+	if (names) {
+		descriptor = g->image + 8192 + 232;
+		raw = descriptor + 8;
+		descriptor[72] = 2;
+	} else {
+		descriptor = gen_inode_bytes(g, file);
+		raw = descriptor + 36;
+		descriptor[100] = 2;
+	}
+	put64(g, descriptor, (uint64_t)leaves * g->block_size);
+	for (unsigned k = 0; k < 16; k++)
+		put32(g, raw + k * 4, k == 0 ? root : GEN_SENTINEL);
+	gen_reseal(g, 8192);
+	return (GEN_DATA + (uint64_t)stored * g->block_size);
+}
+
+static void
+check_truncated_resource(bool names, bool limited)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_stats_t stats;
+	fsimg_error_t error = {0};
+	const fsimg_entry_t *entry;
+	uint64_t length, stored, scratch_bound, work_limit;
+	fsimg_status_t status;
+	bool seen = false;
+
+	length = truncated_resource_image(&g, names);
+	stored = (length - GEN_DATA) / g.block_size;
+	/* One 24-byte extent record per stored block, plus the claimed-block
+	 * and exposed-inode bitsets. Eight pages allow store headers, extent
+	 * page rounding and directory preparation.
+	 * Eight work units per stored block also cover directory slots and
+	 * bootstrap allocation checks; absent leaves cannot consume it.
+	 */
+	scratch_bound = stored * 24 + (g.blocks + 7) / 8 +
+	    (g.inode_count + 1 + 7) / 8 + 8 * 4096;
+	work_limit = limited ? stored * 8 : 0;
+	fixture_new(&f, g.image, length, work_limit);
+	fixture_cache(&f, 4);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "resource open: %s (limit=%" PRIu64
+		    ", observed=%" PRIu64 ")\n", error.message,
+		    error.limit, error.observed);
+	CHECK(status == FSIMG_OK);
+	if (!names) {
+		while ((status = fsimg_reader_next(f.reader, &entry, &error)) ==
+		    FSIMG_OK)
+			seen |= strcmp(entry->path, "/large") == 0;
+		if (status != FSIMG_DONE)
+			fprintf(stderr, "resource listing: %s\n", error.message);
+		CHECK(status == FSIMG_DONE && seen);
+	}
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	if (!limited) {
+		if (stats.scratch_peak >= scratch_bound)
+			fprintf(stderr, "%s tree: scratch peak=%" PRIu64
+			    ", bound=%" PRIu64 ", stored blocks=%" PRIu64 "\n",
+			    names ? "names" : "file", stats.scratch_peak,
+			    scratch_bound, stored);
+		CHECK(stats.scratch_peak < scratch_bound);
+	}
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_truncated_names_scratch_bound(void)
+{
+	check_truncated_resource(true, false);
+}
+
+static void
+test_truncated_names_work_bound(void)
+{
+	check_truncated_resource(true, true);
+}
+
+static void
+test_truncated_file_scratch_bound(void)
+{
+	check_truncated_resource(false, false);
+}
+
+static void
+test_truncated_file_work_bound(void)
+{
+	check_truncated_resource(false, true);
+}
+
+/* Mark a fabricated content reference allocated in the committed bitmap. */
+static void
+truncated_allocate(qnx6_gen_t *g, uint32_t block)
+{
+	*bitmap_byte(g, block) |= (unsigned char)(1u << (block % 8));
+}
+
+/* A failed read ends the reader session. Use a fresh walk for each missing
+ * range, including a later hard-link name, and retain poison after the
+ * confirmed prefix to detect synthesized zero bytes.
+ */
+static void
+check_truncated_missing_read(qnx6_gen_t *g, uint64_t length,
+    const char *path, uint64_t offset, const unsigned char *expected,
+    size_t prefix)
+{
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	unsigned char buffer[2048];
+	size_t count;
+	fsimg_status_t status;
+	bool seen = false;
+
+	fixture_new(&f, g->image, length, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	while ((status = fsimg_reader_next(f.reader, &entry, NULL)) == FSIMG_OK) {
+		if (strcmp(entry->path, path) != 0)
+			continue;
+		seen = true;
+		memset(buffer, GEN_POISON, sizeof(buffer));
+		CHECK(fsimg_reader_read_at(f.reader, offset, buffer, sizeof(buffer),
+		    &count, &error) == FSIMG_ECORRUPT);
+		CHECK(strstr(error.message, "truncated") != NULL);
+		CHECK(count <= prefix);
+		if (count != 0)
+			CHECK(bcmp(buffer, expected, count) == 0);
+		for (size_t i = prefix; i < sizeof(buffer); i++)
+			CHECK(buffer[i] == GEN_POISON);
+		break;
+	}
+	CHECK(seen);
+	fixture_free(&f);
+}
+
+/* The first leaf survives and the second is exactly at EOF. The required
+ * third slot and unused trailing slots must not be inspected. The hard-link
+ * case uses valid slots throughout, so both names' surviving and lost ranges
+ * are tested separately from the rejection of trailing slots.
+ */
+static void
+check_truncated_stopped_file(bool big, bool sentinel, bool linked)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	unsigned char *bytes, buffer[2048];
+	uint64_t length;
+	uint32_t after_stop, file, tail;
+	size_t count;
+	fsimg_status_t status;
+	unsigned files = 0, siblings = 0;
+
+	gen_init(&g, 1024, big, 1048576, GEN_INODES, 0x100);
+	gen_file(&g, 1, "a-good", (const unsigned char *)"a", 1);
+	bytes = pattern(3072, 19);
+	file = gen_file(&g, 1, "b-file", bytes, 3072);
+	if (linked)
+		gen_link(&g, 1, "c-link", file);
+	gen_file(&g, 1, "z-good", (const unsigned char *)"z", 1);
+	gen_commit(&g, 0, 1, true, true);
+	tail = g.next_block;
+	bcopy(bytes, block_at(&g, tail), 1024);
+	put32(&g, gen_inode_bytes(&g, file) + 36, tail);
+	put32(&g, gen_inode_bytes(&g, file) + 40, tail + 1);
+	after_stop = sentinel ? GEN_SENTINEL : g.blocks;
+	if (linked)
+		after_stop = tail + 2;
+	put32(&g, gen_inode_bytes(&g, file) + 44, after_stop);
+	if (!sentinel && !linked)
+		put32(&g, gen_inode_bytes(&g, file) + 36 + 15 * 4, g.blocks + 1);
+	truncated_allocate(&g, tail);
+	truncated_allocate(&g, tail + 1);
+	if (linked)
+		truncated_allocate(&g, tail + 2);
+	length = GEN_DATA + (uint64_t)(tail + 1) * 1024;
+	fixture_new(&f, g.image, length, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	while ((status = fsimg_reader_next(f.reader, &entry, &error)) == FSIMG_OK) {
+		if (strcmp(entry->path, "/a-good") == 0 ||
+		    strcmp(entry->path, "/z-good") == 0) {
+			CHECK(fsimg_reader_read_at(f.reader, 0, buffer, 1,
+			    &count, NULL) == FSIMG_OK);
+			CHECK(count == 1 && buffer[0] == entry->path[1]);
+			siblings++;
+			continue;
+		}
+		if (strcmp(entry->path, "/b-file") != 0 &&
+		    strcmp(entry->path, "/c-link") != 0)
+			continue;
+		files++;
+		CHECK(entry->size == 3072);
+		CHECK(fsimg_reader_read_at(f.reader, 0, buffer, 1024,
+		    &count, NULL) == FSIMG_OK);
+		CHECK(count == 1024 && bcmp(buffer, bytes, count) == 0);
+	}
+	if (status != FSIMG_DONE)
+		fprintf(stderr, "stopped file listing: %s\n", error.message);
+	CHECK(status == FSIMG_DONE);
+	CHECK(files == (linked ? 2u : 1u) && siblings == 2);
+	fixture_free(&f);
+	check_truncated_missing_read(&g, length, "/b-file", 512,
+	    bytes + 512, 512);
+	check_truncated_missing_read(&g, length, "/b-file", 2048, NULL, 0);
+	if (linked)
+		check_truncated_missing_read(&g, length, "/c-link", 512,
+		    bytes + 512, 512);
+	free(bytes);
+	gen_free(&g);
+}
+
+static void
+test_truncated_stop_before_sentinel(void)
+{
+	for (unsigned big = 0; big < 2; big++)
+		check_truncated_stopped_file(big != 0, true, false);
+}
+
+static void
+test_truncated_stop_before_out_of_range(void)
+{
+	for (unsigned big = 0; big < 2; big++)
+		check_truncated_stopped_file(big != 0, false, false);
+}
+
+static void
+test_truncated_stopped_hard_link(void)
+{
+	for (unsigned big = 0; big < 2; big++)
+		check_truncated_stopped_file(big != 0, true, true);
+}
+
+/* Even a partially present indirect block cannot supply pointers. A walk
+ * stops before reading it, leaving listing usable and payload unavailable.
+ */
+static void
+check_truncated_stopped_indirect(bool big, size_t present)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	unsigned char *bytes;
+	uint64_t length;
+	uint32_t file, tail;
+	fsimg_status_t status;
+	bool seen = false;
+
+	gen_init(&g, 1024, big, 1048576, GEN_INODES, 0x100);
+	bytes = pattern(17 * 1024, 31);
+	file = gen_file(&g, 1, "indirect", bytes, 17 * 1024);
+	gen_commit(&g, 0, 1, true, true);
+	tail = g.next_block;
+	put32(&g, gen_inode_bytes(&g, file) + 36, tail);
+	put32(&g, gen_inode_bytes(&g, file) + 40, g.blocks);
+	truncated_allocate(&g, tail);
+	length = GEN_DATA + (uint64_t)tail * 1024 + present;
+	fixture_new(&f, g.image, length, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	while ((status = fsimg_reader_next(f.reader, &entry, &error)) == FSIMG_OK) {
+		if (strcmp(entry->path, "/indirect") != 0)
+			continue;
+		seen = true;
+	}
+	if (status != FSIMG_DONE)
+		fprintf(stderr, "stopped indirect listing: %s\n", error.message);
+	CHECK(status == FSIMG_DONE && seen);
+	fixture_free(&f);
+	check_truncated_missing_read(&g, length, "/indirect", 0, NULL, 0);
+	free(bytes);
+	gen_free(&g);
+}
+
+static void
+test_truncated_stop_at_missing_indirect(void)
+{
+	for (unsigned big = 0; big < 2; big++)
+		check_truncated_stopped_indirect(big != 0, 0);
+}
+
+static void
+test_truncated_stop_at_partial_indirect(void)
+{
+	for (unsigned big = 0; big < 2; big++)
+		check_truncated_stopped_indirect(big != 0, 1023);
+}
+
+/* A leaf needs only the bytes requested by the file, unlike an indirect
+ * block. The final 73 file bytes fit inside a partly present last leaf.
+ */
+static void
+test_truncated_partial_last_leaf(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	unsigned char *bytes, buffer[1097];
+	uint32_t file, tail;
+	size_t count;
+	fsimg_status_t status;
+	bool seen;
+
+	for (unsigned big = 0; big < 2; big++) {
+		gen_init(&g, 1024, big != 0, 1048576, GEN_INODES, 0x100);
+		bytes = pattern(sizeof(buffer), 47);
+		file = gen_file(&g, 1, "partial", bytes, sizeof(buffer));
+		gen_commit(&g, 0, 1, true, true);
+		tail = g.next_block;
+		bcopy(bytes, block_at(&g, tail), sizeof(buffer));
+		for (unsigned k = 0; k < 2; k++) {
+			put32(&g, gen_inode_bytes(&g, file) + 36 + k * 4, tail + k);
+			truncated_allocate(&g, tail + k);
+		}
+		fixture_new(&f, g.image, GEN_DATA + (uint64_t)tail * 1024 +
+		    sizeof(buffer) + 1, 0);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+		seen = false;
+		while ((status = fsimg_reader_next(f.reader, &entry, NULL)) == FSIMG_OK) {
+			if (strcmp(entry->path, "/partial") != 0)
+				continue;
+			seen = true;
+			CHECK(fsimg_reader_read_at(f.reader, 0, buffer,
+			    sizeof(buffer), &count, NULL) == FSIMG_OK);
+			CHECK(count == sizeof(buffer) && bcmp(buffer, bytes, count) == 0);
+		}
+		CHECK(status == FSIMG_DONE && seen);
+		fixture_free(&f);
+		free(bytes);
+		gen_free(&g);
+	}
+}
+
+/* The second long-name record is logically valid but beyond the first
+ * absent leaf. Resolving that record must diagnose truncation, not bounds.
+ */
+static void
+test_truncated_name_after_stop(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_error_t error = {0};
+	uint64_t entries;
+	uint32_t tail;
+
+	for (unsigned big = 0; big < 2; big++) {
+		gen_init(&g, 1024, big != 0, 1048576, GEN_INODES, 0x100);
+		gen_file(&g, 1, "long-name-record-before-the-stop", NULL, 0);
+		gen_file(&g, 1, "long-name-record-after-the-stop", NULL, 0);
+		gen_commit(&g, 0, 1, true, true);
+		tail = g.next_block;
+		put64(&g, g.image + 8192 + 232, 3 * 1024);
+		put32(&g, g.image + 8192 + 232 + 8 + 4, tail);
+		put32(&g, g.image + 8192 + 232 + 8 + 8, tail + 1);
+		put32(&g, dir_slot(&g, 1, 4) + 8, 2);
+		truncated_allocate(&g, tail + 1);
+		truncated_allocate(&g, tail);
+		gen_reseal(&g, 8192);
+		fixture_new(&f, g.image, GEN_DATA + (uint64_t)tail * 1024, 0);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+		CHECK(walk_all(&f, &entries, &error) == FSIMG_ECORRUPT);
+		CHECK(strstr(error.message, "truncated") != NULL);
+		CHECK(strstr(error.message, "out of range") == NULL);
+		fixture_free(&f);
+		gen_free(&g);
+	}
+}
+
+/* A complete earlier sibling remains readable before descent into a
+ * directory whose second leaf is absent. Its trailing slot is invalid
+ * so the failure must come from reading the stopped range.
+ */
+static void
+test_truncated_directory_after_stop(void)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	unsigned char buffer[1], *raw;
+	uint32_t dir, tail;
+	size_t count;
+	fsimg_status_t status;
+	bool sibling;
+
+	for (unsigned big = 0; big < 2; big++) {
+		gen_init(&g, 1024, big != 0, 1048576, GEN_INODES, 0x100);
+		gen_file(&g, 1, "a-good", (const unsigned char *)"a", 1);
+		dir = gen_dir(&g, 1, "z-dir");
+		gen_commit(&g, 0, 1, true, true);
+		tail = g.next_block;
+		raw = gen_inode_bytes(&g, dir);
+		put64(&g, raw, 3072);
+		put32(&g, raw + 40, tail);
+		put32(&g, raw + 44, g.blocks);
+		truncated_allocate(&g, tail);
+		fixture_new(&f, g.image, GEN_DATA + (uint64_t)tail * 1024, 0);
+		CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+		sibling = false;
+		while ((status = fsimg_reader_next(f.reader, &entry, &error)) == FSIMG_OK) {
+			if (strcmp(entry->path, "/a-good") != 0)
+				continue;
+			CHECK(fsimg_reader_read_at(f.reader, 0, buffer, 1,
+			    &count, NULL) == FSIMG_OK);
+			CHECK(count == 1 && buffer[0] == 'a');
+			sibling = true;
+		}
+		CHECK(sibling && status == FSIMG_ECORRUPT);
+		CHECK(strstr(error.message, "truncated") != NULL);
+		fixture_free(&f);
+		gen_free(&g);
+	}
+}
+
+/* EOF cannot hide a domain violation in either system tree: the stopping
+ * reference must still be checked against the system reservation.
+ */
+static void
+test_truncated_stop_checks_system_domain(void)
+{
+	static const unsigned offsets[] = { 72, 152 };
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_error_t error = {0};
+	uint32_t tail;
+
+	for (unsigned big = 0; big < 2; big++) {
+		for (unsigned k = 0; k < 2; k++) {
+			gen_init(&g, 1024, big != 0, 1048576, GEN_INODES, 0x100);
+			gen_commit(&g, 0, 1, true, true);
+			tail = g.next_block;
+			put32(&g, g.image + 8192 + offsets[k] + 8, tail);
+			gen_reseal(&g, 8192);
+			fixture_new(&f, g.image, GEN_DATA + (uint64_t)tail * 1024, 0);
+			CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader,
+			    &error) == FSIMG_ECORRUPT);
+			CHECK(strstr(error.message, "outside the reservation") != NULL);
+			fixture_free(&f);
+			gen_free(&g);
+		}
+	}
+}
+
+/* A stopping leaf remains subject to allocation and exclusive ownership
+ * checks even though none of its payload exists in the image.
+ */
+static void
+check_truncated_stop_validation(bool big, bool shared)
+{
+	qnx6_gen_t g;
+	fixture_t f;
+	fsimg_error_t error = {0};
+	uint64_t entries;
+	uint32_t first, second = 0, tail;
+
+	gen_init(&g, 1024, big, 1048576, GEN_INODES, 0x100);
+	first = gen_file(&g, 1, "first", NULL, 0);
+	if (shared)
+		second = gen_file(&g, 1, "second", NULL, 0);
+	gen_commit(&g, 0, 1, true, true);
+	tail = g.next_block;
+	put64(&g, gen_inode_bytes(&g, first), 1024);
+	put32(&g, gen_inode_bytes(&g, first) + 36, tail);
+	if (shared) {
+		put64(&g, gen_inode_bytes(&g, second), 1024);
+		put32(&g, gen_inode_bytes(&g, second) + 36, tail);
+		truncated_allocate(&g, tail);
+	}
+	fixture_new(&f, g.image, GEN_DATA + (uint64_t)tail * 1024, 0);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
+	/* Listing, rather than walk_all, must reach the second claimant
+	 * without attempting to read the first file's absent payload.
+	 */
+	entries = 0;
+	for (;;) {
+		const fsimg_entry_t *entry;
+		fsimg_status_t status;
+
+		status = fsimg_reader_next(f.reader, &entry, &error);
+		if (status != FSIMG_OK) {
+			CHECK(status == FSIMG_ECORRUPT);
+			break;
+		}
+		entries++;
+	}
+	CHECK(strstr(error.message, shared ? "already in use" :
+	    "referenced block is free") != NULL);
+	if (shared)
+		CHECK(entries >= 1);
+	fixture_free(&f);
+	gen_free(&g);
+}
+
+static void
+test_truncated_stop_checks_allocation(void)
+{
+	for (unsigned big = 0; big < 2; big++)
+		check_truncated_stop_validation(big != 0, false);
+}
+
+static void
+test_truncated_stop_checks_claim(void)
+{
+	for (unsigned big = 0; big < 2; big++)
+		check_truncated_stop_validation(big != 0, true);
+}
+
 static void
 test_truncated_system(void)
 {
@@ -4756,6 +5312,21 @@ main(int argc, char **argv)
 	test_truncated_verify();
 	test_truncated_tail();
 	test_truncated_references();
+	test_truncated_names_scratch_bound();
+	test_truncated_names_work_bound();
+	test_truncated_file_scratch_bound();
+	test_truncated_file_work_bound();
+	test_truncated_stop_before_sentinel();
+	test_truncated_stop_before_out_of_range();
+	test_truncated_stopped_hard_link();
+	test_truncated_stop_at_missing_indirect();
+	test_truncated_stop_at_partial_indirect();
+	test_truncated_partial_last_leaf();
+	test_truncated_name_after_stop();
+	test_truncated_directory_after_stop();
+	test_truncated_stop_checks_system_domain();
+	test_truncated_stop_checks_allocation();
+	test_truncated_stop_checks_claim();
 	test_truncated_system();
 	test_truncated_boundaries();
 	test_truncated_snapshots();

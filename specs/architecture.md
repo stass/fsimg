@@ -278,13 +278,18 @@ format treats a volume longer than its slice by the same rules:
 
 * **One funnel.** `fsimg_reader_bytes` is the read path of every driver. A
   request outside the slice is `FSIMG_ECORRUPT`, "image is truncated", and
-  drivers add no tail checks of their own. Its source-identity check runs
+  drivers do not check their reads against the tail. Its source-identity check runs
   first, so a host file that shrank after opening reports
   `FSIMG_ESOURCE_CHANGED`, not truncation.
 * **Metadata that sizes resources must be present.** Whatever an open
   allocates or trusts from declared geometry lies within the slice before an
   allocation is sized from it, so a tiny file declaring a huge volume cannot
   amplify memory or scratch use.
+* **A walk stops at the end of the slice.** Declared geometry can admit more
+  references than the file holds blocks, so a walk that a table or tree bounds by
+  declared geometry stops at its first reference past the slice, and its index is
+  marked stopped. What it costs is then bounded by blocks in the slice, as on an
+  intact volume, and a lookup past the stop is `FSIMG_ECORRUPT`, never a hole.
 * **A missing tail nothing references does not stop reading.** Open, list and
   extract succeed when everything they touch is in the slice. A referenced
   structure or file past the end fails `FSIMG_ECORRUPT`, and a partial

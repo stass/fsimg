@@ -186,6 +186,10 @@ The reader's walker, `qnx6_index_build()`, turns a descriptor into a shared
    index in logical order; adjacent leaves coalesce, so a contiguous object
    has one extent.
 4. Charge one work unit per reference and the I/O of each indirect block.
+5. On a [truncated volume](design-qnx6.md#truncated-volumes), stop at the first
+   reference past the slice, after applying its policy. The index ends there and
+   is marked stopped, so a lookup past its end is `FSIMG_ECORRUPT`, a truncated
+   image.
 
 The policy is one of three, a closed set:
 
@@ -212,7 +216,8 @@ descriptor. The depth bound, the required-slot bound and the work charge
 together bound a walk by the object's declared length, so a hostile
 descriptor cannot make the walker visit more than `n + I` blocks. Because
 every block of an exclusive walk is claimed once, the exclusive walks of one
-reader visit at most `N` blocks in total.
+reader visit at most `N` blocks in total, and on a truncated volume at most the
+blocks in the slice plus one stopping reference per object.
 
 ## Allocation bitmap
 

@@ -49,6 +49,20 @@ typedef struct exfat_fixture {
 	char		 directory[64];
 } exfat_fixture_t;
 
+static void test_truncated_contiguous_work_bound(void);
+static void truncated_contiguous_file(exfat_fixture_t *, bool);
+static void check_truncated_contiguous_file(uint64_t, bool);
+static void test_truncated_contiguous_file_read(void);
+static void test_truncated_contiguous_file_seek(void);
+static void test_truncated_contiguous_file_absent(void);
+static void check_truncated_directory_length(bool, bool,
+    uint64_t, unsigned, unsigned);
+static void test_truncated_contiguous_directory_marker(void);
+static void test_truncated_contiguous_directory_no_marker(void);
+static void test_truncated_directory_exceeds_declared_length(void);
+static void test_truncated_directory_declared_length_survives(void);
+static void test_truncated_directory_partial_cluster(void);
+
 static void put16(unsigned char *, uint16_t);
 static void put32(unsigned char *, uint32_t);
 static void put64(unsigned char *, uint64_t);
@@ -2350,6 +2364,602 @@ truncated_remove_output(exfat_fixture_t *f)
 	CHECK(unlinkat(f->scratch, "out", AT_REMOVEDIR) == 0);
 }
 
+/* Keep the bitmap and upcase table inside a two-MiB prefix, but let the FAT
+ * address almost 200 MiB of heap. The alternating chain cannot coalesce.
+ */
+static void
+truncated_resource_fixture(exfat_fixture_t *f, bool directory)
+{
+	const unsigned fat_sectors = 3072, heap = 24 + fat_sectors;
+	const unsigned clusters = fat_sectors * 128 - 2;
+	const unsigned bitmap_clusters = (clusters + 4095) / 4096;
+	const unsigned root_cluster = 2 + bitmap_clusters + 256;
+	const unsigned first = root_cluster + 1;
+	unsigned char boot[24 * 512], set[96];
+	unsigned char *fat, *bitmap, *upcase, *root, *stream;
+	uint32_t low = first + 8, high = clusters + 1, current = first;
+	uint32_t length = clusters - (first - 2);
+
+	fixture_new(f);
+	bcopy(f->image, boot, sizeof(boot));
+	bcopy(file_set(f), set, sizeof(set));
+	free(f->image);
+	f->length = 2 * 1048576;
+	f->image = calloc(1, (size_t)f->length);
+	CHECK(f->image != NULL);
+	bcopy(boot, f->image, sizeof(boot));
+	put64(f->image + 72, heap + clusters);
+	put32(f->image + 84, fat_sectors);
+	put32(f->image + 88, heap);
+	put32(f->image + 92, clusters);
+	put32(f->image + 96, root_cluster);
+	fat = f->image + 24 * 512;
+	bitmap = f->image + heap * 512;
+	upcase = bitmap + bitmap_clusters * 512;
+	root = f->image + (heap + root_cluster - 2) * 512;
+	put32(fat, 0xfffffff8);
+	put32(fat + 4, UINT32_MAX);
+	for (unsigned c = 2; c < root_cluster; c++)
+		put32(fat + c * 4, c == 1 + bitmap_clusters || c == root_cluster - 1 ?
+		    UINT32_MAX : c + 1);
+	put32(fat + root_cluster * 4, UINT32_MAX);
+	memset(bitmap, 0xff, bitmap_clusters * 512);
+	for (unsigned i = 0; i < 65536; i++)
+		put16(upcase + i * 2, (uint16_t)(i >= 'a' && i <= 'z' ? i - 32 : i));
+	root[0] = 0x81;
+	put32(root + 20, 2);
+	put64(root + 24, (clusters + 7) / 8);
+	root[32] = 0x82;
+	put32(root + 36, rotate_sum(upcase, 131072, 32));
+	put32(root + 52, 2 + bitmap_clusters);
+	put64(root + 56, 131072);
+	stream = root + 64;
+	bcopy(set, stream, sizeof(set));
+	put16(stream + 4, directory ? 16 : 32);
+	put32(stream + 52, first);
+	put64(stream + 40, (uint64_t)length * 512);
+	put64(stream + 56, (uint64_t)length * 512);
+	fix_set_at(stream);
+	/* Eight contiguous stored clusters satisfy the cursor's first window;
+	 * its end marker must then avoid the rest of the fragmented allocation.
+	 */
+	for (unsigned k = 1; k < length; k++) {
+		uint32_t next;
+
+		if (k < 8)
+			next = current + 1;
+		else
+			next = (k & 1) == 0 ? high-- : low++;
+
+		put32(fat + current * 4, next);
+		current = next;
+	}
+	put32(fat + current * 4, UINT32_MAX);
+	fix_boot(f);
+	truncated_view(f, f->length);
+}
+
+static void
+check_truncated_chain_resource(bool directory, bool limited)
+{
+	exfat_fixture_t f;
+	fsimg_options_t options;
+	fsimg_stats_t before, after;
+	fsimg_error_t error = {0};
+	const fsimg_entry_t *entry;
+	fsimg_status_t status, listing_status;
+	uint64_t stored, storage_bound, work_limit;
+	unsigned entries = 0;
+	unsigned char byte;
+	size_t count;
+
+	truncated_resource_fixture(&f, directory);
+	fsimg_io_free(f.io);
+	fsimg_ctx_free(f.ctx);
+	f.io = NULL;
+	f.ctx = NULL;
+	stored = f.length / 512 - fsimg_load_le32(f.image + 88);
+	/* One extent per stored cluster, the heap bitset, and 96 pages cover
+	 * fixed reader/upcase state, directory sorting and store page rounding.
+	 * The work allowance includes decoding all 65536 upcase entries.
+	 */
+	storage_bound = stored * 32 +
+	    ((uint64_t)fsimg_load_le32(f.image + 92) + 7) / 8 + 96 * 4096;
+	work_limit = f.length / 512 * 32;
+	fsimg_options_init(&options);
+	options.scratch_directory_fd = f.scratch;
+	options.max_work = limited ? work_limit : 0;
+	CHECK(fsimg_ctx_new(&options, &f.ctx, NULL) == FSIMG_OK);
+	/* A small shared cache makes the storage charge include spilled pages. */
+	CHECK(fsimg_test_meta_cache(f.ctx, 4, NULL) == FSIMG_OK);
+	truncated_view(&f, f.length);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) == FSIMG_OK);
+	while ((status = fsimg_reader_next(f.reader, &entry, &error)) == FSIMG_OK)
+		entries++;
+	if (status != FSIMG_DONE)
+		fprintf(stderr, "exFAT resource listing: %s (limit=%" PRIu64 ")\n",
+		    error.message, work_limit);
+	listing_status = status;
+	if (status == FSIMG_DONE && !directory) {
+		truncated_reopen(&f);
+		CHECK(fsimg_reader_next(f.reader, &entry, &error) == FSIMG_OK);
+		status = fsimg_reader_read_at(f.reader, 4096, &byte, 1, &count, &error);
+		if (status != FSIMG_ECORRUPT)
+			fprintf(stderr, "exFAT resource seek: %s\n", error.message);
+		CHECK(status == FSIMG_ECORRUPT);
+		CHECK(count == 0 && strstr(error.message, "truncated") != NULL);
+	}
+	CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
+	if (!limited) {
+		uint64_t growth = after.scratch_peak - before.scratch_peak +
+		    after.memory_peak - before.memory_peak;
+
+		if (growth >= storage_bound)
+			fprintf(stderr, "exFAT storage growth=%" PRIu64 ", bound=%" PRIu64 "\n",
+			    growth, storage_bound);
+		CHECK(growth < storage_bound);
+	}
+	CHECK(listing_status == FSIMG_DONE && entries == 1);
+	fixture_free(&f);
+}
+
+static void
+test_truncated_directory_storage_bound(void)
+{
+	check_truncated_chain_resource(true, false);
+}
+
+static void
+test_truncated_directory_work_bound(void)
+{
+	check_truncated_chain_resource(true, true);
+}
+
+static void
+test_truncated_file_storage_bound(void)
+{
+	check_truncated_chain_resource(false, false);
+}
+
+static void
+test_truncated_file_work_bound(void)
+{
+	check_truncated_chain_resource(false, true);
+}
+
+/* Data.bin jumps past EOF and back to stored data. Good.bin is independent.
+ * ValidDataLength equals DataLength so missing content cannot become zeros.
+ */
+/* All streams share a stored prefix; listing does not claim exclusive
+ * ownership. Bitmap work must follow stored clusters, not declared length.
+ */
+static void
+test_truncated_contiguous_work_bound(void)
+{
+	const unsigned files = 128, root_clusters = 26;
+	const uint64_t work_limit = 500000;
+	exfat_fixture_t f;
+	fsimg_options_t options;
+	uint64_t work;
+	fsimg_error_t error = {0};
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	unsigned char set[96], *root, *fat;
+	uint32_t heap, clusters, first, root_cluster;
+	unsigned entries = 0;
+
+	truncated_resource_fixture(&f, false);
+	heap = fsimg_load_le32(f.image + 88);
+	clusters = fsimg_load_le32(f.image + 92);
+	root_cluster = fsimg_load_le32(f.image + 96);
+	first = root_cluster + root_clusters;
+	root = f.image + (heap + root_cluster - 2) * 512;
+	fat = f.image + 24 * 512;
+	bcopy(root + 64, set, sizeof(set));
+	bzero(root + 64, root_clusters * 512 - 64);
+	for (unsigned c = root_cluster; c < first; c++)
+		put32(fat + c * 4, c + 1 < first ? c + 1 : UINT32_MAX);
+	for (unsigned i = 0; i < files; i++) {
+		char name[9];
+		unsigned char *raw = root + 64 + i * sizeof(set);
+
+		bcopy(set, raw, sizeof(set));
+		CHECK(snprintf(name, sizeof(name), "F%07u", i) == 8);
+		put_name(raw, name);
+		raw[33] = 3; /* NoFatChain. */
+		put32(raw + 52, first);
+		put64(raw + 40, (uint64_t)(clusters + 2 - first) * 512);
+		put64(raw + 56, (uint64_t)(clusters + 2 - first) * 512);
+		fix_set_at(raw);
+	}
+	fsimg_io_free(f.io);
+	f.io = NULL;
+	fsimg_ctx_free(f.ctx);
+	fsimg_options_init(&options);
+	options.scratch_directory_fd = f.scratch;
+	options.max_work = work_limit;
+	CHECK(fsimg_ctx_new(&options, &f.ctx, NULL) == FSIMG_OK);
+	truncated_view(&f, (uint64_t)(heap + first - 1) * 512);
+	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error) == FSIMG_OK);
+	while ((status = fsimg_reader_next(f.reader, &entry, &error)) == FSIMG_OK)
+		entries++;
+	work = f.reader->session.progress.work;
+	if (status != FSIMG_DONE)
+		fprintf(stderr, "contiguous listing: %s; work=%" PRIu64 "\n",
+		    error.message, work);
+	CHECK(status == FSIMG_DONE);
+	CHECK(entries == files);
+	CHECK(work <= work_limit);
+	fixture_free(&f);
+}
+
+static void
+truncated_contiguous_file(exfat_fixture_t *f, bool absent)
+{
+	unsigned char *set, *bitmap;
+
+	fixture_new(f);
+	set = file_set(f);
+	set[33] = 3;
+	put64(set + 40, 1536);
+	put64(set + 56, 1536);
+	fix_set(f);
+	bitmap = f->image + cluster_offset(2);
+	memset(bitmap, 0xff, (HEAP_CLUSTERS + 7) / 8);
+	truncated_view(f, cluster_offset(FILE_CLUSTER + (absent ? 0 : 1)));
+	open_file(f);
+}
+
+static void
+check_truncated_contiguous_file(uint64_t offset, bool absent)
+{
+	exfat_fixture_t f;
+	fsimg_error_t error = {0};
+	unsigned char bytes[512], byte = 0xa5;
+	size_t count;
+
+	truncated_contiguous_file(&f, absent);
+	if (!absent) {
+		CHECK(fsimg_reader_read_at(f.reader, 0, bytes, sizeof(bytes),
+		    &count, &error) == FSIMG_OK);
+		CHECK(count == sizeof(bytes));
+		CHECK(bcmp(bytes, f.image + cluster_offset(FILE_CLUSTER), count) == 0);
+	}
+	CHECK(fsimg_reader_read_at(f.reader, offset, &byte, 1, &count,
+	    &error) == FSIMG_ECORRUPT);
+	CHECK(count == 0 && byte == 0xa5);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	fixture_free(&f);
+}
+
+static void
+test_truncated_contiguous_file_read(void)
+{
+	check_truncated_contiguous_file(512, false);
+}
+
+static void
+test_truncated_contiguous_file_seek(void)
+{
+	check_truncated_contiguous_file(1024, false);
+}
+
+static void
+test_truncated_contiguous_file_absent(void)
+{
+	check_truncated_contiguous_file(0, true);
+}
+
+/* The second cluster can be wholly absent or partially stored. A partial
+ * cluster remains part of the read window and cannot hide behind a marker.
+ */
+static void
+check_truncated_directory_length(bool contiguous, bool marker,
+    uint64_t declared, unsigned surviving, unsigned partial)
+{
+	exfat_fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+	unsigned char *set, *fat, *bitmap, *directory;
+	unsigned entries = 0;
+	bool overallocated;
+
+	fixture_new(&f);
+	set = file_set(&f);
+	put16(set + 4, 16);
+	set[33] = contiguous ? 3 : 1;
+	put64(set + 40, declared);
+	put64(set + 56, declared);
+	fix_set(&f);
+	fat = f.image + 24 * 512;
+	for (unsigned i = 0; i < surviving; i++)
+		put32(fat + (FILE_CLUSTER + i) * 4, FILE_CLUSTER + i + 1);
+	bitmap = f.image + cluster_offset(2);
+	memset(bitmap, 0xff, (HEAP_CLUSTERS + 7) / 8);
+	directory = f.image + cluster_offset(FILE_CLUSTER);
+	bzero(directory, surviving * 512 + partial);
+	if (!marker) {
+		for (unsigned slot = 0; slot < surviving * 16; slot++)
+			directory[slot * 32] = 0x01;
+	}
+	/* Retain declared geometry while shortening the physical view. */
+	f.length = cluster_offset(FILE_CLUSTER + surviving) + partial;
+	truncated_reopen(&f);
+	while ((status = fsimg_reader_next(f.reader, &entry, &error)) == FSIMG_OK)
+		entries++;
+	overallocated = (uint64_t)surviving * 512 > declared;
+	if (marker && partial == 0 && !overallocated) {
+		CHECK(status == FSIMG_DONE);
+		CHECK(entries == 1);
+	} else {
+		CHECK(status == FSIMG_ECORRUPT);
+		if (overallocated)
+			CHECK(strstr(error.message, "truncated") == NULL);
+		else if (partial == 0)
+			CHECK(strstr(error.message, "truncated") != NULL);
+	}
+	fixture_free(&f);
+}
+
+static void
+test_truncated_contiguous_directory_marker(void)
+{
+	check_truncated_directory_length(true, true, 1536, 1, 0);
+}
+
+static void
+test_truncated_contiguous_directory_no_marker(void)
+{
+	check_truncated_directory_length(true, false, 1536, 1, 0);
+}
+
+static void
+test_truncated_directory_exceeds_declared_length(void)
+{
+	check_truncated_directory_length(false, true, 512, 2, 0);
+}
+
+static void
+test_truncated_directory_declared_length_survives(void)
+{
+	check_truncated_directory_length(false, true, 1536, 1, 0);
+}
+
+static void
+test_truncated_directory_partial_cluster(void)
+{
+	check_truncated_directory_length(false, true, 1536, 1, 100);
+}
+
+static void
+truncated_stopped_file(exfat_fixture_t *f)
+{
+	unsigned char *set, *good, *fat, *bitmap;
+	const unsigned missing = FILE_CLUSTER + 4;
+
+	fixture_new(f);
+	set = file_set(f);
+	good = set + 96;
+	fat = f->image + 24 * 512;
+	bitmap = f->image + cluster_offset(2);
+	put64(set + 40, 1536);
+	put64(set + 56, 1536);
+	put32(fat + FILE_CLUSTER * 4, missing);
+	put32(fat + missing * 4, FILE_CLUSTER + 2);
+	put32(fat + (FILE_CLUSTER + 2) * 4, UINT32_MAX);
+	bitmap[(missing - 2) / 8] |= (unsigned char)(1u << ((missing - 2) % 8));
+	bitmap[(FILE_CLUSTER - 1) / 8] |= (unsigned char)(1u << ((FILE_CLUSTER - 1) % 8));
+	fix_set(f);
+	bcopy(set, good, 96);
+	put_name(good, "Good.bin");
+	put32(good + 52, FILE_CLUSTER + 1);
+	put64(good + 40, 4);
+	put64(good + 56, 4);
+	fix_set_at(good);
+	put32(fat + (FILE_CLUSTER + 1) * 4, UINT32_MAX);
+	bcopy("good", f->image + cluster_offset(FILE_CLUSTER + 1), 4);
+	for (unsigned part = 0; part < 3; part++) {
+		const uint32_t chain[] = { FILE_CLUSTER, missing, FILE_CLUSTER + 2 };
+
+		memset(f->image + cluster_offset(chain[part]), (int)('a' + part), 512);
+	}
+	f->length = cluster_offset(missing);
+}
+
+static void
+check_truncated_file_stop(uint64_t offset, bool short_chain, uint64_t initialized)
+{
+	exfat_fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	unsigned char byte = 0xa5;
+	size_t count;
+
+	truncated_stopped_file(&f);
+	/* An EOC at the missing cluster cannot establish the declared length. */
+	if (short_chain)
+		put32(f.image + 24 * 512 + (FILE_CLUSTER + 4) * 4, UINT32_MAX);
+	put64(file_set(&f) + 40, initialized);
+	fix_set(&f);
+	truncated_reopen(&f);
+	CHECK(fsimg_reader_next(f.reader, &entry, &error) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/Data.bin") == 0);
+	if (offset >= initialized) {
+		CHECK(fsimg_reader_read_at(f.reader, offset, &byte, 1, &count,
+		    &error) == FSIMG_OK);
+		CHECK(count == 1 && byte == 0);
+	} else {
+		CHECK(fsimg_reader_read_at(f.reader, offset, &byte, 1, &count,
+		    &error) == FSIMG_ECORRUPT);
+		CHECK(count == 0 && byte == 0xa5);
+		CHECK(strstr(error.message, "truncated") != NULL);
+	}
+	fixture_free(&f);
+}
+
+static void
+test_truncated_file_read_at_stop(void)
+{
+	check_truncated_file_stop(512, false, 1536);
+}
+
+static void
+test_truncated_file_seek_after_stop(void)
+{
+	check_truncated_file_stop(1024, false, 1536);
+}
+
+static void
+test_truncated_file_length_after_stop(void)
+{
+	check_truncated_file_stop(1024, true, 1536);
+}
+
+/* Bytes at or past ValidDataLength are zeros without consulting allocation,
+ * including when the allocation extends beyond the image.
+ */
+static void
+test_truncated_uninitialized_read_at_stop(void)
+{
+	check_truncated_file_stop(512, false, 512);
+}
+
+static void
+test_truncated_uninitialized_seek_after_stop(void)
+{
+	check_truncated_file_stop(1024, false, 0);
+}
+
+/* Root discovery and child preparation must both stop after a real end
+ * marker. With no marker, slots in the stop cluster must report truncation.
+ * The missing FAT entry is free to prove that it is never followed.
+ */
+static void
+check_truncated_directory_stop(bool root, bool marker)
+{
+	exfat_fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+	unsigned char *directory, *set, *bitmap;
+	unsigned first_slot;
+	uint32_t start;
+	const unsigned missing = FILE_CLUSTER + 4;
+
+	fixture_new(&f);
+	set = file_set(&f);
+	start = root ? ROOT_CLUSTER : FILE_CLUSTER;
+	directory = f.image + cluster_offset(start);
+	first_slot = root ? 6 : 0;
+	if (!root) {
+		put16(set + 4, 16);
+		put64(set + 40, 1536);
+		put64(set + 56, 1536);
+		fix_set(&f);
+		bzero(directory, 512);
+	}
+	put32(f.image + 24 * 512 + start * 4, missing);
+	put32(f.image + 24 * 512 + missing * 4, 0);
+	bitmap = f.image + cluster_offset(2);
+	bitmap[(missing - 2) / 8] |= (unsigned char)(1u << ((missing - 2) % 8));
+	if (!marker) {
+		for (unsigned slot = first_slot; slot < 16; slot++)
+			directory[slot * 32] = 0x01; /* Inactive entries, no end marker. */
+	}
+	f.length = cluster_offset(missing);
+	truncated_view(&f, f.length);
+	status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, &error);
+	if (status == FSIMG_OK) {
+		while ((status = fsimg_reader_next(f.reader, &entry, &error)) == FSIMG_OK)
+			continue;
+	}
+	CHECK(status == (marker ? FSIMG_DONE : FSIMG_ECORRUPT));
+	if (!marker)
+		CHECK(strstr(error.message, "truncated") != NULL);
+	fixture_free(&f);
+}
+
+static void
+test_truncated_root_end_marker(void)
+{
+	check_truncated_directory_stop(true, true);
+}
+
+static void
+test_truncated_root_slots_after_stop(void)
+{
+	check_truncated_directory_stop(true, false);
+}
+
+static void
+test_truncated_directory_end_marker(void)
+{
+	check_truncated_directory_stop(false, true);
+}
+
+static void
+test_truncated_directory_slots_after_stop(void)
+{
+	check_truncated_directory_stop(false, false);
+}
+
+/* Complete and shortened views use identical chains and bytes. Full
+ * verification on the complete view proves the fixture is well formed.
+ */
+static void
+check_truncated_chain_control(bool complete)
+{
+	exfat_fixture_t f;
+	fsimg_verify_report_t report;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	unsigned char bytes[1536];
+	unsigned entries = 0;
+	size_t count;
+
+	truncated_stopped_file(&f);
+	if (complete)
+		f.length = IMAGE_BYTES;
+	truncated_reopen(&f);
+	while ((status = fsimg_reader_next(f.reader, &entry, NULL)) == FSIMG_OK) {
+		size_t length = entry->size == 4 ? 4 : sizeof(bytes);
+
+		if (!complete && length > 512)
+			length = 512;
+		entries++;
+		CHECK(fsimg_reader_read_at(f.reader, 0, bytes,
+		    length, &count, NULL) == FSIMG_OK);
+		if (entry->size == 4)
+			CHECK(count == 4 && bcmp(bytes, "good", 4) == 0);
+		else {
+			CHECK(count == (complete ? 1536u : 512u));
+			for (size_t i = 0; i < count; i++)
+				CHECK(bytes[i] == (unsigned char)('a' + i / 512));
+		}
+	}
+	CHECK(status == FSIMG_DONE && entries == 2);
+	if (complete) {
+		truncated_reopen(&f);
+		CHECK(fsimg_verify(f.reader, FSIMG_VERIFY_PAYLOAD, &report, NULL) == FSIMG_OK);
+		CHECK(report.complete && report.files == 2);
+	}
+	fixture_free(&f);
+}
+
+static void
+test_truncated_chain_surviving_sibling(void)
+{
+	check_truncated_chain_control(false);
+}
+
+static void
+test_complete_chain_control(void)
+{
+	check_truncated_chain_control(true);
+}
+
 static void
 test_truncated_tail(void)
 {
@@ -2643,37 +3253,48 @@ test_truncated_metadata(void)
 static void
 test_truncated_bitmap_tail(void)
 {
+	const unsigned heap = 64, clusters = 4100, file = 4098, tail = 4101;
+	const uint64_t complete = (uint64_t)(heap + clusters) * 512;
 	exfat_fixture_t f;
 	fsimg_volume_info_t info;
 	fsimg_error_t error;
 	const fsimg_entry_t *entry;
-	unsigned char *bitmap, *set;
+	unsigned char *image, *root, *set;
 
 	fixture_new(&f);
-	bitmap = f.image + cluster_offset(263);
-	bcopy(f.image + cluster_offset(2), bitmap, 512);
-	put32(f.image + cluster_offset(ROOT_CLUSTER) + 20, 263);
-	put32(f.image + 24 * 512 + 263 * 4, UINT32_MAX);
-	bitmap[(263 - 2) / 8] |= (unsigned char)(1u << ((263 - 2) % 8));
-	/* Cluster 802's allocation bit is byte 100, beyond the cut. Its
-	 * contiguous one-byte file needs no FAT entry during enumeration.
-	 */
-	bitmap[(802 - 2) / 8] |= (unsigned char)(1u << ((802 - 2) % 8));
-	set = file_set(&f);
+	image = calloc(1, complete);
+	CHECK(image != NULL);
+	bcopy(f.image, image, HEAP_SECTOR * 512);
+	bcopy(f.image + HEAP_SECTOR * 512, image + heap * 512,
+	    IMAGE_BYTES - HEAP_SECTOR * 512);
+	free(f.image);
+	f.image = image;
+	f.length = complete;
+	put64(image + 72, heap + clusters);
+	put32(image + 84, 33);
+	put32(image + 88, heap);
+	put32(image + 92, clusters);
+	put32(image + 24 * 512 + 2 * 4, tail);
+	put32(image + 24 * 512 + tail * 4, UINT32_MAX);
+	/* The fragmented bitmap's second cluster holds the stored file's bit. */
+	image[(heap + tail - 2) * 512] = 0x09;
+	root = image + (heap + ROOT_CLUSTER - 2) * 512;
+	put64(root + 24, (clusters + 7) / 8);
+	set = root + 96;
 	set[33] = 3;
-	put32(set + 52, 802);
-	put64(set + 40, 1);
-	put64(set + 56, 1);
-	fix_set(&f);
-	/* Establish that the complete bitmap permits this file to be walked. */
+	put32(set + 52, file);
+	put64(set + 40, 512);
+	put64(set + 56, 512);
+	fix_set_at(set);
+	fix_boot(&f);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	CHECK(strcmp(entry->path, "/Data.bin") == 0);
-	truncated_view(&f, cluster_offset(263) + 100);
+	truncated_view(&f, (uint64_t)(heap + tail - 2) * 512);
 	CHECK(fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL) == FSIMG_OK);
 	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
-	CHECK(info.volume_bytes == IMAGE_BYTES);
-	CHECK(info.missing_bytes == IMAGE_BYTES - f.length);
+	CHECK(info.volume_bytes == complete);
+	CHECK(info.missing_bytes == complete - f.length);
 	CHECK(fsimg_reader_next(f.reader, &entry, &error) == FSIMG_ECORRUPT);
 	CHECK(strstr(error.message, "truncated") != NULL);
 	fixture_free(&f);
@@ -2947,6 +3568,30 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_truncated_contiguous_work_bound();
+	test_truncated_contiguous_file_read();
+	test_truncated_contiguous_file_seek();
+	test_truncated_contiguous_file_absent();
+	test_truncated_contiguous_directory_marker();
+	test_truncated_contiguous_directory_no_marker();
+	test_truncated_directory_exceeds_declared_length();
+	test_truncated_directory_declared_length_survives();
+	test_truncated_directory_partial_cluster();
+	test_truncated_directory_storage_bound();
+	test_truncated_directory_work_bound();
+	test_truncated_file_storage_bound();
+	test_truncated_file_work_bound();
+	test_truncated_file_read_at_stop();
+	test_truncated_file_seek_after_stop();
+	test_truncated_file_length_after_stop();
+	test_truncated_uninitialized_read_at_stop();
+	test_truncated_uninitialized_seek_after_stop();
+	test_truncated_root_end_marker();
+	test_truncated_root_slots_after_stop();
+	test_truncated_directory_end_marker();
+	test_truncated_directory_slots_after_stop();
+	test_truncated_chain_surviving_sibling();
+	test_complete_chain_control();
 	test_truncated_tail();
 	test_truncated_verify();
 	test_truncated_file();

@@ -69,15 +69,24 @@ a data region cut short costs nothing until something refers to it. The
 reserved area, every table and the fixed root must lie within the slice, and
 one that does not is `FSIMG_ECORRUPT` at open. That also bounds what declared
 geometry can size: the table capacity check bounds the cluster count by the
-table bytes, so the metadata scaled by the cluster count, the directory-cluster
-bitset and a file's extent index, stays proportional to bytes the file really
-holds.
+table bytes, so the directory-cluster bitset stays proportional to bytes the file
+really holds.
 
-A directory cluster past the end fails `FSIMG_ECORRUPT` when walked and a
-file's logical bytes past the end fail when read, though the slack after a
-file's last byte may be missing. Listing reads no file data, so it succeeds
-with a file past the end. Full verification fails on any truncated volume,
-before this driver's verification runs.
+The table can still hold far more clusters than the file: a table filling the file
+gives about `slice / 4` clusters, where an intact volume of that size has about
+`slice / cluster size`. So a chain walk stops at its first cluster past the slice,
+and walks cost no more than an intact volume's. A contiguous run ends there too.
+The stopping cluster's link is not read, and the chain's length against the file's
+size is judged only up to it.
+
+A directory that reached its end marker before the stop lists. One that did not
+reads on into the stopping cluster and fails `FSIMG_ECORRUPT`, and so does one
+whose marker shares a read window with a cut through its cluster. A file's logical
+bytes past the end fail when read, whether reached in sequence or by a seek, whose
+extent index ends at the stop; the slack after a file's last byte may be missing.
+Listing reads no file data, so it succeeds with a file past the end. Full
+verification fails on any truncated volume, before this driver's verification
+runs.
 A nonzero `BPB_TotSec16` is the sector count and a nonzero `BPB_FATSz16` the
 table size; the 32-bit field at offset 32 or 36 is consulted only when its
 16-bit counterpart is zero. Boot sectors from before DOS 3.31 keep boot code

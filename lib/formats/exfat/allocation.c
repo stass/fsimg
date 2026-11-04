@@ -13,6 +13,8 @@ typedef struct cluster_visit {
 
 static fsimg_status_t record_run(fsimg_reader_t *, fsimg_extent_index_t *,
     uint32_t, uint32_t, fsimg_error_t *);
+static fsimg_status_t index_contiguous(fsimg_reader_t *, uint32_t, uint32_t,
+    fsimg_extent_index_t *, fsimg_error_t *);
 static fsimg_status_t index_chain(fsimg_reader_t *, uint32_t,
     fsimg_extent_index_t *, fsimg_error_t *);
 static fsimg_status_t bitmap_range(fsimg_reader_t *, uint32_t, uint32_t,
@@ -85,7 +87,10 @@ record_run(fsimg_reader_t *reader, fsimg_extent_index_t *index, uint32_t first,
 
 /* Coalesce adjacent physical clusters while Brent's checkpoint detects
  * cycles. The heap count independently caps all walks, even malformed ones.
- * The index owns the entire chain, including preallocation beyond payload.
+ * The index owns the chain, including preallocation beyond payload.
+ * The heap count is bounded by table bytes and not by the clusters the image
+ * holds, so the walk stops at its first cluster past the slice, leaving the
+ * index stopped there.
  */
 static fsimg_status_t
 index_chain(fsimg_reader_t *reader, uint32_t start, fsimg_extent_index_t *index,
@@ -106,6 +111,11 @@ index_chain(fsimg_reader_t *reader, uint32_t start, fsimg_extent_index_t *index,
 	for (;;) {
 		if (!exfat_cluster_valid(g, cluster) || ++steps > g->clusters)
 			return (exfat_corrupt(error, "invalid or cyclic exFAT allocation chain"));
+		if (exfat_cluster_offset(g, cluster) >= reader->slice_bytes) {
+			fsimg_extent_index_stop(index);
+			return (count == 0 ? FSIMG_OK :
+			    record_run(reader, index, first, count, error));
+		}
 		count++;
 		status = exfat_table_get(reader, cluster, &next, error);
 		if (status != FSIMG_OK)
@@ -131,10 +141,38 @@ index_chain(fsimg_reader_t *reader, uint32_t start, fsimg_extent_index_t *index,
 	}
 }
 
+/* Index the clusters of a contiguous stream that start inside the slice. The
+ * count comes from DataLength, which the slice does not bound, and recording a
+ * run checks its bitmap bits, so past the slice this stops as a chain does.
+ */
+static fsimg_status_t
+index_contiguous(fsimg_reader_t *reader, uint32_t first, uint32_t count,
+    fsimg_extent_index_t *index, fsimg_error_t *error)
+{
+	const exfat_geometry_t *g = &exfat_state(reader)->geometry;
+	uint64_t offset, held;
+
+	offset = exfat_cluster_offset(g, first);
+	/* The clusters from first on that start in the slice, a rounded-up
+	 * division that cannot wrap once offset lies inside it.
+	 */
+	held = offset >= reader->slice_bytes ? 0 :
+	    (reader->slice_bytes - offset - 1) / g->cluster_bytes + 1;
+	if (count <= held)
+		return (record_run(reader, index, first, count, error));
+	fsimg_extent_index_stop(index);
+	/* held < count here, so it fits. */
+	return (held == 0 ? FSIMG_OK :
+	    record_run(reader, index, first, (uint32_t)held, error));
+}
+
 /* Build the extent index of a stream's allocation. A stream without
  * allocation has the empty (NULL) index. Contiguous allocation follows the
- * rounded-up DataLength; a chain must cover DataLength, and exactly so under
- * EXFAT_LENGTH_EXACT_ALLOCATION. Only a complete index is returned.
+ * rounded-up DataLength, up to the end of the slice. A chain must cover
+ * DataLength, and exactly so under EXFAT_LENGTH_EXACT_ALLOCATION. A chain that
+ * stopped at the end of the slice goes on for at least its stopping cluster, so
+ * it may yet cover DataLength, and only its excess can be judged. On success
+ * the index is returned, and it may be stopped.
  */
 fsimg_status_t
 exfat_index_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
@@ -143,7 +181,7 @@ exfat_index_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
 {
 	const exfat_geometry_t *g = &exfat_state(reader)->geometry;
 	fsimg_extent_index_t *index;
-	uint64_t allocated;
+	uint64_t allocated, minimum;
 	uint32_t count;
 	fsimg_status_t status;
 
@@ -160,14 +198,19 @@ exfat_index_build(fsimg_reader_t *reader, const exfat_stream_t *stream,
 	if (stream->contiguous) {
 		count = (uint32_t)(stream->length / g->cluster_bytes +
 		    (stream->length % g->cluster_bytes != 0));
-		status = record_run(reader, index, stream->first, count, error);
+		status = index_contiguous(reader, stream->first, count, index,
+		    error);
 	} else {
 		status = index_chain(reader, stream->first, index, error);
 		if (status == FSIMG_OK) {
 			allocated = fsimg_extent_index_length(index);
-			if (allocated < stream->length ||
+			minimum = allocated;
+			if (fsimg_extent_index_stopped(index))
+				minimum += g->cluster_bytes;
+			if ((allocated < stream->length &&
+			    !fsimg_extent_index_stopped(index)) ||
 			    (policy == EXFAT_LENGTH_EXACT_ALLOCATION &&
-			    allocated != stream->length))
+			    minimum > stream->length))
 				status = exfat_corrupt(error,
 				    "exFAT chain does not cover its declared allocation");
 		}

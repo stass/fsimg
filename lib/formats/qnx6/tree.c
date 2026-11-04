@@ -17,6 +17,16 @@
  * The walker visits only the slots that cover leaves below the object's
  * leaf count n, so its work is bounded by n plus the indirect blocks above
  * them; every other slot must hold the unused sentinel.
+ *
+ * N can exceed the blocks of a truncated volume's slice, so n alone would let
+ * a small file declare many more leaves than it holds. A walk therefore stops
+ * at its first reference past the slice: it indexes the leaves before that
+ * one and examines nothing after it. An exclusive walk's blocks are claimed,
+ * so walks are bounded together by the blocks in the slice, as on an intact
+ * volume. A stopped walk leaves an index shorter than its object, and a lookup
+ * past it reports truncation. Only a content object can stop: the system run
+ * lies in the slice, and visit_block refuses a system tree's reference outside
+ * it.
  */
 typedef struct qnx6_walk {
 	fsimg_reader_t	*reader;
@@ -45,6 +55,7 @@ static fsimg_status_t check_allocated(fsimg_reader_t *, uint32_t,
     fsimg_error_t *);
 static fsimg_status_t visit_block(qnx6_walk_t *, uint32_t, qnx6_role_t,
     fsimg_error_t *);
+static bool past_slice(const fsimg_reader_t *, uint32_t, unsigned);
 static fsimg_status_t visit_node(qnx6_walk_t *, uint32_t, unsigned, uint64_t,
     fsimg_error_t *);
 static fsimg_status_t check_slots(qnx6_walk_t *, const uint32_t *, unsigned,
@@ -278,15 +289,32 @@ check_slots(qnx6_walk_t *walk, const uint32_t *refs, unsigned count,
 		/* k < needed keeps first + k * span below n. */
 		status = visit_node(walk, refs[k], height, first + k * span,
 		    error);
-		if (status != FSIMG_OK)
+		if (status != FSIMG_OK ||
+		    fsimg_extent_index_stopped(walk->index))
 			return (status);
 	}
 	return (FSIMG_OK);
 }
 
+/* Whether a walk stops at the node in block. A leaf is still usable with one
+ * byte in the slice, since a read of its missing bytes fails in
+ * fsimg_reader_bytes; an indirect block must be whole, since a walk needs all
+ * of its references.
+ */
+static bool
+past_slice(const fsimg_reader_t *reader, uint32_t block, unsigned height)
+{
+	uint32_t block_size = qnx6_state(reader)->geometry.block_size;
+	uint64_t offset;
+
+	offset = QNX6_DATA_ORIGIN + (uint64_t)block * block_size;
+	return (offset + (height == 0 ? 1 : block_size) > reader->slice_bytes);
+}
+
 /* Visit the subtree rooted at block: a leaf at height 0, otherwise an
  * indirect block of P references to subtrees of height - 1, covering
- * leaves from first on.
+ * leaves from first on. A node past the slice gets the policy of the block
+ * it would have been, and stops the walk.
  */
 static fsimg_status_t
 visit_node(qnx6_walk_t *walk, uint32_t block, unsigned height, uint64_t first,
@@ -299,6 +327,11 @@ visit_node(qnx6_walk_t *walk, uint32_t block, unsigned height, uint64_t first,
 	unsigned level;
 	fsimg_status_t status;
 
+	if (past_slice(reader, block, height)) {
+		fsimg_extent_index_stop(walk->index);
+		return (visit_block(walk, block, height == 0 ?
+		    walk->object->role : QNX6_ROLE_INDIRECT, error));
+	}
 	if (height == 0) {
 		status = visit_block(walk, block, walk->object->role, error);
 		if (status != FSIMG_OK)

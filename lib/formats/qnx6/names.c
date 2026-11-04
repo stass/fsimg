@@ -43,7 +43,7 @@ long_name_read(fsimg_reader_t *reader, const qnx6_slot_t *slot,
 	if (!slot->long_padding_zero)
 		return (qnx6_unsupported(error, "QNX6 long-name slot has extension bytes"));
 	offset = (uint64_t)slot->long_index * g->block_size;
-	if (offset >= fsimg_extent_index_length(qnx6->names))
+	if (offset >= qnx6->header.names.length)
 		return (qnx6_corrupt(error, "QNX6 long-name index is out of range"));
 	status = qnx6_index_read(reader, qnx6->names, offset, prefix,
 	    sizeof(prefix), error);

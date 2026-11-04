@@ -305,9 +305,9 @@ exfat_close(fsimg_reader_t *reader)
 	reader->driver = NULL;
 }
 
-/* Replay indexed the current file's whole allocation when it exposed the
- * entry, so resolution is a lookup; common delivery stops at the valid-data
- * length and never reads the clusters after it.
+/* Replay indexed the current file's allocation, up to the end of the slice,
+ * when it exposed the entry, so resolution is a lookup; common delivery stops
+ * at the valid-data length and never reads the clusters after it.
  */
 static fsimg_status_t
 exfat_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *extent,

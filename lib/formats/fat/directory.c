@@ -197,9 +197,10 @@ read_directory_run(directory_pass_t *pass, const fsimg_extent_t *run,
 	return (FSIMG_OK);
 }
 
-/* Claim every cluster of a directory chain, including those after its end
- * marker: unused tail clusters still belong to the chain and cannot hide
- * sharing. Re-entering claimed storage is a cycle or a shared chain.
+/* Claim every cluster of a directory chain in the slice, including those
+ * after its end marker: unused tail clusters still belong to the chain and
+ * cannot hide sharing. Re-entering claimed storage is a cycle or a shared
+ * chain.
  */
 static fsimg_status_t
 claim_run(directory_pass_t *pass, const fsimg_extent_t *run,
@@ -274,6 +275,12 @@ fsimg_fat_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 				break;
 			if (status != FSIMG_OK)
 				return (status);
+			/* A directory past its end marker has nothing left to
+			 * read, so its chain need not be walked past the slice.
+			 * One before its marker reads on and fails as truncated.
+			 */
+			if (pass.ended && run.image_offset >= reader->slice_bytes)
+				break;
 			status = claim_run(&pass, &run, error);
 			if (status != FSIMG_OK)
 				return (status);

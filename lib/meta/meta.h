@@ -134,6 +134,8 @@ fsimg_status_t fsimg_extent_index_new(fsimg_session_t *,
     const fsimg_extent_domain_t *, fsimg_extent_index_t **, fsimg_error_t *);
 void fsimg_extent_index_free(fsimg_extent_index_t *);
 uint64_t fsimg_extent_index_length(const fsimg_extent_index_t *);
+void fsimg_extent_index_stop(fsimg_extent_index_t *);
+bool fsimg_extent_index_stopped(const fsimg_extent_index_t *);
 fsimg_status_t fsimg_extent_index_append(fsimg_extent_index_t *,
     const fsimg_extent_t *, fsimg_error_t *);
 fsimg_status_t fsimg_extent_index_lookup(fsimg_extent_index_t *, uint64_t,

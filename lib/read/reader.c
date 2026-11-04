@@ -188,7 +188,6 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	fsimg_read_options_t defaults;
 	fsimg_error_t detail;
 	fsimg_reader_t *reader;
-	uint64_t slice;
 	fsimg_status_t status;
 
 	if (out != NULL)
@@ -242,21 +241,23 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	    &reader->host_identity, error);
 	if (status != FSIMG_OK)
 		goto fail;
+	status = fsimg_io_get_size(input, &reader->slice_bytes, error);
+	if (status != FSIMG_OK)
+		goto fail;
 	status = fsimg_format_open(reader, options->format, error);
 	if (status != FSIMG_OK)
 		goto fail;
 	/* Declared filesystem geometry can exceed the available input. The
 	 * selected I/O view funds the default; an explicit context limit was
 	 * already installed by session initialization. Drivers report what the
-	 * volume declares, and only here is that compared with the slice.
+	 * volume declares, and only here is the declared size compared with
+	 * the slice.
 	 */
-	status = fsimg_io_get_size(input, &slice, error);
-	if (status != FSIMG_OK)
-		goto fail;
 	if (ctx->options.max_output_bytes == 0)
-		reader->session.output_limit = slice;
-	reader->info.missing_bytes = reader->info.volume_bytes > slice ?
-	    reader->info.volume_bytes - slice : 0;
+		reader->session.output_limit = reader->slice_bytes;
+	reader->info.missing_bytes =
+	    reader->info.volume_bytes > reader->slice_bytes ?
+	    reader->info.volume_bytes - reader->slice_bytes : 0;
 	reader->path = fsimg_alloc(ctx, ctx->options.max_path_bytes, &detail);
 	if (reader->path == NULL) {
 		status = detail.status;

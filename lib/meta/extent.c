@@ -22,6 +22,7 @@ struct fsimg_extent_index {
 	fsimg_extent_t	 cached;
 	uint64_t	 cached_record;
 	bool		 cache_valid;
+	bool		 stopped;
 };
 
 static fsimg_status_t extent_corrupt(fsimg_error_t *, const char *);
@@ -237,6 +238,24 @@ record_search(fsimg_extent_index_t *index, uint64_t offset, uint64_t *record,
 	return (FSIMG_OK);
 }
 
+/* Record that the walk building this index stopped at the end of the slice,
+ * which is how a walk over a truncated volume stays bounded by the bytes the
+ * image holds. The object goes on past the index, and that part is missing: a
+ * lookup there reports truncation, and a caller that ran out of index can tell
+ * that from reaching the end of the object.
+ */
+void
+fsimg_extent_index_stop(fsimg_extent_index_t *index)
+{
+	index->stopped = true;
+}
+
+bool
+fsimg_extent_index_stopped(const fsimg_extent_index_t *index)
+{
+	return (index != NULL && index->stopped);
+}
+
 /* Return the extent containing offset. Sequential access crosses each record
  * once: the cached extent answers repeated requests and its successor, which
  * must start where the cached extent ends, answers the next one. Any other
@@ -253,7 +272,9 @@ fsimg_extent_index_lookup(fsimg_extent_index_t *index, uint64_t offset,
 	fsimg_status_t status;
 
 	if (offset >= fsimg_extent_index_length(index))
-		return (extent_corrupt(error, "offset exceeds its indexed allocation"));
+		return (extent_corrupt(error,
+		    fsimg_extent_index_stopped(index) ? "image is truncated" :
+		    "offset exceeds its indexed allocation"));
 	if (index->cache_valid && extent_contains(&index->cached, offset)) {
 		*out = index->cached;
 		return (FSIMG_OK);

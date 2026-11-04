@@ -235,6 +235,12 @@ the FAT data region or the exFAT cluster heap. The index owns:
   directory-cycle marking;
 * lookup of the extent containing an offset, using a cached last extent for
   sequential access and binary search otherwise;
+* a stopped mark, which a driver sets when a walk over a
+  [truncated volume](architecture.md#byte-and-object-boundaries) ends at the end of
+  the slice, so the object goes on past its index. A lookup past any index is
+  `FSIMG_ECORRUPT`, and past a stopped one it reports a truncated image. A caller
+  that runs out of index asks whether it stopped, to tell a missing part from the
+  end of the object;
 * release on owner request and on reader failure or destruction.
 
 Drivers keep allocation discovery, geometry-specific checks, and chain or

@@ -41,8 +41,15 @@ next_slot(exfat_directory_cursor_t *pass, unsigned char *out, fsimg_error_t *err
 
 	if (pass->window_position == pass->window_length) {
 		remaining = fsimg_extent_index_length(pass->index) - pass->offset;
-		if (remaining == 0)
+		if (remaining == 0) {
+			/* Only a directory that reached its terminator can end
+			 * where its index stopped.
+			 */
+			if (!pass->ended &&
+			    fsimg_extent_index_stopped(pass->index))
+				return (exfat_corrupt(error, "image is truncated"));
 			return (FSIMG_DONE);
+		}
 		pass->window_length = remaining > sizeof(pass->window) ?
 		    sizeof(pass->window) : (size_t)remaining;
 		status = exfat_index_read(pass->reader, pass->index, pass->offset,
@@ -140,7 +147,9 @@ benign_allocation(fsimg_reader_t *reader, const unsigned char *raw,
 	stream = (exfat_stream_t){ .first = fsimg_load_le32(raw + 20),
 	    .length = fsimg_load_le64(raw + 24), .contiguous = (flags & 2) != 0 };
 	stream.valid_length = stream.length;
-	/* Building the index validates and claims the allocation. */
+	/* Building the index validates the allocation up to the end of the
+	 * slice and, during full verification, claims what it covers.
+	 */
 	status = exfat_index_build(reader, &stream, EXFAT_LENGTH_COVER_DATA,
 	    &index, error);
 	fsimg_extent_index_free(index);
@@ -235,7 +244,7 @@ mark_run(fsimg_reader_t *reader, uint32_t first, uint32_t count,
 	return (FSIMG_OK);
 }
 
-/* Claim every cluster of a directory's chain before decoding it, so
+/* Claim every indexed cluster of a directory's chain before decoding it, so
  * re-entering claimed storage through a cycle or a shared chain is
  * corruption. The claim is as good as the chain the index was built from; a
  * damaged scratch record that names other heap clusters is caught only by

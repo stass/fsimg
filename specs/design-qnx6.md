@@ -503,12 +503,19 @@ declaring a huge volume fails before anything is sized from `N`. A cut inside th
 run is refused even if the selected snapshot's trees happen to survive it, which
 loses little: a native volume's run is a small fraction of it.
 
-A walk checks its references against `N`, not the slice, because a file past the
-end still lists. So `N` can admit more leaves than a file of this size could as an
-intact volume, by up to `B / 4` times: `slice / 4` leaves, each visited at open or
-when listed, charged to the scratch and work budgets. The cost stays linear in
-bytes the file holds, since every leaf reference sits in an indirect block in the
-slice.
+A tree walk stops at its first reference past the slice, because `N` admits more
+leaves than the file holds. A leaf is past the slice when none of its bytes is in
+it. An indirect block is past the slice unless all of its bytes are, since a walk
+needs every one of its references. The stopping reference gets the checks any
+other does, and neither its subtree nor the slots after it are examined. So the
+blocks walked are in the slice, and since a walk claims its blocks, the walks of
+a listing together cost no more than an intact volume of this size.
+
+An object whose walk stopped still lists, so a file past the end does not hide its
+siblings. Its index ends where the walk stopped, and every read from there on is
+`FSIMG_ECORRUPT`, reporting a truncated image, whether it is a file, a directory
+or a long name: a lookup past the index is never a hole. Bytes before the stop
+read normally, including the surviving bytes of a leaf the cut went through.
 
 ## Tree descriptors and addressing
 

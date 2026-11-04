@@ -102,6 +102,7 @@ struct fsimg_reader {
 	fsimg_ctx_t	*ctx;
 	fsimg_session_t	 session;
 	fsimg_io_t	*input;
+	uint64_t	 slice_bytes;	/* the input's length, fixed at open */
 	const fsimg_reader_ops_t *ops;
 	void		*driver;
 	fsimg_host_file_t identity;

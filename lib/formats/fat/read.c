@@ -337,6 +337,17 @@ fsimg_fat_chain_run(fsimg_reader_t *reader, fat_chain_t *chain,
 		return (FSIMG_DONE);
 	run->logical_offset = chain->steps * g->cluster_bytes;
 	run->image_offset = fsimg_fat_cluster_offset(g, chain->cluster);
+	/* A chain is walked no further than the slice, since the cluster count is
+	 * bounded by table bytes and not by the clusters the image holds. The
+	 * first cluster past it is the chain's last run, with its link unread:
+	 * reading it fails as truncated, and a caller that needs no more stops
+	 * there.
+	 */
+	if (run->image_offset >= reader->slice_bytes) {
+		run->length = g->cluster_bytes;
+		chain->cluster = 0;
+		return (FSIMG_OK);
+	}
 	/* Consume each link exactly once. A contiguous sequence becomes one run;
 	 * the cursor retains the first cluster of the following nonadjacent run.
 	 * The whole allocation is represented, including final-cluster slack.
@@ -346,7 +357,9 @@ fsimg_fat_chain_run(fsimg_reader_t *reader, fat_chain_t *chain,
 		if (status != FSIMG_OK)
 			return (status);
 		run->length += g->cluster_bytes;
-		if (chain->cluster == 0 || chain->cluster != cluster + 1)
+		if (chain->cluster == 0 || chain->cluster != cluster + 1 ||
+		    fsimg_fat_cluster_offset(g, chain->cluster) >=
+		    reader->slice_bytes)
 			return (FSIMG_OK);
 	}
 }
@@ -378,8 +391,11 @@ fsimg_fat_owner_append(fsimg_reader_t *reader, const fsimg_extent_t *run,
 
 /* One forward pass over the current file's chain records every run in the
  * shared index. The chain walk validates the allocation length; the index
- * confines every record to the data region. Only a complete index becomes
- * the current file's.
+ * confines every record to the data region. The pass stops at the first run
+ * past the slice, since the cluster count is bounded by table bytes and not by
+ * the clusters the image holds; the index then ends there, and the chain's
+ * length is not judged past it. On success the index becomes the current
+ * file's, and it may be stopped.
  */
 static fsimg_status_t
 build_index(fsimg_reader_t *reader, fsimg_error_t *error)
@@ -403,6 +419,10 @@ build_index(fsimg_reader_t *reader, fsimg_error_t *error)
 			break;
 		if (status != FSIMG_OK)
 			goto fail;
+		if (run.image_offset >= reader->slice_bytes) {
+			fsimg_extent_index_stop(index);
+			break;
+		}
 		status = fsimg_extent_index_append(index, &run, error);
 		if (status != FSIMG_OK)
 			goto fail;
@@ -435,8 +455,8 @@ fsimg_fat_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *run,
 		*run = fat->extent;
 		return (FSIMG_OK);
 	}
-	/* Anywhere but the cached extent's end is a seek: one complete forward
-	 * pass builds the index, and later lookups search it instead of
+	/* Anywhere but the cached extent's end is a seek: one forward pass, up
+	 * to the end of the slice, builds the index, and later lookups search it instead of
 	 * restarting the allocation chain.
 	 */
 	if (offset != end) {
