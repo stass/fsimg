@@ -83,15 +83,12 @@ hfsplus_boot_area_valid(const unsigned char *prefix)
 	return (true);
 }
 
-/* The header's fields the probe and open both check. Whether N * B fits the
- * volume uses checked arithmetic, as both are hostile.
+/* The header's fields the probe and open both check. N * B is not compared
+ * with the slice: a shorter slice is a truncated volume, not a corrupt one.
  */
 fsimg_status_t
-hfsplus_header_check(const hfsplus_header_t *header, uint64_t volume_bytes,
-    fsimg_error_t *error)
+hfsplus_header_check(const hfsplus_header_t *header, fsimg_error_t *error)
 {
-	uint64_t allocation;
-
 	if (!(header->signature == HFSPLUS_SIGNATURE_PLUS &&
 	    header->version == HFSPLUS_VERSION_PLUS) &&
 	    !(header->signature == HFSPLUS_SIGNATURE_X &&
@@ -105,11 +102,6 @@ hfsplus_header_check(const hfsplus_header_t *header, uint64_t volume_bytes,
 	if (header->total_blocks == 0)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus volume has no blocks"));
-	if (!fsimg_mul_u64(header->total_blocks, header->block_size,
-	    &allocation) ||
-	    allocation > volume_bytes)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus allocation exceeds the volume"));
 	return (FSIMG_OK);
 }
 
@@ -128,6 +120,7 @@ hfsplus_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
 	hfsplus_mdb_t mdb;
 	uint16_t signature;
 
+	(void)volume_bytes;
 	*variant = &hfsplus_variants[HFSPLUS_VARIANT_PLUS];
 	if (prefix == NULL || length < HFSPLUS_PROBE_BYTES ||
 	    !hfsplus_boot_area_valid(prefix))
@@ -148,5 +141,5 @@ hfsplus_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
 		    "no HFS Plus identity signature"));
 	if (signature == HFSPLUS_SIGNATURE_X)
 		*variant = &hfsplus_variants[HFSPLUS_VARIANT_X];
-	return (hfsplus_header_check(&header, volume_bytes, error));
+	return (hfsplus_header_check(&header, error));
 }

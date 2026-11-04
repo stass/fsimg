@@ -93,8 +93,8 @@ The probe inspects 1536 bytes. Without the
 [identity signature](design-hfsplus.md#probe-identity) it makes no claim
 (`FSIMG_EFORMAT`). With it, a header signature is checked for its version
 pairing (`FSIMG_EUNSUPPORTED` otherwise), a power-of-two `blockSize` from 512,
-a nonzero `totalBlocks` and `totalBlocks * blockSize` within the volume
-length (`FSIMG_ECORRUPT` otherwise); a wrapper's master directory block is
+and a nonzero `totalBlocks` (`FSIMG_ECORRUPT` otherwise); `totalBlocks *
+blockSize` may exceed the slice. A wrapper's master directory block is
 claimed on its signatures alone, its fields being checked at open. The probe
 then claims the image with `FSIMG_OK`. It performs no I/O and allocates
 nothing. A forced `hfsx` on an `H+` volume, or a forced `hfsplus` on an `HX`
@@ -110,9 +110,10 @@ next reads:
    whose header at 1024 must show `H+` version 4 and pass the probe's field
    checks. The embedded volume's own boot blocks lie inside the wrapper's
    allocation and are not tested.
-2. **Geometry.** Require the slice length `V` to be a multiple of 512;
-   decode the header; apply the attribute table; derive `B`, `N`, `r`, `t`
-   and the content domain `[r * B, (N - t) * B)` into `hfsplus_geometry_t`.
+2. **Geometry.** Decode the header; take `V`, the slice length or a longer
+   `N * B`, and require it to be a multiple of 512; apply the attribute
+   table; derive `B`, `N`, `r`, `t` and the content domain
+   `[r * B, (N - t) * B)` into `hfsplus_geometry_t`.
 3. **Extents tree.** Build its fork index from the eight inline extents
    alone, require their sum to equal `totalBlocks`, read node 0 and check
    the header record against the tree parameter table.
@@ -162,6 +163,30 @@ order: `journal` (0 none, 1 clean, 2 uninitialized), `catalog_node_bytes`,
 `create_date` (the stored 1904-based local value) and, for a wrapped volume,
 `wrapper_offset`. `FSIMG_VOLUME_FREE` is set only by a completed
 verification.
+
+A slice shorter than `N * B` opens by the
+[common rule for a truncated volume](architecture.md#byte-and-object-boundaries):
+`info` reports `N * B`, and the reader core derives the missing bytes from
+it. The real volume may run up to one block further, which would free its
+last block for content; `t` counts that block as reserved all the same, and a
+fork reaching it fails as outside the content domain, which it could not be
+read from anyway.
+
+Declared geometry sizes nothing and drives no walk here, so nothing has to
+stop at the slice's end. Node buffers follow the bounded `nodeSize`, and an
+extent index and the directory scratch grow by records actually read. Searches
+descend by height, and every cursor scan ends on its keys: strictly ascending
+catalog and attribute keys, and overflow keys whose start block must grow. A
+sibling chain therefore visits a node in the slice at most once, whatever
+`totalNodes` declares. No fork has a hole, so no extent index needs a stopped
+mark. A tree node, a journal record or a file's block past the end fails
+`FSIMG_ECORRUPT` in the read funnel when something refers to it: at open for
+what open reads, at listing for a directory's records and its attributes, on
+a read for file content.
+
+A cut that loses only bytes past `N * B` leaves no proof. Such a slice is
+judged as a volume of its own length, so an alternate header not at
+`V - 1024` fails verification's last step.
 
 ## The fork resolver
 
@@ -663,6 +688,10 @@ folders, compressed files of every type with its own small encoders where a
 codec allows a stored form, journals and wrappers, and mutates them for the
 format design's [acceptance matrix](design-hfsplus.md#acceptance-matrix).
 Every valid fixture has a paired mutation that must fail with its class.
+Fixtures cut short check the common truncated-volume rule: a cut past
+everything touched opens, lists and extracts and reports the missing bytes,
+a cut through a tree, directory or file fails `FSIMG_ECORRUPT` where it is
+reached, and verification fails.
 Reading tests compare `info`, `t`, `x -O` and `x` on the fixtures and on
 each native capture and corpus specimen found through
 `FSIMG_HFSPLUS_NATIVE`, against a manifest of expected results: the names,

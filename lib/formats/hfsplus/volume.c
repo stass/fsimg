@@ -107,28 +107,34 @@ check_identity(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 
 /* Decode the header, apply the attribute table and derive the content domain
  * [r * B, (N - t) * B), where r blocks overlap [0, 1536) and t blocks below N
- * overlap [V - 1024, V).
+ * overlap [V - 1024, V). V is the slice's length, or N * B when a shorter slice
+ * proves the volume's tail is gone: the volume keeps the geometry it declares,
+ * and the read funnel refuses what the slice does not hold.
  */
 static fsimg_status_t
-derive_geometry(fsimg_reader_t *reader, uint64_t volume_bytes,
+derive_geometry(fsimg_reader_t *reader, uint64_t slice_bytes,
     const unsigned char *prefix, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	hfsplus_header_t *header = &hfsplus->header;
 	hfsplus_geometry_t *g = &hfsplus->geometry;
-	uint64_t tail_block;
+	uint64_t allocation_bytes, tail_block, volume_bytes;
 	uint32_t block_size, blocks, first, end;
 	fsimg_status_t status;
 
-	if (volume_bytes % 512 != 0)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus volume length is not whole sectors"));
 	if (!hfsplus_header_decode(prefix + HFSPLUS_BOOT_BYTES,
 	    HFSPLUS_HEADER_BYTES, header))
 		return (hfsplus_corrupt(error, "HFS Plus header is malformed"));
-	status = hfsplus_header_check(header, volume_bytes, error);
+	status = hfsplus_header_check(header, error);
 	if (status != FSIMG_OK)
 		return (status);
+	/* Both operands are 32 bits wide, so the product cannot overflow. */
+	allocation_bytes = (uint64_t)header->total_blocks * header->block_size;
+	volume_bytes = allocation_bytes > slice_bytes ? allocation_bytes :
+	    slice_bytes;
+	if (volume_bytes % 512 != 0)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus volume length is not whole sectors"));
 	if ((header->attributes & ~ATTRIBUTES_KNOWN) != 0)
 		return (hfsplus_unsupported(error,
 		    "HFS Plus volume has an unsupported attribute"));
@@ -502,14 +508,14 @@ hfsplus_volume_open(fsimg_reader_t *reader,
     fsimg_error_t *error)
 {
 	unsigned char prefix[HFSPLUS_PROBE_BYTES];
-	uint64_t volume_bytes;
+	uint64_t slice_bytes;
 	size_t transferred;
 	fsimg_status_t status;
 
-	status = fsimg_io_get_size(reader->input, &volume_bytes, error);
+	status = fsimg_io_get_size(reader->input, &slice_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (volume_bytes < HFSPLUS_PROBE_BYTES)
+	if (slice_bytes < HFSPLUS_PROBE_BYTES)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER,
 		    "HFS Plus volume is shorter than its header"));
@@ -519,7 +525,7 @@ hfsplus_volume_open(fsimg_reader_t *reader,
 		return (status);
 	status = check_identity(reader, forced, prefix, error);
 	if (status == FSIMG_OK)
-		status = derive_geometry(reader, volume_bytes, prefix, error);
+		status = derive_geometry(reader, slice_bytes, prefix, error);
 	if (status == FSIMG_OK)
 		status = open_extents_tree(reader, error);
 	if (status == FSIMG_OK)

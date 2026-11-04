@@ -679,13 +679,6 @@ fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
 	if (reader->state != FSIMG_READER_NEW)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0,
 		    FSIMG_OP_VERIFY, "verification requires an untouched reader"));
-	/* A driver without a verifier advertises no verify capability; the
-	 * request fails before any work, so the reader stays untouched and the
-	 * report stays incomplete.
-	 */
-	if (reader->ops->verify == NULL)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_VERIFY, "format has no full verification"));
 	/* A volume missing part of itself is not a verified volume, whatever
 	 * references the tail: it fails before any work, the reader untouched,
 	 * and no driver needs a truncation check of its own.
@@ -693,6 +686,13 @@ fsimg_verify(fsimg_reader_t *reader, unsigned flags, fsimg_verify_report_t *out,
 	if (reader->info.missing_bytes != 0)
 		return (fsimg_truncated_error(error, FSIMG_OP_VERIFY, "image",
 		    reader->info.missing_bytes, ""));
+	/* A driver without a verifier advertises no verify capability; the
+	 * request fails before any work, so the reader stays untouched and the
+	 * report stays incomplete.
+	 */
+	if (reader->ops->verify == NULL)
+		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+		    FSIMG_OP_VERIFY, "format has no full verification"));
 	if (reader->assumed_identity != NULL)
 		return (assumed_identity_failed(reader, error));
 	out->scope = (flags & FSIMG_VERIFY_PAYLOAD) != 0 ?

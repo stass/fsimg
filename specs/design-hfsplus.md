@@ -88,9 +88,13 @@ All project-defined C types have `_t` typedefs.
 
 ### The volume and its slice
 
-The volume is the slice the driver opens, of length `V` bytes. `V` is a
-multiple of 512; a slice whose length is not is `FSIMG_ECORRUPT`, because
-the alternate header's position is undefined. A volume inside a partition,
+The volume is the slice the driver opens. `V` is its length in bytes, or the
+header's `N * B` when that is longer, which proves the slice lost the
+volume's tail and makes it a
+[truncated volume](architecture.md#byte-and-object-boundaries). `V` is a
+multiple of 512; a slice that reaches `N * B` with a length that is not is
+`FSIMG_ECORRUPT`, because the alternate header's position is undefined. A
+volume inside a partition,
 disk image or wrapper is reached by the [layer design](design-layers.md) or
 the [wrapper rule](#the-hfs-wrapper); the driver never treats the start of a
 disk or a DMG file as the start of a volume. [TN]
@@ -108,9 +112,9 @@ The volume is divided into `N` allocation blocks of `B` bytes, where `B` is
 the header's `blockSize`, a power of two from 512, and `N` is the header's
 `totalBlocks`. Block `b` occupies `[b * B, (b + 1) * B)`. Every extent,
 bitmap bit and block count uses these numbers, starting at zero. The reader
-requires `N >= 1` and `N * B <= V`; the bytes from `N * B` to `V`, fewer
-than `B` on a native volume, are outside allocation and may hold the
-alternate header. [TN]
+requires `N >= 1`, and `N * B <= V` follows from `V`; the bytes from `N * B`
+to `V`, fewer than `B` on a native volume, are outside allocation and may
+hold the alternate header. [TN]
 
 Blocks that overlap `[0, 1536)` or `[V - 1024, V)` are reserved: they
 belong to no fork and are marked allocated in the bitmap. With `r =
@@ -218,7 +222,8 @@ all-zero sectors a disk-image container left out of the `mozilla-1.0-smi`
 specimen (E10), fails this comparison like a disagreeing one: verification
 reports `FSIMG_ECORRUPT` at its last step, after every other pass has run,
 and reading, listing and extraction, which use the primary alone, are
-unaffected. The 1024 bytes at `V - 1024` always lie inside the slice, so
+unaffected. Verification never runs on a truncated volume, so the 1024
+bytes at `V - 1024` lie inside the slice, and
 the read itself can fail only for operational reasons, and those keep
 their own classes: a read the I/O callback fails is `FSIMG_EIO`, and
 cancellation and resource exhaustion are reported as common code reports

@@ -485,7 +485,7 @@ static const hfsplus_owned_name_t hfsplus_owned_names[HFSPLUS_OWNED_COUNT]
  * trailing ones. Forks occupy only blocks r to N - t, the content domain.
  */
 typedef struct hfsplus_geometry {
-	uint64_t	 volume_bytes;	/* V */
+	uint64_t	 volume_bytes;	/* V, past the slice when it is truncated */
 	uint32_t	 block_size;	/* B */
 	uint32_t	 blocks;	/* N */
 	uint32_t	 first_block;	/* r */
@@ -652,12 +652,11 @@ fsimg_status_t hfsplus_unsupported(fsimg_error_t *, const char *);
 /* Identity and the header fields the probe checks (descriptor.c). Open
  * repeats them, since a caller assuming the identity runs no probe.
  * hfsplus_boot_area_valid() tests the 1024 bytes before the header.
- * hfsplus_header_check() checks the signature's version pairing, blockSize,
- * totalBlocks and N * B within a volume of the given length.
+ * hfsplus_header_check() checks the signature's version pairing, blockSize
+ * and totalBlocks.
  */
 bool hfsplus_boot_area_valid(const unsigned char *);
-fsimg_status_t hfsplus_header_check(const hfsplus_header_t *, uint64_t,
-    fsimg_error_t *);
+fsimg_status_t hfsplus_header_check(const hfsplus_header_t *, fsimg_error_t *);
 
 /* The fork resolver (fork.c), the only code that interprets an extent
  * descriptor or an overflow record.
