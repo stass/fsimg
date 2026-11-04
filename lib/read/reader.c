@@ -451,25 +451,29 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 /*
  * Charge a file's declared size to the output budget before it is copied. The
  * default budget is the slice, so on a truncated volume a lost file commonly
- * shows first as an overrun. One read of its last byte goes through the funnel
- * and tells the two apart: a file past the end is corrupt, while one whose last
- * byte is there keeps the limit error, since its extents are shared or the limit
- * is the caller's. Any other failure of that read outranks the limit. Either way
+ * shows first as an overrun. One read of its last stored byte goes through the
+ * funnel and tells the two apart: a file past the end is corrupt, while one whose
+ * last stored byte is there keeps the limit error, since its extents are shared
+ * or the limit is the caller's. The bytes after the initialized length are zeros
+ * no read of the image supplies, so they prove nothing and a file storing none
+ * keeps the limit. Any other failure of that read outranks the limit. Either way
  * the copy does not start.
  */
 fsimg_status_t
 fsimg_reader_charge_file(fsimg_reader_t *reader, fsimg_error_t *error)
 {
-	uint64_t size = reader->entry.size;
 	fsimg_error_t detail;
 	unsigned char last;
 	size_t count;
 	fsimg_status_t probe, status;
 
-	status = fsimg_session_charge(&reader->session, 0, size, 1, error);
-	if (status != FSIMG_ELIMIT || reader->info.missing_bytes == 0 || size == 0)
+	status = fsimg_session_charge(&reader->session, 0, reader->entry.size, 1,
+	    error);
+	if (status != FSIMG_ELIMIT || reader->info.missing_bytes == 0 ||
+	    reader->initialized == 0)
 		return (status);
-	probe = fsimg_reader_read_at(reader, size - 1, &last, 1, &count, &detail);
+	probe = fsimg_reader_read_at(reader, reader->initialized - 1, &last, 1,
+	    &count, &detail);
 	if (probe == FSIMG_OK || probe == FSIMG_ELIMIT)
 		return (status);
 	if (error != NULL)

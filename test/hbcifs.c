@@ -1449,6 +1449,71 @@ test_assumed_hbcifs_still_validates_payload_length(void)
 	container_free(&c);
 }
 
+/* Decode a complete hbcifs stream whose nested ImageFS size disagrees
+ * with the supplied disk. One literal segment preserves the changed bytes.
+ */
+static void
+check_truncated_body(bool missing)
+{
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_AUTOMATIC };
+	fsimg_volume_info_t info;
+	fsimg_verify_report_t report;
+	fsimg_reader_t *reader;
+	fsimg_io_t *volume;
+	fsimg_error_t error;
+	unsigned char *plain;
+	size_t length;
+	segment_t segment;
+	container_t c;
+	buffer_t bytes;
+	memory_file_t file;
+	fixture_t f;
+
+	plain = imagefs_build(&length);
+	if (missing)
+		put_le32(plain + 0x08, (uint32_t)length + 4);
+	else {
+		plain = realloc(plain, length + 4);
+		CHECK(plain != NULL);
+		bzero(plain + length, 4);
+		length += 4;
+	}
+	segment = (segment_t){ .length = length };
+	container_init(&c, plain, length, &segment, 1);
+	bytes = container_file(&c);
+	fixture_init(&f, 0, 0);
+	CHECK(open_buffer(&f, &file, &bytes, NULL, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_select(f.image, &selector, &volume, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_open(f.ctx, volume, NULL, &reader, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_get_info(reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.volume_bytes == (missing ? length + 4 : length - 4));
+	CHECK(info.missing_bytes == (missing ? 4 : 0));
+	CHECK(fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, &error) == FSIMG_ECORRUPT);
+	CHECK(!report.complete);
+	if (missing) {
+		CHECK(strstr(error.message, "truncated") != NULL);
+		CHECK(strstr(error.message, "4 declared bytes are missing") != NULL);
+	} else
+		CHECK(strstr(error.message, "longer") != NULL);
+	fsimg_reader_free(reader);
+	fsimg_io_free(volume);
+	fixture_free(&f);
+	free(bytes.bytes);
+	container_free(&c);
+}
+
+static void
+test_truncated_body(void)
+{
+	check_truncated_body(true);
+}
+
+static void
+test_truncated_longer_body(void)
+{
+	check_truncated_body(false);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1463,6 +1528,8 @@ main(int argc, char **argv)
 	}
 	CHECK(signal(SIGPIPE, SIG_IGN) != SIG_ERR);
 
+	test_truncated_body();
+	test_truncated_longer_body();
 	test_capability();
 	test_profile_facts();
 	test_open();

@@ -421,6 +421,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/coordinator_worker_test.rb \
 	test/cli/create_operands_test.rb \
 	test/cli/examples_test.rb \
+	test/cli/exfat_truncated_test.rb \
 	test/cli/extract_here_test.rb \
 	test/cli/extraction_acls_test.rb \
 	test/cli/extraction_names_test.rb \
@@ -437,7 +438,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/human_help_test.rb \
 	test/cli/human_loss_bounds_test.rb \
 	test/cli/ifs_create_test.rb \
-	test/cli/ifs_test.rb \
+	test/cli/ifs_test.rb test/cli/ifs_truncated_test.rb \
 	test/cli/ifsboot_create_test.rb \
 	test/cli/manifest_generated_test.rb \
 	test/cli/manifest_host_test.rb \

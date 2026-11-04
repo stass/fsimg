@@ -22,11 +22,6 @@ boot_region(fsimg_reader_t *reader, uint64_t base, exfat_geometry_t *g,
 	size_t transferred;
 	fsimg_status_t status;
 
-	status = fsimg_io_get_size(reader->input, &input_length, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (input_length < EXFAT_VOLUME_MIN)
-		return (exfat_corrupt(error, "input is smaller than an exFAT volume"));
 	status = fsimg_reader_bytes(reader, base, boot, sizeof(boot), &transferred, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -97,7 +92,7 @@ boot_region(fsimg_reader_t *reader, uint64_t base, exfat_geometry_t *g,
 	g->root_cluster = fsimg_load_le32(boot + 96);
 	g->flags = fsimg_load_le16(boot + 106);
 	if (!fsimg_mul_u64(volume_sectors, g->sector_bytes, &g->volume_bytes) ||
-	    g->volume_bytes > input_length || g->volume_bytes > INT64_MAX ||
+	    g->volume_bytes > INT64_MAX ||
 	    g->volume_bytes < EXFAT_VOLUME_MIN || fat_sector < 24 || fat_sectors == 0 ||
 	    fat_sector + fat_sectors > heap_sector || heap_sector >= volume_sectors ||
 	    g->clusters < 3 || g->clusters > EXFAT_CLUSTER_MAX ||
@@ -112,6 +107,17 @@ boot_region(fsimg_reader_t *reader, uint64_t base, exfat_geometry_t *g,
 	if (g->clusters != expected ||
 	    ((uint64_t)g->clusters + 2) * 4 > g->fat_bytes)
 		return (exfat_corrupt(error, "inconsistent exFAT heap or FAT capacity"));
+	/* The declared length may exceed a truncated input: a heap cut short
+	 * costs nothing until something refers to it. The FAT must be there,
+	 * and the capacity check above bounds the cluster count by its bytes,
+	 * so metadata scaled by clusters stays proportional to what the file
+	 * holds.
+	 */
+	status = fsimg_io_get_size(reader->input, &input_length, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (g->heap_offset > input_length)
+		return (exfat_corrupt(error, "image is truncated before the exFAT heap"));
 	return (FSIMG_OK);
 }
 

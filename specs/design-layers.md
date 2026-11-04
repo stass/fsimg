@@ -1239,7 +1239,7 @@ its JSON verify record is `"complete":false` with an `unverified` member,
 and its exit status is that of a passing verification. A
 container that carries a volume needs no check that its declared decoded
 length matches the volume's own length field: the disk it yields is
-exactly that length, and the `ifs` driver's verification compares its
+exactly that length, and full verification of an `ifs` volume compares its
 `image_size` with its volume length, so no layer reads a filesystem field.
 
 ## Dependencies and capabilities

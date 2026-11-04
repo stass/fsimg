@@ -16,8 +16,8 @@
  *    volume cannot be verified completely: FSIMG_EUNSUPPORTED before any
  *    work.
  * 2. Length. A well-formed volume is exactly image_size bytes; a longer
- *    one contradicts the image's own size (reading tolerates it), and a
- *    shorter one already failed open.
+ *    one contradicts the image's own size (reading tolerates it), and the
+ *    reader core refused a shorter one before this driver ran.
  * 3. Checksum. The 32-bit words of [0, image_size) in the image's byte
  *    order, the trailer included, sum to zero modulo 2^32: one sequential
  *    pass in windows.
@@ -154,7 +154,7 @@ ifs_verify(fsimg_reader_t *reader, unsigned flags,
 	if (!ifs->mountpoint_valid)
 		return (ifs_unsupported(error,
 		    "ImageFS mountpoint is invalid; verification is incomplete"));
-	if (ifs->volume_bytes != ifs->header.image_size)
+	if (ifs->volume_bytes > ifs->header.image_size)
 		return (ifs_corrupt(error,
 		    "ImageFS volume is longer than its image size"));
 

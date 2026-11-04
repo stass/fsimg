@@ -95,15 +95,21 @@ An ImageFS is `image_size` bytes, laid out in this order: [D], [X1]
 Native nonbootable output ends exactly at `image_size`, and a container's
 peeled body is exactly its declared `imagefs_size` bytes, so a well-formed
 volume is exactly `image_size` long; the tie between the boot image's
-`imagefs_size` and the body's `image_size` is therefore this driver's
+`imagefs_size` and the body's `image_size` is therefore full verification's
 check, not the container's. Reading tolerates a longer volume, such as a
 slice cut past the image: bytes past
 `image_size` are outside the volume, never interpreted and never
-delivered, and info reports `image_size` as the volume's bytes. Full
-verification requires the volume length to equal `image_size`; a longer
-volume contradicts the image's own size and is `FSIMG_ECORRUPT`. A shorter
-volume fails the header bounds. This is the one statement of the
-volume-length rule; the driver cites it. [X1], [S1], [S2]
+delivered, and info reports `image_size` as the volume's bytes. Reading
+also tolerates a shorter volume, a truncated image under the
+[common rule](architecture.md#byte-and-object-boundaries): the record table
+must fit, so opening reads nothing past the slice and sizes nothing from
+`image_size`, while a file past the end fails `FSIMG_ECORRUPT` when read and
+info still reports `image_size`. Full verification requires the volume length
+to equal `image_size`: a longer volume contradicts the image's own size and
+this driver fails it as `FSIMG_ECORRUPT`, and the reader core has already
+failed a shorter one, as it does every truncated volume, before this driver
+runs. This is the one statement of the volume-length rule; the driver cites
+it. [X1], [S1], [S2]
 
 ### Header
 
@@ -139,7 +145,9 @@ fixed header alone; a violation is `FSIMG_ECORRUPT`: [X1], [S1], [S2]
   computed in 64 bits so that no bound underflows;
 * `image_size` is a multiple of 4, so the image is whole words for the
   checksum;
-* `image_size` is at most the slice length.
+* `hdr_dir_size` is at most the slice length, so the record table is
+  present. `image_size` may exceed the slice, under the
+  [volume-length rule](#volume-layout).
 
 `dir_offset` and `hdr_dir_size` are multiples of 4 in every image, because
 every record and the terminator are whole words; an unaligned value is
@@ -466,7 +474,7 @@ never truncates: a name the profile cannot store fails planning. [X1], [S1],
 | Symbolic links | the link layout, targets of 1 to 1024 bytes |
 | Ranges | the range rule; overlaps allowed |
 | References | nonzero ones name one regular-file record |
-| Volume length | at least `image_size`; equal to it under verification |
+| Volume length | at least `hdr_dir_size`; equal to `image_size` under verification |
 | Checksum | zero sum, under verification |
 
 The reader capability advertises files, directories, symbolic links and
@@ -663,7 +671,7 @@ code ran. The minimum matrix:
 
 | Area | Required cases |
 | --- | --- |
-| Probe and header | `imagefs` with one byte changed (no claim); flags `0x00` to `0x07` and `0xff`; each bound relation at `x - 1`, `x` and `x + 1`; `image_size` of 0, 4, and 1, 2 and 3 modulo 4; `image_size` one past the slice; a slice one byte and one sector longer than `image_size` (read, tail never delivered, corrupt under verify); unaligned `dir_offset` and `hdr_dir_size`; an image shorter than `0x58` bytes; nonzero spare words; nonzero mount flags and `chain_paddr` (accepted, reported); probe exclusivity against FAT, exFAT, QNX6 and QNX4 fixtures in both directions, and an ImageFS whose file data holds a QNX4 root block at 512 drawing two claims; forced format |
+| Probe and header | `imagefs` with one byte changed (no claim); flags `0x00` to `0x07` and `0xff`; each bound relation at `x - 1`, `x` and `x + 1`; `image_size` of 0, 4, and 1, 2 and 3 modulo 4; `hdr_dir_size` one past the slice; `image_size` one past the slice and far past it (opens, reports the missing bytes, a file past the end corrupt when read, corrupt under verify); a slice one byte and one sector longer than `image_size` (read, tail never delivered, corrupt under verify); unaligned `dir_offset` and `hdr_dir_size`; an image shorter than `0x58` bytes; nonzero spare words; nonzero mount flags and `chain_paddr` (accepted, reported); probe exclusivity against FAT, exFAT, QNX6 and QNX4 fixtures in both directions, and an ImageFS whose file data holds a QNX4 root block at 512 drawing two claims; forced format |
 | Mountpoint | empty, `/`, `/foo`, 70, 1024 and 1025 bytes; a NUL exactly at `dir_offset - 1` and none before `dir_offset`; a NUL whose rounding is below `dir_offset` (unsupported); nonzero padding (accepted); invalid UTF-8 (omitted by info, incomplete under verify) |
 | Records | lengths 0, 1, 23, 24, below each kind's minimum, exact minimum, and crossing the table end; a length of 25 (unsupported); a missing or nonzero terminator; a zero inode word; a nonzero extended-attribute offset; each unknown type value; mode bits above `0177777`; a path without a NUL; an empty table |
 | Inode flags | each accepted nibble; each other nibble; the counts reported; a flagged directory (accepted, counted) |

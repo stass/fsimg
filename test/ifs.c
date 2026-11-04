@@ -631,7 +631,7 @@ model_header(model_t *m, const unsigned char *image, size_t length,
 	if (*dir_offset < GEN_HEADER ||
 	    (uint64_t)*dir_offset + 4 > *hdr_dir_size ||
 	    (uint64_t)*hdr_dir_size + 4 > m->image_size ||
-	    m->image_size % 4 != 0 || m->image_size > length)
+	    m->image_size % 4 != 0 || *hdr_dir_size > length)
 		return (FSIMG_ECORRUPT);
 	for (unsigned i = 0; i < 40; i++)
 		if (image[H_SPARE + i] != 0)
@@ -750,7 +750,15 @@ model_record(model_t *m, const unsigned char *image, uint32_t offset,
 		if (size != 0 && (start < hdr_dir_size ||
 		    (uint64_t)start + size > (uint64_t)m->image_size - 4))
 			return (FSIMG_ECORRUPT);
-		rec.content = image + start;
+		/* Absent data is represented without forming an out-of-bounds
+		 * pointer; listing still carries the declared logical length.
+		 */
+		if (size == 0)
+			rec.content = image;
+		else if (start <= m->length && size <= m->length - start)
+			rec.content = image + start;
+		else
+			rec.content = NULL;
 		rec.content_length = size;
 	}
 	rec.offset = offset;
@@ -980,7 +988,7 @@ model_build(model_t *m, const unsigned char *image, size_t length)
 	m->status = model_header(m, image, length, &dir_offset, &hdr_dir_size);
 	if (m->status != FSIMG_OK)
 		return;
-	for (uint32_t o = 0; o < m->image_size; o += 4)
+	for (uint32_t o = 0; o < m->image_size && o + 4 <= length; o += 4)
 		m->sum += model_u32(m, image + o);
 	for (offset = dir_offset; offset < hdr_dir_size - 4;
 	    offset += record_length) {
@@ -1044,8 +1052,9 @@ model_build(model_t *m, const unsigned char *image, size_t length)
 }
 
 /* What full verification of an image that opens must return: an invalid
- * mountpoint is out of scope, a volume longer than image_size and a
- * nonzero word sum are corrupt, and each nonzero reference must name
+ * mountpoint is out of scope; the core refuses a shorter slice before
+ * that scope check. A longer slice and a nonzero word sum are corrupt,
+ * and each nonzero reference must name
  * exactly one node, a regular file.
  */
 static fsimg_status_t
@@ -1053,6 +1062,8 @@ model_verify(const model_t *m)
 {
 	if (m->status != FSIMG_OK)
 		return (m->status);
+	if (m->length < m->image_size)
+		return (FSIMG_ECORRUPT);
 	if (!m->mountpoint_valid)
 		return (FSIMG_EUNSUPPORTED);
 	if (m->length != m->image_size || m->sum != 0)
@@ -1471,15 +1482,31 @@ public_kind(gen_kind_t kind)
 	return (0);
 }
 
-/* Compare a listing with the model of the same image: the status, every
- * delivered entry with its metadata and content, and every info value the
- * model predicts. Open validates every record and the whole hierarchy, so
- * every failure the model predicts must fail open itself.
+/* Open and enumeration depend only on the table. Reading the listing
+ * additionally requires every nonempty file's bytes to lie in the slice.
+ */
+static fsimg_status_t
+model_read_status(const model_t *m)
+{
+	if (m->status != FSIMG_OK)
+		return (m->status);
+	for (size_t i = 0; i < m->entry_count; i++)
+		if (m->entries[i].kind == GEN_FILE &&
+		    m->entries[i].content_length != 0 &&
+		    m->entries[i].content == NULL)
+			return (FSIMG_ECORRUPT);
+	return (FSIMG_OK);
+}
+
+/* Compare the delivered prefix, including the failed entry's metadata
+ * when a payload is missing. Only complete payloads are compared as bytes.
  */
 static bool
 listing_matches(const listing_t *l, const model_t *m, const char *label)
 {
-	if (l->status != m->status) {
+	size_t expected_count = m->entry_count;
+
+	if (l->status != model_read_status(m)) {
 		fprintf(stderr, "%s: reader %d (%s), model %d\n", label,
 		    l->status, l->error.message, m->status);
 		return (false);
@@ -1491,9 +1518,17 @@ listing_matches(const listing_t *l, const model_t *m, const char *label)
 	}
 	if (m->status != FSIMG_OK)
 		return (true);
-	if (l->count != m->entry_count) {
+	for (size_t i = 0; i < m->entry_count; i++) {
+		if (m->entries[i].kind == GEN_FILE &&
+		    m->entries[i].content_length != 0 &&
+		    m->entries[i].content == NULL) {
+			expected_count = i + 1;
+			break;
+		}
+	}
+	if (l->count != expected_count) {
 		fprintf(stderr, "%s: %zu entries, model %zu\n", label,
-		    l->count, m->entry_count);
+		    l->count, expected_count);
 		return (false);
 	}
 	for (size_t i = 0; i < l->count; i++) {
@@ -1508,7 +1543,8 @@ listing_matches(const listing_t *l, const model_t *m, const char *label)
 		    FSIMG_META_MODE) || s->mode != e->permissions ||
 		    s->uid != e->uid || s->gid != e->gid ||
 		    s->mtime != (int64_t)e->mtime ||
-		    (size != 0 && memcmp(s->content, e->content, size) != 0)) {
+		    (size != 0 && e->content != NULL &&
+		    memcmp(s->content, e->content, size) != 0)) {
 			fprintf(stderr, "%s: entry %zu differs from the model\n",
 			    label, i);
 			return (false);
@@ -1516,6 +1552,8 @@ listing_matches(const listing_t *l, const model_t *m, const char *label)
 	}
 	if (strcmp(l->info.format, "ifs") != 0 ||
 	    l->info.volume_bytes != m->image_size ||
+	    l->info.missing_bytes != (m->image_size > m->length ?
+	    m->image_size - m->length : 0) ||
 	    l->info.sector_bytes != 1 || l->info.allocation_unit_bytes != 1 ||
 	    ((l->info.valid & FSIMG_VOLUME_MOUNTPOINT) != 0) !=
 	    m->mountpoint_valid ||
@@ -1567,12 +1605,16 @@ verify_slice(const unsigned char *image, size_t length, unsigned flags,
 		CHECK(info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 		status = fsimg_verify(f.reader, flags, report, error);
 		CHECK(report->complete == (status == FSIMG_OK));
-		/* A failed verification reports no allocation and leaves no
-		 * volume information to read.
+		/* Core truncation refusal leaves the untouched reader usable;
+		 * driver verification failures invalidate its information.
 		 */
-		CHECK(status == FSIMG_OK || (report->allocated_clusters == 0 &&
-		    fsimg_reader_get_info(f.reader, &info, NULL) ==
-		    FSIMG_ESTATE));
+		if (status != FSIMG_OK) {
+			CHECK(report->allocated_clusters == 0);
+			if (info.missing_bytes != 0)
+				CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+			else
+				CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_ESTATE);
+		}
 	}
 	if (status == FSIMG_OK) {
 		CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
@@ -1649,10 +1691,10 @@ expect_slice(const unsigned char *image, size_t length, fsimg_status_t status,
 
 	model_build(&m, image, length);
 	list_image(image, length, 0, &l);
-	if (l.status != status || m.status != status)
+	if (l.status != status || model_read_status(&m) != status)
 		fprintf(stderr, "%s: expected %d, reader %d (%s), model %d\n",
 		    label, status, l.status, l.error.message, m.status);
-	CHECK(l.status == status && m.status == status);
+	CHECK(l.status == status && model_read_status(&m) == status);
 	CHECK(listing_matches(&l, &m, label));
 	if (m.status == FSIMG_OK)
 		CHECK(verify_matches(image, length, &m, label));
@@ -2100,8 +2142,10 @@ test_header_bounds(void)
 	for (uint32_t r = 1; r < 4; r++)
 		CHECK(probe_sizes(0x5c, 0x60, 0x200 + r, 0x300) ==
 		    FSIMG_ECORRUPT);
-	/* image_size <= the volume */
-	CHECK(probe_sizes(0x5c, 0x100, 0x200, 0x1ff) == FSIMG_ECORRUPT);
+	/* The metadata table fits the slice; declared data may exceed it. */
+	CHECK(probe_sizes(0x5c, 0x100, 0x200, 0x1ff) == FSIMG_OK);
+	CHECK(probe_sizes(0x5c, 0x100, 0x200, 0xff) == FSIMG_ECORRUPT);
+	CHECK(probe_sizes(0x5c, 0x100, 0x200, 0x100) == FSIMG_OK);
 	CHECK(probe_sizes(0x5c, 0x100, 0x200, 0x200) == FSIMG_OK);
 	CHECK(probe_sizes(0x5c, 0x100, 0x200, 0x201) == FSIMG_OK);
 	/* The largest sizes do not wrap. */
@@ -2110,11 +2154,11 @@ test_header_bounds(void)
 	CHECK(probe_sizes(0x5c, UINT32_MAX - 7, UINT32_MAX - 3,
 	    UINT64_C(1) << 33) == FSIMG_OK);
 
-	/* A slice shorter than image_size is refused; a longer one reads,
-	 * and its tail, poison bytes, is never delivered or counted.
+	/* Missing trailer bytes do not stop reading; a longer slice's
+	 * poison bytes are never delivered or counted.
 	 */
 	sample(&g);
-	expect_slice(g.image, g.length - 1, FSIMG_ECORRUPT,
+	expect_slice(g.image, g.length - 1, FSIMG_OK,
 	    "a slice one byte short");
 	gen_free(&g);
 	for (size_t extra = 1; extra <= 512; extra += 511) {
@@ -5292,10 +5336,271 @@ test_ifs_intact_volume_with_assume_identity_verifies(void)
 	gen_free(&g);
 }
 
-static void test_ifs_assumed_identity_rejects_short_volumes(void);
+/* Two flat files keep truncation tests small and extraction cleanup explicit.
+ * Their three-byte payloads leave alignment padding before the trailer.
+ */
+static void
+truncated_image(gen_t *g)
+{
+	gen_init(g);
+	gen_file(g, "good", "yes");
+	gen_file(g, "lost", "end");
+	gen_finish(g);
+}
 
 static void
-test_ifs_assumed_identity_rejects_short_volumes(void)
+truncated_open(fixture_t *f)
+{
+	fsimg_status_t status;
+	fsimg_error_t error;
+
+	status = fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, &error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "IFS slice %" PRIu64 ": %s\n", f->length, error.message);
+	CHECK(status == FSIMG_OK);
+}
+
+static void
+test_truncated_tail(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_volume_info_t info;
+	listing_t l;
+	model_t m;
+	size_t cut;
+
+	truncated_image(&g);
+	cut = g.members[1].data_offset + g.members[1].bytes_length;
+	model_build(&m, g.image, cut);
+	CHECK(m.status == FSIMG_OK && model_read_status(&m) == FSIMG_OK);
+	list_image(g.image, cut, 0, &l);
+	CHECK(listing_matches(&l, &m, "only alignment padding and trailer lost"));
+	listing_free(&l);
+	model_free(&m);
+	fixture_open(&f, g.image, cut, 0);
+	truncated_open(&f);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.volume_bytes == g.image_size && info.missing_bytes == g.image_size - cut);
+	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", NULL, NULL) == FSIMG_OK);
+	check_file(&f, "out/good", "yes");
+	check_file(&f, "out/lost", "end");
+	remove_tree(f.scratch, "out");
+	fixture_close(&f);
+	gen_free(&g);
+}
+
+static void
+check_truncated_file(bool over_budget)
+{
+	gen_t g;
+	fixture_t f;
+	const fsimg_entry_t *entry;
+	fsimg_error_t error;
+	fsimg_volume_info_t info;
+	model_t m;
+	listing_t l;
+	unsigned char bytes[4];
+	size_t count, cut;
+
+	truncated_image(&g);
+	cut = g.members[1].data_offset;
+	if (over_budget) {
+		/* The table declares data far beyond the small backing buffer. */
+		put32(&g, g.image + H_IMAGE_SIZE, 1000000);
+		put32(&g, g.image + g.members[1].table_offset + R_FILE_SIZE, 900000);
+	}
+	model_build(&m, g.image, cut);
+	CHECK(m.status == FSIMG_OK && model_read_status(&m) == FSIMG_ECORRUPT);
+	list_image(g.image, cut, 0, &l);
+	CHECK(listing_matches(&l, &m, "a file beyond the slice"));
+	listing_free(&l);
+	model_free(&m);
+	fixture_open(&f, g.image, cut, 0);
+	truncated_open(&f);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.volume_bytes == (over_budget ? 1000000 : g.image_size));
+	CHECK(info.missing_bytes == info.volume_bytes - cut);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/good") == 0);
+	CHECK(fsimg_reader_read_at(f.reader, 0, bytes, 3, &count, NULL) == FSIMG_OK);
+	CHECK(count == 3 && bcmp(bytes, "yes", 3) == 0);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/lost") == 0);
+	CHECK(!over_budget || entry->size > cut);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_DONE);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+	truncated_open(&f);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_read_at(f.reader, 0, bytes, 1, &count, &error) == FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	fsimg_reader_free(f.reader);
+	f.reader = NULL;
+	truncated_open(&f);
+	CHECK(fsimg_extract_at(f.reader, f.scratch, "out", NULL, &error) == FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	remove_tree(f.scratch, "out");
+	fixture_close(&f);
+	gen_free(&g);
+}
+
+static void
+test_truncated_file(void)
+{
+	check_truncated_file(false);
+}
+
+static void
+test_truncated_file_budget(void)
+{
+	check_truncated_file(true);
+}
+
+static void
+test_truncated_verify(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	char decimal[32];
+	uint64_t calls;
+
+	truncated_image(&g);
+	g.length = g.members[1].data_offset + g.members[1].bytes_length;
+	CHECK(snprintf(decimal, sizeof(decimal), "%zu", g.image_size - g.length) > 0);
+	for (unsigned payload = 0; payload < 2; payload++) {
+		fixture_open(&f, g.image, g.length, 0);
+		truncated_open(&f);
+		calls = f.calls;
+		CHECK(fsimg_verify(f.reader, payload ? FSIMG_VERIFY_PAYLOAD : 0,
+		    &report, &error) == FSIMG_ECORRUPT);
+		CHECK(strstr(error.message, "truncated") != NULL);
+		CHECK(strstr(error.message, decimal) != NULL);
+		CHECK(!report.complete && report.files == 0 && report.directories == 0);
+		CHECK(report.payload_bytes_read == 0 && f.calls == calls);
+		fixture_close(&f);
+	}
+	gen_free(&g);
+}
+
+static void
+test_truncated_metadata(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_status_t expected, status;
+
+	truncated_image(&g);
+	for (size_t cut = 0; cut < g.hdr_dir_size; cut++) {
+		expected = cut < GEN_HEADER ? FSIMG_EFORMAT : FSIMG_ECORRUPT;
+		CHECK(probe(g.image, cut < GEN_HEADER ? cut : GEN_HEADER, cut) == expected);
+		fixture_open(&f, g.image, cut, 0);
+		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
+		if (status != expected)
+			fprintf(stderr, "IFS metadata cut %zu: %d expected %d\n", cut, status, expected);
+		CHECK(status == expected && f.reader == NULL);
+		fixture_close(&f);
+	}
+	gen_free(&g);
+}
+
+static void
+test_truncated_huge_volume(void)
+{
+	gen_t g;
+	fixture_t f;
+	fsimg_volume_info_t info;
+	const fsimg_entry_t *entry;
+	fsimg_stats_t stats;
+	unsigned char byte;
+	size_t count;
+
+	gen_init(&g);
+	gen_file(&g, "far", "x");
+	gen_finish(&g);
+	put32(&g, g.image + H_IMAGE_SIZE, UINT32_C(0xfffffffc));
+	put32(&g, g.image + g.members[0].table_offset + R_FILE_OFFSET, UINT32_C(0xfffffff0));
+	fixture_open(&f, g.image, g.length, 0);
+	f.ctx->options.memory_bytes = 2 * 1024 * 1024;
+	truncated_open(&f);
+	CHECK(fsimg_reader_get_info(f.reader, &info, NULL) == FSIMG_OK);
+	CHECK(info.volume_bytes == UINT32_C(0xfffffffc));
+	CHECK(info.missing_bytes == UINT32_C(0xfffffffc) - g.length);
+	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_read_at(f.reader, 0, &byte, 1, &count, NULL) == FSIMG_ECORRUPT);
+	CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	CHECK(stats.memory_peak <= 2 * 1024 * 1024);
+	CHECK(stats.scratch_peak <= 2 * 1024 * 1024);
+	fixture_close(&f);
+	gen_free(&g);
+}
+
+static void
+check_truncated_cut(gen_t *g, size_t cut)
+{
+	fixture_t f;
+	fsimg_status_t status;
+	const fsimg_entry_t *entry;
+
+	for (unsigned operation = 0; operation < 3; operation++) {
+		fixture_open(&f, g->image, cut, 0);
+		status = fsimg_reader_open(f.ctx, f.io, NULL, &f.reader, NULL);
+		CHECK(status == FSIMG_OK || status == FSIMG_ECORRUPT ||
+		    (cut < GEN_HEADER && status == FSIMG_EFORMAT));
+		if (status == FSIMG_OK && operation == 1) {
+			do {
+				status = fsimg_reader_next(f.reader, &entry, NULL);
+			} while (status == FSIMG_OK);
+			CHECK(status == FSIMG_DONE || status == FSIMG_ECORRUPT);
+		} else if (status == FSIMG_OK && operation == 2) {
+			status = fsimg_extract_at(f.reader, f.scratch, "out", NULL, NULL);
+			CHECK(status == FSIMG_OK || status == FSIMG_ECORRUPT);
+			remove_tree(f.scratch, "out");
+		}
+		fixture_close(&f);
+	}
+}
+
+static void
+test_truncated_sweep(void)
+{
+	gen_t g;
+	size_t payload_end;
+
+	truncated_image(&g);
+	payload_end = g.members[1].data_offset + g.members[1].bytes_length;
+	/* Every byte count through the payload, then one cut in the tail. */
+	for (size_t cut = 0; cut <= payload_end + 1; cut++)
+		check_truncated_cut(&g, cut);
+	check_truncated_cut(&g, g.length - 1);
+	gen_free(&g);
+}
+
+static void
+test_truncated_longer_slice(void)
+{
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	gen_t g;
+
+	truncated_image(&g);
+	gen_finish_extra(&g, 1);
+	for (unsigned payload = 0; payload < 2; payload++) {
+		CHECK(verify_slice(g.image, g.length,
+		    payload ? FSIMG_VERIFY_PAYLOAD : 0, &report, &error) == FSIMG_ECORRUPT);
+		CHECK(strstr(error.message, "longer") != NULL);
+	}
+
+	gen_free(&g);
+}
+
+static void test_ifs_assumed_identity_accepts_missing_tail_but_requires_metadata(void);
+
+static void
+test_ifs_assumed_identity_accepts_missing_tail_but_requires_metadata(void)
 {
 	gen_t g;
 	fixture_t f;
@@ -5305,12 +5610,23 @@ test_ifs_assumed_identity_rejects_short_volumes(void)
 	check_force_short_volumes("ifs", 88);
 	identity_volume(&g);
 	fixture_open(&f, g.image, g.length, 0);
-	lengths[0] = g.length / 2;
+	lengths[0] = g.length - 1;
 	lengths[1] = GEN_HEADER + 1;
 	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		fsimg_read_options_t options;
+
 		CHECK(fsimg_io_slice(f.io, 0, lengths[i], &volume, NULL) ==
 		    FSIMG_OK);
+
+		fsimg_read_options_init(&options);
+		options.format = "ifs";
+		options.flags = FSIMG_READ_ASSUME_IDENTITY;
+		CHECK(fsimg_reader_open(f.ctx, volume, &options, &f.reader,
+		    NULL) == (i == 0 ? FSIMG_OK : FSIMG_ECORRUPT));
+		fsimg_reader_free(f.reader);
+		f.reader = NULL;
 		check_force_truncated_volume(f.ctx, volume, "ifs");
+
 		fsimg_io_free(volume);
 	}
 	fixture_close(&f);
@@ -5343,7 +5659,16 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
-	test_ifs_assumed_identity_rejects_short_volumes();
+	test_truncated_tail();
+	test_truncated_file();
+	test_truncated_file_budget();
+	test_truncated_verify();
+	test_truncated_metadata();
+	test_truncated_huge_volume();
+	test_truncated_sweep();
+	test_truncated_longer_slice();
+
+	test_ifs_assumed_identity_accepts_missing_tail_but_requires_metadata();
 	test_sample();
 	test_probe();
 	test_header_bounds();

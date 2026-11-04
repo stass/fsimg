@@ -290,9 +290,9 @@ format treats a volume longer than its slice by the same rules:
   structure or file past the end fails `FSIMG_ECORRUPT`, and a partial
   extraction is not success. Output is charged at a file's declared size before
   it is copied, so on a truncated volume an overrun first reads the file's last
-  byte through the funnel: a file past the end fails the same way, and one whose
-  last byte is there keeps the resource limit error, since its extents are shared
-  or the limit is the caller's.
+  stored byte through the funnel: a file past the end fails the same way, and one
+  whose last stored byte is there, or that stores none, keeps the resource limit
+  error, since its extents are shared or the limit is the caller's.
 * **Reporting.** `fsimg_volume_info_t.missing_bytes` is the declared bytes
   past the slice, derived once by the reader core after the driver opens.
   No driver computes it.

@@ -219,8 +219,9 @@ ifs_header_decode(const unsigned char *bytes, ifs_header_t *header,
  * holds it, computed in 64 bits so that no bound underflows:
  * 0x58 <= dir_offset, dir_offset + 4 <= hdr_dir_size (the table holds at
  * least its terminator), hdr_dir_size + 4 <= image_size,
- * image_size a multiple of 4, and image_size within the volume. A violation
- * contradicts the image's own layout.
+ * image_size a multiple of 4, and the table within the volume. A violation
+ * contradicts the image's own layout. image_size may exceed a truncated
+ * volume: it sizes nothing, and what lies past the end fails when read.
  */
 fsimg_status_t
 ifs_header_bounds(const ifs_header_t *header, uint64_t volume_bytes,
@@ -234,9 +235,9 @@ ifs_header_bounds(const ifs_header_t *header, uint64_t volume_bytes,
 	if (header->image_size % 4 != 0)
 		return (ifs_corrupt(error,
 		    "ImageFS image size is not a multiple of 4"));
-	if (header->image_size > volume_bytes)
+	if (header->hdr_dir_size > volume_bytes)
 		return (ifs_corrupt(error,
-		    "ImageFS image size exceeds the volume"));
+		    "image is truncated inside the ImageFS record table"));
 	return (FSIMG_OK);
 }
 

@@ -40,10 +40,28 @@ Both templates place FirstCluster at byte 20 and DataLength at byte 24.
 
 The reader checks both twelve-sector boot regions with bounded sector buffers.
 It validates checksums before trusting geometry, boot/extended signatures,
-mandatory-zero bytes, sector/cluster shifts, volume minimum/length, FAT capacity,
-heap ordering and cluster-count derivation. The backup geometry agrees with the
-main geometry; stale backup flags and percentage do not override main values.
-Recognized unsupported features remain distinguishable from malformed data.
+mandatory-zero bytes, sector/cluster shifts, the declared volume's minimum, FAT
+capacity, heap ordering and cluster-count derivation. The backup geometry agrees
+with the main geometry; stale backup flags and percentage do not override main
+values. Recognized unsupported features remain distinguishable from malformed
+data.
+
+The declared length may exceed the input slice, on the
+[common rule for a truncated volume](architecture.md#byte-and-object-boundaries):
+a heap cut short costs nothing until something refers to it, and the 1 MiB
+minimum applies to the declared length, so a truncated slice may be smaller. The
+boot regions and the whole FAT must lie within the slice, since the heap offset
+must, and one that does not is `FSIMG_ECORRUPT` at open. That also bounds what
+declared geometry can size: the FAT capacity check bounds the cluster count by
+table bytes the slice holds, so the metadata scaled by the cluster count, the
+directory-cluster bitset and a stream's extent index, stays proportional to bytes
+the file really holds. The root directory, the upcase table and the bitmap bits
+of what opening claims are read while opening, so one past the end fails it. A
+later directory or a bitmap bit past the end fails when walked, a file's
+initialized bytes past the end fail when read, and the slack and the zeros after
+them may be missing. Full verification fails on any truncated volume, before this
+driver's verification runs.
+
 Table 4 places DriveSelect at byte 111 and PercentInUse at byte 112. Boot
 checksums exclude bytes 106, 107 and 112; DriveSelect remains covered.
 

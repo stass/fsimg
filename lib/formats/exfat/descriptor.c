@@ -48,13 +48,14 @@ const fsimg_format_t fsimg_exfat_format = {
 
 /* Detection's signature is the jump, the "EXFAT" name and the zeroed legacy
  * BPB through byte 63. OEM text alone is insufficient, since a FAT formatter
- * may use the same name. A signed volume below the exFAT minimum is a corrupt
- * claim. Every other boot field, including the revision and the boot
- * checksum, is validated when the volume is opened.
+ * may use the same name. Every other boot field, including the revision, the
+ * boot checksum and the declared volume's minimum, is validated when the volume
+ * is opened; a truncated input may be smaller than that minimum.
  */
 static fsimg_status_t
-exfat_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
-    const fsimg_format_variant_t **variant, fsimg_error_t *error)
+exfat_probe(const unsigned char *prefix, size_t length,
+    uint64_t volume_bytes FSIMG_UNUSED, const fsimg_format_variant_t **variant,
+    fsimg_error_t *error)
 {
 	static const unsigned char legacy_zero[EXFAT_SIGNATURE_BYTES - 11] = { 0 };
 
@@ -65,7 +66,5 @@ exfat_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
 	    bcmp(prefix + 11, legacy_zero, sizeof(legacy_zero)) != 0)
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER, "no exFAT boot signature"));
-	if (volume_bytes < EXFAT_VOLUME_MIN)
-		return (exfat_corrupt(error, "input is smaller than an exFAT volume"));
 	return (FSIMG_OK);
 }

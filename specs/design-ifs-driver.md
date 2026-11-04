@@ -94,7 +94,7 @@ next reads:
    require zero spare words and `dir_offset` and `hdr_dir_size` that are
    multiples of 4, else `FSIMG_EUNSUPPORTED`. `ifs_header_t` holds the
    decoded fields and the volume length, which the
-   [volume-length rule](design-ifs.md#volume-layout) lets exceed
+   [volume-length rule](design-ifs.md#volume-layout) lets differ from
    `image_size` on read; the content domain is
    `[dir_offset, image_size - 4)`, so a longer volume's tail can never be
    delivered.
@@ -326,9 +326,11 @@ to reconcile, and the table pass validated every record at open. It runs:
   `FSIMG_EUNSUPPORTED` before any work, as an invalid QNX4 label does.
 
 * **Length.** The [volume-length rule](design-ifs.md#volume-layout):
-  the volume length must equal `image_size`, else `FSIMG_ECORRUPT` before
-  any work. A boot image whose `imagefs_size` disagrees with its body, or a
-  bare image with a tail, fails here.
+  a volume longer than `image_size` is `FSIMG_ECORRUPT` before any work. A
+  boot image whose `imagefs_size` exceeds its body's `image_size`, or a bare
+  image with a tail, fails here. A shorter volume, a boot image whose
+  `imagefs_size` falls short of its body included, never gets here: the reader
+  core refuses every truncated volume before the driver's verification.
 * **Checksum.** One sequential pass over `[0, image_size)` in windows sums
   the 32-bit words in the image's byte order; a nonzero result is
   `FSIMG_ECORRUPT`. The pass charges one work unit per window, beside the

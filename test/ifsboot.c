@@ -2084,6 +2084,69 @@ native(void)
 	return (status);
 }
 
+/* Container framing is complete; only the nested ImageFS declaration is
+ * longer or shorter than the disk the container supplies.
+ */
+static void
+check_truncated_body(bool missing)
+{
+	const uint8_t codecs[] = { COMPRESS_NONE, COMPRESS_LZO, COMPRESS_UCL };
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_AUTOMATIC };
+	fsimg_volume_info_t info;
+	fsimg_verify_report_t report;
+	fsimg_reader_t *reader;
+	fsimg_io_t *volume;
+	fsimg_error_t error;
+	buffer_t body = imagefs_build(1000);
+	boot_spec_t spec;
+	boot_image_t image;
+	memory_file_t file;
+	fixture_t f;
+
+	if (missing)
+		put_le32(body.bytes + 0x08, (uint32_t)body.length + 4);
+	else {
+		/* Extra disk bytes leave the original ImageFS completely valid. */
+		buffer_append(&body, "\0\0\0\0", 4);
+	}
+	for (unsigned i = 0; i < sizeof(codecs); i++) {
+		spec = sample_spec(body.bytes, body.length, 0, codecs[i]);
+		image = boot_build(&spec);
+		file = boot_file(&image);
+		fixture_init(&f, 16 * MIB, 0);
+		CHECK(fixture_open(&f, &file, NULL, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_select(f.image, &selector, &volume, NULL) == FSIMG_OK);
+		CHECK(fsimg_reader_open(f.ctx, volume, NULL, &reader, NULL) == FSIMG_OK);
+		CHECK(fsimg_reader_get_info(reader, &info, NULL) == FSIMG_OK);
+		CHECK(info.volume_bytes == (missing ? body.length + 4 : body.length - 4));
+		CHECK(info.missing_bytes == (missing ? 4 : 0));
+		CHECK(fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, &error) == FSIMG_ECORRUPT);
+		CHECK(!report.complete);
+		if (missing) {
+			CHECK(strstr(error.message, "truncated") != NULL);
+			CHECK(strstr(error.message, "4 declared bytes are missing") != NULL);
+		} else
+			CHECK(strstr(error.message, "longer") != NULL);
+		fsimg_reader_free(reader);
+		fsimg_io_free(volume);
+		fixture_free(&f);
+		free(file.bytes);
+	}
+	free(body.bytes);
+}
+
+static void
+test_truncated_body(void)
+{
+	check_truncated_body(true);
+}
+
+static void
+test_truncated_longer_body(void)
+{
+	check_truncated_body(false);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2098,6 +2161,8 @@ main(int argc, char **argv)
 	if (argc == 2 && strcmp(argv[1], "--native") == 0)
 		return (native());
 	CHECK(argc == 1);
+	test_truncated_body();
+	test_truncated_longer_body();
 	test_each_prefix_and_codec();
 	test_probe_offsets();
 	test_header_tables();
