@@ -11,7 +11,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/layers \
 	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat \
 	-I$(top_srcdir)/lib/formats/qnx6 -I$(top_srcdir)/lib/formats/qnx4 \
-	-I$(top_srcdir)/lib/formats/iso9660 \
+	-I$(top_srcdir)/lib/formats/iso9660 -I$(top_srcdir)/lib/formats/hfsplus \
 	$(ZLIB_CFLAGS) $(ZSTD_CFLAGS) $(LZMA_CFLAGS) \
 	-I$(top_srcdir)/lib/formats/ifs \
 	-I$(top_srcdir)/lib/codec
@@ -74,7 +74,9 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
 	lib/formats/fat/write.h lib/formats/fat/write-plan.c \
 	lib/formats/fat/write-names.c lib/formats/fat/write-meta.c \
-	lib/formats/fat/write-emit.c lib/formats/hfsplus/unicode-tables.h \
+	lib/formats/fat/write-emit.c lib/formats/hfsplus/hfsplus.h \
+	lib/formats/hfsplus/codec.c lib/formats/hfsplus/unicode.c \
+	lib/formats/hfsplus/unicode-tables.h \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
@@ -157,6 +159,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify \
 	test-salvage-terminal test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
+	test-hfsplus-codec test-hfsplus-unicode \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-write test-scheme-planning \
@@ -264,6 +267,11 @@ test_qnx4_SOURCES = test/qnx4.c test/test.h test/scale.h
 test_qnx4_LDADD = libfsimg.la
 test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h test/scale.h
 test_qnx4_write_LDADD = libfsimg.la
+test_hfsplus_codec_SOURCES = test/hfsplus-codec.c test/test.h
+test_hfsplus_codec_LDADD = libfsimg.la
+test_hfsplus_unicode_SOURCES = test/hfsplus-unicode.c test/test.h \
+	test/digest.c test/digest.h
+test_hfsplus_unicode_LDADD = libfsimg.la
 test_iso9660_SOURCES = test/iso9660.c test/test.h \
 	test/iso9660-image.c test/iso9660-image.h
 test_iso9660_LDADD = libfsimg.la

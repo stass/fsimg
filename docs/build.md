@@ -1324,6 +1324,13 @@ driver and compares every regular file with `fsimg x -O`; elsewhere that
 comparison is an explicit skip, and no Linux result is recorded
 ([TODO](todo-qnx6.md)).
 
+`test-hfsplus-codec` decodes hand-laid HFS Plus records at the format design's
+offsets, at every truncated length and with hostile framing fields.
+`test-hfsplus-unicode` computes the three pinned table digests through the
+driver's lookups, compares decomposition with a compiled-in subset of the native
+E3 vectors, and checks the exchanges, name admission, comparators and
+namespace keys. Neither reads a capture at run time or writes a file.
+
 `test-qnx4` builds QNX4 volumes with its own generator, written from the
 format design with separate offset tables; it shares no code with
 `lib/formats/qnx4/`; it includes the driver header to compare the

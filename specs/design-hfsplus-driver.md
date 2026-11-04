@@ -62,6 +62,7 @@ typedefs holding only validated values:
 | `hfsplus_header_t` | Every header field of the format design's table, the five forks decoded |
 | `hfsplus_node_t` | Descriptor fields and the validated record offsets of one node buffer |
 | `hfsplus_btree_t` | Header record fields, the tree's node size, comparator and fork index |
+| `hfsplus_ekey_t` | `file_id`, `start_block` and `fork_type` of an extents overflow key |
 | `hfsplus_ckey_t` | `parent`, `units` (count) and a borrowed pointer to the big-endian units in the node buffer |
 | `hfsplus_folder_t`, `hfsplus_file_t`, `hfsplus_thread_t` | The record fields; Finder information kept as raw bytes for the type and creator tests |
 | `hfsplus_akey_t` | `file_id`, `start_block`, name units and borrowed pointer |
@@ -69,6 +70,7 @@ typedefs holding only validated values:
 | `hfsplus_jib_t`, `hfsplus_journal_t` | Journal info block and header fields, the header's byte order |
 | `hfsplus_mdb_t` | The wrapper fields the format design names |
 | `hfsplus_cmpf_t` | Compression type and uncompressed size |
+| `hfsplus_rsrc_t`, `hfsplus_rsrc_table_t`, `hfsplus_chunk_t` | A type 4 resource fork's header, its resource length and chunk count, and one chunk's offset and length |
 
 A borrowed key pointer is valid until its node buffer is reused, which the
 B-tree reader's cursor discipline below fixes. Encoding is the exact inverse
