@@ -62,10 +62,12 @@ module HfsPlusPatchRecord
   end
 
   # Where the data of a catalog leaf record starts, if it is a file record
-  # keyed by `name`.
+  # keyed by `name`. The key's stored units are compared, never its escaped
+  # display text; a stored name is decomposed, so `name` must be too.
   def file_record_data(slice, name)
-    _, record_name, data_at = HfsPlusFields.catalog_key(slice)
-    data_at if record_name == name && slice.bytesize - data_at == FILE_RECORD_BYTES && slice.byteslice(data_at, 2) == [2].pack("n")
+    _, _, data_at = HfsPlusFields.catalog_key(slice)
+    stored = HfsPlusFields.bytes_at(slice, 8, data_at - 8).byteslice(0, slice.unpack1("@6n") * 2)
+    data_at if stored == name.encode("UTF-16BE").b && slice.bytesize - data_at == FILE_RECORD_BYTES && slice.byteslice(data_at, 2) == [2].pack("n")
   end
 
   # Four characters, or `0x` and eight hex digits for codes that are not text.

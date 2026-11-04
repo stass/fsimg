@@ -981,7 +981,7 @@ calls.
 
 Directory links (`h-hfsplus-16777216-e4-dirlinks-J`, `newfs_hfs -J`, mounted
 `journaled`; `capture.rb --populate e4-dirlinks`). `link(2)` on a directory
-succeeds on a journaled volume in three of the seven places tried: a populated
+succeeds on a journaled volume in four of the seven places tried: a populated
 `dl1/a/d` to `dl1/b/d` (different parents); an empty `dl3/a/x/e` to `dl3/a/e2`
 (the destination's parent is the source's grandparent); an empty `dl4/a/x/e` to
 `dl4/c/e3`; and a third name for a directory that had two (`dl7/c/d`, after

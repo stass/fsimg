@@ -622,19 +622,20 @@ module HfsPlusFields
   OWNER_FLAG_COMPRESSED = 0x20
 
   # Yield the record slices of each leaf node of a tree, in chain order, one
-  # node at a time: nothing is kept between nodes. The chain may not visit
-  # more nodes than the tree's header says it has (which also ends a loop,
-  # and a chain of nodes without records), and a node that is not a leaf is
+  # node at a time: only the visited numbers are kept between nodes, and
+  # every one names a node that was read from the image. A second visit is a
+  # loop, so no consumer sees a record twice; the chain may not visit more
+  # nodes than the tree's header says it has; a node that is not a leaf is
   # Malformed. An error names the node it arose at. The block gets the slices
   # and the node's number; the slices lie back to back from the end of the
   # node descriptor.
   def each_leaf(volume, fork, tree)
     limit = [tree[:total_nodes], MAX_NODES].min
     node = tree[:first_leaf]
-    visited = 0
+    visited = Set.new
     until node.zero?
-      visited += 1
-      raise Malformed, "leaf chain visits more than the tree's #{limit} nodes" if visited > limit
+      raise Malformed, "leaf chain returns to node #{node}" unless visited.add?(node)
+      raise Malformed, "leaf chain visits more than the tree's #{limit} nodes" if visited.size > limit
 
       raw = read_node(volume, fork, node, tree[:node_size])
       desc = descriptor(raw)
