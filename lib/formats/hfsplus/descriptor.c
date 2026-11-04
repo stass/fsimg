@@ -7,7 +7,7 @@
 
 #include "format.h"
 #include "fsimg-endian.h"
-#include "hfsplus.h"
+#include "write-hfsplus.h"
 
 #define HFSPLUS_LABEL_BYTES		510u	/* 255 UTF-16 units */
 #define HFSPLUS_BLOCK_MIN		512u
@@ -25,12 +25,26 @@ _Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->label) >
 static fsimg_status_t hfsplus_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
-#define HFSPLUS_VARIANT_INFO(variant_name)				\
-	.name = (variant_name),						\
-	.entry_kinds = FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |	\
-	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO |			\
+/* The kinds the writer stores; the reader also delivers the device and socket
+ * kinds a native volume can hold.
+ */
+#define HFSPLUS_WRITE_KINDS	(FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |	\
+	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO)
+#define HFSPLUS_READ_KINDS	(HFSPLUS_WRITE_KINDS |				\
 	    FSIMG_ENTRY_CHAR_DEVICE | FSIMG_ENTRY_BLOCK_DEVICE |	\
-	    FSIMG_ENTRY_SOCKET,						\
+	    FSIMG_ENTRY_SOCKET)
+/* 512 to 65536 bytes, every power of two. */
+#define HFSPLUS_WRITE_BLOCK_SIZES	UINT32_C(0x0001fe00)
+/* A fork or volume of 2^32 - 1 blocks of the writer's largest size. */
+#define HFSPLUS_WRITE_VOLUME_MAX	((UINT64_C(0xffffffff)) << 16)
+
+_Static_assert(HFSPLUS_WRITE_BLOCK_MIN == 1u << 9 &&
+    HFSPLUS_WRITE_BLOCK_MAX == 1u << 16,
+    "the writer's capability record states its block size range");
+
+#define HFSPLUS_VARIANT_INFO(variant_name, kinds)			\
+	.name = (variant_name),						\
+	.entry_kinds = (kinds),						\
 	.metadata_fields = FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
 	    FSIMG_META_ACCESSED | FSIMG_META_CHANGED |			\
 	    FSIMG_META_OWNER | FSIMG_META_MODE,				\
@@ -45,14 +59,14 @@ static fsimg_status_t hfsplus_probe(const unsigned char *, size_t, uint64_t,
 static const fsimg_format_variant_t hfsplus_variants[] = {
 	[HFSPLUS_VARIANT_PLUS] = {
 		.info = {
-			HFSPLUS_VARIANT_INFO("hfsplus"),
+			HFSPLUS_VARIANT_INFO("hfsplus", HFSPLUS_READ_KINDS),
 			.profile = "HFS Plus"
 		},
 		.id = HFSPLUS_VARIANT_PLUS
 	},
 	[HFSPLUS_VARIANT_X] = {
 		.info = {
-			HFSPLUS_VARIANT_INFO("hfsx"),
+			HFSPLUS_VARIANT_INFO("hfsx", HFSPLUS_READ_KINDS),
 			.profile = "HFSX case-sensitive"
 		},
 		.id = HFSPLUS_VARIANT_X
@@ -65,6 +79,42 @@ const fsimg_format_t fsimg_hfsplus_format = {
 	.probe_bytes = HFSPLUS_PROBE_BYTES,
 	.probe = hfsplus_probe,
 	.reader = &fsimg_hfsplus_reader_ops
+};
+
+/* The registered descriptor reads and verifies. The registry lists a writer
+ * only after the native qualification cycle has accepted its output, so the
+ * writer has its own descriptor, reachable only by code that names it.
+ */
+#define HFSPLUS_WRITE_VARIANT_INFO(variant_name)			\
+	HFSPLUS_VARIANT_INFO(variant_name, HFSPLUS_WRITE_KINDS),	\
+	.write_allocation_unit_size_mask = HFSPLUS_WRITE_BLOCK_SIZES,	\
+	.write_settings = FSIMG_SETTING_VOLUME_UUID
+
+static const fsimg_format_variant_t hfsplus_write_variants[] = {
+	[HFSPLUS_VARIANT_PLUS] = {
+		.info = {
+			HFSPLUS_WRITE_VARIANT_INFO("hfsplus"),
+			.profile = "HFS Plus"
+		},
+		.id = HFSPLUS_VARIANT_PLUS
+	},
+	[HFSPLUS_VARIANT_X] = {
+		.info = {
+			HFSPLUS_WRITE_VARIANT_INFO("hfsx"),
+			.profile = "HFSX case-sensitive"
+		},
+		.id = HFSPLUS_VARIANT_X
+	}
+};
+
+const fsimg_format_t fsimg_hfsplus_write_format = {
+	.variants = hfsplus_write_variants,
+	.variant_count = sizeof(hfsplus_write_variants) /
+	    sizeof(hfsplus_write_variants[0]),
+	.probe_bytes = HFSPLUS_PROBE_BYTES,
+	.probe = hfsplus_probe,
+	.reader = &fsimg_hfsplus_reader_ops,
+	.writer = &fsimg_hfsplus_writer_ops
 };
 
 /* The boot area is all zero or begins with the classic signature "LK", the

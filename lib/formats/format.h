@@ -76,6 +76,10 @@ extern const fsimg_format_t fsimg_qnx6_format;
 extern const fsimg_format_t fsimg_qnx4_format;
 extern const fsimg_format_t fsimg_hfsplus_format;
 extern const fsimg_format_t fsimg_ifs_format;
+/* The HFS Plus writer, outside the registry until its native qualification
+ * registers it; only code that names it, such as its tests, reaches it.
+ */
+extern const fsimg_format_t fsimg_hfsplus_write_format;
 extern const fsimg_format_t fsimg_iso9660_format;
 
 /*

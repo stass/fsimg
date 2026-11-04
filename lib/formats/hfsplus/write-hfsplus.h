@@ -192,6 +192,9 @@ typedef struct hfsplus_plan {
 	hfsplus_compare_t	 compare;
 } hfsplus_plan_t;
 
+/* The writer operations, gathered with the emission in write-emit.c. */
+extern const fsimg_writer_ops_t fsimg_hfsplus_writer_ops;
+
 /* The writer operations of write-plan.c. */
 fsimg_status_t hfsplus_write_validate(fsimg_write_options_t *, unsigned,
     fsimg_error_t *);

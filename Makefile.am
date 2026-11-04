@@ -84,7 +84,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/hfsplus/directory.c lib/formats/hfsplus/read.c \
 	lib/formats/hfsplus/verify.c \
 	lib/formats/hfsplus/write-hfsplus.h lib/formats/hfsplus/write-plan.c \
-	lib/formats/hfsplus/write-btree.c \
+	lib/formats/hfsplus/write-btree.c lib/formats/hfsplus/write-emit.c \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \

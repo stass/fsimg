@@ -685,7 +685,7 @@ The common emission object has already zeroed the sink. The driver emits:
 3. The extents tree's and attributes tree's header nodes.
 4. The bitmap: ones for blocks `0` to `A - 1` and for the tail, zeros
    elsewhere and in the padding, written in whole blocks.
-5. The alternate header, then the primary header, identical.
+5. The primary header, then the alternate header, identical.
 
 Planning and emission run the same packer code, so a node boundary
 emission computes cannot differ from the one planning sized. Every emitted
