@@ -27,6 +27,9 @@ static void test_invalid_device_and_socket_entry_records(void);
 static void test_invalid_entry_records(void);
 static void test_info_uuid(void);
 static void test_info_geometry_is_informational(void);
+static void test_info_missing_bytes_are_bounded(void);
+static void test_image_declared_end_is_representable(void);
+static void test_partition_missing_bytes_match_disk_extent(void);
 static void test_info_label(void);
 static void test_info_mountpoint(void);
 static void test_job_posix_flags(void);
@@ -603,6 +606,40 @@ test_info_geometry_is_informational(void)
 	strcpy(info.format, "iso9660");
 	fsimg_wire_info_encode(frame.payload, &info);
 	CHECK(fsimg_wire_info_frame_valid(&frame));
+}
+
+/* Missing bytes are part of the declared volume, including an empty one. */
+static void
+test_info_missing_bytes_are_bounded(void)
+{
+	typedef struct info_missing_case {
+		uint64_t volume;
+		uint64_t missing;
+		bool valid;
+	} info_missing_case_t;
+	static const info_missing_case_t cases[] = {
+		{ .volume = 4096, .missing = 0, .valid = true },
+		{ .volume = 4096, .missing = 4096, .valid = true },
+		{ .volume = 4096, .missing = 4097, .valid = false },
+		{ .volume = 0, .missing = 1, .valid = false }
+	};
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_INFO,
+	    .length = FSIMG_WIRE_INFO_BYTES };
+	bool valid, matched = true;
+
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_INFO_TIME_BASIS, FSIMG_TIME_WALL);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_INFO_SCOPE, FSIMG_VALIDATION_HEADER);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_INFO_VOLUME, cases[i].volume);
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_INFO_MISSING, cases[i].missing);
+		valid = fsimg_wire_info_frame_valid(&frame);
+		if (valid != cases[i].valid)
+			fprintf(stderr, "INFO missing case %zu: volume=%llu missing=%llu expected %d, received %d\n",
+			    i, (unsigned long long)cases[i].volume,
+			    (unsigned long long)cases[i].missing, cases[i].valid, valid);
+		matched &= valid == cases[i].valid;
+	}
+	CHECK(matched);
 }
 
 static void
@@ -1550,6 +1587,106 @@ test_job_catalogue(void)
 	}
 }
 
+/* A scheme's available and missing bytes describe a representable end. */
+static void
+test_image_declared_end_is_representable(void)
+{
+	typedef struct image_missing_case {
+		uint64_t missing;
+		bool valid;
+	} image_missing_case_t;
+	static const image_missing_case_t cases[] = {
+		{ .missing = UINT64_MAX - 4096, .valid = true },
+		{ .missing = UINT64_MAX - 4095, .valid = false }
+	};
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_IMAGE,
+	    .length = FSIMG_WIRE_IMAGE_BYTES };
+	bool valid, matched = true;
+
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_DISK, 4096);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_FILE, 4096);
+	strcpy((char *)frame.payload + FSIMG_WIRE_IMAGE_SCHEME, "mbr");
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_SECTOR, 512);
+	fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_SLOTS, 4);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_MISSING, cases[i].missing);
+		valid = fsimg_wire_image_frame_valid(&frame);
+		if (valid != cases[i].valid)
+			fprintf(stderr, "IMAGE declared end case %zu: missing=%llu expected %d, received %d\n",
+			    i, (unsigned long long)cases[i].missing, cases[i].valid, valid);
+		matched &= valid == cases[i].valid;
+	}
+	CHECK(matched);
+}
+
+/* Clipping keeps the available prefix; an absent partition has no claim.
+ * Offset, available length and missing bytes describe a representable end.
+ */
+static void
+test_partition_missing_bytes_match_disk_extent(void)
+{
+	typedef struct partition_missing_case {
+		uint64_t offset;
+		uint64_t length;
+		uint64_t missing;
+		fsimg_claim_t claim;
+		bool valid;
+	} partition_missing_case_t;
+	const uint64_t disk_bytes = 4096;
+	const uint64_t slot_count = 4;
+	static const partition_missing_case_t cases[] = {
+		/* Whole slots. */
+		{ .offset = 512, .length = 3584, .missing = 0, .claim = FSIMG_CLAIM_NONE, .valid = true },
+		{ .offset = 512, .length = 512, .missing = 0, .claim = FSIMG_CLAIM_NONE, .valid = true },
+		/* Clipped slots. */
+		{ .offset = 512, .length = 3584, .missing = 512, .claim = FSIMG_CLAIM_NONE, .valid = true },
+		{ .offset = 512, .length = 3584, .missing = 512, .claim = FSIMG_CLAIM_FORMAT, .valid = true },
+		/* Wholly absent slots. */
+		{ .offset = 4096, .length = 0, .missing = 512, .claim = FSIMG_CLAIM_NONE, .valid = true },
+		{ .offset = 8192, .length = 0, .missing = 512, .claim = FSIMG_CLAIM_NONE, .valid = true },
+		{ .offset = UINT64_MAX - 512, .length = 0, .missing = 512, .claim = FSIMG_CLAIM_NONE, .valid = true },
+		/* Impossible extents. */
+		{ .offset = 512, .length = 0, .missing = 512, .claim = FSIMG_CLAIM_NONE, .valid = false },
+		{ .offset = 512, .length = 512, .missing = 512, .claim = FSIMG_CLAIM_NONE, .valid = false },
+		{ .offset = 4096, .length = 512, .missing = 512, .claim = FSIMG_CLAIM_NONE, .valid = false },
+		{ .offset = 8192, .length = 512, .missing = 512, .claim = FSIMG_CLAIM_NONE, .valid = false },
+		{ .offset = 512, .length = 3585, .missing = 512, .claim = FSIMG_CLAIM_NONE, .valid = false },
+		{ .offset = 4096, .length = 0, .missing = 0, .claim = FSIMG_CLAIM_NONE, .valid = false },
+		/* Declared-end overflow boundary. */
+		{ .offset = 512, .length = 3584, .missing = UINT64_MAX - 4096, .claim = FSIMG_CLAIM_NONE, .valid = true },
+		{ .offset = 8192, .length = 0, .missing = UINT64_MAX, .claim = FSIMG_CLAIM_NONE, .valid = false },
+		{ .offset = 512, .length = 3584, .missing = UINT64_MAX - 4095, .claim = FSIMG_CLAIM_NONE, .valid = false },
+		/* Claimed although absent. */
+		{ .offset = 4096, .length = 0, .missing = 512, .claim = FSIMG_CLAIM_UNSUPPORTED, .valid = false },
+		{ .offset = 4096, .length = 0, .missing = 512, .claim = FSIMG_CLAIM_CORRUPT, .valid = false },
+		{ .offset = 4096, .length = 0, .missing = 512, .claim = FSIMG_CLAIM_AMBIGUOUS, .valid = false },
+		{ .offset = 4096, .length = 0, .missing = 512, .claim = FSIMG_CLAIM_FORMAT, .valid = false }
+	};
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_PARTITION,
+	    .length = FSIMG_WIRE_PARTITION_BYTES };
+	bool valid, matched = true;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		bzero(frame.payload, frame.length);
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_PARTITION_INDEX, 1);
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_PARTITION_OFFSET, cases[i].offset);
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_PARTITION_LENGTH, cases[i].length);
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_PARTITION_MISSING, cases[i].missing);
+		fsimg_store_le64(frame.payload + FSIMG_WIRE_PARTITION_CLAIM, cases[i].claim);
+		if (cases[i].claim == FSIMG_CLAIM_FORMAT)
+			strcpy((char *)frame.payload + FSIMG_WIRE_PARTITION_FORMAT, "fat16");
+		valid = fsimg_wire_partition_frame_valid(&frame, slot_count, disk_bytes);
+		if (valid != cases[i].valid)
+			fprintf(stderr, "PARTITION missing case %zu: offset=%llu length=%llu missing=%llu claim=%d expected %d, received %d\n",
+			    i, (unsigned long long)cases[i].offset,
+			    (unsigned long long)cases[i].length,
+			    (unsigned long long)cases[i].missing, cases[i].claim,
+			    cases[i].valid, valid);
+		matched &= valid == cases[i].valid;
+	}
+	CHECK(matched);
+}
+
 /* Missing partitions retain their declared offset even beyond the disk. */
 static void
 test_missing_partition_records(void)
@@ -2393,6 +2530,8 @@ main(int argc, char **argv)
 	test_job_layers();
 	test_job_catalogue();
 	test_image_records();
+	test_image_declared_end_is_representable();
+	test_partition_missing_bytes_match_disk_extent();
 	test_missing_partition_records();
 	test_frame_splits(0);
 	test_frame_splits(127);
@@ -2410,6 +2549,7 @@ main(int argc, char **argv)
 	test_invalid_entry_records();
 	test_info_text_records_reject_invalid_counts_and_strings();
 	test_info_geometry_is_informational();
+	test_info_missing_bytes_are_bounded();
 	test_info_uuid();
 	test_info_label();
 	test_info_mountpoint();

@@ -69,6 +69,11 @@ typedef enum worker_scenario {
 	SCENARIO_VERIFY_HEADER_SCOPE,
 	SCENARIO_VERIFY_UNREQUESTED_PAYLOAD,
 	SCENARIO_VERIFY_MISSING_PAYLOAD,
+	SCENARIO_VERIFY_MISSING_INFO,
+	SCENARIO_VERIFY_MISSING_DONE,
+	SCENARIO_VERIFY_MISSING_EXIT,
+	SCENARIO_VERIFY_MISSING_ERROR,
+	SCENARIO_VERIFY_UNVERIFIED_IMAGE,
 	SCENARIO_RUNTIME_FAILURE,
 	SCENARIO_PARTIAL_EXTRACTION,
 	SCENARIO_ASAN_FAILURE,
@@ -2507,6 +2512,8 @@ test_inheritance(void)
 static int
 fake_worker(worker_scenario_t mode)
 {
+	const bool missing_verify = mode >= SCENARIO_VERIFY_MISSING_INFO &&
+	    mode <= SCENARIO_VERIFY_MISSING_ERROR;
 	fsimg_frame_t frame;
 	unsigned char raw[FSIMG_FRAME_BYTES], header[FSIMG_FRAME_HEADER];
 	uint64_t remaining;
@@ -2600,6 +2607,18 @@ fake_worker(worker_scenario_t mode)
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, mode == SCENARIO_IMAGE_WRONG_DISK ?
 	    (uint64_t)mode + 1 : (uint64_t)mode);
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, (uint64_t)mode);
+	/* A W job's IMAGE carries the layers' verification. */
+	if (mode >= SCENARIO_VERIFY_INVALID_SCOPE &&
+	    mode <= SCENARIO_VERIFY_MISSING_PAYLOAD)
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_VERIFIED);
+	/* Verification cannot complete with missing image or volume bytes. */
+	if (missing_verify) {
+		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_VERIFIED);
+		frame.type = FSIMG_FRAME_IMAGE;
+		frame.length = FSIMG_WIRE_IMAGE_BYTES;
+		bcopy(raw, frame.payload, frame.length);
+		CHECK(fsimg_wire_image_frame_valid(&frame));
+	}
 	if (mode == SCENARIO_PARTITION_OUTSIDE || mode == SCENARIO_PARTITION_UNSELECTED_LIST) {
 		strcpy((char *)raw + FSIMG_WIRE_IMAGE_SCHEME, "mbr");
 		fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
@@ -2630,7 +2649,33 @@ fake_worker(worker_scenario_t mode)
 		fsimg_store_le64(raw + FSIMG_WIRE_INFO_VALID, FSIMG_VOLUME_GEOMETRY);
 		fsimg_store_le64(raw + FSIMG_WIRE_INFO_VOLUME, UINT64_MAX);
 	}
+	if (missing_verify) {
+		fsimg_store_le64(raw + FSIMG_WIRE_INFO_VOLUME, 8192);
+		fsimg_store_le64(raw + FSIMG_WIRE_INFO_MISSING, 4096);
+		frame.type = FSIMG_FRAME_INFO;
+		frame.length = FSIMG_WIRE_INFO_BYTES;
+		bcopy(raw, frame.payload, frame.length);
+		CHECK(fsimg_wire_info_frame_valid(&frame));
+	}
 	CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_INFO, raw, FSIMG_WIRE_INFO_BYTES, NULL) == FSIMG_OK);
+	if (mode == SCENARIO_VERIFY_MISSING_DONE) {
+		bzero(raw, FSIMG_WIRE_DONE_BYTES);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_DONE,
+		    raw, FSIMG_WIRE_DONE_BYTES, NULL) == FSIMG_OK);
+		return (0);
+	}
+	if (mode == SCENARIO_VERIFY_MISSING_EXIT)
+		return (0);
+	/* A truncated volume can report its own corruption after INFO. */
+	if (mode == SCENARIO_VERIFY_MISSING_ERROR) {
+		bzero(&error, sizeof(error));
+		error.status = FSIMG_ECORRUPT;
+		strcpy(error.message, "missing volume bytes");
+		fsimg_wire_error_encode(raw, &error);
+		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ERROR,
+		    raw, FSIMG_WIRE_ERROR_BYTES, NULL) == FSIMG_OK);
+		return (1);
+	}
 	if (mode == SCENARIO_INFORMATIONAL_GEOMETRY) {
 		bzero(raw, FSIMG_WIRE_ENTRY_BYTES);
 		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
@@ -2652,12 +2697,19 @@ fake_worker(worker_scenario_t mode)
 		CHECK(close(output) == 0);
 		return (1);
 	}
-	if (mode >= SCENARIO_VERIFY_INVALID_SCOPE && mode <= SCENARIO_VERIFY_MISSING_PAYLOAD) {
+	if ((mode >= SCENARIO_VERIFY_INVALID_SCOPE && mode <= SCENARIO_VERIFY_MISSING_PAYLOAD) ||
+	    missing_verify || mode == SCENARIO_VERIFY_UNVERIFIED_IMAGE) {
 		bzero(raw, 72);
 		fsimg_store_le64(raw, mode == SCENARIO_VERIFY_INVALID_SCOPE ? UINT64_MAX : mode == SCENARIO_VERIFY_HEADER_SCOPE ?
 		    FSIMG_VALIDATION_HEADER : mode == SCENARIO_VERIFY_UNREQUESTED_PAYLOAD ? FSIMG_VALIDATION_PAYLOAD :
 		    FSIMG_VALIDATION_STRUCTURAL);
 		fsimg_store_le64(raw + 8, 1);
+		if (missing_verify) {
+			frame.type = FSIMG_FRAME_VERIFY;
+			frame.length = FSIMG_WIRE_VERIFY_BYTES;
+			bcopy(raw, frame.payload, frame.length);
+			CHECK(fsimg_wire_verify_frame_valid(&frame, false));
+		}
 		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_VERIFY,
 		    raw, 72, NULL) == FSIMG_OK);
 	}
@@ -2913,9 +2965,12 @@ test_forged(void)
 		SCENARIO_INVALID_TIME_BASIS, SCENARIO_VERIFY_INVALID_SCOPE,
 		SCENARIO_VERIFY_HEADER_SCOPE, SCENARIO_VERIFY_UNREQUESTED_PAYLOAD,
 		SCENARIO_VERIFY_MISSING_PAYLOAD, SCENARIO_RUNTIME_FAILURE,
+		SCENARIO_VERIFY_MISSING_ERROR, SCENARIO_VERIFY_MISSING_INFO,
+		SCENARIO_VERIFY_MISSING_DONE, SCENARIO_VERIFY_MISSING_EXIT,
 		SCENARIO_INFO_WITHOUT_IMAGE, SCENARIO_IMAGE_WRONG_DISK,
 		SCENARIO_PARTITION_OUTSIDE, SCENARIO_PARTITION_UNSELECTED_LIST,
-		SCENARIO_VHD_WHOLE_FILE, SCENARIO_EXCESS_LOSS, SCENARIO_LIMIT_LOSS
+		SCENARIO_VHD_WHOLE_FILE, SCENARIO_EXCESS_LOSS, SCENARIO_LIMIT_LOSS,
+		SCENARIO_VERIFY_UNVERIFIED_IMAGE
 #ifdef FSIMG_TEST_ASAN
 		, SCENARIO_ASAN_FAILURE
 #endif
@@ -2952,8 +3007,10 @@ test_forged(void)
 		/* Only i may report a disk without a selected volume. */
 		if (mode == SCENARIO_PARTITION_UNSELECTED_LIST)
 			fixture.request.kind = FSIMG_JOB_LIST;
-		if (mode >= SCENARIO_VERIFY_INVALID_SCOPE && mode <= SCENARIO_VERIFY_MISSING_PAYLOAD)
+		if (mode >= SCENARIO_VERIFY_INVALID_SCOPE && mode <= SCENARIO_VERIFY_UNVERIFIED_IMAGE)
 			fixture.request.kind = FSIMG_JOB_VERIFY;
+		if (mode == SCENARIO_VERIFY_MISSING_ERROR)
+			expected = FSIMG_ECORRUPT;
 		if (mode == SCENARIO_VERIFY_MISSING_PAYLOAD)
 			fixture.request.flags = FSIMG_JOB_PAYLOAD;
 		if (mode == SCENARIO_STALLED_PARSER) {
@@ -2968,6 +3025,8 @@ test_forged(void)
 			fprintf(stderr, "forged worker scenario %d: expected %d, received %d: %s\n",
 			    mode, expected, status, error.message);
 		CHECK(status == expected);
+		if (mode == SCENARIO_VERIFY_MISSING_ERROR)
+			CHECK(strcmp(error.message, "missing volume bytes") == 0);
 		if (mode == SCENARIO_LONG_LIST_NAME)
 			CHECK(fixture.name_bytes == 65535);
 		if (mode == SCENARIO_EXCESS_LOSS)

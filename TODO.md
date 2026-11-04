@@ -549,6 +549,12 @@
   so a `--without-xz` tree qualifies an install that found liblzma. Replay
   `config.status --config` as `sanitize.sh` does.
 
+* [Low] **Automatic selection hides a truncation** (`lib/layers/image.c`,
+  `select_automatic`): with no selector, `l` or `x` on a disk whose used slots
+  are all past its end reports `FSIMG_EFORMAT` "no recognized filesystem in any
+  partition" without naming the cut, though `i` and `W` report it. Add the
+  missing bytes to the message and keep the status, which `i` routes on.
+
 ## Security residuals
 
 * [Medium] **exFAT listing cost with shared allocations** (`exfat_replay` and

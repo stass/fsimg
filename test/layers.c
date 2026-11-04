@@ -114,6 +114,7 @@ static void test_gpt_names(void);
 static void test_gpt_seeded_failures(void);
 static void test_mbr_truncated_partition_keeps_partial_sector(void);
 static void test_mbr_missing_partition_is_listed_but_not_selected(void);
+static void test_mbr_missing_partition_has_no_filesystem_claim(void);
 static void test_gpt_truncated_partitions_and_backup_report_missing_bytes(void);
 static void test_gpt_failed_primary_stays_corrupt_on_cut_disk(void);
 static void test_gpt_primary_array_cuts_are_corrupt(void);
@@ -969,6 +970,38 @@ test_mbr_missing_partition_is_listed_but_not_selected(void)
 	}
 	fixture_free(&f);
 	free(disk.bytes);
+}
+
+static void
+test_mbr_missing_partition_has_no_filesystem_claim(void)
+{
+	static const char *const stacks[] = {
+		NULL, "exfat/mbr", "fat12/mbr", "fat16/mbr", "fat32/mbr",
+		"ifs/mbr", "iso9660/mbr", "qnx4/mbr", "qnx6/mbr"
+	};
+	memory_disk_t disk = disk_new(4 * MIB);
+	fsimg_partition_info_t partition;
+	unsigned failures = 0;
+	fixture_t f;
+
+	mbr_entry(disk.bytes, 0, 0, 1, 8193, 1024);
+	fixture_init(&f);
+	/* A slot with no bytes reports no claim whichever filesystem is forced. */
+	for (size_t i = 0; i < sizeof(stacks) / sizeof(stacks[0]); i++) {
+		CHECK(fixture_open(&f, &disk, stacks[i], 0, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_next_partition(f.image, &partition, NULL) == FSIMG_OK);
+		CHECK(partition.index == 1 && partition.used);
+		CHECK(partition.length == 0 && partition.missing_bytes == 1024 * 512);
+		if (partition.claim != FSIMG_CLAIM_NONE || partition.format[0] != '\0') {
+			fprintf(stderr, "Missing MBR partition (%s): claim=%d, format=\"%s\"\n",
+			    stacks[i] == NULL ? "unforced" : stacks[i],
+			    (int)partition.claim, partition.format);
+			failures++;
+		}
+	}
+	fixture_free(&f);
+	free(disk.bytes);
+	CHECK(failures == 0);
 }
 
 static void
@@ -2397,6 +2430,7 @@ main(int argc, char **argv)
 	test_gpt_names();
 	test_mbr_truncated_partition_keeps_partial_sector();
 	test_mbr_missing_partition_is_listed_but_not_selected();
+	test_mbr_missing_partition_has_no_filesystem_claim();
 	test_gpt_truncated_partitions_and_backup_report_missing_bytes();
 	test_gpt_failed_primary_stays_corrupt_on_cut_disk();
 	test_gpt_primary_array_cuts_are_corrupt();

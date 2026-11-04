@@ -638,6 +638,10 @@ fsimg_wire_info_frame_valid(const fsimg_frame_t *frame)
 		return (false);
 	if (scope < FSIMG_VALIDATION_HEADER || scope > FSIMG_VALIDATION_PAYLOAD)
 		return (false);
+	/* The missing bytes are declared bytes the input does not hold. */
+	if (fsimg_load_le64(raw + FSIMG_WIRE_INFO_MISSING) >
+	    fsimg_load_le64(raw + FSIMG_WIRE_INFO_VOLUME))
+		return (false);
 	if ((valid & FSIMG_VOLUME_UUID) == 0 &&
 	    !bytes_zero(raw + FSIMG_WIRE_INFO_UUID, 16))
 		return (false);
@@ -761,9 +765,11 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 			return (false);
 	}
 	/* Verification fails on a truncated disk, so a verified one has no
-	 * missing bytes.
+	 * missing bytes. The disk and its missing bytes sum to the end the
+	 * table declares, a 64-bit offset.
 	 */
-	if ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && missing != 0)
+	if (((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && missing != 0) ||
+	    missing > UINT64_MAX - fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK))
 		return (false);
 	scheme = raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0';
 	if (!scheme)
@@ -779,15 +785,20 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	    slots <= FSIMG_GPT_MAX_ENTRIES && selected <= slots && checked <= slots);
 }
 
-/* A used slot of a table with slots entries, lying within the disk or, with no
- * bytes at all, past the end of a truncated one.
+/*
+ * A used slot of a table with slots entries, as clip_table in
+ * lib/layers/image.c leaves it. A whole slot has bytes and lies within the
+ * disk. A clipped slot keeps exactly the bytes the disk holds from its offset,
+ * none when it starts at or past the end, and its declared end is a 64-bit
+ * offset: offset + length is then the larger of the disk and the offset, so
+ * subtracting it cannot wrap. A slot with no bytes has no filesystem to claim.
  */
 bool
 fsimg_wire_partition_frame_valid(const fsimg_frame_t *frame, uint64_t slots,
     uint64_t disk_bytes)
 {
 	const unsigned char *raw = frame->payload;
-	uint64_t index, offset, length, missing, claim;
+	uint64_t index, offset, length, missing, claim, disk_held;
 	bool named;
 
 	if (frame->length != FSIMG_WIRE_PARTITION_BYTES)
@@ -799,10 +810,14 @@ fsimg_wire_partition_frame_valid(const fsimg_frame_t *frame, uint64_t slots,
 	claim = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_CLAIM);
 	if (index == 0 || index > slots)
 		return (false);
-	if (length == 0) {
-		if (missing == 0)
+	disk_held = offset < disk_bytes ? disk_bytes - offset : 0;
+	if (missing == 0) {
+		if (length == 0 || length > disk_held)
 			return (false);
-	} else if (offset > disk_bytes || length > disk_bytes - offset)
+	} else if (length != disk_held ||
+	    missing > UINT64_MAX - offset - length)
+		return (false);
+	if (length == 0 && claim != FSIMG_CLAIM_NONE)
 		return (false);
 	if (fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_FLAGS) >
 	    FSIMG_WIRE_PARTITION_ACTIVE ||

@@ -184,11 +184,17 @@ according to host behavior. The output relay holds only one bounded record;
 after coordinator death its next status write fails, preventing another record.
 
 The lengths a worker reports are checked for consistency with what the
-coordinator knows, and each then bounds the records after it: the
-partitions and the volume lie within the disk, a partition past the end of a
-truncated disk having no bytes, `x -O` without `-l output`
-writes no more than the volume, and a stream creation sends no more than
-its plan. A read job's IMAGE record names the layers the stack forces: an
+coordinator knows, and each then bounds the records after it. The partitions
+and the volume lie within the disk. A partition cut by a truncated disk keeps
+exactly the bytes the disk holds, and one with none claims no filesystem.
+`x -O` without `-l output` writes no more than the volume, and a stream creation
+sends no more than its plan. A verify job's IMAGE record carries the layers'
+verification and so reports no missing bytes, and a verify job whose INFO record
+reports some cannot succeed, as neither VERIFY nor DONE is admitted. That
+catches a worker contradicting itself; the verdict remains the worker's word,
+since the coordinator has no view of the volume.
+
+A read job's IMAGE record names the layers the stack forces: an
 emptied scheme or container slot reports none, a named one that layer, and
 a forced compression that compression. Its file is the input's exact
 length, or, decoded or streamed into the spool, at most the spool limit.

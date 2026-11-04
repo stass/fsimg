@@ -1400,7 +1400,8 @@ fsimg_image_next_partition(fsimg_image_t *image, fsimg_partition_info_t *out,
 
 	record = &image->table.records[image->cursor];
 	fsimg_partition_report(image->table.kind, record, out);
-	if (record->used) {
+	/* A slot past the end of a truncated disk has no bytes to claim. */
+	if (record->used && record->length != 0) {
 		status = claim_volume(image, record->offset, record->length,
 		    &out->claim, out->format, error);
 		if (status != FSIMG_OK)
@@ -1504,7 +1505,7 @@ select_automatic(fsimg_image_t *image, fsimg_io_t **volume,
 	    "several partitions hold a filesystem:");
 	for (uint32_t i = 0; i < image->table.count; i++) {
 		record = &image->table.records[i];
-		if (!record->used)
+		if (!record->used || record->length == 0)
 			continue;
 		status = claim_volume(image, record->offset, record->length,
 		    &claim, format, error);

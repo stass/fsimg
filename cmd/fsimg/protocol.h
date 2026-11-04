@@ -366,10 +366,9 @@ fsimg_status_t fsimg_wire_error_decode(const unsigned char *, uint32_t,
  * IMAGE selection and explicit limits own I/O and output bounds.
  */
 bool fsimg_wire_info_frame_valid(const fsimg_frame_t *);
-/* An image record of an input of the given size: without a container its
- * disk is that size, and a container's disk is what its tables declare. A
- * partition record lies within a disk of the given size, in a table of the
- * given slot count.
+/* An image record's disk is its file without a container, and what a
+ * container's tables declare with one. A partition record takes its table's
+ * slot count and its disk's size, and is what clipping to that disk leaves.
  */
 bool fsimg_wire_image_frame_valid(const fsimg_frame_t *);
 bool fsimg_wire_partition_frame_valid(const fsimg_frame_t *, uint64_t,

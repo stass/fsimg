@@ -188,8 +188,8 @@ candidate_read(fsimg_reader_t *reader, uint64_t offset, qnx6_candidate_t *c,
 	return (FSIMG_OK);
 }
 
-/* The byte past the N blocks. N has 32 bits and a validated B at most 13, so
- * this cannot overflow.
+/* The byte past the N blocks. N has 32 bits and a block is at most 4096 bytes,
+ * so this cannot overflow.
  */
 static uint64_t
 blocks_end(const qnx6_header_t *h)

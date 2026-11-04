@@ -731,8 +731,8 @@ typedef enum fsimg_claim {
  * U+FFFD); an MBR entry fills mbr_type and active. An unused slot has only
  * index set; its claim is NONE. length is what the disk holds, and
  * missing_bytes the rest of the declared length; a partition starting at or
- * past the end of a truncated disk has a length of zero and cannot be
- * selected.
+ * past the end of a truncated disk has a length of zero, no claim and cannot
+ * be selected.
  */
 typedef struct fsimg_partition_info {
 	char		 type[16];

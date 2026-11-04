@@ -153,15 +153,18 @@ class CliTest < Minitest::Test
     end
   end
 
-  def test_info_lists_every_partition_when_all_are_past_end
-    { "mbr" => 512, "gpt" => 17_408 }.each do |scheme, cut|
-      scheme_fixture(scheme: scheme, cut: cut, missing_partition: true)
-      partitions = scheme_records.select { _1.fetch("type") == "partition" }
-      assert_equal([1, 2], partitions.map { _1.fetch("index") })
-      assert_equal(["1048576", "3145728"], partitions.map { _1.fetch("offset_bytes") })
-      assert_equal(["0", "0"], partitions.map { _1.fetch("length_bytes") })
-      assert_equal(["1048576", "524288"], partitions.map { _1.fetch("missing_bytes") })
-      assert_equal(["none", "none"], partitions.map { _1.fetch("filesystem_claim") })
+  def test_info_lists_every_partition_when_all_are_at_or_past_end
+    { "mbr" => [512, SCHEME_PARTITION_OFFSET],
+      "gpt" => [17_408, SCHEME_PARTITION_OFFSET] }.each do |scheme, cuts|
+      cuts.each do |cut|
+        scheme_fixture(scheme: scheme, cut: cut, missing_partition: true)
+        partitions = scheme_records.select { _1.fetch("type") == "partition" }
+        assert_equal([1, 2], partitions.map { _1.fetch("index") })
+        assert_equal(["1048576", "3145728"], partitions.map { _1.fetch("offset_bytes") })
+        assert_equal(["0", "0"], partitions.map { _1.fetch("length_bytes") })
+        assert_equal(["1048576", "524288"], partitions.map { _1.fetch("missing_bytes") })
+        assert_equal(["none", "none"], partitions.map { _1.fetch("filesystem_claim") })
+      end
     end
   end
 

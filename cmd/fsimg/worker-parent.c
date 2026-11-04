@@ -52,7 +52,11 @@ typedef enum worker_output_state {
 	WORKER_UNSELECTED,
 	WORKER_OUTPUT_READY,
 	WORKER_IN_ENTRY,
-	WORKER_VERIFIED
+	WORKER_VERIFIED,
+	/* A verify job's volume reported missing bytes, so the job cannot
+	 * succeed: neither VERIFY nor DONE is admitted here.
+	 */
+	WORKER_TRUNCATED
 } worker_output_state_t;
 
 typedef enum worker_channel {
@@ -423,7 +427,8 @@ read_disk_expected(const worker_supervisor_t *state, const unsigned char *raw)
  * own file, and selects the one partition when a scheme is named. Either
  * way the handler then takes the disk length as the bound of the
  * partitions, the volume and the image.
- * Only i reports a disk without a volume; only W verifies layers.
+ * Only i reports a disk without a volume. W, and only W, verifies layers, so
+ * its IMAGE record has no missing bytes (fsimg_wire_image_frame_valid).
  */
 static bool
 image_frame_expected(const worker_supervisor_t *state,
@@ -439,7 +444,7 @@ image_frame_expected(const worker_supervisor_t *state,
 		return (false);
 	flags = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FLAGS);
 	if (((flags & FSIMG_WIRE_IMAGE_UNSELECTED) != 0 && kind != FSIMG_JOB_INFO) ||
-	    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && kind != FSIMG_JOB_VERIFY))
+	    ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0) != (kind == FSIMG_JOB_VERIFY))
 		return (false);
 	if (!layers_expected(state->request, raw))
 		return (false);
@@ -689,7 +694,9 @@ handle_frame(worker_supervisor_t *state, fsimg_error_t *error)
 		if (kind >= FSIMG_JOB_CREATE || state->output_state != WORKER_WAIT_HEADER ||
 		    !fsimg_wire_info_frame_valid(frame))
 			return (worker_error(error, "invalid worker volume information"));
-		state->output_state = WORKER_OUTPUT_READY;
+		state->output_state = kind == FSIMG_JOB_VERIFY &&
+		    fsimg_load_le64(raw + FSIMG_WIRE_INFO_MISSING) != 0 ?
+		    WORKER_TRUNCATED : WORKER_OUTPUT_READY;
 		break;
 	case FSIMG_FRAME_PLAN:
 		if (!plan_frame_expected(state, frame))

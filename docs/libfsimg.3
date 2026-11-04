@@ -227,8 +227,9 @@ layer and its first assumed check.
 A disk shorter than its partition table declares still opens: a partition
 past the end is clipped to the bytes the disk holds, its length that remainder
 and its missing_bytes the rest of the declared length.
-One with no bytes at all is listed with a length of zero and selecting it
-returns FSIMG_ECORRUPT.
+One with no bytes at all is listed with a length of zero and no claim.
+Automatic selection passes over it, and selecting it explicitly returns
+FSIMG_ECORRUPT.
 A GPT disk opens so only when its primary table is intact and its alternate
 LBA lies past the disk's end, which means its backup is lost; backup tables
 that disagree are always FSIMG_ECORRUPT.
