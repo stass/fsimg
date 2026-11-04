@@ -48,6 +48,11 @@ resolver, so domain, continuity, sum, record-count and claim checks exist
 once; every tree goes through the one node reader, so offset tables, kinds,
 heights and sibling links are validated once.
 
+A fork is resolved when it is opened. Listing does not open a file's forks, and
+reading stops at end of file before opening an empty one, so a zero-length
+fork with stray descriptors reads as empty; verification opens every fork and
+reports it as `FSIMG_ECORRUPT`.
+
 ## Codecs
 
 The shared big-endian [scalar codecs](design-binary-primitives.md) decode
