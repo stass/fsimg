@@ -350,6 +350,12 @@ work in `TODO.md`, and release changes in `NEWS` when there is content to record
   the design changes, not to record what shipped, what was deferred, or which
   parts are not built yet - that belongs in `TODO.md`. A design doc is never
   trimmed to match a partial implementation.
+* **A design written ahead of its evidence marks what is unproven.** A value
+  no observation has confirmed is labelled provisional and names the
+  experiment that closes it; "E1 confirms" is written only once E1 has run.
+  Each such value also says what the design does if the experiment cannot
+  answer, such as when no specimen exists or the native tool refuses, so an
+  unanswerable question has a safe default instead of blocking a gate.
 * A decision that constrains more than one subsystem is recorded, with its
   rationale, in the relevant architecture or contract section of
   `specs/architecture.md`; any other decision lives in the design doc it shapes.
