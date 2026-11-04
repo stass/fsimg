@@ -16,6 +16,7 @@ observation wins and the departure is listed in the plan.
 | The research draft | Research draft, original prose | Questions, invariants, test matrix. Every uncertainty in its section 20 is a gate, never a default |
 | Apple TN1150 | Vendor documentation; facts paraphrased, no text or sample code reproduced | Layout, B-trees, catalog, Unicode rules, hard links, journal, wrapper |
 | Apple `hfs_format.h`, `hfs_catalog.c`, `hfs_link.c` and xnu `decmpfs.h` | APSL 2.0; facts only, no code or declarations | Modern flags, the attribute key and records, private names, the link-stub tests and dates, the compression header and types |
+| Apple open-source `hfs` at tag `hfs-715.120.4` (commit `124b970fd5390f1c2cd6f985478616a04f6eeb1f`, <https://github.com/apple-oss-distributions/hfs>) and `xnu` at tag `xnu-12377.121.6` (commit `ac9718fb1af618d5ce8678d0dc6e8a58f252216f`, <https://github.com/apple-oss-distributions/xnu>), read-only, outside the tree | APSL 2.0; facts only, paraphrased, no code, table, declaration or identifier enters the repository; tables are compared by a throwaway script and only the result is recorded | The [Apple source cross-check](#apple-source-cross-check) |
 | NetBSD `sys/fs/hfs/libhfs.c` | BSD-2-Clause | A second, independent derivation of the folding table, compared, not imported |
 | Unicode 3.2.0 character data | Unicode license, notice in `third-party/Unicode-LICENSE.txt` | Input of the table generator |
 | Apple `lzfse` at a pinned commit | BSD-3-Clause | The imported LZFSE and LZVN decoders, under the [codec design](../specs/design-codecs.md#imported-lzfse-and-lzvn-decoders) |
@@ -1704,3 +1705,265 @@ natively here (no tool formats one), so wrapped volumes come from `mkfs.hfsplus 
 and the one archival specimen, which agree in every field above except the
 geometry.
 
+
+## Apple source cross-check
+
+The Apple sources of the [Sources](#sources) table were read after the
+experiments, to check what the evidence and the designs rest on. They are
+facts, paraphrased: file and line are given at the pinned tags so a reader can
+find each one, and nothing from them is copied. Paths without a prefix are in
+the `hfs` tree (`hfs-715.120.4`); `xnu/` paths are in the `xnu` tree
+(`xnu-12377.121.6`, which also needed `bsd/vfs/vfs_utfconvdata.h` for the
+tables). The host's `fsck_hfs` is `hfs-715.160.9` and its kernel is
+`xnu-12377.161.14`: both are newer than the pinned tags, and the gap is not
+closed here. A fact below that also appears in an experiment says so; where
+the two differ the difference is stated.
+
+### Name comparison table (question 1)
+
+The kernel folds a unit through one of two tables: the Latin table for units
+below U+0100 (`core/UCStringCompareData.h:78`) and the main table for the rest
+(`:103`); the main table's own subtable for the Latin block is never read.
+The comparison routine is `core/UnicodeWrappers.c:366`. `fsck_hfs` carries its
+own copy, one table for all units (`lib_fsck_hfs/dfalib/CaseFolding.h:41`,
+compared by `lib_fsck_hfs/dfalib/SKeyCompare.c:153`), and the user-space
+plugin of the same tree carries a third copy.
+
+A throwaway script folded all 65536 units through each copy and through
+`lib/formats/hfsplus/unicode-tables.h`. The result:
+
+* The three Apple copies agree on all 65536 units, and all agree with the
+  header: **0 differences** in 65536.
+* That covers the 12146 unobservable rows, so the derivation rule there is
+  confirmed by source, not only by NetBSD's witness. It covers the 30
+  exception units, which fold to themselves in Apple's table.
+* U+0000 folds to U+FFFF; U+FFFE and U+FFFF fold to themselves, so U+0000
+  ties with U+FFFF alone, as the header says. U+2400, `:` and `/` fold to
+  themselves. Exactly 16 units fold to zero (ignorable): U+200C to U+200F,
+  U+202A to U+202E, U+206A to U+206F and U+FEFF, the same 16 as the header.
+
+### Decomposition, classes and the name conversion (question 2)
+
+The conversion is `xnu/bsd/vfs/vfs_utfconv.c`; a catalog key is built with
+decomposition and with escaping of illegal UTF-8 on
+(`core/hfs_catalog.c:3519`).
+
+* **Data.** Comparing `xnu/bsd/vfs/vfs_utfconvdata.h` with the header over
+  the BMP: 970 decompositions, all identical to the header's; the
+  decomposable set otherwise is exactly the Hangul syllables U+AC00 to
+  U+D7A3 (11172), which the code computes. No Apple decomposition is longer
+  than four units, none contains a decomposable unit, and none lies in
+  U+2000 to U+2FFF or U+F900 to U+FAFF: the data holds no entry there, and the
+  source gives no reason (the reason is TN1150's). The Hangul formula's range
+  check (`:1001`) admits U+D7A4 by one, but the decomposable-unit test
+  (`:116`) excludes it first, so U+D7A4 stays whole.
+* **Classes.** The 297 nonzero classes of the header equal the xnu table's on
+  every unit. The xnu table holds 25 more nonzero units, all assigned after
+  Unicode 3.2.0: U+0350 to U+0357, U+035D to U+035F, U+0610 to U+0615, U+0656
+  to U+0658, U+0CBC, U+17DD and U+1939 to U+193B. None is in the "combining"
+  set that bounds a run, so they are never sorted; the header's class 0 for
+  them gives the same names.
+* **Algorithm.** A run is the maximal stretch of consecutive units from the
+  combining set (672 units, 375 of them class 0, among them Hangul vowels and
+  finals and the Indic vowel signs), counted after decomposition
+  (`:392`). The run is sorted by an adjacent-swap pass that swaps only when
+  the left class is larger and the right class is nonzero (`:1080`), so it is
+  stable and a class-0 unit in the run is a barrier. That equals a stable
+  sort of each maximal run of nonzero classes, as the design states. Nothing
+  limits the run length or the length of one decomposition; the only bound is
+  the 255-unit key buffer, applied after decomposition (`:439`). Thirty-six
+  decompositions start with a combining unit (U+0340, U+0341, U+0343,
+  U+0344, several Indic vowel signs, U+0F73 and others) and so join the run
+  before them; no decomposition has more than three units after its first.
+* **Surrogates.** A four-byte UTF-8 sequence becomes a pair, the high unit
+  pushed through the run logic (it ends a run) and the low unit stored
+  directly; neither is decomposed. A three-byte spelling of a surrogate, of
+  U+FFFE or of U+FFFF, and any malformed byte, is stored as `%` and two
+  uppercase hex digits per byte; `%` itself is not escaped.
+* **Substitutions.** On the way in, UTF-8 `:` becomes U+002F and U+2400
+  becomes U+0000 (only for non-ASCII input, after the decomposition test);
+  on the way out U+002F becomes `:` and U+0000 becomes U+2400 (`:270`). A
+  stored `:` also appears as `:`, so a stored U+002F and a stored `:` read
+  back the same; the output conversion also refuses U+FFFE and U+FFFF.
+
+All of this agrees with the E3 vectors and the design. The only edge the
+vectors do not exercise is a run of five or more marks with more than one
+class inversion; the algorithm above has no limit there.
+
+### The illegal-name check (question 3)
+
+`fsck_hfs` rejects a file or folder key (not a thread record) whose name is
+empty or over 255 units, or is `.` or `..` (`lib_fsck_hfs/dfalib/CatalogCheck.c:1350`).
+The two mark pairs come from a second test (`:1905`): a repair routine for
+names written before Mac OS X 10.2, under the old Unicode 2.1.2 decomposition
+rules. It flags a name when (a) a unit that Unicode 3.2.0 decomposes appears
+whole, (b) one of a short list of adjacent sequences appears that the old
+rules wrote differently, or (c) marks are out of canonical order by
+`fsck_hfs`'s own class table. The data are `lib_fsck_hfs/dfalib/DecompMakeData.c`
+(raw) and `DecompData.h` (generated; checked equal for the replacement
+strings).
+
+* (c) never fires on names the writer sorts: `fsck_hfs`'s 297 classes equal
+  the header's.
+* (a) never fires on stored names, because the writer decomposes those units.
+* (b) is the list the writer must refuse. Of its 69 entries, 44 are
+  type (a) units; the other 25 are sequences of units that are stable under
+  decomposition. Two of the 25, U+0FB2 or U+0FB3 followed by U+0F80 U+0F71,
+  cannot be stored, because U+0F71 (class 129) sorts before U+0F80 (class
+  130). That leaves **23 adjacent sequences**: U+0306 U+0307 (replaced by
+  U+0310), U+0308 U+030D and U+00A8 U+030D (replaced by the same base with
+  U+0301); U+030D after each of the 15 Greek letters U+0391, U+0395, U+0397,
+  U+0399, U+039F, U+03A5, U+03A9, U+03B1, U+03B5, U+03B7, U+03B9, U+03BF,
+  U+03C5, U+03C9 and U+03D2 (replaced by the letter and U+0301); and U+09AC
+  U+09BC, U+0A21 U+0A3C, U+0B2F U+0B3C, U+0E4D U+0E32 and U+0ECD U+0EB2
+  (replaced by U+09B0, U+0A5C, U+0B5F, U+0E33 and U+0EB3).
+* The E3 pair probe tried every ordered pair of the 327 marks after `a`, so
+  it could see only the two mark-mark pairs. The other 21 are base-then-mark
+  or base-then-base and were not probed. The source says `fsck_hfs -n`
+  flags all 23; it is **not tested here** that the 21 are flagged by the
+  host's `fsck_hfs`, only read.
+
+### The all-ignorable name (question 4)
+
+Both the kernel (`core/hfs_catalog.c:3484`) and `fsck_hfs`
+(`lib_fsck_hfs/dfalib/SKeyCompare.c:236`) order two keys by parent, then by
+name, with a zero-length name compared by raw length first: the thread
+record's empty name sorts before every real name of its parent. A name of
+ignorable units alone has a raw length of at least one, so it goes through
+the folding comparison and folds to empty. It ties only with another
+all-ignorable name, and sorts before every name with a visible unit and after
+the thread key of the same parent. The kernel has no special case for it, and
+`fsck_hfs`'s length check counts raw units, so it passes. The source gives no
+reason to refuse such a name beyond the tie with a sibling; the refusal on
+`hfsplus` is the design's choice.
+
+### Hard-link stubs (questions 5, 6, 7 and 10)
+
+**Stub test.** Looking a record up (`core/hfs_catalog.c:838`) and listing a
+directory (`:2905`) test the same things, and both apply to a *file* record:
+
+* File link: Finder type `hlnk` and creator `hfs+`; the record's link-chain
+  flag is not part of the test (it only says whether the reference is the
+  node's ID or the older node number, `core/hfs_catalog.c:2921`).
+* Directory link: the link-chain flag set, Finder type `fdrp`, creator
+  `MACS`. Listing a directory additionally requires the reference to be at
+  least 16; the lookup does not.
+* Both: the record's `createDate`, converted to seconds (with the record's
+  expanded-times flag), equals the root folder's `createDate` (taken at mount
+  from the root record, `core/hfs_vfsutils.c:587`) **or** a second date that
+  the mount takes from the *file* hard-link data folder (the `\0\0\0\0` +
+  `HFS+ Private Data` folder) alone (`core/hfs_link.c:985`, `:1067`). The
+  directory folder's date (`.HFS+ Private Directory Data\r`) is never used. A
+  read-only mount of a volume without the file folder has only the root date.
+
+**Question 5 answer.** Directory stubs carry the *file* folder's date, the
+same as file stubs: both kinds are created with the one date
+(`core/hfs_link.c:96`). The disagreement the task feared does not arise: a
+native directory stub does not carry the directory folder's date, so it
+cannot fail the test when the two folders' dates differ. The dirlinks capture
+had equal dates only because one mount made both folders. The design's words
+"the private data folder's" (`specs/design-hfsplus.md:871` and `:915`) are
+right only for the file folder; they should say so.
+
+**Question 6.** The kernel's link entry point returns `ENOTSUP` when the
+source is a symbolic link (`core/hfs_link.c:446`); the comment gives the
+`linkat` without-follow case and "for now". It is the only refusal found. The read side does not look at the indirect node's kind: a
+stub resolves to whatever record the node name holds, so a stub whose node is
+a symbolic link reads as one, as the design says. The source does not say
+whether older systems wrote such links, and the checker has no
+symbolic-link-specific rule: **not established**.
+
+**Question 7.** The first-link attribute (a decimal text of the first link's
+ID, with a terminating NUL, inline) is written only for *directory* hard
+links, keyed by the directory node's ID: when the first link is made
+(`core/hfs_link.c:253`), when a later link is made and becomes the first
+(`:315`), and when the first link is unlinked and the next takes over
+(`:871`; the attribute write is at `:1298`). File links keep the first-link ID in the
+indirect node's catalog record and never write the attribute, which agrees
+with E4, E5 and the dirlinks capture. What happens to the attribute when the
+last link goes was not read.
+
+**Question 10.** `link(2)` of a directory is refused with `EPERM` unless the
+volume is journaled (`core/hfs_link.c:452`); the comment says directory links
+were only *qualified* on journaled volumes, a policy, not a stated technical
+need. The other conditions (`:527` to `:598`): the directory folder exists; the
+source's parent and the target's parent differ; neither the target directory
+nor the source's parent is the root; the source is not an ancestor of the
+target; no ancestor of the target is itself a directory link; the link count
+is below the limit; the source is not immutable or append-only; and there is a
+free block. A directory link also sets a "has child link" flag on the
+destination's ancestors and on the source's parent chain.
+
+### Journal, volume header and wrapper (questions 8 and 9)
+
+* **Replay.** A mount opens the journal when the volume's journaled attribute
+  is set. If `lastMountedVersion` is `HFSJ` it does so early
+  (`core/hfs_vfsops.c:1583`, `core/hfs_vfsutils.c:2491`), otherwise late,
+  after the catalog is up, finding the journal file there (`:2701`); both end
+  in the one open routine (`core/hfs_journal.c:1960` to `:2075`), which
+  replays when the header's `start` and `end` differ. Before comparing it
+  replaces a value equal to `size` with `jhdr_size` (`:1162` to `:1184`), so
+  `start == size` with `end == jhdr_size` is empty. Open accepts `start` and
+  `end` in `(0, size]` and multiples of 512, `size` from 256 KiB to 1 GiB; a
+  wrong checksum is only logged, a wrong magic fails. A read-only mount
+  needs `start == end` (`:2237`) or it refuses. The journal info block's
+  `0x1` bit decides local or external, and a clear bit makes the mount look
+  for an external journal device.
+* **Offset base.** The info block is read at the embedded volume's start plus
+  `journalInfoBlock` blocks. The early path adds the embedded start to the
+  stored `offset` before opening, so it takes the stored value as *counting
+  from the embedded volume's start*. The late path does the same addition and
+  then *writes the sum back* (`core/hfs_vfsutils.c:2801`, `:2917`), so after
+  a late mount the stored value counts from the start of the wrapper. This is
+  exactly E11: the one `mkfs.hfsplus -w -J` image held 12288, then 57344 after
+  one macOS mount. The two paths therefore disagree on the base of the same
+  field in Apple's own code. A second mount of that image takes the early path
+  (the first mount wrote `HFSJ`) and would add the embedded start again; what
+  it does then was not tried and the source does not say.
+* **Alternate header.** A flush rewrites the alternate volume header
+  (`core/hfs_vfsops.c:3531`, `:3840`) when the caller asks: resizing the
+  volume, turning the journal on or off, and, on a journaled volume, an update of a
+  system file's extents (`core/hfs_readwrite.c:5732`); and when a flush finds the extents, catalog,
+  allocation or startup file's fork data modified, or the attributes file's
+  (`:3752` on). An ordinary mount, unmount or sync writes only the primary
+  header. The record's "other triggers untried" is thus filled by reading,
+  not by trial.
+
+### Compression (question 11)
+
+`xnu/bsd/sys/decmpfs.h` and `xnu/bsd/kern/decmpfs.c` fix only the
+envelope: the attribute `com.apple.decmpfs`; a 16-byte header of magic
+(`cmpf` as a little-endian word), type and a 64-bit uncompressed size, all
+little-endian (`decmpfs.h:71` to `:140`); a whole attribute of at most 3802
+bytes including the header (`decmpfs.c:561`), so at most 3786 bytes of inline
+payload; type 1 is "data stored uncompressed in the attribute"; types below
+255 are valid, and two dataless types with the high bit set (`decmpfs.h:102`,
+`:105`) are valid for data-less files and directories only. The kernel
+defines no other type: all others, including 3, 4, 7, 8, 11 and 12, belong to
+the separate compression kext, which is not in the tree. **The chunk table,
+the first-offset word, the resource-fork markers and any type beyond the
+design's table are not established** by this source.
+
+### Writer values and the checker (question 12)
+
+The checker (`lib_fsck_hfs/dfalib/SVerify2.c:300` to `:360`) tests a B-tree
+header's depth, root number, and, on a journaled volume, that a node larger
+than an allocation block lies in whole contiguous blocks. A search of the
+checker found **no** test of the catalog node size beyond that, of a one-node
+extents or attributes tree, of one-record index nodes, of `lastMountedVersion`
+values, or of attributes bit 31 (the format header only defines the bit). The
+minimum volume size and `newfs_hfs` constraints were not read. These are
+**not established** by source; the native `fsck_hfs` run in the qualification
+remains the oracle for each provisional value.
+
+### Differences found
+
+| Item | Record or design | Source | What it would break |
+| --- | --- | --- | --- |
+| Illegal-name list | Design `:771`, `:1324`, `:1434`, `:1441`: the two mark pairs | 23 sequences, 21 more (question 3) | A volume the writer produces fails the host `fsck_hfs` for a Greek letter with U+030D and for five Indic and Thai pairs |
+| Private data folder | Design `:871`, `:915` do not say which | The file folder, for both kinds | Nothing if read as the file folder; a reader using the directory folder's date would reject native directory stubs |
+| Directory stub reference | Design `:914`: at least 16 | Only the directory listing tests it | Nothing found; a lookup accepts a smaller value |
+| Journal offset base | Design `:1081`: from the wrapper start for flag `0x1` | Early path: from the embedded start; late path writes the wrapper-based sum | A wrapped volume mounted twice may be read from the wrong place by macOS itself |
+| Journal range | Design `:1107`: `start`, `end` in `[jhdr_size, size)` | macOS opens `(0, size]` and wraps `size` | A clean journal with `start == end == size` is `FSIMG_ECORRUPT` here and mounts on macOS |
+| Journal checksum | Design `:1439` lists a bad checksum | macOS logs it and goes on | A reader stricter than macOS |
+| Post-3.2.0 classes | None | 25 extra nonzero classes, never sorted | Nothing |
