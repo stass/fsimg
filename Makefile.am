@@ -408,7 +408,8 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/vm/ppm2png.py tools/qnx/vm/put.sh \
 	tools/qnx/vm/qsh.py tools/qnx/vm/shot.sh tools/qnx/vm/type.py \
 	tools/qnx/vm/vmstart.sh \
-	tools/gen-fat-tables.rb third-party/Unicode-LICENSE.txt \
+	tools/gen-fat-tables.rb tools/hfsplus/capture.rb tools/hfsplus/fields.rb \
+	third-party/Unicode-LICENSE.txt \
 	test/iso9660-corpus.sh test/iso9660-corpus.rb \
 	test/iso9660-corpus-test.rb test/iso9660-corpus-check.sh.in \
 	test/iso9660-evidence.rb test/iso9660-integration.sh.in \
