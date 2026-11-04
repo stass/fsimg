@@ -19,6 +19,16 @@
 static unsigned failures;
 static void *scratch;
 
+static bool
+decoder_supported(void)
+{
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	return (true);
+#else
+	return (false);
+#endif
+}
+
 static size_t tableless_block(uint8_t *, uint32_t, uint32_t);
 static size_t constant_block(uint8_t *, unsigned, uint32_t);
 static void check_block_result(const char *, const uint8_t *, size_t, size_t,
@@ -510,6 +520,21 @@ write_seed(const char *directory, const char *name, bool raw,
 	CHECK(fclose(file) == 0);
 }
 
+static void
+test_decoders_refuse_unsupported_host(void)
+{
+	uint8_t out[1];
+	fsimg_codec_step_t step;
+	fsimg_error_t error = { 0 };
+
+	expect("test_lzfse_refuses_unsupported_host",
+	    fsimg_lzfse_decode(lzfse_lzvn, sizeof(lzfse_lzvn), out,
+	    sizeof(out), scratch, &step, &error) == FSIMG_EUNSUPPORTED);
+	expect("test_lzvn_refuses_unsupported_host",
+	    fsimg_lzvn_decode(lzfse_lzvn + 12, sizeof(lzfse_lzvn) - 16,
+	    out, sizeof(out), &step, &error) == FSIMG_EUNSUPPORTED);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -531,6 +556,11 @@ main(int argc, char **argv)
 	scratch = malloc(fsimg_lzfse_scratch_bytes());
 	CHECK(scratch != NULL);
 	memset(scratch, POISON, fsimg_lzfse_scratch_bytes());
+	if (!decoder_supported()) {
+		test_decoders_refuse_unsupported_host();
+		free(scratch);
+		return (failures != 0);
+	}
 	/* Different streams reuse the same scratch, including an empty stream. */
 	for (size_t i = 0; i < sizeof(lzfse_vectors) / sizeof(lzfse_vectors[0]); i++)
 		test_vector_bounds(&lzfse_vectors[i], false);

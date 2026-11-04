@@ -3349,6 +3349,16 @@ compression_word(const unsigned char *in)
 	    (uint32_t)in[2] << 16 | (uint32_t)in[3] << 24);
 }
 
+static bool
+decoder_supported(void)
+{
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	return (true);
+#else
+	return (false);
+#endif
+}
+
 static void
 compression_case_init(compression_case_t *c, uint32_t type, size_t size,
     uint32_t stored_mask)
@@ -3582,6 +3592,14 @@ test_compression_codec_content(void)
 		unsigned type = types[t];
 		bool lzvn = type == 7 || type == 8;
 
+		if (!decoder_supported()) {
+			compression_vector_init(&c, type, &lzfse_vectors[1], false, false);
+			snprintf(name, sizeof(name), "test_compression_type%u_unsupported_host", type);
+			check_content(name, &c.plan, "/a", c.plain, c.size,
+			    FSIMG_EUNSUPPORTED, NULL);
+			compression_case_free(&c);
+			continue;
+		}
 		for (size_t i = 0; i < sizeof(lzfse_vectors) / sizeof(lzfse_vectors[0]); i++) {
 			const lzfse_vector_t *v = &lzfse_vectors[i];
 
@@ -3767,6 +3785,8 @@ test_compression_codec_corruption(void)
 	compression_case_t c;
 	char name[128];
 
+	if (!decoder_supported())
+		return;
 	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
 		unsigned type = types[t];
 		bool lzvn = type == 7 || type == 8;
@@ -3807,6 +3827,8 @@ test_compression_lzfse_scratch_budget(void)
 	uint64_t growth = 0;
 	const char *name = "test_compression_lzfse_scratch_budget";
 
+	if (!decoder_supported())
+		return;
 	compression_vector_init(&c, 12, &lzfse_vectors[2], false, false);
 	gen_build(&c.plan, &image);
 	for (unsigned trial = 0; trial < 3; trial++) {
@@ -3874,6 +3896,8 @@ test_compression_word_table_corruption(void)
 	};
 	char name[112];
 
+	if (!decoder_supported())
+		return;
 	for (unsigned type = 8; type <= 12; type += 4) {
 		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 			compression_case_t c;
@@ -3894,6 +3918,26 @@ test_compression_word_table_corruption(void)
 			compression_case_free(&c);
 		}
 	}
+}
+
+static void
+test_compression_resource_map_offsets(void)
+{
+	const char *message = "HFS Plus resource fork's header does not match the fork";
+	compression_case_t c;
+	uint32_t first_chunk;
+
+	compression_case_init(&c, 4, 131200, 0);
+	/* Type 4 pairs are relative to the count word at fork offset 260. */
+	first_chunk = 260 + compression_word(c.resource + 264);
+	gen_store(c.resource + 4, first_chunk, 4);
+	compression_bad_content("test_compression_type4_map_at_first_chunk", &c, 0, message);
+	compression_case_free(&c);
+
+	compression_case_init(&c, 4, 131200, 0);
+	gen_store(c.resource + 4, c.objects[0].resource_size + 1, 4);
+	compression_bad_content("test_compression_type4_map_past_fork", &c, 0, message);
+	compression_case_free(&c);
 }
 
 static void
@@ -4177,8 +4221,11 @@ test_compression_counted_reads(void)
 {
 	static const unsigned types[] = { 4, 8, 12 };
 
-	for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++)
+	for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		if (types[i] != 4 && !decoder_supported())
+			continue;
 		compression_counted_reads(types[i]);
+	}
 }
 
 static void
@@ -7245,6 +7292,7 @@ static void (*const tests[])(void) = {
 	test_compression_lzfse_scratch_budget,
 	test_compression_listing_failures,
 	test_compression_resource_corruption,
+	test_compression_resource_map_offsets,
 	test_compression_word_table_corruption,
 	test_compression_inline_corruption,
 	test_compression_counted_reads,

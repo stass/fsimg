@@ -1092,8 +1092,9 @@ extents like any fork:
   related: the resource length is the data length less 4, and the fork's
   `logicalSize` is the data offset plus the data length plus the map
   length; the data offset is 256 and the map 50 bytes on every native file
-  (E6). The reader requires the relations and does not assume the
-  constants. Two intervals of the fork, with `D` the data offset, are
+  (E6). The map offset is at or after the end of the data and the map ends
+  inside the fork, so the map never overlaps the data. The reader requires
+  the relations and does not assume the constants. Two intervals of the fork, with `D` the data offset, are
   distinct. The table interval holds the count and the pairs, `[D + 4,
   D + 8 + 8 * count)`: the length word is at `D`, the count after it, and
   a chunk's offset is counted from the count, so the first chunk starts

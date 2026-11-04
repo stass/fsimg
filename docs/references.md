@@ -185,8 +185,11 @@ the last two:
   n_matches`. A block's decode cost follows those counts, not its payload: a
   39-byte block with no tables of its own can decode 40000 literals and 10000
   matches that take no input bits and make no output, about 6 s of CPU per MiB of
-  image. Each literal and match yields output apart from padding, so a valid stream
-  stays near `capacity`.
+  image. The limit bounds that cost; it does not make every accepted stream
+  produce output, because a stream of no-output matches under the limit still
+  decodes. For the streams Apple's encoder writes the limit is far from binding:
+  102 native chunks and 1780 plaintexts through `compression_encode_buffer` peak
+  at 15.67% of the bound.
 * `lzfse_fse.h`: `fse_check_freq()`'s loop index is `size_t`, because the wrapper
   includes this header under the project's warnings.
 * The build, `libfsimg-lzfse.la` in `Makefile.am`: `-Wno-sign-compare` and

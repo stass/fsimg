@@ -843,6 +843,12 @@ fsimg_status_t fsimg_lzvn_decode(const uint8_t *in, size_t in_len,
   detects overflow itself rather than relying on a short return, since the
   reference's buffer interface reports a full output the same way as a
   complete one.
+* The LZFSE decoder bounds a stream's cost, not its shape: it fails once the
+  blocks declare more than `4 * (capacity + 40000)` of `n_literals + 3 *
+  n_matches`, so a stream that stays under the limit decodes even when some of
+  its matches produce no output. The limit is far from binding for streams an
+  encoder writes (measured at 15.67% of the bound at most), and a stream that
+  needs more is `FSIMG_ECORRUPT`.
 * Both decoders refuse a big-endian host with `FSIMG_EUNSUPPORTED`: the imported
   loads are native-endian, and a swapped match distance would decode to wrong
   bytes without an error. HFS Plus types 7, 8, 11 and 12 report unsupported there.

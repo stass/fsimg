@@ -353,7 +353,9 @@ window_decode(fsimg_reader_t *reader, size_t stored, size_t expected,
 }
 
 /* Index the resource fork and check the classic resource header's relations to
- * the fork and its table's place: the table interval [D + 4, D + 8 + 8 * count)
+ * the fork: the map follows the data and lies in the fork, so no chunk can be
+ * read from inside it (the sizes then put it exactly at the data's end), and
+ * its table's place: the table interval [D + 4, D + 8 + 8 * count)
  * must end inside the declared data, D plus the data length, and the rest of the
  * data is the payload interval. Nothing here assumes the native data offset or
  * map length. All sums are of 32-bit values in 64 bits. The declared size must
@@ -385,7 +387,10 @@ fork_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 	(void)hfsplus_rsrc_decode(raw, sizeof(raw), &rsrc);
 	end = (uint64_t)rsrc.data_offset + rsrc.data_length;
 	if (rsrc.data_length < HFSPLUS_RSRC_TABLE_BYTES ||
-	    end + rsrc.map_length != file->resource_fork.logical_size)
+	    end + rsrc.map_length != file->resource_fork.logical_size ||
+	    rsrc.map_offset < end ||
+	    (uint64_t)rsrc.map_offset + rsrc.map_length >
+	    file->resource_fork.logical_size)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus resource fork's header does not match the fork"));
 	status = hfsplus_fork_read(reader, hfsplus->file, rsrc.data_offset, raw,
