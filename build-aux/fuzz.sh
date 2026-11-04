@@ -238,7 +238,6 @@ if test ! -f "$bzip2_corpus/multiblock.seed"; then
 fi
 run_fuzzer "$work_dir/fuzz-bzip2" "$bzip2_corpus" 1048576 10
 
-
 compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \

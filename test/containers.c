@@ -87,6 +87,7 @@ typedef struct memory_file {
 	uint64_t	 reads;
 	uint64_t	 fail_at;	/* The read that fails with EIO; 0 never */
 	size_t		 fail_bytes;	/* Bytes confirmed by the failing read */
+	bool		 corrupt_read;	/* Inject a lower-layer parse error */
 	uint64_t	 cut;		/* Nonzero: reads end here, as after a
 					   truncation behind an open image */
 } memory_file_t;
@@ -223,7 +224,8 @@ static void expect_disk(fixture_t *, const unsigned char *, uint64_t);
 static void expect_open_fails(memory_file_t, const char *, fsimg_status_t,
     const char *);
 static void expect_dmg_fails(const dmg_spec_t *, fsimg_status_t, const char *);
-static void expect_payload_fails(memory_file_t, bool, const char *);
+static void expect_payload_fails(memory_file_t, bool, const char *,
+    uint64_t, bool, fsimg_operation_t);
 static void test_crc_oracle(void);
 static void test_dmg_read(void);
 static void test_dmg_legacy_resource_fork(void);
@@ -430,6 +432,14 @@ file_read(void *argument, uint64_t offset, void *buffer, size_t length,
 	memory_file_t *file = argument;
 
 	CHECK(offset <= file->length && length <= file->length - offset);
+	if (file->corrupt_read) {
+		*transferred = 0;
+		fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IO,
+		    "injected lower-layer corruption");
+		error->offset = offset;
+		error->offset_valid = true;
+		return (FSIMG_ECORRUPT);
+	}
 	if (++file->reads == file->fail_at) {
 		if (file->fail_bytes < length)
 			length = file->fail_bytes;
@@ -914,8 +924,12 @@ expect_dmg_fails(const dmg_spec_t *spec, fsimg_status_t status,
  * read-through fails with the named check, and so does reading the disk
  * when the fault is in a chunk rather than a checksum.
  */
+/* Bounded I/O reports failed logical read positions. Checksum errors
+ * raised outside a read have no offset.
+ */
 static void
-expect_payload_fails(memory_file_t file, bool read_fails, const char *message)
+expect_payload_fails(memory_file_t file, bool read_fails, const char *message,
+    uint64_t offset, bool offset_valid, fsimg_operation_t operation)
 {
 	fsimg_layer_report_t report;
 	unsigned char *bytes;
@@ -929,6 +943,9 @@ expect_payload_fails(memory_file_t file, bool read_fails, const char *message)
 	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
 	    &error) == FSIMG_ECORRUPT);
 	CHECK(strcmp(error.message, message) == 0);
+	CHECK(error.offset == offset);
+	CHECK(error.offset_valid == offset_valid);
+	CHECK(error.operation == operation);
 	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
 	bytes = malloc((size_t)info.disk_bytes);
 	CHECK(bytes != NULL);
@@ -936,6 +953,9 @@ expect_payload_fails(memory_file_t file, bool read_fails, const char *message)
 		CHECK(read_disk(&f, 0, bytes, (size_t)info.disk_bytes, &error) ==
 		    FSIMG_ECORRUPT);
 		CHECK(strcmp(error.message, message) == 0);
+		CHECK(error.offset == offset);
+		CHECK(error.offset_valid == offset_valid);
+		CHECK(error.operation == operation);
 	} else
 		CHECK(read_disk(&f, 0, bytes, (size_t)info.disk_bytes, NULL) ==
 		    FSIMG_OK);
@@ -1512,10 +1532,12 @@ test_dmg_seeded_failures(void)
 	spec = base;
 	spec.zlib_delta = -1;
 	expect_payload_fails(dmg_encode(&spec), true,
-	    "compressed chunk decodes to fewer bytes than declared");
+	    "compressed chunk decodes to fewer bytes than declared", 128 * SECTOR,
+	    true, FSIMG_OP_IMAGE);
 	spec.zlib_delta = 1;
 	expect_payload_fails(dmg_encode(&spec), true,
-	    "compressed chunk decodes to more bytes than declared");
+	    "compressed chunk decodes to more bytes than declared", 128 * SECTOR,
+	    true, FSIMG_OP_IMAGE);
 	free(disk);
 }
 
@@ -1648,7 +1670,8 @@ test_dmg_checksums(void)
 
 	spec.table_crc_flip = 1;
 	expect_payload_fails(dmg_encode(&spec), false,
-	    "DMG block table 1 checksum does not match its decoded bytes");
+	    "DMG block table 1 checksum does not match its decoded bytes", 0, false,
+	    FSIMG_OP_IMAGE);
 	free(disk);
 }
 
@@ -1967,7 +1990,8 @@ test_simg_seeded_failures(void)
 	spec = base;
 	spec.chunk[4].crc_flip = 1;
 	expect_payload_fails(simg_encode(&spec), false,
-	    "sparse image CRC32 chunk does not match the expanded image");
+	    "sparse image CRC32 chunk does not match the expanded image", 0, false,
+	    FSIMG_OP_IMAGE);
 	free(disk);
 }
 
@@ -3076,6 +3100,151 @@ bz_dmg(const uint8_t *disk, uint64_t sectors, const uint8_t *code, size_t n)
 	return (spec);
 }
 
+/* A lower-layer read error keeps its operation. Bounded I/O reports the
+ * failed logical read position; here it is also the encoded run's offset.
+ */
+static void
+test_dmg_bzip2_lower_read_error(void)
+{
+	uint8_t *disk = disk_new(129 * SECTOR);
+	uint8_t out[SECTOR];
+	dmg_spec_t spec = bz_dmg(disk, 129, bz_sector512,
+	    sizeof(bz_sector512));
+	memory_file_t file;
+	fsimg_error_t error;
+	fixture_t f;
+	fsimg_io_t *selected;
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+
+	spec.table[0] = (dmg_table_t){ 0, 129, 2,
+	    { { RUN_RAW, 0, 128, 0 }, { RUN_BZIP2, 128, 1, 0 } } };
+	file = dmg_encode(&spec);
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_select(f.image, &selector, &selected, NULL) ==
+	    FSIMG_OK);
+	file.corrupt_read = true;
+	CHECK(read_exact(selected, 128 * SECTOR, out, sizeof(out), &error) ==
+	    FSIMG_ECORRUPT);
+	CHECK(strcmp(error.message, "injected lower-layer corruption") == 0);
+	CHECK(error.operation == FSIMG_OP_IO);
+	CHECK(error.offset_valid && error.offset == 128 * SECTOR);
+	fsimg_io_free(selected);
+	fixture_free(&f);
+	free(file.bytes);
+	free(disk);
+}
+
+/* Use a raw prefix so opening and selection cannot decode the test run. */
+static dmg_spec_t
+bz_dmg_after_prefix(const uint8_t *disk)
+{
+	dmg_spec_t spec = bz_dmg(disk, 129, bz_sector512,
+	    sizeof(bz_sector512));
+
+	spec.table[0] = (dmg_table_t){ 0, 129, 2,
+	    { { RUN_RAW, 0, 128, 0 }, { RUN_BZIP2, 128, 1, 0 } } };
+	return (spec);
+}
+
+static void
+test_dmg_bzip2_allocation_failures(void)
+{
+	uint8_t *disk = disk_new(129 * SECTOR);
+	uint8_t out[SECTOR];
+	dmg_spec_t spec = bz_dmg_after_prefix(disk);
+	memory_file_t file = dmg_encode(&spec);
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+	fsimg_io_t *selected;
+	fsimg_stats_t before, after;
+	fsimg_error_t error;
+	fixture_t f;
+	uint64_t reads;
+
+	/* With selection complete, the next two allocations are the encoded
+	 * buffer and the decoder's work object. Neither may leave a cache hit.
+	 */
+	for (uint64_t allocation = 1; allocation <= 2; allocation++) {
+		fixture_init(&f, 16 * MIB, 0);
+		CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_select(f.image, &selector, &selected, NULL) ==
+		    FSIMG_OK);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
+		reads = file.reads;
+		memset(out, 0xa5, sizeof(out));
+		fsimg_test_fail_alloc_after(f.ctx, allocation);
+		CHECK(read_exact(selected, 128 * SECTOR, out, sizeof(out),
+		    &error) == FSIMG_ENOMEM);
+		CHECK(strcmp(error.message, "allocation failed") == 0);
+		CHECK(error.operation == FSIMG_OP_ALLOCATE);
+		CHECK(error.offset_valid && error.offset == 128 * SECTOR);
+		CHECK(file.reads - reads == allocation - 1);
+		CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
+		CHECK(after.memory_bytes == before.memory_bytes);
+		for (size_t i = 0; i < sizeof(out); i++)
+			CHECK(out[i] == 0xa5);
+		fsimg_test_fail_alloc_after(f.ctx, 0);
+		CHECK(read_exact(selected, 128 * SECTOR, out, sizeof(out),
+		    &error) == FSIMG_OK);
+		for (size_t i = 0; i < sizeof(out); i++)
+			CHECK(out[i] == 'A');
+		fsimg_io_free(selected);
+		fixture_free(&f);
+	}
+	free(file.bytes);
+	free(disk);
+}
+
+static void
+test_dmg_bzip2_failed_decode_retry(void)
+{
+	uint8_t *disk = disk_new(129 * SECTOR);
+	uint8_t out[SECTOR];
+	dmg_spec_t spec = bz_dmg_after_prefix(disk);
+	memory_file_t file = dmg_encode(&spec);
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+	fsimg_io_t *selected;
+	fsimg_error_t error;
+	fixture_t f;
+
+	fixture_init(&f, 16 * MIB, 0);
+	CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_select(f.image, &selector, &selected, NULL) ==
+	    FSIMG_OK);
+	/* Randomisation is bit 112, immediately after the stored block CRC. */
+	file.bytes[128 * SECTOR + 14] |= 0x80;
+	CHECK(read_exact(selected, 128 * SECTOR, out, sizeof(out), &error) ==
+	    FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.message,
+	    "bzip2: randomised blocks are not supported") == 0);
+	CHECK(error.operation == FSIMG_OP_IMAGE);
+	CHECK(error.offset_valid && error.offset == 128 * SECTOR);
+	file.bytes[128 * SECTOR + 14] &= 0x7f;
+	/* A bad block CRC fails after filling the private decode buffer.
+	 * A repeat must decode again, never publish those unverified bytes.
+	 */
+	file.bytes[128 * SECTOR + 10] ^= 1;
+	for (unsigned attempt = 0; attempt < 2; attempt++) {
+		memset(out, 0xa5, sizeof(out));
+		CHECK(read_exact(selected, 128 * SECTOR, out, sizeof(out),
+		    &error) == FSIMG_ECORRUPT);
+		CHECK(strcmp(error.message, "bzip2: block checksum mismatch") == 0);
+		CHECK(error.operation == FSIMG_OP_IMAGE);
+		CHECK(error.offset_valid && error.offset == 128 * SECTOR);
+		for (size_t i = 0; i < sizeof(out); i++)
+			CHECK(out[i] == 0xa5);
+	}
+	file.bytes[128 * SECTOR + 10] ^= 1;
+	CHECK(read_exact(selected, 128 * SECTOR, out, sizeof(out), &error) ==
+	    FSIMG_OK);
+	for (size_t i = 0; i < sizeof(out); i++)
+		CHECK(out[i] == 'A');
+	fsimg_io_free(selected);
+	fixture_free(&f);
+	free(file.bytes);
+	free(disk);
+}
+
 static void
 test_dmg_bzip2_read(void)
 {
@@ -3125,11 +3294,13 @@ test_dmg_bzip2_decoded_lengths(void)
 	spec.table[0] = (dmg_table_t){ 0, 129, 2,
 	    { { RUN_RAW, 0, 128, 0 }, { RUN_BZIP2, 128, 1, 0 } } };
 	expect_payload_fails(dmg_encode(&spec), true,
-	    "compressed chunk decodes to fewer bytes than declared");
+	    "compressed chunk decodes to fewer bytes than declared", 128 * SECTOR,
+	    true, FSIMG_OP_IMAGE);
 	spec.bzip2 = bz_sector513;
 	spec.bzip2_length = sizeof(bz_sector513);
 	expect_payload_fails(dmg_encode(&spec), true,
-	    "bzip2: output longer than its capacity");
+	    "bzip2: output longer than its capacity", 128 * SECTOR, true,
+	    FSIMG_OP_IMAGE);
 	free(disk);
 }
 
@@ -3169,6 +3340,7 @@ main(int argc, char **argv)
 	simg_spec_t simg;
 	memory_file_t file;
 	char *xml;
+	char seed_path[4096];
 
 	/* Small images seed the container and plist fuzzers' corpora. */
 	if (argc == 3 && strcmp(argv[1], "--seed-dmg") == 0) {
@@ -3176,6 +3348,11 @@ main(int argc, char **argv)
 		disk_pattern(disk, 64 * SECTOR, 1);
 		dmg = dmg_whole_disk(disk, 2048);
 		write_seed(argv[2], dmg_encode(&dmg));
+		memset(disk, 'A', SECTOR);
+		dmg = bz_dmg(disk, 1, bz_sector512, sizeof(bz_sector512));
+		CHECK(snprintf(seed_path, sizeof(seed_path), "%s.bzip2", argv[2]) <
+		    (int)sizeof(seed_path));
+		write_seed(seed_path, dmg_encode(&dmg));
 		free(disk);
 		return (0);
 	}
@@ -3243,6 +3420,9 @@ main(int argc, char **argv)
 	}
 	CHECK(argc == 1);
 
+	test_dmg_bzip2_lower_read_error();
+	test_dmg_bzip2_allocation_failures();
+	test_dmg_bzip2_failed_decode_retry();
 	test_dmg_bzip2_read();
 	test_dmg_bzip2_decoded_lengths();
 	test_dmg_bzip2_encoded_lengths();

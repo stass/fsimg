@@ -53,7 +53,9 @@
 #define BZIP2_GROUP_COUNT_BITS	3u
 #define BZIP2_SELECTOR_COUNT_BITS 15u
 #define BZIP2_LENGTH_START_BITS	5u
-#define BZIP2_USED_MAP_BITS	16u
+#define BZIP2_WORD_BITS		32u	/* a header or checksum word */
+#define BZIP2_USED_RANGES	16u	/* ranges of byte values in the used map */
+#define BZIP2_RANGE_VALUES	16u	/* byte values in each range */
 
 #define BZIP2_MIN_GROUPS	2u
 #define BZIP2_MAX_GROUPS	6u
@@ -124,8 +126,11 @@ typedef struct bzip2_decoder {
 typedef struct bzip2_block {
 	uint32_t	 stored_crc;
 	uint32_t	 origin;
-	size_t		 entries;	/* transformed bytes read */
-	uint8_t		 front[BZIP2_BYTE_VALUES];	/* move-to-front list */
+	size_t		 entries;	/* transformed bytes read; filled from
+					   the symbols */
+	uint8_t		 front[BZIP2_BYTE_VALUES];	/* move-to-front list:
+					   starts as the used values, then the
+					   symbols reorder it */
 	unsigned	 used;		/* byte values in the list */
 	unsigned	 groups;
 	unsigned	 selector_count;	/* selectors kept */
@@ -201,7 +206,7 @@ bzip2_read_header(bzip2_decoder_t *decoder, uint32_t *level)
 	fsimg_status_t status;
 	uint32_t word;
 
-	status = bzip2_read_bits(decoder, 32, &word);
+	status = bzip2_read_bits(decoder, BZIP2_WORD_BITS, &word);
 	if (status != FSIMG_OK)
 		return (status);
 	if ((word >> 8) != UINT32_C(0x425a68))	/* "BZh" */
@@ -226,20 +231,20 @@ bzip2_read_used_values(bzip2_decoder_t *decoder, bzip2_block_t *block)
 	fsimg_status_t status;
 	uint32_t ranges, values;
 
-	status = bzip2_read_bits(decoder, BZIP2_USED_MAP_BITS, &ranges);
+	status = bzip2_read_bits(decoder, BZIP2_USED_RANGES, &ranges);
 	if (status != FSIMG_OK)
 		return (status);
 	block->used = 0;
-	for (unsigned range = 0; range < BZIP2_USED_MAP_BITS; range++) {
+	for (unsigned range = 0; range < BZIP2_USED_RANGES; range++) {
 		if ((ranges & (UINT32_C(0x8000) >> range)) == 0)
 			continue;
-		status = bzip2_read_bits(decoder, BZIP2_USED_MAP_BITS, &values);
+		status = bzip2_read_bits(decoder, BZIP2_RANGE_VALUES, &values);
 		if (status != FSIMG_OK)
 			return (status);
-		for (unsigned value = 0; value < BZIP2_USED_MAP_BITS; value++) {
+		for (unsigned value = 0; value < BZIP2_RANGE_VALUES; value++) {
 			if ((values & (UINT32_C(0x8000) >> value)) != 0)
 				block->front[block->used++] =
-				    (uint8_t)(range * BZIP2_USED_MAP_BITS +
+				    (uint8_t)(range * BZIP2_RANGE_VALUES +
 				    value);
 		}
 	}
@@ -391,15 +396,20 @@ bzip2_read_symbol(bzip2_decoder_t *decoder, const bzip2_code_t *code,
  * The most transformed bytes a block can hold and still fit free output
  * bytes: L of them produce at least L - L / 5, the fewest coming from
  * groups of four equal bytes and a zero count, which holds just up to
- * free + free / 4. A block never exceeds the level's size either.
+ * free + free / 4. A block never exceeds max_bytes, the level's size.
  */
 static size_t
-bzip2_block_limit(size_t level_bytes, size_t free_bytes)
+bzip2_block_limit(size_t max_bytes, size_t free_bytes)
 {
-	if (free_bytes >= level_bytes)
-		return (level_bytes);
-	if (free_bytes + free_bytes / 4 >= level_bytes)
-		return (level_bytes);
+	/*
+	 * This comparison comes first so that free_bytes + free_bytes / 4 is
+	 * formed only for a free_bytes below max_bytes, where it cannot
+	 * overflow.
+	 */
+	if (free_bytes >= max_bytes)
+		return (max_bytes);
+	if (free_bytes + free_bytes / 4 >= max_bytes)
+		return (max_bytes);
 	return (free_bytes + free_bytes / 4);
 }
 
@@ -478,21 +488,16 @@ bzip2_read_symbols(bzip2_decoder_t *decoder, bzip2_block_t *block,
 }
 
 /*
- * Build the walk: the byte value counts give where each value starts in
- * the sorted first column, and the k-th of a value in the first column is
- * the k-th of that value in the last column, the entry's own position. Then
- * walk from the origin, expanding runs and folding every output byte into
- * the block's checksum. Any permutation of a malformed block, even of
- * several cycles, walks over initialized entries for exactly entries steps
- * and fails the checksum.
+ * Give each entry the position of its successor in the walk: the byte value
+ * counts give where each value starts in the sorted first column, and the
+ * k-th of a value in the first column is the k-th of that value in the last
+ * column, the entry's own position. The successor goes in the entry's link
+ * bits.
  */
-static fsimg_status_t
-bzip2_write_text(bzip2_decoder_t *decoder, const bzip2_block_t *block,
-    uint32_t *crc)
+static void
+bzip2_link_entries(bzip2_work_t *work, size_t entries)
 {
-	bzip2_work_t *work = decoder->work;
-	uint32_t total, count, entry, link, block_crc;
-	unsigned equal_bytes, previous;
+	uint32_t total, count;
 	uint8_t byte;
 
 	total = 0;
@@ -501,12 +506,29 @@ bzip2_write_text(bzip2_decoder_t *decoder, const bzip2_block_t *block,
 		work->byte_counts[value] = total;
 		total += count;
 	}
-	for (size_t i = 0; i < block->entries; i++) {
+	for (size_t i = 0; i < entries; i++) {
 		byte = (uint8_t)(work->entries[i] & BZIP2_ENTRY_BYTE_MASK);
 		work->entries[work->byte_counts[byte]++] |=
 		    (uint32_t)i << BZIP2_ENTRY_LINK_SHIFT;
 	}
+}
 
+/*
+ * Walk from the origin through the linked entries, expanding runs and
+ * folding every output byte into the block's checksum. Any permutation of a
+ * malformed block, even of several cycles, walks over initialized entries
+ * for exactly entries steps and fails the checksum.
+ */
+static fsimg_status_t
+bzip2_write_text(bzip2_decoder_t *decoder, const bzip2_block_t *block,
+    uint32_t *crc)
+{
+	bzip2_work_t *work = decoder->work;
+	uint32_t entry, link, block_crc;
+	unsigned equal_bytes, previous;
+	uint8_t byte;
+
+	bzip2_link_entries(work, block->entries);
 	block_crc = UINT32_MAX;
 	equal_bytes = 0;
 	previous = 0;
@@ -538,6 +560,9 @@ bzip2_write_text(bzip2_decoder_t *decoder, const bzip2_block_t *block,
 		decoder->out[decoder->produced++] = byte;
 		block_crc = bzip2_crc_add(block_crc, byte);
 	}
+	if (equal_bytes == BZIP2_RUN_BYTES)
+		return (bzip2_fail(decoder, FSIMG_ECORRUPT,
+		    "bzip2: run of four bytes ends the block without a count"));
 	*crc = ~block_crc;
 	return (FSIMG_OK);
 }
@@ -554,7 +579,8 @@ bzip2_read_block(bzip2_decoder_t *decoder, uint32_t *crc)
 	uint32_t groups, randomised, crc_computed;
 	size_t limit;
 
-	status = bzip2_read_bits(decoder, 32, &block.stored_crc);
+	status = bzip2_read_bits(decoder, BZIP2_WORD_BITS,
+	    &block.stored_crc);
 	if (status != FSIMG_OK)
 		return (status);
 	status = bzip2_read_bits(decoder, 1, &randomised);
@@ -631,7 +657,7 @@ bzip2_read_blocks(bzip2_decoder_t *decoder)
 		stream_crc = ((stream_crc << 1) | (stream_crc >> 31)) ^
 		    block_crc;
 	}
-	status = bzip2_read_bits(decoder, 32, &stored_crc);
+	status = bzip2_read_bits(decoder, BZIP2_WORD_BITS, &stored_crc);
 	if (status != FSIMG_OK)
 		return (status);
 	if (stored_crc != stream_crc)
@@ -685,7 +711,6 @@ fsimg_bzip2_decode(fsimg_ctx_t *ctx, const uint8_t *in, size_t in_len,
 	step->produced = decoder.produced;
 	if (status != FSIMG_OK)
 		return (status);
-	step->done = true;
 
 	/*
 	 * The framing gives the stream's exact end: a chunk holds one stream,
@@ -694,5 +719,6 @@ fsimg_bzip2_decode(fsimg_ctx_t *ctx, const uint8_t *in, size_t in_len,
 	if (decoder.position != in_len)
 		return (bzip2_fail(&decoder, FSIMG_ECORRUPT,
 		    "bzip2: trailing bytes after the stream"));
+	step->done = true;
 	return (FSIMG_OK);
 }

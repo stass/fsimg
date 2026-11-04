@@ -661,8 +661,9 @@ transformed bytes are the last column of the sorted matrix, and the first column
 is their sorted order; walking from the origin through the permutation between
 the two gives the text. **Run-length expansion**: after four equal bytes, the
 next byte is a repeat count from 0 to 255 and not a literal; run state starts
-afresh in each block, and a block may end straight after the four bytes with no
-count.
+afresh in each block, and a block ends only after a count: four equal bytes
+closing a block with no count is `FSIMG_ECORRUPT`, as `libbzip2` refuses it and
+encoders always write the count.
 
 ### Interface
 
@@ -702,11 +703,12 @@ Every check names itself in the message, and a corrupt stream's
 | Bit pattern no symbol has; symbols past the last selector | `FSIMG_ECORRUPT` |
 | Transformed bytes past the block limit, whether by run or by symbol | `FSIMG_ECORRUPT` |
 | Output past the capacity | `FSIMG_ECORRUPT` |
+| Four equal bytes ending a block with no count | `FSIMG_ECORRUPT` |
 | Block or stream checksum mismatch | `FSIMG_ECORRUPT` |
 | Bytes after the stream's padding | `FSIMG_ECORRUPT` |
 
-A randomised block is well-formed but refused as unsupported: only bzip2 0.9.0
-wrote them, the format's encoder has ignored the mode since, and handling them
+A randomised block is well-formed but refused as unsupported: only early bzip2
+versions wrote them, the format's encoder has ignored the mode since, and handling them
 would add a table of 512 constants for images nobody makes. A code with unused
 patterns (undersubscribed) is accepted, since no byte of the stream depends on
 it; one of those patterns in the stream is corrupt when it is met.
@@ -744,7 +746,9 @@ full block of zeros in a 512-byte chunk costs at most 640 transformed bytes, not
 code length) or writes to the output, the per-block setup of about 2,000
 operations is paid for by the header bits read for it, and an input is bounded,
 so a call's running time is proportional to `in_len + capacity` and it terminates
-on every input.
+on every input. A chunk decodes in one call that does not poll for cancellation,
+so the latency of a cancel is bounded per chunk, by that running time, and not
+checked inside the decoder.
 
 A stream can consume input without producing anything, as a code length can walk
 up and down forever. `fsimg_bzip2_stream_bound(decoded)`, `decoded + decoded / 4
@@ -947,7 +951,7 @@ in this design, in test code that shares nothing with `lib/codec/`.
 | Encoder round trip | Blocks of zeros, random bytes, text, period-2 and period-49152 patterns, boundary cases at distances 2048, 2049, 16384, 16385 and 49151, and every 64 KiB slice of each decoded native ImageFS available through `FSIMG_IFS_NATIVE`; each decodes to its input under `fsimg_lzo1x_decode`, and its length never exceeds the bound | A byte flipped in an encoded stream fails the round trip; a capacity one below the bound is `FSIMG_EINVAL` before any write |
 | Encoder determinism | A block encoded on a fresh encoder, again after other blocks on the same encoder, in two processes, and under the ASan build with allocation poisoning gives identical bytes | Two blocks are first encoded to plant table entries that a missing check would turn into matches: one leaves, in the bucket of a four-byte group `G` that the block under test contains, the position of a later occurrence of `G`, so the candidate lies after the current position; the other leaves the position of a group that collides with `G` in the hash (found by the test from the hash in this design) but differs in bytes, so the candidate lies before the current position with wrong bytes. The block under test then encodes to the fresh stream; the test documents that dropping the position check or the byte comparison would make it differ |
 | Fuzzing (`fuzz/codec.c`) | The input's first bytes choose the codec, the limit or capacity and, for LZO1X, the window sizes; the rest is the stream, decoded in one call and, for LZO1X, again at random split points under ASan and UBSan; the target asserts LZO1X split invariance, progress on every call, no consumption after `done`, and no byte beyond the buffers | Corpus seeded from every stream above and from chunks of the native images |
-| bzip2 forms (`test/codec.c`) | Vectors made once with the `bzip2` command and kept as bytes: levels 1 and 9, the empty stream, runs of 4 and 255 + 4, the longest `RUNA`/`RUNB` count, several blocks | One malformed case per row of the [failure table](#failures), each asserting its status and check; every proper prefix of a vector; a block limit bomb in a small capacity; allocation refused; a capacity one byte short |
+| bzip2 forms (`test/codec.c`) | Vectors made once with the `bzip2` command and kept as bytes: levels 1 and 9, the empty stream, runs of 4 and 255 + 4, several blocks; a synthetic stream for the longest `RUNA`/`RUNB` count | One malformed case per row of the [failure table](#failures), each asserting its status and check; every proper prefix of a vector; a block limit bomb in a small capacity; allocation refused; a capacity one byte short |
 | bzip2 chunks (`test/containers.c`, `test/containers-integration.sh`) | A generated `UDBZ` DMG reads through the layer; `hdiutil create -format UDBZ` output lists the same as its `UDTO` expansion and passes the container checks | Chunks decoding short and long are `FSIMG_ECORRUPT`; a run past `fsimg_bzip2_stream_bound` is `FSIMG_ECORRUPT` at open |
 | Fuzzing (`fuzz/bzip2.c`) | The input's first bytes choose the capacity; the rest is the stream, decoded under the sanitizers with a charged context | |
 | Differential checker (`test/codec-integration.sh`) | When `~/.local/share/fsimg-oracles/ifs-codecs/oracle` exists: random byte strings, mutated valid streams and corpus chunks decode under `test/codec --decode` and the oracle with the same accept-or-reject result and, on accept, identical bytes, at a capacity above any decoded size so the reference's off-by-one never applies; error codes are never compared; every encoder stream decodes to its input under `oracle lzo`; a missing oracle is reported as a skip, never a pass | A stream the script knows the oracle rejects, listed as accepted in its self-check table, fails the run |

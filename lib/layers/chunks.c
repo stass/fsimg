@@ -863,10 +863,14 @@ decode_bzip2(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 	status = fsimg_io_read_session(disk->file, disk->session,
 	    chunk->file_offset, encoded, (size_t)chunk->encoded_length,
 	    &transferred, error);
-	if (status == FSIMG_OK)
-		status = fsimg_bzip2_decode(disk->ctx, encoded,
-		    (size_t)chunk->encoded_length, out, (size_t)chunk->length,
-		    &step, error);
+	if (status != FSIMG_OK) {
+		/* The read's error is the lower layer's own. */
+		fsimg_dealloc(encoded);
+		return (status);
+	}
+	status = fsimg_bzip2_decode(disk->ctx, encoded,
+	    (size_t)chunk->encoded_length, out, (size_t)chunk->length, &step,
+	    error);
 	fsimg_dealloc(encoded);
 	if (status == FSIMG_ECORRUPT || status == FSIMG_EUNSUPPORTED) {
 		/* A stream the decoder refuses is the image's, at a file offset. */
