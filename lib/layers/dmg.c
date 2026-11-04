@@ -10,6 +10,7 @@
 #include <zlib.h>
 
 #include "codec-memory.h"
+#include "codec.h"
 #include "fsimg-endian.h"
 #include "io.h"
 #include "layer.h"
@@ -394,7 +395,7 @@ const fsimg_container_ops_t fsimg_dmg_container = {
 	.open = dmg_open,
 	.verify = dmg_verify,
 	.writer = &dmg_writer,
-	.codecs = "raw,zero,zlib",
+	.codecs = "raw,zero,zlib,bzip2",
 	.version = fsimg_zlib_version,
 	.payload_checks = true
 };
@@ -867,7 +868,6 @@ unsupported_codec(uint32_t type)
 {
 	switch (type) {
 	case RUN_ADC: return ("ADC");
-	case RUN_BZIP2: return ("bzip2");
 	case RUN_LZFSE: return ("LZFSE");
 	case RUN_LZMA: return ("LZMA");
 	default: return (NULL);
@@ -884,8 +884,8 @@ open_table(void *argument FSIMG_UNUSED, const dmg_table_t *table FSIMG_UNUSED,
 /*
  * Turn a run into a chunk record. Its bytes, if any, lie in the data fork
  * at the table's data offset plus the run's: a raw run's as many as its
- * sectors, a zlib run's at least one and at most zlib's bound for its
- * decoded length, which may not exceed the 16 MiB a cache slot holds.
+ * sectors, a compressed run's at least one and at most its codec's bound for
+ * its decoded length, which may not exceed the 16 MiB a cache slot holds.
  * Zero and ignored runs read nothing. Any other codec is unsupported,
  * never read as zeros.
  */
@@ -925,6 +925,19 @@ open_run(void *argument, const dmg_table_t *table, const dmg_run_t *run,
 			    "zlib run length is outside zlib's bounds"));
 		chunk.kind = FSIMG_CHUNK_COMPRESSED;
 		chunk.argument = FSIMG_CODEC_ZLIB;
+		break;
+	case RUN_BZIP2:
+		if (chunk.length > FSIMG_CHUNK_MAX_DECODED)
+			return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
+			    FSIMG_OP_IMAGE,
+			    "DMG bzip2 run decodes to more than 16 MiB"));
+		if (run->compressed_length == 0 ||
+		    run->compressed_length >
+		    fsimg_bzip2_stream_bound(chunk.length))
+			return (dmg_corrupt(error,
+			    "bzip2 run length is outside its bound"));
+		chunk.kind = FSIMG_CHUNK_COMPRESSED;
+		chunk.argument = FSIMG_CODEC_BZIP2;
 		break;
 	default:
 		if (unsupported_codec(run->type) != NULL)

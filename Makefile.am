@@ -111,7 +111,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/iso9660/write-names.c lib/formats/iso9660/write-susp.c \
 	lib/formats/iso9660/write-plan.c lib/formats/iso9660/write-emit.c \
 	compat/host.c compat/host.h compat/private.c compat/private.h \
-	lib/codec/codec.h lib/codec/lzo1x.c lib/codec/nrv2b.c \
+	lib/codec/codec.h lib/codec/bzip2.c lib/codec/lzo1x.c lib/codec/nrv2b.c \
 	lib/formats/ifs/ifs.h lib/formats/ifs/descriptor.c \
 	lib/formats/ifs/records.c lib/formats/ifs/volume.c \
 	lib/formats/ifs/tree.c lib/formats/ifs/names.c \
@@ -238,7 +238,7 @@ test_wrap_truncated_SOURCES = test/wrap-truncated.c test/test.h
 test_wrap_truncated_LDADD = libfsimg-core.la
 test_scheme_planning_SOURCES = test/scheme-planning.c test/test.h
 test_scheme_planning_LDADD = libfsimg-core.la
-test_containers_SOURCES = test/containers.c test/test.h
+test_containers_SOURCES = test/containers.c test/test.h test/bzip2-vectors.h
 test_containers_LDADD = libfsimg-core.la
 test_ifsboot_SOURCES = test/ifsboot.c test/test.h
 test_ifsboot_LDADD = libfsimg-core.la
@@ -258,7 +258,7 @@ hfsplus_marks_SOURCES = test/hfsplus-marks.c test/hfsplus-gen.c \
 	test/hfsplus-gen.h test/test.h
 test_posix_SOURCES = test/posix.c test/test.h
 test_posix_LDADD = libfsimg.la
-test_codec_SOURCES = test/codec.c test/test.h
+test_codec_SOURCES = test/codec.c test/test.h test/bzip2-vectors.h
 # test/codec-integration.sh runs test-codec once per stream; linking the
 # convenience library makes it a plain binary, not a libtool wrapper.
 test_codec_LDADD = libfsimg-core.la
@@ -450,7 +450,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
 	test/codec-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/hfsplus.c \
 	fuzz/protocol.c fuzz/image.c fuzz/container.c fuzz/plist.c fuzz/compression.c \
-	fuzz/mtree.c fuzz/codec.c fuzz/ifs.c fuzz/iso9660.c fuzz/iso9660-susp.c \
+	fuzz/mtree.c fuzz/codec.c fuzz/bzip2.c fuzz/ifs.c fuzz/iso9660.c fuzz/iso9660-susp.c \
 	test/ifs-integration.sh.in \
 	test/ifs-native.rb \
 	test/cli.sh.in test/qualify-cli.rb \
@@ -675,7 +675,7 @@ distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
 	    hfsplus-fuzz-corpus protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
 	    plist-fuzz-corpus gzip-fuzz-corpus zstd-fuzz-corpus xz-fuzz-corpus mtree-fuzz-corpus \
-	    codec-fuzz-corpus ifs-fuzz-corpus iso9660-fuzz-corpus \
+	    codec-fuzz-corpus bzip2-fuzz-corpus ifs-fuzz-corpus iso9660-fuzz-corpus \
 	    iso9660-susp-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish

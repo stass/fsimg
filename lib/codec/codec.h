@@ -11,10 +11,10 @@
 #include "fsimg.h"
 
 /*
- * Stream decoders for LZO1X and NRV2B (the 8-bit control-buffer variant),
- * and an LZO1X encoder, declared at the end. A codec sees one compressed
+ * Stream decoders for LZO1X, NRV2B (the 8-bit control-buffer variant) and
+ * bzip2, and an LZO1X encoder, declared at the end. A codec sees one compressed
  * stream and one output; it knows nothing of the chunk, header or image
- * that framed the stream. Both decoders read
+ * that framed the stream. The LZO1X and NRV2B decoders read
  * one input byte at a time with its bound checked first and write one
  * output byte at a time with its bound checked first, so no call reads
  * past its input or writes past its output, and a call's running time is
@@ -26,7 +26,8 @@
  * check in the message and the stream offset in error->offset: the stream
  * bytes consumed when the check failed, counting a byte whose value failed
  * it but not a byte that was refused before it was read. Output already
- * written is a correct prefix of a stream the caller discards.
+ * written is a correct prefix of a stream the caller discards; the bzip2
+ * decoder's own contract, at its declaration, differs where it says so.
  */
 
 /* What one decoder call did. */
@@ -125,6 +126,34 @@ fsimg_status_t fsimg_lzo1x_decode(fsimg_lzo1x_decoder_t *,
  */
 fsimg_status_t fsimg_nrv2b_decode(const uint8_t *in, size_t in_len,
     uint8_t *out, size_t capacity, fsimg_codec_step_t *, fsimg_error_t *);
+
+/*
+ * Decode one whole bzip2 stream, in[0..in_len), into out[0..capacity); the
+ * capacity is the output bound, and output past it is corrupt. Success
+ * means the stream's end mark and padding were the last thing in the input:
+ * step->done is set, step->consumed is in_len and the output is
+ * out[0..step->produced), which the caller compares with the length it
+ * expects. One stream is read, so bytes after it are corrupt, and a
+ * randomised block is FSIMG_EUNSUPPORTED.
+ *
+ * Working memory, at most about 3.6 MiB and less for a lower level or a
+ * small capacity, is allocated through ctx after the stream header and
+ * freed before the call returns, so a limit or allocation failure is the
+ * context's status. On failure, out may hold bytes of a block whose checksum
+ * never passed; the caller discards it. A call's running time is
+ * proportional to in_len plus capacity, whatever the stream declares; its
+ * caller charges that. step and error must not be NULL.
+ */
+fsimg_status_t fsimg_bzip2_decode(fsimg_ctx_t *, const uint8_t *in,
+    size_t in_len, uint8_t *out, size_t capacity, fsimg_codec_step_t *,
+    fsimg_error_t *);
+
+/*
+ * The longest stream a caller should accept for a decoded length: above any
+ * real encoder's output, and low enough that a stream cannot pad itself with
+ * bits that decode to nothing. decoded must be small enough not to overflow.
+ */
+uint64_t fsimg_bzip2_stream_bound(uint64_t decoded);
 
 /*
  * The LZO1X encoder: one block in, one complete stream out, end marker

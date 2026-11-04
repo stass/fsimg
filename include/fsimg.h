@@ -494,7 +494,7 @@ typedef struct fsimg_stack {
  * naming a container or compression, empty for a scheme. settings lists
  * the keys the layer stores, comma-separated and unqualified ("type,name"),
  * empty for none. codecs lists the chunk encodings a container reads
- * ("raw,zero,zlib"), and codec_version names the library a layer's codecs
+ * ("raw,zero,zlib,bzip2"), and codec_version names the library a layer's codecs
  * depend on with its version ("zlib 1.3.1"), both empty for none:
  * compressed bytes are reproducible only for one zlib. carries names the
  * filesystem a container packages for a loader ("ifs"), empty for a

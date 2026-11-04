@@ -266,7 +266,8 @@ typedef enum fsimg_chunk_kind {
 typedef enum fsimg_chunk_codec {
 	FSIMG_CODEC_ZLIB = 1,
 	FSIMG_CODEC_LZO1X = 2,
-	FSIMG_CODEC_NRV2B = 3
+	FSIMG_CODEC_NRV2B = 3,
+	FSIMG_CODEC_BZIP2 = 4
 } fsimg_chunk_codec_t;
 
 #define FSIMG_CHUNK_MAX_DECODED	(UINT64_C(16) * 1024 * 1024)

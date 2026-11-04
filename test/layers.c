@@ -614,7 +614,7 @@ test_registry(void)
 		    FSIMG_LAYER_SCHEME, scheme, "" },
 		{ "mbr", "", "disk,type,active,id", "", FSIMG_LAYER_SCHEME,
 		    scheme, "" },
-		{ "dmg", ".dmg", "compress,level,chunk,uuid", "raw,zero,zlib",
+		{ "dmg", ".dmg", "compress,level,chunk,uuid", "raw,zero,zlib,bzip2",
 		    FSIMG_LAYER_CONTAINER, container, "" },
 		{ "vhd", ".vhd", "align,uuid", "raw", FSIMG_LAYER_CONTAINER,
 		    container, "" },

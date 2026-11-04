@@ -88,7 +88,7 @@ class CliTest < Minitest::Test
       {
         "gpt" => nil,
         "mbr" => nil,
-        "dmg" => "raw,zero,zlib",
+        "dmg" => "raw,zero,zlib,bzip2",
         "vhd" => "raw",
         "simg" => "raw,zero,fill",
         "ifsboot" => "raw,lzo1x,nrv2b",

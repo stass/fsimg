@@ -225,6 +225,20 @@ for chunk in "${FSIMG_CODEC_FUZZ_CHUNKS:-/nonexistent}"/*.in; do
 done
 run_fuzzer "$work_dir/fuzz-codec" "$codec_corpus" 65540 10
 
+# Bzip2 has its own two-byte capacity header and bounded output window.
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/lib/core" -I"$source_dir/lib/codec" \
+    "$source_dir/fuzz/bzip2.c" "$fuzz_library" $codec_libs -o "$work_dir/fuzz-bzip2"
+bzip2_corpus=bzip2-fuzz-corpus
+mkdir -p "$bzip2_corpus"
+if test ! -f "$bzip2_corpus/multiblock.seed"; then
+    ./test-codec --seed-bzip2 "$bzip2_corpus"
+fi
+run_fuzzer "$work_dir/fuzz-bzip2" "$bzip2_corpus" 1048576 10
+
+
 compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \

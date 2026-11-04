@@ -97,7 +97,7 @@ class CliTest < Minitest::Test
       Layer    Kind         Read  Write  Verify  Codecs           Settings
       gpt      scheme       yes   yes    yes     -                sector,disk,type,name,disk-guid,guid
       mbr      scheme       yes   yes    yes     -                disk,type,active,id
-      dmg      container    yes   yes    yes     raw,zero,zlib    compress,level,chunk,uuid
+      dmg      container    yes   yes    yes     raw,zero,zlib,bzip2  compress,level,chunk,uuid
       vhd      container    yes   yes    yes     raw              align,uuid
       simg     container    yes   yes    yes     raw,zero,fill    block,crc
       ifsboot  container    yes   yes    yes     raw,lzo1x,nrv2b  startup,prefix,machine,virtual,startup_vaddr,paddr_bias,image_paddr,ram_paddr,imagefs_paddr,compress

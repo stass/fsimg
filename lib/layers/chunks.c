@@ -37,7 +37,7 @@
  * The adapter resolves each read through the index. Raw records read the
  * file at the translated offset, zero and fill records synthesize bytes,
  * and compressed records are decoded whole, by zlib or by the project's
- * LZO1X and NRV2B decoders, into a least-recently-used cache of four chunk
+ * LZO1X, NRV2B and bzip2 decoders, into a least-recently-used cache of four chunk
  * buffers, each the size of the largest compressed chunk the index holds.
  * Sequential reads and any access confined to four chunks therefore
  * decode each chunk once; a pattern alternating across more chunks pays
@@ -142,6 +142,8 @@ static fsimg_status_t inflate_chunk(chunk_disk_t *, const fsimg_chunk_t *,
     unsigned char *, fsimg_error_t *);
 static fsimg_status_t decode_framed(chunk_disk_t *, const fsimg_chunk_t *,
     unsigned char *, fsimg_error_t *);
+static fsimg_status_t decode_bzip2(chunk_disk_t *, const fsimg_chunk_t *,
+    unsigned char *, fsimg_error_t *);
 static fsimg_status_t cache_fetch(chunk_disk_t *, const fsimg_chunk_t *,
     const unsigned char **, fsimg_error_t *);
 static void fill_pattern(unsigned char *, size_t, uint32_t, uint64_t);
@@ -201,6 +203,11 @@ chunk_valid(const fsimg_chunk_index_t *index, const fsimg_chunk_t *chunk)
 			if (chunk->length > FSIMG_CHUNK_MAX_DECODED ||
 			    chunk->encoded_length >
 			    compressBound((uLong)chunk->length))
+				return (false);
+		} else if (chunk->argument == FSIMG_CODEC_BZIP2) {
+			if (chunk->length > FSIMG_CHUNK_MAX_DECODED ||
+			    chunk->encoded_length >
+			    fsimg_bzip2_stream_bound(chunk->length))
 				return (false);
 		} else if (chunk->argument == FSIMG_CODEC_LZO1X ||
 		    chunk->argument == FSIMG_CODEC_NRV2B) {
@@ -538,7 +545,8 @@ fsimg_chunk_kinds_text(unsigned kinds, unsigned codecs, char *text,
 	} names[] = {
 		{ false, FSIMG_CHUNK_RAW, "raw" }, { false, FSIMG_CHUNK_ZERO, "zero" },
 		{ false, FSIMG_CHUNK_FILL, "fill" }, { true, FSIMG_CODEC_ZLIB, "zlib" },
-		{ true, FSIMG_CODEC_LZO1X, "lzo1x" }, { true, FSIMG_CODEC_NRV2B, "nrv2b" }
+		{ true, FSIMG_CODEC_LZO1X, "lzo1x" }, { true, FSIMG_CODEC_NRV2B, "nrv2b" },
+		{ true, FSIMG_CODEC_BZIP2, "bzip2" }
 	};
 	size_t used;
 	int count;
@@ -834,6 +842,46 @@ decode_framed(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 	return (FSIMG_OK);
 }
 
+/*
+ * Decode one bzip2 chunk into out, which holds exactly its declared length.
+ * The decoder takes a stream whole, and a stream may be larger than the input
+ * buffer, so its bytes are read into their own allocation for the duration.
+ * chunk_valid bounded them by the decoded length.
+ */
+static fsimg_status_t
+decode_bzip2(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
+    unsigned char *out, fsimg_error_t *error)
+{
+	fsimg_codec_step_t step;
+	unsigned char *encoded;
+	size_t transferred;
+	fsimg_status_t status;
+
+	encoded = fsimg_alloc(disk->ctx, (size_t)chunk->encoded_length, error);
+	if (encoded == NULL)
+		return (error->status);
+	status = fsimg_io_read_session(disk->file, disk->session,
+	    chunk->file_offset, encoded, (size_t)chunk->encoded_length,
+	    &transferred, error);
+	if (status == FSIMG_OK)
+		status = fsimg_bzip2_decode(disk->ctx, encoded,
+		    (size_t)chunk->encoded_length, out, (size_t)chunk->length,
+		    &step, error);
+	fsimg_dealloc(encoded);
+	if (status == FSIMG_ECORRUPT || status == FSIMG_EUNSUPPORTED) {
+		/* A stream the decoder refuses is the image's, at a file offset. */
+		error->operation = FSIMG_OP_IMAGE;
+		if (error->offset_valid)
+			error->offset += chunk->file_offset;
+	}
+	if (status != FSIMG_OK)
+		return (status);
+	if (step.produced != chunk->length)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
+		    "compressed chunk decodes to fewer bytes than declared"));
+	return (FSIMG_OK);
+}
+
 /* The decoded bytes of a compressed chunk, from the cache or decoded into
  * its least recently used slot. A slot matches only the identical record,
  * so a record cannot be served another record's bytes. The record comes
@@ -873,6 +921,8 @@ cache_fetch(chunk_disk_t *disk, const fsimg_chunk_t *chunk,
 		return (status);
 	if (chunk->argument == FSIMG_CODEC_ZLIB)
 		status = inflate_chunk(disk, chunk, victim->bytes, error);
+	else if (chunk->argument == FSIMG_CODEC_BZIP2)
+		status = decode_bzip2(disk, chunk, victim->bytes, error);
 	else
 		status = decode_framed(disk, chunk, victim->bytes, error);
 	if (status != FSIMG_OK)

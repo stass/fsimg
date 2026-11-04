@@ -1,5 +1,9 @@
 fsimg 0.1.0 (unreleased)
 
+DMG images with bzip2 chunks (UDBZ), the format of most macOS release images
+from 10.4 on, open, list and extract, through a project-owned decoder that
+links no new library.
+
 An image shorter than the filesystem it declares still opens, lists and
 extracts while everything those touch survives, such as a FAT image cut after
 its last allocated cluster. A referenced file or structure past the end fails

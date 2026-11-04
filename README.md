@@ -246,7 +246,7 @@ owner, mode or times.
 | Disk layer | Read | Create |
 | --- | --- | --- |
 | GPT, MBR | Yes | One partition through the CLI; multiple through the C API |
-| DMG (UDIF) | Stored, zero, and zlib chunks | UDRO or UDZO |
+| DMG (UDIF) | Stored, zero, zlib, and bzip2 chunks | UDRO or UDZO |
 | VHD | Fixed disks | Fixed disks |
 | Android sparse (`simg`) | Yes | Yes |
 | gzip | Files and stdin, including concatenated members | Files and stdout |

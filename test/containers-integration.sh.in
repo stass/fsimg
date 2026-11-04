@@ -3,8 +3,8 @@
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 #
 # fsimg reads the containers independent tools write: hdiutil's read-only
-# (UDRO) and zlib (UDZO) DMGs with and without a partition map, populated
-# and zero-filled; qemu-img's fixed VHDs; and img2simg's sparse images.
+# (UDRO), zlib (UDZO) and bzip2 (UDBZ) DMGs with and without a partition map,
+# populated and zero-filled; qemu-img's fixed VHDs; and img2simg's sparse images.
 # Each container's volume must list and extract exactly as its source
 # tree, verify with read-through, and read as the raw disk the same tools
 # expand it to (hdiutil convert to UDTO, qemu-img convert to raw, simg2img).
@@ -57,7 +57,7 @@ same_listing() {
 }
 
 if test -n "$hdiutil"; then
-    for format in UDRO UDZO; do
+    for format in UDRO UDZO UDBZ; do
         for layout in NONE GPTSPUD; do
             "$hdiutil" create -quiet -srcfolder source -size 16m -fs 'MS-DOS FAT16' \
                 -volname FSIMG -layout "$layout" -format "$format" -o "$format-$layout"
@@ -71,7 +71,7 @@ if test -n "$hdiutil"; then
     # whose checksum is the empty CRC.
     "$hdiutil" create -quiet -size 32m -fs 'MS-DOS FAT16' -volname EMPTY \
         -layout GPTSPUD -o zero-UDRW
-    for format in UDRO UDZO; do
+    for format in UDRO UDZO UDBZ; do
         "$hdiutil" convert -quiet zero-UDRW.dmg -format "$format" -o "zero-$format"
         "$fsimg" if "zero-$format.dmg" 2>/dev/null |
             grep -q '^Stack:        fat16/gpt/dmg$' || fail "zero-$format.dmg: stack"

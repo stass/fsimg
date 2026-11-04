@@ -24,13 +24,15 @@
 #include "layer.h"
 #include "meta.h"
 #include "test.h"
+#include "bzip2-vectors.h"
 
 /*
  * The container read side: DMG, fixed VHD and Android sparse images, and
  * the chunk cache behind them. Images are built here by encoders
  * independent of the library's decoders: each writes its format from the
  * published field tables, with its own CRC-32, base64 and byte order; only
- * the zlib streams come from the system zlib, as hdiutil's do. Every
+ * the zlib streams come from system zlib and the bzip2 vectors from
+ * /usr/bin/bzip2, as hdiutil's do. Every
  * passing case has seeded failures beside it that must fail with the named
  * check, never fall through to a raw-disk read.
  */
@@ -118,6 +120,7 @@ typedef struct dmg_table {
  * resource_length overrides the koly fork length when nonzero, otherwise
  * the length is resource_bytes.
  * signature_bytes appends that many 0x5a bytes immediately before koly.
+ * bzip2 and bzip2_length supply the encoded bytes of every bzip2 run.
  * empty_run_length sets the compressed length of zero-sector Ignore and
  * zero-fill runs; empty zero-fill runs have compressed offset zero unless
  * offset_bias overrides it.
@@ -138,6 +141,8 @@ typedef struct dmg_spec {
 	uint64_t	 resource_length;
 	size_t		 signature_bytes;
 	uint64_t	 empty_run_length;
+	const uint8_t	*bzip2;		/* Supplied compressed run bytes */
+	size_t		 bzip2_length;
 } dmg_spec_t;
 
 /* One sparse-image chunk. total overrides the chunk's total size when
@@ -482,6 +487,9 @@ dmg_run_bytes(const dmg_spec_t *spec, const dmg_table_t *table,
 	case RUN_RAW:
 		buffer_append(fork, bytes, (size_t)length);
 		return ((uint32_t)length);
+	case RUN_BZIP2:
+		buffer_append(fork, spec->bzip2, spec->bzip2_length);
+		return ((uint32_t)spec->bzip2_length);
 	case RUN_ZLIB:
 		/* The stream may encode more or fewer bytes than the run. */
 		source_length = (size_t)((int64_t)length + spec->zlib_delta);
@@ -1468,9 +1476,12 @@ test_dmg_seeded_failures(void)
 	expect_dmg_fails(&spec, FSIMG_ECORRUPT, "DMG block table lies outside the disk");
 
 	spec = base;
-	spec.table[0].run[0].type = RUN_BZIP2;
+	spec.table[0].run[0].type = 0x80000004u;
 	expect_dmg_fails(&spec, FSIMG_EUNSUPPORTED,
-	    "DMG run uses bzip2 compression, which is not supported");
+	    "DMG run uses ADC compression, which is not supported");
+	spec.table[0].run[0].type = 0x80000008u;
+	expect_dmg_fails(&spec, FSIMG_EUNSUPPORTED,
+	    "DMG run uses LZMA compression, which is not supported");
 
 	spec = base;
 	spec.table[0].run[0].type = 0x12345678u;
@@ -3051,6 +3062,105 @@ test_assumed_containers_still_validate(void)
 	free(disk);
 }
 
+/* A supplied system-bzip2 vector is the data fork of a one-run UDBZ. */
+static dmg_spec_t
+bz_dmg(const uint8_t *disk, uint64_t sectors, const uint8_t *code, size_t n)
+{
+	dmg_spec_t spec = {
+		.disk = disk, .sectors = sectors, .tables = 1,
+		.bzip2 = code, .bzip2_length = n
+	};
+
+	spec.table[0] = (dmg_table_t){ 0, sectors, 1,
+	    { { RUN_BZIP2, 0, sectors, 0 } } };
+	return (spec);
+}
+
+static void
+test_dmg_bzip2_read(void)
+{
+	uint8_t disk[SECTOR];
+	fsimg_image_info_t info;
+	fsimg_layer_report_t report;
+	memory_file_t file;
+	dmg_spec_t spec;
+	fixture_t f;
+
+	memset(disk, 'A', sizeof(disk));
+	/* The header's table also keeps the recipes beside shared vectors. */
+	for (size_t i = 0; i < sizeof(bz_vectors) / sizeof(bz_vectors[0]); i++) {
+		const bz_vector_t *v = &bz_vectors[i];
+
+		if (strcmp(v->name, "sector512") != 0)
+			continue;
+		spec = bz_dmg(disk, 1, v->code, v->length);
+		file = dmg_encode(&spec);
+		fixture_init(&f, 16 * MIB, 0);
+		CHECK(fixture_open(&f, &file, DETECT, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+		CHECK(strcmp(info.container, "dmg") == 0);
+		CHECK(strcmp(info.codecs, "bzip2") == 0);
+		CHECK(info.chunk_count == 1 && info.disk_bytes == SECTOR);
+		expect_disk(&f, disk, sizeof(disk));
+		CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD,
+		    &report, NULL) == FSIMG_OK);
+		fixture_free(&f);
+		free(file.bytes);
+		return;
+	}
+	CHECK(!"missing sector vector");
+}
+
+static void
+test_dmg_bzip2_decoded_lengths(void)
+{
+	uint8_t *disk = disk_new(129 * SECTOR);
+	dmg_spec_t spec;
+
+	/* Scheme probing reads the raw prefix; only payload reads reach the
+	 * malformed chunk, so a failed select cannot hide the read verdict.
+	 */
+	memset(disk + 128 * SECTOR, 'A', SECTOR);
+	spec = bz_dmg(disk, 129, bz_sector511, sizeof(bz_sector511));
+	spec.table[0] = (dmg_table_t){ 0, 129, 2,
+	    { { RUN_RAW, 0, 128, 0 }, { RUN_BZIP2, 128, 1, 0 } } };
+	expect_payload_fails(dmg_encode(&spec), true,
+	    "compressed chunk decodes to fewer bytes than declared");
+	spec.bzip2 = bz_sector513;
+	spec.bzip2_length = sizeof(bz_sector513);
+	expect_payload_fails(dmg_encode(&spec), true,
+	    "bzip2: output longer than its capacity");
+	free(disk);
+}
+
+static void
+test_dmg_bzip2_encoded_lengths(void)
+{
+	uint8_t disk[SECTOR], oversized[4737];
+	dmg_spec_t spec;
+
+	memset(disk, 'A', sizeof(disk));
+	bzero(oversized, sizeof(oversized));
+	spec = bz_dmg(disk, 1, bz_sector512, 0);
+	expect_dmg_fails(&spec, FSIMG_ECORRUPT,
+	    "DMG bzip2 run length is outside its bound");
+	spec = bz_dmg(disk, 1, oversized, sizeof(oversized));
+	expect_dmg_fails(&spec, FSIMG_ECORRUPT,
+	    "DMG bzip2 run length is outside its bound");
+}
+
+static void
+test_dmg_bzip2_decoded_limit(void)
+{
+	uint8_t *disk = disk_new(16 * MIB + SECTOR);
+	dmg_spec_t spec;
+
+	spec = bz_dmg(disk, 32769, bz_sector512, sizeof(bz_sector512));
+	expect_dmg_fails(&spec, FSIMG_EUNSUPPORTED,
+	    "DMG bzip2 run decodes to more than 16 MiB");
+	free(disk);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3133,6 +3243,10 @@ main(int argc, char **argv)
 	}
 	CHECK(argc == 1);
 
+	test_dmg_bzip2_read();
+	test_dmg_bzip2_decoded_lengths();
+	test_dmg_bzip2_encoded_lengths();
+	test_dmg_bzip2_decoded_limit();
 	test_crc_oracle();
 	test_dmg_read();
 	test_dmg_legacy_resource_fork();

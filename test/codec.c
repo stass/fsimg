@@ -21,11 +21,14 @@
 #include "fsimg.h"
 #include "internal.h"
 #include "test.h"
+#include "bzip2-vectors.h"
 
 /*
- * LZO1X and NRV2B decoder tests.
+ * LZO1X, NRV2B and bzip2 decoder tests.
  *
- * Every stream is written by hand from the format tables: either a worked
+ * Bzip2 uses system-encoder vectors and an independent field writer below.
+ * Each LZO1X and NRV2B stream is written by hand from the format tables:
+ * either a worked
  * stream that the liblzo2 and libucl oracles decoded (hex below, with the
  * oracle's output), or a stream built by one of the two stream writers in
  * this file. A writer encodes each instruction from its definition and
@@ -3783,6 +3786,518 @@ encode_native_bodies(void)
 	return (0);
 }
 
+/* The independent vectors describe their output rather than storing it. */
+static uint8_t *
+bz_plain(const bz_vector_t *v)
+{
+	static const char text[] = "bzip2 reads filesystem chunks.\n";
+	uint8_t tile[1024], *plain;
+	uint32_t state = 0x12345678u;
+
+	plain = xmalloc(v->decoded + 1);
+	for (size_t i = 0; i < sizeof(tile); i++) {
+		state ^= state << 13;
+		state ^= state >> 17;
+		state ^= state << 5;
+		tile[i] = (uint8_t)state;
+	}
+	for (size_t i = 0; i < v->decoded; i++) {
+		switch (v->recipe) {
+		case BZ_SHORT:
+			plain[i] = (uint8_t)text[i];
+			break;
+		case BZ_REPEAT:
+			plain[i] = 'A';
+			break;
+		case BZ_ADJACENT:
+			plain[i] = i < 259 ? 'A' : 'B';
+			break;
+		case BZ_RANDOM_TILE:
+			plain[i] = tile[i % sizeof(tile)];
+			break;
+		case BZ_EXPANSION:
+			plain[i] = (i / 259) % 2 == 0 ? 'A' : 'B';
+			break;
+		}
+	}
+	return (plain);
+}
+
+static void
+bz_expect(fsimg_ctx_t *ctx, const char *name, const uint8_t *in, size_t n,
+    size_t capacity, fsimg_status_t status, const char *message,
+    const uint8_t *plain, size_t decoded)
+{
+	fsimg_codec_step_t step;
+	fsimg_error_t error;
+	fsimg_status_t actual;
+	uint8_t *out;
+
+	out = xmalloc(capacity + 1);
+	memset(out, POISON, capacity + 1);
+	actual = fsimg_bzip2_decode(ctx, in, n, out, capacity, &step, &error);
+	if (actual != status || (message != NULL &&
+	    strcmp(error.message, message) != 0)) {
+		fprintf(stderr, "bzip2 %s: status %d, message %s\n", name,
+		    (int)actual, error.message);
+		CHECK(!"bzip2 verdict differs");
+	}
+	CHECK(step.consumed <= n && step.produced <= capacity);
+	CHECK(poison_intact(out + step.produced, capacity + 1 - step.produced));
+	if (status == FSIMG_OK && (!step.done || step.consumed != n ||
+	    step.produced != decoded || bcmp(out, plain, decoded) != 0)) {
+		fprintf(stderr, "bzip2 %s: done %d, consumed %zu of %zu, "
+		    "produced %zu of %zu; output must match every byte\n",
+		    name, (int)step.done, step.consumed, n, step.produced,
+		    decoded);
+		CHECK(!"bzip2 output differs");
+	}
+	free(out);
+}
+
+static void
+test_bzip2_vectors(void)
+{
+	fsimg_ctx_t *ctx = new_context();
+	uint8_t *plain;
+
+	for (size_t i = 0; i < sizeof(bz_vectors) / sizeof(bz_vectors[0]); i++) {
+		const bz_vector_t *v = &bz_vectors[i];
+
+		plain = bz_plain(v);
+		bz_expect(ctx, v->name, v->code, v->length, v->decoded,
+		    FSIMG_OK, NULL, plain, v->decoded);
+		if (v->decoded != 0)
+			bz_expect(ctx, v->name, v->code, v->length,
+			    v->decoded - 1, FSIMG_ECORRUPT, NULL, NULL, 0);
+		free(plain);
+	}
+	fsimg_ctx_free(ctx);
+}
+
+/* This writer uses a four-symbol alphabet: RUNA, RUNB, MTF position 1,
+ * and end of block. All codes have the same length, so the canonical
+ * code is simply the symbol number. Its default last column is one 'A',
+ * whose inverse transform and CRC are unambiguous. Mutations alter one
+ * field; failures before the CRC need no inverse transform oracle.
+ */
+typedef struct bz_bits {
+	uint8_t	bytes[65536];
+	size_t	bits;
+} bz_bits_t;
+
+typedef enum bz_fault {
+	BZ_VALID, BZ_HEADER, BZ_LEVEL_ZERO, BZ_LEVEL_COLON, BZ_BLOCK_MAGIC,
+	BZ_END_MAGIC, BZ_RANDOMISED, BZ_ORIGIN_LENGTH, BZ_ORIGIN_HUGE,
+	BZ_EMPTY_BLOCK, BZ_EMPTY_MAP, BZ_GROUP_ZERO, BZ_GROUP_ONE,
+	BZ_GROUP_SEVEN, BZ_NO_SELECTORS, BZ_BAD_SELECTOR, BZ_EXTRA_SELECTORS,
+	BZ_LENGTH_ZERO, BZ_LENGTH_21, BZ_WALK_ZERO, BZ_WALK_21,
+	BZ_OVERSUBSCRIBED, BZ_UNDERSUBSCRIBED, BZ_UNUSED_PATTERN,
+	BZ_SELECTOR_EXHAUSTED, BZ_RUN_LIMIT, BZ_SYMBOL_LIMIT, BZ_LONG_DIGITS,
+	BZ_COUNT_OVERFLOW, BZ_BLOCK_CRC, BZ_STREAM_CRC, BZ_BOMB, BZ_LONG_RUN
+} bz_fault_t;
+
+static void
+bz_put(bz_bits_t *w, uint64_t value, unsigned bits)
+{
+	CHECK(w->bits + bits <= sizeof(w->bytes) * 8);
+	while (bits != 0) {
+		bits--;
+		w->bytes[w->bits / 8] |=
+		    (uint8_t)(((value >> bits) & 1) << (7 - w->bits % 8));
+		w->bits++;
+	}
+}
+
+/* MSB-first polynomial division, independent of the decoder's CRC table. */
+static uint32_t
+bz_crc(const uint8_t *plain, size_t n)
+{
+	uint32_t crc = UINT32_MAX;
+
+	for (size_t i = 0; i < n; i++) {
+		crc ^= (uint32_t)plain[i] << 24;
+		for (unsigned bit = 0; bit < 8; bit++)
+			crc = (crc << 1) ^ ((crc >> 31) ? 0x04c11db7u : 0);
+	}
+	return (~crc);
+}
+
+static void
+bz_digits(bz_bits_t *w, unsigned count, unsigned width)
+{
+	while (count != 0) {
+		count--;
+		bz_put(w, count % 2, width);
+		count /= 2;
+	}
+}
+
+static bz_bits_t *
+bz_stream(bz_fault_t fault)
+{
+	bz_bits_t *w = xmalloc(sizeof(*w));
+	uint8_t plain[259], *zeros;
+	uint32_t crc;
+	unsigned groups = 2, selectors = 1, width = 2, start, origin = 0;
+
+	bzero(w, sizeof(*w));
+	memset(plain, 'A', sizeof(plain));
+	crc = bz_crc(plain, fault == BZ_COUNT_OVERFLOW ? 259 : 1);
+	if (fault == BZ_LONG_RUN) {
+		zeros = xmalloc(719985);
+		bzero(zeros, 719985);
+		crc = bz_crc(zeros, 719985);
+		free(zeros);
+	}
+	if (fault == BZ_GROUP_ZERO)
+		groups = 0;
+	if (fault == BZ_GROUP_ONE)
+		groups = 1;
+	if (fault == BZ_GROUP_SEVEN)
+		groups = 7;
+	if (fault == BZ_NO_SELECTORS)
+		selectors = 0;
+	if (fault == BZ_EXTRA_SELECTORS)
+		selectors = 18002;
+	if (fault == BZ_ORIGIN_LENGTH)
+		origin = 1;
+	if (fault == BZ_ORIGIN_HUGE)
+		origin = 0xffffff;
+	if (fault == BZ_OVERSUBSCRIBED)
+		width = 1;
+	if (fault == BZ_UNDERSUBSCRIBED || fault == BZ_UNUSED_PATTERN)
+		width = 3;
+	bz_put(w, fault == BZ_HEADER ? 0x425868 : 0x425a68, 24);
+	bz_put(w, fault == BZ_LEVEL_ZERO ? '0' :
+	    fault == BZ_LEVEL_COLON ? ':' :
+	    (fault == BZ_BOMB || fault == BZ_LONG_RUN) ? '9' : '1', 8);
+	bz_put(w, UINT64_C(0x314159265359) ^ (fault == BZ_BLOCK_MAGIC), 48);
+	bz_put(w, crc ^ (fault == BZ_BLOCK_CRC), 32);
+	bz_put(w, fault == BZ_RANDOMISED, 1);
+	bz_put(w, origin, 24);
+	/* Values A and B, or A and 255 for the RLE count test. */
+	bz_put(w, fault == BZ_EMPTY_MAP ? 0 :
+	    fault == BZ_COUNT_OVERFLOW ? 0x0801 :
+	    fault == BZ_LONG_RUN ? 0x8000 : 0x0800, 16);
+	if (fault != BZ_EMPTY_MAP) {
+		bz_put(w, fault == BZ_COUNT_OVERFLOW ? 0x4000 :
+		    fault == BZ_LONG_RUN ? 0xc000 : 0x6000, 16);
+		if (fault == BZ_COUNT_OVERFLOW)
+			bz_put(w, 1, 16);
+	}
+	bz_put(w, groups, 3);
+	bz_put(w, selectors, 15);
+	for (unsigned i = 0; i < selectors; i++) {
+		if (fault == BZ_BAD_SELECTOR && i == 0)
+			bz_put(w, 3, 2);
+		bz_put(w, 0, 1);
+	}
+	for (unsigned group = 0; group < groups; group++) {
+		start = width;
+		if (fault == BZ_LENGTH_ZERO || fault == BZ_WALK_ZERO)
+			start = 0;
+		if (fault == BZ_LENGTH_21 || fault == BZ_WALK_21)
+			start = 21;
+		if (fault == BZ_WALK_ZERO)
+			start = 1;
+		if (fault == BZ_WALK_21)
+			start = 20;
+		bz_put(w, start, 5);
+		if (fault == BZ_WALK_ZERO)
+			bz_put(w, 3, 2);
+		if (fault == BZ_WALK_21)
+			bz_put(w, 2, 2);
+		for (unsigned symbol = 0; symbol < 4; symbol++)
+			bz_put(w, 0, 1);
+	}
+	switch (fault) {
+	case BZ_EMPTY_BLOCK:
+		break;
+	case BZ_UNUSED_PATTERN:
+		bz_put(w, 7, width);
+		break;
+	case BZ_SELECTOR_EXHAUSTED:
+	case BZ_SYMBOL_LIMIT:
+		for (unsigned i = 0; i < 51; i++)
+			bz_put(w, 2, width);
+		break;
+	case BZ_LONG_RUN:
+		bz_digits(w, 899981, width);
+		break;
+	case BZ_RUN_LIMIT:
+	case BZ_BOMB:
+		bz_digits(w, fault == BZ_BOMB ? 900000 : 100001, width);
+		break;
+	case BZ_LONG_DIGITS:
+		for (unsigned i = 0; i < 40; i++)
+			bz_put(w, 1, width);
+		break;
+	case BZ_COUNT_OVERFLOW:
+		/* Last column of AAAA255, origin 0: 255AAAA. */
+		bz_put(w, 2, width);
+		bz_put(w, 2, width);
+		bz_digits(w, 3, width);
+		break;
+	default:
+		bz_digits(w, 1, width);
+		break;
+	}
+	bz_put(w, 3, width);
+	bz_put(w, UINT64_C(0x177245385090) ^ (fault == BZ_END_MAGIC), 48);
+	bz_put(w, crc ^ (fault == BZ_STREAM_CRC), 32);
+	return (w);
+}
+
+typedef struct bz_failure {
+	const char	*name;
+	bz_fault_t	 fault;
+	size_t		 capacity;
+	fsimg_status_t	 status;
+	const char	*message;
+} bz_failure_t;
+
+static void
+test_bzip2_field_failures(void)
+{
+	static const bz_failure_t cases[] = {
+		{ "bad BZh", BZ_HEADER, 8,
+		    FSIMG_ECORRUPT, "bad stream header" },
+		{ "level zero", BZ_LEVEL_ZERO, 8,
+		    FSIMG_ECORRUPT, "bad level in stream header" },
+		{ "level colon", BZ_LEVEL_COLON, 8,
+		    FSIMG_ECORRUPT, "bad level in stream header" },
+		{ "block magic", BZ_BLOCK_MAGIC, 8,
+		    FSIMG_ECORRUPT, "bad block magic" },
+		{ "end magic", BZ_END_MAGIC, 8,
+		    FSIMG_ECORRUPT, "bad block magic" },
+		{ "randomised", BZ_RANDOMISED, 8,
+		    FSIMG_EUNSUPPORTED, "randomised blocks are not supported" },
+		{ "origin equals length", BZ_ORIGIN_LENGTH, 8,
+		    FSIMG_ECORRUPT, "origin outside the block" },
+		{ "huge origin", BZ_ORIGIN_HUGE, 8,
+		    FSIMG_ECORRUPT, "origin outside the block" },
+		{ "empty block", BZ_EMPTY_BLOCK, 8,
+		    FSIMG_ECORRUPT, "origin outside the block" },
+		{ "empty used map", BZ_EMPTY_MAP, 8,
+		    FSIMG_ECORRUPT, "block uses no byte values" },
+		{ "zero groups", BZ_GROUP_ZERO, 8,
+		    FSIMG_ECORRUPT, "group count out of range" },
+		{ "one group", BZ_GROUP_ONE, 8,
+		    FSIMG_ECORRUPT, "group count out of range" },
+		{ "seven groups", BZ_GROUP_SEVEN, 8,
+		    FSIMG_ECORRUPT, "group count out of range" },
+		{ "no selectors", BZ_NO_SELECTORS, 8,
+		    FSIMG_ECORRUPT, "block has no selectors" },
+		{ "selector equals groups", BZ_BAD_SELECTOR, 8,
+		    FSIMG_ECORRUPT, "selector past the group count" },
+		{ "length zero", BZ_LENGTH_ZERO, 8,
+		    FSIMG_ECORRUPT, "code length out of range" },
+		{ "length 21", BZ_LENGTH_21, 8,
+		    FSIMG_ECORRUPT, "code length out of range" },
+		{ "walk to zero", BZ_WALK_ZERO, 8,
+		    FSIMG_ECORRUPT, "code length out of range" },
+		{ "walk to 21", BZ_WALK_21, 8,
+		    FSIMG_ECORRUPT, "code length out of range" },
+		{ "oversubscribed", BZ_OVERSUBSCRIBED, 8,
+		    FSIMG_ECORRUPT, "code lengths are oversubscribed" },
+		{ "unused pattern", BZ_UNUSED_PATTERN, 8,
+		    FSIMG_ECORRUPT, "bit pattern matches no symbol" },
+		{ "51 symbols one selector", BZ_SELECTOR_EXHAUSTED, 100,
+		    FSIMG_ECORRUPT, "symbols past the last selector" },
+		{ "run over level one", BZ_RUN_LIMIT, 200000,
+		    FSIMG_ECORRUPT, "block passes its limit" },
+		{ "plain symbols over capacity", BZ_SYMBOL_LIMIT, 4,
+		    FSIMG_ECORRUPT, "block passes its limit" },
+		{ "40 RUNB digits", BZ_LONG_DIGITS, 200000,
+		    FSIMG_ECORRUPT, "block passes its limit" },
+		{ "count byte expands past capacity", BZ_COUNT_OVERFLOW, 258,
+		    FSIMG_ECORRUPT, "output longer than its capacity" },
+		{ "block CRC", BZ_BLOCK_CRC, 8,
+		    FSIMG_ECORRUPT, "block checksum mismatch" },
+		{ "stream CRC", BZ_STREAM_CRC, 8,
+		    FSIMG_ECORRUPT, "stream checksum mismatch" }
+	};
+	fsimg_ctx_t *ctx = new_context();
+	bz_bits_t *w;
+	char message[128];
+
+	CHECK(bz_crc((const uint8_t *)"123456789", 9) == 0xfc891918u);
+	/* Establish the writer before relying on any of its mutations. */
+	w = bz_stream(BZ_VALID);
+	bz_expect(ctx, "writer", w->bytes, (w->bits + 7) / 8, 1,
+	    FSIMG_OK, NULL, (const uint8_t *)"A", 1);
+	free(w);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		const bz_failure_t *c = &cases[i];
+
+		w = bz_stream(c->fault);
+		snprintf(message, sizeof(message), "bzip2: %s", c->message);
+		bz_expect(ctx, c->name, w->bytes, (w->bits + 7) / 8,
+		    c->capacity, c->status, message, NULL, 0);
+		free(w);
+	}
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_bzip2_count_byte_exact_capacity(void)
+{
+	fsimg_ctx_t *ctx = new_context();
+	bz_bits_t *w = bz_stream(BZ_COUNT_OVERFLOW);
+	uint8_t plain[259];
+
+	memset(plain, 'A', sizeof(plain));
+	bz_expect(ctx, "four literals and count 255", w->bytes,
+	    (w->bits + 7) / 8, sizeof(plain), FSIMG_OK, NULL, plain,
+	    sizeof(plain));
+	free(w);
+	fsimg_ctx_free(ctx);
+}
+
+/* A constant last column inverts to itself. The zero count after each
+ * four zero literals emits no additional bytes: 899981 - 899981 / 5.
+ * Unlike an encoder's RLE-compressed repeated text, this reaches a long
+ * RUNA/RUNB digit count in a single level-nine block.
+ */
+static void
+test_bzip2_long_run_digits(void)
+{
+	fsimg_ctx_t *ctx = new_context();
+	bz_bits_t *w = bz_stream(BZ_LONG_RUN);
+	uint8_t *plain = xmalloc(719985);
+
+	bzero(plain, 719985);
+	bz_expect(ctx, "899981 transformed zero bytes", w->bytes,
+	    (w->bits + 7) / 8, 719985, FSIMG_OK, NULL, plain, 719985);
+	free(plain);
+	free(w);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_bzip2_accepted_nonstandard_codes(void)
+{
+	const bz_fault_t cases[] = { BZ_UNDERSUBSCRIBED, BZ_EXTRA_SELECTORS };
+	fsimg_ctx_t *ctx = new_context();
+	bz_bits_t *w;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		w = bz_stream(cases[i]);
+		bz_expect(ctx, "unused codes or selectors", w->bytes,
+		    (w->bits + 7) / 8, 8, FSIMG_OK, NULL,
+		    (const uint8_t *)"A", 1);
+		free(w);
+	}
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_bzip2_truncation_and_trailing_bytes(void)
+{
+	fsimg_ctx_t *ctx = new_context();
+	uint8_t bytes[2 * sizeof(bz_short1)];
+
+	for (size_t cut = 0; cut < sizeof(bz_short1); cut++)
+		bz_expect(ctx, "proper prefix", bz_short1, cut, 100,
+		    FSIMG_ECORRUPT, "bzip2: stream ends early", NULL, 0);
+	bcopy(bz_short1, bytes, sizeof(bz_short1));
+	bytes[sizeof(bz_short1)] = 0;
+	bz_expect(ctx, "trailing byte", bytes, sizeof(bz_short1) + 1, 100,
+	    FSIMG_ECORRUPT, "bzip2: trailing bytes after the stream", NULL, 0);
+	bcopy(bz_short1, bytes + sizeof(bz_short1), sizeof(bz_short1));
+	bz_expect(ctx, "concatenated streams", bytes, sizeof(bytes), 100,
+	    FSIMG_ECORRUPT, "bzip2: trailing bytes after the stream", NULL, 0);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_bzip2_interface(void)
+{
+	fsimg_ctx_t *ctx = new_context();
+	fsimg_codec_step_t step;
+	fsimg_error_t error;
+	uint8_t out[100];
+
+	CHECK(fsimg_bzip2_decode(ctx, NULL, 1, out, sizeof(out), &step,
+	    &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.message, "bzip2: invalid buffer arguments") == 0);
+	CHECK(fsimg_bzip2_decode(ctx, bz_short1, sizeof(bz_short1), NULL, 1,
+	    &step, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.message, "bzip2: invalid buffer arguments") == 0);
+	bz_expect(ctx, "short output is successful", bz_short1,
+	    sizeof(bz_short1), sizeof(out), FSIMG_OK, NULL,
+	    (const uint8_t *)"bzip2 reads filesystem chunks.\n", 31);
+	CHECK(fsimg_bzip2_stream_bound(0) == 4096);
+	CHECK(fsimg_bzip2_stream_bound(512) == 4736);
+	CHECK(fsimg_bzip2_stream_bound(16 * 1024 * 1024) == 20975616);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_bzip2_memory_bounds(void)
+{
+	fsimg_options_t options;
+	fsimg_ctx_t *ctx;
+	fsimg_stats_t before, after;
+	fsimg_error_t error;
+	bz_bits_t *w;
+	void *reservation;
+	const uint64_t budget = 16 * 1024 * 1024;
+
+	fsimg_options_init(&options);
+	options.memory_bytes = budget;
+	CHECK(fsimg_ctx_new(&options, &ctx, &error) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(ctx, &before, &error) == FSIMG_OK);
+	w = bz_stream(BZ_BOMB);
+	bz_expect(ctx, "900000 transformed run bytes in 512 bytes", w->bytes,
+	    (w->bits + 7) / 8, 512, FSIMG_ECORRUPT,
+	    "bzip2: block passes its limit", NULL, 0);
+	CHECK(fsimg_ctx_get_stats(ctx, &after, &error) == FSIMG_OK);
+	CHECK(after.memory_bytes == before.memory_bytes);
+	/* A full level-nine table exceeds 3 MiB; this call needs under 64 KiB. */
+	CHECK(after.memory_peak - before.memory_bytes < 65536);
+	free(w);
+	fsimg_test_fail_alloc_after(ctx, 1);
+	bz_expect(ctx, "allocation failure", bz_short1, sizeof(bz_short1),
+	    100, FSIMG_ENOMEM, NULL, NULL, 0);
+	CHECK(fsimg_ctx_get_stats(ctx, &after, &error) == FSIMG_OK);
+	CHECK(after.memory_bytes == before.memory_bytes);
+	fsimg_test_fail_alloc_after(ctx, 0);
+	reservation = fsimg_alloc(ctx, (size_t)(budget - before.memory_bytes -
+	    1024), &error);
+	CHECK(reservation != NULL);
+	bz_expect(ctx, "table budget refused", bz_short1, sizeof(bz_short1),
+	    100, FSIMG_ELIMIT, NULL, NULL, 0);
+	fsimg_dealloc(reservation);
+	CHECK(fsimg_ctx_get_stats(ctx, &after, &error) == FSIMG_OK);
+	CHECK(after.memory_bytes == before.memory_bytes);
+	fsimg_ctx_free(ctx);
+}
+
+/* The dedicated harness has a two-byte capacity in units of 16 bytes. */
+static int
+bz_write_seeds(const char *directory)
+{
+	char path[4096];
+	uint8_t *bytes;
+	size_t units;
+
+	for (size_t i = 0; i < sizeof(bz_vectors) / sizeof(bz_vectors[0]); i++) {
+		const bz_vector_t *v = &bz_vectors[i];
+
+		units = (v->decoded + 15) / 16;
+		bytes = xmalloc(v->length + 2);
+		bytes[0] = (uint8_t)units;
+		bytes[1] = (uint8_t)(units >> 8);
+		bcopy(v->code, bytes + 2, v->length);
+		snprintf(path, sizeof(path), "%s/%s.seed", directory, v->name);
+		write_file(path, bytes, v->length + 2);
+		free(bytes);
+	}
+	return (0);
+}
+
 #define RUN(test) do { \
 	if (getenv("CODEC_DEBUG") != NULL) \
 		fprintf(stderr, "%s\n", #test); \
@@ -3792,6 +4307,14 @@ encode_native_bodies(void)
 static void
 run_tests(void)
 {
+	RUN(test_bzip2_vectors);
+	RUN(test_bzip2_count_byte_exact_capacity);
+	RUN(test_bzip2_long_run_digits);
+	RUN(test_bzip2_field_failures);
+	RUN(test_bzip2_accepted_nonstandard_codes);
+	RUN(test_bzip2_truncation_and_trailing_bytes);
+	RUN(test_bzip2_interface);
+	RUN(test_bzip2_memory_bounds);
 	RUN(test_checks_are_live);
 	RUN(test_lzo_worked_streams);
 	RUN(test_lzo_rejected_worked_streams);
@@ -3831,6 +4354,8 @@ run_tests(void)
 int
 main(int argc, char **argv)
 {
+	if (argc == 3 && strcmp(argv[1], "--seed-bzip2") == 0)
+		return (bz_write_seeds(argv[2]));
 	if (argc == 6 && strcmp(argv[1], "--decode") == 0 &&
 	    strcmp(argv[2], "lzo") == 0)
 		return (decode_lzo_file(argv[3], argv[4],
@@ -3864,7 +4389,8 @@ main(int argc, char **argv)
 		fprintf(stderr, "usage: test-codec [--decode lzo|nrv2b IN OUT "
 		    "BOUND | --emit-cases DIR | --encode IN OUT | --encode-framed "
 		    "IN OUT | --mutate CODEC SEED COUNT DIR FILE... | --native | "
-		    "--random CODEC SEED COUNT DIR | --seed DIR]\n");
+		    "--random CODEC SEED COUNT DIR | --seed DIR | "
+		    "--seed-bzip2 DIR]\n");
 		return (2);
 	}
 	run_tests();
