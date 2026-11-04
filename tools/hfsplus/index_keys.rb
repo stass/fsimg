@@ -11,29 +11,29 @@
 #   index_keys.rb BEFORE_IMAGE AFTER_IMAGE
 #
 # It prints the number of keys in each image and how many keys of one are
-# missing from the other. The catalog tree must have a root that is an index node.
+# missing from the other. The catalog tree must be at least three levels deep,
+# so that the root's children are index nodes; on a shallower tree they are
+# leaves, whose keys any insertion or deletion changes, and the tool refuses.
 require_relative "fields"
 
 module HfsPlusIndexKeys
   module_function
 
-  # The keys of every record of every child of the catalog root. A wrapped
-  # volume or a root that is not an index node has no such level.
+  # The keys of every record of every child of the catalog root, all of which
+  # must be index nodes.
   def level_two_keys(path)
     File.open(path, "rb") do |io|
       fields = HfsPlusFields
-      base = fields::Volume.new(fields::Image.new(io), 0, 512)
-      raise fields::Error, "#{path} is wrapped in an HFS volume; this tool reads plain HFS Plus volumes" if fields.wrapper_report(base)
+      catalog = fields.open_catalog(io)
+      tree = catalog.tree
+      raise fields::Error, "#{path}: the catalog tree is #{tree[:depth]} levels deep; its root's children are not index nodes" if tree[:depth] < 3
 
-      header = fields.read_header(base, 1024)
-      volume = base.with(block_size: header[:block_size])
-      fork = header[:forks][:catalog]
-      tree = fields.tree_header_report(volume, fork)
-      root = fields.read_node(volume, fork, tree[:root_node], tree[:node_size])
-      raise fields::Error, "#{path}: the catalog root is not an index node" unless fields.descriptor(root).kind.zero?
-
+      root = fields.read_node(catalog.volume, catalog.fork, tree[:root_node], tree[:node_size])
       fields.record_slices(root, fields.descriptor(root).num_records).flat_map do |slice|
-        child = fields.read_node(volume, fork, fields.index_child(slice, fields.record_key(slice)), tree[:node_size])
+        child_number = fields.index_child(slice, fields.record_key(slice))
+        child = fields.read_node(catalog.volume, catalog.fork, child_number, tree[:node_size])
+        raise fields::Malformed, "#{path}: node #{child_number} under the root is not an index node" unless fields.descriptor(child).kind.zero?
+
         fields.record_slices(child, fields.descriptor(child).num_records).map { fields.record_key(_1) }
       end
     end

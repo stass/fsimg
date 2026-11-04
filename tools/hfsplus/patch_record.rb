@@ -7,8 +7,9 @@
 # Write a copy of an image with fields of one catalog file record rewritten,
 # so that macOS can be shown a record it will not create itself: a file whose
 # Finder type and creator are `hlnk`/`hfs+`, a chosen creation date or link
-# reference, a flag word. The file record is found by its name, which must
-# occur exactly once as the key of a file record. Only research copies are
+# reference, a flag word. The file record is found by walking the catalog's
+# leaf chain (fields.rb), so that no other bytes of the image can match; its
+# name must be the key of exactly one file record. Only research copies are
 # patched; no checksum covers a catalog record, so the volume still mounts.
 #
 #   patch_record.rb SRC DEST NAME [--type CODE] [--creator CODE] [--create-date SECONDS_SINCE_1904]
@@ -18,6 +19,7 @@
 # SRC and must not lie under the captures root, so no kept capture can be
 # altered. A code is four characters or `0x` and eight hex digits.
 require "optparse"
+require_relative "fields"
 
 module HfsPlusPatchRecord
   class Error < StandardError; end
@@ -36,20 +38,34 @@ module HfsPlusPatchRecord
 
   module_function
 
-  # The offset of the record data of the one file record named `name`.
-  def find_record(image, name)
-    units = name.encode("UTF-16BE").b
-    needle = [units.bytesize / 2].pack("n") + units
-    hits = occurrences(image, needle).filter_map do |at|
-      next if at < 6
-
-      key_length = image.byteslice(at - 6, 2).unpack1("n")
-      data = at - 6 + 2 + key_length
-      data if key_length == 6 + units.bytesize && image.byteslice(data, 2) == [2].pack("n") && data + FILE_RECORD_BYTES <= image.bytesize
+  # The image offset of the record data of the one file record named `name`,
+  # found in the catalog's leaf chain. A record that the fork's first eight
+  # extents split across ranges is refused.
+  def find_record(catalog, name)
+    fields = HfsPlusFields
+    node_size = catalog.tree[:node_size]
+    hits = []
+    fields.each_leaf(catalog.volume, catalog.fork, catalog.tree) do |slices, node|
+      start = fields::NODE_DESCRIPTOR_BYTES
+      slices.each do |slice|
+        data_at = file_record_data(slice, name)
+        hits << node * node_size + start + data_at if data_at
+        start += slice.bytesize
+      end
     end
     raise Error, "#{name.inspect} is the key of #{hits.size} file records, not one" unless hits.size == 1
 
-    hits.first
+    ranges = catalog.volume.fork_ranges(catalog.fork, hits.first, FILE_RECORD_BYTES)
+    raise Error, "the record of #{name.inspect} is not within one extent" unless ranges.size == 1 && ranges.first.last == FILE_RECORD_BYTES
+
+    catalog.volume.base + ranges.first.first
+  end
+
+  # Where the data of a catalog leaf record starts, if it is a file record
+  # keyed by `name`.
+  def file_record_data(slice, name)
+    _, record_name, data_at = HfsPlusFields.catalog_key(slice)
+    data_at if record_name == name && slice.bytesize - data_at == FILE_RECORD_BYTES && slice.byteslice(data_at, 2) == [2].pack("n")
   end
 
   # Four characters, or `0x` and eight hex digits for codes that are not text.
@@ -81,13 +97,6 @@ module HfsPlusPatchRecord
     raise Error, "#{dest} is under the captures root #{root}" if root && (target == root || target.start_with?("#{root}/"))
   end
 
-  # Every offset where `needle` occurs in `image`, overlapping ones included.
-  def occurrences(image, needle)
-    Enumerator.produce(image.index(needle)) { |at| image.index(needle, at + 1) }.take_while { _1 }
-  rescue StopIteration
-    []
-  end
-
   def patch(image, at, options)
     put = ->(offset, packed) { image[at + offset, packed.bytesize] = packed }
     put.call(TYPE_AT, code_bytes(options[:type])) if options[:type]
@@ -113,10 +122,11 @@ module HfsPlusPatchRecord
     check_ranges(options)
     check_dest(src, dest)
     image = File.binread(src)
-    patch(image, find_record(image, name), options)
+    at = File.open(src, "rb") { find_record(HfsPlusFields.open_catalog(_1), name) }
+    patch(image, at, options)
     File.open(dest, File::WRONLY | File::CREAT | File::EXCL, 0o644) { _1.write(image) }
     0
-  rescue Error, OptionParser::ParseError, SystemCallError => e
+  rescue Error, HfsPlusFields::Error, OptionParser::ParseError, SystemCallError => e
     warn "patch_record.rb: #{e.message}"
     1
   end

@@ -54,6 +54,7 @@ module HfsPlusCapture
   PROFILES = {
     "e2" => ->(block_size) { HfsPlusPopulate.e2(block_size) },
     "e4" => ->(_) { HfsPlusPopulateLinks.e4 },
+    "e4-dirlinks" => ->(_) { HfsPlusPopulateLinks.dir_links },
     "e5" => ->(_) { HfsPlusPopulateAttributes.e5 },
     "e6-sweep" => ->(_) { HfsPlusPopulateCompression.e6_sweep },
     "e7" => ->(block_size) { HfsPlusPopulateFragmentation.e7(block_size) },
@@ -63,7 +64,7 @@ module HfsPlusCapture
     "e9-sparse" => ->(_) { HfsPlusPopulateLarge.e9_sparse }
   }.merge(HfsPlusPopulateCompression::TOOLS.to_h { |tool| ["e6-#{tool}", ->(_) { HfsPlusPopulateCompression.e6(tool) }] }).freeze
 
-  Config = Data.define(:root, :variant, :size, :option, :formats, :hdiutil_fs, :import, :command, :populate, :discard_image) do
+  Config = Data.define(:root, :variant, :size, :option, :formats, :hdiutil_fs, :import, :command, :populate, :discard_image, :overwrite) do
     def name = "h-#{variant}-#{size}-#{option}"
     def dir = File.join(root, name)
     def image = File.join(dir, "image.img")
@@ -98,12 +99,14 @@ module HfsPlusCapture
     end
 
     # Attach `image` and return its whole-disk device; with `mountpoint` the
-    # volume is also mounted there, otherwise it is left unmounted. A device
+    # volume is also mounted there (`readonly` mounts it read-only), otherwise
+    # it is left unmounted. A device
     # named in the output is recorded before the exit status is judged, since
     # hdiutil can attach a disk and still fail, for example to mount it.
-    def attach(image, mountpoint: nil)
+    def attach(image, mountpoint: nil, readonly: false)
       args = %w[hdiutil attach -imagekey diskimage-class=CRawDiskImage]
       args += mountpoint ? ["-mountpoint", mountpoint] : ["-nomount"]
+      args << "-readonly" if readonly
       out, ok = @log.run(*args, image)
       device = out[%r{/dev/disk\d+}]
       @devices << device if device && !@devices.include?(device)
@@ -112,8 +115,10 @@ module HfsPlusCapture
       device
     end
 
-    def detach(device)
-      attempts = [[], [], [], ["-force"]]
+    # Detach `device`: three plain attempts and then a forced one, or only the
+    # forced one with `force`.
+    def detach(device, force: false)
+      attempts = force ? [["-force"]] : [[], [], [], ["-force"]]
       done = attempts.any? do |extra|
         _, ok = @log.run("hdiutil", "detach", device, *extra)
         sleep(0.5) unless ok
@@ -131,15 +136,15 @@ module HfsPlusCapture
       raise Error, errors.join("; ") unless errors.empty?
     end
 
-    # Attach, yield the device, and detach it again: a failed detach on the
-    # success path is an error. When the block or the attach fails, the device
+    # Attach, yield the device, and detach it again (unless the block already
+    # did): a failed detach on the success path is an error. When the block or the attach fails, the device
     # is detached on a best-effort basis and that error is the one raised; a
     # device that cannot be detached stays listed for `release` to report.
-    def with(image, mountpoint: nil)
+    def with(image, mountpoint: nil, readonly: false)
       device = nil
-      device = attach(image, mountpoint: mountpoint)
+      device = attach(image, mountpoint: mountpoint, readonly: readonly)
       result = yield device
-      detach(device)
+      detach(device) if @devices.include?(device)
       result
     rescue StandardError
       detach_error(device) if device && @devices.include?(device)
@@ -173,36 +178,49 @@ module HfsPlusCapture
     base = { path: path, kind: st.ftype, size: st.size, mode: format("%04o", st.mode & 0o7777),
              mtime: st.mtime.to_i, nlink: st.nlink, owner: st.uid == Process.uid ? "mounter" : "other" }
     base[:target] = File.readlink(full) if st.symlink?
-    base[:sha256] = file_digest(full) if st.file?
     base
   end
 
   # A file the mounting user cannot read, such as mode 0000, still belongs in
   # the manifest; its checksum is nil rather than a reason to stop.
   def file_digest(path) = File.readable?(path) ? Digest::SHA256.file(path).hexdigest : nil
+
+  # The tree with the checksum of each regular file added.
+  def with_digests(root, tree) = tree.map { _1[:kind] == "file" ? _1.merge(sha256: file_digest(File.join(root, _1[:path]))) : _1 }
   def boot_area(image) = File.open(image, "rb") { _1.read(1024).to_s }
   def boot_summary(bytes) = { zero: bytes.count("\x00".b) == 1024, first_16: bytes.byteslice(0, 16).unpack1("H*"), sha256: Digest::SHA256.hexdigest(bytes) }
   def fields_of(image) = File.open(image, "rb") { HfsPlusFields.decode(_1, limit: FIELD_RECORDS) }
   def fields_text(report) = JSON.pretty_generate(report)
 
+  # A read-only forced check of the volume: -f makes fsck_hfs check a journaled
+  # or clean volume instead of reporting it as not needing one. Its verdict is
+  # "passed" or "failed" by the exit status, and "skipped" when it still says
+  # that it did not check.
   def fsck(attachments, log, image)
     attachments.with(image) do |device|
-      out, ok = log.run("fsck_hfs", "-n", device.sub("/dev/", "/dev/r"))
-      { passed: ok, summary: out.lines.last(2).map(&:strip).reject(&:empty?) }
+      out, ok = log.run("fsck_hfs", "-fn", device.sub("/dev/", "/dev/r"))
+      result = if out.include?("No checking performed") then "skipped"
+               else ok ? "passed" : "failed"
+               end
+      { result: result, summary: out.lines.last(2).map(&:strip).reject(&:empty?) }
     end
   end
 
   # Format `image` with each --format command in turn, or by hdiutil, noting
   # the boot area after every step.
   def format_image(config, attachments, log)
-    FileUtils.rm_f(config.image)
     return hdiutil_create(config, log) if config.hdiutil_fs
 
-    log.run("mkfile", "-n", config.size.to_s, config.image)
+    _, ok = log.run("mkfile", "-n", config.size.to_s, config.image)
+    raise Error, "mkfile failed" unless ok
+
     config.formats.map do |command|
-      attachments.with(config.image) do |device|
-        log.run(*command.shellsplit.map { _1.gsub("@DEV@", device.sub("/dev/", "/dev/r")) })
+      ok = attachments.with(config.image) do |device|
+        _, formatted = log.run(*command.shellsplit.map { _1.gsub("@DEV@", device.sub("/dev/", "/dev/r")) })
+        formatted
       end
+      raise Error, "format command failed: #{command}" unless ok
+
       { after: command, boot: boot_summary(boot_area(config.image)) }
     end
   end
@@ -222,24 +240,36 @@ module HfsPlusCapture
     [{ after: "hdiutil create -fs #{config.hdiutil_fs}", boot: boot_summary(boot_area(config.image)) }]
   end
 
-  # Mount the volume writable, run the population, record the tree, unmount.
-  # The mount directory is removed with rmdir, never recursively, and only
-  # after the volume is detached: were the detach to fail, a recursive removal
-  # would delete the contents of a still-mounted volume. On failure the
-  # directory is left in place.
-  def populate(config, attachments, log, block_size)
-    steps = PROFILES.fetch(config.populate).call(block_size)
+  # Mount the volume, yield the mount directory, unmount. The directory is
+  # removed with rmdir, never recursively, and only after the volume is
+  # detached: were the detach to fail, a recursive removal would delete the
+  # contents of a still-mounted volume. On failure the directory is left in
+  # place.
+  def mounted(image, attachments, readonly: false)
     mount = Dir.mktmpdir("hfsplus-mount")
-    result = attachments.with(config.image, mountpoint: mount) do
-      log.note("# mounted: #{`mount`.lines.grep(/#{Regexp.escape(mount)}/).map { _1[/\(([^)]*)\)/, 1] }.first}")
-      attempts = []
-      steps.each { HfsPlusPopulate.attempt(attempts, _1, mount) }
-      system("sync")
-      { attempts: attempts, tree: walk(mount) }
-    end
+    result = attachments.with(image, mountpoint: mount, readonly: readonly) { yield mount }
     Dir.rmdir(mount)
     result
   end
+
+  # Mount the volume writable, run the population, unmount, and record the
+  # image in fields.json. Only then is the tree read, through a second,
+  # read-only mount: listing a directory or reading a file updates its access
+  # date, so nothing may read the tree before fields.json is decoded. What only
+  # the first mount shows, such as an mtime the volume cannot store, is
+  # recorded by the steps themselves.
+  def populate(config, attachments, log, block_size)
+    steps = PROFILES.fetch(config.populate).call(block_size)
+    attempts = mounted(config.image, attachments) do |mount|
+      log.note("# mounted: #{`mount`.lines.grep(/#{Regexp.escape(mount)}/).map { _1[/\(([^)]*)\)/, 1] }.first}")
+      steps.each_with_object([]) { |step, done| HfsPlusPopulate.attempt(done, step, mount) }.tap { system("sync") }
+    end
+    record_fields(config)
+    { attempts: attempts, tree: mounted(config.image, attachments, readonly: true) { with_digests(_1, walk(_1)) } }
+  end
+
+  # fields.json: the image as it is now.
+  def record_fields(config) = File.write(File.join(config.dir, "fields.json"), fields_text(fields_of(config.image)))
 
   # The part of the manifest that says how the image came to be: a copy of
   # another tool's image or the output of the formatting commands.
@@ -267,9 +297,29 @@ module HfsPlusCapture
     formatted = fields_of(config.image)
     File.write(File.join(config.dir, "fields-formatted.json"), fields_text(formatted))
     fsck_formatted = { fsck_formatted: fsck(attachments, log, config.image) }
-    population = config.populate ? populated(config, attachments, log, formatted) : {}
-    File.write(File.join(config.dir, "fields.json"), fields_text(fields_of(config.image)))
+    population = {}
+    if config.populate
+      population = populated(config, attachments, log, formatted)
+    else
+      record_fields(config)
+    end
     [identity, origin, fsck_formatted, population].reduce(:merge)
+  end
+
+  # A new, empty capture directory, created exclusively: every file of the
+  # capture is then written inside a directory nothing else has put entries in,
+  # so no existing file or symbolic link is replaced or followed. An existing
+  # destination is refused; --overwrite removes it first, but only a real
+  # directory (never a symbolic link, whose target would not be touched).
+  def claim_directory(config)
+    FileUtils.mkdir_p(config.root)
+    Dir.mkdir(config.dir)
+  rescue Errno::EEXIST
+    raise Error, "#{config.dir} exists; --overwrite replaces it" unless config.overwrite
+    raise Error, "#{config.dir} is not a directory" if File.symlink?(config.dir) || !File.directory?(config.dir)
+
+    FileUtils.rm_rf(config.dir)
+    Dir.mkdir(config.dir)
   end
 
   # Build the manifest, then detach whatever is still attached and write
@@ -278,7 +328,7 @@ module HfsPlusCapture
   def capture(config)
     log = Log.new
     attachments = Attachments.new(log)
-    FileUtils.mkdir_p(config.dir)
+    claim_directory(config)
     manifest = nil
     begin
       manifest = build_manifest(config, attachments, log)
@@ -305,7 +355,7 @@ module HfsPlusCapture
   end
 
   def parse(argv)
-    opts = { root: DEFAULT_ROOT, formats: [], discard_image: false }
+    opts = { root: DEFAULT_ROOT, formats: [], discard_image: false, overwrite: false }
     OptionParser.new do |o|
       o.banner = "usage: capture.rb --variant V --size BYTES --option NAME (--format CMD... | --hdiutil-fs FS | --import IMAGE) [--populate PROFILE]"
       o.on("--root DIR") { opts[:root] = _1 }
@@ -318,6 +368,7 @@ module HfsPlusCapture
       o.on("--command TEXT") { opts[:command] = _1 }
       o.on("--populate PROFILE", PROFILES.keys, "one of: #{PROFILES.keys.join(', ')}") { opts[:populate] = _1 }
       o.on("--discard-image") { opts[:discard_image] = true }
+      o.on("--overwrite", "replace an existing capture directory") { opts[:overwrite] = true }
     end.parse!(argv)
     missing = %i[variant size option].reject { opts[_1] }
     raise Error, "missing --#{missing.first}" unless missing.empty?

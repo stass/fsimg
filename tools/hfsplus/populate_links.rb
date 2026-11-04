@@ -18,6 +18,11 @@
 #   stubtest-*       ordinary files that patch_record.rb turns into look-alike stubs
 #   rd/{a,b}         a link made after the root folder's creation date was set earlier
 #
+# `dir_links` is the separate profile of experiment E4's directory links: the
+# same attempt, link(2) on a directory, from several places in the tree.
+#
+#   dl-*             link(2) on a directory, each step with its own source and destination
+#
 require_relative "populate"
 
 module HfsPlusPopulateLinks
@@ -132,6 +137,36 @@ module HfsPlusPopulateLinks
        File.link(File.join(root, "rd/a"), File.join(root, "rd/b"))
        P.observe(["root birth=#{File.stat(root).birthtime.to_i}", observe_all(root, %w[hl2/a/orig hl2/b/second rd/a rd/b])].join("\n"))
      end]
+  end
+
+  # link(2) on a directory from several places: the source populated or empty,
+  # the two parents different or the same, the destination's parent above the
+  # source's or the root, the source a top-level folder, a second link to a
+  # directory that already has two names. A refusal is recorded by its errno.
+  def dir_links
+    [dir_link("dl-different-parents", "dl1/a/d", "dl1/b/d", populated: true),
+     dir_link("dl-same-parent", "dl2/a/d", "dl2/a/d2", populated: true),
+     dir_link("dl-destination-above-source", "dl3/a/x/e", "dl3/a/e2", populated: false),
+     dir_link("dl-unrelated-parents-empty", "dl4/a/x/e", "dl4/c/e3", populated: false),
+     dir_link("dl-destination-in-root", "dl5/a/d", "dl5-in-root", populated: true),
+     dir_link("dl-source-in-root", "dl6-top", "dl6/b/d", populated: true),
+     dir_link("dl-third-name", "dl7/a/d", "dl7/c/d", populated: true, before: [%w[dl7/a/d dl7/b/d]])]
+  end
+
+  # One attempt: make `source` (with a file inside when `populated`), make
+  # `before` links, link `source` to `target`, and report both names.
+  def dir_link(label, source, target, populated:, before: [])
+    P.step(label, target) do |root|
+      P.mkdir_p(root, source)
+      P.mkdir_p(root, File.dirname(target)) unless File.dirname(target) == "."
+      P.write_file(root, "#{source}/inside", "inside #{label}\n") if populated
+      before.each do |from, to|
+        P.mkdir_p(root, File.dirname(to))
+        File.link(File.join(root, from), File.join(root, to))
+      end
+      File.link(File.join(root, source), File.join(root, target))
+      P.observe([source, target].map { P.lstat_line(File.join(root, _1)) }.push("children: #{Dir.children(File.join(root, target)).sort.inspect}").join("\n"))
+    end
   end
 
   # ---- helpers ----

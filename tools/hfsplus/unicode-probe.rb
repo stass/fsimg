@@ -268,16 +268,25 @@ module HfsPlusUnicodeProbe
     [outcomes, directories]
   end
 
-  # The names of a directory as the system returns them, in its order, and those
-  # the system cannot then find again by the name it returned. Ruby's Dir class
-  # composes the names it reads from an HFS volume, so find(1) reads them here.
+  # What readdir returned for one directory, as UTF-16 unit lists: `names` in
+  # the order returned, and `lost`, those the system could not then find again
+  # by the name it returned.
+  Listing = Data.define(:names, :lost) do
+    # The name readdir returned at position `rank`, the position of a record
+    # among its parent's children in leaf order: HFS Plus returns a directory's
+    # names in the order of its catalog keys.
+    def name_at(rank) = names[rank]
+  end
+
+  # The listing of a directory. Ruby's Dir class composes the names it reads
+  # from an HFS volume, so find(1) reads them here.
   def read_listing(directory)
     output, status = Open3.capture2("find", ".", "-mindepth", "1", "-maxdepth", "1", "-print0", chdir: directory, binmode: true)
     raise Error, "find failed in #{directory}" unless status.success?
 
     names = output.split("\x00".b).map { _1.delete_prefix("./") }
     lost = Dir.chdir(directory) { names.reject { found?("./".b + _1) } }
-    [names.map { name_units(_1) }, lost.map { name_units(_1) }]
+    Listing.new(names: names.map { name_units(_1) }, lost: lost.map { name_units(_1) })
   end
 
   def found?(path)
@@ -375,7 +384,7 @@ module HfsPlusUnicodeProbe
       leaf = leaves[outcome.ino]
       raise Error, "#{probe.id} was created but has no catalog leaf" if outcome.ino && !leaf
 
-      listed = leaf && observed[:listings].dig(leaf.parent, 0, leaf.rank)
+      listed = leaf && observed[:listings].fetch(leaf.parent).name_at(leaf.rank)
       raise Error, "#{probe.id} has no readdir entry at rank #{leaf.rank}" if leaf && !listed
 
       Row.new(id: probe.id, scope: probe.scope, disposition: outcome.disposition, representative: outcome.representative,
@@ -395,7 +404,7 @@ module HfsPlusUnicodeProbe
   # would make the join of listing position and leaf rank meaningless.
   def listing_count_mismatches(observed, leaves)
     counts = leaves.values.map(&:parent).tally
-    observed[:listings].reject { |parent, (names, _)| counts[parent] == names.size }.keys
+    observed[:listings].reject { |parent, listing| counts[parent] == listing.names.size }.keys
   end
 
   def fsck_verdict(attachments, log, image)
@@ -417,7 +426,7 @@ module HfsPlusUnicodeProbe
   def readdir_problems(observed, leaves)
     observed.each_with_object([]) do |(set, o), problems|
       mismatched = listing_count_mismatches(o, leaves)
-      lost = o[:listings].values.flat_map(&:last)
+      lost = o[:listings].values.flat_map(&:lost)
       problems << "#{set}: readdir lists a different number of names than the catalog holds in #{mismatched.size} directories" unless mismatched.empty?
       problems << "#{set}: #{lost.size} names readdir returned cannot be found again, such as #{units_text(lost.first)}" unless lost.empty?
     end
@@ -487,7 +496,7 @@ module HfsPlusUnicodeProbe
       fsck: verdict, fsck_without_illegal_names: clean,
       sets: observed.transform_values do |o|
         { directories: o[:directories].keys, seconds: o[:seconds], listing_count_mismatches: listing_count_mismatches(o, leaves),
-          readdir_names_not_found: o[:listings].values.flat_map(&:last).map { units_text(_1) } }
+          readdir_names_not_found: o[:listings].values.flat_map(&:lost).map { units_text(_1) } }
       end
     ))
   end

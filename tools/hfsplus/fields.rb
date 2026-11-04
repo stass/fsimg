@@ -92,8 +92,6 @@ module HfsPlusFields
       parts.map { read(*_1) }.join
     end
 
-    private
-
     # The byte ranges of the volume that hold [offset, offset + length) of the
     # fork. `firsts[i]` is the fork block where extent i starts: extents follow
     # each other in fork order, so extent i covers fork bytes
@@ -351,6 +349,20 @@ module HfsPlusFields
     [seen.to_a, maps, details]
   end
 
+  Catalog = Data.define(:volume, :fork, :tree)
+
+  # The catalog of the plain HFS Plus volume in `io`: its volume, its fork and
+  # its tree header. A volume wrapped in an HFS volume is refused.
+  def open_catalog(io)
+    base = Volume.new(Image.new(io), 0, 512)
+    raise Malformed, "the image is wrapped in an HFS volume; this reads plain HFS Plus volumes" if wrapper_report(base)
+
+    header = read_header(base, 1024)
+    volume = base.with(block_size: header[:block_size])
+    fork = header[:forks][:catalog]
+    Catalog.new(volume, fork, tree_header_report(volume, fork))
+  end
+
   # ---- index nodes ----
 
   # How many examples of a finding a report lists, however many there are.
@@ -360,10 +372,10 @@ module HfsPlusFields
   def record_key(slice)
     raise Malformed, "record of #{slice.bytesize} bytes is shorter than a key length" if slice.bytesize < 2
 
-    key = slice.byteslice(0, 2 + slice.unpack1("n"))
-    raise Malformed, "key of #{key.bytesize} bytes overruns its record of #{slice.bytesize}" if key.bytesize > slice.bytesize
+    length = 2 + slice.unpack1("n")
+    raise Malformed, "key of #{length} bytes overruns its record of #{slice.bytesize}" if length > slice.bytesize
 
-    key
+    slice.byteslice(0, length)
   end
 
   # The child number that ends an index record, after its key padded to an even length.
@@ -579,34 +591,23 @@ module HfsPlusFields
   # Walk the leaf chain, counting every record and keeping the first `limit`
   # and every child of the root. A damaged chain ends the walk and is reported.
   def catalog_report(volume, fork, header, limit)
-    node_size = header[:node_size]
     stats = { leaf_nodes: 0, records: 0, by_type: Hash.new(0) }
     first = []
     root_children = []
     problem = nil
-    seen = Set.new
-    node = header[:first_leaf]
     begin
-      while node != 0
-        raise Malformed, "leaf chain loops at #{node}" unless seen.add?(node)
-        raise Malformed, "leaf chain is longer than #{MAX_NODES}" if seen.size > MAX_NODES
-
-        raw = read_node(volume, fork, node, node_size)
-        desc = descriptor(raw)
-        raise Malformed, "node #{node} on the leaf chain has kind #{desc.kind}" unless desc.kind == -1
-
+      each_leaf(volume, fork, header) do |slices|
         stats[:leaf_nodes] += 1
-        record_slices(raw, desc.num_records).each do |slice|
+        slices.each do |slice|
           rec = catalog_record(slice)
           stats[:records] += 1
           stats[:by_type][rec[:type]] += 1
           first << rec if first.size < limit
           root_children << rec if rec[:parent] == ROOT_ID && !rec[:type].end_with?("thread") && root_children.size < MAX_ROOT_LISTING
         end
-        node = desc.flink
       end
     rescue Error => e
-      problem = "catalog walk stopped at node #{node}: #{e.message}"
+      problem = "catalog walk stopped: #{e.message}"
     end
     { stats: stats, first_records: first, root_children: root_children, walk_problem: problem }.compact
   end
@@ -620,32 +621,58 @@ module HfsPlusFields
   DECMPFS_NAME = "com.apple.decmpfs"
   OWNER_FLAG_COMPRESSED = 0x20
 
-  # The raw leaf records of a tree in key order. A loop in the chain, a node
-  # that is not a leaf or more than MAX_LEAF_RECORDS records is Malformed.
-  def leaf_slices(volume, fork, tree)
-    seen = Set.new
-    slices = []
+  # Yield the record slices of each leaf node of a tree, in chain order, one
+  # node at a time: nothing is kept between nodes. The chain may not visit
+  # more nodes than the tree's header says it has (which also ends a loop,
+  # and a chain of nodes without records), and a node that is not a leaf is
+  # Malformed. An error names the node it arose at. The block gets the slices
+  # and the node's number; the slices lie back to back from the end of the
+  # node descriptor.
+  def each_leaf(volume, fork, tree)
+    limit = [tree[:total_nodes], MAX_NODES].min
     node = tree[:first_leaf]
+    visited = 0
     until node.zero?
-      raise Malformed, "leaf chain loops at #{node}" unless seen.add?(node)
+      visited += 1
+      raise Malformed, "leaf chain visits more than the tree's #{limit} nodes" if visited > limit
 
       raw = read_node(volume, fork, node, tree[:node_size])
       desc = descriptor(raw)
       raise Malformed, "node #{node} on the leaf chain has kind #{desc.kind}" unless desc.kind == -1
 
-      slices.concat(record_slices(raw, desc.num_records))
-      raise Malformed, "more than #{MAX_LEAF_RECORDS} leaf records" if slices.size > MAX_LEAF_RECORDS
-
+      yield record_slices(raw, desc.num_records), node
       node = desc.flink
     end
-    slices
+  rescue Error => e
+    raise e.class, "leaf node #{node}: #{e.message}"
+  end
+
+  # Yield each raw leaf record of a tree in key order; more than
+  # MAX_LEAF_RECORDS of them is Malformed. Without a block, an Enumerator.
+  def each_leaf_slice(volume, fork, tree)
+    return enum_for(:each_leaf_slice, volume, fork, tree) unless block_given?
+
+    count = 0
+    each_leaf(volume, fork, tree) do |slices|
+      slices.each do |slice|
+        count += 1
+        raise Malformed, "more than #{MAX_LEAF_RECORDS} leaf records" if count > MAX_LEAF_RECORDS
+
+        yield slice
+      end
+    end
   end
 
   # The records of a leaf chain: how many there are and the first `limit`
-  # decoded by the block.
+  # decoded by the block. Only the shown records are kept.
   def leaf_report(volume, fork, tree, limit, &decoder)
-    slices = leaf_slices(volume, fork, tree)
-    { count: slices.size, records: slices.first(limit).map(&decoder) }
+    count = 0
+    shown = []
+    each_leaf_slice(volume, fork, tree) do |slice|
+      count += 1
+      shown << decoder.call(slice) if shown.size < limit
+    end
+    { count: count, records: shown }
   end
 
   # An attribute leaf record: key (length, pad, fileID, startBlock, name
@@ -700,20 +727,36 @@ module HfsPlusFields
       extents: extent_list(fields_at(slice, 12, 64, "N*")) }
   end
 
-  # The catalog's file records that carry ownerFlags 0x20, with their forks.
+  # The catalog's file records that carry ownerFlags 0x20, with their forks,
+  # and the first EXAMPLES_SHOWN records that could not be decoded.
   def compressed_catalog_files(volume, fork, tree)
-    errors, files = leaf_slices(volume, fork, tree).filter_map do |slice|
-      parent, name, data_at = catalog_key(slice)
-      data = slice.byteslice(data_at..) || +""
-      next unless data.bytesize == FILE_RECORD_BYTES && fields_at(data, 0, 2, "n").first == 2
-      next if fields_at(data, 41, 1, "C").first.nobits?(OWNER_FLAG_COMPRESSED)
+    files = []
+    errors = []
+    each_leaf_slice(volume, fork, tree) do |slice|
+      entry = compressed_file_entry(slice)
+      next unless entry
 
-      { parent: parent, name: name, id: fields_at(data, 8, 4, "N").first,
-        data_fork: parse_fork(bytes_at(data, 88, 80)), rsrc_fork: parse_fork(bytes_at(data, 168, 80)) }
-    rescue Error => e
-      { error: "catalog record: #{e.message}" }
-    end.partition { _1.key?(:error) }
-    files + errors.first(EXAMPLES_SHOWN)
+      if entry.key?(:error)
+        errors << entry if errors.size < EXAMPLES_SHOWN
+      else
+        files << entry
+      end
+    end
+    files + errors
+  end
+
+  # One catalog record as a compressed file, nil for any other record, or an
+  # { error: } entry for a record that cannot be decoded.
+  def compressed_file_entry(slice)
+    parent, name, data_at = catalog_key(slice)
+    data = slice.byteslice(data_at..) || +""
+    return unless data.bytesize == FILE_RECORD_BYTES && fields_at(data, 0, 2, "n").first == 2
+    return if fields_at(data, 41, 1, "C").first.nobits?(OWNER_FLAG_COMPRESSED)
+
+    { parent: parent, name: name, id: fields_at(data, 8, 4, "N").first,
+      data_fork: parse_fork(bytes_at(data, 88, 80)), rsrc_fork: parse_fork(bytes_at(data, 168, 80)) }
+  rescue Error => e
+    { error: "catalog record: #{e.message}" }
   end
 
   # The decmpfs attribute of each file that has one, keyed by file ID. A record
@@ -733,7 +776,7 @@ module HfsPlusFields
   # fork's chunk table, read from the volume and not through the mount. One
   # undecodable record or fork is reported in its own entry.
   def compression_report(volume, forks, trees)
-    decmpfs = decmpfs_attributes(leaf_slices(volume, forks[:attributes], trees[:attributes]))
+    decmpfs = decmpfs_attributes(each_leaf_slice(volume, forks[:attributes], trees[:attributes]))
     compressed_catalog_files(volume, forks[:catalog], trees[:catalog]).map do |file|
       file.key?(:error) ? file : compressed_file_report(volume, file, decmpfs[file[:id]])
     end

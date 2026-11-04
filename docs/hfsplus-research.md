@@ -133,7 +133,8 @@ without `image.img`.
 
 Project-owned Ruby tools produce and read captures. `tools/hfsplus/capture.rb`
 formats a volume with a native tool (or imports an image another tool
-made), optionally mounts it and populates it, unmounts it, runs `fsck_hfs -n`,
+made), optionally mounts it and populates it, unmounts it, runs `fsck_hfs -fn`
+(a forced, read-only check; the result is `passed`, `failed` or `skipped`),
 and writes `commands.txt`, `manifest.json`, `fields-formatted.json` and
 `fields.json` beside the image; it detaches everything it attached, on failure
 too. `tools/hfsplus/fields.rb IMAGE` decodes an image's boot area, volume
@@ -143,7 +144,7 @@ private folders, Finder information and catalog records as text or JSON
 extents overflow leaf records and, for compressed files, the `decmpfs` header and
 the resource fork's chunk table; `--index` walks the index nodes of each tree and
 compares every index key with the first key of the child it names. `capture.rb
---populate` takes the profiles `e2`, `e4`, `e5`, `e6-zlib`, `e6-lzvn`,
+--populate` takes the profiles `e2`, `e4`, `e4-dirlinks`, `e5`, `e6-zlib`, `e6-lzvn`,
 `e6-lzfse`, `e6-ditto`, `e6-sweep`, `e7`, `e9-create`, `e9-delete`, `e9-thin` and
 `e9-sparse` (`tools/hfsplus/populate*.rb`); `tools/hfsplus/patch_record.rb`
 rewrites fields of one catalog file record in a copy of an image, and
@@ -333,8 +334,13 @@ eraseVolume` volumes over FAT16 (`h-*-diskutil-overfat16-*`), and 18
 `mkfs.hfsplus` volumes from the Ubuntu 24.04 container of
 `build-aux/linux-check.sh` (`h-*-mkfs-*`, imported). `mkfs.hfsplus` and `fsck.hfsplus` report themselves as 540.1-Linux.
 `fsck_hfs -n` reports every non-journaled volume OK; it reports a journaled
-volume only as journaled and not checked, so journaled volumes are checked by
-the decoder's own consistency fields (below).
+volume only as journaled and not checked. `fsck_hfs -fn` forces the read-only
+check of a journaled volume, and `capture.rb` runs it (the captures taken before
+that change ran `fsck_hfs -n`: their `fsck_populated.passed` is true on a
+journaled volume although nothing was checked, which the new
+`fsck_populated.result` records as `skipped` when the message appears). The
+decoder reports the volume's consistency fields; it verifies no journal
+checksum.
 
 Volume header, every formatter and option (87 volumes decoded before any
 mount of ours; the E2 volumes are counted before their population). The tables below
@@ -480,7 +486,8 @@ symbolic link at 1969; files of modes `0600`, `0755`, `4755`, `0000`; folders
 of modes `1777` and `0500`; and a `chown` to 0 and a `chgrp` to another group
 of the user. Every refusal is recorded in `manifest.json` under `attempts`.
 `fsck_hfs -n` reports every non-journaled populated volume OK, and the decoder
-finds no problem on any of them.
+finds no problem on any of them. On the journaled ones the earlier captures hold
+no native verdict (see above).
 
 Refusals. A 256-unit name fails with `ENAMETOOLONG`; symbolic links of 1024,
 1025 and 2048 bytes fail with `ENAMETOOLONG`; `chown` to uid 0 fails with
@@ -507,14 +514,26 @@ Times, as stored (create, contentMod, attributeMod, access):
 
 | Set to | Stored |
 | --- | --- |
-| 1904-01-01 (file, folder) | `createDate` 0 and `contentModDate` 0 (the creation date is lowered to the modification date); attributeMod and access are the write time |
-| 1969 (file) | create and contentMod both 2065844800; attributeMod and access are the write time |
+| 1904-01-01 (file, folder) | `createDate` 0 and `contentModDate` 0 (the creation date is lowered to the modification date); access 0; attributeMod is the write time |
+| 1969 (file) | create, contentMod and access all 2065844800; attributeMod is the write time |
 | 1969 (symbolic link, `lutime`) | create, contentMod and access all 2065844800 |
-| 2040-02-06 06:28:15 | contentMod 4294967295; create is the write time |
-| 2222222222 Unix | contentMod 10099726: the value is reduced modulo 2^32 and reads back as a 1904 date. While mounted, `lstat` reports the unreduced 2222222222 |
+| 2040-02-06 06:28:15 | contentMod and access 4294967295; create is the write time |
+| 2222222222 Unix | contentMod and access 10099726: the value is reduced modulo 2^32 and reads back as a 1904 date. While mounted, `lstat` reports the unreduced 2222222222 (recorded by the step's `output` in `manifest.json`) |
 
-A regular file's access date keeps the write time whatever `utimes` sets; the
-symbolic link's follows. `backupDate` is 0 everywhere.
+These rows come from the captures `h-*-e2-unread-*`, in which nothing reads the
+tree before `fields.json` is decoded: `capture.rb` lists and checksums the tree
+through a second, read-only mount afterwards. The earlier E2 captures walked and
+checksummed the tree while it was still mounted, and in them every file's and
+folder's access date is the write time, which the read caused (so those captures
+cannot show an access date). Two probes on a throwaway 8 MiB volume, with a file
+`f`, a folder `d` and a link `l` set by `utimes` to access 1500000000 and
+modification 1600000000, unmounted and decoded: with no read before the unmount
+`f` and `d` store access 1500000000 (the value set) and `l` too; with a read
+of `f` and a listing of `d` (also after a two-second pause) `f` and `d` store the
+time of the read and `attributeMod` moves with it, while `l`, which was not
+read, keeps 1500000000. A regular file's and a folder's access date therefore
+follows `utimes` and is replaced by a read; the earlier conclusion that it
+ignores `utimes` was the read's effect. `backupDate` is 0 everywhere.
 
 What macOS adds. The first mount creates the two private folders of the hard-link design: `\0\0\0\0HFS+ Private Data` (ID 16) and
 `.HFS+ Private Directory Data\r` (ID 17), both children of the root with flags `0x0010`, valence 0, owner 0,
@@ -542,9 +561,16 @@ Volume bits and the alternate header.
 | Alternate after the same session | Signature, version, `blockSize`, `totalBlocks`, the five fork-data records, `createDate`, `checkedDate`, `backupDate`, Finder information, `encodingsBitmap`, the clump sizes and `journalInfoBlock` equal the primary. `fileCount`, `folderCount`, `freeBlocks`, `nextAllocation`, `nextCatalogID`, `writeCount` and `modifyDate` differ (`lastMountedVersion` too when journaled): the alternate keeps the formatted state |
 | Alternate after the catalog tree grew during a mount (a throwaway volume of 32 MiB and 4096-byte blocks with 3000 empty files, catalog from 64 to 256 nodes, depth 3) | The alternate's catalog fork equals the primary's; its `attributes` is `0x80000000` and its counts, `writeCount` and `modifyDate` are those of the moment the tree grew |
 
-So an alternate header is rewritten when a special file's extent changes, and
-at no other time; its `attributes` can lack the clean bit. The five fork-data
-records and the geometry are the only fields guaranteed equal.
+Observed, not established as a policy: after the population session only the
+geometry and the five fork-data records matched among the fields that change, and the
+alternate had not seen the session's counts, dates or `writeCount`; after the one
+case of catalog growth the alternate held the catalog fork of that moment, with
+the counts and `attributes` of that moment too (clean bit clear). Whether the
+alternate is rewritten at other events (a clean unmount, a `sync`, the fork
+growth of other special files) was not tried, and no vendor documentation is
+cited here for the update rule. The fields observed equal in these two cases are
+the five fork-data records and the geometry; the observation does not show that
+they are always equal.
 
 Owners. A volume mounted by `hdiutil attach` has `noowners`: `lstat` reports
 the mounting user and group 20 whatever the catalog holds, and `chgrp`
@@ -563,13 +589,14 @@ Evidence rows answered:
 
 * Header fields the alternate header keeps equal after native use: the table
   above. Verification may require equality of the signature, version, block
-  size, total blocks and the five forks, and should not compare `attributes`.
+  size, total blocks and the five forks where the two headers were observed to
+  agree, and should not compare `attributes`; the update rule is not established.
 * Volume attribute bits and the other flags on native volumes after use: the
   clean bit clears while mounted and returns on unmount; bit 31 is always set;
   no bit outside the design's table appears. Catalog flags seen: `0x0002`,
   `0x0004`, `0x0008`, `0x0010`, `0x0080`; no `0x0020`, `0x0040` or `0x1000`.
-  The B-tree flags stay as formatted, with the bad-close bit clear. Open until
-  E10 for older volumes.
+  The B-tree flags stay as formatted, with the bad-close bit clear.
+  [E10](#e10-old-volumes) answers this in part for older volumes.
 * Longest symbolic-link target macOS stores and the Finder codes it writes:
   1023 bytes; `slnk`/`rhap`.
 * Whether `newfs_hfs` sets folder counts: E1 and the folder row above (HFSX
@@ -941,23 +968,67 @@ Finder information carries `hlnk`/`hfs+` with another date. The `fdrp`/`MACS`
 rows cannot show the directory-link test: the target `dir_20` does not exist,
 so a passing test and a failed lookup cannot be told apart.
 
-Refusals. `link(2)` on a directory fails with `EPERM`. `link(2)` on a symbolic
-link follows it and links the target (`sl/follow` and `sl/target` share an
-inode with `nlink` 2); `ln -P`, which links the symbolic link itself, fails with
-`Operation not supported`. macOS here makes no hard-linked symbolic link and no
-directory link.
+Refusals. On a volume that is not journaled `link(2)` on a directory fails with
+`EPERM` from every place tried (`h-hfsplus-16777216-e4-dirlinks-plain`, seven
+attempts). `link(2)` on a symbolic link follows it and links the target (`sl/follow` and
+`sl/target` share an inode with `nlink` 2); `ln -P`, which links the symbolic
+link itself, fails with `Operation not supported`. A C `linkat(AT_FDCWD, src,
+AT_FDCWD, dst, 0)` on a symbolic link, on a journaled and on an unjournaled
+8 MiB volume, returns -1 with `errno` 45 (`ENOTSUP`) and creates no name;
+`AT_SYMLINK_FOLLOW` succeeds and links the target (inode and `nlink` 2 of the
+target file). macOS does not create a hard-linked symbolic link through these
+calls.
+
+Directory links (`h-hfsplus-16777216-e4-dirlinks-J`, `newfs_hfs -J`, mounted
+`journaled`; `capture.rb --populate e4-dirlinks`). `link(2)` on a directory
+succeeds on a journaled volume in three of the seven places tried: a populated
+`dl1/a/d` to `dl1/b/d` (different parents); an empty `dl3/a/x/e` to `dl3/a/e2`
+(the destination's parent is the source's grandparent); an empty `dl4/a/x/e` to
+`dl4/c/e3`; and a third name for a directory that had two (`dl7/c/d`, after
+`dl7/a/d` to `dl7/b/d`). It fails with `EPERM` for the same parent
+(`dl2/a/d` to `dl2/a/d2`), for a destination directly in the root (`dl5`) and for a
+source that is a top-level folder (`dl6-top`). Both names then `lstat` as one
+directory (inode 22, `nlink` 3, children listed through either). The hypothesis
+that the destination's parent may not be an ancestor of the source is wrong:
+`dl3` succeeded with it. The conditions tried are not the whole rule.
+
+The records, from `fields.json` of that capture. The first link (`dl1`) made
+two stubs, IDs 25 (in `dl1/a`, folder 21) and 26 (in `dl1/b`, folder 23), both named
+`d`, and the indirect node ID 22:
+
+| Field | Stub (file record) | Indirect node (folder record `dir_22`) |
+| --- | --- | --- |
+| Place | in the folder of the name | folder 19, `.HFS+ Private Directory Data` + CR (flags `0x0010`, mode `041555`, owner flags 2, valence = the number of nodes) |
+| `flags` | `0x0022` (thread and the link-chain bit; no date-added bit) | `0x00A4` |
+| Codes | user information `66647270 4d414353 8000 0000 00000000`: type `fdrp`, creator `MACS`, Finder flags `0x8000` | none (user information zero) |
+| `special` | 22, the indirect node's ID | 2 (3 in `dl7`): the number of names |
+| owner, group | the chain: stub 25 has owner 26 and group 0; stub 26 has owner 0 and group 25 | mounting user 501, group 20 |
+| mode, owner flags | `0100444`, 2 | `040755`, 0 |
+| dates | all four equal the private folder's creation date | all four the creation time |
+| Finder information | zero (no date-added word) | `000000006aeaeb9f 00000000 00000002` for `dir_22` (the date added and the write counter), counter 0 for the empty `dir_34` |
+| forks | empty | not applicable; `valence` 1 (the populated `d`) or 0 (empty directory) |
+
+Against a Finder alias: the look-alike made with `xattr` (`code-fdrp-MACS-alias`
+of the E4 capture) has the same user-information bytes (`fdrp`, `MACS`, Finder
+flags `0x8000`), so a directory link's codes are those of a Finder folder alias.
+The records differ in `special` (1 against 22), `flags` (`0x0082` against
+`0x0022`), mode (`0100644` against `0100444`), owner flags (0 against 2), owner and
+group (501 and 20 against the chain) and the Finder information (a date added
+against zero). The alias used here is that look-alike, not one made by the
+Finder; no alias made by the Finder is recorded. The directory-link stub test of
+a hand-patched record was not run: `patch_record.rb` does not set the Finder
+flags, owner flags, mode or owner and group, and a patched file would not be
+backed by an indirect node of the same pattern without them.
 
 Evidence rows. Answered: stub and indirect-node fields; the stub test (codes,
 dates, flag) for files; whose metadata macOS reports; link counts; chain
 fields; macOS's own attributes on indirect nodes (none); the Finder alias and
-`hlnk`/`hfs+` look-alikes read as ordinary files. Open: hard-linked symbolic
-links, because macOS cannot make one and the design's rule (a symbolic-link
-indirect node) has no native record; it blocks only acceptance of such a node,
-which the design already accepts without evidence. Open: the directory
-hard-link stub test against Finder aliases, because macOS makes no directory
-link and a hand-made stub cannot separate the test from a missing target; it
-blocks the design's directory-link detection rule being checked against
-native bytes, not the refusal itself.
+`hlnk`/`hfs+` look-alikes read as ordinary files; the native directory-link stub
+and indirect node on a journaled volume (above); that macOS creates no
+hard-linked symbolic link through `link(2)`, `linkat(2)` or `ln -P`. Open: the
+hard-linked symbolic link's native record, because none can be made; a reader
+meets one only on a volume another system wrote. Open: a directory-link stub
+test with a patched record against a missing target.
 
 ### E5 Attributes
 
@@ -1138,9 +1209,10 @@ transactions), `h-hfsplus-33554432-e8-remounted` (the same image mounted once mo
 fields only) and `h-hfsplus-33554432-e8-journal-disabled` (`diskutil
 disableJournal`, see Throwaway probes). The writer stops at 7029 files, which fill the volume, and
 most trials from 1.5 seconds on interrupt a full volume. `fsck_hfs -n`
-prints `Volume is journaled.  No checking performed.` on every journaled volume, and
-the captures' `fsck_populated.passed` is true for that message; the decoder
-verifies them.
+prints `Volume is journaled.  No checking performed.` on every journaled volume,
+so these captures have no native verdict: their `fsck_populated.passed` is true
+for that message although nothing was checked. The decoder reports the journal
+fields and verifies no checksum.
 
 Journal info block and header on a formatted, never mounted volume: `newfs_hfs -J`
 leaves the flags at `0x00000005` (bits 0 and 2), the offset at 12288 (block 3 with

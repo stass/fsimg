@@ -25,6 +25,7 @@ require "json"
 require "open3"
 require "optparse"
 require "tmpdir"
+require_relative "capture"
 require_relative "fields"
 
 module HfsPlusInterrupt
@@ -37,42 +38,19 @@ module HfsPlusInterrupt
 
   module_function
 
-  def run(*argv)
-    out, status = Open3.capture2e(*argv)
-    raise Error, "#{argv.join(' ')} failed: #{out.strip}" unless status.success?
+  # Run argv through `log`; a failure is an Error carrying the output.
+  def run(log, *argv)
+    out, ok = log.run(*argv)
+    raise Error, "#{argv.join(' ')} failed: #{out.strip}" unless ok
 
     out
   end
 
-  def attach(image, mountpoint: nil)
-    argv = %w[hdiutil attach -imagekey diskimage-class=CRawDiskImage]
-    argv += mountpoint ? ["-mountpoint", mountpoint] : ["-nomount"]
-    run(*argv, image)[%r{^/dev/disk\d+}] or raise Error, "no device attached for #{image}"
-  end
-
-  def detach(target, force: false)
-    run(*%w[hdiutil detach], *(force ? ["-force"] : []), target)
-  end
-
-  # Attach `image` (unmounted, or at `mountpoint`), yield its device, and always
-  # detach it again, forced and best effort: a detach failure here must not hide
-  # the error that brought us here, and the block may already have detached it.
-  def with_attached(image, mountpoint: nil)
-    device = attach(image, mountpoint: mountpoint)
-    yield device
-  ensure
-    begin
-      detach(device, force: true) if device
-    rescue Error
-      nil
-    end
-  end
-
   # A fresh journaled volume in `image`: formatted through an unmounted attachment.
-  def format_journaled(image)
+  def format_journaled(image, attachments, log)
     FileUtils.rm_f(image)
-    run("mkfile", "-n", IMAGE_BYTES.to_s, image)
-    with_attached(image) { |device| run("newfs_hfs", "-J", "-v", "E8", "-b", "4096", device.sub("/dev/", "/dev/r")) }
+    run(log, "mkfile", "-n", IMAGE_BYTES.to_s, image)
+    attachments.with(image) { |device| run(log, "newfs_hfs", "-J", "-v", "E8", "-b", "4096", device.sub("/dev/", "/dev/r")) }
   end
 
   # What the decoder says about the journal and the volume header.
@@ -98,41 +76,38 @@ module HfsPlusInterrupt
   end
 
   # Interrupt one session; the image at `image` is what the session left.
-  def interrupt(trial, image, workdir)
+  def interrupt(trial, image, workdir, attachments)
     mount = File.join(workdir, "mnt")
     Dir.mkdir(mount)
-    with_attached(image, mountpoint: mount) do
+    attachments.with(image, mountpoint: mount) do |device|
       pid = spawn_writer(mount)
       begin
         sleep(trial.delay)
-        end_session(trial.mode, image, mount, workdir)
+        end_session(trial.mode, image, device, workdir, attachments)
       ensure
         stop(pid)
       end
     end
   end
 
-  def end_session(mode, image, mount, workdir)
+  # End the session by detaching `device` while the writer runs.
+  def end_session(mode, image, device, workdir, attachments)
     case mode
-    when "force" then detach(mount, force: true)
+    when "force" then attachments.detach(device, force: true)
     when "snapshot"
       copy = File.join(workdir, "snapshot.img")
       FileUtils.cp(image, copy)
-      detach(mount, force: true)
+      attachments.detach(device, force: true)
       FileUtils.mv(copy, image)
     else raise Error, "unknown mode #{mode}"
     end
   end
 
   # Mount the interrupted image again, as a user would, and unmount it.
-  def remount(image, workdir)
+  def remount(image, workdir, attachments)
     mount = File.join(workdir, "mnt2")
     Dir.mkdir(mount)
-    with_attached(image, mountpoint: mount) do
-      seen = Dir.children(mount).count { _1.start_with?("w") }
-      detach(mount)
-      seen
-    end
+    attachments.with(image, mountpoint: mount) { Dir.children(mount).count { _1.start_with?("w") } }
   end
 
   # Only the first trial that left transactions is kept.
@@ -164,18 +139,28 @@ module HfsPlusInterrupt
     warn "e8_interrupt.rb: #{dir} not removed: #{e.message}"
   end
 
+  # Detach whatever the trial left attached, before its work directory goes.
+  def release(attachments)
+    attachments.release
+  rescue HfsPlusCapture::Error => e
+    warn "e8_interrupt.rb: #{e.message}"
+  end
+
   def trial(trial, options)
     dir = Dir.mktmpdir("e8-", options.fetch(:work))
+    log = HfsPlusCapture::Log.new
+    attachments = HfsPlusCapture::Attachments.new(log)
     image = File.join(dir, "v.img")
-    format_journaled(image)
-    interrupt(trial, image, dir)
+    format_journaled(image, attachments, log)
+    interrupt(trial, image, dir, attachments)
     interrupted = journal_state(image)
     kept = keep?(options, interrupted)
     FileUtils.cp(image, File.join(options[:keep], "interrupted.img")) if kept
-    seen = remount(image, dir)
+    seen = remount(image, dir, attachments)
     FileUtils.cp(image, File.join(options[:keep], "remounted.img")) if kept
     trial_result(trial, interrupted, seen, journal_state(image))
   ensure
+    release(attachments) if attachments
     remove_workdir(dir) if dir
   end
 
@@ -196,7 +181,7 @@ module HfsPlusInterrupt
       $stdout.flush
     end
     0
-  rescue Error, SystemCallError => e
+  rescue Error, HfsPlusCapture::Error, SystemCallError => e
     warn "e8_interrupt.rb: #{e.message}"
     1
   end

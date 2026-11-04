@@ -105,6 +105,7 @@ module HfsPlusPopulate
       step("file-time", name) do |root|
         write_file(root, name, name)
         File.utime(time, time, File.join(root, name))
+        observe("lstat mtime #{File.lstat(File.join(root, name)).mtime.to_i}")
       end
     end
   end
@@ -113,10 +114,12 @@ module HfsPlusPopulate
     [step("dir-time", "dir-time-1904") do |root|
        Dir.mkdir(File.join(root, "dir-time-1904"))
        File.utime(TIME_1904, TIME_1904, File.join(root, "dir-time-1904"))
+       observe("lstat mtime #{File.lstat(File.join(root, 'dir-time-1904')).mtime.to_i}")
      end,
      step("symlink-time", "symlink-time-1969") do |root|
        File.symlink("size-1", File.join(root, "symlink-time-1969"))
        File.lutime(TIME_1969, TIME_1969, File.join(root, "symlink-time-1969"))
+       observe("lstat mtime #{File.lstat(File.join(root, 'symlink-time-1969')).mtime.to_i}")
      end]
   end
 
