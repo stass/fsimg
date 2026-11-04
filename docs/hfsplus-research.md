@@ -1301,9 +1301,141 @@ first mount rewrites the field (2585 after the population). Setting the field to
 
 ### E10 Old volumes
 
-Status: open. It needs Mac OS 9 and early Mac OS X images, which the owner has not
-supplied; no native tool on this host produces them. It blocks the evidence row on
-names and BSD information on those volumes (reader tables and name rules).
+Status: partly answered. Four HFS Plus volumes from 2001 to 2003 are decoded and
+scanned: three Mac OS X install discs and the Mac OS 9-formatted volume of
+`mozilla-1.0-smi`. No HFS Plus volume written by Mac OS 8.1 to 9.2 with
+non-ASCII names was found: seven Mac OS 8.1 to 9.2.2 install discs and disk
+images from the Internet Archive are classic HFS and were discarded. What
+stays open is the Unicode 2.1 spelling question (below).
+
+Procedure. The owner approved Internet Archive images of the Mac OS 8.1 to 9 era
+for local testing only: they stay outside the repository, are never
+redistributed, and are cited by item identifier. Items were chosen from the
+archive.org advanced-search and metadata APIs (file lists and sizes), fetched one
+at a time with `curl -C - --retry 3 --fail -L` under a generic client name, and
+never attached, mounted or executed. A `7z` holds a MODE1/2352 CD image; the
+user data (16 bytes into each 2352-byte sector) is copied out, the Apple
+Partition Map read, and the `Apple_HFS` partition copied with `dd`. The disc
+partitions start at 512-byte sector 928 or 968 and hold a wrapper (E11). `fields.rb`
+decodes each partition with no change; a throwaway scanner (not committed) walks
+the catalog leaf chain. The corpus records the specimens in `SOURCES.md`,
+`MATRIX.md` and `manifest.sha256`.
+
+| Specimen (archive.org item) | Volume | `lastMountedVersion` (primary, alternate) | Blocks | Catalog | Leaf records |
+| --- | --- | --- | --- | --- | ---: |
+| `archive-macosx-10.0-1z691-2974-a` (`1Z691-2974-A`, Mac OS X 10.0 CD) | wrapped; outer 73728-byte blocks, embedded 8029 of them | `8.10`, `8.10` | 4096 x 144522 | 4096-byte nodes, depth 3 | 11176 |
+| `archive-macosx-10.1-2z691-3184-a` (`2Z691-3184-A`, 10.1 upgrade CD) | wrapped; 9102 outer blocks | `8.10`, `10.0` | 4096 x 163836 | 4096-byte nodes, depth 3 | 12564 |
+| `archive-macosx-10.3-disc2-2z691-4586-a` (`2Z691-4586-A`, Panther disc 2) | wrapped; 9189 outer blocks | `10.0`, `10.0` | 4096 x 165402 | 4096-byte nodes, depth 3 | 3464 |
+| `mozilla-1.0-smi` (Mozilla 1.0 for Mac OS X, 2002) | bare `H+` at byte 0, no partition map | `8.10`, none | 512 x 67900 | 4096-byte nodes, depth 2 | 876 |
+
+`mozilla-1.0-smi` decodes statically: MacBinary II around an NDIF self-mounting
+image whose `bcem` 128 resource lists 134 chunks (130 ADC-compressed, 2 zero, 1
+ignored, 1 end). Decoding the ADC chunks (a literal run, a two-byte and a
+three-byte back reference) gives 67900 sectors, and the volume header sits at
+byte 1024. The NDIF marks the last two sectors as ignored: the alternate header
+(and the reserved sector after it) is not in the image, so the alternate reads as
+zeros and `fields.rb` reports it in `problems`; that comes from the container, not
+the decoder.
+
+Volume headers. All four have version 4, `attributes` `0x00000100` (only the
+cleanly-unmounted bit 8), `journalInfoBlock` 0, no journal, no attributes tree
+(zero `attributesFile`), `lastMountedVersion` `8.10` or `10.0` (never `FSK!`), a
+zero boot area and a bitmap whose clear bits equal `freeBlocks`. The Mac OS X discs hold a 1 MiB startup file (256
+blocks); the smi volume has none. The 10.0 and 10.1 volumes keep nonzero Finder
+information words 0, 2 and 5; the smi volume's eight words are zero.
+The wrapped discs carry `drAtrb` `0x8300` on the outer volume (as in E11) and the
+embedded volume is exactly `count * drAlBlkSiz` bytes, so `N * B = V`.
+
+Trees. Extents tree: 1024-byte nodes (265 on the smi volume, 3072 on the 10.0 disc), `maxKeyLength` 10,
+attributes `0x00000002` (big keys), `keyCompareType` 0, `btreeType` 0, no
+leaf records. Catalog tree: 4096-byte nodes on all four (including the 512-byte-block
+smi volume), `maxKeyLength` 516, attributes `0x00000006` (big keys and variable
+index keys), `keyCompareType` 0, `btreeType` 0; the index keys equal their
+children's first keys (`key_mismatches` 0). Every value lies inside the tree
+parameter table of the design.
+
+Catalog flags. Folder records: flags `0x0000` only (no folder-count-valid bit).
+File records: `0x0002` only. No bit outside the closed tables of the design
+appears, and no volume attribute bit other than 8.
+
+BSD information. The Mac OS 9-formatted smi volume has all 16 bytes zero in every
+folder and file record (438 records), text encoding 0 and backup date 0. The
+Mac OS X volumes have it set in every record: owner 0 with group 0, 80 or 99, modes
+`0100444`, `0100644`, `0100664`, `040555`, `040755`, `040775`, `0120777`,
+`0100555`, `0100755`, `040777` and so on, with `adminFlags` and `ownerFlags` 0 in
+the commonest forms (10.0: owner 0 or 99, group 0 or 99; 10.1: group 0 or 80;
+10.3: group 0 or 80, and the private data folder with mode `040000` and
+`adminFlags` 2). Text encodings other than 0
+occur on the 10.0 disc (14 records, encoding 1) and the 10.1 disc (encodings 1, 2,
+3 and 25); the design ignores them. On the 10.0 disc 5297 backup dates read
+2082873600, which is 1970-01-01 08:00:00 UTC; the design does not check backup
+dates.
+
+Hard links. The 10.0 and 10.1 discs hold the pre-10.2 hard-link layout: 18 and 20
+stub records (type `hlnk`, creator `hfs+`) whose `fileMode` is 0 and whose
+`special` is a reference such as 123022516, resolved to 8 and 9 `iNode<ref>` files
+inside the private data folder (CNID 16) whose `special` holds the link count (2
+and 3). The stubs' `createDate` equals the root folder's on both discs, and the
+private data folder's as well on the 10.1 disc (the folder was created at
+volume-creation time there); the 10.0 disc's private folder date differs.
+
+Names. The private data folder (four U+0000, then `HFS+ Private Data`) is present
+on each Mac OS X disc and ascends in key order, after the other root children,
+under the design's U+0000 rule (no inversion). Other names (22 non-ASCII names on
+the 10.0 disc and 23 on the 10.1 disc; across both discs, `Espan` + U+0303 + `ol`,
+`Franc` + U+0327 + `ais`, `Portugue` + U+0302 + `s`, Hiragino names containing U+3099, a
+Japanese name, and `Korean - ` with U+1112 U+1161 U+11AB U+1100 U+1173 U+11AF) were run
+through the design's decomposition (canonical decomposition with U+2000 to
+U+2FFF, U+F900 to U+FAFF and U+2F800 to U+2FAFF left alone, built from Ruby's
+`unicode_normalize` per run) and through the design's fold description
+(simple lowercase in the listed pages, U+10A0 to U+10C5 to Mkhedruli, the
+joiner and directional controls ignorable, U+0000 sorting last). Every stored
+name equals its decomposition (22 of 22 and 23 of 23), and the leaf keys ascend
+strictly under the fold comparison on all four volumes (0 inversions, 0 equal
+neighbours over 11176, 12564, 3464 and 876 records). The smi volume has no
+non-ASCII name. The check is against the design's prose rules: E3 is open, so
+the accepted fold and decomposition tables do not exist yet, and Ruby's data is
+newer than Unicode 3.2.
+
+Open. A Mac OS 8.1 to 9.2 writer's non-ASCII names, which the design says may
+follow Unicode 2.1, are unobserved: the only Mac OS 9-formatted volume has ASCII
+names, and the Mac OS X 10.0 and 10.1 volumes (made by Mac OS X, probably with
+its own tables) show no difference. The tried Mac OS 8.1 to 9.2.2 discs and disk
+images are classic HFS (volume names and `drAlBlkSiz`: "Mac OS 8.1" 6656, "Macintosh
+HD" 33280, "Mac OS 8.5" 9216, "Mac OS HD" 8192, "Mac OS 9" 10752, "iMac Install CD"
+10752, "MACHD" 32256), so a Mac OS 8.1 to 9 volume with an HFS Plus catalog written by
+that era's system and with non-ASCII names needs a different specimen.
+
+Evidence row (names and BSD information on Mac OS 9 and early Mac OS X volumes):
+answered for BSD information (zero on the Mac OS 9-formatted volume, set on Mac OS X
+volumes, `fileMode` 0 on pre-10.2 hard-link stubs) and for the tree, flag and
+attribute tables; open for Unicode 2.1 name spellings.
+
+Discrepancies with `specs/design-hfsplus.md` (the designs are not edited here):
+
+* Lines 201 to 205 (alternate header): verification compares the five fork-data
+  records plus "the other fields native volumes keep equal after use". The 10.1
+  disc's alternate differs from the primary in `lastMountedVersion` (`10.0`
+  against `8.10`), `writeCount` (12 against 20) and `modifyDate`; the 10.3
+  disc's alternate differs in `lastMountedVersion`, `fileCount`, `folderCount`,
+  `freeBlocks`, `nextAllocation`, `nextCatalogID`, `writeCount`, Finder
+  information and `modifyDate`, with the fork records equal. A genuine old disc
+  then fails a verification that includes those fields. The smi image has no
+  alternate header at all (container artifact).
+* Lines 495 and 499 (kinds table) against 727 (stub test): the pre-10.2 stubs have
+  `fileMode` 0, which the table maps to "Regular file; owner and mode absent"
+  and does not list as a stub, while only `0100000` lists the stub. The stub test
+  (type, creator and date) must run before the kind lookup.
+* Line 728 to 729 (stub date): the 10.0 disc's stubs match the root folder's
+  `createDate` and not the private folder's, so the "or" is required.
+* Lines 913 to 935 (wrapper): the outer block size is 73728 against an embedded
+  4096; the range rules hold (`N * B = V`).
+* Line 153 (`lastMountedVersion`): `8.10` and `10.0` are plain values; the
+  design's "any value" holds.
+
+No closed-table entry (volume attribute, catalog flag, tree parameter) refuses
+these four volumes. The name refusals of lines 555 to 561 do not fire (no `:`,
+`.`, `..`, empty or over-long names; the NUL name is the private data folder).
 
 ### E11 Wrapper
 
