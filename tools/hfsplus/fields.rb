@@ -8,9 +8,10 @@
 # the boot area, the volume header and its alternate, each B-tree's header node
 # and node map, the private folders, Finder information and the first catalog
 # records. The decoder is written from the format design, not from lib/, and
-# treats the image as untrusted: every read is bounds-checked, every walk is
-# bounded, and a section that cannot be decoded is reported in "problems" while
-# the other sections still print.
+# treats the image as untrusted: every read is bounds-checked (record decoders
+# read only through `bytes_at` and `fields_at`), every walk is bounded, and a
+# section that cannot be decoded is reported in "problems" while the other
+# sections still print.
 #
 #   fields.rb [--json] [--records N] IMAGE
 require "digest"
@@ -30,6 +31,8 @@ module HfsPlusFields
   MAX_MAP_NODES = 4096
   MAX_ZERO_CHECK = 4096
   ROOT_ID = 2
+  NODE_DESCRIPTOR_BYTES = 14
+  EMBED_SIGNATURE = 0x482B
   MAX_ROOT_LISTING = 200
   MAX_BITMAP_BYTES = 64 << 20
   MAX_FREE_BYTES = 256 << 20
@@ -89,6 +92,13 @@ module HfsPlusFields
 
     private
 
+    # The byte ranges of the volume that hold [offset, offset + length) of the
+    # fork. `firsts[i]` is the fork block where extent i starts: extents follow
+    # each other in fork order, so extent i covers fork bytes
+    # [first * block_size, (first + count) * block_size). Each range is the
+    # overlap of the request with one extent, translated to its volume position;
+    # an extent without overlap contributes nothing. The ranges are in fork
+    # order and sum to `length` only if the first eight extents cover the request.
     def fork_ranges(fork, offset, length)
       firsts = fork.extents.map(&:count).each_with_object([0]) { |count, acc| acc << acc.last + count }
       fork.extents.zip(firsts).filter_map do |ext, first|
@@ -99,7 +109,65 @@ module HfsPlusFields
     end
   end
 
+  POPCOUNT = Array.new(256) { _1.digits(2).sum }.freeze
+  # A byte that is not 0xFF, and a byte that is not 0x00.
+  NOT_FULL = /[^\xFF]/n
+  NOT_EMPTY = /[^\x00]/n
+
+  # The first `count` bits of a bitmap, most significant bit of each byte
+  # first. The bits of the last byte beyond `count` are cleared, so `bytes`
+  # never holds a set bit outside the bitmap. Searches skip whole bytes in the
+  # string rather than expanding it to one character per bit.
+  Bits = Data.define(:bytes, :count) do
+    def self.of(raw, count)
+      count = [count, raw.bytesize * 8].min
+      whole, extra = count.divmod(8)
+      tail = extra.zero? ? "".b : [raw.getbyte(whole) & (0xff << (8 - extra))].pack("C")
+      new(raw.byteslice(0, whole) + tail, count)
+    end
+
+    def set_count = HfsPlusFields.popcount(bytes)
+    def set?(number) = number.between?(0, count - 1) && bytes.getbyte(number / 8)[7 - number % 8] == 1
+    def first_clear = clear_numbers.first
+
+    # The highest set bit: the last nonzero byte, then its lowest set bit.
+    def last_set
+      at = bytes.rindex(NOT_EMPTY) or return nil
+      at * 8 + 7 - (bytes.getbyte(at) & -bytes.getbyte(at)).bit_length + 1
+    end
+
+    # The numbers of the clear bits, ascending, found by jumping to each byte
+    # that is not all ones.
+    def clear_numbers
+      Enumerator.new do |out|
+        at = 0
+        while (at = bytes.index(NOT_FULL, at))
+          (at * 8...at * 8 + 8).each { |number| out << number if number < count && !set?(number) }
+          at += 1
+        end
+      end
+    end
+  end
+
   module_function
+
+  # ---- bounded reads ----
+
+  # The `length` bytes of `bytes` at `offset`. A record shorter than its layout
+  # raises Truncated here, so no decoder sees the nil that `byteslice` returns
+  # or does arithmetic on a field `unpack` could not fill.
+  def bytes_at(bytes, offset, length)
+    unless offset >= 0 && length >= 0 && offset + length <= bytes.bytesize
+      raise Truncated, "structure of #{bytes.bytesize} bytes has no #{length} bytes at #{offset}"
+    end
+
+    bytes.byteslice(offset, length)
+  end
+
+  # Unpack exactly `length` bytes at `offset` with `template`.
+  def fields_at(bytes, offset, length, template) = bytes_at(bytes, offset, length).unpack(template)
+
+  def popcount(bytes) = bytes.each_byte.sum { POPCOUNT[_1] }
 
   # ---- primitive decoders ----
 
@@ -116,8 +184,8 @@ module HfsPlusFields
   end
 
   def parse_fork(bytes)
-    size, clump, blocks = bytes.unpack("Q>L>L>")
-    extents = bytes.byteslice(16, 64).unpack("L>*").each_slice(2).map { Extent.new(*_1) }
+    size, clump, blocks = fields_at(bytes, 0, 16, "Q>L>L>")
+    extents = fields_at(bytes, 16, 64, "L>*").each_slice(2).map { Extent.new(*_1) }
     Fork.new(size, clump, blocks, extents)
   end
 
@@ -136,13 +204,13 @@ module HfsPlusFields
 
   def parse_header(bytes)
     sig, version, attrs, last, jib, create, modify, backup, checked, files, folders, bsize, total, free,
-      next_alloc, rsrc_clump, data_clump, next_cnid, writes, encodings = bytes.unpack("a2nNa4NNNNNNNNNNNNNNNQ>")
-    forks = FORK_NAMES.each_with_index.to_h { |name, i| [name, parse_fork(bytes.byteslice(112 + 80 * i, 80))] }
+      next_alloc, rsrc_clump, data_clump, next_cnid, writes, encodings = fields_at(bytes, 0, 80, "a2nNa4NNNNNNNNNNNNNNNQ>")
+    forks = FORK_NAMES.each_with_index.to_h { |name, i| [name, parse_fork(bytes_at(bytes, 112 + 80 * i, 80))] }
     { signature: sig, version: version, attributes: attrs, last_mounted: last, journal_info_block: jib,
       dates: { create: create, modify: modify, backup: backup, checked: checked },
       file_count: files, folder_count: folders, block_size: bsize, total_blocks: total, free_blocks: free,
       next_allocation: next_alloc, rsrc_clump: rsrc_clump, data_clump: data_clump, next_catalog_id: next_cnid,
-      write_count: writes, encodings_bitmap: encodings, finder_info: bytes.byteslice(80, 32), forks: forks }
+      write_count: writes, encodings_bitmap: encodings, finder_info: bytes_at(bytes, 80, 32), forks: forks }
   end
 
   def header_report(header)
@@ -179,17 +247,19 @@ module HfsPlusFields
   # ---- B-tree header nodes ----
 
   def descriptor(raw)
-    NodeDescriptor.new(*raw.unpack("NNcCn"))
+    NodeDescriptor.new(*fields_at(raw, 0, 14, "NNcCn"))
   end
 
   # The record offsets of a node, validated: ascending, inside the node and
-  # below the offset table.
+  # below the offset table. The table holds count + 1 big-endian offsets at the
+  # end of the node, last record first; the extra one marks the free space. The
+  # first record starts right after the 14-byte node descriptor.
   def record_offsets(raw, count)
     table = raw.bytesize - 2 * (count + 1)
-    raise Malformed, "#{count} records do not fit a node of #{raw.bytesize}" if table < 14
+    raise Malformed, "#{count} records do not fit a node of #{raw.bytesize}" if table < NODE_DESCRIPTOR_BYTES
 
-    offsets = raw.byteslice(table, 2 * (count + 1)).unpack("n*").reverse
-    ok = offsets.first == 14 && offsets.each_cons(2).all? { |a, b| a <= b } && offsets.last <= table
+    offsets = fields_at(raw, table, 2 * (count + 1), "n*").reverse
+    ok = offsets.first == NODE_DESCRIPTOR_BYTES && offsets.each_cons(2).all? { |a, b| a <= b } && offsets.last <= table
     raise Malformed, "record offsets #{offsets.inspect} are inconsistent" unless ok
 
     offsets
@@ -205,47 +275,56 @@ module HfsPlusFields
 
   def tree_header_report(volume, fork)
     probe = volume.read_fork(fork, 0, 512)
-    node_size = probe.byteslice(32, 2).unpack1("n")
+    node_size = fields_at(probe, 32, 2, "n").first
     raise Malformed, "node size #{node_size} is not a power of two from 512 to 32768" unless (512..32_768).cover?(node_size) && node_size.nobits?(node_size - 1)
 
     raw = read_node(volume, fork, 0, node_size)
     desc = descriptor(raw)
     depth, root, leaf_records, first_leaf, last_leaf, _, max_key, total, free, _, clump, btype, ctype, attrs =
-      raw.byteslice(14, 42).unpack("nNNNNnnNNnNCCN")
+      fields_at(raw, 14, 42, "nNNNNnnNNnNCCN")
     offsets = record_offsets(raw, desc.num_records)
-    map = node_map_report(volume, fork, raw, desc, offsets, node_size, total, free)
+    map = node_map_report(volume, fork, desc, header_map_record(raw, offsets), node_size, total, free)
     {
       node_kind: NODE_KINDS.fetch(desc.kind, desc.kind), node_size: node_size, record_offsets: offsets,
       depth: depth, root_node: root, leaf_records: leaf_records, first_leaf: first_leaf, last_leaf: last_leaf,
       max_key_length: max_key, total_nodes: total, free_nodes: free, clump_size: clump, tree_type: btype,
       key_compare_type: ctype, attributes: format("0x%08X", attrs),
       attribute_flags: flag_names(attrs, TREE_ATTRIBUTES), attribute_unknown_bits: unknown_bits(attrs, TREE_ATTRIBUTES),
-      reserved1: raw.byteslice(44, 2).unpack1("n"), reserved3_zero: raw.byteslice(56, 64).count("\x00".b) == 64,
-      user_data_zero: raw.byteslice(120, 128).count("\x00".b) == 128,
+      reserved1: fields_at(raw, 44, 2, "n").first, reserved3_zero: bytes_at(raw, 56, 64).count("\x00".b) == 64,
+      user_data_zero: bytes_at(raw, 120, 128).count("\x00".b) == 128,
       fork_size_matches_nodes: fork.logical_size == total * node_size,
       node_map: map
     }
   end
 
+  # A header node holds three records: the tree header, 128 bytes of user data
+  # and the map record, which begins the node allocation bitmap. Offsets 2 and 3
+  # bound the third.
+  def header_map_record(raw, offsets)
+    raise Malformed, "header node has #{offsets.size - 1} records, not the tree header, user data and map" if offsets.size < 4
+
+    raw.byteslice(offsets[2], offsets[3] - offsets[2])
+  end
+
   # The header node's map record, then any map nodes its forward links name.
-  def node_map_report(volume, fork, raw, desc, offsets, node_size, total, free)
-    first = raw.byteslice(offsets[2], offsets[3] - offsets[2])
+  def node_map_report(volume, fork, desc, first, node_size, total, free)
     chain, maps = map_chain(volume, fork, desc.flink, node_size)
-    bits = ([first] + maps).join.unpack1("B*")
-    used = bits[0, total].count("1")
+    all = ([first] + maps).join
+    bits = Bits.of(all, total)
+    used = bits.set_count
     {
       header_map_bytes: first.bytesize, map_nodes: chain, map_record_bytes: maps.map(&:bytesize),
-      bits_available: bits.bytesize, used_bits: used, used_matches_total_minus_free: used == total - free,
-      first_clear_bit: bits[0, total].index("0"), bits_beyond_total_set: bits[total..].to_s.count("1"),
-      free_nodes_all_zero: free_nodes_zero?(volume, fork, bits[0, total], node_size)
+      bits_available: all.bytesize * 8, used_bits: used, used_matches_total_minus_free: used == total - free,
+      first_clear_bit: bits.first_clear, bits_beyond_total_set: popcount(all) - used,
+      free_nodes_all_zero: free_nodes_zero?(volume, fork, bits, node_size)
     }
   end
 
   # Whether the unused nodes (map bit clear) hold only zero bytes; the first
   # MAX_ZERO_CHECK nodes are examined.
   def free_nodes_zero?(volume, fork, bits, node_size)
-    bits[0, MAX_ZERO_CHECK].each_char.with_index.all? do |bit, number|
-      bit == "1" || read_node(volume, fork, number, node_size).count("\x00".b) == node_size
+    bits.clear_numbers.lazy.take_while { _1 < MAX_ZERO_CHECK }.all? do |number|
+      read_node(volume, fork, number, node_size).count("\x00".b) == node_size
     end
   end
 
@@ -271,15 +350,17 @@ module HfsPlusFields
 
   def bitmap_report(volume, header)
     fork = header[:forks][:allocation]
-    bytes = [(header[:total_blocks] + 7) / 8, fork.logical_size].min
+    total = header[:total_blocks]
+    bytes = (total + 7) / 8
+    raise Malformed, "bitmap fork of #{fork.logical_size} bytes is too short for #{total} blocks" if fork.logical_size < bytes
     raise Malformed, "bitmap of #{bytes} bytes is over the #{MAX_BITMAP_BYTES} byte limit" if bytes > MAX_BITMAP_BYTES
 
-    bits = volume.read_fork(fork, 0, bytes).unpack1("B*")[0, header[:total_blocks]]
-    set = bits.count("1")
-    { bitmap_bytes: fork.logical_size, set_bits: set, clear_bits: header[:total_blocks] - set,
-      clear_matches_free_blocks: header[:total_blocks] - set == header[:free_blocks],
-      first_clear_block: bits.index("0"), last_set_block: bits.rindex("1"),
-      block_0_set: bits[0] == "1", last_block_set: bits[-1] == "1" }.merge(free_blocks_report(volume, header, bits))
+    bits = Bits.of(volume.read_fork(fork, 0, bytes), total)
+    set = bits.set_count
+    { bitmap_bytes: fork.logical_size, set_bits: set, clear_bits: total - set,
+      clear_matches_free_blocks: total - set == header[:free_blocks],
+      first_clear_block: bits.first_clear, last_set_block: bits.last_set,
+      block_0_set: bits.set?(0), last_block_set: bits.set?(total - 1) }.merge(free_blocks_report(volume, header, bits))
   end
 
   # Whether the free blocks hold only zero bytes: stale data left by an earlier
@@ -287,7 +368,7 @@ module HfsPlusFields
   # MAX_FREE_BYTES have been read.
   def free_blocks_report(volume, header, bits)
     block_size = header[:block_size]
-    free = bits.each_char.lazy.with_index.filter_map { |bit, number| number if bit == "0" }.first(MAX_FREE_BYTES / block_size)
+    free = bits.clear_numbers.first(MAX_FREE_BYTES / block_size)
     dirty = free.reject { volume.read(_1 * block_size, block_size).count("\x00".b) == block_size }
     { free_blocks_examined: free.size, free_blocks_nonzero: dirty.size, first_nonzero_free_block: dirty.first }.compact
   end
@@ -307,61 +388,69 @@ module HfsPlusFields
   def catalog_key(slice)
     raise Malformed, "catalog record of #{slice.bytesize} bytes is shorter than a key" if slice.bytesize < 8
 
-    key_length, parent, name_length = slice.unpack("nNn")
+    key_length, parent, name_length = fields_at(slice, 0, 8, "nNn")
     raise Malformed, "key length #{key_length} disagrees with name length #{name_length}" unless key_length == 6 + 2 * name_length && name_length <= 255
 
     raise Malformed, "key of #{key_length} bytes overruns its record" if 2 + key_length > slice.bytesize
 
-    [parent, name_text(slice.byteslice(8, 2 * name_length)), (2 + key_length + 1) & ~1]
+    [parent, name_text(bytes_at(slice, 8, 2 * name_length)), (2 + key_length + 1) & ~1]
   end
 
   def bsd_report(bytes)
-    owner, group, admin, owner_flags, mode, special = bytes.unpack("NNCCnN")
+    owner, group, admin, owner_flags, mode, special = fields_at(bytes, 0, 16, "NNCCnN")
     { owner: owner, group: group, admin_flags: admin, owner_flags: owner_flags, mode: format("0%o", mode), special: special }
   end
 
+  FOLDER_RECORD_BYTES = 88
+  FILE_RECORD_BYTES = 248
+  DATE_NAMES = %i[create content_mod attribute_mod access backup].freeze
+
+  def date_fields(values) = DATE_NAMES.zip(values).to_h { |name, value| [name, date_field(value)] }
+
   def folder_record(data)
-    _, flags, valence, id, *dates = data.unpack("nnNNNNNNN")
-    { type: "folder", flags: format("0x%04X", flags), valence: valence, id: id,
-      dates: %i[create content_mod attribute_mod access backup].zip(dates).to_h { |k, v| [k, date_field(v)] },
-      bsd: bsd_report(data.byteslice(32, 16)), user_info: hex(data.byteslice(48, 16)),
-      finder_info: hex(data.byteslice(64, 16)), text_encoding: data.byteslice(80, 4).unpack1("N"),
-      reserved: data.byteslice(84, 4).unpack1("N") }
+    _, flags, valence, id, *dates = fields_at(data, 0, 32, "nnNNNNNNN")
+    { type: "folder", flags: format("0x%04X", flags), valence: valence, id: id, dates: date_fields(dates),
+      bsd: bsd_report(bytes_at(data, 32, 16)), user_info: hex(bytes_at(data, 48, 16)),
+      finder_info: hex(bytes_at(data, 64, 16)), text_encoding: fields_at(data, 80, 4, "N").first,
+      reserved: fields_at(data, 84, 4, "N").first }
   end
 
   def file_record(data)
-    _, flags, _, id, *dates = data.unpack("nnNNNNNNN")
-    user_info = data.byteslice(48, 16)
-    { type: "file", flags: format("0x%04X", flags), id: id,
-      dates: %i[create content_mod attribute_mod access backup].zip(dates).to_h { |k, v| [k, date_field(v)] },
-      bsd: bsd_report(data.byteslice(32, 16)), file_type: four_chars(user_info.byteslice(0, 4)),
-      creator: four_chars(user_info.byteslice(4, 4)), user_info: hex(user_info), finder_info: hex(data.byteslice(64, 16)),
-      text_encoding: data.byteslice(80, 4).unpack1("N"),
-      data_fork: fork_report(parse_fork(data.byteslice(88, 80))), rsrc_fork: fork_report(parse_fork(data.byteslice(168, 80))) }
+    _, flags, _, id, *dates = fields_at(data, 0, 32, "nnNNNNNNN")
+    user_info = bytes_at(data, 48, 16)
+    { type: "file", flags: format("0x%04X", flags), id: id, dates: date_fields(dates),
+      bsd: bsd_report(bytes_at(data, 32, 16)), file_type: four_chars(user_info.byteslice(0, 4)),
+      creator: four_chars(user_info.byteslice(4, 4)), user_info: hex(user_info), finder_info: hex(bytes_at(data, 64, 16)),
+      text_encoding: fields_at(data, 80, 4, "N").first,
+      data_fork: fork_report(parse_fork(bytes_at(data, 88, 80))), rsrc_fork: fork_report(parse_fork(bytes_at(data, 168, 80))) }
   end
 
+  # A thread record names the parent and name of its folder or file, which are
+  # not the parent and name of the thread's own key; the fields are called
+  # thread_parent and thread_name so the key's parent and name stay distinct.
   def thread_record(data, kind)
-    parent, name_length = data.byteslice(4, 6).unpack("Nn")
+    parent, name_length = fields_at(data, 4, 6, "Nn")
     raise Malformed, "thread name of #{name_length} units overruns its record" if 10 + 2 * name_length > data.bytesize
 
-    { type: kind, parent: parent, name: name_text(data.byteslice(10, 2 * name_length)) }
+    { type: kind, thread_parent: parent, thread_name: name_text(bytes_at(data, 10, 2 * name_length)) }
   end
 
-  RECORD_TYPES = { 1 => [88, :folder_record], 2 => [248, :file_record] }.freeze
+  def sized_record(data, type, bytes)
+    raise Malformed, "record type #{type} has #{data.bytesize} bytes, expected #{bytes}" unless data.bytesize == bytes
+
+    data
+  end
 
   def catalog_record(slice)
     parent, name, data_at = catalog_key(slice)
     data = slice.byteslice(data_at..) || +""
     raise Malformed, "record for #{name.inspect} has no type" if data.bytesize < 2
 
-    type = data.unpack1("n")
+    type = fields_at(data, 0, 2, "n").first
     body =
       case type
-      when 1, 2
-        want, decoder = RECORD_TYPES.fetch(type)
-        raise Malformed, "record type #{type} has #{data.bytesize} bytes, expected #{want}" unless data.bytesize == want
-
-        send(decoder, data)
+      when 1 then folder_record(sized_record(data, type, FOLDER_RECORD_BYTES))
+      when 2 then file_record(sized_record(data, type, FILE_RECORD_BYTES))
       when 3 then thread_record(data, "folder-thread")
       when 4 then thread_record(data, "file-thread")
       else raise Malformed, "record type #{type} for #{name.inspect}"
@@ -408,9 +497,9 @@ module HfsPlusFields
 
   def journal_report(volume, header)
     block = volume.read(header[:journal_info_block] * header[:block_size], 180)
-    flags = block.unpack1("N")
-    offset, size = block.byteslice(36, 16).unpack("Q>Q>")
-    report = { info_flags: format("0x%08X", flags), device_signature: hex(block.byteslice(4, 32)), offset: offset, size: size }
+    flags = fields_at(block, 0, 4, "N").first
+    offset, size = fields_at(block, 36, 16, "Q>Q>")
+    report = { info_flags: format("0x%08X", flags), device_signature: hex(bytes_at(block, 4, 32)), offset: offset, size: size }
     report.merge(journal_header_report(volume, offset, size))
   end
 
@@ -434,12 +523,16 @@ module HfsPlusFields
     mdb = volume.read(1024, 162)
     return nil unless mdb.byteslice(0, 2) == "BD".b
 
-    block_size = mdb.byteslice(20, 4).unpack1("N")
-    first_block = mdb.byteslice(28, 2).unpack1("n")
-    embed_sig = mdb.byteslice(124, 2).unpack1("n")
-    start, count = mdb.byteslice(126, 4).unpack("nn")
-    { hfs_block_size: block_size, first_allocation_block: first_block, embed_signature: format("0x%04X", embed_sig),
-      embed_start: start, embed_count: count, embedded_volume_offset: first_block * 512 + start * block_size }
+    block_size = fields_at(mdb, 20, 4, "N").first
+    first_block = fields_at(mdb, 28, 2, "n").first
+    embed_sig = fields_at(mdb, 124, 2, "n").first
+    start, count = fields_at(mdb, 126, 4, "nn")
+    report = { hfs_block_size: block_size, first_allocation_block: first_block, embed_signature: format("0x%04X", embed_sig),
+               embed_start: start, embed_count: count }
+    # Only a wrapper that declares an embedded HFS Plus volume locates one.
+    return report unless embed_sig == EMBED_SIGNATURE
+
+    report.merge(embedded_volume_offset: first_block * 512 + start * block_size)
   end
 
   # ---- driver ----

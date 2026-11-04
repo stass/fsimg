@@ -141,6 +141,34 @@ header and alternate header, tree header nodes, node maps, allocation bitmap,
 private folders, Finder information and catalog records as text or JSON
 (`--json`), treating the image as untrusted.
 
+### Throwaway probes
+
+Four observations in E1 and E2 come from probes typed by hand, with no capture
+directory or `commands.txt` behind them. Each can be repeated with the commands
+below; `V` is a 32 MiB image made with `mkfile -n 33554432 V`, formatted with
+`newfs_hfs -v FSIMG -b 4096` on the raw device of `hdiutil attach -imagekey
+diskimage-class=CRawDiskImage -nomount V`, and detached again.
+
+* Mounted volume header (`attributes` `0x80000000`, `writeCount` 1). Mount `V`
+  with `hdiutil attach -imagekey diskimage-class=CRawDiskImage -mountpoint MNT
+  V`, run `sync`, and decode the image file while it is mounted with
+  `ruby tools/hfsplus/fields.rb V`.
+* Alternate header after the catalog tree grew (3000 files, catalog from 64 to
+  256 nodes, depth 3). Mount `V` as above, create the files with `for i in $(seq
+  1 3000); do : > MNT/f$i; done`, run `sync`, detach, and decode with
+  `ruby tools/hfsplus/fields.rb V`. The node counts depend on the volume size,
+  block size and file names; the alternate header differs from the primary in
+  `attributes`, the counts, `writeCount` and `modifyDate`.
+* `mkfs.hfsplus -b 65536` segmentation fault and `-n a=16384` abort. In the
+  Ubuntu 24.04 container of `build-aux/linux-check.sh` with hfsprogs installed,
+  run `truncate -s 32M V`, then `mkfs.hfsplus -b 65536 V` and `mkfs.hfsplus -n
+  a=16384 V`, and read the exit status of each.
+* `hdiutil attach -owners on` and `chgrp`. Mount `V` with `hdiutil attach
+  -imagekey diskimage-class=CRawDiskImage -owners on -mountpoint MNT V`, then
+  `: > MNT/g; chgrp 80 MNT/g; ls -ln MNT/g`, detach, and read the record of
+  `g` from `ruby tools/hfsplus/fields.rb --json --records 5000 V`: its `group`
+  is 80 and its `owner` the mounting user.
+
 ## Compression writers
 
 Run on the host above with `afsctool` 1.7.2 and the system `ditto`, on a 64 MiB
@@ -414,7 +442,7 @@ Volume bits and the alternate header.
 | Mounted (header read during the mount, after `sync`, on a throwaway volume) | `attributes` `0x80000000`: the clean bit is clear, bit 31 stays set; `writeCount` 1; `modifyDate` advanced; `folderCount` and `nextCatalogID` already include the two private folders created by the mount; `fileCount` still 0 |
 | Unmounted after the E2 population | `attributes` `0x80000100` again (`0x80002100` journaled); `writeCount` 22 to 26 (one per write session of the mount); `lastMountedVersion` `10.0` (`HFSJ` journaled); `encodingsBitmap` 1; `fileCount`, `folderCount` and `nextCatalogID` equal the catalog (29 files, 14 folders besides the root, next ID 59 on the 4096-byte volume, whose `.fseventsd` holds three entries; 27 files and next ID 57 on the 512-byte one) |
 | Alternate after the same session | Signature, version, `blockSize`, `totalBlocks`, the five fork-data records, `createDate`, `checkedDate`, `backupDate`, Finder information, `encodingsBitmap`, the clump sizes and `journalInfoBlock` equal the primary. `fileCount`, `folderCount`, `freeBlocks`, `nextAllocation`, `nextCatalogID`, `writeCount` and `modifyDate` differ (`lastMountedVersion` too when journaled): the alternate keeps the formatted state |
-| Alternate after the catalog tree grew during a mount (a throwaway volume with 3000 files, catalog from 64 to 640 nodes, depth 4) | The alternate's catalog fork equals the primary's (one extent of 640 blocks); its `attributes` is `0x80000000` and its counts, `writeCount` and `modifyDate` are those of the moment the tree grew |
+| Alternate after the catalog tree grew during a mount (a throwaway volume of 32 MiB and 4096-byte blocks with 3000 empty files, catalog from 64 to 256 nodes, depth 3) | The alternate's catalog fork equals the primary's; its `attributes` is `0x80000000` and its counts, `writeCount` and `modifyDate` are those of the moment the tree grew |
 
 So an alternate header is rewritten when a special file's extent changes, and
 at no other time; its `attributes` can lack the clean bit. The five fork-data
