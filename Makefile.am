@@ -74,7 +74,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/fat/directory.c lib/formats/fat/verify.c \
 	lib/formats/fat/write.h lib/formats/fat/write-plan.c \
 	lib/formats/fat/write-names.c lib/formats/fat/write-meta.c \
-	lib/formats/fat/write-emit.c \
+	lib/formats/fat/write-emit.c lib/formats/hfsplus/unicode-tables.h \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
@@ -408,7 +408,9 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/vm/ppm2png.py tools/qnx/vm/put.sh \
 	tools/qnx/vm/qsh.py tools/qnx/vm/shot.sh tools/qnx/vm/type.py \
 	tools/qnx/vm/vmstart.sh \
-	tools/gen-fat-tables.rb tools/hfsplus/capture.rb \
+	tools/gen-fat-tables.rb tools/gen-hfsplus-tables.rb \
+	tools/hfsplus-unicode-exceptions.txt tools/hfsplus/capture.rb \
+	tools/hfsplus/check-unicode-tables.rb \
 	tools/hfsplus/e8_interrupt.rb tools/hfsplus/fields.rb \
 	tools/hfsplus/index_keys.rb \
 	tools/hfsplus/patch_record.rb tools/hfsplus/populate.rb \

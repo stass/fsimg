@@ -771,7 +771,8 @@ decompose: the table row of those 139, from U+00C0 on, is not evidence, and
 "lowercase on the page" is not an observation for them. Among the observed rows
 no fold changes a unit on any other page, and no fold occurs that this rule does
 not predict. These 30 observed units on the folded pages have a Unicode 3.2.0
-lowercase but fold to themselves, and are the candidates for the exceptions file:
+lowercase but fold to themselves, and are the rows of
+`tools/hfsplus-unicode-exceptions.txt`:
 
 | Units | Their Unicode 3.2.0 lowercase |
 |---|---|
@@ -898,6 +899,104 @@ noncharacters and other malformed UTF-8 are not probed. The `HX` answers cover
 compare type `0xBC` only: `specs/design-hfsplus.md` also allows `0xCF` on `HX`
 and 0 on `H+`, and `newfs_hfs` has no option that makes either (`-s` selects
 `0xBC`), so they were not probed.
+
+Generated tables. `tools/gen-hfsplus-tables.rb` generates
+`lib/formats/hfsplus/unicode-tables.h` from `UnicodeData-3.2.0.txt` and the
+exceptions file. `tools/hfsplus/check-unicode-tables.rb` is the gate: it parses
+the header, shares nothing with the generator, verifies the digests of its
+inputs (`e3-hfsplus/`, `e3-hfsx/`, `e3-small-names/`, the Unicode file and NetBSD's
+file), exits nonzero on any violation, and is run by hand, because its inputs live
+outside the tree. `HX` uses the identity, since compare type `0xBC` is binary. It
+finds no violation:
+
+* Fold rows, on each comparator by the three rules above: every `determined` row,
+  every chain position with one fold that is listed and strictly above the one
+  before, the 16 `ignorable` rows, U+0000's rule, and the 2048 `pair-only` rows in
+  strictly ascending unit order, with U+D7FF below U+D800 and U+DBFF below U+E000.
+  The chain has 51013 positions on `H+` and 51341 on `HX`. The checker's self-test
+  alters two tables that each pass a row-by-row membership test: U+0410 alone
+  folding to itself breaks one fold per chain position, and U+0411 and U+0431
+  folding to U+0411 breaks the ascending order. Both are rejected, as is a copy of
+  the header with U+0410 altered, with exit 1.
+* Stored units, on each comparator: for every row of `alone`, `between`, `pairs`,
+  `hangul` and `surrogates`, and of `e3-small-names/class0-VARIANT.tsv`, table
+  decomposition and the stable class sort reproduce `leaf_units`, with `:`, U+2400,
+  U+FFFE, U+FFFF and the 2048 surrogate encodings spelled as this section explains
+  and supplementary values as their pairs. The rows with no leaf are the 5 of
+  `residual.tsv`.
+* Collisions: each colliding name has the catalog key of its representative.
+* Catalog order: sorting each directory's names by the comparator's key gives
+  exactly `leaf_rank`, and no two siblings compare equal.
+
+| Set | Names sorted | Directories on `H+` | Directories on `HX` | Collisions on `H+` | Collisions on `HX` |
+|---|---|---|---|---|---|
+| `alone` | 241308 | 16 | 2 | 720 | 26 |
+| `between` | 241310 | 17 | 2 | 721 | 26 |
+| `pairs` | 106929 | 4 | 4 | 35423 | 35423 |
+| `hangul` | 22344 | 2 | 2 | 11172 | 11172 |
+| `surrogates` | 2048 | 1 | 1 | 0 | 0 |
+| `class0` | 15 | 3 | 3 | 9 | 9 |
+
+The table encodes U+0000 as the fold 0xFFFF on `H+`, the largest value, because
+a fold of zero means ignorable; the binary comparison compares it as itself, so it
+sorts first. U+FFFF also folds to 0xFFFF, so the two compare equal; no POSIX name
+stores U+FFFF, and their relation is not observed.
+
+SHA-256 of the tables' serializations, printed by the checker: the fold table as
+65536 big-endian units, the combining classes as 65536 bytes, and for each
+decomposing unit in order the unit, its count and its units, as big-endian units.
+
+```
+78faa07cccc9d4191770b16e067c2ed3fa08199182b70eca259d3d1f3ea60240  fold
+0c753eab520b1374925dc1128228dfe56987f5284ee78837e116a89190ebc599  combining classes
+654f209716fc62ecf5d15fff1063cc021d177bf2c0e97918b60ee93569c70496  decompositions
+```
+
+NetBSD witness. `~/hfsplus-captures/netbsd-libhfs/libhfs.c`, from
+<https://raw.githubusercontent.com/NetBSD/src/e4f73ac629cd72caf75fdbe9eac3eeaafeaca1f0/sys/fs/hfs/libhfs.c>
+(revision 1.19), SHA-256
+`d4aeef80a6b06232340182da3d74bc91e03bfc39de084713eac2d714f10d7f94`. The checker
+interprets the statements of `hfslib_create_casefolding_table` and compares the
+resulting folds over all 65536 units. The file has no decomposition or combining
+class data. Taken alone, NetBSD's table satisfies every rule of `fold.tsv`. On all
+53390 observable rows it equals the generated table, so it confirms the 30
+exceptions, the Georgian mapping, the 16 ignorable units, the lowercase choice in
+the 124 ambiguous classes and the fold of U+0000, without having seen this
+observation. No observable row differs.
+
+139 unobservable rows differ, of the 12146, and 12007 are equal. They are exactly
+the 139 units above that have a lowercase on a folded page and decompose: the
+generated table folds each to its Unicode 3.2.0 lowercase, and NetBSD leaves each
+itself. Each row below is the unit and the generated fold.
+
+```
+00C0:00E0 00C1:00E1 00C2:00E2 00C3:00E3 00C4:00E4 00C5:00E5 00C7:00E7 00C8:00E8
+  00C9:00E9 00CA:00EA 00CB:00EB 00CC:00EC 00CD:00ED 00CE:00EE 00CF:00EF 00D1:00F1
+  00D2:00F2 00D3:00F3 00D4:00F4 00D5:00F5 00D6:00F6 00D9:00F9 00DA:00FA 00DB:00FB
+  00DC:00FC 00DD:00FD 0100:0101 0102:0103 0104:0105 0106:0107 0108:0109 010A:010B
+  010C:010D 010E:010F 0112:0113 0114:0115 0116:0117 0118:0119 011A:011B 011C:011D
+  011E:011F 0120:0121 0122:0123 0124:0125 0128:0129 012A:012B 012C:012D 012E:012F
+  0130:0069 0134:0135 0136:0137 0139:013A 013B:013C 013D:013E 0143:0144 0145:0146
+  0147:0148 014C:014D 014E:014F 0150:0151 0154:0155 0156:0157 0158:0159 015A:015B
+  015C:015D 015E:015F 0160:0161 0162:0163 0164:0165 0168:0169 016A:016B 016C:016D
+  016E:016F 0170:0171 0172:0173 0174:0175 0176:0177 0178:00FF 0179:017A 017B:017C
+  017D:017E 01A0:01A1 01AF:01B0 01CD:01CE 01CF:01D0 01D1:01D2 01D3:01D4 01D5:01D6
+  01D7:01D8 01D9:01DA 01DB:01DC 01DE:01DF 01E0:01E1 01E2:01E3 01E6:01E7 01E8:01E9
+  01EA:01EB 01EC:01ED 01EE:01EF 01F4:01F5 01F8:01F9 01FA:01FB 01FC:01FD 01FE:01FF
+  0386:03AC 0388:03AD 0389:03AE 038A:03AF 038C:03CC 038E:03CD 038F:03CE 03AA:03CA
+  03AB:03CB 0400:0450 0401:0451 0403:0453 0407:0457 040C:045C 040D:045D 040E:045E
+  0419:0439 0476:0477 04C1:04C2 04D0:04D1 04D2:04D3 04D6:04D7 04DA:04DB 04DC:04DD
+  04DE:04DF 04E2:04E3 04E4:04E5 04E6:04E7 04EA:04EB 04EC:04ED 04EE:04EF 04F0:04F1
+  04F2:04F3 04F4:04F5 04F8:04F9
+```
+
+No POSIX name stores one of these units, so no observation here chooses between
+the two. The difference is reachable only through a stored name that is not
+decomposed, in a catalog written by something other than this driver or macOS's
+POSIX path: its folded order under the generated table is not its order under
+NetBSD's. The two derivations are "lowercase on the page" for the generated table
+and, in effect, "lowercase on the page unless the unit decomposes" for NetBSD's,
+and they agree on every observed unit.
 
 ### E4 Hard links
 

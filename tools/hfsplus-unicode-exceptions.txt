@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+#
+# Units on the folded pages that have a Unicode 3.2.0 lowercase, yet fold to
+# themselves on a native HFS Plus volume. Input of tools/gen-hfsplus-tables.rb.
+#
+# Tab separated: the unit, the lowercase this row removes from the fold table,
+# and the observation that requires it, from e3-hfsplus/fold.tsv in
+# docs/hfsplus-research.md's E3. A chain value is the position of the unit's
+# collision class in catalog order; the two neighbours are the folds listed for
+# the classes either side of it.
+01A6	0280	determined at chain 197, after 01A4|01A5 and before 01A7|01A8; does not collide with U+0280
+01F6	0195	determined at chain 220, after 01F1|01F2|01F3 and before 01F7; does not collide with U+0195
+01F7	01BF	determined at chain 221, after 01F6 and before 021C; does not collide with U+01BF
+03D8	03D9	determined at chain 596, after 03D7 and before 03D9; does not collide with U+03D9
+03DA	03DB	determined at chain 598, after 03D9 and before 03DB; does not collide with U+03DB
+03DC	03DD	determined at chain 600, after 03DB and before 03DD; does not collide with U+03DD
+03DE	03DF	determined at chain 602, after 03DD and before 03DF; does not collide with U+03DF
+03E0	03E1	determined at chain 604, after 03DF and before 03E1; does not collide with U+03E1
+03F4	03B8	determined at chain 617, after 03F3 and before 03F5; does not collide with U+03B8
+048A	048B	determined at chain 693, after 0489 and before 048B; does not collide with U+048B
+048C	048D	determined at chain 695, after 048B and before 048D; does not collide with U+048D
+048E	048F	determined at chain 697, after 048D and before 048F; does not collide with U+048F
+04C5	04C6	determined at chain 725, after 04C3|04C4 and before 04C6; does not collide with U+04C6
+04C9	04CA	determined at chain 728, after 04C7|04C8 and before 04CA; does not collide with U+04CA
+04CD	04CE	determined at chain 731, after 04CB|04CC and before 04CE; does not collide with U+04CE
+04D4	04D5	determined at chain 734, after 04CF and before 04D5; does not collide with U+04D5
+04D8	04D9	determined at chain 736, after 04D5 and before 04D9; does not collide with U+04D9
+04E0	04E1	determined at chain 738, after 04D9 and before 04E1; does not collide with U+04E1
+04E8	04E9	determined at chain 740, after 04E1 and before 04E9; does not collide with U+04E9
+0500	0501	determined at chain 750, after 04FF and before 0501; does not collide with U+0501
+0502	0503	determined at chain 752, after 0501 and before 0503; does not collide with U+0503
+0504	0505	determined at chain 754, after 0503 and before 0505; does not collide with U+0505
+0506	0507	determined at chain 756, after 0505 and before 0507; does not collide with U+0507
+0508	0509	determined at chain 758, after 0507 and before 0509; does not collide with U+0509
+050A	050B	determined at chain 760, after 0509 and before 050B; does not collide with U+050B
+050C	050D	determined at chain 762, after 050B and before 050D; does not collide with U+050D
+050E	050F	determined at chain 764, after 050D and before 050F; does not collide with U+050F
+2126	03C9	determined at chain 7321, after 2125 and before 2127; does not collide with U+03C9
+212A	006B	determined at chain 7325, after 2129 and before 212B; does not collide with U+006B
+212B	00E5	determined at chain 7326, after 212A and before 212C; U+00E5 decomposes, so no stored name holds it and this row is order evidence only

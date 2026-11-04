@@ -56,6 +56,31 @@ source, and emits source hashes. The mapping's
 DOS end-of-file byte is excluded from records, and included in its source hash.
 No locale or host Unicode library supplies comparison behavior at runtime.
 
+The generated `lib/formats/hfsplus/unicode-tables.h` uses Unicode-3.0 data under
+the same notice, and project-owned exceptions. Its inputs are:
+
+| Data | Source | SHA-256 |
+| --- | --- | --- |
+| UnicodeData 3.2.0, combining class, canonical decomposition and simple lowercase fields | [Unicode Consortium](https://www.unicode.org/Public/3.2-Update/UnicodeData-3.2.0.txt) | `5e444028b6e76d96f9dc509609c5e3222bf609056f35e5fcde7e6fb8a58cd446` |
+| HFS Plus fold exceptions, each row naming its observation | `tools/hfsplus-unicode-exceptions.txt` | `b7317b3da963c6e6b02fc188b56a17302ff1bbd3ec2374044119cc3094bb9319` |
+
+Regenerate with:
+
+```sh
+ruby tools/gen-hfsplus-tables.rb UnicodeData-3.2.0.txt \
+    tools/hfsplus-unicode-exceptions.txt lib/formats/hfsplus/unicode-tables.h
+```
+
+The generator rejects other inputs and emits both digests. Changing an exceptions
+row means changing the digest pinned in the generator as well.
+`tools/hfsplus/check-unicode-tables.rb` checks the header by hand against the E3
+captures in [the research record](hfsplus-research.md), and against
+[NetBSD `sys/fs/hfs/libhfs.c`](https://raw.githubusercontent.com/NetBSD/src/e4f73ac629cd72caf75fdbe9eac3eeaafeaca1f0/sys/fs/hfs/libhfs.c)
+(BSD-2-Clause, revision 1.19, GitHub mirror commit
+`e4f73ac629cd72caf75fdbe9eac3eeaafeaca1f0`, SHA-256
+`d4aeef80a6b06232340182da3d74bc91e03bfc39de084713eac2d714f10d7f94`), whose folding
+table is compared, never imported: no NetBSD text is in the tree.
+
 `lib/core/sha256.c` and `lib/core/sha256.h`, the project's one SHA-256
 implementation, are FreeBSD's `sys/crypto/sha2/sha256c.c` and
 `sys/crypto/sha2/sha256.h` by Colin Percival, under a BSD-2-Clause notice,
