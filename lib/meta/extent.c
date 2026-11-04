@@ -172,8 +172,11 @@ fsimg_extent_index_append(fsimg_extent_index_t *index,
 	if (extent->logical_offset != index->length ||
 	    !fsimg_add_u64(index->length, extent->length, &end))
 		return (extent_corrupt(error, "extent is not contiguous with its index"));
+	/* The extent came from the image, so this rejects the image, unlike the
+	 * checks of records read back from scratch.
+	 */
 	if (!extent_valid(&index->domain, end, extent))
-		return (extent_corrupt(error,
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_READER,
 		    "extent is empty, misaligned or outside its allocation domain"));
 	index->cache_valid = false;
 
@@ -240,9 +243,9 @@ record_search(fsimg_extent_index_t *index, uint64_t offset, uint64_t *record,
 
 /* Record that the walk building this index stopped at the end of the slice,
  * which is how a walk over a truncated volume stays bounded by the bytes the
- * image holds. The object goes on past the index, and that part is missing: a
- * lookup there reports truncation, and a caller that ran out of index can tell
- * that from reaching the end of the object.
+ * image holds, or under salvage at damage. The object goes on past the index,
+ * and that part is missing: a lookup there reports truncation, and a caller that
+ * ran out of index can tell that from reaching the end of the object.
  */
 void
 fsimg_extent_index_stop(fsimg_extent_index_t *index)

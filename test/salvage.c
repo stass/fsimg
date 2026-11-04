@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
 
 #include <dirent.h>
 #include <errno.h>
@@ -26,6 +27,8 @@ typedef struct fake_driver {
 	bool replay_failure;
 	bool partial_replay;
 	bool collision;
+	bool host_collision;
+	int collision_parent;
 	bool allocate;
 	bool seal;
 	bool omitted;
@@ -50,6 +53,8 @@ typedef struct fixture {
 	size_t length;
 	unsigned reports;
 	char loss_path[1024];
+	char first_loss_path[1024];
+	uint32_t first_loss_mask;
 	char shortened_path[1024];
 	uint32_t loss_mask;
 	bool patterned;
@@ -128,12 +133,16 @@ record_loss(void *argument, const char *path, uint32_t mask)
 	if ((mask & (FSIMG_LOSS_DIRECTORY | FSIMG_LOSS_ENTRY |
 	    FSIMG_LOSS_SHORTENED | FSIMG_LOSS_SKIPPED | FSIMG_LOSS_COLLISION)) == 0)
 		return;
+	CHECK(strlen(path) < sizeof(f->loss_path));
+	if (f->reports == 0) {
+		strcpy(f->first_loss_path, path);
+		f->first_loss_mask = mask;
+	}
 	f->reports++;
 	f->shortened += mask == FSIMG_LOSS_SHORTENED;
 	f->skipped += mask == FSIMG_LOSS_SKIPPED;
 	f->collisions += mask == FSIMG_LOSS_COLLISION;
 
-	CHECK(strlen(path) < sizeof(f->loss_path));
 	strcpy(f->loss_path, path);
 	if (mask == FSIMG_LOSS_SHORTENED)
 		strcpy(f->shortened_path, path);
@@ -195,9 +204,10 @@ fixture_build(fixture_t *f, const char *format, const fsimg_entry_t *entries,
 	fsimg_write_options_init(&write_options);
 	if (strcmp(format, "fat12") == 0)
 		write_options.volume_bytes = 1024u * 1024u;
-	if (patterned) {
+	if (patterned && strcmp(format, "ifs") != 0) {
 		write_options.volume_bytes = 8u * 1024u * 1024u;
-		write_options.allocation_unit_bytes = 512;
+		if (strcmp(format, "iso9660") != 0)
+			write_options.allocation_unit_bytes = 512;
 	}
 	CHECK(fsimg_writer_new(f->ctx, format, &write_options, &writer, NULL) ==
 	    FSIMG_OK);
@@ -455,6 +465,18 @@ fake_replay(fsimg_reader_t *reader, const char *name,
 				return (status);
 		}
 		return (fake_failure(reader, error));
+	}
+	if (f->fake.host_collision && strcmp(name, "c") == 0) {
+		int fd;
+
+		/* Occupy the next host name after private-root validation, so
+		 * the extractor's exclusive creation observes the collision.
+		 */
+		fd = openat(f->fake.collision_parent, "out/c",
+		    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+		CHECK(fd != -1);
+		CHECK(write(fd, "occupied", 8) == 8);
+		CHECK(close(fd) == 0);
 	}
 	reader->entry.kind = payload[0];
 	if (reader->entry.kind == FSIMG_ENTRY_FILE)
@@ -1267,6 +1289,7 @@ typedef enum file_damage {
 	FILE_DIRECTORY_COLLISION,
 	FILE_HOST_COLLISION,
 	FILE_LATER_COLLISION,
+	FILE_LATER_DIRECTORY_COLLISION,
 	FILE_LONG_NAME
 } file_damage_t;
 
@@ -1435,8 +1458,13 @@ static const file_case_t file_cases[] = {
 	{ .name = "later-clean-partial", .damage = FILE_LATER_COLLISION,
 	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1536,
 	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
-	    .salvage_status = FSIMG_EEXISTS,
-	    .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1 },
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_COLLISION, .loss_count = 2 },
+	{ .name = "later-directory-partial", .damage = FILE_LATER_DIRECTORY_COLLISION,
+	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1536,
+	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
+	    .salvage_status = FSIMG_EPARTIAL,
+	    .loss_mask = FSIMG_LOSS_COLLISION, .loss_count = 2 },
 	{ .name = "partial-name-too-long", .damage = FILE_LONG_NAME,
 	    .size_clusters = 5, .damaged_link_index = 2, .prefix = 1536,
 	    .strict_fat = FSIMG_ECORRUPT, .strict_exfat = FSIMG_ECORRUPT,
@@ -1567,7 +1595,8 @@ file_has_collision(const file_case_t *row)
 	return (row->damage == FILE_COLLISION ||
 	    row->damage == FILE_DIRECTORY_COLLISION ||
 	    row->damage == FILE_HOST_COLLISION ||
-	    row->damage == FILE_LATER_COLLISION);
+	    row->damage == FILE_LATER_COLLISION ||
+	    row->damage == FILE_LATER_DIRECTORY_COLLISION);
 }
 
 /* Make physical adjacency independent of logical order. The table is also
@@ -1610,6 +1639,7 @@ file_image_damage(fixture_t *f, file_image_t *image, const file_case_t *row)
 	case FILE_DIRECTORY_COLLISION:
 	case FILE_HOST_COLLISION:
 	case FILE_LATER_COLLISION:
+	case FILE_LATER_DIRECTORY_COLLISION:
 	case FILE_LONG_NAME:
 		file_table_set(f, image, clusters[row->damaged_link_index], end);
 		break;
@@ -1702,7 +1732,8 @@ file_collision_order(fixture_t *f, const file_image_t *image,
 	other = find_bytes(f, wide, image->exfat ? strlen(name) * 2 : 10);
 	other -= image->exfat ? EXFAT_NAME_OFFSET : FAT_LONG_NAME_OFFSET;
 	file = image->record - (image->exfat ? 0 : DIRECTORY_SLOT_BYTES);
-	if ((other < file) == (row->damage != FILE_LATER_COLLISION))
+	if ((other < file) == (row->damage != FILE_LATER_COLLISION &&
+	    row->damage != FILE_LATER_DIRECTORY_COLLISION))
 		return;
 	bcopy(file, saved, length);
 	bcopy(other, file, length);
@@ -1729,6 +1760,10 @@ static void
 build_file_case(fixture_t *f, file_image_t *image, const char *format,
     const file_case_t *row, const char *path, const char *occupied)
 {
+	bool directory = row->damage == FILE_DIRECTORY_COLLISION ||
+	    row->damage == FILE_LATER_DIRECTORY_COLLISION;
+	size_t count = file_has_collision(row) ? 6 : 5;
+
 	/* /b is allocated before foo, below its truncated zero tail.
 	 * /z lies beyond a truncated initialized run and is also skipped.
 	 */
@@ -1739,13 +1774,15 @@ build_file_case(fixture_t *f, file_image_t *image, const char *format,
 		{ .path = "/empty", .kind = FSIMG_ENTRY_FILE },
 		{ .path = row->damage == FILE_TAIL_TRUNCATED ? "/b" :
 		    "/z", .kind = FSIMG_ENTRY_FILE, .size = 512 },
-		{ .path = occupied, .kind = row->damage ==
-		    FILE_DIRECTORY_COLLISION ? FSIMG_ENTRY_DIRECTORY :
-		    FSIMG_ENTRY_FILE, .size = row->damage ==
-		    FILE_DIRECTORY_COLLISION ? 0 : 512 }
+		{ .path = occupied, .kind = directory ? FSIMG_ENTRY_DIRECTORY :
+		    FSIMG_ENTRY_FILE, .size = directory ? 0 : 512 },
+		{ .path = "/dir/foo.partial/child", .kind = FSIMG_ENTRY_FILE,
+		    .size = 512 }
 	};
 
-	fixture_build(f, format, entries, file_has_collision(row) ? 6 : 5, true);
+	if (row->damage == FILE_LATER_DIRECTORY_COLLISION)
+		count++;
+	fixture_build(f, format, entries, count, true);
 	file_image_layout(f, format, image);
 	file_image_damage(f, image, row);
 	if (file_has_collision(row))
@@ -1762,7 +1799,10 @@ check_completed_file_case(fixture_t *f, const file_case_t *row, int output,
 	bool damaged = row->prefix < (size_t)row->size_clusters * 512 ||
 	    row->damage == FILE_HUGE;
 	bool collision = file_has_collision(row);
-	bool skipped = row->prefix == 0 || collision || row->damage == FILE_LONG_NAME;
+	bool later = row->damage == FILE_LATER_COLLISION ||
+	    row->damage == FILE_LATER_DIRECTORY_COLLISION;
+	bool skipped = row->prefix == 0 || (collision && !later) ||
+	    row->damage == FILE_LONG_NAME;
 
 	expect_pattern_file(output, "a", 512, 0, 512);
 	expect_pattern_file(output, "empty", 0, 3, 0);
@@ -1783,7 +1823,11 @@ check_completed_file_case(fixture_t *f, const file_case_t *row, int output,
 		else if (!collision && row->damage != FILE_LONG_NAME)
 			expect_absent(output, partial);
 	}
-	if (collision) {
+	if (later) {
+		expect_absent(output, "child");
+		CHECK(strcmp(f->first_loss_path, path) == 0);
+		CHECK(f->first_loss_mask == FSIMG_LOSS_SHORTENED);
+	} else if (collision) {
 		if (row->damage == FILE_DIRECTORY_COLLISION)
 			CHECK(directory_children(output, occupied + 1) == 0);
 		else
@@ -1792,7 +1836,7 @@ check_completed_file_case(fixture_t *f, const file_case_t *row, int output,
 	CHECK(directory_children(output, "dir") ==
 	    (collision || !skipped ? 1u : 0u));
 	expect_losses(f, row->loss_count, row->loss_count,
-	    truncated ? "/z" : path, row->loss_mask);
+	    truncated ? "/z" : later ? occupied : path, row->loss_mask);
 	CHECK(f->shortened == (unsigned)(damaged && !skipped));
 	if (f->shortened != 0)
 		CHECK(strcmp(f->shortened_path, path) == 0);
@@ -1831,7 +1875,8 @@ check_failed_file_case(fixture_t *f, const file_image_t *image,
 	}
 	CHECK(f->reader->state == FSIMG_READER_FAILED);
 	if (!salvage || row->damage == FILE_BUDGET) {
-		if (collision && row->damage != FILE_LATER_COLLISION) {
+		if (collision && row->damage != FILE_LATER_COLLISION &&
+		    row->damage != FILE_LATER_DIRECTORY_COLLISION) {
 			if (row->damage == FILE_DIRECTORY_COLLISION)
 				CHECK(directory_children(output, occupied + 1) == 0);
 			else
@@ -1944,6 +1989,9 @@ test_file_salvage_prefix_bytes_partial_names_collisions_and_output_limits(void)
 	static const char *const formats[] = { "fat16", "exfat" };
 
 	for (size_t i = 0; i < sizeof(file_cases) / sizeof(file_cases[0]); i++) {
+		if (file_cases[i].damage == FILE_LATER_COLLISION ||
+		    file_cases[i].damage == FILE_LATER_DIRECTORY_COLLISION)
+			continue;
 		for (size_t j = 0; j < sizeof(formats) / sizeof(formats[0]); j++)
 			check_file_extraction(formats[j], &file_cases[i]);
 	}
@@ -2250,9 +2298,887 @@ test_one_cluster_file_work_ignores_long_chain_and_late_cycle(void)
 	CHECK(failures == 0);
 }
 
+/* Wire mutations are independent of the format drivers. The writers supply
+ * clean trees; only foo's allocation is changed. a, empty and z precede its
+ * payload, so a truncation leaves both the namespace and siblings readable.
+ */
+typedef enum prefix_damage {
+	PREFIX_CLEAN,
+	PREFIX_PAST_END,
+	PREFIX_SYMLINK,
+	PREFIX_FIRST_OUTSIDE,
+	PREFIX_FIRST_FREE,
+	PREFIX_LATER_OUTSIDE,
+	PREFIX_SIGNATURE,
+	PREFIX_CHAIN_SHORT,
+	PREFIX_SIZE,
+	PREFIX_CUT,
+	PREFIX_CUT_BEFORE,
+	PREFIX_INDEX_CUT,
+	PREFIX_INDIRECT_BAD,
+	PREFIX_LINKS,
+	PREFIX_LINK_LOADER,
+	PREFIX_LINK_ROOT,
+	PREFIX_LINK_BITMAP,
+	PREFIX_DIRECTORY,
+	PREFIX_ISO_MULTI,
+	PREFIX_ISO_SYSTEM,
+	PREFIX_ISO_DESCRIPTOR
+} prefix_damage_t;
+
+typedef struct prefix_case {
+	const char *format;
+	const char *name;
+	prefix_damage_t damage;
+	fsimg_status_t strict_status;
+	const char *strict_message;
+	fsimg_status_t salvage_status;
+	const char *output_name;
+	size_t prefix;
+	uint32_t loss_mask;
+	unsigned loss_count;
+	const char *loss_path;
+	unsigned shortened;
+	unsigned skipped;
+	const char *linked_output_name;
+	const char *empty_directory;
+} prefix_case_t;
+
+static const prefix_case_t prefix_cases[] = {
+	{ .format = "qnx4", .name = "clean",
+	    .damage = PREFIX_CLEAN, .strict_status = FSIMG_OK,
+	    .strict_message = "",
+	    .salvage_status = FSIMG_OK, .output_name = "foo",
+	    .prefix = 1536, .loss_mask = 0, .loss_count = 0,
+	    .loss_path = NULL, .shortened = 0, .skipped = 0 },
+	{ .format = "qnx4", .name = "first-outside",
+	    .damage = PREFIX_FIRST_OUTSIDE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 extent lies outside the volume",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 0, .skipped = 1 },
+	{ .format = "qnx4", .name = "first-free",
+	    .damage = PREFIX_FIRST_FREE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 referenced block is free",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 0, .skipped = 1 },
+	{ .format = "qnx4", .name = "later-outside",
+	    .damage = PREFIX_LATER_OUTSIDE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 extent lies outside the volume",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx4", .name = "extent-signature",
+	    .damage = PREFIX_SIGNATURE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 extent block is malformed",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx4", .name = "extent-past-slice",
+	    .damage = PREFIX_INDEX_CUT, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "image is truncated",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx4", .name = "chain-short",
+	    .damage = PREFIX_CHAIN_SHORT, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 extent chain ends before its extent count",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 1024, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx4", .name = "size-over-allocation",
+	    .damage = PREFIX_SIZE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 allocation is short of the object's size",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 1536, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx4", .name = "cut",
+	    .damage = PREFIX_CUT, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "image is truncated",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512 + 137, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx4", .name = "cut-before",
+	    .damage = PREFIX_CUT_BEFORE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "image is truncated",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 0, .skipped = 1 },
+	{ .format = "qnx4", .name = "two-names",
+	    .damage = PREFIX_LINKS, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 extent lies outside the volume",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 2,
+	    .loss_path = "/link", .shortened = 2, .skipped = 0,
+	    .linked_output_name = "link.partial" },
+	{ .format = "qnx4", .name = "two-names-loader",
+	    .damage = PREFIX_LINK_LOADER, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 block is already in use",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 2,
+	    .loss_path = "/link", .shortened = 2, .skipped = 0,
+	    .linked_output_name = "link.partial" },
+	{ .format = "qnx4", .name = "two-names-root",
+	    .damage = PREFIX_LINK_ROOT, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 block is already in use",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 2,
+	    .loss_path = "/link", .shortened = 2, .skipped = 0,
+	    .linked_output_name = "link.partial" },
+	{ .format = "qnx4", .name = "two-names-bitmap",
+	    .damage = PREFIX_LINK_BITMAP, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 block is already in use",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 2,
+	    .loss_path = "/link", .shortened = 2, .skipped = 0,
+	    .linked_output_name = "link.partial" },
+	{ .format = "qnx4", .name = "allocation-past-size",
+	    .damage = PREFIX_PAST_END, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 allocation exceeds the object's size",
+	    .salvage_status = FSIMG_OK, .output_name = "foo",
+	    .prefix = 1024, .loss_mask = 0, .loss_count = 0,
+	    .loss_path = NULL, .shortened = 0, .skipped = 0 },
+	{ .format = "qnx4", .name = "directory-bad-extent",
+	    .damage = PREFIX_DIRECTORY, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX4 extent lies outside the volume",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo",
+	    .prefix = 1536, .loss_mask = FSIMG_LOSS_DIRECTORY, .loss_count = 1,
+	    .loss_path = "/bad", .shortened = 0, .skipped = 0,
+	    .empty_directory = "bad" },
+	{ .format = "qnx6", .name = "clean",
+	    .damage = PREFIX_CLEAN, .strict_status = FSIMG_OK,
+	    .strict_message = "",
+	    .salvage_status = FSIMG_OK, .output_name = "foo",
+	    .prefix = 1536, .loss_mask = 0, .loss_count = 0,
+	    .loss_path = NULL, .shortened = 0, .skipped = 0 },
+	{ .format = "qnx6", .name = "first-outside",
+	    .damage = PREFIX_FIRST_OUTSIDE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX6 required block reference is unused or out of range",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 0, .skipped = 1 },
+	{ .format = "qnx6", .name = "first-free",
+	    .damage = PREFIX_FIRST_FREE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX6 referenced block is free",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 0, .skipped = 1 },
+	{ .format = "qnx6", .name = "later-outside",
+	    .damage = PREFIX_LATER_OUTSIDE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX6 required block reference is unused or out of range",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx6", .name = "indirect-past-slice",
+	    .damage = PREFIX_INDEX_CUT, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "image is truncated",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 128 * 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx6", .name = "indirect-invalid",
+	    .damage = PREFIX_INDIRECT_BAD, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX6 required block reference is unused or out of range",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 128 * 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx6", .name = "cut",
+	    .damage = PREFIX_CUT, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "image is truncated",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512 + 137, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "qnx6", .name = "cut-before",
+	    .damage = PREFIX_CUT_BEFORE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "image is truncated",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 0, .skipped = 1 },
+	{ .format = "qnx6", .name = "two-names",
+	    .damage = PREFIX_LINKS, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX6 required block reference is unused or out of range",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 2,
+	    .loss_path = "/link", .shortened = 2, .skipped = 0,
+	    .linked_output_name = "link.partial" },
+	{ .format = "qnx6", .name = "directory-past-slice",
+	    .damage = PREFIX_DIRECTORY, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "image is truncated",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo",
+	    .prefix = 1536, .loss_mask = FSIMG_LOSS_DIRECTORY, .loss_count = 1,
+	    .loss_path = "/bad", .shortened = 0, .skipped = 0,
+	    .empty_directory = "bad" },
+	{ .format = "qnx6", .name = "allocation-past-size",
+	    .damage = PREFIX_PAST_END, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX6 unused block reference is out of range",
+	    .salvage_status = FSIMG_OK, .output_name = "foo",
+	    .prefix = 1536, .loss_mask = 0, .loss_count = 0,
+	    .loss_path = NULL, .shortened = 0, .skipped = 0 },
+	{ .format = "qnx6", .name = "symlink-bad-storage",
+	    .damage = PREFIX_SYMLINK, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "QNX6 required block reference is unused or out of range",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_ENTRY, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 0, .skipped = 0 },
+	{ .format = "ifs", .name = "clean",
+	    .damage = PREFIX_CLEAN, .strict_status = FSIMG_OK,
+	    .strict_message = "",
+	    .salvage_status = FSIMG_OK, .output_name = "foo",
+	    .prefix = 1536, .loss_mask = 0, .loss_count = 0,
+	    .loss_path = NULL, .shortened = 0, .skipped = 0 },
+	{ .format = "ifs", .name = "cut",
+	    .damage = PREFIX_CUT, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "image is truncated",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "foo.partial",
+	    .prefix = 512 + 137, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 1, .skipped = 0 },
+	{ .format = "ifs", .name = "cut-before",
+	    .damage = PREFIX_CUT_BEFORE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "image is truncated",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/foo", .shortened = 0, .skipped = 1 },
+	{ .format = "iso9660", .name = "clean",
+	    .damage = PREFIX_CLEAN, .strict_status = FSIMG_OK,
+	    .strict_message = "",
+	    .salvage_status = FSIMG_OK, .output_name = "FOO",
+	    .prefix = 3 * 2048, .loss_mask = 0, .loss_count = 0,
+	    .loss_path = NULL, .shortened = 0, .skipped = 0 },
+	{ .format = "iso9660", .name = "multi-section-cut",
+	    .damage = PREFIX_ISO_MULTI, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "extent is empty, misaligned or outside its allocation domain",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "FOO.partial",
+	    .prefix = 3 * 2048, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/FOO", .shortened = 1, .skipped = 0 },
+	{ .format = "iso9660", .name = "single-section-cut",
+	    .damage = PREFIX_CUT, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "extent is empty, misaligned or outside its allocation domain",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = "FOO.partial",
+	    .prefix = 2048, .loss_mask = FSIMG_LOSS_SHORTENED, .loss_count = 1,
+	    .loss_path = "/FOO", .shortened = 1, .skipped = 0 },
+	{ .format = "iso9660", .name = "first-past-blocks",
+	    .damage = PREFIX_CUT_BEFORE, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "extent is empty, misaligned or outside its allocation domain",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/FOO", .shortened = 0, .skipped = 1 },
+	{ .format = "iso9660", .name = "first-system-area",
+	    .damage = PREFIX_ISO_SYSTEM, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "extent is empty, misaligned or outside its allocation domain",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/FOO", .shortened = 0, .skipped = 1 },
+	{ .format = "iso9660", .name = "first-descriptor",
+	    .damage = PREFIX_ISO_DESCRIPTOR, .strict_status = FSIMG_ECORRUPT,
+	    .strict_message = "extent is empty, misaligned or outside its allocation domain",
+	    .salvage_status = FSIMG_EPARTIAL, .output_name = NULL,
+	    .prefix = 0, .loss_mask = FSIMG_LOSS_SKIPPED, .loss_count = 1,
+	    .loss_path = "/FOO", .shortened = 0, .skipped = 1 },
+};
+
+static bool
+prefix_linked(const prefix_case_t *row)
+{
+	return (row->damage == PREFIX_LINKS ||
+	    row->damage == PREFIX_LINK_LOADER ||
+	    row->damage == PREFIX_LINK_ROOT ||
+	    row->damage == PREFIX_LINK_BITMAP);
+}
+
+static void
+prefix_bitmap(unsigned char *bitmap, uint32_t bit, bool allocated)
+{
+	unsigned char mask = (unsigned char)(1u << (bit % 8));
+
+	if (allocated)
+		bitmap[bit / 8] |= mask;
+	else
+		bitmap[bit / 8] &= (unsigned char)~mask;
+}
+
+static void
+prefix_qnx4(fixture_t *f, const prefix_case_t *row)
+{
+	enum {
+		BLOCK_BYTES = 512, BITMAP_OFFSET = 1024, RECORD_BYTES = 64,
+		NAME_BYTES = 16, SIZE_OFFSET = 16, FIRST_OFFSET = 20,
+		FIRST_BLOCKS_OFFSET = 24, CHAIN_OFFSET = 28, COUNT_OFFSET = 48,
+		LINK_SLOT_OFFSET = 52, LINKS_OFFSET = 56, STATUS_OFFSET = 63,
+		X_USED_OFFSET = 8, X_COVERED_OFFSET = 12, X_FIRST_OFFSET = 16,
+		X_BLOCKS_OFFSET = 20, X_SECOND_OFFSET = 24,
+		X_SECOND_BLOCKS_OFFSET = 28, X_SIGNATURE_OFFSET = 496,
+		X_COPY_FIRST_OFFSET = 504, X_COPY_BLOCKS_OFFSET = 508
+	};
+	unsigned char *record = find_bytes(f, "foo\0", 4), *xblock;
+	uint32_t first = fsimg_load_le32(record + FIRST_OFFSET);
+	uint32_t blocks = (uint32_t)(f->length / BLOCK_BYTES);
+	uint32_t chain = blocks - 16, relocated = blocks / 2, next_first;
+
+	/* Put foo above every sibling, so cutting it leaves siblings readable. */
+	bcopy(f->bytes + (size_t)(first - 1) * BLOCK_BYTES,
+	    f->bytes + (size_t)(relocated - 1) * BLOCK_BYTES, 1536);
+	first = relocated;
+	fsimg_store_le32(record + FIRST_OFFSET, first);
+	for (unsigned i = 0; i < 3; i++)
+		prefix_bitmap(f->bytes + BITMAP_OFFSET, first + i - 1, true);
+
+	if (prefix_linked(row)) {
+		unsigned char *other = find_bytes(f, "link\0", 5);
+		unsigned char *table = find_bytes(f, "IamTHE.inodeFILE", 16);
+		uint64_t position = (uint64_t)(table - f->bytes) + RECORD_BYTES;
+		uint32_t table_block = (uint32_t)(position / BLOCK_BYTES + 1);
+		unsigned char slot = (unsigned char)(position % BLOCK_BYTES / RECORD_BYTES);
+
+		bcopy(record, table + RECORD_BYTES, RECORD_BYTES);
+		bzero(table + RECORD_BYTES, NAME_BYTES);
+		table[RECORD_BYTES + STATUS_OFFSET] = 0x13;
+		fsimg_store_le16(table + RECORD_BYTES + LINKS_OFFSET, 2);
+		bzero(record, RECORD_BYTES);
+		bcopy("foo", record, 3);
+		bzero(other, RECORD_BYTES);
+		bcopy("link", other, 4);
+		fsimg_store_le32(record + COUNT_OFFSET, table_block);
+		fsimg_store_le32(other + COUNT_OFFSET, table_block);
+		record[LINK_SLOT_OFFSET] = other[LINK_SLOT_OFFSET] = slot;
+		record[STATUS_OFFSET] = other[STATUS_OFFSET] = 8;
+		record = table + RECORD_BYTES;
+	}
+	if (row->damage == PREFIX_DIRECTORY) {
+		unsigned char *directory = find_bytes(f, "bad\0", 4);
+
+		fsimg_store_le32(directory + FIRST_OFFSET, blocks + 1);
+	}
+	if (row->damage == PREFIX_FIRST_OUTSIDE)
+		fsimg_store_le32(record + FIRST_OFFSET, blocks + 1);
+	if (row->damage == PREFIX_FIRST_FREE)
+		prefix_bitmap(f->bytes + BITMAP_OFFSET, first - 1, false);
+	if (row->damage == PREFIX_SIZE)
+		fsimg_store_le32(record + SIZE_OFFSET, 2048);
+	if (row->damage == PREFIX_CUT || row->damage == PREFIX_CUT_BEFORE) {
+		f->length = (size_t)(first - 1) * BLOCK_BYTES + row->prefix;
+		return;
+	}
+	if (row->damage != PREFIX_LATER_OUTSIDE &&
+	    row->damage != PREFIX_SIGNATURE && row->damage != PREFIX_CHAIN_SHORT &&
+	    row->damage != PREFIX_INDEX_CUT && row->damage != PREFIX_PAST_END &&
+	    !prefix_linked(row))
+		return;
+
+	/* Split the original run after its first block, using a free block
+	 * for the extent descriptors and an independent wire signature.
+	 */
+	xblock = f->bytes + (size_t)(chain - 1) * BLOCK_BYTES;
+	bzero(xblock, BLOCK_BYTES);
+	prefix_bitmap(f->bytes + BITMAP_OFFSET, chain - 1, true);
+	fsimg_store_le32(record + FIRST_BLOCKS_OFFSET, 1);
+	fsimg_store_le32(record + CHAIN_OFFSET, chain);
+	fsimg_store_le16(record + COUNT_OFFSET, row->damage == PREFIX_CHAIN_SHORT ? 3 : 2);
+	xblock[X_USED_OFFSET] = 1;
+	fsimg_store_le32(xblock + X_COVERED_OFFSET, row->damage == PREFIX_CHAIN_SHORT ? 1 : 2);
+	switch (row->damage) {
+	case PREFIX_LINK_LOADER:
+		next_first = 1;
+		break;
+	case PREFIX_LINK_ROOT:
+		next_first = 2;
+		break;
+	case PREFIX_LINK_BITMAP:
+		next_first = 3;
+		break;
+	case PREFIX_SIGNATURE:
+	case PREFIX_INDEX_CUT:
+	case PREFIX_CHAIN_SHORT:
+		next_first = first + 1;
+		break;
+	default:
+		next_first = blocks + 1;
+		break;
+	}
+	fsimg_store_le32(xblock + X_FIRST_OFFSET, next_first);
+	fsimg_store_le32(xblock + X_BLOCKS_OFFSET, row->damage == PREFIX_CHAIN_SHORT ? 1 : 2);
+	bcopy("IamXblk", xblock + X_SIGNATURE_OFFSET, 7);
+	fsimg_store_le32(xblock + X_COPY_FIRST_OFFSET, first);
+	fsimg_store_le32(xblock + X_COPY_BLOCKS_OFFSET, 1);
+	if (row->damage == PREFIX_PAST_END) {
+		/* Both logical blocks are in the first extent. The record claims
+		 * three extents, with the next descriptor outside the volume.
+		 */
+		fsimg_store_le32(record + SIZE_OFFSET, 1024);
+		fsimg_store_le32(record + FIRST_BLOCKS_OFFSET, 2);
+		fsimg_store_le16(record + COUNT_OFFSET, 3);
+		xblock[X_USED_OFFSET] = 2;
+		fsimg_store_le32(xblock + X_BLOCKS_OFFSET, 1);
+		fsimg_store_le32(xblock + X_SECOND_OFFSET, first + 2);
+		fsimg_store_le32(xblock + X_SECOND_BLOCKS_OFFSET, 1);
+		fsimg_store_le32(xblock + X_COPY_BLOCKS_OFFSET, 2);
+	}
+	if (row->damage == PREFIX_SIGNATURE)
+		xblock[X_SIGNATURE_OFFSET] = '!';
+	if (row->damage == PREFIX_INDEX_CUT)
+		f->length = (size_t)(chain - 1) * BLOCK_BYTES;
+}
+
+/* Decode only the writer's small, little-endian inode-table descriptor.
+ * The table can be indirect even though this fixture uses few live inodes.
+ */
+static unsigned char *
+prefix_qnx6_inode(fixture_t *f, uint32_t number)
+{
+	unsigned char *header = f->bytes + 8192;
+	unsigned char *refs = header + 80;
+	uint64_t leaf = (uint64_t)(number - 1) * 128 / 512;
+	uint64_t span = 1;
+	uint32_t block;
+
+	for (unsigned i = 0; i < header[144]; i++)
+		span *= 128;
+	for (unsigned depth = header[144]; ; depth--) {
+		block = fsimg_load_le32(refs + leaf / span * 4);
+		CHECK(12288u + (uint64_t)block * 512 + 512 <= f->length);
+		refs = f->bytes + 12288u + (size_t)block * 512;
+		if (depth == 0)
+			return (refs + (number - 1) % 4 * 128);
+		leaf %= span;
+		span /= 128;
+	}
+}
+
+static void
+prefix_qnx6(fixture_t *f, const prefix_case_t *row)
+{
+	unsigned char *name = find_bytes(f, "foo\0", 4);
+	uint32_t number = fsimg_load_le32(name - 5);
+	unsigned char *inode = prefix_qnx6_inode(f, number);
+	unsigned char *refs = inode + 36;
+	unsigned char *header = f->bytes + 8192;
+	uint32_t blocks = fsimg_load_le32(header + 60);
+	uint32_t first = fsimg_load_le32(refs);
+	uint32_t bitmap = fsimg_load_le32(header + 160);
+
+	CHECK(header[224] == 0);
+	if (inode[100] == 0) {
+		uint32_t relocated = blocks / 2;
+
+		for (unsigned i = 0; i < 3; i++) {
+			uint32_t old = fsimg_load_le32(refs + i * 4);
+
+			bcopy(f->bytes + 12288u + (size_t)old * 512,
+			    f->bytes + 12288u + (size_t)(relocated + i) * 512, 512);
+			fsimg_store_le32(refs + i * 4, relocated + i);
+			prefix_bitmap(f->bytes + 12288u + (size_t)bitmap * 512,
+			    relocated + i, true);
+		}
+		first = relocated;
+	}
+	if (prefix_linked(row)) {
+		name = find_bytes(f, "link\0", 5);
+		fsimg_store_le32(name - 5, number);
+		fsimg_store_le16(inode + 34, 2);
+	}
+	if (row->damage == PREFIX_PAST_END)
+		fsimg_store_le32(refs + 3 * 4, blocks);
+	if (row->damage == PREFIX_SYMLINK) {
+		/* Keep one block of the file as link storage, then invalidate it. */
+		fsimg_store_le64(inode, 512);
+		fsimg_store_le16(inode + 32, 0120777);
+		fsimg_store_le32(refs, blocks);
+		fsimg_store_le32(refs + 4, UINT32_MAX);
+		fsimg_store_le32(refs + 8, UINT32_MAX);
+	}
+	if (row->damage == PREFIX_FIRST_FREE)
+		prefix_bitmap(f->bytes + 12288u + (size_t)bitmap * 512, first, false);
+	if (row->damage == PREFIX_FIRST_OUTSIDE)
+		fsimg_store_le32(refs, blocks);
+	if (row->damage == PREFIX_LATER_OUTSIDE || prefix_linked(row))
+		fsimg_store_le32(refs + 4, blocks);
+	if (row->damage == PREFIX_CUT || row->damage == PREFIX_CUT_BEFORE)
+		f->length = 12288u + (size_t)first * 512 + row->prefix;
+	if (row->damage == PREFIX_INDIRECT_BAD)
+		fsimg_store_le32(refs + 4, blocks);
+	if (row->damage == PREFIX_INDEX_CUT) {
+		/* Relocate the second indirect block past all namespace bytes.
+		 * Its allocated reference is valid in-volume, but not in-slice.
+		 */
+		fsimg_store_le32(refs + 4, blocks - 1);
+		prefix_bitmap(f->bytes + 12288u + (size_t)bitmap * 512,
+		    blocks - 1, true);
+		f->length = 12288u + (size_t)(blocks - 1) * 512;
+	}
+	if (row->damage == PREFIX_DIRECTORY) {
+		name = find_bytes(f, "bad\0", 4);
+		inode = prefix_qnx6_inode(f, fsimg_load_le32(name - 5));
+		fsimg_store_le32(inode + 36, blocks - 1);
+		prefix_bitmap(f->bytes + 12288u + (size_t)bitmap * 512,
+		    blocks - 1, true);
+		f->length = 12288u + (size_t)(blocks - 1) * 512;
+	}
+}
+
+/* ECMA-119 both-endian fields and section records, matching the independent
+ * encoder in iso9660-image.c. No production layout or decoder is used.
+ */
+static void
+prefix_iso32(unsigned char *p, uint32_t value)
+{
+	fsimg_store_le32(p, value);
+	fsimg_store_be32(p + 4, value);
+}
+
+static size_t
+prefix_iso_record(unsigned char *p, const char *name, uint32_t first,
+    uint32_t size, unsigned flags)
+{
+	size_t length = strlen(name), bytes = 33 + length + (length % 2 == 0);
+
+	bzero(p, bytes);
+	p[0] = (unsigned char)bytes;
+	prefix_iso32(p + 2, first);
+	prefix_iso32(p + 10, size);
+	p[25] = (unsigned char)flags;
+	p[28] = p[31] = 1;
+	p[32] = (unsigned char)length;
+	bcopy(name, p + 33, length);
+	return (bytes);
+}
+
+static void
+prefix_iso(fixture_t *f, const prefix_case_t *row)
+{
+	unsigned char *root, *p;
+	size_t used = 68;
+	uint32_t first = row->damage == PREFIX_ISO_SYSTEM ? 1 :
+	    row->damage == PREFIX_ISO_DESCRIPTOR ? 16 : 104;
+
+	/* Keep the writer's descriptors/path tables; replace its root records
+	 * with a small plain ISO hierarchy at an independently chosen block.
+	 */
+	p = f->bytes + 16 * 2048;
+	prefix_iso32(p + 156 + 2, 84);
+	prefix_iso32(p + 156 + 10, 2048);
+	fsimg_store_le32(f->bytes +
+	    (size_t)fsimg_load_le32(p + 140) * 2048 + 2, 84);
+	fsimg_store_be32(f->bytes +
+	    (size_t)fsimg_load_be32(p + 148) * 2048 + 2, 84);
+	root = f->bytes + 84 * 2048;
+	bzero(root, 2048);
+	prefix_iso_record(root, "x", 84, 2048, 2);
+	root[33] = 0;
+	prefix_iso_record(root + 34, "x", 84, 2048, 2);
+	root[34 + 33] = 1;
+	used += prefix_iso_record(root + used, "A;1", 100, 512, 0);
+	used += prefix_iso_record(root + used, "EMPTY;1", 101, 0, 0);
+	used += prefix_iso_record(root + used, "Z;1", 102, 512, 0);
+	if (row->damage == PREFIX_ISO_MULTI) {
+		used += prefix_iso_record(root + used, "FOO;1", 104, 2048, 0x80);
+		used += prefix_iso_record(root + used, "FOO;1", 106, 3 * 2048, 0x80);
+		prefix_iso_record(root + used, "FOO;1", 110, 2048, 0);
+		f->length = 108 * 2048 + 137;
+	} else {
+		prefix_iso_record(root + used, "FOO;1", first, 3 * 2048, 0);
+		if (row->damage == PREFIX_CUT || row->damage == PREFIX_CUT_BEFORE)
+			f->length = 104 * 2048 + row->prefix +
+			    (row->damage == PREFIX_CUT ? 137 : 0);
+	}
+	/* Distinct logical-block bytes detect gaps, zeros and partial blocks. */
+	for (unsigned i = 0; i < 10; i++)
+		memset(f->bytes + (104 + i) * 2048, 'D' + i, 2048);
+	if (row->damage == PREFIX_ISO_MULTI) {
+		for (unsigned i = 0; i < 3; i++)
+			memset(f->bytes + (106 + i) * 2048, 'H' + i, 2048);
+	}
+	memset(f->bytes + 100 * 2048, 'A', 512);
+	memset(f->bytes + 102 * 2048, 'C', 512);
+}
+
+static void
+prefix_ifs(fixture_t *f, const prefix_case_t *row)
+{
+	unsigned char bytes[1536];
+	unsigned char *name = find_bytes(f, "foo\0", 4);
+	size_t record = (size_t)(name - f->bytes) - 32;
+	uint32_t old = fsimg_load_le32(f->bytes + record + 24);
+	uint32_t first = (uint32_t)f->length - 4, sum = 0;
+
+	bcopy(f->bytes + old, bytes, sizeof(bytes));
+	CHECK(memory_resize(f, f->length + sizeof(bytes), NULL) == FSIMG_OK);
+	bcopy(bytes, f->bytes + first, sizeof(bytes));
+	fsimg_store_le32(f->bytes + record + 24, first);
+	fsimg_store_le32(f->bytes + 8, (uint32_t)f->length);
+	for (size_t i = 0; i + 4 < f->length; i += 4)
+		sum += fsimg_load_le32(f->bytes + i);
+	fsimg_store_le32(f->bytes + f->length - 4, 0u - sum);
+	if (row->damage != PREFIX_CLEAN)
+		f->length = first + row->prefix;
+}
+
+static void
+build_prefix_case(fixture_t *f, const prefix_case_t *row)
+{
+	fsimg_entry_t entries[] = {
+		{ .path = "/a", .kind = FSIMG_ENTRY_FILE, .size = 512 },
+		{ .path = "/empty", .kind = FSIMG_ENTRY_FILE },
+		{ .path = "/z", .kind = FSIMG_ENTRY_FILE, .size = 512 },
+		{ .path = "/foo", .kind = FSIMG_ENTRY_FILE, .size = 1536 },
+		{ .path = row->damage == PREFIX_DIRECTORY ? "/bad" : "/link",
+		    .kind = row->damage == PREFIX_DIRECTORY ? FSIMG_ENTRY_DIRECTORY :
+		    FSIMG_ENTRY_FILE, .size = row->damage == PREFIX_DIRECTORY ? 0 : 512 },
+		{ .path = "/bad/child", .kind = FSIMG_ENTRY_FILE, .size = 512 }
+	};
+
+	if (strcmp(row->format, "qnx6") == 0 &&
+	    (row->damage == PREFIX_INDEX_CUT || row->damage == PREFIX_INDIRECT_BAD))
+		entries[3].size = 129 * 512;
+	size_t count = 4;
+
+	if (row->damage == PREFIX_DIRECTORY)
+		count = 6;
+	else if (prefix_linked(row))
+		count = 5;
+	fixture_build(f, row->format, entries, count, true);
+	if (strcmp(row->format, "qnx4") == 0)
+		prefix_qnx4(f, row);
+	else if (strcmp(row->format, "qnx6") == 0)
+		prefix_qnx6(f, row);
+	else if (strcmp(row->format, "iso9660") == 0)
+		prefix_iso(f, row);
+	else
+		prefix_ifs(f, row);
+	/* Resize the callback adapter's cached slice before opening. */
+	CHECK(fsimg_io_resize(f->io, f->length, NULL) == FSIMG_OK);
+	if (strcmp(row->format, "iso9660") == 0) {
+		fsimg_read_options_t options;
+
+		fsimg_read_options_init(&options);
+		options.iso_view = FSIMG_ISO_VIEW_PRIMARY;
+		CHECK(fsimg_reader_open(f->ctx, f->io, &options, &f->reader,
+		    NULL) == FSIMG_OK);
+	} else
+		fixture_reader(f);
+}
+
+static void
+expect_iso_prefix(int root, const char *name, const prefix_case_t *row)
+{
+	unsigned char bytes[2048];
+	struct stat st;
+	int fd;
+
+	fd = openat(root, name, O_RDONLY | O_NOFOLLOW);
+	CHECK(fd != -1);
+	CHECK(fstat(fd, &st) == 0 && st.st_size == (off_t)row->prefix);
+	for (size_t i = 0; i < row->prefix / 2048; i++) {
+		unsigned char expected = (unsigned char)('D' + i);
+
+		/* The first section has one D block; the second starts at H. */
+		if (row->damage == PREFIX_ISO_MULTI && i != 0)
+			expected = (unsigned char)('H' + (i - 1));
+
+		CHECK(read(fd, bytes, sizeof(bytes)) == sizeof(bytes));
+		for (size_t j = 0; j < sizeof(bytes); j++)
+			CHECK(bytes[j] == expected);
+	}
+	CHECK(read(fd, bytes, 1) == 0);
+	CHECK(close(fd) == 0);
+}
+
+/* The row supplies the oracle; format selection only chooses its byte codec. */
+static void
+expect_prefix_output(int output, const prefix_case_t *row)
+{
+	bool iso = strcmp(row->format, "iso9660") == 0;
+	const char *plain = iso ? "FOO" : "foo";
+	const char *partial = iso ? "FOO.partial" : "foo.partial";
+
+	expect_pattern_file(output, iso ? "A" : "a", 512, 0, 512);
+	expect_pattern_file(output, iso ? "EMPTY" : "empty", 0, 1, 0);
+	expect_pattern_file(output, iso ? "Z" : "z", 512, 2, 512);
+	if (row->output_name == NULL || strcmp(row->output_name, plain) != 0)
+		expect_absent(output, plain);
+	if (row->output_name == NULL || strcmp(row->output_name, partial) != 0)
+		expect_absent(output, partial);
+	if (row->output_name != NULL) {
+		if (iso)
+			expect_iso_prefix(output, row->output_name, row);
+		else
+			expect_pattern_file(output, row->output_name,
+			    row->prefix, 3, row->prefix);
+	}
+	if (row->empty_directory != NULL) {
+		CHECK(directory_children(output, row->empty_directory) == 0);
+		expect_absent(output, "bad.partial");
+		expect_absent(output, "bad/child");
+		expect_absent(output, "child");
+	}
+	if (row->linked_output_name != NULL) {
+		expect_absent(output, "link");
+		expect_pattern_file(output, row->linked_output_name,
+		    row->prefix, 3, row->prefix);
+	}
+}
+
+static void
+check_prefix_case(const prefix_case_t *row, bool salvage)
+{
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	fsimg_status_t status, expected;
+	char directory[] = "salvage-prefix-XXXXXX";
+	int parent, output;
+
+	parent = open_destination_parent(directory);
+	build_prefix_case(&f, row);
+	fsimg_extract_options_init(&options);
+	if (salvage)
+		options.flags |= FSIMG_EXTRACT_SALVAGE;
+	expected = salvage ? row->salvage_status : row->strict_status;
+	status = fsimg_extract_at(f.reader, parent, "out", &options, &error);
+	if (status != expected || (!salvage && expected != FSIMG_OK &&
+	    strcmp(error.message, row->strict_message) != 0))
+		fprintf(stderr, "prefix %s/%s %s: expected %s, got %s: %s\n",
+		    row->format, row->name, salvage ? "salvage" : "strict",
+		    fsimg_status_string(expected), fsimg_status_string(status),
+		    error.message);
+	CHECK(status == expected);
+	if (!salvage && expected != FSIMG_OK) {
+		CHECK(error.status == row->strict_status);
+		CHECK(strcmp(error.message, row->strict_message) == 0);
+		CHECK(f.reader->state == FSIMG_READER_FAILED);
+		expect_losses(&f, 0, 0, NULL, 0);
+	} else {
+		output = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+		CHECK(output != -1);
+		expect_prefix_output(output, row);
+		expect_losses(&f, row->loss_count, row->loss_count,
+		    row->loss_path, row->loss_mask);
+		CHECK(f.shortened == row->shortened);
+		CHECK(f.skipped == row->skipped);
+		if (row->linked_output_name != NULL) {
+			CHECK(strcmp(f.first_loss_path, "/foo") == 0);
+			CHECK(f.first_loss_mask == row->loss_mask);
+		}
+		CHECK(f.reader->state == FSIMG_READER_DONE);
+		if (expected == FSIMG_EPARTIAL)
+			CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+		CHECK(close(output) == 0);
+	}
+	remove_tree(parent, "out");
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+	fixture_close(&f);
+}
+
+static void
+test_strict_exclusive_creation_collision_preserves_existing_file(void)
+{
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	char directory[] = "salvage-strict-collision-XXXXXX";
+	fsimg_status_t status;
+	char bytes[9];
+	int parent, fd;
+
+	parent = open_destination_parent(directory);
+	fake_open(&f);
+	f.fake.host_collision = true;
+	f.fake.collision_parent = parent;
+	fsimg_extract_options_init(&options);
+	status = fsimg_extract_at(f.reader, parent, "out", &options, &error);
+	if (status != FSIMG_EEXISTS)
+		fprintf(stderr, "strict collision: %s: %s\n",
+		    fsimg_status_string(status), error.message);
+	CHECK(status == FSIMG_EEXISTS);
+	CHECK(error.status == FSIMG_EEXISTS);
+	CHECK(strcmp(error.message, "exclusive output file creation failed") == 0);
+	CHECK(f.reader->state == FSIMG_READER_FAILED);
+	expect_losses(&f, 0, 0, NULL, 0);
+	fd = openat(parent, "out/c", O_RDONLY | O_NOFOLLOW);
+	CHECK(fd != -1);
+	CHECK(read(fd, bytes, sizeof(bytes)) == 8);
+	CHECK(bcmp(bytes, "occupied", 8) == 0);
+	CHECK(read(fd, bytes, 1) == 0);
+	CHECK(close(fd) == 0);
+	remove_tree(parent, "out");
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+	fixture_close(&f);
+}
+
+/* Each row owns a disposable working directory. A failed assertion in a
+ * child cannot hide another row or leave its output tree behind.
+ */
+static unsigned
+run_file_prefix_or_collision_row(const prefix_case_t *prefix, const file_case_t *file,
+    const char *format, bool salvage)
+{
+	char directory[] = "salvage-row-XXXXXX";
+	const char *name = prefix != NULL ? prefix->name : file->name;
+	pid_t child;
+	int status;
+	bool passed;
+
+	CHECK(mkdtemp(directory) != NULL);
+	child = fork();
+	CHECK(child != -1);
+	if (child == 0) {
+		CHECK(chdir(directory) == 0);
+		if (prefix != NULL)
+			check_prefix_case(prefix, salvage);
+		else {
+			char destination[] = "destination-XXXXXX";
+			int parent = open_destination_parent(destination);
+
+			if (salvage)
+				check_file_salvage(format, file, parent,
+				    "/dir/foo", "/dir/foo.partial");
+			else
+				check_file_strict(format, file, parent,
+				    "/dir/foo", "/dir/foo.partial");
+			CHECK(close(parent) == 0);
+			CHECK(rmdir(destination) == 0);
+		}
+		exit(0);
+	}
+	CHECK(waitpid(child, &status, 0) == child);
+	remove_tree(AT_FDCWD, directory);
+	passed = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+	fprintf(stderr, "regression %s/%s %s: %s\n", format, name,
+	    salvage ? "salvage" : "strict", passed ? "PASS" : "FAIL");
+	return (!passed);
+}
+
+static unsigned
+test_file_prefixes_and_exclusive_creation_collisions(void)
+{
+	static const char *const formats[] = { "fat16", "exfat" };
+	unsigned failures = 0;
+
+	for (size_t i = 0; i < sizeof(prefix_cases) / sizeof(prefix_cases[0]); i++) {
+		for (unsigned salvage = 0; salvage < 2; salvage++)
+			failures += run_file_prefix_or_collision_row(&prefix_cases[i], NULL,
+			    prefix_cases[i].format, salvage != 0);
+	}
+	for (size_t i = 0; i < sizeof(file_cases) / sizeof(file_cases[0]); i++) {
+		if (file_cases[i].damage != FILE_LATER_COLLISION &&
+		    file_cases[i].damage != FILE_LATER_DIRECTORY_COLLISION)
+			continue;
+		for (size_t j = 0; j < sizeof(formats) / sizeof(formats[0]); j++) {
+			for (unsigned salvage = 0; salvage < 2; salvage++)
+				failures += run_file_prefix_or_collision_row(NULL, &file_cases[i],
+				    formats[j], salvage != 0);
+		}
+	}
+	return (failures);
+}
+
 int
 main(void)
 {
+	unsigned regression_failures;
+
+	regression_failures = test_file_prefixes_and_exclusive_creation_collisions();
+	test_strict_exclusive_creation_collision_preserves_existing_file();
 	CHECK(FSIMG_EPARTIAL == -14);
 	CHECK(FSIMG_LOSS_EXAMPLES == 32u);
 	CHECK(strcmp(fsimg_status_string(FSIMG_EPARTIAL), "incomplete extraction") == 0);
@@ -2280,5 +3206,6 @@ main(void)
 	test_file_salvage_prefix_bytes_partial_names_collisions_and_output_limits();
 	test_terminal_content_failure_takes_precedence_over_directory_loss();
 	test_one_cluster_file_work_ignores_long_chain_and_late_cycle();
+	CHECK(regression_failures == 0);
 	return (0);
 }

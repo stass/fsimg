@@ -588,6 +588,31 @@ iso_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 	return (FSIMG_OK);
 }
 
+/* Under salvage a file's index ends at its first section the content domain does
+ * not hold whole, so the leading sections and the readable blocks of a straddling
+ * one survive and nothing outside the domain is indexed. Returns true when the
+ * section, clipped to the domain, still goes into the index.
+ */
+static bool
+section_clip(const fsimg_reader_t *reader, fsimg_extent_index_t *index,
+    fsimg_extent_t *extent)
+{
+	const fsimg_extent_domain_t *domain = &reader->content_domain;
+	uint64_t end = domain->offset + domain->length;
+
+	if (fsimg_extent_index_stopped(index))
+		return (false);
+	if (extent->image_offset < domain->offset || extent->image_offset >= end) {
+		fsimg_extent_index_stop(index);
+		return (false);
+	}
+	if (extent->length > end - extent->image_offset) {
+		extent->length = end - extent->image_offset;
+		fsimg_extent_index_stop(index);
+	}
+	return (true);
+}
+
 /* Append a file section with data to the current file's index: its data,
  * past the extended attribute record, at logical offset, rounded up to
  * whole blocks as the index requires. Only the final section can gain
@@ -615,6 +640,8 @@ section_index(fsimg_reader_t *reader, const iso_record_t *record,
 		    ISO_BLOCK_BYTES,
 		.length = ISO_BLOCKS(record->data_length) * ISO_BLOCK_BYTES
 	};
+	if (reader->salvage.enabled && !section_clip(reader, iso->file, &extent))
+		return (FSIMG_OK);
 	return (fsimg_extent_index_append(iso->file, &extent, error));
 }
 

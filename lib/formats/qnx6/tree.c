@@ -368,7 +368,8 @@ visit_node(qnx6_walk_t *walk, uint32_t block, unsigned height, uint64_t first,
  * its policy to every block the walk visits, indirect blocks included. An
  * object without leaves has the empty (NULL) index. The descriptor's depth
  * must reach n; leaves beyond the declared length are refused, since the
- * classic profile has no qualified preallocation.
+ * classic profile has no qualified preallocation. Under salvage a regular
+ * file's walk keeps the leaves before the damage it finds.
  */
 fsimg_status_t
 qnx6_index_build(fsimg_reader_t *reader, const qnx6_object_t *object,
@@ -419,6 +420,7 @@ qnx6_index_build(fsimg_reader_t *reader, const qnx6_object_t *object,
 	if (status == FSIMG_OK)
 		status = flush_run(walk, error);
 done:
+	status = fsimg_reader_salvage_keep(reader, walk->index, status, error);
 	if (status == FSIMG_OK)
 		*out = walk->index;
 	else

@@ -210,6 +210,17 @@ bool fsimg_reader_decode_rejected(const fsimg_reader_t *, const fsimg_error_t *,
  */
 fsimg_status_t fsimg_reader_salvage_plan(fsimg_reader_t *, bool *,
     fsimg_error_t *);
+/* Finish a walk of the current regular file's allocation: a walk whose decoder
+ * rejected the image keeps the index it built before the damage, stopped so that
+ * a lookup past it rejects too, and reports FSIMG_OK. Without salvage, for any
+ * other entry, for a walk with no index yet and for any other failure, the
+ * status comes back unchanged and the caller frees the index. A directory's walk
+ * has a directory or nothing current, so a bad directory stays rejected whole.
+ * An index that already covers the file's size leaves nothing to shorten: damage
+ * past the size is not damage to the file.
+ */
+fsimg_status_t fsimg_reader_salvage_keep(fsimg_reader_t *,
+    fsimg_extent_index_t *, fsimg_status_t, const fsimg_error_t *);
 /* Index a linked allocation for fsimg_reader_salvage_plan() at replay. The index
  * covers the clusters before the first damage, each once: the chain's end, a
  * link the driver rejects, or the first repeat of a cycle. A chain cut short sets

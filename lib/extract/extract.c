@@ -304,6 +304,23 @@ creation_failed(int saved, const char *message, fsimg_error_t *error)
 	return (fsimg_error_set(error, status, saved, FSIMG_OP_EXTRACT, message));
 }
 
+/* Under salvage a name the host already holds costs that entry alone: report the
+ * collision and return true. Nothing is opened, so nothing is overwritten or
+ * merged.
+ */
+static bool
+salvage_collision_reported(extract_state_t *state, const fsimg_entry_t *entry, int saved)
+{
+	if (!state->reader->salvage.enabled || saved != EEXIST)
+		return (false);
+	fsimg_reader_salvage_loss(state->reader, entry->path, NULL,
+	    FSIMG_LOSS_COLLISION);
+	return (true);
+}
+
+/* Create and open one directory and push its frame. FSIMG_DONE means salvage
+ * reported a taken name and pruned the subtree, with no frame pushed.
+ */
 static fsimg_status_t
 extract_directory(extract_state_t *state, const fsimg_entry_t *entry,
     const char *name, fsimg_error_t *error)
@@ -332,6 +349,10 @@ extract_directory(extract_state_t *state, const fsimg_entry_t *entry,
 	if (mkdirat(parent, name, 0700) == -1) {
 		saved = errno;
 		fsimg_fd_release(ctx, -1);
+		if (salvage_collision_reported(state, entry, saved)) {
+			status = fsimg_reader_skip_directory(state->reader, error);
+			return (status == FSIMG_OK ? FSIMG_DONE : status);
+		}
 		return (creation_failed(saved,
 		    "exclusive output directory creation failed", error));
 	}
@@ -499,9 +520,11 @@ extract_file(extract_state_t *state, const fsimg_entry_t *entry,
 	if (fd == -1) {
 		saved = errno;
 		fsimg_fd_release(ctx, -1);
-		if (damaged && (saved == EEXIST || saved == ENAMETOOLONG)) {
+		if (salvage_collision_reported(state, entry, saved))
+			return (FSIMG_DONE);
+		if (damaged && saved == ENAMETOOLONG) {
 			fsimg_reader_salvage_loss(state->reader, entry->path, NULL,
-			    saved == EEXIST ? FSIMG_LOSS_COLLISION : FSIMG_LOSS_SKIPPED);
+			    FSIMG_LOSS_SKIPPED);
 			return (FSIMG_DONE);
 		}
 		return (creation_failed(saved,
@@ -677,7 +700,7 @@ extract_entries(extract_state_t *state, fsimg_error_t *error)
 		} else {
 			status = extract_entry(state, entry, path_length, error);
 		}
-		/* Salvage reported the file and created nothing for it. */
+		/* Salvage reported the entry and created nothing for it. */
 		if (status == FSIMG_DONE && state->reader->salvage.enabled)
 			continue;
 		if (status != FSIMG_OK)

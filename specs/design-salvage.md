@@ -41,19 +41,22 @@ A linked cluster allocation keeps each cluster once. A cluster belongs to the
 prefix when its own link reads and validates, its allocation bit included, and
 the chain ends at its first repeat, found after the walk proves a cycle and
 before any repeat is delivered. A chain broken before the file's size ends the
-file there even past the initialized length; a chain longer than the size is not
-damage to the file. Past the slice the initialized length decides, since defined
-zeros need no storage.
+file there even past the initialized length. Past the slice the initialized
+length decides, since defined zeros need no storage.
+
+Damage past the file's size, in any format's allocation, is not damage to the
+file: every byte is available, so the file keeps its name and no loss is reported.
 
 The prefix length and damage decision select the name at exclusive creation.
 There is no rename and no added sandbox authority. Copying uses only the
 planned prefix through ordinary content delivery. Damage encountered during
 copying is terminal under the existing failure contract.
 
-If `foo.partial` is taken, exclusive creation reports the collision and salvage
-skips the file. It never overwrites or tries a numbered fallback. A suffixed name
-over the name limit is reported and skipped the same way. Name validation and the
-ordinary policy for unrepresentable names still apply.
+If a file's output name is taken, `foo.partial` or a clean name alike, exclusive
+creation reports the collision and salvage skips the file. It never overwrites
+or tries a numbered fallback. A suffixed name over the name limit is reported and
+skipped the same way. Name validation and the ordinary policy for unrepresentable
+names still apply.
 
 Each name is handled independently, including several names for one object.
 An earlier name supplies no proof about a later name's content. There is no
@@ -86,8 +89,9 @@ Classification follows the operation that fails, not a public error code:
 * Image decoding or allocation validation during file planning stops that file
   at its first damage; directory decoding or namespace validation skips that
   listing, and entry decoding during replay skips that entry.
-* Exclusive creation finding the chosen `.partial` name occupied skips and
-  reports that file.
+* Exclusive creation finding any name occupied, for a file or a directory, skips
+  and reports that entry, and a directory's subtree with it. A clean `foo.partial`
+  following a damaged `foo` costs only that name and its subtree.
 * Every other failing operation is terminal: opening checks, resource admission,
   cancellation, host input I/O and stability checks, output creation/copying/
   finalization, scratch/index storage and reporting. Changed input, output
@@ -96,8 +100,9 @@ Classification follows the operation that fails, not a public error code:
 The error's operation identifies a decoder's failure: a driver's prepare or
 replay rejecting the image reports `FSIMG_ECORRUPT` or `FSIMG_EUNSUPPORTED` under
 `FSIMG_OP_READER`, and scratch storage reports `FSIMG_OP_METADATA` even for
-corruption it detects, the extent index's checks included. A lookup past a stopped
-index is the image ending, so it reports `FSIMG_OP_READER`. Everything else is
+corruption it detects, the extent index's checks of its records included. An
+appended extent outside its domain is image damage and a lookup past a stopped
+index is the image ending, so both report `FSIMG_OP_READER`. Everything else is
 terminal, so a new failure is terminal until a decoder declares it. A scratch
 record that scratch storage delivers intact and a driver's own decoding then
 rejects cannot be told from image damage and is reported as a loss, like the
@@ -136,8 +141,9 @@ the total, and the callback's consumer keeps the examples.
   shortened prefixes, `.partial` names, no zero fill and readable siblings.
 * Damage child/root listings and replayed entries; check sibling recovery,
   reader state, unknown descendant counts and terminal rewind failure.
-* Exercise occupied `.partial` names, including host-equivalent spellings, and
-  repeated object names; check no overwrite, fallback or alias proof.
+* Exercise occupied names, clean and `.partial`, for files and directories,
+  including host-equivalent spellings, and repeated object names; check no
+  overwrite, merge, fallback or alias proof.
 * Check capped reports with exact totals, partial status, exit 1 and retained
   roots; inject terminal resource, I/O, changed-input, scratch and copy failures.
 * Exercise domain boundaries and extraction breakout attempts under the ordinary

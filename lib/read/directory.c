@@ -442,10 +442,11 @@ validate_namespace(fsimg_directory_build_t *build, fsimg_error_t *error)
 }
 
 /* The operation an error names tells a decoder's rejection apart from everything
- * else the callback can reach: a decoder, the image read funnel and a lookup past
- * a stopped extent index report FSIMG_OP_READER, while scratch storage, including
- * the extent index's own checks, host I/O and resource admission report their
- * own operations, even for FSIMG_ECORRUPT. Under FSIMG_OP_READER, the other
+ * else the callback can reach: a decoder, the image read funnel, an appended
+ * extent outside its domain and a lookup past a stopped extent index report
+ * FSIMG_OP_READER, while scratch storage, including the extent index's checks of
+ * its records, host I/O and resource admission report their own operations,
+ * even for FSIMG_ECORRUPT. Under FSIMG_OP_READER, the other
  * statuses are changed input and broken driver contracts. Anything not named here
  * is terminal. A driver's own check of a prepared record reports like its decoder
  * and is stepped over too, since the two cannot be told apart.

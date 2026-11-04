@@ -603,12 +603,6 @@
   prefixes, skipped bad directories and capped loss reports with totals, using
   existing limits and unchanged extraction safety rules.
 
-* [Medium] **ISO 9660 image damage the extent index reports as scratch**
-  (`lib/meta/extent.c`, `lib/formats/iso9660/`): salvage classifies by the error's
-  operation, so a file section inside the volume but outside the content domain
-  fails its append under `FSIMG_OP_METADATA` (`iso9660/directory.c:187,618`) and
-  ends the extraction instead of skipping the entry.
-
 * [Low] **Salvage ranges after interior damage** (`lib/read`, `lib/formats/`):
   deferred extension to the prefix-only [salvage policy](specs/design-salvage.md).
   Design recovery of independently located intact later ranges with explicit

@@ -218,7 +218,8 @@ qnx4_extents_consistent(const qnx4_inode_t *record)
 }
 
 /* Build the extent index of a validated record's storage under policy. An
- * object without storage has the empty (NULL) index.
+ * object without storage has the empty (NULL) index. Under salvage a regular
+ * file's walk keeps the extents before the damage it finds.
  */
 fsimg_status_t
 qnx4_index_build(fsimg_reader_t *reader, const qnx4_inode_t *record,
@@ -264,6 +265,7 @@ qnx4_index_build(fsimg_reader_t *reader, const qnx4_inode_t *record,
 	if (status == FSIMG_OK && !fifo && walk->allocated != limit)
 		status = qnx4_corrupt(error,
 		    "QNX4 allocation is short of the object's size");
+	status = fsimg_reader_salvage_keep(reader, walk->index, status, error);
 	if (status == FSIMG_OK)
 		*out = walk->index;
 	else

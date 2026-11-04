@@ -304,7 +304,8 @@ fsimg_status_t fsimg_io_flush(fsimg_io_t *, bool, fsimg_error_t *);
  * which is not delivered; the file at path, created shortened as its name with
  * ".partial" appended; the damaged file at path, skipped with no output because
  * no byte of it is recoverable or its suffixed name exceeds the name limit; or
- * the damaged file at path, skipped because its ".partial" name is taken.
+ * the file or directory at path, skipped with any children because its output
+ * name is taken.
  */
 #define FSIMG_LOSS_DIRECTORY 0x10000u
 #define FSIMG_LOSS_ENTRY 0x20000u
@@ -1343,7 +1344,8 @@ typedef struct fsimg_extract_options {
  * continues; any other failure ends the extraction with its ordinary error.
  * A damaged file is created shortened, as its name with ".partial" appended
  * and holding the bytes before the first noticed damage, or reported and
- * skipped when it has none or that name is taken or too long.
+ * skipped when it has none or that name is too long. Any entry whose output
+ * name is taken is reported and skipped, a directory with its children.
  * A completed walk that noticed a loss returns FSIMG_EPARTIAL, the private
  * output retained and marked incomplete; one that noticed none is FSIMG_OK.
  */

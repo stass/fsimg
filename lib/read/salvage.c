@@ -151,6 +151,18 @@ chain_walk(fsimg_reader_t *reader, const fsimg_salvage_chain_t *chain,
 }
 
 fsimg_status_t
+fsimg_reader_salvage_keep(fsimg_reader_t *reader, fsimg_extent_index_t *index,
+    fsimg_status_t status, const fsimg_error_t *failure)
+{
+	if (status == FSIMG_OK || index == NULL ||
+	    reader->entry.kind != FSIMG_ENTRY_FILE ||
+	    !fsimg_reader_decode_rejected(reader, failure, status))
+		return (status);
+	fsimg_extent_index_stop(index);
+	return (FSIMG_OK);
+}
+
+fsimg_status_t
 fsimg_reader_salvage_index(fsimg_reader_t *reader,
     const fsimg_salvage_chain_t *chain, fsimg_extent_index_t **out,
     fsimg_error_t *error)
