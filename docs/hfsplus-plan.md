@@ -69,7 +69,7 @@ Non-goals:
 | [The draft](../fsspecs/HFSPLUS_HFSX_FSIMG_SPEC.md) | Research draft, original prose | Questions, invariants (section 15), test matrix (section 17). Every uncertainty in its section 20 is a gate here, never a default |
 | Apple TN1150 | Vendor documentation; facts paraphrased, no text or sample code reproduced | Layout, B-trees, catalog, Unicode rules, hard links, journal, wrapper |
 | Apple `hfs_format.h`, `hfs_catalog.c`, `hfs_link.c` and xnu `decmpfs.h` | APSL 2.0; facts only, no code or declarations | Modern flags, the attribute key and records, private names, the link-stub tests and dates, the compression header and types |
-| The Apple `hfs` and `xnu` trees at tags `hfs-715.120.4` and `xnu-12377.121.6`: the kernel's and `fsck_hfs`'s folding tables, the name conversion and its data, the illegal-name repair routine, the link and journal paths, the volume flush and `decmpfs.c` | APSL 2.0; facts only, compared in the record's Apple source cross-check; their gap to the host's `hfs-715.160.9` and `xnu-12377.161.14` is stated there and not closed | Confirmation of the Unicode tables on every row, the 23 `fsck_hfs` sequences, the stub dates, the journal's offset bases and bounds, the alternate header's triggers, the inline attribute bound. Compression types and chunk tables stay evidence from E6: the compression kext's source is not public |
+| The Apple `hfs` and `xnu` trees at tags `hfs-715.120.4` and `xnu-12377.121.6`: the kernel's and `fsck_hfs`'s folding tables, the name conversion and its data, the illegal-name repair routine, the link and journal paths, the volume flush and `decmpfs.c` | APSL 2.0; facts only, compared in the record's Apple source cross-check; their gap to the host's `hfs-715.160.9` and `xnu-12377.161.14` is stated there and not closed | Confirmation of the Unicode tables on every row, the 23 `fsck_hfs` sequences, the stub dates, the journal's offset base and bounds, the alternate header's triggers, the inline attribute bound. Compression types and chunk tables stay evidence from E6: the compression kext's source is not public |
 | NetBSD `sys/fs/hfs/libhfs.c` | BSD-2-Clause | A second, independent derivation of the folding table, compared, not imported |
 | Unicode 3.2.0 character data | Unicode license, notice already in `third-party/Unicode-LICENSE.txt` | Input of the table generator |
 | Apple `lzfse` at a pinned commit | BSD-3-Clause | The imported LZFSE and LZVN decoders, under the [codec design](../specs/design-codecs.md#imported-lzfse-and-lzvn-decoders) |
@@ -171,7 +171,9 @@ special cases rather than handling each case.
     grows with the file and delivery keeps its single owner.
 12. **No journal replay.** An empty or uninitialized journal is read through;
     one with transactions is refused, because its base structures may be
-    stale.
+    stale. On a wrapped volume an initialized journal is refused too,
+    because macOS's own paths disagree on where its stored offset counts
+    from.
 13. **The writer bulk-builds and never fragments.** Sorted records are packed
     into complete trees and every fork is one extent, so there is no node
     split, rebalancing, overflow record or journal in the writer.
@@ -275,9 +277,9 @@ Each experiment varies one property on disposable volumes:
   bytes the detection needs, the Apple source cross-check gives the test
   itself, and the patch tool sets too few fields to make one. The wrapped
   journal's offset base, which E11 observed once, is explained by the
-  cross-check (two mount paths, two bases) and the design locates the
-  journal by the `.journal` fork, so the observation is evidence for the
-  two bases, not a rule of its own. The archive.org images that E10
+  cross-check (two mount paths that count the offset from different starts), which is why the reader
+  refuses a wrapped volume with an initialized journal and reads one
+  never initialized. The archive.org images that E10
   decodes are for local testing only.
 
 ### 2. Design revision and tables
@@ -434,9 +436,11 @@ Each experiment varies one property on disposable volumes:
 * The wrapper path of `volume.c`; generator fixtures with the embedded
   volume at the start, middle and end of the outer volume; E11 captures.
 * **Gate:** wrapped fixtures read and verify as their embedded volume, a
-  wrapped journal is located by its `.journal` fork with the info block's
-  `offset` accepted in either base, and the manual states that the outer
-  HFS volume is not checked.
+  wrapped volume with an uninitialized journal
+  (`h-hfsplus-16777216-e11-mkfs-w-J`) reads, one with an initialized
+  journal (`h-hfsplus-16777216-e11-mkfs-w-J-mounted`) is
+  `FSIMG_EUNSUPPORTED`, and the manual states that the outer HFS volume is
+  not checked and that such a journal is refused.
 
 Unscheduled, each behind its own design: a common representation of
 resource forks, attributes, Finder information and BSD flags, and the HFS

@@ -1070,15 +1070,24 @@ extents like any fork:
   `logicalSize` is the data offset plus the data length plus the map
   length; the data offset is 256 and the map 50 bytes on every native file
   (E6). The reader requires the relations and does not assume the
-  constants. The resource payload is the resource length of bytes after
-  the length word, and every chunk lies inside it, after the count and
-  its `count` pairs: a chunk that reaches past the resource payload, into
-  the map or beyond, is `FSIMG_ECORRUPT` even when it lies within the
-  fork. [DC], [R]
+  constants. Two intervals of the fork, with `D` the data offset, are
+  distinct. The table interval holds the count and the pairs, `[D + 4,
+  D + 8 + 8 * count)`: the length word is at `D`, the count after it, and
+  a chunk's offset is counted from the count, so the first chunk starts
+  `4 + 8 * count` bytes after the count (E6). The payload interval follows
+  the table interval and ends where the declared resource data ends, `D`
+  plus the data length, the resource length of bytes after the length
+  word. The table interval must end inside the payload's declared end;
+  table entries are read from the table interval and every chunk lies in
+  the payload interval, so a chunk that overlaps the table or reaches
+  past the declared end, into the map or beyond, is `FSIMG_ECORRUPT` even
+  when it lies within the fork. Type 4 stores each chunk's own length
+  beside its offset; types 8 and 12 store only successor offsets, below.
+  [DC], [R]
 * **Types 8 and 12** begin the fork, at offset zero, with a table of
   `count + 1` little-endian words, the entry for chunk `i` at byte `4 * i`.
   Three quantities are distinct: the table's base, which is fork offset
-  zero; the table's end `T`, which is the first word's value; and the chunk
+  zero, its entries being successor-offset words and not pairs; the table's end `T`, which is the first word's value; and the chunk
   offsets, which are the words themselves. Chunk `i` spans
   `[offset[i], offset[i + 1])`, so `offset[0]` is `T`, the first chunk
   starts where the table ends, the offsets ascend, and `offset[count]` is
@@ -1137,34 +1146,35 @@ info block: on a journaled volume the root holds the format-owned file
 `.journal`, whose data fork is exactly the journal, so the journal is the
 one extent of that fork, `size` bytes long, in the content domain and in
 whole allocation blocks, and the header, when there is one, is read at the
-extent's start (E1, E8). The info block's `offset` must then agree with
-that location, in one of two bases: counted from the volume's own start,
-or, on a [wrapped](#the-hfs-wrapper) volume, from the wrapper's start. Any
-other value, a `size` that differs from the fork's `logicalSize`, a fork
-of more than one extent, or a journaled volume without the file is
-`FSIMG_ECORRUPT`. An unwrapped volume has one base, so the rule is the
-same on both; nothing is converted, and nothing is searched for, because
-the location comes from the validated catalog fork rather than from
-the stored offset. With bit 13 clear, `journalInfoBlock` is not
-interpreted. The flags are read against this table, and the first
-matching row decides:
+extent's start (E1, E8). The info block's `offset` must then equal
+that location counted from the volume's own start. Any other value, a
+`size` that differs from the fork's `logicalSize`, a fork of more than one
+extent, or a journaled volume without the file is `FSIMG_ECORRUPT`.
+Nothing is converted, and nothing is searched for, because the location
+comes from the validated catalog fork rather than from the stored
+offset. With bit 13 clear, `journalInfoBlock` is not interpreted. The
+flags are read against this table, and the first matching row decides:
 
 | Flags | Rule |
 | --- | --- |
-| `0x4` set | Never initialized: no header is read; the location rule applies |
-| `0x1` set | Local journal: the location rule applies and the header is read at the fork's extent, once |
-| `0x2` set | External journal: no header is read |
+| `0x2` set | External journal: `FSIMG_EUNSUPPORTED`; no header is read and the `.journal` file, the `offset` and the `size` are not examined |
 | Neither `0x1` nor `0x2` | `FSIMG_ECORRUPT` |
+| `0x4` set | Never initialized: no header is read; the location rule applies |
+| `0x1` set, volume [wrapped](#the-hfs-wrapper) | `FSIMG_EUNSUPPORTED`; no other journal check runs |
+| `0x1` set | Local journal: the location rule applies and the header is read at the fork's extent, once |
 
-Two bases are admitted because macOS itself uses both: its early mount
-path takes the stored `offset` as counted from the embedded volume's
-start, and its late path adds the embedded start and writes the sum back,
-which is why the one `mkfs.hfsplus -w -J` image holds 12288 under flags
-`0x5` and 57344, the embedded start plus 12288, after one macOS mount, with
-the header at image byte 57344 (E11, and the record's Apple source
-cross-check). The fork's location is the same under either base, so no
-case list is needed and a header planted at a second candidate location
-cannot hide a pending journal. [TN], [R]
+A wrapped volume with an initialized journal is refused because the stored
+offset's base is not established: macOS's early mount path takes it as
+counted from the embedded volume's start, its late path adds the embedded
+start and writes the sum back, so the one `mkfs.hfsplus -w -J` image holds
+12288 under flags `0x5` and 57344, the embedded start plus 12288, after one
+macOS mount, with the header at image byte 57344 (E11, and the record's
+Apple source cross-check). A stored `E + L` is read as `E + L` by one path
+and as `2E + L` by the other, and each location can hold a different
+header, so a pending journal could be hidden at the one fsimg does not
+read. A wrapped volume with flags `0x5` has no header and reads normally,
+its offset counted from the embedded volume's start as E11 records it.
+[TN], [R]
 
 ### Journal header
 
@@ -1201,9 +1211,10 @@ it; the rule stands unless one does. [TN], [R]
 | Bit 13 clear | Read normally |
 | Journaled; local journal; valid header; `start == end` after the wrap rule | Read normally; `info` reports a clean journal |
 | Journaled; info block flag `0x4` | Read normally; `info` reports an uninitialized journal, which holds no transactions |
+| Journaled; wrapped volume; local journal (flag `0x1`) | `FSIMG_EUNSUPPORTED`: macOS's own paths disagree on the stored offset's base, so fsimg cannot establish which location controls replay |
 | Journaled; `start != end` after the wrap rule | `FSIMG_EUNSUPPORTED`: the base structures may be stale until a mount replays the journal (the volume header of E8's interrupted image counts 1135 files and the replay makes it 1137) |
 | Journaled; flag `0x2` | `FSIMG_EUNSUPPORTED`: the journal is on another device |
-| Journaled; info block or header invalid, `.journal` missing, or its fork disagreeing with the info block in either base | `FSIMG_ECORRUPT` |
+| Journaled; info block or header invalid, `.journal` missing, or its fork disagreeing with the info block | `FSIMG_ECORRUPT` |
 
 A volume whose journaling `diskutil disableJournal` turned off has bit 13
 clear, no journal files and `journalInfoBlock` still set (E8); the first
@@ -1238,7 +1249,14 @@ interpreted nor exposed. Verification of a wrapped volume therefore covers
 the embedded volume and the wrapper fields that locate it, and is complete
 when they are; the manual states that the outer HFS volume is not checked.
 The writer never creates a wrapper: a usable one is a complete classic HFS
-volume, and no current macOS tool formats one. [TN], [R]
+volume, and no current macOS tool formats one.
+
+A wrapped volume whose journal is initialized (info block flag `0x1`) is
+refused with `FSIMG_EUNSUPPORTED`, because the [journal info
+block](#journal-info-block) offset has no established base on a wrapped
+volume. This is a limitation of the reader; refusing is the safe default,
+and a wrapped volume with a never-initialized journal reads normally.
+[TN], [R]
 
 ## Reader profile
 
@@ -1255,8 +1273,8 @@ volume, and no current macOS tool formats one. [TN], [R]
 | Symbolic-link targets | 1 to 1023 bytes |
 | Compression | Types 1, 3, 4, 7, 8, 11 and 12 |
 | Attributes | Inline, fork and extent records; marked as extra data, not delivered |
-| Journal | Unjournaled, or journaled with an empty or uninitialized local journal |
-| Wrapper | Read; outer volume not verified |
+| Journal | Unjournaled, or journaled with an empty or uninitialized local journal; on a wrapped volume, only an uninitialized one |
+| Wrapper | Read; outer volume not verified; an initialized journal inside it unsupported |
 
 The reader capability advertises files, directories, symbolic links and
 FIFOs; owner, mode and the created, modified, changed and accessed times in
@@ -1523,8 +1541,8 @@ code ran. The minimum matrix:
 | Attributes | Inline at 0, 1 and the largest inline size; fork records with 1, 8 and 9 extents; a continuation gap; an unknown record type; a name of 127 units and one of 128; names differing only in case; an attribute for a missing node ID; a flag disagreeing with the tree in each direction, a record with an attribute and a clear flag included; the extra-data mark on a resource fork, a stored attribute, a consumed compression attribute and none, listed and named in the extraction loss report |
 | Links and kinds | Symbolic links of 1, 1023 and 1024 bytes and one with a NUL; FIFOs, sockets and devices; hard-link stubs to files and symbolic links, two and three names across directories, a dangling stub, a zero reference, a link count off by one; a stub with `fileMode` 0; a stub dated from the root folder and one from the private data folder; `hlnk`/`hfs+` with another date, read as a file; a directory hard link refused and its Finder-alias look-alike read as a file; `temp` files |
 | Compression | Every type with content of 0, 1, 65535, 65536, 65537 and 200000 bytes; raw-marker chunks; a type 4 header, table and chunk out of range, a chunk inside the fork but past the resource payload, in the map, and a header whose relations fail; for types 8 and 12 a first word below `4 * (count + 1)`, beyond the fork, padded and unpadded, and a table whose words are read from offset zero while the first word points elsewhere; a chunk above the input bound; an inline size above 65536; an LZFSE `bvx-` block; overlapping and descending chunks; a chunk decoding one byte short and one long; an unknown type; a header shorter than 16 bytes; the flag without the attribute; the attribute without the flag; a nonempty data fork; sequential reading decoding each chunk once |
-| Journal | Unjournaled, clean empty journal in each byte order, uninitialized journal, transactions present with `start < end` and with `start > end`, `start == end` at a position other than `jhdr_size`, `start == size` with `end == jhdr_size` read as clean, `start` or `end` of 0, above `size` or not a multiple of 512, `size` below 256 KiB and above 1 GiB, external journal, flags with neither `0x1` nor `0x2`, a bad checksum, magic or size; journal files absent on a journaled volume and present on an unjournaled one; a `.journal` fork of two extents, of a length other than `size`, and at a start the info block's `offset` names in neither base |
-| Wrapper | A wrapped volume with its embedded extent at the start, the middle and the end; an extent outside the outer slice; an embedded `HX`; a wrapped journal in each state: uninitialized, clean with `offset` in the embedded base and in the wrapper's base, pending, and an `offset` matching the fork in neither base |
+| Journal | Unjournaled, clean empty journal in each byte order, uninitialized journal, transactions present with `start < end` and with `start > end`, `start == end` at a position other than `jhdr_size`, `start == size` with `end == jhdr_size` read as clean, `start` or `end` of 0, above `size` or not a multiple of 512, `size` below 256 KiB and above 1 GiB, external journal, flags with neither `0x1` nor `0x2`, a bad checksum, magic or size; journal files absent on a journaled volume and present on an unjournaled one; a `.journal` fork of two extents, of a length other than `size`, and at a start other than the info block's `offset`; an external journal with and without a `.journal` file; flags `0x3` and `0x6`, which the external row decides |
+| Wrapper | A wrapped volume with its embedded extent at the start, the middle and the end; an extent outside the outer slice; an embedded `HX`; a wrapped journal in each state: uninitialized, which reads (`h-hfsplus-16777216-e11-mkfs-w-J`), and initialized (`h-hfsplus-16777216-e11-mkfs-w-J-mounted`), clean, pending and with `offset` in either candidate base, each `FSIMG_EUNSUPPORTED`; an uninitialized wrapped journal whose `offset` does not match the fork |
 | Writer | Both variants; every block size of the writer profile; exact and automatic sizing at each bitmap-block boundary; an empty catalog; a full volume; names at each length after decomposition, each of the four reserved root names with the private data folder's spelled through four U+2400, colliding siblings on each variant, U+2400 stored as U+0000, and the refused names: percent-text values, an all-ignorable name on `hfsplus`, each of the 23 `fsck_hfs` sequences, alone and after a starter, and a Greek letter with U+0301 accepted beside it; label default, 255 units and 256; owner and mode extremes; times at 1904, 1970, 2040 and beyond as counted losses and refusals; symbolic links and FIFOs; a catalog wide enough for map nodes; byte identity across source order, cache size, scratch path and time zone; a poison scan of every unused byte |
 | Failure | Allocation, scratch, short read, short write, premature EOF, source change, cancellation, flush and publication failures at every stage, each followed by a cleanup check |
 

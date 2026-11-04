@@ -110,20 +110,24 @@ next reads:
 5. **Catalog and attributes trees.** Read and check each header node; select
    the catalog comparator from the signature and `keyCompareType`; require
    `totalNodes * M` to equal the fork's `logicalSize`.
-6. **Journal.** With bit 13 set, read the 180-byte info block; look up
-   `(2, ".journal")` by exact stored units and require a file record
-   whose data fork is one extent of `logicalSize` equal to the info
-   block's `size`, in the content domain; require the info block's
-   `offset` to equal that extent's byte start counted from the slice's
-   start or, on a wrapped volume, from the wrapper's start, as the format
-   design's [info block rule](design-hfsplus.md#journal-info-block)
-   states, whose first matching flags row then decides; read the 44-byte
-   header at the extent's start when that row says so, apply the wrap rule
-   to `start` and `end`, and apply the reader policy table. Nothing is
-   converted and no second place is looked at: the extent is the one
-   location, and `offset` is checked against it. Record the journal's
-   block range and the info block's block for the root's format-owned
-   files.
+6. **Journal.** With bit 13 set, read the 180-byte info block and
+   dispatch on its flags first, by the format design's
+   [flags table](design-hfsplus.md#journal-info-block), whose rows apply in
+   this order: `0x2` set is `FSIMG_EUNSUPPORTED`, with no `.journal`
+   lookup and no `offset` or `size` check; neither `0x1` nor `0x2` is
+   `FSIMG_ECORRUPT`; `0x4` set and `0x1` set on an unwrapped volume apply
+   the local location rule; `0x1` set on a wrapped volume is
+   `FSIMG_EUNSUPPORTED`. The location rule looks up `(2, ".journal")` by
+   exact stored units and requires a file record whose data fork is one
+   extent of `logicalSize` equal to the info block's `size`, in the
+   content domain, and the info block's `offset` equal to that extent's
+   byte start counted from the slice's start. For `0x1`, read the
+   44-byte header at the extent's start, apply the wrap rule to `start`
+   and `end`, and apply the reader policy table; `0x4` reads no header.
+   Nothing is converted and no second place is looked at: the extent is
+   the one location, and `offset` is checked against it. Record the
+   journal's block range and the info block's block for the root's
+   format-owned files.
 7. **Root.** Look up the thread `(2, "")` and require a folder thread with
    parent 1; look up the primary `(1, name)` it names and require a folder
    record with `folderID` 2. The name is the label; a name the
@@ -293,12 +297,17 @@ count `ceil(size / 65536)`, and the chunk table's bounds. For types 8 and
 word's value, read from offset zero and required to lie in
 `[4 * (count + 1), logicalSize]`, never computed from the count; the
 chunk offsets are the words at `4 * i` for `i` in `[0, count]`, the first
-of them `T` itself. For type 4 the bounds are the resource payload after
-the count and its pairs, which the fork header's relations fix. The table
-entries of chunk `i` and its successor are read when chunk `i` is first
-needed, through a small window over the table's bounds, so the table is
-never held whole, and the chunk is checked against them and against the
-payload bounds. Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is
+of them `T` itself. For type 4 the bounds are two intervals that the fork
+header's relations fix, with `D` the data offset: the table interval
+`[D + 4, D + 8 + 8 * count)` holding the count and the `(offset, length)`
+pairs, and the payload interval from its end to `D` plus the data length.
+When chunk `i` is first needed, the reader reads its entries through a
+small window over the table, so the table is never held whole: for type 4
+the pair of chunk `i` from the table interval, which carries the chunk's
+own length, and for types 8 and 12 the words `i` and `i + 1`, whose
+difference is the length. The chunk, whose type 4 offset is counted from
+the count, is checked against the payload interval or, for types 8 and
+12, against the table's end `T` and `logicalSize`. Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is
 the window's current chunk, charges the bytes consumed and produced as
 work, and returns the decoded span. A codec error, a chunk that decodes to
 the wrong length, or one stored beyond the input bound is `FSIMG_ECORRUPT`.
@@ -604,7 +613,7 @@ Reader:
 | Condition | Status |
 | --- | --- |
 | No identity signature; slice shorter than 1536 bytes; a forced variant that contradicts the signature | `FSIMG_EFORMAT` |
-| Signature-version pairing; volume bits outside the table, 29 or 30; tree parameters outside the table; catalog flags outside the table or `0x1000`; directory hard links; names with `:`, U+2400, `.` or `..`, or not their own decomposition; link targets above 1023 bytes or with NUL; compression types outside the table, inline sizes above 65536, compression attributes in fork records; a journal with transactions or on another device; an unobserved attribute record type | `FSIMG_EUNSUPPORTED` |
+| Signature-version pairing; volume bits outside the table, 29 or 30; tree parameters outside the table; catalog flags outside the table or `0x1000`; directory hard links; names with `:`, U+2400, `.` or `..`, or not their own decomposition; link targets above 1023 bytes or with NUL; compression types outside the table, inline sizes above 65536, compression attributes in fork records; a journal with transactions, on another device or initialized on a wrapped volume; an unobserved attribute record type | `FSIMG_EUNSUPPORTED` |
 | Geometry, header, fork, extent, overflow, node framing, key, order, separator, sibling, map, record, thread, kind, name encoding, count, link, attribute, compression, journal, wrapper or bitmap inconsistency | `FSIMG_ECORRUPT` |
 | Unrepresentable selection component | `FSIMG_EINVAL` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
@@ -637,7 +646,8 @@ each native capture and corpus specimen found through
 `FSIMG_HFSPLUS_NATIVE`, against a manifest of expected results: the names,
 sizes, modes, times and checksums a readable capture records, or the
 refusal class and step a capture is expected to fail with, such as the
-interrupted journal and the directory hard link (`FSIMG_EUNSUPPORTED`) and
+interrupted journal, the mounted wrapped journal and the directory hard link
+(`FSIMG_EUNSUPPORTED`) and
 the specimen without an alternate header (`FSIMG_ECORRUPT` at
 verification's last step).
 

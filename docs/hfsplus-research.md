@@ -1722,9 +1722,11 @@ Journaled wrapper. One `mkfs.hfsplus -w -J` image of 16 MiB
 relative to the embedded volume, with flags `0x5` and no header. After one macOS
 mount (it does mount the wrapped volume, writable and journaled) the offset
 reads 57344 = 45056 + 12288 and the journal header (`78 4C 4E 4A`) is at image
-byte 57344: in this observation the offset counts from the start of the image,
-not from the embedded volume. This is one observation, not a rule; whether a
-native wrapper behaves the same is not established. `fields.rb` reports
+byte 57344: after the mount the offset counts from the start of the image, not
+from the embedded volume. The Apple source cross-check explains it: the mount's
+late path adds the embedded start to the stored offset and writes the sum back,
+where the early path counts from the embedded volume. It is one observation of
+one mount; a second mount of that image was not tried. `fields.rb` reports
 `offset_counts_from: image` when the header is found only that way.
 
 Evidence row answered: wrapper layout. The macOS side of a wrapper cannot be made
@@ -1746,7 +1748,7 @@ tables). The host's `fsck_hfs` is `hfs-715.160.9` and its kernel is
 closed here. A fact below that also appears in an experiment says so; where
 the two differ the difference is stated.
 
-### Name comparison table (question 1)
+### Name comparison table
 
 The kernel folds a unit through one of two tables: the Latin table for units
 below U+0100 (`core/UCStringCompareData.h:78`) and the main table for the rest
@@ -1769,7 +1771,7 @@ A throwaway script folded all 65536 units through each copy and through
   themselves. Exactly 16 units fold to zero (ignorable): U+200C to U+200F,
   U+202A to U+202E, U+206A to U+206F and U+FEFF, the same 16 as the header.
 
-### Decomposition, classes and the name conversion (question 2)
+### Decomposition, classes and the name conversion
 
 The conversion is `xnu/bsd/vfs/vfs_utfconv.c`; a catalog key is built with
 decomposition and with escaping of illegal UTF-8 on
@@ -1817,7 +1819,7 @@ All of this agrees with the E3 vectors and the design. The only edge the
 vectors do not exercise is a run of five or more marks with more than one
 class inversion; the algorithm above has no limit there.
 
-### The illegal-name check (question 3)
+### The illegal-name check
 
 `fsck_hfs` rejects a file or folder key (not a thread record) whose name is
 empty or over 255 units, or is `.` or `..` (`lib_fsck_hfs/dfalib/CatalogCheck.c:1350`).
@@ -1852,7 +1854,7 @@ strings).
   its replacement names are those the source gives. The two Tibetan sequences
   are not stored in the input order and are not flagged as stored.
 
-### The all-ignorable name (question 4)
+### The all-ignorable name
 
 Both the kernel (`core/hfs_catalog.c:3484`) and `fsck_hfs`
 (`lib_fsck_hfs/dfalib/SKeyCompare.c:236`) order two keys by parent, then by
@@ -1866,7 +1868,7 @@ the thread key of the same parent. The kernel has no special case for it, and
 reason to refuse such a name beyond the tie with a sibling; the refusal on
 `hfsplus` is the design's choice.
 
-### Hard-link stubs (questions 5, 6, 7 and 10)
+### Hard-link stubs
 
 **Stub test.** Looking a record up (`core/hfs_catalog.c:838`) and listing a
 directory (`:2905`) test the same things, and both apply to a *file* record:
@@ -1885,16 +1887,14 @@ directory (`:2905`) test the same things, and both apply to a *file* record:
   directory folder's date (`.HFS+ Private Directory Data\r`) is never used. A
   read-only mount of a volume without the file folder has only the root date.
 
-**Question 5 answer.** Directory stubs carry the *file* folder's date, the
-same as file stubs: both kinds are created with the one date
-(`core/hfs_link.c:96`). The disagreement the task feared does not arise: a
-native directory stub does not carry the directory folder's date, so it
-cannot fail the test when the two folders' dates differ. The dirlinks capture
-had equal dates only because one mount made both folders. The design's words
-"the private data folder's" (`specs/design-hfsplus.md:871` and `:915`) are
-right only for the file folder; they should say so.
+**Stub dates.** Directory stubs carry the *file* folder's date, the same as
+file stubs: both kinds are created with the one date (`core/hfs_link.c:96`).
+A native directory stub does not carry the directory folder's date, so a
+test against the directory folder's date would reject it whenever the two
+folders' dates differ. The dirlinks capture had equal dates only because
+one mount made both folders.
 
-**Question 6.** The kernel's link entry point returns `ENOTSUP` when the
+**Symbolic-link sources.** The kernel's link entry point returns `ENOTSUP` when the
 source is a symbolic link (`core/hfs_link.c:446`); the comment gives the
 `linkat` without-follow case and "for now". It is the only refusal found. The read side does not look at the indirect node's kind: a
 stub resolves to whatever record the node name holds, so a stub whose node is
@@ -1902,7 +1902,7 @@ a symbolic link reads as one, as the design says. The source does not say
 whether older systems wrote such links, and the checker has no
 symbolic-link-specific rule: **not established**.
 
-**Question 7.** The first-link attribute (a decimal text of the first link's
+**First-link attribute.** The first-link attribute (a decimal text of the first link's
 ID, with a terminating NUL, inline) is written only for *directory* hard
 links, keyed by the directory node's ID: when the first link is made
 (`core/hfs_link.c:253`), when a later link is made and becomes the first
@@ -1912,7 +1912,7 @@ indirect node's catalog record and never write the attribute, which agrees
 with E4, E5 and the dirlinks capture. What happens to the attribute when the
 last link goes was not read.
 
-**Question 10.** `link(2)` of a directory is refused with `EPERM` unless the
+**Directory links.** `link(2)` of a directory is refused with `EPERM` unless the
 volume is journaled (`core/hfs_link.c:452`); the comment says directory links
 were only *qualified* on journaled volumes, a policy, not a stated technical
 need. The other conditions (`:527` to `:598`): the directory folder exists; the
@@ -1923,7 +1923,7 @@ is below the limit; the source is not immutable or append-only; and there is a
 free block. A directory link also sets a "has child link" flag on the
 destination's ancestors and on the source's parent chain.
 
-### Journal, volume header and wrapper (questions 8 and 9)
+### Journal, volume header and wrapper
 
 * **Replay.** A mount opens the journal when the volume's journaled attribute
   is set. If `lastMountedVersion` is `HFSJ` it does so early
@@ -1945,7 +1945,9 @@ destination's ancestors and on the source's parent chain.
   then *writes the sum back* (`core/hfs_vfsutils.c:2801`, `:2917`), so after
   a late mount the stored value counts from the start of the wrapper. This is
   exactly E11: the one `mkfs.hfsplus -w -J` image held 12288, then 57344 after
-  one macOS mount. The two paths therefore disagree on the base of the same
+  one macOS mount; a stored `E + L` is thus read as `E + L` by the early path
+  and as `2E + L` by the late path, and each location can hold a different
+  header. The two paths therefore disagree on the base of the same
   field in Apple's own code. A second mount of that image takes the early path
   (the first mount wrote `HFSJ`) and would add the embedded start again; what
   it does then was not tried and the source does not say.
@@ -1955,10 +1957,10 @@ destination's ancestors and on the source's parent chain.
   system file's extents (`core/hfs_readwrite.c:5732`); and when a flush finds the extents, catalog,
   allocation or startup file's fork data modified, or the attributes file's
   (`:3752` on). An ordinary mount, unmount or sync writes only the primary
-  header. The record's "other triggers untried" is thus filled by reading,
-  not by trial.
+  header. The triggers that experiments left untried are thus
+  known by reading, not by trial.
 
-### Compression (question 11)
+### Compression
 
 `xnu/bsd/sys/decmpfs.h` and `xnu/bsd/kern/decmpfs.c` fix only the
 envelope: the attribute `com.apple.decmpfs`; a 16-byte header of magic
@@ -1973,7 +1975,7 @@ the separate compression kext, which is not in the tree. **The chunk table,
 the first-offset word, the resource-fork markers and any type beyond the
 design's table are not established** by this source.
 
-### Writer values and the checker (question 12)
+### Writer values and the checker
 
 The checker (`lib_fsck_hfs/dfalib/SVerify2.c:300` to `:360`) tests a B-tree
 header's depth, root number, and, on a journaled volume, that a node larger
@@ -1984,15 +1986,3 @@ values, or of attributes bit 31 (the format header only defines the bit). The
 minimum volume size and `newfs_hfs` constraints were not read. These are
 **not established** by source; the native `fsck_hfs` run in the qualification
 remains the oracle for each provisional value.
-
-### Differences found
-
-| Item | Record or design | Source | What it would break |
-| --- | --- | --- | --- |
-| Illegal-name list | Design `:771`, `:1324`, `:1434`, `:1441`: the two mark pairs | 23 sequences, 21 more (question 3) | A volume the writer produces fails the host `fsck_hfs` for a Greek letter with U+030D and for five Indic and Thai pairs |
-| Private data folder | Design `:871`, `:915` do not say which | The file folder, for both kinds | Nothing if read as the file folder; a reader using the directory folder's date would reject native directory stubs |
-| Directory stub reference | Design `:914`: at least 16 | Only the directory listing tests it | Nothing found; a lookup accepts a smaller value |
-| Journal offset base | Design `:1081`: from the wrapper start for flag `0x1` | Early path: from the embedded start; late path writes the wrapper-based sum | A wrapped volume mounted twice may be read from the wrong place by macOS itself |
-| Journal range | Design `:1107`: `start`, `end` in `[jhdr_size, size)` | macOS opens `(0, size]` and wraps `size` | A clean journal with `start == end == size` is `FSIMG_ECORRUPT` here and mounts on macOS |
-| Journal checksum | Design `:1439` lists a bad checksum | macOS logs it and goes on | A reader stricter than macOS |
-| Post-3.2.0 classes | None | 25 extra nonzero classes, never sorted | Nothing |
