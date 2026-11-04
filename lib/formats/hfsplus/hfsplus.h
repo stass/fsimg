@@ -579,7 +579,7 @@ typedef enum hfsplus_journal_state {
 #define HFSPLUS_CHILD_FOLDER_COUNT	0x02u	/* folder_count is recorded */
 #define HFSPLUS_CHILD_FLAGS		0x03u
 
-/* One admitted child, what its 64-byte prepared payload encodes (the driver
+/* One admitted child, what its 60-byte prepared payload encodes (the driver
  * design's Directories and names): everything replay delivers, without reading
  * a node, and the location of the effective record, the indirect node's for a
  * hard-link stub, for what must read it again.
@@ -588,7 +588,6 @@ typedef struct hfsplus_child {
 	uint64_t		 size;
 	uint32_t		 id;		/* the effective record's node ID */
 	uint32_t		 leaf;		/* its leaf node */
-	uint32_t		 stub_id;	/* the stub's node ID, or zero */
 	uint32_t		 owner;
 	uint32_t		 group;
 	uint32_t		 special;	/* a device's dev_t, or zero */

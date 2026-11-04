@@ -65,10 +65,11 @@ uint32_t fsimg_directory_level(const fsimg_directory_build_t *);
  */
 fsimg_status_t fsimg_directory_admit(fsimg_directory_build_t *, const char *,
     const void *, size_t, fsimg_error_t *);
-/* Name a delivered child whose refusal fails the directory, such as an
- * unsupported kind: error's path becomes the child's whole path. Names travel
- * only in path fields, never in a message. A child past the path limit is left
- * unnamed, since admission would refuse it too.
+/* Name a child whose refusal fails the directory, such as an unsupported kind:
+ * error's path becomes the child's whole path, rendered by the name's class so
+ * an omitted name never leaves raw. Names travel only in path fields, never in
+ * a message. A child past the path limit or with a name classification refuses
+ * is left unnamed, since admission would refuse it too.
  */
 void fsimg_directory_name_child(const fsimg_directory_build_t *, const char *,
     fsimg_error_t *);

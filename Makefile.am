@@ -671,7 +671,8 @@ distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
 	    hfsplus-fuzz-corpus protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
 	    plist-fuzz-corpus gzip-fuzz-corpus zstd-fuzz-corpus xz-fuzz-corpus mtree-fuzz-corpus \
-	    codec-fuzz-corpus ifs-fuzz-corpus iso9660-fuzz-corpus
+	    codec-fuzz-corpus ifs-fuzz-corpus iso9660-fuzz-corpus \
+	    iso9660-susp-fuzz-corpus
 check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77

@@ -42,6 +42,8 @@ typedef struct reader_fixture {
 	fsimg_reader_t		*reader;
 	memory_image_t		image;
 	link_corruption_t	corruption;
+	const char		*refused_child;
+	bool			refused_child_nested;
 	bool			trees;
 	bool			cancel_delivery;
 	bool			cancelled;
@@ -169,6 +171,18 @@ reader_prepare(fsimg_reader_t *reader, fsimg_directory_build_t *build,
 	size_t count;
 	uint32_t level = fsimg_directory_level(build);
 
+	if (f->refused_child != NULL) {
+		if (f->refused_child_nested && level == 0) {
+			const unsigned char kind = FSIMG_ENTRY_DIRECTORY;
+
+			return (fsimg_directory_admit(build, "dir", &kind, 1,
+			    error));
+		}
+		status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_READER, "test child refused");
+		fsimg_directory_name_child(build, f->refused_child, error);
+		return (status);
+	}
 	if (level != 0) {
 		CHECK(f->trees && f->tree == 1);
 		f->second_descents++;
@@ -1435,9 +1449,81 @@ test_writer_text_copy_allocation_failure_is_reported(void)
 	fsimg_ctx_free(ctx);
 }
 
+static void
+test_child_error_paths_apply_the_name_profile(void)
+{
+	static const struct {
+		const char *name;
+		fsimg_name_profile_t profile;
+		const char *path;
+	} cases[] = {
+		{ "visible", FSIMG_NAME_PROFILE_PORTABLE, "/visible" },
+		{ "\xff\xfe", FSIMG_NAME_PROFILE_PORTABLE, "/\\xff\\xfe" },
+		{ "a/b", FSIMG_NAME_PROFILE_PORTABLE, "" },
+		{ ".", FSIMG_NAME_PROFILE_PORTABLE, "" },
+		{ "..", FSIMG_NAME_PROFILE_PORTABLE, "" },
+		{ "", FSIMG_NAME_PROFILE_PORTABLE, "" },
+		{ "\xff", FSIMG_NAME_PROFILE_NONE, "" }
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		reader_fixture_t f;
+		fsimg_reader_ops_t ops = reader_ops;
+		fsimg_error_t error = { 0 };
+		const fsimg_entry_t *entry;
+
+		reader_fixture_open(&f);
+		ops.name_profile = cases[i].profile;
+		f.reader->ops = &ops;
+		f.refused_child = cases[i].name;
+		CHECK(fsimg_reader_next(f.reader, &entry, &error) == FSIMG_ECORRUPT);
+		CHECK(strcmp(error.message, "test child refused") == 0);
+		CHECK(strcmp(error.path, cases[i].path) == 0);
+		if (i == 1) {
+			CHECK(strchr(error.path, 0xfe) == NULL);
+			CHECK(strchr(error.path, 0xff) == NULL);
+		}
+		reader_fixture_close(&f);
+	}
+}
+
+static void
+test_child_error_paths_obey_the_path_limit(void)
+{
+	static const struct {
+		const char *name;
+		const char *path;
+	} cases[] = {
+		{ "abc", "/dir/abc" },
+		{ "abcd", "" }
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		reader_fixture_t f;
+		fsimg_error_t error = { 0 };
+		const fsimg_entry_t *entry;
+
+		reader_fixture_open(&f);
+		/* The limit includes /dir/, the child and the terminating NUL. */
+		f.ctx->options.max_path_bytes = 9;
+		f.refused_child = cases[i].name;
+		f.refused_child_nested = true;
+		CHECK(fsimg_reader_next(f.reader, &entry, &error) == FSIMG_OK);
+		CHECK(entry->kind == FSIMG_ENTRY_DIRECTORY);
+		CHECK(strcmp(entry->path, "/dir") == 0);
+		CHECK(error.path[0] == '\0');
+		CHECK(fsimg_reader_next(f.reader, &entry, &error) == FSIMG_ECORRUPT);
+		CHECK(strcmp(error.message, "test child refused") == 0);
+		CHECK(strcmp(error.path, cases[i].path) == 0);
+		reader_fixture_close(&f);
+	}
+}
+
 int
 main(void)
 {
+	test_child_error_paths_apply_the_name_profile();
+	test_child_error_paths_obey_the_path_limit();
 	test_provider_link_reads_at_plan_and_emit_and_observes_changed_bytes();
 	test_link_read_failures_close_source();
 	test_link_read_failures_during_planning_publish_nothing();

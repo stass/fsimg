@@ -240,13 +240,13 @@ driver-private cache to keep coherent or to bound.
 
 `hfsplus_record_validate()` checks a catalog record against the format
 design's record and flag tables; for a file record it runs
-`hfsplus_link_kind()` first and maps only a record that is neither stub to
+`link_kind()` first and maps only a record that is neither stub to
 a kind with the kind table, because a stub's `fileMode` is not its kind:
 `0100000` on current macOS and 0 on the Mac OS X 10.0 and 10.1 discs (E4,
 E10). `hfsplus_thread_lookup()` searches `(id, "")`, requires a thread
 whose type matches the expected kind, and returns its parent and name.
 
-`hfsplus_link_kind()` applies the format design's
+`link_kind()` applies the format design's
 [stub tests](design-hfsplus.md#file-hard-links) to a file record: a file
 stub, a directory stub, or neither. The test compares the record's
 `createDate` with two dates: the root folder's, which open already read,
@@ -352,11 +352,12 @@ by a validated node buffer.
    by their exact stored units, from the one table in `hfsplus.h`, validate
    them and count them, but do not admit them. Open has already found
    `.journal` and checked its fork, so on a journaled volume this step checks
-   `.journal_info_block`: its presence, and its one extent starting at the
-   header's block.
-4. Classify every other child with `hfsplus_link_kind()` and the kind
+   that it is a regular file, and `.journal_info_block`: its presence, its
+   kind, and its one extent starting at the header's block.
+4. Classify every other child with `link_kind()` and the kind
    table: a directory stub fails preparation with
-   `FSIMG_EUNSUPPORTED`, so no child of the directory is exposed; a socket
+   `FSIMG_EUNSUPPORTED`, so no child of the directory is exposed, and like
+   every failure after the child's name is known it names that child; a socket
    or a device is admitted as its read-only kind, a device with its
    `special` word carried in the payload; a file
    stub is resolved now, and the indirect node's record takes the stub's
@@ -370,7 +371,7 @@ by a validated node buffer.
 An admitted child carries its displayed name and a payload of at most the
 common [64-byte bound](design-directories.md#prepared-directory), little
 endian: the effective record's node ID (4), its leaf node number (4) and
-record index (2), the stub's node ID or zero (4), the kind and the
+record index (2), the kind and the
 extra-data bit (1 each), the compression type (1, zero for none), the size
 (8), the owner and group (4 each), the permission bits (2), a flags byte
 saying whether owner and mode are valid and whether a folder count is
@@ -378,8 +379,8 @@ recorded (1), the four times as stored (16), the stored `special` word
 (4), which for a device is the `dev_t` that `replay` splits into
 `FSIMG_META_DEVICE`'s major and minor as the format design states and
 which is zero for every other kind, and for a folder its `valence` and
-folder count (4 each), which its own preparation checks: 64 bytes, the
-whole bound. The effective record is the indirect node's for a stub, so that is
+folder count (4 each), which its own preparation checks: 60 bytes. The
+effective record is the indirect node's for a stub, so that is
 the record the leaf location names. `keys` emits one key, the
 [namespace key](design-hfsplus.md#namespace-keys); `key` maps a query
 component the same way, after the `:` to `/` and U+2400 to U+0000

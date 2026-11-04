@@ -5,9 +5,10 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6, test-qnx4, test-hfsplus, test-ifs, test-codec,
-# test-protocol, test-layers, test-containers, test-compression, test-hbcifs, test-mtree,
-# test-ifsboot and test/spec.sh, which write the seeds, with MAKE naming
+# test-exfat, test-qnx6, test-qnx4, test-hfsplus, test-ifs, test-iso9660,
+# test-codec, test-protocol, test-layers, test-containers, test-compression,
+# test-hbcifs, test-mtree, test-ifsboot and test/spec.sh, which write the
+# seeds, with MAKE naming
 # the make program that drives that build (sanitize.sh inherits it).
 # FUZZ_CC and FUZZ_CXX select the compiler. The harnesses build against
 # the instrumented sanitizer-fuzz/ tree (see sanitize.sh) and keep their

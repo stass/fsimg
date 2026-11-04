@@ -18,30 +18,29 @@
  * chain.
  */
 
-/* The prepared payload, little endian, the whole common bound. */
+/* The prepared payload, little endian. */
 #define PAYLOAD_ID		0
 #define PAYLOAD_LEAF		4
 #define PAYLOAD_RECORD		8
-#define PAYLOAD_STUB		10
-#define PAYLOAD_KIND		14
-#define PAYLOAD_EXTRA		15
-#define PAYLOAD_COMPRESSION	16
-#define PAYLOAD_SIZE		17
-#define PAYLOAD_OWNER		25
-#define PAYLOAD_GROUP		29
-#define PAYLOAD_MODE		33
-#define PAYLOAD_FLAGS		35
-#define PAYLOAD_CREATED		36
-#define PAYLOAD_MODIFIED	40
-#define PAYLOAD_CHANGED		44
-#define PAYLOAD_ACCESSED	48
-#define PAYLOAD_SPECIAL		52
-#define PAYLOAD_VALENCE		56
-#define PAYLOAD_FOLDER_COUNT	60
-#define PAYLOAD_BYTES		64u
+#define PAYLOAD_KIND		10
+#define PAYLOAD_EXTRA		11
+#define PAYLOAD_COMPRESSION	12
+#define PAYLOAD_SIZE		13
+#define PAYLOAD_OWNER		21
+#define PAYLOAD_GROUP		25
+#define PAYLOAD_MODE		29
+#define PAYLOAD_FLAGS		31
+#define PAYLOAD_CREATED		32
+#define PAYLOAD_MODIFIED	36
+#define PAYLOAD_CHANGED		40
+#define PAYLOAD_ACCESSED	44
+#define PAYLOAD_SPECIAL		48
+#define PAYLOAD_VALENCE		52
+#define PAYLOAD_FOLDER_COUNT	56
+#define PAYLOAD_BYTES		60u
 
-_Static_assert(PAYLOAD_BYTES == FSIMG_DIRECTORY_PAYLOAD_BYTES,
-    "the HFS Plus payload is the common bound");
+_Static_assert(PAYLOAD_BYTES <= FSIMG_DIRECTORY_PAYLOAD_BYTES,
+    "the HFS Plus payload fits the common bound");
 _Static_assert(HFSPLUS_KEY_BYTES_MAX <= FSIMG_DIRECTORY_KEY_BYTES,
     "an HFS Plus namespace key fits a directory key buffer");
 _Static_assert(HFSPLUS_NAME_UTF8_MAX < FSIMG_DIRECTORY_NAME_BYTES,
@@ -83,12 +82,13 @@ static bool owned_name(const hfsplus_prepare_t *, const hfsplus_ckey_t *,
     hfsplus_owned_t *);
 static fsimg_status_t prepare_owned(hfsplus_prepare_t *, hfsplus_owned_t,
     const hfsplus_record_t *, fsimg_error_t *);
-static fsimg_status_t refuse_named(const hfsplus_prepare_t *, const char *,
+static fsimg_status_t compressed_refuse(const hfsplus_file_t *,
+    const hfsplus_attr_scan_t *, fsimg_error_t *);
+static fsimg_status_t attributes_classify(fsimg_reader_t *,
+    const hfsplus_primary_t *, uint32_t, bool *, hfsplus_attr_scan_t *,
     fsimg_error_t *);
-static fsimg_status_t compressed_refuse(const hfsplus_prepare_t *,
-    const hfsplus_file_t *, const hfsplus_attr_scan_t *, fsimg_error_t *);
-static fsimg_status_t mark_extra_data(hfsplus_prepare_t *,
-    const hfsplus_primary_t *, hfsplus_child_t *, fsimg_error_t *);
+static fsimg_status_t prepare_named(hfsplus_prepare_t *,
+    const hfsplus_record_t *, fsimg_error_t *);
 static fsimg_status_t prepare_child(hfsplus_prepare_t *, const hfsplus_ckey_t *,
     const hfsplus_record_t *, fsimg_error_t *);
 static fsimg_status_t prepare_scan(hfsplus_prepare_t *, fsimg_error_t *);
@@ -102,7 +102,6 @@ payload_encode(const hfsplus_child_t *child, unsigned char *payload)
 	fsimg_store_le32(payload + PAYLOAD_ID, child->id);
 	fsimg_store_le32(payload + PAYLOAD_LEAF, child->leaf);
 	fsimg_store_le16(payload + PAYLOAD_RECORD, child->record);
-	fsimg_store_le32(payload + PAYLOAD_STUB, child->stub_id);
 	payload[PAYLOAD_KIND] = (unsigned char)child->kind;
 	payload[PAYLOAD_EXTRA] = child->extra_data ? 1 : 0;
 	payload[PAYLOAD_COMPRESSION] = child->compression;
@@ -122,8 +121,10 @@ payload_encode(const hfsplus_child_t *child, unsigned char *payload)
 	fsimg_store_le32(payload + PAYLOAD_FOLDER_COUNT, child->folder_count);
 }
 
-/* The payload came back from scratch storage: every field is checked against
- * what prepare can have written before anything uses it.
+/* The payload came back from scratch storage, so what prepare cannot have
+ * written is refused before anything uses it. The record index is left to the
+ * cursor's seek, which checks it against the node it reads; a size and the
+ * times can hold any value.
  */
 static fsimg_status_t
 payload_decode(const fsimg_hfsplus_reader_t *hfsplus,
@@ -139,7 +140,6 @@ payload_decode(const fsimg_hfsplus_reader_t *hfsplus,
 	child->id = fsimg_load_le32(payload + PAYLOAD_ID);
 	child->leaf = fsimg_load_le32(payload + PAYLOAD_LEAF);
 	child->record = fsimg_load_le16(payload + PAYLOAD_RECORD);
-	child->stub_id = fsimg_load_le32(payload + PAYLOAD_STUB);
 	child->kind = (fsimg_entry_kind_t)payload[PAYLOAD_KIND];
 	child->extra_data = payload[PAYLOAD_EXTRA] != 0;
 	child->compression = payload[PAYLOAD_COMPRESSION];
@@ -163,7 +163,8 @@ payload_decode(const fsimg_hfsplus_reader_t *hfsplus,
 		valid = true;
 		break;
 	case FSIMG_ENTRY_SYMLINK:
-		valid = child->size >= 1 && child->size <= HFSPLUS_LINK_TARGET_MAX;
+		valid = child->size >= 1 &&
+		    child->size <= HFSPLUS_LINK_TARGET_MAX;
 		break;
 	case FSIMG_ENTRY_DIRECTORY:
 	case FSIMG_ENTRY_FIFO:
@@ -181,6 +182,12 @@ payload_decode(const fsimg_hfsplus_reader_t *hfsplus,
 		valid = false;
 	if (child->kind != FSIMG_ENTRY_CHAR_DEVICE &&
 	    child->kind != FSIMG_ENTRY_BLOCK_DEVICE && child->special != 0)
+		valid = false;
+	if ((child->flags & HFSPLUS_CHILD_OWNER_MODE) == 0 &&
+	    (child->owner != 0 || child->group != 0 || child->mode != 0))
+		valid = false;
+	if ((child->flags & HFSPLUS_CHILD_FOLDER_COUNT) != 0 ?
+	    child->kind != FSIMG_ENTRY_DIRECTORY : child->folder_count != 0)
 		valid = false;
 	if (!valid || child->id < HFSPLUS_ID_FIRST_USER ||
 	    child->leaf >= hfsplus->catalog.header.total_nodes ||
@@ -204,15 +211,18 @@ enter_root(hfsplus_prepare_t *prepare, fsimg_error_t *error)
 	prepare->id = HFSPLUS_ID_ROOT;
 	prepare->valence = root->valence;
 	prepare->folder_count = root->folder_count;
-	prepare->check_folder_count = (root->flags & HFSPLUS_FLAG_FOLDER_COUNT) != 0;
+	prepare->check_folder_count =
+	    (root->flags & HFSPLUS_FLAG_FOLDER_COUNT) != 0;
 	return (hfsplus_thread_lookup(&prepare->cursor, HFSPLUS_ID_ROOT,
 	    HFSPLUS_RECORD_FOLDER_THREAD, &thread, error));
 }
 
 /* The folder replay made current: its own record's key is the parent the
  * walker reached it from and its stored name, and the folder's one thread
- * must name both. A second parent, a cycle back to an ancestor and a folder
- * record reusing another folder's ID all fail here.
+ * must name both. On a static image a second parent, a cycle back to an
+ * ancestor and a folder record reusing another folder's ID all fail here; a
+ * source changing underneath is bounded by the depth, path and work limits
+ * and reported through fsimg_reader_stable.
  */
 static fsimg_status_t
 enter_folder(hfsplus_prepare_t *prepare, fsimg_error_t *error)
@@ -237,7 +247,8 @@ enter_folder(hfsplus_prepare_t *prepare, fsimg_error_t *error)
 	status = hfsplus_cursor_seek(&prepare->cursor, current->leaf,
 	    current->record, error);
 	if (status == FSIMG_OK)
-		status = hfsplus_cursor_record(&prepare->cursor, &record, error);
+		status = hfsplus_cursor_record(&prepare->cursor, &record,
+		    error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (!hfsplus_ckey_decode(record.key, record.key_bytes, &stored) ||
@@ -245,6 +256,7 @@ enter_folder(hfsplus_prepare_t *prepare, fsimg_error_t *error)
 	    folder.id != current->id)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus folder record changed since it was listed"));
+	/* expected owns its name, which must outlive the search buffer. */
 	status = hfsplus_catalog_key_init(&expected, stored.parent, stored.name,
 	    stored.units, error);
 	if (status == FSIMG_OK)
@@ -312,13 +324,16 @@ prepare_owned(hfsplus_prepare_t *prepare, hfsplus_owned_t owned,
 			    "HFS Plus private folder is not a folder"));
 		return (FSIMG_OK);
 	case HFSPLUS_OWNED_JOURNAL:
+		if (primary.kind != FSIMG_ENTRY_FILE)
+			return (hfsplus_corrupt(error,
+			    "HFS Plus journal file is not a regular file"));
 		return (FSIMG_OK);
 	case HFSPLUS_OWNED_JOURNAL_INFO:
 		if (primary.kind != FSIMG_ENTRY_FILE)
 			return (hfsplus_corrupt(error,
 			    "HFS Plus journal info file is not a regular file"));
-		status = hfsplus_fork_one_extent(reader, &primary.file.data_fork,
-		    &extent, error);
+		status = hfsplus_fork_one_extent(reader,
+		    &primary.file.data_fork, &extent, error);
 		if (status != FSIMG_OK)
 			return (status);
 		if (extent.start != hfsplus->journal_info_block)
@@ -331,67 +346,44 @@ prepare_owned(hfsplus_prepare_t *prepare, hfsplus_owned_t owned,
 	}
 }
 
-/* Fail with FSIMG_EUNSUPPORTED, the error's path naming the child under
- * preparation.
- */
-static fsimg_status_t
-refuse_named(const hfsplus_prepare_t *prepare, const char *message,
-    fsimg_error_t *error)
-{
-	fsimg_status_t status = hfsplus_unsupported(error, message);
-
-	fsimg_directory_name_child(prepare->build, prepare->path, error);
-	return (status);
-}
-
 /* The one refusal of a compressed file: this reader delivers no decoded
  * content, and its empty data fork must never read as an empty file. The
  * attribute must exist and the data fork be empty, whatever the type.
  */
 static fsimg_status_t
-compressed_refuse(const hfsplus_prepare_t *prepare, const hfsplus_file_t *file,
-    const hfsplus_attr_scan_t *scan, fsimg_error_t *error)
+compressed_refuse(const hfsplus_file_t *file, const hfsplus_attr_scan_t *scan,
+    fsimg_error_t *error)
 {
 	if (!scan->compression)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compressed file has no compression attribute"));
-	if (file->data_fork.logical_size != 0 || file->data_fork.total_blocks != 0)
+	if (file->data_fork.logical_size != 0 ||
+	    file->data_fork.total_blocks != 0)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compressed file has a nonempty data fork"));
-	return (refuse_named(prepare,
-	    "HFS Plus compressed file is not supported", error));
+	return (hfsplus_unsupported(error,
+	    "HFS Plus compressed file is not supported"));
 }
 
-/* A child's extra-data mark and compression come from its effective record: the
- * attribute scan runs only for a record whose flags say to look.
+/* Whether the child with this effective record is compressed, and what its
+ * attributes hold: the scan runs only for a record whose flags say to look, and
+ * is empty otherwise.
  */
 static fsimg_status_t
-mark_extra_data(hfsplus_prepare_t *prepare, const hfsplus_primary_t *primary,
-    hfsplus_child_t *child, fsimg_error_t *error)
+attributes_classify(fsimg_reader_t *reader, const hfsplus_primary_t *primary,
+    uint32_t id, bool *compressed, hfsplus_attr_scan_t *scan,
+    fsimg_error_t *error)
 {
-	bool directory = primary->kind == FSIMG_ENTRY_DIRECTORY;
-	const hfsplus_file_t *file = &primary->file;
-	uint16_t flags = directory ? primary->folder.flags : file->flags;
-	uint8_t owner_flags = directory ? primary->folder.bsd.owner_flags :
-	    file->bsd.owner_flags;
-	bool compressed = primary->kind == FSIMG_ENTRY_FILE &&
-	    (owner_flags & HFSPLUS_OWNER_COMPRESSED) != 0;
-	hfsplus_attr_scan_t scan;
-	fsimg_status_t status;
+	uint16_t flags = primary->kind == FSIMG_ENTRY_DIRECTORY ?
+	    primary->folder.flags : primary->file.flags;
 
-	if (!compressed && (flags & HFSPLUS_FLAG_ATTRIBUTES) == 0)
-		bzero(&scan, sizeof(scan));
-	else {
-		status = hfsplus_attr_scan(prepare->reader, child->id, compressed,
-		    &scan, error);
-		if (status != FSIMG_OK)
-			return (status);
+	*compressed = primary->kind == FSIMG_ENTRY_FILE &&
+	    (primary->file.bsd.owner_flags & HFSPLUS_OWNER_COMPRESSED) != 0;
+	if (!*compressed && (flags & HFSPLUS_FLAG_ATTRIBUTES) == 0) {
+		bzero(scan, sizeof(*scan));
+		return (FSIMG_OK);
 	}
-	if (compressed)
-		return (compressed_refuse(prepare, file, &scan, error));
-	child->extra_data = scan.stored ||
-	    (!directory && file->resource_fork.logical_size > 0);
-	return (FSIMG_OK);
+	return (hfsplus_attr_scan(reader, id, *compressed, scan, error));
 }
 
 static fsimg_status_t
@@ -405,49 +397,30 @@ admit_child(hfsplus_prepare_t *prepare, hfsplus_child_t *child,
 	    sizeof(payload), error));
 }
 
-/* Steps 3 and 4 of the driver design: validate the record and its name, set the
- * format-owned children aside, then classify. A stub takes its indirect node's
- * record for everything but the name.
+/* Step 4 of the driver design and step 3's record check, for a child whose name
+ * is in prepare->path: classify the record, then admit the child or refuse it.
+ * A stub takes its indirect node's record for everything but the name.
  */
 static fsimg_status_t
-prepare_child(hfsplus_prepare_t *prepare, const hfsplus_ckey_t *key,
-    const hfsplus_record_t *record, fsimg_error_t *error)
+prepare_named(hfsplus_prepare_t *prepare, const hfsplus_record_t *record,
+    fsimg_error_t *error)
 {
 	fsimg_reader_t *reader = prepare->reader;
+	const hfsplus_cursor_t *location = &prepare->cursor;
+	hfsplus_attr_scan_t scan;
 	hfsplus_primary_t primary;
 	hfsplus_cursor_t link;
 	hfsplus_child_t child;
-	hfsplus_owned_t owned;
-	const hfsplus_cursor_t *location;
-	uint32_t stub_id;
-	size_t bytes;
+	bool compressed;
 	fsimg_status_t status;
-
-	if (owned_name(prepare, key, &owned)) {
-		status = prepare_owned(prepare, owned, record, error);
-		if (status == FSIMG_OK && (owned == HFSPLUS_OWNED_PRIVATE_DATA ||
-		    owned == HFSPLUS_OWNED_PRIVATE_DIRECTORY))
-			prepare->folders++;
-		return (status);
-	}
-	status = hfsplus_name_admit(key->name, key->units, error);
-	if (status == FSIMG_OK)
-		status = hfsplus_name_to_path(key->name, key->units, prepare->path,
-		    &bytes, error);
-	if (status != FSIMG_OK)
-		return (status);
-	prepare->path[bytes] = '\0';
 
 	status = hfsplus_record_validate(reader, record, &primary, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (primary.link == HFSPLUS_LINK_DIRECTORY)
-		return (refuse_named(prepare,
-		    "HFS Plus directory hard link is not supported", error));
-	location = &prepare->cursor;
-	stub_id = 0;
+		return (hfsplus_unsupported(error,
+		    "HFS Plus directory hard link is not supported"));
 	if (primary.link == HFSPLUS_LINK_FILE) {
-		stub_id = primary.file.id;
 		status = hfsplus_link_resolve(reader, &primary, &link, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -460,11 +433,51 @@ prepare_child(hfsplus_prepare_t *prepare, const hfsplus_ckey_t *key,
 		return (status);
 	child.leaf = location->number;
 	child.record = location->record;
-	child.stub_id = stub_id;
-	status = mark_extra_data(prepare, &primary, &child, error);
+	status = attributes_classify(reader, &primary, child.id, &compressed,
+	    &scan, error);
 	if (status != FSIMG_OK)
 		return (status);
+	if (compressed)
+		return (compressed_refuse(&primary.file, &scan, error));
+	child.extra_data = scan.stored ||
+	    (primary.kind != FSIMG_ENTRY_DIRECTORY &&
+	    primary.file.resource_fork.logical_size > 0);
 	return (admit_child(prepare, &child, error));
+}
+
+/* Steps 3 and 4 of the driver design: validate the name and set the
+ * format-owned children aside. Every failure past that point fails the
+ * directory because of this one child, so it is named here, once.
+ */
+static fsimg_status_t
+prepare_child(hfsplus_prepare_t *prepare, const hfsplus_ckey_t *key,
+    const hfsplus_record_t *record, fsimg_error_t *error)
+{
+	hfsplus_owned_t owned;
+	size_t bytes;
+	fsimg_status_t status;
+
+	if (owned_name(prepare, key, &owned)) {
+		status = prepare_owned(prepare, owned, record, error);
+		if (status == FSIMG_OK &&
+		    (owned == HFSPLUS_OWNED_PRIVATE_DATA ||
+		    owned == HFSPLUS_OWNED_PRIVATE_DIRECTORY))
+			prepare->folders++;
+		return (status);
+	}
+	status = hfsplus_name_admit(key->name, key->units, error);
+	if (status == FSIMG_OK)
+		status = hfsplus_name_to_path(key->name, key->units,
+		    prepare->path, &bytes, error);
+	if (status != FSIMG_OK)
+		return (status);
+	prepare->path[bytes] = '\0';
+
+	status = prepare_named(prepare, record, error);
+	if (status != FSIMG_OK)
+		fsimg_directory_name_child(prepare->build, prepare->path,
+		    error);
+	return (status);
 }
 
 /* Step 2: walk from the thread while the parent is this directory. Each key
@@ -496,7 +509,8 @@ prepare_scan(hfsplus_prepare_t *prepare, fsimg_error_t *error)
 		if (!hfsplus_ckey_decode(record.key, record.key_bytes, &key))
 			return (hfsplus_corrupt(error,
 			    "HFS Plus key is malformed"));
-		if (hfsplus_ckey_compare(compare, &prepare->previous, &key) >= 0)
+		if (hfsplus_ckey_compare(compare, &prepare->previous,
+		    &key) >= 0)
 			return (hfsplus_corrupt(error,
 			    "HFS Plus catalog keys are out of order"));
 		if (key.parent != prepare->id)

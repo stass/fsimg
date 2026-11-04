@@ -447,9 +447,9 @@ ranges_overlap(uint64_t a, uint64_t a_end, uint64_t b, uint64_t b_end)
  * plist at the trailer; older hdiutil writes a legacy resource fork
  * between the plist and the trailer, and a signed image carries its code
  * signature there.
- * A resource fork or a signature of length 0 is absent, whatever its offset. A bare
- * volume whose last sector holds a stray trailer of another file's length
- * draws no claim.
+ * A resource fork or a signature of length 0 is absent, whatever its offset.
+ * A bare volume whose last sector holds a stray trailer of another file's
+ * length draws no claim.
  */
 static fsimg_status_t
 dmg_probe(const unsigned char *prefix FSIMG_UNUSED, size_t prefix_length

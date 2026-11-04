@@ -219,12 +219,13 @@ private_data_lookup(fsimg_reader_t *reader, fsimg_error_t *error)
 	status = hfsplus_catalog_key_init(&key, HFSPLUS_ID_ROOT, name->units,
 	    name->count, error);
 	if (status == FSIMG_OK)
-		status = hfsplus_catalog_find_exact(&hfsplus->catalog, &key, &record,
-		    &found, error);
+		status = hfsplus_catalog_find_exact(&hfsplus->catalog, &key,
+		    &record, &found, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (found) {
-		if (!hfsplus_folder_decode(record.data, record.data_bytes, &folder))
+		if (!hfsplus_folder_decode(record.data, record.data_bytes,
+		    &folder))
 			return (hfsplus_corrupt(error,
 			    "HFS Plus private data folder is not a folder"));
 		hfsplus->private_data_present = true;
@@ -409,9 +410,9 @@ hfsplus_child_fill(const hfsplus_primary_t *primary, hfsplus_child_t *child,
 		return (FSIMG_OK);
 	case FSIMG_ENTRY_CHAR_DEVICE:
 	case FSIMG_ENTRY_BLOCK_DEVICE:
+		child->special = bsd->special;
+		/* FALLTHROUGH */
 	case FSIMG_ENTRY_SOCKET:
-		if (primary->kind != FSIMG_ENTRY_SOCKET)
-			child->special = bsd->special;
 		if (!fork_empty(&file->data_fork) ||
 		    !fork_empty(&file->resource_fork))
 			return (hfsplus_corrupt(error,

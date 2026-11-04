@@ -233,17 +233,18 @@ fsimg_directory_level(const fsimg_directory_build_t *build)
 }
 
 /* Preparation has no current entry, so reader->path past the directory's own
- * path is free to use.
+ * path is free to use. The name is classed as admission would class it, so what
+ * the error renders follows the same rule as any other path.
  */
 void
 fsimg_directory_name_child(const fsimg_directory_build_t *build,
     const char *name, fsimg_error_t *error)
 {
-	record_view_t view = { .name = name, .name_length = strlen(name),
-	    .class = NAME_DELIVERED };
+	record_view_t view = { .name = name, .name_length = strlen(name) };
 
-	if (record_path(build->reader, build->level, build->path_length, &view,
-	    NULL) == FSIMG_OK)
+	if (classify(build->reader, name, view.name_length, &view.class,
+	    NULL) == FSIMG_OK && record_path(build->reader, build->level,
+	    build->path_length, &view, NULL) == FSIMG_OK)
 		name_walker_path(build->reader, error);
 }
 

@@ -2665,14 +2665,25 @@ mutate_descending_keys(gen_record_t *r, size_t n)
 }
 
 static void
-test_catalog_listing(void)
+catalog_listing_plan(gen_plan_t *plan, gen_object_t *objects)
 {
-	gen_object_t objects[] = {
+	static const gen_object_t base[] = {
 		{ .name = name_a, .units = 1, .id = 32, .type = 1 },
 		{ .name = name_b, .units = 1, .id = 33, .type = 2 },
 		{ .parent = 32, .name = name_c, .units = 1, .id = 34,
 		    .type = 2 }
 	};
+
+	bcopy(base, objects, sizeof(base));
+	gen_plan_init(plan);
+	plan->objects = objects;
+	plan->object_count = 3;
+}
+
+static void
+test_catalog_listing(void)
+{
+	gen_object_t objects[3];
 	static const struct {
 		const char *name;
 		void (*mutate)(gen_record_t *, size_t);
@@ -2687,66 +2698,71 @@ test_catalog_listing(void)
 		{ "thread among children", mutate_child_thread,
 		    "HFS Plus catalog record is not a folder or file" }
 	};
+	static const struct {
+		const char *name;
+		void (*mutate)(gen_record_t *, size_t);
+		fsimg_status_t status;
+		const char *message;
+	} orders[] = {
+		{ "ordered children", NULL, FSIMG_DONE, NULL },
+		{ "equal child keys", mutate_equal_keys, FSIMG_ECORRUPT,
+		    "HFS Plus catalog keys are out of order" },
+		{ "descending child keys", mutate_descending_keys, FSIMG_ECORRUPT,
+		    "HFS Plus catalog keys are out of order" }
+	};
 	gen_plan_t plan;
 	listing_t listed;
 
-	gen_plan_init(&plan);
-	plan.objects = objects;
-	plan.object_count = 3;
+	catalog_listing_plan(&plan, objects);
 	listed = list_plan("nested catalog", &plan, FSIMG_DONE, NULL);
 	expect_true("nested traversal order", listed.count == 3 &&
 	    strcmp(listed.entries[0].path, "/a") == 0 &&
 	    strcmp(listed.entries[1].path, "/a/c") == 0 &&
 	    strcmp(listed.entries[2].path, "/b") == 0);
 	for (size_t i = 0; i < sizeof(mutations) / sizeof(mutations[0]); i++) {
+		catalog_listing_plan(&plan, objects);
 		plan.mutate_catalog = mutations[i].mutate;
 		list_plan(mutations[i].name, &plan, FSIMG_ECORRUPT,
 		    mutations[i].message);
 	}
-	plan.mutate_catalog = NULL;
+	catalog_listing_plan(&plan, objects);
 	objects[0].omit_thread = true;
 	list_plan("missing folder thread", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus thread record is missing");
-	objects[0].omit_thread = false;
 	/* A second primary with the same folder ID cannot agree with the
 	 * existing thread's parent and name. */
-	objects[1].type = 1;
-	objects[1].id = 32;
-	objects[1].omit_thread = true;
-	list_plan("reused folder ID", &plan, FSIMG_ECORRUPT,
-	    "HFS Plus folder thread names another parent or name");
-	objects[1].parent = 32;
-	list_plan("folder cycle through descendant", &plan, FSIMG_ECORRUPT,
-	    "HFS Plus folder thread names another parent or name");
-	objects[1].parent = 0;
-	objects[1].type = 2;
-	objects[1].id = 33;
-	objects[1].omit_thread = false;
+	for (unsigned descendant = 0; descendant < 2; descendant++) {
+		catalog_listing_plan(&plan, objects);
+		objects[1].type = 1;
+		objects[1].id = 32;
+		objects[1].omit_thread = true;
+		objects[1].parent = descendant ? 32 : 0;
+		list_plan(descendant ? "folder cycle through descendant" :
+		    "reused folder ID", &plan, FSIMG_ECORRUPT,
+		    "HFS Plus folder thread names another parent or name");
+	}
 	for (uint32_t id = 9; id <= 15; id++) {
+		catalog_listing_plan(&plan, objects);
 		objects[1].id = id;
 		list_plan("reserved file ID", &plan, FSIMG_ECORRUPT,
 		    "HFS Plus file has a reserved node ID");
-		objects[1].id = 33;
+		catalog_listing_plan(&plan, objects);
 		objects[0].id = id;
 		list_plan("reserved folder ID", &plan, FSIMG_ECORRUPT,
 		    "HFS Plus folder has a reserved node ID");
-		objects[0].id = 32;
 	}
 
 	/* Three root files put the second key on a new leaf when packed two
 	 * records at a time; the first key remains a valid search anchor. */
-	objects[0].type = 2;
-	objects[2].parent = 0;
 	for (unsigned boundary = 0; boundary < 2; boundary++) {
-		plan.records_per_node = boundary ? 2 : 0;
-		list_plan("ordered children", &plan, FSIMG_DONE, NULL);
-		plan.mutate_catalog = mutate_equal_keys;
-		list_plan("equal child keys", &plan, FSIMG_ECORRUPT,
-		    "HFS Plus catalog keys are out of order");
-		plan.mutate_catalog = mutate_descending_keys;
-		list_plan("descending child keys", &plan, FSIMG_ECORRUPT,
-		    "HFS Plus catalog keys are out of order");
-		plan.mutate_catalog = NULL;
+		for (size_t i = 0; i < sizeof(orders) / sizeof(orders[0]); i++) {
+			catalog_listing_plan(&plan, objects);
+			objects[0].type = 2;
+			objects[2].parent = 0;
+			plan.records_per_node = boundary ? 2 : 0;
+			plan.mutate_catalog = orders[i].mutate;
+			list_plan(orders[i].name, &plan, orders[i].status, orders[i].message);
+		}
 	}
 }
 
@@ -2937,11 +2953,12 @@ test_symbolic_links(void)
 	    "HFS Plus symbolic link has a resource fork");
 }
 
+static const unsigned char hard_link_payload[] = "indirect payload";
+
 static void
-test_hard_links(void)
+hard_links_plan(gen_plan_t *plan, gen_object_t *objects)
 {
-	static const unsigned char payload[] = "indirect payload";
-	gen_object_t objects[] = {
+	static const gen_object_t base[] = {
 		{ .name = name_a, .units = 1, .id = 32, .type = 2,
 		    .special = 7, .finder = "hlnkhfs+", .dates = { 42 },
 		    .owner = UINT32_MAX, .group = UINT32_MAX },
@@ -2953,29 +2970,43 @@ test_hard_links(void)
 		    .dates = { 42 } },
 		{ .name = inode7, .units = 6, .id = 41, .parent = 40,
 		    .type = 2, .mode = 0100641, .owner = 123, .group = 456,
-		    .data = payload, .data_size = sizeof(payload) - 1,
+		    .data = hard_link_payload, .data_size = sizeof(hard_link_payload) - 1,
 		    .reserved = UINT32_MAX },
 		{ .name = name_a, .units = 1, .id = 36, .parent = 33,
 		    .type = 2, .special = 7, .finder = "hlnkhfs+",
 		    .dates = { 42 } }
 	};
+
+	bcopy(base, objects, sizeof(base));
+	gen_plan_init(plan);
+	plan->objects = objects;
+	plan->object_count = 5;
+}
+
+static void
+test_hard_links(void)
+{
+	static const uint16_t attr_name[] = { 'x' };
+	static const uint16_t lower_inode[] = { 'i', 'n', 'o', 'd', 'e', '7' };
+	gen_attr_value_t attr = { .id = 41, .name = attr_name, .units = 1,
+	    .type = 0x10 };
+	gen_object_t objects[6];
 	gen_plan_t plan;
 	listing_t listed;
 
-	gen_plan_init(&plan);
-	plan.objects = objects;
-	plan.object_count = 5;
+	hard_links_plan(&plan, objects);
 	listed = list_plan("two hard-link names in two directories", &plan,
 	    FSIMG_DONE, NULL);
 	expect_true("private node hidden and metadata taken from node",
 	    listed.count == 3 && listed.entries[0].metadata.uid == 123 &&
 	    listed.entries[2].metadata.mode == 0641 &&
-	    listed.entries[0].size == sizeof(payload) - 1 &&
+	    listed.entries[0].size == sizeof(hard_link_payload) - 1 &&
 	    strcmp(listed.entries[2].path, "/b/c") == 0);
-	check_content("first stub content", &plan, "/a", payload,
-	    sizeof(payload) - 1, FSIMG_OK, NULL);
-	check_content("second stub content", &plan, "/b/c", payload,
-	    sizeof(payload) - 1, FSIMG_OK, NULL);
+	check_content("first stub content", &plan, "/a", hard_link_payload,
+	    sizeof(hard_link_payload) - 1, FSIMG_OK, NULL);
+	check_content("second stub content", &plan, "/b/c", hard_link_payload,
+	    sizeof(hard_link_payload) - 1, FSIMG_OK, NULL);
+	hard_links_plan(&plan, objects);
 	plan.object_count = 6;
 	listed = list_plan("three names across directories", &plan, FSIMG_DONE, NULL);
 	expect_true("three names use node metadata", listed.count == 4 &&
@@ -2984,18 +3015,15 @@ test_hard_links(void)
 	    listed.entries[2].metadata.uid == 123 &&
 	    listed.entries[3].metadata.mode == 0641 &&
 	    listed.entries[0].metadata.created.seconds == -INT64_C(2082844800));
-	check_content("third stub content", &plan, "/b/a", payload,
-	    sizeof(payload) - 1, FSIMG_OK, NULL);
-	plan.object_count = 5;
+	check_content("third stub content", &plan, "/b/a", hard_link_payload,
+	    sizeof(hard_link_payload) - 1, FSIMG_OK, NULL);
+	hard_links_plan(&plan, objects);
 	objects[0].mode = 0100444;
 	objects[0].flags = 0x20;
 	list_plan("current stub mode and flag", &plan, FSIMG_DONE, NULL);
-	objects[0].mode = 0;
-	objects[0].flags = 0;
+	hard_links_plan(&plan, objects);
 	list_plan("zero-mode stub without chain flag", &plan, FSIMG_DONE, NULL);
-	static const uint16_t attr_name[] = { 'x' };
-	gen_attr_value_t attr = { .id = 41, .name = attr_name, .units = 1,
-	    .type = 0x10 };
+	hard_links_plan(&plan, objects);
 	plan.attributes = true;
 	plan.values = &attr;
 	plan.value_count = 1;
@@ -3004,87 +3032,105 @@ test_hard_links(void)
 	expect_true("both stubs carry node mark", listed.count == 3 &&
 	    (listed.entries[0].metadata.valid & FSIMG_META_EXTRA_DATA) &&
 	    (listed.entries[2].metadata.valid & FSIMG_META_EXTRA_DATA));
-	objects[4].flags = 0;
+	hard_links_plan(&plan, objects);
+	plan.attributes = true;
+	plan.values = &attr;
+	plan.value_count = 1;
 	objects[0].flags = 4;
 	attr.id = 32;
 	listed = list_plan("stub attributes do not mark effective node", &plan,
 	    FSIMG_DONE, NULL);
 	expect_true("stub mark absent", !(listed.entries[0].metadata.valid &
 	    FSIMG_META_EXTRA_DATA));
-	objects[0].flags = 0;
-	plan.attributes = false;
-	plan.value_count = 0;
+	hard_links_plan(&plan, objects);
 	objects[0].dates[0] = 0;
 	list_plan("root-date stub with different private date", &plan,
 	    FSIMG_DONE, NULL);
+	hard_links_plan(&plan, objects);
 	objects[0].dates[0] = 43;
 	listed = list_plan("Finder file codes with another date", &plan,
 	    FSIMG_DONE, NULL);
 	expect_true("ordinary file uses own size", listed.entries[0].size == 0);
-	objects[0].dates[0] = 42;
+	hard_links_plan(&plan, objects);
 	objects[0].special = 0;
 	list_plan("zero hard-link reference", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus hard-link stub has a zero reference");
-	objects[0].special = 7;
+	hard_links_plan(&plan, objects);
 	objects[0].data_size = 1;
 	list_plan("stub nonempty data", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus hard-link stub has a nonempty fork");
-	objects[0].data_size = 0;
+	hard_links_plan(&plan, objects);
 	objects[0].resource_size = 1;
 	list_plan("stub nonempty resource", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus hard-link stub has a nonempty fork");
-	objects[0].resource_size = 0;
+	hard_links_plan(&plan, objects);
 	objects[4].name = name_c;
 	objects[4].units = 1;
 	list_plan("missing indirect node", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus hard-link stub's indirect node is missing");
-	static const uint16_t lower_inode[] = { 'i', 'n', 'o', 'd', 'e', '7' };
+	hard_links_plan(&plan, objects);
 	objects[4].name = lower_inode;
-	objects[4].units = 6;
 	list_plan("case variant indirect node is missing", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus hard-link stub's indirect node is missing");
-	objects[4].name = inode7;
+	hard_links_plan(&plan, objects);
 	objects[4].mode = 0010644;
 	list_plan("FIFO indirect node", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus indirect node is a stub or of another kind");
-	objects[4].type = 1;
+	hard_links_plan(&plan, objects);
 	objects[4].mode = 0040755;
+	objects[4].type = 1;
 	list_plan("folder indirect node", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus indirect node is a stub or of another kind");
-	objects[4].type = 2;
+	hard_links_plan(&plan, objects);
 	objects[4].mode = 0100644;
 	bcopy("hlnkhfs+", objects[4].finder, 8);
 	list_plan("indirect node is itself stub", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus indirect node is a stub or of another kind");
-	bzero(objects[4].finder, 32);
+	hard_links_plan(&plan, objects);
 	objects[4].mode = 0120777;
 	listed = list_plan("hard-linked symbolic link", &plan, FSIMG_DONE, NULL);
 	expect_true("indirect node decides link kind",
 	    listed.entries[0].kind == FSIMG_ENTRY_SYMLINK);
-	check_content("hard-linked target", &plan, "/a", payload,
-	    sizeof(payload) - 1, FSIMG_OK, NULL);
+	check_content("hard-linked target", &plan, "/a", hard_link_payload,
+	    sizeof(hard_link_payload) - 1, FSIMG_OK, NULL);
+	hard_links_plan(&plan, objects);
 	objects[4].mode = 0100644;
 	objects[3].type = 2;
 	list_plan("private data lookup requires folder", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus private data folder is not a folder");
+	hard_links_plan(&plan, objects);
+	objects[4].mode = 0100644;
+	objects[3].type = 2;
 	bzero(objects[0].finder, 32);
 	bzero(objects[2].finder, 32);
 	list_plan("root listing validates private folder", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus private folder is not a folder");
-	objects[3].type = 1;
+	hard_links_plan(&plan, objects);
+	objects[4].mode = 0100644;
 	bcopy("fdrpMACS", objects[0].finder, 8);
+	bzero(objects[2].finder, 32);
 	objects[0].flags = 0x20;
 	listed = list_plan("directory hard link", &plan, FSIMG_EUNSUPPORTED,
 	    "HFS Plus directory hard link is not supported");
 	expect_true("directory link names path and exposes no siblings",
 	    strcmp(listed.error.path, "/a") == 0 && listed.count == 0);
-	objects[0].flags = 0;
+	hard_links_plan(&plan, objects);
+	objects[4].mode = 0100644;
+	bcopy("fdrpMACS", objects[0].finder, 8);
+	bzero(objects[2].finder, 32);
 	list_plan("Finder alias without chain flag", &plan, FSIMG_DONE, NULL);
+	hard_links_plan(&plan, objects);
+	objects[4].mode = 0100644;
+	bcopy("fdrpMACS", objects[0].finder, 8);
+	bzero(objects[2].finder, 32);
 	objects[0].flags = 0x20;
 	objects[0].dates[0] = 43;
 	list_plan("Finder alias with another date", &plan, FSIMG_DONE, NULL);
+	hard_links_plan(&plan, objects);
+	objects[4].mode = 0100644;
+	bzero(objects[2].finder, 32);
+	objects[0].flags = 0x20;
 	objects[0].dates[0] = 0;
-	bcopy("hlnkhfs+", objects[0].finder, 8);
 	plan.object_count = 1;
 	list_plan("root-date stub without data folder", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus hard-link stub on a volume with no private data folder");
@@ -4013,8 +4059,8 @@ payload_location(const gen_image_t *image, unsigned char *payload,
 		for (size_t j = 0; j < count; j++) {
 			if (gen_load(node + tree->node_size - 2 * (j + 1), 2) != r->offset - start)
 				continue;
-			store_payload(payload, 4, leaf, 4);
-			store_payload(payload, 8, j, 2);
+			store_payload(payload, PREPARED_LEAF, leaf, 4);
+			store_payload(payload, PREPARED_RECORD, j, 2);
 			return;
 		}
 	}
@@ -4039,19 +4085,25 @@ test_prepared_entries(void)
 		uint64_t value;
 		size_t width;
 	} invalid[] = {
-		{ "prepared unknown kind refused", 14, 255, 1 },
-		{ "prepared leaf at node count refused", 4, 0, 4 },
-		{ "prepared leaf above node count refused", 4, UINT32_MAX, 4 },
-		{ "prepared reserved id refused", 0, 15, 4 },
-		{ "prepared mode outside permission bits refused", 33, 010000, 2 },
-		{ "prepared unknown flags refused", 35, 0x80, 1 },
-		{ "prepared compression refused", 16, 1, 1 },
-		{ "prepared file valence refused", 56, 1, 4 },
-		{ "prepared file special field refused", 52, 1, 4 },
-		{ "prepared empty symlink refused", 17, 0, 8 },
-		{ "prepared oversized symlink refused", 17, 1024, 8 },
-		{ "prepared FIFO with bytes refused", 14, FSIMG_ENTRY_FIFO, 1 },
-		{ "prepared extra data outside boolean refused", 15, 2, 1 }
+		{ "prepared unknown kind refused", PREPARED_KIND, 255, 1 },
+		{ "prepared leaf at node count refused", PREPARED_LEAF, 0, 4 },
+		{ "prepared leaf above node count refused", PREPARED_LEAF, UINT32_MAX, 4 },
+		{ "prepared reserved id refused", PREPARED_ID, 15, 4 },
+		{ "prepared mode outside permission bits refused", PREPARED_MODE, 010000, 2 },
+		{ "prepared unknown flags refused", PREPARED_FLAGS, 0x80, 1 },
+		{ "prepared compression refused", PREPARED_COMPRESSION, 1, 1 },
+		{ "prepared file valence refused", PREPARED_VALENCE, 1, 4 },
+		{ "prepared file special field refused", PREPARED_SPECIAL, 1, 4 },
+		{ "prepared empty symlink refused", PREPARED_SIZE, 0, 8 },
+		{ "prepared oversized symlink refused", PREPARED_SIZE, 1024, 8 },
+		{ "prepared FIFO with bytes refused", PREPARED_KIND, FSIMG_ENTRY_FIFO, 1 },
+		{ "prepared extra data outside boolean refused", PREPARED_EXTRA, 2, 1 },
+		{ "prepared owner without owner mode flag refused", PREPARED_OWNER, 1, 4 },
+		{ "prepared group without owner mode flag refused", PREPARED_GROUP, 1, 4 },
+		{ "prepared mode without owner mode flag refused", PREPARED_MODE, 0644, 2 },
+		{ "prepared folder count without flag refused", PREPARED_FOLDER_COUNT, 1, 4 },
+		{ "prepared folder count flag on file refused", PREPARED_FLAGS, HFSPLUS_CHILD_FOLDER_COUNT, 1 },
+		{ "prepared folder count on folder without flag refused", PREPARED_FOLDER_COUNT, 1, 4 }
 	};
 	size_t invalid_count = sizeof(invalid) / sizeof(invalid[0]);
 	gen_plan_t plan;
@@ -4067,10 +4119,12 @@ test_prepared_entries(void)
 		fsimg_store_t *store;
 		fsimg_error_t error = { 0 };
 		fsimg_status_t status;
-		unsigned char payload[64], byte;
+		unsigned char payload[PREPARED_BYTES], byte;
 		uint64_t cursor;
 		size_t count;
-		bool folder = scenario == invalid_count + 1 || scenario == invalid_count + 2;
+		/* The last invalid row checks a folder without its count flag. */
+		bool folder = scenario == invalid_count - 1 ||
+		    scenario == invalid_count + 1 || scenario == invalid_count + 2;
 		const char *name = "prepared entry baseline";
 		const char *message = NULL;
 
@@ -4094,7 +4148,7 @@ test_prepared_entries(void)
 			    scenario == 1 ? image.trees[GEN_CATALOG].nodes : invalid[scenario].value,
 			    invalid[scenario].width);
 			if (scenario == 9 || scenario == 10)
-				payload[14] = FSIMG_ENTRY_SYMLINK;
+				payload[PREPARED_KIND] = FSIMG_ENTRY_SYMLINK;
 		} else switch (scenario - invalid_count) {
 		case 0:
 			break;
@@ -4105,7 +4159,7 @@ test_prepared_entries(void)
 			break;
 		case 2:
 			name = "prepared record past leaf end refused";
-			store_payload(payload, 8, UINT16_MAX, 2);
+			store_payload(payload, PREPARED_RECORD, UINT16_MAX, 2);
 			message = "HFS Plus record location lies outside its leaf";
 			break;
 		case 3:
@@ -4115,7 +4169,7 @@ test_prepared_entries(void)
 			break;
 		case 4:
 			name = "prepared file size disagrees with record";
-			store_payload(payload, 17, 2, 8);
+			store_payload(payload, PREPARED_SIZE, 2, 8);
 			message = "HFS Plus file record changed since it was listed";
 			break;
 		case 5:
@@ -4138,11 +4192,11 @@ test_prepared_entries(void)
 				const char *name;
 				size_t length;
 			} lengths[] = {
-				{ "driver replay rejects 63-byte payload", 63 },
+				{ "driver replay rejects 59-byte payload", PREPARED_BYTES - 1 },
 				{ "driver replay rejects empty payload", 0 },
-				{ "driver replay rejects 65-byte payload", 65 }
+				{ "driver replay rejects 61-byte payload", PREPARED_BYTES + 1 }
 			};
-			unsigned char extended[65] = { 0 };
+			unsigned char extended[PREPARED_BYTES + 1] = { 0 };
 
 			bcopy(payload, extended, sizeof(payload));
 			for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
@@ -4154,10 +4208,21 @@ test_prepared_entries(void)
 			}
 			status = reader->ops->replay(reader, "b", payload,
 			    sizeof(payload), &error);
-			expect_status("driver replay accepts 64-byte payload", status,
+			expect_status("driver replay accepts 60-byte payload", status,
 			    FSIMG_OK, &error);
 		}
 		if (scenario == invalid_count + 6) {
+			fsimg_directory_keys_t keys;
+			char scratch_name[2] = { 0 };
+
+			CHECK(fsimg_store_read(store, cursor + 9, scratch_name, 1,
+			    &error) == FSIMG_OK);
+			status = reader->ops->keys(reader, scratch_name, payload,
+			    sizeof(payload), &keys, &error);
+			expect_status("scratch name cannot produce HFS Plus keys", status,
+			    FSIMG_ECORRUPT, &error);
+			expect_diagnostic("scratch name cannot produce HFS Plus keys", &error,
+			    "invalid HFS Plus file name");
 			/* Exercise the driver guard while its reader is live; the
 			 * public advance closes it on the walker's earlier refusal. */
 			status = reader->ops->replay(reader, "\xff", payload,
@@ -4168,7 +4233,8 @@ test_prepared_entries(void)
 			    "invalid prepared HFS Plus file name");
 		}
 		status = fsimg_reader_next(reader, &entry, &error);
-		if (folder || (scenario >= invalid_count + 3 && scenario <= invalid_count + 5)) {
+		if ((folder && scenario >= invalid_count) ||
+		    (scenario >= invalid_count + 3 && scenario <= invalid_count + 5)) {
 			expect_status(name, status, FSIMG_OK, &error);
 			if (status == FSIMG_OK) {
 				if (folder)
@@ -4190,6 +4256,274 @@ test_prepared_entries(void)
 		fixture_close(&f);
 		gen_free(&image);
 	}
+}
+
+static void
+malform_file_record(gen_record_t *records, size_t count)
+{
+	gen_record_t *r = find_record(records, count, 2, 2);
+
+	r->length -= 2;
+}
+
+static void
+malform_folder_record(gen_record_t *records, size_t count)
+{
+	gen_record_t *r = find_record(records, count, 2, 1);
+
+	r->length -= 2;
+}
+
+static void
+empty_catalog_record(gen_record_t *records, size_t count)
+{
+	gen_record_t *r = find_record(records, count, 2, 2);
+
+	r->length = r->key_length;
+}
+
+static void
+malform_child_key(gen_record_t *records, size_t count)
+{
+	gen_record_t *r = find_record(records, count, 2, 2);
+
+	/* Keep framing intact; the embedded unit count disagrees with keyLength. */
+	gen_store(r->bytes + 6, 2, 2);
+}
+
+static void
+test_corrupt_catalog_records_pin_diagnostics(void)
+{
+	static const struct {
+		const char *name;
+		uint16_t type;
+		void (*mutate)(gen_record_t *, size_t);
+		const char *message;
+	} rows[] = {
+		{ "malformed file record", 2, malform_file_record,
+		    "HFS Plus file record is malformed" },
+		{ "malformed folder record", 1, malform_folder_record,
+		    "HFS Plus folder record is malformed" },
+		{ "catalog record without a type", 2, empty_catalog_record,
+		    "HFS Plus catalog record is too short for its type" },
+		{ "malformed child key in directory scan", 2, malform_child_key,
+		    "HFS Plus key is malformed" }
+	};
+
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+		    .type = rows[i].type };
+		gen_plan_t plan;
+
+		gen_plan_init(&plan);
+		plan.objects = &object;
+		plan.object_count = 1;
+		list_plan("catalog corruption baseline", &plan, FSIMG_DONE, NULL);
+		plan.mutate_catalog = rows[i].mutate;
+		list_plan(rows[i].name, &plan, FSIMG_ECORRUPT, rows[i].message);
+	}
+}
+
+static void
+test_attribute_scan_refuses_a_malformed_key(void)
+{
+	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+	    .type = 2, .flags = 4 };
+	gen_attr_value_t values[] = {
+		{ .id = 32, .name = name_a, .units = 1, .type = 0x10 },
+		{ .id = 32, .name = name_b, .units = 1, .type = 0x10 }
+	};
+	gen_plan_t plan;
+	gen_image_t image;
+
+	gen_plan_init(&plan);
+	plan.objects = &object;
+	plan.object_count = 1;
+	plan.attributes = true;
+	plan.values = values;
+	plan.value_count = 2;
+	gen_build(&plan, &image);
+	expect_listing("attribute key baseline", &image, FSIMG_DONE, NULL);
+	gen_store(image.bytes + image.trees[GEN_ATTRIBUTES].records[1].offset + 12,
+	    2, 2);
+	expect_listing("malformed attribute key during scan", &image,
+	    FSIMG_ECORRUPT, "HFS Plus attribute key is malformed");
+	gen_free(&image);
+}
+
+static void
+test_thread_lookup_refuses_a_malformed_key_after_following_a_leaf(void)
+{
+	gen_object_t objects[] = {
+		{ .name = name_a, .units = 1, .id = 32, .type = 2 },
+		{ .name = name_b, .units = 1, .id = 33, .type = 2 },
+		{ .name = name_c, .units = 1, .id = 34, .type = 2 }
+	};
+	gen_plan_t plan;
+	gen_image_t image;
+	fixture_t f;
+	hfsplus_cursor_t cursor;
+	hfsplus_thread_t thread;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+
+	gen_plan_init(&plan);
+	plan.objects = objects;
+	plan.object_count = 3;
+	plan.records_per_node = 2;
+	gen_build(&plan, &image);
+	fixture_init(&f, &image, 0, 0);
+	CHECK(fixture_open(&f, -1, false, &error) == FSIMG_OK);
+	fsimg_hfsplus_reader_t *state = f.reader.driver;
+	hfsplus_tree_t *tree = &state->catalog;
+	gen_record_t *r = find_record(image.trees[GEN_CATALOG].records,
+	    image.trees[GEN_CATALOG].record_count, 33, 4);
+
+	/* Start the search in the preceding leaf, so its lower bound follows
+	 * fLink. The next leaf's first key is decoded by thread lookup itself. */
+	tree->header.tree_depth = 1;
+	tree->header.root_node = (uint32_t)((r->offset -
+	    image.trees[GEN_CATALOG].offset) / tree->header.node_size) - 1;
+	hfsplus_cursor_init(&cursor, tree, tree->search_node);
+	status = hfsplus_thread_lookup(&cursor, 33, 4, &thread, &error);
+	expect_status("thread lookup across leaf baseline", status, FSIMG_OK, &error);
+	gen_store(image.bytes + r->offset + 6, 1, 2);
+	hfsplus_cursor_init(&cursor, tree, tree->search_node);
+	status = hfsplus_thread_lookup(&cursor, 33, 4, &thread, &error);
+	expect_status("malformed thread key after leaf transition", status,
+	    FSIMG_ECORRUPT, &error);
+	expect_diagnostic("malformed thread key after leaf transition", &error,
+	    "HFS Plus key is malformed");
+	fixture_close(&f);
+	gen_free(&image);
+}
+
+/* Run each refusal at root and beneath /b, rebuilding its ordinary child. */
+static void
+test_child_refusals_name_the_whole_path(void)
+{
+	enum {
+		CHILD_COMPRESSION_FORK,
+		CHILD_UNKNOWN_ATTRIBUTE,
+		CHILD_EMPTY_SYMLINK,
+		CHILD_LONG_SYMLINK,
+		CHILD_EXPANDED_TIMES,
+		CHILD_UNKNOWN_FLAG,
+		CHILD_DIRECTORY_LINK,
+		CHILD_COMPRESSED,
+		CHILD_ZERO_STUB,
+		CHILD_UNCONVERTIBLE
+	};
+	static const uint16_t cmp_name[] = { 'c', 'o', 'm', '.', 'a', 'p', 'p',
+	    'l', 'e', '.', 'd', 'e', 'c', 'm', 'p', 'f', 's' };
+	static const uint16_t surrogate[] = { 0xd800 };
+	static const unsigned char cmp[] = { 'f', 'p', 'm', 'c', 3, 0, 0, 0,
+	    1, 0, 0, 0, 0, 0, 0, 0 };
+	static const struct {
+		const char *name;
+		fsimg_status_t status;
+		const char *message;
+	} rows[] = {
+		[CHILD_COMPRESSION_FORK] = { "compression attribute in fork", FSIMG_EUNSUPPORTED,
+		    "HFS Plus compression attribute is not stored inline" },
+		[CHILD_UNKNOWN_ATTRIBUTE] = { "unknown attribute type names child", FSIMG_EUNSUPPORTED,
+		    "HFS Plus attribute record has an unknown type" },
+		[CHILD_EMPTY_SYMLINK] = { "empty symlink names child", FSIMG_EUNSUPPORTED,
+		    "HFS Plus symbolic link's target length is not 1 to 1023 bytes" },
+		[CHILD_LONG_SYMLINK] = { "oversized symlink names child", FSIMG_EUNSUPPORTED,
+		    "HFS Plus symbolic link's target length is not 1 to 1023 bytes" },
+		[CHILD_EXPANDED_TIMES] = { "expanded timestamps name child", FSIMG_EUNSUPPORTED,
+		    "HFS Plus catalog record has expanded timestamps" },
+		[CHILD_UNKNOWN_FLAG] = { "unknown flag names child", FSIMG_EUNSUPPORTED,
+		    "HFS Plus catalog record has an unknown flag" },
+		[CHILD_DIRECTORY_LINK] = { "directory hard link names child", FSIMG_EUNSUPPORTED,
+		    "HFS Plus directory hard link is not supported" },
+		[CHILD_COMPRESSED] = { "compressed file names child", FSIMG_EUNSUPPORTED,
+		    "HFS Plus compressed file is not supported" },
+		[CHILD_ZERO_STUB] = { "zero stub reference names child", FSIMG_ECORRUPT,
+		    "HFS Plus hard-link stub has a zero reference" },
+		[CHILD_UNCONVERTIBLE] = { "unconvertible child stays unnamed", FSIMG_ECORRUPT,
+		    "HFS Plus name has an unpaired surrogate" }
+	};
+
+	for (unsigned nested = 0; nested < 2; nested++) {
+		for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+			gen_object_t objects[] = {
+				{ .name = name_a, .units = 1, .id = 32, .type = 2 },
+				{ .name = name_b, .units = 1, .id = 33, .type = 1 }
+			};
+			gen_attr_value_t attr = { .id = 32, .name = cmp_name,
+			    .units = sizeof(cmp_name) / sizeof(cmp_name[0]),
+			    .type = 0x10, .value = cmp, .size = sizeof(cmp) };
+			gen_plan_t plan;
+			listing_t listed;
+			char scenario[100];
+			const char *path = nested ? "/b/a" : "/a";
+
+			gen_plan_init(&plan);
+			plan.objects = objects;
+			plan.object_count = nested ? 2 : 1;
+			objects[0].parent = nested ? 33 : 0;
+			switch (i) {
+			case CHILD_COMPRESSION_FORK:
+			case CHILD_UNKNOWN_ATTRIBUTE:
+			case CHILD_COMPRESSED:
+				plan.attributes = true;
+				plan.values = &attr;
+				plan.value_count = 1;
+				objects[0].flags = 4;
+				objects[0].owner_flags = i == CHILD_UNKNOWN_ATTRIBUTE ? 0 : 0x20;
+				if (i == CHILD_COMPRESSION_FORK)
+					attr.type = 0x20;
+				else if (i == CHILD_UNKNOWN_ATTRIBUTE)
+					attr.type = 0x40;
+				break;
+			case CHILD_EMPTY_SYMLINK:
+			case CHILD_LONG_SYMLINK:
+				objects[0].mode = 0120777;
+				objects[0].data_size = i == CHILD_EMPTY_SYMLINK ? 0 : 1024;
+				break;
+			case CHILD_EXPANDED_TIMES:
+				objects[0].flags = 0x1000;
+				break;
+			case CHILD_UNKNOWN_FLAG:
+				objects[0].flags = 0x8000;
+				break;
+			case CHILD_DIRECTORY_LINK:
+				bcopy("fdrpMACS", objects[0].finder, 8);
+				objects[0].flags = 0x20;
+				break;
+			case CHILD_ZERO_STUB:
+				bcopy("hlnkhfs+", objects[0].finder, 8);
+				break;
+			case CHILD_UNCONVERTIBLE:
+				objects[0].name = surrogate;
+				break;
+			}
+			snprintf(scenario, sizeof(scenario), "%s: %s", path, rows[i].name);
+			listed = list_plan(scenario, &plan, rows[i].status, rows[i].message);
+			if (i == CHILD_UNCONVERTIBLE)
+				path = "";
+			expect_true(scenario, strcmp(listed.error.path, path) == 0);
+			expect_true("refused directory delivers no children",
+			    listed.count == nested);
+		}
+	}
+}
+
+static void
+journal_file_nonregular(gen_record_t *records, size_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		gen_record_t *r = &records[i];
+
+		if (gen_load(r->bytes + 2, 4) == 2 &&
+		    gen_load(r->bytes + 6, 2) == 8) {
+			gen_store(r->bytes + r->key_length + 42, 0010644, 2);
+			return;
+		}
+	}
+	CHECK(false);
 }
 
 static void
@@ -4237,7 +4571,15 @@ test_journal_info_identity(void)
 	    FSIMG_ECORRUPT, &listed.error);
 	expect_diagnostic("journal info must be regular file", &listed.error,
 	    "HFS Plus journal info file is not a regular file");
+	expect_true("format-owned journal info remains unnamed", listed.error.path[0] == '\0');
 	gen_free(&image);
+	gen_plan_init(&plan);
+	plan.journal = true;
+	plan.journal_file = true;
+	plan.mutate_catalog = journal_file_nonregular;
+	listed = list_plan("journal must be regular file", &plan, FSIMG_ECORRUPT,
+	    "HFS Plus journal file is not a regular file");
+	expect_true("format-owned journal remains unnamed", listed.error.path[0] == '\0');
 }
 
 /* Runtime corpus fixtures include an indexed directory, overflow extents,
@@ -4305,6 +4647,10 @@ main(int argc, char **argv)
 	test_root_fields();
 	test_attribute_record_lengths();
 	test_distinct_dates();
+	test_corrupt_catalog_records_pin_diagnostics();
+	test_attribute_scan_refuses_a_malformed_key();
+	test_thread_lookup_refuses_a_malformed_key_after_following_a_leaf();
+	test_child_refusals_name_the_whole_path();
 	test_prepared_entries();
 	test_journal_info_identity();
 	test_probe_exclusivity();
