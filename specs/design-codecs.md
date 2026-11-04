@@ -1,9 +1,10 @@
-# Compression codecs: LZO1X, NRV2B, LZFSE and LZVN
+# Compression codecs: LZO1X, NRV2B, bzip2, LZFSE and LZVN
 
 ## Scope
 
-fsimg owns three stream codecs: an LZO1X decoder, an NRV2B decoder for the
-8-bit control-buffer variant, and an LZO1X encoder. It also compiles two
+fsimg owns four stream codecs: an LZO1X decoder, an NRV2B decoder for the
+8-bit control-buffer variant, a [bzip2 decoder](#the-bzip2-decoder) for DMG
+chunks, and an LZO1X encoder. It also compiles two
 [imported decoders](#imported-lzfse-and-lzvn-decoders), Apple's LZFSE and LZVN, which HFS
 Plus and APFS transparent compression need. They live in
 `lib/codec/`, are private to libfsimg, and know nothing about the images
@@ -616,14 +617,163 @@ stream it writes decodes to its input under the project's decoder; every
 stream decodes to its input under the `liblzo2` oracle; and the native
 startup code boots a written image at the `ifsboot` writer's native gate.
 
+## The bzip2 decoder
+
+DMG `UDBZ` images store each chunk as a bzip2 stream, and most macOS release
+images from 10.4 on are `UDBZ`. fsimg decodes them with a project-owned
+decoder for the same reasons as the other owned codecs: the working agreement
+permits zlib as the only linked library, `libbz2` is not a system library
+everywhere fsimg runs, and the decoder is small next to the bounds checks any
+decoder of untrusted bzip2 needs. It is written from the format's description;
+no code comes from `libbzip2` or another implementation.
+
+### The stream
+
+A stream is read as bits, most significant first, and holds no byte alignment
+between its parts:
+
+| Part | Bits | Content |
+| --- | --- | --- |
+| Header | 32 | `BZh` and the level, an ASCII digit `1` to `9`; a block's transformed length is at most 100,000 times the level |
+| Block magic | 48 | `0x314159265359` |
+| Block checksum | 32 | CRC of the block's decoded bytes |
+| Randomised | 1 | Set by an obsolete encoder mode |
+| Origin | 24 | Where the original text's rotation lies in the sorted matrix |
+| Used map | 16, then 16 per set bit | Which of the 256 byte values the block holds; at least one |
+| Group count | 3 | Huffman codes in the block, 2 to 6 |
+| Selector count | 15 | At least 1 |
+| Selectors | Unary, each below the group count | Move-to-front positions naming the code for each 50 symbols |
+| Code lengths | Per group: 5, then 1 or 2 bits per step | A start length and, for each symbol, deltas: `0` ends the symbol, `10` adds one, `11` subtracts one; every length is 1 to 20 |
+| Symbols | Huffman, canonical | Over an alphabet of the used values plus two, ending in the end-of-block symbol |
+| End magic | 48 | `0x177245385090` after the last block |
+| Stream checksum | 32 | Each block's checksum folded in: rotate left one bit, exclusive-or |
+| Padding | 0 to 7 | To the next byte boundary; its value is not read |
+
+A block's checksum is CRC-32 with polynomial `0x04C11DB7`, most significant
+bit first, starting from all ones and inverted at the end.
+
+A block unwinds through three stages. **Symbols to transformed bytes**: symbols
+0 and 1 (`RUNA`, `RUNB`) are bijective base-2 digits, least significant first,
+of a repeat count for the byte at the front of the move-to-front list; a later
+symbol `s` moves the list's entry at position `s - 1` to the front and emits it;
+the last symbol ends the block. **Inverse Burrows-Wheeler transform**: the
+transformed bytes are the last column of the sorted matrix, and the first column
+is their sorted order; walking from the origin through the permutation between
+the two gives the text. **Run-length expansion**: after four equal bytes, the
+next byte is a repeat count from 0 to 255 and not a literal; run state starts
+afresh in each block, and a block may end straight after the four bytes with no
+count.
+
+### Interface
+
+```c
+fsimg_status_t fsimg_bzip2_decode(fsimg_ctx_t *ctx,
+    const uint8_t *in, size_t in_len, uint8_t *out, size_t capacity,
+    fsimg_codec_step_t *step, fsimg_error_t *error);
+uint64_t fsimg_bzip2_stream_bound(uint64_t decoded);
+```
+
+One call decodes one whole stream. Like the NRV2B decoder it holds no state
+between calls; unlike it, the decoder needs working memory, which it allocates
+through `ctx` and frees before returning. On success the end-of-stream mark and
+its padding were the last things in the input, `step->done` is set,
+`step->consumed` is `in_len`, and the output is `out[0..step->produced)`. A
+stream decoding to fewer bytes than the capacity is a success the caller
+judges, since only the caller knows the length it expected.
+
+One chunk holds one stream, in every specimen seen: `hdiutil` compresses each
+chunk on its own. Concatenated streams, which the `bzip2` command accepts, are
+not read: bytes after the padding are `FSIMG_ECORRUPT`.
+
+### Failures
+
+Every check names itself in the message, and a corrupt stream's
+`error->offset` is the stream bytes consumed when it failed.
+
+| Condition | Status |
+| --- | --- |
+| `NULL` buffer with a nonzero length | `FSIMG_EINVAL` |
+| Working memory refused | The context's: `FSIMG_ELIMIT` or `FSIMG_ENOMEM` |
+| Randomised block | `FSIMG_EUNSUPPORTED` |
+| Input ends before the stream does; bad header; bad block or end magic | `FSIMG_ECORRUPT` |
+| Origin not below the block's transformed length, including every empty block | `FSIMG_ECORRUPT` |
+| Empty used map; group count outside 2 to 6; selector count 0; selector not below the group count | `FSIMG_ECORRUPT` |
+| Code length outside 1 to 20; lengths no prefix code can have (oversubscribed) | `FSIMG_ECORRUPT` |
+| Bit pattern no symbol has; symbols past the last selector | `FSIMG_ECORRUPT` |
+| Transformed bytes past the block limit, whether by run or by symbol | `FSIMG_ECORRUPT` |
+| Output past the capacity | `FSIMG_ECORRUPT` |
+| Block or stream checksum mismatch | `FSIMG_ECORRUPT` |
+| Bytes after the stream's padding | `FSIMG_ECORRUPT` |
+
+A randomised block is well-formed but refused as unsupported: only bzip2 0.9.0
+wrote them, the format's encoder has ignored the mode since, and handling them
+would add a table of 512 constants for images nobody makes. A code with unused
+patterns (undersubscribed) is accepted, since no byte of the stream depends on
+it; one of those patterns in the stream is corrupt when it is met.
+
+A valid block needs at most 18001 selectors, one for each 50 of its at most
+900,001 symbols. Some encoders write more. Those are read and validated like
+the others and then dropped, since a block limited to 900,000 transformed bytes
+cannot reach them. This costs one comparison and accepts those streams.
+
+### Bounds
+
+**Output.** Every byte is written after a check against the capacity, and a run
+count is checked whole before its first byte. A long stream is corrupt the
+moment it passes the capacity.
+
+**Memory.** The decoder allocates after reading the header, one object through
+`ctx`: a `uint32_t` per possible transformed byte and fixed tables of about
+22 KiB (six Huffman codes and the selectors). The entry count is the smaller of
+the declared level's block size, at most 900,000, and `capacity + capacity / 4`
+(the reasoning is under **Work** below), so at most 3.6 MiB, never more than the
+stream's declared level needs, and proportionally less for a small output. The
+allocation is the only one and lasts the call, so its failure is clean and no
+partial state outlives it.
+
+**Work.** Nothing in the decoder loops without consuming input or producing
+bytes, except the transformation of a block, so that is what needs bounding. Expanding
+transformed bytes yields at least four output bytes for each five: the fewest
+come from `a a a a 0` repeated, and in general `L` transformed bytes produce at
+least `L - L / 5` bytes of output. A block can therefore hold no more
+than `R + R / 4` transformed bytes, for `R` output bytes still free, or it would
+overflow whatever its bytes are. The decoder refuses a block that passes this
+limit as it is read, before any transform, so that a 60-byte stream declaring a
+full block of zeros in a 512-byte chunk costs at most 640 transformed bytes, not
+900,000. Every other step takes a bit from the input (a symbol, a selector or a
+code length) or writes to the output, the per-block setup of about 2,000
+operations is paid for by the header bits read for it, and an input is bounded,
+so a call's running time is proportional to `in_len + capacity` and it terminates
+on every input.
+
+A stream can consume input without producing anything, as a code length can walk
+up and down forever. `fsimg_bzip2_stream_bound(decoded)`, `decoded + decoded / 4
++ 4096`, is the longest stream a caller should accept for a decoded length.
+It is well above the 1% plus 600 bytes `libbzip2` documents, leaving room for
+other encoders, and the caller applies it the way it applies zlib's
+`compressBound()`. The decoder itself does not, because its own work is
+proportional to what it is given.
+
+**Arithmetic.** A pending run count is checked against the block limit after each
+digit, so it never exceeds 900,000 and the digit weight never exceeds about 2^20;
+neither can overflow 32 bits. A run-length count is a byte. Lengths in the block
+fit 32 bits, packed with the transformed byte in one `uint32_t`, since a block
+has at most 900,000 entries and 20 bits index them.
+
+**Initialization.** Bytes reach the output only from the walk through the block's
+transformed bytes, all written before it starts. A walk is a fixed number of
+steps over a table whose every entry is initialized, even when a malformed block's
+permutation is several cycles, which the checksum then refuses.
+
 ## Concurrency and failure
 
 A codec object belongs to one caller and holds no reference to any other
-object; there are no static tables and no global state, so independent
+object; the only static tables are constant and there is no global state, so independent
 contexts may decode concurrently, and the single-threaded worker needs no
 locking. A failed decode leaves an LZO1X decoder object finished and, in
-either codec, the output holding `produced` correct bytes of a stream the
-caller discards. A failed encode leaves the output buffer's contents
+the LZO1X and NRV2B decoders, the output holding `produced` correct bytes of
+a stream the caller discards; a failed bzip2 decode can leave bytes of a block
+whose checksum never passed, which the caller discards just the same. A failed encode leaves the output buffer's contents
 unspecified; the table needs no repair, since its contents never affect a
 later block; nothing is allocated or freed by the call itself.
 Cancellation and deadlines act between calls, where the container polls,
@@ -636,6 +786,7 @@ and a call is bounded by the window sizes the container chose.
 | `lib/codec/codec.h` | `fsimg_codec_step_t`, the decoder and encoder types and prototypes; private to libfsimg, never included by `include/fsimg.h` |
 | `lib/codec/lzo1x.c` | The LZO1X instruction tables, the decoder state machine and the encoder; one file, because decoder and encoder share the class and distance constants |
 | `lib/codec/nrv2b.c` | The NRV2B bit reader, number decoder and one-call decoder |
+| `lib/codec/bzip2.c` | The bzip2 bit reader, block parser, inverse transform and one-call decoder |
 | `lib/codec/lzfse.c` | The project-owned wrapper over the imported decoders: `fsimg_lzfse_decode` and `fsimg_lzvn_decode`, their charged scratch and their bounds |
 | `lib/codec/lzfse/` | The imported LZFSE and LZVN decoder files under Apple's notice; nothing else includes them |
 
@@ -645,7 +796,7 @@ object. `lib/layers/` and the HFS Plus and APFS drivers are its only callers. Th
 reading the PCM images needs it in the default build. The name means
 stream codecs; the `codec.c` files under `lib/formats/` are the formats'
 record and integer codecs and stay where they are. Names follow the
-style guide: `fsimg_lzo1x_` and `fsimg_nrv2b_` prefixes, `_t` typedefs,
+style guide: `fsimg_lzo1x_`, `fsimg_nrv2b_` and `fsimg_bzip2_` prefixes, `_t` typedefs,
 constants in upper case named for their meaning (`LZO1X_MAX_DISTANCE`,
 `NRV2B_OFFSET_BONUS_THRESHOLD`), no magic numbers in the machines.
 
@@ -796,6 +947,9 @@ in this design, in test code that shares nothing with `lib/codec/`.
 | Encoder round trip | Blocks of zeros, random bytes, text, period-2 and period-49152 patterns, boundary cases at distances 2048, 2049, 16384, 16385 and 49151, and every 64 KiB slice of each decoded native ImageFS available through `FSIMG_IFS_NATIVE`; each decodes to its input under `fsimg_lzo1x_decode`, and its length never exceeds the bound | A byte flipped in an encoded stream fails the round trip; a capacity one below the bound is `FSIMG_EINVAL` before any write |
 | Encoder determinism | A block encoded on a fresh encoder, again after other blocks on the same encoder, in two processes, and under the ASan build with allocation poisoning gives identical bytes | Two blocks are first encoded to plant table entries that a missing check would turn into matches: one leaves, in the bucket of a four-byte group `G` that the block under test contains, the position of a later occurrence of `G`, so the candidate lies after the current position; the other leaves the position of a group that collides with `G` in the hash (found by the test from the hash in this design) but differs in bytes, so the candidate lies before the current position with wrong bytes. The block under test then encodes to the fresh stream; the test documents that dropping the position check or the byte comparison would make it differ |
 | Fuzzing (`fuzz/codec.c`) | The input's first bytes choose the codec, the limit or capacity and, for LZO1X, the window sizes; the rest is the stream, decoded in one call and, for LZO1X, again at random split points under ASan and UBSan; the target asserts LZO1X split invariance, progress on every call, no consumption after `done`, and no byte beyond the buffers | Corpus seeded from every stream above and from chunks of the native images |
+| bzip2 forms (`test/codec.c`) | Vectors made once with the `bzip2` command and kept as bytes: levels 1 and 9, the empty stream, runs of 4 and 255 + 4, the longest `RUNA`/`RUNB` count, several blocks | One malformed case per row of the [failure table](#failures), each asserting its status and check; every proper prefix of a vector; a block limit bomb in a small capacity; allocation refused; a capacity one byte short |
+| bzip2 chunks (`test/containers.c`, `test/containers-integration.sh`) | A generated `UDBZ` DMG reads through the layer; `hdiutil create -format UDBZ` output lists the same as its `UDTO` expansion and passes the container checks | Chunks decoding short and long are `FSIMG_ECORRUPT`; a run past `fsimg_bzip2_stream_bound` is `FSIMG_ECORRUPT` at open |
+| Fuzzing (`fuzz/bzip2.c`) | The input's first bytes choose the capacity; the rest is the stream, decoded under the sanitizers with a charged context | |
 | Differential checker (`test/codec-integration.sh`) | When `~/.local/share/fsimg-oracles/ifs-codecs/oracle` exists: random byte strings, mutated valid streams and corpus chunks decode under `test/codec --decode` and the oracle with the same accept-or-reject result and, on accept, identical bytes, at a capacity above any decoded size so the reference's off-by-one never applies; error codes are never compared; every encoder stream decodes to its input under `oracle lzo`; a missing oracle is reported as a skip, never a pass | A stream the script knows the oracle rejects, listed as accepted in its self-check table, fails the run |
 | Native gates | Every chunk of the eight S1 boot images decodes to the bytes of its `dumpifs -u` copy, or where the serial transport cannot carry that copy, to the oracle's decode whose additive checksum is zero and whose length equals `imagefs_size`; `PCM3_IFS2.ifs`'s stream decodes to the oracle's 68849668 bytes, consumed exactly; every S2 chunk decodes under NRV2B to the `dumpifs -u` bytes (`qnxbase.ifs`: POSIX `cksum` 2731401004 over 3296204 bytes) | A chunk with one byte flipped fails to decode or to match; the images are licensed and reached only through `FSIMG_IFS_IMAGES`, the directory of the nine H3 files and three X1 files under their original names, never from the repository; the native captures come from `FSIMG_IFS_NATIVE` |
 

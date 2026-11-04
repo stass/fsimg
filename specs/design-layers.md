@@ -1052,7 +1052,7 @@ bytes, little-endian: disk offset at 0, length at 8, file offset at 16 and
 encoded length at 24, each 64-bit; a 32-bit kind at 32 (raw bytes at the
 file offset, zero, a repeated fill value, or compressed bytes); and a 32-bit
 argument at 36 holding the fill value for a fill record, the codec number
-for a compressed record (zlib, LZO1X or UCL NRV2B), and zero otherwise.
+for a compressed record (zlib, bzip2, LZO1X or UCL NRV2B), and zero otherwise.
 DMG and simg both fill it from their tables; a fixed VHD is the degenerate
 case, one raw record covering the file before the footer, so its disk
 object is simply a slice; and an `ifsboot` boot image fills a
@@ -1084,10 +1084,26 @@ compressed inputs needs a budget that holds every cache; a budget that
 cannot fails the open as a memory limit naming the chunk cache rather than
 shrinking it.
 
+A bzip2 chunk is the same as a zlib chunk to these limits, and memory reaches
+three places in order. A run declaring more than 16 MiB is unsupported at open,
+before anything is allocated. The chunk cache's four slots come next, also at
+open: a table declaring one 16 MiB run costs 64 MiB of the budget, or fails the
+open as the memory limit naming the chunk cache, before a byte of that run is
+decoded. Each decode then allocates, for its own duration, the run's compressed
+bytes and the decoder's tables, at most 20 MiB and 3.6 MiB for that 16 MiB chunk,
+and about 1.3 MiB and 3.6 MiB for `hdiutil`'s 1 MiB. So a budget holding the cache
+but not a decode fails that read as a memory limit, with nothing retained; it
+does not shrink the work or decode partially. Zlib and the framed codecs decode
+in their fixed input buffer, which bzip2 cannot share: its stream is a bit
+sequence with no resumable boundary below a block, and one call over the
+whole input keeps the decoder free of input state.
+
 Decoding work is bounded on both sides of the codec. A compressed run is at
 most zlib's `compressBound()` of its decompressed length, so a run cannot
 pad its input with gigabytes of empty stored blocks; a longer run is
-`FSIMG_ECORRUPT`. A framed boot-image chunk is bounded the other way round:
+`FSIMG_ECORRUPT`. A bzip2 run is held the same way to the
+[decoder's stream bound](design-codecs.md#bounds) of its decompressed length.
+A framed boot-image chunk is bounded the other way round:
 its stored length is a 16-bit field and its decoded length is at most the
 profile's 65536. Compressed bytes read and decoded bytes produced are both
 charged to the work counter, so `-l work=` and the deadline bound
@@ -1292,8 +1308,9 @@ operation boundaries separately from filesystem test profiles.
 zlib is a required dependency, linked from the system as the
 [architecture](architecture.md#dependencies-and-implementation-organization)
 permits: gzip and DMG zlib chunks (UDZO) are always available, and configure
-fails clearly without it. Other DMG chunk codecs (ADC, bzip2, lzfse, lzma)
-are unsupported chunk compression and fail with an explicit error naming the
+fails clearly without it. DMG bzip2 chunks (UDBZ) are always available too,
+through the project-owned [decoder](design-codecs.md#the-bzip2-decoder). Other
+DMG chunk codecs (ADC, lzfse, lzma) are unsupported chunk compression and fail with an explicit error naming the
 type; they are never silently treated as zeros. zstd and xz are
 [optional integrations](design-compression-libs.md) over the system
 libzstd and liblzma: a build that has the library implements the
@@ -1623,7 +1640,7 @@ has the empty CRC, zero. Run types:
 | 0x00000002 | Ignore (free) | Zero | Never |
 | 0x80000004 | ADC | Unsupported | Never |
 | 0x80000005 | zlib (UDZO) | Inflate | Data chunks under `compress=zlib` |
-| 0x80000006 | bzip2 | Unsupported | Never |
+| 0x80000006 | bzip2 (UDBZ) | [Decode](design-codecs.md#the-bzip2-decoder) | Never |
 | 0x80000007 | lzfse | Unsupported | Never |
 | 0x80000008 | lzma | Unsupported | Never |
 | Any other | Unknown | Unsupported, naming the type | Never |
@@ -2316,7 +2333,7 @@ format correctness; the oracle rows do.
 | GPT read | Disks from `sgdisk` and `qemu-img` open; auto-selection with one filesystem; index, name and type selectors; names compared as UTF-16 units; `gpt:sector=4096` with `-F fat32/gpt` resolves a disk carrying both headers | Header CRC, entry CRC, alternate LBA, usable range, overlapping entries, backup mismatch, an entry array cut short, protective MBR with no header: each `FSIMG_ECORRUPT` naming the check and never a bare-volume read; two headers at 512 and 4096 without `gpt:sector`: ambiguity |
 | MBR | `fdisk -l` and `mtools` read fsimg disks; `sfdisk` disks open; types 0x04, 0x0B and 0x0E accepted; a partition ending at sector 2^32; CHS saturation at 1023 | Missing signature, overlapping entries (`FSIMG_ECORRUPT`), 0xEE entry (routes to GPT), FAT boot sector resembling a table (ambiguity), `mbr:type=0x85` refused |
 | DMG write | `hdiutil imageinfo` and `hdiutil verify` accept zlib and `none` images; `hdiutil attach` mounts the FAT volume with and without GPT; `qemu-img convert` yields the raw disk byte for byte; zero runs become zero-fill entries | A flipped data-fork byte fails `hdiutil verify` and fsimg's own verification; `dmg:level=0` and `10` refused |
-| DMG read | `hdiutil create` images in UDRO, UDZO and zero-filled variants open and extract, and list as the raw disks `hdiutil convert -format UDTO` and `qemu-img convert` expand them to (`qemu-img` reads DMG but cannot write it); both table shapes; per-table CRC under read-through | Overlapping tables, uncovered sectors, run beyond the data fork, run with zero sectors, run decompressing short and long, run over 16 MiB, bzip2 run (unsupported), unknown type, segment count 2, koly ranges overlapping, plist depth 33, undeclared entity, 5 KiB key; a bare volume whose last sector is a koly whose ranges do not end at the file's end opens as a bare volume |
+| DMG read | `hdiutil create` images in UDRO, UDZO, UDBZ and zero-filled variants open and extract, and list as the raw disks `hdiutil convert -format UDTO` and `qemu-img convert` expand them to (`qemu-img` reads DMG but cannot write it); both table shapes; per-table CRC under read-through | Overlapping tables, uncovered sectors, run beyond the data fork, run with zero sectors, run decompressing short and long, run over 16 MiB, bzip2 run (unsupported), unknown type, segment count 2, koly ranges overlapping, plist depth 33, undeclared entity, 5 KiB key; a bare volume whose last sector is a koly whose ranges do not end at the file's end opens as a bare volume |
 | VHD | `qemu-img check` and `info` report fixed VHD of the declared size; `vhd:align=1M` lengths; footer checksum; creator fields and original size as written | Flipped checksum (`FSIMG_ECORRUPT`, not a raw read), dynamic type 3 (`FSIMG_EUNSUPPORTED`), size mismatch with file length (no VHD claim: the file is whatever its prefix claims, or unrecognised) |
 | simg | `simg2img` expands to the raw disk byte for byte; `img2simg` output opens; `crc=yes` chunk verified | Chunk total mismatch, block sum mismatch, zero-size RAW chunk, FILL with wrong size, CRC mismatch under read-through, block size not a multiple of 4, 2^32 blocks refused at plan time |
 | ifsboot read | The eight H3 and three X1 boot images list and extract against their native manifests with no `dumpifs -u` step, and verify; `mkifs` LZO and UCL nonbootable output (machine 0) opens; generator-built images with opaque startup bytes for each prefix and each compression value, including 0x00; `i` prints `ifs/ifsboot` and the startup fields; sequential and confined reads decode each chunk once | A header at an offset outside the table, and `preboot_size` not equal to its offset: no claim; the signature inside SH-4 startup code: no claim; each closed-table field mutated: `FSIMG_EUNSUPPORTED` naming it; each bound mutated, `stored_size` equal to `startup_size + 4` under a framed value, trailing bytes after the stored image, the zlib value: the named class; a length word or chunk reaching the trailer, a missing terminator, a non-final chunk below 4096 (unsupported), a chunk decoding past 65536 or past `imagefs_size`, a decoded total short of `imagefs_size`, nonzero padding, each sum flipped: `FSIMG_ECORRUPT` naming the check; a body of minimum-size chunks longer than the index bound fails before scratch grows past it; a pattern alternating across five chunks stops at `-l work=`; a `dumpifs -u` copy is corrupt at the first chunk |

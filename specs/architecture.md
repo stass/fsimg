@@ -1073,6 +1073,8 @@ Imported source is not a runtime dependency: fsimg compiles it, owns its
 fixes, fuzzes it under the sanitizers and bounds every call through a
 project-owned wrapper charged to the context. The
 [codec design](design-codecs.md#imported-lzfse-and-lzvn-decoders) owns the import rules.
+DMG bzip2 chunks use a project-owned decoder under the same design, so reading
+them links nothing beyond the system zlib.
 
 The build uses Autoconf, Automake, and Libtool as development tools. Release
 archives contain generated build machinery; users need a C compiler, make,
