@@ -481,6 +481,13 @@ construction, and full verification; it also checks cleanup accounting.
 since QNX6 finds its second header from the slice length; its seed is a 64 KiB B
 = 512 volume from the independent generator holding every entry kind, inline and
 long names and a depth-1 tree, with a 1 MiB input ceiling and the same budgets.
+
+`fuzz/hfsplus.c` exercises automatic probing and forced HFS Plus and HFSX
+opens, directory traversal, component lookup, bounded file content and the
+name codecs under finite resource limits. `test-hfsplus --seed FILE` and
+`--seed-hfsx FILE` generate indexed directories and fragmented files; the
+HFSX seed also includes case-distinct names.
+
 `fuzz/qnx4.c` forces the QNX4 decoder and reads each input as the exact slice,
 since QNX4 derives its block count from the slice length, and again cut to whole
 blocks, which a length-changing mutation otherwise never reaches. It requires
@@ -563,7 +570,7 @@ FUZZ_CC="$(brew --prefix llvm)/bin/clang" make check-fuzz
 The exact standalone commands from the top of a separate build directory are:
 
 ```sh
-make test-fat test-exfat test-qnx6 test-qnx4 test-ifs test-codec \
+make test-fat test-exfat test-qnx6 test-qnx4 test-hfsplus test-ifs test-codec \
     test-protocol test-layers test-containers test-compression test-mtree
 MAKE=make sh ../build-aux/fuzz.sh
 ```
@@ -574,7 +581,8 @@ instrumented library through `build-aux/sanitize.sh fuzz` and compiles the
 harnesses into `sanitizer-fuzz/` from the same read-only source copy.
 
 The target's `fuzz-corpus/`, `exfat-fuzz-corpus/`, `qnx6-fuzz-corpus/`,
-`qnx4-fuzz-corpus/`, `ifs-fuzz-corpus/`, `codec-fuzz-corpus/`,
+`qnx4-fuzz-corpus/`, `hfsplus-fuzz-corpus/`, `ifs-fuzz-corpus/`,
+`codec-fuzz-corpus/`,
 `protocol-fuzz-corpus/`, `image-fuzz-corpus/`, `container-fuzz-corpus/`,
 `plist-fuzz-corpus/`, `gzip-fuzz-corpus/`, `zstd-fuzz-corpus/`, `xz-fuzz-corpus/`, `mtree-fuzz-corpus/` and libFuzzer
 crash artifacts are disposable build outputs. Existing corpus seeds and

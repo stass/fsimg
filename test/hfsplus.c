@@ -4240,9 +4240,64 @@ test_journal_info_identity(void)
 	gen_free(&image);
 }
 
+/* Runtime corpus fixtures include an indexed directory, overflow extents,
+ * empty content and, for HFSX, two case-distinct root names.
+ */
+static void
+emit_seed(const char *path, bool hfsx)
+{
+	static const uint16_t directory[] = { 'd', 'i', 'r' };
+	static const uint16_t empty[] = { 'e', 'm', 'p', 't', 'y' };
+	static const uint16_t upper[] = { 'A' }, lower[] = { 'a' };
+	unsigned char content[65537];
+	gen_object_t objects[36];
+	uint16_t names[32][3];
+	gen_plan_t plan;
+	gen_image_t image;
+	FILE *file;
+
+	bzero(objects, sizeof(objects));
+	for (size_t i = 0; i < sizeof(content); i++)
+		content[i] = (unsigned char)(i * 7 + i / 251);
+	objects[0] = (gen_object_t){ .name = directory, .units = 3,
+	    .id = 16, .type = 1, .mode = 0040755 };
+	objects[1] = (gen_object_t){ .name = empty, .units = 5,
+	    .id = 17, .type = 2, .mode = 0100644 };
+	for (size_t i = 0; i < 32; i++) {
+		names[i][0] = 'f';
+		names[i][1] = '0' + i / 10;
+		names[i][2] = '0' + i % 10;
+		objects[i + 2] = (gen_object_t){ .name = names[i], .units = 3,
+		    .parent = 16, .id = 18 + i, .type = 2, .mode = 0100644,
+		    .data = content, .data_size = i == 0 ? sizeof(content) : 33,
+		    .fragmented = i == 0 };
+	}
+	objects[34] = (gen_object_t){ .name = upper, .units = 1,
+	    .id = 50, .type = 2, .mode = 0100644 };
+	objects[35] = (gen_object_t){ .name = lower, .units = 1,
+	    .id = 51, .type = 2, .mode = 0100644 };
+	gen_plan_init(&plan);
+	plan.hfsx = hfsx;
+	plan.compare_type = hfsx ? 0xbc : 0xcf;
+	plan.records_per_node = 4;
+	plan.objects = objects;
+	plan.object_count = hfsx ? 36 : 34;
+	gen_build(&plan, &image);
+	file = fopen(path, "wb");
+	CHECK(file != NULL);
+	CHECK(fwrite(image.bytes, 1, image.length, file) == image.length);
+	CHECK(fclose(file) == 0);
+	gen_free(&image);
+}
+
 int
 main(int argc, char **argv)
 {
+	if (argc == 3 && (strcmp(argv[1], "--seed") == 0 ||
+	    strcmp(argv[1], "--seed-hfsx") == 0)) {
+		emit_seed(argv[2], strcmp(argv[1], "--seed-hfsx") == 0);
+		return (failures == 0 ? 0 : 1);
+	}
 	if (argc == 3 && strcmp(argv[1], "--native-content") == 0)
 		return (native_content(argv[2]));
 	CHECK(argc == 1);

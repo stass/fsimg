@@ -312,7 +312,7 @@ test_fat_write_SOURCES = test/fat-write.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_write_LDADD = libfsimg.la
 test_driver_contracts_SOURCES = test/driver-contracts.c test/contract.c \
-	test/contract.h
+	test/contract.h test/hfsplus-gen.c test/hfsplus-gen.h
 test_driver_contracts_LDADD = libfsimg.la
 test_layer_contracts_SOURCES = test/layer-contracts.c test/contract.c \
 	test/contract.h
@@ -445,7 +445,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/fat-integration.sh.in test/exfat-integration.sh.in test/qnx6-integration.sh.in \
 	test/qnx4-integration.sh.in test/layers-integration.sh.in \
 	test/containers-integration.sh.in test/compression-integration.sh.in \
-	test/codec-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c \
+	test/codec-integration.sh.in fuzz/fat.c fuzz/qnx6.c fuzz/qnx4.c fuzz/hfsplus.c \
 	fuzz/protocol.c fuzz/image.c fuzz/container.c fuzz/plist.c fuzz/compression.c \
 	fuzz/mtree.c fuzz/codec.c fuzz/ifs.c fuzz/iso9660.c fuzz/iso9660-susp.c \
 	test/ifs-integration.sh.in \
@@ -596,13 +596,13 @@ check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scal
 	./test-qnx4 --scale; result=$$?; test $$result = 0 -o $$result = 77
 	./test-qnx4-write --scale; result=$$?; test $$result = 0 -o $$result = 77
 	MallocSpaceEfficient=1 ./test-ifs --scale
-check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-ifs test-iso9660 \
-	    test-codec \
+check-fuzz: test-fat test-exfat test-qnx6 test-qnx4 test-hfsplus test-ifs \
+	    test-iso9660 test-codec \
 	    test-protocol test-layers test-containers test-compression \
 	    test-hbcifs test-mtree test-ifsboot test/spec.sh
 	+@$(am__make_dryrun) || \
 	    $(SANITIZE_ENV) $(SHELL) $(top_srcdir)/build-aux/fuzz.sh
-check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-ifs \
+check-fuzz-extended: test-fat test-exfat test-qnx6 test-qnx4 test-hfsplus test-ifs \
 	    test-iso9660 \
 	    test-codec test-protocol test-layers test-containers \
 	    test-compression test-hbcifs test-mtree test-ifsboot test/spec.sh
@@ -669,7 +669,7 @@ clean-local:
 # Fuzz corpora persist across clean so later runs reuse their mutations.
 distclean-local:
 	-rm -rf fuzz-corpus exfat-fuzz-corpus qnx6-fuzz-corpus qnx4-fuzz-corpus \
-	    protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
+	    hfsplus-fuzz-corpus protocol-fuzz-corpus image-fuzz-corpus container-fuzz-corpus \
 	    plist-fuzz-corpus gzip-fuzz-corpus zstd-fuzz-corpus xz-fuzz-corpus mtree-fuzz-corpus \
 	    codec-fuzz-corpus ifs-fuzz-corpus iso9660-fuzz-corpus
 check-security: test-sandbox test-publish

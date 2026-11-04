@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "contract.h"
+#include "hfsplus-gen.h"
 #include "host.h"
 #include "internal.h"
 #include "meta.h"
@@ -350,9 +351,17 @@ static const contract_entry_t qnx4_owned[] = {
  * descriptor serves them; QNX6's big-endian byte order is an additional
  * profile beside its little-endian coverage profile.
  */
+static fsimg_status_t materialize_hfsplus(contract_volume_t *, fsimg_error_t *);
+static fsimg_status_t materialize_hfsx(contract_volume_t *, fsimg_error_t *);
 static fsimg_status_t materialize_iso(contract_volume_t *, fsimg_error_t *);
 
 static const contract_fs_profile_t fs_profiles[] = {
+	{ .id = "hfsplus", .format = "hfsplus", .coverage_profile = true,
+	    .expected_capabilities = FSIMG_CAP_READ,
+	    .materialize = materialize_hfsplus, .max_fixture_bytes = 2 * MIB },
+	{ .id = "hfsx", .format = "hfsx", .coverage_profile = true,
+	    .expected_capabilities = FSIMG_CAP_READ,
+	    .materialize = materialize_hfsx, .max_fixture_bytes = 2 * MIB },
 	{ .id = "iso9660", .format = "iso9660", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,
 	    .write = { .flags = WRITE_FLAGS },
@@ -489,6 +498,75 @@ expected_byte(const contract_entry_t *entry, uint64_t identity,
 	if (entry->payload == PAYLOAD_ZERO_SOURCE || zero_at(entry, offset))
 		return (0);
 	return (contract_pattern(identity, offset));
+}
+
+/* The independent generator encodes the common tree, including its exact
+ * payload recipe. Catalog IDs are separate from the provider identities
+ * used to generate bytes. Stored names are ASCII UTF-16 components.
+ */
+static fsimg_status_t
+materialize_hfs(contract_volume_t *volume, bool hfsx)
+{
+	gen_object_t objects[SOURCE_COUNT];
+	uint16_t names[SOURCE_COUNT][16];
+	unsigned char *payloads[SOURCE_COUNT];
+	gen_plan_t plan;
+	gen_image_t image;
+
+	bzero(objects, sizeof(objects));
+	bzero(payloads, sizeof(payloads));
+	for (size_t i = 0; i < SOURCE_COUNT; i++) {
+		const contract_entry_t *entry = &source_tree[i];
+		const char *component = strrchr(entry->path, '/') + 1;
+		gen_object_t *object = &objects[i];
+
+		object->name = names[i];
+		object->units = strlen(component);
+		CONTRACT_CHECK(object->units <= COUNT(names[i]));
+		for (size_t j = 0; j < object->units; j++)
+			names[i][j] = (unsigned char)component[j];
+		object->id = 16 + i;
+		object->parent = 2;
+		if (i == ID_EDIR - 1 || i == ID_MIXED - 1 || i == ID_SUB - 1)
+			object->parent = 16 + ID_DIR - 1;
+		if (i == ID_LARGE - 1)
+			object->parent = 16 + ID_SUB - 1;
+		object->type = entry->kind == FSIMG_ENTRY_DIRECTORY ? 1 : 2;
+		object->mode = object->type == 1 ? 0040755 : 0100644;
+		object->data_size = entry->size;
+		if (entry->size == 0)
+			continue;
+		payloads[i] = malloc((size_t)entry->size);
+		CONTRACT_CHECK(payloads[i] != NULL);
+		for (size_t j = 0; j < entry->size; j++)
+			payloads[i][j] = expected_byte(entry, i + 1, j);
+		object->data = payloads[i];
+	}
+	gen_plan_init(&plan);
+	plan.hfsx = hfsx;
+	plan.compare_type = hfsx ? 0xbc : 0xcf;
+	plan.objects = objects;
+	plan.object_count = COUNT(objects);
+	gen_build(&plan, &image);
+	contract_volume_init(volume, image.length, 0);
+	bcopy(image.bytes, contract_volume_bytes(volume), image.length);
+	gen_free(&image);
+	for (size_t i = 0; i < SOURCE_COUNT; i++)
+		free(payloads[i]);
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+materialize_hfsplus(contract_volume_t *volume,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	return (materialize_hfs(volume, false));
+}
+
+static fsimg_status_t
+materialize_hfsx(contract_volume_t *volume, fsimg_error_t *error FSIMG_UNUSED)
+{
+	return (materialize_hfs(volume, true));
 }
 
 /* An independent primary hierarchy for the common source tree. The
@@ -2826,13 +2904,6 @@ reader_extraction(const contract_fs_profile_t *profile)
 	contract_end();
 }
 
-/* no coverage profile yet: docs/todo-hfsplus.md */
-static bool
-coverage_pending(const char *name)
-{
-	return (strcmp(name, "hfsplus") == 0 || strcmp(name, "hfsx") == 0);
-}
-
 /*
  * Registry reconciliation, in both directions, before any fixture runs:
  * every advertised variant has exactly one coverage profile whose declared
@@ -2853,8 +2924,6 @@ check_registry(void)
 		return;
 	while ((status = fsimg_format_next(&cursor, &info, &error)) == FSIMG_OK) {
 		advertised++;
-		if (coverage_pending(info.name))
-			continue;
 		coverage = 0;
 		for (size_t i = 0; i < COUNT(fs_profiles); i++) {
 			if (strcmp(fs_profiles[i].format, info.name) != 0)

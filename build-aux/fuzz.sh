@@ -5,8 +5,8 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6, test-qnx4, test-ifs, test-codec, test-protocol,
-# test-layers, test-containers, test-compression, test-hbcifs, test-mtree,
+# test-exfat, test-qnx6, test-qnx4, test-hfsplus, test-ifs, test-codec,
+# test-protocol, test-layers, test-containers, test-compression, test-hbcifs, test-mtree,
 # test-ifsboot and test/spec.sh, which write the seeds, with MAKE naming
 # the make program that drives that build (sanitize.sh inherits it).
 # FUZZ_CC and FUZZ_CXX select the compiler. The harnesses build against
@@ -117,6 +117,25 @@ if test ! -f "$qnx6_corpus/sample.seed"; then
     ./test-qnx6 --seed "$qnx6_corpus/sample.seed"
 fi
 run_fuzzer "$work_dir/fuzz-qnx6" "$qnx6_corpus" 1048576 10
+
+# HFS Plus uses exact input volumes and both advertised variants. Private
+# headers expose the name codecs and component lookup used by selection.
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/lib/core" -I"$source_dir/lib/meta" -I"$source_dir/lib/io" \
+    -I"$source_dir/lib/read" -I"$source_dir/lib/formats" \
+    -I"$source_dir/lib/formats/hfsplus" \
+    "$source_dir/fuzz/hfsplus.c" "$fuzz_library" $codec_libs -o "$work_dir/fuzz-hfsplus"
+hfsplus_corpus=hfsplus-fuzz-corpus
+mkdir -p "$hfsplus_corpus"
+if test ! -f "$hfsplus_corpus/sample.seed"; then
+    ./test-hfsplus --seed "$hfsplus_corpus/sample.seed"
+fi
+if test ! -f "$hfsplus_corpus/hfsx.seed"; then
+    ./test-hfsplus --seed-hfsx "$hfsplus_corpus/hfsx.seed"
+fi
+run_fuzzer "$work_dir/fuzz-hfsplus" "$hfsplus_corpus" 3145728 10
 
 # QNX4 derives its block count from the slice length, so its harness also
 # reads exactly the input and forces the decoder. The seeds are generated
