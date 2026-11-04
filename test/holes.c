@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "fsimg.h"
+#include "format.h"
 #include "host.h"
 #include "internal.h"
 #include "io.h"
@@ -1578,7 +1579,11 @@ test_cancellation_in_skipped_zeros(void)
 		f.cancel_answered = &volume;
 		CHECK(publish(&f, "gpt/dmg", &input, 1, true, NULL, "out", NULL) ==
 		    FSIMG_ECANCELLED && !exists(&f, "out"));
-		CHECK(volume.read == 0 && volume.answers == (polled ? 1 : 2));
+		/* Only identification reads the prefix; answered zero chunks
+		 * must cost no reads in the encoding pass.
+		 */
+		CHECK(volume.read == fsimg_format_probe_bytes(NULL) &&
+		    volume.answers == (polled ? 1 : 2));
 		f.cancel_answered = NULL;
 		fsimg_io_free(input);
 	}

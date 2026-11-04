@@ -301,6 +301,18 @@ fsimg_error_set(fsimg_error_t *error, fsimg_status_t status, int os_error,
 }
 
 fsimg_status_t
+fsimg_truncated_error(fsimg_error_t *error, fsimg_operation_t operation,
+    const char *what, uint64_t missing, const char *tail)
+{
+	char message[sizeof(error->message)];
+
+	snprintf(message, sizeof(message),
+	    "%s is truncated: %llu declared bytes are missing%s", what,
+	    (unsigned long long)missing, tail);
+	return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, operation, message));
+}
+
+fsimg_status_t
 fsimg_limit_error(fsimg_error_t *error, fsimg_resource_t resource,
     uint64_t limit, uint64_t observed)
 {

@@ -18,6 +18,7 @@
 #include <zlib.h>
 
 #include "fsimg.h"
+#include "format.h"
 #include "host.h"
 #include "internal.h"
 #include "layer.h"
@@ -2049,7 +2050,12 @@ test_compose(void)
 	CHECK(fsimg_image_compose(f.ctx, "gpt", parts, 3, &options, &sink,
 	    NULL) == FSIMG_OK);
 	fsimg_io_free(output);
-	CHECK(inputs[1].reads == odd_bytes && inputs[2].reads == MIB);
+	/* Probing adds one prefix read; FAT also opens a reader, whose
+	 * metadata reads must still leave the cost below two whole copies.
+	 */
+	CHECK(inputs[1].reads == odd_bytes + fsimg_format_probe_bytes(NULL));
+	CHECK(inputs[2].reads >= MIB + fsimg_format_probe_bytes(NULL) &&
+	    inputs[2].reads < 2 * MIB);
 	CHECK(inputs[0].reads >= MIB);
 	CHECK(disk.length == 4 * MIB + 33 * 512);
 	CHECK(gpt_check(&disk, 512) == NULL);
@@ -2343,7 +2349,11 @@ test_aliases(void)
 	CHECK(pwrite(fd, volume.bytes, MIB, 0) == (ssize_t)MIB);
 	CHECK(fsimg_io_from_fd(f.ctx, fd, FSIMG_IO_READ | FSIMG_IO_WRITE, &input,
 	    NULL) == FSIMG_OK);
-	CHECK(fsimg_io_slice(input, 0, MIB / 2, &slice, NULL) == FSIMG_OK);
+	/* The zero-filled second half makes no filesystem claim, so the
+	 * slice reaches the alias check without a truncated FAT header.
+	 */
+	CHECK(all_zero(volume.bytes + MIB / 2, MIB / 2));
+	CHECK(fsimg_io_slice(input, MIB / 2, MIB / 2, &slice, NULL) == FSIMG_OK);
 	CHECK(fsimg_io_from_fd(f.ctx, fd, FSIMG_IO_READ | FSIMG_IO_WRITE, &output,
 	    NULL) == FSIMG_OK);
 	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, NULL);

@@ -112,6 +112,11 @@ bool fsimg_range_fits(uint64_t, uint64_t, uint64_t);
 void fsimg_error_clear(fsimg_error_t *);
 fsimg_status_t fsimg_error_set(fsimg_error_t *, fsimg_status_t, int,
     fsimg_operation_t, const char *);
+/* FSIMG_ECORRUPT saying what ("image", "disk") lacks the declared bytes it
+ * misses; tail, usually empty, adds what they took with them.
+ */
+fsimg_status_t fsimg_truncated_error(fsimg_error_t *, fsimg_operation_t,
+    const char *, uint64_t, const char *);
 fsimg_status_t fsimg_limit_error(fsimg_error_t *, fsimg_resource_t,
     uint64_t, uint64_t);
 fsimg_status_t fsimg_ctx_ready(fsimg_ctx_t *, fsimg_error_t *);

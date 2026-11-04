@@ -68,6 +68,7 @@ struct fsimg_io {
 	uint64_t	 base;
 	uint64_t	 length;
 	uint64_t	 logical_sector; /* View's units; zero for unknown/decoded */
+	uint64_t	 clipped_bytes; /* Declared bytes missing past the end */
 	unsigned	 access;
 	/* A host-backed root's descriptor, -1 otherwise. The object owns it,
 	 * with its reservation, unless borrowed: then the caller that lent it
@@ -1030,6 +1031,9 @@ io_slice(fsimg_io_t *parent, uint64_t offset, uint64_t length,
 	slice->base = parent->base + offset;
 	slice->length = length;
 	slice->logical_sector = logical_sector;
+	/* What is missing past the parent's end is missing past this one's. */
+	if (offset + length == parent->length)
+		slice->clipped_bytes = parent->clipped_bytes;
 	slice->access = parent->access;
 	slice->fd = -1;
 	*out = slice;
@@ -1048,6 +1052,18 @@ uint64_t
 fsimg_io_logical_sector(const fsimg_io_t *io)
 {
 	return (io->logical_sector);
+}
+
+void
+fsimg_io_set_clipped_bytes(fsimg_io_t *io, uint64_t missing)
+{
+	io->clipped_bytes = missing;
+}
+
+uint64_t
+fsimg_io_clipped_bytes(const fsimg_io_t *io)
+{
+	return (io->clipped_bytes);
 }
 
 fsimg_status_t

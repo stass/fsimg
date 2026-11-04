@@ -525,9 +525,18 @@ They copy the disk once and refuse an output that shares storage with an
 input before writing.
 A filesystem that a wrap's stack names, or that detection recognises and
 supports in the input of a stack with an empty filesystem slot, is opened on
-the input before the disk is planned and before any output.
-The open runs under the context's limits, in the caller's process, and a
-large volume may need the context's scratch directory.
+the input before any output.
+A compose treats each part as such an input, whatever its type, and a refusal
+names the part in error.path as
+.Dq partition N .
+Compose, like a named wrap and an unnamed one whose input draws a claim, opens
+untrusted input in the caller's process, under the context's limits; the
+library never changes its host's sandbox.
+A large volume may need the context's scratch directory.
+A partition of a cut disk that
+.Fn fsimg_image_select
+returned clipped, or a view of it reaching its end, is refused by all three
+operations with FSIMG_ECORRUPT naming the missing bytes, whatever it holds.
 A volume its driver refuses keeps that error, and one its format proves
 truncated fails with FSIMG_ECORRUPT naming the missing bytes.
 A cut that leaves no proof is not detected, such as a QNX4 volume that keeps

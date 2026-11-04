@@ -1438,6 +1438,7 @@ select_record(fsimg_image_t *image, const fsimg_partition_record_t *record,
     fsimg_io_t **volume, fsimg_error_t *error)
 {
 	char message[96];
+	fsimg_status_t status;
 
 	if (record->extended) {
 		snprintf(message, sizeof(message), "partition %u is an extended "
@@ -1452,15 +1453,11 @@ select_record(fsimg_image_t *image, const fsimg_partition_record_t *record,
 		return (layer_failed(image->scheme, fsimg_error_set(error,
 		    FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE, message), error));
 	}
-	return (select_slice(image, record->offset, record->length,
-	    record->index, volume, error));
-}
-
-uint64_t
-fsimg_image_selected_missing(const fsimg_image_t *image)
-{
-	return (image->selected == 0 ? 0 :
-	    image->table.records[image->selected - 1].missing_bytes);
+	status = select_slice(image, record->offset, record->length,
+	    record->index, volume, error);
+	if (status == FSIMG_OK)
+		fsimg_io_set_clipped_bytes(*volume, record->missing_bytes);
+	return (status);
 }
 
 /* A checked slice of the disk, never of the input file's own layout. */
@@ -1796,17 +1793,12 @@ assumed_identity_failed(const fsimg_image_t *image, fsimg_error_t *error)
 static fsimg_status_t
 truncated_disk_failed(const fsimg_image_t *image, fsimg_error_t *error)
 {
-	char message[sizeof(error->message)];
-
 	if (image->table.missing_bytes == 0)
 		return (FSIMG_OK);
-	snprintf(message, sizeof(message),
-	    "disk is truncated: %llu declared bytes are missing%s",
-	    (unsigned long long)image->table.missing_bytes,
+	return (layer_failed(image->scheme, fsimg_truncated_error(error,
+	    FSIMG_OP_IMAGE, "disk", image->table.missing_bytes,
 	    image->table.kind == FSIMG_SCHEME_GPT ?
-	    ", the backup table among them" : "");
-	return (layer_failed(image->scheme, fsimg_error_set(error, FSIMG_ECORRUPT,
-	    0, FSIMG_OP_IMAGE, message), error));
+	    ", the backup table among them" : ""), error));
 }
 
 /* Opening the container and the table already performed every check

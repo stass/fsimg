@@ -8,8 +8,8 @@ the library's volume information report how many bytes are missing. A cut
 partitioned disk reads the same way: a partition past the end is clipped, one
 with no bytes left cannot be selected, and a GPT disk opens from its primary
 table when that table is intact and declares a longer disk, where `i` reports
-the lost backup. `W` fails on these too. A wrap naming a filesystem refuses a
-truncated input.
+the lost backup. `W` fails on these too. Wrap and compose refuse a truncated
+input.
 A QNX6 image cut short loses its second superblock, so it is read from the first
 alone, and `i` reports `second_header_missing`. That may be the older snapshot,
 whose freed blocks a later commit may have rewritten.

@@ -115,9 +115,8 @@ Open QNX IFS work, ordered by the [IFS plan](ifs-plan.md). The
   no filesystem in the stack, and `fsimg_image_compose()` with an ImageFS
   part still write a padded ImageFS that `W` reports as longer than its
   image size. Both are library-only. The owner chooses whether the rule
-  follows the volume's identified filesystem: wrap already identifies its
-  input and could name it in the stack before planning; compose identifies
-  only untyped parts.
+  follows the volume's identified filesystem: wrap and compose already
+  identify their inputs and could name each one before planning.
 * [Low] **Large native bodies** (`tools/qnx/guest/popifs.sh`): the guest's
   4 MiB RAM disk limits native builds to small bodies; build one above
   16 MiB on a scratch volume if a design rule ever depends on body size.

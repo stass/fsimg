@@ -829,7 +829,9 @@ They are library operations with no command-line form.
   otherwise.
 
   What a wrap establishes about its input depends on the stack, and every
-  refusal comes before any output byte. A stack that names a filesystem
+  refusal comes before any output byte. Under any stack a
+  [clipped partition](#truncated-disks) selected from a cut disk is refused
+  first, whatever it holds. A stack that names a filesystem
   and has no carried container requires that filesystem's claim,
   `FSIMG_EINVAL` naming it otherwise, and a corrupt or unsupported claim
   counts. It then opens a reader on the input: a refused open keeps its
@@ -868,6 +870,11 @@ They are library operations with no command-line form.
   Every partition setting comes from its part, so a compose whose layer
   options carry a partition key (`gpt:type`, `gpt:name`, `gpt:guid`,
   `mbr:type`, `mbr:active`) fails; the disk keys apply to the whole disk.
+  Each part is an input under an empty filesystem slot and is held to a
+  wrap's rules for that stack, before any output byte and with no override:
+  a clipped partition is refused, a lone claim opens a reader with the same
+  refusals, and a part with no claim is raw. A type on the part spares it
+  nothing. Each refusal names the part, as `partition N`.
 
 Wrap and compose do not stage a raw disk. The disk is **assembled**: a
 read-only positional object over ordered regions, each a scheme table buffer
@@ -1521,8 +1528,15 @@ forces the scheme slot empty, reads no table and verifies only the volume in it.
 It is the image's check, in the one place that holds the table, so neither a
 scheme's verification nor a filesystem driver knows of it. `fsimg_verify()`
 sees only its slice and verifies the filesystem there, as it does for every
-other layer's check. `fsimg_image_unwrap()` refuses a clipped partition, since
-a partial output is not success.
+other layer's check. The slice `fsimg_image_select()` returns for a clipped
+partition carries its count, so `fsimg_image_unwrap()`, `fsimg_image_wrap()`
+and `fsimg_image_compose()` refuse it as `FSIMG_ECORRUPT` naming the count,
+whatever it holds, since a partial output is not success. A further slice,
+range or disk selection of it that reaches its end carries the count too, an
+image opened on it included, while one stopping short is a range whose bytes
+all exist. A partition selected inside it takes its own record's count. A range
+or disk selection of a cut disk's own bytes has no declared extent to fall short
+of and carries none.
 
 The containers do not clip: DMG, VHD, simg, gzip, xz, zstd and the boot
 containers lose their index, footer or stream end when truncated, and stay

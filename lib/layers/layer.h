@@ -1133,11 +1133,6 @@ fsimg_status_t fsimg_disk_output_check(fsimg_ctx_t *, const fsimg_disk_plan_t *,
  */
 void fsimg_disk_plan_codec(const fsimg_disk_plan_t *, char *, size_t);
 
-/* The declared bytes the disk lacks of the partition fsimg_image_select() last
- * returned, zero for a whole one and for a selection that is no partition.
- */
-uint64_t fsimg_image_selected_missing(const fsimg_image_t *);
-
 /* What the filesystem probes, the one forced by name or all of them, say
  * about the volume at a byte range of an I/O object; format receives the
  * identified format's name, empty without a match.

@@ -47,6 +47,13 @@ fsimg_status_t fsimg_io_resolver(fsimg_ctx_t *, fsimg_io_t *, uint64_t,
  */
 fsimg_status_t fsimg_io_read_slice(fsimg_io_t *, uint64_t, uint64_t,
     fsimg_io_t **, fsimg_error_t *);
+/* The declared bytes a truncated disk lacks of the partition held in this
+ * slice, so the count travels with the volume to whatever a caller hands it
+ * to. Zero for any other object. A further slice reaching the end carries it,
+ * and one stopping short is a range whose bytes all exist.
+ */
+void fsimg_io_set_clipped_bytes(fsimg_io_t *, uint64_t);
+uint64_t fsimg_io_clipped_bytes(const fsimg_io_t *);
 /* A per-call session never attaches borrowed input to a reader's lifetime.
  * read_session transfers exactly the length or fails; read_at_session, as
  * fsimg_io_read_at, may transfer less, and transfers zero only at the end.

@@ -1406,8 +1406,11 @@ typedef struct fsimg_part {
  * override. unwrap writes the
  * bytes a selector names. compose places count
  * volumes in order, each 1 MiB aligned, under a stack naming a scheme and
- * no filesystem; the layer options' partition fields must hold their
- * defaults, since each part carries its own. A container in the stack of
+ * no filesystem, each held to the empty slot's rule; the layer options'
+ * partition fields must hold their defaults, since each part carries its own.
+ * All three refuse a clipped partition fsimg_image_select() returned, and
+ * wrap and compose parse their input in the caller's process, under the
+ * context's limits. A container in the stack of
  * wrap or compose encodes the disk on its way to the sink, in the one
  * transcode a writer uses, and the options' compression compresses the
  * output of any of the three. None of the three stages a raw disk, so each

@@ -56,6 +56,7 @@ typedef struct assembled_disk {
 static fsimg_status_t check_mode(const fsimg_stack_t *,
     const fsimg_write_options_t *, fsimg_write_options_t *,
     fsimg_layer_options_t *, fsimg_layer_inputs_t *, fsimg_error_t *);
+static fsimg_status_t check_not_clipped(const fsimg_io_t *, fsimg_error_t *);
 static fsimg_status_t check_input_whole(fsimg_ctx_t *, fsimg_io_t *,
     const char *, fsimg_error_t *);
 static fsimg_status_t check_named_input(fsimg_ctx_t *, fsimg_io_t *,
@@ -84,8 +85,6 @@ static fsimg_status_t disk_resolve(void *, uint64_t, void *, size_t,
 static fsimg_status_t disk_next_zero(void *, uint64_t, uint64_t *, uint64_t *,
     fsimg_error_t *);
 static void disk_keep(void *);
-static fsimg_status_t identify_volume(fsimg_ctx_t *, fsimg_io_t *, uint64_t,
-    char [static 16], fsimg_error_t *);
 static fsimg_status_t write_plan(fsimg_session_t *, fsimg_disk_plan_t *,
     fsimg_io_t *const *, const uint64_t *, bool, const fsimg_sink_t *,
     fsimg_error_t *);
@@ -468,25 +467,6 @@ disk_keep(void *argument FSIMG_UNUSED)
 {
 }
 
-/* The filesystem a volume's prefix identifies; name is empty when no single
- * format claims it.
- */
-static fsimg_status_t
-identify_volume(fsimg_ctx_t *ctx, fsimg_io_t *volume, uint64_t length,
-    char name[static 16], fsimg_error_t *error)
-{
-	fsimg_session_t session;
-	fsimg_claim_t claim;
-	fsimg_status_t status;
-
-	fsimg_session_init(&session, ctx, "volume identification", 0);
-	status = fsimg_volume_claim(ctx, volume, &session, 0, length, NULL,
-	    &claim, name, error);
-	if (status == FSIMG_OK && claim != FSIMG_CLAIM_FORMAT)
-		name[0] = '\0';
-	return (status);
-}
-
 /*
  * Place a resolved plan's volumes, encode its tables, check the output
  * limit and the sink against every input, and transcode the assembled
@@ -528,12 +508,28 @@ write_plan(fsimg_session_t *session, fsimg_disk_plan_t *plan,
 }
 
 /*
+ * A partial output is not success: the bytes of a partition the disk it came
+ * from was cut through are not the partition, whatever they hold. Unwrap, wrap
+ * and compose refuse it before reading a byte.
+ */
+static fsimg_status_t
+check_not_clipped(const fsimg_io_t *input, fsimg_error_t *error)
+{
+	uint64_t missing = fsimg_io_clipped_bytes(input);
+
+	if (missing == 0)
+		return (FSIMG_OK);
+	return (fsimg_truncated_error(error, FSIMG_OP_IMAGE,
+	    "the selected partition", missing, ""));
+}
+
+/*
  * A named input's driver must open it, a refusal keeping its class, and the
  * reader core must find its declared volume all there: a truncated volume
- * is FSIMG_ECORRUPT naming the count, since a wrap would write it broken
- * into a new image. A cut the format cannot prove is no truncation here
+ * is FSIMG_ECORRUPT naming the count, since a wrap or compose would write it
+ * broken into a new image. A cut the format cannot prove is no truncation here
  * (specs/architecture.md#byte-and-object-boundaries). A NULL name leaves the
- * format to detection. Each refusal names the input ("input").
+ * format to detection. The caller names the input in a refusal.
  */
 static fsimg_status_t
 check_input_whole(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *named,
@@ -542,7 +538,6 @@ check_input_whole(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *named,
 	fsimg_read_options_t read_options;
 	fsimg_volume_info_t info;
 	fsimg_reader_t *reader;
-	char message[sizeof(error->message)];
 	fsimg_status_t status;
 
 	fsimg_read_options_init(&read_options);
@@ -551,16 +546,10 @@ check_input_whole(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *named,
 	status = fsimg_reader_open(ctx, input, &read_options, &reader, error);
 	if (status == FSIMG_OK)
 		status = fsimg_reader_get_info(reader, &info, error);
-	if (status == FSIMG_OK && info.missing_bytes != 0) {
-		snprintf(message, sizeof(message),
-		    "image is truncated: %llu declared bytes are missing",
-		    (unsigned long long)info.missing_bytes);
-		status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
-		    FSIMG_OP_IMAGE, message);
-	}
+	if (status == FSIMG_OK && info.missing_bytes != 0)
+		status = fsimg_truncated_error(error, FSIMG_OP_IMAGE, "image",
+		    info.missing_bytes, "");
 	fsimg_reader_free(reader);
-	if (status != FSIMG_OK)
-		fsimg_error_path(error, "input");
 	return (status);
 }
 
@@ -591,17 +580,21 @@ check_named_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
 		fsimg_error_path(error, named);
 		return (FSIMG_EINVAL);
 	}
-	return (check_input_whole(ctx, input, named, error));
+	status = check_input_whole(ctx, input, named, error);
+	if (status != FSIMG_OK)
+		fsimg_error_path(error, "input");
+	return (status);
 }
 
 /*
- * The input of a stack with an empty filesystem slot: raw bytes, unless
- * detection recognises a filesystem, whose name filesystem receives. That
- * claim must open whole as a named one must, and no override spares bytes that
- * merely look like a cut volume. A corrupt claim names no format, so its open
- * is detection again and only reports the probe's reason. No claim, several
- * claims or an unsupported claim leave nothing to open, and a cut in such an
- * input goes unseen.
+ * An input of a stack with an empty filesystem slot, a wrap's or each of a
+ * compose's: raw bytes, unless detection recognises a filesystem, whose name
+ * filesystem receives. That claim must open whole as a named one must, and no
+ * override spares bytes that merely look like a cut volume. A corrupt claim
+ * names no format, so its open is detection again and only reports the probe's
+ * reason. No claim, several claims or an unsupported claim leave nothing to
+ * open, and a cut in such an input goes unseen. The caller names the input in
+ * a refusal.
  */
 static fsimg_status_t
 check_unnamed_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
@@ -678,12 +671,12 @@ check_carried_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
 }
 
 /*
- * Wrap one raw volume. A filesystem the stack names must be the one the
- * volume holds and open whole, one detection recognises and supports under an
- * empty slot must open whole, and a container that carries a filesystem
- * requires its input to hold that one and to verify. With a scheme the
- * volume is the one partition, typed by the layer settings or else by its
- * filesystem; without one it is the output.
+ * Wrap one raw volume, which is no clipped partition of a cut disk. A
+ * filesystem the stack names must be the one the volume holds and open whole,
+ * one detection recognises and supports under an empty slot must open whole,
+ * and a container that carries a filesystem requires its input to hold that
+ * one and to verify. With a scheme the volume is the one partition, typed by
+ * the layer settings or else by its filesystem; without one it is the output.
  */
 fsimg_status_t
 fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
@@ -723,6 +716,11 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 		status = fsimg_io_get_size(input, &length, error);
 	if (status != FSIMG_OK)
 		return (status);
+	status = check_not_clipped(input, error);
+	if (status != FSIMG_OK) {
+		fsimg_error_path(error, "input");
+		return (status);
+	}
 	container = fsimg_stack_layer(&stack, FSIMG_LAYER_CONTAINER);
 	order = FSIMG_BYTE_ORDER_LITTLE;
 	if (container != NULL && container->container->carries != NULL)
@@ -731,8 +729,12 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 	else if (stack.slots[FSIMG_LAYER_FILESYSTEM].state == FSIMG_SLOT_NAMED)
 		status = check_named_input(ctx, input, length,
 		    stack.slots[FSIMG_LAYER_FILESYSTEM].name, filesystem, error);
-	else
-		status = check_unnamed_input(ctx, input, length, filesystem, error);
+	else {
+		status = check_unnamed_input(ctx, input, length, filesystem,
+		    error);
+		if (status != FSIMG_OK)
+			fsimg_error_path(error, "input");
+	}
 	if (status != FSIMG_OK)
 		return (status);
 	/* One session charges the container's plan and the output. */
@@ -773,8 +775,7 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	fsimg_stack_t stack;
 	fsimg_io_t *volume;
 	fsimg_ctx_t *ctx;
-	uint64_t length, missing;
-	char message[96];
+	uint64_t length;
 	fsimg_error_t local;
 	fsimg_status_t status;
 
@@ -796,18 +797,10 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 		status = fsimg_image_select(image, selector, &volume, error);
 	if (status != FSIMG_OK)
 		return (status);
-	/* A partial output is not success: the bytes of a partition the disk
-	 * was cut through are not the partition.
-	 */
-	missing = selector != NULL && selector->kind == FSIMG_SELECT_SECTION ? 0 :
-	    fsimg_image_selected_missing(image);
-	if (missing != 0) {
+	status = check_not_clipped(volume, error);
+	if (status != FSIMG_OK) {
 		fsimg_io_free(volume);
-		snprintf(message, sizeof(message), "the selected partition is "
-		    "truncated: %llu declared bytes are missing",
-		    (unsigned long long)missing);
-		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
-		    message));
+		return (status);
 	}
 	ctx = fsimg_io_context(volume);
 	fsimg_session_init(&session, ctx, "image output", 0);
@@ -831,7 +824,8 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
  * A partitioned disk from volumes in order. The stack names the scheme
  * and nothing to write inside it; each part carries its own type, name
  * and GUID, so the layer options' partition settings must hold their
- * defaults. A part without a type takes its filesystem's.
+ * defaults. A part without a type takes its filesystem's. Each part is an
+ * input under an empty filesystem slot, and a type spares it nothing.
  */
 fsimg_status_t
 fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
@@ -908,21 +902,25 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 			break;
 		}
 		status = fsimg_io_get_size(volumes[i], &lengths[i], error);
+		if (status == FSIMG_OK)
+			status = check_not_clipped(volumes[i], error);
+		if (status == FSIMG_OK)
+			status = check_unnamed_input(ctx, volumes[i], lengths[i],
+			    filesystem, error);
+		if (status != FSIMG_OK) {
+			fsimg_error_path(error, key);
+			break;
+		}
 		/* An untyped part, NULL or empty, is typed by its filesystem. */
 		typed = parts[i].type != NULL && parts[i].type[0] != '\0';
-		filesystem[0] = '\0';
-		if (status == FSIMG_OK && !typed)
-			status = identify_volume(ctx, volumes[i], lengths[i],
-			    filesystem, error);
-		if (status != FSIMG_OK)
-			break;
 		request = (fsimg_partition_request_t){
 			.type = typed ? parts[i].type : NULL,
 			.name = parts[i].name,
 			.guid = parts[i].guid
 		};
 		status = fsimg_disk_plan_partition(&plan, (uint32_t)i + 1, NULL,
-		    &request, filesystem[0] != '\0' ? filesystem : NULL, error);
+		    &request, !typed && filesystem[0] != '\0' ? filesystem : NULL,
+		    error);
 	}
 	if (status == FSIMG_OK)
 		status = write_plan(&session, &plan, volumes, lengths,

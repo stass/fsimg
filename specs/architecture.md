@@ -310,15 +310,17 @@ format treats a volume longer than its slice by the same rules:
   slice, so this holds by construction. A cut that leaves no proof, such as
   [a QNX4 cut that keeps the bitmap's size and loses only allocated
   blocks](design-qnx4.md#blocks-and-the-block-count), is judged as a volume of the slice's length.
-* **A wrap does not package a volume it proves truncated.** It would write the
-  broken volume into a new image, so a
-  [wrap](design-layers.md#wrap-unwrap-and-compose) whose stack names a
-  filesystem, or whose empty filesystem slot meets an input detection
+* **Wrap and compose do not package a volume they prove truncated.** It would
+  write the broken volume into a new image, so a
+  [wrap or compose](design-layers.md#wrap-unwrap-and-compose) whose stack names
+  a filesystem, or whose empty filesystem slot meets an input detection
   recognises and supports, fails `FSIMG_ECORRUPT` on nonzero `missing_bytes`,
   naming the truncation and that count, before any output, as a carried
   container's verification of its input does. A cut the open refuses keeps the
   driver's error. A cut that leaves no proof is not detected, nor is one in an
-  input drawing no claim, several claims or an unsupported claim.
+  input drawing no claim, several claims or an unsupported claim, unless it is
+  a [clipped partition](design-layers.md#truncated-disks), whose slice carries
+  the count whatever it holds.
 
 A partition scheme applies the same rules to a disk: a partition past the disk's
 end is clipped, GPT opens from its primary when the alternate LBA proves the cut,
