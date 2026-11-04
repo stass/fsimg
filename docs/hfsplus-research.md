@@ -296,8 +296,13 @@ diskimage-class=CRawDiskImage -mountpoint MNT V`, holding the one name
 (`O_CREAT | O_EXCL`), detached, and checked with `fsck_hfs -d -n` on the raw
 device. `fsck.tsv` has the stored units and verdict of each name; the tool reads
 the units from the catalog leaves. `class0-VARIANT.tsv` holds one volume with
-the names that probe marks decomposing from class 0 values. The tool refuses
-to replace an existing directory without `--overwrite`.
+the names that probe marks decomposing from class 0 values.
+`marks-VARIANT.tsv` holds one more volume per comparator with 1003 names of
+longer runs of marks and marks after precomposed starters, `marks-fsck.tsv` its
+`fsck_hfs -d -n` verdict, and `marks-commands.txt` its commands. The tool
+refuses to replace an existing directory without `--overwrite`; the `marks`
+files were added to a capture whose other files are byte for byte the first
+run's, so `commands.txt` is that run's.
 
 SHA-256, `e3-small-names/`:
 
@@ -308,6 +313,10 @@ SHA-256, `e3-small-names/`:
 62389a69ef25443b2af30dcc169fd656eb5ec5d17bda9429fbafd06789ed0d63  class0-hfsx.tsv
 7250642374cc13b8bf824fd99dd18e1c6f20c5fc4b3568096fcd24d1a5fedc63  commands.txt
 bfa659d23b2274101e693efd5f38ebd9372e725c136ce00139d6221a2b84fcb4  fsck.tsv
+c0af88516fa54e91de78525743714008679be2dc3e49c2b6b4ce01ce5d9ad03e  marks-commands.txt
+6b6f09e9d5ac192184d4405cb94e7d94ce2251f00317f7a6a032c77f55e8d4bb  marks-fsck.tsv
+49527f41182a766790970ac794a440c80e8b5fc8bf5d150d3e1498ed225a5eee  marks-hfsplus.tsv
+8d35dd4d6468410e349e7e67029af161cd30e7c58d9868aec4b5ea144095d50f  marks-hfsx.tsv
 ```
 
 ## Experiments
@@ -609,17 +618,17 @@ Evidence rows answered:
 
 Status: answered, on `newfs_hfs`'s two comparators (`H+` with compare type
 `0xCF` and `HX` with `0xBC`), for every value a POSIX name can carry. Every
-observed row is explained by Unicode 3.2.0 plus the rules below. Open: the fold
-rows of units no POSIX name can store, and the compare types `newfs_hfs` cannot
-make (see "What cannot be observed").
+observed row is explained by Unicode 3.2.0 plus the rules below. Not observable:
+the fold rows of units no POSIX name can store, which the table sets by rule, and
+the compare types `newfs_hfs` cannot make (see "What cannot be observed").
 
 | Element | Answer |
 |---|---|
-| Fold table | `fold.tsv`, per unit, on `H+`. Of the 443 units on the folded pages that have a Unicode 3.2.0 lowercase, 304 are observed: they fold to that lowercase, except 30 that stay themselves. The other 139 (from U+00C0 on) decompose, so no stored name holds them and their fold is not observed |
+| Fold table | `fold.tsv`, per unit, on `H+`. Of the 443 units on the folded pages that have a Unicode 3.2.0 lowercase, 304 are observed: they fold to that lowercase, except 30 that stay themselves. The other 139 (from U+00C0 on) decompose, so no stored name holds them and their fold is not observed. The table's rule is lowercase on the folded pages unless the unit decomposes, so those 139 stay themselves, and it equals NetBSD's table on all 65536 units |
 | Ignorable units | U+200C to U+200F, U+202A to U+202E, U+206A to U+206F and U+FEFF on `H+`; none on `HX` |
 | U+0000 ordering | Reachable: the POSIX name U+2400 stores U+0000. It sorts after U+FFFD, the last storable unit, on `H+`, and first on `HX` |
 | Decomposition table | The prediction holds for every BMP value, including all of Hangul; no supplementary value decomposes |
-| Combining order | Stable sort by Unicode 3.2.0 class, after decomposing, for every ordered pair of the 297 BMP marks after `a`, and for the three class 0 values that decompose into marks; the 30 supplementary marks behave as class 0 |
+| Combining order | Stable sort by Unicode 3.2.0 class of each maximal run of nonzero class, after full canonical decomposition, for every ordered pair of the 297 BMP marks after `a`, for the three class 0 values that decompose into marks, and for 1003 names of longer runs and marks after precomposed starters; the 30 supplementary marks behave as class 0 |
 | Supplementary characters | Stored as their surrogate pair, compared unit by unit, never folded or decomposed, and never reordered in the two-mark runs probed |
 
 Procedure. `tools/hfsplus/unicode-probe.rb` formats one disposable 8 GiB sparse
@@ -767,8 +776,9 @@ simple lowercase on pages `0x00`, `0x01`, `0x03`, `0x04`, `0x05`, `0x21` and
 `0xFF`, and the Georgian capitals' mapping U+10A0 to U+10C5 onto U+10D0 to
 U+10F5. Of the 443 units on those pages with a lowercase, 304 are observed (176
 `determined`, 128 `ambiguous`) and 139 are `unobservable`, because they
-decompose: the table row of those 139, from U+00C0 on, is not evidence, and
-"lowercase on the page" is not an observation for them. Among the observed rows
+decompose. The rule is lowercase on those pages unless the unit decomposes, so
+each of the 139, from U+00C0 on, folds to itself, which no observation checks.
+Among the observed rows
 no fold changes a unit on any other page, and no fold occurs that this rule does
 not predict. These 30 observed units on the folded pages have a Unicode 3.2.0
 lowercase but fold to themselves, and are the rows of
@@ -790,7 +800,8 @@ fold to themselves because their pages are not folded. The Deseret case pairs
 are supplementary values, covered by the supplementary claim below. U+212B is
 observed by order only: its lowercase U+00E5 decomposes, so no stored name holds
 U+00E5, and the row says where U+212B sits on the chain, not that it folds to
-itself rather than to U+00E5.
+itself rather than to U+00E5. U+212B has no decomposition under the rule (U+2000
+to U+2FFF are unchanged), so it is an exception row and folds to itself.
 
 Ignorable units. On `H+` the 16 units above collapse: `aXb` collides with `ab`,
 and in another directory `aXb` is created and keeps the unit. A name of one
@@ -844,6 +855,44 @@ does `a` U+1D165 U+0300, which is why the two do not collide. This accounts for
 7421 `units-supplementary` and 7421 `representative-supplementary` rows in
 `differences.tsv`, and for nothing else in `pairs`.
 
+Longer runs and precomposed starters. `e3-small-names/marks-VARIANT.tsv` holds
+1003 names on one 8 MiB volume per comparator: the `SET.tsv` columns, with
+`scope` the category, then `predicted_units`, `predicted_representative` and
+`agrees`. The prediction is the design's rule: full canonical decomposition,
+then a stable sort by Unicode 3.2.0 class of each maximal run of nonzero class,
+a supplementary value as class 0. `agrees` is `yes` for all 1003 names on both
+comparators, and the two files are identical: 233 names are created and 770
+collide with an earlier ordering, each storing exactly the predicted units, so
+the rule has no counter-example in these categories. A name not already in an
+earlier category counts once.
+
+| Category | Names | Created | `EEXIST` |
+|---|---|---|---|
+| `run3`: `a` and every ordered three of U+0334 (class 1), U+0323 (220), U+0300 and U+0301 (230), U+0345 (240) | 125 | 42 | 83 |
+| `run4-distinct-classes`: every ordered four of U+0334, U+0323, U+0300, U+0345 | 256 | 35 | 221 |
+| `run4-equal-classes`: every ordered four of U+0334, U+0323, U+0300, U+0301 | 175 | 42 | 133 |
+| `run3-script-marks`: every ordered three of U+05B0 (10), U+05B8 (18), U+05BC (21), U+0F71 (129), U+0F72 (130) | 125 | 35 | 90 |
+| `decomposable-in-run`: U+0344, U+0F73, U+0F75, U+0F81, U+0340, U+0341, U+0343 alone, before, between and after U+0334, U+0323, U+0345 | 175 | 43 | 132 |
+| `run-split-by-starter`: marks, a decomposable mark, `b`, then marks again | 10 | 8 | 2 |
+| `precomposed-starter`: U+00E2, U+1EAD, U+00C5, U+1E0B, U+AC00, U+AC01 and U+D7A3 with marks after and before, and every order of their decomposed spellings | 24 | 10 | 14 |
+| `hebrew`: U+05E9 and every order of U+05C1, U+05BC, U+05B8 (and U+05B0) | 30 | 2 | 28 |
+| `tibetan`: U+0F40 and every order of U+0F71, U+0F72, U+0F7C (and U+0F74), and U+0F73 with U+0F7C | 32 | 4 | 28 |
+| `long-decomposition`: U+1E69, U+01D5 and U+1FA8, alone and with marks, and their decomposed spellings | 51 | 12 | 39 |
+
+A run is sorted as a whole, not pairwise: every order of a Hebrew or Tibetan
+cluster collapses to one name, and marks of equal class keep their order
+(U+0F40 U+0F71 U+0F72 U+0F7C and U+0F40 U+0F71 U+0F7C U+0F72 are two names, both
+stored as given, since U+0F72 and U+0F7C are class 130). A decomposable mark in
+the middle of a run is replaced by its marks, which then sort with the rest:
+`a` U+0345 U+0F73 U+0323 stores U+0061 U+0F71 U+0F72 U+0323 U+0345. A class 0
+starter ends a run, so marks do not cross it. A mark ahead of a precomposed starter
+stays ahead (U+0323 U+00E2 stores U+0323 U+0061 U+0302), and one after sorts into
+the starter's decomposition (U+00E2 U+0323 stores `a` U+0323 U+0302; U+1E69 stores
+`s` U+0323 U+0307, U+01D5 stores `U` U+0308 U+0304 and U+1FA8 stores U+03A9
+U+0313 U+0345). A Hangul syllable decomposes to its jamo and the mark follows
+(U+AC00 U+0323 stores U+1100 U+1161 U+0323). `fsck_hfs -n` accepts both volumes
+(`marks-fsck.tsv`: `CheckHFS returned 0`), and flags no name.
+
 Hangul. Every one of the 11172 syllables stores its two or three conjoining
 jamo, and its explicit jamo spelling collides with it, on both comparators.
 
@@ -890,12 +939,13 @@ system maps away. The other 2048 are the surrogate units, which appear only as
 parts of pairs (`pair-only`): their order within each group is observed, never a
 value. A catalog holding one of the 12146 is outside what this driver produces
 on macOS, and for POSIX names none of those rows can be compared; no evidence
-here covers a catalog written by another implementation. U+0000 is known to sort
+here covers a catalog written by another implementation. U+0000 sorts
 after every unit up to U+FFFD, and its relation to U+FFFE and U+FFFF is not
-observed. The pairs cover two marks after one starter (plus the three class 0
-values above); runs of three or more marks, ordering across a precomposed
-starter, names of several ignorable units, unassigned supplementary
-noncharacters and other malformed UTF-8 are not probed. The `HX` answers cover
+observed: the table gives U+0000 the fold 0xFFFF, as does NetBSD's table, so a
+stored U+0000 and a stored U+FFFF compare equal. No POSIX name stores U+FFFF. The pairs cover two marks after one starter (plus the three class 0
+values above) and the marks set covers the longer runs and precomposed starters
+it lists; runs of five or more marks, names of several ignorable units,
+unassigned supplementary noncharacters and other malformed UTF-8 are not probed. The `HX` answers cover
 compare type `0xBC` only: `specs/design-hfsplus.md` also allows `0xCF` on `HX`
 and 0 on `H+`, and `newfs_hfs` has no option that makes either (`-s` selects
 `0xBC`), so they were not probed.
@@ -919,14 +969,16 @@ finds no violation:
   folding to U+0411 breaks the ascending order. Both are rejected, as is a copy of
   the header with U+0410 altered, with exit 1.
 * Stored units, on each comparator: for every row of `alone`, `between`, `pairs`,
-  `hangul` and `surrogates`, and of `e3-small-names/class0-VARIANT.tsv`, table
+  `hangul` and `surrogates`, and of `e3-small-names/class0-VARIANT.tsv` and
+  `marks-VARIANT.tsv` (its self-test gives U+0323 class 230 and requires the
+  rows to reject it), table
   decomposition and the stable class sort reproduce `leaf_units`, with `:`, U+2400,
   U+FFFE, U+FFFF and the 2048 surrogate encodings spelled as this section explains
   and supplementary values as their pairs. The rows with no leaf are the 5 of
   `residual.tsv`.
 * Collisions: each colliding name has the catalog key of its representative.
 * Catalog order: sorting each directory's names by the comparator's key gives
-  exactly `leaf_rank`, and no two siblings compare equal.
+  exactly `rank`, and no two siblings compare equal.
 
 | Set | Names sorted | Directories on `H+` | Directories on `HX` | Collisions on `H+` | Collisions on `HX` |
 |---|---|---|---|---|---|
@@ -936,18 +988,19 @@ finds no violation:
 | `hangul` | 22344 | 2 | 2 | 11172 | 11172 |
 | `surrogates` | 2048 | 1 | 1 | 0 | 0 |
 | `class0` | 15 | 3 | 3 | 9 | 9 |
+| `marks` | 1003 | 24 | 24 | 770 | 770 |
 
 The table encodes U+0000 as the fold 0xFFFF on `H+`, the largest value, because
 a fold of zero means ignorable; the binary comparison compares it as itself, so it
-sorts first. U+FFFF also folds to 0xFFFF, so the two compare equal; no POSIX name
-stores U+FFFF, and their relation is not observed.
+sorts first. U+FFFF also folds to 0xFFFF, so the two compare equal, as in
+NetBSD's table; no POSIX name stores U+FFFF, and their relation is not observed.
 
 SHA-256 of the tables' serializations, printed by the checker: the fold table as
 65536 big-endian units, the combining classes as 65536 bytes, and for each
 decomposing unit in order the unit, its count and its units, as big-endian units.
 
 ```
-78faa07cccc9d4191770b16e067c2ed3fa08199182b70eca259d3d1f3ea60240  fold
+b8e22686df0e37d75ab4e0d24c83cf92a5cab407cb6ff722fa54384d6544be46  fold
 0c753eab520b1374925dc1128228dfe56987f5284ee78837e116a89190ebc599  combining classes
 654f209716fc62ecf5d15fff1063cc021d177bf2c0e97918b60ee93569c70496  decompositions
 ```
@@ -958,45 +1011,18 @@ NetBSD witness. `~/hfsplus-captures/netbsd-libhfs/libhfs.c`, from
 `d4aeef80a6b06232340182da3d74bc91e03bfc39de084713eac2d714f10d7f94`. The checker
 interprets the statements of `hfslib_create_casefolding_table` and compares the
 resulting folds over all 65536 units. The file has no decomposition or combining
-class data. Taken alone, NetBSD's table satisfies every rule of `fold.tsv`. On all
-53390 observable rows it equals the generated table, so it confirms the 30
-exceptions, the Georgian mapping, the 16 ignorable units, the lowercase choice in
-the 124 ambiguous classes and the fold of U+0000, without having seen this
-observation. No observable row differs.
+class data. Taken alone, NetBSD's table satisfies every rule of `fold.tsv`.
 
-139 unobservable rows differ, of the 12146, and 12007 are equal. They are exactly
-the 139 units above that have a lowercase on a folded page and decompose: the
-generated table folds each to its Unicode 3.2.0 lowercase, and NetBSD leaves each
-itself. Each row below is the unit and the generated fold.
-
-```
-00C0:00E0 00C1:00E1 00C2:00E2 00C3:00E3 00C4:00E4 00C5:00E5 00C7:00E7 00C8:00E8
-  00C9:00E9 00CA:00EA 00CB:00EB 00CC:00EC 00CD:00ED 00CE:00EE 00CF:00EF 00D1:00F1
-  00D2:00F2 00D3:00F3 00D4:00F4 00D5:00F5 00D6:00F6 00D9:00F9 00DA:00FA 00DB:00FB
-  00DC:00FC 00DD:00FD 0100:0101 0102:0103 0104:0105 0106:0107 0108:0109 010A:010B
-  010C:010D 010E:010F 0112:0113 0114:0115 0116:0117 0118:0119 011A:011B 011C:011D
-  011E:011F 0120:0121 0122:0123 0124:0125 0128:0129 012A:012B 012C:012D 012E:012F
-  0130:0069 0134:0135 0136:0137 0139:013A 013B:013C 013D:013E 0143:0144 0145:0146
-  0147:0148 014C:014D 014E:014F 0150:0151 0154:0155 0156:0157 0158:0159 015A:015B
-  015C:015D 015E:015F 0160:0161 0162:0163 0164:0165 0168:0169 016A:016B 016C:016D
-  016E:016F 0170:0171 0172:0173 0174:0175 0176:0177 0178:00FF 0179:017A 017B:017C
-  017D:017E 01A0:01A1 01AF:01B0 01CD:01CE 01CF:01D0 01D1:01D2 01D3:01D4 01D5:01D6
-  01D7:01D8 01D9:01DA 01DB:01DC 01DE:01DF 01E0:01E1 01E2:01E3 01E6:01E7 01E8:01E9
-  01EA:01EB 01EC:01ED 01EE:01EF 01F4:01F5 01F8:01F9 01FA:01FB 01FC:01FD 01FE:01FF
-  0386:03AC 0388:03AD 0389:03AE 038A:03AF 038C:03CC 038E:03CD 038F:03CE 03AA:03CA
-  03AB:03CB 0400:0450 0401:0451 0403:0453 0407:0457 040C:045C 040D:045D 040E:045E
-  0419:0439 0476:0477 04C1:04C2 04D0:04D1 04D2:04D3 04D6:04D7 04DA:04DB 04DC:04DD
-  04DE:04DF 04E2:04E3 04E4:04E5 04E6:04E7 04EA:04EB 04EC:04ED 04EE:04EF 04F0:04F1
-  04F2:04F3 04F4:04F5 04F8:04F9
-```
-
-No POSIX name stores one of these units, so no observation here chooses between
-the two. The difference is reachable only through a stored name that is not
-decomposed, in a catalog written by something other than this driver or macOS's
-POSIX path: its folded order under the generated table is not its order under
-NetBSD's. The two derivations are "lowercase on the page" for the generated table
-and, in effect, "lowercase on the page unless the unit decomposes" for NetBSD's,
-and they agree on every observed unit.
+The generated table equals it on all 65536 units, and any difference fails the
+checker. On the 53390 observable rows the agreement confirms the 30 exceptions,
+the Georgian mapping, the 16 ignorable units, the lowercase choice in the 124
+ambiguous classes and the fold of U+0000, without NetBSD having seen this
+observation. On the 12146 unobservable rows it is the rule itself: NetBSD
+leaves the 139 units on the folded pages that have a lowercase and decompose as
+themselves, and the table lowercases on those pages unless the unit decomposes.
+No POSIX name stores one of those units, so no observation here chooses between
+two folds for them; a catalog written by another implementation that holds one
+undecomposed folds it as NetBSD does.
 
 ### E4 Hard links
 
@@ -1554,21 +1580,18 @@ volume-creation time there); the 10.0 disc's private folder date differs.
 
 Names. The private data folder (four U+0000, then `HFS+ Private Data`) is present
 on each Mac OS X disc and ascends in key order, after the other root children,
-under the design's U+0000 rule (no inversion). Other names (22 non-ASCII names on
-the 10.0 disc and 23 on the 10.1 disc; across both discs, `Espan` + U+0303 + `ol`,
+under the tables' U+0000 fold (0xFFFF, as in E3). The 22 non-ASCII names on the
+10.0 disc and the 23 on the 10.1 disc (across both discs, `Espan` + U+0303 + `ol`,
 `Franc` + U+0327 + `ais`, `Portugue` + U+0302 + `s`, Hiragino names containing U+3099, a
 Japanese name, and `Korean - ` with U+1112 U+1161 U+11AB U+1100 U+1173 U+11AF) were run
-through the design's decomposition (canonical decomposition with U+2000 to
-U+2FFF, U+F900 to U+FAFF and U+2F800 to U+2FAFF left alone, built from Ruby's
-`unicode_normalize` per run) and through the design's fold description
-(simple lowercase in the listed pages, U+10A0 to U+10C5 to Mkhedruli, the
-joiner and directional controls ignorable, U+0000 sorting last). Every stored
-name equals its decomposition (22 of 22 and 23 of 23), and the leaf keys ascend
-strictly under the fold comparison on all four volumes (0 inversions, 0 equal
-neighbours over 11176, 12564, 3464 and 876 records). The smi volume has no
-non-ASCII name. The check applies the design's prose rules, not the
-[E3](#e3-unicode) observation, using Ruby's Unicode data, which is newer than
-Unicode 3.2.
+through the generated tables of [E3](#e3-unicode)
+(`lib/formats/hfsplus/unicode-tables.h`): decomposing each stored name with the
+table and stably sorting each run of nonzero classes gives the stored name
+itself, for 22 of 22 and 23 of 23, and the leaf keys, compared as the parent ID
+and then the folded units with ignorable units skipped, ascend strictly on all
+four volumes (0 inversions, 0 equal neighbours over 11176, 12564, 3464 and 876
+records). The 10.3 disc and the smi volume have no non-ASCII name (0 of 3464 and
+0 of 876 records), so for them only the order is checked.
 
 Open. A Mac OS 8.1 to 9.2 writer's non-ASCII names, which the design says may
 follow Unicode 2.1, are unobserved: the only Mac OS 9-formatted volume has ASCII

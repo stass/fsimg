@@ -43,9 +43,11 @@
 #   SHA256SUMS        the digest of each file above
 #
 # `--small-names` instead writes OUT_ROOT/e3-small-names/: one small volume per
-# probe name for `fsck_hfs -n` verdicts and stored U+0000 (fsck.tsv), and one
-# volume per comparator for marks that decompose into marks (class0-VARIANT.tsv,
-# class0-differences.tsv), see `run_small_names`.
+# probe name for `fsck_hfs -n` verdicts and stored U+0000 (fsck.tsv), one volume
+# per comparator for marks that decompose into marks (class0-VARIANT.tsv,
+# class0-differences.tsv), and one more per comparator for runs of marks and
+# marks after a precomposed starter (marks-VARIANT.tsv, marks-fsck.tsv,
+# marks-commands.txt), see `run_small_names`.
 #
 # Usage: unicode-probe.rb [--variant hfsplus|hfsx] [--analyze-only] [--sample N]
 #                         [--overwrite] [--small-names]
@@ -457,7 +459,7 @@ module HfsPlusUnicodeProbe
   # Releases every device this run attached, keeps the commands run and removes
   # the scratch files. It returns a failed release instead of raising it, so
   # that it never hides the error already on its way out.
-  def finish_run(attachments, log, out, images, mount, keep_image:)
+  def finish_run(attachments, log, out, images, mount, keep_image:, commands: "commands.txt")
     leftover = begin
       attachments.release
       nil
@@ -465,7 +467,7 @@ module HfsPlusUnicodeProbe
       warn "unicode-probe: #{e.message}"
       e
     end
-    File.write(File.join(out, "commands.txt"), log.to_s)
+    File.write(File.join(out, commands), log.to_s)
     FileUtils.rm_f(images) unless keep_image
     remove_mount_directory(mount) unless leftover
     leftover
@@ -623,16 +625,24 @@ module HfsPlusUnicodeProbe
   # Replay pass 0 of a set under a prediction, which is where every probe's
   # disposition and representative were decided: the probes in creation order,
   # each colliding with the first earlier probe that has the same predicted
-  # key. The later passes hold only probes that pass 0 already refused.
-  def differences_of_set(set, items, rows, prediction)
+  # key. The later passes hold only probes that pass 0 already refused. Each
+  # entry is the probe, its row, the units it should store and the
+  # representative it should have.
+  def predicted_outcomes(items, rows, prediction)
     by_id = rows.to_h { [_1.id, _1] }
     first_with_key = {}
-    items.flat_map do |probe|
+    items.map do |probe|
       row = by_id.fetch(probe.id)
       stored = prediction.stored(probe.cps)
       key = prediction.sort_key(stored)
       expected = prediction.meets_thread?(key) ? "dir" : first_with_key.fetch(key, "self")
       first_with_key[key] ||= probe.id if row.disposition == "created"
+      [probe, row, stored, expected]
+    end
+  end
+
+  def differences_of_set(set, items, rows, prediction)
+    predicted_outcomes(items, rows, prediction).flat_map do |probe, row, stored, expected|
       next [disagreement(set, row.id, "refused", "created", "#{row.disposition}:#{row.representative}")] unless %w[created EEXIST].include?(row.disposition)
 
       suffix = probe.cps.any? { _1 > 0xFFFF } ? "-supplementary" : ""
@@ -975,10 +985,120 @@ module HfsPlusUnicodeProbe
     [rows, differences_of_set("class0", items, rows, prediction) + order_differences("class0", rows, prediction)]
   end
 
+  # ---- runs of marks ----
+
+  # One name of the marks volume: the SET.tsv columns (the scope is the
+  # category) and whether the design's rule (full canonical decomposition, then
+  # a stable sort of each maximal run of nonzero classes) predicts the stored
+  # units and the collision.
+  MARK_EXTRA_COLUMNS = %w[predicted_units predicted_representative agrees].freeze
+  MARKS_COLUMNS = (COLUMNS + MARK_EXTRA_COLUMNS).freeze
+  MarkRow = Data.define(*MARKS_COLUMNS.map(&:to_sym)) do
+    def cells = to_h.values
+  end
+
+  # Marks of the classes 1, 220, 230 (twice), 240, and the Hebrew and Tibetan
+  # ones of classes 10, 18, 21, 129 and 130; and the marks that decompose into
+  # marks, whose decompositions are in the pinned data.
+  RUN_MARKS = [0x334, 0x323, 0x300, 0x301, 0x345].freeze
+  SCRIPT_MARKS = [0x5B0, 0x5B8, 0x5BC, 0xF71, 0xF72].freeze
+  DECOMPOSABLE_MARKS = [0x344, 0xF73, 0xF75, 0xF81, 0x340, 0x341, 0x343].freeze
+  CONTEXT_MARKS = [0x334, 0x323, 0x345].freeze
+
+  # The starter with its trailing marks as given and in every order, and with
+  # the starter decomposed and every order of all its marks.
+  def mark_spellings(cps, data, prediction)
+    starter, *trailing = cps
+    expanded = prediction.stored([starter])
+    split = expanded.index { data.class_of(_1).positive? } || expanded.size
+    base = expanded.first(split)
+    marks = expanded.drop(split) + trailing
+    [cps, *trailing.permutation.map { [starter, *_1] }, *marks.permutation.map { [*base, *_1] }]
+  end
+
+  # The names of the marks volume by category, each a list of values.
+  def mark_vectors(data, prediction)
+    a = [ASCII_A]
+    runs = ->(alphabet, size) { alphabet.repeated_permutation(size).map { a + _1 } }
+    spellings = ->(starters) { starters.flat_map { mark_spellings(_1, data, prediction) } }
+    sandwiches = DECOMPOSABLE_MARKS.flat_map do |d|
+      CONTEXT_MARKS.permutation(2).flat_map { |x, y| [[x, d, y], [d, x, y], [x, y, d]] } +
+        CONTEXT_MARKS.flat_map { |x| [[x, d], [d, x]] } + [[d]]
+    end
+    {
+      "run3" => runs.call(RUN_MARKS, 3),
+      "run4-distinct-classes" => runs.call([0x334, 0x323, 0x300, 0x345], 4),
+      "run4-equal-classes" => runs.call([0x334, 0x323, 0x300, 0x301], 4),
+      "run3-script-marks" => runs.call(SCRIPT_MARKS, 3),
+      "decomposable-in-run" => sandwiches.map { a + _1 },
+      "run-split-by-starter" => DECOMPOSABLE_MARKS.map { |d| [*a, 0x345, d, 0x323, ASCII_B, 0x323, d, 0x345] } +
+        [[*a, 0x345, 0x323, ASCII_B, 0x323, 0x345], [*a, 0x345, 0x323, ASCII_B, 0x345, 0x323], [*a, 0x323, 0x345, ASCII_B, 0x345, 0x323]],
+      "precomposed-starter" => spellings.call([[0xE2, 0x323], [0x1EAD], [0xC5, 0x323], [0x1E0B, 0x323], [0xAC00, 0x323], [0xAC01, 0x300, 0x323], [0xD7A3, 0x334]]) +
+        [[0x323, 0xE2], [0x323, 0xC5], [0x323, 0x1E0B], [0x323, 0xAC00], [0x1EA1, 0x302], [0xE2, 0x323], [0x1E0D, 0x307]],
+      "hebrew" => [0x5C1, 0x5BC, 0x5B8].permutation.map { [0x5E9, *_1] } + [0x5C1, 0x5BC, 0x5B8, 0x5B0].permutation.map { [0x5E9, *_1] },
+      "tibetan" => [0xF71, 0xF72, 0xF7C].permutation.map { [0xF40, *_1] } + [0xF71, 0xF72, 0xF7C, 0xF74].permutation.map { [0xF40, *_1] } +
+        [[0xF40, 0xF73, 0xF7C], [0xF40, 0xF7C, 0xF73]],
+      "long-decomposition" => spellings.call([[0x1E69], [0x1E69, 0x334], [0x1E69, 0x345], [0x1D5], [0x1D5, 0x323], [0x1D5, 0x345], [0x1FA8], [0x1FA8, 0x323], [0x1FA8, 0x334]])
+    }
+  end
+
+  # Every probe of the marks volume once, in category order.
+  def mark_items(data, prediction)
+    mark_vectors(data, prediction).flat_map { |category, vectors| vectors.map { item(cps: _1, scope: category) } }.uniq(&:cps)
+  end
+
+  def marks_rows(items, rows, prediction)
+    predicted_outcomes(items, rows, prediction).map do |_, row, stored, expected|
+      agrees = %w[created EEXIST].include?(row.disposition) && row.leaf_units == units_text(stored) && row.representative == expected
+      MarkRow.new(**row.to_h, predicted_units: units_text(stored), predicted_representative: expected, agrees: agrees ? "yes" : "no")
+    end
+  end
+
+  # One volume of every mark name, checked by `fsck_hfs -n` once it is unmounted.
+  def marks_table(log, attachments, template, image, mount, variant, data)
+    prediction = Prediction.new(data, folded: variant == "hfsplus")
+    items = mark_items(data, prediction)
+    FileUtils.cp(template, image)
+    observed = attachments.with(image, mountpoint: mount) { observe_volume(mount, { "marks" => items }) }
+    leaves, = read_leaves(image)
+    problems = readdir_problems(observed, leaves)
+    raise Error, problems.join("; ") unless problems.empty?
+
+    rows = marks_rows(items, set_rows(items, observed.fetch("marks"), leaves), prediction)
+    verdict = fsck_verdict(attachments, log, image)
+    [rows, FsckRow.new(name: "marks", variant: variant, values: "#{items.size} names", stored_units: "-", fsck_ok: verdict[:ok],
+                       fsck_result: verdict[:last_line], illegal: verdict[:illegal_names].join(" / "))]
+  end
+
+  # marks-VARIANT.tsv per comparator, marks-fsck.tsv, and the commands of this
+  # part in marks-commands.txt, so that commands.txt stays the first part's.
+  def run_marks(cfg, data, out)
+    log = HfsPlusCapture::Log.new
+    attachments = HfsPlusCapture::Attachments.new(log)
+    template = File.join(cfg.work, "small-template.img")
+    image = File.join(cfg.work, "small.img")
+    mount = File.join(cfg.work, "small.mnt")
+    FileUtils.mkdir_p(mount)
+    leftover = nil
+    begin
+      fsck_rows = cfg.variants.map do |variant|
+        format_volume(log, attachments, template, variant, bytes: SMALL_VOLUME_BYTES)
+        rows, fsck = marks_table(log, attachments, template, image, mount, variant, data)
+        write_tsv(File.join(out, "marks-#{variant}.tsv"), MARKS_COLUMNS, rows)
+        fsck
+      end
+      write_tsv(File.join(out, "marks-fsck.tsv"), FSCK_COLUMNS, fsck_rows)
+    ensure
+      leftover = finish_run(attachments, log, out, [template, image], mount, keep_image: cfg.keep_image, commands: "marks-commands.txt")
+    end
+    raise leftover if leftover
+  end
+
   # Evidence for the small-volume claims of the record, written to
   # OUT_ROOT/e3-small-names/: fsck.tsv (one row per name and comparator),
   # class0-VARIANT.tsv (the SET.tsv columns) and class0-VARIANT-differences.tsv
-  # (where the prediction, a stable class sort after decomposing, disagrees).
+  # (where the prediction, a stable class sort after decomposing, disagrees),
+  # then the files of `run_marks`.
   def run_small_names(cfg, data)
     out = File.join(cfg.root, "e3-small-names")
     refuse_existing_capture(out, cfg)
@@ -1003,6 +1123,7 @@ module HfsPlusUnicodeProbe
     end
     raise leftover if leftover
 
+    run_marks(cfg, data, out)
     write_digests(out)
   end
 

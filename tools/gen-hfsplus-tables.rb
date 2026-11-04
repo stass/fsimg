@@ -70,12 +70,15 @@ module HfsplusTables
     end
   end
 
-  # 65536 values, U+0000 included: lowercase on the folded pages, less the
-  # exceptions; Georgian capitals, which Unicode 3.2.0 does not case-map; the
-  # ignorable units; identity elsewhere.
+  # 65536 values, U+0000 included: lowercase on the folded pages unless the unit
+  # decomposes, less the exceptions; Georgian capitals, which Unicode 3.2.0 does
+  # not case-map; the ignorable units; identity elsewhere. A decomposing unit
+  # never reaches the comparator, which sees its decomposition, so its row is
+  # unobservable and keeps itself, as in NetBSD's table.
   def fold_values(records, exceptions)
+    decomposing = decompositions(records)
     lowercase = records
-      .select { _1.lower && FOLDED_PAGES.include?(_1.code >> 8) }
+      .select { _1.lower && FOLDED_PAGES.include?(_1.code >> 8) && !decomposing.key?(_1.code) }
       .to_h { [_1.code, _1.lower] }
     exceptions.each do |row|
       abort(format("Exception U+%04X names the wrong lowercase", row.unit)) unless lowercase[row.unit] == row.lower
@@ -179,7 +182,12 @@ module HfsplusTables
   def fold_comment
     <<~C
       /*
-       * The folded comparator's table; a plain page folds to itself. A value of
+       * The folded comparator's table; a plain page folds to itself. A unit folds
+       * to its Unicode 3.2.0 lowercase on pages 0x00, 0x01, 0x03, 0x04, 0x05, 0x21
+       * and 0xFF unless it has a canonical decomposition, which the comparator
+       * never sees because names are stored decomposed, so such a unit folds to
+       * itself. Georgian capitals fold to Mkhedruli, and the exceptions file lists
+       * the units that keep themselves. A value of
        * zero marks an ignorable unit, which the comparison skips. U+0000 folds to
        * #{format("0x%04X", NUL_FOLD)}: it is not ignorable and sorts after every storable unit, tying
        * only with U+FFFF, which no POSIX name stores. The binary comparator uses no

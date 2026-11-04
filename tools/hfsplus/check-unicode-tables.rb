@@ -21,7 +21,7 @@ module CheckUnicodeTables
   PINS = {
     "e3-hfsplus/SHA256SUMS" => "6f33f14e50f361139c8457b009a11764fb950141753c0e4ac17d051ad16c02e2",
     "e3-hfsx/SHA256SUMS" => "90bfe9d53fc699366c03fb25b9135522419d82eef858521d922aa307ab2dc404",
-    "e3-small-names/SHA256SUMS" => "5a9e2f288435966998f0b2aee05f64b37a175363e506c7fe46562053af668254",
+    "e3-small-names/SHA256SUMS" => "cef674df30523a47aec01ba0b4bad0df4d5a6236f77619d86c3146bc7eec946f",
     "unicode-3.2.0/UnicodeData-3.2.0.txt" => "5e444028b6e76d96f9dc509609c5e3222bf609056f35e5fcde7e6fb8a58cd446",
     "netbsd-libhfs/libhfs.c" => "d4aeef80a6b06232340182da3d74bc91e03bfc39de084713eac2d714f10d7f94"
   }.freeze
@@ -82,7 +82,8 @@ module CheckUnicodeTables
       report_fold(hfsx, hfsx_rows),
       check_sets(captures, tables, plus),
       check_sets(captures, tables, hfsx),
-      witness(captures, tables, plus_rows)
+      witness(captures, tables, plus_rows),
+      self_test_marks(captures, tables)
     ].sum(NO_RESULT)
   end
 
@@ -259,6 +260,18 @@ module CheckUnicodeTables
     )
   end
 
+  # The marks vectors must notice a wrong combining class: with U+0323 given
+  # class 230, the stable sort no longer puts it before U+0300.
+  def self_test_marks(captures, tables)
+    rows = name_rows(File.join(captures, "e3-small-names/marks-hfsx.tsv"))
+    mutant = tables.with(classes: tables.classes.dup.tap { _1[0x323] = 230 })
+    caught = check_stored("self-test", rows, ->(id) { scalars(id) }, mutant).violations
+    Result.new(
+      counts: { "self-test marks mutants rejected" => caught.empty? ? 0 : 1 },
+      violations: caught.empty? ? ["self-test marks: the mutated class table was accepted"] : []
+    )
+  end
+
   # What the joint rule is stronger than: each row's own fold is a listed value.
   def membership_only(rows, table) =
     rows.select(&:chain).reject { listed?(_1, table[_1.unit]) }
@@ -274,14 +287,17 @@ module CheckUnicodeTables
 
   def sets(captures, comparator)
     directory = File.join(captures, "e3-#{comparator.name}")
-    small = File.join(captures, "e3-small-names/class0-#{comparator.name}.tsv")
+    small = ->(prefix) { File.join(captures, "e3-small-names/#{prefix}-#{comparator.name}.tsv") }
     {
       "alone" => [File.join(directory, "alone.tsv"), ->(id) { scalars(id) }],
       "between" => [File.join(directory, "between.tsv"), ->(id) { between(id) }],
       "pairs" => [File.join(directory, "pairs.tsv"), ->(id) { [LOWER_A, *scalars(id)] }],
       "hangul" => [File.join(directory, "hangul.tsv"), ->(id) { scalars(id) }],
       "surrogates" => [File.join(directory, "surrogates.tsv"), ->(id) { [:escaped, id.to_i(16)] }],
-      "class0" => [small, ->(id) { scalars(id) }]
+      "class0" => [small.call("class0"), ->(id) { scalars(id) }],
+      # Runs of marks and marks after a precomposed starter: the vectors of the
+      # decomposition check that the pairs set does not reach.
+      "marks" => [small.call("marks"), ->(id) { scalars(id) }]
     }
   end
 
@@ -461,17 +477,18 @@ module CheckUnicodeTables
     end
   end
 
+  # The table equals NetBSD's on every unit: observable rows by the observation,
+  # unobservable ones by the rule (lowercase on the folded pages unless the unit
+  # decomposes), so any difference fails.
   def witness(captures, tables, rows)
     theirs = netbsd_fold(captures)
-    differences = rows.reject { tables.fold[_1.unit] == theirs[_1.unit] }
+    status = rows.to_h { [_1.unit, _1] }
+    differences = UNITS.reject { tables.fold[_1] == theirs[_1] }
     puts "NetBSD witness differences (unit, ours, NetBSD, status, observed fold):"
-    differences.each do |row|
-      puts format("  %04X %04X %04X %-12s %s", row.unit, tables.fold[row.unit], theirs[row.unit], row.status, row.fold)
+    differences.each do |unit|
+      puts format("  %04X %04X %04X %-12s %s", unit, tables.fold[unit], theirs[unit], status[unit]&.status, status[unit]&.fold)
     end
-    observable = differences.reject { _1.status == "unobservable" }
-    # The record explains one kind of difference: a unit that decomposes, which
-    # NetBSD leaves itself. Any other needs its own explanation first.
-    unexplained = differences.reject { _1.fold == "decomposes" && theirs[_1.unit] == _1.unit }
+    observable = differences.reject { status[_1]&.status == "unobservable" }
     Result.new(
       counts: {
         "witness units compared" => theirs.size,
@@ -480,7 +497,7 @@ module CheckUnicodeTables
         "witness unobservable rows equal" => rows.count { _1.status == "unobservable" && tables.fold[_1.unit] == theirs[_1.unit] },
         "witness violations of the observation" => fold_violations(rows, theirs).size
       },
-      violations: unexplained.map { format("witness: U+%04X differs without an explanation", _1.unit) }
+      violations: differences.map { format("witness: U+%04X folds to %04X, NetBSD to %04X", _1, tables.fold[_1], theirs[_1]) }
     )
   end
 
