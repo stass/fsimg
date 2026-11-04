@@ -109,7 +109,7 @@ _Static_assert(FSIMG_WIRE_INFO_DETAIL_NAME_BYTES +
  * registered scheme whose table the volume's system area also holds, or
  * empty.
  */
-#define FSIMG_WIRE_IMAGE_BYTES 1200u
+#define FSIMG_WIRE_IMAGE_BYTES 1208u
 #define FSIMG_WIRE_IMAGE_UNSELECTED 0x1u	/* i only: no volume follows */
 #define FSIMG_WIRE_IMAGE_VERIFIED 0x2u		/* W only: layers verified */
 typedef enum fsimg_wire_image_field {
@@ -137,7 +137,8 @@ typedef enum fsimg_wire_image_field {
 	FSIMG_WIRE_IMAGE_DETAIL_COUNT = 280,
 	FSIMG_WIRE_IMAGE_DETAILS = 288,
 	FSIMG_WIRE_IMAGE_REASON = 1056,
-	FSIMG_WIRE_IMAGE_HYBRID = 1184
+	FSIMG_WIRE_IMAGE_HYBRID = 1184,
+	FSIMG_WIRE_IMAGE_MISSING = 1200
 } fsimg_wire_image_field_t;
 #define FSIMG_WIRE_IMAGE_STACK_BYTES 64u
 #define FSIMG_WIRE_IMAGE_CODECS_BYTES 32u
@@ -153,10 +154,12 @@ _Static_assert(FSIMG_WIRE_IMAGE_DETAILS + FSIMG_IMAGE_DETAILS_MAX *
 _Static_assert(FSIMG_WIRE_IMAGE_REASON + FSIMG_WIRE_IMAGE_REASON_BYTES ==
     FSIMG_WIRE_IMAGE_HYBRID, "the hybrid scheme follows the reason");
 _Static_assert(FSIMG_WIRE_IMAGE_HYBRID + FSIMG_WIRE_IMAGE_HYBRID_BYTES ==
-    FSIMG_WIRE_IMAGE_BYTES, "the image record ends with the hybrid scheme");
+    FSIMG_WIRE_IMAGE_MISSING, "the missing byte count follows the hybrid scheme");
+_Static_assert(FSIMG_WIRE_IMAGE_MISSING + 8 == FSIMG_WIRE_IMAGE_BYTES,
+    "the image record ends with the missing byte count");
 
 /* One used partition-table slot, for i. */
-#define FSIMG_WIRE_PARTITION_BYTES 224u
+#define FSIMG_WIRE_PARTITION_BYTES 232u
 #define FSIMG_WIRE_PARTITION_ACTIVE 0x1u
 typedef enum fsimg_wire_partition_field {
 	FSIMG_WIRE_PARTITION_INDEX = 0,
@@ -169,11 +172,14 @@ typedef enum fsimg_wire_partition_field {
 	FSIMG_WIRE_PARTITION_FORMAT = 64,
 	FSIMG_WIRE_PARTITION_TYPE_GUID = 80,
 	FSIMG_WIRE_PARTITION_GUID = 96,
-	FSIMG_WIRE_PARTITION_NAME = 112
+	FSIMG_WIRE_PARTITION_NAME = 112,
+	FSIMG_WIRE_PARTITION_MISSING = 224
 } fsimg_wire_partition_field_t;
 #define FSIMG_WIRE_PARTITION_NAME_BYTES 112u
 _Static_assert(FSIMG_WIRE_PARTITION_NAME + FSIMG_WIRE_PARTITION_NAME_BYTES ==
-    FSIMG_WIRE_PARTITION_BYTES, "the partition record ends with the name");
+    FSIMG_WIRE_PARTITION_MISSING, "the missing byte count follows the name");
+_Static_assert(FSIMG_WIRE_PARTITION_MISSING + 8 == FSIMG_WIRE_PARTITION_BYTES,
+    "the partition record ends with the missing byte count");
 
 /* OUTPUT is the most bytes the image can take: the volume or disk, or the
  * largest encoding of the disk by its container and compression. PADDING

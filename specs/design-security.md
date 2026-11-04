@@ -185,7 +185,8 @@ after coordinator death its next status write fails, preventing another record.
 
 The lengths a worker reports are checked for consistency with what the
 coordinator knows, and each then bounds the records after it: the
-partitions and the volume lie within the disk, `x -O` without `-l output`
+partitions and the volume lie within the disk, a partition past the end of a
+truncated disk having no bytes, `x -O` without `-l output`
 writes no more than the volume, and a stream creation sends no more than
 its plan. A read job's IMAGE record names the layers the stack forces: an
 emptied scheme or container slot reports none, a named one that layer, and

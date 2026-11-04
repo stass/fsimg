@@ -19,9 +19,13 @@
  * which points at the primary entry array, and LBA L the backup header,
  * which points at the backup array just before it. A table is accepted
  * only when both copies are intact and agree: a disk whose copies
- * disagree, including a truncated disk whose backup is gone, is reported
- * as corrupt rather than repaired from one copy. A written table has the
- * standard 128 entries, so its array fills 16 KiB at either sector size.
+ * disagree is reported as corrupt rather than repaired from one copy. The
+ * one exception is a primary that is valid and whose alternate LBA lies past
+ * L: that proves the disk was cut, so no backup can be there to agree, and
+ * the table opens from the primary alone and reports the loss. Nothing falls
+ * back to the backup, or to the primary after any failed check. A written
+ * table has the standard 128 entries, so its array fills 16 KiB at either
+ * sector size.
  */
 #define GPT_SIGNATURE		"EFI PART"
 #define GPT_SIGNATURE_BYTES	8
@@ -106,11 +110,14 @@ static fsimg_status_t read_header(const fsimg_scheme_input_t *,
 static uint64_t entry_array_lbas(const gpt_header_t *, const gpt_geometry_t *);
 static fsimg_status_t check_primary(const gpt_header_t *,
     const gpt_geometry_t *, fsimg_error_t *);
-static fsimg_status_t check_backup(const gpt_header_t *, const gpt_header_t *,
+static fsimg_status_t check_backup_header(const gpt_header_t *, const gpt_header_t *,
     const gpt_geometry_t *, fsimg_error_t *);
 static fsimg_status_t read_entry_array(const fsimg_scheme_input_t *,
     const gpt_header_t *, const gpt_geometry_t *, const char *,
     unsigned char **, fsimg_error_t *);
+static fsimg_status_t check_backup_copy(const fsimg_scheme_input_t *,
+    const gpt_header_t *, const unsigned char *, const gpt_geometry_t *,
+    fsimg_error_t *);
 static fsimg_status_t decode_entries(const unsigned char *,
     const gpt_header_t *, const gpt_geometry_t *, fsimg_partition_record_t *,
     fsimg_error_t *);
@@ -274,7 +281,9 @@ read_signature(const fsimg_scheme_input_t *input, uint64_t offset, bool *found,
 
 /* The sector size is where the primary signature is, LBA 1 at 512 or 4096
  * bytes, or the forced gpt:sector. Signatures at both offsets cannot be
- * told apart from the bytes, so they need the setting.
+ * told apart from the bytes, so they need the setting. The disk's length has
+ * no say, so a cut disk, whose last LBA confirms nothing, chooses as a whole
+ * one does; the header there must still hold its CRC32 and record LBA 1.
  */
 static fsimg_status_t
 choose_geometry(const fsimg_scheme_input_t *input, gpt_geometry_t *geometry,
@@ -354,11 +363,15 @@ entry_array_lbas(const gpt_header_t *header, const gpt_geometry_t *geometry)
 }
 
 /*
- * The primary header must describe this disk: it sits at LBA 1, its
- * alternate is the last LBA, its entries have the standard size and a
- * bounded count, its array lies between the header and the usable range,
- * and the usable range ends before the last LBA. Each comparison is of
- * values at most the last LBA plus the array length, so none overflows.
+ * The primary header must describe this disk: it sits at LBA 1, its alternate
+ * is the last LBA or, on a disk cut short, past it, its entries have the
+ * standard size and a bounded count, its array lies between the header and the
+ * usable range and within the disk, and the usable range ends far enough before
+ * the alternate for a backup array between them, which a table holds even on a
+ * disk that lost it. The disk the alternate declares fits 64 bits in bytes, and
+ * every LBA a table holds is below it once the entries are checked against the
+ * usable range, so no comparison here and no byte offset derived later
+ * overflows.
  */
 static fsimg_status_t
 check_primary(const gpt_header_t *header, const gpt_geometry_t *geometry,
@@ -366,22 +379,33 @@ check_primary(const gpt_header_t *header, const gpt_geometry_t *geometry,
 {
 	if (header->my_lba != 1)
 		return (gpt_corrupt(error, "primary", "header does not record LBA 1"));
-	if (header->alternate_lba != geometry->last_lba)
+	if (header->alternate_lba < geometry->last_lba)
 		return (gpt_corrupt(error, "primary",
-		    "alternate LBA is not the disk's last LBA"));
+		    "alternate LBA is before the disk's last LBA"));
+	if (header->alternate_lba > UINT64_MAX / geometry->sector_bytes - 1)
+		return (gpt_corrupt(error, "primary",
+		    "alternate LBA declares a disk no offset can address"));
 	if (header->entry_size != GPT_ENTRY_BYTES)
 		return (gpt_corrupt(error, "primary", "entry size is not 128 bytes"));
 	if (header->entry_count == 0 || header->entry_count > FSIMG_GPT_MAX_ENTRIES)
 		return (gpt_corrupt(error, "primary",
 		    "entry count is outside 1 to 1024"));
 	if (header->first_usable > header->last_usable ||
-	    header->last_usable >= geometry->last_lba)
+	    header->last_usable >= header->alternate_lba)
 		return (gpt_corrupt(error, "primary", "usable range is invalid"));
+	if (entry_array_lbas(header, geometry) >
+	    header->alternate_lba - header->last_usable - 1)
+		return (gpt_corrupt(error, "primary",
+		    "usable range leaves no room for the backup array"));
 	if (header->entries_lba < 2 || header->entries_lba > header->first_usable ||
 	    entry_array_lbas(header, geometry) >
 	    header->first_usable - header->entries_lba)
 		return (gpt_corrupt(error, "primary",
 		    "entry array overlaps the header or the usable range"));
+	if (header->entries_lba > geometry->last_lba ||
+	    entry_array_lbas(header, geometry) >
+	    geometry->last_lba - header->entries_lba + 1)
+		return (gpt_corrupt(error, "primary", "entry array is truncated"));
 	return (FSIMG_OK);
 }
 
@@ -389,7 +413,7 @@ check_primary(const gpt_header_t *header, const gpt_geometry_t *geometry,
  * to LBA 1, with its own array after the usable range and before itself.
  */
 static fsimg_status_t
-check_backup(const gpt_header_t *primary, const gpt_header_t *backup,
+check_backup_header(const gpt_header_t *primary, const gpt_header_t *backup,
     const gpt_geometry_t *geometry, fsimg_error_t *error)
 {
 	if (backup->my_lba != geometry->last_lba || backup->alternate_lba != 1)
@@ -440,8 +464,38 @@ read_entry_array(const fsimg_scheme_input_t *input, const gpt_header_t *header,
 	return (FSIMG_OK);
 }
 
+/*
+ * The backup copy of a disk whose alternate LBA is its last: its header and its
+ * array must mirror the primary's, byte for byte in the array.
+ */
+static fsimg_status_t
+check_backup_copy(const fsimg_scheme_input_t *input, const gpt_header_t *primary,
+    const unsigned char *primary_array, const gpt_geometry_t *geometry,
+    fsimg_error_t *error)
+{
+	gpt_header_t backup;
+	unsigned char *backup_array;
+	fsimg_status_t status;
+
+	backup_array = NULL;
+	status = read_header(input, geometry, geometry->last_lba, "backup", &backup,
+	    error);
+	if (status == FSIMG_OK)
+		status = check_backup_header(primary, &backup, geometry, error);
+	if (status == FSIMG_OK)
+		status = read_entry_array(input, &backup, geometry, "backup",
+		    &backup_array, error);
+	if (status == FSIMG_OK && bcmp(primary_array, backup_array,
+	    (size_t)primary->entry_count * GPT_ENTRY_BYTES) != 0)
+		status = gpt_corrupt(error, "backup",
+		    "entry array differs from the primary");
+	fsimg_dealloc(backup_array);
+	return (status);
+}
+
 /* One record per entry. A used entry, one with a nonzero type, must lie
- * within the usable range; its bytes then lie within the disk.
+ * within the usable range; its bytes then lie within the disk the table
+ * declares, which a cut disk may not reach.
  */
 static fsimg_status_t
 decode_entries(const unsigned char *array, const gpt_header_t *header,
@@ -535,19 +589,21 @@ check_overlap(fsimg_ctx_t *ctx, const fsimg_scheme_table_t *table,
 }
 
 /*
- * Validate both copies and build the table: choose the sector size, check
- * the primary header and its array, check the backup header and that its
- * array is byte for byte the primary's, then decode the entries and reject
- * overlap. Any failure is FSIMG_ECORRUPT naming the check.
+ * Validate the table and build it: choose the sector size, check the primary
+ * header and its array, check the backup copy unless the primary's alternate
+ * LBA, which check_primary allows no lower than the last LBA, proves the disk
+ * too short to hold one, then decode the entries and reject overlap. Any failure
+ * is FSIMG_ECORRUPT naming the check. Fitting the table to a cut disk is the
+ * image's (lib/layers/image.c, clip_table), from the extents and the disk length
+ * declared here.
  */
 static fsimg_status_t
 gpt_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
     fsimg_error_t *error)
 {
 	gpt_geometry_t geometry;
-	gpt_header_t primary, backup;
-	unsigned char *primary_array, *backup_array;
-	size_t array_bytes;
+	gpt_header_t primary;
+	unsigned char *primary_array;
 	fsimg_status_t status;
 
 	bzero(table, sizeof(*table));
@@ -564,23 +620,13 @@ gpt_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 	if (status != FSIMG_OK)
 		return (status);
 
-	backup_array = NULL;
-	status = read_header(input, &geometry, geometry.last_lba, "backup",
-	    &backup, error);
-	if (status == FSIMG_OK)
-		status = check_backup(&primary, &backup, &geometry, error);
-	if (status == FSIMG_OK)
-		status = read_entry_array(input, &backup, &geometry, "backup",
-		    &backup_array, error);
-	array_bytes = (size_t)primary.entry_count * GPT_ENTRY_BYTES;
-	if (status == FSIMG_OK && bcmp(primary_array, backup_array,
-	    array_bytes) != 0)
-		status = gpt_corrupt(error, "backup",
-		    "entry array differs from the primary");
-	fsimg_dealloc(backup_array);
-	if (status != FSIMG_OK) {
-		fsimg_dealloc(primary_array);
-		return (status);
+	if (primary.alternate_lba == geometry.last_lba) {
+		status = check_backup_copy(input, &primary, primary_array, &geometry,
+		    error);
+		if (status != FSIMG_OK) {
+			fsimg_dealloc(primary_array);
+			return (status);
+		}
 	}
 
 	table->records = fsimg_alloc(input->ctx,
@@ -591,6 +637,8 @@ gpt_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 	}
 	table->count = primary.entry_count;
 	table->sector_bytes = geometry.sector_bytes;
+	table->declared_bytes = (primary.alternate_lba + 1) *
+	    geometry.sector_bytes;
 	table->kind = FSIMG_SCHEME_GPT;
 	bcopy(primary.disk_guid, table->disk_guid, sizeof(table->disk_guid));
 	status = decode_entries(primary_array, &primary, &geometry,

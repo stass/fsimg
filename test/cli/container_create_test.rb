@@ -44,6 +44,10 @@ class CliTest < Minitest::Test
       )
       assert_equal((root / image).binread, streamed.stdout, container)
       refute_includes(streamed.stderr, "output is incomplete".b, "streamed stderr")
+      stack = completed(invoke(arguments: ["i", "--json", "-f", image]))
+        .find { _1.fetch("type") == "stack" }
+      assert_equal("0", stack.fetch("missing_bytes"), container)
+      assert_equal(false, stack.fetch("backup_missing"), container)
       verified = invoke(arguments: ["W", "-d", "-f", image]).stdout
       assert_includes(verified, "#{container} container,".encode(Encoding::UTF_8).b, verified)
     end

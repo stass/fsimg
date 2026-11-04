@@ -436,6 +436,7 @@ fsimg_wire_partition_encode(unsigned char *raw, const fsimg_partition_info_t *in
 	    info->active ? FSIMG_WIRE_PARTITION_ACTIVE : 0);
 	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_OFFSET, info->offset);
 	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_LENGTH, info->length);
+	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_MISSING, info->missing_bytes);
 	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_MBR_TYPE, info->mbr_type);
 	fsimg_store_le64(raw + FSIMG_WIRE_PARTITION_CLAIM, info->claim);
 	bcopy(info->type, raw + FSIMG_WIRE_PARTITION_TYPE,
@@ -690,7 +691,7 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	const fsimg_layer_t *layer;
 	const char *unverified = (const char *)raw + FSIMG_WIRE_IMAGE_UNVERIFIED;
 	const char *own = "";
-	uint64_t flags, sector, slots, selected, checked;
+	uint64_t flags, sector, slots, selected, checked, missing;
 	bool scheme;
 
 	if (frame->length != FSIMG_WIRE_IMAGE_BYTES)
@@ -700,6 +701,7 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	slots = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SLOTS);
 	selected = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SELECTED);
 	checked = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_CHECKED);
+	missing = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_MISSING);
 	if (memchr(raw + FSIMG_WIRE_IMAGE_STACK, '\0', FSIMG_WIRE_IMAGE_STACK_BYTES) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_SCHEME, '\0', 16) == NULL ||
 	    memchr(raw + FSIMG_WIRE_IMAGE_CONTAINER, '\0', 16) == NULL ||
@@ -758,9 +760,15 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 		    raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0')
 			return (false);
 	}
+	/* Verification fails on a truncated disk, so a verified one has no
+	 * missing bytes.
+	 */
+	if ((flags & FSIMG_WIRE_IMAGE_VERIFIED) != 0 && missing != 0)
+		return (false);
 	scheme = raw[FSIMG_WIRE_IMAGE_SCHEME] != '\0';
 	if (!scheme)
 		return (sector == 0 && slots == 0 && selected == 0 && checked == 0 &&
+		    missing == 0 &&
 		    (flags & FSIMG_WIRE_IMAGE_UNSELECTED) == 0 &&
 		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID) == 0 &&
 		    bytes_zero(raw + FSIMG_WIRE_IMAGE_DISK_GUID, 16));
@@ -771,13 +779,15 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 	    slots <= FSIMG_GPT_MAX_ENTRIES && selected <= slots && checked <= slots);
 }
 
-/* A used slot of a table with slots entries, lying within the disk. */
+/* A used slot of a table with slots entries, lying within the disk or, with no
+ * bytes at all, past the end of a truncated one.
+ */
 bool
 fsimg_wire_partition_frame_valid(const fsimg_frame_t *frame, uint64_t slots,
     uint64_t disk_bytes)
 {
 	const unsigned char *raw = frame->payload;
-	uint64_t index, offset, length, claim;
+	uint64_t index, offset, length, missing, claim;
 	bool named;
 
 	if (frame->length != FSIMG_WIRE_PARTITION_BYTES)
@@ -785,9 +795,14 @@ fsimg_wire_partition_frame_valid(const fsimg_frame_t *frame, uint64_t slots,
 	index = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_INDEX);
 	offset = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_OFFSET);
 	length = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_LENGTH);
+	missing = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_MISSING);
 	claim = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_CLAIM);
-	if (index == 0 || index > slots || length == 0 || offset > disk_bytes ||
-	    length > disk_bytes - offset)
+	if (index == 0 || index > slots)
+		return (false);
+	if (length == 0) {
+		if (missing == 0)
+			return (false);
+	} else if (offset > disk_bytes || length > disk_bytes - offset)
 		return (false);
 	if (fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_FLAGS) >
 	    FSIMG_WIRE_PARTITION_ACTIVE ||

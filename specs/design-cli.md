@@ -861,12 +861,13 @@ untrusted invalid diagnostic bytes visibly.
 Schema version 1 records use numeric schema=1 and string type, of which
 there are stack, partition, info, plan, entry, verify, format, capabilities,
 loss, progress, error and summary. A read mode's stack record precedes its
-info record: the stack text, compression, scheme, disk size, sector size,
-disk GUID or MBR identifier, the selected partition's slot and whether a
+info record: the stack text, compression, scheme, disk size, the bytes the
+table declares past the disk's end and, on GPT, whether the backup table is
+therefore lost, sector size, disk GUID or MBR identifier, the selected partition's slot and whether a
 volume was selected, with the reason when none was. `i` follows it with one
 partition record per used slot: slot, type name, type GUID, unique GUID and
-name (GPT) or type byte and active flag (MBR), offset, length, the
-filesystem claim and format, and whether it is selected. Filesystem geometry
+name (GPT) or type byte and active flag (MBR), offset, the length the disk
+holds, the declared bytes it lacks, the filesystem claim and format, and whether it is selected. Filesystem geometry
 in an info record is descriptor-declared and may exceed the available
 selected input on a truncated image; it does not change the selected I/O
 range or output ceilings. `missing_bytes` says how far it exceeds the input,

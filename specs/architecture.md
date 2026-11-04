@@ -304,9 +304,12 @@ format treats a volume longer than its slice by the same rules:
   that opens a truncated volume declares a `volume_bytes` beyond the slice, so
   this holds by construction.
 
-Layers whose index, footer or stream end sits at the end of their input (DMG,
-VHD, simg, gzip, xz, zstd and the boot containers) lose it when truncated, and
-stay `FSIMG_ECORRUPT`.
+A partition scheme applies the same rules to a disk: a partition past the disk's
+end is clipped, GPT opens from its primary when the alternate LBA proves the cut,
+and `fsimg_image_verify` fails on every [truncated
+disk](design-layers.md#truncated-disks). Layers whose index, footer or stream end
+sits at the end of their input (DMG, VHD, simg, gzip, xz, zstd and the boot
+containers) lose it when truncated, and stay `FSIMG_ECORRUPT`.
 
 The [scalar byte codecs](design-binary-primitives.md) share unsigned endian
 loads and stores across image, scratch, and protocol codecs. They operate on

@@ -778,6 +778,7 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	    FSIMG_WIRE_IMAGE_COMPRESSION;
 	uint64_t flags = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_FLAGS);
 	uint64_t selected = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SELECTED);
+	uint64_t missing = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_MISSING);
 	bool gpt = strcmp(scheme, "gpt") == 0;
 	bool container = raw[FSIMG_WIRE_IMAGE_CONTAINER] != '\0';
 
@@ -802,6 +803,10 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 			append(display, "null");
 		append(display, ",\"disk_bytes\":");
 		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK));
+		append(display, ",\"missing_bytes\":");
+		uint_value(display, missing);
+		append(display, ",\"backup_missing\":%s", !gpt ? "null" :
+		    missing != 0 ? "true" : "false");
 		append(display, ",\"sector_bytes\":");
 		if (scheme[0] != '\0')
 			append(display, "%llu", (unsigned long long)
@@ -847,6 +852,11 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	    gpt ? "GPT" : "MBR",
 	    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SECTOR));
 	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK));
+	if (missing != 0) {
+		append(display, "\nMissing:      ");
+		byte_size(display, missing);
+		append(display, "%s", gpt ? ", backup table lost" : "");
+	}
 	if (gpt) {
 		append(display, "\nDisk GUID:    ");
 		uuid_value(display, raw + FSIMG_WIRE_IMAGE_DISK_GUID);
@@ -868,6 +878,7 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	uint64_t index = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_INDEX);
 	uint64_t claim = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_CLAIM);
 	bool gpt = strcmp((const char *)display->image + FSIMG_WIRE_IMAGE_SCHEME, "gpt") == 0;
+	uint64_t missing = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_MISSING);
 	bool active = (fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_FLAGS) &
 	    FSIMG_WIRE_PARTITION_ACTIVE) != 0;
 	bool selected = index == fsimg_load_le64(display->image + FSIMG_WIRE_IMAGE_SELECTED);
@@ -898,6 +909,8 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_OFFSET));
 		append(display, ",\"length_bytes\":");
 		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_LENGTH));
+		append(display, ",\"missing_bytes\":");
+		uint_value(display, missing);
 		append(display, ",\"filesystem_claim\":\"%s\",\"format\":", claim_name(claim));
 		if (format_name[0] != '\0')
 			string_value(display, format_name);
@@ -919,6 +932,10 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_LENGTH));
 	append(display, " at ");
 	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_OFFSET));
+	if (missing != 0) {
+		append(display, ", missing ");
+		byte_size(display, missing);
+	}
 	append(display, ", ");
 	prose(display, claim == FSIMG_CLAIM_FORMAT ? format_name : claims[claim]);
 	if (name[0] != '\0') {

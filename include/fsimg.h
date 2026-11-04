@@ -690,7 +690,9 @@ typedef struct fsimg_volume_text {
  * container's header fields in the order its profile documents, such as
  * hbcifs's decoded and payload lengths and its unidentified words, or a
  * QNX boot image's startup-header fields and chunk statistics;
- * detail_count of them are filled and the rest are zero.
+ * detail_count of them are filled and the rest are zero. missing_bytes is
+ * how far the table's declared disk reaches past the end of the disk, zero
+ * for a whole disk; a GPT disk reports it only when its backup table is lost.
  */
 typedef struct fsimg_image_info {
 	char		 stack[64];
@@ -711,6 +713,7 @@ typedef struct fsimg_image_info {
 	fsimg_validation_scope_t scope;
 	uint32_t	 detail_count;
 	fsimg_volume_detail_t details[FSIMG_IMAGE_DETAILS_MAX];
+	uint64_t	 missing_bytes;
 } fsimg_image_info_t;
 
 /* What the filesystem probes say about a partition's first bytes. */
@@ -726,7 +729,10 @@ typedef enum fsimg_claim {
  * the type table's name, or empty for a type the table lacks. A GPT entry
  * fills type_guid, guid and name (UTF-8; an unpaired surrogate reads as
  * U+FFFD); an MBR entry fills mbr_type and active. An unused slot has only
- * index set; its claim is NONE.
+ * index set; its claim is NONE. length is what the disk holds, and
+ * missing_bytes the rest of the declared length; a partition starting at or
+ * past the end of a truncated disk has a length of zero and cannot be
+ * selected.
  */
 typedef struct fsimg_partition_info {
 	char		 type[16];
@@ -736,6 +742,7 @@ typedef struct fsimg_partition_info {
 	unsigned char	 guid[16];
 	uint64_t	 offset;	/* Disk offset in bytes */
 	uint64_t	 length;
+	uint64_t	 missing_bytes;
 	uint32_t	 index;
 	uint32_t	 mbr_type;
 	fsimg_claim_t	 claim;
@@ -778,7 +785,8 @@ typedef struct fsimg_selector {
  * name, such as "xz:check" for an xz stream written without one, and the
  * container's fields that no evidence gives a rule to check, such as
  * "0x14,0x1c" for hbcifs; complete is false exactly when it is not empty,
- * every other check having run and passed.
+ * every other check having run and passed. A disk with missing_bytes in its
+ * image information has no report: verifying it is FSIMG_ECORRUPT.
  */
 typedef struct fsimg_layer_report {
 	char		 compression[16];	/* Members checked at spool time */

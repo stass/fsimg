@@ -93,9 +93,10 @@ static fsimg_status_t send_info(const fsimg_volume_info_t *, fsimg_error_t *);
 static fsimg_status_t send_image(const fsimg_image_info_t *,
     const fsimg_layer_report_t *, const fsimg_error_t *, fsimg_error_t *);
 static fsimg_status_t send_partitions(worker_child_t *, fsimg_error_t *);
+static fsimg_status_t open_image(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t select_volume(worker_child_t *, fsimg_error_t *);
-static fsimg_status_t describe_image(worker_child_t *, fsimg_image_info_t *,
-    fsimg_layer_report_t *, fsimg_error_t *);
+static fsimg_status_t verify_layers(worker_child_t *, fsimg_layer_report_t *,
+    fsimg_error_t *);
 static fsimg_status_t report_unselected(worker_child_t *, fsimg_error_t *);
 static fsimg_status_t send_plan(const fsimg_plan_info_t *, fsimg_error_t *);
 static fsimg_status_t send_entry(const fsimg_entry_t *, fsimg_error_t *);
@@ -598,6 +599,7 @@ send_image(const fsimg_image_info_t *info, const fsimg_layer_report_t *report,
 	}
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, flags);
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, info->disk_bytes);
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_MISSING, info->missing_bytes);
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SECTOR, info->sector_bytes);
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SLOTS, info->partition_count);
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SELECTED, info->selected);
@@ -876,18 +878,16 @@ extract_job(worker_child_t *child, fsimg_error_t *error)
 	return (status);
 }
 
-/* Open the image over the input with the forced stack and select the
- * request's volume into child->volume. A range or disk selection never
- * consults a partition table, so its image forces the scheme slot empty:
- * a damaged table cannot block it, and describing or verifying the image
- * reads only its container.
+/* Open the image over the input with the forced stack. A range or disk
+ * selection never consults a partition table, so its image forces the scheme
+ * slot empty: a damaged table cannot block it, and describing or verifying the
+ * image reads only its container.
  */
 static fsimg_status_t
-select_volume(worker_child_t *child, fsimg_error_t *error)
+open_image(worker_child_t *child, fsimg_error_t *error)
 {
 	const fsimg_worker_request_t *request = &child->request;
 	fsimg_image_options_t options;
-	fsimg_selector_t selector;
 	fsimg_status_t status;
 
 	fsimg_image_options_init(&options);
@@ -913,8 +913,16 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 		status = fsimg_image_open_stream(child->ctx,
 		    child->raw_caps[FSIMG_CAPABILITY_INPUT], &options, &child->image,
 		    error);
-	if (status != FSIMG_OK)
-		return (status);
+	return (status);
+}
+
+/* Select the request's volume into child->volume. */
+static fsimg_status_t
+select_volume(worker_child_t *child, fsimg_error_t *error)
+{
+	const fsimg_worker_request_t *request = &child->request;
+	fsimg_selector_t selector;
+
 	bzero(&selector, sizeof(selector));
 	selector.kind = request->selector;
 	selector.index = request->partition_index;
@@ -925,28 +933,21 @@ select_volume(worker_child_t *child, fsimg_error_t *error)
 }
 
 /*
- * The layers around the selected volume, which W also verifies, into
- * report: the container, then the partition table unless the
- * selection was a range or the whole disk, whose image forces the scheme
- * empty. W -d adds the container's read-through checks.
+ * W verifies the layers around the volume before selecting it, the container
+ * and then the partition table unless the selection was a range or the whole
+ * disk, whose image forces the scheme empty: a damaged or truncated disk is
+ * reported as that, whatever is left of it to select. W -d adds the container's
+ * read-through checks.
  */
 static fsimg_status_t
-describe_image(worker_child_t *child, fsimg_image_info_t *info,
-    fsimg_layer_report_t *report, fsimg_error_t *error)
+verify_layers(worker_child_t *child, fsimg_layer_report_t *report,
+    fsimg_error_t *error)
 {
 	unsigned flags;
-	fsimg_status_t status;
 
-	bzero(info, sizeof(*info));
-	bzero(report, sizeof(*report));
-	if (child->request.kind == FSIMG_JOB_VERIFY) {
-		flags = (child->request.flags & FSIMG_JOB_PAYLOAD) != 0 ?
-		    FSIMG_VERIFY_PAYLOAD : 0;
-		status = fsimg_image_verify(child->image, flags, report, error);
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	return (fsimg_image_get_info(child->image, info, error));
+	flags = (child->request.flags & FSIMG_JOB_PAYLOAD) != 0 ?
+	    FSIMG_VERIFY_PAYLOAD : 0;
+	return (fsimg_image_verify(child->image, flags, report, error));
 }
 
 /*
@@ -987,12 +988,17 @@ read_job(worker_child_t *child, fsimg_error_t *error)
 	const char *format;
 	fsimg_status_t status;
 
-	status = select_volume(child, error);
+	bzero(&report, sizeof(report));
+	status = open_image(child, error);
+	if (status == FSIMG_OK && child->request.kind == FSIMG_JOB_VERIFY)
+		status = verify_layers(child, &report, error);
+	if (status == FSIMG_OK)
+		status = select_volume(child, error);
 	if (status == FSIMG_EFORMAT && child->request.kind == FSIMG_JOB_INFO &&
 	    child->request.selector == FSIMG_SELECT_AUTOMATIC)
 		return (report_unselected(child, error));
 	if (status == FSIMG_OK)
-		status = describe_image(child, &image, &report, error);
+		status = fsimg_image_get_info(child->image, &image, error);
 	if (status != FSIMG_OK)
 		return (status);
 	format = fsimg_job_format(&child->request);

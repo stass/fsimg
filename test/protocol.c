@@ -48,6 +48,7 @@ static bool same_value(const fsimg_setting_t *, const fsimg_setting_value_t *,
     const fsimg_setting_value_t *);
 static void check_transported(const fsimg_setting_t *);
 static void test_image_records(void);
+static void test_missing_partition_records(void);
 
 /* Create jobs in these tests populate the image root from one root. */
 static const char *const image_root[] = { "/" };
@@ -1549,6 +1550,35 @@ test_job_catalogue(void)
 	}
 }
 
+/* Missing partitions retain their declared offset even beyond the disk. */
+static void
+test_missing_partition_records(void)
+{
+	fsimg_partition_info_t partition = { .index = 2, .used = true,
+	    .offset = 3145728, .missing_bytes = 524288,
+	    .claim = FSIMG_CLAIM_NONE };
+	fsimg_frame_t frame;
+
+	bzero(&frame, sizeof(frame));
+	frame.type = FSIMG_FRAME_PARTITION;
+	frame.length = FSIMG_WIRE_PARTITION_BYTES;
+	fsimg_wire_partition_encode(frame.payload, &partition);
+	CHECK(fsimg_load_le64(frame.payload + FSIMG_WIRE_PARTITION_MISSING) == 524288);
+	CHECK(fsimg_wire_partition_frame_valid(&frame, 4, 2097152));
+
+	partition.missing_bytes = 0;
+	fsimg_wire_partition_encode(frame.payload, &partition);
+	CHECK(!fsimg_wire_partition_frame_valid(&frame, 4, 2097152));
+	partition.offset = 1048576;
+	fsimg_wire_partition_encode(frame.payload, &partition);
+	CHECK(!fsimg_wire_partition_frame_valid(&frame, 4, 2097152));
+
+	partition.missing_bytes = 524288;
+	partition.length = 1048577;
+	fsimg_wire_partition_encode(frame.payload, &partition);
+	CHECK(!fsimg_wire_partition_frame_valid(&frame, 4, 2097152));
+}
+
 /* An image record's disk is its file without a container, its compression
  * is one the build reads, it has a table only under a scheme, and a
  * partition record lies within the disk and the table.
@@ -1566,6 +1596,10 @@ test_image_records(void)
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_DISK, 8388608);
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 8388608);
 	strcpy((char *)raw + FSIMG_WIRE_IMAGE_STACK, "fat32");
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_MISSING, 123);
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_MISSING, 0);
 	CHECK(fsimg_wire_image_frame_valid(&frame));
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FILE, 8388607);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
@@ -1587,6 +1621,13 @@ test_image_records(void)
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SECTOR, 512);
 	CHECK(fsimg_wire_image_frame_valid(&frame));
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_MISSING, 123);
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, FSIMG_WIRE_IMAGE_VERIFIED);
+	CHECK(!fsimg_wire_image_frame_valid(&frame));
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_MISSING, 0);
+	CHECK(fsimg_wire_image_frame_valid(&frame));
+	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_FLAGS, 0);
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SELECTED, 5);
 	CHECK(!fsimg_wire_image_frame_valid(&frame));
 	fsimg_store_le64(raw + FSIMG_WIRE_IMAGE_SELECTED, 1);
@@ -2352,6 +2393,7 @@ main(int argc, char **argv)
 	test_job_layers();
 	test_job_catalogue();
 	test_image_records();
+	test_missing_partition_records();
 	test_frame_splits(0);
 	test_frame_splits(127);
 	test_frame_splits(FSIMG_FRAME_BYTES);

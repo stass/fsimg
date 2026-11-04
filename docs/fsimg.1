@@ -457,9 +457,9 @@ and with a partition scheme named in
 .Fl F .
 A range addresses the disk inside any container and never reads the
 partition table, so a damaged table does not block it.
-Both GPT copies must be intact and agree, MBR entries must lie within the disk
-without overlapping, and a table that fails a check fails the command rather
-than falling back to the disk as a bare volume.
+Both GPT copies must be intact and agree unless the primary proves the disk was
+cut, MBR entries must not overlap, and a table that fails a check fails the
+command rather than falling back to the disk as a bare volume.
 A disk whose first sectors are both a valid partition table and a filesystem
 is refused as ambiguous; force the scheme slot to choose:
 .Ql gpt
@@ -764,7 +764,16 @@ Such a truncated image still lists and extracts as long as nothing those
 commands touch lies in the missing tail; a referenced file or structure past
 the end of the image fails as corrupt.
 .Cm W
-fails on every truncated image, naming how many bytes are missing.
+fails on every truncated image, naming how many bytes are missing; a range or
+disk selection reads no partition table, so it sees only a volume's own
+truncation.
+A partitioned disk cut short reads the same way: a partition past the end
+is clipped to what the disk holds and shows the bytes it lacks, one with no
+bytes at all is listed and cannot be selected, and a GPT disk opens from its
+primary table only when that table is intact and declares a longer disk, which
+.Cm i
+reports as a lost backup table.
+GPT tables that disagree are corrupt.
 An ImageFS's details are its header's mount flags, boot and script inode
 references and chain address, its record counts by inode flag nibble, and
 the numbers of implicit directories, shadowed records, omitted subtrees,

@@ -1214,6 +1214,38 @@ scheme_input(fsimg_image_t *image, fsimg_scheme_input_t *input)
 	input->disk_bytes = image->disk_bytes;
 }
 
+/*
+ * Fit a validated table to a disk that may be shorter than it declares. Only
+ * here are the partition extents a table declares compared with the disk, so
+ * every scheme treats a cut alike and none has to remember to: a slot keeps the
+ * bytes the disk holds and counts the rest as missing, and the table counts how
+ * far anything it declares reaches past the end. A scheme's checks bound each
+ * slot's end, so the sums cannot overflow.
+ */
+static void
+clip_table(fsimg_scheme_table_t *table, uint64_t disk_bytes)
+{
+	fsimg_partition_record_t *record;
+	uint64_t declared, end, kept;
+
+	declared = table->declared_bytes;
+	for (uint32_t i = 0; i < table->count; i++) {
+		record = &table->records[i];
+		if (!record->used)
+			continue;
+		end = record->offset + record->length;
+		if (end > declared)
+			declared = end;
+		if (end <= disk_bytes)
+			continue;
+		kept = record->offset < disk_bytes ?
+		    disk_bytes - record->offset : 0;
+		record->missing_bytes = record->length - kept;
+		record->length = kept;
+	}
+	table->missing_bytes = declared > disk_bytes ? declared - disk_bytes : 0;
+}
+
 /* Decide between a scheme and a bare volume, once, and validate the
  * scheme's tables completely. A forced empty scheme slot decides without
  * reading: the disk is the volume.
@@ -1258,6 +1290,7 @@ detect_scheme(fsimg_image_t *image, fsimg_error_t *error)
 			    FSIMG_OP_IMAGE, message);
 			return (layer_failed(scheme, status, error));
 		}
+		clip_table(&image->table, image->disk_bytes);
 	}
 	image->scheme = scheme;
 	image->hybrid = hybrid;
@@ -1333,6 +1366,7 @@ fsimg_image_get_info(fsimg_image_t *image, fsimg_image_info_t *out,
 	fsimg_stack_format(&stack, out->stack, sizeof(out->stack));
 	bcopy(image->table.disk_guid, out->disk_guid, sizeof(out->disk_guid));
 	out->disk_bytes = image->disk_bytes;
+	out->missing_bytes = image->table.missing_bytes;
 	out->sector_bytes = image->table.sector_bytes;
 	out->partition_count = image->table.count;
 	out->selected = image->selected;
@@ -1411,8 +1445,21 @@ select_record(fsimg_image_t *image, const fsimg_partition_record_t *record,
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_IMAGE, message));
 	}
+	if (record->length == 0) {
+		snprintf(message, sizeof(message), "partition %u lies past the end of "
+		    "the disk: image is truncated", (unsigned)record->index);
+		return (layer_failed(image->scheme, fsimg_error_set(error,
+		    FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE, message), error));
+	}
 	return (select_slice(image, record->offset, record->length,
 	    record->index, volume, error));
+}
+
+uint64_t
+fsimg_image_selected_missing(const fsimg_image_t *image)
+{
+	return (image->selected == 0 ? 0 :
+	    image->table.records[image->selected - 1].missing_bytes);
 }
 
 /* A checked slice of the disk, never of the input file's own layout. */
@@ -1739,6 +1786,28 @@ assumed_identity_failed(const fsimg_image_t *image, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/*
+ * A disk missing part of itself is not a verified disk, whichever partition is
+ * selected and however little of it the filesystem there needs. The image holds
+ * the table, so neither a scheme's verification nor a filesystem driver has a
+ * check of its own. A GPT table opens short only by losing its backup.
+ */
+static fsimg_status_t
+truncated_disk_failed(const fsimg_image_t *image, fsimg_error_t *error)
+{
+	char message[sizeof(error->message)];
+
+	if (image->table.missing_bytes == 0)
+		return (FSIMG_OK);
+	snprintf(message, sizeof(message),
+	    "disk is truncated: %llu declared bytes are missing%s",
+	    (unsigned long long)image->table.missing_bytes,
+	    image->table.kind == FSIMG_SCHEME_GPT ?
+	    ", the backup table among them" : "");
+	return (layer_failed(image->scheme, fsimg_error_set(error, FSIMG_ECORRUPT,
+	    0, FSIMG_OP_IMAGE, message), error));
+}
+
 /* Opening the container and the table already performed every check
  * reading needs; verify adds the passes that read beyond the tables, the
  * container's first, and reports the scope reached. What a decode or a
@@ -1768,6 +1837,8 @@ fsimg_image_verify(fsimg_image_t *image, unsigned flags,
 	status = detect_scheme(image, error);
 	if (status == FSIMG_OK)
 		status = assumed_identity_failed(image, error);
+	if (status == FSIMG_OK)
+		status = truncated_disk_failed(image, error);
 	if (status != FSIMG_OK)
 		return (status);
 	payload = (flags & FSIMG_VERIFY_PAYLOAD) != 0;

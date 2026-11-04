@@ -161,10 +161,11 @@ mbr_corrupt(fsimg_error_t *error, const char *check, unsigned slot,
 
 /*
  * Decode the four slots and require each used one, which the shape's
- * validation already places after the MBR sector, to end within the disk and within the 2^32
- * sectors an entry can address, and not to overlap another used slot.
- * Extended partitions are listed with their type; they hold logical
- * partitions this profile does not read.
+ * validation already places after the MBR sector, to end within the 2^32
+ * sectors an entry can address and not to overlap another used slot. Both
+ * judge what the table declares; fitting it to a shorter disk is the image's
+ * (lib/layers/image.c, clip_table). Extended partitions are listed with their
+ * type; they hold logical partitions this profile does not read.
  */
 static fsimg_status_t
 mbr_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
@@ -173,7 +174,7 @@ mbr_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 	unsigned char sector[MBR_SECTOR_BYTES];
 	mbr_entry_t entries[MBR_SLOTS];
 	fsimg_partition_record_t *record;
-	uint64_t disk_sectors, end;
+	uint64_t end;
 	size_t transferred;
 	fsimg_status_t status;
 
@@ -185,7 +186,6 @@ mbr_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 	if (!partition_table_shape(sector, input->identity))
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
 		    "MBR partition table changed after it was identified"));
-	disk_sectors = input->disk_bytes / MBR_SECTOR_BYTES;
 	for (unsigned i = 0; i < MBR_SLOTS; i++) {
 		decode_entry(sector + MBR_ENTRIES + i * MBR_ENTRY_BYTES, &entries[i]);
 		if (!entries[i].used)
@@ -194,8 +194,6 @@ mbr_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 		if (end > MBR_ADDRESSABLE_SECTORS)
 			return (mbr_corrupt(error,
 			    "ends beyond the sectors an entry can address", i + 1, 0));
-		if (end > disk_sectors)
-			return (mbr_corrupt(error, "extends beyond the disk", i + 1, 0));
 	}
 	for (unsigned i = 0; i < MBR_SLOTS; i++) {
 		for (unsigned j = i + 1; j < MBR_SLOTS; j++) {

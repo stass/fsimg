@@ -20,11 +20,14 @@
 #define FSIMG_GPT_NAME_UNITS	36u
 
 /*
- * One table slot as a scheme decodes it. A used slot's offset and length
- * are disk bytes already checked against the disk and the other used
- * slots, so a slice of them cannot fail its bounds. GUIDs are in textual
- * byte order whatever the table stores. name holds a GPT entry's UTF-16
- * units as stored; the name ends at the first zero unit or at 36 units.
+ * One table slot. A scheme's open leaves a used slot's offset and length as
+ * the table declares them, in disk bytes, checked against the other used
+ * slots. Before anyone else sees it the image clips the length to the disk and
+ * moves the rest to missing_bytes, so a slice of a slot with a nonzero length
+ * cannot fail its bounds and a length of zero means it lies past the disk's
+ * end. GUIDs are in textual byte order whatever the table stores. name holds a
+ * GPT entry's UTF-16 units as stored; the name ends at the first zero unit or
+ * at 36 units.
  */
 typedef struct fsimg_partition_record {
 	unsigned char	 type_guid[16];
@@ -32,6 +35,7 @@ typedef struct fsimg_partition_record {
 	uint16_t	 name[FSIMG_GPT_NAME_UNITS];
 	uint64_t	 offset;
 	uint64_t	 length;
+	uint64_t	 missing_bytes;
 	uint32_t	 index;
 	uint8_t		 mbr_type;
 	bool		 used;
@@ -46,6 +50,9 @@ typedef enum fsimg_scheme_kind {
 
 /* A validated partition table: one record per slot in slot order, held in
  * memory charged to the context, and the disk identity it states.
+ * declared_bytes is the disk length the table itself states, zero when it
+ * states none; missing_bytes is how far it or a slot reaches past the disk, and
+ * the image derives it with the clipping.
  */
 typedef struct fsimg_scheme_table {
 	fsimg_partition_record_t *records;
@@ -53,6 +60,8 @@ typedef struct fsimg_scheme_table {
 	uint32_t	 count;
 	uint32_t	 sector_bytes;
 	uint32_t	 mbr_disk_id;
+	uint64_t	 declared_bytes;
+	uint64_t	 missing_bytes;
 	fsimg_scheme_kind_t kind;
 } fsimg_scheme_table_t;
 
@@ -1123,6 +1132,11 @@ fsimg_status_t fsimg_disk_output_check(fsimg_ctx_t *, const fsimg_disk_plan_t *,
  * ", ", or empty when the bytes depend on none.
  */
 void fsimg_disk_plan_codec(const fsimg_disk_plan_t *, char *, size_t);
+
+/* The declared bytes the disk lacks of the partition fsimg_image_select() last
+ * returned, zero for a whole one and for a selection that is no partition.
+ */
+uint64_t fsimg_image_selected_missing(const fsimg_image_t *);
 
 /* What the filesystem probes, the one forced by name or all of them, say
  * about the volume at a byte range of an I/O object; format receives the

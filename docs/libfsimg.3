@@ -224,6 +224,25 @@ on an image whose layer identity checks failed returns FSIMG_ECORRUPT
 once the scheme is detected and before any verification pass, naming the
 layer and its first assumed check.
 .Pp
+A disk shorter than its partition table declares still opens: a partition
+past the end is clipped to the bytes the disk holds, its length that remainder
+and its missing_bytes the rest of the declared length.
+One with no bytes at all is listed with a length of zero and selecting it
+returns FSIMG_ECORRUPT.
+A GPT disk opens so only when its primary table is intact and its alternate
+LBA lies past the disk's end, which means its backup is lost; backup tables
+that disagree are always FSIMG_ECORRUPT.
+missing_bytes of
+.Vt fsimg_image_info_t
+is how far the table's declared disk reaches past the end, and
+.Fn fsimg_image_verify
+returns FSIMG_ECORRUPT whenever it is nonzero, even if the selected filesystem
+fits in what remains.
+.Fn fsimg_verify
+sees only the selected slice.
+.Fn fsimg_image_unwrap
+of a clipped partition returns FSIMG_ECORRUPT rather than a partial output.
+.Pp
 Every path the library emits other than an entry's own path is rendered:
 the path of an error and of the loss callback.
 A backslash is written

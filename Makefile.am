@@ -452,6 +452,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/fat_root_test.rb test/cli/fat_truncated_test.rb \
 	test/cli/qnx4_truncated_test.rb \
 	test/cli/qnx6_truncated_test.rb \
+	test/cli/scheme_truncated_test.rb \
 	test/cli/mtree_export_test.rb \
 	test/cli/mtree_failures_test.rb \
 	test/cli/mtree_reporting_test.rb \

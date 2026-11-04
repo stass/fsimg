@@ -40,6 +40,24 @@ check_disk() {
     "$fsimg" Wf "$1" 2>/dev/null | grep -q "partition table" || fail "$1: verification"
 }
 
+# Keep the FAT metadata and file but remove the partition and disk tails.
+check_truncated_disk() {
+    dd if="$1" of="cut-$1" bs=512 count=4096 2>/dev/null
+    test "$("$fsimg" tf "cut-$1" 2>/dev/null)" = '"/HELLO.TXT"' ||
+        fail "cut-$1: surviving listing"
+    mkdir "restore-$1"
+    "$fsimg" xf "cut-$1" -C "restore-$1" 2>/dev/null ||
+        fail "cut-$1: extraction"
+    cmp "restore-$1/cut-${1%.img}/HELLO.TXT" hello.txt ||
+        fail "cut-$1: extracted bytes"
+    MTOOLS_SKIP_CHECK=1 "$(dirname "$mformat")/mdir" -i "cut-$1@@1M" -b :: |
+        grep -q 'HELLO.TXT' || fail "cut-$1: mdir through clipped offset"
+    if "$fsimg" Wf "cut-$1" > verify.txt 2> verify.err; then
+        fail "cut-$1: verification accepted missing bytes"
+    fi
+    grep -q 'truncated' verify.err || fail "cut-$1: missing truncation diagnostic"
+}
+
 # A zeroed disk image of eight MiB.
 blank() {
     dd if=/dev/zero of="$1" bs=1048576 count=8 2>/dev/null
@@ -71,6 +89,7 @@ if test -n "$sgdisk" && test -n "$mformat"; then
         fail "sgdisk.img: partition GUID"
     test "$("$fsimg" tf sgdisk.img --partition=name=EFI 2>/dev/null)" = '"/HELLO.TXT"' ||
         fail "sgdisk.img: name selector"
+    check_truncated_disk sgdisk.img
     ran=$((ran + 1))
 else
     echo 'SKIP: sgdisk and mtools mformat are required for the GPT oracle'
@@ -87,6 +106,7 @@ if test -n "$sfdisk" && test -n "$mformat"; then
         fail "sfdisk.img: partition 1"
     grep -q '^Partition 2:  linux, 2 MiB at 3 MiB, no filesystem$' info.txt ||
         fail "sfdisk.img: partition 2"
+    check_truncated_disk sfdisk.img
     ran=$((ran + 1))
 else
     echo 'SKIP: sfdisk and mtools mformat are required for the MBR oracle'

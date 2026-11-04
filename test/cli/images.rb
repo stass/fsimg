@@ -31,11 +31,11 @@ module CliImages
     "imagefs_size",
     "preboot_size"
   ].freeze
-  def gpt_disk(sectors:, partitions:)
+  def gpt_disk(sectors:, partitions:, sector_bytes: 512)
     # A GPT disk laid out as sgdisk does: protective MBR, primary header at
     # LBA 1 with 128 entries from LBA 2, backup entries and header at the end.
     # Partition values name the bounds, type, name, and volume bytes.
-    disk = "\0".b * (sectors * 512)
+    disk = "\0".b * (sectors * sector_bytes)
     disk[446...462] = [
       0,
       "\x00\x02\x00".b,
@@ -60,7 +60,7 @@ module CliImages
           0
         ].pack("Q<Q<Q<")) +
         name.encode(Encoding::UTF_16LE).b.ljust(72, "\x00".b))
-      disk[(first * 512)...((first * 512) + payload.size)] = payload
+      disk[(first * sector_bytes)...((first * sector_bytes) + payload.size)] = payload
     end
 
     entries_crc = Zlib.crc32(entries)
@@ -73,8 +73,8 @@ module CliImages
         reserved: 0,
         current_lba: current,
         alternate_lba: alternate,
-        first_usable_lba: 34,
-        last_usable_lba: (sectors - 34),
+        first_usable_lba: 2 + entries.size / sector_bytes,
+        last_usable_lba: sectors - 2 - entries.size / sector_bytes,
         disk_guid: uuid_bytes(value: DISK_GUID, little: true),
         entries_lba: entries_lba,
         entry_count: 128,
@@ -84,13 +84,13 @@ module CliImages
       (fields[0...16] + [Zlib.crc32(fields)].pack("L<")) + fields[20..]
     end
 
-    disk[512...604] = header.call(current: 1, alternate: (sectors - 1), entries_lba: 2)
-    disk[1024...(1024 + entries.size)] = entries
-    disk[((sectors - 33) * 512)...((sectors - 1) * 512)] = entries
-    disk[((sectors - 1) * 512)...(((sectors - 1) * 512) + 92)] = header.call(
+    disk[sector_bytes...(sector_bytes + 92)] = header.call(current: 1, alternate: (sectors - 1), entries_lba: 2)
+    disk[(2 * sector_bytes)...(2 * sector_bytes + entries.size)] = entries
+    disk[((sectors - 1) * sector_bytes - entries.size)...((sectors - 1) * sector_bytes)] = entries
+    disk[((sectors - 1) * sector_bytes)...(((sectors - 1) * sector_bytes) + 92)] = header.call(
       current: (sectors - 1),
       alternate: 1,
-      entries_lba: (sectors - 33)
+      entries_lba: sectors - 1 - entries.size / sector_bytes
     )
     disk
   end

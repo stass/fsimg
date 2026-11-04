@@ -112,6 +112,18 @@ static void test_gpt_read(void);
 static void test_gpt_selectors(void);
 static void test_gpt_names(void);
 static void test_gpt_seeded_failures(void);
+static void test_mbr_truncated_partition_keeps_partial_sector(void);
+static void test_mbr_missing_partition_is_listed_but_not_selected(void);
+static void test_gpt_truncated_partitions_and_backup_report_missing_bytes(void);
+static void test_gpt_failed_primary_stays_corrupt_on_cut_disk(void);
+static void test_gpt_primary_array_cuts_are_corrupt(void);
+static void test_gpt_declared_geometry_cannot_wrap(void);
+static fsimg_status_t unwrap_write(void *, uint64_t, const void *, size_t,
+    size_t *, fsimg_error_t *);
+static void test_unwrap_requires_a_whole_partition(void);
+static void test_extended_mbr_past_end_is_listed_but_unsupported(void);
+static void test_gpt_primary_array_end_and_trailing_partial_sector(void);
+static void expect_scheme_truncated(fixture_t *, const char *, uint64_t);
 static void test_gpt_sector_sizes(void);
 static void test_mbr_read(void);
 static void test_mbr_seeded_failures(void);
@@ -870,6 +882,413 @@ test_gpt_names(void)
 	free(disk.bytes);
 }
 
+/* Table loss is independent of whether the selected filesystem fits. */
+static void
+expect_scheme_truncated(fixture_t *f, const char *scheme, uint64_t missing)
+{
+	fsimg_layer_report_t report;
+	fsimg_error_t error;
+	char count[32];
+
+	snprintf(count, sizeof(count), "%llu", (unsigned long long)missing);
+	CHECK(fsimg_image_verify(f->image, 0, &report, &error) == FSIMG_ECORRUPT);
+	CHECK(strstr(error.message, "truncated") != NULL);
+	CHECK(strstr(error.message, count) != NULL);
+	CHECK(strcmp(error.path, scheme) == 0);
+	if (strcmp(scheme, "gpt") == 0)
+		CHECK(strstr(error.message, "backup") != NULL);
+}
+
+static void
+test_mbr_truncated_partition_keeps_partial_sector(void)
+{
+	static const uint64_t cuts[] = { 4 * MIB, 2 * MIB, 2 * MIB + 123 };
+	memory_disk_t disk = disk_new(4 * MIB);
+	fsimg_partition_info_t partition;
+	fsimg_image_info_t info;
+	fsimg_io_t *volume;
+	fixture_t f;
+
+	make_fat12(disk.bytes + MIB);
+	mbr_entry(disk.bytes, 0, 0x80, 1, 2048, 8192);
+	fixture_init(&f);
+	for (size_t i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+		disk.length = cuts[i];
+		fprintf(stderr, "MBR cut at %llu bytes\n",
+		    (unsigned long long)disk.length);
+		CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+		CHECK(info.missing_bytes == 5 * MIB - disk.length);
+		CHECK(fsimg_image_next_partition(f.image, &partition, NULL) == FSIMG_OK);
+		CHECK(partition.offset == MIB);
+		CHECK(partition.length == disk.length - MIB);
+		CHECK(partition.missing_bytes == 5 * MIB - disk.length);
+		expect_scheme_truncated(&f, "mbr", info.missing_bytes);
+		CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_AUTOMATIC },
+		    &volume, NULL) == FSIMG_OK);
+		expect_volume_lists(&f, volume, "/DIR");
+		expect_scheme_truncated(&f, "mbr", info.missing_bytes);
+	}
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void
+test_mbr_missing_partition_is_listed_but_not_selected(void)
+{
+	memory_disk_t disk = disk_new(4 * MIB);
+	fsimg_partition_info_t partition;
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fsimg_io_t *volume;
+	fixture_t f;
+
+	make_fat12(disk.bytes + MIB);
+	mbr_entry(disk.bytes, 0, 0x80, 1, 2048, 2048);
+	fixture_init(&f);
+	for (unsigned past = 0; past < 2; past++) {
+		mbr_entry(disk.bytes, 1, 0, 1, 8192 + past, 1024);
+		CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+		CHECK(info.missing_bytes == (1024 + past) * 512);
+		CHECK(fsimg_image_next_partition(f.image, &partition, NULL) == FSIMG_OK);
+		CHECK(partition.length == MIB && partition.missing_bytes == 0);
+		CHECK(fsimg_image_next_partition(f.image, &partition, NULL) == FSIMG_OK);
+		CHECK(partition.index == 2 && partition.used);
+		CHECK(partition.offset == (8192 + past) * 512);
+		CHECK(partition.length == 0 && partition.missing_bytes == 1024 * 512);
+		CHECK(partition.claim == FSIMG_CLAIM_NONE);
+		expect_scheme_truncated(&f, "mbr", info.missing_bytes);
+		CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_INDEX,
+		    .index = 2 }, &volume, &error) == FSIMG_ECORRUPT);
+		CHECK(strstr(error.message, "truncated") != NULL && volume == NULL);
+		CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_AUTOMATIC },
+		    &volume, NULL) == FSIMG_OK);
+		expect_volume_lists(&f, volume, "/DIR");
+		expect_scheme_truncated(&f, "mbr", info.missing_bytes);
+	}
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void
+test_gpt_truncated_partitions_and_backup_report_missing_bytes(void)
+{
+	static const uint64_t cuts[] = { 3 * MIB - 512, 3 * MIB - 123,
+	    2 * MIB, 2 * MIB - 512, 4 * MIB - 512, 4 * MIB - 1 };
+	fsimg_partition_info_t partition;
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fsimg_io_t *volume;
+	memory_disk_t disk;
+	fixture_t f;
+
+	fixture_init(&f);
+	for (uint32_t sector = 512; sector <= 4096; sector *= 8) {
+		disk = two_partition_gpt(sector);
+		for (size_t i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+			disk.length = cuts[i];
+			fprintf(stderr, "GPT sector %u, cut at %llu bytes\n",
+			    sector, (unsigned long long)disk.length);
+			CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+			CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+			CHECK(info.sector_bytes == sector);
+			CHECK(info.missing_bytes == 4 * MIB - disk.length);
+			CHECK(fsimg_image_next_partition(f.image, &partition, NULL) == FSIMG_OK);
+			CHECK(partition.offset == MIB);
+			CHECK(partition.length == (disk.length < 2 * MIB ?
+			    disk.length - MIB : MIB));
+			CHECK(partition.missing_bytes == MIB - partition.length);
+			CHECK(fsimg_image_next_partition(f.image, &partition, NULL) == FSIMG_OK);
+			CHECK(partition.offset == 2 * MIB);
+			CHECK(partition.length == (disk.length <= 2 * MIB ? 0 :
+			    (disk.length < 3 * MIB ? disk.length - 2 * MIB : MIB)));
+			CHECK(partition.missing_bytes == MIB - partition.length);
+			if (partition.length == 0) {
+				CHECK(partition.claim == FSIMG_CLAIM_NONE);
+				CHECK(select_with(&f, (fsimg_selector_t){
+				    .kind = FSIMG_SELECT_INDEX, .index = 2 },
+				    &volume, &error) == FSIMG_ECORRUPT);
+				CHECK(strstr(error.message, "truncated") != NULL);
+				CHECK(volume == NULL);
+				CHECK(select_with(&f, (fsimg_selector_t){
+				    .kind = FSIMG_SELECT_NAME, .text = "Donn\xc3\xa9" "es" },
+				    &volume, &error) == FSIMG_ECORRUPT);
+				CHECK(strstr(error.message, "truncated") != NULL);
+				CHECK(volume == NULL);
+				CHECK(select_with(&f, (fsimg_selector_t){
+				    .kind = FSIMG_SELECT_TYPE, .text = "linux" },
+				    &volume, &error) == FSIMG_ECORRUPT);
+				CHECK(strstr(error.message, "truncated") != NULL);
+				CHECK(volume == NULL);
+			}
+			expect_scheme_truncated(&f, "gpt", info.missing_bytes);
+			CHECK(select_with(&f, (fsimg_selector_t){
+			    .kind = FSIMG_SELECT_AUTOMATIC }, &volume, NULL) == FSIMG_OK);
+			expect_volume_lists(&f, volume, "/DIR");
+			expect_scheme_truncated(&f, "gpt", info.missing_bytes);
+		}
+		/* Sector-size ambiguity also applies when the backup is absent. */
+		if (sector == 4096) {
+			bcopy("EFI PART", disk.bytes + 512, 8);
+			CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+			CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
+			CHECK(strstr(error.message, "ambiguous") != NULL);
+			CHECK(fixture_open(&f, &disk, "gpt", 4096, NULL) == FSIMG_OK);
+			CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+		}
+		free(disk.bytes);
+	}
+	fixture_free(&f);
+}
+
+static void
+test_gpt_failed_primary_stays_corrupt_on_cut_disk(void)
+{
+	static const struct {
+		unsigned offset;
+		uint32_t value;
+		const char *message;
+	} edits[] = {
+		{ 24, 2, "GPT primary header does not record LBA 1" },
+		{ 84, 256, "GPT primary entry size is not 128 bytes" }
+	};
+	memory_disk_t disk;
+
+	for (size_t i = 0; i < sizeof(edits) / sizeof(edits[0]); i++) {
+		disk = two_partition_gpt(512);
+		put32(disk.bytes + 512 + edits[i].offset, edits[i].value);
+		gpt_reseal(&disk, 512);
+		disk.length -= 512;
+		expect_gpt_corrupt(&disk, edits[i].message);
+		free(disk.bytes);
+	}
+	disk = two_partition_gpt(512);
+	disk.bytes[512 + 40] ^= 1;
+	/* An intact backup at the last LBA cannot rescue a failed primary. */
+	expect_gpt_corrupt(&disk, "GPT primary header CRC32 mismatch");
+	disk.length -= 512;
+	expect_gpt_corrupt(&disk, "GPT primary header CRC32 mismatch");
+	free(disk.bytes);
+	disk = two_partition_gpt(512);
+	disk.bytes[1024 + 57] ^= 1;
+	disk.length -= 512;
+	expect_gpt_corrupt(&disk, "GPT primary entry array CRC32 mismatch");
+	free(disk.bytes);
+}
+
+static void
+test_gpt_primary_array_cuts_are_corrupt(void)
+{
+	static const uint64_t cuts[] = { 1025, 1536, 1537, 8193, 17407 };
+	memory_disk_t disk = two_partition_gpt(512);
+
+	for (size_t i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+		disk.length = cuts[i];
+		fprintf(stderr, "GPT primary cut at %llu bytes\n",
+		    (unsigned long long)disk.length);
+		expect_gpt_corrupt(&disk, cuts[i] < 1536 ?
+		    "GPT disk is too small for a table" :
+		    "GPT primary entry array is truncated");
+	}
+	disk.length = 700;
+	expect_gpt_corrupt(&disk, "GPT disk is too small for a table");
+	free(disk.bytes);
+}
+
+/* Successful unwraps are compared byte for byte in memory. A failed unwrap
+ * must never reach this sink, even if some partition bytes survive.
+ */
+static fsimg_status_t
+unwrap_write(void *argument, uint64_t offset, const void *bytes, size_t length,
+    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	memory_disk_t *output = argument;
+
+	CHECK(offset == output->stored);
+	CHECK(offset <= output->length && length <= output->length - offset);
+	bcopy(bytes, output->bytes + offset, length);
+	output->stored += length;
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static void
+test_unwrap_requires_a_whole_partition(void)
+{
+	static const uint64_t cuts[] = { 2 * MIB - 123, MIB, 4 * MIB - 512 };
+	memory_disk_t output = disk_new(MIB);
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_INDEX, .index = 1 };
+	fsimg_io_ops_t ops;
+	fsimg_io_t *destination;
+	fsimg_sink_t sink;
+	fsimg_error_t error;
+	memory_disk_t disk;
+	fixture_t f;
+
+	fixture_init(&f);
+	fsimg_io_ops_init(&ops);
+	ops.write_at = unwrap_write;
+	ops.get_size = disk_size;
+	CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &output, &destination,
+	    NULL) == FSIMG_OK);
+	fsimg_sink_init(&sink, FSIMG_SINK_IO);
+	sink.io = destination;
+	for (unsigned gpt = 0; gpt < 2; gpt++) {
+		disk = gpt != 0 ? two_partition_gpt(512) : disk_new(4 * MIB);
+		if (gpt == 0) {
+			make_fat12(disk.bytes + MIB);
+			mbr_entry(disk.bytes, 0, 0, 1, 2048, 2048);
+			mbr_entry(disk.bytes, 1, 0, 0x83, 6144, 2048);
+		}
+		for (size_t i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+			disk.length = cuts[i];
+			output.stored = 0;
+			memset(output.bytes, 0xa5, MIB);
+			CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+			if (disk.length < 2 * MIB) {
+				CHECK(fsimg_image_unwrap(f.image, &selector, NULL,
+				    &sink, &error) == FSIMG_ECORRUPT);
+				if (disk.length > MIB)
+					CHECK(strcmp(error.message, "the selected partition is truncated: 123 declared bytes are missing") == 0);
+				else
+					CHECK(strstr(error.message, "truncated") != NULL);
+				CHECK(output.stored == 0);
+				CHECK(error.output_state == FSIMG_OUTPUT_ABSENT);
+				for (size_t byte = 0; byte < MIB; byte++)
+					CHECK(output.bytes[byte] == 0xa5);
+			} else {
+				CHECK(fsimg_image_unwrap(f.image, &selector, NULL,
+				    &sink, &error) == FSIMG_OK);
+				CHECK(output.stored == MIB);
+				CHECK(bcmp(output.bytes, disk.bytes + MIB, MIB) == 0);
+			}
+		}
+		free(disk.bytes);
+	}
+	fsimg_io_free(destination);
+	fixture_free(&f);
+	free(output.bytes);
+}
+
+static void
+test_extended_mbr_past_end_is_listed_but_unsupported(void)
+{
+	memory_disk_t disk = disk_new(512);
+	fsimg_partition_info_t partition;
+	fsimg_error_t error;
+	fsimg_io_t *volume;
+	fixture_t f;
+
+	mbr_entry(disk.bytes, 0, 0, 0x0f, 2048, 2048);
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_next_partition(f.image, &partition, NULL) == FSIMG_OK);
+	CHECK(partition.index == 1 && partition.used);
+	CHECK(partition.offset == MIB && partition.length == 0);
+	CHECK(partition.missing_bytes == MIB);
+	CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_INDEX,
+	    .index = 1 }, &volume, &error) == FSIMG_EUNSUPPORTED);
+	CHECK(strcmp(error.message, "partition 1 is an extended partition; logical partitions are not supported") == 0);
+	CHECK(volume == NULL);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void
+test_gpt_primary_array_end_and_trailing_partial_sector(void)
+{
+	fsimg_layer_report_t report;
+	fsimg_image_info_t info;
+	memory_disk_t disk;
+	fixture_t f;
+
+	fixture_init(&f);
+	for (uint32_t sector = 512; sector <= 4096; sector *= 8) {
+		disk = two_partition_gpt(sector);
+		disk.length = 2 * sector + GPT_ENTRIES * 128;
+		CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+		CHECK(info.missing_bytes == 4 * MIB - disk.length);
+		disk.length--;
+		expect_gpt_corrupt(&disk, "GPT primary entry array is truncated");
+		disk.length = 2 * sector + 1;
+		expect_gpt_corrupt(&disk, "GPT disk is too small for a table");
+		free(disk.bytes);
+	}
+
+	/* The backup remains at the last complete LBA. The sparse read callback
+	 * supplies a partial trailing sector without enlarging the allocation.
+	 */
+	disk = two_partition_gpt(512);
+	disk.length += 123;
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(info.missing_bytes == 0);
+	CHECK(fsimg_image_verify(f.image, 0, &report, NULL) == FSIMG_OK);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void
+test_gpt_declared_geometry_cannot_wrap(void)
+{
+	static const uint64_t alternates[] = { UINT64_MAX, UINT64_MAX / 512 };
+	const uint64_t alternate = UINT64_MAX / 512 - 1;
+	const uint64_t last_usable = alternate - 33;
+	fsimg_partition_info_t partition;
+	fsimg_image_info_t info;
+	memory_disk_t disk;
+	fixture_t f;
+
+	for (size_t i = 0; i < sizeof(alternates) / sizeof(alternates[0]); i++) {
+		disk = two_partition_gpt(512);
+		put64(disk.bytes + 512 + 32, alternates[i]);
+		gpt_reseal(&disk, 512);
+		disk.length = 3 * MIB;
+		expect_gpt_corrupt(&disk,
+		    "GPT primary alternate LBA declares a disk no offset can address");
+		free(disk.bytes);
+	}
+
+	/* The largest addressable disk has space for both backup structures.
+	 * One entry reaches the usable limit; no huge allocation is needed.
+	 */
+	disk = two_partition_gpt(512);
+	bzero(disk.bytes + 1024 + 128, 128);
+	put64(disk.bytes + 512 + 32, alternate);
+	put64(disk.bytes + 512 + 48, last_usable);
+	put64(disk.bytes + 1024 + 40, last_usable);
+	gpt_reseal(&disk, 512);
+	disk.length = 3 * MIB;
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+	CHECK(info.missing_bytes == (alternate + 1) * 512 - disk.length);
+	CHECK(fsimg_image_next_partition(f.image, &partition, NULL) == FSIMG_OK);
+	CHECK(partition.offset == MIB);
+	CHECK(partition.length == disk.length - MIB);
+	CHECK(partition.missing_bytes == (last_usable + 1) * 512 - disk.length);
+	fixture_free(&f);
+	free(disk.bytes);
+
+	disk = two_partition_gpt(512);
+	put64(disk.bytes + 512 + 48, 8191);
+	gpt_reseal(&disk, 512);
+	disk.length = 3 * MIB;
+	expect_gpt_corrupt(&disk, "GPT primary usable range is invalid");
+	free(disk.bytes);
+
+	/* A primary-only table still reserves the backup entry array. */
+	disk = two_partition_gpt(512);
+	put64(disk.bytes + 512 + 48, 8190);
+	gpt_reseal(&disk, 512);
+	disk.length = 3 * MIB;
+	expect_gpt_corrupt(&disk,
+	    "GPT primary usable range leaves no room for the backup array");
+	free(disk.bytes);
+}
+
 static void
 test_gpt_seeded_failures(void)
 {
@@ -942,7 +1361,7 @@ test_gpt_seeded_failures(void)
 	disk = two_partition_gpt(512);
 	put64(disk.bytes + 512 + 32, 8190);
 	gpt_reseal(&disk, 512);
-	expect_gpt_corrupt(&disk, "GPT primary alternate LBA is not the disk's last LBA");
+	expect_gpt_corrupt(&disk, "GPT primary alternate LBA is before the disk's last LBA");
 	free(disk.bytes);
 
 	disk = two_partition_gpt(512);
@@ -978,17 +1397,24 @@ test_gpt_seeded_failures(void)
 	disk = disk_new(4 * MIB);
 	gpt_build(&disk, 512, overlapping, 2);
 	expect_gpt_corrupt(&disk, "GPT partitions 1 and 2 overlap");
+	disk.length = MIB;
+	expect_gpt_corrupt(&disk, "GPT partitions 1 and 2 overlap");
 	free(disk.bytes);
 
 	disk = disk_new(4 * MIB);
 	gpt_build(&disk, 512, outside, 1);
+	expect_gpt_corrupt(&disk, "GPT partition 1 lies outside the usable range");
+	disk.length = MIB;
 	expect_gpt_corrupt(&disk, "GPT partition 1 lies outside the usable range");
 	free(disk.bytes);
 
 	/* A truncated disk has lost its backup at the recorded last LBA. */
 	disk = two_partition_gpt(512);
 	disk.length -= 512;
-	expect_gpt_corrupt(&disk, "GPT primary alternate LBA is not the disk's last LBA");
+	fixture_init(&f);
+	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+	expect_scheme_truncated(&f, "gpt", 512);
+	fixture_free(&f);
 	disk.length += 512;
 	bzero(disk.bytes + 4 * MIB - 512, 512);
 	expect_gpt_corrupt(&disk, "GPT backup header signature is missing");
@@ -1125,7 +1551,7 @@ test_mbr_seeded_failures(void)
 		const char	*check;
 	} corrupt[] = {
 		{ { 2048, 3000 }, { 2048, 100 }, "MBR partitions 1 and 2 overlap" },
-		{ { 2048, 0 }, { 8192, 0 }, "MBR partition 1 extends beyond the disk" }
+		{ { 9000, 9500 }, { 1000, 1000 }, "MBR partitions 1 and 2 overlap" }
 	};
 	memory_disk_t disk;
 	fsimg_image_info_t info;
@@ -1969,6 +2395,15 @@ main(int argc, char **argv)
 	test_gpt_read();
 	test_gpt_selectors();
 	test_gpt_names();
+	test_mbr_truncated_partition_keeps_partial_sector();
+	test_mbr_missing_partition_is_listed_but_not_selected();
+	test_gpt_truncated_partitions_and_backup_report_missing_bytes();
+	test_gpt_failed_primary_stays_corrupt_on_cut_disk();
+	test_gpt_primary_array_cuts_are_corrupt();
+	test_gpt_declared_geometry_cannot_wrap();
+	test_unwrap_requires_a_whole_partition();
+	test_extended_mbr_past_end_is_listed_but_unsupported();
+	test_gpt_primary_array_end_and_trailing_partial_sector();
 	test_gpt_seeded_failures();
 	test_gpt_sector_sizes();
 	test_mbr_read();

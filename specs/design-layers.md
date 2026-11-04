@@ -1216,7 +1216,7 @@ Layer verification runs before the filesystem's and reports its own scope:
 | ifsboot | The startup checksum over the startup section and the stored checksum over the whole stored image, each one sequential sum over the file; `ram_size` against its rule where the [machine table](#qnx-boot-image-ifsboot) says so; the closed tables, the bounds and the framing (every chunk decoded, the terminator, the zero padding, the decoded total) are identity, open and learning-pass checks and already hold |
 | hbcifs | The identity, the length tie, the header constants and the exact decode already hold at open; the fields at `0x14` and `0x1c` are unidentified and are reported unverified, so the scope is incomplete |
 | GPT | Protective MBR, primary and backup header CRC32 and entry-array CRC32, primary and backup consistency (disk GUID, usable range, entry arrays byte-identical), partitions within the usable range and non-overlapping |
-| MBR | Signature, entry field sanity, partitions within the disk and non-overlapping |
+| MBR | Signature, entry field sanity, a disk that holds every partition, non-overlapping |
 
 Then the selected volume is verified by `fsimg_verify()` as for a raw image.
 Partitions not selected are not verified, and the report says so. Ordinary
@@ -1399,20 +1399,28 @@ than read as something else. GPT has no identity to assume: the header
 signature at LBA 1 is where the table is decoded from, so a forced `gpt`
 under `--force` reads exactly as without it, and a GPT whose header
 signatures are gone stays unreadable. Validation then requires: header CRC32, this
-LBA 1, alternate LBA equal to the disk's last LBA, entry size 128, entry
-count from 1 to 1024, entry array within the disk and before the first usable
-LBA, entry array CRC32, first usable not after last usable and last usable
-before the backup array, the backup header at the alternate LBA with its own
-CRC32, alternate pointing back to 1, the same disk GUID and usable range, and
-a byte-identical entry array. Used entries (nonzero type) need first not
-after last and both within the usable range; the at most 1024 entries are
-sorted in memory by first LBA and adjacent pairs checked for overlap. Any
-failure is `FSIMG_ECORRUPT`; there is no fallback to the backup copy alone,
-because a disk whose copies disagree is reported, not repaired. A truncated
-image whose backup is missing is therefore corrupt, which is what it is.
-Truncated images are common, but a silent fallback would hide the damage; a
-forced degraded open that reports it in the layer report is the extension if
-demand appears.
+LBA 1, an alternate LBA that is not before the disk's last LBA, entry size
+128, entry count from 1 to 1024, entry array within the disk and before the
+first usable LBA, entry array CRC32, first usable not after last usable, room
+for a backup array between last usable and the alternate LBA, and a declared disk, the alternate LBA
+plus one sectors, whose byte length fits 64 bits. When the alternate LBA is
+the disk's last LBA, the backup header must be there with its own CRC32,
+alternate pointing back to 1, the same disk GUID and usable range, and a
+byte-identical entry array. Used entries (nonzero type) need first not after
+last and both within the usable range; the at most 1024 entries are sorted in
+memory by first LBA and adjacent pairs checked for overlap. Any failure is
+`FSIMG_ECORRUPT`. There is no fallback to the backup copy, and none after a
+failed check: a disk whose copies disagree is reported, not repaired.
+
+An alternate LBA past the disk's last LBA proves the disk truncated: a header
+whose CRC32 holds says the disk is longer than it is. The disk opens from the
+primary alone, whose entry array must be present in whole sectors, and
+validation is otherwise the same with the alternate LBA standing for the last
+LBA. The sector size is unaffected: it comes from where the header signature
+is, never from the disk's length, and the header at that LBA must hold its
+CRC32 and record LBA 1, so a cut cannot make one sector size pass for the
+other. Entries are [clipped](#truncated-disks) as MBR's are, and the report
+says the backup table is lost.
 
 ### MBR
 
@@ -1449,13 +1457,46 @@ assumed identity waives ("the MBR has no 0x55AA signature", "the MBR has no
 used partition entry"); the legal entry fields and the two exclusions are
 validation and hold under `--force` too, since open relies on every entry
 lying after the MBR sector, and a probe refusing them is `FSIMG_EFORMAT`.
-Validation then requires first LBA plus count within the disk, and no
-overlap between used entries; a failure is `FSIMG_ECORRUPT`. Extended
+Validation then requires no overlap between used entries, judged by what they
+declare; a failure is `FSIMG_ECORRUPT`. A disk shorter than an entry is
+[truncated](#truncated-disks). Extended
 partitions (types 0x05, 0x0F and 0x85) are listed with their type and are
 unsupported as a selection: logical partitions inside them need their own
 profile. A sector whose bytes also draw a filesystem claim is ambiguous,
 unless the filesystem reserves its system area, as
 [detection](#detection-and-forcing) states.
+
+### Truncated disks
+
+A partition ending past the disk is clipped to the disk's end, in bytes, so a
+cut inside a sector keeps the partial sector: its slice is what the disk holds,
+and the filesystem inside applies
+[its own rules](architecture.md#contracts) to the short slice. One starting at
+or past the end has no bytes: it is listed with a length of zero, automatic
+selection passes over it, and selecting it is `FSIMG_ECORRUPT`, truncated. A
+scheme checks overlap and the usable range by the declared extents, before
+clipping, so what a table says is judged the same way whatever the file's
+length.
+
+The table reports `missing_bytes`, how far the disk it declares reaches past
+the disk: for GPT the alternate LBA, for MBR the furthest entry. Each partition
+reports the part of its own length the disk lacks. `fsimg_image_get_info()` and
+`fsimg_image_next_partition()` carry both, and `i` shows them. A nonzero count
+fails `fsimg_image_verify()` as `FSIMG_ECORRUPT`, naming the count and, for
+GPT, the lost backup, whichever partition is selected and even when the
+filesystem inside it fits in what remains. `W` runs it before selecting, so a
+disk with nothing left to select still reports the cut; a range or disk selection
+forces the scheme slot empty, reads no table and verifies only the volume in it.
+It is the image's check, in the one place that holds the table, so neither a
+scheme's verification nor a filesystem driver knows of it. `fsimg_verify()`
+sees only its slice and verifies the filesystem there, as it does for every
+other layer's check. `fsimg_image_unwrap()` refuses a clipped partition, since
+a partial output is not success.
+
+The containers do not clip: DMG, VHD, simg, gzip, xz, zstd and the boot
+containers lose their index, footer or stream end when truncated, and stay
+`FSIMG_ECORRUPT`. A container's disk length is whole, so a scheme inside it is
+truncated only if it was written so.
 
 ### DMG (UDIF)
 
@@ -2221,8 +2262,8 @@ format correctness; the oracle rows do.
 | Stack parsing | Every legal combination of present slots; `-` in each later slot, shorthand (`fat32/dmg`) and spelled-out (`fat32/-/dmg`) forms parse to the same slots; `i` text re-parses to the same slots | Repeated kind, descending order (`fat32/-/gpt`), `-` in the filesystem slot, unknown name, empty token, trailing `/`; each a syntax error naming the token |
 | Settings | Each key at its bounds; derived defaults per filesystem; `disk=` with and without `-s` | Key for an absent layer; out-of-range chunk, block and level; 36-unit name limit crossed; `apfs` on MBR; `disk=` smaller than the volume |
 | GPT write | `sgdisk -v` reports no problems on disks of every filesystem; `sgdisk -p` shows the type, name and 1 MiB alignment; 4Kn tables verified with `sfdisk --sector-size 4096`, since `sgdisk` takes the sector size of a file as 512 | A flipped bit in the written entry array fails `sgdisk -v`, proving the oracle sees the table fsimg claims to write |
-| GPT read | Disks from `sgdisk` and `qemu-img` open; auto-selection with one filesystem; index, name and type selectors; names compared as UTF-16 units; `gpt:sector=4096` with `-F fat32/gpt` resolves a disk carrying both headers | Header CRC, entry CRC, alternate LBA, usable range, overlapping entries, backup mismatch, truncated backup, protective MBR with no header: each `FSIMG_ECORRUPT` naming the check and never a bare-volume read; two headers at 512 and 4096 without `gpt:sector`: ambiguity |
-| MBR | `fdisk -l` and `mtools` read fsimg disks; `sfdisk` disks open; types 0x04, 0x0B and 0x0E accepted; a partition ending at sector 2^32; CHS saturation at 1023 | Missing signature, overlapping entries, entry beyond the disk (`FSIMG_ECORRUPT`), 0xEE entry (routes to GPT), FAT boot sector resembling a table (ambiguity), `mbr:type=0x85` refused |
+| GPT read | Disks from `sgdisk` and `qemu-img` open; auto-selection with one filesystem; index, name and type selectors; names compared as UTF-16 units; `gpt:sector=4096` with `-F fat32/gpt` resolves a disk carrying both headers | Header CRC, entry CRC, alternate LBA, usable range, overlapping entries, backup mismatch, an entry array cut short, protective MBR with no header: each `FSIMG_ECORRUPT` naming the check and never a bare-volume read; two headers at 512 and 4096 without `gpt:sector`: ambiguity |
+| MBR | `fdisk -l` and `mtools` read fsimg disks; `sfdisk` disks open; types 0x04, 0x0B and 0x0E accepted; a partition ending at sector 2^32; CHS saturation at 1023 | Missing signature, overlapping entries (`FSIMG_ECORRUPT`), 0xEE entry (routes to GPT), FAT boot sector resembling a table (ambiguity), `mbr:type=0x85` refused |
 | DMG write | `hdiutil imageinfo` and `hdiutil verify` accept zlib and `none` images; `hdiutil attach` mounts the FAT volume with and without GPT; `qemu-img convert` yields the raw disk byte for byte; zero runs become zero-fill entries | A flipped data-fork byte fails `hdiutil verify` and fsimg's own verification; `dmg:level=0` and `10` refused |
 | DMG read | `hdiutil create` images in UDRO, UDZO and zero-filled variants open and extract, and list as the raw disks `hdiutil convert -format UDTO` and `qemu-img convert` expand them to (`qemu-img` reads DMG but cannot write it); both table shapes; per-table CRC under read-through | Overlapping tables, uncovered sectors, run beyond the data fork, run with zero sectors, run decompressing short and long, run over 16 MiB, bzip2 run (unsupported), unknown type, segment count 2, koly ranges overlapping, plist depth 33, undeclared entity, 5 KiB key; a bare volume whose last sector is a koly whose ranges do not end at the file's end opens as a bare volume |
 | VHD | `qemu-img check` and `info` report fixed VHD of the declared size; `vhd:align=1M` lengths; footer checksum; creator fields and original size as written | Flipped checksum (`FSIMG_ECORRUPT`, not a raw read), dynamic type 3 (`FSIMG_EUNSUPPORTED`), size mismatch with file length (no VHD claim: the file is whatever its prefix claims, or unrecognised) |

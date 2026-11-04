@@ -698,7 +698,8 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 	fsimg_stack_t stack;
 	fsimg_io_t *volume;
 	fsimg_ctx_t *ctx;
-	uint64_t length;
+	uint64_t length, missing;
+	char message[96];
 	fsimg_error_t local;
 	fsimg_status_t status;
 
@@ -720,6 +721,19 @@ fsimg_image_unwrap(fsimg_image_t *image, const fsimg_selector_t *selector,
 		status = fsimg_image_select(image, selector, &volume, error);
 	if (status != FSIMG_OK)
 		return (status);
+	/* A partial output is not success: the bytes of a partition the disk
+	 * was cut through are not the partition.
+	 */
+	missing = selector != NULL && selector->kind == FSIMG_SELECT_SECTION ? 0 :
+	    fsimg_image_selected_missing(image);
+	if (missing != 0) {
+		fsimg_io_free(volume);
+		snprintf(message, sizeof(message), "the selected partition is "
+		    "truncated: %llu declared bytes are missing",
+		    (unsigned long long)missing);
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
+		    message));
+	}
 	ctx = fsimg_io_context(volume);
 	fsimg_session_init(&session, ctx, "image output", 0);
 	status = fsimg_io_get_size(volume, &length, error);

@@ -311,6 +311,7 @@ fsimg_partition_report(fsimg_scheme_kind_t scheme,
 	out->used = true;
 	out->offset = record->offset;
 	out->length = record->length;
+	out->missing_bytes = record->missing_bytes;
 	type = fsimg_partition_type_name(scheme, record);
 	if (type != NULL)
 		snprintf(out->type, sizeof(out->type), "%s", type);

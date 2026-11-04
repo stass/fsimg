@@ -4,7 +4,11 @@ An image shorter than the filesystem it declares still opens, lists and
 extracts while everything those touch survives, such as a FAT image cut after
 its last allocated cluster. A referenced file or structure past the end fails
 as corrupt, and `W` fails on every truncated image, ISO 9660 included. `i` and
-the library's volume information report how many bytes are missing.
+the library's volume information report how many bytes are missing. A cut
+partitioned disk reads the same way: a partition past the end is clipped, one
+with no bytes left cannot be selected, and a GPT disk opens from its primary
+table when that table is intact and declares a longer disk, where `i` reports
+the lost backup. `W` fails on these too.
 A QNX6 image cut short loses its second superblock, so it is read from the first
 alone, and `i` reports `second_header_missing`. That may be the older snapshot,
 whose freed blocks a later commit may have rewritten.
