@@ -372,10 +372,11 @@ current_file(fsimg_reader_t *reader, uint64_t offset, fsimg_error_t *error)
  * exact physical read per piece; the rest are synthesized zeros and never
  * touch storage. A decoded link target is served as [0, size) of the
  * reader's target buffer instead, after the stability check and one unit
- * of work that a stored read would cost. transferred counts only confirmed
+ * of work that a stored read would cost. A held extent is copied from the
+ * driver's buffer at the same cost. transferred counts only confirmed
  * bytes, so a failure in a later extent still reports the pieces before
  * it; stored counts those among them read from the image, which excludes
- * synthesized zeros and decoded targets.
+ * synthesized zeros, decoded targets and held extents.
  */
 fsimg_status_t
 fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
@@ -424,13 +425,15 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 			break;
 		}
 		bzero(&extent, sizeof(extent));
+		reader->held = NULL;
 		status = reader->ops->resolve(reader, offset, &extent, error);
 		if (status != FSIMG_OK)
 			return (status);
 		/* The extent must contain offset; clip it to the request and to
 		 * the initialized length, so slack after either is never read.
-		 * The piece must lie in the content domain whatever the driver
-		 * resolved, so no driver can deliver metadata as content.
+		 * A mapped piece must lie in the content domain whatever the
+		 * driver resolved, so no driver can deliver metadata as content;
+		 * a held piece reads no image, so it has no range to check.
 		 */
 		if (offset < extent.logical_offset ||
 		    offset - extent.logical_offset >= extent.length)
@@ -441,6 +444,19 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 			piece = (size_t)(extent.length - within);
 		if (piece > initialized - offset)
 			piece = (size_t)(initialized - offset);
+		if (reader->held != NULL) {
+			status = fsimg_reader_stable(reader, error);
+			if (status == FSIMG_OK)
+				status = fsimg_session_charge(&reader->session,
+				    0, 0, 1, error);
+			if (status != FSIMG_OK)
+				return (status);
+			bcopy(reader->held + within, buffer + *transferred,
+			    piece);
+			*transferred += piece;
+			offset += piece;
+			continue;
+		}
 		if (extent.image_offset > UINT64_MAX - within ||
 		    extent.image_offset + within < domain->offset ||
 		    !fsimg_range_fits(extent.image_offset + within - domain->offset,

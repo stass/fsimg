@@ -47,8 +47,9 @@ typedef struct fsimg_format_variant fsimg_format_variant_t;
  * resolve	return one validated extent of the current file containing
  *		logical offset o, where o < reader->initialized. Delivery
  *		checks that it contains o and reads only the part of it
- *		inside reader->content_domain. It is never called for a
- *		decoded link target.
+ *		inside reader->content_domain, or copies it from reader->held
+ *		when resolve set that. It is never called for a decoded link
+ *		target.
  *
  * open reads its decoding options, such as a view, from reader->options.
  */
@@ -172,6 +173,12 @@ struct fsimg_reader {
 	 */
 	unsigned char	*link_target;
 	size_t		 link_length;
+	/* Set by resolve when the extent it returns is held rather than mapped:
+	 * its length bytes are here, in a charged buffer the driver owns, valid
+	 * until the next resolve or the walker's advance, and its image_offset
+	 * means nothing. Delivery clears it before each resolve.
+	 */
+	const unsigned char *held;
 	/* The image range file storage can occupy, such as the FAT data
 	 * region or the exFAT cluster heap, set by the driver's open. Content
 	 * is never read outside it; until a driver sets it, it is empty. It

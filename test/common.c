@@ -55,6 +55,11 @@ typedef struct reader_fixture {
 	unsigned		roots[2];
 	unsigned		second_descents;
 	unsigned		resolves;
+	bool			span_mode;
+	fsimg_extent_t		spans[2];
+	const unsigned char	*span_bytes[2];
+	fsimg_status_t		span_failure;
+	bool			span_change_host;
 	uint64_t		first_work;
 	uint64_t		first_entries;
 	uint64_t		second_work;
@@ -243,7 +248,7 @@ reader_replay(fsimg_reader_t *reader, const char *name FSIMG_UNUSED,
 }
 
 static fsimg_status_t
-reader_resolve(fsimg_reader_t *reader, uint64_t offset FSIMG_UNUSED,
+reader_resolve(fsimg_reader_t *reader, uint64_t offset,
     fsimg_extent_t *extent, fsimg_error_t *error FSIMG_UNUSED)
 {
 	reader_fixture_t *f = reader->driver;
@@ -254,6 +259,20 @@ reader_resolve(fsimg_reader_t *reader, uint64_t offset FSIMG_UNUSED,
 	CHECK(reader->link_length == 0);
 	CHECK(reader->entry.kind == FSIMG_ENTRY_FILE);
 	f->resolves++;
+	if (f->span_mode) {
+		size_t index = offset >= 3 ? 1 : 0;
+
+		if (index == 1 && f->span_failure != FSIMG_OK)
+			return (f->span_failure);
+		if (index == 1 && f->span_change_host)
+			CHECK(ftruncate(f->changed_host, VOLUME_BYTES + 1) == 0);
+		if (index == 1 && f->cancel_delivery)
+			f->cancelled = true;
+		*extent = f->spans[index];
+		if (f->span_bytes[index] != NULL)
+			reader->held = f->span_bytes[index];
+		return (FSIMG_OK);
+	}
 	*extent = (fsimg_extent_t){ .image_offset = 0, .length = 3 };
 	return (FSIMG_OK);
 }
@@ -1519,9 +1538,180 @@ test_child_error_paths_obey_the_path_limit(void)
 	}
 }
 
+/* Keep these contract assertions independent: a missing held-span engine must
+ * report every scenario, rather than aborting at the first unsupported span.
+ */
+static unsigned held_failures;
+
+static void
+held_expect(const char *name, bool result)
+{
+	if (!result) {
+		fprintf(stderr, "%s: held-span contract failed\n", name);
+		held_failures++;
+	}
+}
+
+static void
+held_fixture(reader_fixture_t *f)
+{
+	const fsimg_entry_t *entry;
+
+	reader_fixture_open(f);
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_next(f->reader, &entry, NULL) == FSIMG_OK);
+	f->span_mode = true;
+	f->reader->entry.size = f->reader->initialized = 6;
+	f->spans[0] = (fsimg_extent_t){ .length = 3,
+	    .image_offset = UINT64_MAX };
+	f->spans[1] = (fsimg_extent_t){ .logical_offset = 3, .length = 3,
+	    .image_offset = UINT64_MAX };
+	f->span_bytes[0] = (const unsigned char *)"abc";
+	f->span_bytes[1] = (const unsigned char *)"def";
+}
+
+static void
+test_held_span_delivery(void)
+{
+	reader_fixture_t f;
+	unsigned char bytes[16];
+	size_t count, stored;
+	unsigned reads;
+	fsimg_status_t status;
+	fsimg_range_t range;
+	fsimg_verify_report_t report = { 0 };
+
+	held_fixture(&f);
+	reads = f.image.reads;
+	status = fsimg_reader_content(f.reader, 1, bytes, 4, &count, &stored, NULL);
+	held_expect("test_held_span_clips_and_crosses_spans", status == FSIMG_OK &&
+	    count == 4 && stored == 0 && bcmp(bytes, "bcde", 4) == 0 &&
+	    f.image.reads == reads && f.resolves == 2);
+	reader_fixture_close(&f);
+
+	held_fixture(&f);
+	f.reader->initialized = 4;
+	memset(bytes, 0xa5, sizeof(bytes));
+	status = fsimg_reader_content(f.reader, 2, bytes, sizeof(bytes), &count,
+	    &stored, NULL);
+	held_expect("test_held_span_initialized_tail", status == FSIMG_OK &&
+	    count == 4 && stored == 0 && bcmp(bytes, "cd\0\0", 4) == 0 &&
+	    bytes[4] == 0xa5);
+	reader_fixture_close(&f);
+
+	for (unsigned invalid = 0; invalid < 2; invalid++) {
+		held_fixture(&f);
+		f.spans[0].logical_offset = invalid == 0 ? 1 : 0;
+		f.spans[0].length = invalid == 0 ? 3 : 0;
+		status = fsimg_reader_content(f.reader, 0, bytes, 1, &count,
+		    &stored, NULL);
+		held_expect("test_held_span_requires_containment",
+		    status == FSIMG_ESTATE && count == 0 && stored == 0);
+		reader_fixture_close(&f);
+	}
+	for (unsigned mapped = 0; mapped < 2; mapped++) {
+		held_fixture(&f);
+		f.span_bytes[mapped] = NULL;
+		f.spans[mapped].image_offset = 100;
+		bcopy(mapped == 0 ? "abc" : "def", f.image.bytes + 100, 3);
+		reads = f.image.reads;
+		status = fsimg_reader_content(f.reader, 0, bytes, 6, &count,
+		    &stored, NULL);
+		held_expect(mapped == 0 ? "test_mapped_then_held" :
+		    "test_held_then_mapped_clears_stale_pointer",
+		    status == FSIMG_OK && count == 6 && stored == 3 &&
+		    bcmp(bytes, "abcdef", 6) == 0 && f.image.reads == reads + 1);
+		reader_fixture_close(&f);
+	}
+	held_fixture(&f);
+	f.span_failure = FSIMG_ECORRUPT;
+	memset(bytes, 0xa5, sizeof(bytes));
+	status = fsimg_reader_content(f.reader, 0, bytes, 6, &count, &stored, NULL);
+	held_expect("test_held_span_failure_preserves_confirmed_bytes",
+	    status == FSIMG_ECORRUPT && count == 3 && stored == 0 &&
+	    bcmp(bytes, "abc", 3) == 0 && bytes[3] == 0xa5);
+	reader_fixture_close(&f);
+
+	for (unsigned cancel = 0; cancel < 2; cancel++) {
+		held_fixture(&f);
+		if (cancel != 0)
+			f.cancelled = true;
+		else
+			f.ctx->options.max_work = f.reader->session.progress.work;
+		status = fsimg_reader_content(f.reader, 0, bytes, 6, &count,
+		    &stored, NULL);
+		held_expect(cancel ? "test_held_span_observes_cancellation" :
+		    "test_held_span_charges_work", count == 0 && stored == 0 &&
+		    status == (cancel ? FSIMG_ECANCELLED : FSIMG_ELIMIT));
+		reader_fixture_close(&f);
+	}
+	held_fixture(&f);
+	reads = f.image.reads;
+	status = fsimg_reader_next_range(f.reader, 1, &range, NULL);
+	held_expect("test_held_span_ranges_do_not_resolve", status == FSIMG_OK &&
+	    range.offset == 1 && range.length == 5 && range.kind == FSIMG_RANGE_DATA &&
+	    f.resolves == 0 && f.image.reads == reads);
+	status = fsimg_verify_account(f.reader, &report, NULL);
+	if (status == FSIMG_OK)
+		status = fsimg_verify_payload(f.reader, bytes, sizeof(bytes), &report, NULL);
+	held_expect("test_held_span_verification_counts_logical_bytes",
+	    status == FSIMG_OK && report.logical_bytes == 6 &&
+	    report.payload_bytes_read == 0 && f.image.reads == reads);
+	reader_fixture_close(&f);
+}
+
+static void
+test_held_span_checks_each_span(void)
+{
+	for (unsigned scenario = 0; scenario < 3; scenario++) {
+		reader_fixture_t f;
+		unsigned char bytes[6];
+		size_t count, stored;
+		char directory[] = "common-held-XXXXXX";
+		int fd = -1;
+		fsimg_status_t expected;
+
+		held_fixture(&f);
+		if (scenario == 0) {
+			/* Only this stability check needs a host file, because the
+			 * callback source has no host identity to change. */
+			const fsimg_entry_t *entry;
+
+			CHECK(mkdtemp(directory) != NULL);
+			fd = reader_fixture_use_host(&f, directory);
+			CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+			CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
+			f.reader->entry.size = f.reader->initialized = 6;
+			f.changed_host = fd;
+			f.span_change_host = true;
+			expected = FSIMG_ESOURCE_CHANGED;
+		} else if (scenario == 1) {
+			f.cancel_delivery = true;
+			expected = FSIMG_ECANCELLED;
+		} else {
+			f.ctx->options.max_work = f.reader->session.progress.work + 1;
+			expected = FSIMG_ELIMIT;
+		}
+		memset(bytes, 0xa5, sizeof(bytes));
+		fsimg_status_t status = fsimg_reader_content(f.reader, 0, bytes,
+		    sizeof(bytes), &count, &stored, NULL);
+		held_expect(scenario == 0 ? "test_held_span_stability_after_resolve" :
+		    scenario == 1 ? "test_held_span_cancellation_between_spans" :
+		    "test_held_span_work_limit_between_spans", status == expected &&
+		    count == 3 && stored == 0 && bcmp(bytes, "abc", 3) == 0 && bytes[3] == 0xa5);
+		reader_fixture_close(&f);
+		if (fd != -1) {
+			CHECK(close(fd) == 0);
+			CHECK(rmdir(directory) == 0);
+		}
+	}
+}
+
 int
 main(void)
 {
+	test_held_span_delivery();
+	test_held_span_checks_each_span();
 	test_child_error_paths_apply_the_name_profile();
 	test_child_error_paths_obey_the_path_limit();
 	test_provider_link_reads_at_plan_and_emit_and_observes_changed_bytes();
@@ -1551,5 +1741,5 @@ main(void)
 	test_reader_view_rejected_before_driver_open_or_image_reads();
 	test_view_applicability_precedes_driver_open();
 	test_decoded_link_payload_verification_charges_work();
-	return (0);
+	return (held_failures == 0 ? 0 : 1);
 }
