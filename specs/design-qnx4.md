@@ -79,7 +79,10 @@ of 512, and a size above `2^28` is out of range. The declared bytes therefore
 always exceed the slice, and the volume follows the
 [rules for a truncated image](architecture.md#byte-and-object-boundaries). A
 cut too short to change `ceil(N / 8)` proves nothing: the slice is judged as a
-volume of its own length. A damaged size that overstates the bitmap without
+volume of its own length. If it is whole blocks and every lost block was
+allocated, it opens as an intact volume with nothing missing, and only what
+refers past the slice fails; otherwise it fails the length or padding-bit
+check. A damaged size that overstates the bitmap without
 changing `B` is indistinguishable from a cut and reads as one, so full
 verification fails it as truncated.
 

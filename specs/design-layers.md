@@ -120,7 +120,8 @@ its length, so this rule passes for it with no case of its own. Its
 format may still need a length rule: under `none` an `ifsboot` body's
 length is a multiple of 4, because `stored_size` is. That rule is the
 carried filesystem's own invariant. The filesystem's layout guarantees it
-on create, the wrap's verification of its input establishes it, and the
+on create, a carried container's wrap establishes it by fully verifying
+[its input](#wrap-unwrap-and-compose), and the
 container's bound refuses a disk that breaks it, naming the field. Since
 this rule refuses any scheme below `ifs` first, a scheme inside a carried
 container around `ifs` is refused here, naming the scheme, before the
@@ -826,6 +827,24 @@ They are library operations with no command-line form.
   the stack has no scheme, and the input must draw the carried
   filesystem's bounded-probe claim; `FSIMG_EFORMAT` names the input
   otherwise.
+
+  What a wrap establishes about its input depends on the stack, and every
+  refusal comes before any output byte. A stack that names a filesystem
+  and has no carried container requires that filesystem's claim,
+  `FSIMG_EINVAL` naming it otherwise, and a corrupt or unsupported claim
+  counts. It then opens a reader on the input: a refused open keeps its
+  class, and a nonzero
+  [`missing_bytes`](architecture.md#byte-and-object-boundaries) is
+  `FSIMG_ECORRUPT` naming the truncation and that count, so a volume its
+  format proves truncated is not written into a new image. This is an open,
+  not a verification: the volume is otherwise copied as it stands, including
+  a cut that leaves no proof, such as
+  [a QNX4 cut that keeps the bitmap's size and loses only allocated
+  blocks](design-qnx4.md#blocks-and-the-block-count). A carried
+  container runs the carried filesystem's full structural verification,
+  which fails on a truncated volume with the same class and establishes
+  what the container's header depends on. A stack with neither takes the
+  input as raw bytes; its probe only types the partition.
 * **Unwrap** takes an opened image and a Disk, partition or Range selector and
   writes the selected bytes raw.
 * **Compose** takes an ordered list of volume images, each opened as an image
@@ -2275,7 +2294,7 @@ format correctness; the oracle rows do.
 | Spool | Stdin of a raw, DMG and gzip image through the coordinator's pipe; all-zero input leaves holes (physical blocks sampled); limit exactly reached; a raw stream whose prefix also passes for gzip is ambiguous and `-z` or `-F` resolves it | A gzip bomb failing at the step that crosses the limit with `FSIMG_RESOURCE_SPOOL`, before the host file grows past it; no spool descriptor; spool descriptor not a fresh empty file; a terminal on stdin refused |
 | Transcode | Output bytes identical with hole knowledge consulted and ignored, across budgets and chunk-cache sizes; a sparse raw intermediate read only where its record marks writes; raw intermediate absent from every directory after success and failure; output-limit accounting of both files, in the staging directory and in the scratch tree | Short write, flush failure and cancellation at each chunk: staged files removed, nothing published, stream reports incomplete output after the first byte; a sink needing a raw intermediate without one, or with a descriptor that is linked, non-empty, not regular or read-only, fails before any mutation; `cf -` with a terminal on stdout refused |
 | Chunk cache | Sequential reads of a UDZO image decode each chunk once; a pattern confined to four chunks decodes each once; decoded bytes appear in the work counter | A pattern alternating across five maximum chunks pays one decode per read and stops at `-l work=` with `FSIMG_RESOURCE_WORK`, and without a work limit at the decode bound; a 16 MiB memory budget fails the open as a memory limit |
-| Wrap, unwrap, compose | Wrap then unwrap is the identity; compose of three volumes lists three partitions with the given names and types in `sgdisk`; inputs read once; a DMG input's zero run composed without a read or a decode, as the [hole design](design-holes.md#tests-and-evidence) details | Aliased input and output; five partitions on MBR; unrecognised volume without `type=` |
+| Wrap, unwrap, compose | Wrap then unwrap is the identity; compose of three volumes lists three partitions with the given names and types in `sgdisk`; a compose's inputs read once; a DMG input's zero run composed without a read or a decode, as the [hole design](design-holes.md#tests-and-evidence) details; an intact volume of each filesystem wraps under a stack naming it, bare and gzipped, and in a scheme and a container for each but `ifs`; a QNX4 cut too short to change its bitmap, with its tail allocated, wraps as the volume its slice describes | Aliased input and output; five partitions on MBR; unrecognised volume without `type=`; a volume of each filesystem cut with its metadata intact, an exFAT under its 1 MiB minimum among them, under each of those stacks and `ifs/ifsboot` (`FSIMG_ECORRUPT` naming the missing byte count, with no output byte); a volume the probe claims and open refuses, and a FAT cut inside its tables, which its probe calls corrupt (`FSIMG_ECORRUPT` naming the input, no output byte); a claim the probe calls unsupported keeps `FSIMG_EUNSUPPORTED`; an intact `ifs` in a scheme and a container (`FSIMG_EUNSUPPORTED`) |
 | Create then verify | Verification runs on the staged file before publication | A fault injected into the staged file after transcode discards it, publishes nothing, and names the layer; `cW` with `-f -` is a syntax error |
 | Reproducibility | Byte-identical output across host order, budget, scratch placement, cache size and hole knowledge for every container, under `compress=none` and under zlib with one zlib version; identifiers follow the derivation under `-R` | Different epochs differ only in the derived fields; an unset identifier without `-R` fails in the library with the key named; zlib version reported |
 | Fuzzing | koly, plist, mish, GPT, MBR, VHD footer, simg header, gzip header, startup header and framing, and `hbcifs` header parsers under sanitizers with small budgets | Corpus seeded from every fixture above |

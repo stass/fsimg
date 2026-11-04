@@ -306,8 +306,17 @@ format treats a volume longer than its slice by the same rules:
   `missing_bytes` is nonzero, before the driver's verification runs: a volume
   missing part of itself is not a verified volume, whatever references the
   tail. No driver has a truncation check of its own in verification. A format
-  that opens a truncated volume declares a `volume_bytes` beyond the slice, so
-  this holds by construction.
+  that opens a volume it proves truncated declares a `volume_bytes` beyond the
+  slice, so this holds by construction. A cut that leaves no proof, such as
+  [a QNX4 cut that keeps the bitmap's size and loses only allocated
+  blocks](design-qnx4.md#blocks-and-the-block-count), is judged as a volume of the slice's length.
+* **A wrap does not package a truncated volume it names.** It would write the
+  broken volume into a new image, so a
+  [wrap](design-layers.md#wrap-unwrap-and-compose) whose stack names a
+  filesystem fails `FSIMG_ECORRUPT` on nonzero `missing_bytes`, naming the
+  truncation and that count, before any output, as a carried container's
+  verification of its input does. A cut the open refuses keeps the driver's
+  error, and a cut that leaves no proof is not detected.
 
 A partition scheme applies the same rules to a disk: a partition past the disk's
 end is clipped, GPT opens from its primary when the alternate LBA proves the cut,

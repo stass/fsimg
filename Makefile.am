@@ -152,7 +152,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-private test-io test-device test-meta test-meta-sort test-meta-runs test-unicode test-format \
 	test-catalog test-source test-mtree test-manifest test-publish test-fat test-fat-write test-emit \
 	test-common test-driver-contracts test-layer-contracts test-codec-memory \
-	test-metadata-loss \
+	test-metadata-loss test-wrap-truncated \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
@@ -223,6 +223,8 @@ test_settings_SOURCES = test/settings.c test/test.h
 test_settings_LDADD = libfsimg-core.la
 test_layers_write_SOURCES = test/layers-write.c test/test.h
 test_layers_write_LDADD = libfsimg-core.la
+test_wrap_truncated_SOURCES = test/wrap-truncated.c test/test.h
+test_wrap_truncated_LDADD = libfsimg-core.la
 test_scheme_planning_SOURCES = test/scheme-planning.c test/test.h
 test_scheme_planning_LDADD = libfsimg-core.la
 test_containers_SOURCES = test/containers.c test/test.h

@@ -56,8 +56,10 @@ typedef struct assembled_disk {
 static fsimg_status_t check_mode(const fsimg_stack_t *,
     const fsimg_write_options_t *, fsimg_write_options_t *,
     fsimg_layer_options_t *, fsimg_layer_inputs_t *, fsimg_error_t *);
+static fsimg_status_t check_input_whole(fsimg_ctx_t *, fsimg_io_t *,
+    const char *, fsimg_error_t *);
 static fsimg_status_t check_named_input(fsimg_ctx_t *, fsimg_io_t *,
-    uint64_t, const fsimg_stack_t *, char [static 16], fsimg_error_t *);
+    uint64_t, const char *, char [static 16], fsimg_error_t *);
 static fsimg_status_t check_carried_input(fsimg_ctx_t *, fsimg_io_t *,
     uint64_t, const fsimg_stack_t *, const fsimg_layer_t *, char [static 16],
     fsimg_byte_order_t *, fsimg_error_t *);
@@ -81,7 +83,7 @@ static fsimg_status_t disk_next_zero(void *, uint64_t, uint64_t *, uint64_t *,
     fsimg_error_t *);
 static void disk_keep(void *);
 static fsimg_status_t identify_volume(fsimg_ctx_t *, fsimg_io_t *, uint64_t,
-    const char *, char [static 16], fsimg_error_t *);
+    char [static 16], fsimg_error_t *);
 static fsimg_status_t write_plan(fsimg_session_t *, fsimg_disk_plan_t *,
     fsimg_io_t *const *, const uint64_t *, bool, const fsimg_sink_t *,
     fsimg_error_t *);
@@ -464,19 +466,19 @@ disk_keep(void *argument FSIMG_UNUSED)
 {
 }
 
-/* The filesystem a volume's prefix identifies, forced or detected; name is
- * empty when no single format claims it.
+/* The filesystem a volume's prefix identifies; name is empty when no single
+ * format claims it.
  */
 static fsimg_status_t
 identify_volume(fsimg_ctx_t *ctx, fsimg_io_t *volume, uint64_t length,
-    const char *forced, char name[static 16], fsimg_error_t *error)
+    char name[static 16], fsimg_error_t *error)
 {
 	fsimg_session_t session;
 	fsimg_claim_t claim;
 	fsimg_status_t status;
 
 	fsimg_session_init(&session, ctx, "volume identification", 0);
-	status = fsimg_volume_claim(ctx, volume, &session, 0, length, forced,
+	status = fsimg_volume_claim(ctx, volume, &session, 0, length, NULL,
 	    &claim, name, error);
 	if (status == FSIMG_OK && claim != FSIMG_CLAIM_FORMAT)
 		name[0] = '\0';
@@ -523,30 +525,71 @@ write_plan(fsimg_session_t *session, fsimg_disk_plan_t *plan,
 	return (status);
 }
 
-/* The filesystem a wrap's input holds, empty when no single format claims
- * it; one the stack names must be the one it holds, else FSIMG_EINVAL
- * naming the filesystem.
+/*
+ * A named input's driver must open it, a refusal keeping its class, and the
+ * reader core must find its declared volume all there: a truncated volume
+ * is FSIMG_ECORRUPT naming the count, since a wrap would write it broken
+ * into a new image. A cut the format cannot prove is no truncation here
+ * (specs/architecture.md#byte-and-object-boundaries). Each refusal names
+ * the input ("input").
+ */
+static fsimg_status_t
+check_input_whole(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *named,
+    fsimg_error_t *error)
+{
+	fsimg_read_options_t read_options;
+	fsimg_volume_info_t info;
+	fsimg_reader_t *reader;
+	char message[sizeof(error->message)];
+	fsimg_status_t status;
+
+	fsimg_read_options_init(&read_options);
+	read_options.format = named;
+	reader = NULL;
+	status = fsimg_reader_open(ctx, input, &read_options, &reader, error);
+	if (status == FSIMG_OK)
+		status = fsimg_reader_get_info(reader, &info, error);
+	if (status == FSIMG_OK && info.missing_bytes != 0) {
+		snprintf(message, sizeof(message),
+		    "image is truncated: %llu declared bytes are missing",
+		    (unsigned long long)info.missing_bytes);
+		status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_IMAGE, message);
+	}
+	fsimg_reader_free(reader);
+	if (status != FSIMG_OK)
+		fsimg_error_path(error, "input");
+	return (status);
+}
+
+/*
+ * The input of a stack naming a filesystem, without a carried container:
+ * the input must draw that filesystem's own claim, else FSIMG_EINVAL naming
+ * it, and then open whole. A corrupt or unsupported claim is a claim, and
+ * the open, which runs the same probe, reports it; so on success filesystem
+ * holds the name.
  */
 static fsimg_status_t
 check_named_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
-    const fsimg_stack_t *stack, char filesystem[static 16],
-    fsimg_error_t *error)
+    const char *named, char filesystem[static 16], fsimg_error_t *error)
 {
-	const fsimg_stack_slot_t *slot = &stack->slots[FSIMG_LAYER_FILESYSTEM];
-	const char *named;
+	fsimg_session_t session;
+	fsimg_claim_t claim;
 	fsimg_status_t status;
 
-	named = slot->state == FSIMG_SLOT_NAMED ? slot->name : NULL;
-	status = identify_volume(ctx, input, length, named, filesystem, error);
+	fsimg_session_init(&session, ctx, "volume identification", 0);
+	status = fsimg_volume_claim(ctx, input, &session, 0, length, named,
+	    &claim, filesystem, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (named != NULL && strcmp(filesystem, named) != 0) {
+	if (claim == FSIMG_CLAIM_NONE || (claim == FSIMG_CLAIM_FORMAT &&
+	    strcmp(filesystem, named) != 0)) {
 		fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
 		    "the volume does not hold the filesystem the stack names");
 		fsimg_error_path(error, named);
 		return (FSIMG_EINVAL);
 	}
-	return (FSIMG_OK);
+	return (check_input_whole(ctx, input, named, error));
 }
 
 /*
@@ -607,10 +650,10 @@ check_carried_input(fsimg_ctx_t *ctx, fsimg_io_t *input, uint64_t length,
 
 /*
  * Wrap one raw volume. A filesystem the stack names must be the one the
- * volume holds, and a container that carries a filesystem requires its
- * input to hold that one and to verify. With a scheme the volume is the
- * one partition, typed by the layer settings or else by its filesystem;
- * without one it is the output.
+ * volume holds and open whole, and a container that carries a filesystem
+ * requires its input to hold that one and to verify. With a scheme the
+ * volume is the one partition, typed by the layer settings or else by its
+ * filesystem; without one it is the output.
  */
 fsimg_status_t
 fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
@@ -655,9 +698,11 @@ fsimg_image_wrap(fsimg_ctx_t *ctx, fsimg_io_t *input, const char *text,
 	if (container != NULL && container->container->carries != NULL)
 		status = check_carried_input(ctx, input, length, &stack,
 		    container, filesystem, &order, error);
+	else if (stack.slots[FSIMG_LAYER_FILESYSTEM].state == FSIMG_SLOT_NAMED)
+		status = check_named_input(ctx, input, length,
+		    stack.slots[FSIMG_LAYER_FILESYSTEM].name, filesystem, error);
 	else
-		status = check_named_input(ctx, input, length, &stack, filesystem,
-		    error);
+		status = identify_volume(ctx, input, length, filesystem, error);
 	if (status != FSIMG_OK)
 		return (status);
 	/* One session charges the container's plan and the output. */
@@ -837,7 +882,7 @@ fsimg_image_compose(fsimg_ctx_t *ctx, const char *text,
 		typed = parts[i].type != NULL && parts[i].type[0] != '\0';
 		filesystem[0] = '\0';
 		if (status == FSIMG_OK && !typed)
-			status = identify_volume(ctx, volumes[i], lengths[i], NULL,
+			status = identify_volume(ctx, volumes[i], lengths[i],
 			    filesystem, error);
 		if (status != FSIMG_OK)
 			break;

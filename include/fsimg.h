@@ -1400,7 +1400,9 @@ typedef struct fsimg_part {
  * wrap puts a raw volume into the stack's scheme as its one partition,
  * typed by gpt_type or mbr_type, else by the filesystem the stack names or
  * the volume's prefix identifies; without a scheme the volume is the
- * disk. unwrap writes the bytes a selector names. compose places count
+ * disk. A filesystem the stack names must open on the volume before any
+ * output, and a truncation it proves is FSIMG_ECORRUPT. unwrap writes the
+ * bytes a selector names. compose places count
  * volumes in order, each 1 MiB aligned, under a stack naming a scheme and
  * no filesystem; the layer options' partition fields must hold their
  * defaults, since each part carries its own. A container in the stack of
