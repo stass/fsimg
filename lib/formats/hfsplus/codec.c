@@ -451,6 +451,7 @@ hfsplus_mdb_decode(const unsigned char *raw, size_t length, hfsplus_mdb_t *mdb)
 		return (false);
 
 	mdb->signature = fsimg_load_be16(raw);
+	mdb->allocation_blocks = fsimg_load_be16(raw + 0x12);
 	mdb->allocation_block_size = fsimg_load_be32(raw + 0x14);
 	mdb->first_block_sector = fsimg_load_be16(raw + 0x1c);
 	mdb->embedded_signature = fsimg_load_be16(raw + 0x7c);

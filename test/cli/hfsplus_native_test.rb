@@ -50,8 +50,8 @@ class HfsplusNativeTest < Minitest::Test
       message: "HFS Plus directory hard link is not supported", path: "/dl1/a/d"),
     Expectation.new(pattern: /e8-interrupted\z/, status: :refused, code: -6,
       message: "HFS Plus journal holds transactions; mount the volume to replay", path: ""),
-    Expectation.new(pattern: /mkfs-w(?:-J(?:-mounted)?)?\z/, status: :refused, code: -6,
-      message: "HFS Plus volume inside an HFS wrapper is not supported", path: ""),
+    Expectation.new(pattern: /mkfs-w-J-mounted\z/, status: :refused, code: -6,
+      message: "HFS Plus journal inside a wrapper has no established location", path: ""),
     Expectation.new(pattern: /\Ah-(?:hfsplus|hfsx)-/, status: :ok, code: nil,
       message: nil, path: nil)
   ].freeze

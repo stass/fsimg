@@ -104,15 +104,19 @@ volume, contradicts the declared variant and is `FSIMG_EFORMAT`, as the
 `open` completes recognition in a fixed order; each step fails before the
 next reads:
 
-1. **Wrapper.** For a `BD` block, decode the master directory block, compute
-   the embedded range with checked arithmetic, require it inside the slice
-   and open it as a nested slice; the driver then works on that slice alone,
-   whose header at 1024 must show `H+` version 4 and pass the probe's field
-   checks. The embedded volume's own boot blocks lie inside the wrapper's
-   allocation and are not tested.
-2. **Geometry.** Decode the header; take `V`, the slice length or a longer
-   `N * B`, and require it to be a multiple of 512; apply the attribute
-   table; derive `B`, `N`, `r`, `t` and the content domain
+1. **Wrapper.** For a `BD` block, decode the master directory block and
+   compute the embedded range in 64 bits, which its 16-bit and 32-bit fields
+   cannot overflow. Require it inside the outer volume's allocation blocks,
+   past the master directory block and starting inside the slice, and open it,
+   clipped to the slice, as a nested slice that replaces the reader's input
+   and length until close. The driver then works on that slice alone, so the
+   journal's offsets and verification need no wrapper case, and its header at
+   1024 must show `H+` version 4 and pass the probe's field checks. The
+   embedded volume's own boot blocks lie inside the wrapper's allocation and
+   are not tested.
+2. **Geometry.** Decode the header; on a wrapped volume require `N * B` to
+   equal the embedded range; take `V`, the slice length or a longer `N * B`,
+   and require it to be a multiple of 512; apply the attribute table; derive `B`, `N`, `r`, `t` and the content domain
    `[r * B, (N - t) * B)` into `hfsplus_geometry_t`.
 3. **Extents tree.** Build its fork index from the eight inline extents
    alone, require their sum to equal `totalBlocks`, read node 0 and check
@@ -171,7 +175,10 @@ it. `N * B` is then only a lower bound on `V`: the real volume may run up to
 one block further, which frees its last block for content, so `t` cannot be
 known. Such a volume reserves no tail and its content domain runs to `N`. The
 read funnel refuses whatever the slice does not hold, and bytes the slice does
-hold in the last block are harmless.
+hold in the last block are harmless. The range of a wrapped volume is exactly
+`N * B`, so its `V` is known; its `info` also adds the
+[outer volume's lost tail](design-hfsplus.md#the-hfs-wrapper) to `N * B`, which
+makes the derived missing bytes the outer volume's.
 
 Declared geometry sizes nothing here, so nothing has to stop at the slice's
 end. Node buffers follow the bounded `nodeSize`, and an extent index and the

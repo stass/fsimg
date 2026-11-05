@@ -245,6 +245,7 @@ typedef struct hfsplus_journal {
 typedef struct hfsplus_mdb {
 	uint32_t	 allocation_block_size;	/* drAlBlkSiz */
 	uint16_t	 signature;
+	uint16_t	 allocation_blocks;	/* drNmAlBlks */
 	uint16_t	 first_block_sector;	/* drAlBlSt */
 	uint16_t	 embedded_signature;
 	uint16_t	 embedded_start;
@@ -654,8 +655,19 @@ typedef struct fsimg_hfsplus_reader {
 	unsigned char		*catalog_scan_node;
 	fsimg_extent_index_t	*bitmap;
 	hfsplus_folder_t	 root;
-	/* Set for an embedded volume; decides the journal table's wrapped row. */
+	/* Set for an embedded volume; decides the journal table's wrapped row.
+	 * The reader's input is then embedded_input, a slice this state owns of
+	 * outer_input, which hfsplus_close() puts back. wrapper_offset and
+	 * embedded_bytes are the range; outer_missing is what the outer volume
+	 * declares past both the slice and that range, which read.c adds to the
+	 * reported volume so the reader core counts it as missing.
+	 */
 	bool			 wrapped;
+	fsimg_io_t		*outer_input;
+	fsimg_io_t		*embedded_input;
+	uint64_t		 wrapper_offset;
+	uint64_t		 embedded_bytes;
+	uint64_t		 outer_missing;
 	/* The journal, for the root's format-owned files; its blocks are zero
 	 * without one. journal_info_block is meaningful under the same state.
 	 */
@@ -858,15 +870,9 @@ bool hfsplus_index_child(const hfsplus_record_t *, uint32_t *);
 fsimg_status_t hfsplus_record_compare(const hfsplus_tree_t *,
     const hfsplus_record_t *, const hfsplus_record_t *, int *, fsimg_error_t *);
 
-/* Open (volume.c): the fixed step order of the driver design, with the journal
- * step apart. hfsplus_journal_open() applies the info block's flags table to
- * the open catalog. It is external, and the reader's wrapped field settable,
- * only so tests can reach the table's wrapped row, which open cannot while it
- * refuses every wrapper at its first step.
- */
+/* Open (volume.c): the fixed step order of the driver design. */
 fsimg_status_t hfsplus_volume_open(fsimg_reader_t *,
     const fsimg_format_variant_t *, fsimg_error_t *);
-fsimg_status_t hfsplus_journal_open(fsimg_reader_t *, fsimg_error_t *);
 
 /* What the stub tests decide of a file record. */
 typedef enum hfsplus_link {

@@ -178,6 +178,9 @@ typedef struct gen_image {
 /* The caller owns the returned image and frees it with gen_free(). No I/O. */
 void gen_plan_init(gen_plan_t *);
 void gen_build(const gen_plan_t *, gen_image_t *);
+/* Owned outer bytes; the embedded image remains owned by its caller. */
+unsigned char *gen_wrap(const gen_image_t *, uint32_t, uint16_t, uint16_t,
+    uint16_t, size_t *);
 void gen_free(gen_image_t *);
 void gen_rebuild_bitmap(gen_image_t *);
 uint64_t gen_node_offset(const gen_image_t *, gen_tree_id_t, uint32_t);

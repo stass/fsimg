@@ -56,6 +56,7 @@ class HfsplusVerifyManifestTest < Minitest::Test
     {
       ["native", "h-hfsplus-33554432-e8-interrupted"] => "unsupported capability",
       ["native", "h-hfsplus-16777216-e4-dirlinks-J"] => "unsupported capability",
+      ["native", "h-hfsplus-16777216-e11-mkfs-w-J-mounted"] => "unsupported capability",
       ["decoded", "mozilla-1.0-smi"] => "corrupt image"
     }.each do |identity, status|
       row = ROWS.find { [_1.source, _1.identifier] == identity }

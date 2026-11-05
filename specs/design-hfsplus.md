@@ -1280,13 +1280,27 @@ long. [TN]
 
 The reader opens that range as a slice and reads it as an `H+` volume, its
 alternate header at the end of the embedded range. `drAlBlkSiz` is a nonzero
-multiple of 512, the range lies inside the outer slice, and the embedded
-volume's signature is `H+` with version 4; anything else is
-`FSIMG_ECORRUPT`. The embedded volume's block size need not equal the
+multiple of 512, `count` is nonzero, the extent lies inside the outer
+volume's `drNmAlBlks` allocation blocks (2 bytes at `0x12`), the range starts
+past the master directory block, the embedded volume's signature is `H+` with
+version 4, and the range equals `N * B` of the volume inside it; anything else
+is `FSIMG_ECORRUPT`. The embedded volume's block size need not equal the
 wrapper's: `mkfs.hfsplus -w` and the Blender 2.28 image use 4096 for both,
 with `drAlBlSt` 8 and the embedded volume at byte 45056, and the Mac OS X
-install discs wrap 4096-byte volumes in 73728-byte outer blocks; in every
-case the embedded range equals `N * B` of the volume inside it (E10, E11).
+install discs wrap 4096-byte volumes in 73728-byte outer blocks; the range
+equals `N * B` in every case, so that equality is what a block size
+contradicting the wrapper breaks (E10, E11).
+
+The outer volume declares `512 * drAlBlSt + drNmAlBlks * drAlBlkSiz + 1024`
+bytes: its allocation blocks, the alternate master directory block and a
+reserved sector. A slice shorter than that follows the [common rule for a
+truncated volume](architecture.md#byte-and-object-boundaries). The nested slice
+is clipped to the outer slice's end, an embedded volume starting past that end
+fails `FSIMG_ECORRUPT`, and the reported volume adds what the slice lacks of the
+outer volume beyond the embedded range to `N * B`. The missing bytes are
+therefore the outer volume's, so verification fails even on a cut that leaves
+the embedded volume whole, while reading continues as on any truncated volume.
+
 The wrapper is an envelope around the HFS Plus volume, as a partition table
 is around a partition: its own catalog, bitmap, which marks every block
 used, and files, among them the bad-block file whose one extent covers the
@@ -1604,7 +1618,7 @@ code ran. The minimum matrix:
 | Links and kinds | Symbolic links of 1, 1023 and 1024 bytes and one with a NUL; FIFOs, sockets and devices; hard-link stubs to files and symbolic links, two and three names across directories, a dangling stub, a zero reference, a link count off by one; a stub with `fileMode` 0; a stub dated from the root folder and one from the private data folder; `hlnk`/`hfs+` with another date, read as a file; a directory hard link refused and its Finder-alias look-alike read as a file; `temp` files |
 | Compression | Every type with content of 0, 1, 65535, 65536, 65537 and 200000 bytes; raw-marker chunks; a type 4 header, table and chunk out of range, a chunk inside the fork but past the resource payload, in the map, and a header whose relations fail; for types 8 and 12 a first word below `4 * (count + 1)`, beyond the fork, padded and unpadded, and a table whose words are read from offset zero while the first word points elsewhere; a chunk above the input bound; an inline size above 65536; an LZFSE `bvx-` block; overlapping and descending chunks; a chunk decoding one byte short and one long; an unknown type; a header shorter than 16 bytes; the flag without the attribute; the attribute without the flag; a nonempty data fork; sequential reading decoding each chunk once |
 | Journal | Unjournaled, clean empty journal in each byte order, uninitialized journal, transactions present with `start < end` and with `start > end`, `start == end` at a position other than `jhdr_size`, `start == size` with `end == jhdr_size` read as clean, `start` or `end` of 0, above `size` or not a multiple of 512, `size` below 256 KiB and above 1 GiB, external journal, flags with neither `0x1` nor `0x2`, a bad checksum, magic or size; journal files absent on a journaled volume and present on an unjournaled one; a `.journal` fork of two extents, of a length other than `size`, and at a start other than the info block's `offset`; an external journal with and without a `.journal` file; flags `0x3` and `0x6`, which the external row decides |
-| Wrapper | A wrapped volume with its embedded extent at the start, the middle and the end; an extent outside the outer slice; an embedded `HX`; a wrapped journal in each state: uninitialized, which reads (`h-hfsplus-16777216-e11-mkfs-w-J`), and initialized (`h-hfsplus-16777216-e11-mkfs-w-J-mounted`), clean, pending and with `offset` in either candidate base, each `FSIMG_EUNSUPPORTED`; an uninitialized wrapped journal whose `offset` does not match the fork |
+| Wrapper | A wrapped volume with its embedded extent at the start, the middle and the end; a signature with no extent; an extent outside the outer volume; location fields at their maxima; a wrapper naming itself; a range that is not the embedded `N * B`; an embedded `HX`; a slice cut inside the embedded volume, at its header and after it inside the outer tail; the outer volume's other bytes changed, which verification ignores; a wrapped journal in each state: uninitialized, which reads (`h-hfsplus-16777216-e11-mkfs-w-J`), and initialized (`h-hfsplus-16777216-e11-mkfs-w-J-mounted`), clean, pending and with `offset` in either candidate base, each `FSIMG_EUNSUPPORTED`; an uninitialized wrapped journal whose `offset` does not match the fork |
 | Writer | Both variants; every block size of the writer profile; exact and automatic sizing at each bitmap-block boundary; an empty catalog; a full volume; names at each length after decomposition, each of the four reserved root names with the private data folder's spelled through four U+2400, colliding siblings on each variant, U+2400 stored as U+0000, and the refused names: percent-text values, an all-ignorable name on `hfsplus`, each of the 23 `fsck_hfs` sequences, alone and after a starter, and a Greek letter with U+0301 accepted beside it; label default, 255 units and 256; owner and mode extremes; times at 1904, 1970, 2040 and beyond as counted losses and refusals; symbolic links and FIFOs; a catalog wide enough for map nodes; byte identity across source order, cache size, scratch path and time zone; a poison scan of every unused byte |
 | Failure | Allocation, scratch, short read, short write, premature EOF, source change, cancellation, flush and publication failures at every stage, each followed by a cleanup check |
 

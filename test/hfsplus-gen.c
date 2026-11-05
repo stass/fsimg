@@ -69,6 +69,41 @@ gen_load(const unsigned char *p, size_t width)
 	return (value);
 }
 
+/* Only the MDB's location fields describe this envelope. The allocation area
+ * outside the embedded bytes is deliberately empty, not a classic HFS tree.
+ */
+unsigned char *
+gen_wrap(const gen_image_t *image, uint32_t block_size, uint16_t first_sector,
+    uint16_t before, uint16_t after, size_t *length)
+{
+	uint64_t blocks, total, first, end;
+	unsigned char *bytes, *mdb;
+
+	CHECK(block_size != 0 && block_size % 512 == 0);
+	CHECK(image->length % block_size == 0);
+	blocks = image->length / block_size;
+	total = before + blocks + after;
+	first = (uint64_t)first_sector * 512;
+	end = first + total * block_size + 1024;
+	CHECK(first >= 1536 && blocks > 0 && total <= UINT16_MAX);
+	CHECK(end <= SIZE_MAX);
+	*length = (size_t)end;
+	bytes = calloc(1, *length);
+	CHECK(bytes != NULL);
+	mdb = bytes + 1024;
+	gen_store(mdb, 0x4244, 2);
+	gen_store(mdb + 0x12, total, 2);
+	gen_store(mdb + 0x14, block_size, 4);
+	gen_store(mdb + 0x1c, first_sector, 2);
+	gen_store(mdb + 0x7c, 0x482b, 2);
+	gen_store(mdb + 0x7e, before, 2);
+	gen_store(mdb + 0x80, blocks, 2);
+	bcopy(mdb, bytes + *length - 1024, 512);
+	bcopy(image->bytes, bytes + first + (uint64_t)before * block_size,
+	    image->length);
+	return (bytes);
+}
+
 void
 gen_plan_init(gen_plan_t *plan)
 {

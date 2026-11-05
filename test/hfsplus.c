@@ -373,8 +373,6 @@ test_identity_geometry(void)
 	gen_store(image.bytes + VOLUME_HEADER, 0x4244, 2);
 	gen_store(image.bytes + VOLUME_HEADER + 124, 0x482b, 2);
 	expect_status("wrapper probe", image_probe(&image), FSIMG_OK, NULL);
-	expect_status("wrapper open", image_open(&image, -1, false),
-	    FSIMG_EUNSUPPORTED, NULL);
 	expect_status("forced hfsx wrapper", image_open(&image, 1, false),
 	    FSIMG_EFORMAT, NULL);
 	gen_store(image.bytes + VOLUME_HEADER + 124, 0, 2);
@@ -1694,13 +1692,12 @@ test_journals(void)
 		expect_status("journal two extents", image_open(&image, -1,
 		    false), FSIMG_ECORRUPT, NULL);
 		bcopy(saved, image.bytes + data + FILE_DATA_FORK, 80);
-		fixture_init(&f, &image, 0, 0);
-		CHECK(fixture_open(&f, -1, false, &error) == FSIMG_OK);
-		((fsimg_hfsplus_reader_t *)f.reader.driver)->wrapped = true;
+		gen_image_t wrapped = { 0 };
+		wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1,
+		    &wrapped.length);
 		expect_status("wrapped initialized journal",
-		    hfsplus_journal_open(&f.reader, &error), FSIMG_EUNSUPPORTED,
-		    &error);
-		fixture_close(&f);
+		    image_open(&wrapped, -1, false), FSIMG_EUNSUPPORTED, NULL);
+		free(wrapped.bytes);
 		/* A merely similar name cannot satisfy the journal requirement.
 		 */
 		mutation_t similar = { "journal similar stored name",
@@ -1786,12 +1783,13 @@ test_journals(void)
 				    &error) == FSIMG_OK);
 				expect_true("uninitialized journal detail",
 				    f.reader.info.details[0].value == 2);
-				((fsimg_hfsplus_reader_t
-				    *)f.reader.driver)->wrapped = true;
-				expect_status("wrapped uninitialized journal",
-				    hfsplus_journal_open(&f.reader, &error),
-				    FSIMG_OK, &error);
 				fixture_close(&f);
+				gen_image_t wrapped = { 0 };
+				wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1,
+				    &wrapped.length);
+				expect_status("wrapped uninitialized journal",
+				    image_open(&wrapped, -1, false), FSIMG_OK, NULL);
+				free(wrapped.bytes);
 			}
 			/* With bit 13 clear, the same stored file is ordinary
 			 * data. */
@@ -2222,7 +2220,7 @@ test_native(void)
 		const fsimg_format_variant_t *variant;
 		size_t transferred;
 		int fd;
-		bool matches, wrapped, classic;
+		bool matches, classic;
 
 		CHECK(snprintf(image_path, sizeof(image_path),
 		    "%s/%s/image.img", directory,
@@ -2268,9 +2266,8 @@ test_native(void)
 		    &transferred, &error) == FSIMG_OK);
 		probe = fsimg_hfsplus_format.probe(prefix, transferred,
 		    f.length, &variant, &error);
-		wrapped = gen_load(prefix + 1024, 2) == 0x4244 &&
-		    gen_load(prefix + 1024 + 124, 2) == 0x482b;
-		classic = gen_load(prefix + 1024, 2) == 0x4244 && !wrapped;
+		classic = gen_load(prefix + 1024, 2) == 0x4244 &&
+		    gen_load(prefix + 1024 + 124, 2) != 0x482b;
 		expect_status(entry->d_name, probe,
 		    classic ? FSIMG_EFORMAT : FSIMG_OK, &error);
 		if (classic) {
@@ -2283,7 +2280,8 @@ test_native(void)
 			captures++;
 			continue;
 		}
-		expected = wrapped ||
+		expected = strcmp(entry->d_name,
+		    "h-hfsplus-16777216-e11-mkfs-w-J-mounted") == 0 ||
 		    strcmp(entry->d_name,
 		    "h-hfsplus-33554432-e8-interrupted") == 0 ?
 		    FSIMG_EUNSUPPORTED : FSIMG_OK;
@@ -7272,7 +7270,347 @@ test_truncated_longer_slice(void)
  * Calling through a table keeps the compiler from inlining every test into
  * main and summing their stack frames.
  */
+/* Every row starts from a real envelope, so only the named field is hostile. */
+static void
+test_wrapper_refusals(void)
+{
+	gen_plan_t plan;
+	gen_image_t image, wrapped = { 0 };
+	const uint64_t embedded = 6144;
+	mutation_t cases[] = {
+		{ "wrapper zero allocation size", 1044, 0, 4, FSIMG_ECORRUPT,
+		    "HFS wrapper's allocation block size is not a multiple of 512" },
+		{ "wrapper unaligned allocation size", 1044, 513, 4,
+		    FSIMG_ECORRUPT,
+		    "HFS wrapper's allocation block size is not a multiple of 512" },
+		{ "wrapper empty extent", 1152, 0, 2, FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded extent is empty" },
+		{ "wrapper extent past outer volume", 1150, 3, 2, FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded extent lies past its outer volume" },
+		{ "wrapper start at input end", 1052, 4110, 2, FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded volume lies past the slice: image is truncated" },
+		{ "wrapper start past input end", 1052, 4111, 2, FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded volume lies past the slice: image is truncated" },
+		{ "wrapper embedded HFSX", embedded + 1024, 0x48580005, 4,
+		    FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded volume is not HFS Plus version 4" },
+		{ "wrapper embedded classic HFS", embedded + 1024, 0x4244, 2,
+		    FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded volume is not HFS Plus version 4" },
+		{ "wrapper embedded wrong version", embedded + 1026, 5, 2,
+		    FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded volume is not HFS Plus version 4" },
+		{ "wrapper doubled embedded block size", embedded + 1064, 8192, 4,
+		    FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded range contradicts the volume's block size and count" },
+		{ "wrapper embedded count one short", embedded + 1068, 511, 4,
+		    FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded range contradicts the volume's block size and count" },
+		{ "wrapper embedded count one long", embedded + 1068, 513, 4,
+		    FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded range contradicts the volume's block size and count" },
+		{ "wrapper extent one block short", 1152, 511, 2, FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded range contradicts the volume's block size and count" },
+		{ "wrapper extent one block long", 1152, 513, 2, FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded range contradicts the volume's block size and count" }
+	};
+
+	gen_plan_init(&plan);
+	gen_build(&plan, &image);
+	wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1, &wrapped.length);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+		mutate_open(&wrapped, &cases[i]);
+
+	/* These rows require several hostile fields to reach their guard. */
+	typedef struct wrapper_fields {
+		mutation_t mutation;
+		uint32_t size;
+		uint16_t blocks;
+		uint16_t sector;
+		uint16_t start;
+	} wrapper_fields_t;
+	const wrapper_fields_t compound[] = {
+		{ .mutation = { "wrapper overlaps MDB", 1150, 0, 2,
+		    FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded volume overlaps its master directory block" },
+		    .size = 4096, .blocks = 514, .sector = 0, .start = 1 },
+		{ .mutation = { "wrapper maximal extent fields", 1152,
+		    UINT16_MAX, 2, FSIMG_ECORRUPT,
+		    "HFS wrapper's embedded extent lies past its outer volume" },
+		    .size = UINT32_MAX - 511, .blocks = UINT16_MAX - 1,
+		    .sector = UINT16_MAX, .start = UINT16_MAX }
+	};
+
+	for (size_t i = 0; i < sizeof(compound) / sizeof(compound[0]); i++) {
+		gen_store(wrapped.bytes + 1044, compound[i].size, 4);
+		gen_store(wrapped.bytes + 1042, compound[i].blocks, 2);
+		gen_store(wrapped.bytes + 1052, compound[i].sector, 2);
+		gen_store(wrapped.bytes + 1150, compound[i].start, 2);
+		mutate_open(&wrapped, &compound[i].mutation);
+	}
+	free(wrapped.bytes);
+	gen_free(&image);
+}
+
+static void
+test_wrapper_journals(void)
+{
+	typedef struct journal_case {
+		const char *name;
+		uint32_t flags;
+		bool pending;
+		bool image_base;
+		bool mismatch;
+		fsimg_status_t status;
+		const char *message;
+	} journal_case_t;
+	static const journal_case_t cases[] = {
+		{ "wrapper initialized clean embedded base", 1, false, false,
+		    false, FSIMG_EUNSUPPORTED,
+		    "HFS Plus journal inside a wrapper has no established location" },
+		{ "wrapper initialized pending embedded base", 1, true, false,
+		    false, FSIMG_EUNSUPPORTED,
+		    "HFS Plus journal inside a wrapper has no established location" },
+		{ "wrapper initialized clean image base", 1, false, true,
+		    false, FSIMG_EUNSUPPORTED,
+		    "HFS Plus journal inside a wrapper has no established location" },
+		{ "wrapper initialized pending image base", 1, true, true,
+		    false, FSIMG_EUNSUPPORTED,
+		    "HFS Plus journal inside a wrapper has no established location" },
+		{ "wrapper uninitialized embedded base", 5, false, false,
+		    false, FSIMG_OK, NULL },
+		{ "wrapper uninitialized wrong location", 5, false, false,
+		    true, FSIMG_ECORRUPT, "disagrees with the journal info block" }
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		gen_plan_t plan;
+		gen_image_t image, wrapped = { 0 };
+		fixture_t f;
+		fsimg_error_t error = { 0 };
+		fsimg_status_t status;
+
+		gen_plan_init(&plan);
+		plan.journal = true;
+		plan.journal_flags = cases[i].flags;
+		plan.journal_end = cases[i].pending ? 1024 : 512;
+		gen_build(&plan, &image);
+		if (cases[i].image_base || cases[i].mismatch)
+			gen_store(image.bytes + image.journal_info + JIB_OFFSET,
+			    image.journal_header + (cases[i].image_base ? 6144 :
+			    4096), 8);
+		wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1,
+		    &wrapped.length);
+		fixture_init(&f, &wrapped, 0, 0);
+		status = fixture_open(&f, -1, false, &error);
+		expect_status(cases[i].name, status, cases[i].status, &error);
+		if (cases[i].message != NULL)
+			expect_true(cases[i].name,
+			    strstr(error.message, cases[i].message) != NULL);
+		fixture_close(&f);
+		free(wrapped.bytes);
+		gen_free(&image);
+	}
+}
+
+/* Public listing and extraction must see the embedded file, even when only
+ * unused embedded bytes or the outer tail are missing.
+ */
+static void
+check_wrapper_contents(const char *name, const gen_image_t *wrapped,
+    uint64_t embedded, uint64_t volume_bytes, uint64_t missing)
+{
+	static const unsigned char payload[] = "wrapper file bytes";
+	fixture_t f;
+	fsimg_reader_t *reader = public_reader(&f, wrapped);
+	const fsimg_entry_t *entry;
+	fsimg_volume_info_t info;
+	fsimg_error_t error = { 0 };
+	fsimg_verify_report_t report;
+	unsigned char bytes[64];
+	size_t count;
+	char number[32];
+
+	if (reader != NULL) {
+		expect_status(name, fsimg_reader_get_info(reader, &info, &error),
+		    FSIMG_OK, &error);
+		expect_true("wrapper profile", strcmp(info.profile,
+		    "HFS Plus in HFS wrapper") == 0);
+		if (info.volume_bytes != volume_bytes || info.missing_bytes != missing)
+			fprintf(stderr, "%s: volume_bytes=%" PRIu64
+			    " expected=%" PRIu64 ", missing_bytes=%" PRIu64
+			    " expected=%" PRIu64 "\n", name, info.volume_bytes,
+			    volume_bytes, info.missing_bytes, missing);
+		expect_true(name, info.volume_bytes == volume_bytes &&
+		    info.missing_bytes == missing);
+		expect_true(name, info.detail_count > 0);
+		if (info.detail_count > 0) {
+			const fsimg_volume_detail_t *last =
+			    &info.details[info.detail_count - 1];
+
+			expect_true("wrapper offset is the last detail", strcmp(last->name, "wrapper_offset") == 0 &&
+			    last->value == embedded);
+		}
+		if (missing != 0) {
+			expect_status(name, fsimg_verify(reader, 0, &report, &error),
+			    FSIMG_ECORRUPT, &error);
+			snprintf(number, sizeof(number), "%" PRIu64, missing);
+			expect_true("wrapper truncation diagnostic and count", strstr(error.message, "truncated") != NULL &&
+			    strstr(error.message, number) != NULL);
+		}
+		fsimg_status_t status = fsimg_reader_next(reader, &entry, &error);
+		expect_status(name, status, FSIMG_OK, &error);
+		if (status != FSIMG_OK)
+			goto listed;
+		expect_true(name, strcmp(entry->path, "/a") == 0 &&
+		    entry->kind == FSIMG_ENTRY_FILE &&
+		    entry->size == sizeof(payload) - 1);
+		expect_status(name, fsimg_reader_read_at(reader, 0, bytes,
+		    sizeof(bytes), &count, &error), FSIMG_OK, &error);
+		expect_true(name, count == sizeof(payload) - 1 &&
+		    bcmp(bytes, payload, count) == 0);
+		expect_status(name, fsimg_reader_next(reader, &entry, &error),
+		    FSIMG_DONE, &error);
+	}
+listed:
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+
+	char temporary[] = "hfsplus-wrapper-XXXXXX";
+	fsimg_extract_options_t options;
+	int parent, root, fd;
+
+	CHECK(mkdtemp(temporary) != NULL);
+	parent = open(temporary, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(parent != -1);
+	reader = public_reader(&f, wrapped);
+	if (reader != NULL) {
+		fsimg_extract_options_init(&options);
+		expect_status(name, fsimg_extract_at(reader, parent, "out",
+		    &options, &error), FSIMG_OK, &error);
+		root = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+		CHECK(root != -1);
+		fd = openat(root, "a", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+		CHECK(fd != -1);
+		ssize_t got = read(fd, bytes, sizeof(bytes));
+		expect_true(name, got == sizeof(payload) - 1 &&
+		    bcmp(bytes, payload, sizeof(payload) - 1) == 0);
+		CHECK(close(fd) == 0);
+		CHECK(unlinkat(root, "a", 0) == 0);
+		CHECK(close(root) == 0);
+		CHECK(unlinkat(parent, "out", AT_REMOVEDIR) == 0);
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(temporary) == 0);
+}
+
+static void
+test_wrappers(void)
+{
+	typedef struct wrapper_position {
+		const char *name;
+		uint32_t size;
+		uint16_t before;
+		uint16_t after;
+	} wrapper_position_t;
+	static const wrapper_position_t positions[] = {
+		{ "wrapper at allocation start", 4096, 0, 2 },
+		{ "wrapper in allocation middle", 4096, 1, 1 },
+		{ "wrapper at allocation end", 4096, 2, 0 },
+		{ "wrapper allocation size 73728", 73728, 1, 1 },
+		{ "wrapper allocation size 512", 512, 1, 1 }
+	};
+	static const unsigned char payload[] = "wrapper file bytes";
+	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+	    .type = 2, .data = payload, .data_size = sizeof(payload) - 1 };
+	gen_plan_t plan;
+	gen_image_t image, wrapped = { 0 };
+
+	gen_plan_init(&plan);
+	/* 540 * 4096 is also exactly 30 * 73728. */
+	plan.total_blocks = 540;
+	plan.objects = &object;
+	plan.object_count = 1;
+	gen_build(&plan, &image);
+	check_surviving_file("unwrapped wrapper baseline", &image,
+	    image.length, payload, sizeof(payload) - 1);
+	for (size_t i = 0; i < sizeof(positions) / sizeof(positions[0]); i++) {
+		uint64_t embedded = 2048 +
+		    (uint64_t)positions[i].before * positions[i].size;
+
+		wrapped.bytes = gen_wrap(&image, positions[i].size, 4,
+		    positions[i].before, positions[i].after, &wrapped.length);
+		expect_status(positions[i].name, image_probe(&wrapped), FSIMG_OK, NULL);
+		expect_status(positions[i].name, image_open(&wrapped, -1, false),
+		    FSIMG_OK, NULL);
+		check_wrapper_contents(positions[i].name, &wrapped, embedded,
+		    image.length, 0);
+		expect_status("real wrapper forced hfsx", image_open(&wrapped,
+		    1, false), FSIMG_EFORMAT, NULL);
+		free(wrapped.bytes);
+	}
+	wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1, &wrapped.length);
+	const unsigned char *mdb = wrapped.bytes + 1024;
+	uint64_t outer_block_size = gen_load(mdb + 0x14, 4);
+	uint64_t allocation_start = 512 * gen_load(mdb + 0x1c, 2);
+	uint64_t embedded = allocation_start +
+	    gen_load(mdb + 0x7e, 2) * outer_block_size;
+	uint64_t embedded_length = gen_load(mdb + 0x80, 2) * outer_block_size;
+	uint64_t embedded_end = embedded + embedded_length;
+	uint64_t outer_end = allocation_start +
+	    gen_load(mdb + 0x12, 2) * outer_block_size + 1024;
+	uint64_t volume_bytes = gen_load(image.bytes + VOLUME_TOTAL_BLOCKS, 4) *
+	    gen_load(image.bytes + VOLUME_BLOCK_SIZE, 4);
+	static const char *cuts[] = {
+		"wrapper truncated embedded tail", "wrapper truncated outer tail"
+	};
+	for (size_t i = 0; i < 2; i++) {
+		uint64_t reported_volume, tail_start;
+
+		wrapped.length = embedded + (i == 0 ? embedded_length / 2 :
+		    embedded_length + 512);
+		tail_start = wrapped.length > embedded_end ?
+		    wrapped.length : embedded_end;
+		/* Report past N * B to include missing outer bytes beyond the embed. */
+		reported_volume = volume_bytes + (outer_end - tail_start);
+		check_wrapper_contents(cuts[i], &wrapped, embedded,
+		    reported_volume, outer_end - wrapped.length);
+	}
+	static const char *open_cuts[] = {
+		"wrapper embedded header lost", "wrapper header survives missing trees"
+	};
+	for (size_t i = 0; i < 2; i++) {
+		fixture_t f;
+		fsimg_error_t error = { 0 };
+
+		wrapped.length = embedded + (i == 0 ? 1024 : 1536);
+		fixture_init(&f, &wrapped, 0, 0);
+		expect_status(open_cuts[i], fixture_open(&f, -1, false, &error),
+		    FSIMG_ECORRUPT, &error);
+		expect_true(open_cuts[i],
+		    strstr(error.message, "image is truncated") != NULL);
+		fixture_close(&f);
+	}
+	free(wrapped.bytes);
+
+	/* A referenced file beyond the cut must fail through the slice funnel. */
+	unsigned char *fork = catalog_data(&image, 2, 2) + FILE_DATA_FORK;
+	gen_store(fork + FORK_START, plan.total_blocks - 4, 4);
+	wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1, &wrapped.length);
+	wrapped.length = 6144 + image.length / 2;
+	check_truncated_file_listed(&wrapped, sizeof(payload) - 1);
+	check_truncated_file_read(&wrapped);
+	check_truncated_file_extract(&wrapped);
+	free(wrapped.bytes);
+	gen_free(&image);
+}
+
 static void (*const tests[])(void) = {
+	test_wrappers,
+	test_wrapper_refusals,
+	test_wrapper_journals,
 	test_root_fields,
 	test_attribute_record_lengths,
 	test_distinct_dates,

@@ -8,10 +8,10 @@ native	h-hfsplus-1048576-newfs-b4096		ok		0	1	35	221	0
 native	h-hfsplus-1048576-newfs-b512		ok		0	1	262	1786	0
 native	h-hfsplus-134217728-overfat32-newfs		ok		0	1	771	31997	0
 native	h-hfsplus-16777216-e11-mkfs-h-classic		unknown format	no partition table or filesystem recognized
-native	h-hfsplus-16777216-e11-mkfs-w-J-mounted		unsupported capability	HFS Plus volume inside an HFS wrapper is not supported
-native	h-hfsplus-16777216-e11-mkfs-w-J		unsupported capability	HFS Plus volume inside an HFS wrapper is not supported
-native	h-hfsplus-16777216-e11-mkfs-w-b512		unsupported capability	HFS Plus volume inside an HFS wrapper is not supported
-native	h-hfsplus-16777216-e11-mkfs-w		unsupported capability	HFS Plus volume inside an HFS wrapper is not supported
+native	h-hfsplus-16777216-e11-mkfs-w-J-mounted		unsupported capability	HFS Plus journal inside a wrapper has no established location
+native	h-hfsplus-16777216-e11-mkfs-w-J		ok		0	1	224	3860	0
+native	h-hfsplus-16777216-e11-mkfs-w-b512		ok		0	1	749	31950	0
+native	h-hfsplus-16777216-e11-mkfs-w		ok		0	1	95	3989	0
 native	h-hfsplus-16777216-e4-dirlinks-J		unsupported capability	HFS Plus directory hard links are not supported
 native	h-hfsplus-16777216-e4-dirlinks-plain		ok		6	29	105	3991	0
 native	h-hfsplus-16777216-e5		ok		19	5	149	3947	0
@@ -31,7 +31,7 @@ native	h-hfsplus-33554432-newfs-b4096		ok		0	1	195	7997	0
 native	h-hfsplus-33554432-overfat16-newfs-J		ok		0	1	324	7868	0
 native	h-hfsplus-33554432-overfat16-newfs		ok		0	1	195	7997	0
 native	h-hfsplus-4194304-e7		ok		844	3	1018	6	0
-native	h-hfsplus-67108864-e11-mkfs-w		unsupported capability	HFS Plus volume inside an HFS wrapper is not supported
+native	h-hfsplus-67108864-e11-mkfs-w		ok		0	1	383	15989	0
 native	h-hfsplus-67108864-e2-b65536		ok		27	13	53	971	0
 native	h-hfsplus-671088640-e9-create		ok		100006	52	79387	84453	0
 native	h-hfsplus-671088640-e9-delete		ok		64659	52	79395	84445	0
@@ -42,7 +42,7 @@ native	h-hfsplus-8388608-e6-ditto		ok		26	2	361	1687	0
 native	h-hfsplus-8388608-e6-lzfse		ok		31	2	421	1627	0
 native	h-hfsplus-8388608-e6-lzvn		ok		31	2	705	1343	0
 native	h-hfsplus-8388608-e6-zlib		ok		31	2	439	1609	0
-native	h-hfsplus-9713664-e11-blender-2.28		unsupported capability	HFS Plus volume inside an HFS wrapper is not supported
+native	h-hfsplus-9713664-e11-blender-2.28		ok		21	24	1830	530	0
 native	h-hfsx-16777216-e5		ok		19	5	149	3947	0
 native	h-hfsx-33554432-e2-s-b4096		ok		27	13	221	7971	0
 native	h-hfsx-33554432-e2-unread-s-b4096		ok		27	13	221	7971	0
@@ -57,7 +57,7 @@ corpus	archive-macosx-10.0-1z691-2974-a/Mac OS X [1Z691-2974-A].7z		unknown form
 corpus	archive-macosx-10.1-2z691-3184-a/Mac OS X 10.1 Upgrade CD [2Z691-3184-A].7z		unknown format	no partition table or filesystem recognized
 corpus	archive-macosx-10.3-disc2-2z691-4586-a/Mac OS X Panther - Install Disc 2 [2Z691-4586-A].7z		unknown format	no partition table or filesystem recognized
 corpus	blender-2.28/blender-2.28-darwin-6.6-powerpc.dmg		unknown format	no partition table or filesystem recognized
-corpus-partition	blender-2.28/blender-2.28-darwin-6.6-powerpc.dmg	-F hfsplus/-/dmg --offset=32768 --length=9713664	unsupported capability	HFS Plus volume inside an HFS wrapper is not supported
+corpus-partition	blender-2.28/blender-2.28-darwin-6.6-powerpc.dmg	-F hfsplus/-/dmg --offset=32768 --length=9713664	ok		21	24	1830	530	0
 corpus	blender-2.33a/blender-2.33a-OSX-10.3-powerpc.dmg		unknown format	no partition table or filesystem recognized
 corpus-partition	blender-2.33a/blender-2.33a-OSX-10.3-powerpc.dmg	-F hfsplus/-/dmg --offset=32768 --length=17428480	ok		83	48	3895	360	0
 corpus	blender-2.79a/blender-2.79a-macOS-10.6.dmg		ok		4669	507	115963	13951	0

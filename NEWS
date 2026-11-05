@@ -31,8 +31,10 @@ extraction safety rule stays in force. The library option is `FSIMG_EXTRACT_SALV
 HFS Plus and HFSX volumes can be inspected, listed, verified and extracted: data forks,
 POSIX metadata, hard links as separate entries, and a mark on entries with a
 resource fork or extended attributes. Files macOS compressed with zlib, LZVN
-or LZFSE read and extract as their decoded bytes; volumes in a classic HFS
-wrapper are reported as not supported.
+or LZFSE read and extract as their decoded bytes. A volume in a classic HFS
+wrapper reads and verifies as its embedded volume: the outer HFS volume is not
+checked, and one whose journal has been initialized is reported as not
+supported.
 
 ISO 9660 creation writes Rock Ridge and Joliet at interchange levels 1 to 3,
 with deep-directory relocation and multi-extent files. Joliet aliases avoid

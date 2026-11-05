@@ -2805,12 +2805,121 @@ write_fixture(const char *name, const char *path)
 	return (0);
 }
 
+/* The same embedded bytes must produce the same report at every position.
+ * Poisoning outer metadata proves verification stays inside the slice.
+ */
+static void
+test_wrapped_verification(void)
+{
+	typedef struct wrapper_case {
+		const char *name;
+		uint16_t before;
+		uint16_t after;
+		uint64_t poison;
+	} wrapper_case_t;
+	static const wrapper_case_t cases[] = {
+		{ "verify wrapper at allocation start", 0, 2, 0 },
+		{ "verify wrapper in allocation middle", 1, 1, 0 },
+		{ "verify wrapper at allocation end", 2, 0, 0 },
+		{ "verify ignores outer bitmap", 1, 1, 1536 },
+		{ "verify ignores outer catalog", 1, 1, 2048 },
+		{ "verify ignores alternate MDB", 1, 1, UINT64_MAX }
+	};
+	gen_image_t image, wrapped = { 0 };
+	fsimg_error_t error = { 0 };
+
+	build_clean(&image);
+	for (unsigned payload = 0; payload < 2; payload++) {
+		fixture_t baseline;
+		fsimg_verify_report_t expected;
+		unsigned flags = payload ? FSIMG_VERIFY_PAYLOAD : 0;
+
+		scenario = "verify unwrapped wrapper baseline";
+		CHECK(fixture_open(&baseline, &image, 0, 0, &error) == FSIMG_OK);
+		CHECK(fsimg_verify(baseline.reader, flags, &expected,
+		    &error) == FSIMG_OK);
+		fixture_close(&baseline);
+		for (size_t i = 0; i < COUNT(cases); i++) {
+			fixture_t fixture;
+			fsimg_verify_report_t report;
+			fsimg_status_t status;
+
+			scenario = cases[i].name;
+			wrapped.bytes = gen_wrap(&image, 4096, 4, cases[i].before,
+			    cases[i].after, &wrapped.length);
+			if (cases[i].poison != 0) {
+				uint64_t offset = cases[i].poison == UINT64_MAX ?
+				    wrapped.length - 1024 : cases[i].poison;
+
+				memset(wrapped.bytes + offset, 0xa5, 512);
+			}
+			status = fixture_open(&fixture, &wrapped, 0, 0, &error);
+			expect_status(status, FSIMG_OK, &error);
+			if (status == FSIMG_OK) {
+				status = fsimg_verify(fixture.reader, flags, &report,
+				    &error);
+				expect_status(status, FSIMG_OK, &error);
+				expect(report.complete, "wrapped report is complete");
+				expect(report.files == expected.files &&
+				    report.directories == expected.directories &&
+				    report.allocated_clusters == expected.allocated_clusters &&
+				    report.free_clusters == expected.free_clusters &&
+				    report.bad_clusters == expected.bad_clusters &&
+				    report.logical_bytes == expected.logical_bytes &&
+				    report.payload_bytes_read == expected.payload_bytes_read,
+				    "wrapped counts equal the unwrapped volume");
+			}
+			fixture_close(&fixture);
+			free(wrapped.bytes);
+		}
+	}
+	for (unsigned tail = 0; tail < 2; tail++) {
+		fixture_t fixture;
+		char message[96];
+		uint64_t missing;
+		fsimg_verify_report_t report;
+
+		scenario = tail ? "verify missing outer tail" :
+		    "verify missing embedded tail";
+		wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1, &wrapped.length);
+		missing = wrapped.length - (6144 + (tail ? image.length + 512 :
+		    image.length / 2));
+		CHECK(fixture_open(&fixture, &wrapped, 0, missing,
+		    &error) == FSIMG_OK);
+		snprintf(message, sizeof(message), "%llu declared bytes are missing",
+		    (unsigned long long)missing);
+		expect(fixture.reader->info.missing_bytes == missing,
+		    "outer missing byte count");
+		expect_status(fsimg_verify(fixture.reader, 0, &report, &error),
+		    FSIMG_ECORRUPT, &error);
+		expect(strstr(error.message, "truncated") != NULL,
+		    "verification names truncation");
+		expect(strstr(error.message, message) != NULL,
+		    "verification names the outer missing byte count");
+		expect(!report.complete, "truncated report is incomplete");
+		fixture_close(&fixture);
+		free(wrapped.bytes);
+	}
+	gen_free(&image);
+
+	scenario = "verify corruption inside wrapper";
+	referenced_clear_block(&image);
+	wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1, &wrapped.length);
+	fixture_t fixture;
+	CHECK(fixture_open(&fixture, &wrapped, 0, 0, &error) == FSIMG_OK);
+	check_failure(&fixture, 0, FSIMG_ECORRUPT, "bitmap");
+	fixture_close(&fixture);
+	free(wrapped.bytes);
+	gen_free(&image);
+}
+
 int
 main(int argc, char **argv)
 {
 	if (argc == 4 && strcmp(argv[1], "--write-fixture") == 0)
 		return (write_fixture(argv[2], argv[3]));
 	CHECK(argc == 1);
+	test_wrapped_verification();
 	test_cross_linked_records_read_no_payload();
 	test_stubs_read_their_indirect_node_once();
 	test_tail_one_of_two_bits_set_block_512();

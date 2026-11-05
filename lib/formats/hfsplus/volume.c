@@ -14,8 +14,9 @@
  * Opening a volume completes recognition in a fixed order, each step failing
  * before the next reads:
  *
- * 1. check_identity(): the identity; a wrapper is refused, its work is in
- *    docs/todo-hfsplus.md;
+ * 1. check_identity(): the identity; open_wrapper() then moves a wrapped volume
+ *    onto a slice of its embedded range, so every later step, the journal's
+ *    offsets and verification among them, works on that slice alone;
  * 2. derive_geometry(): the header, its attribute table and the geometry;
  * 3. open_extents_tree(): the extents tree, whose fork resolves from its inline
  *    extents alone;
@@ -23,7 +24,7 @@
  *    work, and its comparator;
  * 5. open_remaining_forks(): the attributes tree and the bitmap and startup
  *    forks;
- * 6. hfsplus_journal_open(): the journal, under the info block's flags table;
+ * 6. journal_open(): the journal, under the info block's flags table;
  * 7. open_root(): the root folder through its thread, whose name is the label.
  *
  * Open reads at most the header, three header nodes, a few search paths and
@@ -48,8 +49,17 @@
 #define RESERVED_HEAD_BYTES	1536u
 #define RESERVED_TAIL_BYTES	1024u
 
+/* The outer volume's sector size, and its last two sectors after its allocation
+ * blocks: the alternate master directory block and a reserved one.
+ */
+#define WRAPPER_SECTOR_BYTES	512u
+#define WRAPPER_TAIL_BYTES	1024u
+
+static bool wrapper_mdb(const unsigned char *, hfsplus_mdb_t *);
 static fsimg_status_t check_identity(fsimg_reader_t *,
     const fsimg_format_variant_t *, const unsigned char *, fsimg_error_t *);
+static fsimg_status_t open_wrapper(fsimg_reader_t *, const hfsplus_mdb_t *,
+    unsigned char *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t derive_geometry(fsimg_reader_t *, uint64_t,
     const unsigned char *, fsimg_error_t *);
 static fsimg_status_t open_extents_tree(fsimg_reader_t *, fsimg_error_t *);
@@ -57,6 +67,7 @@ static fsimg_status_t select_comparator(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t allocate_scan_node(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t open_catalog_tree(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t open_remaining_forks(fsimg_reader_t *, fsimg_error_t *);
+static fsimg_status_t journal_open(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t journal_state_from_flags(const fsimg_hfsplus_reader_t *,
     uint32_t, hfsplus_journal_state_t *, fsimg_error_t *);
 static fsimg_status_t journal_location(fsimg_reader_t *, const hfsplus_jib_t *,
@@ -64,6 +75,17 @@ static fsimg_status_t journal_location(fsimg_reader_t *, const hfsplus_jib_t *,
 static fsimg_status_t journal_header_check(fsimg_reader_t *,
     const hfsplus_jib_t *, const hfsplus_extent_t *, fsimg_error_t *);
 static fsimg_status_t open_root(fsimg_reader_t *, fsimg_error_t *);
+
+/* Whether the block at 1024 is a master directory block embedding "H+". Without
+ * that, a "BD" block is a classic HFS volume, not a wrapper.
+ */
+static bool
+wrapper_mdb(const unsigned char *block, hfsplus_mdb_t *mdb)
+{
+	return (fsimg_load_be16(block) == HFSPLUS_SIGNATURE_WRAPPER &&
+	    hfsplus_mdb_decode(block, HFSPLUS_HEADER_BYTES, mdb) &&
+	    mdb->embedded_signature == HFSPLUS_SIGNATURE_PLUS);
+}
 
 /* The identity signature, which a caller assuming the identity waives; a
  * signature the variant it forced contradicts is refused either way. A volume
@@ -79,9 +101,7 @@ check_identity(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 	bool wrapper, known, variant_x;
 	fsimg_status_t status;
 
-	wrapper = signature == HFSPLUS_SIGNATURE_WRAPPER &&
-	    hfsplus_mdb_decode(block, HFSPLUS_HEADER_BYTES, &mdb) &&
-	    mdb.embedded_signature == HFSPLUS_SIGNATURE_PLUS;
+	wrapper = wrapper_mdb(block, &mdb);
 	known = wrapper || signature == HFSPLUS_SIGNATURE_PLUS ||
 	    signature == HFSPLUS_SIGNATURE_X;
 	status = fsimg_reader_identity(reader,
@@ -96,9 +116,87 @@ check_identity(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 		return (fsimg_error_set(error, FSIMG_EFORMAT, 0,
 		    FSIMG_OP_READER,
 		    "HFS Plus signature contradicts the forced variant"));
-	if (wrapper)
-		return (hfsplus_unsupported(error,
-		    "HFS Plus volume inside an HFS wrapper is not supported"));
+	return (FSIMG_OK);
+}
+
+/*
+ * Validate the wrapper's location fields and replace the reader's input with a
+ * read-only slice of the embedded range, reading its first bytes into prefix.
+ * From here the driver sees only the embedded volume; hfsplus_close() restores
+ * the input. The outer volume itself is an envelope and is not interpreted.
+ *
+ * The fields are 16 and 32 bits wide, so no sum or product here can overflow 64
+ * bits: the largest end is below 2^50.
+ *
+ * The range must lie in the outer volume's allocation blocks, and hostile fields
+ * are refused on that, but the slice can be shorter than the outer volume
+ * declares. That is an ordinary truncation: the slice is clipped, the read funnel
+ * refuses what it does not hold, and outer_missing keeps the part of the outer
+ * tail that clipping cannot show, for read.c to declare.
+ */
+static fsimg_status_t
+open_wrapper(fsimg_reader_t *reader, const hfsplus_mdb_t *mdb,
+    unsigned char *prefix, uint64_t *slice_bytes, fsimg_error_t *error)
+{
+	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
+	uint64_t first, offset, length, outer_end, covered;
+	size_t transferred;
+	fsimg_io_t *embedded;
+	fsimg_status_t status;
+
+	if (mdb->allocation_block_size == 0 ||
+	    mdb->allocation_block_size % WRAPPER_SECTOR_BYTES != 0)
+		return (hfsplus_corrupt(error,
+		    "HFS wrapper's allocation block size is not a multiple of 512"));
+	if (mdb->embedded_count == 0)
+		return (hfsplus_corrupt(error,
+		    "HFS wrapper's embedded extent is empty"));
+	if ((uint32_t)mdb->embedded_start + mdb->embedded_count >
+	    mdb->allocation_blocks)
+		return (hfsplus_corrupt(error,
+		    "HFS wrapper's embedded extent lies past its outer volume"));
+
+	first = (uint64_t)mdb->first_block_sector * WRAPPER_SECTOR_BYTES;
+	offset = first +
+	    (uint64_t)mdb->embedded_start * mdb->allocation_block_size;
+	length = (uint64_t)mdb->embedded_count * mdb->allocation_block_size;
+	outer_end = first +
+	    (uint64_t)mdb->allocation_blocks * mdb->allocation_block_size +
+	    WRAPPER_TAIL_BYTES;
+	if (offset < HFSPLUS_PROBE_BYTES)
+		return (hfsplus_corrupt(error,
+		    "HFS wrapper's embedded volume overlaps its master directory block"));
+	if (offset >= *slice_bytes)
+		return (hfsplus_corrupt(error,
+		    "HFS wrapper's embedded volume lies past the slice: image is truncated"));
+
+	status = fsimg_io_read_slice(reader->input, offset,
+	    length < *slice_bytes - offset ? length : *slice_bytes - offset,
+	    &embedded, error);
+	if (status != FSIMG_OK)
+		return (status);
+	covered = offset + length > *slice_bytes ? offset + length : *slice_bytes;
+	hfsplus->outer_missing = outer_end > covered ? outer_end - covered : 0;
+	hfsplus->outer_input = reader->input;
+	hfsplus->embedded_input = embedded;
+	hfsplus->embedded_bytes = length;
+	hfsplus->wrapper_offset = offset;
+	hfsplus->wrapped = true;
+	reader->input = embedded;
+	status = fsimg_io_get_size(embedded, slice_bytes, error);
+	if (status != FSIMG_OK)
+		return (status);
+	reader->slice_bytes = *slice_bytes;
+
+	status = fsimg_reader_bytes(reader, 0, prefix, HFSPLUS_PROBE_BYTES,
+	    &transferred, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (fsimg_load_be16(prefix + HFSPLUS_BOOT_BYTES) !=
+	    HFSPLUS_SIGNATURE_PLUS ||
+	    fsimg_load_be16(prefix + HFSPLUS_BOOT_BYTES + 2) != HFSPLUS_VERSION_PLUS)
+		return (hfsplus_corrupt(error,
+		    "HFS wrapper's embedded volume is not HFS Plus version 4"));
 	return (FSIMG_OK);
 }
 
@@ -130,6 +228,9 @@ derive_geometry(fsimg_reader_t *reader, uint64_t slice_bytes,
 		return (status);
 	/* Both operands are 32 bits wide, so the product cannot overflow. */
 	allocation_bytes = (uint64_t)header->total_blocks * header->block_size;
+	if (hfsplus->wrapped && allocation_bytes != hfsplus->embedded_bytes)
+		return (hfsplus_corrupt(error,
+		    "HFS wrapper's embedded range contradicts the volume's block size and count"));
 	truncated = allocation_bytes > slice_bytes;
 	volume_bytes = truncated ? allocation_bytes : slice_bytes;
 	/* N * B is whole sectors, so this fires only on a slice reaching it. */
@@ -404,8 +505,8 @@ journal_state_from_flags(const fsimg_hfsplus_reader_t *hfsplus, uint32_t flags,
  * state but a refusal requires the location rule, and only a local initialized
  * journal has a header to read.
  */
-fsimg_status_t
-hfsplus_journal_open(fsimg_reader_t *reader, fsimg_error_t *error)
+static fsimg_status_t
+journal_open(fsimg_reader_t *reader, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	const hfsplus_geometry_t *g = &hfsplus->geometry;
@@ -514,6 +615,7 @@ hfsplus_volume_open(fsimg_reader_t *reader,
     fsimg_error_t *error)
 {
 	unsigned char prefix[HFSPLUS_PROBE_BYTES];
+	hfsplus_mdb_t mdb;
 	uint64_t slice_bytes;
 	size_t transferred;
 	fsimg_status_t status;
@@ -530,6 +632,8 @@ hfsplus_volume_open(fsimg_reader_t *reader,
 	if (status != FSIMG_OK)
 		return (status);
 	status = check_identity(reader, forced, prefix, error);
+	if (status == FSIMG_OK && wrapper_mdb(prefix + HFSPLUS_BOOT_BYTES, &mdb))
+		status = open_wrapper(reader, &mdb, prefix, &slice_bytes, error);
 	if (status == FSIMG_OK)
 		status = derive_geometry(reader, slice_bytes, prefix, error);
 	if (status == FSIMG_OK)
@@ -539,7 +643,7 @@ hfsplus_volume_open(fsimg_reader_t *reader,
 	if (status == FSIMG_OK)
 		status = open_remaining_forks(reader, error);
 	if (status == FSIMG_OK)
-		status = hfsplus_journal_open(reader, error);
+		status = journal_open(reader, error);
 	if (status == FSIMG_OK)
 		status = open_root(reader, error);
 	return (status);

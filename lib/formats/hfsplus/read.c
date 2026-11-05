@@ -99,7 +99,9 @@ report_info(fsimg_reader_t *reader)
 	bool variant_x = header->signature == HFSPLUS_SIGNATURE_X;
 
 	strcpy(info->format, variant_x ? "hfsx" : "hfsplus");
-	if (!variant_x)
+	if (hfsplus->wrapped)
+		strcpy(info->profile, "HFS Plus in HFS wrapper");
+	else if (!variant_x)
 		strcpy(info->profile, "HFS Plus");
 	else if (hfsplus->catalog.compare == HFSPLUS_COMPARE_BINARY)
 		strcpy(info->profile, "HFSX case-sensitive");
@@ -110,7 +112,8 @@ report_info(fsimg_reader_t *reader)
 		info->valid |= FSIMG_VOLUME_LABEL;
 		bcopy(hfsplus->label, info->label, hfsplus->label_bytes);
 	}
-	info->volume_bytes = hfsplus->geometry.volume_bytes;
+	info->volume_bytes = hfsplus->geometry.volume_bytes +
+	    hfsplus->outer_missing;
 	info->sector_bytes = 512;
 	info->allocation_unit_bytes = hfsplus->geometry.block_size;
 	info->allocation_units = hfsplus->geometry.blocks;
@@ -133,6 +136,8 @@ report_info(fsimg_reader_t *reader)
 	    (uint64_t)header->finder_info[6] << 32 | header->finder_info[7]);
 	detail_add(info, "last_mounted", header->last_mounted_version);
 	detail_add(info, "create_date", header->create_date);
+	if (hfsplus->wrapped)
+		detail_add(info, "wrapper_offset", hfsplus->wrapper_offset);
 }
 
 static fsimg_status_t
@@ -165,6 +170,10 @@ hfsplus_close(fsimg_reader_t *reader)
 
 	if (hfsplus == NULL)
 		return;
+	if (hfsplus->wrapped) {
+		reader->input = hfsplus->outer_input;
+		fsimg_io_free(hfsplus->embedded_input);
+	}
 	hfsplus_tree_free(&hfsplus->extents);
 	hfsplus_tree_free(&hfsplus->catalog);
 	hfsplus_tree_free(&hfsplus->attributes);

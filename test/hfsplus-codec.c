@@ -564,6 +564,7 @@ test_locations(void)
 	CHECK(jib.offset == UINT64_C(0x8192a3b4c5d6e7f8));
 	CHECK(jib.size == UINT64_C(0x92a3b4c5d6e7f809));
 	put_be(m, 0x4244, 2);
+	put_be(m + 0x12, 0xc4de, 2);
 	put_be(m + 0x14, 0x12345678, 4);
 	put_be(m + 0x1c, 0x91ab, 2);
 	put_be(m + 0x7c, 0x482b, 2);
@@ -572,6 +573,7 @@ test_locations(void)
 	check_span(decode_mdb, m, 130, sizeof(mdb), false, "mdb");
 	CHECK(hfsplus_mdb_decode(m, 130, &mdb));
 	CHECK(mdb.signature == 0x4244 && mdb.embedded_signature == 0x482b);
+	CHECK(mdb.allocation_blocks == 0xc4de);
 	CHECK(mdb.allocation_block_size == 0x12345678);
 	CHECK(mdb.first_block_sector == 0x91ab);
 	CHECK(mdb.embedded_start == 0xa2bc && mdb.embedded_count == 0xb3cd);
