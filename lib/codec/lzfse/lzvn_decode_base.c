@@ -449,19 +449,22 @@ copy_match:
     //  the match, but this is OK because we know we have a safety bound
     //  away from the end of the destination buffer.
     for (size_t i = 0; i < M; i += 8)
-      store8(&dst_ptr[i], load8(&dst_ptr[i - D]));
+      //  fsimg: index from dst - D; dst[i - D] wraps i - D before the add.
+      store8(&dst_ptr[i], load8(&(dst_ptr - D)[i]));
   } else if (M <= dst_len) {
     //  Either the match distance is too small, or we are too close to
     //  the end of the buffer to safely use eight byte copies. Fall back
     //  on a simple byte-by-byte implementation.
     for (size_t i = 0; i < M; ++i)
-      dst_ptr[i] = dst_ptr[i - D];
+      //  fsimg: index from dst - D; dst[i - D] wraps i - D before the add.
+      dst_ptr[i] = (dst_ptr - D)[i];
   } else {
     // Destination truncated: fill DST, and store partial match
 
     // Copy partial match
     for (size_t i = 0; i < dst_len; ++i)
-      dst_ptr[i] = dst_ptr[i - D];
+      //  fsimg: index from dst - D; dst[i - D] wraps i - D before the add.
+      dst_ptr[i] = (dst_ptr - D)[i];
     // Save state
     state->src = src_ptr;
     state->dst = dst_ptr + dst_len;

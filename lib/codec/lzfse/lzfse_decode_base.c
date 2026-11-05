@@ -238,7 +238,8 @@ static int lzfse_decode_lmd(lzfse_decoder_state *s) {
         copy(dst, dst - D, M);
       else
         for (size_t i = 0; i < M; i++)
-          dst[i] = dst[i - D];
+          //  fsimg: index from dst - D; dst[i - D] wraps i - D before the add.
+          dst[i] = (dst - D)[i];
       dst += M;
     }
 
@@ -278,7 +279,8 @@ static int lzfse_decode_lmd(lzfse_decoder_state *s) {
       //  the buffer is full.
       if (M <= remaining_bytes) {
         for (size_t i = 0; i < M; i++)
-          dst[i] = dst[i - D];
+          //  fsimg: index from dst - D; dst[i - D] wraps i - D before the add.
+          dst[i] = (dst - D)[i];
         dst += M;
         remaining_bytes -= M;
         M = 0;
@@ -292,7 +294,8 @@ static int lzfse_decode_lmd(lzfse_decoder_state *s) {
                  // But we still set M = 0, to maintain the post-condition.
       } else {
         for (size_t i = 0; i < remaining_bytes; i++)
-          dst[i] = dst[i - D];
+          //  fsimg: index from dst - D; dst[i - D] wraps i - D before the add.
+          dst[i] = (dst - D)[i];
         dst += remaining_bytes;
         M -= remaining_bytes;
       DestinationBufferIsFull:

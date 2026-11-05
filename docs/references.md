@@ -180,6 +180,11 @@ the last two:
   which only a stream with no earlier match can have. They use the previous
   distance without the check the other opcodes make, so such a match copied each
   output byte onto itself and passed whatever the buffer held as decoded data.
+* `lzvn_decode_base.c` and `lzfse_decode_base.c`, undefined behaviour: a match
+  copy indexed `dst[i - D]` with unsigned `i < D`, which wraps before the pointer
+  addition. The address is right on common hosts, but the arithmetic is
+  undefined and UndefinedBehaviorSanitizer stops on it. The copies index
+  `(dst - D)[i]`; the distance was already checked against the output start.
 * `lzfse_decode_base.c` and `lzfse_internal.h`, a resource bound: a stream fails
   once its blocks declare more than `4 * (capacity + 40000)` of `n_literals + 3 *
   n_matches`. A block's decode cost follows those counts, not its payload: a
