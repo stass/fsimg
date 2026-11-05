@@ -43,14 +43,11 @@ evidence and provenance.
   of such a DMG is an xz stream at file offset 0, so the xz probe also claims
   the file and autodetection reports the input as ambiguous until the DMG's
   full identity (the trailer tie) outranks the bare xz magic.
-* [Medium] **Apple Partition Map** (`lib/layers/`, `specs/design-layers.md`):
-  older Mac disk images and CDs partition with APM, which the layers do not
-  read, so their volumes are reachable only through `--offset` and
-  `--length`. A read-only APM scheme (driver descriptor map, partition map
-  entries, 512- and 2048-byte blocks) is independent of the HFS Plus reader
-  and can land first. Real specimen: the Firefox 1.5.0.1 UDZO DMG
-  (archive.org; `~/fsimg-corpus/edge/dmg/`) holds a DDM, an APM and one
-  `Apple_HFS` partition carrying HFS Plus.
+* [Low] **`W` on xorriso HFS Plus volumes** (`lib/`, `specs/design-hfsplus.md`):
+  the `Apple_HFS` partition of `supergrub2-classic-*` (`-F apm`) lists and reads,
+  and `W` fails with "bitmap marks a block nothing owns". Decide from a closer look
+  whether xorriso reserves blocks a verifier should accept as it does the
+  formatter-marked tail, or whether the verdict stands and belongs in the record.
 * [Low] **Linux kernel mount comparison** (`test/hfsplus-integration.rb`):
   compare the fsimg baseline against a read-only Linux kernel mount in a root
   Linux VM. The comparison and its first run belong together, including the

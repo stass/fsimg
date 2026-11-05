@@ -4,6 +4,7 @@
 #include "config.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -26,25 +27,25 @@
  * io-blk.so and diskimage configuration).
  */
 static const fsimg_partition_type_t partition_types[] = {
-	{ "basic", BASIC_GUID, BASIC_NAME, { 0x07 } },
+	{ "basic", BASIC_GUID, BASIC_NAME, { 0x07 }, NULL },
 	{ "esp", "C12A7328-F81F-11D2-BA4B-00A0C93EC93B", "EFI system partition",
-	    { 0xef } },
-	{ "fat12", BASIC_GUID, BASIC_NAME, { 0x01 } },
-	{ "fat16", BASIC_GUID, BASIC_NAME, { 0x06, 0x04, 0x0e } },
-	{ "fat32", BASIC_GUID, BASIC_NAME, { 0x0c, 0x0b } },
-	{ "exfat", BASIC_GUID, BASIC_NAME, { 0x07 } },
+	    { 0xef }, NULL },
+	{ "fat12", BASIC_GUID, BASIC_NAME, { 0x01 }, NULL },
+	{ "fat16", BASIC_GUID, BASIC_NAME, { 0x06, 0x04, 0x0e }, NULL },
+	{ "fat32", BASIC_GUID, BASIC_NAME, { 0x0c, 0x0b }, NULL },
+	{ "exfat", BASIC_GUID, BASIC_NAME, { 0x07 }, NULL },
 	{ "linux", "0FC63DAF-8483-4772-8E79-3D69D8477DE4", "Linux filesystem",
-	    { 0x83 } },
-	{ "apfs", "7C3457EF-0000-11AA-AA11-00306543ECAC", "Apple APFS", { 0 } },
+	    { 0x83 }, NULL },
+	{ "apfs", "7C3457EF-0000-11AA-AA11-00306543ECAC", "Apple APFS", { 0 }, NULL },
 	{ "hfs", "48465300-0000-11AA-AA11-00306543ECAC", "Apple HFS/HFS+",
-	    { 0xaf } },
+	    { 0xaf }, "Apple_HFS" },
 	{ "hfsplus", "48465300-0000-11AA-AA11-00306543ECAC", "Apple HFS/HFS+",
-	    { 0xaf } },
+	    { 0xaf }, "Apple_HFS" },
 	{ "hfsx", "48465300-0000-11AA-AA11-00306543ECAC", "Apple HFS/HFS+",
-	    { 0xaf } },
+	    { 0xaf }, "Apple_HFSX" },
 	{ "qnx6", "CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1", "QNX6 Power-Safe",
-	    { 0xb2, 0xb1, 0xb3 } },
-	{ "qnx4", NULL, NULL, { 0x4d, 0x4e, 0x4f } }
+	    { 0xb2, 0xb1, 0xb3 }, NULL },
+	{ "qnx4", NULL, NULL, { 0x4d, 0x4e, 0x4f }, NULL }
 };
 
 #define TYPE_COUNT	(sizeof(partition_types) / sizeof(partition_types[0]))
@@ -55,6 +56,16 @@ static bool type_carries_byte(const fsimg_partition_type_t *, uint8_t);
 static bool type_carries_guid(const fsimg_partition_type_t *,
     const unsigned char *);
 static void name_to_utf8(const uint16_t *, char *, size_t);
+static fsimg_status_t type_refused(fsimg_error_t *, const char *);
+static fsimg_status_t gpt_type_match(const fsimg_type_selector_t *,
+    const fsimg_partition_record_t *, bool *, fsimg_error_t *);
+static fsimg_status_t mbr_type_match(const fsimg_type_selector_t *,
+    const fsimg_partition_record_t *, bool *, fsimg_error_t *);
+static fsimg_status_t apm_type_match(const fsimg_type_selector_t *,
+    const fsimg_partition_record_t *, bool *, fsimg_error_t *);
+static bool type_carried(const fsimg_partition_type_t *, fsimg_scheme_kind_t,
+    const fsimg_partition_record_t *);
+static int compare_extents(const void *, const void *);
 
 static bool
 hex_digit(char c, unsigned *value)
@@ -115,8 +126,9 @@ type_carries_guid(const fsimg_partition_type_t *type,
 	    type_guid) && bcmp(type_guid, guid, sizeof(type_guid)) == 0);
 }
 
-/* A type selector is a table name, GUID text, or "0x" and two hex digits
- * naming a nonzero MBR byte.
+/* A type selector is a table name, GUID text, "0x" and two hex digits naming
+ * a nonzero MBR byte, or an APM type beginning Apple_, the prefix Apple reserves
+ * for its own types.
  */
 fsimg_status_t
 fsimg_partition_type_parse(const char *text, fsimg_type_selector_t *out,
@@ -132,18 +144,101 @@ fsimg_partition_type_parse(const char *text, fsimg_type_selector_t *out,
 		}
 	}
 	if (fsimg_guid_parse(text, out->guid)) {
-		out->literal_guid = true;
+		out->form = FSIMG_TYPE_GUID;
 		return (FSIMG_OK);
 	}
 	if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X') &&
 	    hex_digit(text[2], &high) && hex_digit(text[3], &low) &&
 	    text[4] == '\0' && (high | low) != 0) {
 		out->mbr_type = (uint8_t)(high << 4 | low);
-		out->literal_byte = true;
+		out->form = FSIMG_TYPE_BYTE;
+		return (FSIMG_OK);
+	}
+	if (strncmp(text, "Apple_", strlen("Apple_")) == 0 &&
+	    strlen(text) < sizeof(out->apm_type)) {
+		snprintf(out->apm_type, sizeof(out->apm_type), "%s", text);
+		out->form = FSIMG_TYPE_APM;
 		return (FSIMG_OK);
 	}
 	return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-	    "unknown partition type; use a type name, a GUID or an MBR byte"));
+	    "unknown partition type; use a type name, a GUID, an MBR byte or an "
+	    "Apple_ type"));
+}
+
+static fsimg_status_t
+type_refused(fsimg_error_t *error, const char *message)
+{
+	return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE, message));
+}
+
+static fsimg_status_t
+gpt_type_match(const fsimg_type_selector_t *selector,
+    const fsimg_partition_record_t *record, bool *matches, fsimg_error_t *error)
+{
+	switch (selector->form) {
+	case FSIMG_TYPE_TABLE:
+		if (selector->type->gpt_guid == NULL)
+			return (type_refused(error, "the partition type has no GPT GUID"));
+		*matches = type_carries_guid(selector->type, record->type_guid);
+		break;
+	case FSIMG_TYPE_GUID:
+		*matches = bcmp(selector->guid, record->type_guid, 16) == 0;
+		break;
+	case FSIMG_TYPE_BYTE:
+		return (type_refused(error,
+		    "an MBR type byte cannot select a GPT partition"));
+	case FSIMG_TYPE_APM:
+		return (type_refused(error,
+		    "an APM type cannot select a GPT partition"));
+	}
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+mbr_type_match(const fsimg_type_selector_t *selector,
+    const fsimg_partition_record_t *record, bool *matches, fsimg_error_t *error)
+{
+	switch (selector->form) {
+	case FSIMG_TYPE_TABLE:
+		if (selector->type->mbr_types[0] == 0)
+			return (type_refused(error, "the partition type has no MBR byte"));
+		*matches = type_carries_byte(selector->type, record->mbr_type);
+		break;
+	case FSIMG_TYPE_BYTE:
+		*matches = selector->mbr_type == record->mbr_type;
+		break;
+	case FSIMG_TYPE_GUID:
+		return (type_refused(error,
+		    "a GPT type GUID cannot select an MBR partition"));
+	case FSIMG_TYPE_APM:
+		return (type_refused(error,
+		    "an APM type cannot select an MBR partition"));
+	}
+	return (FSIMG_OK);
+}
+
+/* An APM selector compares type text as a listing shows it. */
+static fsimg_status_t
+apm_type_match(const fsimg_type_selector_t *selector,
+    const fsimg_partition_record_t *record, bool *matches, fsimg_error_t *error)
+{
+	switch (selector->form) {
+	case FSIMG_TYPE_TABLE:
+		if (selector->type->apm_type == NULL)
+			return (type_refused(error, "the partition type has no APM type"));
+		*matches = strcmp(selector->type->apm_type, record->apm_type) == 0;
+		break;
+	case FSIMG_TYPE_APM:
+		*matches = strcmp(selector->apm_type, record->apm_type) == 0;
+		break;
+	case FSIMG_TYPE_GUID:
+		return (type_refused(error,
+		    "a GPT type GUID cannot select an APM partition"));
+	case FSIMG_TYPE_BYTE:
+		return (type_refused(error,
+		    "an MBR type byte cannot select an APM partition"));
+	}
+	return (FSIMG_OK);
 }
 
 fsimg_status_t
@@ -152,28 +247,15 @@ fsimg_partition_type_match(const fsimg_type_selector_t *selector,
     bool *matches, fsimg_error_t *error)
 {
 	*matches = false;
-	if (scheme == FSIMG_SCHEME_GPT) {
-		if (selector->literal_byte)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_IMAGE, "an MBR type byte cannot select a GPT partition"));
-		if (selector->type != NULL && selector->type->gpt_guid == NULL)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_IMAGE, "the partition type has no GPT GUID"));
-		*matches = selector->literal_guid ?
-		    bcmp(selector->guid, record->type_guid, 16) == 0 :
-		    type_carries_guid(selector->type, record->type_guid);
-		return (FSIMG_OK);
+	switch (scheme) {
+	case FSIMG_SCHEME_GPT:
+		return (gpt_type_match(selector, record, matches, error));
+	case FSIMG_SCHEME_MBR:
+		return (mbr_type_match(selector, record, matches, error));
+	case FSIMG_SCHEME_APM:
+		return (apm_type_match(selector, record, matches, error));
 	}
-	if (selector->literal_guid)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "a GPT type GUID cannot select an MBR partition"));
-	if (selector->type != NULL && selector->type->mbr_types[0] == 0)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "the partition type has no MBR byte"));
-	*matches = selector->literal_byte ?
-	    selector->mbr_type == record->mbr_type :
-	    type_carries_byte(selector->type, record->mbr_type);
-	return (FSIMG_OK);
+	return (type_refused(error, "the table has no known scheme"));
 }
 
 const fsimg_partition_type_t *
@@ -214,16 +296,21 @@ fsimg_partition_type_gpt(const fsimg_type_selector_t *selector,
 	const fsimg_partition_type_t *type;
 
 	*name = "";
-	if (selector->literal_byte)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "an MBR type byte cannot type a GPT partition"));
-	if (selector->literal_guid) {
+	switch (selector->form) {
+	case FSIMG_TYPE_TABLE:
+		type = selector->type;
+		if (type->gpt_guid == NULL || !fsimg_guid_parse(type->gpt_guid,
+		    record->type_guid))
+			return (type_refused(error, "the partition type has no GPT GUID"));
+		*name = type->gpt_name;
+		break;
+	case FSIMG_TYPE_GUID:
 		/* A nil type marks an entry unused, so readers would not see
 		 * the partition.
 		 */
 		if (bcmp(selector->guid, nil_guid, sizeof(nil_guid)) == 0)
-			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
-			    FSIMG_OP_IMAGE, "the nil GUID marks an unused GPT entry"));
+			return (type_refused(error,
+			    "the nil GUID marks an unused GPT entry"));
 		bcopy(selector->guid, record->type_guid, 16);
 		for (size_t i = 0; i < TYPE_COUNT; i++) {
 			type = &partition_types[i];
@@ -232,14 +319,13 @@ fsimg_partition_type_gpt(const fsimg_type_selector_t *selector,
 				break;
 			}
 		}
-		return (FSIMG_OK);
+		break;
+	case FSIMG_TYPE_BYTE:
+		return (type_refused(error,
+		    "an MBR type byte cannot type a GPT partition"));
+	case FSIMG_TYPE_APM:
+		return (type_refused(error, "an APM type cannot type a GPT partition"));
 	}
-	type = selector->type;
-	if (type->gpt_guid == NULL || !fsimg_guid_parse(type->gpt_guid,
-	    record->type_guid))
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "the partition type has no GPT GUID"));
-	*name = type->gpt_name;
 	return (FSIMG_OK);
 }
 
@@ -252,18 +338,25 @@ fsimg_status_t
 fsimg_partition_type_mbr(const fsimg_type_selector_t *selector,
     fsimg_partition_record_t *record, fsimg_error_t *error)
 {
-	uint8_t byte;
+	uint8_t byte = 0;
 
-	if (selector->literal_guid)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+	switch (selector->form) {
+	case FSIMG_TYPE_TABLE:
+		byte = selector->type->mbr_types[0];
+		break;
+	case FSIMG_TYPE_BYTE:
+		byte = selector->mbr_type;
+		break;
+	case FSIMG_TYPE_GUID:
+		return (type_refused(error,
 		    "a GPT type GUID cannot type an MBR partition"));
-	byte = selector->literal_byte ? selector->mbr_type :
-	    selector->type->mbr_types[0];
+	case FSIMG_TYPE_APM:
+		return (type_refused(error, "an APM type cannot type an MBR partition"));
+	}
 	if (byte == 0)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "the partition type has no MBR byte"));
+		return (type_refused(error, "the partition type has no MBR byte"));
 	if (byte == 0x05 || byte == 0x0f || byte == 0x85 || byte == 0xee)
-		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
+		return (type_refused(error,
 		    "extended and GPT protective types cannot be written"));
 	record->mbr_type = byte;
 	return (FSIMG_OK);
@@ -319,14 +412,91 @@ fsimg_partition_report(fsimg_scheme_kind_t scheme,
 	type = fsimg_partition_type_name(scheme, record);
 	if (type != NULL)
 		snprintf(out->type, sizeof(out->type), "%s", type);
-	if (scheme == FSIMG_SCHEME_GPT) {
+	switch (scheme) {
+	case FSIMG_SCHEME_GPT:
 		bcopy(record->type_guid, out->type_guid, sizeof(out->type_guid));
 		bcopy(record->guid, out->guid, sizeof(out->guid));
 		name_to_utf8(record->name, out->name, sizeof(out->name));
-	} else {
+		break;
+	case FSIMG_SCHEME_MBR:
 		out->mbr_type = record->mbr_type;
 		out->active = record->active;
+		break;
+	case FSIMG_SCHEME_APM:
+		bcopy(record->apm_type, out->apm_type, sizeof(out->apm_type));
+		name_to_utf8(record->name, out->name, sizeof(out->name));
+		break;
 	}
+}
+
+/* Whether a table type is the one a record of the scheme carries. */
+static bool
+type_carried(const fsimg_partition_type_t *type, fsimg_scheme_kind_t scheme,
+    const fsimg_partition_record_t *record)
+{
+	switch (scheme) {
+	case FSIMG_SCHEME_GPT:
+		return (type_carries_guid(type, record->type_guid));
+	case FSIMG_SCHEME_MBR:
+		return (type_carries_byte(type, record->mbr_type));
+	case FSIMG_SCHEME_APM:
+		return (type->apm_type != NULL &&
+		    strcmp(type->apm_type, record->apm_type) == 0);
+	}
+	return (false);
+}
+
+/* A used slot's extent, sorted to find overlaps. */
+typedef struct scheme_extent {
+	uint64_t	 offset;
+	uint64_t	 end;
+	uint32_t	 index;
+} scheme_extent_t;
+
+static int
+compare_extents(const void *left, const void *right)
+{
+	const scheme_extent_t *a = left, *b = right;
+
+	if (a->offset != b->offset)
+		return (a->offset < b->offset ? -1 : 1);
+	return (a->index < b->index ? -1 : a->index > b->index);
+}
+
+/* Sorted by start, each slot can only overlap its predecessor. */
+fsimg_status_t
+fsimg_scheme_find_overlap(fsimg_ctx_t *ctx, const fsimg_scheme_table_t *table,
+    uint32_t *first, uint32_t *second, fsimg_error_t *error)
+{
+	const fsimg_partition_record_t *record;
+	scheme_extent_t *extents;
+	uint32_t count;
+
+	*first = 0;
+	*second = 0;
+	extents = fsimg_alloc(ctx, (size_t)table->count * sizeof(*extents), error);
+	if (extents == NULL)
+		return (error->status);
+	count = 0;
+	for (uint32_t i = 0; i < table->count; i++) {
+		record = &table->records[i];
+		if (!record->used)
+			continue;
+		extents[count].offset = record->offset;
+		extents[count].end = record->offset + record->length;
+		extents[count].index = record->index;
+		count++;
+	}
+	qsort(extents, count, sizeof(*extents), compare_extents);
+	for (uint32_t i = 1; i < count; i++) {
+		if (extents[i].offset >= extents[i - 1].end)
+			continue;
+		*first = extents[i - 1].index;
+		*second = extents[i].index;
+		break;
+	}
+	fsimg_dealloc(extents);
+	return (FSIMG_OK);
 }
 
 const char *
@@ -337,9 +507,7 @@ fsimg_partition_type_name(fsimg_scheme_kind_t scheme,
 
 	for (size_t i = 0; i < TYPE_COUNT; i++) {
 		type = &partition_types[i];
-		if (scheme == FSIMG_SCHEME_GPT ?
-		    type_carries_guid(type, record->type_guid) :
-		    type_carries_byte(type, record->mbr_type))
+		if (type_carried(type, scheme, record))
 			return (type->name);
 	}
 	return (NULL);

@@ -35,26 +35,9 @@
 #define LINUX_GUID	"0FC63DAF-8483-4772-8E79-3D69D8477DE4"
 #define DISK_GUID	"11111111-2222-4333-8444-555555555555"
 
-/* A disk image in memory. A sparse disk reads as zeros beyond its stored
- * bytes, so a 2 TiB MBR disk needs only its first sector.
- */
-typedef struct memory_disk {
-	unsigned char	*bytes;
-	uint64_t	 stored;
-	uint64_t	 length;
-} memory_disk_t;
+#include "layers-fixture.h"
 
-/* One GPT entry as the encoder writes it. */
-typedef struct gpt_partition {
-	const char	*type_guid;
-	const uint16_t	*name;
-	uint64_t	 first_lba;
-	uint64_t	 last_lba;
-} gpt_partition_t;
-
-/* A test's view of the library: one context with scratch, and one image
- * over a memory disk.
- */
+/* One context with scratch and an image over a memory disk. */
 typedef struct fixture {
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*io;
@@ -77,21 +60,7 @@ static const uint16_t name_data[] = { 'D', 'o', 'n', 'n', 0xe9, 'e', 's', 0 };
  */
 static const uint16_t name_hostile[] = { 0xd800, 'X', 0x1b, 0 };
 
-static uint32_t crc32_oracle(const unsigned char *, size_t);
-static void put16(unsigned char *, uint16_t);
-static void put32(unsigned char *, uint32_t);
-static void put64(unsigned char *, uint64_t);
-static void guid_text(const char *, unsigned char *);
-static void guid_put(unsigned char *, const char *);
 static memory_disk_t disk_new(uint64_t);
-static void make_fat12(unsigned char *);
-static void gpt_build(memory_disk_t *, uint32_t, const gpt_partition_t *,
-    unsigned);
-static void gpt_reseal(memory_disk_t *, uint32_t);
-static void mbr_entry(unsigned char *, unsigned, uint8_t, uint8_t, uint32_t,
-    uint32_t);
-static fsimg_status_t disk_read(void *, uint64_t, void *, size_t, size_t *,
-    fsimg_error_t *);
 static fsimg_status_t disk_size(void *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t disk_write(void *, uint64_t, const void *, size_t,
     size_t *, fsimg_error_t *);
@@ -127,6 +96,7 @@ static void test_gpt_primary_array_end_and_trailing_partial_sector(void);
 static void expect_scheme_truncated(fixture_t *, const char *, uint64_t);
 static void test_gpt_sector_sizes(void);
 static void test_mbr_read(void);
+static void test_extended_mbr_fat_claim_is_not_a_candidate(void);
 static void test_mbr_seeded_failures(void);
 static void test_mbr_zero_lba_is_not_a_table(void);
 static void test_iso_system_area_scheme(void);
@@ -146,73 +116,6 @@ static void test_assume_identity_does_not_change_mbr_detection(void);
 static void test_forcing(void);
 static void write_seed(const char *, const memory_disk_t *);
 
-static uint32_t
-crc32_oracle(const unsigned char *bytes, size_t length)
-{
-	uint32_t crc = 0xffffffffu;
-
-	for (size_t i = 0; i < length; i++) {
-		crc ^= bytes[i];
-		for (int bit = 0; bit < 8; bit++)
-			crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
-	}
-	return (crc ^ 0xffffffffu);
-}
-
-static void
-put16(unsigned char *p, uint16_t v)
-{
-	p[0] = (unsigned char)v;
-	p[1] = (unsigned char)(v >> 8);
-}
-
-static void
-put32(unsigned char *p, uint32_t v)
-{
-	for (unsigned i = 0; i < 4; i++)
-		p[i] = (unsigned char)(v >> (8 * i));
-}
-
-static void
-put64(unsigned char *p, uint64_t v)
-{
-	for (unsigned i = 0; i < 8; i++)
-		p[i] = (unsigned char)(v >> (8 * i));
-}
-
-/* A GUID's sixteen bytes in text order. */
-static void
-guid_text(const char *text, unsigned char *bytes)
-{
-	unsigned value;
-
-	for (unsigned i = 0, position = 0; i < 16; i++) {
-		if (text[position] == '-')
-			position++;
-		CHECK(sscanf(text + position, "%2x", &value) == 1);
-		bytes[i] = (unsigned char)value;
-		position += 2;
-	}
-}
-
-/* GPT's mixed byte order: the 32-, 16- and 16-bit leading groups
- * little-endian, the last eight bytes as written.
- */
-static void
-guid_put(unsigned char *raw, const char *text)
-{
-	unsigned char bytes[16];
-
-	guid_text(text, bytes);
-	for (unsigned i = 0; i < 4; i++)
-		raw[i] = bytes[3 - i];
-	raw[4] = bytes[5];
-	raw[5] = bytes[4];
-	raw[6] = bytes[7];
-	raw[7] = bytes[6];
-	bcopy(bytes + 8, raw + 8, 8);
-}
-
 static memory_disk_t
 disk_new(uint64_t length)
 {
@@ -221,152 +124,6 @@ disk_new(uint64_t length)
 	disk.bytes = calloc(1, (size_t)length);
 	CHECK(disk.bytes != NULL);
 	return (disk);
-}
-
-/* A 1 MiB FAT12 volume laid out by hand: 2048 sectors of 512 bytes, one
- * sector per cluster, one reserved sector, two 6-sector FATs and a
- * 224-entry root directory holding one subdirectory, DIR, at cluster 2.
- */
-static void
-make_fat12(unsigned char *volume)
-{
-	static const char dot[] = ".          ";
-	static const char dotdot[] = "..         ";
-	unsigned char *boot = volume, *root, *directory;
-
-	bzero(volume, FAT_BYTES);
-	boot[0] = 0xeb;
-	boot[1] = 0x3c;
-	boot[2] = 0x90;
-	bcopy("MSWIN4.1", boot + 3, 8);
-	put16(boot + 11, 512);
-	boot[13] = 1;
-	put16(boot + 14, 1);
-	boot[16] = 2;
-	put16(boot + 17, 224);
-	put16(boot + 19, 2048);
-	boot[21] = 0xf8;
-	put16(boot + 22, 6);
-	put16(boot + 24, 32);
-	put16(boot + 26, 2);
-	boot[38] = 0x29;
-	bcopy("NO NAME    FAT12   ", boot + 43, 19);
-	boot[510] = 0x55;
-	boot[511] = 0xaa;
-	for (unsigned table = 0; table < 2; table++) {
-		/* Media entry, the reserved entry, and cluster 2 end of chain. */
-		static const unsigned char head[] = { 0xf8, 0xff, 0xff, 0xff, 0x0f };
-
-		bcopy(head, volume + (1 + table * 6) * 512, sizeof(head));
-	}
-	root = volume + 13 * 512;
-	bcopy("DIR        ", root, 11);
-	root[11] = 0x10;
-	put16(root + 26, 2);
-	directory = volume + 27 * 512;
-	bcopy(dot, directory, 11);
-	directory[11] = 0x10;
-	put16(directory + 26, 2);
-	bcopy(dotdot, directory + 32, 11);
-	directory[32 + 11] = 0x10;
-}
-
-/*
- * A GPT of 128 entries in the layout sgdisk writes: protective MBR, header
- * at LBA 1, primary array from LBA 2, usable range after it, backup array
- * before the backup header at the last LBA.
- */
-static void
-gpt_build(memory_disk_t *disk, uint32_t sector, const gpt_partition_t *parts,
-    unsigned count)
-{
-	uint64_t last_lba, array_lbas;
-	unsigned char *mbr, *entry;
-
-	last_lba = disk->length / sector - 1;
-	array_lbas = GPT_ENTRIES * 128 / sector;
-	mbr = disk->bytes;
-	mbr_entry(mbr, 0, 0x00, 0xee, 1,
-	    last_lba > 0xffffffffu ? 0xffffffffu : (uint32_t)last_lba);
-	for (unsigned copy = 0; copy < 2; copy++) {
-		uint64_t header_lba = copy == 0 ? 1 : last_lba;
-		uint64_t array_lba = copy == 0 ? 2 : last_lba - array_lbas;
-		unsigned char *header = disk->bytes + header_lba * sector;
-
-		bcopy("EFI PART", header, 8);
-		put32(header + 8, 0x00010000);
-		put32(header + 12, 92);
-		put64(header + 24, header_lba);
-		put64(header + 32, copy == 0 ? last_lba : 1);
-		put64(header + 40, 2 + array_lbas);
-		put64(header + 48, last_lba - array_lbas - 1);
-		guid_put(header + 56, DISK_GUID);
-		put64(header + 72, array_lba);
-		put32(header + 80, GPT_ENTRIES);
-		put32(header + 84, 128);
-		for (unsigned i = 0; i < count; i++) {
-			entry = disk->bytes + array_lba * sector + i * 128;
-			guid_put(entry, parts[i].type_guid);
-			guid_put(entry + 16, "AAAAAAAA-0000-4000-8000-00000000000A");
-			entry[31] = (unsigned char)i;
-			put64(entry + 32, parts[i].first_lba);
-			put64(entry + 40, parts[i].last_lba);
-			for (unsigned unit = 0; parts[i].name[unit] != 0; unit++)
-				put16(entry + 56 + unit * 2, parts[i].name[unit]);
-		}
-	}
-	gpt_reseal(disk, sector);
-}
-
-/* Recompute both arrays' and both headers' CRCs after an edit. */
-static void
-gpt_reseal(memory_disk_t *disk, uint32_t sector)
-{
-	uint64_t last_lba = disk->length / sector - 1;
-
-	for (unsigned copy = 0; copy < 2; copy++) {
-		unsigned char *header = disk->bytes + (copy == 0 ? 1 : last_lba) *
-		    sector;
-		uint64_t array_lba = header[72] | (uint64_t)header[73] << 8 |
-		    (uint64_t)header[74] << 16;
-
-		put32(header + 88, crc32_oracle(disk->bytes + array_lba * sector,
-		    GPT_ENTRIES * 128));
-		put32(header + 16, 0);
-		put32(header + 16, crc32_oracle(header, 92));
-	}
-}
-
-static void
-mbr_entry(unsigned char *sector, unsigned slot, uint8_t status, uint8_t type,
-    uint32_t first_lba, uint32_t sectors)
-{
-	unsigned char *entry = sector + 446 + slot * 16;
-
-	entry[0] = status;
-	entry[4] = type;
-	put32(entry + 8, first_lba);
-	put32(entry + 12, sectors);
-	sector[510] = 0x55;
-	sector[511] = 0xaa;
-}
-
-static fsimg_status_t
-disk_read(void *argument, uint64_t offset, void *buffer, size_t length,
-    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
-{
-	memory_disk_t *disk = argument;
-	size_t stored;
-
-	CHECK(offset <= disk->length && length <= disk->length - offset);
-	bzero(buffer, length);
-	if (offset < disk->stored) {
-		stored = disk->stored - offset < length ?
-		    (size_t)(disk->stored - offset) : length;
-		bcopy(disk->bytes + offset, buffer, stored);
-	}
-	*transferred = length;
-	return (FSIMG_OK);
 }
 
 static fsimg_status_t
@@ -619,6 +376,7 @@ test_registry(void)
 		    FSIMG_LAYER_SCHEME, scheme, "" },
 		{ "mbr", "", "disk,type,active,id", "", FSIMG_LAYER_SCHEME,
 		    scheme, "" },
+		{ "apm", "", "", "", FSIMG_LAYER_SCHEME, read_only, "" },
 		{ "dmg", ".dmg", "compress,level,chunk,uuid", "raw,zero,zlib,bzip2",
 		    FSIMG_LAYER_CONTAINER, container, "" },
 		{ "vhd", ".vhd", "align,uuid", "raw", FSIMG_LAYER_CONTAINER,
@@ -1566,7 +1324,7 @@ test_mbr_read(void)
 	CHECK(strcmp(error.message, "several partitions have that type") == 0);
 	CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_NAME,
 	    .text = "EFI" }, &volume, &error) == FSIMG_EINVAL);
-	CHECK(strcmp(error.message, "partition names exist only in GPT") == 0);
+	CHECK(strcmp(error.message, "only GPT partitions can be selected by name") == 0);
 	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report, NULL) ==
 	    FSIMG_OK);
 	CHECK(strcmp(report.scheme, "mbr") == 0 && report.partitions == 3);
@@ -1576,6 +1334,47 @@ test_mbr_read(void)
 	CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
 	CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_INDEX,
 	    .index = 4 }, &volume, NULL) == FSIMG_EUNSUPPORTED);
+	fixture_free(&f);
+	free(disk.bytes);
+}
+
+static void
+test_extended_mbr_fat_claim_is_not_a_candidate(void)
+{
+	memory_disk_t disk = disk_new(4 * MIB);
+	fsimg_partition_info_t part;
+	fsimg_image_info_t info;
+	fsimg_error_t error;
+	fsimg_io_t *volume;
+	fixture_t f;
+
+	make_fat12(disk.bytes + MIB);
+	mbr_entry(disk.bytes, 0, 0, 0x0f, 2048, 2048);
+	fixture_init(&f);
+	for (unsigned other = 0; other < 2; other++) {
+		if (other != 0) {
+			make_fat12(disk.bytes + 2 * MIB);
+			mbr_entry(disk.bytes, 1, 0, 0x01, 4096, 2048);
+		}
+		CHECK(fixture_open(&f, &disk, NULL, 0, NULL) == FSIMG_OK);
+		CHECK(fsimg_image_next_partition(f.image, &part, NULL) == FSIMG_OK);
+		CHECK(part.index == 1 && part.used && part.claim == FSIMG_CLAIM_NONE);
+		CHECK(select_with(&f, (fsimg_selector_t){ .kind = FSIMG_SELECT_INDEX,
+		    .index = 1 }, &volume, &error) == FSIMG_EUNSUPPORTED);
+		CHECK(strstr(error.message, "logical partitions") != NULL);
+		if (other == 0) {
+			CHECK(select_with(&f, (fsimg_selector_t){
+			    .kind = FSIMG_SELECT_AUTOMATIC }, &volume, &error) == FSIMG_EFORMAT);
+			CHECK(strcmp(error.message,
+			    "no recognized filesystem in any partition") == 0);
+		} else {
+			CHECK(select_with(&f, (fsimg_selector_t){
+			    .kind = FSIMG_SELECT_AUTOMATIC }, &volume, NULL) == FSIMG_OK);
+			CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
+			CHECK(info.selected == 2);
+			expect_volume_lists(&f, volume, "/DIR");
+		}
+	}
 	fixture_free(&f);
 	free(disk.bytes);
 }
@@ -2393,6 +2192,36 @@ test_force_location_unforced_automatic(void)
 	free(disk.bytes);
 }
 
+/* Small APM fuzz inputs have a map, a used data slot and unused free space.
+ * These are independent big-endian fields from the APM byte layout.
+ */
+static memory_disk_t
+apm_seed(uint32_t block)
+{
+	memory_disk_t disk = disk_new(128 * KIB);
+	static const char *const types[] = {
+		"Apple_partition_map", "Apple_HFS", "Apple_Free"
+	};
+	static const uint32_t starts[] = { 1, 8, 24 };
+	static const uint32_t blocks[] = { 3, 16, 8 };
+
+	bcopy("ER", disk.bytes, 2);
+	disk.bytes[2] = (unsigned char)(block >> 8);
+	disk.bytes[3] = (unsigned char)block;
+	for (unsigned slot = 0; slot < 3; slot++) {
+		unsigned char *raw = disk.bytes + (slot + 1) * block;
+		uint32_t fields[] = { 3, starts[slot], blocks[slot] };
+
+		bcopy("PM", raw, 2);
+		for (unsigned field = 0; field < 3; field++)
+			for (unsigned byte = 0; byte < 4; byte++)
+				raw[4 + field * 4 + byte] =
+				    (unsigned char)(fields[field] >> (24 - byte * 8));
+		bcopy(types[slot], raw + 48, strlen(types[slot]));
+	}
+	return (disk);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2414,6 +2243,13 @@ main(int argc, char **argv)
 		seed = disk_new(128 * KIB);
 		mbr_entry(seed.bytes, 0, 0x80, 0x0c, 1, 63);
 		mbr_entry(seed.bytes, 1, 0x00, 0x83, 64, 64);
+		write_seed(argv[2], &seed);
+		free(seed.bytes);
+		return (0);
+	}
+	if (argc == 3 && (strcmp(argv[1], "--seed-apm") == 0 ||
+	    strcmp(argv[1], "--seed-apm2048") == 0)) {
+		seed = apm_seed(strcmp(argv[1], "--seed-apm") == 0 ? 512 : 2048);
 		write_seed(argv[2], &seed);
 		free(seed.bytes);
 		return (0);
@@ -2446,6 +2282,7 @@ main(int argc, char **argv)
 	test_gpt_seeded_failures();
 	test_gpt_sector_sizes();
 	test_mbr_read();
+	test_extended_mbr_fat_claim_is_not_a_candidate();
 	test_mbr_seeded_failures();
 	test_mbr_zero_lba_is_not_a_table();
 	test_iso_system_area_scheme();

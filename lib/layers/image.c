@@ -140,6 +140,8 @@ static fsimg_status_t probe_layer(const fsimg_layer_t *, const probe_input_t *,
     fsimg_identity_t *, fsimg_error_t *);
 static fsimg_identity_t *vouch(fsimg_image_t *, fsimg_layer_kind_t);
 static bool vouched(const fsimg_image_t *, fsimg_layer_kind_t);
+static void survey_layers(unsigned, const probe_input_t *, bool,
+    fsimg_survey_t *);
 static fsimg_status_t survey(unsigned, const probe_input_t *, const char *,
     fsimg_survey_t *, fsimg_error_t *);
 static const char *forced_filesystem(const fsimg_image_t *);
@@ -873,6 +875,31 @@ probe_layer(const fsimg_layer_t *layer, const probe_input_t *input,
 	    input->tail_length, input->bytes, identity, error));
 }
 
+/* Count the probes of the layers that yield, or of those that do not. One that
+ * yields runs only after the others and only when none of its kind claimed.
+ */
+static void
+survey_layers(unsigned kinds, const probe_input_t *input, bool yielding,
+    fsimg_survey_t *counts)
+{
+	const fsimg_layer_t *layer;
+	fsimg_error_t detail;
+	fsimg_status_t status;
+
+	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
+		if ((kinds & SURVEY(layer->kind)) == 0 || !probing(layer))
+			continue;
+		if ((layer->scheme != NULL && layer->scheme->yields) != yielding)
+			continue;
+		if (yielding && counts[layer->kind].claims != 0)
+			continue;
+		fsimg_error_clear(&detail);
+		status = probe_layer(layer, input, NULL, &detail);
+		if (fsimg_survey_count(&counts[layer->kind], status, &detail))
+			counts[layer->kind].layer = layer;
+	}
+}
+
 /*
  * One survey over both registries: every probe of the kinds in the set,
  * the layer registry's schemes, containers and compressions and the
@@ -886,20 +913,10 @@ static fsimg_status_t
 survey(unsigned kinds, const probe_input_t *input,
     const char *forced_filesystem, fsimg_survey_t *counts, fsimg_error_t *error)
 {
-	const fsimg_layer_t *layer;
-	fsimg_error_t detail;
-	fsimg_status_t status;
-
 	for (unsigned kind = 0; kind < SURVEY_KINDS; kind++)
 		fsimg_survey_init(&counts[kind]);
-	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
-		if ((kinds & SURVEY(layer->kind)) == 0 || !probing(layer))
-			continue;
-		fsimg_error_clear(&detail);
-		status = probe_layer(layer, input, NULL, &detail);
-		if (fsimg_survey_count(&counts[layer->kind], status, &detail))
-			counts[layer->kind].layer = layer;
-	}
+	survey_layers(kinds, input, false, counts);
+	survey_layers(kinds, input, true, counts);
 	if ((kinds & SURVEY(FSIMG_LAYER_FILESYSTEM)) == 0)
 		return (FSIMG_OK);
 	return (fsimg_format_identify(forced_filesystem, input->prefix,
@@ -1400,8 +1417,10 @@ fsimg_image_next_partition(fsimg_image_t *image, fsimg_partition_info_t *out,
 
 	record = &image->table.records[image->cursor];
 	fsimg_partition_report(image->table.kind, record, out);
-	/* A slot past the end of a truncated disk has no bytes to claim. */
-	if (record->used && record->length != 0) {
+	/* A slot past the end of a truncated disk has no bytes to claim, and one
+	 * that cannot be a volume is not probed.
+	 */
+	if (record->used && !record->not_volume && record->length != 0) {
 		status = claim_volume(image, record->offset, record->length,
 		    &out->claim, out->format, error);
 		if (status != FSIMG_OK)
@@ -1440,10 +1459,14 @@ select_record(fsimg_image_t *image, const fsimg_partition_record_t *record,
 	char message[96];
 	fsimg_status_t status;
 
-	if (record->extended) {
-		snprintf(message, sizeof(message), "partition %u is an extended "
-		    "partition; logical partitions are not supported",
-		    (unsigned)record->index);
+	if (record->not_volume) {
+		if (image->table.kind == FSIMG_SCHEME_MBR)
+			snprintf(message, sizeof(message), "partition %u is an "
+			    "extended partition; logical partitions are not "
+			    "supported", (unsigned)record->index);
+		else
+			snprintf(message, sizeof(message), "partition %u, %s, is not "
+			    "a volume", (unsigned)record->index, record->apm_type);
 		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_IMAGE, message));
 	}
@@ -1479,8 +1502,9 @@ select_range(fsimg_image_t *image, const fsimg_selector_t *selector,
 	return (select_slice(image, selector->offset, length, 0, volume, error));
 }
 
-/* The one used partition whose prefix draws a filesystem claim, corrupt
- * and unsupported claims included so the reader reports the real reason.
+/* The one used partition that can be a volume and whose prefix draws a
+ * filesystem claim, corrupt and unsupported claims included so the reader
+ * reports the real reason.
  */
 static fsimg_status_t
 select_automatic(fsimg_image_t *image, fsimg_io_t **volume,
@@ -1502,7 +1526,7 @@ select_automatic(fsimg_image_t *image, fsimg_io_t **volume,
 	    "several partitions hold a filesystem:");
 	for (uint32_t i = 0; i < image->table.count; i++) {
 		record = &image->table.records[i];
-		if (!record->used || record->length == 0)
+		if (!record->used || record->not_volume || record->length == 0)
 			continue;
 		status = claim_volume(image, record->offset, record->length,
 		    &claim, format, error);
@@ -1558,7 +1582,7 @@ find_by_name(fsimg_image_t *image, const char *text,
 
 	if (image->table.kind != FSIMG_SCHEME_GPT)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
-		    "partition names exist only in GPT"));
+		    "only GPT partitions can be selected by name"));
 	status = fsimg_utf8_to_utf16(text, strlen(text), NULL, 0, &count, error);
 	if (status != FSIMG_OK)
 		return (status);

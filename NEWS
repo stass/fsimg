@@ -1,5 +1,15 @@
 fsimg 0.1.0 (unreleased)
 
+Old Mac disk images and optical discs open through a read-only Apple Partition
+Map scheme, `apm`, in the same stack slot as `gpt` and `mbr`: `hfsplus/apm/dmg`
+is detected, partitions list with their map type and name, and
+`--partition=type=Apple_HFS` selects by that type. Hybrid media that also carry
+an MBR or GPT read as before, and `-F apm` reads their map. The partition report
+gains `apm_type`, in the library and in `--json`.
+
+An MBR extended partition is no longer probed for a filesystem: automatic
+selection passes over it and `i` lists it as holding none.
+
 DMG images with bzip2 chunks (UDBZ), the format of most macOS release images
 from 10.4 on, open, list and extract, through a project-owned decoder that
 links no new library.

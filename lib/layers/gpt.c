@@ -4,7 +4,6 @@
 #include "config.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -83,13 +82,6 @@ typedef struct gpt_geometry {
 	uint32_t	 sector_bytes;
 } gpt_geometry_t;
 
-/* A used entry's LBA range, sorted to find overlaps. */
-typedef struct gpt_extent {
-	uint64_t	 first;
-	uint64_t	 last;
-	uint32_t	 index;
-} gpt_extent_t;
-
 static uint32_t gpt_crc32(const unsigned char *, size_t);
 static bool protective_mbr(const unsigned char *, size_t);
 static bool signature_at(const unsigned char *, size_t, size_t);
@@ -121,8 +113,7 @@ static fsimg_status_t check_backup_copy(const fsimg_scheme_input_t *,
 static fsimg_status_t decode_entries(const unsigned char *,
     const gpt_header_t *, const gpt_geometry_t *, fsimg_partition_record_t *,
     fsimg_error_t *);
-static int compare_extents(const void *, const void *);
-static fsimg_status_t check_overlap(fsimg_ctx_t *,
+static fsimg_status_t reject_overlap(fsimg_ctx_t *,
     const fsimg_scheme_table_t *, fsimg_error_t *);
 static fsimg_status_t gpt_open(const fsimg_scheme_input_t *,
     fsimg_scheme_table_t *, fsimg_error_t *);
@@ -158,7 +149,8 @@ const fsimg_scheme_ops_t fsimg_gpt_scheme = {
 	.validate_plan = gpt_validate_plan,
 	.report_plan = gpt_report_plan,
 	.footprint = gpt_footprint,
-	.encode = gpt_encode
+	.encode = gpt_encode,
+	.large_sector = 4096
 };
 
 /* CRC-32 as UEFI and zlib define it: reflected polynomial 0xEDB88320, all
@@ -536,56 +528,21 @@ decode_entries(const unsigned char *array, const gpt_header_t *header,
 	return (FSIMG_OK);
 }
 
-static int
-compare_extents(const void *left, const void *right)
-{
-	const gpt_extent_t *a = left, *b = right;
-
-	if (a->first != b->first)
-		return (a->first < b->first ? -1 : 1);
-	return (a->index < b->index ? -1 : a->index > b->index);
-}
-
-/* Sort the used entries by first LBA, in memory charged to the context,
- * so each can only overlap its predecessor.
- */
+/* Two used entries sharing an LBA is a corrupt table. */
 static fsimg_status_t
-check_overlap(fsimg_ctx_t *ctx, const fsimg_scheme_table_t *table,
+reject_overlap(fsimg_ctx_t *ctx, const fsimg_scheme_table_t *table,
     fsimg_error_t *error)
 {
-	const fsimg_partition_record_t *record;
-	gpt_extent_t *extents;
-	uint32_t count;
+	uint32_t first, second;
 	char check[64];
 	fsimg_status_t status;
 
-	extents = fsimg_alloc(ctx, (size_t)table->count * sizeof(*extents),
-	    error);
-	if (extents == NULL)
-		return (error->status);
-	count = 0;
-	for (uint32_t i = 0; i < table->count; i++) {
-		record = &table->records[i];
-		if (!record->used)
-			continue;
-		extents[count].first = record->offset / table->sector_bytes;
-		extents[count].last = extents[count].first - 1 +
-		    record->length / table->sector_bytes;
-		extents[count].index = record->index;
-		count++;
-	}
-	qsort(extents, count, sizeof(*extents), compare_extents);
-	status = FSIMG_OK;
-	for (uint32_t i = 1; i < count; i++) {
-		if (extents[i].first > extents[i - 1].last)
-			continue;
-		snprintf(check, sizeof(check), "partitions %u and %u overlap",
-		    (unsigned)extents[i - 1].index, (unsigned)extents[i].index);
-		status = gpt_corrupt(error, "", check);
-		break;
-	}
-	fsimg_dealloc(extents);
-	return (status);
+	status = fsimg_scheme_find_overlap(ctx, table, &first, &second, error);
+	if (status != FSIMG_OK || first == 0)
+		return (status);
+	snprintf(check, sizeof(check), "partitions %u and %u overlap",
+	    (unsigned)first, (unsigned)second);
+	return (gpt_corrupt(error, "", check));
 }
 
 /*
@@ -645,7 +602,7 @@ gpt_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 	    table->records, error);
 	fsimg_dealloc(primary_array);
 	if (status == FSIMG_OK)
-		status = check_overlap(input->ctx, table, error);
+		status = reject_overlap(input->ctx, table, error);
 	if (status != FSIMG_OK) {
 		fsimg_dealloc(table->records);
 		bzero(table, sizeof(*table));

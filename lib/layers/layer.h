@@ -32,12 +32,14 @@
  * cannot fail its bounds and a length of zero means it lies past the disk's
  * end. GUIDs are in textual byte order whatever the table stores. name holds a
  * GPT entry's UTF-16 units as stored; the name ends at the first zero unit or
- * at 36 units.
+ * at 36 units. An APM entry's name and apm_type are its fields as printable
+ * ASCII, each terminated.
  */
 typedef struct fsimg_partition_record {
 	unsigned char	 type_guid[16];
 	unsigned char	 guid[16];
 	uint16_t	 name[FSIMG_GPT_NAME_UNITS];
+	char		 apm_type[33];
 	uint64_t	 offset;
 	uint64_t	 length;
 	uint64_t	 missing_bytes;
@@ -45,12 +47,14 @@ typedef struct fsimg_partition_record {
 	uint8_t		 mbr_type;
 	bool		 used;
 	bool		 active;
-	bool		 extended;	/* An MBR container of logical partitions */
+	bool		 not_volume;	/* Listed, never selected: an MBR extended
+					 * partition, or APM's map or a driver */
 } fsimg_partition_record_t;
 
 typedef enum fsimg_scheme_kind {
 	FSIMG_SCHEME_GPT,
-	FSIMG_SCHEME_MBR
+	FSIMG_SCHEME_MBR,
+	FSIMG_SCHEME_APM
 } fsimg_scheme_kind_t;
 
 /* A validated partition table: one record per slot in slot order, held in
@@ -207,6 +211,11 @@ typedef struct fsimg_scheme_partition_args {
  * scheme's fields of an image report and the report of slot (from 1) of
  * a validated table. encode turns a validated table into its regions for
  * a disk of the given length; every byte of a region is defined.
+ *
+ * large_sector is the one block size beside 512 a table may use, 0 for none.
+ * A scheme that yields counts as a claim in a survey only when no other scheme
+ * claims, because a table of the kind is expected beside another on hybrid
+ * media.
  */
 typedef struct fsimg_scheme_ops {
 	size_t		 probe_bytes;
@@ -230,6 +239,8 @@ typedef struct fsimg_scheme_ops {
 	void		(*footprint)(uint32_t, uint64_t *, uint64_t *);
 	fsimg_status_t	(*encode)(fsimg_ctx_t *, const fsimg_scheme_table_t *,
 			    uint64_t, fsimg_scheme_tables_t *, fsimg_error_t *);
+	uint32_t	 large_sector;
+	bool		 yields;
 } fsimg_scheme_ops_t;
 
 /* Whether a scheme writes: it has the write set. */
@@ -837,6 +848,7 @@ typedef struct fsimg_layer {
 
 extern const fsimg_scheme_ops_t fsimg_gpt_scheme;
 extern const fsimg_scheme_ops_t fsimg_mbr_scheme;
+extern const fsimg_scheme_ops_t fsimg_apm_scheme;
 extern const fsimg_container_ops_t fsimg_dmg_container;
 extern const fsimg_container_ops_t fsimg_vhd_container;
 extern const fsimg_container_ops_t fsimg_simg_container;
@@ -910,15 +922,23 @@ typedef struct fsimg_partition_type {
 	const char	*gpt_guid;	/* RFC 4122 text, or NULL */
 	const char	*gpt_name;	/* sgdisk's default partition name */
 	uint8_t		 mbr_types[3];	/* Written type first; zero-terminated */
+	const char	*apm_type;	/* The map's type text, or NULL */
 } fsimg_partition_type_t;
 
-/* A parsed type selector: a table entry, a literal GUID or a literal byte. */
+/* What a parsed type selector holds, which decides the one field it uses. */
+typedef enum fsimg_type_form {
+	FSIMG_TYPE_TABLE,	/* type */
+	FSIMG_TYPE_GUID,	/* guid */
+	FSIMG_TYPE_BYTE,	/* mbr_type */
+	FSIMG_TYPE_APM		/* apm_type */
+} fsimg_type_form_t;
+
 typedef struct fsimg_type_selector {
+	fsimg_type_form_t form;
 	const fsimg_partition_type_t *type;
 	unsigned char	 guid[16];
+	char		 apm_type[33];
 	uint8_t		 mbr_type;
-	bool		 literal_guid;
-	bool		 literal_byte;
 } fsimg_type_selector_t;
 
 fsimg_status_t fsimg_partition_type_parse(const char *,
@@ -943,6 +963,12 @@ fsimg_status_t fsimg_partition_type_gpt(const fsimg_type_selector_t *,
  */
 fsimg_status_t fsimg_partition_type_mbr(const fsimg_type_selector_t *,
     fsimg_partition_record_t *, fsimg_error_t *);
+/* Find an overlap among a table's used slots, sorting them in memory charged
+ * to the context: *first and *second name two slots that overlap, in sorted
+ * order, or *first is 0 when none do.
+ */
+fsimg_status_t fsimg_scheme_find_overlap(fsimg_ctx_t *,
+    const fsimg_scheme_table_t *, uint32_t *, uint32_t *, fsimg_error_t *);
 /* Fill a public partition record from a decoded or planned one. */
 void fsimg_partition_report(fsimg_scheme_kind_t,
     const fsimg_partition_record_t *, fsimg_partition_info_t *);

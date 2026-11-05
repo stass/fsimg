@@ -187,7 +187,7 @@ class CliTest < Minitest::Test
         .lines(chomp: true)
     )
     result = invoke(arguments: ["tf", "mbr.img", "--partition=name=EFI"], expected: 1)
-    assert_includes(result.stderr, "partition names exist only in GPT".b, "result stderr")
+    assert_includes(result.stderr, "only GPT partitions can be selected by name".b, "result stderr")
     info = invoke(arguments: ["i", "-f", "mbr.img", "--partition=type=0x01"], expected: 1)
     assert_includes(info.stderr, "several partitions have that type".b, "info stderr")
   end

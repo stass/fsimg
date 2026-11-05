@@ -79,6 +79,7 @@ typedef struct contract_layer_profile {
 			    contract_volume_t *);
 } contract_layer_profile_t;
 
+static void apm_build(const contract_volume_t *, contract_volume_t *);
 static void hbcifs_build(const contract_volume_t *, contract_volume_t *);
 
 #define RW_VERIFY	(FSIMG_CAP_READ | FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY)
@@ -92,6 +93,9 @@ static const layer_mode_t gpt_modes[] = {
 };
 static const layer_mode_t mbr_modes[] = {
 	{ .id = "default", .capabilities = RW_VERIFY },
+};
+static const layer_mode_t apm_modes[] = {
+	{ .id = "default", .capabilities = R_VERIFY },
 };
 static const layer_mode_t dmg_modes[] = {
 	{ .id = "zlib", .capabilities = RW_VERIFY,
@@ -139,6 +143,11 @@ static const contract_layer_profile_t layer_profiles[] = {
 	    .expected_capabilities = RW_VERIFY, .carries = "",
 	    .payload = PAYLOAD_FAT12, .stack = "fat12/mbr",
 	    .modes = mbr_modes, .mode_count = COUNT(mbr_modes) },
+	{ .name = "apm", .kind = FSIMG_LAYER_SCHEME,
+	    .expected_capabilities = R_VERIFY, .carries = "",
+	    .payload = PAYLOAD_FAT12, .stack = "fat12/apm",
+	    .modes = apm_modes, .mode_count = COUNT(apm_modes),
+	    .materialize = apm_build },
 	{ .name = "dmg", .kind = FSIMG_LAYER_CONTAINER,
 	    .expected_capabilities = RW_VERIFY, .carries = "",
 	    .payload = PAYLOAD_FAT12, .stack = "fat12/dmg",
@@ -420,6 +429,42 @@ payload_build(payload_t payload, contract_volume_t *volume)
 	fsimg_writer_free(writer);
 	fixture_close(&fixture);
 	contract_volume_reset(volume);
+}
+
+static void
+put_be32(unsigned char *p, uint32_t value)
+{
+	p[0] = (unsigned char)(value >> 24);
+	p[1] = (unsigned char)(value >> 16);
+	p[2] = (unsigned char)(value >> 8);
+	p[3] = (unsigned char)value;
+}
+
+/* An independent APM encoder: a 512-byte driver descriptor, one map
+ * entry, then the payload. The sole partition starts at block 2.
+ */
+static void
+apm_build(const contract_volume_t *payload, contract_volume_t *out)
+{
+	unsigned char *bytes, *entry;
+	uint32_t blocks;
+
+	CONTRACT_CHECK(payload->length % 512 == 0);
+	CONTRACT_CHECK(payload->length / 512 <= UINT32_MAX - 2);
+	blocks = (uint32_t)(payload->length / 512);
+	contract_volume_init(out, payload->length + 1024, 0);
+	bytes = contract_volume_bytes(out);
+	bcopy("ER", bytes, 2);
+	bytes[2] = 2;
+	put_be32(bytes + 4, blocks + 2);
+	entry = bytes + 512;
+	bcopy("PM", entry, 2);
+	put_be32(entry + 4, 1);
+	put_be32(entry + 8, 2);
+	put_be32(entry + 12, blocks);
+	bcopy("DOS_FAT_12", entry + 48, 10);
+	bcopy(payload->bytes + CONTRACT_GUARD, bytes + 1024,
+	    (size_t)payload->length);
 }
 
 /*
@@ -736,7 +781,7 @@ check_family(const contract_layer_profile_t *profile, const layer_mode_t *mode,
 			tables = 2 * (uint64_t)mode->gpt_sector_bytes + 16 * KIB;
 		} else {
 			CONTRACT_CHECK(read->info.sector_bytes == 512);
-			tables = 512;
+			tables = strcmp(profile->name, "apm") == 0 ? 1024 : 512;
 		}
 		CONTRACT_CHECK(read->partition.offset >= tables);
 		CONTRACT_CHECK(zero_between(encoded, tables,

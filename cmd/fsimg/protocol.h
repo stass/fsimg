@@ -159,7 +159,7 @@ _Static_assert(FSIMG_WIRE_IMAGE_MISSING + 8 == FSIMG_WIRE_IMAGE_BYTES,
     "the image record ends with the missing byte count");
 
 /* One used partition-table slot, for i. */
-#define FSIMG_WIRE_PARTITION_BYTES 232u
+#define FSIMG_WIRE_PARTITION_BYTES 272u
 #define FSIMG_WIRE_PARTITION_ACTIVE 0x1u
 typedef enum fsimg_wire_partition_field {
 	FSIMG_WIRE_PARTITION_INDEX = 0,
@@ -173,12 +173,16 @@ typedef enum fsimg_wire_partition_field {
 	FSIMG_WIRE_PARTITION_TYPE_GUID = 80,
 	FSIMG_WIRE_PARTITION_GUID = 96,
 	FSIMG_WIRE_PARTITION_NAME = 112,
-	FSIMG_WIRE_PARTITION_MISSING = 224
+	FSIMG_WIRE_PARTITION_MISSING = 224,
+	FSIMG_WIRE_PARTITION_APM_TYPE = 232
 } fsimg_wire_partition_field_t;
 #define FSIMG_WIRE_PARTITION_NAME_BYTES 112u
 _Static_assert(FSIMG_WIRE_PARTITION_NAME + FSIMG_WIRE_PARTITION_NAME_BYTES ==
     FSIMG_WIRE_PARTITION_MISSING, "the missing byte count follows the name");
-_Static_assert(FSIMG_WIRE_PARTITION_MISSING + 8 == FSIMG_WIRE_PARTITION_BYTES,
+#define FSIMG_WIRE_PARTITION_APM_TYPE_BYTES 40u
+_Static_assert(FSIMG_WIRE_PARTITION_APM_TYPE + FSIMG_WIRE_PARTITION_APM_TYPE_BYTES ==
+    FSIMG_WIRE_PARTITION_BYTES, "the APM type ends the record");
+_Static_assert(FSIMG_WIRE_PARTITION_MISSING + 8 == FSIMG_WIRE_PARTITION_APM_TYPE,
     "the partition record ends with the missing byte count");
 
 /* OUTPUT is the most bytes the image can take: the volume or disk, or the

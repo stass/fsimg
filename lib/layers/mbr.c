@@ -223,7 +223,7 @@ mbr_open(const fsimg_scheme_input_t *input, fsimg_scheme_table_t *table,
 		record->used = true;
 		record->active = entries[i].status == 0x80;
 		record->mbr_type = entries[i].type;
-		record->extended = entries[i].type == 0x05 ||
+		record->not_volume = entries[i].type == 0x05 ||
 		    entries[i].type == 0x0f || entries[i].type == 0x85;
 		record->offset = entries[i].first_lba * MBR_SECTOR_BYTES;
 		record->length = entries[i].sectors * MBR_SECTOR_BYTES;

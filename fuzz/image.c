@@ -11,7 +11,7 @@
 
 /*
  * The input is a whole disk. Each run opens the image under several forced
- * stacks (detected, GPT at either sector size, MBR, no scheme) and drives
+ * stacks (detected, GPT at either sector size, MBR, APM, no scheme) and drives
  * the scheme step, partition enumeration, every selector, layer
  * verification and a reader on the selected slice, under finite limits.
  * Mutations rarely keep a GPT's CRC32 fields valid, so each input also runs
@@ -30,7 +30,7 @@ static uint32_t crc32_bytes(const uint8_t *, size_t);
 static uint64_t le(const uint8_t *, unsigned);
 static void put32(uint8_t *, uint32_t);
 static void reseal_header(uint8_t *, size_t, size_t);
-static void exercise_stack(fsimg_ctx_t *, fsimg_io_t *, const char *, uint32_t);
+static void exercise_stack(fsimg_ctx_t *, fsimg_io_t *, const char *, uint32_t, unsigned);
 static void exercise(const uint8_t *, size_t);
 int LLVMFuzzerTestOneInput(const uint8_t *, size_t);
 
@@ -116,9 +116,9 @@ reseal_header(uint8_t *disk, size_t size, size_t offset)
  */
 static void
 exercise_stack(fsimg_ctx_t *ctx, fsimg_io_t *io, const char *stack,
-    uint32_t sector)
+    uint32_t sector, unsigned flags)
 {
-	static const char *const texts[] = { "EFI", "esp", "0x0c", "fat32",
+	static const char *const texts[] = { "EFI", "esp", "0x0c", "fat32", "hfs", "Apple_HFS",
 	    "C12A7328-F81F-11D2-BA4B-00A0C93EC93B" };
 	fsimg_image_options_t options;
 	fsimg_image_info_t info;
@@ -134,6 +134,7 @@ exercise_stack(fsimg_ctx_t *ctx, fsimg_io_t *io, const char *stack,
 	if (stack != NULL && fsimg_stack_parse(stack, &options.stack, NULL) != FSIMG_OK)
 		abort();
 	options.layers.gpt_sector_bytes = sector;
+	options.flags = flags;
 	if (fsimg_image_open(ctx, io, &options, &image, NULL) != FSIMG_OK)
 		return;
 	if (fsimg_image_get_info(image, &info, NULL) == FSIMG_OK) {
@@ -185,9 +186,13 @@ exercise(const uint8_t *data, size_t size)
 	static const struct {
 		const char	*stack;
 		uint32_t	 sector;
+		unsigned	 flags;
 	} stacks[] = {
-		{ NULL, 0 }, { "gpt", 0 }, { "gpt", 4096 }, { "mbr", 0 },
-		{ "fat12/-", 0 }
+		{ .stack = NULL }, { .stack = "gpt" },
+		{ .stack = "gpt", .sector = 4096 }, { .stack = "mbr" },
+		{ .stack = "apm" },
+		{ .stack = "apm", .flags = FSIMG_IMAGE_ASSUME_IDENTITY },
+		{ .stack = "fat12/-" }
 	};
 	fuzz_input_t input = { .data = data, .size = size };
 	fsimg_options_t options;
@@ -213,7 +218,8 @@ exercise(const uint8_t *data, size_t size)
 		return;
 	}
 	for (size_t i = 0; i < sizeof(stacks) / sizeof(stacks[0]); i++)
-		exercise_stack(ctx, io, stacks[i].stack, stacks[i].sector);
+		exercise_stack(ctx, io, stacks[i].stack, stacks[i].sector,
+		    stacks[i].flags);
 	fsimg_io_free(io);
 	fsimg_ctx_get_stats(ctx, &stats, NULL);
 	if (stats.memory_bytes != baseline.memory_bytes || stats.scratch_bytes != 0 ||

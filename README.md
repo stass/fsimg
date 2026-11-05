@@ -18,9 +18,9 @@ fsimg cf data.img -F exfat -C files .      # Create an image from ./files/
 
 - **One interface across formats.** Work with FAT, exFAT, and QNX filesystems
   using the same commands.
-- **Read through the layers.** Detect supported filesystems inside GPT or MBR
-  disks, DMGs, fixed VHDs, Android sparse images, and gzip, zstd or xz
-  streams.
+- **Read through the layers.** Detect supported filesystems inside GPT, MBR or
+  Apple Partition Map disks, DMGs, fixed VHDs, Android sparse images, and gzip,
+  zstd or xz streams.
 - **Build images from files or manifests.** Choose the filesystem, size,
   label, partition scheme, and container. Use mtree manifests to set image
   ownership and permissions without changing host files.
@@ -246,6 +246,7 @@ owner, mode or times.
 | Disk layer | Read | Create |
 | --- | --- | --- |
 | GPT, MBR | Yes | One partition through the CLI; multiple through the C API |
+| Apple Partition Map | Yes, at 512- and 2048-byte blocks | No |
 | DMG (UDIF) | Stored, zero, zlib, and bzip2 chunks | UDRO or UDZO |
 | VHD | Fixed disks | Fixed disks |
 | Android sparse (`simg`) | Yes | Yes |

@@ -63,7 +63,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/read/salvage.c \
 	lib/read/selection.c lib/read/selection.h \
 	lib/layers/layer.h lib/layers/stack.c lib/layers/types.c \
-	lib/layers/image.c lib/layers/gpt.c lib/layers/mbr.c \
+	lib/layers/image.c lib/layers/gpt.c lib/layers/mbr.c lib/layers/apm.c \
 	lib/layers/plan.c lib/layers/output.c \
 	lib/layers/chunks.c lib/layers/plist.c lib/layers/dmg.c \
 	lib/layers/vhd.c lib/layers/simg.c lib/layers/transcode.c \
@@ -181,7 +181,8 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
-	test-qualify test-fragment test-posix test-layers test-layers-write test-scheme-planning \
+	test-qualify test-fragment test-posix test-layers test-layers-apm \
+	test-layers-write test-scheme-planning \
 	test-containers test-compression test-gzip-write test-holes test-settings \
 	header-c \
 	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
@@ -244,8 +245,10 @@ test_unicode_SOURCES = test/unicode.c test/test.h
 test_unicode_LDADD = libfsimg.la
 test_format_SOURCES = test/format.c test/test.h
 test_format_LDADD = libfsimg.la
-test_layers_SOURCES = test/layers.c test/test.h
+test_layers_SOURCES = test/layers.c test/layers-fixture.h test/test.h
 test_layers_LDADD = libfsimg-core.la
+test_layers_apm_SOURCES = test/layers-apm.c test/layers-fixture.h test/test.h
+test_layers_apm_LDADD = libfsimg-core.la
 test_settings_SOURCES = test/settings.c test/test.h
 test_settings_LDADD = libfsimg-core.la
 test_layers_write_SOURCES = test/layers-write.c test/test.h
@@ -500,6 +503,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/compressed_create_test.rb \
 	test/cli/container_create_test.rb \
 	test/cli/containers_test.rb \
+	test/cli/apm_test.rb \
 	test/cli/coordinator_worker_test.rb \
 	test/cli/create_operands_test.rb \
 	test/cli/examples_test.rb \

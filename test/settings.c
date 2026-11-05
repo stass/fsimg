@@ -113,6 +113,7 @@ static const struct {
 } advertised[] = {
 	{ "gpt", "sector,disk,type,name,disk-guid,guid" },
 	{ "mbr", "disk,type,active,id" },
+	{ "apm", "" },
 	{ "dmg", "compress,level,chunk,uuid" },
 	{ "vhd", "align,uuid" },
 	{ "simg", "block,crc" },

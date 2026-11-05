@@ -42,6 +42,8 @@ static void metadata_fields(fsimg_cli_display_t *, uint64_t);
 static void entry_kinds(fsimg_cli_display_t *, uint64_t);
 static const char *kind_name(uint64_t);
 static void uuid_value(fsimg_cli_display_t *, const unsigned char *);
+static void optional_uuid(fsimg_cli_display_t *, bool, const unsigned char *);
+static const char *scheme_label(const char *, char *, size_t);
 static void posix_fields(fsimg_cli_display_t *, const unsigned char *, uint64_t);
 static void format_details(fsimg_cli_display_t *, const fsimg_format_info_t *);
 static void layer(fsimg_cli_display_t *, const fsimg_layer_info_t *);
@@ -847,6 +849,19 @@ container_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	    FSIMG_WIRE_IMAGE_DETAILS, true);
 }
 
+/* A scheme's name as prose writes it, in capitals. */
+static const char *
+scheme_label(const char *scheme, char *label, size_t capacity)
+{
+	size_t i;
+
+	for (i = 0; i + 1 < capacity && scheme[i] != '\0'; i++)
+		label[i] = scheme[i] >= 'a' && scheme[i] <= 'z' ?
+		    (char)(scheme[i] - 'a' + 'A') : scheme[i];
+	label[i] = '\0';
+	return (label);
+}
+
 /*
  * The layers around the volume, from the IMAGE record: the stack, the
  * compression, the container and, with a scheme, the disk and its table.
@@ -864,7 +879,9 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	uint64_t selected = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SELECTED);
 	uint64_t missing = fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_MISSING);
 	bool gpt = strcmp(scheme, "gpt") == 0;
+	bool mbr = strcmp(scheme, "mbr") == 0;
 	bool container = raw[FSIMG_WIRE_IMAGE_CONTAINER] != '\0';
+	char label[8];
 
 	if (display->options->json) {
 		append(display, "{\"schema\":1,\"type\":\"stack\",\"stack\":");
@@ -905,7 +922,7 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 		} else
 			append(display, "null");
 		append(display, ",\"mbr_disk_id\":");
-		if (scheme[0] != '\0' && !gpt)
+		if (mbr)
 			append(display, "%llu", (unsigned long long)
 			    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID));
 		else
@@ -933,7 +950,7 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	if (scheme[0] == '\0')
 		return;
 	append(display, "Scheme:       %s, %llu-byte sectors\nDisk size:    ",
-	    gpt ? "GPT" : "MBR",
+	    scheme_label(scheme, label, sizeof(label)),
 	    (unsigned long long)fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_SECTOR));
 	byte_size(display, fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK));
 	if (missing != 0) {
@@ -944,10 +961,24 @@ image_report(fsimg_cli_display_t *display, const unsigned char *raw)
 	if (gpt) {
 		append(display, "\nDisk GUID:    ");
 		uuid_value(display, raw + FSIMG_WIRE_IMAGE_DISK_GUID);
-	} else
+	} else if (mbr)
 		append(display, "\nDisk ID:      0x%08llx", (unsigned long long)
 		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID));
 	append(display, "\n");
+}
+
+/* A JSON identifier: quoted text when the scheme has one, otherwise null. */
+static void
+optional_uuid(fsimg_cli_display_t *display, bool present,
+    const unsigned char *raw)
+{
+	if (!present) {
+		append(display, "null");
+		return;
+	}
+	append(display, "\"");
+	uuid_value(display, raw);
+	append(display, "\"");
 }
 
 /* One used table slot; the selected one is marked. */
@@ -959,9 +990,13 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	const char *type = (const char *)raw + FSIMG_WIRE_PARTITION_TYPE;
 	const char *format_name = (const char *)raw + FSIMG_WIRE_PARTITION_FORMAT;
 	const char *name = (const char *)raw + FSIMG_WIRE_PARTITION_NAME;
+	const char *apm_type = (const char *)raw + FSIMG_WIRE_PARTITION_APM_TYPE;
 	uint64_t index = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_INDEX);
 	uint64_t claim = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_CLAIM);
-	bool gpt = strcmp((const char *)display->image + FSIMG_WIRE_IMAGE_SCHEME, "gpt") == 0;
+	const char *scheme = (const char *)display->image + FSIMG_WIRE_IMAGE_SCHEME;
+	bool gpt = strcmp(scheme, "gpt") == 0;
+	bool mbr = strcmp(scheme, "mbr") == 0;
+	bool apm = strcmp(scheme, "apm") == 0;
 	uint64_t missing = fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_MISSING);
 	bool active = (fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_FLAGS) &
 	    FSIMG_WIRE_PARTITION_ACTIVE) != 0;
@@ -976,19 +1011,31 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 			string_value(display, type);
 		else
 			append(display, "null");
+		append(display, ",\"apm_type\":");
+		if (apm)
+			string_value(display, apm_type);
+		else
+			append(display, "null");
 		append(display, ",\"type_guid\":");
-		if (gpt) {
-			append(display, "\"");
-			uuid_value(display, raw + FSIMG_WIRE_PARTITION_TYPE_GUID);
-			append(display, "\",\"guid\":\"");
-			uuid_value(display, raw + FSIMG_WIRE_PARTITION_GUID);
-			append(display, "\",\"name\":");
+		optional_uuid(display, gpt, raw + FSIMG_WIRE_PARTITION_TYPE_GUID);
+		append(display, ",\"guid\":");
+		optional_uuid(display, gpt, raw + FSIMG_WIRE_PARTITION_GUID);
+		append(display, ",\"name\":");
+		if (mbr)
+			append(display, "null");
+		else
 			string_value(display, name);
-			append(display, ",\"mbr_type\":null,\"active\":null");
-		} else
-			append(display, "null,\"guid\":null,\"name\":null,\"mbr_type\":%llu,"
-			    "\"active\":%s", (unsigned long long)fsimg_load_le64(raw +
-			    FSIMG_WIRE_PARTITION_MBR_TYPE), active ? "true" : "false");
+		append(display, ",\"mbr_type\":");
+		if (mbr)
+			append(display, "%llu", (unsigned long long)fsimg_load_le64(raw +
+			    FSIMG_WIRE_PARTITION_MBR_TYPE));
+		else
+			append(display, "null");
+		append(display, ",\"active\":");
+		if (mbr)
+			append(display, "%s", active ? "true" : "false");
+		else
+			append(display, "null");
 		append(display, ",\"offset_bytes\":");
 		uint_value(display, fsimg_load_le64(raw + FSIMG_WIRE_PARTITION_OFFSET));
 		append(display, ",\"length_bytes\":");
@@ -1005,7 +1052,9 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	}
 	snprintf(label, sizeof(label), "Partition %llu:", (unsigned long long)index);
 	append(display, "%-13s ", label);
-	if (type[0] != '\0')
+	if (apm)
+		prose(display, apm_type);
+	else if (type[0] != '\0')
 		prose(display, type);
 	else if (gpt)
 		uuid_value(display, raw + FSIMG_WIRE_PARTITION_TYPE_GUID);
@@ -1504,6 +1553,7 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 	const char *compression = (const char *)image +
 	    FSIMG_WIRE_IMAGE_COMPRESSION;
 	const char *fields;
+	char label[8];
 	size_t qualified;
 	uint64_t checked = fsimg_load_le64(image + FSIMG_WIRE_IMAGE_CHECKED);
 	uint64_t selected = fsimg_load_le64(image + FSIMG_WIRE_IMAGE_SELECTED);
@@ -1583,7 +1633,7 @@ verification(fsimg_cli_display_t *display, const unsigned char *raw)
 		}
 		if (table)
 			append(display, " %s partition table (%llu partition%s) and partition %llu",
-			    strcmp(scheme, "gpt") == 0 ? "GPT" : "MBR",
+			    scheme_label(scheme, label, sizeof(label)),
 			    (unsigned long long)checked, checked == 1 ? "" : "s",
 			    (unsigned long long)selected);
 		append(display, " filesystem structure%s verified (%llu files, %llu directories",
@@ -2384,7 +2434,7 @@ fsimg_cli_final(void *argument, fsimg_worker_text_t *text, fsimg_error_t *error)
 		if (!display->hybrid_noted && hybrid[0] != '\0') {
 			display->hybrid_noted = true;
 			append(display, "fsimg: note: the disk also carries a "
-			    "%s partition table; use -F %s to read its "
+			    "partition table (%s); use -F %s to read its "
 			    "partitions\n", hybrid, hybrid);
 			return (finish_span(display, true, text, error));
 		}

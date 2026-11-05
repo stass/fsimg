@@ -37,6 +37,8 @@ static const fsimg_layer_t layers[] = {
 	    .settings = &fsimg_gpt_settings },
 	{ .name = "mbr", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_mbr_scheme,
 	    .settings = &fsimg_mbr_settings },
+	{ .name = "apm", .kind = FSIMG_LAYER_SCHEME,
+	    .scheme = &fsimg_apm_scheme },
 	{ .name = "dmg", .suffix = ".dmg", .kind = FSIMG_LAYER_CONTAINER,
 	    .container = &fsimg_dmg_container, .settings = &fsimg_dmg_settings },
 	{ .name = "vhd", .suffix = ".vhd", .kind = FSIMG_LAYER_CONTAINER,

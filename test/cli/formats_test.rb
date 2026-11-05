@@ -43,6 +43,7 @@ class CliTest < Minitest::Test
       {
         "gpt" => "scheme",
         "mbr" => "scheme",
+        "apm" => "scheme",
         "dmg" => "container",
         "vhd" => "container",
         "simg" => "container",
@@ -56,6 +57,8 @@ class CliTest < Minitest::Test
     )
     assert_equal(["sector", "disk", "type", "name", "disk-guid", "guid"], layers.fetch("gpt").fetch("settings"))
     assert_equal(["disk", "type", "active", "id"], layers.fetch("mbr").fetch("settings"))
+    assert_equal([], layers.fetch("apm").fetch("settings"))
+    assert_equal(5, layers.fetch("apm").fetch("capabilities"), "layers apm capabilities")
     assert_equal(["compress", "level", "chunk", "uuid"], layers.fetch("dmg").fetch("settings"))
     assert_equal(["block", "crc"], layers.fetch("simg").fetch("settings"))
     assert_equal(["level"], layers.fetch("gzip").fetch("settings"))
@@ -88,6 +91,7 @@ class CliTest < Minitest::Test
       {
         "gpt" => nil,
         "mbr" => nil,
+        "apm" => nil,
         "dmg" => "raw,zero,zlib,bzip2",
         "vhd" => "raw",
         "simg" => "raw,zero,fill",

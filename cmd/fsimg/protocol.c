@@ -446,6 +446,8 @@ fsimg_wire_partition_encode(unsigned char *raw, const fsimg_partition_info_t *in
 	bcopy(info->type_guid, raw + FSIMG_WIRE_PARTITION_TYPE_GUID,
 	    sizeof(info->type_guid));
 	bcopy(info->guid, raw + FSIMG_WIRE_PARTITION_GUID, sizeof(info->guid));
+	bcopy(info->apm_type, raw + FSIMG_WIRE_PARTITION_APM_TYPE,
+	    strnlen(info->apm_type, sizeof(info->apm_type) - 1));
 	bcopy(info->name, raw + FSIMG_WIRE_PARTITION_NAME,
 	    strnlen(info->name, FSIMG_WIRE_PARTITION_NAME_BYTES - 1));
 }
@@ -779,9 +781,8 @@ fsimg_wire_image_frame_valid(const fsimg_frame_t *frame)
 		    fsimg_load_le64(raw + FSIMG_WIRE_IMAGE_DISK_ID) == 0 &&
 		    bytes_zero(raw + FSIMG_WIRE_IMAGE_DISK_GUID, 16));
 	layer = fsimg_layer_find((const char *)raw + FSIMG_WIRE_IMAGE_SCHEME);
-	/* MBR sectors are 512 bytes; GPT's are 512 or 4096. */
 	return (layer != NULL && layer->scheme != NULL && (sector == 512 ||
-	    (sector == 4096 && strcmp(layer->name, "gpt") == 0)) && slots != 0 &&
+	    (sector != 0 && sector == layer->scheme->large_sector)) && slots != 0 &&
 	    slots <= FSIMG_GPT_MAX_ENTRIES && selected <= slots && checked <= slots);
 }
 
@@ -827,7 +828,9 @@ fsimg_wire_partition_frame_valid(const fsimg_frame_t *frame, uint64_t slots,
 	if (memchr(raw + FSIMG_WIRE_PARTITION_TYPE, '\0', 16) == NULL ||
 	    memchr(raw + FSIMG_WIRE_PARTITION_FORMAT, '\0', 16) == NULL ||
 	    memchr(raw + FSIMG_WIRE_PARTITION_NAME, '\0',
-	    FSIMG_WIRE_PARTITION_NAME_BYTES) == NULL)
+	    FSIMG_WIRE_PARTITION_NAME_BYTES) == NULL ||
+	    memchr(raw + FSIMG_WIRE_PARTITION_APM_TYPE, '\0',
+	    FSIMG_WIRE_PARTITION_APM_TYPE_BYTES) == NULL)
 		return (false);
 	named = raw[FSIMG_WIRE_PARTITION_FORMAT] != '\0';
 	return (named == (claim == FSIMG_CLAIM_FORMAT));

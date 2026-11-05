@@ -706,6 +706,18 @@ test_settings(void)
 	expect_refused(&f, "fat12/gpt", MIB, &layers, FSIMG_WRITE_REPRODUCIBLE,
 	    FSIMG_EINVAL, "gpt:name");
 
+	/* A literal APM type cannot be used to plan either writable scheme. */
+	fsimg_layer_options_init(&layers);
+	snprintf(layers.gpt_type, sizeof(layers.gpt_type), "Apple_HFS");
+	write_options(&options, FSIMG_WRITE_REPRODUCIBLE, EPOCH, &layers);
+	options.volume_bytes = MIB;
+	CHECK(plan_only(&f, "fat12/gpt", &options, &info, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.message, "an APM type cannot type a GPT partition") == 0);
+	fsimg_layer_options_init(&layers);
+	snprintf(layers.mbr_type, sizeof(layers.mbr_type), "Apple_HFS");
+	CHECK(plan_only(&f, "fat12/mbr", &options, &info, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.message, "an APM type cannot type an MBR partition") == 0);
+
 	/* Types: a GPT type has a GUID, an MBR type a writable byte. */
 	fsimg_layer_options_init(&layers);
 	snprintf(layers.gpt_type, sizeof(layers.gpt_type), "0x0c");

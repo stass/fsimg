@@ -250,6 +250,8 @@ A disk shorter than its partition table declares still opens: a partition
 past the end is clipped to the bytes the disk holds, its length that remainder
 and its missing_bytes the rest of the declared length.
 One with no bytes at all is listed with a length of zero and no claim.
+A slot that cannot be a volume, an MBR extended partition or an Apple Partition
+Map's map, driver or patch entry, also has no claim, whatever its bytes hold.
 Automatic selection passes over it, and selecting it explicitly returns
 FSIMG_ECORRUPT.
 A GPT disk opens so only when its primary table is intact and its alternate
@@ -609,13 +611,16 @@ container.
 A disk that both a partition table and a filesystem claim is ambiguous
 unless the stack forces the scheme slot, with one exception: ISO 9660
 reserves its system area for boot and partition data, so an isohybrid
-image whose GPT or MBR lies there, both identities matching, is read as
+image whose GPT, MBR or Apple Partition Map lies there, both identities
+matching, is read as
 its ISO 9660 volume, a partition selector on it fails with FSIMG_EINVAL,
 and
 .Fn fsimg_image_get_info
 names the scheme in hybrid_scheme, otherwise empty; forcing the scheme
 reads its partitions.
 An MBR entry starting at sector 0 is no partition table.
+The read-only apm scheme yields: its map counts only when no other scheme
+claims the disk, since hybrid optical media carry it beside a GPT or MBR.
 .Fn fsimg_layer_next
 reports each container's chunk encodings and the version of the library
 each container and compression uses.

@@ -1741,6 +1741,56 @@ and the one archival specimen, which agree in every field above except the
 geometry.
 
 
+## Apple Partition Map specimens
+
+The [APM profile](../specs/design-layers.md#apm) rests on these images, read
+through fsimg alone and never attached, mounted or executed. The specimens stay
+in the local corpus and are recorded here by name. The Mac OS X discs are cooked
+from their MODE1/2352 images to 2048-byte sectors outside the corpus. `Entries`
+counts the map's entries, with the used ones `i` lists in brackets. `Selected` is
+what `i` chooses without `-F`. `t` counts listed members.
+
+| Specimen | Outer layers | `sbBlkSize` | Block | Entries | Selected | `t` | `W` |
+| --- | --- | ---: | ---: | ---: | --- | ---: | --- |
+| `firefox-1.5.0.1` | UDZO | 2048 | 512 | 2 (2) | 2, `Apple_HFS` | 495 | passes |
+| `firefox-1.0` | gzip, UDRO | 512 | 512 | 3 (2) | 2, `Apple_HFS` | 576 | passes |
+| `firefox-2.0.0.20` | UDZO | 2048 | 512 | 2 (2) | 2, `Apple_HFS` | 471 | passes |
+| `firefox-3.6.28` | UDBZ | 2048 | 512 | 2 (2) | 2, `Apple_HFS` | 328 | passes |
+| `firefox-11.0` | UDBZ | 2048 | 512 | 2 (2) | 2, `Apple_HFS` | 140 | passes |
+| `firefox-24.0` | UDBZ | 2048 | 512 | 2 (2) | 2, `Apple_HFS` | 156 | passes |
+| `firefox-55.0` | UDBZ | 2048 | 512 | 2 (2) | 2, `Apple_HFS` | 159 | passes |
+| `firefox-70.0` | UDBZ | 512 | 512 | 4 (3) | 3, `Apple_HFSX` | 169 | passes |
+| `firefox-130.0` | UDBZ | 512 | 512 | 4 (3) | 3, `Apple_HFSX` | 166 | passes |
+| `mozilla-1.3` | gzip, UDRO | 512 | 512 | 3 (2) | 2, `Apple_HFS` | 760 | fails: alternate header absent |
+| `mozilla-1.7.13` | UDZO | 512 | 512 | 3 (2) | 2, `Apple_HFS` | 985 | fails: alternate header absent |
+| `python-2.4.4` | UDZO | 512 | 512 | 3 (2) | 2, `Apple_HFS` | 73 | passes |
+| `python-3.3.5` | UDZO | 512 | 512 | 3 (2) | 2, `Apple_HFS` | 67 | passes |
+| `vlc-1.1.11` | UDBZ | 512 | 512 | 3 (2) | 2, `Apple_HFS` | 1316 | passes |
+| `blender-2.28` | UDZO | 512 | 512 | 3 (2) | 2, `Apple_HFS` | 44 | passes |
+| `blender-2.33a` | UDZO | 512 | 512 | 3 (2) | 2, `Apple_HFS` | 130 | passes |
+| `archive-macosx-10.0` | none | 2048 | 512 | 10 (7) | 9, `Apple_HFS` | 5578 | passes |
+| `archive-macosx-10.1` | none | 2048 | 512 | 10 (7) | 9, `Apple_HFS` | 6271 | passes |
+| `archive-macosx-10.3-disc2` | none | 2048 | 512 | 10 (7) | 9, `Apple_HFS` | 1730 | passes |
+| `archive-darwin-1.0-toast` | none | 2048 | 512 | 10 (7) | none: classic HFS | 0 | fails: no filesystem |
+| `macos-7.5-install-cd` | DMG | 512 | 512 | 2 (2) | none: classic HFS | 0 | fails: no filesystem |
+| `macbackup1` | none | 512 | 512 | 2 (2) | ISO 9660, bare, with a note | 418 | fails: unsorted ISO 9660 directory |
+| `supergrub2-classic` (3 images) | none | 2048 | 2048 | 4 (4) | ISO 9660, bare, note naming `gpt` | 1013, 409, 410 | passes |
+
+Forcing `apm` on the hybrids gives the following. `supergrub2-classic` selects
+partition 3, `Apple_HFS`, lists 1011, 407 and 408 members, and `W` fails with "HFS
+Plus bitmap marks a block nothing owns", a verdict on xorriso's volume rather than
+on its map. `macbackup1` fails to open: its `Apple_HFS` partition starts at byte
+2048, so the ISO 9660 probe finds the volume's second descriptor at 32 KiB of the
+slice and claims it, and the partition holds classic HFS in any case.
+
+The two `mozilla` failures are the alternate header [E10](#e10-old-volumes)
+already records as left out of the image; a byte range around the volume gives the
+same verdict, and neither of the two places it could lie holds a header.
+`sbBlkCount` disagrees with the disk on `firefox-3.6.28` through `firefox-55.0`,
+by orders of magnitude, and on the Darwin disc, which it doubles. `pmDataCnt`
+equals `pmPartBlkCnt` and `pmLgDataStart` is 0 on every `Apple_HFS` and
+`Apple_HFSX` entry above; they differ only on the map, driver and free entries.
+
 ## Apple source cross-check
 
 The Apple sources of the [Sources](#sources) table were read after the

@@ -1001,7 +1001,8 @@ parse_stack(cli_parse_t *parse, const char *text)
 
 /*
  * --partition=N, name=TEXT or type=NAME. A type must be one the library's
- * type table, a GUID or an MBR byte expresses; whether the disk carries
+ * type table, a GUID, an MBR byte or an Apple_ type expresses; whether the
+ * disk carries
  * it is the worker's question.
  */
 static fsimg_status_t

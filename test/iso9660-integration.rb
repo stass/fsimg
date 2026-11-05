@@ -559,7 +559,7 @@ module IsoIntegration
       elsif !status.success?
         "W #{view}: expected success; exit=#{status.exitstatus}: #{diagnostic.strip}"
       elsif File.basename(image).include?("isohybrid") &&
-          !note.match?(/\Afsimg: note: the disk also carries a (gpt|mbr) partition table; use -F \1 to read its partitions\n\z/)
+          !note.match?(/\Afsimg: note: the disk also carries a partition table \((gpt|mbr|apm)\); use -F \1 to read its partitions\n\z/)
         "W #{view}: expected one hybrid partition-table note: #{diagnostic.inspect}"
       end
     end

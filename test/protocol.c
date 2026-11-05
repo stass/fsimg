@@ -1806,6 +1806,67 @@ test_missing_partition_records(void)
 	CHECK(!fsimg_wire_partition_frame_valid(&frame, 4, 2097152));
 }
 
+/* Scheme descriptors decide which large sector the image frame accepts. */
+static void
+test_image_sector_sizes_follow_the_scheme(void)
+{
+	static const struct {
+		const char *scheme;
+		uint32_t large_sector;
+	} cases[] = { { "gpt", 4096 }, { "apm", 2048 }, { "mbr", 0 } };
+	static const uint32_t sectors[] = { 0, 512, 2048, 4096 };
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_IMAGE,
+	    .length = FSIMG_WIRE_IMAGE_BYTES };
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		for (size_t j = 0; j < sizeof(sectors) / sizeof(sectors[0]); j++) {
+			bzero(frame.payload, frame.length);
+			strcpy((char *)frame.payload + FSIMG_WIRE_IMAGE_STACK, cases[i].scheme);
+			strcpy((char *)frame.payload + FSIMG_WIRE_IMAGE_SCHEME, cases[i].scheme);
+			fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_DISK, 8388608);
+			fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_FILE, 8388608);
+			fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_SLOTS, 3);
+			fsimg_store_le64(frame.payload + FSIMG_WIRE_IMAGE_SECTOR, sectors[j]);
+			CHECK(fsimg_wire_image_frame_valid(&frame) ==
+			    (sectors[j] == 512 || (sectors[j] != 0 &&
+			    sectors[j] == cases[i].large_sector)));
+		}
+	}
+}
+
+/* APM's type text field is zero-filled and bounded independently of
+ * the partition name. A partition frame must include the complete type field.
+ */
+static void
+test_partition_frame_preserves_and_bounds_apm_type(void)
+{
+	fsimg_partition_info_t partition = { .index = 2, .used = true,
+	    .offset = 32768, .length = 1048576 };
+	fsimg_frame_t frame = { .type = FSIMG_FRAME_PARTITION,
+	    .length = FSIMG_WIRE_PARTITION_BYTES };
+	unsigned char *type = frame.payload + FSIMG_WIRE_PARTITION_APM_TYPE;
+
+	strcpy(partition.apm_type, "Apple_HFS");
+	memset(frame.payload, 0xa5, frame.length);
+	fsimg_wire_partition_encode(frame.payload, &partition);
+	CHECK(strcmp((const char *)type, "Apple_HFS") == 0);
+	for (size_t i = strlen(partition.apm_type); i < FSIMG_WIRE_PARTITION_APM_TYPE_BYTES; i++)
+		CHECK(type[i] == 0);
+	CHECK(fsimg_wire_partition_frame_valid(&frame, 3, 2097152));
+	frame.length -= FSIMG_WIRE_PARTITION_APM_TYPE_BYTES;
+	CHECK(!fsimg_wire_partition_frame_valid(&frame, 3, 2097152));
+	frame.length = FSIMG_WIRE_PARTITION_BYTES;
+	memset(partition.apm_type, 'A', 32);
+	partition.apm_type[32] = '\0';
+	fsimg_wire_partition_encode(frame.payload, &partition);
+	CHECK(strcmp((const char *)type, partition.apm_type) == 0);
+	CHECK(fsimg_wire_partition_frame_valid(&frame, 3, 2097152));
+	memset(type, 'A', FSIMG_WIRE_PARTITION_APM_TYPE_BYTES);
+	CHECK(!fsimg_wire_partition_frame_valid(&frame, 3, 2097152));
+	type[FSIMG_WIRE_PARTITION_APM_TYPE_BYTES - 1] = '\0';
+	CHECK(fsimg_wire_partition_frame_valid(&frame, 3, 2097152));
+}
+
 /* An image record's disk is its file without a container, its compression
  * is one the build reads, it has a table only under a scheme, and a
  * partition record lies within the disk and the table.
@@ -2619,6 +2680,8 @@ main(int argc, char **argv)
 	test_job_force_requires_a_read_and_named_layer_or_compression();
 	test_job_layers();
 	test_job_catalogue();
+	test_image_sector_sizes_follow_the_scheme();
+	test_partition_frame_preserves_and_bounds_apm_type();
 	test_image_records();
 	test_image_declared_end_is_representable();
 	test_partition_missing_bytes_match_disk_extent();

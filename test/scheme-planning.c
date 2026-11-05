@@ -455,9 +455,13 @@ test_registry_write_sets(void)
 			continue;
 		schemes++;
 		CHECK(fsimg_scheme_write_set_valid(layer->scheme));
-		CHECK(fsimg_scheme_writable(layer->scheme));
+		CHECK(strcmp(layer->name, "gpt") == 0 ||
+		    strcmp(layer->name, "mbr") == 0 ||
+		    strcmp(layer->name, "apm") == 0);
+		CHECK(fsimg_scheme_writable(layer->scheme) ==
+		    (strcmp(layer->name, "apm") != 0));
 	}
-	CHECK(schemes == 2);
+	CHECK(schemes == 3);
 	CHECK(fsimg_layer_find("tri") == NULL);
 	CHECK(fsimg_scheme_write_set_valid(&tri_scheme));
 	CHECK(fsimg_scheme_write_set_valid(&read_only_scheme));
@@ -480,9 +484,10 @@ test_capabilities_follow_write_set(void)
 		if (info.kind != FSIMG_LAYER_SCHEME)
 			continue;
 		seen++;
-		CHECK(info.capabilities == all);
+		CHECK(info.capabilities == (strcmp(info.name, "apm") == 0 ?
+		    (FSIMG_CAP_READ | FSIMG_CAP_VERIFY) : all));
 	}
-	CHECK(seen == 2);
+	CHECK(seen == 3);
 	CHECK(fsimg_layer_capabilities(&tri_layer) == all);
 	CHECK(fsimg_layer_capabilities(&read_only_layer) ==
 	    (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));

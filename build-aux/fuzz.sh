@@ -270,7 +270,7 @@ run_fuzzer "$work_dir/fuzz-protocol" "$protocol_corpus" 65536 5
 
 # The image harness reads each input as a whole disk and drives the scheme
 # step, partition enumeration, selection and layer verification under
-# several forced stacks. The seeds are the GPT and MBR disks of the layer
+# several forced stacks. The seeds are the GPT, MBR and APM disks of the layer
 # tests.
 compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
@@ -283,6 +283,12 @@ if test ! -f "$image_corpus/gpt.seed"; then
 fi
 if test ! -f "$image_corpus/mbr.seed"; then
     ./test-layers --seed-mbr "$image_corpus/mbr.seed"
+fi
+if test ! -f "$image_corpus/apm.seed"; then
+    ./test-layers --seed-apm "$image_corpus/apm.seed"
+fi
+if test ! -f "$image_corpus/apm2048.seed"; then
+    ./test-layers --seed-apm2048 "$image_corpus/apm2048.seed"
 fi
 run_fuzzer "$work_dir/fuzz-image" "$image_corpus" 1048576 10
 

@@ -757,9 +757,11 @@ typedef enum fsimg_claim {
 /* One table slot, numbered from 1 as sgdisk and /dev/sda1 count. type is
  * the type table's name, or empty for a type the table lacks. A GPT entry
  * fills type_guid, guid and name (UTF-8; an unpaired surrogate reads as
- * U+FFFD); an MBR entry fills mbr_type and active. An unused slot has only
- * index set; its claim is NONE. length is what the disk holds, and
- * missing_bytes the rest of the declared length; a partition starting at or
+ * U+FFFD); an MBR entry fills mbr_type and active; an APM entry fills apm_type
+ * and name, as printable ASCII with each other byte replaced by '?'. An unused
+ * slot, which includes an APM free or void entry, has only index set; its claim
+ * is NONE, as it is for a used slot that cannot be a volume, an MBR extended
+ * partition or APM's map, driver or patch entry. length is what the disk holds, and missing_bytes the rest of the declared length; a partition starting at or
  * past the end of a truncated disk has a length of zero, no claim and cannot
  * be selected.
  */
@@ -767,6 +769,7 @@ typedef struct fsimg_partition_info {
 	char		 type[16];
 	char		 format[16];
 	char		 name[112];
+	char		 apm_type[33];
 	unsigned char	 type_guid[16];
 	unsigned char	 guid[16];
 	uint64_t	 offset;	/* Disk offset in bytes */
@@ -790,8 +793,8 @@ typedef enum fsimg_selector_kind {
 } fsimg_selector_kind_t;
 
 /* index for INDEX; text for NAME (UTF-8) and TYPE (a type-table name, GUID
- * text or "0x" and two hex digits), borrowed for the call; offset and
- * length for RANGE, where a zero length extends to the end of the disk.
+ * text, "0x" and two hex digits, or an APM type beginning Apple_), borrowed
+ * for the call; offset and length for RANGE, where a zero length extends to the end of the disk.
  * SECTION names in text one of the container's sections, the byte strings
  * it stores beside the disk under the unqualified name of the file setting
  * that supplies them ("prefix", "startup"); only unwrap accepts it.

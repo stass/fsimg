@@ -89,7 +89,7 @@ class CliTest < Minitest::Test
     result.stderr.sub(/\Afsimg: warning: OS sandbox unavailable; continuing without confinement\n/n, "".b)
 
   def hybrid_note(scheme:) =
-    "fsimg: note: the disk also carries a #{scheme} partition table; use -F #{scheme} to read its partitions\n".b
+    "fsimg: note: the disk also carries a partition table (#{scheme}); use -F #{scheme} to read its partitions\n".b
 
   def isohybrid_image(scheme:)
     %w[iso fat].each do |kind|

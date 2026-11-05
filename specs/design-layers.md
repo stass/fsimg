@@ -441,7 +441,7 @@ volume uses one of these selectors:
 
 | Selector | Matches |
 | --- | --- |
-| Automatic (default) | The one used partition whose prefix draws a filesystem claim, running the forced filesystem probe when one is given and every filesystem probe otherwise. Corrupt and unsupported claims count, so the eventual open reports the real reason. Zero candidates is "no recognised filesystem in any partition"; several is an error that lists them and requires a selector. |
+| Automatic (default) | The one used partition that can be a volume, which excludes an MBR extended partition and APM's [machinery](#apm), whose prefix draws a filesystem claim, running the forced filesystem probe when one is given and every filesystem probe otherwise. Corrupt and unsupported claims count, so the eventual open reports the real reason. Zero candidates is "no recognised filesystem in any partition"; several is an error that lists them and requires a selector. |
 | Index `N` | The partition in slot `N`; an unused slot is an error. |
 | Name `TEXT` | GPT only. `TEXT` is validated UTF-8, converted to UTF-16LE code units and compared unit for unit with the entry's name truncated at its first zero unit; no case folding or normalisation. Exactly one entry must match. |
 | Type `NAME` | A name from the [type table](#partition-types), a literal GUID or MBR type byte, or a literal APM type beginning `Apple_`. Exactly one used partition must carry that type. |
@@ -1520,8 +1520,8 @@ Validation then requires no overlap between used entries, judged by what they
 declare; a failure is `FSIMG_ECORRUPT`. A disk shorter than an entry is
 [truncated](#truncated-disks). Extended
 partitions (types 0x05, 0x0F and 0x85) are listed with their type and are
-unsupported as a selection: logical partitions inside them need their own
-profile. A sector whose bytes also draw a filesystem claim is ambiguous,
+unsupported as a selection, because logical partitions inside them need their own
+profile; automatic selection passes over them and `i` does not probe them. A sector whose bytes also draw a filesystem claim is ambiguous,
 unless the filesystem reserves its system area, as
 [detection](#detection-and-forcing) states.
 
@@ -1582,9 +1582,9 @@ offset above. `ER` alone draws no claim: isohybrid sector 0 starts with those
 bytes as harmless x86 code, and two bytes do not identify a table. A claim's
 validation failures are `FSIMG_ECORRUPT`, never a bare volume. `ER` is the
 identity an assumed identity waives ("the disk has no driver descriptor map"),
-which is how a map behind a zeroed block 0 is read; `PM` locates what is decoded
-and stays a check, so a missing first entry remains `FSIMG_EFORMAT` under
-`--force`.
+which is how a 512-byte map behind a zeroed block 0 is read; a 2048-byte map needs
+the `sbBlkSize` that names it. `PM` locates what is decoded and stays a check, so
+a missing first entry remains `FSIMG_EFORMAT` under `--force`.
 
 Validation requires:
 
@@ -1608,8 +1608,10 @@ on used entries. That is what makes a real disc open: `Apple_Free` on the
 Darwin disc runs a whole CD's capacity past the end of its image and describes
 no data, so it neither overlaps anything nor makes the disk truncated.
 
-An `Apple_partition_map`, `Apple_Patches` or `Apple_Driver*` entry is used and
-listed, and is not a volume: automatic selection passes over it, and selecting it
+Types compare exactly, as listed, after that replacement. An `Apple_partition_map`,
+`Apple_Patches` or `Apple_Driver*` entry, the disk's machinery, is used and
+listed, and is not a volume: `i` does not probe it, automatic selection passes
+over it, and selecting it
 is `FSIMG_EUNSUPPORTED`, as an extended MBR partition is. Its bytes stay reachable
 through a range. Every other used entry is a candidate under the ordinary
 [automatic rule](#partition-selection), whatever its type, because the claim
