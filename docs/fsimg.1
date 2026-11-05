@@ -235,6 +235,12 @@ Keys are scratch, spool, entries, depth, path, fds, output, work and seconds.
 Scratch, spool, path and output use bytes; the others are unsigned decimal
 counts.
 Zero selects the documented default.
+When reading, output defaults to 16 times the selected volume length,
+and when extraction stops at a limit, a larger
+.Fl l Cm output Ns = Ns Ar bytes
+allows more and
+.Fl l Cm output Ns = Ns Cm unlimited
+removes the output limit.
 Seconds sets an operation deadline; zero adds no deadline.
 .It Fl m Ar bytes
 Aggregate library memory budget; default 256 MiB, minimum 16 MiB.
@@ -349,8 +355,16 @@ shows it, still applies, and
 .Nm
 never raises it; a tree at the default depth limit needs about 272, more
 than the 256 a macOS shell starts with.
-Logical extraction output defaults to the selected volume slice length,
-including holes.
+Logical extraction output, holes and every link to shared data included,
+defaults to 16 times the selected volume slice length, which admits
+compressed content that decodes to more than the volume stores while still
+stopping a decompression bomb.
+A volume that expands further, or a sparse file longer than that, fails
+naming the limit and needs
+.Fl l Cm output Ns = Ns Ar bytes ,
+or
+.Fl l Cm output Ns = Ns Cm unlimited
+for an image that is trusted.
 Work and time have no hidden short default limit.
 .Sh READING
 Modes

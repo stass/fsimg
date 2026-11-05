@@ -284,13 +284,14 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 		goto fail;
 	reader->state = FSIMG_READER_NEW;
 	/* Declared filesystem geometry can exceed the available input. The
-	 * selected I/O view funds the default; an explicit context limit was
-	 * already installed by session initialization. Drivers report what the
-	 * volume declares, and only here is the declared size compared with
-	 * the slice.
+	 * selected I/O view funds the default (fsimg_default_output_limit); an
+	 * explicit context limit was already installed by session
+	 * initialization. Drivers report what the volume declares, and only
+	 * here is the declared size compared with the slice.
 	 */
 	if (ctx->options.max_output_bytes == 0)
-		reader->session.output_limit = reader->slice_bytes;
+		reader->session.output_limit =
+		    fsimg_default_output_limit(reader->slice_bytes);
 	reader->info.missing_bytes =
 	    reader->info.volume_bytes > reader->slice_bytes ?
 	    reader->info.volume_bytes - reader->slice_bytes : 0;
@@ -518,15 +519,15 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 
 /*
  * Charge a file's declared size to the output budget before it is copied. The
- * default budget is the slice, so on a truncated volume a lost file commonly
- * shows first as an overrun. One read of its last stored byte goes through the
- * funnel and tells the two apart: a file past the end is corrupt, while one whose
- * last stored byte is there keeps the limit error, since its extents are shared,
- * its decoded size exceeds what it stores, or the limit is the caller's. The
- * bytes after the initialized length are zeros
- * no read of the image supplies, so they prove nothing and a file storing none
- * keeps the limit. Any other failure of that read outranks the limit. Either way
- * the copy does not start.
+ * default budget is proportional to the slice, so on a truncated volume a lost
+ * file can show first as an overrun. One read of its last stored byte goes
+ * through the funnel and tells the two apart: a file past the end is corrupt,
+ * while one whose last stored byte is there keeps the limit error, since its
+ * extents are shared, its decoded size exceeds what it stores, or the limit is
+ * the caller's. The bytes after the initialized length are zeros no read of
+ * the image supplies, so they prove nothing and a file storing none keeps the
+ * limit. Any other failure of that read outranks the limit. Either way the
+ * copy does not start.
  */
 fsimg_status_t
 fsimg_reader_charge_file(fsimg_reader_t *reader, fsimg_error_t *error)

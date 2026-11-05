@@ -1138,12 +1138,16 @@ extract(fixture_t *f, int parent, const char *selection)
 	return (fsimg_extract_at(f->reader, parent, "out", &options, NULL));
 }
 
-#define SHARED_FILE_BYTES (40u * 1024u)
-#define SHARED_FILE_COUNT 8u
+#define SHARED_FILE_BYTES (96u * 1024u)
+#define SHARED_FILE_COUNT 44u
+/* The extent follows the volume descriptors and root, so 96 KiB of it fits
+ * inside the 256 KiB image and every read of it succeeds.
+ */
+#define SHARED_EXTENT 24u
 
 /* All payloads share an accessible extent. The descriptor declares more
- * space than the stored image, so only the selected I/O length is a safe
- * default budget for their cumulative logical extraction size.
+ * space than the stored image, so only 16 times the selected I/O length is
+ * a safe default budget for their cumulative logical extraction size.
  */
 static image_t
 shared_extent_image(void)
@@ -1157,8 +1161,8 @@ shared_extent_image(void)
 	bzero(root + position, BLOCK - position);
 	for (unsigned i = 0; i < SHARED_FILE_COUNT; i++) {
 		CHECK(snprintf(name, sizeof(name), "F%03u.TXT;1", i) == 10);
-		position += record(root + position, name, strlen(name), DATA,
-		    SHARED_FILE_BYTES, 0);
+		position += record(root + position, name, strlen(name),
+		    SHARED_EXTENT, SHARED_FILE_BYTES, 0);
 	}
 	return (image);
 }
@@ -1174,7 +1178,7 @@ test_extraction_budget_uses_selected_io_extent(void)
 		fsimg_status_t status;
 	} output_case_t;
 	static const output_case_t cases[] = {
-		{ .expected_limit = BLOCKS * BLOCK, .completed_files = 6,
+		{ .expected_limit = 16u * BLOCKS * BLOCK, .completed_files = 42,
 		  .status = FSIMG_ELIMIT },
 		{ .context_limit = SHARED_FILE_COUNT * SHARED_FILE_BYTES,
 		  .completed_files = SHARED_FILE_COUNT, .status = FSIMG_OK },

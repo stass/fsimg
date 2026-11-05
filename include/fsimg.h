@@ -1317,7 +1317,12 @@ typedef struct fsimg_extract_options {
 	 */
 	const char *const *selections;
 	size_t		 selection_count;
-	uint64_t	 max_output_bytes; /* Zero uses the reader's ceiling. */
+	/* Zero uses the reader's ceiling: the context's max_output_bytes, or
+	 * by default 16 times the selected slice length, saturating. Decoded
+	 * content, such as HFS Plus compression, can exceed the slice; a
+	 * caller extracting a volume that expands further sets a limit.
+	 */
+	uint64_t	 max_output_bytes;
 	/* Explicit minutes east of UTC for unknown-zone calendar timestamps. */
 	int32_t		 wall_offset_minutes;
 	/* An empty regular file open for writing, borrowed, or -1 (initialized

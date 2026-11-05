@@ -2801,9 +2801,9 @@ selected input permits. Default, explicit-lower-limit and nonzero
 offset/length cases must all fail at the independent output bound without
 forwarding the oversized batch.
 
-`test-iso9660 --output-limit` extracts eight files sharing an accessible
-40 KiB extent from a 256 KiB selected view whose descriptor declares 2 MiB.
-The default refuses cumulative output beyond the selected view, while
+`test-iso9660 --output-limit` extracts 44 files sharing an accessible
+96 KiB extent from a 256 KiB selected view whose descriptor declares 2 MiB.
+The default refuses cumulative output beyond 16 times the selected view, while
 explicit context and extraction limits retain their precedence. A nonzero
 slice prefix also verifies that the budget uses the selected view rather
 than its larger backing object. The CLI shared-extent case exercises the

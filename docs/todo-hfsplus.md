@@ -10,13 +10,6 @@ evidence and provenance.
   check go into the record from the first CI log. A Mac OS 8.1 to 9.2 writer's
   non-ASCII names stay unobserved, and no Finder-made alias or Time Machine
   volume is in the corpus.
-* [Medium] **Default output budget on a compressed volume** (`lib/read/reader.c`):
-  the default output budget is the slice, and a compressed file charges its
-  decoded size, so a volume whose files decode to more than its own length
-  fails with `FSIMG_ELIMIT` unless the caller raises the limit. No capture or
-  corpus specimen reaches it. The owner decides whether a compressed volume
-  funds a larger default, since the budget is also what bounds a bomb across
-  many files.
 * [Low] **Large-catalog qualification verdict** (`tools/hfsplus/qualify.rb`):
   `qualify.rb --large-catalog` has not finished with results on the writer that
   states the low 32 bits of a fork past `2^32` bytes as its `clumpSize`. `fsck_hfs

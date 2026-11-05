@@ -948,9 +948,9 @@ input left after a chunk's end marker (unless E7 shows macOS pads chunks) is
 corrupt.
 
 Decoded bytes count toward the extraction output limit like any other
-content, and that limit defaults to the volume's length, so extracting a
-volume whose compressed files, holes, clones or hard links expand past the
-container needs an explicit `-l output`, as the
+content, and that limit defaults to 16 times the selected volume length, so extracting
+a volume whose compressed files, holes, clones or hard links expand past
+that needs an explicit `-l output`, as the
 [security design](design-security.md#safe-extraction) states.
 
 **Delivery.** Delivery receives decoded bytes one chunk at a time as

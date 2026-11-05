@@ -92,7 +92,8 @@ After `--` every word is an operand, including one spelled `-C`.
 `output`, `work` and `seconds`. Scratch, spool, path and output values are
 byte quantities; entries, depth, fds and work are unsigned counts; seconds is
 an integer deadline measured on the monotonic clock, where zero selects the
-default of no additional deadline. `spool` bounds the temporary file that
+default of no additional deadline. `output` alone also accepts `unlimited`,
+which lifts the quota for a trusted image. `spool` bounds the temporary file that
 holds a stream or compressed input, defined in the
 [layer design](design-layers.md#budget). No limit of its own bounds the
 manifest `x --mtree` writes or a `t` listing: `entries` bounds their lines
@@ -132,7 +133,7 @@ and cancellation, not a hidden short timeout that makes gigantic legitimate
 jobs impossible.
 
 Zero resource values select their documented defaults; disabling scratch
-uses `-T -`. There is no magic negative or `unlimited` operand. Explicit
+uses `-T -`. There is no magic negative operand, and only `-l output` accepts `unlimited`. Explicit
 large limits remain bounded by checked `uint64_t` counters and host
 capabilities. The [architecture](architecture.md#bounded-resources) defines
 the defaults, except the CLI's `fds` default above.
@@ -556,6 +557,10 @@ included, in a manifest the coordinator publishes beside the tree, as the
 [manifest design](design-mtree.md#extraction-writing-a-manifest) specifies.
 
 Logical output bytes, including holes, count against the output quota.
+Without `-l output` the quota of `x` and `x -O` is the library's default, 16
+times the selected volume length. When output stops at the quota, the one-line
+diagnostic gives the limit, whether it is that default or the user's
+`-l output`, and that a larger `-l output=BYTES`, or `-l output=unlimited`, allows more.
 Sparse files are used where possible. Success means all selected content and
 required finalization completed. On error a private partial destination can
 remain; the diagnostic identifies it. There is no all-or-nothing directory

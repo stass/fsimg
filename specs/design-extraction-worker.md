@@ -47,9 +47,12 @@ known-zero I/O boundary. Data ranges use bounded positional copies, then file
 flush and checked close complete the file. No extraction callback resets the
 reader's session quotas.
 
-The default cumulative logical-output ceiling is the selected reader I/O
-view's length, including for repeated references to shared file data. A
-filesystem's declared geometry does not raise it. An explicit context limit
+The default cumulative logical-output ceiling is 16 times the selected reader
+I/O view's length, saturating at the largest 64-bit value, counting repeated
+references to shared file data each time. The multiple admits decoded content
+longer than what the volume stores, such as HFS Plus compression, while a
+decompression bomb or cross-linked extents still stop at a bound proportional
+to the image. A filesystem's declared geometry does not raise it. An explicit context limit
 replaces that default; an explicit extraction limit also replaces the default
 but remains capped by any explicit context limit.
 
@@ -114,8 +117,9 @@ I/O extent. The INFO record reports descriptor-declared filesystem geometry,
 which may extend beyond that extent on a truncated image. Its typed fields
 remain validated, but its geometry grants no access or output authority.
 The supervisor derives a raw member output's default ceiling from the
-selected extent, with an explicit output limit taking precedence, and never
-raises that ceiling from INFO. Missing metadata or content therefore reaches
+selected extent, by the same multiple as the library's default, with an
+explicit output limit taking precedence, and never raises that ceiling from
+INFO. Missing metadata or content therefore reaches
 the filesystem's own corruption checks rather than becoming a protocol fault.
 
 The worker first reports active, unavailable or disabled confinement. Automatic

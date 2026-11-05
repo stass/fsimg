@@ -749,6 +749,16 @@ fsimg_session_init(fsimg_session_t *session, fsimg_ctx_t *ctx,
 	    volume_bytes : ctx->options.max_output_bytes;
 }
 
+uint64_t
+fsimg_default_output_limit(uint64_t slice_bytes)
+{
+	uint64_t limit;
+
+	if (!fsimg_mul_u64(slice_bytes, FSIMG_DEFAULT_OUTPUT_MULTIPLE, &limit))
+		return (UINT64_MAX);
+	return (limit);
+}
+
 fsimg_status_t
 fsimg_session_charge(fsimg_session_t *session, uint64_t entries,
     uint64_t output_bytes, uint64_t work, fsimg_error_t *error)

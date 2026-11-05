@@ -547,9 +547,21 @@ test_loss_rendering(void)
 	CHECK(!error.path_truncated && strcmp(error.path, "/short\\\\name") == 0);
 }
 
+static void
+test_default_output_limit_is_sixteen_slices_saturating(void)
+{
+	CHECK(fsimg_default_output_limit(0) == 0);
+	CHECK(fsimg_default_output_limit(1) == 16);
+	CHECK(fsimg_default_output_limit(4096) == 16 * 4096);
+	CHECK(fsimg_default_output_limit(UINT64_MAX / 16) == UINT64_MAX / 16 * 16);
+	CHECK(fsimg_default_output_limit(UINT64_MAX / 16 + 1) == UINT64_MAX);
+	CHECK(fsimg_default_output_limit(UINT64_MAX) == UINT64_MAX);
+}
+
 int
 main(void)
 {
+	test_default_output_limit_is_sixteen_slices_saturating();
 	test_arithmetic();
 	test_entry_metadata_definitions();
 	test_context();

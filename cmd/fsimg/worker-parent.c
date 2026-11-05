@@ -298,7 +298,8 @@ deliver_event(worker_supervisor_t *state, fsimg_error_t *error)
 /*
  * A read job's volume lies within the disk its IMAGE record states: the
  * range --offset and --length name, or else the whole disk. Without
- * -l output that range bounds what x -O may write. INFO's declared
+ * -l output, what x -O may write is bounded by the library's default
+ * multiple of that range, fsimg_default_output_limit(). INFO's declared
  * filesystem geometry is informational and cannot widen this authority.
  * False when the range does not fit the disk. The library's range
  * selection applies the same rule (a zero length runs to the disk's end);
@@ -318,7 +319,7 @@ bound_volume(worker_supervisor_t *state)
 	if (selected_bytes > state->disk_bytes - request->offset)
 		return (false);
 	if (request->limits.max_output_bytes == 0)
-		state->output_limit = selected_bytes;
+		state->output_limit = fsimg_default_output_limit(selected_bytes);
 	return (true);
 }
 

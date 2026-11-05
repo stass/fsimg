@@ -135,8 +135,11 @@ or the codec library checks them.
 CLI information can report declared filesystem geometry beyond the available
 input when headers remain readable. Missing referenced structures or content
 retain filesystem errors; informational geometry does not enlarge selected
-I/O ranges or output limits. Default extraction budgets use the selected
-input length, including when several entries reference the same payload.
+I/O ranges or output limits. Default extraction budgets are 16 times the
+selected input length, including when several entries reference the same payload.
+
+`-l output=unlimited` removes the extraction output limit for an image the caller
+trusts; no other limit key accepts `unlimited`.
 
 zstd-compressed images are read and written over the system libzstd, an
 optional integration that `configure --with-zstd` controls (default auto)

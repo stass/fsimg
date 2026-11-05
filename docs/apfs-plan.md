@@ -139,9 +139,9 @@ branch in common code:
 8. **Layer and sizing rows.** `apfs` moves from the reserved stack names to
    the filesystem names, the reproducible-identifier rule gains role 5 for
    an APFS volume UUID, and the sizing design gains the APFS dimensions.
-9. **Extraction ceiling.** The default extraction output limit stays the
-   volume's length, which an APFS volume with holes, clones, compressed
-   files or hard links can exceed; such an extraction needs `-l output`, as
+9. **Extraction ceiling.** The default extraction output limit is 16
+   times the selected volume length, which an APFS volume with holes, clones,
+   compressed files or hard links can exceed; such an extraction needs `-l output`, as
    the [security design](../specs/design-security.md#safe-extraction) states
    and the user documentation repeats.
 
@@ -517,8 +517,9 @@ One waits for evidence:
   between versions would hash differently. E4 establishes the version and
   the pinned tables follow it; the risk is confined to such names, and
   each macOS release's capture set rechecks it.
-* **Extraction ceiling.** Extracting a volume with large sparse or
-  compressed files fails by default until the caller raises `-l output`.
+* **Extraction ceiling.** Extracting a volume whose sparse or
+  compressed files expand past 16 times the volume fails by default until
+  the caller raises `-l output`.
   This is the deliberate bomb defence, not a defect, and the manual page
   says so.
 * **Native checks need privileges.** Attaching and checking raw images may

@@ -554,19 +554,25 @@ capability. Adding such a CLI capability requires proving that metadata calls
 cannot mutate read-only input or escape through a descriptor alias.
 
 Count logical extracted bytes, including zero ranges, before creating or
-extending files. Default total output is at most the selected volume length
-for every format. An APFS volume can legitimately exceed it, since holes,
+extending files. Default total output is at most 16 times the selected volume
+length for every format, saturating at the largest 64-bit value. Holes,
 clones, compressed files and the separate entries of hard links all deliver
-more logical bytes than the container stores; extracting such a volume
-fails with the output limit named, and the caller raises it with
-`-l output` after deciding the volume is trusted to expand that far. The
-default stays the volume length because it is the bound that makes a
-decompression or clone bomb fail without a caller's decision. A container's disk can be far longer
-than its file (zero runs cost nothing), so the coordinator takes the disk
-length from the worker's image record and cannot check it against the file:
-for a container image the default bound rests on that worker-reported
-length, and a caller who wants a bound independent of the worker sets
-`-l output`. A caller can select another finite ceiling. Sparsity, cross-links, and repeated entry references do not evade it.
+more logical bytes than a volume stores, so a legitimate HFS Plus or APFS
+volume can decode to several times its length, which the multiple admits. The
+default stays proportional to the volume because that is the bound that
+makes a decompression or clone bomb fail without a caller's decision; a
+volume that expands further fails with the output limit named, and the
+caller raises it with `-l output` after deciding the volume is trusted to
+expand that far. Sparsity, cross-links, and repeated entry references do
+not evade the bound. Until it stops, a decompression bomb can write up to 16
+times the selected volume length in real decoded bytes, and for a compressed
+container that length can be far more than the image file: a container's
+disk can be far longer than its file (zero runs cost nothing), so the
+coordinator takes the disk length from the worker's image record and cannot
+check it against the file. For a container image the default bound rests on
+that worker-reported length, and a caller who wants a bound independent of
+the worker sets `-l output`. A caller can select another finite ceiling, or
+remove it for a trusted image with `-l output=unlimited`.
 Disk-full and short-write errors fail the operation. Completion requires
 successful file finalization; sparse logical length alone does not prove that
 initialized content was written.

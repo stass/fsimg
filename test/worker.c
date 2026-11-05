@@ -2728,6 +2728,9 @@ test_inheritance(void)
 	fixture_close(&fixture);
 }
 
+/* One byte more than the default output limit of the largest INFO slice. */
+#define GEOMETRY_FILE_BYTES (16u * SCENARIO_INFORMATIONAL_GEOMETRY + 1u)
+
 /* This test-only executable can act as a compromised worker. An executable
  * fixture marks the attack and its size selects the scenario, without
  * adding test flags or hooks to production worker code. It never parses
@@ -2907,9 +2910,11 @@ fake_worker(worker_scenario_t mode)
 		return (1);
 	}
 	if (mode == SCENARIO_INFORMATIONAL_GEOMETRY) {
+		static const unsigned char geometry_data[GEOMETRY_FILE_BYTES];
+
 		bzero(raw, FSIMG_WIRE_ENTRY_BYTES);
 		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_KIND, FSIMG_ENTRY_FILE);
-		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_LENGTH, (uint64_t)mode + 1);
+		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_LENGTH, GEOMETRY_FILE_BYTES);
 		fsimg_store_le64(raw + FSIMG_WIRE_ENTRY_NAME_LENGTH, 2);
 		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY, raw,
 		    FSIMG_WIRE_ENTRY_BYTES, NULL) == FSIMG_OK);
@@ -2917,8 +2922,9 @@ fake_worker(worker_scenario_t mode)
 		    "/x", 2, NULL) == FSIMG_OK);
 		CHECK(fsimg_frame_write(FSIMG_CHILD_CONTROL, FSIMG_FRAME_ENTRY_END,
 		    NULL, 0, NULL) == FSIMG_OK);
-		bzero(raw, sizeof(raw));
-		CHECK(write(FSIMG_CHILD_DATA, raw, (size_t)mode + 1) == (ssize_t)mode + 1);
+		/* More than the default limit, 16 times the input, in one batch. */
+		CHECK(write(FSIMG_CHILD_DATA, geometry_data, GEOMETRY_FILE_BYTES) ==
+		    (ssize_t)GEOMETRY_FILE_BYTES);
 	}
 	if (mode == SCENARIO_PARTIAL_EXTRACTION) {
 		output = openat(FSIMG_CHILD_OUTPUT, "partial", O_WRONLY | O_CREAT | O_EXCL, 0600);
@@ -3089,9 +3095,9 @@ test_info_geometry_does_not_widen_output(void)
 		fixture.request.length = cases[i].length;
 		fixture.request.limits.max_output_bytes = cases[i].output_limit;
 		fixture.request.seconds = 5;
-		expected_limit = (uint64_t)mode - cases[i].offset;
+		expected_limit = ((uint64_t)mode - cases[i].offset) * 16u;
 		if (cases[i].length != 0)
-			expected_limit = cases[i].length;
+			expected_limit = cases[i].length * 16u;
 		if (cases[i].output_limit != 0)
 			expected_limit = cases[i].output_limit;
 		output = openat(fixture.parent, "raw", O_CREAT | O_EXCL | O_RDWR, 0600);

@@ -3507,7 +3507,7 @@ gen_decmpfs_resource(const unsigned char *bytes, size_t length,
 	size_t capacity = cursor + count * (compressBound(chunk) + 1) + map;
 	unsigned char *out = calloc(1, capacity);
 
-	CHECK(out != NULL && count <= 32);
+	CHECK(out != NULL && count <= 64);
 	compression_le(out + data + 4, count, 4);
 	for (size_t i = 0; i < count; i++) {
 		size_t piece = length - i * chunk;
@@ -3515,7 +3515,7 @@ gen_decmpfs_resource(const unsigned char *bytes, size_t length,
 
 		if (piece > chunk)
 			piece = chunk;
-		if ((stored_mask & (UINT32_C(1) << i)) != 0) {
+		if (i < 32 && (stored_mask & (UINT32_C(1) << i)) != 0) {
 			out[cursor] = 0xff;
 			bcopy(bytes + i * chunk, out + cursor + 1, piece);
 			stored = piece + 1;
@@ -4147,6 +4147,80 @@ test_compression_resource_map_offsets(void)
 	compression_case_init(&c, 4, 131200, 0);
 	gen_store(c.resource + 4, c.objects[0].resource_size + 1, 4);
 	compression_bad_content("test_compression_type4_map_past_fork", &c, 0, message);
+	compression_case_free(&c);
+}
+
+/* A compressed file decodes to more than the volume stores. The default
+ * output limit is 16 times the slice, so such a file is read at the default
+ * and its bytes match.
+ */
+static void
+test_compressed_file_larger_than_slice_reads_at_default_limit(void)
+{
+	compression_case_t c;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+
+	compression_case_init(&c, 4, 3 * 1024 * 1024 + 100, 0);
+	gen_build(&c.plan, &image);
+	expect_true("decoded file exceeds the slice", c.size > image.length);
+	expect_true("decoded file is under the default output limit",
+	    c.size < FSIMG_DEFAULT_OUTPUT_MULTIPLE * (uint64_t)image.length);
+	reader = compression_open("compressed file larger than slice", &f, &image);
+	if (reader != NULL) {
+		expect_true("reader default limit is 16 times the slice",
+		    reader->session.output_limit ==
+		    FSIMG_DEFAULT_OUTPUT_MULTIPLE * (uint64_t)image.length);
+		status = fsimg_reader_charge_file(reader, &error);
+		expect_status("default limit admits the decoded size", status,
+		    FSIMG_OK, &error);
+		compression_read_pieces("compressed file larger than slice reads",
+		    reader, c.plain, c.size, 4096);
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	gen_free(&image);
+	compression_case_free(&c);
+}
+
+/* The refusal side: a decoded size beyond 16 times the slice stops at the
+ * default limit.
+ */
+static void
+test_compressed_file_beyond_default_limit_is_refused(void)
+{
+	compression_case_t c;
+	gen_image_t image;
+	fixture_t f;
+	fsimg_reader_t *reader;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+
+	const uint64_t declared = 64 * 1024 * 1024;
+
+	/* The generator's resource fork holds at most 64 chunks, so the header
+	 * alone declares a decoded size past the limit. The charge comes before
+	 * any read, so the short fork is never consulted.
+	 */
+	compression_case_init(&c, 4, 3 * 1024 * 1024 + 100, 0);
+	gen_decmpfs_header(c.header, 4, declared);
+	gen_build(&c.plan, &image);
+	expect_true("decoded file exceeds the default output limit",
+	    declared > FSIMG_DEFAULT_OUTPUT_MULTIPLE * (uint64_t)image.length);
+	reader = compression_open("compressed file beyond default limit", &f, &image);
+	if (reader != NULL) {
+		status = fsimg_reader_charge_file(reader, &error);
+		expect_status("default limit refuses the decoded size", status,
+		    FSIMG_ELIMIT, &error);
+		expect_true("refusal names the output resource",
+		    error.resource == FSIMG_RESOURCE_OUTPUT);
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+	gen_free(&image);
 	compression_case_free(&c);
 }
 
@@ -7467,21 +7541,26 @@ test_truncated_file_output_limit(void)
 	plan.objects = &object;
 	plan.object_count = 1;
 	gen_build(&plan, &image);
-	image.length /= 2;
-	size = image.length + plan.block_size;
+	/* The file can fill the volume, so the stored slice must be under
+	 * 1/16 of it for the file to exceed the default output limit. */
+	image.length /= 2 * FSIMG_DEFAULT_OUTPUT_MULTIPLE;
+	size = FSIMG_DEFAULT_OUTPUT_MULTIPLE * (uint64_t)image.length +
+	    plan.block_size;
 	fork = catalog_data(&image, 2, 2) + FILE_DATA_FORK;
 	gen_store(fork, size, 8);
 	gen_store(fork + FORK_BLOCKS, size / plan.block_size, 4);
 	gen_store(fork + FORK_COUNT, size / plan.block_size, 4);
 	reader = public_reader(&f, &image);
+	expect_true("truncated image opens", reader != NULL);
 	if (reader != NULL) {
 		status = fsimg_reader_next(reader, &entry, &error);
 		expect_status("file larger than slice is listed", status,
 		    FSIMG_OK, &error);
 		if (status == FSIMG_OK) {
 			expect_true("file exceeds slice output ceiling",
-			    entry->size > image.length &&
-			    reader->session.output_limit == image.length);
+			    entry->size > reader->session.output_limit &&
+			    reader->session.output_limit ==
+			    FSIMG_DEFAULT_OUTPUT_MULTIPLE * (uint64_t)image.length);
 			status = fsimg_reader_charge_file(reader, &error);
 			expect_status("missing last stored byte outranks output limit",
 			    status, FSIMG_ECORRUPT, &error);
@@ -8120,6 +8199,8 @@ static void (*const tests[])(void) = {
 	test_truncated_overflow_leaf,
 	test_truncated_file_straddles_cut,
 	test_truncated_file_output_limit,
+	test_compressed_file_larger_than_slice_reads_at_default_limit,
+	test_compressed_file_beyond_default_limit_is_refused,
 	test_truncated_longer_slice,
 	test_headers,
 	test_tree_parameters,

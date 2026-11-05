@@ -38,28 +38,78 @@ class CliTest < Minitest::Test
     end
   end
 
+  # The seeded ISO holds 44 files of 96K sharing one extent in a 256K image
+  # whose descriptor declares more space: 4224K of output against a default
+  # limit of 16 times the 256K slice.
   def test_iso_shared_extents_do_not_enlarge_directory_extraction_budget
-    helper = @executable.dirname / "test-iso9660"
-    invoke(executable: helper, arguments: ["--seed-shared", (@root / "shared.img").to_s])
+    shared_iso_fixture
     (@root / "default").mkdir
     (@root / "explicit").mkdir
+    limit = 16 * File.size(@root / "shared.img")
 
     error = failed(invoke(arguments: ["x", "--json", "-S", "off", "-f", "shared.img",
       "-C", "default"], expected: 1))
     assert_equal(-8, error.fetch("code"))
     assert_equal("output", error.fetch("resource"))
-    assert_equal(File.size(@root / "shared.img").to_s, error.fetch("limit"))
+    assert_equal(limit.to_s, error.fetch("limit"))
     assert_equal("incomplete", error.fetch("output_state"))
-    assert_equal(6, Dir.children(@root / "default/shared").size)
+    assert_equal(limit / (96 * 1024), (@root / "default/shared").children.size)
+
+    (@root / "human").mkdir
+    human = invoke(arguments: ["x", "-S", "off", "-f", "shared.img", "-C", "human"], expected: 1)
+    assert_includes(human.stderr, ("fsimg: output limit reached: #{limit} bytes, 16 times the " \
+      "selected volume's length; rerun with -l output=BYTES to allow more, " \
+      "or -l output=unlimited\n").b)
 
     completed(invoke(arguments: ["x", "--json", "-S", "off", "-f", "shared.img",
-      "-l", "output=320K", "-C", "explicit"]))
+      "-l", "output=5M", "-C", "explicit"]))
     files = (@root / "explicit/shared").children
-    assert_equal(8, files.size)
-    files.each { assert_equal(40 * 1024, _1.size) }
+    assert_equal(44, files.size)
+    files.each { assert_equal(96 * 1024, _1.size) }
+  end
+
+  def test_explicit_output_limit_message_names_the_flag
+    shared_iso_fixture
+    (@root / "out").mkdir
+
+    result = invoke(arguments: ["x", "-S", "off", "-f", "shared.img", "-l", "output=10",
+      "-C", "out"], expected: 1)
+    assert_includes(result.stderr, ("fsimg: output limit reached: 10 bytes, as -l output set; " \
+      "rerun with a larger -l output=BYTES to allow more, or -l output=unlimited\n").b)
+  end
+
+  def test_output_unlimited_extracts_what_the_default_refuses
+    shared_iso_fixture
+    (@root / "out").mkdir
+
+    completed(invoke(arguments: ["x", "--json", "-S", "off", "-f", "shared.img",
+      "-l", "output=unlimited", "-C", "out"]))
+    assert_equal(44, (@root / "out/shared").children.size)
+  end
+
+  def test_only_the_output_limit_accepts_unlimited
+    shared_iso_fixture
+
+    error = failed(invoke(arguments: ["t", "--json", "-S", "off", "-f", "shared.img",
+      "-l", "entries=unlimited"], expected: 2))
+    assert_includes(error.fetch("message"), "resource limit requires an unsigned decimal count")
+  end
+
+  def test_output_limit_rejects_a_word_that_is_not_unlimited
+    shared_iso_fixture
+
+    error = failed(invoke(arguments: ["t", "--json", "-S", "off", "-f", "shared.img",
+      "-l", "output=bogus"], expected: 2))
+    assert_includes(error.fetch("message"),
+      "output limit requires an unsigned byte quantity or unlimited")
   end
 
   private
+
+  def shared_iso_fixture
+    helper = @executable.dirname / "test-iso9660"
+    invoke(executable: helper, arguments: ["--seed-shared", (@root / "shared.img").to_s])
+  end
 
   def check_iso_truncated_verification(payload:)
     iso_truncated_fixture(name: "tail.img", missing_payload: false)

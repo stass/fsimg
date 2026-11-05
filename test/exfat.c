@@ -3176,6 +3176,11 @@ check_truncated_initialized(uint64_t initialized, fsimg_status_t expected)
 	fixture_new(&f);
 	truncated_large_file(&f, initialized);
 	check_complete_file_sets(&f);
+	/* The 400000-byte file fits under the default 16 times the slice, so
+	 * pin the limit to the slice: the test tells lost content from a limit
+	 * overrun on a truncated volume, which needs the file to exceed it.
+	 */
+	f.ctx->options.max_output_bytes = f.length;
 	truncated_reopen(&f);
 	CHECK(fsimg_reader_next(f.reader, &entry, NULL) == FSIMG_OK);
 	/* The last logical byte is always synthesized, even when the last

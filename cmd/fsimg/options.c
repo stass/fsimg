@@ -627,9 +627,17 @@ parse_limit(cli_parse_t *parse, const char *text, unsigned *seen)
 	*seen |= 1u << key;
 	bytes = key == CLI_LIMIT_SCRATCH || key == CLI_LIMIT_SPOOL ||
 	    key == CLI_LIMIT_PATH || key == CLI_LIMIT_OUTPUT;
-	if (fsimg_cli_number(value + 1, bytes, &number, parse->error) != FSIMG_OK)
-		return (syntax_naming(parse, bytes ?
-		    "resource limit requires an unsigned byte quantity" :
+	/* Only the output limit lifts entirely: it guards the destination's
+	 * space, which a trusted image may fill; every other limit keeps its
+	 * finite range.
+	 */
+	if (key == CLI_LIMIT_OUTPUT && strcmp(value + 1, "unlimited") == 0)
+		number = UINT64_MAX;
+	else if (fsimg_cli_number(value + 1, bytes, &number, parse->error) !=
+	    FSIMG_OK)
+		return (syntax_naming(parse, key == CLI_LIMIT_OUTPUT ?
+		    "output limit requires an unsigned byte quantity or unlimited" :
+		    bytes ? "resource limit requires an unsigned byte quantity" :
 		    "resource limit requires an unsigned decimal count", text));
 	if ((key == CLI_LIMIT_DEPTH || key == CLI_LIMIT_PATH || key == CLI_LIMIT_FDS) &&
 	    number > UINT32_MAX)

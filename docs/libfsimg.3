@@ -721,6 +721,13 @@ Keep output and scratch off such filesystems when other users are not
 trusted.
 .Pp
 Logical lengths including holes count against output limits.
+With max_output_bytes zero in both the context options and
+.Vt fsimg_extract_options_t ,
+a reader's output limit is 16 times its selected slice length, saturating at
+.Dv UINT64_MAX ;
+decoded content, such as HFS Plus compression, can exceed the slice, and the
+multiple admits that while still bounding a decompression bomb.
+A caller extracting a volume that expands further sets max_output_bytes.
 Failure after creation can leave private incomplete output.
 The default restores no host timestamps.
 Owners, permission bits and change times are never restored.

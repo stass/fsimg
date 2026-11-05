@@ -1982,6 +1982,77 @@ force_hint(fsimg_cli_display_t *display, const char *candidate)
 	append(display, " --force to read it as %s anyway", candidate);
 }
 
+/*
+ * A read stopped at its output limit gets this line in place of the generic
+ * one: the limit, whether -l output or the default multiple of the volume set
+ * it, and the flag that raises it. False for any other failure.
+ */
+static bool
+output_limit_line(fsimg_cli_display_t *display, const fsimg_error_t *error)
+{
+	const fsimg_worker_request_t *request = &display->options->request;
+
+	/* An unlimited output still fails when declared sizes pass 2^64; no
+	 * flag raises that, so the generic line reports it.
+	 */
+	if (error->status != FSIMG_ELIMIT ||
+	    error->resource != FSIMG_RESOURCE_OUTPUT ||
+	    request->kind >= FSIMG_JOB_CREATE ||
+	    request->limits.max_output_bytes == UINT64_MAX)
+		return (false);
+	append(display, "fsimg: output limit reached: %llu bytes, ",
+	    (unsigned long long)error->limit);
+	if (request->limits.max_output_bytes == 0)
+		append(display, "%u times the selected volume's length; "
+		    "rerun with -l output=BYTES to allow more, "
+		    "or -l output=unlimited\n",
+		    FSIMG_DEFAULT_OUTPUT_MULTIPLE);
+	else
+		append(display, "as -l output set; "
+		    "rerun with a larger -l output=BYTES to allow more, "
+		    "or -l output=unlimited\n");
+	return (true);
+}
+
+/*
+ * The failure's one-line summary: its message, the path it names, the host
+ * error, the limit that stopped it and, where one fits, the --force spelling
+ * that would read the image anyway.
+ */
+static void
+failure_line(fsimg_cli_display_t *display, const fsimg_error_t *error,
+    const char *resource)
+{
+	const char *candidate;
+
+	append(display, "fsimg: ");
+	prose(display, error->message[0] != '\0' ? error->message :
+	    fsimg_status_string(error->status));
+	if (error->message_truncated)
+		append(display, " [message truncated]");
+	if (error->path[0] != '\0') {
+		append(display, " ");
+		rendered_value(display, error->path);
+		if (error->path_truncated)
+			append(display, " [path truncated]");
+	}
+	if (error->os_error != 0) {
+		append(display, ": ");
+		prose(display, strerror(error->os_error));
+	}
+	if (error->resource != FSIMG_RESOURCE_NONE)
+		append(display, " (%s limit %llu, observed %llu)", resource,
+		    (unsigned long long)error->limit,
+		    (unsigned long long)error->observed);
+	if (error->offset_valid)
+		append(display, " at byte %llu",
+		    (unsigned long long)error->offset);
+	candidate = force_candidate(display, error);
+	if (candidate != NULL)
+		force_hint(display, candidate);
+	append(display, "\n");
+}
+
 static void
 failure(fsimg_cli_display_t *display)
 {
@@ -1992,7 +2063,6 @@ failure(fsimg_cli_display_t *display)
 	static const char *const states[] = { "absent", "incomplete", "published", "uncertain" };
 	const fsimg_error_t *error = display->failure;
 	const fsimg_layer_t *layer;
-	const char *candidate;
 	const char *resource, *state;
 
 	resource = (unsigned)error->resource < sizeof(resources) / sizeof(resources[0]) ?
@@ -2054,29 +2124,8 @@ failure(fsimg_cli_display_t *display)
 		completion_notices(display);
 		salvage_notice(display);
 	}
-	append(display, "fsimg: ");
-	prose(display, error->message[0] != '\0' ? error->message : fsimg_status_string(error->status));
-	if (error->message_truncated)
-		append(display, " [message truncated]");
-	if (error->path[0] != '\0') {
-		append(display, " ");
-		rendered_value(display, error->path);
-		if (error->path_truncated)
-			append(display, " [path truncated]");
-	}
-	if (error->os_error != 0) {
-		append(display, ": ");
-		prose(display, strerror(error->os_error));
-	}
-	if (error->resource != FSIMG_RESOURCE_NONE)
-		append(display, " (%s limit %llu, observed %llu)", resource,
-		    (unsigned long long)error->limit, (unsigned long long)error->observed);
-	if (error->offset_valid)
-		append(display, " at byte %llu", (unsigned long long)error->offset);
-	candidate = force_candidate(display, error);
-	if (candidate != NULL)
-		force_hint(display, candidate);
-	append(display, "\n");
+	if (!output_limit_line(display, error))
+		failure_line(display, error, resource);
 	if (error->output_state == FSIMG_OUTPUT_INCOMPLETE)
 		append(display, "fsimg: output is incomplete\n");
 	else if (error->output_state == FSIMG_OUTPUT_PUBLISHED) {

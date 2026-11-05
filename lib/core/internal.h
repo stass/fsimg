@@ -164,6 +164,17 @@ fsimg_status_t fsimg_io_adopt_scratch(fsimg_ctx_t *, int, fsimg_io_t **,
 void fsimg_io_bind_session(fsimg_io_t *, fsimg_session_t *);
 void fsimg_session_init(fsimg_session_t *, fsimg_ctx_t *, const char *,
     uint64_t);
+/*
+ * The output limit of a read no caller limited: FSIMG_DEFAULT_OUTPUT_MULTIPLE
+ * times the selected slice length, saturating at UINT64_MAX. Decoded content,
+ * such as HFS Plus compression, can exceed what the slice stores, so the slice
+ * alone refuses legitimate volumes; a bound proportional to the slice still
+ * stops a decompression bomb or cross-linked extents without a caller's
+ * decision. The reader's default and the CLI coordinator's bound on a raw
+ * member stream both come from here.
+ */
+#define FSIMG_DEFAULT_OUTPUT_MULTIPLE 16u
+uint64_t fsimg_default_output_limit(uint64_t);
 fsimg_status_t fsimg_session_charge(fsimg_session_t *, uint64_t, uint64_t,
     uint64_t, fsimg_error_t *);
 void fsimg_stat_add(uint64_t *, uint64_t);
