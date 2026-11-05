@@ -440,7 +440,7 @@ index_child(const hfsplus_tree_t *tree, const unsigned char *buffer,
     const hfsplus_node_t *node, const hfsplus_key_t *key, uint32_t *child,
     fsimg_error_t *error)
 {
-	hfsplus_record_t record;
+	hfsplus_record_t record = { 0 };
 	const unsigned char *bytes;
 	uint32_t candidate;
 	size_t length;

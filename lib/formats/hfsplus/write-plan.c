@@ -924,7 +924,7 @@ run_passes(hfsplus_plan_t *plan, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
 	hfsplus_candidates_t candidates;
-	hfsplus_geometry_choice_t geometry;
+	hfsplus_geometry_choice_t geometry = { 0 };
 	fsimg_stream_t *unsorted;
 	uint64_t payload_blocks;
 	fsimg_status_t status;
