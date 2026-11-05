@@ -95,6 +95,7 @@ static void test_names(void);
 static void test_packing(void);
 static void test_rows_and_counts(void);
 static void test_settings_and_limits(void);
+static void test_tree_clump_low_32_bits(void);
 static size_t utf8_unit(char *out, uint16_t unit);
 static bool zero_bytes(const unsigned char *p, size_t n);
 
@@ -620,7 +621,7 @@ check_header(tree_check_t *c, const unsigned char *raw)
 	EXPECT(h.node_size == m && h.max_key_length == s->max_key_length);
 	EXPECT(h.total_nodes == s->total_nodes);
 	EXPECT(h.free_nodes == s->total_nodes - s->used_nodes);
-	EXPECT(h.clump_size == (uint64_t)s->total_nodes * m);
+	EXPECT(h.clump_size == hfsplus_tree_clump(s));
 	EXPECT(h.btree_type == 0 && h.key_compare_type == s->compare_type);
 	EXPECT(h.attributes == s->attributes);
 	EXPECT(be16(raw + m - 2) == 14);
@@ -854,6 +855,28 @@ pack_case(uint32_t files, unsigned final_units, uint32_t expected_leaves,
 		fsimg_stream_free(levels[i]);
 	fsimg_stream_free(records);
 	fsimg_ctx_free(f.ctx);
+}
+
+static void
+test_tree_clump_low_32_bits(void)
+{
+	hfsplus_tree_shape_t shape = { .node_bytes = 4096,
+		.total_nodes = (1u << 20) - 1 };
+	uint32_t clump;
+
+	named("tree clump below 2^32 bytes");
+	EXPECT(hfsplus_tree_clump(&shape) == UINT32_C(0xfffff000));
+
+	named("tree clump at 2^32 bytes");
+	shape.total_nodes = 1u << 20;
+	clump = hfsplus_tree_clump(&shape);
+	EXPECT(clump == 0);
+
+	named("tree clump far above 2^32 bytes");
+	shape.node_bytes = 8192;
+	shape.total_nodes = (1u << 20) + 1000;
+	clump = hfsplus_tree_clump(&shape);
+	EXPECT(clump == UINT32_C(8192000));
 }
 
 static void
@@ -2525,6 +2548,7 @@ main(void)
 	test_bitmap_boundaries();
 	test_settings_and_limits();
 	test_minimization();
+	test_tree_clump_low_32_bits();
 	test_packing();
 	test_names();
 	test_key_order_and_mapping();

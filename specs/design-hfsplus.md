@@ -1406,11 +1406,9 @@ calendar seconds since 1904, the same value as the root folder's
 `rsrcClumpSize` are `min(16 * B, 65536)`, and the bitmap's and each tree
 fork's `clumpSize` and each B-tree header's `clumpSize` are its
 `logicalSize`, the native formatter's values (E1). A tree fork of `2^32` bytes
-or more states `2^32 - 1` instead, because the field holds no more; that
-saturation is provisional, since no observed volume has a tree fork that large.
-The native cycle on a catalog of 4 GiB closes it; if that cycle cannot run the
-saturation stands, because `clumpSize` is a hint that readers ignore and the
-alternative of a wrapped value would state a smaller clump than the fork.
+or more states the low 32 bits of that size: the field holds no more, and
+`fsck_hfs -fn` refuses a larger value and names this one, as the record's
+[fsimg writer output](../docs/hfsplus-research.md#fsimg-writer-output) holds.
 `nextCatalogID`
 is one more than the largest node ID an entry holds, 16 when only the root
 exists. Finder information is zero except

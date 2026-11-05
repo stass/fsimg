@@ -2130,3 +2130,26 @@ unlinks a stored file; `fsck_hfs -fn` passes after it. `low-space` runs out part
 the way through: its 66 free blocks end at 0 with some steps done and the rest
 refused, and it passes `fsck_hfs -fn`, the remount and fsimg's checks like the
 others.
+
+A catalog past 32 bits, `qualify.rb --large-catalog`: 2970000 files of 240-byte
+names on a volume of 4714397696 bytes, a catalog fork of 4306628608 bytes in
+1051423 nodes. It is not one of the 34 volumes, and its compare steps have no
+verdict: the one complete run lost its results when the tool failed to write
+its log. What it establishes comes from direct checks:
+
+| Catalog fork's `clumpSize` | `fsck_hfs -fn` on the writer's volume |
+| --- | --- |
+| 4294967295, `2^32 - 1` | Exit 8: `Invalid file clump size (It should be 11661312 instead of 4294967295)` |
+| 4294901760, the largest multiple of 65536 | Exit 8: the same, `instead of 4294901760` |
+| 11661312, the size's low 32 bits | Exit 0, `appears to be OK` |
+
+The volume with the low 32 bits also mounts read-only, `find` lists all 2970000
+files, and `fsimg W` verifies it. The first volume, with the check above failing,
+also went through the modification steps of a complete run. Afterwards macOS had
+extended the fork to 4703744000 bytes and written 397115392 as its `clumpSize`,
+the amount it grew by, and `fsck_hfs -fn` and `fsimg W` pass on that volume. So
+`fsck_hfs` also accepts a value below the low 32 bits. The rule behind that is
+inferred from these values: the pinned checker source does not show where it
+computes its expected value. The writer states the low 32 bits. Every other
+volume above has a fork below `2^32` bytes, where those bits are the logical size
+itself.

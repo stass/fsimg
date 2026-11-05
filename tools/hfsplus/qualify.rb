@@ -56,7 +56,7 @@ module HfsPlusQualify
   # One entry more than the catalog header's map holds, with free space beyond.
   MAP_NODE_FILES = 86_770
   MAP_NODE_BYTES = 160 << 20
-  # A catalog whose fork passes 2^32 bytes, where its clumpSize saturates.
+  # A catalog whose fork passes 2^32 bytes, where its clumpSize wraps.
   LARGE_CATALOG_FILES = 2_970_000
   LARGE_CATALOG_BYTES = (1 << 32) + (400 << 20)
   BASE_TIME = 1_700_000_000
@@ -723,8 +723,8 @@ module HfsPlusQualify
     options
   end
 
-  # The volume that closes the clumpSize saturation, which takes hours and
-  # about 8 GiB of disk, runs only when asked for.
+  # The volume whose catalog passes 2^32 bytes takes hours and about 8 GiB of
+  # disk, so it runs only when asked for.
   def large_catalog =
     Image.of(name: "hfsplus-catalog-4gib", variant: "hfsplus", block: 4096, volume_bytes: LARGE_CATALOG_BYTES,
              entries: map_node_entries(LARGE_CATALOG_FILES))
