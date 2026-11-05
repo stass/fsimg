@@ -10,9 +10,14 @@
 
 /*
  * Every layer function takes a non-NULL error record, which receives the
- * failure's status; the public entry points that reach this module (the
- * image, the image operations and the writer) substitute a local record
- * when their caller passes none.
+ * failure's status, so a layer may read error->status without a check. The
+ * public entry points that reach this module substitute a local record when
+ * their caller passes none: the image in image.c, the image operations in
+ * output.c, the stack and registry queries in stack.c and the writer in
+ * lib/write/writer.c. A layer's I/O resolver is reached through lib/io/io.c,
+ * whose transfers give it their own record and whose zero-range query
+ * substitutes, so it holds below fsimg_io_*() too. Tests may pass NULL on paths
+ * they expect to succeed.
  */
 
 /* GPT reads at most this many entries of 128 bytes per table copy. */

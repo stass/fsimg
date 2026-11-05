@@ -523,6 +523,11 @@ test_stack_grammar(void)
 	fsimg_stack_t stack, again;
 	char text[64];
 
+	/* Failing with no record to report into. */
+	CHECK(fsimg_stack_parse("", &stack, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_stack_parse("nosuch", &stack, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_stack_parse(NULL, NULL, NULL) == FSIMG_EINVAL);
+	CHECK(fsimg_layer_next(NULL, NULL, NULL) == FSIMG_EINVAL);
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		CHECK(fsimg_stack_parse(cases[i].text, &stack, NULL) == FSIMG_OK);
 		CHECK(stack.slots[FSIMG_LAYER_SCHEME].state == cases[i].scheme);

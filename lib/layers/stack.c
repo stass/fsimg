@@ -126,14 +126,11 @@ stack_syntax(fsimg_error_t *error, const char *message, const char *token,
 	size_t tail_start;
 
 	status = fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE, message);
-	if (error != NULL) {
-		tail_start = length < sizeof(text) ? 0 :
-		    length - (sizeof(text) - 1);
-		bcopy(token + tail_start, text, length - tail_start);
-		text[length - tail_start] = '\0';
-		fsimg_error_path(error, text);
-		error->path_truncated = error->path_truncated || tail_start != 0;
-	}
+	tail_start = length < sizeof(text) ? 0 : length - (sizeof(text) - 1);
+	bcopy(token + tail_start, text, length - tail_start);
+	text[length - tail_start] = '\0';
+	fsimg_error_path(error, text);
+	error->path_truncated = error->path_truncated || tail_start != 0;
 	return (status);
 }
 
@@ -152,7 +149,10 @@ fsimg_stack_parse(const char *text, fsimg_stack_t *out, fsimg_error_t *error)
 	const char *token, *end;
 	char name[sizeof(stack.slots[0].name)];
 	size_t length;
+	fsimg_error_t local;
 
+	if (error == NULL)
+		error = &local;
 	fsimg_error_clear(error);
 	if (text == NULL || out == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,
@@ -445,7 +445,10 @@ fsimg_layer_next(size_t *cursor, fsimg_layer_info_t *out, fsimg_error_t *error)
 {
 	const fsimg_layer_t *layer;
 	size_t used;
+	fsimg_error_t local;
 
+	if (error == NULL)
+		error = &local;
 	fsimg_error_clear(error);
 	if (cursor == NULL || out == NULL)
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_IMAGE,

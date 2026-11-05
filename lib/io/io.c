@@ -415,7 +415,11 @@ fsimg_io_next_zero_range(fsimg_io_t *io, uint64_t offset, uint64_t *start,
 	fsimg_io_t *root;
 	uint64_t from, limit, low, high;
 	fsimg_status_t status;
+	fsimg_error_t local;
 
+	/* A layer's resolver below reads the record it is given. */
+	if (error == NULL)
+		error = &local;
 	*start = *end = 0;
 	status = io_range(io, offset, 0, error);
 	if (status != FSIMG_OK)
@@ -1247,7 +1251,7 @@ io_transfer(fsimg_io_t *io, uint64_t offset, void *buffer, size_t length,
     size_t *transferred, bool writing, bool exact, fsimg_session_t *session,
     fsimg_error_t *error)
 {
-	fsimg_error_t detail;
+	fsimg_error_t detail;	/* What a layer's resolver reads: never NULL */
 	fsimg_progress_t progress;
 	fsimg_io_t *root;
 	size_t batch, count, done;
