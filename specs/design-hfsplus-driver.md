@@ -273,13 +273,24 @@ driver-private cache to keep coherent or to bound.
 
 ## Catalog records and links
 
-`hfsplus_record_validate()` checks a catalog record against the format
-design's record and flag tables; for a file record it runs
-`link_kind()` first and maps only a record that is neither stub to
-a kind with the kind table, because a stub's `fileMode` is not its kind:
-`0100000` on current macOS and 0 on the Mac OS X 10.0 and 10.1 discs (E4,
-E10). `hfsplus_thread_lookup()` searches `(id, "")`, requires a thread
-whose type matches the expected kind, and returns its parent and name.
+`hfsplus_record_validate()` is the one decision on what a catalog record's
+own bytes must be: the format design's record and flag tables and, for a
+file record, `link_kind()` first and then, for a record that is neither
+stub, the kind table and that kind's rules for its forks, because a stub's
+`fileMode` is not its kind: `0100000` on current macOS and 0 on the Mac OS X
+10.0 and 10.1 discs (E4, E10). `hfsplus_record_attributes()` is the one
+decision on a validated record's attributes: it scans them when the flags
+say to look, and holds a compressed regular file to the
+[compression rules](design-hfsplus.md#content-and-failures) that its record
+and attribute alone decide. Verification's catalog pass calls both for every
+primary and preparation for every child, so what the format says of a record
+does not depend on a walk reaching it, and `hfsplus_child_fill()` translates
+a validated record into a child without judging it. The two stay apart
+because a stub answers for its entry with its indirect node's record, which
+only a walk resolves, and because under salvage a failure of the attributes
+costs the child and a failure of the record its directory.
+`hfsplus_thread_lookup()` searches `(id, "")`, requires a thread whose type
+matches the expected kind, and returns its parent and name.
 
 `link_kind()` applies the format design's
 [stub tests](design-hfsplus.md#file-hard-links) to a file record: a file
@@ -502,8 +513,10 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    stub; and appends `(reference, stub ID)` for each file stub to a link
    stream and `(reference, link count)` for each indirect node in the
    private data folder to an inode stream. Every record passes the reader's
-   record validation, a stub's nonzero reference and empty forks included,
-   so a record no walk reaches is held to the same rules. Each folder's
+   record validation and attribute decision, a stub's nonzero reference and
+   empty forks, a kind's fork rules and a compressed file's attribute included,
+   so a record no walk reaches is held to the same rules, and an indirect node
+   no stub names must still be a regular file or a symbolic link. Each folder's
    `valence` and `folderCount` go to a declared-counts stream, and the
    primaries under each parent, adjacent in key order, to a counted stream.
    Thread records appear in leaf order sorted by node ID, the order of
@@ -549,7 +562,10 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    plus the format-owned root children and the private data folder's records
    that step 2 counted, must equal all the primaries step 2 counted, so a
    disconnected folder cycle, whose members all have parents, is
-   `FSIMG_ECORRUPT`.
+   `FSIMG_ECORRUPT`. Content is read only here, through the entries the walk
+   delivers: a target's bytes, a chunk table and a decoded chunk belong to a
+   named entry, so a hidden record's are never read, its forks being claimed
+   and nothing able to deliver them.
 8. **Alternate header.** Compare the fields the format design names: the
    signature, version, `blockSize`, `totalBlocks` and the five fork-data
    records. An alternate without a header signature, such as the zeroed
@@ -698,7 +714,7 @@ byte comes from a row, a stream record, the geometry or a profile constant.
 | Probe and open | One 1536-byte read; three header nodes; the extents tree's inline index; a few search paths for the special forks' overflow and the root; the journal records |
 | Listing | Per directory: one search and one cursor scan of its records, its thread validated, the common key sort; per hard-link stub, one or two keyed searches; per flagged file, one attribute scan. No payload is read |
 | Content | Per entry, one leaf reread and one resolver walk on first resolve, then one index lookup per request; per compressed chunk, one table read and one decode |
-| Verification | Every node of every tree read once by level iteration plus once by its lower level's merge; the catalog and attributes passes; external sorts of the object, declared-count, link and inode streams and of the ownership claims, and their merges; one bitmap pass of the bitmap's `logicalSize`; scratch for the streams, the node bitsets and the ownership runs |
+| Verification | Every node of every tree read once by level iteration plus once by its lower level's merge; the catalog and attributes passes, with one attributes search for each primary whose flags say to look, as preparation makes; external sorts of the object, declared-count, link and inode streams and of the ownership claims, and their merges; one bitmap pass of the bitmap's `logicalSize`; scratch for the streams, the node bitsets and the ownership runs |
 | Planning | One pass over the catalog, one external sort of two records per entry, one packing pass per tree level, the raise-until-fit search |
 | Emission | Payload bytes plus one pass over the sorted records and level streams, and the bitmap |
 

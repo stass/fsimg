@@ -887,9 +887,11 @@ typedef struct hfsplus_primary {
 
 /* Catalog records and links (catalog.c).
  *
- * hfsplus_record_validate() checks a primary record against the format design's
- * record, flag and kind tables, a file record's stub tests first. A thread or a
- * record of another type is FSIMG_ECORRUPT.
+ * hfsplus_record_validate() is the one decision on what a primary record's own
+ * bytes must be: the format design's record, flag and kind tables, a file record's
+ * stub tests first, and each kind's rules for its forks. Verification calls it for
+ * every primary and a listing for every child, so no rule depends on a walk
+ * reaching the record. A thread or a record of another type is FSIMG_ECORRUPT.
  *
  * hfsplus_link_resolve() turns a file stub into its indirect node by the keyed
  * search for its name in the private data folder: primary then holds the indirect
@@ -903,9 +905,12 @@ typedef struct hfsplus_primary {
  * hfsplus_private_data_lookup() finds the file hard-link data folder once by its
  * exact stored units, setting private_data_known and what it says.
  *
- * hfsplus_child_fill() maps a validated record, not a stub, to its child's
- * kind, size, owner, mode and dates, the kind's rules checked; it sets the
- * location and extra data to none.
+ * hfsplus_indirect_node_check() refuses an indirect node that is a stub or
+ * neither a regular file nor a symbolic link, whatever found the node.
+ *
+ * hfsplus_child_fill() translates a validated record, not a stub, to its child's
+ * kind, size, owner, mode and dates, and judges nothing; it sets the location and
+ * extra data to none.
  */
 fsimg_status_t hfsplus_record_validate(fsimg_reader_t *,
     const hfsplus_record_t *, hfsplus_primary_t *, fsimg_error_t *);
@@ -918,8 +923,9 @@ fsimg_status_t hfsplus_link_resolve(fsimg_reader_t *, hfsplus_primary_t *,
 fsimg_status_t hfsplus_thread_lookup(hfsplus_cursor_t *, uint32_t, uint16_t,
     hfsplus_thread_t *, fsimg_error_t *);
 fsimg_status_t hfsplus_private_data_lookup(fsimg_reader_t *, fsimg_error_t *);
-fsimg_status_t hfsplus_child_fill(const hfsplus_primary_t *, hfsplus_child_t *,
+fsimg_status_t hfsplus_indirect_node_check(const hfsplus_primary_t *,
     fsimg_error_t *);
+void hfsplus_child_fill(const hfsplus_primary_t *, hfsplus_child_t *);
 
 /* Attributes (attributes.c). hfsplus_attr_scan(reader, id, compressed, payload,
  * scan, error) validates the attribute records of one node ID. compressed says
@@ -931,6 +937,13 @@ fsimg_status_t hfsplus_child_fill(const hfsplus_primary_t *, hfsplus_child_t *,
  * HFSPLUS_CHUNK_STORED_MAX bytes that receives those bytes, since the scan's
  * later nodes overwrite the node holding them; a listing passes NULL and reads
  * no payload.
+ *
+ * hfsplus_record_attributes() is the one decision on a validated record's
+ * attributes, its compression among them, made for every primary as for every
+ * child: *compressed says the record is a compressed regular file, set on every
+ * path, and scan what its attributes hold. It is apart from record validation
+ * because a listing under salvage loses only the child to its failure, and because
+ * a stub answers with its indirect node's record, which only a walk resolves.
  */
 typedef struct hfsplus_attr_scan {
 	hfsplus_cmpf_t	 cmpf;
@@ -941,13 +954,15 @@ typedef struct hfsplus_attr_scan {
 
 fsimg_status_t hfsplus_attr_scan(fsimg_reader_t *, uint32_t, bool,
     unsigned char *, hfsplus_attr_scan_t *, fsimg_error_t *);
+fsimg_status_t hfsplus_record_attributes(fsimg_reader_t *,
+    const hfsplus_primary_t *, bool *, hfsplus_attr_scan_t *, fsimg_error_t *);
 
 /* Transparent compression (compress.c).
  *
  * hfsplus_compress_check() is the one decision on a compressed file's record and
- * attribute, made at listing and again on first resolve: the attribute exists,
- * the data fork is empty, and the type and inline size are ones this reader
- * decodes. hfsplus_compress_known() says a type passed it, and
+ * attribute, made through hfsplus_record_attributes() and again on first resolve:
+ * the attribute exists, the data fork is empty, and the type and inline size are
+ * ones this reader decodes. hfsplus_compress_known() says a type passed it, and
  * hfsplus_compress_consumes_fork() that its content is the resource fork.
  *
  * hfsplus_compress_open() opens the current entry's content from its record,

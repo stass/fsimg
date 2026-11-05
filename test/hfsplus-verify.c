@@ -685,6 +685,238 @@ private_empty_fork_stray_extent(gen_image_t *image)
 	gen_store(catalog_data(image, 41, false) + 108, 1, 4);
 }
 
+/* The generator supplies threads, valence, header counts and fork allocation.
+ * The optional stub lives in a listed folder and shares the private folder's
+ * creation date, as required for a hard-link reference.
+ */
+static void
+build_hidden_record(gen_image_t *image, gen_object_t hidden,
+    const gen_attr_value_t *attribute, bool listed_stub)
+{
+	static const uint16_t temporary[] = { 't', 'e', 'm', 'p', '1', '0', '0' };
+	gen_object_t objects[] = {
+		{ .name = private_data, .units = COUNT(private_data),
+		    .id = 40, .type = 1, .dates = { 42 } },
+		hidden,
+		{ .name = name_b, .units = 1, .id = 33, .type = 1 },
+		{ .name = name_a, .units = 1, .id = 32, .parent = 33,
+		    .type = 2, .special = 7, .finder = "hlnkhfs+",
+		    .dates = { 42 } }
+	};
+	gen_plan_t plan;
+
+	if (objects[1].name == NULL) {
+		objects[1].name = temporary;
+		objects[1].units = COUNT(temporary);
+	}
+	objects[1].id = 41;
+	objects[1].parent = 40;
+	objects[1].type = 2;
+	objects[1].flags = attribute == NULL ? 0 : 0x0004;
+	gen_plan_init(&plan);
+	plan.verification = true;
+	plan.objects = objects;
+	plan.object_count = listed_stub ? COUNT(objects) : 2;
+	plan.attributes = attribute != NULL;
+	plan.values = attribute;
+	plan.value_count = attribute == NULL ? 0 : 1;
+	gen_build(&plan, image);
+}
+
+static void
+hidden_socket_data(gen_image_t *image)
+{
+	gen_object_t hidden = { .mode = 0140000, .data_size = 1 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+static void
+hidden_character_resource(gen_image_t *image)
+{
+	gen_object_t hidden = { .mode = 0020000, .resource_size = 1 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+static void
+hidden_block_data(gen_image_t *image)
+{
+	gen_object_t hidden = { .mode = 0060000, .data_size = 1 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+static void
+hidden_symlink_resource(gen_image_t *image)
+{
+	gen_object_t hidden = { .mode = 0120000,
+	    .data = (const unsigned char *)"hello", .data_size = 5,
+	    .resource_size = 1 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+static void
+hidden_symlink_empty(gen_image_t *image)
+{
+	gen_object_t hidden = { .mode = 0120000 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+static void
+hidden_symlink_1024(gen_image_t *image)
+{
+	gen_object_t hidden = { .mode = 0120000, .data_size = 1024 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+static void
+hidden_compressed_no_attribute(gen_image_t *image)
+{
+	gen_object_t hidden = { .mode = 0100000, .owner_flags = 0x20 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+/* Type 3 stores the three uncompressed bytes inline after its marker. */
+static void
+build_hidden_compressed(gen_image_t *image, gen_object_t hidden,
+    unsigned type, bool bad_signature, bool listed_stub)
+{
+	static const uint16_t compression_name[] = { 'c', 'o', 'm', '.',
+	    'a', 'p', 'p', 'l', 'e', '.', 'd', 'e', 'c', 'm', 'p', 'f', 's' };
+	unsigned char bytes[20] = { 'f', 'p', 'm', 'c' };
+	gen_attr_value_t attribute = { .id = 41, .type = 0x10,
+	    .name = compression_name, .units = COUNT(compression_name),
+	    .value = bytes, .size = type == 3 ? sizeof(bytes) : 16 };
+
+	store_le(bytes + 4, type, 4);
+	store_le(bytes + 8, 3, 8);
+	bytes[16] = 0xff;
+	bcopy("abc", bytes + 17, 3);
+	if (bad_signature)
+		bytes[0] = 0;
+	hidden.mode = 0100000;
+	hidden.owner_flags = 0x20;
+	build_hidden_record(image, hidden, &attribute, listed_stub);
+}
+
+static void
+hidden_compressed_bad_signature(gen_image_t *image)
+{
+	gen_object_t hidden = { 0 };
+
+	build_hidden_compressed(image, hidden, 3, true, false);
+}
+
+static void
+hidden_compressed_data(gen_image_t *image)
+{
+	gen_object_t hidden = { .data_size = 1 };
+
+	build_hidden_compressed(image, hidden, 3, false, false);
+}
+
+static void
+hidden_compressed_unknown_type(gen_image_t *image)
+{
+	gen_object_t hidden = { 0 };
+
+	build_hidden_compressed(image, hidden, 255, false, false);
+}
+
+static void
+hidden_fifo_data(gen_image_t *image)
+{
+	gen_object_t hidden = { .mode = 0010000, .data_size = 1 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+static const uint16_t hidden_inode_name[] = { 'i', 'N', 'o', 'd', 'e', '7' };
+
+static void
+hidden_inode_fifo(gen_image_t *image)
+{
+	gen_object_t hidden = { .name = hidden_inode_name,
+	    .units = COUNT(hidden_inode_name), .mode = 0010000 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+static void
+hidden_inode_compressed_no_attribute(gen_image_t *image)
+{
+	gen_object_t hidden = { .name = hidden_inode_name,
+	    .units = COUNT(hidden_inode_name), .mode = 0100000,
+	    .owner_flags = 0x20 };
+
+	build_hidden_record(image, hidden, NULL, false);
+}
+
+/* A three-byte type-8 file needs two offset words. A first offset of four
+ * places the end of its table inside those words, before any chunk decoding.
+ */
+static void
+build_hidden_inode_bad_table(gen_image_t *image, bool listed_stub)
+{
+	unsigned char resource[12] = { 0 };
+	gen_object_t hidden = { .name = hidden_inode_name,
+	    .units = COUNT(hidden_inode_name), .special = listed_stub ? 1 : 0,
+	    .resource = resource, .resource_size = sizeof(resource) };
+
+	store_le(resource, 4, 4);
+	store_le(resource + 4, sizeof(resource), 4);
+	resource[8] = 6;
+	bcopy("abc", resource + 9, 3);
+	build_hidden_compressed(image, hidden, 8, false, listed_stub);
+}
+
+static void
+hidden_inode_bad_table_referenced(gen_image_t *image)
+{
+	build_hidden_inode_bad_table(image, true);
+}
+
+static void
+hidden_inode_bad_table_unreferenced(gen_image_t *image)
+{
+	build_hidden_inode_bad_table(image, false);
+}
+
+static void
+hidden_inode_compressed_valid(gen_image_t *image)
+{
+	gen_object_t hidden = { .name = hidden_inode_name,
+	    .units = COUNT(hidden_inode_name), .special = 1 };
+
+	build_hidden_compressed(image, hidden, 3, false, true);
+}
+
+static void
+test_hidden_primary_acceptance(void)
+{
+	gen_image_t image;
+
+	scenario = "hidden_fifo_data";
+	hidden_fifo_data(&image);
+	check_clean(&image, 0, 1, 0, 0);
+	gen_free(&image);
+
+	scenario = "hidden_inode_bad_table_unreferenced";
+	hidden_inode_bad_table_unreferenced(&image);
+	check_clean(&image, 0, 1, 0, 0);
+	gen_free(&image);
+
+	scenario = "hidden_inode_compressed_valid";
+	hidden_inode_compressed_valid(&image);
+	check_clean_bytes(&image, 1, 2, 3, 0, 0);
+	gen_free(&image);
+}
+
 static void
 fork_mutation(gen_image_t *image, unsigned offset, uint64_t value, size_t width)
 {
@@ -2088,6 +2320,32 @@ static const corruption_t corruptions[] = {
 	    listed_empty_fork_stray_extent, FSIMG_ECORRUPT, "extent" },
 	{ "private zero-length fork has stray extent",
 	    private_empty_fork_stray_extent, FSIMG_ECORRUPT, "extent" },
+	{ "hidden_socket_data",
+	    hidden_socket_data, FSIMG_ECORRUPT, "HFS Plus socket or device has a nonempty fork" },
+	{ "hidden_character_resource",
+	    hidden_character_resource, FSIMG_ECORRUPT, "HFS Plus socket or device has a nonempty fork" },
+	{ "hidden_block_data",
+	    hidden_block_data, FSIMG_ECORRUPT, "HFS Plus socket or device has a nonempty fork" },
+	{ "hidden_symlink_resource",
+	    hidden_symlink_resource, FSIMG_ECORRUPT, "HFS Plus symbolic link has a resource fork" },
+	{ "hidden_symlink_empty",
+	    hidden_symlink_empty, FSIMG_EUNSUPPORTED, "HFS Plus symbolic link's target length is not 1 to 1023 bytes" },
+	{ "hidden_symlink_1024",
+	    hidden_symlink_1024, FSIMG_EUNSUPPORTED, "HFS Plus symbolic link's target length is not 1 to 1023 bytes" },
+	{ "hidden_compressed_no_attribute",
+	    hidden_compressed_no_attribute, FSIMG_ECORRUPT, "HFS Plus compressed file has no compression attribute" },
+	{ "hidden_compressed_bad_signature",
+	    hidden_compressed_bad_signature, FSIMG_ECORRUPT, "HFS Plus compression attribute's header is malformed" },
+	{ "hidden_compressed_data",
+	    hidden_compressed_data, FSIMG_ECORRUPT, "HFS Plus compressed file has a nonempty data fork" },
+	{ "hidden_compressed_unknown_type",
+	    hidden_compressed_unknown_type, FSIMG_EUNSUPPORTED, "HFS Plus compression type is not supported" },
+	{ "hidden_inode_fifo",
+	    hidden_inode_fifo, FSIMG_ECORRUPT, "HFS Plus indirect node is a stub or of another kind" },
+	{ "hidden_inode_compressed_no_attribute",
+	    hidden_inode_compressed_no_attribute, FSIMG_ECORRUPT, "HFS Plus compressed file has no compression attribute" },
+	{ "hidden_inode_bad_table_referenced",
+	    hidden_inode_bad_table_referenced, FSIMG_ECORRUPT, "HFS Plus compressed file's chunk table is malformed" },
 	{ "used extent has zero count",
 	    extent_zero_count, FSIMG_ECORRUPT, "extent" },
 	{ "used extent follows unused descriptor",
@@ -2561,6 +2819,7 @@ main(int argc, char **argv)
 	test_compression_scopes();
 	test_additional_acceptance();
 	test_clean_variants_and_reused_ids();
+	test_hidden_primary_acceptance();
 	test_corruption_table();
 	test_stray_empty_forks_do_not_prevent_listing_or_reading();
 	test_preflight_refuses_before_scanning();

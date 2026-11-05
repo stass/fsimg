@@ -63,6 +63,32 @@ scan_record(const hfsplus_akey_t *key, const hfsplus_record_t *record,
 	return (FSIMG_OK);
 }
 
+/* The scan runs only for a record whose flags say to look, and is empty
+ * otherwise. A stub has no kind, so its owner flags say nothing: its indirect
+ * node's record answers for its entry.
+ */
+fsimg_status_t
+hfsplus_record_attributes(fsimg_reader_t *reader,
+    const hfsplus_primary_t *primary, bool *compressed,
+    hfsplus_attr_scan_t *scan, fsimg_error_t *error)
+{
+	bool directory = primary->kind == FSIMG_ENTRY_DIRECTORY;
+	uint16_t flags = directory ? primary->folder.flags : primary->file.flags;
+	uint32_t id = directory ? primary->folder.id : primary->file.id;
+	fsimg_status_t status;
+
+	*compressed = primary->kind == FSIMG_ENTRY_FILE &&
+	    (primary->file.bsd.owner_flags & HFSPLUS_OWNER_COMPRESSED) != 0;
+	if (!*compressed && (flags & HFSPLUS_FLAG_ATTRIBUTES) == 0) {
+		bzero(scan, sizeof(*scan));
+		return (FSIMG_OK);
+	}
+	status = hfsplus_attr_scan(reader, id, *compressed, NULL, scan, error);
+	if (status != FSIMG_OK || !*compressed)
+		return (status);
+	return (hfsplus_compress_check(&primary->file, scan, error));
+}
+
 /* One lower-bound search for (id, "", 0), which no attribute key equals
  * because a name has at least one unit, then a walk while fileID matches. An
  * absent tree holds nothing. The walk checks key order, which refuses a looping

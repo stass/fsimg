@@ -44,6 +44,8 @@ static fsimg_status_t folder_validate(const hfsplus_record_t *,
     hfsplus_primary_t *, fsimg_error_t *);
 static fsimg_status_t file_kind(const hfsplus_file_t *, fsimg_entry_kind_t *,
     fsimg_error_t *);
+static fsimg_status_t kind_rules_check(const hfsplus_file_t *,
+    fsimg_entry_kind_t, fsimg_error_t *);
 static fsimg_status_t file_validate(fsimg_reader_t *, const hfsplus_record_t *,
     hfsplus_primary_t *, fsimg_error_t *);
 static fsimg_status_t link_kind(fsimg_reader_t *, const hfsplus_file_t *,
@@ -151,6 +153,39 @@ file_kind(const hfsplus_file_t *file, fsimg_entry_kind_t *kind,
 	}
 }
 
+/* What the format design requires of a kind's forks. A regular file's rules are
+ * compression's, which need its attributes: hfsplus_record_attributes(). A FIFO
+ * has none: its forks are claimed like any file's and nothing is delivered.
+ */
+static fsimg_status_t
+kind_rules_check(const hfsplus_file_t *file, fsimg_entry_kind_t kind,
+    fsimg_error_t *error)
+{
+	const hfsplus_fork_t *data = &file->data_fork;
+	const hfsplus_fork_t *resource = &file->resource_fork;
+
+	switch (kind) {
+	case FSIMG_ENTRY_SYMLINK:
+		if (data->logical_size == 0 ||
+		    data->logical_size > HFSPLUS_LINK_TARGET_MAX)
+			return (hfsplus_unsupported(error,
+			    "HFS Plus symbolic link's target length is not 1 to 1023 bytes"));
+		if (!fork_empty(resource))
+			return (hfsplus_corrupt(error,
+			    "HFS Plus symbolic link has a resource fork"));
+		return (FSIMG_OK);
+	case FSIMG_ENTRY_SOCKET:
+	case FSIMG_ENTRY_CHAR_DEVICE:
+	case FSIMG_ENTRY_BLOCK_DEVICE:
+		if (!fork_empty(data) || !fork_empty(resource))
+			return (hfsplus_corrupt(error,
+			    "HFS Plus socket or device has a nonempty fork"));
+		return (FSIMG_OK);
+	default:
+		return (FSIMG_OK);
+	}
+}
+
 /* The stub tests run first: a stub's fileMode is 0100000 on current macOS and
  * 0 on the oldest discs, so it says nothing of the entry's kind.
  */
@@ -177,7 +212,10 @@ file_validate(fsimg_reader_t *reader, const hfsplus_record_t *record,
 		return (stub_check(hfsplus_state(reader), file, error));
 	if (primary->link != HFSPLUS_LINK_NONE)
 		return (FSIMG_OK);
-	return (file_kind(file, &primary->kind, error));
+	status = file_kind(file, &primary->kind, error);
+	if (status != FSIMG_OK)
+		return (status);
+	return (kind_rules_check(file, primary->kind, error));
 }
 
 fsimg_status_t
@@ -341,6 +379,13 @@ hfsplus_link_resolve(fsimg_reader_t *reader, hfsplus_primary_t *primary,
 	status = hfsplus_record_validate(reader, &record, primary, error);
 	if (status != FSIMG_OK)
 		return (status);
+	return (hfsplus_indirect_node_check(primary, error));
+}
+
+fsimg_status_t
+hfsplus_indirect_node_check(const hfsplus_primary_t *primary,
+    fsimg_error_t *error)
+{
 	if (primary->link != HFSPLUS_LINK_NONE ||
 	    (primary->kind != FSIMG_ENTRY_FILE &&
 	    primary->kind != FSIMG_ENTRY_SYMLINK))
@@ -379,9 +424,8 @@ hfsplus_thread_lookup(hfsplus_cursor_t *cursor, uint32_t id, uint16_t type,
 	return (FSIMG_OK);
 }
 
-fsimg_status_t
-hfsplus_child_fill(const hfsplus_primary_t *primary, hfsplus_child_t *child,
-    fsimg_error_t *error)
+void
+hfsplus_child_fill(const hfsplus_primary_t *primary, hfsplus_child_t *child)
 {
 	const hfsplus_file_t *file = &primary->file;
 	const hfsplus_folder_t *folder = &primary->folder;
@@ -405,33 +449,16 @@ hfsplus_child_fill(const hfsplus_primary_t *primary, hfsplus_child_t *child,
 			child->flags |= HFSPLUS_CHILD_FOLDER_COUNT;
 			child->folder_count = folder->folder_count;
 		}
-		return (FSIMG_OK);
+		break;
 	case FSIMG_ENTRY_FILE:
-		child->size = file->data_fork.logical_size;
-		return (FSIMG_OK);
 	case FSIMG_ENTRY_SYMLINK:
 		child->size = file->data_fork.logical_size;
-		if (child->size == 0 || child->size > HFSPLUS_LINK_TARGET_MAX)
-			return (hfsplus_unsupported(error,
-			    "HFS Plus symbolic link's target length is not 1 to 1023 bytes"));
-		if (!fork_empty(&file->resource_fork))
-			return (hfsplus_corrupt(error,
-			    "HFS Plus symbolic link has a resource fork"));
-		return (FSIMG_OK);
-	case FSIMG_ENTRY_FIFO:
-		return (FSIMG_OK);
+		break;
 	case FSIMG_ENTRY_CHAR_DEVICE:
 	case FSIMG_ENTRY_BLOCK_DEVICE:
 		child->special = bsd->special;
-		/* FALLTHROUGH */
-	case FSIMG_ENTRY_SOCKET:
-		if (!fork_empty(&file->data_fork) ||
-		    !fork_empty(&file->resource_fork))
-			return (hfsplus_corrupt(error,
-			    "HFS Plus socket or device has a nonempty fork"));
-		return (FSIMG_OK);
+		break;
 	default:
-		return (hfsplus_corrupt(error,
-		    "HFS Plus catalog record has no kind"));
+		break;
 	}
 }

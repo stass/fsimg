@@ -781,12 +781,14 @@ root_take(verify_t *verify, const hfsplus_ckey_t *key,
 }
 
 /* A folder or file record. Every record of the catalog comes through here once,
- * hidden or not: it is validated, its parent counts it, a folder declares its
- * counts, and a file's both forks are resolved and claimed once. Whatever holds no
- * thread or parent is found by the merges and reachability.
+ * hidden or not: its record and attributes pass the decisions a listing makes, so
+ * no rule of the format depends on a walk reaching it. Its parent counts it, a
+ * folder declares its counts, and a file's both forks are resolved and claimed
+ * once. Whatever holds no thread or parent is found by the merges and reachability.
  *
  * The private data folder holds indirect nodes and open-deleted files. A stub among
- * them would add to its node's link count with no name a walk could reach.
+ * them would add to its node's link count with no name a walk could reach, and an
+ * indirect node no stub names still has to be of a kind one could.
  */
 static fsimg_status_t
 primary_take(verify_t *verify, const hfsplus_ckey_t *key,
@@ -794,9 +796,10 @@ primary_take(verify_t *verify, const hfsplus_ckey_t *key,
 {
 	fsimg_reader_t *reader = verify->reader;
 	const fsimg_hfsplus_reader_t *hfsplus = verify->hfsplus;
+	hfsplus_attr_scan_t scan;
 	hfsplus_primary_t primary;
 	hfsplus_owned_t owned;
-	bool folder, in_private_data;
+	bool compressed, folder, in_private_data;
 	uint32_t id, reference;
 	uint16_t flags;
 	fsimg_status_t status;
@@ -812,6 +815,10 @@ primary_take(verify_t *verify, const hfsplus_ckey_t *key,
 	if (primary.link == HFSPLUS_LINK_DIRECTORY)
 		return (hfsplus_unsupported(error,
 		    "HFS Plus directory hard links are not supported"));
+	status = hfsplus_record_attributes(reader, &primary, &compressed, &scan,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
 	folder = primary.kind == FSIMG_ENTRY_DIRECTORY;
 	id = folder ? primary.folder.id : primary.file.id;
 	flags = folder ? primary.folder.flags : primary.file.flags;
@@ -827,8 +834,10 @@ primary_take(verify_t *verify, const hfsplus_ckey_t *key,
 			    "HFS Plus private data folder holds a hard-link stub"));
 		verify->private_records++;
 		if (inode_reference(key, &reference)) {
-			status = link_append(verify->inodes, reference,
-			    primary.file.bsd.special, error);
+			status = hfsplus_indirect_node_check(&primary, error);
+			if (status == FSIMG_OK)
+				status = link_append(verify->inodes, reference,
+				    primary.file.bsd.special, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}
@@ -1342,7 +1351,9 @@ merges(verify_t *verify, fsimg_error_t *error)
  * read would, checking its attribute, its fork's headers and an inline payload's
  * decode, then has its whole chunk table checked; no chunk in a fork is decoded. A
  * symbolic link's target is read, so a target no extraction could create fails
- * here. An ordinary file's forks were resolved by the catalog pass.
+ * here. An ordinary file's forks were resolved by the catalog pass. All of this
+ * is the content of a named entry: a record no entry names has its allocation
+ * claimed and its attribute checked, and its content read by nothing.
  */
 static fsimg_status_t
 content_check(fsimg_reader_t *reader, fsimg_error_t *error)

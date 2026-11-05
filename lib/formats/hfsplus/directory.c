@@ -86,9 +86,6 @@ static fsimg_status_t payload_decode(const fsimg_hfsplus_reader_t *,
     const unsigned char *, size_t, hfsplus_child_t *, fsimg_error_t *);
 static fsimg_status_t prepare_owned(hfsplus_prepare_t *, hfsplus_owned_t,
     const hfsplus_record_t *, fsimg_error_t *);
-static fsimg_status_t attributes_classify(fsimg_reader_t *,
-    const hfsplus_primary_t *, uint32_t, bool *, hfsplus_attr_scan_t *,
-    fsimg_error_t *);
 static fsimg_status_t prepare_named(hfsplus_prepare_t *,
     const hfsplus_record_t *, fsimg_error_t *);
 static fsimg_status_t prepare_child(hfsplus_prepare_t *, const hfsplus_ckey_t *,
@@ -346,27 +343,6 @@ prepare_owned(hfsplus_prepare_t *prepare, hfsplus_owned_t owned,
 	}
 }
 
-/* Whether the child with this effective record is compressed, and what its
- * attributes hold: the scan runs only for a record whose flags say to look, and
- * is empty otherwise.
- */
-static fsimg_status_t
-attributes_classify(fsimg_reader_t *reader, const hfsplus_primary_t *primary,
-    uint32_t id, bool *compressed, hfsplus_attr_scan_t *scan,
-    fsimg_error_t *error)
-{
-	uint16_t flags = primary->kind == FSIMG_ENTRY_DIRECTORY ?
-	    primary->folder.flags : primary->file.flags;
-
-	*compressed = primary->kind == FSIMG_ENTRY_FILE &&
-	    (primary->file.bsd.owner_flags & HFSPLUS_OWNER_COMPRESSED) != 0;
-	if (!*compressed && (flags & HFSPLUS_FLAG_ATTRIBUTES) == 0) {
-		bzero(scan, sizeof(*scan));
-		return (FSIMG_OK);
-	}
-	return (hfsplus_attr_scan(reader, id, *compressed, NULL, scan, error));
-}
-
 static fsimg_status_t
 admit_child(hfsplus_prepare_t *prepare, hfsplus_child_t *child,
     fsimg_error_t *error)
@@ -415,15 +391,11 @@ prepare_named(hfsplus_prepare_t *prepare, const hfsplus_record_t *record,
 	}
 	if (primary.kind == FSIMG_ENTRY_DIRECTORY)
 		prepare->folders++;
-	status = hfsplus_child_fill(&primary, &child, error);
-	if (status != FSIMG_OK)
-		return (status);
+	hfsplus_child_fill(&primary, &child);
 	child.leaf = location->number;
 	child.record = location->record;
-	status = attributes_classify(reader, &primary, child.id, &compressed,
-	    &scan, error);
-	if (status == FSIMG_OK && compressed)
-		status = hfsplus_compress_check(&primary.file, &scan, error);
+	status = hfsplus_record_attributes(reader, &primary, &compressed, &scan,
+	    error);
 	if (status != FSIMG_OK) {
 		if (!fsimg_reader_decode_rejected(reader, error, status))
 			return (status);
