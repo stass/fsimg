@@ -739,3 +739,5 @@ EXTRA_DIST += \
 	test/spec/suite/iso9660/test_rules.rb
 
 EXTRA_DIST += test/hfsplus-integration.sh test/hfsplus-integration.rb
+
+EXTRA_DIST += test/hfsplus-capture-test.rb

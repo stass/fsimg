@@ -4,7 +4,7 @@
 #ifndef HFSPLUS_WRITE_FIXTURE_H
 #define HFSPLUS_WRITE_FIXTURE_H
 #include "fsimg.h"
-#define HWF_COUNT 14u
+#define HWF_COUNT 24u
 #define HWF_LABEL "Writer volume"
 #define HWF_EPOCH 1700000000
 typedef struct hwf_entry {
@@ -39,7 +39,7 @@ void hwf_options(fsimg_write_options_t *, uint32_t);
 void hwf_open(hwf_fixture_t *, unsigned, const fsimg_write_options_t *,
     uint64_t, int, bool);
 void hwf_add_tree(hwf_fixture_t *, uint32_t, bool);
-void hwf_add_mapnodes(hwf_fixture_t *);
+void hwf_add_mapnodes(hwf_fixture_t *, unsigned);
 void hwf_close(hwf_fixture_t *);
 unsigned char hwf_byte(uint64_t, uint64_t);
 fsimg_metadata_t hwf_metadata(void);

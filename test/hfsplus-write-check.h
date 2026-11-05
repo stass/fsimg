@@ -7,4 +7,5 @@
 /* Raw-byte oracle; no production format codec, comparator or planner. */
 void hwc_check(const hwf_image_t *, const hwf_fixture_t *,
     const fsimg_write_options_t *, unsigned, bool);
+void hwc_check_tree(const unsigned char *, uint64_t);
 #endif

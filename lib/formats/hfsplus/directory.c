@@ -55,7 +55,6 @@ _Static_assert(HFSPLUS_NAME_UTF8_MAX < FSIMG_DIRECTORY_NAME_BYTES,
 /* Seconds from 1904-01-01 to the Unix epoch. */
 #define HFSPLUS_EPOCH_OFFSET	INT64_C(2082844800)
 
-
 /* One directory under preparation. cursor holds the catalog's scan buffer,
  * which keyed searches for a child leave alone. previous owns the last key
  * read, whose bytes the next leaf would overwrite.

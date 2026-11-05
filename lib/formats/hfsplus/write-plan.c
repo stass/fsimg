@@ -29,6 +29,23 @@
  * depend on source order, budgets, sort fan-in, scratch placement or time zone.
  */
 
+/* A row's fields in HFSPLUS_ROW_BYTES of scratch, little endian. */
+#define ROW_LENGTH	0u
+#define ROW_FIRST_BLOCK	8u
+#define ROW_BLOCKS	12u
+#define ROW_PARENT	16u
+#define ROW_UID		20u
+#define ROW_GID		24u
+#define ROW_CREATED	28u
+#define ROW_MODIFIED	32u
+#define ROW_ACCESSED	36u
+#define ROW_CHANGED	40u
+#define ROW_VALENCE	44u
+#define ROW_FOLDERS	48u
+#define ROW_MODE	52u
+#define ROW_KIND	54u
+_Static_assert(ROW_KIND < HFSPLUS_ROW_BYTES, "a row's fields fit its bytes");
+
 /* The most blocks a volume or fork holds. */
 #define BLOCKS_MAX		UINT64_C(0xffffffff)
 /* The primary header's end and the alternate header's distance from the end. */
@@ -129,9 +146,14 @@ holds_illegal_sequence(const uint16_t *units, size_t count)
 /* Encode an image path component or label into its stored name and namespace
  * key. Returns NULL on success, otherwise why the name is refused.
  *
- * The final check holds the writer to the reader's own admission rule, so a
- * name that could not read back as the same component, such as a dot name,
- * never reaches a volume.
+ * A path component holds no slash. One in a label would be stored as itself and
+ * read back as a colon, a different name, so it is refused. The exchange of colon
+ * and slash otherwise reads back unchanged.
+ *
+ * The final check holds the writer to the reader's own admission rule: a stored
+ * name the reader refuses, such as a dot name, or one that does not map to its
+ * path and back to the same units, never reaches a volume. It judges the stored
+ * name, not the caller's text, which decomposition may legitimately change.
  */
 static const char *
 name_encode(hfsplus_compare_t compare, const char *component, size_t length,
@@ -140,6 +162,8 @@ name_encode(hfsplus_compare_t compare, const char *component, size_t length,
 	uint16_t units[HFSPLUS_NAME_UNITS_MAX];
 	size_t count;
 
+	if (memchr(component, '/', length) != NULL)
+		return ("name holds a slash, which reads back as a colon");
 	if (!hfsplus_path_to_units(component, length, units, &count))
 		return ("name is not valid UTF-8 within 255 HFS Plus units");
 	if (count == 0)
@@ -175,7 +199,7 @@ hfsplus_write_validate(fsimg_write_options_t *options, unsigned variant,
 	if (block < HFSPLUS_WRITE_BLOCK_MIN || block > HFSPLUS_WRITE_BLOCK_MAX ||
 	    (block & (block - 1)) != 0 ||
 	    (options->sector_bytes != 0 && options->sector_bytes != 512) ||
-	    options->volume_bytes > INT64_MAX ||
+	    options->volume_bytes > HFSPLUS_WRITE_VOLUME_MAX ||
 	    options->volume_bytes % 512 != 0 ||
 	    options->volume_bytes / block > BLOCKS_MAX ||
 	    ((options->flags & FSIMG_WRITE_REPRODUCIBLE) != 0 &&
@@ -210,20 +234,20 @@ hfsplus_row_get(hfsplus_plan_t *plan, uint64_t id, hfsplus_row_t *row,
 	status = fsimg_array_get(plan->rows, id, raw, error);
 	if (status != FSIMG_OK)
 		return (status);
-	row->length = fsimg_load_le64(raw);
-	row->first_block = fsimg_load_le32(raw + 8);
-	row->blocks = fsimg_load_le32(raw + 12);
-	row->parent = fsimg_load_le32(raw + 16);
-	row->uid = fsimg_load_le32(raw + 20);
-	row->gid = fsimg_load_le32(raw + 24);
-	row->created = fsimg_load_le32(raw + 28);
-	row->modified = fsimg_load_le32(raw + 32);
-	row->accessed = fsimg_load_le32(raw + 36);
-	row->changed = fsimg_load_le32(raw + 40);
-	row->valence = fsimg_load_le32(raw + 44);
-	row->folders = fsimg_load_le32(raw + 48);
-	row->mode = fsimg_load_le16(raw + 52);
-	row->kind = raw[54];
+	row->length = fsimg_load_le64(raw + ROW_LENGTH);
+	row->first_block = fsimg_load_le32(raw + ROW_FIRST_BLOCK);
+	row->blocks = fsimg_load_le32(raw + ROW_BLOCKS);
+	row->parent = fsimg_load_le32(raw + ROW_PARENT);
+	row->uid = fsimg_load_le32(raw + ROW_UID);
+	row->gid = fsimg_load_le32(raw + ROW_GID);
+	row->created = fsimg_load_le32(raw + ROW_CREATED);
+	row->modified = fsimg_load_le32(raw + ROW_MODIFIED);
+	row->accessed = fsimg_load_le32(raw + ROW_ACCESSED);
+	row->changed = fsimg_load_le32(raw + ROW_CHANGED);
+	row->valence = fsimg_load_le32(raw + ROW_VALENCE);
+	row->folders = fsimg_load_le32(raw + ROW_FOLDERS);
+	row->mode = fsimg_load_le16(raw + ROW_MODE);
+	row->kind = raw[ROW_KIND];
 	return (FSIMG_OK);
 }
 
@@ -234,20 +258,20 @@ hfsplus_row_set(hfsplus_plan_t *plan, uint64_t id, const hfsplus_row_t *row,
 	unsigned char raw[HFSPLUS_ROW_BYTES];
 
 	bzero(raw, sizeof(raw));
-	fsimg_store_le64(raw, row->length);
-	fsimg_store_le32(raw + 8, row->first_block);
-	fsimg_store_le32(raw + 12, row->blocks);
-	fsimg_store_le32(raw + 16, row->parent);
-	fsimg_store_le32(raw + 20, row->uid);
-	fsimg_store_le32(raw + 24, row->gid);
-	fsimg_store_le32(raw + 28, row->created);
-	fsimg_store_le32(raw + 32, row->modified);
-	fsimg_store_le32(raw + 36, row->accessed);
-	fsimg_store_le32(raw + 40, row->changed);
-	fsimg_store_le32(raw + 44, row->valence);
-	fsimg_store_le32(raw + 48, row->folders);
-	fsimg_store_le16(raw + 52, row->mode);
-	raw[54] = row->kind;
+	fsimg_store_le64(raw + ROW_LENGTH, row->length);
+	fsimg_store_le32(raw + ROW_FIRST_BLOCK, row->first_block);
+	fsimg_store_le32(raw + ROW_BLOCKS, row->blocks);
+	fsimg_store_le32(raw + ROW_PARENT, row->parent);
+	fsimg_store_le32(raw + ROW_UID, row->uid);
+	fsimg_store_le32(raw + ROW_GID, row->gid);
+	fsimg_store_le32(raw + ROW_CREATED, row->created);
+	fsimg_store_le32(raw + ROW_MODIFIED, row->modified);
+	fsimg_store_le32(raw + ROW_ACCESSED, row->accessed);
+	fsimg_store_le32(raw + ROW_CHANGED, row->changed);
+	fsimg_store_le32(raw + ROW_VALENCE, row->valence);
+	fsimg_store_le32(raw + ROW_FOLDERS, row->folders);
+	fsimg_store_le16(raw + ROW_MODE, row->mode);
+	raw[ROW_KIND] = row->kind;
 	return (fsimg_array_set(plan->rows, id, raw, error));
 }
 
@@ -675,6 +699,8 @@ geometry_exact(uint64_t volume_bytes, uint32_t block, uint64_t demand,
 	if (volume_bytes < HEAD_BYTES + TAIL_BYTES)
 		return (false);
 	blocks = volume_bytes / block;
+	if (blocks > BLOCKS_MAX)
+		return (false);
 	head = (HEAD_BYTES + block - 1) / block;
 	/* The last blocks below N, wherever the alternate lies: fsck_hfs calls a
 	 * clear bit there under-allocation even when the alternate is past N * B.

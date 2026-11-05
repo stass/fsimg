@@ -13,6 +13,9 @@
 #define HFSPLUS_WRITE_BLOCK_DEFAULT	4096u
 #define HFSPLUS_WRITE_BLOCK_MIN		512u
 #define HFSPLUS_WRITE_BLOCK_MAX		65536u
+/* A fork or volume of 2^32 - 1 blocks of the writer's largest size. */
+#define HFSPLUS_WRITE_VOLUME_MAX	\
+	(UINT64_C(0xffffffff) * HFSPLUS_WRITE_BLOCK_MAX)
 
 /* Stored dates count from 1904. */
 #define HFSPLUS_TIME_ORIGIN		INT64_C(2082844800)
@@ -236,7 +239,8 @@ int hfsplus_write_record_compare(const void *, size_t, const void *, size_t,
  * hfsplus_tree_emit() runs the same packer again, writing each node through
  * the caller: the leaves in order, each index level, the header and the map
  * nodes. It fails with FSIMG_ESTATE when the streams no longer produce
- * the packed counts.
+ * well-formed records or the packed counts; hfsplus_tree_pack() does for a
+ * malformed record too.
  */
 void hfsplus_tree_shape_init(hfsplus_tree_shape_t *, hfsplus_tree_kind_t,
     hfsplus_compare_t);

@@ -6,4 +6,5 @@ if ! command -v ruby >/dev/null 2>&1; then
     echo 'SKIP: Ruby is required for HFS Plus integration'
     exit 77
 fi
+ruby "$(dirname "$0")/hfsplus-capture-test.rb"
 exec ruby "$(dirname "$0")/hfsplus-integration.rb" ./hfsplus-write-gen

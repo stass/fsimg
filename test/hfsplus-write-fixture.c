@@ -146,7 +146,17 @@ hwf_add_tree(hwf_fixture_t *f, uint32_t block, bool reverse)
 		{ "/pipe", "/pipe", FSIMG_ENTRY_FIFO, 0 },
 		{ "/dir/vacant", "/dir/vacant", FSIMG_ENTRY_DIRECTORY, 0 },
 		{ long_first, long_first, FSIMG_ENTRY_FILE, 0 },
-		{ long_last, long_last, FSIMG_ENTRY_FILE, 0 }
+		{ long_last, long_last, FSIMG_ENTRY_FILE, 0 },
+		{ "/Zeta", "/Zeta", FSIMG_ENTRY_FILE, 0 },
+		{ "/alpha", "/alpha", FSIMG_ENTRY_FILE, 0 },
+		{ "/\316\251", "/\316\251", FSIMG_ENTRY_FILE, 0 },
+		{ "/\316\261", "/\316\261", FSIMG_ENTRY_FILE, 0 },
+		{ "/:", "/:", FSIMG_ENTRY_FILE, 0 },
+		{ "/\342\220\200", "/\342\220\200", FSIMG_ENTRY_FILE, 0 },
+		{ "/\360\237\230\200", "/\360\237\230\200", FSIMG_ENTRY_FILE, 0 },
+		{ "/\357\274\241", "/\357\274\241", FSIMG_ENTRY_FILE, 0 },
+		{ "/a\342\200\214x", "/a\342\200\214x", FSIMG_ENTRY_FILE, 0 },
+		{ "/ay", "/ay", FSIMG_ENTRY_FILE, 0 }
 	};
 	fsimg_entry_t e;
 	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER };
@@ -169,7 +179,7 @@ hwf_add_tree(hwf_fixture_t *f, uint32_t block, bool reverse)
  * exceeds the header map's 30720-node capacity without any host sources.
  */
 void
-hwf_add_mapnodes(hwf_fixture_t *f)
+hwf_add_mapnodes(hwf_fixture_t *f, unsigned count)
 {
 	char path[242];
 	fsimg_entry_t e = { .kind = FSIMG_ENTRY_FILE };
@@ -177,7 +187,7 @@ hwf_add_mapnodes(hwf_fixture_t *f)
 
 	memset(path, 'n', sizeof(path) - 1);
 	path[sizeof(path) - 1] = '\0';
-	for (unsigned i = 0; i < 200000; i++) {
+	for (unsigned i = 0; i < count; i++) {
 		snprintf(path, 10, "/%08u", i);
 		path[9] = 'n';
 		e.path = path;

@@ -66,8 +66,8 @@ static fsimg_status_t follow_chain(hfsplus_cursor_t *, fsimg_error_t *);
  * keyCompareType depends on the volume's signature and is volume.c's choice.
  *
  * An attributes tree's btreeType and keyCompareType come as one of two pairs,
- * (0, 0) or (TYPE_RESERVED, HFSPLUS_COMPARE_TYPE_BINARY), and the header's pair never
- * changes how its keys compare: attribute names are always compared as
+ * (0, 0) or (TYPE_RESERVED, HFSPLUS_COMPARE_TYPE_BINARY), and the header's pair
+ * never changes how its keys compare: attribute names are always compared as
  * unsigned code units. A tree with no index node, which is only an empty
  * one, may omit the variable index keys flag, since no index key exists for
  * the flag to describe.

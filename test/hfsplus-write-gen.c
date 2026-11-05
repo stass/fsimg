@@ -56,7 +56,10 @@ main(int argc, char **argv)
 		CHECK(block >= 512 && block <= 65536 &&
 		    (block & (block - 1)) == 0);
 	CHECK(strcmp(argv[4], "empty") == 0 || strcmp(argv[4], "tree") == 0 ||
-	    strcmp(argv[4], "mapnodes") == 0 || strcmp(argv[4], "nearlyfull") == 0 ||
+	    strcmp(argv[4], "mapnodes") == 0 ||
+	    strcmp(argv[4], "mapnodes-small") == 0 ||
+	    strcmp(argv[4], "nearlyfull-small") == 0 ||
+	    strcmp(argv[4], "nearlyfull") == 0 ||
 	    minimize);
 	hwf_options(&options, (uint32_t)block);
 	if (minimize) {
@@ -90,12 +93,42 @@ main(int argc, char **argv)
 	CHECK(scratch >= 0);
 	hwf_open(&f, variant, &options, 256 * 1024 * 1024, scratch, false);
 	if (strcmp(argv[4], "mapnodes") == 0)
-		hwf_add_mapnodes(&f);
+		hwf_add_mapnodes(&f, 200000);
+	else if (strcmp(argv[4], "mapnodes-small") == 0)
+		/* 86769 entries use exactly the header map; one more needs
+		 * a map node, including the index levels above the leaves.
+		 */
+		hwf_add_mapnodes(&f, 86770);
 	else if (strcmp(argv[4], "tree-min") == 0)
 		hwf_add_tree(&f, 4096, false);
 	else if (strcmp(argv[4], "empty") != 0 &&
 	    strcmp(argv[4], "empty-min") != 0)
 		hwf_add_tree(&f, (uint32_t)block, false);
+	if (strcmp(argv[4], "nearlyfull-small") == 0) {
+		fsimg_entry_t entry = { .path = "/filler", .kind = FSIMG_ENTRY_FILE };
+		fsimg_source_t source = { .kind = FSIMG_SOURCE_ZERO };
+		const fsimg_plan_t *plan;
+		fsimg_plan_info_t info;
+
+		CHECK(block == 4096 && options.volume_bytes == 4 * 1024 * 1024);
+		/* Include the filler's catalog pair when sizing the minimum, then
+		 * recreate the writer with a payload that leaves two free blocks.
+		 */
+		hwf_close(&f);
+		options.volume_bytes = 0;
+		hwf_open(&f, variant, &options, 256 * 1024 * 1024, scratch, false);
+		hwf_add_tree(&f, (uint32_t)block, false);
+		CHECK(fsimg_writer_add(f.writer, &entry, &source, NULL) == FSIMG_OK);
+		CHECK(fsimg_writer_plan(f.writer, &plan, NULL) == FSIMG_OK);
+		CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+		CHECK(info.volume_bytes + 2 * block < 4 * 1024 * 1024);
+		entry.size = 4 * 1024 * 1024 - info.volume_bytes - 2 * block;
+		hwf_close(&f);
+		options.volume_bytes = 4 * 1024 * 1024;
+		hwf_open(&f, variant, &options, 256 * 1024 * 1024, scratch, false);
+		hwf_add_tree(&f, (uint32_t)block, false);
+		CHECK(fsimg_writer_add(f.writer, &entry, &source, NULL) == FSIMG_OK);
+	}
 	status = fsimg_writer_write_at(f.writer, directory, name, &error);
 	if (status != FSIMG_OK)
 		fprintf(stderr, "generate %s: %d %s (offset=%" PRIu64 ")\n",

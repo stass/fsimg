@@ -42,7 +42,6 @@
 #define JOURNAL_SIZE_MAX	(UINT64_C(1024) * 1024 * 1024)
 #define JOURNAL_ALIGN		512u
 
-
 /* The bytes no fork can occupy: the boot blocks and primary header, and the
  * alternate header with the reserved sector after it.
  */

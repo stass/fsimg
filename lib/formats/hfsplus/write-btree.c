@@ -60,8 +60,10 @@ typedef struct hfsplus_pack {
 	uint32_t	 nodes;
 } hfsplus_pack_t;
 
-/* One node being encoded in the caller's buffer: its pack decides boundaries,
- * number is the node being filled, and last that level's last node.
+/* One level being encoded into the caller's node buffer. pack decides the record
+ * boundaries and counts the level's nodes so far; first and last are the level's
+ * first and last node numbers, from which the open node's number and sibling
+ * links derive. height and kind are the values of each node's descriptor.
  */
 typedef struct hfsplus_node_encoder {
 	const hfsplus_tree_emit_t *emit;
@@ -69,8 +71,22 @@ typedef struct hfsplus_node_encoder {
 	uint32_t	 first;
 	uint32_t	 last;
 	uint32_t	 height;
-	int		 kind;
+	int8_t		 kind;
 } hfsplus_node_encoder_t;
+
+/* The B-tree header record's fields the writer sets beyond zero. */
+#define BTREE_DEPTH		0u
+#define BTREE_ROOT		2u
+#define BTREE_LEAF_RECORDS	6u
+#define BTREE_FIRST_LEAF	10u
+#define BTREE_LAST_LEAF		14u
+#define BTREE_NODE_SIZE		18u
+#define BTREE_MAX_KEY_LENGTH	20u
+#define BTREE_TOTAL_NODES	22u
+#define BTREE_FREE_NODES	26u
+#define BTREE_CLUMP_SIZE	32u
+#define BTREE_COMPARE_TYPE	37u
+#define BTREE_ATTRIBUTES	38u
 
 /* The one packing decision: whether a record must start a new node, because
  * none is open or it does not fit the open one.
@@ -180,7 +196,8 @@ hfsplus_write_record_decode(const unsigned char *raw, size_t length,
 	record->units = fsimg_load_be16(raw + 12);
 	record->key = raw + HFSPLUS_WRITE_RECORD_FIXED;
 	record->name = record->key + record->key_bytes;
-	return (length == HFSPLUS_WRITE_RECORD_FIXED +
+	return (record->units <= HFSPLUS_NAME_UNITS_MAX &&
+	    length == HFSPLUS_WRITE_RECORD_FIXED +
 	    (size_t)record->key_bytes + 2u * (size_t)record->units);
 }
 
@@ -272,6 +289,22 @@ stale_stream(fsimg_error_t *error)
 	    "HFS Plus packer record stream is inconsistent"));
 }
 
+/* Decode a level stream record read back from scratch; its name is at raw +
+ * HFSPLUS_WRITE_LEVEL_FIXED. Only a record level_append did not write fails, and
+ * passing keeps the name within the caller's HFSPLUS_WRITE_LEVEL_MAX bytes.
+ */
+static bool
+level_record_decode(const unsigned char *raw, size_t length, uint32_t *parent,
+    uint32_t *units)
+{
+	if (length < HFSPLUS_WRITE_LEVEL_FIXED)
+		return (false);
+	*parent = fsimg_load_be32(raw);
+	*units = fsimg_load_be16(raw + 4);
+	return (*units <= HFSPLUS_NAME_UNITS_MAX &&
+	    length == HFSPLUS_WRITE_LEVEL_FIXED + 2u * (size_t)*units);
+}
+
 /* The leaf level: one pass over the sorted records. */
 static fsimg_status_t
 pack_leaves(fsimg_session_t *session, fsimg_stream_t *records,
@@ -320,7 +353,7 @@ pack_index_level(fsimg_session_t *session, fsimg_stream_t *below,
 	hfsplus_pack_t pack = { .node_bytes = node_bytes };
 	uint64_t cursor = 0;
 	size_t length;
-	uint32_t units;
+	uint32_t parent, units;
 	fsimg_status_t status;
 
 	for (;;) {
@@ -332,10 +365,11 @@ pack_index_level(fsimg_session_t *session, fsimg_stream_t *below,
 			status = fsimg_session_charge(session, 0, 0, 1, error);
 		if (status != FSIMG_OK)
 			return (status);
-		units = fsimg_load_be16(raw + 4);
+		if (!level_record_decode(raw, length, &parent, &units))
+			return (stale_stream(error));
 		if (!pack_place(&pack, index_record_bytes(units)))
 			continue;
-		status = level_append(first_keys, fsimg_load_be32(raw), units,
+		status = level_append(first_keys, parent, units,
 		    raw + HFSPLUS_WRITE_LEVEL_FIXED, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -506,7 +540,8 @@ key_encode(unsigned char *out, uint32_t parent, uint32_t units,
 }
 
 /* Place one record, closing the previous node when it starts a new one, and
- * return where its bytes go.
+ * return where its bytes go. A record starting a node must fit the empty node,
+ * so every write the caller then makes through the result stays inside it.
  */
 static fsimg_status_t
 encoder_place(hfsplus_node_encoder_t *encoder, uint32_t record_bytes,
@@ -521,7 +556,8 @@ encoder_place(hfsplus_node_encoder_t *encoder, uint32_t record_bytes,
 				return (status);
 		}
 		pack_open_node(&encoder->pack);
-		if (encoder->first + encoder->pack.nodes - 1u > encoder->last)
+		if (encoder->first + encoder->pack.nodes - 1u > encoder->last ||
+		    pack_starts_node(&encoder->pack, record_bytes))
 			return (stale_stream(error));
 		node_begin(encoder);
 	}
@@ -588,7 +624,7 @@ emit_index_level(const hfsplus_tree_emit_t *emit, uint32_t level,
 	unsigned char *out;
 	uint64_t cursor = 0;
 	size_t key_bytes, length;
-	uint32_t child, units;
+	uint32_t child, parent, units;
 	fsimg_status_t status;
 
 	bzero(&encoder, sizeof(encoder));
@@ -609,12 +645,13 @@ emit_index_level(const hfsplus_tree_emit_t *emit, uint32_t level,
 			    error);
 		if (status != FSIMG_OK)
 			return (status);
-		units = fsimg_load_be16(raw + 4);
+		if (!level_record_decode(raw, length, &parent, &units))
+			return (stale_stream(error));
 		status = encoder_place(&encoder, index_record_bytes(units), &out,
 		    error);
 		if (status != FSIMG_OK)
 			return (status);
-		key_bytes = key_encode(out, fsimg_load_be32(raw), units,
+		key_bytes = key_encode(out, parent, units,
 		    raw + HFSPLUS_WRITE_LEVEL_FIXED);
 		fsimg_store_be32(out + key_bytes, child);
 		child++;
@@ -686,18 +723,19 @@ header_record_encode(const hfsplus_tree_shape_t *shape, unsigned char *record)
 		last_leaf = shape->level_nodes[0];
 		root = level_first_node(shape, shape->depth - 1u);
 	}
-	fsimg_store_be16(record, (uint16_t)shape->depth);
-	fsimg_store_be32(record + 2, root);
-	fsimg_store_be32(record + 6, shape->leaf_records);
-	fsimg_store_be32(record + 10, first_leaf);
-	fsimg_store_be32(record + 14, last_leaf);
-	fsimg_store_be16(record + 18, (uint16_t)shape->node_bytes);
-	fsimg_store_be16(record + 20, shape->max_key_length);
-	fsimg_store_be32(record + 22, shape->total_nodes);
-	fsimg_store_be32(record + 26, shape->total_nodes - shape->used_nodes);
-	fsimg_store_be32(record + 32, hfsplus_tree_clump(shape));
-	record[37] = shape->compare_type;
-	fsimg_store_be32(record + 38, shape->attributes);
+	fsimg_store_be16(record + BTREE_DEPTH, (uint16_t)shape->depth);
+	fsimg_store_be32(record + BTREE_ROOT, root);
+	fsimg_store_be32(record + BTREE_LEAF_RECORDS, shape->leaf_records);
+	fsimg_store_be32(record + BTREE_FIRST_LEAF, first_leaf);
+	fsimg_store_be32(record + BTREE_LAST_LEAF, last_leaf);
+	fsimg_store_be16(record + BTREE_NODE_SIZE, (uint16_t)shape->node_bytes);
+	fsimg_store_be16(record + BTREE_MAX_KEY_LENGTH, shape->max_key_length);
+	fsimg_store_be32(record + BTREE_TOTAL_NODES, shape->total_nodes);
+	fsimg_store_be32(record + BTREE_FREE_NODES,
+	    shape->total_nodes - shape->used_nodes);
+	fsimg_store_be32(record + BTREE_CLUMP_SIZE, hfsplus_tree_clump(shape));
+	record[BTREE_COMPARE_TYPE] = shape->compare_type;
+	fsimg_store_be32(record + BTREE_ATTRIBUTES, shape->attributes);
 }
 
 /* Node 0: the header record, zero user data and the map's first bits. Returns

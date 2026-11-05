@@ -32,6 +32,7 @@ require "open3"
 require "optparse"
 require "shellwords"
 require "tmpdir"
+require "timeout"
 require_relative "fields"
 require_relative "populate"
 require_relative "populate_attributes"
@@ -46,6 +47,10 @@ module HfsPlusCapture
   DEFAULT_ROOT = File.join(Dir.home, "hfsplus-captures")
   FIELD_RECORDS = 400
   OUTPUT_LINES = 40
+  COMMAND_TIMEOUT = 30 * 60
+  FSCK_TIMEOUT = 30 * 60
+  ATTACH_TIMEOUT = 5 * 60
+  DETACH_TIMEOUT = 5 * 60
   # What --option may hold: it becomes part of the capture directory's name.
   OPTION_PATTERN = /\A[\w.+-]+\z/
 
@@ -79,19 +84,47 @@ module HfsPlusCapture
     def shown_command(argv) = argv.map { _1.match?(%r{\A[\w/.@:=+,-]+\z}) ? _1 : _1.shellescape }.join(" ")
 
     # Run argv, log it, return [combined output, success].
-    def run(*argv)
-      out, code = run_status(*argv)
+    def run(*argv, timeout: COMMAND_TIMEOUT)
+      out, code = run_status(*argv, timeout: timeout)
       [out, code == 0]
     end
 
     # Run argv, log it, return [combined output, exit status]; the status is
     # nil when the program cannot start or dies of a signal. The [cmd, cmd]
     # form of the program keeps a lone element from being handed to a shell.
-    def run_status(*argv)
-      out, status = Open3.capture2e([argv.first, argv.first], *argv.drop(1))
+    def run_status(*argv, timeout: COMMAND_TIMEOUT)
+      out = +"".b
+      code = Open3.popen2e([argv.first, argv.first], *argv.drop(1), pgroup: true) do |input, output, child|
+        input.close
+        reader = Thread.new do
+          loop { out << output.readpartial(16_384) }
+        rescue EOFError
+          nil
+        end
+        begin
+          Timeout.timeout(timeout) do
+            reader.value
+            child.value.exitstatus
+          end
+        rescue Timeout::Error
+          # Kill the group even if the leader exited: descendants can retain
+          # the output pipe and keep the reader waiting for EOF.
+          begin
+            Process.kill("KILL", -child.pid)
+          rescue Errno::ESRCH
+            nil
+          end
+          child.value
+          reader.value
+          out << "\n[timeout after #{timeout} seconds: #{shown_command(argv)}]\n"
+          nil
+        ensure
+          reader.join
+        end
+      end
       shown = out.lines.first(OUTPUT_LINES).map(&:chomp)
-      @lines.push("$ #{shown_command(argv)}", *shown.map { "  #{_1}" }, "  [exit #{status.exitstatus}]")
-      [out, status.exitstatus]
+      @lines.push("$ #{shown_command(argv)}", *shown.map { "  #{_1}" }, "  [exit #{code}]")
+      [out, code]
     rescue SystemCallError => e
       @lines.push("$ #{shown_command(argv)}", "  [#{e.message}]")
       ["", nil]
@@ -114,10 +147,13 @@ module HfsPlusCapture
       args = %w[hdiutil attach -imagekey diskimage-class=CRawDiskImage]
       args += mountpoint ? ["-mountpoint", mountpoint] : ["-nomount"]
       args << "-readonly" if readonly
-      out, ok = @log.run(*args, image)
+      out, ok = @log.run(*args, image, timeout: ATTACH_TIMEOUT)
       device = out[%r{/dev/disk\d+}]
       @devices << device if device && !@devices.include?(device)
-      raise Error, "cannot attach #{image}: #{out.lines.first}" unless ok && device
+      unless ok && device
+        detach_error(device) if device
+        raise Error, "cannot attach #{image}: #{out.lines.first}"
+      end
 
       device
     end
@@ -127,7 +163,7 @@ module HfsPlusCapture
     def detach(device, force: false)
       attempts = force ? [["-force"]] : [[], [], [], ["-force"]]
       done = attempts.any? do |extra|
-        _, ok = @log.run("hdiutil", "detach", device, *extra)
+        _, ok = @log.run("hdiutil", "detach", device, *extra, timeout: DETACH_TIMEOUT)
         sleep(0.5) unless ok
         ok
       end
@@ -205,7 +241,7 @@ module HfsPlusCapture
   # that it did not check.
   def fsck(attachments, log, image)
     attachments.with(image) do |device|
-      out, ok = log.run("fsck_hfs", "-fn", device.sub("/dev/", "/dev/r"))
+      out, ok = log.run("fsck_hfs", "-fn", device.sub("/dev/", "/dev/r"), timeout: FSCK_TIMEOUT)
       result = if out.include?("No checking performed") then "skipped"
                else ok ? "passed" : "failed"
                end

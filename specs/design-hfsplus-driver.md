@@ -617,10 +617,13 @@ bad blocks as `bad_clusters`.
 `validate` applies the format design's [settings table](design-hfsplus.md#settings-and-sizing):
 `allocation_unit_bytes` zero or a power of two from 512 to 65536;
 `sector_bytes` zero or 512; `volume_bytes` zero or a multiple of 512 whose
-block count is at most `2^32 - 1`; `label` NULL, empty or at most 255 units
-after encoding; `epoch` within 1904 to 2040 in reproducible mode;
-`volume_uuid` any value. `volume_serial` is ignored, as the format stores no
-32-bit serial. The capability record's `write_settings` names
+block count is at most `2^32 - 1`, and no more than the capability record's
+`max_volume_bytes` of `(2^32 - 1) * 65536`, which also states `max_file_bytes`; `label` NULL, empty or at most 255 units
+after encoding, with no `/`; `epoch` within 1904 to 2040 in reproducible mode;
+`volume_uuid` any value. `volume_serial` is accepted and ignored, as the format
+stores no 32-bit serial: it is a common write option outside the settings table
+that `fsimg_write_settings_check` holds to defaults, and the CLI fills it on
+every write, as for QNX6 and QNX4. The capability record's `write_settings` names
 `FSIMG_SETTING_VOLUME_UUID` alone, so the CLI generates a random identifier
 unless `-R` is given.
 
@@ -649,9 +652,10 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    metadata through the common policy, selecting owner, mode and times; count
    the entry into its parent's row; accumulate the data fork's blocks for
    every candidate block size, for the sizing search; and append two records
-   to the catalog record stream, the primary and the thread. A record is the
-   sort key, the parent node ID and the namespace key as big-endian bytes,
-   then the catalog ID, the record type and the stored name.
+   to the catalog record stream, the primary and the thread. A record holds,
+   big endian, the parent node ID, the catalog ID, the record type, the
+   namespace key's length, the name's unit count, the namespace key and the
+   stored name. The parent and the namespace key are its sort key.
 2. **Sort.** Sort the stream externally by sort key. Adjacent equal keys are
    siblings that macOS would treat as one name: planning fails with
    `FSIMG_EINVAL` naming the second. A thread's key is its node ID and the
@@ -659,8 +663,8 @@ Planning runs a fixed sequence of passes over the frozen catalog:
 3. **Packing.** Run the packer over the sorted stream: leaves in order,
    recording each leaf's first key in the level-1 stream, then each level
    from the previous one, until one node remains. Node counts give the
-   catalog's used nodes, and map nodes come from a fixed-point step on
-   `totalNodes`. The extents tree and the attributes tree are each one
+   catalog's used nodes, and map nodes come from a closed form on them: the
+   smallest `k` with `used + k` within the header's and `k` map nodes' bits. The extents tree and the attributes tree are each one
    header node. The node sizes are fixed, so
    the node counts depend on the catalog alone and packing runs once; each
    candidate block size only rounds the three forks up to whole allocation
@@ -740,7 +744,7 @@ Writer:
 
 | Condition | Status |
 | --- | --- |
-| Setting outside its rule; a name or label outside 1 to 255 units after encoding, invalid UTF-8 or a percent-text value, all-ignorable on `hfsplus`, or holding a sequence `fsck_hfs` flags; equivalent siblings; a reserved root name | `FSIMG_EINVAL` |
+| Setting outside its rule; a label holding `/`; a name or label outside 1 to 255 units after encoding, invalid UTF-8 or a percent-text value, all-ignorable on `hfsplus`, or holding a sequence `fsck_hfs` flags; equivalent siblings; a reserved root name | `FSIMG_EINVAL` |
 | A file needing more than `2^32 - 1` blocks; a kind the profile lacks or a link target above 1023 bytes, from the common capability check; a time loss when the caller forbids losses | `FSIMG_EUNSUPPORTED` |
 | Content that does not fit the exact size or `2^32 - 1` blocks; a non-reproducible format time outside 1904 to 2040 | `FSIMG_ERANGE` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |

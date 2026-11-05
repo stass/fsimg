@@ -1892,6 +1892,18 @@ test_real_capabilities(void)
 	REQUIRE(fsimg_hfsplus_write_format.writer != NULL);
 	for (unsigned variant = 0; variant < 2; variant++) {
 		const fsimg_format_info_t *info = &fsimg_hfsplus_write_format.variants[variant].info;
+		const fsimg_format_info_t *read_info = &fsimg_hfsplus_format.variants[variant].info;
+
+		EXPECT(info->max_file_bytes == UINT64_C(0xffffffff0000));
+		EXPECT(info->max_volume_bytes == UINT64_C(0xffffffff0000));
+		EXPECT(info->max_label_bytes == 510);
+		EXPECT(info->max_name_utf16_units == 255);
+		EXPECT(info->max_link_target_bytes == 1023);
+		EXPECT(read_info->max_file_bytes == UINT64_C(0x7fffffff80000000));
+		EXPECT(read_info->max_volume_bytes == UINT64_C(0x7fffffff80000000));
+		EXPECT(read_info->max_label_bytes == 510);
+		EXPECT(read_info->max_name_utf16_units == 255);
+		EXPECT(read_info->max_link_target_bytes == 1023);
 		EXPECT(info->write_settings == FSIMG_SETTING_VOLUME_UUID);
 		EXPECT(info->write_allocation_unit_size_mask == 0x1fe00u);
 		EXPECT(info->entry_kinds == (FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |
@@ -2095,9 +2107,418 @@ test_unpublished_failures(void)
 	REQUIRE(rmdir(directory) == 0);
 }
 
+/* A malformed level record must be rejected before an index node is written.
+ * The valid leaf stream has sixteen files: fifteen per leaf, then one, the
+ * smallest two-leaf shape for one-unit file keys.
+ */
+typedef struct level_writes {
+	uint32_t numbers[4];
+	unsigned count;
+} level_writes_t;
+
+static fsimg_status_t
+record_level_write(void *argument, uint32_t number,
+    const unsigned char *bytes FSIMG_UNUSED, fsimg_error_t *error FSIMG_UNUSED)
+{
+	level_writes_t *writes = argument;
+
+	REQUIRE(writes->count < 4);
+	writes->numbers[writes->count++] = number;
+	return (FSIMG_OK);
+}
+
+/* Replace a completed level's scratch stream at a poll boundary, before the
+ * index packer reads it. Both stores are real streams with their own frames;
+ * swapping their values transfers ownership without calling into the library
+ * from a callback. The replacement keeps the well-formed stream for cleanup.
+ */
+typedef struct level_corruption {
+	hfsplus_tree_shape_t *shape;
+	fsimg_stream_t **levels;
+	fsimg_stream_t *replacement;
+	bool injected;
+} level_corruption_t;
+
+static bool
+replace_packed_level(void *argument)
+{
+	level_corruption_t *corruption = argument;
+	fsimg_stream_t saved;
+
+	if (!corruption->injected && corruption->shape->level_nodes[0] == 2) {
+		corruption->injected = true;
+		saved = *corruption->levels[0];
+		*corruption->levels[0] = *corruption->replacement;
+		*corruption->replacement = saved;
+	}
+	return (false);
+}
+
+static void
+test_pack_and_emit_reject_malformed_level_records(void)
+{
+	typedef struct malformed_level_case {
+		unsigned units;
+		size_t length;
+	} malformed_level_case_t;
+	static const malformed_level_case_t cases[] = {
+		{ .units = 0x0fff, .length = 8 },
+		{ .units = 256, .length = 516 },
+		{ .units = 2, .length = 8 },
+		{ .units = 1, .length = 10 },
+		{ .units = 0, .length = 4 }
+	};
+
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+		fixture_t f;
+		fsimg_session_t session;
+		fsimg_stream_t *records, *levels[HFSPLUS_BTREE_DEPTH_MAX] = { NULL };
+		hfsplus_tree_shape_t shape;
+		unsigned char raw[HFSPLUS_WRITE_RECORD_MAX] = { 0 };
+		unsigned char name[] = { 0, 'a' }, guarded[4096 + 64], guard[64];
+		hfsplus_write_record_t record = { .type = HFSPLUS_RECORD_FILE,
+		    .units = 1, .key_bytes = 2, .key = name, .name = name };
+		level_writes_t writes = { 0 };
+		hfsplus_tree_emit_t emit = { .session = &session, .shape = &shape,
+		    .levels = levels, .node = guarded, .leaf_data = leaf_pattern,
+		    .write = record_level_write, .argument = &writes };
+		size_t length;
+
+		named("malformed level units=%u length=%zu", cases[i].units, cases[i].length);
+		context_open(&f);
+		fsimg_session_init(&session, f.ctx, "hfsplus", 0);
+		REQUIRE(fsimg_stream_new(&session, sizeof(raw), &records, NULL) == FSIMG_OK);
+		for (unsigned n = 0; n < 16; n++) {
+			record.parent = n + 2;
+			length = hfsplus_write_record_encode(&record, raw);
+			REQUIRE(fsimg_stream_append(records, raw, length, NULL, NULL) == FSIMG_OK);
+		}
+		REQUIRE(fsimg_stream_seal(records, NULL) == FSIMG_OK);
+		hfsplus_tree_shape_init(&shape, HFSPLUS_TREE_CATALOG, HFSPLUS_COMPARE_FOLDED);
+		REQUIRE(hfsplus_tree_pack(&session, records, &shape, levels, NULL) == FSIMG_OK);
+		REQUIRE(shape.depth == 2 && shape.level_nodes[0] == 2);
+		hfsplus_tree_place(&shape, 0, 4096);
+
+		fsimg_stream_free(levels[0]);
+		REQUIRE(fsimg_stream_new(&session, HFSPLUS_WRITE_LEVEL_MAX,
+		    &levels[0], NULL) == FSIMG_OK);
+		bzero(raw, sizeof(raw));
+		fsimg_store_be32(raw, 2);
+		fsimg_store_be16(raw + 4, (uint16_t)cases[i].units);
+		REQUIRE(fsimg_stream_append(levels[0], raw, cases[i].length,
+		    NULL, NULL) == FSIMG_OK);
+		REQUIRE(fsimg_stream_seal(levels[0], NULL) == FSIMG_OK);
+		memset(guarded, 0xa5, sizeof(guarded));
+		bcopy(guarded + 4096, guard, sizeof(guard));
+		emit.records = records;
+
+		EXPECT(hfsplus_tree_emit(&emit, NULL) == FSIMG_ESTATE);
+		EXPECT(bcmp(guarded + 4096, guard, sizeof(guard)) == 0);
+		EXPECT(writes.count == 2);
+		EXPECT(writes.numbers[0] == 1 && writes.numbers[1] == 2);
+		for (unsigned level = 0; level < HFSPLUS_BTREE_DEPTH_MAX; level++)
+			fsimg_stream_free(levels[level]);
+		/* Exercise the sizing pass with the same malformed payload, not
+		 * just the emitter's independently supplied stream.
+		 */
+		{
+			fsimg_stream_t *replacement;
+			const unsigned char first_key[] = { 0, 0, 0, 2, 0, 1, 0, 97 };
+			level_corruption_t corruption = { .shape = &shape,
+			    .levels = levels };
+
+			bzero(levels, sizeof(levels));
+			REQUIRE(fsimg_stream_new(&session, HFSPLUS_WRITE_LEVEL_MAX,
+			    &replacement, NULL) == FSIMG_OK);
+			/* The poll may occur during the first frame header read.
+			 * Keep that frame identical; corrupt the following one.
+			 */
+			REQUIRE(fsimg_stream_append(replacement, first_key, sizeof(first_key),
+			    NULL, NULL) == FSIMG_OK);
+			REQUIRE(fsimg_stream_append(replacement, raw, cases[i].length,
+			    NULL, NULL) == FSIMG_OK);
+			REQUIRE(fsimg_stream_seal(replacement, NULL) == FSIMG_OK);
+			corruption.replacement = replacement;
+			hfsplus_tree_shape_init(&shape, HFSPLUS_TREE_CATALOG, HFSPLUS_COMPARE_FOLDED);
+			f.ctx->options.cancelled = replace_packed_level;
+			f.ctx->options.cancel_argument = &corruption;
+			EXPECT(hfsplus_tree_pack(&session, records, &shape, levels, NULL) == FSIMG_ESTATE);
+			EXPECT(corruption.injected);
+			f.ctx->options.cancelled = NULL;
+			f.ctx->options.cancel_argument = NULL;
+			fsimg_stream_free(replacement);
+			for (unsigned level = 0; level < HFSPLUS_BTREE_DEPTH_MAX; level++)
+				fsimg_stream_free(levels[level]);
+		}
+		fsimg_stream_free(records);
+		fsimg_ctx_free(f.ctx);
+	}
+}
+
+static void
+test_leaf_decoder_rejects_256_units(void)
+{
+	unsigned char raw[14 + 512] = { 0 };
+	hfsplus_write_record_t record;
+
+	named("leaf decoder refuses 256 units with matching length");
+	fsimg_store_be16(raw + 12, 256);
+	EXPECT(!hfsplus_write_record_decode(raw, sizeof(raw), &record));
+}
+
+static void
+test_volume_validate_limit(void)
+{
+	for (unsigned variant = 0; variant < 2; variant++) {
+		fsimg_write_options_t options = options_for(65536);
+
+		named("volume validation limit variant=%u", variant);
+		options.volume_bytes = UINT64_C(0xffffffff0000);
+		EXPECT(hfsplus_write_validate(&options, variant, NULL) == FSIMG_OK);
+		options.volume_bytes = UINT64_C(0xffffffff0200);
+		EXPECT(hfsplus_write_validate(&options, variant, NULL) == FSIMG_EINVAL);
+	}
+}
+
+static void
+test_plan_accepts_uint32_max_blocks(void)
+{
+	fixture_t f;
+	fsimg_write_options_t options = options_for(512);
+	hfsplus_plan_t *plan;
+	fsimg_stats_t stats;
+
+	named("plan UINT32_MAX blocks without retaining a bitmap");
+	options.volume_bytes = UINT64_C(0xffffffff) * 512;
+	fixture_open(&f, 0, &options);
+	plan = plan_ok(&f);
+	EXPECT(plan->total_blocks == UINT32_MAX);
+	EXPECT(plan->volume_bytes == UINT64_C(0x1fffffffe00));
+	EXPECT(plan->bitmap_blocks == 1048576);
+	REQUIRE(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
+	/* A 512-MiB bitmap cannot fit in this context's 256-MiB budget.
+	 * Its backing store must not exist either: only the tiny catalog does.
+	 */
+	EXPECT(stats.scratch_bytes < 1024 * 1024);
+	fixture_close(&f);
+}
+
+static void
+test_plan_refuses_catalog_record_count_overflow(void)
+{
+	fixture_t f;
+	fsimg_write_options_t options = options_for(4096);
+
+	named("catalog count exceeds two records per entry");
+	fixture_open(&f, 0, &options);
+	REQUIRE(fsimg_writer_prepare(f.writer, NULL, NULL) == FSIMG_OK);
+	/* Enter the driver after preparation, which otherwise derives count
+	 * from real catalog entries. Refusal precedes any catalog access.
+	 */
+	f.writer->count = UINT64_C(2147483647);
+	EXPECT(hfsplus_write_plan(f.writer, NULL) == FSIMG_ERANGE);
+	f.writer->count = 0;
+	fixture_close(&f);
+}
+
+static void
+test_real_label_mapping(void)
+{
+	for (unsigned variant = 0; variant < 2; variant++) {
+		fixture_t context;
+		fsimg_write_options_t options;
+		fsimg_writer_t *writer = NULL;
+		hwf_fixture_t f;
+		hwf_image_t image = { 0 };
+		fsimg_io_t *io;
+		fsimg_reader_t *reader;
+		fsimg_read_options_t read_options;
+		fsimg_volume_info_t volume;
+
+		named("real label slash refusal variant=%u", variant);
+		context_open(&context);
+		hwf_options(&options, 4096);
+		options.label = "a/b";
+		EXPECT(fsimg_writer_new_variant(context.ctx, &fsimg_hfsplus_write_format,
+		    &fsimg_hfsplus_write_format.variants[variant], &options,
+		    &writer, NULL) == FSIMG_EINVAL);
+		fsimg_writer_free(writer);
+
+		fsimg_ctx_free(context.ctx);
+
+		named("real label colon round trip variant=%u", variant);
+		options.label = "a:b";
+		hwf_open(&f, variant, &options, 64 * 1024 * 1024, -1, false);
+		REQUIRE(hwf_emit(&f, &image, NULL) == FSIMG_OK);
+		REQUIRE(hwf_io(&f, &image, &io) == FSIMG_OK);
+		fsimg_read_options_init(&read_options);
+		read_options.format = variant ? "hfsx" : "hfsplus";
+		REQUIRE(fsimg_reader_open(f.ctx, io, &read_options, &reader, NULL) == FSIMG_OK);
+		REQUIRE(fsimg_reader_get_info(reader, &volume, NULL) == FSIMG_OK);
+		EXPECT(strcmp(volume.label, "a:b") == 0);
+		fsimg_reader_free(reader);
+		fsimg_io_free(io);
+		free(image.bytes);
+		hwf_close(&f);
+	}
+}
+
+static void
+test_real_volume_serial_accepted_and_ignored(void)
+{
+	for (unsigned variant = 0; variant < 2; variant++) {
+		fsimg_write_options_t options;
+		hwf_fixture_t f;
+		hwf_image_t baseline = { 0 }, with_serial = { 0 };
+
+		named("real volume serial accepted and ignored variant=%u", variant);
+		hwf_options(&options, 4096);
+		options.volume_serial = 0;
+		hwf_open(&f, variant, &options, 64 * 1024 * 1024, -1, false);
+		REQUIRE(hwf_emit(&f, &baseline, NULL) == FSIMG_OK);
+		hwf_close(&f);
+
+		options.volume_serial = 1;
+		hwf_open(&f, variant, &options, 64 * 1024 * 1024, -1, false);
+		REQUIRE(hwf_emit(&f, &with_serial, NULL) == FSIMG_OK);
+		REQUIRE(with_serial.length == baseline.length);
+		EXPECT(memcmp(with_serial.bytes, baseline.bytes,
+		    (size_t)baseline.length) == 0);
+		free(with_serial.bytes);
+		free(baseline.bytes);
+		hwf_close(&f);
+	}
+}
+
+static fsimg_status_t
+long_link_read(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
+    uint64_t offset FSIMG_UNUSED, void *buffer, size_t length, size_t *done,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	memset(buffer, 't', length);
+	*done = length;
+	return (FSIMG_OK);
+}
+
+static void
+test_real_link_target_boundary(void)
+{
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (unsigned length = 1023; length <= 1024; length++) {
+			fixture_t f;
+			fsimg_write_options_t options;
+			fsimg_source_ops_t ops;
+			fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER };
+			fsimg_entry_t entry = { .path = "/link", .kind = FSIMG_ENTRY_SYMLINK,
+			    .size = length };
+			const fsimg_plan_t *plan;
+
+			named("real link target variant=%u bytes=%u", variant, length);
+			hwf_options(&options, 4096);
+			context_open(&f);
+			REQUIRE(fsimg_writer_new_variant(f.ctx, &fsimg_hfsplus_write_format,
+			    &fsimg_hfsplus_write_format.variants[variant], &options,
+			    &f.writer, NULL) == FSIMG_OK);
+			fsimg_source_ops_init(&ops);
+			ops.read_at = long_link_read;
+			ops.validate = provider_validate;
+			REQUIRE(fsimg_writer_set_sources(f.writer, &ops, NULL, NULL) == FSIMG_OK);
+			REQUIRE(fsimg_writer_add(f.writer, &entry, &source, NULL) == FSIMG_OK);
+			/* The design accepts 1..1023 bytes; the reader must have room
+			 * for a terminating NUL in its 1024-byte target buffer.
+			 */
+			EXPECT(fsimg_writer_plan(f.writer, &plan, NULL) ==
+			    (length == 1023 ? FSIMG_OK : FSIMG_EUNSUPPORTED));
+			fixture_close(&f);
+		}
+	}
+}
+
+static void
+test_raw_check_rejects_missing_root_child(void)
+{
+	fixture_t f;
+	fsimg_session_t session;
+	fsimg_stream_t *records, *levels[HFSPLUS_BTREE_DEPTH_MAX] = { NULL };
+	hfsplus_tree_shape_t shape;
+	node_capture_t capture = { .node_bytes = 4096 };
+	unsigned char raw[HFSPLUS_WRITE_RECORD_MAX], node[4096], name[] = { 0, 'a' };
+	hfsplus_write_record_t record = { .type = HFSPLUS_RECORD_FILE,
+	    .units = 1, .key_bytes = 2, .key = name, .name = name };
+	hfsplus_tree_emit_t emit = { .session = &session, .shape = &shape,
+	    .levels = levels, .node = node, .leaf_data = leaf_pattern,
+	    .write = capture_node, .argument = &capture };
+	unsigned char *root;
+	unsigned count, start, end;
+	uint64_t length;
+	pid_t child;
+	int status;
+
+	named("raw checker rejects omitted final root child");
+	context_open(&f);
+	fsimg_session_init(&session, f.ctx, "hfsx", 0);
+	REQUIRE(fsimg_stream_new(&session, sizeof(raw), &records, NULL) == FSIMG_OK);
+	/* Fifteen one-unit files fit in a leaf; the sixteenth requires a
+	 * second leaf and a two-record index root.
+	 */
+	for (unsigned i = 0; i < 16; i++) {
+		size_t bytes;
+
+		record.parent = i + 2;
+		bytes = hfsplus_write_record_encode(&record, raw);
+		REQUIRE(fsimg_stream_append(records, raw, bytes, NULL, NULL) == FSIMG_OK);
+	}
+	REQUIRE(fsimg_stream_seal(records, NULL) == FSIMG_OK);
+	hfsplus_tree_shape_init(&shape, HFSPLUS_TREE_CATALOG, HFSPLUS_COMPARE_BINARY);
+	REQUIRE(hfsplus_tree_pack(&session, records, &shape, levels, NULL) == FSIMG_OK);
+	hfsplus_tree_place(&shape, 0, 4096);
+	REQUIRE(shape.depth == 2 && shape.level_nodes[0] == 2);
+	length = (uint64_t)shape.total_nodes * 4096;
+	capture.bytes = calloc((size_t)length, 1);
+	REQUIRE(capture.bytes != NULL);
+	emit.records = records;
+	REQUIRE(hfsplus_tree_emit(&emit, NULL) == FSIMG_OK);
+	hwc_check_tree(capture.bytes, length);
+	root = capture.bytes + 3 * 4096;
+	count = be16(root + 10);
+	REQUIRE(count == 2);
+	start = be16(root + 4096 - 2 * count);
+	end = be16(root + 4096 - 2 * (count + 1));
+
+	fflush(NULL);
+	child = fork();
+	REQUIRE(child >= 0);
+	if (child == 0) {
+		fsimg_store_be16(root + 10, (uint16_t)(count - 1));
+		bzero(root + start, end - start);
+		/* Keep the removed record's start as the free-space offset;
+		 * erase the obsolete offset in the newly freed slack.
+		 */
+		bzero(root + 4096 - 2 * (count + 1), 2);
+		hwc_check_tree(capture.bytes, length);
+		_exit(0);
+	}
+	REQUIRE(waitpid(child, &status, 0) == child);
+	EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 1);
+	free(capture.bytes);
+	for (unsigned level = 0; level < HFSPLUS_BTREE_DEPTH_MAX; level++)
+		fsimg_stream_free(levels[level]);
+	fsimg_stream_free(records);
+	fsimg_ctx_free(f.ctx);
+}
+
 int
 main(void)
 {
+	test_pack_and_emit_reject_malformed_level_records();
+	test_leaf_decoder_rejects_256_units();
+	test_volume_validate_limit();
+	test_plan_accepts_uint32_max_blocks();
+	test_plan_refuses_catalog_record_count_overflow();
+	test_real_label_mapping();
+	test_real_volume_serial_accepted_and_ignored();
+	test_real_link_target_boundary();
+	test_raw_check_rejects_missing_root_child();
 	test_real_capabilities();
 	test_emission_matrix();
 	test_reserves_tail_blocks_when_alternate_is_past_allocation_domain();

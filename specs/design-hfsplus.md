@@ -1383,7 +1383,8 @@ The native cycle on a catalog of 4 GiB closes it; if that cycle cannot run the
 saturation stands, because `clumpSize` is a hint that readers ignore and the
 alternative of a wrapped value would state a smaller clump than the fork.
 `nextCatalogID`
-is one more than the largest node ID. Finder information is zero except
+is one more than the largest node ID an entry holds, 16 when only the root
+exists. Finder information is zero except
 words 6 and 7, the volume identifier: the first eight bytes of
 `volume_uuid`, zero when no identifier is given. The writer creates no
 case-insensitive HFSX volume: `hfsplus` already is one.
@@ -1502,7 +1503,9 @@ U+2400 exchange lets an image path spell it: four U+2400 then
 `HFS+ Private Data` would store its exact units. The driver keeps the four
 names in one table that the reader recognizes them by and the writer refuses
 them by, so the two lists cannot drift.
-The label follows the same encoding and limit; a NULL or empty label from
+The label follows the same encoding and limit, and refuses `/`: a path
+component cannot hold one, while a label would store it as itself and read it
+back as `:`, a different name. A NULL or empty label from
 a library caller selects `untitled`, the native formatter's default, while
 the CLI passes its own default `FSIMG`.
 
@@ -1528,7 +1531,7 @@ with `FSIMG_EUNSUPPORTED`.
 | `allocation_unit_bytes` | 0 or a power of two from 512 to 65536; 0 selects 4096 |
 | `sector_bytes` | 0 or 512 |
 | `volume_bytes` | 0 or a multiple of 512 holding the plan, with `floor(V / B) <= 2^32 - 1` |
-| `label` | At most 255 units after encoding |
+| `label` | At most 255 units after encoding; no `/`, which reads back as `:` |
 | `volume_uuid` | Its first eight bytes are the volume identifier |
 | `epoch` | Within 1904 to 2040 in reproducible mode |
 

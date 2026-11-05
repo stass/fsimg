@@ -35,14 +35,11 @@ static fsimg_status_t hfsplus_probe(const unsigned char *, size_t, uint64_t,
 	    FSIMG_ENTRY_SOCKET)
 /* 512 to 65536 bytes, every power of two. */
 #define HFSPLUS_WRITE_BLOCK_SIZES	UINT32_C(0x0001fe00)
-/* A fork or volume of 2^32 - 1 blocks of the writer's largest size. */
-#define HFSPLUS_WRITE_VOLUME_MAX	((UINT64_C(0xffffffff)) << 16)
-
 _Static_assert(HFSPLUS_WRITE_BLOCK_MIN == 1u << 9 &&
     HFSPLUS_WRITE_BLOCK_MAX == 1u << 16,
     "the writer's capability record states its block size range");
 
-#define HFSPLUS_VARIANT_INFO(variant_name, kinds)			\
+#define HFSPLUS_VARIANT_INFO(variant_name, kinds, bytes_max)		\
 	.name = (variant_name),						\
 	.entry_kinds = (kinds),						\
 	.metadata_fields = FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
@@ -50,8 +47,8 @@ _Static_assert(HFSPLUS_WRITE_BLOCK_MIN == 1u << 9 &&
 	    FSIMG_META_OWNER | FSIMG_META_MODE,				\
 	.sector_size_mask = 1u << 9,					\
 	.allocation_unit_size_mask = HFSPLUS_BLOCK_SIZES,		\
-	.max_file_bytes = HFSPLUS_VOLUME_MAX,				\
-	.max_volume_bytes = HFSPLUS_VOLUME_MAX,				\
+	.max_file_bytes = (bytes_max),					\
+	.max_volume_bytes = (bytes_max),				\
 	.max_name_utf16_units = HFSPLUS_NAME_UNITS_MAX,			\
 	.max_label_bytes = HFSPLUS_LABEL_BYTES,				\
 	.max_link_target_bytes = HFSPLUS_LINK_TARGET_MAX
@@ -59,14 +56,16 @@ _Static_assert(HFSPLUS_WRITE_BLOCK_MIN == 1u << 9 &&
 static const fsimg_format_variant_t hfsplus_variants[] = {
 	[HFSPLUS_VARIANT_PLUS] = {
 		.info = {
-			HFSPLUS_VARIANT_INFO("hfsplus", HFSPLUS_READ_KINDS),
+			HFSPLUS_VARIANT_INFO("hfsplus", HFSPLUS_READ_KINDS,
+			    HFSPLUS_VOLUME_MAX),
 			.profile = "HFS Plus"
 		},
 		.id = HFSPLUS_VARIANT_PLUS
 	},
 	[HFSPLUS_VARIANT_X] = {
 		.info = {
-			HFSPLUS_VARIANT_INFO("hfsx", HFSPLUS_READ_KINDS),
+			HFSPLUS_VARIANT_INFO("hfsx", HFSPLUS_READ_KINDS,
+			    HFSPLUS_VOLUME_MAX),
 			.profile = "HFSX case-sensitive"
 		},
 		.id = HFSPLUS_VARIANT_X
@@ -86,7 +85,8 @@ const fsimg_format_t fsimg_hfsplus_format = {
  * writer has its own descriptor, reachable only by code that names it.
  */
 #define HFSPLUS_WRITE_VARIANT_INFO(variant_name)			\
-	HFSPLUS_VARIANT_INFO(variant_name, HFSPLUS_WRITE_KINDS),	\
+	HFSPLUS_VARIANT_INFO(variant_name, HFSPLUS_WRITE_KINDS,		\
+	    HFSPLUS_WRITE_VOLUME_MAX),					\
 	.write_allocation_unit_size_mask = HFSPLUS_WRITE_BLOCK_SIZES,	\
 	.write_settings = FSIMG_SETTING_VOLUME_UUID
 

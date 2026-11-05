@@ -27,6 +27,7 @@ typedef struct raw_check {
 	uint32_t tail;
 	uint32_t next;
 	unsigned variant;
+	const hwf_fixture_t *fixture;
 } raw_check_t;
 
 typedef struct primary {
@@ -112,17 +113,52 @@ offset_at(const unsigned char *node, unsigned size, unsigned index)
 	return (u16(node + size - 2 * (index + 1)));
 }
 
-/* Fixtures use lowercase ASCII plus decomposed e-acute. Binary UTF-16 order
- * equals folded order on precisely this alphabet; no Unicode table is used.
+/* Fixture indices in catalog order, derived from the design's UTF-16 rules.
+ * Folded alpha < Zeta < long z; binary Zeta precedes lowercase alpha.
+ * Greek alpha folds before capital omega; binary capital omega comes first.
+ * The colon is stored as slash. U+2400 is stored as zero: folded zero ranks
+ * last, binary zero first. The emoji's D83D DE00 precedes fullwidth A (FF21,
+ * folded FF41) in both orders: comparison is by units, not Unicode scalars.
+ * U+200C is ignored when folding, so a<U+200C>x precedes ay; binary reverses
+ * that pair. The other names retain their lowercase ASCII order.
  */
+static const unsigned root_order[2][HWF_COUNT - 3] = {
+	{ 18, 12, 5, 15, 22, 23, 8, 0, 2, 4, 7, 9, 10, 6,
+	    14, 13, 17, 16, 20, 21, 19 },
+	{ 19, 18, 14, 12, 5, 15, 23, 22, 8, 0, 2, 4, 7, 9,
+	    10, 6, 13, 16, 17, 20, 21 }
+};
+
+static void name_text(const unsigned char *, unsigned, char *, size_t);
+
+static unsigned
+root_position(raw_check_t *c, const unsigned char *key)
+{
+	char name[768];
+
+	if (u16(key + 6) == 0)
+		return (0); /* The root thread precedes all its children. */
+	name_text(key + 8, u16(key + 6), name, sizeof(name));
+	for (unsigned i = 0; i < HWF_COUNT - 3; i++)
+		if (strcmp(name, c->fixture->entries[root_order[c->variant][i]].listed + 1) == 0)
+			return (i + 1);
+	CHECK(false);
+	return (0);
+}
+
 static int
-key_compare(const unsigned char *a, const unsigned char *b)
+key_compare(raw_check_t *c, const unsigned char *a, const unsigned char *b)
 {
 	uint32_t ap = u32(a + 2), bp = u32(b + 2);
 	unsigned an = u16(a + 6), bn = u16(b + 6);
 
 	if (ap != bp)
 		return (ap < bp ? -1 : 1);
+	if (ap == 2 && c->variant == 0) {
+		unsigned ar = root_position(c, a), br = root_position(c, b);
+
+		return (ar < br ? -1 : ar != br);
+	}
 	for (unsigned i = 0; i < an && i < bn; i++) {
 		unsigned ac = u16(a + 8 + 2 * i);
 		unsigned bc = u16(b + 8 + 2 * i);
@@ -138,7 +174,7 @@ tree(raw_check_t *c, const unsigned char *base, uint64_t length,
     unsigned size, unsigned maxkey, unsigned compare, unsigned flags)
 {
 	const unsigned char *h = base + 14, *previous[17] = { NULL };
-	uint32_t last[17] = { 0 }, first[17] = { 0 };
+	uint32_t last[17] = { 0 }, first[17] = { 0 }, referenced[17] = { 0 };
 	uint32_t total = u32(h + 22), free_nodes = u32(h + 26);
 	uint32_t used = total - free_nodes, leaf_records = 0;
 	uint32_t first_map = u32(base), maps = 0;
@@ -229,7 +265,7 @@ tree(raw_check_t *c, const unsigned char *base, uint64_t length,
 			CHECK(start < stop && start % 2 == 0 && stop % 2 == 0);
 			CHECK(keybytes <= stop - start && keybytes == 8 + 2 * u16(key + 6));
 			if (previous[height] != NULL)
-				CHECK(key_compare(previous[height], key) < 0);
+				CHECK(key_compare(c, previous[height], key) < 0);
 			previous[height] = key;
 			own(c, key, keybytes);
 			if (height == 1) {
@@ -240,6 +276,9 @@ tree(raw_check_t *c, const unsigned char *base, uint64_t length,
 
 				CHECK(stop - start == keybytes + 4);
 				CHECK(child > 0 && child < n);
+				/* Nodes are emitted consecutively within each level. */
+				CHECK(child == first[height - 1] + referenced[height - 1]);
+				referenced[height - 1]++;
 				cn = base + (uint64_t)child * size;
 				CHECK(cn[9] + 1 == height);
 				CHECK(u16(cn + 14) + 2 == keybytes);
@@ -249,13 +288,30 @@ tree(raw_check_t *c, const unsigned char *base, uint64_t length,
 		}
 		zero(node + end, size - 2 * (records + 1) - end);
 	}
-	for (unsigned height = 1; height <= highest; height++)
+	for (unsigned height = 1; height <= highest; height++) {
 		CHECK(u32(base + (uint64_t)last[height] * size) == 0);
+		if (height < highest)
+			CHECK(referenced[height] == last[height] - first[height] + 1);
+	}
 	CHECK(leaf_records == u32(h + 6));
 	CHECK(u16(h) == highest);
 	CHECK(u32(h + 2) == (highest == 0 ? 0 : first[highest]));
 	CHECK(first[highest] == last[highest]);
 	CHECK(u32(h + 10) == first[1] && u32(h + 14) == last[1]);
+}
+
+/* A standalone binary catalog lets mutation tests use the smallest index
+ * shape without requiring the volume fixture's complete namespace.
+ */
+void
+hwc_check_tree(const unsigned char *bytes, uint64_t length)
+{
+	raw_check_t c = { .bytes = bytes, .length = length, .variant = 1 };
+
+	c.owned = calloc((size_t)length, 1);
+	CHECK(c.owned != NULL);
+	tree(&c, bytes, length, 4096, 516, 0xbc, 6);
+	free(c.owned);
 }
 
 static void
@@ -266,11 +322,33 @@ name_text(const unsigned char *p, unsigned units, char *out, size_t capacity)
 	for (unsigned i = 0; i < units; i++) {
 		unsigned ch = u16(p + 2 * i);
 
-		CHECK(n + 3 < capacity && ch < 0x800);
+		CHECK(n + 4 < capacity);
+		if (ch == 0)
+			ch = 0x2400;
+		else if (ch == '/')
+			ch = ':';
+		else if (ch >= 0xd800 && ch <= 0xdbff) {
+			unsigned low;
+
+			CHECK(i + 1 < units);
+			low = u16(p + 2 * ++i);
+			CHECK(low >= 0xdc00 && low <= 0xdfff);
+			ch = 0x10000 + ((ch - 0xd800) << 10) + low - 0xdc00;
+		}
 		if (ch < 128)
 			out[n++] = (char)ch;
 		else {
-			out[n++] = (char)(0xc0 | ch >> 6);
+			if (ch >= 0x10000) {
+				out[n++] = (char)(0xf0 | ch >> 18);
+				out[n++] = (char)(0x80 | ((ch >> 12) & 63));
+			} else if (ch >= 0x800)
+				out[n++] = (char)(0xe0 | ch >> 12);
+			else {
+				out[n++] = (char)(0xc0 | ch >> 6);
+				out[n++] = (char)(0x80 | (ch & 63));
+				continue;
+			}
+			out[n++] = (char)(0x80 | ((ch >> 6) & 63));
 			out[n++] = (char)(0x80 | (ch & 63));
 		}
 	}
@@ -283,7 +361,7 @@ catalog(raw_check_t *c, const unsigned char *base, const hwf_fixture_t *f,
 {
 	primary_t prim[HWF_COUNT + 1] = { 0 };
 	primary_t threads[HWF_COUNT + 1] = { 0 };
-	unsigned count = 0, tcount = 0, files = 0, folders = 0;
+	unsigned count = 0, tcount = 0, files = 0, folders = 0, roots = 0;
 	uint32_t node = u32(base + 14 + 10), maxid = 2;
 	bool seen[HWF_COUNT] = { false };
 
@@ -299,6 +377,10 @@ catalog(raw_check_t *c, const unsigned char *base, const hwf_fixture_t *f,
 			if (type <= 2) {
 				CHECK(count < HWF_COUNT + 1);
 				CHECK(p + end - d == (type == 1 ? 88 : 248));
+				if (u32(k + 2) == 2) {
+					roots++;
+					CHECK(root_position(c, k) == roots);
+				}
 				prim[count++] = (primary_t){ u32(d + 8),
 				    u32(k + 2), k + 8, u16(k + 6), d };
 			} else {
@@ -442,7 +524,7 @@ hwc_check(const hwf_image_t *image, const hwf_fixture_t *fixture,
     const fsimg_write_options_t *options, unsigned variant, bool empty)
 {
 	raw_check_t c = { .bytes = image->bytes, .length = image->length,
-	    .variant = variant };
+	    .variant = variant, .fixture = fixture };
 	const unsigned char *h = c.bytes + 1024, *bitmap, *extents, *attrs, *cat;
 	uint64_t bitmap_length;
 	uint32_t clump;

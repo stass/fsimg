@@ -44,6 +44,23 @@
 #define THREAD_UNITS			8u
 #define THREAD_NAME			10u
 /* The header's fields the writer sets beyond zero. */
+#define HEADER_SIGNATURE		0u
+#define HEADER_VERSION			2u
+#define HEADER_ATTRIBUTES		4u
+#define HEADER_LAST_MOUNTED		8u
+#define HEADER_CREATE_DATE		16u
+#define HEADER_MODIFY_DATE		20u
+#define HEADER_CHECKED_DATE		28u
+#define HEADER_FILE_COUNT		32u
+#define HEADER_FOLDER_COUNT		36u
+#define HEADER_BLOCK_SIZE		40u
+#define HEADER_TOTAL_BLOCKS		44u
+#define HEADER_FREE_BLOCKS		48u
+#define HEADER_NEXT_ALLOCATION		52u
+#define HEADER_RSRC_CLUMP		56u
+#define HEADER_DATA_CLUMP		60u
+#define HEADER_NEXT_CATALOG_ID		64u
+#define HEADER_ENCODINGS_BITMAP		72u
 #define HEADER_FINDER_IDENTIFIER	104u
 #define HEADER_ALLOCATION_FILE		112u
 #define HEADER_EXTENTS_FILE		192u
@@ -338,26 +355,28 @@ emit_headers(hfsplus_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	bzero(raw, sizeof(raw));
-	fsimg_store_be16(raw, x ? HFSPLUS_SIGNATURE_X : HFSPLUS_SIGNATURE_PLUS);
-	fsimg_store_be16(raw + 2, x ? HFSPLUS_VERSION_X : HFSPLUS_VERSION_PLUS);
-	fsimg_store_be32(raw + 4, WRITE_ATTRIBUTES);
-	fsimg_store_be32(raw + 8, WRITE_LAST_MOUNTED);
-	fsimg_store_be32(raw + 16, plan->format_time);
-	fsimg_store_be32(raw + 20, plan->format_time);
-	fsimg_store_be32(raw + 28, plan->format_time);
-	fsimg_store_be32(raw + 32, plan->file_count);
-	fsimg_store_be32(raw + 36, plan->folder_count);
-	fsimg_store_be32(raw + 40, block);
-	fsimg_store_be32(raw + 44, plan->total_blocks);
-	fsimg_store_be32(raw + 48,
+	fsimg_store_be16(raw + HEADER_SIGNATURE,
+	    x ? HFSPLUS_SIGNATURE_X : HFSPLUS_SIGNATURE_PLUS);
+	fsimg_store_be16(raw + HEADER_VERSION,
+	    x ? HFSPLUS_VERSION_X : HFSPLUS_VERSION_PLUS);
+	fsimg_store_be32(raw + HEADER_ATTRIBUTES, WRITE_ATTRIBUTES);
+	fsimg_store_be32(raw + HEADER_LAST_MOUNTED, WRITE_LAST_MOUNTED);
+	fsimg_store_be32(raw + HEADER_CREATE_DATE, plan->format_time);
+	fsimg_store_be32(raw + HEADER_MODIFY_DATE, plan->format_time);
+	fsimg_store_be32(raw + HEADER_CHECKED_DATE, plan->format_time);
+	fsimg_store_be32(raw + HEADER_FILE_COUNT, plan->file_count);
+	fsimg_store_be32(raw + HEADER_FOLDER_COUNT, plan->folder_count);
+	fsimg_store_be32(raw + HEADER_BLOCK_SIZE, block);
+	fsimg_store_be32(raw + HEADER_TOTAL_BLOCKS, plan->total_blocks);
+	fsimg_store_be32(raw + HEADER_FREE_BLOCKS,
 	    plan->total_blocks - plan->allocated - plan->tail_blocks);
-	fsimg_store_be32(raw + 52, plan->allocated);
+	fsimg_store_be32(raw + HEADER_NEXT_ALLOCATION, plan->allocated);
 	data_clump = block < WRITE_DATA_CLUMP_MAX / 16 ? 16 * block :
 	    WRITE_DATA_CLUMP_MAX;
-	fsimg_store_be32(raw + 56, data_clump);
-	fsimg_store_be32(raw + 60, data_clump);
-	fsimg_store_be32(raw + 64, plan->next_catalog_id);
-	fsimg_store_be64(raw + 72, WRITE_ENCODINGS_BITMAP);
+	fsimg_store_be32(raw + HEADER_RSRC_CLUMP, data_clump);
+	fsimg_store_be32(raw + HEADER_DATA_CLUMP, data_clump);
+	fsimg_store_be32(raw + HEADER_NEXT_CATALOG_ID, plan->next_catalog_id);
+	fsimg_store_be64(raw + HEADER_ENCODINGS_BITMAP, WRITE_ENCODINGS_BITMAP);
 	bcopy(options->volume_uuid, raw + HEADER_FINDER_IDENTIFIER,
 	    VOLUME_IDENTIFIER_BYTES);
 	bitmap_bytes = plan->bitmap_blocks * block;

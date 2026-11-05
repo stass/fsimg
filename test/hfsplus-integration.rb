@@ -14,9 +14,14 @@ end
 module HfsPlusIntegration
   class Error < FsimgSpec::Error; end
 
+  GENERATOR_TIMEOUT = 30 * 60
   BLOCKS = [512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536].freeze
   VARIANTS = %w[hfsplus hfsx].freeze
   LABEL = "Writer volume".freeze
+  ROOT_NAMES = ["dir", "empty", "equal", "above", "two", "hello", "cafe\u0301",
+                "link", "pipe", "a" * 200, "z" * 200, "Zeta", "alpha",
+                "\u03a9", "\u03b1", ":", "\u2400", "\u{1f600}", "\uff21",
+                "a\u200cx", "ay"].freeze
   HELLO = (0...5).map { (1 + (8 * 17 + _1 * 13) % 251).chr }.join.b.freeze
   # fsck findings sometimes start with "**" too. Enumerate the progress
   # phases, rather than accepting all lines with that prefix.
@@ -44,19 +49,22 @@ module HfsPlusIntegration
        .find { File.file?(_1) && File.executable?(_1) }
   end
 
-  def command(*argv)
+  def command(*argv, timeout: 30)
     out, err, status = Open3.popen3({ "LC_ALL" => "C", "TZ" => "UTC" },
                                   [argv.first, argv.first], *argv.drop(1), pgroup: true) do |input, output, errors, child|
       input.close
       stdout = Thread.new { output.read.b }
       stderr = Thread.new { errors.read.b }
       begin
-        status = Timeout.timeout(30) { child.value }
-        [stdout.value, stderr.value, status]
+        Timeout.timeout(timeout) { [stdout.value, stderr.value, child.value] }
       rescue Timeout::Error
-        Process.kill("KILL", -child.pid)
+        begin
+          Process.kill("KILL", -child.pid)
+        rescue Errno::ESRCH
+          nil
+        end
         child.value
-        raise Error, "#{argv.join(' ')}: timed out after 30 seconds"
+        raise Error, "#{argv.join(' ')}: timed out after #{timeout} seconds"
       ensure
         stdout.join
         stderr.join
@@ -85,12 +93,14 @@ module HfsPlusIntegration
         %w[empty-min tree-min].map { [variant, 0, _1, nil] } +
         [[variant, 4096, "tree", (4 << 20) + 512],
          [variant, 4096, "tree", (4 << 20) + 2048],
-         [variant, 512, "tree", 4 << 20]]
+         [variant, 512, "tree", 4 << 20],
+         [variant, 4096, "nearlyfull-small", nil]]
     end
     return ordinary unless large
 
     ordinary + VARIANTS.flat_map do |variant|
       [[variant, 4096, "tree", 1 << 30], [variant, 8192, "tree", 1 << 30],
+       [variant, 4096, "mapnodes-small", nil],
        [variant, 4096, "mapnodes", nil], [variant, 4096, "nearlyfull", nil]]
     end
   end
@@ -102,7 +112,7 @@ module HfsPlusIntegration
     attachments = HfsPlusCapture::Attachments.new(log)
     begin
       attachments.with(image, readonly: true) do |device|
-        out, ok = log.run("fsck_hfs", "-fn", device.sub("/dev/", "/dev/r"))
+        out, ok = log.run("fsck_hfs", "-fn", device.sub("/dev/", "/dev/r"), timeout: HfsPlusCapture::FSCK_TIMEOUT)
         if oracle_log
           File.open(oracle_log, "ab") do |file|
             file.write("\nIMAGE #{image}\n")
@@ -122,14 +132,14 @@ module HfsPlusIntegration
   end
 
   def hfsdump_check(tool:, image:, shape:)
-    if %w[empty empty-min mapnodes].include?(shape)
+    if %w[empty empty-min mapnodes mapnodes-small].include?(shape)
       # hfsdump read / hangs on empty folders, including native newfs_hfs
       # volumes. stat avoids that oracle quirk and still verifies the root.
       root = command(tool, image, "stat", "/")
       unless root.match?(/^type: folder\r?$/) && root.match?(/^cnid: 2\r?$/)
         raise Error, "hfsdump root is not a folder with cnid 2"
       end
-      if shape == "mapnodes"
+      if %w[mapnodes mapnodes-small].include?(shape)
         # hwf_add_mapnodes emits eight digits followed by 232 'n' bytes.
         path = "/00000000#{'n' * 232}"
         raise Error, "hfsdump synthetic file payload differs" unless command(tool, image, "read", path).empty?
@@ -139,7 +149,12 @@ module HfsPlusIntegration
 
     listing = command(tool, image, "read", "/")
 
-    raise Error, "hfsdump listing omits hello" unless listing.include?("hello")
+    # hfsdump maps stored slash to colon. puts truncates the one-unit NUL
+    # name to an empty line; that line represents U+2400 in path spelling.
+    names = listing.force_encoding("UTF-8").lines.map { _1.chomp.empty? ? "\u2400" : _1.chomp }
+    ROOT_NAMES.each do |name|
+      raise Error, "hfsdump listing omits #{name.inspect}" unless names.include?(name)
+    end
     raise Error, "hfsdump hello payload differs" unless command(tool, image, "read", "/hello") == HELLO
   end
 
@@ -148,6 +163,17 @@ module HfsPlusIntegration
     listing = command("fls", image)
     return if empty
 
+    names = listing.force_encoding("UTF-8").lines.filter_map { _1.split(":\t", 2)[1]&.strip }
+    ROOT_NAMES.each do |name|
+      # fls versions expose stored slash/NUL or their printable replacement
+      # '^'; accept those spellings only for the two mapped catalog names.
+      displayed = case name
+                  when ":" then [":", "/", "^"]
+                  when "\u2400" then ["\u2400", "^", ""]
+                  else [name]
+                  end
+      raise Error, "fls listing omits #{name.inspect}" unless displayed.any? { names.include?(_1) }
+    end
     inode = listing.lines.filter_map { _1[/\Ar\/r\s+([^:]+):\s+hello\s*\z/, 1] }.first
     raise Error, "fls listing omits hello" unless inode
     raise Error, "icat hello payload differs" unless command("icat", image, inode) == HELLO
@@ -159,6 +185,9 @@ module HfsPlusIntegration
       catalog_block = file.read(4).unpack1("N")
       file.seek(catalog_block * 4096 + 14 + 22)
       total, free = file.read(8).unpack("N2")
+      file.seek(catalog_block * 4096)
+      map_node = file.read(4).unpack1("N")
+      raise Error, "mapnodes fixture has no map node" if map_node.zero?
       raise Error, "mapnodes fixture has only #{total - free} used nodes" unless total - free > 30_720
     end
   end
@@ -172,17 +201,18 @@ module HfsPlusIntegration
   end
 
   def generate(generator:, image:, variant:, block:, shape:, size:, directory:)
-    if shape == "nearlyfull"
+    if %w[nearlyfull nearlyfull-small].include?(shape)
       probe = File.join(directory, "size-probe.img")
       command(generator, probe, variant, block.to_s, "tree")
       size = File.size(probe) + 2 * block
+      size = [size, 4 << 20].max if shape == "nearlyfull-small"
       File.unlink(probe)
     end
     args = [generator, image, variant, block.to_s, shape]
     args << size.to_s if size
-    command(*args)
-    check_mapnodes(image) if shape == "mapnodes"
-    check_nearlyfull(image) if shape == "nearlyfull"
+    command(*args, timeout: GENERATOR_TIMEOUT)
+    check_mapnodes(image) if %w[mapnodes mapnodes-small].include?(shape)
+    check_nearlyfull(image) if %w[nearlyfull nearlyfull-small].include?(shape)
   end
 
   def image_line(image, name:)
@@ -216,7 +246,7 @@ module HfsPlusIntegration
           checks.each do |oracle, check|
             next unless available.fetch(oracle)
 
-            if oracle == :sleuth && shape == "mapnodes"
+            if oracle == :sleuth && %w[mapnodes mapnodes-small].include?(shape)
               puts "SKIP sleuth #{image}: fsstat is too slow on a catalog of this size"
               next
             end
