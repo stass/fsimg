@@ -380,8 +380,10 @@ inode-table block, and the smallest block count rather than a multiple of
 HFS Plus and HFSX try every block size.
 Explicit settings and the free reserve still hold, ties go to the default
 candidate, and QNX4 and ImageFS volumes are already their smallest.
-An HFS Plus or HFSX volume with no free reserve has no free block, and macOS
-mounts it and refuses to change it.
+An HFS Plus or HFSX volume with no free reserve has no free block, so macOS can
+mount it but not add to it.
+It can remove a stored file only where rounding to a larger block has left the
+catalog free nodes.
 Minimization with a nonzero volume_bytes or a fixed disk fails with
 FSIMG_EINVAL.
 Reproducible mode fixes timestamps, identifiers, ordering and padding.

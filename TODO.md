@@ -103,14 +103,12 @@
   qnxprobe comparisons and head-unit acceptance.
   [Research evidence](docs/qnx4-research.md) owns the native observations.
 
-* [High] **HFS Plus and HFSX** (`lib/formats/hfsplus/`, `lib/codec/`,
-  `lib/read/`): the [format design](specs/design-hfsplus.md) and
-  [driver design](specs/design-hfsplus-driver.md) describe a reader and
-  verifier for native volumes, transparent compression included, and an
-  unjournaled writer registered after native macOS qualification; only the
-  reader of uncompressed and zlib-compressed content is implemented. The [plan](docs/hfsplus-plan.md) orders the stages, from
-  the native evidence corpus to wrapped volumes, and the
-  [work breakdown](docs/todo-hfsplus.md) holds the open items and decisions.
+* [Medium] **HFS Plus and HFSX** (`lib/formats/hfsplus/`, `tools/hfsplus/`): the
+  [format design](specs/design-hfsplus.md) and
+  [driver design](specs/design-hfsplus-driver.md) describe the reader, verifier
+  and writer, all three registered. The [work breakdown](docs/todo-hfsplus.md)
+  holds the open items and decisions, and the
+  [research record](docs/hfsplus-research.md) owns the native evidence.
 
 * [Medium] **UDF reader, verifier and writer** (`lib/formats/udf/`,
   `lib/read/`, `lib/meta/extent.c`, `lib/write/`): the

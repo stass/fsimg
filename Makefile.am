@@ -517,9 +517,9 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/layer_force_test.rb \
 	test/cli/formats_test.rb \
 	test/cli/helpers_test.rb \
+	test/cli/hfsplus_create_test.rb \
 	test/cli/hfsplus_native_test.rb \
 	test/cli/hfsplus_truncated_test.rb \
-	test/cli/hfsplus_create_test.rb \
 	test/cli/hfsplus_verify_test.rb \
 	test/cli/hfsplus_verify_manifest_test.rb \
 	test/hfsplus-verify-expected.tsv \

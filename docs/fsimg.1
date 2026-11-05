@@ -57,7 +57,9 @@ Unless
 .Fl s
 or
 .Fl Fl free-space
-leaves room, it has no free block, and macOS mounts it and refuses to change it.
+leaves room, it has no free block, so macOS can mount it but not add to it.
+It can remove a stored file only where rounding to a larger block has left the
+catalog free nodes.
 An HFS Plus volume inside a classic HFS wrapper is read and verified as that
 embedded volume: the outer HFS volume is not checked, and a wrapped volume whose
 journal has been initialized is refused as not supported.
@@ -448,7 +450,8 @@ The partition holding the volume: slot
 counted from 1; the one GPT partition whose name is
 .Ar text ,
 compared exactly; or the one partition of a type, given as a type name
-(basic, esp, fat12, fat16, fat32, exfat, linux, apfs, hfs, qnx6, qnx4), a GPT
+(basic, esp, fat12, fat16, fat32, exfat, linux, apfs, hfs, hfsplus, hfsx, qnx6,
+qnx4), a GPT
 type GUID or an MBR type byte such as 0x0c.
 On GPT, basic, fat12, fat16, fat32 and exfat all name the basic-data type, so
 each selects any basic-data partition.
@@ -958,6 +961,8 @@ Volume label.
 The default FSIMG applies only to a format with a volume label; a format
 without one is created without a label and rejects
 .Fl L .
+An HFS Plus or HFSX label is at most 255 UTF-16 units after decomposition, with
+no slash, and otherwise follows the format's name rules.
 .It Fl M
 Minimize: choose the geometry settings left open that give the smallest
 volume, instead of the first legal one.
@@ -1006,7 +1011,8 @@ Sector size within the selected profile.
 .It Fl o Ar cluster=bytes
 Allocation-unit size within the selected profile; for QNX6 the block size,
 512, 1024 (the default), 2048 or 4096; for HFS Plus and HFSX the allocation
-block size, a power of two from 512 to 65536; for ImageFS, which addresses bytes,
+block size, a power of two from 512 to 65536, 4096 by default; for ImageFS, which
+addresses bytes,
 1.
 .It Fl o Ar endian=little|big
 QNX6 and ImageFS on-disk byte order; default little.
@@ -1278,7 +1284,8 @@ identifier.
 The partition type: a name from the type list under
 .Sx READING
 or RFC 4122 text.
-Default basic data for FAT and exFAT and the QNX6 Power-Safe type for QNX6;
+Default basic data for FAT and exFAT, the QNX6 Power-Safe type for QNX6 and
+Apple HFS/HFS+ for HFS Plus and HFSX;
 QNX4 has no GPT type and must name one.
 .It Fl o Ar gpt:name=text
 The partition name, at most 36 UTF-16 units; default the type's
@@ -1293,7 +1300,8 @@ The exact disk length, a multiple of the sector size; an MBR disk holds at
 most 2^32 sectors (2 TiB).
 .It Fl o Ar mbr:type=name|0xNN
 The partition type byte; default 0x01 for FAT12, 0x06 for FAT16, 0x0c for
-FAT32, 0x07 for exFAT, 0xb2 for QNX6 and 0x4d for QNX4.
+FAT32, 0x07 for exFAT, 0xb2 for QNX6, 0x4d for QNX4 and 0xaf for HFS Plus and
+HFSX.
 Extended types (0x05, 0x0f and 0x85) and the GPT protective type 0xee are
 refused.
 .It Fl o Ar mbr:active=yes|no
@@ -1523,7 +1531,8 @@ Import accepts regular files, directories and symbolic links, hierarchy,
 content and representable timestamps.
 A symbolic link is recorded with its target, which is never followed; a target
 longer than 1024 bytes fails the import, and planning fails for a target
-longer than the selected format stores, 1023 bytes for QNX4 and QNX6.
+longer than the selected format stores, 1023 bytes for QNX4, QNX6, HFS Plus and
+HFSX.
 The Linux sandbox denies the worker the path-based queries that read a link,
 since they are not confined beneath the source, so a confined Linux import of
 a tree containing one fails as unsupported, naming the link.

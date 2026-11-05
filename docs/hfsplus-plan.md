@@ -204,7 +204,7 @@ stage that consumes it.
 | Index keys equal to their child's first key after native deletions; whether `fsck_hfs` accepts a one-record non-root index node, which greedy packing can produce and which gains a packer rule only if refused | E9, stage 9 | Verifier, writer packer |
 | Names and BSD information on volumes from Mac OS 9 and early Mac OS X | E10 | Reader tables, name rules |
 | Wrapper layout | E11 | Stage 10 |
-| `fsck_hfs` and macOS acceptance of fsimg's choices: `fsim`, the smallest volume, one-node extents and attributes trees, 4096-byte catalog nodes at every size, no private folders | Stage 9 | Writer registration |
+| `fsck_hfs` and macOS acceptance of fsimg's choices: `fsim`, the smallest volume, one-node extents and attributes trees, 4096-byte catalog nodes at every size | Stage 9 | Writer registration |
 
 ## Work packages
 

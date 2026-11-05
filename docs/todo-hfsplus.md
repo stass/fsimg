@@ -1,7 +1,6 @@
 # HFS Plus work
 
-Open HFS Plus work, ordered by the [HFS Plus plan](hfsplus-plan.md). The
-[format design](../specs/design-hfsplus.md) and the
+Open HFS Plus work. The [format design](../specs/design-hfsplus.md) and the
 [driver design](../specs/design-hfsplus-driver.md) describe the target; the
 research record [`docs/hfsplus-research.md`](hfsplus-research.md) owns the
 evidence and provenance.
@@ -11,10 +10,6 @@ evidence and provenance.
   check go into the record from the first CI log. A Mac OS 8.1 to 9.2 writer's
   non-ASCII names stay unobserved, and no Finder-made alias or Time Machine
   volume is in the corpus.
-* [High] **Reader, compression and verifier** (`lib/formats/hfsplus/`,
-  `lib/read/`, `lib/codec/`): plan stages 5 to 7. They bring the last of the
-  common changes the format design lists, the imported LZFSE and LZVN
-  decoders.
 * [Medium] **Default output budget on a compressed volume** (`lib/read/reader.c`):
   the default output budget is the slice, and a compressed file charges its
   decoded size, so a volume whose files decode to more than its own length
@@ -39,8 +34,8 @@ evidence and provenance.
   bound under its own design.
 * [Low] **LZFSE chunks in DMG** (`lib/layers/dmg.c`,
   `specs/design-layers.md`): the layer design refuses `ULFO` chunks as
-  unsupported. Once stage 5 imports the LZFSE decoder, the DMG reader can
-  decode them through the same wrapper.
+  unsupported. The DMG reader can decode them with the LZFSE decoder of
+  `lib/codec/` through the same wrapper.
 * [Medium] **LZMA chunks in DMG** (`lib/layers/dmg.c`,
   `specs/design-layers.md`): the layer design refuses LZMA (`ULMO`) chunks as
   unsupported. An `ULMO` chunk is a plain xz stream, which the xz layer's

@@ -1475,8 +1475,8 @@ from 362,128 to 3,620,921 (10.00 times) and metadata passes stay at 2.513.
 Total verification I/O grows from 467,720 to 4,852,450 (10.37 times), including
 scratch I/O across merge levels. Peak charged memory remains 5,363,280 bytes.
 
-`test-hfsplus-write` plans, packs and emits through the unregistered
-`fsimg_hfsplus_write_format`: round trips through the reader and the verifier,
+`test-hfsplus-write` plans, packs and emits through the writer of
+`fsimg_hfsplus_format`: round trips through the reader and the verifier,
 an independent raw checker (`test/hfsplus-write-check.c`) written from the format
 design, byte identity across source order, cache size, scratch path and time
 zone, a scan of every unused byte with the transfer buffer poisoned, and faults at
@@ -1541,7 +1541,18 @@ The script exits 1 for findings or when an explicitly set
 `FSIMG_HFSPLUS_NATIVE` or `FSIMG_HFSPLUS_CORPUS` matches no images. It exits 77
 when no independent oracle completed an agreement: a fsimg baseline row alone
 proves nothing. Otherwise it exits 0. `test/hfsplus-integration.sh` first runs
-the capture and integration harness unit tests without images or device access.
+the capture and integration harness unit tests without images or device access,
+and `test/hfsplus-qualify-test.rb`, whose native case on macOS takes the smallest
+empty volume through the qualification cycle. The whole cycle, which runs on
+macOS with `hdiutil` and only on the images it generates, is:
+
+```
+ruby tools/hfsplus/qualify.rb --generator ./hfsplus-write-gen --fsimg ./fsimg --root DIR
+```
+
+It exits 1 unless every image passes, and leaves `results.json` under `DIR`.
+`--only REGEX` runs part of it, and `--large-catalog`, which takes hours, runs the
+one volume whose catalog passes `2^32` bytes.
 
 The run on Darwin 25.6.0 against the native captures, with the corpus variable
 unset, used hfsdump at the hfsfuse pin `eed780cbe0445893de6f4aa8d74461da00756984` and Sleuth Kit 4.15.0:

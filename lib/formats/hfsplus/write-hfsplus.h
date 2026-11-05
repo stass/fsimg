@@ -250,15 +250,19 @@ uint64_t hfsplus_tree_blocks(const hfsplus_tree_shape_t *, uint32_t);
 void hfsplus_tree_place(hfsplus_tree_shape_t *, uint32_t, uint32_t);
 fsimg_status_t hfsplus_tree_emit(const hfsplus_tree_emit_t *, fsimg_error_t *);
 
-/* The fork's logical size in bytes. A tree fork's clump size is this value
- * in 32 bits: its low bits past 2^32, which is what fsck_hfs asks for.
- */
+/* The fork's logical size in bytes. */
 static inline uint64_t
 hfsplus_tree_logical_bytes(const hfsplus_tree_shape_t *shape)
 {
 	return ((uint64_t)shape->total_nodes * shape->node_bytes);
 }
 
+/* A tree fork's clump size: the low 32 bits of its logical size, as the field
+ * holds no more. That fsck_hfs accepts this is inferred from the values the
+ * research record lists under fsimg writer output, where it refuses only a clump
+ * above those bits. A fork of exactly 2^32 bytes states 0, which no checker or
+ * kernel run has seen.
+ */
 static inline uint32_t
 hfsplus_tree_clump(const hfsplus_tree_shape_t *shape)
 {

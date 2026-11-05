@@ -1381,8 +1381,8 @@ accepts each, as the record's
 read-write mount; 4096-byte catalog nodes at every volume size; a one-node
 extents tree and a one-node attributes tree, which macOS grows when it inserts;
 and the smallest volume minimization yields. A volume with no free reserve has no
-free block and its catalog no free node, so macOS mounts it read-write and refuses
-to change it.
+free block, so macOS mounts it read-write and cannot add to it. It can remove a
+stored file only where rounding to a larger block has left the catalog free nodes.
 
 ### Volume
 
@@ -1406,9 +1406,11 @@ calendar seconds since 1904, the same value as the root folder's
 `rsrcClumpSize` are `min(16 * B, 65536)`, and the bitmap's and each tree
 fork's `clumpSize` and each B-tree header's `clumpSize` are its
 `logicalSize`, the native formatter's values (E1). A tree fork of `2^32` bytes
-or more states the low 32 bits of that size: the field holds no more, and
-`fsck_hfs -fn` refuses a larger value and names this one, as the record's
-[fsimg writer output](../docs/hfsplus-research.md#fsimg-writer-output) holds.
+or more states the low 32 bits of that size, since the field holds no more. That
+`fsck_hfs -fn` accepts this is inferred, from the few values the record's
+[fsimg writer output](../docs/hfsplus-research.md#fsimg-writer-output) lists: it
+refuses a clump above the size's low 32 bits. A fork of exactly `2^32` bytes states
+clump 0, which no checker or kernel run has seen.
 `nextCatalogID`
 is one more than the largest node ID an entry holds, 16 when only the root
 exists. Finder information is zero except
