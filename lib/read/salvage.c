@@ -3,8 +3,6 @@
  */
 #include "config.h"
 
-#include <strings.h>
-
 #include "reader.h"
 
 static fsimg_status_t chain_follow(fsimg_reader_t *,
@@ -213,15 +211,17 @@ fail:
 
 /* Walk the current file's extents from its first byte up to limit. *out is the
  * first logical byte that is not available: the rejection of its lookup, or the
- * end of the content domain or the slice, which can fall inside an extent. It
- * is limit when every byte below limit is available. Each extent is charged,
- * like a read of it, so the walk is bounded and polled.
+ * end of the content domain or the slice, which can fall inside an extent. A
+ * held extent reads no image, so neither end applies to it. *out is limit when
+ * every byte below limit is available. Each extent is charged, like a read of
+ * it, so the walk is bounded and polled.
  */
 static fsimg_status_t
 readable_prefix(fsimg_reader_t *reader, uint64_t limit, uint64_t *out,
     fsimg_error_t *error)
 {
 	const fsimg_extent_domain_t *domain = &reader->content_domain;
+	const unsigned char *held;
 	fsimg_extent_t extent;
 	fsimg_error_t detail;
 	uint64_t offset, end, within, image, available;
@@ -235,9 +235,8 @@ readable_prefix(fsimg_reader_t *reader, uint64_t limit, uint64_t *out,
 		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
 		if (status != FSIMG_OK)
 			return (status);
-		bzero(&extent, sizeof(extent));
 		fsimg_error_clear(&detail);
-		status = reader->ops->resolve(reader, offset, &extent, &detail);
+		status = fsimg_reader_resolve(reader, offset, &extent, &held, &detail);
 		if (status != FSIMG_OK) {
 			if (fsimg_reader_decode_rejected(reader, &detail, status))
 				break;
@@ -245,19 +244,17 @@ readable_prefix(fsimg_reader_t *reader, uint64_t limit, uint64_t *out,
 				*error = detail;
 			return (status);
 		}
-		if (offset < extent.logical_offset ||
-		    offset - extent.logical_offset >= extent.length)
-			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-			    FSIMG_OP_READER, "resolved extent does not contain the offset"));
 		within = offset - extent.logical_offset;
-		if (extent.image_offset > UINT64_MAX - within)
-			break;
-		image = extent.image_offset + within;
-		if (image < domain->offset || image >= end)
-			break;
 		available = extent.length - within;
-		if (available > end - image)
-			available = end - image;
+		if (held == NULL) {
+			if (extent.image_offset > UINT64_MAX - within)
+				break;
+			image = extent.image_offset + within;
+			if (image < domain->offset || image >= end)
+				break;
+			if (available > end - image)
+				available = end - image;
+		}
 		if (available >= limit - offset) {
 			offset = limit;
 			break;

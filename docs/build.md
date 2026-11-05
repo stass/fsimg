@@ -1347,6 +1347,9 @@ offsets, at every truncated length and with hostile framing fields.
 driver's lookups, compares decomposition with a compiled-in subset of the native
 E3 vectors, and checks the exchanges, name admission, comparators and
 namespace keys. Neither reads a capture at run time or writes a file.
+`test-hfsplus-salvage` extracts generated volumes under salvage into a private
+fixture: clean and damaged compressed files, broken overflow walks, truncated
+volumes and a rejected listing, with a plain sibling proving the walk went on.
 
 `test-qnx4` builds QNX4 volumes with its own generator, written from the
 format design with separate offset tables; it shares no code with

@@ -443,6 +443,20 @@ entry's size; HFS Plus has no uninitialized tail. A symbolic link's target
 is read once when its index is built, so a NUL byte fails the first read of
 the target; a listing, which reads no content, does not see it.
 
+Under [salvage](design-salvage.md), the common plan resolves a regular file
+from its first byte. A fork's overflow walk that the decoder rejects keeps the
+extents before the damage, stopped there, whether the fork is a data fork or a
+compressed file's resource fork. A fork failing its descriptor checks has no
+index to keep, and neither has a record or attribute that fails content open's
+checks, so such a file has no recoverable bytes. A compressed file's plan
+decodes it, chunk by chunk: its prefix ends on the 64 KiB boundary before the
+first chunk that a damaged table entry, a stopped or truncated resource fork or
+a failed decode rejects, and no later chunk is recovered. A resource fork's
+headers and an inline payload are checked at content open, so damage there loses
+the whole file. Copying the prefix decodes its chunks again, which charges
+their work a second time. Damage a listing finds, including a compression
+attribute or type it rejects, costs that directory's listing.
+
 ## Verification
 
 Full verification establishes what the walk alone does not: that every tree

@@ -366,6 +366,25 @@ current_file(fsimg_reader_t *reader, uint64_t offset, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+fsimg_status_t
+fsimg_reader_resolve(fsimg_reader_t *reader, uint64_t offset,
+    fsimg_extent_t *extent, const unsigned char **held, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	bzero(extent, sizeof(*extent));
+	status = reader->ops->resolve(reader, offset, extent, error);
+	*held = reader->held;
+	reader->held = NULL;
+	if (status != FSIMG_OK)
+		return (status);
+	if (offset < extent->logical_offset ||
+	    offset - extent->logical_offset >= extent->length)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "resolved extent does not contain the offset"));
+	return (FSIMG_OK);
+}
+
 /* Deliver up to length bytes of the current file at offset, clipped to the
  * file length; an offset at or past it delivers nothing. Bytes below the
  * initialized length are read from the extents the driver resolves, one
@@ -425,22 +444,15 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 			*transferred = length;
 			break;
 		}
-		bzero(&extent, sizeof(extent));
-		status = reader->ops->resolve(reader, offset, &extent, error);
-		held = reader->held;
-		reader->held = NULL;
+		status = fsimg_reader_resolve(reader, offset, &extent, &held, error);
 		if (status != FSIMG_OK)
 			return (status);
-		/* The extent must contain offset; clip it to the request and to
-		 * the initialized length, so slack after either is never read.
-		 * A mapped piece must lie in the content domain whatever the
-		 * driver resolved, so no driver can deliver metadata as content;
-		 * a held piece reads no image, so it has no range to check.
+		/* Clip the extent to the request and to the initialized length, so
+		 * slack after either is never read. A mapped piece must lie in the
+		 * content domain whatever the driver resolved, so no driver can
+		 * deliver metadata as content; a held piece reads no image, so it
+		 * has no range to check.
 		 */
-		if (offset < extent.logical_offset ||
-		    offset - extent.logical_offset >= extent.length)
-			return (fsimg_error_set(error, FSIMG_ESTATE, 0,
-			    FSIMG_OP_READER, "resolved extent does not contain the offset"));
 		within = offset - extent.logical_offset;
 		if (piece > extent.length - within)
 			piece = (size_t)(extent.length - within);

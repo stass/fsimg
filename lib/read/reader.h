@@ -176,7 +176,7 @@ struct fsimg_reader {
 	/* Set by resolve when the extent it returns is held rather than mapped:
 	 * its length bytes are here, in a charged buffer the driver owns, valid
 	 * until the next resolve or the walker's advance, and its image_offset
-	 * means nothing. Delivery takes it into a local and clears it as resolve
+	 * means nothing. fsimg_reader_resolve() takes it and clears it as resolve
 	 * returns, so it is NULL outside that call.
 	 */
 	const unsigned char *held;
@@ -240,6 +240,13 @@ fsimg_status_t fsimg_reader_salvage_index(fsimg_reader_t *,
     const fsimg_salvage_chain_t *, fsimg_extent_index_t **, fsimg_error_t *);
 fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
+/* The one call of the driver's resolve: the extent containing offset, checked to
+ * contain it. *held is what reader->held was set to, NULL for a mapped extent,
+ * and is taken from the reader even when resolve fails, so no later resolve can
+ * see it.
+ */
+fsimg_status_t fsimg_reader_resolve(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
+    const unsigned char **, fsimg_error_t *);
 /* Declare the current entry's content a symbolic-link target the driver
  * decoded at replay from an encoding, such as a sequence of path
  * components, rather than stored verbatim (specs/design-content.md

@@ -37,6 +37,10 @@ shortened in the current entry, so its charge, output size and reads see only
 the prefix, and a garbage size field neither spends the budget nor ends the walk.
 A clean file over the budget is terminal.
 
+An extent a driver holds decoded instead of mapping reads no image, so neither
+the domain nor the slice clips it: every byte of it is available, and damage to
+what it was decoded from is a rejected lookup. Planning such a file decodes it.
+
 A linked cluster allocation keeps each cluster once. A cluster belongs to the
 prefix when its own link reads and validates, its allocation bit included, and
 the chain ends at its first repeat, found after the walk proves a cycle and

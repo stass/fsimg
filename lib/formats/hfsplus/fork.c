@@ -245,6 +245,11 @@ hfsplus_fork_index(fsimg_reader_t *reader, uint32_t file_id, uint8_t fork_type,
 	if (status == FSIMG_OK && walk.appended < walk.total)
 		status = walk_overflow(&walk, file_id, fork_type, &consumed,
 		    error);
+	/* Under salvage the current regular file's walk keeps the extents before
+	 * the damage. A volume's own forks are indexed at open, before salvage
+	 * is enabled, so they stay rejected whole.
+	 */
+	status = fsimg_reader_salvage_keep(reader, walk.index, status, error);
 	if (status != FSIMG_OK) {
 		fsimg_extent_index_free(walk.index);
 		return (status);
