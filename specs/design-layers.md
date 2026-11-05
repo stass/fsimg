@@ -9,7 +9,7 @@ Terms:
 
 * **Volume**: the bytes a filesystem driver reads or writes. Every existing
   driver contract applies to a volume unchanged.
-* **Disk**: the bytes a partition **scheme** (GPT, MBR) describes. A disk
+* **Disk**: the bytes a partition **scheme** (GPT, MBR, APM) describes. A disk
   without a scheme is a bare volume.
 * **Container**: a file format that stores a disk with tables, framing and
   checksums of its own: a disk-image format (DMG/UDIF, fixed VHD, Android
@@ -60,7 +60,7 @@ An image is a stack with three slots in fixed order, each at most once:
 | Slot | Kind | Names |
 | --- | --- | --- |
 | 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`, `hfsplus`, `hfsx`, `apfs`, `udf`, `iso9660`; reserved: `hfs` (classic HFS) |
-| 2 | Scheme | `gpt`, `mbr` |
+| 2 | Scheme | `gpt`, `mbr`, `apm` (read only) |
 | 3 | Container | `dmg`, `vhd`, `simg`, `ifsboot`, `hbcifs` |
 
 The text form is `fs[/scheme][/container]`: the present slots inner to outer,
@@ -330,12 +330,13 @@ area it reserves for boot and partition data, ISO 9660 and UDF with their
 first 32 KiB, never reads that area, so a partition table there cannot
 contest the volume: it is the same disk's second reading. An isohybrid
 image puts its MBR or GPT there so that the file is also a partitioned
-disk. When the step-3 survey holds exactly one scheme claim and one
+disk. When the step-3 survey holds exactly one scheme claim, after the
+[APM rule](#apm) below, and one
 filesystem claim, both matches, and the filesystem is such a format, the
 disk is read as the bare volume, and the image information names the
 scheme (`hybrid_scheme`) so that a caller can tell the user; the CLI prints
-a one-line note naming `-F gpt` or `-F mbr`, which forces the scheme and
-reads the partitions. A corrupt or unsupported claim on either side, a
+a one-line note naming `-F gpt`, `-F mbr` or `-F apm`, which forces the scheme
+and reads the partitions. A corrupt or unsupported claim on either side, a
 second claim of either kind, and every other filesystem paired with a
 scheme stay ambiguous. The table itself is validated only when the forced
 scheme reads it, since the volume does not depend on it. A forced
@@ -433,7 +434,8 @@ counts as a claim.
 ### Partition selection
 
 A scheme yields partitions in table-slot order, numbered from 1 (the first
-GPT entry or MBR slot is partition 1, as `sgdisk` and `/dev/sda1` count).
+GPT entry or MBR slot, or the first APM map entry, is partition 1, as `sgdisk` and
+`/dev/sda1` count).
 Unused slots keep their number so that numbers match other tools. Selecting a
 volume uses one of these selectors:
 
@@ -442,7 +444,7 @@ volume uses one of these selectors:
 | Automatic (default) | The one used partition whose prefix draws a filesystem claim, running the forced filesystem probe when one is given and every filesystem probe otherwise. Corrupt and unsupported claims count, so the eventual open reports the real reason. Zero candidates is "no recognised filesystem in any partition"; several is an error that lists them and requires a selector. |
 | Index `N` | The partition in slot `N`; an unused slot is an error. |
 | Name `TEXT` | GPT only. `TEXT` is validated UTF-8, converted to UTF-16LE code units and compared unit for unit with the entry's name truncated at its first zero unit; no case folding or normalisation. Exactly one entry must match. |
-| Type `NAME` | A name from the [type table](#partition-types) or a literal GUID or MBR type byte. Exactly one used partition must carry that type. |
+| Type `NAME` | A name from the [type table](#partition-types), a literal GUID or MBR type byte, or a literal APM type beginning `Apple_`. Exactly one used partition must carry that type. |
 | Range `offset, length` | A checked slice of the disk. Step 3 is skipped entirely: no scheme probe runs, so a damaged partition table does not block it. The escape hatch for unusual layouts. |
 | Disk | The whole disk, for unwrap, layer verification and raw access. Like Range, it runs no scheme probe. It is a slice like any other, so `fsimg_reader_open()` accepts it; on a partitioned disk the filesystem probes then meet the partition table and report an unrecognised image, which is the honest result. |
 
@@ -462,8 +464,8 @@ Before exposing partitions, common scheme opening checks its chosen LBA
 size against the disk view's immutable optional logical sector size,
 as the [device-input contract](design-device-input.md#raw-device-sectors-and-partition-tables)
 defines. A mismatch is unsupported: GPT's selected 512/4096-byte geometry
-must agree, and the 512-byte MBR profile refuses a raw endpoint with another
-logical sector size. One common image-disk view constructor initializes
+must agree, the 512-byte MBR profile refuses a raw endpoint with another
+logical sector size, and so does APM for its block size. One common image-disk view constructor initializes
 this fact after peeling: a decoded compression/container result uses
 unknown; an undecoded result inherits its input view's value. The image
 owns this ordinary flattened read-only view and releases it before its
@@ -1013,22 +1015,23 @@ read correctly.
 One table serves `type=` on write, the Type selector on read, compose and
 `--info`:
 
-| Name | GPT type GUID | MBR byte | Default GPT name | Meaning |
-| --- | --- | --- | --- | --- |
-| `basic` | `EBD0A0A2-B9E5-4433-87C0-68B6B72699C7` | 0x07 | `Microsoft basic data` | Microsoft basic data (FAT, exFAT, NTFS) |
-| `esp` | `C12A7328-F81F-11D2-BA4B-00A0C93EC93B` | 0xEF | `EFI system partition` | EFI system partition |
-| `fat12`, `fat16`, `fat32` | as `basic` | 0x01, 0x06, 0x0C | as `basic` | FAT by MBR convention; FAT16 may also carry 0x04 (below 32 MiB) or 0x0E (LBA) and FAT32 0x0B, accepted on read |
-| `exfat` | as `basic` | 0x07 | as `basic` | exFAT |
-| `linux` | `0FC63DAF-8483-4772-8E79-3D69D8477DE4` | 0x83 | `Linux filesystem` | Linux filesystem data |
-| `apfs` | `7C3457EF-0000-11AA-AA11-00306543ECAC` | none | `Apple APFS` | APFS container |
-| `hfs` | `48465300-0000-11AA-AA11-00306543ECAC` | 0xAF | `Apple HFS/HFS+` | Apple HFS+ |
-| `hfsplus`, `hfsx` | as `hfs` | 0xAF | as `hfs` | HFS Plus and HFSX by convention |
-| `qnx6` | `CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1` | 0xB2 | `QNX6 Power-Safe` | QNX6 Power-Safe; 0xB1 and 0xB3 accepted on read |
-| `qnx4` | none | 0x4D | none | QNX4 POSIX volume; 0x4E and 0x4F, the secondary and tertiary volumes, accepted on read |
+| Name | GPT type GUID | MBR byte | APM type | Default GPT name | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `basic` | `EBD0A0A2-B9E5-4433-87C0-68B6B72699C7` | 0x07 | none | `Microsoft basic data` | Microsoft basic data (FAT, exFAT, NTFS) |
+| `esp` | `C12A7328-F81F-11D2-BA4B-00A0C93EC93B` | 0xEF | none | `EFI system partition` | EFI system partition |
+| `fat12`, `fat16`, `fat32` | as `basic` | 0x01, 0x06, 0x0C | none | as `basic` | FAT by MBR convention; FAT16 may also carry 0x04 (below 32 MiB) or 0x0E (LBA) and FAT32 0x0B, accepted on read |
+| `exfat` | as `basic` | 0x07 | none | as `basic` | exFAT |
+| `linux` | `0FC63DAF-8483-4772-8E79-3D69D8477DE4` | 0x83 | none | `Linux filesystem` | Linux filesystem data |
+| `apfs` | `7C3457EF-0000-11AA-AA11-00306543ECAC` | none | none | `Apple APFS` | APFS container |
+| `hfs` | `48465300-0000-11AA-AA11-00306543ECAC` | 0xAF | `Apple_HFS` | `Apple HFS/HFS+` | Apple HFS+ |
+| `hfsplus`, `hfsx` | as `hfs` | 0xAF | `Apple_HFS`, `Apple_HFSX` respectively | as `hfs` | HFS Plus and HFSX by convention |
+| `qnx6` | `CEF5A9AD-73BC-4601-89F3-CDEEEEE321A1` | 0xB2 | none | `QNX6 Power-Safe` | QNX6 Power-Safe; 0xB1 and 0xB3 accepted on read |
+| `qnx4` | none | 0x4D | none | none | QNX4 POSIX volume; 0x4E and 0x4F, the secondary and tertiary volumes, accepted on read |
 
 The default GPT names are the ones `sgdisk` assigns, so a disk fsimg writes
 lists like one it made. A GPT type that is not in the table is reported as
-its GUID text; an MBR type as `0x` and two hex digits. The QNX values come
+its GUID text; an MBR type as `0x` and two hex digits; an APM entry always as
+its own type text. The QNX values come
 from QNX's own documentation: the QNX6 GUID is the one the `io-blk.so` and
 `diskimage` references assign to Power-Safe partitions, also listed by
 gptfdisk (`0xb300`, "QNX6 Power-Safe") and util-linux ("QNX6 file system");
@@ -1271,6 +1274,7 @@ Layer verification runs before the filesystem's and reports its own scope:
 | hbcifs | The identity, the length tie, the header constants and the exact decode already hold at open; the fields at `0x14` and `0x1c` are unidentified and are reported unverified, so the scope is incomplete |
 | GPT | Protective MBR, primary and backup header CRC32 and entry-array CRC32, primary and backup consistency (disk GUID, usable range, entry arrays byte-identical), partitions within the usable range and non-overlapping |
 | MBR | Signature, entry field sanity, a disk that holds every partition, non-overlapping |
+| APM | Open checks every field the [profile](#apm) reads; nothing remains |
 
 Then the selected volume is verified by `fsimg_verify()` as for a raw image.
 Partitions not selected are not verified, and the report says so. Ordinary
@@ -1521,6 +1525,114 @@ profile. A sector whose bytes also draw a filesystem claim is ambiguous,
 unless the filesystem reserves its system area, as
 [detection](#detection-and-forcing) states.
 
+### APM
+
+Reference: Inside Macintosh: Devices, "Partition Map" (`Block0` and
+`Partition`). The Linux and FreeBSD parsers were consulted as references only.
+APM is read only: the descriptor has no write set, so a create, wrap or
+compose naming it fails as every read-only scheme does.
+
+Layout, big-endian, with `B` the block size. Block 0 holds the driver
+descriptor map (DDM): signature `ER` at 0, `sbBlkSize` (16 bits) at 2,
+`sbBlkCount` (32 bits) at 4. The map's entries occupy the blocks after it,
+entry `N` at byte `N * B`, and only the first 512 bytes of a block are read:
+
+| Offset | Field | Use |
+| --- | --- | --- |
+| 0 | `pmSig`, `PM` | Required in every entry |
+| 4 | `pmMapBlkCnt` | The entry count; the same in every entry |
+| 8 | `pmPyPartStart` | First block of the partition, in units of `B` |
+| 12 | `pmPartBlkCnt` | Length of the partition, in units of `B` |
+| 16 | `pmPartName`, 32 bytes | Reported |
+| 48 | `pmParType`, 32 bytes | Classifies the entry; reported |
+| 80, 84, 88 | `pmLgDataStart`, `pmDataCnt`, `pmPartStatus` | Ignored |
+
+The earlier map format with signature `TS` that Inside Macintosh mentions
+occurs in no specimen and is not read.
+
+**Block size.** `B` comes from where the first entry is, not from `sbBlkSize`
+alone: `PM` at byte 512 makes `B` 512 whatever `sbBlkSize` says; otherwise, when
+`sbBlkSize` is 2048 and `PM` is at byte 2048, `B` is 2048. The specimens
+([table](../docs/hfsplus-research.md#apple-partition-map-specimens)) show three
+shapes. `sbBlkSize` 512 with one map at 512. `sbBlkSize` 2048 with a map at each
+spacing, in Apple's Disc Recording images, whose two maps agree on every
+partition; and in Apple's install discs, whose 512-byte map has ten entries
+with `Apple_Void` at bytes 2048 and 4096 so that a nine-entry 2048-byte map can
+begin at byte 6144. And `sbBlkSize` 2048 with only the 2048-byte map, as xorriso
+writes behind a GPT header at byte 512. Trusting `sbBlkSize` first would read an
+install disc's Void entries as the map's start, with counts of 10 and then 9;
+every shape reads cleanly under the rule, and where both maps exist they place
+the volume at the same byte. `sbBlkSize` values other than 512 and 2048 occur
+nowhere, and other spacings are not probed.
+
+`sbBlkCount` is ignored: the Disc Recording images of Firefox 3.6 through 55 hold
+values that exceed the disk by orders of magnitude, and the Darwin disc's
+describes twice its image. The table therefore declares no disk length.
+
+`pmDataCnt` and `pmLgDataStart` do not narrow the slice, which is the physical
+extent. Inside Macintosh gives them to systems such as A/UX whose file system
+does not start at the partition's first block. Every `Apple_HFS` and
+`Apple_HFSX` entry in the specimens has a logical start of 0 and a data count
+equal to the partition's; they differ only on the map, drivers and free space,
+which are not volumes. `pmPartStatus` is not consulted either: Disc Recording
+leaves it 0 on the map entry, so its valid bit proves nothing.
+
+**Reading.** The probe claims on `ER` at byte 0 and `PM` at the first-entry
+offset above. `ER` alone draws no claim: isohybrid sector 0 starts with those
+bytes as harmless x86 code, and two bytes do not identify a table. A claim's
+validation failures are `FSIMG_ECORRUPT`, never a bare volume. `ER` is the
+identity an assumed identity waives ("the disk has no driver descriptor map"),
+which is how a map behind a zeroed block 0 is read; `PM` locates what is decoded
+and stays a check, so a missing first entry remains `FSIMG_EFORMAT` under
+`--force`.
+
+Validation requires:
+
+* an entry count from 1 to 1024, the bound GPT has, of which every block lies
+  wholly within the disk, so a map cut short is corrupt rather than clipped;
+* `PM` and the same count in every entry;
+* for each used entry: a nonempty type, a start after block 0, and, unless its
+  type is `Apple_partition_map`, a start after the map's own blocks;
+* no overlap between used entries, judged by what they declare.
+
+A block count times `B` is at most 2^43, so an extent's end cannot overflow 64
+bits. Records are held in charged memory, at most 1024 of them. Name and type
+are the bytes before the first zero, each byte outside printable ASCII replaced
+by `?`, so nothing an image holds reaches a report unescaped; MacRoman names lose
+their accented letters, which only a report sees.
+
+**Slots.** Numbering follows entry order, so `--partition=N` agrees with
+`pdisk`. An `Apple_Free` or `Apple_Void` entry, or any entry of zero length, is
+an unused slot: it keeps its number, is not listed, and is exempt from the checks
+on used entries. That is what makes a real disc open: `Apple_Free` on the
+Darwin disc runs a whole CD's capacity past the end of its image and describes
+no data, so it neither overlaps anything nor makes the disk truncated.
+
+An `Apple_partition_map`, `Apple_Patches` or `Apple_Driver*` entry is used and
+listed, and is not a volume: automatic selection passes over it, and selecting it
+is `FSIMG_EUNSUPPORTED`, as an extended MBR partition is. Its bytes stay reachable
+through a range. Every other used entry is a candidate under the ordinary
+[automatic rule](#partition-selection), whatever its type, because the claim
+decides, as it does for GPT: one claim is selected, several require a selector.
+
+**Detection.** A disk can carry a DDM and also an MBR or GPT: hybrid optical
+media put `ER` in the first bytes of an MBR's boot code and the map in space the
+other tables leave free. The specimens `supergrub2-classic-*` hold a protective
+MBR, a GPT header at 512, a map at 2048 and an ISO 9660 volume. APM **yields**: a
+field of the scheme's descriptor makes its claim count only when no other scheme
+claims, so such a disk reads exactly as it would without the map, a GPT beside
+ISO 9660 being the [system-area pairing](#detection-and-forcing). An ordinary
+two-way rivalry would turn every such disc into an ambiguity. The other
+direction needs no rule: a real MBR or GPT disk has no `ER` and no `PM`. A map
+alone beside ISO 9660 or UDF is that same pairing, read as the bare volume with a
+note naming `-F apm`; the `macbackup1` specimen reads so, the HFS side of it
+being classic HFS. Forcing `apm` runs only its own probe and reads the map on
+any of these.
+
+A raw device whose logical sector differs from `B` is refused by the common
+[check](#partition-selection), so a disc with a 512-byte map, read directly from a
+2048-byte drive, needs a range.
+
 ### Truncated disks
 
 A partition ending past the disk is clipped to the disk's end, in bytes, so a
@@ -1534,7 +1646,7 @@ clipping, so what a table says is judged the same way whatever the file's
 length.
 
 The table reports `missing_bytes`, how far the disk it declares reaches past
-the disk: for GPT the alternate LBA, for MBR the furthest entry. Each partition
+the disk: for GPT the alternate LBA, for MBR and APM the furthest entry. Each partition
 reports the part of its own length the disk lacks. `fsimg_image_get_info()` and
 `fsimg_image_next_partition()` carry both, and `i` shows them. A nonzero count
 fails `fsimg_image_verify()` as `FSIMG_ECORRUPT`, naming the count and, for
@@ -2332,6 +2444,7 @@ format correctness; the oracle rows do.
 | GPT write | `sgdisk -v` reports no problems on disks of every filesystem; `sgdisk -p` shows the type, name and 1 MiB alignment; 4Kn tables verified with `sfdisk --sector-size 4096`, since `sgdisk` takes the sector size of a file as 512 | A flipped bit in the written entry array fails `sgdisk -v`, proving the oracle sees the table fsimg claims to write |
 | GPT read | Disks from `sgdisk` and `qemu-img` open; auto-selection with one filesystem; index, name and type selectors; names compared as UTF-16 units; `gpt:sector=4096` with `-F fat32/gpt` resolves a disk carrying both headers | Header CRC, entry CRC, alternate LBA, usable range, overlapping entries, backup mismatch, an entry array cut short, protective MBR with no header: each `FSIMG_ECORRUPT` naming the check and never a bare-volume read; two headers at 512 and 4096 without `gpt:sector`: ambiguity |
 | MBR | `fdisk -l` and `mtools` read fsimg disks; `sfdisk` disks open; types 0x04, 0x0B and 0x0E accepted; a partition ending at sector 2^32; CHS saturation at 1023 | Missing signature, overlapping entries (`FSIMG_ECORRUPT`), 0xEE entry (routes to GPT), FAT boot sector resembling a table (ambiguity), `mbr:type=0x85` refused |
+| APM | No tool in the project's reach writes these maps, so tables built in memory cover each rule, and real images (Disc Recording, `hdiutil`, install discs, xorriso hybrids) open and verify through fsimg alone, recorded in [the research log](../docs/hfsplus-research.md#apple-partition-map-specimens) |
 | DMG write | `hdiutil imageinfo` and `hdiutil verify` accept zlib and `none` images; `hdiutil attach` mounts the FAT volume with and without GPT; `qemu-img convert` yields the raw disk byte for byte; zero runs become zero-fill entries | A flipped data-fork byte fails `hdiutil verify` and fsimg's own verification; `dmg:level=0` and `10` refused |
 | DMG read | `hdiutil create` images in UDRO, UDZO, UDBZ and zero-filled variants open and extract, and list as the raw disks `hdiutil convert -format UDTO` and `qemu-img convert` expand them to (`qemu-img` reads DMG but cannot write it); both table shapes; per-table CRC under read-through | Overlapping tables, uncovered sectors, run beyond the data fork, run with zero sectors, run decompressing short and long, run over 16 MiB, unknown type, segment count 2, koly ranges overlapping, plist depth 33, undeclared entity, 5 KiB key; a bare volume whose last sector is a koly whose ranges do not end at the file's end opens as a bare volume |
 | VHD | `qemu-img check` and `info` report fixed VHD of the declared size; `vhd:align=1M` lengths; footer checksum; creator fields and original size as written | Flipped checksum (`FSIMG_ECORRUPT`, not a raw read), dynamic type 3 (`FSIMG_EUNSUPPORTED`), size mismatch with file length (no VHD claim: the file is whatever its prefix claims, or unrecognised) |

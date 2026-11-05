@@ -509,7 +509,8 @@ constraints. Common disk planning owns bounded record allocation, alignment,
 placement, fixed-disk fit, container rounding, and output accounting. Create,
 wrap, and compose reach the same scheme operations, so adding a writer policy
 does not require another scheme-name branch in their common setup. GPT and MBR
-retain their bounded table representations and explicit read-side codecs; this
+retain their bounded table representations and explicit read-side codecs, and the
+read-only [Apple Partition Map](design-layers.md#apm) has its own; this
 boundary does not promise that arbitrary partition formats share one layout.
 
 Each writable container owns an immutable private
