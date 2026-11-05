@@ -272,12 +272,15 @@ module HfsPlusQualify
   class Cycle
     STEPS = %i[generate fsck_before mount modify fsck_after remount fsimg].freeze
 
-    def initialize(image, tools, directory)
+    # The volume mounts beside its image, or under `mounts` when given: macOS
+    # refuses a mount on a volume a user attached, such as a RAM disk. The
+    # `.mnt` suffix keeps the mount point apart from the image's directory.
+    def initialize(image, tools, directory, mounts: nil)
       @image = image
       @tools = tools
       @directory = directory
       @path = File.join(directory, "image.img")
-      @mountpoint = File.join(directory, "mnt")
+      @mountpoint = mounts ? File.join(mounts, "#{image.name}.mnt") : File.join(directory, "mnt")
       @log = HfsPlusCapture::Log.new
       @attachments = HfsPlusCapture::Attachments.new(@log)
       @tree = {}
@@ -296,10 +299,18 @@ module HfsPlusQualify
         steps = STEPS.to_h { [_1, attempt(_1)] }
       ensure
         released = release
+        remove_mountpoint
       end
       { image: @image.name, **steps, refused: @refusals, uncompressed: @uncompressed, facts: @facts, detach: released }
     ensure
       File.write(File.join(@directory, "commands.txt"), @log.to_s)
+    end
+
+    # An empty mount point goes; one still in use or holding files stays.
+    def remove_mountpoint
+      Dir.rmdir(@mountpoint)
+    rescue Errno::ENOENT, Errno::ENOTEMPTY, Errno::EBUSY
+      nil
     end
 
     private
@@ -833,6 +844,9 @@ module HfsPlusQualify
       o.on("--generator PATH", "the built hfsplus-write-gen") { options[:generator] = File.expand_path(_1) }
       o.on("--fsimg PATH", "the built fsimg") { options[:fsimg] = File.expand_path(_1) }
       o.on("--root DIR", "a disposable directory, private to this user, for the images") { options[:root] = File.expand_path(_1) }
+      o.on("--mounts DIR", "a directory, private to this user and not on a RAM disk, for the mount points") do
+        options[:mounts] = File.expand_path(_1)
+      end
       o.on("--only REGEX", "only images whose name matches") { options[:only] = Regexp.new(_1) }
       o.on("--large-catalog", "only the volume whose catalog passes 2^32 bytes") { options[:large_catalog] = true }
       o.on("--keep", "keep each passing image too; a failed one is always kept") { options[:keep] = true }
@@ -858,17 +872,27 @@ module HfsPlusQualify
 
   # Run the images in turn. The results file holds every finished row, so that a
   # crash loses only the image it stopped.
-  def run_images(chosen, tools, root, keep:)
+  def run_images(chosen, tools, root, mounts:, keep:)
     chosen.each_with_object([]) do |image, rows|
       directory = File.join(root, image.name)
       FileUtils.rm_rf(directory)
       FileUtils.mkdir_p(directory)
-      row = Cycle.new(image, tools, directory).run
+      row = Cycle.new(image, tools, directory, mounts: mounts).run
       puts row.slice(:image, *Cycle::STEPS, :refused).to_json
       FileUtils.rm_f(File.join(directory, "image.img")) if passed?(row) && !keep
       rows << row
       write_results(root, rows)
     end
+  end
+
+  # Each run writes, renames and removes beneath root and the mount points, so
+  # neither may be a symbolic link or open to another user's changes.
+  def private_directory(path)
+    FileUtils.mkdir_p(path)
+    stat = File.lstat(path)
+    return if stat.directory? && stat.uid == Process.euid && (stat.mode & 0o022).zero?
+
+    raise Error, "#{path} is not a directory private to this user"
   end
 
   def write_results(root, rows)
@@ -888,13 +912,14 @@ module HfsPlusQualify
     end
     root = options.fetch(:root)
     tools = Tools.new(generator: options.fetch(:generator), fsimg: options.fetch(:fsimg))
-    FileUtils.mkdir_p(root)
-    # An image attached by an earlier run may have its mount under what removes.
+    [root, options[:mounts]].compact.each { private_directory(_1) }
+    # An image attached by an earlier run lies under root, whose image
+    # directories each run removes, so it must be detached first.
     stale = leftovers(root)
     raise Error, "already attached: #{stale.join(', ')}" unless stale.empty?
 
     FileUtils.rm_f(File.join(root, "results.json"))
-    rows = run_images(chosen, tools, root, keep: options[:keep])
+    rows = run_images(chosen, tools, root, mounts: options[:mounts], keep: options[:keep])
     puts result_table(rows)
     remaining = leftovers(root)
     warn "still attached: #{remaining.join(', ')}" unless remaining.empty?
