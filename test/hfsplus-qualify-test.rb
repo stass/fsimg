@@ -546,6 +546,12 @@ class HfsPlusQualifyTest < Minitest::Test
       assert_equal(HfsPlusQualify.content(1, 517), File.binread(File.join(source, "dir/file")))
       assert(File.directory?(File.join(source, "dir")))
       assert_equal("dir/file", File.readlink(File.join(source, "link")))
+      # cli_tree reads birth times, which Ruby on Linux does not implement.
+      begin
+        File.lstat(source).birthtime
+      rescue NotImplementedError
+        skip("File::Stat#birthtime is not supported on this host")
+      end
       tree = HfsPlusQualify.cli_tree(entries, source)
       entries.zip([0o755, 0o644, 0o755]).each do |entry, mode|
         seen = tree.fetch(entry.path)
