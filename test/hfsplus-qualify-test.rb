@@ -378,10 +378,10 @@ class HfsPlusQualifyTest < Minitest::Test
     assert(HfsPlusQualify.cli_image.cli)
   end
 
-  def test_attempt_records_fields_and_key_errors_but_propagates_interrupt
+  def test_attempt_records_any_step_failure_but_propagates_interrupt
     Dir.mktmpdir do |root|
       cycle = HfsPlusQualify::Cycle.new(fixture_image, nil, root)
-      [HfsPlusFields::Error, KeyError].each do |error|
+      [HfsPlusFields::Error, KeyError, NoMethodError].each do |error|
         cycle.define_singleton_method(:broken_step) { raise error, "broken field" }
         assert_equal("FAIL: broken field", cycle.send(:attempt, :broken_step))
       end

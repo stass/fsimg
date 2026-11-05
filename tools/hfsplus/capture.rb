@@ -100,13 +100,14 @@ module HfsPlusCapture
     def run_status(*argv, timeout: COMMAND_TIMEOUT, stderr: [:child, :out])
       out = +"".b
       code = Open3.popen2([argv.first, argv.first], *argv.drop(1), pgroup: true, err: stderr) do |input, output, child|
-        input.close
-        reader = Thread.new do
-          loop { out << output.readpartial(16_384) }
-        rescue EOFError
-          nil
-        end
+        reader = nil
         begin
+          input.close
+          reader = Thread.new do
+            loop { out << output.readpartial(16_384) }
+          rescue EOFError
+            nil
+          end
           Timeout.timeout(timeout) do
             reader.value
             child.value.exitstatus
@@ -119,7 +120,7 @@ module HfsPlusCapture
           stop_group(child, reader)
           raise
         ensure
-          reader.join
+          reader&.join
         end
       end
       shown = out.lines.first(OUTPUT_LINES).map { _1.chomp.byteslice(0, OUTPUT_LINE_BYTES) }
@@ -142,7 +143,7 @@ module HfsPlusCapture
         nil
       end
       child.value
-      reader.value
+      reader&.value
     end
   end
 

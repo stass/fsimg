@@ -1551,6 +1551,9 @@ ruby tools/hfsplus/qualify.rb --generator ./hfsplus-write-gen --fsimg ./fsimg --
 ```
 
 It exits 1 unless every image passes, and leaves `results.json` under `DIR`.
+Build `all` before asking for `hfsplus-write-gen`, in a separate `make`: `all`
+recurses, so naming both in one parallel run links the libraries twice at once
+and corrupts them.
 `--only REGEX` runs part of it, and `--large-catalog`, which takes hours, runs the
 one volume whose catalog passes `2^32` bytes.
 

@@ -304,11 +304,13 @@ module HfsPlusQualify
 
     private
 
-    # The boundary of one step: it records the failure as the step's result.
+    # The boundary of one step: any failure of the step, whatever its class,
+    # becomes the step's result so that the images after it still run. Interrupts
+    # are not StandardError and stop the run.
     def attempt(step)
       send(step)
       "pass"
-    rescue HfsPlusCapture::Error, HfsPlusFields::Error, SystemCallError, JSON::ParserError, KeyError => e
+    rescue StandardError => e
       "FAIL: #{HfsPlusQualify.text(e.message.lines.first(12).join.strip.byteslice(0, OUTPUT_EXCERPT_BYTES))}"
     end
 
