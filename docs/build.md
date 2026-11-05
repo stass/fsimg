@@ -1510,7 +1510,7 @@ Other hosts print `SKIP linux-mount: needs root on Linux`; a refused mount is
 also a skip. The script exits 1 for findings, 77 when no applicable oracle
 exists, and 0 otherwise.
 
-The reader run on Darwin 25.6.0 used hfsdump at the hfsfuse pin
+The run on Darwin 25.6.0 used hfsdump at the hfsfuse pin
 `eed780cbe0445893de6f4aa8d74461da00756984` and Sleuth Kit 4.15.0:
 
 | Source | Volumes | Oracle | Result | Known limitations |
@@ -1521,11 +1521,12 @@ The reader run on Darwin 25.6.0 used hfsdump at the hfsfuse pin
 | linux-mkfs-hfsplus corpus | 5 | fsimg, hfsdump, Sleuth Kit | 5 agree per reader | Empty directories checked without hfsdump read |
 | Local mkfs | 0 | All | Skip | mkfs.hfsplus unavailable |
 | Native and corpus | 49 | Linux mount | Skip | Host is Darwin; these sources are ineligible for mounting on every host |
+| Writer volumes | 32 | fsck_hfs (version hfs-715.160.9), fsimg, hfsdump, Sleuth Kit | 32 agree per reader | None |
+| Writer volumes | 32 | Linux mount | Skip | Host is Darwin |
 
-This totals 112 agreements, 84 skips and no findings. The 64-member read cap
+This totals 240 agreements, 116 skips and no findings. The 64-member read cap
 applies to the two e7 captures. No corpus or capture oracle timed out.
-Writer generation was not exercised in this reader run; its build directory
-had no `hfsplus-write-gen`. Linux and FreeBSD reader runs are not recorded here.
+Linux and FreeBSD reader runs are not recorded here.
 
 The frozen oracle limitation table is restricted to observed names and errors.
 TSK exposes synthetic system forks, private HFS+ storage and journal objects
