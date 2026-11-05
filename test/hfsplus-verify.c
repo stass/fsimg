@@ -2846,7 +2846,7 @@ test_wrapped_verification(void)
 
 			scenario = cases[i].name;
 			wrapped.bytes = gen_wrap(&image, 4096, 4, cases[i].before,
-			    cases[i].after, &wrapped.length);
+			    cases[i].after, 1024, &wrapped.length);
 			if (cases[i].poison != 0) {
 				uint64_t offset = cases[i].poison == UINT64_MAX ?
 				    wrapped.length - 1024 : cases[i].poison;
@@ -2876,27 +2876,35 @@ test_wrapped_verification(void)
 	for (unsigned tail = 0; tail < 2; tail++) {
 		fixture_t fixture;
 		char message[96];
-		uint64_t missing;
+		uint64_t cut_bytes, missing;
 		fsimg_verify_report_t report;
 
 		scenario = tail ? "verify missing outer tail" :
 		    "verify missing embedded tail";
-		wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1, &wrapped.length);
-		missing = wrapped.length - (6144 + (tail ? image.length + 512 :
-		    image.length / 2));
-		CHECK(fixture_open(&fixture, &wrapped, 0, missing,
+		wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1, 1024,
+		    &wrapped.length);
+		cut_bytes = wrapped.length - (6144 +
+		    (tail ? image.length + 512 : image.length / 2));
+		missing = tail ? 0 : image.length / 2;
+		CHECK(fixture_open(&fixture, &wrapped, 0, cut_bytes,
 		    &error) == FSIMG_OK);
 		snprintf(message, sizeof(message), "%llu declared bytes are missing",
 		    (unsigned long long)missing);
 		expect(fixture.reader->info.missing_bytes == missing,
-		    "outer missing byte count");
+		    "embedded missing byte count");
+		/* The outer volume is unchecked, including its missing tail. */
 		expect_status(fsimg_verify(fixture.reader, 0, &report, &error),
-		    FSIMG_ECORRUPT, &error);
-		expect(strstr(error.message, "truncated") != NULL,
-		    "verification names truncation");
-		expect(strstr(error.message, message) != NULL,
-		    "verification names the outer missing byte count");
-		expect(!report.complete, "truncated report is incomplete");
+		    tail ? FSIMG_OK : FSIMG_ECORRUPT, &error);
+		if (tail)
+			expect(report.complete, "embedded report is complete");
+		else {
+			expect(strstr(error.message, "truncated") != NULL,
+			    "verification names truncation");
+			expect(strstr(error.message, message) != NULL,
+			    "verification names embedded missing bytes");
+			expect(!report.complete,
+			    "truncated report is incomplete");
+		}
 		fixture_close(&fixture);
 		free(wrapped.bytes);
 	}
@@ -2904,7 +2912,8 @@ test_wrapped_verification(void)
 
 	scenario = "verify corruption inside wrapper";
 	referenced_clear_block(&image);
-	wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1, &wrapped.length);
+	wrapped.bytes = gen_wrap(&image, 4096, 4, 1, 1, 1024,
+	    &wrapped.length);
 	fixture_t fixture;
 	CHECK(fixture_open(&fixture, &wrapped, 0, 0, &error) == FSIMG_OK);
 	check_failure(&fixture, 0, FSIMG_ECORRUPT, "bitmap");

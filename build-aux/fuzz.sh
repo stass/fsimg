@@ -136,6 +136,9 @@ fi
 if test ! -f "$hfsplus_corpus/hfsx.seed"; then
     ./test-hfsplus --seed-hfsx "$hfsplus_corpus/hfsx.seed"
 fi
+if test ! -f "$hfsplus_corpus/wrap.seed"; then
+    ./test-hfsplus --seed-wrap "$hfsplus_corpus/wrap.seed"
+fi
 run_fuzzer "$work_dir/fuzz-hfsplus" "$hfsplus_corpus" 3145728 10
 
 # QNX4 derives its block count from the slice length, so its harness also

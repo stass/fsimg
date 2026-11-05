@@ -14,8 +14,10 @@ typedef struct fsimg_format_variant fsimg_format_variant_t;
  * Common code owns the input, session, public snapshot, traversal and
  * lifecycle, including terminal failure cleanup. open receives the forced
  * public variant, or NULL after detection; the probe has already claimed the
- * image, but open still validates everything it uses. close accepts a
- * partially opened object and repeated calls after cleanup.
+ * image, but open still validates everything it uses. A volume held inside
+ * an envelope of its format's own moves the input with
+ * fsimg_reader_narrow(). close accepts a partially opened object and repeated
+ * calls after cleanup.
  *
  * Directory callbacks (specs/design-directories.md):
  * prepare	decode the root directory at level 0, otherwise the directory
@@ -127,6 +129,7 @@ typedef struct fsimg_salvage_chain {
 } fsimg_salvage_chain_t;
 
 typedef enum fsimg_reader_state {
+	FSIMG_READER_OPENING,	/* the driver's open is running */
 	FSIMG_READER_NEW,
 	FSIMG_READER_ITERATING,
 	FSIMG_READER_DONE,
@@ -137,7 +140,8 @@ struct fsimg_reader {
 	fsimg_ctx_t	*ctx;
 	fsimg_session_t	 session;
 	fsimg_io_t	*input;
-	uint64_t	 slice_bytes;	/* the input's length, fixed at open */
+	uint64_t	 slice_bytes;	/* the input's length, fixed once open returns */
+	fsimg_io_t	*narrowed;	/* the slice input became, owned, or NULL */
 	const fsimg_reader_ops_t *ops;
 	void		*driver;
 	fsimg_host_file_t identity;
@@ -240,6 +244,15 @@ fsimg_status_t fsimg_reader_salvage_index(fsimg_reader_t *,
     const fsimg_salvage_chain_t *, fsimg_extent_index_t **, fsimg_error_t *);
 fsimg_status_t fsimg_reader_bytes(fsimg_reader_t *, uint64_t, void *, size_t,
     size_t *, fsimg_error_t *);
+/* Replace the input with a read-only slice of its [offset, offset + length), so
+ * that everything after it, offsets and truncation included, sees only that
+ * range. The reader owns the slice and frees it with itself. A range past the
+ * input's end is clipped, and the driver's declared size then counts the loss;
+ * one starting at or past the end is FSIMG_ECORRUPT. Only a driver's open can
+ * call this, once: any other call is FSIMG_ESTATE.
+ */
+fsimg_status_t fsimg_reader_narrow(fsimg_reader_t *, uint64_t, uint64_t,
+    fsimg_error_t *);
 /* The one call of the driver's resolve: the extent containing offset, checked to
  * contain it. *held is what reader->held was set to, NULL for a mapped extent,
  * and is taken from the reader even when resolve fails, so no later resolve can

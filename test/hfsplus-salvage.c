@@ -626,7 +626,7 @@ file_fork(gen_image_t *image, unsigned fork_offset)
 }
 
 static void
-test_truncated_volume_shortens_plain_and_compressed(void)
+check_truncated_volume_prefixes(bool wrapped)
 {
 	static const unsigned types[] = { 0, 4 };
 
@@ -656,20 +656,39 @@ test_truncated_volume_shortens_plain_and_compressed(void)
 		bcopy(types[i] == 0 ? f.plain : f.resource, image.bytes + start,
 		    types[i] == 0 ? f.size : f.resource_size);
 		slice = image;
+		if (wrapped)
+			slice.bytes = gen_wrap(&image, 4096, 4, 1, 1, 1024,
+			    &slice.length);
 		/* Plain bytes stop at the cut itself. A stored compressed chunk
 		 * crossing the cut contributes no decoded bytes to the prefix.
 		 */
-		slice.length = (size_t)start + CHUNK + 137 +
+		slice.length = (wrapped ? 6144 : 0) + (size_t)start +
+		    CHUNK + 137 +
 		    (types[i] == 0 ? 0 : 288 + 1);
 		CHECK(slice.length < image.length);
+		/* The expected prefix excludes the wrapper's 6144 bytes. */
 		fprintf(stderr, "%s: %s\n", current_test,
 		    types[i] == 0 ? "plain" : "compressed");
 		extract_image(&slice, &result);
 		expect_losses(&result, FSIMG_LOSS_SHORTENED, "/f");
 		expect_file_and_sibling(&result, &f, "f.partial", prefix);
+		if (wrapped)
+			free(slice.bytes);
 		gen_free(&image);
 		file_fixture_free(&f);
 	}
+}
+
+static void
+test_truncated_volume_shortens_plain_and_compressed(void)
+{
+	check_truncated_volume_prefixes(false);
+}
+
+static void
+test_wrapped_cut_recovers_volume_relative_file_prefixes(void)
+{
+	check_truncated_volume_prefixes(true);
 }
 
 static void
@@ -1184,6 +1203,7 @@ main(void)
 	RUN(test_plain_file_keeps_extents_before_broken_overflow);
 	RUN(test_compressed_file_keeps_chunks_before_broken_resource_overflow);
 	RUN(test_truncated_volume_shortens_plain_and_compressed);
+	RUN(test_wrapped_cut_recovers_volume_relative_file_prefixes);
 	RUN(test_rejected_compressed_child_loses_entry_and_keeps_siblings);
 	RUN(test_output_limit_stops_decoding_after_crossing_chunk);
 	RUN(test_exact_output_limit_keeps_clean_compressed_name);

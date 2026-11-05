@@ -179,9 +179,7 @@ hfsplus_probe(const unsigned char *prefix, size_t length, uint64_t volume_bytes,
 		    "no HFS Plus identity signature"));
 	block = prefix + HFSPLUS_BOOT_BYTES;
 	signature = fsimg_load_be16(block);
-	if (signature == HFSPLUS_SIGNATURE_WRAPPER &&
-	    hfsplus_mdb_decode(block, HFSPLUS_HEADER_BYTES, &mdb) &&
-	    mdb.embedded_signature == HFSPLUS_SIGNATURE_PLUS)
+	if (hfsplus_wrapper_decode(block, HFSPLUS_HEADER_BYTES, &mdb))
 		return (FSIMG_OK);
 	if ((signature != HFSPLUS_SIGNATURE_PLUS &&
 	    signature != HFSPLUS_SIGNATURE_X) ||

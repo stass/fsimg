@@ -74,7 +74,7 @@ gen_load(const unsigned char *p, size_t width)
  */
 unsigned char *
 gen_wrap(const gen_image_t *image, uint32_t block_size, uint16_t first_sector,
-    uint16_t before, uint16_t after, size_t *length)
+    uint16_t before, uint16_t after, size_t slack, size_t *length)
 {
 	uint64_t blocks, total, first, end;
 	unsigned char *bytes, *mdb;
@@ -84,9 +84,10 @@ gen_wrap(const gen_image_t *image, uint32_t block_size, uint16_t first_sector,
 	blocks = image->length / block_size;
 	total = before + blocks + after;
 	first = (uint64_t)first_sector * 512;
-	end = first + total * block_size + 1024;
 	CHECK(first >= 1536 && blocks > 0 && total <= UINT16_MAX);
-	CHECK(end <= SIZE_MAX);
+	end = first + total * block_size;
+	CHECK(slack >= 1024 && end <= SIZE_MAX && slack <= SIZE_MAX - end);
+	end += slack;
 	*length = (size_t)end;
 	bytes = calloc(1, *length);
 	CHECK(bytes != NULL);
@@ -610,12 +611,12 @@ gen_build(const gen_plan_t *plan, gen_image_t *image)
 	CHECK(b >= 512 && (b & (b - 1)) == 0);
 	CHECK(plan->records_per_node != 1);
 	CHECK(plan->total_blocks >= 16 && plan->label_units <= 255);
-	CHECK(plan->total_blocks <= SIZE_MAX / b);
+	CHECK(plan->total_blocks <= (SIZE_MAX - plan->extra_bytes) / b);
 	bzero(image, sizeof(*image));
 	image->header = 1024;
 	image->block_size = b;
 	image->catalog_overflow = plan->catalog_overflow;
-	image->length = (size_t)plan->total_blocks * b;
+	image->length = (size_t)plan->total_blocks * b + plan->extra_bytes;
 	/* calloc leaves untouched payload pages sparse in memory. Scale
 	 * fixtures
 	 * use only metadata and never materialize their unused payload blocks.
@@ -997,15 +998,16 @@ gen_rebuild_bitmap(gen_image_t *image)
 {
 	unsigned char *header = image->bytes + image->header;
 	uint32_t total = (uint32_t)gen_load(header + 44, 4), used = 0;
+	uint64_t tail = (image->length - 1024) / image->block_size;
 	uint64_t bitmap = gen_load(header + GEN_BITMAP_FORK + 16, 4) *
 	    image->block_size;
 
 	bzero(image->bytes + bitmap, ((uint64_t)total + 7) / 8);
 	bitmap_mark(image, 0, (1536u + image->block_size - 1) /
 	    image->block_size);
-	bitmap_mark(image, (uint32_t)((image->length - 1024) /
-	    image->block_size), (1024u + image->block_size - 1) /
-	    image->block_size);
+	/* Only allocation blocks intersecting the range's tail are reserved. */
+	if (tail < total)
+		bitmap_mark(image, (uint32_t)tail, total - (uint32_t)tail);
 	for (unsigned offset = GEN_BITMAP_FORK; offset <= GEN_STARTUP_FORK;
 	    offset += 80)
 		bitmap_extents(image, header + offset + 16);

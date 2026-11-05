@@ -120,6 +120,8 @@ typedef struct gen_plan {
 	size_t		 label_units;
 	uint32_t	 block_size;
 	uint32_t	 total_blocks;
+	/* Length beyond N * B; alternate header is at length - 1024. */
+	size_t		 extra_bytes;
 	uint16_t	 node_size[GEN_TREE_COUNT];
 	/* Maximum records per leaf and per index, at least two. Zero packs
 	 * full. */
@@ -178,9 +180,12 @@ typedef struct gen_image {
 /* The caller owns the returned image and frees it with gen_free(). No I/O. */
 void gen_plan_init(gen_plan_t *);
 void gen_build(const gen_plan_t *, gen_image_t *);
-/* Owned outer bytes; the embedded image remains owned by its caller. */
+/* Owned outer bytes; the embedded image remains owned by its caller.
+ * Slack follows the outer allocation area and includes the alternate MDB
+ * and reserved sector (at least 1024 bytes).
+ */
 unsigned char *gen_wrap(const gen_image_t *, uint32_t, uint16_t, uint16_t,
-    uint16_t, size_t *);
+    uint16_t, size_t, size_t *);
 void gen_free(gen_image_t *);
 void gen_rebuild_bitmap(gen_image_t *);
 uint64_t gen_node_offset(const gen_image_t *, gen_tree_id_t, uint32_t);

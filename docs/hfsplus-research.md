@@ -1711,6 +1711,12 @@ numbers and fork extents inside the embedded volume, including `journalInfoBlock
 count from the embedded start; the journal info block's byte `offset` is the
 exception (below).
 
+Outer tail. The outer fields do not give the image's length. Every captured
+wrapper has its alternate master directory block at `image_size - 1024`, and the
+image ends past the last outer allocation block by 4096 bytes for the 4096-byte
+`mkfs.hfsplus -w` images (16 and 64 MiB, plain and `-J`), 1024 for `-w -b512` and
+2048 for Blender 2.28.
+
 Bad block file. The outer extents file is a one-leaf HFS B-tree of 512-byte nodes
 whose only record is the key (file ID 5, data fork, start block 0) with the extent
 `10+2360`: the bad block file covers exactly the embedded range, and the outer volume
@@ -1959,6 +1965,24 @@ destination's ancestors and on the source's parent chain.
   (`:3752` on). An ordinary mount, unmount or sync writes only the primary
   header. The triggers that experiments left untried are thus
   known by reading, not by trial.
+
+* **Wrapper range.** The mount computes the embedded start from the wrapper's
+  first-block sector, extent start and allocation block size, and takes
+  count times block size as the partition's length
+  (`core/hfs_vfsops.c:1422` to `:1480`). Its only test of that range is that
+  start and length are multiples of the device's logical block size
+  (`core/hfs_vfsutils.c:212`). It never compares the range with the embedded
+  volume's blocks times its block size. The difference picks where the
+  alternate header goes (`core/hfs_vfsutils.c:293` to `:352`): spare bytes of up
+  to one allocation block are innocuous, and the one alternate header stays
+  1024 bytes before the range's end; more than that is a smaller volume in a
+  larger partition, written at both 1024 before the range's end and 1024 before
+  the volume's end (`core/hfs_vfsops.c:2311` to `:2327`), and recovery reads the
+  one relative to the partition (`:3596`). A volume larger than the range has
+  no case of its own there: the mount does not refuse it and falls through to
+  the same alternate location. So a volume no larger than the range is what it
+  tolerates on purpose, and a larger one is untested rather than allowed.
+  No captured wrapper has any difference at all (E10, E11).
 
 ### Compression
 

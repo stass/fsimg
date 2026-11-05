@@ -298,6 +298,16 @@ format treats a volume longer than its slice by the same rules:
   stored byte through the funnel: a file past the end fails the same way, and one
   whose last stored byte is there, or that stores none, keeps the resource limit
   error, since its extents are shared or the limit is the caller's.
+* **Narrowing.** A volume held inside an envelope of its own format, such as an
+  HFS wrapper, is a range of the input only its driver can name.
+  `fsimg_reader_narrow` moves the reader onto that range: during the driver's
+  open, once, and `FSIMG_ESTATE` at any other time. The core makes the read-only
+  slice, clips it at the input's end, owns it and frees it with the reader, so
+  the driver never writes a reader field or keeps a slice's lifetime, on
+  success or on a failed open. Offsets, the funnel, salvage, verification and
+  `missing_bytes` then see only the range, and none of them has a nested case.
+  A partition stays a layer's job: the layers know a disk without knowing its
+  format, where an envelope is known only after the format has claimed it.
 * **Reporting.** `fsimg_volume_info_t.missing_bytes` is the declared bytes
   past the slice, derived once by the reader core after the driver opens.
   No driver computes it.

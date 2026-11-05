@@ -112,8 +112,7 @@ report_info(fsimg_reader_t *reader)
 		info->valid |= FSIMG_VOLUME_LABEL;
 		bcopy(hfsplus->label, info->label, hfsplus->label_bytes);
 	}
-	info->volume_bytes = hfsplus->geometry.volume_bytes +
-	    hfsplus->outer_missing;
+	info->volume_bytes = hfsplus->geometry.volume_bytes;
 	info->sector_bytes = 512;
 	info->allocation_unit_bytes = hfsplus->geometry.block_size;
 	info->allocation_units = hfsplus->geometry.blocks;
@@ -170,10 +169,6 @@ hfsplus_close(fsimg_reader_t *reader)
 
 	if (hfsplus == NULL)
 		return;
-	if (hfsplus->wrapped) {
-		reader->input = hfsplus->outer_input;
-		fsimg_io_free(hfsplus->embedded_input);
-	}
 	hfsplus_tree_free(&hfsplus->extents);
 	hfsplus_tree_free(&hfsplus->catalog);
 	hfsplus_tree_free(&hfsplus->attributes);

@@ -159,6 +159,30 @@ fsimg_reader_set_link_target(fsimg_reader_t *reader, const void *bytes,
 	return (FSIMG_OK);
 }
 
+fsimg_status_t
+fsimg_reader_narrow(fsimg_reader_t *reader, uint64_t offset, uint64_t length,
+    fsimg_error_t *error)
+{
+	fsimg_io_t *slice;
+	fsimg_status_t status;
+
+	if (reader->state != FSIMG_READER_OPENING || reader->narrowed != NULL)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "a reader narrows only once, during its driver's open"));
+	if (offset >= reader->slice_bytes)
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_READER,
+		    "the range to read lies past the input: image is truncated"));
+	if (length > reader->slice_bytes - offset)
+		length = reader->slice_bytes - offset;
+	status = fsimg_io_read_slice(reader->input, offset, length, &slice, error);
+	if (status != FSIMG_OK)
+		return (status);
+	reader->narrowed = slice;
+	reader->input = slice;
+	reader->slice_bytes = length;
+	return (FSIMG_OK);
+}
+
 /*
  * The one read path of every driver, so the one place a volume longer than its
  * slice is told apart: whatever a driver asks for past the slice is a truncated
@@ -254,9 +278,11 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	status = fsimg_io_get_size(input, &reader->slice_bytes, error);
 	if (status != FSIMG_OK)
 		goto fail;
+	reader->state = FSIMG_READER_OPENING;
 	status = fsimg_format_open(reader, options->format, error);
 	if (status != FSIMG_OK)
 		goto fail;
+	reader->state = FSIMG_READER_NEW;
 	/* Declared filesystem geometry can exceed the available input. The
 	 * selected I/O view funds the default; an explicit context limit was
 	 * already installed by session initialization. Drivers report what the
@@ -290,6 +316,7 @@ fsimg_reader_free(fsimg_reader_t *reader)
 	fsimg_walk_free(reader);
 	if (reader->ops != NULL)
 		reader->ops->close(reader);
+	fsimg_io_free(reader->narrowed);
 	fsimg_dealloc(reader->link_target);
 	fsimg_dealloc(reader->path);
 	fsimg_dealloc(reader);

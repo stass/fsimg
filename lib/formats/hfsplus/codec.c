@@ -460,6 +460,15 @@ hfsplus_mdb_decode(const unsigned char *raw, size_t length, hfsplus_mdb_t *mdb)
 	return (true);
 }
 
+bool
+hfsplus_wrapper_decode(const unsigned char *raw, size_t length,
+    hfsplus_mdb_t *mdb)
+{
+	return (hfsplus_mdb_decode(raw, length, mdb) &&
+	    mdb->signature == HFSPLUS_SIGNATURE_WRAPPER &&
+	    mdb->embedded_signature == HFSPLUS_SIGNATURE_PLUS);
+}
+
 /* The bytes 66 70 6d 63, then a little-endian type and uncompressed size,
  * which must fit a signed 64-bit content length. A value may continue past
  * the header with its inline payload.

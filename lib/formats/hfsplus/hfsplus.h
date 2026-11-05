@@ -323,6 +323,10 @@ bool hfsplus_journal_decode(const unsigned char *, size_t,
  */
 bool hfsplus_journal_is_older_form(const unsigned char *, size_t);
 bool hfsplus_mdb_decode(const unsigned char *, size_t, hfsplus_mdb_t *);
+/* Whether the block is a master directory block embedding "H+", decoded into
+ * the output. Without that, a "BD" block is a classic HFS volume, not a wrapper.
+ */
+bool hfsplus_wrapper_decode(const unsigned char *, size_t, hfsplus_mdb_t *);
 bool hfsplus_cmpf_decode(const unsigned char *, size_t, hfsplus_cmpf_t *);
 bool hfsplus_rsrc_decode(const unsigned char *, size_t, hfsplus_rsrc_t *);
 bool hfsplus_rsrc_table_decode(const unsigned char *, size_t,
@@ -656,18 +660,12 @@ typedef struct fsimg_hfsplus_reader {
 	fsimg_extent_index_t	*bitmap;
 	hfsplus_folder_t	 root;
 	/* Set for an embedded volume; decides the journal table's wrapped row.
-	 * The reader's input is then embedded_input, a slice this state owns of
-	 * outer_input, which hfsplus_close() puts back. wrapper_offset and
-	 * embedded_bytes are the range; outer_missing is what the outer volume
-	 * declares past both the slice and that range, which read.c adds to the
-	 * reported volume so the reader core counts it as missing.
+	 * The reader is then narrowed to the range wrapper_offset and
+	 * embedded_bytes name, which the slice may hold only part of.
 	 */
 	bool			 wrapped;
-	fsimg_io_t		*outer_input;
-	fsimg_io_t		*embedded_input;
 	uint64_t		 wrapper_offset;
 	uint64_t		 embedded_bytes;
-	uint64_t		 outer_missing;
 	/* The journal, for the root's format-owned files; its blocks are zero
 	 * without one. journal_info_block is meaningful under the same state.
 	 */
