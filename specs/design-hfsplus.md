@@ -1373,17 +1373,15 @@ so it never inserts into a tree, splits a node, or emits an overflow record.
 Where the format leaves a choice, the writer follows what `newfs_hfs`
 writes for an empty volume of the same geometry, as E1 records.
 
-Four choices depart from `newfs_hfs` and are provisional: no native check
-has accepted them yet. Each names the step of the
+Four choices depart from `newfs_hfs`. The
 [native qualification cycle](../docs/hfsplus-plan.md#9-native-qualification-and-writer-registration)
-that closes it and the default the writer takes if that step refuses it.
-
-| Provisional value | Closing check | Safe default |
-| --- | --- | --- |
-| `lastMountedVersion` `fsim` | `fsck_hfs -n` and a mount accept the volume | `10.0`, the value every unjournaled native volume carries (E1, E2) |
-| 4096-byte catalog nodes at every volume size | The cycle on a volume of 1 GiB and above with blocks of 4096 and above | `newfs_hfs`'s 8192-byte nodes at those sizes (E1) |
-| A one-node extents tree and a one-node attributes tree | The cycle's append-until-fragmentation and attribute steps, which make macOS insert into both | `newfs_hfs`'s eight-node trees (E1) |
-| The smallest volume minimization yields | The cycle on that volume | A floor of 1 MiB, the smallest volume `newfs_hfs` makes (E1) |
+accepts each, as the record's
+[fsimg writer output](../docs/hfsplus-research.md#fsimg-writer-output) holds:
+`lastMountedVersion` `fsim`, which macOS replaces with `10.0` at its first
+read-write mount; 4096-byte catalog nodes at every volume size; a one-node
+extents tree and a one-node attributes tree, which macOS grows when it inserts;
+and the smallest volume minimization yields. That volume has no free block and
+its catalog no free node, so macOS mounts it read-write and refuses to change it.
 
 ### Volume
 
@@ -1470,7 +1468,7 @@ switches the catalog to 8192 at 1 GiB with blocks of 4096 and above (E1),
 a size-dependent choice the writer does not copy, so that a tree's node
 count depends on the catalog alone and the block size only rounds its fork
 up to whole blocks; the 4096 bytes at those sizes are a
-[provisional value](#writer-profile). 4096 is also the catalog node size of
+[choice the native cycle accepts](#writer-profile). 4096 is also the catalog node size of
 every old volume (E10) and of the native tree whose map nodes E9 records,
 so the writer's map nodes, when a catalog needs them, have the one native
 layout observed: one record from offset 14 of `M - 20` bytes, the layout

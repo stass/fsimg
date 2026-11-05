@@ -56,6 +56,9 @@ module HfsPlusQualify
   # One entry more than the catalog header's map holds, with free space beyond.
   MAP_NODE_FILES = 86_770
   MAP_NODE_BYTES = 160 << 20
+  # A catalog whose fork passes 2^32 bytes, where its clumpSize saturates.
+  LARGE_CATALOG_FILES = 2_970_000
+  LARGE_CATALOG_BYTES = (1 << 32) + (400 << 20)
   BASE_TIME = 1_700_000_000
   COMMAND_TIMEOUT = 30 * 60
   # Each round leaves one more extent on the file, so 24 rounds need the extents
@@ -194,8 +197,8 @@ module HfsPlusQualify
     names.each_with_index.map { |name, index| Entry.of("file", "/#{name}", size: index + 1) }
   end
 
-  def map_node_entries =
-    (0...MAP_NODE_FILES).map { Entry.of("file", format("/%08d%s", _1, "n" * 232)) }
+  def map_node_entries(files) =
+    (0...files).map { Entry.of("file", format("/%08d%s", _1, "n" * 232)) }
 
   def images(variant)
     blocks = BLOCKS.map do |block|
@@ -214,7 +217,7 @@ module HfsPlusQualify
                entries: block_tree(4096), limited: true, fill: true),
       Image.of(name: "#{variant}-low-space", variant: variant, block: 4096, volume_bytes: LOW_SPACE_BYTES,
                entries: block_tree(4096), limited: true),
-      Image.of(name: "#{variant}-map-nodes", variant: variant, block: 4096, volume_bytes: MAP_NODE_BYTES, entries: map_node_entries),
+      Image.of(name: "#{variant}-map-nodes", variant: variant, block: 4096, volume_bytes: MAP_NODE_BYTES, entries: map_node_entries(MAP_NODE_FILES)),
       Image.of(name: "#{variant}-names", variant: variant, block: 4096, volume_bytes: ORDINARY_BYTES,
                entries: length_names.map { Entry.of("file", "/#{_1}") }, refused: OVERLONG_NAMES),
       Image.of(name: "#{variant}-collisions", variant: variant, block: 4096, volume_bytes: ORDINARY_BYTES,
@@ -332,7 +335,8 @@ module HfsPlusQualify
         block_size: header.fetch(:block_size),
         extents_leaf_records: trees.dig(:extents, :leaf_records), extents_nodes: trees.dig(:extents, :total_nodes),
         attributes_leaf_records: trees.dig(:attributes, :leaf_records), attributes_nodes: trees.dig(:attributes, :total_nodes),
-        catalog_nodes: trees.dig(:catalog, :total_nodes), catalog_free_nodes: trees.dig(:catalog, :free_nodes) }
+        catalog_nodes: trees.dig(:catalog, :total_nodes), catalog_free_nodes: trees.dig(:catalog, :free_nodes),
+        catalog_node_bytes: trees.dig(:catalog, :node_size), catalog_clump: trees.dig(:catalog, :clump_size) }
     end
 
     def fsck_before = fsck(:fsck_before_output)
@@ -463,7 +467,7 @@ module HfsPlusQualify
   # The read-write mount's work: each step changes the volume and returns the
   # tree it now shows. A step's own folder goes away when a limited volume
   # refuses it, so that a refused step leaves the tree as it was: ENOSPC, or
-  # ENOTSUP from link(2) when macOS had no room to make its hard-link folder.
+  # ENOTSUP from link(2), seen where macOS had no room for its hard-link folder.
   class Modification
     PATTERN = "fsimg qualification\n"
     Step = Data.define(:name, :folder, :run)
@@ -712,17 +716,28 @@ module HfsPlusQualify
       o.on("--fsimg PATH", "the built fsimg") { options[:fsimg] = File.expand_path(_1) }
       o.on("--root DIR", "a disposable directory for the images") { options[:root] = File.expand_path(_1) }
       o.on("--only REGEX", "only images whose name matches") { options[:only] = Regexp.new(_1) }
+      o.on("--large-catalog", "only the volume whose catalog passes 2^32 bytes") { options[:large_catalog] = true }
       o.on("--keep", "keep each image directory") { options[:keep] = true }
       o.on("--list", "print the image names and stop") { options[:list] = true }
     end.parse!(argv)
     options
   end
 
-  def selected(only) = VARIANTS.flat_map { images(_1) }.select { only.nil? || only.match?(_1.name) }
+  # The volume that closes the clumpSize saturation, which takes hours and
+  # about 8 GiB of disk, runs only when asked for.
+  def large_catalog =
+    Image.of(name: "hfsplus-catalog-4gib", variant: "hfsplus", block: 4096, volume_bytes: LARGE_CATALOG_BYTES,
+             entries: map_node_entries(LARGE_CATALOG_FILES))
+
+  def selected(options)
+    return [large_catalog] if options[:large_catalog]
+
+    VARIANTS.flat_map { images(_1) }.select { options[:only].nil? || options[:only].match?(_1.name) }
+  end
 
   def main(argv)
     options = parse(argv)
-    chosen = selected(options[:only])
+    chosen = selected(options)
     if options[:list]
       puts chosen.map(&:name)
       return 0

@@ -2008,5 +2008,125 @@ checker found **no** test of the catalog node size beyond that, of a one-node
 extents or attributes tree, of one-record index nodes, of `lastMountedVersion`
 values, or of attributes bit 31 (the format header only defines the bit). The
 minimum volume size and `newfs_hfs` constraints were not read. These are
-**not established** by source; the native `fsck_hfs` run in the qualification
-remains the oracle for each provisional value.
+**not established** by source; the native run under
+[fsimg writer output](#fsimg-writer-output) is the oracle for each of them.
+
+## fsimg writer output
+
+`tools/hfsplus/qualify.rb` takes volumes the writer made through the native
+cycle of the [plan](hfsplus-plan.md#9-native-qualification-and-writer-registration),
+on the [host above](#macos-development-host): macOS 26.6.2 (`25G83`), with
+`fsck_hfs` `hfs-715.160.9`, `hdiutil` framework and driver 683.160.3, and `ditto`
+at the digests listed there. Every volume is one the tool generated in a
+disposable directory, and it attaches, mounts and detaches them unprivileged.
+`hdiutil info` lists none of them afterwards.
+
+```
+qualify.rb --generator BUILD/hfsplus-write-gen --fsimg BUILD/fsimg --root DIR
+```
+
+**Result: every cycle passes, on all 34 volumes.** Each one passes all seven
+steps: generate, `fsck_hfs -fn` with no line of finding, the mounted compare,
+the modifications, `fsck_hfs -fn` again, the remounted compare, and fsimg's own
+`W`, `t --json`, `t -v` and `x -O`. No detach needed force.
+
+The steps, as they ran:
+
+* Metadata compare: `find`, `lstat` and `readlink`, read-only under `hdiutil
+  attach -owners on`, which needs no privilege and shows stored owners. Owner,
+  group, mode, all four times, size, kind and link target match what the writer
+  was given, nondefault owners and modes included; ownership needed no skip.
+  Only after that does a read-only mount with owners off compare checksums,
+  because the mounting user may not read a file under its stored owner.
+* Modifications, read-write with owners off: a file created; `q-fragment/data`
+  appended one fsynced block at a time between one-block files, 24 times; a
+  folder made and one removed; a file unlinked; two attributes, of 5 and 8192
+  bytes; a resource fork; a hard link; two files through `ditto
+  --hfsCompression`, one inline (65536 zeros) and one in a resource fork (163840
+  bytes of text). Then on files the writer stored: rename, unlink, hard link and
+  attribute. Reads afterwards exclude access and change times, which those steps
+  move.
+* What macOS adds is left out of each compare by name: `.fseventsd`,
+  `.Spotlight-V100`, `.Trashes`, `.TemporaryItems` and `.DS_Store` at the root
+  and, in the catalog only, the two private folders of hard links. `find` does
+  not enter `.Trashes`, which refuses the mounting user. Anything else unexpected
+  fails the step.
+* fsimg afterwards: `W` verifies the volume macOS changed, extents overflow
+  records, attributes and compressed files included. `t --json` lists the
+  metadata again, with `extra_data` set on exactly the attribute and resource
+  fork files and on no compressed file; the `@` of `t -v` marks those same paths.
+  `x -O` delivers every nonempty file's bytes, decoding both compressed ones,
+  including through both names of each hard link.
+* `names`: every length of 1 to 255 UTF-16 units after decomposition, spelled in
+  units of one, two (`é`, a surrogate pair, a two-jamo syllable) and three to a
+  character. The writer refuses each spelling's 256-unit form.
+* `collisions`: E3's sets. Where the comparator makes a pair collide (always
+  decomposition, Hangul, the combining order of U+0F73 and the canonical
+  singletons; on `hfsplus` also case folding and ignorable units), the writer
+  refuses both names together, and macOS resolves the name left out to the file
+  stored under the other. Where it does not (on `hfsx` the fold and ignorable
+  pairs; on both the Deseret case pair and the unordered supplementary marks),
+  both names are stored and macOS resolves them to two files.
+
+Block size, free blocks before and after, nodes of each tree before and after
+with the leaf records after it, and the modifications refused:
+
+| Volume | Bytes | Block | Free blocks | Extents nodes (records) | Attributes nodes (records) | Catalog nodes | Refused |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `hfsplus-block-512` | 33554432 | 512 | 65399, 65117 | 1, 2 (2) | 1, 4 (6) | 5, 20 | 0 |
+| `hfsplus-block-1024` | 33554432 | 1024 | 32678, 32509 | 1, 2 (2) | 1, 4 (6) | 5, 20 | 0 |
+| `hfsplus-block-2048` | 33554432 | 2048 | 16314, 16202 | 1, 2 (2) | 1, 4 (6) | 5, 20 | 0 |
+| `hfsplus-block-4096` | 33554432 | 4096 | 8130, 8045 | 1, 2 (2) | 1, 4 (6) | 5, 20 | 0 |
+| `hfsplus-block-8192` | 33554432 | 8192 | 4037, 3968 | 2, 2 (2) | 1, 4 (6) | 6, 18 | 0 |
+| `hfsplus-block-16384` | 33554432 | 16384 | 1990, 1928 | 4, 4 (2) | 2, 4 (6) | 8, 16 | 0 |
+| `hfsplus-block-32768` | 33554432 | 32768 | 967, 907 | 8, 8 (2) | 4, 4 (6) | 8, 16 | 0 |
+| `hfsplus-block-65536` | 33554432 | 65536 | 455, 399 | 16, 16 (2) | 8, 8 (5) | 16, 16 | 0 |
+| `hfsplus-1gib-block-4096` | 1073741824 | 4096 | 262075, 261990 | 1, 2 (2) | 1, 4 (6) | 5, 20 | 0 |
+| `hfsplus-1gib-block-8192` | 1073741824 | 8192 | 131012, 130943 | 2, 2 (2) | 1, 4 (6) | 6, 18 | 0 |
+| `hfsplus-smallest-empty` | 23552 | 512 | 0, 0 | 1, 1 (0) | 1, 1 (0) | 2, 2 | 8 |
+| `hfsplus-smallest-tree` | 223744 | 512 | 0, 0 | 1, 1 (0) | 1, 1 (0) | 5, 5 | 12 |
+| `hfsplus-nearly-full` | 4194304 | 4096 | 2, 1 | 1, 1 (0) | 1, 1 (0) | 5, 6 | 11 |
+| `hfsplus-low-space` | 524288 | 4096 | 66, 0 | 1, 2 (2) | 1, 2 (3) | 5, 15 | 6 |
+| `hfsplus-map-nodes` | 167772160 | 4096 | 10231, 1978 | 1, 2 (2) | 1, 4 (6) | 30722, 38905 | 0 |
+| `hfsplus-names` | 33554432 | 4096 | 7941, 7626 | 1, 2 (2) | 1, 4 (6) | 245, 490 | 0 |
+| `hfsplus-collisions` | 33554432 | 4096 | 8165, 8086 | 1, 2 (2) | 1, 4 (6) | 4, 16 | 0 |
+| `hfsx-block-512` | 33554432 | 512 | 65399, 65157 | 1, 2 (2) | 1, 4 (6) | 5, 15 | 0 |
+| `hfsx-block-1024` | 33554432 | 1024 | 32678, 32529 | 1, 2 (2) | 1, 4 (6) | 5, 15 | 0 |
+| `hfsx-block-2048` | 33554432 | 2048 | 16314, 16212 | 1, 2 (2) | 1, 4 (6) | 5, 15 | 0 |
+| `hfsx-block-4096` | 33554432 | 4096 | 8130, 8050 | 1, 2 (2) | 1, 4 (6) | 5, 15 | 0 |
+| `hfsx-block-8192` | 33554432 | 8192 | 4037, 3968 | 2, 2 (2) | 1, 4 (6) | 6, 18 | 0 |
+| `hfsx-block-16384` | 33554432 | 16384 | 1990, 1928 | 4, 4 (2) | 2, 4 (6) | 8, 16 | 0 |
+| `hfsx-block-32768` | 33554432 | 32768 | 967, 907 | 8, 8 (2) | 4, 4 (6) | 8, 16 | 0 |
+| `hfsx-block-65536` | 33554432 | 65536 | 455, 396 | 16, 16 (2) | 8, 8 (6) | 16, 16 | 0 |
+| `hfsx-1gib-block-4096` | 1073741824 | 4096 | 262075, 261995 | 1, 2 (2) | 1, 4 (6) | 5, 15 | 0 |
+| `hfsx-1gib-block-8192` | 1073741824 | 8192 | 131012, 130943 | 2, 2 (2) | 1, 4 (6) | 6, 18 | 0 |
+| `hfsx-smallest-empty` | 23552 | 512 | 0, 0 | 1, 1 (0) | 1, 1 (0) | 2, 2 | 8 |
+| `hfsx-smallest-tree` | 223744 | 512 | 0, 0 | 1, 1 (0) | 1, 1 (0) | 5, 5 | 12 |
+| `hfsx-nearly-full` | 4194304 | 4096 | 2, 1 | 1, 1 (0) | 1, 1 (0) | 5, 6 | 11 |
+| `hfsx-low-space` | 524288 | 4096 | 66, 0 | 1, 2 (2) | 1, 2 (3) | 5, 14 | 5 |
+| `hfsx-map-nodes` | 167772160 | 4096 | 10231, 1978 | 1, 2 (2) | 1, 4 (6) | 30722, 38905 | 0 |
+| `hfsx-names` | 33554432 | 4096 | 7941, 7626 | 1, 2 (2) | 1, 4 (6) | 245, 490 | 0 |
+| `hfsx-collisions` | 33554432 | 4096 | 8160, 8079 | 1, 2 (2) | 1, 4 (6) | 4, 16 | 0 |
+
+`lastMountedVersion` is `fsim` before the first read-write mount and `10.0` after
+it on every volume. Every volume starts with no extents or attribute records.
+
+The four values the writer's profile takes where it departs from `newfs_hfs`:
+
+| Value | Outcome | Evidence |
+| --- | --- | --- |
+| `lastMountedVersion` `fsim` | Confirmed | `fsck_hfs -fn` and mounts, read-only and read-write, accept it on all 34 volumes |
+| 4096-byte catalog nodes at every volume size | Confirmed | The `1gib` volumes at blocks of 4096 and 8192 |
+| A one-node extents tree and a one-node attributes tree | Confirmed | Below 8192-byte blocks for the extents tree and 16384 for the attributes tree each tree starts at one node, and macOS grows it and inserts the records above |
+| The smallest volume minimization yields | Confirmed | `smallest-empty`, 23552 bytes, and `smallest-tree` |
+
+A volume without room is valid and unchangeable. The smallest volume has no free
+block and its catalog no free node, so macOS mounts it read-write and refuses each
+modification: `ENOSPC`, or `ENOTSUP` from `link(2)`, which the record takes to mean
+macOS had no room for its hard-link folder at mount; the cause is inferred, not
+observed. The nearly full volume has two free blocks. macOS takes one for a catalog
+node, refuses the same way every step that creates a name or an attribute, and
+unlinks a stored file; `fsck_hfs -fn` passes after it. `low-space` runs out part of
+the way through: its 66 free blocks end at 0 with some steps done and the rest
+refused, and it passes `fsck_hfs -fn`, the remount and fsimg's checks like the
+others.
