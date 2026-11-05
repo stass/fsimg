@@ -1216,6 +1216,28 @@ export `HFSDUMP`, and install the `hfsprogs` and `sleuthkit` packages. The
 [HFS Plus research record](hfsplus-research.md) holds the native tool
 identities and the unprivileged procedure for attaching a raw image on macOS.
 
+Run the reader comparisons from a build directory without generating the writer
+matrix:
+
+```sh
+FSIMG_HFS_ONLY=reader \
+FSIMG_HFSPLUS_NATIVE="$HOME/hfsplus-captures" \
+FSIMG_HFSPLUS_CORPUS=/path/to/hfsplus-corpus \
+    sh ../test/hfsplus-integration.sh
+# Equivalently, supply the generator and fsimg paths explicitly:
+FSIMG_HFS_ONLY=reader ruby ../test/hfsplus-integration.rb \
+    ./hfsplus-write-gen ./fsimg
+```
+
+The reader selects raw native captures at `$FSIMG_HFSPLUS_NATIVE/*/*.img` and
+`$FSIMG_HFSPLUS_CORPUS/linux-mkfs-hfsplus/*.img`; it does not unpack archived
+captures. Each absent source is named as a skip. It also creates a sparse 16 MiB
+volume with `mkfs.hfsplus` when available. With both source variables unset,
+only this local mkfs source is considered by the reader. Omitting
+`FSIMG_HFS_ONLY=reader` also runs the writer matrix. Startup records the hfsfuse
+build pin (hfsdump has no version flag), `fls -V`, and `uname -sr`. Oracle
+comparisons have a 60-second budget per volume; timeouts are counted as skips.
+
 The verification manifest, `test/hfsplus-verify-expected.tsv`, runs under
 `test/cli/hfsplus_verify_manifest_test.rb` with `FSIMG_HFSPLUS_NATIVE` naming the
 native captures, `FSIMG_HFSPLUS_CORPUS` the real-world specimens and
@@ -1463,6 +1485,63 @@ every block size, the smallest volumes, and exact sizes whose alternate header
 straddles the last block or lies past it. `FSIMG_HFS_LARGE=1` adds 1 GiB volumes
 at 4096 and 8192, catalogs with map nodes, and nearly full volumes; it writes
 over 4 GiB of images, then removes them.
+
+Its reader comparisons use `fsimg t --json`, `fsimg W --json` and `fsimg x -O`
+on the same volumes as each independent reader. Verification must complete or
+match the named refusal in `test/hfsplus-verify-expected.tsv`, including its
+status and message; successful manifest rows also check the five block and
+entry counts. Native manifest hashes and symlink targets are checked when
+present. hfsdump stats every listed path and the root, compares file types and
+logical sizes, reads only directories known to contain members, and compares
+their child names. Empty directories receive stat checks alone because
+hfsdump can hang reading them. Regular file bytes and symlink targets are
+compared by SHA-256. Sleuth Kit runs `fsstat`, compares recursive `fls -r -p`
+paths and types, and compares `icat` bytes by SHA-256. A printed cap limits
+reads to 64 regular files and symlinks per volume: uncapped per-member fsimg
+CLI startup takes minutes on the e7 captures. Listing, verification and
+hfsdump metadata traversal retain all entries, subject to command and oracle
+timeouts. Each oracle and volume emits a `COMPARE` line with entry, file and
+byte counts and an agreement, finding or skip; the summary counts each result.
+
+On Linux as root, locally generated writer and mkfs volumes also receive a
+`mount -t hfsplus -o ro,loop` tree, type and byte comparison, with unmount in
+the cleanup path. Native captures and corpus specimens are never mounted.
+Other hosts print `SKIP linux-mount: needs root on Linux`; a refused mount is
+also a skip. The script exits 1 for findings, 77 when no applicable oracle
+exists, and 0 otherwise.
+
+The reader run on Darwin 25.6.0 used hfsdump at the hfsfuse pin
+`eed780cbe0445893de6f4aa8d74461da00756984` and Sleuth Kit 4.15.0:
+
+| Source | Volumes | Oracle | Result | Known limitations |
+| --- | ---: | --- | --- | --- |
+| Native raw captures | 44 | fsimg | 35 agree, 9 expected refusals | Classic HFS, HFS wrappers, journal replay and journaled directory hard links |
+| Native raw captures | 44 | hfsdump | 34 agree, 10 skip | 9 unavailable baselines; 1 ditto volume has incorrect type 8 resource bytes |
+| Native raw captures | 44 | Sleuth Kit | 28 agree, 16 skip | 9 unavailable baselines; 7 volumes encounter attribute, directory-link or compression limitations |
+| linux-mkfs-hfsplus corpus | 5 | fsimg, hfsdump, Sleuth Kit | 5 agree per reader | Empty directories checked without hfsdump read |
+| Local mkfs | 0 | All | Skip | mkfs.hfsplus unavailable |
+| Native and corpus | 49 | Linux mount | Skip | Host is Darwin; these sources are ineligible for mounting on every host |
+
+This totals 112 agreements, 84 skips and no findings. The 64-member read cap
+applies to the two e7 captures. No corpus or capture oracle timed out.
+Writer generation was not exercised in this reader run; its build directory
+had no `hfsplus-write-gen`. Linux and FreeBSD reader runs are not recorded here.
+
+The frozen oracle limitation table is restricted to observed names and errors.
+TSK exposes synthetic system forks, private HFS+ storage and journal objects
+that fsimg intentionally omits. TSK cannot read the fork-backed attribute on
+`/attr-sizes` in both 16 MiB e5 captures. In the 8 MiB e4 captures it omits
+`/u1/a` on HFS Plus and fails catalog thread lookup on HFSX. The HFS Plus and
+HFSX e6-lzfse captures encounter unsupported inline/resource LZFSE decoding on
+`forced-mixed-196608`, `forced-random-1`, `mixed-196608`, `random-1`,
+`shape-{131073,262145,393217,589825}`, and
+`{text,zeros}-{1,65535,65536,65537,200000}`. TSK misreads LZVN resource chunk
+bounds on `forced-mixed-196608`, `mixed-196608`, `text-200000` and
+`zeros-200000` in the HFS Plus e6-lzvn capture. hfsdump returns incorrect bytes
+for `shape-{262145,393217,589825}` in the HFS Plus e6-ditto capture; fsimg's
+digests match the native manifest. These limitations produce skips rather
+than agreements, while other members continue to be checked. Unknown
+disagreements remain findings.
 
 `test-qnx4` builds QNX4 volumes with its own generator, written from the
 format design with separate offset tables; it shares no code with
