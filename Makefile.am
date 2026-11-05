@@ -187,7 +187,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
 # Fixture generators support integration tests; they are not tests.
 check_PROGRAMS = $(test_programs) layers-compose hfsplus-marks hfsplus-write-gen \
-	test-iso9660-scale test-iso9660-write-scale
+	test-iso9660-scale test-hfsplus-scale test-iso9660-write-scale
 QUICK_TESTS = $(test_programs) test/hfsplus-integration.sh \
 	test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
@@ -326,6 +326,9 @@ test_iso9660_write_SOURCES = test/iso9660-write.c test/test.h
 test_iso9660_write_LDADD = libfsimg.la
 test_iso9660_scale_SOURCES = test/iso9660-scale.c test/test.h test/scale.h
 test_iso9660_scale_LDADD = libfsimg.la
+test_hfsplus_scale_SOURCES = test/hfsplus-scale.c test/hfsplus-gen.h \
+	test/test.h test/scale.h
+test_hfsplus_scale_LDADD = libfsimg.la
 test_iso9660_write_scale_SOURCES = test/iso9660-write-scale.c test/test.h test/scale.h
 test_iso9660_write_scale_LDADD = libfsimg.la
 test_ifs_SOURCES = test/ifs.c test/test.h test/scale.h
@@ -620,7 +623,13 @@ baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	mv $(srcdir)/test/baseline.txt.new $(srcdir)/test/baseline.txt
 check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scale \
 	    test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-ifs test-iso9660-scale \
-	    test-iso9660-write-scale
+	    test-iso9660-write-scale test-hfsplus-scale
+	./test-hfsplus-scale --catalog 1000000
+	./test-hfsplus-scale --wide
+	./test-hfsplus-scale --extents
+	./test-hfsplus-scale --deep
+	./test-hfsplus-scale --depth-limit
+	./test-hfsplus-scale --capacity
 	./test-iso9660-write-scale --wide
 	./test-iso9660-write-scale --capacity
 	./test-iso9660-scale --wide
@@ -655,7 +664,8 @@ check-cli-rss: fsimg-rss fsimg-rss-guard
 	./fsimg-rss-guard; result=$$?; test $$result = 0 -o $$result = 77
 	$(RUBY) $(top_srcdir)/test/qualify-cli.rb ./fsimg-rss 100000
 check-extended: test-qualify test-fragment test-exfat-scale check-cli-rss \
-	    check-spec-extended
+	    check-spec-extended test-hfsplus-scale
+	./test-hfsplus-scale --catalog 10000000
 	./test-qualify --catalog 10000000
 	./test-qualify --wide 100000
 	./test-fragment --fragments 1048576

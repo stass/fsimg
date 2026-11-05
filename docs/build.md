@@ -1386,6 +1386,64 @@ on the same context. Run `./test-hfsplus-faults` in the build directory;
 optional stage and fault names select a single sweep, for example
 `./test-hfsplus-faults content allocation`.
 
+`test-hfsplus-scale` generates every image byte from its address, retaining one
+4096-byte B-tree node and layout integers, with no image file or resident record
+catalog. It opens through callback I/O under a 16 MiB memory budget, walks all
+entries, reopens for full verification, and checks memory, scratch and descriptor
+accounting against the live context's baseline after reader and I/O teardown.
+Each process creates and removes a private scratch directory beneath its working
+directory. Run `./test-hfsplus-scale --catalog 10000000`, `--wide 100000`,
+`--extents 1000000`, `--deep 256`, `--depth-limit`, or `--capacity` in the build
+directory. Catalog files are grouped under folders of at most 2048 children;
+the wide directory must spill beyond the memory budget. The fragmented file has
+512-byte extents separated by free blocks, with eight inline extents and computed
+overflow records; sequential reads compare every payload byte and reverse-order
+samples straddle extent boundaries. The capacity fixture has 4,294,967,295
+4096-byte allocation blocks, a file named `hello` in the last usable block, and
+a 536,870,912-byte bitmap fork. Verification must read every bitmap byte in order.
+`make check-scale` selects one million catalog files and the qualification sizes
+of the other cases; `make check-extended` selects ten million catalog files.
+The catalog qualification exceeds a minute on the measured host. RSS may grow
+by at most 32 MiB above the pre-open peak, allowing the charged budget plus
+16 MiB of runtime and allocator overhead. Metadata deliveries are bounded by
+32 walk passes and 40 verification passes to catch repeated whole-tree scans.
+
+Reference macOS x86_64 measurements follow. Paired values are walk / verify;
+resource sizes and RSS are bytes, metadata reads count delivered 512-byte sectors
+of the catalog, overflow tree and bitmap, and pass equivalents divide by the
+number of those sectors. Seconds include opening the reader and, for the extent
+walk, reading and checking all payload. Each profile runs in a separate process.
+
+| Case | Walk entries | Source calls | All I/O calls | Metadata sector reads | Metadata passes | Peak scratch | Peak charged memory | Peak RSS | Seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| catalog-1000000 | 1000489 | 73961 / 362128 | 73961 / 467720 | 591723 / 2897045 | 0.513 / 2.513 | 144112012 | 5363280 | 14368768 | 5.296 / 11.077 |
+| catalog-10000000 | 10004883 | 739416 / 3620921 | 739416 / 4852450 | 5915363 / 28967394 | 0.513 / 2.513 | 1441003696 | 5363280 | 11894784 | 22.908 / 62.073 |
+| wide-100000 | 100000 | 7158 / 35972 | 17235 / 54860 | 57299 / 287800 | 0.497 / 2.497 | 24612794 | 5375825 | 10358784 | 0.392 / 0.808 |
+| extents-500000 | 1 | 501396 / 2576 | 507574 / 26051 | 10131 / 20634 | 0.978 / 1.992 | 36013218 | 5363280 | 10366976 | 0.719 / 1.035 |
+| extents-1000000 | 1 | 1002646 / 5127 | 1014795 / 63779 | 20131 / 41041 | 0.973 / 1.984 | 72013410 | 5363280 | 10383360 | 1.434 / 2.555 |
+| deep | 256 | 813 / 899 | 813 / 899 | 6539 / 7212 | 20.371 / 22.467 | 0 | 1162364 | 3956736 | 0.004 / 0.007 |
+| depth-limit | 256 | 816 / 901 | 816 / 901 | 6563 / 7236 | 20.445 / 22.542 | 0 | 1162424 | 3809280 | 0.004 / 0.005 |
+| capacity | 1 | 11 / 131090 | 11 / 131090 | 110 / 1048742 | 0.000 / 1.000 | 0 | 1160209 | 2490368 | 0.001 / 3.531 |
+
+The deep fixture has 255 nested folders and a bottom file: 256 entries at
+`max_depth = 256`, with successful walking and verification. `--depth-limit`
+has 256 folders and a bottom file at depth 257. It asserts `FSIMG_ELIMIT`,
+`FSIMG_RESOURCE_DEPTH`, limit 256, observed 257, after delivering 256 folders,
+including cleanup and an incomplete verification report. Both cases assert
+the metadata-pass and RSS bounds above. Linux and FreeBSD measurements are
+not included.
+
+For the extent comparison, doubling from 500,000 to 1,000,000 extents increases
+verification I/O calls from 26,051 to 63,779 (2.45 times), while source read calls
+increase from 2,576 to 5,127 (1.99 times) and charged memory stays at 5,363,280
+bytes. Verification time increases from 1.035 to 2.555 seconds (2.47 times).
+Scratch I/O grows when sorting requires another merge level; source reads
+remain proportional to the extent count.
+For one million versus ten million catalog files, verification source reads grow
+from 362,128 to 3,620,921 (10.00 times) and metadata passes stay at 2.513.
+Total verification I/O grows from 467,720 to 4,852,450 (10.37 times), including
+scratch I/O across merge levels. Peak charged memory remains 5,363,280 bytes.
+
 `test-hfsplus-write` plans, packs and emits through the unregistered
 `fsimg_hfsplus_write_format`: round trips through the reader and the verifier,
 an independent raw checker (`test/hfsplus-write-check.c`) written from the format
