@@ -451,7 +451,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/hfsplus-unicode-exceptions.txt tools/hfsplus/capture.rb \
 	tools/hfsplus/check-unicode-tables.rb \
 	tools/hfsplus/e8_interrupt.rb tools/hfsplus/fields.rb \
-	tools/hfsplus/index_keys.rb \
+	tools/hfsplus/index_keys.rb tools/hfsplus/ndif.rb \
 	tools/hfsplus/patch_record.rb tools/hfsplus/populate.rb \
 	tools/hfsplus/populate_attributes.rb tools/hfsplus/populate_compression.rb \
 	tools/hfsplus/populate_fragmentation.rb tools/hfsplus/populate_large.rb \

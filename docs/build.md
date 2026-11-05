@@ -1216,6 +1216,26 @@ export `HFSDUMP`, and install the `hfsprogs` and `sleuthkit` packages. The
 [HFS Plus research record](hfsplus-research.md) holds the native tool
 identities and the unprivileged procedure for attaching a raw image on macOS.
 
+The verification manifest, `test/hfsplus-verify-expected.tsv`, runs under
+`test/cli/hfsplus_verify_manifest_test.rb` with `FSIMG_HFSPLUS_NATIVE` naming the
+native captures, `FSIMG_HFSPLUS_CORPUS` the real-world specimens and
+`FSIMG_HFSPLUS_DECODED` a directory of images from containers fsimg does not
+read. The one such specimen is `mozilla-1.0-smi.img`, a self-mounting NDIF image.
+Mozilla's release is fetched by hand, its corpus record gives the source URL,
+and decoded locally:
+
+```sh
+ruby tools/hfsplus/ndif.rb mozilla-macosX-10.smi.bin \
+    "$FSIMG_HFSPLUS_DECODED/mozilla-1.0-smi.img"
+shasum -a 256 "$FSIMG_HFSPLUS_DECODED/mozilla-1.0-smi.img"
+# ab850b44d69d876cb63d9690997605e9e6e9b3dbb73933b7856b111f5a206b8a
+```
+
+The input's SHA-256 is
+`bb7197fbcb10a24d4f09978443a827a63d1e5d39cb8ee3e4e80371e9528726ca`. Neither file
+is redistributed; both stay local. The image is untrusted and is only ever read
+by fsimg as a file, never attached or mounted.
+
 `./test-fat --volume-labels` covers native formatter labels with the archive
 bit, malformed label placement/allocation/attributes, and verification's
 agreement of boot-sector and root labels. Automatic FAT sizing
