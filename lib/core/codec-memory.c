@@ -62,8 +62,9 @@ fsimg_codec_memory_error(const fsimg_codec_memory_t *memory,
 		return (fsimg_error_set(error, FSIMG_ENOMEM, 0,
 		    FSIMG_OP_ALLOCATE,
 		    "the codec library could not allocate its state"));
-	*error = memory->error;
-	return (error->status);
+	if (error != NULL)
+		*error = memory->error;
+	return (memory->error.status);
 }
 
 /* zlib's binding: its callbacks with zlib's exact signatures. */

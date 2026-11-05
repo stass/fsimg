@@ -1371,6 +1371,21 @@ namespace keys. Neither reads a capture at run time or writes a file.
 fixture: clean and damaged compressed files, broken overflow walks, truncated
 volumes and a rejected listing, with a plain sibling proving the walk went on.
 
+`test-hfsplus-faults` sweeps allocation, scratch open/resize/read/write, short
+positive source reads, premature EOF, source errors and cancellation separately
+through open, walk, content and reopened payload verification. Its generated
+indexed catalog includes overflow extents, attributes, inline and resource-fork
+zlib content, and a journal. Bounded metadata caches under a 16 MiB context
+budget force scratch use in each operation, asserted separately from setup.
+The public reader exposes decoded file content;
+raw resource forks and attribute values have no public read API. Preparation
+and verification validate those records. Short reads must match clean entry
+counts and content digests. Every attempt checks memory, scratch, descriptors
+and the private scratch directory after teardown, then opens and walks again
+on the same context. Run `./test-hfsplus-faults` in the build directory;
+optional stage and fault names select a single sweep, for example
+`./test-hfsplus-faults content allocation`.
+
 `test-hfsplus-write` plans, packs and emits through the unregistered
 `fsimg_hfsplus_write_format`: round trips through the reader and the verifier,
 an independent raw checker (`test/hfsplus-write-check.c`) written from the format

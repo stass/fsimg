@@ -372,7 +372,7 @@ Each experiment varies one property on disposable volumes:
 
 ### 7. Reader interoperability, scale and faults
 
-* `test/hfsplus-integration.sh.in` runs the oracles the build finds and
+* `test/hfsplus-integration.sh` runs the oracles the build finds and
   skips the others explicitly: fsimg on the native captures and on
   `mkfs.hfsplus` volumes; `hfsdump` and the Sleuth Kit compared with fsimg
   on the same volumes; the Linux kernel mount where a root Linux host
