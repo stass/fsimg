@@ -14,6 +14,10 @@
 
 /* An allocation block of 512 bytes to 2^31 bytes, every power of two. */
 #define HFSPLUS_BLOCK_SIZES		UINT32_C(0xfffffe00)
+/* N * B with N of 2^32 - 1 blocks of 2^31 bytes: what the reader accepts. The
+ * writer's narrower profile is enforced when it validates its options.
+ */
+#define HFSPLUS_VOLUME_MAX		((UINT64_C(0xffffffff)) << 31)
 
 _Static_assert(HFSPLUS_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
     "the HFS Plus link-target limit lies within the entry model's ceiling");
@@ -47,8 +51,8 @@ _Static_assert(HFSPLUS_WRITE_BLOCK_MIN == 1u << 9 &&
 	.allocation_unit_size_mask = HFSPLUS_BLOCK_SIZES,		\
 	.write_allocation_unit_size_mask = HFSPLUS_WRITE_BLOCK_SIZES,	\
 	.write_settings = FSIMG_SETTING_VOLUME_UUID,			\
-	.max_file_bytes = HFSPLUS_WRITE_VOLUME_MAX,			\
-	.max_volume_bytes = HFSPLUS_WRITE_VOLUME_MAX,			\
+	.max_file_bytes = HFSPLUS_VOLUME_MAX,				\
+	.max_volume_bytes = HFSPLUS_VOLUME_MAX,				\
 	.max_name_utf16_units = HFSPLUS_NAME_UNITS_MAX,			\
 	.max_label_bytes = HFSPLUS_LABEL_BYTES,				\
 	.max_link_target_bytes = HFSPLUS_LINK_TARGET_MAX

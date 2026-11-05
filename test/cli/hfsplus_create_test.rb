@@ -42,7 +42,7 @@ class HfsplusCreateTest < Minitest::Test
       assert_equal([512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536],
         format.fetch("write_cluster_bytes"), variant)
       %w[max_file_bytes max_volume_bytes].each do |field|
-        assert_equal(((2**32 - 1) * 65_536).to_s, format.fetch(field), "#{variant} #{field}")
+        assert_equal(((2**32 - 1) * 2**31).to_s, format.fetch(field), "#{variant} #{field}")
       end
     end
   end

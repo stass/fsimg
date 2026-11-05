@@ -626,15 +626,20 @@ bad blocks as `bad_clusters`.
 `validate` applies the format design's [settings table](design-hfsplus.md#settings-and-sizing):
 `allocation_unit_bytes` zero or a power of two from 512 to 65536;
 `sector_bytes` zero or 512; `volume_bytes` zero or a multiple of 512 whose
-block count is at most `2^32 - 1`, and no more than the capability record's
-`max_volume_bytes` of `(2^32 - 1) * 65536`, which also states `max_file_bytes`; `label` NULL, empty or at most 255 units
-after encoding, with no `/`; `epoch` within 1904 to 2040 in reproducible mode;
+block count is at most `2^32 - 1`, and no more than `(2^32 - 1) * 65536`; `label`
+NULL, empty or at most 255 units after encoding, with no `/`; `epoch` within 1904 to 2040 in reproducible mode;
 `volume_uuid` any value. `volume_serial` is accepted and ignored, as the format
 stores no 32-bit serial: it is a common write option outside the settings table
 that `fsimg_write_settings_check` holds to defaults, and the CLI fills it on
 every write, as for QNX6 and QNX4. The capability record's `write_settings` names
 `FSIMG_SETTING_VOLUME_UUID` alone, so the CLI generates a random identifier
 unless `-R` is given.
+
+The capability record states the union of reading and writing: its
+`max_volume_bytes` and `max_file_bytes` are `(2^32 - 1) * 2^31`, the bound of the
+block size the reader accepts. `validate` holds the writer to its narrower profile,
+and its `write_allocation_unit_size_mask` states that profile's block sizes.
+Planning refuses a file of more than `2^32 - 1` blocks at each candidate block size.
 
 ## Planning
 

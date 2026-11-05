@@ -621,7 +621,7 @@ check_header(tree_check_t *c, const unsigned char *raw)
 	EXPECT(h.node_size == m && h.max_key_length == s->max_key_length);
 	EXPECT(h.total_nodes == s->total_nodes);
 	EXPECT(h.free_nodes == s->total_nodes - s->used_nodes);
-	EXPECT(h.clump_size == hfsplus_tree_clump(s));
+	EXPECT(h.clump_size == (uint32_t)((uint64_t)s->total_nodes * m));
 	EXPECT(h.btree_type == 0 && h.key_compare_type == s->compare_type);
 	EXPECT(h.attributes == s->attributes);
 	EXPECT(be16(raw + m - 2) == 14);
@@ -1915,8 +1915,8 @@ test_real_capabilities(void)
 	for (unsigned variant = 0; variant < 2; variant++) {
 		const fsimg_format_info_t *info = &fsimg_hfsplus_format.variants[variant].info;
 
-		EXPECT(info->max_file_bytes == UINT64_C(0xffffffff0000));
-		EXPECT(info->max_volume_bytes == UINT64_C(0xffffffff0000));
+		EXPECT(info->max_file_bytes == (UINT64_C(0xffffffff) << 31));
+		EXPECT(info->max_volume_bytes == (UINT64_C(0xffffffff) << 31));
 		EXPECT(info->max_label_bytes == 510);
 		EXPECT(info->max_name_utf16_units == 255);
 		EXPECT(info->max_link_target_bytes == 1023);
@@ -2290,9 +2290,11 @@ test_volume_validate_limit(void)
 		fsimg_write_options_t options = options_for(65536);
 
 		named("volume validation limit variant=%u", variant);
-		options.volume_bytes = UINT64_C(0xffffffff0000);
+		options.volume_bytes = HFSPLUS_WRITE_VOLUME_MAX;
 		EXPECT(hfsplus_write_validate(&options, variant, NULL) == FSIMG_OK);
-		options.volume_bytes = UINT64_C(0xffffffff0200);
+		options.volume_bytes = HFSPLUS_WRITE_VOLUME_MAX + 512;
+		EXPECT(hfsplus_write_validate(&options, variant, NULL) == FSIMG_EINVAL);
+		options = options_for(131072);
 		EXPECT(hfsplus_write_validate(&options, variant, NULL) == FSIMG_EINVAL);
 	}
 }
