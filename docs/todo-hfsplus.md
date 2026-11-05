@@ -61,3 +61,8 @@ evidence and provenance.
   and can land first. Real specimen: the Firefox 1.5.0.1 UDZO DMG
   (archive.org; `~/fsimg-corpus/edge/dmg/`) holds a DDM, an APM and one
   `Apple_HFS` partition carrying HFS Plus.
+* [Low] **Linux kernel mount comparison** (`test/hfsplus-integration.rb`):
+  compare the fsimg baseline against a read-only Linux kernel mount in a root
+  Linux VM. The comparison and its first run belong together, including the
+  driver's name mapping as observed there, since unrun comparison code is
+  worth nothing.

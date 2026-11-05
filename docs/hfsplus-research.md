@@ -26,7 +26,7 @@ observation wins and the departure is listed in the plan.
 | hfsprogs `mkfs.hfsplus` and `fsck.hfsplus` | APSL-derived binaries, external | Linux formatter and checker oracle |
 | hfsfuse `hfsdump`, built from a pinned revision outside the tree | MIT and bundled terms, external | Independent reader |
 | The Sleuth Kit `fls`, `istat`, `icat` | Mixed licenses, external | Independent forensic reader |
-| Linux kernel `hfsplus` | GPL-2.0, reference only | Read-only mount comparison where a root Linux host exists; no code, declarations or identifiers enter the tree |
+| Linux kernel `hfsplus` | GPL-2.0, reference only | No harness compares against it; a mount comparison is [open work](todo-hfsplus.md). No code, declarations or identifiers enter the tree |
 
 ## Tool identities
 

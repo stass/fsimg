@@ -78,7 +78,7 @@ Non-goals:
 | hfsprogs `mkfs.hfsplus` and `fsck.hfsplus` | APSL-derived binaries, external | Linux formatter and checker oracle |
 | hfsfuse `hfsdump`, built from a pinned revision outside the tree | MIT and bundled terms, external | Independent reader |
 | The Sleuth Kit `fls`, `istat`, `icat` | Mixed licenses, external | Independent forensic reader |
-| Linux kernel `hfsplus` | GPL-2.0, reference only | Read-only mount comparison where a root Linux host exists; no code, declarations or identifiers enter the tree |
+| Linux kernel `hfsplus` | GPL-2.0, reference only | No harness compares against it; a mount comparison is [open work](todo-hfsplus.md). No code, declarations or identifiers enter the tree |
 
 ## Existing owners and common changes
 
@@ -375,8 +375,7 @@ Each experiment varies one property on disposable volumes:
 * `test/hfsplus-integration.sh` runs the oracles the build finds and
   skips the others explicitly: fsimg on the native captures and on
   `mkfs.hfsplus` volumes; `hfsdump` and the Sleuth Kit compared with fsimg
-  on the same volumes; the Linux kernel mount where a root Linux host
-  allows it.
+  on the same volumes.
 * Scale cases, each recording I/O calls, metadata passes, peak scratch and
   RSS: a catalog of ten million entries from a streaming generator; one
   directory wide enough to spill; a file whose fork has a million extents

@@ -340,6 +340,23 @@ name_bytes(const image_t *image, const object_t *object, unsigned char *p)
 	return (2 + 2 * length);
 }
 
+/*
+ * These hashes are summed so the walk order does not matter. FNV-1a of names
+ * differing in their low bits can sum equally: H("/00000000") + H("/00000003")
+ * == H("/00000001") + H("/00000002"), so duplicate copies of the middle two
+ * would pass. fmix64 spreads every input bit through the value before the sum.
+ */
+static uint64_t
+fmix64(uint64_t h)
+{
+	h ^= h >> 33;
+	h *= UINT64_C(0xff51afd7ed558ccd);
+	h ^= h >> 33;
+	h *= UINT64_C(0xc4ceb9fe1a85ec53);
+	h ^= h >> 33;
+	return (h);
+}
+
 static uint64_t
 path_hash(const char *path, bool folder)
 {
@@ -351,7 +368,7 @@ path_hash(const char *path, bool folder)
 	}
 	hash ^= (unsigned char)folder;
 	hash *= UINT64_C(1099511628211);
-	return (hash);
+	return (fmix64(hash));
 }
 
 static uint64_t
@@ -976,6 +993,9 @@ main(int argc, char **argv)
 	unsigned long long parsed;
 	char *end;
 
+	/* A collision lets duplicate copies of the middle two names pass. */
+	CHECK(path_hash("/00000000", false) + path_hash("/00000003", false) !=
+	    path_hash("/00000001", false) + path_hash("/00000002", false));
 	CHECK(argc == 2 || argc == 3);
 	if (strcmp(argv[1], "--catalog") == 0) {
 		shape = CATALOG;

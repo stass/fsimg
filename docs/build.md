@@ -1436,21 +1436,20 @@ as walk and verification passes over the metadata plus 150 fixed reads: catalog
 and wide 1 and 3, extents 2 and 4, deep and depth limit 21 and 23, capacity 1
 and 2.
 
-Reference macOS x86_64 measurements follow; timings come from one run. Paired values are walk / verify;
+Reference macOS x86_64 measurements follow; the two extents rows come from one run, the others from an earlier one. Paired values are walk / verify;
 resource sizes and RSS are bytes, metadata reads count delivered 512-byte sectors
 of the catalog, overflow tree and bitmap, and pass equivalents divide by the
 number of those sectors. Seconds include opening the reader and, for the extent
-walk, reading and checking all payload. The extents-1000000 verify row includes
-payload: amount 1000000, walk 1.375 s, verify 3.161 s, verify reads 1007630,
-verify metadata block reads 61065. Each profile runs in a separate process.
+walk, reading and checking all payload; extents verification reads payload too.
+Each profile runs in a separate process.
 
 | Case | Walk entries | Source calls | All I/O calls | Metadata sector reads | Metadata passes | Peak scratch | Peak charged memory | Peak RSS | Seconds |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | catalog-1000000 | 1000489 | 73961 / 362128 | 73961 / 467720 | 591723 / 2897045 | 0.513 / 2.513 | 144112012 | 5363280 | 14368768 | 5.296 / 11.077 |
 | catalog-10000000 | 10004883 | 739416 / 3620921 | 739416 / 4852450 | 5915363 / 28967394 | 0.513 / 2.513 | 1441003696 | 5363280 | 11894784 | 22.908 / 62.073 |
 | wide-100000 | 100000 | 7158 / 35972 | 17235 / 54860 | 57299 / 287800 | 0.497 / 2.497 | 24612794 | 5375825 | 10358784 | 0.392 / 0.808 |
-| extents-500000 | 1 | 501396 / 2576 | 507574 / 26051 | 10131 / 20634 | 0.978 / 1.992 | 36013218 | 5363280 | 10366976 | 0.719 / 1.035 |
-| extents-1000000 | 1 | 1002646 / 1007630 | 1014795 / not recorded | 20131 / 61065 | 0.973 / not recorded | 72013410 | 5363280 | 10383360 | 1.375 / 3.161 |
+| extents-500000 | 1 | 501396 / 503829 | 507574 / 533168 | 10131 / 30658 | 0.978 / 2.960 | 36013218 | 5428832 | 10407936 | 0.683 / 1.327 |
+| extents-1000000 | 1 | 1002646 / 1007630 | 1014795 / 1078007 | 20131 / 61065 | 0.973 / 2.952 | 72013410 | 5428832 | 10432512 | 1.367 / 3.024 |
 | deep | 256 | 813 / 899 | 813 / 899 | 6539 / 7212 | 20.371 / 22.467 | 0 | 1162364 | 3956736 | 0.004 / 0.007 |
 | depth-limit | 256 | 816 / 901 | 816 / 901 | 6563 / 7236 | 20.445 / 22.542 | 0 | 1162424 | 3809280 | 0.004 / 0.005 |
 | capacity | 1 | 11 / 131090 | 11 / 131090 | 110 / 1048742 | 0.000 / 1.000 | 0 | 1160209 | 2490368 | 0.001 / 3.531 |
@@ -1463,12 +1462,14 @@ including cleanup and an incomplete verification report. Both cases assert
 the metadata-pass and RSS bounds above. Linux and FreeBSD measurements are
 not included.
 
-For the extent comparison, doubling from 500,000 to 1,000,000 extents increases
-verification I/O calls from 26,051 to 63,779 (2.45 times), while source read calls
-increase from 2,576 to 5,127 (1.99 times) and charged memory stays at 5,363,280
-bytes. Verification time increases from 1.035 to 2.555 seconds (2.47 times).
-Scratch I/O grows when sorting requires another merge level; source reads
-remain proportional to the extent count.
+For the extent comparison, verification reads payload at both sizes. Doubling
+from 500,000 to 1,000,000 extents increases verification source reads from
+503,829 to 1,007,630 (2.00 times) and metadata block reads from 30,658 to
+61,065 (1.99 times), and charged memory stays at 5,428,832 bytes. Verification
+I/O calls increase from 533,168 to 1,078,007 (2.02 times) and time from 1.327
+to 3.024 seconds (2.28 times). The scratch I/O within those calls grows from
+29,339 to 70,377 (2.40 times), since sorting needs another merge level; source
+reads remain proportional to the extent count.
 For one million versus ten million catalog files, verification source reads grow
 from 362,128 to 3,620,921 (10.00 times) and metadata passes stay at 2.513.
 Total verification I/O grows from 467,720 to 4,852,450 (10.37 times), including
@@ -1515,10 +1516,11 @@ Zero-valence folders are not read because hfsdump hangs on them. File bytes and
 symlink targets are compared by streaming SHA-256 and byte count. Sleuth Kit
 runs `fsstat`, compares recursive `fls -r -p` paths and types, and streams `icat`
 bytes into the same digest check. Name comparisons preserve multiplicity,
-including collisions in fls's `^` spelling of stored slash and NUL. hfsdump's
-stored-NUL name prints as an empty line and cannot be addressed by any spelling;
-a member with U+2400 anywhere in its path receives a named skip, and a folder's
-listing is compared with that name's empty-line spelling. Sleuth Kit skips map-node
+including collisions in fls's `^` spelling of stored slash and NUL. hfsdump
+prints a name through `puts`, which stops at a stored NUL, and cannot address
+that name by any spelling. A member with U+2400 anywhere in its path receives
+a named skip. A folder's listing leaves out each child name holding U+2400, and
+each such name must account for exactly one line no other name claims. Sleuth Kit skips map-node
 catalogs because `fsstat` is too slow on them. For map-node shapes, hfsdump
 compares the root listing against all entries and reads one synthetic member.
 It prints a `CAP hfsdump` line because a process per member takes over 30 minutes
@@ -1535,18 +1537,6 @@ Each oracle and volume emits a `COMPARE` line with entry, file and byte counts
 and an agreement, finding or skip; `SUMMARY` counts every comparison row and
 explicit sources with no images as findings.
 
-On Linux as root, locally generated writer and mkfs volumes also receive a
-`mount -t hfsplus -o ro,loop` tree, type and byte comparison. This path has not
-been run. Names are decoded as UTF-8 and compared under NFC to accommodate the
-Linux driver's composed output. Native captures and corpus specimens are never
-mounted. Other hosts print `SKIP linux-mount: needs root on Linux`. Local mount
-refusals are findings except for the named environment errors: unknown filesystem
-type, loop-device setup failure, and operation not permitted or permission denied (EPERM). Mount and
-unmount commands each have 30 seconds; mounted file reads are not bounded.
-Cleanup tries ordinary unmount, then lazy unmount. A first unmount failure is a
-finding; if both fail, the process exits immediately and leaves the directory
-in place so temporary-directory cleanup cannot recurse into a live mount.
-
 The script exits 1 for findings or when an explicitly set
 `FSIMG_HFSPLUS_NATIVE` or `FSIMG_HFSPLUS_CORPUS` matches no images. It exits 77
 when no independent oracle completed an agreement: a fsimg baseline row alone
@@ -1562,14 +1552,12 @@ unset, used hfsdump at the hfsfuse pin `eed780cbe0445893de6f4aa8d74461da00756984
 | Native raw captures | 44 | hfsdump | 34 agree, 10 skip | 9 unavailable baselines; 1 ditto volume has incorrect type 8 resource bytes |
 | Native raw captures | 44 | Sleuth Kit | 28 agree, 16 skip | 9 unavailable baselines; 7 volumes encounter attribute, thread-position or compression limitations |
 | Local mkfs | 0 | All | Skip | mkfs.hfsplus unavailable |
-| Native raw captures | 44 | Linux mount | Skip | Host is Darwin; these sources are ineligible for mounting on every host |
 | Writer volumes | 32 | fsck_hfs (version hfs-715.160.9) | 32 agree | None |
 | Writer volumes | 32 | fsimg | 32 agree | None |
 | Writer volumes | 32 | hfsdump | 6 agree, 26 skip | Each tree volume holds the stored-NUL name, which hfsdump cannot address; its other members are compared |
 | Writer volumes | 32 | Sleuth Kit | 30 agree, 2 skip | The small nearly full volumes hit the thread-position limitation |
-| Writer volumes | 32 | Linux mount | Skip | Host is Darwin |
 
-This totals 197 agreements, 139 skips and no findings over 92,190,307 compared
+This totals 197 agreements, 63 skips and no findings over 92,190,307 compared
 bytes. No capture oracle timed out.
 Linux and FreeBSD reader runs are not recorded here.
 
@@ -1577,7 +1565,10 @@ The frozen oracle limitation table is restricted to observed names and errors.
 A member limitation applies only after that member's fsimg digest matches the
 native manifest. Without a manifest match there is no member exception.
 A volume-wide limitation has no member digest and matches on volume name and
-error alone; it may name a writer volume too.
+error alone; it may name a writer volume too. Its row is a skip, so it never
+counts as an independent agreement, but a skip does not fail the run, so the
+entry pins its exact diagnostic. On the writer volumes hfsdump, when present,
+still lists the affected folder.
 TSK exposes synthetic system forks, private HFS+ storage and journal objects
 that fsimg intentionally omits. TSK cannot read the fork-backed attribute on
 `/attr-sizes` in both 16 MiB e5 captures. fls gives up on a folder whose thread

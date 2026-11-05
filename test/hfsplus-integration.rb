@@ -7,7 +7,6 @@ require "tmpdir"
 require "timeout"
 require "json"
 require "digest"
-require "find"
 require "set"
 require "fileutils"
 require_relative "../tools/hfsplus/capture"
@@ -41,7 +40,8 @@ module HfsPlusIntegration
   # files. fsimg omits these format-owned objects.
   SLEUTH_HIDDEN = %r{\A/(?:\$(?:ExtentsFile|CatalogFile|BadBlockFile|AllocationFile|AttributesFile)|\.HFS\+ Private Directory Data\^|\^{4}HFS\+ Private Data|\.journal|\.journal_info_block)(?:/|\z)}.freeze
   # These are observed oracle defects, scoped to named volumes and errors.
-  # They yield skips, never agreements. No fsimg failure is exempted.
+  # They yield skips, never agreements. A skip does not fail the run, so each
+  # entry must pin its exact diagnostic.
   ORACLE_LIMITATIONS = [
     # TSK cannot read the fork-backed attribute on attr-sizes in either E5 tree.
     Limitation.new(oracle: "sleuth", volume: /\Ah-hfs(?:plus|x)-16777216-e5\z/,
@@ -49,6 +49,9 @@ module HfsPlusIntegration
     # TSK abandons folders whose thread starts in the last 520 catalog-node bytes.
     Limitation.new(oracle: "sleuth", volume: /\Ah-hfsplus-8388608-e4\z/,
       member: nil, error: /fls paths: missing=\["\/u1\/a"\] \(1\) extra=\[\] \(0\)/),
+    # writer_tree_check compares root names and /hello only, so it would not
+    # catch a phantom member here. The row is a skip, never an agreement, and
+    # hfsdump, when present, lists /dir/sub on these volumes.
     Limitation.new(oracle: "sleuth", volume: /\Ahfs(?:plus|x)-4096-nearlyfull-small-/,
       member: nil, error: /fls paths: missing=\["\/dir\/sub\/below"\] \(1\) extra=\[\] \(0\)/),
     # HFSX catalog thread lookup fails entirely in this capture.
@@ -67,15 +70,15 @@ module HfsPlusIntegration
       member: %r{\A/shape-(?:262145|393217|589825)\z}, error: /SHA256 differs:/)
   ].freeze
 
-  Kind = Data.define(:mode, :fls, :ftype)
+  Kind = Data.define(:mode, :fls)
   KINDS = {
-    "file" => Kind.new(mode: 0o100000, fls: "r", ftype: "file"),
-    "directory" => Kind.new(mode: 0o040000, fls: "d", ftype: "directory"),
-    "symlink" => Kind.new(mode: 0o120000, fls: "l", ftype: "link"),
-    "fifo" => Kind.new(mode: 0o010000, fls: "p", ftype: "fifo"),
-    "char_device" => Kind.new(mode: 0o020000, fls: "c", ftype: "characterSpecial"),
-    "block_device" => Kind.new(mode: 0o060000, fls: "b", ftype: "blockSpecial"),
-    "socket" => Kind.new(mode: 0o140000, fls: "s", ftype: "socket")
+    "file" => Kind.new(mode: 0o100000, fls: "r"),
+    "directory" => Kind.new(mode: 0o040000, fls: "d"),
+    "symlink" => Kind.new(mode: 0o120000, fls: "l"),
+    "fifo" => Kind.new(mode: 0o010000, fls: "p"),
+    "char_device" => Kind.new(mode: 0o020000, fls: "c"),
+    "block_device" => Kind.new(mode: 0o060000, fls: "b"),
+    "socket" => Kind.new(mode: 0o140000, fls: "s")
   }.freeze
   # hwf_add_mapnodes emits eight digits followed by 232 'n' bytes.
   MAPNODES_MEMBER = "/00000000#{'n' * 232}".freeze
@@ -179,8 +182,7 @@ module HfsPlusIntegration
       native: RUBY_PLATFORM.include?("darwin") && find_program("hdiutil") && find_program("fsck_hfs"),
       hfsdump: find_program(ENV.fetch("HFSDUMP", File.join(Dir.home, ".local/share/fsimg-oracles/hfsfuse/bin/hfsdump"))),
       sleuth: %w[fsstat fls icat].all? { find_program(_1) },
-      linux: find_program("fsck.hfsplus"),
-      mount: RUBY_PLATFORM.include?("linux") && Process.uid.zero? && find_program("mount") && find_program("umount")
+      linux: find_program("fsck.hfsplus")
     }
     candidates.each { |name, available| puts "SKIP: #{name} oracle absent" unless available }
     candidates
@@ -284,8 +286,6 @@ module HfsPlusIntegration
       puts "VERSION hfsdump hfsfuse #{pin} (build-hfsfuse.sh pin)"
     end
     puts "VERSION sleuth #{text(command('fls', '-V')).strip}" if available[:sleuth]
-    puts "VERSION linux-mount #{text(command('uname', '-sr')).strip}"
-    puts "SKIP linux-mount: needs root on Linux" unless available[:mount]
   end
 
   def verification_rows
@@ -436,13 +436,16 @@ module HfsPlusIntegration
       files: digests.length, bytes: digests.values.sum(&:bytes)))
   end
 
-  def same_paths(expected:, actual:, context:)
+  # Compares as multisets. unattributed counts the actual lines the caller
+  # cannot tie to an expected path; exactly that many must be left over.
+  def same_paths(expected:, actual:, context:, unattributed: 0)
     wanted, got = expected.tally, actual.tally
     missing = expected.uniq.flat_map { |path| [path] * [wanted[path] - got.fetch(path, 0), 0].max }
     extra = actual.uniq.flat_map { |path| [path] * [got[path] - wanted.fetch(path, 0), 0].max }
-    return if missing.empty? && extra.empty?
+    return if missing.empty? && extra.length == unattributed
 
-    raise Error, "#{context}: missing=#{missing.first(20).inspect} (#{missing.length}) extra=#{extra.first(20).inspect} (#{extra.length})"
+    suffix = unattributed.zero? ? "" : ", unattributed expected=#{unattributed}"
+    raise Error, "#{context}: missing=#{missing.first(20).inspect} (#{missing.length}) extra=#{extra.first(20).inspect} (#{extra.length})#{suffix}"
   end
 
   def same_digest(actual:, path:, snapshot:)
@@ -491,15 +494,9 @@ module HfsPlusIntegration
     Result.new(tally: tally, findings: findings, skips: skips, timeout: timeout)
   end
 
-  # Each oracle's catalog spelling is applied to listing
-  # expectations. fls can collapse distinct names, so paths remain a multiset.
-  def oracle_path(path, oracle:)
-    case oracle
-    when "hfsdump" then path.gsub("\u2400", "")
-    when "sleuth" then path.gsub(/[:\u2400]/, "^")
-    else path
-    end
-  end
+  # fls spells stored slash and NUL as ^ and can collapse distinct names, so
+  # paths remain a multiset.
+  def sleuth_path(path) = path.gsub(/[:\u2400]/, "^")
 
   def hfsdump_reader(tool:, volume:, snapshot:, invoke:, members: snapshot.entries)
     children = snapshot.entries.keys.group_by { File.dirname(_1) }
@@ -534,8 +531,12 @@ module HfsPlusIntegration
     else
       []
     end
-    expected = children.map { oracle_path(File.basename(_1), oracle: "hfsdump") }
-    same_paths(expected: expected, actual: names, context: "#{path.inspect}: hfsdump children")
+    # hfsdump prints a name through puts, which stops at a stored NUL, so its
+    # line is not that name. Such a name leaves the comparison, as its member
+    # does in hfsdump_reader: it accounts for one line no other name claims,
+    # whatever that line holds, and fls, when present, compares the name itself.
+    nul_names, plain = children.map { File.basename(_1) }.partition { _1.include?("\u2400") }
+    same_paths(expected: plain, actual: names, context: "#{path.inspect}: hfsdump children", unattributed: nul_names.length)
     Tally.new(entries: 1)
   end
 
@@ -565,11 +566,11 @@ module HfsPlusIntegration
       match = /\A(\S+)\s+(\S+):\t(.*)\n?\z/.match(line)
       raise Error, "unrecognized fls record: #{line.inspect}" unless match
 
-      [oracle_path("/#{match[3]}", oracle: "sleuth"), { inode: match[2], type: match[1] }]
+      [sleuth_path("/#{match[3]}"), { inode: match[2], type: match[1] }]
     end.reject { |path, _| SLEUTH_HIDDEN.match?(path) }
     skips = []
     begin
-      expected = snapshot.entries.keys.map { oracle_path(_1, oracle: "sleuth") }
+      expected = snapshot.entries.keys.map { sleuth_path(_1) }
       same_paths(expected: expected, actual: nodes.map(&:first), context: "fls paths")
     rescue Error => e
       raise unless known_limitation?(oracle: "sleuth", volume: volume, path: nil, message: e.message)
@@ -578,9 +579,9 @@ module HfsPlusIntegration
     end
     # Preserve colliding fls spellings and consume one inode per fsimg member.
     by_path = nodes.group_by(&:first).transform_values { _1.map(&:last) }
-    reported = snapshot.entries.select { |path, _| by_path.key?(oracle_path(path, oracle: "sleuth")) }
+    reported = snapshot.entries.select { |path, _| by_path.key?(sleuth_path(path)) }
     result = compare_members(reported, oracle: "sleuth", volume: volume, snapshot: snapshot) do |path, entry|
-      node = by_path.fetch(oracle_path(path, oracle: "sleuth")).shift
+      node = by_path.fetch(sleuth_path(path)).shift
       type = KINDS.fetch(entry.fetch("kind")).fls
       raise Error, "fls type #{node[:type]}, fsimg #{type}" unless node.fetch(:type).split("/").last == type
 
@@ -591,96 +592,6 @@ module HfsPlusIntegration
       tally
     end
     result.with(skips: skips + result.skips)
-  end
-
-  MOUNT_ENVIRONMENT_ERRORS = [
-    /unknown filesystem type/i,
-    /(?:failed to (?:set up|setup) loop device|cannot (?:find|set up).*loop device)/i,
-    /operation not permitted|permission denied|\bEPERM\b/i
-  ].freeze
-
-  def mount_environment_error?(message) = MOUNT_ENVIRONMENT_ERRORS.any? { _1.match?(message) }
-
-  def mounted?(mountpoint) = File.stat(mountpoint).dev != File.stat(File.dirname(mountpoint)).dev
-
-  def mount_volume(image:, mountpoint:, timeout:)
-    command("mount", "-t", "hfsplus", "-o", "ro,loop", image, mountpoint, timeout: timeout)
-  rescue Error => e
-    raise Skip, "mount environment: #{e.message}" if mount_environment_error?(e.message)
-
-    raise
-  end
-
-  def with_mount(image:, mountpoint:, timeout: 30)
-    result = nil
-    begin
-      mount_volume(image: image, mountpoint: mountpoint, timeout: timeout)
-      result = yield
-    ensure
-      earlier_error = $!
-      if mounted?(mountpoint)
-        problem = unmount_volume(mountpoint)
-        if problem && earlier_error
-          warn "FINDING unmount failed while handling #{earlier_error.message}: #{problem}"
-        elsif problem
-          result = result.with(findings: result.findings + [problem])
-        end
-      end
-    end
-    result
-  end
-
-  def mounted_name(path) = path.dup.force_encoding("UTF-8").unicode_normalize(:nfc)
-
-  def mounted_reader(volume:, snapshot:, directory:)
-    raise Skip, "only locally generated volumes may be mounted" unless volume.local
-
-    mountpoint = File.join(directory, "mount")
-    Dir.mkdir(mountpoint) unless File.directory?(mountpoint)
-    with_mount(image: volume.image, mountpoint: mountpoint) do
-      # C-locale directory names are bytes. Linux composes Unicode and exposes
-      # stored slash/NUL as ':'/U+2400, like fsimg; NFC compares those spellings.
-      hosts = []
-      Find.find(mountpoint) { hosts << _1 unless _1 == mountpoint }
-      names = hosts.map { |host| [mounted_name(host.delete_prefix(mountpoint)), host] }
-      paths = names.group_by(&:first).transform_values { _1.map(&:last) }
-      expected = snapshot.entries.keys.map { _1.unicode_normalize(:nfc) }
-      same_paths(expected: expected, actual: names.map(&:first), context: "mounted paths")
-      compare_members(snapshot.entries, oracle: "linux-mount", volume: volume, snapshot: snapshot) do |path, entry|
-        host = paths.fetch(path.unicode_normalize(:nfc)).shift
-        stat = File.lstat(host)
-        kind = KINDS.fetch(entry.fetch("kind")).ftype
-        raise Error, "mounted type #{stat.ftype}, fsimg #{kind}" unless stat.ftype == kind
-
-        tally = Tally.new(entries: 1)
-        if snapshot.digests.key?(path)
-          digest = if stat.symlink?
-            bytes = File.readlink(host).b
-            FileDigest.new(sha256: Digest::SHA256.hexdigest(bytes), bytes: bytes.bytesize)
-          else
-            FileDigest.new(sha256: Digest::SHA256.file(host).hexdigest, bytes: stat.size)
-          end
-          tally += same_digest(actual: digest, path: path, snapshot: snapshot)
-        end
-        tally
-      end
-    end
-  end
-
-  # Return the first failure after releasing the mount. If neither operation
-  # succeeds, bypass mktmpdir cleanup to prevent recursion into a live mount.
-  def unmount_volume(mountpoint)
-    command("umount", mountpoint)
-    nil
-  rescue Error => e
-    begin
-      command("umount", "-l", mountpoint)
-    rescue Error => lazy_error
-      warn "FINDING unmount failed: #{e.message}; lazy unmount failed: #{lazy_error.message}; leaving #{mountpoint} in place"
-      $stdout.flush
-      exit!(1)
-    end
-    "unmount failed: #{e.message}"
   end
 
   def timeout_skip?(oracle:, local:) = oracle != "fsimg" && !local
@@ -751,7 +662,7 @@ module HfsPlusIntegration
       result
     end
     snapshot = baseline.value
-    checks = { "hfsdump" => !!available[:hfsdump], "sleuth" => !!available[:sleuth], "linux-mount" => !!available[:mount] }
+    checks = { "hfsdump" => !!available[:hfsdump], "sleuth" => !!available[:sleuth] }
     comparisons = checks.map do |oracle, present|
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + READER_TIMEOUT
       invoke = lambda do |operation, *args|
@@ -762,7 +673,7 @@ module HfsPlusIntegration
       end
 
       comparison(oracle: oracle, volume: volume) do
-        raise Skip, "oracle absent or host ineligible" unless present
+        raise Skip, "oracle absent" unless present
         raise Skip, "fsimg baseline unavailable" unless snapshot
         if oracle == "sleuth" && mapnodes?(shape)
           raise Skip, "fsstat is too slow on a catalog of this size"
@@ -777,7 +688,6 @@ module HfsPlusIntegration
           end
           hfsdump_reader(tool: available[:hfsdump], volume: volume, snapshot: snapshot, invoke: invoke, members: members)
         when "sleuth" then sleuth_reader(volume: volume, snapshot: snapshot, invoke: invoke)
-        when "linux-mount" then mounted_reader(volume: volume, snapshot: snapshot, directory: directory)
         end
       end
     end

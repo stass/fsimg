@@ -141,89 +141,58 @@ class HfsPlusIntegrationTest < Minitest::Test
     assert_equal 1, result.tally.entries
   end
 
-  def test_mount_environment_errors_are_distinct_from_real_refusals
-    ["unknown filesystem type 'hfsplus'", "failed to setup loop device", "Operation not permitted", "permission denied"].each do |message|
-      assert H.mount_environment_error?(message), message
+  # The first three lines are what puts prints for "\u2400ab", "a\u2400b",
+  # and "ab\u2400"; the last two are the plain names.
+  PUTS_LINES = ["", "a", "ab", "a", "plain"].freeze
+
+  private def nul_listing_result(lines)
+    entries = ["/\u2400ab", "/a\u2400b", "/ab\u2400", "/a", "/plain"].to_h { [_1, { "kind" => "file" }] }
+    snapshot = H::Snapshot.new(entries: entries, digests: {}, matched: Set.new)
+    invoke = lambda do |_operation, _tool, _image, action, path|
+      assert_equal "/", path
+      action == "stat" ? "type: folder\ncnid: 2\nvalence: 5\n" : lines.map { "#{_1}\n" }.join
     end
-    refute H.mount_environment_error?("bad superblock")
+
+    H.hfsdump_reader(tool: "unused", volume: volume, snapshot: snapshot,
+      invoke: invoke, members: {})
   end
 
-  # PATH contains only disposable scripts; mounted? supplies the observed state.
-  def with_mount_stubs(mount:, umount:, mounted:)
-    Dir.mktmpdir("hfs-mount-", ENV["TMPDIR"]) do |directory|
-      log = File.join(directory, "calls")
-      { "mount" => mount, "umount" => umount }.each do |name, body|
-        path = File.join(directory, name)
-        File.write(path, "#!/bin/sh\necho #{name} \"$@\" >> '#{log}'\n#{body}\n")
-        File.chmod(0o700, path)
-      end
-      original_path = ENV["PATH"]
-      begin
-        ENV["PATH"] = directory
-        stubbed(H, :mounted?, mounted) { yield directory, log }
-      ensure
-        ENV["PATH"] = original_path
-      end
-    end
+  def test_hfsdump_listing_leaves_out_names_holding_a_stored_nul
+    result = nul_listing_result(PUTS_LINES)
+    assert_empty result.findings
+    assert_equal 1, result.tally.entries
   end
 
-  def test_refused_mount_is_a_finding
-    with_mount_stubs(mount: "echo 'bad superblock' >&2; exit 1", umount: "exit 0", mounted: false) do |directory, log|
-      output, errors = capture_io do
-        row = H.comparison(oracle: "linux-mount", volume: volume) do
-          H.with_mount(image: "unused", mountpoint: directory) { flunk "mount refused" }
-        end
-        assert_equal "finding", row.verdict
-        assert_includes row.findings.first, "bad superblock"
-      end
-      assert_includes errors, "FINDING"
-      refute_includes output, "SKIP"
-      refute_includes File.read(log), "umount"
+  def test_hfsdump_listing_finds_a_wrong_plain_name_beside_stored_nul_names
+    result = nul_listing_result(["", "a", "ab", "a", "other"])
+    assert_equal 1, result.findings.length
+    assert_includes result.findings.first, 'missing=["plain"]'
+  end
+
+  def test_hfsdump_listing_finds_wrong_line_count_beside_stored_nul_names
+    [["", "a", "ab", "a", "plain", "extra"], ["a", "ab", "a", "plain"]].each do |listing|
+      result = nul_listing_result(listing)
+      assert_equal 1, result.findings.length, listing.inspect
     end
   end
 
-  def test_environment_mount_refusal_is_a_skip
-    with_mount_stubs(mount: "echo 'permission denied' >&2; exit 1", umount: "exit 0", mounted: false) do |directory, _log|
-      capture_io do
-        row = H.comparison(oracle: "linux-mount", volume: volume) do
-          H.with_mount(image: "unused", mountpoint: directory) { flunk "mount refused" }
-        end
-        assert_equal "skip", row.verdict
-        assert_empty row.findings
-      end
-    end
+  def test_hfsdump_listing_does_not_check_the_line_of_a_stored_nul_name
+    result = nul_listing_result(["x", "y", "z", "a", "plain"])
+    assert_empty result.findings
   end
 
-  def test_failed_unmount_followed_by_lazy_success_is_a_finding
-    with_mount_stubs(mount: "exit 0", umount: '[ "$1" = "-l" ]', mounted: true) do |directory, log|
-      result = H.with_mount(image: "unused", mountpoint: directory) { H::Result.new }
-      assert_equal 1, result.findings.length
-      assert_includes result.findings.first, "unmount failed"
-      assert_equal ["mount", "umount", "umount"], File.readlines(log).map { _1.split.first }
-      assert_includes File.readlines(log).last, "-l"
-    end
-  end
+  def test_nearlyfull_sleuth_limitation_makes_the_row_a_skip
+    volume = volume(name: "hfsplus-4096-nearlyfull-small-auto", source: "writer")
+    entries = ["/dir/sub/below", "/hello"].to_h { [_1, { "kind" => "file" }] }
+    snapshot = H::Snapshot.new(entries: entries, digests: {}, matched: Set.new)
+    invoke = ->(_operation, *args) { args.first == "fsstat" ? "" : "r/r 16:\thello\n" }
 
-  def test_failed_unmount_preserves_earlier_error
-    with_mount_stubs(mount: "exit 0", umount: '[ "$1" = "-l" ]', mounted: true) do |directory, log|
-      original = H::Error.new("earlier error")
-      _output, errors = capture_io do
-        error = assert_raises(H::Error) do
-          H.with_mount(image: "unused", mountpoint: directory) { raise original }
-        end
-        assert_same original, error
+    capture_io do
+      row = H.comparison(oracle: "sleuth", volume: volume) do
+        H.sleuth_reader(volume: volume, snapshot: snapshot, invoke: invoke)
       end
-      assert_includes errors, "unmount failed while handling earlier error"
-      assert_includes File.readlines(log).last, "-l"
-    end
-  end
-
-  def test_mount_timeout_with_live_mount_unmounts
-    with_mount_stubs(mount: "while :; do :; done", umount: "exit 0", mounted: true) do |directory, log|
-      assert_raises(H::CommandTimeout) do
-        H.with_mount(image: "unused", mountpoint: directory, timeout: 1) { flunk "mount timed out" }
-      end
-      assert_equal ["mount", "umount"], File.readlines(log).map { _1.split.first }
+      assert_equal "skip", row.verdict
+      assert_empty row.findings
     end
   end
 
@@ -267,29 +236,6 @@ class HfsPlusIntegrationTest < Minitest::Test
     end
   end
 
-  def test_mounted_reader_preserves_colliding_normalized_names
-    entries = { "/caf\u00e9" => { "kind" => "file" }, "/cafe\u0301" => { "kind" => "file" } }
-    snapshot = H::Snapshot.new(entries: entries, digests: {}, matched: Set.new)
-    visited = []
-    Dir.mktmpdir("hfs-names-", ENV["TMPDIR"]) do |directory|
-      mountpoint = File.join(directory, "mount")
-      hosts = entries.keys.map { mountpoint + _1 }
-      traverse = ->(_root, &visit) { hosts.each { visit.call(_1) } }
-      stat = ->(host) { visited << host; Struct.new(:ftype).new("file") }
-      mounting = ->(**_options, &read) { read.call }
-      stubbed(H, :with_mount, mounting) do
-        stubbed(Find, :find, traverse) do
-          stubbed(File, :lstat, stat) do
-            result = H.mounted_reader(volume: volume, snapshot: snapshot, directory: directory)
-            assert_empty result.findings
-            assert_equal 2, result.tally.entries
-          end
-        end
-      end
-      assert_equal hosts, visited
-    end
-  end
-
   def test_each_oracle_has_its_own_volume_budget
     snapshot = H::Snapshot.new(entries: {}, digests: {}, matched: Set.new)
     baseline = H::Result.new(value: snapshot)
@@ -313,8 +259,8 @@ class HfsPlusIntegrationTest < Minitest::Test
             stubbed(H, :sleuth_reader, sleuth) do
               capture_io do
                 rows = H.reader_volume(fsimg: "unused", volume: volume,
-                  available: { hfsdump: "hfsdump", sleuth: true, mount: false }, directory: "unused")
-                assert_equal %w[agree agree agree skip], rows.map(&:verdict)
+                  available: { hfsdump: "hfsdump", sleuth: true }, directory: "unused")
+                assert_equal %w[agree agree agree], rows.map(&:verdict)
               end
             end
           end
