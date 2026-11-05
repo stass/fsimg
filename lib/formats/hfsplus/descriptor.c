@@ -42,7 +42,7 @@ _Static_assert(HFSPLUS_WRITE_BLOCK_MIN == 1u << 9 &&
     "the writer's capability record states its block size range");
 
 #define HFSPLUS_VARIANT_INFO(variant_name)				\
-	.name = (variant_name),						\
+	.name = variant_name,						\
 	.entry_kinds = HFSPLUS_KINDS,					\
 	.metadata_fields = FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
 	    FSIMG_META_ACCESSED | FSIMG_META_CHANGED |			\
