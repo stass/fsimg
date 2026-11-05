@@ -52,8 +52,8 @@ content interface. Extent lookup alone never authorizes exposing them.
 | Driver | Content domain, initialized length, and resolution of a logical offset below it to one validated extent containing that offset: mapped, zero or held |
 | Extent index (optional, `lib/meta/`) | Encoded extent records, bounded growth, ordering and coverage checks, sequential and binary lookup, cleanup |
 
-Delivery calls one driver operation: resolve offset `o < initialized` to an
-extent `(logical_offset, image_offset, length)` with
+Delivery and the salvage plan reach one driver operation through
+`fsimg_reader_resolve`: resolve offset `o < initialized` to an extent `(logical_offset, image_offset, length)` with
 `logical_offset <= o < logical_offset + length`. The extent's kind is one of a
 closed set, which no field stores. Delivery derives it in one place, testing in
 this order:
@@ -72,8 +72,8 @@ index, so a new field would be indeterminate in each driver not written for
 it, and clearing the extent before `resolve` does not survive such a copy.
 Neither test depends on a field a driver can forget. `image_offset` is what
 every mapped extent must already set. `reader->held` is set only by a driver
-that holds bytes, and delivery reads it into a local and clears it as soon as
-`resolve` returns, so it is NULL outside that call and a borrowed pointer never
+that holds bytes, and `fsimg_reader_resolve` takes it into a local and clears it
+as soon as `resolve` returns, so it is NULL outside that call and a borrowed pointer never
 enters a record the index stores.
 
 The driver chooses how to answer: a sequential chain cursor, a direct
@@ -109,8 +109,8 @@ length cannot describe them, since it covers only a tail. A driver therefore
 resolves such a range to an extent whose image offset is `FSIMG_EXTENT_ZERO`,
 which is `UINT64_MAX`. No mapped extent, called a data extent below, can carry
 that value, because every one lies inside a domain whose end fits in
-`uint64_t`. Delivery clears the extent before calling `resolve`, so a driver
-that sets no image offset never produces the mark.
+`uint64_t`. `fsimg_reader_resolve` clears the extent before calling `resolve`, so
+a driver that sets no image offset never produces the mark.
 
 * Delivery checks a zero extent's containment exactly as a data extent's,
   then fills the piece with zeros. It never reads storage for it and applies

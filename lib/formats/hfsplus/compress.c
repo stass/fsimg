@@ -605,6 +605,7 @@ chunk_load(fsimg_reader_t *reader, uint64_t chunk, fsimg_error_t *error)
 	size_t expected, stored;
 	fsimg_status_t status;
 
+	/* A failed decode may have overwritten output, so never leave it marked valid. */
 	window->valid = false;
 	status = chunk_table(hfsplus->current.compression) == CHUNK_TABLE_RESOURCE ?
 	    chunk_locate(reader, chunk, &offset, &stored, error) :

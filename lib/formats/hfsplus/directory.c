@@ -39,6 +39,12 @@
 #define PAYLOAD_FOLDER_COUNT	56
 #define PAYLOAD_BYTES		60u
 
+/* The compression byte of a child salvage admits although its attributes were
+ * rejected. hfsplus_compress_known refuses it, so payload_decode rejects the
+ * entry at replay, where the loss is reported under the child's own name.
+ */
+#define CHILD_COMPRESSION_REJECTED	0xffu
+
 _Static_assert(PAYLOAD_BYTES <= FSIMG_DIRECTORY_PAYLOAD_BYTES,
     "the HFS Plus payload fits the common bound");
 _Static_assert(HFSPLUS_KEY_BYTES_MAX <= FSIMG_DIRECTORY_KEY_BYTES,
@@ -383,7 +389,10 @@ admit_child(hfsplus_prepare_t *prepare, hfsplus_child_t *child,
  * A stub takes its indirect node's record for everything but the name. A
  * compressed file's size is the attribute's, the data fork being empty, and the
  * resource fork that holds its chunks is content, not extra data. At size 0 no
- * read reaches its fork or payload, so whatever they hold is extra data.
+ * read reaches its fork or payload, so whatever they hold is extra data. Under
+ * salvage, attributes that fail to decode cost this child rather than its
+ * directory's listing: a compressed file is admitted for replay to reject, and any
+ * other child is admitted with its attributes counted as extra data.
  */
 static fsimg_status_t
 prepare_named(hfsplus_prepare_t *prepare, const hfsplus_record_t *record,
@@ -419,12 +428,18 @@ prepare_named(hfsplus_prepare_t *prepare, const hfsplus_record_t *record,
 	child.record = location->record;
 	status = attributes_classify(reader, &primary, child.id, &compressed,
 	    &scan, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (compressed) {
+	if (status == FSIMG_OK && compressed)
 		status = hfsplus_compress_check(&primary.file, &scan, error);
-		if (status != FSIMG_OK)
+	if (status != FSIMG_OK) {
+		if (!fsimg_reader_decode_rejected(reader, error, status))
 			return (status);
+		fsimg_error_clear(error);
+		if (compressed) {
+			child.compression = CHILD_COMPRESSION_REJECTED;
+			return (admit_child(prepare, &child, error));
+		}
+		scan.stored = true;
+	} else if (compressed) {
 		child.size = scan.cmpf.uncompressed_size;
 		child.compression = (uint8_t)scan.cmpf.type;
 	}

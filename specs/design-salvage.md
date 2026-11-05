@@ -35,11 +35,14 @@ the domain or slice. A format supplies its resolve and a replay that keeps the
 allocation before the damage instead of rejecting the entry. A planned file is
 shortened in the current entry, so its charge, output size and reads see only
 the prefix, and a garbage size field neither spends the budget nor ends the walk.
-A clean file over the budget is terminal.
+A prefix past the output budget cannot be charged whatever follows it, so the
+walk stops there with the charge's limit error, and a clean file over the budget
+is terminal.
 
 An extent a driver holds decoded instead of mapping reads no image, so neither
 the domain nor the slice clips it: every byte of it is available, and damage to
-what it was decoded from is a rejected lookup. Planning such a file decodes it.
+what it was decoded from is a rejected lookup. Planning such a file decodes it, up
+to the extent that crosses the output budget.
 
 A linked cluster allocation keeps each cluster once. A cluster belongs to the
 prefix when its own link reads and validates, its allocation bit included, and

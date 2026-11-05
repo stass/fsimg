@@ -454,8 +454,15 @@ first chunk that a damaged table entry, a stopped or truncated resource fork or
 a failed decode rejects, and no later chunk is recovered. A resource fork's
 headers and an inline payload are checked at content open, so damage there loses
 the whole file. Copying the prefix decodes its chunks again, which charges
-their work a second time. Damage a listing finds, including a compression
-attribute or type it rejects, costs that directory's listing.
+their work a second time.
+
+Attributes are read while a directory is listed, and their damage costs one
+child, not the listing. A compressed file whose attributes the scan or the
+compression check rejects, a well-formed file of a type the driver does not
+decode included, is admitted with a compression byte that replay refuses, so
+replay reports the loss under the file's own name and the walk goes on. Any other
+child whose scan is rejected is extracted and marked as having extra data. Damage
+a listing finds in a child's name or catalog record costs that directory's listing.
 
 ## Verification
 

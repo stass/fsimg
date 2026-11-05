@@ -20,6 +20,7 @@
 
 #include "fsimg.h"
 #include "hfsplus-gen.h"
+#include "lzfse-vectors.h"
 #include "internal.h"
 #include "test.h"
 
@@ -49,7 +50,7 @@ static unsigned output_number;
 
 typedef struct file_fixture {
 	gen_plan_t plan;
-	gen_object_t objects[3];
+	gen_object_t objects[6];
 	gen_attr_value_t attribute;
 	unsigned char header[1024];
 	unsigned char *plain;
@@ -58,8 +59,23 @@ typedef struct file_fixture {
 	size_t resource_size;
 } file_fixture_t;
 
+/* Payload bounds exclude framing and tables, so each counted read is one
+ * encoded chunk. Cancellation becomes pending only once planning reads data.
+ */
+typedef struct extraction_control {
+	uint64_t output_limit;
+	uint64_t work_limit;
+	uint64_t payload_start;
+	uint64_t payload_end;
+	bool cancel_on_payload;
+} extraction_control_t;
+
 typedef struct extraction {
+
 	const gen_image_t *image;
+	const extraction_control_t *control;
+	unsigned payload_reads;
+	bool extra_data;
 	fsimg_status_t status;
 	fsimg_error_t error;
 	uint64_t salvage_losses;
@@ -89,18 +105,18 @@ load_le32(const unsigned char *p)
  * offset-only table gen_compressed_resource supplies for type 8.
  */
 static unsigned char *
-zlib_resource(const gen_compressed_chunk_t chunks[CHUNKS], size_t *size)
+zlib_resource(const gen_compressed_chunk_t *chunks, size_t count, size_t *size)
 {
-	size_t cursor = 264 + 8 * CHUNKS;
+	size_t cursor = 264 + 8 * count;
 	unsigned char *out;
 
 	*size = cursor + 50;
-	for (size_t i = 0; i < CHUNKS; i++)
+	for (size_t i = 0; i < count; i++)
 		*size += chunks[i].length;
 	out = calloc(1, *size);
 	CHECK(out != NULL);
-	store_le(out + 260, CHUNKS, 4);
-	for (size_t i = 0; i < CHUNKS; i++) {
+	store_le(out + 260, count, 4);
+	for (size_t i = 0; i < count; i++) {
 		store_le(out + 264 + 8 * i, cursor - 260, 4);
 		store_le(out + 268 + 8 * i, chunks[i].length, 4);
 		bcopy(chunks[i].bytes, out + cursor, chunks[i].length);
@@ -118,13 +134,14 @@ zlib_resource(const gen_compressed_chunk_t chunks[CHUNKS], size_t *size)
  * bytes. No expected output is obtained through the library's decoder.
  */
 static void
-file_fixture_init(file_fixture_t *f, unsigned type, bool stored)
+file_fixture_chunks(file_fixture_t *f, unsigned type, bool stored, size_t count)
 {
-	gen_compressed_chunk_t chunks[CHUNKS];
-	unsigned char *encoded[CHUNKS];
+	gen_compressed_chunk_t chunks[64];
+	unsigned char *encoded[64];
 
+	CHECK(count <= 64);
 	bzero(f, sizeof(*f));
-	f->size = type == 3 ? 127 : CHUNKS * CHUNK;
+	f->size = type == 3 ? 127 : count * CHUNK;
 	f->plain = malloc(f->size);
 	CHECK(f->plain != NULL);
 	for (size_t i = 0; i < f->size; i++)
@@ -162,7 +179,7 @@ file_fixture_init(file_fixture_t *f, unsigned type, bool stored)
 		f->attribute.size += length;
 		return;
 	}
-	for (size_t i = 0; i < CHUNKS; i++) {
+	for (size_t i = 0; i < count; i++) {
 		uLongf length = compressBound(CHUNK);
 
 		encoded[i] = malloc(length + 1);
@@ -179,12 +196,18 @@ file_fixture_init(file_fixture_t *f, unsigned type, bool stored)
 		    .length = length };
 	}
 	f->resource = type == 8 ?
-	    gen_compressed_resource(chunks, CHUNKS, &f->resource_size) :
-	    zlib_resource(chunks, &f->resource_size);
+	    gen_compressed_resource(chunks, count, &f->resource_size) :
+	    zlib_resource(chunks, count, &f->resource_size);
 	f->objects[1].resource = f->resource;
 	f->objects[1].resource_size = f->resource_size;
-	for (size_t i = 0; i < CHUNKS; i++)
+	for (size_t i = 0; i < count; i++)
 		free(encoded[i]);
+}
+
+static void
+file_fixture_init(file_fixture_t *f, unsigned type, bool stored)
+{
+	file_fixture_chunks(f, type, stored, CHUNKS);
 }
 
 static void
@@ -198,9 +221,14 @@ static fsimg_status_t
 memory_read(void *argument, uint64_t offset, void *buffer, size_t length,
     size_t *count, fsimg_error_t *error)
 {
-	const gen_image_t *image = ((extraction_t *)argument)->image;
+	extraction_t *result = argument;
+	const gen_image_t *image = result->image;
 
 	(void)error;
+	if (result->control != NULL &&
+	    offset >= result->control->payload_start &&
+	    offset < result->control->payload_end)
+		result->payload_reads++;
 	CHECK(offset <= image->length && length <= image->length - offset);
 	bcopy(image->bytes + offset, buffer, length);
 	*count = length;
@@ -231,9 +259,28 @@ record_loss(void *argument, const char *path, uint32_t kind)
 	fprintf(stderr, "%s: loss %s kind %#x\n", current_test, path, kind);
 }
 
+static bool
+cancel_after_payload(void *argument)
+{
+	extraction_t *result = argument;
+
+	return (result->control->cancel_on_payload && result->payload_reads != 0);
+}
+
+static void
+record_entry(void *argument, const fsimg_entry_t *entry)
+{
+	extraction_t *result = argument;
+
+	if (strcmp(entry->path, "/f") == 0)
+		result->extra_data =
+		    (entry->metadata.valid & FSIMG_META_EXTRA_DATA) != 0;
+}
+
 /* All scratch and extracted output live beneath the runner's private root. */
 static fsimg_status_t
-extract_image(const gen_image_t *image, extraction_t *result)
+extract_image_controlled(const gen_image_t *image, extraction_t *result,
+    const extraction_control_t *control)
 {
 	fsimg_options_t options;
 	fsimg_extract_options_t extract;
@@ -246,12 +293,22 @@ extract_image(const gen_image_t *image, extraction_t *result)
 
 	bzero(result, sizeof(*result));
 	result->image = image;
+	result->control = control;
 	result->output = -1;
 	fsimg_options_init(&options);
 	options.memory_bytes = 16 * 1024 * 1024;
 	options.scratch_directory_fd = fixture_root;
 	options.loss = record_loss;
 	options.loss_argument = result;
+	options.entry = record_entry;
+	options.entry_argument = result;
+	if (control != NULL) {
+		if (control->output_limit != 0)
+			options.max_output_bytes = control->output_limit;
+		options.max_work = control->work_limit;
+		options.cancelled = cancel_after_payload;
+		options.cancel_argument = result;
+	}
 	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
 	fsimg_io_ops_init(&ops);
 	ops.read_at = memory_read;
@@ -275,6 +332,12 @@ extract_image(const gen_image_t *image, extraction_t *result)
 	    current_test, fsimg_status_string(result->status),
 	    (unsigned long long)result->salvage_losses, result->error.message);
 	return (result->status);
+}
+
+static fsimg_status_t
+extract_image(const gen_image_t *image, extraction_t *result)
+{
+	return (extract_image_controlled(image, result, NULL));
 }
 
 static void
@@ -610,7 +673,7 @@ test_truncated_volume_shortens_plain_and_compressed(void)
 }
 
 static void
-test_rejected_listing_names_the_directory(void)
+test_rejected_compressed_child_loses_entry_and_keeps_siblings(void)
 {
 	file_fixture_t f;
 	gen_image_t image;
@@ -618,6 +681,7 @@ test_rejected_listing_names_the_directory(void)
 	struct stat st = { 0 };
 
 	file_fixture_init(&f, 3, false);
+	f.objects[0].parent = 34;
 	f.objects[1].parent = 34;
 	f.objects[2] = (gen_object_t){ .name = name_d, .units = 1,
 	    .id = 34, .type = 1 };
@@ -625,14 +689,418 @@ test_rejected_listing_names_the_directory(void)
 	f.header[0] = 'x'; /* prepare_named rejects /d/f's attribute. */
 	gen_build(&f.plan, &image);
 	extract_image(&image, &result);
-	expect_losses(&result, FSIMG_LOSS_DIRECTORY, "/d");
-	expect_file(result.output, "z", sibling, sizeof(sibling) - 1);
+	expect_losses(&result, FSIMG_LOSS_ENTRY, "/d/f");
+	expect_file(result.output, "d/z", sibling, sizeof(sibling) - 1);
 	EXPECT(fstatat(result.output, "d", &st, AT_SYMLINK_NOFOLLOW) == 0);
 	EXPECT(S_ISDIR(st.st_mode));
 	expect_absent(result.output, "d/f");
 	expect_absent(result.output, "d/f.partial");
 	if (result.output != -1)
 		CHECK(close(result.output) == 0);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+/* Only reads within the encoded payload count; table/header reads do not
+ * stand in for decoding. The catalog fork is contiguous in these fixtures.
+ */
+static extraction_control_t
+payload_control(gen_image_t *image, const file_fixture_t *f)
+{
+	unsigned char *fork = file_fork(image, 168);
+	uint64_t start = gen_load(fork + 16, 4) * f->plan.block_size;
+
+	return ((extraction_control_t){
+	    .payload_start = start + 260 + load_le32(f->resource + 264),
+	    .payload_end = start + f->resource_size - 50 });
+}
+
+static void
+test_output_limit_stops_decoding_after_crossing_chunk(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+	extraction_control_t control;
+
+	file_fixture_chunks(&f, 4, false, 64);
+	gen_build(&f.plan, &image);
+	control = payload_control(&image, &f);
+	control.output_limit = CHUNK;
+	extract_image_controlled(&image, &result, &control);
+	EXPECT(result.status == FSIMG_ELIMIT);
+	EXPECT(result.error.resource == FSIMG_RESOURCE_OUTPUT);
+	EXPECT(result.loss_count == 0 && result.salvage_losses == 0);
+	fprintf(stderr, "%s: payload reads %u; expected 1..2 of 64\n",
+	    current_test, result.payload_reads);
+	EXPECT(result.payload_reads > 0 && result.payload_reads <= 2);
+	expect_absent(result.output, "f");
+	expect_absent(result.output, "f.partial");
+	CHECK(close(result.output) == 0);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_exact_output_limit_keeps_clean_compressed_name(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+	extraction_control_t control;
+
+	file_fixture_chunks(&f, 4, false, 64);
+	gen_build(&f.plan, &image);
+	control = payload_control(&image, &f);
+	control.output_limit = f.size + sizeof(sibling) - 1;
+	extract_image_controlled(&image, &result, &control);
+	expect_losses(&result, 0, NULL);
+	expect_file_and_sibling(&result, &f, "f", f.size);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_bad_compression_attributes_keep_directory_children(void)
+{
+	static const uint16_t name_u[] = { 'u' };
+	static const uint16_t name_s[] = { 's' };
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+	gen_attr_value_t attributes[2];
+	unsigned char unknown[16];
+
+	file_fixture_init(&f, 3, false);
+	f.header[0] = 'x'; /* /d/f has a malformed decmpfs magic. */
+	bcopy(f.header, unknown, sizeof(unknown));
+	unknown[0] = 'f';
+	store_le(unknown + 4, 99, 4); /* /d/u is well formed, unsupported. */
+	attributes[0] = f.attribute;
+	attributes[1] = f.attribute;
+	attributes[1].id = 35;
+	attributes[1].value = unknown;
+	attributes[1].size = sizeof(unknown);
+	f.plan.values = attributes;
+	f.plan.value_count = 2;
+	f.objects[0].parent = 34;
+	f.objects[1].parent = 34;
+	f.objects[2] = (gen_object_t){ .name = name_d, .units = 1,
+	    .id = 34, .type = 1 };
+	f.objects[3] = (gen_object_t){ .name = name_u, .units = 1,
+	    .id = 35, .parent = 34, .type = 2, .flags = 4,
+	    .owner_flags = 0x20 };
+	f.objects[4] = (gen_object_t){ .name = name_s, .units = 1,
+	    .id = 36, .parent = 34, .type = 1 };
+	f.objects[5] = (gen_object_t){ .name = name_z, .units = 1,
+	    .id = 37, .parent = 36, .type = 2, .data = sibling,
+	    .data_size = sizeof(sibling) - 1 };
+	f.plan.object_count = 6;
+	gen_build(&f.plan, &image);
+	extract_image(&image, &result);
+	EXPECT(result.status == FSIMG_EPARTIAL);
+	EXPECT(result.loss_count == 2 && result.salvage_losses == 2);
+	for (unsigned i = 0; i < result.loss_count; i++) {
+		EXPECT(result.loss_kinds[i] == FSIMG_LOSS_ENTRY);
+		EXPECT(strcmp(result.loss_paths[i], i == 0 ? "/d/f" :
+		    "/d/u") == 0);
+	}
+	expect_file(result.output, "d/z", sibling, sizeof(sibling) - 1);
+	expect_file(result.output, "d/s/z", sibling, sizeof(sibling) - 1);
+	expect_absent(result.output, "d/f");
+	expect_absent(result.output, "d/u");
+	CHECK(close(result.output) == 0);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_plain_child_with_broken_attribute_scan_keeps_bytes_and_extra_data(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+	const gen_record_t *record;
+
+	file_fixture_init(&f, 3, false);
+	f.objects[1].owner_flags = 0;
+	f.objects[1].data = f.plain;
+	f.objects[1].data_size = f.size;
+	gen_build(&f.plan, &image);
+	/* The inline value claims more bytes than its record contains. */
+	record = &image.trees[GEN_ATTRIBUTES].records[0];
+	gen_store(image.bytes + record->offset + record->key_length + 12,
+	    4096, 4);
+	extract_image(&image, &result);
+	expect_losses(&result, 0, NULL);
+	EXPECT(result.extra_data);
+	expect_file_and_sibling(&result, &f, "f", f.size);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_directory_hard_link_rejects_its_parent_listing(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+
+	file_fixture_init(&f, 0, false);
+	f.objects[1].parent = 34;
+	f.objects[1].flags = 0x20;
+	bcopy("fdrpMACS", f.objects[1].finder, 8);
+	f.objects[2] = (gen_object_t){ .name = name_d, .units = 1,
+	    .id = 34, .type = 1 };
+	f.plan.object_count = 3;
+	gen_build(&f.plan, &image);
+	extract_image(&image, &result);
+	expect_losses(&result, FSIMG_LOSS_DIRECTORY, "/d");
+	expect_file(result.output, "z", sibling, sizeof(sibling) - 1);
+	expect_absent(result.output, "d/f");
+	CHECK(close(result.output) == 0);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_bad_middle_adler_trailer_keeps_only_validated_chunk(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+	size_t start, length;
+
+	file_fixture_init(&f, 4, false);
+	start = 260 + load_le32(f.resource + 272);
+	length = load_le32(f.resource + 276);
+	/* Inflate emits chunk 1 before discovering its wrong Adler-32. Those
+	 * bytes must never replace the validated chunk 0 in the held window.
+	 */
+	f.resource[start + length - 1] ^= 1;
+	gen_build(&f.plan, &image);
+	extract_image(&image, &result);
+	expect_losses(&result, FSIMG_LOSS_SHORTENED, "/f");
+	expect_file_and_sibling(&result, &f, "f.partial", CHUNK);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_low_middle_table_offset_rejects_previous_chunk(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+
+	file_fixture_init(&f, 4, false);
+	/* chunk_locate checks chunk 0's successor too. Moving chunk 1 back
+	 * one byte overlaps chunk 0, so no chunk belongs to the prefix.
+	 */
+	store_le(f.resource + 272, load_le32(f.resource + 272) - 1, 4);
+	gen_build(&f.plan, &image);
+	extract_image(&image, &result);
+	expect_losses(&result, FSIMG_LOSS_SKIPPED, "/f");
+	expect_file_and_sibling(&result, &f, NULL, 0);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+/* Type 8 takes bare LZVN, without the vector's 12-byte LZFSE block
+ * header or four-byte stream terminator. Type 12 takes the whole stream.
+ * Chunk 0 is real LZFSE; LZVN uses the real short vector as chunk 0.
+ */
+static void
+real_codec_fixture(file_fixture_t *f, unsigned type)
+{
+	const lzfse_vector_t *v = &lzfse_vectors[type == 8 ? 1 : 3];
+	const unsigned char *encoded = v->encoded;
+	size_t length = v->encoded_size;
+	gen_compressed_chunk_t chunks[2];
+
+	file_fixture_init(f, 8, false);
+	free(f->resource);
+	free(f->plain);
+	f->size = v->plain_size * (type == 8 ? 1 : 2);
+	f->plain = malloc(f->size);
+	CHECK(f->plain != NULL);
+	for (size_t i = 0; i < f->size; i++)
+		f->plain[i] = lzfse_plain_byte(v, i % v->plain_size);
+	if (type == 8) {
+		encoded += 12;
+		length -= 16;
+	}
+	chunks[0] = (gen_compressed_chunk_t){ encoded, length };
+	chunks[1] = chunks[0];
+	f->resource = gen_compressed_resource(chunks, type == 8 ? 1 : 2,
+	    &f->resource_size);
+	store_le(f->header + 4, type, 4);
+	store_le(f->header + 8, f->size, 8);
+	f->objects[1].resource = f->resource;
+	f->objects[1].resource_size = f->resource_size;
+}
+
+static void
+test_real_lzvn_bad_word_table_skips_first_chunk(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+
+	real_codec_fixture(&f, 8);
+	/* The ending word lies past the fork; chunk 0 cannot be located. */
+	store_le(f.resource + 4, f.resource_size + 1, 4);
+	gen_build(&f.plan, &image);
+	extract_image(&image, &result);
+	expect_losses(&result, FSIMG_LOSS_SKIPPED, "/f");
+	expect_file_and_sibling(&result, &f, NULL, 0);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_real_lzvn_bad_stream_skips_first_chunk(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+
+	real_codec_fixture(&f, 8);
+	/* 0x1e is an undefined LZVN opcode, replacing the first literal. */
+	f.resource[load_le32(f.resource)] = 0x1e;
+	gen_build(&f.plan, &image);
+	extract_image(&image, &result);
+	expect_losses(&result, FSIMG_LOSS_SKIPPED, "/f");
+	expect_file_and_sibling(&result, &f, NULL, 0);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_real_lzfse_bad_middle_stream_keeps_first_chunk(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+
+	real_codec_fixture(&f, 12);
+	/* Destroy chunk 1's bvx2 block magic; chunk 0 stays encoded. */
+	f.resource[load_le32(f.resource + 4)] = 0;
+	gen_build(&f.plan, &image);
+	extract_image(&image, &result);
+	expect_losses(&result, FSIMG_LOSS_SHORTENED, "/f");
+	expect_file_and_sibling(&result, &f, "f.partial", CHUNK);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_damaged_compressed_file_does_not_contaminate_next_compressed_file(void)
+{
+	file_fixture_t f, next;
+	gen_image_t image;
+	extraction_t result;
+	gen_attr_value_t attributes[2];
+	uLongf length;
+
+	file_fixture_init(&f, 4, false);
+	file_fixture_init(&next, 3, false);
+	f.resource[260 + load_le32(f.resource + 272)] = 0;
+	/* Distinct bytes expose a held window left over from the first file. */
+	for (size_t i = 0; i < next.size; i++)
+		next.plain[i] = (unsigned char)(201 + i % 17);
+	length = sizeof(next.header) - 16;
+	CHECK(compress2(next.header + 16, &length, next.plain, next.size,
+	    Z_BEST_COMPRESSION) == Z_OK);
+	next.attribute.size = 16 + length;
+	f.objects[0] = next.objects[1];
+	f.objects[0].name = name_z;
+	f.objects[0].id = 33;
+	attributes[0] = f.attribute;
+	attributes[1] = next.attribute;
+	attributes[1].id = 33;
+	f.plan.values = attributes;
+	f.plan.value_count = 2;
+	gen_build(&f.plan, &image);
+	extract_image(&image, &result);
+	expect_losses(&result, FSIMG_LOSS_SHORTENED, "/f");
+	expect_file(result.output, "f.partial", f.plain, CHUNK);
+	expect_file(result.output, "z", next.plain, next.size);
+	expect_absent(result.output, "f");
+	expect_absent(result.output, "z.partial");
+	CHECK(close(result.output) == 0);
+	gen_free(&image);
+	file_fixture_free(&next);
+	file_fixture_free(&f);
+}
+
+static void
+test_work_limit_during_compressed_plan_is_terminal(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+	extraction_control_t control;
+
+	file_fixture_init(&f, 4, false);
+	gen_build(&f.plan, &image);
+	control = payload_control(&image, &f);
+	control.work_limit = 2 * CHUNK;
+	extract_image_controlled(&image, &result, &control);
+	EXPECT(result.status == FSIMG_ELIMIT);
+	EXPECT(result.error.resource == FSIMG_RESOURCE_WORK);
+	EXPECT(result.payload_reads != 0);
+	EXPECT(result.loss_count == 0 && result.salvage_losses == 0);
+	expect_absent(result.output, "f");
+	expect_absent(result.output, "f.partial");
+	CHECK(close(result.output) == 0);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_cancellation_during_compressed_plan_is_terminal(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+	extraction_control_t control;
+
+	file_fixture_init(&f, 4, false);
+	gen_build(&f.plan, &image);
+	control = payload_control(&image, &f);
+	control.cancel_on_payload = true;
+	extract_image_controlled(&image, &result, &control);
+	EXPECT(result.status == FSIMG_ECANCELLED);
+	EXPECT(result.payload_reads == 1);
+	EXPECT(result.loss_count == 0 && result.salvage_losses == 0);
+	expect_absent(result.output, "f");
+	expect_absent(result.output, "f.partial");
+	CHECK(close(result.output) == 0);
+	gen_free(&image);
+	file_fixture_free(&f);
+}
+
+static void
+test_broken_overflow_past_file_end_keeps_clean_name(void)
+{
+	file_fixture_t f;
+	gen_image_t image;
+	extraction_t result;
+	unsigned char *fork;
+
+	file_fixture_init(&f, 0, false);
+	f.objects[1].fragmented = true;
+	gen_build(&f.plan, &image);
+	break_overflow(&image, 0);
+	/* Retain allocation and its broken overflow but end the logical file
+	 * in its first block. No unavailable byte belongs to this file.
+	 */
+	fork = file_fork(&image, 88);
+	gen_store(fork, 137, 8);
+	extract_image(&image, &result);
+	expect_losses(&result, 0, NULL);
+	expect_file_and_sibling(&result, &f, "f", 137);
 	gen_free(&image);
 	file_fixture_free(&f);
 }
@@ -716,7 +1184,21 @@ main(void)
 	RUN(test_plain_file_keeps_extents_before_broken_overflow);
 	RUN(test_compressed_file_keeps_chunks_before_broken_resource_overflow);
 	RUN(test_truncated_volume_shortens_plain_and_compressed);
-	RUN(test_rejected_listing_names_the_directory);
-	fprintf(stderr, "%u of 11 cases failed\n", failed);
+	RUN(test_rejected_compressed_child_loses_entry_and_keeps_siblings);
+	RUN(test_output_limit_stops_decoding_after_crossing_chunk);
+	RUN(test_exact_output_limit_keeps_clean_compressed_name);
+	RUN(test_bad_compression_attributes_keep_directory_children);
+	RUN(test_plain_child_with_broken_attribute_scan_keeps_bytes_and_extra_data);
+	RUN(test_directory_hard_link_rejects_its_parent_listing);
+	RUN(test_bad_middle_adler_trailer_keeps_only_validated_chunk);
+	RUN(test_low_middle_table_offset_rejects_previous_chunk);
+	RUN(test_real_lzvn_bad_word_table_skips_first_chunk);
+	RUN(test_real_lzvn_bad_stream_skips_first_chunk);
+	RUN(test_real_lzfse_bad_middle_stream_keeps_first_chunk);
+	RUN(test_damaged_compressed_file_does_not_contaminate_next_compressed_file);
+	RUN(test_work_limit_during_compressed_plan_is_terminal);
+	RUN(test_cancellation_during_compressed_plan_is_terminal);
+	RUN(test_broken_overflow_past_file_end_keeps_clean_name);
+	fprintf(stderr, "%u of 25 cases failed\n", failed);
 	return (failed == 0 ? 0 : 1);
 }

@@ -215,6 +215,11 @@ fail:
  * held extent reads no image, so neither end applies to it. *out is limit when
  * every byte below limit is available. Each extent is charged, like a read of
  * it, so the walk is bounded and polled.
+ *
+ * A prefix past the output budget fails the file's charge whatever the rest of
+ * the file holds, so the walk ends there with that charge's error and decodes
+ * nothing further. The prefix never exceeds the entry's size, which is what
+ * makes the charge below fail.
  */
 static fsimg_status_t
 readable_prefix(fsimg_reader_t *reader, uint64_t limit, uint64_t *out,
@@ -224,14 +229,20 @@ readable_prefix(fsimg_reader_t *reader, uint64_t limit, uint64_t *out,
 	const unsigned char *held;
 	fsimg_extent_t extent;
 	fsimg_error_t detail;
-	uint64_t offset, end, within, image, available;
+	uint64_t offset, end, within, image, available, budget;
 	fsimg_status_t status;
+	bool clipped;
 
+	budget = reader->session.output_limit > reader->session.output_bytes ?
+	    reader->session.output_limit - reader->session.output_bytes : 0;
 	end = reader->slice_bytes;
 	if (domain->offset < end && domain->length < end - domain->offset)
 		end = domain->offset + domain->length;
 	offset = 0;
 	while (offset < limit) {
+		if (offset > budget)
+			return (fsimg_session_charge(&reader->session, 0,
+			    reader->entry.size, 0, error));
 		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -246,21 +257,24 @@ readable_prefix(fsimg_reader_t *reader, uint64_t limit, uint64_t *out,
 		}
 		within = offset - extent.logical_offset;
 		available = extent.length - within;
+		clipped = false;
 		if (held == NULL) {
 			if (extent.image_offset > UINT64_MAX - within)
 				break;
 			image = extent.image_offset + within;
 			if (image < domain->offset || image >= end)
 				break;
-			if (available > end - image)
+			if (available > end - image) {
 				available = end - image;
+				clipped = true;
+			}
 		}
 		if (available >= limit - offset) {
 			offset = limit;
 			break;
 		}
 		offset += available;
-		if (available != extent.length - within)
+		if (clipped)
 			break;
 	}
 	*out = offset;
