@@ -8,6 +8,8 @@ require "timeout"
 require "json"
 require "digest"
 require "find"
+require "set"
+require "fileutils"
 require_relative "../tools/hfsplus/capture"
 
 module FsimgSpec
@@ -16,43 +18,67 @@ end
 
 module HfsPlusIntegration
   class Error < FsimgSpec::Error; end
-  class OracleTimeout < Error; end
+  class CommandTimeout < Error; end
   class Skip < Error; end
 
   READER_TIMEOUT = 60
-  # An uncapped e7 capture needs minutes of per-member CLI process startup.
-  FILE_READ_CAP = 64
   Volume = Data.define(:image, :name, :source, :local)
-  Comparison = Data.define(:value, :result)
+  Snapshot = Data.define(:entries, :digests, :matched)
+  ExpectedVerification = Data.define(:source, :name, :arguments, :status, :message,
+    :files, :directories, :allocated_clusters, :free_clusters, :bad_clusters)
+  Limitation = Data.define(:oracle, :volume, :member, :error)
+  Tally = Data.define(:entries, :files, :bytes) do
+    def initialize(entries: 0, files: 0, bytes: 0) = super
+    def +(other) = Tally.new(entries: entries + other.entries,
+      files: files + other.files, bytes: bytes + other.bytes)
+  end
+  FileDigest = Data.define(:sha256, :bytes)
+  Result = Data.define(:value, :tally, :findings, :skips, :timeout) do
+    def initialize(value: nil, tally: Tally.new, findings: [], skips: [], timeout: nil) = super
+  end
+  Comparison = Data.define(:value, :verdict, :oracle, :findings)
   # TSK exposes synthetic system forks, private catalog storage and journal
   # files. fsimg omits these format-owned objects.
-  ORACLE_HIDDEN = {
-    "sleuth" => %r{\A/(?:\$(?:ExtentsFile|CatalogFile|BadBlockFile|AllocationFile|AttributesFile)|\.HFS\+ Private Directory Data\^|\^{4}HFS\+ Private Data|\.journal|\.journal_info_block)(?:/|\z)}
-  }.freeze
-  # These are observed oracle defects, scoped to named captures and errors.
+  SLEUTH_HIDDEN = %r{\A/(?:\$(?:ExtentsFile|CatalogFile|BadBlockFile|AllocationFile|AttributesFile)|\.HFS\+ Private Directory Data\^|\^{4}HFS\+ Private Data|\.journal|\.journal_info_block)(?:/|\z)}.freeze
+  # These are observed oracle defects, scoped to named volumes and errors.
   # They yield skips, never agreements. No fsimg failure is exempted.
   ORACLE_LIMITATIONS = [
     # TSK cannot read the fork-backed attribute on attr-sizes in either E5 tree.
-    ["sleuth", /\Ah-hfs(?:plus|x)-16777216-e5\z/, "/attr-sizes",
-     /Unsupported record type: \(32\)/],
-    # TSK omits a directory-hard-link alias child; HFSX lookup fails entirely.
-    ["sleuth", /\Ah-hfsplus-8388608-e4\z/, nil,
-     /fls paths: missing=\["\/u1\/a"\] \(1\) extra=\[\] \(0\)/],
-    ["sleuth", /\Ah-hfsx-8388608-e4\z/, nil,
-     /hfs_cat_file_lookup: Error finding thread node for file \(1\)/],
+    Limitation.new(oracle: "sleuth", volume: /\Ah-hfs(?:plus|x)-16777216-e5\z/,
+      member: "/attr-sizes", error: /Unsupported record type: \(32\)/),
+    # TSK abandons folders whose thread starts in the last 520 catalog-node bytes.
+    Limitation.new(oracle: "sleuth", volume: /\Ah-hfsplus-8388608-e4\z/,
+      member: nil, error: /fls paths: missing=\["\/u1\/a"\] \(1\) extra=\[\] \(0\)/),
+    Limitation.new(oracle: "sleuth", volume: /\Ahfs(?:plus|x)-4096-nearlyfull-small-/,
+      member: nil, error: /fls paths: missing=\["\/dir\/sub\/below"\] \(1\) extra=\[\] \(0\)/),
+    # HFSX catalog thread lookup fails entirely in this capture.
+    Limitation.new(oracle: "sleuth", volume: /\Ah-hfsx-8388608-e4\z/,
+      member: nil, error: /hfs_cat_file_lookup: Error finding thread node for file \(1\)/),
     # TSK lacks LZFSE inline/resource decoding (types 11 and 12).
-    ["sleuth", /\Ah-hfs(?:plus|x)-8388608-e6-lzfse\z/,
-     %r{\A/(?:forced-mixed-196608|forced-random-1|mixed-196608|random-1|shape-(?:131073|262145|393217|589825)|(?:text|zeros)-(?:1|200000|65535|65536|65537))\z},
-     /Attribute 4352 not found/],
+    Limitation.new(oracle: "sleuth", volume: /\Ah-hfs(?:plus|x)-8388608-e6-lzfse\z/,
+      member: %r{\A/(?:forced-mixed-196608|forced-random-1|mixed-196608|random-1|shape-(?:131073|262145|393217|589825)|(?:text|zeros)-(?:1|200000|65535|65536|65537))\z},
+      error: /Attribute 4352 not found/),
     # TSK misreads the resource framing/chunk bounds of these type 8 files.
-    ["sleuth", /\Ah-hfsplus-8388608-e6-lzvn\z/,
-     %r{\A/(?:forced-mixed-196608|mixed-196608|text-200000|zeros-200000)\z},
-     /block size is too large: (?:66145|4294888110|4294965730)/],
+    Limitation.new(oracle: "sleuth", volume: /\Ah-hfsplus-8388608-e6-lzvn\z/,
+      member: %r{\A/(?:forced-mixed-196608|mixed-196608|text-200000|zeros-200000)\z},
+      error: /block size is too large: (?:66145|4294888110|4294965730)/),
     # hfsdump emits bad bytes for these type 8 final partial resource chunks.
-    # fsimg_snapshot checks their digests against the native manifest first.
-    ["hfsdump", /\Ah-hfsplus-8388608-e6-ditto\z/,
-     %r{\A/shape-(?:262145|393217|589825)\z}, /SHA256 differs:/]
-  ].map(&:freeze).freeze
+    Limitation.new(oracle: "hfsdump", volume: /\Ah-hfsplus-8388608-e6-ditto\z/,
+      member: %r{\A/shape-(?:262145|393217|589825)\z}, error: /SHA256 differs:/)
+  ].freeze
+
+  Kind = Data.define(:mode, :fls, :ftype)
+  KINDS = {
+    "file" => Kind.new(mode: 0o100000, fls: "r", ftype: "file"),
+    "directory" => Kind.new(mode: 0o040000, fls: "d", ftype: "directory"),
+    "symlink" => Kind.new(mode: 0o120000, fls: "l", ftype: "link"),
+    "fifo" => Kind.new(mode: 0o010000, fls: "p", ftype: "fifo"),
+    "char_device" => Kind.new(mode: 0o020000, fls: "c", ftype: "characterSpecial"),
+    "block_device" => Kind.new(mode: 0o060000, fls: "b", ftype: "blockSpecial"),
+    "socket" => Kind.new(mode: 0o140000, fls: "s", ftype: "socket")
+  }.freeze
+  # hwf_add_mapnodes emits eight digits followed by 232 'n' bytes.
+  MAPNODES_MEMBER = "/00000000#{'n' * 232}".freeze
 
   GENERATOR_TIMEOUT = 30 * 60
   BLOCKS = [512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536].freeze
@@ -82,6 +108,8 @@ module HfsPlusIntegration
 
   module_function
 
+  def text(bytes) = bytes.dup.force_encoding("UTF-8").scrub
+
   def find_program(name)
     return name if name.include?("/") && File.file?(name) && File.executable?(name)
 
@@ -89,14 +117,31 @@ module HfsPlusIntegration
        .find { File.file?(_1) && File.executable?(_1) }
   end
 
-  def command(*argv, timeout: 30, statuses: [0])
-    out, err, status = Open3.popen3({ "LC_ALL" => "C", "TZ" => "UTC" },
-                                  [argv.first, argv.first], *argv.drop(1), pgroup: true) do |input, output, errors, child|
+  # Drain both pipes even after retaining an excerpt: a noisy child must neither
+  # block on stderr nor make failure diagnostics consume unbounded memory.
+  def run_command(argv, stdout:, timeout:, statuses:)
+    excerpt = String.new.b
+    err = String.new.b
+    status = Open3.popen3({ "LC_ALL" => "C", "TZ" => "UTC" },
+      [argv.first, argv.first], *argv.drop(1), pgroup: true) do |input, output, errors, child|
       input.close
-      stdout = Thread.new { output.read.b }
-      stderr = Thread.new { errors.read.b }
+      reader = Thread.new do
+        while (chunk = output.read(64 * 1024))
+          excerpt << chunk.byteslice(0, [2048 - excerpt.bytesize, 0].max)
+          stdout.call(chunk)
+        end
+      end
+      diagnostics = Thread.new do
+        while (chunk = errors.read(64 * 1024))
+          err << chunk.byteslice(0, [4096 - err.bytesize, 0].max)
+        end
+      end
       begin
-        Timeout.timeout(timeout) { [stdout.value, stderr.value, child.value] }
+        Timeout.timeout(timeout) do
+          reader.value
+          diagnostics.value
+          child.value
+        end
       rescue Timeout::Error
         begin
           Process.kill("KILL", -child.pid)
@@ -104,17 +149,29 @@ module HfsPlusIntegration
           nil
         end
         child.value
-        raise OracleTimeout, "#{argv.join(' ')}: timed out after #{timeout} seconds"
+        raise CommandTimeout, "#{argv.join(' ')}: timed out after #{timeout.is_a?(Integer) ? timeout : format("%.1f", timeout)} seconds"
       ensure
-        stdout.join
-        stderr.join
+        reader.join
+        diagnostics.join
       end
     end
     unless statuses.include?(status.exitstatus)
-      raise Error, "#{argv.join(' ')}: exit #{status.exitstatus}: #{err.byteslice(0, 8192)}\nstdout excerpt: #{out.byteslice(0, 2048).inspect}"
+      raise Error, "#{argv.join(' ')}: exit #{status.exitstatus}: #{text(err)}\nstdout excerpt: #{text(excerpt).inspect}"
     end
+  end
 
-    out.b
+  def command(*argv, timeout: 30, statuses: [0])
+    output = String.new.b
+    run_command(argv, stdout: ->(chunk) { output << chunk }, timeout: timeout, statuses: statuses)
+    output
+  end
+
+  def digest_output(*argv, timeout: 30)
+    digest = Digest::SHA256.new
+    bytes = 0
+    consume = ->(chunk) { digest.update(chunk); bytes += chunk.bytesize }
+    run_command(argv, stdout: consume, timeout: timeout, statuses: [0])
+    FileDigest.new(sha256: digest.hexdigest, bytes: bytes)
   end
 
   def oracles
@@ -174,53 +231,7 @@ module HfsPlusIntegration
     end
   end
 
-  def hfsdump_check(tool:, image:, shape:)
-    if %w[empty empty-min mapnodes mapnodes-small].include?(shape)
-      # hfsdump read / hangs on empty folders, including native newfs_hfs
-      # volumes. stat avoids that oracle quirk and still verifies the root.
-      root = command(tool, image, "stat", "/")
-      unless root.match?(/^type: folder\r?$/) && root.match?(/^cnid: 2\r?$/)
-        raise Error, "hfsdump root is not a folder with cnid 2"
-      end
-      if %w[mapnodes mapnodes-small].include?(shape)
-        # hwf_add_mapnodes emits eight digits followed by 232 'n' bytes.
-        path = "/00000000#{'n' * 232}"
-        raise Error, "hfsdump synthetic file payload differs" unless command(tool, image, "read", path).empty?
-      end
-      return
-    end
-
-    listing = command(tool, image, "read", "/")
-
-    # hfsdump maps stored slash to colon. puts truncates the one-unit NUL
-    # name to an empty line; that line represents U+2400 in path spelling.
-    names = listing.force_encoding("UTF-8").lines.map { _1.chomp.empty? ? "\u2400" : _1.chomp }
-    ROOT_NAMES.each do |name|
-      raise Error, "hfsdump listing omits #{name.inspect}" unless names.include?(name)
-    end
-    raise Error, "hfsdump hello payload differs" unless command(tool, image, "read", "/hello") == HELLO
-  end
-
-  def sleuth_check(image:, empty:)
-    command("fsstat", image)
-    listing = command("fls", image)
-    return if empty
-
-    names = listing.force_encoding("UTF-8").lines.filter_map { _1.split(":\t", 2)[1]&.strip }
-    ROOT_NAMES.each do |name|
-      # fls versions expose stored slash/NUL or their printable replacement
-      # '^'; accept those spellings only for the two mapped catalog names.
-      displayed = case name
-                  when ":" then [":", "/", "^"]
-                  when "\u2400" then ["\u2400", "^", ""]
-                  else [name]
-                  end
-      raise Error, "fls listing omits #{name.inspect}" unless displayed.any? { names.include?(_1) }
-    end
-    inode = listing.lines.filter_map { _1[/\Ar\/r\s+([^:]+):\s+hello\s*\z/, 1] }.first
-    raise Error, "fls listing omits hello" unless inode
-    raise Error, "icat hello payload differs" unless command("icat", image, inode) == HELLO
-  end
+  def mapnodes?(shape) = %w[mapnodes mapnodes-small].include?(shape)
 
   def check_mapnodes(image)
     File.open(image, "rb") do |file|
@@ -254,7 +265,7 @@ module HfsPlusIntegration
     args = [generator, image, variant, block.to_s, shape]
     args << size.to_s if size
     command(*args, timeout: GENERATOR_TIMEOUT)
-    check_mapnodes(image) if %w[mapnodes mapnodes-small].include?(shape)
+    check_mapnodes(image) if mapnodes?(shape)
     check_nearlyfull(image) if %w[nearlyfull nearlyfull-small].include?(shape)
   end
 
@@ -267,28 +278,41 @@ module HfsPlusIntegration
 
   def reader_versions(available)
     if available[:hfsdump]
-      puts "VERSION hfsdump hfsfuse eed780cbe0445893de6f4aa8d74461da00756984 (build-hfsfuse.sh pin)"
+      pin = File.read(File.join(__dir__, "../build-aux/build-hfsfuse.sh"))[/^revision=(.+)$/, 1]
+      raise Error, "hfsfuse build pin absent" unless pin
+
+      puts "VERSION hfsdump hfsfuse #{pin} (build-hfsfuse.sh pin)"
     end
-    puts "VERSION sleuth #{command('fls', '-V').strip}" if available[:sleuth]
-    puts "VERSION linux-mount #{command('uname', '-sr').strip}"
+    puts "VERSION sleuth #{text(command('fls', '-V')).strip}" if available[:sleuth]
+    puts "VERSION linux-mount #{text(command('uname', '-sr')).strip}"
     puts "SKIP linux-mount: needs root on Linux" unless available[:mount]
   end
 
   def verification_rows
     File.readlines(File.join(__dir__, "hfsplus-verify-expected.tsv"), chomp: true)
-      .reject { _1.start_with?("#") }.map { _1.split("\t", -1) }
+      .reject { _1.start_with?("#") }.map do |line|
+        fields = ExpectedVerification.members.zip(line.split("\t", -1)).to_h
+        ExpectedVerification.new(**fields)
+      end
   end
 
-  def reader_volumes(directory)
-    native = ENV["FSIMG_HFSPLUS_NATIVE"]
-    corpus = ENV["FSIMG_HFSPLUS_CORPUS"]
-    sources = {
+  def reader_sources(native: ENV["FSIMG_HFSPLUS_NATIVE"], corpus: ENV["FSIMG_HFSPLUS_CORPUS"])
+    {
       "native" => native && File.join(File.expand_path(native), "*", "*.img"),
       "linux-mkfs-hfsplus" => corpus && File.join(File.expand_path(corpus), "linux-mkfs-hfsplus", "*.img")
     }
-    volumes = sources.flat_map do |source, pattern|
+  end
+
+  def unmatched_sources(sources:, volumes:)
+    sources.keys.select { |source| sources[source] && volumes.none? { _1.source == source } }
+  end
+
+  def reader_volumes(directory)
+    volumes = reader_sources.flat_map do |source, pattern|
       paths = pattern ? Dir[pattern].sort : []
-      puts "SKIP #{source}: #{pattern || 'environment variable unset'}: no images" if paths.empty?
+      if paths.empty?
+        puts "SKIP #{source}: #{pattern || 'environment variable unset'}: no images"
+      end
       paths.map do |image|
         name = source == "native" ? File.basename(File.dirname(image)) : File.basename(image)
         Volume.new(image: File.realpath(image), name: name, source: source, local: false)
@@ -312,279 +336,448 @@ module HfsPlusIntegration
   def expected_verification(volume)
     source = volume.source == "native" ? "native" : "corpus"
     name = source == "native" ? volume.name : "linux-mkfs-hfsplus/#{volume.name}"
-    verification_rows.find { _1[0] == source && _1[1] == name }
+    verification_rows.find { _1.source == source && _1.name == name }
   end
 
-  def fsimg_snapshot(fsimg:, volume:, stats:)
+  def verify_volume(fsimg:, volume:)
     expected = expected_verification(volume)
-    status = expected ? expected.fetch(3) : "ok"
-    verification = json_records(command(fsimg, "W", "--json", "-f", volume.image,
+    status = expected&.status || "ok"
+    records = json_records(command(fsimg, "W", "--json", "-f", volume.image,
       timeout: READER_TIMEOUT, statuses: status == "ok" ? [0] : [1]))
     if status != "ok"
-      error = verification.find { _1["type"] == "error" }
-      unless error && error["status"] == status && error.fetch("message").include?(expected.fetch(4))
-        raise Error, "verification expected #{expected[3..4].inspect}, got #{verification.inspect}"
+      error = records.find { _1["type"] == "error" }
+      unless error && error["status"] == status && error.fetch("message").include?(expected.message)
+        raise Error, "verification expected #{status}: #{expected.message}, got #{text(records.inspect.byteslice(0, 2048))}"
       end
-    else
-      report = verification.find { _1["type"] == "verify" }
-      raise Error, "verification incomplete" unless report && report["complete"]
-
-      if expected
-        fields = %w[files directories allocated_clusters free_clusters bad_clusters]
-        fields.zip(expected.drop(5)).each do |field, count|
-          raise Error, "verification #{field}: expected #{count}, got #{report[field]}" unless report[field].to_s == count
-        end
-      end
-    end
-    listing = json_records(command(fsimg, "t", "--json", "-f", volume.image,
-      timeout: READER_TIMEOUT, statuses: status == "ok" ? [0] : [0, 1]))
-    if status != "ok"
-      puts "EXPECTED fsimg #{volume.source}/#{volume.name}: #{status}: #{expected.fetch(4)}"
+      puts "EXPECTED fsimg #{volume.source}/#{volume.name}: #{status}: #{expected.message}"
       raise Skip, "expected verification refusal; no verified comparison baseline"
     end
-    entries = listing.select { _1["type"] == "entry" }.to_h { [_1.fetch("path"), _1] }
-    count = listing.count { _1["type"] == "entry" }
-    raise Error, "duplicate fsimg listing paths" unless count == entries.length
+    report = records.find { _1["type"] == "verify" }
+    raise Error, "verification incomplete" unless report && report["complete"]
 
-    stats[:entries] = entries.length
+    return unless expected
+
+    %i[files directories allocated_clusters free_clusters bad_clusters].each do |field|
+      count = expected.public_send(field)
+      raise Error, "verification #{field}: expected #{count}, got #{report[field.to_s]}" unless report[field.to_s].to_s == count
+    end
+  end
+
+  def list_volume(fsimg:, volume:)
+    records = json_records(command(fsimg, "t", "--json", "-f", volume.image, timeout: READER_TIMEOUT))
+    entries = records.filter_map do |record|
+      case [record["type"], record["path"]]
+      in ["entry", String => path] then [path, record]
+      else nil
+      end
+    end
+    raise Error, "duplicate fsimg listing paths" unless entries.map(&:first).tally.values.all? { _1 == 1 }
+
+    entries.to_h.freeze
+  end
+
+  def extract_digests(fsimg:, volume:, entries:, directory:)
+    extraction = Dir.mktmpdir("extract-", directory)
+    begin
+      records = json_records(command(fsimg, "x", "--json", "-E", "-k", "-f", volume.image,
+        "-C", extraction, timeout: READER_TIMEOUT))
+      summary = records.find { _1["type"] == "summary" }
+      raise Error, "extraction lacks summary record" unless summary
+
+      skipped = entries.values.count { !%w[file directory].include?(_1.fetch("kind")) }
+      raise Error, "extraction skipped count: #{summary.inspect}, expected #{skipped}" unless Integer(summary.fetch("skipped_entries")) == skipped
+      raise Error, "extraction omitted names: #{summary.inspect}" unless Integer(summary.fetch("omitted_entries")).zero?
+      entries.filter_map do |path, entry|
+        next unless %w[file symlink].include?(entry.fetch("kind"))
+
+        digest = if entry.fetch("kind") == "symlink"
+          digest_output(fsimg, "x", "-O", "-f", volume.image, "--", path, timeout: READER_TIMEOUT)
+        else
+          host = File.join(extraction, path.delete_prefix("/"))
+          raise Error, "#{path.inspect}: extracted member is not a regular file" unless File.lstat(host).file?
+
+          FileDigest.new(sha256: Digest::SHA256.file(host).hexdigest, bytes: File.size(host))
+        end
+        size = Integer(entry.fetch("size_bytes"))
+        raise Error, "#{path.inspect}: fsimg read #{digest.bytes} bytes, listing says #{size}" unless digest.bytes == size
+
+        [path, digest]
+      end.to_h.freeze
+    ensure
+      FileUtils.remove_entry(extraction)
+    end
+  end
+
+  def manifest_matches(volume:, digests:)
     manifest_path = File.join(File.dirname(volume.image), "manifest.json")
-    manifest = if volume.source == "native" && File.file?(manifest_path)
-      JSON.parse(File.read(manifest_path)).fetch("tree", []).to_h { ["/#{_1.fetch('path')}", _1] }
-    else
-      {}
-    end
-    files = entries.values.select { %w[file symlink].include?(_1.fetch("kind")) }
-    if files.length > FILE_READ_CAP
-      puts "CAP fsimg #{volume.source}/#{volume.name}: reading #{FILE_READ_CAP}/#{files.length} files and symlinks (per-file CLI startup cost)"
-    end
-    hashes = files.first(FILE_READ_CAP).to_h do |entry|
-      path = entry.fetch("path")
-      bytes = command(fsimg, "x", "-O", "-f", volume.image, "--", path, timeout: READER_TIMEOUT)
-      size = Integer(entry.fetch("size_bytes"))
-      raise Error, "#{path.inspect}: fsimg read #{bytes.bytesize} bytes, listing says #{size}" unless bytes.bytesize == size
+    return Set.new.freeze unless volume.source == "native" && File.file?(manifest_path)
 
-      stats[:files] += 1
-      stats[:bytes] += bytes.bytesize
-      digest = Digest::SHA256.hexdigest(bytes)
-      observation = manifest[path]
-      if observation && observation["sha256"] && observation["sha256"] != digest
-        raise Error, "#{path.inspect}: fsimg SHA256 #{digest} differs from native #{observation.fetch('sha256')}"
-      end
-      if observation && observation["target"] && observation["target"].b != bytes
-        raise Error, "#{path.inspect}: fsimg symlink target differs from native manifest"
-      end
-      [path, digest]
-    end
-    { entries: entries.freeze, hashes: hashes.freeze }.freeze
+    manifest = JSON.parse(File.read(manifest_path, encoding: "UTF-8")).fetch("tree", [])
+    manifest.filter_map do |observation|
+      path = "/#{observation.fetch('path')}"
+      expected = observation["sha256"] || (Digest::SHA256.hexdigest(observation["target"].b) if observation["target"])
+      next unless expected
+
+      digest = digests[path]
+      raise Error, "#{path.inspect}: native manifest member has no fsimg digest" unless digest
+      raise Error, "#{path.inspect}: fsimg SHA256 #{digest.sha256} differs from native #{expected}" unless expected == digest.sha256
+
+      path
+    end.to_set.freeze
+  end
+
+  def fsimg_snapshot(fsimg:, volume:, directory:)
+    verify_volume(fsimg: fsimg, volume: volume)
+    entries = list_volume(fsimg: fsimg, volume: volume)
+    digests = extract_digests(fsimg: fsimg, volume: volume, entries: entries, directory: directory)
+    matched = manifest_matches(volume: volume, digests: digests)
+    snapshot = Snapshot.new(entries: entries, digests: digests, matched: matched)
+    Result.new(value: snapshot, tally: Tally.new(entries: entries.length,
+      files: digests.length, bytes: digests.values.sum(&:bytes)))
   end
 
   def same_paths(expected:, actual:, context:)
-    missing, extra = expected - actual, actual - expected
+    wanted, got = expected.tally, actual.tally
+    missing = expected.uniq.flat_map { |path| [path] * [wanted[path] - got.fetch(path, 0), 0].max }
+    extra = actual.uniq.flat_map { |path| [path] * [got[path] - wanted.fetch(path, 0), 0].max }
     return if missing.empty? && extra.empty?
 
     raise Error, "#{context}: missing=#{missing.first(20).inspect} (#{missing.length}) extra=#{extra.first(20).inspect} (#{extra.length})"
   end
 
-  def same_bytes(bytes:, path:, snapshot:, stats:)
-    actual = Digest::SHA256.hexdigest(bytes)
-    expected = snapshot.fetch(:hashes).fetch(path)
+  def same_digest(actual:, path:, snapshot:)
+    expected = snapshot.digests.fetch(path)
     unless actual == expected
-      raise Error, "#{path.inspect}: SHA256 differs: fsimg=#{expected} oracle=#{actual}"
+      raise Error, "#{path.inspect}: SHA256 differs: fsimg=#{expected.sha256} oracle=#{actual.sha256}; bytes=#{expected.bytes}/#{actual.bytes}"
     end
-    stats[:files] += 1
-    stats[:bytes] += bytes.bytesize
+    Tally.new(files: 1, bytes: actual.bytes)
   end
 
-  def known_limitation?(oracle:, volume:, path:, message:)
-    volume.source == "native" && ORACLE_LIMITATIONS.any? do |tool, name, member, error|
-      tool == oracle && name.match?(volume.name) && member === path && error.match?(message)
+  # A member limitation needs its digest matched against the native manifest,
+  # so it can only apply to a native volume. A volume-wide limitation matches
+  # its name and error.
+  def known_limitation?(oracle:, volume:, path:, message:, matched: Set.new)
+    ORACLE_LIMITATIONS.any? do |limitation|
+      limitation.oracle == oracle && limitation.volume.match?(volume.name) &&
+        limitation.error.match?(message) &&
+        (limitation.member.nil? || (limitation.member === path && matched.include?(path)))
     end
   end
 
-  # Continue after a member disagreement so a single bad file cannot hide
-  # other findings. A timeout ends the volume rather than restarting a budget.
-  def compare_members(entries, oracle:, volume:)
+  # This per-member StandardError boundary records decoding and host I/O errors.
+  # Keep completed member checks when another member fails. A timeout ends
+  # traversal and travels with earlier findings, so it cannot hide them.
+  def compare_members(entries, oracle:, volume:, snapshot:)
+    tally = Tally.new
     findings = []
     skips = []
+    timeout = nil
     entries.each do |path, entry|
       begin
-        yield(path, entry)
-      rescue OracleTimeout
-        raise if findings.empty?
-
-        puts "SKIP #{oracle} #{volume.source}/#{volume.name}: timed out after #{READER_TIMEOUT} seconds"
-        raise Error, findings.join("\n")
-      rescue Error => e
-        if known_limitation?(oracle: oracle, volume: volume, path: path, message: e.message)
-          skips << path
-          puts "SKIP #{oracle} #{volume.source}/#{volume.name} #{path.inspect}: known oracle limitation: #{e.message}"
+        tally += yield(path, entry)
+      rescue CommandTimeout => e
+        timeout = e.message
+        break
+      rescue Skip => e
+        skips << "#{path.inspect}: #{e.message}"
+      rescue StandardError => e
+        if known_limitation?(oracle: oracle, volume: volume, path: path, message: e.message, matched: snapshot.matched)
+          skips << "#{path.inspect}: known oracle limitation: #{e.message}"
         else
           findings << "#{path.inspect}: #{e.message}"
         end
       end
     end
-    raise Error, findings.join("\n") unless findings.empty?
-    raise Skip, "#{skips.length} members have known oracle limitations" unless skips.empty?
+    Result.new(tally: tally, findings: findings, skips: skips, timeout: timeout)
   end
 
-  def hfsdump_reader(tool:, volume:, snapshot:, stats:, invoke:)
-    entries = snapshot.fetch(:entries)
-    # Include root even when fsimg's member listing is empty. Only directories
-    # with known children are read: hfsdump hangs reading an empty directory.
+  # Each oracle's catalog spelling is applied to listing
+  # expectations. fls can collapse distinct names, so paths remain a multiset.
+  def oracle_path(path, oracle:)
+    case oracle
+    when "hfsdump" then path.gsub("\u2400", "")
+    when "sleuth" then path.gsub(/[:\u2400]/, "^")
+    else path
+    end
+  end
+
+  def hfsdump_reader(tool:, volume:, snapshot:, invoke:, members: snapshot.entries)
+    children = snapshot.entries.keys.group_by { File.dirname(_1) }
     root = { "kind" => "directory", "size_bytes" => "0" }
-    compare_members(entries.merge("/" => root), oracle: "hfsdump", volume: volume) do |path, entry|
-      stat = invoke.call(tool, volume.image, "stat", path)
-      folder = entry.fetch("kind") == "directory"
-      wanted = folder ? "folder" : "file"
-      raise Error, "#{path.inspect}: hfsdump type differs: #{stat}" unless stat[/^type: (.+)$/, 1] == wanted
+    compare_members(members.merge("/" => root), oracle: "hfsdump", volume: volume, snapshot: snapshot) do |path, entry|
+      raise Skip, "hfsdump cannot address literal stored-NUL name #{path.inspect}" if path.include?("\u2400")
 
-      unless folder
-        size = stat[/^(?:decmpfs.logical_size|data_fork.logical_size): (\d+)$/, 1]
-        # Compressed size is emitted after the raw fork size.
-        size = stat[/^decmpfs.logical_size: (\d+)$/, 1] || size
-        unless size && Integer(size) == Integer(entry.fetch("size_bytes"))
-          raise Error, "#{path.inspect}: hfsdump size #{size.inspect}, fsimg #{entry.fetch('size_bytes')}"
-        end
-        mode = stat[/^permissions.file_mode: ([0-7]+)$/, 1]
-        type = { "file" => 0o100000, "symlink" => 0o120000, "fifo" => 0o010000 }.fetch(entry.fetch("kind"))
-        if mode && (Integer(mode, 8) & 0o170000) != type
-          raise Error, "#{path.inspect}: hfsdump mode #{mode}, fsimg kind #{entry.fetch('kind')}"
-        end
-      end
-      stats[:entries] += 1
-      if folder
-        children = entries.keys.select { File.dirname(_1) == path && _1 != path }.map { File.basename(_1) }
-        next if children.empty?
-
-        names = invoke.call(tool, volume.image, "read", path).force_encoding("UTF-8").lines.map(&:chomp)
-        same_paths(expected: children, actual: names, context: "#{path.inspect}: hfsdump children")
-      elsif snapshot.fetch(:hashes).key?(path)
-        same_bytes(bytes: invoke.call(tool, volume.image, "read", path), path: path, snapshot: snapshot, stats: stats)
+      stat = invoke.call(:command, tool, volume.image, "stat", path)
+      if entry.fetch("kind") == "directory"
+        hfsdump_folder(tool: tool, volume: volume, invoke: invoke, path: path, stat: stat, children: children.fetch(path, []))
+      else
+        hfsdump_file(tool: tool, volume: volume, snapshot: snapshot, invoke: invoke, path: path, entry: entry, stat: stat)
       end
     end
   end
 
-  def sleuth_reader(volume:, snapshot:, stats:, invoke:)
-    invoke.call("fsstat", volume.image)
-    listing = invoke.call("fls", "-r", "-p", volume.image).force_encoding("UTF-8")
-    nodes = listing.lines.filter_map do |line|
+  def hfsdump_folder(tool:, volume:, invoke:, path:, stat:, children:)
+    raise Error, "hfsdump type differs: #{text(stat)}" unless stat[/^type: (.+)$/, 1] == "folder"
+
+    raise Error, "hfsdump root CNID differs" if path == "/" && stat[/^cnid: (\d+)$/, 1] != "2"
+
+    valence = stat[/^valence: (\d+)$/, 1]
+    raise Error, "hfsdump folder lacks valence" unless valence
+
+    # Journal and private catalog objects count in root valence but neither
+    # reader lists them. Only root may have valence without visible children.
+    if Integer(valence).positive? && children.empty? && path != "/"
+      raise Error, "hfsdump non-root valence #{valence} with no fsimg children"
+    end
+    names = if Integer(valence).positive?
+      invoke.call(:command, tool, volume.image, "read", path).dup.force_encoding("UTF-8").lines.map(&:chomp)
+    else
+      []
+    end
+    expected = children.map { oracle_path(File.basename(_1), oracle: "hfsdump") }
+    same_paths(expected: expected, actual: names, context: "#{path.inspect}: hfsdump children")
+    Tally.new(entries: 1)
+  end
+
+  def hfsdump_file(tool:, volume:, snapshot:, invoke:, path:, entry:, stat:)
+    raise Error, "hfsdump type differs: #{text(stat)}" unless stat[/^type: (.+)$/, 1] == "file"
+
+    size = stat[/^decmpfs.logical_size: (\d+)$/, 1] || stat[/^data_fork.logical_size: (\d+)$/, 1]
+    unless size && Integer(size) == Integer(entry.fetch("size_bytes"))
+      raise Error, "hfsdump size #{size.inspect}, fsimg #{entry.fetch('size_bytes')}"
+    end
+    mode = stat[/^permissions.file_mode: ([0-7]+)$/, 1]
+    type = KINDS.fetch(entry.fetch("kind")).mode
+    if mode && (Integer(mode, 8) & 0o170000) != type
+      raise Error, "hfsdump mode #{mode}, fsimg kind #{entry.fetch('kind')}"
+    end
+    tally = Tally.new(entries: 1)
+    if snapshot.digests.key?(path)
+      tally += same_digest(actual: invoke.call(:digest_output, tool, volume.image, "read", path), path: path, snapshot: snapshot)
+    end
+    tally
+  end
+
+  def sleuth_reader(volume:, snapshot:, invoke:)
+    invoke.call(:command, "fsstat", volume.image)
+    listing = invoke.call(:command, "fls", "-r", "-p", volume.image).dup.force_encoding("UTF-8")
+    nodes = listing.lines.map do |line|
       match = /\A(\S+)\s+(\S+):\t(.*)\n?\z/.match(line)
       raise Error, "unrecognized fls record: #{line.inspect}" unless match
 
-      ["/#{match[3]}", { inode: match[2], type: match[1] }]
-    end.to_h.reject { |path, _| ORACLE_HIDDEN.fetch("sleuth").match?(path) }
-    path_problem = nil
+      [oracle_path("/#{match[3]}", oracle: "sleuth"), { inode: match[2], type: match[1] }]
+    end.reject { |path, _| SLEUTH_HIDDEN.match?(path) }
+    skips = []
     begin
-      same_paths(expected: snapshot.fetch(:entries).keys, actual: nodes.keys, context: "fls paths")
+      expected = snapshot.entries.keys.map { oracle_path(_1, oracle: "sleuth") }
+      same_paths(expected: expected, actual: nodes.map(&:first), context: "fls paths")
     rescue Error => e
       raise unless known_limitation?(oracle: "sleuth", volume: volume, path: nil, message: e.message)
 
-      path_problem = e.message
-      puts "SKIP sleuth #{volume.source}/#{volume.name}: known oracle limitation: #{path_problem}"
+      skips << "known oracle limitation: #{e.message}"
     end
-    reported = snapshot.fetch(:entries).select { |path, _| nodes.key?(path) }
-    compare_members(reported, oracle: "sleuth", volume: volume) do |path, entry|
-      node = nodes.fetch(path)
-      type = { "directory" => "d", "file" => "r", "symlink" => "l", "fifo" => "p" }.fetch(entry.fetch("kind"))
-      raise Error, "#{path.inspect}: fls type #{node[:type]}, fsimg #{type}" unless node.fetch(:type).split("/").last == type
+    # Preserve colliding fls spellings and consume one inode per fsimg member.
+    by_path = nodes.group_by(&:first).transform_values { _1.map(&:last) }
+    reported = snapshot.entries.select { |path, _| by_path.key?(oracle_path(path, oracle: "sleuth")) }
+    result = compare_members(reported, oracle: "sleuth", volume: volume, snapshot: snapshot) do |path, entry|
+      node = by_path.fetch(oracle_path(path, oracle: "sleuth")).shift
+      type = KINDS.fetch(entry.fetch("kind")).fls
+      raise Error, "fls type #{node[:type]}, fsimg #{type}" unless node.fetch(:type).split("/").last == type
 
-      stats[:entries] += 1
-      next unless snapshot.fetch(:hashes).key?(path)
-
-      same_bytes(bytes: invoke.call("icat", volume.image, node.fetch(:inode)), path: path, snapshot: snapshot, stats: stats)
+      tally = Tally.new(entries: 1)
+      if snapshot.digests.key?(path)
+        tally += same_digest(actual: invoke.call(:digest_output, "icat", volume.image, node.fetch(:inode)), path: path, snapshot: snapshot)
+      end
+      tally
     end
-    raise Skip, path_problem if path_problem
+    result.with(skips: skips + result.skips)
   end
 
-  def mounted_reader(volume:, snapshot:, stats:, directory:)
+  MOUNT_ENVIRONMENT_ERRORS = [
+    /unknown filesystem type/i,
+    /(?:failed to (?:set up|setup) loop device|cannot (?:find|set up).*loop device)/i,
+    /operation not permitted|permission denied|\bEPERM\b/i
+  ].freeze
+
+  def mount_environment_error?(message) = MOUNT_ENVIRONMENT_ERRORS.any? { _1.match?(message) }
+
+  def mounted?(mountpoint) = File.stat(mountpoint).dev != File.stat(File.dirname(mountpoint)).dev
+
+  def mount_volume(image:, mountpoint:, timeout:)
+    command("mount", "-t", "hfsplus", "-o", "ro,loop", image, mountpoint, timeout: timeout)
+  rescue Error => e
+    raise Skip, "mount environment: #{e.message}" if mount_environment_error?(e.message)
+
+    raise
+  end
+
+  def with_mount(image:, mountpoint:, timeout: 30)
+    result = nil
+    begin
+      mount_volume(image: image, mountpoint: mountpoint, timeout: timeout)
+      result = yield
+    ensure
+      earlier_error = $!
+      if mounted?(mountpoint)
+        problem = unmount_volume(mountpoint)
+        if problem && earlier_error
+          warn "FINDING unmount failed while handling #{earlier_error.message}: #{problem}"
+        elsif problem
+          result = result.with(findings: result.findings + [problem])
+        end
+      end
+    end
+    result
+  end
+
+  def mounted_name(path) = path.dup.force_encoding("UTF-8").unicode_normalize(:nfc)
+
+  def mounted_reader(volume:, snapshot:, directory:)
     raise Skip, "only locally generated volumes may be mounted" unless volume.local
 
     mountpoint = File.join(directory, "mount")
     Dir.mkdir(mountpoint) unless File.directory?(mountpoint)
-    mounted = false
-    begin
-      begin
-        command("mount", "-t", "hfsplus", "-o", "ro,loop", volume.image, mountpoint)
-        mounted = true
-      rescue OracleTimeout
-        raise
-      rescue Error => e
-        raise Skip, "mount refused: #{e.message}"
-      end
-      paths = []
-      Find.find(mountpoint) { paths << _1.delete_prefix(mountpoint) unless _1 == mountpoint }
-      same_paths(expected: snapshot.fetch(:entries).keys, actual: paths, context: "mounted paths")
-      snapshot.fetch(:entries).each do |path, entry|
-        host = File.join(mountpoint, path.delete_prefix("/"))
+    with_mount(image: volume.image, mountpoint: mountpoint) do
+      # C-locale directory names are bytes. Linux composes Unicode and exposes
+      # stored slash/NUL as ':'/U+2400, like fsimg; NFC compares those spellings.
+      hosts = []
+      Find.find(mountpoint) { hosts << _1 unless _1 == mountpoint }
+      names = hosts.map { |host| [mounted_name(host.delete_prefix(mountpoint)), host] }
+      paths = names.group_by(&:first).transform_values { _1.map(&:last) }
+      expected = snapshot.entries.keys.map { _1.unicode_normalize(:nfc) }
+      same_paths(expected: expected, actual: names.map(&:first), context: "mounted paths")
+      compare_members(snapshot.entries, oracle: "linux-mount", volume: volume, snapshot: snapshot) do |path, entry|
+        host = paths.fetch(path.unicode_normalize(:nfc)).shift
         stat = File.lstat(host)
-        kind = { "directory" => "directory", "file" => "file", "symlink" => "link", "fifo" => "fifo" }.fetch(entry.fetch("kind"))
-        raise Error, "#{path.inspect}: mounted type #{stat.ftype}, fsimg #{kind}" unless stat.ftype == kind
+        kind = KINDS.fetch(entry.fetch("kind")).ftype
+        raise Error, "mounted type #{stat.ftype}, fsimg #{kind}" unless stat.ftype == kind
 
-        stats[:entries] += 1
-        next unless snapshot.fetch(:hashes).key?(path)
-
-        bytes = stat.symlink? ? File.readlink(host).b : File.binread(host)
-        same_bytes(bytes: bytes, path: path, snapshot: snapshot, stats: stats)
+        tally = Tally.new(entries: 1)
+        if snapshot.digests.key?(path)
+          digest = if stat.symlink?
+            bytes = File.readlink(host).b
+            FileDigest.new(sha256: Digest::SHA256.hexdigest(bytes), bytes: bytes.bytesize)
+          else
+            FileDigest.new(sha256: Digest::SHA256.file(host).hexdigest, bytes: stat.size)
+          end
+          tally += same_digest(actual: digest, path: path, snapshot: snapshot)
+        end
+        tally
       end
-    ensure
-      command("umount", mountpoint) if mounted
     end
   end
 
-  # This per-oracle boundary records decoding, host I/O and command failures.
-  # It reports partial counts; a timeout can never produce an agreement.
-  def comparison(oracle:, volume:, failures:)
-    stats = { entries: 0, files: 0, bytes: 0 }
-    result = "agree"
-    value = nil
+  # Return the first failure after releasing the mount. If neither operation
+  # succeeds, bypass mktmpdir cleanup to prevent recursion into a live mount.
+  def unmount_volume(mountpoint)
+    command("umount", mountpoint)
+    nil
+  rescue Error => e
     begin
-      value = yield(stats)
-    rescue OracleTimeout
-      result = "skip"
-      puts "SKIP #{oracle} #{volume.source}/#{volume.name}: timed out after #{READER_TIMEOUT} seconds"
+      command("umount", "-l", mountpoint)
+    rescue Error => lazy_error
+      warn "FINDING unmount failed: #{e.message}; lazy unmount failed: #{lazy_error.message}; leaving #{mountpoint} in place"
+      $stdout.flush
+      exit!(1)
+    end
+    "unmount failed: #{e.message}"
+  end
+
+  def timeout_skip?(oracle:, local:) = oracle != "fsimg" && !local
+
+  def exit_code(rows:, unmatched:)
+    return 1 if rows.any? { _1.verdict == "finding" } || !unmatched.empty?
+
+    rows.any? { _1.oracle != "fsimg" && _1.verdict == "agree" } ? 0 : 77
+  end
+
+  # This per-comparison boundary records command, decoding and host I/O
+  # exceptions. Raised comparisons have no completed result and report zeros.
+  # Local volumes are stricter: nothing but this project made them, so a hang
+  # is ours to explain.
+  def comparison(oracle:, volume:)
+    result = begin
+      yield || Result.new
+    rescue CommandTimeout => e
+      Result.new(timeout: e.message)
     rescue Skip => e
-      result = "skip"
-      puts "SKIP #{oracle} #{volume.source}/#{volume.name}: #{e.message}"
+      Result.new(skips: [e.message])
     rescue StandardError => e
       if known_limitation?(oracle: oracle, volume: volume, path: nil, message: e.message)
-        result = "skip"
-        puts "SKIP #{oracle} #{volume.source}/#{volume.name}: known oracle limitation: #{e.message}"
+        Result.new(skips: ["known oracle limitation: #{e.message}"])
       else
-        result = "finding"
-        failures << "#{oracle} #{volume.source}/#{volume.name}: #{e.message}"
-        warn "FINDING #{failures.last}"
+        Result.new(findings: [e.message])
       end
-    ensure
-      puts "COMPARE #{oracle} #{volume.source}/#{volume.name} entries=#{stats[:entries]} files=#{stats[:files]} bytes=#{stats[:bytes]} result=#{result}"
     end
-    Comparison.new(value: value, result: result)
+    findings = result.findings
+    skips = result.skips
+    if result.timeout
+      if findings.empty? && timeout_skip?(oracle: oracle, local: volume.local)
+        skips += [result.timeout]
+      else
+        findings += [result.timeout]
+      end
+    end
+    verdict = if !findings.empty?
+      "finding"
+    elsif !skips.empty?
+      "skip"
+    else
+      "agree"
+    end
+    skips.each { puts "SKIP #{oracle} #{volume.source}/#{volume.name}: #{_1}" }
+    warn "FINDING #{oracle} #{volume.source}/#{volume.name}: #{findings.join("\n")}" unless findings.empty?
+    tally = result.tally
+    puts "COMPARE #{oracle} #{volume.source}/#{volume.name} entries=#{tally.entries} files=#{tally.files} bytes=#{tally.bytes} result=#{verdict}"
+    Comparison.new(value: result.value, verdict: verdict, oracle: oracle, findings: findings)
   end
 
-  def reader_volume(fsimg:, volume:, available:, failures:, directory:, checks: nil)
-    baseline = comparison(oracle: "fsimg", volume: volume, failures: failures) do |stats|
-      fsimg_snapshot(fsimg: fsimg, volume: volume, stats: stats)
+  def writer_tree_check(snapshot:, shape:)
+    if mapnodes?(shape)
+      path = MAPNODES_MEMBER
+      expected = FileDigest.new(sha256: Digest::SHA256.hexdigest(""), bytes: 0)
+      raise Error, "mapnodes synthetic file absent or nonempty" unless snapshot.digests[path] == expected
+    elsif !%w[empty empty-min].include?(shape)
+      names = snapshot.entries.keys.select { File.dirname(_1) == "/" }.map { File.basename(_1) }
+      raise Error, "writer tree lacks root names" unless (ROOT_NAMES - names).empty?
+      raise Error, "writer hello digest differs" unless snapshot.digests.fetch("/hello").sha256 == Digest::SHA256.hexdigest(HELLO)
+    end
+  end
+
+  def reader_volume(fsimg:, volume:, available:, directory:, shape: nil)
+    baseline = comparison(oracle: "fsimg", volume: volume) do
+      result = fsimg_snapshot(fsimg: fsimg, volume: volume, directory: directory)
+      writer_tree_check(snapshot: result.value, shape: shape) if shape
+      result
     end
     snapshot = baseline.value
-    checks ||= { "hfsdump" => available[:hfsdump], "sleuth" => available[:sleuth], "linux-mount" => available[:mount] }
+    checks = { "hfsdump" => !!available[:hfsdump], "sleuth" => !!available[:sleuth], "linux-mount" => !!available[:mount] }
     comparisons = checks.map do |oracle, present|
-      comparison(oracle: oracle, volume: volume, failures: failures) do |stats|
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + READER_TIMEOUT
+      invoke = lambda do |operation, *args|
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        raise CommandTimeout, "per-volume budget of #{READER_TIMEOUT} seconds ran out" if remaining <= 0
+
+        public_send(operation, *args, timeout: remaining)
+      end
+
+      comparison(oracle: oracle, volume: volume) do
         raise Skip, "oracle absent or host ineligible" unless present
         raise Skip, "fsimg baseline unavailable" unless snapshot
-
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + READER_TIMEOUT
-        invoke = lambda do |*args|
-          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          raise OracleTimeout if remaining <= 0
-
-          command(*args, timeout: remaining)
+        if oracle == "sleuth" && mapnodes?(shape)
+          raise Skip, "fsstat is too slow on a catalog of this size"
         end
+
         case oracle
         when "hfsdump"
-          hfsdump_reader(tool: present, volume: volume, snapshot: snapshot, stats: stats, invoke: invoke)
-        when "sleuth"
-          sleuth_reader(volume: volume, snapshot: snapshot, stats: stats, invoke: invoke)
-        when "linux-mount"
-          mounted_reader(volume: volume, snapshot: snapshot, stats: stats, directory: directory)
+          members = snapshot.entries
+          if mapnodes?(shape)
+            puts "CAP hfsdump #{volume.name}: root listing and one member of #{members.length}; a process per member takes over 30 minutes on this catalog"
+            members = members.slice(MAPNODES_MEMBER)
+          end
+          hfsdump_reader(tool: available[:hfsdump], volume: volume, snapshot: snapshot, invoke: invoke, members: members)
+        when "sleuth" then sleuth_reader(volume: volume, snapshot: snapshot, invoke: invoke)
+        when "linux-mount" then mounted_reader(volume: volume, snapshot: snapshot, directory: directory)
         end
       end
     end
@@ -595,11 +788,12 @@ module HfsPlusIntegration
     available = oracles
     reader_versions(available)
 
-    failures = []
     outcomes = []
+    volumes = []
     Dir.mktmpdir("fsimg-hfs-integration-", ENV["TMPDIR"]) do |directory|
-      reader_volumes(directory).each do |volume|
-        outcomes.concat(reader_volume(fsimg: fsimg, volume: volume, available: available, failures: failures, directory: directory))
+      volumes = reader_volumes(directory)
+      volumes.each do |volume|
+        outcomes.concat(reader_volume(fsimg: fsimg, volume: volume, available: available, directory: directory))
       end
       writer_cases = if ENV["FSIMG_HFS_ONLY"] == "reader" || !available.values.any?
         []
@@ -609,45 +803,41 @@ module HfsPlusIntegration
       writer_cases.each do |variant, block, shape, size|
         name = "#{variant}-#{block}-#{shape}-#{size || 'auto'}"
         image = File.join(directory, "#{name}.img")
+        volume = Volume.new(image: image, name: name, source: "writer", local: true)
         begin
-          generate(generator: generator, image: image, variant: variant, block: block,
-                   shape: shape, size: size, directory: directory)
-          puts image_line(image, name: name)
-          volume = Volume.new(image: image, name: name, source: "writer", local: true)
+          begin
+            generate(generator: generator, image: image, variant: variant, block: block,
+              shape: shape, size: size, directory: directory)
+            puts image_line(image, name: name)
+          rescue StandardError => e
+            outcomes << comparison(oracle: "generator", volume: volume) { raise e }
+            next
+          end
           outcomes.concat(reader_volume(fsimg: fsimg, volume: volume, available: available,
-            failures: failures, directory: directory, checks: { "linux-mount" => available[:mount] }))
-          empty = %w[empty empty-min].include?(shape)
+            directory: directory, shape: shape))
           # Each present oracle runs even if another oracle reports a finding.
           checks = {
             native: -> { native_check(image, oracle_log: ENV["FSIMG_HFS_ORACLE_LOG"]) },
-            hfsdump: -> { hfsdump_check(tool: available.fetch(:hfsdump), image: image, shape: shape) },
-            sleuth: -> { sleuth_check(image: image, empty: empty) },
             linux: -> { command(available.fetch(:linux), "-n", image) }
           }
           checks.each do |oracle, check|
             next unless available.fetch(oracle)
 
-            outcomes << comparison(oracle: oracle.to_s, volume: volume, failures: failures) do |_stats|
-              if oracle == :sleuth && %w[mapnodes mapnodes-small].include?(shape)
-                raise Skip, "fsstat is too slow on a catalog of this size"
-              end
+            outcomes << comparison(oracle: oracle.to_s, volume: volume) do
               check.call
+              Result.new
             end
           end
-        rescue Error => e
-          failures << "#{name}: #{e.message}"
-          warn "FINDING #{failures.last}"
         ensure
           File.unlink(image) if File.exist?(image)
         end
       end
     end
-    totals = outcomes.map(&:result).tally
-    puts "SUMMARY agree=#{totals.fetch('agree', 0)} finding=#{totals.fetch('finding', 0)} skip=#{totals.fetch('skip', 0)}"
-    return 1 unless failures.empty?
-
-    applicable = ENV["FSIMG_HFS_ONLY"] == "reader" ? available.values_at(:hfsdump, :sleuth, :mount) : available.values
-    applicable.any? ? 0 : 77
+    unmatched = unmatched_sources(sources: reader_sources, volumes: volumes)
+    unmatched.each { warn "FINDING explicit #{_1} source matched no images" }
+    totals = outcomes.map(&:verdict).tally
+    puts "SUMMARY agree=#{totals.fetch('agree', 0)} finding=#{totals.fetch('finding', 0) + unmatched.length} skip=#{totals.fetch('skip', 0)}"
+    exit_code(rows: outcomes, unmatched: unmatched)
   end
 end
 

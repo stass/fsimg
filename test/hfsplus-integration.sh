@@ -7,4 +7,5 @@ if ! command -v ruby >/dev/null 2>&1; then
     exit 77
 fi
 ruby "$(dirname "$0")/hfsplus-capture-test.rb"
+ruby "$(dirname "$0")/hfsplus-integration-test.rb"
 exec ruby "$(dirname "$0")/hfsplus-integration.rb" ./hfsplus-write-gen ./fsimg

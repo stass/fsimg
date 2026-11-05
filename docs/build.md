@@ -1236,7 +1236,7 @@ volume with `mkfs.hfsplus` when available. With both source variables unset,
 only this local mkfs source is considered by the reader. Omitting
 `FSIMG_HFS_ONLY=reader` also runs the writer matrix. Startup records the hfsfuse
 build pin (hfsdump has no version flag), `fls -V`, and `uname -sr`. Oracle
-comparisons have a 60-second budget per volume; timeouts are counted as skips.
+comparisons use the command and per-volume bounds described below.
 
 The verification manifest, `test/hfsplus-verify-expected.tsv`, runs under
 `test/cli/hfsplus_verify_manifest_test.rb` with `FSIMG_HFSPLUS_NATIVE` naming the
@@ -1401,8 +1401,10 @@ zlib content, and a journal. Bounded metadata caches under a 16 MiB context
 budget force scratch use in each operation, asserted separately from setup.
 The public reader exposes decoded file content;
 raw resource forks and attribute values have no public read API. Preparation
-and verification validate those records. Short reads must match clean entry
-counts and content digests. Every attempt checks memory, scratch, descriptors
+and verification validate those records. Short reads must match clean entry counts, and in the content stage content
+digests. Allocation faults run each point twice, with and without a diagnostic
+record; other faults alternate. A failure given a record must report its status
+there. The count of open descriptors must be unchanged at the end. Every attempt checks memory, scratch, descriptors
 and the private scratch directory after teardown, then opens and walks again
 on the same context. Run `./test-hfsplus-faults` in the build directory;
 optional stage and fault names select a single sweep, for example
@@ -1411,10 +1413,12 @@ optional stage and fault names select a single sweep, for example
 `test-hfsplus-scale` generates every image byte from its address, retaining one
 4096-byte B-tree node and layout integers, with no image file or resident record
 catalog. It opens through callback I/O under a 16 MiB memory budget, walks all
-entries, reopens for full verification, and checks memory, scratch and descriptor
+entries, reopens for verification, which reads payload for the extents shape
+and metadata alone for the others, and checks memory, scratch and descriptor
 accounting against the live context's baseline after reader and I/O teardown.
-Each process creates and removes a private scratch directory beneath its working
-directory. Run `./test-hfsplus-scale --catalog 10000000`, `--wide 100000`,
+The walk's entries must match an order-independent sum of path hashes computed
+by one pass over the generator's catalog ordinals. The count of open descriptors must be unchanged at the end. Each process creates and removes a private scratch directory
+beneath its working directory. Run `./test-hfsplus-scale --catalog 10000000`, `--wide 100000`,
 `--extents 1000000`, `--deep 256`, `--depth-limit`, or `--capacity` in the build
 directory. Catalog files are grouped under folders of at most 2048 children;
 the wide directory must spill beyond the memory budget. The fragmented file has
@@ -1427,14 +1431,18 @@ a 536,870,912-byte bitmap fork. Verification must read every bitmap byte in orde
 of the other cases; `make check-extended` selects ten million catalog files.
 The catalog qualification exceeds a minute on the measured host. RSS may grow
 by at most 32 MiB above the pre-open peak, allowing the charged budget plus
-16 MiB of runtime and allocator overhead. Metadata deliveries are bounded by
-32 walk passes and 40 verification passes to catch repeated whole-tree scans.
+16 MiB of runtime and allocator overhead. Metadata block reads are bounded per shape to catch repeated whole-tree scans,
+as walk and verification passes over the metadata plus 150 fixed reads: catalog
+and wide 1 and 3, extents 2 and 4, deep and depth limit 21 and 23, capacity 1
+and 2.
 
-Reference macOS x86_64 measurements follow. Paired values are walk / verify;
+Reference macOS x86_64 measurements follow; timings come from one run. Paired values are walk / verify;
 resource sizes and RSS are bytes, metadata reads count delivered 512-byte sectors
 of the catalog, overflow tree and bitmap, and pass equivalents divide by the
 number of those sectors. Seconds include opening the reader and, for the extent
-walk, reading and checking all payload. Each profile runs in a separate process.
+walk, reading and checking all payload. The extents-1000000 verify row includes
+payload: amount 1000000, walk 1.375 s, verify 3.161 s, verify reads 1007630,
+verify metadata block reads 61065. Each profile runs in a separate process.
 
 | Case | Walk entries | Source calls | All I/O calls | Metadata sector reads | Metadata passes | Peak scratch | Peak charged memory | Peak RSS | Seconds |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -1442,7 +1450,7 @@ walk, reading and checking all payload. Each profile runs in a separate process.
 | catalog-10000000 | 10004883 | 739416 / 3620921 | 739416 / 4852450 | 5915363 / 28967394 | 0.513 / 2.513 | 1441003696 | 5363280 | 11894784 | 22.908 / 62.073 |
 | wide-100000 | 100000 | 7158 / 35972 | 17235 / 54860 | 57299 / 287800 | 0.497 / 2.497 | 24612794 | 5375825 | 10358784 | 0.392 / 0.808 |
 | extents-500000 | 1 | 501396 / 2576 | 507574 / 26051 | 10131 / 20634 | 0.978 / 1.992 | 36013218 | 5363280 | 10366976 | 0.719 / 1.035 |
-| extents-1000000 | 1 | 1002646 / 5127 | 1014795 / 63779 | 20131 / 41041 | 0.973 / 1.984 | 72013410 | 5363280 | 10383360 | 1.434 / 2.555 |
+| extents-1000000 | 1 | 1002646 / 1007630 | 1014795 / not recorded | 20131 / 61065 | 0.973 / not recorded | 72013410 | 5363280 | 10383360 | 1.375 / 3.161 |
 | deep | 256 | 813 / 899 | 813 / 899 | 6539 / 7212 | 20.371 / 22.467 | 0 | 1162364 | 3956736 | 0.004 / 0.007 |
 | depth-limit | 256 | 816 / 901 | 816 / 901 | 6563 / 7236 | 20.445 / 22.542 | 0 | 1162424 | 3809280 | 0.004 / 0.005 |
 | capacity | 1 | 11 / 131090 | 11 / 131090 | 110 / 1048742 | 0.000 / 1.000 | 0 | 1160209 | 2490368 | 0.001 / 3.531 |
@@ -1486,53 +1494,96 @@ straddles the last block or lies past it. `FSIMG_HFS_LARGE=1` adds 1 GiB volumes
 at 4096 and 8192, catalogs with map nodes, and nearly full volumes; it writes
 over 4 GiB of images, then removes them.
 
-Its reader comparisons use `fsimg t --json`, `fsimg W --json` and `fsimg x -O`
-on the same volumes as each independent reader. Verification must complete or
-match the named refusal in `test/hfsplus-verify-expected.tsv`, including its
-status and message; successful manifest rows also check the five block and
-entry counts. Native manifest hashes and symlink targets are checked when
-present. hfsdump stats every listed path and the root, compares file types and
-logical sizes, reads only directories known to contain members, and compares
-their child names. Empty directories receive stat checks alone because
-hfsdump can hang reading them. Regular file bytes and symlink targets are
-compared by SHA-256. Sleuth Kit runs `fsstat`, compares recursive `fls -r -p`
-paths and types, and compares `icat` bytes by SHA-256. A printed cap limits
-reads to 64 regular files and symlinks per volume: uncapped per-member fsimg
-CLI startup takes minutes on the e7 captures. Listing, verification and
-hfsdump metadata traversal retain all entries, subject to command and oracle
-timeouts. Each oracle and volume emits a `COMPARE` line with entry, file and
-byte counts and an agreement, finding or skip; the summary counts each result.
+Its reader comparisons use `fsimg W --json` and `fsimg t --json` to establish
+one baseline for both captured and writer volumes. Verification must complete
+or match the named refusal in `test/hfsplus-verify-expected.tsv`, including its
+status and message; successful rows also check the five block and entry counts.
+One `fsimg x --json -E -k` extracts the whole volume into a new private directory.
+Every regular file is hashed from disk with a streaming SHA-256 digest and its
+size checked against the listing. Symlink targets use individual `fsimg x -O`
+commands. The extraction summary must account for all listed symlinks, fifos, devices and sockets
+as skipped entries and omit no names. The extraction directory is removed before
+any independent reader runs.
+Native manifest hashes and symlink targets are checked when present, including
+members absent from the fsimg digest set.
+
+hfsdump stats every addressable listed path and the root, compares types and logical sizes,
+and uses each folder's `valence` to decide whether to read its children. Missing
+valence is a finding. A non-root folder with positive valence but no fsimg
+children is a finding; root may count hidden journal and private objects.
+Zero-valence folders are not read because hfsdump hangs on them. File bytes and
+symlink targets are compared by streaming SHA-256 and byte count. Sleuth Kit
+runs `fsstat`, compares recursive `fls -r -p` paths and types, and streams `icat`
+bytes into the same digest check. Name comparisons preserve multiplicity,
+including collisions in fls's `^` spelling of stored slash and NUL. hfsdump's
+stored-NUL name prints as an empty line and cannot be addressed by any spelling;
+a member with U+2400 anywhere in its path receives a named skip, and a folder's
+listing is compared with that name's empty-line spelling. Sleuth Kit skips map-node
+catalogs because `fsstat` is too slow on them. For map-node shapes, hfsdump
+compares the root listing against all entries and reads one synthetic member.
+It prints a `CAP hfsdump` line because a process per member takes over 30 minutes
+on this catalog. Writer tree checks also require
+the fixture's root names and hello bytes, or the empty synthetic map-node file.
+
+hfsdump and Sleuth Kit each have a 60-second budget per volume. fsimg has 60 seconds per command. A timeout
+in fsimg or any command on a local volume is a finding. An independent oracle
+timeout on a non-local volume is a skip unless earlier member findings exist;
+those findings and the timeout are reported together. Diagnostics state the
+actual remaining budget at command start, or that the volume budget ran out.
+Command stderr and failure excerpts retain only a few KiB even for noisy tools.
+Each oracle and volume emits a `COMPARE` line with entry, file and byte counts
+and an agreement, finding or skip; `SUMMARY` counts every comparison row and
+explicit sources with no images as findings.
 
 On Linux as root, locally generated writer and mkfs volumes also receive a
-`mount -t hfsplus -o ro,loop` tree, type and byte comparison, with unmount in
-the cleanup path. Native captures and corpus specimens are never mounted.
-Other hosts print `SKIP linux-mount: needs root on Linux`; a refused mount is
-also a skip. The script exits 1 for findings, 77 when no applicable oracle
-exists, and 0 otherwise.
+`mount -t hfsplus -o ro,loop` tree, type and byte comparison. This path has not
+been run. Names are decoded as UTF-8 and compared under NFC to accommodate the
+Linux driver's composed output. Native captures and corpus specimens are never
+mounted. Other hosts print `SKIP linux-mount: needs root on Linux`. Local mount
+refusals are findings except for the named environment errors: unknown filesystem
+type, loop-device setup failure, and operation not permitted or permission denied (EPERM). Mount and
+unmount commands each have 30 seconds; mounted file reads are not bounded.
+Cleanup tries ordinary unmount, then lazy unmount. A first unmount failure is a
+finding; if both fail, the process exits immediately and leaves the directory
+in place so temporary-directory cleanup cannot recurse into a live mount.
 
-The run on Darwin 25.6.0 used hfsdump at the hfsfuse pin
-`eed780cbe0445893de6f4aa8d74461da00756984` and Sleuth Kit 4.15.0:
+The script exits 1 for findings or when an explicitly set
+`FSIMG_HFSPLUS_NATIVE` or `FSIMG_HFSPLUS_CORPUS` matches no images. It exits 77
+when no independent oracle completed an agreement: a fsimg baseline row alone
+proves nothing. Otherwise it exits 0. `test/hfsplus-integration.sh` first runs
+the capture and integration harness unit tests without images or device access.
+
+The run on Darwin 25.6.0 against the native captures, with the corpus variable
+unset, used hfsdump at the hfsfuse pin `eed780cbe0445893de6f4aa8d74461da00756984` and Sleuth Kit 4.15.0:
 
 | Source | Volumes | Oracle | Result | Known limitations |
 | --- | ---: | --- | --- | --- |
 | Native raw captures | 44 | fsimg | 35 agree, 9 expected refusals | Classic HFS, HFS wrappers, journal replay and journaled directory hard links |
 | Native raw captures | 44 | hfsdump | 34 agree, 10 skip | 9 unavailable baselines; 1 ditto volume has incorrect type 8 resource bytes |
-| Native raw captures | 44 | Sleuth Kit | 28 agree, 16 skip | 9 unavailable baselines; 7 volumes encounter attribute, directory-link or compression limitations |
-| linux-mkfs-hfsplus corpus | 5 | fsimg, hfsdump, Sleuth Kit | 5 agree per reader | Empty directories checked without hfsdump read |
+| Native raw captures | 44 | Sleuth Kit | 28 agree, 16 skip | 9 unavailable baselines; 7 volumes encounter attribute, thread-position or compression limitations |
 | Local mkfs | 0 | All | Skip | mkfs.hfsplus unavailable |
-| Native and corpus | 49 | Linux mount | Skip | Host is Darwin; these sources are ineligible for mounting on every host |
-| Writer volumes | 32 | fsck_hfs (version hfs-715.160.9), fsimg, hfsdump, Sleuth Kit | 32 agree per reader | None |
+| Native raw captures | 44 | Linux mount | Skip | Host is Darwin; these sources are ineligible for mounting on every host |
+| Writer volumes | 32 | fsck_hfs (version hfs-715.160.9) | 32 agree | None |
+| Writer volumes | 32 | fsimg | 32 agree | None |
+| Writer volumes | 32 | hfsdump | 6 agree, 26 skip | Each tree volume holds the stored-NUL name, which hfsdump cannot address; its other members are compared |
+| Writer volumes | 32 | Sleuth Kit | 30 agree, 2 skip | The small nearly full volumes hit the thread-position limitation |
 | Writer volumes | 32 | Linux mount | Skip | Host is Darwin |
 
-This totals 240 agreements, 116 skips and no findings. The 64-member read cap
-applies to the two e7 captures. No corpus or capture oracle timed out.
+This totals 197 agreements, 139 skips and no findings over 92,190,307 compared
+bytes. No capture oracle timed out.
 Linux and FreeBSD reader runs are not recorded here.
 
 The frozen oracle limitation table is restricted to observed names and errors.
+A member limitation applies only after that member's fsimg digest matches the
+native manifest. Without a manifest match there is no member exception.
+A volume-wide limitation has no member digest and matches on volume name and
+error alone; it may name a writer volume too.
 TSK exposes synthetic system forks, private HFS+ storage and journal objects
 that fsimg intentionally omits. TSK cannot read the fork-backed attribute on
-`/attr-sizes` in both 16 MiB e5 captures. In the 8 MiB e4 captures it omits
-`/u1/a` on HFS Plus and fails catalog thread lookup on HFSX. The HFS Plus and
+`/attr-sizes` in both 16 MiB e5 captures. fls gives up on a folder whose thread
+record starts in the last 520 bytes of its catalog node, omitting `/u1/a` in
+the 8 MiB HFS Plus e4 capture and `/dir/sub/below` on the small nearly full writer
+volumes. The 8 MiB HFSX e4 capture fails catalog thread lookup. The HFS Plus and
 HFSX e6-lzfse captures encounter unsupported inline/resource LZFSE decoding on
 `forced-mixed-196608`, `forced-random-1`, `mixed-196608`, `random-1`,
 `shape-{131073,262145,393217,589825}`, and
