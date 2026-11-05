@@ -91,12 +91,15 @@ module HfsPlusCapture
       [out, code == 0]
     end
 
-    # Run argv, log it, return [combined output, exit status]; the status is
-    # nil when the program cannot start or dies of a signal. The [cmd, cmd]
-    # form of the program keeps a lone element from being handed to a shell.
-    def run_status(*argv, timeout: COMMAND_TIMEOUT)
+    # Run argv, log it, return [output, exit status]; the status is nil when the
+    # program cannot start, dies of a signal or runs past `timeout`. The output
+    # holds its standard error too, unless `stderr` names a file for that. The
+    # program has its own process group: a timeout or an interrupt kills the group
+    # and reaps it, so that nothing it started keeps running. The [cmd, cmd] form
+    # of the program keeps a lone element from being handed to a shell.
+    def run_status(*argv, timeout: COMMAND_TIMEOUT, stderr: [:child, :out])
       out = +"".b
-      code = Open3.popen2e([argv.first, argv.first], *argv.drop(1), pgroup: true) do |input, output, child|
+      code = Open3.popen2([argv.first, argv.first], *argv.drop(1), pgroup: true, err: stderr) do |input, output, child|
         input.close
         reader = Thread.new do
           loop { out << output.readpartial(16_384) }
@@ -109,17 +112,12 @@ module HfsPlusCapture
             child.value.exitstatus
           end
         rescue Timeout::Error
-          # Kill the group even if the leader exited: descendants can retain
-          # the output pipe and keep the reader waiting for EOF.
-          begin
-            Process.kill("KILL", -child.pid)
-          rescue Errno::ESRCH
-            nil
-          end
-          child.value
-          reader.value
+          stop_group(child, reader)
           out << "\n[timeout after #{timeout} seconds: #{shown_command(argv)}]\n"
           nil
+        rescue SignalException
+          stop_group(child, reader)
+          raise
         ensure
           reader.join
         end
@@ -130,6 +128,21 @@ module HfsPlusCapture
     rescue SystemCallError => e
       @lines.push("$ #{shown_command(argv)}", "  [#{e.message}]")
       ["", nil]
+    end
+
+    private
+
+    # Kill the group even if the leader exited: descendants can retain the output
+    # pipe and keep the reader waiting for EOF. macOS answers EPERM for a group
+    # whose only member is an unreaped leader, and ESRCH once it is reaped.
+    def stop_group(child, reader)
+      begin
+        Process.kill("KILL", -child.pid)
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
+      end
+      child.value
+      reader.value
     end
   end
 
@@ -182,18 +195,17 @@ module HfsPlusCapture
     end
 
     # Attach, yield the device, and detach it again (unless the block already
-    # did): a failed detach on the success path is an error. When the block or the attach fails, the device
-    # is detached on a best-effort basis and that error is the one raised; a
-    # device that cannot be detached stays listed for `release` to report.
+    # did): a failed detach on the success path is an error. When the block is
+    # left any other way, an interrupt included, the device is detached on a
+    # best-effort basis and what left the block is what is raised; a device that
+    # cannot be detached stays listed for `release` to report.
     def with(image, mountpoint: nil, readonly: false, options: [])
-      device = nil
       device = attach(image, mountpoint: mountpoint, readonly: readonly, options: options)
       result = yield device
       detach(device) if @devices.include?(device)
       result
-    rescue StandardError
+    ensure
       detach_error(device) if device && @devices.include?(device)
-      raise
     end
 
     private

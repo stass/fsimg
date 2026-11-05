@@ -5,7 +5,8 @@
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
 # The native qualification cycle of the HFS Plus writer, on macOS. For each
-# image of `images` the writer makes a raw volume, and then:
+# image of `images` the writer makes a raw volume, and `fsimg c` with its
+# defaults makes one more, and then:
 #
 #   1. fsck_before  attach without mounting, `fsck_hfs -fn`
 #   2. mount        mount read-only; compare find, stat and checksums with what
@@ -16,11 +17,13 @@
 #   4. fsck_after   `fsck_hfs -fn` again
 #   5. remount      mount read-only; compare again, with the modifications
 #   6. fsimg        `fsimg W` verifies the volume, `t --json` and `t -v` list it
-#                   with the extra-data marks expected, `x -O` delivers each file
+#                   with the extra-data marks expected, `x -O` delivers each
+#                   nonempty file
 #
 # A step's failure does not stop the steps after it, so that one result does not
-# hide another. A smallest or nearly full volume may refuse a modification for
-# lack of room; the refusal is recorded, every other one is a failure.
+# hide another. A volume without room refuses modifications, as its `room` says
+# it must; the refusals are recorded and judged against that, and any other
+# refusal is a failure.
 #
 # Stored ownership shows only under `hdiutil attach -owners on`, where the
 # mounting user can read only what the stored mode lets others read. So each
@@ -33,15 +36,11 @@
 require "digest"
 require "fileutils"
 require "json"
-require "open3"
 require "optparse"
-require "timeout"
 require_relative "capture"
 
 module HfsPlusQualify
   class Error < HfsPlusCapture::Error; end
-
-  C = HfsPlusCapture
 
   VARIANTS = %w[hfsplus hfsx].freeze
   BLOCKS = [512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536].freeze
@@ -61,13 +60,16 @@ module HfsPlusQualify
   LARGE_CATALOG_BYTES = (1 << 32) + (400 << 20)
   BASE_TIME = 1_700_000_000
   COMMAND_TIMEOUT = 30 * 60
+  OUTPUT_EXCERPT_BYTES = 4096
   # Each round leaves one more extent on the file, so 24 rounds need the extents
   # overflow tree: a catalog record holds eight.
   FRAGMENT_ROUNDS = 24
   # What macOS adds to a volume's root that readdir shows. The folders it uses
-  # for hard links are hidden from readdir but appear in the catalog.
+  # for hard links appear in the catalog, but neither readdir nor fsimg lists
+  # them: were fsimg to, its compare would report them as unexpected.
   NATIVE_ROOT = %w[.fseventsd .Spotlight-V100 .Trashes .TemporaryItems .DS_Store].freeze
-  PRIVATE_ROOT = ["\u2400\u2400\u2400\u2400HFS+ Private Data", ".HFS+ Private Directory Data\r"].freeze
+  # What a volume from `fsimg c` holds without `-p`: the writer's defaults.
+  CLI_MODES = { "file" => 0o644, "directory" => 0o755, "symlink" => 0o755 }.freeze
   OWNER_VIEW = %w[-nobrowse -owners on].freeze
   CONTENT_VIEW = %w[-nobrowse -owners off].freeze
   METADATA = %i[kind size mode uid gid created modified changed accessed target].freeze
@@ -96,10 +98,12 @@ module HfsPlusQualify
     def regular? = kind == "file"
   end
 
-  Image = Data.define(:name, :variant, :block, :volume_bytes, :entries, :limited, :fill, :pairs, :refused) do
-    def self.of(name:, variant:, block:, volume_bytes:, entries:, limited: false, fill: false, pairs: [], refused: [])
-      new(name: name, variant: variant, block: block, volume_bytes: volume_bytes, entries: entries, limited: limited,
-          fill: fill, pairs: pairs, refused: refused)
+  # `room` says what the volume must do with the modifications; see `check_room`.
+  # `cli` makes the volume with `fsimg c` from a host tree, not the generator.
+  Image = Data.define(:name, :variant, :block, :volume_bytes, :entries, :room, :fill, :pairs, :illegal_names, :cli) do
+    def self.of(name:, variant:, block:, volume_bytes:, entries:, room: :ample, fill: false, pairs: [], illegal_names: [], cli: false)
+      new(name: name, variant: variant, block: block, volume_bytes: volume_bytes, entries: entries, room: room,
+          fill: fill, pairs: pairs, illegal_names: illegal_names, cli: cli)
     end
   end
 
@@ -120,6 +124,10 @@ module HfsPlusQualify
     (period * (size / 251 + 1)).byteslice(0, size)
   end
 
+  # Which modifications a read-write mount completed and which it refused, as
+  # "step: reason", the tree that leaves and the `ditto` files left uncompressed.
+  Outcome = Data.define(:tree, :completed, :refused, :uncompressed)
+
   # What readdir returns for a name given to the writer: E3's canonical
   # decomposition, in which no supplementary value decomposes or reorders. The
   # names here avoid the BMP ranges macOS also leaves alone. Ruby orders marks
@@ -137,6 +145,34 @@ module HfsPlusQualify
                created: entry.created, modified: entry.modified, changed: entry.changed, accessed: entry.accessed,
                target: entry.target&.b, sha256: file ? Digest::SHA256.hexdigest(content(index, entry.size)) : nil,
                extra: false)]
+    end
+  end
+
+  # Make `entries` in the new host directory `source` for `fsimg c`, with their
+  # times. Directories get theirs last, once nothing more changes in them.
+  def materialize(entries, source)
+    FileUtils.mkdir_p(source)
+    entries.each_with_index do |entry, index|
+      full = File.join(source, entry.path)
+      case entry.kind
+      in "directory" then Dir.mkdir(full)
+      in "file" then File.binwrite(full, content(index, entry.size))
+      in "symlink" then File.symlink(entry.target, full)
+      end
+    end
+    entries.reverse_each { File.lutime(_1.accessed, _1.modified, File.join(source, _1.path)) }
+  end
+
+  # The tree expected on a volume `fsimg c` makes from `source` with its defaults:
+  # no owner or permission bits, so the writer's show; what the host tree says of
+  # kinds, sizes, targets, contents and creation and modification times. The
+  # changed time is the format time, and reading the source can move the access
+  # time.
+  def cli_tree(entries, source)
+    entries.to_h do |entry|
+      seen = view_of(File.join(source, entry.path), digests: true)
+      [native_path(entry.path),
+       seen.with(mode: CLI_MODES.fetch(entry.kind), uid: 0, gid: 0, changed: nil, accessed: nil, extra: false)]
     end
   end
 
@@ -173,8 +209,8 @@ module HfsPlusQualify
     (plain + doubled + (1..85).map { "\ud55c" * _1 }).uniq
   end
 
-  # A name one unit too long, in each spelling.
-  OVERLONG_NAMES = ["x" * 256, "\u00e9" * 128, "#{"\u{1f600}" * 127}xx", "\ud55c" * 86].freeze
+  # A name of exactly 256 units, in each spelling.
+  OVERLONG_NAMES = ["x" * 256, "\u00e9" * 128, "#{"\u{1f600}" * 127}xx", "\uac00" * 128, "#{"\ud55c" * 85}x"].freeze
 
   # E3's collision sets. These pairs collide on both comparators: decomposition,
   # the Hangul algorithm, combining order, and the canonical singletons.
@@ -211,19 +247,25 @@ module HfsPlusQualify
     end
     pairs = collision_pairs(variant)
     blocks + large + [
-      Image.of(name: "#{variant}-smallest-empty", variant: variant, block: 0, volume_bytes: nil, entries: [], limited: true),
-      Image.of(name: "#{variant}-smallest-tree", variant: variant, block: 0, volume_bytes: nil, entries: block_tree(4096), limited: true),
+      Image.of(name: "#{variant}-smallest-empty", variant: variant, block: 0, volume_bytes: nil, entries: [], room: :none),
+      Image.of(name: "#{variant}-smallest-tree", variant: variant, block: 0, volume_bytes: nil, entries: block_tree(4096), room: :none),
       Image.of(name: "#{variant}-nearly-full", variant: variant, block: 4096, volume_bytes: NEARLY_FULL_BYTES,
-               entries: block_tree(4096), limited: true, fill: true),
+               entries: block_tree(4096), room: :unlink_only, fill: true),
       Image.of(name: "#{variant}-low-space", variant: variant, block: 4096, volume_bytes: LOW_SPACE_BYTES,
-               entries: block_tree(4096), limited: true),
+               entries: block_tree(4096), room: :partial),
       Image.of(name: "#{variant}-map-nodes", variant: variant, block: 4096, volume_bytes: MAP_NODE_BYTES, entries: map_node_entries(MAP_NODE_FILES)),
       Image.of(name: "#{variant}-names", variant: variant, block: 4096, volume_bytes: ORDINARY_BYTES,
-               entries: length_names.map { Entry.of("file", "/#{_1}") }, refused: OVERLONG_NAMES),
+               entries: length_names.map { Entry.of("file", "/#{_1}") }, illegal_names: OVERLONG_NAMES),
       Image.of(name: "#{variant}-collisions", variant: variant, block: 4096, volume_bytes: ORDINARY_BYTES,
                entries: collision_entries(pairs), pairs: pairs)
     ]
   end
+
+  # The volume `fsimg c` makes with its defaults: no free block at 4096-byte
+  # blocks, so macOS can change nothing. A host tree imports no FIFO.
+  def cli_image =
+    Image.of(name: "hfsplus-cli-defaults", variant: "hfsplus", block: 0, volume_bytes: nil,
+             entries: block_tree(4096).reject { _1.kind == "fifo" }, room: :none, cli: true)
 
   # One image's trip through the cycle. It holds the tree the volume should
   # show, which the modifications change; everything it attaches it detaches.
@@ -236,65 +278,88 @@ module HfsPlusQualify
       @directory = directory
       @path = File.join(directory, "image.img")
       @mountpoint = File.join(directory, "mnt")
-      @log = C::Log.new
-      @attachments = C::Attachments.new(@log)
-      @tree = expected_tree_of(image)
+      @log = HfsPlusCapture::Log.new
+      @attachments = HfsPlusCapture::Attachments.new(@log)
+      @tree = {}
       @refusals = []
+      @uncompressed = []
+      @native_additions = []
       @facts = {}
     end
 
-    # Run every step and return the image's row of the results.
+    # Run every step and return the image's row of the results. An interrupt
+    # also detaches what was attached. An attach it cut short may leave a device
+    # no one knows of, which the next run's check of `leftovers` refuses.
     def run
       FileUtils.mkdir_p(@mountpoint)
-      steps = STEPS.to_h { [_1, attempt(_1)] }
-      released = release
-      { image: @image.name, **steps, refused: @refusals, facts: @facts, detach: released }
+      begin
+        steps = STEPS.to_h { [_1, attempt(_1)] }
+      ensure
+        released = release
+      end
+      { image: @image.name, **steps, refused: @refusals, uncompressed: @uncompressed, facts: @facts, detach: released }
     ensure
       File.write(File.join(@directory, "commands.txt"), @log.to_s)
     end
 
     private
 
-    def expected_tree_of(image)
-      return {} if image.fill
-
-      HfsPlusQualify.expected_tree(image.entries)
-    end
-
     # The boundary of one step: it records the failure as the step's result.
     def attempt(step)
       send(step)
       "pass"
-    rescue C::Error, SystemCallError, Timeout::Error, JSON::ParserError => e
-      "FAIL: #{HfsPlusQualify.text(e.message.lines.first(12).join.strip)}"
+    rescue HfsPlusCapture::Error, HfsPlusFields::Error, SystemCallError, JSON::ParserError, KeyError => e
+      "FAIL: #{HfsPlusQualify.text(e.message.lines.first(12).join.strip.byteslice(0, OUTPUT_EXCERPT_BYTES))}"
     end
 
     def release
       @attachments.release
       forced = @log.to_s.lines.grep(/\$ hdiutil detach .* -force/)
       forced.empty? ? "pass" : "FAIL: forced #{forced.size} detach"
-    rescue C::Error => e
+    rescue HfsPlusCapture::Error => e
       "FAIL: #{HfsPlusQualify.text(e.message)}"
     end
 
-    # Generate the image, and first the images the writer must refuse.
+    # Make the image, and first the images the writer must refuse.
     def generate
-      @image.refused.each { refused_name(_1) }
+      @image.illegal_names.each { refused_name(_1) }
       @image.pairs.select(&:collide).each { refused_pair(_1) }
-      entries = @image.fill ? with_filler : @image.entries
-      @tree = HfsPlusQualify.expected_tree(entries)
-      generator(@path, entries, @image.block, @image.volume_bytes)
+      @image.cli ? create_with_cli : create_with_generator
       @facts[:image_bytes] = File.size(@path)
       @facts[:fields_before] = fields
     end
 
-    def refused_name(name) = refused_entries([Entry.of("file", "/#{name}")], name)
-    def refused_pair(pair) = refused_entries([Entry.of("file", "/#{pair.first}"), Entry.of("file", "/#{pair.second}")], pair.second)
+    def create_with_generator
+      entries = @image.fill ? with_filler : @image.entries
+      @tree = HfsPlusQualify.expected_tree(entries)
+      generator(@path, entries, @image.block, @image.volume_bytes)
+    end
 
-    def refused_entries(entries, name)
+    def create_with_cli
+      source = File.join(@directory, "source")
+      HfsPlusQualify.materialize(@image.entries, source)
+      @tree = HfsPlusQualify.cli_tree(@image.entries, source)
+      out, code = @log.run_status(@tools.fsimg, "c", "-F", @image.variant, "-f", @path, "-C", source, ".", timeout: COMMAND_TIMEOUT)
+      raise Error, "fsimg c exit #{code}: #{out}" unless code == 0
+
+      FileUtils.rm_rf(source)
+    end
+
+    def refused_name(name) = refused_entries([Entry.of("file", "/#{name}")], name, /within 255 HFS Plus units/)
+
+    # The second name alone is legal, so what refuses the pair is the collision.
+    def refused_pair(pair)
+      alone = File.join(@directory, "alone.img")
+      generator(alone, [Entry.of("file", "/#{pair.second}")], 4096, nil)
+      File.unlink(alone)
+      refused_entries([Entry.of("file", "/#{pair.first}"), Entry.of("file", "/#{pair.second}")], pair.second,
+                      /equivalent to a sibling/)
+    end
+
+    def refused_entries(entries, name, reason)
       probe = File.join(@directory, "refused.img")
       out, code = generator_status(probe, entries, 4096, nil)
-      raise Error, "the writer accepted #{name.dump}" unless code == 1 && !File.exist?(probe)
+      raise Error, "the writer did not refuse #{name.dump} for #{reason.source}: #{out}" unless code == 1 && !File.exist?(probe) && out.b.match?(reason)
 
       @log.note("  refused #{name.dump}: #{HfsPlusQualify.text(out.lines.first.to_s)}")
     end
@@ -344,37 +409,39 @@ module HfsPlusQualify
 
     def fsck(fact)
       out, ok = @attachments.with(@path, readonly: true) do |device|
-        @log.run("fsck_hfs", "-fn", device.sub("/dev/", "/dev/r"), timeout: C::FSCK_TIMEOUT)
+        @log.run("fsck_hfs", "-fn", device.sub("/dev/", "/dev/r"), timeout: HfsPlusCapture::FSCK_TIMEOUT)
       end
       @facts[fact] = HfsPlusQualify.text(out.lines.last.to_s.strip)
-      findings = C.fsck_findings(out)
+      findings = HfsPlusCapture.fsck_findings(out)
       raise Error, "fsck_hfs findings: #{findings.join('; ')}" unless findings.empty?
       raise Error, "fsck_hfs did not pass: #{out}" unless ok && out.include?("appears to be OK")
     end
 
-    def mount = compare(first: true)
-    def remount = compare(first: false)
+    def mount = compare(pairs: true)
+    def remount = compare(pairs: false)
 
     # The metadata mount and the checksum mount, both read-only. A mount never
     # precedes the first metadata read, so access times are the writer's until
     # the read-write mount.
-    def compare(first:)
+    def compare(pairs:)
       @attachments.with(@path, mountpoint: @mountpoint, readonly: true, options: OWNER_VIEW) do
         report_differences("metadata", observe(digests: false), METADATA)
-        check_pairs if first
+        check_pairs if pairs
       end
       @attachments.with(@path, mountpoint: @mountpoint, readonly: true, options: CONTENT_VIEW) do
         report_differences("checksums", observe(digests: true), [:sha256])
       end
     end
 
-    def report_differences(what, observed, fields)
-      differences = HfsPlusQualify.differences(@tree, observed, fields)
+    def report_differences(what, observed, compared)
+      differences = HfsPlusQualify.differences(@tree, observed, compared)
       raise Error, "#{what}: #{differences.first(8).join('; ')} (#{differences.size} differences)" unless differences.empty?
     end
 
-    # The volume, by `find`, with macOS's own additions to the root left out.
+    # The volume, by `find`, with macOS's own additions to the root left out and
+    # noted: they are all fsimg's own listing may leave out.
     def observe(digests:)
+      @native_additions = Dir.children(@mountpoint) & NATIVE_ROOT
       out, ok = @log.run("find", @mountpoint, "-mindepth", "1", *native_prune, "-print0", timeout: COMMAND_TIMEOUT)
       raise Error, "find failed: #{out}" unless ok
 
@@ -397,19 +464,22 @@ module HfsPlusQualify
     end
 
     def modify
-      @attachments.with(@path, mountpoint: @mountpoint, options: CONTENT_VIEW) do
-        @tree = HfsPlusQualify.relaxed(@tree)
-        Modification.new(root: @mountpoint, log: @log, tree: @tree, limited: @image.limited, scratch: @directory,
-                         block: @facts.fetch(:fields_before).fetch(:block_size)).run.then do |tree, refusals|
-          @tree = tree
-          @refusals = refusals
-        end
+      block = @facts.fetch(:fields_before).fetch(:block_size)
+      @tree = HfsPlusQualify.relaxed(@tree)
+      outcome = @attachments.with(@path, mountpoint: @mountpoint, options: CONTENT_VIEW) do
+        Modification.new(root: @mountpoint, log: @log, tree: @tree, limited: @image.room != :ample, scratch: @directory,
+                         block: block).run
       end
+      @tree = outcome.tree
+      @refusals = outcome.refused
+      @uncompressed = outcome.uncompressed
       @facts[:fields_after] = fields
-      check_modified unless @image.limited
+      HfsPlusQualify.check_room(@image.room, outcome)
+      check_modified if @image.room == :ample
     end
 
-    # The steps the provisional one-node trees answer to did reach the trees.
+    # A volume with room must show the records that make macOS grow its one-node
+    # extents and attributes trees, or the cycle has not tested that growth.
     def check_modified
       after = @facts.fetch(:fields_after)
       raise Error, "no extents overflow record: the file did not fragment" unless after.fetch(:extents_leaf_records).to_i.positive?
@@ -432,7 +502,7 @@ module HfsPlusQualify
         next unless record["type"] == "entry"
 
         path = record.fetch("path")
-        [path.b, HfsPlusQualify.view_of_record(record)] unless HfsPlusQualify.native_extra?(path)
+        [path.b, HfsPlusQualify.view_of_record(record)] unless native_addition?(path)
       end.to_h
     end
 
@@ -441,7 +511,7 @@ module HfsPlusQualify
       marked = fsimg_output("t", "-v", "-f", @path).lines.filter_map do |line|
         line[/\A\S+@\s.*?"(.*)"\s*\z/, 1]&.then { JSON.parse("\"#{_1}\"") }
       end
-      kept = marked.reject { HfsPlusQualify.native_extra?(_1) }.map(&:b).sort
+      kept = marked.reject { native_addition?(_1) }.map(&:b).sort
       wanted = @tree.select { |_, view| view.extra }.keys.sort
       raise Error, "t -v marks #{kept.inspect}, not #{wanted.inspect}" unless kept == wanted
     end
@@ -456,19 +526,27 @@ module HfsPlusQualify
       end
     end
 
+    def native_addition?(path) = @native_additions.include?(path.delete_prefix("/").split("/", 2).first)
+
+    # What the command writes on stdout, stderr apart so that it cannot mix in.
     def fsimg_output(*args)
-      out, err, status = Timeout.timeout(COMMAND_TIMEOUT) { Open3.capture3(@tools.fsimg, *args, binmode: true) }
-      raise Error, "fsimg #{args.first} exit #{status.exitstatus}: #{err}" unless status.success?
+      errors = File.join(@directory, "fsimg-stderr")
+      out, code = @log.run_status(@tools.fsimg, *args, timeout: COMMAND_TIMEOUT, stderr: errors)
+      raise Error, "fsimg #{args.first} exit #{code}: #{File.binread(errors, OUTPUT_EXCERPT_BYTES)}" unless code == 0
 
       out.force_encoding("UTF-8")
     end
   end
 
   # The read-write mount's work: each step changes the volume and returns the
-  # tree it now shows. A step's own folder goes away when a limited volume
-  # refuses it, so that a refused step leaves the tree as it was: ENOSPC, or
-  # ENOTSUP from link(2), seen where macOS had no room for its hard-link folder.
+  # tree it now shows. A volume `limited` for room may refuse a step, whose own
+  # folder then goes away so that the tree stays as it was. It refuses with
+  # ENOSPC, or with ENOTSUP from link(2), seen where macOS had no room for its
+  # hard-link folder; any other failure ends the modifications.
   class Modification
+    # ENOTSUP from link(2), which means no room; from any other call it is a failure.
+    class LinkRefused < Error; end
+
     PATTERN = "fsimg qualification\n"
     Step = Data.define(:name, :folder, :run)
     # E6: ditto stores 65536 zeros inline in the decmpfs attribute, and text of
@@ -483,23 +561,27 @@ module HfsPlusQualify
       @scratch = scratch
       @originals = tree.select { |path, view| view.regular? && path.count("/") == 1 }.keys.sort
       @block = block
+      @uncompressed = []
     end
 
-    # The final tree and the steps refused.
+    # Run every step and return the Outcome.
     def run
-      steps.reduce([@tree, []]) do |(tree, refusals), step|
-        [apply(step, tree), refusals]
-      rescue Errno::ENOSPC, Errno::ENOTSUP => e
+      tree = @tree
+      completed = []
+      refused = []
+      steps.each do |step|
+        tree = step.run.call(tree)
+        completed << step.name
+      rescue Errno::ENOSPC, LinkRefused => e
         raise unless @limited
 
         FileUtils.rm_rf(File.join(@root, step.folder)) if step.folder
-        [tree, refusals + ["#{step.name}: #{e.message}"]]
+        refused << HfsPlusQualify.text("#{step.name}: #{e.message}")
       end
+      Outcome.new(tree: tree, completed: completed, refused: refused, uncompressed: @uncompressed)
     end
 
     private
-
-    def apply(step, tree) = step.run.call(tree)
 
     def steps
       [Step.new(name: "create", folder: "q-create", run: method(:create)),
@@ -513,12 +595,17 @@ module HfsPlusQualify
        *original_steps]
     end
 
-    # The same operations on what the writer stored, while enough files exist.
+    # The same operations on what the writer stored, each on a file of its own,
+    # while enough files exist.
     def original_steps
-      [["rename-original", :rename_original], ["unlink-original", :unlink_original],
-       ["link-original", :link_original], ["attribute-original", :attribute_original]].zip(@originals)
-        .select { _2 }.map { |(name, op), path| Step.new(name: name, folder: nil, run: ->(tree) { method(op).call(tree, path) }) }
+      renamed, unlinked, linked, attributed = @originals
+      [original_step("rename-original", renamed) { rename_original(_1, renamed) },
+       original_step("unlink-original", unlinked) { unlink_original(_1, unlinked) },
+       original_step("link-original", linked) { link_original(_1, linked) },
+       original_step("attribute-original", attributed) { attribute_original(_1, attributed) }].compact
     end
+
+    def original_step(name, path, &run) = path && Step.new(name: name, folder: nil, run: run)
 
     def full(path) = File.join(@root, path.dup.force_encoding("UTF-8"))
     def folder(name) = FileUtils.mkdir_p(File.join(@root, name)).then { ["/#{name}".b, directory_view] }
@@ -587,25 +674,25 @@ module HfsPlusQualify
     def hard_link(tree)
       kept = folder("q-link")
       first, view = write("q-link/first", PATTERN * 3)
-      File.link(File.join(@root, "q-link/first"), File.join(@root, "q-link/second"))
+      link(File.join(@root, "q-link/first"), File.join(@root, "q-link/second"))
       tree.merge([kept, [first, view], ["/q-link/second".b, view]].to_h)
     end
 
     def compress(tree)
       kept = folder("q-comp")
-      tree.merge(kept.first => kept.last).merge(COMPRESSED.to_h { |name, bytes| compress_file(name, bytes) })
+      made = COMPRESSED.to_h { |name, bytes| compress_file(name, bytes) }
+      @uncompressed = COMPRESSED.keys.reject { compressed?(_1) }
+      tree.merge(kept.first => kept.last).merge(made)
     end
 
     def compress_file(name, bytes)
       source = File.join(@scratch, "compress-#{name}")
       File.binwrite(source, bytes)
-      target = File.join(@root, "q-comp", name)
-      tool("ditto", "--hfsCompression", source, target)
-      flags = tool("stat", "-f", "%Sf", target)
-      raise Error, "ditto left #{name} uncompressed: #{flags.strip}" unless @limited || flags.include?("compressed")
-
+      tool("ditto", "--hfsCompression", source, File.join(@root, "q-comp", name))
       ["/q-comp/#{name}".b, file_view(bytes)]
     end
+
+    def compressed?(name) = tool("stat", "-f", "%Sf", File.join(@root, "q-comp", name)).include?("compressed")
 
     def rename_original(tree, path)
       File.rename(full(path), File.join(@root, "q-renamed"))
@@ -618,8 +705,14 @@ module HfsPlusQualify
     end
 
     def link_original(tree, path)
-      File.link(full(path), File.join(@root, "q-original-link"))
+      link(full(path), File.join(@root, "q-original-link"))
       tree.merge("/q-original-link".b => tree.fetch(path))
+    end
+
+    def link(existing, added)
+      File.link(existing, added)
+    rescue Errno::ENOTSUP => e
+      raise LinkRefused, e.message
     end
 
     def attribute_original(tree, path)
@@ -637,16 +730,34 @@ module HfsPlusQualify
     end
   end
 
+  # Whether a volume's modifications did what its room says they must, as the
+  # record's table holds:
+  #   ample        every step completes
+  #   none         every step is refused
+  #   unlink_only  unlink-original completes and every other step is refused
+  #   partial      at least one step completes and at least one is refused
+  # `ditto` may leave a file uncompressed only under `partial`, where the volume
+  # runs out part of the way through.
+  def check_room(room, outcome)
+    completed = outcome.completed
+    refused = outcome.refused
+    met = case room
+          in :ample then refused.empty?
+          in :none then completed.empty?
+          in :unlink_only then completed == ["unlink-original"]
+          in :partial then completed.any? && refused.any?
+          end
+    raise Error, "room #{room}, but completed [#{completed.join(', ')}] and refused #{refused.size}" unless met
+    return if outcome.uncompressed.empty? || room == :partial
+
+    raise Error, "room #{room}, but ditto left #{outcome.uncompressed.join(', ')} uncompressed"
+  end
+
   # Modifications and reads change these, whatever the volume then shows.
   def relaxed(tree) = tree.transform_values { _1.with(changed: nil, accessed: nil) }
 
   # Tool output as text for the record, whatever bytes it held.
   def text(bytes) = bytes.dup.force_encoding("UTF-8").scrub
-
-  def native_extra?(relative)
-    first = relative.dup.force_encoding("UTF-8").delete_prefix("/").split("/", 2).first
-    NATIVE_ROOT.include?(first) || PRIVATE_ROOT.include?(first)
-  end
 
   KINDS = { "link" => "symlink", "characterSpecial" => "char", "blockSpecial" => "block" }.freeze
 
@@ -656,7 +767,7 @@ module HfsPlusQualify
     View.of(kind: kind, size: kind == "file" ? st.size : nil, mode: st.mode & 0o7777, uid: st.uid, gid: st.gid,
             created: st.birthtime.to_i, modified: st.mtime.to_i, changed: st.ctime.to_i, accessed: st.atime.to_i,
             target: kind == "symlink" ? File.readlink(full).b : nil,
-            sha256: digests && kind == "file" ? C.file_digest(full) : nil)
+            sha256: digests && kind == "file" ? HfsPlusCapture.file_digest(full) : nil)
   end
 
   # A `t --json` entry record; its symlink target is not listed, so nil there
@@ -692,19 +803,24 @@ module HfsPlusQualify
     missing + extra + changed
   end
 
-  # The disk images attached from under `root`, by `hdiutil info`.
+  # The disk images attached from under `root`, by `hdiutil info`, which names
+  # them by their real paths. A failed `hdiutil info` says nothing about them.
   def leftovers(root)
-    out, = C::Log.new.run("hdiutil", "info")
-    out.lines.filter_map { _1[/\Aimage-path\s*:\s*(.*)$/, 1] }.select { _1.start_with?(root) }
+    out, ok = HfsPlusCapture::Log.new.run("hdiutil", "info")
+    raise Error, "hdiutil info failed: #{text(out)}" unless ok
+
+    real = "#{File.realpath(root)}/".b
+    out.lines.filter_map { _1[/\Aimage-path\s*:\s*(.*)$/, 1] }.select { _1.start_with?(real) }
   end
 
   def result_table(rows)
     columns = Cycle::STEPS + [:detach]
-    header = "| Image | #{columns.join(' | ')} | Refused |"
-    rule = "|#{' --- |' * (columns.size + 2)}"
+    header = "| Image | #{columns.join(' | ')} | Refused | Uncompressed |"
+    rule = "|#{' --- |' * (columns.size + 3)}"
     lines = rows.map do |row|
       cells = columns.map { row.fetch(_1)[0, 60] }
-      "| #{row.fetch(:image)} | #{cells.join(' | ')} | #{row.fetch(:refused).map { _1.split(':').first }.join(', ')} |"
+      refused = row.fetch(:refused).map { _1.split(":").first }.join(", ")
+      "| #{row.fetch(:image)} | #{cells.join(' | ')} | #{refused} | #{row.fetch(:uncompressed).join(', ')} |"
     end
     [header, rule, *lines].join("\n")
   end
@@ -714,10 +830,10 @@ module HfsPlusQualify
     OptionParser.new do |o|
       o.on("--generator PATH", "the built hfsplus-write-gen") { options[:generator] = File.expand_path(_1) }
       o.on("--fsimg PATH", "the built fsimg") { options[:fsimg] = File.expand_path(_1) }
-      o.on("--root DIR", "a disposable directory for the images") { options[:root] = File.expand_path(_1) }
+      o.on("--root DIR", "a disposable directory, private to this user, for the images") { options[:root] = File.expand_path(_1) }
       o.on("--only REGEX", "only images whose name matches") { options[:only] = Regexp.new(_1) }
       o.on("--large-catalog", "only the volume whose catalog passes 2^32 bytes") { options[:large_catalog] = true }
-      o.on("--keep", "keep each image directory") { options[:keep] = true }
+      o.on("--keep", "keep each passing image too; a failed one is always kept") { options[:keep] = true }
       o.on("--list", "print the image names and stop") { options[:list] = true }
     end.parse!(argv)
     options
@@ -729,11 +845,37 @@ module HfsPlusQualify
     Image.of(name: "hfsplus-catalog-4gib", variant: "hfsplus", block: 4096, volume_bytes: LARGE_CATALOG_BYTES,
              entries: map_node_entries(LARGE_CATALOG_FILES))
 
+  # The images asked for; asking for none is an error, not an empty pass.
   def selected(options)
-    return [large_catalog] if options[:large_catalog]
+    candidates = options[:large_catalog] ? [large_catalog] : VARIANTS.flat_map { images(_1) } + [cli_image]
+    chosen = candidates.select { options[:only].nil? || options[:only].match?(_1.name) }
+    raise Error, "--only #{options[:only].source} selects no image" if chosen.empty?
 
-    VARIANTS.flat_map { images(_1) }.select { options[:only].nil? || options[:only].match?(_1.name) }
+    chosen
   end
+
+  # Run the images in turn. The results file holds every finished row, so that a
+  # crash loses only the image it stopped.
+  def run_images(chosen, tools, root, keep:)
+    chosen.each_with_object([]) do |image, rows|
+      directory = File.join(root, image.name)
+      FileUtils.rm_rf(directory)
+      FileUtils.mkdir_p(directory)
+      row = Cycle.new(image, tools, directory).run
+      puts row.slice(:image, *Cycle::STEPS, :refused).to_json
+      FileUtils.rm_f(File.join(directory, "image.img")) if passed?(row) && !keep
+      rows << row
+      write_results(root, rows)
+    end
+  end
+
+  def write_results(root, rows)
+    path = File.join(root, "results.json")
+    File.write("#{path}.new", JSON.pretty_generate(rows))
+    File.rename("#{path}.new", path)
+  end
+
+  def passed?(row) = (Cycle::STEPS + [:detach]).all? { row.fetch(_1) == "pass" }
 
   def main(argv)
     options = parse(argv)
@@ -745,20 +887,19 @@ module HfsPlusQualify
     root = options.fetch(:root)
     tools = Tools.new(generator: options.fetch(:generator), fsimg: options.fetch(:fsimg))
     FileUtils.mkdir_p(root)
-    rows = chosen.map do |image|
-      directory = File.join(root, image.name)
-      FileUtils.rm_rf(directory)
-      FileUtils.mkdir_p(directory)
-      row = Cycle.new(image, tools, directory).run
-      puts row.slice(:image, *Cycle::STEPS, :refused).to_json
-      FileUtils.rm_rf(File.join(directory, "image.img")) unless options[:keep]
-      row
-    end
-    File.write(File.join(root, "results.json"), JSON.pretty_generate(rows))
+    # An image attached by an earlier run may have its mount under what removes.
+    stale = leftovers(root)
+    raise Error, "already attached: #{stale.join(', ')}" unless stale.empty?
+
+    FileUtils.rm_f(File.join(root, "results.json"))
+    rows = run_images(chosen, tools, root, keep: options[:keep])
     puts result_table(rows)
     remaining = leftovers(root)
     warn "still attached: #{remaining.join(', ')}" unless remaining.empty?
-    rows.all? { |row| (Cycle::STEPS + [:detach]).all? { row.fetch(_1) == "pass" } } && remaining.empty? ? 0 : 1
+    rows.all? { passed?(_1) } && remaining.empty? ? 0 : 1
+  rescue Error, OptionParser::ParseError, RegexpError => e
+    warn "qualify.rb: #{e.message}"
+    1
   end
 end
 
