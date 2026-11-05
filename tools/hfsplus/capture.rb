@@ -47,6 +47,8 @@ module HfsPlusCapture
   DEFAULT_ROOT = File.join(Dir.home, "hfsplus-captures")
   FIELD_RECORDS = 400
   OUTPUT_LINES = 40
+  # `find -print0` output is one line, however large the volume.
+  OUTPUT_LINE_BYTES = 4096
   COMMAND_TIMEOUT = 30 * 60
   FSCK_TIMEOUT = 30 * 60
   ATTACH_TIMEOUT = 5 * 60
@@ -122,7 +124,7 @@ module HfsPlusCapture
           reader.join
         end
       end
-      shown = out.lines.first(OUTPUT_LINES).map(&:chomp)
+      shown = out.lines.first(OUTPUT_LINES).map { _1.chomp.byteslice(0, OUTPUT_LINE_BYTES) }
       @lines.push("$ #{shown_command(argv)}", *shown.map { "  #{_1}" }, "  [exit #{code}]")
       [out, code]
     rescue SystemCallError => e
