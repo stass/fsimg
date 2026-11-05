@@ -238,7 +238,7 @@ empty.
 The filesystem itself needs FSIMG_READ_ASSUME_IDENTITY on the reader that
 opens the selected volume.
 A format whose identity checks all pass reads exactly as without the flag.
-Every filesystem format honours the flags; of the layers, mbr, vhd,
+Every filesystem format honours the flags; of the layers, mbr, apm, vhd,
 simg, hbcifs, dmg and gzip do.
 Every other layer reads exactly as without them.
 .Fn fsimg_image_verify
@@ -253,7 +253,8 @@ One with no bytes at all is listed with a length of zero and no claim.
 A slot that cannot be a volume, an MBR extended partition or an Apple Partition
 Map's map, driver or patch entry, also has no claim, whatever its bytes hold.
 Automatic selection passes over it, and selecting it explicitly returns
-FSIMG_ECORRUPT.
+FSIMG_EUNSUPPORTED.
+Selecting a partition with no bytes at all returns FSIMG_ECORRUPT.
 A GPT disk opens so only when its primary table is intact and its alternate
 LBA lies past the disk's end, which means its backup is lost; backup tables
 that disagree are always FSIMG_ECORRUPT.
