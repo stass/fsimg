@@ -49,14 +49,28 @@ source_read(void *arg, uint64_t id, uint64_t offset, void *buffer,
 {
 	hwf_fixture_t *f = arg;
 	unsigned char *p = buffer;
+	size_t low = 0, high = f->target_count, mid;
 
 	*done = 0;
 	if (++f->reads == f->fail_read)
 		return (FSIMG_OK); /* Premature EOF. */
 	if (f->reads == f->short_read && length > 1)
 		length /= 2;
-	for (size_t i = 0; i < length; i++)
-		p[i] = hwf_byte(id, offset + i);
+	while (low < high) {
+		mid = low + (high - low) / 2;
+		if (f->targets[mid].id < id)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+	if (low < f->target_count && f->targets[low].id == id) {
+		CHECK(offset <= f->targets[low].length);
+		CHECK(length <= f->targets[low].length - offset);
+		bcopy(f->targets[low].bytes + offset, buffer, length);
+	} else {
+		for (size_t i = 0; i < length; i++)
+			p[i] = hwf_byte(id, offset + i);
+	}
 	*done = length;
 	return (FSIMG_OK);
 }
@@ -201,6 +215,9 @@ hwf_close(hwf_fixture_t *f)
 	fsimg_stats_t stats;
 
 	fsimg_writer_free(f->writer);
+	for (size_t i = 0; i < f->target_count; i++)
+		free(f->targets[i].bytes);
+	free(f->targets);
 	CHECK(fsimg_ctx_get_stats(f->ctx, &stats, NULL) == FSIMG_OK);
 	CHECK(stats.memory_bytes == f->baseline.memory_bytes);
 	CHECK(stats.scratch_bytes == f->baseline.scratch_bytes);

@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include "hfsplus-write-fixture.h"
@@ -27,6 +28,145 @@ number(const char *text)
 	return ((uint64_t)value);
 }
 
+/* Spec numbers have no whitespace or sign, except for signed Unix times. */
+static uint64_t
+spec_number(const char *text, unsigned base, uint64_t limit)
+{
+	uint64_t value = 0;
+	unsigned digit;
+
+	CHECK(*text != '\0');
+	for (; *text != '\0'; text++) {
+		CHECK(*text >= '0' && *text < '0' + (int)base);
+		digit = (unsigned)(*text - '0');
+		CHECK(value <= (limit - digit) / base);
+		value = value * base + digit;
+	}
+	return (value);
+}
+
+static fsimg_timestamp_t
+spec_time(const char *text)
+{
+	bool negative = *text == '-';
+	uint64_t magnitude;
+	fsimg_timestamp_t time = { .basis = FSIMG_TIME_UTC,
+	    .precision_ns = 1000000000 };
+
+	magnitude = spec_number(text + negative, 10,
+	    (uint64_t)INT64_MAX + negative);
+	if (negative && magnitude == (uint64_t)INT64_MAX + 1)
+		time.seconds = INT64_MIN;
+	else if (negative)
+		time.seconds = -(int64_t)magnitude;
+	else
+		time.seconds = (int64_t)magnitude;
+	return (time);
+}
+
+static unsigned char *
+spec_hex(const char *text, size_t *length)
+{
+	const char *digits = "0123456789abcdef";
+	const char *high, *low;
+	unsigned char *bytes;
+
+	*length = strlen(text) / 2;
+	CHECK(strlen(text) % 2 == 0);
+	bytes = malloc(*length + 1);
+	CHECK(bytes != NULL);
+	for (size_t i = 0; i < *length; i++) {
+		CHECK(text[2 * i] != '\0' && text[2 * i + 1] != '\0');
+		high = strchr(digits, text[2 * i]);
+		low = strchr(digits, text[2 * i + 1]);
+		CHECK(high != NULL && low != NULL);
+		bytes[i] = (unsigned char)((high - digits) * 16 + low - digits);
+	}
+	bytes[*length] = '\0';
+	return (bytes);
+}
+
+static fsimg_status_t
+add_spec(hwf_fixture_t *f, const char *path, fsimg_error_t *error)
+{
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = 1000 };
+	fsimg_entry_t entry;
+	fsimg_status_t status = FSIMG_OK;
+	FILE *input;
+	char *line = NULL, *fields[11], *tab;
+	unsigned char *name, *target;
+	size_t capacity = 0, target_capacity = 0, length, target_length;
+	ssize_t count;
+
+	input = fopen(path, "r");
+	CHECK(input != NULL);
+	while ((count = getline(&line, &capacity, input)) != -1) {
+		CHECK((size_t)count == strlen(line));
+		if (count > 0 && line[count - 1] == '\n')
+			line[count - 1] = '\0';
+		fields[0] = line;
+		for (size_t i = 1; i < 11; i++) {
+			tab = strchr(fields[i - 1], '\t');
+			CHECK(tab != NULL);
+			*tab = '\0';
+			fields[i] = tab + 1;
+		}
+		CHECK(strchr(fields[10], '\t') == NULL);
+		bzero(&entry, sizeof(entry));
+		if (strcmp(fields[0], "file") == 0)
+			entry.kind = FSIMG_ENTRY_FILE;
+		else if (strcmp(fields[0], "directory") == 0)
+			entry.kind = FSIMG_ENTRY_DIRECTORY;
+		else if (strcmp(fields[0], "symlink") == 0)
+			entry.kind = FSIMG_ENTRY_SYMLINK;
+		else {
+			CHECK(strcmp(fields[0], "fifo") == 0);
+			entry.kind = FSIMG_ENTRY_FIFO;
+		}
+		entry.size = spec_number(fields[1], 10, UINT64_MAX);
+		CHECK(entry.kind == FSIMG_ENTRY_FILE || entry.size == 0);
+		entry.metadata = hwf_metadata();
+		entry.metadata.mode = (uint32_t)spec_number(fields[2], 8, 07777);
+		entry.metadata.uid = (uint32_t)spec_number(fields[3], 10, UINT32_MAX);
+		entry.metadata.gid = (uint32_t)spec_number(fields[4], 10, UINT32_MAX);
+		entry.metadata.created = spec_time(fields[5]);
+		entry.metadata.modified = spec_time(fields[6]);
+		entry.metadata.changed = spec_time(fields[7]);
+		entry.metadata.accessed = spec_time(fields[8]);
+		if (entry.kind == FSIMG_ENTRY_SYMLINK) {
+			target = spec_hex(fields[9], &target_length);
+			if (f->target_count == target_capacity) {
+				target_capacity = target_capacity == 0 ? 16 :
+				    target_capacity * 2;
+				CHECK(target_capacity <= SIZE_MAX / sizeof(*f->targets));
+				f->targets = realloc(f->targets,
+				    target_capacity * sizeof(*f->targets));
+				CHECK(f->targets != NULL);
+			}
+			f->targets[f->target_count++] = (hwf_target_t){
+			    .id = source.id, .bytes = target, .length = target_length };
+			entry.size = target_length;
+		} else
+			CHECK(strcmp(fields[9], "-") == 0);
+		name = spec_hex(fields[10], &length);
+		CHECK(length > 0 && name[0] == '/' &&
+		    memchr(name, '\0', length) == NULL);
+		entry.path = (char *)name;
+		status = fsimg_writer_add(f->writer, &entry,
+		    entry.kind == FSIMG_ENTRY_FILE || entry.kind == FSIMG_ENTRY_SYMLINK ?
+		    &source : NULL, error);
+		free(name);
+		if (status != FSIMG_OK)
+			break;
+		CHECK(source.id != UINT64_MAX);
+		source.id++;
+	}
+	CHECK(!ferror(input));
+	CHECK(fclose(input) == 0);
+	free(line);
+	return (status);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -39,7 +179,7 @@ main(int argc, char **argv)
 	unsigned variant;
 	uint64_t block;
 	int directory, scratch;
-	bool minimize;
+	bool minimize, spec;
 
 	if (argc != 5 && argc != 6) {
 		fprintf(stderr, "usage: %s OUTPUT VARIANT BLOCK SHAPE [VOLUME_BYTES]\n", argv[0]);
@@ -48,7 +188,8 @@ main(int argc, char **argv)
 	CHECK(strcmp(argv[2], "hfsplus") == 0 || strcmp(argv[2], "hfsx") == 0);
 	variant = strcmp(argv[2], "hfsx") == 0;
 	block = number(argv[3]);
-	minimize = strcmp(argv[4], "empty-min") == 0 ||
+	spec = strncmp(argv[4], "spec:", 5) == 0;
+	minimize = (spec && block == 0) || strcmp(argv[4], "empty-min") == 0 ||
 	    strcmp(argv[4], "tree-min") == 0;
 	if (minimize)
 		CHECK(block == 0 && argc == 5);
@@ -60,8 +201,11 @@ main(int argc, char **argv)
 	    strcmp(argv[4], "mapnodes-small") == 0 ||
 	    strcmp(argv[4], "nearlyfull-small") == 0 ||
 	    strcmp(argv[4], "nearlyfull") == 0 ||
-	    minimize);
+	    minimize || spec);
 	hwf_options(&options, (uint32_t)block);
+	/* Spec metadata must survive the fixture's reproducible defaults. */
+	if (spec)
+		options.flags &= ~FSIMG_WRITE_REPRODUCIBLE;
 	if (minimize) {
 		options.flags |= FSIMG_WRITE_MINIMIZE;
 		options.volume_bytes = 0;
@@ -92,7 +236,10 @@ main(int argc, char **argv)
 	scratch = open(scratch_path, O_RDONLY | O_DIRECTORY);
 	CHECK(scratch >= 0);
 	hwf_open(&f, variant, &options, 256 * 1024 * 1024, scratch, false);
-	if (strcmp(argv[4], "mapnodes") == 0)
+	status = FSIMG_OK;
+	if (spec)
+		status = add_spec(&f, argv[4] + 5, &error);
+	else if (strcmp(argv[4], "mapnodes") == 0)
 		hwf_add_mapnodes(&f, 200000);
 	else if (strcmp(argv[4], "mapnodes-small") == 0)
 		/* 86769 entries use exactly the header map; one more needs
@@ -129,8 +276,12 @@ main(int argc, char **argv)
 		hwf_add_tree(&f, (uint32_t)block, false);
 		CHECK(fsimg_writer_add(f.writer, &entry, &source, NULL) == FSIMG_OK);
 	}
-	status = fsimg_writer_write_at(f.writer, directory, name, &error);
-	if (status != FSIMG_OK)
+	if (status == FSIMG_OK)
+		status = fsimg_writer_write_at(f.writer, directory, name, &error);
+	if (status != FSIMG_OK && spec)
+		fprintf(stderr, "generate %s: %d %s\n",
+		    argv[1], status, error.message);
+	else if (status != FSIMG_OK)
 		fprintf(stderr, "generate %s: %d %s (offset=%" PRIu64 ")\n",
 		    argv[1], status, error.message, error.offset);
 	hwf_close(&f);

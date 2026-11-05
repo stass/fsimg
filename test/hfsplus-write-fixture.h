@@ -13,11 +13,19 @@ typedef struct hwf_entry {
 	fsimg_entry_kind_t kind;
 	uint64_t length;
 } hwf_entry_t;
+typedef struct hwf_target {
+	uint64_t id;
+	unsigned char *bytes;
+	size_t length;
+} hwf_target_t;
 typedef struct hwf_fixture {
 	fsimg_ctx_t *ctx;
 	fsimg_writer_t *writer;
 	fsimg_stats_t baseline;
 	hwf_entry_t entries[HWF_COUNT];
+	/* Sorted by source id; only spec symlinks need stored content. */
+	hwf_target_t *targets;
+	size_t target_count;
 	uint64_t reads;
 	uint64_t validates;
 	uint64_t fail_read;

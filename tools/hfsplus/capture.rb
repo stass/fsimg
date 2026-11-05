@@ -140,11 +140,11 @@ module HfsPlusCapture
 
     # Attach `image` and return its whole-disk device; with `mountpoint` the
     # volume is also mounted there (`readonly` mounts it read-only), otherwise
-    # it is left unmounted. A device
+    # it is left unmounted; `options` are further hdiutil arguments. A device
     # named in the output is recorded before the exit status is judged, since
     # hdiutil can attach a disk and still fail, for example to mount it.
-    def attach(image, mountpoint: nil, readonly: false)
-      args = %w[hdiutil attach -imagekey diskimage-class=CRawDiskImage]
+    def attach(image, mountpoint: nil, readonly: false, options: [])
+      args = %w[hdiutil attach -imagekey diskimage-class=CRawDiskImage] + options
       args += mountpoint ? ["-mountpoint", mountpoint] : ["-nomount"]
       args << "-readonly" if readonly
       out, ok = @log.run(*args, image, timeout: ATTACH_TIMEOUT)
@@ -183,9 +183,9 @@ module HfsPlusCapture
     # did): a failed detach on the success path is an error. When the block or the attach fails, the device
     # is detached on a best-effort basis and that error is the one raised; a
     # device that cannot be detached stays listed for `release` to report.
-    def with(image, mountpoint: nil, readonly: false)
+    def with(image, mountpoint: nil, readonly: false, options: [])
       device = nil
-      device = attach(image, mountpoint: mountpoint, readonly: readonly)
+      device = attach(image, mountpoint: mountpoint, readonly: readonly, options: options)
       result = yield device
       detach(device) if @devices.include?(device)
       result
@@ -234,6 +234,27 @@ module HfsPlusCapture
   def boot_summary(bytes) = { zero: bytes.count("\x00".b) == 1024, first_16: bytes.byteslice(0, 16).unpack1("H*"), sha256: Digest::SHA256.hexdigest(bytes) }
   def fields_of(image) = File.open(image, "rb") { HfsPlusFields.decode(_1, limit: FIELD_RECORDS) }
   def fields_text(report) = JSON.pretty_generate(report)
+
+  # The lines of the output of `fsck_hfs -fn` that are neither its progress nor
+  # its verdict: what it found. Findings sometimes start with "**" too, so the
+  # progress phases are enumerated rather than accepted by that prefix. Apple's
+  # fsck_hfs.c (lines 533-534) logs a failed unprivileged read-write open before
+  # reopening O_RDONLY, which is sufficient for -n.
+  FSCK_PROGRESS = [
+    %r{\ACan't open /dev/rdisk\d+: Permission denied\z},
+    /\A\*\* Checking non-journaled HFS Plus Volume\.\z/,
+    /\A\*\* Detected a case-sensitive volume\.\z/,
+    %r{\A\*\* /dev/rdisk\d+(?:s\d+)?(?: \(NO WRITE\))?\z},
+    /\A\*\* Checking (?:HFS Plus|HFSX) volume\.\z/,
+    /\A\*\* Checking (?:extents overflow file|catalog file|multi-linked files|catalog hierarchy|extended attributes file|volume bitmap|volume information)\.\z/,
+    /\A\*\* The volume .+ appears to be OK\.\z/,
+    /\A\*\* The volume .+ was formatted by .+\z/,
+    /\A(?:\*\* )?The volume name is .+\z/,
+    /\AExecuting fsck_hfs \(version .+\)\.?\z/
+  ].freeze
+
+  def fsck_findings(out) =
+    out.lines.map(&:strip).reject { |line| line.empty? || FSCK_PROGRESS.any? { _1.match?(line) } }
 
   # A read-only forced check of the volume: -f makes fsck_hfs check a journaled
   # or clean volume instead of reporting it as not needing one. Its verdict is
