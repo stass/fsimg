@@ -30,6 +30,29 @@
 #define HEADER_BITS (8u * (NODE_BYTES - 256u))
 #define MAP_BITS (8u * (NODE_BYTES - 20u))
 
+#define MAX_DEPTH 256u
+
+/* Cover reads that open and verification perform regardless of image size. */
+#define METADATA_FIXED_READS 150u
+
+/* Offsets and sizes: TN_ names B-tree node fields relative to the node;
+ * VH_ names volume header fields relative to the header. */
+enum {
+	TN_FORWARD_LINK = 0, TN_BACKWARD_LINK = 4, TN_KIND = 8,
+	TN_HEIGHT = 9, TN_RECORD_COUNT = 10, TN_DESCRIPTOR_BYTES = 14,
+	TN_TREE_DEPTH = 14, TN_ROOT = 16, TN_LEAF_RECORDS = 20,
+	TN_FIRST_LEAF = 24, TN_LAST_LEAF = 28, TN_NODE_SIZE = 32,
+	TN_MAX_KEY_LENGTH = 34, TN_TOTAL_NODES = 36,
+	TN_KEY_COMPARE_TYPE = 51, TN_ATTRIBUTES = 52,
+	TN_USER_RECORD = 120, TN_MAP_RECORD = 248, TN_OFFSET_BYTES = 2
+};
+
+enum {
+	VH_SIGNATURE = 0, VH_VERSION = 2, VH_ATTRIBUTES = 4,
+	VH_FILE_COUNT = 32, VH_FOLDER_COUNT = 36, VH_BLOCK_SIZE = 40,
+	VH_TOTAL_BLOCKS = 44, VH_FREE_BLOCKS = 48, VH_NEXT_CATALOG_ID = 64
+};
+
 /* Fourteen maximum-size catalog records need 14 * (24 + 248 + 2)
  * bytes; fifty overflow records need 50 * (12 + 64 + 2). Both leave
  * room for the descriptor and final offset. An index fits 128 keys,
@@ -99,6 +122,28 @@ typedef struct measurement {
 	uint64_t io_calls;
 	double elapsed;
 } measurement_t;
+
+typedef struct pass_ceiling {
+	unsigned walk;
+	unsigned verify;
+} pass_ceiling_t;
+
+typedef struct walk_result {
+	uint64_t entries;
+	uint64_t files;
+	uint64_t folders;
+	uint64_t path_sum;
+	fsimg_status_t status;
+	fsimg_error_t error;
+	measurement_t measurement;
+} walk_result_t;
+
+typedef struct verify_result {
+	fsimg_status_t status;
+	fsimg_error_t error;
+	fsimg_verify_report_t report;
+	measurement_t measurement;
+} verify_result_t;
 
 static void
 store(unsigned char *p, uint64_t value, unsigned width)
@@ -191,6 +236,8 @@ plan_image(image_t *image, shape_t shape, uint32_t amount)
 	    image->overflow.nodes) * NODE_BYTES / image->block_size + tail + 16;
 	if (image->extents != 0)
 		minimum += 2 * (uint64_t)image->extents - 1;
+	/* The bitmap occupies blocks whose allocation bits enlarge the bitmap;
+	 * iterate until its block count covers the resulting volume. */
 	bitmap = 1;
 	do {
 		blocks = shape == CAPACITY ? UINT32_MAX :
@@ -217,6 +264,9 @@ folder_files(const image_t *image, uint32_t folder)
 	return (remaining < GROUP_FILES ? remaining : GROUP_FILES);
 }
 
+/* The catalog sorts by (parent CNID, name). A thread's key is its own CNID and an
+ * empty name, so it precedes the primaries of that folder's children.
+ */
 static object_t
 catalog_object(const image_t *image, uint32_t ordinal)
 {
@@ -288,6 +338,64 @@ name_bytes(const image_t *image, const object_t *object, unsigned char *p)
 	for (size_t i = 0; i < length; i++)
 		store(p + 2 + 2 * i, length == 5 ? "hello"[i] : digits[i], 2);
 	return (2 + 2 * length);
+}
+
+static uint64_t
+path_hash(const char *path, bool folder)
+{
+	uint64_t hash = UINT64_C(14695981039346656037);
+
+	for (; *path != '\0'; path++) {
+		hash ^= (unsigned char)*path;
+		hash *= UINT64_C(1099511628211);
+	}
+	hash ^= (unsigned char)folder;
+	hash *= UINT64_C(1099511628211);
+	return (hash);
+}
+
+static uint64_t
+expected_path_sum(const image_t *image)
+{
+	/* Walk order differs from catalog order, so sum the path/kind hashes.
+	 * Use only the generator, never the reader. Folder primaries extend
+	 * the deep chain; a folder thread contributes no hash and restores
+	 * the parent prefix before its children in the grouped catalog. */
+	/* At most MAX_DEPTH components, each a slash and eight ASCII bytes. */
+	char path[MAX_DEPTH * 9 + 1] = {0};
+	unsigned char name[18];
+	uint32_t folder = 2;
+	size_t prefix = 0, length, end;
+	uint64_t sum = 0;
+
+	for (uint32_t i = 0; i < image->catalog.records; i++) {
+		object_t object = catalog_object(image, i);
+
+		if (object.id == 2 || (object.thread && !object.folder))
+			continue;
+		if (object.thread && object.id == folder)
+			continue;
+		if (object.parent == 2)
+			prefix = 0;
+		else
+			CHECK(object.parent == folder);
+		length = (name_bytes(image, &object, name) - 2) / 2;
+		end = prefix + 1 + length;
+		CHECK(end < sizeof(path));
+		path[prefix] = '/';
+		for (size_t j = 0; j < length; j++) {
+			CHECK(name[2 + 2 * j] == 0);
+			path[prefix + 1 + j] = (char)name[3 + 2 * j];
+		}
+		path[end] = '\0';
+		if (!object.thread)
+			sum += path_hash(path, object.folder);
+		if (object.folder) {
+			folder = object.id;
+			prefix = end;
+		}
+	}
+	return (sum);
 }
 
 static size_t
@@ -387,38 +495,41 @@ emit_node(const image_t *image, const tree_t *tree, bool catalog,
 {
 	uint32_t first, count, lower_first, lower_count, span, height, index;
 	uint32_t child, ordinal, records;
-	size_t position = 14, key;
+	size_t position = TN_DESCRIPTOR_BYTES, key;
 
 	bzero(p, NODE_BYTES);
 	if (number == 0) {
-		p[8] = 1;
-		store(p, tree->nodes > tree->used ? tree->used : 0, 4);
-		store(p + 10, 3, 2);
-		store(p + NODE_BYTES - 2, 14, 2);
-		store(p + NODE_BYTES - 4, 120, 2);
-		store(p + NODE_BYTES - 6, 248, 2);
-		store(p + NODE_BYTES - 8, NODE_BYTES - 8, 2);
-		store(p + 14, tree->depth, 2);
-		store(p + 16, tree->root, 4);
-		store(p + 20, tree->records, 4);
-		store(p + 24, tree->leaves != 0 ? 1 : 0, 4);
-		store(p + 28, tree->leaves, 4);
-		store(p + 32, NODE_BYTES, 2);
-		store(p + 34, catalog ? 516 : 10, 2);
-		store(p + 36, tree->nodes, 4);
-		p[51] = catalog ? 0xcf : 0;
-		store(p + 52, catalog ? 6 : 2, 4);
-		map_record(p + 248, 0, NODE_BYTES - 256, tree->nodes);
+		p[TN_KIND] = 1;
+		store(p + TN_FORWARD_LINK, tree->nodes > tree->used ? tree->used : 0, 4);
+		store(p + TN_RECORD_COUNT, 3, 2);
+		store(p + NODE_BYTES - TN_OFFSET_BYTES, TN_DESCRIPTOR_BYTES, 2);
+		store(p + NODE_BYTES - 2 * TN_OFFSET_BYTES, TN_USER_RECORD, 2);
+		store(p + NODE_BYTES - 3 * TN_OFFSET_BYTES, TN_MAP_RECORD, 2);
+		store(p + NODE_BYTES - 4 * TN_OFFSET_BYTES,
+		    NODE_BYTES - 4 * TN_OFFSET_BYTES, 2);
+		store(p + TN_TREE_DEPTH, tree->depth, 2);
+		store(p + TN_ROOT, tree->root, 4);
+		store(p + TN_LEAF_RECORDS, tree->records, 4);
+		store(p + TN_FIRST_LEAF, tree->leaves != 0 ? 1 : 0, 4);
+		store(p + TN_LAST_LEAF, tree->leaves, 4);
+		store(p + TN_NODE_SIZE, NODE_BYTES, 2);
+		store(p + TN_MAX_KEY_LENGTH, catalog ? 516 : 10, 2);
+		store(p + TN_TOTAL_NODES, tree->nodes, 4);
+		p[TN_KEY_COMPARE_TYPE] = catalog ? 0xcf : 0;
+		store(p + TN_ATTRIBUTES, catalog ? 6 : 2, 4);
+		map_record(p + TN_MAP_RECORD, 0, HEADER_BITS / 8, tree->nodes);
 		return;
 	}
 	if (number >= tree->used) {
-		p[8] = 2;
-		store(p, number + 1 < tree->nodes ? number + 1 : 0, 4);
-		store(p + 10, 1, 2);
-		store(p + NODE_BYTES - 2, 14, 2);
-		store(p + NODE_BYTES - 4, NODE_BYTES - 6, 2);
-		map_record(p + 14, HEADER_BITS + (number - tree->used) * MAP_BITS,
-		    NODE_BYTES - 20, tree->nodes);
+		p[TN_KIND] = 2;
+		store(p + TN_FORWARD_LINK, number + 1 < tree->nodes ? number + 1 : 0, 4);
+		store(p + TN_RECORD_COUNT, 1, 2);
+		store(p + NODE_BYTES - TN_OFFSET_BYTES, TN_DESCRIPTOR_BYTES, 2);
+		store(p + NODE_BYTES - 2 * TN_OFFSET_BYTES,
+		    NODE_BYTES - 3 * TN_OFFSET_BYTES, 2);
+		map_record(p + TN_DESCRIPTOR_BYTES,
+		    HEADER_BITS + (number - tree->used) * MAP_BITS, MAP_BITS / 8,
+		    tree->nodes);
 		return;
 	}
 	first = 1;
@@ -437,17 +548,17 @@ emit_node(const image_t *image, const tree_t *tree, bool catalog,
 			span *= FANOUT;
 	}
 	index = number - first;
-	store(p, index + 1 < count ? number + 1 : 0, 4);
-	store(p + 4, index != 0 ? number - 1 : 0, 4);
-	p[8] = height == 1 ? 255 : 0;
-	p[9] = height;
+	store(p + TN_FORWARD_LINK, index + 1 < count ? number + 1 : 0, 4);
+	store(p + TN_BACKWARD_LINK, index != 0 ? number - 1 : 0, 4);
+	p[TN_KIND] = height == 1 ? 255 : 0;
+	p[TN_HEIGHT] = height;
 	records = height == 1 ? tree->records - index * tree->slots :
 	    lower_count - index * FANOUT;
 	if (records > (height == 1 ? tree->slots : FANOUT))
 		records = height == 1 ? tree->slots : FANOUT;
-	store(p + 10, records, 2);
+	store(p + TN_RECORD_COUNT, records, 2);
 	for (uint32_t i = 0; i < records; i++) {
-		store(p + NODE_BYTES - 2 * (i + 1), position, 2);
+		store(p + NODE_BYTES - TN_OFFSET_BYTES * (i + 1), position, 2);
 		if (height == 1) {
 			ordinal = index * tree->slots + i;
 			position += catalog ? catalog_record(image, ordinal, p + position) :
@@ -461,23 +572,23 @@ emit_node(const image_t *image, const tree_t *tree, bool catalog,
 			position += key + 4;
 		}
 	}
-	CHECK(position + 2 * (records + 1) <= NODE_BYTES);
-	store(p + NODE_BYTES - 2 * (records + 1), position, 2);
+	CHECK(position + TN_OFFSET_BYTES * (records + 1) <= NODE_BYTES);
+	store(p + NODE_BYTES - TN_OFFSET_BYTES * (records + 1), position, 2);
 }
 
 static void
 volume_header(const image_t *image, unsigned char *p)
 {
 	bzero(p, NODE_BYTES);
-	store(p, 0x482b, 2);
-	store(p + 2, 4, 2);
-	store(p + 4, 0x100, 4);
-	store(p + 32, image->files, 4);
-	store(p + 36, image->folders, 4);
-	store(p + 40, image->block_size, 4);
-	store(p + 44, image->blocks, 4);
-	store(p + 48, image->free_blocks, 4);
-	store(p + 64, 16 + image->folders + image->files, 4);
+	store(p + VH_SIGNATURE, 0x482b, 2);
+	store(p + VH_VERSION, 4, 2);
+	store(p + VH_ATTRIBUTES, 0x100, 4);
+	store(p + VH_FILE_COUNT, image->files, 4);
+	store(p + VH_FOLDER_COUNT, image->folders, 4);
+	store(p + VH_BLOCK_SIZE, image->block_size, 4);
+	store(p + VH_TOTAL_BLOCKS, image->blocks, 4);
+	store(p + VH_FREE_BLOCKS, image->free_blocks, 4);
+	store(p + VH_NEXT_CATALOG_ID, 16 + image->folders + image->files, 4);
 	contiguous_fork(p + GEN_BITMAP_FORK, ceiling(image->blocks, 8),
 	    ceiling(1536, image->block_size), image->block_size);
 	contiguous_fork(p + GEN_EXTENTS_FORK, (uint64_t)image->overflow.nodes * NODE_BYTES,
@@ -647,87 +758,176 @@ measurement(const image_t *image, fsimg_ctx_t *ctx, double start)
 }
 
 static void
-run(shape_t shape, uint32_t amount)
+setup_context_io(image_t *image, const char *directory, fsimg_ctx_t **ctx,
+    fsimg_io_t **io, fsimg_stats_t *baseline)
 {
-	const char *labels[] = { "catalog", "wide", "extents", "deep", "depth-limit", "capacity" };
-	image_t image;
-	fsimg_ctx_t *ctx;
-	fsimg_io_t *io;
-	fsimg_reader_t *reader = NULL;
 	fsimg_options_t limits;
-	fsimg_read_options_t options;
 	fsimg_io_ops_t ops;
-	fsimg_stats_t baseline, stats;
-	fsimg_verify_report_t report = {0};
-	fsimg_error_t error = {0}, walk_error;
-	const fsimg_entry_t *entry;
-	fsimg_status_t status, walk_status;
-	measurement_t walk, verify;
-	uint64_t entries = 0, files = 0, folders = 0, rss, rss_base, metadata_blocks;
-	double start;
-	char directory[] = "hfsplus-scale-XXXXXX";
+	fsimg_error_t error = {0};
 	int scratch;
 
-	plan_image(&image, shape, amount);
-	CHECK(mkdtemp(directory) != NULL);
 	scratch = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 	CHECK(scratch != -1);
 	fsimg_options_init(&limits);
 	limits.memory_bytes = SCALE_BUDGET;
-	limits.max_entries = 4 * (uint64_t)(image.files + image.folders) + 1024;
+	limits.max_entries = 4 * (uint64_t)(image->files + image->folders) + 1024;
 	limits.max_work = UINT64_C(1000000000000);
-	limits.max_depth = 256;
+	limits.max_depth = MAX_DEPTH;
 	limits.scratch_directory_fd = scratch;
-	require_ok(fsimg_ctx_new(&limits, &ctx, &error), &error);
+	require_ok(fsimg_ctx_new(&limits, ctx, &error), &error);
 	CHECK(close(scratch) == 0);
-	CHECK(fsimg_ctx_get_stats(ctx, &baseline, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(*ctx, baseline, NULL) == FSIMG_OK);
 	fsimg_io_ops_init(&ops);
 	ops.read_at = image_read;
 	ops.get_size = image_size;
-	require_ok(fsimg_io_from_callbacks(ctx, &ops, &image, &io, &error), &error);
+	require_ok(fsimg_io_from_callbacks(*ctx, &ops, image, io, &error), &error);
+}
+
+static walk_result_t
+walk_image(image_t *image, fsimg_ctx_t *ctx, fsimg_io_t *io, uint64_t *rss)
+{
+	walk_result_t result = {0};
+	fsimg_reader_t *reader = NULL;
+	fsimg_read_options_t options;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	double start = seconds();
+
 	fsimg_read_options_init(&options);
-	rss_base = scale_peak_rss();
-	start = seconds();
-	status = fsimg_reader_open(ctx, io, &options, &reader, &error);
+	status = fsimg_reader_open(ctx, io, &options, &reader, &result.error);
 	if (status == FSIMG_OK) {
-		while ((status = fsimg_reader_next(reader, &entry, &error)) == FSIMG_OK) {
-			entries++;
+		while ((status = fsimg_reader_next(reader, &entry, &result.error)) == FSIMG_OK) {
+			result.entries++;
+			result.path_sum += path_hash(entry->path,
+			    entry->kind == FSIMG_ENTRY_DIRECTORY);
 			if (entry->kind == FSIMG_ENTRY_DIRECTORY)
-				folders++;
+				result.folders++;
 			else {
 				CHECK(entry->kind == FSIMG_ENTRY_FILE);
-				CHECK(entry->size == (shape == CAPACITY ? 5 :
-				    (uint64_t)image.extents * 512));
-				files++;
-				if (image.extents != 0) {
-					status = check_content(reader, &image, &error);
+				CHECK(entry->size == (image->shape == CAPACITY ? 5 :
+				    (uint64_t)image->extents * 512));
+				result.files++;
+				if (image->extents != 0) {
+					status = check_content(reader, image, &result.error);
 					if (status != FSIMG_OK)
 						break;
 				}
 			}
 		}
 	}
-	walk_status = status;
-	walk_error = error;
-	walk = measurement(&image, ctx, start);
-	rss = scale_peak_rss();
+	result.status = status;
+	result.measurement = measurement(image, ctx, start);
+	*rss = scale_peak_rss();
 	fsimg_reader_free(reader);
-	reader = NULL;
-	image.reads = 0;
-	image.metadata_reads = 0;
-	image.bitmap_seen = 0;
-	image.cached_offset = UINT64_MAX;
+	return (result);
+}
+
+static verify_result_t
+verify_image(image_t *image, fsimg_ctx_t *ctx, fsimg_io_t *io,
+    uint64_t walk_io_calls, uint64_t *rss)
+{
+	verify_result_t result = {0};
+	fsimg_reader_t *reader = NULL;
+	fsimg_read_options_t options;
+	/* Extents exercise payload traversal; other shapes stress metadata. */
+	unsigned flags = image->shape == EXTENTS ? FSIMG_VERIFY_PAYLOAD : 0;
+	double start;
+
+	image->reads = 0;
+	image->metadata_reads = 0;
+	image->bitmap_seen = 0;
+	image->cached_offset = UINT64_MAX;
+	fsimg_read_options_init(&options);
 	start = seconds();
-	status = fsimg_reader_open(ctx, io, &options, &reader, &error);
-	if (status == FSIMG_OK)
-		status = fsimg_verify(reader, 0, &report, &error);
-	verify = measurement(&image, ctx, start);
-	verify.io_calls -= walk.io_calls;
-	scale_rss_sample(&rss);
+	result.status = fsimg_reader_open(ctx, io, &options, &reader, &result.error);
+	if (result.status == FSIMG_OK)
+		result.status = fsimg_verify(reader, flags, &result.report, &result.error);
+	result.measurement = measurement(image, ctx, start);
+	result.measurement.io_calls -= walk_io_calls;
+	scale_rss_sample(rss);
 	fsimg_reader_free(reader);
+	return (result);
+}
+
+static void
+assert_depth_limit(const walk_result_t *walk, const verify_result_t *verify)
+{
+	CHECK(walk->status == FSIMG_ELIMIT && walk->error.resource == FSIMG_RESOURCE_DEPTH);
+	CHECK(walk->error.limit == MAX_DEPTH &&
+	    walk->error.observed == MAX_DEPTH + 1 && walk->entries == MAX_DEPTH);
+	CHECK(verify->status == FSIMG_ELIMIT && verify->error.resource == FSIMG_RESOURCE_DEPTH);
+	CHECK(verify->error.limit == MAX_DEPTH &&
+	    verify->error.observed == MAX_DEPTH + 1);
+	CHECK(!verify->report.complete);
+}
+
+static void
+assert_complete(const image_t *image, const walk_result_t *walk,
+    const verify_result_t *verify, const fsimg_stats_t *stats)
+{
+	if (walk->status != FSIMG_DONE)
+		require_ok(walk->status, &walk->error);
+	require_ok(verify->status, &verify->error);
+	CHECK(walk->entries == (uint64_t)image->files + image->folders);
+	CHECK(walk->path_sum == expected_path_sum(image));
+	CHECK(walk->files == image->files && walk->folders == image->folders);
+	CHECK(verify->report.complete && verify->report.files == image->files &&
+	    verify->report.directories == (uint64_t)image->folders + 1);
+	CHECK(verify->report.logical_bytes == (image->shape == CAPACITY ? 5 :
+	    (uint64_t)image->extents * 512));
+	CHECK(verify->report.free_clusters == image->free_blocks);
+	if (image->shape == EXTENTS) {
+		CHECK(verify->report.scope == FSIMG_VALIDATION_PAYLOAD);
+		CHECK(verify->report.payload_bytes_read ==
+		    (uint64_t)image->extents * 512);
+	} else {
+		CHECK(verify->report.scope == FSIMG_VALIDATION_STRUCTURAL);
+		CHECK(verify->report.payload_bytes_read == 0);
+	}
+	if (image->shape == WIDE)
+		CHECK(stats->scratch_peak > SCALE_BUDGET);
+	if (image->shape == CAPACITY)
+		CHECK(image->bitmap_seen == ceiling(image->blocks, 8));
+}
+
+static void
+run(shape_t shape, uint32_t amount)
+{
+	const char *labels[] = { "catalog", "wide", "extents", "deep", "depth-limit", "capacity" };
+	/* Metadata block reads per block of metadata, which a repeated whole-tree
+	 * scan per object would exceed. Each is the integer above the ratio measured
+	 * from a single object (with METADATA_FIXED_READS) to 10,000,000 catalog
+	 * objects. DEEP repeats a root-to-leaf search for each level.
+	 */
+	static const pass_ceiling_t pass_ceilings[] = {
+		[CATALOG] = { 1, 3 },
+		[WIDE] = { 1, 3 },
+		[EXTENTS] = { 2, 4 },
+		[DEEP] = { 21, 23 },
+		[DEPTH_LIMIT] = { 21, 23 },
+		[CAPACITY] = { 1, 2 }
+	};
+	image_t image;
+	fsimg_ctx_t *ctx;
+	fsimg_io_t *io;
+	fsimg_stats_t baseline, stats;
+	walk_result_t walked;
+	verify_result_t verified;
+	uint64_t rss, rss_base, metadata_blocks;
+	char directory[] = "hfsplus-scale-XXXXXX";
+	int open_descriptors = fsimg_test_open_descriptors();
+
+	plan_image(&image, shape, amount);
+	CHECK(mkdtemp(directory) != NULL);
+	setup_context_io(&image, directory, &ctx, &io, &baseline);
+	rss_base = scale_peak_rss();
+	walked = walk_image(&image, ctx, io, &rss);
+	verified = verify_image(&image, ctx, io, walked.measurement.io_calls,
+	    &rss);
 	fsimg_io_free(io);
 	CHECK(fsimg_ctx_get_stats(ctx, &stats, NULL) == FSIMG_OK);
 	fsimg_ctx_free(ctx);
+	CHECK(fsimg_test_open_descriptors() == open_descriptors);
 	CHECK(rmdir(directory) == 0);
 	metadata_blocks = (uint64_t)(image.catalog.nodes + image.overflow.nodes) *
 	    (NODE_BYTES / 512) + ceiling(ceiling(image.blocks, 8), 512);
@@ -739,13 +939,16 @@ run(shape_t shape, uint32_t amount)
 	    " verify_seconds=%.3f scratch_peak=%" PRIu64 " memory_peak=%" PRIu64
 	    " rss=%" PRIu64 " bitmap_seen=%" PRIu64
 	    " walk_status=%d verify_status=%d verify_complete=%u\n",
-	    labels[shape], amount, entries,
-	    walk.reads, walk.io_calls, walk.metadata_reads,
-	    (double)walk.metadata_reads / metadata_blocks, walk.elapsed,
-	    verify.reads, verify.io_calls, verify.metadata_reads,
-	    (double)verify.metadata_reads / metadata_blocks, verify.elapsed,
+	    labels[shape], amount, walked.entries,
+	    walked.measurement.reads, walked.measurement.io_calls,
+	    walked.measurement.metadata_reads,
+	    (double)walked.measurement.metadata_reads / metadata_blocks,
+	    walked.measurement.elapsed, verified.measurement.reads,
+	    verified.measurement.io_calls, verified.measurement.metadata_reads,
+	    (double)verified.measurement.metadata_reads / metadata_blocks,
+	    verified.measurement.elapsed,
 	    stats.scratch_peak, stats.memory_peak, rss, image.bitmap_seen,
-	    (int)walk_status, (int)status, (unsigned)report.complete);
+	    (int)walked.status, (int)verified.status, (unsigned)verified.report.complete);
 	CHECK(fflush(stdout) == 0);
 	/* The live context owns its baseline allocation and scratch descriptor;
 	 * all resources acquired by the reader and I/O must have returned. */
@@ -755,31 +958,14 @@ run(shape_t shape, uint32_t amount)
 	/* An uncharged resident catalog or extent array must not grow with the
 	 * fixture. Allow runtime/allocator overhead above the charged budget. */
 	CHECK(rss <= rss_base + SCALE_BUDGET + (UINT64_C(16) << 20));
-	/* A constant pass ceiling catches repeated whole-tree scans per object;
-	 * small fixtures include fixed header/search overhead in this ratio. */
-	CHECK(walk.metadata_reads <= metadata_blocks * 32);
-	CHECK(verify.metadata_reads <= metadata_blocks * 40);
-	if (shape == DEPTH_LIMIT) {
-		CHECK(walk_status == FSIMG_ELIMIT && walk_error.resource == FSIMG_RESOURCE_DEPTH);
-		CHECK(walk_error.limit == 256 && walk_error.observed == 257 && entries == 256);
-		CHECK(status == FSIMG_ELIMIT && error.resource == FSIMG_RESOURCE_DEPTH);
-		CHECK(error.limit == 256 && error.observed == 257);
-		CHECK(!report.complete);
-		return;
-	}
-	if (walk_status != FSIMG_DONE)
-		require_ok(walk_status, &walk_error);
-	require_ok(status, &error);
-	CHECK(entries == (uint64_t)image.files + image.folders);
-	CHECK(files == image.files && folders == image.folders);
-	CHECK(report.complete && report.files == image.files &&
-	    report.directories == (uint64_t)image.folders + 1);
-	CHECK(report.logical_bytes == (shape == CAPACITY ? 5 : (uint64_t)image.extents * 512));
-	CHECK(report.free_clusters == image.free_blocks);
-	if (shape == WIDE)
-		CHECK(stats.scratch_peak > SCALE_BUDGET);
-	if (shape == CAPACITY)
-		CHECK(image.bitmap_seen == ceiling(image.blocks, 8));
+	CHECK(walked.measurement.metadata_reads <=
+	    metadata_blocks * pass_ceilings[shape].walk + METADATA_FIXED_READS);
+	CHECK(verified.measurement.metadata_reads <=
+	    metadata_blocks * pass_ceilings[shape].verify + METADATA_FIXED_READS);
+	if (shape == DEPTH_LIMIT)
+		assert_depth_limit(&walked, &verified);
+	else
+		assert_complete(&image, &walked, &verified, &stats);
 }
 
 int
@@ -802,10 +988,10 @@ main(int argc, char **argv)
 		amount = 1000000;
 	} else if (strcmp(argv[1], "--deep") == 0) {
 		shape = DEEP;
-		amount = 256;
+		amount = MAX_DEPTH;
 	} else if (strcmp(argv[1], "--depth-limit") == 0) {
 		shape = DEPTH_LIMIT;
-		amount = 257;
+		amount = MAX_DEPTH + 1;
 	} else {
 		CHECK(strcmp(argv[1], "--capacity") == 0);
 		shape = CAPACITY;

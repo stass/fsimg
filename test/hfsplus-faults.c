@@ -252,9 +252,9 @@ cancelled(void *argument)
 }
 
 static fsimg_status_t
-open_image(fixture_t *f)
+open_image(fixture_t *f, fsimg_error_t *error)
 {
-	return (fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, NULL));
+	return (fsimg_reader_open(f->ctx, f->io, NULL, &f->reader, error));
 }
 
 static void
@@ -281,17 +281,43 @@ digest_bytes(result_t *result, const unsigned char *bytes, size_t count)
 	}
 }
 
+static unsigned char
+expected_byte(unsigned file, uint64_t offset)
+{
+	switch (file) {
+	case 0:
+		return ((unsigned char)(offset * 17 + 3));
+	case 2:
+		return ((unsigned char)(offset * 7 + 1));
+	default:
+		return ((unsigned char)"abc"[offset]);
+	}
+}
+
+static uint64_t
+expected_size(unsigned file)
+{
+	switch (file) {
+	case 0:
+		return (DECODED_BYTES);
+	case 2:
+		return (9 * BLOCK_BYTES);
+	default:
+		return (3);
+	}
+}
+
 static fsimg_status_t
-walk(fixture_t *f, bool content, result_t *result)
+walk(fixture_t *f, bool content, result_t *result, fsimg_error_t *error)
 {
 	const fsimg_entry_t *entry;
 	unsigned char bytes[8192];
 	fsimg_status_t status;
 	size_t count, length;
-	uint64_t offset, expected_size;
+	uint64_t offset;
 	unsigned file;
 
-	while ((status = fsimg_reader_next(f->reader, &entry, NULL)) == FSIMG_OK) {
+	while ((status = fsimg_reader_next(f->reader, &entry, error)) == FSIMG_OK) {
 		result->entries++;
 		digest_bytes(result, (const unsigned char *)entry->path,
 		    strlen(entry->path));
@@ -300,9 +326,7 @@ walk(fixture_t *f, bool content, result_t *result)
 			result->valid = false;
 			return (FSIMG_OK);
 		}
-		expected_size = file == 0 ? DECODED_BYTES :
-		    (file == 2 ? 9 * BLOCK_BYTES : 3);
-		if (entry->size != expected_size) {
+		if (entry->size != expected_size(file)) {
 			result->valid = false;
 			return (FSIMG_OK);
 		}
@@ -314,7 +338,7 @@ walk(fixture_t *f, bool content, result_t *result)
 			length = entry->size - offset < sizeof(bytes) ?
 			    (size_t)(entry->size - offset) : sizeof(bytes);
 			status = fsimg_reader_read_at(f->reader, offset, bytes,
-			    length, &count, NULL);
+			    length, &count, error);
 			if (status != FSIMG_OK)
 				return (status);
 			if (count != length) {
@@ -322,15 +346,7 @@ walk(fixture_t *f, bool content, result_t *result)
 				return (FSIMG_OK);
 			}
 			for (size_t i = 0; i < count; i++) {
-				unsigned char expected;
-
-				if (file == 0)
-					expected = (unsigned char)((offset + i) * 17 + 3);
-				else if (file == 2)
-					expected = (unsigned char)((offset + i) * 7 + 1);
-				else
-					expected = (unsigned char)"abc"[offset + i];
-				if (bytes[i] != expected)
+				if (bytes[i] != expected_byte(file, offset + i))
 					result->valid = false;
 			}
 			digest_bytes(result, bytes, count);
@@ -340,10 +356,11 @@ walk(fixture_t *f, bool content, result_t *result)
 	return (status == FSIMG_DONE ? FSIMG_OK : status);
 }
 
-/* Diagnostic records are optional. Codec failures must return their status
- * when a caller requests no diagnostic record, just like other reader work. */
+/* Diagnostic records are optional, and failures must report the same status
+ * with either form.
+ */
 static fsimg_status_t
-perform(fixture_t *f, stage_t stage, result_t *result)
+perform(fixture_t *f, stage_t stage, result_t *result, fsimg_error_t *error)
 {
 	fsimg_verify_report_t report = {0};
 	fsimg_status_t status;
@@ -352,13 +369,13 @@ perform(fixture_t *f, stage_t stage, result_t *result)
 	    .valid = true };
 	switch (stage) {
 	case STAGE_OPEN:
-		return (open_image(f));
+		return (open_image(f, error));
 	case STAGE_WALK:
-		return (walk(f, false, result));
+		return (walk(f, false, result, error));
 	case STAGE_CONTENT:
-		return (walk(f, true, result));
+		return (walk(f, true, result, error));
 	case STAGE_VERIFY:
-		status = fsimg_verify(f->reader, FSIMG_VERIFY_PAYLOAD, &report, NULL);
+		status = fsimg_verify(f->reader, FSIMG_VERIFY_PAYLOAD, &report, error);
 		result->valid = report.complete == (status == FSIMG_OK);
 		if (status == FSIMG_OK) {
 			result->valid = result->valid && report.files == FILES &&
@@ -394,7 +411,7 @@ prepare(fixture_t *f, gen_image_t *image, int directory, stage_t stage)
 	CHECK(fsimg_ctx_get_stats(f->ctx, &f->baseline, NULL) == FSIMG_OK);
 	make_io(f);
 	if (stage != STAGE_OPEN)
-		CHECK(open_image(f) == FSIMG_OK);
+		CHECK(open_image(f, NULL) == FSIMG_OK);
 	f->reads = f->polls = 0;
 }
 
@@ -453,9 +470,9 @@ cleanup(fixture_t *f)
 	fsimg_test_meta_fail_after(f->ctx, FSIMG_META_OPEN, 0, 0);
 	release_handles(f);
 	make_io(f);
-	status = open_image(f);
+	status = open_image(f, NULL);
 	if (status == FSIMG_OK)
-		status = walk(f, false, &result);
+		status = walk(f, false, &result, NULL);
 	release_handles(f);
 	CHECK(status == FSIMG_OK);
 	CHECK(result.valid && result.entries == FILES);
@@ -469,59 +486,113 @@ same_result(const result_t *a, const result_t *b)
 	    a->digest == b->digest && a->extra == b->extra && a->valid);
 }
 
+static bool
+fault_reached(const fixture_t *f, fault_t fault, unsigned point)
+{
+	switch (fault) {
+	case FAULT_ALLOC:
+		return (f->ctx->allocation_attempts >= point);
+	case FAULT_SCRATCH_OPEN:
+	case FAULT_SCRATCH_RESIZE:
+	case FAULT_SCRATCH_READ:
+	case FAULT_SCRATCH_WRITE:
+		return (f->ctx->meta_fault_after == 0);
+	case FAULT_SHORT:
+		return (f->reads >= point);
+	default:
+		return (f->fired);
+	}
+}
+
+static fsimg_status_t
+expected_status(fault_t fault, bool hit)
+{
+	if (!hit || fault == FAULT_SHORT)
+		return (FSIMG_OK);
+	switch (fault) {
+	case FAULT_ALLOC:
+		return (FSIMG_ENOMEM);
+	case FAULT_CANCEL:
+		return (FSIMG_ECANCELLED);
+	default:
+		return (FSIMG_EIO);
+	}
+}
+
+static fsimg_status_t
+attempt(fixture_t *f, stage_t stage, fault_t fault, unsigned point,
+    const result_t *expected, fsimg_error_t *error, bool *hit)
+{
+	result_t result;
+	fsimg_status_t status, wanted;
+
+	f->armed = true;
+	f->fault = fault;
+	f->point = point;
+	if (fault == FAULT_ALLOC)
+		fsimg_test_fail_alloc_after(f->ctx, point);
+	else if (fault >= FAULT_SCRATCH_OPEN && fault <= FAULT_SCRATCH_WRITE)
+		fsimg_test_meta_fail_after(f->ctx,
+		    scratch_faults[fault - FAULT_SCRATCH_OPEN], point, EIO);
+	if (error != NULL)
+		fsimg_error_clear(error);
+	status = perform(f, stage, &result, error);
+	*hit = fault_reached(f, fault, point);
+	wanted = expected_status(fault, *hit);
+	if (error != NULL && status != FSIMG_OK && error->status != status) {
+		fprintf(stderr, "stage=%s fault=%s attempt=%u status=%d error.status=%d\n",
+		    stages[stage], faults[fault], point, status, error->status);
+		failures++;
+	}
+	if (status != wanted || !result.valid || (status == FSIMG_OK &&
+	    !same_result(&result, expected))) {
+		fprintf(stderr, "stage=%s fault=%s attempt=%u record=%u status=%d expected=%d result_matches=%u\n",
+		    stages[stage], faults[fault], point, (unsigned)(error != NULL),
+		    status, wanted,
+		    (unsigned)same_result(&result, expected));
+		failures++;
+	}
+	return (status);
+}
+
 static void
 sweep(gen_image_t *image, int directory, stage_t stage, fault_t fault,
     const result_t *expected)
 {
 	fixture_t f;
-	result_t result;
-	fsimg_status_t status, wanted;
+	fsimg_error_t error;
+	fsimg_status_t status;
 	uint64_t hits = 0;
-	bool hit, complete = false;
+	bool hit, any_hit, complete = false;
 	double start = seconds();
-	unsigned point;
+	unsigned point, forms = fault == FAULT_ALLOC ? 2 : 1;
 
+	/* Flushed so that a crash or hang names the sweep it happened in. */
+	printf("HFS faults stage=%s fault=%s\n", stages[stage], faults[fault]);
+	CHECK(fflush(stdout) == 0);
 	for (point = 1; point < ATTEMPT_LIMIT; point++) {
-		prepare(&f, image, directory, stage);
-		f.armed = true;
-		f.fault = fault;
-		f.point = point;
-		if (fault == FAULT_ALLOC)
-			fsimg_test_fail_alloc_after(f.ctx, point);
-		else if (fault >= FAULT_SCRATCH_OPEN && fault <= FAULT_SCRATCH_WRITE)
-			fsimg_test_meta_fail_after(f.ctx,
-			    scratch_faults[fault - FAULT_SCRATCH_OPEN], point, EIO);
-		printf("attempt stage=%s fault=%s point=%u\n",
-		    stages[stage], faults[fault], point);
-		CHECK(fflush(stdout) == 0);
-		status = perform(&f, stage, &result);
-		if (fault == FAULT_ALLOC)
-			hit = f.ctx->allocation_attempts >= point;
-		else if (fault >= FAULT_SCRATCH_OPEN && fault <= FAULT_SCRATCH_WRITE)
-			hit = f.ctx->meta_fault_after == 0;
-		else if (fault == FAULT_SHORT)
-			hit = f.reads >= point;
-		else
-			hit = f.fired;
-		if (hit && (fault != FAULT_SHORT || f.fired))
-			hits++;
-		wanted = FSIMG_OK;
-		if (hit && fault != FAULT_SHORT)
-			wanted = fault == FAULT_ALLOC ? FSIMG_ENOMEM :
-			    (fault == FAULT_CANCEL ? FSIMG_ECANCELLED : FSIMG_EIO);
-		/* Cleanup also runs for an unexpected status or result. */
-		cleanup(&f);
-		if (status != wanted || !result.valid || (status == FSIMG_OK &&
-		    !same_result(&result, expected))) {
-			fprintf(stderr, "stage=%s fault=%s attempt=%u status=%d expected=%d result_matches=%u\n",
-			    stages[stage], faults[fault], point, status, wanted,
-			    (unsigned)same_result(&result, expected));
-			failures++;
+		any_hit = false;
+		complete = true;
+		for (unsigned i = 0; i < forms; i++) {
+			fsimg_error_t *detail;
+
+			/* Allocation faults use both record forms at every point;
+			 * other faults alternate NULL on odd points and a cleared
+			 * record on even points. */
+			detail = (point + i) % 2 == 0 ? &error : NULL;
+			prepare(&f, image, directory, stage);
+			status = attempt(&f, stage, fault, point, expected,
+			    detail, &hit);
+			any_hit |= hit;
+			complete = complete && status == FSIMG_OK;
+			if (hit && (fault != FAULT_SHORT || f.fired))
+				hits++;
+			/* Cleanup also runs for an unexpected status or result. */
+			cleanup(&f);
 		}
-		if (!hit) {
-			complete = status == FSIMG_OK;
+		if (!any_hit)
 			break;
-		}
+		complete = false;
 	}
 	printf("HFS faults stage=%s fault=%s attempts=%u hits=%" PRIu64
 	    " seconds=%.3f complete=%u\n", stages[stage], faults[fault], point,
@@ -539,7 +610,7 @@ main(int argc, char **argv)
 	result_t expected[STAGE_COUNT];
 	fsimg_stats_t stats, before;
 	char path[] = "hfsplus-faults-XXXXXX";
-	int directory;
+	int directory, open_descriptors;
 	double start = seconds();
 	bool selected = false;
 
@@ -547,11 +618,12 @@ main(int argc, char **argv)
 	CHECK(mkdtemp(path) != NULL);
 	directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 	CHECK(directory != -1);
+	open_descriptors = fsimg_test_open_descriptors();
 	build_image(&image);
 	for (stage_t stage = STAGE_OPEN; stage < STAGE_COUNT; stage++) {
 		prepare(&f, &image, directory, stage);
 		CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
-		CHECK(perform(&f, stage, &expected[stage]) == FSIMG_OK);
+		CHECK(perform(&f, stage, &expected[stage], NULL) == FSIMG_OK);
 		CHECK(expected[stage].valid);
 		CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
 		printf("baseline stage=%s reads=%" PRIu64 " polls=%" PRIu64
@@ -582,6 +654,7 @@ main(int argc, char **argv)
 	CHECK(selected);
 	gen_free(&image);
 	directory_empty(directory);
+	CHECK(fsimg_test_open_descriptors() == open_descriptors);
 	CHECK(close(directory) == 0);
 	CHECK(rmdir(path) == 0);
 	printf("HFS faults seconds=%.3f failures=%u\n", seconds() - start, failures);
