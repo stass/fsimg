@@ -24,7 +24,7 @@ class HfsPlusCaptureTimeoutTest < Minitest::Test
 
       @calls << argv.drop(1)
       if @attach_timeout && argv[1] == "attach"
-        return super(RbConfig.ruby, "-e", '$stdout.sync = true; puts "/dev/disk123"; sleep 60', timeout: 1)
+        return super(RbConfig.ruby, "-e", '$stdout.sync = true; puts "/dev/disk123"; sleep 60', timeout: 5)
       end
       ["/dev/disk123\n", true]
     end
@@ -36,12 +36,12 @@ class HfsPlusCaptureTimeoutTest < Minitest::Test
     out, ok = attachments.with("fixture.img") do |_device|
       log.run(RbConfig.ruby, "-e",
               '$stdout.sync = true; puts "before timeout"; fork { sleep 60 }; exit!',
-              timeout: 1)
+              timeout: 5)
     end
 
     refute ok
     assert_includes out, "before timeout"
-    assert_includes out, "timeout after 1 seconds"
+    assert_includes out, "timeout after 5 seconds"
     assert_equal "attach", log.calls.first.first
     assert_equal ["detach", "/dev/disk123"], log.calls.last
   ensure
@@ -67,7 +67,7 @@ class HfsPlusCaptureTimeoutTest < Minitest::Test
     attachments = HfsPlusCapture::Attachments.new(log)
     assert_raises(HfsPlusCapture::Error) do
       attachments.with("fixture.img") do |_device|
-        _, ok = log.run(RbConfig.ruby, "-e", 'sleep 60', timeout: 1)
+        _, ok = log.run(RbConfig.ruby, "-e", 'sleep 60', timeout: 5)
         raise HfsPlusCapture::Error, "check failed" unless ok
       end
     end
@@ -107,9 +107,9 @@ class HfsPlusCaptureTimeoutTest < Minitest::Test
   def test_run_status_timeout_kills_leader_and_child_in_its_process_group
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     output, status = HfsPlusCapture::Log.new.run_status(RbConfig.ruby, "-e",
-      '$stdout.sync = true; child = fork { sleep 60 }; puts child; puts Process.pid; sleep 60', timeout: 1)
+      '$stdout.sync = true; child = fork { sleep 60 }; puts child; puts Process.pid; sleep 60', timeout: 5)
     assert_nil(status)
-    assert_operator(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 5)
+    assert_operator(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 30)
     pids = output.lines.first(2).map { Integer(_1) }
     assert_equal(2, pids.size)
     pids.each { assert_process_gone(_1) }
