@@ -53,6 +53,34 @@ class TestFatOracles < Minitest::Test
     end
   end
 
+  def test_fatcat_agrees_with_a_case_only_name_difference
+    assert_equal "agrees", observe_fatcat_name("T.26Y").state
+  end
+
+  def test_fatcat_disagrees_with_a_real_name_difference
+    assert_equal "disagrees", observe_fatcat_name("OTHER.26Y").state
+  end
+
+  def test_fatcat_still_checks_content_when_names_differ_only_in_case
+    assert_equal "disagrees", observe_fatcat_name("T.26Y", contents: "bad").state
+  end
+
+  def test_fatcat_agrees_with_an_uppercase_directory_path
+    tree = [self.class.entry("UPPER"), FsimgSpec::TreeEntry.file("UPPER/t.26y", size: 3, content: "zero")]
+    listings = {"/" => [["UPPER", "Directory"]], "/upper" => [["T.26Y", "File"]]}
+
+    assert_equal "agrees", observe_fatcat_directories(tree:, listings:).state
+  end
+
+  def test_fatcat_agrees_with_case_only_name_differences_at_a_nested_level
+    tree = [self.class.entry("outer"), self.class.entry("outer/inner"),
+      FsimgSpec::TreeEntry.file("outer/inner/t.26y", size: 3, content: "zero")]
+    listings = {"/" => [["outer", "Directory"]], "/outer" => [["INNER", "Directory"]],
+      "/outer/inner" => [["T.26Y", "File"]]}
+
+    assert_equal "agrees", observe_fatcat_directories(tree:, listings:).state
+  end
+
   # A file far longer than the tree says is read only up to the cap, and
   # the stream past it is a disagreement.
   def test_a_stream_past_its_cap_disagrees
@@ -231,6 +259,36 @@ class TestFatOracles < Minitest::Test
   end
 
   private
+
+  # Listings for each directory and a three-zero-byte read-back. Only the
+  # expected folded paths succeed, so directory traversal is checked too.
+  def observe_fatcat_directories(tree:, listings:)
+    Dir.mktmpdir do |directory|
+      tool = File.join(directory, "fatcat")
+      cases = listings.map do |path, entries|
+        listing = JSON.generate("Entries" => entries.map { |name, type| {"Name" => name, "EntryType" => type} })
+        "'#{path}') printf '%s' '#{listing}' ;;"
+      end.join("\n")
+      file = tree.find { _1.type == "file" }.path.downcase
+      File.write(tool, "#!/bin/sh\ncase \"$1\" in\n-F) case \"$4\" in\n#{cases}\n*) exit 7 ;;\nesac ;;\n" \
+        "-r) case \"$2\" in\n'/#{file}') printf '\\000\\000\\000' ;;\n*) exit 7 ;;\nesac ;;\n*) exit 7 ;;\nesac\n")
+      File.chmod(0o700, tool)
+      observe_image(tree:, tools: {fatcat: tool}) { _1.fetch("fatcat") }
+    end
+  end
+
+  # A controlled fatcat listing and read-back isolate name comparison from
+  # the host's installed fatcat and its handling of DIR_NTRes.
+  def observe_fatcat_name(name, contents: "\\000\\000\\000")
+    Dir.mktmpdir do |directory|
+      tool = File.join(directory, "fatcat")
+      listing = JSON.generate("Entries" => [{"Name" => name, "EntryType" => "File"}])
+      File.write(tool, "#!/bin/sh\ncase \"$1\" in\n-F) printf '%s' '#{listing}' ;;\n-r) printf '#{contents}' ;;\nesac\n")
+      File.chmod(0o700, tool)
+      tree = [FsimgSpec::TreeEntry.file("t.26y", size: 3, content: "zero")]
+      observe_image(tree:, tools: {fatcat: tool}) { _1.fetch("fatcat") }
+    end
+  end
 
   # Writes a builder image of tree into a case directory, plants the
   # named files beside it, and yields the observations of it as the known

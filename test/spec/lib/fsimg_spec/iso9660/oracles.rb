@@ -21,8 +21,7 @@ module FsimgSpec
             geometry(shell, tool:, image:, chdir:, model:, settings:)
           end,
           "xorriso" => observation(shell, :xorriso) do |tool|
-            text = output(shell, [tool, "-no_rc", "-indev", image, "-pvd_info"], chdir:)
-            metadata_report(text, model:, tool: :xorriso, settings:)
+            xorriso_report(shell, tool:, image:, chdir:, model:, settings:)
           end
         }
       end
@@ -111,8 +110,23 @@ module FsimgSpec
         Observation.disagrees(FsimgSpec.error_label(error))
       end
 
-      def output(shell, arguments, chdir:)
-        successful(shell.run(arguments, chdir:, capture_bytes: 1 << 20))
+      def xorriso_report(shell, tool:, image:, chdir:, model:, settings:)
+        execution = shell.run([tool, "-no_rc", "-indev", image, "-pvd_info"], chdir:, capture_bytes: 1 << 20)
+        # xorriso 1.5.8.pl02 on macOS refuses many 1024-byte Rock Ridge
+        # link targets with "Rock Ridge path too long", while accepting
+        # at least one 1024-byte target. The rule is unknown; only an
+        # observed refusal with this diagnostic is a consumer exception.
+        if execution.exit_status && execution.exit_status != 0 &&
+            !execution.launch_error && !execution.ended_by && !execution.leftover && !execution.signal &&
+            execution.stderr.include?("Rock Ridge path too long".b) && long_link?(model)
+          return Observation.not_applicable("libisofs: Rock Ridge path too long (target at least 1024 bytes)")
+        end
+
+        metadata_report(successful(execution), model:, tool: :xorriso, settings:)
+      end
+
+      def long_link?(model) = model.rr_records.any? do |record|
+        RockRidge.kind(record) == "symlink" && RockRidge.target(record).length >= 1024
       end
 
       def successful(execution)
@@ -122,8 +136,8 @@ module FsimgSpec
         end
         execution.stdout
       end
-      private_class_method :geometry, :observation, :output, :successful, :recipe_problems, :recipe_value,
-        :tool_problems, :reported_field
+      private_class_method :geometry, :observation, :xorriso_report, :long_link?, :successful, :recipe_problems,
+        :recipe_value, :tool_problems, :reported_field
     end
   end
 end

@@ -824,6 +824,11 @@ content the target, through the
 content; the data length of its ISO record is not its size. fsimg never
 resolves a target.
 
+xorriso 1.5.8 on macOS refuses many targets of exactly 1024 bytes with "Rock
+Ridge path too long" and accepts at least one; the rule is not known. Such a
+target is valid Rock Ridge, which sets no total length, but may not read back
+through libisofs.
+
 ### Relocation
 
 The primary hierarchy is at most eight levels deep, the root being level

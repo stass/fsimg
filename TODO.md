@@ -353,6 +353,12 @@
 
 ## Bugs by subsystem
 
+* [Low] **Spec harness oracle step can fail on EINTR** (`test/spec/`): a quick run
+  under `check-asan` reported `harness_error` for
+  `fat.create.cluster_count.fat16_4100`, detail `oracles: EINTR: "Interrupted system
+  call"`, failing the run; its replay passes. Find the call that raises it and retry
+  the interrupted call.
+
 * [Low] **Quick specification profile over its ceiling** (`test/spec/`,
   `specs/design-spec-testing.md`): the design caps the quick profile at about 60 s
   added to `make check`, but `test/spec.sh` takes several minutes. Bring it back
@@ -368,12 +374,6 @@
   linear in entries. Frames batched in the worker, or a `read_control` that drains
   several frames per wakeup, would remove most of it; either changes the supervisor
   protocol's pacing, which is security-relevant, so it needs a small design first.
-
-* [Low] **Spec harness oracle disagreements** (`test/spec/`): fatcat disagrees
-  on `fat.directory.name` and `fat.directory.unique_names`, and xorriso on
-  `iso9660.rr.sl.components`, `framing` and `profile`, in some seeded runs, while
-  `test/spec.sh` still passes. Find out whether each is an fsimg defect or an
-  oracle limit, then fix it or record the limit in the harness.
 
 * [Medium] **Post-read source-change payload evidence** (`test/exfat.c`):
   the helper's truncation case changes its source before the next read.

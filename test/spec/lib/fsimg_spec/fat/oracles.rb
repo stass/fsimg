@@ -179,7 +179,12 @@ module FsimgSpec
       # whose first directory it lists as the root's (FatSystem::getEntries
       # and rootClusters in the pinned fatcat). root_cluster is nil for
       # FAT12 or FAT16. Its exit status is 0 even when a path is missing,
-      # so only what it writes counts.
+      # so only what it writes counts. FatEntry::getShortFilename ignores
+      # DIR_NTRes lowercase flags, listing t.26y as T.26Y. Compare paths
+      # case-insensitively while keeping types, sizes and digests strict,
+      # so its listings and read-backs still check content and tree shape.
+      # The fold also covers long names, which fatcat returns verbatim;
+      # checking a long name's case is therefore left to mtools.
       private_class_method def self.fatcat(shell, image:, chdir:, tree:, geometry:, root_cluster:)
         tool = shell.tools[:fatcat]
         sector = geometry.bytes_per_sector
@@ -196,12 +201,13 @@ module FsimgSpec
           root_cluster.nil? && root_overread != false # an Undefined region is not known to be whole
         return Observation.not_applicable("fatcat decodes ASCII names only") unless tree.all? { _1.path.ascii_only? }
 
+        tree = tree.map { _1.with(path: _1.path.downcase) }
         directories = ["".b, *tree.select { _1.type == "directory" }.map(&:path)]
         listed = directories.flat_map do |directory|
           path = "/".b + directory
           json = output(shell, [tool, "-F", "json", "-l", path, image], chdir:, cap: listing_bytes(tree),
                                                                        label: "fatcat -l #{FsimgSpec.shown(path)}")
-          fatcat_entries(json, directory)
+          fatcat_entries(json, directory).map { _1.with(path: _1.path.downcase) }
         end
         read = read_files(listed, tree) do |path, cap|
           output(shell, [tool, "-r", "/".b + path, image], chdir:, cap:, label: "fatcat -r #{FsimgSpec.shown(path)}")

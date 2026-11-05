@@ -14,7 +14,43 @@ class Iso9660OraclesTest < Minitest::Test
   end
   Fields = Data.define(:space_le)
   Volume = Data.define(:fields)
-  Model = Data.define(:image_length, :volume)
+  Model = Data.define(:image_length, :volume, :rr_records) do
+    def initialize(rr_records: [], **fields) = super(rr_records:, **fields)
+  end
+
+  def test_xorriso_does_not_apply_when_it_refuses_a_1024_byte_link_as_too_long
+    ["t".b * 1024, "/".b * 1024, "t".b * 1023 + "/".b].each do |target|
+      observed, ran = observe_link_target(target, status: 5, stderr: "Rock Ridge path too long\n")
+
+      assert_equal "not_applicable", observed.fetch("xorriso").state
+      assert_includes observed.fetch("xorriso").detail, "Rock Ridge path too long"
+      assert_equal "agrees", observed.fetch("isoinfo").state
+      assert_includes ran, "/configured/xorriso"
+    end
+  end
+
+  def test_xorriso_disagrees_when_it_refuses_a_1023_byte_link_as_too_long
+    observed, ran = observe_link_target("t".b * 1023, status: 5, stderr: "Rock Ridge path too long\n")
+
+    assert_equal "disagrees", observed.fetch("xorriso").state
+    assert_includes ran, "/configured/xorriso"
+  end
+
+  def test_xorriso_disagrees_with_another_failure_at_1024_bytes
+    observed, ran = observe_link_target("t".b * 1024, status: 5, stderr: "Cannot read image\n")
+
+    assert_equal "disagrees", observed.fetch("xorriso").state
+    assert_includes ran, "/configured/xorriso"
+  end
+
+  def test_xorriso_observes_a_successful_1024_byte_link_target
+    ["t".b * 1024, ("t".b * 255 + "/".b) * 4].each do |target|
+      observed, ran = observe_link_target(target)
+
+      assert_equal "agrees", observed.fetch("xorriso").state
+      assert_includes ran, "/configured/xorriso"
+    end
+  end
 
   def test_tiny_image_short_read_is_an_exact_consumer_exception
     result = observe(blocks: 27, status: 255, stderr: "isoinfo: Short read on old image\n")
@@ -129,6 +165,34 @@ class Iso9660OraclesTest < Minitest::Test
   end
 
   private
+
+  # Decode real SL entries, but record oracle invocations without requiring
+  # either external tool or its platform-specific link limit.
+  def observe_link_target(target, status: 0, stderr: "")
+    Dir.mktmpdir do |directory|
+      path = File.join(directory, "fixture.iso")
+      parameters = {symlink: 1, target_shape: 2}
+      Iso::Builder.write(path, parameters:, tree: Iso::Builder.tree(parameters), max_bytes: 1 << 20)
+      model = Iso::Model.decode(FsimgSpec::ImageView.open(path))
+      record = model.rr_records.find { Iso::RockRidge.kind(_1) == "symlink" }
+      entries = Iso::Builder.sl_entries(target).map do |raw|
+        Iso::SuspEntry.new(offset: 0, raw:, fields: Iso::Layout.decode(Iso::Layout::SuspHeader, raw), scope: "test", area: "test")
+      end
+      entries = record.entries.reject { _1.fields.signature == "SL" } + entries
+      model = Model.new(image_length: 96 * 2048, volume: Volume.new(fields: Fields.new(space_le: 96)),
+        rr_records: [record.with(entries:)])
+      ran = []
+      execute = lambda do |arguments|
+        ran << arguments.first
+        text = "Logical block size is: 2048\nVolume size is: #{model.volume.fields.space_le}\n"
+        Execution.new(launch_error: nil, ended_by: nil, leftover: false, signal: nil,
+          exit_status: arguments.first == "/configured/xorriso" ? status : 0, stdout: text.b,
+          stderr: arguments.first == "/configured/xorriso" ? stderr.b : "".b)
+      end
+      shell = Shell.new(tools: {isoinfo: "/configured/isoinfo", xorriso: "/configured/xorriso"}, execute:)
+      [Iso::Oracles.observe(shell, image: "fixture.iso", chdir: directory, model:), ran]
+    end
+  end
 
   def descriptor_model(**texts)
     raw = "\0".b * 2048
