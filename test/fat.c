@@ -806,12 +806,8 @@ test_variants(void)
 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 		CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 		CHECK(strcmp(format.name, names[i]) == 0);
-		if (strcmp(format.name, "hfsplus") == 0 ||
-		    strcmp(format.name, "hfsx") == 0)
-			CHECK(format.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
-		else
-			CHECK(format.capabilities == (FSIMG_CAP_READ |
-			    FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
+		CHECK(format.capabilities == (FSIMG_CAP_READ |
+		    FSIMG_CAP_WRITE | FSIMG_CAP_VERIFY));
 	}
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);

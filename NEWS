@@ -28,6 +28,13 @@ clean name is no proof. It implies `-k`, whose skips are not losses, and every
 extraction safety rule stays in force. The library option is `FSIMG_EXTRACT_SALVAGE`, returning
 `FSIMG_EPARTIAL`.
 
+HFS Plus and HFSX volumes can be created: `c -F hfsplus` and `c -F hfsx` write a
+clean, unjournaled volume with allocation blocks of 512 to 65536 bytes, holding
+files, directories, symbolic links and FIFOs with owner, mode and four times. macOS
+checks, mounts and modifies what they write, and `tools/hfsplus/qualify.rb` runs
+that cycle. Unless `-s` or `--free-space` leaves room, the volume has no free
+block, so macOS mounts it and refuses to change it.
+
 HFS Plus and HFSX volumes can be inspected, listed, verified and extracted: data forks,
 POSIX metadata, hard links as separate entries, and a mark on entries with a
 resource fork or extended attributes. Files macOS compressed with zlib, LZVN

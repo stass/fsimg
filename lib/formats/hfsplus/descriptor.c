@@ -14,8 +14,6 @@
 
 /* An allocation block of 512 bytes to 2^31 bytes, every power of two. */
 #define HFSPLUS_BLOCK_SIZES		UINT32_C(0xfffffe00)
-/* N * B with N of 2^32 - 1 blocks of 2^31 bytes. */
-#define HFSPLUS_VOLUME_MAX		((UINT64_C(0xffffffff)) << 31)
 
 _Static_assert(HFSPLUS_LINK_TARGET_MAX <= FSIMG_SYMLINK_TARGET_MAX,
     "the HFS Plus link-target limit lies within the entry model's ceiling");
@@ -25,13 +23,13 @@ _Static_assert(sizeof(((fsimg_volume_info_t *)NULL)->label) >
 static fsimg_status_t hfsplus_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
-/* The kinds the writer stores; the reader also delivers the device and socket
- * kinds a native volume can hold.
+/* The writer stores files, directories, symbolic links and FIFOs. Devices
+ * and sockets are read-only kinds (specs/design-device-nodes.md): the catalog
+ * never holds one, so the writer never meets them.
  */
-#define HFSPLUS_WRITE_KINDS	(FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |	\
-	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO)
-#define HFSPLUS_READ_KINDS	(HFSPLUS_WRITE_KINDS |				\
-	    FSIMG_ENTRY_CHAR_DEVICE | FSIMG_ENTRY_BLOCK_DEVICE |	\
+#define HFSPLUS_KINDS	(FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |		\
+	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO |				\
+	    FSIMG_ENTRY_CHAR_DEVICE | FSIMG_ENTRY_BLOCK_DEVICE |		\
 	    FSIMG_ENTRY_SOCKET)
 /* 512 to 65536 bytes, every power of two. */
 #define HFSPLUS_WRITE_BLOCK_SIZES	UINT32_C(0x0001fe00)
@@ -39,16 +37,18 @@ _Static_assert(HFSPLUS_WRITE_BLOCK_MIN == 1u << 9 &&
     HFSPLUS_WRITE_BLOCK_MAX == 1u << 16,
     "the writer's capability record states its block size range");
 
-#define HFSPLUS_VARIANT_INFO(variant_name, kinds, bytes_max)		\
+#define HFSPLUS_VARIANT_INFO(variant_name)				\
 	.name = (variant_name),						\
-	.entry_kinds = (kinds),						\
+	.entry_kinds = HFSPLUS_KINDS,					\
 	.metadata_fields = FSIMG_META_CREATED | FSIMG_META_MODIFIED |	\
 	    FSIMG_META_ACCESSED | FSIMG_META_CHANGED |			\
 	    FSIMG_META_OWNER | FSIMG_META_MODE,				\
 	.sector_size_mask = 1u << 9,					\
 	.allocation_unit_size_mask = HFSPLUS_BLOCK_SIZES,		\
-	.max_file_bytes = (bytes_max),					\
-	.max_volume_bytes = (bytes_max),				\
+	.write_allocation_unit_size_mask = HFSPLUS_WRITE_BLOCK_SIZES,	\
+	.write_settings = FSIMG_SETTING_VOLUME_UUID,			\
+	.max_file_bytes = HFSPLUS_WRITE_VOLUME_MAX,			\
+	.max_volume_bytes = HFSPLUS_WRITE_VOLUME_MAX,			\
 	.max_name_utf16_units = HFSPLUS_NAME_UNITS_MAX,			\
 	.max_label_bytes = HFSPLUS_LABEL_BYTES,				\
 	.max_link_target_bytes = HFSPLUS_LINK_TARGET_MAX
@@ -56,16 +56,14 @@ _Static_assert(HFSPLUS_WRITE_BLOCK_MIN == 1u << 9 &&
 static const fsimg_format_variant_t hfsplus_variants[] = {
 	[HFSPLUS_VARIANT_PLUS] = {
 		.info = {
-			HFSPLUS_VARIANT_INFO("hfsplus", HFSPLUS_READ_KINDS,
-			    HFSPLUS_VOLUME_MAX),
+			HFSPLUS_VARIANT_INFO("hfsplus"),
 			.profile = "HFS Plus"
 		},
 		.id = HFSPLUS_VARIANT_PLUS
 	},
 	[HFSPLUS_VARIANT_X] = {
 		.info = {
-			HFSPLUS_VARIANT_INFO("hfsx", HFSPLUS_READ_KINDS,
-			    HFSPLUS_VOLUME_MAX),
+			HFSPLUS_VARIANT_INFO("hfsx"),
 			.profile = "HFSX case-sensitive"
 		},
 		.id = HFSPLUS_VARIANT_X
@@ -75,42 +73,6 @@ static const fsimg_format_variant_t hfsplus_variants[] = {
 const fsimg_format_t fsimg_hfsplus_format = {
 	.variants = hfsplus_variants,
 	.variant_count = sizeof(hfsplus_variants) / sizeof(hfsplus_variants[0]),
-	.probe_bytes = HFSPLUS_PROBE_BYTES,
-	.probe = hfsplus_probe,
-	.reader = &fsimg_hfsplus_reader_ops
-};
-
-/* The registered descriptor reads and verifies. The registry lists a writer
- * only after the native qualification cycle has accepted its output, so the
- * writer has its own descriptor, reachable only by code that names it.
- */
-#define HFSPLUS_WRITE_VARIANT_INFO(variant_name)			\
-	HFSPLUS_VARIANT_INFO(variant_name, HFSPLUS_WRITE_KINDS,		\
-	    HFSPLUS_WRITE_VOLUME_MAX),					\
-	.write_allocation_unit_size_mask = HFSPLUS_WRITE_BLOCK_SIZES,	\
-	.write_settings = FSIMG_SETTING_VOLUME_UUID
-
-static const fsimg_format_variant_t hfsplus_write_variants[] = {
-	[HFSPLUS_VARIANT_PLUS] = {
-		.info = {
-			HFSPLUS_WRITE_VARIANT_INFO("hfsplus"),
-			.profile = "HFS Plus"
-		},
-		.id = HFSPLUS_VARIANT_PLUS
-	},
-	[HFSPLUS_VARIANT_X] = {
-		.info = {
-			HFSPLUS_WRITE_VARIANT_INFO("hfsx"),
-			.profile = "HFSX case-sensitive"
-		},
-		.id = HFSPLUS_VARIANT_X
-	}
-};
-
-const fsimg_format_t fsimg_hfsplus_write_format = {
-	.variants = hfsplus_write_variants,
-	.variant_count = sizeof(hfsplus_write_variants) /
-	    sizeof(hfsplus_write_variants[0]),
 	.probe_bytes = HFSPLUS_PROBE_BYTES,
 	.probe = hfsplus_probe,
 	.reader = &fsimg_hfsplus_reader_ops,

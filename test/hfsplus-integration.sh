@@ -8,4 +8,5 @@ if ! command -v ruby >/dev/null 2>&1; then
 fi
 ruby "$(dirname "$0")/hfsplus-capture-test.rb"
 ruby "$(dirname "$0")/hfsplus-integration-test.rb"
+ruby "$(dirname "$0")/hfsplus-qualify-test.rb" ./hfsplus-write-gen ./fsimg
 exec ruby "$(dirname "$0")/hfsplus-integration.rb" ./hfsplus-write-gen ./fsimg

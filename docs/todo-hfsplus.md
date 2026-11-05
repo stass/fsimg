@@ -22,13 +22,6 @@ evidence and provenance.
   corpus specimen reaches it. The owner decides whether a compressed volume
   funds a larger default, since the budget is also what bounds a bomb across
   many files.
-* [Medium] **Writer registration** (`lib/formats/hfsplus/descriptor.c`,
-  `tools/hfsplus/qualify.rb`): plan stage 9. The writer is reachable only
-  through `fsimg_hfsplus_write_format`, so `--formats` and the CLI do not
-  offer it, until the macOS `fsck_hfs`, mount, modify and remount cycle is
-  recorded and settles the writer profile's four provisional values.
-  Registration then covers the capability record, `README.md`, the man pages
-  and `NEWS`.
 * [Medium] **Apple data representation** (`include/fsimg.h`,
   `specs/design-metadata.md`): resource forks, extended attributes, Finder
   information and BSD flags have no place in the entry model, so the reader

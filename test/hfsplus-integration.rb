@@ -92,23 +92,6 @@ module HfsPlusIntegration
                 "\u03a9", "\u03b1", ":", "\u2400", "\u{1f600}", "\uff21",
                 "a\u200cx", "ay"].freeze
   HELLO = (0...5).map { (1 + (8 * 17 + _1 * 13) % 251).chr }.join.b.freeze
-  # fsck findings sometimes start with "**" too. Enumerate the progress
-  # phases, rather than accepting all lines with that prefix.
-  # Apple's fsck_hfs.c (lines 533-534) logs a failed unprivileged read-write
-  # open before reopening O_RDONLY, which is sufficient for -n.
-  FSCK_PROGRESS = [
-    %r{\ACan't open /dev/rdisk\d+: Permission denied\z},
-    /\A\*\* Checking non-journaled HFS Plus Volume\.\z/,
-    /\A\*\* Detected a case-sensitive volume\.\z/,
-    %r{\A\*\* /dev/rdisk\d+(?:s\d+)?(?: \(NO WRITE\))?\z},
-    /\A\*\* Checking (?:HFS Plus|HFSX) volume\.\z/,
-    /\A\*\* Checking (?:extents overflow file|catalog file|multi-linked files|catalog hierarchy|extended attributes file|volume bitmap|volume information)\.\z/,
-    /\A\*\* The volume .+ appears to be OK\.\z/,
-    /\A\*\* The volume .+ was formatted by .+\z/,
-    /\A(?:\*\* )?The volume name is #{Regexp.escape(LABEL)}\z/,
-    /\AExecuting fsck_hfs \(version .+\)\.?\z/
-  ].freeze
-
   module_function
 
   def text(bytes) = bytes.dup.force_encoding("UTF-8").scrub
@@ -222,9 +205,7 @@ module HfsPlusIntegration
           end
         end
         puts out.lines.last(6).map { "  #{_1.rstrip}" }
-        findings = out.lines.map(&:strip).reject do |line|
-          line.empty? || FSCK_PROGRESS.any? { _1.match?(line) }
-        end
+        findings = HfsPlusCapture.fsck_findings(out)
         raise Error, "fsck_hfs findings:\n#{findings.join("\n")}" unless findings.empty?
         raise Error, "fsck_hfs failed or did not check the volume" unless ok && out.include?("appears to be OK")
       end

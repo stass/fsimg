@@ -38,7 +38,7 @@ lists
 The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT,
 classic QNX6 Power-Safe volumes in either byte order, QNX4 volumes, and
 nonbootable QNX ImageFS images in either byte order.
-It reads, and does not create, HFS Plus and HFSX volumes.
+It reads and creates HFS Plus and HFSX volumes.
 A file stored in its attribute or compressed with zlib, LZVN or LZFSE is
 decoded, unless its inline content is larger than 64 KiB or its compression
 attribute is not stored inline; those files and any other compression type
@@ -377,8 +377,11 @@ FAT12/16, the smallest root holding its entries; for QNX6 every classic
 block size, an inode capacity of exactly the entries rounded to a whole
 inode-table block, and the smallest block count rather than a multiple of
 64.
+HFS Plus and HFSX try every block size.
 Explicit settings and the free reserve still hold, ties go to the default
 candidate, and QNX4 and ImageFS volumes are already their smallest.
+An HFS Plus or HFSX volume with no free reserve has no free block, and macOS
+mounts it and refuses to change it.
 Minimization with a nonzero volume_bytes or a fixed disk fails with
 FSIMG_EINVAL.
 Reproducible mode fixes timestamps, identifiers, ordering and padding.
@@ -419,7 +422,8 @@ QNX4 names inode_capacity alone, the
 .Pa .inodes
 slot count, where zero selects 128 slots raised to the slots the names
 need.
-QNX6 and QNX4 store no volume_serial and ignore it.
+HFS Plus and HFSX name the UUID alone and store its first eight bytes.
+QNX6, QNX4, HFS Plus and HFSX store no volume_serial and ignore it.
 The setting mountpoint, a copied string under FSIMG_SETTING_MOUNTPOINT,
 follows the same rule, as does fat_root_entries under
 FSIMG_SETTING_ROOT_ENTRIES, which FAT12 and FAT16 name: the fixed root

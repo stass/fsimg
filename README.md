@@ -208,7 +208,7 @@ Standard input and decompression use a temporary spool, bounded by
 | QNX4 | Yes | QNX 6.5.0 `dinit` layout, including long names |
 | QNX ImageFS (IFS) | Yes | Either byte order; newly created bodies are nonbootable |
 | ISO 9660 | Yes | Rock Ridge, Joliet and primary views; levels 1 to 3, relocated deep trees, BIOS/EFI El Torito boot catalogs |
-| HFS Plus, HFSX | Read, verify and extract | Uncompressed files and files compressed with zlib, LZVN or LZFSE; a volume in an HFS wrapper reads as its embedded volume, the outer HFS volume unchecked and an initialized journal in it not supported |
+| HFS Plus, HFSX | Yes | Clean, unjournaled volumes that macOS checks, mounts and modifies; reads files compressed with zlib, LZVN or LZFSE; a volume in an HFS wrapper reads as its embedded volume, the outer HFS volume unchecked and an initialized journal in it not supported |
 
 ISO creation writes Rock Ridge and Joliet together. `-o level=1|2|3`
 selects the primary hierarchy's interchange level, default 3. `-o

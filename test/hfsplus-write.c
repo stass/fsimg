@@ -1510,7 +1510,7 @@ test_determinism(void)
 }
 
 
-/* Emission tests deliberately use the real, unregistered writer descriptor.
+/* Emission tests use the registered writer descriptor.
  * The earlier tests keep their planning-only descriptor.
  */
 static void
@@ -1888,29 +1888,23 @@ test_real_capabilities(void)
 
 	named("real descriptor capabilities");
 	fprintf(stderr, "%s\n", scenario);
-	EXPECT(fsimg_hfsplus_format.writer == NULL);
-	REQUIRE(fsimg_hfsplus_write_format.writer != NULL);
+	REQUIRE(fsimg_hfsplus_format.writer != NULL);
 	for (unsigned variant = 0; variant < 2; variant++) {
-		const fsimg_format_info_t *info = &fsimg_hfsplus_write_format.variants[variant].info;
-		const fsimg_format_info_t *read_info = &fsimg_hfsplus_format.variants[variant].info;
+		const fsimg_format_info_t *info = &fsimg_hfsplus_format.variants[variant].info;
 
 		EXPECT(info->max_file_bytes == UINT64_C(0xffffffff0000));
 		EXPECT(info->max_volume_bytes == UINT64_C(0xffffffff0000));
 		EXPECT(info->max_label_bytes == 510);
 		EXPECT(info->max_name_utf16_units == 255);
 		EXPECT(info->max_link_target_bytes == 1023);
-		EXPECT(read_info->max_file_bytes == UINT64_C(0x7fffffff80000000));
-		EXPECT(read_info->max_volume_bytes == UINT64_C(0x7fffffff80000000));
-		EXPECT(read_info->max_label_bytes == 510);
-		EXPECT(read_info->max_name_utf16_units == 255);
-		EXPECT(read_info->max_link_target_bytes == 1023);
 		EXPECT(info->write_settings == FSIMG_SETTING_VOLUME_UUID);
 		EXPECT(info->write_allocation_unit_size_mask == 0x1fe00u);
 		EXPECT(info->entry_kinds == (FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |
-		    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO));
+		    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO | FSIMG_ENTRY_CHAR_DEVICE |
+		    FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET));
 		hwf_options(&options, 4096);
 		hwf_open(&f, variant, &options, 64 * 1024 * 1024, -1, false);
-		EXPECT(fsimg_writer_add(f.writer, &device, NULL, NULL) != FSIMG_OK);
+		EXPECT(fsimg_writer_add(f.writer, &device, NULL, NULL) == FSIMG_EINVAL);
 		hwf_close(&f);
 		REQUIRE(fsimg_partition_type_select(NULL, info->name, &selector, NULL) == FSIMG_OK);
 		type = selector.type;
@@ -2339,8 +2333,8 @@ test_real_label_mapping(void)
 		context_open(&context);
 		hwf_options(&options, 4096);
 		options.label = "a/b";
-		EXPECT(fsimg_writer_new_variant(context.ctx, &fsimg_hfsplus_write_format,
-		    &fsimg_hfsplus_write_format.variants[variant], &options,
+		EXPECT(fsimg_writer_new_variant(context.ctx, &fsimg_hfsplus_format,
+		    &fsimg_hfsplus_format.variants[variant], &options,
 		    &writer, NULL) == FSIMG_EINVAL);
 		fsimg_writer_free(writer);
 
@@ -2416,8 +2410,8 @@ test_real_link_target_boundary(void)
 			named("real link target variant=%u bytes=%u", variant, length);
 			hwf_options(&options, 4096);
 			context_open(&f);
-			REQUIRE(fsimg_writer_new_variant(f.ctx, &fsimg_hfsplus_write_format,
-			    &fsimg_hfsplus_write_format.variants[variant], &options,
+			REQUIRE(fsimg_writer_new_variant(f.ctx, &fsimg_hfsplus_format,
+			    &fsimg_hfsplus_format.variants[variant], &options,
 			    &f.writer, NULL) == FSIMG_OK);
 			fsimg_source_ops_init(&ops);
 			ops.read_at = long_link_read;

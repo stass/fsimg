@@ -67,7 +67,7 @@ module HfsPlusQualify
   # What macOS adds to a volume's root that readdir shows. The folders it uses
   # for hard links are hidden from readdir but appear in the catalog.
   NATIVE_ROOT = %w[.fseventsd .Spotlight-V100 .Trashes .TemporaryItems .DS_Store].freeze
-  PRIVATE_ROOT = ["␀␀␀␀HFS+ Private Data", ".HFS+ Private Directory Data\r"].freeze
+  PRIVATE_ROOT = ["\u2400\u2400\u2400\u2400HFS+ Private Data", ".HFS+ Private Directory Data\r"].freeze
   OWNER_VIEW = %w[-nobrowse -owners on].freeze
   CONTENT_VIEW = %w[-nobrowse -owners off].freeze
   METADATA = %i[kind size mode uid gid created modified changed accessed target].freeze
@@ -144,9 +144,9 @@ module HfsPlusQualify
   # tree, varied so that a field the writer swapped would show.
   def block_tree(block)
     files = { "/dir/sub/below" => block - 1, "/equal" => block, "/above" => block + 1, "/two" => 2 * block + 1,
-              "/big" => 40 * block, "/hello" => 5, "/café" => 19, "/empty" => 0, "/Zeta" => 0, "/alpha" => 0,
-              "/Ω" => 0, "/α" => 0, "/:" => 0, "/␀" => 0, "/\u{1f600}" => 0, "/Ａ" => 0,
-              "/a‌x" => 0, "/ay" => 0, "/#{'a' * 200}" => 0, "/#{'z' * 200}" => 0 }
+              "/big" => 40 * block, "/hello" => 5, "/caf\u00e9" => 19, "/empty" => 0, "/Zeta" => 0, "/alpha" => 0,
+              "/\u03a9" => 0, "/\u03b1" => 0, "/:" => 0, "/\u2400" => 0, "/\u{1f600}" => 0, "/\uff21" => 0,
+              "/a\u200cx" => 0, "/ay" => 0, "/#{'a' * 200}" => 0, "/#{'z' * 200}" => 0 }
     modes = [0o644, 0o640, 0o751, 0o444, 0o600, 0o755].cycle
     owners = [[123, 456], [0, 0], [65_000, 20], [501, 20]].cycle
     times = (0..).lazy.map { BASE_TIME - 86_400 * 3650 + 1000 * _1 }
@@ -167,24 +167,24 @@ module HfsPlusQualify
   # two-jamo syllable) and three to a character.
   def length_names
     plain = (1..255).map { "x" * _1 }
-    doubled = %W[é \u{1f600} 가].flat_map do |unit|
+    doubled = %W[\u00e9 \u{1f600} \uac00].flat_map do |unit|
       (1..127).flat_map { [unit * _1, "#{unit * _1}x"] }
     end
-    (plain + doubled + (1..85).map { "한" * _1 }).uniq
+    (plain + doubled + (1..85).map { "\ud55c" * _1 }).uniq
   end
 
   # A name one unit too long, in each spelling.
-  OVERLONG_NAMES = ["x" * 256, "é" * 128, "#{"\u{1f600}" * 127}xx", "한" * 86].freeze
+  OVERLONG_NAMES = ["x" * 256, "\u00e9" * 128, "#{"\u{1f600}" * 127}xx", "\ud55c" * 86].freeze
 
   # E3's collision sets. These pairs collide on both comparators: decomposition,
   # the Hangul algorithm, combining order, and the canonical singletons.
-  BOTH_COLLIDE = [["café", "café"], ["가", "가"],
-                  ["aཱིི", "aཱིི"], ["aཱི", "aཱི"],
-                  ["̀", "̀"], [";", ";"], ["·", "·"], ["ά", "ά"]].freeze
+  BOTH_COLLIDE = [["cafe\u0301", "caf\u00e9"], ["\uac00", "\u1100\u1161"],
+                  ["a\u0f72\u0f73", "a\u0f73\u0f72"], ["a\u0f73", "a\u0f72\u0f71"],
+                  ["\u0300", "\u0340"], [";", "\u037e"], ["\u00b7", "\u0387"], ["\u03ac", "\u1f71"]].freeze
   # These collide on `hfsplus` only: case folding and ignorable units.
-  PLUS_COLLIDE = [%w[Zeta zeta], ["Ω", "ω"], ["Ａ", "ａ"], %W[ab a‌b], %W[pq p﻿q]].freeze
+  PLUS_COLLIDE = [%w[Zeta zeta], ["\u03a9", "\u03c9"], ["\uff21", "\uff41"], %W[ab a\u200cb], %W[pq p\ufeffq]].freeze
   # These collide on neither: supplementary values neither fold nor reorder.
-  NONE_COLLIDE = [["\u{10400}", "\u{10428}"], ["à\u{1d165}", "a\u{1d165}̀"]].freeze
+  NONE_COLLIDE = [["\u{10400}", "\u{10428}"], ["a\u0300\u{1d165}", "a\u{1d165}\u0300"]].freeze
 
   def collision_pairs(variant)
     both = BOTH_COLLIDE.map { Pair.new(first: _1, second: _2, collide: true) }

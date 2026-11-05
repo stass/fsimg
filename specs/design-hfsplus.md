@@ -1380,8 +1380,9 @@ accepts each, as the record's
 `lastMountedVersion` `fsim`, which macOS replaces with `10.0` at its first
 read-write mount; 4096-byte catalog nodes at every volume size; a one-node
 extents tree and a one-node attributes tree, which macOS grows when it inserts;
-and the smallest volume minimization yields. That volume has no free block and
-its catalog no free node, so macOS mounts it read-write and refuses to change it.
+and the smallest volume minimization yields. A volume with no free reserve has no
+free block and its catalog no free node, so macOS mounts it read-write and refuses
+to change it.
 
 ### Volume
 

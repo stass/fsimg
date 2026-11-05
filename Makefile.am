@@ -465,6 +465,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/vm/vmstart.sh \
 	tools/gen-fat-tables.rb tools/gen-hfsplus-tables.rb \
 	tools/hfsplus-unicode-exceptions.txt tools/hfsplus/capture.rb \
+	tools/hfsplus/qualify.rb \
 	tools/hfsplus/check-unicode-tables.rb \
 	tools/hfsplus/e8_interrupt.rb tools/hfsplus/fields.rb \
 	tools/hfsplus/index_keys.rb tools/hfsplus/ndif.rb \
@@ -518,6 +519,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/helpers_test.rb \
 	test/cli/hfsplus_native_test.rb \
 	test/cli/hfsplus_truncated_test.rb \
+	test/cli/hfsplus_create_test.rb \
 	test/cli/hfsplus_verify_test.rb \
 	test/cli/hfsplus_verify_manifest_test.rb \
 	test/hfsplus-verify-expected.tsv \
@@ -754,5 +756,5 @@ EXTRA_DIST += \
 
 EXTRA_DIST += test/hfsplus-integration.sh test/hfsplus-integration.rb
 
-EXTRA_DIST += test/hfsplus-capture-test.rb
+EXTRA_DIST += test/hfsplus-capture-test.rb test/hfsplus-qualify-test.rb
 EXTRA_DIST += test/hfsplus-integration-test.rb

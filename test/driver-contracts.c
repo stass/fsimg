@@ -286,6 +286,16 @@ static const contract_metadata_case_t qnx6_metadata[] = {
 	OMITTED_CASES(FSIMG_META_ATTRIBUTES),
 };
 
+/* HFS Plus stores the same whole-second UTC and POSIX fields tested here,
+ * with symbolic links and FIFOs, and omits DOS attributes.
+ */
+static const contract_metadata_case_t hfsplus_metadata[] = {
+	QNX_EXACT_CASE,
+	QNX_FRACTION_CASE,
+	QNX_KIND_CASES,
+	OMITTED_CASES(FSIMG_META_ATTRIBUTES),
+};
+
 static const contract_metadata_case_t qnx4_metadata[] = {
 	QNX_EXACT_CASE,
 	QNX_FRACTION_CASE,
@@ -357,10 +367,16 @@ static fsimg_status_t materialize_iso(contract_volume_t *, fsimg_error_t *);
 
 static const contract_fs_profile_t fs_profiles[] = {
 	{ .id = "hfsplus", .format = "hfsplus", .coverage_profile = true,
-	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
+	    .expected_capabilities = ALL_CAPABILITIES,
+	    .write = { .flags = WRITE_FLAGS },
+	    .metadata_cases = hfsplus_metadata,
+	    .metadata_case_count = COUNT(hfsplus_metadata),
 	    .materialize = materialize_hfsplus, .max_fixture_bytes = 2 * MIB },
 	{ .id = "hfsx", .format = "hfsx", .coverage_profile = true,
-	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
+	    .expected_capabilities = ALL_CAPABILITIES,
+	    .write = { .flags = WRITE_FLAGS },
+	    .metadata_cases = hfsplus_metadata,
+	    .metadata_case_count = COUNT(hfsplus_metadata),
 	    .materialize = materialize_hfsx, .max_fixture_bytes = 2 * MIB },
 	{ .id = "iso9660", .format = "iso9660", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,

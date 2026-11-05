@@ -134,8 +134,8 @@ hwf_open(hwf_fixture_t *f, unsigned variant, const fsimg_write_options_t *o,
 	if (!poison && memory == 16 * 1024 * 1024 && scratch != -1)
 		CHECK(fsimg_test_meta_cache(f->ctx, 2, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(f->ctx, &f->baseline, NULL) == FSIMG_OK);
-	CHECK(fsimg_writer_new_variant(f->ctx, &fsimg_hfsplus_write_format,
-	    &fsimg_hfsplus_write_format.variants[variant], o, &f->writer,
+	CHECK(fsimg_writer_new_variant(f->ctx, &fsimg_hfsplus_format,
+	    &fsimg_hfsplus_format.variants[variant], o, &f->writer,
 	    NULL) == FSIMG_OK);
 	fsimg_source_ops_init(&source);
 	source.read_at = source_read;
