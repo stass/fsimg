@@ -19,14 +19,13 @@
  * them in charged scratch, so a million-extent fork costs scratch and not RAM.
  */
 
-/* One fork's walk. Each extent goes to the index, to the claims, or to both
- * when both are set; a walk with neither only checks.
- */
+/* One fork's walk. Each extent goes to the index, or without one to the claims. */
 typedef struct fork_walk {
 	fsimg_reader_t		*reader;
 	fsimg_extent_index_t	*index;
 	fsimg_owner_runs_t	*claims;
 	uint64_t		 appended;	/* blocks so far */
+	uint64_t		 records;	/* overflow records so far */
 	uint32_t		 total;		/* the fork's totalBlocks */
 } fork_walk_t;
 
@@ -35,11 +34,13 @@ static fsimg_status_t check_descriptors(const hfsplus_geometry_t *,
 static fsimg_status_t append_extents(fork_walk_t *, const hfsplus_extent_t *,
     fsimg_error_t *);
 static fsimg_status_t walk_overflow(fork_walk_t *, uint32_t, uint8_t,
-    uint64_t *, fsimg_error_t *);
+    fsimg_error_t *);
+static fsimg_status_t walk_fork(fork_walk_t *, uint32_t, uint8_t,
+    const hfsplus_fork_t *, fsimg_error_t *);
 static fsimg_status_t check_fork(const hfsplus_geometry_t *,
     const hfsplus_fork_t *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t check_named_fork(fsimg_reader_t *, uint32_t,
-    const hfsplus_fork_t *, uint64_t *, fsimg_error_t *);
+    const hfsplus_fork_t *, fsimg_error_t *);
 
 /* Check one record's eight descriptors against the extent rules and give the
  * blocks of its used ones: used precede unused, an unused one is (0, 0), and
@@ -96,18 +97,12 @@ append_extents(fork_walk_t *walk, const hfsplus_extent_t *extents,
 		run.logical_offset = walk->appended * block_size;
 		run.image_offset = (uint64_t)extents[i].start * block_size;
 		run.length = (uint64_t)extents[i].count * block_size;
-		if (walk->claims != NULL) {
-			status = fsimg_owner_runs_append(walk->claims,
-			    extents[i].start, extents[i].count, error);
-			if (status != FSIMG_OK)
-				return (status);
-		}
-		if (walk->index != NULL) {
-			status = fsimg_extent_index_append(walk->index, &run,
-			    error);
-			if (status != FSIMG_OK)
-				return (status);
-		}
+		status = walk->index != NULL ?
+		    fsimg_extent_index_append(walk->index, &run, error) :
+		    fsimg_owner_runs_append(walk->claims, extents[i].start,
+		    extents[i].count, error);
+		if (status != FSIMG_OK)
+			return (status);
 		walk->appended += extents[i].count;
 	}
 	return (FSIMG_OK);
@@ -121,7 +116,7 @@ append_extents(fork_walk_t *walk, const hfsplus_extent_t *extents,
  */
 static fsimg_status_t
 walk_overflow(fork_walk_t *walk, uint32_t file_id, uint8_t fork_type,
-    uint64_t *records, fsimg_error_t *error)
+    fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(walk->reader);
 	hfsplus_extent_t extents[HFSPLUS_EXTENTS_PER_RECORD];
@@ -179,7 +174,7 @@ walk_overflow(fork_walk_t *walk, uint32_t file_id, uint8_t fork_type,
 			status = hfsplus_cursor_next(&cursor, error);
 		if (status != FSIMG_OK)
 			return (status);
-		(*records)++;
+		walk->records++;
 	}
 
 	if (!cursor.valid)
@@ -194,6 +189,21 @@ walk_overflow(fork_walk_t *walk, uint32_t file_id, uint8_t fork_type,
 		return (hfsplus_corrupt(error,
 		    "HFS Plus fork has an extra overflow record"));
 	return (FSIMG_OK);
+}
+
+/* A checked fork's blocks in logical order: its inline extents, then its overflow
+ * records for what they leave short of totalBlocks.
+ */
+static fsimg_status_t
+walk_fork(fork_walk_t *walk, uint32_t file_id, uint8_t fork_type,
+    const hfsplus_fork_t *fork, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = append_extents(walk, fork->extents, error);
+	if (status == FSIMG_OK && walk->appended < walk->total)
+		status = walk_overflow(walk, file_id, fork_type, error);
+	return (status);
 }
 
 /* Check fork data and give the blocks of its inline extents: the descriptors,
@@ -230,16 +240,17 @@ check_fork(const hfsplus_geometry_t *geometry, const hfsplus_fork_t *fork,
  */
 static fsimg_status_t
 check_named_fork(fsimg_reader_t *reader, uint32_t file_id,
-    const hfsplus_fork_t *fork, uint64_t *inline_blocks, fsimg_error_t *error)
+    const hfsplus_fork_t *fork, fsimg_error_t *error)
 {
+	uint64_t inline_blocks;
 	fsimg_status_t status;
 
-	status = check_fork(&hfsplus_state(reader)->geometry, fork, inline_blocks,
+	status = check_fork(&hfsplus_state(reader)->geometry, fork, &inline_blocks,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (file_id == HFSPLUS_ID_EXTENTS &&
-	    *inline_blocks != fork->total_blocks)
+	    inline_blocks != fork->total_blocks)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus extents tree's fork needs overflow"));
 	return (FSIMG_OK);
@@ -247,18 +258,14 @@ check_named_fork(fsimg_reader_t *reader, uint32_t file_id,
 
 fsimg_status_t
 hfsplus_fork_index(fsimg_reader_t *reader, uint32_t file_id, uint8_t fork_type,
-    const hfsplus_fork_t *fork, fsimg_extent_index_t **index, uint64_t *records,
+    const hfsplus_fork_t *fork, fsimg_extent_index_t **index,
     fsimg_error_t *error)
 {
 	fork_walk_t walk = { .reader = reader, .total = fork->total_blocks };
-	uint64_t inline_blocks, consumed;
 	fsimg_status_t status;
 
 	*index = NULL;
-	if (records != NULL)
-		*records = 0;
-	consumed = 0;
-	status = check_named_fork(reader, file_id, fork, &inline_blocks, error);
+	status = check_named_fork(reader, file_id, fork, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (fork->total_blocks == 0)
@@ -268,10 +275,7 @@ hfsplus_fork_index(fsimg_reader_t *reader, uint32_t file_id, uint8_t fork_type,
 	    &reader->content_domain, &walk.index, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = append_extents(&walk, fork->extents, error);
-	if (status == FSIMG_OK && walk.appended < walk.total)
-		status = walk_overflow(&walk, file_id, fork_type, &consumed,
-		    error);
+	status = walk_fork(&walk, file_id, fork_type, fork, error);
 	/* Under salvage the current regular file's walk keeps the extents before
 	 * the damage. A volume's own forks are indexed at open, before salvage
 	 * is enabled, so they stay rejected whole.
@@ -281,8 +285,6 @@ hfsplus_fork_index(fsimg_reader_t *reader, uint32_t file_id, uint8_t fork_type,
 		fsimg_extent_index_free(walk.index);
 		return (status);
 	}
-	if (records != NULL)
-		*records = consumed;
 	*index = walk.index;
 	return (FSIMG_OK);
 }
@@ -294,14 +296,12 @@ hfsplus_fork_claim(fsimg_reader_t *reader, fsimg_owner_runs_t *claims,
 {
 	fork_walk_t walk = { .reader = reader, .claims = claims,
 	    .total = fork->total_blocks };
-	uint64_t inline_blocks;
 	fsimg_status_t status;
 
-	status = check_named_fork(reader, file_id, fork, &inline_blocks, error);
+	status = check_named_fork(reader, file_id, fork, error);
 	if (status == FSIMG_OK)
-		status = append_extents(&walk, fork->extents, error);
-	if (status == FSIMG_OK && walk.appended < walk.total)
-		status = walk_overflow(&walk, file_id, fork_type, records, error);
+		status = walk_fork(&walk, file_id, fork_type, fork, error);
+	*records += walk.records;
 	return (status);
 }
 

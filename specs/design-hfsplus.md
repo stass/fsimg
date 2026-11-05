@@ -968,7 +968,8 @@ model has no hard-link representation, as the
 delivered from the one indirect node. A missing indirect node, a zero
 reference, an indirect node that is a stub itself or of another kind, or a
 stub with a nonempty fork is `FSIMG_ECORRUPT`. Verification checks that
-each indirect node's link count equals its stubs; the chain fields are not
+each indirect node's link count equals its stubs and that no stub lies in
+the private data folder, where no walk reaches it; the chain fields are not
 checked. macOS creates no hard link to a symbolic link: `link(2)` follows
 the link, `linkat(2)` without `AT_SYMLINK_FOLLOW` and `ln -P` fail with
 `ENOTSUP`, the one refusal in the kernel's link path (E4, the record's

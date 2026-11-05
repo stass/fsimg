@@ -229,7 +229,7 @@ hfsplus_content_open(fsimg_reader_t *reader, fsimg_error_t *error)
 	if (current->compression != 0)
 		return (hfsplus_compress_open(reader, &file, error));
 	status = hfsplus_fork_index(reader, file.id, HFSPLUS_FORK_DATA,
-	    &file.data_fork, &hfsplus->file, NULL, error);
+	    &file.data_fork, &hfsplus->file, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (hfsplus->file == NULL)

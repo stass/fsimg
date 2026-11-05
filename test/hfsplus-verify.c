@@ -33,6 +33,7 @@ typedef struct fixture {
 	uint64_t watched_first;
 	uint64_t watched_end;
 	uint64_t watched_reads;
+	uint64_t watched_bytes;
 	uint64_t cancel_at;
 	uint64_t polls;
 	int scratch_fd;
@@ -62,7 +63,10 @@ typedef enum link_damage {
 	LINK_COUNT_LOW,
 	LINK_COUNT_HIGH,
 	LINK_UNREFERENCED_INODE,
-	LINK_NONEMPTY_STUB
+	LINK_NONEMPTY_STUB,
+	LINK_HIDDEN_NONEMPTY_STUB,
+	LINK_HIDDEN_STUB,
+	LINK_THREE_STUBS
 } link_damage_t;
 
 typedef enum attribute_damage {
@@ -70,6 +74,12 @@ typedef enum attribute_damage {
 	ATTRIBUTE_CONTINUATION_GAP,
 	ATTRIBUTE_CONTINUATION_SHORT
 } attribute_damage_t;
+
+typedef enum compression_sibling {
+	COMPRESSION_EMPTY_SIBLING,
+	COMPRESSION_PLAIN_SIBLING,
+	COMPRESSION_INLINE_SIBLING
+} compression_sibling_t;
 
 static void expect(bool condition, const char *description);
 static void expect_status(fsimg_status_t actual, fsimg_status_t wanted,
@@ -127,7 +137,7 @@ static void header_file_count(gen_image_t *image);
 static void header_folder_count(gen_image_t *image);
 static void attribute_flag_clear(gen_image_t *image);
 static void attribute_flag_without_record(gen_image_t *image);
-static void attribute_missing_owner(gen_image_t *image);
+static void attribute_owner_above_every_primary(gen_image_t *image);
 static void attribute_unknown_type(gen_image_t *image);
 static void absent_label(gen_image_t *image);
 static void private_directory_nonempty(gen_image_t *image);
@@ -146,9 +156,9 @@ static void child_wrong_height(gen_image_t *image);
 static void child_is_header(gen_image_t *image);
 static void child_is_self(gen_image_t *image);
 static void sibling_fault(gen_image_t *image, bool index, bool cycle);
-static void leaf_cycle(gen_image_t *image);
+static void leaf_sibling_cycle_fails_back_link(gen_image_t *image);
 static void leaf_backlink(gen_image_t *image);
-static void index_cycle(gen_image_t *image);
+static void index_sibling_cycle_fails_back_link(gen_image_t *image);
 static void index_backlink(gen_image_t *image);
 static void tree_header_delta(gen_image_t *image, unsigned offset, size_t width);
 static void leaf_records_off(gen_image_t *image);
@@ -203,7 +213,7 @@ static void link_unreferenced_inode(gen_image_t *image);
 static void link_nonempty_stub(gen_image_t *image);
 static void store_le(unsigned char *bytes, uint64_t value, size_t width);
 static void build_compressed_variant(gen_image_t *image, unsigned type, compression_damage_t fault,
-    bool plain_sibling);
+    compression_sibling_t sibling);
 static void build_compressed(gen_image_t *image, unsigned type, compression_damage_t fault);
 static void compressed4_outside(gen_image_t *image);
 static void compressed4_overlap(gen_image_t *image);
@@ -355,6 +365,15 @@ memory_read(void *argument, uint64_t offset, void *buffer, size_t length,
 		return (FSIMG_OK);
 	if (length > fixture->length - offset)
 		length = (size_t)(fixture->length - offset);
+	if (fixture->watched_end > offset &&
+	    fixture->watched_first < offset + length) {
+		uint64_t first = offset > fixture->watched_first ?
+		    offset : fixture->watched_first;
+		uint64_t end = offset + length < fixture->watched_end ?
+		    offset + length : fixture->watched_end;
+
+		fixture->watched_bytes += end - first;
+	}
 	bcopy(fixture->image->bytes + offset, buffer, length);
 	*transferred = length;
 	return (FSIMG_OK);
@@ -436,8 +455,11 @@ check_failure(fixture_t *fixture, unsigned flags, fsimg_status_t wanted,
 
 	status = fsimg_verify(fixture->reader, flags, &report, &error);
 	expect_status(status, wanted, &error);
-	if (strstr(error.message, message) == NULL) {
-		fprintf(stderr, "%s: expected message containing '%s', got '%s'\n",
+	/* Full diagnostics compare exactly; short expectations match fragments. */
+	if ((strncmp(message, "HFS Plus ", 9) == 0 ?
+	    strcmp(error.message, message) != 0 :
+	    strstr(error.message, message) == NULL)) {
+		fprintf(stderr, "%s: expected message '%s', got '%s'\n",
 		    scenario, message, error.message);
 		failures++;
 	}
@@ -451,8 +473,8 @@ check_failure(fixture_t *fixture, unsigned flags, fsimg_status_t wanted,
 }
 
 static void
-check_clean(gen_image_t *image, uint64_t files, uint64_t directories,
-    uint64_t bytes, uint64_t bad_blocks)
+check_clean_bytes(gen_image_t *image, uint64_t files, uint64_t directories,
+    uint64_t bytes, uint64_t initialized_bytes, uint64_t bad_blocks)
 {
 	for (unsigned payload = 0; payload < 2; payload++) {
 		fixture_t fixture;
@@ -475,8 +497,13 @@ check_clean(gen_image_t *image, uint64_t files, uint64_t directories,
 			expect(report.files == files, "exact file count");
 			expect(report.directories == directories, "exact directory count");
 			expect(report.logical_bytes == bytes, "exact logical byte count");
-			expect(report.payload_bytes_read == (payload ? bytes : 0),
-			    "only plain initialized payload contributes bytes");
+			if (report.payload_bytes_read != (payload ? initialized_bytes : 0)) {
+				fprintf(stderr, "%s: got %s (%s), payload_bytes_read=%llu, expected %llu\n",
+				    scenario, fsimg_status_string(status), error.message,
+				    (unsigned long long)report.payload_bytes_read,
+				    (unsigned long long)(payload ? initialized_bytes : 0));
+				failures++;
+			}
 			expect(report.free_clusters == gen_load(header(image) + 48, 4),
 			    "exact free-block count");
 			expect(report.allocated_clusters ==
@@ -498,6 +525,13 @@ check_clean(gen_image_t *image, uint64_t files, uint64_t directories,
 		}
 		fixture_close(&fixture);
 	}
+}
+
+static void
+check_clean(gen_image_t *image, uint64_t files, uint64_t directories,
+    uint64_t bytes, uint64_t bad_blocks)
+{
+	check_clean_bytes(image, files, directories, bytes, bytes, bad_blocks);
 }
 
 /* Each builder starts with its own volume; no mutation is shared by cases. */
@@ -596,6 +630,8 @@ shared_block(gen_image_t *image)
 	build_clean(image);
 	gen_store(catalog_data(image, 34, false) + 104,
 	    gen_load(catalog_data(image, 32, false) + 104, 4), 4);
+	gen_rebuild_bitmap(image);
+	bcopy(header(image), image->bytes + image->length - 1024, 512);
 }
 
 static void
@@ -748,14 +784,36 @@ attribute_flag_without_record(gen_image_t *image)
 	gen_store(catalog_data(image, 34, false) + 2, 4, 2);
 }
 
+/* A single attribute keeps key order valid for every owner ID. Clearing the
+ * former owner's flag leaves only the unmatched owner as the fault.
+ */
 static void
-attribute_missing_owner(gen_image_t *image)
+build_attribute_owner(gen_image_t *image, uint32_t owner)
 {
 	gen_record_t *r;
 
 	build_clean(image);
+	gen_store(catalog_data(image, 32, false) + 2, 0, 2);
 	r = &image->trees[GEN_ATTRIBUTES].records[0];
-	gen_store(image->bytes + r->offset + 4, 99, 4);
+	gen_store(image->bytes + r->offset + 4, owner, 4);
+}
+
+static void
+attribute_owner_id_zero(gen_image_t *image)
+{
+	build_attribute_owner(image, 0);
+}
+
+static void
+attribute_owner_between_primaries(gen_image_t *image)
+{
+	build_attribute_owner(image, 31);
+}
+
+static void
+attribute_owner_above_every_primary(gen_image_t *image)
+{
+	build_attribute_owner(image, 99);
 }
 
 static void
@@ -951,7 +1009,7 @@ sibling_fault(gen_image_t *image, bool index, bool cycle)
 }
 
 static void
-leaf_cycle(gen_image_t *image)
+leaf_sibling_cycle_fails_back_link(gen_image_t *image)
 {
 	sibling_fault(image, false, true);
 }
@@ -961,7 +1019,7 @@ leaf_backlink(gen_image_t *image)
 	sibling_fault(image, false, false);
 }
 static void
-index_cycle(gen_image_t *image)
+index_sibling_cycle_fails_back_link(gen_image_t *image)
 {
 	sibling_fault(image, true, true);
 }
@@ -1022,6 +1080,27 @@ map_bit_past_total(gen_image_t *image)
 	build_deep_tree(image);
 	total = image->trees[GEN_EXTENTS].nodes;
 	extent_node(image, 0)[248 + total / 8] |= (unsigned char)(0x80u >> (total % 8));
+}
+
+static void
+map_link_past_total_nodes_extents(gen_image_t *image)
+{
+	build_clean(image);
+	gen_store(image->bytes + image->trees[GEN_EXTENTS].offset, UINT32_MAX, 4);
+}
+
+static void
+map_link_past_total_nodes_catalog(gen_image_t *image)
+{
+	build_clean(image);
+	gen_store(image->bytes + image->trees[GEN_CATALOG].offset, UINT32_MAX, 4);
+}
+
+static void
+map_link_past_total_nodes_attributes(gen_image_t *image)
+{
+	build_clean(image);
+	gen_store(image->bytes + image->trees[GEN_ATTRIBUTES].offset, UINT32_MAX, 4);
 }
 
 /* The fixed header map covers 2048 nodes. Full map nodes add 3936 bits
@@ -1141,6 +1220,19 @@ bad_blocks_resource_orphan(gen_image_t *image)
 	image->bytes[image->trees[GEN_EXTENTS].records[0].offset + 2] = 255;
 }
 
+static void
+move_alternate_beyond_allocation(gen_image_t *image)
+{
+	size_t old_length;
+
+	old_length = image->length;
+	image->length += 2048;
+	image->bytes = realloc(image->bytes, image->length);
+	CHECK(image->bytes != NULL);
+	bzero(image->bytes + old_length - 1024, 3072);
+	bcopy(header(image), image->bytes + image->length - 1024, 512);
+}
+
 /* Slack leaves the alternate outside allocation. Retain the formatter's
  * last ceil(1024 / B) bits, or clear them and adjust the independent count.
  */
@@ -1149,7 +1241,6 @@ build_slack_tail(gen_image_t *image, uint32_t block_size, bool marked)
 {
 	gen_plan_t plan;
 	unsigned char *bitmap;
-	size_t old_length;
 	uint32_t tail = (1024 + block_size - 1) / block_size;
 	uint32_t free_blocks;
 
@@ -1157,11 +1248,7 @@ build_slack_tail(gen_image_t *image, uint32_t block_size, bool marked)
 	plan.verification = true;
 	plan.block_size = block_size;
 	gen_build(&plan, image);
-	old_length = image->length;
-	image->length += 2048;
-	image->bytes = realloc(image->bytes, image->length);
-	CHECK(image->bytes != NULL);
-	bzero(image->bytes + old_length - 1024, 3072);
+	move_alternate_beyond_allocation(image);
 	bitmap = image->bytes + gen_load(header(image) +
 	    GEN_BITMAP_FORK + 16, 4) * block_size;
 	free_blocks = (uint32_t)gen_load(header(image) + 48, 4);
@@ -1193,6 +1280,29 @@ tail_orphan_512(gen_image_t *image)
 	bitmap = image->bytes + gen_load(header(image) +
 	    GEN_BITMAP_FORK + 16, 4) * 512;
 	bitmap[509 / 8] |= 0x80u >> (509 % 8);
+}
+
+static void
+tail_block_owned_with_clear_bit(gen_image_t *image)
+{
+	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
+	    .type = 2, .data_size = 1 };
+	gen_plan_t plan;
+	unsigned char *bitmap;
+
+	gen_plan_init(&plan);
+	plan.verification = true;
+	plan.objects = &object;
+	plan.object_count = 1;
+	gen_build(&plan, image);
+	gen_store(catalog_data(image, 32, false) + 104, 511, 4);
+	gen_rebuild_bitmap(image);
+	move_alternate_beyond_allocation(image);
+	bitmap = image->bytes + gen_load(header(image) +
+	    GEN_BITMAP_FORK + 16, 4) * image->block_size;
+	bitmap[511 / 8] &= (unsigned char)~(0x80u >> (511 % 8));
+	gen_store(header(image) + 48, gen_load(header(image) + 48, 4) + 1, 4);
+	bcopy(header(image), image->bytes + image->length - 1024, 512);
 }
 
 static void
@@ -1441,7 +1551,9 @@ build_links(gen_image_t *image, link_damage_t fault)
 		    .id = 40, .type = 1, .dates = { 42 } },
 		{ .name = inode, .units = COUNT(inode), .id = 41, .parent = 40,
 		    .type = 2, .special = 2, .data = (const unsigned char *)"abc",
-		    .data_size = 3 }
+		    .data_size = 3 },
+		{ .name = name_b, .units = 1, .id = 35, .parent = 33,
+		    .type = 2, .special = 7, .finder = "hlnkhfs+", .dates = { 42 } }
 	};
 	gen_plan_t plan;
 
@@ -1455,13 +1567,47 @@ build_links(gen_image_t *image, link_damage_t fault)
 		bzero(objects[2].finder, sizeof(objects[2].finder));
 		break;
 	case LINK_NONEMPTY_STUB: objects[0].data_size = 1; break;
+	case LINK_HIDDEN_NONEMPTY_STUB:
+		objects[2].parent = 40;
+		objects[2].data_size = 1;
+		break;
+	case LINK_HIDDEN_STUB: objects[2].parent = 40; break;
+	case LINK_THREE_STUBS: objects[4].special = 3; break;
 	default: break;
 	}
 	gen_plan_init(&plan);
 	plan.verification = true;
 	plan.objects = objects;
-	plan.object_count = COUNT(objects);
+	plan.object_count = COUNT(objects) -
+	    (fault == LINK_THREE_STUBS ? 0 : 1);
 	gen_build(&plan, image);
+}
+
+static void
+private_data_valence_low(gen_image_t *image)
+{
+	build_links(image, LINK_SOUND);
+	gen_store(catalog_data(image, 40, false) + 4, 0, 4);
+}
+
+static void
+private_data_folder_count_wrong(gen_image_t *image)
+{
+	build_links(image, LINK_SOUND);
+	gen_store(catalog_data(image, 40, false) + 2, 0x10, 2);
+	gen_store(catalog_data(image, 40, false) + 84, 1, 4);
+}
+
+static void
+hidden_stub_nonempty_fork(gen_image_t *image)
+{
+	build_links(image, LINK_HIDDEN_NONEMPTY_STUB);
+}
+
+static void
+ghost_stub_in_private_data(gen_image_t *image)
+{
+	build_links(image, LINK_HIDDEN_STUB);
 }
 
 static void
@@ -1508,11 +1654,12 @@ store_le(unsigned char *bytes, uint64_t value, size_t width)
  */
 static void
 build_compressed_variant(gen_image_t *image, unsigned type, compression_damage_t fault,
-    bool plain_sibling)
+    compression_sibling_t sibling)
 {
 	static const uint16_t compression_name[] = { 'c', 'o', 'm', '.',
 	    'a', 'p', 'p', 'l', 'e', '.', 'd', 'e', 'c', 'm', 'p', 'f', 's' };
 	unsigned char attribute[16] = { 'f', 'p', 'm', 'c' };
+	unsigned char inline_attribute[20] = { 'f', 'p', 'm', 'c' };
 	unsigned char last_lzfse[] = { 'b', 'v', 'x', '-', 1, 0, 0, 0,
 	    'x', 'b', 'v', 'x', '$' };
 	unsigned char *raw, *resource;
@@ -1523,9 +1670,14 @@ build_compressed_variant(gen_image_t *image, unsigned type, compression_damage_t
 		{ .name = name_b, .units = 1, .id = 33, .type = 2,
 		    .data = (const unsigned char *)"abc", .data_size = 3 }
 	};
-	gen_attr_value_t value = { .id = 32, .type = 0x10,
-	    .name = compression_name, .units = COUNT(compression_name),
-	    .value = attribute, .size = sizeof(attribute) };
+	gen_attr_value_t values[] = {
+		{ .id = 32, .type = 0x10,
+		    .name = compression_name, .units = COUNT(compression_name),
+		    .value = attribute, .size = sizeof(attribute) },
+		{ .id = 33, .type = 0x10,
+		    .name = compression_name, .units = COUNT(compression_name),
+		    .value = inline_attribute, .size = sizeof(inline_attribute) }
+	};
 	gen_plan_t plan;
 	size_t size, cursor, second;
 
@@ -1592,8 +1744,16 @@ build_compressed_variant(gen_image_t *image, unsigned type, compression_damage_t
 	}
 	if (fault == COMPRESSION_BAD_STREAM)
 		resource[second] = 0;
-	if (!plain_sibling)
+	if (sibling != COMPRESSION_PLAIN_SIBLING)
 		objects[1].data_size = 0;
+	if (sibling == COMPRESSION_INLINE_SIBLING) {
+		objects[1].flags = 4;
+		objects[1].owner_flags = 0x20;
+		store_le(inline_attribute + 4, 3, 4);
+		store_le(inline_attribute + 8, 3, 8);
+		inline_attribute[16] = 0xff;
+		bcopy("abc", inline_attribute + 17, 3);
+	}
 	objects[0].resource = resource;
 	objects[0].resource_size = size;
 	gen_plan_init(&plan);
@@ -1601,8 +1761,8 @@ build_compressed_variant(gen_image_t *image, unsigned type, compression_damage_t
 	plan.objects = objects;
 	plan.object_count = COUNT(objects);
 	plan.attributes = true;
-	plan.values = &value;
-	plan.value_count = 1;
+	plan.values = values;
+	plan.value_count = sibling == COMPRESSION_INLINE_SIBLING ? 2 : 1;
 	gen_build(&plan, image);
 	free(resource);
 	free(raw);
@@ -1611,7 +1771,7 @@ build_compressed_variant(gen_image_t *image, unsigned type, compression_damage_t
 static void
 build_compressed(gen_image_t *image, unsigned type, compression_damage_t fault)
 {
-	build_compressed_variant(image, type, fault, true);
+	build_compressed_variant(image, type, fault, COMPRESSION_PLAIN_SIBLING);
 }
 
 static void
@@ -1735,7 +1895,8 @@ test_compressed_only_payload_counts_no_initialized_bytes(void)
 
 	for (size_t i = 0; i < COUNT(types); i++) {
 		scenario = "compressed-only payload contributes zero initialized bytes";
-		build_compressed_variant(&image, types[i], COMPRESSION_SOUND, false);
+		build_compressed_variant(&image, types[i], COMPRESSION_SOUND,
+		    COMPRESSION_EMPTY_SIBLING);
 		CHECK(fixture_open(&fixture, &image, 0, 0, &error) == FSIMG_OK);
 		expect_status(fsimg_verify(fixture.reader, FSIMG_VERIFY_PAYLOAD,
 		    &report, &error), FSIMG_OK, &error);
@@ -1750,6 +1911,26 @@ test_compressed_only_payload_counts_no_initialized_bytes(void)
 }
 
 static const corruption_t corruptions[] = {
+	{ "attribute_owner_id_zero",
+	    attribute_owner_id_zero, FSIMG_ECORRUPT, "HFS Plus attribute names no primary record" },
+	{ "attribute_owner_between_primaries",
+	    attribute_owner_between_primaries, FSIMG_ECORRUPT, "HFS Plus attribute names no primary record" },
+	{ "private_data_valence_low",
+	    private_data_valence_low, FSIMG_ECORRUPT, "HFS Plus folder's valence disagrees with its children" },
+	{ "private_data_folder_count_wrong",
+	    private_data_folder_count_wrong, FSIMG_ECORRUPT, "HFS Plus folder count disagrees with its child folders" },
+	{ "hidden_stub_nonempty_fork",
+	    hidden_stub_nonempty_fork, FSIMG_ECORRUPT, "HFS Plus hard-link stub has a nonempty fork" },
+	{ "ghost_stub_in_private_data",
+	    ghost_stub_in_private_data, FSIMG_ECORRUPT, "HFS Plus private data folder holds a hard-link stub" },
+	{ "map_link_past_total_nodes_extents",
+	    map_link_past_total_nodes_extents, FSIMG_ECORRUPT, "HFS Plus node lies outside its tree" },
+	{ "map_link_past_total_nodes_catalog",
+	    map_link_past_total_nodes_catalog, FSIMG_ECORRUPT, "HFS Plus node lies outside its tree" },
+	{ "map_link_past_total_nodes_attributes",
+	    map_link_past_total_nodes_attributes, FSIMG_ECORRUPT, "HFS Plus node lies outside its tree" },
+	{ "tail_block_owned_with_clear_bit",
+	    tail_block_owned_with_clear_bit, FSIMG_ECORRUPT, "HFS Plus bitmap leaves an owned block clear" },
 	{ "type 4 second chunk outside",
 	    compressed4_outside, FSIMG_ECORRUPT, "outside" },
 	{ "type 4 second chunk overlap",
@@ -1816,7 +1997,7 @@ static const corruption_t corruptions[] = {
 	{ "hard-link stub dangles",
 	    link_dangling, FSIMG_ECORRUPT, "indirect node is missing" },
 	{ "hard-link reference is zero",
-	    link_zero_reference, FSIMG_ECORRUPT, "indirect node is missing" },
+	    link_zero_reference, FSIMG_ECORRUPT, "HFS Plus hard-link stub has a zero reference" },
 	{ "hard-link count is one low",
 	    link_count_low, FSIMG_ECORRUPT, "link count disagrees" },
 	{ "hard-link count is one high",
@@ -1847,17 +2028,17 @@ static const corruption_t corruptions[] = {
 	{ "index key differs by one unit",
 	    index_key_differs, FSIMG_ECORRUPT, "index key differs" },
 	{ "index child has wrong height",
-	    child_wrong_height, FSIMG_ECORRUPT, "node" },
+	    child_wrong_height, FSIMG_ECORRUPT, "HFS Plus node has the wrong kind or height" },
 	{ "index child is header",
-	    child_is_header, FSIMG_ECORRUPT, "node" },
+	    child_is_header, FSIMG_ECORRUPT, "HFS Plus node has the wrong kind or height" },
 	{ "index child is itself",
-	    child_is_self, FSIMG_ECORRUPT, "node" },
-	{ "leaf sibling cycle",
-	    leaf_cycle, FSIMG_ECORRUPT, "sibling" },
+	    child_is_self, FSIMG_ECORRUPT, "HFS Plus node has the wrong kind or height" },
+	{ "leaf_sibling_cycle_fails_back_link",
+	    leaf_sibling_cycle_fails_back_link, FSIMG_ECORRUPT, "HFS Plus sibling's back link does not name its neighbour" },
 	{ "leaf sibling back link is broken",
 	    leaf_backlink, FSIMG_ECORRUPT, "sibling" },
-	{ "index sibling cycle",
-	    index_cycle, FSIMG_ECORRUPT, "sibling" },
+	{ "index_sibling_cycle_fails_back_link",
+	    index_sibling_cycle_fails_back_link, FSIMG_ECORRUPT, "HFS Plus sibling's back link does not name its neighbour" },
 	{ "index sibling back link is broken",
 	    index_backlink, FSIMG_ECORRUPT, "sibling" },
 	{ "leafRecords is off",
@@ -1867,7 +2048,7 @@ static const corruption_t corruptions[] = {
 	{ "lastLeafNode is off",
 	    last_leaf_off, FSIMG_ECORRUPT, "lastLeafNode" },
 	{ "treeDepth is off",
-	    tree_depth_off, FSIMG_ECORRUPT, "node" },
+	    tree_depth_off, FSIMG_ECORRUPT, "HFS Plus node has the wrong kind or height" },
 	{ "freeNodes is off",
 	    free_nodes_off, FSIMG_ECORRUPT, "freeNodes" },
 	{ "used node is unmarked",
@@ -1945,12 +2126,12 @@ static const corruption_t corruptions[] = {
 	    header_file_count, FSIMG_ECORRUPT, "fileCount" },
 	{ "header folderCount disagrees",
 	    header_folder_count, FSIMG_ECORRUPT, "folderCount" },
-	{ "attribute has missing owner",
-	    attribute_missing_owner, FSIMG_ECORRUPT, "attribute" },
+	{ "attribute_owner_above_every_primary",
+	    attribute_owner_above_every_primary, FSIMG_ECORRUPT, "HFS Plus attribute names no primary record" },
 	{ "attribute flag is clear",
-	    attribute_flag_clear, FSIMG_ECORRUPT, "attribute flag" },
+	    attribute_flag_clear, FSIMG_ECORRUPT, "HFS Plus record's attribute flag disagrees with the attributes tree" },
 	{ "attribute flag has no record",
-	    attribute_flag_without_record, FSIMG_ECORRUPT, "attribute flag" },
+	    attribute_flag_without_record, FSIMG_ECORRUPT, "HFS Plus record's attribute flag disagrees with the attributes tree" },
 	{ "attribute has unknown type",
 	    attribute_unknown_type, FSIMG_EUNSUPPORTED, "attribute" },
 	{ "entry name is not decomposed",
@@ -2027,7 +2208,7 @@ test_additional_acceptance(void)
 	gen_free(&image);
 	scenario = "two hard-link names share one indirect node";
 	build_links(&image, LINK_SOUND);
-	check_clean(&image, 2, 2, 6, 0);
+	check_clean_bytes(&image, 2, 2, 6, 3, 0);
 	gen_free(&image);
 	for (size_t i = 0; i < COUNT(block_sizes); i++) {
 		for (unsigned marked = 0; marked < 2; marked++) {
@@ -2205,6 +2386,145 @@ test_resource_and_cancellation_statuses(void)
 	gen_free(&image);
 }
 
+static void
+test_cross_linked_records_read_no_payload(void)
+{
+	gen_image_t image;
+	fixture_t fixture;
+	fsimg_verify_report_t report;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	uint64_t block;
+	char message[128];
+
+	scenario = "cross_linked_records_read_no_payload";
+	shared_block(&image);
+	block = gen_load(catalog_data(&image, 32, false) + 104, 4);
+	snprintf(message, sizeof(message), "HFS Plus allocation block %llu is claimed by more than one owner",
+	    (unsigned long long)block);
+	CHECK(fixture_open(&fixture, &image, 0, 0, &error) == FSIMG_OK);
+	fixture.watched_first = block * image.block_size;
+	fixture.watched_end = fixture.watched_first + image.block_size;
+
+	status = fsimg_verify(fixture.reader, FSIMG_VERIFY_PAYLOAD, &report, &error);
+	expect_status(status, FSIMG_ECORRUPT, &error);
+	expect(strcmp(error.message, message) == 0, message);
+	expect(!report.complete, "cross-linked volume is incomplete");
+	if (report.payload_bytes_read != 0 || fixture.watched_reads != 0 ||
+	    fixture.watched_bytes != 0)
+		fprintf(stderr, "%s: got %s (%s), payload_bytes_read=%llu, watched_reads=%llu, watched_bytes=%llu\n",
+		    scenario, fsimg_status_string(status), error.message,
+		    (unsigned long long)report.payload_bytes_read,
+		    (unsigned long long)fixture.watched_reads,
+		    (unsigned long long)fixture.watched_bytes);
+	expect(report.payload_bytes_read == 0, "cross-linked volume reads no payload bytes");
+	expect(fixture.watched_reads == 0, "shared extent is never read");
+	expect(fixture.watched_bytes == 0, "shared extent supplies no bytes");
+
+	fixture_close(&fixture);
+	gen_free(&image);
+}
+
+static void
+test_stubs_read_their_indirect_node_once(void)
+{
+	gen_image_t image;
+	fixture_t fixture;
+	fsimg_verify_report_t report;
+	fsimg_error_t error = { 0 };
+	fsimg_status_t status;
+	uint64_t size, block;
+
+	scenario = "stubs_read_their_indirect_node_once";
+	build_links(&image, LINK_THREE_STUBS);
+	size = gen_load(catalog_data(&image, 41, false) + 88, 8);
+	block = gen_load(catalog_data(&image, 41, false) + 104, 4);
+	CHECK(size == 3);
+	CHECK(fixture_open(&fixture, &image, 0, 0, &error) == FSIMG_OK);
+	fixture.watched_first = block * image.block_size;
+	fixture.watched_end = fixture.watched_first + size;
+
+	status = fsimg_verify(fixture.reader, FSIMG_VERIFY_PAYLOAD, &report, &error);
+	expect_status(status, FSIMG_OK, &error);
+	expect(report.complete, "shared indirect node's report is complete");
+	expect(report.files == 3, "each visible stub counts as a file");
+	expect(report.logical_bytes == 3 * size, "each stub contributes its logical size");
+	if (report.payload_bytes_read != size || fixture.watched_reads != 1 ||
+	    fixture.watched_bytes != size)
+		fprintf(stderr, "%s: got %s (%s), payload_bytes_read=%llu, watched_reads=%llu, watched_bytes=%llu\n",
+		    scenario, fsimg_status_string(status), error.message,
+		    (unsigned long long)report.payload_bytes_read,
+		    (unsigned long long)fixture.watched_reads,
+		    (unsigned long long)fixture.watched_bytes);
+	expect(report.payload_bytes_read == size, "indirect payload counts once");
+	expect(fixture.watched_reads == 1, "indirect content is read once");
+	expect(fixture.watched_bytes == size, "indirect content supplies its bytes once");
+
+	fixture_close(&fixture);
+	gen_free(&image);
+}
+
+static void
+test_tail_one_of_two_bits_set_block_512(void)
+{
+	gen_image_t image;
+	unsigned char *bitmap;
+
+	scenario = "tail_one_of_two_bits_set_block_512";
+	build_slack_tail(&image, 512, false);
+	bitmap = image.bytes + gen_load(header(&image) +
+	    GEN_BITMAP_FORK + 16, 4) * 512;
+	bitmap[510 / 8] |= 0x80u >> (510 % 8);
+	gen_store(header(&image) + 48, gen_load(header(&image) + 48, 4) - 1, 4);
+	bcopy(header(&image), image.bytes + image.length - 1024, 512);
+	/* Three header blocks, one bitmap block, one extents header, sixteen
+	 * catalog blocks, and one unowned formatter-tail bit use 22 blocks.
+	 */
+	CHECK(gen_load(header(&image) + 48, 4) == 490);
+	for (unsigned payload = 0; payload < 2; payload++) {
+		fixture_t fixture;
+		fsimg_verify_report_t report;
+		fsimg_error_t error = { 0 };
+		fsimg_status_t status;
+
+		CHECK(fixture_open(&fixture, &image, 0, 0, &error) == FSIMG_OK);
+		status = fsimg_verify(fixture.reader, payload ? FSIMG_VERIFY_PAYLOAD : 0,
+		    &report, &error);
+		expect_status(status, FSIMG_OK, &error);
+		expect(report.complete, "partly marked formatter tail is complete");
+		expect(report.free_clusters == 490, "one clear tail bit counts as free");
+		expect(report.allocated_clusters == 22, "one set tail bit counts as allocated");
+		fixture_close(&fixture);
+	}
+	gen_free(&image);
+}
+
+static void
+test_inline_compressed_after_fork_compressed(void)
+{
+	for (unsigned payload = 0; payload < 2; payload++) {
+		gen_image_t image;
+		fixture_t fixture;
+		fsimg_verify_report_t report;
+		fsimg_error_t error = { 0 };
+		fsimg_status_t status;
+
+		scenario = payload ? "inline_compressed_after_fork_compressed (payload)" :
+		    "inline_compressed_after_fork_compressed (structural)";
+		build_compressed_variant(&image, 4, COMPRESSION_SOUND,
+		    COMPRESSION_INLINE_SIBLING);
+		CHECK(fixture_open(&fixture, &image, 0, 0, &error) == FSIMG_OK);
+
+		status = fsimg_verify(fixture.reader, payload ? FSIMG_VERIFY_PAYLOAD : 0,
+		    &report, &error);
+		expect_status(status, FSIMG_OK, &error);
+		expect(report.complete, "fork and inline compressed files complete verification");
+
+		fixture_close(&fixture);
+		gen_free(&image);
+	}
+}
+
 static int
 write_fixture(const char *name, const char *path)
 {
@@ -2233,6 +2553,10 @@ main(int argc, char **argv)
 	if (argc == 4 && strcmp(argv[1], "--write-fixture") == 0)
 		return (write_fixture(argv[2], argv[3]));
 	CHECK(argc == 1);
+	test_cross_linked_records_read_no_payload();
+	test_stubs_read_their_indirect_node_once();
+	test_tail_one_of_two_bits_set_block_512();
+	test_inline_compressed_after_fork_compressed();
 	test_compressed_only_payload_counts_no_initialized_bytes();
 	test_compression_scopes();
 	test_additional_acceptance();

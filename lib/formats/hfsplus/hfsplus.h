@@ -689,18 +689,15 @@ fsimg_status_t hfsplus_header_check(const hfsplus_header_t *, fsimg_error_t *);
 /* The fork resolver (fork.c), the only code that interprets an extent
  * descriptor or an overflow record.
  *
- * hfsplus_fork_index(reader, file_id, fork_type, fork, index, records, error)
- * builds a new extent index of the fork's blocks, inline then overflow, in
- * logical order, NULL for a fork of zero blocks. *records, when not NULL, is
- * the number of overflow records it consumed.
- * Every failure leaves no index and no records.
+ * hfsplus_fork_index(reader, file_id, fork_type, fork, index, error) builds a new
+ * extent index of the fork's blocks, inline then overflow, in logical order, NULL
+ * for a fork of zero blocks. Every failure leaves no index.
  * A fork that needs overflow requires the extents tree to be open. The extents
  * tree's own fork (HFSPLUS_ID_EXTENTS) must sum to totalBlocks inline, so
  * resolving it never reads it.
  */
 fsimg_status_t hfsplus_fork_index(fsimg_reader_t *, uint32_t, uint8_t,
-    const hfsplus_fork_t *, fsimg_extent_index_t **, uint64_t *,
-    fsimg_error_t *);
+    const hfsplus_fork_t *, fsimg_extent_index_t **, fsimg_error_t *);
 /* Verification's resolve of a fork: the same checks and the same overflow walk
  * as hfsplus_fork_index(), with no index built, its extents appended to the
  * claims and the overflow records it consumes added to *records. This is the

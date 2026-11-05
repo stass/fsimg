@@ -15,10 +15,15 @@
  * ends the run, so a report is never complete after a skip.
  *
  * Nothing about a whole tree stays in memory. Each pass holds a node or two and
- * sends what later passes need to scratch: three streams keyed by node ID, two
- * by hard-link reference, the ownership claims and one bitset per tree. A pass
- * reads what the one before it has already checked, so only the structure pass
- * needs its own bound on a looping chain: its visited set.
+ * sends what later passes need to scratch: five streams keyed by node ID, two by
+ * hard-link reference, the ownership claims and one bitset per tree. A pass reads
+ * what the one before it has already checked, so only the structure pass needs its
+ * own bounds on a looping chain: a level's back links and the map chain's visited
+ * set.
+ *
+ * Whatever every record must satisfy is checked by the catalog pass and the merges
+ * after it, which see every record. The common walk reaches only what a listing
+ * shows, so nothing a hidden record must satisfy is left to it.
  */
 
 /* The volume attribute saying node IDs have wrapped and may be reused. */
@@ -56,6 +61,15 @@
 /* An attribute owner's record: its node ID. */
 #define OWNER_BYTES		4u
 
+#define UNREACHED_MESSAGE	"HFS Plus catalog holds records the root does not reach"
+
+/* A folder's counts in scratch, what it declares or what the catalog holds. */
+#define COUNTS_ID		0
+#define COUNTS_CHILDREN		4
+#define COUNTS_FOLDERS		12
+#define COUNTS_CHECKED		20
+#define COUNTS_BYTES		21u
+
 /* "iNode" and the decimal reference, which fits ten digits. */
 #define INODE_PREFIX_UNITS	5u
 #define INODE_DIGITS_MAX	10u
@@ -72,6 +86,14 @@ typedef struct stream_reader {
 	unsigned char	 bytes[RECORD_BYTES_MAX];
 } stream_reader_t;
 
+/* One folder's counts. check_folders says the folder carries a folderCount. */
+typedef struct folder_counts {
+	uint32_t	 id;
+	uint64_t	 children;
+	uint64_t	 folders;
+	bool		 check_folders;
+} folder_counts_t;
+
 /* One verification. The claims and streams are owned here, released by
  * verify_release() on every path. The counters are what later passes compare.
  */
@@ -83,9 +105,16 @@ typedef struct verify {
 	fsimg_stream_t		*objects;	/* one per primary record */
 	fsimg_stream_t		*threads;	/* in key order, so by node ID */
 	fsimg_stream_t		*owners;	/* one per attribute owner, ascending */
+	fsimg_stream_t		*declared;	/* one per folder: its own counts */
+	fsimg_stream_t		*counted;	/* one per parent, ascending */
 	fsimg_stream_t		*links;		/* (reference, stub ID) */
 	fsimg_stream_t		*inodes;	/* (reference, link count) */
 	unsigned char		*payload;	/* a read-through's buffer, or NULL */
+	fsimg_bitset_t		*read_nodes;	/* with stubs: IDs whose content was read */
+	folder_counts_t		 run;		/* the parent being counted; no children
+						 * means none */
+	uint64_t		 stubs;
+	uint32_t		 largest_id;
 	uint64_t		 files;
 	uint64_t		 folders;	/* without the root */
 	uint64_t		 primaries;	/* with the root */
@@ -96,8 +125,8 @@ typedef struct verify {
 	uint64_t		 reached;
 } verify_t;
 
-/* One tree's structure pass. nodes holds the level being checked and index the
- * level above it, read again for the merge of their records and nodes.
+/* One tree's structure pass. nodes and index are the buffers of the level being
+ * checked and of the level above it, read again for the merge of the two.
  */
 typedef struct tree_pass {
 	fsimg_reader_t	*reader;
@@ -110,6 +139,18 @@ typedef struct tree_pass {
 	size_t		 previous_bytes;
 	unsigned char	 previous[INDEX_MAX_KEY_BYTES];
 } tree_pass_t;
+
+/* One level's iteration. The level above it, with the position of the next index
+ * record to pair, is there only below the top. first_child is the current node's
+ * first record's child, set only above the leaves.
+ */
+typedef struct level_walk {
+	hfsplus_level_t	 nodes;
+	hfsplus_level_t	 index;
+	uint16_t	 index_position;
+	bool		 top;
+	uint32_t	 first_child;
+} level_walk_t;
 
 /* The attribute fork whose continuation records the pass is expecting. */
 typedef struct attribute_fork {
@@ -135,10 +176,10 @@ static fsimg_status_t map_chain_mark(tree_pass_t *, fsimg_error_t *);
 static fsimg_status_t map_bits_compare(tree_pass_t *, const unsigned char *,
     size_t, uint64_t *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t map_compare(tree_pass_t *, fsimg_error_t *);
-static fsimg_status_t index_pair(hfsplus_level_t *, uint16_t *, uint32_t,
-    const hfsplus_record_t *, fsimg_error_t *);
-static fsimg_status_t node_records_check(tree_pass_t *, const hfsplus_level_t *,
-    hfsplus_level_t *, uint16_t *, uint32_t *, fsimg_error_t *);
+static fsimg_status_t index_pair(level_walk_t *, const hfsplus_record_t *,
+    fsimg_error_t *);
+static fsimg_status_t node_records_check(tree_pass_t *, level_walk_t *,
+    fsimg_error_t *);
 static fsimg_status_t level_check(tree_pass_t *, unsigned, uint32_t, uint32_t,
     uint32_t *, fsimg_error_t *);
 static fsimg_status_t tree_levels_check(tree_pass_t *, fsimg_error_t *);
@@ -148,6 +189,12 @@ static fsimg_status_t name_record_append(fsimg_stream_t *, uint32_t, uint32_t,
     uint16_t, const unsigned char *, uint16_t, bool, fsimg_error_t *);
 static fsimg_status_t link_append(fsimg_stream_t *, uint32_t, uint32_t,
     fsimg_error_t *);
+static fsimg_status_t counts_append(fsimg_stream_t *, const folder_counts_t *,
+    fsimg_error_t *);
+static void counts_load(const stream_reader_t *, folder_counts_t *);
+static fsimg_status_t folder_declare(verify_t *, const hfsplus_folder_t *,
+    fsimg_error_t *);
+static fsimg_status_t child_count(verify_t *, uint32_t, bool, fsimg_error_t *);
 static bool inode_reference(const hfsplus_ckey_t *, uint32_t *);
 static fsimg_status_t thread_take(verify_t *, const hfsplus_ckey_t *,
     const hfsplus_record_t *, fsimg_error_t *);
@@ -173,9 +220,11 @@ static fsimg_status_t reader_advance(verify_t *, stream_reader_t *,
 static fsimg_status_t object_merge(verify_t *, const stream_reader_t *,
     stream_reader_t *, stream_reader_t *, fsimg_error_t *);
 static fsimg_status_t objects_merge(verify_t *, fsimg_error_t *);
+static fsimg_status_t counts_merge(verify_t *, fsimg_error_t *);
 static fsimg_status_t links_merge(verify_t *, fsimg_error_t *);
 static fsimg_status_t merges(verify_t *, fsimg_error_t *);
 static fsimg_status_t content_check(fsimg_reader_t *, fsimg_error_t *);
+static fsimg_status_t content_read(verify_t *, fsimg_error_t *);
 static fsimg_status_t reachability(verify_t *, fsimg_error_t *);
 static fsimg_status_t bitmap_byte(bitmap_scan_t *, uint64_t, unsigned char *,
     fsimg_error_t *);
@@ -192,7 +241,7 @@ static void verify_release(verify_t *);
  * mapping refused, read at open, and a directory hard link's target, since the
  * driver walks none. The keyed searches here also give the catalog pass the
  * private data folder's ID. A file under the private directory name is no folder;
- * a folder whose valence understates its children fails reachability later.
+ * a folder whose valence understates its children fails the counts merge later.
  */
 static fsimg_status_t
 preflight(verify_t *verify, fsimg_error_t *error)
@@ -230,8 +279,10 @@ preflight(verify_t *verify, fsimg_error_t *error)
 	return (hfsplus_private_data_lookup(verify->reader, error));
 }
 
-/* Mark a node visited. Every node of the tree is marked once, so this is also
- * what ends a looping chain: its first repeat fails here.
+/* Mark a node as used, for the comparison with the node map. A repeat can only be
+ * in the map chain, which it ends: on a level, the back-link check of
+ * hfsplus_level_next() ends every sibling cycle first, and a node's kind and height
+ * keep it on one level.
  */
 static fsimg_status_t
 visit_node(tree_pass_t *pass, uint32_t number, fsimg_error_t *error)
@@ -255,18 +306,20 @@ static fsimg_status_t
 map_chain_mark(tree_pass_t *pass, fsimg_error_t *error)
 {
 	hfsplus_node_t node;
+	uint32_t number;
 	fsimg_status_t status;
 
-	status = visit_node(pass, 0, error);
+	/* A read bounds its number by totalNodes, so it comes before the mark. */
+	status = hfsplus_node_read(pass->tree, 0, pass->nodes,
+	    HFSPLUS_NODE_HEADER, 0, &node, error);
 	if (status == FSIMG_OK)
-		status = hfsplus_node_read(pass->tree, 0, pass->nodes,
-		    HFSPLUS_NODE_HEADER, 0, &node, error);
+		status = visit_node(pass, 0, error);
 	while (status == FSIMG_OK && node.forward_link != 0) {
-		status = visit_node(pass, node.forward_link, error);
-		if (status != FSIMG_OK)
-			break;
-		status = hfsplus_node_read(pass->tree, node.forward_link,
-		    pass->nodes, HFSPLUS_NODE_MAP, 0, &node, error);
+		number = node.forward_link;
+		status = hfsplus_node_read(pass->tree, number, pass->nodes,
+		    HFSPLUS_NODE_MAP, 0, &node, error);
+		if (status == FSIMG_OK)
+			status = visit_node(pass, number, error);
 		if (status != FSIMG_OK)
 			break;
 		if (node.backward_link != 0 || node.records != 1)
@@ -365,9 +418,11 @@ map_compare(tree_pass_t *pass, fsimg_error_t *error)
  * first key: the separator and child checks, as a merge of two sequential streams.
  */
 static fsimg_status_t
-index_pair(hfsplus_level_t *index, uint16_t *position, uint32_t number,
-    const hfsplus_record_t *first, fsimg_error_t *error)
+index_pair(level_walk_t *walk, const hfsplus_record_t *first,
+    fsimg_error_t *error)
 {
+	hfsplus_level_t *index = &walk->index;
+	uint16_t *position = &walk->index_position;
 	hfsplus_record_t record;
 	uint32_t child;
 	fsimg_status_t status;
@@ -388,7 +443,7 @@ index_pair(hfsplus_level_t *index, uint16_t *position, uint32_t number,
 	if (!hfsplus_index_child(&record, &child))
 		return (hfsplus_corrupt(error,
 		    "HFS Plus index record is not a child number"));
-	if (child != number)
+	if (child != walk->nodes.number)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus index record does not name the next node of its level"));
 	if (record.key_bytes != first->key_bytes ||
@@ -400,13 +455,12 @@ index_pair(hfsplus_level_t *index, uint16_t *position, uint32_t number,
 
 /* Every record of the level's current node: keys strictly ascending across the
  * level, an index node's records naming children, the first record paired with
- * the level above when there is one. *first_child takes a first record's child.
+ * the level above unless this is the top.
  */
 static fsimg_status_t
-node_records_check(tree_pass_t *pass, const hfsplus_level_t *nodes,
-    hfsplus_level_t *index, uint16_t *index_position, uint32_t *first_child,
-    fsimg_error_t *error)
+node_records_check(tree_pass_t *pass, level_walk_t *walk, fsimg_error_t *error)
 {
+	const hfsplus_level_t *nodes = &walk->nodes;
 	hfsplus_record_t record, previous;
 	uint32_t child;
 	int order;
@@ -436,11 +490,10 @@ node_records_check(tree_pass_t *pass, const hfsplus_level_t *nodes,
 				return (hfsplus_corrupt(error,
 				    "HFS Plus index record is not a child number"));
 			if (i == 0)
-				*first_child = child;
+				walk->first_child = child;
 		}
-		if (i == 0 && index->valid) {
-			status = index_pair(index, index_position, nodes->number,
-			    &record, error);
+		if (i == 0 && !walk->top) {
+			status = index_pair(walk, &record, error);
 			if (status != FSIMG_OK)
 				return (status);
 		}
@@ -448,55 +501,50 @@ node_records_check(tree_pass_t *pass, const hfsplus_level_t *nodes,
 	return (FSIMG_OK);
 }
 
-/* Check one level, leftmost node first, and give the leftmost child of its first
- * node for the level below. A level other than the root's merges with the index
- * records above it, which must end when it does; the root's level is the root
- * alone.
+/* Check one level, leftmost node first. Above the leaves, *next_first takes the
+ * leftmost child of its first node, where the level below starts; at height 1 there
+ * is no level below and it is left alone. A level other than the root's merges with
+ * the index records above it, which must end when it does; the root's level is the
+ * root alone.
  */
 static fsimg_status_t
 level_check(tree_pass_t *pass, unsigned height, uint32_t first,
     uint32_t upper_first, uint32_t *next_first, fsimg_error_t *error)
 {
-	const hfsplus_btree_t *header = &pass->tree->header;
-	bool top = height == header->tree_depth;
-	hfsplus_level_t nodes;
-	hfsplus_level_t index = { .valid = false };
-	uint16_t index_position = 0;
-	uint32_t first_child = 0;
+	level_walk_t walk = { .top = height == pass->tree->header.tree_depth };
 	fsimg_status_t status;
 
 	pass->previous_bytes = 0;
-	status = hfsplus_level_open(&nodes, pass->tree, pass->nodes, first, height,
-	    error);
-	if (status == FSIMG_OK && !top)
-		status = hfsplus_level_open(&index, pass->tree, pass->index,
+	status = hfsplus_level_open(&walk.nodes, pass->tree, pass->nodes, first,
+	    height, error);
+	if (status == FSIMG_OK && !walk.top)
+		status = hfsplus_level_open(&walk.index, pass->tree, pass->index,
 		    upper_first, height + 1, error);
-	while (status == FSIMG_OK && nodes.valid) {
-		status = visit_node(pass, nodes.number, error);
+	while (status == FSIMG_OK && walk.nodes.valid) {
+		status = visit_node(pass, walk.nodes.number, error);
 		if (status != FSIMG_OK)
 			break;
-		if (top && nodes.node.forward_link != 0)
+		if (walk.top && walk.nodes.node.forward_link != 0)
 			return (hfsplus_corrupt(error,
 			    "HFS Plus tree's root has a sibling"));
-		status = node_records_check(pass, &nodes, &index, &index_position,
-		    &first_child, error);
+		status = node_records_check(pass, &walk, error);
 		if (status != FSIMG_OK)
 			break;
-		if (nodes.number == first)
-			*next_first = first_child;
+		if (height > 1 && walk.nodes.number == first)
+			*next_first = walk.first_child;
 		if (height == 1) {
-			pass->leaf_records += nodes.node.records;
-			pass->last_leaf = nodes.number;
+			pass->leaf_records += walk.nodes.node.records;
+			pass->last_leaf = walk.nodes.number;
 		}
 		status = fsimg_session_charge(&pass->reader->session, 0, 0, 1,
 		    error);
 		if (status == FSIMG_OK)
-			status = hfsplus_level_next(&nodes, error);
+			status = hfsplus_level_next(&walk.nodes, error);
 	}
 	if (status != FSIMG_OK)
 		return (status);
-	if (!top && (index_position != index.node.records ||
-	    index.node.forward_link != 0))
+	if (!walk.top && (walk.index_position != walk.index.node.records ||
+	    walk.index.node.forward_link != 0))
 		return (hfsplus_corrupt(error,
 		    "HFS Plus index record names no node of the level below"));
 	return (FSIMG_OK);
@@ -597,6 +645,69 @@ link_append(fsimg_stream_t *stream, uint32_t reference, uint32_t value,
 	return (fsimg_stream_append(stream, record, sizeof(record), NULL, error));
 }
 
+static fsimg_status_t
+counts_append(fsimg_stream_t *stream, const folder_counts_t *counts,
+    fsimg_error_t *error)
+{
+	unsigned char record[COUNTS_BYTES];
+
+	fsimg_store_le32(record + COUNTS_ID, counts->id);
+	fsimg_store_le64(record + COUNTS_CHILDREN, counts->children);
+	fsimg_store_le64(record + COUNTS_FOLDERS, counts->folders);
+	record[COUNTS_CHECKED] = counts->check_folders ? 1 : 0;
+	return (fsimg_stream_append(stream, record, sizeof(record), NULL, error));
+}
+
+static void
+counts_load(const stream_reader_t *reader, folder_counts_t *counts)
+{
+	counts->id = fsimg_load_le32(reader->bytes + COUNTS_ID);
+	counts->children = fsimg_load_le64(reader->bytes + COUNTS_CHILDREN);
+	counts->folders = fsimg_load_le64(reader->bytes + COUNTS_FOLDERS);
+	counts->check_folders = reader->bytes[COUNTS_CHECKED] != 0;
+}
+
+/* What a folder's record says it holds, for the counts merge. */
+static fsimg_status_t
+folder_declare(verify_t *verify, const hfsplus_folder_t *folder,
+    fsimg_error_t *error)
+{
+	folder_counts_t counts = {
+		.id = folder->id,
+		.children = folder->valence,
+		.folders = folder->folder_count,
+		.check_folders = (folder->flags & HFSPLUS_FLAG_FOLDER_COUNT) != 0
+	};
+
+	return (counts_append(verify->declared, &counts, error));
+}
+
+/* Count one primary under its parent. Step 1 checked the keys, which order by
+ * parent first, so a parent's primaries are adjacent and the counts leave in
+ * ascending parent order.
+ */
+static fsimg_status_t
+child_count(verify_t *verify, uint32_t parent, bool folder, fsimg_error_t *error)
+{
+	folder_counts_t *run = &verify->run;
+	fsimg_status_t status;
+
+	if (run->children != 0 && run->id != parent) {
+		status = counts_append(verify->counted, run, error);
+		if (status != FSIMG_OK)
+			return (status);
+		run->children = 0;
+	}
+	if (run->children == 0) {
+		run->id = parent;
+		run->folders = 0;
+	}
+	run->children++;
+	if (folder)
+		run->folders++;
+	return (FSIMG_OK);
+}
+
 /* The reference of a name spelled exactly as a stub's reference would find it:
  * "iNode" and a decimal value without a leading zero. Any other name in the private
  * data folder, a temp file's among them, is no indirect node.
@@ -654,20 +765,28 @@ root_take(verify_t *verify, const hfsplus_ckey_t *key,
     const hfsplus_record_t *record, fsimg_error_t *error)
 {
 	hfsplus_folder_t folder;
+	fsimg_status_t status;
 
 	if (!hfsplus_folder_decode(record->data, record->data_bytes, &folder) ||
 	    folder.id != HFSPLUS_ID_ROOT)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus root record is not folder 2"));
 	verify->primaries++;
+	status = folder_declare(verify, &folder, error);
+	if (status != FSIMG_OK)
+		return (status);
 	return (name_record_append(verify->objects, folder.id, key->parent,
 	    HFSPLUS_RECORD_FOLDER_THREAD, key->name, key->units,
 	    (folder.flags & HFSPLUS_FLAG_ATTRIBUTES) != 0, error));
 }
 
 /* A folder or file record. Every record of the catalog comes through here once,
- * so every file's both forks are resolved and claimed once, reachable or not.
- * Whatever holds no thread or parent is found by the merge and reachability.
+ * hidden or not: it is validated, its parent counts it, a folder declares its
+ * counts, and a file's both forks are resolved and claimed once. Whatever holds no
+ * thread or parent is found by the merges and reachability.
+ *
+ * The private data folder holds indirect nodes and open-deleted files. A stub among
+ * them would add to its node's link count with no name a walk could reach.
  */
 static fsimg_status_t
 primary_take(verify_t *verify, const hfsplus_ckey_t *key,
@@ -703,9 +822,11 @@ primary_take(verify_t *verify, const hfsplus_ckey_t *key,
 		if (folder)
 			return (hfsplus_corrupt(error,
 			    "HFS Plus private data folder holds a folder"));
+		if (primary.link == HFSPLUS_LINK_FILE)
+			return (hfsplus_corrupt(error,
+			    "HFS Plus private data folder holds a hard-link stub"));
 		verify->private_records++;
-		if (primary.link == HFSPLUS_LINK_NONE &&
-		    inode_reference(key, &reference)) {
+		if (inode_reference(key, &reference)) {
 			status = link_append(verify->inodes, reference,
 			    primary.file.bsd.special, error);
 			if (status != FSIMG_OK)
@@ -715,9 +836,15 @@ primary_take(verify_t *verify, const hfsplus_ckey_t *key,
 	if (hfsplus_owned_find(hfsplus, key, &owned))
 		verify->owned_records++;
 	verify->primaries++;
-	if (folder)
+	status = child_count(verify, key->parent, folder, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (folder) {
 		verify->folders++;
-	else {
+		status = folder_declare(verify, &primary.folder, error);
+		if (status != FSIMG_OK)
+			return (status);
+	} else {
 		verify->files++;
 		status = hfsplus_fork_claim(reader, verify->claims, id,
 		    HFSPLUS_FORK_DATA, &primary.file.data_fork,
@@ -726,9 +853,11 @@ primary_take(verify_t *verify, const hfsplus_ckey_t *key,
 			status = hfsplus_fork_claim(reader, verify->claims, id,
 			    HFSPLUS_FORK_RESOURCE, &primary.file.resource_fork,
 			    &verify->overflow_records, error);
-		if (status == FSIMG_OK && primary.link == HFSPLUS_LINK_FILE)
+		if (status == FSIMG_OK && primary.link == HFSPLUS_LINK_FILE) {
+			verify->stubs++;
 			status = link_append(verify->links,
 			    primary.file.bsd.special, id, error);
+		}
 		if (status != FSIMG_OK)
 			return (status);
 	}
@@ -767,6 +896,8 @@ catalog_pass(verify_t *verify, fsimg_error_t *error)
 		if (status == FSIMG_OK)
 			status = hfsplus_cursor_next(&cursor, error);
 	}
+	if (status == FSIMG_OK && verify->run.children != 0)
+		status = counts_append(verify->counted, &verify->run, error);
 	return (status);
 }
 
@@ -834,7 +965,9 @@ attribute_take(verify_t *verify, const hfsplus_akey_t *key,
 	}
 }
 
-/* Step 3: the attributes tree's leaves, in node-ID order, yield each owner once. */
+/* Step 3: the attributes tree's leaves, in node-ID order, yield each owner once.
+ * Node ID 0 is an owner like any other here and fails the merge.
+ */
 static fsimg_status_t
 attributes_pass(verify_t *verify, fsimg_error_t *error)
 {
@@ -846,6 +979,7 @@ attributes_pass(verify_t *verify, fsimg_error_t *error)
 	hfsplus_akey_t key;
 	hfsplus_attr_t attr;
 	uint32_t previous = 0;
+	bool have_previous = false;
 	fsimg_status_t status;
 
 	if (!tree->present || tree->header.tree_depth == 0)
@@ -863,11 +997,13 @@ attributes_pass(verify_t *verify, fsimg_error_t *error)
 			return (hfsplus_corrupt(error,
 			    "HFS Plus attribute record is malformed"));
 		status = attribute_take(verify, &key, &attr, &fork, error);
-		if (status == FSIMG_OK && key.file_id != previous) {
+		if (status == FSIMG_OK &&
+		    (!have_previous || key.file_id != previous)) {
 			fsimg_store_le32(owner, key.file_id);
 			status = fsimg_stream_append(verify->owners, owner,
 			    sizeof(owner), NULL, error);
 			previous = key.file_id;
+			have_previous = true;
 		}
 		if (status == FSIMG_OK)
 			status = hfsplus_cursor_next(&cursor, error);
@@ -940,7 +1076,7 @@ id_compare(const void *a, size_t alen, const void *b, size_t blen,
 {
 	uint32_t ida, idb;
 
-	if (alen < RECORD_NAME || blen < RECORD_NAME)
+	if (alen < RECORD_PARENT || blen < RECORD_PARENT)
 		return ((alen > blen) - (alen < blen));
 	ida = fsimg_load_le32((const unsigned char *)a + RECORD_ID);
 	idb = fsimg_load_le32((const unsigned char *)b + RECORD_ID);
@@ -1040,7 +1176,6 @@ static fsimg_status_t
 objects_merge(verify_t *verify, fsimg_error_t *error)
 {
 	stream_reader_t object, thread, owner;
-	uint32_t largest = 0;
 	fsimg_status_t status;
 
 	status = stream_sorted(&verify->objects, id_compare, error);
@@ -1061,7 +1196,7 @@ objects_merge(verify_t *verify, fsimg_error_t *error)
 		status = object_merge(verify, &object, &thread, &owner, error);
 		if (status != FSIMG_OK)
 			return (status);
-		largest = fsimg_load_le32(object.bytes + RECORD_ID);
+		verify->largest_id = fsimg_load_le32(object.bytes + RECORD_ID);
 		status = reader_advance(verify, &object, error);
 	}
 	if (status != FSIMG_OK)
@@ -1072,13 +1207,65 @@ objects_merge(verify_t *verify, fsimg_error_t *error)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus attribute names no primary record"));
 	if ((verify->hfsplus->header.attributes & VOLUME_IDS_REUSED) == 0 &&
-	    verify->hfsplus->header.next_catalog_id <= largest)
+	    verify->hfsplus->header.next_catalog_id <= verify->largest_id)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus nextCatalogID does not exceed the largest node ID"));
 	return (FSIMG_OK);
 }
 
-/* Step 5's second merge: every stub names an indirect node and every indirect
+/* Step 5's second merge: every folder's valence, and folderCount when it carries
+ * one, against the primaries the catalog holds under it. The walk has no part in
+ * this, so a folder it never enters is held to the same counts. Primaries under a
+ * parent that is no folder cannot be reached from the root.
+ */
+static fsimg_status_t
+counts_merge(verify_t *verify, fsimg_error_t *error)
+{
+	stream_reader_t declared, counted;
+	folder_counts_t want, run;
+	fsimg_status_t status;
+
+	status = stream_sorted(&verify->declared, id_compare, error);
+	if (status == FSIMG_OK)
+		status = fsimg_stream_seal(verify->counted, error);
+	if (status == FSIMG_OK)
+		status = reader_open(verify, &declared, verify->declared,
+		    COUNTS_BYTES, error);
+	if (status == FSIMG_OK)
+		status = reader_open(verify, &counted, verify->counted,
+		    COUNTS_BYTES, error);
+	while (status == FSIMG_OK && declared.valid) {
+		uint64_t children = 0, folders = 0;
+
+		counts_load(&declared, &want);
+		if (counted.valid) {
+			counts_load(&counted, &run);
+			if (run.id < want.id)
+				return (hfsplus_corrupt(error, UNREACHED_MESSAGE));
+			if (run.id == want.id) {
+				children = run.children;
+				folders = run.folders;
+				status = reader_advance(verify, &counted, error);
+				if (status != FSIMG_OK)
+					return (status);
+			}
+		}
+		if (children != want.children)
+			return (hfsplus_corrupt(error,
+			    "HFS Plus folder's valence disagrees with its children"));
+		if (want.check_folders && folders != want.folders)
+			return (hfsplus_corrupt(error,
+			    "HFS Plus folder count disagrees with its child folders"));
+		status = reader_advance(verify, &declared, error);
+	}
+	if (status != FSIMG_OK)
+		return (status);
+	if (counted.valid)
+		return (hfsplus_corrupt(error, UNREACHED_MESSAGE));
+	return (FSIMG_OK);
+}
+
+/* Step 5's third merge: every stub names an indirect node and every indirect
  * node's link count equals its stubs. An indirect node's name fixes its reference,
  * so no two share one.
  */
@@ -1134,6 +1321,8 @@ merges(verify_t *verify, fsimg_error_t *error)
 
 	status = objects_merge(verify, error);
 	if (status == FSIMG_OK)
+		status = counts_merge(verify, error);
+	if (status == FSIMG_OK)
 		status = links_merge(verify, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -1170,9 +1359,37 @@ content_check(fsimg_reader_t *reader, fsimg_error_t *error)
 	return (status);
 }
 
-/* Step 6: the common walk's preparation checks each reachable folder. What it
- * reaches, the root and the records it never enters must then be all the
- * primaries, or some of them hang off a disconnected cycle or a missing parent.
+/* The content of the current entry, once for each node. Only a stub repeats an ID,
+ * the objects merge having given every record its own. An indirect node's record
+ * decides everything read here, so another stub's read finds nothing new, and a
+ * volume's stubs do not multiply one large fork's reads. Each stub's entry is still
+ * accounted, as extraction delivers it.
+ */
+static fsimg_status_t
+content_read(verify_t *verify, fsimg_error_t *error)
+{
+	fsimg_reader_t *reader = verify->reader;
+	bool read = false;
+	fsimg_status_t status;
+
+	if (verify->read_nodes != NULL) {
+		status = fsimg_bitset_test_and_set(verify->read_nodes,
+		    verify->hfsplus->current.id, &read, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	if (read)
+		return (FSIMG_OK);
+	return (verify->payload != NULL ?
+	    fsimg_verify_payload(reader, verify->payload, PAYLOAD_BUFFER_BYTES,
+	    verify->report, error) :
+	    content_check(reader, error));
+}
+
+/* Step 7: the common walk from the root reads what extraction would. What it
+ * reaches, the root and the records it never enters must be all the primaries, or
+ * some of them hang off a disconnected cycle. The claims have been checked by now,
+ * so what this reads is one owner's blocks at a time.
  */
 static fsimg_status_t
 reachability(verify_t *verify, fsimg_error_t *error)
@@ -1180,6 +1397,12 @@ reachability(verify_t *verify, fsimg_error_t *error)
 	fsimg_reader_t *reader = verify->reader;
 	fsimg_status_t status;
 
+	if (verify->stubs != 0) {
+		status = fsimg_bitset_new(&reader->session,
+		    (uint64_t)verify->largest_id + 1, &verify->read_nodes, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 	verify->report->directories = 1;
 	for (;;) {
 		status = fsimg_walk_next(reader, error);
@@ -1193,17 +1416,13 @@ reachability(verify_t *verify, fsimg_error_t *error)
 			return (status);
 		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
 			continue;
-		status = verify->payload != NULL ?
-		    fsimg_verify_payload(reader, verify->payload,
-		    PAYLOAD_BUFFER_BYTES, verify->report, error) :
-		    content_check(reader, error);
+		status = content_read(verify, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
 	if (1 + verify->reached + verify->owned_records +
 	    verify->private_records != verify->primaries)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus catalog holds records the root does not reach"));
+		return (hfsplus_corrupt(error, UNREACHED_MESSAGE));
 	return (FSIMG_OK);
 }
 
@@ -1287,14 +1506,16 @@ bitmap_gap(bitmap_scan_t *scan, uint64_t first, uint64_t end, uint64_t tail_firs
 	return (FSIMG_OK);
 }
 
-/* Step 7: the sealed claims, in block order, against the bitmap's first N bits;
+/* Step 6: the sealed claims, in block order, against the bitmap's first N bits;
  * the gaps between them must be clear, and so must every bit past N. The utility
- * refuses overlapping claims as it returns them, whichever objects made them.
+ * refuses overlapping claims as it returns them, whichever objects made them, so a
+ * cross-link ends the run here, before the walk reads any file's content.
  *
  * A formatter marks the last blocks below N for the alternate header wherever it
  * lies. When it lies past allocation, in the bytes from N * B to V, no reserved
- * tail was claimed and those blocks are a content block like any other, so
- * they may be set with no owner, and then count as allocated.
+ * tail was claimed for those blocks. A fork may own one, and then its bit must be
+ * set as any claim's must. With no owner, a clear bit is accepted, and a set one
+ * counts as allocated.
  */
 static fsimg_status_t
 bitmap_compare(verify_t *verify, fsimg_error_t *error)
@@ -1424,8 +1645,11 @@ verify_release(verify_t *verify)
 	fsimg_stream_free(verify->objects);
 	fsimg_stream_free(verify->threads);
 	fsimg_stream_free(verify->owners);
+	fsimg_stream_free(verify->declared);
+	fsimg_stream_free(verify->counted);
 	fsimg_stream_free(verify->links);
 	fsimg_stream_free(verify->inodes);
+	fsimg_bitset_free(verify->read_nodes);
 	fsimg_dealloc(verify->payload);
 }
 
@@ -1465,6 +1689,12 @@ hfsplus_verify(fsimg_reader_t *reader, unsigned flags,
 		status = fsimg_stream_new(session, OWNER_BYTES, &verify.owners,
 		    error);
 	if (status == FSIMG_OK)
+		status = fsimg_stream_new(session, COUNTS_BYTES, &verify.declared,
+		    error);
+	if (status == FSIMG_OK)
+		status = fsimg_stream_new(session, COUNTS_BYTES, &verify.counted,
+		    error);
+	if (status == FSIMG_OK)
 		status = fsimg_stream_new(session, LINK_BYTES, &verify.links, error);
 	if (status == FSIMG_OK)
 		status = fsimg_stream_new(session, LINK_BYTES, &verify.inodes, error);
@@ -1484,9 +1714,9 @@ hfsplus_verify(fsimg_reader_t *reader, unsigned flags,
 	if (status == FSIMG_OK)
 		status = merges(&verify, error);
 	if (status == FSIMG_OK)
-		status = reachability(&verify, error);
-	if (status == FSIMG_OK)
 		status = bitmap_compare(&verify, error);
+	if (status == FSIMG_OK)
+		status = reachability(&verify, error);
 	if (status == FSIMG_OK)
 		status = alternate_compare(&verify, error);
 	if (status == FSIMG_OK)

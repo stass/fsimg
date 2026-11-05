@@ -374,7 +374,7 @@ fork_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 	fsimg_status_t status;
 
 	status = hfsplus_fork_index(reader, file->id, HFSPLUS_FORK_RESOURCE,
-	    &file->resource_fork, &hfsplus->file, NULL, error);
+	    &file->resource_fork, &hfsplus->file, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (hfsplus->file == NULL || file->resource_fork.logical_size < sizeof(raw))
@@ -434,7 +434,7 @@ word_table_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 	fsimg_status_t status;
 
 	status = hfsplus_fork_index(reader, file->id, HFSPLUS_FORK_RESOURCE,
-	    &file->resource_fork, &hfsplus->file, NULL, error);
+	    &file->resource_fork, &hfsplus->file, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (hfsplus->file == NULL || file->resource_fork.logical_size < sizeof(raw))

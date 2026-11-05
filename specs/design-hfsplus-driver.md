@@ -498,10 +498,14 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    stream; resolves both forks of every file record through the fork
    resolver, which claims their runs and counts the overflow records they
    consume; counts files and folders, and separately the records whose
-   parent is the private data folder, which must all be files; and appends
-   `(reference, stub ID)` for each file stub to a link stream and
-   `(reference, link count)` for each indirect node in the private data
-   folder to an inode stream.
+   parent is the private data folder, which must all be files and none a
+   stub; and appends `(reference, stub ID)` for each file stub to a link
+   stream and `(reference, link count)` for each indirect node in the
+   private data folder to an inode stream. Every record passes the reader's
+   record validation, a stub's nonzero reference and empty forks included,
+   so a record no walk reaches is held to the same rules. Each folder's
+   `valence` and `folderCount` go to a declared-counts stream, and the
+   primaries under each parent, adjacent in key order, to a counted stream.
    Thread records appear in leaf order sorted by node ID, the order of
    their keys, and are kept as a second stream in that order.
 3. **The attributes pass.** The attributes tree's leaf level yields records
@@ -521,25 +525,31 @@ then runs these passes in order, each bounded. The first contradiction ends it w
    attribute stream holds its node ID, so a record with an attribute and a
    clear flag is `FSIMG_ECORRUPT` rather than silently unmarked, and
    `nextCatalogID` exceeds the largest ID unless bit 12 is set.
+   Sort the declared counts by node ID and merge them with the counted
+   stream: every folder's `valence`, and with flag `0x0010` its `folderCount`,
+   equals the primaries the catalog holds under it, whether a walk enters it
+   or not, and a primary under a parent that is no folder is `FSIMG_ECORRUPT`.
    Sort the link and inode streams by reference and merge them: every stub's
    reference names an indirect node, and every indirect node's link count
    equals its stubs. The overflow records consumed, plus the bad-block
    records, equal the extents tree's `leafRecords`, so no overflow record is
    orphaned. The counted files and folders equal the header's counts.
-6. **Reachability.** The common walk runs once, its preparation checking
-   each reachable folder's thread, children, `valence` and name order. The
-   primaries it reaches, plus the format-owned root children and the
-   private data folder's records that step 2 counted, must equal all the
-   primaries step 2 counted, so a disconnected folder cycle, whose members
-   all have parents, is `FSIMG_ECORRUPT`.
-7. **Bitmap.** Seal the ownership claims, an instance of the
+6. **Bitmap.** Seal the ownership claims, an instance of the
    [exclusive run utility](design-verification-helpers.md#exclusive-ownership-run-utility)
    over `[0, N)`, and compare them with the bitmap's first `N` bits in one
    sequential pass in windows: a claimed clear bit and an allocated
    unclaimed bit are `FSIMG_ECORRUPT`, except the last `ceil(1024 / B)` blocks
    of a volume with `t = 0`, which the formatter may have marked with no
    owner; the padding bits must be zero; the clear bits must equal
-   `freeBlocks`.
+   `freeBlocks`. This precedes the walk because the walk reads content, and
+   a volume whose records name one extent many times is refused here before
+   any of those reads.
+7. **Reachability.** The common walk runs once, its preparation checking
+   each reachable folder's thread and name order. The primaries it reaches,
+   plus the format-owned root children and the private data folder's records
+   that step 2 counted, must equal all the primaries step 2 counted, so a
+   disconnected folder cycle, whose members all have parents, is
+   `FSIMG_ECORRUPT`.
 8. **Alternate header.** Compare the fields the format design names: the
    signature, version, `blockSize`, `totalBlocks` and the five fork-data
    records. An alternate without a header signature, such as the zeroed
@@ -555,22 +565,29 @@ utility fits without an exception. Every fork's claims come from one
 funnel, the fork resolver, while the catalog and attributes passes reach
 every record exactly once; only the reserved head and tail and the
 bad-block records, which have no fork data, are claimed directly in step
-4. A cross-linked fork fails in step 7 whichever objects own it.
+4. A cross-linked fork fails in step 6 whichever objects own it.
 
-Step 6 of a structural run reads what extraction would refuse without
+Step 7 of a structural run reads what extraction would refuse without
 reading a file's data: a symbolic link's target, and for a compressed file
 its attribute and fork headers, an inline payload's decode and every entry
 of its chunk table, against its neighbours and the fork, with no chunk in a
 fork decoded. A plain file's forks were resolved in step 2.
 
 Payload read-through, when requested, reads each entry's content through
-common delivery during step 6, decoding compressed files completely, so
+common delivery during step 7, decoding compressed files completely, so
 every chunk and with it the whole table is checked. Its
 `payload_bytes_read` follows the [common rule](design-api.md): decoded spans
 and their encoded backing reads contribute no bytes, so a compressed file
-adds its decoded size to `logical_bytes` and nothing to that count. An indirect node is read once for each stub that names it, as
-extraction reads it, so no set of nodes already read is kept, and its bytes
-count once per stub.
+adds its decoded size to `logical_bytes` and nothing to that count.
+
+In either scope an indirect node's content is read once, by the first stub
+the walk reaches. Without that, many stubs naming one node would multiply a
+large fork's reads with no limit but `max_work`, since verification produces
+no output. On a volume with stubs a bitset of node IDs, up to the largest the
+catalog holds and in charged scratch, records what has been read. Only a stub
+repeats an ID, because step 5 refused any other repeat. Each stub's entry
+still adds its size to `logical_bytes`, while `payload_bytes_read` counts the
+node once.
 
 A wrapped volume is verified as its embedded volume, under the format
 design's [wrapper rule](design-hfsplus.md#the-hfs-wrapper), and its report
@@ -681,7 +698,7 @@ byte comes from a row, a stream record, the geometry or a profile constant.
 | Probe and open | One 1536-byte read; three header nodes; the extents tree's inline index; a few search paths for the special forks' overflow and the root; the journal records |
 | Listing | Per directory: one search and one cursor scan of its records, its thread validated, the common key sort; per hard-link stub, one or two keyed searches; per flagged file, one attribute scan. No payload is read |
 | Content | Per entry, one leaf reread and one resolver walk on first resolve, then one index lookup per request; per compressed chunk, one table read and one decode |
-| Verification | Every node of every tree read once by level iteration plus once by its lower level's merge; the catalog and attributes passes; external sorts of the object, link and inode streams and of the ownership claims, and their merges; one bitmap pass of the bitmap's `logicalSize`; scratch for the streams, the node bitsets and the ownership runs |
+| Verification | Every node of every tree read once by level iteration plus once by its lower level's merge; the catalog and attributes passes; external sorts of the object, declared-count, link and inode streams and of the ownership claims, and their merges; one bitmap pass of the bitmap's `logicalSize`; scratch for the streams, the node bitsets and the ownership runs |
 | Planning | One pass over the catalog, one external sort of two records per entry, one packing pass per tree level, the raise-until-fit search |
 | Emission | Payload bytes plus one pass over the sorted records and level streams, and the bitmap |
 

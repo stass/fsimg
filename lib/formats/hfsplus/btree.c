@@ -272,7 +272,7 @@ hfsplus_tree_open(fsimg_reader_t *reader, hfsplus_tree_t *tree,
 
 	*tree = (hfsplus_tree_t){ .reader = reader, .kind = kind };
 	status = hfsplus_fork_index(reader, id, HFSPLUS_FORK_DATA, fork,
-	    &tree->fork, NULL, error);
+	    &tree->fork, error);
 	if (status != FSIMG_OK || tree->fork == NULL)
 		return (status);
 

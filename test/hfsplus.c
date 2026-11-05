@@ -1325,7 +1325,7 @@ index_child_fork(fixture_t *f, const gen_image_t *image, uint8_t type,
 	CHECK(hfsplus_fork_decode(image->bytes + record->offset +
 	    record->key_length +
 	    (type == 0 ? FILE_DATA_FORK : FILE_RESOURCE_FORK), 80, &fork));
-	return (hfsplus_fork_index(&f->reader, 32, type, &fork, index, NULL,
+	return (hfsplus_fork_index(&f->reader, 32, type, &fork, index,
 	    error));
 }
 
@@ -1388,21 +1388,24 @@ test_forks(void)
 		    &image.trees[GEN_CATALOG].records[2];
 		uint64_t location = record->offset + record->key_length + FILE_DATA_FORK;
 		CHECK(hfsplus_fork_decode(image.bytes + location, 80, &fork));
-		uint64_t records = UINT64_MAX;
-		expect_status("fragmented fork record count", hfsplus_fork_index(
-		    &f.reader, 32, 0, &fork, &index, &records, &error),
+		fsimg_owner_runs_t *claims;
+		uint64_t records = 0;
+
+		CHECK(fsimg_owner_runs_new(&f.reader.session,
+		    "HFS Plus allocation block", 0, plan.total_blocks,
+		    &claims, &error) == FSIMG_OK);
+		expect_status("fragmented fork record count", hfsplus_fork_claim(
+		    &f.reader, claims, 32, 0, &fork, &records, &error),
 		    FSIMG_OK, &error);
 		expect_true("true overflow record count", records ==
 		    (counts[n] > 8 ? (counts[n] - 1) / 8 : 0));
-		fsimg_extent_index_free(index);
-		records = UINT64_MAX;
+		fsimg_owner_runs_free(claims);
 		fork.logical_size = (uint64_t)fork.total_blocks *
 		    plan.block_size + 1;
 		expect_status("logical size beyond allocation",
 		    hfsplus_fork_index(&f.reader,
-		    32, 0, &fork, &index, &records, &error), FSIMG_ECORRUPT,
+		    32, 0, &fork, &index, &error), FSIMG_ECORRUPT,
 		    &error);
-		expect_true("failing fork resets records", records == 0);
 		CHECK(index == NULL);
 		fixture_close(&f);
 		gen_free(&image);
@@ -1479,7 +1482,7 @@ test_forks(void)
 	fork.logical_size = 15u * plan.block_size;
 	expect_status("overflow overshoots totalBlocks", hfsplus_fork_index(&f.reader,
 	    32, 0,
-	    &fork, &index, NULL, &error), FSIMG_ECORRUPT, &error);
+	    &fork, &index, &error), FSIMG_ECORRUPT, &error);
 	expect_true("overflow overshoot diagnostic", strstr(error.message,
 	    "extents exceed its totalBlocks") != NULL);
 	fsimg_extent_index_free(index);
@@ -1490,7 +1493,7 @@ test_forks(void)
 	fork.logical_size = 16u * plan.block_size;
 	bzero(&error, sizeof(error));
 	expect_status("extra overflow after last", hfsplus_fork_index(&f.reader,
-	    32, 0, &fork, &index, NULL, &error), FSIMG_ECORRUPT, &error);
+	    32, 0, &fork, &index, &error), FSIMG_ECORRUPT, &error);
 	expect_true("extra overflow diagnostic", strstr(error.message,
 	    "fork has an extra overflow record") != NULL);
 	fsimg_extent_index_free(index);
@@ -1523,7 +1526,7 @@ test_forks(void)
 		}
 		uint64_t work = f.reader.session.progress.work;
 		expect_status(names[fault], hfsplus_fork_index(&f.reader,
-		    fault == 8 ? 3 : 32, 0, &fork, &index, NULL, &error),
+		    fault == 8 ? 3 : 32, 0, &fork, &index, &error),
 		    FSIMG_ECORRUPT, &error);
 		if (fault == 8)
 			expect_true(names[fault], strstr(error.message,
@@ -3102,6 +3105,11 @@ test_hard_links(void)
 	hard_links_plan(&plan, objects);
 	objects[4].mode = 0100644;
 	bcopy("hlnkhfs+", objects[4].finder, 8);
+	objects[4].special = 7;
+	objects[4].data = NULL;
+	objects[4].data_size = 0;
+	objects[4].resource = NULL;
+	objects[4].resource_size = 0;
 	list_plan("indirect node is itself stub", &plan, FSIMG_ECORRUPT,
 	    "HFS Plus indirect node is a stub or of another kind");
 	hard_links_plan(&plan, objects);

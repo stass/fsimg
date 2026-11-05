@@ -271,14 +271,14 @@ open_remaining_forks(fsimg_reader_t *reader, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 	status = hfsplus_fork_index(reader, HFSPLUS_ID_ALLOCATION,
-	    HFSPLUS_FORK_DATA, &header->allocation_file, &hfsplus->bitmap, NULL,
+	    HFSPLUS_FORK_DATA, &header->allocation_file, &hfsplus->bitmap,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (hfsplus->bitmap == NULL)
 		return (hfsplus_corrupt(error, "HFS Plus bitmap is missing"));
 	status = hfsplus_fork_index(reader, HFSPLUS_ID_STARTUP,
-	    HFSPLUS_FORK_DATA, &header->startup_file, &startup, NULL, error);
+	    HFSPLUS_FORK_DATA, &header->startup_file, &startup, error);
 	if (status != FSIMG_OK)
 		return (status);
 	fsimg_extent_index_free(startup);

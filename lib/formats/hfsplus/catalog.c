@@ -49,6 +49,8 @@ static fsimg_status_t file_validate(fsimg_reader_t *, const hfsplus_record_t *,
 static fsimg_status_t link_kind(fsimg_reader_t *, const hfsplus_file_t *,
     hfsplus_link_t *, fsimg_error_t *);
 static bool fork_empty(const hfsplus_fork_t *);
+static fsimg_status_t stub_check(const fsimg_hfsplus_reader_t *,
+    const hfsplus_file_t *, fsimg_error_t *);
 
 /* The flag word is a closed table; a bit outside it, the expanded timestamps
  * bit among them, changes interpretation in a way the reader does not know.
@@ -171,6 +173,8 @@ file_validate(fsimg_reader_t *reader, const hfsplus_record_t *record,
 	status = link_kind(reader, file, &primary->link, error);
 	if (status != FSIMG_OK)
 		return (status);
+	if (primary->link == HFSPLUS_LINK_FILE)
+		return (stub_check(hfsplus_state(reader), file, error));
 	if (primary->link != HFSPLUS_LINK_NONE)
 		return (FSIMG_OK);
 	return (file_kind(file, &primary->kind, error));
@@ -279,6 +283,25 @@ fork_empty(const hfsplus_fork_t *fork)
 	return (fork->logical_size == 0 && fork->total_blocks == 0);
 }
 
+/* What a file stub must be whatever resolves it, so every validated record is held
+ * to it, one no walk reaches included.
+ */
+static fsimg_status_t
+stub_check(const fsimg_hfsplus_reader_t *hfsplus, const hfsplus_file_t *stub,
+    fsimg_error_t *error)
+{
+	if (stub->bsd.special == 0)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus hard-link stub has a zero reference"));
+	if (!fork_empty(&stub->data_fork) || !fork_empty(&stub->resource_fork))
+		return (hfsplus_corrupt(error,
+		    "HFS Plus hard-link stub has a nonempty fork"));
+	if (!hfsplus->private_data_present)
+		return (hfsplus_corrupt(error,
+		    "HFS Plus hard-link stub on a volume with no private data folder"));
+	return (FSIMG_OK);
+}
+
 /* The chain fields, the indirect node's reserved word and the stub's owner and
  * group, are never read: the reference in special names the node. The name's
  * spelling is exact, since a folded search would also land on "inode7".
@@ -296,16 +319,6 @@ hfsplus_link_resolve(fsimg_reader_t *reader, hfsplus_primary_t *primary,
 	size_t count;
 	bool found;
 	fsimg_status_t status;
-
-	if (stub->bsd.special == 0)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus hard-link stub has a zero reference"));
-	if (!fork_empty(&stub->data_fork) || !fork_empty(&stub->resource_fork))
-		return (hfsplus_corrupt(error,
-		    "HFS Plus hard-link stub has a nonempty fork"));
-	if (!hfsplus->private_data_present)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus hard-link stub on a volume with no private data folder"));
 
 	count = (size_t)snprintf(text, sizeof(text), "iNode%u",
 	    (unsigned)stub->bsd.special);
