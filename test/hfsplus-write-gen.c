@@ -231,7 +231,7 @@ main(int argc, char **argv)
 		tmp = "/tmp";
 	scratch_path = malloc(strlen(tmp) + 32);
 	CHECK(scratch_path != NULL);
-	sprintf(scratch_path, "%s/fsimg-hfs-gen.XXXXXX", tmp);
+	snprintf(scratch_path, strlen(tmp) + 32, "%s/fsimg-hfs-gen.XXXXXX", tmp);
 	CHECK(mkdtemp(scratch_path) != NULL);
 	scratch = open(scratch_path, O_RDONLY | O_DIRECTORY);
 	CHECK(scratch >= 0);
