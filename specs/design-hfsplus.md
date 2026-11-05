@@ -94,9 +94,10 @@ volume's tail and makes it a
 [truncated volume](architecture.md#byte-and-object-boundaries). A wrapped
 volume's `V` is instead its [embedded range's](#the-hfs-wrapper) length,
 whatever the slice holds. `V` is a
-multiple of 512; a slice that reaches `N * B` with a length that is not is
-`FSIMG_ECORRUPT`, because the alternate header's position is undefined. A
-volume inside a partition,
+multiple of 512. A bare slice that reaches `N * B` with a length that is not is
+`FSIMG_ECORRUPT`, because the alternate header's position is undefined; a
+wrapped volume's range fixes that position, so such a cut only reports its
+missing bytes. A volume inside a partition,
 disk image or wrapper is reached by the [layer design](design-layers.md) or
 the [wrapper rule](#the-hfs-wrapper); the driver never treats the start of a
 disk or a DMG file as the start of a volume. [TN]

@@ -7818,7 +7818,11 @@ test_wrapper_longer_ranges(void)
 		{ .name = "wrapper cut between allocation and range ends",
 		    .blocks = 512, .outer_block_size = 4096,
 		    /* N * B + 512 of a range of N * B + 4096. */
-		    .extra_bytes = 4096, .kept = 2097664, .missing = 3584 }
+		    .extra_bytes = 4096, .kept = 2097664, .missing = 3584 },
+		{ .name = "wrapper cut at an unaligned length",
+		    .blocks = 512, .outer_block_size = 4096,
+		    /* N * B + 1 of a range of N * B + 4096. */
+		    .extra_bytes = 4096, .kept = 2097153, .missing = 4095 }
 	};
 	static const unsigned char payload[] = "wrapper file bytes";
 	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
