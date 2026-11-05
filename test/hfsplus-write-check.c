@@ -263,7 +263,7 @@ tree(raw_check_t *c, const unsigned char *base, uint64_t length,
 			unsigned keybytes = u16(key) + 2;
 
 			CHECK(start < stop && start % 2 == 0 && stop % 2 == 0);
-			CHECK(keybytes <= stop - start && keybytes == 8 + 2 * u16(key + 6));
+			CHECK(keybytes <= stop - start && keybytes == 8u + 2u * u16(key + 6));
 			if (previous[height] != NULL)
 				CHECK(key_compare(c, previous[height], key) < 0);
 			previous[height] = key;
@@ -280,8 +280,8 @@ tree(raw_check_t *c, const unsigned char *base, uint64_t length,
 				CHECK(child == first[height - 1] + referenced[height - 1]);
 				referenced[height - 1]++;
 				cn = base + (uint64_t)child * size;
-				CHECK(cn[9] + 1 == height);
-				CHECK(u16(cn + 14) + 2 == keybytes);
+				CHECK(cn[9] + 1u == height);
+				CHECK(u16(cn + 14) + 2u == keybytes);
 				CHECK(bcmp(key, cn + 14, keybytes) == 0);
 				own(c, key + keybytes, 4);
 			}

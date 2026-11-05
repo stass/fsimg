@@ -157,7 +157,7 @@ enter_wrapper(fsimg_reader_t *reader, const hfsplus_mdb_t *mdb,
     unsigned char *prefix, uint64_t *embedded_bytes, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
-	uint64_t offset, length;
+	uint64_t offset = 0, length = 0;
 	size_t transferred;
 	fsimg_status_t status;
 
@@ -504,7 +504,7 @@ journal_open(fsimg_reader_t *reader, fsimg_error_t *error)
 	uint32_t info_block = hfsplus->header.journal_info_block;
 	hfsplus_extent_t extent;
 	hfsplus_jib_t jib;
-	hfsplus_journal_state_t state;
+	hfsplus_journal_state_t state = HFSPLUS_JOURNAL_NONE;
 	size_t transferred;
 	fsimg_status_t status;
 

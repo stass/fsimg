@@ -202,7 +202,7 @@ hwf_add_mapnodes(hwf_fixture_t *f, unsigned count)
 	memset(path, 'n', sizeof(path) - 1);
 	path[sizeof(path) - 1] = '\0';
 	for (unsigned i = 0; i < count; i++) {
-		snprintf(path, 10, "/%08u", i);
+		snprintf(path, 10, "/%08u", i % 100000000u);
 		path[9] = 'n';
 		e.path = path;
 		CHECK(fsimg_writer_add(f->writer, &e, &source, NULL) == FSIMG_OK);

@@ -706,7 +706,7 @@ inspect_node(void *argument, uint32_t number, const unsigned char *raw,
 			    record.type == HFSPLUS_RECORD_FILE ? record.units : 0));
 			EXPECT(bcmp(key.name, record.name, 2 * key.units) == 0);
 			length = 8 + 2 * key.units;
-			EXPECT(end - start == length + data_length(&record));
+			EXPECT((size_t)(end - start) == length + data_length(&record));
 			for (size_t j = 0; j < data_length(&record); j++)
 				EXPECT(raw[start + length + j] == (j % 2 == 0 ?
 				    record.id % 251 + 1 : 0));
@@ -719,7 +719,7 @@ inspect_node(void *argument, uint32_t number, const unsigned char *raw,
 			EXPECT(key.units == be16(level_key + 6));
 			EXPECT(bcmp(key.name, level_key + 8, 2 * key.units) == 0);
 			length = 8 + 2 * key.units;
-			EXPECT(end - start == length + 4);
+			EXPECT((size_t)(end - start) == length + 4);
 			EXPECT(be32(raw + start + length) ==
 			    level_first(s, level - 1) + c->level_seen[level - 1]);
 			c->level_seen[level - 1]++;
