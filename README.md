@@ -310,7 +310,8 @@ export PATH="$HOME/.local/bin:$PATH"
 From a release archive, start with `./configure`; generated build support is
 included. Ruby 3.2 or later, Minitest and pkg-config are needed for the CLI
 integration and installation checks. See [build and validation](docs/build.md)
-for platform setup and test commands.
+for platform setup and test commands, and for keeping the build directory and
+test scratch on a RAM disk.
 
 Installation includes the command, shared and static `libfsimg`, the public C
 header, pkg-config metadata, manuals, and checked

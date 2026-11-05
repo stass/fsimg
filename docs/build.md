@@ -120,6 +120,40 @@ make check-fuzz
 make check-fuzz-extended
 ```
 
+### Build and test scratch on a RAM disk
+
+Build output and test scratch are written and deleted many times, so a RAM
+disk is faster than a disk and spares an SSD. Most tests create their
+scratch under `TMPDIR`, so a recipe is enough; no test needs changing. On
+macOS, which needs no root:
+
+```sh
+dev=$(hdiutil attach -nomount ram://33554432)   # 16 GiB in 512-byte sectors
+diskutil erasevolume APFS fsimg-ram "$dev"
+mkdir /Volumes/fsimg-ram/build /Volumes/fsimg-ram/tmp
+export TMPDIR=/Volumes/fsimg-ram/tmp
+cd /Volumes/fsimg-ram/build && /path/to/fsimg/configure ... && make -j32 check
+hdiutil detach "$dev"    # frees the memory; the contents are gone
+```
+
+The disk takes memory only as it fills. It mounts with owners ignored, which
+the suite tolerates. Its size must cover the build plus the largest scratch
+the chosen target writes: `make check` and `check-scale` fit in 16 GiB, and
+`FSIMG_HFS_LARGE=1` writes over 4 GiB of HFS Plus images. The QNX4 writer's
+`--scale-limits` run needs about 21 GiB of free scratch space, and the HFS
+Plus qualification with `--large-catalog` about 8 GiB, so size the disk for
+the target (`ram://50331648` is 24 GiB).
+
+On Linux, `/dev/shm` is a tmpfs on most distributions: use
+`TMPDIR=/dev/shm/fsimg-tmp`, and build there only if it is mounted exec. On
+FreeBSD a tmpfs mount needs root, so use one on a host you administer.
+
+A test that needs a particular host filesystem keeps its documented
+location, such as `QNX4_SCALE_SCRATCH`, and `check-seek-holes` needs a
+filesystem that reports holes (APFS and tmpfs do). `build-aux/linux-check.sh`
+mounts a tmpfs at `/tmp` in its container, so that check's scratch stays in
+memory.
+
 The tree builds warning-free under `-Werror` with Clang and with GCC. CI builds
 and checks with Clang on Linux and macOS, and with GCC 13 and GCC 16 on Linux.
 The macOS, Linux and FreeBSD jobs run `sh ../build-aux/ci-check.sh` in the
@@ -614,8 +648,8 @@ prepares a 100,000-file root directory at a 16 MiB budget and a grouped
 deterministic content without host payload fixtures. Catalog tests check every
 path, source reference, and parent, sample provider bytes, and report peak charged
 memory, scratch, and descriptors, cumulative I/O calls, and elapsed time.
-Scratch should use a disk-backed filesystem; a RAM-backed directory consumes
-system memory outside the library heap budget.
+Scratch on a RAM disk is fine for the check: it takes system memory outside
+the library heap budget, which these measurements do not count.
 
 The FAT scale case lists and structurally verifies 65,520 empty files in one
 directory at a 16 MiB context budget and one shared cache page. It requires

@@ -21,7 +21,8 @@
 # uncommitted changes are not checked. Building the image fetches packages
 # and the revision's gems over the network; the run itself has no network
 # and runs as an unprivileged user. The container's kernel must provide
-# Landlock ABI 3 for the sandbox profiles to run (docs/build.md).
+# Landlock ABI 3 for the sandbox profiles to run (docs/build.md). The
+# container's /tmp is an 8 GiB tmpfs, so test scratch stays in memory.
 set -eu
 
 usage() {
@@ -119,6 +120,7 @@ git -C "$top" archive --format=tar -o "$rundir/source.tar" "$commit"
 # behind if this script is killed outright:
 #   docker ps -a --filter label=fsimg-linux-check
 docker create -i --rm --network none --cidfile "$rundir/cid" \
+    --tmpfs /tmp:rw,exec,nosuid,size=8g \
     --label fsimg-linux-check "$(cat "$rundir/iid")" \
     sh -c "$container_program" sh "$check_command" >/dev/null
 docker start -ai "$(cat "$rundir/cid")" <"$rundir/source.tar" &
