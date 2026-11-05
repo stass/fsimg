@@ -3,6 +3,13 @@
  */
 #include "config.h"
 
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/time.h>
+#include <signal.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -15,6 +22,7 @@
 #include "fsimg-endian.h"
 #include "test.h"
 #include "write-hfsplus.h"
+#include "hfsplus-write-check.h"
 
 /* Planning has no output authority. Nodes are checked as they pass through
  * a memory callback; even the map-boundary cases retain no volume image.
@@ -357,7 +365,7 @@ test_bitmap_boundaries(void)
 					opts.volume_bytes = n * b + extra;
 					fixture_open(&f, 0, &opts);
 					check_geometry(plan_ok(&f), n, b,
-					    extra == 512 ? 1 : 0, 0);
+					    (uint32_t)ceil_div(1024, b), 0);
 					fixture_close(&f);
 				}
 			}
@@ -1501,9 +1509,604 @@ test_determinism(void)
 	tzset();
 }
 
+
+/* Emission tests deliberately use the real, unregistered writer descriptor.
+ * The earlier tests keep their planning-only descriptor.
+ */
+static void
+check_emitted_reader(hwf_fixture_t *f, hwf_image_t *image, unsigned variant,
+    bool empty, bool reproducible)
+{
+	fsimg_io_t *io;
+	fsimg_reader_t *reader;
+	fsimg_read_options_t options;
+	fsimg_verify_report_t report;
+	fsimg_volume_info_t volume;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	unsigned count = 0;
+	uint64_t logical = 0;
+	bool seen[HWF_COUNT] = { false };
+	unsigned char bytes[4096];
+
+	fsimg_read_options_init(&options);
+	options.format = variant ? "hfsx" : "hfsplus";
+	REQUIRE(hwf_io(f, image, &io) == FSIMG_OK);
+	REQUIRE(fsimg_reader_open(f->ctx, io, &options, &reader, NULL) == FSIMG_OK);
+	REQUIRE(fsimg_reader_get_info(reader, &volume, NULL) == FSIMG_OK);
+	EXPECT(strcmp(volume.label, HWF_LABEL) == 0);
+	while ((status = fsimg_reader_next(reader, &entry, NULL)) == FSIMG_OK) {
+		unsigned which = HWF_COUNT;
+		size_t done;
+
+		if (strcmp(entry->path, "/") == 0) {
+			EXPECT(entry->kind == FSIMG_ENTRY_DIRECTORY);
+			continue;
+		}
+		for (unsigned i = 0; i < HWF_COUNT && !empty; i++)
+			if (strcmp(f->entries[i].listed, entry->path) == 0)
+				which = i;
+		REQUIRE(which < HWF_COUNT);
+		EXPECT(!seen[which]);
+		seen[which] = true;
+		count++;
+		EXPECT(entry->kind == f->entries[which].kind);
+		EXPECT(entry->size == f->entries[which].length);
+		EXPECT(entry->metadata.uid == 123 && entry->metadata.gid == 456);
+		EXPECT(entry->metadata.mode == 0751);
+		EXPECT((entry->metadata.valid & hwf_metadata().valid) == hwf_metadata().valid);
+		EXPECT(entry->metadata.created.seconds == HWF_EPOCH - (reproducible ? 0 : 4));
+		EXPECT(entry->metadata.modified.seconds == HWF_EPOCH - (reproducible ? 0 : 3));
+		EXPECT(entry->metadata.changed.seconds == HWF_EPOCH - (reproducible ? 0 : 2));
+		EXPECT(entry->metadata.accessed.seconds == HWF_EPOCH - (reproducible ? 0 : 1));
+		logical += entry->size;
+		for (uint64_t offset = 0; offset < entry->size; offset += done) {
+			REQUIRE(fsimg_reader_read_at(reader, offset, bytes,
+			    sizeof(bytes), &done, NULL) == FSIMG_OK);
+			REQUIRE(done > 0 && done <= entry->size - offset);
+			for (size_t i = 0; i < done; i++)
+				EXPECT(bytes[i] == hwf_byte(which + 1, offset + i));
+		}
+	}
+	EXPECT(status == FSIMG_DONE);
+	EXPECT(count == (empty ? 0 : HWF_COUNT));
+	fsimg_reader_free(reader);
+	REQUIRE(fsimg_reader_open(f->ctx, io, &options, &reader, NULL) == FSIMG_OK);
+	status = fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, NULL);
+	EXPECT(status == FSIMG_OK);
+	EXPECT(report.complete);
+	EXPECT(report.files == (empty ? 0 : HWF_COUNT - 3));
+	EXPECT(report.directories == (empty ? 1 : 4));
+	EXPECT(report.logical_bytes == logical);
+	fsimg_reader_free(reader);
+	fsimg_io_free(io);
+}
+
+static void
+test_emission_matrix(void)
+{
+	hwf_fixture_t f;
+	hwf_image_t image;
+	fsimg_write_options_t options;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (uint32_t block = 512; block <= 65536; block *= 2) {
+			for (unsigned shape = 0; shape < 5; shape++) {
+				named("emission variant=%u block=%u shape=%u", variant, block, shape);
+				fprintf(stderr, "%s\n", scenario);
+				hwf_options(&options, block);
+				if (shape >= 2)
+					options.volume_bytes = 1024 * 1024 +
+					    (shape == 3 ? 512 : shape == 4 ? 1536 : 0);
+				hwf_open(&f, variant, &options, 64 * 1024 * 1024, -1, false);
+				if (shape != 1)
+					hwf_add_tree(&f, block, false);
+				image = (hwf_image_t){ 0 };
+				status = hwf_emit(&f, &image, &error);
+				if (status != FSIMG_OK)
+					fprintf(stderr, "%s: emit %d %s\n", scenario, status, error.message);
+				REQUIRE(status == FSIMG_OK);
+				hwc_check(&image, &f, &options, variant, shape == 1);
+				check_emitted_reader(&f, &image, variant, shape == 1, true);
+				free(image.bytes);
+				hwf_close(&f);
+			}
+		}
+		hwf_options(&options, 0);
+		options.flags |= FSIMG_WRITE_MINIMIZE;
+		named("emission minimize variant=%u", variant);
+		hwf_open(&f, variant, &options, 64 * 1024 * 1024, -1, false);
+		hwf_add_tree(&f, 4096, false);
+		image = (hwf_image_t){ 0 };
+		REQUIRE(hwf_emit(&f, &image, NULL) == FSIMG_OK);
+		hwc_check(&image, &f, &options, variant, false);
+		check_emitted_reader(&f, &image, variant, false, true);
+		free(image.bytes);
+		hwf_close(&f);
+	}
+}
+
+static void
+test_reserves_tail_blocks_when_alternate_is_past_allocation_domain(void)
+{
+	hwf_fixture_t f;
+	fsimg_write_options_t options;
+	const unsigned char *header, *bitmap;
+	uint32_t blocks, used;
+
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (uint32_t block = 2048; block <= 4096; block *= 2) {
+			for (uint32_t remainder = 1024; remainder <= 2048; remainder += 512) {
+				hwf_image_t image = { 0 };
+
+				if (remainder >= block)
+					continue;
+				named("reserved tail beyond allocation domain variant=%u B=%u remainder=%u",
+				    variant, block, remainder);
+				fprintf(stderr, "%s\n", scenario);
+				hwf_options(&options, block);
+				options.volume_bytes = 4 * 1024 * 1024 + remainder;
+				hwf_open(&f, variant, &options, 64 * 1024 * 1024, -1, false);
+				hwf_add_tree(&f, block, false);
+				REQUIRE(hwf_emit(&f, &image, NULL) == FSIMG_OK);
+				REQUIRE(image.length == options.volume_bytes);
+				header = image.bytes + 1024;
+				EXPECT(be32(header + 40) == block);
+				blocks = be32(header + 44);
+				REQUIRE(blocks == image.length / block);
+				EXPECT(image.length - (uint64_t)blocks * block == remainder);
+				REQUIRE(be32(header + 128) < blocks);
+				bitmap = image.bytes + (uint64_t)be32(header + 128) * block;
+				EXPECT((bitmap[(blocks - 1) / 8] &
+				    (1u << (7 - (blocks - 1) % 8))) != 0);
+				used = 0;
+				for (uint32_t bit = 0; bit < blocks; bit++)
+					used += (bitmap[bit / 8] >> (7 - bit % 8)) & 1;
+				EXPECT(be32(header + 48) == blocks - used);
+				EXPECT(bcmp(header, image.bytes + image.length - 1024, 512) == 0);
+				hwc_check(&image, &f, &options, variant, false);
+				check_emitted_reader(&f, &image, variant, false, true);
+				free(image.bytes);
+				hwf_close(&f);
+			}
+		}
+	}
+}
+
+static void
+test_emitted_metadata(void)
+{
+	for (unsigned variant = 0; variant < 2; variant++) {
+		hwf_fixture_t f;
+		hwf_image_t image = { 0 };
+		fsimg_write_options_t options;
+		time_t before, after;
+		uint32_t created;
+
+		named("emitted distinct timestamps variant=%u", variant);
+		hwf_options(&options, 4096);
+		options.flags &= ~FSIMG_WRITE_REPRODUCIBLE;
+		before = time(NULL);
+		hwf_open(&f, variant, &options, 64 * 1024 * 1024, -1, false);
+		hwf_add_tree(&f, 4096, false);
+		REQUIRE(hwf_emit(&f, &image, NULL) == FSIMG_OK);
+		after = time(NULL);
+		created = be32(image.bytes + 1024 + 16);
+		EXPECT(created >= (uint64_t)before + 2082844800u);
+		EXPECT(created <= (uint64_t)after + 2082844800u);
+		hwc_check(&image, &f, &options, variant, false);
+		check_emitted_reader(&f, &image, variant, false, false);
+		free(image.bytes);
+		hwf_close(&f);
+	}
+}
+
+static void
+test_emitted_identity(void)
+{
+	hwf_fixture_t f;
+	hwf_image_t baseline, image;
+	fsimg_write_options_t options;
+	char *saved = getenv("TZ") == NULL ? NULL : strdup(getenv("TZ"));
+	char directory[] = "/tmp/fsimg-hfs-identity.XXXXXX";
+	char other_directory[] = "/tmp/fsimg-hfs-identity.XXXXXX";
+	int scratch, other_scratch;
+
+	REQUIRE(mkdtemp(directory) != NULL);
+	scratch = open(directory, O_RDONLY | O_DIRECTORY);
+	REQUIRE(scratch >= 0);
+	REQUIRE(mkdtemp(other_directory) != NULL);
+	other_scratch = open(other_directory, O_RDONLY | O_DIRECTORY);
+	REQUIRE(other_scratch >= 0);
+	for (unsigned variant = 0; variant < 2; variant++) {
+		named("emitted identity variant=%u", variant);
+		hwf_options(&options, 4096);
+		baseline = (hwf_image_t){ 0 };
+		for (unsigned pass = 0; pass < 3; pass++) {
+			REQUIRE(setenv("TZ", pass == 0 ? "UTC0" : "PST8PDT", 1) == 0);
+			tzset();
+			hwf_open(&f, variant, &options,
+			    pass == 1 ? 16 * 1024 * 1024 : 64 * 1024 * 1024,
+			    pass == 0 ? -1 : pass == 1 ? scratch : other_scratch, false);
+			hwf_add_tree(&f, 4096, pass != 0);
+			image = (hwf_image_t){ 0 };
+			REQUIRE(hwf_emit(&f, &image, NULL) == FSIMG_OK);
+			if (pass == 0)
+				baseline = image;
+			else {
+				EXPECT(image.length == baseline.length);
+				EXPECT(bcmp(image.bytes, baseline.bytes, (size_t)image.length) == 0);
+				free(image.bytes);
+			}
+			hwf_close(&f);
+		}
+		free(baseline.bytes);
+	}
+	REQUIRE(close(scratch) == 0);
+	REQUIRE(rmdir(directory) == 0);
+	REQUIRE(close(other_scratch) == 0);
+	REQUIRE(rmdir(other_directory) == 0);
+	if (saved == NULL)
+		REQUIRE(unsetenv("TZ") == 0);
+	else {
+		REQUIRE(setenv("TZ", saved, 1) == 0);
+		free(saved);
+	}
+	tzset();
+}
+
+typedef enum emit_fault {
+	EMIT_ALLOC, EMIT_CANCEL, EMIT_SCRATCH_OPEN, EMIT_SCRATCH_RESIZE,
+	EMIT_SCRATCH_READ, EMIT_SCRATCH_WRITE, EMIT_SHORT, EMIT_WRITE,
+	EMIT_FLUSH, EMIT_SOURCE_SHORT, EMIT_EOF, EMIT_CHANGED
+} emit_fault_t;
+
+/* Each failed attempt owns a fresh context. Closing it must restore every
+ * resource counter; scratch entries are checked by removing the directory.
+ */
+static void
+test_emission_faults(void)
+{
+	const fsimg_meta_fault_t scratch_faults[] = { FSIMG_META_OPEN,
+	    FSIMG_META_RESIZE, FSIMG_META_READ, FSIMG_META_WRITE };
+	char directory[] = "/tmp/fsimg-hfs-faults.XXXXXX";
+	hwf_fixture_t f;
+	hwf_image_t image;
+	fsimg_write_options_t options;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	bool hit;
+	int scratch;
+
+	REQUIRE(mkdtemp(directory) != NULL);
+	scratch = open(directory, O_RDONLY | O_DIRECTORY);
+	REQUIRE(scratch >= 0);
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (uint32_t block = 512; block <= 8192; block *= 16) {
+			for (emit_fault_t fault = EMIT_ALLOC; fault <= EMIT_CHANGED; fault++) {
+				for (uint64_t point = 1;; point++) {
+					named("emit fault variant=%u B=%u fault=%u point=%" PRIu64,
+					    variant, block, fault, point);
+					REQUIRE(point < 10000);
+					hwf_options(&options, block);
+					hwf_open(&f, variant, &options, 16 * 1024 * 1024, scratch, false);
+					/* One payload, rather than the full boundary matrix. */
+					{
+						fsimg_entry_t entry = { .path = "/payload",
+						    .kind = FSIMG_ENTRY_FILE, .size = 31 };
+						fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = 1 };
+						REQUIRE(fsimg_writer_add(f.writer, &entry, &source, NULL) == FSIMG_OK);
+					}
+					image = (hwf_image_t){ 0 };
+					if (fault == EMIT_ALLOC)
+						fsimg_test_fail_alloc_after(f.ctx, point);
+					else if (fault == EMIT_CANCEL) {
+						f.polls = 0;
+						f.cancel_at = point;
+					} else if (fault >= EMIT_SCRATCH_OPEN && fault <= EMIT_SCRATCH_WRITE)
+						fsimg_test_meta_fail_after(f.ctx,
+						    scratch_faults[fault - EMIT_SCRATCH_OPEN], point, EIO);
+					else if (fault == EMIT_SHORT)
+						image.short_write = point;
+					else if (fault == EMIT_WRITE)
+						image.fail_write = point;
+					else if (fault == EMIT_FLUSH)
+						image.fail_flush = point == 1;
+					else if (fault == EMIT_SOURCE_SHORT)
+						f.short_read = point;
+					else if (fault == EMIT_EOF)
+						f.fail_read = point;
+					else
+						f.fail_validate = point;
+					status = hwf_emit(&f, &image, &error);
+					if (fault == EMIT_ALLOC)
+						hit = f.ctx->allocation_attempts >= point;
+					else if (fault == EMIT_CANCEL)
+						hit = f.polls >= point;
+					else if (fault >= EMIT_SCRATCH_OPEN && fault <= EMIT_SCRATCH_WRITE)
+						hit = f.ctx->meta_fault_after == 0;
+					else if (fault == EMIT_SHORT || fault == EMIT_WRITE)
+						hit = image.writes >= point;
+					else if (fault == EMIT_FLUSH)
+						hit = point == 1;
+					else if (fault == EMIT_EOF || fault == EMIT_SOURCE_SHORT)
+						hit = f.reads >= point;
+					else
+						hit = f.validates >= point;
+					if (!hit || fault == EMIT_SHORT || fault == EMIT_SOURCE_SHORT)
+						EXPECT(status == FSIMG_OK);
+					else {
+						if (fault == EMIT_ALLOC)
+							EXPECT(status == FSIMG_ENOMEM || status == FSIMG_ELIMIT);
+						else if (fault == EMIT_CANCEL)
+							EXPECT(status == FSIMG_ECANCELLED);
+						else if (fault == EMIT_CHANGED)
+							EXPECT(status == FSIMG_ESOURCE_CHANGED);
+						else
+							EXPECT(status == FSIMG_EIO);
+						EXPECT(error.output_state != FSIMG_OUTPUT_PUBLISHED);
+					}
+					free(image.bytes);
+					fsimg_test_fail_alloc_after(f.ctx, 0);
+					fsimg_test_meta_fail_after(f.ctx, FSIMG_META_OPEN, 0, 0);
+					f.cancel_at = 0;
+					hwf_close(&f);
+					/* No named scratch survives even between attempts. */
+					{
+						DIR *dir = opendir(directory);
+						struct dirent *entry;
+						REQUIRE(dir != NULL);
+						while ((entry = readdir(dir)) != NULL)
+							EXPECT(strcmp(entry->d_name, ".") == 0 ||
+							    strcmp(entry->d_name, "..") == 0);
+						REQUIRE(closedir(dir) == 0);
+					}
+					if (!hit) {
+						EXPECT(point > 1);
+						fprintf(stderr, "%s: swept %" PRIu64 " checkpoints\n",
+						    scenario, point - 1);
+						break;
+					}
+				}
+			}
+		}
+	}
+	REQUIRE(close(scratch) == 0);
+	REQUIRE(rmdir(directory) == 0);
+}
+
+static void
+test_real_capabilities(void)
+{
+	fsimg_write_options_t options;
+	hwf_fixture_t f;
+	fsimg_entry_t device = { .path = "/device", .kind = FSIMG_ENTRY_CHAR_DEVICE };
+	fsimg_type_selector_t selector;
+	const fsimg_partition_type_t *type;
+
+	named("real descriptor capabilities");
+	fprintf(stderr, "%s\n", scenario);
+	EXPECT(fsimg_hfsplus_format.writer == NULL);
+	REQUIRE(fsimg_hfsplus_write_format.writer != NULL);
+	for (unsigned variant = 0; variant < 2; variant++) {
+		const fsimg_format_info_t *info = &fsimg_hfsplus_write_format.variants[variant].info;
+		EXPECT(info->write_settings == FSIMG_SETTING_VOLUME_UUID);
+		EXPECT(info->write_allocation_unit_size_mask == 0x1fe00u);
+		EXPECT(info->entry_kinds == (FSIMG_ENTRY_FILE | FSIMG_ENTRY_DIRECTORY |
+		    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_FIFO));
+		hwf_options(&options, 4096);
+		hwf_open(&f, variant, &options, 64 * 1024 * 1024, -1, false);
+		EXPECT(fsimg_writer_add(f.writer, &device, NULL, NULL) != FSIMG_OK);
+		hwf_close(&f);
+		REQUIRE(fsimg_partition_type_select(NULL, info->name, &selector, NULL) == FSIMG_OK);
+		type = selector.type;
+		REQUIRE(type != NULL);
+		EXPECT(strcmp(type->gpt_guid, "48465300-0000-11AA-AA11-00306543ECAC") == 0);
+		EXPECT(type->mbr_types[0] == 0xaf);
+	}
+}
+
+/* Poison covers the emission transfer-buffer allocation. The output's zero
+ * callback turns poison off immediately afterward, before source I/O objects
+ * that require zeroed allocations are created. The poisoned buffer holds
+ * every tree node and bitmap batch. Construction, collection, planning and
+ * cleanup run with poison disabled.
+ */
+static void
+test_poisoned_images(void)
+{
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (uint32_t block = 512; block <= 65536; block *= 2) {
+			pid_t child;
+			int status;
+
+			named("poisoned image variant=%u B=%u", variant, block);
+			fflush(NULL);
+			child = fork();
+			REQUIRE(child >= 0);
+			if (child == 0) {
+				hwf_fixture_t f;
+				hwf_image_t image = { 0 };
+				fsimg_write_options_t options;
+				const fsimg_plan_t *plan;
+				fsimg_plan_info_t info;
+				fsimg_io_t *io;
+				struct itimerval deadline = { .it_value.tv_sec = 10 };
+
+				REQUIRE(setitimer(ITIMER_REAL, &deadline, NULL) == 0);
+				hwf_options(&options, block);
+				hwf_open(&f, variant, &options,
+				    64 * 1024 * 1024, -1, false);
+				hwf_add_tree(&f, block, false);
+				REQUIRE(fsimg_writer_plan(f.writer, &plan, NULL) == FSIMG_OK);
+				REQUIRE(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+				image.length = info.volume_bytes;
+				image.bytes = malloc((size_t)image.length);
+				REQUIRE(image.bytes != NULL);
+				memset(image.bytes, 0xa5, (size_t)image.length);
+				image.poison_context = f.ctx;
+				REQUIRE(hwf_io(&f, &image, &io) == FSIMG_OK);
+				fsimg_test_poison_allocations(f.ctx, true);
+				REQUIRE(fsimg_writer_emit(f.writer, io, NULL) == FSIMG_OK);
+				fsimg_test_poison_allocations(f.ctx, false);
+				fsimg_io_free(io);
+				hwc_check(&image, &f, &options, variant, false);
+				free(image.bytes);
+				hwf_close(&f);
+				_exit(0);
+			}
+			REQUIRE(waitpid(child, &status, 0) == child);
+			if (!WIFEXITED(status))
+				fprintf(stderr, "%s: signal %d before completing image check\n",
+				    scenario, WTERMSIG(status));
+			EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+		}
+	}
+}
+
+/* Each child changes one otherwise zero byte. Requiring the checker's
+ * explicit failure exit proves that every class reaches a rejecting check.
+ */
+static void
+test_raw_scan_rejects_stray_bytes(void)
+{
+	static const char *classes[] = { "boot area", "node free space",
+	    "unused node", "payload tail", "free block", "reserved record field" };
+	hwf_fixture_t f;
+	hwf_image_t image = { 0 };
+	fsimg_write_options_t options;
+	unsigned char *header, *cat, *leaf, *extents, *record;
+	uint64_t offsets[6] = { 0 };
+	uint32_t node, used;
+	unsigned records, end;
+
+	hwf_options(&options, 8192);
+	options.volume_bytes = 1024 * 1024;
+	hwf_open(&f, 0, &options, 64 * 1024 * 1024, -1, false);
+	hwf_add_tree(&f, 8192, false);
+	REQUIRE(hwf_emit(&f, &image, NULL) == FSIMG_OK);
+	hwc_check(&image, &f, &options, 0, false);
+	header = image.bytes + 1024;
+	cat = image.bytes + (uint64_t)be32(header + 272 + 16) * 8192;
+	extents = image.bytes + (uint64_t)be32(header + 192 + 16) * 8192;
+	leaf = cat + (uint64_t)be32(cat + 14 + 10) * 4096;
+	records = be16(leaf + 10);
+	end = be16(leaf + 4096 - 2 * (records + 1));
+	REQUIRE(end < 4096 - 2 * (records + 1));
+	used = be32(extents + 14 + 22) - be32(extents + 14 + 26);
+	REQUIRE(be32(extents + 14 + 26) > 0);
+	record = leaf + be16(leaf + 4094);
+	record += be16(record) + 2;
+	REQUIRE(be16(record) == 1 && be32(record + 8) == 2);
+	offsets[0] = 0;
+	offsets[1] = (uint64_t)(leaf - image.bytes) + end;
+	offsets[2] = (uint64_t)(extents - image.bytes) + (uint64_t)used * 4096;
+	offsets[4] = (uint64_t)be32(header + 52) * 8192;
+	REQUIRE(be32(header + 48) > 0);
+	/* Locate a nonempty file whose final allocation block has slack. */
+	node = be32(cat + 14 + 10);
+	while (node != 0 && offsets[3] == 0) {
+		leaf = cat + (uint64_t)node * 4096;
+		for (unsigned r = 0; r < be16(leaf + 10); r++) {
+			const unsigned char *key = leaf + be16(leaf + 4096 - 2 * (r + 1));
+			const unsigned char *data = key + be16(key) + 2;
+			uint64_t length;
+
+			/* The root thread's reserved word follows its record type. */
+			if (be16(data) == 3 && be32(key + 2) == 2)
+				offsets[5] = (uint64_t)(data - image.bytes) + 2;
+			if (be16(data) != 2)
+				continue;
+			length = (uint64_t)be32(data + 88) << 32 | be32(data + 92);
+			if (length != 0 && length % 8192 != 0)
+				offsets[3] = (uint64_t)be32(data + 104) * 8192 + length;
+		}
+		node = be32(leaf);
+	}
+	REQUIRE(offsets[3] != 0 && offsets[5] != 0);
+	for (unsigned i = 0; i < 6; i++) {
+		pid_t child;
+		int status;
+
+		named("raw scan rejects %s", classes[i]);
+		REQUIRE(offsets[i] < image.length && image.bytes[offsets[i]] == 0);
+		fprintf(stderr, "%s (expected checker failure)\n", scenario);
+		fflush(NULL);
+		child = fork();
+		REQUIRE(child >= 0);
+		if (child == 0) {
+			image.bytes[offsets[i]] = 1;
+			hwc_check(&image, &f, &options, 0, false);
+			_exit(0);
+		}
+		REQUIRE(waitpid(child, &status, 0) == child);
+		EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 1);
+	}
+	free(image.bytes);
+	hwf_close(&f);
+}
+
+static void
+test_unpublished_failures(void)
+{
+	char directory[] = "/tmp/fsimg-hfs-output.XXXXXX";
+	int parent;
+
+	REQUIRE(mkdtemp(directory) != NULL);
+	parent = open(directory, O_RDONLY | O_DIRECTORY);
+	REQUIRE(parent >= 0);
+	for (unsigned variant = 0; variant < 2; variant++) {
+		for (uint32_t block = 512; block <= 8192; block *= 16) {
+			for (unsigned fault = 0; fault < 3; fault++) {
+				hwf_fixture_t f;
+				fsimg_write_options_t options;
+				const fsimg_plan_t *plan;
+				fsimg_error_t error;
+				fsimg_status_t status;
+				fsimg_entry_t entry = { .path = "/payload",
+				    .kind = FSIMG_ENTRY_FILE, .size = 31 };
+				fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = 1 };
+
+				named("publication variant=%u B=%u fault=%u", variant, block, fault);
+				hwf_options(&options, block);
+				hwf_open(&f, variant, &options,
+				    16 * 1024 * 1024, parent, false);
+				REQUIRE(fsimg_writer_add(f.writer, &entry, &source, NULL) == FSIMG_OK);
+				REQUIRE(fsimg_writer_plan(f.writer, &plan, NULL) == FSIMG_OK);
+				if (fault == 0)
+					f.fail_read = f.reads + 1;
+				else if (fault == 1)
+					f.fail_validate = f.validates + 1;
+				else
+					f.cancel_at = f.polls + 1;
+				status = fsimg_writer_write_at(f.writer, parent, "image", &error);
+				EXPECT(status == (fault == 0 ? FSIMG_EIO :
+				    fault == 1 ? FSIMG_ESOURCE_CHANGED : FSIMG_ECANCELLED));
+				EXPECT(error.output_state == FSIMG_OUTPUT_ABSENT);
+				EXPECT(faccessat(parent, "image", F_OK, 0) == -1 && errno == ENOENT);
+				f.cancel_at = 0;
+				hwf_close(&f);
+			}
+		}
+	}
+	REQUIRE(close(parent) == 0);
+	REQUIRE(rmdir(directory) == 0);
+}
+
 int
 main(void)
 {
+	test_real_capabilities();
+	test_emission_matrix();
+	test_reserves_tail_blocks_when_alternate_is_past_allocation_domain();
+	test_emitted_metadata();
+	test_emitted_identity();
+	test_emission_faults();
+	test_unpublished_failures();
+	test_poisoned_images();
+	test_raw_scan_rejects_stray_bytes();
 	test_bitmap_boundaries();
 	test_settings_and_limits();
 	test_minimization();

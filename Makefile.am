@@ -186,9 +186,10 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	header-c \
 	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
 # Fixture generators support integration tests; they are not tests.
-check_PROGRAMS = $(test_programs) layers-compose hfsplus-marks \
+check_PROGRAMS = $(test_programs) layers-compose hfsplus-marks hfsplus-write-gen \
 	test-iso9660-scale test-iso9660-write-scale
-QUICK_TESTS = $(test_programs) test/fat-integration.sh test/exfat-integration.sh \
+QUICK_TESTS = $(test_programs) test/hfsplus-integration.sh \
+	test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
@@ -305,7 +306,12 @@ test_hfsplus_verify_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_hfsplus_unicode_SOURCES = test/hfsplus-unicode.c test/test.h \
 	test/digest.c test/digest.h
 test_hfsplus_unicode_LDADD = libfsimg.la
-test_hfsplus_write_SOURCES = test/hfsplus-write.c test/test.h
+test_hfsplus_write_SOURCES = test/hfsplus-write.c test/test.h \
+	test/hfsplus-write-check.c test/hfsplus-write-check.h \
+	test/hfsplus-write-fixture.c test/hfsplus-write-fixture.h
+hfsplus_write_gen_SOURCES = test/hfsplus-write-gen.c \
+	test/hfsplus-write-fixture.c test/hfsplus-write-fixture.h test/test.h
+hfsplus_write_gen_LDADD = libfsimg.la
 test_hfsplus_write_LDADD = libfsimg.la
 test_iso9660_SOURCES = test/iso9660.c test/test.h \
 	test/iso9660-image.c test/iso9660-image.h
@@ -731,3 +737,5 @@ EXTRA_DIST += \
 	test/spec/suite/iso9660/test_model.rb \
 	test/spec/suite/iso9660/test_oracles.rb \
 	test/spec/suite/iso9660/test_rules.rb
+
+EXTRA_DIST += test/hfsplus-integration.sh test/hfsplus-integration.rb

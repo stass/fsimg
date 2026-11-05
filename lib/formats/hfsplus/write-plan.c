@@ -665,23 +665,21 @@ candidate_demand(const hfsplus_plan_t *plan,
 	    *demand <= BLOCKS_MAX);
 }
 
-/* Geometry at an exact volume size: N is what the slice holds. The tail is the
- * blocks below N that overlap the last 1024 bytes: on a slice longer than N
- * blocks by 1024 bytes or more, the alternate header lies past allocation and
- * no block is reserved for it.
- */
+/* Geometry at an exact volume size: N is what the slice holds. */
 static bool
 geometry_exact(uint64_t volume_bytes, uint32_t block, uint64_t demand,
     hfsplus_geometry_choice_t *choice)
 {
-	uint64_t blocks, bitmap, head, needed, tail, tail_start;
+	uint64_t blocks, bitmap, head, needed, tail;
 
 	if (volume_bytes < HEAD_BYTES + TAIL_BYTES)
 		return (false);
 	blocks = volume_bytes / block;
 	head = (HEAD_BYTES + block - 1) / block;
-	tail_start = (volume_bytes - TAIL_BYTES) / block;
-	tail = blocks > tail_start ? blocks - tail_start : 0;
+	/* The last blocks below N, wherever the alternate lies: fsck_hfs calls a
+	 * clear bit there under-allocation even when the alternate is past N * B.
+	 */
+	tail = (TAIL_BYTES + block - 1) / block;
 	bitmap = bitmap_blocks(blocks, block);
 	needed = head + tail + bitmap + demand;
 	if (needed > blocks)

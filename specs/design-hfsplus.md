@@ -1411,6 +1411,12 @@ spares macOS from creating the tree when it first writes an ACL,
 written: no formatter creates them, and the first writable macOS mount
 does (E1, E2).
 
+The writer's `t` is `ceil(1024 / B)` at every volume size, the blocks a
+native formatter marks wherever the alternate header lies. A size that puts
+the alternate past `N * B` still reserves them, unlike the reader's content
+domain: `fsck_hfs -n` reports a clear bit there as under-allocation and a wrong
+free count, so the writer cannot leave them free.
+
 Allocation is one prefix `[0, A)` plus the reserved tail; `freeBlocks` is
 `N - A - t` and `nextAllocation` is `A`. The bitmap's `logicalSize` is its
 whole allocation, and its bits are set for `[0, A)` and the tail and clear

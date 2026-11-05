@@ -1371,6 +1371,26 @@ namespace keys. Neither reads a capture at run time or writes a file.
 fixture: clean and damaged compressed files, broken overflow walks, truncated
 volumes and a rejected listing, with a plain sibling proving the walk went on.
 
+`test-hfsplus-write` plans, packs and emits through the unregistered
+`fsimg_hfsplus_write_format`: round trips through the reader and the verifier,
+an independent raw checker (`test/hfsplus-write-check.c`) written from the format
+design, byte identity across source order, cache size, scratch path and time
+zone, a scan of every unused byte with the transfer buffer poisoned, and faults at
+every stage. Volumes stay in memory, apart from a few publication cases.
+
+`test/hfsplus-integration.rb` generates writer output with `hfsplus-write-gen`
+in a temporary directory and runs each oracle it finds, naming each one it
+skips: `fsck_hfs -fn` on macOS through the attachment owner in
+`tools/hfsplus/capture.rb`, which attaches with `-nomount` and always detaches;
+`hfsdump`, from `$HFSDUMP` or `~/.local/share/fsimg-oracles/hfsfuse/bin/hfsdump`;
+the Sleuth Kit's `fsstat`, `fls` and `icat`; and `fsck.hfsplus -n`. Any `fsck_hfs`
+line other than its progress lines fails the script, and
+`FSIMG_HFS_ORACLE_LOG` keeps the whole output. The script covers both variants at
+every block size, the smallest volumes, and exact sizes whose alternate header
+straddles the last block or lies past it. `FSIMG_HFS_LARGE=1` adds 1 GiB volumes
+at 4096 and 8192, catalogs with map nodes, and nearly full volumes; it writes
+over 4 GiB of images, then removes them.
+
 `test-qnx4` builds QNX4 volumes with its own generator, written from the
 format design with separate offset tables; it shares no code with
 `lib/formats/qnx4/`; it includes the driver header to compare the
