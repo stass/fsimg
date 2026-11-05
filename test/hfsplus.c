@@ -234,16 +234,12 @@ fixture_init(fixture_t *f, const gen_image_t *image, uint64_t scratch,
 static fsimg_status_t
 fixture_open(fixture_t *f, int forced, bool assume, fsimg_error_t *error)
 {
-	fsimg_status_t status;
-
 	if (assume)
 		f->reader.options.flags |= FSIMG_READ_ASSUME_IDENTITY;
 	f->reader.slice_bytes = f->length;
 	f->reader.state = FSIMG_READER_OPENING;
-	status = fsimg_hfsplus_reader_ops.open(&f->reader,
-	    forced < 0 ? NULL : &fsimg_hfsplus_format.variants[forced], error);
-	f->reader.state = FSIMG_READER_NEW;
-	return (status);
+	return (fsimg_hfsplus_reader_ops.open(&f->reader,
+	    forced < 0 ? NULL : &fsimg_hfsplus_format.variants[forced], error));
 }
 
 static void
@@ -2180,6 +2176,12 @@ test_narrow_clips_range_and_refuses_second_call(void)
 	gen_plan_init(&plan);
 	gen_build(&plan, &image);
 	fixture_init(&f, &image, 0, 0);
+	expect_status("zeroed reader refuses narrow",
+	    fsimg_reader_narrow(&f.reader, 512, 1024, &error),
+	    FSIMG_ESTATE, &error);
+	expect_true("zeroed reader narrow preserves input and length",
+	    f.reader.input == f.io && f.reader.slice_bytes == 0 &&
+	    f.reader.narrowed == NULL);
 	f.reader.state = FSIMG_READER_OPENING;
 	f.reader.slice_bytes = image.length;
 	expect_status("narrow start at end is corruption",
@@ -2212,6 +2214,29 @@ test_narrow_clips_range_and_refuses_second_call(void)
 	    f.reader.input == input && f.reader.narrowed == input &&
 	    f.reader.slice_bytes == length);
 	fixture_close(&f);
+
+	fixture_t bounded;
+	fixture_init(&bounded, &image, 0, 0);
+	bounded.reader.state = FSIMG_READER_OPENING;
+	bounded.reader.slice_bytes = image.length;
+	CHECK(image.length > 1536);
+	/* Distinct from its neighbours, so a wrong offset cannot read it. */
+	image.bytes[1535] = 0x5a;
+	expect_status("narrow ends before parent end",
+	    fsimg_reader_narrow(&bounded.reader, 512, 1024, &error),
+	    FSIMG_OK, &error);
+	expect_status("read last byte inside narrowed range",
+	    fsimg_io_read_exact(bounded.reader.input, 1023, bytes, 1,
+	    &count, &error), FSIMG_OK, &error);
+	expect_true("narrowed last byte matches parent",
+	    count == 1 && bytes[0] == 0x5a);
+	unsigned reads = bounded.reads;
+	expect_status("exact read crossing narrowed end refuses range",
+	    fsimg_io_read_exact(bounded.reader.input, 1023, bytes, 2,
+	    &count, &error), FSIMG_ERANGE, &error);
+	expect_true("crossing narrowed end does not call backing reader",
+	    bounded.reads == reads);
+	fixture_close(&bounded);
 	gen_free(&image);
 }
 
@@ -6535,11 +6560,59 @@ test_journal_info_identity(void)
 	expect_true("format-owned journal remains unnamed", listed.error.path[0] == '\0');
 }
 
+/*
+ * This layout is what HFS_WRAPPER_VOLUME_BYTES, HFS_WRAPPER_OFFSET,
+ * HFS_WRAPPER_PAYLOAD_OFFSET and HFS_WRAPPER_PREFIX_BYTES in
+ * test/cli/hfsplus_truncated_test.rb depend on.
+ */
+static void
+emit_wrapped_seed(const char *path)
+{
+	gen_image_t image, envelope = { 0 };
+	gen_plan_t plan;
+	unsigned char content[65537];
+	gen_object_t object;
+	static const uint16_t name[] = { 'a' };
+	FILE *file;
+	uint64_t start;
+	unsigned char *fork;
+
+	gen_plan_init(&plan);
+	plan.verification = true;
+	for (size_t i = 0; i < sizeof(content); i++)
+		content[i] = (unsigned char)(i % 251);
+	object = (gen_object_t){ .name = name, .units = 1,
+	    .id = 32, .type = 2, .mode = 0100644, .data = content,
+	    .data_size = sizeof(content) };
+	plan.objects = &object;
+	plan.object_count = 1;
+	gen_build(&plan, &image);
+	/* Keep metadata before the cut and place /a at a known tail
+	 * offset for the CLI's truncated extraction fixture.
+	 */
+	start = (uint64_t)(plan.total_blocks - 32) * plan.block_size;
+	fork = catalog_data(&image, 2, 2) + FILE_DATA_FORK;
+	gen_store(fork + FORK_START, start / plan.block_size, 4);
+	bcopy(content, image.bytes + start, sizeof(content));
+	gen_rebuild_bitmap(&image);
+	bcopy(image.bytes + VOLUME_HEADER,
+	    image.bytes + image.length - 1024, 512);
+	envelope.bytes = gen_wrap(&image, 4096, 4, 1, 1, 1024,
+	    &envelope.length);
+	file = fopen(path, "wb");
+	CHECK(file != NULL);
+	CHECK(fwrite(envelope.bytes, 1, envelope.length, file) ==
+	    envelope.length);
+	CHECK(fclose(file) == 0);
+	free(envelope.bytes);
+	gen_free(&image);
+}
+
 /* Runtime corpus fixtures include an indexed directory, overflow extents,
  * empty content and, for HFSX, two case-distinct root names.
  */
 static void
-emit_seed(const char *path, bool hfsx, bool wrapped)
+emit_seed(const char *path, bool hfsx)
 {
 	static const uint16_t directory[] = { 'd', 'i', 'r' };
 	static const uint16_t empty[] = { 'e', 'm', 'p', 't', 'y' };
@@ -6552,43 +6625,6 @@ emit_seed(const char *path, bool hfsx, bool wrapped)
 	gen_plan_t plan;
 	gen_image_t image;
 	FILE *file;
-
-	if (wrapped) {
-		gen_image_t envelope = { 0 };
-		uint64_t start;
-		unsigned char *fork;
-
-		gen_plan_init(&plan);
-		plan.verification = true;
-		for (size_t i = 0; i < sizeof(content); i++)
-			content[i] = (unsigned char)(i % 251);
-		objects[0] = (gen_object_t){ .name = lower, .units = 1,
-		    .id = 32, .type = 2, .mode = 0100644, .data = content,
-		    .data_size = sizeof(content) };
-		plan.objects = objects;
-		plan.object_count = 1;
-		gen_build(&plan, &image);
-		/* Keep metadata before the cut and place a at a known tail
-		 * offset for the CLI's truncated extraction fixture.
-		 */
-		start = (uint64_t)(plan.total_blocks - 32) * plan.block_size;
-		fork = catalog_data(&image, 2, 2) + FILE_DATA_FORK;
-		gen_store(fork + FORK_START, start / plan.block_size, 4);
-		bcopy(content, image.bytes + start, sizeof(content));
-		gen_rebuild_bitmap(&image);
-		bcopy(image.bytes + VOLUME_HEADER,
-		    image.bytes + image.length - 1024, 512);
-		envelope.bytes = gen_wrap(&image, 4096, 4, 1, 1, 1024,
-		    &envelope.length);
-		file = fopen(path, "wb");
-		CHECK(file != NULL);
-		CHECK(fwrite(envelope.bytes, 1, envelope.length, file) ==
-		    envelope.length);
-		CHECK(fclose(file) == 0);
-		free(envelope.bytes);
-		gen_free(&image);
-		return;
-	}
 
 	bzero(objects, sizeof(objects));
 	for (size_t i = 0; i < sizeof(content); i++)
@@ -7653,7 +7689,7 @@ check_wrapper_contents(const char *name, const gen_image_t *wrapped,
 	fsimg_verify_report_t report;
 	unsigned char bytes[64];
 	size_t count;
-	char number[64];
+	char number[96];
 
 	fixture_init(&f, wrapped, 0, 0);
 	expect_status(name, fsimg_reader_open(f.ctx, f.io, NULL, &reader,
@@ -7686,10 +7722,9 @@ check_wrapper_contents(const char *name, const gen_image_t *wrapped,
 		    missing == 0 ? FSIMG_OK : FSIMG_ECORRUPT, &error);
 		if (missing != 0) {
 			snprintf(number, sizeof(number),
-			    ": %" PRIu64 " declared bytes are missing",
+			    "image is truncated: %" PRIu64 " declared bytes are missing",
 			    missing);
 			expect_true("wrapper truncation diagnostic and count",
-			    strstr(error.message, "truncated") != NULL &&
 			    strstr(error.message, number) != NULL);
 		}
 		/* Verification consumes iteration. Reopen for listing. */
@@ -7766,6 +7801,8 @@ test_wrapper_longer_ranges(void)
 		uint32_t blocks;
 		uint32_t outer_block_size;
 		size_t extra_bytes;
+		uint64_t kept;
+		uint64_t missing;
 	} longer_range_t;
 	static const longer_range_t cases[] = {
 		{ .name = "wrapper embedded count one short", .blocks = 511,
@@ -7777,7 +7814,11 @@ test_wrapper_longer_ranges(void)
 		    .extra_bytes = 512 },
 		{ .name = "wrapper range exceeds volume by four blocks",
 		    .blocks = 512, .outer_block_size = 4096,
-		    .extra_bytes = 4 * 4096 }
+		    .extra_bytes = 4 * 4096 },
+		{ .name = "wrapper cut between allocation and range ends",
+		    .blocks = 512, .outer_block_size = 4096,
+		    /* N * B + 512 of a range of N * B + 4096. */
+		    .extra_bytes = 4096, .kept = 2097664, .missing = 3584 }
 	};
 	static const unsigned char payload[] = "wrapper file bytes";
 	gen_object_t object = { .name = name_a, .units = 1, .id = 32,
@@ -7815,8 +7856,11 @@ test_wrapper_longer_ranges(void)
 		    FSIMG_OK, NULL);
 		uint64_t range_bytes = (uint64_t)plan.total_blocks *
 		    plan.block_size + plan.extra_bytes;
+		/* A row with no kept value keeps the whole image. */
+		if (cases[i].kept != 0)
+			wrapped.length = embedded + cases[i].kept;
 		check_wrapper_contents(cases[i].name, &wrapped, embedded,
-		    range_bytes, 0);
+		    range_bytes, cases[i].missing);
 		free(wrapped.bytes);
 		gen_free(&image);
 	}
@@ -7893,6 +7937,21 @@ test_wrappers(void)
 	plan.objects = &object;
 	plan.object_count = 1;
 	gen_build(&plan, &image);
+	wrapped.bytes = gen_wrap(&image, 512, 4, 1, 1, 1024,
+	    &wrapped.length);
+	/* The master directory block's embedded extent count: one 512-byte block. */
+	gen_store(wrapped.bytes + 1024 + 0x80, 1, 2);
+	fixture_t short_range;
+	fsimg_error_t short_error = { 0 };
+	fixture_init(&short_range, &wrapped, 0, 0);
+	expect_status("uncut wrapper with 512-byte embedded range",
+	    fixture_open(&short_range, -1, false, &short_error),
+	    FSIMG_ECORRUPT, &short_error);
+	expect_true("512-byte embedded range names short range, not truncation",
+	    strcmp(short_error.message,
+	    "HFS wrapper's embedded range is shorter than an HFS Plus header") == 0);
+	fixture_close(&short_range);
+	free(wrapped.bytes);
 	check_surviving_file("unwrapped wrapper baseline", &image,
 	    image.length, payload, sizeof(payload) - 1);
 	for (size_t i = 0; i < sizeof(positions) / sizeof(positions[0]); i++) {
@@ -7935,7 +7994,8 @@ test_wrappers(void)
 		    reported_volume + 4096, 0 },
 		{ "wrapper cut in mkfs slack", reported_volume + 4096 + 1536,
 		    0 },
-		{ "wrapper cut in alternate MDB", reported_volume + 4096 + 2304,
+		{ "wrapper cut in alternate MDB",
+		    reported_volume + 4096 + 3072 + 256,
 		    0 }
 	};
 	for (size_t i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
@@ -8086,8 +8146,10 @@ main(int argc, char **argv)
 	if (argc == 3 && (strcmp(argv[1], "--seed") == 0 ||
 	    strcmp(argv[1], "--seed-hfsx") == 0 ||
 	    strcmp(argv[1], "--seed-wrap") == 0)) {
-		emit_seed(argv[2], strcmp(argv[1], "--seed-hfsx") == 0,
-		    strcmp(argv[1], "--seed-wrap") == 0);
+		if (strcmp(argv[1], "--seed-wrap") == 0)
+			emit_wrapped_seed(argv[2]);
+		else
+			emit_seed(argv[2], strcmp(argv[1], "--seed-hfsx") == 0);
 		return (failures == 0 ? 0 : 1);
 	}
 	if (argc == 3 && strcmp(argv[1], "--native-content") == 0)

@@ -58,9 +58,9 @@ static fsimg_status_t check_identity(fsimg_reader_t *,
 static fsimg_status_t wrapper_range(const hfsplus_mdb_t *, uint64_t *,
     uint64_t *, fsimg_error_t *);
 static fsimg_status_t enter_wrapper(fsimg_reader_t *, const hfsplus_mdb_t *,
-    unsigned char *, fsimg_error_t *);
+    unsigned char *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t derive_geometry(fsimg_reader_t *,
-    const unsigned char *, fsimg_error_t *);
+    const unsigned char *, uint64_t, fsimg_error_t *);
 static fsimg_status_t open_extents_tree(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t select_comparator(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t allocate_scan_node(fsimg_reader_t *, fsimg_error_t *);
@@ -110,9 +110,9 @@ check_identity(fsimg_reader_t *reader, const fsimg_format_variant_t *forced,
 
 /*
  * The range the wrapper's location fields name, refused when hostile: it must
- * lie in the outer volume's allocation blocks and start past the master
- * directory block. This reads only the fields, so a cut image gets the same
- * answer as a whole one.
+ * lie in the outer volume's allocation blocks, start past the master directory
+ * block and hold an HFS Plus header. This reads only the fields, so a cut image
+ * gets the same answer as a whole one.
  *
  * The fields are 16 and 32 bits wide, so no sum or product here can overflow 64
  * bits: the largest end is below 2^50.
@@ -139,6 +139,10 @@ wrapper_range(const hfsplus_mdb_t *mdb, uint64_t *offset, uint64_t *length,
 	if (*offset < HFSPLUS_PROBE_BYTES)
 		return (hfsplus_corrupt(error,
 		    "HFS wrapper's embedded volume overlaps its master directory block"));
+	/* Otherwise a whole image would read as cut inside its embedded header. */
+	if (*length < HFSPLUS_PROBE_BYTES)
+		return (hfsplus_corrupt(error,
+		    "HFS wrapper's embedded range is shorter than an HFS Plus header"));
 	return (FSIMG_OK);
 }
 
@@ -146,11 +150,11 @@ wrapper_range(const hfsplus_mdb_t *mdb, uint64_t *offset, uint64_t *length,
  * Narrow the reader to the embedded range and read the embedded volume's first
  * bytes into prefix. From here the driver sees only that volume; the outer
  * volume is an envelope and is not interpreted, so a cut in its tail alone
- * shows nowhere.
+ * shows nowhere. *embedded_bytes receives the range's length, uncut.
  */
 static fsimg_status_t
 enter_wrapper(fsimg_reader_t *reader, const hfsplus_mdb_t *mdb,
-    unsigned char *prefix, fsimg_error_t *error)
+    unsigned char *prefix, uint64_t *embedded_bytes, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	uint64_t offset, length;
@@ -162,7 +166,7 @@ enter_wrapper(fsimg_reader_t *reader, const hfsplus_mdb_t *mdb,
 		status = fsimg_reader_narrow(reader, offset, length, error);
 	if (status != FSIMG_OK)
 		return (status);
-	hfsplus->embedded_bytes = length;
+	*embedded_bytes = length;
 	hfsplus->wrapper_offset = offset;
 	hfsplus->wrapped = true;
 
@@ -180,16 +184,17 @@ enter_wrapper(fsimg_reader_t *reader, const hfsplus_mdb_t *mdb,
 
 /* Decode the header, apply the attribute table and derive the content domain
  * [r * B, (N - t) * B), where r blocks overlap [0, 1536) and t blocks below N
- * overlap [V - 1024, V). A wrapper states V: its embedded range, cut or not. A
- * bare volume's V is the slice's length when it reaches N * B. A shorter slice
- * proves the volume's tail is gone and reports N * B, but that is only a lower
- * bound on V, so t cannot be known and is taken as 0: the volume keeps the
- * geometry it declares, the read funnel refuses what the slice does not hold,
- * and bytes it does hold in the last block are harmless.
+ * overlap [V - 1024, V). A wrapper states V: embedded_bytes, read only when
+ * wrapped, is its range's length, cut or not. A bare volume's V is the slice's
+ * length when it reaches N * B. A shorter slice proves the volume's tail is gone
+ * and reports N * B, but that is only a lower bound on V, so t cannot be known
+ * and is taken as 0: the volume keeps the geometry it declares, the read funnel
+ * refuses what the slice does not hold, and bytes it does hold in the last
+ * block are harmless.
  */
 static fsimg_status_t
 derive_geometry(fsimg_reader_t *reader, const unsigned char *prefix,
-    fsimg_error_t *error)
+    uint64_t embedded_bytes, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	hfsplus_header_t *header = &hfsplus->header;
@@ -207,16 +212,18 @@ derive_geometry(fsimg_reader_t *reader, const unsigned char *prefix,
 		return (status);
 	/* Both operands are 32 bits wide, so the product cannot overflow. */
 	allocation_bytes = (uint64_t)header->total_blocks * header->block_size;
-	/* A range shorter than the volume would read as a cut that nothing cut. */
-	if (hfsplus->wrapped && allocation_bytes > hfsplus->embedded_bytes)
-		return (hfsplus_corrupt(error,
-		    "HFS wrapper's embedded range is shorter than the volume's block size and count"));
 	slice_bytes = reader->slice_bytes;
-	tail_known = hfsplus->wrapped || allocation_bytes <= slice_bytes;
-	if (hfsplus->wrapped)
-		volume_bytes = hfsplus->embedded_bytes;
-	else
+	if (hfsplus->wrapped) {
+		/* A shorter range would read as a cut that nothing cut. */
+		if (allocation_bytes > embedded_bytes)
+			return (hfsplus_corrupt(error,
+			    "HFS wrapper's embedded range is shorter than the volume's block size and count"));
+		volume_bytes = embedded_bytes;
+		tail_known = true;
+	} else {
+		tail_known = allocation_bytes <= slice_bytes;
 		volume_bytes = tail_known ? slice_bytes : allocation_bytes;
+	}
 	/* N * B is whole sectors, so this fires only on a slice reaching it. */
 	if (volume_bytes % 512 != 0)
 		return (hfsplus_corrupt(error,
@@ -599,6 +606,7 @@ hfsplus_volume_open(fsimg_reader_t *reader,
 {
 	unsigned char prefix[HFSPLUS_PROBE_BYTES];
 	hfsplus_mdb_t mdb;
+	uint64_t embedded_bytes = 0;
 	bool wrapper;
 	size_t transferred;
 	fsimg_status_t status;
@@ -613,9 +621,9 @@ hfsplus_volume_open(fsimg_reader_t *reader,
 		return (status);
 	status = check_identity(reader, forced, prefix, &mdb, &wrapper, error);
 	if (status == FSIMG_OK && wrapper)
-		status = enter_wrapper(reader, &mdb, prefix, error);
+		status = enter_wrapper(reader, &mdb, prefix, &embedded_bytes, error);
 	if (status == FSIMG_OK)
-		status = derive_geometry(reader, prefix, error);
+		status = derive_geometry(reader, prefix, embedded_bytes, error);
 	if (status == FSIMG_OK)
 		status = open_extents_tree(reader, error);
 	if (status == FSIMG_OK)

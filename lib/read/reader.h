@@ -129,8 +129,8 @@ typedef struct fsimg_salvage_chain {
 } fsimg_salvage_chain_t;
 
 typedef enum fsimg_reader_state {
+	FSIMG_READER_NEW,	/* zero: a zeroed reader cannot narrow */
 	FSIMG_READER_OPENING,	/* the driver's open is running */
-	FSIMG_READER_NEW,
 	FSIMG_READER_ITERATING,
 	FSIMG_READER_DONE,
 	FSIMG_READER_FAILED

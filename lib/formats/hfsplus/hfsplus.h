@@ -660,12 +660,11 @@ typedef struct fsimg_hfsplus_reader {
 	fsimg_extent_index_t	*bitmap;
 	hfsplus_folder_t	 root;
 	/* Set for an embedded volume; decides the journal table's wrapped row.
-	 * The reader is then narrowed to the range wrapper_offset and
-	 * embedded_bytes name, which the slice may hold only part of.
+	 * The reader is then narrowed to the embedded range starting at
+	 * wrapper_offset, which the slice may hold only part of.
 	 */
 	bool			 wrapped;
 	uint64_t		 wrapper_offset;
-	uint64_t		 embedded_bytes;
 	/* The journal, for the root's format-owned files; its blocks are zero
 	 * without one. journal_info_block is meaningful under the same state.
 	 */

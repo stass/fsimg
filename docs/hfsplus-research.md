@@ -1971,12 +1971,12 @@ destination's ancestors and on the source's parent chain.
   count times block size as the partition's length
   (`core/hfs_vfsops.c:1422` to `:1480`). Its only test of that range is that
   start and length are multiples of the device's logical block size
-  (`core/hfs_vfsutils.c:212`). It never compares the range with the embedded
-  volume's blocks times its block size. The difference picks where the
-  alternate header goes (`core/hfs_vfsutils.c:293` to `:352`): spare bytes of up
-  to one allocation block are innocuous, and the one alternate header stays
-  1024 bytes before the range's end; more than that is a smaller volume in a
-  larger partition, written at both 1024 before the range's end and 1024 before
+  (`core/hfs_vfsutils.c:212`). It never refuses on the difference between the
+  range and the embedded volume's blocks times its block size. The difference
+  picks where the alternate header goes (`core/hfs_vfsutils.c:293` to `:352`):
+  spare bytes of up to one allocation block get no special handling, and the one
+  alternate header stays 1024 bytes before the range's end; more than that is a
+  smaller volume in a larger partition, written at both 1024 before the range's end and 1024 before
   the volume's end (`core/hfs_vfsops.c:2311` to `:2327`), and recovery reads the
   one relative to the partition (`:3596`). A volume larger than the range has
   no case of its own there: the mount does not refuse it and falls through to

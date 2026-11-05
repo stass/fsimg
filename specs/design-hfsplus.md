@@ -88,10 +88,12 @@ All project-defined C types have `_t` typedefs.
 
 ### The volume and its slice
 
-The volume is the slice the driver opens. `V` is its length in bytes, or the
+A bare volume is the slice the driver opens. `V` is its length in bytes, or the
 header's `N * B` when that is longer, which proves the slice lost the
 volume's tail and makes it a
-[truncated volume](architecture.md#byte-and-object-boundaries). `V` is a
+[truncated volume](architecture.md#byte-and-object-boundaries). A wrapped
+volume's `V` is instead its [embedded range's](#the-hfs-wrapper) length,
+whatever the slice holds. `V` is a
 multiple of 512; a slice that reaches `N * B` with a length that is not is
 `FSIMG_ECORRUPT`, because the alternate header's position is undefined. A
 volume inside a partition,
@@ -123,9 +125,10 @@ ceil(1536 / B)` and `t` the number of blocks below `N` that overlap
 occupy, is `[r * B, (N - t) * B)`. It is the domain every
 [extent index](design-content.md#extent-index) of the reader declares. For
 `B = 4096` and `V = N * B`, `r = 1` and `t = 1`: the first and last blocks
-are reserved. A truncated volume has lost its tail, so the alternate header
-is not there to protect: it reserves no tail, `t = 0`, and its content
-domain ends at `N * B`. [TN]
+are reserved. A truncated bare volume has lost its tail, so the alternate
+header is not there to protect: it reserves no tail, `t = 0`, and its content
+domain ends at `N * B`. A cut wrapped volume keeps its `t`, because its
+original end [stays known](#the-hfs-wrapper). [TN]
 
 A formatter marks the last `ceil(1024 / B)` blocks below `N` for the
 alternate header wherever it lies: `newfs_hfs` marks them unconditionally
@@ -1283,20 +1286,22 @@ that range and reads it as an `H+` volume whose `V` is the range's length, its
 alternate header at the end of the range. `drAlBlkSiz` is a nonzero multiple of
 512, `count` is nonzero, the extent lies inside the outer volume's `drNmAlBlks`
 allocation blocks (2 bytes at `0x12`), the range starts past the master
-directory block, the embedded volume's signature is `H+` with version 4, and
-`N * B` of the volume inside it does not exceed the range; anything else is
+directory block and is at least 1536 bytes long, the embedded volume's
+signature is `H+` with version 4, and `N * B` of the volume inside it does not
+exceed the range; anything else is
 `FSIMG_ECORRUPT`. The embedded volume's block size need not equal the wrapper's:
 `mkfs.hfsplus -w` and the Blender 2.28 image use 4096 for both, with `drAlBlSt`
 8 and the embedded volume at byte 45056, and the Mac OS X install discs wrap
 4096-byte volumes in 73728-byte outer blocks.
 
-The range equals `N * B` in every captured image (E10, E11), and the two rules
-for the other cases rest on different evidence:
+The range equals `N * B` in every captured image (E10, E11), and the rules for
+the other cases rest on different evidence:
 
 | Case | Rule | Evidence |
 | --- | --- | --- |
 | `N * B` below the range | Opens as a bare volume in a longer slice does: `V` and the reported size are the range's length, the alternate header at its end | Apple's mount takes the range as the partition, keeps an alternate header 1024 bytes before its end whatever the spare bytes, and refuses nothing ([R, wrapper range](../docs/hfsplus-research.md#journal-volume-header-and-wrapper)); no captured image has it |
 | `N * B` above the range | `FSIMG_ECORRUPT` | fsimg's own: the truncation rule would count the excess as bytes a cut removed, and no cut did. Apple's mount has no test for this, and no captured image has it |
+| A cut keeping `kept` bytes of the range, `N * B <= kept < range` | Truncated: `V` and the reported size stay the range's length, `missing_bytes` is what the slice lacks of the range, every file reads, and verification fails on the missing bytes | fsimg's own, following from `V` being the range: the wrapper states the volume's end, so the bytes past `N * B` are declared even when the volume does not use them. No captured image has it |
 
 The outer volume's length plays no part. Its fields do not state it: the
 alternate master directory block lies 1024 bytes before the image's end, and the
@@ -1305,10 +1310,11 @@ image ends 4096 bytes past the last outer block in the 4096-byte `mkfs.hfsplus
 shorter than the range follows the [common rule for a truncated
 volume](architecture.md#byte-and-object-boundaries): the nested slice is clipped
 to the outer slice's end, an embedded volume starting past that end fails
-`FSIMG_ECORRUPT`, `missing_bytes` is what the slice lacks of the range, and the
-reserved tail is still computed from the range's length. A cut in the outer tail
-alone leaves the embedded volume whole: `missing_bytes` is 0 and verification
-passes, which is what the outer volume being unchecked means.
+`FSIMG_ECORRUPT`, `missing_bytes` is what the slice lacks of the range and is
+the embedded volume's only, and the reserved tail is still computed from the
+range's length, since a wrapped volume's original end stays known. A cut in the
+outer tail alone leaves the embedded volume whole: `missing_bytes` is 0 and
+verification passes, which is what the outer volume being unchecked means.
 
 The wrapper is an envelope around the HFS Plus volume, as a partition table
 is around a partition: its own catalog, bitmap, which marks every block
@@ -1627,7 +1633,7 @@ code ran. The minimum matrix:
 | Links and kinds | Symbolic links of 1, 1023 and 1024 bytes and one with a NUL; FIFOs, sockets and devices; hard-link stubs to files and symbolic links, two and three names across directories, a dangling stub, a zero reference, a link count off by one; a stub with `fileMode` 0; a stub dated from the root folder and one from the private data folder; `hlnk`/`hfs+` with another date, read as a file; a directory hard link refused and its Finder-alias look-alike read as a file; `temp` files |
 | Compression | Every type with content of 0, 1, 65535, 65536, 65537 and 200000 bytes; raw-marker chunks; a type 4 header, table and chunk out of range, a chunk inside the fork but past the resource payload, in the map, and a header whose relations fail; for types 8 and 12 a first word below `4 * (count + 1)`, beyond the fork, padded and unpadded, and a table whose words are read from offset zero while the first word points elsewhere; a chunk above the input bound; an inline size above 65536; an LZFSE `bvx-` block; overlapping and descending chunks; a chunk decoding one byte short and one long; an unknown type; a header shorter than 16 bytes; the flag without the attribute; the attribute without the flag; a nonempty data fork; sequential reading decoding each chunk once |
 | Journal | Unjournaled, clean empty journal in each byte order, uninitialized journal, transactions present with `start < end` and with `start > end`, `start == end` at a position other than `jhdr_size`, `start == size` with `end == jhdr_size` read as clean, `start` or `end` of 0, above `size` or not a multiple of 512, `size` below 256 KiB and above 1 GiB, external journal, flags with neither `0x1` nor `0x2`, a bad checksum, magic or size; journal files absent on a journaled volume and present on an unjournaled one; a `.journal` fork of two extents, of a length other than `size`, and at a start other than the info block's `offset`; an external journal with and without a `.journal` file; flags `0x3` and `0x6`, which the external row decides |
-| Wrapper | A wrapped volume with its embedded extent at the start, the middle and the end; a signature with no extent; an extent outside the outer volume; location fields at their maxima; a wrapper naming itself; a range shorter than the embedded `N * B`, which is refused, and one longer, which reads; slack past the outer volume's end; an embedded `HX`; a slice cut inside the embedded volume, at its header and after it inside the outer tail; the outer volume's other bytes changed, which verification ignores; a wrapped journal in each state: uninitialized, which reads (`h-hfsplus-16777216-e11-mkfs-w-J`), and initialized (`h-hfsplus-16777216-e11-mkfs-w-J-mounted`), clean, pending and with `offset` in either candidate base, each `FSIMG_EUNSUPPORTED`; an uninitialized wrapped journal whose `offset` does not match the fork |
+| Wrapper | A wrapped volume with its embedded extent at the start, the middle and the end; a signature with no extent; an extent outside the outer volume; location fields at their maxima; a wrapper naming itself; a range shorter than the embedded `N * B` or than 1536 bytes, each refused without naming truncation, and one longer, which reads; slack past the outer volume's end; an embedded `HX`; a slice cut inside the embedded volume, at its header, keeping `kept` bytes with `N * B <= kept < range`, and after the range inside the outer tail; the outer volume's other bytes changed, which verification ignores; a wrapped journal in each state: uninitialized, which reads (`h-hfsplus-16777216-e11-mkfs-w-J`), and initialized (`h-hfsplus-16777216-e11-mkfs-w-J-mounted`), clean, pending and with `offset` in either candidate base, each `FSIMG_EUNSUPPORTED`; an uninitialized wrapped journal whose `offset` does not match the fork |
 | Writer | Both variants; every block size of the writer profile; exact and automatic sizing at each bitmap-block boundary; an empty catalog; a full volume; names at each length after decomposition, each of the four reserved root names with the private data folder's spelled through four U+2400, colliding siblings on each variant, U+2400 stored as U+0000, and the refused names: percent-text values, an all-ignorable name on `hfsplus`, each of the 23 `fsck_hfs` sequences, alone and after a starter, and a Greek letter with U+0301 accepted beside it; label default, 255 units and 256; owner and mode extremes; times at 1904, 1970, 2040 and beyond as counted losses and refusals; symbolic links and FIFOs; a catalog wide enough for map nodes; byte identity across source order, cache size, scratch path and time zone; a poison scan of every unused byte |
 | Failure | Allocation, scratch, short read, short write, premature EOF, source change, cancellation, flush and publication failures at every stage, each followed by a cleanup check |
 
