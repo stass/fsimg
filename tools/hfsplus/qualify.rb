@@ -19,8 +19,8 @@
 #                   with the extra-data marks expected, `x -O` delivers each file
 #
 # A step's failure does not stop the steps after it, so that one result does not
-# hide another. A smallest or nearly full volume may refuse a modification with
-# ENOSPC; the refusal is recorded, every other one is a failure.
+# hide another. A smallest or nearly full volume may refuse a modification for
+# lack of room; the refusal is recorded, every other one is a failure.
 #
 # Stored ownership shows only under `hdiutil attach -owners on`, where the
 # mounting user can read only what the stored mode lets others read. So each
@@ -51,6 +51,8 @@ module HfsPlusQualify
   LARGE_BLOCKS = [4096, 8192].freeze
   NEARLY_FULL_BYTES = 4 << 20
   NEARLY_FULL_FREE_BLOCKS = 2
+  # Modifications run out of room part of the way through.
+  LOW_SPACE_BYTES = 512 << 10
   # One entry more than the catalog header's map holds, with free space beyond.
   MAP_NODE_FILES = 86_770
   MAP_NODE_BYTES = 160 << 20
@@ -117,8 +119,11 @@ module HfsPlusQualify
 
   # What readdir returns for a name given to the writer: E3's canonical
   # decomposition, in which no supplementary value decomposes or reorders. The
-  # names here avoid the BMP ranges macOS also leaves alone.
-  def native_path(path) = path.gsub(/[^\u{10000}-\u{10ffff}]+/) { _1.unicode_normalize(:nfd) }.b
+  # names here avoid the BMP ranges macOS also leaves alone. Ruby orders marks
+  # before expanding U+0F73 and its like, which have class 0 but decompose into
+  # marks, so a second pass sorts what the first expanded, as E3 observes.
+  def native_path(path) =
+    path.gsub(/[^\u{10000}-\u{10ffff}]+/) { _1.unicode_normalize(:nfd).unicode_normalize(:nfd) }.b
 
   # The tree expected on a volume made from `entries`.
   def expected_tree(entries)
@@ -207,6 +212,8 @@ module HfsPlusQualify
       Image.of(name: "#{variant}-smallest-tree", variant: variant, block: 0, volume_bytes: nil, entries: block_tree(4096), limited: true),
       Image.of(name: "#{variant}-nearly-full", variant: variant, block: 4096, volume_bytes: NEARLY_FULL_BYTES,
                entries: block_tree(4096), limited: true, fill: true),
+      Image.of(name: "#{variant}-low-space", variant: variant, block: 4096, volume_bytes: LOW_SPACE_BYTES,
+               entries: block_tree(4096), limited: true),
       Image.of(name: "#{variant}-map-nodes", variant: variant, block: 4096, volume_bytes: MAP_NODE_BYTES, entries: map_node_entries),
       Image.of(name: "#{variant}-names", variant: variant, block: 4096, volume_bytes: ORDINARY_BYTES,
                entries: length_names.map { Entry.of("file", "/#{_1}") }, refused: OVERLONG_NAMES),
@@ -309,7 +316,7 @@ module HfsPlusQualify
 
     def generator_status(path, entries, block, volume_bytes)
       spec = File.join(@directory, "spec.tsv")
-      File.write(spec, entries.map(&:spec_line).join("\n") << "\n")
+      File.write(spec, entries.map { "#{_1.spec_line}\n" }.join)
       args = [@tools.generator, path, @image.variant, block.to_s, "spec:#{spec}"]
       args << volume_bytes.to_s if volume_bytes
       @log.run_status(*args, timeout: COMMAND_TIMEOUT)
@@ -364,13 +371,16 @@ module HfsPlusQualify
 
     # The volume, by `find`, with macOS's own additions to the root left out.
     def observe(digests:)
-      out, ok = @log.run("find", @mountpoint, "-mindepth", "1", "-print0", timeout: COMMAND_TIMEOUT)
+      out, ok = @log.run("find", @mountpoint, "-mindepth", "1", *native_prune, "-print0", timeout: COMMAND_TIMEOUT)
       raise Error, "find failed: #{out}" unless ok
 
-      out.split("\0".b).filter_map do |full|
-        relative = full.byteslice(@mountpoint.bytesize..)
-        [relative.b, HfsPlusQualify.view_of(full, digests: digests)] unless HfsPlusQualify.native_extra?(relative)
-      end.to_h
+      out.split("\0".b).to_h { [_1.byteslice(@mountpoint.bytesize..).b, HfsPlusQualify.view_of(_1, digests: digests)] }
+    end
+
+    # What macOS adds is left out unread: its .Trashes refuses the mounting user.
+    def native_prune
+      paths = NATIVE_ROOT.flat_map { ["-o", "-path", File.join(@mountpoint, _1)] }.drop(1)
+      ["(", *paths, ")", "-prune", "-o"]
     end
 
     # Each pair resolves as E3 says: colliding names to one file, others to two.
@@ -451,8 +461,9 @@ module HfsPlusQualify
   end
 
   # The read-write mount's work: each step changes the volume and returns the
-  # tree it now shows. A step's own folder goes away when ENOSPC refuses it on a
-  # limited volume, so that a refused step leaves the tree as it was.
+  # tree it now shows. A step's own folder goes away when a limited volume
+  # refuses it, so that a refused step leaves the tree as it was: ENOSPC, or
+  # ENOTSUP from link(2) when macOS had no room to make its hard-link folder.
   class Modification
     PATTERN = "fsimg qualification\n"
     Step = Data.define(:name, :folder, :run)
@@ -474,7 +485,7 @@ module HfsPlusQualify
     def run
       steps.reduce([@tree, []]) do |(tree, refusals), step|
         [apply(step, tree), refusals]
-      rescue Errno::ENOSPC => e
+      rescue Errno::ENOSPC, Errno::ENOTSUP => e
         raise unless @limited
 
         FileUtils.rm_rf(File.join(@root, step.folder)) if step.folder

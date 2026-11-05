@@ -78,7 +78,7 @@ module HfsPlusCapture
   # Appends what was run to commands.txt and runs it.
   class Log
     def initialize = @lines = []
-    def to_s = @lines.join("\n") << "\n"
+    def to_s = @lines.map(&:b).join("\n".b) << "\n"
     def note(text) = @lines << text
 
     def shown_command(argv) = argv.map { _1.match?(%r{\A[\w/.@:=+,-]+\z}) ? _1 : _1.shellescape }.join(" ")
