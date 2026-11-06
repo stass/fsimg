@@ -10,11 +10,6 @@ evidence and provenance.
   check go into the record from the first CI log. A Mac OS 8.1 to 9.2 writer's
   non-ASCII names stay unobserved, and no Finder-made alias or Time Machine
   volume is in the corpus.
-* [Low] **Large-catalog qualification verdict** (`tools/hfsplus/qualify.rb`):
-  `qualify.rb --large-catalog` has not finished with results on the writer that
-  states the low 32 bits of a fork past `2^32` bytes as its `clumpSize`. `fsck_hfs
-  -fn`, a mount and `fsimg W` accept that volume, but the compare and modify steps
-  have no recorded verdict. A run takes about 2.5 hours and 8 GiB of disk.
 * [Medium] **Apple data representation** (`include/fsimg.h`,
   `specs/design-metadata.md`): resource forks, extended attributes, Finder
   information and BSD flags have no place in the entry model, so the reader

@@ -2216,9 +2216,12 @@ the 16 nodes free.
 
 A catalog past 32 bits, `qualify.rb --large-catalog`: 2970000 files of 240-byte
 names on a volume of 4714397696 bytes, a catalog fork of 4306628608 bytes in
-1051423 nodes. It is not one of the 35 volumes, and its compare steps have no
-verdict: the one complete run lost its results when the tool failed to write
-its log. What it establishes comes from direct checks:
+1051423 nodes. It is not one of the 35 volumes. A complete run passes every
+step: generation, `fsck_hfs -fn` before and after, the mount, the modification
+steps, the remount and the `fsimg` compare, with no refusals. The run takes
+about 2.5 hours from the SSD; with its root on a RAM disk and its mount points
+outside it (`--mounts`), about 1.5 hours. Direct checks show which `clumpSize`
+the catalog fork needs:
 
 | Catalog fork's `clumpSize` | `fsck_hfs -fn` on the writer's volume |
 | --- | --- |
