@@ -138,8 +138,8 @@ hdiutil detach "$dev"    # frees the memory; the contents are gone
 
 The disk takes memory only as it fills. macOS will not mount another volume
 on it, so a check that mounts images, such as the HFS Plus qualification,
-keeps its mount points on the system disk (`qualify.rb --mounts`). It mounts with owners ignored, which
-the suite tolerates. Its size must cover the build plus the largest scratch
+keeps its mount points on the system disk, under `/tmp`. It mounts with
+owners ignored, which the suite tolerates. Its size must cover the build plus the largest scratch
 the chosen target writes: `make check` and `check-scale` fit in 16 GiB, and
 `FSIMG_HFS_LARGE=1` writes over 4 GiB of HFS Plus images. The QNX4 writer's
 `--scale-limits` run needs about 21 GiB of free scratch space, and the HFS
@@ -1591,11 +1591,10 @@ Build `all` before asking for `hfsplus-write-gen`, in a separate `make`: `all`
 recurses, so naming both in one parallel run links the libraries twice at once
 and corrupts them.
 `--only REGEX` runs part of it, and `--large-catalog`, which takes hours, runs the
-one volume whose catalog passes `2^32` bytes. `--root` and `--mounts` must be
-directories private to the user. `--root` may be on a RAM disk, but macOS
-refuses to mount on a volume a user attached, so then pass `--mounts DIR`
-naming a directory on the system disk for the mount points, which hold no
-data.
+one volume whose catalog passes `2^32` bytes. `--root` must be a directory
+private to the user, and may be on a RAM disk. The mount points, which hold
+no data, go in a fresh private directory under `/tmp`, since macOS refuses to
+mount on a volume a user attached.
 
 The run on Darwin 25.6.0 against the native captures, with the corpus variable
 unset, used hfsdump at the hfsfuse pin `eed780cbe0445893de6f4aa8d74461da00756984` and Sleuth Kit 4.15.0:

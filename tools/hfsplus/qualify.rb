@@ -37,6 +37,7 @@ require "digest"
 require "fileutils"
 require "json"
 require "optparse"
+require "tmpdir"
 require_relative "capture"
 
 module HfsPlusQualify
@@ -272,15 +273,15 @@ module HfsPlusQualify
   class Cycle
     STEPS = %i[generate fsck_before mount modify fsck_after remount fsimg].freeze
 
-    # The volume mounts beside its image, or under `mounts` when given: macOS
-    # refuses a mount on a volume a user attached, such as a RAM disk. The
-    # `.mnt` suffix keeps the mount point apart from the image's directory.
-    def initialize(image, tools, directory, mounts: nil)
+    # The volume mounts at a directory of its own under `mounts`, apart from
+    # the image's directory: macOS refuses a mount on a volume a user attached,
+    # such as a RAM disk holding root.
+    def initialize(image, tools, directory, mounts:)
       @image = image
       @tools = tools
       @directory = directory
       @path = File.join(directory, "image.img")
-      @mountpoint = mounts ? File.join(mounts, "#{image.name}.mnt") : File.join(directory, "mnt")
+      @mountpoint = File.join(mounts, image.name)
       @log = HfsPlusCapture::Log.new
       @attachments = HfsPlusCapture::Attachments.new(@log)
       @tree = {}
@@ -306,12 +307,7 @@ module HfsPlusQualify
       File.write(File.join(@directory, "commands.txt"), @log.to_s)
     end
 
-    # An empty mount point goes; one still in use or holding files stays.
-    def remove_mountpoint
-      Dir.rmdir(@mountpoint)
-    rescue Errno::ENOENT, Errno::ENOTEMPTY, Errno::EBUSY
-      nil
-    end
+    def remove_mountpoint = HfsPlusQualify.remove_empty(@mountpoint)
 
     private
 
@@ -844,9 +840,6 @@ module HfsPlusQualify
       o.on("--generator PATH", "the built hfsplus-write-gen") { options[:generator] = File.expand_path(_1) }
       o.on("--fsimg PATH", "the built fsimg") { options[:fsimg] = File.expand_path(_1) }
       o.on("--root DIR", "a disposable directory, private to this user, for the images") { options[:root] = File.expand_path(_1) }
-      o.on("--mounts DIR", "a directory, private to this user and not on a RAM disk, for the mount points") do
-        options[:mounts] = File.expand_path(_1)
-      end
       o.on("--only REGEX", "only images whose name matches") { options[:only] = Regexp.new(_1) }
       o.on("--large-catalog", "only the volume whose catalog passes 2^32 bytes") { options[:large_catalog] = true }
       o.on("--keep", "keep each passing image too; a failed one is always kept") { options[:keep] = true }
@@ -885,14 +878,26 @@ module HfsPlusQualify
     end
   end
 
-  # Each run writes, renames and removes beneath root and the mount points, so
-  # neither may be a symbolic link or open to another user's changes.
+  # Each run writes, renames and removes beneath root, so it may not be a
+  # symbolic link or open to another user's changes.
   def private_directory(path)
     FileUtils.mkdir_p(path)
     stat = File.lstat(path)
     return if stat.directory? && stat.uid == Process.euid && (stat.mode & 0o022).zero?
 
     raise Error, "#{path} is not a directory private to this user"
+  end
+
+  # Remove a mount point or the directory of them only when it is empty. A
+  # recursive removal would reach into a volume left mounted, so one still in
+  # use or holding files stays, with a warning; a missing one is already gone.
+  # The removal runs in ensure blocks, so it never raises over the real error.
+  def remove_empty(directory)
+    Dir.rmdir(directory)
+  rescue Errno::ENOENT
+    nil
+  rescue SystemCallError => e
+    warn "qualify.rb: left #{directory}: #{e.message}"
   end
 
   def write_results(root, rows)
@@ -912,14 +917,22 @@ module HfsPlusQualify
     end
     root = options.fetch(:root)
     tools = Tools.new(generator: options.fetch(:generator), fsimg: options.fetch(:fsimg))
-    [root, options[:mounts]].compact.each { private_directory(_1) }
+    private_directory(root)
     # An image attached by an earlier run lies under root, whose image
     # directories each run removes, so it must be detached first.
     stale = leftovers(root)
     raise Error, "already attached: #{stale.join(', ')}" unless stale.empty?
 
     FileUtils.rm_f(File.join(root, "results.json"))
-    rows = run_images(chosen, tools, root, mounts: options[:mounts], keep: options[:keep])
+    # The mount points live in a fresh private directory on the system disk.
+    # It goes with rmdir, never a recursive removal, which would reach into a
+    # volume left mounted.
+    mounts = Dir.mktmpdir("fsimg-qualify-mounts-", "/tmp")
+    rows = begin
+      run_images(chosen, tools, root, mounts: mounts, keep: options[:keep])
+    ensure
+      remove_empty(mounts)
+    end
     puts result_table(rows)
     remaining = leftovers(root)
     warn "still attached: #{remaining.join(', ')}" unless remaining.empty?

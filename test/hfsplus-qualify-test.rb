@@ -155,6 +155,51 @@ class HfsPlusQualifyTest < Minitest::Test
     end
   end
 
+  def test_main_mounts_under_a_fresh_private_tmp_directory_it_removes_after_pass_or_interrupt
+    row = passing_row
+    [-> { row }, -> { raise Interrupt }].each do |outcome|
+      Dir.mktmpdir do |root|
+        seen = []
+        cycle = Object.new
+        cycle.define_singleton_method(:run, &outcome)
+        record = lambda do |*, mounts:|
+          seen << [mounts, File.stat(mounts).mode & 0o777]
+          cycle
+        end
+        capture_io do
+          with_main_stubs(record) { HfsPlusQualify.main(main_args(root)) }
+        rescue Interrupt
+          nil
+        end
+        mounts, mode = seen.fetch(0)
+        assert_match(%r{\A/tmp/fsimg-qualify-mounts-}, mounts)
+        assert_equal(0o700, mode)
+        refute_path_exists(mounts)
+      end
+    end
+  end
+
+  def test_main_leaves_a_mounts_directory_that_still_holds_files_and_warns
+    row = passing_row
+    mounts = nil
+    Dir.mktmpdir do |root|
+      cycle = Object.new
+      cycle.define_singleton_method(:run) do
+        File.write(File.join(mounts, "left"), "data")
+        row
+      end
+      record = lambda do |*, **options|
+        mounts = options.fetch(:mounts)
+        cycle
+      end
+      _, errors = capture_io { with_main_stubs(record) { HfsPlusQualify.main(main_args(root)) } }
+      assert_equal("data", File.read(File.join(mounts, "left")))
+      assert_match(%r{left /tmp/fsimg-qualify-mounts-[^:]*: Directory not empty}, errors)
+    end
+  ensure
+    FileUtils.rm_rf(mounts) if mounts&.start_with?("/tmp/fsimg-qualify-mounts-")
+  end
+
   def test_main_returns_failure_for_bad_regexp_and_unknown_option
     [["--only", "["], ["--unknown-option"]].each do |args|
       _, errors = capture_io { assert_equal(1, HfsPlusQualify.main(args)) }
@@ -321,7 +366,7 @@ class HfsPlusQualifyTest < Minitest::Test
          **%i[created modified changed accessed].to_h { [_1, {seconds: "0"}] }}
       end
       executable = fake_fsimg(root: root, output: "#{records.map(&:to_json).join("\n")}\n")
-      cycle = HfsPlusQualify::Cycle.new(fixture_image, HfsPlusQualify::Tools.new(generator: "unused", fsimg: executable), root)
+      cycle = HfsPlusQualify::Cycle.new(fixture_image, HfsPlusQualify::Tools.new(generator: "unused", fsimg: executable), root, mounts: root)
       cycle.instance_variable_set(:@native_additions, [".Trashes"])
       entries = cycle.send(:fsimg_entries)
       assert_equal(paths.drop(2), entries.keys)
@@ -380,7 +425,7 @@ class HfsPlusQualifyTest < Minitest::Test
 
   def test_attempt_records_any_step_failure_but_propagates_interrupt
     Dir.mktmpdir do |root|
-      cycle = HfsPlusQualify::Cycle.new(fixture_image, nil, root)
+      cycle = HfsPlusQualify::Cycle.new(fixture_image, nil, root, mounts: root)
       [HfsPlusFields::Error, KeyError, NoMethodError].each do |error|
         cycle.define_singleton_method(:broken_step) { raise error, "broken field" }
         assert_equal("FAIL: broken field", cycle.send(:attempt, :broken_step))
@@ -392,7 +437,7 @@ class HfsPlusQualifyTest < Minitest::Test
 
   def test_cycle_releases_attachments_when_a_step_is_interrupted
     Dir.mktmpdir do |root|
-      cycle = HfsPlusQualify::Cycle.new(fixture_image, nil, root)
+      cycle = HfsPlusQualify::Cycle.new(fixture_image, nil, root, mounts: root)
       releases = []
       attachments = Object.new
       attachments.define_singleton_method(:release) { releases << :release }
@@ -580,7 +625,7 @@ class HfsPlusQualifyTest < Minitest::Test
   private
 
   def cycle_for(root:, generator: "unused", fsimg: "unused") =
-    HfsPlusQualify::Cycle.new(fixture_image, HfsPlusQualify::Tools.new(generator: generator, fsimg: fsimg), root)
+    HfsPlusQualify::Cycle.new(fixture_image, HfsPlusQualify::Tools.new(generator: generator, fsimg: fsimg), root, mounts: root)
 
   def fake_generator(root:, code:, output:, leaves_probe:)
     executable = File.join(root, "generator-double")
@@ -641,6 +686,15 @@ class HfsPlusQualifyTest < Minitest::Test
 
   def passing_row = {image: "fixture", **HfsPlusQualify::Cycle::STEPS.to_h { [_1, "pass"] },
                     refused: [], uncompressed: [], facts: {}, detach: "pass"}
+
+  # Run main over the fixture image with Cycle.new replaced by cycle_new.
+  def with_main_stubs(cycle_new, &)
+    with_stub(HfsPlusQualify, :selected, replacement: [fixture_image]) do
+      with_stub(HfsPlusQualify, :leftovers, replacement: []) do
+        with_stub(HfsPlusQualify::Cycle, :new, replacement: cycle_new, &)
+      end
+    end
+  end
 
   def main_args(root) = ["--root", root, "--generator", "unused-generator", "--fsimg", "unused-fsimg"]
 
