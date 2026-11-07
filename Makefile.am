@@ -473,6 +473,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/gen-fat-tables.rb tools/gen-hfsplus-tables.rb \
 	tools/hfsplus-unicode-exceptions.txt tools/hfsplus/capture.rb \
 	tools/hfsplus/qualify.rb \
+	tools/erofs/capture.rb tools/erofs/erofsdump.rb \
 	tools/hfsplus/check-unicode-tables.rb \
 	tools/hfsplus/e8_interrupt.rb tools/hfsplus/fields.rb \
 	tools/hfsplus/index_keys.rb tools/hfsplus/ndif.rb \

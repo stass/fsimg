@@ -77,7 +77,21 @@ configure (package `uuid` not found); with `uuid-dev` but without
 `liblz4-dev` it fails with `unexpected codec set: lzma, deflate, zstd`.
 With both installed, the script
 succeeds and `mkfs.erofs -V` prints the same two lines as on macOS. The
-Dockerfile carries no erofs-utils build.
+Dockerfile carries no erofs-utils build, but its apt package list includes
+`liblz4-dev` and `uuid-dev`, so the CI image has what the script needs.
+
+### Capture tools
+
+`tools/erofs/capture.rb NAME SOURCE -- MKFS-OPTION...` builds one fixture under
+`$FSIMG_EROFS_FIXTURES/NAME` (never overwriting) with a fixed build time (`-T`,
+from `SOURCE_DATE_EPOCH`, default 0) and UUID (`-U`), and records the image,
+the exact command, the tool versions, the SHA-256, the `dump.erofs`
+superblock, statistics and root listing, and a manifest of the source tree.
+`tools/erofs/erofsdump.rb IMAGE` is the independent structure dumper, written
+from `specs/design-erofs.md` alone: it prints every superblock field, checks
+the superblock checksum, walks the tree from the root and prints inode
+headers, attributes, directory entries, chunk entries and every compressed
+index record, and reports each broken design rule as a `problem:` line.
 
 ### rust-fs-erofs
 
