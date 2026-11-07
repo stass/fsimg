@@ -399,13 +399,6 @@
   for `e13-big5g-chunk1m`, a 3 MB image.
   Reporting a driver's holes as ZERO ranges would let extraction leave
   them as holes.
-* [Medium] **EROFS writer output may not stay sparse**
-  (`lib/formats/erofs/write-emit.c`): the stage 10 qualification's sparse
-  source file of 2^32 + 5000 bytes produced an image that occupied about
-  4 GiB on disk, while [architecture](specs/architecture.md) says emission
-  leaves a file's zero ranges to the fresh volume beneath them. Check
-  whether emission writes the source's hole ranges, or the observation
-  came from the copy-out, and fix or document it.
 * [Medium] **EROFS LZ4 measurement runs before the output budget**
   (`lib/formats/erofs/write-plan.c` `measure_files`,
   `lib/write/writer.c`): under `compression=lz4` planning reads and

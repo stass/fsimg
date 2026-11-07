@@ -999,6 +999,20 @@ of their children; its metadata comes from the first operand that scanned it,
 and a parent created for a longer operand never outranks a scanned directory.
 Any other repeated image path fails planning and names the path, so naming
 the same tree twice fails on its first file.
+.Pp
+A host file is read in full, and its holes are stored as zeros like any
+other bytes: fsimg does not ask the host where a source file's holes are,
+so in a raw image a sparse file occupies its logical size wherever the
+format stores it uncompressed.
+A manifest's zero content,
+.Cm fsimg.content Ns = Ns Cm zero
+or
+.Cm fsimg.holes ,
+is left unwritten there instead.
+A DMG, VHD or Android sparse image container stores an all-zero chunk of
+either as a zero run, as
+.Sx Containers, compression and streams
+describes.
 .Bl -tag -width Ds
 .It Fl e Ar epoch
 Signed decimal Unix seconds for reproducible timestamps; requires
