@@ -364,13 +364,6 @@
 
 ## Bugs by subsystem
 
-* [Medium] **EROFS dumper lags two evidence corrections**
-  (`tools/erofs/erofsdump.rb`): it prints the superblock epoch as a compact
-  inode's time instead of adding the word at `0x0C`, and its compact head
-  block number omits the count marker of a cluster whose head lies in the
-  previous group, so it misreports 3 files of `e8-lz4-big16k` and 40 of
-  `e9-mixed-lz4-lzma` ([format design](specs/design-erofs.md#index-records)).
-
 * [Low] **EROFS driver design names a section that does not exist**
   (`specs/design-erofs-driver.md`, reuse list): it points the MicroLZMA and
   Zstandard block decoders at "the EROFS block-decoding section" of

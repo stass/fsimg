@@ -16,9 +16,10 @@
 # the image holds and reports each rule the image breaks as a `problem:` line
 # instead of stopping. A read outside the image or an unusable superblock is
 # an error: the message goes to standard error and the exit status is 1.
-# A `problem:` line also makes the exit status 1. An image whose tree this
-# dumper cannot decode (the 48-bit layout or the metadata box) is dumped as
-# far as the superblock and exits with status 2.
+# A `problem:` line also makes the exit status 1. A feature the design
+# classifies as unsupported (or an image whose tree this dumper cannot
+# decode: the 48-bit layout, the metadata box) is reported as an
+# `unsupported:` or `note:` line and, absent any problem, exits with status 2.
 #
 # Where the design marks a rule provisional the dumper implements the design's
 # default and prints a `note:`.
@@ -26,6 +27,9 @@ require "optparse"
 
 module ErofsDump
   class Error < StandardError; end
+
+  # A volume the design refuses as unsupported, where reading cannot go on.
+  class Unsupported < Error; end
 
   MAGIC = 0xE0F5E1E2
   SB_OFFSET = 1024
@@ -46,9 +50,12 @@ module ErofsDump
     0x100 => "METABOX"
   }.freeze
   COMPAT_SB_CHKSUM = 0x01
+  COMPAT_XATTR_FILTER = 0x04
   COMPAT_PLAIN_XATTR_PFX = 0x10
+  INCOMPAT_LZ4_0PADDING = 0x001
   INCOMPAT_COMPR_CFGS = 0x002
   INCOMPAT_CHUNKED_FILE = 0x004
+  INCOMPAT_COMPR_HEAD2 = 0x008
   INCOMPAT_ZTAILPACKING = 0x010
   INCOMPAT_FRAGMENTS = 0x020
   INCOMPAT_XATTR_PREFIXES = 0x040
@@ -98,6 +105,10 @@ module ErofsDump
     4 => "trusted.", 6 => "security."
   }.freeze
 
+  # The advice bits this dumper knows; any other is reserved.
+  ADVICE_KNOWN = 0x3F
+  # Bits 2 to 14 of a full index record's advice word are reserved.
+  RECORD_RESERVED_BITS = 0x7FFC
   ADVICE_TWO_BYTE = 0x01
   ADVICE_HEAD1_BIG = 0x02
   ADVICE_HEAD2_BIG = 0x04
@@ -114,6 +125,11 @@ module ErofsDump
   # field: the marker that a physical cluster spans several blocks.
   BIG_CLUSTER_FLAG = 0x800
   BIG_CLUSTER_COUNT = 0x7FF
+  # A physical cluster is at most 1 MiB stored.
+  MAX_CLUSTER_BYTES = 1 << 20
+  INT64_MAX = (1 << 63) - 1
+  # Name filter hash seed; the built-in prefix index is added to it.
+  FILTER_SEED = 0x25BBE08F
 
   # Superblock fields: name, byte offset, unpack directive. The metabox NID
   # and the word after it lie in the first extension slot and are read apart.
@@ -169,7 +185,12 @@ module ErofsDump
 
   Dirent = Data.define(:nid, :type, :name)
   Pending = Data.define(:nid, :expected_type, :parent)
-  XattrEntry = Data.define(:text, :stop)
+  # `bit` is the entry's name-filter bit, or nil when its long prefix is unknown.
+  XattrEntry = Data.define(:text, :stop, :bit)
+  # A long xattr prefix: a built-in base index and the infix after it.
+  LongPrefix = Data.define(:base, :infix) do
+    def full = "#{XATTR_PREFIXES.fetch(base, '')}#{infix.b}"
+  end
 
   # Compressed map header, the 8 bytes before the index.
   MapHeader = Data.define(:raw) do
@@ -208,6 +229,49 @@ module ErofsDump
     module_function
 
     def update(seed, bytes) = bytes.each_byte.reduce(seed) { |c, b| TABLE[(c ^ b) & 0xFF] ^ (c >> 8) }
+  end
+
+  # XXH32 as the xxHash specification (doc/xxhash_spec.md) describes it.
+  module Xxh32
+    PRIME1 = 0x9E3779B1
+    PRIME2 = 0x85EBCA77
+    PRIME3 = 0xC2B2AE3D
+    PRIME4 = 0x27D4EB2F
+    PRIME5 = 0x165667B1
+    MASK = 0xFFFFFFFF
+
+    module_function
+
+    def rotl(value, bits) = ((value << bits) | (value >> (32 - bits))) & MASK
+    def round(acc, lane) = (rotl((acc + lane * PRIME2) & MASK, 13) * PRIME1) & MASK
+
+    # The hash of `bytes` under `seed`: stripes of four lanes, then the
+    # remaining words and bytes, then the avalanche.
+    def hash(bytes, seed: 0)
+      data = bytes.b
+      stripes = data.bytesize / 16
+      acc = stripes.zero? ? (seed + PRIME5) & MASK : converge(data, stripes, seed)
+      acc = (acc + data.bytesize) & MASK
+      tail = data.byteslice(stripes * 16..)
+      words = tail.bytesize / 4
+      acc = tail.unpack("L<#{words}").reduce(acc) { |a, lane| (rotl((a + lane * PRIME3) & MASK, 17) * PRIME4) & MASK }
+      acc = tail.byteslice(words * 4..).each_byte.reduce(acc) { |a, byte| (rotl((a + byte * PRIME5) & MASK, 11) * PRIME1) & MASK }
+      avalanche(acc)
+    end
+
+    def converge(data, stripes, seed)
+      start = [seed + PRIME1 + PRIME2, seed + PRIME2, seed, seed - PRIME1].map { _1 & MASK }
+      accs = data.byteslice(0, stripes * 16).unpack("L<*").each_slice(4).reduce(start) do |current, lanes|
+        current.zip(lanes).map { |acc, lane| round(acc, lane) }
+      end
+      accs.zip([1, 7, 12, 18]).sum { |acc, bits| rotl(acc, bits) } & MASK
+    end
+
+    def avalanche(acc)
+      acc = ((acc ^ (acc >> 15)) * PRIME2) & MASK
+      acc = ((acc ^ (acc >> 13)) * PRIME3) & MASK
+      acc ^ (acc >> 16)
+    end
   end
 
   # Bounds-checked access to the image.
@@ -264,21 +328,18 @@ module ErofsDump
   # lies inside the declared volume (blocks * block size, or the file when
   # the superblock declares no block count).
   class Dumper
-    ANCHOR_NOTE = "compact-index head block numbers follow what mkfs.erofs 1.9.4 and dump.erofs " \
-                  "show: a group's first head is at the anchor plus 1, or at the anchor when " \
-                  "advice permits big clusters; the design text says anchor plus the blocks of " \
-                  "preceding heads (E8 decides)"
-
     def initialize(volume, out)
       @vol = volume
       @out = out
       @problems = 0
+      @unsupported = 0
+      @lz4_max_blocks = nil
       @seen = Set.new
       @directories = Set.new
       @noted = Set.new
     end
 
-    attr_reader :problems
+    attr_reader :problems, :unsupported
 
     # Prints the image. Returns :tree_not_decoded when the walk is skipped
     # because the image uses a layout this dumper does not decode, else :ok.
@@ -290,6 +351,11 @@ module ErofsDump
       read_prefix_table
       return :ok unless tree
 
+      # A volume refused at open has no readable tree.
+      if @unsupported.positive?
+        note "the tree is not decoded: the volume is refused as unsupported"
+        return :tree_not_decoded
+      end
       if @sb.incompat.anybits?(INCOMPAT_48BIT | INCOMPAT_METABOX)
         note "the tree is not decoded: the 48-bit layout and metadata-box inodes are not supported by this dumper"
         return :tree_not_decoded
@@ -305,6 +371,12 @@ module ErofsDump
 
     def note_once(text)
       note(text) if @noted.add?(text)
+    end
+
+    # A feature the design refuses as unsupported rather than corrupt.
+    def unsupported_feature(text)
+      @unsupported += 1
+      say "unsupported: #{text}" if @noted.add?("unsupported: #{text}")
     end
 
     def problem(text)
@@ -342,8 +414,9 @@ module ErofsDump
       full = @vol.read(SB_OFFSET, SB_BASE_SIZE + 16 * fields[:ext_slots]).b
       sb = Superblock.new(**fields, metabox_nid: full.bytesize >= 0x88 ? full.unpack1("Q<", offset: 0x80) : nil,
                                     reserved_88: full.bytesize >= 0x90 ? full.unpack1("Q<", offset: 0x88) : nil)
-      raise Error, "blkszbits #{sb.blkszbits} is outside 9..12" unless (9..12).cover?(sb.blkszbits)
-      raise Error, "superblock of #{sb.size} bytes ends past byte #{SB_REGION_END}" if SB_OFFSET + sb.size > SB_REGION_END
+      raise Error, "blkszbits #{sb.blkszbits} is below 9" if sb.blkszbits < 9
+      raise Unsupported, "blkszbits #{sb.blkszbits} is above 12" if sb.blkszbits > 12
+      raise Unsupported, "superblock of #{sb.size} bytes ends past byte #{SB_REGION_END}" if SB_OFFSET + sb.size > SB_REGION_END
 
       @domain = sb.blocks.zero? ? @vol.size : sb.blocks * sb.block_size
       sb
@@ -394,9 +467,9 @@ module ErofsDump
       unknown_incompat = sb.incompat & ~INCOMPAT.keys.reduce(0, :|)
       unknown_compat = sb.compat & ~COMPAT.keys.reduce(0, :|)
       problem "fixed nanoseconds #{sb.fixed_nsec} is not below 1000000000" if sb.fixed_nsec >= 1_000_000_000
-      problem "dirblkbits #{sb.dirblkbits} is nonzero" unless sb.dirblkbits.zero?
-      problem "extra device count #{sb.extra_devices} is nonzero (refused by the design)" unless sb.extra_devices.zero?
-      problem "unknown incompatible bits #{format('0x%x', unknown_incompat)}" unless unknown_incompat.zero?
+      unsupported_feature "dirblkbits #{sb.dirblkbits} is nonzero" unless sb.dirblkbits.zero?
+      unsupported_feature "extra device count #{sb.extra_devices} is nonzero" unless sb.extra_devices.zero?
+      unsupported_feature "unknown incompatible bits #{format('0x%x', unknown_incompat)}" unless unknown_incompat.zero?
       note "unknown compatible bits #{format('0x%x', unknown_compat)}" unless unknown_compat.zero?
       note "reserved bytes are nonzero" unless sb.reserved_6a.zero? && sb.reserved_78.zero? && sb.reserved_88.to_i.zero?
       note "image is #{@vol.size} bytes; the superblock declares #{@domain}" if @domain != @vol.size
@@ -453,7 +526,7 @@ module ErofsDump
       return unless @sb.incompat.anybits?(INCOMPAT_COMPR_CFGS)
 
       say "compression configuration (algorithm mask #{format('0x%x', @sb.u1)})"
-      problem "algorithm mask has bits above 3" if @sb.u1 > 0xF
+      unsupported_feature "algorithm mask has bits above 3" if @sb.u1 > 0xF
       allowed_algorithms.reduce(SB_OFFSET + @sb.size) do |pos, alg|
         pos = read_config(alg, pos)
         break unless pos
@@ -466,20 +539,46 @@ module ErofsDump
     # after it, or nil when the record cannot be read.
     def read_config(alg, pos)
       pos = align(pos, 4)
-      unless pos + 2 <= SB_REGION_END && pos + 2 <= @domain
-        problem "configuration record header for #{ALGORITHMS[alg]} lies outside the superblock region"
-        return nil
-      end
+      return config_outside(alg, "header") if pos + 2 > SB_REGION_END
+      return config_truncated(alg) if pos + 2 > @domain
+
       len = u16(pos)
-      unless pos + 2 + len <= SB_REGION_END && pos + 2 + len <= @domain
-        problem "configuration record of #{len} bytes for #{ALGORITHMS[alg]} ends past byte #{SB_REGION_END} or the volume"
-        return nil
-      end
+      return config_outside(alg, "record of #{len} bytes") if pos + 2 + len > SB_REGION_END
+      return config_truncated(alg) if pos + 2 + len > @domain
+
       payload = read(pos + 2, len)
-      problem "configuration record of #{len} bytes for #{ALGORITHMS[alg]}, expected #{CONFIG_LENGTHS[alg]}" if len != CONFIG_LENGTHS[alg]
+      unsupported_feature "configuration record of #{len} bytes for #{ALGORITHMS[alg]}, expected #{CONFIG_LENGTHS[alg]}" if len != CONFIG_LENGTHS[alg]
       detail = len == CONFIG_LENGTHS[alg] ? config_fields(alg, payload) : Fmt.hex(payload)
       say format("  %-10s offset %d length %d: %s", ALGORITHMS[alg], pos, len, detail)
+      check_config_bounds(alg, payload) if len == CONFIG_LENGTHS[alg]
+      @lz4_max_blocks = payload.unpack1("S<", offset: 2) if alg.zero? && len == CONFIG_LENGTHS[alg]
       pos + 2 + len
+    end
+
+    def config_outside(alg, what)
+      unsupported_feature "configuration #{what} for #{ALGORITHMS[alg]} ends past byte #{SB_REGION_END}"
+      nil
+    end
+
+    def config_truncated(alg)
+      problem "configuration record for #{ALGORITHMS[alg]} runs past the end of the volume"
+      nil
+    end
+
+    # The bounds of the design's configuration table; a field outside them is
+    # unsupported.
+    def check_config_bounds(alg, payload)
+      case alg
+      when 1
+        dict = payload.unpack1("L<")
+        unsupported_feature "MicroLZMA dictionary #{dict} is outside 4096..8 MiB" unless (4096..(8 << 20)).cover?(dict)
+        unsupported_feature "MicroLZMA format #{payload.unpack1('S<', offset: 4)} is not 0" unless payload.unpack1("S<", offset: 4).zero?
+      when 2
+        unsupported_feature "DEFLATE window bits #{payload.getbyte(0)} are above 15" if payload.getbyte(0) > 15
+      when 3
+        unsupported_feature "Zstandard format #{payload.getbyte(0)} is not 0" unless payload.getbyte(0).zero?
+        unsupported_feature "Zstandard window log less 10 is #{payload.getbyte(1)}, above 10" if payload.getbyte(1) > 10
+      end
     end
 
     def config_fields(alg, payload)
@@ -499,6 +598,7 @@ module ErofsDump
       return unless @sb.incompat.anybits?(INCOMPAT_XATTR_PREFIXES) && @sb.prefix_count.positive?
 
       unless @sb.compat.anybits?(COMPAT_PLAIN_XATTR_PFX)
+        problem "long prefixes without a packed inode or PLAIN_XATTR_PFX" unless @sb.incompat.anybits?(INCOMPAT_FRAGMENTS)
         note "long-prefix table lives in the packed inode; not decoded"
         @prefixes_decoded = false
         return
@@ -512,9 +612,9 @@ module ErofsDump
         infix = record_len < 2 ? "".b : read(pos + 3, record_len - 1)
         pos += align(2 + record_len, 4)
         problem "long prefix #{i} has no built-in base #{base.inspect}" if base && !XATTR_PREFIXES.key?(base)
-        full = "#{XATTR_PREFIXES.fetch(base, '')}#{infix.b}"
-        say "  #{i}: #{Fmt.name(full)}"
-        full
+        prefix = LongPrefix.new(base: base || 0, infix: infix.b)
+        say "  #{i}: #{Fmt.name(prefix.full)}"
+        prefix
       end
     end
 
@@ -541,8 +641,8 @@ module ErofsDump
       else
         f = fixed.unpack("S<S<S<S<L<L<L<L<S<S<")
         Inode.new(nid:, offset: off, extended: false, layout: (fw >> 1) & 7, format_word: fw, xcount: f[1], mode: f[2],
-                  nlink: f[3], size: f[4], layout_word: f[6], ino: f[7], uid: f[8], gid: f[9], time: @sb.epoch,
-                  nsec: @sb.fixed_nsec, reserved: fixed.byteslice(12, 4) + fixed.byteslice(28, 4))
+                  nlink: f[3], size: f[4], layout_word: f[6], ino: f[7], uid: f[8], gid: f[9], time: @sb.epoch + f[5],
+                  nsec: @sb.fixed_nsec, reserved: fixed.byteslice(28, 4))
       end
     end
 
@@ -553,6 +653,7 @@ module ErofsDump
       problem "layout #{ino.layout} is reserved" unless LAYOUTS.key?(ino.layout)
       problem "mode type #{format('%o', ino.kind)} is not a file type" unless KINDS.key?(ino.kind)
       problem "nanoseconds #{ino.nsec} is not below 1000000000" if ino.nsec >= 1_000_000_000
+      problem "time #{ino.time} overflows a signed 64-bit count" if ino.time > INT64_MAX
       problem "reserved fields are nonzero" unless ino.reserved.each_byte.all?(&:zero?)
       device_inode_problems(ino)
     end
@@ -571,8 +672,8 @@ module ErofsDump
       say format("  format_word=0x%04x mode=%07o(%s) perm=%04o nlink=%d size=%d uid=%d gid=%d ino=%d",
                  ino.format_word, ino.mode, KINDS.fetch(ino.kind, "unknown"), ino.mode & 0o7777,
                  ino.nlink, ino.size, ino.uid, ino.gid, ino.ino)
-      say format("  layout_word=0x%08x time=%s%s xattr_count=%d (region %d bytes)", ino.layout_word,
-                 Fmt.time(ino.time, ino.nsec), ino.extended ? "" : " (superblock epoch)", ino.xcount, ino.xattr_size)
+      say format("  layout_word=0x%08x time=%s xattr_count=%d (region %d bytes)", ino.layout_word,
+                 Fmt.time(ino.time, ino.nsec), ino.xcount, ino.xattr_size)
       return unless [KIND_CHARDEV, KIND_BLOCKDEV].include?(ino.kind)
 
       say format("  device: major=%d minor=%d", (ino.layout_word >> 8) & 0xFFF,
@@ -590,16 +691,25 @@ module ErofsDump
       filter, shared = read(start, 12).unpack("L<C")
       say format("  xattr region [%d,%d): name filter 0x%08x, %d shared index(es)", start, stop, filter, shared)
       problem "shared indexes run past the attribute region" if start + 12 + 4 * shared > stop
-      shared.times do |i|
-        idx = u32(start + 12 + 4 * i)
-        say "    shared index #{idx}: #{read_xattr_entry(@sb.xattr_blkaddr * @sb.block_size + 4 * idx).text}"
-      end
+      entries = shared_entries(start:, shared:, stop:)
       pos = start + 12 + 4 * shared
       while pos < stop
         entry = read_xattr_entry(pos)
         problem "attribute entry at #{pos} ends past its region" if entry.stop > stop
         say "    inline: #{entry.text}"
+        entries << entry
         pos = entry.stop
+      end
+      check_filter(filter, entries.map(&:bit))
+    end
+
+    # Prints the shared entries an inode names and returns them.
+    def shared_entries(start:, shared:, stop:)
+      Array.new(shared) do |i|
+        break [] if start + 12 + 4 * (i + 1) > stop
+
+        idx = u32(start + 12 + 4 * i)
+        read_xattr_entry(@sb.xattr_blkaddr * @sb.block_size + 4 * idx).tap { say "    shared index #{idx}: #{_1.text}" }
       end
     end
 
@@ -607,19 +717,46 @@ module ErofsDump
       suffix_len, index, value_len = read(pos, 4).unpack("CCS<")
       suffix = read(pos + 4, suffix_len)
       value = read(pos + 4 + suffix_len, value_len)
+      problem "ACL attribute index #{index} has a name suffix" if [2, 3].include?(index) && !suffix.empty?
       text = format("%s value=%d bytes %s", Fmt.name(xattr_prefix(index) + suffix), value_len, Fmt.hex(value))
-      XattrEntry.new(text:, stop: align(pos + 4 + suffix_len + value_len, 4))
+      XattrEntry.new(text:, stop: align(pos + 4 + suffix_len + value_len, 4), bit: filter_bit(index, suffix))
+    end
+
+    # The bit of the 32-bit name filter an attribute name hashes to: XXH32
+    # of the name without its built-in prefix, seeded with the prefix's
+    # index; nil when a long prefix cannot be resolved.
+    def filter_bit(index, suffix)
+      return Xxh32.hash(suffix, seed: FILTER_SEED + index) % 32 if index < 0x80
+
+      long = @prefixes_decoded && @prefixes[index & 0x7F]
+      long ? Xxh32.hash(long.infix + suffix, seed: FILTER_SEED + long.base) % 32 : nil
+    end
+
+    # A set filter bit promises that no attribute hashes to it. A word that
+    # claims a present attribute's bit is wrong; a nonzero word other than
+    # the producers' complement of the present bits is only reported.
+    def check_filter(filter, bits)
+      return unless @sb.compat.anybits?(COMPAT_XATTR_FILTER) && @sb.filter_reserved.zero?
+      return note_once("name filter not checked: a long prefix is not resolved") if bits.include?(nil)
+
+      present = bits.reduce(0) { |mask, bit| mask | (1 << bit) }
+      expected = ~present & 0xFFFFFFFF
+      problem format("name filter 0x%08x claims a present attribute's bit (present 0x%08x)", filter, present) unless (filter & present).zero?
+      note format("name filter 0x%08x is not the complement 0x%08x of the present bits", filter, expected) unless filter.zero? || filter == expected
     end
 
     def xattr_prefix(index)
-      return XATTR_PREFIXES.fetch(index) { problem("xattr name index #{index} is unknown"); "?#{index}?" } if index < 0x80
+      if index < 0x80
+        return XATTR_PREFIXES.fetch(index) { unsupported_feature("xattr name index #{index}"); "?#{index}?" }
+      end
 
+      problem "long-prefix reference without XATTR_PREFIXES" unless @sb.incompat.anybits?(INCOMPAT_XATTR_PREFIXES)
       long = index & 0x7F
       unless @prefixes_decoded
         note_once "long-prefix references are not resolved: the table is not decoded"
         return "?long#{long}?"
       end
-      @prefixes.fetch(long) { problem("long prefix #{long} does not exist"); "?long#{long}?" }
+      @prefixes.fetch(long) { problem("long prefix #{long} does not exist"); return "?long#{long}?" }.full
     end
 
     # ---- data layouts ---------------------------------------------------
@@ -635,18 +772,16 @@ module ErofsDump
     def print_flat(ino)
       b = @sb.block_size
       full = ino.layout == LAYOUT_INLINE ? ino.size / b : block_count(ino.size)
-      if ino.size.zero?
-        say "  data: empty"
-      elsif full.zero?
-        note "start block is not interpreted: the whole content is the inline tail" if ino.layout_word == 0xFFFFFFFF
-      elsif ino.layout_word == 0xFFFFFFFF
-        problem "null flat address (start block all ones) under the design's default (E3)"
-      end
-      if full.positive? && ino.layout_word != 0xFFFFFFFF
+      say "  data: empty" if ino.size.zero?
+      # The start word is an address only where it is read; elsewhere it
+      # addresses nothing and is not validated.
+      if full.positive?
         check_blocks(ino.layout_word, full)
         say format("  data: blocks %d..%d (%d)", ino.layout_word, ino.layout_word + full - 1, full)
       end
       return if ino.layout == LAYOUT_FLAT
+
+      problem "flat-inline size #{ino.size} is a nonzero multiple of the block size" if ino.size.positive? && (ino.size % b).zero?
 
       tail = ino.size % b
       say format("  inline tail: offset 0x%x length %d", ino.attrs_end, tail)
@@ -658,6 +793,7 @@ module ErofsDump
     def chunk_entries(ino)
       fmt = ChunkFormat.new(ino.layout_word)
       chunk = @sb.block_size << fmt.bits
+      problem "chunk size #{chunk} exceeds 2^47 bytes" if chunk > 1 << 47
       count = block_count_of(ino.size, chunk)
       start = align(ino.attrs_end, fmt.width)
       span(start, fmt.width * count)
@@ -720,38 +856,38 @@ module ErofsDump
       say format("  map header at 0x%x: word0 0x%08x advice 0x%04x (%s) algorithms 0x%02x (head1 %s, head2 %s) cluster byte 0x%02x",
                  hdr_at, header.word0, advice, Fmt.names(ADVICE, advice), header.algorithms,
                  algo_name(header.head1_algorithm), algo_name(header.head2_algorithm), header.cluster_byte)
-      problem "unknown advice bits #{format('0x%x', advice & ~0x3F)}" unless (advice & ~0x3F).zero?
+      unsupported_feature "reserved advice bits #{format('0x%x', advice & ~ADVICE_KNOWN)}" unless (advice & ~ADVICE_KNOWN).zero?
       if header.whole_file_fragment?
         say "  whole-file fragment: packed-inode offset #{header.whole_file_fragment_offset} (no index)"
         problem "fragment without FRAGMENTS" unless @sb.incompat.anybits?(INCOMPAT_FRAGMENTS)
         return
       end
-      lbits = @sb.blkszbits + header.cluster_extra_bits
-      say "  lclusterbits #{lbits} (logical cluster #{1 << lbits} bytes)"
-      if lbits > 20
-        problem "logical cluster beyond 2^20 bytes"
+      say "  lclusterbits #{@sb.blkszbits + header.cluster_extra_bits} (logical cluster #{1 << (@sb.blkszbits + header.cluster_extra_bits)} bytes)"
+      unless header.cluster_extra_bits.zero?
+        unsupported_feature "logical cluster larger than the block (L != B)"
         return
       end
-
       index = if ino.layout == LAYOUT_FULL_INDEX
-                full_index(ino:, hdr_at:, lbits:)
+                full_index(ino:, hdr_at:)
               else
-                compact_index(ino:, hdr_at:, lbits:, header:)
+                compact_index(ino:, hdr_at:, header:)
               end
-      print_records(ino:, index:, lbits:, header:)
+      print_records(ino:, index:, header:)
     end
 
     def algo_name(id) = ALGORITHMS.fetch(id) { "unknown(#{id})" }
 
-    def record_count(ino, lbits) = (ino.size + (1 << lbits) - 1) >> lbits
+    # L is the block size, the only logical cluster size supported.
+    def record_count(ino) = block_count(ino.size)
 
-    def full_index(ino:, hdr_at:, lbits:)
-      count = record_count(ino, lbits)
+    def full_index(ino:, hdr_at:)
+      count = record_count(ino)
       start = hdr_at + 16
       span(start, 8 * count)
       say "  full index: #{count} record(s) of 8 bytes at 0x#{start.to_s(16)}"
       records = Array.new(count) do |i|
         adv, clusterofs, d0, d1 = read(start + 8 * i, 8).unpack("S<S<S<S<")
+        unsupported_feature "record #{i} has reserved advice bits #{format('0x%x', adv & RECORD_RESERVED_BITS)}" unless (adv & RECORD_RESERVED_BITS).zero?
         type = adv & 3
         if type == TYPE_NONHEAD
           big = d0.anybits?(BIG_CLUSTER_FLAG)
@@ -765,30 +901,30 @@ module ErofsDump
 
     # Groups follow the design: 8-byte groups of 2 records until the offset
     # reaches a multiple of 32, then 32-byte groups of 16 while 16 or more
-    # records remain, then 8-byte groups. Provisional per the design (E8).
-    def compact_index(ino:, hdr_at:, lbits:, header:)
-      total = record_count(ino, lbits)
+    # records remain, then 8-byte groups. Without advice 0x01 every group is
+    # 8 bytes, which the design refuses.
+    def compact_index(ino:, hdr_at:, header:)
+      total = record_count(ino)
       two_byte = header.advice.anybits?(ADVICE_TWO_BYTE)
+      unsupported_feature "compact index without advice 0x01 (8-byte groups only)" unless two_byte
+      problem "compact advice 0x02 and 0x04 differ" if header.advice.anybits?(ADVICE_HEAD1_BIG) != header.advice.anybits?(ADVICE_HEAD2_BIG)
       pos = hdr_at + 8
       span(pos, 2 * total)
       say "  compact index: #{total} record(s) from 0x#{pos.to_s(16)}#{two_byte ? ' (16-record groups permitted)' : ''}"
-      note_once "compact group packing is provisional in the design (E8)"
-      note_once ANCHOR_NOTE
-      bias = header.advice.anybits?(ADVICE_BIG) ? 0 : 1
+      big = header.advice.anybits?(ADVICE_BIG)
       records = []
       while records.size < total
         wide = two_byte && (pos % 32).zero? && total - records.size >= 16
-        group = compact_group(pos:, wide:, lbits:, first: records.size, bias:)
+        group = compact_group(pos:, wide:, first: records.size, big:)
         records.concat(group.records)
         pos = group.end_pos
       end
       Index.new(records: records.first(total), end_pos: pos)
     end
 
-    def compact_group(pos:, wide:, lbits:, first:, bias:)
+    # L = B <= 4096 fixes the value width at 12 bits.
+    def compact_group(pos:, wide:, first:, big:)
       size, count, bits = wide ? [32, 16, 14] : [8, 2, 16]
-      lobits = [lbits, 12].max
-      problem "logical cluster too large for #{size}-byte groups" if lbits > (wide ? 12 : 14)
       raw = read(pos, size)
       anchor = raw.unpack1("L<", offset: size - 4)
       # The bytes before the anchor, reversed and read as hex, give the
@@ -796,54 +932,82 @@ module ErofsDump
       packed = raw.byteslice(0, size - 4).reverse.unpack1("H*").to_i(16)
       fields = Array.new(count) do |i|
         v = (packed >> (i * bits)) & ((1 << bits) - 1)
-        CompactField.new(type: (v >> lobits) & 3, value: v & ((1 << lobits) - 1))
+        CompactField.new(type: (v >> 12) & 3, value: v & 0xFFF)
       end
-      Index.new(records: group_records(fields:, base: anchor + bias, first:), end_pos: pos + size)
+      Index.new(records: group_records(fields:, anchor:, first:, big:), end_pos: pos + size)
     end
 
-    # Heads take consecutive blocks from `base`, a following big-cluster
-    # marker making the head's cluster span several blocks.
-    def group_records(fields:, base:, first:)
-      next_block = base
-      fields.each_with_index.map do |field, i|
+    # The records of one group. A head or plain record's block is its
+    # group's anchor plus the blocks of the clusters before it in the group.
+    def group_records(fields:, anchor:, first:, big:)
+      fields.each_index.map do |i|
+        field = fields[i]
         index = first + i
         if field.type == TYPE_NONHEAD
-          nonhead_record(index, field, previous: fields[i - 1], last: i == fields.size - 1)
+          forward = i == fields.size - 1 && !field.big? ? field.value : nil
+          NonheadRecord.new(index:, delta0: backward_distance(fields, i), delta1: forward, big_blocks: field.big? ? field.big_count : nil)
         else
-          blkaddr = next_block
-          following = fields[i + 1]
-          next_block += following&.big? ? following.big_count : 1
-          HeadRecord.new(index:, type: field.type, clusterofs: field.value, blkaddr:, partial: false)
+          HeadRecord.new(index:, type: field.type, clusterofs: field.value, blkaddr: anchor + blocks_before(fields, i, big:), partial: false)
         end
       end
     end
 
-    # A non-head record: a marker counts as distance 1 back; the last record of
-    # a group stores its forward distance, and its backward distance is that of
-    # the record before it plus one.
-    def nonhead_record(index, field, previous:, last:)
-      return NonheadRecord.new(index:, delta0: 1, delta1: nil, big_blocks: field.big_count) if field.big?
-      return NonheadRecord.new(index:, delta0: field.value, delta1: nil, big_blocks: nil) unless last
+    # A non-head record's backward distance. A count marker is one back; the
+    # group's last slot holds the forward distance, so its backward distance
+    # is derived from the slot before it: 1 after a head or plain record,
+    # 2 after a marker, else that slot's distance plus one.
+    def backward_distance(fields, i)
+      field = fields[i]
+      return 1 if field.big?
+      return field.value unless i == fields.size - 1
 
-      NonheadRecord.new(index:, delta0: previous_distance(previous) + 1, delta1: field.value, big_blocks: nil)
+      before = fields[i - 1]
+      return 1 unless before.type == TYPE_NONHEAD
+
+      before.big? ? 2 : backward_distance(fields, i - 1) + 1
     end
 
-    def previous_distance(previous)
-      return 1 unless previous.type == TYPE_NONHEAD
+    # The sum the group's records before `target` add to the anchor. Without
+    # big clusters it starts at one, a head or plain record adds one and a
+    # non-head jumps to its head. With them it starts at zero, a marker adds
+    # its count and skips the head before it, a head or plain record met
+    # directly is a one-block cluster, and a non-head jumps to its marker.
+    # The walk never leaves the group; a malformed jump ends it (the shape
+    # rules report it).
+    def blocks_before(fields, target, big:)
+      sum = big ? 0 : 1
+      j = target - 1
+      while j >= 0
+        field = fields[j]
+        if field.type != TYPE_NONHEAD
+          sum += 1
+          j -= 1
+        elsif big && field.big?
+          sum += field.big_count
+          j -= 2
+        else
+          jump = backward_distance(fields, j) - (big ? 1 : 0)
+          land = j - jump
+          break if jump < 1 || (land >= 0 && !jump_target?(fields[land], big:))
 
-      previous.big? ? 1 : previous.value
+          j = land
+        end
+      end
+      sum
     end
 
-    def print_records(ino:, index:, lbits:, header:)
+    def jump_target?(field, big:) = big ? field.type == TYPE_NONHEAD && field.big? : field.type != TYPE_NONHEAD
+
+    def print_records(ino:, index:, header:)
       records = index.records
-      lsize = 1 << lbits
+      lsize = @sb.block_size
       records.each do |rec|
         say "    record #{rec.index}: #{record_text(rec)}"
         next unless rec.is_a?(HeadRecord) && rec.clusterofs >= lsize
 
         problem "head or plain record has clusterofs #{rec.clusterofs} >= #{lsize}"
       end
-      check_record_rules(records, header)
+      check_record_rules(records:, header:, size: ino.size)
       say "  extents (head to next head):"
       heads = records.grep(HeadRecord)
       # A head at or past `size` is the end marker of the last cluster.
@@ -854,22 +1018,98 @@ module ErofsDump
         start = head.index * lsize + head.clusterofs
         following = heads[i + 1]
         stop = following ? following.index * lsize + following.clusterofs : ino.size
+        blocks = cluster_blocks(records, head)
+        # A tail cluster is stored in the inode or the packed inode: its
+        # record's block number is no address.
+        check_blocks(head.blkaddr, blocks) unless head.equal?(heads.last) && header.advice.anybits?(ADVICE_INLINE_TAIL | ADVICE_FRAGMENT_TAIL)
         say format("    logical %d..%d (%d) %s block %d count %d", start, stop, stop - start,
-                   extent_algo(head, header), head.blkaddr, cluster_blocks(records, head))
+                   extent_algo(head, header), head.blkaddr, blocks)
       end
       problem "no head or plain record in a nonempty file" if heads.empty? && ino.size.positive?
       problem "first extent does not start at offset 0" if heads.first&.index&.zero? && !heads.first.clusterofs.zero?
       tail_notes(ino:, header:, index_end: index.end_pos)
     end
 
-    def check_record_rules(records, header)
-      if records.any? { _1.is_a?(NonheadRecord) && _1.big_blocks } && !header.advice.anybits?(ADVICE_BIG)
-        problem "big-cluster marker without advice 0x02 or 0x04"
-      end
+    # Rules over the whole index, for the full and the compact form alike.
+    def check_record_rules(records:, header:, size:)
+      check_end_marker(records, size)
+      big = header.advice.anybits?(ADVICE_BIG)
+      records.grep(NonheadRecord).each { check_nonhead(records, _1, big:) }
+      check_markers(records, header)
       used = records.grep(HeadRecord).filter_map { head_algorithm(_1, header) }.uniq
       (used - allowed_algorithms).each do |alg|
         problem "inode algorithm #{algo_name(alg)} is absent from the superblock's algorithm mask"
       end
+      problem "head-2 record without COMPR_HEAD2" if records.any? { _1.is_a?(HeadRecord) && _1.type == TYPE_HEAD2 } &&
+                                                      !@sb.incompat.anybits?(INCOMPAT_COMPR_HEAD2)
+      return unless used.include?(0) && !@sb.incompat.anybits?(INCOMPAT_LZ4_0PADDING)
+
+      unsupported_feature "LZ4 cluster on a volume without LZ4_0PADDING"
+    end
+
+    # When size mod L is nonzero the last record is a head or plain record at
+    # or before the size: the end marker at the size, or the last cluster's
+    # own record.
+    def check_end_marker(records, size)
+      rest = size % @sb.block_size
+      last = records.last
+      return if rest.zero? || (last.is_a?(HeadRecord) && last.clusterofs <= rest)
+
+      problem "the last record is not a head or plain record at or before the size (clusterofs #{rest})"
+    end
+
+    # A non-head's distances: backward is nonzero and reaches a head or
+    # plain record (a marker's cluster-mate with big clusters), forward is
+    # nonzero.
+    def check_nonhead(records, rec, big:)
+      problem "record #{rec.index}: backward distance is zero" if rec.delta0.zero?
+      problem "record #{rec.index}: forward distance is zero" if rec.delta1&.zero?
+      return if rec.delta0.zero?
+
+      if rec.big_blocks
+        problem "record #{rec.index}: count marker with count zero" if rec.big_blocks.zero?
+        after_head = rec.index.positive? && records[rec.index - 1].type != TYPE_NONHEAD
+        problem "record #{rec.index}: count marker is not directly after a head or plain record" unless after_head
+        return
+      end
+      jump = rec.delta0 - (big ? 1 : 0)
+      problem "record #{rec.index}: non-head without the count marker directly after a head" if big && jump.zero?
+      return if jump.zero?
+
+      land = records[rec.index - jump] if rec.index >= jump
+      problem "record #{rec.index}: backward distance #{rec.delta0} passes record 0" unless land
+      return unless land
+
+      right = big ? land.is_a?(NonheadRecord) && land.big_blocks : land.is_a?(HeadRecord)
+      problem "record #{rec.index}: backward distance #{rec.delta0} lands on a record of the wrong type" unless right
+    end
+
+    # Count markers: only where the cluster's algorithm permits big clusters,
+    # with COMPR_CFGS, within the cluster limits, and the first non-head
+    # record of such a cluster always carries one.
+    def check_markers(records, header)
+      records.each_cons(2) do |head, rec|
+        next unless head.is_a?(HeadRecord) && rec.is_a?(NonheadRecord)
+
+        permitted = big_permitted?(head, header)
+        problem "record #{rec.index}: count marker without the advice bit of its algorithm" if rec.big_blocks && !permitted
+        problem "record #{rec.index}: first non-head record of a cluster has no count marker" if !rec.big_blocks && permitted
+        check_marker_count(head, rec, header) if rec.big_blocks
+      end
+    end
+
+    def big_permitted?(head, header)
+      bit = { TYPE_HEAD1 => ADVICE_HEAD1_BIG, TYPE_HEAD2 => ADVICE_HEAD2_BIG, TYPE_PLAIN => ADVICE_BIG }.fetch(head.type)
+      header.advice.anybits?(bit)
+    end
+
+    def check_marker_count(head, rec, header)
+      problem "count marker without COMPR_CFGS" unless @sb.incompat.anybits?(INCOMPAT_COMPR_CFGS)
+      count = rec.big_blocks
+      unsupported_feature "cluster of #{count} blocks is over 1 MiB" if count * @sb.block_size > MAX_CLUSTER_BYTES
+      return unless head_algorithm(head, header) == 0 && @lz4_max_blocks&.positive? && count > @lz4_max_blocks
+
+      problem "record #{rec.index}: count #{count} exceeds the LZ4 maximum of #{@lz4_max_blocks} blocks"
     end
 
     # The algorithm id of a head record, or nil for a plain record.
@@ -902,6 +1142,10 @@ module ErofsDump
       following.is_a?(NonheadRecord) && following.big_blocks ? following.big_blocks : 1
     end
 
+    # The compressed inline tail lies after the index, inside one block. (The
+    # design says the block holding the inode's start; mkfs.erofs 1.9.4 puts
+    # the tail in the next block when the inode starts near a block's end,
+    # e8-lz4-ztail, so only crossing a block boundary is reported.)
     def tail_notes(ino:, header:, index_end:)
       advice = header.advice
       if advice.anybits?(ADVICE_INLINE_TAIL)
@@ -1016,7 +1260,7 @@ module ErofsDump
         return
       end
       if ino.size > SYMLINK_MAX
-        problem "symlink target of #{ino.size} bytes is over #{SYMLINK_MAX}"
+        unsupported_feature "symlink target of #{ino.size} bytes is over #{SYMLINK_MAX}"
         return
       end
       target = symlink_target(ino)
@@ -1090,8 +1334,8 @@ module ErofsDump
     end
   end
 
-  # Exit status: 0 clean, 1 an error or a `problem:` line, 2 the tree was not
-  # decoded (the image is valid as far as it was read).
+  # Exit status: 0 clean, 1 an error or a `problem:` line, 2 an unsupported
+  # feature or a tree not decoded (the image is valid as far as it was read).
   def self.main(argv)
     tree = true
     parser = OptionParser.new("usage: erofsdump.rb [--no-tree] IMAGE") { _1.on("--[no-]tree") { |v| tree = v } }
@@ -1101,11 +1345,14 @@ module ErofsDump
     File.open(paths.first, "rb") do |io|
       dumper = Dumper.new(Volume.new(io), $stdout)
       outcome = dumper.dump(tree:)
-      warn "erofsdump: the tree is not decoded (48-bit layout or metadata box)" if outcome == :tree_not_decoded
+      warn "erofsdump: the tree is not decoded (unsupported volume, 48-bit layout or metadata box)" if outcome == :tree_not_decoded
       next 1 unless dumper.problems.zero?
 
-      outcome == :tree_not_decoded ? 2 : 0
+      outcome == :tree_not_decoded || dumper.unsupported.positive? ? 2 : 0
     end
+  rescue Unsupported => e
+    warn "erofsdump: unsupported: #{e.message}"
+    2
   rescue Error, OptionParser::ParseError, SystemCallError => e
     warn "erofsdump: #{e.message}"
     1
