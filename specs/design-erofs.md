@@ -1368,9 +1368,11 @@ become independent files under the [sources design](design-sources.md).
   37, with the box's one slot. Without the box the root's inode is the
   first, so the root NID always fits its 16-bit field; under the box the
   root is the box content's first inode and its NID is in the wide field.
-* The block count is the volume length divided by `B`; the inode count is
-  the number of inodes written; the shared-attribute block, extra devices,
-  long prefixes and packed NID are zero.
+* The block count is the volume length divided by `B`, rounded down: a
+  fixed disk fits the volume to 512-byte sectors, so a zero partial block
+  may follow the last block. The inode count is the number of inodes
+  written; the shared-attribute block, extra devices, long prefixes and
+  packed NID are zero.
 * The epoch and fixed nanoseconds are the format time, the UTC host clock
   sampled once during planning, or the reproducible epoch with zero
   nanoseconds under `-R`; the [48-bit profile](#48-bit-profile) chooses the
@@ -1548,7 +1550,7 @@ change times are not stored and are counted as optional losses under the
 | Setting | Rule |
 | --- | --- |
 | `allocation_unit_bytes` | 0, 512, 1024, 2048 or 4096 subject to E11; 0 selects 4096 |
-| `volume_bytes` | 0, or a multiple of `B` at least the plan's length; the block count is `V / B` and the excess is zero |
+| `volume_bytes` | 0, or a multiple of 512 holding the plan; the block count is `floor(V / B)`, the image is `V` bytes long, and the excess blocks and any partial block after the last block are zero |
 | `label` | At most 15 bytes, stored raw and NUL-padded to 16 |
 | `volume_uuid` | Stored verbatim; unset in reproducible mode, it follows the [identifier rule](design-layers.md#identifiers) with the EROFS volume role; unset otherwise, `FSIMG_EINVAL`, and the CLI supplies a random version 4 UUID |
 | `epoch` | The format time in reproducible mode, from `-e`: any signed 64-bit second count. The superblock's epoch field is a different value: it holds the format time, and under `erofs_addressing=48` the smallest modification second instead |

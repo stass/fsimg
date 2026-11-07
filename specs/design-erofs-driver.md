@@ -339,7 +339,7 @@ the walk meets it.
 | Setting | Field | Driver rule |
 | --- | --- | --- |
 | `cluster=` | `allocation_unit_bytes` | 0 or an accepted block size |
-| `-s` | `volume_bytes` | 0 or a multiple of `B` at least the plan |
+| `-s` | `volume_bytes` | 0 or a multiple of 512 holding the plan's blocks |
 | `-L` | `label` | At most 15 bytes |
 | `uuid=` | `volume_uuid` | Verbatim; unset in reproducible mode, the identifier rule's EROFS role; unset otherwise, `FSIMG_EINVAL` naming the key, and the CLI supplies a random version 4 UUID |
 | `-e` | `epoch` | Any signed 64-bit second count; the format time in reproducible mode |

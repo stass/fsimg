@@ -861,6 +861,8 @@ test_sector_volume_and_label_geometry(void)
 	refusal_t unaligned = { "volume of 4097 bytes", FSIMG_EINVAL, NULL };
 	refusal_t odd = { "volume of 12288 bytes less one", FSIMG_EINVAL,
 	    NULL };
+	refusal_t partial = { "volume of 4096 bytes and 256", FSIMG_EINVAL,
+	    NULL };
 	refusal_t label = { "a 16-byte label", FSIMG_EINVAL, NULL };
 	refusal_t beyond = { "a volume past 2^32 blocks", FSIMG_EINVAL,
 	    NULL };
@@ -877,8 +879,12 @@ test_sector_volume_and_label_geometry(void)
 	reproducible_options(&options);
 	options.volume_bytes = 3 * BLOCK;
 	check_accepted(ctx, &options, "a volume of three blocks");
+	options.volume_bytes = 3 * BLOCK + 512;
+	check_accepted(ctx, &options, "a volume of three blocks and a sector");
 	options.volume_bytes = BLOCK + 1;
 	check_refused(ctx, &options, &unaligned);
+	options.volume_bytes = BLOCK + 256;
+	check_refused(ctx, &options, &partial);
 	options.volume_bytes = 3 * BLOCK - 1;
 	check_refused(ctx, &options, &odd);
 	options.volume_bytes = (UINT64_C(1) << 32) * BLOCK;
@@ -2831,6 +2837,49 @@ test_emission_leaves_no_stale_byte(void)
 }
 
 /*
+ * A fixed disk fits its partition to 512-byte sectors, not to blocks. A
+ * volume of whole sectors holds floor(V / B) blocks, and the partial block
+ * after them is zero, under poison, and outside the block count, so the
+ * reader and verifier see the same image as without it.
+ */
+static void
+test_sector_multiple_volume_has_a_zero_partial_tail(void)
+{
+	fsimg_write_options_t options;
+	fsimg_plan_info_t info;
+	fixture_t fixture;
+	memory_sink_t sink;
+	uint64_t blocks, used;
+
+	build_round_trip_tree();
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	used = fixture.plan->used_blocks;
+	fixture_close(&fixture);
+
+	blocks = used + 2;
+	options.volume_bytes = blocks * BLOCK + BLOCK - 512;
+	plan_tree(&fixture, &options);
+	CHECK(fixture.plan->block_count == blocks);
+	CHECK(fsimg_plan_get_info(&fixture.plan->common, &info, NULL) ==
+	    FSIMG_OK);
+	CHECK(info.volume_bytes == options.volume_bytes);
+	CHECK(info.allocation_units == blocks);
+	CHECK(info.free_bytes == (blocks - used) * BLOCK);
+
+	emit_tree(&fixture, &sink, POISON);
+	CHECK(sink.length == options.volume_bytes);
+	for (uint64_t i = used * BLOCK; i < sink.length; i++)
+		CHECK_CASE(sink.bytes[i] == 0, "byte %ju past the content is %u",
+		    (uintmax_t)i, sink.bytes[i]);
+	check_enumeration(&fixture, &sink, true);
+	check_verification(&fixture, &sink);
+	check_extraction(&fixture, &sink);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+/*
  * Faults.
  */
 
@@ -3201,6 +3250,7 @@ main(void)
 	test_unreproducible_image_stores_given_times_and_owners();
 	test_reproducible_image_ignores_order_limits_and_time_zone();
 	test_emission_leaves_no_stale_byte();
+	test_sector_multiple_volume_has_a_zero_partial_tail();
 	test_write_failure_fails_emission_at_any_write();
 	test_flush_failure_fails_emission();
 	test_allocation_failure_during_emission_is_clean();

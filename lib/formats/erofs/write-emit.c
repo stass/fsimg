@@ -11,12 +11,12 @@
 /*
  * Emission (specs/design-erofs-driver.md, Emission). The common writer has
  * zeroed the volume, so the boot area, the gaps between inodes, the unused
- * bytes of every block and any blocks volume_bytes adds are zero already,
- * and the driver writes only bytes that carry something. In catalog ID
- * order, root first, it writes each inode's fixed part, then a directory's
- * blocks or a file's or link's content, whose tail under the flat-inline
- * layout lands in the body just after the fixed part. The superblock comes
- * last.
+ * bytes of every block and any blocks or partial block volume_bytes adds
+ * are zero already, and the driver writes only bytes that carry something.
+ * In catalog ID order, root first, it writes each inode's fixed part, then
+ * a directory's blocks or a file's or link's content, whose tail under the
+ * flat-inline layout lands in the body just after the fixed part. The
+ * superblock comes last.
  *
  * The superblock checksum covers [1024, B) for B above 1024: the superblock
  * and whatever inodes and inline tails block 0 holds. The emission object

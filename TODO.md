@@ -372,15 +372,6 @@
 
 ## Bugs by subsystem
 
-* [Medium] **EROFS writer refuses most fixed-size disks**
-  (`lib/formats/erofs/write-plan.c`, `specs/design-erofs.md` Settings and
-  sizing): `volume_bytes` must be whole 4096-byte blocks, but a fixed disk
-  (`gpt:disk`, `mbr:disk`) fits the volume to 512-byte sectors only, so a
-  partition whose length is not a multiple of 4096 is refused as invalid.
-  Either accept a multiple of 512 with `V / B` blocks and a zero partial
-  tail, as HFS Plus does, or have the fit round to the block; the design
-  decides which before stage 10's `erofs/gpt` qualification.
-
 * [Medium] **EROFS directory listing exceeds the minimum memory budget**
   (`lib/formats/erofs/directory.c`): listing one directory of 100000
   entries fails under the 16 MiB budget and needs 256 MiB

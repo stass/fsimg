@@ -68,7 +68,9 @@ typedef struct erofs_row {
  * the superblock's epoch, with zero fixed nanoseconds; metadata_end is the
  * block-aligned byte offset where the data area begins; used_blocks counts
  * every block up to the end of the last inode's data and block_count the
- * volume's blocks, at least used_blocks. uuid is the stored identifier.
+ * volume's blocks, at least used_blocks. volume_bytes is the image length:
+ * block_count blocks, plus the zero partial block a volume size of whole
+ * sectors leaves past them. uuid is the stored identifier.
  */
 typedef struct erofs_plan {
 	fsimg_plan_t	 common;
@@ -76,6 +78,7 @@ typedef struct erofs_plan {
 	uint64_t	 metadata_end;
 	uint64_t	 used_blocks;
 	uint64_t	 block_count;
+	uint64_t	 volume_bytes;
 	uint64_t	 inode_count;
 	int64_t		 format_time;
 	uint32_t	 block_bytes;
