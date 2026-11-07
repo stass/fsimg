@@ -364,13 +364,6 @@
 
 ## Bugs by subsystem
 
-* [High] **LZ4 full mode does not enforce the end-of-block conditions**
-  (`lib/codec/lz4.c`): the [codec design](specs/design-codecs.md#end-of-block)
-  requires full mode to refuse a block with fewer than five final literals
-  after a match or a last match starting fewer than 12 bytes before the end,
-  as the kernel and `fsck.erofs` do; the decoder accepts both, and
-  `test/codec.c` still lists blocks that break them as valid.
-
 * [Medium] **EROFS dumper lags two evidence corrections**
   (`tools/erofs/erofsdump.rb`): it prints the superblock epoch as a compact
   inode's time instead of adding the word at `0x0C`, and its compact head

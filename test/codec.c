@@ -4409,17 +4409,25 @@ bz_write_seeds(const char *directory)
  * decoded; the writer is first checked to reproduce them byte for byte.
  * test/lz4-vectors.h holds blocks the command itself made.
  *
- * Every valid block goes through one battery, in full mode and in partial
- * mode, and its expectations come from the block's layout, found by the
- * small parser below rather than by the decoder:
+ * Every block that is well formed goes through one battery, in full mode
+ * and in partial mode, and its expectations come from the block's layout,
+ * found by the small parser below rather than by the decoder. A block
+ * either meets the end conditions (a final literal run of five or more
+ * after a match, and a last match starting at least 12 bytes before the
+ * end; a block with no match meets them whatever its length) or breaks
+ * only those, and the battery is told which by its entry point,
+ * check_lz4_valid or check_lz4_partial_only:
  *
  *   - decoded whole under a capacity equal to its output, and under a
- *     larger one;
+ *     larger one: decoded when it meets the end conditions, otherwise
+ *     refused as its block end with the whole output produced;
  *   - every proper prefix: one ending directly after a sequence's literals
- *     decodes to that much of the output, and any other is unterminated;
+ *     is a block of its own, decoded to that much of the output when that
+ *     prefix meets the end conditions and refused as its block end when
+ *     not, and any other is unterminated;
  *   - one byte less of capacity refuses the run that passes it;
- *   - every length from 0 to the decoded length in partial mode, and one
- *     above it.
+ *   - every length from 0 to the decoded length in partial mode, which
+ *     never judges the end conditions, and one above it.
  *
  * Every output byte beyond what a call reports producing must still hold
  * the poison the test filled it with; a redzone past the buffer the call
@@ -4427,6 +4435,21 @@ bz_write_seeds(const char *directory)
  */
 #define LZ4_REDZONE		16u
 #define LZ4_MAX_SEQUENCES	32u
+
+/*
+ * The end conditions of design-codecs.md, "End of block": a block holding a
+ * match ends with at least LZ4_END_LITERALS literals, and its last match
+ * starts at least LZ4_END_MATCH_DISTANCE bytes before the output's end.
+ */
+#define LZ4_END_LITERALS	5u
+#define LZ4_END_MATCH_DISTANCE	12u
+
+/*
+ * The final literals that close a hand-built block after a match of four
+ * bytes or more: five or more, and with the shortest match twelve bytes
+ * from the match's start to the end.
+ */
+#define LZ4_CLOSING_LITERALS	8u
 
 /*
  * Where one sequence lies in a valid block, and the output around it.
@@ -4571,6 +4594,26 @@ lz4_parse(const stream_t *s, lz4_layout_t *layout)
 }
 
 /*
+ * Whether the block that ends directly after the literals of sequence
+ * last meets the end conditions. Without an earlier sequence it has no
+ * match and meets them. Otherwise its final literal run must hold five
+ * bytes, and the match before it, which began where the previous
+ * sequence's literals ended, must begin 12 bytes before the output's end.
+ */
+static bool
+lz4_meets_end_conditions(const lz4_layout_t *layout, size_t last)
+{
+	const lz4_sequence_t *q = &layout->sequence[last];
+	size_t match_start;
+
+	if (last == 0)
+		return (true);
+	match_start = layout->sequence[last - 1].plain_literals_end;
+	return (q->plain_literals_end - q->plain_start >= LZ4_END_LITERALS &&
+	    q->plain_literals_end - match_start >= LZ4_END_MATCH_DISTANCE);
+}
+
+/*
  * Decoding drivers. The input is a copy of exactly its length and the
  * output buffer has a poisoned redzone past what the call is told it may
  * write, so a read or a write past either shows.
@@ -4646,6 +4689,20 @@ expect_failed_output(const char *name, const codec_run_t *run,
 }
 
 /*
+ * Full mode refused a block at its end, after decoding all of its output:
+ * the end conditions failed once the input ended after the final literals.
+ */
+static void
+expect_lz4_block_end(const char *name, const codec_run_t *run,
+    const uint8_t *plain, size_t produced, size_t code_length)
+{
+	expect_failure(name, run, FSIMG_ECORRUPT, "lz4: block end",
+	    code_length);
+	CHECK(run->consumed == code_length);
+	expect_failed_output(name, run, plain, produced);
+}
+
+/*
  * --seed writes a LZ4 fuzz seed in the format of fuzz/codec.c's header
  * comment: byte 0 is 8, bytes 1-2 the capacity, byte 3 the partial length
  * (0 to 127 as they are, then steps of 128), then the block. A block or
@@ -4701,8 +4758,9 @@ lz4_excess_offset(const uint8_t *code, size_t start, size_t end,
 /*
  * A cut block, decoded in full mode under the capacity of its output. The
  * block ends where the cut is; the layout says whether that is directly
- * after a sequence's literals, and where the decoder must have stopped
- * if it is not.
+ * after a sequence's literals, which makes it a block of its own judged
+ * by the end conditions, and where the decoder must have stopped if it
+ * is not.
  */
 static void
 check_lz4_cut(const char *name, const stream_t *s, const lz4_layout_t *layout,
@@ -4711,19 +4769,26 @@ check_lz4_cut(const char *name, const stream_t *s, const lz4_layout_t *layout,
 	const lz4_sequence_t *q;
 	codec_run_t run;
 	char how[96];
-	size_t offset, produced;
+	size_t index, offset, produced;
 
 	q = NULL;
+	index = 0;
 	for (size_t i = 0; i < layout->count; i++)
 		if (layout->sequence[i].token <= cut &&
-		    cut < layout->sequence[i].end)
+		    cut < layout->sequence[i].end) {
 			q = &layout->sequence[i];
+			index = i;
+		}
 	CHECK(q != NULL);
 	snprintf(how, sizeof(how), "%s cut at %zu", name, cut);
 	decode_lz4(s->code, cut, s->plain_length, &run);
 	if (cut == q->literals_end) {
-		expect_decoded(how, &run, s->plain, q->plain_literals_end,
-		    cut);
+		if (lz4_meets_end_conditions(layout, index))
+			expect_decoded(how, &run, s->plain,
+			    q->plain_literals_end, cut);
+		else
+			expect_lz4_block_end(how, &run, s->plain,
+			    q->plain_literals_end, cut);
 		run_free(&run);
 		return;
 	}
@@ -4825,17 +4890,50 @@ check_lz4_partial_length(const char *name, const stream_t *s,
 }
 
 /*
- * The battery for a valid block.
+ * The part of the battery that does not depend on whether the block meets
+ * the end conditions: every proper prefix, a capacity one byte short, and
+ * partial mode at every length, which never judges the end conditions.
+ */
+static void
+check_lz4_cuts_capacity_and_partial(const char *name, const stream_t *s,
+    const lz4_layout_t *layout)
+{
+	codec_run_t run;
+	char how[96];
+
+	for (size_t cut = 0; cut < s->code_length; cut++)
+		if (is_cut_point(cut, s->code_length))
+			check_lz4_cut(name, s, layout, cut);
+
+	if (s->plain_length > 0)
+		check_lz4_capacity_short_by_one(name, s, layout);
+
+	for (size_t length = 0; length <= s->plain_length; length++)
+		if (is_cut_point(length, s->plain_length))
+			check_lz4_partial_length(name, s, layout, length);
+
+	/* One above the decoded length: the block ends first. */
+	snprintf(how, sizeof(how), "%s partial length %zu", name,
+	    s->plain_length + 1);
+	decode_lz4_partial(s->code, s->code_length, s->plain_length + 1, &run);
+	expect_failure(how, &run, FSIMG_ECORRUPT, "stream ends before the "
+	    "requested length", s->code_length);
+	expect_failed_output(how, &run, s->plain, s->plain_length);
+	run_free(&run);
+}
+
+/*
+ * The battery for a valid block: one that meets the end conditions.
  */
 static void
 check_lz4_valid(const char *name, const stream_t *s)
 {
 	lz4_layout_t layout;
 	codec_run_t run;
-	char how[96];
 
 	CHECK(s->valid);
 	lz4_parse(s, &layout);
+	CHECK(lz4_meets_end_conditions(&layout, layout.count - 1));
 	emit_lz4_seed(s->code, s->code_length, s->plain_length,
 	    s->plain_length / 2);
 
@@ -4848,25 +4946,37 @@ check_lz4_valid(const char *name, const stream_t *s)
 	expect_decoded(name, &run, s->plain, s->plain_length, s->code_length);
 	run_free(&run);
 
-	for (size_t cut = 0; cut < s->code_length; cut++)
-		if (is_cut_point(cut, s->code_length))
-			check_lz4_cut(name, s, &layout, cut);
+	check_lz4_cuts_capacity_and_partial(name, s, &layout);
+}
 
-	if (s->plain_length > 0)
-		check_lz4_capacity_short_by_one(name, s, &layout);
+/*
+ * The battery for a block that breaks only the end conditions: full mode
+ * decodes all of it and refuses it at its end, whatever the capacity that
+ * holds the output, and partial mode decodes it at every length.
+ */
+static void
+check_lz4_partial_only(const char *name, const stream_t *s)
+{
+	lz4_layout_t layout;
+	codec_run_t run;
 
-	for (size_t length = 0; length <= s->plain_length; length++)
-		if (is_cut_point(length, s->plain_length))
-			check_lz4_partial_length(name, s, &layout, length);
+	CHECK(s->valid);
+	lz4_parse(s, &layout);
+	CHECK(!lz4_meets_end_conditions(&layout, layout.count - 1));
+	emit_lz4_seed(s->code, s->code_length, s->plain_length,
+	    s->plain_length / 2);
 
-	/* One above the decoded length: the block ends first. */
-	snprintf(how, sizeof(how), "%s partial length %zu", name,
-	    s->plain_length + 1);
-	decode_lz4_partial(s->code, s->code_length, s->plain_length + 1, &run);
-	expect_failure(how, &run, FSIMG_ECORRUPT, "stream ends before the "
-	    "requested length", s->code_length);
-	expect_failed_output(how, &run, s->plain, s->plain_length);
+	decode_lz4(s->code, s->code_length, s->plain_length, &run);
+	expect_lz4_block_end(name, &run, s->plain, s->plain_length,
+	    s->code_length);
 	run_free(&run);
+
+	decode_lz4(s->code, s->code_length, s->plain_length + 100, &run);
+	expect_lz4_block_end(name, &run, s->plain, s->plain_length,
+	    s->code_length);
+	run_free(&run);
+
+	check_lz4_cuts_capacity_and_partial(name, s, &layout);
 }
 
 /*
@@ -4949,32 +5059,65 @@ lz4_vector_input(lz4_recipe_t recipe, uint8_t *out, size_t length)
 }
 
 /*
- * The worked blocks: the lz4 command decoded each to the output listed
- * (the third repeats a run of 275 'D' with the macros below).
+ * The worked blocks of design-codecs.md. The lz4 command, decoding inside
+ * a legacy frame, decoded the first eight to the output listed (the
+ * seventh's 275 'D' are spelled with the macros below); that frame's
+ * output buffer is larger than the data, so the command does not judge a
+ * last match's distance from the end. The last four are the hand-built
+ * blocks of the design's prose on the end conditions. A block that breaks the end
+ * conditions is marked partial_only: the decoder's full mode refuses it,
+ * and its partial mode decodes it.
  */
 #define LZ4_TEN_D	"DDDDDDDDDD"
 #define LZ4_X3(text)	text text text
 #define LZ4_X9(text)	LZ4_X3(LZ4_X3(text))
 #define LZ4_275_D	LZ4_X3(LZ4_X9(LZ4_TEN_D)) "DDDDD"
 
-static const worked_stream_t lz4_worked[] = {
-	{ "lz4 one token, no literals, end", "00", "" },
-	{ "lz4 one literal", "10 41", "A" },
-	{ "lz4 last sequence ignores its match field", "1f 41", "A" },
-	{ "lz4 literal field 15, extension 0",
+typedef struct lz4_worked_block {
+	worked_stream_t	stream;
+	bool		partial_only;	/* full mode refuses it at its end */
+} lz4_worked_block_t;
+
+static const lz4_worked_block_t lz4_worked[] = {
+	{ .stream = { "lz4 one token, no literals, end", "00", "" } },
+	{ .stream = { "lz4 one literal", "10 41", "A" } },
+	{ .stream = { "lz4 last sequence ignores its match field", "1f 41",
+	    "A" } },
+	{ .stream = { "lz4 literal field 15, extension 0",
 	    "f0 00 41 42 43 44 45 46 47 48 49 4a 4b 4c 4d 4e 4f",
-	    "ABCDEFGHIJKLMNO" },
-	{ "lz4 match of 4 at offset 4",
+	    "ABCDEFGHIJKLMNO" } },
+	{ .stream = { "lz4 match of 4 at offset 4",
 	    "40 41 42 43 44 04 00 50 45 45 45 45 45", "ABCDABCDEEEEE" },
-	{ "lz4 match of 4 at offset 1 overlaps itself",
+	    .partial_only = true },
+	{ .stream = { "lz4 match of 4 at offset 1 overlaps itself",
 	    "40 41 42 43 44 01 00 50 45 45 45 45 45", "ABCDDDDDEEEEE" },
-	{ "lz4 match field 15, extension ff 00",
+	    .partial_only = true },
+	{ .stream = { "lz4 match field 15, extension ff 00",
 	    "4f 41 42 43 44 01 00 ff 00 50 45 45 45 45 45",
-	    "ABC" LZ4_275_D "EEEEE" },
-	{ "lz4 sequence with no literals",
+	    "ABC" LZ4_275_D "EEEEE" } },
+	{ .stream = { "lz4 sequence with no literals",
 	    "40 41 42 43 44 04 00 00 04 00 50 45 45 45 45 45",
-	    "ABCDABCDABCDEEEEE" },
+	    "ABCDABCDABCDEEEEE" }, .partial_only = true },
+	{ .stream = { "lz4 one final literal after a match",
+	    "40 41 42 43 44 04 00 10 45", "ABCDABCDE" },
+	    .partial_only = true },
+	{ .stream = {
+	    "lz4 last match 12 bytes before the end, five final literals",
+	    "43 41 42 43 44 04 00 50 45 45 45 45 45", "ABCDABCDABCEEEEE" } },
+	{ .stream = { "lz4 last match 11 bytes before the end",
+	    "42 41 42 43 44 04 00 50 45 45 45 45 45", "ABCDABCDABEEEEE" },
+	    .partial_only = true },
+	{ .stream = { "lz4 four final literals",
+	    "44 41 42 43 44 04 00 40 45 45 45 45", "ABCDABCDABCDEEEE" },
+	    .partial_only = true },
 };
+
+/*
+ * The worked block whose first literal is changed to prove the writer live:
+ * "lz4 last match 12 bytes before the end, five final literals", which full
+ * mode decodes.
+ */
+#define LZ4_LIVENESS_BLOCK	9
 
 /* The writer's version of worked block i, from the format tables. */
 static stream_t *
@@ -5024,6 +5167,30 @@ lz4_written_worked(size_t i)
 		use_literals(w, "EEEEE", 5);
 		lz4_last_sequence(w, 5, 0);
 		break;
+	case 8:
+		use_literals(w, "ABCD", 4);
+		lz4_sequence(w, 4, 4, 4);
+		use_literals(w, "E", 1);
+		lz4_last_sequence(w, 1, 0);
+		break;
+	case 9:
+		use_literals(w, "ABCD", 4);
+		lz4_sequence(w, 4, 4, 7);
+		use_literals(w, "EEEEE", 5);
+		lz4_last_sequence(w, 5, 0);
+		break;
+	case 10:
+		use_literals(w, "ABCD", 4);
+		lz4_sequence(w, 4, 4, 6);
+		use_literals(w, "EEEEE", 5);
+		lz4_last_sequence(w, 5, 0);
+		break;
+	case 11:
+		use_literals(w, "ABCD", 4);
+		lz4_sequence(w, 4, 4, 8);
+		use_literals(w, "EEEE", 4);
+		lz4_last_sequence(w, 4, 0);
+		break;
 	default:
 		CHECK(false);
 	}
@@ -5039,15 +5206,20 @@ test_lz4_worked_blocks(void)
 
 	count = sizeof(lz4_worked) / sizeof(lz4_worked[0]);
 	for (size_t i = 0; i < count; i++) {
-		s = worked_stream(&lz4_worked[i]);
-		check_lz4_valid(lz4_worked[i].name, s);
+		const worked_stream_t *worked = &lz4_worked[i].stream;
+
+		s = worked_stream(worked);
+		if (lz4_worked[i].partial_only)
+			check_lz4_partial_only(worked->name, s);
+		else
+			check_lz4_valid(worked->name, s);
 		w = lz4_written_worked(i);
-		expect_same_code(lz4_worked[i].name, w, s);
+		expect_same_code(worked->name, w, s);
 		stream_free(w);
 
 		/* The same block with its first literal changed decodes
 		 * to different bytes, so the comparison above is live. */
-		if (i == 4) {
+		if (i == LZ4_LIVENESS_BLOCK) {
 			s->code[1] ^= 0x20;
 			decode_lz4(s->code, s->code_length, s->plain_length,
 			    &run);
@@ -5065,8 +5237,9 @@ test_lz4_worked_blocks(void)
  * Literal lengths 0, 14, 15, 16, 269, 270 and 525: no extension, an
  * extension of 0, 1, 254 and 255 followed by 0, and two 255s followed by 0.
  * Each is the whole of a literal-only block, and the literals of a
- * sequence that a match follows; the empty run follows a sequence, since
- * the first sequence cannot match with nothing produced.
+ * sequence that a match follows, closed by final literals that meet the
+ * end conditions; the empty run follows a sequence, since the first
+ * sequence cannot match with nothing produced.
  */
 static void
 test_lz4_literal_lengths(void)
@@ -5091,7 +5264,7 @@ test_lz4_literal_lengths(void)
 			lz4_sequence(s, 0, 4, 4);
 		} else
 			lz4_sequence(s, lengths[i], 1, 4);
-		lz4_last_sequence(s, 5, 0);
+		lz4_last_sequence(s, LZ4_CLOSING_LITERALS, 0);
 		check_lz4_valid(name, s);
 		stream_free(s);
 	}
@@ -5102,7 +5275,8 @@ test_lz4_literal_lengths(void)
  * extension of 0, 254, and 255 followed by 0, at offsets 1 and 2, at the
  * bytes produced (a match that reads all of them), and with 8 bytes
  * produced and offset 8 (a match longer than its offset), and, at the
- * farthest offset, 65535 after 65535 literals.
+ * farthest offset, 65535 after 65535 literals. The final literals after
+ * the match are enough for the block to meet the end conditions.
  */
 static void
 test_lz4_match_lengths(void)
@@ -5119,7 +5293,7 @@ test_lz4_match_lengths(void)
 			    lengths[i], (unsigned)offsets[j]);
 			s = stream_new();
 			lz4_sequence(s, 8, offsets[j], lengths[i]);
-			lz4_last_sequence(s, 5, 0);
+			lz4_last_sequence(s, LZ4_CLOSING_LITERALS, 0);
 			check_lz4_valid(name, s);
 			stream_free(s);
 		}
@@ -5127,7 +5301,7 @@ test_lz4_match_lengths(void)
 		    lengths[i]);
 		s = stream_new();
 		lz4_sequence(s, 5, 5, lengths[i]);
-		lz4_last_sequence(s, 5, 0);
+		lz4_last_sequence(s, LZ4_CLOSING_LITERALS, 0);
 		check_lz4_valid(name, s);
 		stream_free(s);
 
@@ -5135,16 +5309,19 @@ test_lz4_match_lengths(void)
 		    lengths[i]);
 		s = stream_new();
 		lz4_sequence(s, 65535, 65535, lengths[i]);
-		lz4_last_sequence(s, 5, 0);
+		lz4_last_sequence(s, LZ4_CLOSING_LITERALS, 0);
 		check_lz4_valid(name, s);
 		stream_free(s);
 	}
 }
 
 /*
- * A last sequence carries a match field that is ignored, and may be one
- * literal after a match, which the reference decoder refuses and this
- * one accepts (design-codecs.md, "The block").
+ * A last sequence carries a match field that is ignored. After a match it
+ * holds exactly five literals when the match starts exactly 12 bytes before
+ * the end, and the block is valid. A last sequence of no literals after a
+ * match breaks the end conditions: full mode refuses the block at its end,
+ * partial mode decodes it (design-codecs.md, "End of block"). One and four
+ * final literals are worked blocks.
  */
 static void
 test_lz4_last_sequence_forms(void)
@@ -5153,7 +5330,7 @@ test_lz4_last_sequence_forms(void)
 
 	s = stream_new();
 	use_literals(s, "ABCD", 4);
-	lz4_sequence(s, 4, 4, 4);
+	lz4_sequence(s, 4, 4, 7);
 	lz4_last_sequence(s, 5, 15);
 	check_lz4_valid("lz4 last sequence of 5 with match field 15", s);
 	stream_free(s);
@@ -5161,18 +5338,9 @@ test_lz4_last_sequence_forms(void)
 	s = stream_new();
 	use_literals(s, "ABCD", 4);
 	lz4_sequence(s, 4, 4, 4);
-	use_literals(s, "E", 1);
-	lz4_last_sequence(s, 1, 0);
-	check_lz4_valid("lz4 last sequence of one literal after a match", s);
-	CHECK(s->code_length == 9 && s->plain_length == 9);
-	CHECK(memcmp(s->plain, "ABCDABCDE", 9) == 0);
-	stream_free(s);
-
-	s = stream_new();
-	use_literals(s, "ABCD", 4);
-	lz4_sequence(s, 4, 4, 4);
 	lz4_last_sequence(s, 0, 7);
-	check_lz4_valid("lz4 last sequence with no literals after a match", s);
+	check_lz4_partial_only("lz4 last sequence with no literals after a match",
+	    s);
 	stream_free(s);
 }
 

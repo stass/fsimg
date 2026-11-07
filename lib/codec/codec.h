@@ -135,10 +135,12 @@ fsimg_status_t fsimg_nrv2b_decode(const uint8_t *in, size_t in_len,
  * out[0..step->produced), which may be shorter than the capacity; the caller
  * judges its length. An offset of zero, or an offset reaching before the
  * output start, a literal run or match longer than the room left, and an
- * input ending anywhere else are FSIMG_ECORRUPT. The block's end conditions
- * that bind only encoders (at least five final literals, the last match 12
- * bytes before the end) are not checked. On every return out[0..step->produced) is the
- * decoded prefix and nothing past it is written. step must not be NULL.
+ * input ending anywhere else are FSIMG_ECORRUPT. So is a block that holds a
+ * match and whose final literal run is shorter than five bytes or whose
+ * last match starts fewer than 12 bytes before the output's end, judged once
+ * the block has ended, at offset in_len; the kernel refuses such a block
+ * too. On every return out[0..step->produced) is the decoded prefix and
+ * nothing past it is written. step must not be NULL.
  */
 fsimg_status_t fsimg_lz4_decode(const uint8_t *in, size_t in_len,
     uint8_t *out, size_t capacity, fsimg_codec_step_t *, fsimg_error_t *);
@@ -151,9 +153,9 @@ fsimg_status_t fsimg_lz4_decode(const uint8_t *in, size_t in_len,
  * step->done with step->produced equal to length and step->consumed where the
  * decoder stopped. A block that ends before length bytes is FSIMG_ECORRUPT,
  * and so is every verdict of fsimg_lz4_decode() met before length is reached,
- * except that a literal run or match running past length is clipped instead.
- * done here means the requested length was produced, not that the block
- * ended.
+ * except that a literal run or match running past length is clipped instead
+ * and the block's end conditions are not judged. done here means the
+ * requested length was produced, not that the block ended.
  */
 fsimg_status_t fsimg_lz4_decode_partial(const uint8_t *in, size_t in_len,
     uint8_t *out, size_t length, fsimg_codec_step_t *, fsimg_error_t *);

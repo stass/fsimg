@@ -21,6 +21,13 @@
  * sequence stops after its literals, so the block ends exactly where the
  * input ends directly after a sequence's literals.
  *
+ * A whole block holding a match must also end well clear of it: at least
+ * five final literals, and the last match starting at least 12 bytes
+ * before the output's end. The format leaves these to the encoder, but the
+ * kernel and fsck.erofs refuse a block that breaks them, so full mode
+ * refuses it too, in one check once the block has ended. Partial mode stops
+ * before the end, or cannot tell it is there, and does not judge them.
+ *
  * One call decodes one block: the whole of it in full mode, or its first
  * bytes up to a requested length in partial mode. Every length is held
  * against the output room before each addition, so it cannot overflow, and
@@ -36,6 +43,8 @@
 #define LZ4_EXTENSION_MORE	255	/* another extension byte follows */
 #define LZ4_MIN_MATCH		4
 #define LZ4_OFFSET_BYTES	2	/* little-endian, low byte first */
+#define LZ4_END_LITERALS	5	/* final literals after a match */
+#define LZ4_END_MATCH_DISTANCE	12	/* last match start to output end */
 
 /* What the output bound means. */
 typedef enum lz4_mode {
@@ -52,6 +61,8 @@ typedef struct lz4_block {
 	size_t		 bound;		/* capacity or requested length */
 	size_t		 produced;
 	lz4_mode_t	 mode;
+	bool		 matched;	/* a match has been copied */
+	size_t		 match_start;	/* where the last match's output began */
 } lz4_block_t;
 
 static fsimg_status_t lz4_fail(const lz4_block_t *, fsimg_status_t,
@@ -59,6 +70,8 @@ static fsimg_status_t lz4_fail(const lz4_block_t *, fsimg_status_t,
 static fsimg_status_t lz4_read_length(lz4_block_t *, unsigned, size_t,
     size_t *, fsimg_error_t *);
 static fsimg_status_t lz4_read_offset(lz4_block_t *, size_t *,
+    fsimg_error_t *);
+static fsimg_status_t lz4_check_end(const lz4_block_t *, size_t,
     fsimg_error_t *);
 static fsimg_status_t lz4_decode_sequences(lz4_block_t *, fsimg_error_t *);
 static fsimg_status_t lz4_decode(lz4_mode_t, const uint8_t *, size_t,
@@ -148,12 +161,31 @@ lz4_read_offset(lz4_block_t *block, size_t *offset, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/*
+ * Judge a whole block's end, once its input has ended after the final
+ * literal run of the given length. A literal-only block meets the end
+ * conditions whatever its length; one holding a match needs at least five
+ * final literals and its last match starting at least 12 bytes before the
+ * output's end. The verdict's offset is the bytes consumed, all of them.
+ */
+static fsimg_status_t
+lz4_check_end(const lz4_block_t *block, size_t literals, fsimg_error_t *error)
+{
+	if (!block->matched)
+		return (FSIMG_OK);
+	if (literals < LZ4_END_LITERALS ||
+	    block->produced - block->match_start < LZ4_END_MATCH_DISTANCE)
+		return (lz4_fail(block, FSIMG_ECORRUPT, "lz4: block end",
+		    error));
+	return (FSIMG_OK);
+}
+
 /* Decode sequences until the block ends, the bound is reached or a verdict. */
 static fsimg_status_t
 lz4_decode_sequences(lz4_block_t *block, fsimg_error_t *error)
 {
 	fsimg_status_t status;
-	size_t count, from, offset;
+	size_t count, from, literals, offset;
 	uint8_t token;
 
 	for (;;) {
@@ -166,13 +198,13 @@ lz4_decode_sequences(lz4_block_t *block, fsimg_error_t *error)
 		token = block->in[block->consumed++];
 
 		status = lz4_read_length(block, token >> LZ4_FIELD_BITS, 0,
-		    &count, error);
+		    &literals, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (count > block->in_len - block->consumed)
+		if (literals > block->in_len - block->consumed)
 			return (lz4_fail(block, FSIMG_ECORRUPT,
 			    "lz4: unterminated stream", error));
-		for (size_t i = 0; i < count; i++)
+		for (size_t i = 0; i < literals; i++)
 			block->out[block->produced++] =
 			    block->in[block->consumed++];
 
@@ -182,7 +214,7 @@ lz4_decode_sequences(lz4_block_t *block, fsimg_error_t *error)
 		/* The input ending after literals is the end of the block. */
 		if (block->consumed == block->in_len) {
 			if (block->mode == LZ4_FULL)
-				return (FSIMG_OK);
+				return (lz4_check_end(block, literals, error));
 			return (lz4_fail(block, FSIMG_ECORRUPT,
 			    "lz4: stream ends before the requested length",
 			    error));
@@ -195,6 +227,10 @@ lz4_decode_sequences(lz4_block_t *block, fsimg_error_t *error)
 		    LZ4_MIN_MATCH, &count, error);
 		if (status != FSIMG_OK)
 			return (status);
+
+		/* The end conditions are judged against the last match. */
+		block->matched = true;
+		block->match_start = block->produced;
 
 		/* Front to back, so an offset below the count repeats. */
 		from = block->produced - offset;

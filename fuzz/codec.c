@@ -46,8 +46,11 @@
  * length. Full success means done with all input consumed. Wherever the
  * partial length is no more than the bytes the full decode produced,
  * successful or not, the partial decode must succeed with exactly that
- * many bytes, the same as the full decode's prefix; after a full success
- * a longer length must be refused as corrupt, the block ending first.
+ * many bytes, the same as the full decode's prefix; a block full mode
+ * refuses only for its end conditions has produced all its output, and
+ * partial mode, which never judges them, decodes every prefix of it. After
+ * a full success a longer length must be refused as corrupt, the block
+ * ending first.
  *
  * A block is encoded by one encoder kept across inputs, whose table the
  * earlier inputs filled, and by a fresh one: the streams must be the same
