@@ -21,8 +21,24 @@
  * is the first, so its NID fits the superblock's 16-bit field.
  */
 #define EROFS_WRITE_METADATA_START	(EROFS_SUPER_OFFSET + EROFS_SUPER_BASE_BYTES)
-/* Without 48-bit addressing a block number is 32 bits wide. */
+/*
+ * The largest block number: 32 bits wide, or 48 under addressing=48, whose
+ * start blocks keep bits 32 to 47 in the inode word at 0x06 and whose
+ * block count keeps them in the superblock's wide form.
+ */
 #define EROFS_WRITE_BLOCKS_MAX		UINT64_C(0xffffffff)
+#define EROFS_WRITE_BLOCKS_MAX_48	UINT64_C(0xffffffffffff)
+/*
+ * Under addressing=48 a compressed file maps its clusters by encoded
+ * extents of 32-byte records, which start at the first multiple of 32
+ * bytes at or after the 8-byte map header's end: 32 bytes after the fixed
+ * part, since an inode starts on a 32-byte slot, its fixed part is 32 or
+ * 64 bytes and the writer stores no attributes. The header's advice
+ * selects encoded extents (bit 0) of 4 << 3 bytes (bits 1 and 2).
+ */
+#define EROFS_EXTENT32_BYTES		32u
+#define EROFS_EXTENT32_OFFSET		32u
+#define EROFS_EXTENT32_ADVICE		0x0007u
 
 /*
  * One plan row per catalog ID, row 0 the root. A row holds everything the
@@ -73,7 +89,10 @@ typedef struct erofs_row {
 
 /*
  * The plan: the row array and the volume the passes derive. format_time is
- * the superblock's epoch, with zero fixed nanoseconds; metadata_end is the
+ * the time of every inode whose own is absent, and epoch the superblock's,
+ * with zero fixed nanoseconds: the format time, or under addressing=48
+ * (addressing48) the smallest modification second of any row. blocks_max
+ * is the largest block number the addressing allows. metadata_end is the
  * block-aligned byte offset where the data area begins; used_blocks counts
  * every block up to the end of the last inode's data and block_count the
  * volume's blocks, at least used_blocks. volume_bytes is the image length:
@@ -94,8 +113,11 @@ typedef struct erofs_plan {
 	uint64_t	 inode_count;
 	fsimg_store_t	*cluster_records;	/* LZ4, write-lz4.c */
 	uint64_t	 cluster_count;		/* records of compressed files */
+	uint64_t	 blocks_max;
 	int64_t		 format_time;
+	int64_t		 epoch;
 	uint32_t	 block_bytes;
+	bool		 addressing48;
 	unsigned char	 uuid[16];
 } erofs_plan_t;
 
@@ -178,7 +200,7 @@ fsimg_status_t erofs_row_get(erofs_plan_t *, uint64_t, erofs_row_t *,
     fsimg_error_t *);
 fsimg_status_t erofs_row_set(erofs_plan_t *, uint64_t, const erofs_row_t *,
     fsimg_error_t *);
-uint64_t erofs_row_body_bytes(const erofs_row_t *, uint32_t);
+uint64_t erofs_row_body_bytes(const erofs_plan_t *, const erofs_row_t *);
 uint32_t erofs_row_unbroken_bytes(const erofs_row_t *, uint32_t);
 uint64_t erofs_row_index_records(const erofs_row_t *, uint32_t);
 uint32_t erofs_row_fixed_bytes(const erofs_row_t *);

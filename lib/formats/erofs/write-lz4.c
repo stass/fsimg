@@ -28,8 +28,9 @@
  * Planning runs the former over a measured read and appends one record per
  * cluster to the plan's cluster records. Emission runs it again over an
  * encoded copy, compares each cluster with its record and stores the
- * block, and writes each compressed inode's full index from the records,
- * so no payload is staged and the index needs no source.
+ * block, and writes each compressed inode's full index, or under
+ * addressing=48 its encoded extents, from the records, so no payload is
+ * staged and the index needs no source.
  */
 
 /* A cluster record, little endian; bytes 13 to 15 are zero. */
@@ -38,6 +39,22 @@
 #define RECORD_PRODUCED		10
 #define RECORD_PLAIN		12
 #define RECORD_BYTES		16u
+/*
+ * A 32-byte encoded extent: its length word, stored bytes in bits 0 to 20
+ * and the format in bits 28 to 31, 0 for plain and otherwise the algorithm
+ * plus one, then the physical and the logical byte offsets, each in two
+ * little-endian 32-bit halves, low first; bytes 20 to 31 are zero. The map
+ * header holds the extent count's low 32 bits and its high 16 bits around
+ * the advice word.
+ */
+#define EXTENT_LENGTH		0
+#define EXTENT_PHYSICAL		4
+#define EXTENT_LOGICAL		12
+#define EXTENT_FORMAT_SHIFT	28
+#define EXTENT_FORMAT_LZ4	((uint32_t)EROFS_ALGORITHM_LZ4 + 1)
+#define XHEADER_COUNT_LOW	0
+#define XHEADER_ADVICE		4
+#define XHEADER_COUNT_HIGH	6
 
 _Static_assert(EROFS_LZ4_WINDOW_BYTES - 1 <= UINT16_MAX,
     "a cluster's consumed bytes less one fit a record's 16-bit field");
@@ -106,6 +123,9 @@ static fsimg_status_t record_cluster(void *, const erofs_lz4_cluster_t *,
     const unsigned char *, fsimg_error_t *);
 static fsimg_status_t store_cluster(void *, const erofs_lz4_cluster_t *,
     const unsigned char *, fsimg_error_t *);
+static fsimg_status_t write_extents(erofs_plan_t *, const erofs_row_t *,
+    uint64_t, unsigned char *, erofs_put_t, void *, fsimg_error_t *);
+static void put_le64_halves(unsigned char *, uint64_t);
 static fsimg_status_t index_record(unsigned char *, size_t *, uint64_t *,
     const erofs_zrecord_t *, uint16_t, erofs_put_t, void *, fsimg_error_t *);
 static fsimg_status_t corrupt_plan(fsimg_error_t *);
@@ -421,7 +441,8 @@ index_record(unsigned char *buffer, size_t *fill, uint64_t *offset,
  * cluster without one. Each cluster must start where the previous ended
  * and its head must fall in logical cluster records, so the records tile
  * [0, size) in order and never pass ceil(size / B), the count the inode's
- * body was sized for; a plan that breaks either is refused.
+ * body was sized for; a plan that breaks either is refused. Under
+ * addressing=48, write_extents() writes the encoded extents instead.
  */
 fsimg_status_t
 erofs_lz4_write_index(erofs_plan_t *plan, const erofs_row_t *row,
@@ -437,6 +458,9 @@ erofs_lz4_write_index(erofs_plan_t *plan, const erofs_row_t *row,
 	size_t fill;
 	fsimg_status_t status;
 
+	if (plan->addressing48)
+		return (write_extents(plan, row, offset, buffer, put, argument,
+		    error));
 	if (!erofs_zheader_encode(&header, buffer))
 		return (corrupt_plan(error));
 	bzero(buffer + EROFS_ZHEADER_BYTES,
@@ -496,6 +520,88 @@ erofs_lz4_write_index(erofs_plan_t *plan, const erofs_row_t *row,
 	if (records != erofs_row_index_records(row, block_bytes))
 		return (corrupt_plan(error));
 	return (put(argument, offset, buffer, fill, error));
+}
+
+/*
+ * Under addressing=48, write a compressed row's map header and 32-byte
+ * encoded extents at offset, the end of its fixed part, staging up to
+ * FSIMG_EMIT_BUFFER_BYTES, a multiple of the record, in buffer
+ * (specs/design-erofs.md, 48-bit profile). The header holds the extent
+ * count, one per cluster, and the advice that selects 32-byte records;
+ * the count's high 16 bits are zero, since a row's clusters fit 32 bits,
+ * and the 24 bytes between the header and the first record are zero.
+ *
+ * Cluster i, holding logical bytes [h, e), gives one record: B stored
+ * bytes, format LZ4 or plain, at the byte offset of block start_block + i,
+ * from logical offset h. A record runs to the next one's logical offset,
+ * or to size, so e need not be stored. Each cluster must start where the
+ * previous ended and lie within size, so the logical offsets start at 0,
+ * increase strictly and tile [0, size); a plan that breaks that is
+ * refused. The count is at most ceil(size / B), the bound readers enforce:
+ * erofs_row_get() refuses a row with more clusters than that, which the
+ * former never forms, since every cluster but the last holds B bytes or
+ * more. Block start_block + i is a placed
+ * block, so its byte offset stays below 2^60.
+ */
+static fsimg_status_t
+write_extents(erofs_plan_t *plan, const erofs_row_t *row, uint64_t offset,
+    unsigned char *buffer, erofs_put_t put, void *argument,
+    fsimg_error_t *error)
+{
+	const uint32_t block_bytes = plan->block_bytes;
+	erofs_lz4_cluster_t cluster;
+	unsigned char *extent;
+	uint64_t expected;
+	uint32_t format;
+	size_t fill;
+	fsimg_status_t status;
+
+	_Static_assert(FSIMG_EMIT_BUFFER_BYTES % EROFS_EXTENT32_BYTES == 0,
+	    "the staging buffer holds whole encoded extents");
+	bzero(buffer, EROFS_EXTENT32_OFFSET);
+	fsimg_store_le32(buffer + XHEADER_COUNT_LOW, row->clusters);
+	fsimg_store_le16(buffer + XHEADER_ADVICE, EROFS_EXTENT32_ADVICE);
+	fsimg_store_le16(buffer + XHEADER_COUNT_HIGH, 0);
+	fill = EROFS_EXTENT32_OFFSET;
+	expected = 0;
+	for (uint64_t i = 0; i < row->clusters; i++) {
+		status = record_get(plan, row->first_cluster + i, &cluster,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (cluster.logical != expected ||
+		    cluster.consumed > row->size - cluster.logical)
+			return (corrupt_plan(error));
+		expected += cluster.consumed;
+
+		if (fill == FSIMG_EMIT_BUFFER_BYTES) {
+			status = put(argument, offset, buffer, fill, error);
+			if (status != FSIMG_OK)
+				return (status);
+			offset += fill;
+			fill = 0;
+		}
+		extent = buffer + fill;
+		bzero(extent, EROFS_EXTENT32_BYTES);
+		format = cluster.plain ? 0 : EXTENT_FORMAT_LZ4;
+		fsimg_store_le32(extent + EXTENT_LENGTH,
+		    block_bytes | format << EXTENT_FORMAT_SHIFT);
+		put_le64_halves(extent + EXTENT_PHYSICAL,
+		    (row->start_block + i) * block_bytes);
+		put_le64_halves(extent + EXTENT_LOGICAL, cluster.logical);
+		fill += EROFS_EXTENT32_BYTES;
+	}
+	if (expected != row->size)
+		return (corrupt_plan(error));
+	return (put(argument, offset, buffer, fill, error));
+}
+
+/* A 64-bit value as two little-endian 32-bit halves, low first. */
+static void
+put_le64_halves(unsigned char *raw, uint64_t value)
+{
+	fsimg_store_le32(raw, (uint32_t)value);
+	fsimg_store_le32(raw + 4, (uint32_t)(value >> 32));
 }
 
 /*

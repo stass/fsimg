@@ -162,7 +162,7 @@ inode_offset(const erofs_row_t *row)
 /*
  * Whether the row lies where planning put it: its body inside the metadata
  * area, after the superblock, and its data blocks, if any, inside the data
- * area, which ends below the 32-bit block limit. Every write emission
+ * area, which ends within the addressing's block limit. Every write emission
  * makes for the row is derived from these fields, so a row that passes
  * cannot reach the superblock or another area.
  */
@@ -174,7 +174,7 @@ row_placed(const erofs_plan_t *plan, const erofs_row_t *row)
 
 	if (row->nid < EROFS_WRITE_METADATA_START / EROFS_NID_SLOT_BYTES ||
 	    row->nid > plan->metadata_end / EROFS_NID_SLOT_BYTES ||
-	    inode_offset(row) + erofs_row_body_bytes(row, block_bytes) >
+	    inode_offset(row) + erofs_row_body_bytes(plan, row) >
 	    plan->metadata_end)
 		return (false);
 	blocks = erofs_row_data_blocks(row, block_bytes);
@@ -218,10 +218,12 @@ row_kind(const erofs_row_t *row, fsimg_entry_kind_t *kind,
 /*
  * The superblock of the writer profile (specs/design-erofs.md, Volume),
  * all but the root NID and the checksum: features SB_CHKSUM and MTIME, no
- * extension slots, metadata from block 0, the format time as the epoch
- * with zero nanoseconds, and the label raw and NUL-padded. When a file is
- * compressed, LZ4_0PADDING and LZ4's maximum distance, 65535. Every other
- * field is zero. validate_options() bounds the label and the block count.
+ * extension slots, metadata from block 0, the plan's epoch with zero
+ * nanoseconds, and the label raw and NUL-padded. When a file is
+ * compressed, LZ4_0PADDING and LZ4's maximum distance, 65535; under
+ * addressing=48, 48BIT, which erofs_super_encode() writes in the wide
+ * form. Every other field is zero. validate_options() bounds the label and
+ * the block count.
  */
 static void
 super_init(const erofs_plan_t *plan, erofs_super_t *sb)
@@ -232,7 +234,7 @@ super_init(const erofs_plan_t *plan, erofs_super_t *sb)
 	sb->compat = EROFS_COMPAT_SB_CHKSUM | EROFS_COMPAT_MTIME;
 	sb->blkszbits = (uint8_t)(ffs((int)plan->block_bytes) - 1);
 	sb->inode_count = plan->inode_count;
-	sb->epoch = plan->format_time;
+	sb->epoch = plan->epoch;
 	sb->block_count = plan->block_count;
 	bcopy(plan->uuid, sb->uuid, sizeof(sb->uuid));
 	sb->name_length = (uint8_t)strlen(label);
@@ -241,6 +243,8 @@ super_init(const erofs_plan_t *plan, erofs_super_t *sb)
 		sb->incompat |= EROFS_INCOMPAT_LZ4_0PADDING;
 		sb->compression_word = EROFS_LZ4_DISTANCE;
 	}
+	if (plan->addressing48)
+		sb->incompat |= EROFS_INCOMPAT_48BIT;
 }
 
 /*
@@ -248,10 +252,14 @@ super_init(const erofs_plan_t *plan, erofs_super_t *sb)
  * fields, with its 1-based position in the metadata area, which ID order
  * makes id + 1, as its serial number. The layout word is the start block,
  * zero for an inode that stores no block, or a compressed inode's
- * physical block count. A compact inode's time is the
- * superblock's epoch, which the compact rule makes exact. The row is
- * checked here, before anything of it is written, and the directory and
- * content writes that follow use the same row.
+ * physical block count, which fits 32 bits; under addressing=48 the start
+ * block's bits 32 to 47 go to the word at 0x06, which for a compressed
+ * inode holds the block count's high bits, zero, and every compact inode,
+ * which is never a directory there, takes the implicit link count of 1
+ * that frees that word. A compact inode's time is the superblock's epoch
+ * plus the offset the compact rule makes exact. The row is checked here,
+ * before anything of it is written, and the directory and content writes
+ * that follow use the same row.
  */
 static fsimg_status_t
 emit_inode(erofs_emit_state_t *state, uint64_t id, const erofs_row_t *row,
@@ -271,8 +279,12 @@ emit_inode(erofs_emit_state_t *state, uint64_t id, const erofs_row_t *row,
 	inode.permissions = row->mode & EROFS_MODE_PERMISSIONS;
 	inode.nlink = row->links;
 	inode.size = row->size;
-	inode.layout_word = row->layout == EROFS_LAYOUT_COMPRESSED_FULL ?
-	    row->clusters : (uint32_t)row->start_block;
+	if (row->layout == EROFS_LAYOUT_COMPRESSED_FULL) {
+		inode.layout_word = row->clusters;
+	} else {
+		inode.layout_word = (uint32_t)row->start_block;
+		inode.layout_high = (uint16_t)(row->start_block >> 32);
+	}
 	inode.serial = (uint32_t)(id + 1);
 	inode.uid = row->uid;
 	inode.gid = row->gid;

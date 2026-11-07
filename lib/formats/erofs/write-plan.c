@@ -15,9 +15,12 @@
  * is sequential, and plan rows, one per catalog ID in a scratch-backed
  * array, are the only per-entry state:
  *
- * 1. Settings and time fix the block size, the format time and the UUID.
+ * 1. Settings and time fix the block size, the addressing, the format
+ *    time and the UUID.
  * 2. Entries encode each entry's kind, size, owner, mode, time and link
  *    count, and pack each directory's names (write-dir.c) for its size.
+ *    Under addressing=48 the superblock's epoch is lowered to the
+ *    smallest modification second of any row.
  * 3. Measurement, under compression=lz4, refuses an output limit the least
  *    reachable volume exceeds, then encodes each regular file whose flat
  *    layout stores at least two blocks (write-lz4.c) and gives it the
@@ -25,7 +28,8 @@
  * 4. Metadata placement chooses each inode's form and layout, which the
  *    finished link counts decide, and assigns its NID.
  * 5. Data placement assigns each inode's start block in the same order.
- * 6. Sizing checks the requested volume size and the 32-bit block limit.
+ * 6. Sizing checks the requested volume size; passes 4 and 5 have kept
+ *    every block within the addressing's limit.
  *
  * Every row's encoded length depends only on the catalog, the settings and
  * a compressed file's measured clusters, so no pass changes an earlier
@@ -71,7 +75,9 @@ static uint64_t flat_blocks(const erofs_plan_t *, const erofs_row_t *,
     bool *);
 static fsimg_status_t check_least_volume(erofs_plan_t *, fsimg_error_t *);
 static fsimg_status_t measure_files(erofs_plan_t *, fsimg_error_t *);
-static void choose_inode_shape(erofs_row_t *, int64_t, uint32_t);
+static fsimg_status_t addressing_exceeded(const erofs_plan_t *,
+    fsimg_error_t *);
+static void choose_inode_shape(const erofs_plan_t *, erofs_row_t *);
 static fsimg_status_t place_metadata(erofs_plan_t *, fsimg_error_t *);
 static fsimg_status_t place_data(erofs_plan_t *, uint64_t *, uint64_t *,
     fsimg_error_t *);
@@ -88,31 +94,33 @@ const fsimg_writer_ops_t fsimg_erofs_writer_ops = {
 /*
  * The common options under the writer profile: a 512-byte sector, a block
  * of 512, 1024, 2048 or 4096 bytes, 4096 by default, a volume size of zero
- * or whole sectors whose whole blocks fit the 32-bit block count, no
- * free-space request, a label that leaves the name field a terminator, and
- * the EROFS settings. Values outside each domain are invalid. The
- * writer emits the 32-bit layout without a metadata box, uncompressed or
- * with LZ4 files; the other values of the addressing and box settings name
- * layouts it does not write, so they too are unsupported rather than
- * invalid. A metadata box needs
- * 48-bit addressing whether or not it is supported.
+ * or whole sectors whose whole blocks fit the block count the addressing
+ * allows, no free-space request, a label that leaves the name field a
+ * terminator, and the EROFS settings. Values outside each domain are
+ * invalid. The writer emits the 32- and 48-bit layouts without a metadata
+ * box, uncompressed or with LZ4 files; the box values name layouts it does
+ * not write, so they are unsupported rather than invalid. A metadata box
+ * needs 48-bit addressing whether or not it is supported.
  */
 static fsimg_status_t
 validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
     fsimg_error_t *error)
 {
 	static const char empty_label[] = "";
+	uint64_t blocks_max;
 	uint32_t block;
 	bool legal_block;
 
 	block = options->allocation_unit_bytes == 0 ?
 	    EROFS_WRITE_BLOCK_DEFAULT : options->allocation_unit_bytes;
+	blocks_max = options->erofs_addressing == 48 ?
+	    EROFS_WRITE_BLOCKS_MAX_48 : EROFS_WRITE_BLOCKS_MAX;
 	legal_block = block >= 1u << EROFS_BLKSZBITS_MIN &&
 	    block <= 1u << EROFS_BLKSZBITS_MAX && (block & (block - 1)) == 0;
 	if (!legal_block ||
 	    (options->sector_bytes != 0 && options->sector_bytes != 512) ||
 	    options->volume_bytes % 512 != 0 ||
-	    options->volume_bytes / block > EROFS_WRITE_BLOCKS_MAX ||
+	    options->volume_bytes / block > blocks_max ||
 	    options->min_free_bytes != 0 ||
 	    (options->label != NULL &&
 	    strlen(options->label) > EROFS_WRITE_LABEL_MAX))
@@ -137,9 +145,6 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 		return (setting_refused(error, FSIMG_EINVAL, "metabox",
 		    "an EROFS metadata box requires 48-bit addressing"));
 
-	if (options->erofs_addressing == 48)
-		return (setting_refused(error, FSIMG_EUNSUPPORTED, "addressing",
-		    "the EROFS writer does not write 48-bit addressing"));
 	if (options->erofs_metabox != FSIMG_EROFS_METABOX_NONE)
 		return (setting_refused(error, FSIMG_EUNSUPPORTED, "metabox",
 		    "the EROFS writer does not write a metadata box"));
@@ -276,20 +281,24 @@ erofs_row_fixed_bytes(const erofs_row_t *row)
 
 /*
  * The inode's body: its fixed part and any inline tail, since the writer
- * stores no attributes, or under the compressed layout its fixed part,
- * map header and full index, whose records start 16 bytes after the
- * header. The fixed part ends on an 8-byte boundary, where the header
- * starts.
+ * stores no attributes, or under the compressed layout its fixed part and
+ * map header, which starts where the fixed part ends, and then either the
+ * full index, whose records start 16 bytes after the header, or under
+ * addressing=48 one 32-byte encoded extent per cluster, starting 32 bytes
+ * after it.
  */
 uint64_t
-erofs_row_body_bytes(const erofs_row_t *row, uint32_t block_bytes)
+erofs_row_body_bytes(const erofs_plan_t *plan, const erofs_row_t *row)
 {
-	if (row->layout == EROFS_LAYOUT_COMPRESSED_FULL)
-		return (erofs_row_fixed_bytes(row) + EROFS_FULL_INDEX_OFFSET +
-		    erofs_row_index_records(row, block_bytes) *
-		    EROFS_FULL_RECORD_BYTES);
-	return (erofs_row_fixed_bytes(row) +
-	    erofs_row_tail_bytes(row, block_bytes));
+	if (row->layout != EROFS_LAYOUT_COMPRESSED_FULL)
+		return (erofs_row_fixed_bytes(row) +
+		    erofs_row_tail_bytes(row, plan->block_bytes));
+	if (plan->addressing48)
+		return (erofs_row_fixed_bytes(row) + EROFS_EXTENT32_OFFSET +
+		    (uint64_t)row->clusters * EROFS_EXTENT32_BYTES);
+	return (erofs_row_fixed_bytes(row) + EROFS_FULL_INDEX_OFFSET +
+	    erofs_row_index_records(row, plan->block_bytes) *
+	    EROFS_FULL_RECORD_BYTES);
 }
 
 /*
@@ -303,7 +312,8 @@ erofs_row_unbroken_bytes(const erofs_row_t *row, uint32_t block_bytes)
 {
 	if (row->layout == EROFS_LAYOUT_COMPRESSED_FULL)
 		return (erofs_row_fixed_bytes(row));
-	return ((uint32_t)erofs_row_body_bytes(row, block_bytes));
+	return (erofs_row_fixed_bytes(row) +
+	    erofs_row_tail_bytes(row, block_bytes));
 }
 
 /* A compressed inode's index records: one per logical cluster of B bytes. */
@@ -343,8 +353,9 @@ erofs_row_data_blocks(const erofs_row_t *row, uint32_t block_bytes)
 
 /*
  * Pass 1 for time: the format time is the reproducible epoch, or the
- * host's UTC clock sampled once. It is the superblock's epoch, with zero
- * fixed nanoseconds, and the time of every inode whose own is absent.
+ * host's UTC clock sampled once. It is the time of every inode whose own
+ * is absent, and the superblock's epoch, with zero fixed nanoseconds,
+ * until pass 2 lowers that under addressing=48.
  */
 static fsimg_status_t
 choose_format_time(erofs_plan_t *plan, fsimg_error_t *error)
@@ -354,13 +365,14 @@ choose_format_time(erofs_plan_t *plan, fsimg_error_t *error)
 
 	if ((options->flags & FSIMG_WRITE_REPRODUCIBLE) != 0) {
 		plan->format_time = options->epoch;
-		return (FSIMG_OK);
+	} else {
+		now = time(NULL);
+		if (now == (time_t)-1)
+			return (fsimg_error_set(error, FSIMG_EIO, 0,
+			    FSIMG_OP_WRITER, "host clock is unavailable"));
+		plan->format_time = (int64_t)now;
 	}
-	now = time(NULL);
-	if (now == (time_t)-1)
-		return (fsimg_error_set(error, FSIMG_EIO, 0, FSIMG_OP_WRITER,
-		    "host clock is unavailable"));
-	plan->format_time = (int64_t)now;
+	plan->epoch = plan->format_time;
 	return (FSIMG_OK);
 }
 
@@ -467,7 +479,9 @@ count_subdirectory(erofs_plan_t *plan, uint64_t parent_id,
  * Pass 2 for catalog entry id. Its row is encoded from the catalog
  * snapshot before a directory's children are walked, since the walk
  * reuses the snapshot's record buffer. The parent's row, earlier in ID
- * order, gains a link for a subdirectory.
+ * order, gains a link for a subdirectory. Under addressing=48 the epoch
+ * follows the smallest modification second, so the compact form can store
+ * any time within 2^32 seconds after it.
  */
 static fsimg_status_t
 plan_entry(erofs_plan_t *plan, uint64_t id, uint64_t *child_cursor,
@@ -489,6 +503,8 @@ plan_entry(erofs_plan_t *plan, uint64_t id, uint64_t *child_cursor,
 	if (status != FSIMG_OK)
 		return (status);
 	parent_id = catalog->parent_id;
+	if (plan->addressing48 && row.mtime < plan->epoch)
+		plan->epoch = row.mtime;
 
 	if (catalog->entry.kind == FSIMG_ENTRY_DIRECTORY) {
 		status = count_subdirectory(plan, parent_id, error);
@@ -551,7 +567,7 @@ flat_blocks(const erofs_plan_t *plan, const erofs_row_t *row, bool *measured)
 	erofs_row_t shaped = *row;
 	uint64_t blocks;
 
-	choose_inode_shape(&shaped, plan->format_time, plan->block_bytes);
+	choose_inode_shape(plan, &shaped);
 	blocks = erofs_row_data_blocks(&shaped, plan->block_bytes);
 	*measured = (row->mode & EROFS_MODE_TYPE_MASK) == EROFS_MODE_REGULAR &&
 	    blocks >= 2;
@@ -645,12 +661,10 @@ measure_files(erofs_plan_t *plan, fsimg_error_t *error)
 		if (!measured)
 			continue;
 		/* A cluster holds at most a window, so a file needing more
-		 * clusters than 32-bit addressing has blocks is refused unread.
+		 * clusters than the addressing has blocks is refused unread.
 		 */
-		if (row.size / EROFS_LZ4_WINDOW_BYTES >= EROFS_WRITE_BLOCKS_MAX) {
-			status = setting_refused(error, FSIMG_ERANGE,
-			    "addressing",
-			    "EROFS data exceeds 32-bit block addressing");
+		if (row.size / EROFS_LZ4_WINDOW_BYTES >= plan->blocks_max) {
+			status = addressing_exceeded(plan, error);
 			break;
 		}
 		status = erofs_lz4_measure(plan, former, id, row.size, flat,
@@ -659,12 +673,18 @@ measure_files(erofs_plan_t *plan, fsimg_error_t *error)
 			break;
 		if (clusters >= flat)
 			continue;
-		if (clusters > EROFS_WRITE_BLOCKS_MAX) {
-			status = setting_refused(error, FSIMG_ERANGE,
-			    "addressing",
-			    "EROFS data exceeds 32-bit block addressing");
+		if (clusters > plan->blocks_max) {
+			status = addressing_exceeded(plan, error);
 			break;
 		}
+		/*
+		 * The row's cluster count and the layout word are 32 bits.
+		 * Only under addressing=48 can a file pass that, since
+		 * blocks_max is UINT32_MAX otherwise, and its flat layout
+		 * holds it, so it stays flat.
+		 */
+		if (clusters > UINT32_MAX)
+			continue;
 		row.layout = EROFS_LAYOUT_COMPRESSED_FULL;
 		row.clusters = (uint32_t)clusters;
 		row.first_cluster = plan->cluster_count;
@@ -678,29 +698,51 @@ measure_files(erofs_plan_t *plan, fsimg_error_t *error)
 }
 
 /*
+ * Refuse a plan whose metadata or data passes the addressing's largest
+ * block number, naming the setting.
+ */
+static fsimg_status_t
+addressing_exceeded(const erofs_plan_t *plan, fsimg_error_t *error)
+{
+	return (setting_refused(error, FSIMG_ERANGE, "addressing",
+	    plan->addressing48 ? "EROFS volume exceeds 48-bit block addressing" :
+	    "EROFS volume exceeds 32-bit block addressing"));
+}
+
+/*
  * The inode's form and layout. It is compact when its size fits 32 bits,
- * its owner and link count 16 bits each, and its time is the format time
- * to the nanosecond, which a compact inode stores as the superblock's
- * epoch; otherwise extended. A file measurement compressed keeps the
- * compressed layout. Other content whose size is not a multiple of the
- * block keeps its tail in the body when the fixed part and the tail fit
- * one block (flat-inline), and in a data block of its own otherwise
- * (flat).
+ * its owner, group and link count 16 bits each, and its time is one the
+ * compact form stores exactly: the superblock's epoch plus an unsigned
+ * offset of at most span, with zero nanoseconds; otherwise it is extended.
+ * Without addressing=48 the epoch is the format time and span is 0. Under
+ * it pass 2 has lowered the epoch to the smallest time and span is the
+ * 32-bit offset's range, and a compact link count must be 1, the implicit
+ * count whose word carries start-block bits, so every directory is
+ * extended. A file
+ * measurement compressed keeps the compressed layout. Other content whose
+ * size is not a multiple of the block keeps its tail in the body when the
+ * fixed part and the tail fit one block (flat-inline), and in a data block
+ * of its own otherwise (flat).
  */
 static void
-choose_inode_shape(erofs_row_t *row, int64_t format_time,
-    uint32_t block_bytes)
+choose_inode_shape(const erofs_plan_t *plan, erofs_row_t *row)
 {
+	const uint64_t span = plan->addressing48 ? UINT32_MAX : 0;
 	uint64_t tail;
+	bool compact_time;
 
+	/* Unsigned subtraction is exact once mtime >= epoch. */
+	compact_time = row->mtime >= plan->epoch && row->mtime_nsec == 0 &&
+	    (uint64_t)row->mtime - (uint64_t)plan->epoch <= span;
 	row->extended = row->size > UINT32_MAX || row->uid > UINT16_MAX ||
-	    row->gid > UINT16_MAX || row->links > UINT16_MAX ||
-	    row->mtime != format_time || row->mtime_nsec != 0;
+	    row->gid > UINT16_MAX ||
+	    row->links > (plan->addressing48 ? 1 : UINT16_MAX) ||
+	    !compact_time;
 	if (row->layout == EROFS_LAYOUT_COMPRESSED_FULL)
 		return;
-	tail = row->size % block_bytes;
+	tail = row->size % plan->block_bytes;
 	row->layout = EROFS_LAYOUT_FLAT;
-	if (tail != 0 && erofs_row_fixed_bytes(row) + tail <= block_bytes)
+	if (tail != 0 && erofs_row_fixed_bytes(row) + tail <= plan->block_bytes)
 		row->layout = EROFS_LAYOUT_FLAT_INLINE;
 }
 
@@ -711,16 +753,16 @@ choose_inode_shape(erofs_row_t *row, int64_t format_time,
  * body that is the fixed part and any tail the whole body stays in one
  * block: an inode that would cross starts at the next block. A compressed
  * inode keeps only its fixed part in one block; its index continues
- * across blocks. The area ends at a block boundary. Offsets stay below
- * the 32-bit block limit, checked after every inode, and each inode adds
- * at most a block and a body, which a file size below 2^64 bounds far
- * below 2^63, so nothing can overflow.
+ * across blocks. The area ends at a block boundary. Offsets stay within
+ * the addressing's block limit, at most 2^60 bytes, checked after every
+ * inode, and each inode adds at most a block and a body, which a file
+ * size below 2^64 bounds far below 2^63, so nothing can overflow.
  */
 static fsimg_status_t
 place_metadata(erofs_plan_t *plan, fsimg_error_t *error)
 {
 	const uint32_t block_bytes = plan->block_bytes;
-	const uint64_t limit = EROFS_WRITE_BLOCKS_MAX * block_bytes;
+	const uint64_t limit = plan->blocks_max * block_bytes;
 	erofs_row_t row;
 	uint64_t offset, within, body;
 	fsimg_status_t status;
@@ -730,8 +772,8 @@ place_metadata(erofs_plan_t *plan, fsimg_error_t *error)
 		status = erofs_row_get(plan, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);
-		choose_inode_shape(&row, plan->format_time, block_bytes);
-		body = erofs_row_body_bytes(&row, block_bytes);
+		choose_inode_shape(plan, &row);
+		body = erofs_row_body_bytes(plan, &row);
 
 		offset = (offset + EROFS_NID_SLOT_BYTES - 1) &
 		    ~(uint64_t)(EROFS_NID_SLOT_BYTES - 1);
@@ -742,8 +784,7 @@ place_metadata(erofs_plan_t *plan, fsimg_error_t *error)
 		row.nid = offset / EROFS_NID_SLOT_BYTES;
 		offset += body;
 		if (offset > limit)
-			return (setting_refused(error, FSIMG_ERANGE, "addressing",
-			    "EROFS metadata exceeds 32-bit block addressing"));
+			return (addressing_exceeded(plan, error));
 		status = erofs_row_set(plan, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -758,7 +799,7 @@ place_metadata(erofs_plan_t *plan, fsimg_error_t *error)
  * metadata area's end. An inode that stores no block keeps start block 0,
  * the word the layout leaves unused. For the summary it also counts the
  * data blocks and the bytes of file and link content; both stay below the
- * 32-bit block limit's byte count, checked per inode.
+ * addressing's block limit's byte count, checked per inode.
  */
 static fsimg_status_t
 place_data(erofs_plan_t *plan, uint64_t *payload_blocks,
@@ -778,9 +819,8 @@ place_data(erofs_plan_t *plan, uint64_t *payload_blocks,
 		if (status != FSIMG_OK)
 			return (status);
 		blocks = erofs_row_data_blocks(&row, block_bytes);
-		if (blocks > EROFS_WRITE_BLOCKS_MAX - next)
-			return (setting_refused(error, FSIMG_ERANGE, "addressing",
-			    "EROFS data exceeds 32-bit block addressing"));
+		if (blocks > plan->blocks_max - next)
+			return (addressing_exceeded(plan, error));
 		row.start_block = blocks != 0 ? next : 0;
 		next += blocks;
 		status = erofs_row_set(plan, id, &row, error);
@@ -805,7 +845,7 @@ place_data(erofs_plan_t *plan, uint64_t *payload_blocks,
  * block. So block_count * B <= volume_bytes < (block_count + 1) * B.
  * Emission leaves the excess blocks and that partial block zero, and the
  * block count excludes the partial block. validate_options() has already
- * required whole sectors and a block count within 32 bits. An inode's
+ * required whole sectors and a block count the addressing allows. An inode's
  * serial number, its 1-based position, is 32 bits in both forms.
  */
 static fsimg_status_t
@@ -884,6 +924,9 @@ make_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 
 	/* Pass 1: settings, time and identity. */
 	plan->block_bytes = writer->options.allocation_unit_bytes;
+	plan->addressing48 = writer->options.erofs_addressing == 48;
+	plan->blocks_max = plan->addressing48 ? EROFS_WRITE_BLOCKS_MAX_48 :
+	    EROFS_WRITE_BLOCKS_MAX;
 	plan->inode_count = writer->count + 1;
 	status = choose_format_time(plan, error);
 	if (status == FSIMG_OK)

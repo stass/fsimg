@@ -18,6 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "codec.h"
 #include "fsimg.h"
 #include "format.h"
 #include "fsimg-endian.h"
@@ -75,6 +76,8 @@ static bool sweeping;
 
 /* The compression setting base_options() selects; the LZ4 tests set it. */
 static fsimg_erofs_compression_t compression = FSIMG_EROFS_COMPRESSION_NONE;
+/* The addressing base_options() selects; the 48-bit tests set it. */
+static uint32_t addressing;
 
 /* Report the case before the fatal check names the failed condition. */
 #define CHECK_CASE(condition, ...) do { \
@@ -212,6 +215,7 @@ base_options(fsimg_write_options_t *options)
 	fsimg_write_options_init(options);
 	options->label = "test";
 	options->erofs_compression = compression;
+	options->erofs_addressing = addressing;
 	if (block_size != BLOCK_DEFAULT)
 		options->allocation_unit_bytes = block_size;
 }
@@ -851,8 +855,6 @@ test_unwritten_settings_are_refused_naming_the_setting(void)
 		fsimg_erofs_metabox_t metabox;
 		refusal_t	 want;
 	} cases[] = {
-		{ FSIMG_EROFS_COMPRESSION_NONE, 48, FSIMG_EROFS_METABOX_NONE,
-		    { "48-bit addressing", FSIMG_EUNSUPPORTED, "addressing" } },
 		{ FSIMG_EROFS_COMPRESSION_NONE, 64, FSIMG_EROFS_METABOX_NONE,
 		    { "64-bit addressing", FSIMG_EINVAL, "addressing" } },
 		{ FSIMG_EROFS_COMPRESSION_NONE, 16, FSIMG_EROFS_METABOX_NONE,
@@ -890,6 +892,10 @@ test_unwritten_settings_are_refused_naming_the_setting(void)
 	reproducible_options(&options);
 	options.erofs_addressing = 32;
 	check_accepted(ctx, &options, "explicit 32-bit addressing");
+	options.erofs_addressing = 48;
+	check_accepted(ctx, &options, "48-bit addressing");
+	options.erofs_compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	check_accepted(ctx, &options, "48-bit addressing with LZ4");
 	fsimg_ctx_free(ctx);
 }
 
@@ -2899,7 +2905,7 @@ carrying_bytes(fixture_t *fixture, uint64_t length)
 		uint64_t data = row.size - tail;
 
 		mark_range(carries, length, row.nid * SLOT,
-		    erofs_row_body_bytes(&row, block_size));
+		    erofs_row_body_bytes(fixture->plan, &row));
 		if (row.layout == EROFS_LAYOUT_COMPRESSED_FULL)
 			data = (uint64_t)row.clusters * block_size;
 		if (data != 0)
@@ -3723,7 +3729,7 @@ test_super_encoding_refuses_what_it_cannot_store(void)
 
 	CHECK(erofs_super_encode(&sb, raw));
 
-	sb.incompat = EROFS_INCOMPAT_48BIT;
+	sb.incompat = EROFS_INCOMPAT_METABOX;
 	CHECK(!erofs_super_encode(&sb, raw));
 
 	sb = sample_super();
@@ -3863,6 +3869,478 @@ test_compact_inode_encoding_refuses_what_it_cannot_store(void)
 }
 
 /*
+ * 48-bit addressing (specs/design-erofs.md, 48-bit profile). The
+ * structural tests decode the emitted bytes themselves, so they need no
+ * reader; the round trips read the image back once the reader opens a
+ * 48BIT volume.
+ */
+
+#define SB_BLOCKS_HIGH		0x0e	/* the 16-bit root NID field */
+#define SB_BLOCKS_LOW		0x24
+#define SB_WIDE_ROOT		0x70
+#define INODE_FORMAT_BIT4	0x0010u
+#define INODE_HIGH_WORD		0x06
+#define INODE_COMPACT_TIME	0x0c
+#define EXTENT_LZ4		1u
+
+/* The superblock region of an image, decoded and its checksum checked. */
+static erofs_super_t
+decode_image_super(const memory_sink_t *sink)
+{
+	const size_t length = sink->length - EROFS_SUPER_OFFSET <
+	    SUPER_REGION ? (size_t)(sink->length - EROFS_SUPER_OFFSET) :
+	    SUPER_REGION;
+	erofs_super_t sb;
+	erofs_config_t config;
+	const char *what = NULL;
+	fsimg_status_t status;
+
+	status = erofs_region_decode(sink->bytes + EROFS_SUPER_OFFSET, length,
+	    &sb, &config, &what);
+	CHECK_CASE(status == FSIMG_OK, "superblock refused: %s", what);
+	return (sb);
+}
+
+/*
+ * The emitted superblock is the wide form on a small volume: 48BIT, the
+ * root NID in the 64-bit field and the block count's high bits, zero, in
+ * the 16-bit one. The epoch is the smallest modification second, the time
+ * before 1970 in the round-trip tree. Every directory is extended without
+ * format bit 4, so it keeps its "." entry, and has the size the 32-bit
+ * plan gives it; every compact inode, never a directory, carries the
+ * implicit link count with zero start-block bits and stores its time as
+ * the offset from the epoch, nonzero for most.
+ */
+static void
+test_addressing48_image_structure(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture, narrow;
+	memory_sink_t sink;
+	erofs_super_t sb;
+	const unsigned char *raw;
+	uint64_t offset_times = 0;
+
+	build_round_trip_tree();
+	unreproducible_options(&options);
+	plan_tree(&narrow, &options);
+	addressing = 48;
+	unreproducible_options(&options);
+	plan_tree(&fixture, &options);
+	emit_tree(&fixture, &sink, POISON);
+
+	sb = decode_image_super(&sink);
+	raw = sink.bytes + EROFS_SUPER_OFFSET;
+	CHECK(sb.incompat == EROFS_INCOMPAT_48BIT);
+	CHECK(sb.root_nid == row_at(&fixture, 0).nid && sb.root_nid == 36);
+	CHECK(fsimg_load_le64(raw + SB_WIDE_ROOT) == sb.root_nid);
+	CHECK(fsimg_load_le16(raw + SB_BLOCKS_HIGH) == 0);
+	CHECK(fsimg_load_le32(raw + SB_BLOCKS_LOW) ==
+	    fixture.plan->block_count);
+	CHECK(sb.block_count == fixture.plan->block_count);
+	CHECK(sb.epoch == row_of_path(&fixture, "/owners/before-1970").mtime);
+	CHECK(sb.epoch < 0 && sb.epoch_nsec == 0);
+
+	for (uint64_t id = 0; id <= fixture.writer->count; id++) {
+		const erofs_row_t row = row_at(&fixture, id);
+		const unsigned char *inode = sink.bytes + row.nid * SLOT;
+		const uint16_t format = fsimg_load_le16(inode);
+		const bool directory = (row.mode & EROFS_MODE_TYPE_MASK) ==
+		    EROFS_MODE_DIRECTORY;
+		uint32_t offset;
+
+		CHECK_CASE((format & 1) == row.extended &&
+		    (row.extended || !directory), "id %ju: form",
+		    (uintmax_t)id);
+		CHECK_CASE(((format & INODE_FORMAT_BIT4) != 0) == !row.extended,
+		    "id %ju: format bit 4", (uintmax_t)id);
+		CHECK(fsimg_load_le16(inode + INODE_HIGH_WORD) == 0);
+		if (directory)
+			CHECK_CASE(row.size == row_at(&narrow, id).size,
+			    "id %ju: directory size", (uintmax_t)id);
+		if (row.extended)
+			continue;
+		offset = fsimg_load_le32(inode + INODE_COMPACT_TIME);
+		CHECK_CASE(sb.epoch + offset == row.mtime &&
+		    row.mtime_nsec == 0, "id %ju: compact time", (uintmax_t)id);
+		offset_times += offset != 0;
+	}
+	CHECK(offset_times > 0);
+	check_enumeration(&fixture, &sink, false);
+	check_verification(&fixture, &sink);
+	check_extraction(&fixture, &sink);
+	free(sink.bytes);
+	fixture_close(&fixture);
+	fixture_close(&narrow);
+	addressing = 0;
+}
+
+/*
+ * The compact form takes a whole second from the epoch to 2^32 - 1
+ * seconds after it; a second later, or any nanoseconds, is extended. The
+ * epoch is the smallest second, here before the host clock's format time,
+ * and the last compact inode stores the largest offset.
+ */
+static void
+test_addressing48_compact_time_range(void)
+{
+	const int64_t far = OLD_TIME + (INT64_C(1) << 32);
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	tree_reset();
+	with_time(add_file(10, "/first"), OLD_TIME, 0);
+	with_time(add_file(10, "/last-compact"), far - 1, 0);
+	with_time(add_file(10, "/too-far"), far, 0);
+	with_time(add_file(10, "/nanoseconds"), OLD_TIME + 7, 1);
+	add_file(10, "/absent");
+	add_directory("/dir");
+	addressing = 48;
+	unreproducible_options(&options);
+	plan_tree(&fixture, &options);
+	CHECK(fixture.plan->epoch == OLD_TIME);
+	CHECK(fixture.plan->format_time > OLD_TIME);
+	CHECK(!row_of_path(&fixture, "/first").extended);
+	CHECK(!row_of_path(&fixture, "/last-compact").extended);
+	CHECK(!row_of_path(&fixture, "/absent").extended);
+	CHECK(row_of_path(&fixture, "/too-far").extended);
+	CHECK(row_of_path(&fixture, "/nanoseconds").extended);
+	CHECK(row_of_path(&fixture, "/dir").extended);
+	CHECK(row_at(&fixture, 0).extended);
+	emit_tree(&fixture, &sink, POISON);
+	CHECK(fsimg_load_le32(sink.bytes + row_of_path(&fixture,
+	    "/last-compact").nid * SLOT + INODE_COMPACT_TIME) == UINT32_MAX);
+	free(sink.bytes);
+	fixture_close(&fixture);
+	addressing = 0;
+}
+
+/*
+ * Check one compressed row's map header and 32-byte encoded extents in the
+ * image and decode the file through them: the count is the row's clusters,
+ * at most ceil(size / B); each record stores B bytes, LZ4 or plain, at
+ * the row's next block, from a logical offset that starts at 0 and
+ * increases strictly below size, and its reserved bytes are zero.
+ */
+static void
+check_encoded_extents(fixture_t *fixture, const memory_sink_t *sink,
+    uint64_t id, unsigned char *decoded)
+{
+	const erofs_row_t row = row_at(fixture, id);
+	const size_t index = spec_for_id(fixture, id);
+	const unsigned char *header = sink->bytes + row.nid * SLOT +
+	    erofs_row_fixed_bytes(&row);
+	const unsigned char *extent, *block;
+	uint64_t logical, end, physical;
+	fsimg_codec_step_t step;
+	uint32_t word;
+	size_t start;
+
+	CHECK(fsimg_load_le32(header) == row.clusters);
+	CHECK(fsimg_load_le16(header + 4) == EROFS_EXTENT32_ADVICE);
+	CHECK(fsimg_load_le16(header + 6) == 0);
+	for (size_t i = 8; i < EROFS_EXTENT32_OFFSET; i++)
+		CHECK(header[i] == 0);
+	CHECK(row.clusters <= (row.size + block_size - 1) / block_size);
+
+	for (uint32_t i = 0; i < row.clusters; i++) {
+		extent = header + EROFS_EXTENT32_OFFSET + i * 32u;
+		word = fsimg_load_le32(extent);
+		physical = fsimg_load_le32(extent + 4) |
+		    (uint64_t)fsimg_load_le32(extent + 8) << 32;
+		logical = fsimg_load_le32(extent + 12) |
+		    (uint64_t)fsimg_load_le32(extent + 16) << 32;
+		end = i + 1 == row.clusters ? row.size :
+		    fsimg_load_le32(extent + 32 + 12) |
+		    (uint64_t)fsimg_load_le32(extent + 32 + 16) << 32;
+		CHECK_CASE((word & 0x0fffffffu) == block_size &&
+		    word >> 28 <= EXTENT_LZ4, "id %ju extent %u: length word "
+		    "%#x", (uintmax_t)id, i, word);
+		CHECK(physical == (row.start_block + i) * block_size);
+		CHECK((i != 0 || logical == 0) && logical < end &&
+		    end <= row.size && end - logical <= LZ4_WINDOW);
+		for (size_t k = 20; k < 32; k++)
+			CHECK(extent[k] == 0);
+
+		block = sink->bytes + physical;
+		if (word >> 28 == EXTENT_LZ4) {
+			for (start = 0; start < block_size && block[start] == 0;
+			    start++)
+				continue;
+			CHECK(fsimg_lz4_decode(block + start, block_size - start,
+			    decoded, (size_t)(end - logical), &step, NULL) ==
+			    FSIMG_OK && step.produced == end - logical);
+		} else
+			bcopy(block, decoded, (size_t)(end - logical));
+		for (uint64_t k = 0; k < end - logical; k++)
+			CHECK_CASE(decoded[k] == spec_byte(index, logical + k),
+			    "id %ju byte %ju", (uintmax_t)id,
+			    (uintmax_t)(logical + k));
+	}
+}
+
+/*
+ * Under addressing=48 with compression=lz4 every compressed file is mapped
+ * by 32-byte encoded extents that decode to its content, and the
+ * superblock adds LZ4_0PADDING and LZ4's maximum distance to 48BIT.
+ */
+static void
+test_addressing48_lz4_files_are_encoded_extents(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	erofs_super_t sb;
+	unsigned char *decoded;
+	uint64_t compressed = 0;
+
+	decoded = malloc(LZ4_WINDOW);
+	CHECK(decoded != NULL);
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	addressing = 48;
+	build_lz4_tree();
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	check_lz4_layouts(&fixture);
+	emit_tree(&fixture, &sink, POISON);
+	sb = decode_image_super(&sink);
+	CHECK(sb.incompat ==
+	    (EROFS_INCOMPAT_48BIT | EROFS_INCOMPAT_LZ4_0PADDING));
+	CHECK(sb.compression_word == 65535);
+	for (uint64_t id = 1; id <= fixture.writer->count; id++) {
+		if (row_at(&fixture, id).layout != EROFS_LAYOUT_COMPRESSED_FULL)
+			continue;
+		check_encoded_extents(&fixture, &sink, id, decoded);
+		compressed++;
+	}
+	CHECK(compressed > 5);
+	check_enumeration(&fixture, &sink, true);
+	check_verification(&fixture, &sink);
+	check_extraction(&fixture, &sink);
+	free(sink.bytes);
+	free(decoded);
+	fixture_close(&fixture);
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+	addressing = 0;
+}
+
+/*
+ * A file of more encoded extents than the emission buffer holds, 2047
+ * after the map header, is written across buffer flushes: 2100 windows of
+ * text at 512-byte blocks, one cluster each.
+ */
+static void
+test_addressing48_extents_cross_the_staging_buffer(void)
+{
+	const uint64_t size = 2100 * (uint64_t)LZ4_WINDOW;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	unsigned char *decoded;
+	uint64_t id;
+
+	decoded = malloc(LZ4_WINDOW);
+	CHECK(decoded != NULL);
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	addressing = 48;
+	block_size = 512;
+	tree_reset();
+	add_file(size, "/text")->content = CONTENT_TEXT;
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	id = id_of_path(&fixture, "/text");
+	CHECK(row_at(&fixture, id).clusters == 2100);
+	CHECK(2100 * EROFS_EXTENT32_BYTES > FSIMG_EMIT_BUFFER_BYTES);
+	emit_tree(&fixture, &sink, POISON);
+	check_encoded_extents(&fixture, &sink, id, decoded);
+	free(sink.bytes);
+	free(decoded);
+	fixture_close(&fixture);
+	block_size = BLOCK_DEFAULT;
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+	addressing = 0;
+}
+
+/*
+ * The 48-bit image is the same bytes whatever the insertion order, budget,
+ * scratch or time zone, and leaves no stale byte, with and without LZ4.
+ */
+static void
+test_addressing48_image_is_reproducible_and_clean(void)
+{
+	addressing = 48;
+	check_identity_variants(build_round_trip_tree);
+	check_no_stale_byte(build_round_trip_tree);
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	check_identity_variants(build_lz4_tree);
+	check_no_stale_byte(build_lz4_tree);
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+	addressing = 0;
+}
+
+/*
+ * A volume size whose block count needs more than 32 bits is accepted
+ * under addressing=48 and gives the plan that block count; one past 48
+ * bits, or past 32 without the setting, is invalid geometry.
+ */
+static void
+test_addressing48_volume_size_passes_32_bits(void)
+{
+	const uint64_t blocks = (UINT64_C(1) << 32) + 1000;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer = NULL;
+
+	addressing = 48;
+	tree_reset();
+	add_file(5000, "/file");
+	reproducible_options(&options);
+	options.volume_bytes = blocks * block_size;
+	plan_tree(&fixture, &options);
+	CHECK(fixture.plan->block_count == blocks);
+	CHECK(fixture.plan->volume_bytes == blocks * block_size);
+	fixture_close(&fixture);
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	options.volume_bytes = (UINT64_C(1) << 48) * block_size;
+	CHECK(new_writer(ctx, &options, &writer, NULL) == FSIMG_EINVAL);
+	options.erofs_addressing = 32;
+	options.volume_bytes = blocks * block_size;
+	CHECK(new_writer(ctx, &options, &writer, NULL) == FSIMG_EINVAL);
+	CHECK(writer == NULL);
+	fsimg_ctx_free(ctx);
+	addressing = 0;
+}
+
+/* Source, allocation, write and cluster-plan faults fail the 48-bit image. */
+static void
+test_addressing48_faults_are_clean(void)
+{
+	addressing = 48;
+	test_write_failure_fails_emission_at_any_write();
+	test_lz4_source_faults_fail_planning_and_emission();
+	test_lz4_allocation_and_write_failures_are_clean();
+	test_lz4_damaged_cluster_plan_is_refused();
+	addressing = 0;
+}
+
+/*
+ * Under 48BIT the superblock encodes as the wide form, the block count's
+ * bits 32 to 47 in the 16-bit field, and decodes to the same values; a
+ * root NID of zero, which selects the narrow form, or a block count past
+ * 48 bits is refused.
+ */
+static void
+test_wide_super_encoding_decodes_to_the_same_superblock(void)
+{
+	unsigned char region[SUPER_REGION];
+	erofs_super_t sb = sample_super(), decoded;
+	erofs_config_t config;
+	const char *what = NULL;
+
+	sb.incompat = EROFS_INCOMPAT_48BIT;
+	sb.block_count = (UINT64_C(1) << 32) + 3;
+	bzero(region, sizeof(region));
+	CHECK(erofs_super_encode(&sb, region));
+	CHECK(fsimg_load_le16(region + SB_BLOCKS_HIGH) == 1);
+	CHECK(fsimg_load_le32(region + SB_BLOCKS_LOW) == 3);
+	CHECK(fsimg_load_le64(region + SB_WIDE_ROOT) == 36);
+	CHECK(erofs_super_checksum(region, sizeof(region), sb.blkszbits,
+	    &sb.checksum));
+	CHECK(erofs_super_encode(&sb, region));
+	CHECK(erofs_region_decode(region, sizeof(region), &decoded, &config,
+	    &what) == FSIMG_OK);
+	CHECK(decoded.root_nid == 36 && decoded.block_count == sb.block_count);
+	CHECK(decoded.incompat == EROFS_INCOMPAT_48BIT);
+
+	sb.root_nid = 0;
+	CHECK(!erofs_super_encode(&sb, region));
+	sb.root_nid = UINT64_C(1) << 40;
+	CHECK(erofs_super_encode(&sb, region));
+	sb.block_count = UINT64_C(1) << 48;
+	CHECK(!erofs_super_encode(&sb, region));
+}
+
+/*
+ * The implicit link count: a compact non-directory of a 48BIT volume with
+ * one link always sets format bit 4 and stores its start block's high bits
+ * in the link-count word, and decodes to the same inode; a FIFO takes it
+ * with zero bits, and the same inode stored without the bit re-encodes
+ * with it. A directory, an extended inode, another link count and a volume
+ * without 48BIT keep the bit clear, and compact start-block bits without
+ * it are refused.
+ */
+static void
+test_implicit_link_count_encoding(void)
+{
+	erofs_super_t sb = sample_super();
+	unsigned char raw[EROFS_INODE_EXTENDED_BYTES];
+	erofs_inode_t inode = sample_inode(false), decoded;
+	const char *what = NULL;
+
+	sb.incompat = EROFS_INCOMPAT_48BIT;
+	inode.time = EPOCH;
+	inode.layout_high = 0x1234;
+	CHECK(erofs_inode_encode(&inode, &sb, raw));
+	CHECK((fsimg_load_le16(raw) & INODE_FORMAT_BIT4) != 0);
+	CHECK(fsimg_load_le16(raw + INODE_HIGH_WORD) == 0x1234);
+	CHECK(erofs_inode_decode(raw, EROFS_INODE_COMPACT_BYTES, &sb,
+	    &decoded, &what) == FSIMG_OK);
+	CHECK(decoded.nlink == 1 && decoded.layout_high == 0x1234 &&
+	    decoded.layout_word == 77);
+
+	/* Stored with the bit clear, the same inode decodes and re-encodes
+	 * with it. */
+	inode.layout_high = 0;
+	CHECK(erofs_inode_encode(&inode, &sb, raw));
+	fsimg_store_le16(raw, fsimg_load_le16(raw) & ~INODE_FORMAT_BIT4);
+	fsimg_store_le16(raw + INODE_HIGH_WORD, 1);
+	CHECK(erofs_inode_decode(raw, EROFS_INODE_COMPACT_BYTES, &sb,
+	    &decoded, &what) == FSIMG_OK);
+	CHECK(erofs_inode_encode(&decoded, &sb, raw));
+	CHECK((fsimg_load_le16(raw) & INODE_FORMAT_BIT4) != 0);
+	CHECK(fsimg_load_le16(raw + INODE_HIGH_WORD) == 0);
+
+	inode.kind = FSIMG_ENTRY_FIFO;
+	inode.layout = EROFS_LAYOUT_FLAT;
+	inode.size = 0;
+	inode.layout_word = 0;
+	CHECK(erofs_inode_encode(&inode, &sb, raw));
+	CHECK((fsimg_load_le16(raw) & INODE_FORMAT_BIT4) != 0);
+
+	inode = sample_inode(false);
+	inode.time = EPOCH;
+	inode.nlink = 2;
+	CHECK(erofs_inode_encode(&inode, &sb, raw));
+	CHECK((fsimg_load_le16(raw) & INODE_FORMAT_BIT4) == 0);
+	CHECK(fsimg_load_le16(raw + INODE_HIGH_WORD) == 2);
+	inode.layout_high = 1;
+	CHECK(!erofs_inode_encode(&inode, &sb, raw));
+	inode.nlink = 1;
+	inode.layout_high = 0;
+	inode.extended = true;
+	CHECK(erofs_inode_encode(&inode, &sb, raw));
+	CHECK((fsimg_load_le16(raw) & INODE_FORMAT_BIT4) == 0);
+	inode.extended = false;
+	inode.kind = FSIMG_ENTRY_DIRECTORY;
+	inode.size = UINT32_C(1) << sb.blkszbits;
+	inode.layout = EROFS_LAYOUT_FLAT;
+	CHECK(erofs_inode_encode(&inode, &sb, raw));
+	CHECK((fsimg_load_le16(raw) & INODE_FORMAT_BIT4) == 0);
+	inode.layout_high = 1;
+	CHECK(!erofs_inode_encode(&inode, &sb, raw));
+	inode = sample_inode(false);
+	inode.time = EPOCH;
+	sb.incompat = 0;
+	CHECK(erofs_inode_encode(&inode, &sb, raw));
+	CHECK((fsimg_load_le16(raw) & INODE_FORMAT_BIT4) == 0);
+	inode.layout_high = 1;
+	CHECK(!erofs_inode_encode(&inode, &sb, raw));
+}
+
+/*
  * Run a test at each block size the writer accepts, then return to the
  * default. The model, the sweeps and the image checks follow block_size.
  * A failed check exits, and report_block_size() then names the size.
@@ -3955,5 +4433,15 @@ main(void)
 	test_compact_inode_encoding_decodes_to_the_same_inode();
 	test_extended_inode_encoding_decodes_to_the_same_inode();
 	test_compact_inode_encoding_refuses_what_it_cannot_store();
+
+	at_every_block_size(test_addressing48_image_structure);
+	test_addressing48_compact_time_range();
+	at_every_block_size(test_addressing48_lz4_files_are_encoded_extents);
+	test_addressing48_extents_cross_the_staging_buffer();
+	at_every_block_size(test_addressing48_image_is_reproducible_and_clean);
+	at_every_block_size(test_addressing48_volume_size_passes_32_bits);
+	test_addressing48_faults_are_clean();
+	test_wide_super_encoding_decodes_to_the_same_superblock();
+	test_implicit_link_count_encoding();
 	return (0);
 }

@@ -104,12 +104,23 @@ class ErofsCreateTest < Minitest::Test
     end
   end
 
-  def test_unwritten_layouts_are_refused
-    %w[addressing=48].each do |setting|
-      result = invoke(arguments: ["c", "-n", "-S", "off", "-R", "-F", "erofs",
-        "-o", setting, "-C", @source, "."], expected: 1)
-      assert_includes(result.stderr, setting.split("=").first.b, setting)
+  def test_48_bit_addressing_writes_the_wide_superblock_reproducibly
+    [[], ["-o", "compression=lz4"]].each do |extra|
+      flags = ["-R", "-e", TIME.to_s, "-o", "addressing=48", *extra]
+      image = create(name: "wide#{extra.size}", flags: flags)
+      again = create(name: "again#{extra.size}", flags: flags)
+      superblock = image.binread(128, 1024)
+      assert_equal(0x80, superblock.unpack1("L<", offset: 0x50) & 0x80, extra.inspect)
+      assert_equal(36, superblock.unpack1("Q<", offset: 0x70), extra.inspect)
+      assert_equal(0, superblock.unpack1("S<", offset: 0x0e), extra.inspect)
+      assert_equal(image.binread, again.binread, extra.inspect)
     end
+  end
+
+  def test_unwritten_layouts_are_refused
+    result = invoke(arguments: ["c", "-n", "-S", "off", "-R", "-F", "erofs",
+      "-o", "addressing=48", "-o", "metabox=plain", "-C", @source, "."], expected: 1)
+    assert_includes(result.stderr, "metabox".b)
   end
 
   private

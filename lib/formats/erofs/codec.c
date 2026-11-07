@@ -459,9 +459,12 @@ erofs_super_checksum(const unsigned char *region, size_t length,
 
 /*
  * The base superblock into the EROFS_SUPER_BASE_BYTES at raw, the inverse
- * of super_parse() for a superblock without the 48-bit layout and without
- * extension slots, which is every superblock the writer emits: its
- * features are at most SB_CHKSUM and MTIME, and LZ4_0PADDING. The volume
+ * of super_parse() for a superblock without extension slots, which is
+ * every superblock the writer emits: its features are at most SB_CHKSUM
+ * and MTIME, and LZ4_0PADDING and 48BIT. Under 48BIT it is the wide form,
+ * the root NID in the 64-bit field, nonzero since zero selects the narrow
+ * form, and the block count's bits 32 to 47 in the 16-bit root NID field;
+ * otherwise the root NID is 16 bits and the block count 32. The volume
  * name is its first name_length bytes, NUL-padded. The extra device count
  * and every reserved byte are zero. false means sb is not of that shape, a
  * field exceeds its width, the block shift or nanoseconds are outside
@@ -470,11 +473,15 @@ erofs_super_checksum(const unsigned char *region, size_t length,
 bool
 erofs_super_encode(const erofs_super_t *sb, unsigned char *raw)
 {
+	const bool wide = (sb->incompat & EROFS_INCOMPAT_48BIT) != 0;
+
 	if ((sb->compat &
 	    ~(EROFS_COMPAT_SB_CHKSUM | EROFS_COMPAT_MTIME)) != 0 ||
-	    (sb->incompat & ~EROFS_INCOMPAT_LZ4_0PADDING) != 0 ||
+	    (sb->incompat &
+	    ~(EROFS_INCOMPAT_LZ4_0PADDING | EROFS_INCOMPAT_48BIT)) != 0 ||
 	    sb->extension_slots != 0 || sb->box_nid != 0 ||
-	    sb->root_nid > UINT16_MAX || sb->block_count > UINT32_MAX ||
+	    (wide ? sb->root_nid == 0 || sb->block_count >> 48 != 0 :
+	    sb->root_nid > UINT16_MAX || sb->block_count > UINT32_MAX) ||
 	    sb->blkszbits < EROFS_BLKSZBITS_MIN ||
 	    sb->blkszbits > EROFS_BLKSZBITS_MAX ||
 	    sb->epoch_nsec >= NSEC_PER_SEC ||
@@ -487,7 +494,12 @@ erofs_super_encode(const erofs_super_t *sb, unsigned char *raw)
 	fsimg_store_le32(raw + SB_CHECKSUM, sb->checksum);
 	fsimg_store_le32(raw + SB_COMPAT, sb->compat);
 	raw[SB_BLKSZBITS] = sb->blkszbits;
-	fsimg_store_le16(raw + SB_ROOT_NID, (uint16_t)sb->root_nid);
+	if (wide) {
+		fsimg_store_le64(raw + SB_WIDE_ROOT_NID, sb->root_nid);
+		fsimg_store_le16(raw + SB_ROOT_NID,
+		    (uint16_t)(sb->block_count >> 32));
+	} else
+		fsimg_store_le16(raw + SB_ROOT_NID, (uint16_t)sb->root_nid);
 	fsimg_store_le64(raw + SB_INODE_COUNT, sb->inode_count);
 	fsimg_store_le64(raw + SB_EPOCH, (uint64_t)sb->epoch);
 	fsimg_store_le32(raw + SB_EPOCH_NSEC, sb->epoch_nsec);
@@ -951,14 +963,20 @@ inode_body_measure(const erofs_super_t *sb, erofs_inode_t *inode,
 /*
  * An inode's fixed part into raw, compact or extended by inode->extended,
  * so raw receives EROFS_INODE_COMPACT_BYTES or EROFS_INODE_EXTENDED_BYTES.
- * It is the inverse of erofs_inode_decode() without format bit 4, which
- * only the 48-bit layout defines; every reserved byte is zero, and sb
- * supplies the compact form's time base and the block size. false means
- * the record does not fit: a kind or attribute region the format cannot
- * express, permission bits beyond 12, or, in the compact form, an owner,
- * group or link count beyond 16 bits, a size beyond 32 bits, start-block
- * high bits, or a time that is not the epoch plus a 32-bit offset with the
- * superblock's nanoseconds. It also means the decoder refuses the encoded
+ * It is the inverse of erofs_inode_decode() except for a directory's
+ * omitted dot, which the writer never emits; every reserved byte is zero,
+ * and sb supplies the compact form's time base and the block size. A
+ * compact non-directory of a 48BIT volume with link count 1 always takes
+ * format bit 4, its link-count word holding layout_high, so the encoding
+ * is a function of the decoded inode, which does not record the bit: a
+ * decoded compact inode without the bit re-encodes with it, to the same
+ * decoded inode. false means the record does not fit: a kind or attribute
+ * region the format cannot express, permission bits beyond 12, or
+ * start-block high bits without 48BIT. In the compact form it also means
+ * start-block high bits without bit 4, an owner, group or link count
+ * beyond 16 bits, a size beyond 32 bits, or a time that is not the epoch
+ * plus a 32-bit offset with the superblock's nanoseconds. It also means
+ * the decoder refuses the encoded
  * bytes, for a rule a single inode must keep, such as a symbolic link's
  * length or a FIFO's empty layout word: the encoded inode is decoded once
  * more, so an inode that encodes is one the reader accepts. raw is then
@@ -973,11 +991,15 @@ erofs_inode_encode(const erofs_inode_t *inode, const erofs_super_t *sb,
 	uint64_t time_offset;
 	uint32_t xattr_count;
 	uint16_t mode;
+	bool implicit_nlink;
 
 	if (inode->layout > EROFS_LAYOUT_CHUNK_BASED || inode->omits_dot ||
 	    inode->permissions > EROFS_MODE_PERMISSIONS ||
 	    !kind_encode(inode->kind, &mode))
 		return (false);
+	implicit_nlink = !inode->extended &&
+	    inode->kind != FSIMG_ENTRY_DIRECTORY && inode->nlink == 1 &&
+	    (sb->incompat & EROFS_INCOMPAT_48BIT) != 0;
 	xattr_count = 0;
 	if (inode->xattr_bytes != 0) {
 		if (inode->xattr_bytes < EROFS_XATTR_HEADER_BYTES ||
@@ -1013,10 +1035,11 @@ erofs_inode_encode(const erofs_inode_t *inode, const erofs_super_t *sb,
 		    inode->time_nsec != sb->epoch_nsec ||
 		    inode->size > UINT32_MAX || inode->nlink > UINT16_MAX ||
 		    inode->uid > UINT16_MAX || inode->gid > UINT16_MAX ||
-		    inode->layout_high != 0)
+		    (inode->layout_high != 0 && !implicit_nlink))
 			return (false);
 		bzero(raw, EROFS_INODE_COMPACT_BYTES);
-		fsimg_store_le16(raw + IC_NLINK, (uint16_t)inode->nlink);
+		fsimg_store_le16(raw + IC_NLINK, implicit_nlink ?
+		    inode->layout_high : (uint16_t)inode->nlink);
 		fsimg_store_le32(raw + IC_SIZE, (uint32_t)inode->size);
 		fsimg_store_le32(raw + IC_TIME, (uint32_t)time_offset);
 		fsimg_store_le32(raw + IC_LAYOUT_WORD, inode->layout_word);
@@ -1026,7 +1049,8 @@ erofs_inode_encode(const erofs_inode_t *inode, const erofs_super_t *sb,
 	}
 	/* The first eight bytes are common to both forms. */
 	fsimg_store_le16(raw, (uint16_t)((inode->extended ? FORMAT_EXTENDED :
-	    0) | (unsigned)inode->layout << FORMAT_LAYOUT_SHIFT));
+	    0) | (implicit_nlink ? FORMAT_BIT4 : 0) |
+	    (unsigned)inode->layout << FORMAT_LAYOUT_SHIFT));
 	fsimg_store_le16(raw + IC_XATTR_COUNT, (uint16_t)xattr_count);
 	fsimg_store_le16(raw + IC_MODE, (uint16_t)(mode | inode->permissions));
 	return (erofs_inode_decode(raw, inode->extended ?
