@@ -11,6 +11,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/layers \
 	-I$(top_srcdir)/lib/formats/fat -I$(top_srcdir)/lib/formats/exfat \
 	-I$(top_srcdir)/lib/formats/qnx6 -I$(top_srcdir)/lib/formats/qnx4 \
+	-I$(top_srcdir)/lib/formats/erofs \
 	-I$(top_srcdir)/lib/formats/iso9660 -I$(top_srcdir)/lib/formats/hfsplus \
 	$(ZLIB_CFLAGS) $(ZSTD_CFLAGS) $(LZMA_CFLAGS) \
 	-I$(top_srcdir)/lib/formats/ifs \
@@ -100,6 +101,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx6/directory.c lib/formats/qnx6/read.c \
 	lib/formats/qnx6/verify.c lib/formats/qnx6/write-qnx6.h \
 	lib/formats/qnx6/write-plan.c lib/formats/qnx6/write-emit.c \
+	lib/formats/erofs/erofs.h lib/formats/erofs/codec.c \
 	lib/formats/qnx4/qnx4.h lib/formats/qnx4/descriptor.c \
 	lib/formats/qnx4/codec.c lib/formats/qnx4/volume.c \
 	lib/formats/qnx4/extent.c lib/formats/qnx4/bitmap.c \
@@ -178,6 +180,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify \
 	test-salvage-terminal test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
+	test-erofs \
 	test-lzfse test-hfsplus-codec test-hfsplus test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
@@ -286,6 +289,8 @@ test_codec_LDADD = libfsimg-core.la
 test_exfat_SOURCES = test/exfat.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_exfat_LDADD = libfsimg.la
+test_erofs_SOURCES = test/erofs.c test/test.h
+test_erofs_LDADD = libfsimg.la
 test_qnx6_SOURCES = test/qnx6.c test/test.h test/scale.h
 test_qnx6_LDADD = libfsimg.la
 test_qnx6_write_SOURCES = test/qnx6-write.c test/test.h \

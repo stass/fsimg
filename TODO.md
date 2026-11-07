@@ -385,6 +385,15 @@
   output under the record's dictionary or window, charged to the context)
   before stage 7.
 
+* [Low] **EROFS format design leaves four inode and configuration cases
+  open** (`specs/design-erofs.md`, `lib/formats/erofs/codec.c`): the
+  chunk-based section calls 2^47 bytes "the reader's bound on any file
+  size", but no rule bounds an inode's size or names its class (the codec
+  accepts any 64-bit size); chunk-format bit 6 with 4-byte entries, the
+  48-bit start-block high bits of a FIFO, socket or device, and
+  `COMPR_CFGS` with an empty algorithm mask are all accepted without a rule.
+  Decide each and state it in the design.
+
 * [Low] **Spec harness oracle step can fail on EINTR** (`test/spec/`): a quick run
   under `check-asan` reported `harness_error` for
   `fat.create.cluster_count.fat16_4100`, detail `oracles: EINTR: "Interrupted system

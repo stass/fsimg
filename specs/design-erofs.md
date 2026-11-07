@@ -662,9 +662,10 @@ requires nothing of them.
 A name index below `0x80` selects a built-in prefix: 1 `user.`, 2
 `system.posix_acl_access`, 3 `system.posix_acl_default`, 4 `trusted.`, 6
 `security.`. The two ACL indexes name complete attributes and take an empty
-suffix. Index `0x80 | k` names the `k`-th long prefix, which must exist. Any
-other index is `FSIMG_EUNSUPPORTED`, naming the attribute index, since no
-published document defines it.
+suffix; a nonempty one is `FSIMG_ECORRUPT`. Index `0x80 | k` names the
+`k`-th long prefix, which must exist. Any other index is
+`FSIMG_EUNSUPPORTED`, naming the attribute index, since no published
+document defines it.
 
 ### Shared pool
 
@@ -753,10 +754,14 @@ order, follows the superblock and its extension slots, each starting on a
 
 | Algorithm | Payload | Fields |
 | --- | --- | --- |
-| LZ4 | 14 bytes | Maximum distance, maximum physical cluster blocks, reserved |
-| MicroLZMA | 14 bytes | Dictionary size 4096 to 8 MiB, format 0, reserved |
-| DEFLATE | 6 bytes | Window bits at most 15, reserved |
-| Zstandard | 6 bytes | Format 0, window log less 10 at most 10, reserved |
+| LZ4 | 14 bytes | Maximum distance (16 bits), maximum physical cluster blocks (16 bits), 10 reserved bytes |
+| MicroLZMA | 14 bytes | Dictionary size 4096 to 8 MiB (32 bits), format 0 (16 bits), 8 reserved bytes |
+| DEFLATE | 6 bytes | Window bits at most 15 (8 bits), 5 reserved bytes |
+| Zstandard | 6 bytes | Format 0 (8 bits), window log less 10 at most 10 (8 bits), 4 reserved bytes |
+
+A record's reserved bytes are treated as the superblock's: a nonzero one
+does not prevent reading, `i` reports it, and verification of the volume is
+incomplete (E9 records every producer record with them zero).
 
 A length other than these, a mask bit above 3, or a record running past the
 [superblock region](#volume-identity-and-geometry) is `FSIMG_EUNSUPPORTED`;
@@ -1024,7 +1029,8 @@ refused as `FSIMG_EUNSUPPORTED` naming it rather than guessed.
   carries the implicit link count below.
 * **Implicit link count.** On a compact non-directory inode, format-word bit
   4 means the link count is 1 and the link-count word holds start-block bits
-  instead.
+  instead. On an extended non-directory inode the bit has no published
+  meaning and is `FSIMG_EUNSUPPORTED`.
 * **Omitted dot.** On a directory, format-word bit 4 means its `.` entry is
   absent, [above](#order-and-dot-entries).
 * **Chunks.** Chunk format bit 6 permits 48-bit block numbers in 8-byte
@@ -1103,15 +1109,17 @@ A nonzero extra-device count marks a volume whose chunks or clusters may
 live in other backing files, named by opaque tags in a device table. Such a
 volume is recognized and refused at open with `FSIMG_EUNSUPPORTED`: fsimg
 has no input for a second backing file, and a device tag is never resolved
-as a host path. The refusal keys on the count alone and runs at open before
-the feature-pairing and chunk rules, after the probe's own checks of the
-magic, the block size and the incompatible-bit table, because the count is
+as a host path. The refusal keys on the count alone, because the count is
 the one field both producer forms set: a `--blobdev` volume also sets
 `DEVICE_TABLE` and `CHUNKED_FILE`, while a `--tar=i` volume sets
 `DEVICE_TABLE` only, uses 512-byte blocks and holds chunk-based files
 without `CHUNKED_FILE` (E14, `e14-blobdev-b4096`, `e14-tar-index-b4096`).
-Both carry an empty device tag and a nonzero device
-identifier in every chunk entry.
+Both carry an empty device tag and a nonzero device identifier in every
+chunk entry. The refusal runs at open after the probe's own checks (the
+magic, the block size, `dirblkbits`, the extension slots and the
+incompatible-bit table) and the extension slots' truncation on a volume
+shorter than 4096 bytes, and before the checksum and the feature-pairing
+and chunk rules.
 
 ## Verification
 
@@ -1471,5 +1479,5 @@ Self round trips are necessary and never sufficient.
 | U1 | `erofs-utils` (`mkfs.erofs`, `fsck.erofs`, `dump.erofs`) at the pinned release | External oracles and fixture producers, run on disposable images |
 | K1 | The Linux kernel's EROFS implementation in the Linux check environment | External oracle by mounting only; its source is GPL and is not read for code |
 | R1 | `rust-fs-erofs` | MIT; independent external reader; no code imported |
-| X1 | XXH32 and LZ4 block format descriptions by their author | Public format descriptions; the codec design's clean-room procedure applies |
+| X1 | XXH32 and LZ4 block format descriptions by their author: for XXH32, the xxHash specification `doc/xxhash_spec.md` (version 0.2.0) by Yann Collet in the `Cyan4973/xxHash` repository at commit `d66a9cb6f223b1f15cceebee39bc07ed0bd4ad3d`, fetched on 2026-11-06, whose notice permits copying and distribution with the copyright notice preserved | Public format descriptions; the codec design's clean-room procedure applies. The name-filter hash is written from the XXH32 section alone and checked against `xxhsum -H0`; no xxHash implementation is read |
 | T1 | [Research draft](../fsspecs/EROFS_fsimg_spec.md) | Original project research; not authoritative |

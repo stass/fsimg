@@ -1,0 +1,4053 @@
+/* SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+ */
+#include "config.h"
+
+#include <stdarg.h>
+#include <stdbool.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#include "erofs.h"
+#include "test.h"
+
+/*
+ * Tests of the EROFS on-disk codecs. Structures are built here with small
+ * helpers that write fields at the byte offsets of the format's on-disk
+ * tables, independently of codec.c. Real mkfs.erofs
+ * output is embedded as sparse runs of its non-zero bytes. Every check is
+ * recorded, not fatal, so one run lists every failing case.
+ */
+
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+
+enum {
+	REGION_BYTES = 3072,		/* the superblock region */
+	SUPER_BYTES = 128,
+	SENTINEL = 0xa5
+};
+
+static int failures;
+
+static const char *
+status_name(fsimg_status_t status)
+{
+	switch (status) {
+	case FSIMG_OK:
+		return ("OK");
+	case FSIMG_ECORRUPT:
+		return ("ECORRUPT");
+	case FSIMG_EUNSUPPORTED:
+		return ("EUNSUPPORTED");
+	case FSIMG_EINVAL:
+		return ("EINVAL");
+	default:
+		return ("other status");
+	}
+}
+
+/* Record one failed expectation: where it is, which case and what it said. */
+static void
+expectf(bool ok, const char *function, int line, const char *expression,
+    const char *format, ...)
+{
+	va_list ap;
+
+	if (ok)
+		return;
+	failures++;
+	fprintf(stderr, "test/erofs.c:%d: %s: case ", line, function);
+	va_start(ap, format);
+	vfprintf(stderr, format, ap);
+	va_end(ap);
+	fprintf(stderr, ": expected %s\n", expression);
+}
+
+#define EXPECT(ok, ...) \
+	expectf((ok), __func__, __LINE__, #ok, __VA_ARGS__)
+
+/* A status mismatch reports both statuses and the decoder's phrase. */
+static void
+expect_status(fsimg_status_t got, fsimg_status_t want, const char *what,
+    const char *function, int line, const char *name)
+{
+	if (got == want)
+		return;
+	failures++;
+	fprintf(stderr, "test/erofs.c:%d: %s: case %s: status %s, expected "
+	    "%s (%s)\n", line, function, name, status_name(got),
+	    status_name(want), what != NULL ? what : "no phrase");
+}
+
+#define EXPECT_STATUS(got, want, what, name) \
+	expect_status((got), (want), (what), __func__, __LINE__, (name))
+
+static void
+put_le(unsigned char *p, uint64_t value, size_t width)
+{
+	size_t i;
+
+	for (i = 0; i < width; i++)
+		p[i] = (unsigned char)(value >> (8 * i));
+}
+
+/* One field written into a structure: byte offset, width and value. */
+typedef struct patch {
+	uint16_t	 offset;
+	uint8_t		 width;
+	uint64_t	 value;
+} patch_t;
+
+enum { MAX_PATCHES = 6 };
+
+/* A patch list ends at the first entry of width zero. */
+static void
+patch_apply(unsigned char *buf, const patch_t *patches)
+{
+	size_t i;
+
+	for (i = 0; i < MAX_PATCHES && patches[i].width != 0; i++)
+		put_le(buf + patches[i].offset, patches[i].value,
+		    patches[i].width);
+}
+
+/* ---- Fixtures: sparse images of real mkfs.erofs output ---- */
+
+/*
+ * A run of non-zero bytes: the image offset, the position in the fixture's
+ * byte array and the length. Bytes outside every run are zero.
+ */
+typedef struct fixture_run {
+	uint32_t	 offset;
+	uint32_t	 source;
+	uint32_t	 length;
+} fixture_run_t;
+
+/* base is the image offset that buffer byte 0 stands for. */
+typedef struct fixture {
+	const unsigned char *bytes;
+	const fixture_run_t *runs;
+	size_t		 run_count;
+	size_t		 base;
+} fixture_t;
+
+#define FIXTURE(name, base) \
+	{ name##_bytes, name##_runs, ARRAY_SIZE(name##_runs), (base) }
+
+static void
+fixture_load(const fixture_t *fixture, unsigned char *buf, size_t size)
+{
+	size_t i;
+
+	bzero(buf, size);
+	for (i = 0; i < fixture->run_count; i++) {
+		const fixture_run_t *run = &fixture->runs[i];
+
+		CHECK(run->offset >= fixture->base);
+		CHECK(run->offset - fixture->base + run->length <= size);
+		bcopy(fixture->bytes + run->source,
+		    buf + (run->offset - fixture->base), run->length);
+	}
+}
+
+/* ---- Independent oracles ---- */
+
+/*
+ * CRC-32C from its definition: the reflected Castagnoli polynomial
+ * 0x82F63B78, bit by bit, with the register seeded with all ones. The
+ * result is the register, which is the form the superblock stores; the
+ * published check value is the register inverted.
+ */
+static uint32_t
+crc32c_register(const unsigned char *p, size_t n)
+{
+	uint32_t reg = UINT32_C(0xffffffff);
+	size_t i;
+	int bit;
+
+	for (i = 0; i < n; i++) {
+		reg ^= p[i];
+		for (bit = 0; bit < 8; bit++)
+			reg = (reg & 1) != 0 ?
+			    (reg >> 1) ^ UINT32_C(0x82f63b78) : reg >> 1;
+	}
+	return (reg);
+}
+
+/* The bytes the checksum covers, counted from volume byte 1024. */
+static size_t
+covered_bytes(unsigned blkszbits)
+{
+	size_t block = (size_t)1 << blkszbits;
+
+	return (block > 1024 ? block - 1024 : block);
+}
+
+/* The checksum the design defines for region: its range, bytes 4..7 zero. */
+static uint32_t
+expected_checksum(const unsigned char *region, unsigned blkszbits)
+{
+	unsigned char copy[REGION_BYTES];
+	size_t covered = covered_bytes(blkszbits);
+
+	bcopy(region, copy, covered);
+	bzero(copy + 4, 4);
+	return (crc32c_register(copy, covered));
+}
+
+/* The Linux 32-bit device number encoding, from the design's bit layout. */
+static uint32_t
+device_word(uint32_t major, uint32_t minor)
+{
+	return ((minor & 0xffu) | (major << 8) |
+	    ((minor & ~UINT32_C(0xff)) << 12));
+}
+
+/* ---- Superblock ---- */
+
+/* Superblock field offsets from the design's table, relative to byte 1024. */
+enum {
+	SB_MAGIC = 0x00,
+	SB_CHECKSUM = 0x04,
+	SB_COMPAT = 0x08,
+	SB_BLKSZBITS = 0x0c,
+	SB_SLOTS = 0x0d,
+	SB_ROOT16 = 0x0e,
+	SB_INODES = 0x10,
+	SB_EPOCH = 0x18,
+	SB_NSEC = 0x20,
+	SB_BLOCKS = 0x24,
+	SB_META_BLOCK = 0x28,
+	SB_XATTR_BLOCK = 0x2c,
+	SB_UUID = 0x30,
+	SB_NAME = 0x40,
+	SB_INCOMPAT = 0x50,
+	SB_WORD54 = 0x54,
+	SB_DEVICES = 0x56,
+	SB_DIRBLKBITS = 0x5a,
+	SB_PREFIX_COUNT = 0x5b,
+	SB_PREFIX_START = 0x5c,
+	SB_PACKED_NID = 0x60,
+	SB_FILTER_BYTE = 0x68,
+	SB_ISHARE = 0x69,
+	SB_RESERVED_6A = 0x6a,
+	SB_BUILD_TIME = 0x6c,
+	SB_ROOT64 = 0x70,
+	SB_RESERVED_78 = 0x78,
+	SB_BOX_NID = 0x80,
+	SB_RESERVED_88 = 0x88
+};
+
+/* A valid 4096-byte-block superblock region with no features. */
+static void
+region_init(unsigned char *region)
+{
+	bzero(region, REGION_BYTES);
+	put_le(region + SB_MAGIC, EROFS_MAGIC, 4);
+	region[SB_BLKSZBITS] = 12;
+	put_le(region + SB_ROOT16, 36, 2);
+}
+
+typedef struct region_result {
+	fsimg_status_t	 status;
+	const char	*what;
+	erofs_super_t	 sb;
+	erofs_config_t	 config;
+} region_result_t;
+
+/* Decode, and check that a failing decoder left both outputs untouched. */
+static region_result_t
+region_decode_checked(const char *name, const unsigned char *bytes,
+    size_t length)
+{
+	region_result_t r;
+	erofs_super_t sb_before;
+	erofs_config_t config_before;
+
+	r.what = NULL;
+	memset(&r.sb, SENTINEL, sizeof(r.sb));
+	memset(&r.config, SENTINEL, sizeof(r.config));
+	sb_before = r.sb;
+	config_before = r.config;
+	r.status = erofs_region_decode(bytes, length, &r.sb, &r.config,
+	    &r.what);
+	if (r.status != FSIMG_OK) {
+		EXPECT(bcmp(&r.sb, &sb_before, sizeof(sb_before)) == 0,
+		    "%s: failure leaves the superblock untouched", name);
+		EXPECT(bcmp(&r.config, &config_before,
+		    sizeof(config_before)) == 0,
+		    "%s: failure leaves the configuration untouched", name);
+		/* The sentinel is not a valid bool; no caller may read it. */
+		bzero(&r.sb, sizeof(r.sb));
+		bzero(&r.config, sizeof(r.config));
+	}
+	return (r);
+}
+
+typedef struct super_case {
+	const char	*name;
+	size_t		 length;	/* 0, or left out: SUPER_BYTES */
+	patch_t		 patches[MAX_PATCHES];
+	fsimg_status_t	 status;
+	/*
+	 * A rule the probe does not check: erofs_region_decode() refuses the
+	 * row with its own class, which the region cases pin.
+	 */
+	bool		 region_only;
+} super_case_t;
+
+#define FEATURE(offset, value)	{ (offset), 4, (value) }
+
+static const super_case_t super_cases[] = {
+	{ .name = "length_127_is_corrupt",
+	    .length = 127, .status = FSIMG_ECORRUPT },
+	{ .name = "length_1_is_corrupt",
+	    .length = 1, .status = FSIMG_ECORRUPT },
+	{ .name = "length_128_is_accepted", .length = 128, .status = FSIMG_OK },
+	{ .name = "blkszbits_0_is_corrupt",
+	    .patches = {{ SB_BLKSZBITS, 1, 0 }}, .status = FSIMG_ECORRUPT },
+	{ .name = "blkszbits_8_is_corrupt",
+	    .patches = {{ SB_BLKSZBITS, 1, 8 }}, .status = FSIMG_ECORRUPT },
+	{ .name = "blkszbits_9_is_accepted",
+	    .patches = {{ SB_BLKSZBITS, 1, 9 }}, .status = FSIMG_OK },
+	{ .name = "blkszbits_12_is_accepted",
+	    .patches = {{ SB_BLKSZBITS, 1, 12 }}, .status = FSIMG_OK },
+	{ .name = "blkszbits_13_is_unsupported",
+	    .patches = {{ SB_BLKSZBITS, 1, 13 }},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "blkszbits_255_is_unsupported",
+	    .patches = {{ SB_BLKSZBITS, 1, 255 }},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "dirblkbits_1_is_unsupported",
+	    .patches = {{ SB_DIRBLKBITS, 1, 1 }},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "dirblkbits_255_is_unsupported",
+	    .patches = {{ SB_DIRBLKBITS, 1, 255 }},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "0_extension_slots_are_accepted",
+	    .patches = {{ SB_SLOTS, 1, 0 }}, .status = FSIMG_OK },
+	{ .name = "184_extension_slots_are_accepted",
+	    .patches = {{ SB_SLOTS, 1, 184 }}, .status = FSIMG_OK },
+	{ .name = "185_extension_slots_are_unsupported",
+	    .patches = {{ SB_SLOTS, 1, 185 }}, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "255_extension_slots_are_unsupported",
+	    .patches = {{ SB_SLOTS, 1, 255 }}, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "incompat_0x200_is_unsupported",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x200)},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "incompat_0x80000000_is_unsupported",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x80000000)},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "incompat_all_known_bits_with_0x200_is_unsupported",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x3ff), { SB_SLOTS, 1, 1 }},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "incompat_lz4_0padding_is_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x001)}, .status = FSIMG_OK },
+	{ .name = "incompat_compr_cfgs_is_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x002)}, .status = FSIMG_OK },
+	{ .name = "incompat_chunked_file_is_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x004)}, .status = FSIMG_OK },
+	{ .name = "incompat_device_table_is_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x008)}, .status = FSIMG_OK },
+	{ .name = "incompat_ztailpacking_is_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x010)}, .status = FSIMG_OK },
+	{ .name = "incompat_fragments_is_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x020)}, .status = FSIMG_OK },
+	{ .name = "incompat_xattr_prefixes_is_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x040)}, .status = FSIMG_OK },
+	{ .name = "incompat_48bit_is_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x080)}, .status = FSIMG_OK },
+	{ .name = "incompat_metabox_with_a_slot_is_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x100), { SB_SLOTS, 1, 1 }},
+	    .status = FSIMG_OK },
+	{ .name = "incompat_all_known_bits_with_a_slot_are_accepted",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x1ff), { SB_SLOTS, 1, 1 }},
+	    .status = FSIMG_OK },
+	{ .name = "shared_ea_in_metabox_with_metabox_is_accepted",
+	    .patches = {FEATURE(SB_COMPAT, 0x08), FEATURE(SB_INCOMPAT, 0x100),
+	    { SB_SLOTS, 1, 1 }},
+	    .status = FSIMG_OK },
+	{ .name = "unknown_compat_bits_are_accepted",
+	    .patches = {FEATURE(SB_COMPAT, 0xffffffc0)}, .status = FSIMG_OK },
+	/* The rules erofs_region_decode() adds are not the probe's. */
+	{ .name = "extra_devices_are_not_a_probe_check",
+	    .patches = {{ SB_DEVICES, 2, 1 }}, .status = FSIMG_OK,
+	    .region_only = true },
+	{ .name = "epoch_nanoseconds_are_not_a_probe_check",
+	    .patches = {FEATURE(SB_NSEC, 1000000000)}, .status = FSIMG_OK,
+	    .region_only = true },
+	{ .name = "shared_ea_without_metabox_is_not_a_probe_check",
+	    .patches = {FEATURE(SB_COMPAT, 0x08)}, .status = FSIMG_OK,
+	    .region_only = true },
+	{ .name = "metabox_without_a_slot_is_not_a_probe_check",
+	    .patches = {FEATURE(SB_INCOMPAT, 0x100)}, .status = FSIMG_OK,
+	    .region_only = true },
+};
+
+/*
+ * Every row is classified by the probe, and the region decoder applies
+ * the same classification. The probe reads a heap copy of exactly the
+ * given length, so a read past the length leaves the allocation.
+ */
+static void
+test_super_probe_classifies_each_case(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(super_cases); i++) {
+		const super_case_t *c = &super_cases[i];
+		unsigned char region[REGION_BYTES];
+		size_t length = c->length != 0 ? c->length : SUPER_BYTES;
+		unsigned char *exact;
+		const char *what = NULL;
+		fsimg_status_t status;
+		region_result_t r;
+
+		region_init(region);
+		patch_apply(region, c->patches);
+
+		exact = malloc(length);
+		EXPECT(exact != NULL, "%s: allocate %zu bytes", c->name,
+		    length);
+		if (exact == NULL)
+			continue;
+		bcopy(region, exact, length);
+		status = erofs_super_probe(exact, length, &what);
+		free(exact);
+		EXPECT_STATUS(status, c->status, what, c->name);
+
+		if (c->region_only)
+			continue;
+		/* The full region leaves room for any extension slots. */
+		r = region_decode_checked(c->name, region,
+		    c->length != 0 ? c->length : REGION_BYTES);
+		EXPECT_STATUS(r.status, c->status, r.what, c->name);
+	}
+}
+
+static void
+test_magic_matches_only_the_magic_bytes(void)
+{
+	unsigned char region[REGION_BYTES];
+	size_t i;
+
+	region_init(region);
+	EXPECT(erofs_magic_matches(region, 4), "four bytes of magic");
+	EXPECT(erofs_magic_matches(region, SUPER_BYTES), "full superblock");
+	EXPECT(!erofs_magic_matches(region, 3), "three bytes are too few");
+	EXPECT(!erofs_magic_matches(region, 0), "no bytes");
+	for (i = 0; i < 4; i++) {
+		region[i] ^= 0x01;
+		EXPECT(!erofs_magic_matches(region, SUPER_BYTES),
+		    "magic byte %zu flipped", i);
+		region[i] ^= 0x01;
+	}
+}
+
+static void
+test_super_fields_are_decoded_from_their_offsets(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+	size_t i;
+
+	region_init(region);
+	put_le(region + SB_CHECKSUM, 0x11223344, 4);
+	put_le(region + SB_COMPAT, 0x80000022, 4);
+	region[SB_BLKSZBITS] = 10;
+	region[SB_SLOTS] = 2;
+	put_le(region + SB_ROOT16, 0x1234, 2);
+	put_le(region + SB_INODES, UINT64_C(0x0123456789), 8);
+	put_le(region + SB_EPOCH, 1700000000, 8);
+	put_le(region + SB_NSEC, 5, 4);
+	put_le(region + SB_BLOCKS, 0x00abcdef, 4);
+	put_le(region + SB_META_BLOCK, 7, 4);
+	put_le(region + SB_XATTR_BLOCK, 9, 4);
+	for (i = 0; i < 16; i++)
+		region[SB_UUID + i] = (unsigned char)(0xc0 + i);
+	bcopy("volume-label", region + SB_NAME, 12);
+	put_le(region + SB_INCOMPAT, 0x044, 4);
+	put_le(region + SB_WORD54, 0x1234, 2);
+	region[SB_PREFIX_COUNT] = 3;
+	put_le(region + SB_PREFIX_START, 0x1000, 4);
+	put_le(region + SB_PACKED_NID, UINT64_C(0x0000000200000003), 8);
+	region[SB_ISHARE] = 0x42;
+	put_le(region + SB_BUILD_TIME, 100000000, 4);
+
+	r = region_decode_checked("all_fields", region, REGION_BYTES);
+
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "all_fields");
+	EXPECT(r.sb.checksum == 0x11223344, "checksum as stored");
+	EXPECT(r.sb.compat == 0x80000022, "compat as stored");
+	EXPECT(r.sb.incompat == 0x044, "incompat as stored");
+	EXPECT(r.sb.blkszbits == 10, "blkszbits");
+	EXPECT(r.sb.extension_slots == 2, "extension slots");
+	EXPECT(r.sb.root_nid == 0x1234, "root nid from the 16-bit field");
+	EXPECT(r.sb.inode_count == UINT64_C(0x0123456789), "inode count");
+	EXPECT(r.sb.epoch == 1700000000, "epoch");
+	EXPECT(r.sb.epoch_nsec == 5, "epoch nanoseconds");
+	EXPECT(r.sb.block_count == 0x00abcdef, "block count");
+	EXPECT(r.sb.meta_blkaddr == 7, "metadata block");
+	EXPECT(r.sb.xattr_blkaddr == 9, "shared attribute block");
+	EXPECT(bcmp(r.sb.uuid, region + SB_UUID, 16) == 0, "uuid");
+	EXPECT(bcmp(r.sb.name, region + SB_NAME, 16) == 0, "volume name");
+	EXPECT(r.sb.name_length == 12, "volume name length");
+	EXPECT(r.sb.compression_word == 0x1234, "compression word");
+	EXPECT(r.sb.xattr_prefix_count == 3, "long-prefix count");
+	EXPECT(r.sb.xattr_prefix_start == 0x1000, "long-prefix start");
+	EXPECT(r.sb.packed_nid == UINT64_C(0x0000000200000003), "packed nid");
+	EXPECT(r.sb.ishare_prefix == 0x42, "image-share prefix index");
+	EXPECT(r.sb.build_time == 100000000, "build time");
+	EXPECT(!r.sb.filter_disabled, "filter byte zero keeps the filter");
+	EXPECT(!r.sb.reserved_nonzero, "no reserved byte set");
+	EXPECT(r.sb.box_nid == 0, "box nid is zero without the metabox");
+}
+
+static void
+test_filter_byte_nonzero_disables_the_name_filter(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	region_init(region);
+	region[SB_FILTER_BYTE] = 1;
+	r = region_decode_checked("filter_byte_1", region, REGION_BYTES);
+	EXPECT(r.status == FSIMG_OK && r.sb.filter_disabled,
+	    "filter byte 1 disables the filter");
+
+	region[SB_FILTER_BYTE] = 0x80;
+	r = region_decode_checked("filter_byte_0x80", region, REGION_BYTES);
+	EXPECT(r.status == FSIMG_OK && r.sb.filter_disabled,
+	    "filter byte 0x80 disables the filter");
+}
+
+static void
+test_name_length_ends_at_the_first_nul_or_the_field_end(void)
+{
+	static const struct {
+		const char	*name;
+		unsigned char	 bytes[16];
+		unsigned	 length;
+	} cases[] = {
+		{ "empty_name", { 0 }, 0 },
+		{ "abc_then_nul_then_garbage",
+		    { 'a', 'b', 'c', 0, 'x', 'y', 'z' }, 3 },
+		{ "fifteen_bytes_then_nul",
+		    { 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a',
+		    'a', 'a', 'a', 'a', 0 }, 15 },
+		{ "sixteen_bytes_without_nul",
+		    { 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b',
+		    'b', 'b', 'b', 'b', 'b' }, 16 },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		unsigned char region[REGION_BYTES];
+		region_result_t r;
+
+		region_init(region);
+		bcopy(cases[i].bytes, region + SB_NAME, 16);
+		r = region_decode_checked(cases[i].name, region, REGION_BYTES);
+		EXPECT(r.status == FSIMG_OK &&
+		    r.sb.name_length == cases[i].length, "%s", cases[i].name);
+	}
+}
+
+static void
+test_negative_epochs_decode_as_signed(void)
+{
+	static const int64_t epochs[] = { -1, -86400, INT64_MIN, INT64_MAX };
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(epochs); i++) {
+		unsigned char region[REGION_BYTES];
+		region_result_t r;
+
+		region_init(region);
+		put_le(region + SB_EPOCH, (uint64_t)epochs[i], 8);
+		r = region_decode_checked("epoch", region, REGION_BYTES);
+		EXPECT(r.status == FSIMG_OK && r.sb.epoch == epochs[i],
+		    "epoch %lld", (long long)epochs[i]);
+	}
+}
+
+static void
+test_root_nid_without_48bit_is_the_16_bit_field(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	region_init(region);
+	put_le(region + SB_ROOT16, 0xfffe, 2);
+	put_le(region + SB_BLOCKS, 0x89abcdef, 4);
+	r = region_decode_checked("root16", region, REGION_BYTES);
+	EXPECT(r.status == FSIMG_OK && r.sb.root_nid == 0xfffe,
+	    "root nid is the 16-bit field");
+	EXPECT(r.sb.block_count == 0x89abcdef,
+	    "block count is the 32-bit field alone");
+	EXPECT(!r.sb.reserved_nonzero, "wide root field zero");
+}
+
+static void
+test_48bit_widens_root_nid_and_block_count(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	region_init(region);
+	put_le(region + SB_INCOMPAT, EROFS_INCOMPAT_48BIT, 4);
+	put_le(region + SB_ROOT16, 0x1234, 2);
+	put_le(region + SB_BLOCKS, 0x89abcdef, 4);
+	put_le(region + SB_ROOT64, UINT64_C(0x0123456789abcdef), 8);
+
+	r = region_decode_checked("48bit_widths", region, REGION_BYTES);
+
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "48bit_widths");
+	EXPECT(r.sb.root_nid == UINT64_C(0x0123456789abcdef),
+	    "root nid is the 64-bit field");
+	EXPECT(r.sb.block_count == UINT64_C(0x123489abcdef),
+	    "block count gains the 0x0E word as bits 32 to 47");
+	EXPECT(!r.sb.reserved_nonzero, "wide root field is not reserved");
+}
+
+static void
+test_reserved_superblock_bytes_are_reported_not_refused(void)
+{
+	static const struct {
+		uint16_t	 offset;
+		bool		 reserved_without_48bit;
+		bool		 reserved_with_48bit;
+	} bytes[] = {
+		{ SB_RESERVED_6A, true, true },
+		{ SB_RESERVED_6A + 1, true, true },
+		{ SB_ROOT64, true, false },
+		{ SB_ROOT64 + 7, true, false },
+		{ SB_RESERVED_78, true, true },
+		{ SB_RESERVED_78 + 7, true, true },
+	};
+	size_t i;
+	int wide;
+
+	for (wide = 0; wide < 2; wide++) {
+		for (i = 0; i < ARRAY_SIZE(bytes); i++) {
+			unsigned char region[REGION_BYTES];
+			region_result_t r;
+			bool want = wide != 0 ? bytes[i].reserved_with_48bit :
+			    bytes[i].reserved_without_48bit;
+
+			region_init(region);
+			if (wide != 0)
+				put_le(region + SB_INCOMPAT,
+				    EROFS_INCOMPAT_48BIT, 4);
+			region[bytes[i].offset] = 1;
+			r = region_decode_checked("reserved", region,
+			    REGION_BYTES);
+			EXPECT(r.status == FSIMG_OK &&
+			    r.sb.reserved_nonzero == want,
+			    "byte 0x%x set, 48bit=%d, reserved_nonzero=%d",
+			    (unsigned)bytes[i].offset, wide, (int)want);
+		}
+	}
+}
+
+/* ---- Superblock region, checksum and configuration ---- */
+
+static void
+test_extension_slots_past_the_given_length_are_corrupt(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	region_init(region);
+	region[SB_SLOTS] = 2;
+	r = region_decode_checked("2_slots_length_159", region, 159);
+	EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what, "2_slots_length_159");
+	r = region_decode_checked("2_slots_length_160", region, 160);
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "2_slots_length_160");
+
+	region[SB_SLOTS] = 184;
+	r = region_decode_checked("184_slots_length_3071", region, 3071);
+	EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what,
+	    "184_slots_length_3071");
+	r = region_decode_checked("184_slots_length_3072", region, 3072);
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "184_slots_length_3072");
+
+	r = region_decode_checked("length_127", region, 127);
+	EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what, "length_127");
+}
+
+/* Under METABOX the first slot holds the box NID and a reserved word. */
+static void
+metabox_region_init(unsigned char *region)
+{
+	region_init(region);
+	region[SB_SLOTS] = 1;
+	put_le(region + SB_INCOMPAT, EROFS_INCOMPAT_METABOX, 4);
+}
+
+static void
+test_metabox_nid_is_read_from_the_first_slot(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	metabox_region_init(region);
+	put_le(region + SB_BOX_NID, UINT64_C(0x1122334455667788), 8);
+	r = region_decode_checked("box_nid", region, REGION_BYTES);
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "box_nid");
+	EXPECT(r.sb.box_nid == UINT64_C(0x1122334455667788), "box nid");
+	EXPECT(!r.sb.reserved_nonzero, "slot reserved word zero");
+
+	put_le(region + SB_BOX_NID, UINT64_C(0x7fffffffffffffff), 8);
+	r = region_decode_checked("box_nid_max", region, REGION_BYTES);
+	EXPECT(r.status == FSIMG_OK &&
+	    r.sb.box_nid == UINT64_C(0x7fffffffffffffff),
+	    "box nid with bit 63 clear is accepted");
+}
+
+static void
+test_metabox_nid_with_bit_63_is_corrupt(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	metabox_region_init(region);
+	put_le(region + SB_BOX_NID, UINT64_C(1) << 63, 8);
+	r = region_decode_checked("box_nid_bit63", region, REGION_BYTES);
+	EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what, "box_nid_bit63");
+}
+
+static void
+test_metabox_slot_reserved_word_is_reported(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	metabox_region_init(region);
+	region[SB_RESERVED_88] = 1;
+	r = region_decode_checked("slot_reserved_first", region,
+	    REGION_BYTES);
+	EXPECT(r.status == FSIMG_OK && r.sb.reserved_nonzero,
+	    "byte 0x88 sets reserved_nonzero");
+
+	metabox_region_init(region);
+	region[SB_RESERVED_88 + 7] = 0x80;
+	r = region_decode_checked("slot_reserved_last", region, REGION_BYTES);
+	EXPECT(r.status == FSIMG_OK && r.sb.reserved_nonzero,
+	    "byte 0x8f sets reserved_nonzero");
+}
+
+static void
+test_slot_bytes_are_ignored_without_metabox(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	region_init(region);
+	region[SB_SLOTS] = 1;
+	bcopy("\xff\xff\xff\xff\xff\xff\xff\xff\x01\x02\x03\x04\x05\x06\x07"
+	    "\x08", region + SB_BOX_NID, 16);
+	r = region_decode_checked("slot_without_metabox", region,
+	    REGION_BYTES);
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "slot_without_metabox");
+	EXPECT(r.sb.box_nid == 0, "box nid stays zero");
+	EXPECT(!r.sb.reserved_nonzero, "slot bytes are not reserved bytes");
+}
+
+typedef struct region_case {
+	const char	*name;
+	size_t		 length;	/* 0: the 3072-byte region */
+	patch_t		 patches[MAX_PATCHES];
+	fsimg_status_t	 status;
+} region_case_t;
+
+/*
+ * The rules erofs_region_decode() adds to the base superblock's, in the
+ * order it applies them. The row with a wrong checksum pins that the device
+ * refusal precedes the checksum.
+ */
+static const region_case_t region_cases[] = {
+	{ .name = "extra_device_count_1_is_unsupported",
+	    .patches = {{ SB_DEVICES, 2, 1 }}, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "extra_device_count_65535_is_unsupported",
+	    .patches = {{ SB_DEVICES, 2, 0xffff }},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "extra_devices_are_refused_before_a_wrong_checksum",
+	    .patches = {{ SB_DEVICES, 2, 1 },
+	    { SB_COMPAT, 4, EROFS_COMPAT_SB_CHKSUM },
+	    { SB_CHECKSUM, 4, 0xdeadbeef }},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "truncated_slots_are_corrupt_before_extra_devices",
+	    .length = 159,
+	    .patches = {{ SB_SLOTS, 1, 2 }, { SB_DEVICES, 2, 1 }},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "epoch_nanoseconds_999999999_are_accepted",
+	    .patches = {{ SB_NSEC, 4, 999999999 }}, .status = FSIMG_OK },
+	{ .name = "epoch_nanoseconds_1000000000_are_corrupt",
+	    .patches = {{ SB_NSEC, 4, 1000000000 }}, .status = FSIMG_ECORRUPT },
+	{ .name = "epoch_nanoseconds_4294967295_are_corrupt",
+	    .patches = {{ SB_NSEC, 4, 0xffffffff }}, .status = FSIMG_ECORRUPT },
+	{ .name = "metabox_without_a_slot_is_corrupt",
+	    .patches = {{ SB_INCOMPAT, 4, EROFS_INCOMPAT_METABOX }},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "metabox_with_a_slot_is_accepted",
+	    .patches = {{ SB_INCOMPAT, 4, EROFS_INCOMPAT_METABOX },
+	    { SB_SLOTS, 1, 1 }}, .status = FSIMG_OK },
+	{ .name = "shared_ea_in_metabox_without_metabox_is_corrupt",
+	    .patches = {{ SB_COMPAT, 4, EROFS_COMPAT_SHARED_EA_IN_METABOX }},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "shared_ea_in_metabox_with_metabox_is_accepted",
+	    .patches = {{ SB_COMPAT, 4, EROFS_COMPAT_SHARED_EA_IN_METABOX },
+	    { SB_INCOMPAT, 4, EROFS_INCOMPAT_METABOX }, { SB_SLOTS, 1, 1 }},
+	    .status = FSIMG_OK },
+};
+
+static void
+test_region_decode_applies_the_rules_beyond_the_base_superblock(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(region_cases); i++) {
+		const region_case_t *c = &region_cases[i];
+		unsigned char region[REGION_BYTES];
+		region_result_t r;
+
+		region_init(region);
+		patch_apply(region, c->patches);
+		r = region_decode_checked(c->name, region,
+		    c->length != 0 ? c->length : REGION_BYTES);
+		EXPECT_STATUS(r.status, c->status, r.what, c->name);
+	}
+}
+
+/* ---- Checksum, over the real regions of e1-chk-b512 .. b4096 ---- */
+
+/* e1-chk-b512: image bytes [1024, 1536), the checksummed range */
+static const unsigned char chk512_bytes[] = {
+	/* image offset 1024, 17 bytes */
+	0xe2, 0xe1, 0xf5, 0xe0, 0x3d, 0xdd, 0xc0, 0x28, 0x03, 0x00,
+	0x00, 0x00, 0x09, 0x00, 0x24, 0x00, 0x07,
+	/* image offset 1060, 28 bytes */
+	0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33,
+	0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+	/* image offset 1152, 140 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xed, 0x41, 0x03, 0x00, 0x6c, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x01, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x54, 0x00, 0x02, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x55, 0x00, 0x02, 0x00, 0x29, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x57, 0x00, 0x01, 0x00, 0x2b, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5c, 0x00, 0x01, 0x00,
+	0x2d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x00,
+	0x02, 0x00, 0xf0, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x64, 0x00, 0x07, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x65, 0x00, 0x01, 0x00, 0x2e, 0x2e, 0x2e, 0x61,
+	0x2e, 0x74, 0x78, 0x74, 0x62, 0x69, 0x67, 0x2e, 0x62, 0x69,
+	0x6e, 0x64, 0x6c, 0x6d, 0x69, 0x64, 0x2e, 0x62, 0x69, 0x6e,
+	/* image offset 1312, 38 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x06, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x02, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a,
+	/* image offset 1376, 140 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x20, 0x4e,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+	0x03, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x12, 0xf8, 0x58, 0x8d, 0xad, 0x6c, 0x5b, 0x4a,
+	0xc1, 0x9a, 0x71, 0x91, 0x70, 0x84, 0x5f, 0x18, 0x1b, 0x61,
+	0xea, 0x57, 0xe0, 0x36, 0x87, 0xa5, 0x53, 0x0c, 0xc2, 0x59,
+	0xba, 0x13, 0xe9, 0x8b, 0x04, 0x00, 0x00, 0x00, 0xed, 0x41,
+	0x02, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0xff, 0xff, 0xff, 0xff, 0x04, 0x00, 0x00, 0x00, 0xf5, 0x01,
+	0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2d, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x24, 0x00, 0x02, 0x00, 0x24, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x25, 0x00, 0x02, 0x00,
+	0xf2, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x27, 0x00,
+	0x01, 0x00, 0x2e, 0x2e, 0x2e, 0x62, 0x2e, 0x74, 0x78, 0x74,
+};
+static const fixture_run_t chk512_runs[] = {
+	{ 1024, 0, 17 },
+	{ 1060, 17, 28 },
+	{ 1152, 45, 140 },
+	{ 1312, 185, 38 },
+	{ 1376, 223, 140 },
+};
+
+/* e1-chk-b1024: image bytes [1024, 2048), the checksummed range */
+static const unsigned char chk1024_bytes[] = {
+	/* image offset 1024, 17 bytes */
+	0xe2, 0xe1, 0xf5, 0xe0, 0xd1, 0x67, 0x5f, 0x8c, 0x03, 0x00,
+	0x00, 0x00, 0x0a, 0x00, 0x24, 0x00, 0x07,
+	/* image offset 1060, 28 bytes */
+	0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33,
+	0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+	/* image offset 1152, 140 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xed, 0x41, 0x03, 0x00, 0x6c, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x01, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x54, 0x00, 0x02, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x55, 0x00, 0x02, 0x00, 0x29, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x57, 0x00, 0x01, 0x00, 0x2b, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5c, 0x00, 0x01, 0x00,
+	0x3d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x00,
+	0x02, 0x00, 0xe0, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x64, 0x00, 0x07, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x65, 0x00, 0x01, 0x00, 0x2e, 0x2e, 0x2e, 0x61,
+	0x2e, 0x74, 0x78, 0x74, 0x62, 0x69, 0x67, 0x2e, 0x62, 0x69,
+	0x6e, 0x64, 0x6c, 0x6d, 0x69, 0x64, 0x2e, 0x62, 0x69, 0x6e,
+	/* image offset 1312, 38 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x06, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x02, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a,
+	/* image offset 1376, 652 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x20, 0x4e,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+	0x03, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xbf, 0xde, 0x83, 0x1d, 0x0d, 0x53, 0x0b, 0x9f,
+	0x23, 0xdf, 0x45, 0x35, 0x3d, 0x4c, 0x9f, 0x92, 0x9b, 0xfa,
+	0xd8, 0xbe, 0x85, 0xa4, 0x49, 0x2e, 0x30, 0xa8, 0x45, 0x67,
+	0xa4, 0xac, 0x7a, 0x1d, 0xd2, 0x3a, 0x06, 0x7c, 0x43, 0xd8,
+	0x51, 0xdd, 0x86, 0x41, 0x30, 0xe3, 0x26, 0x93, 0xee, 0x47,
+	0x12, 0x80, 0x2f, 0x23, 0x47, 0x32, 0x75, 0xf5, 0xb5, 0x22,
+	0xe1, 0xf6, 0x0f, 0x3d, 0x67, 0xcf, 0x6c, 0xc7, 0xe9, 0x0a,
+	0x34, 0xd8, 0x3d, 0x09, 0xae, 0xea, 0x74, 0x19, 0xe1, 0x42,
+	0x86, 0x66, 0x72, 0x27, 0x26, 0x39, 0xca, 0xe5, 0xcb, 0x00,
+	0x35, 0x5c, 0x7c, 0xce, 0x03, 0xc6, 0x00, 0x2e, 0x98, 0x14,
+	0xb4, 0x74, 0xab, 0x40, 0x4d, 0x76, 0x99, 0x77, 0x3b, 0xa7,
+	0x9a, 0x32, 0xb2, 0x20, 0x78, 0x4f, 0xa0, 0x2c, 0x01, 0x9a,
+	0x31, 0x05, 0xe5, 0x49, 0xae, 0x2a, 0xfe, 0x10, 0x90, 0x0b,
+	0x06, 0x51, 0x56, 0x85, 0x12, 0xcd, 0xd5, 0xe6, 0x22, 0xe2,
+	0x83, 0xbd, 0x1f, 0x5a, 0xb9, 0xc7, 0xe0, 0xb9, 0x64, 0x76,
+	0xe8, 0x49, 0xab, 0xfa, 0x50, 0x07, 0x9f, 0xde, 0x62, 0x9d,
+	0xe3, 0xbd, 0xab, 0xc1, 0x10, 0xa9, 0x33, 0x4e, 0x63, 0x6a,
+	0x24, 0x5e, 0xc4, 0x3f, 0x7f, 0x38, 0x45, 0xbd, 0x52, 0x8d,
+	0x22, 0x3c, 0xfe, 0x8e, 0xd2, 0x60, 0x88, 0x86, 0xc1, 0x5f,
+	0x02, 0x3e, 0xf6, 0x80, 0x13, 0x97, 0xb1, 0xc1, 0x3e, 0xb1,
+	0x5d, 0x0b, 0xde, 0xae, 0x1c, 0xf0, 0x4b, 0x58, 0x2d, 0x4f,
+	0x19, 0xdf, 0xa5, 0xdc, 0xa3, 0x99, 0x67, 0xfa, 0xcf, 0xec,
+	0xf8, 0x42, 0x74, 0x8d, 0xd4, 0x36, 0xbe, 0x1c, 0x8b, 0x69,
+	0x79, 0xb1, 0xfb, 0x03, 0x68, 0x27, 0x8e, 0x9c, 0xcc, 0x72,
+	0x9b, 0x99, 0xcc, 0x57, 0xfd, 0x8b, 0x4a, 0x57, 0x70, 0x40,
+	0xc6, 0x85, 0xa7, 0x63, 0x2f, 0x34, 0x78, 0xbd, 0x4e, 0xb6,
+	0xf6, 0x19, 0x1f, 0x50, 0xb8, 0x3e, 0xfb, 0xac, 0x55, 0xb6,
+	0x21, 0x9a, 0x0e, 0x6d, 0xab, 0x06, 0x90, 0x16, 0xfe, 0xaa,
+	0x7f, 0x75, 0x09, 0x40, 0xb7, 0xdd, 0x7f, 0x04, 0xb6, 0xd7,
+	0xef, 0xf4, 0x0a, 0xdd, 0xb8, 0x44, 0x16, 0xe8, 0xe6, 0x07,
+	0x5d, 0xb5, 0xd6, 0x1a, 0x12, 0xa3, 0x2e, 0x52, 0x86, 0x7c,
+	0xf8, 0x49, 0xcc, 0x23, 0xfa, 0x44, 0xfb, 0xb2, 0xa5, 0x3e,
+	0x79, 0x8c, 0x24, 0xdf, 0x1d, 0x65, 0x8a, 0x96, 0xd7, 0xcb,
+	0x67, 0xb2, 0x28, 0xcc, 0x32, 0xa0, 0xd9, 0x19, 0x4d, 0xa1,
+	0x52, 0xc9, 0x93, 0xf1, 0x42, 0x0b, 0xad, 0xb8, 0xd0, 0x27,
+	0xfe, 0xa7, 0xa4, 0x2a, 0xa2, 0x7d, 0x5c, 0x51, 0x23, 0x22,
+	0xce, 0x86, 0x07, 0x48, 0x0f, 0x58, 0xf2, 0x30, 0x5c, 0x75,
+	0xc7, 0x43, 0x3a, 0x5d, 0x81, 0xae, 0x21, 0x17, 0xe6, 0xae,
+	0x0f, 0x91, 0x03, 0x98, 0x2f, 0x33, 0x2e, 0x07, 0xac, 0x0a,
+	0xbd, 0x66, 0x3a, 0xd2, 0x86, 0xc6, 0xf3, 0xa8, 0x83, 0xed,
+	0x66, 0x3a, 0x88, 0x23, 0x9e, 0x33, 0x24, 0x96, 0xdd, 0x97,
+	0x54, 0x4a, 0x9d, 0x6a, 0x30, 0x2f, 0x2d, 0x16, 0x7c, 0xb3,
+	0x6d, 0x73, 0xea, 0xa2, 0x6a, 0xed, 0x51, 0x28, 0x46, 0x59,
+	0x8e, 0x2f, 0x93, 0xb3, 0x8f, 0xa8, 0x1e, 0x62, 0xe3, 0xba,
+	0x9a, 0x69, 0xb0, 0x89, 0x28, 0x2e, 0xab, 0xc9, 0xe4, 0xd4,
+	0xab, 0xf8, 0x70, 0x11, 0x39, 0xa6, 0x0e, 0x83, 0xd5, 0x27,
+	0x1f, 0x8d, 0xeb, 0x68, 0x0e, 0xf7, 0x7d, 0xbc, 0x8a, 0x98,
+	0xfa, 0x04, 0x87, 0xa1, 0x7f, 0x79, 0x3f, 0x25, 0xc3, 0xce,
+	0x41, 0x22, 0xee, 0xfe, 0x1e, 0x3b, 0x2e, 0x08, 0x35, 0x64,
+	0xf2, 0x02, 0x50, 0x49, 0xb2, 0xe9, 0x33, 0xf2, 0x02, 0x1f,
+	0xac, 0xd4, 0x00, 0xc7, 0xb1, 0xff, 0x51, 0x98, 0x46, 0x27,
+	0xba, 0x47, 0x83, 0x26, 0x12, 0xf8, 0x58, 0x8d, 0xad, 0x6c,
+	0x5b, 0x4a, 0xc1, 0x9a, 0x71, 0x91, 0x70, 0x84, 0x5f, 0x18,
+	0x1b, 0x61, 0xea, 0x57, 0xe0, 0x36, 0x87, 0xa5, 0x53, 0x0c,
+	0xc2, 0x59, 0xba, 0x13, 0xe9, 0x8b, 0x04, 0x00, 0x00, 0x00,
+	0xed, 0x41, 0x02, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x04, 0x00, 0x00, 0x00,
+	0xf5, 0x01, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3d, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x24, 0x00, 0x02, 0x00,
+	0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x25, 0x00,
+	0x02, 0x00, 0xe2, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x27, 0x00, 0x01, 0x00, 0x2e, 0x2e, 0x2e, 0x62, 0x2e, 0x74,
+	0x78, 0x74,
+};
+static const fixture_run_t chk1024_runs[] = {
+	{ 1024, 0, 17 },
+	{ 1060, 17, 28 },
+	{ 1152, 45, 140 },
+	{ 1312, 185, 38 },
+	{ 1376, 223, 652 },
+};
+
+/* e1-chk-b2048: image bytes [1024, 2048), the checksummed range */
+static const unsigned char chk2048_bytes[] = {
+	/* image offset 1024, 17 bytes */
+	0xe2, 0xe1, 0xf5, 0xe0, 0x53, 0xcc, 0xb3, 0xb0, 0x03, 0x00,
+	0x00, 0x00, 0x0b, 0x00, 0x24, 0x00, 0x07,
+	/* image offset 1060, 28 bytes */
+	0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33,
+	0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+	/* image offset 1152, 140 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xed, 0x41, 0x03, 0x00, 0x6c, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x01, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x54, 0x00, 0x02, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x55, 0x00, 0x02, 0x00, 0x29, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x57, 0x00, 0x01, 0x00, 0xc0, 0x02,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5c, 0x00, 0x01, 0x00,
+	0xf2, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x00,
+	0x02, 0x00, 0xf5, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x64, 0x00, 0x07, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x65, 0x00, 0x01, 0x00, 0x2e, 0x2e, 0x2e, 0x61,
+	0x2e, 0x74, 0x78, 0x74, 0x62, 0x69, 0x67, 0x2e, 0x62, 0x69,
+	0x6e, 0x64, 0x6c, 0x6d, 0x69, 0x64, 0x2e, 0x62, 0x69, 0x6e,
+	/* image offset 1312, 38 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x06, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x02, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a,
+};
+static const fixture_run_t chk2048_runs[] = {
+	{ 1024, 0, 17 },
+	{ 1060, 17, 28 },
+	{ 1152, 45, 140 },
+	{ 1312, 185, 38 },
+};
+
+/* e1-chk-b4096: image bytes [1024, 4096), the checksummed range */
+static const unsigned char chk4096_bytes[] = {
+	/* image offset 1024, 17 bytes */
+	0xe2, 0xe1, 0xf5, 0xe0, 0xe3, 0x76, 0x4f, 0x0d, 0x03, 0x00,
+	0x00, 0x00, 0x0c, 0x00, 0x24, 0x00, 0x07,
+	/* image offset 1060, 28 bytes */
+	0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33,
+	0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+	/* image offset 1152, 140 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xed, 0x41, 0x03, 0x00, 0x6c, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x01, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x54, 0x00, 0x02, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x55, 0x00, 0x02, 0x00, 0x29, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x57, 0x00, 0x01, 0x00, 0x80, 0x02,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5c, 0x00, 0x01, 0x00,
+	0xf2, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x00,
+	0x02, 0x00, 0xf5, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x64, 0x00, 0x07, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x65, 0x00, 0x01, 0x00, 0x2e, 0x2e, 0x2e, 0x61,
+	0x2e, 0x74, 0x78, 0x74, 0x62, 0x69, 0x67, 0x2e, 0x62, 0x69,
+	0x6e, 0x64, 0x6c, 0x6d, 0x69, 0x64, 0x2e, 0x62, 0x69, 0x6e,
+	/* image offset 1312, 38 bytes */
+	0x04, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x06, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x02, 0x00, 0x00, 0x00, 0xf5, 0x01, 0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a,
+};
+static const fixture_run_t chk4096_runs[] = {
+	{ 1024, 0, 17 },
+	{ 1060, 17, 28 },
+	{ 1152, 45, 140 },
+	{ 1312, 185, 38 },
+};
+
+
+typedef struct checksum_fixture {
+	const char	*name;
+	unsigned	 blkszbits;
+	fixture_t	 fixture;
+} checksum_fixture_t;
+
+static const checksum_fixture_t checksum_fixtures[] = {
+	{ "e1-chk-b512", 9, FIXTURE(chk512, 1024) },
+	{ "e1-chk-b1024", 10, FIXTURE(chk1024, 1024) },
+	{ "e1-chk-b2048", 11, FIXTURE(chk2048, 1024) },
+	{ "e1-chk-b4096", 12, FIXTURE(chk4096, 1024) },
+};
+
+/*
+ * The region of one fixture: its covered range from the real image and zero
+ * beyond, which the checksum does not see.
+ */
+static void
+checksum_region_load(const checksum_fixture_t *f, unsigned char *region)
+{
+	fixture_load(&f->fixture, region, covered_bytes(f->blkszbits));
+	bzero(region + covered_bytes(f->blkszbits),
+	    REGION_BYTES - covered_bytes(f->blkszbits));
+}
+
+static void
+test_crc32c_oracle_matches_the_published_check_value(void)
+{
+	EXPECT((crc32c_register((const unsigned char *)"123456789", 9) ^
+	    UINT32_C(0xffffffff)) == UINT32_C(0xe3069283),
+	    "inverted register of 123456789");
+	EXPECT(crc32c_register((const unsigned char *)"123456789", 9) ==
+	    UINT32_C(0x1cf96d7c), "stored form of 123456789");
+}
+
+static void
+test_real_checksummed_regions_are_accepted(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(checksum_fixtures); i++) {
+		const checksum_fixture_t *f = &checksum_fixtures[i];
+		unsigned char region[REGION_BYTES];
+		region_result_t r;
+
+		checksum_region_load(f, region);
+		r = region_decode_checked(f->name, region, REGION_BYTES);
+		EXPECT_STATUS(r.status, FSIMG_OK, r.what, f->name);
+		EXPECT(r.status != FSIMG_OK ||
+		    (r.sb.compat & EROFS_COMPAT_SB_CHKSUM) != 0,
+		    "%s: fixture sets SB_CHKSUM", f->name);
+		EXPECT(r.status != FSIMG_OK ||
+		    r.sb.checksum == expected_checksum(region, f->blkszbits),
+		    "%s: stored checksum equals the independent CRC", f->name);
+	}
+}
+
+static void
+test_flipped_bit_inside_the_covered_range_is_corrupt(void)
+{
+	size_t i, j;
+
+	for (i = 0; i < ARRAY_SIZE(checksum_fixtures); i++) {
+		const checksum_fixture_t *f = &checksum_fixtures[i];
+		size_t covered = covered_bytes(f->blkszbits);
+		size_t positions[] = { 0, 9, covered / 2, covered - 1 };
+
+		for (j = 0; j < ARRAY_SIZE(positions); j++) {
+			unsigned char region[REGION_BYTES];
+			region_result_t r;
+
+			checksum_region_load(f, region);
+			region[positions[j]] ^= 0x01;
+			r = region_decode_checked(f->name, region,
+			    REGION_BYTES);
+			EXPECT(r.status == FSIMG_ECORRUPT,
+			    "%s: bit flipped in byte %zu: %s", f->name,
+			    positions[j], status_name(r.status));
+		}
+	}
+}
+
+static void
+test_flipped_checksum_field_is_corrupt(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(checksum_fixtures); i++) {
+		const checksum_fixture_t *f = &checksum_fixtures[i];
+		unsigned char region[REGION_BYTES];
+		region_result_t r;
+
+		checksum_region_load(f, region);
+		region[SB_CHECKSUM + 3] ^= 0x80;
+		r = region_decode_checked(f->name, region, REGION_BYTES);
+		EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what, f->name);
+	}
+}
+
+static void
+test_flipped_bit_just_past_the_covered_range_is_accepted(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(checksum_fixtures); i++) {
+		const checksum_fixture_t *f = &checksum_fixtures[i];
+		size_t covered = covered_bytes(f->blkszbits);
+		unsigned char region[REGION_BYTES];
+		region_result_t r;
+
+		if (covered == REGION_BYTES)
+			continue;
+		checksum_region_load(f, region);
+		region[covered] ^= 0x01;
+		r = region_decode_checked(f->name, region, REGION_BYTES);
+		EXPECT_STATUS(r.status, FSIMG_OK, r.what, f->name);
+
+		region[covered] ^= 0x01;
+		region[REGION_BYTES - 1] ^= 0x80;
+		r = region_decode_checked(f->name, region, REGION_BYTES);
+		EXPECT_STATUS(r.status, FSIMG_OK, r.what, f->name);
+	}
+}
+
+static void
+test_region_shorter_than_the_covered_range_is_corrupt(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(checksum_fixtures); i++) {
+		const checksum_fixture_t *f = &checksum_fixtures[i];
+		size_t covered = covered_bytes(f->blkszbits);
+		unsigned char region[REGION_BYTES];
+		region_result_t r;
+
+		checksum_region_load(f, region);
+		r = region_decode_checked(f->name, region, covered - 1);
+		EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what, f->name);
+		r = region_decode_checked(f->name, region, covered);
+		EXPECT_STATUS(r.status, FSIMG_OK, r.what, f->name);
+	}
+}
+
+static void
+test_wrong_checksum_without_sb_chksum_is_accepted(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	region_init(region);
+	put_le(region + SB_CHECKSUM, 0xdeadbeef, 4);
+	r = region_decode_checked("wrong_checksum_no_feature", region,
+	    REGION_BYTES);
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "wrong_checksum_no_feature");
+	EXPECT(r.sb.checksum == 0xdeadbeef, "checksum reported as stored");
+
+	put_le(region + SB_COMPAT, EROFS_COMPAT_SB_CHKSUM, 4);
+	r = region_decode_checked("wrong_checksum_with_feature", region,
+	    REGION_BYTES);
+	EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what,
+	    "wrong_checksum_with_feature");
+}
+
+static void
+test_super_checksum_equals_the_independent_crc(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(checksum_fixtures); i++) {
+		const checksum_fixture_t *f = &checksum_fixtures[i];
+		size_t covered = covered_bytes(f->blkszbits);
+		unsigned char region[REGION_BYTES];
+		uint32_t value = 0;
+
+		checksum_region_load(f, region);
+		EXPECT(erofs_super_checksum(region, REGION_BYTES,
+		    f->blkszbits, &value) &&
+		    value == expected_checksum(region, f->blkszbits),
+		    "%s: whole region", f->name);
+
+		value = 0;
+		EXPECT(erofs_super_checksum(region, covered, f->blkszbits,
+		    &value) && value == expected_checksum(region, f->blkszbits),
+		    "%s: region of exactly the covered length", f->name);
+
+		value = 0x12345678;
+		EXPECT(!erofs_super_checksum(region, covered - 1,
+		    f->blkszbits, &value) && value == 0x12345678,
+		    "%s: one byte short is false and leaves the output",
+		    f->name);
+
+		put_le(region + SB_CHECKSUM, 0xa5a5a5a5, 4);
+		EXPECT(erofs_super_checksum(region, REGION_BYTES,
+		    f->blkszbits, &value) &&
+		    value == expected_checksum(region, f->blkszbits),
+		    "%s: the stored field counts as zero", f->name);
+	}
+}
+
+static void
+test_super_checksum_covers_the_range_of_every_block_size(void)
+{
+	unsigned char region[REGION_BYTES];
+	unsigned bits;
+	size_t i;
+
+	for (i = 0; i < sizeof(region); i++)
+		region[i] = (unsigned char)(i * 7 + (i >> 8));
+	for (bits = 9; bits <= 12; bits++) {
+		uint32_t value = 0;
+
+		EXPECT(erofs_super_checksum(region, REGION_BYTES, bits,
+		    &value) && value == expected_checksum(region, bits),
+		    "blkszbits %u", bits);
+	}
+	EXPECT(!erofs_super_checksum(region, 0, 9, &(uint32_t){ 0 }),
+	    "empty region");
+}
+
+static void
+test_super_checksum_refuses_block_sizes_outside_9_to_12(void)
+{
+	static const unsigned bits[] = { 0, 8, 13, 255 };
+	unsigned char region[REGION_BYTES];
+	size_t i;
+
+	bzero(region, sizeof(region));
+	for (i = 0; i < ARRAY_SIZE(bits); i++) {
+		uint32_t value = 0x12345678;
+
+		EXPECT(!erofs_super_checksum(region, REGION_BYTES, bits[i],
+		    &value) && value == 0x12345678,
+		    "blkszbits %u is false and leaves the output", bits[i]);
+	}
+}
+
+/* ---- Compression configuration ---- */
+
+#define LE32(v)	(uint8_t)(v), (uint8_t)((v) >> 8), (uint8_t)((v) >> 16), \
+		    (uint8_t)((v) >> 24)
+
+/* A configured volume: COMPR_CFGS set, the mask in the word at 0x54. */
+static void
+config_region_init(unsigned char *region, unsigned slots, unsigned mask)
+{
+	region_init(region);
+	region[SB_SLOTS] = (unsigned char)slots;
+	put_le(region + SB_INCOMPAT, EROFS_INCOMPAT_COMPR_CFGS, 4);
+	put_le(region + SB_WORD54, mask, 2);
+}
+
+static bool
+config_equal(const erofs_config_t *a, const erofs_config_t *b)
+{
+	return (a->lzma_dict_size == b->lzma_dict_size &&
+	    a->lz4_max_distance == b->lz4_max_distance &&
+	    a->lz4_max_pcluster_blocks == b->lz4_max_pcluster_blocks &&
+	    a->algorithms == b->algorithms &&
+	    a->deflate_window_bits == b->deflate_window_bits &&
+	    a->zstd_window_log == b->zstd_window_log &&
+	    a->reserved_nonzero == b->reserved_nonzero);
+}
+
+/*
+ * One algorithm's record alone, at the first position after a bare
+ * superblock: length word, payload and the decoded result when accepted.
+ */
+typedef struct payload_case {
+	const char	*name;
+	unsigned	 algorithm;
+	uint16_t	 length_word;	/* 0, or left out: the natural length */
+	unsigned char	 payload[14];
+	fsimg_status_t	 status;
+	erofs_config_t	 expect;
+} payload_case_t;
+
+static const payload_case_t payload_cases[] = {
+	{ .name = "lz4_distance_0xffff_and_one_block",
+	    .algorithm = EROFS_ALGORITHM_LZ4,
+	    .payload = { 0xff, 0xff, 0x01, 0x00 }, .status = FSIMG_OK,
+	    .expect = { .algorithms = 1, .lz4_max_distance = 0xffff,
+	    .lz4_max_pcluster_blocks = 1 } },
+	{ .name = "lz4_reserved_byte_nonzero_is_reported",
+	    .algorithm = EROFS_ALGORITHM_LZ4,
+	    .payload = { 0x00, 0x20, 0x04, 0x00, 0x01 }, .status = FSIMG_OK,
+	    .expect = { .algorithms = 1, .lz4_max_distance = 0x2000,
+	    .lz4_max_pcluster_blocks = 4, .reserved_nonzero = true } },
+	{ .name = "lz4_last_reserved_byte_nonzero_is_reported",
+	    .algorithm = EROFS_ALGORITHM_LZ4,
+	    .payload = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80 },
+	    .status = FSIMG_OK,
+	    .expect = { .algorithms = 1, .reserved_nonzero = true } },
+	{ .name = "lz4_payload_length_13_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_LZ4, .length_word = 13,
+	    .payload = { 0 }, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "lz4_payload_length_15_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_LZ4, .length_word = 15,
+	    .payload = { 0 }, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "lzma_dictionary_4095_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_LZMA, .payload = { LE32(4095) },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "lzma_dictionary_4096_is_accepted",
+	    .algorithm = EROFS_ALGORITHM_LZMA, .payload = { LE32(4096) },
+	    .status = FSIMG_OK,
+	    .expect = { .algorithms = 2, .lzma_dict_size = 4096 } },
+	{ .name = "lzma_dictionary_8388608_is_accepted",
+	    .algorithm = EROFS_ALGORITHM_LZMA, .payload = { LE32(8388608) },
+	    .status = FSIMG_OK,
+	    .expect = { .algorithms = 2, .lzma_dict_size = 8388608 } },
+	{ .name = "lzma_dictionary_8388609_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_LZMA, .payload = { LE32(8388609) },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "lzma_dictionary_0_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_LZMA, .payload = { LE32(0) },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "lzma_dictionary_4294967295_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_LZMA, .payload = { LE32(0xffffffffu) },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "lzma_format_1_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_LZMA,
+	    .payload = { LE32(65536), 0x01, 0x00 },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "lzma_reserved_byte_nonzero_is_reported",
+	    .algorithm = EROFS_ALGORITHM_LZMA,
+	    .payload = { LE32(65536), 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	    0x00, 0x40 },
+	    .status = FSIMG_OK,
+	    .expect = { .algorithms = 2, .lzma_dict_size = 65536,
+	    .reserved_nonzero = true } },
+	{ .name = "lzma_payload_length_6_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_LZMA, .length_word = 6,
+	    .payload = { LE32(65536) }, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "deflate_window_bits_15_are_accepted",
+	    .algorithm = EROFS_ALGORITHM_DEFLATE, .payload = { 15 },
+	    .status = FSIMG_OK,
+	    .expect = { .algorithms = 4, .deflate_window_bits = 15 } },
+	{ .name = "deflate_window_bits_7_are_accepted",
+	    .algorithm = EROFS_ALGORITHM_DEFLATE, .payload = { 7 },
+	    .status = FSIMG_OK,
+	    .expect = { .algorithms = 4, .deflate_window_bits = 7 } },
+	{ .name = "deflate_window_bits_16_are_unsupported",
+	    .algorithm = EROFS_ALGORITHM_DEFLATE, .payload = { 16 },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "deflate_window_bits_255_are_unsupported",
+	    .algorithm = EROFS_ALGORITHM_DEFLATE, .payload = { 255 },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "deflate_reserved_byte_nonzero_is_reported",
+	    .algorithm = EROFS_ALGORITHM_DEFLATE,
+	    .payload = { 15, 0, 0, 0, 0, 0x01 }, .status = FSIMG_OK,
+	    .expect = { .algorithms = 4, .deflate_window_bits = 15,
+	    .reserved_nonzero = true } },
+	{ .name = "deflate_payload_length_14_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_DEFLATE, .length_word = 14,
+	    .payload = { 15 }, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "deflate_payload_length_5_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_DEFLATE, .length_word = 5,
+	    .payload = { 15 }, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "zstd_window_field_10_gives_log_20",
+	    .algorithm = EROFS_ALGORITHM_ZSTD, .payload = { 0x00, 10 },
+	    .status = FSIMG_OK,
+	    .expect = { .algorithms = 8, .zstd_window_log = 20 } },
+	{ .name = "zstd_window_field_0_gives_log_10",
+	    .algorithm = EROFS_ALGORITHM_ZSTD, .payload = { 0x00, 0 },
+	    .status = FSIMG_OK,
+	    .expect = { .algorithms = 8, .zstd_window_log = 10 } },
+	{ .name = "zstd_window_field_11_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_ZSTD, .payload = { 0x00, 11 },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "zstd_window_field_255_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_ZSTD, .payload = { 0x00, 255 },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "zstd_format_1_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_ZSTD, .payload = { 0x01, 5 },
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "zstd_reserved_byte_nonzero_is_reported",
+	    .algorithm = EROFS_ALGORITHM_ZSTD,
+	    .payload = { 0x00, 5, 0, 0, 0, 0x02 }, .status = FSIMG_OK,
+	    .expect = { .algorithms = 8, .zstd_window_log = 15,
+	    .reserved_nonzero = true } },
+	{ .name = "zstd_payload_length_7_is_unsupported",
+	    .algorithm = EROFS_ALGORITHM_ZSTD, .length_word = 7,
+	    .payload = { 0x00, 5 }, .status = FSIMG_EUNSUPPORTED },
+};
+
+static void
+test_each_configuration_payload_is_validated_and_decoded(void)
+{
+	static const uint16_t natural_length[EROFS_ALGORITHM_COUNT] =
+	    { 14, 14, 6, 6 };
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(payload_cases); i++) {
+		const payload_case_t *c = &payload_cases[i];
+		unsigned char region[REGION_BYTES];
+		region_result_t r;
+
+		config_region_init(region, 0, 1u << c->algorithm);
+		put_le(region + SUPER_BYTES, c->length_word != 0 ?
+		    c->length_word : natural_length[c->algorithm], 2);
+		bcopy(c->payload, region + SUPER_BYTES + 2,
+		    sizeof(c->payload));
+
+		r = region_decode_checked(c->name, region, REGION_BYTES);
+
+		EXPECT_STATUS(r.status, c->status, r.what, c->name);
+		EXPECT(r.status != FSIMG_OK || c->status != FSIMG_OK ||
+		    config_equal(&r.config, &c->expect),
+		    "%s: decoded fields", c->name);
+	}
+}
+
+/* Distinct values per algorithm, written in the layout of the design. */
+static size_t
+config_records_put(unsigned char *region, size_t offset, unsigned mask,
+    erofs_config_t *expect)
+{
+	bzero(expect, sizeof(*expect));
+	expect->algorithms = (uint8_t)mask;
+	if ((mask & 1u) != 0) {
+		put_le(region + offset, 14, 2);
+		put_le(region + offset + 2, 4096, 2);
+		put_le(region + offset + 4, 16, 2);
+		expect->lz4_max_distance = 4096;
+		expect->lz4_max_pcluster_blocks = 16;
+		offset += 16;
+	}
+	if ((mask & 2u) != 0) {
+		put_le(region + offset, 14, 2);
+		put_le(region + offset + 2, 65536, 4);
+		expect->lzma_dict_size = 65536;
+		offset += 16;
+	}
+	if ((mask & 4u) != 0) {
+		put_le(region + offset, 6, 2);
+		region[offset + 2] = 12;
+		expect->deflate_window_bits = 12;
+		offset += 8;
+	}
+	if ((mask & 8u) != 0) {
+		put_le(region + offset, 6, 2);
+		region[offset + 3] = 7;
+		expect->zstd_window_log = 17;
+		offset += 8;
+	}
+	return (offset);
+}
+
+static void
+test_records_follow_the_slots_in_increasing_algorithm_order(void)
+{
+	static const unsigned masks[] = { 0x1, 0x2, 0x4, 0x8, 0x5, 0xa, 0x6,
+	    0xc, 0xf };
+	static const unsigned slot_counts[] = { 0, 1, 2, 100 };
+	size_t i, j;
+
+	for (i = 0; i < ARRAY_SIZE(masks); i++) {
+		for (j = 0; j < ARRAY_SIZE(slot_counts); j++) {
+			unsigned char region[REGION_BYTES];
+			erofs_config_t expect;
+			region_result_t r;
+			size_t end;
+
+			config_region_init(region, slot_counts[j], masks[i]);
+			end = config_records_put(region, SUPER_BYTES +
+			    16 * slot_counts[j], masks[i], &expect);
+			r = region_decode_checked("records", region, end);
+			EXPECT(r.status == FSIMG_OK &&
+			    config_equal(&r.config, &expect),
+			    "mask 0x%x after %u slots, length %zu", masks[i],
+			    slot_counts[j], end);
+		}
+	}
+}
+
+static void
+test_without_compr_cfgs_the_word_is_lz4_max_distance(void)
+{
+	unsigned char region[REGION_BYTES];
+	erofs_config_t expect;
+	region_result_t r;
+
+	bzero(&expect, sizeof(expect));
+	expect.algorithms = 1;
+	expect.lz4_max_distance = 0x1234;
+	region_init(region);
+	put_le(region + SB_WORD54, 0x1234, 2);
+	memset(region + SUPER_BYTES, 0xee, 32);
+	r = region_decode_checked("no_compr_cfgs", region, REGION_BYTES);
+	EXPECT(r.status == FSIMG_OK && config_equal(&r.config, &expect),
+	    "LZ4 alone with the superblock distance; bytes after are not "
+	    "records");
+
+	put_le(region + SB_WORD54, 0, 2);
+	expect.lz4_max_distance = 0;
+	r = region_decode_checked("no_compr_cfgs_zero", region, REGION_BYTES);
+	EXPECT(r.status == FSIMG_OK && config_equal(&r.config, &expect),
+	    "distance zero");
+}
+
+static void
+test_algorithm_mask_bits_above_3_are_unsupported(void)
+{
+	static const unsigned masks[] = { 0x10, 0x11, 0x1f, 0x100, 0x8000,
+	    0xfff0 };
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(masks); i++) {
+		unsigned char region[REGION_BYTES];
+		region_result_t r;
+
+		config_region_init(region, 0, masks[i]);
+		put_le(region + SUPER_BYTES, 14, 2);
+		r = region_decode_checked("mask", region, REGION_BYTES);
+		EXPECT(r.status == FSIMG_EUNSUPPORTED, "mask 0x%x: %s",
+		    masks[i], status_name(r.status));
+	}
+}
+
+static void
+test_record_past_byte_3072_is_unsupported(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	config_region_init(region, 184, 0x1);
+	r = region_decode_checked("lz4_after_184_slots", region, REGION_BYTES);
+	EXPECT_STATUS(r.status, FSIMG_EUNSUPPORTED, r.what,
+	    "lz4_after_184_slots");
+
+	config_region_init(region, 183, 0x1);
+	put_le(region + SUPER_BYTES + 16 * 183, 14, 2);
+	r = region_decode_checked("lz4_ending_at_3072", region, REGION_BYTES);
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "lz4_ending_at_3072");
+
+	config_region_init(region, 183, 0x3);
+	put_le(region + SUPER_BYTES + 16 * 183, 14, 2);
+	r = region_decode_checked("second_record_at_3072", region,
+	    REGION_BYTES);
+	EXPECT_STATUS(r.status, FSIMG_EUNSUPPORTED, r.what,
+	    "second_record_at_3072");
+
+	config_region_init(region, 183, 0x1);
+	put_le(region + SUPER_BYTES + 16 * 183, 14, 2);
+	r = region_decode_checked("record_fits_region_not_length", region,
+	    REGION_BYTES - 1);
+	EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what,
+	    "record_fits_region_not_length");
+}
+
+static void
+test_record_past_a_shorter_length_is_corrupt(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	config_region_init(region, 2, 0x1);
+	put_le(region + SUPER_BYTES + 32, 14, 2);
+	r = region_decode_checked("length_word_cut", region, 161);
+	EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what, "length_word_cut");
+	r = region_decode_checked("payload_cut", region, 175);
+	EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what, "payload_cut");
+	r = region_decode_checked("record_exact", region, 176);
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "record_exact");
+}
+
+/* e9-config-four: image bytes [1024, 1216), superblock and its four records */
+static const unsigned char config_four_bytes[] = {
+	/* image offset 1024, 17 bytes */
+	0xe2, 0xe1, 0xf5, 0xe0, 0x28, 0xc9, 0xd5, 0x2e, 0x03, 0x00,
+	0x00, 0x00, 0x0c, 0x00, 0x26, 0x00, 0x51,
+	/* image offset 1060, 28 bytes */
+	0x6e, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33,
+	0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+	/* image offset 1104, 5 bytes */
+	0x03, 0x00, 0x00, 0x00, 0x0f,
+	/* image offset 1152, 20 bytes */
+	0x0e, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x80,
+	/* image offset 1184, 12 bytes */
+	0x06, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00,
+	0x00, 0x05,
+};
+static const fixture_run_t config_four_runs[] = {
+	{ 1024, 0, 17 },
+	{ 1060, 17, 28 },
+	{ 1104, 45, 5 },
+	{ 1152, 50, 20 },
+	{ 1184, 70, 12 },
+};
+
+/* The four records of mkfs.erofs 1.9.4 as written by e9-config-four. */
+static void
+test_real_four_record_configuration_decodes(void)
+{
+	static const fixture_t fixture = FIXTURE(config_four, 1024);
+	unsigned char region[REGION_BYTES];
+	erofs_config_t expect = { .algorithms = 0x0f,
+	    .lz4_max_distance = 0xffff, .lz4_max_pcluster_blocks = 1,
+	    .lzma_dict_size = 32768, .deflate_window_bits = 15,
+	    .zstd_window_log = 15 };
+	region_result_t r;
+
+	fixture_load(&fixture, region, REGION_BYTES);
+	/*
+	 * The fragment carries the superblock and its records, not the whole
+	 * 3072-byte region its checksum covers, so the feature is cleared.
+	 */
+	region[SB_COMPAT] &= (unsigned char)~EROFS_COMPAT_SB_CHKSUM;
+
+	r = region_decode_checked("e9-config-four", region, REGION_BYTES);
+
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "e9-config-four");
+	EXPECT(r.sb.compression_word == 0x0f, "algorithm mask 0x0f");
+	EXPECT(config_equal(&r.config, &expect), "four records' fields");
+	EXPECT(!r.config.reserved_nonzero, "records' reserved bytes zero");
+}
+
+/* ---- Inodes ---- */
+
+/* Inode field offsets from the design's tables. */
+enum {
+	I_FORMAT = 0x00,
+	I_XATTR_COUNT = 0x02,
+	I_MODE = 0x04,
+	I_LAYOUT_WORD = 0x10,
+	I_SERIAL = 0x14,
+	IC_NLINK = 0x06,
+	IC_SIZE = 0x08,
+	IC_TIME = 0x0c,
+	IC_UID = 0x18,
+	IC_GID = 0x1a,
+	IC_RESERVED = 0x1c,
+	IX_HIGH = 0x06,
+	IX_SIZE = 0x08,
+	IX_UID = 0x18,
+	IX_GID = 0x1c,
+	IX_TIME = 0x20,
+	IX_NSEC = 0x28,
+	IX_NLINK = 0x2c,
+	IX_RESERVED = 0x30
+};
+
+/* Format word: bit 0 extended, bits 1 to 3 layout, bit 4 48-bit only. */
+#define FORMAT_EXTENDED		0x0001u
+#define FORMAT_BIT4		0x0010u
+#define FORMAT(layout)		((unsigned)(layout) << 1)
+
+/* Mode type bits, as in POSIX, plus rw-r--r--. */
+#define MODE_FIFO		0x1000u
+#define MODE_CHAR		0x2000u
+#define MODE_DIRECTORY		0x4000u
+#define MODE_BLOCK		0x6000u
+#define MODE_REGULAR		0x8000u
+#define MODE_SYMLINK		0xa000u
+#define MODE_SOCKET		0xc000u
+#define PERMISSIONS_644		0x1a4u
+
+enum { INODE_BUFFER_BYTES = 128 };
+
+/*
+ * A regular file, flat, 10 bytes, layout word 7, link count 1, with the
+ * time word, owner and serial number set to recognisable values.
+ */
+static void
+inode_init(unsigned char *raw, bool extended)
+{
+	bzero(raw, INODE_BUFFER_BYTES);
+	put_le(raw + I_FORMAT, extended ? FORMAT_EXTENDED : 0, 2);
+	put_le(raw + I_MODE, MODE_REGULAR | PERMISSIONS_644, 2);
+	put_le(raw + I_LAYOUT_WORD, 7, 4);
+	if (extended) {
+		put_le(raw + IX_SIZE, 10, 8);
+		put_le(raw + IX_NLINK, 1, 4);
+	} else {
+		put_le(raw + IC_SIZE, 10, 4);
+		put_le(raw + IC_NLINK, 1, 2);
+	}
+}
+
+static erofs_super_t
+super_for_inodes(unsigned blkszbits, uint32_t incompat, int64_t epoch,
+    uint32_t nsec)
+{
+	erofs_super_t sb;
+
+	bzero(&sb, sizeof(sb));
+	sb.blkszbits = (uint8_t)blkszbits;
+	sb.incompat = incompat;
+	sb.epoch = epoch;
+	sb.epoch_nsec = nsec;
+	return (sb);
+}
+
+typedef struct inode_result {
+	fsimg_status_t	 status;
+	const char	*what;
+	erofs_inode_t	 inode;
+} inode_result_t;
+
+static inode_result_t
+inode_decode_checked(const char *name, const unsigned char *raw,
+    size_t length, const erofs_super_t *sb)
+{
+	inode_result_t r;
+	erofs_inode_t before;
+
+	r.what = NULL;
+	memset(&r.inode, SENTINEL, sizeof(r.inode));
+	before = r.inode;
+	r.status = erofs_inode_decode(raw, length, sb, &r.inode, &r.what);
+	if (r.status != FSIMG_OK) {
+		EXPECT(bcmp(&r.inode, &before, sizeof(before)) == 0,
+		    "%s: failure leaves the output untouched", name);
+		/* A sentinel is not a valid bool/enum; nobody may read it. */
+		bzero(&r.inode, sizeof(r.inode));
+	}
+	return (r);
+}
+
+typedef struct inode_case {
+	const char	*name;
+	bool		 extended;
+	unsigned	 blkszbits;	/* 0: 12 */
+	uint32_t	 incompat;
+	int64_t		 epoch;
+	size_t		 length;	/* 0: the fixed part */
+	patch_t		 patches[MAX_PATCHES];
+	fsimg_status_t	 status;
+	uint64_t	 body_bytes;	/* 0: not checked */
+	uint64_t	 layout_offset;	/* 0: not checked */
+} inode_case_t;
+
+#define CHUNKED		EROFS_INCOMPAT_CHUNKED_FILE
+#define WIDE		EROFS_INCOMPAT_48BIT
+#define FORMAT_FIELD(value)	{ I_FORMAT, 2, (value) }
+#define MODE_FIELD(value)	{ I_MODE, 2, (value) }
+#define XATTR_FIELD(value)	{ I_XATTR_COUNT, 2, (value) }
+#define LAYOUT_FIELD(value)	{ I_LAYOUT_WORD, 4, (value) }
+#define C_SIZE(value)		{ IC_SIZE, 4, (value) }
+#define X_SIZE(value)		{ IX_SIZE, 8, (value) }
+
+static const inode_case_t inode_cases[] = {
+	/* Truncation */
+	{ .name = "compact_length_31_is_corrupt", .length = 31,
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "compact_length_32_is_accepted", .length = 32,
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "extended_length_63_is_corrupt", .extended = true,
+	    .length = 63, .status = FSIMG_ECORRUPT },
+	{ .name = "extended_length_64_is_accepted", .extended = true,
+	    .length = 64, .status = FSIMG_OK, .body_bytes = 64,
+	    .layout_offset = 64 },
+	{ .name = "length_1_is_corrupt", .length = 1,
+	    .status = FSIMG_ECORRUPT },
+
+	/* Format word */
+	{ .name = "compact_bit_4_without_48bit_is_corrupt",
+	    .patches = {FORMAT_FIELD(FORMAT_BIT4)}, .status = FSIMG_ECORRUPT },
+	{ .name = "extended_bit_4_without_48bit_is_corrupt",
+	    .extended = true,
+	    .patches = {FORMAT_FIELD(FORMAT_EXTENDED | FORMAT_BIT4)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "layout_5_is_corrupt",
+	    .patches = {FORMAT_FIELD(FORMAT(5))}, .status = FSIMG_ECORRUPT },
+	{ .name = "layout_6_is_corrupt",
+	    .patches = {FORMAT_FIELD(FORMAT(6))}, .status = FSIMG_ECORRUPT },
+	{ .name = "layout_7_is_corrupt",
+	    .patches = {FORMAT_FIELD(FORMAT(7))}, .status = FSIMG_ECORRUPT },
+	{ .name = "layout_1_is_unsupported",
+	    .patches = {FORMAT_FIELD(FORMAT(1))},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "layout_3_is_unsupported",
+	    .patches = {FORMAT_FIELD(FORMAT(3))},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "extended_layout_1_is_unsupported", .extended = true,
+	    .patches = {FORMAT_FIELD(FORMAT(1) | FORMAT_EXTENDED)},
+	    .status = FSIMG_EUNSUPPORTED },
+
+	/* Attribute region sizes */
+	{ .name = "attribute_count_0_is_no_region",
+	    .patches = {XATTR_FIELD(0)}, .status = FSIMG_OK,
+	    .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "attribute_count_1_is_a_12_byte_region",
+	    .patches = {XATTR_FIELD(1)}, .status = FSIMG_OK,
+	    .body_bytes = 32 + 12, .layout_offset = 32 + 12 },
+	{ .name = "attribute_count_2_is_a_16_byte_region",
+	    .patches = {XATTR_FIELD(2)}, .status = FSIMG_OK,
+	    .body_bytes = 32 + 16, .layout_offset = 32 + 16 },
+	{ .name = "attribute_count_65535_is_the_largest_region",
+	    .extended = true, .patches = {XATTR_FIELD(65535)},
+	    .status = FSIMG_OK, .body_bytes = 64 + 12 + 4 * 65534,
+	    .layout_offset = 64 + 12 + 4 * 65534 },
+
+	/* Kinds and their rules */
+	{ .name = "directory_of_size_0_is_corrupt",
+	    .patches = {MODE_FIELD(MODE_DIRECTORY | 0755), C_SIZE(0)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "directory_of_size_1_is_accepted",
+	    .patches = {MODE_FIELD(MODE_DIRECTORY | 0755), C_SIZE(1)},
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "symlink_of_size_0_is_corrupt",
+	    .patches = {MODE_FIELD(MODE_SYMLINK | 0777), C_SIZE(0)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "symlink_of_size_1024_is_accepted",
+	    .patches = {MODE_FIELD(MODE_SYMLINK | 0777), C_SIZE(1024)},
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "symlink_of_size_1025_is_unsupported",
+	    .patches = {MODE_FIELD(MODE_SYMLINK | 0777), C_SIZE(1025)},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "extended_symlink_of_size_1025_is_unsupported",
+	    .extended = true,
+	    .patches = {MODE_FIELD(MODE_SYMLINK | 0777), X_SIZE(1025)},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "fifo_of_size_0_is_accepted",
+	    .patches = {MODE_FIELD(MODE_FIFO | 0644), C_SIZE(0),
+	    LAYOUT_FIELD(0)},
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "fifo_with_layout_word_is_corrupt",
+	    .patches = {MODE_FIELD(MODE_FIFO | 0644), C_SIZE(0),
+	    LAYOUT_FIELD(1)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "fifo_with_inline_layout_is_corrupt",
+	    .patches = {MODE_FIELD(MODE_FIFO | 0644), C_SIZE(0),
+	    LAYOUT_FIELD(0),
+	    FORMAT_FIELD(FORMAT(2))},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "fifo_with_size_is_corrupt",
+	    .patches = {MODE_FIELD(MODE_FIFO | 0644), C_SIZE(1),
+	    LAYOUT_FIELD(0)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "socket_with_layout_word_is_corrupt", .extended = true,
+	    .patches = {MODE_FIELD(MODE_SOCKET | 0644), X_SIZE(0),
+	    LAYOUT_FIELD(0xffffffff)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "socket_of_size_0_is_accepted", .extended = true,
+	    .patches = {MODE_FIELD(MODE_SOCKET | 0644), X_SIZE(0),
+	    LAYOUT_FIELD(0)},
+	    .status = FSIMG_OK, .body_bytes = 64, .layout_offset = 64 },
+	{ .name = "socket_with_size_is_corrupt", .extended = true,
+	    .patches = {MODE_FIELD(MODE_SOCKET | 0644), X_SIZE(5),
+	    LAYOUT_FIELD(0)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "char_device_with_any_layout_word_is_accepted",
+	    .patches = {MODE_FIELD(MODE_CHAR | 0600), C_SIZE(0),
+	    LAYOUT_FIELD(0xffffffff)},
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "block_device_with_layout_word_0_is_accepted",
+	    .patches = {MODE_FIELD(MODE_BLOCK | 0600), C_SIZE(0),
+	    LAYOUT_FIELD(0)},
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "char_device_with_size_is_corrupt",
+	    .patches = {MODE_FIELD(MODE_CHAR | 0600), C_SIZE(1),
+	    LAYOUT_FIELD(0x0801)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "block_device_with_inline_layout_is_corrupt",
+	    .patches = {MODE_FIELD(MODE_BLOCK | 0600), C_SIZE(0),
+	    LAYOUT_FIELD(0x0801),
+	    FORMAT_FIELD(FORMAT(2))},
+	    .status = FSIMG_ECORRUPT },
+
+	/* Times */
+	{ .name = "compact_time_overflow_is_corrupt",
+	    .epoch = INT64_MAX - 0xfffffffe,
+	    .patches = {{ IC_TIME, 4, 0xffffffff }}, .status = FSIMG_ECORRUPT },
+	{ .name = "compact_time_reaching_int64_max_is_accepted",
+	    .epoch = INT64_MAX - 0xffffffff,
+	    .patches = {{ IC_TIME, 4, 0xffffffff }}, .status = FSIMG_OK,
+	    .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "compact_reserved_word_nonzero_is_corrupt",
+	    .patches = {{ IC_RESERVED, 4, 1 }}, .status = FSIMG_ECORRUPT },
+	{ .name = "compact_reserved_high_byte_nonzero_is_corrupt",
+	    .patches = {{ IC_RESERVED + 3, 1, 0x80 }},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "extended_nanoseconds_999999999_are_accepted",
+	    .extended = true, .patches = {{ IX_NSEC, 4, 999999999 }},
+	    .status = FSIMG_OK, .body_bytes = 64, .layout_offset = 64 },
+	{ .name = "extended_nanoseconds_1000000000_are_corrupt",
+	    .extended = true, .patches = {{ IX_NSEC, 4, 1000000000 }},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "extended_high_word_without_48bit_is_corrupt",
+	    .extended = true, .patches = {{ IX_HIGH, 2, 1 }},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "extended_high_word_under_48bit_is_accepted",
+	    .extended = true, .incompat = WIDE,
+	    .patches = {{ IX_HIGH, 2, 1 }}, .status = FSIMG_OK,
+	    .body_bytes = 64, .layout_offset = 64 },
+
+	/* 48-bit format bit 4 */
+	{ .name = "compact_file_with_bit_4_under_48bit_is_accepted",
+	    .incompat = WIDE, .patches = {FORMAT_FIELD(FORMAT_BIT4)},
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "compact_directory_with_bit_4_under_48bit_is_accepted",
+	    .incompat = WIDE,
+	    .patches = {FORMAT_FIELD(FORMAT_BIT4),
+	    MODE_FIELD(MODE_DIRECTORY | 0755), C_SIZE(24)},
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "extended_file_with_bit_4_is_unsupported",
+	    .extended = true, .incompat = WIDE,
+	    .patches = {FORMAT_FIELD(FORMAT_EXTENDED | FORMAT_BIT4)},
+	    .status = FSIMG_EUNSUPPORTED },
+	{ .name = "extended_directory_with_bit_4_under_48bit_is_accepted",
+	    .extended = true, .incompat = WIDE,
+	    .patches = {FORMAT_FIELD(FORMAT_EXTENDED | FORMAT_BIT4),
+	    MODE_FIELD(MODE_DIRECTORY | 0755), X_SIZE(24)},
+	    .status = FSIMG_OK, .body_bytes = 64, .layout_offset = 64 },
+
+	/* Flat-inline tails */
+	{ .name = "inline_size_4096_at_4096_is_corrupt", .blkszbits = 12,
+	    .patches = {FORMAT_FIELD(FORMAT(2)), C_SIZE(4096)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "inline_size_8192_at_4096_is_corrupt", .blkszbits = 12,
+	    .patches = {FORMAT_FIELD(FORMAT(2)), C_SIZE(8192)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "extended_inline_size_512_at_512_is_corrupt",
+	    .extended = true, .blkszbits = 9,
+	    .patches = {FORMAT_FIELD(FORMAT(2) | FORMAT_EXTENDED), X_SIZE(512)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "inline_size_0_is_accepted", .blkszbits = 12,
+	    .patches = {FORMAT_FIELD(FORMAT(2)), C_SIZE(0)},
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "inline_size_5000_at_4096_has_a_904_byte_tail",
+	    .blkszbits = 12,
+	    .patches = {FORMAT_FIELD(FORMAT(2)), C_SIZE(5000)},
+	    .status = FSIMG_OK, .body_bytes = 32 + 904, .layout_offset = 32 },
+	{ .name = "inline_size_513_at_512_has_a_1_byte_tail", .blkszbits = 9,
+	    .patches = {FORMAT_FIELD(FORMAT(2)), C_SIZE(513)},
+	    .status = FSIMG_OK, .body_bytes = 32 + 1, .layout_offset = 32 },
+	{ .name = "extended_inline_tail_follows_the_attribute_region",
+	    .extended = true, .blkszbits = 12,
+	    .patches = {FORMAT_FIELD(FORMAT(2) | FORMAT_EXTENDED),
+	    XATTR_FIELD(3),
+	    X_SIZE(100)},
+	    .status = FSIMG_OK, .body_bytes = 64 + 20 + 100,
+	    .layout_offset = 84 },
+	{ .name = "flat_size_4096_is_accepted_without_a_tail",
+	    .blkszbits = 12, .patches = {C_SIZE(4096)}, .status = FSIMG_OK,
+	    .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "flat_body_is_fixed_part_and_attribute_region",
+	    .extended = true, .blkszbits = 12,
+	    .patches = {XATTR_FIELD(3), X_SIZE(100000)}, .status = FSIMG_OK,
+	    .body_bytes = 64 + 20, .layout_offset = 64 + 20 },
+
+	/* Chunk-based bodies */
+	{ .name = "chunk_based_without_chunked_file_is_corrupt",
+	    .blkszbits = 12,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), LAYOUT_FIELD(0), C_SIZE(4096)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "chunk_4_byte_entries_one_per_block_chunk",
+	    .blkszbits = 12, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), LAYOUT_FIELD(0),
+	    C_SIZE(3 * 4096 + 1)},
+	    .status = FSIMG_OK, .body_bytes = 32 + 4 * 4, .layout_offset = 32 },
+	{ .name = "chunk_exact_multiple_has_no_partial_chunk",
+	    .blkszbits = 12, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), LAYOUT_FIELD(0),
+	    C_SIZE(2 * 4096)},
+	    .status = FSIMG_OK, .body_bytes = 32 + 4 * 2, .layout_offset = 32 },
+	{ .name = "chunk_bits_1_doubles_the_chunk", .blkszbits = 12,
+	    .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), LAYOUT_FIELD(1),
+	    C_SIZE(3 * 4096 + 1)},
+	    .status = FSIMG_OK, .body_bytes = 32 + 4 * 2, .layout_offset = 32 },
+	{ .name = "chunk_layout_word_high_half_is_ignored", .blkszbits = 12,
+	    .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), LAYOUT_FIELD(0xabcd0001),
+	    C_SIZE(3 * 4096 + 1)},
+	    .status = FSIMG_OK, .body_bytes = 32 + 4 * 2, .layout_offset = 32 },
+	{ .name = "chunk_8_byte_entries_after_a_16_byte_region_are_aligned",
+	    .blkszbits = 12, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), XATTR_FIELD(2),
+	    LAYOUT_FIELD(0x20), C_SIZE(4097)}, .status = FSIMG_OK,
+	    .body_bytes = 48 + 8 * 2, .layout_offset = 48 },
+	{ .name = "chunk_8_byte_entries_after_a_20_byte_region_round_up",
+	    .blkszbits = 12, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), XATTR_FIELD(3),
+	    LAYOUT_FIELD(0x20), C_SIZE(4097)}, .status = FSIMG_OK,
+	    .body_bytes = 56 + 8 * 2, .layout_offset = 56 },
+	{ .name = "chunk_4_byte_entries_after_a_20_byte_region_do_not_round",
+	    .blkszbits = 12, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), XATTR_FIELD(3),
+	    LAYOUT_FIELD(0), C_SIZE(4097)}, .status = FSIMG_OK,
+	    .body_bytes = 52 + 4 * 2, .layout_offset = 52 },
+	{ .name = "chunk_size_0_has_no_entries", .blkszbits = 12,
+	    .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), LAYOUT_FIELD(0), C_SIZE(0)},
+	    .status = FSIMG_OK, .body_bytes = 32, .layout_offset = 32 },
+	{ .name = "chunk_8_byte_entries_align_the_index_to_8",
+	    .blkszbits = 12, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), XATTR_FIELD(1),
+	    LAYOUT_FIELD(0x20),
+	    C_SIZE(4097)},
+	    .status = FSIMG_OK, .body_bytes = 48 + 8 * 2, .layout_offset = 48 },
+	{ .name = "extended_chunk_8_byte_entries_align_the_index_to_8",
+	    .extended = true, .blkszbits = 12, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4) | FORMAT_EXTENDED),
+	    XATTR_FIELD(1), LAYOUT_FIELD(0x20), X_SIZE(4096)},
+	    .status = FSIMG_OK, .body_bytes = 80 + 8, .layout_offset = 80 },
+	{ .name = "extended_chunk_4_byte_entries_follow_the_region",
+	    .extended = true, .blkszbits = 12, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4) | FORMAT_EXTENDED),
+	    XATTR_FIELD(2),
+	    LAYOUT_FIELD(0), X_SIZE(3 * 4096)},
+	    .status = FSIMG_OK, .body_bytes = 80 + 4 * 3, .layout_offset = 80 },
+	{ .name = "chunk_index_of_the_largest_file_does_not_overflow",
+	    .extended = true, .blkszbits = 9, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4) | FORMAT_EXTENDED),
+	    LAYOUT_FIELD(0),
+	    X_SIZE((UINT64_C(1) << 47) - 1)},
+	    .status = FSIMG_OK, .body_bytes = 64 + 4 * (UINT64_C(1) << 38),
+	    .layout_offset = 64 },
+	{ .name = "chunk_format_bit_7_is_corrupt", .blkszbits = 12,
+	    .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), LAYOUT_FIELD(0x80)},
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "chunk_format_bit_6_without_48bit_is_corrupt",
+	    .blkszbits = 12, .incompat = CHUNKED,
+	    .patches = {FORMAT_FIELD(FORMAT(4)), LAYOUT_FIELD(0x60)},
+	    .status = FSIMG_ECORRUPT },
+};
+
+static void
+test_inode_decode_classifies_each_case(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(inode_cases); i++) {
+		const inode_case_t *c = &inode_cases[i];
+		unsigned char raw[INODE_BUFFER_BYTES];
+		erofs_super_t sb = super_for_inodes(c->blkszbits != 0 ?
+		    c->blkszbits : 12, c->incompat, c->epoch, 0);
+		size_t fixed = c->extended ? 64 : 32;
+		inode_result_t r;
+
+		inode_init(raw, c->extended);
+		patch_apply(raw, c->patches);
+		r = inode_decode_checked(c->name, raw,
+		    c->length != 0 ? c->length : fixed, &sb);
+
+		EXPECT_STATUS(r.status, c->status, r.what, c->name);
+		if (r.status != FSIMG_OK)
+			continue;
+		EXPECT(c->body_bytes == 0 ||
+		    r.inode.body_bytes == c->body_bytes,
+		    "%s: body_bytes %llu, expected %llu", c->name,
+		    (unsigned long long)r.inode.body_bytes,
+		    (unsigned long long)c->body_bytes);
+		EXPECT(c->layout_offset == 0 ||
+		    r.inode.layout_offset == c->layout_offset,
+		    "%s: layout_offset %llu, expected %llu", c->name,
+		    (unsigned long long)r.inode.layout_offset,
+		    (unsigned long long)c->layout_offset);
+	}
+}
+
+static void
+test_inode_of_length_0_is_corrupt(void)
+{
+	unsigned char raw[INODE_BUFFER_BYTES];
+	erofs_super_t sb = super_for_inodes(12, 0, 0, 0);
+	inode_result_t r;
+
+	inode_init(raw, false);
+	r = inode_decode_checked("length_0", raw, 0, &sb);
+	EXPECT_STATUS(r.status, FSIMG_ECORRUPT, r.what, "length_0");
+}
+
+static void
+test_fixed_bytes_follow_format_bit_0_only(void)
+{
+	static const uint16_t formats[] = { 0x0000, 0x0002, 0x0008, 0x0010,
+	    0x0e00, 0xfffe, 0x0001, 0x0003, 0x0009, 0xffff };
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(formats); i++) {
+		unsigned char raw[2];
+
+		put_le(raw, formats[i], 2);
+		EXPECT(erofs_inode_fixed_bytes(raw) ==
+		    ((formats[i] & 1) != 0 ? 64u : 32u), "format 0x%04x",
+		    (unsigned)formats[i]);
+	}
+}
+
+static void
+test_format_bits_5_to_15_are_each_corrupt(void)
+{
+	unsigned bit;
+
+	for (bit = 5; bit < 16; bit++) {
+		unsigned char raw[INODE_BUFFER_BYTES];
+		erofs_super_t sb = super_for_inodes(12, WIDE | CHUNKED, 0, 0);
+		inode_result_t r;
+		int extended;
+
+		for (extended = 0; extended < 2; extended++) {
+			inode_init(raw, extended != 0);
+			put_le(raw + I_FORMAT, (uint64_t)extended |
+			    (UINT64_C(1) << bit), 2);
+			r = inode_decode_checked("format_bit", raw,
+			    extended != 0 ? 64 : 32, &sb);
+			EXPECT(r.status == FSIMG_ECORRUPT,
+			    "format bit %u, extended=%d: %s", bit, extended,
+			    status_name(r.status));
+		}
+	}
+}
+
+static void
+test_each_mode_type_selects_its_kind(void)
+{
+	static const struct {
+		unsigned		 type;
+		fsimg_entry_kind_t	 kind;
+		uint64_t		 size;
+	} kinds[] = {
+		{ MODE_REGULAR, FSIMG_ENTRY_FILE, 10 },
+		{ MODE_DIRECTORY, FSIMG_ENTRY_DIRECTORY, 10 },
+		{ MODE_SYMLINK, FSIMG_ENTRY_SYMLINK, 10 },
+		{ MODE_FIFO, FSIMG_ENTRY_FIFO, 0 },
+		{ MODE_CHAR, FSIMG_ENTRY_CHAR_DEVICE, 0 },
+		{ MODE_BLOCK, FSIMG_ENTRY_BLOCK_DEVICE, 0 },
+		{ MODE_SOCKET, FSIMG_ENTRY_SOCKET, 0 },
+	};
+	size_t i;
+	int extended;
+
+	for (extended = 0; extended < 2; extended++) {
+		for (i = 0; i < ARRAY_SIZE(kinds); i++) {
+			unsigned char raw[INODE_BUFFER_BYTES];
+			erofs_super_t sb = super_for_inodes(12, 0, 0, 0);
+			inode_result_t r;
+
+			inode_init(raw, extended != 0);
+			put_le(raw + I_MODE, kinds[i].type | 0644, 2);
+			put_le(raw + (extended != 0 ? IX_SIZE : IC_SIZE),
+			    kinds[i].size, extended != 0 ? 8 : 4);
+			put_le(raw + I_LAYOUT_WORD, 0, 4);
+			r = inode_decode_checked("kind", raw,
+			    extended != 0 ? 64 : 32, &sb);
+			EXPECT(r.status == FSIMG_OK && r.inode.kind ==
+			    kinds[i].kind, "mode type 0x%x, extended=%d",
+			    kinds[i].type, extended);
+		}
+	}
+}
+
+static void
+test_other_mode_types_are_corrupt(void)
+{
+	static const unsigned types[] = { 0x0000, 0x3000, 0x5000, 0x7000,
+	    0x9000, 0xb000, 0xd000, 0xe000, 0xf000 };
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(types); i++) {
+		unsigned char raw[INODE_BUFFER_BYTES];
+		erofs_super_t sb = super_for_inodes(12, 0, 0, 0);
+		inode_result_t r;
+
+		inode_init(raw, false);
+		put_le(raw + I_MODE, types[i] | 0644, 2);
+		r = inode_decode_checked("bad_type", raw, 32, &sb);
+		EXPECT(r.status == FSIMG_ECORRUPT, "mode type 0x%x: %s",
+		    types[i], status_name(r.status));
+	}
+}
+
+static void
+test_permissions_are_the_low_12_bits_of_the_mode(void)
+{
+	unsigned char raw[INODE_BUFFER_BYTES];
+	erofs_super_t sb = super_for_inodes(12, 0, 0, 0);
+	inode_result_t r;
+
+	inode_init(raw, false);
+	put_le(raw + I_MODE, MODE_REGULAR | 0xfff, 2);
+	r = inode_decode_checked("perm_fff", raw, 32, &sb);
+	EXPECT(r.status == FSIMG_OK && r.inode.permissions == 0xfff,
+	    "setuid, setgid, sticky and rwx for all");
+
+	put_le(raw + I_MODE, MODE_REGULAR | 0755, 2);
+	r = inode_decode_checked("perm_755", raw, 32, &sb);
+	EXPECT(r.status == FSIMG_OK && r.inode.permissions == 0755,
+	    "rwxr-xr-x");
+}
+
+static void
+test_compact_inode_fields_are_decoded(void)
+{
+	unsigned char raw[INODE_BUFFER_BYTES];
+	erofs_super_t sb = super_for_inodes(12, 0, 1000, 123456789);
+	inode_result_t r;
+
+	inode_init(raw, false);
+	put_le(raw + IC_NLINK, 0xfffe, 2);
+	put_le(raw + IC_SIZE, 0xfedcba98, 4);
+	put_le(raw + IC_TIME, 5, 4);
+	put_le(raw + I_LAYOUT_WORD, 0x01020304, 4);
+	put_le(raw + I_SERIAL, 0x11223344, 4);
+	put_le(raw + IC_UID, 0xabcd, 2);
+	put_le(raw + IC_GID, 0xef01, 2);
+
+	r = inode_decode_checked("compact_fields", raw, 32, &sb);
+
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "compact_fields");
+	EXPECT(!r.inode.extended && r.inode.fixed_bytes == 32,
+	    "compact, 32 bytes");
+	EXPECT(r.inode.layout == EROFS_LAYOUT_FLAT, "flat layout");
+	EXPECT(r.inode.nlink == 0xfffe, "16-bit link count");
+	EXPECT(r.inode.size == 0xfedcba98, "32-bit size");
+	EXPECT(r.inode.time == 1005, "time is the epoch plus the word");
+	EXPECT(r.inode.time_nsec == 123456789, "superblock nanoseconds");
+	EXPECT(r.inode.layout_word == 0x01020304, "layout word");
+	EXPECT(r.inode.serial == 0x11223344, "serial number");
+	EXPECT(r.inode.uid == 0xabcd, "16-bit uid");
+	EXPECT(r.inode.gid == 0xef01, "16-bit gid");
+	EXPECT(r.inode.xattr_bytes == 0, "no attribute region");
+	EXPECT(r.inode.layout_high == 0, "no high start-block bits");
+	EXPECT(!r.inode.omits_dot, "dot not omitted");
+}
+
+static void
+test_compact_time_is_epoch_plus_the_unsigned_word(void)
+{
+	unsigned char raw[INODE_BUFFER_BYTES];
+	inode_result_t r;
+	erofs_super_t sb;
+
+	inode_init(raw, false);
+	put_le(raw + IC_TIME, 0xffffffff, 4);
+
+	sb = super_for_inodes(12, 0, -1, 0);
+	r = inode_decode_checked("negative_epoch", raw, 32, &sb);
+	EXPECT(r.status == FSIMG_OK && r.inode.time == 0xfffffffe,
+	    "epoch -1 plus 0xffffffff");
+
+	sb = super_for_inodes(12, 0, -INT64_C(5000000000), 0);
+	r = inode_decode_checked("very_negative_epoch", raw, 32, &sb);
+	EXPECT(r.status == FSIMG_OK &&
+	    r.inode.time == -INT64_C(5000000000) + 0xffffffff,
+	    "epoch -5e9 plus 0xffffffff");
+
+	sb = super_for_inodes(12, WIDE, 0, 0);
+	r = inode_decode_checked("48bit_time", raw, 32, &sb);
+	EXPECT(r.status == FSIMG_OK && r.inode.time == 0xffffffff,
+	    "the word is a time under the 48-bit layout too");
+
+	sb = super_for_inodes(12, 0, INT64_MIN, 0);
+	put_le(raw + IC_TIME, 0, 4);
+	r = inode_decode_checked("min_epoch", raw, 32, &sb);
+	EXPECT(r.status == FSIMG_OK && r.inode.time == INT64_MIN,
+	    "epoch INT64_MIN plus 0");
+}
+
+static void
+test_extended_inode_fields_are_decoded(void)
+{
+	unsigned char raw[INODE_BUFFER_BYTES];
+	erofs_super_t sb = super_for_inodes(12, 0, 1000, 999);
+	inode_result_t r;
+
+	inode_init(raw, true);
+	put_le(raw + I_XATTR_COUNT, 3, 2);
+	put_le(raw + IX_SIZE, UINT64_C(0x00001234567890ab), 8);
+	put_le(raw + I_LAYOUT_WORD, 0x01020304, 4);
+	put_le(raw + I_SERIAL, 0x55667788, 4);
+	put_le(raw + IX_UID, 0xdeadbeef, 4);
+	put_le(raw + IX_GID, 0xcafef00d, 4);
+	put_le(raw + IX_TIME, (uint64_t)-123456789, 8);
+	put_le(raw + IX_NSEC, 987654321, 4);
+	put_le(raw + IX_NLINK, 0x01000001, 4);
+
+	r = inode_decode_checked("extended_fields", raw, 64, &sb);
+
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "extended_fields");
+	EXPECT(r.inode.extended && r.inode.fixed_bytes == 64,
+	    "extended, 64 bytes");
+	EXPECT(r.inode.xattr_bytes == 20, "attribute count 3 is 20 bytes");
+	EXPECT(r.inode.size == UINT64_C(0x00001234567890ab), "64-bit size");
+	EXPECT(r.inode.layout_word == 0x01020304, "layout word");
+	EXPECT(r.inode.serial == 0x55667788, "serial number");
+	EXPECT(r.inode.uid == 0xdeadbeef, "32-bit uid");
+	EXPECT(r.inode.gid == 0xcafef00d, "32-bit gid");
+	EXPECT(r.inode.time == -123456789, "signed time, not the epoch's");
+	EXPECT(r.inode.time_nsec == 987654321, "its own nanoseconds");
+	EXPECT(r.inode.nlink == 0x01000001, "32-bit link count");
+	EXPECT(r.inode.layout_high == 0, "no high start-block bits");
+	EXPECT(!r.inode.omits_dot, "dot not omitted");
+}
+
+static void
+test_each_extended_reserved_byte_nonzero_is_corrupt(void)
+{
+	unsigned offset;
+
+	for (offset = IX_RESERVED; offset < IX_RESERVED + 16; offset++) {
+		unsigned char raw[INODE_BUFFER_BYTES];
+		erofs_super_t sb = super_for_inodes(12, WIDE, 0, 0);
+		inode_result_t r;
+
+		inode_init(raw, true);
+		raw[offset] = 1;
+		r = inode_decode_checked("reserved", raw, 64, &sb);
+		EXPECT(r.status == FSIMG_ECORRUPT, "byte 0x%x: %s", offset,
+		    status_name(r.status));
+	}
+}
+
+static void
+test_48bit_inode_start_block_bits_are_reported(void)
+{
+	unsigned char raw[INODE_BUFFER_BYTES];
+	erofs_super_t sb = super_for_inodes(12, WIDE, 0, 0);
+	inode_result_t r;
+
+	inode_init(raw, true);
+	put_le(raw + IX_HIGH, 0xbeef, 2);
+	r = inode_decode_checked("extended_high", raw, 64, &sb);
+	EXPECT(r.status == FSIMG_OK && r.inode.layout_high == 0xbeef &&
+	    r.inode.nlink == 1, "extended: the 0x06 word is layout_high");
+
+	inode_init(raw, false);
+	put_le(raw + I_FORMAT, FORMAT_BIT4, 2);
+	put_le(raw + IC_NLINK, 0x1234, 2);
+	r = inode_decode_checked("compact_implicit_nlink", raw, 32, &sb);
+	EXPECT(r.status == FSIMG_OK && r.inode.nlink == 1 &&
+	    r.inode.layout_high == 0x1234 && !r.inode.omits_dot,
+	    "compact file with bit 4: link count 1, word is layout_high");
+
+	inode_init(raw, false);
+	put_le(raw + IC_NLINK, 0x1234, 2);
+	r = inode_decode_checked("compact_explicit_nlink", raw, 32, &sb);
+	EXPECT(r.status == FSIMG_OK && r.inode.nlink == 0x1234 &&
+	    r.inode.layout_high == 0, "compact file without bit 4 keeps nlink");
+}
+
+static void
+test_directory_with_bit_4_omits_dot(void)
+{
+	unsigned char raw[INODE_BUFFER_BYTES];
+	erofs_super_t sb = super_for_inodes(12, WIDE, 0, 0);
+	inode_result_t r;
+	int extended;
+
+	for (extended = 0; extended < 2; extended++) {
+		inode_init(raw, extended != 0);
+		put_le(raw + I_FORMAT, extended | FORMAT_BIT4, 2);
+		put_le(raw + I_MODE, MODE_DIRECTORY | 0755, 2);
+		put_le(raw + (extended != 0 ? IX_SIZE : IC_SIZE), 24,
+		    extended != 0 ? 8 : 4);
+		r = inode_decode_checked("omits_dot", raw,
+		    extended != 0 ? 64 : 32, &sb);
+		EXPECT(r.status == FSIMG_OK && r.inode.omits_dot &&
+		    r.inode.kind == FSIMG_ENTRY_DIRECTORY,
+		    "extended=%d directory with bit 4", extended);
+	}
+
+	inode_init(raw, false);
+	put_le(raw + I_MODE, MODE_DIRECTORY | 0755, 2);
+	put_le(raw + IC_SIZE, 24, 4);
+	r = inode_decode_checked("keeps_dot", raw, 32, &sb);
+	EXPECT(r.status == FSIMG_OK && !r.inode.omits_dot,
+	    "directory without bit 4 keeps its dot entry");
+}
+
+static void
+test_device_numbers_decode_by_the_linux_bit_layout(void)
+{
+	static const struct {
+		uint32_t	 word;
+		uint32_t	 major;
+		uint32_t	 minor;
+	} cases[] = {
+		{ 0xffffffff, 4095, 1048575 },
+		{ 0x00000000, 0, 0 },
+		{ 0x00000801, 8, 1 },
+		{ 0x00000102, 1, 2 },
+		{ 0x000fff00, 4095, 0 },
+		{ 0xfff000ff, 0, 0xfffff },
+		{ 0x0011032c, 0x103, 0x12c },
+		{ 0x00100000, 0, 0x100 },
+		{ 0x000000ff, 0, 255 },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		uint32_t major = 0xdead, minor = 0xbeef;
+
+		erofs_device_decode(cases[i].word, &major, &minor);
+		EXPECT(major == cases[i].major && minor == cases[i].minor,
+		    "word 0x%08x gave %u:%u, expected %u:%u",
+		    (unsigned)cases[i].word, (unsigned)major,
+		    (unsigned)minor, (unsigned)cases[i].major,
+		    (unsigned)cases[i].minor);
+		EXPECT(device_word(cases[i].major, cases[i].minor) ==
+		    cases[i].word, "case table agrees with the encoding, "
+		    "word 0x%08x", (unsigned)cases[i].word);
+	}
+}
+
+/* ---- Chunk formats and entries ---- */
+
+static void
+test_chunk_format_reserved_bits_7_to_15_are_each_corrupt(void)
+{
+	erofs_super_t sb = super_for_inodes(12, WIDE, 0, 0);
+	unsigned bit;
+
+	for (bit = 7; bit < 16; bit++) {
+		erofs_chunk_format_t before, format;
+		const char *what = NULL;
+		fsimg_status_t status;
+
+		memset(&format, SENTINEL, sizeof(format));
+		before = format;
+		status = erofs_chunk_format_decode(UINT32_C(1) << bit, &sb,
+		    &format, &what);
+		EXPECT(status == FSIMG_ECORRUPT, "format bit %u: %s", bit,
+		    status_name(status));
+		EXPECT(bcmp(&format, &before, sizeof(before)) == 0,
+		    "format bit %u: output untouched", bit);
+	}
+}
+
+static void
+test_chunk_format_48bit_bit_needs_the_48bit_layout(void)
+{
+	erofs_super_t plain = super_for_inodes(12, 0, 0, 0);
+	erofs_super_t wide = super_for_inodes(12, WIDE, 0, 0);
+	erofs_chunk_format_t format;
+	const char *what = NULL;
+
+	EXPECT(erofs_chunk_format_decode(0x40, &plain, &format, &what) ==
+	    FSIMG_ECORRUPT, "bit 6 without 48BIT");
+	EXPECT(erofs_chunk_format_decode(0x60, &wide, &format, &what) ==
+	    FSIMG_OK && format.wide && format.entry_bytes == 8,
+	    "bit 6 with 48BIT is wide");
+	EXPECT(erofs_chunk_format_decode(0x20, &wide, &format, &what) ==
+	    FSIMG_OK && !format.wide && format.entry_bytes == 8,
+	    "bit 6 clear is not wide, even under 48BIT");
+}
+
+static void
+test_chunk_format_sets_size_and_entry_width(void)
+{
+	static const struct {
+		unsigned	 blkszbits;
+		uint32_t	 word;
+		uint8_t		 chunkbits;
+		uint64_t	 chunk_bytes;
+		uint8_t		 entry_bytes;
+	} cases[] = {
+		{ .blkszbits = 12, .word = 0x0000, .chunkbits = 0,
+		    .chunk_bytes = 4096, .entry_bytes = 4 },
+		{ .blkszbits = 12, .word = 0x0005, .chunkbits = 5,
+		    .chunk_bytes = 4096 << 5, .entry_bytes = 4 },
+		{ .blkszbits = 12, .word = 0x0020, .chunkbits = 0,
+		    .chunk_bytes = 4096, .entry_bytes = 8 },
+		{ .blkszbits = 12, .word = 0x0025, .chunkbits = 5,
+		    .chunk_bytes = 4096 << 5, .entry_bytes = 8 },
+		{ .blkszbits = 9, .word = 0x001f, .chunkbits = 31,
+		    .chunk_bytes = UINT64_C(512) << 31, .entry_bytes = 4 },
+		{ .blkszbits = 12, .word = 0x001f, .chunkbits = 31,
+		    .chunk_bytes = UINT64_C(4096) << 31, .entry_bytes = 4 },
+		{ .blkszbits = 10, .word = 0xabcd0003, .chunkbits = 3,
+		    .chunk_bytes = 1024 << 3, .entry_bytes = 4 },
+		{ .blkszbits = 11, .word = 0xffff0000, .chunkbits = 0,
+		    .chunk_bytes = 2048, .entry_bytes = 4 },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		erofs_super_t sb = super_for_inodes(cases[i].blkszbits, 0, 0,
+		    0);
+		erofs_chunk_format_t format;
+		const char *what = NULL;
+		fsimg_status_t status;
+
+		status = erofs_chunk_format_decode(cases[i].word, &sb, &format,
+		    &what);
+		EXPECT(status == FSIMG_OK &&
+		    format.chunkbits == cases[i].chunkbits &&
+		    format.chunk_bytes == cases[i].chunk_bytes &&
+		    format.entry_bytes == cases[i].entry_bytes &&
+		    !format.wide, "blkszbits %u word 0x%08x",
+		    cases[i].blkszbits, (unsigned)cases[i].word);
+	}
+}
+
+typedef struct chunk_case {
+	const char	*name;
+	bool		 wide;
+	uint8_t		 entry_bytes;
+	size_t		 length;
+	unsigned char	 entry[8];
+	fsimg_status_t	 status;
+	bool		 hole;
+	uint64_t	 block;
+} chunk_case_t;
+
+/* An 8-byte entry: high 16 bits, device 16 bits, low 32 bits. */
+#define ENTRY8(high, device, low) \
+	{ (uint8_t)(high), (uint8_t)((high) >> 8), (uint8_t)(device), \
+	    (uint8_t)((device) >> 8), LE32(low) }
+
+static const chunk_case_t chunk_cases[] = {
+	{ .name = "four_byte_block", .entry_bytes = 4, .length = 4,
+	    .entry = { LE32(0x12345678) }, .status = FSIMG_OK,
+	    .block = 0x12345678 },
+	{ .name = "four_byte_block_0", .entry_bytes = 4, .length = 4,
+	    .entry = { LE32(0) }, .status = FSIMG_OK },
+	{ .name = "four_byte_hole", .entry_bytes = 4, .length = 4,
+	    .entry = { LE32(0xffffffff) }, .status = FSIMG_OK, .hole = true },
+	{ .name = "four_byte_entry_of_3_bytes_is_corrupt", .entry_bytes = 4,
+	    .length = 3, .entry = { LE32(0x12345678) },
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "four_byte_entry_with_longer_input_is_accepted",
+	    .entry_bytes = 4, .length = 100, .entry = { LE32(7) },
+	    .status = FSIMG_OK, .block = 7 },
+	{ .name = "eight_byte_block", .entry_bytes = 8, .length = 8,
+	    .entry = ENTRY8(0, 0, 0x1234), .status = FSIMG_OK,
+	    .block = 0x1234 },
+	{ .name = "eight_byte_hole_is_zero_high_device_and_all_ones",
+	    .entry_bytes = 8, .length = 8, .entry = ENTRY8(0, 0, 0xffffffff),
+	    .status = FSIMG_OK, .hole = true },
+	{ .name = "eight_byte_high_part_without_wide_is_corrupt",
+	    .entry_bytes = 8, .length = 8, .entry = ENTRY8(1, 0, 5),
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "eight_byte_all_ones_high_part_without_wide_is_corrupt",
+	    .entry_bytes = 8, .length = 8,
+	    .entry = ENTRY8(0xffff, 0, 0xffffffff), .status = FSIMG_ECORRUPT },
+	{ .name = "eight_byte_device_identifier_is_corrupt",
+	    .entry_bytes = 8, .length = 8, .entry = ENTRY8(0, 1, 5),
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "eight_byte_hole_with_device_identifier_is_corrupt",
+	    .entry_bytes = 8, .length = 8, .entry = ENTRY8(0, 1, 0xffffffff),
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "eight_byte_entry_of_7_bytes_is_corrupt", .entry_bytes = 8,
+	    .length = 7, .entry = ENTRY8(0, 0, 5), .status = FSIMG_ECORRUPT },
+	{ .name = "wide_block_has_48_bits", .wide = true, .entry_bytes = 8,
+	    .length = 8, .entry = ENTRY8(0x0001, 0, 2), .status = FSIMG_OK,
+	    .block = UINT64_C(0x100000002) },
+	{ .name = "wide_block_with_high_part_ffff_and_low_word_not_all_ones",
+	    .wide = true, .entry_bytes = 8, .length = 8,
+	    .entry = ENTRY8(0xffff, 0, 0xfffffffe), .status = FSIMG_OK,
+	    .block = UINT64_C(0xfffffffffffe) },
+	{ .name = "wide_low_word_all_ones_with_another_high_part_is_a_block",
+	    .wide = true, .entry_bytes = 8, .length = 8,
+	    .entry = ENTRY8(0x0001, 0, 0xffffffff), .status = FSIMG_OK,
+	    .block = UINT64_C(0x1ffffffff) },
+	{ .name = "wide_all_48_bits_ones_is_a_hole", .wide = true,
+	    .entry_bytes = 8, .length = 8,
+	    .entry = ENTRY8(0xffff, 0, 0xffffffff), .status = FSIMG_OK,
+	    .hole = true },
+	{ .name = "wide_zero_high_part_all_ones_low_word_is_a_block",
+	    .wide = true, .entry_bytes = 8, .length = 8,
+	    .entry = ENTRY8(0, 0, 0xffffffff), .status = FSIMG_OK,
+	    .block = 0xffffffff },
+	{ .name = "wide_device_identifier_is_corrupt", .wide = true,
+	    .entry_bytes = 8, .length = 8, .entry = ENTRY8(1, 1, 5),
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "wide_hole_with_device_identifier_is_corrupt",
+	    .wide = true, .entry_bytes = 8, .length = 8,
+	    .entry = ENTRY8(0xffff, 1, 0xffffffff), .status = FSIMG_ECORRUPT },
+	{ .name = "wide_entry_of_7_bytes_is_corrupt", .wide = true,
+	    .entry_bytes = 8, .length = 7, .entry = ENTRY8(1, 0, 5),
+	    .status = FSIMG_ECORRUPT },
+};
+
+static void
+test_chunk_entries_decode_to_blocks_and_holes(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(chunk_cases); i++) {
+		const chunk_case_t *c = &chunk_cases[i];
+		erofs_chunk_format_t format = { .chunk_bytes = 4096,
+		    .chunkbits = 0, .entry_bytes = c->entry_bytes,
+		    .wide = c->wide };
+		unsigned char buf[100];
+		erofs_chunk_t chunk, before;
+		const char *what = NULL;
+		fsimg_status_t status;
+
+		bzero(buf, sizeof(buf));
+		bcopy(c->entry, buf, sizeof(c->entry));
+		memset(&chunk, SENTINEL, sizeof(chunk));
+		before = chunk;
+		status = erofs_chunk_decode(buf, c->length, &format, &chunk,
+		    &what);
+
+		EXPECT_STATUS(status, c->status, what, c->name);
+		if (status == FSIMG_OK) {
+			EXPECT(chunk.hole == c->hole && chunk.block == c->block,
+			    "%s: hole=%d block=0x%llx", c->name,
+			    (int)chunk.hole, (unsigned long long)chunk.block);
+		} else {
+			EXPECT(bcmp(&chunk, &before, sizeof(before)) == 0,
+			    "%s: failure leaves the output untouched", c->name);
+		}
+	}
+}
+/* e1-geom-b512: image bytes [1184, 1254), the root directory's inline tail */
+static const unsigned char geom_root_bytes[] = {
+	/* image offset 1184, 70 bytes */
+	0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3c, 0x00,
+	0x02, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x3d, 0x00, 0x02, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x3f, 0x00, 0x01, 0x00, 0x2a, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x44, 0x00, 0x02, 0x00, 0x2d, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x45, 0x00, 0x07, 0x00,
+	0x2e, 0x2e, 0x2e, 0x61, 0x2e, 0x74, 0x78, 0x74, 0x64, 0x6c,
+};
+static const fixture_run_t geom_root_runs[] = {
+	{ 1184, 0, 70 },
+};
+
+/*
+ * e6-xattr-default: superblock, shared pool [1152, 1188) and the fixed
+ * part and attribute region of inodes (NIDs) 56, 74, 99, 115 and 118.
+ */
+static const unsigned char xattr_default_bytes[] = {
+	/* image offset 1024, 17 bytes */
+	0xe2, 0xe1, 0xf5, 0xe0, 0x05, 0xb9, 0xc8, 0xe4, 0x07, 0x00,
+	0x00, 0x00, 0x0c, 0x00, 0x26, 0x00, 0x1b,
+	/* image offset 1060, 28 bytes */
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33,
+	0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+	/* image offset 1152, 34 bytes */
+	0x06, 0x01, 0x09, 0x00, 0x63, 0x6f, 0x6d, 0x6d, 0x6f, 0x6e,
+	0x73, 0x61, 0x6d, 0x65, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x00,
+	0x08, 0x01, 0x02, 0x00, 0x70, 0x61, 0x69, 0x72, 0x61, 0x74,
+	0x74, 0x72, 0x70, 0x76,
+	/* image offset 1792, 56 bytes */
+	0x04, 0x00, 0x04, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x08, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xdf, 0xff, 0xfd, 0x01, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x20, 0x01, 0x00, 0x00, 0x03, 0x01,
+	0x01, 0x00, 0x6f, 0x77, 0x6e, 0x31,
+	/* image offset 2368, 156 bytes */
+	0x04, 0x00, 0x1d, 0x00, 0xfd, 0x41, 0x02, 0x00, 0x1b, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xff, 0xdf, 0xbf, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x34, 0x00, 0x02, 0x00,
+	0x00, 0x00, 0x01, 0x00, 0x07, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x02, 0x00, 0x07, 0x00, 0xe8, 0x03, 0x00, 0x00, 0x04, 0x00,
+	0x05, 0x00, 0xff, 0xff, 0xff, 0xff, 0x08, 0x00, 0x05, 0x00,
+	0xe8, 0x03, 0x00, 0x00, 0x10, 0x00, 0x07, 0x00, 0xff, 0xff,
+	0xff, 0xff, 0x20, 0x00, 0x05, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x00, 0x03, 0x34, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00,
+	0x07, 0x00, 0xff, 0xff, 0xff, 0xff, 0x02, 0x00, 0x07, 0x00,
+	0xe8, 0x03, 0x00, 0x00, 0x04, 0x00, 0x05, 0x00, 0xff, 0xff,
+	0xff, 0xff, 0x08, 0x00, 0x05, 0x00, 0xe8, 0x03, 0x00, 0x00,
+	0x10, 0x00, 0x07, 0x00, 0xff, 0xff, 0xff, 0xff, 0x20, 0x00,
+	0x05, 0x00, 0xff, 0xff, 0xff, 0xff,
+	/* image offset 3168, 93 bytes */
+	0x04, 0x00, 0x0e, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x03, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xf7, 0xff, 0xef, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x03, 0x06, 0x02, 0x00, 0x73, 0x65,
+	0x63, 0x53, 0x53, 0x00, 0x00, 0x00, 0x07, 0x06, 0x1a, 0x00,
+	0x73, 0x65, 0x6c, 0x69, 0x6e, 0x75, 0x78, 0x73, 0x79, 0x73,
+	0x74, 0x65, 0x6d, 0x5f, 0x75, 0x3a, 0x6f, 0x62, 0x6a, 0x65,
+	0x63, 0x74, 0x5f, 0x72, 0x3a, 0x65, 0x74, 0x63, 0x5f, 0x74,
+	0x3a, 0x73, 0x30,
+	/* image offset 3680, 91 bytes */
+	0x04, 0x00, 0x0d, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x04, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0x7f, 0xff, 0xbe, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x08, 0x04, 0x01, 0x00, 0x76, 0x65,
+	0x6e, 0x64, 0x6f, 0x72, 0x2e, 0x7a, 0x36, 0x00, 0x00, 0x00,
+	0x07, 0x01, 0x01, 0x00, 0x6f, 0x74, 0x68, 0x65, 0x72, 0x2e,
+	0x71, 0x35, 0x0e, 0x01, 0x01, 0x00, 0x76, 0x65, 0x6e, 0x64,
+	0x6f, 0x72, 0x2e, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x2e, 0x78,
+	0x34,
+	/* image offset 3776, 248 bytes */
+	0x04, 0x00, 0x34, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x05, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xf7, 0x36, 0x38, 0xbc, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x02, 0x01, 0x02, 0x00, 0x6b, 0x31,
+	0x76, 0x31, 0x03, 0x01, 0x03, 0x00, 0x6b, 0x31, 0x30, 0x76,
+	0x31, 0x30, 0x00, 0x00, 0x03, 0x01, 0x03, 0x00, 0x6b, 0x31,
+	0x31, 0x76, 0x31, 0x31, 0x00, 0x00, 0x03, 0x01, 0x03, 0x00,
+	0x6b, 0x31, 0x32, 0x76, 0x31, 0x32, 0x00, 0x00, 0x03, 0x01,
+	0x03, 0x00, 0x6b, 0x31, 0x33, 0x76, 0x31, 0x33, 0x00, 0x00,
+	0x03, 0x01, 0x03, 0x00, 0x6b, 0x31, 0x34, 0x76, 0x31, 0x34,
+	0x00, 0x00, 0x03, 0x01, 0x03, 0x00, 0x6b, 0x31, 0x35, 0x76,
+	0x31, 0x35, 0x00, 0x00, 0x03, 0x01, 0x03, 0x00, 0x6b, 0x31,
+	0x36, 0x76, 0x31, 0x36, 0x00, 0x00, 0x03, 0x01, 0x03, 0x00,
+	0x6b, 0x31, 0x37, 0x76, 0x31, 0x37, 0x00, 0x00, 0x03, 0x01,
+	0x03, 0x00, 0x6b, 0x31, 0x38, 0x76, 0x31, 0x38, 0x00, 0x00,
+	0x03, 0x01, 0x03, 0x00, 0x6b, 0x31, 0x39, 0x76, 0x31, 0x39,
+	0x00, 0x00, 0x02, 0x01, 0x02, 0x00, 0x6b, 0x32, 0x76, 0x32,
+	0x03, 0x01, 0x03, 0x00, 0x6b, 0x32, 0x30, 0x76, 0x32, 0x30,
+	0x00, 0x00, 0x02, 0x01, 0x02, 0x00, 0x6b, 0x33, 0x76, 0x33,
+	0x02, 0x01, 0x02, 0x00, 0x6b, 0x34, 0x76, 0x34, 0x02, 0x01,
+	0x02, 0x00, 0x6b, 0x35, 0x76, 0x35, 0x02, 0x01, 0x02, 0x00,
+	0x6b, 0x36, 0x76, 0x36, 0x02, 0x01, 0x02, 0x00, 0x6b, 0x37,
+	0x76, 0x37, 0x02, 0x01, 0x02, 0x00, 0x6b, 0x38, 0x76, 0x38,
+	0x02, 0x01, 0x02, 0x00, 0x6b, 0x39, 0x76, 0x39,
+};
+static const fixture_run_t xattr_default_runs[] = {
+	{ 1024, 0, 17 },
+	{ 1060, 17, 28 },
+	{ 1152, 45, 34 },
+	{ 1792, 79, 56 },
+	{ 2368, 135, 156 },
+	{ 3168, 291, 93 },
+	{ 3680, 384, 91 },
+	{ 3776, 475, 248 },
+};
+
+/*
+ * e6-xattr-pfx-plain: superblock, shared pool [1152, 1188), prefix table
+ * [1188, 1216) and the fixed part and attribute region of inodes (NIDs)
+ * 107, 111, 113, 124 and 128.
+ */
+static const unsigned char xattr_prefixes_bytes[] = {
+	/* image offset 1024, 17 bytes */
+	0xe2, 0xe1, 0xf5, 0xe0, 0x97, 0x40, 0x95, 0x6f, 0x17, 0x00,
+	0x00, 0x00, 0x0c, 0x00, 0x26, 0x00, 0x1b,
+	/* image offset 1060, 28 bytes */
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33,
+	0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+	/* image offset 1104, 14 bytes */
+	0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x02, 0x29, 0x01,
+	/* image offset 1152, 34 bytes */
+	0x06, 0x01, 0x09, 0x00, 0x63, 0x6f, 0x6d, 0x6d, 0x6f, 0x6e,
+	0x73, 0x61, 0x6d, 0x65, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x00,
+	0x08, 0x01, 0x02, 0x00, 0x70, 0x61, 0x69, 0x72, 0x61, 0x74,
+	0x74, 0x72, 0x70, 0x76,
+	/* image offset 1188, 26 bytes */
+	0x0e, 0x00, 0x01, 0x76, 0x65, 0x6e, 0x64, 0x6f, 0x72, 0x2e,
+	0x61, 0x6c, 0x70, 0x68, 0x61, 0x2e, 0x08, 0x00, 0x04, 0x76,
+	0x65, 0x6e, 0x64, 0x6f, 0x72, 0x2e,
+	/* image offset 3424, 50 bytes */
+	0x04, 0x00, 0x03, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x04, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0x7f, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x01, 0x00, 0x78, 0x31,
+	/* image offset 3552, 50 bytes */
+	0x04, 0x00, 0x03, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x04, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xff, 0xff, 0xfe, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x01, 0x81, 0x01, 0x00, 0x7a, 0x33,
+	/* image offset 3616, 70 bytes */
+	0x04, 0x00, 0x08, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x04, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0x7f, 0xff, 0xbe, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x01, 0x81, 0x01, 0x00, 0x7a, 0x36,
+	0x00, 0x00, 0x07, 0x01, 0x01, 0x00, 0x6f, 0x74, 0x68, 0x65,
+	0x72, 0x2e, 0x71, 0x35, 0x01, 0x80, 0x01, 0x00, 0x78, 0x34,
+	/* image offset 3968, 114 bytes */
+	0x04, 0x00, 0x13, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x06, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xdf, 0xdf, 0xbf, 0x01, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x20, 0x01, 0x00, 0x00, 0x00, 0x02,
+	0x2c, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x06, 0x00,
+	0xff, 0xff, 0xff, 0xff, 0x02, 0x00, 0x04, 0x00, 0xe8, 0x03,
+	0x00, 0x00, 0x04, 0x00, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x10, 0x00, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff, 0x20, 0x00,
+	0x04, 0x00, 0xff, 0xff, 0xff, 0xff, 0x01, 0x04, 0x02, 0x00,
+	0x6d, 0x6d, 0x6d, 0x00, 0x01, 0x01, 0x05, 0x00, 0x61, 0x6d,
+	0x69, 0x78, 0x65, 0x64,
+	/* image offset 4096, 46 bytes */
+	0x04, 0x00, 0x02, 0x00, 0xa4, 0x81, 0x01, 0x00, 0x06, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xff, 0xbf, 0xff, 0x01, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x25, 0x01,
+};
+static const fixture_run_t xattr_prefixes_runs[] = {
+	{ 1024, 0, 17 },
+	{ 1060, 17, 28 },
+	{ 1104, 45, 14 },
+	{ 1152, 59, 34 },
+	{ 1188, 93, 26 },
+	{ 3424, 119, 50 },
+	{ 3552, 169, 50 },
+	{ 3616, 219, 70 },
+	{ 3968, 289, 114 },
+	{ 4096, 403, 46 },
+};
+
+
+/* ---- Directory blocks ---- */
+
+typedef struct dname {
+	uint64_t	 nid;
+	const char	*name;
+	size_t		 length;
+	unsigned	 type;
+} dname_t;
+
+/* A literal may hold NUL bytes: its length is the array's, not strlen's. */
+#define DNAME(nid, literal, type) { (nid), (literal), sizeof(literal) - 1, \
+	    (type) }
+
+enum { DIR_BLOCK_BYTES = 4096 };
+
+/*
+ * Lay out a directory block of size bytes: the 12-byte entries, then the
+ * names back to back, then zeros. Returns the offset just past the last name.
+ */
+static size_t
+dir_block_build(unsigned char *blk, size_t size, const dname_t *names,
+    size_t count)
+{
+	size_t name_offset = count * EROFS_DIRENT_BYTES;
+	size_t i;
+
+	bzero(blk, size);
+	for (i = 0; i < count; i++) {
+		unsigned char *entry = blk + i * EROFS_DIRENT_BYTES;
+
+		CHECK(name_offset + names[i].length <= size);
+		put_le(entry, names[i].nid, 8);
+		put_le(entry + 8, name_offset, 2);
+		entry[10] = (unsigned char)names[i].type;
+		bcopy(names[i].name, blk + name_offset, names[i].length);
+		name_offset += names[i].length;
+	}
+	return (name_offset);
+}
+
+/* Entry i of a block starts at 12 * i; name offset at +8, type at +10. */
+static void
+dir_set_name_offset(unsigned char *blk, size_t entry, uint64_t offset)
+{
+	put_le(blk + entry * EROFS_DIRENT_BYTES + 8, offset, 2);
+}
+
+static const dname_t abc_names[] = {
+	DNAME(11, "a", EROFS_FT_REGULAR),
+	DNAME(22, "bb", EROFS_FT_DIRECTORY),
+	DNAME(33, "ccc", EROFS_FT_SYMLINK),
+};
+
+/* The block above: entries at 0..35, names "a" 36, "bb" 37, "ccc" 39..41. */
+enum { ABC_END = 42 };
+
+static fsimg_status_t
+dirblock_decode_checked(const char *name, const unsigned char *bytes,
+    size_t length, erofs_dirblock_t *block, const char **what)
+{
+	erofs_dirblock_t before;
+	fsimg_status_t status;
+
+	memset(block, SENTINEL, sizeof(*block));
+	before = *block;
+	*what = NULL;
+	status = erofs_dirblock_decode(bytes, length, block, what);
+	if (status != FSIMG_OK) {
+		EXPECT(bcmp(block, &before, sizeof(before)) == 0,
+		    "%s: failure leaves the output untouched", name);
+		/* The sentinel is not a valid bool; no caller may read it. */
+		bzero(block, sizeof(*block));
+	}
+	return (status);
+}
+
+/* The status of decoding a block, which validates every entry. */
+static fsimg_status_t
+dir_status(const char *name, const unsigned char *blk, size_t length)
+{
+	erofs_dirblock_t block;
+	const char *what;
+
+	return (dirblock_decode_checked(name, blk, length, &block, &what));
+}
+
+static void
+test_directory_block_shorter_than_one_entry_is_corrupt(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+
+	bzero(blk, sizeof(blk));
+	EXPECT(dir_status("length_0", blk, 0) == FSIMG_ECORRUPT, "length 0");
+	EXPECT(dir_status("length_11", blk, 11) == FSIMG_ECORRUPT, "length 11");
+}
+
+static void
+test_first_name_offset_defines_the_entry_count(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+	erofs_dirblock_t block;
+	const char *what;
+	static const dname_t ten[] = {
+		DNAME(1, "a", 1), DNAME(2, "b", 1), DNAME(3, "c", 1),
+		DNAME(4, "d", 1), DNAME(5, "e", 1), DNAME(6, "f", 1),
+		DNAME(7, "g", 1), DNAME(8, "h", 1), DNAME(9, "i", 1),
+		DNAME(10, "j", 1)
+	};
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	EXPECT(dirblock_decode_checked("three", blk, sizeof(blk), &block,
+	    &what) == FSIMG_OK && block.count == 3 &&
+	    block.length == sizeof(blk) && block.bytes == blk,
+	    "three entries: first name offset 36");
+
+	dir_block_build(blk, sizeof(blk), ten, 10);
+	EXPECT(dirblock_decode_checked("ten", blk, sizeof(blk), &block,
+	    &what) == FSIMG_OK && block.count == 10,
+	    "ten entries: first name offset 120");
+
+	dir_block_build(blk, sizeof(blk), abc_names, 1);
+	EXPECT(dirblock_decode_checked("one", blk, ABC_END, &block, &what) ==
+	    FSIMG_OK && block.count == 1 && block.length == ABC_END,
+	    "one entry, length as given");
+}
+
+static void
+test_first_name_offset_must_be_a_nonzero_multiple_of_12_below_the_length(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 0, 0);
+	EXPECT(dir_status("offset_0", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "first name offset 0");
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 0, 37);
+	EXPECT(dir_status("offset_37", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "first name offset 37 is not a multiple of 12");
+	dir_set_name_offset(blk, 0, 13);
+	EXPECT(dir_status("offset_13", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "first name offset 13");
+
+	dir_block_build(blk, sizeof(blk), abc_names, 1);
+	dir_set_name_offset(blk, 0, 12);
+	EXPECT(dir_status("offset_12_length_12", blk, 12) == FSIMG_ECORRUPT,
+	    "first name offset 12 is not below length 12");
+	EXPECT(dir_status("offset_12_length_13", blk, 13) == FSIMG_OK,
+	    "first name offset 12 is below length 13 (name \"a\")");
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	EXPECT(dir_status("offset_36_length_36", blk, 36) == FSIMG_ECORRUPT,
+	    "first name offset 36 is not below length 36");
+	EXPECT(dir_status("offset_36_length_37", blk, 37) == FSIMG_ECORRUPT,
+	    "the other entries' offsets 37 and 39 are past length 37");
+}
+
+static void
+test_entry_fields_and_name_spans_are_decoded(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+	erofs_dirblock_t block;
+	erofs_dirent_t ent;
+	const char *what;
+	size_t i;
+	static const struct {
+		uint64_t nid;
+		uint16_t offset;
+		uint16_t length;
+		uint8_t type;
+	} want[3] = {
+		{ .nid = 11, .offset = 36, .length = 1,
+		    .type = EROFS_FT_REGULAR },
+		{ .nid = 22, .offset = 37, .length = 2,
+		    .type = EROFS_FT_DIRECTORY },
+		{ .nid = 33, .offset = 39, .length = 3,
+		    .type = EROFS_FT_SYMLINK },
+	};
+	static const size_t valid_lengths[] = { ABC_END, DIR_BLOCK_BYTES };
+
+	for (size_t v = 0; v < ARRAY_SIZE(valid_lengths); v++) {
+		dir_block_build(blk, sizeof(blk), abc_names, 3);
+		CHECK(dirblock_decode_checked("abc", blk, valid_lengths[v],
+		    &block, &what) == FSIMG_OK);
+		for (i = 0; i < 3; i++) {
+			memset(&ent, SENTINEL, sizeof(ent));
+			EXPECT(erofs_dirent_decode(&block, i, &ent, &what) ==
+			    FSIMG_OK && ent.nid == want[i].nid &&
+			    ent.name_offset == want[i].offset &&
+			    ent.name_length == want[i].length &&
+			    ent.file_type == want[i].type,
+			    "valid length %zu, entry %zu", valid_lengths[v], i);
+		}
+	}
+}
+
+static void
+test_last_name_ends_at_the_valid_length_or_the_first_nul(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+	erofs_dirblock_t block;
+	erofs_dirent_t ent;
+	const char *what;
+
+	/* Valid length 41 cuts "ccc" to "cc": the name ends with the block. */
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	CHECK(dirblock_decode_checked("cut", blk, ABC_END - 1, &block,
+	    &what) == FSIMG_OK);
+	EXPECT(erofs_dirent_decode(&block, 2, &ent, &what) == FSIMG_OK &&
+	    ent.name_length == 2, "valid length 41: last name is 2 bytes");
+
+	/* "a", NUL, "b" as the last name: it ends at the NUL. */
+	{
+		static const dname_t names[] = {
+			DNAME(1, "x", EROFS_FT_REGULAR),
+			DNAME(2, "a\0b", EROFS_FT_REGULAR),
+		};
+
+		dir_block_build(blk, sizeof(blk), names, 2);
+		CHECK(dirblock_decode_checked("nul", blk, sizeof(blk), &block,
+		    &what) == FSIMG_OK);
+		EXPECT(erofs_dirent_decode(&block, 1, &ent, &what) ==
+		    FSIMG_OK && ent.name_length == 1 &&
+		    ent.name_offset == 25, "last name stops at its NUL");
+		EXPECT(erofs_dirent_decode(&block, 0, &ent, &what) ==
+		    FSIMG_OK && ent.name_length == 1,
+		    "the middle name is bounded by the next offset");
+	}
+}
+
+static void
+test_name_offsets_must_increase_strictly(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 1, 36);
+	EXPECT(dir_status("equal_0_1", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "entry 1 offset equals entry 0's");
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 2, 37);
+	EXPECT(dir_status("equal_1_2", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "entry 2 offset equals entry 1's");
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 2, 36);
+	EXPECT(dir_status("decreasing_last", blk, sizeof(blk)) ==
+	    FSIMG_ECORRUPT, "entry 2 offset 36 is below entry 1's 37");
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 1, 40);
+	EXPECT(dir_status("decreasing_middle", blk, sizeof(blk)) ==
+	    FSIMG_ECORRUPT, "entry 2 offset 39 is below entry 1's 40");
+}
+
+static void
+test_name_offset_inside_the_entry_array_is_corrupt(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 1, 24);
+	EXPECT(dir_status("inside_array", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "entry 1 name offset 24 lies in the entry array");
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 2, 4);
+	EXPECT(dir_status("inside_array_last", blk, sizeof(blk)) ==
+	    FSIMG_ECORRUPT, "entry 2 name offset 4 lies in the entry array");
+}
+
+static void
+test_name_offset_past_the_valid_length_is_corrupt(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 2, ABC_END + 1);
+	EXPECT(dir_status("past_end", blk, ABC_END) == FSIMG_ECORRUPT,
+	    "last name offset 43 with valid length 42");
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 1, 100);
+	EXPECT(dir_status("middle_past_end", blk, ABC_END) == FSIMG_ECORRUPT,
+	    "middle name offset 100 with valid length 42");
+}
+
+static void
+test_empty_last_name_is_corrupt(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	dir_set_name_offset(blk, 2, ABC_END);
+	EXPECT(dir_status("empty_at_end", blk, ABC_END) == FSIMG_ECORRUPT,
+	    "last name offset equals the valid length");
+	EXPECT(dir_status("empty_at_nul", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "last name starts at a NUL byte");
+
+	dir_set_name_offset(blk, 2, 2000);
+	EXPECT(dir_status("empty_in_zeros", blk, sizeof(blk)) ==
+	    FSIMG_ECORRUPT, "last name starts inside the zero padding");
+}
+
+/* A two-entry block: a name of the given length, then "z". */
+static fsimg_status_t
+long_name_status(const char *name, size_t length, bool last)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+	unsigned char text[300];
+	dname_t z = DNAME(1, "z", EROFS_FT_REGULAR);
+	dname_t x = { 2, (const char *)text, length, EROFS_FT_REGULAR };
+	dname_t names[2];
+
+	memset(text, 'x', sizeof(text));
+	names[0] = last ? z : x;
+	names[1] = last ? x : z;
+	dir_block_build(blk, sizeof(blk), names, 2);
+	return (dir_status(name, blk, sizeof(blk)));
+}
+
+static void
+test_names_longer_than_255_bytes_are_corrupt(void)
+{
+	EXPECT(long_name_status("middle_255", 255, false) == FSIMG_OK,
+	    "255-byte middle name");
+	EXPECT(long_name_status("middle_256", 256, false) == FSIMG_ECORRUPT,
+	    "256-byte middle name");
+	EXPECT(long_name_status("last_255", 255, true) == FSIMG_OK,
+	    "255-byte last name");
+	EXPECT(long_name_status("last_256", 256, true) == FSIMG_ECORRUPT,
+	    "256-byte last name");
+	EXPECT(long_name_status("last_300", 300, true) == FSIMG_ECORRUPT,
+	    "300-byte last name");
+}
+
+static void
+test_slash_or_nul_in_a_name_is_corrupt(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+	static const dname_t slash_middle[] = {
+		DNAME(1, "a/b", 1), DNAME(2, "z", 1) };
+	static const dname_t slash_last[] = {
+		DNAME(1, "z", 1), DNAME(2, "a/b", 1) };
+	static const dname_t slash_only[] = {
+		DNAME(1, "z", 1), DNAME(2, "/", 1) };
+	static const dname_t nul_middle[] = {
+		DNAME(1, "a\0b", 1), DNAME(2, "z", 1) };
+	static const dname_t nul_before_slash[] = {
+		DNAME(1, "z", 1), DNAME(2, "a\0/", 1) };
+
+	dir_block_build(blk, sizeof(blk), slash_middle, 2);
+	EXPECT(dir_status("slash_middle", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "slash in a middle name");
+	dir_block_build(blk, sizeof(blk), slash_last, 2);
+	EXPECT(dir_status("slash_last", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "slash in the last name");
+	dir_block_build(blk, sizeof(blk), slash_only, 2);
+	EXPECT(dir_status("slash_only", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "a name that is a slash");
+	dir_block_build(blk, sizeof(blk), nul_middle, 2);
+	EXPECT(dir_status("nul_middle", blk, sizeof(blk)) == FSIMG_ECORRUPT,
+	    "NUL inside a middle name");
+	dir_block_build(blk, sizeof(blk), nul_before_slash, 2);
+	EXPECT(dir_status("nul_before_slash", blk, sizeof(blk)) == FSIMG_OK,
+	    "the last name ends at its NUL, before the slash");
+}
+
+static void
+test_file_types_0_to_7_are_accepted_and_8_is_corrupt(void)
+{
+	static const unsigned types[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15,
+	    255 };
+	size_t i, entry;
+
+	for (i = 0; i < ARRAY_SIZE(types); i++) {
+		for (entry = 0; entry < 3; entry++) {
+			unsigned char blk[DIR_BLOCK_BYTES];
+			bool valid = types[i] <= 7;
+
+			dir_block_build(blk, sizeof(blk), abc_names, 3);
+			blk[entry * EROFS_DIRENT_BYTES + 10] =
+			    (unsigned char)types[i];
+			EXPECT(dir_status("type", blk, sizeof(blk)) ==
+			    (valid ? FSIMG_OK : FSIMG_ECORRUPT),
+			    "file type %u in entry %zu", types[i], entry);
+		}
+	}
+}
+
+static void
+test_entry_index_past_the_count_is_invalid(void)
+{
+	unsigned char blk[DIR_BLOCK_BYTES];
+	erofs_dirblock_t block;
+	erofs_dirent_t ent, before;
+	const char *what;
+	size_t indexes[] = { 3, 4, 1000, SIZE_MAX };
+	size_t i;
+
+	dir_block_build(blk, sizeof(blk), abc_names, 3);
+	CHECK(dirblock_decode_checked("abc", blk, sizeof(blk), &block, &what) ==
+	    FSIMG_OK);
+	for (i = 0; i < ARRAY_SIZE(indexes); i++) {
+		memset(&ent, SENTINEL, sizeof(ent));
+		before = ent;
+		EXPECT(erofs_dirent_decode(&block, indexes[i], &ent, &what) ==
+		    FSIMG_EINVAL && bcmp(&ent, &before, sizeof(ent)) == 0,
+		    "index %zu is the caller's error and leaves the output",
+		    indexes[i]);
+	}
+}
+
+/* The root of e1-geom-b512, an inline tail of 70 bytes. */
+static void
+test_real_root_directory_block_decodes_to_the_dumped_names(void)
+{
+	static const fixture_t fixture = FIXTURE(geom_root, 1184);
+	static const struct {
+		uint64_t	 nid;
+		const char	*name;
+		uint8_t		 type;
+	} want[] = {
+		{ 36, ".", EROFS_FT_DIRECTORY },
+		{ 36, "..", EROFS_FT_DIRECTORY },
+		{ 40, "a.txt", EROFS_FT_REGULAR },
+		{ 42, "d", EROFS_FT_DIRECTORY },
+		{ 45, "l", EROFS_FT_SYMLINK },
+	};
+	unsigned char tail[70];
+	erofs_dirblock_t block;
+	const char *what;
+	size_t i;
+
+	fixture_load(&fixture, tail, sizeof(tail));
+	CHECK(dirblock_decode_checked("e1-geom-b512", tail, sizeof(tail),
+	    &block, &what) == FSIMG_OK);
+	EXPECT(block.count == 5, "five entries");
+	for (i = 0; i < ARRAY_SIZE(want) && i < block.count; i++) {
+		erofs_dirent_t ent;
+
+		CHECK(erofs_dirent_decode(&block, i, &ent, &what) == FSIMG_OK);
+		EXPECT(ent.nid == want[i].nid &&
+		    ent.file_type == want[i].type &&
+		    ent.name_length == strlen(want[i].name) &&
+		    bcmp(tail + ent.name_offset, want[i].name,
+		    ent.name_length) == 0, "entry %zu is %s", i, want[i].name);
+	}
+}
+
+/* ---- Extended attributes ---- */
+
+static void
+test_attribute_header_must_fit_the_region(void)
+{
+	unsigned char region[1100];
+	erofs_xattr_header_t header, before;
+	const char *what = NULL;
+	static const struct {
+		const char	*name;
+		unsigned	 shared;
+		size_t		 length;
+		fsimg_status_t	 status;
+	} cases[] = {
+		{ "length_0", 0, 0, FSIMG_ECORRUPT },
+		{ "length_11", 0, 11, FSIMG_ECORRUPT },
+		{ "length_12_no_shared", 0, 12, FSIMG_OK },
+		{ "length_12_one_shared", 1, 12, FSIMG_ECORRUPT },
+		{ "one_shared_exact", 1, 16, FSIMG_OK },
+		{ "three_shared_one_byte_short", 3, 23, FSIMG_ECORRUPT },
+		{ "three_shared_exact", 3, 24, FSIMG_OK },
+		{ "three_shared_with_inline_entries", 3, 100, FSIMG_OK },
+		{ "255_shared_one_byte_short", 255, 1031, FSIMG_ECORRUPT },
+		{ "255_shared_exact", 255, 1032, FSIMG_OK },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		fsimg_status_t status;
+
+		bzero(region, sizeof(region));
+		put_le(region, 0xdeadbeef, 4);
+		region[4] = (unsigned char)cases[i].shared;
+		memset(&header, SENTINEL, sizeof(header));
+		before = header;
+		status = erofs_xattr_header_decode(region, cases[i].length,
+		    &header, &what);
+		EXPECT_STATUS(status, cases[i].status, what, cases[i].name);
+		EXPECT(status != FSIMG_OK ||
+		    (header.filter == 0xdeadbeef &&
+		    header.shared_count == cases[i].shared &&
+		    header.entries_offset == 12 + 4 * cases[i].shared),
+		    "%s: filter, shared count and entries offset",
+		    cases[i].name);
+		EXPECT(status == FSIMG_OK ||
+		    bcmp(&header, &before, sizeof(before)) == 0,
+		    "%s: failure leaves the output untouched", cases[i].name);
+	}
+}
+
+static void
+test_attribute_header_reserved_bytes_are_not_required_zero(void)
+{
+	unsigned char region[12];
+	erofs_xattr_header_t header;
+	const char *what = NULL;
+
+	memset(region, 0xff, sizeof(region));
+	region[4] = 0;
+	EXPECT(erofs_xattr_header_decode(region, sizeof(region), &header,
+	    &what) == FSIMG_OK && header.filter == 0xffffffff &&
+	    header.shared_count == 0 && header.entries_offset == 12,
+	    "bytes 5..11 hold 0xff");
+}
+
+static void
+test_shared_ids_are_read_from_offset_12(void)
+{
+	unsigned char region[32];
+	erofs_xattr_header_t header;
+	const char *what = NULL;
+	uint32_t id;
+
+	bzero(region, sizeof(region));
+	region[4] = 3;
+	put_le(region + 12, 288, 4);
+	put_le(region + 16, 0xffffffff, 4);
+	put_le(region + 20, 1, 4);
+	CHECK(erofs_xattr_header_decode(region, sizeof(region), &header,
+	    &what) == FSIMG_OK);
+
+	id = 0;
+	EXPECT(erofs_xattr_shared_id(region, &header, 0, &id) && id == 288,
+	    "index 0");
+	EXPECT(erofs_xattr_shared_id(region, &header, 1, &id) &&
+	    id == 0xffffffff, "index 1");
+	EXPECT(erofs_xattr_shared_id(region, &header, 2, &id) && id == 1,
+	    "index 2");
+}
+
+static void
+test_shared_id_past_the_shared_count_is_false_and_leaves_the_output(void)
+{
+	static const unsigned indexes[] = { 3, 4, 255, UINT_MAX };
+	unsigned char region[32];
+	erofs_xattr_header_t header;
+	const char *what = NULL;
+	uint32_t id;
+	size_t i;
+
+	/* Bytes sit past the count's ids; they are not shared ids. */
+	memset(region, 0x11, sizeof(region));
+	region[4] = 3;
+	CHECK(erofs_xattr_header_decode(region, sizeof(region), &header,
+	    &what) == FSIMG_OK);
+	for (i = 0; i < ARRAY_SIZE(indexes); i++) {
+		id = 0x5a5a5a5a;
+		EXPECT(!erofs_xattr_shared_id(region, &header, indexes[i],
+		    &id) && id == 0x5a5a5a5a,
+		    "index %u of 3 is false, id untouched", indexes[i]);
+	}
+
+	region[4] = 0;
+	CHECK(erofs_xattr_header_decode(region, sizeof(region), &header,
+	    &what) == FSIMG_OK);
+	id = 0x5a5a5a5a;
+	EXPECT(!erofs_xattr_shared_id(region, &header, 0, &id) &&
+	    id == 0x5a5a5a5a, "index 0 of 0 is false, id untouched");
+}
+
+static void
+test_shared_entry_offset_is_the_block_plus_4_per_id(void)
+{
+	static const struct {
+		unsigned	 blkszbits;
+		uint32_t	 block;
+		uint32_t	 id;
+		uint64_t	 offset;
+	} cases[] = {
+		{ 12, 0, 0, 0 },
+		{ 12, 3, 5, 3 * 4096 + 20 },
+		{ 9, 7, 288, 7 * 512 + 1152 },
+		{ 12, 0xffffffff, 0xffffffff,
+		    UINT64_C(0xffffffff) * 4096 + UINT64_C(4) * 0xffffffff },
+		{ 9, 0xffffffff, 0xffffffff,
+		    UINT64_C(0xffffffff) * 512 + UINT64_C(4) * 0xffffffff },
+		{ 11, 1, 0xffffffff, 2048 + UINT64_C(4) * 0xffffffff },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		erofs_super_t sb = super_for_inodes(cases[i].blkszbits, 0, 0,
+		    0);
+
+		sb.xattr_blkaddr = cases[i].block;
+		EXPECT(erofs_xattr_shared_offset(&sb, cases[i].id) ==
+		    cases[i].offset, "blkszbits %u block %u id %u",
+		    cases[i].blkszbits, (unsigned)cases[i].block,
+		    (unsigned)cases[i].id);
+	}
+}
+
+typedef struct xattr_case {
+	const char	*name;
+	uint8_t		 index;
+	size_t		 suffix;	/* suffix length */
+	size_t		 value;		/* value length */
+	long		 slack;		/* length given less padded size */
+	unsigned	 prefixes;	/* the volume's long-prefix count */
+	bool		 prefix_feature;
+	fsimg_status_t	 status;
+} xattr_case_t;
+
+static const xattr_case_t xattr_cases[] = {
+	{ .name = "padded_entry_fits_exactly", .index = 1, .suffix = 3,
+	    .value = 2, .status = FSIMG_OK },
+	{ .name = "entry_one_byte_short_of_padding_is_corrupt", .index = 1,
+	    .suffix = 3, .value = 2, .slack = -1, .status = FSIMG_ECORRUPT },
+	{ .name = "entry_with_slack_is_accepted", .index = 1, .suffix = 3,
+	    .value = 2, .slack = 50, .status = FSIMG_OK },
+	{ .name = "unpadded_size_multiple_of_4_fits_exactly", .index = 1,
+	    .suffix = 4, .value = 4, .status = FSIMG_OK },
+	{ .name = "unpadded_size_multiple_of_4_one_short_is_corrupt",
+	    .index = 1, .suffix = 4, .value = 4, .slack = -1,
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "empty_suffix_and_value_is_a_4_byte_entry", .index = 1,
+	    .suffix = 0, .value = 0, .status = FSIMG_OK },
+	{ .name = "largest_entry_is_accepted", .index = 1, .suffix = 255,
+	    .value = 65535, .status = FSIMG_OK },
+	{ .name = "largest_entry_one_byte_short_is_corrupt", .index = 1,
+	    .suffix = 255, .value = 65535, .slack = -1,
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "user_index_1_is_accepted", .index = 1, .suffix = 5,
+	    .value = 7, .status = FSIMG_OK },
+	{ .name = "trusted_index_4_is_accepted", .index = 4, .suffix = 5,
+	    .value = 7, .status = FSIMG_OK },
+	{ .name = "security_index_6_is_accepted", .index = 6, .suffix = 5,
+	    .value = 7, .status = FSIMG_OK },
+	{ .name = "acl_access_index_2_with_empty_suffix_is_accepted",
+	    .index = 2, .suffix = 0, .value = 28, .status = FSIMG_OK },
+	{ .name = "acl_default_index_3_with_empty_suffix_is_accepted",
+	    .index = 3, .suffix = 0, .value = 28, .status = FSIMG_OK },
+	{ .name = "acl_access_index_2_with_a_suffix_is_corrupt", .index = 2,
+	    .suffix = 1, .value = 28, .status = FSIMG_ECORRUPT },
+	{ .name = "acl_default_index_3_with_a_suffix_is_corrupt", .index = 3,
+	    .suffix = 1, .value = 28, .status = FSIMG_ECORRUPT },
+	{ .name = "index_0_is_unsupported", .index = 0, .suffix = 2,
+	    .value = 2, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "index_5_is_unsupported", .index = 5, .suffix = 2,
+	    .value = 2, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "index_7_is_unsupported", .index = 7, .suffix = 2,
+	    .value = 2, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "index_0x7f_is_unsupported", .index = 0x7f, .suffix = 2,
+	    .value = 2, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "index_0x40_is_unsupported", .index = 0x40, .suffix = 2,
+	    .value = 2, .status = FSIMG_EUNSUPPORTED },
+	{ .name = "long_prefix_without_the_feature_is_corrupt",
+	    .index = 0x80, .suffix = 2, .value = 2, .prefixes = 2,
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "long_prefix_with_no_prefixes_is_corrupt", .index = 0x80,
+	    .suffix = 2, .value = 2, .prefix_feature = true,
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "long_prefix_0_of_2_is_accepted", .index = 0x80,
+	    .suffix = 2, .value = 2, .prefixes = 2, .prefix_feature = true,
+	    .status = FSIMG_OK },
+	{ .name = "long_prefix_1_of_2_is_accepted", .index = 0x81,
+	    .suffix = 2, .value = 2, .prefixes = 2, .prefix_feature = true,
+	    .status = FSIMG_OK },
+	{ .name = "long_prefix_2_of_2_is_corrupt", .index = 0x82,
+	    .suffix = 2, .value = 2, .prefixes = 2, .prefix_feature = true,
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "long_prefix_127_of_2_is_corrupt", .index = 0xff,
+	    .suffix = 2, .value = 2, .prefixes = 2, .prefix_feature = true,
+	    .status = FSIMG_ECORRUPT },
+	{ .name = "long_prefix_126_of_127_is_accepted", .index = 0xfe,
+	    .suffix = 2, .value = 2, .prefixes = 127, .prefix_feature = true,
+	    .status = FSIMG_OK },
+};
+
+static void
+test_attribute_entries_are_validated_and_decoded(void)
+{
+	static unsigned char buf[70000];
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(xattr_cases); i++) {
+		const xattr_case_t *c = &xattr_cases[i];
+		erofs_super_t sb = super_for_inodes(12, c->prefix_feature ?
+		    EROFS_INCOMPAT_XATTR_PREFIXES : 0, 0, 0);
+		erofs_xattr_t x, before;
+		size_t padded = (4 + c->suffix + c->value + 3) & ~(size_t)3;
+		const char *what = NULL;
+		fsimg_status_t status;
+
+		sb.xattr_prefix_count = (uint8_t)c->prefixes;
+		bzero(buf, 4 + c->suffix + c->value + 8);
+		buf[0] = (unsigned char)c->suffix;
+		buf[1] = c->index;
+		put_le(buf + 2, c->value, 2);
+		memset(buf + 4, 's', c->suffix);
+		memset(buf + 4 + c->suffix, 'v', c->value);
+		memset(&x, SENTINEL, sizeof(x));
+		before = x;
+
+		status = erofs_xattr_decode(buf,
+		    (size_t)((long)padded + c->slack), &sb, &x, &what);
+
+		EXPECT_STATUS(status, c->status, what, c->name);
+		EXPECT(status != FSIMG_OK || (x.entry_bytes == padded &&
+		    x.name_index == c->index &&
+		    x.suffix_length == c->suffix &&
+		    x.value_length == c->value),
+		    "%s: entry_bytes %u (padded %zu), index 0x%x, suffix %u, "
+		    "value %u", c->name, (unsigned)x.entry_bytes, padded,
+		    (unsigned)x.name_index, (unsigned)x.suffix_length,
+		    (unsigned)x.value_length);
+		EXPECT(status == FSIMG_OK ||
+		    bcmp(&x, &before, sizeof(before)) == 0,
+		    "%s: failure leaves the output untouched", c->name);
+	}
+}
+
+static void
+test_attribute_entry_shorter_than_4_bytes_is_corrupt(void)
+{
+	unsigned char buf[8] = { 0, 1, 0, 0, 0, 0, 0, 0 };
+	erofs_super_t sb = super_for_inodes(12, 0, 0, 0);
+	erofs_xattr_t x;
+	const char *what = NULL;
+	size_t length;
+
+	for (length = 0; length < 4; length++)
+		EXPECT(erofs_xattr_decode(buf, length, &sb, &x, &what) ==
+		    FSIMG_ECORRUPT, "length %zu", length);
+	EXPECT(erofs_xattr_decode(buf, 4, &sb, &x, &what) == FSIMG_OK &&
+	    x.entry_bytes == 4, "length 4 holds an empty entry");
+}
+
+static void
+test_prefix_record_validation(void)
+{
+	/* Record L=8: base 4, infix "abcdefg" (7 bytes); 10 bytes pad to 12 */
+	static const unsigned char record8[16] = { 8, 0, 4, 'a', 'b', 'c', 'd',
+	    'e', 'f', 'g', 0, 0, 0xee, 0xee, 0xee, 0xee };
+	unsigned char buf[16];
+	erofs_prefix_t p, before;
+	const char *what = NULL;
+	size_t length;
+
+	for (length = 0; length < 2; length++)
+		EXPECT(erofs_prefix_decode(record8, length, &p, &what) ==
+		    FSIMG_ECORRUPT, "length %zu is below the length word",
+		    length);
+
+	bcopy(record8, buf, sizeof(buf));
+	put_le(buf, 0, 2);
+	EXPECT(erofs_prefix_decode(buf, sizeof(buf), &p, &what) ==
+	    FSIMG_ECORRUPT, "record length 0");
+
+	for (length = 2; length < 10; length++)
+		EXPECT(erofs_prefix_decode(record8, length, &p, &what) ==
+		    FSIMG_ECORRUPT, "record of 10 bytes cut at %zu", length);
+
+	memset(&p, SENTINEL, sizeof(p));
+	EXPECT(erofs_prefix_decode(record8, 12, &p, &what) == FSIMG_OK &&
+	    p.base_index == 4 && p.infix_length == 7 && p.record_bytes == 12,
+	    "record padded to 12");
+
+	bcopy(record8, buf, sizeof(buf));
+	put_le(buf, 1, 2);
+	memset(&p, SENTINEL, sizeof(p));
+	EXPECT(erofs_prefix_decode(buf, 4, &p, &what) == FSIMG_OK &&
+	    p.infix_length == 0 && p.record_bytes == 4,
+	    "record length 1 is a base index alone");
+
+	{
+		static const unsigned char bases[] = { 1, 4, 6, 0, 5, 7, 0x80,
+		    0x81, 0xff };
+		size_t i;
+
+		for (i = 0; i < ARRAY_SIZE(bases); i++) {
+			bool builtin = bases[i] == 1 || bases[i] == 4 ||
+			    bases[i] == 6;
+
+			bcopy(record8, buf, sizeof(buf));
+			buf[2] = bases[i];
+			memset(&p, SENTINEL, sizeof(p));
+			before = p;
+			EXPECT((erofs_prefix_decode(buf, 12, &p, &what) ==
+			    FSIMG_OK) == builtin, "base index 0x%x",
+			    (unsigned)bases[i]);
+			EXPECT(builtin || bcmp(&p, &before, sizeof(p)) == 0,
+			    "base index 0x%x: failure leaves the output",
+			    (unsigned)bases[i]);
+		}
+	}
+}
+
+/* ---- XXH32 and the name filter ---- */
+
+/* The test message: byte i is (31 * i + 7) mod 256. */
+static void
+message_fill(unsigned char *msg, size_t length)
+{
+	size_t i;
+
+	for (i = 0; i < length; i++)
+		msg[i] = (unsigned char)(31 * i + 7);
+}
+
+/* Reference values: `xxhsum -H0 -s<seed> FILE` on the generated message. */
+static const struct {
+	size_t		 length;
+	uint32_t	 seed;
+	uint32_t	 hash;
+} xxh_cases[] = {
+	{ 0, 0, 0x02cc5d05 }, { 0, 1, 0x0b2cb792 },
+	{ 0, 631893647, 0x7a17d3b4 }, { 0, 4294967295u, 0x9061da9d },
+	{ 0, 633069711, 0x59ff5d54 }, { 1, 0, 0x002e0d32 },
+	{ 1, 1, 0x628e4e70 }, { 1, 631893647, 0x88692909 },
+	{ 4, 0, 0x073faa82 }, { 4, 1, 0x7c94ab13 },
+	{ 4, 631893647, 0x624be495 }, { 4, 4294967295u, 0x82063e1a },
+	{ 4, 633069711, 0x2ff521d5 }, { 15, 0, 0x9f29f87b },
+	{ 15, 1, 0xdddd4dc2 }, { 15, 631893647, 0x9231563c },
+	{ 16, 0, 0x3f6c9665 }, { 16, 1, 0x0e5c90ba },
+	{ 16, 631893647, 0x1b3fa419 }, { 17, 0, 0xe048ecdb },
+	{ 17, 1, 0xf6b42fec }, { 17, 631893647, 0xb358841c },
+	{ 17, 4294967295u, 0xb0de87c9 }, { 17, 633069711, 0xe3afc88c },
+	{ 31, 0, 0x00f1525c }, { 31, 1, 0x43fa4523 },
+	{ 31, 631893647, 0xa0e5fda5 }, { 32, 0, 0xee42e668 },
+	{ 32, 1, 0xd1cd5a82 }, { 32, 631893647, 0xc4c23cc6 },
+	{ 33, 0, 0x770b5126 }, { 33, 1, 0xb19d0f8a },
+	{ 33, 631893647, 0xa61926ce }, { 33, 4294967295u, 0x9d009823 },
+	{ 33, 633069711, 0x6bc8b3ea }, { 100, 0, 0x75936eb8 },
+	{ 100, 1, 0x0b9a0a5e }, { 100, 631893647, 0xb0d348fa },
+	{ 100, 4294967295u, 0x8c2af6d6 }, { 100, 633069711, 0xd54445f5 },
+};
+
+static void
+test_xxh32_matches_xxhsum_at_stripe_boundary_lengths(void)
+{
+	unsigned char msg[100];
+	size_t i;
+
+	message_fill(msg, sizeof(msg));
+	for (i = 0; i < ARRAY_SIZE(xxh_cases); i++) {
+		EXPECT(erofs_xxh32(msg, xxh_cases[i].length, NULL, 0,
+		    xxh_cases[i].seed) == xxh_cases[i].hash,
+		    "length %zu seed %u, all in the first piece",
+		    xxh_cases[i].length, (unsigned)xxh_cases[i].seed);
+		EXPECT(erofs_xxh32(NULL, 0, msg, xxh_cases[i].length,
+		    xxh_cases[i].seed) == xxh_cases[i].hash,
+		    "length %zu seed %u, all in the second piece",
+		    xxh_cases[i].length, (unsigned)xxh_cases[i].seed);
+	}
+}
+
+static void
+test_xxh32_matches_the_published_string_values(void)
+{
+	static const struct {
+		const char	*text;
+		uint32_t	 hash;
+	} strings[] = {
+		{ "", 0x02cc5d05 },
+		{ "a", 0x550d7456 },
+		{ "abc", 0x32d153ff },
+		{ "0123456789abcdef", 0xc2c45b69 },
+		{ "0123456789abcdefghijklmnopqrstuvwxyz", 0x9aa38e7e },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(strings); i++) {
+		const unsigned char *text =
+		    (const unsigned char *)strings[i].text;
+
+		EXPECT(erofs_xxh32(text, strlen(strings[i].text), NULL, 0, 0) ==
+		    strings[i].hash, "\"%s\"", strings[i].text);
+	}
+}
+
+static void
+test_xxh32_gives_one_value_for_every_split_of_a_message(void)
+{
+	unsigned char msg[100];
+	size_t i, k;
+
+	message_fill(msg, sizeof(msg));
+	for (i = 0; i < ARRAY_SIZE(xxh_cases); i++) {
+		for (k = 0; k <= xxh_cases[i].length; k++)
+			EXPECT(erofs_xxh32(msg, k, msg + k,
+			    xxh_cases[i].length - k, xxh_cases[i].seed) ==
+			    xxh_cases[i].hash,
+			    "length %zu seed %u split at %zu",
+			    xxh_cases[i].length, (unsigned)xxh_cases[i].seed,
+			    k);
+	}
+}
+
+static void
+test_filter_bit_hashes_infix_and_suffix_with_the_prefix_seed(void)
+{
+	unsigned char msg[33];
+
+	message_fill(msg, sizeof(msg));
+	/* Seed 0x25BBE08F plus the base index; the bit is the hash mod 32. */
+	EXPECT(erofs_xattr_filter_bit(1, NULL, 0, msg, 33) == 26,
+	    "base 1, suffix only: 0xdb804b7a");
+	EXPECT(erofs_xattr_filter_bit(1, msg, 10, msg + 10, 23) == 26,
+	    "base 1, infix and suffix of one message");
+	EXPECT(erofs_xattr_filter_bit(4, msg, 4, NULL, 0) == 11,
+	    "base 4, infix only: 0x83c6616b");
+	EXPECT(erofs_xattr_filter_bit(6, NULL, 0, msg, 33) == 31,
+	    "base 6, suffix only: 0x116a82df");
+	EXPECT(erofs_xattr_filter_bit(6, msg, 2, msg + 2, 2) == 13,
+	    "base 6, split 4-byte message: 0xe969cbed");
+	EXPECT(erofs_xattr_filter_bit(0, msg, 4, NULL, 0) == 21,
+	    "base 0: 0x2ff521d5");
+}
+
+/*
+ * The name filter of real inodes. For each, the filter word the producer
+ * stored must equal the complement of the OR of one bit per attribute, shared
+ * or inline, found by walking the inode's region with the decoders.
+ */
+typedef struct filter_inode {
+	const char	*name;
+	uint32_t	 nid;
+	uint32_t	 filter;	/* the fixture's, as e6-xattrs.rb */
+} filter_inode_t;
+
+static const filter_inode_t default_inodes[] = {
+	{ "/common1", 56, 0xfdffdfff },
+	{ "/dacl", 74, 0xbfdfffff },
+	{ "/fs", 99, 0xeffff7ff },
+	{ "/lp4", 115, 0xbeff7fff },
+	{ "/many", 118, 0xbc3836f7 },
+};
+
+static const filter_inode_t prefix_inodes[] = {
+	{ "/lp1", 107, 0xffff7fff },
+	{ "/lp3", 111, 0xfeffffff },
+	{ "/lp4", 113, 0xbeff7fff },
+	{ "/mixed", 124, 0xbfdfdfff },
+	{ "/pair1", 128, 0xffbfffff },
+};
+
+enum { E6_IMAGE_BYTES = 8192 };
+
+/* One attribute's filter bit, resolving a long prefix in the image's table. */
+static unsigned
+attribute_filter_bit(const unsigned char *image, const erofs_super_t *sb,
+    const unsigned char *entry, const erofs_xattr_t *x)
+{
+	const unsigned char *suffix = entry + EROFS_XATTR_ENTRY_BYTES;
+	const unsigned char *record;
+	erofs_prefix_t prefix;
+	const char *what = NULL;
+	unsigned k;
+
+	if (x->name_index < EROFS_XATTR_LONG_PREFIX)
+		return (erofs_xattr_filter_bit(x->name_index, NULL, 0, suffix,
+		    x->suffix_length));
+
+	record = image + 4 * (size_t)sb->xattr_prefix_start;
+	for (k = 0; k < (unsigned)(x->name_index & 0x7f); k++) {
+		CHECK(erofs_prefix_decode(record, 64, &prefix, &what) ==
+		    FSIMG_OK);
+		record += prefix.record_bytes;
+	}
+	CHECK(erofs_prefix_decode(record, 64, &prefix, &what) == FSIMG_OK);
+	return (erofs_xattr_filter_bit(prefix.base_index, record + 3,
+	    prefix.infix_length, suffix, x->suffix_length));
+}
+
+static void
+filter_check_inode(const char *image_name, const unsigned char *image,
+    const erofs_super_t *sb, const filter_inode_t *inode)
+{
+	erofs_inode_t decoded;
+	erofs_xattr_header_t header;
+	erofs_xattr_t x;
+	const unsigned char *region;
+	const char *what = NULL;
+	size_t position = 32 * (size_t)inode->nid;
+	uint32_t seen = 0;
+	unsigned i;
+
+	CHECK(erofs_inode_decode(image + position, E6_IMAGE_BYTES - position,
+	    sb, &decoded, &what) == FSIMG_OK);
+	region = image + position + decoded.fixed_bytes;
+	CHECK(erofs_xattr_header_decode(region, decoded.xattr_bytes, &header,
+	    &what) == FSIMG_OK);
+
+	for (i = 0; i < header.shared_count; i++) {
+		uint64_t at;
+		uint32_t id;
+
+		CHECK(erofs_xattr_shared_id(region, &header, i, &id));
+		at = erofs_xattr_shared_offset(sb, id);
+		CHECK(at < E6_IMAGE_BYTES);
+		CHECK(erofs_xattr_decode(image + at, E6_IMAGE_BYTES - at, sb,
+		    &x, &what) == FSIMG_OK);
+		seen |= UINT32_C(1) << attribute_filter_bit(image, sb,
+		    image + at, &x);
+	}
+	for (position = header.entries_offset; position < decoded.xattr_bytes;
+	    position += x.entry_bytes) {
+		CHECK(erofs_xattr_decode(region + position,
+		    decoded.xattr_bytes - position, sb, &x, &what) == FSIMG_OK);
+		seen |= UINT32_C(1) << attribute_filter_bit(image, sb,
+		    region + position, &x);
+	}
+
+	EXPECT(header.filter == inode->filter, "%s %s: stored filter 0x%08x",
+	    image_name, inode->name, (unsigned)header.filter);
+	EXPECT(~seen == inode->filter, "%s %s: complement of the bits is "
+	    "0x%08x, fixture has 0x%08x", image_name, inode->name,
+	    (unsigned)~seen, (unsigned)inode->filter);
+}
+
+/*
+ * Decode the superblock of a fixture image. A fixture holds only the bytes
+ * its tests read, so the checksum, which covers the rest of the block, is
+ * taken out of the decoded region rather than verified.
+ */
+static fsimg_status_t
+fixture_super_decode(const unsigned char *image, erofs_super_t *sb)
+{
+	unsigned char region[REGION_BYTES];
+	erofs_config_t config;
+	const char *what;
+
+	bcopy(image + EROFS_SUPER_OFFSET, region, sizeof(region));
+	region[SB_COMPAT] &= (unsigned char)~EROFS_COMPAT_SB_CHKSUM;
+	return (erofs_region_decode(region, sizeof(region), sb, &config,
+	    &what));
+}
+
+static void
+filter_check_image(const char *image_name, const fixture_t *fixture,
+    const filter_inode_t *inodes, size_t count, unsigned prefix_count)
+{
+	static unsigned char image[E6_IMAGE_BYTES];
+	erofs_super_t sb;
+	size_t i;
+
+	fixture_load(fixture, image, sizeof(image));
+	CHECK(fixture_super_decode(image, &sb) == FSIMG_OK);
+	CHECK(sb.xattr_prefix_count == prefix_count);
+	CHECK(!sb.filter_disabled);
+	for (i = 0; i < count; i++)
+		filter_check_inode(image_name, image, &sb, &inodes[i]);
+}
+
+static void
+test_name_filter_of_real_inodes_is_the_complement_of_the_attribute_bits(void)
+{
+	static const fixture_t plain = FIXTURE(xattr_default, 0);
+	static const fixture_t prefixes = FIXTURE(xattr_prefixes, 0);
+
+	filter_check_image("e6-xattr-default", &plain, default_inodes,
+	    ARRAY_SIZE(default_inodes), 0);
+	filter_check_image("e6-xattr-pfx-plain", &prefixes, prefix_inodes,
+	    ARRAY_SIZE(prefix_inodes), 2);
+}
+
+static void
+test_real_long_prefix_records_decode(void)
+{
+	static const fixture_t fixture = FIXTURE(xattr_prefixes, 0);
+	static unsigned char image[E6_IMAGE_BYTES];
+	erofs_super_t sb;
+	erofs_prefix_t first, second;
+	const char *what = NULL;
+	const unsigned char *record;
+
+	fixture_load(&fixture, image, sizeof(image));
+	CHECK(fixture_super_decode(image, &sb) == FSIMG_OK);
+	EXPECT(sb.xattr_prefix_count == 2 && sb.xattr_prefix_start == 297,
+	    "two prefixes starting at word 297 (byte 1188)");
+
+	record = image + 1188;
+	EXPECT(erofs_prefix_decode(record, 28, &first, &what) == FSIMG_OK &&
+	    first.base_index == 1 && first.infix_length == 13 &&
+	    first.record_bytes == 16 &&
+	    bcmp(record + 3, "vendor.alpha.", 13) == 0,
+	    "record at 1188: user. + vendor.alpha.");
+	record += first.record_bytes;
+	EXPECT(erofs_prefix_decode(record, 12, &second, &what) == FSIMG_OK &&
+	    second.base_index == 4 && second.infix_length == 7 &&
+	    second.record_bytes == 12 && bcmp(record + 3, "vendor.", 7) == 0,
+	    "record at 1204: trusted. + vendor.");
+	EXPECT(1188 + first.record_bytes + second.record_bytes == 1216,
+	    "the table ends where the first inode starts");
+}
+
+int
+main(void)
+{
+	test_crc32c_oracle_matches_the_published_check_value();
+
+	test_super_probe_classifies_each_case();
+	test_magic_matches_only_the_magic_bytes();
+	test_super_fields_are_decoded_from_their_offsets();
+	test_filter_byte_nonzero_disables_the_name_filter();
+	test_name_length_ends_at_the_first_nul_or_the_field_end();
+	test_negative_epochs_decode_as_signed();
+	test_root_nid_without_48bit_is_the_16_bit_field();
+	test_48bit_widens_root_nid_and_block_count();
+	test_reserved_superblock_bytes_are_reported_not_refused();
+
+	test_extension_slots_past_the_given_length_are_corrupt();
+	test_region_decode_applies_the_rules_beyond_the_base_superblock();
+	test_metabox_nid_is_read_from_the_first_slot();
+	test_metabox_nid_with_bit_63_is_corrupt();
+	test_metabox_slot_reserved_word_is_reported();
+	test_slot_bytes_are_ignored_without_metabox();
+
+	test_real_checksummed_regions_are_accepted();
+	test_flipped_bit_inside_the_covered_range_is_corrupt();
+	test_flipped_checksum_field_is_corrupt();
+	test_flipped_bit_just_past_the_covered_range_is_accepted();
+	test_region_shorter_than_the_covered_range_is_corrupt();
+	test_wrong_checksum_without_sb_chksum_is_accepted();
+	test_super_checksum_equals_the_independent_crc();
+	test_super_checksum_covers_the_range_of_every_block_size();
+	test_super_checksum_refuses_block_sizes_outside_9_to_12();
+
+	test_each_configuration_payload_is_validated_and_decoded();
+	test_records_follow_the_slots_in_increasing_algorithm_order();
+	test_without_compr_cfgs_the_word_is_lz4_max_distance();
+	test_algorithm_mask_bits_above_3_are_unsupported();
+	test_record_past_byte_3072_is_unsupported();
+	test_record_past_a_shorter_length_is_corrupt();
+	test_real_four_record_configuration_decodes();
+
+	test_inode_decode_classifies_each_case();
+	test_inode_of_length_0_is_corrupt();
+	test_fixed_bytes_follow_format_bit_0_only();
+	test_format_bits_5_to_15_are_each_corrupt();
+	test_each_mode_type_selects_its_kind();
+	test_other_mode_types_are_corrupt();
+	test_permissions_are_the_low_12_bits_of_the_mode();
+	test_compact_inode_fields_are_decoded();
+	test_compact_time_is_epoch_plus_the_unsigned_word();
+	test_extended_inode_fields_are_decoded();
+	test_each_extended_reserved_byte_nonzero_is_corrupt();
+	test_48bit_inode_start_block_bits_are_reported();
+	test_directory_with_bit_4_omits_dot();
+	test_device_numbers_decode_by_the_linux_bit_layout();
+
+	test_chunk_format_reserved_bits_7_to_15_are_each_corrupt();
+	test_chunk_format_48bit_bit_needs_the_48bit_layout();
+	test_chunk_format_sets_size_and_entry_width();
+	test_chunk_entries_decode_to_blocks_and_holes();
+
+	test_directory_block_shorter_than_one_entry_is_corrupt();
+	test_first_name_offset_defines_the_entry_count();
+	test_first_name_offset_must_be_a_nonzero_multiple_of_12_below_the_length();
+	test_entry_fields_and_name_spans_are_decoded();
+	test_last_name_ends_at_the_valid_length_or_the_first_nul();
+	test_name_offsets_must_increase_strictly();
+	test_name_offset_inside_the_entry_array_is_corrupt();
+	test_name_offset_past_the_valid_length_is_corrupt();
+	test_empty_last_name_is_corrupt();
+	test_names_longer_than_255_bytes_are_corrupt();
+	test_slash_or_nul_in_a_name_is_corrupt();
+	test_file_types_0_to_7_are_accepted_and_8_is_corrupt();
+	test_entry_index_past_the_count_is_invalid();
+	test_real_root_directory_block_decodes_to_the_dumped_names();
+
+	test_attribute_header_must_fit_the_region();
+	test_attribute_header_reserved_bytes_are_not_required_zero();
+	test_shared_ids_are_read_from_offset_12();
+	test_shared_id_past_the_shared_count_is_false_and_leaves_the_output();
+	test_shared_entry_offset_is_the_block_plus_4_per_id();
+	test_attribute_entries_are_validated_and_decoded();
+	test_attribute_entry_shorter_than_4_bytes_is_corrupt();
+	test_prefix_record_validation();
+
+	test_xxh32_matches_xxhsum_at_stripe_boundary_lengths();
+	test_xxh32_matches_the_published_string_values();
+	test_xxh32_gives_one_value_for_every_split_of_a_message();
+	test_filter_bit_hashes_infix_and_suffix_with_the_prefix_seed();
+	test_name_filter_of_real_inodes_is_the_complement_of_the_attribute_bits();
+	test_real_long_prefix_records_decode();
+
+	if (failures != 0)
+		fprintf(stderr, "test/erofs.c: %d checks failed\n", failures);
+	CHECK(failures == 0);
+	return (0);
+}

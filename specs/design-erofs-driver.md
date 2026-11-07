@@ -26,13 +26,13 @@ reach the driver through the write options under the capability record's
 | --- | --- |
 | `erofs.h` | Private types, constants and prototypes shared by the files below |
 | `descriptor.c` | `fsimg_erofs_format`: the `erofs` variant, its capability record and the probe |
-| `codec.c` | Pure decoders and encoders of the superblock, configuration records, both inode forms, directory entries, attribute headers and entries, chunk entries, the map header, full records, compact groups and encoded-extent records; the name-filter hash; no I/O |
+| `codec.c` | Pure decoders and encoders of the superblock, configuration records, both inode forms, directory blocks and their entries, attribute headers and entries, long-prefix records, chunk entries, the map header, full records, compact groups and encoded-extent records; the name-filter hash; no I/O |
 | `read.c` | `fsimg_erofs_reader_ops`: open, close and volume information; the feature decision |
 | `meta.c` | The metadata reader: `erofs_meta_read()` over the primary and box spaces, and `erofs_inode_load()` |
 | `map.c` | `erofs_map()`: the one function that maps a logical offset of an inode to a normalized extent |
 | `zmap.c` | Compressed lookups: full index, compact groups and encoded extents to one normalized cluster |
 | `cluster.c` | The decode windows: stored-byte reads, padding, codec dispatch, plain clusters and the one-cluster reuse rule |
-| `directory.c` | `prepare`, `replay`, `keys` and `key`; the directory block parser and the parent rule |
+| `directory.c` | `prepare`, `replay`, `keys` and `key`; name order across blocks, dot entries and the parent rule |
 | `xattr.c` | Attribute region validation, the extra-data mark, and the pool, prefix and filter checks verification calls |
 | `content.c` | `resolve`: mapped, zero and held extents for files and symbolic links |
 | `verify.c` | Reference and ownership streams, link counts, the packed inode and the box sweep |
@@ -82,9 +82,14 @@ only:
 | --- | --- |
 | `erofs_super_t` | Block shift, feature words, root NID, inode count, epoch and nanoseconds, block count, metadata and attribute blocks, UUID, name bytes, algorithm mask or LZ4 distance, prefix count and start, packed and box NIDs, build time |
 | `erofs_config_t` | Per algorithm: present, maximum distance, maximum cluster blocks, dictionary size, window |
-| `erofs_inode_t` | NID, space, body offset, fixed size, attribute region size, layout, kind, permission bits, link count, size, layout word and its high bits, owner, group, time, serial, body length |
+| `erofs_inode_t` | NID, space, body offset, fixed size, attribute region size, layout, kind, permission bits, link count, size, layout word and its high bits, owner, group, time, serial, layout-bytes offset, body length |
+| `erofs_chunk_format_t` | Chunk bits and size, index entry width, wide block numbers |
+| `erofs_chunk_t` | Block number or hole |
+| `erofs_dirblock_t` | A directory block's bytes, valid length and entry count |
 | `erofs_dirent_t` | Child NID, name span, file type |
-| `erofs_xattr_t` | Shared count, entry span, name index, suffix and value spans |
+| `erofs_xattr_header_t` | Name filter, shared count, inline entries' start |
+| `erofs_xattr_t` | Entry span, name index, suffix and value spans |
+| `erofs_prefix_t` | Record span, base index, infix span |
 | `erofs_zheader_t` | Fragment offset or tail size, advice, algorithms, cluster bits, whole-fragment mark, extent count |
 | `erofs_cluster_t` | The normalized cluster: logical start and length, source (volume, inline body or packed inode), physical byte start and stored length, algorithm or plain, interlace offset, partial mark |
 | `erofs_extent_t` | The normalized extent `map.c` returns: logical start and length, kind (stored, zero, inline, cluster, fragment), physical start, and the cluster when compressed |
@@ -104,27 +109,29 @@ Open:
 1. Reads the
    [superblock region](design-erofs.md#volume-identity-and-geometry) from
    `[1024, min(4096, volume end))`, at most 3072 bytes, rereads the
-   superblock from it, and checks every superblock rule: block size,
-   `dirblkbits`, reserved bytes, the checksum, the extra device count and
-   the volume extent. A nonzero device count refuses the volume here,
-   before open's feature-pairing and chunk rules
+   superblock from it, and checks every superblock rule in this order:
+   the probe's checks, the extension slots against the bytes read, the
+   extra device count, the checksum, the remaining base fields with their
+   feature pairings, the metadata-box slot and the configuration records;
+   reserved bytes are recorded and the volume extent follows. A nonzero
+   device count therefore refuses the volume before open's feature-pairing
+   and chunk rules
    ([external devices](design-erofs.md#external-data-devices)). Open sets
    the volume information's `volume_bytes` to `blocks * B` when the block
    count is nonzero, so the reader core derives `missing_bytes` for a
    truncated volume, and sets the address domain and
    `reader->content_domain`. A truncated volume opens; nothing in open fails
    on truncation unless a structure it reads lies past the end.
-2. Decides the features once: the incompatible word against the set the
-   reader supports; refused and unsupported bits fail here
-   with the feature named. The decision is a set of booleans the rest of the
-   driver reads, never the raw words.
-3. Decodes the configuration records when `COMPR_CFGS` is set.
-4. Under the metadata box, loads the box inode from the primary space,
+2. Decides the features once from the decoded words: the bits this stage
+   of the reader refuses fail here with the feature named (the probe's
+   checks already refused bits outside the format's table). The decision is
+   a set of booleans the rest of the driver reads, never the raw words.
+3. Under the metadata box, loads the box inode from the primary space,
    requires a regular file that uses no fragment, and keeps it, with
    its validated map parameters, for the life of the reader.
-5. Under fragments, loads the packed inode the same way and checks that it is
+4. Under fragments, loads the packed inode the same way and checks that it is
    a regular file that uses no fragment.
-6. Loads the root inode and requires a directory.
+5. Loads the root inode and requires a directory.
 
 Open reads nothing else: no directory, no attribute pool, no prefix table.
 Volume information is filled from the superblock and the feature decision.
