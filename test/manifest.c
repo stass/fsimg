@@ -798,8 +798,9 @@ test_generated_digest_after_planning(void)
 
 /* The source cursor serves generated content: next_range() tiles the file
  * into its DATA and ZERO runs, reads at scattered offsets match the
- * reference and read zero inside holes, a positional block decodes to its
- * seed and offset, and a link's target is served from its record.
+ * reference and read zero inside holes, each charging one unit of work
+ * as an I/O transfer would, a positional block decodes to its seed and
+ * offset, and a link's target is served from its record.
  */
 static void
 test_generated_ranges(void)
@@ -825,7 +826,7 @@ test_generated_ranges(void)
 	fsimg_ctx_t *ctx;
 	fsimg_range_t range;
 	unsigned char bytes[100];
-	uint64_t offset, state;
+	uint64_t offset, state, work;
 	size_t length, transferred;
 	int fd;
 	fixture_t fixture;
@@ -856,12 +857,14 @@ test_generated_ranges(void)
 	CHECK(range.offset == 12 && range.length == 18 &&
 	    range.kind == FSIMG_RANGE_ZERO);
 	state = 12345;
+	work = writer->session.progress.work;
 	for (unsigned trial = 0; trial < 200; trial++) {
 		state = state * 6364136223846793005u + 1442695040888963407u;
 		offset = (state >> 33) % 100;
 		length = (size_t)((state >> 17) % 40) + 1;
 		CHECK(fsimg_source_read(writer, offset, bytes, length,
 		    &transferred, NULL) == FSIMG_OK);
+		CHECK(writer->session.progress.work == ++work);
 		CHECK(transferred == (length < 100 - offset ? length :
 		    100 - offset));
 		for (size_t i = 0; i < transferred; i++)

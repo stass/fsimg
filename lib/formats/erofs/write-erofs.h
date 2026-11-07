@@ -90,6 +90,7 @@ typedef struct erofs_plan {
 	uint64_t	 used_blocks;
 	uint64_t	 block_count;
 	uint64_t	 volume_bytes;
+	uint64_t	 least_volume;		/* LZ4: before measurement */
 	uint64_t	 inode_count;
 	fsimg_store_t	*cluster_records;	/* LZ4, write-lz4.c */
 	uint64_t	 cluster_count;		/* records of compressed files */

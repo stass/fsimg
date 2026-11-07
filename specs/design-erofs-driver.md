@@ -417,7 +417,16 @@ catalog position:
    without needing any NID. A subdirectory adds a link to its parent's
    row, so a directory's link count is final only once its children have
    been visited.
-3. **Measurement**, under `compression=lz4` only: for each regular file
+3. **Measurement**, under `compression=lz4` only. Before any read, the
+   least volume the plan can reach goes to the writer's output limit
+   check: a requested `volume_bytes`, or else the blocks up to the end of
+   the superblock and every row's flat data blocks, except that a file
+   measurement would read counts the fewer of its flat blocks and one
+   cluster per 64 KiB window, since a cluster holds at most a window. An
+   output limit even that volume exceeds refuses the plan unread, and
+   sizing refuses a volume below it as a corrupt plan, so a layout rule
+   the bound does not anticipate fails loudly. Then,
+   for each regular file
    whose flat layout stores at least two blocks, since a compressed file
    stores at least one, a [measured read](#lz4-planning-and-emission)
    encodes the content, records its cluster count in the row and appends
@@ -425,7 +434,10 @@ catalog position:
    layout when it stores fewer blocks, and the store keeps only the chosen
    files' records. No address exists yet, so a cluster's block is its
    position among the file's clusters; emission and box generation add the
-   file's planned start block when they encode it.
+   file's planned start block when they encode it. Each file is read to
+   its end: every cluster but the last holds at least a block of content,
+   so a file reaches its flat block count of clusters only within its last
+   block, and stopping there would save less than a block.
 4. **Metadata placement.** Fixes each row's inode form and its flat or
    flat-inline layout from its final fields, since an extended inode's
    larger fixed part decides whether a tail fits, then assigns its body

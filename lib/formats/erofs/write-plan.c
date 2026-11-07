@@ -18,8 +18,9 @@
  * 1. Settings and time fix the block size, the format time and the UUID.
  * 2. Entries encode each entry's kind, size, owner, mode, time and link
  *    count, and pack each directory's names (write-dir.c) for its size.
- * 3. Measurement, under compression=lz4, encodes each regular file whose
- *    flat layout stores at least two blocks (write-lz4.c) and gives it the
+ * 3. Measurement, under compression=lz4, refuses an output limit the least
+ *    reachable volume exceeds, then encodes each regular file whose flat
+ *    layout stores at least two blocks (write-lz4.c) and gives it the
  *    compressed layout when that stores fewer.
  * 4. Metadata placement chooses each inode's form and layout, which the
  *    finished link counts decide, and assigns its NID.
@@ -66,6 +67,9 @@ static fsimg_status_t count_subdirectory(erofs_plan_t *, uint64_t,
 static fsimg_status_t plan_entry(erofs_plan_t *, uint64_t, uint64_t *,
     fsimg_error_t *);
 static fsimg_status_t plan_entries(erofs_plan_t *, fsimg_error_t *);
+static uint64_t flat_blocks(const erofs_plan_t *, const erofs_row_t *,
+    bool *);
+static fsimg_status_t check_least_volume(erofs_plan_t *, fsimg_error_t *);
 static fsimg_status_t measure_files(erofs_plan_t *, fsimg_error_t *);
 static void choose_inode_shape(erofs_row_t *, int64_t, uint32_t);
 static fsimg_status_t place_metadata(erofs_plan_t *, fsimg_error_t *);
@@ -536,44 +540,109 @@ plan_entries(erofs_plan_t *plan, fsimg_error_t *error)
 }
 
 /*
+ * The number of data blocks the row stores under its flat layout, in the
+ * shape pass 4 will give it. *measured is set when pass 3 measures the
+ * row: a regular file of at least two flat blocks, since a compressed file
+ * stores at least one.
+ */
+static uint64_t
+flat_blocks(const erofs_plan_t *plan, const erofs_row_t *row, bool *measured)
+{
+	erofs_row_t shaped = *row;
+	uint64_t blocks;
+
+	choose_inode_shape(&shaped, plan->format_time, plan->block_bytes);
+	blocks = erofs_row_data_blocks(&shaped, plan->block_bytes);
+	*measured = (row->mode & EROFS_MODE_TYPE_MASK) == EROFS_MODE_REGULAR &&
+	    blocks >= 2;
+	return (blocks);
+}
+
+/*
+ * Before pass 3 reads any content, the least volume the plan can reach,
+ * whatever the measurements find, goes to the output limit check
+ * (fsimg_writer_output_floor()), so a limit even that volume exceeds fails
+ * unread. It is kept in least_volume, and make_plan() refuses a sized
+ * volume below it as a corrupt plan, so a layout rule that lets a file
+ * store fewer blocks than this bound counts fails every LZ4 plan that
+ * uses it instead of refusing valid images. A requested volume is the
+ * volume. Otherwise the metadata area
+ * covers at least the boot area and the superblock, a measured file
+ * stores at least one cluster per 64 KiB window, since a cluster holds at
+ * most a window, unless it stays flat, and every other row stores its flat
+ * blocks. The sums saturate: a volume past 64 bits fits no limit.
+ */
+static fsimg_status_t
+check_least_volume(erofs_plan_t *plan, fsimg_error_t *error)
+{
+	fsimg_writer_t *writer = plan->common.writer;
+	const uint32_t block_bytes = plan->block_bytes;
+	uint64_t volume, blocks, flat, windows;
+	erofs_row_t row;
+	bool measured;
+	fsimg_status_t status;
+
+	volume = writer->options.volume_bytes;
+	if (volume == 0) {
+		blocks = (EROFS_WRITE_METADATA_START + block_bytes - 1) /
+		    block_bytes;
+		for (uint64_t id = 0; id <= writer->count; id++) {
+			status = erofs_row_get(plan, id, &row, error);
+			if (status != FSIMG_OK)
+				return (status);
+			flat = flat_blocks(plan, &row, &measured);
+			windows = row.size / EROFS_LZ4_WINDOW_BYTES +
+			    (row.size % EROFS_LZ4_WINDOW_BYTES != 0);
+			fsimg_stat_add(&blocks,
+			    measured && windows < flat ? windows : flat);
+		}
+		if (!fsimg_mul_u64(blocks, block_bytes, &volume))
+			volume = UINT64_MAX;
+	}
+	plan->least_volume = volume;
+	return (fsimg_writer_output_floor(writer, volume, error));
+}
+
+/*
  * Pass 3, under compression=lz4 only (specs/design-erofs.md, LZ4 profile):
- * each regular file is measured when its flat layout, with the form and
- * inline tail placement will choose, stores at least two blocks, since a
- * compressed file stores at least one, and takes the compressed layout
+ * once the least volume fits the output limit, each regular file is
+ * measured when its flat layout, with the form and inline tail placement
+ * will choose, stores at least two blocks, and takes the compressed layout
  * when its clusters are fewer than those blocks. Its records then stay in
  * the plan's cluster records; a file that stays flat leaves them to be
- * overwritten by the next.
+ * overwritten by the next. A file is read to its end even once its
+ * clusters reach its flat blocks: every cluster but the last holds at
+ * least a block of content, so that happens only within its last block.
  */
 static fsimg_status_t
 measure_files(erofs_plan_t *plan, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
-	const uint32_t block_bytes = plan->block_bytes;
 	erofs_lz4_former_t *former;
-	erofs_row_t row, shaped;
+	erofs_row_t row;
 	uint64_t flat, clusters;
+	bool measured;
 	fsimg_status_t status;
 
 	if (writer->options.erofs_compression != FSIMG_EROFS_COMPRESSION_LZ4)
 		return (FSIMG_OK);
+	status = check_least_volume(plan, error);
+	if (status != FSIMG_OK)
+		return (status);
 	status = fsimg_store_new(&writer->session, &plan->cluster_records,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = erofs_lz4_former_new(writer->ctx, &writer->session,
-	    block_bytes, &former, error);
+	    plan->block_bytes, &former, error);
 	if (status != FSIMG_OK)
 		return (status);
 	for (uint64_t id = 1; id <= writer->count; id++) {
 		status = erofs_row_get(plan, id, &row, error);
 		if (status != FSIMG_OK)
 			break;
-		if ((row.mode & EROFS_MODE_TYPE_MASK) != EROFS_MODE_REGULAR)
-			continue;
-		shaped = row;
-		choose_inode_shape(&shaped, plan->format_time, block_bytes);
-		flat = erofs_row_data_blocks(&shaped, block_bytes);
-		if (flat < 2)
+		flat = flat_blocks(plan, &row, &measured);
+		if (!measured)
 			continue;
 		/* A cluster holds at most a window, so a file needing more
 		 * clusters than 32-bit addressing has blocks is refused unread.
@@ -841,6 +910,9 @@ make_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		goto fail;
 	status = size_volume(plan, error);
+	if (status == FSIMG_OK && plan->volume_bytes < plan->least_volume)
+		status = fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_WRITER, "EROFS volume is below its least volume");
 	if (status != FSIMG_OK)
 		goto fail;
 

@@ -313,6 +313,14 @@ fsimg_status_t fsimg_catalog_prepare(fsimg_writer_t *,
  */
 fsimg_status_t fsimg_writer_loss(fsimg_writer_t *, const fsimg_entry_t *,
     uint32_t, const char *, fsimg_error_t *);
+/* Refuse a plan whose volume cannot fall below volume_bytes when even that
+ * volume, held again by a raw intermediate, exceeds the output limit. A
+ * driver whose layout depends on content calls it before planning reads
+ * any, so an image that cannot fit is refused unread; the full check after
+ * planning still decides every plan it admits.
+ */
+fsimg_status_t fsimg_writer_output_floor(fsimg_writer_t *, uint64_t,
+    fsimg_error_t *);
 /* Source lookup uses its own record buffer and preserves current snapshot. */
 fsimg_status_t fsimg_catalog_read_source(fsimg_writer_t *, uint64_t,
     fsimg_catalog_entry_t *, fsimg_error_t *);

@@ -26,7 +26,10 @@ begins:
 
 1. Seal and plan the catalog. Planning refuses an output whose bound, plus
    the raw intermediate of an encoded output ([layer
-   design](design-layers.md)), exceeds the output limit, then checks the
+   design](design-layers.md)), exceeds the output limit; when a [measured
+   read](#measured-reads-and-encoded-copies) plans the layout, an output
+   whose least volume already exceeds the limit is refused before any
+   content is read. Planning then checks the
    digests a manifest claims for generated content, as the [manifest
    design](design-mtree.md#digests) states. The raw intermediate of a bare
    stream is charged when the stream is written, before any byte is emitted.
@@ -159,14 +162,22 @@ the encoder's determinism makes the two agree.
   `[0, length)` once, in logical order, in batches of at most the emission
   buffer's size: DATA ranges are read exactly, and ZERO ranges arrive as
   zero bytes, since an encoder needs them, with one work unit charged per
-  zero batch as each read charges one. After the last byte the consumer
+  zero batch as each read charges one, an I/O transfer or computed
+  content alike. After the last byte the consumer
   receives one call with no bytes, which marks the end of the content so
   it can finish its last unit; an empty source receives only that call.
   The source is then validated and closed; a consumer failure or a failed
   read closes it at once. The read works during planning and during
   emission, never holds a source between calls, allocates its own batch
   buffer for each call and charges every read to the session, under the
-  source failure rule above.
+  source failure rule above. A driver that measures during planning first
+  states the least volume its plan can reach whatever the measurements
+  find, and the writer refuses the plan when that volume, held once by the
+  disk and again by a raw intermediate, already exceeds the output limit:
+  every output's bound holds its disk and every disk its volume, so the
+  full check after planning would refuse it too. An image whose least
+  volume fits but whose final bound does not is refused by the full check
+  once planning ends, after its measured reads.
 * **Encoded copy:** during emission, a measured read whose consumer is the
   driver's encoder, together with the regions the plan gives the encoding
   and the number of bytes the plan says it stores. The regions are checked

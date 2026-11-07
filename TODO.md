@@ -399,16 +399,6 @@
   for `e13-big5g-chunk1m`, a 3 MB image.
   Reporting a driver's holes as ZERO ranges would let extraction leave
   them as holes.
-* [Medium] **EROFS LZ4 measurement runs before the output budget**
-  (`lib/formats/erofs/write-plan.c` `measure_files`,
-  `lib/write/writer.c`): under `compression=lz4` planning reads and
-  encodes every regular file of two or more blocks before `plan_disk()`
-  checks the output limit, whose comment assumes no content is touched
-  before then. The work budget bounds the encoding (each cluster charges
-  its bytes), but generated DATA reads charge no work, and a file that
-  turns out to stay flat is still encoded to its end. Decide whether the
-  output limit should be checked against the flat sizes first, and stop a
-  measurement once its clusters reach the flat block count.
 * [Low] **EROFS verification reports two advisory findings nowhere**
   (`lib/formats/erofs/verify.c`): the [format design's
   verification](specs/design-erofs.md#verification) reports the

@@ -224,10 +224,15 @@ reproducible_options(fsimg_write_options_t *options)
 	options->epoch = EPOCH;
 }
 
+/* The output stack new_writer() builds, NULL for the bare volume. */
+static const char *stack;
+
 static fsimg_status_t
 new_writer(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
     fsimg_writer_t **writer, fsimg_error_t *error)
 {
+	if (stack != NULL)
+		return (fsimg_writer_new(ctx, stack, options, writer, error));
 	return (fsimg_writer_new_variant(ctx, &fsimg_erofs_format,
 	    &fsimg_erofs_format.variants[0], options, writer, error));
 }
@@ -291,6 +296,9 @@ static uint64_t changed_source = UINT64_MAX;
 static uint64_t drifted_source = UINT64_MAX;
 static uint64_t short_source = UINT64_MAX;
 
+/* Every provider read counts here, so a test can tell planning read none. */
+static uint64_t provider_reads;
+
 /* A byte of noise at offset, from a 64-bit mix of the index and offset. */
 static unsigned char
 noise_byte(uint64_t index, uint64_t offset)
@@ -340,6 +348,7 @@ provider_read(void *argument FSIMG_UNUSED, uint64_t id, uint64_t offset,
 	unsigned char *bytes = buffer;
 	uint64_t size;
 
+	provider_reads++;
 	CHECK(id < tree.count);
 	size = tree.specs[id].size;
 	CHECK(offset <= size);
@@ -3427,6 +3436,107 @@ test_lz4_allocation_and_write_failures_are_clean(void)
 }
 
 /*
+ * Plan a 1 MiB text file under compression=lz4, an output limit and a
+ * requested volume, 0 for none. Its least image is the metadata's first
+ * blocks and one cluster per 64 KiB window, 16 clusters. The text repeats
+ * a 44-byte sentence, so a window of it encodes in far less than 512
+ * bytes and the file stores about those 16 clusters at every block size,
+ * while the flat image stores 1 MiB.
+ */
+static fsimg_status_t
+plan_lz4_under_output_limit(fixture_t *fixture, uint64_t limit,
+    uint64_t volume_bytes)
+{
+	fsimg_write_options_t options;
+	fsimg_options_t context;
+
+	tree_reset();
+	add_file(1u << 20, "/text")->content = CONTENT_TEXT;
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	reproducible_options(&options);
+	options.volume_bytes = volume_bytes;
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+	fsimg_options_init(&context);
+	context.max_output_bytes = limit;
+	fixture_open_with(fixture, &context, 0);
+	provider_reads = 0;
+	return (fixture_plan(fixture, &options, false));
+}
+
+/*
+ * An output limit below the least image the content could compress to
+ * refuses the plan before measurement reads a byte, and so does one below
+ * a requested volume or, behind a DMG container, below twice the least
+ * image, since the raw intermediate holds the disk too. A limit the flat
+ * image exceeds but the compressed image fits is accepted, down to exactly
+ * the planned output.
+ */
+static void
+test_lz4_output_limit_below_the_least_image_refuses_unread(void)
+{
+	const uint64_t least = 16 * (uint64_t)block_size;
+	fixture_t fixture;
+	fsimg_status_t status;
+	uint64_t output;
+
+	status = plan_lz4_under_output_limit(&fixture, least, 0);
+	CHECK_CASE(status == FSIMG_ELIMIT, "status %d: %s", status,
+	    fixture.error.message);
+	CHECK(fixture.error.resource == FSIMG_RESOURCE_OUTPUT &&
+	    fixture.error.limit == least && fixture.error.observed > least);
+	CHECK_CASE(provider_reads == 0, "planning read the source %llu times",
+	    (unsigned long long)provider_reads);
+	CHECK(!fixture.writer->source.active);
+	fixture_close(&fixture);
+
+	status = plan_lz4_under_output_limit(&fixture, 64 * (uint64_t)block_size,
+	    65 * (uint64_t)block_size);
+	CHECK(status == FSIMG_ELIMIT &&
+	    fixture.error.resource == FSIMG_RESOURCE_OUTPUT);
+	CHECK(fixture.error.observed == 65 * (uint64_t)block_size);
+	CHECK(provider_reads == 0);
+	fixture_close(&fixture);
+
+	stack = "erofs/dmg";
+	status = plan_lz4_under_output_limit(&fixture, 2 * least, 0);
+	stack = NULL;
+	CHECK_CASE(status == FSIMG_ELIMIT, "status %d: %s", status,
+	    fixture.error.message);
+	CHECK(fixture.error.resource == FSIMG_RESOURCE_OUTPUT &&
+	    fixture.error.observed > 2 * least &&
+	    fixture.error.observed % 2 == 0 &&
+	    strstr(fixture.error.message, "raw intermediate") != NULL);
+	CHECK(provider_reads == 0);
+	fixture_close(&fixture);
+	stack = "erofs/dmg";
+	status = plan_lz4_under_output_limit(&fixture, 16 * least, 0);
+	stack = NULL;
+	CHECK_CASE(status == FSIMG_OK, "status %d: %s", status,
+	    fixture.error.message);
+	fixture_close(&fixture);
+
+	status = plan_lz4_under_output_limit(&fixture, 64 * (uint64_t)block_size,
+	    0);
+	CHECK_CASE(status == FSIMG_OK, "status %d: %s", status,
+	    fixture.error.message);
+	CHECK(provider_reads != 0);
+	CHECK(row_of_path(&fixture, "/text").layout ==
+	    EROFS_LAYOUT_COMPRESSED_FULL);
+	output = fixture.plan->common.info.output_bytes;
+	fixture_close(&fixture);
+
+	status = plan_lz4_under_output_limit(&fixture, output, 0);
+	CHECK_CASE(status == FSIMG_OK, "status %d: %s", status,
+	    fixture.error.message);
+	fixture_close(&fixture);
+	status = plan_lz4_under_output_limit(&fixture, output - 1, 0);
+	/* Refused by the floor where it is tight, by the full check else. */
+	CHECK(status == FSIMG_ELIMIT &&
+	    fixture.error.resource == FSIMG_RESOURCE_OUTPUT);
+	fixture_close(&fixture);
+}
+
+/*
  * Cluster records and compressed rows come back from scratch storage, so
  * a plan damaged after planning is refused, not emitted: a reserved byte
  * set, a plain flag above one, a stored length beyond the block, a cluster
@@ -3837,6 +3947,7 @@ main(void)
 	test_lz4_source_faults_fail_planning_and_emission();
 	test_lz4_allocation_and_write_failures_are_clean();
 	test_lz4_damaged_cluster_plan_is_refused();
+	at_every_block_size(test_lz4_output_limit_below_the_least_image_refuses_unread);
 	test_index_encoding_decodes_to_the_same_records();
 
 	test_super_encoding_decodes_to_the_same_superblock();

@@ -867,12 +867,19 @@ fsimg_source_read(fsimg_writer_t *writer, uint64_t offset, void *buffer,
 	    (size_t)(source->length - offset) : length;
 	if (remaining == 0)
 		return (FSIMG_OK);
-	if (source->storage == FSIMG_STORAGE_ZERO) {
-		bzero(buffer, remaining);
-		*transferred = remaining;
-	} else if (generated_content(source)) {
-		fsimg_generated_read(&source->generated, offset, buffer,
-		    remaining);
+	if (source->storage == FSIMG_STORAGE_ZERO ||
+	    generated_content(source)) {
+		/* Every read charges work: an I/O transfer charges its own
+		 * unit, so bytes computed without one charge a unit here.
+		 */
+		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
+		if (status != FSIMG_OK)
+			return (source_abort(source, status));
+		if (source->storage == FSIMG_STORAGE_ZERO)
+			bzero(buffer, remaining);
+		else
+			fsimg_generated_read(&source->generated, offset, buffer,
+			    remaining);
 		*transferred = remaining;
 	} else {
 		status = fsimg_io_read_exact(source->io, offset, buffer, remaining,

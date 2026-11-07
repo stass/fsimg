@@ -762,6 +762,35 @@ plan_disk(fsimg_writer_t *writer, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
+/*
+ * A driver whose layout depends on content it must read to plan states,
+ * before reading any, the least volume that content can produce. The disk
+ * holds the volume, the output's bound holds the disk, and a raw
+ * intermediate holds the disk again, so plan_disk() will need at least
+ * that volume once, or twice behind a raw intermediate: an output limit
+ * below that refuses the plan now instead of after the reads.
+ */
+fsimg_status_t
+fsimg_writer_output_floor(fsimg_writer_t *writer, uint64_t volume_bytes,
+    fsimg_error_t *error)
+{
+	uint64_t limit = writer->ctx->options.max_output_bytes;
+	uint64_t needed = volume_bytes;
+
+	if (writer_encoded(writer))
+		fsimg_stat_add(&needed, volume_bytes);
+	if (limit == 0 || needed <= limit)
+		return (FSIMG_OK);
+	fsimg_limit_error(error, FSIMG_RESOURCE_OUTPUT, limit, needed);
+	if (error != NULL)
+		snprintf(error->message, sizeof(error->message),
+		    "the image%s needs at least %llu bytes, more than the output "
+		    "limit", writer_encoded(writer) ?
+		    " and its raw intermediate" : "",
+		    (unsigned long long)needed);
+	return (FSIMG_ELIMIT);
+}
+
 /* Planning's first step compares the catalog with the selected format's
  * capability record, so no driver ever receives an entry kind it lacks and
  * the policy for a field a format does not store is the same for every
