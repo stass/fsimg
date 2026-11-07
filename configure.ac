@@ -168,7 +168,7 @@ AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integra
     test/containers-integration.sh test/compression-integration.sh
     test/cli.sh test/baseline.sh test/spec.sh test/codec-integration.sh
     test/iso9660-corpus-check.sh test/iso9660-integration.sh test/iso9660-boot.sh test/iso9660-writer.sh
-    test/ifs-integration.sh],
+    test/ifs-integration.sh test/erofs-integration.sh],
     [test ! -f test/fat-integration.sh || chmod +x test/fat-integration.sh
      test ! -f test/iso9660-corpus-check.sh || chmod +x test/iso9660-corpus-check.sh
      test ! -f test/iso9660-integration.sh || chmod +x test/iso9660-integration.sh
@@ -176,6 +176,7 @@ AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integra
      test ! -f test/iso9660-writer.sh || chmod +x test/iso9660-writer.sh
      test ! -f test/codec-integration.sh || chmod +x test/codec-integration.sh
      test ! -f test/ifs-integration.sh || chmod +x test/ifs-integration.sh
+     test ! -f test/erofs-integration.sh || chmod +x test/erofs-integration.sh
      test ! -f test/exfat-integration.sh || chmod +x test/exfat-integration.sh
      test ! -f test/qnx6-integration.sh || chmod +x test/qnx6-integration.sh
      test ! -f test/qnx4-integration.sh || chmod +x test/qnx4-integration.sh

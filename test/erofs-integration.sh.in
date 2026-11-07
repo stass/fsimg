@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+#
+# fsimg reads the mkfs.erofs fixture corpus and agrees with each fixture's
+# source manifest; a few fixtures are also read through a GPT and through
+# gzip and xz layers. Fixtures the reader does not support yet are counted
+# and named, never passed.
+set -eu
+ulimit -c 0
+if test -z "${FSIMG_EROFS_FIXTURES:-}" || test ! -d "$FSIMG_EROFS_FIXTURES"; then
+    echo 'SKIP: FSIMG_EROFS_FIXTURES names no fixture directory'
+    exit 77
+fi
+if test -z '@RUBY@'; then
+    echo 'SKIP: Ruby is required'
+    exit 77
+fi
+sgdisk=${SGDISK:-'@SGDISK@'}
+exec '@RUBY@' '@abs_top_srcdir@/test/erofs-integration.rb' "$(pwd)/fsimg" \
+    "$sgdisk" "$FSIMG_EROFS_FIXTURES"
