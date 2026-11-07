@@ -4717,7 +4717,14 @@ test_open_pairs_long_prefixes_with_a_plain_table_or_a_packed_inode(void)
 		{ "XATTR_PREFIXES with FRAGMENTS and no packed inode",
 		    { { SB_INCOMPAT, 4, INCOMPAT_XATTR_PREFIXES |
 		    INCOMPAT_FRAGMENTS } }, true, FSIMG_ECORRUPT,
-		    "packed inode" }
+		    "packed inode" },
+		/* mkfs.erofs -m puts the table in the metadata box (E12,
+		 * e12-box-pfx-plain): the unimplemented bit is refused by
+		 * name before the pairing rule is judged. */
+		{ "XATTR_PREFIXES with METABOX and neither placement",
+		    { { SB_INCOMPAT, 4, INCOMPAT_XATTR_PREFIXES |
+		    INCOMPAT_METABOX }, { SB_SLOTS, 1, 1 } }, true,
+		    FSIMG_EUNSUPPORTED, "METABOX" }
 	};
 
 	run_open_cases(cases, ARRAY_SIZE(cases), 0);

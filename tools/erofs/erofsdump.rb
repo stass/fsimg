@@ -592,15 +592,15 @@ module ErofsDump
     end
 
     # The long-prefix table when it is a plain region. Sets @prefixes and
-    # @prefixes_decoded; a table in the packed inode is not decoded.
+    # @prefixes_decoded; a table in the packed inode or the metadata box is
+    # not decoded.
     def read_prefix_table
       @prefixes = []
       @prefixes_decoded = true
       return unless @sb.incompat.anybits?(INCOMPAT_XATTR_PREFIXES) && @sb.prefix_count.positive?
 
       unless @sb.compat.anybits?(COMPAT_PLAIN_XATTR_PFX)
-        problem "long prefixes without a packed inode or PLAIN_XATTR_PFX" unless @sb.incompat.anybits?(INCOMPAT_FRAGMENTS)
-        note "long-prefix table lives in the packed inode; not decoded"
+        note prefix_table_note
         @prefixes_decoded = false
         return
       end
@@ -617,6 +617,20 @@ module ErofsDump
         say "  #{i}: #{Fmt.name(prefix.full)}"
         prefix
       end
+    end
+
+    # The note naming where a table that is no plain region lives: the
+    # metadata box when the volume has one, whether or not a packed inode
+    # exists (E12, e12-box-pfx-plain, e12-box-lz4-pfx-frag), else the packed
+    # inode. With neither the volume is corrupt, and this also records the
+    # problem.
+    def prefix_table_note
+      return "long-prefix table lives in the metadata box; not decoded" if @sb.incompat.anybits?(INCOMPAT_METABOX)
+      return "long-prefix table lives in the packed inode; not decoded" if
+        @sb.incompat.anybits?(INCOMPAT_FRAGMENTS) && @sb.packed_nid.positive?
+
+      problem "long prefixes without a packed inode or PLAIN_XATTR_PFX"
+      "long-prefix table has no place; not decoded"
     end
 
     # ---- inodes -------------------------------------------------------

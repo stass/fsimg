@@ -217,7 +217,9 @@ erofs_close(fsimg_reader_t *reader)
  * DEDUPE alone, which shares the bit, has none (E8, e8-lz4-dedupe). It is
  * a regular file that uses no fragment, read through its own layout, so a
  * fragment's mapping nests once. A long-prefix table that is no plain
- * region lives in its content, so such a table without it is corrupt.
+ * region lives in its content, so such a table without a packed inode is
+ * corrupt: every feature this reader implements puts the table in one of
+ * those two places.
  */
 static fsimg_status_t
 packed_load(fsimg_reader_t *reader, fsimg_error_t *error)
@@ -336,11 +338,11 @@ domain_set(fsimg_reader_t *reader, fsimg_error_t *error)
 }
 
 /*
- * Decide the features once from the decoded words. The pairing rule comes
- * first: a long-prefix table lives in a plain region or in the packed
- * inode, and without either the volume is corrupt. Then each incompatible
- * bit this reader does not implement is refused, naming the bit, so a
- * volume using it never opens.
+ * Decide the features once from the decoded words. Each incompatible bit
+ * this reader does not implement is refused, naming the bit, so a volume
+ * using it never opens and is never judged by a rule the bit changes:
+ * METABOX adds a third place for the long-prefix table, beside the two
+ * packed_load() accepts.
  */
 static fsimg_status_t
 features_decide(fsimg_erofs_reader_t *erofs, fsimg_error_t *error)
@@ -349,12 +351,6 @@ features_decide(fsimg_erofs_reader_t *erofs, fsimg_error_t *error)
 	erofs_features_t *features = &erofs->features;
 	char phrase[sizeof(((fsimg_error_t *)NULL)->message)];
 	uint32_t named_compat;
-
-	if ((sb->incompat & EROFS_INCOMPAT_XATTR_PREFIXES) != 0 &&
-	    (sb->compat & EROFS_COMPAT_PLAIN_XATTR_PFX) == 0 &&
-	    (sb->incompat & EROFS_INCOMPAT_FRAGMENTS) == 0)
-		return (erofs_reject(error, FSIMG_ECORRUPT,
-		    "long prefixes without a plain table or a packed inode"));
 
 	for (size_t i = 0; i < FEATURE_COUNT(incompat_features); i++) {
 		const erofs_feature_t *feature = &incompat_features[i];

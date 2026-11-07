@@ -46,6 +46,25 @@ class ErofsDumpTest < Minitest::Test
     assert_match(/claims a present attribute's bit/, out.string)
   end
 
+  def test_a_table_outside_a_plain_region_is_placed_or_a_problem
+    placements = {
+      packed: { incompat: INCOMPAT_FRAGMENTS, packed_nid: 40 },
+      box: { incompat: INCOMPAT_METABOX, packed_nid: 0 },
+      box_beside_a_packed_inode: { incompat: INCOMPAT_METABOX | INCOMPAT_FRAGMENTS, packed_nid: 40 },
+      fragments_without_a_packed_inode: { incompat: INCOMPAT_FRAGMENTS, packed_nid: 0 },
+      neither: { incompat: 0, packed_nid: 0 }
+    }
+    found = placements.transform_values do |sb|
+      checker = dumper
+      checker.instance_variable_set(:@sb, Struct.new(:incompat, :packed_nid).new(sb[:incompat], sb[:packed_nid]))
+      [checker.send(:prefix_table_note)[/packed inode|metadata box|no place/], checker.problems]
+    end
+
+    assert_equal({ packed: ["packed inode", 0], box: ["metadata box", 0],
+                   box_beside_a_packed_inode: ["metadata box", 0],
+                   fragments_without_a_packed_inode: ["no place", 1], neither: ["no place", 1] }, found)
+  end
+
   def test_last_nonhead_after_a_big_cluster_marker_is_two_back
     fields = [field(TYPE_HEAD1, 0), field(TYPE_NONHEAD, BIG_CLUSTER_FLAG | 3), field(TYPE_NONHEAD, 5)]
     head, marker, last = dumper.send(:group_records, fields:, anchor: 10, first: 0, big: true)

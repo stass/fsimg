@@ -136,7 +136,12 @@ Open:
    encoded extents without the bit fails the feature pairing like any
    other inode ([metadata box](design-erofs.md#metadata-box)).
 4. Under fragments, loads the packed inode the same way and checks that it is
-   a regular file that uses no fragment.
+   a regular file that uses no fragment. Then, on every volume, rejects
+   long prefixes with neither a plain table, a packed inode nor a metadata
+   box as `FSIMG_ECORRUPT`
+   ([long prefixes](design-erofs.md#long-prefixes)). Step 2 has already
+   refused every bit the reader does not implement, so the rule judges only
+   features it reads.
 5. Loads the root inode and requires a directory.
 
 Open reads nothing else: no directory, no attribute pool, no prefix table.

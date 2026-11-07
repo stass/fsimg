@@ -742,7 +742,9 @@ to whole box blocks so the root inode follows at NID bit 63 plus
 kernel reads it there (E12, `e12-box-pfx-plain`, `-pfx-plain-b512`,
 `-pfx-lz4`, `-lz4-pfx-frag`; `-pfx-lz4-plainpfx` keeps the plain
 placement). A volume with long prefixes but no packed inode, no metadata
-box and no `PLAIN_XATTR_PFX` is `FSIMG_ECORRUPT`. A record whose
+box and no `PLAIN_XATTR_PFX` is `FSIMG_ECORRUPT`. Because an incompatible
+bit can move the table, a reader judges these placements only after
+refusing the incompatible bits it does not implement. A record whose
 base index is not a built-in prefix, or that runs past its region, is
 `FSIMG_ECORRUPT`.
 
@@ -1188,9 +1190,10 @@ past the packed inode's size, is `FSIMG_ECORRUPT`. The packed inode is not in
 the namespace: [verification](#verification) reports a directory entry
 naming it as `FSIMG_ECORRUPT`. A packed NID of 0 names no packed inode,
 and neither does any packed NID without `FRAGMENTS`, as the kernel loads
-the packed inode (source `super.c`); a fragment, or a long-prefix table
-outside a plain region, on a volume without a packed inode is
-`FSIMG_ECORRUPT`.
+the packed inode (source `super.c`); a fragment on a volume without a
+packed inode is `FSIMG_ECORRUPT`, and so is a long-prefix table outside a
+plain region on a volume without a packed inode or a metadata box
+([long prefixes](#long-prefixes)).
 
 ### Shared clusters
 
