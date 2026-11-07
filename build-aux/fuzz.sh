@@ -5,7 +5,7 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6, test-qnx4, test-hfsplus, test-ifs, test-iso9660,
+# test-exfat, test-qnx6, test-erofs, test-qnx4, test-hfsplus, test-ifs, test-iso9660,
 # test-codec, test-lzfse, test-protocol, test-layers, test-containers, test-compression,
 # test-hbcifs, test-mtree, test-ifsboot and test/spec.sh, which write the
 # seeds, with MAKE naming
@@ -118,6 +118,23 @@ if test ! -f "$qnx6_corpus/sample.seed"; then
     ./test-qnx6 --seed "$qnx6_corpus/sample.seed"
 fi
 run_fuzzer "$work_dir/fuzz-qnx6" "$qnx6_corpus" 1048576 10
+
+# EROFS addresses the volume from byte 0, so its harness reads exactly the
+# input and forces the decoder. It recomputes the superblock checksum with
+# the driver's own codec, so it sees the driver's private header.
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/lib/core" -I"$source_dir/lib/meta" -I"$source_dir/lib/io" \
+    -I"$source_dir/lib/read" -I"$source_dir/lib/formats" \
+    -I"$source_dir/lib/formats/erofs" \
+    "$source_dir/fuzz/erofs.c" "$fuzz_library" $codec_libs -o "$work_dir/fuzz-erofs"
+erofs_corpus=erofs-fuzz-corpus
+mkdir -p "$erofs_corpus"
+if test ! -f "$erofs_corpus/tree-512.seed"; then
+    ./test-erofs --seed "$erofs_corpus"
+fi
+run_fuzzer "$work_dir/fuzz-erofs" "$erofs_corpus" 1048576 10
 
 # HFS Plus uses exact input volumes and both advertised variants. Private
 # headers expose the name codecs and component lookup used by selection.

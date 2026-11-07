@@ -6902,9 +6902,74 @@ test_a_compact_inode_time_is_the_stored_word_after_the_epoch(void)
 	gen_tree_free(&tree);
 }
 
-int
-main(void)
+/* ---- Fuzz seeds ---- */
+
+/* A volume with a directory, stored and inline files and a link. */
+static void
+seed_tree(gen_tree_t *tree, unsigned blkszbits)
 {
+	gen_inode_t link = inode_proto(MODE_LINK, LAYOUT_FLAT_INLINE);
+	gen_dirent_t root_kids[4], inside[1];
+	uint64_t sub, inner, stored, inlined, symlink;
+	size_t block = (size_t)1 << blkszbits;
+
+	tree_new(tree, blkszbits, 8);
+	sub = gen_tree_slot(tree, GEN_COMPACT_BYTES, 0);
+	inner = add_file(tree, LAYOUT_FLAT_INLINE, 40, 3);
+	stored = add_file(tree, LAYOUT_FLAT, block + 100, 1);
+	inlined = add_file(tree, LAYOUT_FLAT_INLINE, 70, 2);
+	link.layout_word = UINT32_C(0xffffffff);
+	symlink = gen_tree_add(tree, &link, "target/of/the/link", 18);
+	inside[0] = (gen_dirent_t){ "inner", inner, T_FILE };
+	root_kids[0] = (gen_dirent_t){ "dir", sub, T_DIR };
+	root_kids[1] = (gen_dirent_t){ "inline", inlined, T_FILE };
+	root_kids[2] = (gen_dirent_t){ "link", symlink, T_LINK };
+	root_kids[3] = (gen_dirent_t){ "stored", stored, T_FILE };
+	gen_tree_dir(tree, 0, 0, root_kids, 4);
+	gen_tree_dir(tree, sub, 0, inside, 1);
+}
+
+static void
+write_seed(const char *directory, const char *name, gen_tree_t *tree)
+{
+	char path[1024];
+	FILE *file;
+
+	gen_tree_seal(tree);
+	CHECK(snprintf(path, sizeof(path), "%s/%s", directory, name) <
+	    (int)sizeof(path));
+	file = fopen(path, "wb");
+	CHECK(file != NULL);
+	CHECK(fwrite(tree->image.bytes, 1, tree->image.length, file) ==
+	    tree->image.length);
+	CHECK(fclose(file) == 0);
+}
+
+/* --seed DIRECTORY: small volumes for the fuzz corpus. */
+static void
+emit_seeds(const char *directory)
+{
+	gen_tree_t tree;
+
+	seed_tree(&tree, 9);
+	write_seed(directory, "tree-512.seed", &tree);
+	gen_tree_free(&tree);
+	seed_tree(&tree, 12);
+	write_seed(directory, "tree-4096.seed", &tree);
+	gen_tree_free(&tree);
+	tree_new(&tree, 9, 2);
+	gen_tree_dir(&tree, 0, 0, NULL, 0);
+	write_seed(directory, "empty-root.seed", &tree);
+	gen_tree_free(&tree);
+}
+
+int
+main(int argc, char **argv)
+{
+	if (argc == 3 && strcmp(argv[1], "--seed") == 0) {
+		emit_seeds(argv[2]);
+		return (failures == 0 ? 0 : 1);
+	}
 	test_crc32c_oracle_matches_the_published_check_value();
 
 	test_super_probe_classifies_each_case();
