@@ -496,6 +496,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/hfsplus-unicode-exceptions.txt tools/hfsplus/capture.rb \
 	tools/hfsplus/qualify.rb \
 	tools/erofs/capture.rb tools/erofs/erofsdump.rb \
+	tools/erofs/manifest.rb tools/erofs/qualify.sh \
 	tools/hfsplus/check-unicode-tables.rb \
 	tools/hfsplus/e8_interrupt.rb tools/hfsplus/fields.rb \
 	tools/hfsplus/index_keys.rb tools/hfsplus/ndif.rb \
@@ -567,6 +568,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/merged_operands_test.rb \
 	test/cli/minimize_test.rb \
 	test/cli/iso_devices_test.rb \
+	test/cli/erofs_create_test.rb \
 	test/cli/erofs_settings_test.rb \
 	test/cli/iso_settings_test.rb test/cli/iso_truncated_test.rb \
 	test/cli/isohybrid_test.rb \

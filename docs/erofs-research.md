@@ -599,6 +599,57 @@ read.
   1.9.4 reads bytes from after the inline data, in the following block,
   in every interlaced case and never agrees with the kernel.
 
+## fsimg writer output
+
+`tools/erofs/qualify.sh` ran on 2026-11-07 against `fsimg` built from
+branch `erofs-s10` at "Refuse EROFS volumes below one block and
+free-space requests", with
+`fsck.erofs` 1.9.4-gf36cadb5 and rust-fs-erofs 0.5.1 on macOS and the
+colima VM's kernel `7.0.0-38-generic`:
+
+```sh
+sh tools/erofs/qualify.sh build/fsimg ~/.cache/fsimg-erofs/vm-q/run \
+    /Volumes/erofs-s10/scratch
+```
+
+Each image was created with `fsimg c -p -o uuid=... -F erofs`, so it holds
+the source's owner, permission bits and modification time. Each check
+compares a manifest of the image as the oracle reads it with one of the
+source tree: per path the kind, permission bits, owner, group, size of
+files and links, modification time in nanoseconds, SHA-256 of files and
+link target.
+
+| Oracle | Verdict rule | Fields compared | Cannot check |
+| --- | --- | --- | --- |
+| `fsck.erofs --extract --preserve` | Exit 0 and no `<E>` line | All but a link's mode | A link's mode, since macOS gives an extracted link its own; the root, which is the extraction directory |
+| Kernel loop mount (`ro,nodev,nosuid,noexec`), `find -printf` and `sha256sum` as root | Mount succeeds, the listing matches | All | Inode numbers, link counts and directory sizes, which no source fixes |
+| rust-fs-erofs `fs IMAGE stat` per path, `export --recursive --preserve=links` | Every export completes, the listing matches | All | As the kernel |
+| fsimg `W`, `t --json` | `W` exits 0, the listing matches | All but contents | Contents, which `W` checks against the image's own structure only |
+
+No oracle compares the root's metadata: the root has no catalog entry and
+the writer gives it owner 0, mode 0755 and the format time. Extended
+attributes, device nodes, sockets and hard links are not checked because
+the writer stores none: a host source refuses FIFOs, devices and sockets,
+and hard links become independent files, which every oracle reads back
+with the source's content. The FIFO kind, which a library catalog can
+supply, is covered by the driver contracts, not here.
+
+| Output | Source | fsck | Kernel | Rust | fsimg |
+| --- | --- | --- | --- | --- | --- |
+| empty | The root alone | Pass | Pass | Pass | Pass |
+| small | Files of 0, 1, 31, 32, 4064, 4095, 4096, 4097 and 9000 bytes, a 2000 time, modes 0600 and 0750, a link | Pass | Pass | Pass | Pass |
+| deep | 40 nested directories and a file | Pass | Pass | Pass | Pass |
+| wide | 1500 entries in one directory, 20 names of 255 bytes in another: multi-block directories | Pass | Pass | Pass | Pass |
+| large | A sparse file of 2^32 + 5000 bytes (an extended inode, flat-inline) and a 1 MiB + 1 file | Pass | Pass | Pass | Pass |
+| every kind | Empty file and directory, regular file and its hard link, short, absolute, dangling and 1000-byte links | Pass | Pass | Pass | Pass |
+| names before `.` | Names starting with space, `!`, `#`, `$`, `%`, `&`, `'`, `(`, `)`, `*`, `+`, `,`, `-`, `.hidden`, `..dots`, UTF-8 | Pass | Pass | Pass | Pass |
+| `erofs/gpt`, `gpt:disk=8M` | small; the 7323136-byte partition ends in a partial block, copied out for the oracles | Pass | Pass | Pass | Pass |
+| `erofs/mbr`, `mbr:disk=8M` | small, copied out likewise | Pass | Pass | Pass | Pass |
+
+The writer accepts only 4096-byte blocks: `cluster=512`, `1024` and `2048`
+are refused, as the design requires until E11 shows the kernel mounting
+them, so no other block size was qualified. No oracle rejected an output.
+
 ## Evidence answers
 
 | Question | Answer | Fixtures |
@@ -621,7 +672,7 @@ read.
 | Compact group packing; the last record and the end marker; inline tail placement; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed, the big-cluster head block following the kernel's walk from the group's anchor; the last record is the marker, the last cluster's own head or plain record inside the last logical cluster, or, at `size mod L = 0`, the last cluster's final record, 592 inodes; the inline tail starts at the index end and lies in one block, not necessarily the inode's; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, and producers write `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. `L > B` and compact advice `0x01` clear are unobservable with the pinned release; E15 observes them hand-built | `e8-*` |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | Framings confirmed; DEFLATE window bits at most 15, MicroLZMA dictionary at least 4096 and format 0, Zstandard format 0; head-2 by hand-built images, accepted by the kernel without `COMPR_HEAD2` | `e9-*` |
 | Every 48-bit field; encoded extents; writer's 32-byte records | Open; blocks stages 12, 14 and 15 | E10 |
-| Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Open; blocks stages 10 and 11 | E11 |
+| Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Open for 512 to 2048-byte blocks, which the writer refuses until E11 runs; at 4096 bytes the writer's output passes the kernel, `fsck.erofs` and rust-fs-erofs ([fsimg writer output](#fsimg-writer-output)) | E11 |
 | Metadata-box layout, root placement, box compression, shared attributes in the box | Open; blocks stages 13 and 15 | E12 |
 | Scale | Open; blocks stage 8 | E13 |
 | The fields a volume with external devices sets | Extra device count nonzero in both producer forms, `DEVICE_TABLE`, device identifier 1 in every chunk; `CHUNKED_FILE` only under `--blobdev` | `e14-*` |

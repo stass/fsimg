@@ -77,14 +77,14 @@ const fsimg_writer_ops_t fsimg_erofs_writer_ops = {
 /*
  * The common options under the writer profile: a 512-byte sector, a
  * 4096-byte block, a volume size of zero or whole sectors whose whole
- * blocks fit the 32-bit block count, a label that leaves the name field a terminator,
- * and the EROFS settings. Values outside each domain are invalid. The
- * smaller blocks EROFS defines are refused as unsupported until the
- * kernel is shown to mount them. The writer emits
- * the uncompressed 32-bit layout without a metadata box; the other values
- * of the three settings name layouts it does not write, so they too are
- * unsupported rather than invalid. A metadata box needs 48-bit addressing
- * whether or not it is supported.
+ * blocks fit the 32-bit block count, no free-space request, a label that
+ * leaves the name field a terminator, and the EROFS settings. Values
+ * outside each domain are invalid. The smaller blocks EROFS defines are
+ * refused as unsupported until the kernel is shown to mount them. The
+ * writer emits the uncompressed 32-bit layout without a metadata box; the
+ * other values of the three settings name layouts it does not write, so
+ * they too are unsupported rather than invalid. A metadata box needs
+ * 48-bit addressing whether or not it is supported.
  */
 static fsimg_status_t
 validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
@@ -101,10 +101,11 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 	    (options->sector_bytes != 0 && options->sector_bytes != 512) ||
 	    options->volume_bytes % 512 != 0 ||
 	    options->volume_bytes / block > EROFS_WRITE_BLOCKS_MAX ||
+	    options->min_free_bytes != 0 ||
 	    (options->label != NULL &&
 	    strlen(options->label) > EROFS_WRITE_LABEL_MAX))
 		return (fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER,
-		    "invalid EROFS geometry or label"));
+		    "invalid EROFS geometry, free space or label"));
 
 	if (options->erofs_addressing != 0 && options->erofs_addressing != 32 &&
 	    options->erofs_addressing != 48)
@@ -602,27 +603,28 @@ place_data(erofs_plan_t *plan, uint64_t *payload_blocks,
 }
 
 /*
- * Pass 5: the volume is exactly the used blocks unless volume_bytes asks
- * for more. A requested volume holds its whole blocks, floor(V / B), and
- * keeps its length: a fixed disk fits a partition to 512-byte sectors, so
- * a partial block may follow the last block. Emission leaves the excess
- * blocks and that partial block zero, and the block count excludes the
- * partial block. validate_options() has already required whole sectors
- * and a block count within 32 bits. An inode's serial number, its 1-based
- * position, is 32 bits in both forms.
+ * Pass 5: without volume_bytes the volume is exactly the used blocks. A
+ * requested volume V holds its whole blocks, floor(V / B), which must be
+ * at least the used blocks, and keeps its length: a fixed disk fits a
+ * partition to 512-byte sectors, so a partial block may follow the last
+ * block. So block_count * B <= volume_bytes < (block_count + 1) * B.
+ * Emission leaves the excess blocks and that partial block zero, and the
+ * block count excludes the partial block. validate_options() has already
+ * required whole sectors and a block count within 32 bits. An inode's
+ * serial number, its 1-based position, is 32 bits in both forms.
  */
 static fsimg_status_t
 size_volume(erofs_plan_t *plan, fsimg_error_t *error)
 {
-	uint64_t requested;
+	uint64_t requested, volume_bytes;
 
 	if (plan->inode_count > UINT32_MAX)
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
 		    "EROFS inodes exceed the 32-bit serial number"));
 
-	requested = plan->common.writer->options.volume_bytes /
-	    plan->block_bytes;
-	if (requested == 0) {
+	volume_bytes = plan->common.writer->options.volume_bytes;
+	requested = volume_bytes / plan->block_bytes;
+	if (volume_bytes == 0) {
 		plan->block_count = plan->used_blocks;
 		plan->volume_bytes = plan->block_count * plan->block_bytes;
 		return (FSIMG_OK);
@@ -631,14 +633,15 @@ size_volume(erofs_plan_t *plan, fsimg_error_t *error)
 		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
 		    "EROFS content does not fit the volume size"));
 	plan->block_count = requested;
-	plan->volume_bytes = plan->common.writer->options.volume_bytes;
+	plan->volume_bytes = volume_bytes;
 	return (FSIMG_OK);
 }
 
 /*
  * The plan information. Metadata is everything but file and link content
  * blocks: the boot area, the superblock, the inodes with their inline
- * tails, and directory blocks.
+ * tails, and directory blocks. A partial block after the last block is
+ * part of the volume's length but of no block category.
  */
 static void
 summarize(erofs_plan_t *plan, uint64_t payload_blocks)

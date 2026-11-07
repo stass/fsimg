@@ -198,8 +198,8 @@ static fsimg_status_t
 new_writer(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
     fsimg_writer_t **writer, fsimg_error_t *error)
 {
-	return (fsimg_writer_new_variant(ctx, &fsimg_erofs_write_format,
-	    &fsimg_erofs_write_format.variants[0], options, writer, error));
+	return (fsimg_writer_new_variant(ctx, &fsimg_erofs_format,
+	    &fsimg_erofs_format.variants[0], options, writer, error));
 }
 
 /*
@@ -863,6 +863,7 @@ test_sector_volume_and_label_geometry(void)
 	    NULL };
 	refusal_t partial = { "volume of 4096 bytes and 256", FSIMG_EINVAL,
 	    NULL };
+	refusal_t free_space = { "a free-space request", FSIMG_EINVAL, NULL };
 	refusal_t label = { "a 16-byte label", FSIMG_EINVAL, NULL };
 	refusal_t beyond = { "a volume past 2^32 blocks", FSIMG_EINVAL,
 	    NULL };
@@ -889,6 +890,11 @@ test_sector_volume_and_label_geometry(void)
 	check_refused(ctx, &options, &odd);
 	options.volume_bytes = (UINT64_C(1) << 32) * BLOCK;
 	check_refused(ctx, &options, &beyond);
+
+	/* The image is exactly its plan; there is no free space to size. */
+	reproducible_options(&options);
+	options.min_free_bytes = 1;
+	check_refused(ctx, &options, &free_space);
 
 	reproducible_options(&options);
 	options.label = "0123456789abcde";
@@ -1567,6 +1573,12 @@ test_volume_size_sets_the_block_count(void)
 	fixture_close(&fixture);
 
 	options.volume_bytes = (used - 1) * BLOCK;
+	fixture_open(&fixture);
+	CHECK(fixture_plan(&fixture, &options, false) == FSIMG_ERANGE);
+	fixture_close(&fixture);
+
+	/* A volume of whole sectors but no whole block holds nothing. */
+	options.volume_bytes = BLOCK - 512;
 	fixture_open(&fixture);
 	CHECK(fixture_plan(&fixture, &options, false) == FSIMG_ERANGE);
 	fixture_close(&fixture);

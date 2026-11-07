@@ -1551,6 +1551,7 @@ change times are not stored and are counted as optional losses under the
 | --- | --- |
 | `allocation_unit_bytes` | 0, 512, 1024, 2048 or 4096 subject to E11; 0 selects 4096 |
 | `volume_bytes` | 0, or a multiple of 512 holding the plan; the block count is `floor(V / B)`, the image is `V` bytes long, and the excess blocks and any partial block after the last block are zero |
+| `min_free_bytes` | 0; the image is exactly its plan, so a free-space request is `FSIMG_EINVAL` |
 | `label` | At most 15 bytes, stored raw and NUL-padded to 16 |
 | `volume_uuid` | Stored verbatim; unset in reproducible mode, it follows the [identifier rule](design-layers.md#identifiers) with the EROFS volume role; unset otherwise, `FSIMG_EINVAL`, and the CLI supplies a random version 4 UUID |
 | `epoch` | The format time in reproducible mode, from `-e`: any signed 64-bit second count. The superblock's epoch field is a different value: it holds the format time, and under `erofs_addressing=48` the smallest modification second instead |

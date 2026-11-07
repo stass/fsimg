@@ -124,11 +124,14 @@ typedef struct contract_metadata_case {
 } contract_metadata_case_t;
 
 /* The explicit creation settings a profile tests, applied after
- * fsimg_write_options_init() selects every other default.
+ * fsimg_write_options_init() selects every other default. A writer that
+ * refuses the all-zero identifier outside reproducible mode, which the
+ * metadata cases use, names one in volume_uuid.
  */
 typedef struct contract_write_setup {
 	uint32_t	 flags;
 	fsimg_byte_order_t byte_order;
+	unsigned char	 volume_uuid[16];
 } contract_write_setup_t;
 
 typedef struct contract_fs_profile {
@@ -297,6 +300,28 @@ static const contract_metadata_case_t hfsplus_metadata[] = {
 	OMITTED_CASES(FSIMG_META_ATTRIBUTES),
 };
 
+/*
+ * EROFS stores the owner, the permission bits and the modification time to
+ * the nanosecond, with symbolic links and FIFOs. It omits the change time,
+ * which the reader reports only for volumes without MTIME, and DOS
+ * attributes (design-erofs.md, Metadata and defaults).
+ */
+static const contract_metadata_case_t erofs_metadata[] = {
+	QNX_EXACT_CASE,
+	{ .id = "fraction-kept", .kind = FSIMG_ENTRY_FILE,
+	    .source = { .valid = FSIMG_META_MODIFIED,
+	    .modified = TIME(Y2K, 999000001, FSIMG_TIME_UTC, 0) },
+	    .plan_status = FSIMG_OK, .checked = FSIMG_META_MODIFIED,
+	    .stored = { .modified = TIME(Y2K, 999000001, FSIMG_TIME_UTC, 0) } },
+	{ .id = "change-time-omitted", .kind = FSIMG_ENTRY_FILE,
+	    .source = { .valid = FSIMG_META_CHANGED,
+	    .changed = TIME(Y2K, 0, FSIMG_TIME_UTC, 0) },
+	    .plan_status = FSIMG_OK, .losses = 1,
+	    .loss_mask = FSIMG_META_CHANGED },
+	QNX_KIND_CASES,
+	OMITTED_CASES(FSIMG_META_ATTRIBUTES),
+};
+
 static const contract_metadata_case_t qnx4_metadata[] = {
 	QNX_EXACT_CASE,
 	QNX_FRACTION_CASE,
@@ -380,10 +405,12 @@ static const contract_fs_profile_t fs_profiles[] = {
 	    .metadata_cases = hfsplus_metadata,
 	    .metadata_case_count = COUNT(hfsplus_metadata),
 	    .materialize = materialize_hfsx, .max_fixture_bytes = 2 * MIB },
-	/* Read and verify, no writer: the volumes come from the independent
-	 * generator. */
+	/* The read volumes come from the independent generator. */
 	{ .id = "erofs", .format = "erofs", .coverage_profile = true,
-	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
+	    .expected_capabilities = ALL_CAPABILITIES,
+	    .write = { .flags = WRITE_FLAGS, .volume_uuid = { 1 } },
+	    .metadata_cases = erofs_metadata,
+	    .metadata_case_count = COUNT(erofs_metadata),
 	    .materialize = materialize_erofs, .max_fixture_bytes = 2 * MIB },
 	{ .id = "iso9660", .format = "iso9660", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,
@@ -925,6 +952,8 @@ write_options(const fixture_t *fixture, fsimg_write_options_t *options)
 	fsimg_write_options_init(options);
 	options->flags = fixture->profile->write.flags;
 	options->byte_order = fixture->profile->write.byte_order;
+	bcopy(fixture->profile->write.volume_uuid, options->volume_uuid,
+	    sizeof(options->volume_uuid));
 }
 
 static fsimg_status_t

@@ -77,13 +77,11 @@
   LZ4 profile with a measured read and encoded copy in common emission, and
   last the 48-bit layout and metadata box, read and then written. External
   data devices stay refused.
-  The uncompressed writer plans and emits (`write-plan.c`, `write-dir.c`,
-  `write-emit.c`). It sits in the unregistered `fsimg_erofs_write_format`, so
-  `fsimg c` cannot select it, until stage 10's kernel and `fsck.erofs`
-  qualification registers it with the `docs/fsimg.1` entries for
-  `compression=`, `addressing=` and `metabox=`. Until then the writer
-  refuses `compression=lz4` (stage 11), `addressing=48` (stage 14),
-  `metabox=plain|lz4` (stage 15) and 512- to 2048-byte blocks (E11) with
+  The uncompressed writer is registered (`write-plan.c`, `write-dir.c`,
+  `write-emit.c`), and `tools/erofs/qualify.sh` checks its output with
+  `fsck.erofs`, the kernel and rust-fs-erofs. It refuses `compression=lz4`
+  (stage 11), `addressing=48` (stage 14), `metabox=plain|lz4` (stage 15)
+  and 512- to 2048-byte blocks, which wait for E11's kernel probes, with
   `FSIMG_EUNSUPPORTED`.
 
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
@@ -379,6 +377,13 @@
   `test/erofs.c` opens with the larger budget). The driver design bounds
   directories through metadata scratch; find what the prepare path keeps
   in memory and move it to scratch before stage 8's scale gate.
+* [Medium] **EROFS writer output may not stay sparse**
+  (`lib/formats/erofs/write-emit.c`): the stage 10 qualification's sparse
+  source file of 2^32 + 5000 bytes produced an image that occupied about
+  4 GiB on disk, while [architecture](specs/architecture.md) says emission
+  leaves a file's zero ranges to the fresh volume beneath them. Check
+  whether emission writes the source's hole ranges, or the observation
+  came from the copy-out, and fix or document it.
 * [Medium] **EROFS payload verification reads a hard-linked file once per
   name** (`lib/formats/erofs/verify.c`): without a visited set,
   `fsimg_verify_payload` runs at every name, so `W -d` reads a file with N

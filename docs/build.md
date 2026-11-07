@@ -1250,6 +1250,25 @@ and fails when the built `mkfs.erofs` lacks a
 codec. The tool identities, the Linux kernel oracle and the rust-fs-erofs
 oracle are in [erofs-research.md](erofs-research.md).
 
+`tools/erofs/qualify.sh` qualifies the EROFS writer against those oracles
+and the colima VM's kernel. It builds each output tree, creates the image
+with the given `fsimg` and checks it with `fsck.erofs --extract` (no `<E>`
+line), a read-only loop mount in the VM, rust-fs-erofs and fsimg `W` and
+`t`, printing one PASS or FAIL line per check:
+
+```sh
+sh tools/erofs/qualify.sh build/fsimg ~/.cache/fsimg-erofs/vm-q/run \
+    /Volumes/RAMDISK/scratch
+```
+
+The work directory holds the sources and images and must lie under
+`$HOME`, which the VM shares at the same path; the optional scratch
+directory holds the extractions, about 4 GiB at peak, the size of the large file
+(`-l` sets its size). It needs Ruby, `colima` with passwordless `sudo` in
+the VM, and the oracles under `~/.local/share/fsimg-oracles` (or
+`$FSIMG_ORACLES`). The record of a run is in
+[erofs-research.md](erofs-research.md#fsimg-writer-output).
+
 The HFS Plus work uses the hfsfuse `hfsdump` reader as an independent oracle,
 built the same way from a pinned upstream revision:
 

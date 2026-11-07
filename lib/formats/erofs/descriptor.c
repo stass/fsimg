@@ -22,11 +22,19 @@ static fsimg_status_t erofs_probe(const unsigned char *, size_t, uint64_t,
     const fsimg_format_variant_t **, fsimg_error_t *);
 
 /*
- * The one public name. The reader reports every POSIX kind and the one time
- * an inode stores, as a modification or a change time by the volume's MTIME
- * feature. Names are bounded in bytes; a UTF-8 name has no more UTF-16 units
- * than bytes, so the byte limit bounds it. The label is the superblock's
- * 16-byte name field.
+ * The one public name, read and written. The reader reports every POSIX
+ * kind, devices and sockets as read-only kinds, and the one time an inode
+ * stores: a modification time under the volume's MTIME feature, a change
+ * time without it. The writer stores files, directories, symbolic links
+ * and FIFOs with the modification time, owner and mode, and always sets
+ * MTIME, so the record lists the modification time and not the change
+ * time, and the writer reports a source change time as an omitted field.
+ * Names are bounded in bytes; a UTF-8 name has no more UTF-16 units than
+ * bytes, so the byte limit bounds it. The sector and label values are the
+ * writer's: the format has no sector of its own, so the writer works in
+ * 512-byte sectors, and the writer keeps the name field's terminator,
+ * although the reader returns a full 16-byte name. The identifier is the
+ * UUID.
  */
 static const fsimg_format_variant_t erofs_variants[] = {
 	{
@@ -37,44 +45,6 @@ static const fsimg_format_variant_t erofs_variants[] = {
 			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
 			    FSIMG_ENTRY_FIFO | FSIMG_ENTRY_CHAR_DEVICE |
 			    FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET,
-			.metadata_fields = FSIMG_META_MODIFIED |
-			    FSIMG_META_CHANGED | FSIMG_META_OWNER |
-			    FSIMG_META_MODE,
-			.sector_size_mask = EROFS_BLOCK_SIZES,
-			.allocation_unit_size_mask = EROFS_BLOCK_SIZES,
-			.max_file_bytes = EROFS_VOLUME_MAX,
-			.max_volume_bytes = EROFS_VOLUME_MAX,
-			.max_name_utf16_units = EROFS_NAME_MAX,
-			.max_label_bytes = EROFS_NAME_FIELD_BYTES,
-			.max_link_target_bytes = EROFS_SYMLINK_MAX
-		},
-		.id = 0		/* The only variant. */
-	}
-};
-
-const fsimg_format_t fsimg_erofs_format = {
-	.variants = erofs_variants,
-	.variant_count = sizeof(erofs_variants) / sizeof(erofs_variants[0]),
-	.probe_bytes = EROFS_PROBE_BYTES,
-	.probe = erofs_probe,
-	.reader = &fsimg_erofs_reader_ops
-};
-
-/*
- * The writer's profile, outside the registry until the kernel and
- * fsck.erofs accept its output. It writes files, directories, symbolic
- * links and FIFOs, and stores the modification time, owner and mode. It
- * reports 512-byte sectors, as the format has none of its own. The label
- * keeps the name field's terminator; the identifier is the UUID.
- */
-static const fsimg_format_variant_t erofs_write_variants[] = {
-	{
-		.info = {
-			.name = "erofs",
-			.profile = "core",
-			.entry_kinds = FSIMG_ENTRY_FILE |
-			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
-			    FSIMG_ENTRY_FIFO,
 			.metadata_fields = FSIMG_META_MODIFIED |
 			    FSIMG_META_OWNER | FSIMG_META_MODE,
 			.sector_size_mask = 1u << 9,
@@ -89,14 +59,13 @@ static const fsimg_format_variant_t erofs_write_variants[] = {
 			.write_settings = FSIMG_SETTING_VOLUME_UUID |
 			    FSIMG_SETTING_EROFS
 		},
-		.id = 0
+		.id = 0		/* The only variant. */
 	}
 };
 
-const fsimg_format_t fsimg_erofs_write_format = {
-	.variants = erofs_write_variants,
-	.variant_count = sizeof(erofs_write_variants) /
-	    sizeof(erofs_write_variants[0]),
+const fsimg_format_t fsimg_erofs_format = {
+	.variants = erofs_variants,
+	.variant_count = sizeof(erofs_variants) / sizeof(erofs_variants[0]),
 	.probe_bytes = EROFS_PROBE_BYTES,
 	.probe = erofs_probe,
 	.reader = &fsimg_erofs_reader_ops,
