@@ -3354,9 +3354,20 @@ block_hashes_to(const uint8_t *block, size_t end, const uint8_t *group)
 	return (false);
 }
 
-/* The corpus digest computed by a second process, on its own encoder. */
+/* The LZO1X corpus digest on a new encoder, for second_process_digest. */
 static uint64_t
-second_process_digest(fsimg_ctx_t *ctx)
+lzo_fresh_corpus_digest(fsimg_ctx_t *ctx)
+{
+	return (corpus_digest(new_encoder(ctx)));
+}
+
+/*
+ * A corpus digest computed by a second process: fresh_digest runs there,
+ * on an encoder of its own.
+ */
+static uint64_t
+second_process_digest(fsimg_ctx_t *ctx,
+    uint64_t (*fresh_digest)(fsimg_ctx_t *))
 {
 	uint64_t digest;
 	int pipe_ends[2], status;
@@ -3376,7 +3387,7 @@ second_process_digest(fsimg_ctx_t *ctx)
 		 */
 		close(pipe_ends[0]);
 		emit_directory = NULL;
-		digest = corpus_digest(new_encoder(ctx));
+		digest = fresh_digest(ctx);
 		_exit(write(pipe_ends[1], &digest, sizeof(digest)) ==
 		    (ssize_t)sizeof(digest) ? 0 : 1);
 	}
@@ -3442,7 +3453,7 @@ test_lzo_encoder_determinism(void)
 	emit_directory = NULL;
 	CHECK(corpus_digest(used) == digest);
 	CHECK(corpus_digest(used) == digest);
-	CHECK(second_process_digest(ctx) == digest);
+	CHECK(second_process_digest(ctx, lzo_fresh_corpus_digest) == digest);
 	emit_directory = saved_directory;
 	if (digest != UINT64_C(0x1d122f6ed0e77d07)) {
 		fprintf(stderr, "corpus digest 0x%016" PRIx64 "\n", digest);
@@ -5606,6 +5617,946 @@ test_lz4_interface(void)
 	CHECK(step.done && step.consumed == 0 && step.produced == 0);
 }
 
+/*
+ * LZ4 encoder tests.
+ *
+ * The encoder is judged by its blocks. Every block goes through
+ * lz4e_check_block: it must decode in full mode, under a capacity equal to
+ * the input it claims to encode, to exactly that input, and meet the end
+ * conditions as lz4e_walk finds them. The walker is written here from the
+ * format tables and shares nothing with lib/codec/: a block holding a
+ * match ends with at least five literals, its last match starts at least
+ * 12 bytes before the end, and input of 12 bytes or fewer holds no match.
+ * A whole-mode block must also fit a buffer of exactly the design's bound,
+ * n + n / 255 + 2, and a prefix-mode block its capacity, with every byte
+ * past what the call reports writing, up to a redzone beyond the buffer,
+ * still holding its poison.
+ *
+ * The worked blocks of the design are pinned byte for byte, which fixes
+ * the parse's rules; every other block is judged by the properties above,
+ * so a change of parse that keeps the contract breaks only the pins and
+ * the corpus digest. Inputs without any repeated four-byte group cannot
+ * hold a match whatever the parse, so for them the expected block and the
+ * expected prefix at every capacity follow from the format alone.
+ *
+ * With --seed each whole-mode block of up to 4096 input bytes is written
+ * as a seed for fuzz/codec.c's LZ4 encoder mode and, as a block, for its
+ * LZ4 decoder mode.
+ */
+#define LZ4E_SEED_LIMIT		4096u	/* longest input seeded */
+#define LZ4E_FUZZ_ENCODER	16u	/* fuzz byte 0: the LZ4 encoder */
+#define LZ4E_MAX_DISTANCE	65535u
+#define LZ4E_WINDOW		65536u	/* the EROFS writer's window */
+#define LZ4E_SWEEP		5000u	/* prefix capacities swept */
+
+/* What a walk over a block found. */
+typedef struct lz4e_shape {
+	size_t	 decoded;		/* bytes the block decodes to */
+	size_t	 final_literals;
+	size_t	 last_match_start;	/* where the last match decodes */
+	size_t	 longest_offset;
+	bool	 matched;
+	bool	 well_formed;
+} lz4e_shape_t;
+
+/* The case a check reports on failure. */
+typedef struct lz4e_case {
+	const char	*name;
+	size_t		 n;
+	size_t		 capacity;
+} lz4e_case_t;
+
+static void
+lz4e_require(bool ok, const lz4e_case_t *c, const char *expectation)
+{
+	if (ok)
+		return;
+	fprintf(stderr, "%s, %zu bytes, capacity %zu: %s\n", c->name, c->n,
+	    c->capacity, expectation);
+	CHECK(!"the LZ4 encoder's block is as expected");
+}
+
+/* The design's bound, written here independently of the header. */
+static size_t
+lz4e_bound(size_t n)
+{
+	return (n + n / 255 + 2);
+}
+
+/* The extension bytes of a length field's value, from the format table. */
+static size_t
+lz4e_extension_bytes(size_t value)
+{
+	return (value < 15 ? 0 : 1 + (value - 15) / 255);
+}
+
+/* The block of an input written as one literal-only sequence. */
+static size_t
+lz4e_literal_block_length(size_t n)
+{
+	return (1 + lz4e_extension_bytes(n) + n);
+}
+
+/*
+ * The longest literal-only prefix of an n-byte input whose block fits the
+ * capacity, by trying every count: the prefix mode result for an input
+ * without a repeated group.
+ */
+static size_t
+lz4e_literal_prefix(size_t n, size_t capacity)
+{
+	size_t best;
+
+	best = 0;
+	for (size_t f = 0; f <= n; f++)
+		if (lz4e_literal_block_length(f) <= capacity)
+			best = f;
+	return (best);
+}
+
+/* Read a length field and its extension bytes; false if cut off. */
+static bool
+lz4e_walk_length(const uint8_t *code, size_t length, size_t *at,
+    unsigned field, size_t *value)
+{
+	uint8_t byte;
+
+	*value = field;
+	if (field != 15)
+		return (true);
+	do {
+		if (*at == length)
+			return (false);
+		byte = code[(*at)++];
+		*value += byte;
+	} while (byte == 255);
+	return (true);
+}
+
+/*
+ * Walk a block's sequences without decoding them: the decoded length, the
+ * final run, the last match and the longest offset. well_formed is false
+ * for a block cut off anywhere but after a sequence's literals, or with an
+ * offset of zero or reaching before the start.
+ */
+static lz4e_shape_t
+lz4e_walk(const uint8_t *code, size_t length)
+{
+	lz4e_shape_t shape = { 0 };
+	size_t at, literals, match, offset;
+	uint8_t token;
+
+	at = 0;
+	while (at < length) {
+		token = code[at++];
+		if (!lz4e_walk_length(code, length, &at, token >> 4,
+		    &literals) || literals > length - at)
+			return (shape);
+		at += literals;
+		shape.decoded += literals;
+		if (at == length) {
+			shape.final_literals = literals;
+			shape.well_formed = true;
+			return (shape);
+		}
+		if (length - at < 2)
+			return (shape);
+		offset = (size_t)code[at] | (size_t)code[at + 1] << 8;
+		at += 2;
+		if (offset == 0 || offset > shape.decoded ||
+		    !lz4e_walk_length(code, length, &at, token & 15, &match))
+			return (shape);
+		shape.matched = true;
+		shape.last_match_start = shape.decoded;
+		if (offset > shape.longest_offset)
+			shape.longest_offset = offset;
+		shape.decoded += match + 4;
+	}
+	return (shape);
+}
+
+/*
+ * Check a block of plain[0..n): it decodes in full mode to exactly those
+ * bytes, writing nothing past them, and its walk meets the end conditions.
+ * Returns the walk.
+ */
+static lz4e_shape_t
+lz4e_check_block(const lz4e_case_t *c, const uint8_t *code, size_t length,
+    const uint8_t *plain, size_t n)
+{
+	fsimg_codec_step_t step;
+	fsimg_error_t error;
+	lz4e_shape_t shape;
+	uint8_t *out;
+
+	shape = lz4e_walk(code, length);
+	lz4e_require(shape.well_formed && shape.decoded == n, c,
+	    "the walk finds a well-formed block of the input's length");
+	if (shape.matched) {
+		lz4e_require(shape.final_literals >= 5, c,
+		    "at least five final literals after a match");
+		lz4e_require(n - shape.last_match_start >= 12, c,
+		    "the last match starts 12 or more bytes before the end");
+	}
+	lz4e_require(n >= 13 || !shape.matched, c,
+	    "input of 12 bytes or fewer holds no match");
+
+	out = xmalloc(n + LZ4_REDZONE);
+	memset(out, POISON, n + LZ4_REDZONE);
+	lz4e_require(fsimg_lz4_decode(code, length, out, n, &step, &error) ==
+	    FSIMG_OK && step.done && step.consumed == length &&
+	    step.produced == n, c, "the block decodes in full mode");
+	lz4e_require(bcmp(out, plain, n) == 0, c,
+	    "the block decodes to the input");
+	lz4e_require(poison_intact(out + n, LZ4_REDZONE), c,
+	    "the decoder writes nothing past the input");
+	free(out);
+	return (shape);
+}
+
+static fsimg_lz4_encoder_t *
+lz4e_new_encoder(fsimg_ctx_t *ctx)
+{
+	fsimg_lz4_encoder_t *encoder;
+	fsimg_error_t error;
+
+	CHECK(fsimg_lz4_encoder_new(ctx, &encoder, &error) == FSIMG_OK);
+	CHECK(encoder != NULL);
+	return (encoder);
+}
+
+/*
+ * Write an input as a seed for fuzz/codec.c's LZ4 encoder mode: byte 0 is
+ * 16, bytes 1-2 the prefix capacity less one, byte 3 unused, the input.
+ */
+static void
+lz4e_emit_seed(const uint8_t *block, size_t n, size_t capacity)
+{
+	char path[4096];
+	uint8_t *bytes;
+
+	if (emit_directory == NULL || !emit_seeds || n > LZ4E_SEED_LIMIT)
+		return;
+	bytes = xmalloc(4 + n);
+	bytes[0] = LZ4E_FUZZ_ENCODER;
+	bytes[1] = (uint8_t)((capacity - 1) & 0xff);
+	bytes[2] = (uint8_t)(((capacity - 1) >> 8) & 0xff);
+	bytes[3] = 0;
+	bcopy(block, bytes + 4, n);
+	emit_sequence++;
+	snprintf(path, sizeof(path), "%s/lz4enc-%05u.seed", emit_directory,
+	    emit_sequence);
+	write_file(path, bytes, 4 + n);
+	free(bytes);
+}
+
+/*
+ * Encode an input whole into a buffer of exactly the bound and check the
+ * block. The caller frees the block; its length is *length.
+ */
+static uint8_t *
+lz4e_encode(fsimg_lz4_encoder_t *encoder, const char *name,
+    const uint8_t *block, size_t n, size_t *length)
+{
+	lz4e_case_t c = { .name = name, .n = n, .capacity = lz4e_bound(n) };
+	fsimg_error_t error;
+	uint8_t *code;
+
+	CHECK(fsimg_lz4_encode_bound(n) == c.capacity);
+	code = xmalloc(c.capacity + LZ4_REDZONE);
+	memset(code, POISON, c.capacity + LZ4_REDZONE);
+	lz4e_require(fsimg_lz4_encode(encoder, block, n, code, c.capacity,
+	    length, &error) == FSIMG_OK, &c, "whole mode succeeds");
+	lz4e_require(*length <= c.capacity, &c, "the block fits the bound");
+	lz4e_require(poison_intact(code + *length,
+	    c.capacity + LZ4_REDZONE - *length), &c,
+	    "nothing is written past the block");
+	lz4e_check_block(&c, code, *length, block, n);
+
+	lz4e_emit_seed(block, n, n / 2 + 1);
+	if (n <= LZ4E_SEED_LIMIT)
+		emit_lz4_seed(code, *length, n, n / 2);
+	return (code);
+}
+
+/* Encode an input whole and check its block, which is then dropped. */
+static size_t
+lz4e_round_trip(fsimg_lz4_encoder_t *encoder, const char *name,
+    const uint8_t *block, size_t n)
+{
+	uint8_t *code;
+	size_t length;
+
+	code = lz4e_encode(encoder, name, block, n, &length);
+	free(code);
+	return (length);
+}
+
+/*
+ * Encode the longest prefix that fits capacity and check the block. The
+ * caller frees the block; *step is the call's.
+ */
+static uint8_t *
+lz4e_encode_prefix(fsimg_lz4_encoder_t *encoder, const char *name,
+    const uint8_t *block, size_t n, size_t capacity,
+    fsimg_codec_step_t *step)
+{
+	lz4e_case_t c = { .name = name, .n = n, .capacity = capacity };
+	fsimg_error_t error;
+	uint8_t *code;
+
+	code = xmalloc(capacity + LZ4_REDZONE);
+	memset(code, POISON, capacity + LZ4_REDZONE);
+	lz4e_require(fsimg_lz4_encode_prefix(encoder, block, n, code,
+	    capacity, step, &error) == FSIMG_OK, &c, "prefix mode succeeds");
+	lz4e_require(step->produced <= capacity && step->consumed <= n, &c,
+	    "the block fits the capacity and claims no more than the input");
+	lz4e_require(step->done == (step->consumed == n), &c,
+	    "done exactly when the whole input is encoded");
+	lz4e_require(poison_intact(code + step->produced,
+	    capacity + LZ4_REDZONE - step->produced), &c,
+	    "nothing is written past the block");
+	lz4e_check_block(&c, code, step->produced, block, step->consumed);
+	return (code);
+}
+
+/*
+ * Fill bytes[0..n) from the random sequence of the first seed from seed
+ * up whose bytes hold no repeated four-byte group, so no parse can find a
+ * match in them.
+ */
+static int
+lz4e_compare_groups(const void *a, const void *b)
+{
+	uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+
+	return (x < y ? -1 : x > y);
+}
+
+static void
+lz4e_fill_without_repeats(uint8_t *bytes, size_t n, uint64_t seed)
+{
+	uint32_t *groups;
+	size_t count;
+	bool repeated;
+
+	count = n < 4 ? 0 : n - 3;
+	groups = xmalloc(count * sizeof(*groups));
+	do {
+		fill_random(bytes, n, seed++);
+		for (size_t i = 0; i < count; i++)
+			groups[i] = (uint32_t)bytes[i] |
+			    (uint32_t)bytes[i + 1] << 8 |
+			    (uint32_t)bytes[i + 2] << 16 |
+			    (uint32_t)bytes[i + 3] << 24;
+		qsort(groups, count, sizeof(*groups), lz4e_compare_groups);
+		repeated = false;
+		for (size_t i = 1; i < count && !repeated; i++)
+			repeated = groups[i] == groups[i - 1];
+	} while (repeated);
+	free(groups);
+}
+
+/* bytes[i] = base[i mod period], base random. */
+static void
+lz4e_fill_periodic(uint8_t *bytes, size_t n, size_t period, uint64_t seed)
+{
+	fill_random(bytes, period < n ? period : n, seed);
+	for (size_t i = period; i < n; i++)
+		bytes[i] = bytes[i - period];
+}
+
+/* An input, as text, and its block, as hex, from the design's table. */
+typedef struct lz4e_worked {
+	const char	*input;
+	const char	*block;
+	size_t		 capacity;	/* 0 for whole mode */
+	size_t		 consumed;	/* the expected prefix */
+} lz4e_worked_t;
+
+/*
+ * The design's worked blocks, byte for byte. They fix the parse's rules:
+ * input of 12 bytes is literals only, a match ends five bytes before the
+ * end, a match of 4 needs eight final literals, a group 11 bytes before
+ * the end is never matched, and prefix mode refuses a sequence whose final
+ * run does not fit.
+ */
+static void
+test_lz4_encoder_worked_blocks(void)
+{
+	static const lz4e_worked_t cases[] = {
+		{ "", "00", 0, 0 },
+		{ "A", "10 41", 0, 0 },
+		{ "AAAAAAAAAAAA",
+		  "c0 41 41 41 41 41 41 41 41 41 41 41 41", 0, 0 },
+		{ "AAAAAAAAAAAAA", "13 41 01 00 50 41 41 41 41 41", 0, 0 },
+		{ "ABCDABCDEFGHIJKL",
+		  "40 41 42 43 44 04 00 80 45 46 47 48 49 4a 4b 4c", 0, 0 },
+		{ "ABCDABCDEFGHIJK",
+		  "f0 00 41 42 43 44 41 42 43 44 45 46 47 48 49 4a 4b", 0, 0 },
+		{ "AAAAAAAAAAAAA", "80 41 41 41 41 41 41 41 41", 9, 8 },
+		{ "AAAAAAAAAAAAA", "13 41 01 00 50 41 41 41 41 41", 10, 13 },
+	};
+	lz4e_case_t c;
+	fsimg_lz4_encoder_t *encoder;
+	fsimg_codec_step_t step;
+	fsimg_ctx_t *ctx;
+	uint8_t expected[64], *code;
+	uint8_t distinct[20];
+	size_t expected_length, length, n;
+
+	ctx = new_context();
+	encoder = lz4e_new_encoder(ctx);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		n = strlen(cases[i].input);
+		c = (lz4e_case_t){ .name = cases[i].input, .n = n,
+		    .capacity = cases[i].capacity };
+		parse_hex(cases[i].block, expected, sizeof(expected),
+		    &expected_length);
+		if (cases[i].capacity == 0) {
+			code = lz4e_encode(encoder, "worked block",
+			    (const uint8_t *)cases[i].input, n, &length);
+		} else {
+			code = lz4e_encode_prefix(encoder, "worked block",
+			    (const uint8_t *)cases[i].input, n,
+			    cases[i].capacity, &step);
+			length = step.produced;
+			lz4e_require(step.consumed == cases[i].consumed, &c,
+			    "the worked prefix is consumed");
+		}
+		lz4e_require(length == expected_length &&
+		    bcmp(code, expected, length) == 0, &c,
+		    "the encoder writes the worked block");
+		free(code);
+	}
+
+	/* 20 bytes without a repeat in 10 bytes: a token and 9 literals. */
+	lz4e_fill_without_repeats(distinct, sizeof(distinct), 1);
+	code = lz4e_encode_prefix(encoder, "distinct", distinct,
+	    sizeof(distinct), 10, &step);
+	CHECK(step.consumed == 9 && step.produced == 10 && code[0] == 0x90);
+	free(code);
+
+	fsimg_lz4_encoder_free(encoder);
+	fsimg_ctx_free(ctx);
+}
+
+/*
+ * Every length from 0 to 40 of zeros, one letter, a period-3 pattern and
+ * bytes without a repeat round-trips: these are the lengths the end
+ * conditions care about. Up to 12 bytes every block is literals only.
+ */
+static void
+test_lz4_encoder_short_inputs(void)
+{
+	fsimg_lz4_encoder_t *encoder;
+	fsimg_ctx_t *ctx;
+	uint8_t distinct[40], letters[40], pattern[40], zeros[40];
+	size_t length;
+
+	ctx = new_context();
+	encoder = lz4e_new_encoder(ctx);
+	bzero(zeros, sizeof(zeros));
+	memset(letters, 'A', sizeof(letters));
+	for (size_t i = 0; i < sizeof(pattern); i++)
+		pattern[i] = (uint8_t)("xyz"[i % 3]);
+	lz4e_fill_without_repeats(distinct, sizeof(distinct), 3);
+
+	for (size_t n = 0; n <= sizeof(zeros); n++) {
+		length = lz4e_round_trip(encoder, "zeros", zeros, n);
+		CHECK(n > 12 || length == lz4e_literal_block_length(n));
+		CHECK(n < 20 || length < lz4e_literal_block_length(n));
+		lz4e_round_trip(encoder, "letters", letters, n);
+		lz4e_round_trip(encoder, "period 3", pattern, n);
+		length = lz4e_round_trip(encoder, "distinct", distinct, n);
+		CHECK(length == lz4e_literal_block_length(n));
+	}
+	fsimg_lz4_encoder_free(encoder);
+	fsimg_ctx_free(ctx);
+}
+
+/*
+ * Larger inputs round-trip: zeros, text, random bytes, and periodic data
+ * at every period from 1 to 300 and at periods about the window and the
+ * largest offset, over inputs longer than one window.
+ */
+static void
+test_lz4_encoder_round_trips(void)
+{
+	static const size_t long_periods[] = { 1000, 4095, 4096, 65534,
+	    65535, 65536, 65537, 70000 };
+	fsimg_lz4_encoder_t *encoder;
+	fsimg_ctx_t *ctx;
+	uint8_t *block;
+	size_t length;
+
+	ctx = new_context();
+	encoder = lz4e_new_encoder(ctx);
+	block = xmalloc(200000);
+
+	bzero(block, 200000);
+	length = lz4e_round_trip(encoder, "zeros", block, 200000);
+	CHECK(length < 1000);
+	fill_text(block, 200000, 5);
+	length = lz4e_round_trip(encoder, "text", block, 200000);
+	CHECK(length < 100000);
+	fill_random(block, 65536, 7);
+	lz4e_round_trip(encoder, "random", block, 65536);
+
+	for (size_t period = 1; period <= 300; period++) {
+		lz4e_fill_periodic(block, 20000, period, period);
+		length = lz4e_round_trip(encoder, "periodic", block, 20000);
+		CHECK(length < 20000 / 4);
+	}
+	for (size_t i = 0; i < sizeof(long_periods) / sizeof(long_periods[0]);
+	    i++) {
+		lz4e_fill_periodic(block, 140000, long_periods[i], i);
+		lz4e_round_trip(encoder, "long period", block, 140000);
+	}
+
+	free(block);
+	fsimg_lz4_encoder_free(encoder);
+	fsimg_ctx_free(ctx);
+}
+
+/*
+ * The largest offset is 65535. A group repeated 65535 bytes later, among
+ * zeros, is matched at exactly that offset; repeated 65536 or 65537 bytes
+ * later it lies out of reach, and an encoder writing it anyway would
+ * write offset 0 or 1, which the round trip refuses.
+ */
+static void
+test_lz4_encoder_far_matches(void)
+{
+	static const uint8_t group[8] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+	    0x77, 0x88 };
+	fsimg_lz4_encoder_t *encoder;
+	lz4e_shape_t shape;
+	lz4e_case_t c;
+	fsimg_ctx_t *ctx;
+	uint8_t *block, *code;
+	size_t length, n;
+
+	ctx = new_context();
+	encoder = lz4e_new_encoder(ctx);
+	for (size_t distance = LZ4E_MAX_DISTANCE;
+	    distance <= LZ4E_MAX_DISTANCE + 2; distance++) {
+		n = distance + 64;
+		block = xmalloc(n);
+		bzero(block, n);
+		bcopy(group, block, sizeof(group));
+		bcopy(group, block + distance, sizeof(group));
+		c = (lz4e_case_t){ .name = "far group", .n = n,
+		    .capacity = lz4e_bound(n) };
+		code = lz4e_encode(encoder, "far group", block, n, &length);
+		shape = lz4e_walk(code, length);
+		lz4e_require(shape.longest_offset <= LZ4E_MAX_DISTANCE, &c,
+		    "no offset passes 65535");
+		lz4e_require(distance != LZ4E_MAX_DISTANCE ||
+		    shape.longest_offset == LZ4E_MAX_DISTANCE, &c,
+		    "the group 65535 bytes back is matched");
+		free(code);
+		free(block);
+	}
+	fsimg_lz4_encoder_free(encoder);
+	fsimg_ctx_free(ctx);
+}
+
+/*
+ * Sweep prefix mode over every capacity from 1 to LZ4E_SWEEP, and at the
+ * bound and beyond it, where the block must be whole mode's.
+ */
+static void
+lz4e_sweep(fsimg_lz4_encoder_t *encoder, const char *name,
+    const uint8_t *block, size_t n)
+{
+	lz4e_case_t c = { .name = name, .n = n };
+	fsimg_codec_step_t step;
+	uint8_t *code, *whole;
+	size_t whole_length;
+
+	for (size_t capacity = 1; capacity <= LZ4E_SWEEP; capacity++) {
+		code = lz4e_encode_prefix(encoder, name, block, n, capacity,
+		    &step);
+		c.capacity = capacity;
+		lz4e_require(step.consumed > 0 || capacity == 1 || n == 0, &c,
+		    "a capacity of two or more holds a byte");
+		free(code);
+	}
+
+	whole = lz4e_encode(encoder, name, block, n, &whole_length);
+	for (size_t capacity = lz4e_bound(n); capacity <= lz4e_bound(n) + 1;
+	    capacity++) {
+		code = lz4e_encode_prefix(encoder, name, block, n, capacity,
+		    &step);
+		c.capacity = capacity;
+		lz4e_require(step.done && step.produced == whole_length &&
+		    bcmp(code, whole, whole_length) == 0, &c,
+		    "at the bound prefix mode writes whole mode's block");
+		free(code);
+	}
+	free(whole);
+}
+
+/*
+ * Prefix mode at every capacity: text, zeros, a mixed input and a whole
+ * window of text, each block fitting and decoding to its prefix. For
+ * bytes without a repeat the prefix is exactly the longest literal run
+ * that fits.
+ */
+static void
+test_lz4_encoder_prefix_capacities(void)
+{
+	lz4e_case_t c = { .name = "distinct" };
+	fsimg_lz4_encoder_t *encoder;
+	fsimg_codec_step_t step;
+	fsimg_ctx_t *ctx;
+	uint8_t *block, *code;
+	size_t n;
+
+	ctx = new_context();
+	encoder = lz4e_new_encoder(ctx);
+	block = xmalloc(LZ4E_WINDOW);
+
+	fill_text(block, 20000, 11);
+	lz4e_sweep(encoder, "text", block, 20000);
+	bzero(block, LZ4E_WINDOW);
+	lz4e_sweep(encoder, "zeros", block, LZ4E_WINDOW);
+	fill_random(block, 3000, 13);
+	bzero(block + 3000, 10000);
+	fill_text(block + 13000, 20000, 17);
+	lz4e_fill_periodic(block + 33000, 7000, 37, 19);
+	lz4e_sweep(encoder, "mixed", block, 40000);
+	fill_text(block, LZ4E_WINDOW, 23);
+	lz4e_sweep(encoder, "text window", block, LZ4E_WINDOW);
+
+	n = 8192;
+	lz4e_fill_without_repeats(block, n, 29);
+	c.n = n;
+	for (size_t capacity = 1; capacity <= lz4e_bound(n) + 1; capacity++) {
+		code = lz4e_encode_prefix(encoder, "distinct", block, n,
+		    capacity, &step);
+		c.capacity = capacity;
+		lz4e_require(step.consumed == lz4e_literal_prefix(n, capacity),
+		    &c, "the longest literal run that fits is consumed");
+		free(code);
+	}
+
+	free(block);
+	fsimg_lz4_encoder_free(encoder);
+	fsimg_ctx_free(ctx);
+}
+
+/*
+ * The bound n + n / 255 + 2 holds for every shape. Input without a repeat
+ * is one literal run, 1 + x(n) + n bytes, which meets the bound exactly
+ * when n mod 255 is 15 or more, first at 15; one byte below the bound is
+ * refused with nothing written.
+ */
+static void
+test_lz4_encoder_bound(void)
+{
+	static const size_t lengths[] = { 0, 1, 14, 15, 16, 269, 270, 271,
+	    524, 525, 4096, 65536, 65537 };
+	fsimg_lz4_encoder_t *encoder;
+	fsimg_error_t error;
+	fsimg_ctx_t *ctx;
+	uint8_t *block, *code;
+	size_t length, n;
+
+	ctx = new_context();
+	encoder = lz4e_new_encoder(ctx);
+	block = xmalloc(65537 + 400);
+
+	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		n = lengths[i];
+		lz4e_fill_without_repeats(block, n, 31 + n);
+		length = lz4e_round_trip(encoder, "distinct", block, n);
+		CHECK(length == lz4e_literal_block_length(n));
+		CHECK((n % 255 >= 15) == (length == lz4e_bound(n)));
+
+		code = xmalloc(lz4e_bound(n) - 1);
+		memset(code, POISON, lz4e_bound(n) - 1);
+		length = 1;
+		CHECK(fsimg_lz4_encode(encoder, block, n, code,
+		    lz4e_bound(n) - 1, &length, &error) == FSIMG_EINVAL);
+		CHECK(error.status == FSIMG_EINVAL && length == 0);
+		CHECK(poison_intact(code, lz4e_bound(n) - 1));
+		free(code);
+	}
+
+	/* Runs of 15 to 400 random bytes between short repeats. */
+	for (uint64_t seed = 0; seed < 64; seed++) {
+		uint64_t state = seed;
+
+		n = 0;
+		while (n < 65537) {
+			size_t run = 15 + next_random(&state) % 386;
+
+			fill_random(block + n, run, state);
+			n += run;
+			if (n >= 8 && n + 4 <= 65537) {
+				bcopy(block + n - 8, block + n, 4);
+				n += 4;
+			}
+		}
+		lz4e_round_trip(encoder, "runs and repeats", block, 65537);
+	}
+
+	CHECK(fsimg_lz4_encode_bound(0) == 2);
+	CHECK(fsimg_lz4_encode_bound(65536) == 65795);
+	free(block);
+	fsimg_lz4_encoder_free(encoder);
+	fsimg_ctx_free(ctx);
+}
+
+/* Bad arguments are refused before anything is read or written. */
+static void
+test_lz4_encoder_refusals(void)
+{
+	fsimg_lz4_encoder_t *encoder;
+	fsimg_codec_step_t step;
+	fsimg_error_t error;
+	fsimg_ctx_t *ctx;
+	uint8_t block[64], out[16];
+	size_t length;
+
+	ctx = new_context();
+	encoder = lz4e_new_encoder(ctx);
+	fill_text(block, sizeof(block), 3);
+
+	CHECK(fsimg_lz4_encode(encoder, NULL, 1, out, sizeof(out), &length,
+	    &error) == FSIMG_EINVAL && length == 0);
+	CHECK(fsimg_lz4_encode(encoder, block, 0, NULL, 2, &length,
+	    &error) == FSIMG_EINVAL);
+	CHECK(fsimg_lz4_encode_prefix(encoder, NULL, 1, out, sizeof(out),
+	    &step, &error) == FSIMG_EINVAL);
+	CHECK(fsimg_lz4_encode_prefix(encoder, block, 1, NULL, 1, &step,
+	    &error) == FSIMG_EINVAL);
+
+	/* A capacity of 0 cannot hold even the empty block's token. */
+	memset(out, POISON, sizeof(out));
+	CHECK(fsimg_lz4_encode_prefix(encoder, block, sizeof(block), out, 0,
+	    &step, &error) == FSIMG_EINVAL);
+	CHECK(error.status == FSIMG_EINVAL && step.consumed == 0 &&
+	    step.produced == 0 && !step.done);
+	CHECK(poison_intact(out, sizeof(out)));
+
+	/* Empty input in prefix mode is the empty block, done. */
+	CHECK(fsimg_lz4_encode_prefix(encoder, NULL, 0, out, 1, &step,
+	    &error) == FSIMG_OK);
+	CHECK(step.consumed == 0 && step.produced == 1 && out[0] == 0 &&
+	    step.done);
+
+	/* A capacity of 1 holds the empty block, whatever the input. */
+	CHECK(fsimg_lz4_encode_prefix(encoder, block, sizeof(block), out, 1,
+	    &step, &error) == FSIMG_OK);
+	CHECK(step.consumed == 0 && step.produced == 1 && out[0] == 0 &&
+	    !step.done && poison_intact(out + 1, sizeof(out) - 1));
+#if SIZE_MAX > UINT32_MAX
+	/* Input past 2^32 - 1 is refused on its length; none is read. */
+	CHECK(fsimg_lz4_encode_bound((size_t)UINT32_MAX + 1) == SIZE_MAX);
+	CHECK(fsimg_lz4_encode(encoder, block, (size_t)UINT32_MAX + 1, out,
+	    sizeof(out), &length, &error) == FSIMG_EINVAL);
+	CHECK(fsimg_lz4_encode_prefix(encoder, block, (size_t)UINT32_MAX + 1,
+	    out, sizeof(out), &step, &error) == FSIMG_EINVAL);
+#endif
+
+	fsimg_lz4_encoder_free(encoder);
+	fsimg_ctx_free(ctx);
+}
+
+/* The table is charged to the context, and a failed allocation is clean. */
+static void
+test_lz4_encoder_allocation(void)
+{
+	fsimg_lz4_encoder_t *encoder;
+	fsimg_stats_t before, during, after;
+	fsimg_error_t error;
+	fsimg_ctx_t *ctx;
+
+	ctx = new_context();
+	CHECK(fsimg_ctx_get_stats(ctx, &before, &error) == FSIMG_OK);
+	fsimg_test_fail_alloc_after(ctx, 1);
+	CHECK(fsimg_lz4_encoder_new(ctx, &encoder, &error) == FSIMG_ENOMEM);
+	CHECK(encoder == NULL && error.status == FSIMG_ENOMEM);
+	CHECK(fsimg_ctx_get_stats(ctx, &during, &error) == FSIMG_OK);
+	CHECK(during.memory_bytes == before.memory_bytes);
+
+	fsimg_test_fail_alloc_after(ctx, 0);
+	encoder = lz4e_new_encoder(ctx);
+	CHECK(fsimg_ctx_get_stats(ctx, &during, &error) == FSIMG_OK);
+	CHECK(during.memory_bytes >= before.memory_bytes + 16384);
+	fsimg_lz4_encoder_free(encoder);
+	fsimg_lz4_encoder_free(NULL);
+	CHECK(fsimg_ctx_get_stats(ctx, &after, &error) == FSIMG_OK);
+	CHECK(after.memory_bytes == before.memory_bytes);
+	fsimg_ctx_free(ctx);
+}
+
+/*
+ * The digest of a fixed corpus's blocks on the given encoder: text, random
+ * bytes, zeros and a period-3 pattern whole, and a text window in prefix
+ * mode at a few capacities.
+ */
+static uint64_t
+lz4e_corpus_digest(fsimg_lz4_encoder_t *encoder)
+{
+	static const size_t capacities[] = { 1, 100, 4096, 20000 };
+	fsimg_codec_step_t step;
+	uint8_t *block, *code;
+	uint64_t digest;
+	size_t length;
+
+	block = xmalloc(200000);
+	digest = 0xcbf29ce484222325u;
+	fill_text(block, 200000, 5);
+	code = lz4e_encode(encoder, "corpus text", block, 200000, &length);
+	digest = digest_bytes(digest, code, length);
+	free(code);
+	fill_random(block, 65536, 5);
+	code = lz4e_encode(encoder, "corpus random", block, 65536, &length);
+	digest = digest_bytes(digest, code, length);
+	free(code);
+	bzero(block, 70000);
+	code = lz4e_encode(encoder, "corpus zeros", block, 70000, &length);
+	digest = digest_bytes(digest, code, length);
+	free(code);
+	for (size_t i = 0; i < 100000; i++)
+		block[i] = (uint8_t)("xyz"[i % 3]);
+	code = lz4e_encode(encoder, "corpus period 3", block, 100000,
+	    &length);
+	digest = digest_bytes(digest, code, length);
+	free(code);
+	fill_text(block, LZ4E_WINDOW, 7);
+	for (size_t i = 0; i < sizeof(capacities) / sizeof(capacities[0]);
+	    i++) {
+		code = lz4e_encode_prefix(encoder, "corpus window", block,
+		    LZ4E_WINDOW, capacities[i], &step);
+		digest = digest_bytes(digest, code, step.produced);
+		digest = digest_bytes(digest, (const uint8_t *)&step.consumed,
+		    sizeof(step.consumed));
+		free(code);
+	}
+	free(block);
+	return (digest);
+}
+
+static uint64_t
+lz4e_fresh_corpus_digest(fsimg_ctx_t *ctx)
+{
+	return (lz4e_corpus_digest(lz4e_new_encoder(ctx)));
+}
+
+/*
+ * The block depends on the input and the capacity alone: a fresh encoder,
+ * one whose table earlier inputs filled and a second process give the
+ * same bytes, and the corpus digest is pinned, so another host must give
+ * them too. The earlier inputs leave entries in the used encoder's
+ * table: the corpus's own text at shifted positions, so its groups'
+ * entries name positions after or far from the ones the corpus will look
+ * up, and random bytes, whose entries name other bytes. The test shows
+ * the block does not depend on earlier calls; it cannot show that the
+ * zero fill is what makes it so, since the scan also records every
+ * position before looking up a later one, which on its own keeps stale
+ * entries out of the block.
+ */
+static void
+test_lz4_encoder_determinism(void)
+{
+	fsimg_lz4_encoder_t *fresh, *used;
+	const char *saved_directory;
+	fsimg_ctx_t *ctx;
+	uint8_t *block;
+	uint64_t digest;
+
+	ctx = new_context();
+	fresh = lz4e_new_encoder(ctx);
+	used = lz4e_new_encoder(ctx);
+	block = xmalloc(LZ4E_WINDOW + 3000);
+	fill_text(block, LZ4E_WINDOW + 3000, 7);
+	lz4e_round_trip(used, "plant", block + 3000, LZ4E_WINDOW);
+	lz4e_round_trip(used, "plant", block + 1, 1000);
+	fill_random(block, LZ4E_WINDOW, 41);
+	lz4e_round_trip(used, "plant", block, LZ4E_WINDOW);
+
+	/* The first pass alone writes its blocks for --seed. */
+	digest = lz4e_corpus_digest(fresh);
+	saved_directory = emit_directory;
+	emit_directory = NULL;
+	CHECK(lz4e_corpus_digest(used) == digest);
+	CHECK(lz4e_corpus_digest(used) == digest);
+	CHECK(second_process_digest(ctx, lz4e_fresh_corpus_digest) == digest);
+	emit_directory = saved_directory;
+	if (digest != UINT64_C(0x2c37a96b4ff85fb6)) {
+		fprintf(stderr, "LZ4 corpus digest 0x%016" PRIx64 "\n", digest);
+		CHECK(!"the LZ4 corpus digest is the pinned one");
+	}
+
+	free(block);
+	fsimg_lz4_encoder_free(fresh);
+	fsimg_lz4_encoder_free(used);
+	fsimg_ctx_free(ctx);
+}
+
+/*
+ * --encode-lz4 IN OUT CAPACITY: IN as LZ4 blocks in a legacy frame, the
+ * input the lz4 command decodes with lz4 -d (docs/build.md). A CAPACITY of
+ * 0 encodes IN in whole-mode blocks of up to 4 MiB; any other encodes each
+ * block in prefix mode from the next window of up to 64 KiB into CAPACITY
+ * bytes, as the EROFS writer fills a cluster.
+ */
+static int
+encode_lz4_file(const char *in_path, const char *out_path,
+    size_t capacity)
+{
+	static const uint8_t magic[4] = { 0x02, 0x21, 0x4c, 0x18 };
+	fsimg_lz4_encoder_t *encoder;
+	fsimg_codec_step_t step;
+	fsimg_error_t error;
+	fsimg_ctx_t *ctx;
+	uint8_t *block, *code, word[4];
+	size_t at, n, piece, room;
+	FILE *out;
+
+	block = read_file(in_path, &n);
+	ctx = new_context();
+	encoder = lz4e_new_encoder(ctx);
+	piece = capacity == 0 ? 4u << 20 : LZ4E_WINDOW;
+	room = capacity == 0 ? lz4e_bound(piece) : capacity;
+	code = xmalloc(room);
+	out = fopen(out_path, "wb");
+	CHECK(out != NULL && fwrite(magic, 1, 4, out) == 4);
+	for (at = 0; at < n; at += step.consumed) {
+		piece = n - at < piece ? n - at : piece;
+		if (capacity == 0) {
+			step.consumed = piece;
+			if (fsimg_lz4_encode(encoder, block + at, piece, code,
+			    room, &step.produced, &error) != FSIMG_OK)
+				break;
+		} else if (fsimg_lz4_encode_prefix(encoder, block + at, piece,
+		    code, room, &step, &error) != FSIMG_OK ||
+		    step.consumed == 0) {
+			break;
+		}
+		for (unsigned i = 0; i < 4; i++)
+			word[i] = (uint8_t)(step.produced >> (8 * i));
+		CHECK(fwrite(word, 1, 4, out) == 4 &&
+		    fwrite(code, 1, step.produced, out) == step.produced);
+	}
+	CHECK(fclose(out) == 0);
+	if (at < n) {
+		fprintf(stderr, "%s: the encoder stopped at %zu\n", in_path,
+		    at);
+		exit(1);
+	}
+	free(code);
+	free(block);
+	fsimg_lz4_encoder_free(encoder);
+	fsimg_ctx_free(ctx);
+	return (0);
+}
+
 #define RUN(test) do { \
 	if (getenv("CODEC_DEBUG") != NULL) \
 		fprintf(stderr, "%s\n", #test); \
@@ -5669,6 +6620,15 @@ run_tests(void)
 	RUN(test_lzo_encoder_allocation);
 	RUN(test_lzo_encoder_determinism);
 	RUN(test_lzo_encoder_stale_entries);
+	RUN(test_lz4_encoder_worked_blocks);
+	RUN(test_lz4_encoder_short_inputs);
+	RUN(test_lz4_encoder_round_trips);
+	RUN(test_lz4_encoder_far_matches);
+	RUN(test_lz4_encoder_prefix_capacities);
+	RUN(test_lz4_encoder_bound);
+	RUN(test_lz4_encoder_refusals);
+	RUN(test_lz4_encoder_allocation);
+	RUN(test_lz4_encoder_determinism);
 }
 
 int
@@ -5691,6 +6651,9 @@ main(int argc, char **argv)
 	}
 	if (argc == 4 && strcmp(argv[1], "--encode") == 0)
 		return (encode_file(argv[2], argv[3]));
+	if (argc == 5 && strcmp(argv[1], "--encode-lz4") == 0)
+		return (encode_lz4_file(argv[2], argv[3],
+		    parse_count(argv[4])));
 	if (argc == 4 && strcmp(argv[1], "--encode-framed") == 0)
 		return (encode_framed_file(argv[2], argv[3]));
 	if (argc == 2 && strcmp(argv[1], "--native") == 0)
@@ -5708,7 +6671,8 @@ main(int argc, char **argv)
 	if (argc != 1) {
 		fprintf(stderr, "usage: test-codec [--decode lzo|nrv2b IN OUT "
 		    "BOUND | --emit-cases DIR | --encode IN OUT | --encode-framed "
-		    "IN OUT | --mutate CODEC SEED COUNT DIR FILE... | --native | "
+		    "IN OUT | --encode-lz4 IN OUT CAPACITY | "
+		    "--mutate CODEC SEED COUNT DIR FILE... | --native | "
 		    "--random CODEC SEED COUNT DIR | --seed DIR | "
 		    "--seed-bzip2 DIR]\n");
 		return (2);

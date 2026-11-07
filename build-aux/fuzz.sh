@@ -238,8 +238,10 @@ compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     "$source_dir/fuzz/codec.c" "$fuzz_library" $codec_libs -o "$work_dir/fuzz-codec"
 codec_corpus=codec-fuzz-corpus
 mkdir -p "$codec_corpus"
-# A corpus without the encoder's seeds, lzoenc-*.seed, is seeded again.
-if ! ls "$codec_corpus"/lzoenc-*.seed >/dev/null 2>&1; then
+# A corpus without the encoders' seeds, lzoenc-*.seed and lz4enc-*.seed,
+# is seeded again.
+if ! ls "$codec_corpus"/lzoenc-*.seed >/dev/null 2>&1 ||
+    ! ls "$codec_corpus"/lz4enc-*.seed >/dev/null 2>&1; then
     ./test-codec --seed "$codec_corpus"
 fi
 # Native chunks, never in the tree, join the corpus when

@@ -2,10 +2,10 @@
 
 ## Scope
 
-fsimg owns five stream codecs: an LZO1X decoder, an NRV2B decoder for the
+fsimg owns six stream codecs: an LZO1X decoder, an NRV2B decoder for the
 8-bit control-buffer variant, an [LZ4 block decoder](#the-lz4-block-decoder)
-for EROFS clusters, a [bzip2 decoder](#the-bzip2-decoder) for DMG chunks, and
-an LZO1X encoder. It also compiles two
+for EROFS clusters, a [bzip2 decoder](#the-bzip2-decoder) for DMG chunks, an
+LZO1X encoder and an [LZ4 block encoder](#the-lz4-block-encoder). It also compiles two
 [imported decoders](#imported-lzfse-and-lzvn-decoders), Apple's LZFSE and LZVN, which HFS
 Plus and APFS transparent compression need. They live in
 `lib/codec/`, are private to libfsimg, and know nothing about the images
@@ -15,9 +15,10 @@ sequence of chunks each introduced by a 16-bit big-endian stored length, is
 the `ifsboot` container's in the [layer design](design-layers.md); the
 single unframed stream behind the 64-byte Harman-Becker header is the
 `hbcifs` container's, in the same design. Both containers call the decoders
-specified here, and the `ifsboot` writer calls the encoder. The cluster
-layout around an LZ4 block, its padding and the length it must decode to,
-is the [EROFS design's](design-erofs.md#physical-clusters).
+specified here, and the `ifsboot` writer calls the LZO1X encoder. The
+cluster layout around an LZ4 block, its padding and the length it must
+decode to, is the [EROFS design's](design-erofs.md#physical-clusters), and
+the EROFS writer calls the LZ4 encoder.
 
 Complete contiguous integer fields may use the shared
 [scalar byte codecs](design-binary-primitives.md) after their input spans are
@@ -118,7 +119,7 @@ Everything the plan asks for follows from this shape:
   for byte by byte at the window's pace.
 * **No allocation.** The LZO1X decoder state is a struct the caller embeds
   or keeps on its stack; the NRV2B decoder has no state outside its call;
-  the buffers are the caller's. The encoder's one table is allocated once
+  the buffers are the caller's. Each encoder's one table is allocated once
   through the resource context by its owner and reused per block.
 
 ## The LZO1X stream
@@ -984,6 +985,216 @@ a few bytes of work; one that fits is paid for byte by byte. The format's
 own ratio limit, about 255 output bytes per extension byte, bounds how far
 a block can expand.
 
+## The LZ4 block encoder
+
+```c
+fsimg_status_t fsimg_lz4_encoder_new(fsimg_ctx_t *,
+    fsimg_lz4_encoder_t **, fsimg_error_t *);
+void fsimg_lz4_encoder_free(fsimg_lz4_encoder_t *);
+size_t fsimg_lz4_encode_bound(size_t in_len);
+fsimg_status_t fsimg_lz4_encode(fsimg_lz4_encoder_t *,
+    const uint8_t *in, size_t in_len, uint8_t *out, size_t capacity,
+    size_t *out_len, fsimg_error_t *);
+fsimg_status_t fsimg_lz4_encode_prefix(fsimg_lz4_encoder_t *,
+    const uint8_t *in, size_t in_len, uint8_t *out, size_t capacity,
+    fsimg_codec_step_t *step, fsimg_error_t *);
+```
+
+The encoder writes one raw block in one call, for the EROFS writer's
+compressed clusters. It need not reproduce the reference encoder's bytes;
+it must be deterministic, bounded, and meet the
+[end conditions](#end-of-block), so that fsimg's full mode, the Linux kernel
+and `fsck.erofs` all read its blocks. Both modes write a complete block of
+a prefix of `in[0..in_len)` into `out`, which must not overlap it:
+
+* **Whole mode**, `fsimg_lz4_encode`, encodes all of the input. A capacity
+  below [the bound](#lz4-encoder-bound-and-work) is `FSIMG_EINVAL` before
+  anything is read or written. On success `*out_len` is the block's length.
+* **Prefix mode**, `fsimg_lz4_encode_prefix`, encodes as much of the input
+  as the [destination-bounded parse](#destination-bounded-encoding) fits
+  into `capacity` bytes. On success `step->consumed` is the length of the
+  prefix encoded, `step->produced` the block's length, at most `capacity`,
+  and `step->done` is set when the prefix is the whole input. Decoding the
+  block in full mode gives exactly `in[0..step->consumed)`. A capacity of 0
+  is `FSIMG_EINVAL`, since no block is shorter than its one token; a
+  capacity of 1 holds only the empty block `00`, and any larger one holds
+  at least one byte of a nonempty input.
+
+The EROFS writer calls prefix mode with the block size `B` as the capacity
+and a window of the next `min(remaining, 64 KiB)` input bytes, and stores
+the block right-aligned in its cluster; the leading zeros of
+`LZ4_0PADDING` fill whatever the block leaves, so the block needs no room
+for padding of its own. Whole mode is prefix mode with the bound checked
+first: at any capacity of at least the bound, the parse below never stops
+early, so prefix mode consumes the whole input and writes the same bytes.
+
+| Input | Mode | Block |
+| --- | --- | --- |
+| empty | whole | `00` |
+| `A` | whole | `10 41` |
+| 12 `A` | whole | `c0` and the 12 bytes: no position has an earlier candidate within reach of the end |
+| 13 `A` | whole | `13 41 01 00 50 41 41 41 41 41`: one literal, a match of 7 at offset 1 ending 5 bytes before the end, five literals |
+| `ABCDABCDEFGHIJKL` | whole | `40 41 42 43 44 04 00 80 45 46 47 48 49 4a 4b 4c`: a match of 4 needs eight final literals to start 12 bytes before the end |
+| `ABCDABCDEFGHIJK` | whole | `f0 00` and the 15 bytes: the second `ABCD` lies 11 bytes before the end, too late for a match |
+| 13 `A` | prefix, capacity 9 | `80` and 8 bytes, consuming 8: the match of 7 would need 10 bytes with its five final literals |
+| 13 `A` | prefix, capacity 10 | the whole-mode block, consuming 13: the sequence and its final run fill the capacity exactly |
+| 20 bytes without a repeat | prefix, capacity 10 | `90` and 9 bytes, consuming 9 |
+
+### LZ4 matching
+
+The encoder's state is a table of 4096 entries of 32-bit input positions
+(16 KiB), allocated once by `fsimg_lz4_encoder_new` through the resource
+context and zero-filled at the start of every call. With `n` the input's
+length, the scan examines positions `p` from 0 while `p <= n - 12`, the
+last position at which a match may start under end condition 3:
+
+* The four bytes at `p`, read as a little-endian 32-bit value, multiplied
+  by 2654435761 modulo 2^32, top 12 bits, select one table entry. The entry
+  is the candidate; `p` replaces it. A zero entry names position 0, a real
+  position, judged like any other.
+* The candidate is a match when it lies before `p`, at most 65535 bytes
+  behind it (the largest offset the format holds), and its four bytes equal
+  those at `p`; comparing the bytes makes a hash collision harmless. The
+  match is extended forward while the bytes agree and its end stays at or
+  before `n - 5`, so the last five bytes are never matched (end
+  condition 2). A match is therefore 4 to `n - 5 - p` bytes long, and that
+  limit is at least 7 at any examined position. Matching is greedy: the match found is taken,
+  if [it fits](#destination-bounded-encoding), never deferred for a later
+  or longer one.
+* After a match every position inside it that the scan could examine is
+  recorded in the table, and the scan resumes after the match. Without a
+  match the byte becomes a pending literal and the scan moves on by one.
+
+Input of 12 bytes or fewer has no examined position with an earlier
+candidate, so it is written as literals only, as end condition 3 requires.
+
+### LZ4 sequences and the block end
+
+A match of `m` bytes at offset `d`, after the `l` pending literals, is one
+sequence: the token with literal field `min(l, 15)` and match field
+`min(m - 4, 15)`, the literal extension, the literals, `d` as two
+little-endian bytes, and the match extension. An extension of value
+`v >= 15` is `(v - 15) / 255` bytes of 255 followed by the byte
+`(v - 15) mod 255`; a field below 15 has none. The block ends with one
+literal-only sequence whose match field is 0, which is condition 1. In whole
+mode the scan limits above give conditions 2 and 3 directly: every match
+starts at or before `n - 12` and ends at or before `n - 5`, and the final
+run holds the rest of the input.
+
+In prefix mode the block can end at a prefix length `c` shorter than `n`,
+while the scan limits came from `n`. The final run must then still meet both
+conditions against `c`: after a match of `m` bytes ending at input position
+`e`, it needs at least `f_min(m) = max(5, 12 - m)` literals, five for
+condition 2 and enough that `c - (e - m) >= 12` for condition 3. Those
+literals always exist, since the scan limits give `e + f_min(m) <= n`.
+
+### Destination-bounded encoding
+
+The costs the parse weighs, in output bytes, with `x(v)` the extension
+bytes of a field value `v`, 0 for `v < 15` and `1 + (v - 15) / 255`
+otherwise:
+
+| Part | Cost |
+| --- | --- |
+| A sequence of `l` literals and an `m`-byte match | `1 + l + x(l) + 2 + x(m - 4)` |
+| The final run of `f` literals | `final(f) = 1 + f + x(f)` |
+
+The encoder keeps the bytes written so far `o`, the input those sequences
+cover `e` and the final run they require, `f_min` of the last match or 0
+before any match. With `N` the capacity:
+
+1. **Pending literals.** Before position `p` is examined, if
+   `final(p - e) > N - o` the scan stops: the pending literals no longer
+   fit even as the final run, so no sequence that carries them can fit.
+   The rule changes no output; it stops the scan within a few bytes of the
+   point the block can reach, so a call's work follows what it consumes and
+   not the window it was given.
+2. **Sequences.** A match is taken when its sequence plus a final run of
+   its `f_min` fits: `sequence + final(f_min(m)) <= N - o`. Otherwise the
+   scan stops, and the match is not shortened to fit. The cost is density
+   at a cluster's edge: a long match whose extension bytes do not fit, such
+   as a run of zeros after about 3850 incompressible bytes in a 4096-byte
+   cluster, leaves the cluster to literals, and the next cluster takes the
+   run. That costs at most about one cluster per such edge; shortening the
+   match would add a length search for it.
+3. **The final run.** When the scan stops or ends, the final run takes the
+   largest `f <= n - e` with `final(f) <= N - o`; the block encodes
+   `c = e + f` bytes. Rule 2 guarantees `f >= f_min` after a match, and
+   before any match `N >= 1` guarantees the empty run.
+
+The parse depends on the capacity only through where it stops: a larger
+capacity takes the same matches and stops at the same sequence or a later
+one. The prefix is the longest one this parse can end within `N`, not
+necessarily the longest prefix whose own whole-mode block fits `N`; finding
+that would take a search over lengths, since a block's length is not
+monotone in the input's. The EROFS writer's cluster rule is stated in terms
+of this mode.
+
+### LZ4 encoder bound and work
+
+`fsimg_lz4_encode_bound(n) = n + n / 255 + 2`. A sequence costs at most
+`l + m + floor(l / 255)`: its token, offset and match extension,
+`3 + x(m - 4)`, are at most `m - 1` for every `m >= 4`, and
+`x(l) <= 1 + floor(l / 255)`. The final run costs at most
+`2 + f + floor(f / 255)`. The literal counts and match lengths sum to the
+input's length, so a block costs at most `n + floor(n / 255) + 2`. An input
+without a match is one literal run of `1 + x(n) + n` bytes, which meets the
+bound exactly when `n mod 255` is 15 or more, first at 15 bytes. The same sum
+bounds every partial block the fit tests price, since each is a block of a
+prefix of at most `n` bytes; every cost the encoder computes is therefore
+at most the bound, which `fsimg_lz4_encode_bound` returns as `SIZE_MAX`
+when it does not fit a `size_t`, and the encoder compares costs with the
+room `N - o`, never adding them to `o`. The input is at most 2^32 - 1
+bytes, the table's position width; a longer input, or one whose bound is
+`SIZE_MAX`, is `FSIMG_EINVAL` in both modes.
+
+Every output byte goes through one writer that refuses a byte past the
+capacity, so no write can overflow whatever the arithmetic above says. The
+fit tests make the refusal unreachable; reaching it, a final run shorter
+than the last match's `f_min` (checked before the run is written), or
+whole mode consuming less than the whole input, is `FSIMG_ESTATE`, a
+defect in the encoder, with the output's contents unspecified. No block
+breaking the end conditions is ever returned, whatever the fit arithmetic
+says.
+
+A call zero-fills the table, hashes and looks up each examined position
+once, compares each byte of a match once while extending it, records the
+positions inside matches, and writes each output byte once. Its running
+time is proportional to `in_len` plus the block's length at most; when rule
+1 stops the scan, it is proportional to `consumed` plus the block's length
+plus the length of the one match rule 2 may have refused. The caller
+charges the work to its session after the call.
+
+### LZ4 encoder determinism
+
+The block is a function of `in[0..in_len)` and, in prefix mode, the
+capacity; nothing else reaches it. The table is zero-filled at the start of
+every call, so neither its allocation's contents, nor earlier calls, nor a
+sanitizer's poisoned memory affect a later block; candidates are positions,
+never pointers; the hash is a fixed function on 32-bit values; there is no
+randomness and no arithmetic whose result depends on the host's word size.
+Nothing is read outside the input: a hash reads `p` to `p + 3` with
+`p <= n - 12`, and extending a match reads no byte at or past `n - 5`. In
+prefix mode the block depends on `in_len` as well as on the bytes it
+consumes, because the scan's end limits come from `in_len`; a caller that
+needs a reproducible block passes a window that is itself a function of
+its data, as the EROFS writer's `min(remaining, 64 KiB)` is.
+
+The scan records every position before a later one is looked up, which
+by the [LZO1X encoder's argument](#determinism) would on its own keep an
+earlier call's entries out of the block. The zero fill, which costs little
+beside a 64 KiB window, makes determinism hold without that invariant, so a
+later change to which positions are recorded, such as skipping ahead
+through incompressible input, cannot break it.
+
+### LZ4 encoder validation
+
+Three checks establish the encoder: every block decodes under fsimg's
+full mode to its input, end conditions included; blocks wrapped in a
+legacy frame decode to their input under the `lz4` command; and the EROFS
+writer's stage gate mounts LZ4 volumes under the kernel and passes
+`fsck.erofs`.
+
 ## Concurrency and failure
 
 A codec object belongs to one caller and holds no reference to any other
@@ -1005,7 +1216,7 @@ and a call is bounded by the window sizes the container chose.
 | `lib/codec/codec.h` | `fsimg_codec_step_t`, the decoder and encoder types and prototypes; private to libfsimg, never included by `include/fsimg.h` |
 | `lib/codec/lzo1x.c` | The LZO1X instruction tables, the decoder state machine and the encoder; one file, because decoder and encoder share the class and distance constants |
 | `lib/codec/nrv2b.c` | The NRV2B bit reader, number decoder and one-call decoder |
-| `lib/codec/lz4.c` | The LZ4 length reader and the one-call full and partial block decoders |
+| `lib/codec/lz4.c` | The LZ4 length reader, the one-call full and partial block decoders and the [block encoder](#the-lz4-block-encoder); one file, because decoder and encoder share the token, extension and end-condition constants |
 | `lib/codec/bzip2.c` | The bzip2 bit reader, block parser, inverse transform and one-call decoder |
 | `lib/codec/lzfse.c` | The project-owned wrapper over the imported decoders: `fsimg_lzfse_decode` and `fsimg_lzvn_decode`, their charged scratch and their bounds |
 | `lib/codec/lzfse/` | The imported LZFSE and LZVN decoder files under Apple's notice; nothing else includes them |
@@ -1158,19 +1369,29 @@ The procedure and its inputs:
   `lib/lz4/`, the LZ4 code in `erofs-utils`, nor any port or binding.
 * **This design.** Its author read the documents above and the oracle
   wrapper, ran the oracles on hand-built streams and on the corpus, and
-  read no codec source.
+  read no codec source. The [LZ4 encoder](#the-lz4-block-encoder) needs no
+  describer, since no source stands behind it: its section and its code
+  were written in one session from the block format description, the
+  decoder sections above and the project's own decoder in
+  `lib/codec/lz4.c`, without reading any LZ4 encoder or searching for
+  encoder code. Its hash is Knuth's multiplicative hash with the
+  golden-ratio constant the LZO1X encoder already uses; its table size,
+  4096 entries of 16 KiB, is a tuning choice for a 64 KiB window and an L1
+  cache, which coincides with the reference library's default memory
+  setting; its other constants are the format's.
 * **Implementers.** Whoever writes `lib/codec/lzo1x.c`,
   `lib/codec/nrv2b.c` and `lib/codec/lz4.c` works from this design and the
   tests alone and reads no codec source: not `liblzo2`, `minilzo`,
   `libucl`, UPX, the kernel's `lzo1x_decompress_safe.c` or `lib/lz4/`, the
-  `lz4` library, nor the owner's `~/pcm31/tools/ifs.py`. When agents do the work, describer and
+  `lz4` library's `lz4.c` or `lz4hc.c`, the compressors in `erofs-utils`,
+  nor the owner's `~/pcm31/tools/ifs.py`. When agents do the work, describer and
   implementer are separate sessions sharing nothing beyond the accepted
   design. The implementer may run the oracle.
 * **Provenance review.** Before the codecs land, a reviewer who did not
   write them confirms that every file carries the BSD-2-Clause SPDX header
   and fsimg copyright; that the structure is this design's LZO1X state
-  machine and one-call NRV2B and LZ4 decoders and not a transcription of
-  any decoder's control flow; that the only
+  machine, one-call NRV2B and LZ4 decoders and LZ4 parse and not a
+  transcription of any decoder's or encoder's control flow; that the only
   literal constants are those the format tables require; that no file's
   history ever held imported text; and that the commit
   message lists the sources above. The review is recorded with the stage's
@@ -1192,11 +1413,16 @@ in this design, in test code that shares nothing with `lib/codec/`.
 | Decompression-bomb ratio | A 20-byte NRV2B stream claiming 64 KiB within a 64 KiB capacity decodes in one call, and a 265-byte LZO1X stream (one literal, then a long match of 65535 at distance 1, then the end marker) claiming 64 KiB within a 64 KiB limit decodes in calls of 4 KiB windows; the charged work equals consumed plus produced and the elapsed steps are below a fixed multiple of it | The capacity or limit lowered to 32 KiB refuses the same streams at the length field, before any byte of the match is copied: `produced` is the one literal, and the work is the few bytes of the header |
 | Encoder round trip | Blocks of zeros, random bytes, text, period-2 and period-49152 patterns, boundary cases at distances 2048, 2049, 16384, 16385 and 49151, and every 64 KiB slice of each decoded native ImageFS available through `FSIMG_IFS_NATIVE`; each decodes to its input under `fsimg_lzo1x_decode`, and its length never exceeds the bound | A byte flipped in an encoded stream fails the round trip; a capacity one below the bound is `FSIMG_EINVAL` before any write |
 | Encoder determinism | A block encoded on a fresh encoder, again after other blocks on the same encoder, in two processes, and under the ASan build with allocation poisoning gives identical bytes | Two blocks are first encoded to plant table entries that a missing check would turn into matches: one leaves, in the bucket of a four-byte group `G` that the block under test contains, the position of a later occurrence of `G`, so the candidate lies after the current position; the other leaves the position of a group that collides with `G` in the hash (found by the test from the hash in this design) but differs in bytes, so the candidate lies before the current position with wrong bytes. The block under test then encodes to the fresh stream; the test documents that dropping the position check or the byte comparison would make it differ |
-| Fuzzing (`fuzz/codec.c`) | The input's first bytes choose the codec, the limit or capacity and, for LZO1X, the window sizes; the rest is the stream, decoded in one call and, for LZO1X, again at random split points under ASan and UBSan; the target asserts LZO1X split invariance, progress on every call, no consumption after `done`, and no byte beyond the buffers. For LZ4 the block is decoded in full mode and in partial mode at a length taken from the input: at any length up to the bytes the full decode produced, successful or not, the partial decode succeeds with the same prefix | Corpus seeded from every stream above and from chunks of the native images |
+| Fuzzing (`fuzz/codec.c`) | The input's first bytes choose the codec, the limit or capacity and, for LZO1X, the window sizes; the rest is the stream, decoded in one call and, for LZO1X, again at random split points under ASan and UBSan; the target asserts LZO1X split invariance, progress on every call, no consumption after `done`, and no byte beyond the buffers. For LZ4 the block is decoded in full mode and in partial mode at a length taken from the input: at any length up to the bytes the full decode produced, successful or not, the partial decode succeeds with the same prefix. The LZ4 encoder encodes the input whole, on a kept and a fresh encoder that must agree, and in prefix mode at a capacity taken from the input; every block stays within its buffer, decodes in full mode to exactly the input it claims, and prefix mode at or past the bound is whole mode | Corpus seeded from every stream above and from chunks of the native images |
 | LZ4 forms (`test/codec.c`) | The worked blocks above; literal lengths 0, 14, 15, 16, 269, 270 and 525, so extensions of one and two bytes and a 255 followed by 0; match lengths 4, 18, 19, 273 and 274 at offsets 1, 2 and the bytes produced, and at 65535 after 65535 literals; a match longer than its offset; a last sequence with a nonzero match field; a last sequence of exactly five literals after a match starting exactly 12 bytes before the end; blocks the `lz4` command made from zeros, text, a short repeating pattern and incompressible bytes, kept as bytes; each decodes to the bytes the oracle produced | Offset zero; offset one past the bytes produced; a last sequence of one and of four literals after a match; a last match starting 11 bytes before the end; each names its check and the offset, the end conditions at `in_len` |
 | LZ4 truncation | Every proper prefix of every valid block, in full mode: one ending directly after a sequence's literals decodes to that much of the output when that much meets the [end conditions](#end-of-block) and is refused at the block end otherwise, and any other is unterminated; the output beyond `produced` keeps its poison. A block longer than 4096 bytes is cut at a stride of points, at the first 8 points and at every point of its last 64 bytes, as for LZO1X | The complete block through the same loop decodes `done` to the expected bytes |
 | LZ4 bounds | Full mode at a capacity equal to the decoded length decodes; one byte less refuses the literal run or match that passes it, at the byte that completes the excess, with `produced` the bytes before it and nothing written beyond; 1000 extension bytes of 255 claiming 255000 literals under a capacity of 65536 are refused after the 258th byte | The capacity raised to cover the claim makes the same block fail only when its input runs out, proving the capacity was the operative check |
 | LZ4 partial mode | Every valid block decoded at every length from 0 to its decoded length, or for an output longer than 4096 bytes at a stride of lengths, the first 8 and every length of its last 64 bytes, gives that prefix of the full decode, `done`, `produced` equal to the length; a block that is corrupt only after the point the length is reached (a literal run claiming more than the input holds, an offset of zero next) still succeeds there; a block that breaks only the end conditions decodes at every length | A length one above the decoded length is corrupt, the block ending first; a corrupt offset before the length is reached is still refused |
+| LZ4 encoder forms (`test/codec.c`) | The [worked blocks](#the-lz4-block-encoder) byte for byte, in both modes, with 13 `A` also at capacity 10, where the sequence and its final run fill the capacity exactly; empty input and every length from 1 to 40 of zeros, one letter, a period-3 pattern and bytes without a repeated four-byte group, literals only up to 12 bytes; zeros and text of 200000 bytes, random bytes, periodic data at every period from 1 to 300 and at 1000, 4095, 4096, 65534 to 65537 and 70000 over 140000 bytes; a group among zeros repeated 65535, 65536 and 65537 bytes later. Every block fits a buffer of exactly the bound with the rest untouched, decodes in full mode to its input, and meets the end conditions as a walker written in the test from the format tables finds them | The group 65535 bytes back appears as offset 65535, so the largest distance is reached; an encoder ignoring the distance limit writes offset 0 or 1 at 65536 and 65537, which the round trip refuses |
+| LZ4 encoder prefix mode | Text, zeros, a mixed input and a 64 KiB text window at every capacity from 1 to 5000, and bytes without a repeat at every capacity up to one past their bound: each block fits its capacity with every byte after it, up to a redzone past the buffer, still poisoned, decodes in full mode to exactly the prefix it claims and meets the end conditions; `done` exactly when the prefix is the whole input; a capacity of two or more holds a byte; at the bound and one past it the block is whole mode's | For bytes without a repeat the prefix is exactly the longest literal run whose block fits, computed by trying every count, so a fit test off by one byte in either direction fails |
+| LZ4 encoder bound and refusals | Bytes without a repeat of 0, 1, 14, 15, 16, 269, 270, 271, 524, 525, 4096, 65536 and 65537 bytes encode as one literal run, exactly the bound when `n mod 255` is 15 or more; 64 inputs of random runs of 15 to 400 bytes between four-byte repeats fit it | One byte below the bound is `FSIMG_EINVAL` with nothing written; `NULL` buffers, a prefix capacity of 0 and input past 2^32 - 1 are `FSIMG_EINVAL`; a prefix capacity of 1 gives the empty block |
+| LZ4 encoder determinism | A corpus of whole and prefix blocks encoded on a fresh encoder, twice on one whose table earlier inputs filled (the corpus's own text at shifted positions, random bytes), and in a second process gives identical bytes; its digest is pinned | Allocation refused leaves no charge; the table is charged to the context |
+| LZ4 encoder oracle | Legacy frames of whole-mode and prefix-mode blocks of text, a binary, random bytes, zeros and a source tar at several capacities decode to their input under `lz4 -d` (`test-codec --encode-lz4`, [build notes](../docs/build.md)) | |
 | bzip2 forms (`test/codec.c`) | Vectors made once with the `bzip2` command and kept as bytes: levels 1 and 9, the empty stream, runs of 4 and 255 + 4, several blocks; a synthetic stream for the longest `RUNA`/`RUNB` count | One malformed case per row of the [failure table](#failures), each asserting its status and check; every proper prefix of a vector; a block limit bomb in a small capacity; allocation refused; a capacity one byte short |
 | bzip2 chunks (`test/containers.c`, `test/containers-integration.sh`) | A generated `UDBZ` DMG reads through the layer; `hdiutil create -format UDBZ` output lists the same as its `UDTO` expansion and passes the container checks | Chunks decoding short and long are `FSIMG_ECORRUPT`; a run past `fsimg_bzip2_stream_bound` is `FSIMG_ECORRUPT` at open |
 | Fuzzing (`fuzz/bzip2.c`) | The input's first bytes choose the capacity; the rest is the stream, decoded under the sanitizers with a charged context | |

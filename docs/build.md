@@ -576,7 +576,15 @@ encoder: it is encoded by an encoder kept across inputs and by a fresh
 one, which must give the same bytes within a buffer of exactly the bound,
 the stream must decode to the block, and a capacity one byte below the
 bound must be refused with nothing written; `test-codec --seed` writes
-such seeds as `lzoenc-*.seed`.
+such seeds as `lzoenc-*.seed`. An input whose first byte has bit 4 set is
+a block for the LZ4 encoder, bytes 1-2 giving its prefix capacity less
+one: it is encoded whole, by a kept and a fresh encoder that must agree,
+within a buffer of exactly the bound, and in prefix mode at that
+capacity; every block must leave the rest of its buffer poisoned and
+decode in full mode to exactly the input it claims, and prefix mode must
+give whole mode's block once the capacity reaches the bound.
+`test-codec --seed` writes such seeds as `lz4enc-*.seed`, and the
+encoder's blocks as LZ4 decoder seeds.
 
 `fuzz/lzfse.c` drives the LZFSE and raw LZVN wrappers with exact-size
 input allocations and a guarded output buffer. The first byte chooses the
@@ -1271,6 +1279,24 @@ uuid development packages (on macOS also `brew install lz4 xz zstd xxhash`),
 and fails when the built `mkfs.erofs` lacks a
 codec. The tool identities, the Linux kernel oracle and the rust-fs-erofs
 oracle are in [erofs-research.md](erofs-research.md).
+
+The LZ4 encoder's blocks are also decoded by the `lz4` command (1.11.0,
+`brew install lz4`), run as a binary only. `test-codec --encode-lz4 IN OUT
+CAPACITY` writes `IN` as blocks in an LZ4 legacy frame: whole-mode blocks
+of up to 4 MiB for a `CAPACITY` of 0, otherwise one prefix-mode block per
+64 KiB window into `CAPACITY` bytes, as the EROFS writer fills a cluster.
+The command must decode the frame to `IN`:
+
+```sh
+./test-codec --encode-lz4 IN OUT.lz4 4096 && lz4 -d -c OUT.lz4 | cmp - IN
+```
+
+The check passes for `/usr/share/dict/words`, the `test-codec` binary,
+1 MiB of random bytes, 5 MiB of zeros and a 5.7 MB tar of the tree's `lib/`
+and `specs/` at capacities 0, 13, 512, 4096 and 65536. The command decodes
+into a buffer larger than a block's data, so it does not apply the LZ4 end
+conditions; the unit tests hold the blocks to them through fsimg's full
+mode.
 
 `tools/erofs/qualify.sh` qualifies the EROFS writer against those oracles
 and the colima VM's kernel. It builds each output tree, creates the image

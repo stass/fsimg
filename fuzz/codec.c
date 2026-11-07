@@ -11,16 +11,17 @@
 
 /*
  * The LZO1X, NRV2B and LZ4 decoders on arbitrary streams, and the LZO1X
- * encoder on arbitrary blocks. The input's first four bytes choose the
- * operation and the rest is the stream or the block:
+ * and LZ4 encoders on arbitrary blocks. The input's first four bytes
+ * choose the operation and the rest is the stream or the block:
  *
- *   byte 0     bit 2 selects the encoder, which reads no other header
- *              bits; otherwise bit 3 selects LZ4, which reads no other
- *              header bits; otherwise bit 0 the codec (0 LZO1X, 1 NRV2B),
- *              and bit 1 adds one to the NRV2B capacity, so 65536 is
- *              reachable
+ *   byte 0     bit 4 selects the LZ4 encoder, which reads only bytes 1-2;
+ *              otherwise bit 2 selects the LZO1X encoder, which reads no
+ *              other header bits; otherwise bit 3 selects LZ4, which reads
+ *              no other header bits; otherwise bit 0 the codec (0 LZO1X,
+ *              1 NRV2B), and bit 1 adds one to the NRV2B capacity, so
+ *              65536 is reachable
  *   bytes 1-2  little-endian v: the LZO1X limit is 16v, the NRV2B and
- *              LZ4 capacity v
+ *              LZ4 capacity v, the LZ4 encoder's prefix capacity v + 1
  *   byte 3     the LZO1X call plan: the low nibble n sets the input piece
  *              to 1 + 17n^2 bytes (1 to 3826, from single bytes to whole
  *              chunks), the high nibble c the window capacity to 2^(c mod
@@ -57,6 +58,14 @@
  * bytes, fit a buffer of exactly the bound, n + n / 255 + 6, leave the
  * rest of it untouched, and decode in one call to the block. One byte
  * less than the bound is refused before anything is written.
+ *
+ * The LZ4 encoder, kept across inputs like the LZO1X one, encodes the
+ * block whole into a buffer of exactly the bound, n + n / 255 + 2, and
+ * then its longest fitting prefix into the prefix capacity. Each block
+ * must leave the rest of its buffer untouched and decode in full mode,
+ * end conditions included, to exactly the input it claims; a fresh
+ * encoder must give the same whole block, and prefix mode must give it
+ * too when the capacity reaches the bound.
  */
 #define FUZZ_HEADER_BYTES	4
 #define POISON			0xa5u
@@ -66,6 +75,7 @@
 #define NRV2B_MAX_CAPACITY	65536u
 #define FUZZ_ENCODE		4u	/* byte 0: encode the block */
 #define FUZZ_LZ4		8u	/* byte 0: decode an LZ4 block */
+#define FUZZ_LZ4_ENCODE		16u	/* byte 0: LZ4-encode the block */
 
 /* The outcome of one decode, summed over its calls. */
 typedef struct fuzz_result {
@@ -82,9 +92,13 @@ static void lzo_in_pieces(const uint8_t *, size_t, uint64_t, uint8_t,
 static void exercise_lzo(const uint8_t *, size_t, uint64_t, uint8_t);
 static void exercise_nrv2b(const uint8_t *, size_t, size_t);
 static void exercise_lz4(const uint8_t *, size_t, size_t, size_t);
+static fsimg_ctx_t *encoder_context(void);
 static uint8_t *encode_into_bound(fsimg_lzo1x_encoder_t *, const uint8_t *,
     size_t, size_t *);
 static void exercise_encoder(const uint8_t *, size_t);
+static uint8_t *lz4_encode_checked(fsimg_lz4_encoder_t *, const uint8_t *,
+    size_t, bool, size_t, fsimg_codec_step_t *);
+static void exercise_lz4_encoder(const uint8_t *, size_t, size_t);
 int LLVMFuzzerTestOneInput(const uint8_t *, size_t);
 
 static bool
@@ -315,9 +329,25 @@ exercise_lz4(const uint8_t *in, size_t length, size_t capacity,
 	free(full_out);
 }
 
-/* The encoder kept across inputs, and the context that charges it. */
+/* The encoders kept across inputs, and the context that charges them. */
 static fsimg_ctx_t *encoder_ctx;
 static fsimg_lzo1x_encoder_t *kept_encoder;
+static fsimg_lz4_encoder_t *kept_lz4_encoder;
+
+/* The encoders' context, made on first use. */
+static fsimg_ctx_t *
+encoder_context(void)
+{
+	fsimg_options_t options;
+	fsimg_error_t error;
+
+	if (encoder_ctx == NULL) {
+		fsimg_options_init(&options);
+		if (fsimg_ctx_new(&options, &encoder_ctx, &error) != FSIMG_OK)
+			abort();
+	}
+	return (encoder_ctx);
+}
 
 static uint8_t *
 encode_into_bound(fsimg_lzo1x_encoder_t *encoder, const uint8_t *block,
@@ -347,20 +377,16 @@ exercise_encoder(const uint8_t *block, size_t length)
 	fsimg_lzo1x_decoder_t decoder;
 	fsimg_lzo1x_encoder_t *fresh;
 	fsimg_codec_step_t step;
-	fsimg_options_t options;
 	fsimg_error_t error;
 	uint8_t *code, *fresh_code, *output, *refused;
 	size_t code_length, fresh_length, refused_capacity, refused_length;
 
-	if (encoder_ctx == NULL) {
-		fsimg_options_init(&options);
-		if (fsimg_ctx_new(&options, &encoder_ctx, &error) != FSIMG_OK)
-			abort();
-		if (fsimg_lzo1x_encoder_new(encoder_ctx, &kept_encoder,
-		    &error) != FSIMG_OK)
-			abort();
-	}
-	if (fsimg_lzo1x_encoder_new(encoder_ctx, &fresh, &error) != FSIMG_OK)
+	if (kept_encoder == NULL &&
+	    fsimg_lzo1x_encoder_new(encoder_context(), &kept_encoder,
+	    &error) != FSIMG_OK)
+		abort();
+	if (fsimg_lzo1x_encoder_new(encoder_context(), &fresh,
+	    &error) != FSIMG_OK)
 		abort();
 
 	/* The kept and the fresh table give the same stream. */
@@ -397,6 +423,92 @@ exercise_encoder(const uint8_t *block, size_t length)
 	fsimg_lzo1x_encoder_free(fresh);
 }
 
+/*
+ * Encode all of block through whole mode, or the longest prefix that fits
+ * capacity through prefix mode, and check the block: nothing written past
+ * it, and a full-mode decode to exactly the input it claims. The caller
+ * frees the block.
+ */
+static uint8_t *
+lz4_encode_checked(fsimg_lz4_encoder_t *encoder, const uint8_t *block,
+    size_t length, bool whole, size_t capacity, fsimg_codec_step_t *step)
+{
+	fsimg_codec_step_t decoded;
+	fsimg_error_t error;
+	uint8_t *code, *output;
+	size_t bound;
+
+	bound = length + length / 255 + 2;
+	if (fsimg_lz4_encode_bound(length) != bound)
+		abort();
+	code = fuzz_alloc(capacity);
+	memset(code, POISON, capacity);
+	if (whole) {
+		if (fsimg_lz4_encode(encoder, block, length, code, capacity,
+		    &step->produced, &error) != FSIMG_OK)
+			abort();
+		step->consumed = length;
+		step->done = true;
+	} else if (fsimg_lz4_encode_prefix(encoder, block, length, code,
+	    capacity, step, &error) != FSIMG_OK) {
+		abort();
+	}
+	if (step->produced > capacity || step->consumed > length ||
+	    step->done != (step->consumed == length) ||
+	    !poison_intact(code + step->produced, capacity - step->produced))
+		abort();
+
+	output = fuzz_alloc(step->consumed);
+	if (fsimg_lz4_decode(code, step->produced, output, step->consumed,
+	    &decoded, &error) != FSIMG_OK || !decoded.done ||
+	    decoded.consumed != step->produced ||
+	    decoded.produced != step->consumed ||
+	    memcmp(output, block, step->consumed) != 0)
+		abort();
+	free(output);
+	return (code);
+}
+
+static void
+exercise_lz4_encoder(const uint8_t *block, size_t length, size_t capacity)
+{
+	fsimg_lz4_encoder_t *fresh;
+	fsimg_codec_step_t fresh_step, prefix_step, step;
+	fsimg_error_t error;
+	uint8_t *code, *fresh_code, *prefix_code;
+	size_t bound;
+
+	if (kept_lz4_encoder == NULL &&
+	    fsimg_lz4_encoder_new(encoder_context(), &kept_lz4_encoder,
+	    &error) != FSIMG_OK)
+		abort();
+	if (fsimg_lz4_encoder_new(encoder_context(), &fresh,
+	    &error) != FSIMG_OK)
+		abort();
+
+	/* The kept and the fresh table give the same whole block. */
+	bound = length + length / 255 + 2;
+	code = lz4_encode_checked(kept_lz4_encoder, block, length, true,
+	    bound, &step);
+	fresh_code = lz4_encode_checked(fresh, block, length, true, bound,
+	    &fresh_step);
+	if (fresh_step.produced != step.produced ||
+	    memcmp(code, fresh_code, step.produced) != 0)
+		abort();
+
+	/* Prefix mode at the bound and beyond is whole mode. */
+	prefix_code = lz4_encode_checked(kept_lz4_encoder, block, length,
+	    false, capacity, &prefix_step);
+	if (capacity >= bound && (prefix_step.produced != step.produced ||
+	    memcmp(prefix_code, code, step.produced) != 0))
+		abort();
+
+	free(prefix_code);
+	free(fresh_code);
+	free(code);
+	fsimg_lz4_encoder_free(fresh);
+}
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -404,12 +516,17 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 	if (size < FUZZ_HEADER_BYTES)
 		return (0);
+	bound = (uint32_t)data[1] | (uint32_t)data[2] << 8;
+	if ((data[0] & FUZZ_LZ4_ENCODE) != 0) {
+		exercise_lz4_encoder(data + FUZZ_HEADER_BYTES,
+		    size - FUZZ_HEADER_BYTES, (size_t)bound + 1);
+		return (0);
+	}
 	if ((data[0] & FUZZ_ENCODE) != 0) {
 		exercise_encoder(data + FUZZ_HEADER_BYTES,
 		    size - FUZZ_HEADER_BYTES);
 		return (0);
 	}
-	bound = (uint32_t)data[1] | (uint32_t)data[2] << 8;
 	if ((data[0] & FUZZ_LZ4) != 0)
 		exercise_lz4(data + FUZZ_HEADER_BYTES, size - FUZZ_HEADER_BYTES,
 		    bound, data[3] < 128 ? data[3] : 128u * (data[3] - 127u));

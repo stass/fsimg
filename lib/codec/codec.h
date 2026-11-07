@@ -266,4 +266,63 @@ fsimg_status_t fsimg_lzo1x_encode(fsimg_lzo1x_encoder_t *,
     const uint8_t *in, size_t in_len, uint8_t *out, size_t capacity,
     size_t *out_len, fsimg_error_t *);
 
+/*
+ * The LZ4 block encoder: one raw block per call, of the whole input or of
+ * the longest prefix its parse fits into a fixed output size. Every block
+ * meets the end conditions the full-mode decoder and the kernel enforce.
+ * Its only state is a 16 KiB table of input positions, allocated once
+ * through the context and zero-filled at the start of every call, so a
+ * block depends on the input bytes, in_len and, in prefix mode, the
+ * capacity alone. The object belongs to one caller at a time.
+ */
+typedef struct fsimg_lz4_encoder fsimg_lz4_encoder_t;
+
+/*
+ * Allocate an encoder through ctx, charged to its memory budget. On
+ * failure *out is NULL and the status is the allocation's. error must not
+ * be NULL.
+ */
+fsimg_status_t fsimg_lz4_encoder_new(fsimg_ctx_t *, fsimg_lz4_encoder_t **,
+    fsimg_error_t *);
+
+/* Free an encoder; NULL is ignored. */
+void fsimg_lz4_encoder_free(fsimg_lz4_encoder_t *);
+
+/*
+ * The longest block the encoder writes for in_len bytes:
+ * in_len + in_len / 255 + 2. For an in_len the encoder refuses, above
+ * 2^32 - 1, or one whose bound is SIZE_MAX or more, it is SIZE_MAX.
+ */
+size_t fsimg_lz4_encode_bound(size_t in_len);
+
+/*
+ * Encode all of in[0..in_len) as one block into out[0..capacity), which
+ * must not overlap it, and set *out_len to the block's length. A capacity
+ * below the bound, an in_len the bound refuses, a NULL in with a nonzero
+ * in_len or a NULL out with a nonzero capacity is FSIMG_EINVAL before anything is read or written. A
+ * block that would pass the capacity is FSIMG_ESTATE, a defect in the
+ * encoder, with the buffer's contents unspecified; nothing is ever
+ * written past the capacity. *out_len is 0 on failure; encoder and out_len
+ * must not be NULL.
+ */
+fsimg_status_t fsimg_lz4_encode(fsimg_lz4_encoder_t *, const uint8_t *in,
+    size_t in_len, uint8_t *out, size_t capacity, size_t *out_len,
+    fsimg_error_t *);
+
+/*
+ * Encode the longest prefix of in[0..in_len) that the encoder's greedy
+ * parse can end within capacity bytes, as one block into out[0..capacity),
+ * which must not overlap the input. On success step->consumed is the
+ * prefix's length, step->produced the block's, at most capacity, and
+ * step->done is set when the prefix is the whole input; the block decodes
+ * in full mode to exactly in[0..step->consumed). At a capacity of at least
+ * fsimg_lz4_encode_bound(in_len) the block is fsimg_lz4_encode()'s. A
+ * capacity of 0, an in_len the bound refuses, a NULL in with a nonzero
+ * in_len or a NULL out with a nonzero capacity is FSIMG_EINVAL; FSIMG_ESTATE is a defect as above. The
+ * step is zero on failure; encoder and step must not be NULL.
+ */
+fsimg_status_t fsimg_lz4_encode_prefix(fsimg_lz4_encoder_t *,
+    const uint8_t *in, size_t in_len, uint8_t *out, size_t capacity,
+    fsimg_codec_step_t *, fsimg_error_t *);
+
 #endif

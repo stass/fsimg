@@ -1444,9 +1444,11 @@ the flat layouts. A compressed file uses:
 
 * layout 1, the full index, with `L = B`, head-1 algorithm LZ4, no head-2,
   advice word zero;
-* physical clusters of one block, each holding the LZ4 encoding of the
-  longest prefix of the remaining input, at most 64 KiB, whose encoding
-  fits `B` bytes, right-aligned with leading zeros under `LZ4_0PADDING`.
+* physical clusters of one block, each holding the block the LZ4
+  encoder's [prefix mode](design-codecs.md#destination-bounded-encoding)
+  makes from a window of the next `min(remaining, 64 KiB)` input bytes
+  into `B` bytes, the longest prefix of the window its greedy parse can
+  end within `B`, right-aligned with leading zeros under `LZ4_0PADDING`.
   The 64 KiB cap is the writer's decision: it keeps every decoded extent
   far inside the readers' 12 MiB limit and bounds the encoder's input
   window, and it lies far below the 1,041,954 decoded bytes the pinned
@@ -1466,8 +1468,9 @@ the flat layouts. A compressed file uses:
 * no compressed tail, fragment, sharing, big cluster or configuration
   record.
 
-The encoder is the project-owned LZ4 encoder of the
-[codec design](design-codecs.md), deterministic for its input; the LZ4
+The encoder is the project-owned [LZ4 block
+encoder](design-codecs.md#the-lz4-block-encoder) of the codec design,
+deterministic for its window and capacity; the LZ4
 maximum distance field is written as 65535, LZ4's own maximum, which bounds
 every distance the encoder produces in its 64 KiB window and is the value
 `mkfs.erofs` writes, so the word matches every producer volume; the kernel
