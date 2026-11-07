@@ -212,18 +212,18 @@ Every stage leaves `make -j32 check` passing and follows the gates below.
 ### 0. Oracles and tools
 
 * Build `erofs-utils` 1.9.4 from its release tag with LZ4, liblzma, zlib
-  and libzstd under `~/.local/share/fsimg-oracles/erofs-utils` on macOS, and
-  the same in the Linux check environment; record `mkfs.erofs -V`, the
-  configure summary and a fixture showing each codec compiled in.
+  and libzstd under `~/.local/share/fsimg-oracles/erofs-utils` on macOS; the
+  CI Linux image carries the packages the build script needs. Record
+  `mkfs.erofs -V`, the configure summary and a fixture showing each codec compiled in.
 * Record the Linux check VM's kernel version and EROFS configuration
   (compression codecs, sub-page block sizes, the 48-bit layout from 6.15 and
   the box from 6.17), and how a disposable image is loop-mounted read-only
   inside the VM.
 * Install `rust-fs-erofs` at a pinned version beside the other oracles.
-* Add `tools/erofs/`: `capture.sh`, which builds a named fixture from a
+* Add `tools/erofs/`: `capture.rb`, which builds a named fixture from a
   recipe tree with its command record, tool versions, SHA-256 and
-  `dump.erofs` output; and `erofsdump.rb`, a structure dumper written from
-  the format design independently of `lib/`, which prints every field the
+  `dump.erofs` output; and `erofsdump.rb`, a structure dumper (run as
+  `ruby tools/erofs/erofsdump.rb IMAGE`) written from the format design independently of `lib/`, which prints every field the
   design tabulates, checks the superblock checksum and decodes every index
   form. These are project tools under the Ruby and style rules. Fixtures live
   outside the repository in the directory named by `FSIMG_EROFS_FIXTURES`.

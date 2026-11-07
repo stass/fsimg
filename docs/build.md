@@ -1245,7 +1245,8 @@ sh build-aux/build-erofs-utils.sh ~/.local/share/fsimg-oracles/erofs-utils
 
 The destination must be new. The helper needs Git, a C compiler, make,
 Autoconf, Automake, Libtool, pkg-config and the LZ4, liblzma, zlib, zstd and
-uuid development packages, and fails when the built `mkfs.erofs` lacks a
+uuid development packages (on macOS also `brew install lz4 xz zstd xxhash`),
+and fails when the built `mkfs.erofs` lacks a
 codec. The tool identities, the Linux kernel oracle and the rust-fs-erofs
 oracle are in [erofs-research.md](erofs-research.md).
 

@@ -70,28 +70,35 @@ empty. The compressed images were 8192 bytes for lz4, lz4hc, lzma and zstd and
 
 The build script runs unchanged in an `ubuntu:24.04` container. It needs the
 packages `autoconf automake libtool make pkg-config gcc git ca-certificates
-zlib1g-dev liblzma-dev libzstd-dev` plus `liblz4-dev` and `uuid-dev`. The CI
-Linux image (`build-aux/linux-check/Dockerfile`) installs all of these except
-`liblz4-dev` and `uuid-dev`. Without `uuid-dev` the script fails in
-configure (package `uuid` not found); with `uuid-dev` but without
-`liblz4-dev` it fails with `unexpected codec set: lzma, deflate, zstd`.
-With both installed, the script
-succeeds and `mkfs.erofs -V` prints the same two lines as on macOS. The
-Dockerfile carries no erofs-utils build, but its apt package list includes
-`liblz4-dev` and `uuid-dev`, so the CI image has what the script needs.
+zlib1g-dev liblzma-dev libzstd-dev liblz4-dev uuid-dev`; the CI Linux image
+(`build-aux/linux-check/Dockerfile`) installs all of them. Without `uuid-dev`
+the script fails in configure (package `uuid` not found); without
+`liblz4-dev` it fails with `unexpected codec set: lzma, deflate, zstd`. With
+both installed, `mkfs.erofs -V` prints the same two lines as on macOS.
 
 ### Capture tools
 
-`tools/erofs/capture.rb NAME SOURCE -- MKFS-OPTION...` builds one fixture under
-`$FSIMG_EROFS_FIXTURES/NAME` (never overwriting) with a fixed build time (`-T`,
-from `SOURCE_DATE_EPOCH`, default 0) and UUID (`-U`), and records the image,
-the exact command, the tool versions, the SHA-256, the `dump.erofs`
-superblock, statistics and root listing, and a manifest of the source tree.
-`tools/erofs/erofsdump.rb IMAGE` is the independent structure dumper, written
-from `specs/design-erofs.md` alone: it prints every superblock field, checks
-the superblock checksum, walks the tree from the root and prints inode
+`ruby tools/erofs/capture.rb NAME SOURCE -- MKFS-OPTION...` builds one fixture
+under `$FSIMG_EROFS_FIXTURES/NAME` (never overwriting; it builds in
+`NAME.tmp-PID` and renames last) with a fixed build time (`-T`, from
+`SOURCE_DATE_EPOCH`, default 0) and UUID (`-U`). It records the image, the
+command with `$SOURCE`, `$FIXTURE` and `$EROFS_UTILS_BIN` placeholders, the
+tool versions, the SHA-256, the `dump.erofs` superblock, statistics and root
+listing, and a manifest of the source tree (modes, owners, nanosecond mtimes,
+hard-link groups, extended attributes, content hashes). The manifest is taken
+before and after `mkfs.erofs`, and a difference fails the run.
+
+Chunk-based fixtures from `mkfs.erofs` 1.9.4 are not byte-reproducible: the
+upper half of the layout word at 0x10 of a chunk-based inode holds
+nondeterministic bytes, so two runs on the same source differ there.
+
+`ruby tools/erofs/erofsdump.rb IMAGE` is the independent structure dumper,
+written from `specs/design-erofs.md` alone: it prints every superblock field,
+checks the superblock checksum, walks the tree from the root and prints inode
 headers, attributes, directory entries, chunk entries and every compressed
-index record, and reports each broken design rule as a `problem:` line.
+index record, and reports each broken design rule as a `problem:` line. The
+exit status is 0 for a clean image, 1 for a problem or an unreadable image and
+2 when the tree is not decoded (the 48-bit layout and the metadata box).
 
 ### rust-fs-erofs
 
