@@ -133,6 +133,7 @@ static uint64_t		record_start(const zindex_t *, uint64_t,
 static fsimg_status_t	unit_load(zindex_t *, const erofs_index_unit_t *,
 			    fsimg_error_t *);
 static xindex_t		xindex_open(fsimg_reader_t *, const erofs_inode_t *);
+static erofs_zcache_t	*zcache_of(fsimg_reader_t *, const erofs_inode_t *);
 static void		zcache_select(fsimg_reader_t *, const erofs_inode_t *);
 
 /*
@@ -186,13 +187,30 @@ erofs_zmap(fsimg_reader_t *reader, const erofs_inode_t *inode,
 }
 
 /*
- * Make the reader's lookup cache inode's: a cache holding another inode's
- * index unit or running sum forgets it.
+ * The lookup cache inode's lookups use: the metadata box inode's own, or the
+ * reader's one cache for every other inode. A lookup of an inode in the box
+ * reads its index through box reads, each a lookup of the box inode, so the
+ * two must not share a cache (fsimg_erofs_reader_t).
+ */
+static erofs_zcache_t *
+zcache_of(fsimg_reader_t *reader, const erofs_inode_t *inode)
+{
+	fsimg_erofs_reader_t *erofs = erofs_state(reader);
+
+	if (erofs->has_box && inode->space == EROFS_SPACE_PRIMARY &&
+	    inode->nid == erofs->box.nid)
+		return (&erofs->box_zcache);
+	return (&erofs->zcache);
+}
+
+/*
+ * Make the lookup cache zcache_of() gives inode hold inode's lookups: a
+ * cache holding another inode's index unit or running sum forgets it.
  */
 static void
 zcache_select(fsimg_reader_t *reader, const erofs_inode_t *inode)
 {
-	erofs_zcache_t *cache = &erofs_state(reader)->zcache;
+	erofs_zcache_t *cache = zcache_of(reader, inode);
 
 	if (cache->nid != inode->nid) {
 		cache->unit_valid = false;
@@ -310,6 +328,7 @@ last_cluster(const zindex_t *index, const erofs_zrecord_t *head,
 		    "plain inline tail on an interlaced inode"));
 	/* erofs_inode_load() proved the tail inside the body and a block. */
 	cluster->source = EROFS_SOURCE_INLINE;
+	cluster->space = inode->space;
 	cluster->storage_offset = inode->offset + inode->tail_offset;
 	cluster->stored_bytes = inode->zheader.tail_bytes;
 	return (FSIMG_OK);
@@ -530,7 +549,7 @@ static fsimg_status_t
 record_load(zindex_t *index, uint64_t number, erofs_zrecord_t *out,
     fsimg_error_t *error)
 {
-	erofs_zcache_t *cache = &erofs_state(index->reader)->zcache;
+	erofs_zcache_t *cache = zcache_of(index->reader, index->inode);
 	erofs_index_unit_t unit;
 	erofs_zrecord_t record;
 	uint64_t first;
@@ -582,7 +601,7 @@ static fsimg_status_t
 unit_load(zindex_t *index, const erofs_index_unit_t *unit,
     fsimg_error_t *error)
 {
-	erofs_zcache_t *cache = &erofs_state(index->reader)->zcache;
+	erofs_zcache_t *cache = zcache_of(index->reader, index->inode);
 	unsigned char raw[EROFS_FULL_UNIT_RECORDS * EROFS_FULL_RECORD_BYTES];
 	uint64_t offset = index->records_offset + unit->offset;
 	const char *what;
@@ -834,7 +853,7 @@ static fsimg_status_t
 extent_run(const xindex_t *index, uint64_t number, erofs_xrecord_t *record,
     fsimg_error_t *error)
 {
-	erofs_zcache_t *cache = &erofs_state(index->reader)->zcache;
+	erofs_zcache_t *cache = zcache_of(index->reader, index->inode);
 	erofs_xrecord_t step;
 	uint64_t at, physical;
 	fsimg_status_t status;

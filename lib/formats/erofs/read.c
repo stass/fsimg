@@ -12,41 +12,40 @@
 #include "unicode.h"
 
 /*
- * One bit of a feature word: its name, "A/B" for a bit the format gives two
- * names, and whether this reader reads a volume that sets it.
+ * One bit of a feature word and its name, "A/B" for a bit the format gives
+ * two names.
  */
 typedef struct erofs_feature {
 	uint32_t	 bit;
 	const char	*name;
-	bool		 readable;
 } erofs_feature_t;
 
 /*
- * The closed tables of both words, in bit order. Every compatible bit is
- * readable, since the format lets a reader ignore what it does not use. An
- * incompatible bit is readable when this driver reads the structures it
- * adds. Bits outside the incompatible table never reach open: the probe's
- * checks refuse them first.
+ * The closed tables of both words, in bit order, for the volume
+ * information's texts. This reader reads every bit of both: the format lets
+ * a reader ignore a compatible bit it does not use, and the reader reads the
+ * structures every incompatible bit in the table adds. Bits outside the
+ * incompatible table never reach open: the probe's checks refuse them first.
  */
 static const erofs_feature_t compat_features[] = {
-	{ EROFS_COMPAT_SB_CHKSUM, "SB_CHKSUM", true },
-	{ EROFS_COMPAT_MTIME, "MTIME", true },
-	{ EROFS_COMPAT_XATTR_FILTER, "XATTR_FILTER", true },
-	{ EROFS_COMPAT_SHARED_EA_IN_METABOX, "SHARED_EA_IN_METABOX", true },
-	{ EROFS_COMPAT_PLAIN_XATTR_PFX, "PLAIN_XATTR_PFX", true },
-	{ EROFS_COMPAT_ISHARE_XATTRS, "ISHARE_XATTRS", true }
+	{ EROFS_COMPAT_SB_CHKSUM, "SB_CHKSUM" },
+	{ EROFS_COMPAT_MTIME, "MTIME" },
+	{ EROFS_COMPAT_XATTR_FILTER, "XATTR_FILTER" },
+	{ EROFS_COMPAT_SHARED_EA_IN_METABOX, "SHARED_EA_IN_METABOX" },
+	{ EROFS_COMPAT_PLAIN_XATTR_PFX, "PLAIN_XATTR_PFX" },
+	{ EROFS_COMPAT_ISHARE_XATTRS, "ISHARE_XATTRS" }
 };
 
 static const erofs_feature_t incompat_features[] = {
-	{ EROFS_INCOMPAT_LZ4_0PADDING, "LZ4_0PADDING", true },
-	{ EROFS_INCOMPAT_COMPR_CFGS, "COMPR_CFGS/BIG_PCLUSTER", true },
-	{ EROFS_INCOMPAT_CHUNKED_FILE, "CHUNKED_FILE", true },
-	{ EROFS_INCOMPAT_DEVICE_TABLE, "DEVICE_TABLE/COMPR_HEAD2", true },
-	{ EROFS_INCOMPAT_ZTAILPACKING, "ZTAILPACKING", true },
-	{ EROFS_INCOMPAT_FRAGMENTS, "FRAGMENTS/DEDUPE", true },
-	{ EROFS_INCOMPAT_XATTR_PREFIXES, "XATTR_PREFIXES", true },
-	{ EROFS_INCOMPAT_48BIT, "48BIT", true },
-	{ EROFS_INCOMPAT_METABOX, "METABOX", false }
+	{ EROFS_INCOMPAT_LZ4_0PADDING, "LZ4_0PADDING" },
+	{ EROFS_INCOMPAT_COMPR_CFGS, "COMPR_CFGS/BIG_PCLUSTER" },
+	{ EROFS_INCOMPAT_CHUNKED_FILE, "CHUNKED_FILE" },
+	{ EROFS_INCOMPAT_DEVICE_TABLE, "DEVICE_TABLE/COMPR_HEAD2" },
+	{ EROFS_INCOMPAT_ZTAILPACKING, "ZTAILPACKING" },
+	{ EROFS_INCOMPAT_FRAGMENTS, "FRAGMENTS/DEDUPE" },
+	{ EROFS_INCOMPAT_XATTR_PREFIXES, "XATTR_PREFIXES" },
+	{ EROFS_INCOMPAT_48BIT, "48BIT" },
+	{ EROFS_INCOMPAT_METABOX, "METABOX" }
 };
 
 #define FEATURE_COUNT(table)	(sizeof(table) / sizeof((table)[0]))
@@ -83,8 +82,7 @@ static fsimg_status_t	domain_set(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t	erofs_open(fsimg_reader_t *,
 			    const fsimg_format_variant_t *, fsimg_error_t *);
 static void		erofs_close(fsimg_reader_t *);
-static fsimg_status_t	features_decide(fsimg_erofs_reader_t *,
-			    fsimg_error_t *);
+static void		features_decide(fsimg_erofs_reader_t *);
 static uint32_t		features_named(const erofs_feature_t *, size_t);
 static void		features_text(const erofs_feature_t *, size_t,
 			    uint32_t, char *, size_t);
@@ -92,6 +90,7 @@ static void		info_report(fsimg_reader_t *);
 static bool		label_printable(const unsigned char *, size_t);
 static void		name_escape(const unsigned char *, size_t, char *,
 			    size_t);
+static fsimg_status_t	box_load(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t	packed_load(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t	super_read(fsimg_reader_t *, fsimg_error_t *);
 static void		text_add(fsimg_volume_info_t *, const char *,
@@ -151,10 +150,11 @@ erofs_reject(fsimg_error_t *error, fsimg_status_t status, const char *what)
 
 /*
  * Open in the order the format fixes: the superblock region and every
- * superblock rule, the address domain, the feature decision, the packed
- * inode, then the root. A refused feature fails before any inode is read,
- * so no partial view of a refused volume exists. Open reads nothing else:
- * no directory, attribute pool or prefix table.
+ * superblock rule, the address domain, the feature decision, the metadata box
+ * inode, the packed inode, then the root, which may lie in either metadata
+ * space. A refused feature or open form fails before the root is read, so no
+ * partial view of a refused volume exists. Open reads nothing else: no
+ * directory, attribute pool or prefix table.
  */
 static fsimg_status_t
 erofs_open(fsimg_reader_t *reader,
@@ -180,7 +180,8 @@ erofs_open(fsimg_reader_t *reader,
 	status = domain_set(reader, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = features_decide(erofs, error);
+	features_decide(erofs);
+	status = box_load(reader, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = packed_load(reader, error);
@@ -207,8 +208,57 @@ erofs_close(fsimg_reader_t *reader)
 		return;
 	erofs_window_free(&erofs->content_window);
 	erofs_window_free(&erofs->meta_window);
+	erofs_window_free(&erofs->box_window);
 	fsimg_dealloc(erofs);
 	reader->driver = NULL;
+}
+
+/*
+ * The metadata box inode, under METABOX: the superblock's box NID, whose bit
+ * 63 the region decoder refused, so the inode lives in the primary space.
+ * It is a regular file, flat or compressed behind a full or compact index
+ * (E12, e12-box-lz4-b1024) or, under 48BIT, encoded extents, which the
+ * inode decoder pairs with the bit, and it uses no fragment; so a box read
+ * reads only the primary space and never another box read. The flat-inline
+ * and chunk-based layouts are open forms no producer writes and no kernel
+ * has been shown to read, refused as unsupported, as is the shared pool in
+ * a compressed box.
+ */
+static fsimg_status_t
+box_load(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	fsimg_erofs_reader_t *erofs = erofs_state(reader);
+	erofs_inode_t *box = &erofs->box;
+	fsimg_status_t status;
+
+	if (!erofs->features.box)
+		return (FSIMG_OK);
+	status = erofs_inode_load(reader, erofs->super.box_nid, box, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (box->kind != FSIMG_ENTRY_FILE)
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "metadata box inode is not a regular file"));
+	switch (box->layout) {
+	case EROFS_LAYOUT_FLAT:
+		break;
+	case EROFS_LAYOUT_COMPRESSED_FULL:
+	case EROFS_LAYOUT_COMPRESSED_COMPACT:
+		if (box->zheader.whole_fragment ||
+		    (box->zheader.advice & EROFS_ADVICE_FRAGMENT) != 0)
+			return (erofs_reject(error, FSIMG_ECORRUPT,
+			    "the metadata box inode uses a fragment"));
+		if (erofs->features.pool_in_box)
+			return (erofs_reject(error, FSIMG_EUNSUPPORTED,
+			    "shared attributes in a compressed metadata box"));
+		break;
+	case EROFS_LAYOUT_FLAT_INLINE:
+	case EROFS_LAYOUT_CHUNK_BASED:
+		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
+		    "metadata box inode layout"));
+	}
+	erofs->has_box = true;
+	return (FSIMG_OK);
 }
 
 /*
@@ -217,9 +267,11 @@ erofs_close(fsimg_reader_t *reader)
  * DEDUPE alone, which shares the bit, has none (E8, e8-lz4-dedupe). It is
  * a regular file that uses no fragment, read through its own layout, so a
  * fragment's mapping nests once. A long-prefix table that is no plain
- * region lives in its content, so such a table without a packed inode is
- * corrupt: every feature this reader implements puts the table in one of
- * those two places.
+ * region lives in the metadata box's content or, without the box, in the
+ * packed inode's, so such a table with neither is corrupt: every feature
+ * this reader implements puts the table in one of those three places. The
+ * packed inode never lives in the box: a packed NID with bit 63 is an open
+ * form no producer writes, refused as unsupported.
  */
 static fsimg_status_t
 packed_load(fsimg_reader_t *reader, fsimg_error_t *error)
@@ -230,6 +282,11 @@ packed_load(fsimg_reader_t *reader, fsimg_error_t *error)
 
 	if ((erofs->super.incompat & EROFS_INCOMPAT_FRAGMENTS) != 0 &&
 	    erofs->super.packed_nid != 0) {
+		/* Without the box, nid_locate() finds the NID corrupt. */
+		if (erofs->has_box &&
+		    (erofs->super.packed_nid & EROFS_NID_BOX) != 0)
+			return (erofs_reject(error, FSIMG_EUNSUPPORTED,
+			    "packed inode in the metadata box"));
 		status = erofs_inode_load(reader, erofs->super.packed_nid,
 		    packed, error);
 		if (status != FSIMG_OK)
@@ -246,9 +303,10 @@ packed_load(fsimg_reader_t *reader, fsimg_error_t *error)
 		erofs->has_packed = true;
 	}
 	if (erofs->features.long_prefixes && !erofs->features.plain_prefixes &&
-	    !erofs->has_packed)
+	    !erofs->has_box && !erofs->has_packed)
 		return (erofs_reject(error, FSIMG_ECORRUPT,
-		    "long prefixes without a plain table or a packed inode"));
+		    "long prefixes without a plain table, a metadata box or "
+		    "a packed inode"));
 	return (FSIMG_OK);
 }
 
@@ -338,28 +396,15 @@ domain_set(fsimg_reader_t *reader, fsimg_error_t *error)
 }
 
 /*
- * Decide the features once from the decoded words. Each incompatible bit
- * this reader does not implement is refused, naming the bit, so a volume
- * using it never opens and is never judged by a rule the bit changes:
- * METABOX adds a third place for the long-prefix table, beside the two
- * packed_load() accepts.
+ * Decide the features once from the decoded words, which the probe's checks
+ * have confined to bits this reader reads.
  */
-static fsimg_status_t
-features_decide(fsimg_erofs_reader_t *erofs, fsimg_error_t *error)
+static void
+features_decide(fsimg_erofs_reader_t *erofs)
 {
 	const erofs_super_t *sb = &erofs->super;
 	erofs_features_t *features = &erofs->features;
-	char phrase[sizeof(((fsimg_error_t *)NULL)->message)];
 	uint32_t named_compat;
-
-	for (size_t i = 0; i < FEATURE_COUNT(incompat_features); i++) {
-		const erofs_feature_t *feature = &incompat_features[i];
-
-		if ((sb->incompat & feature->bit) == 0 || feature->readable)
-			continue;
-		snprintf(phrase, sizeof(phrase), "feature %s", feature->name);
-		return (erofs_reject(error, FSIMG_EUNSUPPORTED, phrase));
-	}
 
 	features->checksum = (sb->compat & EROFS_COMPAT_SB_CHKSUM) != 0;
 	features->mtime = (sb->compat & EROFS_COMPAT_MTIME) != 0;
@@ -368,10 +413,12 @@ features_decide(fsimg_erofs_reader_t *erofs, fsimg_error_t *error)
 	    (sb->incompat & EROFS_INCOMPAT_XATTR_PREFIXES) != 0;
 	features->plain_prefixes =
 	    (sb->compat & EROFS_COMPAT_PLAIN_XATTR_PFX) != 0;
+	features->box = (sb->incompat & EROFS_INCOMPAT_METABOX) != 0;
+	features->pool_in_box =
+	    (sb->compat & EROFS_COMPAT_SHARED_EA_IN_METABOX) != 0;
 	named_compat = features_named(compat_features,
 	    FEATURE_COUNT(compat_features));
 	features->unknown_compat = (sb->compat & ~named_compat) != 0;
-	return (FSIMG_OK);
 }
 
 /*

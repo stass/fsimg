@@ -12,9 +12,13 @@
  * from a stack buffer, and later readers of its body ask for the ranges
  * they need, so a body's length costs reads, never memory.
  *
- * Open refuses the metadata box, so an opened volume has one metadata
- * space, the primary one. The box space is part of the interface, and a
- * read of it is refused as unsupported.
+ * A volume has one or two metadata spaces: the primary one, the volume's
+ * address domain, and under the metadata box the box inode's content. A
+ * box read maps its range through the box inode, which open loaded from the
+ * primary space and which uses no fragment, so a box read reads only the
+ * primary space and the recursion is one level deep by construction. It
+ * decodes through the box window and the box's own lookup cache, so it
+ * leaves the state of the lookup or window fill it serves untouched.
  */
 
 static fsimg_status_t	extents_measure(const fsimg_erofs_reader_t *,
@@ -27,9 +31,23 @@ static fsimg_status_t	zheader_load(fsimg_reader_t *, erofs_space_t, uint64_t,
 			    erofs_inode_t *, fsimg_error_t *);
 
 /*
- * length bytes at offset of one metadata space into out. A primary-space
- * range must lie inside the address domain; inside it, a range past the
- * input's end is a truncation that bounded I/O reports as corrupt.
+ * The length of a metadata space: the address domain, or the metadata box's
+ * content, which is empty on a volume without the box.
+ */
+uint64_t
+erofs_space_bytes(const fsimg_erofs_reader_t *erofs, erofs_space_t space)
+{
+	if (space == EROFS_SPACE_PRIMARY)
+		return (erofs->domain_bytes);
+	return (erofs->has_box ? erofs->box.size : 0);
+}
+
+/*
+ * length bytes at offset of one metadata space into out. The range must lie
+ * inside its space. A primary-space range is one bounded read, where a
+ * range past the input's end is a truncation that bounded I/O reports as
+ * corrupt; a box range is the box inode's content, copied through the box
+ * window.
  */
 fsimg_status_t
 erofs_meta_read(fsimg_reader_t *reader, erofs_space_t space, uint64_t offset,
@@ -39,9 +57,14 @@ erofs_meta_read(fsimg_reader_t *reader, erofs_space_t space, uint64_t offset,
 	size_t transferred;
 	fsimg_status_t status;
 
-	if (space != EROFS_SPACE_PRIMARY)
-		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
-		    "metadata box read"));
+	if (space == EROFS_SPACE_BOX) {
+		if (!fsimg_range_fits(offset, length,
+		    erofs_space_bytes(erofs, space)))
+			return (erofs_reject(error, FSIMG_ECORRUPT,
+			    "metadata outside the metadata box"));
+		return (erofs_content_copy(reader, &erofs->box_window,
+		    &erofs->box, offset, length, out, NULL, error));
+	}
 	if (!fsimg_range_fits(offset, length, erofs->domain_bytes))
 		return (erofs_reject(error, FSIMG_ECORRUPT,
 		    "metadata outside the address domain"));
@@ -58,12 +81,14 @@ erofs_meta_read(fsimg_reader_t *reader, erofs_space_t space, uint64_t offset,
 
 /*
  * Load the inode that nid names: find it, read and decode its fixed part, and
- * check the rules that depend on where it is. The fixed part is read in
- * the compact size first and the rest only for an extended inode, so a
- * compact inode in the last 32 bytes of the domain loads. The body's span,
- * [offset, offset + body_bytes) of its space, must lie in the space, and an
- * inline tail inside one block of it. Of the body only a compressed
- * inode's map header is read here, since the body's length depends on it.
+ * check the rules that depend on where it is. The fixed part is read in the
+ * compact size first and the rest only for an extended inode, so a compact
+ * inode in the last 32 bytes of its space loads. The body's span, [offset,
+ * offset + body_bytes) of its space, must lie in the space, and an inline tail
+ * inside one block of it: B-byte blocks of the volume, or of the box's content
+ * for an inode in the box, whose fixed part and attribute region may cross such
+ * a block (E12, e12-box-plain-b512). Of the body only a compressed inode's map
+ * header is read here, since the body's length depends on it.
  */
 fsimg_status_t
 erofs_inode_load(fsimg_reader_t *reader, uint64_t nid, erofs_inode_t *out,
@@ -87,7 +112,7 @@ erofs_inode_load(fsimg_reader_t *reader, uint64_t nid, erofs_inode_t *out,
 		return (status);
 	fixed_bytes = erofs_inode_fixed_bytes(raw);
 	if (fixed_bytes > EROFS_INODE_COMPACT_BYTES) {
-		/* The compact read proved offset + 32 inside the domain. */
+		/* The compact read proved offset + 32 inside the space. */
 		status = erofs_meta_read(reader, space,
 		    offset + EROFS_INODE_COMPACT_BYTES,
 		    fixed_bytes - EROFS_INODE_COMPACT_BYTES,
@@ -109,12 +134,11 @@ erofs_inode_load(fsimg_reader_t *reader, uint64_t nid, erofs_inode_t *out,
 			return (status);
 	}
 
-	/*
-	 * Only the primary space reaches this point, since a box read is
-	 * refused above, so the domain bounds the body.
-	 */
-	if (!fsimg_range_fits(offset, inode.body_bytes, erofs->domain_bytes))
+	if (!fsimg_range_fits(offset, inode.body_bytes,
+	    erofs_space_bytes(erofs, space)))
 		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    space == EROFS_SPACE_BOX ?
+		    "inode body outside the metadata box" :
 		    "inode body outside the address domain"));
 	status = tail_check(erofs, offset, &inode, error);
 	if (status != FSIMG_OK)
@@ -240,9 +264,9 @@ extents_measure(const fsimg_erofs_reader_t *erofs, erofs_inode_t *inode,
 }
 
 /*
- * An inline tail, [tail_offset, body_bytes) of the body at offset, lies
- * inside one block: the kernel's rule for a flat-inline tail and for a
- * compressed one alike. A tail ending exactly at a block's end stays
+ * An inline tail, [tail_offset, body_bytes) of the body at offset of its space,
+ * lies inside one block of that space: the kernel's rule for a flat-inline tail
+ * and for a compressed one alike. A tail ending exactly at a block's end stays
  * inside that block, and an empty tail is no tail.
  */
 static fsimg_status_t
@@ -253,7 +277,7 @@ tail_check(const fsimg_erofs_reader_t *erofs, uint64_t offset,
 
 	if (inode->tail_offset >= inode->body_bytes)
 		return (FSIMG_OK);
-	/* erofs_inode_load() proved offset + body_bytes inside the domain. */
+	/* erofs_inode_load() proved offset + body_bytes inside the space. */
 	first = offset + inode->tail_offset;
 	last = offset + inode->body_bytes - 1;
 	if (first >> erofs->super.blkszbits != last >> erofs->super.blkszbits)
@@ -265,10 +289,11 @@ tail_check(const fsimg_erofs_reader_t *erofs, uint64_t offset,
 /*
  * The space and offset of inode nid. A NID counts 32-byte slots from the
  * metadata block, meta_blkaddr * B, of the primary space; with bit 63 set
- * it counts them from the start of the metadata box's content instead,
- * which a volume without the box does not have. The slot product can
- * overflow 64 bits, so both steps are checked; the metadata block's byte
- * offset is below 2^44 and cannot.
+ * the rest of it counts them from the start of the metadata box's content
+ * instead, which a volume without the box does not have. Open loads the box
+ * inode before any NID with bit 63 can be resolved, from a NID with the bit
+ * clear. The slot product can overflow 64 bits, so both steps are checked;
+ * the metadata block's byte offset is below 2^44 and cannot.
  */
 static fsimg_status_t
 nid_locate(const fsimg_erofs_reader_t *erofs, uint64_t nid,
@@ -276,9 +301,17 @@ nid_locate(const fsimg_erofs_reader_t *erofs, uint64_t nid,
 {
 	uint64_t base, slots;
 
-	if ((nid & EROFS_NID_BOX) != 0)
-		return (erofs_reject(error, FSIMG_ECORRUPT,
-		    "NID in a metadata box the volume does not have"));
+	if ((nid & EROFS_NID_BOX) != 0) {
+		if (!erofs->has_box)
+			return (erofs_reject(error, FSIMG_ECORRUPT,
+			    "NID in a metadata box the volume does not have"));
+		if (!fsimg_mul_u64(nid & ~EROFS_NID_BOX, EROFS_NID_SLOT_BYTES,
+		    offset))
+			return (erofs_reject(error, FSIMG_ECORRUPT,
+			    "inode NID"));
+		*space = EROFS_SPACE_BOX;
+		return (FSIMG_OK);
+	}
 	base = (uint64_t)erofs->super.meta_blkaddr << erofs->super.blkszbits;
 	if (!fsimg_mul_u64(nid, EROFS_NID_SLOT_BYTES, &slots) ||
 	    !fsimg_add_u64(base, slots, offset))

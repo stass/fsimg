@@ -32,6 +32,9 @@ typedef struct gen_image {
 	unsigned char	*bytes;
 	size_t		 length;
 	uint64_t	 meta_base;	/* meta_blkaddr * B, set by gen_super_write */
+	/* A metadata box's bytes in the metadata area; see gen_tree_box_begin. */
+	uint64_t	 box_base;	/* zero: no box */
+	uint64_t	 box_end;
 } gen_image_t;
 
 /* Every base superblock field; gen_super_default() fills a valid volume. */
@@ -518,5 +521,35 @@ typedef struct gen_xfile {
  */
 uint64_t	gen_tree_add_extents(gen_tree_t *, const gen_inode_t *,
 		    const gen_xfile_t *);
+
+/*
+ * Metadata box volumes. gen_tree_box_begin() opens the box at the next block
+ * boundary of the metadata area: every slot gen_tree_slot() hands out until
+ * gen_tree_box_end() lies in the box, and its NID is a box NID, bit 63 set
+ * over a count of 32-byte slots from the box's first byte, which
+ * gen_inode_offset() and gen_nid_at() map to the box's bytes in the area.
+ * So every builder works on inodes in the box unchanged, and a test writes
+ * a shared pool or a prefix table there at gen_box_offset(). A box NID
+ * makes a root only through the 48-bit layout's wide root field.
+ *
+ * gen_tree_box_end() closes the box at the next block boundary, stores it
+ * by kind, adds the box inode in the primary space after it and sets
+ * METABOX, one extension slot and the box NID; it returns the box inode's
+ * NID. GEN_BOX_PLAIN keeps the box's blocks in place as a flat inode's
+ * content. GEN_BOX_INDEXED copies them into data blocks as plain clusters
+ * behind a full index and zeroes them in the area, so the box reads only
+ * through its index. Inodes in an indexed box are complete before the end.
+ */
+typedef enum gen_box_kind {
+	GEN_BOX_PLAIN,
+	GEN_BOX_INDEXED
+} gen_box_kind_t;
+
+#define GEN_NID_BOX		(UINT64_C(1) << 63)
+
+void		gen_tree_box_begin(gen_tree_t *);
+uint64_t	gen_tree_box_end(gen_tree_t *, gen_box_kind_t);
+/* The volume offset of byte `offset` of an open or plain box's content. */
+uint64_t	gen_box_offset(const gen_tree_t *, uint64_t);
 
 #endif /* !FSIMG_TEST_EROFS_GEN_H */

@@ -171,6 +171,10 @@ gen_root_default(void)
 uint64_t
 gen_inode_offset(const gen_image_t *image, uint64_t nid)
 {
+	if ((nid & GEN_NID_BOX) != 0) {
+		CHECK(image->box_base != 0);
+		return (image->box_base + 32 * (nid & ~GEN_NID_BOX));
+	}
 	return (image->meta_base + 32 * nid);
 }
 
@@ -283,6 +287,11 @@ gen_tree_first_block(unsigned blkszbits)
 uint64_t
 gen_nid_at(const gen_image_t *image, uint64_t offset)
 {
+	if (image->box_base != 0 && offset >= image->box_base &&
+	    offset < image->box_end) {
+		CHECK((offset - image->box_base) % 32 == 0);
+		return ((offset - image->box_base) / 32 | GEN_NID_BOX);
+	}
 	CHECK(offset >= image->meta_base && (offset - image->meta_base) % 32 == 0);
 	return ((offset - image->meta_base) / 32);
 }
@@ -1152,5 +1161,73 @@ gen_tree_add_extents(gen_tree_t *tree, const gen_inode_t *proto,
 	for (size_t i = 0; i < xf->record_count; i++)
 		xrecord_put(&tree->image, base + records_start + i * width,
 		    width, &xf->records[i]);
+	return (nid);
+}
+
+void
+gen_tree_box_begin(gen_tree_t *tree)
+{
+	uint64_t block = (uint64_t)1 << tree->blkszbits;
+
+	CHECK(tree->image.box_base == 0);
+	tree->meta_next = round_up(tree->meta_next, block);
+	tree->image.box_base = tree->meta_next;
+	tree->image.box_end = UINT64_MAX;
+}
+
+uint64_t
+gen_box_offset(const gen_tree_t *tree, uint64_t offset)
+{
+	CHECK(tree->image.box_base != 0);
+	return (tree->image.box_base + offset);
+}
+
+uint64_t
+gen_tree_box_end(gen_tree_t *tree, gen_box_kind_t kind)
+{
+	uint64_t block = (uint64_t)1 << tree->blkszbits;
+	uint64_t base = tree->image.box_base, end, nid;
+	const unsigned char *word = tree->image.bytes + GEN_SUPER_OFFSET +
+	    SB_INCOMPAT;
+	gen_inode_t box;
+
+	CHECK(base != 0 && tree->image.box_end == UINT64_MAX);
+	end = round_up(tree->meta_next, block);
+	tree->meta_next = end;
+	tree->image.box_end = end;
+	bzero(&box, sizeof(box));
+	box.mode = 0100644;
+	box.nlink = 1;
+	box.size = end - base;
+	if (kind == GEN_BOX_PLAIN) {
+		box.layout_word = (uint32_t)(base / block);
+		nid = gen_tree_slot(tree, GEN_COMPACT_BYTES, 0);
+		box.nid = nid;
+		gen_inode_write(&tree->image, &box);
+	} else {
+		size_t count = (size_t)(box.size / block);
+		gen_zcluster_t *clusters = calloc(count, sizeof(*clusters));
+		unsigned char *content = malloc((size_t)box.size);
+		gen_zfile_t zf;
+
+		CHECK(clusters != NULL && content != NULL);
+		bcopy(tree->image.bytes + base, content, (size_t)box.size);
+		bzero(tree->image.bytes + base, (size_t)box.size);
+		for (size_t i = 0; i < count; i++)
+			clusters[i] = (gen_zcluster_t){ .start = i * block,
+			    .blocks = 1, .kind = GEN_ZK_PLAIN };
+		zf = (gen_zfile_t){ .content = content,
+		    .size = (size_t)box.size, .index_layout = 1,
+		    .clusters = clusters, .cluster_count = count,
+		    .last = GEN_ZL_BLOCKS };
+		nid = gen_tree_add_zfile(tree, &box, &zf);
+		free(content);
+		free(clusters);
+	}
+	gen_super_put(&tree->image, SB_INCOMPAT, (word[0] |
+	    (uint32_t)word[1] << 8 | (uint32_t)word[2] << 16 |
+	    (uint32_t)word[3] << 24) | 0x100u, 4);
+	gen_super_put(&tree->image, SB_SLOTS, 1, 1);
+	gen_super_put(&tree->image, SB_BOX_NID, nid, 8);
 	return (nid);
 }

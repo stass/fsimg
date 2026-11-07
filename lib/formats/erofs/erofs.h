@@ -464,9 +464,10 @@ typedef enum erofs_cluster_mode {
  * means:
  *
  *   BLOCKS  whole blocks of the volume; a volume byte offset.
- *   INLINE  an inline tail in an inode's body in the primary space; the
- *           tail's volume byte offset too, never one relative to the body,
- *           so that two equal window keys name the same bytes.
+ *   INLINE  an inline tail in an inode's body; the tail's byte offset in
+ *           the inode's metadata space, which the cluster's space names,
+ *           never one relative to the body, so that two equal window keys
+ *           name the same bytes.
  *   PACKED  a fragment: an offset into the packed inode's content. It is no
  *           cluster to decode; the mapper maps it through the packed inode.
  */
@@ -495,6 +496,7 @@ typedef struct erofs_cluster {
 	uint32_t	 stored_bytes;
 	uint32_t	 rotation;		/* interlaced */
 	erofs_source_t	 source;
+	erofs_space_t	 space;			/* an inline tail's */
 	erofs_cluster_mode_t mode;
 	uint8_t		 algorithm;		/* compressed */
 	bool		 partial;		/* compressed */
@@ -582,6 +584,8 @@ typedef struct erofs_features {
 	bool		 xattr_filter;		/* XATTR_FILTER */
 	bool		 long_prefixes;		/* XATTR_PREFIXES */
 	bool		 plain_prefixes;	/* PLAIN_XATTR_PFX */
+	bool		 box;			/* METABOX */
+	bool		 pool_in_box;		/* SHARED_EA_IN_METABOX */
 	bool		 unknown_compat;
 } erofs_features_t;
 
@@ -600,6 +604,15 @@ typedef struct erofs_features {
  * the driver's own readers, directories, symbolic links and the long-prefix
  * table, last copied from, so neither evicts the other's bytes; zcache
  * holds the compressed lookup's last index unit.
+ *
+ * box is the metadata box inode, loaded at open when has_box says the
+ * volume has one; its content is the second metadata space. A box read
+ * happens in the middle of another inode's lookup or window fill, when that
+ * inode lives in the box, so the box has a window and a lookup cache of its
+ * own, box_window and box_zcache, which nothing else touches: a box read
+ * never evicts the state of the lookup it serves. The box inode lives in
+ * the primary space and uses no fragment, so a box read never needs another
+ * box read.
  */
 typedef struct fsimg_erofs_reader {
 	erofs_super_t	 super;
@@ -609,11 +622,15 @@ typedef struct fsimg_erofs_reader {
 	uint64_t	 current_parent;
 	uint64_t	 domain_bytes;
 	erofs_inode_t	 packed;
+	erofs_inode_t	 box;
 	erofs_window_t	 content_window;
 	erofs_window_t	 meta_window;
+	erofs_window_t	 box_window;
 	erofs_zcache_t	 zcache;
+	erofs_zcache_t	 box_zcache;
 	uint32_t	 block_bytes;
 	bool		 has_packed;
+	bool		 has_box;
 } fsimg_erofs_reader_t;
 
 extern const fsimg_reader_ops_t fsimg_erofs_reader_ops;
@@ -651,6 +668,9 @@ fsimg_status_t	erofs_cluster_readable(const fsimg_reader_t *,
 fsimg_status_t	erofs_window_fill(fsimg_reader_t *, erofs_window_t *,
 		    const erofs_cluster_t *, fsimg_error_t *);
 void		erofs_window_free(erofs_window_t *);
+fsimg_status_t	erofs_content_copy(fsimg_reader_t *, erofs_window_t *,
+		    const erofs_inode_t *, uint64_t, size_t, void *, size_t *,
+		    fsimg_error_t *);
 fsimg_status_t	erofs_content_read(fsimg_reader_t *, const erofs_inode_t *,
 		    uint64_t, size_t, void *, size_t *, fsimg_error_t *);
 fsimg_status_t	erofs_resolve(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
@@ -700,11 +720,12 @@ typedef erofs_xxh32_state_t erofs_name_hash_t;
 
 /*
  * Verification (verify.c). Every reachable structure claims its byte range
- * of the primary space in one class, which the ownership sweep reconciles
- * after the walk:
+ * of the metadata space it lies in, in one class, which the ownership sweep
+ * of that space reconciles after the walk:
  *
- *	EXCLUSIVE	the superblock region, inode bodies, directory blocks
- *			and the plain long-prefix table: overlaps nothing
+ *	EXCLUSIVE	the superblock region, inode bodies, directory blocks,
+ *			the metadata box's blocks and a long-prefix table
+ *			outside the packed inode: overlaps nothing
  *	SHARED		a shared attribute entry: overlaps only an identical
  *			shared claim, since inodes share pool entries
  *	DATA		file and symbolic-link blocks: may overlap data,
@@ -725,20 +746,21 @@ typedef enum erofs_claim_class {
 #define EROFS_LONG_PREFIX_MAX		128u
 
 /*
- * One verification's state, from the first claim to the sweep: the claim
- * stream in scratch, and for each of the first min(xattr_prefix_count,
- * 128) long prefixes its name hash, seeded with its base index and with
- * its infix absorbed.
+ * One verification's state, from the first claim to the sweep: a claim stream
+ * in scratch per metadata space, the box's only under the box, and for each of
+ * the first min(xattr_prefix_count, 128) long prefixes its name hash, seeded
+ * with its base index and with its infix absorbed.
  */
 typedef struct erofs_verifier {
-	fsimg_stream_t	*claims;
+	fsimg_stream_t	*claims[EROFS_SPACE_BOX + 1];	/* by space */
 	erofs_name_hash_t prefixes[EROFS_LONG_PREFIX_MAX];
 } erofs_verifier_t;
 
 fsimg_status_t	erofs_verify(fsimg_reader_t *, unsigned,
 		    fsimg_verify_report_t *, fsimg_error_t *);
-fsimg_status_t	erofs_claim(erofs_verifier_t *, erofs_claim_class_t, uint64_t,
-		    uint64_t, uint64_t, fsimg_error_t *);
+fsimg_status_t	erofs_claim(erofs_verifier_t *, erofs_space_t,
+		    erofs_claim_class_t, uint64_t, uint64_t, uint64_t,
+		    fsimg_error_t *);
 
 /*
  * Verification's attribute checks (xattr.c): the long-prefix table, loaded
@@ -755,6 +777,7 @@ fsimg_status_t	erofs_xattr_verify(fsimg_reader_t *, const erofs_inode_t *,
  * becomes bytes. Every read goes through bounded I/O after its range is
  * proved inside its space.
  */
+uint64_t	erofs_space_bytes(const fsimg_erofs_reader_t *, erofs_space_t);
 fsimg_status_t	erofs_meta_read(fsimg_reader_t *, erofs_space_t, uint64_t,
 		    size_t, void *, fsimg_error_t *);
 fsimg_status_t	erofs_inode_load(fsimg_reader_t *, uint64_t, erofs_inode_t *,

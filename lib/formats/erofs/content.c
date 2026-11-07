@@ -19,11 +19,14 @@
  * preparation, symbolic-link replay, the long-prefix table and payload
  * verification, read a logical range of any inode into a buffer of theirs
  * with erofs_content_read(), copying clusters through the metadata window.
+ * The metadata reader reads the metadata box's content the same way through
+ * the box window, erofs_content_copy().
  */
 
 static bool		cluster_mapped(const erofs_cluster_t *);
-static fsimg_status_t	extent_read(fsimg_reader_t *, const erofs_extent_t *,
-			    uint64_t, size_t, void *, size_t *, fsimg_error_t *);
+static fsimg_status_t	extent_read(fsimg_reader_t *, erofs_window_t *,
+			    const erofs_extent_t *, uint64_t, size_t, void *, size_t *,
+			    fsimg_error_t *);
 
 /*
  * Whether delivery maps the cluster's bytes in the volume rather than
@@ -90,17 +93,32 @@ erofs_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *out,
 }
 
 /*
- * length bytes of inode's content from logical offset into out, extent by
- * extent. The range must lie inside the inode's size: callers derive it
- * from the size, so a range past it is a driver defect, FSIMG_EINVAL.
- * When stored is not NULL, the bytes delivery would read from the image
- * are added to it: those of stored extents and of plain clusters stored
- * shifted, never decoded bytes or zeros.
+ * length bytes of inode's content from logical offset into out, copied
+ * through the metadata window: erofs_content_copy() for the driver's own
+ * readers.
  */
 fsimg_status_t
 erofs_content_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
     uint64_t offset, size_t length, void *out, size_t *stored,
     fsimg_error_t *error)
+{
+	return (erofs_content_copy(reader, &erofs_state(reader)->meta_window,
+	    inode, offset, length, out, stored, error));
+}
+
+/*
+ * length bytes of inode's content from logical offset into out, extent by
+ * extent, any cluster decoded into window and copied from it. The range
+ * must lie inside the inode's size: callers derive it from the size, so a
+ * range past it is a driver defect, FSIMG_EINVAL. When stored is not NULL,
+ * the bytes delivery would read from the image are added to it: those of
+ * stored extents and of plain clusters stored shifted, never decoded bytes
+ * or zeros.
+ */
+fsimg_status_t
+erofs_content_copy(fsimg_reader_t *reader, erofs_window_t *window,
+    const erofs_inode_t *inode, uint64_t offset, size_t length, void *out,
+    size_t *stored, fsimg_error_t *error)
 {
 	unsigned char *cursor = out;
 	erofs_extent_t extent;
@@ -119,8 +137,8 @@ erofs_content_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
 		extent_end = extent.logical_offset + extent.length;
 		piece = extent_end - offset < length ?
 		    (size_t)(extent_end - offset) : length;
-		status = extent_read(reader, &extent, offset, piece, cursor,
-		    stored, error);
+		status = extent_read(reader, window, &extent, offset, piece,
+		    cursor, stored, error);
 		if (status != FSIMG_OK)
 			return (status);
 		cursor += piece;
@@ -133,15 +151,14 @@ erofs_content_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
 /*
  * length bytes from logical offset of one extent, which holds them all. A
  * stored extent is read from the volume, where a range past the input's end
- * is a truncated volume; a cluster is left in the metadata window and
- * copied from it; a zero extent is filled with zeros without reading.
+ * is a truncated volume; a cluster is left in window and copied from it; a
+ * zero extent is filled with zeros without reading.
  */
 static fsimg_status_t
-extent_read(fsimg_reader_t *reader, const erofs_extent_t *extent,
-    uint64_t offset, size_t length, void *out, size_t *stored,
-    fsimg_error_t *error)
+extent_read(fsimg_reader_t *reader, erofs_window_t *window,
+    const erofs_extent_t *extent, uint64_t offset, size_t length, void *out,
+    size_t *stored, fsimg_error_t *error)
 {
-	erofs_window_t *window = &erofs_state(reader)->meta_window;
 	uint64_t within = offset - extent->logical_offset;
 	size_t transferred;
 	fsimg_status_t status;

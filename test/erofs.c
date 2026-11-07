@@ -4747,24 +4747,22 @@ test_open_refuses_inconsistent_superblock_fields(void)
 		{ "METABOX with no extension slot",
 		    { { SB_INCOMPAT, 4, INCOMPAT_METABOX } }, true,
 		    FSIMG_ECORRUPT, NULL },
+		/* The slot's box NID 0 names the root directory. */
 		{ "METABOX with one extension slot",
 		    { { SB_INCOMPAT, 4, INCOMPAT_METABOX },
-		    { SB_SLOTS, 1, 1 } }, true, FSIMG_EUNSUPPORTED,
-		    "METABOX" }
+		    { SB_SLOTS, 1, 1 } }, true, FSIMG_ECORRUPT,
+		    "metadata box inode is not a regular file" }
 	};
 
 	run_open_cases(cases, ARRAY_SIZE(cases), 0);
 }
 
 static void
-test_open_accepts_48bit_and_refuses_metabox_by_name(void)
+test_open_accepts_48bit(void)
 {
 	static const open_case_t cases[] = {
 		{ "48BIT", { { SB_INCOMPAT, 4, 0x080 } }, true, FSIMG_OK,
-		    NULL },
-		{ "METABOX", { { SB_INCOMPAT, 4, 0x100 },
-		    { SB_SLOTS, 1, 1 } }, true, FSIMG_EUNSUPPORTED,
-		    "METABOX" }
+		    NULL }
 	};
 
 	run_open_cases(cases, ARRAY_SIZE(cases), 0);
@@ -4784,14 +4782,7 @@ test_open_pairs_long_prefixes_with_a_plain_table_or_a_packed_inode(void)
 		{ "XATTR_PREFIXES with FRAGMENTS and no packed inode",
 		    { { SB_INCOMPAT, 4, INCOMPAT_XATTR_PREFIXES |
 		    INCOMPAT_FRAGMENTS } }, true, FSIMG_ECORRUPT,
-		    "packed inode" },
-		/* mkfs.erofs -m puts the table in the metadata box (E12,
-		 * e12-box-pfx-plain): the unimplemented bit is refused by
-		 * name before the pairing rule is judged. */
-		{ "XATTR_PREFIXES with METABOX and neither placement",
-		    { { SB_INCOMPAT, 4, INCOMPAT_XATTR_PREFIXES |
-		    INCOMPAT_METABOX }, { SB_SLOTS, 1, 1 } }, true,
-		    FSIMG_EUNSUPPORTED, "METABOX" }
+		    "packed inode" }
 	};
 
 	run_open_cases(cases, ARRAY_SIZE(cases), 0);
@@ -5438,9 +5429,9 @@ test_meta_read_bounds_the_space_and_the_input(void)
 	/* Six blocks declared, and two more blocks of input past them. */
 	image_build_sized(&image, &sb, NULL, 8 * 4096);
 	meta_open(&v, &image);
-	check_refusal("metadata box space", erofs_meta_read(&v.reader,
-	    EROFS_SPACE_BOX, 0, 8, out, &error), FSIMG_EUNSUPPORTED, &error,
-	    "metadata box");
+	check_refusal("metadata box space of a volume without the box",
+	    erofs_meta_read(&v.reader, EROFS_SPACE_BOX, 0, 8, out, &error),
+	    FSIMG_ECORRUPT, &error, "metadata outside the metadata box");
 	check_refusal("range past the domain, inside the input",
 	    erofs_meta_read(&v.reader, EROFS_SPACE_PRIMARY, 6 * 4096 - 8, 16,
 	    out, &error), FSIMG_ECORRUPT, &error,
@@ -12557,6 +12548,47 @@ write_seed(const char *directory, const char *name, gen_tree_t *tree)
 }
 
 /*
+ * Metadata-box seeds: a plain box holding the root, named by the 48-bit
+ * layout's wide root field, and an indexed box without the 48-bit layout,
+ * the root in the primary space. Each box holds a directory and a
+ * flat-inline file whose tail lies in the box.
+ */
+static void
+emit_box_seeds(const char *directory)
+{
+	static const struct {
+		const char	*name;
+		gen_box_kind_t	 kind;
+		bool		 wide_root;
+	} seeds[] = {
+		{ "box-plain-48bit.seed", GEN_BOX_PLAIN, true },
+		{ "box-indexed.seed", GEN_BOX_INDEXED, false }
+	};
+	gen_inode_t file = file_proto(LAYOUT_FLAT_INLINE);
+	gen_dirent_t kids[1], top[1];
+	gen_tree_t tree;
+	uint64_t root, dir;
+
+	for (size_t i = 0; i < ARRAY_SIZE(seeds); i++) {
+		tree_new(&tree, 9, 8);
+		gen_tree_box_begin(&tree);
+		root = seeds[i].wide_root ?
+		    gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0) : 0;
+		dir = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+		kids[0] = (gen_dirent_t){ "f", gen_tree_add(&tree, &file,
+		    "box tail", 8), T_FILE };
+		top[0] = (gen_dirent_t){ "d", dir, T_DIR };
+		gen_tree_dir(&tree, dir, root, kids, 1);
+		gen_tree_dir(&tree, root, root, top, 1);
+		(void)gen_tree_box_end(&tree, seeds[i].kind);
+		if (seeds[i].wide_root)
+			gen_tree_set_48bit(&tree, tree.blocks, root);
+		write_seed(directory, seeds[i].name, &tree);
+		gen_tree_free(&tree);
+	}
+}
+
+/*
  * Fuzz seeds for the 48-bit layout: a wide-root volume with a compact
  * bit-4 file and a directory omitting its dot, and an encoded-extent file
  * at each record width.
@@ -12704,6 +12736,7 @@ emit_seeds(const char *directory)
 	emit_tail_seeds(directory);
 	emit_codec_seeds(directory);
 	emit_48bit_seeds(directory);
+	emit_box_seeds(directory);
 }
 
 /* ---- DEFLATE, MicroLZMA and Zstandard clusters ---- */
@@ -13435,7 +13468,7 @@ main(int argc, char **argv)
 	test_open_refuses_an_unknown_incompatible_bit();
 	test_open_refuses_nonzero_extra_devices_before_the_checksum();
 	test_open_refuses_inconsistent_superblock_fields();
-	test_open_accepts_48bit_and_refuses_metabox_by_name();
+	test_open_accepts_48bit();
 	test_open_pairs_long_prefixes_with_a_plain_table_or_a_packed_inode();
 	test_open_tolerates_unknown_compatible_bits_and_reserved_bytes();
 	test_open_refuses_a_wrong_magic_unless_identity_is_assumed();

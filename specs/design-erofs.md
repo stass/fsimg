@@ -1380,12 +1380,13 @@ the open forms at the end are refused as `FSIMG_EUNSUPPORTED` naming them.
   inode itself lives in the primary space. The kernel refuses a box NID
   with bit 63 and a box without a slot at mount (E12).
 * The second space is the metadata-box inode's content, read through its
-  own data layout: flat, or compressed behind a full index or, on a
-  `48BIT` volume, [encoded extents](#encoded-extents). `mkfs.erofs` writes
-  a flat box, or an LZ4 box mapped by 4-byte encoded extents (advice
-  `0x0001`, logical cluster shift 1), and stores the box flat when
+  own data layout: flat, or compressed behind a full or compact index or,
+  on a `48BIT` volume, [encoded extents](#encoded-extents). `mkfs.erofs`
+  writes a flat box, or an LZ4 box mapped by 4-byte encoded extents (advice
+  `0x0001`, logical cluster shift 1) or, at 1024-byte blocks, by a compact
+  index (layout 3, advice `0x0001`), and stores the box flat when
   compression would not shrink it (`e12-box-plain`, `e12-box-lz4`,
-  `e12-box-lz4-m16k`). A box behind a full index is accepted because the
+  `e12-box-lz4-m16k`, `e12-box-lz4-b1024`). A box behind a full index is accepted because the
   [writer](#metadata-box-profile) emits it under `addressing=32`; no
   producer writes one and no kernel has read one, so it is provisional on
   the box-writer stage's qualification like the writer form. An inode
@@ -1427,10 +1428,10 @@ A NID with bit 63 set in a volume without the metadata box is
 `FSIMG_ECORRUPT`, as is a NID whose inode lies outside its space; the kernel
 lists such an entry and fails to read it (E12). Open after E12, each
 `FSIMG_EUNSUPPORTED` naming it until a producer image or a kernel-mounted
-hand-built one shows it read: a box inode with the flat-inline, chunk-based
-or compact-index layout; a packed NID with bit 63; and
-`SHARED_EA_IN_METABOX` on a compressed box, whose rule is the same but
-which no fixture holds. `SHARED_EA_IN_METABOX`
+hand-built one shows it read: a box inode with the flat-inline or
+chunk-based layout; a packed NID with bit 63; and
+`SHARED_EA_IN_METABOX` on a compressed box, behind an index or encoded
+extents, whose rule is the same but which no fixture holds. `SHARED_EA_IN_METABOX`
 without `METABOX` is `FSIMG_ECORRUPT`; the kernel mounts such a volume and
 fails every shared attribute read.
 

@@ -121,6 +121,7 @@ extent_find(fsimg_reader_t *reader, const erofs_inode_t *inode,
 				.stored_bytes = (uint32_t)(inode->size -
 				    stored_bytes),
 				.source = EROFS_SOURCE_INLINE,
+				.space = inode->space,
 				.mode = EROFS_CLUSTER_SHIFTED
 			}
 		};

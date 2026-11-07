@@ -42,11 +42,15 @@
  *   /frag     full index: an LZ4 cluster, then a fragment in the packed inode
  *   /d        a directory stored as one LZ4 cluster, holding /d/x
  *   /d/x      flat-inline, all inline
+ *
+ * The inodes of /d and /d/x lie in a metadata box behind a full index, so
+ * every read of them goes through the box's own window and lookup cache,
+ * and verification keeps the box's claim stream.
  */
 
 #define BLKSZBITS 9u
 #define BLOCK_BYTES (1u << BLKSZBITS)
-#define DATA_BLOCKS 24u
+#define DATA_BLOCKS 26u
 #define ATTEMPT_LIMIT 10000u
 /* Metadata cache pages: few enough that the small volume's streams spill. */
 #define META_CACHE_PAGES 2u
@@ -380,7 +384,8 @@ add_compressed_dir(gen_tree_t *tree, uint64_t nested)
 static void
 build_image(gen_tree_t *tree)
 {
-	uint64_t deflate_record = GEN_SUPER_OFFSET + 128 + 16;
+	/* The box's extension slot moves the records 16 bytes on. */
+	uint64_t deflate_record = GEN_SUPER_OFFSET + 128 + 16 + 16;
 	gen_dirent_t root[6];
 	uint64_t nested;
 
@@ -391,7 +396,7 @@ build_image(gen_tree_t *tree)
 	    EROFS_INCOMPAT_CHUNKED_FILE);
 	gen_super_put(&tree->image, SB_ALGORITHM_MASK,
 	    1u << EROFS_ALGORITHM_LZ4 | 1u << EROFS_ALGORITHM_DEFLATE, 2);
-	gen_lz4_config_put(&tree->image, 0, 65535, 1);
+	gen_lz4_config_put(&tree->image, 1, 65535, 1);
 	gen_put(&tree->image, deflate_record, 6, 2);
 	gen_put(&tree->image, deflate_record + 2, 15, 1);
 
@@ -402,9 +407,11 @@ build_image(gen_tree_t *tree)
 	root[3] = (gen_dirent_t){ "frag", add_fragment_file(tree),
 	    DIRENT_FILE };
 	root[4] = (gen_dirent_t){ "lz4", add_lz4(tree), DIRENT_FILE };
+	gen_tree_box_begin(tree);
 	nested = add_flat(tree, ENTRY_NESTED);
 	root[5] = (gen_dirent_t){ "d", add_compressed_dir(tree, nested),
 	    DIRENT_DIR };
+	(void)gen_tree_box_end(tree, GEN_BOX_INDEXED);
 	gen_tree_dir(tree, 0, 0, root, sizeof(root) / sizeof(root[0]));
 	/* The root's link count counts its subdirectory /d. */
 	gen_put(&tree->image, gen_inode_offset(&tree->image, 0) + INODE_NLINK,

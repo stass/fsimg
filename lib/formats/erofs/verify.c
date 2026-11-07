@@ -25,13 +25,21 @@
  * (u64), the link count of a name (u32), the role (u8), the flags (u8) and
  * two zero bytes.
  *
- * Claims. Every reachable structure claims its bytes of the volume in one
- * of erofs_claim_class_t's classes: the superblock region, the long-prefix
- * table and the packed inode before the walk, then each inode's body, its
- * directory blocks or file data, and its shared attribute entries, at the
- * points "Each inode is recorded once" below gives. Sorted by start, one
- * sweep applies the ownership rule. A record is the start (u64), the
+ * Claims. Every reachable structure claims its bytes of the metadata space
+ * it lies in, in one of erofs_claim_class_t's classes: the superblock
+ * region, the long-prefix table, the packed inode and the metadata box
+ * inode before the walk, then each inode's body, its directory blocks or
+ * file data, and its shared attribute entries, at the points "Each inode is
+ * recorded once" below gives. Each space has its own claim stream, the
+ * box's only on a volume with the box: the volume's offsets and the box
+ * content's are different coordinates. Sorted by start, one sweep per
+ * stream applies the ownership rule. A record is the start (u64), the
  * length (u64), the owning NID (u64) and the class (u8).
+ *
+ * The metadata box inode is claimed like the packed inode, its every
+ * cluster decoded, but its stored blocks are exclusive metadata: they hold
+ * the box's inodes, shared entries and long-prefix table, which claim their
+ * bytes of its content in the box's stream. No entry may name it.
  *
  * The packed inode is claimed once, as a file whose every cluster is also
  * decoded, so a fragment's bytes are claimed and checked where they are
@@ -87,11 +95,13 @@ typedef struct claim {
 
 static int		claim_compare(const void *, size_t, const void *,
 			    size_t, void *);
+static fsimg_status_t	box_check(fsimg_reader_t *, erofs_verifier_t *,
+			    fsimg_error_t *);
 static fsimg_status_t	claim_next(fsimg_reader_t *, fsimg_stream_t *,
-			    uint64_t *, uint64_t, claim_t *, bool *,
+			    uint64_t, uint64_t *, uint64_t, claim_t *, bool *,
 			    fsimg_error_t *);
 static fsimg_status_t	claims_sweep(fsimg_reader_t *, fsimg_stream_t *,
-			    fsimg_error_t *);
+			    uint64_t, fsimg_error_t *);
 static int		compare_u64(uint64_t, uint64_t);
 static fsimg_status_t	nondirectory_verify(fsimg_reader_t *, erofs_verifier_t *,
 			    uint64_t, uint32_t, uint8_t, unsigned char *,
@@ -118,6 +128,8 @@ static fsimg_status_t	reference_next(fsimg_reader_t *, fsimg_stream_t *,
 static fsimg_status_t	references_pass(fsimg_reader_t *, erofs_verifier_t *,
 			    fsimg_stream_t *, unsigned char *,
 			    fsimg_verify_report_t *, fsimg_error_t *);
+static fsimg_status_t	space_sweep(fsimg_reader_t *, erofs_verifier_t *,
+			    erofs_space_t, fsimg_error_t *);
 static fsimg_status_t	scope_check(const fsimg_erofs_reader_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	scratch_corrupt(fsimg_error_t *, const char *);
@@ -129,24 +141,29 @@ static fsimg_status_t	verifier_new(fsimg_reader_t *, erofs_verifier_t **,
 static void		verifier_free(erofs_verifier_t *);
 
 /*
- * Claim [start, start + length) of the primary space for owner. Every
- * caller claims a range it has proved inside the address domain; an
- * empty range claims nothing.
+ * Claim [start, start + length) of a metadata space for owner. Every
+ * caller claims a range it has proved inside that space; an empty range
+ * claims nothing. Only a volume with the metadata box has a box stream, and
+ * only a structure in the box claims in it.
  */
 fsimg_status_t
-erofs_claim(erofs_verifier_t *verifier, erofs_claim_class_t class,
-    uint64_t start, uint64_t length, uint64_t owner, fsimg_error_t *error)
+erofs_claim(erofs_verifier_t *verifier, erofs_space_t space,
+    erofs_claim_class_t class, uint64_t start, uint64_t length,
+    uint64_t owner, fsimg_error_t *error)
 {
 	unsigned char record[CLAIM_BYTES];
 
 	if (length == 0)
 		return (FSIMG_OK);
+	if (verifier->claims[space] == NULL)
+		return (erofs_reject(error, FSIMG_EINVAL,
+		    "claim in a metadata box the volume does not have"));
 	fsimg_store_le64(record, start);
 	fsimg_store_le64(record + 8, length);
 	fsimg_store_le64(record + 16, owner);
 	record[24] = (unsigned char)class;
-	return (fsimg_stream_append(verifier->claims, record, sizeof(record),
-	    NULL, error));
+	return (fsimg_stream_append(verifier->claims[space], record,
+	    sizeof(record), NULL, error));
 }
 
 fsimg_status_t
@@ -186,12 +203,14 @@ erofs_verify(fsimg_reader_t *reader, unsigned flags,
 	 * The superblock region: the superblock and its extension slots,
 	 * which domain_set() proved inside the domain.
 	 */
-	status = erofs_claim(verifier, EROFS_CLAIM_EXCLUSIVE, EROFS_SUPER_OFFSET,
-	    EROFS_SUPER_BASE_BYTES +
+	status = erofs_claim(verifier, EROFS_SPACE_PRIMARY, EROFS_CLAIM_EXCLUSIVE,
+	    EROFS_SUPER_OFFSET, EROFS_SUPER_BASE_BYTES +
 	    (uint64_t)sb->extension_slots * EROFS_SUPER_SLOT_BYTES,
 	    EROFS_CLAIM_NO_INODE, error);
 	if (status == FSIMG_OK)
 		status = packed_check(reader, verifier, error);
+	if (status == FSIMG_OK)
+		status = box_check(reader, verifier, error);
 	if (status != FSIMG_OK)
 		goto done;
 
@@ -237,12 +256,10 @@ erofs_verify(fsimg_reader_t *reader, unsigned flags,
 	fsimg_stream_free(sorted);
 	sorted = NULL;
 	if (status == FSIMG_OK)
-		status = fsimg_stream_seal(verifier->claims, error);
-	if (status == FSIMG_OK)
-		status = fsimg_stream_sort(verifier->claims, claim_compare, NULL,
-		    NULL, &sorted, error);
-	if (status == FSIMG_OK)
-		status = claims_sweep(reader, sorted, error);
+		status = space_sweep(reader, verifier, EROFS_SPACE_PRIMARY,
+		    error);
+	if (status == FSIMG_OK && erofs->has_box)
+		status = space_sweep(reader, verifier, EROFS_SPACE_BOX, error);
 	if (status == FSIMG_OK)
 		status = fsimg_reader_stable(reader, error);
 	if (status == FSIMG_OK)
@@ -255,9 +272,28 @@ done:
 	return (status);
 }
 
+/* One metadata space's claims sealed, sorted and swept. */
+static fsimg_status_t
+space_sweep(fsimg_reader_t *reader, erofs_verifier_t *verifier,
+    erofs_space_t space, fsimg_error_t *error)
+{
+	fsimg_stream_t *sorted = NULL;
+	fsimg_status_t status;
+
+	status = fsimg_stream_seal(verifier->claims[space], error);
+	if (status == FSIMG_OK)
+		status = fsimg_stream_sort(verifier->claims[space],
+		    claim_compare, NULL, NULL, &sorted, error);
+	if (status == FSIMG_OK)
+		status = claims_sweep(reader, sorted,
+		    erofs_space_bytes(erofs_state(reader), space), error);
+	fsimg_stream_free(sorted);
+	return (status);
+}
+
 /*
- * The verifier: the claim stream and the long prefixes' hashes, the
- * table claimed. *out is set only once both exist.
+ * The verifier: the claim streams and the long prefixes' hashes, the
+ * table claimed. *out is set only once all exist.
  */
 static fsimg_status_t
 verifier_new(fsimg_reader_t *reader, erofs_verifier_t **out,
@@ -273,7 +309,10 @@ verifier_new(fsimg_reader_t *reader, erofs_verifier_t **out,
 		goto failed;
 	bzero(verifier, sizeof(*verifier));
 	status = fsimg_stream_new(&reader->session, CLAIM_BYTES,
-	    &verifier->claims, error);
+	    &verifier->claims[EROFS_SPACE_PRIMARY], error);
+	if (status == FSIMG_OK && erofs_state(reader)->has_box)
+		status = fsimg_stream_new(&reader->session, CLAIM_BYTES,
+		    &verifier->claims[EROFS_SPACE_BOX], error);
 	if (status == FSIMG_OK)
 		status = erofs_prefixes_load(reader, verifier, error);
 	if (status != FSIMG_OK) {
@@ -293,7 +332,8 @@ verifier_free(erofs_verifier_t *verifier)
 {
 	if (verifier == NULL)
 		return;
-	fsimg_stream_free(verifier->claims);
+	fsimg_stream_free(verifier->claims[EROFS_SPACE_PRIMARY]);
+	fsimg_stream_free(verifier->claims[EROFS_SPACE_BOX]);
 	fsimg_dealloc(verifier);
 }
 
@@ -315,6 +355,9 @@ inode_record(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 	if (erofs->has_packed && inode->nid == erofs->packed.nid)
 		return (erofs_reject(error, FSIMG_ECORRUPT,
 		    "a directory entry names the packed inode"));
+	if (erofs->has_box && inode->nid == erofs->box.nid)
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "a directory entry names the metadata box inode"));
 	status = reference_add(references, &(reference_t){
 		.nid = inode->nid,
 		.nlink = inode->nlink,
@@ -375,9 +418,9 @@ inode_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 {
 	fsimg_status_t status;
 
-	/* erofs_inode_load() proved the body inside the domain. */
-	status = erofs_claim(verifier, EROFS_CLAIM_EXCLUSIVE, inode->offset,
-	    inode->body_bytes, inode->nid, error);
+	/* erofs_inode_load() proved the body inside its space. */
+	status = erofs_claim(verifier, inode->space, EROFS_CLAIM_EXCLUSIVE,
+	    inode->offset, inode->body_bytes, inode->nid, error);
 	if (status != FSIMG_OK)
 		return (status);
 	switch (inode->kind) {
@@ -458,8 +501,8 @@ packed_check(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 	if (!erofs->has_packed)
 		return (FSIMG_OK);
 	/* erofs_inode_load() proved the body inside the domain. */
-	status = erofs_claim(verifier, EROFS_CLAIM_EXCLUSIVE, packed->offset,
-	    packed->body_bytes, packed->nid, error);
+	status = erofs_claim(verifier, EROFS_SPACE_PRIMARY, EROFS_CLAIM_EXCLUSIVE,
+	    packed->offset, packed->body_bytes, packed->nid, error);
 	if (status == FSIMG_OK)
 		status = storage_claim(reader, verifier, packed,
 		    EROFS_CLAIM_DATA, true, error);
@@ -469,7 +512,34 @@ packed_check(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 }
 
 /*
- * Claim every stored extent of inode's content in class, mapped from
+ * The metadata box inode, when the volume has one: its body, its storage as
+ * exclusive metadata and its attributes, with every cluster of a compressed
+ * box decoded once, whether or not a reachable inode lies there.
+ */
+static fsimg_status_t
+box_check(fsimg_reader_t *reader, erofs_verifier_t *verifier,
+    fsimg_error_t *error)
+{
+	const fsimg_erofs_reader_t *erofs = erofs_state(reader);
+	const erofs_inode_t *box = &erofs->box;
+	fsimg_status_t status;
+
+	if (!erofs->has_box)
+		return (FSIMG_OK);
+	/* erofs_inode_load() proved the body inside the domain. */
+	status = erofs_claim(verifier, EROFS_SPACE_PRIMARY, EROFS_CLAIM_EXCLUSIVE,
+	    box->offset, box->body_bytes, box->nid, error);
+	if (status == FSIMG_OK)
+		status = storage_claim(reader, verifier, box,
+		    EROFS_CLAIM_EXCLUSIVE, true, error);
+	if (status == FSIMG_OK)
+		status = erofs_xattr_verify(reader, box, verifier, error);
+	return (status);
+}
+
+/*
+ * Claim every stored extent of inode's content in class, in the volume
+ * wherever the inode lives (E12), mapped from
  * offset 0 to its size, decoding each cluster into the metadata window too
  * when decode says so. An extent occupies whole blocks, which erofs_map()
  * proved inside the content domain, so rounding its length up to a block
@@ -509,8 +579,8 @@ storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 			continue;
 		switch (extent.kind) {
 		case EROFS_EXTENT_STORED:
-			status = erofs_claim(verifier, class,
-			    extent.storage_offset,
+			status = erofs_claim(verifier, EROFS_SPACE_PRIMARY,
+			    class, extent.storage_offset,
 			    (extent.length + block_mask) & ~block_mask,
 			    inode->nid, error);
 			break;
@@ -522,7 +592,8 @@ storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 				    &extent.cluster, error);
 			if (status == FSIMG_OK &&
 			    extent.cluster.source == EROFS_SOURCE_BLOCKS)
-				status = erofs_claim(verifier, class,
+				status = erofs_claim(verifier,
+				    EROFS_SPACE_PRIMARY, class,
 				    extent.cluster.storage_offset,
 				    extent.cluster.stored_bytes, inode->nid,
 				    error);
@@ -747,13 +818,14 @@ inode_references_check(uint64_t nid, uint64_t names, uint64_t subdirectories,
 
 /*
  * The next claim, or *more false at the stream's end. A record must have
- * a known class, a nonempty range inside the address domain and a start
+ * a known class, a nonempty range inside its space, [0, limit), and a start
  * not below previous, the start of the claim before it. Each record is a
  * unit of work, as references are.
  */
 static fsimg_status_t
-claim_next(fsimg_reader_t *reader, fsimg_stream_t *sorted, uint64_t *cursor,
-    uint64_t previous, claim_t *out, bool *more, fsimg_error_t *error)
+claim_next(fsimg_reader_t *reader, fsimg_stream_t *sorted, uint64_t limit,
+    uint64_t *cursor, uint64_t previous, claim_t *out, bool *more,
+    fsimg_error_t *error)
 {
 	unsigned char record[CLAIM_BYTES];
 	uint64_t start, length;
@@ -774,7 +846,7 @@ claim_next(fsimg_reader_t *reader, fsimg_stream_t *sorted, uint64_t *cursor,
 	length = fsimg_load_le64(record + 8);
 	if (transferred != sizeof(record) || record[24] > EROFS_CLAIM_DATA ||
 	    length == 0 ||
-	    !fsimg_range_fits(start, length, erofs_state(reader)->domain_bytes))
+	    !fsimg_range_fits(start, length, limit))
 		return (scratch_corrupt(error, "invalid EROFS claim record"));
 	if (start < previous)
 		return (scratch_corrupt(error,
@@ -800,7 +872,8 @@ overlap(uint64_t start, const char *what, fsimg_error_t *error)
 }
 
 /*
- * The ownership rule in one pass over the claims sorted by start. Every
+ * The ownership rule in one pass over one space's claims, inside
+ * [0, limit), sorted by start. Every
  * claim of a pair that overlaps starts no later than the other, so a
  * claim overlaps an earlier one exactly when it starts below the furthest
  * end the earlier claims of that class reached:
@@ -813,7 +886,7 @@ overlap(uint64_t start, const char *what, fsimg_error_t *error)
  *	data		overlaps no exclusive or shared claim
  */
 static fsimg_status_t
-claims_sweep(fsimg_reader_t *reader, fsimg_stream_t *sorted,
+claims_sweep(fsimg_reader_t *reader, fsimg_stream_t *sorted, uint64_t limit,
     fsimg_error_t *error)
 {
 	claim_t claim, shared;
@@ -826,8 +899,8 @@ claims_sweep(fsimg_reader_t *reader, fsimg_stream_t *sorted,
 	bzero(&claim, sizeof(claim));
 	bzero(&shared, sizeof(shared));
 	for (;;) {
-		status = claim_next(reader, sorted, &cursor, claim.start, &claim,
-		    &more, error);
+		status = claim_next(reader, sorted, limit, &cursor, claim.start,
+		    &claim, &more, error);
 		if (status != FSIMG_OK || !more)
 			return (status);
 		switch (claim.class) {

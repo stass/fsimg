@@ -786,7 +786,10 @@ of the 20 fixtures mounts and passes `fsck.erofs` with no `<E>`; content and
   the LZ4 box is layout 1 of 8192 bytes with one stored block, mapped by
   4-byte encoded extents with advice `0x0001` and logical cluster shift 1
   (header `00 00 00 00 01 00 00 01`), the same form as a regular LZ4 file
-  in the 48-bit image, and the producer
+  in the 48-bit image; at 1024-byte blocks (`e12-box-lz4-b1024`) the LZ4
+  box is instead layout 3, a compact index (NID 38: format `0x0006`, size
+  7168, header `00 00 00 00 01 00 00 00`), which `dump.erofs` reports as
+  layout 3; and the producer
   stores the box flat when one block would not shrink. `-m` needs a
   positive size, so the producer writes no plain box beside compressed
   files; `--MZ` is a different mechanism without a feature bit (source

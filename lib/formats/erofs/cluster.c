@@ -30,8 +30,9 @@
  * leaves an unkeyed window and never a key naming bytes it does not hold.
  *
  * Decoding a cluster reads its stored bytes into the input buffer, at most
- * 1 MiB: whole blocks of the volume, or an inline tail from the primary
- * space, keyed at its absolute offset so equal keys name equal bytes. A
+ * 1 MiB: whole blocks of the volume, or an inline tail from the space of
+ * its inode, keyed at its offset there with the space, so equal keys name
+ * equal bytes. A
  * fragment is no cluster: the mapper resolves it to the packed inode's own.
  * A plain cluster is copied, rotated when interlaced. A compressed
  * stream is right-aligned in its blocks behind zero padding, so it starts at
@@ -243,7 +244,8 @@ erofs_window_free(erofs_window_t *window)
 /*
  * Read cluster's stored bytes into window's input: blocks the mapper
  * proved inside the content domain, where a range past the input's end is
- * a truncated volume, or an inline tail through the metadata reader.
+ * a truncated volume, or an inline tail through the metadata reader in
+ * the space of the inode holding it.
  */
 static fsimg_status_t
 input_read(fsimg_reader_t *reader, erofs_window_t *window,
@@ -253,7 +255,7 @@ input_read(fsimg_reader_t *reader, erofs_window_t *window,
 	fsimg_status_t status;
 
 	if (cluster->source == EROFS_SOURCE_INLINE)
-		return (erofs_meta_read(reader, EROFS_SPACE_PRIMARY,
+		return (erofs_meta_read(reader, cluster->space,
 		    cluster->storage_offset, cluster->stored_bytes,
 		    window->input, error));
 	status = fsimg_reader_bytes(reader, cluster->storage_offset,
@@ -282,6 +284,7 @@ window_holds(const erofs_window_t *window, const erofs_cluster_t *cluster)
 	    key->stored_bytes == cluster->stored_bytes &&
 	    key->rotation == cluster->rotation &&
 	    key->source == cluster->source &&
+	    key->space == cluster->space &&
 	    key->mode == cluster->mode &&
 	    key->algorithm == cluster->algorithm &&
 	    key->partial == cluster->partial);

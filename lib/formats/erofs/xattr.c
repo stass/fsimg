@@ -13,7 +13,7 @@
  * carries the extra-data mark.
  *
  * Verification checks the structures the region points at as well: every
- * shared index names an entry inside the volume, which it claims as shared
+ * shared index names an entry inside its space, which it claims as shared
  * metadata; the long-prefix table is well formed and claimed as exclusive
  * metadata; and, when the volume carries name filters, no attribute's name
  * hashes to a bit the inode's filter sets, since a wrong filter makes the
@@ -54,6 +54,8 @@ static fsimg_status_t	inline_entries_walk(fsimg_reader_t *,
 			    bool *, fsimg_error_t *);
 static void		name_bit_add(region_scan_t *, const erofs_xattr_t *,
 			    const unsigned char *);
+static bool		prefix_in_packed(const fsimg_erofs_reader_t *);
+static erofs_space_t	prefix_space(const fsimg_erofs_reader_t *);
 static fsimg_status_t	prefix_read(fsimg_reader_t *, uint64_t, size_t, void *,
 			    fsimg_error_t *);
 static fsimg_status_t	shared_entry_verify(fsimg_reader_t *,
@@ -164,9 +166,11 @@ erofs_xattr_verify(fsimg_reader_t *reader, const erofs_inode_t *inode,
  * Load the long-prefix table into the verifier and claim it. The table
  * starts at byte xattr_prefix_start * 4 of its region and holds
  * xattr_prefix_count records, each at least 4 bytes, padded to 4. Its
- * region is the volume under PLAIN_XATTR_PFX, where the claim runs to the
- * last record's end, and otherwise the packed inode's content, which open
- * proved present and whose storage the packed inode's own claims cover.
+ * region is the volume under PLAIN_XATTR_PFX, otherwise the metadata box's
+ * content on a volume with the box, where the claim runs to the last
+ * record's end in that space, and otherwise the packed inode's content,
+ * which open proved present and whose storage the packed inode's own claims
+ * cover.
  * Every record is validated; each of the first 128, the ones an index can
  * name, leaves its name hash in the verifier with its infix absorbed, so
  * an attribute's hash only adds its suffix.
@@ -185,8 +189,8 @@ erofs_prefixes_load(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 
 	if (!erofs->features.long_prefixes || sb->xattr_prefix_count == 0)
 		return (FSIMG_OK);
-	region_bytes = erofs->features.plain_prefixes ? erofs->domain_bytes :
-	    erofs->packed.size;
+	region_bytes = prefix_in_packed(erofs) ? erofs->packed.size :
+	    erofs_space_bytes(erofs, prefix_space(erofs));
 	/* A 32-bit count of 4-byte units: the start fits 34 bits. */
 	start = offset = (uint64_t)sb->xattr_prefix_start * 4;
 	for (unsigned k = 0; k < sb->xattr_prefix_count; k++) {
@@ -216,16 +220,34 @@ erofs_prefixes_load(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 		/* The decoder proved the record inside the region. */
 		offset += prefix.record_bytes;
 	}
-	if (!erofs->features.plain_prefixes)
+	if (prefix_in_packed(erofs))
 		return (FSIMG_OK);
-	return (erofs_claim(verifier, EROFS_CLAIM_EXCLUSIVE, start,
-	    offset - start, EROFS_CLAIM_NO_INODE, error));
+	return (erofs_claim(verifier, prefix_space(erofs), EROFS_CLAIM_EXCLUSIVE,
+	    start, offset - start, EROFS_CLAIM_NO_INODE, error));
+}
+
+/*
+ * Whether the long-prefix table is content of the packed inode: neither
+ * plain nor in the metadata box, the two other places open accepts.
+ */
+static bool
+prefix_in_packed(const fsimg_erofs_reader_t *erofs)
+{
+	return (!erofs->features.plain_prefixes && !erofs->has_box);
+}
+
+/* The metadata space of a table outside the packed inode. */
+static erofs_space_t
+prefix_space(const fsimg_erofs_reader_t *erofs)
+{
+	return (erofs->features.plain_prefixes ? EROFS_SPACE_PRIMARY :
+	    EROFS_SPACE_BOX);
 }
 
 /*
  * length bytes at offset of the long-prefix table's region, a range the
- * caller proved inside it: the volume's primary space for a plain table,
- * or the packed inode's content.
+ * caller proved inside it: a metadata space, the volume for a plain table
+ * or the box's content, or the packed inode's content.
  */
 static fsimg_status_t
 prefix_read(fsimg_reader_t *reader, uint64_t offset, size_t length,
@@ -233,11 +255,11 @@ prefix_read(fsimg_reader_t *reader, uint64_t offset, size_t length,
 {
 	fsimg_erofs_reader_t *erofs = erofs_state(reader);
 
-	if (erofs->features.plain_prefixes)
-		return (erofs_meta_read(reader, EROFS_SPACE_PRIMARY, offset,
-		    length, out, error));
-	return (erofs_content_read(reader, &erofs->packed, offset, length,
-	    out, NULL, error));
+	if (prefix_in_packed(erofs))
+		return (erofs_content_read(reader, &erofs->packed, offset,
+		    length, out, NULL, error));
+	return (erofs_meta_read(reader, prefix_space(erofs), offset, length,
+	    out, error));
 }
 
 /*
@@ -331,31 +353,36 @@ inline_entries_walk(fsimg_reader_t *reader, const erofs_inode_t *inode,
 }
 
 /*
- * The shared entry index id names: inside the volume, decoded like an
- * inline entry against what remains of the volume, claimed as shared
- * metadata by inode, and its name hashed when the scan hashes.
+ * The shared entry index id names: inside the pool's space, the volume or
+ * under SHARED_EA_IN_METABOX the metadata box's content, decoded like an
+ * inline entry against what remains of that space, claimed there as shared
+ * metadata by inode, and its name hashed when the scan hashes. The pool's
+ * space does not depend on the inode's: an inode in the box names entries
+ * of a pool in the volume unless the bit is set (E12).
  */
 static fsimg_status_t
 shared_entry_verify(fsimg_reader_t *reader, const erofs_inode_t *inode,
     uint32_t id, region_scan_t *scan, fsimg_error_t *error)
 {
 	fsimg_erofs_reader_t *erofs = erofs_state(reader);
+	erofs_space_t space = erofs->features.pool_in_box ? EROFS_SPACE_BOX :
+	    EROFS_SPACE_PRIMARY;
 	unsigned char head[EROFS_XATTR_ENTRY_BYTES], suffix[SUFFIX_MAX];
 	erofs_xattr_t xattr;
 	const char *what;
-	uint64_t offset, remaining;
+	uint64_t offset, remaining, space_bytes;
 	fsimg_status_t status;
 
 	status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
 	if (status != FSIMG_OK)
 		return (status);
 	offset = erofs_xattr_shared_offset(&erofs->super, id);
-	remaining = offset < erofs->domain_bytes ?
-	    erofs->domain_bytes - offset : 0;
+	space_bytes = erofs_space_bytes(erofs, space);
+	remaining = offset < space_bytes ? space_bytes - offset : 0;
 	if (remaining < sizeof(head))
 		return (erofs_reject(error, FSIMG_ECORRUPT,
-		    "shared attribute outside the volume"));
-	status = erofs_meta_read(reader, EROFS_SPACE_PRIMARY, offset,
+		    "shared attribute outside its metadata space"));
+	status = erofs_meta_read(reader, space, offset,
 	    sizeof(head), head, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -364,13 +391,13 @@ shared_entry_verify(fsimg_reader_t *reader, const erofs_inode_t *inode,
 	    &erofs->super, &xattr, &what);
 	if (status != FSIMG_OK)
 		return (erofs_reject(error, status, what));
-	status = erofs_claim(scan->verifier, EROFS_CLAIM_SHARED, offset,
+	status = erofs_claim(scan->verifier, space, EROFS_CLAIM_SHARED, offset,
 	    xattr.entry_bytes, inode->nid, error);
 	if (status != FSIMG_OK || !scan->hash)
 		return (status);
 
-	status = erofs_meta_read(reader, EROFS_SPACE_PRIMARY,
-	    offset + sizeof(head), xattr.suffix_length, suffix, error);
+	status = erofs_meta_read(reader, space, offset + sizeof(head),
+	    xattr.suffix_length, suffix, error);
 	if (status != FSIMG_OK)
 		return (status);
 	name_bit_add(scan, &xattr, suffix);

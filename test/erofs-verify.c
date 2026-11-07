@@ -1905,7 +1905,7 @@ test_a_shared_index_outside_the_volume_is_corrupt_though_listing_works(void)
 	gen_tree_seal(&tree);
 	EXPECT(list_image(&tree.image) == FSIMG_OK, "far index: listing works");
 	check_image("an index far past the volume", &tree.image, FSIMG_ECORRUPT,
-	    "invalid EROFS shared attribute outside the volume");
+	    "invalid EROFS shared attribute outside its metadata space");
 	gen_tree_free(&tree);
 
 	file = shared_index_tree(&tree);
@@ -1915,7 +1915,7 @@ test_a_shared_index_outside_the_volume_is_corrupt_though_listing_works(void)
 	gen_tree_seal(&tree);
 	EXPECT(list_image(&tree.image) == FSIMG_OK, "end index: listing works");
 	check_image("an index at the volume's end", &tree.image, FSIMG_ECORRUPT,
-	    "invalid EROFS shared attribute outside the volume");
+	    "invalid EROFS shared attribute outside its metadata space");
 	gen_tree_free(&tree);
 
 	file = shared_index_tree(&tree);
@@ -2988,6 +2988,491 @@ test_an_implicit_link_count_of_1_is_checked_against_the_names(void)
 	}
 }
 
+/* ---- The metadata box ---- */
+
+enum {
+	COMPAT_SHARED_EA_IN_METABOX = 0x08,
+	INCOMPAT_METABOX = 0x100,
+	SB_BOX_NID = 0x80,
+	SB_PACKED_NID = 0x60,
+	BOX_DATA_BLOCKS = 32
+};
+
+static const gen_box_kind_t box_kinds[] = { GEN_BOX_PLAIN, GEN_BOX_INDEXED };
+
+static const char *
+box_kind_name(gen_box_kind_t kind)
+{
+	return (kind == GEN_BOX_PLAIN ? "plain box" : "indexed box");
+}
+
+/*
+ * Inside an open box: a directory "d" holding a flat file, a flat-inline
+ * file whose tail lies in the box, and a symbolic link, and a root naming
+ * "d" and a small inline file. With a wide root the root lies in the box,
+ * named by the 48-bit layout's wide field, which alone holds bit 63;
+ * otherwise it is NID 0 of the primary space. Returns the root's NID.
+ */
+static uint64_t
+box_contents(gen_tree_t *tree, bool wide_root)
+{
+	gen_dirent_t kids[3], top[2];
+	uint64_t dir, root;
+
+	kids[0] = entry("flat", add_file(tree, LAYOUT_FLAT, 1000), T_FILE);
+	kids[1] = entry("inline", add_file(tree, LAYOUT_INLINE, 700), T_FILE);
+	kids[2] = entry("link", add_symlink(tree, "flat"), T_LINK);
+	dir = new_dir(tree);
+	root = wide_root ? new_dir(tree) : 0;
+	top[0] = entry("d", dir, T_DIR);
+	top[1] = entry("f", add_file(tree, LAYOUT_INLINE, 40), T_FILE);
+	fill_dir(tree, dir, root, kids, 3);
+	fill_dir(tree, root, root, top, 2);
+	return (root);
+}
+
+/* A box volume of kind at 2^blkszbits-byte blocks; the box inode's NID. */
+static uint64_t
+box_tree(gen_tree_t *tree, unsigned blkszbits, gen_box_kind_t kind,
+    bool wide_root)
+{
+	uint64_t root, box;
+
+	tree_new(tree, blkszbits, BOX_DATA_BLOCKS);
+	gen_tree_box_begin(tree);
+	root = box_contents(tree, wide_root);
+	box = gen_tree_box_end(tree, kind);
+	if (wide_root)
+		gen_tree_set_48bit(tree, tree->blocks, root);
+	return (box);
+}
+
+/*
+ * Inodes in the box, plain or behind an index, at 512- and 4096-byte
+ * blocks, with the root in the box under the 48-bit layout's wide root and
+ * in the primary space without the 48-bit layout: the box needs neither.
+ */
+static void
+test_box_volumes_verify_with_the_root_in_either_space(void)
+{
+	static const unsigned shifts[] = { 9, 12 };
+
+	for (size_t k = 0; k < ARRAY_SIZE(box_kinds); k++) {
+		for (size_t b = 0; b < ARRAY_SIZE(shifts); b++) {
+			for (int wide = 0; wide <= 1; wide++) {
+				char name[96];
+				gen_tree_t tree;
+
+				snprintf(name, sizeof(name), "%s, B=%u, root %s",
+				    box_kind_name(box_kinds[k]), 1u << shifts[b],
+				    wide ? "in the box" : "in the primary space");
+				(void)box_tree(&tree, shifts[b], box_kinds[k],
+				    wide != 0);
+				gen_tree_seal(&tree);
+				for (size_t i = 0; i < SCOPE_COUNT; i++) {
+					verdict_t v = verify_image(&tree.image,
+					    scopes[i]);
+
+					check_verdict(name, scopes[i], &v,
+					    FSIMG_OK, NULL);
+					EXPECT(v.report.directories == 2 &&
+					    v.report.logical_bytes ==
+					    1000 + 700 + 4 + 40,
+					    "%s: %llu directories, %llu bytes",
+					    name, (unsigned long long)
+					    v.report.directories,
+					    (unsigned long long)
+					    v.report.logical_bytes);
+				}
+				gen_tree_free(&tree);
+			}
+		}
+	}
+}
+
+/*
+ * The shared pool lies in the primary space, wherever the inode naming it
+ * lives, unless SHARED_EA_IN_METABOX puts it in the box's content at the
+ * same block number. Both spaces hold an entry at the index the box inode
+ * names, user.k in the pool's space and user.zz in the other, and the name
+ * filter clears only user.k's bit, so the volume verifies only when the
+ * entry is read from the pool's space: the case of c1 to c6 in E12, whose
+ * shared attribute Linux 7.0 reads from the wrong place.
+ */
+static void
+test_box_inodes_name_shared_entries_of_the_pool_in_its_space(void)
+{
+	static const attr_t decoy = { 1, "zz", "www" };
+	const uint32_t index = 0;
+	region_t region = { .filter = ~(UINT32_C(1) << filter_bit(1, "", "k")),
+	    .shared = &index, .shared_count = 1 };
+	/* Block 6 is free in the primary space and lies in the box. */
+	const uint64_t block_bytes = 512, pool_block = 6;
+	uint64_t box_pool, primary_pool;
+
+	for (int in_box = 0; in_box <= 1; in_box++) {
+		const char *name = in_box ? "the pool in the box" :
+		    "the pool in the primary space";
+		gen_dirent_t kids[1];
+		gen_tree_t tree;
+
+		tree_new(&tree, 9, BOX_DATA_BLOCKS);
+		primary_pool = block_offset(&tree, (uint32_t)pool_block);
+		gen_tree_box_begin(&tree);
+		kids[0] = entry("c1", add_file_with_region(&tree, &region),
+		    T_FILE);
+		/* The box's block pool_block holds the box's pool. */
+		tree.meta_next = gen_box_offset(&tree, (pool_block + 1) *
+		    block_bytes);
+		box_pool = gen_box_offset(&tree, pool_block * block_bytes);
+		fill_dir(&tree, 0, 0, kids, 1);
+		put_entry(&tree, in_box ? box_pool : primary_pool,
+		    &shared_attr);
+		put_entry(&tree, in_box ? primary_pool : box_pool, &decoy);
+		set_pool(&tree, (uint32_t)pool_block);
+		gen_tree_set_compat(&tree, COMPAT_SB_CHKSUM |
+		    COMPAT_XATTR_FILTER |
+		    (in_box ? COMPAT_SHARED_EA_IN_METABOX : 0));
+		(void)gen_tree_box_end(&tree, GEN_BOX_PLAIN);
+		expect_verified(name, &tree);
+		gen_tree_free(&tree);
+	}
+}
+
+/* A one-record long-prefix table: base index 1 (user.) and the infix. */
+static void
+one_prefix_table(unsigned char table[12], const char *infix)
+{
+	bzero(table, 12);
+	table[0] = (unsigned char)(strlen(infix) + 1);
+	table[2] = 1;
+	bcopy(infix, table + 3, strlen(infix));
+}
+
+/*
+ * Without PLAIN_XATTR_PFX the long-prefix table of a box volume lies at
+ * prefix_start * 4 of the box's content, plain or behind an index, and
+ * beside a packed inode whose content holds another table at the same
+ * offset. As for the packed inode's table, the filter clears only the
+ * name's bit, so the volume verifies only if the infix was read from the
+ * box.
+ */
+static void
+test_a_prefix_table_in_the_box_verifies(void)
+{
+	static const char infix[] = "vendor.";
+	const attr_t attr = { 0x80, "first", "1" };
+	region_t region = { .filter = ~(UINT32_C(1) << filter_bit(1, infix,
+	    "first")), .inline_attrs = &attr, .inline_count = 1 };
+	gen_inode_t packed = inode_proto(MODE_FILE, LAYOUT_FLAT);
+	unsigned char table[12], decoy[12];
+
+	one_prefix_table(table, infix);
+	one_prefix_table(decoy, "others.");
+	for (size_t k = 0; k < 2 * ARRAY_SIZE(box_kinds); k++) {
+		bool with_packed = k >= ARRAY_SIZE(box_kinds);
+		gen_box_kind_t kind = box_kinds[k % ARRAY_SIZE(box_kinds)];
+		gen_dirent_t kids[1];
+		gen_tree_t tree;
+
+		tree_new(&tree, 9, BOX_DATA_BLOCKS);
+		if (with_packed)
+			gen_tree_set_packed(&tree, gen_tree_add(&tree, &packed,
+			    decoy, sizeof(decoy)));
+		gen_tree_box_begin(&tree);
+		/* The table fills the box's first block, as mkfs.erofs puts it. */
+		gen_put_bytes(&tree.image, gen_box_offset(&tree, 0), table,
+		    sizeof(table));
+		tree.meta_next = gen_box_offset(&tree, 512);
+		kids[0] = entry("f", add_file_with_region(&tree, &region),
+		    T_FILE);
+		fill_dir(&tree, 0, 0, kids, 1);
+		set_prefix_table(&tree, 0, 1);
+		if (with_packed)
+			put_super(&tree, SB_INCOMPAT, INCOMPAT_XATTR_PREFIXES |
+			    INCOMPAT_FRAGMENTS, 4);
+		gen_tree_set_compat(&tree, COMPAT_XATTR_FILTER |
+		    COMPAT_SB_CHKSUM);
+		(void)gen_tree_box_end(&tree, kind);
+		expect_verified(with_packed ? "a box beside a packed inode" :
+		    box_kind_name(kind), &tree);
+		gen_tree_free(&tree);
+	}
+}
+
+/* The root's entry "f" renamed to name another NID. */
+static void
+box_entry_retarget(gen_tree_t *tree, uint64_t nid)
+{
+	gen_dirent_t kids[1] = { entry("f", nid, T_FILE) };
+
+	fill_dir(tree, 0, 0, kids, 1);
+}
+
+/*
+ * NIDs naming a metadata space wrongly: bit 63 on a volume without the box,
+ * a box NID past the box's content, and the box inode itself, which is
+ * outside the namespace like the packed inode.
+ */
+static void
+test_box_nids_outside_their_space_are_corrupt(void)
+{
+	gen_tree_t tree;
+	uint64_t box;
+
+	tree_new(&tree, 9, BOX_DATA_BLOCKS);
+	box_entry_retarget(&tree, GEN_NID_BOX | 1);
+	expect_corrupt("bit 63 without the box", &tree,
+	    "NID in a metadata box the volume does not have");
+	gen_tree_free(&tree);
+
+	box = box_tree(&tree, 9, GEN_BOX_PLAIN, false);
+	box_entry_retarget(&tree, GEN_NID_BOX | 4096);
+	expect_corrupt("a box NID past the box", &tree,
+	    "metadata outside the metadata box");
+	gen_tree_free(&tree);
+
+	box = box_tree(&tree, 9, GEN_BOX_PLAIN, false);
+	box_entry_retarget(&tree, box);
+	expect_corrupt("an entry naming the box inode", &tree,
+	    "a directory entry names the metadata box inode");
+	gen_tree_free(&tree);
+}
+
+/*
+ * An inline tail in the box may not cross a B-byte block of the box's
+ * content; the fixed part before it may (e12-box-plain-b512). A compact
+ * inode 64 bytes before a block's end puts its 64-byte tail across it; an
+ * extended one 32 bytes before crosses with its fixed part alone.
+ */
+static void
+test_an_inline_tail_crossing_a_box_block_is_corrupt(void)
+{
+	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_INLINE);
+	unsigned char content[64];
+	gen_tree_t tree;
+	uint64_t nid;
+
+	for (int crossing = 0; crossing <= 1; crossing++) {
+		tree_new(&tree, 9, BOX_DATA_BLOCKS);
+		gen_tree_box_begin(&tree);
+		proto.extended = !crossing;
+		nid = gen_nid_at(&tree.image, gen_box_offset(&tree,
+		    crossing ? 512 - 64 : 512 - 32));
+		memset(content, 'x', sizeof(content));
+		gen_tree_fill(&tree, nid, &proto, content, sizeof(content));
+		tree.meta_next = gen_box_offset(&tree, 1024);
+		box_entry_retarget(&tree, nid);
+		(void)gen_tree_box_end(&tree, GEN_BOX_PLAIN);
+		if (crossing)
+			expect_corrupt("a tail crossing a box block", &tree,
+			    "inline tail crosses a block boundary");
+		else
+			expect_verified("a fixed part crossing a box block",
+			    &tree);
+		gen_tree_free(&tree);
+	}
+}
+
+/*
+ * The box inode: a regular file in a layout this reader reads, using no
+ * fragment, so a box read never needs another box read. Each mutation is
+ * refused at open with its class: a directory or a fragment is corrupt; the
+ * chunk-based layout, a packed inode in the box and the pool in a
+ * compressed box are open forms, unsupported.
+ */
+static void
+test_box_inode_mutations_fail_with_their_class(void)
+{
+	gen_tree_t tree;
+	uint64_t box, at;
+
+	box = box_tree(&tree, 9, GEN_BOX_PLAIN, false);
+	gen_put(&tree.image, inode_offset(&tree, box) + 4, MODE_DIR, 2);
+	expect_corrupt("a directory box inode", &tree,
+	    "metadata box inode is not a regular file");
+	gen_tree_free(&tree);
+
+	box = box_tree(&tree, 9, GEN_BOX_PLAIN, false);
+	put_super(&tree, SB_BOX_NID, box | GEN_NID_BOX, 8);
+	expect_corrupt("a box NID with bit 63", &tree, "metadata box NID");
+	gen_tree_free(&tree);
+
+	box = box_tree(&tree, 9, GEN_BOX_PLAIN, false);
+	/* Chunk-based (layout 4); the start block reads as chunkbits. */
+	gen_put(&tree.image, inode_offset(&tree, box), 4u << 1, 2);
+	put_super(&tree, SB_INCOMPAT, INCOMPAT_METABOX | INCOMPAT_CHUNKED_FILE,
+	    4);
+	check_tree("a chunk-based box inode", &tree, FSIMG_EUNSUPPORTED,
+	    "metadata box inode layout");
+	gen_tree_free(&tree);
+
+	box = box_tree(&tree, 9, GEN_BOX_INDEXED, false);
+	/* A whole-file fragment: the map header is the offset with bit 63. */
+	at = inode_offset(&tree, box) + 32;
+	gen_put(&tree.image, at, GEN_NID_BOX, 8);
+	put_super(&tree, SB_INCOMPAT, INCOMPAT_METABOX | INCOMPAT_FRAGMENTS,
+	    4);
+	expect_corrupt("a box inode in a fragment", &tree,
+	    "the metadata box inode uses a fragment");
+	gen_tree_free(&tree);
+
+	box = box_tree(&tree, 9, GEN_BOX_PLAIN, false);
+	put_super(&tree, SB_INCOMPAT, INCOMPAT_METABOX | INCOMPAT_FRAGMENTS,
+	    4);
+	put_super(&tree, SB_PACKED_NID, GEN_NID_BOX | 2, 8);
+	check_tree("a packed NID with bit 63", &tree, FSIMG_EUNSUPPORTED,
+	    "packed inode in the metadata box");
+	gen_tree_free(&tree);
+
+	box = box_tree(&tree, 9, GEN_BOX_INDEXED, false);
+	gen_tree_set_compat(&tree, COMPAT_SB_CHKSUM |
+	    COMPAT_SHARED_EA_IN_METABOX);
+	check_tree("the pool in a compressed box", &tree, FSIMG_EUNSUPPORTED,
+	    "shared attributes in a compressed metadata box");
+	gen_tree_free(&tree);
+}
+
+/*
+ * A packed NID with bit 63 is an open form only on a box volume; without
+ * the box it is a NID in a space the volume does not have, corrupt.
+ */
+static void
+test_a_packed_nid_with_bit_63_without_the_box_is_corrupt(void)
+{
+	gen_tree_t tree;
+
+	tree_new(&tree, 9, BOX_DATA_BLOCKS);
+	box_entry_retarget(&tree, add_file(&tree, LAYOUT_FLAT, 10));
+	put_super(&tree, SB_INCOMPAT, INCOMPAT_FRAGMENTS, 4);
+	put_super(&tree, SB_PACKED_NID, GEN_NID_BOX | 2, 8);
+	expect_corrupt("a packed NID with bit 63 and no box", &tree,
+	    "NID in a metadata box the volume does not have");
+	gen_tree_free(&tree);
+}
+
+/*
+ * Each metadata space's claims are swept: a long-prefix table placed over
+ * a box inode's inline tail overlaps it in the box's stream, and a file's
+ * data block placed on a block of the box overlaps the box's storage in
+ * the volume's.
+ */
+static void
+test_overlaps_in_either_space_are_corrupt(void)
+{
+	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_INLINE);
+	unsigned char table[12];
+	gen_tree_t tree;
+	uint64_t nid, file;
+
+	one_prefix_table(table, "vendor.");
+	tree_new(&tree, 9, BOX_DATA_BLOCKS);
+	gen_tree_box_begin(&tree);
+	nid = gen_tree_add(&tree, &proto, table, sizeof(table));
+	box_entry_retarget(&tree, nid);
+	/* The tail follows the 32-byte fixed part of the box's first inode. */
+	set_prefix_table(&tree, (nid & ~GEN_NID_BOX) * 32 + 32, 1);
+	gen_tree_set_compat(&tree, COMPAT_SB_CHKSUM);
+	(void)gen_tree_box_end(&tree, GEN_BOX_PLAIN);
+	check_tree("a prefix table over a box inode's tail", &tree, FSIMG_ECORRUPT,
+	    "overlaps other storage");
+	gen_tree_free(&tree);
+
+	(void)box_tree(&tree, 9, GEN_BOX_PLAIN, false);
+	file = add_file(&tree, LAYOUT_FLAT, 10);
+	gen_put(&tree.image, inode_offset(&tree, file) + 0x10,
+	    tree.image.box_base >> 9, 4);
+	box_entry_retarget(&tree, file);
+	check_tree("file data on the box's block", &tree, FSIMG_ECORRUPT,
+	    "overlaps other storage");
+	gen_tree_free(&tree);
+}
+
+/*
+ * Read every regular file of the image through the public reader, the
+ * tails through the content window, and compare each with its expected
+ * byte, one per file in listing order.
+ */
+static void
+check_file_bytes(const char *name, const gen_image_t *image,
+    const unsigned char *expected, size_t count, size_t size)
+{
+	source_t source = { image->bytes, image->length };
+	const fsimg_entry_t *walked;
+	fsimg_reader_t *reader = NULL;
+	unsigned char buffer[256];
+	fsimg_options_t options;
+	fsimg_io_ops_t ops;
+	fsimg_ctx_t *ctx;
+	fsimg_io_t *io;
+	size_t files = 0, got;
+
+	CHECK(size <= sizeof(buffer));
+	fsimg_options_init(&options);
+	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
+	fsimg_io_ops_init(&ops);
+	ops.read_at = source_read;
+	ops.get_size = source_size;
+	CHECK(fsimg_io_from_callbacks(ctx, &ops, &source, &io, NULL) ==
+	    FSIMG_OK);
+	CHECK(fsimg_reader_open(ctx, io, NULL, &reader, NULL) == FSIMG_OK);
+	while (fsimg_reader_next(reader, &walked, NULL) == FSIMG_OK) {
+		if (walked->kind != FSIMG_ENTRY_FILE)
+			continue;
+		CHECK(files < count);
+		CHECK(fsimg_reader_read_at(reader, 0, buffer, size, &got,
+		    NULL) == FSIMG_OK && got == size);
+		for (size_t i = 0; i < size; i++) {
+			if (buffer[i] != expected[files]) {
+				EXPECT(false, "%s: file %zu byte %zu is %c, "
+				    "expected %c", name, files, i, buffer[i],
+				    expected[files]);
+				break;
+			}
+		}
+		files++;
+	}
+	EXPECT(files == count, "%s: %zu files", name, files);
+	fsimg_reader_free(reader);
+	fsimg_io_free(io);
+	fsimg_ctx_free(ctx);
+}
+
+/*
+ * A window key names its tail's space: "a" in the volume and "b" in the box
+ * have tails of one length at the same offset of their spaces, read one
+ * after the other through the content window, and "b" must not be served
+ * "a"'s bytes.
+ */
+static void
+test_tails_at_one_offset_of_both_spaces_read_apart(void)
+{
+	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_INLINE);
+	unsigned char a[100], b[100];
+	gen_dirent_t kids[2];
+	gen_tree_t tree;
+	uint64_t offset;
+
+	memset(a, 'a', sizeof(a));
+	memset(b, 'b', sizeof(b));
+	tree_new(&tree, 9, BOX_DATA_BLOCKS);
+	kids[0] = entry("a", gen_tree_add(&tree, &proto, a, sizeof(a)),
+	    T_FILE);
+	offset = inode_offset(&tree, kids[0].nid);
+	gen_tree_box_begin(&tree);
+	tree.meta_next = gen_box_offset(&tree, offset);
+	kids[1] = entry("b", gen_tree_add(&tree, &proto, b, sizeof(b)),
+	    T_FILE);
+	CHECK(inode_offset(&tree, kids[1].nid) == gen_box_offset(&tree,
+	    offset));
+	fill_dir(&tree, 0, 0, kids, 2);
+	(void)gen_tree_box_end(&tree, GEN_BOX_PLAIN);
+	gen_tree_seal(&tree);
+	check_file_bytes("tails at one offset", &tree.image,
+	    (const unsigned char *)"ab", 2, sizeof(a));
+	gen_tree_free(&tree);
+}
+
 int
 main(void)
 {
@@ -3063,5 +3548,14 @@ main(void)
 	test_files_ending_in_fragments_of_the_packed_inode_verify();
 	test_an_entry_naming_the_packed_inode_is_corrupt();
 	test_a_prefix_table_in_the_packed_inode_verifies();
+	test_box_volumes_verify_with_the_root_in_either_space();
+	test_box_inodes_name_shared_entries_of_the_pool_in_its_space();
+	test_a_prefix_table_in_the_box_verifies();
+	test_box_nids_outside_their_space_are_corrupt();
+	test_an_inline_tail_crossing_a_box_block_is_corrupt();
+	test_box_inode_mutations_fail_with_their_class();
+	test_a_packed_nid_with_bit_63_without_the_box_is_corrupt();
+	test_overlaps_in_either_space_are_corrupt();
+	test_tails_at_one_offset_of_both_spaces_read_apart();
 	return (failures == 0 ? 0 : 1);
 }

@@ -123,13 +123,14 @@ Open:
    truncated volume, and sets the address domain and
    `reader->content_domain`. A truncated volume opens; nothing in open fails
    on truncation unless a structure it reads lies past the end.
-2. Decides the features once from the decoded words: the bits this stage
-   of the reader refuses fail here with the feature named (the probe's
-   checks already refused bits outside the format's table). The decision is
+2. Decides the features once from the decoded words, every bit of which
+   the reader reads (the probe's checks already refused bits outside the
+   format's table). The decision is
    a set of booleans the rest of the driver reads, never the raw words.
 3. Under the metadata box, loads the box inode from the primary space,
-   requires a regular file that is flat or compressed behind a full index
-   or, with `48BIT`, encoded extents, and that uses no fragment, and keeps
+   requires a regular file that is flat or compressed behind a full or
+   compact index or, with `48BIT`, encoded extents, and that uses no
+   fragment, and keeps
    it, with its validated map parameters, for the life of the reader. The
    box does not require `48BIT`: the root NID comes from the field the
    superblock's form selects and may lie in either space, and a box of
