@@ -71,6 +71,20 @@ class ErofsRulesTest < Minitest::Test
     end
   end
 
+  def test_an_empty_root_directory_is_found_by_open_and_a_root_directory_outside_the_domain_by_listing
+    with_cases do |cases, _registry|
+      assert_equal ["info"], cases.call(witness("erofs.inode.directory_size.empty")).kase.recipe.stages
+      outside = Erofs::Witnesses::Witness.new(
+        id: "erofs.test.root_data_outside", parameters: {}, intended: nil, rules: [],
+        mutations: [Erofs::Witnesses.u32(Erofs::Witnesses.inode(Erofs::Builder::ROOT, 0x10), 0xFFFFFFFF)]
+      )
+      kase = cases.call(outside).kase
+      assert_includes kase.classification.rule_ids, "erofs.inode.data_domain"
+      assert kase.expected.fetch("info").accept, "open reads the root inode, not its data"
+      assert_equal [FsimgSpec::Status.parse("FSIMG_ECORRUPT")], kase.expected.fetch("ls").statuses
+    end
+  end
+
   def test_directory_violations_are_found_by_listing_not_by_open
     with_cases do |cases, _registry|
       kase = cases.call(witness("erofs.dir.type.unknown_type")).kase

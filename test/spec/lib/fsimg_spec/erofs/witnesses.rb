@@ -61,6 +61,10 @@ module FsimgSpec
           "layout_5" => change(mutations: [u16(inode(Builder::FILE), 5 << 1)]),
           "layout_7" => change(mutations: [u16(inode(Builder::FILE), 7 << 1)])
         },
+        "inode.layout_profile" => {
+          "compressed_full" => change(mutations: [u16(inode(Builder::FILE), 1 << 1)]),
+          "compressed_compact" => change(mutations: [u16(inode(Builder::FILE), 3 << 1)])
+        },
         "inode.reserved" => {
           "compact_word" => change(mutations: [u32(inode(Builder::FILE, 0x1C), 1)]),
           "extended_word" => change(mutations: [u16(inode(Builder::EXT, 0x06), 1)]),
@@ -86,6 +90,10 @@ module FsimgSpec
         "inode.directory_size" => { "empty" => change(mutations: [u32(inode(Builder::ROOT, 8), 0)]) },
         "xattr.framing" => { "overlong_entry" => change(parameters: ATTRIBUTES, mutations: [u16(region(14), 0x100)]) },
         "xattr.index" => { "unknown_index" => change(parameters: ATTRIBUTES, mutations: [u8(region(13), 7)]) },
+        "xattr.acl_suffix" => {
+          "access_with_suffix" => change(parameters: ATTRIBUTES, mutations: [u8(region(13), 2)]),
+          "default_with_suffix" => change(parameters: ATTRIBUTES, mutations: [u8(region(13), 3)])
+        },
         "xattr.prefix" => { "missing_prefix" => change(parameters: ATTRIBUTES, mutations: [u8(region(13), 0x81)]) },
         "dir.framing" => {
           "zero_offset" => change(mutations: [u16(root(0, 8), 0)]),

@@ -779,6 +779,8 @@ EXTRA_DIST += \
 	test/spec/lib/fsimg_spec/iso9660/suite.rb \
 	test/spec/lib/fsimg_spec/iso9660/witnesses.rb \
 	test/spec/suite/core/test_special_sources.rb \
+	test/spec/suite/erofs/test_layout.rb \
+	test/spec/suite/erofs/test_model.rb \
 	test/spec/suite/erofs/test_rules.rb \
 	test/spec/suite/iso9660/test_model.rb \
 	test/spec/suite/iso9660/test_oracles.rb \

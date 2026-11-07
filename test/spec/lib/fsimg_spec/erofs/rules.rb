@@ -20,6 +20,14 @@ module FsimgSpec
       PREFIXES_FEATURE = 0x40
       BUILTIN_PREFIXES = [1, 2, 3, 4, 6].freeze
       LONG_PREFIX = 0x80
+      ACL_INDEXES = [2, 3].freeze
+      # The compressed layouts (1 and 3) and the chunk-based layout (4) are
+      # outside the profile. A chunk-based inode on a volume without
+      # CHUNKED_FILE is corrupt, not unsupported (design: Features).
+      UNREAD_LAYOUTS = [1, 3, 4].freeze
+      CHUNKED_FILE = 0x04
+      # A directory's data is read when it is listed, a file's when extracted.
+      DATA_SCOPE = ->(inode) { inode.directory? ? "directories" : "files" }
 
       module_function
 
@@ -34,13 +42,15 @@ module FsimgSpec
 
       # A rule over every decoded inode that applies_to selects. A
       # violation has the scope of the check that reached the inode: open
-      # for the root, listing for the rest, unless the rule has one scope.
-      def inode_rule(id:, anchor:, scope: %w[open directories], status: "FSIMG_ECORRUPT", category: "normative", applies_to: nil, &holds)
+      # for the root, listing for the rest, unless scope_of names where the
+      # design checks the rule instead, or the rule has one scope.
+      def inode_rule(id:, anchor:, scope: %w[open directories], scope_of: :scope.to_proc, status: "FSIMG_ECORRUPT",
+                     category: "normative", applies_to: nil, &holds)
         selected = applies_to || ->(_inode, _model) { true }
         rule(id:, scope:, anchor:, status:, category:, applies_to: INODES,
              predicate: lambda { |model, _|
                failing = model.inodes.values.compact.select { selected.call(_1, model) && !holds.call(_1, model) }
-               Array(scope).one? ? failing.empty? : failing.map(&:scope).uniq
+               Array(scope).one? ? failing.empty? : failing.map(&scope_of).uniq
              })
       end
 
@@ -69,6 +79,8 @@ module FsimgSpec
              predicate: ->(m, _) { m.sb.fixed_nsec < NSEC }),
         inode_rule(id: "inode.format", anchor: "format-word") { |inode, _| inode.format >> 4 == 0 },
         inode_rule(id: "inode.layout", anchor: "format-word") { |inode, _| inode.layout <= 4 },
+        inode_rule(id: "inode.layout_profile", anchor: "data-layouts", status: "FSIMG_EUNSUPPORTED", category: "profile",
+                   applies_to: ->(inode, model) { unread_layout?(inode, model) }) { false },
         inode_rule(id: "inode.reserved", anchor: "compact-inode") do |inode, _|
           inode.extended ? inode.fields.reserved_a.zero? && inode.fields.reserved_b.bytes.all?(&:zero?) : inode.fields.reserved.zero?
         end,
@@ -83,16 +95,19 @@ module FsimgSpec
         end,
         inode_rule(id: "inode.inline_size", anchor: "flat-and-flat-inline",
                    applies_to: ->(inode, _) { inode.inline? && inode.size.positive? }) { |inode, model| (inode.size % model.block).positive? },
-        inode_rule(id: "inode.data_domain", anchor: "flat-and-flat-inline", scope: "files",
+        inode_rule(id: "inode.data_domain", anchor: "flat-and-flat-inline", scope: %w[directories files], scope_of: DATA_SCOPE,
                    applies_to: ->(inode, model) { (inode.layout.zero? || inode.inline?) && stored_bytes(inode, model).positive? }) do |inode, model|
           FsimgSpec.derive(model.domain) { inode.fields.layout_word * model.block + stored_bytes(inode, model) <= _1 }
         end,
-        inode_rule(id: "inode.directory_size", anchor: "directories", scope: "directories",
+        inode_rule(id: "inode.directory_size", anchor: "directories",
                    applies_to: ->(inode, _) { inode.directory? }) { |inode, _| inode.size.positive? },
         attribute_rule(id: "xattr.framing", anchor: "inline-region") { |inode, _| attributes(inode).framed },
         attribute_rule(id: "xattr.index", anchor: "names-1", status: "FSIMG_EUNSUPPORTED", category: "profile",
                        applies_to: ->(inode, _) { attributes(inode).framed }) do |inode, _|
           attributes(inode).entries.all? { _1.name_index >= LONG_PREFIX || BUILTIN_PREFIXES.include?(_1.name_index) }
+        end,
+        attribute_rule(id: "xattr.acl_suffix", anchor: "names-1", applies_to: ->(inode, _) { attributes(inode).framed }) do |inode, _|
+          attributes(inode).entries.none? { ACL_INDEXES.include?(_1.name_index) && _1.suffix_length.positive? }
         end,
         attribute_rule(id: "xattr.prefix", anchor: "names-1", applies_to: ->(inode, _) { attributes(inode).framed }) do |inode, model|
           attributes(inode).entries.select { _1.name_index >= LONG_PREFIX }.all? do
@@ -115,7 +130,10 @@ module FsimgSpec
              predicate: ->(m, _) { named(m).all? { parent_rule?(_1) } })
       ]
 
-      def identity?(model) = model.sb_defined? && model.magic == [Builder::MAGIC].pack("V") && model.image_length >= 1028
+      def identity?(model) = model.sb_defined? && model.magic == [Layout::MAGIC].pack("V") && model.image_length >= 1028
+
+      def unread_layout?(inode, model) =
+        UNREAD_LAYOUTS.include?(inode.layout) && (inode.layout != 4 || model.sb.incompat.anybits?(CHUNKED_FILE))
 
       # The bytes of an inode's content held in whole blocks.
       def stored_bytes(inode, model) = inode.inline? ? inode.size / model.block * model.block : inode.size
@@ -127,21 +145,24 @@ module FsimgSpec
       # the region, and no bytes remain.
       def attributes(inode)
         region = inode.region
-        return Attributes.new(framed: false, entries: []) if region.bytesize < 12
+        return UNFRAMED if region.bytesize < 12
 
         indexes = 12 + 4 * Layout.decode(Layout::AttributeHeader, region.byteslice(0, 12)).shared_count
-        return Attributes.new(framed: false, entries: []) if indexes > region.bytesize
+        return UNFRAMED if indexes > region.bytesize
 
-        entries = []
-        at = indexes
-        while at + 4 <= region.bytesize
-          entry = Layout.decode(Layout::AttributeEntry, region.byteslice(at, 4))
-          at += (4 + entry.suffix_length + entry.value_length + 3) & ~3
-          return Attributes.new(framed: false, entries:) if at > region.bytesize
+        starts = Enumerator.produce(indexes) { _1 + entry_span(region, _1) }.take_while { _1 + 4 <= region.bytesize }
+        whole = starts.map { [Layout.decode(Layout::AttributeEntry, region.byteslice(_1, 4)), _1 + entry_span(region, _1)] }
+                      .take_while { |_, last| last <= region.bytesize }
+        ends = whole.empty? ? indexes : whole.last.last
+        Attributes.new(framed: whole.size == starts.size && ends == region.bytesize, entries: whole.map(&:first))
+      end
 
-          entries << entry
-        end
-        Attributes.new(framed: at == region.bytesize, entries:)
+      UNFRAMED = Attributes.new(framed: false, entries: []).freeze
+
+      # An entry's head, name, value and padding to a multiple of 4.
+      def entry_span(region, at)
+        entry = Layout.decode(Layout::AttributeEntry, region.byteslice(at, 4))
+        (4 + entry.suffix_length + entry.value_length + 3) & ~3
       end
 
       # The directories whose every block has delimited names.

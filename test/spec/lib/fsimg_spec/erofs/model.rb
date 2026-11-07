@@ -42,7 +42,11 @@ module FsimgSpec
     # bound makes a scope unclassified.
     class Model < Data.define(:image_length, :magic, :sb, :block, :domain, :checksum, :inodes, :directories, :tree, :cut_off)
       UNKNOWN = Undefined.new(reason: "structure is absent or truncated")
-      KINDS = { 0o100000 => "file", 0o040000 => "directory", 0o120000 => "symlink" }.freeze
+      # The kind fsimg lists for each mode type.
+      KINDS = {
+        0o100000 => "file", 0o040000 => "directory", 0o120000 => "symlink", 0o010000 => "fifo",
+        0o140000 => "socket", 0o020000 => "char_device", 0o060000 => "block_device"
+      }.freeze
       # The file type a directory entry stores for each mode type.
       TYPES = { 0o100000 => 1, 0o040000 => 2, 0o020000 => 3, 0o060000 => 4, 0o010000 => 5, 0o140000 => 6, 0o120000 => 7 }.freeze
 
@@ -73,6 +77,13 @@ module FsimgSpec
 
     class Decoder
       CHUNK = 1 << 16
+      # The scopes that read what a cut-off structure held: a scope and
+      # every scope after it.
+      DEPENDENTS = {
+        "open" => %w[open directories files verification destination],
+        "directories" => %w[directories files verification destination],
+        "files" => %w[files verification destination]
+      }.freeze
 
       def initialize(image, ceilings:)
         @image = image
@@ -89,7 +100,7 @@ module FsimgSpec
       def call
         magic = @image.read(1024, 4)
         sb = @image.length >= 1024 + 128 ? Layout.decode(Layout::Superblock, @image.read(1024, 128)) : Model::UNKNOWN
-        return result(magic, sb, Model::UNKNOWN, Model::UNKNOWN) if FsimgSpec.undefined?(sb) || magic != [Builder::MAGIC].pack("V")
+        return result(magic, sb, Model::UNKNOWN, Model::UNKNOWN) if FsimgSpec.undefined?(sb) || magic != [Layout::MAGIC].pack("V")
 
         @sb = sb
         @block = sb.blkszbits.between?(9, 12) ? 1 << sb.blkszbits : Model::UNKNOWN
@@ -115,58 +126,73 @@ module FsimgSpec
 
       def result(magic, sb, block, domain)
         Model.new(image_length: @image.length, magic:, sb:, block:, domain:, checksum: checksum_of, inodes: @inodes.freeze,
-                  directories: @directories.freeze, tree: @clean ? @tree.freeze : Model::UNKNOWN, cut_off: @cut_off.uniq.freeze)
+                  directories: @directories.freeze, tree: @clean ? @tree.freeze : Model::UNKNOWN, cut_off: @cut_off.freeze)
       end
 
-      # Breadth first from the root. A directory is entered once, from the
-      # entry that first names it; the parent rule is judged by the rules.
+      # Breadth first from the root, once for every name a directory has: the
+      # parent rule makes two names in one parent legal, and ordinary reading
+      # lists the shared subtree under each. The rules judge each descent's
+      # parent. A directory below itself is recorded for the rules but not
+      # entered again, so a cycle ends; the entry bound ends a wide tree.
       def walk
         root = load_inode(@sb.root_nid, "open")
         return @clean = false unless root&.directory?
 
-        @entered = [root.nid]
-        queue = [[root, "".b, root.nid]]
+        queue = [[root, "".b, root.nid, []]]
         until queue.empty?
-          inode, path, parent = queue.shift
+          inode, path, parent, ancestors = queue.shift
           directory = Directory.new(inode:, parent:, blocks: read_blocks(inode))
           @directories << directory
+          next if ancestors.include?(inode.nid)
+
           directory.entries.each do |entry|
             next if entry.name.nil? || %w[. ..].include?(entry.name)
-            break cut_off("directories") if (@entries_left -= 1).negative?
+            break incomplete("directories") if (@entries_left -= 1).negative?
 
             child = load_inode(entry.nid, "directories")
             next @clean = false unless child
 
-            visit(child, path.empty? ? entry.name : "#{path}/#{entry.name}".b, queue, directory)
+            visit(child, path.empty? ? entry.name : "#{path}/#{entry.name}".b, queue, directory, ancestors + [inode.nid])
           end
         end
       end
 
-      def visit(child, path, queue, directory)
+      def visit(child, path, queue, directory, ancestors)
         kind = Model::KINDS[child.type_bits]
         @clean = false unless kind
         @tree << WalkedEntry.new(path: path.freeze, type: kind || "other", size: kind == "file" ? child.size : nil,
                                  sha256: kind == "file" ? digest(child) : nil)
-        return unless child.directory? && !@entered.include?(child.nid)
-
-        @entered << child.nid
-        queue << [child, path, directory.inode.nid]
+        queue << [child, path, directory.inode.nid, ancestors] if child.directory?
       end
 
+      # An inode, or nil when the image does not hold it; the cut-off is
+      # recorded against the scope that needed it.
       def load_inode(nid, scope)
         return @inodes[nid] if @inodes.key?(nid)
 
         offset = @sb.meta_blkaddr * @block + 32 * nid
-        head = @image.read(offset, 2)
-        return @inodes[nid] = nil if head.bytesize < 2
+        head = held(offset, 2, scope)
+        return @inodes[nid] = nil unless head
 
         extended = head.unpack1("v").odd?
-        bytes = @image.read(offset, extended ? 64 : 32)
-        return @inodes[nid] = nil if bytes.bytesize < (extended ? 64 : 32)
+        bytes = held(offset, extended ? 64 : 32, scope)
+        return @inodes[nid] = nil unless bytes
 
         fields = Layout.decode(extended ? Layout::ExtendedInode : Layout::CompactInode, bytes)
         inode = Inode.new(nid:, offset:, scope:, fields:, extended:, region: "".b)
         @inodes[nid] = inode.with(region: @image.read(offset + inode.fixed_bytes, inode.region_bytes))
+      end
+
+      # The count bytes at offset, or nil when the image lacks them. A range
+      # inside the volume's declared extent that the input does not hold is a
+      # truncation, which leaves scope unclassified; a range outside the
+      # extent is for the rules (inode.body, inode.data_domain) to judge.
+      def held(offset, count, scope)
+        bytes = @image.read(offset, count)
+        return bytes if bytes.bytesize == count
+
+        incomplete(scope) if !FsimgSpec.undefined?(@domain) && offset + count <= @domain
+        nil
       end
 
       def read_blocks(inode)
@@ -174,7 +200,7 @@ module FsimgSpec
 
         (0...((inode.size + @block - 1) / @block)).filter_map do |index|
           valid = [@block, inode.size - index * @block].min
-          bytes = data(inode, index * @block, valid)
+          bytes = data(inode, index * @block, valid, "directories")
           block(bytes, valid) if bytes
         end
       end
@@ -205,15 +231,15 @@ module FsimgSpec
       # count bytes at offset of the inode's content, or nil when the image
       # does not hold them. Flat data is read from its start block; the
       # inline tail comes from the inode's body.
-      def data(inode, offset, count)
+      def data(inode, offset, count, scope)
         return "".b if count.zero?
+        return nil if offset + count > inode.size
 
         full = inode.inline? ? inode.size / @block * @block : inode.size
         stored = offset < full ? [count, full - offset].min : 0
-        head = stored.zero? ? "".b : @image.read(inode.fields.layout_word * @block + offset, stored)
-        tail = count > stored ? @image.read(inode.body_offset + (offset + stored - full), count - stored) : "".b
-        bytes = head + tail
-        bytes.bytesize == count && (offset + count <= inode.size) ? bytes : nil
+        head = stored.zero? ? "".b : held(inode.fields.layout_word * @block + offset, stored, scope)
+        tail = count > stored ? held(inode.body_offset + (offset + stored - full), count - stored, scope) : "".b
+        head && tail && head + tail
       end
 
       def digest(inode)
@@ -221,17 +247,17 @@ module FsimgSpec
 
         digest = Digest::SHA256.new
         0.step(inode.size - 1, CHUNK) do |offset|
-          bytes = data(inode, offset, [CHUNK, inode.size - offset].min)
+          bytes = data(inode, offset, [CHUNK, inode.size - offset].min, "files")
           return nil unless bytes
 
           digest << bytes
           @digested += bytes.bytesize
-          return cut_off("files") && nil if @digested > @digest_limit
+          return incomplete("files") && nil if @digested > @digest_limit
         end
         digest.hexdigest
       end
 
-      def cut_off(scope) = @cut_off << scope
+      def incomplete(scope) = @cut_off |= DEPENDENTS.fetch(scope)
     end
   end
 end

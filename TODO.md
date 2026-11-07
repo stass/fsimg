@@ -371,6 +371,11 @@
   `test/erofs.c` opens with the larger budget). The driver design bounds
   directories through metadata scratch; find what the prepare path keeps
   in memory and move it to scratch before stage 8's scale gate.
+* [Medium] **EROFS verifier does not yet assert block-count truncation**
+  (`lib/formats/erofs/`): `test_a_block_count_past_the_input_lists_what_lies_in_the_input`
+  in `test/erofs.c` checks only the listing; the verification assertion
+  that an image shorter than its block count is reported truncated lands
+  with the verifier in stage 4.
 * [Low] **EROFS codec does not yet enforce three format-design rules**
   (`lib/formats/erofs/codec.c`): chunk-format bit 6 with 4-byte entries is
   accepted (`erofs_chunk_format_decode`; the design's

@@ -133,13 +133,13 @@ exercise(const uint8_t *data, size_t size)
 			if (entry->kind != FSIMG_ENTRY_FILE &&
 			    entry->kind != FSIMG_ENTRY_SYMLINK)
 				continue;
+			/* A failed read leaves the later entries to be listed. */
 			if (fsimg_reader_read_at(reader, 0, bytes, sizeof(bytes),
 			    &count, NULL) != FSIMG_OK)
-				break;
-			if (entry->size > sizeof(bytes) &&
-			    fsimg_reader_read_at(reader, entry->size - 1, bytes, 1,
-			    &count, NULL) != FSIMG_OK)
-				break;
+				continue;
+			if (entry->size > sizeof(bytes))
+				(void)fsimg_reader_read_at(reader,
+				    entry->size - 1, bytes, 1, &count, NULL);
 		}
 		fsimg_reader_free(reader);
 	}

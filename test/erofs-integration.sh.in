@@ -12,8 +12,9 @@ if test -z "${FSIMG_EROFS_FIXTURES:-}" || test ! -d "$FSIMG_EROFS_FIXTURES"; the
     echo 'SKIP: FSIMG_EROFS_FIXTURES names no fixture directory'
     exit 77
 fi
-if test -z '@RUBY@'; then
-    echo 'SKIP: Ruby is required'
+if test -z '@RUBY@' ||
+    ! '@RUBY@' -e 'exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.2"))'; then
+    echo 'SKIP: Ruby 3.2 or later is required'
     exit 77
 fi
 sgdisk=${SGDISK:-'@SGDISK@'}

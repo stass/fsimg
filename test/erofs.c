@@ -6911,7 +6911,11 @@ test_a_compact_inode_time_is_the_stored_word_after_the_epoch(void)
 
 /* ---- Mutation matrix: geometry and features ---- */
 
-/* Every compatible bit alone is read; the open names it and decides it. */
+/*
+ * Each compatible bit the reader reads on its own is named and decides its
+ * own feature. SHARED_EA_IN_METABOX (0x08) is not among them: alone it is
+ * refused, because the shared attributes need the metadata box.
+ */
 static void
 test_open_accepts_each_compatible_bit_alone(void)
 {
@@ -6954,7 +6958,7 @@ test_open_accepts_each_compatible_bit_alone(void)
 	}
 }
 
-/* Incompatible bits 9 to 31 are outside the table, whatever else is set. */
+/* Every incompatible bit from 9 to 31 is outside the table and refused. */
 static void
 test_open_refuses_every_unknown_incompatible_bit(void)
 {
@@ -7182,10 +7186,14 @@ patched_root(gen_tree_t *tree)
 	return (at);
 }
 
-/* Records are ".", "..", "a_b", "c": 12 bytes each, names after 48. */
+/*
+ * Records are ".", "..", "a_b", "c": 12 bytes each, names after 48, packed
+ * one after the other, so "a_b" starts at 51 and "c" at 54.
+ */
 enum {
 	RECORD_BYTES = 12,
-	NAMES_AT = 48
+	NAMES_AT = 48,
+	A_B_NAME_AT = NAMES_AT + 1 + 2
 };
 
 static void
@@ -7205,7 +7213,7 @@ test_a_stored_directory_block_with_a_bad_field_is_refused(void)
 		    "directory entry count" },
 		{ "second name offset below the first", 1, 8, 2, 12,
 		    "not increasing" },
-		{ "name offsets repeat", 3, 8, 2, NAMES_AT,
+		{ "name offsets repeat", 3, 8, 2, A_B_NAME_AT,
 		    "not increasing" },
 		{ "last name offset past the block", 3, 8, 2, 4000,
 		    "directory name offset" },
@@ -7238,8 +7246,8 @@ test_a_nul_or_slash_inside_a_stored_name_is_refused(void)
 
 		tree_new(&tree, 9, 4);
 		at = patched_root(&tree);
-		/* The middle of "a_b", which is not the last name. */
-		gen_put(&tree.image, at + NAMES_AT + 1, bytes[i], 1);
+		/* The "_" of "a_b", which is not the last name. */
+		gen_put(&tree.image, at + A_B_NAME_AT + 1, bytes[i], 1);
 		check_refused(bytes[i] == 0 ? "NUL in a name" :
 		    "slash in a name", &tree, FSIMG_ECORRUPT,
 		    "directory name byte");
@@ -7318,6 +7326,7 @@ test_a_directory_of_100000_entries_lists_every_name(void)
 	unsigned char *bytes = calloc(BLOCKS, block);
 	gen_inode_t dir = inode_proto(MODE_DIR, LAYOUT_FLAT);
 	char last[PATH_BYTES];
+	fsimg_status_t status;
 	gen_tree_t tree;
 	size_t count, size;
 	uint64_t file;
@@ -7339,6 +7348,18 @@ test_a_directory_of_100000_entries_lists_every_name(void)
 	    FSIMG_DONE, "the walk of 100000 entries reaches its end");
 	EXPECT(count == ENTRIES && strcmp(last, "/n099999") == 0,
 	    "%zu entries, the last \"%s\"", count, last);
+	/*
+	 * Known defect (TODO.md, "EROFS directory listing exceeds the
+	 * minimum memory budget"): the design budget of 16 MiB is too small
+	 * for this directory. When the listing moves to metadata scratch
+	 * this expectation flips to FSIMG_DONE with all ENTRIES names; change
+	 * it then and drop the larger budget above.
+	 */
+	status = count_entries(&tree.image, 16 * 1024 * 1024, &count, last,
+	    sizeof(last));
+	EXPECT(status == FSIMG_ELIMIT,
+	    "at 16 MiB the walk fails with the memory limit (status %d)",
+	    (int)status);
 	gen_tree_free(&tree);
 	free(bytes);
 	free(names);

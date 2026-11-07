@@ -9,6 +9,9 @@ module FsimgSpec
     # Fixed records from the field tables of specs/design-erofs.md. Layouts
     # represent bytes only: invalid values stay representable for mutations.
     module Layout
+      # The magic number at volume byte 1024 (design: The superblock).
+      MAGIC = 0xE0F5E1E2
+
       # The base superblock, at volume byte 1024 (design: The superblock).
       class Superblock < BinData::Record
         endian :little
