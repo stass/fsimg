@@ -105,11 +105,11 @@ Open:
    [superblock region](design-erofs.md#volume-identity-and-geometry) from
    `[1024, min(4096, volume end))`, at most 3072 bytes, rereads the
    superblock from it, and checks every superblock rule: block size,
-   `dirblkbits`, reserved bytes, the checksum, the extra device count,
-   whose nonzero value refuses the volume before any feature or chunk rule
-   ([external devices](design-erofs.md#external-data-devices)), and the
-   volume extent. It
-   sets the volume information's `volume_bytes` to `blocks * B` when the
+   `dirblkbits`, reserved bytes, the checksum, the extra device count and
+   the volume extent. A nonzero device count refuses the volume here,
+   before open's feature-pairing and chunk rules
+   ([external devices](design-erofs.md#external-data-devices)). Open sets
+   the volume information's `volume_bytes` to `blocks * B` when the block
    count is nonzero, so the reader core derives `missing_bytes` for a
    truncated volume, and sets the address domain and
    `reader->content_domain`. A truncated volume opens; nothing in open fails
@@ -416,7 +416,7 @@ once, and the encoder's determinism makes the two agree.
 | Inode load | The fixed part and the headers it needs; bodies read in ranges |
 | Directory preparation | One block buffer and the previous name; children spooled by the common walker |
 | Index lookup | One full record window, one compact group, or one encoded-extent record per search step |
-| Decode windows | Two, three under a compressed metadata box; each at most one decoded cluster plus a 1 MiB input buffer and the codec's state, charged before allocation |
+| Decode windows | Two, three under a compressed metadata box; each at most one decoded cluster plus a 1 MiB input buffer and the codec's state, the MicroLZMA dictionary or Zstandard window the [configuration record](design-erofs.md#configuration) declares included, charged before allocation |
 | Verification | The reference and claim streams in scratch, three under a metadata box, under the common sort's run buffer |
 | Planning | Plan rows in a paged array; directory packing of one directory's names at a time, streamed from the catalog; LZ4 index records in a scratch stream |
 | Emission | One directory block, one LZ4 input window and output block, one box staging block |

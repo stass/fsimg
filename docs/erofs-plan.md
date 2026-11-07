@@ -184,8 +184,8 @@ The designs record these with their rationale.
 
 Stage 1 answers these, each tied to the experiment that answers it and the
 stage that consumes it. Every provisional value in the designs is listed.
-E7, E13 and E14 settle no provisional value: they produce fixtures for
-rules the designs state as established layout, and refusal tests for E14.
+E13 and E14 settle no provisional value: they produce fixtures for rules the
+designs state as established layout, and refusal tests for E14.
 An answered row points to the research record's
 [evidence answers](erofs-research.md#evidence-answers), which name the
 fixture behind each answer; the designs carry the answers themselves.
@@ -200,13 +200,14 @@ fixture behind each answer; the designs carry the answers themselves.
 | Device-number encoding; sizes and layout words of FIFOs, sockets and devices | E5 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
 | Attribute header reserved bytes; prefix table placement and units; the filter hash | E6 | Stages 3, 4 | [Answered](erofs-research.md#evidence-answers) |
 | Chunk entry forms, holes, shared chunks | E7 | Stage 5 | [Answered](erofs-research.md#evidence-answers) |
-| Compact group packing at every boundary; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | E8 | Stages 6, 11 | [Answered](erofs-research.md#evidence-answers); `L > B` and compact advice `0x01` clear stay unobserved |
+| Compact group packing at every boundary; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | E8 | Stages 6, 11 | [Answered](erofs-research.md#evidence-answers); `L > B` and compact advice `0x01` clear are refused until E15 observes them |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | E9 | Stage 7 | [Answered](erofs-research.md#evidence-answers); head-2 by hand-built images only |
 | Every 48-bit field; the extent count's placement; encoded-extent widths; kernel acceptance of the writer's 32-byte records | E10 | Stages 12, 14, 15 | Open, runs before stage 12 |
 | Kernel acceptance of writer output at 512, 1024 and 2048-byte blocks and of the writer's field choices | E11 | Stages 10, 11 | Open, runs before stage 10 |
 | Metadata-box layout, root placement, box compression, shared attributes in the box | E12 | Stages 13, 15 | Open, runs before stage 13 |
 | Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | E13 | Stage 8 | Open, runs before stage 8 |
 | The fields a volume with external devices sets, so refusal names it | E14 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
+| The record count and group layout of a compressed inode with `L > B`, and of a compact inode with advice `0x01` clear, on hand-built images the kernel mounts | E15 | Stage 6 | Open; both refused as unsupported until it runs, and still refused if no such image mounts |
 
 ## Work packages
 
@@ -316,11 +317,15 @@ fixtures, their command records and the oracle output:
 * Raw DEFLATE over zlib; the optional-library entry points (common change
   3) and their dispatch in `cluster.c`; builds with and without each
   library.
-* **Gate:** E9 fixtures match in a full build, the hand-built `e9-head2-*`
-  images included, since no producer writes a head-2 record; in a build
-  without a library the affected files fail with `FSIMG_EUNSUPPORTED`
-  naming it while the rest of the volume lists and extracts, and
-  verification reports incomplete.
+* Hand-built head-2 fixtures that set `COMPR_HEAD2`, since no producer
+  writes a head-2 record and the stage 1 hand-built `e9-head2-*` images
+  leave the bit clear.
+* **Gate:** the producer E9 fixtures and the head-2 fixtures with the bit
+  set match in a full build; `e9-head2-lzma` (bit clear), `e9-head2-wrongalg`
+  and `e9-head2-head1-wrong` fail with `FSIMG_ECORRUPT` naming the rule; in
+  a build without a library the affected files fail with
+  `FSIMG_EUNSUPPORTED` naming it while the rest of the volume lists and
+  extracts, and verification reports incomplete.
 
 ### 8. Reader interoperability, scale and faults
 

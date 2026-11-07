@@ -843,7 +843,9 @@ bytes before the end with five final literals and refused the eight that end
 with one to four literals or whose last match starts 11 or fewer bytes
 before the end (E8, `e8-lz4-block-end`, in the
 [EROFS research record](../docs/erofs-research.md#e8-lz4-and-index-formats)).
-Every producer block meets both with room to spare. The full mode below
+Every producer block meets both, some exactly at a bound: across 1314
+producer clusters the shortest final literal run is five bytes and the
+nearest last match starts exactly 12 bytes before the end. The full mode below
 therefore refuses a block that breaks either as `FSIMG_ECORRUPT`, in one
 check at the block's end once the output's length is known: a block holding
 a match whose final literal run is shorter than five bytes, or whose last

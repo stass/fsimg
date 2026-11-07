@@ -111,7 +111,7 @@ headers, attributes, directory entries, chunk entries and every compressed
 index record, and reports each broken design rule as a `problem:` line. The
 exit status is 0 for a clean image, 1 for a problem or an unreadable image and
 2 when the tree is not decoded (the 48-bit layout and the metadata box). It
-lags the design on two rules E2 and E8 changed (`TODO.md`): it prints the
+lags the design on two rules (`TODO.md`): it prints the
 epoch for a compact inode's time instead of adding the word at `0x0C`, and
 it computes a compact head's block number without the count marker of a
 cluster begun in the previous group, so it misreports 3 files of
@@ -231,7 +231,8 @@ the repository under `~/.cache/fsimg-erofs/evidence`.
   `B` 512, 1024 and 4096; 185 are refused by kernel and `fsck.erofs`. The
   kernel reads configuration records placed at and beyond byte 4096 (a
   poisoned record at 4096 fails the mount; a valid 6000-byte record followed
-  by one at 10098 is read); `fsck.erofs` validates no record.
+  by one at 10098 is read); `fsck.erofs` validates no record. `mkfs.erofs`
+  1.9.4's own records end within the first 1.2 KiB.
 * Block count: `blocks * B` equals the image length in every producer image
   of every family, v1.2 and v1.5 included. The kernel and `fsck.erofs` ignore
   the count: 0, 1, 3, 8 and 17 on a 7-block image all mount and read every
@@ -250,7 +251,9 @@ the repository under `~/.cache/fsimg-erofs/evidence`.
 * Word `0x0C` of a compact inode: zero in every non-48-bit image; the
   file's time minus the epoch under `-E 48bit`. The kernel reads it as
   unsigned seconds added to the epoch in every image, with or without
-  48-bit or `MTIME` (`0xDEADBEEF` gives epoch + 3735928559). Word `0x1C`
+  48-bit or `MTIME` (hand-edited copies of `e2-alltime`, epoch 1700000000:
+  `0xDEADBEEF` gives epoch + 3735928559, with and without `MTIME`; a
+  48-bit root with 1234567 reads as 1234567 over its zero epoch). Word `0x1C`
   and the extended inode's `0x06` and `0x30` to `0x3F`: zero in every
   producer inode, ignored by the kernel when set.
 * Time without `MTIME`: only v1.2 omits the bit. Its extended inodes hold
@@ -276,11 +279,17 @@ the repository under `~/.cache/fsimg-erofs/evidence`.
   regular files only.
 * Flat-inline with a nonzero size that is a multiple of `B`: never produced;
   the kernel and `fsck.erofs` refuse it (`inline data across blocks`). A tail
-  ending exactly at the block end is read; one byte more is refused.
+  ending exactly at the block end is read (hand-built `sBm33-tail-fits-exact`,
+  a 4064-byte file whose 32-byte inode starts a block); one byte more is
+  refused (`sBm33-tail-crosses`).
 * Start word: every producer, v1.2 and v1.5 included, writes `0xFFFFFFFF` in
-  a flat-inline inode with no full block and 0 in an empty file; the kernel
-  reads neither (7, 9999 and `0xFFFFFFFF` all ignored). A flat-inline inode
-  with a full block and start `0xFFFFFFFF` fails to read.
+  a flat-inline inode with no full block (21 of the 25 flat-inline inodes of
+  `e3-b4096-inline`) and 0 in an empty file; the kernel reads neither (7,
+  9999 and `0xFFFFFFFF` all ignored). A flat file holds its start block at
+  any nonzero size: the one-byte file of `e3-b4096-noinline` is flat with
+  start block 1. A flat-inline inode with a full block and start
+  `0xFFFFFFFF` fails to read; a flat 8192-byte file with start `0xFFFFFFFF`
+  reads as zeros in the kernel.
 * Sparse sources are materialised as zero blocks; no flat hole exists.
 
 ### E4 Directories
@@ -383,8 +392,11 @@ equal `dump.erofs -e` on every file except the big-cluster cases below.
   clusters (0 mismatches). With big clusters the kernel's backward walk
   (source `zmap.c`) adds each count marker met, including the marker of a
   cluster whose head is in the previous group: `e8-lz4-big16k` `/mixed`
-  record 44 is block 25 = anchor 21 + 4, which the design's earlier wording
-  and the dumper compute as 21; 40 further files in `e9-mixed-lz4-lzma`.
+  record 44 is block 25 = anchor 21 + 4, which the dumper computes as 21;
+  40 further files in `e9-mixed-lz4-lzma`. A compressed cluster that is
+  not a partial reference, whose extent is shorter than its stored blocks
+  and does not end the file, is refused by the kernel (source, `zmap.c`,
+  "too much compressed data").
 * Big clusters: compact advice `0x07`, full-index advice `0x02`; the kernel
   requires compact `0x02` and `0x04` equal (source). Every cluster that
   spans a non-head record has the marker, count 1 included. Observed
@@ -441,7 +453,10 @@ Zstandard clusters at the defaults.
   MicroLZMA `dict_size` 32768, 262144, 4 MiB by cluster size, `format` 0;
   DEFLATE window bits 15, 12, 8 and 7 for dictionaries 32768, 4096, 256 and
   128; Zstandard `format` 0 and window log less 10 from 2 to 10. The mask
-  lists configured algorithms only. Kernel bounds (source): MicroLZMA
+  lists configured algorithms only; the four records of `e9-config-four`,
+  on a superblock without slots, end at byte 1200. Every non-LZ4 compact
+  inode carries advice `0x07`, at one block too. Kernel bounds (source):
+  MicroLZMA
   `format` 0 and dictionary 4096 to 8 MiB, DEFLATE window bits at most 15,
   Zstandard `format` 0 and window log at most 10 (2^20), each reported as
   invalid. `mkfs.erofs` refuses LZMA above 8 MiB or below 4096, DEFLATE
@@ -471,8 +486,8 @@ Zstandard clusters at the defaults.
 | Question | Answer | Fixtures |
 | --- | --- | --- |
 | Superblock checksum range, seed and final inversion at each block size | `[1024, B)` for `B > 1024`, `[1024, 1024 + B)` otherwise; seed all ones, no final inversion; kernel and `fsck.erofs` agree | `e1-chk-b512` to `-b4096` |
-| Largest block size any producer emits | 4096; `mkfs.erofs` refuses 8192, the kernel refuses `blkszbits` 13 and above | `e1-geom-b*` |
-| The superblock region's end | 4096 for extension slots at every `B`; the kernel reads configuration records beyond it, which fsimg refuses by policy | `e1-slot-base-*` |
+| Largest block size any producer emits | 4096; `mkfs.erofs` refuses 8192, the kernel refuses `blkszbits` 13, 14 and 16 | `e1-geom-b*` |
+| The superblock region's end | 4096 for extension slots at `B` 512, 1024 and 4096; the kernel reads configuration records beyond it, which fsimg refuses by policy | `e1-slot-base-*` |
 | Block count versus image length | Equal in every producer image; the kernel ignores the count, which fsimg enforces by policy | every family |
 | The build-time word | Zero except under `-E 48bit`, where it is the absolute build time | `e1-bt-*`, `e2-v1*` |
 | Compact inode reserved word | `0x0C` is the time in seconds after the epoch on every volume, as the kernel reads it; `0x1C` ignored by the kernel, zero in every producer | `e1-bt-48bit`, `e2-*` |
@@ -480,12 +495,12 @@ Zstandard clusters at the defaults.
 | What the inode count counts | Distinct inodes, a hard link once, plus the packed inode; v1.2 writes 0 | `e2-count-*`, `e2-v12-*` |
 | Flat-inline without a tail | Never produced; a nonzero multiple-of-`B` size with layout 2 is refused by kernel and `fsck.erofs` | `e3-*` |
 | An empty file's start block | 0, and the kernel does not read it | `e3-*` |
-| The null flat address | `0xFFFFFFFF` is the unused start word of every flat-inline inode with no full block, in every producer; the word is read only when a full block exists | `e3-b4096-inline`, `e2-v1*-default` |
+| The null flat address | `0xFFFFFFFF` is the unused start word of every flat-inline inode with no full block, in every producer; a flat inode's word is read whenever its size is nonzero, a flat-inline inode's only when it has a full block | `e3-b4096-inline`, `e3-b4096-noinline`, `e2-v1*-default` |
 | Directory block padding; dot-entry placement; directory link counts | Unused bytes zero; dot entries in bytewise position; 2 + subdirectories, except link count 1 on a compact directory above 65535 | `e4-*` |
 | Device-number encoding; sizes and layout words of FIFOs, sockets and devices | Linux 32-bit encoding; size 0, layout 0, FIFO and socket word 0 | `e5-kinds-*` |
 | Attribute header reserved bytes; prefix table placement and units; the filter hash | Zero; plain table at `start * 4` after the shared pool, packed table at `start * 4` of the packed inode's decoded content; XXH32 over the name without its built-in prefix, seed `0x25BBE08F` + base index, every attribute counted | `e6-xattr-*` |
 | Chunk entry forms, holes, shared chunks | As designed; the layout word's upper half is uninitialised and ignored; per-inode `chunkbits` | `e7-chunk*`, `e7-edit-*` |
-| Compact group packing; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed with the big-cluster head rule corrected; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. Open: `L > B` and compact advice `0x01` clear, unobservable with the pinned release; they block nothing | `e8-*` |
+| Compact group packing; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed, the big-cluster head block following the kernel's walk from the group's anchor; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. Open: `L > B` and compact advice `0x01` clear, unobservable with the pinned release and refused until E15 observes them | `e8-*` |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | Framings confirmed; DEFLATE window bits at most 15, MicroLZMA dictionary at least 4096 and format 0, Zstandard format 0; head-2 by hand-built images, accepted by the kernel without `COMPR_HEAD2` | `e9-*` |
 | Every 48-bit field; encoded extents; writer's 32-byte records | Open; blocks stages 12, 14 and 15 | E10 |
 | Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Open; blocks stages 10 and 11 | E11 |

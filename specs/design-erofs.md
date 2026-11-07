@@ -97,10 +97,10 @@ This section explains the model the rules below serve.
 
 | Profile | Reader contract | Writer contract |
 | --- | --- | --- |
-| Core | Block sizes 512 to 4096 ([geometry](#volume-identity-and-geometry)); compact and extended inodes; flat and flat-inline data; every POSIX kind; extended attributes validated and marked as extra data | Emitted, 4096-byte blocks, flat and flat-inline layouts, compact and extended inodes, no extended attributes |
+| Core | Block sizes 512 to 4096 ([geometry](#volume-identity-and-geometry)); compact and extended inodes, a compact inode's time counted from the superblock's epoch; flat and flat-inline data; every POSIX kind; extended attributes validated and marked as extra data | Emitted, 4096-byte blocks, flat and flat-inline layouts, compact and extended inodes, no extended attributes |
 | Chunked | Chunk-based files with 4-byte and 8-byte indexes and holes, primary device only | Never emitted |
 | Compressed | Full and compact indexes, big physical clusters, plain clusters, compressed inline tails, packed fragments, shared clusters and compressed directories; LZ4 and DEFLATE always, MicroLZMA and Zstandard when the build has the optional library | LZ4 with full indexes and one-block physical clusters, under the `compression=lz4` setting |
-| 48-bit layout | Wide block numbers and root NID, per-inode compact times, implicit link counts, directories without `.`, byte-addressed encoded extents | Emitted under `addressing=48`: wide fields and compact times, encoded extents for LZ4 files, no omitted dots |
+| 48-bit layout | Wide block numbers and root NID, implicit link counts, directories without `.`, byte-addressed encoded extents | Emitted under `addressing=48`: wide fields and compact times, encoded extents for LZ4 files, no omitted dots |
 | Metadata box | Inodes and shared attributes in a second metadata space carried by a file, plain or compressed | Emitted under `metabox=plain` or `metabox=lz4` |
 | External data devices | Recognized and refused at open | Never emitted |
 
@@ -162,7 +162,7 @@ only the magic.
 **Block size.** `B = 2^blkszbits`. The reader accepts `blkszbits` 9 to 12;
 a larger value is `FSIMG_EUNSUPPORTED`. No pinned producer emits a larger
 block: `mkfs.erofs` 1.9.4 refuses `-b8192`, and the kernel on 4 KiB pages
-refuses `blkszbits` 13 and above as it refuses 8 (E1, `e1-geom-b512` to
+refuses `blkszbits` 13, 14 and 16 as it refuses 8 (E1, `e1-geom-b512` to
 `-b4096`). `dirblkbits` must be zero; another value is
 `FSIMG_EUNSUPPORTED`, since no published layout defines it.
 
@@ -171,11 +171,13 @@ refuses `blkszbits` 13 and above as it refuses 8 (E1, `e1-geom-b512` to
 Linux reads with the superblock: one 4 KiB page less the 1024-byte offset.
 The region is independent of `B`, so a 512- or 1024-byte-block volume keeps
 its superblock outside block 0. For the slots this is the kernel's own
-bound: 184 slots, ending at byte 4096, mount at every block size and 185 are
-refused (E1, `e1-slot-base-*`, kernel with 4 KiB pages). For the records it
-is fsimg policy: the kernel reads configuration records past byte 4096, but
-no pinned producer writes one (`mkfs.erofs` 1.9.4's records end below byte
-1200), and bounding them keeps open's read one bounded prefix. Extension
+bound: 184 slots, ending at byte 4096, mount at 512-, 1024- and 4096-byte
+blocks and 185 are refused (E1, `e1-slot-base-*`, kernel with 4 KiB pages).
+For the records it is fsimg policy: the kernel reads configuration records
+past byte 4096, but no pinned producer writes one (`mkfs.erofs` 1.9.4 writes
+none past the first 1.2 KiB: E1; all four of its records on a superblock
+without slots end at byte 1200: E9, `e9-config-four`), and bounding them
+keeps open's read one bounded prefix. Extension
 slots that end past byte 4096, or a configuration record that does, are
 `FSIMG_EUNSUPPORTED`. A structure running past the end of a volume shorter
 than 4096 bytes is `FSIMG_ECORRUPT`.
@@ -317,11 +319,13 @@ a fragment without `FRAGMENTS`, a long-prefix reference without
 metadata space without `METABOX`. The kernel does not check every pairing:
 it reads a head-2 record on a volume without `COMPR_HEAD2` (E9,
 `e9-head2-lzma`) and a chunk-based inode on a volume without `CHUNKED_FILE`
-(E14, `e14-tar-index-b4096`). fsimg requires the bit by policy: no pinned
-producer writes a structure without its bit, and the bit is what tells a
-reader, before the first inode, which structures to expect. A refused
-feature is refused at open, before the root is read, so no partial view of a
-refused volume exists.
+(E14, `e14-tar-index-b4096`). fsimg requires the bit by policy: the bit is
+what tells a reader, before the first inode, which structures to expect, and
+no pinned-producer volume reaches the rule without it. The `--tar=i` volume
+is refused at open for its nonzero extra-device count before any inode is
+read, and every other pinned-producer volume sets the bit of each structure
+it carries. A refused feature is refused at open, before the root is read,
+so no partial view of a refused volume exists.
 
 ## Inodes
 
@@ -379,7 +383,8 @@ they choose the extended form for any time other than the epoch, so the
 word is nonzero only on 48-bit volumes (`e1-bt-48bit`, `e2-vm-48bit`); a
 nonzero word is a time, never corruption. The kernel ignores the word at
 `0x1C` and the extended inode's reserved bytes; every pinned producer writes
-them zero (E2, 3202 inodes), and the reader requires that.
+them zero (E2, 3202 inodes), and the reader requires that by fsimg policy: a
+nonzero one is `FSIMG_ECORRUPT`.
 
 ### Extended inode
 
@@ -489,15 +494,20 @@ flat-inline inode whose `size` is a nonzero multiple of `B` is
 tail and refuse it as inline data across blocks, and producers write layout
 0 for such sizes (E3, `e3-*`). Size 0 with either layout is accepted.
 
-The layout word of a flat or flat-inline inode is read only when the inode
-has a full block, `size >= B`. An inode with none, an empty flat inode or a
-flat-inline inode shorter than `B`, has an unused start word that is neither
-read nor validated: every pinned producer writes `0xFFFFFFFF` there in a
-flat-inline inode under one block and 0 in an empty file, and the kernel
-reads neither (E3, `e3-b4096-inline`, `e2-v12-default`, `e2-v15-default`;
-21 of 25 flat-inline inodes in one image carry `0xFFFFFFFF`). Where the
+The layout word of a flat inode is read whenever `size > 0`, since every
+byte of a flat inode lies in its blocks, a one-byte file included (E3,
+`e3-b4096-noinline`, whose one-byte file is flat with start block 1). The
+word of a flat-inline inode is read when the inode has a full block,
+`floor(size / B) > 0`. Otherwise, in an empty inode of either layout and in
+a flat-inline inode shorter than `B`, the word addresses nothing and is
+neither read nor validated: every pinned producer writes `0xFFFFFFFF` there
+in a flat-inline inode under one block and 0 in an empty file, and the
+kernel reads neither (E3, `e3-b4096-inline`, where 21 of 25 flat-inline
+inodes carry `0xFFFFFFFF`; `e2-v12-default`, `e2-v15-default`). Where the
 word is read it is an address like any other, and one outside the domain,
-`0xFFFFFFFF` included, is `FSIMG_ECORRUPT`.
+`0xFFFFFFFF` included, is `FSIMG_ECORRUPT`. For `0xFFFFFFFF` in a flat
+inode with content that is fsimg policy: the kernel reads such a file as
+zeros (E3), and no producer writes the word in a flat inode.
 
 ### Chunk-based
 
@@ -506,11 +516,11 @@ bits 0 to 4 are `chunkbits`, bit 5 selects 8-byte index entries, bit 6
 permits the wide block numbers of the [48-bit layout](#48-bit-layout) and
 requires it, and bits 7 to 15 are reserved and zero; a set one is
 `FSIMG_ECORRUPT`, and the kernel refuses it too (E7,
-`e7-edit-format-0x80`). The high 16 bits are reserved and ignored by the
-reader and the verifier, and are zero in anything fsimg writes:
-`mkfs.erofs` 1.9.4 writes uninitialised bytes there, so two builds of one
-tree differ in them (E7, `e7-chunk8k` and `e7-chunk8k-again`), and a byte
-comparison against its output must exclude them. The chunk
+`e7-edit-format-0x80`). The high 16 bits are unspecified, not reserved:
+the reader and the verifier ignore them, since `mkfs.erofs` 1.9.4 writes
+uninitialised bytes there, so two builds of one tree differ in them (E7,
+`e7-chunk8k` and `e7-chunk8k-again`), and a byte comparison against its
+output must exclude them. The chunk
 size is `B << chunkbits`, which must not exceed 2^47 bytes (the reader's
 bound on any file size), or the inode is `FSIMG_ECORRUPT`; `chunkbits` is
 per inode and not the producer's requested chunk size, since `mkfs.erofs`
@@ -525,9 +535,12 @@ end rounded up to the entry width:
   widens the block number to 48 bits, a 16-bit device identifier, which is
   zero because the volume has no extra devices, and a 32-bit block number.
 
-A block number of all ones, at the entry's width, is a hole: that chunk
-reads as zeros, delivered as a
-[zero extent](design-content.md#zero-extents). Any other chunk occupies
+A block number of all ones at the block number's width, the 32-bit field,
+or the 48 bits of the high part and the field under chunk format bit 6, is a
+hole: that chunk reads as zeros, delivered as a
+[zero extent](design-content.md#zero-extents). An 8-byte hole entry is
+therefore a zero high part and device identifier before `0xFFFFFFFF` (E7,
+`e7-chunk8k-forceidx`). Any other chunk occupies
 `min(chunk, size - offset)` bytes from `block * B`, inside the domain (E7,
 `e7-chunk*`, hole and shared entries included). A nonzero high part without
 bit 6, bit 6 without `48BIT`, or a nonzero device identifier, is
@@ -751,9 +764,19 @@ a record running past the end of a volume shorter than 4096 bytes is
 `FSIMG_EUNSUPPORTED`: they are the kernel's limits, which it reports as
 invalid, and the pinned producer's maxima, which both oracles read at the
 bounds (E9, `e9-lzma-dict8m`, `e9-zstd-dict1m`, `e9-deflate-dict128` with
-window bits 7). The DEFLATE window and the dictionaries are upper bounds the
-producer derives from its cluster size, not stream parameters: raw DEFLATE
-inflates with a 32 KiB window whatever the record says. An
+window bits 7). The MicroLZMA lower bound of 4096 rests on the kernel's
+source alone: `mkfs.erofs` refuses to write a smaller dictionary (E9), so no
+fixture carries one. The producer derives every one of these values from
+its cluster size (E9), but only the DEFLATE window is no stream parameter:
+raw DEFLATE inflates with a 32 KiB window whatever the record says. The
+MicroLZMA dictionary size and the Zstandard window log bound the decoder's
+memory, so the reader hands liblzma the record's dictionary size and libzstd
+a `ZSTD_d_windowLogMax` of the record's window log plus 10, at most 20,
+charges that dictionary or window to the context before the first decode
+([decode windows](design-erofs-driver.md#resource-bounds)), and refuses a
+stream that needs more as `FSIMG_ECORRUPT`. Without the record's bound a
+hostile frame could declare a window the library allocates outside the
+budget: libzstd's own default admits 128 MiB. An
 inode naming an algorithm absent from the mask is `FSIMG_ECORRUPT`. The mask
 lists only configured algorithms, so a `-zlzma` volume has mask `0x2` and no
 LZ4 record; `COMPR_CFGS` is set for any non-LZ4 codec or big cluster (E9,
@@ -773,12 +796,16 @@ The 8-byte map header sits at the attribute region's end rounded up to 8:
 When bit 7 of byte 7 is set, the whole file lives in the packed inode: the
 header, with that bit cleared, is a 64-bit offset into the packed inode's
 content, and there is no index. Otherwise the logical cluster size is
-`L = 2^lclusterbits`, at least `B`. Its ceiling is the record formats' own:
-a full record's 16-bit `clusterofs` needs `L` at most 2^16, and the compact
-index needs `lclusterbits` at most 14, or 12 with 32-byte groups; a larger
-value is `FSIMG_EUNSUPPORTED`. Every pinned producer writes `L = B` (E8), so
-`L > B` is accepted on the record formats' rules alone (provisional: no
-producer image has it, and none can be built with the pinned release).
+`L = 2^lclusterbits`, and the reader requires `L = B`: every pinned
+producer writes `lclusterbits = blkszbits` (E8), and with `L = B` the record
+count below is the `ceil(size / B)` that the kernel and `erofs-utils`
+compute, and the record formats' own ceilings, `L` at most 2^16 for a full
+record's `clusterofs` and `lclusterbits` at most 14, or 12 with 32-byte
+groups, for the compact index, hold on every accepted volume. Another
+value is `FSIMG_EUNSUPPORTED` naming the logical cluster size (provisional:
+no producer image has `L > B` and the pinned release cannot build one; E15,
+a hand-built `L > B` image mounted by the kernel, settles whether the record
+count follows `L` or `B`, and refusal stands until it does).
 
 | Advice bit | Meaning |
 | --- | --- |
@@ -806,7 +833,8 @@ first block. A non-head record belongs to the cluster begun by the nearest
 head before it and carries two distances: back to that head's logical
 cluster and forward to the next head's. The physical cluster's logical
 extent runs from its head to the next head, or to `size`. There are
-`ceil(size / L)` records. When `size mod L` is nonzero the last record is
+`ceil(size / B)` records, `L` being `B`. When `size mod L` is nonzero the
+last record is
 the end marker: a plain record with `clusterofs = size mod L` that begins an
 empty cluster at `size`, so the extent before it ends at `size`; when
 `size mod L` is zero there is no such record (E8, 176 files with and 86
@@ -835,35 +863,60 @@ meaning, a compressed hole, that no pinned producer writes.
 **Compact index.** Records are packed in groups, each ending in a 32-bit
 anchor block number; a group of 2 records in 8 bytes, or, under advice bit
 `0x01`, of 16 records in 32 bytes. A record's field is 16 bits in an 8-byte
-group and 14 bits in a 32-byte group; it holds, from its low end, `lobits =
-max(lclusterbits, 12)` bits of value and then 2 bits of type. On a head the
-value is `clusterofs`; on a non-head it is the backward distance, except in a
-group's last record, where it is the forward distance. Groups are laid out
-from the header's end: first 8-byte groups until the offset reaches a
-multiple of 32, then 32-byte groups while 16 or more records remain, then
-8-byte groups; an odd final record occupies a whole 8-byte group whose
-second slot is zero and never read. 32-byte groups need `lclusterbits` at
-most 12 and 8-byte groups at most 14; the inode is `FSIMG_ECORRUPT`
-otherwise. The packing agrees with `dump.erofs -e` at every header phase and
-every record count from 2 to 71 (E8, `e8-lz4-compact-counts`,
-`e8-lz4-compact-xattr`, 348 files). A compact inode with advice bit `0x01`
-clear, all 8-byte groups, is what the kernel reads and no producer writes.
+group and 14 bits in a 32-byte group; it holds, from its low end, 12 bits of
+value (the kernel's `max(lclusterbits, 12)`, which `L = B` fixes at 12) and
+then 2 bits of type. On a head the value is `clusterofs`; on a non-head it
+is the backward distance, except in a group's last slot, which holds the
+forward distance instead, capped by the producer at `0x7FF` so that it never
+reads as a count marker; a count marker in the last slot keeps its meaning,
+since the marker bit is tested first. The last slot's backward distance is
+derived from the slot before it: 1 when that slot is a head or plain record,
+2 when it is a count marker, and otherwise that slot's backward distance
+plus one. Groups are laid out from the header's end: first 8-byte groups
+until the offset reaches a multiple of 32, then 32-byte groups while 16 or
+more records remain, then 8-byte groups; an odd final record occupies a
+whole 8-byte group whose second slot is zero and never read. The packing
+agrees with `dump.erofs -e` at every header phase and every record count
+from 2 to 71 (E8, `e8-lz4-compact-counts`, `e8-lz4-compact-xattr`, 348
+files). A compact inode with advice bit `0x01` clear, all 8-byte groups by
+the kernel's source, is `FSIMG_EUNSUPPORTED` naming the advice: no producer
+writes one and none has been observed (provisional, E15; refusal stands if
+E15 cannot build one).
 
-A head or plain record's block number is the group's anchor plus a sum
-gathered by walking back from the record to the group's first record, where
-the walk stops; a cluster whose records all lie in earlier groups is already
-in the anchor. Without big clusters the sum is one plus the number of head
-and plain records before it in the group, non-head records adding nothing.
-With big clusters permitted, the sum is the block count of every cluster
-recorded before it in the group: a non-head record carrying the count marker
-adds its count, and the head directly before it adds nothing; a head or plain
-record met directly, so not followed by its marker, adds one; a non-head
-record without the marker adds nothing and sends the walk to its cluster's
-marker, `backward distance - 1` records before it. A group may therefore
-begin in the middle of a cluster, whose marker then adds its blocks although
-its head lies in the previous group (E8, `e8-lz4-big16k` `/mixed` record 44,
-block 25 = anchor 21 + 4; `e9-mixed-lz4-lzma`). The two forms agree with
-`dump.erofs -e` on every file of every compact fixture.
+A head or plain record's block number is its group's anchor plus a sum
+gathered by walking back over the records before it in the same group. The
+anchor is the running block counter `mkfs.erofs` carries into the group.
+Without big clusters it is the block of the last head or plain record
+before the group, or one less than the first cluster's block for the first
+group. With big clusters it is the start block of the first physical
+cluster not yet accounted for when the group begins, where a cluster is
+accounted for once its count marker, or its head when it has no marker,
+lies before the group's first record: a group that begins inside a cluster
+whose marker lies in the group has that cluster's start block as its
+anchor, and a group that begins at a head, or inside a cluster whose marker
+lies in an earlier group, has the block after the previous cluster. The walk
+visits the records from the one before the target down to the group's first
+record and never leaves the group: a jump that would land before the first
+record ends the walk. Without big clusters the sum starts at one, a head or
+plain record met adds one, and a non-head record adds nothing and jumps to
+its head, `backward distance` records before it. With big clusters
+permitted the sum starts at zero: a non-head record carrying the count
+marker adds its count and skips the head directly before it; a head or
+plain record met directly, so not skipped by a marker, is a one-block
+cluster without a marker and adds one; a non-head record without the marker
+adds nothing and jumps to its cluster's marker, `backward distance - 1`
+records before it. A cluster accounted for in the anchor contributes
+nothing more, and a cluster that begins in an earlier group but whose
+marker lies in this one adds its count when the marker is met (E8,
+`e8-lz4-big16k` `/mixed` record 44, block 25 = anchor 21 + 4;
+`e9-mixed-lz4-lzma`). The two forms agree with `dump.erofs -e` on every
+file of every compact fixture. The index is `FSIMG_ECORRUPT` when a
+non-head record's backward distance is zero; when, with big clusters, a
+non-head record without the marker has backward distance one, since the
+record directly after a head is that cluster's marker; when a count marker
+is directly preceded in its group by a non-head record; or when a jump
+inside the group lands on a record of the wrong type, a non-head without
+big clusters or anything but a marker with them.
 
 **Lookup.** Mapping logical offset `o < size` reads record `floor(o / L)`. A
 head whose start lies at or below `o` begins the cluster. A head whose start
@@ -882,19 +935,24 @@ cluster's blocks with leading zero bytes, and the decoder starts at the
 first nonzero byte: LZ4 under `LZ4_0PADDING`, and every other algorithm
 always (E8, E9). An LZ4 cluster on a volume without `LZ4_0PADDING` is
 `FSIMG_EUNSUPPORTED` naming the feature, raised when the content is read
-like a codec the build lacks: no pinned producer writes such a volume
-(`mkfs.erofs` 1.9.4 sets the bit on every build, `-E legacy-compress`
-included), and neither the kernel nor `fsck.erofs` reads a left-aligned
-stream shorter than its cluster (E8, `e8-lz4-unpadded`), so no layout exists
-to match. Every stream therefore has a known end, and it decodes to exactly
-its extent: fewer bytes, or a stream that would write beyond the extent, is
-`FSIMG_ECORRUPT`, outside a partial reference. LZ4 carries no end mark, so
-its block ends at the cluster's last byte; DEFLATE's final block and
-Zstandard's frame end lie at or before it, and bytes after them are not
-judged; MicroLZMA marks no end and is decoded to the extent's length. A
-compressed cluster, outside a partial reference, whose extent is shorter
-than its stored blocks and does not end the file is `FSIMG_ECORRUPT`, as for
-the kernel.
+like a codec the build lacks. That is fsimg policy: no pinned producer
+writes such a volume (`mkfs.erofs` 1.9.4 sets the bit on every build, `-E
+legacy-compress` included), and without the bit nothing records where a
+stream ends. The kernel skips leading zero bytes whatever the bit says, so
+it reads a bit-cleared volume whose streams are still right-aligned (E8,
+`e8-lz4-flag-cleared`), while neither it nor `fsck.erofs` reads a
+left-aligned stream shorter than its cluster (E8, `e8-lz4-unpadded`). Every
+stream fsimg reads is therefore bounded on both sides: it starts at the
+first nonzero byte, and it either ends at the cluster's last byte (LZ4,
+which carries no end mark), carries its own end (DEFLATE's final block and
+Zstandard's frame end, at or before the cluster's last byte; bytes after
+them are not judged) or is decoded until the extent is full (MicroLZMA,
+which marks no end). Each decodes to exactly its extent: fewer bytes, or a
+stream that would write beyond the extent, is `FSIMG_ECORRUPT`, outside a
+partial reference. A compressed cluster, outside a partial reference, whose
+extent is shorter than its stored blocks and does not end the file is
+`FSIMG_ECORRUPT`, the kernel's rule (E8, source `zmap.c`, "too much
+compressed data").
 
 A partial reference (bit 15 of a full record; the compact index has no such
 mark, and producers write shared clusters only with the full index: E8,
@@ -941,9 +999,10 @@ sharing changes nothing for reading and is permitted by verification.
 
 A physical cluster is at most 1 MiB stored and its logical extent at most
 12 MiB decoded, the kernel's limits [K1], which the pinned producer stays
-inside: its largest cluster is exactly 1 MiB stored and 8,192,000 bytes
-decoded (E8, E9, `e8-lz4-words6m-big1m`, `e8-lz4-zeros40m-big1m` and the
-`e9-*-big1m` fixtures). A larger cluster is `FSIMG_EUNSUPPORTED`. The decoded
+inside: its largest stored cluster is exactly 1 MiB (E8, E9,
+`e8-lz4-words6m-big1m` and the `e9-*-words6m-big1m` fixtures) and its
+largest decoded extent 8,192,000 bytes (E8, `e8-lz4-zeros40m-big1m`). A
+larger cluster is `FSIMG_EUNSUPPORTED`. The decoded
 extent is charged to the context when it is decoded, so a volume whose
 clusters exceed the session's memory budget fails with the budget error,
 naming the cluster size, never as corruption.
@@ -1044,12 +1103,14 @@ A nonzero extra-device count marks a volume whose chunks or clusters may
 live in other backing files, named by opaque tags in a device table. Such a
 volume is recognized and refused at open with `FSIMG_EUNSUPPORTED`: fsimg
 has no input for a second backing file, and a device tag is never resolved
-as a host path. The refusal keys on the count alone and runs before every
-chunk and feature-bit rule, because the count is the one field both producer
-forms set: a `--blobdev` volume also sets `DEVICE_TABLE` and `CHUNKED_FILE`,
-while a `--tar=i` volume sets `DEVICE_TABLE` only, uses 512-byte blocks and
-holds chunk-based files without `CHUNKED_FILE` (E14, `e14-blobdev-b4096`,
-`e14-tar-index-b4096`). Both carry an empty device tag and a nonzero device
+as a host path. The refusal keys on the count alone and runs at open before
+the feature-pairing and chunk rules, after the probe's own checks of the
+magic, the block size and the incompatible-bit table, because the count is
+the one field both producer forms set: a `--blobdev` volume also sets
+`DEVICE_TABLE` and `CHUNKED_FILE`, while a `--tar=i` volume sets
+`DEVICE_TABLE` only, uses 512-byte blocks and holds chunk-based files
+without `CHUNKED_FILE` (E14, `e14-blobdev-b4096`, `e14-tar-index-b4096`).
+Both carry an empty device tag and a nonzero device
 identifier in every chunk entry.
 
 ## Verification
@@ -1107,8 +1168,8 @@ them.
 | Condition | Status |
 | --- | --- |
 | No magic at offset 1024, or a prefix too short to hold it | `FSIMG_EFORMAT` |
-| A recognized volume using external data devices, a 48-bit or metadata-box rule E10 or E12 left unconfirmed, an unknown incompatible bit, an unknown attribute index or configuration, a block size or cluster size beyond the reader's range, a codec the build lacks, an LZ4 cluster on a volume without `LZ4_0PADDING`, a symbolic-link target over 1024 bytes | `FSIMG_EUNSUPPORTED`, naming the feature |
-| A checksum mismatch; a field outside its range; a structure outside the domain or crossing a boundary it must not cross; reserved bits set outside the superblock; unordered or repeated names; a parent-rule violation; a decode that fails or produces the wrong length; a referenced structure past the end of a truncated volume | `FSIMG_ECORRUPT` |
+| A recognized volume using external data devices, a 48-bit or metadata-box rule E10 or E12 left unconfirmed, an unknown incompatible bit, a reserved advice or full-record bit, an unknown attribute index or configuration, a block size or cluster size beyond the reader's range, a logical cluster larger than a block, a codec the build lacks, an LZ4 cluster on a volume without `LZ4_0PADDING`, a symbolic-link target over 1024 bytes | `FSIMG_EUNSUPPORTED`, naming the feature |
+| A checksum mismatch; a field outside its range; a structure outside the domain or crossing a boundary it must not cross; a reserved field or bit required zero, outside the superblock and other than the advice and record bits above; unordered or repeated names; a parent-rule violation; a decode that fails or produces the wrong length; a referenced structure past the end of a truncated volume | `FSIMG_ECORRUPT` |
 | Memory, scratch, work or time exhausted, including a decoded cluster above the budget | The budget's error, never `FSIMG_ECORRUPT` |
 | An I/O failure | The I/O error |
 
@@ -1201,10 +1262,12 @@ its subdirectories.
 A regular file, directory or symbolic link with `t = size mod B` nonzero
 uses the flat-inline layout when its fixed part and `t` fit one block, and
 the flat layout otherwise, with its tail in its own data block. A size that
-is a multiple of `B`, including zero, uses the flat layout. An inode with no
-full block, empty or flat-inline under one block, has start block 0: the
-kernel does not read it, and `mkfs.erofs` writes 0 for an empty file (E3,
-`e3-*`). FIFOs use the flat layout with size and layout word zero.
+is a multiple of `B`, including zero, uses the flat layout. An empty inode, or
+a flat-inline inode under one block, has an unused start word, written 0:
+the kernel does not read it, and `mkfs.erofs` writes 0 for an empty file
+(E3, `e3-*`). Every other inode's word is its start block, a flat inode's
+tail block included. FIFOs use the flat layout with size and layout word
+zero.
 
 ### Directories
 
@@ -1228,10 +1291,11 @@ the flat layouts. A compressed file uses:
 * physical clusters of one block, each holding the LZ4 encoding of the
   longest prefix of the remaining input, at most 64 KiB, whose encoding
   fits `B` bytes, right-aligned with leading zeros under `LZ4_0PADDING`.
-  The 64 KiB cap keeps every decoded extent far inside the readers' 12 MiB
-  limit and bounds the encoder's input window; the pinned producer gives a
-  one-block cluster up to 1,041,954 decoded bytes (E8, `e8-lz4-zeros40m`),
-  so the cap may rise for ratio without crossing any reader's limit;
+  The 64 KiB cap is the writer's decision: it keeps every decoded extent
+  far inside the readers' 12 MiB limit and bounds the encoder's input
+  window, and it lies far below the 1,041,954 decoded bytes the pinned
+  producer puts through one block (E8, `e8-lz4-zeros40m`), so every
+  reader of the producer's output accepts the writer's clusters;
 * blocks that meet the LZ4 [end-of-block
   conditions](design-codecs.md#end-of-block): the last sequence carries at
   least five literals, the last match starts at least 12 bytes before the
@@ -1248,10 +1312,11 @@ the flat layouts. A compressed file uses:
 
 The encoder is the project-owned LZ4 encoder of the
 [codec design](design-codecs.md), deterministic for its input; the LZ4
-maximum distance field is written as zero, which readers take as LZ4's own
-maximum of 65535 and which bounds every distance the encoder produces in its
-64 KiB window. `mkfs.erofs` writes 65535 there; the kernel and `fsck.erofs`
-read a volume with zero (E8, `e8-lz4-distance0`). Whether a cluster is
+maximum distance field is written as 65535, LZ4's own maximum, which bounds
+every distance the encoder produces in its 64 KiB window and is the value
+`mkfs.erofs` writes, so the word matches every producer volume; the kernel
+and `fsck.erofs` also read a volume with zero there (E8,
+`e8-lz4-distance0`). Whether a cluster is
 compressed depends only on the file's bytes, so the layout, and the image,
 are reproducible.
 
@@ -1373,12 +1438,12 @@ minimization searches the writer's accepted block sizes, 4096 first.
 | --- | --- | --- |
 | Geometry | Block sizes 512 to 4096; checksum present and absent; superblock with extension slots; volume inside GPT and a compressed outer layer | Short prefix, half magic, illegal block size, `dirblkbits` set, checksum flipped on each side of the boundary; a block count past the volume, which opens and lists what lies in the volume and fails verification as truncated |
 | Features | Every compatible bit; every accepted incompatible bit | Each unknown bit, 48-bit, metadata box, extra devices |
-| Inodes | Compact, extended and both in one volume; sizes 0, 1, 31, 32, B-1, B, B+1, 2B and above 4 GiB through a sparse source; every kind; owners above 65535; times before 1970, past 2038 and with nanoseconds | Reserved bits, layouts 5 to 7, nanoseconds out of range, unknown mode type, body past the domain, tail crossing a block |
+| Inodes | Compact, extended and both in one volume; sizes 0, 1, 31, 32, B-1, B, B+1, 2B and above 4 GiB through a sparse source; every kind; owners above 65535; times before 1970, past 2038 and with nanoseconds; a nonzero compact time word on a volume without the 48-bit layout, read as the epoch plus the word | Reserved bits, layouts 5 to 7, nanoseconds out of range, unknown mode type, body past the domain, tail crossing a block |
 | Directories | 1- and 255-byte names, invalid UTF-8, names sorting before `.`, one directory of 100000 entries, deep trees | Name offset zero, unaligned or too large; repeated, unordered or overlapping names; slash or NUL; bad type; type mismatch; parent-rule violations; a second name for a directory |
 | Attributes | Inline, shared, long prefixes in both placements, filter on and off, ACLs and security labels | Overlong entries, bad shared index, unknown index, bad prefix |
 | Chunks | Both entry widths, several chunk sizes, holes, shared chunks | Device identifiers, high parts, short index, chunk past the domain |
 | Compression | Each algorithm; full and compact indexes across group boundaries; big, plain and interlaced clusters; partial references; inline tails; fragments; compressed directories; reads starting and ending inside a cluster | Bad distances and cycles, bad group packing, marker without big clusters, oversize clusters, truncated and corrupt streams, fragment past the packed inode |
-| 48-bit layout | Root NID above 65535; start blocks and chunk blocks above 2^32 through sparse fixtures; compact per-inode times; implicit link counts; omitted dots; every encoded-extent width a producer emits | High bits without the feature; wide root zero; encoded extents unordered, overcounted or overlong; a time sum past 64 bits |
+| 48-bit layout | Root NID above 65535; start blocks and chunk blocks above 2^32 through sparse fixtures; implicit link counts; omitted dots; every encoded-extent width a producer emits | High bits without the feature; wide root zero; encoded extents unordered, overcounted or overlong; a time sum past 64 bits |
 | Metadata box | Plain and compressed boxes; directories, files and shared attributes inside; reads across box cluster boundaries | Box NID with bit 63 or naming a fragment; box inode in the box; tail crossing a box block; bit 63 without the feature |
 | Verification | Every producer fixture verifies | Every mutation above reports its class; overlapping metadata, a wrong link count |
 | Writer | Empty, small, deep, wide, large-file volumes; every kind it writes; every profile and their combinations; byte identity across source order, budget, scratch and time zone; a poison scan of every unwritten byte | Settings out of range; a source changed between planning and emission |

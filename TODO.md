@@ -378,6 +378,14 @@
   previous group, so it misreports 3 files of `e8-lz4-big16k` and 40 of
   `e9-mixed-lz4-lzma` ([format design](specs/design-erofs.md#index-records)).
 
+* [Low] **EROFS driver design names a section that does not exist**
+  (`specs/design-erofs-driver.md`, reuse list): it points the MicroLZMA and
+  Zstandard block decoders at "the EROFS block-decoding section" of
+  [the compression libraries design](specs/design-compression-libs.md),
+  which has no such section; write it (one bounded input to one bounded
+  output under the record's dictionary or window, charged to the context)
+  before stage 7.
+
 * [Low] **Spec harness oracle step can fail on EINTR** (`test/spec/`): a quick run
   under `check-asan` reported `harness_error` for
   `fat.create.cluster_count.fat16_4100`, detail `oracles: EINTR: "Interrupted system
