@@ -754,9 +754,17 @@ check-security: test-sandbox test-publish
 	./test-publish
 	./test-sandbox; result=$$?; test $$result = 0 -o $$result = 77
 
-# Independent ISO specification layouts, models, rules and witnesses.
+# Independent ISO and EROFS specification layouts, models, rules and witnesses.
 EXTRA_DIST += \
 	docs/iso9660-spec-coverage.md \
+	test/spec/lib/fsimg_spec/erofs.rb \
+	test/spec/lib/fsimg_spec/erofs/builder.rb \
+	test/spec/lib/fsimg_spec/erofs/cases.rb \
+	test/spec/lib/fsimg_spec/erofs/layout.rb \
+	test/spec/lib/fsimg_spec/erofs/model.rb \
+	test/spec/lib/fsimg_spec/erofs/rules.rb \
+	test/spec/lib/fsimg_spec/erofs/suite.rb \
+	test/spec/lib/fsimg_spec/erofs/witnesses.rb \
 	test/spec/lib/fsimg_spec/iso9660.rb \
 	test/spec/lib/fsimg_spec/iso9660/builder.rb \
 	test/spec/lib/fsimg_spec/iso9660/cases.rb \
@@ -771,6 +779,7 @@ EXTRA_DIST += \
 	test/spec/lib/fsimg_spec/iso9660/suite.rb \
 	test/spec/lib/fsimg_spec/iso9660/witnesses.rb \
 	test/spec/suite/core/test_special_sources.rb \
+	test/spec/suite/erofs/test_rules.rb \
 	test/spec/suite/iso9660/test_model.rb \
 	test/spec/suite/iso9660/test_oracles.rb \
 	test/spec/suite/iso9660/test_rules.rb

@@ -68,7 +68,8 @@ module FsimgSpec
     def self.suites
       require_relative "fat"
       require_relative "iso9660"
-      { "fat" => Fat::Suite, "iso9660" => Iso9660::Suite }
+      require_relative "erofs"
+      { "fat" => Fat::Suite, "iso9660" => Iso9660::Suite, "erofs" => Erofs::Suite }
     end
 
     # The suite of a recipe's format: fat12, fat16 and fat32 are FAT's.

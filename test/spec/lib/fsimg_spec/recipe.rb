@@ -17,7 +17,7 @@ module FsimgSpec
   end
 
   # The fsimg format names the harness models.
-  MODELED_FORMATS = %w[fat12 fat16 fat32 iso9660].freeze
+  MODELED_FORMATS = %w[fat12 fat16 fat32 iso9660 erofs].freeze
 
   # Parameter and setting names, and builder and tool names, which may also
   # hold dots and dashes, as in mkfs.fat. Neither kind can be empty, name
