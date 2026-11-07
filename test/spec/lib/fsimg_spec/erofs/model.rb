@@ -180,7 +180,8 @@ module FsimgSpec
 
         fields = Layout.decode(extended ? Layout::ExtendedInode : Layout::CompactInode, bytes)
         inode = Inode.new(nid:, offset:, scope:, fields:, extended:, region: "".b)
-        @inodes[nid] = inode.with(region: @image.read(offset + inode.fixed_bytes, inode.region_bytes))
+        region = inode.region_bytes.zero? ? "".b : held(offset + inode.fixed_bytes, inode.region_bytes, scope)
+        @inodes[nid] = inode.with(region: region || "".b)
       end
 
       # The count bytes at offset, or nil when the image lacks them. A range

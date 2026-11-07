@@ -11,7 +11,9 @@
 # content, link target and the extended-attribute mark. Times are derived
 # from the fixture's command.txt, never from the reader: under `-T N` without
 # --mkfs-time every time is N, and otherwise an extended
-# inode keeps the source time and a compact inode holds the epoch N.
+# inode keeps the source time and a compact inode holds the epoch N. On a
+# volume without the MTIME bit an extended inode holds the change time, which
+# is not compared.
 # A fixture without a manifest must open, list and extract, and its
 # expected.txt digests must match where it has one; the few that end in a
 # refusal are pinned in EXPECTED_REFUSALS. A fixture whose `i` fails with the
@@ -109,7 +111,7 @@ def parse_row(cols)
 end
 
 def read_manifest(dir) =
-  File.readlines(File.join(dir, "manifest.txt"), chomp: true).map { parse_row(_1.split("\t", -1)) }
+  File.read(File.join(dir, "manifest.txt")).each_line(chomp: true).map { parse_row(_1.split("\t", -1)) }
 
 # The portable name profile delivers strict UTF-8 without control bytes.
 def portable?(path) = path.b.force_encoding("UTF-8").then { _1.valid_encoding? && !_1.match?(/[[:cntrl:]]/) }
@@ -195,11 +197,15 @@ def time_check(row, seen, rule:, mtime:)
   end
 
   compact = seen.precision == COMPACT_PRECISION_NS
+  # Without the MTIME bit an extended inode stores the source's change time,
+  # which no manifest column carries.
+  return Comparison.of(skipped: [:change_time]) if !mtime && !compact
+
   keeps = rule.source && !compact
   want = [keeps ? row.seconds : rule.epoch, keeps ? row.nanos : 0]
   sec, nsec = seen.time
   diffs = []
-  if compact && rule.source && row.seconds != rule.epoch
+  if compact && rule.source && (row.seconds != rule.epoch || row.nanos.to_i.positive?)
     diffs << "#{row.path}: compact inode for a source time of #{row.seconds}, epoch #{rule.epoch}"
   end
   unless sec == want[0] && (want[1].nil? || nsec == want[1])
@@ -297,7 +303,7 @@ def digest_differences(dir, out)
   file = File.join(dir, "expected.txt")
   return [] unless File.exist?(file)
 
-  File.readlines(file, chomp: true).filter_map do |line|
+  File.read(file).each_line(chomp: true).filter_map do |line|
     sum, path = line.split("  ", 2)
     "#{path}: sha256 #{file_sha(out, path).inspect} != #{sum}" unless file_sha(out, path) == sum
   end
@@ -400,7 +406,7 @@ def summary(results, wrapped)
   floor = counts.fetch(:pass, 0) < PASS_FLOOR ? ["fewer than #{PASS_FLOOR} passes"] : []
   line = "summary: #{counts.fetch(:pass, 0)} pass, #{counts.fetch(:fail, 0)} fail, " \
          "#{counts.fetch(:unsupported, 0)} unsupported, #{counts.fetch(:unchecked, 0)} unchecked " \
-         "(opened, no manifest); times compared against the command line, none tolerated; " \
+         "(opened, no manifest); times compared against the command line (change times of extended inodes without MTIME skipped); " \
          "not compared: #{skipped.empty? ? 'nothing' : skipped}"
   [line, counts.fetch(:fail, 0).zero? && wrapped.empty? && floor.empty?, floor]
 end
