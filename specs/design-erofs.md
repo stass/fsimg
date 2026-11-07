@@ -565,8 +565,8 @@ device identifier, is `FSIMG_ECORRUPT`. That is fsimg policy, stricter than
 the kernel and `fsck.erofs`, which ignore the high part and the device
 identifier and accept bit 6 on any volume (E7, `e7-edit-high-part`,
 `-device-id`, `-format-0x40`) and, by their source, with either entry
-width: no pinned producer
-writes any of them on a volume without extra devices, a device identifier
+width: no pinned fixture
+holds any of them on a volume without extra devices, a device identifier
 names a backing file fsimg does not have, the high part is address bits the
 volume says are not there, and a 4-byte entry has no high part for bit 6 to
 widen. `mkfs.erofs` sets bit 6 whenever a chunk's block number exceeds 32
@@ -1032,7 +1032,7 @@ compression gained nothing (E8, `e8-lz4-ztail`, 76 head and 5 plain
 tails). A plain tail under interlacing, which no fixture holds since no
 pinned fixture combines `ztailpacking` with `fragments`, is rotated like any
 other plain cluster, as the reference decoder does whether a cluster is
-inline or not (source `data.c`); provisional until E15 observes one. Its
+inline or not (source `data.c`); provisional until E15 observes one, and the source rule stands if E15 cannot mount one. Its
 record's block number names a block holding none of this
 file's bytes and is not read, and no count marker follows it. The tail's
 block is not necessarily the block holding the inode's start: when an
