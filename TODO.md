@@ -501,15 +501,6 @@
   requires once the metadata box reads. Carry the space in `erofs_cluster_t`
   when the box is implemented.
 
-* [Medium] **EROFS hostile tests for the packed inode** (`test/erofs.c`,
-  `test/erofs-verify.c`): no test covers long prefixes outside a plain table
-  with no packed inode, a flat-inline or chunk-based packed inode, a corrupt
-  packed cluster no file references, a compressed inline tail in the
-  verifier, or alternating window fills of two inodes' tails. The count in
-  the marker after the last head under tail or fragment advice is never
-  judged (`zmap.c` `last_cluster`; the record's structure is decoded as any
-  other); test that nothing reads it.
-
 * [Low] **The CLI chooses the allocation unit's noun by format name**
   (`cmd/fsimg/display.c` `format_counts_blocks`): each block-based format
   must join a name list. A descriptor field naming the unit would make it

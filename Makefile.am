@@ -188,7 +188,8 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify \
 	test-salvage-terminal test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
-	test-erofs test-erofs-verify test-erofs-fixtures test-erofs-write \
+	test-erofs test-erofs-verify test-erofs-faults test-erofs-fixtures \
+	test-erofs-write \
 	test-lzfse test-hfsplus-codec test-hfsplus test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
@@ -304,6 +305,9 @@ test_erofs_LDADD = libfsimg.la $(ZLIB_LIBS) $(ZSTD_LIBS) $(LZMA_LIBS)
 test_erofs_verify_SOURCES = test/erofs-verify.c test/test.h \
 	test/erofs-gen.c test/erofs-gen.h
 test_erofs_verify_LDADD = libfsimg.la
+test_erofs_faults_SOURCES = test/erofs-faults.c test/test.h \
+	test/erofs-gen.c test/erofs-gen.h
+test_erofs_faults_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_erofs_fixtures_SOURCES = test/erofs-fixtures.c test/test.h
 test_erofs_fixtures_LDADD = libfsimg.la
 test_erofs_scale_SOURCES = test/erofs-scale.c test/test.h test/scale.h

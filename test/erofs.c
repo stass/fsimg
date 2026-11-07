@@ -4713,7 +4713,7 @@ test_open_pairs_long_prefixes_with_a_plain_table_or_a_packed_inode(void)
 		    COMPAT_PLAIN_XATTR_PFX } }, true, FSIMG_OK, NULL },
 		{ "XATTR_PREFIXES alone",
 		    { { SB_INCOMPAT, 4, INCOMPAT_XATTR_PREFIXES } },
-		    true, FSIMG_ECORRUPT, NULL },
+		    true, FSIMG_ECORRUPT, "without a plain table" },
 		{ "XATTR_PREFIXES with FRAGMENTS and no packed inode",
 		    { { SB_INCOMPAT, 4, INCOMPAT_XATTR_PREFIXES |
 		    INCOMPAT_FRAGMENTS } }, true, FSIMG_ECORRUPT,
@@ -10334,17 +10334,79 @@ static const zplan_t zplan_packed = { .size = 1700, .count = 3, .clusters = {
 	ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 9), ZC(600, GEN_ZK_LZ4_PERIODIC, 1, 11),
 	ZC(1200, GEN_ZK_LZ4_PERIODIC, 1, 13) } };
 
-/* A flat packed inode, or a compressed one in layout, named by the volume. */
+/* A packed inode layout that stores its bytes uncompressed. */
+static bool
+zpacked_raw(unsigned layout)
+{
+	return (layout == LAYOUT_FLAT || layout == LAYOUT_FLAT_INLINE ||
+	    layout == LAYOUT_CHUNK_BASED);
+}
+
+static const char *
+zpacked_name(unsigned layout)
+{
+	switch (layout) {
+	case LAYOUT_FLAT:
+		return ("flat");
+	case LAYOUT_FLAT_INLINE:
+		return ("flat-inline");
+	case LAYOUT_CHUNK_BASED:
+		return ("chunk-based");
+	default:
+		return (zlayout_name(layout));
+	}
+}
+
+/* A chunk-based inode of one-block chunks holding size bytes; its NID. */
+static uint64_t
+zchunked_add(gen_tree_t *tree, const gen_inode_t *base,
+    const unsigned char *bytes, size_t size)
+{
+	size_t block = (size_t)1 << tree->blkszbits;
+	size_t count = (size + block - 1) / block;
+	gen_chunk_t *entries = calloc(count, sizeof(*entries));
+	unsigned char *data = malloc(block);
+	const unsigned char *super = tree->image.bytes + GEN_SUPER_OFFSET +
+	    SB_INCOMPAT;
+	gen_inode_t proto = *base;
+	uint64_t nid;
+
+	CHECK(entries != NULL && data != NULL);
+	gen_tree_set_incompat(tree, ((uint32_t)super[0] | (uint32_t)super[1] << 8 |
+	    (uint32_t)super[2] << 16 | (uint32_t)super[3] << 24) |
+	    INCOMPAT_CHUNKED_FILE);
+	for (size_t i = 0; i < count; i++) {
+		size_t piece = size - i * block < block ? size - i * block : block;
+
+		bzero(data, block);
+		bcopy(bytes + i * block, data, piece);
+		entries[i] = gen_chunk_block(gen_tree_data(tree, data, block));
+	}
+	proto.size = size;
+	nid = gen_tree_add_chunked(tree, &proto, 0, entries, count);
+	free(data);
+	free(entries);
+	return (nid);
+}
+
+/*
+ * A packed inode named by the volume: flat, flat with an inline tail or
+ * chunk-based holding packed as given, or compressed in layout holding
+ * zplan_packed's content.
+ */
 static uint64_t
 zpacked_add(gen_tree_t *tree, const unsigned char *packed, size_t size,
     unsigned layout)
 {
-	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_FLAT);
+	gen_inode_t proto = inode_proto(MODE_FILE, layout == LAYOUT_FLAT_INLINE ?
+	    LAYOUT_FLAT_INLINE : LAYOUT_FLAT);
 	zbuild_t build = { .plan = &zplan_packed, .content = packed,
 	    .layout = layout };
 	uint64_t nid;
 
-	if (layout == 0)
+	if (layout == LAYOUT_CHUNK_BASED)
+		nid = zchunked_add(tree, &proto, packed, size);
+	else if (zpacked_raw(layout))
 		nid = gen_tree_add(tree, &proto, packed, size);
 	else {
 		CHECK(size == zplan_packed.size);
@@ -10356,10 +10418,11 @@ zpacked_add(gen_tree_t *tree, const unsigned char *packed, size_t size,
 
 /*
  * File "f" of plan whose last cluster, or whole content, is a fragment at
- * offset of a packed inode in packed_layout. A flat packed inode (layout 0)
- * is offset + plan->size + 64 bytes long and receives the fragment from
- * content; a compressed one holds zplan_packed's content, which the
- * fragment's range of content receives instead. Returns the file's NID.
+ * offset of a packed inode in packed_layout. An uncompressed packed inode
+ * (zpacked_raw) holds 64 bytes after the fragment and receives the
+ * fragment from content; a compressed one holds zplan_packed's content,
+ * which the fragment's range of content receives instead. Returns the
+ * file's NID.
  */
 static uint64_t
 zfragment_tree(gen_tree_t *tree, const zvolume_t *volume, const zplan_t *plan,
@@ -10368,11 +10431,11 @@ zfragment_tree(gen_tree_t *tree, const zvolume_t *volume, const zplan_t *plan,
 {
 	size_t from = last == GEN_ZL_WHOLE ? 0 :
 	    (size_t)plan->clusters[plan->count - 1].start;
-	size_t packed_size = packed_layout == 0 ? offset + plan->size + 64 :
-	    zplan_packed.size;
+	size_t packed_size = zpacked_raw(packed_layout) ?
+	    offset + (plan->size - from) + 64 : zplan_packed.size;
 	unsigned char *packed;
 
-	if (packed_layout == 0)
+	if (zpacked_raw(packed_layout))
 		packed = zpacked_bytes(content, from, plan->size, offset,
 		    packed_size);
 	else {
@@ -10410,8 +10473,7 @@ zfragment_run(const char *name, const zvolume_t *volume, const zplan_t *plan,
 	gen_tree_t tree;
 
 	snprintf(label, sizeof(label), "%s (%s index, %s packed inode)", name,
-	    zlayout_name(layout), packed_layout == 0 ? "flat" :
-	    zlayout_name(packed_layout));
+	    zlayout_name(layout), zpacked_name(packed_layout));
 	(void)zfragment_tree(&tree, volume, plan, content, layout, last,
 	    offset, packed_layout);
 	check_zfile(label, &tree, plan, content);
@@ -10602,6 +10664,227 @@ test_hostile_tails_and_fragments_are_refused(void)
 	free(tail_content);
 	free(plain_content);
 	free(big_content);
+}
+
+/* Open a reader on the sealed tree and verify it in scope flags. */
+static void
+check_zverify(const char *label, gen_tree_t *tree, unsigned flags,
+    fsimg_status_t want)
+{
+	fsimg_verify_report_t report;
+	fsimg_reader_t *reader = NULL;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	volume_t v;
+
+	bzero(&error, sizeof(error));
+	bzero(&report, sizeof(report));
+	gen_tree_seal(tree);
+	volume_start(&v, tree->image.bytes, tree->image.length);
+	status = fsimg_reader_open(v.ctx, v.io, NULL, &reader, &error);
+	if (status == FSIMG_OK)
+		status = fsimg_verify(reader, flags, &report, &error);
+	EXPECT(status == want && report.complete == (want == FSIMG_OK),
+	    "%s: verification status %d, expected %d (%s)", label, (int)status,
+	    (int)want, error.message);
+	fsimg_reader_free(reader);
+	fsimg_io_free(v.io);
+	fsimg_ctx_free(v.ctx);
+}
+
+/* Verification's two scopes: structure, then structure and payload. */
+static const unsigned zscopes[] = { 0, FSIMG_VERIFY_PAYLOAD };
+
+/*
+ * A fragment in a packed inode stored flat with an inline tail, the
+ * fragment crossing from its block into the tail, or chunk-based, reads
+ * back and verifies.
+ */
+static void
+test_fragments_read_back_through_an_inline_or_chunk_based_packed_inode(void)
+{
+	static const unsigned packed[] = { LAYOUT_FLAT_INLINE,
+	    LAYOUT_CHUNK_BASED };
+	static const unsigned layouts[] = { ZLAYOUT_FULL, ZLAYOUT_COMPACT };
+
+	for (size_t p = 0; p < ARRAY_SIZE(packed); p++) {
+		for (size_t i = 0; i < ARRAY_SIZE(layouts); i++) {
+			unsigned char *content = zcontent(&zplan_frag, 33);
+			char label[160];
+			gen_tree_t tree;
+
+			snprintf(label, sizeof(label), "fragment in a %s packed "
+			    "inode (%s index)", zpacked_name(packed[p]),
+			    zlayout_name(layouts[i]));
+			/* The packed inode is 400 + 700 + 64 bytes, so its
+			 * inline tail starts at 1024, inside the fragment's
+			 * [400, 1100). */
+			(void)zfragment_tree(&tree, &zvolume_frag, &zplan_frag,
+			    content, layouts[i], GEN_ZL_FRAGMENT, 400, packed[p]);
+			check_zfile(label, &tree, &zplan_frag, content);
+			check_zverify(label, &tree, FSIMG_VERIFY_PAYLOAD,
+			    FSIMG_OK);
+			gen_tree_free(&tree);
+			free(content);
+		}
+	}
+}
+
+/*
+ * The compressed packed inode's third cluster, [1200, 1700), which the
+ * file's fragment at 10 never reaches, is overwritten with 0xff: listing
+ * and reading the file succeed, and verification, which decodes every
+ * packed cluster, finds it.
+ */
+static void
+test_verification_decodes_a_packed_cluster_no_file_references(void)
+{
+	unsigned char *content = zcontent(&zplan_frag, 33);
+	size_t block = 512;
+	uint32_t first = gen_tree_first_block(9);
+	gen_tree_t tree;
+
+	/* The packed inode's clusters are the tree's first data blocks, one
+	 * each. */
+	(void)zfragment_tree(&tree, &zvolume_frag, &zplan_frag, content,
+	    ZLAYOUT_FULL, GEN_ZL_FRAGMENT, 10, ZLAYOUT_FULL);
+	CHECK(tree.image.length >= (first + 3) * block);
+	memset(tree.image.bytes + (first + 2) * block, 0xff, block);
+	check_zfile("unreferenced packed cluster corrupt", &tree, &zplan_frag,
+	    content);
+	for (size_t i = 0; i < ARRAY_SIZE(zscopes); i++)
+		check_zverify("unreferenced packed cluster corrupt", &tree,
+		    zscopes[i], FSIMG_ECORRUPT);
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/* A compressed inline tail, and one after a big cluster, verify. */
+static void
+test_verification_accepts_compressed_inline_tails(void)
+{
+	static const zplan_t *plans[] = { &zplan_tail_lz4, &zplan_tail_big };
+	static const zvolume_t *volumes[] = { &zvolume_tail,
+	    &zvolume_tail_big };
+	static const unsigned layouts[] = { ZLAYOUT_FULL, ZLAYOUT_COMPACT };
+
+	for (size_t k = 0; k < ARRAY_SIZE(plans); k++) {
+		for (size_t i = 0; i < ARRAY_SIZE(layouts); i++) {
+			unsigned char *content = zcontent(plans[k], 21);
+			zbuild_t build = { .plan = plans[k], .content = content,
+			    .layout = layouts[i], .last = GEN_ZL_INLINE };
+			gen_tree_t tree;
+
+			ztree_with_file(&tree, volumes[k], &build);
+			for (size_t s = 0; s < ARRAY_SIZE(zscopes); s++)
+				check_zverify("compressed inline tail", &tree,
+				    zscopes[s], FSIMG_OK);
+			gen_tree_free(&tree);
+			free(content);
+		}
+	}
+}
+
+/* A file that is one compressed inline tail, so two inodes share a block
+ * and nothing is decoded between their tails. */
+static const zplan_t zplan_tail_small = { .size = 200, .count = 1,
+    .clusters = { ZC(0, GEN_ZK_LZ4_PERIODIC, 0, 7) } };
+
+/*
+ * Two inodes whose compressed inline tails lie in one metadata block are
+ * read one after the other, in both orders: each tail's window fill must
+ * deliver its own inode's bytes, never the other's decoded output.
+ */
+static void
+test_two_inline_tails_in_one_block_read_back_in_either_order(void)
+{
+	for (unsigned order = 0; order < 2; order++) {
+		unsigned char *first = zcontent(&zplan_tail_small, 41);
+		unsigned char *second = zcontent(&zplan_tail_small, 57);
+		zbuild_t a = { .plan = &zplan_tail_small, .content = first,
+		    .layout = ZLAYOUT_FULL, .last = GEN_ZL_INLINE };
+		zbuild_t b = a;
+		gen_dirent_t names[2];
+		const node_t *node;
+		listing_t *list;
+		gen_tree_t tree;
+		uint64_t nid_a, nid_b;
+
+		b.content = second;
+		ztree_new(&tree, 9, &zvolume_tail, 1);
+		nid_a = zfile_add(&tree, &a);
+		nid_b = zfile_add(&tree, &b);
+		CHECK(gen_inode_offset(&tree.image, nid_a) / 512 ==
+		    gen_inode_offset(&tree.image, nid_b) / 512);
+		names[0] = (gen_dirent_t){ "a", order == 0 ? nid_a : nid_b,
+		    T_FILE };
+		names[1] = (gen_dirent_t){ "b", order == 0 ? nid_b : nid_a,
+		    T_FILE };
+		gen_tree_dir(&tree, 0, 0, names, 2);
+		list = walk_ok("two tails in one block", &tree);
+		node = find_node(list, "/a");
+		EXPECT(node != NULL && node->content != NULL &&
+		    bcmp(node->content, order == 0 ? first : second,
+		    zplan_tail_small.size) == 0, "order %u: /a reads its own "
+		    "bytes", order);
+		node = find_node(list, "/b");
+		EXPECT(node != NULL && node->content != NULL &&
+		    bcmp(node->content, order == 0 ? second : first,
+		    zplan_tail_small.size) == 0, "order %u: /b reads its own "
+		    "bytes", order);
+		listing_free(list);
+		check_zverify("two tails in one block", &tree,
+		    FSIMG_VERIFY_PAYLOAD, FSIMG_OK);
+		gen_tree_free(&tree);
+		free(first);
+		free(second);
+	}
+}
+
+/*
+ * Under big clusters the producer writes a count marker after the head of
+ * a tail or a fragment, which no cluster uses. Its count is set to 7
+ * blocks, which matches no cluster: reading and verification ignore it.
+ */
+static void
+test_the_count_after_a_tail_or_fragment_head_is_never_read(void)
+{
+	/* The full index's records follow the 8-byte header and 8 reserved
+	 * bytes; record 3, logical cluster 3, follows the head at 1100, and
+	 * its delta[0] is the count with the marker bit 0x800. */
+	enum { MARKER_AT = 16 + 3 * 8 + 4, MARKER_BIT = 0x800 };
+
+	for (unsigned fragment = 0; fragment < 2; fragment++) {
+		const zplan_t *plan = fragment ? &zplan_frag_big : &zplan_tail_big;
+		unsigned char *content = zcontent(plan, 21);
+		zbuild_t build = { .plan = plan, .content = content,
+		    .layout = ZLAYOUT_FULL, .last = GEN_ZL_INLINE };
+		const char *label = fragment ? "count after a fragment head" :
+		    "count after a tail head";
+		const unsigned char *word;
+		gen_tree_t tree;
+		uint64_t nid, at;
+
+		if (fragment)
+			nid = zfragment_tree(&tree, &zvolume_frag_big, plan,
+			    content, ZLAYOUT_FULL, GEN_ZL_FRAGMENT, 5,
+			    LAYOUT_FLAT);
+		else {
+			ztree_new(&tree, 9, &zvolume_tail_big,
+			    zplan_blocks(plan));
+			nid = zfile_add(&tree, &build);
+			root_names(&tree, "f", nid, T_FILE);
+		}
+		at = zheader_place(&tree, nid) + MARKER_AT;
+		word = tree.image.bytes + at;
+		CHECK((word[0] | word[1] << 8) == MARKER_BIT);
+		gen_put(&tree.image, at, MARKER_BIT | 7, 2);
+		check_zfile(label, &tree, plan, content);
+		for (size_t s = 0; s < ARRAY_SIZE(zscopes); s++)
+			check_zverify(label, &tree, zscopes[s], FSIMG_OK);
+		gen_tree_free(&tree);
+		free(content);
+	}
 }
 
 /*
@@ -11925,6 +12208,11 @@ main(int argc, char **argv)
 	test_compressed_inline_tails_read_back_byte_for_byte();
 	test_fragments_read_back_through_the_packed_inode();
 	test_hostile_tails_and_fragments_are_refused();
+	test_fragments_read_back_through_an_inline_or_chunk_based_packed_inode();
+	test_verification_decodes_a_packed_cluster_no_file_references();
+	test_verification_accepts_compressed_inline_tails();
+	test_two_inline_tails_in_one_block_read_back_in_either_order();
+	test_the_count_after_a_tail_or_fragment_head_is_never_read();
 	test_compressed_directories_and_links_are_read();
 	test_a_failed_fragment_window_allocation_is_reported();
 
