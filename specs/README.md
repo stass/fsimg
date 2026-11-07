@@ -55,7 +55,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [Device nodes and sockets](design-device-nodes.md) | Character devices, block devices and sockets as read-only kinds; the device-number field and its per-format decoding; listing, protocol, extraction skipping and manifest records |
 | [Manifests](design-mtree.md) | Creating from an mtree(5) manifest as a source root: grammar subset, generated content, host bytes beneath a content directory, keyword mapping, bounds; the manifest extraction writes |
 | [Layers](design-layers.md) | Partition schemes, disk-image containers, compression, spooling and composition |
-| [Optional compression libraries](design-compression-libs.md) | zstd and xz over the system libzstd and liblzma as optional integrations: build and packaging, profiles, memory and input bounds, sandbox, reproducibility, licensing, oracles |
+| [Optional compression libraries](design-compression-libs.md) | zstd and xz over the system libzstd and liblzma as optional integrations: build and packaging, profiles, EROFS MicroLZMA and Zstandard cluster decoding, memory and input bounds, sandbox, reproducibility, licensing, oracles |
 | [Command line](design-cli.md) | Modes, bundled letters, options, stacks and settings, operands, destinations, output, and failure behavior |
 | [Specification-driven testing](design-spec-testing.md) | Rule-derived valid and invalid images, per-stage expectations, the CLI runner contract, fixtures and coverage reports |
 | [Style](style.md) | C conventions and readability review |

@@ -60,11 +60,12 @@ The driver also needs facilities shared beyond it:
 * MicroLZMA and Zstandard block decoding through the optional liblzma and
   libzstd integrations, under the architecture's optional-integration rule
   and specified in the compression libraries design's
-  [EROFS block decoding](design-compression-libs.md#erofs-block-decoding). Each library's
-  one source file has a private entry point that decodes one bounded input
-  into one bounded output under the context's allocation adapter, reached
-  through the library's registry row and absent, failing as unsupported,
-  when the build lacks the library.
+  [EROFS block decoding](design-compression-libs.md#erofs-block-decoding).
+  Each library's one source file has a private entry point that decodes
+  one bounded input into one bounded output under the context's allocation
+  adapter, reached through the library's registry row and absent, failing
+  as unsupported naming the library, when the build lacks the library or,
+  for MicroLZMA, its liblzma predates 5.4.
 * Raw DEFLATE through the system zlib under the existing
   [allocation adapter](design-binary-primitives.md).
 * A measured read and an encoded copy, for the LZ4 writer

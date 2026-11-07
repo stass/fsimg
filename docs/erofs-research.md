@@ -320,6 +320,11 @@ with majors to 4095 and minors to 1048575, a FIFO and a socket.
   `mknod` value. `0xFFFFFFFF` is device 4095:1048575.
 * Devices, FIFOs and sockets: size 0, layout 0, no inline data, no
   attributes; FIFO and socket layout word 0. Entry types 3, 4, 5, 6.
+  Source (`inode.c`): the writer's start-block high word and implicit
+  link count apply only to an inode with a block number above 32 bits; a
+  device, FIFO or socket has none, so its extended word `0x06` is zero and
+  its compact link count is explicit, format bit 4 clear, under `48BIT`
+  too (unobserved: E10).
 
 ### E6 Attributes
 
@@ -368,6 +373,12 @@ attributes.
   without devices are all accepted and ignored by kernel and `fsck.erofs`.
 * A chunk block past the image: the kernel returns `EIO`; `fsck.erofs
   --extract` writes zeros and exits 0.
+* Source (`blobchunk.c`): `erofs_inode_fixup_chunkformat` sets bit `0x40`
+  when any chunk's block number exceeds 32 bits, whatever the entry width;
+  `erofs_write_chunk_indexes` then writes a 4-byte entry as the low 32 bits
+  only, so the bit with 4-byte entries means lost address bits. The entry
+  width is chosen first: 8 bytes with extra devices or
+  `--force-chunk-format=chunk-indexes`, else 4.
 
 ### E8 LZ4 and index formats
 
@@ -420,7 +431,11 @@ equal `dump.erofs -e` on every file except the big-cluster cases below.
   tail head's block field is the producer's reserved block, not the tail
   (nid 73471 record 7 block 61; two single-cluster files both name block
   703); the fragment head's block field is likewise no address
-  (`compress.c` stores `fragmentoff >> 32` there on the full index).
+  (`compress.c` stores `fragmentoff >> 32` there on the full index and
+  switches a file to the full index when its `fragmentoff` exceeds 32 bits;
+  `zmap.c` ors that field, shifted by 32, into the header's offset on a
+  full index only). The end marker's block field is 0 on a full index
+  (`compress.c` `z_erofs_fini_full_indexes`); a compact record stores none.
 * Head block numbers: anchor + 1 + preceding heads in the group without big
   clusters (0 mismatches). With big clusters the kernel's backward walk
   (source `zmap.c`) adds each count marker met, including the marker of a
@@ -498,6 +513,18 @@ Zstandard clusters at the defaults.
   head-2 nibble 0). Hand-built: a type-3 record selects the algorithm in
   the high nibble of header byte 6 and the kernel and `fsck.erofs` read it
   without `COMPR_HEAD2` set; a mismatched algorithm or stream fails in both.
+* Empty mask (source): `decompress.c` `z_erofs_parse_cfgs` loads one record
+  per set mask bit and accepts a mask of zero; `zmap.c` then refuses any
+  inode whose algorithm the mask lacks. No producer writes an empty mask.
+* MicroLZMA return codes, liblzma 5.8.4, `e9-lzma-l6` `/mixed` cluster 0
+  (4095 stream bytes after one leading zero, extent 12226, dictionary 8
+  MiB): `lzma_microlzma_decoder` then one `lzma_code(LZMA_FINISH)` returns
+  `LZMA_STREAM_END` with the output full for the exact size and for an
+  inexact size equal to the output (12226, 6113 and 1 bytes, the input
+  partly consumed), `LZMA_DATA_ERROR` for an exact size of 6113,
+  `LZMA_OK` with the output short for a size of 12227 under either flag
+  and for the input cut one byte short. The reference decoder
+  (`decompress.c`) accepts only `LZMA_STREAM_END`, partial or not.
 
 ### E14 External devices
 

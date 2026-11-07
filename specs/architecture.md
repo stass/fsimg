@@ -1049,7 +1049,10 @@ handled the same way: a `--with-NAME[=auto|yes|no]` configure option
 detected like zlib (pkg-config, then header and library, overridable
 flags), one conditionally compiled source file that alone includes the
 library's header, a registry row whose operations are present exactly when
-that file is compiled, the library's flags in `Libs.private`, the sources
+that file is compiled (an operation that needs a library interface newer
+than the baseline is probed separately by configure and stays NULL without
+it, refused as unsupported naming the library and the version that provides
+it), the library's flags in `Libs.private`, the sources
 distributed in every build, and a public header identical in every build.
 Behaviour without the library is the core's: the row keeps its name and
 suffix with no operations, so a request for it fails as unsupported,
