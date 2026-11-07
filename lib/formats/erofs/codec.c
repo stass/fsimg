@@ -109,7 +109,7 @@ enum {
 #define CHUNK_HOLE_48		UINT64_C(0xffffffffffff)
 
 /* The MicroLZMA dictionary bounds and the other records' field maxima. */
-#define LZMA_DICT_MIN		UINT32_C(4096)
+#define LZMA_DICT_MIN		EROFS_LZMA_DICT_MIN
 #define LZMA_DICT_MAX		UINT32_C(8388608)
 #define DEFLATE_WINDOW_BITS_MAX	15u
 #define ZSTD_WINDOW_LOG_BASE	10u

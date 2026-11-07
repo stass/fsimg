@@ -1686,6 +1686,11 @@ format(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 		sizes(display, info->allocation_unit_size_mask);
 		append(display, ",\"write_cluster_bytes\":");
 		sizes(display, info->write_allocation_unit_size_mask);
+		append(display, ",\"codecs\":");
+		if (info->codecs[0] != '\0')
+			string_value(display, info->codecs);
+		else
+			append(display, "null");
 		append(display, "}\n");
 	} else {
 		append(display, "%-7s  %-4s  %-5s  %s\n", info->name,
@@ -1783,6 +1788,8 @@ format_details(fsimg_cli_display_t *display, const fsimg_format_info_t *info)
 		    info->max_link_target_bytes);
 	else
 		append(display, "\n  Maximum link target: none\n");
+	if (info->codecs[0] != '\0')
+		append(display, "  Compression: %s\n", info->codecs);
 }
 
 static void

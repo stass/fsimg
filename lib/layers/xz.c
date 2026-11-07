@@ -108,6 +108,15 @@ static fsimg_status_t refill(xz_decoder_t *, fsimg_error_t *);
 static fsimg_status_t decoder_start(xz_decoder_t *, fsimg_error_t *);
 static void decoder_end(xz_decoder_t *);
 static fsimg_status_t decode_streams(xz_decoder_t *, fsimg_error_t *);
+#ifdef FSIMG_MICROLZMA
+static fsimg_status_t microlzma_block_decode(fsimg_ctx_t *,
+    const unsigned char *, size_t, unsigned char *, size_t, bool, size_t,
+    fsimg_error_t *);
+static fsimg_status_t block_memory_failed(const fsimg_codec_memory_t *,
+    fsimg_error_t *);
+static fsimg_status_t block_failed(const fsimg_codec_memory_t *, lzma_ret,
+    fsimg_error_t *);
+#endif
 
 static const fsimg_compressor_ops_t xz_encoder = {
 	.open = encoder_open,
@@ -124,7 +133,10 @@ const fsimg_compression_ops_t fsimg_xz_compression = {
 	.plan = xz_plan,
 	.bound = xz_bound,
 	.encoder = &xz_encoder,
-	.version = xz_version
+	.version = xz_version,
+#ifdef FSIMG_MICROLZMA
+	.block_decode = microlzma_block_decode
+#endif
 };
 
 /* liblzma's binding of the codec memory adapter. */
@@ -562,3 +574,110 @@ encoder_close(void *state)
 	fsimg_dealloc(encoder->output);
 	fsimg_dealloc(encoder);
 }
+
+#ifdef FSIMG_MICROLZMA
+/* The MicroLZMA dictionary sizes an EROFS record may declare. */
+#define MICROLZMA_DICT_MIN	4096u
+#define MICROLZMA_DICT_MAX	(8u * 1024 * 1024)
+
+/*
+ * EROFS block decoding: one cluster's MicroLZMA stream into one bounded
+ * output (specs/design-compression-libs.md#erofs-block-decoding), under
+ * liblzma 5.4's raw decoder. The compressed length is exact, since the
+ * stream is right-aligned in its cluster; the decoded length is exact
+ * unless the reference is partial, when the decoder stops at the output's
+ * end without requiring the stream to end there. The dictionary size is
+ * the volume's, since the stream carries none, and liblzma allocates it
+ * through the adapter, so a budget that cannot hold it fails before a
+ * byte is decoded. One lzma_code(LZMA_FINISH) runs over the whole input
+ * and output, and only LZMA_STREAM_END with the output full is the
+ * extent: liblzma returns it at the given length under an inexact size as
+ * at the stream's end under an exact one, and LZMA_OK when the input ends
+ * first. The decoder lives for this call only.
+ */
+static fsimg_status_t
+microlzma_block_decode(fsimg_ctx_t *ctx, const unsigned char *input,
+    size_t input_bytes, unsigned char *output, size_t output_bytes,
+    bool partial, size_t bound, fsimg_error_t *error)
+{
+	lzma_stream stream = LZMA_STREAM_INIT;
+	fsimg_codec_memory_t memory;
+	lzma_allocator allocator;
+	lzma_ret code;
+
+	if (output_bytes == 0 || bound < MICROLZMA_DICT_MIN ||
+	    bound > MICROLZMA_DICT_MAX)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "MicroLZMA block decode given an empty extent or a bad "
+		    "dictionary"));
+	lzma_bind(&memory, ctx, &allocator, &stream);
+	code = lzma_microlzma_decoder(&stream, input_bytes, output_bytes,
+	    !partial, (uint32_t)bound);
+	if (code != LZMA_OK) {
+		/* Every parameter was checked, so only memory explains it. */
+		lzma_end(&stream);
+		if (code == LZMA_MEM_ERROR)
+			return (block_memory_failed(&memory, error));
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "liblzma refused to set up a MicroLZMA decoder"));
+	}
+	stream.next_in = input;
+	stream.avail_in = input_bytes;
+	stream.next_out = output;
+	stream.avail_out = output_bytes;
+	code = lzma_code(&stream, LZMA_FINISH);
+	lzma_end(&stream);
+	if (code == LZMA_STREAM_END && stream.avail_out == 0)
+		return (FSIMG_OK);
+	return (block_failed(&memory, code, error));
+}
+
+/* The adapter's first error, named for the library. */
+static fsimg_status_t
+block_memory_failed(const fsimg_codec_memory_t *memory, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fsimg_codec_memory_error(memory, error);
+	if (error != NULL && error->path[0] == '\0')
+		snprintf(error->path, sizeof(error->path), "liblzma");
+	return (status);
+}
+
+/*
+ * A decode that did not produce the extent, by liblzma's closed return
+ * set: memory as the adapter recorded it; a programming error as fsimg's
+ * own, since every parameter was checked first; and everything else as a
+ * damaged cluster. That includes an option error, which while decoding is
+ * the stream's first byte holding properties out of range, and
+ * LZMA_STREAM_END short of the output's end.
+ */
+static fsimg_status_t
+block_failed(const fsimg_codec_memory_t *memory, lzma_ret code,
+    fsimg_error_t *error)
+{
+	char message[64];
+
+	switch (code) {
+	case LZMA_MEM_ERROR:
+		return (block_memory_failed(memory, error));
+	case LZMA_OPTIONS_ERROR:
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_READER, "MicroLZMA stream's properties are invalid"));
+	case LZMA_PROG_ERROR:
+		snprintf(message, sizeof(message),
+		    "liblzma refused the block decode with code %d", (int)code);
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    message));
+	case LZMA_STREAM_END:
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_READER,
+		    "MicroLZMA stream ends before its extent is full"));
+	default:
+		snprintf(message, sizeof(message),
+		    "MicroLZMA stream is corrupt (liblzma code %d)", (int)code);
+		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
+		    FSIMG_OP_READER, message));
+	}
+}
+#endif /* FSIMG_MICROLZMA */

@@ -804,7 +804,9 @@ fixture carries one. The producer derives every one of these values from
 its cluster size (E9), but only the DEFLATE window is no stream parameter:
 raw DEFLATE inflates with a 32 KiB window whatever the record says. The
 MicroLZMA dictionary size and the Zstandard window log bound the decoder's
-memory, so the reader hands liblzma the record's dictionary size and libzstd
+memory, so the reader hands liblzma the record's dictionary size, or the
+extent's length when that is smaller (at least 4096: a fresh decoder cannot
+reach back further than it has produced), and libzstd
 a `ZSTD_d_windowLogMax` of the record's window log plus 10, at most 20,
 charges that dictionary or window to the context before the first decode
 ([decode windows](design-erofs-driver.md#resource-bounds)), and refuses a

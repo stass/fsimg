@@ -50,9 +50,12 @@
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
 QNX6 Power-Safe and QNX4 volumes, HFS Plus and HFSX volumes, QNX ImageFS images,
 ISO 9660 images and EROFS volumes.
-EROFS reading covers chunk-based files and files compressed with LZ4;
-other compression algorithms, packed fragments, compressed inline tails
-and compressed directories and symbolic links are not read.
+EROFS reading covers chunk-based files and files compressed with LZ4 or
+DEFLATE, and with MicroLZMA or Zstandard when the build has liblzma 5.4 or
+libzstd; a file of an algorithm the build lacks fails as unsupported naming
+the library while the rest of the volume reads.
+Packed fragments, compressed inline tails and compressed directories and
+symbolic links are not read.
 A created EROFS volume is uncompressed, with 512- to 4096-byte blocks and
 32-bit addressing, and stores files, directories and symbolic links with
 their owner, permission bits and modification time to the nanosecond.
@@ -101,6 +104,16 @@ Report the stack, the partition table and the volume information.
 Report compiled and usable capabilities; takes no image.
 A format's entry kinds include the devices and sockets its reader reports;
 no writer stores them.
+With
+.Fl v
+a format whose files may be compressed lists, as
+.Ql Compression: ,
+the algorithms this build decodes and the library each depends on
+.Pq Ql lz4; lzma, liblzma 5.8.4; deflate, zlib 1.3.1; zstd, zstd 1.5.7 ;
+.Fl -json
+gives the same text as the format record's
+.Ql codecs ,
+null for a format without compression.
 .El
 .Pp
 Exactly one mode is given, except that

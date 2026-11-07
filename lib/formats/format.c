@@ -354,6 +354,8 @@ fsimg_format_next(size_t *cursor, fsimg_format_info_t *out, fsimg_error_t *error
 		}
 		*out = format->variants[index].info;
 		out->capabilities = format_capabilities(format);
+		if (format->codecs != NULL)
+			format->codecs(out->codecs, sizeof(out->codecs));
 		(*cursor)++;
 		return (FSIMG_OK);
 	}

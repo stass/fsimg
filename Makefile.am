@@ -298,7 +298,7 @@ test_exfat_SOURCES = test/exfat.c test/test.h \
 test_exfat_LDADD = libfsimg.la
 test_erofs_SOURCES = test/erofs.c test/test.h test/erofs-gen.c \
 	test/erofs-gen.h
-test_erofs_LDADD = libfsimg.la
+test_erofs_LDADD = libfsimg.la $(ZLIB_LIBS) $(ZSTD_LIBS) $(LZMA_LIBS)
 test_erofs_verify_SOURCES = test/erofs-verify.c test/test.h \
 	test/erofs-gen.c test/erofs-gen.h
 test_erofs_verify_LDADD = libfsimg.la
@@ -495,7 +495,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/gen-fat-tables.rb tools/gen-hfsplus-tables.rb \
 	tools/hfsplus-unicode-exceptions.txt tools/hfsplus/capture.rb \
 	tools/hfsplus/qualify.rb \
-	tools/erofs/capture.rb tools/erofs/erofsdump.rb \
+	tools/erofs/capture.rb tools/erofs/erofsdump.rb tools/erofs/head2-bit.rb \
 	tools/erofs/manifest.rb tools/erofs/qualify.sh \
 	tools/hfsplus/check-unicode-tables.rb \
 	tools/hfsplus/e8_interrupt.rb tools/hfsplus/fields.rb \

@@ -2531,25 +2531,34 @@ test_two_files_naming_one_cluster_verify(void)
 	}
 }
 
+/*
+ * A cluster of an algorithm whose library the build lacks leaves the
+ * volume unverified, naming the library. Only a build without libzstd has
+ * such an algorithm to test; with it, test-erofs decodes the clusters.
+ */
 static void
-test_a_cluster_of_another_algorithm_leaves_verification_unsupported(void)
+test_a_cluster_of_an_algorithm_the_build_lacks_leaves_verification_unsupported(void)
 {
+#ifndef FSIMG_ZSTD
 	gen_dirent_t kids[1];
 	gen_tree_t tree;
 
-	/* COMPR_CFGS with LZ4 and DEFLATE records; the file's head-1 is DEFLATE */
+	/* COMPR_CFGS with LZ4 and Zstandard records; the file's head-1 is
+	 * Zstandard */
 	ztree_new(&tree, 8);
 	put_super(&tree, SB_INCOMPAT, INCOMPAT_LZ4_0PADDING | INCOMPAT_COMPR_CFGS,
 	    4);
-	put_super(&tree, SB_WORD54, 0x5, 2);
+	put_super(&tree, SB_WORD54, 0x9, 2);
 	gen_lz4_config_put(&tree.image, 0, 65535, 1);
 	gen_put(&tree.image, GEN_SUPER_OFFSET + 128 + 16, 6, 2);
-	gen_put(&tree.image, GEN_SUPER_OFFSET + 128 + 18, 15, 1);
-	kids[0] = entry("f", add_zfile(&tree, ZLAYOUT_FULL, 1000, 2, ZNO_BLOCK),
+	gen_put(&tree.image, GEN_SUPER_OFFSET + 128 + 19, 2, 1);
+	kids[0] = entry("f", add_zfile(&tree, ZLAYOUT_FULL, 1000, 3, ZNO_BLOCK),
 	    T_FILE);
 	fill_dir(&tree, 0, 0, kids, 1);
-	check_tree("a DEFLATE cluster", &tree, FSIMG_EUNSUPPORTED, "DEFLATE");
+	check_tree("a Zstandard cluster without libzstd", &tree,
+	    FSIMG_EUNSUPPORTED, "libzstd");
 	gen_tree_free(&tree);
+#endif
 }
 
 static void
@@ -2667,7 +2676,7 @@ main(void)
 	test_a_compressed_cluster_over_an_inode_body_is_corrupt();
 	test_a_compressed_cluster_over_a_directory_block_is_corrupt();
 	test_two_files_naming_one_cluster_verify();
-	test_a_cluster_of_another_algorithm_leaves_verification_unsupported();
+	test_a_cluster_of_an_algorithm_the_build_lacks_leaves_verification_unsupported();
 	test_lz4_clusters_without_lz4_0padding_leave_verification_unsupported();
 	test_chunk_based_and_compressed_files_verify_together();
 	return (failures == 0 ? 0 : 1);

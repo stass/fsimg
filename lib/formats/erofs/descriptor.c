@@ -68,7 +68,8 @@ const fsimg_format_t fsimg_erofs_format = {
 	.probe_bytes = EROFS_PROBE_BYTES,
 	.probe = erofs_probe,
 	.reader = &fsimg_erofs_reader_ops,
-	.writer = &fsimg_erofs_writer_ops
+	.writer = &fsimg_erofs_writer_ops,
+	.codecs = erofs_codecs
 };
 
 /*

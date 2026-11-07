@@ -112,6 +112,15 @@ class CliTest < Minitest::Test
     expected_capabilities = formats.keys.to_h { [_1, 7] }
     assert_equal(expected_capabilities, formats.transform_values { _1.fetch("capabilities") }, "filesystem capabilities match their supported operations")
     assert_equal(((32 * 1024) * 1024), formats.fetch("exfat").fetch("write_cluster_bytes")[-1])
+    erofs_codecs = formats.fetch("erofs").fetch("codecs").split("; ").map { _1.split(", ").first }
+    # MicroLZMA needs liblzma 5.4, which an xz-capable build may predate.
+    assert_equal(["lz4", "deflate", *("zstd" if zstd_supported?)], erofs_codecs - ["lzma"],
+                 "erofs lists the cluster algorithms this build decodes")
+    # The xz row's own liblzma version says whether MicroLZMA must be there.
+    xz_version = layers.fetch("xz").fetch("codec_version").to_s[/\Aliblzma (\S+)/, 1]
+    microlzma = !xz_version.nil? && Gem::Version.new(xz_version) >= Gem::Version.new("5.4")
+    assert_equal(microlzma, erofs_codecs.include?("lzma"), "MicroLZMA is listed exactly with liblzma 5.4 or later")
+    assert_nil(formats.fetch("fat12").fetch("codecs"), "a format without compression lists no codecs")
     assert(formats.fetch("exfat").fetch("max_file_bytes").is_a?(String), "formats exfat max file bytes is a String")
     capabilities = decoded.find { |record| record.fetch("type") == "capabilities" }
     assert_includes(["unavailable", "not-probed"].to_set, capabilities.fetch("sandbox_runtime"), "unavailable not probed to set")

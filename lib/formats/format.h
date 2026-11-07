@@ -54,6 +54,9 @@ struct fsimg_format_variant {
  * function of the probe prefix of a volume the probe claims, giving the
  * order it is stored in, so a container that packages the volume can
  * refuse an order its header cannot describe.
+ *
+ * codecs is optional: for a format whose files may be compressed, it
+ * writes fsimg_format_info_t.codecs, the algorithms this build decodes.
  */
 struct fsimg_format {
 	const fsimg_format_variant_t *variants;
@@ -67,6 +70,7 @@ struct fsimg_format {
 	const fsimg_writer_ops_t *writer;
 	bool		 exact_volume;
 	bool		 reserved_system_area;
+	void		(*codecs)(char *, size_t);
 };
 
 /* The registered descriptors; the registry in format.c lists them. */

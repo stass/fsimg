@@ -16,6 +16,16 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include <zlib.h>
+/* zconf.h defines FAR, a name the tests use; nothing here needs zlib's. */
+#undef FAR
+#ifdef FSIMG_ZSTD
+#include <zstd.h>
+#endif
+#ifdef FSIMG_MICROLZMA
+#include <lzma.h>
+#endif
+
 #include "erofs-gen.h"
 #include "erofs.h"
 #include "format.h"
@@ -9894,6 +9904,21 @@ enum {
 	ZV_ALL_ALGORITHMS = 0xf
 };
 
+/*
+ * How a stream of a library algorithm that is not that algorithm's fails:
+ * as corrupt with the library, as unsupported naming it without.
+ */
+#ifdef FSIMG_MICROLZMA
+#define LZMA_REFUSAL	FSIMG_ECORRUPT, "MicroLZMA"
+#else
+#define LZMA_REFUSAL	FSIMG_EUNSUPPORTED, "MicroLZMA cluster needs liblzma 5.4"
+#endif
+#ifdef FSIMG_ZSTD
+#define ZSTD_REFUSAL	FSIMG_ECORRUPT, "Zstandard"
+#else
+#define ZSTD_REFUSAL	FSIMG_EUNSUPPORTED, "Zstandard cluster needs libzstd"
+#endif
+
 #define ZHOSTILE_BIG_VOLUME \
 	{ EROFS_INCOMPAT_COMPR_CFGS, 0, 4, false }
 #define ZHOSTILE_ALL_VOLUME \
@@ -9997,16 +10022,17 @@ test_hostile_indexes_are_refused_through_the_rule_they_break(void)
 		    &zplan_mixed, { EROFS_INCOMPAT_DEVICE_TABLE, 0, 0, false },
 		    0x30, { { 3, ZF_TYPE, EROFS_RECORD_HEAD2 } }, ZL_BOTH,
 		    FSIMG_ECORRUPT, "not configured" },
-		{ "a MicroLZMA cluster", &zplan_mixed, ZHOSTILE_ALL_VOLUME, 1,
-		    { { 0 } }, ZL_BOTH, FSIMG_EUNSUPPORTED, "MicroLZMA" },
-		{ "a DEFLATE cluster", &zplan_mixed, ZHOSTILE_ALL_VOLUME, 2,
-		    { { 0 } }, ZL_BOTH, FSIMG_EUNSUPPORTED, "DEFLATE" },
-		{ "a Zstandard cluster", &zplan_mixed, ZHOSTILE_ALL_VOLUME, 3,
-		    { { 0 } }, ZL_BOTH, FSIMG_EUNSUPPORTED, "Zstandard" },
+		/* LZ4 streams read as another algorithm's. */
+		{ "LZ4 streams as MicroLZMA", &zplan_mixed,
+		    ZHOSTILE_ALL_VOLUME, 1, { { 0 } }, ZL_BOTH, LZMA_REFUSAL },
+		{ "LZ4 streams as DEFLATE", &zplan_mixed, ZHOSTILE_ALL_VOLUME, 2,
+		    { { 0 } }, ZL_BOTH, FSIMG_ECORRUPT, "DEFLATE" },
+		{ "LZ4 streams as Zstandard", &zplan_mixed,
+		    ZHOSTILE_ALL_VOLUME, 3, { { 0 } }, ZL_BOTH, ZSTD_REFUSAL },
 		{ "a head-2 DEFLATE cluster after a readable head-1 one",
 		    &zplan_mixed, ZHOSTILE_HEAD2_ALL_VOLUME, 0x20,
 		    { { 3, ZF_TYPE, EROFS_RECORD_HEAD2 } }, ZL_BOTH,
-		    FSIMG_EUNSUPPORTED, "DEFLATE" }
+		    FSIMG_ECORRUPT, "DEFLATE" }
 	};
 
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++)
@@ -10437,6 +10463,8 @@ emit_compressed_seeds(const char *directory)
 	free(content);
 }
 
+static void	emit_codec_seeds(const char *);
+
 /* --seed DIRECTORY: small volumes for the fuzz corpus. */
 static void
 emit_seeds(const char *directory)
@@ -10454,6 +10482,621 @@ emit_seeds(const char *directory)
 	write_seed(directory, "empty-root.seed", &tree);
 	gen_tree_free(&tree);
 	emit_compressed_seeds(directory);
+	emit_codec_seeds(directory);
+}
+
+/* ---- DEFLATE, MicroLZMA and Zstandard clusters ---- */
+
+enum {
+	CODEC_STREAM_MAX = 96 * 1024,
+	CODEC_EXTENT = 4000,		/* a one-block stream at any level */
+	CODEC_FAR_PREFIX = 70000	/* a match beyond a 64 KiB dictionary */
+};
+
+/* A volume configuring every algorithm, its records at their defaults. */
+static const zvolume_t zvolume_all = ZHOSTILE_ALL_VOLUME;
+/* The same with COMPR_HEAD2, which lets a file mix two algorithms. */
+static const zvolume_t zvolume_all_head2 = ZHOSTILE_HEAD2_ALL_VOLUME;
+
+/*
+ * Records of zvolume_all other than ztree_new()'s: the MicroLZMA dictionary
+ * and the Zstandard window log, each 0 for the default (64 KiB, 2^12).
+ * The records follow the superblock at 128 (LZ4), 144 (MicroLZMA), 160
+ * (DEFLATE) and 168 (Zstandard).
+ */
+typedef struct codec_config {
+	uint32_t	 lzma_dict;
+	unsigned	 zstd_log;
+} codec_config_t;
+
+static const codec_config_t codec_defaults = { 0, 0 };
+
+static const char *const codec_names[] = { "LZ4", "MicroLZMA", "DEFLATE",
+	"Zstandard" };
+
+/*
+ * What a build without the library says for each algorithm, NULL for one
+ * every build decodes.
+ */
+static const char *
+codec_missing(unsigned algorithm)
+{
+	switch (algorithm) {
+#ifndef FSIMG_MICROLZMA
+	case EROFS_ALGORITHM_LZMA:
+		return ("MicroLZMA cluster needs liblzma 5.4");
+#endif
+#ifndef FSIMG_ZSTD
+	case EROFS_ALGORITHM_ZSTD:
+		return ("Zstandard cluster needs libzstd");
+#endif
+	default:
+		return (NULL);
+	}
+}
+
+/*
+ * Compress length bytes into algorithm's EROFS cluster stream under a
+ * dictionary or window of bound bytes: raw DEFLATE, a MicroLZMA stream, or
+ * one Zstandard frame with its content size and no checksum, as mkfs.erofs
+ * writes them (E9). Returns the stream's length, or 0 when the build has
+ * no encoder for the algorithm, which is when it has no decoder.
+ */
+static size_t
+codec_stream(unsigned algorithm, const unsigned char *in, size_t length,
+    unsigned char *out, size_t capacity, size_t bound)
+{
+	size_t n = 0;
+
+	(void)bound;	/* DEFLATE's window is no stream parameter */
+	switch (algorithm) {
+	case EROFS_ALGORITHM_DEFLATE: {
+		z_stream z;
+
+		bzero(&z, sizeof(z));
+		CHECK(deflateInit2(&z, 9, Z_DEFLATED, -MAX_WBITS, 8,
+		    Z_DEFAULT_STRATEGY) == Z_OK);
+		z.next_in = (Bytef *)(uintptr_t)in;
+		z.avail_in = (uInt)length;
+		z.next_out = out;
+		z.avail_out = (uInt)capacity;
+		CHECK(deflate(&z, Z_FINISH) == Z_STREAM_END);
+		n = z.total_out;
+		deflateEnd(&z);
+		break;
+	}
+#ifdef FSIMG_ZSTD
+	case EROFS_ALGORITHM_ZSTD: {
+		ZSTD_CCtx *c = ZSTD_createCCtx();
+		int log = 10;
+
+		while (((size_t)1 << log) < bound)
+			log++;
+		CHECK(c != NULL);
+		CHECK(!ZSTD_isError(ZSTD_CCtx_setParameter(c,
+		    ZSTD_c_compressionLevel, 19)));
+		CHECK(!ZSTD_isError(ZSTD_CCtx_setParameter(c, ZSTD_c_windowLog,
+		    log)));
+		n = ZSTD_compress2(c, out, capacity, in, length);
+		CHECK(!ZSTD_isError(n));
+		ZSTD_freeCCtx(c);
+		break;
+	}
+#endif
+#ifdef FSIMG_MICROLZMA
+	case EROFS_ALGORITHM_LZMA: {
+		lzma_stream z = LZMA_STREAM_INIT;
+		lzma_options_lzma options;
+
+		CHECK(!lzma_lzma_preset(&options, 6));
+		options.dict_size = (uint32_t)bound;
+		CHECK(lzma_microlzma_encoder(&z, &options) == LZMA_OK);
+		z.next_in = in;
+		z.avail_in = length;
+		z.next_out = out;
+		z.avail_out = capacity;
+		CHECK(lzma_code(&z, LZMA_FINISH) == LZMA_STREAM_END);
+		CHECK(z.total_in == length);
+		n = (size_t)z.total_out;
+		lzma_end(&z);
+		break;
+	}
+#endif
+	default:
+		break;
+	}
+	return (n);
+}
+
+/* The test content of a codec cluster: the pattern with a period of 37. */
+static void
+codec_content(unsigned char *bytes, size_t length, unsigned seed)
+{
+	for (size_t i = 0; i < length; i++)
+		bytes[i] = pattern_byte(seed, i % 37);
+}
+
+/*
+ * A tree whose file "f" is one cluster holding stream, of extent bytes,
+ * stored as algorithm's head-1 cluster in blkszbits blocks.
+ */
+static void
+codec_tree(gen_tree_t *tree, const codec_config_t *config, unsigned layout,
+    unsigned algorithm, unsigned blkszbits, const unsigned char *stream,
+    size_t length, size_t extent)
+{
+	uint32_t blocks = (uint32_t)((length + ((size_t)1 << blkszbits) - 1) >>
+	    blkszbits);
+	zplan_t plan = { .blkszbits = blkszbits, .size = extent, .count = 1,
+	    .big = blocks > 1, .clusters = { ZC_RAW(0, blocks, stream,
+	    length) } };
+	unsigned char *content = zcontent(&plan, 0);
+	zbuild_t build = { .plan = &plan, .content = content, .layout = layout,
+	    .algorithms = (uint8_t)algorithm };
+
+	ztree_with_file(tree, &zvolume_all, &build);
+	if (config->lzma_dict != 0)
+		gen_put(&tree->image, GEN_SUPER_OFFSET + 146, config->lzma_dict,
+		    4);
+	if (config->zstd_log != 0)
+		gen_put(&tree->image, GEN_SUPER_OFFSET + 171,
+		    config->zstd_log - 10, 1);
+	free(content);
+}
+
+/* Open the tree's file under a memory budget, read it whole and close. */
+static fsimg_status_t
+codec_read(const char *label, gen_tree_t *tree, size_t size,
+    uint64_t memory_bytes, unsigned char *out, fsimg_error_t *error)
+{
+	const fsimg_entry_t *entry = NULL;
+	fsimg_reader_t *reader = NULL;
+	fsimg_stats_t stats;
+	fsimg_status_t status;
+	volume_t v;
+
+	bzero(error, sizeof(*error));
+	gen_tree_seal(tree);
+	volume_start_with(&v, tree->image.bytes, tree->image.length,
+	    memory_bytes);
+	status = fsimg_reader_open(v.ctx, v.io, NULL, &reader, error);
+	if (status == FSIMG_OK)
+		status = fsimg_reader_next(reader, &entry, error);
+	if (status == FSIMG_OK) {
+		EXPECT(entry->size == size, "%s: the file's size is %zu", label,
+		    size);
+		status = read_range(reader, 0, out, size, error);
+	}
+	fsimg_reader_free(reader);
+	fsimg_io_free(v.io);
+	CHECK(fsimg_ctx_get_stats(v.ctx, &stats, NULL) == FSIMG_OK);
+	EXPECT(stats.memory_bytes == v.baseline,
+	    "%s: the decoder's memory returns to the budget", label);
+	fsimg_ctx_free(v.ctx);
+	return (status);
+}
+
+/*
+ * One cluster of each algorithm, in both indexes, reads back byte for
+ * byte, or, in a build without the algorithm's library, fails as
+ * unsupported naming the library.
+ */
+static void
+test_deflate_microlzma_and_zstd_clusters_read_back_or_name_their_library(void)
+{
+	unsigned char content[CODEC_EXTENT], got[CODEC_EXTENT];
+	unsigned char stream[CODEC_STREAM_MAX];
+	static const unsigned algorithms[] = { EROFS_ALGORITHM_LZMA,
+		EROFS_ALGORITHM_DEFLATE, EROFS_ALGORITHM_ZSTD };
+	fsimg_error_t error;
+	fsimg_status_t status;
+	gen_tree_t tree;
+	char label[96];
+	size_t n;
+
+	codec_content(content, sizeof(content), 21);
+	for (size_t i = 0; i < ARRAY_SIZE(algorithms); i++) {
+		unsigned a = algorithms[i];
+		const char *missing = codec_missing(a);
+
+		n = codec_stream(a, content, sizeof(content), stream,
+		    sizeof(stream), a == EROFS_ALGORITHM_LZMA ? 65536 : 4096);
+		if (n == 0) {
+			/* No encoder: any stream shows the refusal. */
+			CHECK(missing != NULL);
+			stream[0] = 0x5d;
+			n = 1;
+		}
+		for (unsigned layout = ZLAYOUT_FULL; layout <= ZLAYOUT_COMPACT;
+		    layout += 2) {
+			snprintf(label, sizeof(label), "a %s cluster (%s index)",
+			    codec_names[a], zlayout_name(layout));
+			codec_tree(&tree, &codec_defaults, layout, a, 9, stream, n,
+			    sizeof(content));
+			status = codec_read(label, &tree, sizeof(content),
+			    16 * 1024 * 1024, got, &error);
+			if (missing != NULL) {
+				check_refusal(label, status, FSIMG_EUNSUPPORTED,
+				    &error, missing);
+			} else {
+				check_status(label, status, FSIMG_OK, &error);
+				EXPECT(status != FSIMG_OK ||
+				    memcmp(got, content, sizeof(content)) == 0,
+				    "%s: the content reads back", label);
+			}
+			gen_tree_free(&tree);
+		}
+	}
+}
+
+/*
+ * A file whose head-1 clusters are LZ4 and whose head-2 cluster is
+ * another algorithm, on a volume with COMPR_HEAD2: the LZ4 part reads in
+ * every build and the head-2 part reads, or names its library.
+ */
+static void
+test_a_head_2_cluster_of_another_algorithm_reads_after_lz4_ones(void)
+{
+	static const unsigned algorithms[] = { EROFS_ALGORITHM_LZMA,
+		EROFS_ALGORITHM_DEFLATE, EROFS_ALGORITHM_ZSTD };
+	unsigned char stream[CODEC_STREAM_MAX];
+
+	for (size_t i = 0; i < ARRAY_SIZE(algorithms); i++) {
+		unsigned a = algorithms[i];
+		const char *missing = codec_missing(a);
+		zplan_t plan = { .size = 1500, .count = 2, .clusters = {
+		    ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 13),
+		    { 600, 1, GEN_ZK_RAW, true, 0, stream, 0 } } };
+		unsigned char *content = zcontent(&plan, 7);
+		zbuild_t build = { .plan = &plan, .content = content,
+		    .layout = ZLAYOUT_FULL, .algorithms = (uint8_t)(a << 4) };
+		unsigned char got[600];
+		fsimg_error_t error;
+		gen_tree_t tree;
+		zreader_t z;
+		char label[96];
+		size_t n;
+
+		n = codec_stream(a, content + 600, 900, stream, sizeof(stream),
+		    a == EROFS_ALGORITHM_LZMA ? 65536 : 4096);
+		if (n == 0) {
+			stream[0] = 0x5d;
+			n = 1;
+		}
+		plan.clusters[1].raw_length = n;
+		snprintf(label, sizeof(label), "LZ4, then head-2 %s",
+		    codec_names[a]);
+		ztree_with_file(&tree, &zvolume_all_head2, &build);
+		if (missing == NULL) {
+			check_zfile(label, &tree, &plan, content);
+		} else {
+			zreader_open(&z, label, &tree, plan.size);
+			if (z.ok) {
+				bzero(&error, sizeof(error));
+				check_status(label, read_range(z.reader, 0, got,
+				    sizeof(got), &error), FSIMG_OK, &error);
+				EXPECT(memcmp(got, content, sizeof(got)) == 0,
+				    "%s: the LZ4 cluster reads back", label);
+				check_refusal(label, read_range(z.reader, 600,
+				    got, 1, &error), FSIMG_EUNSUPPORTED, &error,
+				    missing);
+			}
+			zreader_close(&z, label);
+		}
+		gen_tree_free(&tree);
+		free(content);
+	}
+}
+
+/*
+ * Under a partial reference each algorithm stops at the extent's end of a
+ * longer stream, and the same stream unmarked is corrupt; an extent one
+ * byte longer than the stream decodes to is corrupt either way.
+ */
+static void
+test_codec_streams_decode_exactly_their_extent_unless_partial(void)
+{
+	static const unsigned algorithms[] = { EROFS_ALGORITHM_LZMA,
+		EROFS_ALGORITHM_DEFLATE, EROFS_ALGORITHM_ZSTD };
+	static const zpatch_t partial[] = { { 0, ZF_PARTIAL, 1 },
+		{ 0, ZF_END, 0 } };
+	unsigned char long_content[1000];
+	unsigned char stream0[CODEC_STREAM_MAX], stream1[CODEC_STREAM_MAX];
+	unsigned char content[CODEC_EXTENT + 1], got[CODEC_EXTENT + 1];
+
+	codec_content(long_content, sizeof(long_content), 3);
+	codec_content(content, sizeof(content), 5);
+	for (size_t i = 0; i < ARRAY_SIZE(algorithms); i++) {
+		unsigned a = algorithms[i];
+		size_t bound = a == EROFS_ALGORITHM_LZMA ? 65536 : 4096;
+		size_t n0 = codec_stream(a, long_content, sizeof(long_content),
+		    stream0, sizeof(stream0), bound);
+		zplan_t plan = { .size = 1500, .count = 2, .clusters = {
+		    ZC_RAW(0, 1, stream0, n0), ZC_RAW(600, 1, stream1, 0) } };
+		unsigned char *file = zcontent(&plan, 5);
+		zbuild_t build = { .plan = &plan, .content = file,
+		    .layout = ZLAYOUT_FULL, .patches = partial,
+		    .algorithms = (uint8_t)a };
+		fsimg_error_t error;
+		gen_tree_t tree;
+		char label[96];
+		size_t n;
+
+		if (codec_missing(a) != NULL) {
+			free(file);
+			continue;
+		}
+		bcopy(long_content, file, 600);
+		plan.clusters[1].raw_length = codec_stream(a, file + 600, 900,
+		    stream1, sizeof(stream1), bound);
+		snprintf(label, sizeof(label), "a partial %s reference",
+		    codec_names[a]);
+		ztree_with_file(&tree, &zvolume_all, &build);
+		check_zfile(label, &tree, &plan, file);
+		gen_tree_free(&tree);
+
+		snprintf(label, sizeof(label), "the same %s stream unmarked",
+		    codec_names[a]);
+		build.patches = NULL;
+		ztree_with_file(&tree, &zvolume_all, &build);
+		check_refused(label, &tree, FSIMG_ECORRUPT, codec_names[a]);
+		gen_tree_free(&tree);
+		free(file);
+
+		/* The stream of CODEC_EXTENT bytes read as one more and one
+		 * less, unmarked. */
+		n = codec_stream(a, content, CODEC_EXTENT, stream0,
+		    sizeof(stream0), bound);
+		for (size_t extent = CODEC_EXTENT - 1; extent <= CODEC_EXTENT + 1;
+		    extent += 2) {
+			snprintf(label, sizeof(label),
+			    "a %s stream of %d bytes read as %zu",
+			    codec_names[a], CODEC_EXTENT, extent);
+			codec_tree(&tree, &codec_defaults, ZLAYOUT_FULL, a, 9,
+			    stream0, n, extent);
+			check_refusal(label, codec_read(label, &tree, extent,
+			    16 * 1024 * 1024, got, &error), FSIMG_ECORRUPT,
+			    &error, codec_names[a]);
+			gen_tree_free(&tree);
+		}
+	}
+}
+
+/* One hostile stream and the refusal it must meet. */
+typedef struct codec_hostile {
+	const char	*name;
+	unsigned	 algorithm;
+	const unsigned char *bytes;
+	size_t		 length;
+	unsigned	 zstd_log;
+	fsimg_status_t	 status;
+	const char	*phrase;
+} codec_hostile_t;
+
+/*
+ * Hand-made streams the decoders must refuse before decoding: Zstandard
+ * frames the header parse rejects, a legacy and a skippable frame among
+ * them, which never reach libzstd, and a MicroLZMA properties byte no
+ * encoder writes. A build without the library names it instead.
+ */
+static void
+test_hand_made_hostile_codec_streams_are_corrupt(void)
+{
+	/* No single segment, no content size, window 2^21. */
+	static const unsigned char window21[] = { 0x28, 0xb5, 0x2f, 0xfd,
+		0x00, 0x58, 0x01, 0x00, 0x00, 0x00 };
+	/* A one-byte dictionary identifier, window 2^10. */
+	static const unsigned char dictionary[] = { 0x28, 0xb5, 0x2f, 0xfd,
+		0x01, 0x00, 0x07, 0x01, 0x00, 0x00, 0x00 };
+	/* The v0.7 magic libzstd's legacy decoder would accept. */
+	static const unsigned char legacy[] = { 0x27, 0xb5, 0x2f, 0xfd,
+		0x00, 0x00, 0x00, 0x00, 0x00 };
+	static const unsigned char skippable[] = { 0x50, 0x2a, 0x4d, 0x18,
+		0x01, 0x00, 0x00, 0x00, 0xaa };
+	/* Inverted properties 0xfe: beyond lc, lp and pb's range. */
+	static const unsigned char properties[] = { 0x01, 0x00, 0x10, 0x20 };
+	static const codec_hostile_t cases[] = {
+		{ "a Zstandard window of 2^21 under a record of 2^10",
+		    EROFS_ALGORITHM_ZSTD, window21, sizeof(window21), 10,
+		    ZSTD_REFUSAL },
+		{ "a Zstandard frame naming a dictionary",
+		    EROFS_ALGORITHM_ZSTD, dictionary, sizeof(dictionary), 10,
+		    ZSTD_REFUSAL },
+		{ "a legacy Zstandard frame", EROFS_ALGORITHM_ZSTD, legacy,
+		    sizeof(legacy), 0, ZSTD_REFUSAL },
+		{ "a skippable Zstandard frame", EROFS_ALGORITHM_ZSTD,
+		    skippable, sizeof(skippable), 0, ZSTD_REFUSAL },
+		{ "a MicroLZMA properties byte out of range",
+		    EROFS_ALGORITHM_LZMA, properties, sizeof(properties), 0,
+		    LZMA_REFUSAL }
+	};
+	unsigned char got[CODEC_EXTENT];
+	fsimg_error_t error;
+	gen_tree_t tree;
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		const codec_hostile_t *h = &cases[i];
+		codec_config_t config = { 0, h->zstd_log };
+
+		codec_tree(&tree, &config, ZLAYOUT_FULL, h->algorithm, 9,
+		    h->bytes, h->length, CODEC_EXTENT);
+		check_refusal(h->name, codec_read(h->name, &tree, CODEC_EXTENT,
+		    16 * 1024 * 1024, got, &error), h->status, &error,
+		    h->phrase);
+		gen_tree_free(&tree);
+	}
+}
+
+/*
+ * Damage the libraries detect: a flipped stream byte, and a MicroLZMA
+ * stream that needs a 1 MiB dictionary read under a 64 KiB record.
+ */
+static void
+test_damaged_codec_streams_are_corrupt_naming_the_algorithm(void)
+{
+	static const unsigned algorithms[] = { EROFS_ALGORITHM_LZMA,
+		EROFS_ALGORITHM_DEFLATE, EROFS_ALGORITHM_ZSTD };
+	static unsigned char stream[CODEC_STREAM_MAX];
+	static unsigned char distant[CODEC_FAR_PREFIX + 1000];
+	unsigned char content[CODEC_EXTENT];
+	fsimg_error_t error;
+	gen_tree_t tree;
+	char label[96];
+	size_t n;
+
+	codec_content(content, sizeof(content), 9);
+	for (size_t i = 0; i < ARRAY_SIZE(algorithms); i++) {
+		unsigned a = algorithms[i];
+
+		n = codec_stream(a, content, sizeof(content), stream,
+		    sizeof(stream), a == EROFS_ALGORITHM_LZMA ? 65536 : 4096);
+		if (n == 0)
+			continue;
+		/* DEFLATE's first block header, the Zstandard block header
+		 * after a 7-byte frame header, a MicroLZMA range-coder byte. */
+		stream[a == EROFS_ALGORITHM_ZSTD ? 8 : a ==
+		    EROFS_ALGORITHM_DEFLATE ? 0 : 2] ^= 0xff;
+		snprintf(label, sizeof(label), "a flipped %s stream byte",
+		    codec_names[a]);
+		codec_tree(&tree, &codec_defaults, ZLAYOUT_FULL, a, 9, stream, n,
+		    sizeof(content));
+		check_refusal(label, codec_read(label, &tree, sizeof(content),
+		    16 * 1024 * 1024, distant, &error), FSIMG_ECORRUPT, &error,
+		    codec_names[a]);
+		gen_tree_free(&tree);
+	}
+
+	/* Incompressible bytes (xorshift32), then a copy of their start. */
+	for (uint32_t i = 0, x = 2463534242u; i < CODEC_FAR_PREFIX; i++) {
+		x ^= x << 13;
+		x ^= x >> 17;
+		x ^= x << 5;
+		distant[i] = (unsigned char)(x >> 24);
+	}
+	bcopy(distant, distant + CODEC_FAR_PREFIX, 1000);
+	n = codec_stream(EROFS_ALGORITHM_LZMA, distant, sizeof(distant), stream,
+	    sizeof(stream), 1024 * 1024);
+	if (n != 0) {
+		static unsigned char got[sizeof(distant)];
+
+		codec_tree(&tree, &codec_defaults, ZLAYOUT_FULL,
+		    EROFS_ALGORITHM_LZMA, 12, stream, n, sizeof(distant));
+		check_refusal("a 1 MiB-dictionary MicroLZMA stream under 64 KiB",
+		    codec_read("far match", &tree, sizeof(distant),
+		    16 * 1024 * 1024, got, &error), FSIMG_ECORRUPT, &error,
+		    "MicroLZMA");
+		gen_tree_free(&tree);
+	}
+}
+
+/*
+ * The decoder's state is charged to the context: an 8 MiB MicroLZMA
+ * dictionary that does not fit beside a 9 MiB decode window in the
+ * smallest budget, 16 MiB, fails as a memory limit naming liblzma with
+ * nothing decoded, and an allocation failure at each of a decode's
+ * allocations fails the read and returns all memory.
+ */
+static void
+test_codec_decoder_memory_is_charged_and_returned_on_failure(void)
+{
+	static const unsigned algorithms[] = { EROFS_ALGORITHM_LZMA,
+		EROFS_ALGORITHM_DEFLATE, EROFS_ALGORITHM_ZSTD };
+	unsigned char content[CODEC_EXTENT], got[CODEC_EXTENT];
+	unsigned char stream[CODEC_STREAM_MAX];
+	fsimg_error_t error;
+	fsimg_status_t status;
+	gen_tree_t tree;
+	char label[96];
+	size_t n;
+
+	if (codec_missing(EROFS_ALGORITHM_LZMA) == NULL) {
+		static const codec_config_t config = { 8 * 1024 * 1024, 0 };
+		size_t large = 9 * 1024 * 1024;
+		unsigned char *bytes = malloc(large), *out = malloc(large);
+
+		CHECK(bytes != NULL && out != NULL);
+		codec_content(bytes, large, 11);
+		n = codec_stream(EROFS_ALGORITHM_LZMA, bytes, large, stream,
+		    sizeof(stream), 65536);
+		codec_tree(&tree, &config, ZLAYOUT_FULL, EROFS_ALGORITHM_LZMA, 12,
+		    stream, n, large);
+		status = codec_read("an 8 MiB dictionary beside a 9 MiB window",
+		    &tree, large, 16 * 1024 * 1024, out, &error);
+		check_status("an 8 MiB dictionary beside a 9 MiB window",
+		    status, FSIMG_ELIMIT, &error);
+		EXPECT(strcmp(error.path, "liblzma") == 0,
+		    "the memory limit names liblzma, not \"%s\"", error.path);
+		gen_tree_free(&tree);
+		free(bytes);
+		free(out);
+	}
+
+	codec_content(content, sizeof(content), 11);
+	for (size_t i = 0; i < ARRAY_SIZE(algorithms); i++) {
+		unsigned a = algorithms[i];
+		bool read = false;
+
+		n = codec_stream(a, content, sizeof(content), stream,
+		    sizeof(stream), a == EROFS_ALGORITHM_LZMA ? 65536 : 4096);
+		if (n == 0)
+			continue;
+		codec_tree(&tree, &codec_defaults, ZLAYOUT_FULL, a, 9, stream, n,
+		    sizeof(content));
+		gen_tree_seal(&tree);
+		/* The window's two buffers come first, then the decoder's
+		 * allocations, until a read needs no more. */
+		for (uint64_t nth = 1; nth <= 64 && !read; nth++) {
+			zreader_t z;
+
+			snprintf(label, sizeof(label),
+			    "%s decode, allocation %llu fails", codec_names[a],
+			    (unsigned long long)nth);
+			zreader_open(&z, label, &tree, sizeof(content));
+			if (z.ok) {
+				bzero(&error, sizeof(error));
+				fsimg_test_fail_alloc_after(z.v.ctx, nth);
+				status = read_range(z.reader, 0, got,
+				    sizeof(got), &error);
+				fsimg_test_fail_alloc_after(z.v.ctx, 0);
+				read = status == FSIMG_OK;
+				if (!read)
+					check_status(label, status, FSIMG_ENOMEM,
+					    &error);
+			}
+			zreader_close(&z, label);
+		}
+		EXPECT(read, "%s: a read succeeds once allocations do",
+		    codec_names[a]);
+		gen_tree_free(&tree);
+	}
+}
+
+/*
+ * Seeds holding one cluster of each algorithm the build encodes, so the
+ * fuzzer reaches the DEFLATE, MicroLZMA and Zstandard decoders.
+ */
+static void
+emit_codec_seeds(const char *directory)
+{
+	static const char *const names[] = { [EROFS_ALGORITHM_LZMA] =
+		"lzma.seed", [EROFS_ALGORITHM_DEFLATE] = "deflate.seed",
+		[EROFS_ALGORITHM_ZSTD] = "zstd.seed" };
+	unsigned char content[CODEC_EXTENT], stream[CODEC_STREAM_MAX];
+	gen_tree_t tree;
+	size_t n;
+
+	codec_content(content, sizeof(content), 13);
+	for (unsigned a = EROFS_ALGORITHM_LZMA; a <= EROFS_ALGORITHM_ZSTD; a++) {
+		n = codec_stream(a, content, sizeof(content), stream,
+		    sizeof(stream), a == EROFS_ALGORITHM_LZMA ? 65536 : 4096);
+		if (n == 0)
+			continue;
+		codec_tree(&tree, &codec_defaults, ZLAYOUT_COMPACT, a, 9, stream,
+		    n, sizeof(content));
+		gen_tree_seal(&tree);
+		write_seed(directory, names[a], &tree);
+		gen_tree_free(&tree);
+	}
 }
 
 int
@@ -10700,6 +11343,12 @@ main(int argc, char **argv)
 	test_a_non_head_chaining_to_an_earlier_non_head_of_its_cluster_reads();
 	test_a_physical_cluster_past_a_truncated_image_is_corrupt();
 	test_compressed_directories_and_links_are_unsupported();
+	test_deflate_microlzma_and_zstd_clusters_read_back_or_name_their_library();
+	test_a_head_2_cluster_of_another_algorithm_reads_after_lz4_ones();
+	test_codec_streams_decode_exactly_their_extent_unless_partial();
+	test_hand_made_hostile_codec_streams_are_corrupt();
+	test_damaged_codec_streams_are_corrupt_naming_the_algorithm();
+	test_codec_decoder_memory_is_charged_and_returned_on_failure();
 
 	if (failures != 0)
 		fprintf(stderr, "test/erofs.c: %d checks failed\n", failures);

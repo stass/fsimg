@@ -88,6 +88,28 @@ a static consumer with `pkg-config --static --libs libfsimg`, so the check
 follows the metadata. CI builds with both libraries on every platform, GCC
 16 included, and without them in the GCC 13 job.
 
+The same libraries decode EROFS clusters: MicroLZMA through liblzma's
+`lzma_microlzma_decoder`, which liblzma has from 5.4, and Zstandard
+through libzstd (specs/design-compression-libs.md#erofs-block-decoding).
+After the xz link test configure checks for the MicroLZMA decoder
+(`checking whether liblzma has the MicroLZMA decoder`) and defines
+`FSIMG_MICROLZMA` when it links, so an older liblzma still serves xz; the
+zstd link test already covers the calls the Zstandard decoder makes.
+DEFLATE clusters use the system zlib in every build. A build without a
+library reads the rest of an EROFS volume and fails a file of that
+algorithm as unsupported naming the library (`liblzma 5.4`, `libzstd`);
+`fsimg --formats -v` lists under `erofs` the algorithms the build decodes.
+`test-erofs` and `test/erofs-integration.sh` check both configurations:
+with a library they decode its clusters, and without it they require the
+refusal, a volume that still lists and a verification that reports it,
+lowering the integration pass floor by one for each such fixture. A
+library-less build was configured and checked with:
+
+```sh
+/path/to/fsimg/configure --without-zstd --without-xz
+make -j32 check TESTS='test-erofs test-erofs-fixtures test/erofs-integration.sh'
+```
+
 The CLI requires native spawn-time closure of all unspecified descriptors:
 `POSIX_SPAWN_CLOEXEC_DEFAULT` or `posix_spawn_file_actions_addclosefrom_np`.
 Configure reports an error if neither interface is available. Host OS and libc

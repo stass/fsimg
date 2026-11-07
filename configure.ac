@@ -163,6 +163,29 @@ FSIMG_CODEC_LIBRARY([xz], [LZMA], [liblzma], [lzma], [#include <lzma.h>],
           lzma_easy_encoder(&e, 0, LZMA_CHECK_CRC64) != LZMA_OK ||
           lzma_version_string()[0] == '\0');],
     [FSIMG_XZ], [liblzma for the xz compression])
+# The MicroLZMA decoder EROFS clusters need, in liblzma 5.4.0 and later
+# (specs/design-compression-libs.md#erofs-block-decoding). An older liblzma
+# still serves xz; only the EROFS block decoder is left out.
+fsimg_have_microlzma=no
+AS_IF([test "$fsimg_have_xz" = yes], [
+    fsimg_saved_CPPFLAGS=$CPPFLAGS
+    fsimg_saved_LIBS=$LIBS
+    CPPFLAGS="$CPPFLAGS $LZMA_CFLAGS"
+    LIBS="$LZMA_LIBS $LIBS"
+    AC_MSG_CHECKING([whether liblzma has the MicroLZMA decoder])
+    AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <lzma.h>]],
+        [[lzma_stream s = LZMA_STREAM_INIT;
+          return (lzma_microlzma_decoder(&s, 1, 1, 1, 4096) != LZMA_OK);]])],
+        [fsimg_have_microlzma=yes])
+    AC_MSG_RESULT([$fsimg_have_microlzma])
+    CPPFLAGS=$fsimg_saved_CPPFLAGS
+    LIBS=$fsimg_saved_LIBS
+    AS_IF([test "$fsimg_have_microlzma" = no],
+        [AC_MSG_NOTICE([EROFS MicroLZMA clusters disabled: liblzma predates 5.4])])
+])
+AS_IF([test "$fsimg_have_microlzma" = yes],
+    [AC_DEFINE([FSIMG_MICROLZMA], [1],
+        [Define to 1 when liblzma provides the MicroLZMA decoder.])])
 AC_CONFIG_FILES([Makefile libfsimg.pc test/fat-integration.sh test/exfat-integration.sh
     test/qnx6-integration.sh test/qnx4-integration.sh test/layers-integration.sh
     test/containers-integration.sh test/compression-integration.sh

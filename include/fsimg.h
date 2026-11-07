@@ -1275,6 +1275,14 @@ typedef struct fsimg_format_info {
 	 */
 	uint32_t	 write_settings;
 	uint32_t	 read_settings;
+	/*
+	 * The compression algorithms this build decodes in the format's
+	 * compressed files, each with the name and runtime version of the
+	 * library it depends on, "; " between them ("lz4; deflate, zlib
+	 * 1.3.1; zstd, zstd 1.5.7" without liblzma); empty for a format
+	 * without them.
+	 */
+	char		 codecs[128];
 } fsimg_format_info_t;
 
 typedef struct fsimg_verify_report {

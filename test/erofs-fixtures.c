@@ -60,7 +60,19 @@ static const char *const fixture_names[] = {
 	"e8-lz4-big16k", "e8-lz4-big64k", "e8-lz4-big1m",
 	"e8-lz4-words6m-big1m", "e8-lz4-zeros40m", "e8-lz4-zeros40m-big1m",
 	"e8-lz4hc-legacy", "e9-config-four", "e9-mixed-lz4-lzma",
-	"e1-cfg-lz4-b4096", "e1-cfg-lz4-b512"
+	"e1-cfg-lz4-b4096", "e1-cfg-lz4-b512",
+	/*
+	 * The E9 fixtures with an extents.txt; the zeros40m ones dump only
+	 * one of their two files, so the integration test alone reads them.
+	 * The library codecs run in a build that has the library.
+	 */
+	"e9-deflate-words6m-big1m",
+#ifdef FSIMG_MICROLZMA
+	"e9-lzma-words6m-big1m",
+#endif
+#ifdef FSIMG_ZSTD
+	"e9-zstd-words6m-big1m",
+#endif
 };
 
 /* ---- The oracle: dump.erofs -e rows and the manifest ---- */

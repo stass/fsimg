@@ -814,6 +814,18 @@ typedef struct fsimg_compressor_ops {
  * writes the name and runtime version of the library the codec is, as
  * "zlib 1.3.1", which the capability record and the plan report; NULL
  * for a compression this build does not implement.
+ *
+ * block_decode decodes one EROFS physical cluster's stream
+ * (specs/design-compression-libs.md#erofs-block-decoding): input_bytes of
+ * input into exactly output_bytes of output, or, when partial, into the
+ * first output_bytes of a longer stream, under a decoder whose dictionary
+ * or window is at most bound bytes, the volume's configuration record. It
+ * creates and frees its decoder within the call, allocates through the
+ * codec memory adapter, writes nothing outside the output, and fails
+ * FSIMG_ECORRUPT naming the algorithm for a stream that is not exactly
+ * that, FSIMG_ELIMIT for a budget that cannot hold the decoder, and
+ * FSIMG_ESTATE for parameters the caller should have refused. NULL on a
+ * row whose library this build lacks, or lacks the block interface of.
  */
 typedef struct fsimg_compression_ops {
 	size_t		 probe_bytes;
@@ -827,6 +839,9 @@ typedef struct fsimg_compression_ops {
 	fsimg_status_t	(*bound)(uint64_t, uint64_t *, fsimg_error_t *);
 	const fsimg_compressor_ops_t *encoder;
 	void		(*version)(char *, size_t);
+	fsimg_status_t	(*block_decode)(fsimg_ctx_t *, const unsigned char *,
+			    size_t, unsigned char *, size_t, bool, size_t,
+			    fsimg_error_t *);
 } fsimg_compression_ops_t;
 
 /* A registered layer. Every layer name the stack grammar accepts outside

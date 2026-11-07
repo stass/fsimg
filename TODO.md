@@ -369,6 +369,21 @@
 
 ## Bugs by subsystem
 
+* [Low] **EROFS cluster decode errors name no cluster**
+  (`lib/formats/erofs/cluster.c`): a corrupt stream of any algorithm
+  reports the check it failed ("invalid EROFS Zstandard stream is
+  corrupt ...", "lz4: block end") but not the physical cluster's offset,
+  which would point a user at the damage. Add it once in
+  `erofs_window_fill()` for every algorithm and update the pinned
+  messages in `test/erofs-integration.rb`.
+* [Low] **The block_decode operation takes eight positional parameters**
+  (`lib/layers/layer.h`, `xz.c`, `zstd.c`, `lib/formats/erofs/cluster.c`):
+  three `size_t` and a `bool` in a row, so swapping the output length and
+  the bound compiles; the zstd row also turns the window back from bytes
+  into its log. A small request structure (input, output, partial,
+  dictionary bytes or window log) would make the call self-describing.
+  The stream decoders in `cluster.c` also take a non-const input to suit
+  zlib's `next_in`; building with `ZLIB_CONST` would keep it const.
 * [Medium] **EROFS directory listing exceeds the minimum memory budget**
   (`lib/formats/erofs/directory.c`): listing one directory of 100000
   entries fails under the 16 MiB budget and needs 256 MiB

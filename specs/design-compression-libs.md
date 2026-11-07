@@ -449,8 +449,10 @@ the budget when the call ends.
   [E9](../docs/erofs-research.md#e9-other-codecs)); the reference decoder
   accepts only `LZMA_STREAM_END` for either case (source `decompress.c`).
   The dictionary size comes from the record, not the stream, which carries
-  none; liblzma allocates that much, and a stream compressed with a larger
-  one fails as `LZMA_DATA_ERROR`.
+  none; the driver passes the smaller of the record's size and the
+  extent's length, at least 4096, since a fresh decoder cannot reach back
+  further than it has produced. liblzma allocates that much, and a stream
+  compressed with a larger dictionary fails as `LZMA_DATA_ERROR`.
 * Zstandard: `ZSTD_getFrameHeader` over the cluster's first bytes, the
   same guard the [zstd profile](#zstd) applies to every frame start, so
   that libzstd's legacy decoders, which allocate outside the adapter, never
@@ -500,9 +502,11 @@ EROFS codecs as not covered.
 the cluster algorithms this build decodes and the library each depends on:
 LZ4, the project codec, with no library or version, and each other
 algorithm with the version its library's `version` operation gives, zlib's
-for DEFLATE (`lz4; deflate, zlib 1.3.1; lzma, liblzma 5.8.4; zstd, libzstd
-1.5.7`), omitting an algorithm whose row has no block decoder; `--json`
-lists the same names in the format record's `capabilities`. A user reads
+for DEFLATE, in identifier order (`lz4; lzma, liblzma 5.8.4; deflate, zlib
+1.3.1; zstd, zstd 1.5.7`), omitting an algorithm whose row has no block decoder. The text is
+`fsimg_format_info_t.codecs`, which a format descriptor's optional `codecs`
+operation writes, and `--json` gives it as the format record's `codecs`,
+null for a format without compression. A user reads
 from one listing which EROFS volumes a build can extract.
 
 **Sandbox.** Both calls are pure computation over caller buffers plus
@@ -518,8 +522,8 @@ library in the file that owns it:
 | --- | --- |
 | A cluster of an algorithm whose row has no `block_decode` | `FSIMG_EUNSUPPORTED` naming the library, when that content is read |
 | The budget cannot hold the dictionary or window (`LZMA_MEM_ERROR`, `ZSTD_error_memory_allocation`) | The adapter's first error: `FSIMG_ELIMIT`, `FSIMG_RESOURCE_MEMORY`, naming the library, nothing decoded |
-| The stream ends before the output is full; the output fills before the frame ends outside a partial reference; a cluster whose first bytes are not a current Zstandard frame header (a legacy or skippable frame, or a parse error); damaged data (`LZMA_DATA_ERROR`, `LZMA_BUF_ERROR`, `LZMA_OK` after `LZMA_FINISH`; `ZSTD_error_corruption_detected`, `_frameParameter_windowTooLarge`, `_dictionary_*`, `_prefix_unknown`, any other decode-side code) | `FSIMG_ECORRUPT` naming the algorithm; the driver adds the cluster |
-| An output length of zero, a bound outside the record's range, `LZMA_OPTIONS_ERROR`, `LZMA_PROG_ERROR`, `ZSTD_error_parameter_*`, `ZSTD_error_stage_wrong` | `FSIMG_ESTATE` with the call and code: the driver validated every parameter first |
+| The stream ends before the output is full; the output fills before the frame ends outside a partial reference; a cluster whose first bytes are not a current Zstandard frame header (a legacy or skippable frame, or a parse error); damaged data (`LZMA_DATA_ERROR`, `LZMA_BUF_ERROR`, `LZMA_OK` after `LZMA_FINISH`, `LZMA_OPTIONS_ERROR` from `lzma_code`, which is the stream's first byte holding properties out of range; `ZSTD_error_corruption_detected`, `_frameParameter_windowTooLarge`, `_dictionary_*`, `_prefix_unknown`, any other decode-side code) | `FSIMG_ECORRUPT` naming the algorithm; the driver adds its EROFS prefix |
+| An output length of zero, a bound outside the record's range, `LZMA_OPTIONS_ERROR` from `lzma_microlzma_decoder`, `LZMA_PROG_ERROR`, `ZSTD_error_parameter_*`, `ZSTD_error_stage_wrong` | `FSIMG_ESTATE` with the call and code: the driver validated every parameter first |
 
 The [tests table](#tests-and-evidence) carries the block decoders' rows.
 

@@ -131,6 +131,13 @@ static fsimg_status_t frame_start(zstd_decoder_t *, fsimg_error_t *);
 static fsimg_status_t decoder_start(zstd_decoder_t *, fsimg_error_t *);
 static void decoder_end(zstd_decoder_t *);
 static fsimg_status_t decode_frames(zstd_decoder_t *, fsimg_error_t *);
+static fsimg_status_t zstd_block_decode(fsimg_ctx_t *, const unsigned char *,
+    size_t, unsigned char *, size_t, bool, size_t, fsimg_error_t *);
+static fsimg_status_t block_memory_failed(const fsimg_codec_memory_t *,
+    fsimg_error_t *);
+static fsimg_status_t block_failed(const fsimg_codec_memory_t *, size_t,
+    fsimg_error_t *);
+static fsimg_status_t block_corrupt(const char *, fsimg_error_t *);
 
 static const fsimg_compressor_ops_t zstd_encoder = {
 	.open = encoder_open,
@@ -147,7 +154,8 @@ const fsimg_compression_ops_t fsimg_zstd_compression = {
 	.plan = zstd_plan,
 	.bound = zstd_bound,
 	.encoder = &zstd_encoder,
-	.version = zstd_version
+	.version = zstd_version,
+	.block_decode = zstd_block_decode
 };
 
 /* libzstd's binding of the codec memory adapter: one item of size bytes. */
@@ -667,4 +675,135 @@ encoder_close(void *state)
 	fsimg_dealloc(encoder->zeros);
 	fsimg_dealloc(encoder->output);
 	fsimg_dealloc(encoder);
+}
+
+/*
+ * EROFS block decoding: one cluster's stream, exactly one current frame,
+ * into one bounded output (specs/design-compression-libs.md#erofs-block-
+ * decoding). The frame header is parsed here before a decoder exists, so
+ * a legacy or skippable frame, which libzstd would decode outside the
+ * adapter, never reaches the library, and a frame naming a dictionary or a
+ * window above the volume's bound is refused before anything is
+ * allocated. The window limit is also set on the decoder, so the library
+ * enforces the same bound. The decoder lives for this call only.
+ *
+ * ZSTD_decompressStream is called until it reports the frame's end, an
+ * error, or a call that makes no progress, which happens once the input
+ * is consumed or the output is full. A frame that ends is the extent only
+ * when the output is exactly full; a full output with the frame still
+ * going is the extent only under a partial reference; anything else is a
+ * truncated or overlong stream. Bytes after the frame's end are not
+ * judged.
+ */
+static fsimg_status_t
+zstd_block_decode(fsimg_ctx_t *ctx, const unsigned char *input,
+    size_t input_bytes, unsigned char *output, size_t output_bytes,
+    bool partial, size_t bound, fsimg_error_t *error)
+{
+	ZSTD_inBuffer in = { .src = input, .size = input_bytes };
+	ZSTD_outBuffer out = { .dst = output, .size = output_bytes };
+	fsimg_codec_memory_t memory;
+	ZSTD_frameHeader header;
+	ZSTD_DStream *stream;
+	size_t before_in, before_out, result;
+	unsigned window_log;
+
+	/* The record's window is 2^10 to 2^20 bytes (design-erofs.md). */
+	for (window_log = 10; window_log <= 20 &&
+	    ((size_t)1 << window_log) != bound; window_log++)
+		continue;
+	if (output_bytes == 0 || window_log > 20)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "Zstandard block decode given an empty extent or a bad window"));
+
+	result = ZSTD_getFrameHeader(&header, input, input_bytes);
+	if (ZSTD_isError(result) || result != 0 ||
+	    header.frameType != ZSTD_frame)
+		return (block_corrupt("cluster is not one Zstandard frame", error));
+	if (header.dictID != 0)
+		return (block_corrupt("Zstandard frame needs a dictionary", error));
+	if (header.windowSize > bound)
+		return (block_corrupt(
+		    "Zstandard frame's window exceeds the volume's", error));
+
+	stream = ZSTD_createDStream_advanced(zstd_bind(&memory, ctx));
+	if (stream == NULL)
+		return (block_memory_failed(&memory, error));
+	result = ZSTD_DCtx_setParameter(stream, ZSTD_d_windowLogMax,
+	    (int)window_log);
+	if (ZSTD_isError(result)) {
+		ZSTD_freeDStream(stream);
+		return (call_failed(&memory, result, "ZSTD_DCtx_setParameter",
+		    error));
+	}
+	do {
+		before_in = in.pos;
+		before_out = out.pos;
+		result = ZSTD_decompressStream(stream, &out, &in);
+	} while (!ZSTD_isError(result) && result != 0 &&
+	    !(partial && out.pos == out.size) &&
+	    (in.pos != before_in || out.pos != before_out));
+	ZSTD_freeDStream(stream);
+
+	if (ZSTD_isError(result))
+		return (block_failed(&memory, result, error));
+	if (out.pos != out.size)
+		return (block_corrupt(result == 0 ?
+		    "Zstandard frame ends before its extent is full" :
+		    "Zstandard frame is truncated", error));
+	if (result != 0 && !partial)
+		return (block_corrupt("Zstandard frame continues past its extent",
+		    error));
+	return (FSIMG_OK);
+}
+
+/*
+ * A failed block decode, by libzstd's code: memory as the adapter
+ * recorded it, named for the library; a parameter or stage error as
+ * fsimg's own, since every parameter was checked first; and every other
+ * code, a window or dictionary refusal among them, as a damaged cluster,
+ * since the record pins what a cluster may need.
+ */
+static fsimg_status_t
+block_failed(const fsimg_codec_memory_t *memory, size_t result,
+    fsimg_error_t *error)
+{
+	ZSTD_ErrorCode code = ZSTD_getErrorCode(result);
+	char message[64];
+
+	switch (code) {
+	case ZSTD_error_memory_allocation:
+		return (block_memory_failed(memory, error));
+	case ZSTD_error_parameter_unsupported:
+	case ZSTD_error_parameter_combination_unsupported:
+	case ZSTD_error_parameter_outOfBound:
+	case ZSTD_error_stage_wrong:
+		snprintf(message, sizeof(message),
+		    "libzstd refused the block decode with code %d", (int)code);
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    message));
+	default:
+		snprintf(message, sizeof(message),
+		    "Zstandard stream is corrupt (libzstd code %d)", (int)code);
+		return (block_corrupt(message, error));
+	}
+}
+
+/* The adapter's first error, named for the library. */
+static fsimg_status_t
+block_memory_failed(const fsimg_codec_memory_t *memory, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fsimg_codec_memory_error(memory, error);
+	if (error != NULL && error->path[0] == '\0')
+		snprintf(error->path, sizeof(error->path), "libzstd");
+	return (status);
+}
+
+static fsimg_status_t
+block_corrupt(const char *what, fsimg_error_t *error)
+{
+	return (fsimg_error_set(error, FSIMG_ECORRUPT, 0, FSIMG_OP_READER,
+	    what));
 }

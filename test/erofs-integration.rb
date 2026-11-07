@@ -22,7 +22,13 @@
 # A fixture whose `i` fails with the
 # "unsupported capability" status is counted and named as not yet supported,
 # never a pass, and only for a reason listed in KNOWN_REFUSALS: any other
-# refusal, or fewer than PASS_FLOOR passes, fails the run. A few
+# refusal, or fewer than PASS_FLOOR passes, fails the run. A refusal naming
+# a compression library (liblzma 5.4, libzstd) is a pass only for a build
+# whose `--formats` listing lacks that library's EROFS codec, and only when
+# the volume lists and `W` refuses it for the same reason; each such fixture
+# lowers the floor by one. The hand-built head-2 fixtures are also read with
+# COMPR_HEAD2 set (tools/erofs/head2-bit.rb), where their head-2 records are
+# legal (HEAD2_WITH_BIT). A few
 # representative fixtures are then wrapped in a GPT, gzip and xz, and must
 # list exactly as the bare image.
 #
@@ -38,6 +44,8 @@ require "fileutils"
 require "json"
 require "open3"
 require "tmpdir"
+
+require_relative "../tools/erofs/head2-bit"
 
 FSIMG, SGDISK, CORPUS = ARGV.fetch(0, nil), ARGV.fetch(1, nil), ARGV.fetch(2, nil)
 abort "usage: erofs-integration.rb FSIMG SGDISK CORPUS" unless FSIMG && CORPUS
@@ -66,8 +74,9 @@ DEVICES = %w[chardev blockdev].freeze
 MAX_NOTES = 4
 # The verifications run on every readable fixture: structure, then file data.
 VERIFY_MODES = [[], ["-d"]].freeze
-# Passes today; a fixture slipping to "unsupported" must not keep the run green.
-PASS_FLOOR = 74
+# The passes of a build with every library; a fixture slipping to
+# "unsupported" must not keep the run green.
+PASS_FLOOR = 104
 # Fixtures covering geometry, inline data, and an attribute-bearing tree.
 WRAPPED_FIXTURES = %w[e1-geom-b512 e3-b4096-inline e6-xattr-default].freeze
 SECTOR = 512
@@ -75,9 +84,21 @@ FIRST_SECTOR = 2048
 
 # The only reasons the reader may give for an image it cannot read yet.
 KNOWN_REFUSALS = [
-  %r{feature (48BIT|ZTAILPACKING|FRAGMENTS/DEDUPE)\z}, /extra devices\z/,
-  /compression algorithm (MicroLZMA|DEFLATE|Zstandard)\z/, /metadata box/
+  %r{feature (48BIT|ZTAILPACKING|FRAGMENTS/DEDUPE)\z}, /extra devices\z/, /metadata box/
 ].freeze
+
+# A cluster of an algorithm whose library this build lacks, and the codec
+# name `--formats` lists for the library.
+LIBRARY_REFUSAL = /cluster needs (liblzma 5\.4|libzstd)\z/
+LIBRARY_CODECS = { "liblzma 5.4" => "lzma", "libzstd" => "zstd" }.freeze
+
+# The hand-built head-2 images read with COMPR_HEAD2 set: the digest /y must
+# have (e9-head2-lzma's expected.txt), or the refusal of an LZ4 stream that
+# its head-2 record calls MicroLZMA; and the codec /y's record names, which
+# a build may lack. Evidence: E9.md.
+HEAD2_WITH_BIT = { "e9-head2-lzma" => [:digest, "lzma"], "e9-head2-lz4-ctrl" => [:digest, "lz4"],
+                   "e9-head2-wrongalg" => [/MicroLZMA stream/, "lzma"] }.freeze
+HEAD2_DIGEST_SOURCE = "e9-head2-lzma"
 
 # Fixtures without a manifest that end in a refusal, and its class. Evidence:
 # ~/.cache/fsimg-erofs/evidence/E8.md (the cleared-flag edits), E14.md
@@ -389,18 +410,74 @@ def compare_unlisted(name, dir, work)
   end
 end
 
+CAP_READ = 0x01
+
+def format_records = parse_lines(run("--formats", "--json")).select { _1["type"] == "format" }
+
+# The EROFS codecs this build decodes, by the names `--formats` lists.
+def build_codecs(records) =
+  records.find { _1["name"] == "erofs" }.fetch("codecs").to_s.split("; ").map { _1.split(",").first }
+
+# The compressions this build reads, which a build without liblzma lacks xz of.
+def readable_compressions(records) =
+  records.select { _1["kind"] == "compression" && _1["capabilities"].anybits?(CAP_READ) }.map { _1["name"] }
+
+# A refusal naming a library this build lacks, when the volume still lists
+# and verification refuses it for the same reason; the difference otherwise.
+def library_difference(message, image)
+  library = message[LIBRARY_REFUSAL, 1]
+  return "#{library} refused, but this build decodes #{LIBRARY_CODECS[library]}" if BUILD_CODECS.include?(LIBRARY_CODECS[library])
+
+  listing(image)
+  verify_refusal_difference(image, Regexp.new(Regexp.escape(message)))
+rescue RuntimeError, Unsupported => e
+  "the rest of the volume does not read: #{e.message}"
+end
+
+def library_refused(name, dir, message)
+  difference = library_difference(message, File.join(dir, "image.erofs"))
+  Result.new(name:, verdict: difference ? :fail : :no_library, notes: [message, *difference], skipped: [])
+end
+
 def check(dir, work)
   name = File.basename(dir)
   return compare_unlisted(name, dir, work) unless File.exist?(File.join(dir, "manifest.txt"))
 
   compare(name, dir, work)
 rescue Unsupported => e
+  return library_refused(name, dir, e.message) if e.message.match?(LIBRARY_REFUSAL)
+
   known = KNOWN_REFUSALS.any? { e.message.match?(_1) }
   note = known ? e.message : "unexpected refusal: #{e.message}"
   Result.new(name:, verdict: known ? :unsupported : :fail, notes: [note], skipped: [])
 rescue StandardError => e
   Result.new(name:, verdict: :fail, notes: ["#{e.class}: #{e.message}"], skipped: [])
 end
+
+# `x -O` of one path: its SHA-256, or the refusal text.
+def extracted_digest(image, path)
+  out, err, status = fsimg("x", "-O", "-f", image, path)
+  status.success? ? Digest::SHA256.hexdigest(out) : failure_line(out, err)
+end
+
+def head2_expected_digest =
+  File.read(File.join(CORPUS, HEAD2_DIGEST_SOURCE, "expected.txt")).split.first
+
+# One hand-built head-2 image with the bit set: /y reads to the digest, or
+# fails as pinned; a build without liblzma refuses MicroLZMA naming it.
+def head2_check(name:, want:, codec:, work:)
+  image = File.join(work, "#{name}-head2-bit.erofs")
+  File.binwrite(image, Head2Bit.with_bit(File.binread(File.join(CORPUS, name, "image.erofs"))))
+  got = extracted_digest(image, "/y")
+  expected = BUILD_CODECS.include?(codec) ? want : LIBRARY_REFUSAL
+  ok = expected == :digest ? got == head2_expected_digest && verify_failure(image).nil? : got.match?(expected)
+  Result.new(name: "#{name} (COMPR_HEAD2 set)", verdict: ok ? :pass : :fail, notes: ok ? [] : ["/y: #{got}"], skipped: [])
+end
+
+def head2_results(work) =
+  HEAD2_WITH_BIT.filter_map do |name, (want, codec)|
+    head2_check(name:, want:, codec:, work:) if File.exist?(File.join(CORPUS, name))
+  end
 
 def report(result)
   note = result.notes.join("; ")
@@ -438,7 +515,9 @@ end
 def gpt_wrapper? = !SGDISK.to_s.empty? && File.executable?(SGDISK)
 
 def wrappers_for(image)
-  list = [["gzip", ->(path) { compress("gzip", image, path) }], ["xz", ->(path) { compress("xz", image, path) }]]
+  list = %w[gzip xz].select { READABLE_COMPRESSIONS.include?(_1) }.map do |program|
+    [program, ->(path) { compress(program, image, path) }]
+  end
   gpt_wrapper? ? list.unshift(["gpt", ->(path) { wrap_gpt(image, path) }]) : list
 end
 
@@ -466,8 +545,10 @@ end
 def summary(results, wrapped)
   counts = results.map(&:verdict).tally
   skipped = results.flat_map(&:skipped).tally.map { |kind, n| "#{n} #{kind}" }.join(", ")
-  floor = counts.fetch(:pass, 0) < PASS_FLOOR ? ["fewer than #{PASS_FLOOR} passes"] : []
+  want = PASS_FLOOR - counts.fetch(:no_library, 0)
+  floor = counts.fetch(:pass, 0) < want ? ["fewer than #{want} passes"] : []
   line = "summary: #{counts.fetch(:pass, 0)} pass, #{counts.fetch(:fail, 0)} fail, " \
+         "#{counts.fetch(:no_library, 0)} need a library this build lacks, " \
          "#{counts.fetch(:unsupported, 0)} unsupported, #{counts.fetch(:rejected, 0)} rejected as corrupt, " \
          "#{counts.fetch(:unchecked, 0)} unchecked " \
          "(opened, no manifest); times compared against the command line (change times of extended inodes without MTIME skipped); " \
@@ -475,13 +556,16 @@ def summary(results, wrapped)
   [line, counts.fetch(:fail, 0).zero? && wrapped.empty? && floor.empty?, floor]
 end
 
+BUILD_CODECS, READABLE_COMPRESSIONS = format_records.then { [build_codecs(_1), readable_compressions(_1)] }.map(&:freeze)
+
 Dir.mktmpdir("fsimg-erofs-") do |work|
   dirs = Dir.children(CORPUS).sort.map { File.join(CORPUS, _1) }.select { File.directory?(_1) }
-  results = dirs.map { |dir| check(dir, work).tap { report(_1) } }
+  results = dirs.map { |dir| check(dir, work).tap { report(_1) } } + head2_results(work).each { report(_1) }
   wrapped = wrap_failures(results, work)
   wrapped.each { puts "FAIL        #{_1}" }
   gpt = gpt_wrapper? ? "gpt, " : ""
-  puts "wrapped: #{WRAPPED_FIXTURES.size} fixtures through #{gpt}gzip, xz; #{wrapped.size} failures"
+  puts "wrapped: #{WRAPPED_FIXTURES.size} fixtures through #{gpt}#{(READABLE_COMPRESSIONS & %w[gzip xz]).join(', ')}; " \
+       "#{wrapped.size} failures"
   puts "unsupported (not a pass): #{results.select { _1.verdict == :unsupported }.map(&:name).join(' ')}"
   line, ok, floor = summary(results, wrapped)
   puts line

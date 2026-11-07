@@ -141,6 +141,9 @@ typedef struct erofs_super {
 	bool		 reserved_nonzero;
 } erofs_super_t;
 
+/* The smallest MicroLZMA dictionary a record may declare. */
+#define EROFS_LZMA_DICT_MIN	UINT32_C(4096)
+
 /*
  * The compression configuration. algorithms is the mask of algorithms the
  * volume may use, by EROFS_ALGORITHM_* bit. Without COMPR_CFGS it is LZ4
@@ -532,6 +535,7 @@ fsimg_status_t	erofs_zmap(fsimg_reader_t *, const erofs_inode_t *, uint64_t,
  * build decodes a cluster, FSIMG_EUNSUPPORTED naming what it lacks;
  * erofs_window_fill() leaves a cluster's logical extent in a window's output.
  */
+void		erofs_codecs(char *, size_t);
 fsimg_status_t	erofs_cluster_readable(const fsimg_reader_t *,
 		    const erofs_cluster_t *, fsimg_error_t *);
 fsimg_status_t	erofs_window_fill(fsimg_reader_t *, erofs_window_t *,
