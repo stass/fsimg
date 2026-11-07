@@ -1235,6 +1235,20 @@ tools are installed through ports; ordinary builds/tests remain unprivileged.
 Fatcat's non-512-sector subcheck is explicitly skipped, and its Unicode name
 decoding is not an oracle; native checks and mtools cover those features.
 
+The EROFS work uses erofs-utils 1.9.4 (`mkfs.erofs`, `fsck.erofs`,
+`dump.erofs`) as an independent oracle, built from its pinned release tag with
+LZ4, liblzma, zlib and libzstd and no FUSE:
+
+```sh
+sh build-aux/build-erofs-utils.sh ~/.local/share/fsimg-oracles/erofs-utils
+```
+
+The destination must be new. The helper needs Git, a C compiler, make,
+Autoconf, Automake, Libtool, pkg-config and the LZ4, liblzma, zlib, zstd and
+uuid development packages, and fails when the built `mkfs.erofs` lacks a
+codec. The tool identities, the Linux kernel oracle and the rust-fs-erofs
+oracle are in [erofs-research.md](erofs-research.md).
+
 The HFS Plus work uses the hfsfuse `hfsdump` reader as an independent oracle,
 built the same way from a pinned upstream revision:
 
