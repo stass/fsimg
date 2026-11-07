@@ -375,6 +375,16 @@
   since `blkszbits` is at most 12 and `chunkbits` at most 31, and should go
   with its constant. Each change needs its failing-then-passing test.
 
+* [Low] **EROFS inline tails use their own window** (`lib/formats/erofs/`):
+  `content.c` copies an inline tail into a one-block `tail_window` charged at
+  open, while the driver design puts tails in the content decode window. Fold
+  it into that window when `cluster.c` lands (plan stage 6).
+
+* [Low] **The CLI chooses the allocation unit's noun by format name**
+  (`cmd/fsimg/display.c` `format_counts_blocks`): each block-based format
+  must join a name list. A descriptor field naming the unit would make it
+  hold by construction.
+
 * [Low] **Spec harness oracle step can fail on EINTR** (`test/spec/`): a quick run
   under `check-asan` reported `harness_error` for
   `fat.create.cluster_count.fat16_4100`, detail `oracles: EINTR: "Interrupted system

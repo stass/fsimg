@@ -474,7 +474,9 @@ source's change time in an extended inode and the volume's build time, the
 epoch, in a compact inode, so a compact inode's time is then the volume's
 and not the source's (E2, `e2-v12-*`). The kernel presents one time either
 way and ignores the bit. Access and creation times are not stored. Times are
-UTC with nanosecond precision.
+UTC; an extended inode's time has nanosecond precision, and a compact
+inode's, whole seconds after the epoch sharing the epoch's nanoseconds, has
+one-second precision.
 
 ### Links
 

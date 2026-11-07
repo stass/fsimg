@@ -77,9 +77,6 @@ extern const fsimg_format_t fsimg_qnx4_format;
 extern const fsimg_format_t fsimg_hfsplus_format;
 extern const fsimg_format_t fsimg_ifs_format;
 extern const fsimg_format_t fsimg_iso9660_format;
-/* Outside the registry: its reader opens volumes but has no directory or
- * content callbacks.
- */
 extern const fsimg_format_t fsimg_erofs_format;
 
 /*

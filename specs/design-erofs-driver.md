@@ -34,7 +34,7 @@ reach the driver through the write options under the capability record's
 | `cluster.c` | The decode windows: stored-byte reads, padding, codec dispatch, plain clusters and the one-cluster reuse rule |
 | `directory.c` | `prepare`, `replay`, `keys` and `key`; name order across blocks, dot entries and the parent rule |
 | `xattr.c` | Attribute region validation, the extra-data mark, and the pool, prefix and filter checks verification calls |
-| `content.c` | `resolve`: mapped, zero and held extents for files and symbolic links |
+| `content.c` | `resolve`: mapped, zero and held extents for regular files; the content reader replay and preparation use for symbolic-link targets and directory blocks |
 | `verify.c` | Reference and ownership streams, link counts, the packed inode and the box sweep |
 | `write-erofs.h` | Plan rows and the plan object |
 | `write-plan.c` | `validate`, `plan`, `free`: settings, the entry pass, measurement, placement and sizing |
@@ -276,7 +276,11 @@ portable-profile functions.
   contents another lookup may replace.
 
 Held bytes stay valid until the next `resolve` or walk advance, as the
-content contract states.
+content contract states. A symbolic link never reaches `resolve`: replay
+declares its checked target as decoded content. A file's allocation is
+validated when its content is first resolved, not when its entry is
+listed, so a damaged flat file lists, and salvage keeps none of its stored
+blocks, since the mapper checks their range whole.
 
 ## Verification
 

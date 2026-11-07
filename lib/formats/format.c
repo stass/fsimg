@@ -19,7 +19,8 @@ static const fsimg_format_t *const formats[] = {
 	&fsimg_qnx4_format,
 	&fsimg_ifs_format,
 	&fsimg_iso9660_format,
-	&fsimg_hfsplus_format
+	&fsimg_hfsplus_format,
+	&fsimg_erofs_format
 };
 
 #define FORMAT_COUNT	(sizeof(formats) / sizeof(formats[0]))

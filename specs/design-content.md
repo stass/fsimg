@@ -161,8 +161,12 @@ stores targets verbatim leaves, means delivery resolves extents. Decoded
 content takes the same bounds, batching, stability check and work charging,
 and a range query reports the target as one data range. The buffer's content is
 valid until the walker advances, like the rest of the current entry. A
-driver that stores targets verbatim never sets it, so the two sources of
-link content cannot both apply to one entry.
+driver whose format rules judge a verbatim target by its bytes, such as
+EROFS refusing a target that holds NUL, reads the target at replay, checks
+it and declares the bytes it checked the same way, so a refusal is the
+entry's and delivery serves exactly what was checked. Any other driver that
+stores targets verbatim never sets it. A driver chooses one source per
+format, so the two sources of link content cannot both apply to one entry.
 
 ## Stored bytes
 

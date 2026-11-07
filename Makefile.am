@@ -103,7 +103,9 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx6/write-plan.c lib/formats/qnx6/write-emit.c \
 	lib/formats/erofs/erofs.h lib/formats/erofs/codec.c \
 	lib/formats/erofs/descriptor.c lib/formats/erofs/read.c \
-	lib/formats/erofs/meta.c \
+	lib/formats/erofs/meta.c lib/formats/erofs/map.c \
+	lib/formats/erofs/content.c lib/formats/erofs/directory.c \
+	lib/formats/erofs/xattr.c \
 	lib/formats/qnx4/qnx4.h lib/formats/qnx4/descriptor.c \
 	lib/formats/qnx4/codec.c lib/formats/qnx4/volume.c \
 	lib/formats/qnx4/extent.c lib/formats/qnx4/bitmap.c \
@@ -366,7 +368,9 @@ test_fat_write_SOURCES = test/fat-write.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_write_LDADD = libfsimg.la
 test_driver_contracts_SOURCES = test/driver-contracts.c test/contract.c \
-	test/contract.h test/hfsplus-gen.c test/hfsplus-gen.h
+	test/contract.h test/hfsplus-gen.c test/hfsplus-gen.h \
+	test/erofs-contract.c test/erofs-contract.h test/erofs-gen.c \
+	test/erofs-gen.h test/test.h
 test_driver_contracts_LDADD = libfsimg.la
 test_layer_contracts_SOURCES = test/layer-contracts.c test/contract.c \
 	test/contract.h

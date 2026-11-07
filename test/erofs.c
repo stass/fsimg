@@ -5332,6 +5332,1576 @@ test_inode_load_checks_the_layout_against_the_volume_features(void)
 	gen_image_free(&image);
 }
 
+/* ---- Entries and content through the public reader ---- */
+
+/*
+ * These tests build whole trees with the generator, open them with
+ * fsimg_reader_open() and walk them to the end, so the status of the first
+ * failing step is the status the caller sees. Each listed file and link is
+ * read completely through fsimg_reader_read_at().
+ */
+
+enum {
+	WALK_MAX = 512,
+	PATH_BYTES = 320,
+	LAYOUT_FLAT = 0
+};
+
+#define MODE_FILE	0100644
+#define MODE_DIR	040755
+#define MODE_LINK	0120777
+
+enum {
+	T_UNKNOWN = 0,
+	T_FILE = 1,
+	T_DIR = 2,
+	T_CHAR = 3,
+	T_BLOCK = 4,
+	T_FIFO = 5,
+	T_SOCKET = 6,
+	T_LINK = 7
+};
+
+typedef struct node {
+	char		 path[PATH_BYTES];
+	fsimg_entry_kind_t kind;
+	uint64_t	 size;
+	fsimg_metadata_t meta;
+	unsigned char	*content;	/* size bytes of a file or link */
+} node_t;
+
+typedef struct listing {
+	node_t		 nodes[WALK_MAX];
+	size_t		 count;
+} listing_t;
+
+static listing_t *
+listing_new(void)
+{
+	listing_t *list = calloc(1, sizeof(*list));
+
+	CHECK(list != NULL);
+	return (list);
+}
+
+static void
+listing_free(listing_t *list)
+{
+	for (size_t i = 0; i < list->count; i++)
+		free(list->nodes[i].content);
+	free(list);
+}
+
+static const node_t *
+find_node(const listing_t *list, const char *path)
+{
+	for (size_t i = 0; i < list->count; i++) {
+		if (strcmp(list->nodes[i].path, path) == 0)
+			return (&list->nodes[i]);
+	}
+	return (NULL);
+}
+
+/* A byte of the test content: it differs by seed, offset and block. */
+static unsigned char
+pattern_byte(unsigned seed, size_t i)
+{
+	return ((unsigned char)(seed + i * 31 + (i >> 8) * 7));
+}
+
+static void
+fill_pattern(unsigned char *bytes, size_t length, unsigned seed)
+{
+	for (size_t i = 0; i < length; i++)
+		bytes[i] = pattern_byte(seed, i);
+}
+
+/* The first offset where the node's bytes leave the pattern, or its size. */
+static size_t
+pattern_mismatch(const node_t *node, unsigned seed)
+{
+	size_t i;
+
+	for (i = 0; i < node->size; i++) {
+		if (node->content[i] != pattern_byte(seed, i))
+			break;
+	}
+	return (i);
+}
+
+static fsimg_status_t
+read_content(fsimg_reader_t *reader, node_t *node, fsimg_error_t *error)
+{
+	size_t done = 0;
+
+	if (node->size == 0)
+		return (FSIMG_OK);
+	node->content = malloc(node->size);
+	CHECK(node->content != NULL);
+	while (done < node->size) {
+		size_t count = 0;
+		fsimg_status_t status;
+
+		status = fsimg_reader_read_at(reader, done, node->content + done,
+		    node->size - done, &count, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (count == 0)
+			return (FSIMG_ESTATE);
+		done += count;
+	}
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+list_entry(fsimg_reader_t *reader, const fsimg_entry_t *entry,
+    listing_t *list, fsimg_error_t *error)
+{
+	node_t *node;
+
+	CHECK(list->count < WALK_MAX && strlen(entry->path) < PATH_BYTES);
+	node = &list->nodes[list->count++];
+	strcpy(node->path, entry->path);
+	node->kind = entry->kind;
+	node->size = entry->size;
+	node->meta = entry->metadata;
+	if (entry->kind != FSIMG_ENTRY_FILE &&
+	    entry->kind != FSIMG_ENTRY_SYMLINK)
+		return (FSIMG_OK);
+	return (read_content(reader, node, error));
+}
+
+/*
+ * Open the image, list every entry with its content and close it again,
+ * requiring that the memory the walk took comes back. The result is the
+ * status of the first step that failed, or FSIMG_OK at the end of the walk.
+ */
+static fsimg_status_t
+walk_image(const gen_image_t *image, listing_t *list, fsimg_error_t *error)
+{
+	const fsimg_entry_t *entry;
+	fsimg_reader_t *reader = NULL;
+	fsimg_stats_t stats;
+	fsimg_status_t status;
+	volume_t v;
+
+	volume_start(&v, image->bytes, image->length);
+	status = fsimg_reader_open(v.ctx, v.io, NULL, &reader, error);
+	while (status == FSIMG_OK) {
+		status = fsimg_reader_next(reader, &entry, error);
+		if (status == FSIMG_OK)
+			status = list_entry(reader, entry, list, error);
+	}
+	fsimg_reader_free(reader);
+	fsimg_io_free(v.io);
+	CHECK(fsimg_ctx_get_stats(v.ctx, &stats, NULL) == FSIMG_OK);
+	EXPECT(stats.memory_bytes == v.baseline,
+	    "a walk returns its memory to the baseline (%llu != %llu)",
+	    (unsigned long long)stats.memory_bytes,
+	    (unsigned long long)v.baseline);
+	fsimg_ctx_free(v.ctx);
+	return (status == FSIMG_DONE ? FSIMG_OK : status);
+}
+
+/*
+ * Seal the tree, walk it and require the status want and, if phrase is not
+ * NULL, that phrase in the error message, so a case passes only through the
+ * rule it names. The listing is returned.
+ */
+static listing_t *
+walk_tree(const char *name, gen_tree_t *tree, fsimg_status_t want,
+    const char *phrase)
+{
+	listing_t *list = listing_new();
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	bzero(&error, sizeof(error));
+	gen_tree_seal(tree);
+	status = walk_image(&tree->image, list, &error);
+	check_refusal(name, status, want, &error, phrase);
+	return (list);
+}
+
+/* A walk that must reach the end of the image. */
+static listing_t *
+walk_ok(const char *name, gen_tree_t *tree)
+{
+	return (walk_tree(name, tree, FSIMG_OK, NULL));
+}
+
+/* A walk that must stop with status want, through the rule phrase names. */
+static void
+check_refused(const char *name, gen_tree_t *tree, fsimg_status_t want,
+    const char *phrase)
+{
+	listing_free(walk_tree(name, tree, want, phrase));
+}
+
+/* A tree with room for the given number of data blocks. */
+static void
+tree_new(gen_tree_t *tree, unsigned blkszbits, unsigned data_blocks)
+{
+	gen_tree_init(tree, blkszbits, gen_tree_first_block(blkszbits) +
+	    data_blocks);
+}
+
+static gen_inode_t
+inode_proto(uint16_t mode, unsigned layout)
+{
+	gen_inode_t inode;
+
+	bzero(&inode, sizeof(inode));
+	inode.mode = mode;
+	inode.nlink = 1;
+	inode.layout = (uint8_t)layout;
+	inode.uid = 1000;
+	inode.gid = 100;
+	return (inode);
+}
+
+static gen_inode_t
+file_proto(unsigned layout)
+{
+	return (inode_proto(MODE_FILE, layout));
+}
+
+/* A file of size pattern bytes added to the tree; returns its NID. */
+static uint64_t
+add_file(gen_tree_t *tree, unsigned layout, size_t size, unsigned seed)
+{
+	gen_inode_t proto = file_proto(layout);
+	unsigned char *bytes = calloc(size != 0 ? size : 1, 1);
+	uint64_t nid;
+
+	CHECK(bytes != NULL);
+	fill_pattern(bytes, size, seed);
+	nid = gen_tree_add(tree, &proto, bytes, size);
+	free(bytes);
+	return (nid);
+}
+
+/* The root directory naming just one child. */
+static void
+root_names(gen_tree_t *tree, const char *name, uint64_t nid, uint8_t type)
+{
+	gen_dirent_t child = { name, nid, type };
+
+	gen_tree_dir(tree, 0, 0, &child, 1);
+}
+
+/* The records packed as given: the directory's bytes and its size. */
+static unsigned char *
+pack_records(const gen_tree_t *tree, const gen_dirent_t *records, size_t count,
+    size_t *size)
+{
+	size_t block = (size_t)1 << tree->blkszbits;
+	size_t capacity = count * block;	/* a record fits one block */
+	unsigned char *bytes = calloc(capacity, 1);
+
+	CHECK(bytes != NULL);
+	*size = gen_dir_pack(bytes, capacity, block, records, count);
+	return (bytes);
+}
+
+/* A flat directory with the records exactly as given, in the order given. */
+static void
+dir_raw(gen_tree_t *tree, uint64_t nid, const gen_dirent_t *records,
+    size_t count)
+{
+	gen_inode_t dir = inode_proto(MODE_DIR, LAYOUT_FLAT);
+	unsigned char *bytes;
+	size_t size;
+
+	bytes = pack_records(tree, records, count, &size);
+	gen_tree_fill(tree, nid, &dir, bytes, size);
+	free(bytes);
+}
+
+/*
+ * The root as a flat-inline directory with the records as given, whose
+ * "." and ".." name it. Its inode is placed last, with room for its tail,
+ * and the superblock points at it.
+ */
+static void
+inline_root_raw(gen_tree_t *tree, const gen_dirent_t *records, size_t count)
+{
+	gen_inode_t dir = inode_proto(MODE_DIR, LAYOUT_FLAT_INLINE);
+	size_t block = (size_t)1 << tree->blkszbits;
+	gen_dirent_t *named = calloc(count, sizeof(*named));
+	unsigned char *bytes;
+	uint64_t nid;
+	size_t size;
+
+	CHECK(named != NULL);
+	bytes = pack_records(tree, records, count, &size);
+	free(bytes);
+	nid = gen_tree_slot(tree, GEN_COMPACT_BYTES, size & (block - 1));
+	gen_tree_set_root(tree, nid);
+	bcopy(records, named, count * sizeof(*named));
+	for (size_t i = 0; i < count; i++) {
+		if (strcmp(named[i].name, ".") == 0 ||
+		    strcmp(named[i].name, "..") == 0)
+			named[i].nid = nid;
+	}
+	bytes = pack_records(tree, named, count, &size);
+	gen_tree_fill(tree, nid, &dir, bytes, size);
+	free(bytes);
+	free(named);
+}
+
+/*
+ * How many records the first k blocks of the records, packed as dir_raw
+ * packs them, hold: the index of the first record of block k.
+ */
+static size_t
+records_before_block(const gen_tree_t *tree, const gen_dirent_t *records,
+    size_t count, size_t k)
+{
+	size_t block = (size_t)1 << tree->blkszbits;
+	unsigned char *bytes;
+	size_t size, total = 0;
+
+	bytes = pack_records(tree, records, count, &size);
+	CHECK(size > k * block);
+	for (size_t i = 0; i < k; i++) {
+		/* The first record's name offset is 12 bytes per record. */
+		total += (size_t)(bytes[i * block + 8] |
+		    bytes[i * block + 9] << 8) / 12;
+	}
+	free(bytes);
+	return (total);
+}
+
+/* Exchange the last record before block k with the first record of it. */
+static void
+swap_across_block(const gen_tree_t *tree, gen_dirent_t *records, size_t count,
+    size_t k)
+{
+	size_t first = records_before_block(tree, records, count, k);
+	gen_dirent_t held;
+
+	CHECK(first > 2 && first < count);
+	held = records[first - 1];
+	records[first - 1] = records[first];
+	records[first] = held;
+}
+
+/* ---- Mapping at every boundary ---- */
+
+typedef struct size_case {
+	unsigned	 blkszbits;
+	size_t		 size;
+	unsigned	 layout;
+} size_case_t;
+
+/* Flat-inline content that is a nonzero multiple of B is not readable. */
+static bool
+size_is_refused(const size_case_t *c)
+{
+	size_t block = (size_t)1 << c->blkszbits;
+
+	return (c->layout == LAYOUT_FLAT_INLINE && c->size != 0 &&
+	    c->size % block == 0);
+}
+
+static void
+test_every_boundary_size_is_read_byte_for_byte(void)
+{
+	static const unsigned bits[] = { 9, 12 };
+	static const unsigned layouts[] = { LAYOUT_FLAT, LAYOUT_FLAT_INLINE };
+
+	for (size_t b = 0; b < ARRAY_SIZE(bits); b++) {
+		size_t block = (size_t)1 << bits[b];
+		const size_t sizes[] = { 0, 1, block - 1, block, block + 1,
+		    2 * block };
+
+		for (size_t l = 0; l < ARRAY_SIZE(layouts); l++) {
+			for (size_t s = 0; s < ARRAY_SIZE(sizes); s++) {
+				size_case_t c = { bits[b], sizes[s], layouts[l] };
+				char name[64];
+				gen_tree_t tree;
+				listing_t *list;
+				const node_t *node;
+				uint64_t nid;
+
+				snprintf(name, sizeof(name),
+				    "layout %u B=%zu size=%zu", c.layout,
+				    block, c.size);
+				tree_new(&tree, c.blkszbits, 8);
+				nid = add_file(&tree, c.layout, c.size, 5);
+				root_names(&tree, "f", nid, T_FILE);
+				if (size_is_refused(&c)) {
+					check_refused(name, &tree, FSIMG_ECORRUPT,
+					    "inline tail of a whole block");
+					gen_tree_free(&tree);
+					continue;
+				}
+				list = walk_ok(name, &tree);
+				node = find_node(list, "/f");
+				EXPECT(node != NULL && node->size == c.size &&
+				    pattern_mismatch(node, 5) == c.size,
+				    "%s: every byte read back", name);
+				listing_free(list);
+				gen_tree_free(&tree);
+			}
+		}
+	}
+}
+
+/* A flat file of blocks blocks placed last in a volume of exactly its end. */
+static void
+flat_file_at_volume_end(gen_tree_t *tree, unsigned blkszbits, unsigned blocks)
+{
+	size_t block = (size_t)1 << blkszbits;
+	gen_inode_t proto = file_proto(LAYOUT_FLAT);
+	unsigned char *bytes = calloc(blocks * block, 1);
+	uint64_t nid;
+
+	CHECK(bytes != NULL);
+	fill_pattern(bytes, blocks * block, 3);
+	tree_new(tree, blkszbits, 1 + blocks);
+
+	/* The root takes the first data block, so the file takes the rest. */
+	nid = gen_tree_slot(tree, GEN_COMPACT_BYTES, 0);
+	root_names(tree, "f", nid, T_FILE);
+	gen_tree_fill(tree, nid, &proto, bytes, blocks * block);
+	free(bytes);
+}
+
+static void
+test_flat_extent_ending_at_the_volume_end_is_read(void)
+{
+	static const unsigned bits[] = { 9, 12 };
+
+	for (size_t b = 0; b < ARRAY_SIZE(bits); b++) {
+		char name[32];
+		gen_tree_t tree;
+		listing_t *list;
+		const node_t *node;
+
+		snprintf(name, sizeof(name), "B=%u", 1u << bits[b]);
+		flat_file_at_volume_end(&tree, bits[b], 2);
+		list = walk_ok(name, &tree);
+		node = find_node(list, "/f");
+		EXPECT(node != NULL && pattern_mismatch(node, 3) == node->size,
+		    "%s: the last block of the volume is read", name);
+		listing_free(list);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_flat_extent_one_block_past_the_volume_end_is_corrupt(void)
+{
+	static const unsigned bits[] = { 9, 12 };
+
+	for (size_t b = 0; b < ARRAY_SIZE(bits); b++) {
+		char name[32];
+		gen_tree_t tree;
+
+		snprintf(name, sizeof(name), "B=%u", 1u << bits[b]);
+		flat_file_at_volume_end(&tree, bits[b], 2);
+		gen_tree_set_blocks(&tree, tree.blocks - 1);
+		check_refused(name, &tree, FSIMG_ECORRUPT,
+		    "data blocks outside the volume");
+		gen_tree_free(&tree);
+	}
+}
+
+/* A one-file tree whose file has the layout, size and start word given. */
+static void
+word_case(gen_tree_t *tree, unsigned layout, size_t size, uint32_t word)
+{
+	gen_inode_t proto = file_proto(layout);
+	unsigned char *bytes = calloc(size != 0 ? size : 1, 1);
+	uint64_t nid;
+
+	CHECK(bytes != NULL);
+	fill_pattern(bytes, size, 9);
+	tree_new(tree, 9, 8);
+	proto.layout_word = word;
+	nid = gen_tree_add(tree, &proto, bytes, size);
+	root_names(tree, "f", nid, T_FILE);
+	free(bytes);
+}
+
+/* Overwrite the layout word of the inode at nid. */
+static void
+set_word(gen_tree_t *tree, uint64_t nid, uint32_t word)
+{
+	gen_put(&tree->image, gen_inode_offset(&tree->image, nid) + 0x10,
+	    word, 4);
+}
+
+static void
+test_flat_inline_file_under_a_block_ignores_its_start_word(void)
+{
+	gen_tree_t tree;
+	listing_t *list;
+	const node_t *node;
+
+	word_case(&tree, LAYOUT_FLAT_INLINE, 511, UINT32_C(0xffffffff));
+	list = walk_ok("flat-inline 511 bytes, word 0xffffffff", &tree);
+	node = find_node(list, "/f");
+	EXPECT(node != NULL && pattern_mismatch(node, 9) == 511,
+	    "the inline tail is the whole content");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+static void
+test_flat_file_with_content_and_start_word_ffffffff_is_corrupt(void)
+{
+	gen_tree_t tree;
+
+	word_case(&tree, LAYOUT_FLAT, 1, 0);
+	set_word(&tree, 1, UINT32_C(0xffffffff));
+	check_refused("flat 1 byte, word 0xffffffff", &tree, FSIMG_ECORRUPT,
+	    "data start block 0xFFFFFFFF");
+	gen_tree_free(&tree);
+
+	/* Any other word outside the volume is refused by the domain rule. */
+	word_case(&tree, LAYOUT_FLAT, 1, 0);
+	set_word(&tree, 1, UINT32_C(0xfffffffe));
+	check_refused("flat 1 byte, word 0xfffffffe", &tree, FSIMG_ECORRUPT,
+	    "data blocks outside the volume");
+	gen_tree_free(&tree);
+}
+
+static void
+test_flat_inline_with_a_full_block_reads_its_start_word(void)
+{
+	gen_tree_t tree;
+
+	word_case(&tree, LAYOUT_FLAT_INLINE, 600, 0);
+	set_word(&tree, 1, UINT32_C(0xffffffff));
+	check_refused("flat-inline 600 bytes, word 0xffffffff", &tree,
+	    FSIMG_ECORRUPT, "data start block 0xFFFFFFFF");
+	gen_tree_free(&tree);
+}
+
+static void
+test_empty_file_ignores_its_start_word_in_either_layout(void)
+{
+	static const uint32_t words[] = { 0, 12345, UINT32_C(0xffffffff) };
+
+	for (size_t l = 0; l < 2; l++) {
+		unsigned layout = l == 0 ? LAYOUT_FLAT : LAYOUT_FLAT_INLINE;
+
+		for (size_t w = 0; w < ARRAY_SIZE(words); w++) {
+			char name[48];
+			gen_tree_t tree;
+			listing_t *list;
+			const node_t *node;
+
+			snprintf(name, sizeof(name), "layout %u word 0x%x",
+			    layout, (unsigned)words[w]);
+			word_case(&tree, layout, 0, words[w]);
+			list = walk_ok(name, &tree);
+			node = find_node(list, "/f");
+			EXPECT(node != NULL && node->size == 0, "%s: empty file",
+			    name);
+			listing_free(list);
+			gen_tree_free(&tree);
+		}
+	}
+}
+
+/*
+ * A flat-inline file with no full block whose inode starts a metadata block
+ * and whose tail is the given length: the inode takes 32 bytes, so a tail of
+ * B - 32 ends at the block's end and a longer one crosses it.
+ */
+static void
+tail_case(gen_tree_t *tree, size_t tail)
+{
+	gen_inode_t proto = file_proto(LAYOUT_FLAT_INLINE);
+	size_t block = 512;
+	unsigned char *bytes = calloc(tail, 1);
+	uint64_t nid;
+
+	CHECK(bytes != NULL);
+	fill_pattern(bytes, tail, 11);
+	tree_new(tree, 9, 4);
+	nid = gen_nid_at(&tree->image, tree->image.meta_base + block);
+	proto.layout_word = UINT32_C(0xffffffff);
+	gen_tree_fill(tree, nid, &proto, bytes, tail);
+	root_names(tree, "f", nid, T_FILE);
+	free(bytes);
+}
+
+static void
+test_inline_tail_ending_at_the_block_end_is_read(void)
+{
+	gen_tree_t tree;
+	listing_t *list;
+	const node_t *node;
+
+	tail_case(&tree, 512 - 32);
+	list = walk_ok("tail ends at the block end", &tree);
+	node = find_node(list, "/f");
+	EXPECT(node != NULL && node->size == 480 &&
+	    pattern_mismatch(node, 11) == 480, "the tail is read whole");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+static void
+test_inline_tail_crossing_the_block_end_is_corrupt(void)
+{
+	gen_tree_t tree;
+
+	tail_case(&tree, 512 - 31);
+	check_refused("tail crosses the block end", &tree, FSIMG_ECORRUPT,
+	    "inline tail crosses");
+	gen_tree_free(&tree);
+}
+
+/* ---- Directories ---- */
+
+/* A tree whose root holds the records given, and one small file "a". */
+static void
+raw_root_tree(gen_tree_t *tree, const gen_dirent_t *records, size_t count)
+{
+	uint64_t file;
+
+	tree_new(tree, 9, 8);
+	file = add_file(tree, LAYOUT_FLAT_INLINE, 3, 1);
+	CHECK(file == 1);
+	dir_raw(tree, 0, records, count);
+}
+
+#define DOT	{ ".", 0, T_DIR }
+#define DOTDOT	{ "..", 0, T_DIR }
+
+static void
+test_directory_over_several_blocks_lists_every_name_in_order(void)
+{
+	static const unsigned bits[] = { 9, 12 };
+
+	for (size_t b = 0; b < ARRAY_SIZE(bits); b++) {
+		size_t block = (size_t)1 << bits[b];
+		/* A name record is 29 bytes. */
+		size_t count = 2 * block / 30 + 5;
+		gen_dirent_t *kids = calloc(count, sizeof(*kids));
+		char (*names)[24] = calloc(count, sizeof(*names));
+		gen_tree_t tree;
+		listing_t *list;
+		uint64_t nid;
+
+		CHECK(kids != NULL && names != NULL);
+		tree_new(&tree, bits[b], 8);
+		nid = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+		for (size_t i = 0; i < count; i++) {
+			snprintf(names[i], sizeof(names[i]), "n%03zu-padding-name",
+			    i);
+			kids[i] = (gen_dirent_t){ names[i], nid, T_FILE };
+		}
+		gen_tree_dir(&tree, 0, 0, kids, count);
+		list = walk_ok("multi-block directory", &tree);
+		EXPECT(list->count == count, "B=%zu: %zu names listed, not %zu",
+		    block, list->count, count);
+		for (size_t i = 0; i < list->count && i < count; i++) {
+			char path[32];
+
+			snprintf(path, sizeof(path), "/%s", names[i]);
+			EXPECT(strcmp(list->nodes[i].path, path) == 0,
+			    "B=%zu: entry %zu is %s", block, i, path);
+		}
+		listing_free(list);
+		gen_tree_free(&tree);
+		free(names);
+		free(kids);
+	}
+}
+
+/* Many same-length names at B = 512, so a record fits wherever its swap does. */
+enum {
+	MANY_NAMES = 40,
+	MANY_BYTES = 24
+};
+
+static void
+many_names(gen_dirent_t *records, char names[][MANY_BYTES], uint64_t nid)
+{
+	records[0] = (gen_dirent_t){ ".", 0, T_DIR };
+	records[1] = (gen_dirent_t){ "..", 0, T_DIR };
+	for (size_t i = 0; i < MANY_NAMES; i++) {
+		snprintf(names[i], MANY_BYTES, "n%03zu-padding-name", i);
+		records[2 + i] = (gen_dirent_t){ names[i], nid, T_FILE };
+	}
+}
+
+static void
+test_names_out_of_order_across_a_block_boundary_are_corrupt(void)
+{
+	gen_dirent_t all[MANY_NAMES + 2];
+	char names[MANY_NAMES][MANY_BYTES];
+	gen_tree_t tree;
+	uint64_t file;
+
+	tree_new(&tree, 9, 8);
+	file = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+	many_names(all, names, file);
+	swap_across_block(&tree, all, MANY_NAMES + 2, 1);
+	dir_raw(&tree, 0, all, MANY_NAMES + 2);
+	check_refused("last of block 0 above first of block 1", &tree,
+	    FSIMG_ECORRUPT, "directory names out of order");
+	gen_tree_free(&tree);
+}
+
+/*
+ * A flat-inline root: a one-block directory held wholly in the inline tail,
+ * and a 2B + k one whose last block is the tail, so the name order is
+ * checked from the second stored block into the inline one.
+ */
+static void
+test_flat_inline_directories_list_their_stored_and_inline_blocks(void)
+{
+	static const size_t counts[] = { 3, MANY_NAMES };
+
+	for (size_t c = 0; c < ARRAY_SIZE(counts); c++) {
+		gen_dirent_t all[MANY_NAMES + 2];
+		char names[MANY_NAMES][MANY_BYTES];
+		gen_tree_t tree;
+		listing_t *list;
+		uint64_t file;
+		size_t size;
+
+		tree_new(&tree, 9, 8);
+		file = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+		many_names(all, names, file);
+		free(pack_records(&tree, all, counts[c] + 2, &size));
+		CHECK(c == 0 ? size < 512 : size > 1024 && size % 512 != 0);
+		inline_root_raw(&tree, all, counts[c] + 2);
+		list = walk_ok("flat-inline root", &tree);
+		EXPECT(list->count == counts[c], "directory of %zu bytes: "
+		    "%zu names listed, not %zu", size, list->count, counts[c]);
+		for (size_t i = 0; i < list->count && i < counts[c]; i++) {
+			char path[MANY_BYTES + 1];
+
+			snprintf(path, sizeof(path), "/%s", names[i]);
+			EXPECT(strcmp(list->nodes[i].path, path) == 0,
+			    "directory of %zu bytes: entry %zu is %s", size, i,
+			    path);
+		}
+		listing_free(list);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_names_out_of_order_into_the_inline_tail_are_corrupt(void)
+{
+	gen_dirent_t all[MANY_NAMES + 2];
+	char names[MANY_NAMES][MANY_BYTES];
+	gen_tree_t tree;
+	uint64_t file;
+
+	tree_new(&tree, 9, 8);
+	file = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+	many_names(all, names, file);
+	swap_across_block(&tree, all, MANY_NAMES + 2, 2);
+	inline_root_raw(&tree, all, MANY_NAMES + 2);
+	check_refused("last stored block above the inline block", &tree,
+	    FSIMG_ECORRUPT, "directory names out of order");
+	gen_tree_free(&tree);
+}
+
+/*
+ * The last name of a full block that is not the last block ends exactly at
+ * the block's end, with no NUL after it: its length is the block's valid
+ * length, not a search for a terminator.
+ */
+static void
+test_name_ending_at_the_end_of_a_full_block_is_read_whole(void)
+{
+	char a[151], b[151], c[150];
+	gen_dirent_t records[6];
+	gen_tree_t tree;
+	listing_t *list;
+	char path[160];
+	uint64_t file;
+
+	memset(a, 'a', 150);
+	memset(b, 'b', 150);
+	memset(c, 'c', 149);
+	a[150] = b[150] = c[149] = '\0';
+	tree_new(&tree, 9, 8);
+	file = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+	records[0] = (gen_dirent_t){ ".", 0, T_DIR };
+	records[1] = (gen_dirent_t){ "..", 0, T_DIR };
+	records[2] = (gen_dirent_t){ a, file, T_FILE };
+	records[3] = (gen_dirent_t){ b, file, T_FILE };
+	records[4] = (gen_dirent_t){ c, file, T_FILE };
+	records[5] = (gen_dirent_t){ "d", file, T_FILE };
+	/*
+	 * Block 0 holds five records, 60 bytes, and the names "." "..", a, b
+	 * and c, 1 + 2 + 150 + 150 + 149 = 452 bytes: 512 exactly.
+	 */
+	CHECK(records_before_block(&tree, records, 6, 1) == 5);
+	dir_raw(&tree, 0, records, 6);
+	list = walk_ok("name ends at the end of block 0", &tree);
+	snprintf(path, sizeof(path), "/%s", c);
+	EXPECT(list->count == 4 && find_node(list, path) != NULL &&
+	    find_node(list, "/d") != NULL, "all four names, the long ones whole");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+/*
+ * Names of 255 bytes that differ only in their last byte, one to a block at
+ * B = 512, so the previous name carried across each block boundary is
+ * compared at full width.
+ */
+enum {
+	LONG_NAMES = 4,
+	LONG_BYTES = 256
+};
+
+static void
+long_names(gen_dirent_t *records, char names[][LONG_BYTES], uint64_t nid)
+{
+	records[0] = (gen_dirent_t){ ".", 0, T_DIR };
+	records[1] = (gen_dirent_t){ "..", 0, T_DIR };
+	for (size_t i = 0; i < LONG_NAMES; i++) {
+		memset(names[i], 'x', 254);
+		names[i][254] = (char)('a' + i);
+		names[i][255] = '\0';
+		records[2 + i] = (gen_dirent_t){ names[i], nid, T_FILE };
+	}
+}
+
+static void
+test_directory_of_255_byte_names_lists_across_its_block_boundaries(void)
+{
+	gen_dirent_t records[LONG_NAMES + 2];
+	char names[LONG_NAMES][LONG_BYTES];
+	gen_tree_t tree;
+	listing_t *list;
+	uint64_t file;
+
+	tree_new(&tree, 9, 8);
+	file = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+	long_names(records, names, file);
+	CHECK(records_before_block(&tree, records, LONG_NAMES + 2, 2) == 4);
+	dir_raw(&tree, 0, records, LONG_NAMES + 2);
+	list = walk_ok("four 255-byte names", &tree);
+	EXPECT(list->count == LONG_NAMES, "%zu names listed", list->count);
+	for (size_t i = 0; i < list->count && i < LONG_NAMES; i++) {
+		char path[LONG_BYTES + 1];
+
+		snprintf(path, sizeof(path), "/%s", names[i]);
+		EXPECT(strlen(list->nodes[i].path) == 256 &&
+		    strcmp(list->nodes[i].path, path) == 0,
+		    "entry %zu is the full 255-byte name", i);
+	}
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+static void
+test_255_byte_names_out_of_order_only_at_a_block_boundary_are_corrupt(void)
+{
+	gen_dirent_t records[LONG_NAMES + 2];
+	char names[LONG_NAMES][LONG_BYTES];
+	gen_tree_t tree;
+	uint64_t file;
+
+	tree_new(&tree, 9, 8);
+	file = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+	long_names(records, names, file);
+	swap_across_block(&tree, records, LONG_NAMES + 2, 1);
+	dir_raw(&tree, 0, records, LONG_NAMES + 2);
+	check_refused("255-byte names swapped across block 0 and 1", &tree,
+	    FSIMG_ECORRUPT, "directory names out of order");
+	gen_tree_free(&tree);
+}
+
+typedef struct root_case {
+	const char	*name;
+	gen_dirent_t	 records[6];
+	size_t		 count;
+	fsimg_status_t	 want;
+	const char	*phrase;	/* the rule that refuses it */
+} root_case_t;
+
+static void
+test_root_directory_records_are_checked(void)
+{
+	/* "" is the last record of a full block, followed by a name that
+	 * starts the next block, so zeros follow the empty name inside the
+	 * block's valid length.
+	 */
+	static const root_case_t cases[] = {
+		{ "name out of order within a block",
+		    { DOT, DOTDOT, { "b", 1, T_FILE }, { "a", 1, T_FILE } }, 4,
+		    FSIMG_ECORRUPT, "directory names out of order" },
+		{ "repeated name",
+		    { DOT, DOTDOT, { "a", 1, T_FILE }, { "a", 1, T_FILE } }, 4,
+		    FSIMG_ECORRUPT, "directory names out of order" },
+		{ "dot entries in order and nothing else",
+		    { DOT, DOTDOT }, 2, FSIMG_OK, NULL },
+		{ "missing dot",
+		    { DOTDOT, { "a", 1, T_FILE } }, 2, FSIMG_ECORRUPT,
+		    "directory without \".\"" },
+		{ "missing dot dot",
+		    { DOT, { "a", 1, T_FILE } }, 2, FSIMG_ECORRUPT,
+		    "directory without \"..\"" },
+		{ "name with a slash",
+		    { DOT, DOTDOT, { "a/b", 1, T_FILE } }, 3, FSIMG_ECORRUPT,
+		    "directory name byte" },
+		{ "empty name ending a full block",
+		    { DOT, DOTDOT, { "a", 1, T_FILE }, { "", 1, T_FILE },
+		    { "b", 1, T_FILE | GEN_STARTS_BLOCK } }, 5, FSIMG_ECORRUPT,
+		    "empty directory name" },
+		{ "file type 0 defers to the mode",
+		    { DOT, DOTDOT, { "a", 1, 0 } }, 3, FSIMG_OK, NULL },
+		{ "file type disagrees with the mode",
+		    { DOT, DOTDOT, { "a", 1, T_DIR } }, 3, FSIMG_ECORRUPT,
+		    "file type disagrees" },
+		{ "link type on a regular file",
+		    { DOT, DOTDOT, { "a", 1, T_LINK } }, 3, FSIMG_ECORRUPT,
+		    "file type disagrees" },
+		{ "dot with a file type of 1",
+		    { { ".", 0, T_FILE }, DOTDOT }, 2, FSIMG_ECORRUPT,
+		    "dot entry file type" },
+		{ "dot entries with file type 0",
+		    { { ".", 0, 0 }, { "..", 0, 0 } }, 2, FSIMG_OK, NULL },
+		{ "dot dot naming another inode than the root",
+		    { DOT, { "..", 1, 0 } }, 2, FSIMG_ECORRUPT,
+		    "dot entry breaks the parent rule" },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		gen_tree_t tree;
+
+		raw_root_tree(&tree, cases[i].records, cases[i].count);
+		listing_free(walk_tree(cases[i].name, &tree, cases[i].want,
+		    cases[i].phrase));
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_dot_after_a_name_that_sorts_before_it_is_accepted(void)
+{
+	gen_tree_t tree;
+	listing_t *list;
+
+	tree_new(&tree, 9, 8);
+	root_names(&tree, "-a", add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1),
+	    T_FILE);
+	list = walk_ok("-a sorts before the dot entries", &tree);
+	EXPECT(list->count == 1 && find_node(list, "/-a") != NULL,
+	    "the only entry is /-a, not the dot entries");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+/* NIDs in subdir_case: the directory "d" is the first slot, the file next. */
+enum {
+	SUBDIR_NID = 1,
+	SUBFILE_NID = 2
+};
+
+/* The root holds directory "d" whose records are given. */
+static void
+subdir_case(const char *name, const gen_dirent_t *records, size_t count,
+    fsimg_status_t want, const char *phrase)
+{
+	gen_tree_t tree;
+	uint64_t file, dir;
+
+	tree_new(&tree, 9, 8);
+	dir = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	file = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+	CHECK(dir == SUBDIR_NID && file == SUBFILE_NID);
+	root_names(&tree, "d", dir, T_DIR);
+	dir_raw(&tree, dir, records, count);
+	listing_free(walk_tree(name, &tree, want, phrase));
+	gen_tree_free(&tree);
+}
+
+static void
+test_subdirectory_dot_entries_must_name_it_and_its_parent(void)
+{
+	static const gen_dirent_t good[] = {
+		{ ".", SUBDIR_NID, T_DIR }, { "..", 0, T_DIR } };
+	static const gen_dirent_t dotdot_names_itself[] = {
+		{ ".", SUBDIR_NID, T_DIR }, { "..", SUBDIR_NID, T_DIR } };
+	static const gen_dirent_t dot_names_parent[] = {
+		{ ".", 0, T_DIR }, { "..", 0, T_DIR } };
+	static const gen_dirent_t names_itself[] = {
+		{ ".", SUBDIR_NID, T_DIR }, { "..", 0, T_DIR },
+		{ "self", SUBDIR_NID, T_DIR } };
+	static const gen_dirent_t names_parent[] = {
+		{ ".", SUBDIR_NID, T_DIR }, { "..", 0, T_DIR },
+		{ "up", 0, T_DIR } };
+
+	subdir_case("dot entries correct", good, 2, FSIMG_OK, NULL);
+	subdir_case("dot dot names the directory itself", dotdot_names_itself,
+	    2, FSIMG_ECORRUPT, "dot entry breaks the parent rule");
+	subdir_case("dot names the parent", dot_names_parent, 2,
+	    FSIMG_ECORRUPT, "dot entry breaks the parent rule");
+	subdir_case("a child entry names the directory", names_itself, 3,
+	    FSIMG_ECORRUPT, "directory entry naming the directory or its parent");
+	subdir_case("a child entry names the parent", names_parent, 3,
+	    FSIMG_ECORRUPT, "directory entry naming the directory or its parent");
+}
+
+static void
+test_a_directory_named_from_two_parents_fails_the_second_descent(void)
+{
+	gen_tree_t tree;
+	uint64_t a, b, shared;
+	gen_dirent_t root_kids[2], under[1];
+
+	tree_new(&tree, 9, 16);
+	a = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	b = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	shared = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	root_kids[0] = (gen_dirent_t){ "a", a, T_DIR };
+	root_kids[1] = (gen_dirent_t){ "b", b, T_DIR };
+	under[0] = (gen_dirent_t){ "shared", shared, T_DIR };
+	gen_tree_dir(&tree, 0, 0, root_kids, 2);
+	gen_tree_dir(&tree, a, 0, under, 1);
+	gen_tree_dir(&tree, b, 0, under, 1);
+	gen_tree_dir(&tree, shared, a, NULL, 0);
+	check_refused("shared directory below a and b", &tree, FSIMG_ECORRUPT,
+	    "dot entry breaks the parent rule");
+	gen_tree_free(&tree);
+}
+
+static void
+test_two_names_for_one_directory_in_one_parent_are_both_listed(void)
+{
+	gen_tree_t tree;
+	uint64_t dir, file;
+	gen_dirent_t root_kids[2], inside[1];
+	listing_t *list;
+
+	tree_new(&tree, 9, 16);
+	file = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+	dir = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	root_kids[0] = (gen_dirent_t){ "x", dir, T_DIR };
+	root_kids[1] = (gen_dirent_t){ "y", dir, T_DIR };
+	inside[0] = (gen_dirent_t){ "f", file, T_FILE };
+	gen_tree_dir(&tree, 0, 0, root_kids, 2);
+	gen_tree_dir(&tree, dir, 0, inside, 1);
+	list = walk_ok("one directory named twice by the root", &tree);
+	EXPECT(find_node(list, "/x/f") != NULL && find_node(list, "/y/f") !=
+	    NULL, "the shared subtree is listed under both names");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+/*
+ * root -> a -> b, where b also lists the inode `up` as a child: a is b's
+ * parent, and the root is b's grandparent, which the parent rule meets when
+ * it descends into the root and finds its ".." naming the root, not b.
+ */
+static void
+cycle_case(const char *name, bool up_is_root, const char *phrase)
+{
+	gen_dirent_t root_kids[1], a_kids[1], b_kids[1];
+	gen_tree_t tree;
+	uint64_t a, b;
+
+	tree_new(&tree, 9, 8);
+	a = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	b = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	root_kids[0] = (gen_dirent_t){ "a", a, T_DIR };
+	a_kids[0] = (gen_dirent_t){ "b", b, T_DIR };
+	b_kids[0] = (gen_dirent_t){ "up", up_is_root ? 0 : a, T_DIR };
+	gen_tree_dir(&tree, 0, 0, root_kids, 1);
+	gen_tree_dir(&tree, a, 0, a_kids, 1);
+	gen_tree_dir(&tree, b, a, b_kids, 1);
+	check_refused(name, &tree, FSIMG_ECORRUPT, phrase);
+	gen_tree_free(&tree);
+}
+
+static void
+test_a_cycle_back_through_an_ancestor_at_depth_2_is_corrupt(void)
+{
+	cycle_case("b lists its parent a", false,
+	    "directory entry naming the directory or its parent");
+	cycle_case("b lists the root", true,
+	    "dot entry breaks the parent rule");
+}
+
+static void
+test_names_that_are_not_portable_utf8_are_omitted_not_refused(void)
+{
+	static const char *const kept[] = { "/ok", "/caf\xc3\xa9" };
+	gen_tree_t tree;
+	uint64_t file;
+	gen_dirent_t kids[5];
+	listing_t *list;
+
+	tree_new(&tree, 9, 8);
+	file = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
+	kids[0] = (gen_dirent_t){ "ok", file, T_FILE };
+	kids[1] = (gen_dirent_t){ "bad\xff", file, T_FILE };
+	kids[2] = (gen_dirent_t){ "ctl\x01", file, T_FILE };
+	kids[3] = (gen_dirent_t){ "caf\xc3\xa9", file, T_FILE };
+	kids[4] = (gen_dirent_t){ "\xc3", file, T_FILE };	/* truncated */
+	gen_tree_dir(&tree, 0, 0, kids, 5);
+	list = walk_ok("names outside the portable profile", &tree);
+	EXPECT(list->count == ARRAY_SIZE(kept), "%zu entries delivered, not %zu",
+	    list->count, ARRAY_SIZE(kept));
+	for (size_t i = 0; i < ARRAY_SIZE(kept); i++)
+		EXPECT(find_node(list, kept[i]) != NULL, "%s is delivered",
+		    kept[i]);
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+/* ---- Content through common delivery ---- */
+
+static void
+test_stored_and_inline_content_and_hard_links_read_back(void)
+{
+	gen_tree_t tree;
+	gen_dirent_t kids[4];
+	uint64_t flat, mixed, small;
+	gen_inode_t linked = file_proto(LAYOUT_FLAT_INLINE);
+	unsigned char bytes[40];
+	listing_t *list;
+	const node_t *node;
+
+	tree_new(&tree, 9, 16);
+	flat = add_file(&tree, LAYOUT_FLAT, 2 * 512 + 7, 21);
+	mixed = add_file(&tree, LAYOUT_FLAT_INLINE, 512 + 5, 22);
+
+	/* The link count of "small" says two names; the reader lists both. */
+	linked.nlink = 2;
+	fill_pattern(bytes, sizeof(bytes), 23);
+	small = gen_tree_add(&tree, &linked, bytes, sizeof(bytes));
+	kids[0] = (gen_dirent_t){ "flat", flat, T_FILE };
+	kids[1] = (gen_dirent_t){ "mixed", mixed, T_FILE };
+	kids[2] = (gen_dirent_t){ "small", small, T_FILE };
+	kids[3] = (gen_dirent_t){ "small-link", small, T_FILE };
+	gen_tree_dir(&tree, 0, 0, kids, 4);
+
+	list = walk_ok("stored, inline and linked files", &tree);
+	EXPECT(list->count == 4, "%zu entries", list->count);
+	node = find_node(list, "/flat");
+	EXPECT(node != NULL && node->size == 1031 &&
+	    pattern_mismatch(node, 21) == 1031, "stored blocks and a tail");
+	node = find_node(list, "/mixed");
+	EXPECT(node != NULL && node->size == 517 &&
+	    pattern_mismatch(node, 22) == 517, "a block and an inline tail");
+	node = find_node(list, "/small");
+	EXPECT(node != NULL && pattern_mismatch(node, 23) == 40,
+	    "inline content");
+	node = find_node(list, "/small-link");
+	EXPECT(node != NULL && node->size == 40 &&
+	    pattern_mismatch(node, 23) == 40,
+	    "a second name for the same inode has the same bytes");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+/*
+ * Reads that start inside the inline tail, and that cross from the last
+ * stored block into it, return the same bytes as a whole-file read.
+ */
+static void
+test_reads_at_offsets_cross_from_stored_blocks_into_the_inline_tail(void)
+{
+	enum { SIZE = 512 + 100 };
+	static const struct {
+		size_t		 offset;
+		size_t		 length;
+	} reads[] = {
+		{ 0, SIZE }, { 511, 2 }, { 512, 10 }, { 530, 70 },
+		{ SIZE - 1, 1 }, { 400, 200 }
+	};
+	const fsimg_entry_t *entry = NULL;
+	fsimg_reader_t *reader = NULL;
+	fsimg_error_t error;
+	gen_tree_t tree;
+	volume_t v;
+
+	tree_new(&tree, 9, 8);
+	root_names(&tree, "f", add_file(&tree, LAYOUT_FLAT_INLINE, SIZE, 5),
+	    T_FILE);
+	gen_tree_seal(&tree);
+	volume_start(&v, tree.image.bytes, tree.image.length);
+	CHECK(fsimg_reader_open(v.ctx, v.io, NULL, &reader, &error) == FSIMG_OK);
+	CHECK(fsimg_reader_next(reader, &entry, &error) == FSIMG_OK);
+	CHECK(strcmp(entry->path, "/f") == 0 && entry->size == SIZE);
+	for (size_t r = 0; r < ARRAY_SIZE(reads); r++) {
+		unsigned char got[SIZE];
+		size_t done = 0, count = 1;
+
+		while (done < reads[r].length && count != 0) {
+			CHECK(fsimg_reader_read_at(reader, reads[r].offset + done,
+			    got + done, reads[r].length - done, &count,
+			    &error) == FSIMG_OK);
+			done += count;
+		}
+		EXPECT(done == reads[r].length, "read at %zu for %zu bytes "
+		    "returned %zu", reads[r].offset, reads[r].length, done);
+		for (size_t i = 0; i < done; i++)
+			if (got[i] != pattern_byte(5, reads[r].offset + i)) {
+				EXPECT(false, "read at %zu for %zu bytes: byte %zu",
+				    reads[r].offset, reads[r].length, i);
+				break;
+			}
+	}
+	fsimg_reader_free(reader);
+	fsimg_io_free(v.io);
+	fsimg_ctx_free(v.ctx);
+	gen_tree_free(&tree);
+}
+
+/* ---- Symbolic links ---- */
+
+/* A tree whose root names one link of the layout, size and bytes given. */
+static void
+link_case(gen_tree_t *tree, unsigned layout, size_t size, int nul_at)
+{
+	gen_inode_t proto = inode_proto(MODE_LINK, layout);
+	unsigned char *target = calloc(size != 0 ? size : 1, 1);
+	uint64_t nid;
+
+	CHECK(target != NULL);
+	for (size_t i = 0; i < size; i++)
+		target[i] = (unsigned char)('a' + i % 26);
+	if (nul_at >= 0)
+		target[nul_at] = 0;
+	tree_new(tree, 9, 8);
+	proto.layout_word = UINT32_C(0xffffffff);
+	nid = gen_tree_add(tree, &proto, target, size);
+	root_names(tree, "l", nid, T_LINK);
+	free(target);
+}
+
+typedef struct link_case_def {
+	const char	*name;
+	unsigned	 layout;
+	size_t		 size;
+	int		 nul_at;
+	fsimg_status_t	 want;
+	const char	*phrase;
+} link_case_def_t;
+
+static void
+test_symbolic_link_targets_are_checked_and_delivered(void)
+{
+	static const link_case_def_t cases[] = {
+		{ "one byte, inline", LAYOUT_FLAT_INLINE, 1, -1, FSIMG_OK, NULL },
+		{ "one byte, flat", LAYOUT_FLAT, 1, -1, FSIMG_OK, NULL },
+		{ "1024 bytes across two blocks", LAYOUT_FLAT, 1024, -1,
+		    FSIMG_OK, NULL },
+		{ "block and inline tail", LAYOUT_FLAT_INLINE, 600, -1,
+		    FSIMG_OK, NULL },
+		{ "empty target", LAYOUT_FLAT_INLINE, 0, -1, FSIMG_ECORRUPT,
+		    "symbolic link size" },
+		{ "1025 bytes", LAYOUT_FLAT, 1025, -1, FSIMG_EUNSUPPORTED,
+		    "symbolic link size" },
+		{ "NUL inside the target", LAYOUT_FLAT_INLINE, 20, 7,
+		    FSIMG_ECORRUPT, "NUL byte" },
+		{ "NUL as the last byte", LAYOUT_FLAT_INLINE, 20, 19,
+		    FSIMG_ECORRUPT, "NUL byte" },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		const link_case_def_t *c = &cases[i];
+		gen_tree_t tree;
+		listing_t *list;
+		const node_t *node;
+
+		link_case(&tree, c->layout, c->size, c->nul_at);
+		list = walk_tree(c->name, &tree, c->want, c->phrase);
+		node = find_node(list, "/l");
+		if (c->want == FSIMG_OK) {
+			EXPECT(node != NULL && node->kind == FSIMG_ENTRY_SYMLINK &&
+			    node->size == c->size, "%s: a link of its size",
+			    c->name);
+			for (size_t k = 0; node != NULL && k < c->size; k++)
+				if (node->content[k] != 'a' + k % 26) {
+					EXPECT(false, "%s: target byte %zu",
+					    c->name, k);
+					break;
+				}
+		}
+		listing_free(list);
+		gen_tree_free(&tree);
+	}
+}
+
+/* ---- Extended attributes ---- */
+
+/* A tree with one inline file "f" whose attribute count is count. */
+static uint64_t
+xattr_file(gen_tree_t *tree, unsigned count)
+{
+	gen_inode_t proto = file_proto(LAYOUT_FLAT_INLINE);
+	unsigned char bytes[8];
+	uint64_t nid;
+
+	fill_pattern(bytes, sizeof(bytes), 31);
+	tree_new(tree, 9, 4);
+	proto.xattr_count = (uint16_t)count;
+	proto.layout_word = UINT32_C(0xffffffff);
+	nid = gen_tree_add(tree, &proto, bytes, sizeof(bytes));
+	root_names(tree, "f", nid, T_FILE);
+	return (nid);
+}
+
+/* Where the attribute region of an inode with a compact fixed part starts. */
+static uint64_t
+xattr_at(const gen_tree_t *tree, uint64_t nid)
+{
+	return (gen_inode_offset(&tree->image, nid) + GEN_COMPACT_BYTES);
+}
+
+static bool
+has_extra_data(const listing_t *list)
+{
+	const node_t *node = find_node(list, "/f");
+
+	return (node != NULL && (node->meta.valid & FSIMG_META_EXTRA_DATA) != 0);
+}
+
+typedef struct attr_case {
+	const char	*name;
+	unsigned	 count;		/* the inode's attribute count */
+	unsigned	 shared;	/* shared ids, one block id 0 each */
+	unsigned	 index;		/* the one inline entry's name index */
+	const char	*suffix;	/* ... its suffix, NULL for no entry */
+	unsigned	 suffix_length;	/* the length byte, if it lies */
+	fsimg_status_t	 want;
+	const char	*phrase;	/* the rule that refuses it */
+	bool		 extra_data;
+} attr_case_t;
+
+static void
+test_attribute_regions_set_the_extra_data_mark_or_are_refused(void)
+{
+	static const attr_case_t cases[] = {
+		{ .name = "no attributes", .want = FSIMG_OK },
+		{ .name = "header only", .count = 1, .want = FSIMG_OK },
+		{ .name = "one inline entry", .count = 3, .index = 1,
+		    .suffix = "k", .suffix_length = 1, .want = FSIMG_OK,
+		    .extra_data = true },
+		{ .name = "one shared id", .count = 2, .shared = 1,
+		    .want = FSIMG_OK, .extra_data = true },
+		{ .name = "entry longer than the region", .count = 2,
+		    .index = 1, .suffix = "", .suffix_length = 8,
+		    .want = FSIMG_ECORRUPT, .phrase = "attribute entry length" },
+		{ .name = "unknown name index 5", .count = 2, .index = 5,
+		    .suffix = "", .want = FSIMG_EUNSUPPORTED,
+		    .phrase = "attribute name index" },
+		{ .name = "ACL index 2 with a suffix", .count = 3, .index = 2,
+		    .suffix = "x", .suffix_length = 1, .want = FSIMG_ECORRUPT,
+		    .phrase = "ACL attribute suffix" },
+		{ .name = "ACL index 3 with a suffix", .count = 3, .index = 3,
+		    .suffix = "x", .suffix_length = 1, .want = FSIMG_ECORRUPT,
+		    .phrase = "ACL attribute suffix" },
+		{ .name = "ACL index 2 without a suffix", .count = 2,
+		    .index = 2, .suffix = "", .want = FSIMG_OK,
+		    .extra_data = true },
+		{ .name = "ACL index 3 without a suffix", .count = 2,
+		    .index = 3, .suffix = "", .want = FSIMG_OK,
+		    .extra_data = true },
+		{ .name = "index 4", .count = 2, .index = 4, .suffix = "",
+		    .want = FSIMG_OK, .extra_data = true },
+		{ .name = "index 6", .count = 2, .index = 6, .suffix = "",
+		    .want = FSIMG_OK, .extra_data = true },
+		{ .name = "index 7", .count = 2, .index = 7, .suffix = "",
+		    .want = FSIMG_EUNSUPPORTED,
+		    .phrase = "attribute name index" },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		const attr_case_t *c = &cases[i];
+		gen_tree_t tree;
+		uint64_t nid = xattr_file(&tree, c->count);
+		uint64_t region = xattr_at(&tree, nid);
+		listing_t *list;
+
+		if (c->shared != 0) {
+			gen_put(&tree.image, region + 4, c->shared, 1);
+			gen_put(&tree.image, region + 12, 0, 4);
+		}
+		if (c->suffix != NULL) {
+			size_t used = gen_xattr_entry(&tree.image, region + 12,
+			    c->index, c->suffix, "v", 0);
+
+			gen_put(&tree.image, region + 12, c->suffix_length, 1);
+			CHECK(used <= 4 * (c->count - 1));
+		}
+		list = walk_tree(c->name, &tree, c->want, c->phrase);
+		if (c->want == FSIMG_OK)
+			EXPECT(has_extra_data(list) == c->extra_data,
+			    "%s: extra-data mark is %d", c->name,
+			    (int)c->extra_data);
+		listing_free(list);
+		gen_tree_free(&tree);
+	}
+}
+
+/* ---- Kinds, owners and times ---- */
+
+/* A tree whose root names one inode, of the form and fields given. */
+static void
+meta_case(gen_tree_t *tree, gen_inode_t proto, uint32_t compat)
+{
+	uint64_t nid;
+
+	tree_new(tree, 9, 4);
+	nid = gen_tree_add(tree, &proto, NULL, 0);
+	root_names(tree, "n", nid, T_UNKNOWN);
+	gen_tree_set_compat(tree, compat | 1);
+}
+
+static void
+test_device_numbers_decode_the_linux_32_bit_encoding(void)
+{
+	static const struct {
+		const char	*name;
+		uint16_t	 mode;
+		uint32_t	 word;
+		uint32_t	 want_major, want_minor;
+		fsimg_entry_kind_t kind;
+	} cases[] = {
+		{ "largest numbers", 020644, UINT32_C(0xffffffff), 4095,
+		    1048575, FSIMG_ENTRY_CHAR_DEVICE },
+		{ "small numbers", 060644, UINT32_C(0x801), 8, 1,
+		    FSIMG_ENTRY_BLOCK_DEVICE },
+		{ "minor above 8 bits", 020644, UINT32_C(0x12301245), 0x12,
+		    0x12345, FSIMG_ENTRY_CHAR_DEVICE },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		gen_inode_t proto = inode_proto(cases[i].mode, LAYOUT_FLAT);
+		gen_tree_t tree;
+		listing_t *list;
+		const node_t *node;
+
+		proto.layout_word = cases[i].word;
+		meta_case(&tree, proto, 0);
+		list = walk_ok(cases[i].name, &tree);
+		node = find_node(list, "/n");
+		EXPECT(node != NULL && node->kind == cases[i].kind &&
+		    node->size == 0 &&
+		    (node->meta.valid & FSIMG_META_DEVICE) != 0 &&
+		    node->meta.dev_major == cases[i].want_major &&
+		    node->meta.dev_minor == cases[i].want_minor,
+		    "%s: %u:%u", cases[i].name, cases[i].want_major,
+		    cases[i].want_minor);
+		listing_free(list);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_fifos_and_sockets_have_no_size_and_no_device_number(void)
+{
+	static const struct {
+		uint16_t	 mode;
+		fsimg_entry_kind_t kind;
+	} cases[] = {
+		{ 010644, FSIMG_ENTRY_FIFO },
+		{ 0140755, FSIMG_ENTRY_SOCKET },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		gen_tree_t tree;
+		listing_t *list;
+		const node_t *node;
+
+		meta_case(&tree, inode_proto(cases[i].mode, LAYOUT_FLAT), 0);
+		list = walk_ok("fifo or socket", &tree);
+		node = find_node(list, "/n");
+		EXPECT(node != NULL && node->kind == cases[i].kind &&
+		    node->size == 0 && (node->meta.valid & FSIMG_META_DEVICE) == 0,
+		    "mode %o is a kind %d without a device", cases[i].mode,
+		    (int)cases[i].kind);
+		listing_free(list);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_owner_and_permission_bits_are_delivered(void)
+{
+	gen_inode_t proto = inode_proto(0104755, LAYOUT_FLAT);
+	gen_tree_t tree;
+	listing_t *list;
+	const node_t *node;
+
+	proto.uid = 1234;
+	proto.gid = 4321;
+	meta_case(&tree, proto, 0);
+	list = walk_ok("setuid file", &tree);
+	node = find_node(list, "/n");
+	EXPECT(node != NULL && node->meta.uid == 1234 && node->meta.gid == 4321 &&
+	    node->meta.mode == 04755 && (node->meta.valid & FSIMG_META_OWNER) &&
+	    (node->meta.valid & FSIMG_META_MODE), "uid, gid and the low 12 bits");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+static void
+test_the_stored_time_is_modified_with_mtime_and_changed_without(void)
+{
+	static const uint32_t compats[] = { 0, 2 };
+
+	for (size_t i = 0; i < ARRAY_SIZE(compats); i++) {
+		gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_FLAT);
+		bool mtime = (compats[i] & 2) != 0;
+		gen_tree_t tree;
+		listing_t *list;
+		const node_t *node;
+		const fsimg_timestamp_t *got;
+		uint32_t other;
+
+		proto.extended = true;
+		proto.time = 1700000000;
+		proto.time_nsec = 123456789;
+		meta_case(&tree, proto, compats[i]);
+		list = walk_ok(mtime ? "MTIME set" : "MTIME clear", &tree);
+		node = find_node(list, "/n");
+		CHECK(node != NULL);
+		got = mtime ? &node->meta.modified : &node->meta.changed;
+		other = mtime ? FSIMG_META_CHANGED : FSIMG_META_MODIFIED;
+		EXPECT(got->seconds == 1700000000 &&
+		    got->nanoseconds == 123456789 &&
+		    got->basis == FSIMG_TIME_UTC && got->precision_ns == 1 &&
+		    (node->meta.valid & (mtime ? FSIMG_META_MODIFIED :
+		    FSIMG_META_CHANGED)) != 0 && (node->meta.valid & other) == 0,
+		    "mtime=%d: the one time is delivered under one name", mtime);
+		listing_free(list);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_a_compact_inode_time_is_the_stored_word_after_the_epoch(void)
+{
+	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_FLAT);
+	gen_tree_t tree;
+	listing_t *list;
+	const node_t *node;
+
+	proto.time = 86400;
+	meta_case(&tree, proto, 2);
+	list = walk_ok("compact time with MTIME", &tree);
+	node = find_node(list, "/n");
+	EXPECT(node != NULL && node->meta.modified.seconds == 86400 &&
+	    node->meta.modified.nanoseconds == 0 &&
+	    node->meta.modified.precision_ns == 1000000000,
+	    "epoch 0 plus the word, to the second");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
 int
 main(void)
 {
@@ -5467,6 +7037,39 @@ main(void)
 	test_body_read_returns_the_tail_and_bounds_its_range();
 	test_meta_read_bounds_the_space_and_the_input();
 	test_inode_load_checks_the_layout_against_the_volume_features();
+
+	test_every_boundary_size_is_read_byte_for_byte();
+	test_flat_extent_ending_at_the_volume_end_is_read();
+	test_flat_extent_one_block_past_the_volume_end_is_corrupt();
+	test_flat_inline_file_under_a_block_ignores_its_start_word();
+	test_flat_file_with_content_and_start_word_ffffffff_is_corrupt();
+	test_flat_inline_with_a_full_block_reads_its_start_word();
+	test_empty_file_ignores_its_start_word_in_either_layout();
+	test_inline_tail_ending_at_the_block_end_is_read();
+	test_inline_tail_crossing_the_block_end_is_corrupt();
+	test_directory_over_several_blocks_lists_every_name_in_order();
+	test_names_out_of_order_across_a_block_boundary_are_corrupt();
+	test_flat_inline_directories_list_their_stored_and_inline_blocks();
+	test_names_out_of_order_into_the_inline_tail_are_corrupt();
+	test_name_ending_at_the_end_of_a_full_block_is_read_whole();
+	test_directory_of_255_byte_names_lists_across_its_block_boundaries();
+	test_255_byte_names_out_of_order_only_at_a_block_boundary_are_corrupt();
+	test_root_directory_records_are_checked();
+	test_dot_after_a_name_that_sorts_before_it_is_accepted();
+	test_subdirectory_dot_entries_must_name_it_and_its_parent();
+	test_a_directory_named_from_two_parents_fails_the_second_descent();
+	test_a_cycle_back_through_an_ancestor_at_depth_2_is_corrupt();
+	test_two_names_for_one_directory_in_one_parent_are_both_listed();
+	test_names_that_are_not_portable_utf8_are_omitted_not_refused();
+	test_stored_and_inline_content_and_hard_links_read_back();
+	test_reads_at_offsets_cross_from_stored_blocks_into_the_inline_tail();
+	test_symbolic_link_targets_are_checked_and_delivered();
+	test_attribute_regions_set_the_extra_data_mark_or_are_refused();
+	test_device_numbers_decode_the_linux_32_bit_encoding();
+	test_fifos_and_sockets_have_no_size_and_no_device_number();
+	test_owner_and_permission_bits_are_delivered();
+	test_the_stored_time_is_modified_with_mtime_and_changed_without();
+	test_a_compact_inode_time_is_the_stored_word_after_the_epoch();
 
 	if (failures != 0)
 		fprintf(stderr, "test/erofs.c: %d checks failed\n", failures);

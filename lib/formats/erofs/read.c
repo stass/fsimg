@@ -100,14 +100,19 @@ static void		texts_report(const erofs_super_t *,
 			    fsimg_volume_info_t *);
 
 /*
- * The reader opens and closes a volume; it has no directory, content or
- * verification callbacks, and its descriptor is outside the registry.
+ * The reader: open and close here, the directory callbacks in directory.c
+ * and resolve in content.c. It has no verification callback.
  */
 const fsimg_reader_ops_t fsimg_erofs_reader_ops = {
 	.open = erofs_open,
 	.close = erofs_close,
+	.prepare = erofs_prepare,
+	.replay = erofs_replay,
+	.keys = erofs_keys,
+	.key = erofs_key,
 	.ambiguous = "duplicate EROFS directory name",
-	.name_profile = FSIMG_NAME_PROFILE_PORTABLE
+	.name_profile = FSIMG_NAME_PROFILE_PORTABLE,
+	.resolve = erofs_resolve
 };
 
 fsimg_erofs_reader_t *
@@ -184,6 +189,14 @@ erofs_open(fsimg_reader_t *reader,
 		return (erofs_reject(error, FSIMG_ECORRUPT,
 		    "root inode is not a directory"));
 
+	erofs->tail_window = fsimg_alloc(reader->ctx, erofs->block_bytes,
+	    &detail);
+	if (erofs->tail_window == NULL) {
+		if (error != NULL)
+			*error = detail;
+		return (detail.status);
+	}
+
 	info_report(reader);
 	return (FSIMG_OK);
 }
@@ -195,6 +208,7 @@ erofs_close(fsimg_reader_t *reader)
 
 	if (erofs == NULL)
 		return;
+	fsimg_dealloc(erofs->tail_window);
 	fsimg_dealloc(erofs);
 	reader->driver = NULL;
 }

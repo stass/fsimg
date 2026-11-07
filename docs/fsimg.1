@@ -50,6 +50,8 @@
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
 QNX6 Power-Safe and QNX4 volumes, HFS Plus and HFSX volumes, QNX ImageFS images
 and ISO 9660 images.
+It also reads EROFS volumes that use neither compression nor chunk-based
+files.
 ISO 9660 reading supports Rock Ridge, Joliet and the primary hierarchy.
 A created HFS Plus or HFSX volume is clean and unjournaled, and an HFSX one is
 case-sensitive.
@@ -203,7 +205,7 @@ for directory extraction, under the ordinary destination checks.
 The image's layers, inner to outer, separated by
 .Ql / ;
 the filesystem name is fat12, fat16, fat32, exfat, qnx6, qnx4, ifs, iso9660,
-hfsplus or hfsx.
+hfsplus, hfsx or erofs.
 Required for
 .Cm c .
 The slots are the filesystem, the partition scheme (gpt, mbr, or the read-only
@@ -469,8 +471,8 @@ The partition holding the volume: slot
 counted from 1; the one GPT partition whose name is
 .Ar text ,
 compared exactly; or the one partition of a type, given as a type name
-(basic, esp, fat12, fat16, fat32, exfat, linux, apfs, hfs, hfsplus, hfsx, qnx6,
-qnx4), a GPT
+(basic, esp, fat12, fat16, fat32, exfat, linux, erofs, apfs, hfs, hfsplus, hfsx,
+qnx6, qnx4), a GPT
 type GUID, an MBR type byte such as 0x0c, or an Apple Partition Map type
 beginning Apple_, such as Apple_HFS.
 An Apple Partition Map numbers its entries in map order: a free or void entry
@@ -1316,7 +1318,7 @@ The partition type: a name from the type list under
 .Sx READING
 or RFC 4122 text.
 Default basic data for FAT and exFAT, the QNX6 Power-Safe type for QNX6 and
-Apple HFS/HFS+ for HFS Plus and HFSX;
+Apple HFS/HFS+ for HFS Plus and HFSX, and Linux filesystem for EROFS;
 QNX4 has no GPT type and must name one.
 .It Fl o Ar gpt:name=text
 The partition name, at most 36 UTF-16 units; default the type's
@@ -1331,8 +1333,8 @@ The exact disk length, a multiple of the sector size; an MBR disk holds at
 most 2^32 sectors (2 TiB).
 .It Fl o Ar mbr:type=name|0xNN
 The partition type byte; default 0x01 for FAT12, 0x06 for FAT16, 0x0c for
-FAT32, 0x07 for exFAT, 0xb2 for QNX6, 0x4d for QNX4 and 0xaf for HFS Plus and
-HFSX.
+FAT32, 0x07 for exFAT, 0xb2 for QNX6, 0x4d for QNX4, 0xaf for HFS Plus and
+HFSX, and 0x83 for EROFS.
 Extended types (0x05, 0x0f and 0x85) and the GPT protective type 0xee are
 refused.
 .It Fl o Ar mbr:active=yes|no

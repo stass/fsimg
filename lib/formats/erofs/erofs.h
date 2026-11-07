@@ -264,6 +264,30 @@ typedef struct erofs_prefix {
 } erofs_prefix_t;
 
 /*
+ * Where a range of an inode's content is stored, as erofs_map() returns it:
+ * in the volume's blocks, or inline in the inode's own body. The kinds the
+ * later layouts add, holes and decoded clusters, join this closed set.
+ */
+typedef enum erofs_extent_kind {
+	EROFS_EXTENT_STORED,
+	EROFS_EXTENT_INLINE
+} erofs_extent_kind_t;
+
+/*
+ * One normalized extent: the logical bytes [logical_offset,
+ * logical_offset + length) of an inode, stored from storage_offset, a volume
+ * byte offset for a stored extent and an offset in the inode's body for an
+ * inline one. A stored extent's whole blocks lie inside the content domain;
+ * an inline extent lies inside the body, which erofs_inode_load() checked.
+ */
+typedef struct erofs_extent {
+	uint64_t	 logical_offset;
+	uint64_t	 storage_offset;
+	uint64_t	 length;
+	erofs_extent_kind_t kind;
+} erofs_extent_t;
+
+/*
  * The feature decision open makes once from the superblock's feature words.
  * The rest of the driver reads these, never the words. A feature this
  * reader refuses at open has no member, since no opened volume sets it.
@@ -285,12 +309,20 @@ typedef struct erofs_features {
  * input's length when the count is zero. Every structure the driver reads
  * lies inside it; a part of it past the input's end is a truncation, which
  * bounded I/O reports when something there is read.
+ *
+ * current is the entry the walker last replayed and current_parent the NID
+ * of the directory listing it: prepare reads a directory below the root
+ * from them, and resolve the current file. tail_window holds an inline
+ * tail for delivery, one block, charged at open and owned until close.
  */
 typedef struct fsimg_erofs_reader {
 	erofs_super_t	 super;
 	erofs_config_t	 config;
 	erofs_features_t features;
+	erofs_inode_t	 current;
+	uint64_t	 current_parent;
 	uint64_t	 domain_bytes;
+	unsigned char	*tail_window;
 	uint32_t	 block_bytes;
 } fsimg_erofs_reader_t;
 
@@ -299,6 +331,36 @@ extern const fsimg_reader_ops_t fsimg_erofs_reader_ops;
 /* Driver state and error reporting (read.c). */
 fsimg_erofs_reader_t *erofs_state(const fsimg_reader_t *);
 fsimg_status_t	erofs_reject(fsimg_error_t *, fsimg_status_t, const char *);
+
+/*
+ * The mapper (map.c), the one place a logical offset of an inode becomes
+ * storage, and the content reader (content.c) built on it, which reads a
+ * logical range of any inode into a caller buffer.
+ */
+fsimg_status_t	erofs_map(const fsimg_reader_t *, const erofs_inode_t *,
+		    uint64_t, erofs_extent_t *, fsimg_error_t *);
+fsimg_status_t	erofs_content_read(fsimg_reader_t *, const erofs_inode_t *,
+		    uint64_t, size_t, void *, fsimg_error_t *);
+fsimg_status_t	erofs_resolve(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
+		    fsimg_error_t *);
+
+/* Directory callbacks (directory.c). */
+fsimg_status_t	erofs_prepare(fsimg_reader_t *, fsimg_directory_build_t *,
+		    fsimg_error_t *);
+fsimg_status_t	erofs_replay(fsimg_reader_t *, const char *,
+		    const unsigned char *, size_t, fsimg_error_t *);
+fsimg_status_t	erofs_keys(fsimg_reader_t *, const char *,
+		    const unsigned char *, size_t, fsimg_directory_keys_t *,
+		    fsimg_error_t *);
+fsimg_status_t	erofs_key(fsimg_reader_t *, const char *, unsigned char *,
+		    size_t *, fsimg_error_t *);
+
+/*
+ * Attribute region validation (xattr.c): whether the inode holds an
+ * attribute, after the inline region's structure is checked.
+ */
+fsimg_status_t	erofs_xattr_check(fsimg_reader_t *, const erofs_inode_t *,
+		    bool *, fsimg_error_t *);
 
 /*
  * The metadata reader (meta.c), the one place a NID or a metadata offset
@@ -319,7 +381,9 @@ fsimg_status_t	erofs_body_read(fsimg_reader_t *, const erofs_inode_t *,
  * naming the field; erofs_dirent_decode() also returns FSIMG_EINVAL for an
  * index past the block's entries, a caller's error. The exceptions to the
  * length rule are erofs_inode_fixed_bytes(), which reads the two bytes of
- * the format word, and the accessors of a structure already decoded.
+ * the format word, the accessors of a structure already decoded, and the two
+ * attribute decoders, which read only their fixed head, the 12-byte header
+ * or an entry's 4 bytes, and take as length what remains of the region.
  * Rules that relate one structure to another, such as an address inside
  * the volume, belong to their callers.
  */

@@ -1196,7 +1196,8 @@ typedef enum fsimg_identifier_role {
 	FSIMG_ROLE_DISK = 1,
 	FSIMG_ROLE_PARTITION = 2,
 	FSIMG_ROLE_VHD = 3,
-	FSIMG_ROLE_DMG = 4
+	FSIMG_ROLE_DMG = 4,
+	FSIMG_ROLE_EROFS = 6	/* an EROFS volume UUID */
 } fsimg_identifier_role_t;
 
 /* The reproducible GUID of a role and index at an epoch, in textual byte

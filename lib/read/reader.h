@@ -27,8 +27,9 @@ typedef struct fsimg_format_variant fsimg_format_variant_t;
  *		the current entry: fill reader->entry except its path, set
  *		the driver's current locator and content state, and for a
  *		regular file set reader->initialized; for a symbolic link
- *		whose target the format encodes, declare the decoded target
- *		with fsimg_reader_set_link_target() instead.
+ *		whose target the format encodes or whose bytes replay must
+ *		check, declare the target with fsimg_reader_set_link_target()
+ *		instead.
  * keys		derive the namespace keys of a record's name and payload;
  *		the name is the stored component, raw bytes for an omitted
  *		child.
@@ -269,7 +270,8 @@ fsimg_status_t fsimg_reader_resolve(fsimg_reader_t *, uint64_t, fsimg_extent_t *
  * into the reader's target buffer and sets entry.size and initialized to
  * length; delivery then serves them under the same bounds, stability
  * check and work charging as stored content, and never calls resolve for
- * the entry. A driver that stores targets verbatim never calls it.
+ * the entry. A driver that stores targets verbatim calls it only when it
+ * must check the target's bytes at replay, declaring the bytes it checked.
  */
 fsimg_status_t fsimg_reader_set_link_target(fsimg_reader_t *,
     const void *, size_t, fsimg_error_t *);

@@ -45,6 +45,12 @@ class CliTest < Minitest::Test
       assert_equal(1023, hfs.fetch("max_link_target_bytes"), name)
       assert_equal(2, hfs.fetch("write_settings"), name)
     end
+    erofs = formats.delete("erofs")
+    assert_equal(1, erofs.fetch("capabilities"), "erofs is read only")
+    assert_equal(127, erofs.fetch("entry_kinds"))
+    assert_equal(0x72, erofs.fetch("metadata_fields"))
+    assert_equal(1024, erofs.fetch("max_link_target_bytes"))
+    assert_equal(0, erofs.fetch("write_settings"))
     formats.each do |name, record|
       assert_equal(%w[fat12 fat16].include?(name) ? 32 : 0, record.fetch("write_settings"), "#{name} write settings")
       assert_equal(3, record.fetch("entry_kinds"), "#{name} supports only files and directories")

@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "contract.h"
+#include "erofs-contract.h"
 #include "hfsplus-gen.h"
 #include "host.h"
 #include "internal.h"
@@ -364,6 +365,7 @@ static const contract_entry_t qnx4_owned[] = {
 static fsimg_status_t materialize_hfsplus(contract_volume_t *, fsimg_error_t *);
 static fsimg_status_t materialize_hfsx(contract_volume_t *, fsimg_error_t *);
 static fsimg_status_t materialize_iso(contract_volume_t *, fsimg_error_t *);
+static fsimg_status_t materialize_erofs(contract_volume_t *, fsimg_error_t *);
 
 static const contract_fs_profile_t fs_profiles[] = {
 	{ .id = "hfsplus", .format = "hfsplus", .coverage_profile = true,
@@ -378,6 +380,10 @@ static const contract_fs_profile_t fs_profiles[] = {
 	    .metadata_cases = hfsplus_metadata,
 	    .metadata_case_count = COUNT(hfsplus_metadata),
 	    .materialize = materialize_hfsx, .max_fixture_bytes = 2 * MIB },
+	/* Read only: the volumes come from the independent generator. */
+	{ .id = "erofs", .format = "erofs", .coverage_profile = true,
+	    .expected_capabilities = FSIMG_CAP_READ,
+	    .materialize = materialize_erofs, .max_fixture_bytes = 2 * MIB },
 	{ .id = "iso9660", .format = "iso9660", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,
 	    .write = { .flags = WRITE_FLAGS },
@@ -584,6 +590,36 @@ static fsimg_status_t
 materialize_hfsx(contract_volume_t *volume, fsimg_error_t *error FSIMG_UNUSED)
 {
 	return (materialize_hfs(volume, true));
+}
+
+/* The EROFS generator takes the common tree and its byte oracle. Files are
+ * flat-inline, so the zero sources are stored as zero bytes: the format has
+ * no holes.
+ */
+static unsigned char
+erofs_source_byte(void *argument FSIMG_UNUSED, size_t index, uint64_t offset)
+{
+	return (expected_byte(&source_tree[index], index + 1, offset));
+}
+
+static fsimg_status_t
+materialize_erofs(contract_volume_t *volume, fsimg_error_t *error FSIMG_UNUSED)
+{
+	erofs_source_t sources[SOURCE_COUNT];
+	unsigned char *image;
+	size_t length;
+
+	for (size_t i = 0; i < SOURCE_COUNT; i++) {
+		sources[i] = (erofs_source_t){ source_tree[i].path,
+		    source_tree[i].kind == FSIMG_ENTRY_DIRECTORY,
+		    source_tree[i].size };
+	}
+	image = erofs_contract_image(sources, SOURCE_COUNT, erofs_source_byte,
+	    NULL, &length);
+	contract_volume_init(volume, length, 0);
+	bcopy(image, contract_volume_bytes(volume), length);
+	free(image);
+	return (FSIMG_OK);
 }
 
 /* An independent primary hierarchy for the common source tree. The

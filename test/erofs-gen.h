@@ -117,4 +117,99 @@ void		gen_seal(gen_image_t *);
  */
 uint32_t	gen_crc32c_register(const unsigned char *, size_t);
 
+/*
+ * Directory blocks. A gen_dirent_t is one record: the name is a C string
+ * (the record's bytes, so "" is the empty name) and the type the file type
+ * byte, to which GEN_STARTS_BLOCK may be ORed. gen_dir_pack() writes the
+ * records in the order given into out, which the caller zeroed and sized for
+ * capacity bytes: as many records to a block as fit, a new block also
+ * starting at a record whose type has GEN_STARTS_BLOCK set. It returns the
+ * directory's size: every block but the last is full length and the last
+ * ends after its last name. It sorts and checks no order, but a
+ * block that would not fit in the capacity stops the test.
+ */
+enum {
+	GEN_STARTS_BLOCK = 0x100
+};
+
+typedef struct gen_dirent {
+	const char	*name;
+	uint64_t	 nid;
+	uint16_t	 type;
+} gen_dirent_t;
+
+size_t		gen_dir_pack(unsigned char *, size_t, size_t,
+		    const gen_dirent_t *, size_t);
+
+/*
+ * A tree builder over an image of `blocks` blocks of 2^blkszbits bytes. The
+ * superblock is default; NID 0 is reserved for the root. Inodes are placed
+ * in a metadata area of GEN_TREE_META_BYTES that starts at byte 4096, and
+ * data blocks come after it, so a file's first block is
+ * gen_tree_first_block(). gen_tree_seal() stores the checksum last.
+ */
+enum {
+	GEN_TREE_META_BYTES = 65536
+};
+
+typedef struct gen_tree {
+	gen_image_t	 image;
+	unsigned	 blkszbits;
+	uint32_t	 blocks;
+	uint64_t	 meta_next;	/* the next free metadata byte */
+	uint32_t	 data_next;	/* the next free data block */
+} gen_tree_t;
+
+uint32_t	gen_tree_first_block(unsigned);
+void		gen_tree_init(gen_tree_t *, unsigned, uint32_t);
+void		gen_tree_free(gen_tree_t *);
+
+/* The superblock rewritten with another block count; the image is kept. */
+void		gen_tree_set_blocks(gen_tree_t *, uint32_t);
+void		gen_tree_seal(gen_tree_t *);
+
+/* The superblock's compatible feature word, SB_CHKSUM kept as given. */
+void		gen_tree_set_compat(gen_tree_t *, uint32_t);
+
+/* The NID of the 32-byte slot at a volume offset in the metadata area. */
+uint64_t	gen_nid_at(const gen_image_t *, uint64_t);
+
+/*
+ * Reserve room for an inode: its fixed part and attribute region, then an
+ * inline tail. The tail lies in one block; the part before it may lie in
+ * the block before.
+ */
+uint64_t	gen_tree_slot(gen_tree_t *, size_t, size_t);
+
+/*
+ * Write the inode at nid with the content stored under its layout: layout 0
+ * keeps all of it in data blocks, layout 2 keeps floor(size / B) blocks
+ * there and the rest inline after the inode's fixed part and attribute
+ * region. The layout word becomes the first data block when there is one and
+ * is the prototype's otherwise. size is the inode's size.
+ */
+void		gen_tree_fill(gen_tree_t *, uint64_t, const gen_inode_t *,
+		    const void *, size_t);
+
+/* A slot of the right size followed by gen_tree_fill(); returns the NID. */
+uint64_t	gen_tree_add(gen_tree_t *, const gen_inode_t *, const void *,
+		    size_t);
+
+/*
+ * A compact directory (mode 040755) at nid holding the children and the "."
+ * and ".." records, all sorted by name bytes, stored flat in data blocks.
+ */
+void		gen_tree_dir(gen_tree_t *, uint64_t, uint64_t,
+		    const gen_dirent_t *, size_t);
+
+/* Name the inode at nid as the root in the superblock. */
+void		gen_tree_set_root(gen_tree_t *, uint64_t);
+
+/*
+ * One inline attribute entry at a volume offset: name index, suffix and
+ * value, padded to 4 bytes. Returns the padded length.
+ */
+size_t		gen_xattr_entry(gen_image_t *, uint64_t, unsigned,
+		    const char *, const void *, size_t);
+
 #endif /* !FSIMG_TEST_EROFS_GEN_H */

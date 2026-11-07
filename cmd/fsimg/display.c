@@ -1082,8 +1082,8 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	append(display, "%s%s\n", active ? ", active" : "", selected ? ", selected" : "");
 }
 
-/* The allocation unit's name in human output: QNX filesystems allocate in
- * blocks, the other formats in clusters. JSON keeps one field name. The
+/* The allocation unit's name in human output: QNX filesystems, HFS Plus
+ * and EROFS allocate in blocks, the other formats in clusters. JSON keeps one field name. The
  * frame decoder checks that a wire format name is terminated. A new
  * block-based format joins this list.
  */
@@ -1091,7 +1091,8 @@ static bool
 format_counts_blocks(const char *format)
 {
 	return (strcmp(format, "qnx4") == 0 || strcmp(format, "qnx6") == 0 ||
-	    strcmp(format, "hfsplus") == 0 || strcmp(format, "hfsx") == 0);
+	    strcmp(format, "hfsplus") == 0 || strcmp(format, "hfsx") == 0 ||
+	    strcmp(format, "erofs") == 0);
 }
 
 /* The volume's named details in the driver's order, values in decimal. */

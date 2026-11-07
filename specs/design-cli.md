@@ -201,7 +201,7 @@ a name fills the slot of its kind and `-` marks the next slot empty, so
 `fat32/-/dmg` spells `fat32/dmg` out and `fat32/-/-` is a bare volume. A
 repeated kind or misordered name is a syntax error, not a guess. Filesystem
 names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`,
-`hfsplus`, `hfsx`, `apfs`, `udf` and `iso9660`.
+`hfsplus`, `hfsx`, `apfs`, `udf`, `iso9660` and `erofs`.
 
 `-F` is required for `c`, and its stack must begin with a filesystem name:
 `-F gpt` creates nothing and is a syntax error. On reading, a named slot is

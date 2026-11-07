@@ -283,6 +283,20 @@ test_capability_records(void)
 			CHECK(info.max_link_target_bytes == 1023);
 			continue;
 		}
+		if (strcmp(info.name, "erofs") == 0) {
+			CHECK(info.capabilities == FSIMG_CAP_READ);
+			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
+			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
+			    FSIMG_ENTRY_FIFO | FSIMG_ENTRY_CHAR_DEVICE |
+			    FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET));
+			CHECK(info.metadata_fields == (FSIMG_META_MODIFIED |
+			    FSIMG_META_CHANGED | FSIMG_META_OWNER |
+			    FSIMG_META_MODE));
+			CHECK(info.max_label_bytes == 16);
+			CHECK(info.max_link_target_bytes == 1024);
+			CHECK(info.max_name_utf16_units == 255);
+			continue;
+		}
 		if (strcmp(info.name, "iso9660") == 0) {
 			CHECK(info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_WRITE |
 			    FSIMG_CAP_VERIFY));
@@ -305,7 +319,7 @@ test_capability_records(void)
 		else
 			CHECK(info.max_label_bytes == 11);
 	}
-	CHECK(count == 10);
+	CHECK(count == 11);
 }
 
 static void

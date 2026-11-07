@@ -36,6 +36,8 @@ static const fsimg_partition_type_t partition_types[] = {
 	{ "exfat", BASIC_GUID, BASIC_NAME, { 0x07 }, NULL },
 	{ "linux", "0FC63DAF-8483-4772-8E79-3D69D8477DE4", "Linux filesystem",
 	    { 0x83 }, NULL },
+	{ "erofs", "0FC63DAF-8483-4772-8E79-3D69D8477DE4", "Linux filesystem",
+	    { 0x83 }, NULL },
 	{ "apfs", "7C3457EF-0000-11AA-AA11-00306543ECAC", "Apple APFS", { 0 }, NULL },
 	{ "hfs", "48465300-0000-11AA-AA11-00306543ECAC", "Apple HFS/HFS+",
 	    { 0xaf }, "Apple_HFS" },

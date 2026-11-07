@@ -228,3 +228,230 @@ gen_seal(gen_image_t *image)
 	gen_put(image, GEN_SUPER_OFFSET + SB_CHECKSUM,
 	    gen_crc32c_register(image->bytes + GEN_SUPER_OFFSET, covered), 4);
 }
+
+size_t
+gen_dir_pack(unsigned char *out, size_t capacity, size_t block,
+    const gen_dirent_t *entries, size_t count)
+{
+	size_t at = 0, used = 0, first = 0;
+
+	while (first < count) {
+		size_t n = 0, names = 0, name_at;
+
+		/* Take records while their array and names fit one block. */
+		while (first + n < count) {
+			const gen_dirent_t *e = &entries[first + n];
+			size_t length = strlen(e->name);
+
+			if (n > 0 && (e->type & GEN_STARTS_BLOCK) != 0)
+				break;
+			if (12 * (n + 1) + names + length > block)
+				break;
+			names += length;
+			n++;
+		}
+		CHECK(n > 0);
+		CHECK(at + block <= capacity);
+		name_at = 12 * n;
+		for (size_t i = 0; i < n; i++) {
+			const gen_dirent_t *e = &entries[first + i];
+			unsigned char *record = out + at + 12 * i;
+			size_t length = strlen(e->name);
+
+			put_le(record, e->nid, 8);
+			put_le(record + 8, name_at, 2);
+			record[10] = (unsigned char)e->type;
+			bcopy(e->name, out + at + name_at, length);
+			name_at += length;
+		}
+		used = name_at;
+		first += n;
+		if (first < count)
+			at += block;
+	}
+	return (at + used);
+}
+
+uint32_t
+gen_tree_first_block(unsigned blkszbits)
+{
+	return ((uint32_t)(DEFAULT_META_BYTES + GEN_TREE_META_BYTES) >>
+	    blkszbits);
+}
+
+uint64_t
+gen_nid_at(const gen_image_t *image, uint64_t offset)
+{
+	CHECK(offset >= image->meta_base && (offset - image->meta_base) % 32 == 0);
+	return ((offset - image->meta_base) / 32);
+}
+
+void
+gen_tree_init(gen_tree_t *tree, unsigned blkszbits, uint32_t blocks)
+{
+	gen_super_t sb = gen_super_default(blkszbits, blocks);
+
+	CHECK(blocks >= gen_tree_first_block(blkszbits));
+	bzero(tree, sizeof(*tree));
+	gen_image_init(&tree->image, (size_t)blocks << blkszbits);
+	gen_super_write(&tree->image, &sb);
+	tree->blkszbits = blkszbits;
+	tree->blocks = blocks;
+	tree->meta_next = DEFAULT_META_BYTES;
+	tree->data_next = gen_tree_first_block(blkszbits);
+	CHECK(gen_tree_slot(tree, GEN_COMPACT_BYTES, 0) == 0);
+}
+
+void
+gen_tree_free(gen_tree_t *tree)
+{
+	gen_image_free(&tree->image);
+}
+
+void
+gen_tree_set_blocks(gen_tree_t *tree, uint32_t blocks)
+{
+	gen_super_put(&tree->image, SB_BLOCKS, blocks, 4);
+}
+
+void
+gen_tree_set_compat(gen_tree_t *tree, uint32_t compat)
+{
+	gen_super_put(&tree->image, SB_COMPAT, compat, 4);
+}
+
+void
+gen_tree_seal(gen_tree_t *tree)
+{
+	gen_seal(&tree->image);
+}
+
+uint64_t
+gen_tree_slot(gen_tree_t *tree, size_t header, size_t tail)
+{
+	uint64_t block = (uint64_t)1 << tree->blkszbits;
+	uint64_t at = tree->meta_next;
+	uint64_t end;
+
+	CHECK(tail < block);
+	if (tail > 0 && (at + header) / block !=
+	    (at + header + tail - 1) / block) {
+		/* Start the tail at the next block, the header just before. */
+		uint64_t boundary = (at + header) / block * block + block;
+
+		at = (boundary - header + 31) & ~(uint64_t)31;
+		CHECK((at + header) / block == (at + header + tail - 1) / block);
+	}
+	end = (at + header + tail + 31) & ~(uint64_t)31;
+	CHECK(end <= DEFAULT_META_BYTES + GEN_TREE_META_BYTES);
+	tree->meta_next = end;
+	return (gen_nid_at(&tree->image, at));
+}
+
+void
+gen_tree_fill(gen_tree_t *tree, uint64_t nid, const gen_inode_t *proto,
+    const void *content, size_t size)
+{
+	size_t block = (size_t)1 << tree->blkszbits;
+	size_t stored = proto->layout == 2 ? size / block * block : size;
+	gen_inode_t inode = *proto;
+
+	CHECK(proto->layout == 0 || proto->layout == 2);
+	if (stored > 0) {
+		size_t blocks = (stored + block - 1) / block;
+
+		CHECK(tree->data_next + blocks <= tree->blocks);
+		inode.layout_word = tree->data_next;
+		gen_put_bytes(&tree->image, (uint64_t)tree->data_next * block,
+		    content, stored);
+		tree->data_next += (uint32_t)blocks;
+	}
+	if (size > stored) {
+		gen_put_bytes(&tree->image,
+		    gen_inode_offset(&tree->image, nid) +
+		    gen_inode_header_bytes(proto),
+		    (const unsigned char *)content + stored, size - stored);
+	}
+	inode.nid = nid;
+	inode.size = size;
+	gen_inode_write(&tree->image, &inode);
+}
+
+uint64_t
+gen_tree_add(gen_tree_t *tree, const gen_inode_t *proto, const void *content,
+    size_t size)
+{
+	size_t block = (size_t)1 << tree->blkszbits;
+	size_t tail = proto->layout == 2 ? size & (block - 1) : 0;
+	uint64_t nid = gen_tree_slot(tree, gen_inode_header_bytes(proto), tail);
+
+	gen_tree_fill(tree, nid, proto, content, size);
+	return (nid);
+}
+
+static int
+dirent_compare(const void *a, const void *b)
+{
+	const char *x = ((const gen_dirent_t *)a)->name;
+	const char *y = ((const gen_dirent_t *)b)->name;
+
+	return (strcmp(x, y));
+}
+
+/* The children with "." and ".." added, sorted by name bytes. */
+static gen_dirent_t *
+dir_records(uint64_t nid, uint64_t parent, const gen_dirent_t *children,
+    size_t count)
+{
+	gen_dirent_t *all = calloc(count + 2, sizeof(*all));
+
+	CHECK(all != NULL);
+	all[0] = (gen_dirent_t){ ".", nid, 2 };
+	all[1] = (gen_dirent_t){ "..", parent, 2 };
+	if (count > 0)
+		bcopy(children, all + 2, count * sizeof(*all));
+	qsort(all, count + 2, sizeof(*all), dirent_compare);
+	return (all);
+}
+
+void
+gen_tree_dir(gen_tree_t *tree, uint64_t nid, uint64_t parent,
+    const gen_dirent_t *children, size_t count)
+{
+	size_t block = (size_t)1 << tree->blkszbits;
+	gen_dirent_t *all = dir_records(nid, parent, children, count);
+	/* Every record fits one block, so a block holds at least one. */
+	size_t capacity = (count + 2) * block;
+	unsigned char *blocks = calloc(capacity, 1);
+	gen_inode_t dir;
+	size_t size;
+
+	CHECK(blocks != NULL);
+	size = gen_dir_pack(blocks, capacity, block, all, count + 2);
+	bzero(&dir, sizeof(dir));
+	dir.mode = 040755;
+	dir.nlink = 2;
+	gen_tree_fill(tree, nid, &dir, blocks, size);
+	free(blocks);
+	free(all);
+}
+
+void
+gen_tree_set_root(gen_tree_t *tree, uint64_t nid)
+{
+	gen_super_put(&tree->image, SB_ROOT16, nid, 2);
+}
+
+size_t
+gen_xattr_entry(gen_image_t *image, uint64_t at, unsigned index,
+    const char *suffix, const void *value, size_t value_length)
+{
+	size_t suffix_length = strlen(suffix);
+
+	gen_put(image, at, suffix_length, 1);
+	gen_put(image, at + 1, index, 1);
+	gen_put(image, at + 2, value_length, 2);
+	gen_put_bytes(image, at + 4, suffix, suffix_length);
+	gen_put_bytes(image, at + 4 + suffix_length, value, value_length);
+	return ((4 + suffix_length + value_length + 3) & ~(size_t)3);
+}
