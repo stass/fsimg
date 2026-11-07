@@ -60,7 +60,8 @@ fsimg_status_t fsimg_emit_image(fsimg_writer_t *, fsimg_io_t *,
 /* The emission transfer buffer holds FSIMG_EMIT_BUFFER_BYTES. A driver may
  * encode metadata in it between operations. Its contents are unspecified
  * whenever the driver takes it, and fsimg_emit_copy() overwrites it, so a
- * driver initializes every byte it then writes.
+ * driver initializes every byte it then writes. An encoded copy holds it
+ * for its batches, and the call returns NULL while one runs.
  */
 unsigned char *fsimg_emit_buffer(fsimg_emit_t *);
 
@@ -77,6 +78,58 @@ fsimg_status_t fsimg_emit_write(fsimg_emit_t *, uint64_t, const void *,
  */
 fsimg_status_t fsimg_emit_copy(fsimg_emit_t *, uint64_t,
     const fsimg_emit_payload_t *, fsimg_error_t *);
+
+/* A content consumer receives an entry's bytes from a measured read or an
+ * encoded copy (specs/design-emission.md#measured-reads-and-encoded-copies):
+ * every byte once, in logical order, in batches of at most
+ * FSIMG_EMIT_BUFFER_BYTES, ZERO ranges as zero bytes, then one call with
+ * length 0 and bytes NULL marking the end. A failure it returns ends the
+ * read and is returned from it.
+ */
+typedef fsimg_status_t (*fsimg_content_consumer_t)(void *,
+    const unsigned char *, size_t, fsimg_error_t *);
+
+/* Where an encoded copy goes. length is the file length the plan records
+ * and must equal the catalog's; stored is the number of bytes the plan
+ * says the encoding stores, at most the regions' total capacity. encode
+ * consumes the content and hands each finished unit to fsimg_emit_put().
+ * observe, when not NULL, sees every stored byte as in a payload copy.
+ */
+typedef struct fsimg_emit_encoding {
+	const fsimg_emit_region_t *regions;
+	size_t		 region_count;
+	uint64_t	 length;
+	uint64_t	 stored;
+	fsimg_content_consumer_t encode;
+	void		*encoder_argument;
+	fsimg_emit_observer_t observe;
+	void		*observer_argument;
+} fsimg_emit_encoding_t;
+
+/* Copy catalog entry id through the driver's encoder: a measured read whose
+ * consumer is encoding->encode, with the batches in the emission buffer.
+ * The regions are checked before the source is opened. Output that passes
+ * encoding->stored, or ends short of it, is FSIMG_ESOURCE_CHANGED. The
+ * source is closed on every outcome.
+ */
+fsimg_status_t fsimg_emit_encoded_copy(fsimg_emit_t *, uint64_t,
+    const fsimg_emit_encoding_t *, fsimg_error_t *);
+
+/* Store the next encoded bytes of the running encoded copy at the next
+ * position of its regions. Called only from the copy's encoder; any other
+ * call is FSIMG_ESTATE.
+ */
+fsimg_status_t fsimg_emit_put(fsimg_emit_t *, const void *, size_t,
+    fsimg_error_t *);
+
+/* The measured read: stream the content of catalog entry id, whose planned
+ * length is length, to consumer through the one source lifecycle the copy
+ * uses. It works while the driver plans and while it emits, allocates its
+ * own batch buffer, and closes the source on every outcome; a length that
+ * differs from the catalog's is a corrupt plan.
+ */
+fsimg_status_t fsimg_writer_measure(fsimg_writer_t *, uint64_t, uint64_t,
+    fsimg_content_consumer_t, void *, fsimg_error_t *);
 
 /* The link-target read (specs/design-emission.md#encoded-link-targets):
  * copy the whole target of symbolic-link entry id into target, which holds

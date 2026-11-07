@@ -122,6 +122,7 @@ static void observe_copy(void *, const unsigned char *, size_t, uint64_t);
 static void check_observed(const memory_sink_t *, uint64_t,
     const fsimg_emit_payload_t *);
 static void test_direct_copies(void);
+static void test_encoded_copies(void);
 
 /* The expected payload: a byte pattern that differs per file, with zeros
  * wherever the file's ranges are ZERO.
@@ -982,6 +983,280 @@ test_direct_copies(void)
 	}
 }
 
+/* Measured reads and encoded copies. A test emit callback first measures the
+ * file, checking that the read delivers every logical byte once, in order and
+ * in bounded batches, ZERO ranges as zeros, then a single end call; then it
+ * copies the file through a toy encoder that stores each byte complemented,
+ * in units of ENCODE_UNIT bytes, so the stored length equals the file length
+ * and the expected image follows from file_byte() alone.
+ */
+#define ENCODE_UNIT 1000u
+
+typedef struct encode_case {
+	const char	*name;
+	uint64_t	 file;
+	uint64_t	 capacities[2];
+	size_t		 region_count;
+	uint64_t	 length;
+	uint64_t	 stored;
+	uint64_t	 changed_id;
+	uint64_t	 short_read_id;
+	uint64_t	 fail_at;		/* encoder fails at this offset */
+	bool		 last_region_outside_volume;
+	fsimg_status_t	 expected;
+} encode_case_t;
+
+/* The consumer's view of one read: the file, the next expected offset, and
+ * whether the end call arrived. The encoder also stages its unit here.
+ */
+typedef struct content_run {
+	fsimg_emit_t	*emit;
+	uint64_t	 file;
+	uint64_t	 offset;
+	uint64_t	 fail_at;
+	bool		 ended;
+	size_t		 staged;
+	unsigned char	 unit[ENCODE_UNIT];
+} content_run_t;
+
+static struct {
+	const encode_case_t *test;
+	emit_fixture_t	*fixture;
+	fsimg_emit_region_t regions[2];
+	fsimg_emit_encoding_t encoding;
+	bool		 source_active;
+} encode_run;
+
+/* Check one delivery against file_byte() and the batch and end rules. */
+static void
+check_delivery(content_run_t *run, const unsigned char *bytes, size_t length)
+{
+	CHECK(!run->ended);
+	if (length == 0) {
+		CHECK(bytes == NULL && run->offset == tree[run->file].size);
+		run->ended = true;
+		return;
+	}
+	CHECK(bytes != NULL && length <= FSIMG_EMIT_BUFFER_BYTES);
+	for (size_t i = 0; i < length; i++)
+		CHECK(bytes[i] == file_byte(run->file, run->offset + i));
+	run->offset += length;
+}
+
+static fsimg_status_t
+measure_consumer(void *argument, const unsigned char *bytes, size_t length,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	check_delivery(argument, bytes, length);
+	return (FSIMG_OK);
+}
+
+/* The toy encoder: complement, stage, put each full unit and the rest at the
+ * end. A failure injected at fail_at stands in for an encoder's own error.
+ */
+static fsimg_status_t
+complement_encoder(void *argument, const unsigned char *bytes, size_t length,
+    fsimg_error_t *error)
+{
+	content_run_t *run = argument;
+	fsimg_error_t ignored;
+	fsimg_status_t status;
+
+	/* The copy holds the emission buffer and cannot nest. */
+	CHECK(fsimg_emit_buffer(run->emit) == NULL);
+	CHECK(fsimg_emit_encoded_copy(run->emit, 1, &encode_run.encoding,
+	    &ignored) == FSIMG_ESTATE);
+	if (run->fail_at != 0 && run->offset + length >= run->fail_at)
+		return (fsimg_error_set(error, FSIMG_ENOMEM, 0, FSIMG_OP_WRITER,
+		    "test encoder failure"));
+	check_delivery(run, bytes, length);
+	for (size_t i = 0; i < length; i++) {
+		run->unit[run->staged++] = (unsigned char)~bytes[i];
+		if (run->staged == ENCODE_UNIT) {
+			status = fsimg_emit_put(run->emit, run->unit,
+			    run->staged, error);
+			if (status != FSIMG_OK)
+				return (status);
+			run->staged = 0;
+		}
+	}
+	if (length != 0 || run->staged == 0)
+		return (FSIMG_OK);
+	status = fsimg_emit_put(run->emit, run->unit, run->staged, error);
+	run->staged = 0;
+	return (status);
+}
+
+static fsimg_status_t
+encode_case_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,
+    fsimg_error_t *error)
+{
+	const encode_case_t *test = encode_run.test;
+	content_run_t measured, encoded;
+	fsimg_emit_encoding_t no_encoder;
+	fsimg_error_t ignored;
+	uint64_t id;
+	fsimg_status_t status;
+
+	id = catalog_id(encode_run.fixture, tree[test->file].path);
+	CHECK(fsimg_emit_put(emit, "x", 1, &ignored) == FSIMG_ESTATE);
+	no_encoder = encode_run.encoding;
+	no_encoder.encode = NULL;
+	CHECK(fsimg_emit_encoded_copy(emit, id, &no_encoder, &ignored) ==
+	    FSIMG_ESTATE && !writer->source.active);
+	if (test->expected == FSIMG_OK) {
+		bzero(&measured, sizeof(measured));
+		measured.file = test->file;
+		CHECK(fsimg_writer_measure(writer, id, test->length,
+		    measure_consumer, &measured, error) == FSIMG_OK);
+		CHECK(measured.ended && !writer->source.active);
+	}
+
+	bzero(&encoded, sizeof(encoded));
+	encoded.emit = emit;
+	encoded.file = test->file;
+	encoded.fail_at = test->fail_at;
+	encode_run.encoding.encoder_argument = &encoded;
+	encode_run.fixture->changed_id = test->changed_id;
+	status = fsimg_emit_encoded_copy(emit, id, &encode_run.encoding,
+	    error);
+	encode_run.source_active = writer->source.active;
+	CHECK(fsimg_emit_put(emit, "x", 1, &ignored) == FSIMG_ESTATE);
+	CHECK(status != FSIMG_OK || encoded.ended);
+	return (status);
+}
+
+static void
+test_encoded_copies(void)
+{
+	static const encode_case_t cases[] = {
+		{ .name = "mixed source in two regions", .file = FILE_MIXED,
+		    .capacities = { 150500, 60000 }, .region_count = 2,
+		    .length = 200000, .stored = 200000,
+		    .expected = FSIMG_OK },
+		{ .name = "source of one ZERO range", .file = FILE_SPARSE,
+		    .capacities = { 50000 }, .region_count = 1,
+		    .length = 50000, .stored = 50000, .expected = FSIMG_OK },
+		{ .name = "empty source", .file = FILE_EMPTY,
+		    .length = 0, .stored = 0, .expected = FSIMG_OK },
+		{ .name = "output beyond the plan", .file = FILE_MIXED,
+		    .capacities = { 200000 }, .region_count = 1,
+		    .length = 200000, .stored = 199999,
+		    .expected = FSIMG_ESOURCE_CHANGED },
+		{ .name = "output short of the plan", .file = FILE_MIXED,
+		    .capacities = { 200001 }, .region_count = 1,
+		    .length = 200000, .stored = 200001,
+		    .expected = FSIMG_ESOURCE_CHANGED },
+		{ .name = "stored length beyond the regions", .file = FILE_MIXED,
+		    .capacities = { 100000, 99999 }, .region_count = 2,
+		    .length = 200000, .stored = 200000,
+		    .expected = FSIMG_ECORRUPT },
+		{ .name = "plan length below catalog", .file = FILE_LARGE,
+		    .capacities = { 300000 }, .region_count = 1,
+		    .length = 299999, .stored = 299999,
+		    .expected = FSIMG_ECORRUPT },
+		{ .name = "region outside volume", .file = FILE_MIXED,
+		    .capacities = { 100000, 100000 }, .region_count = 2,
+		    .length = 200000, .stored = 200000,
+		    .last_region_outside_volume = true,
+		    .expected = FSIMG_ECORRUPT },
+		{ .name = "source changed", .file = FILE_MIXED,
+		    .capacities = { 200000 }, .region_count = 1,
+		    .length = 200000, .stored = 200000,
+		    .changed_id = FILE_MIXED,
+		    .expected = FSIMG_ESOURCE_CHANGED },
+		{ .name = "source ends early", .file = FILE_LARGE,
+		    .capacities = { 300000 }, .region_count = 1,
+		    .length = 300000, .stored = 300000,
+		    .short_read_id = FILE_LARGE, .expected = FSIMG_EIO },
+		{ .name = "encoder failure", .file = FILE_LARGE,
+		    .capacities = { 300000 }, .region_count = 1,
+		    .length = 300000, .stored = 300000, .fail_at = 150000,
+		    .expected = FSIMG_ENOMEM },
+	};
+	const encode_case_t *test;
+	emit_fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_writer_ops_t ops;
+	fsimg_format_t format;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	unsigned char *expected;
+	uint64_t logical;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		test = &cases[i];
+		fixture_open(&fixture, "fat12");
+		bzero(&sink, sizeof(sink));
+		sink_open(&fixture, &sink, 0xa5);
+		fixture.short_read_id = test->short_read_id;
+		format = *fixture.writer->format;
+		ops = *format.writer;
+		ops.emit = encode_case_emit;
+		format.writer = &ops;
+		fixture.writer->format = &format;
+
+		bzero(&encode_run, sizeof(encode_run));
+		encode_run.test = test;
+		encode_run.fixture = &fixture;
+		place_regions(test->capacities, test->region_count, sink.length,
+		    encode_run.regions);
+		if (test->last_region_outside_volume)
+			encode_run.regions[test->region_count - 1].image_offset =
+			    sink.length - 10;
+		encode_run.encoding = (fsimg_emit_encoding_t){
+			.regions = encode_run.regions,
+			.region_count = test->region_count,
+			.length = test->length,
+			.stored = test->stored,
+			.encode = complement_encoder,
+			.observe = observe_copy,
+			.observer_argument = &observed
+		};
+		bzero(&observed, sizeof(observed));
+		observed.length = sink.length;
+		observed.bytes = calloc(1, (size_t)sink.length);
+		observed.seen = calloc((size_t)sink.length, sizeof(bool));
+		CHECK(observed.bytes != NULL && observed.seen != NULL);
+
+		status = emit_to(&fixture, &sink, &error);
+		CHECK(!encode_run.source_active);
+		if (test->expected != FSIMG_OK) {
+			check_failed(&fixture, &sink, status, test->expected,
+			    &error, test->name);
+			if (test->expected == FSIMG_ECORRUPT)
+				CHECK(observed.total == 0);
+		} else {
+			if (status != FSIMG_OK)
+				fprintf(stderr, "%s: %d %s\n", test->name, status,
+				    error.message);
+			CHECK(status == FSIMG_OK);
+			/* Stored bytes land in logical order across the regions,
+			 * each observed once; everything else stays zero.
+			 */
+			expected = calloc(1, (size_t)sink.length);
+			CHECK(expected != NULL);
+			logical = 0;
+			for (size_t r = 0; r < test->region_count; r++) {
+				for (uint64_t k = 0; k < encode_run.regions[r].capacity &&
+				    logical < test->stored; k++, logical++)
+					expected[encode_run.regions[r].image_offset + k] =
+					    (unsigned char)~file_byte(test->file, logical);
+			}
+			CHECK(bcmp(expected, sink.bytes, (size_t)sink.length) == 0);
+			CHECK(observed.total == test->stored);
+			for (uint64_t k = 0; k < sink.length; k++)
+				CHECK(!observed.seen[k] ||
+				    observed.bytes[k] == expected[k]);
+			free(expected);
+		}
+		fixture_close(&fixture);
+		free(sink.bytes);
+		free(observed.bytes);
+		free(observed.seen);
+	}
+}
+
 int
 main(void)
 {
@@ -995,5 +1270,6 @@ main(void)
 		test_corrupt_plans(formats[i]);
 	}
 	test_direct_copies();
+	test_encoded_copies();
 	return (0);
 }

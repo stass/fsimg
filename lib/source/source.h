@@ -40,8 +40,9 @@ struct fsimg_source_root {
  * trusted only once finish succeeds; finish closes it on every outcome.
  * An operational failure of open, read or range closes it too and
  * reports the status without failing the writer, which fails when the
- * emission that asked returns; every caller lies inside an emission or
- * its pre-emission alias check, both of which fail the writer. Writer
+ * operation that asked returns; every caller lies inside planning, an
+ * emission or its pre-emission alias check, each of which fails the
+ * writer. Writer
  * failure/destruction also closes it. Source records have a separate
  * buffer, so source operations preserve the catalog's current snapshot.
  * Reads within the declared length are exact or fail; a request crossing it

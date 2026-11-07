@@ -15,8 +15,8 @@ Driver designs ([FAT](design-fat-writer.md), [exFAT](design-exfat.md),
 
 | Owner | Owns |
 | --- | --- |
-| Writer lifecycle (`lib/write/`) | State transitions, pre-mutation checks, sink initialization, flush, failure marking of the output, the [link-target read](#encoded-link-targets) |
-| Emission object | Bounded metadata writes, the source copy operation, the transfer buffer, progress |
+| Writer lifecycle (`lib/write/`) | State transitions, pre-mutation checks, sink initialization, flush, failure marking of the output, the [link-target read](#encoded-link-targets), the [measured read](#measured-reads-and-encoded-copies) |
+| Emission object | Bounded metadata writes, the source copy operation, the [encoded copy](#measured-reads-and-encoded-copies), the transfer buffer, progress |
 | Driver | Layout iteration, metadata encoding, placement: which bytes belong at which offset |
 
 ## Order
@@ -142,6 +142,53 @@ A failure closes the source and fails the planning or emission step that
 asked, and the writer with it, under the
 [source failure rule](design-sources.md); a failed plan publishes no losses
 and no summary.
+
+## Measured reads and encoded copies
+
+A format that stores a file as an encoding of its bytes, such as EROFS's
+LZ4 clusters, needs the encoding's size before it places anything, and the
+encoding itself when it emits. Staging the encoded payload would hold data
+the plan cannot bound, so the writer offers two operations that run the
+driver's encoder over the source twice, once to measure and once to store;
+the encoder's determinism makes the two agree.
+
+* **Measured read:** stream entry `id`'s content to a driver consumer, a
+  callback `(argument, bytes, length)` that may fail. It opens the source
+  by stable catalog ID, requires the catalog's length to equal the length
+  the plan records, a corrupt plan otherwise, and delivers every byte of
+  `[0, length)` once, in logical order, in batches of at most the emission
+  buffer's size: DATA ranges are read exactly, and ZERO ranges arrive as
+  zero bytes, since an encoder needs them, with one work unit charged per
+  zero batch as each read charges one. After the last byte the consumer
+  receives one call with no bytes, which marks the end of the content so
+  it can finish its last unit; an empty source receives only that call.
+  The source is then validated and closed; a consumer failure or a failed
+  read closes it at once. The read works during planning and during
+  emission, never holds a source between calls, allocates its own batch
+  buffer for each call and charges every read to the session, under the
+  source failure rule above.
+* **Encoded copy:** during emission, a measured read whose consumer is the
+  driver's encoder, together with the regions the plan gives the encoding
+  and the number of bytes the plan says it stores. The regions are checked
+  before the source is opened, as the copy checks its own. The encoder
+  hands each finished unit to the emission object, which writes it at the
+  next position of those regions in logical order, calls the driver's copy
+  observer over it as the copy does, and refuses a unit that would pass
+  the planned stored length; when the content ends, a stored length short
+  of the plan's fails the copy. Both are `FSIMG_ESOURCE_CHANGED`: planning
+  measured the same bytes with the same deterministic encoder, so other
+  output means other bytes. The driver compares each unit it forms with
+  the one planning recorded and fails the same way on a difference, so a
+  source whose bytes changed under the same length and identity still
+  cannot produce output the plan does not describe. Batches come from the
+  emission buffer, which the emission object does not hand out while the
+  copy runs.
+
+Common code holds no encoder and knows nothing of units beyond their bytes:
+the consumer is the format's encoder and the driver owns every comparison
+with its plan. Neither operation adds a source lifecycle of its own; both
+are the copy's open, range walk, exact reads, validation and close, with
+the destination replaced by a consumer.
 
 ## Failure
 
