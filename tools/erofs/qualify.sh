@@ -30,9 +30,11 @@
 # fsimg, each reported as SKIP, for a reader that does not read the layout;
 # skipping fsimg also skips the partitioned outputs, which it copies out.
 # The mixed tree holds text, noise and short files, so under lz4 some files
-# compress and some stay flat. Under addressing=48 the huge output is the
-# small tree in a sparse volume of 2^32 + 1000 blocks, whose block count
-# needs the superblock's high bits; it is never read end to end.
+# compress and some stay flat. Under addressing=48 the small tree also
+# holds a file modified in 1950, so the superblock's epoch, the smallest
+# time, is negative, and the huge output is the small tree in a sparse
+# volume of 2^32 + 1000 blocks, whose block count needs the superblock's
+# high bits; it is never read end to end.
 # WORKDIR holds the sources and images and must lie under $HOME, which the
 # VM shares at the same path; SCRATCH (default WORKDIR) holds extractions.
 # Each output's files are replaced as it is built. The oracles are found
@@ -262,8 +264,8 @@ extract_partition() {
 	        .find { _1["type"] == "partition" } or abort("no partition")
 	    puts [part["offset_bytes"], part["length_bytes"]]
 	        .map { Integer(_1) / 512 }.join(" ")' >"$2.extent" &&
-	    read -r skip count <"$2.extent" &&
-	    dd if="$1" of="$2" bs=512 skip="$skip" count="$count" 2>/dev/null
+	    read -r start count <"$2.extent" &&
+	    dd if="$1" of="$2" bs=512 skip="$start" count="$count" 2>/dev/null
 }
 
 # Sources. Content is deterministic; times are the creation times, with
@@ -299,6 +301,12 @@ build_small() {
 	chmod 0750 "$s/dir/sub"
 	touch -t 200001020304.05 "$s/dir/f0"
 	touch -t 200001020304.05 "$s/dir"
+	# Under addressing=48 the epoch is the smallest time, which this
+	# file makes negative.
+	if [ "$addressing" = 48 ]; then
+		printf 'old\n' >"$s/old"
+		touch -t 195001020304.05 "$s/old"
+	fi
 }
 
 build_deep() {

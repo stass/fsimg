@@ -1088,41 +1088,44 @@ as deep, wide and names, are the uncompressed image byte for byte.
 
 `tools/erofs/qualify.sh -a 48` ran on 2026-11-07 at each block size,
 uncompressed and under `-c lz4`, against `fsimg` built from branch
-`erofs-s14` at "write the EROFS 48-bit layout", with `fsck.erofs`
-1.9.4-gf36cadb5 on macOS and the colima VM's kernel `7.0.0-38-generic`:
+`erofs-s14` rebased on the 48-bit reader ("read the EROFS 48-bit
+layout"), with `fsck.erofs` 1.9.4-gf36cadb5 on macOS and the colima VM's
+kernel `7.0.0-38-generic`:
 
 ```sh
 for c in none lz4; do
 	for b in 512 1024 2048 4096; do
-		sh tools/erofs/qualify.sh -a 48 -b $b -c $c -x rust,fsimg \
-		    build/fsimg ~/.cache/fsimg-erofs/vm-14/a48-$b-$c
+		sh tools/erofs/qualify.sh -a 48 -b $b -c $c -x rust \
+		    build/fsimg ~/.cache/fsimg-erofs/vm-14b/a48-$b-$c
 	done
 done
 ```
 
-Every output of the runs above was created again with
-`-o addressing=48`: the superblock's wide form, every directory extended,
-the implicit link count on every compact file and link, times as offsets
-from the smallest modification second and, under `lz4`, compressed files
-mapped by 32-byte encoded extents with LZ4 and plain extents. A further
-output, `huge`, puts the small tree in a sparse volume of 2^32 + 1000
-blocks (`-s`), 2 TiB apparent at 512-byte blocks and 16 TiB at 4096, so
-the block count's bits 32 to 47 are set; no check reads it end to end.
+Every output was created with `-o addressing=48`: the superblock's wide
+form, every directory extended, the implicit link count on every compact
+file and link, times as offsets from the smallest modification second
+and, under `lz4`, compressed files mapped by 32-byte encoded extents with
+LZ4 and plain extents. Under `-a 48` the small tree also holds a file
+modified in 1950, so the superblock's epoch is negative, and so is every
+output built from that tree. A further output, `huge`, puts the small
+tree in a sparse volume of 2^32 + 1000 blocks (`-s`), 2 TiB apparent at
+512-byte blocks and 16 TiB at 4096, so the block count's bits 32 to 47
+are set; no check reads it end to end.
 
 | Oracle | Outputs | Verdict |
 | --- | --- | --- |
-| `fsck.erofs --extract --preserve` | empty, small, deep, wide, large, every kind, tails, names, mixed, huge | Pass at every block size, both settings |
+| `fsck.erofs --extract --preserve` | empty, small, deep, wide, large, every kind, tails, names, mixed, gpt, mbr, huge | Pass at every block size, both settings |
 | Kernel loop mount | The same | Pass at every block size, both settings |
+| fsimg `W`, `t` | The same | Pass at every block size, both settings |
 | rust-fs-erofs 0.5.1 | None | Refuses every image: "feature_incompat 48bit (0x80) block addressing is not implemented by this reader" (first run, then `-x rust`) |
-| fsimg `W`, `t` | None | Skipped: fsimg's reader refuses `48BIT` until the 48-bit reader (stage 12); its unit-test round trips are guarded the same way |
-| `erofs/gpt`, `erofs/mbr` | None | Skipped with fsimg, whose `i` copies the partition out |
 
 The 8192-byte block refusal passed in every run. Data beyond block 2^32,
-which would need more than 2 TiB of stored content, was not built: start
-blocks above 32 bits are checked by the encoder's unit tests and by E10's
-`e10-48-large`, not by an oracle reading fsimg's output. A host source
-refuses FIFOs, so the implicit link count on a compact FIFO is checked by
-the unit tests only.
+which would need more than 2 TiB of stored content, was not built for an
+oracle: start blocks above 32 bits are checked by `test-erofs-write`,
+which plants a flat and an LZ4 file past block 2^32 in a sparse sink and
+reads them back with fsimg's reader, and by E10's `e10-48-large`. A host
+source refuses FIFOs, so the implicit link count on a compact FIFO is
+checked by the unit tests only.
 
 Image sizes in bytes of the reproducible `-o compression=lz4` plan
 (`fsimg c -n -R`) at each addressing:

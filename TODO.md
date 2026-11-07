@@ -402,6 +402,15 @@
   for `e13-big5g-chunk1m`, a 3 MB image.
   Reporting a driver's holes as ZERO ranges would let extraction leave
   them as holes.
+* [Low] **EROFS encoders are inverses by refusal lists**
+  (`lib/formats/erofs/codec.c`): `erofs_zheader_encode()`,
+  `erofs_xrecord_encode()`, `erofs_xlength_encode()` and
+  `erofs_full_record_encode()` stay exact inverses of their decoders only
+  as far as each refuses what the decoder would read differently, and
+  `erofs_inode_encode()` re-decodes without comparing. Decoding each
+  output and comparing it with the input would make the property hold by
+  construction; `erofs_full_record_encode()` drops `partial` on a plain
+  record today.
 * [Low] **EROFS verification reports two advisory findings nowhere**
   (`lib/formats/erofs/verify.c`): the [format design's
   verification](specs/design-erofs.md#verification) reports the
