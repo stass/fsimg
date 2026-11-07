@@ -98,7 +98,7 @@ This section explains the model the rules below serve.
 
 | Profile | Reader contract | Writer contract |
 | --- | --- | --- |
-| Core | Block sizes 512 to 4096 ([geometry](#volume-identity-and-geometry)); compact and extended inodes, a compact inode's time counted from the superblock's epoch; flat and flat-inline data; every POSIX kind; extended attributes validated and marked as extra data | Emitted, 4096-byte blocks, flat and flat-inline layouts, compact and extended inodes, no extended attributes |
+| Core | Block sizes 512 to 4096 ([geometry](#volume-identity-and-geometry)); compact and extended inodes, a compact inode's time counted from the superblock's epoch; flat and flat-inline data; every POSIX kind; extended attributes validated and marked as extra data | Emitted, 512- to 4096-byte blocks, flat and flat-inline layouts, compact and extended inodes, no extended attributes |
 | Chunked | Chunk-based files with 4-byte and 8-byte indexes and holes, primary device only | Never emitted |
 | Compressed | Full and compact indexes, big physical clusters, plain clusters, compressed inline tails, packed fragments, shared clusters and compressed directories; LZ4 and DEFLATE always, MicroLZMA and Zstandard when the build has the optional library | LZ4 with full indexes and one-block physical clusters, under the `compression=lz4` setting |
 | 48-bit layout | Wide block numbers and root NID, implicit link counts, directories without `.`, byte-addressed encoded extents | Emitted under `addressing=48`: wide fields and compact times, encoded extents for LZ4 files, no omitted dots |
@@ -1352,9 +1352,11 @@ become independent files under the [sources design](design-sources.md).
 ### Volume
 
 * `B = 4096` unless `allocation_unit_bytes` selects 512, 1024 or 2048.
-  The smaller sizes are provisional: the writer accepts them only once E11
-  shows that the Linux kernel in the check environment mounts writer output
-  at that size; if E11 cannot answer, the writer accepts only 4096.
+  E11 confirms every size: the Linux kernel in the check environment,
+  `fsck.erofs` and rust-fs-erofs read the writer's output at 512, 1024,
+  2048 and 4096 bytes, including the layout below at its smallest, where
+  the [covered range](#superblock-checksum) holds the first inodes and
+  inodes end at, or move past, many block ends.
 * Bytes 0 to 1023 are zero. The superblock has no extension slots, except
   the one the [metadata-box profile](#metadata-box-profile) needs. Its
   compatible features are `SB_CHKSUM` and `MTIME`; its incompatible
@@ -1549,7 +1551,7 @@ change times are not stored and are counted as optional losses under the
 
 | Setting | Rule |
 | --- | --- |
-| `allocation_unit_bytes` | 0, 512, 1024, 2048 or 4096 subject to E11; 0 selects 4096 |
+| `allocation_unit_bytes` | 0, 512, 1024, 2048 or 4096 (E11); 0 selects 4096 |
 | `volume_bytes` | 0, or a multiple of 512 holding the plan; the block count is `floor(V / B)`, the image is `V` bytes long, and the excess blocks and any partial block after the last block are zero |
 | `min_free_bytes` | 0; the image is exactly its plan, so a free-space request is `FSIMG_EINVAL` |
 | `label` | At most 15 bytes, stored raw and NUL-padded to 16 |

@@ -18,10 +18,10 @@
  * flat-inline layout lands in the body just after the fixed part. The
  * superblock comes last.
  *
- * The superblock checksum covers [1024, B) for B above 1024: the superblock
- * and whatever inodes and inline tails block 0 holds. The emission object
- * cannot read the sink back, so the driver keeps those bytes itself in
- * covered. put() and copy() are the only calls into the emission object:
+ * The superblock checksum covers [1024, B) for B above 1024 and
+ * [1024, 1024 + B) otherwise: the superblock and whatever inodes and inline
+ * tails follow it in that range. The emission object cannot read the sink
+ * back, so the driver keeps those bytes itself in covered. put() and copy() are the only calls into the emission object:
  * put() mirrors the part of each metadata write that falls inside the
  * covered range, and copy() attaches cover_copy() to each source copy,
  * which mirrors every byte the copy writes there. Since the volume starts
@@ -29,7 +29,7 @@
  * written, and the checksum is computed over it last.
  */
 
-_Static_assert(2 * EROFS_WRITE_BLOCK_BYTES <= FSIMG_EMIT_BUFFER_BYTES,
+_Static_assert(2 * (1u << EROFS_BLKSZBITS_MAX) <= FSIMG_EMIT_BUFFER_BYTES,
     "the emission buffer holds a directory block and its name staging");
 
 /* The checksum's covered range is at most the superblock region. */

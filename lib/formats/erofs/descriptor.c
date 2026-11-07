@@ -49,8 +49,7 @@ static const fsimg_format_variant_t erofs_variants[] = {
 			    FSIMG_META_OWNER | FSIMG_META_MODE,
 			.sector_size_mask = 1u << 9,
 			.allocation_unit_size_mask = EROFS_BLOCK_SIZES,
-			.write_allocation_unit_size_mask =
-			    EROFS_WRITE_BLOCK_SIZES,
+			.write_allocation_unit_size_mask = EROFS_BLOCK_SIZES,
 			.max_file_bytes = EROFS_VOLUME_MAX,
 			.max_volume_bytes = EROFS_VOLUME_MAX,
 			.max_name_utf16_units = EROFS_NAME_MAX,

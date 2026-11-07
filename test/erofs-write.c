@@ -52,9 +52,10 @@
  * fail the emission without leaking. The inode and superblock encoders
  * are checked against the reader's decoders.
  */
-#define BLOCK		4096u
+#define BLOCK_DEFAULT	4096u
+#define BLOCK_MAX	4096u
 #define SLOT		32u
-#define SLOTS_PER_BLOCK	(BLOCK / SLOT)
+#define SLOTS_PER_BLOCK	(block_size / SLOT)
 #define EPOCH		INT64_C(1700000000)
 #define OLD_TIME	INT64_C(1234567890)
 #define MAX_SPECS	512u
@@ -62,6 +63,14 @@
 #define MAX_ROWS	(MAX_SPECS + 1)
 #define MAX_NAMES	1024u
 #define MAX_BLOCKS	128u
+
+/*
+ * The block size the tests plan at, which the model and the checks
+ * expect: the writer's default, except while at_every_block_size() runs a
+ * test at each size the writer accepts and sets sweeping.
+ */
+static uint32_t block_size = BLOCK_DEFAULT;
+static bool sweeping;
 
 /* Report the case before the fatal check names the failed condition. */
 #define CHECK_CASE(condition, ...) do { \
@@ -177,13 +186,16 @@ typedef struct fixture {
 /*
  * The settings every case but the label's own starts from: the defaults,
  * with the label given because the driver selects none (see
- * test_default_label_is_selected()).
+ * test_default_label_is_selected()), at the tests' block size. The
+ * default block size is left unset, so the writer selects it.
  */
 static void
 base_options(fsimg_write_options_t *options)
 {
 	fsimg_write_options_init(options);
 	options->label = "test";
+	if (block_size != BLOCK_DEFAULT)
+		options->allocation_unit_bytes = block_size;
 }
 
 static void
@@ -485,7 +497,7 @@ dir_names(const char *dir, name_t *names)
 
 /*
  * The directory's size: entries fill blocks while a block's 12-byte entries
- * and names stay within 4096 bytes; the size is the full blocks plus the
+ * and names stay within a block; the size is the full blocks plus the
  * last block's used bytes.
  */
 static uint64_t
@@ -498,13 +510,13 @@ model_dir_size(const char *dir)
 	for (size_t i = 0; i < count; i++) {
 		uint64_t need = 12 + names[i].length;
 
-		if (used + need > BLOCK) {
+		if (used + need > block_size) {
 			full++;
 			used = 0;
 		}
 		used += need;
 	}
-	return (full * BLOCK + used);
+	return (full * block_size + used);
 }
 
 static uint64_t
@@ -616,8 +628,8 @@ model_plan(fixture_t *fixture, int64_t format_time, bool reproducible)
 		    row->gid > 65535 || row->links > 65535 ||
 		    row->mtime != format_time || row->mtime_nsec != 0;
 		fixed = row->extended ? 64 : 32;
-		tail = (uint32_t)(row->size % BLOCK);
-		row->layout = tail != 0 && fixed + tail <= BLOCK ?
+		tail = (uint32_t)(row->size % block_size);
+		row->layout = tail != 0 && fixed + tail <= block_size ?
 		    EROFS_LAYOUT_FLAT_INLINE : EROFS_LAYOUT_FLAT;
 		body_slots = row->layout == EROFS_LAYOUT_FLAT_INLINE ?
 		    (fixed + tail + SLOT - 1) / SLOT : fixed / SLOT;
@@ -629,15 +641,15 @@ model_plan(fixture_t *fixture, int64_t format_time, bool reproducible)
 		slot += body_slots;
 	}
 	model.metadata_end = (slot + SLOTS_PER_BLOCK - 1) / SLOTS_PER_BLOCK *
-	    BLOCK;
+	    block_size;
 
 	/* Data blocks, contiguous in the same order. */
-	next_block = model.metadata_end / BLOCK;
+	next_block = model.metadata_end / block_size;
 	for (uint64_t id = 0; id < model.count; id++) {
 		erofs_row_t *row = &model.rows[id];
-		uint64_t blocks = row->size / BLOCK;
+		uint64_t blocks = row->size / block_size;
 
-		if (row->layout == EROFS_LAYOUT_FLAT && row->size % BLOCK != 0)
+		if (row->layout == EROFS_LAYOUT_FLAT && row->size % block_size != 0)
 			blocks++;
 		row->start_block = blocks != 0 ? next_block : 0;
 		next_block += blocks;
@@ -682,7 +694,7 @@ check_plan_matches_model(fixture_t *fixture, const char *what)
 
 	CHECK_CASE(plan->inode_count == model.count, "%s: inode count",
 	    what);
-	CHECK_CASE(plan->block_bytes == BLOCK, "%s: block size", what);
+	CHECK_CASE(plan->block_bytes == block_size, "%s: block size", what);
 	CHECK_CASE(plan->metadata_end == model.metadata_end,
 	    "%s: metadata_end %llu, want %llu", what,
 	    (unsigned long long)plan->metadata_end,
@@ -763,7 +775,7 @@ test_default_settings_plan_an_empty_volume(void)
 	tree_reset();
 	reproducible_options(&options);
 	plan_tree(&fixture, &options);
-	CHECK(fixture.plan->block_bytes == BLOCK);
+	CHECK(fixture.plan->block_bytes == block_size);
 	fixture_close(&fixture);
 }
 
@@ -820,16 +832,19 @@ test_unwritten_settings_are_refused_naming_the_setting(void)
 	fsimg_ctx_free(ctx);
 }
 
+/*
+ * The writer emits the four block sizes EROFS defines, the ones E11 shows
+ * the kernel and both other readers accept; any other size is invalid.
+ */
 static void
-test_block_size_selects_only_4096(void)
+test_block_size_selects_512_to_4096(void)
 {
 	static const struct {
 		uint32_t	 bytes;
 		fsimg_status_t	 status;
 	} cases[] = {
-		{ 0, FSIMG_OK }, { 4096, FSIMG_OK },
-		{ 512, FSIMG_EUNSUPPORTED }, { 1024, FSIMG_EUNSUPPORTED },
-		{ 2048, FSIMG_EUNSUPPORTED },
+		{ 0, FSIMG_OK }, { 512, FSIMG_OK }, { 1024, FSIMG_OK },
+		{ 2048, FSIMG_OK }, { 4096, FSIMG_OK },
 		{ 8192, FSIMG_EINVAL }, { 3000, FSIMG_EINVAL },
 		{ 256, FSIMG_EINVAL }
 	};
@@ -858,11 +873,12 @@ test_sector_volume_and_label_geometry(void)
 {
 	fsimg_write_options_t options;
 	refusal_t sector = { "4096-byte sectors", FSIMG_EINVAL, NULL };
-	refusal_t unaligned = { "volume of 4097 bytes", FSIMG_EINVAL, NULL };
-	refusal_t odd = { "volume of 12288 bytes less one", FSIMG_EINVAL,
+	refusal_t unaligned = { "a volume of a block and a byte", FSIMG_EINVAL,
 	    NULL };
-	refusal_t partial = { "volume of 4096 bytes and 256", FSIMG_EINVAL,
+	refusal_t odd = { "a volume of three blocks less a byte", FSIMG_EINVAL,
 	    NULL };
+	refusal_t partial = { "a volume of a block and 256 bytes",
+	    FSIMG_EINVAL, NULL };
 	refusal_t free_space = { "a free-space request", FSIMG_EINVAL, NULL };
 	refusal_t label = { "a 16-byte label", FSIMG_EINVAL, NULL };
 	refusal_t beyond = { "a volume past 2^32 blocks", FSIMG_EINVAL,
@@ -878,17 +894,19 @@ test_sector_volume_and_label_geometry(void)
 	check_refused(ctx, &options, &sector);
 
 	reproducible_options(&options);
-	options.volume_bytes = 3 * BLOCK;
+	options.volume_bytes = 3 * block_size;
 	check_accepted(ctx, &options, "a volume of three blocks");
-	options.volume_bytes = 3 * BLOCK + 512;
+	options.volume_bytes = 3 * block_size + 512;
 	check_accepted(ctx, &options, "a volume of three blocks and a sector");
-	options.volume_bytes = BLOCK + 1;
+	options.volume_bytes = block_size + 1;
 	check_refused(ctx, &options, &unaligned);
-	options.volume_bytes = BLOCK + 256;
+	options.volume_bytes = block_size + 256;
 	check_refused(ctx, &options, &partial);
-	options.volume_bytes = 3 * BLOCK - 1;
+	options.volume_bytes = 3 * block_size - 1;
 	check_refused(ctx, &options, &odd);
-	options.volume_bytes = (UINT64_C(1) << 32) * BLOCK;
+	options.volume_bytes = UINT64_C(0xffffffff) * block_size;
+	check_accepted(ctx, &options, "a volume of 2^32 - 1 blocks");
+	options.volume_bytes = (UINT64_C(1) << 32) * block_size;
 	check_refused(ctx, &options, &beyond);
 
 	/* The image is exactly its plan; there is no free space to size. */
@@ -1048,6 +1066,19 @@ test_unreproducible_format_time_is_the_host_clock(void)
  * Placement and sizing.
  */
 
+/* Bytes rounded up to whole blocks. */
+static uint64_t
+whole_blocks(uint64_t bytes)
+{
+	return ((bytes + block_size - 1) / block_size * block_size);
+}
+
+/*
+ * The root alone is a compact inode at NID 36 with "." and ".." inline;
+ * the metadata area, and so the volume, ends at the next block boundary.
+ */
+#define ROOT_ALONE_END	(36 * SLOT + 32 + 27)
+
 static void
 test_empty_catalog_has_only_the_root_inode(void)
 {
@@ -1070,9 +1101,10 @@ test_empty_catalog_has_only_the_root_inode(void)
 	CHECK(root.mtime == EPOCH && root.mtime_nsec == 0);
 	CHECK(root.uid == 0 && root.gid == 0);
 	CHECK(fixture.plan->inode_count == 1);
-	CHECK(fixture.plan->metadata_end == BLOCK);
-	CHECK(fixture.plan->used_blocks == 1);
-	CHECK(fixture.plan->block_count == 1);
+	CHECK(fixture.plan->metadata_end == whole_blocks(ROOT_ALONE_END));
+	CHECK(fixture.plan->used_blocks ==
+	    fixture.plan->metadata_end / block_size);
+	CHECK(fixture.plan->block_count == fixture.plan->used_blocks);
 	model_plan(&fixture, EPOCH, true);
 	check_plan_matches_model(&fixture, "empty catalog");
 	fixture_close(&fixture);
@@ -1085,9 +1117,9 @@ build_mixed_tree(void)
 	tree_reset();
 	add_directory("/bin");
 	add_file(100, "/bin/tool");
-	add_file(3 * BLOCK + 100, "/bin/big");
+	add_file(3 * block_size + 100, "/bin/big");
 	add_file(0, "/bin/empty");
-	add_file(2 * BLOCK, "/bin/exact");
+	add_file(2 * block_size, "/bin/exact");
 	add_file(4065, "/bin/almost-full");
 	add_directory("/etc")->mode = 0700;
 	with_owner(add_file(70, "/etc/passwd"), 1000, 1000)->mode = 0600;
@@ -1117,11 +1149,15 @@ test_mixed_tree_plan_matches_the_model(void)
 	model_plan(&fixture, EPOCH, true);
 	check_plan_matches_model(&fixture, "mixed tree");
 
-	/* The big directory holds a full data block and an inline tail. */
+	/*
+	 * The big directory spans blocks; at 4096 bytes it is one full block
+	 * and an inline tail, the case the model's flat-inline rule names.
+	 */
 	many = row_of_path(&fixture, "/many");
-	CHECK(many.size > BLOCK && many.size % BLOCK != 0);
-	CHECK(many.layout == EROFS_LAYOUT_FLAT_INLINE);
-	CHECK(many.start_block != 0);
+	CHECK(many.size > block_size && many.start_block != 0);
+	if (block_size == 4096)
+		CHECK(many.layout == EROFS_LAYOUT_FLAT_INLINE &&
+		    many.size % block_size != 0);
 	CHECK(fixture.plan->block_count == fixture.plan->used_blocks);
 	fixture_close(&fixture);
 }
@@ -1137,13 +1173,13 @@ test_start_blocks_follow_catalog_order_contiguously(void)
 	reproducible_options(&options);
 	plan_tree(&fixture, &options);
 
-	next = fixture.plan->metadata_end / BLOCK;
+	next = fixture.plan->metadata_end / block_size;
 	for (uint64_t id = 0; id <= fixture.writer->count; id++) {
 		erofs_row_t row = row_at(&fixture, id);
-		uint64_t blocks = row.size / BLOCK;
+		uint64_t blocks = row.size / block_size;
 		char path[MAX_PATH] = "/";
 
-		if (row.layout == EROFS_LAYOUT_FLAT && row.size % BLOCK != 0)
+		if (row.layout == EROFS_LAYOUT_FLAT && row.size % block_size != 0)
 			blocks++;
 		if (id != 0)
 			catalog_path(&fixture, id, path, sizeof(path));
@@ -1178,7 +1214,7 @@ test_inodes_are_aligned_in_catalog_order(void)
 		CHECK_CASE(start >= previous_end, "id %llu overlaps its "
 		    "predecessor", (unsigned long long)id);
 		previous_end = start + erofs_row_fixed_bytes(&row) +
-		    erofs_row_tail_bytes(&row, BLOCK);
+		    erofs_row_tail_bytes(&row, block_size);
 		CHECK_CASE(previous_end <= fixture.plan->metadata_end,
 		    "id %llu ends past the metadata area",
 		    (unsigned long long)id);
@@ -1269,8 +1305,10 @@ test_default_modes_and_given_modes(void)
 
 /*
  * The flat-inline rule: a nonzero tail t stays in the body when the fixed
- * part and t fit one block. A compact inode's limit is t = 4064 and an
- * extended inode's t = 4032; a multiple of 4096, zero included, is flat.
+ * part and t fit one block. A compact inode's limit is t = B - 32 and an
+ * extended inode's t = B - 64; a multiple of B, zero included, is flat.
+ * The sizes are 4096-based, and 4064, 4065, 4032 and 4033 are B - 32,
+ * B - 31, B - 64 and B - 63 modulo every B, so the cases hold at each.
  */
 static void
 test_tail_layout_follows_the_block_fit(void)
@@ -1325,8 +1363,8 @@ test_tail_layout_follows_the_block_fit(void)
 /*
  * An inode with an inline tail lies inside one block; a tail-free inode
  * keeps only its fixed part inside one. The sweep adds k FIFOs and then one
- * final inode, so the final inode's position moves across the end of block
- * 0 as k grows; every plan is compared to the model, and the sweep requires
+ * final inode, so the final inode's position moves across block ends as k
+ * grows; every plan is compared to the model, and the sweep requires
  * that it saw the cases the rule names:
  *   moved	the inode would have crossed, so it starts the next block
  *   fits	the inode ends exactly at the block's end and stays
@@ -1371,16 +1409,16 @@ sweep_final_inode(const char *what, uint64_t size, bool extended,
 		before = row_at(&fixture, last_id - 1);
 		start = last.nid * SLOT;
 		end = start + erofs_row_fixed_bytes(&last) +
-		    erofs_row_tail_bytes(&last, BLOCK);
-		CHECK_CASE(start / BLOCK == (end - 1) / BLOCK,
+		    erofs_row_tail_bytes(&last, block_size);
+		CHECK_CASE(start / block_size == (end - 1) / block_size,
 		    "%s: the inode crosses a block", label);
-		if (start % BLOCK == 0 && start != 0 &&
+		if (start % block_size == 0 && start != 0 &&
 		    before.nid * SLOT + erofs_row_fixed_bytes(&before) +
-		    erofs_row_tail_bytes(&before, BLOCK) < start)
+		    erofs_row_tail_bytes(&before, block_size) < start)
 			seen->moved++;
-		if (end % BLOCK == 0)
+		if (end % block_size == 0)
 			seen->fits++;
-		if (start % BLOCK == BLOCK - SLOT &&
+		if (start % block_size == block_size - SLOT &&
 		    erofs_row_fixed_bytes(&last) == SLOT)
 			seen->compact_in_last_slot++;
 		fixture_close(&fixture);
@@ -1561,27 +1599,32 @@ test_volume_size_sets_the_block_count(void)
 	CHECK(used > 1);
 	fixture_close(&fixture);
 
-	options.volume_bytes = (used + 7) * BLOCK;
+	options.volume_bytes = (used + 7) * block_size;
 	plan_tree(&fixture, &options);
 	CHECK(fixture.plan->used_blocks == used);
 	CHECK(fixture.plan->block_count == used + 7);
 	fixture_close(&fixture);
 
-	options.volume_bytes = used * BLOCK;
+	options.volume_bytes = used * block_size;
 	plan_tree(&fixture, &options);
 	CHECK(fixture.plan->block_count == used);
 	fixture_close(&fixture);
 
-	options.volume_bytes = (used - 1) * BLOCK;
+	options.volume_bytes = (used - 1) * block_size;
 	fixture_open(&fixture);
 	CHECK(fixture_plan(&fixture, &options, false) == FSIMG_ERANGE);
 	fixture_close(&fixture);
 
-	/* A volume of whole sectors but no whole block holds nothing. */
-	options.volume_bytes = BLOCK - 512;
-	fixture_open(&fixture);
-	CHECK(fixture_plan(&fixture, &options, false) == FSIMG_ERANGE);
-	fixture_close(&fixture);
+	/*
+	 * A volume of whole sectors but no whole block holds nothing; at
+	 * 512-byte blocks every sector is a block, so there is none.
+	 */
+	if (block_size > 512) {
+		options.volume_bytes = block_size - 512;
+		fixture_open(&fixture);
+		CHECK(fixture_plan(&fixture, &options, false) == FSIMG_ERANGE);
+		fixture_close(&fixture);
+	}
 }
 
 static void
@@ -1677,7 +1720,7 @@ test_insertion_order_does_not_change_the_plan(void)
  */
 
 typedef struct pack_result {
-	unsigned char	 data[MAX_BLOCKS][BLOCK];
+	unsigned char	 data[MAX_BLOCKS][BLOCK_MAX];
 	size_t		 used[MAX_BLOCKS];
 	unsigned	 blocks;
 	uint64_t	 size_before_last_close;
@@ -1685,7 +1728,7 @@ typedef struct pack_result {
 } pack_result_t;
 
 static pack_result_t packed;
-static unsigned char pack_buffer[2 * BLOCK];
+static unsigned char pack_buffer[2 * BLOCK_MAX];
 static char name_bytes[MAX_NAMES][256];
 
 /* A name of length bytes, distinct by index in its first four bytes. */
@@ -1958,7 +2001,7 @@ walk_block(void *argument, uint64_t index, const unsigned char *bytes,
 	walk->last_valid = length;
 	CHECK_CASE(erofs_dirblock_decode(bytes, length, &block, &why) ==
 	    FSIMG_OK, "block %llu: %s", (unsigned long long)index, why);
-	for (size_t j = length; j < BLOCK; j++)
+	for (size_t j = length; j < block_size; j++)
 		CHECK_CASE(bytes[j] == 0, "block %llu byte %zu past the "
 		    "valid length is not zero", (unsigned long long)index, j);
 	for (size_t i = 0; i < block.count; i++) {
@@ -2076,9 +2119,9 @@ test_directory_walk_merges_dots_across_blocks(void)
 	size = walk_directory(&fixture, &cursor, 0, 0);
 	CHECK(root.size == size);
 	CHECK(size == model_dir_size(""));
-	CHECK(walked.blocks == (size + BLOCK - 1) / BLOCK);
+	CHECK(walked.blocks == (size + block_size - 1) / block_size);
 	CHECK(walked.blocks > 2);
-	CHECK(walked.last_valid == size - (walked.blocks - 1) * BLOCK);
+	CHECK(walked.last_valid == size - (walked.blocks - 1) * block_size);
 	check_walked_names("root", "", 0, 0);
 
 	/* The next walk starts at directory 1's first child. */
@@ -2625,7 +2668,7 @@ test_empty_catalog_image_reads_back_as_the_root_alone(void)
 	plan_tree(&fixture, &options);
 	CHECK(row_at(&fixture, 0).layout == EROFS_LAYOUT_FLAT_INLINE);
 	emit_tree(&fixture, &sink, POISON);
-	CHECK(sink.length == BLOCK);
+	CHECK(sink.length == whole_blocks(ROOT_ALONE_END));
 	check_enumeration(&fixture, &sink, true);
 	check_verification(&fixture, &sink);
 	free(sink.bytes);
@@ -2663,7 +2706,7 @@ test_unreproducible_image_stores_given_times_and_owners(void)
 	row = row_of_path(&fixture, "/layouts/size-4065");
 	CHECK(row.layout == EROFS_LAYOUT_FLAT);
 	row = row_of_path(&fixture, "/wide");
-	CHECK(row.size > 4 * BLOCK);
+	CHECK(row.size > 4 * block_size);
 	fixture_close(&fixture);
 }
 
@@ -2784,13 +2827,13 @@ carrying_bytes(fixture_t *fixture, uint64_t length)
 	mark_range(carries, length, EROFS_SUPER_OFFSET, EROFS_SUPER_BASE_BYTES);
 	for (uint64_t id = 0; id <= fixture->writer->count; id++) {
 		erofs_row_t row = row_at(fixture, id);
-		uint64_t tail = erofs_row_tail_bytes(&row, BLOCK);
+		uint64_t tail = erofs_row_tail_bytes(&row, block_size);
 		uint64_t data = row.size - tail;
 
 		mark_range(carries, length, row.nid * SLOT,
 		    erofs_row_fixed_bytes(&row) + tail);
 		if (data != 0)
-			mark_range(carries, length, row.start_block * BLOCK,
+			mark_range(carries, length, row.start_block * block_size,
 			    data);
 	}
 	return (carries);
@@ -2829,7 +2872,7 @@ test_emission_leaves_no_stale_byte(void)
 	emit_poisoned(&other, POISON_ALT, NULL);
 
 	CHECK(poisoned.length == other.length);
-	CHECK(poisoned.length > BLOCK);
+	CHECK(poisoned.length > block_size);
 	for (uint64_t i = 0; i < EROFS_SUPER_OFFSET; i++)
 		CHECK_CASE(poisoned.bytes[i] == 0, "boot byte %ju is %u",
 		    (uintmax_t)i, poisoned.bytes[i]);
@@ -2869,19 +2912,21 @@ test_sector_multiple_volume_has_a_zero_partial_tail(void)
 	used = fixture.plan->used_blocks;
 	fixture_close(&fixture);
 
+	/* At 512-byte blocks no partial block exists; only excess blocks do. */
 	blocks = used + 2;
-	options.volume_bytes = blocks * BLOCK + BLOCK - 512;
+	options.volume_bytes = blocks * block_size + block_size - 512;
+	CHECK(block_size == 512 || options.volume_bytes % block_size != 0);
 	plan_tree(&fixture, &options);
 	CHECK(fixture.plan->block_count == blocks);
 	CHECK(fsimg_plan_get_info(&fixture.plan->common, &info, NULL) ==
 	    FSIMG_OK);
 	CHECK(info.volume_bytes == options.volume_bytes);
 	CHECK(info.allocation_units == blocks);
-	CHECK(info.free_bytes == (blocks - used) * BLOCK);
+	CHECK(info.free_bytes == (blocks - used) * block_size);
 
 	emit_tree(&fixture, &sink, POISON);
 	CHECK(sink.length == options.volume_bytes);
-	for (uint64_t i = used * BLOCK; i < sink.length; i++)
+	for (uint64_t i = used * block_size; i < sink.length; i++)
 		CHECK_CASE(sink.bytes[i] == 0, "byte %ju past the content is %u",
 		    (uintmax_t)i, sink.bytes[i]);
 	check_enumeration(&fixture, &sink, true);
@@ -3220,13 +3265,42 @@ test_compact_inode_encoding_refuses_what_it_cannot_store(void)
 	CHECK(erofs_inode_encode(&inode, &sb, raw));
 }
 
+/*
+ * Run a test at each block size the writer accepts, then return to the
+ * default. The model, the sweeps and the image checks follow block_size.
+ * A failed check exits, and report_block_size() then names the size.
+ */
+static void
+at_every_block_size(void (*test)(void))
+{
+	static const uint32_t sizes[] = { 512, 1024, 2048, 4096 };
+
+	sweeping = true;
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		block_size = sizes[i];
+		test();
+	}
+	sweeping = false;
+	block_size = BLOCK_DEFAULT;
+}
+
+/* At exit, name the block size of the test that failed during a sweep. */
+static void
+report_block_size(void)
+{
+	if (sweeping)
+		fprintf(stderr, "the failed check ran at %u-byte blocks\n",
+		    block_size);
+}
+
 int
 main(void)
 {
+	CHECK(atexit(report_block_size) == 0);
 	test_default_settings_plan_an_empty_volume();
 	test_unwritten_settings_are_refused_naming_the_setting();
-	test_block_size_selects_only_4096();
-	test_sector_volume_and_label_geometry();
+	test_block_size_selects_512_to_4096();
+	at_every_block_size(test_sector_volume_and_label_geometry);
 	test_other_formats_refuse_erofs_settings();
 	test_default_label_is_selected();
 
@@ -3235,34 +3309,34 @@ main(void)
 	test_reproducible_mode_derives_uuid_and_time_from_epoch();
 	test_unreproducible_format_time_is_the_host_clock();
 
-	test_empty_catalog_has_only_the_root_inode();
-	test_mixed_tree_plan_matches_the_model();
-	test_start_blocks_follow_catalog_order_contiguously();
-	test_inodes_are_aligned_in_catalog_order();
+	at_every_block_size(test_empty_catalog_has_only_the_root_inode);
+	at_every_block_size(test_mixed_tree_plan_matches_the_model);
+	at_every_block_size(test_start_blocks_follow_catalog_order_contiguously);
+	at_every_block_size(test_inodes_are_aligned_in_catalog_order);
 	test_link_count_is_two_plus_subdirectories();
 	test_default_modes_and_given_modes();
-	test_tail_layout_follows_the_block_fit();
-	test_inline_tail_never_crosses_a_block();
-	test_extended_inode_moves_when_its_fixed_part_would_cross();
-	test_compact_inode_may_use_a_blocks_last_slot();
+	at_every_block_size(test_tail_layout_follows_the_block_fit);
+	at_every_block_size(test_inline_tail_never_crosses_a_block);
+	at_every_block_size(test_extended_inode_moves_when_its_fixed_part_would_cross);
+	at_every_block_size(test_compact_inode_may_use_a_blocks_last_slot);
 	test_extended_form_triggers();
 	test_modification_time_is_compared_to_the_nanosecond();
 	test_reproducible_mode_stores_the_epoch_in_every_inode();
-	test_volume_size_sets_the_block_count();
+	at_every_block_size(test_volume_size_sets_the_block_count);
 	test_names_are_bounded_in_bytes();
 	test_insertion_order_does_not_change_the_plan();
 
 	test_directory_blocks_fill_exactly_and_overflow_by_one_byte();
 	test_directory_blocks_hold_255_byte_names();
 	test_directory_blocks_mix_name_lengths();
-	test_directory_walk_merges_dots_across_blocks();
+	at_every_block_size(test_directory_walk_merges_dots_across_blocks);
 
-	test_empty_catalog_image_reads_back_as_the_root_alone();
-	test_reproducible_image_reads_back_as_specified();
-	test_unreproducible_image_stores_given_times_and_owners();
-	test_reproducible_image_ignores_order_limits_and_time_zone();
-	test_emission_leaves_no_stale_byte();
-	test_sector_multiple_volume_has_a_zero_partial_tail();
+	at_every_block_size(test_empty_catalog_image_reads_back_as_the_root_alone);
+	at_every_block_size(test_reproducible_image_reads_back_as_specified);
+	at_every_block_size(test_unreproducible_image_stores_given_times_and_owners);
+	at_every_block_size(test_reproducible_image_ignores_order_limits_and_time_zone);
+	at_every_block_size(test_emission_leaves_no_stale_byte);
+	at_every_block_size(test_sector_multiple_volume_has_a_zero_partial_tail);
 	test_write_failure_fails_emission_at_any_write();
 	test_flush_failure_fails_emission();
 	test_allocation_failure_during_emission_is_clean();

@@ -1264,7 +1264,9 @@ sh tools/erofs/qualify.sh build/fsimg ~/.cache/fsimg-erofs/vm-q/run \
 The work directory holds the sources and images and must lie under
 `$HOME`, which the VM shares at the same path; the optional scratch
 directory holds the extractions, about 4 GiB at peak, the size of the large file
-(`-l` sets its size). It needs Ruby, `colima` with passwordless `sudo` in
+(`-l` sets its size). `-b` selects the block size of every output, 512,
+1024, 2048 or 4096 (the default); a full qualification runs once at each.
+It needs Ruby, `colima` with passwordless `sudo` in
 the VM, and the oracles under `~/.local/share/fsimg-oracles` (or
 `$FSIMG_ORACLES`). The record of a run is in
 [erofs-research.md](erofs-research.md#fsimg-writer-output).

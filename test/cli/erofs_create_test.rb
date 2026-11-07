@@ -41,7 +41,24 @@ class ErofsCreateTest < Minitest::Test
     format = filesystems(completed(invoke(arguments: ["--formats", "--json"]))).fetch("erofs")
     assert_equal(7, format.fetch("capabilities"))
     assert_equal(0x402, format.fetch("write_settings"))
-    assert_equal([4096], format.fetch("write_cluster_bytes"))
+    assert_equal([512, 1024, 2048, 4096], format.fetch("write_cluster_bytes"))
+  end
+
+  def test_each_block_size_creates_a_volume_that_verifies_and_reads_back
+    [512, 1024, 2048, 4096].each do |bytes|
+      image = create(name: "block-#{bytes}", flags: ["-R", "-o", "cluster=#{bytes}"])
+      assert_equal(bytes, record(image: image, command: "i", type: "info").fetch("cluster_bytes"))
+      assert_equal("initialized-payload", record(image: image, command: "W", type: "verify", flags: ["-d"])
+        .fetch("validation_scope"), bytes.to_s)
+      assert_equal((@source / "dir/file").binread,
+        invoke(arguments: ["x", "-O", "-S", "off", "-f", image, "/dir/file"]).stdout, bytes.to_s)
+    end
+  end
+
+  def test_block_size_beyond_4096_is_outside_the_profile
+    result = invoke(arguments: ["c", "-n", "-S", "off", "-R", "-F", "erofs",
+      "-o", "cluster=8192", "-C", @source, "."], expected: 2)
+    assert_includes(result.stderr, "outside the selected writer profile".b)
   end
 
   def test_create_list_verify_and_extract_preserve_bytes_modes_and_times

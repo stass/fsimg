@@ -526,6 +526,71 @@ Zstandard clusters at the defaults.
   and for the input cut one byte short. The reference decoder
   (`decompress.c`) accepts only `LZMA_STREAM_END`, partial or not.
 
+### E11 Writer probes
+
+The question was whether the kernel accepts the writer's output at 512,
+1024 and 2048-byte blocks and the writer's own field choices: an empty
+inode's start word of 0, the unused start word 0 of a flat-inline inode
+under one block (producers write `0xFFFFFFFF`), inodes that end exactly at
+a block's end or move to the next block, directories spanning blocks, and,
+at `B` 512, a superblock checksum range `[1024, 1536)` that holds the first
+inodes. The plan's hand-built variants were not needed: the writer's
+layout is already parameterized by `B`, so its refusal of the smaller sizes
+was lifted and its own output qualified at each size.
+
+On 2026-11-07, `fsimg` built from branch `erofs` at 340c74ea ("Register
+and qualify the EROFS writer") with the block-size refusal removed from
+`validate_options()` and the descriptor's write mask widened to the four
+sizes, `fsck.erofs` 1.9.4-gf36cadb5 and rust-fs-erofs 0.5.1
+on macOS, and the colima VM's kernel `7.0.0-38-generic` ran stage 10's
+qualification once per block size:
+
+```sh
+for b in 512 1024 2048 4096; do
+    sh tools/erofs/qualify.sh -b $b build/fsimg \
+        ~/.cache/fsimg-erofs/vm-e11/run2/b$b /Volumes/erofs-e11/work/scratch-$b
+done
+```
+
+`-b` passes `-o cluster=B` to every output. Each size ran the outputs and
+oracles of [fsimg writer output](#fsimg-writer-output), with two changes
+to the trees: `small` adds files of `B - 32`, `B - 1`, `B` and `B + 1`
+bytes, and a new `tails` tree holds files of `B + 32i` bytes for `i` from 1
+to `B / 32 - 2`, so the extended inodes carrying their tails grow to fill
+a whole block, some ending exactly at a block's end and some moving to
+the next. A structural walk of every
+image but `large` (a scratch script outside the repository that follows
+the root's directory tree with its own decoder) counted the field choices
+the kernel then read, summed over the nine images, the copied-out `gpt` and
+`mbr` partitions included; no flat-inline inode used `0xFFFFFFFF`:
+
+| `B` | Inodes | Inodes ending at a block's end | Multi-block directories | Empty inodes, start word 0 | Flat-inline inodes under one block, start word 0 |
+| --- | --- | --- | --- | --- | --- |
+| 512 | 1666 | 191 | 2 | 1524 | 96 |
+| 1024 | 1682 | 97 | 2 | 1524 | 96 |
+| 2048 | 1714 | 48 | 2 | 1524 | 97 |
+| 4096 | 1766 | 25 | 2 | 1524 | 97 |
+
+Inodes also moved past block ends: at 512 bytes, `deep`'s 42 inodes end at
+no block's end, yet ten of them start a block.
+
+| `B` | fsck | Kernel | Rust | fsimg | Outputs |
+| --- | --- | --- | --- | --- | --- |
+| 512 | Pass | Pass | Pass | Pass | All ten |
+| 1024 | Pass | Pass | Pass | Pass | All ten |
+| 2048 | Pass | Pass | Pass | Pass | All ten |
+| 4096 | Pass | Pass | Pass | Pass | All ten |
+
+The ten outputs are `empty`, `small`, `deep`, `wide`, `large`, `kinds`,
+`tails`, `names`, `erofs/gpt` and `erofs/mbr`; each size also refused
+`cluster=8192` as outside the writer profile. Every output at every size
+passed every oracle, 160 checks with none failed, and the kernel logged
+nothing for these mounts but the root NID. The answer: the kernel,
+`fsck.erofs` and rust-fs-erofs accept the writer's output at 512, 1024,
+2048 and 4096-byte blocks, with its empty-file and flat-inline start words
+of 0, inodes ending at and moving past block ends, and multi-block
+directories. The writer accepts all four sizes.
+
 ### E14 External devices
 
 `e14-blobdev-b4096` (`--blobdev`), `e14-tar-index-b4096` (`--tar=i`),
@@ -646,9 +711,9 @@ supply, is covered by the driver contracts, not here.
 | `erofs/gpt`, `gpt:disk=8M` | small; the 7323136-byte partition ends in a partial block, copied out for the oracles | Pass | Pass | Pass | Pass |
 | `erofs/mbr`, `mbr:disk=8M` | small, copied out likewise | Pass | Pass | Pass | Pass |
 
-The writer accepts only 4096-byte blocks: `cluster=512`, `1024` and `2048`
-are refused, as the design requires until E11 shows the kernel mounting
-them, so no other block size was qualified. No oracle rejected an output.
+No oracle rejected an output. This run covered 4096-byte blocks only;
+[E11](#e11-writer-probes) repeats the qualification at every block size,
+with the `tails` tree added.
 
 ## Evidence answers
 
@@ -672,7 +737,7 @@ them, so no other block size was qualified. No oracle rejected an output.
 | Compact group packing; the last record and the end marker; inline tail placement; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed, the big-cluster head block following the kernel's walk from the group's anchor; the last record is the marker, the last cluster's own head or plain record inside the last logical cluster, or, at `size mod L = 0`, the last cluster's final record, 592 inodes; the inline tail starts at the index end and lies in one block, not necessarily the inode's; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, and producers write `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. `L > B` and compact advice `0x01` clear are unobservable with the pinned release; E15 observes them hand-built | `e8-*` |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | Framings confirmed; DEFLATE window bits at most 15, MicroLZMA dictionary at least 4096 and format 0, Zstandard format 0; head-2 by hand-built images, accepted by the kernel without `COMPR_HEAD2` | `e9-*` |
 | Every 48-bit field; encoded extents; writer's 32-byte records | Open; blocks stages 12, 14 and 15 | E10 |
-| Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Open for 512 to 2048-byte blocks, which the writer refuses until E11 runs; at 4096 bytes the writer's output passes the kernel, `fsck.erofs` and rust-fs-erofs ([fsimg writer output](#fsimg-writer-output)) | E11 |
+| Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Accepted: at 512, 1024, 2048 and 4096-byte blocks the writer's output passes the kernel, `fsck.erofs` and rust-fs-erofs, with empty and sub-block flat-inline start words of 0, inodes ending at and moving past block ends, and multi-block directories ([E11](#e11-writer-probes)) | E11, `qualify.sh -b` |
 | Metadata-box layout, root placement, box compression, shared attributes in the box | Open; blocks stages 13 and 15 | E12 |
 | Scale | Open; blocks stage 8 | E13 |
 | The fields a volume with external devices sets | Extra device count nonzero in both producer forms, `DEVICE_TABLE`, device identifier 1 in every chunk; `CHUNKED_FILE` only under `--blobdev` | `e14-*` |

@@ -8,11 +8,11 @@
 #include "erofs.h"
 
 /*
- * The block sizes the writer emits. The kernel's acceptance of the smaller
- * sizes the reader takes is unconfirmed, so the writer emits 4096 only.
+ * The block size the writer selects when none is given. It emits every
+ * size EROFS defines, 512 to 4096 bytes; E11 shows the kernel, fsck.erofs
+ * and rust-fs-erofs reading its output at each.
  */
-#define EROFS_WRITE_BLOCK_BYTES		4096u
-#define EROFS_WRITE_BLOCK_SIZES		(1u << 12)
+#define EROFS_WRITE_BLOCK_DEFAULT	4096u
 /* The 16-byte volume name field keeps a terminating NUL. */
 #define EROFS_WRITE_LABEL_MAX		(EROFS_NAME_FIELD_BYTES - 1)
 /*

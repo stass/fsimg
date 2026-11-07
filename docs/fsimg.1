@@ -53,7 +53,7 @@ ISO 9660 images and EROFS volumes.
 EROFS reading covers chunk-based files and files compressed with LZ4;
 other compression algorithms, packed fragments, compressed inline tails
 and compressed directories and symbolic links are not read.
-A created EROFS volume is uncompressed, with 4096-byte blocks and
+A created EROFS volume is uncompressed, with 512- to 4096-byte blocks and
 32-bit addressing, and stores files, directories and symbolic links with
 their owner, permission bits and modification time to the nanosecond.
 ISO 9660 reading supports Rock Ridge, Joliet and the primary hierarchy.
@@ -1049,7 +1049,7 @@ Sector size within the selected profile.
 Allocation-unit size within the selected profile; for QNX6 the block size,
 512, 1024 (the default), 2048 or 4096; for HFS Plus and HFSX the allocation
 block size, a power of two from 512 to 65536, 4096 by default; for EROFS the
-block size, 4096; for ImageFS, which
+block size, 512, 1024, 2048 or 4096 (the default); for ImageFS, which
 addresses bytes,
 1.
 .It Fl o Ar endian=little|big

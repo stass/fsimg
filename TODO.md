@@ -79,10 +79,9 @@
   data devices stay refused.
   The uncompressed writer is registered (`write-plan.c`, `write-dir.c`,
   `write-emit.c`), and `tools/erofs/qualify.sh` checks its output with
-  `fsck.erofs`, the kernel and rust-fs-erofs. It refuses `compression=lz4`
-  (stage 11), `addressing=48` (stage 14), `metabox=plain|lz4` (stage 15)
-  and 512- to 2048-byte blocks, which wait for E11's kernel probes, with
-  `FSIMG_EUNSUPPORTED`.
+  `fsck.erofs`, the kernel and rust-fs-erofs at every block size. It
+  refuses `compression=lz4` (stage 11), `addressing=48` (stage 14) and
+  `metabox=plain|lz4` (stage 15) with `FSIMG_EUNSUPPORTED`.
 
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and

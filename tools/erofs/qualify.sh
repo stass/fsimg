@@ -20,8 +20,10 @@
 # and the format time (design-erofs.md), so no oracle compares its
 # metadata with the source directory's.
 #
-# Usage: qualify.sh [-l large-bytes] FSIMG WORKDIR [SCRATCH]
+# Usage: qualify.sh [-b block-bytes] [-l large-bytes] FSIMG WORKDIR [SCRATCH]
 #
+# -b selects the block size, 512, 1024, 2048 or 4096 (the default), for
+# every output; -l the size of the large tree's sparse file.
 # WORKDIR holds the sources and images and must lie under $HOME, which the
 # VM shares at the same path; SCRATCH (default WORKDIR) holds extractions.
 # Each output's files are replaced as it is built. The oracles are found
@@ -30,18 +32,25 @@
 
 set -eu
 
+block=4096
 large_bytes=4294972296		# 2^32 + 5000: past a compact inode's size
-while getopts l: flag; do
+while getopts b:l: flag; do
 	case $flag in
+	b)	block=$OPTARG ;;
 	l)	large_bytes=$OPTARG ;;
 	*)	exit 2 ;;
 	esac
 done
 shift $((OPTIND - 1))
 [ $# -ge 2 ] && [ $# -le 3 ] || {
-	echo "usage: qualify.sh [-l large-bytes] FSIMG WORKDIR [SCRATCH]" >&2
+	echo "usage: qualify.sh [-b block-bytes] [-l large-bytes] FSIMG WORKDIR [SCRATCH]" >&2
 	exit 2
 }
+case $block in
+512|1024|2048|4096) ;;
+*)	echo "qualify.sh: block size is 512, 1024, 2048 or 4096" >&2
+	exit 2 ;;
+esac
 
 here=$(cd "$(dirname "$0")" && pwd)
 fsimg=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -180,7 +189,8 @@ qualify() {
 	shift 2
 	src=$work/$name.src image=$work/$name.img
 	rm -f "$image"
-	if ! "$fsimg" c -p -o uuid=$uuid -F "$layout" "$@" -f "$image" \
+	if ! "$fsimg" c -p -o uuid=$uuid -o cluster=$block -F "$layout" "$@" \
+	    -f "$image" \
 	    -C "$src" . >"$work/$name.create.log" 2>&1; then
 		result FAIL "$name" create "$(tail -1 "$work/$name.create.log")"
 		return
@@ -235,7 +245,8 @@ build_empty() {
 build_small() {
 	s=$(fresh small)
 	mkdir -p "$s/dir/sub"
-	for n in 0 1 31 32 4064 4095 4096 4097 9000; do
+	for n in 0 1 31 32 $((block - 32)) $((block - 1)) $block \
+	    $((block + 1)) 4064 4095 4096 4097 9000; do
 		bytes $n >"$s/dir/f$n"
 	done
 	printf 'hello\n' >"$s/hello"
@@ -288,6 +299,16 @@ build_kinds() {
 	ln -s "$(printf "%01000d" 0 | tr 0 x)" "$s/long-link"
 }
 
+# Files of one block and an inline tail that grows by 32 bytes, from 32
+# to two slots short of a block, so their extended inodes grow to fill a
+# whole block: some end exactly at a block's end, some move to the next.
+build_tails() {
+	s=$(fresh tails)
+	for i in $(count $((block / 32 - 2))); do
+		bytes $((block + 32 * i)) >"$s/$(printf 't%03d' "$i")"
+	done
+}
+
 build_names() {
 	s=$(fresh names)
 	for n in ' space' '!' '#hash' '$' '%' '&' "'" '(' ')' '*' '+' ',' \
@@ -304,6 +325,7 @@ build_deep
 build_wide
 build_large
 build_kinds
+build_tails
 build_names
 
 qualify empty-tree erofs
@@ -312,24 +334,23 @@ qualify deep erofs
 qualify wide erofs
 qualify large erofs
 qualify kinds erofs
+qualify tails erofs
 qualify names erofs
 cp -R "$work/small.src" "$work/gpt.src"
 cp -R "$work/small.src" "$work/mbr.src"
 qualify gpt erofs/gpt -o gpt:disk=8M
 qualify mbr erofs/mbr -o mbr:disk=8M
 
-# The writer profile admits only 4096-byte blocks (design-erofs.md,
-# Volume), so the command refuses the smaller ones as outside it.
-for b in 512 1024 2048; do
-	if "$fsimg" c -n -o uuid=$uuid -F erofs -o cluster=$b \
-	    -C "$work/small.src" . >/dev/null 2>"$work/block-$b.log"; then
-		result FAIL "block-$b" refusal "accepted"
-	elif grep -q 'outside the selected writer profile' "$work/block-$b.log"; then
-		result PASS "block-$b" refusal
-	else
-		result FAIL "block-$b" refusal "$(tail -1 "$work/block-$b.log")"
-	fi
-done
+# EROFS blocks end at 4096 bytes (design-erofs.md, Volume), so the command
+# refuses a larger one as outside the writer profile.
+if "$fsimg" c -n -o uuid=$uuid -F erofs -o cluster=8192 \
+    -C "$work/small.src" . >/dev/null 2>"$work/block-8192.log"; then
+	result FAIL block-8192 refusal "accepted"
+elif grep -q 'outside the selected writer profile' "$work/block-8192.log"; then
+	result PASS block-8192 refusal
+else
+	result FAIL block-8192 refusal "$(tail -1 "$work/block-8192.log")"
+fi
 
 echo "$failures failed"
 [ "$failures" -eq 0 ]

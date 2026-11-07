@@ -75,12 +75,11 @@ const fsimg_writer_ops_t fsimg_erofs_writer_ops = {
 };
 
 /*
- * The common options under the writer profile: a 512-byte sector, a
- * 4096-byte block, a volume size of zero or whole sectors whose whole
- * blocks fit the 32-bit block count, no free-space request, a label that
- * leaves the name field a terminator, and the EROFS settings. Values
- * outside each domain are invalid. The smaller blocks EROFS defines are
- * refused as unsupported until the kernel is shown to mount them. The
+ * The common options under the writer profile: a 512-byte sector, a block
+ * of 512, 1024, 2048 or 4096 bytes, 4096 by default, a volume size of zero
+ * or whole sectors whose whole blocks fit the 32-bit block count, no
+ * free-space request, a label that leaves the name field a terminator, and
+ * the EROFS settings. Values outside each domain are invalid. The
  * writer emits the uncompressed 32-bit layout without a metadata box; the
  * other values of the three settings name layouts it does not write, so
  * they too are unsupported rather than invalid. A metadata box needs
@@ -94,9 +93,10 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 	uint32_t block;
 	bool legal_block;
 
-	block = options->allocation_unit_bytes == 0 ? EROFS_WRITE_BLOCK_BYTES :
-	    options->allocation_unit_bytes;
-	legal_block = block >= 512 && block <= 4096 && (block & (block - 1)) == 0;
+	block = options->allocation_unit_bytes == 0 ?
+	    EROFS_WRITE_BLOCK_DEFAULT : options->allocation_unit_bytes;
+	legal_block = block >= 1u << EROFS_BLKSZBITS_MIN &&
+	    block <= 1u << EROFS_BLKSZBITS_MAX && (block & (block - 1)) == 0;
 	if (!legal_block ||
 	    (options->sector_bytes != 0 && options->sector_bytes != 512) ||
 	    options->volume_bytes % 512 != 0 ||
@@ -125,10 +125,6 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 		return (setting_refused(error, FSIMG_EINVAL, "metabox",
 		    "an EROFS metadata box requires 48-bit addressing"));
 
-	if (block != EROFS_WRITE_BLOCK_BYTES)
-		return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
-		    FSIMG_OP_WRITER,
-		    "the EROFS writer emits 4096-byte blocks only"));
 	if (options->erofs_compression != FSIMG_EROFS_COMPRESSION_NONE)
 		return (setting_refused(error, FSIMG_EUNSUPPORTED, "compression",
 		    "the EROFS writer does not compress files"));
