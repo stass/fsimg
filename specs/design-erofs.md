@@ -421,6 +421,15 @@ inside the address domain; a body that runs past the domain is
 `FSIMG_ECORRUPT`. The serial number is reported but never used to identify
 an inode, and two inodes may share one.
 
+An inode's size is a 64-bit count with no bound of its own and no class of
+its own. The structures it implies, a flat inode's blocks, a chunk-based
+inode's index and chunks and a compressed inode's `ceil(size / B)` records,
+must lie inside the domain, which the body rule above and each layout's
+extent rules already require, and every count derived from the size is
+checked 64-bit arithmetic whose overflow is `FSIMG_ECORRUPT`. A size is
+therefore corrupt exactly when a structure it implies breaks a rule, and a
+size no structure contradicts is accepted whatever its magnitude.
+
 ### Kinds and fields
 
 The mode's type bits select the kind: regular file, directory, symbolic
@@ -445,7 +454,11 @@ link, FIFO, character device, block device or socket. Any other type is
 A device, FIFO or socket uses layout 0; another layout, or a nonzero size,
 is `FSIMG_ECORRUPT`. `mkfs.erofs` 1.9.4 writes size 0, layout 0 and, for
 FIFOs and sockets, a zero layout word, compact and extended alike (E5,
-`e5-kinds-*`).
+`e5-kinds-*`). Such an inode has no start block, so the word that holds
+start-block bits 32 to 47 under the [48-bit layout](#48-bit-layout) is zero
+on it: a nonzero one is `FSIMG_ECORRUPT`, a reserved field required zero.
+`mkfs.erofs` writes that word zero and the link count explicitly for every
+such inode (source `inode.c`); E10 checks it on a 48-bit volume.
 
 ### Times
 
@@ -521,8 +534,8 @@ the reader and the verifier ignore them, since `mkfs.erofs` 1.9.4 writes
 uninitialised bytes there, so two builds of one tree differ in them (E7,
 `e7-chunk8k` and `e7-chunk8k-again`), and a byte comparison against its
 output must exclude them. The chunk
-size is `B << chunkbits`, which must not exceed 2^47 bytes (the reader's
-bound on any file size), or the inode is `FSIMG_ECORRUPT`; `chunkbits` is
+size is `B << chunkbits`, at most 2^43 bytes by the fields' widths, so it
+needs no bound of its own; `chunkbits` is
 per inode and not the producer's requested chunk size, since `mkfs.erofs`
 raises it to the largest power of two dividing every run of contiguous
 chunks, and a wholly sparse file is one hole chunk of its size rounded up to
@@ -544,14 +557,18 @@ before `0xFFFFFFFF` (E7, `e7-chunk8k-forceidx`); under bit 6 it is a high
 part of `0xFFFF`, a zero device identifier and `0xFFFFFFFF`. Any other chunk occupies
 `min(chunk, size - offset)` bytes from `block * B`, inside the domain (E7,
 `e7-chunk*`, hole and shared entries included). A nonzero high part without
-bit 6, bit 6 without `48BIT`, or a nonzero device identifier, is
-`FSIMG_ECORRUPT`. That is fsimg policy, stricter than the kernel and
-`fsck.erofs`, which ignore the high part and the device identifier and
-accept bit 6 on any volume (E7, `e7-edit-high-part`, `-device-id`,
-`-format-0x40`): no pinned producer writes any of them on a volume without
-extra devices, a device identifier names a backing file fsimg does not have,
-and the high part is address bits the volume says are not there. Chunks may
-share blocks with each other and with other files.
+bit 6, bit 6 without `48BIT`, bit 6 with 4-byte entries, or a nonzero
+device identifier, is `FSIMG_ECORRUPT`. That is fsimg policy, stricter than
+the kernel and `fsck.erofs`, which ignore the high part and the device
+identifier and accept bit 6 on any volume (E7, `e7-edit-high-part`,
+`-device-id`, `-format-0x40`) and, by their source, with either entry
+width: no pinned producer
+writes any of them on a volume without extra devices, a device identifier
+names a backing file fsimg does not have, the high part is address bits the
+volume says are not there, and a 4-byte entry has no high part for bit 6 to
+widen, so `mkfs.erofs` sets the bit only with 8-byte entries (source
+`blobchunk.c`). Chunks may share blocks with each other and with other
+files.
 
 ### Holes
 
@@ -786,7 +803,11 @@ budget: libzstd's own default admits 128 MiB. An
 inode naming an algorithm absent from the mask is `FSIMG_ECORRUPT`. The mask
 lists only configured algorithms, so a `-zlzma` volume has mask `0x2` and no
 LZ4 record; `COMPR_CFGS` is set for any non-LZ4 codec or big cluster (E9,
-`e9-config-four`, `e9-mixed-lz4-lzma`).
+`e9-config-four`, `e9-mixed-lz4-lzma`). An empty mask under `COMPR_CFGS`
+needs no rule of its own: it configures no algorithm, so every compressed
+inode on such a volume is `FSIMG_ECORRUPT` by the rule above and an
+uncompressed one reads as any other; no producer writes it and the kernel
+accepts it.
 
 ### Map header
 
@@ -837,14 +858,28 @@ non-head or 3 head-2. A head or plain record starts a physical cluster at
 logical offset `i * L + clusterofs`, with `clusterofs < L`, and names its
 first block. A non-head record belongs to the cluster begun by the nearest
 head before it and carries two distances: back to that head's logical
-cluster and forward to the next head's. The physical cluster's logical
-extent runs from its head to the next head, or to `size`. There are
-`ceil(size / B)` records, `L` being `B`. When `size mod L` is nonzero the
-last record is
-the end marker: a plain record with `clusterofs = size mod L` that begins an
-empty cluster at `size`, so the extent before it ends at `size`; when
-`size mod L` is zero there is no such record (E8, 176 files with and 86
-without in `e8-lz4-compact`, `-compact-xattr` and `-lz4hc-legacy`).
+cluster and forward to the next head's. There are `ceil(size / B)` records,
+`L` being `B`. A physical cluster's logical extent runs from its head to the
+start of the next head or plain record, or to `size` when no record
+follows, so the last extent ends at `size` by construction. A head or plain
+record that starts at `size` begins an empty cluster, which is never read;
+one that starts beyond `size` is `FSIMG_ECORRUPT`. The reader needs no
+other end rule. The producer writes the last record in one of two forms,
+both of which the extent rule covers: when the last physical cluster starts
+inside the last logical cluster, its own head or plain record is the last
+record and `clusterofs < size mod L` (`e9-zstd-l3` `/text026`, size 106696,
+record 26 plain at `clusterofs` 165 holding the final 35 bytes; 36 of 176
+files in `e8-lz4-compact-counts`; an inline tail in `e2-count-zt`, a
+fragment in `e8-lz4-frag`); otherwise, when `size mod L` is nonzero, the
+last record is an end marker, a plain record with `clusterofs = size mod L`
+and block number 0 that begins an empty cluster at `size` (395 files
+across the E8 and E9 fixtures), and when `size mod L` is zero there is no
+marker and the last record is the last cluster's head, plain or non-head
+record (128 files). `mkfs.erofs` writes a record for a logical cluster
+only while the extent reaches that cluster's end, then adds the marker
+when bytes remain (source `compress.c`), and the kernel ends an extent at
+`size` once the next record index reaches the record count (source
+`zmap.c`); E8 records the tally.
 
 A physical cluster is one block, unless its algorithm's advice bit permits
 big clusters. When it does, the first non-head record of every physical
@@ -852,7 +887,7 @@ cluster, a one-block cluster included, carries the count marker: `0x800` in
 its backward distance field with the cluster's block count in the low 11
 bits, its backward distance being one (E8, `e8-lz4-big16k`, where markers
 with count 1 occur). A head directly followed by another head or plain
-record has no marker and is one block. A first non-head record without the
+record, or by no record, has no marker and is one block. A first non-head record without the
 marker, a count of zero, or one for which the algorithm's maximum cluster
 blocks do not allow it, is `FSIMG_ECORRUPT`. A marker without the advice bit
 is `FSIMG_ECORRUPT`.
@@ -976,10 +1011,21 @@ cluster). A plain cluster longer than its blocks is `FSIMG_ECORRUPT`.
 
 ### Compressed inline tail
 
-Under advice bit `0x08` the last physical cluster is stored in the body,
-after the index, `h_idata_size` bytes long, within the block that holds the
-inode's start. A tail that crosses that block, or a size of zero, is
-`FSIMG_ECORRUPT`.
+Under advice bit `0x08` the physical cluster holding the file's last byte
+is stored in the inode's body: its stored bytes are the `h_idata_size`
+bytes that begin at the index end, the byte after the last full record or
+the end of the last compact group, and they lie within one block. A size of
+zero, or a tail that crosses a block boundary, is `FSIMG_ECORRUPT`, the
+kernel's rule. The tail is decoded by its record's type like any other
+cluster: a head when the producer compressed it, a plain cluster when
+compression gained nothing (E8, `e8-lz4-ztail`, 76 head and 5 plain
+tails). Its record's block number names a block holding none of this
+file's bytes and is not read, and no count marker follows it. The tail's
+block is not necessarily the block holding the inode's start: when an
+inode starts near a block's end, its index runs into the next block and the
+tail follows it there (E8, `e8-lz4-ztail`, 5 of 81 tails, such as
+`/text008` at `0x23dfe0` with the index ending and the tail starting at
+`0x23e030`; `e2-count-zt`).
 
 ### Packed fragments
 
@@ -988,7 +1034,13 @@ is a regular file whose content holds fragments of other files. A file
 whose last cluster is a fragment (advice bit `0x20`) reads its last bytes,
 from the end of its last ordinary cluster to `size`, from the packed
 inode's content at the header's fragment offset; a whole-file fragment
-reads all of `[0, size)` from there. The packed inode is read through its
+reads all of `[0, size)` from there. The fragment's own record is a head or
+plain record like any other; its block number is no address and, with a
+compact index, is not read, and no count marker follows it. On a full index
+that block field holds bits 32 to 63 of the fragment offset, which is why
+the producer switches a file to the full index once the packed inode passes
+4 GiB (source `compress.c`; the kernel reads the field so, `zmap.c`), and
+no producer fixture reaches that size. The packed inode is read through its
 own data layout, which may be compressed, and its fragments are never
 fragments of it: a packed inode that uses a fragment, or a fragment range
 past the packed inode's size, is `FSIMG_ECORRUPT`. The packed inode is not in

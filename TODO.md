@@ -364,35 +364,19 @@
 
 ## Bugs by subsystem
 
-* [Medium] **EROFS design: index end-marker rule is wrong**
-  (`specs/design-erofs.md` "Index records"): real images end with the last
-  cluster's own head or plain record at or before size mod L (e9-zstd-l3
-  /text026: size 106696, last record 26 plain at clusterofs 165, block 215;
-  also e2-count-zt, e8-lz4-frag, e8-lz4-ztail), and with an inline or
-  fragment tail the last head's block is not an address; fix before stage 6.
-* [Medium] **EROFS design: compressed inline tail placement is wrong**
-  (`specs/design-erofs.md`): "within the block that holds the inode's start"
-  is contradicted by e8-lz4-ztail (5 inodes, e.g. inode at 0x23dfe0, tail at
-  0x23e030); only "does not cross a block boundary" holds; fix before stage 6.
 * [Low] **EROFS fixtures e2-vm-compact and e2-vm-compact-alltime are failed
   captures** (`~/fsimg-corpus/erofs`): 4096-byte zero stubs; mkfs refused an
   owner above 65535 in compact form; recapture without the over-range owner.
-* [Low] **EROFS driver design names a section that does not exist**
-  (`specs/design-erofs-driver.md`, reuse list): it points the MicroLZMA and
-  Zstandard block decoders at "the EROFS block-decoding section" of
-  [the compression libraries design](specs/design-compression-libs.md),
-  which has no such section; write it (one bounded input to one bounded
-  output under the record's dictionary or window, charged to the context)
-  before stage 7.
-
-* [Low] **EROFS format design leaves four inode and configuration cases
-  open** (`specs/design-erofs.md`, `lib/formats/erofs/codec.c`): the
-  chunk-based section calls 2^47 bytes "the reader's bound on any file
-  size", but no rule bounds an inode's size or names its class (the codec
-  accepts any 64-bit size); chunk-format bit 6 with 4-byte entries, the
-  48-bit start-block high bits of a FIFO, socket or device, and
-  `COMPR_CFGS` with an empty algorithm mask are all accepted without a rule.
-  Decide each and state it in the design.
+* [Low] **EROFS codec does not yet enforce three format-design rules**
+  (`lib/formats/erofs/codec.c`): chunk-format bit 6 with 4-byte entries is
+  accepted (`erofs_chunk_format_decode`; the design's
+  [chunk-based section](specs/design-erofs.md#chunk-based) says
+  `FSIMG_ECORRUPT`); a nonzero start-block high word on a FIFO, socket or
+  device is accepted (`inode_kind_check` never looks at `layout_high`; the
+  [kinds section](specs/design-erofs.md#kinds-and-fields) says
+  `FSIMG_ECORRUPT`); and the `CHUNK_BYTES_MAX_SHIFT` check is unreachable,
+  since `blkszbits` is at most 12 and `chunkbits` at most 31, and should go
+  with its constant. Each change needs its failing-then-passing test.
 
 * [Low] **Spec harness oracle step can fail on EINTR** (`test/spec/`): a quick run
   under `check-asan` reported `harness_error` for

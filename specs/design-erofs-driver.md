@@ -59,8 +59,8 @@ The driver also needs facilities shared beyond it:
   [codec design](design-codecs.md) under its clean-room procedure.
 * MicroLZMA and Zstandard block decoding through the optional liblzma and
   libzstd integrations, under the architecture's optional-integration rule
-  and specified in the EROFS block-decoding section of the
-  [compression libraries design](design-compression-libs.md). Each library's
+  and specified in the compression libraries design's
+  [EROFS block decoding](design-compression-libs.md#erofs-block-decoding). Each library's
   one source file has a private entry point that decodes one bounded input
   into one bounded output under the context's allocation adapter, reached
   through the library's registry row and absent, failing as unsupported,

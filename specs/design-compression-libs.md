@@ -8,6 +8,8 @@ checks use. This design adds both as **optional integrations** over the
 system `libzstd` and `liblzma`: a build that has a library reads and writes
 its compression with the gzip profile's shape; a build that lacks it is the
 core as it stands, and refuses the compression exactly as it does today.
+The same two libraries decode the MicroLZMA and Zstandard clusters of EROFS
+volumes, [below](#erofs-block-decoding).
 
 The [architecture](architecture.md#dependencies-and-implementation-organization)
 owns the dependency rule and the optional-integration mechanics this design
@@ -131,6 +133,7 @@ operations. Every other behaviour is already a function of the registry:
 | Settings keys, validation, `--formats` listing | The row's settings slice |
 | Codec version in `--formats` and the plan report | The row's `version` operation |
 | Verification scope | The spool-time checks `decode` performs, and the row's one `unverified` entry, which verification reports when `decode` says a member lacked that check |
+| EROFS cluster decoding | The row's `block_decode`, present when the library and its block interface are found ([below](#erofs-block-decoding)) |
 
 So the design has one conditional, evaluated once at configure time: the
 library is present, so `lib/layers/zstd.c` (or `xz.c`) is compiled and the
@@ -184,6 +187,8 @@ exact functions the profile uses (`ZSTD_createDStream_advanced`,
 setters, the streaming calls and `ZSTD_versionString`;
 `lzma_stream_decoder`, `lzma_easy_encoder` and `lzma_version_string`), so
 a library too old or built without the needed interface counts as absent.
+A second liblzma test, for the MicroLZMA decoder EROFS needs, follows it
+and disables only that decoder ([below](#erofs-block-decoding)).
 `yes` fails configure naming the library when the test fails; `auto`
 disables the compression and says so in configure's output; `no` never
 looks. The result is an Automake conditional (`FSIMG_ZSTD`, `FSIMG_XZ`), a
@@ -391,6 +396,116 @@ trailing bytes than a stream header, which liblzma cannot tell apart;
 `liblzma` does not decode; `LZMA_FORMAT_ERROR` after the claim is
 `FSIMG_ECORRUPT`.
 
+### EROFS block decoding
+
+The [EROFS driver](design-erofs-driver.md#decode-windows) decodes a
+compressed physical cluster into its logical extent: one bounded input, the
+cluster's stream after the driver has stripped its leading zero bytes, at
+most 1 MiB, into one bounded output, the extent's decoded length, at most
+12 MiB, both buffers the driver owns ([limits](design-erofs.md#limits)).
+Two of the format's four [algorithms](design-erofs.md#algorithms) are
+these libraries': MicroLZMA through liblzma and Zstandard through libzstd.
+Under the architecture's
+[optional-integration rule](architecture.md#dependencies-and-implementation-organization)
+each is a private entry point in the library's one source file, so `xz.c`
+and `zstd.c` stay the only files that include a library header, and the
+driver reaches it through the registry row.
+
+**Entry point.** `fsimg_compression_ops_t` gains one operation,
+`block_decode`, NULL on every row but these two. It takes the context, the
+input bytes and their length, the output buffer and the exact length to
+produce, a partial flag, and the memory bound in bytes that the EROFS
+[configuration record](design-erofs.md#configuration) declares: the
+MicroLZMA dictionary size, or the Zstandard window, `2^(window log + 10)`.
+It fills the output and returns `FSIMG_OK`, or a status from the table
+below, and writes nothing outside the output buffer. The driver finds the
+algorithm's row by its layer name, `xz` or `zstd`; a row without
+`block_decode`, because the build lacks the library or, for MicroLZMA, its
+liblzma predates 5.4, is `FSIMG_EUNSUPPORTED` naming the library
+(`liblzma 5.4` or `libzstd`), raised when a cluster of that algorithm is
+read, so the rest of the volume stays readable. The driver has checked the
+bound against the record's range before the row sees it.
+
+**Decoding.** Each call creates a fresh decoder bound to a fresh adapter,
+decodes in one pass over the whole input and output, and frees the decoder
+before returning, so no state outlives a cluster and its memory returns to
+the budget when the call ends.
+
+* MicroLZMA: `lzma_microlzma_decoder(&stream, input length, output
+  length, !partial, dictionary size)`, then one `lzma_code(LZMA_FINISH)`
+  over the whole input and output. The compressed length is exact, since
+  the stream is right-aligned in its cluster, and the uncompressed length
+  is exact unless the reference is partial, in which case the decoder
+  stops at the output length without requiring the stream to end there.
+  `LZMA_STREAM_END` with the output full is the one success. The dictionary
+  size comes from the record, not the stream, which carries none; liblzma
+  allocates that much, and a stream compressed with a larger one fails as
+  `LZMA_DATA_ERROR`.
+* Zstandard: a `ZSTD_DStream` from `ZSTD_createDStream_advanced` with the
+  adapter, `ZSTD_d_windowLogMax` set to the record's window log plus 10
+  before the first byte, then `ZSTD_decompressStream` over the whole input
+  until it returns zero, the frame's end, or the output is full. Without
+  `partial` the frame must end with the output exactly full: a frame that
+  ends short, or still has bytes to flush when the output is full, is
+  `FSIMG_ECORRUPT`, and bytes after the frame's end are not judged. With
+  `partial` a full output is success wherever the frame stands, and a frame
+  that ends first is `FSIMG_ECORRUPT`. A frame whose window exceeds the
+  record's bound is refused by the library before it allocates, and a frame
+  that names a dictionary fails; both are `FSIMG_ECORRUPT`, not
+  `FSIMG_EUNSUPPORTED` as in the whole-file profile, because the record pins
+  what a cluster may need, so a cluster that needs more is damaged rather
+  than a feature this build lacks. The producer writes frames with the
+  content size, no checksum and no dictionary identifier (E9).
+
+**Memory.** Every allocation the library makes goes through the adapter
+and is charged to the context before the library uses it, as for the
+whole-file decoders, so the dictionary or window is charged before the
+first byte is decoded, and a budget that cannot hold it fails as
+`FSIMG_ELIMIT` with `FSIMG_RESOURCE_MEMORY` naming the library, with
+nothing decoded and accounting back at its pre-call value. The record makes
+the need known before the stream is seen: at most 8 MiB for a MicroLZMA
+dictionary and 1 MiB for a Zstandard window, plus the library's fixed
+state. The output buffer is the driver's decode window, charged by the
+driver ([resource bounds](design-erofs-driver.md#resource-bounds)); the
+entry point allocates no buffer of its own.
+
+**Build.** `lzma_microlzma_decoder` exists in liblzma 5.4.0 and later.
+`configure` runs a second link test after `FSIMG_CODEC_LIBRARY([xz], ...)`
+over the same `LZMA_CFLAGS` and `LZMA_LIBS`, calling that function, and
+defines `FSIMG_MICROLZMA` when it links; `xz.c` compiles its `block_decode`
+under that macro, so an older liblzma still serves xz and leaves the
+operation NULL. The existing libzstd probe already calls
+`ZSTD_d_windowLogMax` and `ZSTD_decompressStream`, so zstd needs no second
+test. `--without-xz` or `--without-zstd` removes the block decoder with the
+compression, and the MSan build, configured without both, reports both
+EROFS codecs as not covered.
+
+**Capability output.** `fsimg --formats -v` names under the `erofs` row
+the cluster algorithms this build decodes and the library each depends on,
+with the versions the compression rows' `version` operations give
+(`lz4; deflate, zlib 1.3.1; lzma, liblzma 5.8.4; zstd, libzstd 1.5.7`),
+omitting an algorithm whose row has no block decoder; `--json` lists the
+same names in the format record's `capabilities`. A user reads from one
+listing which EROFS volumes a build can extract.
+
+**Sandbox.** Both calls are pure computation over caller buffers plus
+`malloc`: the MicroLZMA decoder is a single-threaded raw decoder, and
+`ZSTD_decompressStream` with no workers starts no thread, opens no file and
+asks the kernel nothing, so the worker's profile is unchanged and the
+required-confinement checks of the whole-file decoders cover them.
+
+**Refusals and error results.** Error mapping stays a closed table per
+library in the file that owns it:
+
+| Situation | Result |
+| --- | --- |
+| A cluster of an algorithm whose row has no `block_decode` | `FSIMG_EUNSUPPORTED` naming the library, when that content is read |
+| The budget cannot hold the dictionary or window (`LZMA_MEM_ERROR`, `ZSTD_error_memory_allocation`) | The adapter's first error: `FSIMG_ELIMIT`, `FSIMG_RESOURCE_MEMORY`, naming the library, nothing decoded |
+| The stream ends before the output is full; the output fills before the frame ends outside a partial reference; damaged data (`LZMA_DATA_ERROR`, `LZMA_BUF_ERROR`, `LZMA_OK` after `LZMA_FINISH`; `ZSTD_error_corruption_detected`, `_frameParameter_windowTooLarge`, `_dictionary_*`, `_prefix_unknown`, any other decode-side code) | `FSIMG_ECORRUPT` naming the algorithm; the driver adds the cluster |
+| An output length of zero, a bound outside the record's range, `LZMA_OPTIONS_ERROR`, `LZMA_PROG_ERROR`, `ZSTD_error_parameter_*`, `ZSTD_error_stage_wrong` | `FSIMG_ESTATE` with the call and code: the driver validated every parameter first |
+
+The [tests table](#tests-and-evidence) carries the block decoders' rows.
+
 ### Settings
 
 The [settings catalogue](design-settings.md) gains three rows, present in
@@ -588,6 +703,7 @@ library skips the profile's rows explicitly and runs the refusal rows.
 | zstd read | `zstd` output at levels 1, 3, 19 and `--ultra -22` spools and lists as the raw image, from a file and from a pipe; concatenated frames; a leading and a middle skippable frame; a `--no-check` file verifies with `zstd:checksum` unverified, `"complete":false` and a passing status; a file piped to `zstd` (no content size) verifies complete; `i` prints `Compression: zstd` | Trailing garbage (`FSIMG_ECORRUPT` at its offset); a flipped checksum; a content size one more and one less than the data; a frame truncated at each of its byte offsets up to the first block; a `--long=28` window (`FSIMG_EUNSUPPORTED`); a frame with a dictionary ID (`FSIMG_EUNSUPPORTED`); a bomb failing at the spool step that crosses the limit before the file grows past it; a 32 MiB budget failing a 64 MiB-window frame (`zstd --long=26`) as a memory limit naming zstd, with nothing decoded; forced `zstd` on a gzip file (`FSIMG_EFORMAT`); a zstd file whose content is itself zstd is unrecognized |
 | xz write | `xz -t` accepts output at presets 0, 6 and 9 with each check; `xz -d` yields the raw image; `xz -l` shows one stream, one block and the chosen check; the bound is at least `lzma_stream_buffer_bound(n)` for sampled `n` up to 2^40; byte-identical output across hosts under one liblzma version; `cW` verifies a `.xz` | `xz:level=10` and `xz:check=none` refused naming the key; preset 9 under a 256 MiB budget fails at encoder open as `FSIMG_RESOURCE_MEMORY` naming xz before any byte is written; a flipped block byte fails `xz -t` and fsimg's verification; allocation failure injected at each adapter call |
 | xz read | `xz` output at presets 0, 6 and 9 and with each check spools and lists; `-T0` multi-block streams; concatenated streams with and without stream padding; `--check=none` verifies with `xz:check` unverified and a passing status; `i` prints `Compression: xz` | Trailing garbage, a padding run of 5 zero bytes (`FSIMG_ECORRUPT` at the offset where the decoder stopped, which liblzma places after the bytes it read as the next stream's header); a flipped check; a flipped index CRC32; a header flags byte changed; a stream truncated at each offset through its first block header; a 4 GiB dictionary size (`FSIMG_RESOURCE_MEMORY` at the allocation, nothing decoded); a bomb at the spool step; a `.lzma` (legacy) file is unrecognized, not an xz claim |
+| EROFS block decoding | Every MicroLZMA cluster of the `e9-lzma-*` fixtures and every Zstandard cluster of the `e9-zstd-*` fixtures decodes through the row operation to its extent and matches the manifest (`test/erofs-integration.sh`), big clusters (`-big64k`, `-words6m-big1m`) and the dictionary extremes (`e9-lzma-dict8m`, `e9-zstd-dict1m`) included; shared clusters from `test/erofs-gen.c` decode under `partial` to the shorter extent; each decode charges and releases the dictionary or window | A flipped stream byte (`FSIMG_ECORRUPT` naming the algorithm); an extent length one more and one less than the stream produces (both `FSIMG_ECORRUPT`); a Zstandard frame built with `ZSTD_c_windowLog` 21 against a record of window log 10, and one with a dictionary identifier (`FSIMG_ECORRUPT`, nothing allocated above the bound); a MicroLZMA stream compressed with a 1 MiB dictionary read under a 64 KiB record (`FSIMG_ECORRUPT`); a memory budget below the dictionary (`FSIMG_RESOURCE_MEMORY` naming the library, nothing decoded); allocation failure injected at each adapter call, accounting at its baseline; a build without the library, and a test build with `FSIMG_MICROLZMA` undefined, list the fixtures and read their LZ4 and uncompressed files while the lzma or zstd files fail as `FSIMG_EUNSUPPORTED` naming the library; `fuzz/erofs.c` runs with the libraries the build has |
 | Spool and streams | Stdin of a `.zst` and a `.xz` image through the coordinator's pipe; `cf -` writing a zstd and an xz stream the oracles decode | Short write, flush failure and cancellation at each piece: staged files removed, nothing published, stream reports incomplete output after the first byte |
 | Sandbox | Decode and create under `-S required` on Linux x86-64 and FreeBSD, and on Linux arm64 where available | A test build that sets `ZSTD_c_nbWorkers` to 1 fails under `-S required`, proving the gate sees a thread attempt |
 | Adapter | Charged deltas and release for each binding; zero-byte requests; the first error kept across several allocations in one library call; poison mode | A binding that installs only one callback fails the contract test |

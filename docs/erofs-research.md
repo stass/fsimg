@@ -386,8 +386,41 @@ equal `dump.erofs -e` on every file except the big-cluster cases below.
   32-byte groups under advice `0x01`, then 8-byte groups; an odd final
   record fills a whole 8-byte group. Record count `ceil(size / L)`. Advice
   `0x01` clear is never produced (source).
-* End marker: when `size mod L != 0` the last record is a plain record with
-  `clusterofs = size mod L` (176 files); when it is 0 there is none (86).
+* Last record: over 592 indexed inodes in `e8-lz4-compact`, `-compact-counts`,
+  `-lz4hc-legacy`, `-big16k`, `-dedupe`, `-ztail`, `-frag`, `-allfrag`,
+  `e2-count-zt`, `e9-zstd-l3` and `e9-mixed-lz4-lzma`, the last record takes
+  three forms and no other. 395 end with a marker, a plain record with
+  `clusterofs = size mod L` beginning an empty cluster at `size`. 69 end
+  with the last cluster's own head or plain record, with
+  `clusterofs < size mod L` and no marker: the cluster starts inside the
+  last logical cluster (`e9-zstd-l3` `/text026`, size 106696, record 26
+  plain at `clusterofs` 165, block 215; 36 raw tails in
+  `e8-lz4-compact-counts`, such as nid 121, size 21980, record 5 plain at
+  1291; 30 inline tails in `e8-lz4-ztail` and 1 in `e2-count-zt`; the
+  fragment of `e8-lz4-frag` nid 72310, size 20000, record 4 head-1 at 0).
+  128 have `size mod L = 0` and end with the last cluster's head, plain or
+  non-head record. Source: `compress.c` `z_erofs_write_full_indexes` writes a
+  record for a logical cluster only while the extent reaches its end and
+  clears the pending offset when the final extent fits its cluster;
+  `z_erofs_fini_full_indexes` adds the marker only for a nonzero pending
+  offset. `zmap.c` ends an extent at `i_size` once the next record index is
+  at or past the record count. Restricted to `e8-lz4-compact`,
+  `-compact-xattr` and `-lz4hc-legacy`, which have no raw tail, the tally is
+  176 marker files and 86 without.
+* Inline tail: the tail's `h_idata_size` bytes start at the index end
+  (`zmap.c` sets `z_fragmentoff` to `nextpackoff` of the last record, the
+  end of its compact group) and must lie in one block (`invalid
+  tail-packing pclustersize` otherwise). All 81 inline tails of
+  `e8-lz4-ztail` and both of `e2-count-zt` do; 5 of the 81 lie in the block
+  after the one holding the inode (nids 73471 at `0x23dfe0` with tail at
+  `0x23e030`, 72446, 72701, 72829, 75135), where `dump.erofs -e` reports the
+  tail extent at that offset (nid 73471, `/text008`: physical 2351152,
+  length 2762). 76 tails have a head-1 record and 5 a plain one
+  (`compress.c` inlines the raw bytes when compression gains nothing). The
+  tail head's block field is the producer's reserved block, not the tail
+  (nid 73471 record 7 block 61; two single-cluster files both name block
+  703); the fragment head's block field is likewise no address
+  (`compress.c` stores `fragmentoff >> 32` there on the full index).
 * Head block numbers: anchor + 1 + preceding heads in the group without big
   clusters (0 mismatches). With big clusters the kernel's backward walk
   (source `zmap.c`) adds each count marker met, including the marker of a
@@ -500,7 +533,7 @@ Zstandard clusters at the defaults.
 | Device-number encoding; sizes and layout words of FIFOs, sockets and devices | Linux 32-bit encoding; size 0, layout 0, FIFO and socket word 0 | `e5-kinds-*` |
 | Attribute header reserved bytes; prefix table placement and units; the filter hash | Zero; plain table at `start * 4` after the shared pool, packed table at `start * 4` of the packed inode's decoded content; XXH32 over the name without its built-in prefix, seed `0x25BBE08F` + base index, every attribute counted | `e6-xattr-*` |
 | Chunk entry forms, holes, shared chunks | As designed; the layout word's upper half is uninitialised and ignored; per-inode `chunkbits` | `e7-chunk*`, `e7-edit-*` |
-| Compact group packing; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed, the big-cluster head block following the kernel's walk from the group's anchor; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. Open: `L > B` and compact advice `0x01` clear, unobservable with the pinned release and refused until E15 observes them | `e8-*` |
+| Compact group packing; the last record and the end marker; inline tail placement; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed, the big-cluster head block following the kernel's walk from the group's anchor; the last record is the marker, the last cluster's own head or plain record inside the last logical cluster, or, at `size mod L = 0`, the last cluster's final record, 592 inodes; the inline tail starts at the index end and lies in one block, not necessarily the inode's; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. Open: `L > B` and compact advice `0x01` clear, unobservable with the pinned release and refused until E15 observes them | `e8-*` |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | Framings confirmed; DEFLATE window bits at most 15, MicroLZMA dictionary at least 4096 and format 0, Zstandard format 0; head-2 by hand-built images, accepted by the kernel without `COMPR_HEAD2` | `e9-*` |
 | Every 48-bit field; encoded extents; writer's 32-byte records | Open; blocks stages 12, 14 and 15 | E10 |
 | Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Open; blocks stages 10 and 11 | E11 |
