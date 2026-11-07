@@ -43,8 +43,13 @@ EROFS reading includes chunk-based files and files, directories and
 symbolic links compressed with LZ4 or DEFLATE, and with MicroLZMA or
 Zstandard in a build with liblzma 5.4 or libzstd, inline compressed tails,
 packed fragments and deduplicated clusters included.
-A created EROFS volume is uncompressed, with 512- to 4096-byte blocks and
-32-bit addressing.
+A created EROFS volume has 512- to 4096-byte blocks and 32-bit
+addressing, and is uncompressed or, under
+.Dv FSIMG_EROFS_COMPRESSION_LZ4 ,
+stores each regular file that compresses into fewer blocks as one-block
+LZ4 clusters.
+Planning encodes such a file once to measure it and emission once more,
+and each encoding counts its input bytes as work.
 A file stored in its attribute or compressed with zlib, LZVN or LZFSE is
 decoded, unless its inline content is larger than 64 KiB or its compression
 attribute is not stored inline; those files and any other compression type
@@ -436,7 +441,9 @@ The EROFS settings erofs_compression
 erofs_addressing (32 or 48, zero selecting 32) and erofs_metabox
 .Pq Dv FSIMG_EROFS_METABOX_NONE , Dv FSIMG_EROFS_METABOX_PLAIN No or Dv FSIMG_EROFS_METABOX_LZ4
 are declared by FSIMG_SETTING_EROFS; writer construction rejects a
-non-default value for any other format with FSIMG_EINVAL.
+non-default value for any other format with FSIMG_EINVAL, and the EROFS
+writer rejects 48-bit addressing and a metadata box with
+FSIMG_EUNSUPPORTED.
 The settings byte_order, volume_uuid, inode_capacity and reserve_percent
 select the byte order, the UUID in textual byte order, the inode capacity
 and the reserved-block percentage (default 3) of a format whose record's

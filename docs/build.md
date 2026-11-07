@@ -1313,7 +1313,9 @@ The work directory holds the sources and images and must lie under
 `$HOME`, which the VM shares at the same path; the optional scratch
 directory holds the extractions, about 4 GiB at peak, the size of the large file
 (`-l` sets its size). `-b` selects the block size of every output, 512,
-1024, 2048 or 4096 (the default); a full qualification runs once at each.
+1024, 2048 or 4096 (the default), and `-c` the compression setting,
+`none` (the default) or `lz4`; a full qualification runs once at each
+block size under each setting.
 It needs Ruby, `colima` with passwordless `sudo` in
 the VM, and the oracles under `~/.local/share/fsimg-oracles` (or
 `$FSIMG_ORACLES`). The record of a run is in

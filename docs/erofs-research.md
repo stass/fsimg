@@ -764,6 +764,53 @@ No oracle rejected an output. This run covered 4096-byte blocks only;
 [E11](#e11-writer-probes) repeats the qualification at every block size,
 with the `tails` tree added.
 
+### LZ4 output
+
+`tools/erofs/qualify.sh -c lz4` ran on 2026-11-07 at each block size
+against `fsimg` built from branch `erofs-s11b` at "Write LZ4-compressed
+EROFS files under compression=lz4", with `fsck.erofs` 1.9.4-gf36cadb5 and
+rust-fs-erofs 0.5.1 on macOS and the colima VM's kernel
+`7.0.0-38-generic`:
+
+```sh
+for b in 512 1024 2048 4096; do
+	sh tools/erofs/qualify.sh -b $b -c lz4 build/fsimg \
+	    ~/.cache/fsimg-erofs/vm-11b/b$b
+done
+```
+
+Every output of the uncompressed run was created again with
+`-o compression=lz4`, under the same oracles and comparisons, and a
+`mixed` tree was added: text files of 1, `B - 1`, `B`, `B + 1`, `2B`,
+`3B + 5`, 65535, 65536, 65537, 300000 and 1000003 bytes, noise files of
+`B + 1`, `2B` and 100000 bytes, 100000 bytes of text followed by 100000 of
+noise, 5000 bytes of noise followed by 200000 of text, a 70000-byte
+period-251 pattern and a sparse file of 3000000 zero bytes. So the images
+hold LZ4 clusters, plain clusters inside compressed files, files that stay
+flat, end markers, last clusters whose head lies in the last logical
+cluster and, at 512 bytes, full indexes that cross blocks. All 45 checks
+passed at each of the four block sizes; no oracle rejected an output.
+
+Image sizes in bytes against the same tree without compression (the
+`fsimg c -n` plan):
+
+| Output | `B` | Uncompressed | LZ4 |
+| --- | --- | --- | --- |
+| mixed | 512 | 5081600 | 336384 |
+| mixed | 1024 | 5087232 | 335872 |
+| mixed | 2048 | 5099520 | 405504 |
+| mixed | 4096 | 5124096 | 573440 |
+| small | 512 | 31232 | 8704 |
+| small | 4096 | 28672 | 24576 |
+| large | 512 | 4296022528 | 101666816 |
+| large | 4096 | 4296024064 | 276901888 |
+
+The large tree's sparse file of 2^32 + 5000 bytes stores one block per
+64 KiB window, the writer's cap on a cluster's input, so its compressed
+size grows with `B`; at 512 bytes half of it is the full index, one 8-byte
+record per logical cluster. Trees with no file of two or more blocks, such
+as deep, wide and names, are the uncompressed image byte for byte.
+
 ## Evidence answers
 
 | Question | Answer | Fixtures |
@@ -786,7 +833,7 @@ with the `tails` tree added.
 | Compact group packing; the last record and the end marker; inline tail placement; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed, the big-cluster head block following the kernel's walk from the group's anchor; the last record is the marker, the last cluster's own head or plain record inside the last logical cluster, or, at `size mod L = 0`, the last cluster's final record, 592 inodes; the inline tail starts at the index end and lies in one block, not necessarily the inode's; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, and producers write `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. `L > B` and compact advice `0x01` clear are unobservable with the pinned release; E15 observes them hand-built | `e8-*` |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | Framings confirmed; DEFLATE window bits at most 15, MicroLZMA dictionary at least 4096 and format 0, Zstandard format 0; head-2 by hand-built images, accepted by the kernel without `COMPR_HEAD2` | `e9-*` |
 | Every 48-bit field; encoded extents; writer's 32-byte records | Open; blocks stages 12, 14 and 15 | E10 |
-| Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Accepted: at 512, 1024, 2048 and 4096-byte blocks the writer's output passes the kernel, `fsck.erofs` and rust-fs-erofs, with empty and sub-block flat-inline start words of 0, inodes ending at and moving past block ends, and multi-block directories ([E11](#e11-writer-probes)) | E11, `qualify.sh -b` |
+| Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Accepted: at 512, 1024, 2048 and 4096-byte blocks the writer's output passes the kernel, `fsck.erofs` and rust-fs-erofs, with empty and sub-block flat-inline start words of 0, inodes ending at and moving past block ends, and multi-block directories ([E11](#e11-writer-probes)); and with `compression=lz4` at every block size, LZ4 and plain one-block clusters behind full indexes that cross blocks at 512 bytes, end markers and heads in the last logical cluster included ([LZ4 output](#lz4-output)) | E11, `qualify.sh -b`, `qualify.sh -c lz4` |
 | Metadata-box layout, root placement, box compression, shared attributes in the box | Open; blocks stages 13 and 15 | E12 |
 | Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | Files beyond 4 GiB need no 48-bit layout (flat-inline, chunked and LZ4 compact); start blocks reach `0xFFFFFFFE` and NIDs exceed 2^32 without the 48-bit layout; the root NID stays 36 or 128, or bit 63 in a metadata box, so a root NID above 65535 and a nonzero `meta_blkaddr` come only from hand-built images | `e13-*` |
 | The fields a volume with external devices sets | Extra device count nonzero in both producer forms, `DEVICE_TABLE`, device identifier 1 in every chunk; `CHUNKED_FILE` only under `--blobdev` | `e14-*` |

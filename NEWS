@@ -18,14 +18,15 @@ table, the attribute name filters and the packed inode. A volume with
 48-bit addressing, a metadata box or extra devices is refused as
 unsupported.
 
-`c -F erofs` creates EROFS volumes: uncompressed, with 512- to 4096-byte
-blocks (`-o cluster=`, 4096 by default) and 32-bit addressing, with files,
+`c -F erofs` creates EROFS volumes: uncompressed, or with
+`-o compression=lz4` LZ4-compressed regular files where that saves
+blocks, with 512- to 4096-byte blocks (`-o cluster=`, 4096 by default) and 32-bit addressing, with files,
 directories and symbolic links, the owner, the permission bits and the
 modification time to the nanosecond. Hard links become independent
 files. A fixed `gpt:disk` or `mbr:disk` partition need not be a whole
 number of blocks; the partial block after the volume is zero. `-o uuid=`
-sets the volume UUID; `compression=lz4`, `addressing=48` and a metadata
-box are refused as unsupported. `fsck.erofs`, a Linux kernel mount and
+sets the volume UUID; `addressing=48` and a metadata box are refused as
+unsupported. `fsck.erofs`, a Linux kernel mount and
 rust-fs-erofs read the output back at every block size
 (`tools/erofs/qualify.sh`).
 

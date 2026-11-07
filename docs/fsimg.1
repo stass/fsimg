@@ -1080,7 +1080,10 @@ derives one from the epoch and otherwise a random version 4 UUID is
 generated.
 .It Fl o Ar compression=none|lz4
 EROFS file compression; default none.
-lz4 is refused as unsupported.
+lz4 stores each regular file that compresses into fewer blocks as
+one-block LZ4 clusters behind a full index, and every other file,
+directory and symbolic link uncompressed; a volume none of whose files
+compresses is the same as with none.
 .It Fl o Ar addressing=32|48
 EROFS block addressing width; default 32.
 48 is refused as unsupported.

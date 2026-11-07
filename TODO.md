@@ -77,11 +77,12 @@
   LZ4 profile with a measured read and encoded copy in common emission, and
   last the 48-bit layout and metadata box, read and then written. External
   data devices stay refused.
-  The uncompressed writer is registered (`write-plan.c`, `write-dir.c`,
-  `write-emit.c`), and `tools/erofs/qualify.sh` checks its output with
-  `fsck.erofs`, the kernel and rust-fs-erofs at every block size. It
-  refuses `compression=lz4` (stage 11), `addressing=48` (stage 14) and
-  `metabox=plain|lz4` (stage 15) with `FSIMG_EUNSUPPORTED`.
+  The writer is registered (`write-plan.c`, `write-dir.c`, `write-emit.c`,
+  `write-lz4.c`) with its LZ4 profile, and `tools/erofs/qualify.sh` checks
+  its output, uncompressed and under `-c lz4`, with `fsck.erofs`, the
+  kernel and rust-fs-erofs at every block size. It refuses `addressing=48`
+  (stage 14) and `metabox=plain|lz4` (stage 15) with
+  `FSIMG_EUNSUPPORTED`.
 
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
@@ -405,6 +406,16 @@
   leaves a file's zero ranges to the fresh volume beneath them. Check
   whether emission writes the source's hole ranges, or the observation
   came from the copy-out, and fix or document it.
+* [Medium] **EROFS LZ4 measurement runs before the output budget**
+  (`lib/formats/erofs/write-plan.c` `measure_files`,
+  `lib/write/writer.c`): under `compression=lz4` planning reads and
+  encodes every regular file of two or more blocks before `plan_disk()`
+  checks the output limit, whose comment assumes no content is touched
+  before then. The work budget bounds the encoding (each cluster charges
+  its bytes), but generated DATA reads charge no work, and a file that
+  turns out to stay flat is still encoded to its end. Decide whether the
+  output limit should be checked against the flat sizes first, and stop a
+  measurement once its clusters reach the flat block count.
 * [Medium] **EROFS payload verification reads a hard-linked file once per
   name** (`lib/formats/erofs/verify.c`): without a visited set,
   `fsimg_verify_payload` runs at every name, so `W -d` reads a file with N

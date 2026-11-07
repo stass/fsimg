@@ -20,10 +20,14 @@
 # and the format time (design-erofs.md), so no oracle compares its
 # metadata with the source directory's.
 #
-# Usage: qualify.sh [-b block-bytes] [-l large-bytes] FSIMG WORKDIR [SCRATCH]
+# Usage: qualify.sh [-b block-bytes] [-c compression] [-l large-bytes]
+#        FSIMG WORKDIR [SCRATCH]
 #
 # -b selects the block size, 512, 1024, 2048 or 4096 (the default), for
-# every output; -l the size of the large tree's sparse file.
+# every output; -c the compression setting, none (the default) or lz4;
+# -l the size of the large tree's sparse file. The mixed tree holds text,
+# noise and short files, so under lz4 some files compress and some stay
+# flat.
 # WORKDIR holds the sources and images and must lie under $HOME, which the
 # VM shares at the same path; SCRATCH (default WORKDIR) holds extractions.
 # Each output's files are replaced as it is built. The oracles are found
@@ -33,19 +37,26 @@
 set -eu
 
 block=4096
+compression=none
 large_bytes=4294972296		# 2^32 + 5000: past a compact inode's size
-while getopts b:l: flag; do
+while getopts b:c:l: flag; do
 	case $flag in
 	b)	block=$OPTARG ;;
+	c)	compression=$OPTARG ;;
 	l)	large_bytes=$OPTARG ;;
 	*)	exit 2 ;;
 	esac
 done
 shift $((OPTIND - 1))
 [ $# -ge 2 ] && [ $# -le 3 ] || {
-	echo "usage: qualify.sh [-b block-bytes] [-l large-bytes] FSIMG WORKDIR [SCRATCH]" >&2
+	echo "usage: qualify.sh [-b block-bytes] [-c compression] [-l large-bytes] FSIMG WORKDIR [SCRATCH]" >&2
 	exit 2
 }
+case $compression in
+none|lz4) ;;
+*)	echo "qualify.sh: compression is none or lz4" >&2
+	exit 2 ;;
+esac
 case $block in
 512|1024|2048|4096) ;;
 *)	echo "qualify.sh: block size is 512, 1024, 2048 or 4096" >&2
@@ -189,7 +200,8 @@ qualify() {
 	shift 2
 	src=$work/$name.src image=$work/$name.img
 	rm -f "$image"
-	if ! "$fsimg" c -p -o uuid=$uuid -o cluster=$block -F "$layout" "$@" \
+	if ! "$fsimg" c -p -o uuid=$uuid -o cluster=$block \
+	    -o compression=$compression -F "$layout" "$@" \
 	    -f "$image" \
 	    -C "$src" . >"$work/$name.create.log" 2>&1; then
 		result FAIL "$name" create "$(tail -1 "$work/$name.create.log")"
@@ -309,6 +321,33 @@ build_tails() {
 	done
 }
 
+# Text that compresses at every size from one byte to well past the 64 KiB
+# LZ4 window, noise that does not, text followed by noise, and a sparse
+# run of zeros, each deterministic.
+text() {
+	ruby -e 'print(("the quick brown fox jumps over the lazy dog " * (Integer(ARGV[0]) / 44 + 1))[0, Integer(ARGV[0])])' "$1"
+}
+
+noise() {
+	ruby -e 'print(Random.new(Integer(ARGV[1])).bytes(Integer(ARGV[0])))' "$1" "$2"
+}
+
+build_mixed() {
+	s=$(fresh mixed)
+	mkdir "$s/text" "$s/noise"
+	for n in 1 $((block - 1)) $block $((block + 1)) $((2 * block)) \
+	    $((3 * block + 5)) 65535 65536 65537 300000 1000003; do
+		text $n >"$s/text/t$n"
+	done
+	for n in $((block + 1)) $((2 * block)) 100000; do
+		noise $n $n >"$s/noise/n$n"
+	done
+	{ text 100000; noise 100000 7; } >"$s/half"
+	{ noise 5000 8; text 200000; } >"$s/noise-first"
+	bytes 70000 >"$s/periodic"
+	dd if=/dev/zero of="$s/zeros" bs=1 count=0 seek=3000000 2>/dev/null
+}
+
 build_names() {
 	s=$(fresh names)
 	for n in ' space' '!' '#hash' '$' '%' '&' "'" '(' ')' '*' '+' ',' \
@@ -327,6 +366,7 @@ build_large
 build_kinds
 build_tails
 build_names
+build_mixed
 
 qualify empty-tree erofs
 qualify small erofs
@@ -336,6 +376,7 @@ qualify large erofs
 qualify kinds erofs
 qualify tails erofs
 qualify names erofs
+qualify mixed erofs
 cp -R "$work/small.src" "$work/gpt.src"
 cp -R "$work/small.src" "$work/mbr.src"
 qualify gpt erofs/gpt -o gpt:disk=8M
