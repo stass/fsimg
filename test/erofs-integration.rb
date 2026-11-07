@@ -237,7 +237,11 @@ end
 # times the volume's length, plus room for link targets.
 def output_limit(rows) = ["-l", "output=#{rows.select { _1.kind == 'file' }.sum(&:size) + (1 << 20)}"]
 
+# A path with a ".." component, which no reader should report, is never
+# followed out of dir.
 def file_sha(dir, path)
+  return nil if path.split("/").include?("..")
+
   full = File.join(dir, path)
   File.file?(full) && !File.symlink?(full) ? Digest::SHA256.file(full).hexdigest : nil
 end
@@ -458,6 +462,227 @@ rescue StandardError => e
   Result.new(name:, verdict: :fail, notes: ["#{e.class}: #{e.message}"], skipped: [])
 end
 
+# The rust-fs-erofs comparison. Every fixture fsimg reads (a pass or an
+# unchecked fixture) is also listed and its files read by rust-fs-erofs, an
+# independent reader, and the two readings must agree on each portable path:
+# kind, the size of a file or symbolic link, permission bits, modification
+# seconds, device numbers, link target and the SHA-256 of a file's content.
+# Owners, nanoseconds and attributes are not compared, since rust-fs-erofs
+# does not list them, nor a directory's size, which fsimg delivers as 0. The
+# work is bounded by the files' listed bytes, never the image's length, so a
+# sparse multi-terabyte fixture reads only its few files.
+RUST_FS_EROFS = File.join(ENV.fetch("FSIMG_ORACLES", File.join(Dir.home, ".local/share/fsimg-oracles")),
+                          "rust-erofs/bin/rust-fs-erofs")
+RUST_KINDS = {
+  "file" => "file", "dir" => "dir", "symlink" => "symlink", "fifo" => "fifo",
+  "socket" => "socket", "char" => "chardev", "block" => "blockdev"
+}.freeze
+# Bounds far past every fixture, so rust-fs-erofs never stops a walk short.
+RUST_DEPTH = 4096
+RUST_LIMIT = 100_000_000
+# A fixture with more file bytes or more files than these has each nonempty
+# file streamed through `export PATH -` and hashed, rather than exported as
+# a tree to the work directory, which holds fsimg's extraction of the same
+# files: rust-fs-erofs syncs every file it exports, so e13-dir100k's 100000
+# empty files take minutes that comparing their sizes makes redundant.
+RUST_EXPORT_BYTES = 256 << 20
+RUST_EXPORT_FILES = 10_000
+EMPTY_SHA = Digest::SHA256.hexdigest("")
+# Fixtures rust-fs-erofs refuses although fsimg and mkfs.erofs agree on
+# them: name => refusal. rust-fs-erofs 0.5.1 reads 64 bytes for every
+# inode, so a compact (32-byte) inode in the volume's last 32 bytes, which
+# e4-nearfull-b4096 holds, is a short read to it. It also fails to export
+# dozens of LZ4 files of the two e8-lz4-compact fixtures ("LZ4 decompression
+# failed", "decompressed size mismatch", "input is all zeros") and the
+# files of e6-xattr-pfx-packed whose tails are fragments ("inline PLAIN tail
+# shorter than its extent"); fsck.erofs 1.9.4 extracts every regular file of
+# those three images with the bytes fsimg extracts, which match the source
+# manifests. The cause inside rust-fs-erofs is not diagnosed.
+RUST_REFUSALS = {
+  "e4-nearfull-b4096" => /ShortRead \{ offset: 8160, want: 64, got: 32 \}/,
+  "e6-xattr-pfx-packed" => /malformed inode: inline PLAIN tail shorter than its extent/,
+  "e8-lz4-compact-counts" => /malformed inode: LZ4 /,
+  "e8-lz4-compact-xattr" => /malformed inode: LZ4 /
+}.freeze
+
+# What one reader delivers for a path.
+Entry = Data.define(:kind, :size, :mode, :seconds, :dev, :target, :sha)
+
+class RustRefusal < StandardError; end
+
+def rust_available? = File.executable?(RUST_FS_EROFS)
+
+def rust_version = Open3.capture2(RUST_FS_EROFS, "--version").first.strip
+
+# The error text of a failed rust-fs-erofs command: its JSON record on
+# stderr, or the raw stderr.
+def rust_error(err)
+  JSON.parse(err.lines.last.to_s).fetch("error")
+rescue JSON::ParserError, KeyError, TypeError
+  err.strip
+end
+
+def rust_json(*args)
+  out, err, status = Open3.capture3(RUST_FS_EROFS, "fs", *args)
+  raise RustRefusal, rust_error(err) unless status.success?
+
+  JSON.parse(out)
+end
+
+# rust-fs-erofs 0.5.1 prints an extended inode's signed 64-bit seconds as
+# unsigned, so a time before the epoch arrives near 2^64.
+def signed64(value) = value >= 1 << 63 ? value - (1 << 64) : value
+
+def rust_listing(image) =
+  rust_json(image, "ls", "-R", "--max-depth", RUST_DEPTH.to_s, "--limit", RUST_LIMIT.to_s, "/").to_h do |item|
+    kind = RUST_KINDS.fetch(item.fetch("type"), item["type"])
+    dev = DEVICES.include?(kind) ? [item["major"], item["minor"]] : nil
+    size = SIZED.include?(kind) ? item.fetch("size") : nil
+    [item.fetch("path"), Entry.new(kind:, size:, mode: item.fetch("mode").to_i(8) & 0o7777,
+                                   seconds: signed64(item.fetch("mtime")), dev:, target: item["target"], sha: nil)]
+  end
+
+# SHA-256 of a file read by rust-fs-erofs through a pipe.
+def rust_streamed_sha(image, path)
+  Open3.popen3(RUST_FS_EROFS, "fs", image, "export", path, "-") do |stdin, out, err, thread|
+    stdin.close
+    errors = Thread.new { err.read }
+    digest = Digest::SHA256.new
+    while (chunk = out.read(1 << 20))
+      digest << chunk
+    end
+    raise RustRefusal, "export #{path}: #{rust_error(errors.value)}" unless thread.value.success?
+
+    digest.hexdigest
+  end
+end
+
+# SHA-256 of every file, from one recursive export's report. A second name
+# of a hard-linked inode is linked, not copied, and reports no digest, so it
+# is hashed from the exported tree. Special files are skipped, which makes
+# the command exit with status 5 (rust-fs-erofs 0.5.1), so the report, not
+# the status, says whether the export is whole: nothing refused, failed or
+# cancelled.
+def rust_exported_shas(image, dir)
+  out, err, = Open3.capture3(RUST_FS_EROFS, "fs", image, "export", "--recursive", "--preserve=links",
+                             "--max-depth", RUST_DEPTH.to_s, "/", dir)
+  report = find_export_report(out)
+  raise RustRefusal, "export: #{rust_error(err)}" unless report
+
+  items = report.fetch("items").select { rust_portable?(export_path(_1)) }
+  failed = items.reject { %w[completed skipped].include?(_1.fetch("status")) }
+  unless failed.empty? && !report.fetch("cancelled")
+    raise RustRefusal, "export #{failed.first&.then { export_path(_1) }}: #{failed.first&.fetch('reason')}"
+  end
+
+  items.to_h { |item| [export_path(item), item.dig("copy", "sha256") || file_sha(dir, export_path(item))] }
+end
+
+# An export item's path: a failed item names only its parent and name.
+def export_path(item) = item["path"] || File.join(item.fetch("parent"), item.fetch("name"))
+
+# rust-fs-erofs prints each byte of a name that is not UTF-8 as U+FFFD, and
+# cannot export it to a macOS volume, so such a path stands for a name the
+# portable profile leaves out. A real name holding U+FFFD is lost with
+# them, which fails the comparison as "listed by fsimg only", never passes
+# it.
+def rust_portable?(path) = portable?(path) && !path.include?("\uFFFD")
+
+# The export report on stdout, or nil when there is none.
+def find_export_report(out)
+  JSON.parse(out).then { _1.is_a?(Hash) && _1.key?("items") ? _1 : nil }
+rescue JSON::ParserError
+  nil
+end
+
+# The SHA-256 of each file rust-fs-erofs lists, by path. An empty file is
+# not read: both readers list its size, and its content is nothing.
+def rust_shas(image, files:, work:)
+  if files.values.sum > RUST_EXPORT_BYTES || files.size > RUST_EXPORT_FILES
+    return files.to_h { |path, size| [path, size.zero? ? EMPTY_SHA : rust_streamed_sha(image, path)] }
+  end
+
+  dir = File.join(work, "rust-export")
+  begin
+    rust_exported_shas(image, dir)
+  ensure
+    FileUtils.rm_rf(dir)
+  end
+end
+
+# fsimg's reading of the same paths, from its listing and its extraction.
+def fsimg_entries(image, out) =
+  listing(image).to_h do |seen|
+    target = seen.kind == "symlink" ? link_target(image, seen.path) : nil
+    sha = seen.kind == "file" ? file_sha(out, seen.path) : nil
+    dev = DEVICES.include?(seen.kind) ? seen.dev : nil
+    size = SIZED.include?(seen.kind) ? seen.size : nil
+    [seen.path, Entry.new(kind: seen.kind, size:, mode: seen.mode, seconds: seen.time&.first, dev:,
+                          target:, sha:)]
+  end
+
+def entry_differences(path, ours:, theirs:) =
+  ours.to_h.filter_map do |field, value|
+    "#{path}: #{field} #{value.inspect} (fsimg) != #{theirs.public_send(field).inspect} (rust-fs-erofs)" \
+      unless value == theirs.public_send(field)
+  end
+
+def reading_differences(ours, theirs)
+  missing = (ours.keys - theirs.keys).map { "#{_1}: listed by fsimg only" }
+  extra = (theirs.keys - ours.keys).map { "#{_1}: listed by rust-fs-erofs only" }
+  missing + extra + (ours.keys & theirs.keys).flat_map { entry_differences(_1, ours: ours[_1], theirs: theirs[_1]) }
+end
+
+# Both readings of one fixture, restricted to the portable paths fsimg
+# delivers, and the count of paths left out.
+def rust_readings(name, image:, work:)
+  ours = fsimg_entries(image, File.join(work, name))
+  listed = rust_listing(image)
+  theirs = listed.select { |path, _| rust_portable?(path) }
+  files = theirs.select { _2.kind == "file" }.transform_values(&:size)
+  shas = rust_shas(image, files:, work:)
+  theirs = theirs.to_h { |path, entry| [path, entry.with(sha: entry.kind == "file" ? shas[path] : nil)] }
+  portable = (ours.keys | theirs.keys).select { portable?(_1) }
+  [ours.slice(*portable), theirs.slice(*portable), (ours.keys | listed.keys).size - portable.size]
+end
+
+# The comparison for a fixture fsimg read, or nil for one it did not.
+def rust_result(result, dir:, work:)
+  return nil unless %i[pass unchecked].include?(result.verdict)
+
+  name = File.basename(dir)
+  ours, theirs, dropped = rust_readings(name, image: File.join(dir, "image.erofs"), work:)
+  diffs = reading_differences(ours, theirs)
+  Result.new(name: "#{name} (rust-fs-erofs)", verdict: diffs.empty? ? :agree : :fail, notes: diffs.first(MAX_NOTES),
+             skipped: [:non_portable_path] * dropped)
+rescue RustRefusal => e
+  pinned = RUST_REFUSALS[name]&.then { e.message.match?(_1) }
+  Result.new(name: "#{name} (rust-fs-erofs)", verdict: pinned ? :rust_refused : :fail,
+             notes: ["rust-fs-erofs refused: #{e.message}"], skipped: [])
+rescue StandardError => e
+  # The per-comparison boundary, as check's: any other error fails this
+  # fixture's comparison and the run goes on.
+  Result.new(name: "#{name} (rust-fs-erofs)", verdict: :fail, notes: ["#{e.class}: #{e.message}"], skipped: [])
+end
+
+# One fixture's results: fsimg's, then the rust-fs-erofs comparison's. The
+# fixture's extraction is removed afterwards, so the work directory holds one
+# fixture's files at a time.
+def fixture_results(dir, work)
+  result = check(dir, work)
+  [result, *(rust_available? ? rust_result(result, dir:, work:) : nil)]
+ensure
+  FileUtils.rm_rf(File.join(work, File.basename(dir)))
+end
+
+def rust_summary(results)
+  return "rust-fs-erofs: skipped, #{RUST_FS_EROFS} is not executable" unless rust_available?
+
+  counts = results.select { _1.name.end_with?("(rust-fs-erofs)") }.map(&:verdict).tally
+  "rust-fs-erofs: #{rust_version}; #{counts.fetch(:agree, 0)} agree, " \
+    "#{counts.fetch(:rust_refused, 0)} refused as pinned, #{counts.fetch(:fail, 0)} differ"
+end
+
 # `x -O` of one path: its SHA-256, or the refusal text.
 def extracted_digest(image, path)
   out, err, status = fsimg("x", "-O", "-f", image, path)
@@ -565,7 +790,8 @@ BUILD_CODECS, READABLE_COMPRESSIONS = format_records.then { [build_codecs(_1), r
 Dir.mktmpdir("fsimg-erofs-") do |work|
   dirs = Dir.children(CORPUS).sort.reject { _1.include?(".tmp-") || _1.match?(STREAMED_FIXTURES) }
             .map { File.join(CORPUS, _1) }.select { File.directory?(_1) }
-  results = dirs.map { |dir| check(dir, work).tap { report(_1) } } + head2_results(work).each { report(_1) }
+  results = dirs.flat_map { |dir| fixture_results(dir, work).each { report(_1) } } +
+            head2_results(work).each { report(_1) }
   wrapped = wrap_failures(results, work)
   wrapped.each { puts "FAIL        #{_1}" }
   gpt = gpt_wrapper? ? "gpt, " : ""
@@ -573,6 +799,7 @@ Dir.mktmpdir("fsimg-erofs-") do |work|
        "#{wrapped.size} failures"
   puts "unsupported (not a pass): #{results.select { _1.verdict == :unsupported }.map(&:name).join(' ')}"
   line, ok, floor = summary(results, wrapped)
+  puts rust_summary(results)
   puts line
   floor.each { puts "FAIL        #{_1}" }
   exit(ok ? 0 : 1)

@@ -1280,6 +1280,34 @@ and fails when the built `mkfs.erofs` lacks a
 codec. The tool identities, the Linux kernel oracle and the rust-fs-erofs
 oracle are in [erofs-research.md](erofs-research.md).
 
+`test/erofs-integration.sh` also compares fsimg's reading of every fixture
+it reads with rust-fs-erofs 0.5.1
+(`~/.local/share/fsimg-oracles/rust-erofs/bin/rust-fs-erofs`, or under
+`$FSIMG_ORACLES`; the run reports the comparison as skipped when the binary
+is absent). For each fixture that passes or opens unchecked, `fs IMAGE ls
+-R` and a recursive `export` (or, past 256 MiB or 10000 files, one
+`export PATH -` per nonempty file) must agree with fsimg's `t --json` and
+`x` on every portable path: kind, the size of a file or symbolic link,
+permission bits, modification seconds, device numbers, link target and
+file SHA-256. rust-fs-erofs lists no owners, nanoseconds or attributes,
+and fsimg delivers a directory's size as 0, so those are not compared.
+rust-fs-erofs 0.5.1 prints a time before the epoch as an unsigned 64-bit
+number, which the script reads back as signed, and exits with status 5
+when an export skips special files, so the export's report decides
+whether it is whole. rust-fs-erofs prints each byte of a name that is
+not UTF-8 as U+FFFD and cannot export such a name to a macOS volume, so
+those paths count as non-portable. A refusal is a failure unless pinned in
+`RUST_REFUSALS`: rust-fs-erofs reads 64 bytes for every inode, so it
+refuses `e4-nearfull-b4096`, whose last inode is a compact one in the
+volume's final 32 bytes, and it fails on dozens of LZ4 files of
+`e8-lz4-compact-counts` and `e8-lz4-compact-xattr` and on the
+fragment-tailed files of `e6-xattr-pfx-packed`, whose every regular file
+`fsck.erofs` 1.9.4 extracts with the bytes fsimg extracts. On the corpus
+the run ends with `rust-fs-erofs: rust-fs-erofs (rust-fs-erofs) 0.5.1;
+128 agree, 4 refused as pinned, 0 differ`; the TiB-apparent
+`e13-limits-nid` and `e13-limits-startblk` images agree, and their few
+listed files are all either reader touches.
+
 The LZ4 encoder's blocks are also decoded by the `lz4` command (1.11.0,
 `brew install lz4`), run as a binary only. `test-codec --encode-lz4 IN OUT
 CAPACITY` writes `IN` as blocks in an LZ4 legacy frame: whole-mode blocks

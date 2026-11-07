@@ -433,6 +433,13 @@
   between the two loads can cause. No test reaches the message; a
   callback source returning a different link-count byte on the inode's
   second read would.
+* [Low] **A pinned rust-fs-erofs refusal drops a fixture's whole
+  comparison** (`test/erofs-integration.rb` `rust_exported_shas`): one
+  failed export item raises, so `e6-xattr-pfx-packed` and the two
+  `e8-lz4-compact` fixtures compare no listing, mode, time or digest with
+  rust-fs-erofs, even for the files it exports; only the manifest check
+  covers them. Drop just the failed items whose reason matches the pin and
+  compare the rest.
 * [Low] **EROFS specification model runs no verification stage**
   (`test/spec/lib/fsimg_spec/erofs/cases.rb`): `Cases::STAGES` is
   `info ls extract`; the model should classify `verify` and `verify-deep`
