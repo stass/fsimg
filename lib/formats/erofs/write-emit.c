@@ -15,16 +15,18 @@
  * are zero already, and the driver writes only bytes that carry something.
  * In catalog ID order, root first, it writes each inode's fixed part, then
  * a directory's blocks or a file's or link's content, whose tail under the
- * flat-inline layout lands in the body just after the fixed part. The
- * superblock comes last.
+ * flat-inline layout lands in the body just after the fixed part; a
+ * compressed file's index follows its fixed part and its clusters come
+ * through an encoded copy (write-lz4.c). The superblock comes last.
  *
  * The superblock checksum covers [1024, B) for B above 1024 and
  * [1024, 1024 + B) otherwise: the superblock and whatever inodes and inline
  * tails follow it in that range. The emission object cannot read the sink
- * back, so the driver keeps those bytes itself in covered. put() and copy() are the only calls into the emission object:
- * put() mirrors the part of each metadata write that falls inside the
- * covered range, and copy() attaches cover_copy() to each source copy,
- * which mirrors every byte the copy writes there. Since the volume starts
+ * back, so the driver keeps those bytes itself in covered. put(), copy()
+ * and the encoded copy are the only calls into the emission object: put()
+ * mirrors the part of each metadata write that falls inside the covered
+ * range, and cover_copy() observes each source copy and encoded copy,
+ * mirroring every byte they write there. Since the volume starts
  * zero, covered holds the range's final bytes once the last inode is
  * written, and the checksum is computed over it last.
  */
@@ -40,11 +42,13 @@ _Static_assert(2 * (1u << EROFS_BLKSZBITS_MAX) <= FSIMG_EMIT_BUFFER_BYTES,
  * compact inodes' time base; its root NID is filled from row 0 and its
  * checksum last. directory is the row of the directory whose blocks
  * erofs_dir_walk() is delivering. covered mirrors volume bytes [1024,
- * 1024 + covered_bytes), the checksum's range.
+ * 1024 + covered_bytes), the checksum's range. former forms LZ4 clusters,
+ * allocated only when the plan compresses a file.
  */
 typedef struct erofs_emit_state {
 	erofs_plan_t	*plan;
 	fsimg_emit_t	*emit;
+	erofs_lz4_former_t *former;
 	erofs_super_t	 super;
 	erofs_row_t	 directory;
 	size_t		 covered_bytes;
@@ -56,6 +60,8 @@ static void cover(erofs_emit_state_t *, uint64_t, const unsigned char *,
 static void cover_copy(void *, const unsigned char *, size_t, uint64_t);
 static fsimg_status_t put(erofs_emit_state_t *, uint64_t, const void *,
     size_t, fsimg_error_t *);
+static fsimg_status_t put_index(void *, uint64_t, const void *, size_t,
+    fsimg_error_t *);
 static fsimg_status_t copy(erofs_emit_state_t *, uint64_t,
     fsimg_emit_payload_t *, fsimg_error_t *);
 static fsimg_status_t corrupt_plan(fsimg_error_t *, const char *);
@@ -74,6 +80,7 @@ static fsimg_status_t emit_directory(erofs_emit_state_t *, uint64_t,
 static fsimg_status_t emit_content(erofs_emit_state_t *, uint64_t,
     const erofs_row_t *, fsimg_error_t *);
 static fsimg_status_t emit_superblock(erofs_emit_state_t *, fsimg_error_t *);
+static fsimg_status_t emit_rows(erofs_emit_state_t *, fsimg_error_t *);
 
 /*
  * Mirror the part of the volume range [offset, offset + length) that lies
@@ -115,6 +122,14 @@ put(erofs_emit_state_t *state, uint64_t offset, const void *bytes,
 	if (status == FSIMG_OK)
 		cover(state, offset, bytes, length);
 	return (status);
+}
+
+/* put() for the LZ4 index writer. */
+static fsimg_status_t
+put_index(void *argument, uint64_t offset, const void *bytes, size_t length,
+    fsimg_error_t *error)
+{
+	return (put(argument, offset, bytes, length, error));
 }
 
 /*
@@ -204,7 +219,8 @@ row_kind(const erofs_row_t *row, fsimg_entry_kind_t *kind,
  * The superblock of the writer profile (specs/design-erofs.md, Volume),
  * all but the root NID and the checksum: features SB_CHKSUM and MTIME, no
  * extension slots, metadata from block 0, the format time as the epoch
- * with zero nanoseconds, and the label raw and NUL-padded. Every other
+ * with zero nanoseconds, and the label raw and NUL-padded. When a file is
+ * compressed, LZ4_0PADDING and LZ4's maximum distance, 65535. Every other
  * field is zero. validate_options() bounds the label and the block count.
  */
 static void
@@ -221,13 +237,18 @@ super_init(const erofs_plan_t *plan, erofs_super_t *sb)
 	bcopy(plan->uuid, sb->uuid, sizeof(sb->uuid));
 	sb->name_length = (uint8_t)strlen(label);
 	bcopy(label, sb->name, sb->name_length);
+	if (plan->cluster_count != 0) {
+		sb->incompat |= EROFS_INCOMPAT_LZ4_0PADDING;
+		sb->compression_word = EROFS_LZ4_DISTANCE;
+	}
 }
 
 /*
  * Catalog entry id's inode, at its NID: the row's form, layout, kind and
  * fields, with its 1-based position in the metadata area, which ID order
  * makes id + 1, as its serial number. The layout word is the start block,
- * zero for an inode that stores no block. A compact inode's time is the
+ * zero for an inode that stores no block, or a compressed inode's
+ * physical block count. A compact inode's time is the
  * superblock's epoch, which the compact rule makes exact. The row is
  * checked here, before anything of it is written, and the directory and
  * content writes that follow use the same row.
@@ -250,7 +271,8 @@ emit_inode(erofs_emit_state_t *state, uint64_t id, const erofs_row_t *row,
 	inode.permissions = row->mode & EROFS_MODE_PERMISSIONS;
 	inode.nlink = row->links;
 	inode.size = row->size;
-	inode.layout_word = (uint32_t)row->start_block;
+	inode.layout_word = row->layout == EROFS_LAYOUT_COMPRESSED_FULL ?
+	    row->clusters : (uint32_t)row->start_block;
 	inode.serial = (uint32_t)(id + 1);
 	inode.uid = row->uid;
 	inode.gid = row->gid;
@@ -357,9 +379,10 @@ emit_directory(erofs_emit_state_t *state, uint64_t id, const erofs_row_t *row,
 /*
  * A file's or link's content in one source copy: its data blocks, all of
  * them under the flat layout, a partial last block included, and the full
- * ones under the flat-inline layout, then its inline tail in the body. The
- * copy opens, checks and closes the source, so a source changed since
- * collection fails here.
+ * ones under the flat-inline layout, then its inline tail in the body. A
+ * compressed file's map header and index come first, then its clusters
+ * through an encoded copy. Either copy opens, checks and closes the
+ * source, so a source changed since collection fails here.
  */
 static fsimg_status_t
 emit_content(erofs_emit_state_t *state, uint64_t id, const erofs_row_t *row,
@@ -372,9 +395,22 @@ emit_content(erofs_emit_state_t *state, uint64_t id, const erofs_row_t *row,
 		.length = row->size,
 		.initialized = row->size
 	};
+	fsimg_status_t status;
 	uint64_t blocks;
 	uint32_t tail;
 
+	if (row->layout == EROFS_LAYOUT_COMPRESSED_FULL) {
+		if (state->former == NULL)
+			return (corrupt_plan(error,
+			    "EROFS plan compresses a file it did not count"));
+		status = erofs_lz4_write_index(state->plan, row,
+		    inode_offset(row) + erofs_row_fixed_bytes(row),
+		    fsimg_emit_buffer(state->emit), put_index, state, error);
+		if (status != FSIMG_OK)
+			return (status);
+		return (erofs_lz4_copy(state->plan, state->former, state->emit,
+		    id, row, cover_copy, state, error));
+	}
 	blocks = erofs_row_data_blocks(row, block_bytes);
 	tail = erofs_row_tail_bytes(row, block_bytes);
 	if (blocks != 0)
@@ -419,8 +455,8 @@ emit_superblock(erofs_emit_state_t *state, fsimg_error_t *error)
 
 /*
  * Emit the plan: every row in ID order, its inode and then its content,
- * then the superblock. Directories are walked in increasing ID order, as
- * planning walked them, so one child cursor serves them all.
+ * then the superblock. The cluster former exists for the whole emission
+ * when the plan compresses a file, and is released on every outcome.
  */
 fsimg_status_t
 erofs_write_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,
@@ -428,8 +464,6 @@ erofs_write_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,
 {
 	erofs_plan_t *plan = (erofs_plan_t *)writer->plan;
 	erofs_emit_state_t state;
-	erofs_row_t row;
-	uint64_t child_cursor;
 	fsimg_status_t status;
 
 	bzero(&state, sizeof(state));
@@ -439,23 +473,48 @@ erofs_write_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,
 	state.covered_bytes = erofs_super_covered_bytes(state.super.blkszbits);
 	if (state.covered_bytes == 0 || state.covered_bytes > COVERED_MAX)
 		return (corrupt_plan(error, "EROFS block size"));
+	if (plan->cluster_count != 0) {
+		status = erofs_lz4_former_new(writer->ctx, &writer->session,
+		    plan->block_bytes, &state.former, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	status = emit_rows(&state, error);
+	erofs_lz4_former_free(state.former);
+	if (status != FSIMG_OK)
+		return (status);
+	return (emit_superblock(&state, error));
+}
+
+/*
+ * Every row in ID order. Directories are walked in increasing ID order, as
+ * planning walked them, so one child cursor serves them all.
+ */
+static fsimg_status_t
+emit_rows(erofs_emit_state_t *state, fsimg_error_t *error)
+{
+	fsimg_writer_t *writer = state->plan->common.writer;
+	erofs_row_t row;
+	uint64_t child_cursor;
+	fsimg_status_t status;
+
 	child_cursor = 0;
 	for (uint64_t id = 0; id <= writer->count; id++) {
-		status = erofs_row_get(plan, id, &row, error);
+		status = erofs_row_get(state->plan, id, &row, error);
 		if (status == FSIMG_OK)
-			status = emit_inode(&state, id, &row, error);
+			status = emit_inode(state, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);
 		if (id == 0)
-			state.super.root_nid = row.nid;
+			state->super.root_nid = row.nid;
 		switch (row.mode & EROFS_MODE_TYPE_MASK) {
 		case EROFS_MODE_DIRECTORY:
-			status = emit_directory(&state, id, &row, &child_cursor,
+			status = emit_directory(state, id, &row, &child_cursor,
 			    error);
 			break;
 		case EROFS_MODE_REGULAR:
 		case EROFS_MODE_SYMLINK:
-			status = emit_content(&state, id, &row, error);
+			status = emit_content(state, id, &row, error);
 			break;
 		case EROFS_MODE_FIFO:
 			break;
@@ -467,5 +526,5 @@ erofs_write_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	return (emit_superblock(&state, error));
+	return (FSIMG_OK);
 }

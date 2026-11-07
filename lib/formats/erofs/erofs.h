@@ -705,10 +705,11 @@ fsimg_status_t	erofs_body_read(fsimg_reader_t *, const erofs_inode_t *,
  * only their fixed head, the 12-byte header or a 4-byte entry or record
  * head, and take as length what remains of the region. Rules that relate
  * one structure to another, such as an address inside the volume, belong
- * to their callers. The encoders, erofs_super_encode() and
- * erofs_inode_encode(), write a decoder's exact inverse into a buffer of
- * the structure's fixed length, and return false, leaving the buffer
- * unspecified, for a record the encoding cannot represent.
+ * to their callers. The encoders, erofs_super_encode(),
+ * erofs_inode_encode(), erofs_zheader_encode() and
+ * erofs_full_record_encode(), write a decoder's exact inverse into a
+ * buffer of the structure's fixed length, and return false, leaving the
+ * buffer unspecified, for a record the encoding cannot represent.
  */
 bool		erofs_magic_matches(const unsigned char *, size_t);
 fsimg_status_t	erofs_super_probe(const unsigned char *, size_t,
@@ -734,6 +735,9 @@ fsimg_status_t	erofs_zheader_decode(const unsigned char *,
 		    const char **);
 fsimg_status_t	erofs_full_record_decode(const unsigned char *, bool,
 		    erofs_zrecord_t *, const char **);
+bool		erofs_zheader_encode(const erofs_zheader_t *, unsigned char *);
+bool		erofs_full_record_encode(const erofs_zrecord_t *, uint16_t,
+		    unsigned char *);
 void		erofs_compact_layout(uint64_t, uint64_t,
 		    erofs_compact_layout_t *);
 void		erofs_compact_locate(const erofs_compact_layout_t *, uint64_t,

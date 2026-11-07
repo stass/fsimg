@@ -33,16 +33,22 @@
  *		zero until metadata placement
  *   start_block
  *		the first block of the inode's data, its tail block included
- *		under the flat layout; zero when the inode stores no block,
- *		before data placement, and for an empty inode or a flat-inline
- *		inode under one block, whose layout word addresses nothing
+ *		under the flat layout, its first cluster under the compressed
+ *		one; zero when the inode stores no block, before data
+ *		placement, and for an empty inode or a flat-inline inode under
+ *		one block, whose layout word addresses nothing
+ *   clusters, first_cluster
+ *		under EROFS_LAYOUT_COMPRESSED_FULL, the file's physical
+ *		clusters and the index of the first of their records in the
+ *		plan's cluster records; zero otherwise
  *   mtime, mtime_nsec
  *		the stored modification time, already chosen under the
  *		metadata policy (format time when absent or reproducible)
  *   uid, gid	the stored owner, zero when absent
  *   links	1 for a non-directory; a directory's 2 plus its subdirectories
  *   mode	type and permission bits
- *   layout	EROFS_LAYOUT_FLAT or EROFS_LAYOUT_FLAT_INLINE, and extended
+ *   layout	EROFS_LAYOUT_COMPRESSED_FULL, chosen by measurement, or
+ *		EROFS_LAYOUT_FLAT or EROFS_LAYOUT_FLAT_INLINE, and extended
  *		the inode form, both fixed by metadata placement
  * The wire layout is little endian at the offsets ROW_* name in
  * write-plan.c, every unused byte zero.
@@ -51,6 +57,8 @@ typedef struct erofs_row {
 	uint64_t	 size;
 	uint64_t	 nid;
 	uint64_t	 start_block;
+	uint64_t	 first_cluster;	/* LZ4: its first cluster record */
+	uint32_t	 clusters;	/* LZ4: its physical clusters */
 	int64_t		 mtime;
 	uint32_t	 mtime_nsec;
 	uint32_t	 uid;
@@ -71,6 +79,9 @@ typedef struct erofs_row {
  * volume's blocks, at least used_blocks. volume_bytes is the image length:
  * block_count blocks, plus the zero partial block a volume size of whole
  * sectors leaves past them. uuid is the stored identifier.
+ * cluster_records holds the cluster records of the compressed files,
+ * cluster_count of them, in catalog order (write-lz4.c); it exists only
+ * under compression=lz4.
  */
 typedef struct erofs_plan {
 	fsimg_plan_t	 common;
@@ -80,6 +91,8 @@ typedef struct erofs_plan {
 	uint64_t	 block_count;
 	uint64_t	 volume_bytes;
 	uint64_t	 inode_count;
+	fsimg_store_t	*cluster_records;	/* LZ4, write-lz4.c */
+	uint64_t	 cluster_count;		/* records of compressed files */
 	int64_t		 format_time;
 	uint32_t	 block_bytes;
 	unsigned char	 uuid[16];
@@ -135,13 +148,38 @@ typedef struct erofs_dir_builder {
 	unsigned char	*pack_buffer;
 } erofs_dir_builder_t;
 
+/*
+ * LZ4 files (write-lz4.c). A cluster is one physical block: the LZ4 block
+ * the encoder's prefix mode makes from a window of at most
+ * EROFS_LZ4_WINDOW_BYTES, right-aligned, or plain bytes at the block's
+ * start. consumed is the logical bytes it holds from logical on, produced
+ * its stored bytes before padding.
+ */
+#define EROFS_LZ4_WINDOW_BYTES		65536u
+#define EROFS_LZ4_DISTANCE		65535u
+
+typedef struct erofs_lz4_cluster {
+	uint64_t	 logical;
+	uint32_t	 consumed;
+	uint32_t	 produced;
+	bool		 plain;
+} erofs_lz4_cluster_t;
+
+typedef struct erofs_lz4_former erofs_lz4_former_t;
+
+/* Write bytes at a volume offset, for the index writer's caller. */
+typedef fsimg_status_t (*erofs_put_t)(void *, uint64_t, const void *, size_t,
+    fsimg_error_t *);
+
 extern const fsimg_writer_ops_t fsimg_erofs_writer_ops;
 
 fsimg_status_t erofs_row_get(erofs_plan_t *, uint64_t, erofs_row_t *,
     fsimg_error_t *);
 fsimg_status_t erofs_row_set(erofs_plan_t *, uint64_t, const erofs_row_t *,
     fsimg_error_t *);
-uint32_t erofs_row_body_bytes(const erofs_row_t *, uint32_t);
+uint64_t erofs_row_body_bytes(const erofs_row_t *, uint32_t);
+uint32_t erofs_row_unbroken_bytes(const erofs_row_t *, uint32_t);
+uint64_t erofs_row_index_records(const erofs_row_t *, uint32_t);
 uint32_t erofs_row_fixed_bytes(const erofs_row_t *);
 uint32_t erofs_row_tail_bytes(const erofs_row_t *, uint32_t);
 uint64_t erofs_row_data_blocks(const erofs_row_t *, uint32_t);
@@ -156,5 +194,16 @@ fsimg_status_t erofs_dir_walk(erofs_plan_t *, uint64_t *, uint64_t,
 
 fsimg_status_t erofs_write_emit(fsimg_writer_t *, fsimg_emit_t *,
     fsimg_error_t *);
+
+fsimg_status_t erofs_lz4_former_new(fsimg_ctx_t *, fsimg_session_t *,
+    uint32_t, erofs_lz4_former_t **, fsimg_error_t *);
+void erofs_lz4_former_free(erofs_lz4_former_t *);
+fsimg_status_t erofs_lz4_measure(erofs_plan_t *, erofs_lz4_former_t *,
+    uint64_t, uint64_t, uint64_t, uint64_t *, fsimg_error_t *);
+fsimg_status_t erofs_lz4_write_index(erofs_plan_t *, const erofs_row_t *,
+    uint64_t, unsigned char *, erofs_put_t, void *, fsimg_error_t *);
+fsimg_status_t erofs_lz4_copy(erofs_plan_t *, erofs_lz4_former_t *,
+    fsimg_emit_t *, uint64_t, const erofs_row_t *, fsimg_emit_observer_t,
+    void *, fsimg_error_t *);
 
 #endif

@@ -20,6 +20,7 @@
 
 #include "fsimg.h"
 #include "format.h"
+#include "fsimg-endian.h"
 #include "internal.h"
 #include "layer.h"
 #include "meta.h"
@@ -72,6 +73,9 @@
 static uint32_t block_size = BLOCK_DEFAULT;
 static bool sweeping;
 
+/* The compression setting base_options() selects; the LZ4 tests set it. */
+static fsimg_erofs_compression_t compression = FSIMG_EROFS_COMPRESSION_NONE;
+
 /* Report the case before the fatal check names the failed condition. */
 #define CHECK_CASE(condition, ...) do { \
 	if (!(condition)) { \
@@ -80,6 +84,18 @@ static bool sweeping;
 	} \
 	CHECK(condition); \
 } while (0)
+
+/*
+ * What a file's bytes look like (spec_byte()): the default pattern,
+ * repetitive text LZ4 compresses well, noise it cannot compress, or text
+ * for the first half and noise after it.
+ */
+typedef enum content {
+	CONTENT_PATTERN = 0,
+	CONTENT_TEXT,
+	CONTENT_NOISE,
+	CONTENT_HALF
+} content_t;
 
 /*
  * A tree under test: entries the test adds to a writer. A spec's mode is
@@ -98,6 +114,7 @@ typedef struct spec {
 	int64_t		 mtime;
 	uint32_t	 mtime_nsec;
 	const char	*target;	/* a link's target; its size */
+	content_t	 content;
 } spec_t;
 
 typedef struct tree {
@@ -194,6 +211,7 @@ base_options(fsimg_write_options_t *options)
 {
 	fsimg_write_options_init(options);
 	options->label = "test";
+	options->erofs_compression = compression;
 	if (block_size != BLOCK_DEFAULT)
 		options->allocation_unit_bytes = block_size;
 }
@@ -265,14 +283,46 @@ fixture_close(fixture_t *fixture)
  */
 static uint64_t changed_source = UINT64_MAX;
 
+/*
+ * Faults in content the source's validation cannot see: drifted_source
+ * serves noise in place of its bytes, and short_source ends its reads at
+ * half its size. UINT64_MAX disables each.
+ */
+static uint64_t drifted_source = UINT64_MAX;
+static uint64_t short_source = UINT64_MAX;
+
+/* A byte of noise at offset, from a 64-bit mix of the index and offset. */
+static unsigned char
+noise_byte(uint64_t index, uint64_t offset)
+{
+	uint64_t x = (index << 40) ^ offset ^ UINT64_C(0x9e3779b97f4a7c15);
+
+	x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+	x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+	return ((unsigned char)(x ^ (x >> 31)));
+}
+
 static unsigned char
 spec_byte(uint64_t index, uint64_t offset)
 {
+	static const char text[] = "the quick brown fox jumps over the lazy dog ";
 	const spec_t *spec = &tree.specs[index];
+	content_t content = spec->content;
 
 	if (spec->target != NULL)
 		return ((unsigned char)spec->target[offset]);
-	return ((unsigned char)(index * 131 + offset * 7 + offset / 251));
+	if (index == drifted_source)
+		content = CONTENT_NOISE;
+	if (content == CONTENT_HALF)
+		content = offset < spec->size / 2 ? CONTENT_TEXT : CONTENT_NOISE;
+	switch (content) {
+	case CONTENT_TEXT:
+		return ((unsigned char)text[offset % (sizeof(text) - 1)]);
+	case CONTENT_NOISE:
+		return (noise_byte(index, offset));
+	default:
+		return ((unsigned char)(index * 131 + offset * 7 + offset / 251));
+	}
 }
 
 static fsimg_status_t
@@ -293,6 +343,10 @@ provider_read(void *argument FSIMG_UNUSED, uint64_t id, uint64_t offset,
 	CHECK(id < tree.count);
 	size = tree.specs[id].size;
 	CHECK(offset <= size);
+	if (id == short_source)
+		size /= 2;
+	if (offset > size)
+		offset = size;
 	if (length > size - offset)
 		length = (size_t)(size - offset);
 	for (size_t i = 0; i < length; i++)
@@ -788,8 +842,6 @@ test_unwritten_settings_are_refused_naming_the_setting(void)
 		fsimg_erofs_metabox_t metabox;
 		refusal_t	 want;
 	} cases[] = {
-		{ FSIMG_EROFS_COMPRESSION_LZ4, 0, FSIMG_EROFS_METABOX_NONE,
-		    { "lz4 compression", FSIMG_EUNSUPPORTED, "compression" } },
 		{ FSIMG_EROFS_COMPRESSION_NONE, 48, FSIMG_EROFS_METABOX_NONE,
 		    { "48-bit addressing", FSIMG_EUNSUPPORTED, "addressing" } },
 		{ FSIMG_EROFS_COMPRESSION_NONE, 64, FSIMG_EROFS_METABOX_NONE,
@@ -2774,7 +2826,7 @@ emit_variant(const variant_t *variant, memory_sink_t *sink)
 }
 
 static void
-test_reproducible_image_ignores_order_limits_and_time_zone(void)
+check_identity_variants(void (*build)(void))
 {
 	static const variant_t variants[] = {
 		{ "forward", false, 0, 0, NULL },
@@ -2787,7 +2839,7 @@ test_reproducible_image_ignores_order_limits_and_time_zone(void)
 	const size_t count = sizeof(variants) / sizeof(variants[0]);
 	memory_sink_t reference, sink;
 
-	build_round_trip_tree();
+	build();
 	emit_variant(&variants[0], &reference);
 	for (size_t i = 1; i < count; i++) {
 		emit_variant(&variants[i], &sink);
@@ -2798,6 +2850,12 @@ test_reproducible_image_ignores_order_limits_and_time_zone(void)
 		free(sink.bytes);
 	}
 	free(reference.bytes);
+}
+
+static void
+test_reproducible_image_ignores_order_limits_and_time_zone(void)
+{
+	check_identity_variants(build_round_trip_tree);
 }
 
 /*
@@ -2814,9 +2872,10 @@ mark_range(unsigned char *carries, uint64_t length, uint64_t start,
 
 /*
  * The bytes of the image that may carry data, one byte each, from the plan
- * alone: the superblock, each inode's fixed part and inline tail, and the
- * data blocks' content, which ends at the size under the flat layout and
- * at the last full block under the flat-inline one.
+ * alone: the superblock, each inode's body, its fixed part and inline tail
+ * or index, and the data blocks' content, which ends at the size under the
+ * flat layout, at the last full block under the flat-inline one and at the
+ * last cluster's end under the compressed one.
  */
 static unsigned char *
 carrying_bytes(fixture_t *fixture, uint64_t length)
@@ -2831,7 +2890,9 @@ carrying_bytes(fixture_t *fixture, uint64_t length)
 		uint64_t data = row.size - tail;
 
 		mark_range(carries, length, row.nid * SLOT,
-		    erofs_row_fixed_bytes(&row) + tail);
+		    erofs_row_body_bytes(&row, block_size));
+		if (row.layout == EROFS_LAYOUT_COMPRESSED_FULL)
+			data = (uint64_t)row.clusters * block_size;
 		if (data != 0)
 			mark_range(carries, length, row.start_block * block_size,
 			    data);
@@ -2862,12 +2923,12 @@ emit_poisoned(memory_sink_t *sink, unsigned char poison,
  * the emitter left in a range it meant to write.
  */
 static void
-test_emission_leaves_no_stale_byte(void)
+check_no_stale_byte(void (*build)(void))
 {
 	memory_sink_t poisoned, other;
 	unsigned char *carries;
 
-	build_round_trip_tree();
+	build();
 	emit_poisoned(&poisoned, POISON, &carries);
 	emit_poisoned(&other, POISON_ALT, NULL);
 
@@ -2889,6 +2950,12 @@ test_emission_leaves_no_stale_byte(void)
 	free(carries);
 	free(poisoned.bytes);
 	free(other.bytes);
+}
+
+static void
+test_emission_leaves_no_stale_byte(void)
+{
+	check_no_stale_byte(build_round_trip_tree);
 }
 
 /*
@@ -3063,6 +3130,426 @@ test_changed_link_source_fails_emission(void)
 	build_round_trip_tree();
 	check_changed_source("/links/short");
 	check_changed_source("/links/long");
+}
+
+/*
+ * LZ4 files.
+ */
+
+#define LZ4_WINDOW	65536u
+
+/*
+ * The LZ4 tree: text, which compresses, at the sizes where the cluster
+ * rules change (one block, two blocks, the 64 KiB window), noise, which
+ * does not, a file of text then noise, whose clusters are LZ4 and then
+ * plain, the default pattern, files only an extended inode describes, and
+ * the other kinds. "/small" holds the four files check_extraction()
+ * copies.
+ */
+static void
+build_lz4_tree(void)
+{
+	const uint64_t b = block_size;
+	const uint64_t text[] = { 0, 1, b - 1, b, b + 1, 2 * b, 3 * b + 5,
+	    LZ4_WINDOW - 1, LZ4_WINDOW, LZ4_WINDOW + 1, 300000, 1000003 };
+	const uint64_t noise[] = { b + 1, 2 * b, 100000 };
+
+	tree_reset();
+	add_directory("/text");
+	for (size_t i = 0; i < sizeof(text) / sizeof(text[0]); i++)
+		add_file(text[i], "/text/t%ju", (uintmax_t)text[i])->content =
+		    CONTENT_TEXT;
+	add_directory("/noise");
+	for (size_t i = 0; i < sizeof(noise) / sizeof(noise[0]); i++)
+		add_file(noise[i], "/noise/n%ju", (uintmax_t)noise[i])->content =
+		    CONTENT_NOISE;
+	add_file(200000, "/half")->content = CONTENT_HALF;
+	add_file(70000, "/pattern");
+	with_owner(add_file(20000, "/owned"), 70000, 70000)->content =
+	    CONTENT_TEXT;
+	with_time(add_file(30000, "/timed"), 1700000123, 5)->content =
+	    CONTENT_TEXT;
+	add_symlink("text/t1", "/link");
+	tree_add(FSIMG_ENTRY_FIFO, 0, "/pipe");
+	add_directory("/small");
+	add_directory("/small/sub");
+	add_file(0, "/small/empty");
+	add_file(1, "/small/one");
+	add_file(5000, "/small/sub/five-thousand")->content = CONTENT_TEXT;
+	add_file(9000, "/small/sub/nine-thousand")->content = CONTENT_TEXT;
+}
+
+/*
+ * Which files compress: text and the text-then-noise file once their flat
+ * layout stores two blocks, noise never; the pattern may or may not. A
+ * text file of at least a window fills every cluster but the last with a
+ * whole window, since 64 KiB of text encodes far below 512 bytes, so its
+ * clusters are ceil(size / 64 KiB); every compressed file stores fewer
+ * blocks than its flat layout.
+ */
+static void
+check_lz4_layouts(fixture_t *fixture)
+{
+	const spec_t *spec;
+	erofs_row_t row, flat;
+	bool compressed;
+
+	for (size_t i = 0; i < tree.count; i++) {
+		spec = &tree.specs[i];
+		if (spec->kind != FSIMG_ENTRY_FILE)
+			continue;
+		row = row_of_path(fixture, spec->path);
+		compressed = row.layout == EROFS_LAYOUT_COMPRESSED_FULL;
+		flat = row;
+		flat.layout = row.extended || spec->size % block_size == 0 ?
+		    EROFS_LAYOUT_FLAT : EROFS_LAYOUT_FLAT_INLINE;
+		if (flat.layout == EROFS_LAYOUT_FLAT_INLINE &&
+		    erofs_row_fixed_bytes(&flat) + spec->size % block_size >
+		    block_size)
+			flat.layout = EROFS_LAYOUT_FLAT;
+		flat.clusters = 0;
+		CHECK_CASE(spec->content == CONTENT_PATTERN ||
+		    compressed == ((spec->content == CONTENT_TEXT ||
+		    spec->content == CONTENT_HALF) &&
+		    erofs_row_data_blocks(&flat, block_size) >= 2),
+		    "%s: compressed %d", spec->path, compressed);
+		if (!compressed)
+			continue;
+		CHECK(row.clusters < erofs_row_data_blocks(&flat, block_size));
+		if (spec->content == CONTENT_TEXT && spec->size >= LZ4_WINDOW)
+			CHECK_CASE(row.clusters == (spec->size + LZ4_WINDOW - 1) /
+			    LZ4_WINDOW, "%s: %u clusters", spec->path,
+			    row.clusters);
+	}
+}
+
+/*
+ * A reproducible LZ4 image reads back, verifies and extracts as specified,
+ * with LZ4_0PADDING and LZ4's maximum distance in its superblock.
+ */
+static void
+test_lz4_image_reads_back_as_specified(void)
+{
+	fsimg_write_options_t options;
+	erofs_config_t config;
+	erofs_super_t sb;
+	fixture_t fixture;
+	memory_sink_t sink;
+	const char *what;
+
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	build_lz4_tree();
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	check_lz4_layouts(&fixture);
+	emit_tree(&fixture, &sink, POISON);
+	CHECK(sink.length > 4096);
+	CHECK(erofs_region_decode(sink.bytes + EROFS_SUPER_OFFSET,
+	    4096 - EROFS_SUPER_OFFSET, &sb, &config, &what) == FSIMG_OK);
+	CHECK(sb.incompat == EROFS_INCOMPAT_LZ4_0PADDING);
+	CHECK(sb.compression_word == 65535);
+	check_enumeration(&fixture, &sink, true);
+	check_verification(&fixture, &sink);
+	check_extraction(&fixture, &sink);
+	free(sink.bytes);
+	fixture_close(&fixture);
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+}
+
+static void
+test_lz4_image_ignores_order_limits_and_time_zone(void)
+{
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	check_identity_variants(build_lz4_tree);
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+}
+
+static void
+test_lz4_emission_leaves_no_stale_byte(void)
+{
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	check_no_stale_byte(build_lz4_tree);
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+}
+
+/* The image of the current tree under the compression setting given. */
+static void
+emit_compressed(fsimg_erofs_compression_t setting, memory_sink_t *sink)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+
+	compression = setting;
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	emit_tree(&fixture, sink, POISON);
+	fixture_close(&fixture);
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+}
+
+/*
+ * When no file would store fewer blocks compressed, compression=lz4 writes
+ * the uncompressed image byte for byte, superblock included.
+ */
+static void
+test_lz4_without_a_compressible_file_is_the_flat_image(void)
+{
+	const uint64_t b = block_size;
+	memory_sink_t flat, lz4;
+
+	tree_reset();
+	add_file(b + 1, "/text")->content = CONTENT_TEXT;
+	add_file(b, "/block")->content = CONTENT_TEXT;
+	add_file(3 * b, "/noise")->content = CONTENT_NOISE;
+	add_file(0, "/empty");
+	emit_compressed(FSIMG_EROFS_COMPRESSION_NONE, &flat);
+	emit_compressed(FSIMG_EROFS_COMPRESSION_LZ4, &lz4);
+	CHECK(flat.length == lz4.length &&
+	    bcmp(flat.bytes, lz4.bytes, (size_t)flat.length) == 0);
+	free(flat.bytes);
+	free(lz4.bytes);
+}
+
+/*
+ * A fault in a compressed file's source, raised before planning or between
+ * planning and emission, fails the step that reads it with want and leaves
+ * no source open; a changed source is reported by the file's path.
+ */
+static void
+check_lz4_fault(const char *path, uint64_t *fault, bool before_planning,
+    fsimg_status_t want)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_status_t status;
+	size_t index = spec_at_path(path);
+
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	reproducible_options(&options);
+	fixture_open(&fixture);
+	if (before_planning)
+		*fault = index;
+	status = fixture_plan(&fixture, &options, false);
+	if (!before_planning) {
+		CHECK(status == FSIMG_OK);
+		CHECK(row_of_path(&fixture, path).layout ==
+		    EROFS_LAYOUT_COMPRESSED_FULL);
+		sink_open(&fixture, &sink, POISON);
+		*fault = index;
+		status = emit_into(&fixture, &sink);
+		free(sink.bytes);
+	}
+	*fault = UINT64_MAX;
+	CHECK_CASE(status == want, "%s: status %d, want %d: %s", path, status,
+	    want, fixture.error.message);
+	CHECK_CASE(want != FSIMG_ESOURCE_CHANGED ||
+	    strcmp(skip_slash(fixture.error.path), skip_slash(path)) == 0,
+	    "%s: the error names %s", path, fixture.error.path);
+	CHECK(!fixture.writer->source.active);
+	fixture_close(&fixture);
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+}
+
+static void
+test_lz4_source_faults_fail_planning_and_emission(void)
+{
+	build_lz4_tree();
+	/* Content that changes after measurement changes the clusters. */
+	check_lz4_fault("/text/t300000", &drifted_source, false,
+	    FSIMG_ESOURCE_CHANGED);
+	check_lz4_fault("/half", &drifted_source, false,
+	    FSIMG_ESOURCE_CHANGED);
+	check_lz4_fault("/text/t300000", &changed_source, true,
+	    FSIMG_ESOURCE_CHANGED);
+	check_lz4_fault("/text/t300000", &changed_source, false,
+	    FSIMG_ESOURCE_CHANGED);
+	check_lz4_fault("/text/t1000003", &short_source, true, FSIMG_EIO);
+	check_lz4_fault("/text/t1000003", &short_source, false, FSIMG_EIO);
+}
+
+/*
+ * Allocation fails at every point of planning and then of emission, and a
+ * write fails midway, under compression=lz4.
+ */
+static void
+test_lz4_allocation_and_write_failures_are_clean(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_status_t status;
+	bool emitting = false, done = false;
+	unsigned failures = 0;
+	uint64_t writes;
+
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	build_lz4_tree();
+	reproducible_options(&options);
+	for (uint64_t attempt = 1; attempt < 8192 && !done; attempt++) {
+		fixture_open(&fixture);
+		if (!emitting)
+			fsimg_test_fail_alloc_after(fixture.ctx, attempt);
+		status = fixture_plan(&fixture, &options, false);
+		fsimg_test_fail_alloc_after(fixture.ctx, 0);
+		if (status == FSIMG_OK && !emitting) {
+			emitting = true;
+			attempt = 0;
+		} else if (status == FSIMG_OK) {
+			sink_open(&fixture, &sink, POISON);
+			fsimg_test_fail_alloc_after(fixture.ctx, attempt);
+			status = emit_into(&fixture, &sink);
+			fsimg_test_fail_alloc_after(fixture.ctx, 0);
+			done = status == FSIMG_OK;
+			free(sink.bytes);
+		}
+		CHECK_CASE(status == FSIMG_OK || status == FSIMG_ENOMEM,
+		    "allocation %ju failing gave status %d",
+		    (uintmax_t)attempt, status);
+		failures += status == FSIMG_ENOMEM;
+		CHECK(fixture.writer == NULL || !fixture.writer->source.active);
+		fixture_close(&fixture);
+	}
+	CHECK(done && failures > 0);
+
+	plan_tree(&fixture, &options);
+	emit_tree(&fixture, &sink, POISON);
+	writes = sink.writes;
+	free(sink.bytes);
+	fixture_close(&fixture);
+	plan_tree(&fixture, &options);
+	sink_open(&fixture, &sink, POISON);
+	sink.fail_write_at = writes / 2;
+	CHECK(emit_into(&fixture, &sink) != FSIMG_OK);
+	free(sink.bytes);
+	fixture_close(&fixture);
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+}
+
+/*
+ * Cluster records and compressed rows come back from scratch storage, so
+ * a plan damaged after planning is refused, not emitted: a reserved byte
+ * set, a plain flag above one, a stored length beyond the block, a cluster
+ * that does not start where the previous one ended, and a row whose
+ * records lie beyond the adopted ones.
+ */
+static void
+test_lz4_damaged_cluster_plan_is_refused(void)
+{
+	static const struct {
+		const char	*name;
+		size_t		 at;		/* byte of the second record */
+		int		 value;		/* -1: add one to the byte */
+		fsimg_status_t	 want;
+	} cases[] = {
+		{ "reserved byte", 13, 1, FSIMG_ESTATE },
+		{ "plain flag", 12, 2, FSIMG_ESTATE },
+		{ "stored length", 11, 0xff, FSIMG_ESTATE },
+		{ "logical start", 0, -1, FSIMG_ESTATE },
+		{ "row beyond the records", SIZE_MAX, 0, FSIMG_ECORRUPT },
+	};
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	erofs_row_t row;
+	unsigned char byte;
+	uint64_t id, offset;
+	fsimg_status_t status;
+
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	build_lz4_tree();
+	reproducible_options(&options);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		plan_tree(&fixture, &options);
+		id = id_of_path(&fixture, "/text/t300000");
+		row = row_at(&fixture, id);
+		CHECK(row.layout == EROFS_LAYOUT_COMPRESSED_FULL &&
+		    row.clusters >= 2);
+		if (cases[i].at == SIZE_MAX) {
+			row.first_cluster = fixture.plan->cluster_count;
+			CHECK(erofs_row_set(fixture.plan, id, &row, NULL) ==
+			    FSIMG_OK);
+		} else {
+			offset = (row.first_cluster + 1) * 16 + cases[i].at;
+			CHECK(fsimg_store_read(fixture.plan->cluster_records,
+			    offset, &byte, 1, NULL) == FSIMG_OK);
+			byte = cases[i].value < 0 ? (unsigned char)(byte + 1) :
+			    (unsigned char)cases[i].value;
+			CHECK(fsimg_store_write(fixture.plan->cluster_records,
+			    offset, &byte, 1, NULL) == FSIMG_OK);
+		}
+		sink_open(&fixture, &sink, POISON);
+		status = emit_into(&fixture, &sink);
+		CHECK_CASE(status == cases[i].want, "%s: status %d: %s",
+		    cases[i].name, status, fixture.error.message);
+		CHECK_CASE(strcmp(fixture.error.message, cases[i].want ==
+		    FSIMG_ESTATE ? "invalid EROFS cluster plan" :
+		    "invalid EROFS plan row") == 0, "%s: %s", cases[i].name,
+		    fixture.error.message);
+		free(sink.bytes);
+		fixture_close(&fixture);
+	}
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+}
+
+/*
+ * The map header and full-index records the LZ4 writer encodes decode to
+ * the same fields; what a record cannot hold, or the writer never emits,
+ * is refused.
+ */
+static void
+test_index_encoding_decodes_to_the_same_records(void)
+{
+	const erofs_zrecord_t records[] = {
+		{ .type = EROFS_RECORD_HEAD1, .clusterofs = 511,
+		    .block = UINT32_MAX },
+		{ .type = EROFS_RECORD_PLAIN, .clusterofs = 7, .block = 12 },
+		{ .type = EROFS_RECORD_NONHEAD, .backward = 129 },
+	};
+	const erofs_zheader_t header = { .advice = 0 };
+	erofs_zrecord_t decoded, bad;
+	erofs_zheader_t zh;
+	erofs_super_t sb;
+	unsigned char raw[16];
+	const char *what;
+
+	bzero(&sb, sizeof(sb));
+	sb.incompat = EROFS_INCOMPAT_LZ4_0PADDING;
+	memset(raw, 0xff, sizeof(raw));
+	CHECK(erofs_zheader_encode(&header, raw));
+	for (size_t i = 0; i < EROFS_ZHEADER_BYTES; i++)
+		CHECK(raw[i] == 0);
+	CHECK(erofs_zheader_decode(raw, &sb, EROFS_LAYOUT_COMPRESSED_FULL,
+	    &zh, &what) == FSIMG_OK);
+	CHECK(zh.advice == 0 && zh.head1_algorithm == EROFS_ALGORITHM_LZ4 &&
+	    !zh.whole_fragment);
+	zh = (erofs_zheader_t){ .whole_fragment = true };
+	CHECK(!erofs_zheader_encode(&zh, raw));
+	zh = (erofs_zheader_t){ .advice = EROFS_ADVICE_INLINE_TAIL,
+	    .tail_bytes = 5 };
+	CHECK(!erofs_zheader_encode(&zh, raw));
+
+	for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); i++) {
+		memset(raw, 0xff, sizeof(raw));
+		CHECK(erofs_full_record_encode(&records[i], 3, raw));
+		CHECK(erofs_full_record_decode(raw, false, &decoded, &what) ==
+		    FSIMG_OK);
+		CHECK(decoded.type == records[i].type &&
+		    decoded.clusterofs == records[i].clusterofs &&
+		    decoded.block == records[i].block &&
+		    decoded.backward == records[i].backward && !decoded.marker);
+		if (records[i].type == EROFS_RECORD_NONHEAD)
+			CHECK(fsimg_load_le16(raw + 6) == 3 &&
+			    fsimg_load_le16(raw + 2) == 0);
+	}
+	bad = (erofs_zrecord_t){ .type = EROFS_RECORD_HEAD1,
+	    .block = UINT64_C(1) << 32 };
+	CHECK(!erofs_full_record_encode(&bad, 0, raw));
+	bad = (erofs_zrecord_t){ .type = EROFS_RECORD_NONHEAD };
+	CHECK(!erofs_full_record_encode(&bad, 1, raw));
+	bad = (erofs_zrecord_t){ .type = EROFS_RECORD_NONHEAD,
+	    .backward = 1, .marker = true, .marker_blocks = 2 };
+	CHECK(!erofs_full_record_encode(&bad, 1, raw));
 }
 
 /*
@@ -3342,6 +3829,15 @@ main(void)
 	test_allocation_failure_during_emission_is_clean();
 	test_changed_file_source_fails_emission();
 	test_changed_link_source_fails_emission();
+
+	at_every_block_size(test_lz4_image_reads_back_as_specified);
+	at_every_block_size(test_lz4_image_ignores_order_limits_and_time_zone);
+	at_every_block_size(test_lz4_emission_leaves_no_stale_byte);
+	at_every_block_size(test_lz4_without_a_compressible_file_is_the_flat_image);
+	test_lz4_source_faults_fail_planning_and_emission();
+	test_lz4_allocation_and_write_failures_are_clean();
+	test_lz4_damaged_cluster_plan_is_refused();
+	test_index_encoding_decodes_to_the_same_records();
 
 	test_super_encoding_decodes_to_the_same_superblock();
 	test_super_encoding_refuses_what_it_cannot_store();

@@ -386,13 +386,14 @@ catalog position:
    row, so a directory's link count is final only once its children have
    been visited.
 3. **Measurement**, under `compression=lz4` only: for each regular file
-   larger than one block, a [measured read](#lz4-planning-and-emission)
+   whose flat layout stores at least two blocks, since a compressed file
+   stores at least one, a [measured read](#lz4-planning-and-emission)
    encodes the content, records its cluster count in the row and appends
-   its index records to a scratch stream; the row chooses the compressed
-   layout when it stores fewer blocks, and the stream keeps only the chosen
-   files' records. No address exists yet, so a record holds its cluster's
-   block index relative to the file's first block; emission and box
-   generation add the file's planned start block when they encode it.
+   its cluster records to a scratch store; the row chooses the compressed
+   layout when it stores fewer blocks, and the store keeps only the chosen
+   files' records. No address exists yet, so a cluster's block is its
+   position among the file's clusters; emission and box generation add the
+   file's planned start block when they encode it.
 4. **Metadata placement.** Fixes each row's inode form and its flat or
    flat-inline layout from its final fields, since an extended inode's
    larger fixed part decides whether a tail fits, then assigns its body
@@ -425,7 +426,7 @@ Emission runs in plan order after the common writer has zeroed the volume:
    file or link, issue one source copy over its regions: its full blocks,
    then its inline tail in the body; for an LZ4 file, an encoded copy.
 2. Under the box: the box content, every body in plan order, is generated
-   from the plan rows and the index stream one block at a time and written
+   from the plan rows and the cluster records one block at a time and written
    as the box's stored blocks, through the LZ4 cluster former under
    `metabox=lz4`; then the box inode is written in the primary area.
 3. The superblock, then the checksum over the final bytes of its covered
@@ -454,18 +455,20 @@ the source lifecycle common:
 fills one block with the longest input prefix whose encoding fits, emits a
 plain cluster when one block of input does not, and records each head's
 logical offset. The full-index records, or under 48-bit addressing the
-encoded extents, follow from the heads. Measurement keeps each cluster's
-logical fields (type, `clusterofs` or logical start, stored length and
-block index relative to the file's first block) in a scratch stream, a
-fixed-size record per logical cluster for a full index or per cluster for
-encoded extents, which is metadata, not payload. Emission encodes each
-body's index from that stream through `codec.c`, which writes every
-reserved byte as zero, and the encoded copy checks that every head it
-produces matches, so emission holds one input window, one output block and
-the current record. The output block is
-zero-filled before each cluster is formed in it, so the padding of a
-right-aligned LZ4 cluster and the end of a short last cluster are zero,
-never bytes of the previous cluster or another file; under `LZ4_0PADDING`
+encoded extents, follow from the heads. Measurement keeps one fixed-size
+record per physical cluster in a scratch store: its logical start, the
+logical bytes it holds, its stored length and whether it is plain, which
+is metadata, not payload; a cluster's position among the file's records is
+its block relative to the file's first block. Emission encodes each
+body's index from those records through `codec.c`, which writes every
+reserved byte as zero, and the encoded copy checks that every cluster it
+forms matches its record in all four fields, so emission holds one
+window buffer, one output block and the current record. Every byte of the
+output block is written for each cluster: the encoder's bytes are moved to its end and the gap before them
+zeroed, or the block is zeroed before a plain cluster's bytes are copied
+to its start, so the padding of a right-aligned LZ4 cluster and the end
+of a short last cluster are zero, never bytes of the previous cluster or
+another file; under `LZ4_0PADDING`
 the decoder depends on that zero run to find the stream's start. Keeping the
 records is what lets the box, whose bodies hold them, be generated without
 reading a source. The box under `metabox=lz4` uses the same former on
@@ -482,13 +485,15 @@ once, and the encoder's determinism makes the two agree.
 | Index lookup | One full record window, one compact group, or one encoded-extent record per search step |
 | Decode windows | Two, three under a compressed metadata box; each at most one decoded cluster plus a 1 MiB input buffer and the codec's state, the MicroLZMA dictionary or Zstandard window the [configuration record](design-erofs.md#configuration) declares included, charged before allocation |
 | Verification | The reference and claim streams in scratch, three under a metadata box, under the common sort's run buffer |
-| Planning | Plan rows in a paged array; directory packing of one directory's names at a time, streamed from the catalog; LZ4 index records in a scratch stream |
-| Emission | One directory block and its name staging block, a copy of the checksum's covered range of at most 3072 bytes, one LZ4 input window and output block, one box staging block |
+| Planning | Plan rows in a paged array; directory packing of one directory's names at a time, streamed from the catalog; LZ4 cluster records in a scratch store; for the file being measured, the measured read's 64 KiB batch buffer and the cluster former's window buffer and output block |
+| Emission | One directory block and its name staging block, a copy of the checksum's covered range of at most 3072 bytes, an LZ4 window buffer of two 64 KiB windows and an LZ4 output block, one box staging block |
 
 Work is charged per block read, per index record visited and per decoded
 byte, so an image whose distances force long backward walks, or whose
 directories alias one subtree many times, exhausts the work budget rather
-than running unbounded.
+than running unbounded. The writer charges each LZ4 cluster's input bytes
+when it forms the cluster, once in measurement and once in emission, so a
+work budget bounds compression too.
 
 ## Failure classification
 

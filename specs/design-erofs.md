@@ -1488,12 +1488,31 @@ the flat layouts. A compressed file uses:
   stored as literals only. The kernel and `fsck.erofs` refuse a block that
   breaks either condition (E8, `e8-lz4-block-end`), and every producer block
   meets them;
-* a plain cluster when not even the next `B` input bytes encode into one
-  block: those `B` bytes stored raw (shifted), or the remaining bytes when
-  fewer remain;
+* a plain cluster when the prefix mode's block holds fewer than
+  `min(B, remaining)` input bytes: those bytes stored raw (shifted) at the
+  block's start, the rest of the block zero. So every cluster but the last
+  holds at least `B` logical bytes, and no two heads share a logical
+  cluster. The rule is stated in the encoder's own terms because its greedy
+  parse decides the prefix: another parse might fit the next `B` bytes
+  where this one does not, and the rule must depend on the file's bytes
+  alone;
+* the full index's records from the clusters' heads: cluster `i`, starting
+  at logical offset `h` and ending at `e`, gives logical cluster `h / B` a
+  head-1 record, or a plain record for a plain cluster, with `clusterofs =
+  h mod B` and block `start + i`, and each logical cluster from `h / B + 1`
+  to `e / B - 1` a non-head record with backward distance to `h / B` and
+  forward distance to `e / B`, where the next head or the end marker lies.
+  When `size mod B` is nonzero and the last cluster's head is not in the
+  last logical cluster, that cluster holds the producer's end marker, a
+  plain record with `clusterofs = size mod B` and block 0. No record sets
+  the partial-reference mark, since every cluster decodes to exactly its
+  extent;
 * the layout word holding the file's physical block count;
 * no compressed tail, fragment, sharing, big cluster or configuration
-  record.
+  record; the map header is zero: LZ4, algorithm 0, for both heads, no
+  advice and a logical cluster of one block. Its index follows the inode's
+  fixed part, which the [layout](#layout) keeps in one block, and may
+  continue across blocks.
 
 The encoder is the project-owned [LZ4 block
 encoder](design-codecs.md#the-lz4-block-encoder) of the codec design,
@@ -1502,7 +1521,9 @@ maximum distance field is written as 65535, LZ4's own maximum, which bounds
 every distance the encoder produces in its 64 KiB window and is the value
 `mkfs.erofs` writes, so the word matches every producer volume; the kernel
 and `fsck.erofs` also read a volume with zero there (E8,
-`e8-lz4-distance0`). Whether a cluster is
+`e8-lz4-distance0`). The field and `LZ4_0PADDING` are written only when a
+file is compressed, so a volume none of whose files compresses is the
+uncompressed profile's volume byte for byte. Whether a cluster is
 compressed depends only on the file's bytes, so the layout, and the image,
 are reproducible.
 

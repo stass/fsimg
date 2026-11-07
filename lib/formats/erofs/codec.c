@@ -1285,6 +1285,68 @@ erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
 }
 
 /*
+ * The map header the writer emits, the inverse of erofs_zheader_decode()
+ * for a header without an inline tail or fragment: the advice word, the
+ * two algorithms and a logical cluster of one block, every other bit zero.
+ * false for an inline tail, a fragment, an unknown advice bit or an
+ * algorithm beyond four bits.
+ */
+bool
+erofs_zheader_encode(const erofs_zheader_t *header, unsigned char *raw)
+{
+	if (header->whole_fragment || header->fragment_offset != 0 ||
+	    header->tail_bytes != 0 ||
+	    (header->advice & ~EROFS_ADVICE_KNOWN) != 0 ||
+	    (header->advice & (EROFS_ADVICE_INLINE_TAIL |
+	    EROFS_ADVICE_FRAGMENT)) != 0 ||
+	    header->head1_algorithm > 0x0f || header->head2_algorithm > 0x0f)
+		return (false);
+	bzero(raw, EROFS_ZHEADER_BYTES);
+	fsimg_store_le16(raw + 4, header->advice);
+	raw[6] = (unsigned char)(header->head1_algorithm |
+	    header->head2_algorithm << 4);
+	return (true);
+}
+
+/*
+ * One full-index record, the inverse of erofs_full_record_decode() with the
+ * forward distance a non-head record also carries: a head's or plain
+ * record's clusterofs and 32-bit block, or a non-head record's backward
+ * and forward distances, with the partial mark on a head that sets it.
+ * false for a count marker, which the writer never emits, a zero or
+ * marker-sized backward distance, a block beyond 32 bits or an unknown
+ * type.
+ */
+bool
+erofs_full_record_encode(const erofs_zrecord_t *record, uint16_t forward,
+    unsigned char *raw)
+{
+	uint16_t advice;
+
+	if (record->marker || record->type > EROFS_RECORD_HEAD2)
+		return (false);
+	advice = (uint16_t)record->type;
+	bzero(raw, EROFS_FULL_RECORD_BYTES);
+	if (record->type == EROFS_RECORD_NONHEAD) {
+		if (record->backward == 0 ||
+		    (record->backward & RECORD_MARKER) != 0)
+			return (false);
+		fsimg_store_le16(raw, advice);
+		fsimg_store_le16(raw + 4, record->backward);
+		fsimg_store_le16(raw + 6, forward);
+		return (true);
+	}
+	if (record->block > UINT32_MAX)
+		return (false);
+	if (record->partial && record->type != EROFS_RECORD_PLAIN)
+		advice |= RECORD_PARTIAL;
+	fsimg_store_le16(raw, advice);
+	fsimg_store_le16(raw + 2, record->clusterofs);
+	fsimg_store_le32(raw + 4, (uint32_t)record->block);
+	return (true);
+}
+
+/*
  * One 8-byte full-index record: a 16-bit advice word with the type in bits
  * 0 and 1 and the partial-reference mark in bit 15, a 16-bit clusterofs,
  * then a head's or plain record's 32-bit block, or a non-head record's

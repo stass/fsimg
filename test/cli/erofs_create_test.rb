@@ -89,8 +89,23 @@ class ErofsCreateTest < Minitest::Test
       .fetch("validation_scope"))
   end
 
+  def test_lz4_compression_shrinks_the_image_reproducibly_at_each_block_size
+    [512, 4096].each do |bytes|
+      flags = ["-R", "-e", TIME.to_s, "-o", "cluster=#{bytes}"]
+      flat = create(name: "flat#{bytes}", flags: flags)
+      lz4 = create(name: "lz4-#{bytes}", flags: [*flags, "-o", "compression=lz4"])
+      again = create(name: "again#{bytes}", flags: [*flags, "-o", "compression=lz4"])
+      assert_operator(lz4.size, :<, flat.size, bytes.to_s)
+      assert_equal(lz4.binread, again.binread, bytes.to_s)
+      assert_equal("initialized-payload", record(image: lz4, command: "W", type: "verify", flags: ["-d"])
+        .fetch("validation_scope"), bytes.to_s)
+      assert_equal((@source / "dir/file").binread,
+        invoke(arguments: ["x", "-O", "-S", "off", "-f", lz4, "/dir/file"]).stdout, bytes.to_s)
+    end
+  end
+
   def test_unwritten_layouts_are_refused
-    %w[compression=lz4 addressing=48].each do |setting|
+    %w[addressing=48].each do |setting|
       result = invoke(arguments: ["c", "-n", "-S", "off", "-R", "-F", "erofs",
         "-o", setting, "-C", @source, "."], expected: 1)
       assert_includes(result.stderr, setting.split("=").first.b, setting)
