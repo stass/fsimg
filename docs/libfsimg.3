@@ -417,6 +417,12 @@ without boot_bios is invalid.
 These settings are declared by FSIMG_SETTING_ISO_LEVEL and
 FSIMG_SETTING_ELTORITO.
 No boot information table or hybrid system area is written.
+The EROFS settings erofs_compression
+.Pq Dv FSIMG_EROFS_COMPRESSION_NONE No or Dv FSIMG_EROFS_COMPRESSION_LZ4 ,
+erofs_addressing (32 or 48, zero selecting 32) and erofs_metabox
+.Pq Dv FSIMG_EROFS_METABOX_NONE , Dv FSIMG_EROFS_METABOX_PLAIN No or Dv FSIMG_EROFS_METABOX_LZ4
+are declared by FSIMG_SETTING_EROFS; writer construction rejects a
+non-default value for any other format with FSIMG_EINVAL.
 The settings byte_order, volume_uuid, inode_capacity and reserve_percent
 select the byte order, the UUID in textual byte order, the inode capacity
 and the reserved-block percentage (default 3) of a format whose record's

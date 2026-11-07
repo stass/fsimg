@@ -1411,7 +1411,8 @@ static void
 test_wrap_settings(void)
 {
 	static const char *const keys[] = { "sector", "cluster", "endian",
-	    "uuid", "inodes", "reserve", "mountpoint", "root" };
+	    "uuid", "inodes", "reserve", "mountpoint", "root", "compression",
+	    "addressing", "metabox" };
 	fsimg_write_options_t defaults, options;
 	fsimg_sink_t sink;
 	fsimg_error_t error;
@@ -1465,6 +1466,9 @@ test_wrap_settings(void)
 	options.iso_modified_set = defaults.iso_modified_set;
 	options.iso_expires_set = defaults.iso_expires_set;
 	options.iso_effective_set = defaults.iso_effective_set;
+	options.erofs_compression = defaults.erofs_compression;
+	options.erofs_addressing = defaults.erofs_addressing;
+	options.erofs_metabox = defaults.erofs_metabox;
 	options.layers = defaults.layers;
 	options.inputs = defaults.inputs;
 	bcopy(defaults.compression, options.compression,
@@ -1485,7 +1489,12 @@ test_wrap_settings(void)
 		case 4: options.inode_capacity = 64; break;
 		case 5: options.reserve_percent = 0; break;
 		case 6: options.mountpoint = ""; break;
-		default: options.fat_root_entries = 16; break;
+		case 7: options.fat_root_entries = 16; break;
+		case 8:
+			options.erofs_compression = FSIMG_EROFS_COMPRESSION_LZ4;
+			break;
+		case 9: options.erofs_addressing = 48; break;
+		default: options.erofs_metabox = FSIMG_EROFS_METABOX_PLAIN; break;
 		}
 		bzero(&error, sizeof(error));
 		CHECK(fsimg_image_wrap(f.ctx, input, "fat12", &options, &sink,

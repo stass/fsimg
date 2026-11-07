@@ -78,6 +78,11 @@ extern const fsimg_format_t fsimg_hfsplus_format;
 extern const fsimg_format_t fsimg_ifs_format;
 extern const fsimg_format_t fsimg_iso9660_format;
 extern const fsimg_format_t fsimg_erofs_format;
+/* The EROFS writer's descriptor, outside the registry until kernel and
+ * fsck.erofs qualification registers it; reached through
+ * fsimg_writer_new_variant().
+ */
+extern const fsimg_format_t fsimg_erofs_write_format;
 
 /*
  * What a set of probes says about one input, under the one claim rule for

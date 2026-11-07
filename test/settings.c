@@ -94,7 +94,10 @@ static const member_t write_members[] = {
 	WRITE_MEMBER(iso_created_set, bool),
 	WRITE_MEMBER(iso_modified_set, bool),
 	WRITE_MEMBER(iso_expires_set, bool),
-	WRITE_MEMBER(iso_effective_set, bool)
+	WRITE_MEMBER(iso_effective_set, bool),
+	WRITE_MEMBER(erofs_compression, fsimg_erofs_compression_t),
+	WRITE_MEMBER(erofs_addressing, uint32_t),
+	WRITE_MEMBER(erofs_metabox, fsimg_erofs_metabox_t)
 };
 
 static const member_t read_members[] = {
@@ -348,6 +351,16 @@ test_masks_and_files(void)
 		CHECK(strcmp(slice->rows[i].key, "boot") == 0 ||
 		    strcmp(slice->rows[i].key, "efiboot") == 0 ||
 		    strcmp(slice->rows[i].key, "bootload") == 0);
+		found++;
+	}
+	CHECK(found == 3);
+	found = 0;
+	for (size_t i = 0; i < slice->count; i++) {
+		if (slice->rows[i].support != FSIMG_SETTING_EROFS)
+			continue;
+		CHECK(strcmp(slice->rows[i].key, "compression") == 0 ||
+		    strcmp(slice->rows[i].key, "addressing") == 0 ||
+		    strcmp(slice->rows[i].key, "metabox") == 0);
 		found++;
 	}
 	CHECK(found == 3);
@@ -1053,6 +1066,140 @@ test_iso_catalogue_and_defaults(void)
 	CHECK(row->choices[4].spelling == NULL);
 }
 
+/* The EROFS rows default to no compression, the 32-bit addressing
+ * default of zero and no metadata box, and accept exactly their choices.
+ */
+static void
+test_erofs_catalogue_and_defaults(void)
+{
+	static const struct {
+		const char *key;
+		fsimg_setting_kind_t kind;
+		fsimg_setting_syntax_t syntax;
+		size_t choices;
+	} expected[] = {
+		{ "compression", FSIMG_KIND_EROFS_COMPRESSION,
+		    FSIMG_SYNTAX_CHOICE, 2 },
+		{ "addressing", FSIMG_KIND_U32, FSIMG_SYNTAX_COUNT, 2 },
+		{ "metabox", FSIMG_KIND_EROFS_METABOX,
+		    FSIMG_SYNTAX_CHOICE, 3 }
+	};
+	static const char *const compressions[] = { "none", "lz4" };
+	static const fsimg_erofs_compression_t compression_values[] = {
+		FSIMG_EROFS_COMPRESSION_NONE, FSIMG_EROFS_COMPRESSION_LZ4 };
+	static const char *const addressings[] = { "32", "48" };
+	static const char *const metaboxes[] = { "none", "plain", "lz4" };
+	static const fsimg_erofs_metabox_t metabox_values[] = {
+		FSIMG_EROFS_METABOX_NONE, FSIMG_EROFS_METABOX_PLAIN,
+		FSIMG_EROFS_METABOX_LZ4 };
+	fsimg_write_options_t write;
+	fsimg_setting_records_t records;
+	const fsimg_setting_t *row;
+
+	memset(&write, 0xa5, sizeof(write));
+	fsimg_write_options_init(&write);
+	CHECK(write.erofs_compression == FSIMG_EROFS_COMPRESSION_NONE);
+	CHECK(write.erofs_addressing == 0);
+	CHECK(write.erofs_metabox == FSIMG_EROFS_METABOX_NONE);
+	records = (fsimg_setting_records_t){ .write = &write };
+	for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+		row = fsimg_setting_find(&fsimg_filesystem_settings,
+		    expected[i].key, strlen(expected[i].key));
+		CHECK(row != NULL);
+		CHECK(row->record == FSIMG_RECORD_WRITE);
+		CHECK(row->kind == expected[i].kind);
+		CHECK(row->syntax == expected[i].syntax);
+		CHECK(row->scope == FSIMG_SCOPE_WRITE);
+		CHECK(row->support == FSIMG_SETTING_EROFS);
+		CHECK(row->choices[expected[i].choices].spelling == NULL);
+		CHECK(fsimg_setting_is_default(row, &records));
+		CHECK(fsimg_setting_check(row, &records, NULL) == FSIMG_OK);
+	}
+	row = fsimg_setting_find(&fsimg_filesystem_settings, "compression", 11);
+	CHECK(row->initial.erofs_compression == FSIMG_EROFS_COMPRESSION_NONE);
+	for (size_t i = 0; i < 2; i++) {
+		CHECK(strcmp(row->choices[i].spelling, compressions[i]) == 0);
+		CHECK(row->choices[i].value.erofs_compression ==
+		    compression_values[i]);
+	}
+	row = fsimg_setting_find(&fsimg_filesystem_settings, "addressing", 10);
+	CHECK(row->initial.u32 == 0 && row->nonzero && row->max == UINT32_MAX);
+	for (size_t i = 0; i < 2; i++) {
+		CHECK(strcmp(row->choices[i].spelling, addressings[i]) == 0);
+		CHECK(row->choices[i].value.u32 == 32 + 16 * i);
+	}
+	row = fsimg_setting_find(&fsimg_filesystem_settings, "metabox", 7);
+	CHECK(row->initial.erofs_metabox == FSIMG_EROFS_METABOX_NONE);
+	for (size_t i = 0; i < 3; i++) {
+		CHECK(strcmp(row->choices[i].spelling, metaboxes[i]) == 0);
+		CHECK(row->choices[i].value.erofs_metabox == metabox_values[i]);
+	}
+}
+
+/* An enum member outside the row's choices fails the structural check
+ * with or without a writer, naming its key.
+ */
+static void
+test_erofs_enum_members_are_checked(void)
+{
+	fsimg_write_options_t write;
+	fsimg_error_t error;
+
+	fsimg_write_options_init(&write);
+	write.erofs_compression = (fsimg_erofs_compression_t)2;
+	CHECK(fsimg_write_settings_check(&write, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "compression") == 0);
+	fsimg_write_options_init(&write);
+	write.erofs_metabox = (fsimg_erofs_metabox_t)3;
+	CHECK(fsimg_write_settings_check(&write, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "metabox") == 0);
+}
+
+/* Each EROFS setting not at its default needs a writer that declares
+ * FSIMG_SETTING_EROFS; the default of each is accepted by every writer.
+ */
+static void
+test_erofs_settings_require_capability(void)
+{
+	static const struct {
+		const char *key;
+		fsimg_erofs_compression_t compression;
+		uint32_t addressing;
+		fsimg_erofs_metabox_t metabox;
+	} cases[] = {
+		{ "compression", FSIMG_EROFS_COMPRESSION_LZ4, 0,
+		    FSIMG_EROFS_METABOX_NONE },
+		{ "addressing", FSIMG_EROFS_COMPRESSION_NONE, 48,
+		    FSIMG_EROFS_METABOX_NONE },
+		{ "metabox", FSIMG_EROFS_COMPRESSION_NONE, 0,
+		    FSIMG_EROFS_METABOX_LZ4 }
+	};
+	fsimg_format_info_t fat, erofs;
+	fsimg_write_options_t write;
+	fsimg_error_t error;
+
+	format_info("fat32", &fat);
+	erofs = fat;
+	erofs.write_settings |= FSIMG_SETTING_EROFS;
+	fsimg_write_options_init(&write);
+	CHECK(fsimg_write_settings_check(&write, &fat, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_write_options_init(&write);
+		write.erofs_compression = cases[i].compression;
+		write.erofs_addressing = cases[i].addressing;
+		write.erofs_metabox = cases[i].metabox;
+		CHECK(fsimg_write_settings_check(&write, &fat, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(strcmp(error.path, cases[i].key) == 0);
+		CHECK(strcmp(error.message, "write setting does not apply to the image format") == 0);
+		CHECK(fsimg_write_settings_check(&write, &erofs, NULL) ==
+		    FSIMG_OK);
+		CHECK(fsimg_write_settings_check(&write, NULL, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(strcmp(error.path, cases[i].key) == 0);
+	}
+}
+
 static void
 test_iso_read_settings_require_capability(void)
 {
@@ -1076,7 +1223,7 @@ test_iso_read_settings_require_capability(void)
 }
 
 static void
-test_registered_writers_refuse_iso_settings(void)
+test_registered_writers_refuse_unsupported_settings(void)
 {
 	static const struct {
 		const char *key;
@@ -1086,7 +1233,13 @@ test_registered_writers_refuse_iso_settings(void)
 		{ "level", FSIMG_SETTING_ISO_LEVEL, { .iso_level = 3 } },
 		{ "bootload", FSIMG_SETTING_ELTORITO, { .boot_load_sectors = 4 } },
 		{ "boot", FSIMG_SETTING_ELTORITO, { .boot_bios = "/x" } },
-		{ "efiboot", FSIMG_SETTING_ELTORITO, { .boot_efi = "/x" } }
+		{ "efiboot", FSIMG_SETTING_ELTORITO, { .boot_efi = "/x" } },
+		{ "compression", FSIMG_SETTING_EROFS,
+		    { .erofs_compression = FSIMG_EROFS_COMPRESSION_LZ4 } },
+		{ "addressing", FSIMG_SETTING_EROFS,
+		    { .erofs_addressing = 48 } },
+		{ "metabox", FSIMG_SETTING_EROFS,
+		    { .erofs_metabox = FSIMG_EROFS_METABOX_PLAIN } }
 	};
 	fsimg_ctx_t *ctx;
 	fsimg_writer_t *writer;
@@ -1119,6 +1272,11 @@ test_registered_writers_refuse_iso_settings(void)
 			options.boot_load_sectors = cases[i].options.boot_load_sectors;
 			options.boot_bios = cases[i].options.boot_bios;
 			options.boot_efi = cases[i].options.boot_efi;
+			options.erofs_compression =
+			    cases[i].options.erofs_compression;
+			options.erofs_addressing =
+			    cases[i].options.erofs_addressing;
+			options.erofs_metabox = cases[i].options.erofs_metabox;
 			status = fsimg_writer_new(ctx, info.name, &options,
 			    &writer, &error);
 			if (status != FSIMG_EINVAL ||
@@ -1136,8 +1294,11 @@ int
 main(void)
 {
 	test_iso_catalogue_and_defaults();
+	test_erofs_catalogue_and_defaults();
+	test_erofs_enum_members_are_checked();
+	test_erofs_settings_require_capability();
 	test_iso_read_settings_require_capability();
-	test_registered_writers_refuse_iso_settings();
+	test_registered_writers_refuse_unsupported_settings();
 	test_slices();
 	test_member_bindings();
 	test_masks_and_files();

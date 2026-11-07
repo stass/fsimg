@@ -52,12 +52,15 @@
  * present, since an empty path is a value, and five zero bytes. The file
  * settings travel as descriptors, one capability bit each, never in the
  * record. Three eight-byte fields follow: image input kind, byte length
- * and transfer quantum. The ISO 9660 descriptor settings close the
- * record: the dates as eight signed little-endian bytes each; the texts,
+ * and transfer quantum. The ISO 9660 descriptor settings follow: the
+ * dates as eight signed little-endian bytes each; the texts,
  * back to back in FSIMG_JOB_DESCRIPTOR_TEXT_BYTES, each in the capacity of
  * its setting, NUL-terminated and zero after the terminator; one byte whose
  * bits say which of the texts is present and one for the dates, since an
- * empty text and a zero date are values; and six zero bytes. The texts and
+ * empty text and a zero date are values; and six zero bytes. The EROFS
+ * settings close the record as eight bytes each: the compression
+ * (fsimg_erofs_compression_t), the addressing width and the metadata box
+ * (fsimg_erofs_metabox_t). The texts and
  * dates are the descriptor rows of the settings table, in its order, so
  * a new descriptor setting changes the record's size: it adds its bytes to
  * FSIMG_JOB_DESCRIPTOR_TEXT_BYTES or FSIMG_JOB_DESCRIPTOR_DATES and so to
@@ -151,7 +154,10 @@ typedef enum job_string_field {
 	JOB_ISO_TEXT_PRESENT = JOB_ISO_TEXTS_OFFSET +
 	    FSIMG_JOB_DESCRIPTOR_TEXT_BYTES,
 	JOB_ISO_DATE_PRESENT = JOB_ISO_TEXT_PRESENT + 1,
-	JOB_ISO_RESERVED = JOB_ISO_DATE_PRESENT + 1
+	JOB_ISO_RESERVED = JOB_ISO_DATE_PRESENT + 1,
+	JOB_EROFS_COMPRESSION_OFFSET = JOB_ISO_RESERVED + 6,
+	JOB_EROFS_ADDRESSING_OFFSET = JOB_EROFS_COMPRESSION_OFFSET + 8,
+	JOB_EROFS_METABOX_OFFSET = JOB_EROFS_ADDRESSING_OFFSET + 8
 } job_string_field_t;
 
 /* Bits of JOB_IFSBOOT_SET: field n of the ifsboot settings is set, and the
@@ -229,8 +235,8 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_MOUNTPOINT_OFFSET,
     "the layer fields do not overlap");
 _Static_assert(JOB_RESERVED_OFFSET + 7 == JOB_IFSBOOT_OFFSET &&
-    JOB_ISO_RESERVED + 6 == FSIMG_JOB_BYTES,
-    "the ISO descriptor settings close the record");
+    JOB_EROFS_METABOX_OFFSET + 8 == FSIMG_JOB_BYTES,
+    "the EROFS settings close the record");
 _Static_assert(FSIMG_JOB_BOOT_PATH_BYTES == FSIMG_BOOT_PATH_TEXT_BYTES &&
     sizeof(((fsimg_worker_request_t *)0)->boot_bios_storage) ==
     FSIMG_JOB_BOOT_PATH_BYTES &&
@@ -480,7 +486,8 @@ iso_descriptor_valid(const unsigned char *raw)
 	if ((raw[JOB_ISO_TEXT_PRESENT] & ~all[0]) != 0 ||
 	    (raw[JOB_ISO_DATE_PRESENT] & ~all[1]) != 0)
 		return (false);
-	for (unsigned i = JOB_ISO_RESERVED; i < FSIMG_JOB_BYTES; i++) {
+	for (unsigned i = JOB_ISO_RESERVED; i < JOB_EROFS_COMPRESSION_OFFSET;
+	    i++) {
 		if (raw[i] != 0)
 			return (false);
 	}
@@ -979,6 +986,12 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	}
 	fsimg_store_le64(raw + JOB_ISO_VIEW_OFFSET, request->read.iso_view);
 	fsimg_store_le64(raw + JOB_ISO_LEVEL_OFFSET, request->write.iso_level);
+	fsimg_store_le64(raw + JOB_EROFS_COMPRESSION_OFFSET,
+	    (uint64_t)request->write.erofs_compression);
+	fsimg_store_le64(raw + JOB_EROFS_ADDRESSING_OFFSET,
+	    request->write.erofs_addressing);
+	fsimg_store_le64(raw + JOB_EROFS_METABOX_OFFSET,
+	    (uint64_t)request->write.erofs_metabox);
 	fsimg_store_le64(raw + JOB_BOOT_LOAD_OFFSET,
 	    request->write.boot_load_sectors);
 	if (request->write.boot_bios != NULL) {
@@ -1075,6 +1088,11 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	/* An absent boot path is an all-zero field. */
 	if (fsimg_load_le64(raw + JOB_ISO_VIEW_OFFSET) > FSIMG_ISO_VIEW_PRIMARY ||
 	    fsimg_load_le64(raw + JOB_ISO_LEVEL_OFFSET) > UINT32_MAX ||
+	    fsimg_load_le64(raw + JOB_EROFS_COMPRESSION_OFFSET) >
+	    FSIMG_EROFS_COMPRESSION_LZ4 ||
+	    fsimg_load_le64(raw + JOB_EROFS_ADDRESSING_OFFSET) > UINT32_MAX ||
+	    fsimg_load_le64(raw + JOB_EROFS_METABOX_OFFSET) >
+	    FSIMG_EROFS_METABOX_LZ4 ||
 	    fsimg_load_le64(raw + JOB_BOOT_LOAD_OFFSET) > UINT32_MAX ||
 	    (raw[JOB_BOOT_PRESENT] & ~(JOB_BOOT_BIOS | JOB_BOOT_EFI)) != 0 ||
 	    !string_field_valid(raw + JOB_BOOT_BIOS_OFFSET,
@@ -1199,6 +1217,12 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    (fsimg_iso_view_t)fsimg_load_le64(raw + JOB_ISO_VIEW_OFFSET);
 	request->write.iso_level =
 	    (uint32_t)fsimg_load_le64(raw + JOB_ISO_LEVEL_OFFSET);
+	request->write.erofs_compression = (fsimg_erofs_compression_t)
+	    fsimg_load_le64(raw + JOB_EROFS_COMPRESSION_OFFSET);
+	request->write.erofs_addressing =
+	    (uint32_t)fsimg_load_le64(raw + JOB_EROFS_ADDRESSING_OFFSET);
+	request->write.erofs_metabox = (fsimg_erofs_metabox_t)
+	    fsimg_load_le64(raw + JOB_EROFS_METABOX_OFFSET);
 	request->write.boot_load_sectors =
 	    (uint32_t)fsimg_load_le64(raw + JOB_BOOT_LOAD_OFFSET);
 	decode_boot_path(raw, JOB_BOOT_BIOS_OFFSET, JOB_BOOT_BIOS,

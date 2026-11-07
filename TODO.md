@@ -77,6 +77,15 @@
   LZ4 profile with a measured read and encoded copy in common emission, and
   last the 48-bit layout and metadata box, read and then written. External
   data devices stay refused.
+  The uncompressed writer plans (`write-plan.c`, `write-dir.c`) but does
+  not emit: `erofs_write_emit()` refuses every plan until `write-emit.c`
+  lands. It sits in the unregistered `fsimg_erofs_write_format`, so
+  `fsimg c` cannot select it, until stage 10's kernel and `fsck.erofs`
+  qualification registers it with the `docs/fsimg.1` entries for
+  `compression=`, `addressing=` and `metabox=`. Until then the writer
+  refuses `compression=lz4` (stage 11), `addressing=48` (stage 14),
+  `metabox=plain|lz4` (stage 15) and 512- to 2048-byte blocks (E11) with
+  `FSIMG_EUNSUPPORTED`.
 
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
@@ -363,6 +372,15 @@
   [driver](specs/design-iso9660-driver.md) define the supported profile.
 
 ## Bugs by subsystem
+
+* [Medium] **EROFS writer refuses most fixed-size disks**
+  (`lib/formats/erofs/write-plan.c`, `specs/design-erofs.md` Settings and
+  sizing): `volume_bytes` must be whole 4096-byte blocks, but a fixed disk
+  (`gpt:disk`, `mbr:disk`) fits the volume to 512-byte sectors only, so a
+  partition whose length is not a multiple of 4096 is refused as invalid.
+  Either accept a multiple of 512 with `V / B` blocks and a zero partial
+  tail, as HFS Plus does, or have the fit round to the block; the design
+  decides which before stage 10's `erofs/gpt` qualification.
 
 * [Medium] **EROFS directory listing exceeds the minimum memory budget**
   (`lib/formats/erofs/directory.c`): listing one directory of 100000

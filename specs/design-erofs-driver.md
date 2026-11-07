@@ -356,11 +356,12 @@ catalog position:
 1. **Settings and time.** Validates the settings and fixes `B`, the format
    time and, under 48-bit addressing, the epoch from one pass over the
    catalog's modification times.
-2. **Entries.** For each catalog entry in order: kind, size, inode form,
-   link count, and for a directory its size from `write-dir.c`, which packs
+2. **Entries.** For each catalog entry in order: kind, size, owner, mode,
+   time, link count, and for a directory its size from `write-dir.c`, which packs
    the sorted names, with `.` and `..` merged into their byte-order places,
-   without needing any NID. Rows record the layout choice it can already
-   make: flat or flat-inline from size alone.
+   without needing any NID. A subdirectory adds a link to its parent's
+   row, so a directory's link count is final only once its children have
+   been visited.
 3. **Measurement**, under `compression=lz4` only: for each regular file
    larger than one block, a [measured read](#lz4-planning-and-emission)
    encodes the content, records its cluster count in the row and appends
@@ -369,8 +370,11 @@ catalog position:
    files' records. No address exists yet, so a record holds its cluster's
    block index relative to the file's first block; emission and box
    generation add the file's planned start block when they encode it.
-4. **Metadata placement.** Assigns each row its body offset, and so its
-   NID, with the block rules of the [layout](design-erofs.md#layout), and
+4. **Metadata placement.** Fixes each row's inode form and its flat or
+   flat-inline layout from its final fields, since an extended inode's
+   larger fixed part decides whether a tail fits, then assigns its body
+   offset, and so its NID, with the block rules of the
+   [layout](design-erofs.md#layout), and
    fixes the metadata area's end. Under the box the offsets are in the box's
    content and the primary area holds the box inode alone; under
    `metabox=lz4` the box inode's extent list is sized for `ceil(content / B)`
@@ -453,7 +457,7 @@ once, and the encoder's determinism makes the two agree.
 | Decode windows | Two, three under a compressed metadata box; each at most one decoded cluster plus a 1 MiB input buffer and the codec's state, the MicroLZMA dictionary or Zstandard window the [configuration record](design-erofs.md#configuration) declares included, charged before allocation |
 | Verification | The reference and claim streams in scratch, three under a metadata box, under the common sort's run buffer |
 | Planning | Plan rows in a paged array; directory packing of one directory's names at a time, streamed from the catalog; LZ4 index records in a scratch stream |
-| Emission | One directory block, one LZ4 input window and output block, one box staging block |
+| Emission | One directory block and its name staging block, one LZ4 input window and output block, one box staging block |
 
 Work is charged per block read, per index record visited and per decoded
 byte, so an image whose distances force long backward walks, or whose

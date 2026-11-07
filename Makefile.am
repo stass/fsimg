@@ -106,6 +106,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/erofs/meta.c lib/formats/erofs/map.c \
 	lib/formats/erofs/content.c lib/formats/erofs/directory.c \
 	lib/formats/erofs/verify.c lib/formats/erofs/xattr.c \
+	lib/formats/erofs/write-erofs.h lib/formats/erofs/write-plan.c \
+	lib/formats/erofs/write-dir.c lib/formats/erofs/write-emit.c \
 	lib/formats/qnx4/qnx4.h lib/formats/qnx4/descriptor.c \
 	lib/formats/qnx4/codec.c lib/formats/qnx4/volume.c \
 	lib/formats/qnx4/extent.c lib/formats/qnx4/bitmap.c \
@@ -184,7 +186,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify \
 	test-salvage-terminal test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
-	test-erofs test-erofs-verify \
+	test-erofs test-erofs-verify test-erofs-write \
 	test-lzfse test-hfsplus-codec test-hfsplus test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
@@ -299,6 +301,8 @@ test_erofs_LDADD = libfsimg.la
 test_erofs_verify_SOURCES = test/erofs-verify.c test/test.h \
 	test/erofs-gen.c test/erofs-gen.h
 test_erofs_verify_LDADD = libfsimg.la
+test_erofs_write_SOURCES = test/erofs-write.c test/test.h
+test_erofs_write_LDADD = libfsimg.la
 test_qnx6_SOURCES = test/qnx6.c test/test.h test/scale.h
 test_qnx6_LDADD = libfsimg.la
 test_qnx6_write_SOURCES = test/qnx6-write.c test/test.h \
@@ -560,6 +564,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/merged_operands_test.rb \
 	test/cli/minimize_test.rb \
 	test/cli/iso_devices_test.rb \
+	test/cli/erofs_settings_test.rb \
 	test/cli/iso_settings_test.rb test/cli/iso_truncated_test.rb \
 	test/cli/isohybrid_test.rb \
 	test/cli/fat_root_test.rb test/cli/fat_truncated_test.rb \

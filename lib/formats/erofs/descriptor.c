@@ -3,8 +3,8 @@
  */
 #include "config.h"
 
-#include "erofs.h"
 #include "format.h"
+#include "write-erofs.h"
 
 _Static_assert(EROFS_SYMLINK_MAX <= FSIMG_SYMLINK_TARGET_MAX,
     "the EROFS link-target limit lies within the entry model's ceiling");
@@ -58,6 +58,49 @@ const fsimg_format_t fsimg_erofs_format = {
 	.probe_bytes = EROFS_PROBE_BYTES,
 	.probe = erofs_probe,
 	.reader = &fsimg_erofs_reader_ops
+};
+
+/*
+ * The writer's profile, outside the registry until the kernel and
+ * fsck.erofs accept its output. It writes files, directories, symbolic
+ * links and FIFOs, and stores the modification time, owner and mode. It
+ * reports 512-byte sectors, as the format has none of its own. The label
+ * keeps the name field's terminator; the identifier is the UUID.
+ */
+static const fsimg_format_variant_t erofs_write_variants[] = {
+	{
+		.info = {
+			.name = "erofs",
+			.profile = "core",
+			.entry_kinds = FSIMG_ENTRY_FILE |
+			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
+			    FSIMG_ENTRY_FIFO,
+			.metadata_fields = FSIMG_META_MODIFIED |
+			    FSIMG_META_OWNER | FSIMG_META_MODE,
+			.sector_size_mask = 1u << 9,
+			.allocation_unit_size_mask = EROFS_BLOCK_SIZES,
+			.write_allocation_unit_size_mask =
+			    EROFS_WRITE_BLOCK_SIZES,
+			.max_file_bytes = EROFS_VOLUME_MAX,
+			.max_volume_bytes = EROFS_VOLUME_MAX,
+			.max_name_utf16_units = EROFS_NAME_MAX,
+			.max_label_bytes = EROFS_WRITE_LABEL_MAX,
+			.max_link_target_bytes = EROFS_SYMLINK_MAX,
+			.write_settings = FSIMG_SETTING_VOLUME_UUID |
+			    FSIMG_SETTING_EROFS
+		},
+		.id = 0
+	}
+};
+
+const fsimg_format_t fsimg_erofs_write_format = {
+	.variants = erofs_write_variants,
+	.variant_count = sizeof(erofs_write_variants) /
+	    sizeof(erofs_write_variants[0]),
+	.probe_bytes = EROFS_PROBE_BYTES,
+	.probe = erofs_probe,
+	.reader = &fsimg_erofs_reader_ops,
+	.writer = &fsimg_erofs_writer_ops
 };
 
 /*

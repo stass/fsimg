@@ -43,6 +43,7 @@ static void test_read_job_zero_members_is_invalid(void);
 static void test_job_zstd_levels_roundtrip_and_reject_wide_wire_value(void);
 static void test_zstd_unverified_record_requires_verified_zstd(void);
 static void test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void);
+static void test_job_erofs_settings_roundtrip_and_reject_invalid_wire_values(void);
 static void test_xz_unverified_record_requires_verified_xz(void);
 static void test_job_force_requires_a_read_and_named_layer_or_compression(void);
 static void test_job_layers(void);
@@ -1075,7 +1076,7 @@ test_job_mountpoint(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 24 + 2080 + 24 + 357);
+	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 24 + 2080 + 24 + 357 + 3 * 8);
 	memset(longest, 'm', FIELD - 1);
 	memset(longer, 'm', FIELD);
 	fsimg_worker_request_init(&request);
@@ -1598,6 +1599,10 @@ same_value(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 		return (a->xz_check == b->xz_check);
 	case FSIMG_KIND_IFSBOOT_COMPRESSION:
 		return (a->ifsboot_compression == b->ifsboot_compression);
+	case FSIMG_KIND_EROFS_COMPRESSION:
+		return (a->erofs_compression == b->erofs_compression);
+	case FSIMG_KIND_EROFS_METABOX:
+		return (a->erofs_metabox == b->erofs_metabox);
 	case FSIMG_KIND_TEXT:
 	case FSIMG_KIND_TEXT_POINTER:
 		return ((a->text == NULL) == (b->text == NULL) &&
@@ -2040,7 +2045,7 @@ test_image_records(void)
 static void
 test_job_device_input(void)
 {
-	enum { KIND = FSIMG_JOB_BYTES - 24 - 357, LENGTH = KIND + 8,
+	enum { KIND = FSIMG_JOB_BYTES - 3 * 8 - 24 - 357, LENGTH = KIND + 8,
 	    QUANTUM = LENGTH + 8, CAPABILITIES = 23 * 8 };
 	static const struct {
 		unsigned offset;
@@ -2220,7 +2225,7 @@ test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == 5119);
+	CHECK(FSIMG_JOB_BYTES == 5143);
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
 	request.root_paths = image_root;
@@ -2245,6 +2250,66 @@ test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void)
 			    &selection, &capabilities, NULL) == FSIMG_EINVAL);
 		}
 	}
+}
+
+/* The EROFS settings are three 64-bit fields after the ISO descriptor
+ * settings: compression, addressing, metabox.
+ */
+static void
+test_job_erofs_settings_roundtrip_and_reject_invalid_wire_values(void)
+{
+	enum { COMPRESSION = 5119, ADDRESSING = 5127, METABOX = 5135 };
+	static const struct {
+		fsimg_erofs_compression_t compression;
+		uint32_t addressing;
+		fsimg_erofs_metabox_t metabox;
+	} cases[] = {
+		{ FSIMG_EROFS_COMPRESSION_NONE, 0, FSIMG_EROFS_METABOX_NONE },
+		{ FSIMG_EROFS_COMPRESSION_LZ4, 32, FSIMG_EROFS_METABOX_PLAIN },
+		{ FSIMG_EROFS_COMPRESSION_NONE, 48, FSIMG_EROFS_METABOX_LZ4 },
+		{ FSIMG_EROFS_COMPRESSION_LZ4, UINT32_MAX,
+		    FSIMG_EROFS_METABOX_NONE }
+	};
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	CHECK(FSIMG_JOB_BYTES == METABOX + 8);
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		request.write.erofs_compression = cases[i].compression;
+		request.write.erofs_addressing = cases[i].addressing;
+		request.write.erofs_metabox = cases[i].metabox;
+		memset(raw, 0xa5, sizeof(raw));
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_load_le64(raw + COMPRESSION) == (uint64_t)cases[i].compression);
+		CHECK(fsimg_load_le64(raw + ADDRESSING) == cases[i].addressing);
+		CHECK(fsimg_load_le64(raw + METABOX) == (uint64_t)cases[i].metabox);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		CHECK(decoded.write.erofs_compression == cases[i].compression);
+		CHECK(decoded.write.erofs_addressing == cases[i].addressing);
+		CHECK(decoded.write.erofs_metabox == cases[i].metabox);
+	}
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	fsimg_store_le64(raw + COMPRESSION, FSIMG_EROFS_COMPRESSION_LZ4 + 1);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	fsimg_store_le64(raw + COMPRESSION, request.write.erofs_compression);
+	fsimg_store_le64(raw + ADDRESSING, (uint64_t)UINT32_MAX + 1);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	fsimg_store_le64(raw + ADDRESSING, request.write.erofs_addressing);
+	fsimg_store_le64(raw + METABOX, FSIMG_EROFS_METABOX_LZ4 + 1);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	fsimg_store_le64(raw + METABOX, request.write.erofs_metabox);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
 }
 
 static void
@@ -2366,7 +2431,7 @@ test_iso_jobs_have_canonical_wire_bytes(void)
 
 	iso_wire_place_string(create_tail, 24, "/b/bios.img");
 	iso_wire_place_string(efi_tail, 1049, "/efi/boot.img");
-	CHECK(FSIMG_JOB_BYTES == 5119);
+	CHECK(FSIMG_JOB_BYTES == 5143);
 	fsimg_worker_request_init(&request);
 	CHECK(request.read.iso_view == FSIMG_ISO_VIEW_AUTO);
 	request.kind = FSIMG_JOB_CREATE;
@@ -2668,6 +2733,7 @@ main(int argc, char **argv)
 	test_zstd_unverified_record_requires_verified_zstd();
 	test_plan_geometry_record();
 	test_job_xz_settings_roundtrip_and_reject_invalid_wire_values();
+	test_job_erofs_settings_roundtrip_and_reject_invalid_wire_values();
 	test_xz_unverified_record_requires_verified_xz();
 	test_job_minimize_flag();
 	test_job_qnx6_settings();

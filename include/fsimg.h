@@ -847,6 +847,21 @@ typedef enum fsimg_byte_order {
 	FSIMG_BYTE_ORDER_BIG = 1
 } fsimg_byte_order_t;
 
+/* The EROFS file compression: none, or LZ4 for each file it shrinks. */
+typedef enum fsimg_erofs_compression {
+	FSIMG_EROFS_COMPRESSION_NONE = 0,
+	FSIMG_EROFS_COMPRESSION_LZ4 = 1
+} fsimg_erofs_compression_t;
+
+/* The EROFS metadata box: none, or the inodes in a box stored plain or
+ * LZ4-compressed.
+ */
+typedef enum fsimg_erofs_metabox {
+	FSIMG_EROFS_METABOX_NONE = 0,
+	FSIMG_EROFS_METABOX_PLAIN = 1,
+	FSIMG_EROFS_METABOX_LZ4 = 2
+} fsimg_erofs_metabox_t;
+
 typedef struct fsimg_write_options {
 	size_t		 size;
 	uint32_t	 version;
@@ -920,6 +935,13 @@ typedef struct fsimg_write_options {
 	bool		 iso_modified_set;
 	bool		 iso_expires_set;
 	bool		 iso_effective_set;
+	/* FSIMG_SETTING_EROFS: the EROFS layout. erofs_addressing is 32 or 48
+	 * bits of block address, zero selecting 32; the defaults are no
+	 * compression and no metadata box.
+	 */
+	fsimg_erofs_compression_t erofs_compression;
+	uint32_t	 erofs_addressing;
+	fsimg_erofs_metabox_t erofs_metabox;
 	/* Borrowed for construction and copied; NULL selects every default. */
 	const fsimg_layer_options_t *layers;
 	/* The file settings: the record is copied at construction and its I/O
@@ -1219,6 +1241,8 @@ typedef struct fsimg_volume_info {
 #define FSIMG_SETTING_ELTORITO 0x80u
 #define FSIMG_SETTING_ISO_VIEW 0x100u
 #define FSIMG_SETTING_ISO_DESCRIPTOR 0x200u
+/* erofs_compression, erofs_addressing and erofs_metabox. */
+#define FSIMG_SETTING_EROFS 0x400u
 
 typedef struct fsimg_format_info {
 	char		 name[16];

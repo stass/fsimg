@@ -322,6 +322,14 @@ and `--free-space` fails, since the format has no free space. On read,
 volume detection finds, and an image of another format refuses a
 non-default `view`, as the [settings catalogue](design-settings.md)
 states.
+EROFS takes `compression=none|lz4`, `addressing=32|48` and
+`metabox=none|plain|lz4`, its file compression, block address width and
+metadata box, each defaulting to the first value, and shares `uuid=`; the
+[EROFS driver design](design-erofs-driver.md#writer-settings) states their
+rules. Every other format refuses them unless at their library defaults:
+`compression=none` and `metabox=none` pass, while `addressing=` is refused
+whenever given, since the library's default is zero, as `level=` is for
+ISO 9660. The worker job carries each as eight bytes.
 A qualified key targets one layer: `-o gpt:type=esp`,
 `-o gpt:name=EFI`, `-o dmg:compress=none`, `-o gzip:level=9`. A qualifier
 naming a layer absent from the stack, or a compression not selected, fails;

@@ -67,6 +67,8 @@ typedef enum fsimg_setting_kind {
 	FSIMG_KIND_IFSBOOT_COMPRESSION,	/* fsimg_ifsboot_compression_t */
 	FSIMG_KIND_XZ_CHECK,		/* fsimg_xz_check_t */
 	FSIMG_KIND_ISO_VIEW,		/* fsimg_iso_view_t */
+	FSIMG_KIND_EROFS_COMPRESSION,	/* fsimg_erofs_compression_t */
+	FSIMG_KIND_EROFS_METABOX,	/* fsimg_erofs_metabox_t */
 	FSIMG_KIND_TEXT,		/* char[size], NUL-terminated */
 	FSIMG_KIND_ID16,		/* unsigned char[16] */
 	FSIMG_KIND_TEXT_POINTER,	/* const char *, borrowed; NULL absent */
@@ -88,6 +90,8 @@ typedef union fsimg_setting_value {
 	fsimg_ifsboot_compression_t ifsboot_compression;
 	fsimg_xz_check_t xz_check;
 	fsimg_iso_view_t iso_view;
+	fsimg_erofs_compression_t erofs_compression;
+	fsimg_erofs_metabox_t erofs_metabox;
 	unsigned char	 id[16];
 	const char	*text;
 	fsimg_io_t	*io;

@@ -120,6 +120,7 @@ Public option initialization and catalogue default tests agree on these values:
 | ISO descriptor texts | `NULL`, the format's default text; a pointer to `""` is an explicit field of spaces |
 | ISO volume dates | Absent: the `_set` flag false and the seconds zero |
 | ISO view (read) | `FSIMG_ISO_VIEW_AUTO`, zero |
+| EROFS compression, addressing and metadata box | `FSIMG_EROFS_COMPRESSION_NONE`, zero requesting 32-bit addressing, and `FSIMG_EROFS_METABOX_NONE` |
 | File input | `NULL` |
 
 Default tests compare typed values. They never compare entire native structures
@@ -161,10 +162,10 @@ The finite syntax classes cover the existing grammar:
 | Class | Examples and conversion |
 | --- | --- |
 | Byte quantity | `sector`, `cluster`, `gpt:disk`, chunk and alignment sizes; checked CLI unit syntax, then destination range |
-| Decimal count | `inodes`, `root`, `volume`, `level`, `bootload`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
+| Decimal count | `inodes`, `root`, `volume`, `level`, `addressing=32|48`, `bootload`, compression levels, `ifsboot:machine`; per-key zero allowance and range |
 | Hexadecimal 32-bit value | `mbr:id` and boot addresses; `0x` or `0X` and one through eight hexadecimal digits |
 | Boolean | Exactly `yes` or `no` |
-| Named choice | `endian=little|big`, `case=insensitive|sensitive`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437`, `view=auto|rockridge|joliet|primary` |
+| Named choice | `endian=little|big`, `case=insensitive|sensitive`, `dmg:compress=zlib|none`, `ifsboot:compress=lzo|none`, `oem=cp437`, `view=auto|rockridge|joliet|primary`, `compression=none|lz4`, `metabox=none|plain|lz4` |
 | UUID | RFC 4122 text converted to textual byte order; nil permitted for the filesystem UUID, refused for layer identifiers; the filesystem's own validation may still refuse nil, as APFS does outside reproducible mode |
 | Signed seconds | ISO `created`, `modified`, `expires` and `effective`; the `-e` epoch grammar, an optional leading minus and decimal digits, into an `int64_t` with its presence flag; the range is the owning format's |
 | Text | GPT type/name, MBR type, mountpoint, snapshot name, ISO `boot` and `efiboot` image paths and the ISO descriptor texts `volset`, `publisher`, `preparer`, `application`, `copyright`, `abstract` and `biblio`; checked destination capacity, with format meaning checked by its owner; the snapshot name is UTF-8 of 1 to 255 bytes, held in a 256-byte CLI slot and carried in the worker job as a length-prefixed field of at most 255 bytes; a boot image path holds at most 1024 bytes on the command line and travels in a 1025-byte job field with its own presence bit, since an empty path is a value the library refuses; a descriptor text holds at most 64 or 18 bytes, its capacity in the Joliet descriptor that mirrors it, and travels in a field of that width and a terminator with a presence bit, since an empty text is a value |

@@ -343,8 +343,10 @@ fixtures, their command records and the oracle output:
 
 * `write-erofs.h`, `write-plan.c`, `write-dir.c`, `write-emit.c`; the
   setting rows, accepting `compression=none`, `addressing=32` and
-  `metabox=none` and refusing every other value with `FSIMG_EUNSUPPORTED`
-  until the stage that emits it.
+  `metabox=none` and refusing every other value the format defines with
+  `FSIMG_EUNSUPPORTED` until the stage that emits it; a value outside the
+  setting's domain, or a metadata box without `addressing=48`, is
+  `FSIMG_EINVAL`.
 * `test/erofs-write.c`: round trips through the reader and verifier; byte
   identity across source order, budget, scratch and time zone; a poison scan;
   faults.

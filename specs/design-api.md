@@ -606,6 +606,13 @@ carry no descriptor and grant no authority; the
 [ISO driver design](design-iso9660-driver.md#writer-settings) states their
 rules.
 
+EROFS has three typed fields under `FSIMG_SETTING_EROFS`:
+`erofs_compression` (`FSIMG_EROFS_COMPRESSION_NONE` or `_LZ4`),
+`erofs_addressing` (32 or 48, zero selecting 32) and `erofs_metabox`
+(`FSIMG_EROFS_METABOX_NONE`, `_PLAIN` or `_LZ4`); the
+[EROFS driver design](design-erofs-driver.md#writer-settings) states their
+rules.
+
 `next()` validates a directory's effective lookup namespace through the bounded
 preparation specified in [prepared directories](design-directories.md) before
 exposing its children. Duplicate/case-equivalent names and FAT alias collisions

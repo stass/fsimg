@@ -91,17 +91,6 @@ enum {
 #define FORMAT_BIT4		0x0010u
 #define FORMAT_RESERVED		0xffe0u
 
-/* The mode's type bits, by their traditional POSIX values. */
-#define MODE_TYPE_MASK		0170000u
-#define MODE_FIFO		0010000u
-#define MODE_CHAR_DEVICE	0020000u
-#define MODE_DIRECTORY		0040000u
-#define MODE_BLOCK_DEVICE	0060000u
-#define MODE_REGULAR		0100000u
-#define MODE_SYMLINK		0120000u
-#define MODE_SOCKET		0140000u
-#define MODE_PERMISSIONS	07777u
-
 #define NSEC_PER_SEC		UINT32_C(1000000000)
 
 /*
@@ -615,7 +604,7 @@ erofs_inode_decode(const unsigned char *raw, size_t length,
 	mode = fsimg_load_le16(raw + IC_MODE);
 	if (!kind_decode(mode, &inode.kind))
 		return (reject(FSIMG_ECORRUPT, "inode file type", what));
-	inode.permissions = mode & MODE_PERMISSIONS;
+	inode.permissions = mode & EROFS_MODE_PERMISSIONS;
 
 	if (inode.extended)
 		status = extended_decode(raw, sb, bit4, &inode, what);
@@ -639,26 +628,26 @@ erofs_inode_decode(const unsigned char *raw, size_t length,
 static bool
 kind_decode(uint16_t mode, fsimg_entry_kind_t *kind)
 {
-	switch (mode & MODE_TYPE_MASK) {
-	case MODE_REGULAR:
+	switch (mode & EROFS_MODE_TYPE_MASK) {
+	case EROFS_MODE_REGULAR:
 		*kind = FSIMG_ENTRY_FILE;
 		return (true);
-	case MODE_DIRECTORY:
+	case EROFS_MODE_DIRECTORY:
 		*kind = FSIMG_ENTRY_DIRECTORY;
 		return (true);
-	case MODE_SYMLINK:
+	case EROFS_MODE_SYMLINK:
 		*kind = FSIMG_ENTRY_SYMLINK;
 		return (true);
-	case MODE_FIFO:
+	case EROFS_MODE_FIFO:
 		*kind = FSIMG_ENTRY_FIFO;
 		return (true);
-	case MODE_CHAR_DEVICE:
+	case EROFS_MODE_CHAR_DEVICE:
 		*kind = FSIMG_ENTRY_CHAR_DEVICE;
 		return (true);
-	case MODE_BLOCK_DEVICE:
+	case EROFS_MODE_BLOCK_DEVICE:
 		*kind = FSIMG_ENTRY_BLOCK_DEVICE;
 		return (true);
-	case MODE_SOCKET:
+	case EROFS_MODE_SOCKET:
 		*kind = FSIMG_ENTRY_SOCKET;
 		return (true);
 	default:

@@ -84,6 +84,17 @@ typedef enum erofs_layout {
 	EROFS_LAYOUT_CHUNK_BASED = 4
 } erofs_layout_t;
 
+/* The mode's type bits, by their traditional POSIX values. */
+#define EROFS_MODE_TYPE_MASK		0170000u
+#define EROFS_MODE_FIFO			0010000u
+#define EROFS_MODE_CHAR_DEVICE		0020000u
+#define EROFS_MODE_DIRECTORY		0040000u
+#define EROFS_MODE_BLOCK_DEVICE		0060000u
+#define EROFS_MODE_REGULAR		0100000u
+#define EROFS_MODE_SYMLINK		0120000u
+#define EROFS_MODE_SOCKET		0140000u
+#define EROFS_MODE_PERMISSIONS		07777u
+
 /* Directory entry file types; any other value is corrupt. */
 #define EROFS_FT_UNKNOWN		0u
 #define EROFS_FT_REGULAR		1u

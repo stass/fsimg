@@ -77,6 +77,11 @@ typedef unsigned char id16_t[16];
 	fsimg_xz_check_t, FSIMG_NO_PRESENCE)
 #define ISO_VIEW(rec, member)	BIND(rec, member, FSIMG_KIND_ISO_VIEW,	\
 	fsimg_iso_view_t, FSIMG_NO_PRESENCE)
+#define EROFS_COMPRESSION(rec, member)	BIND(rec, member,		\
+	FSIMG_KIND_EROFS_COMPRESSION, fsimg_erofs_compression_t,	\
+	FSIMG_NO_PRESENCE)
+#define EROFS_METABOX(rec, member)	BIND(rec, member,		\
+	FSIMG_KIND_EROFS_METABOX, fsimg_erofs_metabox_t, FSIMG_NO_PRESENCE)
 #define TEXT_(type, record_id, member)	.record = (record_id),		\
 	.kind = FSIMG_KIND_TEXT, .offset = offsetof(type, member),	\
 	.size = TEXT_SIZE(type, member), .presence = FSIMG_NO_PRESENCE
@@ -110,6 +115,20 @@ static const fsimg_setting_choice_t view_choices[] = {
 };
 static const fsimg_setting_choice_t iso_level_choices[] = {
 	{ "1", { .u32 = 1 } }, { "2", { .u32 = 2 } }, { "3", { .u32 = 3 } },
+	{ NULL, { 0 } }
+};
+static const fsimg_setting_choice_t erofs_compression_choices[] = {
+	{ "none", { .erofs_compression = FSIMG_EROFS_COMPRESSION_NONE } },
+	{ "lz4", { .erofs_compression = FSIMG_EROFS_COMPRESSION_LZ4 } },
+	{ NULL, { 0 } }
+};
+static const fsimg_setting_choice_t erofs_addressing_choices[] = {
+	{ "32", { .u32 = 32 } }, { "48", { .u32 = 48 } }, { NULL, { 0 } }
+};
+static const fsimg_setting_choice_t erofs_metabox_choices[] = {
+	{ "none", { .erofs_metabox = FSIMG_EROFS_METABOX_NONE } },
+	{ "plain", { .erofs_metabox = FSIMG_EROFS_METABOX_PLAIN } },
+	{ "lz4", { .erofs_metabox = FSIMG_EROFS_METABOX_LZ4 } },
 	{ NULL, { 0 } }
 };
 static const fsimg_setting_choice_t endian_choices[] = {
@@ -234,7 +253,20 @@ static const fsimg_setting_t filesystem_rows[] = {
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
 	{ .key = "effective", I64_SET(RECORD_WRITE, iso_effective, iso_effective_set),
 	    .syntax = FSIMG_SYNTAX_SECONDS,
-	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR }
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
+	{ .key = "compression",
+	    EROFS_COMPRESSION(RECORD_WRITE, erofs_compression),
+	    .syntax = FSIMG_SYNTAX_CHOICE, .choices = erofs_compression_choices,
+	    .initial = { .erofs_compression = FSIMG_EROFS_COMPRESSION_NONE },
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_EROFS },
+	{ .key = "addressing", U32(RECORD_WRITE, erofs_addressing),
+	    .syntax = FSIMG_SYNTAX_COUNT, .choices = erofs_addressing_choices,
+	    .max = UINT32_MAX, .nonzero = true,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_EROFS },
+	{ .key = "metabox", EROFS_METABOX(RECORD_WRITE, erofs_metabox),
+	    .syntax = FSIMG_SYNTAX_CHOICE, .choices = erofs_metabox_choices,
+	    .initial = { .erofs_metabox = FSIMG_EROFS_METABOX_NONE },
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_EROFS }
 };
 
 /*
@@ -558,6 +590,14 @@ load_member(const fsimg_setting_t *row, const unsigned char *member,
 	case FSIMG_KIND_ISO_VIEW:
 		bcopy(member, &value->iso_view, sizeof(value->iso_view));
 		break;
+	case FSIMG_KIND_EROFS_COMPRESSION:
+		bcopy(member, &value->erofs_compression,
+		    sizeof(value->erofs_compression));
+		break;
+	case FSIMG_KIND_EROFS_METABOX:
+		bcopy(member, &value->erofs_metabox,
+		    sizeof(value->erofs_metabox));
+		break;
 	case FSIMG_KIND_TEXT:
 		value->text = (const char *)member;
 		break;
@@ -610,6 +650,14 @@ store_member(const fsimg_setting_t *row, unsigned char *member,
 		break;
 	case FSIMG_KIND_ISO_VIEW:
 		bcopy(&value->iso_view, member, sizeof(value->iso_view));
+		break;
+	case FSIMG_KIND_EROFS_COMPRESSION:
+		bcopy(&value->erofs_compression, member,
+		    sizeof(value->erofs_compression));
+		break;
+	case FSIMG_KIND_EROFS_METABOX:
+		bcopy(&value->erofs_metabox, member,
+		    sizeof(value->erofs_metabox));
 		break;
 	case FSIMG_KIND_TEXT:
 		/* The whole member is defined: the text, then zeros. A NULL
@@ -665,6 +713,10 @@ values_equal(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 		return (a->xz_check == b->xz_check);
 	case FSIMG_KIND_ISO_VIEW:
 		return (a->iso_view == b->iso_view);
+	case FSIMG_KIND_EROFS_COMPRESSION:
+		return (a->erofs_compression == b->erofs_compression);
+	case FSIMG_KIND_EROFS_METABOX:
+		return (a->erofs_metabox == b->erofs_metabox);
 	case FSIMG_KIND_TEXT:
 		return ((a->text == NULL || a->text[0] == '\0') ==
 		    (b->text == NULL || b->text[0] == '\0'));
