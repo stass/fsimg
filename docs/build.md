@@ -1341,9 +1341,17 @@ The work directory holds the sources and images and must lie under
 `$HOME`, which the VM shares at the same path; the optional scratch
 directory holds the extractions, about 4 GiB at peak, the size of the large file
 (`-l` sets its size). `-b` selects the block size of every output, 512,
-1024, 2048 or 4096 (the default), and `-c` the compression setting,
-`none` (the default) or `lz4`; a full qualification runs once at each
-block size under each setting.
+1024, 2048 or 4096 (the default), `-c` the compression setting,
+`none` (the default) or `lz4`, and `-a` the addressing, 32 (the default)
+or 48; a full qualification runs once at each block size under each
+compression setting and addressing. Under `-a 48` a further output puts
+the small tree in a sparse volume of 2^32 + 1000 blocks, 2 TiB apparent
+at 512-byte blocks and 16 TiB at 4096, which no check reads end to end.
+`-x` skips the checks it lists, of `fsck`, `kernel`, `rust` and `fsimg`,
+each reported as SKIP: rust-fs-erofs does not read the 48-bit layout, so
+a 48-bit run passes `-x rust`, and `-x rust,fsimg` while fsimg's reader
+refuses the layout; skipping `fsimg` also skips the partitioned outputs,
+whose copy-out reads the disk with fsimg.
 It needs Ruby, `colima` with passwordless `sudo` in
 the VM, and the oracles under `~/.local/share/fsimg-oracles` (or
 `$FSIMG_ORACLES`). The record of a run is in

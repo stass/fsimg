@@ -80,11 +80,12 @@
   The writer is registered (`write-plan.c`, `write-dir.c`, `write-emit.c`,
   `write-lz4.c`) with its LZ4 profile, and `tools/erofs/qualify.sh` checks
   its output, uncompressed and under `-c lz4`, with `fsck.erofs`, the
-  kernel and rust-fs-erofs at every block size. It refuses `addressing=48`
-  (stage 14) and `metabox=plain|lz4` (stage 15) with
-  `FSIMG_EUNSUPPORTED`. The reader reads the 48-bit layout, encoded
+  kernel and rust-fs-erofs at every block size, and under `-a 48` with
+  `fsck.erofs`, the kernel and fsimg's own reader, rust-fs-erofs not
+  reading the 48-bit layout. The reader reads the 48-bit layout, encoded
   extents of every width included; the metadata box (stage 13) is refused
-  at open.
+  at open, and the writer refuses `metabox=plain|lz4` (stage 15) with
+  `FSIMG_EUNSUPPORTED`.
 
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
@@ -401,6 +402,19 @@
   for `e13-big5g-chunk1m`, a 3 MB image.
   Reporting a driver's holes as ZERO ranges would let extraction leave
   them as holes.
+* [Medium] **EROFS encoded extents bypass the codec**
+  (`lib/formats/erofs/write-lz4.c` `write_extents`): the 48-bit writer
+  packs its map header and 32-byte records itself, while the full index
+  goes through `codec.c`, whose encoders decode their output once more.
+  Once the 48-bit reader's extent decoder is in `codec.c`, move the
+  encoding next to it with the same decode-once-more check, so writer and
+  reader cannot drift apart.
+* [Medium] **EROFS start blocks above 32 bits are unchecked in output**
+  (`lib/formats/erofs/write-emit.c` `emit_inode`): no test or oracle sees
+  fsimg write a start block at or past 2^32, which needs more than 2 TiB
+  of stored content; the encoder's unit tests cover the field. A
+  white-box test could plant such a row and emit into a sink that keeps
+  only the metadata area.
 * [Low] **EROFS verification reports two advisory findings nowhere**
   (`lib/formats/erofs/verify.c`): the [format design's
   verification](specs/design-erofs.md#verification) reports the

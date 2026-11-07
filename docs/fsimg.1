@@ -61,8 +61,9 @@ directories without a
 .Pa \&.
 entry included; a volume with a metadata box or extra devices is refused
 as unsupported.
-A created EROFS volume is uncompressed, with 512- to 4096-byte blocks and
-32-bit addressing, and stores files, directories and symbolic links with
+A created EROFS volume is uncompressed or LZ4-compressed, with 512- to
+4096-byte blocks and 32-bit or 48-bit addressing, and stores files,
+directories and symbolic links with
 their owner, permission bits and modification time to the nanosecond.
 ISO 9660 reading supports Rock Ridge, Joliet and the primary hierarchy.
 A created HFS Plus or HFSX volume is clean and unjournaled, and an HFSX one is
@@ -1104,7 +1105,13 @@ directory and symbolic link uncompressed; a volume none of whose files
 compresses is the same as with none.
 .It Fl o Ar addressing=32|48
 EROFS block addressing width; default 32.
-48 is refused as unsupported.
+48 writes the 48-bit layout, which a volume of more than 2^32 blocks
+needs: the superblock's wide form, every directory as an extended inode
+and, under
+.Ar compression=lz4 ,
+compressed files mapped by encoded extents.
+Linux marks the layout experimental, and older kernels and other readers
+may not read it.
 .It Fl o Ar metabox=none|plain|lz4
 EROFS metadata box; default none.
 plain and lz4 require

@@ -22,15 +22,17 @@ box or extra devices is refused as unsupported.
 
 `c -F erofs` creates EROFS volumes: uncompressed, or with
 `-o compression=lz4` LZ4-compressed regular files where that saves
-blocks, with 512- to 4096-byte blocks (`-o cluster=`, 4096 by default) and 32-bit addressing, with files,
+blocks, with 512- to 4096-byte blocks (`-o cluster=`, 4096 by default) and 32-bit addressing, or
+with `-o addressing=48` the 48-bit layout, whose block count may pass 2^32 and
+whose LZ4 files are mapped by encoded extents, with files,
 directories and symbolic links, the owner, the permission bits and the
 modification time to the nanosecond. Hard links become independent
 files. A fixed `gpt:disk` or `mbr:disk` partition need not be a whole
 number of blocks; the partial block after the volume is zero. `-o uuid=`
-sets the volume UUID; `addressing=48` and a metadata box are refused as
-unsupported. `fsck.erofs`, a Linux kernel mount and
-rust-fs-erofs read the output back at every block size
-(`tools/erofs/qualify.sh`).
+sets the volume UUID; a metadata box is refused as unsupported.
+`fsck.erofs`, a Linux kernel mount and rust-fs-erofs read the output back
+at every block size, rust-fs-erofs only without 48-bit addressing, which
+it does not read (`tools/erofs/qualify.sh`).
 
 Old Mac disk images and optical discs open through a read-only Apple Partition
 Map scheme, `apm`, in the same stack slot as `gpt` and `mbr`: `hfsplus/apm/dmg`

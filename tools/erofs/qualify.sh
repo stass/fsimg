@@ -20,14 +20,19 @@
 # and the format time (design-erofs.md), so no oracle compares its
 # metadata with the source directory's.
 #
-# Usage: qualify.sh [-b block-bytes] [-c compression] [-l large-bytes]
-#        FSIMG WORKDIR [SCRATCH]
+# Usage: qualify.sh [-a addressing] [-b block-bytes] [-c compression]
+#        [-l large-bytes] [-x check,...] FSIMG WORKDIR [SCRATCH]
 #
-# -b selects the block size, 512, 1024, 2048 or 4096 (the default), for
-# every output; -c the compression setting, none (the default) or lz4;
-# -l the size of the large tree's sparse file. The mixed tree holds text,
-# noise and short files, so under lz4 some files compress and some stay
-# flat.
+# -a selects the addressing setting, 32 (the default) or 48; -b the block
+# size, 512, 1024, 2048 or 4096 (the default), for every output; -c the
+# compression setting, none (the default) or lz4; -l the size of the large
+# tree's sparse file; -x the checks to skip, of fsck, kernel, rust and
+# fsimg, each reported as SKIP, for a reader that does not read the layout;
+# skipping fsimg also skips the partitioned outputs, which it copies out.
+# The mixed tree holds text, noise and short files, so under lz4 some files
+# compress and some stay flat. Under addressing=48 the huge output is the
+# small tree in a sparse volume of 2^32 + 1000 blocks, whose block count
+# needs the superblock's high bits; it is never read end to end.
 # WORKDIR holds the sources and images and must lie under $HOME, which the
 # VM shares at the same path; SCRATCH (default WORKDIR) holds extractions.
 # Each output's files are replaced as it is built. The oracles are found
@@ -36,22 +41,38 @@
 
 set -eu
 
+addressing=32
 block=4096
 compression=none
 large_bytes=4294972296		# 2^32 + 5000: past a compact inode's size
-while getopts b:c:l: flag; do
+skip=
+while getopts a:b:c:l:x: flag; do
 	case $flag in
+	a)	addressing=$OPTARG ;;
 	b)	block=$OPTARG ;;
 	c)	compression=$OPTARG ;;
 	l)	large_bytes=$OPTARG ;;
+	x)	skip=$skip,$OPTARG ;;
 	*)	exit 2 ;;
 	esac
 done
 shift $((OPTIND - 1))
 [ $# -ge 2 ] && [ $# -le 3 ] || {
-	echo "usage: qualify.sh [-b block-bytes] [-c compression] [-l large-bytes] FSIMG WORKDIR [SCRATCH]" >&2
+	echo "usage: qualify.sh [-a addressing] [-b block-bytes] [-c compression] [-l large-bytes] [-x check,...] FSIMG WORKDIR [SCRATCH]" >&2
 	exit 2
 }
+for name in $(printf '%s' "$skip" | tr , ' '); do
+	case $name in
+	fsck|kernel|rust|fsimg) ;;
+	*)	echo "qualify.sh: -x names fsck, kernel, rust or fsimg" >&2
+		exit 2 ;;
+	esac
+done
+case $addressing in
+32|48) ;;
+*)	echo "qualify.sh: addressing is 32 or 48" >&2
+	exit 2 ;;
+esac
 case $compression in
 none|lz4) ;;
 *)	echo "qualify.sh: compression is none or lz4" >&2
@@ -93,7 +114,15 @@ manifest() {
 
 result() {
 	echo "$1 $2 $3${4:+: $4}"
-	[ "$1" = PASS ] || failures=$((failures + 1))
+	[ "$1" = PASS ] || [ "$1" = SKIP ] || failures=$((failures + 1))
+}
+
+# Run check CHECK on output NAME's IMAGE unless -x names it.
+check() {
+	case ,$skip, in
+	*,"$1",*) result SKIP "$2" "$1" "skipped by -x" ;;
+	*)	"check_$1" "$2" "$3" ;;
+	esac
 }
 
 # Run inside the VM as root: mount IMAGE read-only without devices,
@@ -201,7 +230,8 @@ qualify() {
 	src=$work/$name.src image=$work/$name.img
 	rm -f "$image"
 	if ! "$fsimg" c -p -o uuid=$uuid -o cluster=$block \
-	    -o compression=$compression -F "$layout" "$@" \
+	    -o compression=$compression -o addressing=$addressing \
+	    -F "$layout" "$@" \
 	    -f "$image" \
 	    -C "$src" . >"$work/$name.create.log" 2>&1; then
 		result FAIL "$name" create "$(tail -1 "$work/$name.create.log")"
@@ -211,17 +241,19 @@ qualify() {
 		result FAIL "$name" source "unreadable source"
 		return
 	fi
-	case $layout in
+	case $layout,$skip, in
+	*/*,*,fsimg,*)
+		result SKIP "$name" partition "the copy-out reads the disk with fsimg"
+		return ;;
 	*/*)	if ! extract_partition "$image" "$work/$name.part"; then
 			result FAIL "$name" partition "no partition copied out"
 			return
 		fi
 		image=$work/$name.part ;;
 	esac
-	check_fsck "$name" "$image"
-	check_kernel "$name" "$image"
-	check_rust "$name" "$image"
-	check_fsimg "$name" "$image"
+	for oracle in fsck kernel rust fsimg; do
+		check $oracle "$name" "$image"
+	done
 }
 
 extract_partition() {
@@ -381,6 +413,12 @@ cp -R "$work/small.src" "$work/gpt.src"
 cp -R "$work/small.src" "$work/mbr.src"
 qualify gpt erofs/gpt -o gpt:disk=8M
 qualify mbr erofs/mbr -o mbr:disk=8M
+if [ "$addressing" = 48 ]; then
+	rm -rf "$work/huge.src"
+	cp -R "$work/small.src" "$work/huge.src"
+	qualify huge erofs -s $(((4294967296 + 1000) * block))
+	rm -f "$work/huge.img"
+fi
 
 # EROFS blocks end at 4096 bytes (design-erofs.md, Volume), so the command
 # refuses a larger one as outside the writer profile.

@@ -46,8 +46,8 @@ packed fragments and deduplicated clusters included, and volumes with
 48-bit addressing and encoded extents; a volume with a metadata box or
 extra devices is refused with
 .Dv FSIMG_EUNSUPPORTED .
-A created EROFS volume has 512- to 4096-byte blocks and 32-bit
-addressing, and is uncompressed or, under
+A created EROFS volume has 512- to 4096-byte blocks and 32-bit or,
+with erofs_addressing 48, 48-bit addressing, and is uncompressed or, under
 .Dv FSIMG_EROFS_COMPRESSION_LZ4 ,
 stores each regular file that compresses into fewer blocks as one-block
 LZ4 clusters.
@@ -445,8 +445,7 @@ erofs_addressing (32 or 48, zero selecting 32) and erofs_metabox
 .Pq Dv FSIMG_EROFS_METABOX_NONE , Dv FSIMG_EROFS_METABOX_PLAIN No or Dv FSIMG_EROFS_METABOX_LZ4
 are declared by FSIMG_SETTING_EROFS; writer construction rejects a
 non-default value for any other format with FSIMG_EINVAL, and the EROFS
-writer rejects 48-bit addressing and a metadata box with
-FSIMG_EUNSUPPORTED.
+writer rejects a metadata box with FSIMG_EUNSUPPORTED.
 The settings byte_order, volume_uuid, inode_capacity and reserve_percent
 select the byte order, the UUID in textual byte order, the inode capacity
 and the reserved-block percentage (default 3) of a format whose record's

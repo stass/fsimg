@@ -411,11 +411,12 @@ Planning is a fixed sequence of passes over the sealed catalog, each
 sequential, with plan rows in a scratch-backed paged array indexed by
 catalog position:
 
-1. **Settings and time.** Validates the settings and fixes `B`, the format
-   time and, under 48-bit addressing, the epoch from one pass over the
-   catalog's modification times.
+1. **Settings and time.** Validates the settings and fixes `B`, the
+   addressing and the format time, which is also the epoch until pass 2.
 2. **Entries.** For each catalog entry in order: kind, size, owner, mode,
-   time, link count, and for a directory its size from `write-dir.c`, which packs
+   time, link count, under 48-bit addressing the epoch lowered to its
+   modification second when that is smaller, so the epoch is final before
+   any form is chosen, and for a directory its size from `write-dir.c`, which packs
    the sorted names, with `.` and `..` merged into their byte-order places,
    without needing any NID. A subdirectory adds a link to its parent's
    row, so a directory's link count is final only once its children have
@@ -459,8 +460,9 @@ catalog position:
    block count and volume length. Under `metabox=lz4` the box's cluster
    count comes from a measured encoding of the box content, which pass 5
    can generate because every NID and start block it holds is now final.
-6. **Sizing.** Checks `volume_bytes`, the 32-bit limits without
-   `addressing=48`, and the output limit.
+6. **Sizing.** Checks `volume_bytes` and the output limit. Passes 4 and 5
+   have already kept every block within the addressing's limit: 32 bits
+   without `addressing=48`, 48 under it.
 
 Every row's encoded length depends only on the catalog, the settings and,
 for an LZ4 file, its measured clusters, all known before pass 4, so no
@@ -511,8 +513,8 @@ record per physical cluster in a scratch store: its logical start, the
 logical bytes it holds, its stored length and whether it is plain, which
 is metadata, not payload; a cluster's position among the file's records is
 its block relative to the file's first block. Emission encodes each
-body's index from those records through `codec.c`, which writes every
-reserved byte as zero, and the encoded copy checks that every cluster it
+body's index from those records, a full index through `codec.c` and
+encoded extents in `write-lz4.c`, each writing every reserved byte as zero, and the encoded copy checks that every cluster it
 forms matches its record in all four fields, so emission holds one
 window buffer, one output block and the current record. Every byte of the
 output block is written for each cluster: the encoder's bytes are moved to its end and the gap before them
