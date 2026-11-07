@@ -186,24 +186,27 @@ Stage 1 answers these, each tied to the experiment that answers it and the
 stage that consumes it. Every provisional value in the designs is listed.
 E7, E13 and E14 settle no provisional value: they produce fixtures for
 rules the designs state as established layout, and refusal tests for E14.
+An answered row points to the research record's
+[evidence answers](erofs-research.md#evidence-answers), which name the
+fixture behind each answer; the designs carry the answers themselves.
 
-| Question | Evidence | Consumer |
-| --- | --- | --- |
-| Superblock checksum range, seed and final inversion at each block size | E1 | Stage 3 |
-| Largest block size any producer emits; the superblock region's end; block count versus image length; the build-time word | E1 | Stage 3 |
-| Compact inode reserved word; the time's meaning without `MTIME`; what the inode count counts | E2 | Stages 3, 4 |
-| Flat-inline without a tail; an empty file's start block; the null flat address | E3 | Stages 3, 9 |
-| Directory block padding; dot-entry placement; directory link counts | E4 | Stages 3, 4, 9 |
-| Device-number encoding; sizes and layout words of FIFOs, sockets and devices | E5 | Stage 3 |
-| Attribute header reserved bytes; prefix table placement and units; the filter hash | E6 | Stages 3, 4 |
-| Chunk entry forms, holes, shared chunks | E7 | Stage 5 |
-| Compact group packing at every boundary; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | E8 | Stages 6, 11 |
-| MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | E9 | Stage 7 |
-| Every 48-bit field; the extent count's placement; encoded-extent widths; kernel acceptance of the writer's 32-byte records | E10 | Stages 12, 14, 15 |
-| Kernel acceptance of writer output at 512, 1024 and 2048-byte blocks and of the writer's field choices | E11 | Stages 10, 11 |
-| Metadata-box layout, root placement, box compression, shared attributes in the box | E12 | Stages 13, 15 |
-| Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | E13 | Stage 8 |
-| The fields a volume with external devices sets, so refusal names it | E14 | Stage 3 |
+| Question | Evidence | Consumer | Status |
+| --- | --- | --- | --- |
+| Superblock checksum range, seed and final inversion at each block size | E1 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
+| Largest block size any producer emits; the superblock region's end; block count versus image length; the build-time word | E1 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
+| Compact inode reserved word; the time's meaning without `MTIME`; what the inode count counts | E2 | Stages 3, 4 | [Answered](erofs-research.md#evidence-answers) |
+| Flat-inline without a tail; an empty file's start block; the null flat address | E3 | Stages 3, 9 | [Answered](erofs-research.md#evidence-answers) |
+| Directory block padding; dot-entry placement; directory link counts | E4 | Stages 3, 4, 9 | [Answered](erofs-research.md#evidence-answers) |
+| Device-number encoding; sizes and layout words of FIFOs, sockets and devices | E5 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
+| Attribute header reserved bytes; prefix table placement and units; the filter hash | E6 | Stages 3, 4 | [Answered](erofs-research.md#evidence-answers) |
+| Chunk entry forms, holes, shared chunks | E7 | Stage 5 | [Answered](erofs-research.md#evidence-answers) |
+| Compact group packing at every boundary; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | E8 | Stages 6, 11 | [Answered](erofs-research.md#evidence-answers); `L > B` and compact advice `0x01` clear stay unobserved |
+| MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | E9 | Stage 7 | [Answered](erofs-research.md#evidence-answers); head-2 by hand-built images only |
+| Every 48-bit field; the extent count's placement; encoded-extent widths; kernel acceptance of the writer's 32-byte records | E10 | Stages 12, 14, 15 | Open, runs before stage 12 |
+| Kernel acceptance of writer output at 512, 1024 and 2048-byte blocks and of the writer's field choices | E11 | Stages 10, 11 | Open, runs before stage 10 |
+| Metadata-box layout, root placement, box compression, shared attributes in the box | E12 | Stages 13, 15 | Open, runs before stage 13 |
+| Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | E13 | Stage 8 | Open, runs before stage 8 |
+| The fields a volume with external devices sets, so refusal names it | E14 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
 
 ## Work packages
 
@@ -245,7 +248,7 @@ fixtures, their command records and the oracle output:
 | E5 Kinds | FIFOs, sockets, character and block devices with large majors and minors, created as root in the Linux VM |
 | E6 Attributes | `user.`, `trusted.`, `security.` and ACL attributes inline and shared; long prefixes in both placements; the name filter on and off |
 | E7 Chunks | `--chunksize` at several sizes, `-E force-chunk-indexes`, sparse sources and identical chunks |
-| E8 LZ4 | Default compact indexes and `-E legacy-compress` full indexes; `-C` big clusters; files forcing 2-byte groups and every group boundary; incompressible clusters; `-E ztailpacking`, `fragments`, `all-fragments` and `dedupe`; compressed directories; each recorded with `dump.erofs -e`; clusters rewritten by hand so a block's last sequence carries fewer than five literals, or its last match starts fewer than 12 bytes before the end, read by the kernel and `fsck.erofs`, which settles the [LZ4 decoder's](../specs/design-codecs.md#end-of-block) leniency |
+| E8 LZ4 | Default compact indexes and `-E legacy-compress` full indexes; `-C` big clusters; files forcing 2-byte groups and every group boundary; incompressible clusters; `-E ztailpacking`, `fragments`, `all-fragments` and `dedupe`; compressed directories; each recorded with `dump.erofs -e`; clusters rewritten by hand so a block's last sequence carries fewer than five literals, or its last match starts fewer than 12 bytes before the end, read by the kernel and `fsck.erofs`, which fixes the [LZ4 decoder's](../specs/design-codecs.md#end-of-block) end-of-block rule |
 | E9 Other codecs | `-z lzma`, `deflate` and `zstd` at several levels and dictionary sizes; a mixed two-algorithm volume |
 | E10 48-bit | `-E 48bit` volumes small and large through sparse files; compact times; implicit link counts; omitted dots; compressed files in every encoded-extent width the producer emits; a hand-built LZ4 file and LZ4 box mapped by 32-byte records through the independent generator, mounted by the kernel and checked by `fsck.erofs` |
 | E11 Writer probes | Hand-built variants of the writer's layout through the independent generator, each mounted by the kernel and checked by `fsck.erofs`: block sizes below 4096, empty-file start blocks, inode placement at block ends |
@@ -313,9 +316,11 @@ fixtures, their command records and the oracle output:
 * Raw DEFLATE over zlib; the optional-library entry points (common change
   3) and their dispatch in `cluster.c`; builds with and without each
   library.
-* **Gate:** E9 fixtures match in a full build; in a build without a library
-  the affected files fail with `FSIMG_EUNSUPPORTED` naming it while the rest
-  of the volume lists and extracts, and verification reports incomplete.
+* **Gate:** E9 fixtures match in a full build, the hand-built `e9-head2-*`
+  images included, since no producer writes a head-2 record; in a build
+  without a library the affected files fail with `FSIMG_EUNSUPPORTED`
+  naming it while the rest of the volume lists and extracts, and
+  verification reports incomplete.
 
 ### 8. Reader interoperability, scale and faults
 
@@ -459,7 +464,7 @@ and run in order.
 | Separate `super.c`, `inode.c`, `data.c`, `packed.c`, `metabox.c`, `decompress.c` (section 13) | `meta.c`, `map.c`, `zmap.c`, `cluster.c` | One owner per decision: NID to bytes, offset to storage |
 | An LRU cache keyed by inode and cluster (section 13) | One decoded cluster per window | Sequential reads decode each cluster once; a cache adds eviction state for random-read speed only |
 | Visited-NID sets for cycle detection (section 13.3) | The parent rule; a reference stream in verification | Cycles become unreachable by construction |
-| A strict and a permissive reader for nonzero compact reserved words (section 4.3) | One rule: corrupt | Two interpretations are two formats to test |
+| A strict and a permissive reader for nonzero compact reserved words (section 4.3) | One rule: the word at `0x0C` is the inode's time after the epoch, as the kernel reads it on every volume (E2); `0x1C` nonzero is corrupt | Two interpretations are two formats to test |
 | `--erofs` libFuzzer targets per module (section 16.4) | `fuzz/erofs.c` plus codec cases | One target per format, as for the other drivers |
 | An LZ4 library or import (section 8.1) | Project-owned clean-room decoder and encoder | The owner's decision, as for LZO1X |
 | 48-bit and metabox writer not planned (sections 11, 14.4) | Read, then write, as the last stages | The owner's decision |

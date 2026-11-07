@@ -364,6 +364,20 @@
 
 ## Bugs by subsystem
 
+* [High] **LZ4 full mode does not enforce the end-of-block conditions**
+  (`lib/codec/lz4.c`): the [codec design](specs/design-codecs.md#end-of-block)
+  requires full mode to refuse a block with fewer than five final literals
+  after a match or a last match starting fewer than 12 bytes before the end,
+  as the kernel and `fsck.erofs` do; the decoder accepts both, and
+  `test/codec.c` still lists blocks that break them as valid.
+
+* [Medium] **EROFS dumper lags two evidence corrections**
+  (`tools/erofs/erofsdump.rb`): it prints the superblock epoch as a compact
+  inode's time instead of adding the word at `0x0C`, and its compact head
+  block number omits the count marker of a cluster whose head lies in the
+  previous group, so it misreports 3 files of `e8-lz4-big16k` and 40 of
+  `e9-mixed-lz4-lzma` ([format design](specs/design-erofs.md#index-records)).
+
 * [Low] **Spec harness oracle step can fail on EINTR** (`test/spec/`): a quick run
   under `check-asan` reported `harness_error` for
   `fat.create.cluster_count.fat16_4100`, detail `oracles: EINTR: "Interrupted system

@@ -91,8 +91,8 @@ only:
 
 Encoding is the exact inverse and writes every reserved byte as zero. The
 superblock checksum helper takes the final superblock-region bytes and the
-block size and applies the covered-range rule E1 fixes; it is the one place that
-rule lives.
+block size and applies the [covered range](design-erofs.md#superblock-checksum);
+it is the one place that rule lives.
 
 ## Probe and open
 
@@ -105,7 +105,10 @@ Open:
    [superblock region](design-erofs.md#volume-identity-and-geometry) from
    `[1024, min(4096, volume end))`, at most 3072 bytes, rereads the
    superblock from it, and checks every superblock rule: block size,
-   `dirblkbits`, reserved bytes, the checksum and the volume extent. It
+   `dirblkbits`, reserved bytes, the checksum, the extra device count,
+   whose nonzero value refuses the volume before any feature or chunk rule
+   ([external devices](design-erofs.md#external-data-devices)), and the
+   volume extent. It
    sets the volume information's `volume_bytes` to `blocks * B` when the
    count is nonzero, so the reader core derives `missing_bytes` for a
    truncated volume, and sets the address domain and
@@ -209,13 +212,12 @@ cluster:
 
 1. reads the stored bytes from the domain or the metadata space into the
    window's input buffer, at most 1 MiB;
-2. skips leading zero bytes when the padding rule applies;
+2. skips leading zero bytes, since every stream is right-aligned
+   ([physical clusters](design-erofs.md#physical-clusters));
 3. for a plain cluster, copies or rotates the bytes; otherwise calls the
    algorithm's decoder for the extent's decoded length, partially under a
-   partial reference, and for LZ4 also when the padding rule does not
-   apply, since the stream's end is then unknown amid the padding that
-   follows it ([physical clusters](design-erofs.md#physical-clusters)), so
-   the decoder stops there without requiring the stream to end;
+   partial reference, where the stream continues past the extent and the
+   decoder stops without requiring it to end;
 4. requires the decoder to produce exactly that length.
 
 The output buffer grows to the decoded length, charged to the context
@@ -429,8 +431,9 @@ than running unbounded.
 The driver reports the format design's
 [classes](design-erofs.md#failure-classification). `codec.c` and `zmap.c`
 return `FSIMG_ECORRUPT` or `FSIMG_EUNSUPPORTED` with a static phrase naming
-the field; `cluster.c` maps a decoder's rejection to `FSIMG_ECORRUPT` and a
-missing library to `FSIMG_EUNSUPPORTED`; budget errors pass through
+the field; `cluster.c` maps a decoder's rejection to `FSIMG_ECORRUPT`, and a
+missing library or an LZ4 cluster on a volume without `LZ4_0PADDING` to
+`FSIMG_EUNSUPPORTED`; budget errors pass through
 unchanged. `prepare` and `replay` report decoder rejections under
 `FSIMG_OP_READER`, so salvage can step over them.
 

@@ -49,7 +49,7 @@ and tests fsimg needs whichever code decodes.
 | H3 `PCM3_IFS2.ifs` (`hbcifs`) | LZO1X | One unframed stream of 33575140 bytes decoding to 68849668 bytes, consumed exactly, ending in `11 00 00` |
 | X1 `qnxbase*.ifs` (three x86 images, source S2) | NRV2B | 51 framed chunks per image, 50 of them decoding to 65536 bytes |
 | `mkifs compress=2` and `compress=3` output from QNX 6.5.0 (E7) | both | The same framing on small bodies, for the gates below |
-| EROFS compressed clusters, algorithm 0 ([EROFS design](design-erofs.md#algorithms)) | LZ4 | One raw block per physical cluster, no frame and no stored length; right-aligned after leading zero bytes under `LZ4_0PADDING`, which the driver strips; a partial reference needs only a prefix of a block's output |
+| EROFS compressed clusters, algorithm 0 ([EROFS design](design-erofs.md#algorithms)) | LZ4 | One raw block per physical cluster, no frame and no stored length; right-aligned after leading zero bytes, which the driver strips (an LZ4 volume without `LZ4_0PADDING` is refused); a partial reference needs only a prefix of a block's output |
 
 The `hbcifs` stream is why the LZO1X decoder is resumable: a 68 MiB output and a
 33 MiB input cannot both sit in memory under the 16 MiB minimum budget, so
@@ -836,18 +836,28 @@ The description allows a decoder to refuse a block that breaks them; it
 does not require it. The decoder holds condition 1 by construction: a block
 ends only where the input ends directly after a sequence's literals, and an
 input ending anywhere else, after a match included, is a truncation.
-Conditions 2 and 3 are not checked. A block that breaks only them parses
-without ambiguity, its output is what the encoding says, and a reader that
-refused it would lose a file another decoder reads. The oracle refuses a
-block whose last sequence carries fewer than five literals after a match
-and accepts one whose last match starts fewer than 12 bytes before the end.
-Whether the Linux kernel refuses either kind of block is unknown: the
-leniency is provisional, and the E8 fixtures in the
-[EROFS plan](../docs/erofs-plan.md#1-evidence-corpus) check both with
-clusters rewritten by hand. For a condition the kernel enforces, the full
-mode below refuses the block too, as one check at the block's end; if E8 cannot answer, the decoder stays lenient, since
-accepting what the kernel refuses costs a verifier finding while refusing
-what it accepts costs a file.
+Conditions 2 and 3 are enforced by the Linux kernel and by `fsck.erofs`,
+which decode an EROFS cluster into a buffer of exactly its extent: of ten
+hand-built clusters, both read the two whose last match starts 12 or more
+bytes before the end with five final literals and refused the eight that end
+with one to four literals or whose last match starts 11 or fewer bytes
+before the end (E8, `e8-lz4-block-end`, in the
+[EROFS research record](../docs/erofs-research.md#e8-lz4-and-index-formats)).
+Every producer block meets both with room to spare. The full mode below
+therefore refuses a block that breaks either as `FSIMG_ECORRUPT`, in one
+check at the block's end once the output's length is known: a block holding
+a match whose final literal run is shorter than five bytes, or whose last
+match starts fewer than 12 bytes before the output's end. A literal-only
+block, which has no match, satisfies both whatever its length. Partial mode
+stops before the block's end, or at a length it cannot tell is the end, so
+it cannot judge the conditions and does not. The decoder refuses what the
+kernel refuses, so a verifier finding on fsimg's side is a finding on the
+kernel's, and no file the kernel reads is lost.
+
+The encoder holds all three as its contract: every block ends with a
+literal-only sequence of at least five literals, its last match starts at
+least 12 bytes before the end of its decoded input, and input of fewer than
+13 bytes is emitted as literals only.
 
 ### Worked blocks
 
@@ -871,9 +881,22 @@ ends after a match), `20 41` (two literals, one present), `10 41 01` (half
 an offset), `f0` (an extension cut off), and every proper prefix of a valid
 block that does not end after a sequence's literals. fsimg refuses `40 41
 42 43 44 00 00 50 45 45 45 45 45`, offset zero, which the oracle decodes as
-four zero bytes; the description calls such a block corrupt. fsimg accepts
-`40 41 42 43 44 04 00 10 45`, whose last sequence carries one literal, which
-the oracle refuses, as stated above.
+four zero bytes; the description calls such a block corrupt.
+
+The [end conditions](#end-of-block) apply to the blocks above in full mode.
+The oracle, decoding inside a legacy frame, has an output buffer larger than
+the data and so does not apply condition 3; fsimg's full mode refuses `40 41
+42 43 44 04 00 50 45 45 45 45 45`, `40 41 42 43 44 01 00 50 45 45 45 45 45`
+and `40 41 42 43 44 04 00 00 04 00 50 45 45 45 45 45`, whose last match
+starts 9 bytes before the end, and `40 41 42 43 44 04 00 10 45`, one final
+literal after a match; partial mode decodes each to the output shown at any
+length up to it. Blocks that meet both conditions exactly and decode in
+full mode: `43 41 42 43 44 04 00 50 45 45 45 45 45` is `ABCDABCDABCEEEEE`,
+whose 7-byte match at offset 4 starts 12 bytes before the end and is
+followed by five literals. Refused by one byte each: `42 41 42 43 44 04 00
+50 45 45 45 45 45` (`ABCDABCDABEEEEE`, the last match starts 11 bytes
+before the end) and `44 41 42 43 44 04 00 40 45 45 45 45`
+(`ABCDABCDABCDEEEE`, four final literals).
 
 ### LZ4 interface
 
@@ -890,7 +913,8 @@ Both decode one block from `in[0..in_len)` into `out`, which must not
 overlap it, in one call.
 
 * **Full mode**, `fsimg_lz4_decode`, decodes the whole block. The block
-  must end exactly at `in_len`. The capacity is the output bound: a literal
+  must end exactly at `in_len` and meet the [end conditions](#end-of-block)
+  against the output it produced. The capacity is the output bound: a literal
   run or match that would pass it is corrupt. On success `step->done` is
   set, `step->consumed` is `in_len` and the output is
   `out[0..step->produced)`; decoding to fewer bytes than the capacity is a
@@ -906,11 +930,10 @@ overlap it, in one call.
   literal run's literals lie after its extension, and a match's field is
   read by the same rule. On success `step->done` is set, `step->produced`
   is `length` and `step->consumed` is where the decoder stopped, so input
-  after that point is never judged. A block that ends before `length`
-  bytes is corrupt. EROFS uses it for a partial reference, whose stream
-  continues past the file's extent, and for a cluster without
-  `LZ4_0PADDING`, whose stream may be followed by padding. A `length` of
-  0 succeeds at once with nothing consumed.
+  after that point is never judged and the end conditions are not checked.
+  A block that ends before `length` bytes is corrupt. EROFS uses it for a
+  partial reference, whose stream continues past the file's extent. A
+  `length` of 0 succeeds at once with nothing consumed.
 
 In both modes `out[0..step->produced)` is on every return the decoded
 prefix, nothing is written past it, and nothing is read past `in_len`.
@@ -923,6 +946,7 @@ prefix, nothing is written past it, and nothing is read past `in_len`.
 | Offset zero | `FSIMG_ECORRUPT`, zero match offset |
 | Offset greater than the bytes produced | `FSIMG_ECORRUPT`, distance before the output start |
 | Full mode: a literal run or match longer than the room left in the output | `FSIMG_ECORRUPT`, output longer than its capacity |
+| Full mode: after a match, fewer than five final literals, or a last match starting fewer than 12 bytes before the output's end | `FSIMG_ECORRUPT`, block end; the offset is `in_len` |
 | Partial mode: the block ends before `length` bytes | `FSIMG_ECORRUPT`, stream ends before the requested length |
 | `NULL` buffer with a nonzero length | `FSIMG_EINVAL` |
 
@@ -938,8 +962,11 @@ instead); once complete, the literals it copies are held against the input
 left. The offset is judged once both its bytes are read, zero first and
 then against the bytes produced. The match length is then held against the
 room as its extension accumulates, starting from the field plus 4 before
-any extension byte is read. A block that breaks two rules therefore has one
-verdict, the first in this order, and the unit tests expect it exactly.
+any extension byte is read. In full mode the end conditions are judged last,
+when the input ends after the final literals, from the output's length, the
+last match's start and the final literal run. A block that breaks two rules
+therefore has one verdict, the first in this order, and the unit tests
+expect it exactly.
 
 ### LZ4 bounds and work
 
@@ -1164,10 +1191,10 @@ in this design, in test code that shares nothing with `lib/codec/`.
 | Encoder round trip | Blocks of zeros, random bytes, text, period-2 and period-49152 patterns, boundary cases at distances 2048, 2049, 16384, 16385 and 49151, and every 64 KiB slice of each decoded native ImageFS available through `FSIMG_IFS_NATIVE`; each decodes to its input under `fsimg_lzo1x_decode`, and its length never exceeds the bound | A byte flipped in an encoded stream fails the round trip; a capacity one below the bound is `FSIMG_EINVAL` before any write |
 | Encoder determinism | A block encoded on a fresh encoder, again after other blocks on the same encoder, in two processes, and under the ASan build with allocation poisoning gives identical bytes | Two blocks are first encoded to plant table entries that a missing check would turn into matches: one leaves, in the bucket of a four-byte group `G` that the block under test contains, the position of a later occurrence of `G`, so the candidate lies after the current position; the other leaves the position of a group that collides with `G` in the hash (found by the test from the hash in this design) but differs in bytes, so the candidate lies before the current position with wrong bytes. The block under test then encodes to the fresh stream; the test documents that dropping the position check or the byte comparison would make it differ |
 | Fuzzing (`fuzz/codec.c`) | The input's first bytes choose the codec, the limit or capacity and, for LZO1X, the window sizes; the rest is the stream, decoded in one call and, for LZO1X, again at random split points under ASan and UBSan; the target asserts LZO1X split invariance, progress on every call, no consumption after `done`, and no byte beyond the buffers. For LZ4 the block is decoded in full mode and in partial mode at a length taken from the input: at any length up to the bytes the full decode produced, successful or not, the partial decode succeeds with the same prefix | Corpus seeded from every stream above and from chunks of the native images |
-| LZ4 forms (`test/codec.c`) | The worked blocks above; literal lengths 0, 14, 15, 16, 269, 270 and 525, so extensions of one and two bytes and a 255 followed by 0; match lengths 4, 18, 19, 273 and 274 at offsets 1, 2 and the bytes produced, and at 65535 after 65535 literals; a match longer than its offset; a last sequence with a nonzero match field; a last sequence of one literal after a match; blocks the `lz4` command made from zeros, text, a short repeating pattern and incompressible bytes, kept as bytes; each decodes to the bytes the oracle produced | Offset zero; offset one past the bytes produced; each names its check and the offset |
+| LZ4 forms (`test/codec.c`) | The worked blocks above; literal lengths 0, 14, 15, 16, 269, 270 and 525, so extensions of one and two bytes and a 255 followed by 0; match lengths 4, 18, 19, 273 and 274 at offsets 1, 2 and the bytes produced, and at 65535 after 65535 literals; a match longer than its offset; a last sequence with a nonzero match field; a last sequence of exactly five literals after a match starting exactly 12 bytes before the end; blocks the `lz4` command made from zeros, text, a short repeating pattern and incompressible bytes, kept as bytes; each decodes to the bytes the oracle produced | Offset zero; offset one past the bytes produced; a last sequence of one and of four literals after a match; a last match starting 11 bytes before the end; each names its check and the offset, the end conditions at `in_len` |
 | LZ4 truncation | Every proper prefix of every valid block, in full mode: one ending directly after a sequence's literals decodes to that much of the output, and any other is unterminated; the output beyond `produced` keeps its poison. A block longer than 4096 bytes is cut at a stride of points, at the first 8 points and at every point of its last 64 bytes, as for LZO1X | The complete block through the same loop decodes `done` to the expected bytes |
 | LZ4 bounds | Full mode at a capacity equal to the decoded length decodes; one byte less refuses the literal run or match that passes it, at the byte that completes the excess, with `produced` the bytes before it and nothing written beyond; 1000 extension bytes of 255 claiming 255000 literals under a capacity of 65536 are refused after the 258th byte | The capacity raised to cover the claim makes the same block fail only when its input runs out, proving the capacity was the operative check |
-| LZ4 partial mode | Every valid block decoded at every length from 0 to its decoded length, or for an output longer than 4096 bytes at a stride of lengths, the first 8 and every length of its last 64 bytes, gives that prefix of the full decode, `done`, `produced` equal to the length; a block that is corrupt only after the point the length is reached (a literal run claiming more than the input holds, an offset of zero next) still succeeds there | A length one above the decoded length is corrupt, the block ending first; a corrupt offset before the length is reached is still refused |
+| LZ4 partial mode | Every valid block decoded at every length from 0 to its decoded length, or for an output longer than 4096 bytes at a stride of lengths, the first 8 and every length of its last 64 bytes, gives that prefix of the full decode, `done`, `produced` equal to the length; a block that is corrupt only after the point the length is reached (a literal run claiming more than the input holds, an offset of zero next) still succeeds there; a block that breaks only the end conditions decodes at every length | A length one above the decoded length is corrupt, the block ending first; a corrupt offset before the length is reached is still refused |
 | bzip2 forms (`test/codec.c`) | Vectors made once with the `bzip2` command and kept as bytes: levels 1 and 9, the empty stream, runs of 4 and 255 + 4, several blocks; a synthetic stream for the longest `RUNA`/`RUNB` count | One malformed case per row of the [failure table](#failures), each asserting its status and check; every proper prefix of a vector; a block limit bomb in a small capacity; allocation refused; a capacity one byte short |
 | bzip2 chunks (`test/containers.c`, `test/containers-integration.sh`) | A generated `UDBZ` DMG reads through the layer; `hdiutil create -format UDBZ` output lists the same as its `UDTO` expansion and passes the container checks | Chunks decoding short and long are `FSIMG_ECORRUPT`; a run past `fsimg_bzip2_stream_bound` is `FSIMG_ECORRUPT` at open |
 | Fuzzing (`fuzz/bzip2.c`) | The input's first bytes choose the capacity; the rest is the stream, decoded under the sanitizers with a charged context | |
