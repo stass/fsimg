@@ -76,7 +76,7 @@ MAX_NOTES = 4
 VERIFY_MODES = [[], ["-d"]].freeze
 # The passes of a build with every library; a fixture slipping to
 # "unsupported" must not keep the run green.
-PASS_FLOOR = 117
+PASS_FLOOR = 118
 # Corpus entries left out: capture.rb's in-progress directories (`.tmp-`
 # in the name), and the 5 GiB E13 files, which test-erofs-scale reads by
 # streaming them to a digest, since extracting one here writes 5 GiB.
@@ -88,7 +88,7 @@ FIRST_SECTOR = 2048
 
 # The only reasons the reader may give for an image it cannot read yet.
 KNOWN_REFUSALS = [
-  /feature 48BIT\z/, /extra devices\z/, /metadata box/
+  /feature 48BIT\z/, /feature METABOX\z/, /extra devices\z/, /metadata box/
 ].freeze
 
 # A cluster of an algorithm whose library this build lacks, and the codec
@@ -107,11 +107,16 @@ HEAD2_DIGEST_SOURCE = "e9-head2-lzma"
 # Fixtures without a manifest that end in a refusal, and its class. Evidence:
 # ~/.cache/fsimg-erofs/evidence/E8.md (the cleared-flag edits), E14.md
 # (extra devices), E15.md (logical clusters of several blocks, compact
-# advice 0x01 clear). A fixture listed neither here nor in EXPECTED_CORRUPT
-# must open, list and extract.
+# advice 0x01 clear), E10.md (48-bit volumes and their edits). A fixture
+# listed neither here nor in EXPECTED_CORRUPT must open, list and extract.
 EXPECTED_REFUSALS = {
   "e14-blobdev-b4096" => /extra devices/, "e14-tar-index-b4096" => /extra devices/,
   "e2-vm-48bit" => /48BIT/,
+  # The current reader's refusals of 48-bit volumes; specs/design-erofs.md gives these and no48 their own
+  # verdicts (several are hostile edits it rejects as corrupt), which the 48BIT reader pins.
+  **%w[48-chunk 48-kinds edit-kinds-extbit4 edit-lz4-counthi edit-small-nlink1 edit-small-wide hand-box32]
+    .to_h { ["e10-#{_1}", /feature 48BIT\z/] },
+  "e10-edit-lz4-no48" => /logical cluster size other than the block size/,
   "e8-lz4-flag-cleared" => /LZ4 cluster without LZ4_0PADDING/,
   "e8-lz4-flag-cleared-distance0" => /LZ4 cluster without LZ4_0PADDING/,
   "e8-lz4-unpadded" => /LZ4 cluster without LZ4_0PADDING/,
