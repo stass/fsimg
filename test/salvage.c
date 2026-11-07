@@ -2280,6 +2280,51 @@ test_resolved_extents_outside_or_straddling_content_domain(void)
 	CHECK(rmdir(directory) == 0);
 }
 
+/*
+ * A zero extent is a hole the format defines: its bytes read as zeros from no
+ * storage, so no domain or slice end applies to it. Here the file "c" resolves
+ * to a zero extent whose image_offset, the all-ones mark, lies far outside the
+ * three-byte domain that makes any stored extent of "c" damaged. Extraction
+ * delivers three zero bytes with no loss, with salvage or without.
+ */
+static void
+test_zero_extent_passes_the_domain_and_salvage_keeps_the_file(void)
+{
+	fixture_t f;
+	fsimg_extract_options_t options;
+	fsimg_error_t error;
+	char directory[] = "salvage-zero-XXXXXX";
+	unsigned char bytes[4];
+	int parent, output, fd;
+
+	parent = open_destination_parent(directory);
+	for (unsigned salvage = 0; salvage < 2; salvage++) {
+		fake_open(&f);
+		f.reader->content_domain.length = 3;
+		f.fake.content_offset = FSIMG_EXTENT_ZERO;
+		fsimg_extract_options_init(&options);
+		if (salvage != 0)
+			options.flags |= FSIMG_EXTRACT_SALVAGE;
+		CHECK(fsimg_extract_at(f.reader, parent, "out", &options,
+		    &error) == FSIMG_OK);
+		expect_losses(&f, 0, 0, NULL, 0);
+		output = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+		CHECK(output != -1);
+		expect_absent(output, "c.partial");
+		fd = openat(output, "c", O_RDONLY | O_NOFOLLOW);
+		CHECK(fd != -1);
+		memset(bytes, 0xa5, sizeof(bytes));
+		CHECK(read(fd, bytes, sizeof(bytes)) == 3);
+		CHECK(bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 0);
+		CHECK(close(fd) == 0);
+		CHECK(close(output) == 0);
+		remove_tree(parent, "out");
+		fixture_close(&f);
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+}
+
 /* Only the first cluster belongs to the file. The remaining links must not
  * consume the reader session's work budget, even when they end in a cycle.
  * A one-link control establishes that this budget fits ordinary extraction.
@@ -3304,6 +3349,7 @@ main(void)
 	test_content_io_failure_is_terminal_with_salvage_enabled();
 	test_resolve_corruption_skips_file_before_creation();
 	test_resolved_extents_outside_or_straddling_content_domain();
+	test_zero_extent_passes_the_domain_and_salvage_keeps_the_file();
 	test_file_pass_resource_and_state_failures_are_terminal();
 	test_output_write_failure_after_content_read_is_terminal();
 	test_table_walk_changed_input_and_provider_io_failures_are_terminal();

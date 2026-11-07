@@ -50,9 +50,10 @@ typedef struct fsimg_format_variant fsimg_format_variant_t;
  * resolve	return one validated extent of the current file containing
  *		logical offset o, where o < reader->initialized. Delivery
  *		checks that it contains o and reads only the part of it
- *		inside reader->content_domain, or copies it from reader->held
- *		when resolve set that. It is never called for a decoded link
- *		target.
+ *		inside reader->content_domain, copies it from reader->held
+ *		when resolve set that, or fills it with zeros when its
+ *		image_offset is FSIMG_EXTENT_ZERO, a hole the format defines.
+ *		It is never called for a decoded link target.
  *
  * open reads its decoding options, such as a view, from reader->options.
  */

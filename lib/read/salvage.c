@@ -212,9 +212,9 @@ fail:
 /* Walk the current file's extents from its first byte up to limit. *out is the
  * first logical byte that is not available: the rejection of its lookup, or the
  * end of the content domain or the slice, which can fall inside an extent. A
- * held extent reads no image, so neither end applies to it. *out is limit when
- * every byte below limit is available. Each extent is charged, like a read of
- * it, so the walk is bounded and polled.
+ * held or zero extent reads no image, so neither end applies to it. *out is
+ * limit when every byte below limit is available. Each extent is charged, like
+ * a read of it, so the walk is bounded and polled.
  *
  * A prefix past the output budget fails the file's charge whatever the rest of
  * the file holds, so the walk ends there with that charge's error and decodes
@@ -258,7 +258,7 @@ readable_prefix(fsimg_reader_t *reader, uint64_t limit, uint64_t *out,
 		within = offset - extent.logical_offset;
 		available = extent.length - within;
 		clipped = false;
-		if (held == NULL) {
+		if (held == NULL && extent.image_offset != FSIMG_EXTENT_ZERO) {
 			if (extent.image_offset > UINT64_MAX - within)
 				break;
 			image = extent.image_offset + within;

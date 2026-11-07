@@ -1658,6 +1658,79 @@ test_held_span_delivery(void)
 	reader_fixture_close(&f);
 }
 
+/* A zero extent reads as zeros from no storage, and delivery charges it. */
+static void
+zero_fixture(reader_fixture_t *f)
+{
+	held_fixture(f);
+	f->span_bytes[0] = f->span_bytes[1] = NULL;
+	f->spans[0].image_offset = f->spans[1].image_offset = FSIMG_EXTENT_ZERO;
+}
+
+static void
+test_zero_extent_delivery(void)
+{
+	reader_fixture_t f;
+	unsigned char bytes[16];
+	size_t count, stored;
+	unsigned reads;
+	fsimg_status_t status;
+	fsimg_verify_report_t report = { 0 };
+
+	zero_fixture(&f);
+	reads = f.image.reads;
+	memset(bytes, 0xa5, sizeof(bytes));
+	status = fsimg_reader_content(f.reader, 1, bytes, 5, &count, &stored, NULL);
+	held_expect("test_zero_extent_fills_zeros_without_reading", status ==
+	    FSIMG_OK && count == 5 && stored == 0 && f.image.reads == reads &&
+	    f.resolves == 2 && bcmp(bytes, "\0\0\0\0\0", 5) == 0 &&
+	    bytes[5] == 0xa5);
+	reader_fixture_close(&f);
+
+	/* The zero extent lies outside the image and the domain: only a
+	 * stored extent is checked against them. */
+	zero_fixture(&f);
+	f.reader->content_domain.length = 0;
+	status = fsimg_reader_content(f.reader, 0, bytes, 6, &count, &stored, NULL);
+	held_expect("test_zero_extent_has_no_domain_to_fit", status == FSIMG_OK &&
+	    count == 6 && stored == 0);
+	reader_fixture_close(&f);
+
+	zero_fixture(&f);
+	f.spans[1].image_offset = 100;
+	bcopy("def", f.image.bytes + 100, 3);
+	reads = f.image.reads;
+	status = fsimg_reader_content(f.reader, 0, bytes, 6, &count, &stored, NULL);
+	held_expect("test_zero_then_mapped", status == FSIMG_OK && count == 6 &&
+	    stored == 3 && bcmp(bytes, "\0\0\0def", 6) == 0 &&
+	    f.image.reads == reads + 1);
+	reader_fixture_close(&f);
+
+	for (unsigned cancel = 0; cancel < 2; cancel++) {
+		zero_fixture(&f);
+		if (cancel != 0)
+			f.cancelled = true;
+		else
+			f.ctx->options.max_work = f.reader->session.progress.work;
+		status = fsimg_reader_content(f.reader, 0, bytes, 6, &count,
+		    &stored, NULL);
+		held_expect(cancel ? "test_zero_extent_observes_cancellation" :
+		    "test_zero_extent_charges_work", count == 0 && stored == 0 &&
+		    status == (cancel ? FSIMG_ECANCELLED : FSIMG_ELIMIT));
+		reader_fixture_close(&f);
+	}
+
+	zero_fixture(&f);
+	reads = f.image.reads;
+	status = fsimg_verify_account(f.reader, &report, NULL);
+	if (status == FSIMG_OK)
+		status = fsimg_verify_payload(f.reader, bytes, sizeof(bytes), &report, NULL);
+	held_expect("test_zero_extent_verification_counts_logical_bytes",
+	    status == FSIMG_OK && report.logical_bytes == 6 &&
+	    report.payload_bytes_read == 0 && f.image.reads == reads);
+	reader_fixture_close(&f);
+}
+
 static void
 test_held_span_checks_each_span(void)
 {
@@ -1709,6 +1782,7 @@ int
 main(void)
 {
 	test_held_span_delivery();
+	test_zero_extent_delivery();
 	test_held_span_checks_each_span();
 	test_child_error_paths_apply_the_name_profile();
 	test_child_error_paths_obey_the_path_limit();

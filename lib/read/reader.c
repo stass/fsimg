@@ -422,10 +422,11 @@ fsimg_reader_resolve(fsimg_reader_t *reader, uint64_t offset,
  * touch storage. A decoded link target is served as [0, size) of the
  * reader's target buffer instead, after the stability check and one unit
  * of work that a stored read would cost. A held extent is copied from the
- * driver's buffer at the same cost. transferred counts only confirmed
- * bytes, so a failure in a later extent still reports the pieces before
- * it; stored counts those among them read from the image, which excludes
- * synthesized zeros, decoded targets and held extents.
+ * driver's buffer at the same cost, and a zero extent filled with zeros.
+ * transferred counts only confirmed bytes, so a failure in a later extent
+ * still reports the pieces before it; stored counts those among them read
+ * from the image, which excludes synthesized zeros, zero extents, decoded
+ * targets and held extents.
  */
 fsimg_status_t
 fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
@@ -480,23 +481,26 @@ fsimg_reader_content(fsimg_reader_t *reader, uint64_t offset, void *out,
 		/* Clip the extent to the request and to the initialized length, so
 		 * slack after either is never read. A mapped piece must lie in the
 		 * content domain whatever the driver resolved, so no driver can
-		 * deliver metadata as content; a held piece reads no image, so it
-		 * has no range to check.
+		 * deliver metadata as content; a held or zero piece reads no
+		 * image, so it has no range to check.
 		 */
 		within = offset - extent.logical_offset;
 		if (piece > extent.length - within)
 			piece = (size_t)(extent.length - within);
 		if (piece > initialized - offset)
 			piece = (size_t)(initialized - offset);
-		if (held != NULL) {
+		if (held != NULL || extent.image_offset == FSIMG_EXTENT_ZERO) {
 			status = fsimg_reader_stable(reader, error);
 			if (status == FSIMG_OK)
 				status = fsimg_session_charge(&reader->session,
 				    0, 0, 1, error);
 			if (status != FSIMG_OK)
 				return (status);
-			bcopy(held + within, buffer + *transferred,
-			    piece);
+			if (held != NULL)
+				bcopy(held + within, buffer + *transferred,
+				    piece);
+			else
+				bzero(buffer + *transferred, piece);
 			*transferred += piece;
 			offset += piece;
 			continue;

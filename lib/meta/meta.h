@@ -98,13 +98,19 @@ fsimg_status_t fsimg_bitset_read(fsimg_bitset_t *, uint64_t, void *, size_t,
     fsimg_error_t *);
 
 /* One physical run of an object's storage: length bytes at image_offset hold
- * the object's bytes [logical_offset, logical_offset + length).
+ * the object's bytes [logical_offset, logical_offset + length). A zero
+ * extent, a hole the format defines, has image_offset FSIMG_EXTENT_ZERO: its
+ * bytes read as zeros and no storage stands behind them. No stored extent
+ * can carry the mark, since every one lies inside a domain whose end fits
+ * in uint64_t (specs/design-content.md#zero-extents).
  */
 typedef struct fsimg_extent {
 	uint64_t	 logical_offset;
 	uint64_t	 image_offset;
 	uint64_t	 length;
 } fsimg_extent_t;
+
+#define FSIMG_EXTENT_ZERO	UINT64_MAX
 
 /* The image range [offset, offset + length) that an object's storage may
  * occupy, in whole units counted from offset, such as a cluster heap.
