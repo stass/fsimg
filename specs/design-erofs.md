@@ -35,8 +35,9 @@ Evidence has three meanings here:
   `erofs-utils` [H1]. It establishes positions and meanings, not that every
   combination is valid or what current producers emit.
 * **Observation**: a measured property of a named fixture from the plan's
-  experiments (E1 through E14), produced by a pinned `mkfs.erofs` [U1] and
-  checked by `fsck.erofs`, `dump.erofs` and a Linux kernel mount [K1]. An
+  experiments (E1 through E15), produced by a pinned `mkfs.erofs` [U1] or,
+  for E15, hand-built from its skeleton, and checked by `fsck.erofs`,
+  `dump.erofs` and a Linux kernel mount [K1]. An
   observation is not a universal format rule.
 * **fsimg policy**: a deliberate validation, capability or construction
   rule. It can be stricter than the Linux kernel without redefining the
@@ -851,9 +852,10 @@ fail in the kernel and both tools, `e15-a-compact-b2048-l4096-adv1-lcount`);
 compact fields are `max(lclusterbits, 12)` bits wide, so a compact inode
 with `L > 4096` needs advice `0x01` clear, since a 32-byte group's 14-bit
 field holds only 12 bits of value (the kernel returns `EOPNOTSUPP`,
-`e15-a-compact-b4096-l8192-adv1flip`); and the inline tail follows the
-record, or compact group, holding record `(size - 1) >> lclusterbits`
-(`e15-c-l2b-tail-at-L`).
+`e15-a-compact-b4096-l8192-adv1flip`); and the inline tail follows record
+`(size - 1) >> lclusterbits`, or the end of the compact group holding it
+(the full index observed, `e15-c-l2b-tail-at-L`; the compact index from
+the kernel's source).
 
 | Advice bit | Meaning |
 | --- | --- |
@@ -951,8 +953,9 @@ files). A compact inode with advice bit `0x01` clear lays every record in
 groups, under the anchor, last-slot and block rules above; the kernel,
 `fsck.erofs` and `dump.erofs` read one (E15, hand-built `e15-b-compact-*`,
 non-head records in every slot). It is `FSIMG_EUNSUPPORTED` naming the
-advice as fsimg policy: no producer writes one, since `mkfs.erofs` sets
-`0x01` on every compact inode (source `compress.c`).
+advice as fsimg policy: no producer writes one, since `mkfs.erofs` writes
+`lclusterbits = blkszbits`, at most 12, and sets `0x01` on every compact
+inode with `lclusterbits` at or below 12 (source `compress.c`).
 
 A head or plain record's block number is its group's anchor plus a sum
 gathered by walking back over the records before it in the same group. The
@@ -1054,26 +1057,26 @@ within one block. A size of zero, or a tail that crosses a block boundary,
 is `FSIMG_ECORRUPT`, the kernel's rule. The tail is decoded by its
 record's type like any other cluster: a head when the producer compressed
 it, a plain cluster when compression gained nothing (E8, `e8-lz4-ztail`, 76
-head and 5 plain tails). A plain tail on an interlaced inode, advice `0x10`
-with the tail's record of type 0, is `FSIMG_EUNSUPPORTED` naming the
-combination, which no producer fixture holds: `mkfs.erofs` never inlines
-the final extent of a file that `fragments` may pack, and `fragments` is
-what sets `0x10` (source `compress.c`, `may_inline` requires
-`!may_packing`; 51 files under `-E ztailpacking,fragments` give whole-file
-fragments or advice `0x31`, never `0x08` with `0x10`). The reference
-readers have no agreed meaning for one: for a tail of `E` bytes at
-`clusterofs` `C`, the kernel reads it correctly only when `E > B - C` and
-the stored bytes are the extent rotated left by `B - C`; when
-`E <= B - C` it copies bytes preceding the tail in the inode's block into
-the file, and `fsck.erofs` reads bytes after the tail in every interlaced
-case (E15, hand-built `e15-c-il-*`). Its
-record's block number names a block holding none of this
-file's bytes and is not read, and no count marker follows it. The tail's
-block is not necessarily the block holding the inode's start: when an
-inode starts near a block's end, its index runs into the next block and the
-tail follows it there (E8, `e8-lz4-ztail`, 5 of 81 tails, such as
-`/text008` at `0x23dfe0` with the index ending and the tail starting at
-`0x23e030`; `e2-count-zt`).
+head and 5 plain tails). The tail's record's block number names a block
+holding none of this file's bytes and is not read, and no count marker
+follows it. The tail's block is not necessarily the block holding the
+inode's start: when an inode starts near a block's end, its index runs
+into the next block and the tail follows it there (E8, `e8-lz4-ztail`, 5
+of 81 tails, such as `/text008` at `0x23dfe0` with the index ending and
+the tail starting at `0x23e030`; `e2-count-zt`).
+
+A plain tail on an interlaced inode, advice `0x10` with the tail's record
+of type 0, is `FSIMG_EUNSUPPORTED` naming the combination, which no
+producer fixture holds: `mkfs.erofs` never inlines the final extent of a
+file that `fragments` may pack, and `fragments` is what sets `0x10`
+(source `compress.c`, `may_inline` requires `!may_packing`; 51 files under
+`-E ztailpacking,fragments` give whole-file fragments or advice `0x31`,
+never `0x08` with `0x10`). The reference readers have no agreed meaning
+for one: for a tail of `E` bytes at `clusterofs` `C`, the kernel reads it
+correctly only when `E > B - C` and the stored bytes are the extent
+rotated left by `B - C`; when `E <= B - C` it copies bytes preceding the
+tail in the inode's block into the file, and `fsck.erofs` reads bytes
+after the tail in every interlaced case (E15, hand-built `e15-c-il-*`).
 
 ### Packed fragments
 

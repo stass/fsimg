@@ -200,7 +200,7 @@ fixture behind each answer; the designs carry the answers themselves.
 | Device-number encoding; sizes and layout words of FIFOs, sockets and devices | E5 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
 | Attribute header reserved bytes; prefix table placement and units; the filter hash | E6 | Stages 3, 4 | [Answered](erofs-research.md#evidence-answers) |
 | Chunk entry forms, holes, shared chunks | E7 | Stage 5 | [Answered](erofs-research.md#evidence-answers) |
-| Compact group packing at every boundary; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | E8 | Stages 6, 11 | [Answered](erofs-research.md#evidence-answers); `L > B` and compact advice `0x01` clear are refused by policy after E15 |
+| Compact group packing at every boundary; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | E8 | Stages 6, 11 | [Answered](erofs-research.md#evidence-answers); `L > B` and compact advice `0x01` clear are refused by policy (E15) |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | E9 | Stage 7 | [Answered](erofs-research.md#evidence-answers); head-2 by hand-built images only |
 | Every 48-bit field; the extent count's placement; encoded-extent widths; kernel acceptance of the writer's 32-byte records | E10 | Stages 12, 14, 15 | Open, runs before stage 12 |
 | Kernel acceptance of writer output at 512, 1024 and 2048-byte blocks and of the writer's field choices | E11 | Stages 10, 11 | Open, runs before stage 10 |
@@ -256,7 +256,7 @@ fixtures, their command records and the oracle output:
 | E12 Metadata box | Box volumes plain and LZ4-compressed, with directories, files and shared attributes inside; where the root lives |
 | E13 Scale | Files beyond 4 GiB through sparse sources; a directory of 100000 entries; a tree placing the root NID and start blocks at their limits |
 | E14 External devices | `--blobdev` and `--tar=i` volumes, structure only |
-| E15 Large logical clusters | Hand-built images through the independent generator: a compressed inode with `L = 2B` a compact inode with advice `0x01` clear, and a plain (interlaced) inline tail on a volume with both `ztailpacking` and `fragments`, each mounted by the kernel and checked by `fsck.erofs`, extents compared with `dump.erofs -e` |
+| E15 Large logical clusters | Hand-built images through the independent generator: a compressed inode with `L = 2B`, a compact inode with advice `0x01` clear, and a plain (interlaced) inline tail on a volume with both `ztailpacking` and `fragments`, each mounted by the kernel and checked by `fsck.erofs`, extents compared with `dump.erofs -e` |
 
 * **Deliverable:** `docs/erofs-research.md`: sources and licenses, tool
   identities, per-experiment observations, and for each evidence question an
