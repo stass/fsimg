@@ -266,6 +266,8 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 			*error = detail;
 		return (detail.status);
 	}
+	/* Drivers and the walker rely on every field starting at zero. */
+	bzero(reader, sizeof(*reader));
 	reader->ctx = ctx;
 	reader->input = input;
 	reader->options = *options;

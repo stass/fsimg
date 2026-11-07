@@ -22,6 +22,9 @@
 #define EROFS_SUPER_SLOT_BYTES		16u
 #define EROFS_BLKSZBITS_MIN		9u
 #define EROFS_BLKSZBITS_MAX		12u
+/* The probe reads through the base superblock and no further. */
+#define EROFS_PROBE_BYTES		(EROFS_SUPER_OFFSET + EROFS_SUPER_BASE_BYTES)
+#define EROFS_NAME_FIELD_BYTES		16u
 
 /* Compatible features: an unknown bit does not prevent reading. */
 #define EROFS_COMPAT_SB_CHKSUM		UINT32_C(0x01)
@@ -147,6 +150,16 @@ typedef struct erofs_config {
 } erofs_config_t;
 
 /*
+ * The two metadata spaces a NID can address: the volume itself, inside the
+ * address domain, and the metadata box inode's content. Offsets in the
+ * primary space are volume byte offsets.
+ */
+typedef enum erofs_space {
+	EROFS_SPACE_PRIMARY,
+	EROFS_SPACE_BOX
+} erofs_space_t;
+
+/*
  * The decoded fixed part of an inode. layout_offset is where its layout
  * bytes (the inline tail or the chunk index) start and body_bytes where
  * they end, both from the inode's first byte, so [0, body_bytes) is all the
@@ -154,8 +167,13 @@ typedef struct erofs_config {
  * layout_word is the word at 0x10: a start block, a chunk format or a
  * device number by the inode's layout and kind. layout_high holds start-block
  * bits 32 to 47 under the 48-bit layout and is zero otherwise.
+ * nid, space and offset say where the inode is: erofs_inode_load() sets
+ * them, and erofs_inode_decode() alone leaves them zero.
  */
 typedef struct erofs_inode {
+	uint64_t	 nid;
+	uint64_t	 offset;		/* of the fixed part, in space */
+	erofs_space_t	 space;
 	uint64_t	 size;
 	uint64_t	 layout_offset;
 	uint64_t	 body_bytes;
@@ -244,6 +262,55 @@ typedef struct erofs_prefix {
 	uint16_t	 infix_length;
 	uint8_t		 base_index;
 } erofs_prefix_t;
+
+/*
+ * The feature decision open makes once from the superblock's feature words.
+ * The rest of the driver reads these, never the words. A feature this
+ * reader refuses at open has no member, since no opened volume sets it.
+ * unknown_compat records a compatible bit outside the format's table, which
+ * does not prevent reading but leaves verification incomplete.
+ */
+typedef struct erofs_features {
+	bool		 checksum;		/* SB_CHKSUM: open checked it */
+	bool		 mtime;			/* MTIME: times are modifications */
+	bool		 xattr_filter;		/* XATTR_FILTER */
+	bool		 long_prefixes;		/* XATTR_PREFIXES */
+	bool		 plain_prefixes;	/* PLAIN_XATTR_PFX */
+	bool		 unknown_compat;
+} erofs_features_t;
+
+/*
+ * The driver's state, from open to close. domain_bytes ends the address
+ * domain [0, domain_bytes): the block count times the block size, or the
+ * input's length when the count is zero. Every structure the driver reads
+ * lies inside it; a part of it past the input's end is a truncation, which
+ * bounded I/O reports when something there is read.
+ */
+typedef struct fsimg_erofs_reader {
+	erofs_super_t	 super;
+	erofs_config_t	 config;
+	erofs_features_t features;
+	uint64_t	 domain_bytes;
+	uint32_t	 block_bytes;
+} fsimg_erofs_reader_t;
+
+extern const fsimg_reader_ops_t fsimg_erofs_reader_ops;
+
+/* Driver state and error reporting (read.c). */
+fsimg_erofs_reader_t *erofs_state(const fsimg_reader_t *);
+fsimg_status_t	erofs_reject(fsimg_error_t *, fsimg_status_t, const char *);
+
+/*
+ * The metadata reader (meta.c), the one place a NID or a metadata offset
+ * becomes bytes. Every read goes through bounded I/O after its range is
+ * proved inside its space.
+ */
+fsimg_status_t	erofs_meta_read(fsimg_reader_t *, erofs_space_t, uint64_t,
+		    size_t, void *, fsimg_error_t *);
+fsimg_status_t	erofs_inode_load(fsimg_reader_t *, uint64_t, erofs_inode_t *,
+		    fsimg_error_t *);
+fsimg_status_t	erofs_body_read(fsimg_reader_t *, const erofs_inode_t *,
+		    uint64_t, size_t, void *, fsimg_error_t *);
 
 /*
  * Decoders (codec.c). Each reads only the bytes and length it is given,

@@ -150,11 +150,14 @@ construction.
 
 `erofs_inode_load(reader, nid, out)` computes the space and offset from the
 NID, reads the fixed part, decodes and validates it, computes the body
-length from the attribute count and layout, and reads the attribute header
-and layout header it needs. It records the body's span; later readers of
-the body, such as `xattr.c` and `zmap.c`, call `erofs_meta_read()` for the
-ranges they need, so no body is held whole and a body's length is bounded
-only by the address domain.
+length from the attribute count and layout, and reads the layout header the
+length needs, the map header of a compressed inode. It records the body's
+span and checks it against the space and the inline-tail rule. Later
+readers of the body, such as `xattr.c` and `zmap.c`, call
+`erofs_body_read()` for the ranges they need, which refuses a range outside
+the body as `FSIMG_ECORRUPT` and reads through `erofs_meta_read()`, so no
+body is held whole and a body's length is bounded only by the address
+domain.
 
 ## Mapping
 

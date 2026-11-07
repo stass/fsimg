@@ -12,15 +12,19 @@
 #include <string.h>
 #include <strings.h>
 
+#include "erofs-gen.h"
 #include "erofs.h"
+#include "format.h"
 #include "test.h"
 
 /*
- * Tests of the EROFS on-disk codecs. Structures are built here with small
- * helpers that write fields at the byte offsets of the format's on-disk
- * tables, independently of codec.c. Real mkfs.erofs
- * output is embedded as sparse runs of its non-zero bytes. Every check is
- * recorded, not fatal, so one run lists every failing case.
+ * Tests of the EROFS on-disk codecs, and of the probe, open and the metadata
+ * reader. Structures are built here with small helpers that write fields at
+ * the byte offsets of the format's on-disk tables, independently of codec.c.
+ * Real mkfs.erofs output is embedded as sparse runs of its non-zero bytes.
+ * The probe, open and metadata reader tests run against images from the
+ * independent generator in test/erofs-gen.c. Every check is recorded, not
+ * fatal, so one run lists every failing case.
  */
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -45,6 +49,8 @@ status_name(fsimg_status_t status)
 		return ("EUNSUPPORTED");
 	case FSIMG_EINVAL:
 		return ("EINVAL");
+	case FSIMG_ENOMEM:
+		return ("ENOMEM");
 	default:
 		return ("other status");
 	}
@@ -3955,6 +3961,1377 @@ test_real_long_prefix_records_decode(void)
 	    "the table ends where the first inode starts");
 }
 
+/* ---- Probe, open and the metadata reader ---- */
+
+/*
+ * These tests open images from test/erofs-gen.c through the driver's own
+ * open callback, the way the hfsplus tests do, so every refusal is the
+ * driver's and not the registry's. A minimal volume has its metadata at
+ * byte 4096, past the superblock region at every block size, and two blocks
+ * of metadata space from there to the end of its address domain.
+ */
+
+enum {
+	META_BYTES = 4096,		/* where a minimal volume's metadata starts */
+	INODE_ROOT_TAIL = 24		/* the minimal root directory's inline size */
+};
+
+/*
+ * Feature bits and data layouts as the design's tables number them, kept
+ * apart from the driver's constants so a wrong value there cannot make a
+ * test agree with it.
+ */
+enum {
+	COMPAT_SB_CHKSUM = 0x01,
+	COMPAT_MTIME = 0x02,
+	COMPAT_SHARED_EA_IN_METABOX = 0x08,
+	COMPAT_PLAIN_XATTR_PFX = 0x10,
+	COMPAT_UNNAMED_BIT = 0x40,
+	INCOMPAT_CHUNKED_FILE = 0x004,
+	INCOMPAT_FRAGMENTS = 0x020,
+	INCOMPAT_XATTR_PREFIXES = 0x040,
+	INCOMPAT_METABOX = 0x100,
+	LAYOUT_COMPRESSED_FULL = 1,
+	LAYOUT_FLAT_INLINE = 2,
+	LAYOUT_COMPRESSED_COMPACT = 3,
+	LAYOUT_CHUNK_BASED = 4
+};
+
+/* The blocks of a minimal volume: the blocks before the metadata, then two. */
+static uint32_t
+minimal_blocks(unsigned blkszbits)
+{
+	return ((uint32_t)META_BYTES >> blkszbits) + 2;
+}
+
+/*
+ * Build a volume of length bytes from sb and root, the minimal root when
+ * root is NULL; the checksum is stored last when the superblock asks for it.
+ */
+static void
+image_build_sized(gen_image_t *image, const gen_super_t *sb,
+    const gen_inode_t *root, size_t length)
+{
+	gen_inode_t minimal = gen_root_default();
+
+	gen_image_init(image, length);
+	gen_super_write(image, sb);
+	gen_inode_write(image, root != NULL ? root : &minimal);
+	if ((sb->compat & COMPAT_SB_CHKSUM) != 0)
+		gen_seal(image);
+}
+
+static void
+image_build(gen_image_t *image, const gen_super_t *sb, const gen_inode_t *root)
+{
+	image_build_sized(image, sb, root, (size_t)sb->blocks << sb->blkszbits);
+}
+
+static void
+minimal_image(gen_image_t *image, unsigned blkszbits)
+{
+	gen_super_t sb = gen_super_default(blkszbits, minimal_blocks(blkszbits));
+
+	image_build(image, &sb, NULL);
+}
+
+/* A reader over an in-memory image, built the way a driver test opens one. */
+typedef struct volume {
+	fsimg_reader_t	 reader;
+	fsimg_ctx_t	*ctx;
+	fsimg_io_t	*io;
+	const unsigned char *bytes;
+	uint64_t	 length;
+	uint64_t	 baseline;
+} volume_t;
+
+static fsimg_status_t
+volume_read(void *argument, uint64_t offset, void *buffer, size_t length,
+    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	volume_t *v = argument;
+
+	CHECK(offset <= v->length && length <= v->length - offset);
+	bcopy(v->bytes + offset, buffer, length);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+volume_size(void *argument, uint64_t *size, fsimg_error_t *error FSIMG_UNUSED)
+{
+	*size = ((volume_t *)argument)->length;
+	return (FSIMG_OK);
+}
+
+static void
+volume_start(volume_t *v, const unsigned char *bytes, uint64_t length)
+{
+	fsimg_options_t options;
+	fsimg_io_ops_t ops;
+	fsimg_stats_t stats;
+
+	bzero(v, sizeof(*v));
+	v->bytes = bytes;
+	v->length = length;
+	fsimg_options_init(&options);
+	options.memory_bytes = 16 * 1024 * 1024;
+	CHECK(fsimg_ctx_new(&options, &v->ctx, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(v->ctx, &stats, NULL) == FSIMG_OK);
+	v->baseline = stats.memory_bytes;
+	fsimg_io_ops_init(&ops);
+	ops.read_at = volume_read;
+	ops.get_size = volume_size;
+	CHECK(fsimg_io_from_callbacks(v->ctx, &ops, v, &v->io, NULL) ==
+	    FSIMG_OK);
+	v->reader.ctx = v->ctx;
+	v->reader.input = v->io;
+	v->reader.ops = &fsimg_erofs_reader_ops;
+	v->reader.slice_bytes = length;
+	v->reader.state = FSIMG_READER_OPENING;
+	fsimg_read_options_init(&v->reader.options);
+	fsimg_session_init(&v->reader.session, v->ctx, "test", 0);
+}
+
+static fsimg_status_t
+volume_open(volume_t *v, unsigned flags, fsimg_error_t *error)
+{
+	v->reader.options.flags |= flags;
+	return (fsimg_erofs_reader_ops.open(&v->reader, NULL, error));
+}
+
+/* Close twice, then require that every byte the open took came back. */
+static void
+volume_stop(volume_t *v, const char *name)
+{
+	fsimg_stats_t stats;
+
+	fsimg_erofs_reader_ops.close(&v->reader);
+	fsimg_erofs_reader_ops.close(&v->reader);
+	fsimg_io_free(v->io);
+	CHECK(fsimg_ctx_get_stats(v->ctx, &stats, NULL) == FSIMG_OK);
+	EXPECT(stats.memory_bytes == v->baseline,
+	    "%s: close returns memory to the baseline (%llu != %llu)", name,
+	    (unsigned long long)stats.memory_bytes,
+	    (unsigned long long)v->baseline);
+	fsimg_ctx_free(v->ctx);
+}
+
+static void
+check_status(const char *name, fsimg_status_t got, fsimg_status_t want,
+    const fsimg_error_t *error)
+{
+	expect_status(got, want, error->message, __func__, __LINE__, name);
+}
+
+static bool
+has_phrase(const fsimg_error_t *error, const char *phrase)
+{
+	return (phrase == NULL || strstr(error->message, phrase) != NULL);
+}
+
+/* Open image of length bytes and close it again; the open's error is kept. */
+static fsimg_status_t
+open_close(const char *name, const unsigned char *bytes, size_t length,
+    unsigned flags, fsimg_error_t *error)
+{
+	volume_t v;
+	fsimg_status_t status;
+
+	bzero(error, sizeof(*error));
+	volume_start(&v, bytes, length);
+	status = volume_open(&v, flags, error);
+	volume_stop(&v, name);
+	return (status);
+}
+
+/* Require status want and, if given, a phrase in the message. */
+static void
+check_refusal(const char *name, fsimg_status_t got, fsimg_status_t want,
+    const fsimg_error_t *error, const char *phrase)
+{
+	check_status(name, got, want, error);
+	EXPECT(has_phrase(error, phrase), "%s: message \"%s\" names \"%s\"",
+	    name, error->message, phrase);
+}
+
+/* Open the whole image with flags and require status want and a phrase. */
+static void
+check_open_flags(const char *name, const gen_image_t *image, unsigned flags,
+    fsimg_status_t want, const char *phrase)
+{
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	status = open_close(name, image->bytes, image->length, flags, &error);
+	check_refusal(name, status, want, &error, phrase);
+}
+
+static void
+check_open(const char *name, const gen_image_t *image, fsimg_status_t want,
+    const char *phrase)
+{
+	check_open_flags(name, image, 0, want, phrase);
+}
+
+static const fsimg_volume_detail_t *
+find_detail(const fsimg_volume_info_t *info, const char *name)
+{
+	for (unsigned i = 0; i < info->detail_count; i++) {
+		if (strcmp(info->details[i].name, name) == 0)
+			return (&info->details[i]);
+	}
+	return (NULL);
+}
+
+static const char *
+find_text(const fsimg_volume_info_t *info, const char *name)
+{
+	for (unsigned i = 0; i < info->text_count; i++) {
+		if (strcmp(info->texts[i].name, name) == 0)
+			return (info->texts[i].value);
+	}
+	return (NULL);
+}
+
+static bool
+detail_is(const fsimg_volume_info_t *info, const char *name, uint64_t value)
+{
+	const fsimg_volume_detail_t *detail = find_detail(info, name);
+
+	return (detail != NULL && detail->value == value);
+}
+
+static bool
+text_is(const fsimg_volume_info_t *info, const char *name, const char *value)
+{
+	const char *text = find_text(info, name);
+
+	return (text != NULL && strcmp(text, value) == 0);
+}
+
+/* ---- The probe ---- */
+
+static void
+test_generator_crc32c_matches_the_published_check_value(void)
+{
+	/* The stored form is the register without the final inversion. */
+	EXPECT(gen_crc32c_register((const unsigned char *)"123456789", 9) ==
+	    UINT32_C(0x1cf96d7c), "stored form of 123456789");
+}
+
+static fsimg_status_t
+probe_prefix(const unsigned char *prefix, size_t length, const char **name)
+{
+	const fsimg_format_variant_t *variant = NULL;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	bzero(&error, sizeof(error));
+	status = fsimg_erofs_format.probe(prefix, length, length, &variant,
+	    &error);
+	*name = variant != NULL ? variant->info.name : NULL;
+	return (status);
+}
+
+static void
+check_probe(const char *name, const unsigned char *prefix, size_t length,
+    fsimg_status_t want)
+{
+	const char *variant;
+	fsimg_status_t status = probe_prefix(prefix, length, &variant);
+
+	expect_status(status, want, NULL, __func__, __LINE__, name);
+}
+
+static void
+test_probe_needs_the_magic_inside_the_prefix(void)
+{
+	gen_image_t image;
+	unsigned char other[1152];
+
+	minimal_image(&image, 12);
+	check_probe("no prefix", NULL, 0, FSIMG_EFORMAT);
+	check_probe("prefix ends before the magic ends", image.bytes, 1027,
+	    FSIMG_EFORMAT);
+	bcopy(image.bytes, other, sizeof(other));
+	other[1024] ^= 0xff;
+	check_probe("a different magic", other, sizeof(other), FSIMG_EFORMAT);
+	gen_image_free(&image);
+}
+
+static void
+test_probe_claims_a_full_prefix_and_names_erofs(void)
+{
+	gen_image_t image;
+	const char *variant;
+
+	minimal_image(&image, 12);
+	EXPECT(probe_prefix(image.bytes, 1152, &variant) == FSIMG_OK,
+	    "1152-byte prefix of a valid image");
+	EXPECT(variant != NULL && strcmp(variant, "erofs") == 0,
+	    "the variant is named erofs");
+	gen_image_free(&image);
+}
+
+static void
+test_probe_with_a_short_base_superblock_is_corrupt(void)
+{
+	gen_image_t image;
+
+	minimal_image(&image, 12);
+	check_probe("prefix of 1028 bytes", image.bytes, 1028, FSIMG_ECORRUPT);
+	check_probe("prefix of 1151 bytes", image.bytes, 1151, FSIMG_ECORRUPT);
+	gen_image_free(&image);
+}
+
+typedef struct probe_case {
+	const char	*name;
+	patch_t		 patches[MAX_PATCHES];
+	fsimg_status_t	 want;
+} probe_case_t;
+
+static void
+test_probe_classifies_the_base_superblock(void)
+{
+	static const probe_case_t cases[] = {
+		{ "blkszbits 8", { { SB_BLKSZBITS, 1, 8 } }, FSIMG_ECORRUPT },
+		{ "blkszbits 13", { { SB_BLKSZBITS, 1, 13 } },
+		    FSIMG_EUNSUPPORTED },
+		{ "blkszbits 9", { { SB_BLKSZBITS, 1, 9 } }, FSIMG_OK },
+		{ "dirblkbits 1", { { SB_DIRBLKBITS, 1, 1 } },
+		    FSIMG_EUNSUPPORTED },
+		{ "185 extension slots", { { SB_SLOTS, 1, 185 } },
+		    FSIMG_EUNSUPPORTED },
+		{ "184 extension slots", { { SB_SLOTS, 1, 184 } }, FSIMG_OK },
+		{ "incompat bit 0x200", { { SB_INCOMPAT, 4, 0x200 } },
+		    FSIMG_EUNSUPPORTED },
+		{ "wrong checksum is not the probe's concern",
+		    { { SB_CHECKSUM, 4, 0xdeadbeef } }, FSIMG_OK }
+	};
+	gen_image_t image;
+
+	minimal_image(&image, 12);
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		unsigned char prefix[1152];
+		const char *variant;
+
+		bcopy(image.bytes, prefix, sizeof(prefix));
+		patch_apply(prefix + GEN_SUPER_OFFSET, cases[i].patches);
+		expect_status(probe_prefix(prefix, sizeof(prefix), &variant),
+		    cases[i].want, NULL, __func__, __LINE__, cases[i].name);
+	}
+	gen_image_free(&image);
+}
+
+/* ---- Open ---- */
+
+static void
+test_open_accepts_the_minimal_volume(void)
+{
+	gen_image_t image;
+
+	minimal_image(&image, 12);
+	check_open("minimal volume", &image, FSIMG_OK, NULL);
+	gen_image_free(&image);
+}
+
+static void
+test_open_reports_geometry_uuid_and_the_format_values(void)
+{
+	gen_super_t sb = gen_super_default(12, 3);
+	gen_image_t image;
+	volume_t v;
+	fsimg_error_t error;
+	const fsimg_volume_info_t *info;
+
+	for (unsigned i = 0; i < 16; i++)
+		sb.uuid[i] = (uint8_t)(0x10 + i);
+	sb.inode_count = 77;
+	sb.compat = COMPAT_SB_CHKSUM | COMPAT_MTIME;
+	sb.build_time = 12345;
+	sb.epoch = 1700000000;
+	sb.epoch_nsec = 123456789;
+	image_build(&image, &sb, NULL);
+	gen_put(&image, GEN_SUPER_OFFSET + SB_ISHARE, 9, 1);
+	gen_put(&image, GEN_SUPER_OFFSET + SB_RESERVED_6A, 1, 1);
+	gen_seal(&image);
+
+	volume_start(&v, image.bytes, image.length);
+	check_status("open", volume_open(&v, 0, &error), FSIMG_OK, &error);
+	info = &v.reader.info;
+	EXPECT(strcmp(info->format, "erofs") == 0 &&
+	    strcmp(info->profile, "core") == 0, "format erofs, profile core");
+	EXPECT((info->valid & FSIMG_VOLUME_GEOMETRY) != 0 &&
+	    (info->valid & FSIMG_VOLUME_UUID) != 0, "geometry and uuid valid");
+	EXPECT(info->volume_bytes == 3 * 4096 &&
+	    info->allocation_unit_bytes == 4096 && info->allocation_units == 3,
+	    "volume_bytes %llu, unit %llu, units %llu",
+	    (unsigned long long)info->volume_bytes,
+	    (unsigned long long)info->allocation_unit_bytes,
+	    (unsigned long long)info->allocation_units);
+	EXPECT(bcmp(info->uuid, sb.uuid, 16) == 0, "uuid as stored");
+	EXPECT(info->detail_count > 0 &&
+	    strcmp(info->details[0].name, "block_count") == 0,
+	    "block_count is the first detail");
+	EXPECT(detail_is(info, "block_count", 3), "block_count detail");
+	EXPECT(detail_is(info, "inode_count", 77), "inode_count detail");
+	EXPECT(detail_is(info, "epoch_nsec", 123456789), "epoch_nsec detail");
+	EXPECT(detail_is(info, "compat", 3), "compat detail");
+	EXPECT(detail_is(info, "incompat", 0), "incompat detail");
+	EXPECT(detail_is(info, "build_time", 12345), "build_time detail");
+	EXPECT(detail_is(info, "ishare_prefix", 9), "ishare_prefix detail");
+	EXPECT(detail_is(info, "reserved_nonzero", 1),
+	    "reserved_nonzero detail");
+	EXPECT(text_is(info, "epoch", "1700000000"), "epoch text is \"%s\"",
+	    find_text(info, "epoch") != NULL ? find_text(info, "epoch") : "");
+	EXPECT(text_is(info, "compat_features", "SB_CHKSUM MTIME"),
+	    "compat_features text");
+	EXPECT(erofs_state(&v.reader)->features.mtime, "MTIME feature decided");
+	volume_stop(&v, "geometry");
+	gen_image_free(&image);
+}
+
+static void
+test_open_reports_a_negative_epoch_as_signed_seconds(void)
+{
+	gen_super_t sb = gen_super_default(12, 3);
+	gen_image_t image;
+	volume_t v;
+	fsimg_error_t error;
+
+	sb.epoch = -5;
+	sb.epoch_nsec = 999999999;
+	image_build(&image, &sb, NULL);
+	volume_start(&v, image.bytes, image.length);
+	check_status("open", volume_open(&v, 0, &error), FSIMG_OK, &error);
+	EXPECT(text_is(&v.reader.info, "epoch", "-5"), "epoch text is -5");
+	EXPECT(detail_is(&v.reader.info, "epoch_nsec", 999999999),
+	    "epoch_nsec detail");
+	EXPECT(detail_is(&v.reader.info, "reserved_nonzero", 0),
+	    "reserved bytes are zero");
+	EXPECT(!erofs_state(&v.reader)->features.mtime, "no MTIME feature");
+	volume_stop(&v, "negative epoch");
+	gen_image_free(&image);
+}
+
+static void
+test_open_accepts_every_block_size_with_a_correct_checksum(void)
+{
+	for (unsigned bits = 9; bits <= 12; bits++) {
+		char name[32];
+		gen_image_t image;
+
+		snprintf(name, sizeof(name), "block size %u", 1u << bits);
+		minimal_image(&image, bits);
+		check_open(name, &image, FSIMG_OK, NULL);
+		gen_image_free(&image);
+	}
+}
+
+static void
+test_open_refuses_a_flipped_bit_inside_the_checksum_range(void)
+{
+	for (unsigned bits = 9; bits <= 12; bits++) {
+		size_t last = GEN_SUPER_OFFSET + covered_bytes(bits) - 1;
+		const size_t flips[] = { GEN_SUPER_OFFSET + SB_UUID, last };
+		char name[48];
+		gen_image_t image;
+
+		for (size_t i = 0; i < ARRAY_SIZE(flips); i++) {
+			minimal_image(&image, bits);
+			image.bytes[flips[i]] ^= 0x10;
+			snprintf(name, sizeof(name), "B=%u flip at %zu",
+			    1u << bits, flips[i]);
+			check_open(name, &image, FSIMG_ECORRUPT, "checksum");
+			gen_image_free(&image);
+		}
+	}
+}
+
+static void
+test_open_accepts_a_flipped_bit_just_past_the_checksum_range(void)
+{
+	for (unsigned bits = 9; bits <= 12; bits++) {
+		/* At 4096 the range ends where the root inode starts; its
+		 * serial number is a free field. */
+		size_t past = bits == 12 ? META_BYTES + 0x14 :
+		    GEN_SUPER_OFFSET + covered_bytes(bits);
+		char name[48];
+		gen_image_t image;
+
+		minimal_image(&image, bits);
+		image.bytes[past] ^= 0x10;
+		snprintf(name, sizeof(name), "B=%u flip at %zu", 1u << bits,
+		    past);
+		check_open(name, &image, FSIMG_OK, NULL);
+		gen_image_free(&image);
+	}
+}
+
+static void
+test_open_does_not_check_the_checksum_without_sb_chksum(void)
+{
+	gen_super_t sb = gen_super_default(12, 3);
+	gen_image_t image;
+
+	sb.compat = 0;
+	sb.checksum = 0xdeadbeef;
+	image_build(&image, &sb, NULL);
+	check_open("garbage checksum, no SB_CHKSUM", &image, FSIMG_OK, NULL);
+	gen_image_free(&image);
+}
+
+/* Fields patched into a minimal 4096-byte-block volume before open. */
+typedef struct open_case {
+	const char	*name;
+	patch_t		 patches[MAX_PATCHES];
+	bool		 reseal;	/* store the checksum after patching */
+	fsimg_status_t	 want;
+	const char	*phrase;	/* the message names it, or NULL */
+} open_case_t;
+
+static void
+run_open_cases(const open_case_t *cases, size_t count, unsigned flags)
+{
+	for (size_t i = 0; i < count; i++) {
+		gen_image_t image;
+
+		minimal_image(&image, 12);
+		patch_apply(image.bytes + GEN_SUPER_OFFSET, cases[i].patches);
+		if (cases[i].reseal)
+			gen_seal(&image);
+		check_open_flags(cases[i].name, &image, flags,
+		    cases[i].want, cases[i].phrase);
+		gen_image_free(&image);
+	}
+}
+
+static void
+test_open_refuses_a_checksum_range_cut_short_by_the_input(void)
+{
+	gen_image_t image;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	minimal_image(&image, 12);
+	put_le(image.bytes + GEN_SUPER_OFFSET + SB_COMPAT, COMPAT_SB_CHKSUM,
+	    4);
+	/*
+	 * The 2000-byte input holds the magic and the base superblock, so
+	 * the identity check and the base rules pass, and no extension slot
+	 * or extra device is declared. The checksum covers 3072 bytes from
+	 * byte 1024 but only 976 are there, and the checksum rule is the
+	 * first to look at them.
+	 */
+	status = open_close("checksum range past the input", image.bytes,
+	    2000, 0, &error);
+	check_refusal("checksum range past the input", status, FSIMG_ECORRUPT,
+	    &error, "checksum range truncated");
+	gen_image_free(&image);
+}
+
+static void
+test_open_refuses_an_unknown_incompatible_bit(void)
+{
+	static const open_case_t cases[] = {
+		{ "bit 9", { { SB_INCOMPAT, 4, 0x200 } }, true,
+		    FSIMG_EUNSUPPORTED, "incompatible feature" }
+	};
+
+	run_open_cases(cases, ARRAY_SIZE(cases), 0);
+}
+
+static void
+test_open_refuses_nonzero_extra_devices_before_the_checksum(void)
+{
+	static const open_case_t cases[] = {
+		{ "extra devices, checksum correct",
+		    { { SB_DEVICES, 2, 1 } }, true, FSIMG_EUNSUPPORTED,
+		    "device" },
+		{ "extra devices, checksum wrong, CHUNKED_FILE set",
+		    { { SB_DEVICES, 2, 1 },
+		    { SB_INCOMPAT, 4, INCOMPAT_CHUNKED_FILE } }, false,
+		    FSIMG_EUNSUPPORTED, "device" }
+	};
+
+	run_open_cases(cases, ARRAY_SIZE(cases), 0);
+}
+
+static void
+test_open_refuses_inconsistent_superblock_fields(void)
+{
+	static const open_case_t cases[] = {
+		{ "epoch nanoseconds 1000000000",
+		    { { SB_NSEC, 4, 1000000000 } }, true, FSIMG_ECORRUPT,
+		    NULL },
+		{ "SHARED_EA_IN_METABOX without METABOX",
+		    { { SB_COMPAT, 4, COMPAT_SB_CHKSUM |
+		    COMPAT_SHARED_EA_IN_METABOX } }, true,
+		    FSIMG_ECORRUPT, NULL },
+		{ "METABOX with no extension slot",
+		    { { SB_INCOMPAT, 4, INCOMPAT_METABOX } }, true,
+		    FSIMG_ECORRUPT, NULL },
+		{ "METABOX with one extension slot",
+		    { { SB_INCOMPAT, 4, INCOMPAT_METABOX },
+		    { SB_SLOTS, 1, 1 } }, true, FSIMG_EUNSUPPORTED,
+		    "METABOX" }
+	};
+
+	run_open_cases(cases, ARRAY_SIZE(cases), 0);
+}
+
+static void
+test_open_refuses_each_unimplemented_incompatible_bit_by_name(void)
+{
+	static const open_case_t cases[] = {
+		{ "LZ4_0PADDING", { { SB_INCOMPAT, 4, 0x001 } }, true,
+		    FSIMG_EUNSUPPORTED, "LZ4_0PADDING" },
+		{ "COMPR_CFGS", { { SB_INCOMPAT, 4, 0x002 },
+		    { SB_WORD54, 2, 0 } }, true, FSIMG_EUNSUPPORTED,
+		    "COMPR_CFGS" },
+		{ "CHUNKED_FILE", { { SB_INCOMPAT, 4, 0x004 } }, true,
+		    FSIMG_EUNSUPPORTED, "CHUNKED_FILE" },
+		{ "DEVICE_TABLE", { { SB_INCOMPAT, 4, 0x008 },
+		    { SB_DEVICES, 2, 0 } }, true, FSIMG_EUNSUPPORTED,
+		    "DEVICE_TABLE" },
+		{ "ZTAILPACKING", { { SB_INCOMPAT, 4, 0x010 } }, true,
+		    FSIMG_EUNSUPPORTED, "ZTAILPACKING" },
+		{ "FRAGMENTS", { { SB_INCOMPAT, 4, 0x020 } }, true,
+		    FSIMG_EUNSUPPORTED, "FRAGMENTS" },
+		{ "48BIT", { { SB_INCOMPAT, 4, 0x080 } }, true,
+		    FSIMG_EUNSUPPORTED, "48BIT" },
+		{ "METABOX", { { SB_INCOMPAT, 4, 0x100 },
+		    { SB_SLOTS, 1, 1 } }, true, FSIMG_EUNSUPPORTED,
+		    "METABOX" }
+	};
+
+	run_open_cases(cases, ARRAY_SIZE(cases), 0);
+}
+
+static void
+test_open_pairs_long_prefixes_with_a_plain_table_or_a_packed_inode(void)
+{
+	static const open_case_t cases[] = {
+		{ "XATTR_PREFIXES with PLAIN_XATTR_PFX",
+		    { { SB_INCOMPAT, 4, INCOMPAT_XATTR_PREFIXES },
+		    { SB_COMPAT, 4, COMPAT_SB_CHKSUM |
+		    COMPAT_PLAIN_XATTR_PFX } }, true, FSIMG_OK, NULL },
+		{ "XATTR_PREFIXES alone",
+		    { { SB_INCOMPAT, 4, INCOMPAT_XATTR_PREFIXES } },
+		    true, FSIMG_ECORRUPT, NULL },
+		{ "XATTR_PREFIXES with FRAGMENTS and no plain table",
+		    { { SB_INCOMPAT, 4, INCOMPAT_XATTR_PREFIXES |
+		    INCOMPAT_FRAGMENTS } }, true, FSIMG_EUNSUPPORTED,
+		    "FRAGMENTS" }
+	};
+
+	run_open_cases(cases, ARRAY_SIZE(cases), 0);
+}
+
+static void
+test_open_tolerates_unknown_compatible_bits_and_reserved_bytes(void)
+{
+	gen_image_t image;
+	volume_t v;
+	fsimg_error_t error;
+
+	minimal_image(&image, 12);
+	gen_super_put(&image, SB_COMPAT, COMPAT_SB_CHKSUM | COMPAT_UNNAMED_BIT,
+	    4);
+	gen_seal(&image);
+	volume_start(&v, image.bytes, image.length);
+	check_status("unknown compatible bit", volume_open(&v, 0, &error),
+	    FSIMG_OK, &error);
+	EXPECT(erofs_state(&v.reader)->features.unknown_compat,
+	    "unknown_compat is set");
+	EXPECT(text_is(&v.reader.info, "compat_features", "SB_CHKSUM 0x40"),
+	    "compat_features shows \"0x40\"");
+	volume_stop(&v, "unknown compatible bit");
+
+	gen_super_put(&image, SB_COMPAT, COMPAT_SB_CHKSUM, 4);
+	gen_super_put(&image, SB_RESERVED_6A, 1, 1);
+	gen_seal(&image);
+	volume_start(&v, image.bytes, image.length);
+	check_status("reserved byte", volume_open(&v, 0, &error), FSIMG_OK,
+	    &error);
+	EXPECT(detail_is(&v.reader.info, "reserved_nonzero", 1),
+	    "reserved_nonzero is 1");
+	volume_stop(&v, "reserved byte");
+	gen_image_free(&image);
+}
+
+static void
+test_open_refuses_a_wrong_magic_unless_identity_is_assumed(void)
+{
+	gen_image_t image;
+	fsimg_error_t error;
+	volume_t v;
+
+	minimal_image(&image, 12);
+	gen_super_put(&image, SB_MAGIC, 0x12345678, 4);
+	gen_seal(&image);
+	check_open("wrong magic", &image, FSIMG_ECORRUPT, "magic");
+
+	volume_start(&v, image.bytes, image.length);
+	check_status("wrong magic, assumed",
+	    volume_open(&v, FSIMG_READ_ASSUME_IDENTITY, &error), FSIMG_OK,
+	    &error);
+	EXPECT(v.reader.assumed_identity != NULL, "the waived check is recorded");
+	volume_stop(&v, "wrong magic, assumed");
+	gen_image_free(&image);
+}
+
+/* A forced open waives the magic and nothing else. */
+static void
+test_forced_open_still_applies_every_other_superblock_rule(void)
+{
+	/*
+	 * The blkszbits case clears SB_CHKSUM, so a missing block-size rule
+	 * cannot hide behind a checksum refusal.
+	 */
+	static const open_case_t cases[] = {
+		{ "blkszbits 8", { { SB_MAGIC, 4, 0x12345678 },
+		    { SB_COMPAT, 4, 0 },
+		    { SB_BLKSZBITS, 1, 8 } }, false, FSIMG_ECORRUPT,
+		    "block size" },
+		{ "dirblkbits 1", { { SB_MAGIC, 4, 0x12345678 },
+		    { SB_DIRBLKBITS, 1, 1 } }, true, FSIMG_EUNSUPPORTED,
+		    "directory block size" },
+		{ "extra devices", { { SB_MAGIC, 4, 0x12345678 },
+		    { SB_DEVICES, 2, 1 } }, true, FSIMG_EUNSUPPORTED,
+		    "device" },
+		{ "bad checksum", { { SB_MAGIC, 4, 0x12345678 },
+		    { SB_CHECKSUM, 4, 0xdeadbeef } }, false, FSIMG_ECORRUPT,
+		    "checksum" }
+	};
+
+	run_open_cases(cases, ARRAY_SIZE(cases), FSIMG_READ_ASSUME_IDENTITY);
+}
+
+static void
+test_open_reports_an_allocation_failure_and_keeps_no_memory(void)
+{
+	gen_image_t image;
+	volume_t v;
+	fsimg_error_t error;
+
+	minimal_image(&image, 12);
+	volume_start(&v, image.bytes, image.length);
+	bzero(&error, sizeof(error));
+	/* The driver's state is the first allocation open makes. */
+	fsimg_test_fail_alloc_after(v.ctx, 1);
+	check_refusal("state allocation fails", volume_open(&v, 0, &error),
+	    FSIMG_ENOMEM, &error, "allocation");
+	fsimg_test_fail_alloc_after(v.ctx, 0);
+	EXPECT(v.reader.driver == NULL, "no driver state is left behind");
+	volume_stop(&v, "allocation failure");
+	gen_image_free(&image);
+}
+
+static void
+test_open_refuses_a_volume_shorter_than_the_magic_either_way(void)
+{
+	static const size_t lengths[] = { 1000, GEN_SUPER_OFFSET };
+	unsigned char bytes[GEN_SUPER_OFFSET] = { 0 };
+
+	for (size_t i = 0; i < ARRAY_SIZE(lengths); i++) {
+		fsimg_error_t error;
+		fsimg_status_t status;
+		char name[48];
+
+		/* The identity check finds no magic in an empty region. */
+		snprintf(name, sizeof(name), "plain open, %zu bytes",
+		    lengths[i]);
+		status = open_close(name, bytes, lengths[i], 0, &error);
+		check_refusal(name, status, FSIMG_ECORRUPT, &error,
+		    "no EROFS superblock magic");
+		/* Waiving it leaves the decoder, which needs the superblock. */
+		snprintf(name, sizeof(name), "assumed identity, %zu bytes",
+		    lengths[i]);
+		status = open_close(name, bytes, lengths[i],
+		    FSIMG_READ_ASSUME_IDENTITY, &error);
+		check_refusal(name, status, FSIMG_ECORRUPT, &error,
+		    "superblock truncated");
+	}
+}
+
+static void
+test_open_refuses_extension_slots_past_a_short_volume(void)
+{
+	gen_super_t sb = gen_super_default(9, 4);
+	gen_image_t image;
+
+	sb.meta_blkaddr = 3;
+	sb.slots = 100;
+	image_build(&image, &sb, NULL);
+	check_open("100 slots in 2048 bytes", &image, FSIMG_ECORRUPT, NULL);
+	gen_image_free(&image);
+}
+
+static void
+test_open_reports_a_truncated_volume_at_its_declared_length(void)
+{
+	gen_super_t sb = gen_super_default(12, 6);
+	gen_image_t image;
+	volume_t v;
+	fsimg_error_t error;
+
+	/* Build the whole volume, then hand open only its first two blocks. */
+	image_build(&image, &sb, NULL);
+	image.length = 2 * 4096;
+	volume_start(&v, image.bytes, image.length);
+	check_status("root inside the input", volume_open(&v, 0, &error),
+	    FSIMG_OK, &error);
+	EXPECT(v.reader.info.volume_bytes == 6 * 4096,
+	    "volume_bytes %llu is blocks * B, not the input",
+	    (unsigned long long)v.reader.info.volume_bytes);
+	volume_stop(&v, "truncated, root present");
+	gen_image_free(&image);
+
+	/* The root lies inside blocks * B but past the input's end. */
+	sb.meta_blkaddr = 3;
+	image_build(&image, &sb, NULL);
+	image.length = 2 * 4096;
+	check_open("root past the input", &image, FSIMG_ECORRUPT, NULL);
+	gen_image_free(&image);
+}
+
+static void
+test_open_takes_a_zero_block_count_as_the_input_length(void)
+{
+	gen_super_t sb = gen_super_default(12, 0);
+	gen_image_t image;
+	volume_t v;
+	fsimg_error_t error;
+
+	image_build_sized(&image, &sb, NULL, 3 * 4096);
+	volume_start(&v, image.bytes, image.length);
+	check_status("open", volume_open(&v, 0, &error), FSIMG_OK, &error);
+	EXPECT(v.reader.info.volume_bytes == 3 * 4096,
+	    "volume_bytes %llu equals the input",
+	    (unsigned long long)v.reader.info.volume_bytes);
+	EXPECT(detail_is(&v.reader.info, "block_count", 0),
+	    "block_count detail is the stored zero");
+	volume_stop(&v, "zero block count");
+	gen_image_free(&image);
+}
+
+static void
+test_open_refuses_a_block_count_ending_inside_the_superblock(void)
+{
+	gen_super_t sb = gen_super_default(9, 2);
+	gen_image_t image;
+
+	/*
+	 * The root inode at volume byte 0 lies inside the 1024-byte domain,
+	 * so only the superblock itself is outside it.
+	 */
+	sb.meta_blkaddr = 0;
+	image_build_sized(&image, &sb, NULL, 10 * 512);
+	check_open("512-byte blocks, 2 blocks", &image, FSIMG_ECORRUPT,
+	    "superblock");
+	gen_image_free(&image);
+
+	/* Three blocks end at byte 1536, past the 128-byte base superblock. */
+	sb.blocks = 3;
+	image_build_sized(&image, &sb, NULL, 10 * 512);
+	check_open("512-byte blocks, 3 blocks", &image, FSIMG_OK, NULL);
+	gen_image_free(&image);
+}
+
+/*
+ * The input holds a valid root at the byte meta_blkaddr names, one block past
+ * the block count, so only the address domain refuses it.
+ */
+static void
+test_open_refuses_a_root_outside_the_address_domain(void)
+{
+	gen_super_t sb = gen_super_default(12, 3);
+	gen_image_t image;
+
+	sb.meta_blkaddr = 3;
+	image_build_sized(&image, &sb, NULL, 4 * 4096);
+	check_open("meta_blkaddr past the block count", &image, FSIMG_ECORRUPT,
+	    "metadata outside the address domain");
+	gen_image_free(&image);
+}
+
+static void
+test_open_refuses_a_root_that_is_a_regular_file(void)
+{
+	gen_super_t sb = gen_super_default(12, 3);
+	gen_inode_t root = gen_root_default();
+	gen_image_t image;
+
+	root.mode = MODE_REGULAR | 0644;
+	image_build(&image, &sb, &root);
+	check_open("root is a regular file", &image, FSIMG_ECORRUPT,
+	    "directory");
+	gen_image_free(&image);
+}
+
+static void
+test_open_refuses_a_root_with_a_reserved_format_bit(void)
+{
+	gen_super_t sb = gen_super_default(12, 3);
+	gen_inode_t root = gen_root_default();
+	gen_image_t image;
+
+	root.format_extra = 0x20;	/* format bit 5 is reserved */
+	image_build(&image, &sb, &root);
+	check_open("root with a reserved format bit", &image, FSIMG_ECORRUPT,
+	    "inode format");
+	gen_image_free(&image);
+}
+
+typedef struct label_case {
+	const char	*name;
+	unsigned char	 bytes[sizeof(((gen_super_t *)NULL)->name) + 1];
+	size_t		 length;
+	const char	*label;		/* NULL: no label */
+	const char	*escaped;	/* the "name" text, or NULL: none */
+} label_case_t;
+
+static void
+test_open_delivers_the_name_as_a_label_only_when_it_is_printable(void)
+{
+	static const label_case_t cases[] = {
+		{ "short name", "vol", 3, "vol", NULL },
+		{ "16 bytes without a NUL", "ABCDEFGHIJKLMNOP", 16,
+		    "ABCDEFGHIJKLMNOP", NULL },
+		{ "control byte", { 'a', 0x01, 'b' }, 3, NULL, "a\\x01b" },
+		{ "backslash", { 'a', '\\', 'b' }, 3, "a\\b", NULL },
+		{ "DEL byte", { 'a', 0x7f, 'b' }, 3, NULL, "a\\x7fb" },
+		{ "empty name", { 0 }, 0, NULL, NULL },
+		{ "invalid UTF-8", { 0xff }, 1, NULL, "\\xff" },
+		{ "16-byte name truncated inside a UTF-8 sequence",
+		    "ABCDEFGHIJKLMNO\xc2", 16, NULL, "ABCDEFGHIJKLMNO\\xc2" },
+		{ "C1 control character", { 'a', 0xc2, 0x85, 'b' }, 4, NULL,
+		    "a\\xc2\\x85b" },
+		{ "printable two-byte character", { 0xc3, 0xa9 }, 2,
+		    "\xc3\xa9", NULL }
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		const label_case_t *c = &cases[i];
+		gen_super_t sb = gen_super_default(12, 3);
+		gen_image_t image;
+		volume_t v;
+		fsimg_error_t error;
+		const fsimg_volume_info_t *info;
+
+		bcopy(c->bytes, sb.name, c->length);
+		image_build(&image, &sb, NULL);
+		volume_start(&v, image.bytes, image.length);
+		check_status(c->name, volume_open(&v, 0, &error), FSIMG_OK,
+		    &error);
+		info = &v.reader.info;
+		EXPECT(((info->valid & FSIMG_VOLUME_LABEL) != 0) ==
+		    (c->label != NULL), "%s: label flag", c->name);
+		EXPECT(c->label == NULL || strcmp(info->label, c->label) == 0,
+		    "%s: label is \"%s\"", c->name, info->label);
+		EXPECT(c->escaped == NULL ?
+		    find_text(info, "name") == NULL :
+		    text_is(info, "name", c->escaped),
+		    "%s: name text is \"%s\"", c->name,
+		    find_text(info, "name") != NULL ?
+		    find_text(info, "name") : "(none)");
+		volume_stop(&v, c->name);
+		gen_image_free(&image);
+	}
+}
+
+static void
+test_open_failures_return_all_memory(void)
+{
+	static const struct {
+		const char	*name;
+		unsigned	 offset;
+		uint64_t	 value;
+		unsigned	 width;
+	} cases[] = {
+		{ "feature refusal", SB_INCOMPAT, 0x004, 4 },
+		{ "superblock rule", SB_NSEC, 1000000000, 4 },
+		{ "root outside the domain", SB_META_BLOCK, 3, 4 }
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		gen_image_t image;
+		fsimg_error_t error;
+
+		minimal_image(&image, 12);
+		gen_super_put(&image, cases[i].offset, cases[i].value,
+		    cases[i].width);
+		gen_seal(&image);
+		/* open_close() requires the baseline after the failed open. */
+		EXPECT(open_close(cases[i].name, image.bytes, image.length, 0,
+		    &error) != FSIMG_OK, "%s fails", cases[i].name);
+		gen_image_free(&image);
+	}
+}
+
+/* ---- The metadata reader ---- */
+
+/* Space for extended inodes at the end of the domain: a page past it. */
+enum { DOMAIN_BYTES = 3 * 4096, TRAILING_BYTES = 4096 };
+
+/* A minimal 4096-byte-block volume of 3 blocks and room past its end. */
+static void
+meta_image(gen_image_t *image)
+{
+	gen_super_t sb = gen_super_default(12, 3);
+
+	image_build_sized(image, &sb, NULL, DOMAIN_BYTES + TRAILING_BYTES);
+}
+
+static void
+meta_open(volume_t *v, const gen_image_t *image)
+{
+	fsimg_error_t error;
+
+	volume_start(v, image->bytes, image->length);
+	CHECK(volume_open(v, 0, &error) == FSIMG_OK);
+}
+
+static fsimg_status_t
+load(volume_t *v, uint64_t nid, erofs_inode_t *inode, fsimg_error_t *error)
+{
+	return (erofs_inode_load(&v->reader, nid, inode, error));
+}
+
+/* The last slot of the 3-block domain, and the slot after it. */
+enum {
+	LAST_NID = (DOMAIN_BYTES - META_BYTES) / 32 - 1,
+	PAST_DOMAIN_NID = LAST_NID + 1
+};
+
+static void
+test_inode_load_refuses_unaddressable_nids(void)
+{
+	/*
+	 * The phrase pins each case to its own check: with one check
+	 * removed, the case either loads or fails with a different
+	 * phrase. The last NID lies inside the input, one slot past the
+	 * domain, where the test writes a valid inode.
+	 */
+	static const struct {
+		const char	*name;
+		uint64_t	 nid;
+		const char	*phrase;
+	} cases[] = {
+		{ "bit 63 set", UINT64_C(1) << 63, "metadata box" },
+		{ "slot product overflows 64 bits", UINT64_C(1) << 62, "NID" },
+		{ "slot product fits, adding the metadata base overflows",
+		    (UINT64_C(1) << 59) - 1, "NID" },
+		{ "past the domain, inside the input", PAST_DOMAIN_NID,
+		    "metadata outside the address domain" }
+	};
+	gen_inode_t beyond = { .nid = PAST_DOMAIN_NID,
+	    .mode = MODE_REGULAR | 0644, .nlink = 1 };
+	gen_image_t image;
+	volume_t v;
+
+	meta_image(&image);
+	gen_inode_write(&image, &beyond);
+	meta_open(&v, &image);
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		erofs_inode_t inode;
+		fsimg_error_t error;
+
+		check_refusal(cases[i].name, load(&v, cases[i].nid, &inode,
+		    &error), FSIMG_ECORRUPT, &error, cases[i].phrase);
+	}
+	volume_stop(&v, "unaddressable nids");
+	gen_image_free(&image);
+}
+
+/*
+ * The last slot leaves 32 bytes of the domain: a compact inode loads, and an
+ * extended one, which needs 64, is refused.
+ */
+static void
+test_inode_load_in_the_last_slot_is_compact_only(void)
+{
+	gen_inode_t inode = { .nid = LAST_NID, .mode = MODE_REGULAR | 0644,
+	    .nlink = 1 };
+	gen_image_t image;
+	erofs_inode_t loaded;
+	volume_t v;
+	fsimg_error_t error;
+
+	meta_image(&image);
+	gen_inode_write(&image, &inode);
+	meta_open(&v, &image);
+	check_status("compact inode in the last 32 bytes",
+	    load(&v, LAST_NID, &loaded, &error), FSIMG_OK, &error);
+
+	inode.extended = 1;
+	gen_inode_write(&image, &inode);
+	check_status("extended inode needing 64 bytes",
+	    load(&v, LAST_NID, &loaded, &error), FSIMG_ECORRUPT, &error);
+	volume_stop(&v, "end of the domain");
+	gen_image_free(&image);
+}
+
+static void
+test_inode_load_allows_a_fixed_part_across_a_block_boundary(void)
+{
+	/* 64 bytes starting 32 bytes before the end of block 1. */
+	enum { CROSSING_NID = (2 * 4096 - 32 - META_BYTES) / 32 };
+	gen_inode_t inode = { .nid = CROSSING_NID, .extended = 1,
+	    .mode = MODE_REGULAR | 0644, .nlink = 1 };
+	gen_image_t image;
+	erofs_inode_t loaded;
+	volume_t v;
+	fsimg_error_t error;
+
+	meta_image(&image);
+	gen_inode_write(&image, &inode);
+	meta_open(&v, &image);
+	check_status("extended inode across a block boundary",
+	    load(&v, CROSSING_NID, &loaded, &error), FSIMG_OK, &error);
+	EXPECT(loaded.extended && loaded.fixed_bytes == 64,
+	    "the extended form was decoded");
+	volume_stop(&v, "crossing fixed part");
+	gen_image_free(&image);
+}
+
+static void
+test_inode_load_reports_where_the_inode_is_and_how_long(void)
+{
+	gen_inode_t inode = { .nid = 1, .mode = MODE_REGULAR | 0644,
+	    .nlink = 1, .layout = LAYOUT_FLAT_INLINE, .size = 100,
+	    .xattr_count = 2 };
+	gen_image_t image;
+	erofs_inode_t loaded;
+	volume_t v;
+	fsimg_error_t error;
+
+	meta_image(&image);
+	gen_inode_write(&image, &inode);
+	meta_open(&v, &image);
+	check_status("flat-inline inode", load(&v, 1, &loaded, &error),
+	    FSIMG_OK, &error);
+	EXPECT(loaded.nid == 1 && loaded.space == EROFS_SPACE_PRIMARY &&
+	    loaded.offset == META_BYTES + 32, "nid, space and offset");
+	EXPECT(loaded.fixed_bytes == 32 && loaded.xattr_bytes == 16 &&
+	    loaded.layout_offset == 48, "fixed %u, attributes %u, layout at %llu",
+	    loaded.fixed_bytes, loaded.xattr_bytes,
+	    (unsigned long long)loaded.layout_offset);
+	EXPECT(loaded.body_bytes == 32 + 12 + 4 + 100, "body_bytes %llu",
+	    (unsigned long long)loaded.body_bytes);
+	volume_stop(&v, "loaded fields");
+	gen_image_free(&image);
+}
+
+/*
+ * A flat-inline inode at NID 100 whose tail starts at byte 4096 + 3200 + 32
+ * of the volume and runs for size bytes; block 1 ends at byte 8192, so a
+ * size of 864 ends exactly there.
+ */
+static void
+test_inode_load_accepts_a_tail_ending_at_the_block_end_only(void)
+{
+	gen_inode_t inode = { .nid = 100, .mode = MODE_REGULAR | 0644,
+	    .nlink = 1, .layout = LAYOUT_FLAT_INLINE, .size = 864 };
+	gen_image_t image;
+	erofs_inode_t loaded;
+	volume_t v;
+	fsimg_error_t error;
+
+	meta_image(&image);
+	gen_inode_write(&image, &inode);
+	meta_open(&v, &image);
+	check_status("tail ends at the block end",
+	    load(&v, 100, &loaded, &error), FSIMG_OK, &error);
+	inode.size = 865;
+	gen_inode_write(&image, &inode);
+	check_status("tail one byte past the block end",
+	    load(&v, 100, &loaded, &error), FSIMG_ECORRUPT, &error);
+	volume_stop(&v, "tail at the block end");
+	gen_image_free(&image);
+}
+
+/*
+ * Inodes whose header (the fixed part and its attribute region) ends at byte
+ * 8192, the first byte of block 2, so the inline tail lies wholly in block 2.
+ */
+static void
+test_inode_load_accepts_a_tail_starting_at_the_next_block(void)
+{
+	static const struct {
+		const char	*name;
+		uint64_t	 nid;
+		bool		 extended;
+		uint16_t	 xattr_count;
+		uint64_t	 header_bytes;
+	} cases[] = {
+		{ "compact, no attributes", 127, false, 0, 32 },
+		{ "extended, no attributes", 126, true, 0, 64 },
+		{ "compact, 32-byte attribute region", 126, false, 6, 64 }
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		gen_inode_t inode = { .nid = cases[i].nid,
+		    .extended = cases[i].extended, .mode = MODE_REGULAR | 0644,
+		    .nlink = 1, .layout = LAYOUT_FLAT_INLINE, .size = 100,
+		    .xattr_count = cases[i].xattr_count };
+		gen_image_t image;
+		erofs_inode_t loaded = { 0 };
+		volume_t v;
+		fsimg_error_t error;
+		fsimg_status_t status;
+
+		meta_image(&image);
+		gen_inode_write(&image, &inode);
+		CHECK(gen_inode_offset(&image, inode.nid) +
+		    gen_inode_header_bytes(&inode) == 2 * 4096);
+		meta_open(&v, &image);
+		status = load(&v, inode.nid, &loaded, &error);
+		check_status(cases[i].name, status, FSIMG_OK, &error);
+		/* A failed load leaves nothing to compare. */
+		EXPECT(status != FSIMG_OK ||
+		    (loaded.layout_offset == cases[i].header_bytes &&
+		    loaded.body_bytes == cases[i].header_bytes + 100),
+		    "%s: layout at %llu, body %llu bytes", cases[i].name,
+		    (unsigned long long)loaded.layout_offset,
+		    (unsigned long long)loaded.body_bytes);
+		volume_stop(&v, cases[i].name);
+		gen_image_free(&image);
+	}
+}
+
+static void
+test_inode_load_refuses_a_body_past_the_domain(void)
+{
+	gen_inode_t inode = { .nid = LAST_NID, .mode = MODE_REGULAR | 0644,
+	    .nlink = 1, .layout = LAYOUT_FLAT_INLINE, .size = 10 };
+	gen_image_t image;
+	erofs_inode_t loaded;
+	volume_t v;
+	fsimg_error_t error;
+
+	meta_image(&image);
+	gen_inode_write(&image, &inode);
+	meta_open(&v, &image);
+	check_status("10-byte tail after the last slot",
+	    load(&v, LAST_NID, &loaded, &error), FSIMG_ECORRUPT, &error);
+	volume_stop(&v, "body past the domain");
+	gen_image_free(&image);
+}
+
+static void
+test_body_read_returns_the_tail_and_bounds_its_range(void)
+{
+	gen_inode_t inode = { .nid = 2, .mode = MODE_REGULAR | 0644,
+	    .nlink = 1, .layout = LAYOUT_FLAT_INLINE, .size = 20 };
+	const unsigned char tail[] = "0123456789abcdefghij";
+	const size_t tail_bytes = sizeof(tail) - 1;
+	unsigned char out[32];
+	gen_image_t image;
+	erofs_inode_t loaded;
+	volume_t v;
+	fsimg_error_t error;
+
+	meta_image(&image);
+	gen_inode_write(&image, &inode);
+	gen_put_bytes(&image, gen_inode_offset(&image, 2) +
+	    gen_inode_header_bytes(&inode), tail, tail_bytes);
+	meta_open(&v, &image);
+	CHECK(load(&v, 2, &loaded, &error) == FSIMG_OK);
+
+	bzero(out, sizeof(out));
+	check_status("read the tail", erofs_body_read(&v.reader, &loaded,
+	    loaded.layout_offset, tail_bytes, out, &error), FSIMG_OK,
+	    &error);
+	EXPECT(bcmp(out, tail, tail_bytes) == 0, "the tail bytes");
+	check_refusal("range past body_bytes", erofs_body_read(&v.reader,
+	    &loaded, 0, loaded.body_bytes + 1, out, &error), FSIMG_ECORRUPT,
+	    &error, "outside the inode's body");
+	check_refusal("offset past body_bytes", erofs_body_read(&v.reader,
+	    &loaded, loaded.body_bytes + 1, 0, out, &error), FSIMG_ECORRUPT,
+	    &error, "outside the inode's body");
+	check_status("empty read at body_bytes", erofs_body_read(&v.reader,
+	    &loaded, loaded.body_bytes, 0, out, &error), FSIMG_OK, &error);
+	volume_stop(&v, "body read");
+	gen_image_free(&image);
+}
+
+static void
+test_meta_read_bounds_the_space_and_the_input(void)
+{
+	gen_super_t sb = gen_super_default(12, 6);
+	gen_image_t image;
+	unsigned char out[32];
+	volume_t v;
+	fsimg_error_t error;
+
+	/* Six blocks declared, and two more blocks of input past them. */
+	image_build_sized(&image, &sb, NULL, 8 * 4096);
+	meta_open(&v, &image);
+	check_refusal("metadata box space", erofs_meta_read(&v.reader,
+	    EROFS_SPACE_BOX, 0, 8, out, &error), FSIMG_EUNSUPPORTED, &error,
+	    "metadata box");
+	check_refusal("range past the domain, inside the input",
+	    erofs_meta_read(&v.reader, EROFS_SPACE_PRIMARY, 6 * 4096 - 8, 16,
+	    out, &error), FSIMG_ECORRUPT, &error,
+	    "metadata outside the address domain");
+	check_status("range ending at the domain's end", erofs_meta_read(
+	    &v.reader, EROFS_SPACE_PRIMARY, 6 * 4096 - 16, 16, out, &error),
+	    FSIMG_OK, &error);
+	volume_stop(&v, "meta read, long input");
+	gen_image_free(&image);
+
+	/* Six blocks declared, three present. */
+	image_build(&image, &sb, NULL);
+	image.length = 3 * 4096;
+	meta_open(&v, &image);
+	check_status("range inside the domain, past the input",
+	    erofs_meta_read(&v.reader, EROFS_SPACE_PRIMARY, 4 * 4096, 16, out,
+	    &error), FSIMG_ECORRUPT, &error);
+	EXPECT(strstr(error.message, "address domain") == NULL,
+	    "bounded I/O refuses it, not the domain: \"%s\"", error.message);
+	check_status("range inside the input", erofs_meta_read(&v.reader,
+	    EROFS_SPACE_PRIMARY, 2 * 4096, 16, out, &error), FSIMG_OK, &error);
+	volume_stop(&v, "meta read, short input");
+	gen_image_free(&image);
+}
+
+static void
+test_inode_load_checks_the_layout_against_the_volume_features(void)
+{
+	static const struct {
+		const char	*name;
+		uint8_t		 layout;
+		fsimg_status_t	 want;
+	} cases[] = {
+		{ "compressed full layout", LAYOUT_COMPRESSED_FULL,
+		    FSIMG_EUNSUPPORTED },
+		{ "compressed compact layout", LAYOUT_COMPRESSED_COMPACT,
+		    FSIMG_EUNSUPPORTED },
+		{ "chunk-based layout without CHUNKED_FILE",
+		    LAYOUT_CHUNK_BASED, FSIMG_ECORRUPT }
+	};
+	gen_image_t image;
+	volume_t v;
+
+	meta_image(&image);
+	meta_open(&v, &image);
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		gen_inode_t inode = { .nid = 1, .mode = MODE_REGULAR | 0644,
+		    .nlink = 1, .layout = cases[i].layout, .size = 10 };
+		erofs_inode_t loaded;
+		fsimg_error_t error;
+
+		gen_inode_write(&image, &inode);
+		check_status(cases[i].name, load(&v, 1, &loaded, &error),
+		    cases[i].want, &error);
+	}
+	volume_stop(&v, "layouts");
+	gen_image_free(&image);
+}
+
 int
 main(void)
 {
@@ -4045,6 +5422,51 @@ main(void)
 	test_filter_bit_hashes_infix_and_suffix_with_the_prefix_seed();
 	test_name_filter_of_real_inodes_is_the_complement_of_the_attribute_bits();
 	test_real_long_prefix_records_decode();
+
+	test_generator_crc32c_matches_the_published_check_value();
+	test_probe_needs_the_magic_inside_the_prefix();
+	test_probe_claims_a_full_prefix_and_names_erofs();
+	test_probe_with_a_short_base_superblock_is_corrupt();
+	test_probe_classifies_the_base_superblock();
+
+	test_open_accepts_the_minimal_volume();
+	test_open_reports_geometry_uuid_and_the_format_values();
+	test_open_reports_a_negative_epoch_as_signed_seconds();
+	test_open_accepts_every_block_size_with_a_correct_checksum();
+	test_open_refuses_a_flipped_bit_inside_the_checksum_range();
+	test_open_accepts_a_flipped_bit_just_past_the_checksum_range();
+	test_open_does_not_check_the_checksum_without_sb_chksum();
+	test_open_refuses_a_checksum_range_cut_short_by_the_input();
+	test_open_refuses_an_unknown_incompatible_bit();
+	test_open_refuses_nonzero_extra_devices_before_the_checksum();
+	test_open_refuses_inconsistent_superblock_fields();
+	test_open_refuses_each_unimplemented_incompatible_bit_by_name();
+	test_open_pairs_long_prefixes_with_a_plain_table_or_a_packed_inode();
+	test_open_tolerates_unknown_compatible_bits_and_reserved_bytes();
+	test_open_refuses_a_wrong_magic_unless_identity_is_assumed();
+	test_forced_open_still_applies_every_other_superblock_rule();
+	test_open_reports_an_allocation_failure_and_keeps_no_memory();
+	test_open_refuses_a_volume_shorter_than_the_magic_either_way();
+	test_open_refuses_extension_slots_past_a_short_volume();
+	test_open_reports_a_truncated_volume_at_its_declared_length();
+	test_open_takes_a_zero_block_count_as_the_input_length();
+	test_open_refuses_a_block_count_ending_inside_the_superblock();
+	test_open_refuses_a_root_outside_the_address_domain();
+	test_open_refuses_a_root_that_is_a_regular_file();
+	test_open_refuses_a_root_with_a_reserved_format_bit();
+	test_open_delivers_the_name_as_a_label_only_when_it_is_printable();
+	test_open_failures_return_all_memory();
+
+	test_inode_load_refuses_unaddressable_nids();
+	test_inode_load_in_the_last_slot_is_compact_only();
+	test_inode_load_allows_a_fixed_part_across_a_block_boundary();
+	test_inode_load_reports_where_the_inode_is_and_how_long();
+	test_inode_load_accepts_a_tail_ending_at_the_block_end_only();
+	test_inode_load_accepts_a_tail_starting_at_the_next_block();
+	test_inode_load_refuses_a_body_past_the_domain();
+	test_body_read_returns_the_tail_and_bounds_its_range();
+	test_meta_read_bounds_the_space_and_the_input();
+	test_inode_load_checks_the_layout_against_the_volume_features();
 
 	if (failures != 0)
 		fprintf(stderr, "test/erofs.c: %d checks failed\n", failures);

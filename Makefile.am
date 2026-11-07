@@ -102,6 +102,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/qnx6/verify.c lib/formats/qnx6/write-qnx6.h \
 	lib/formats/qnx6/write-plan.c lib/formats/qnx6/write-emit.c \
 	lib/formats/erofs/erofs.h lib/formats/erofs/codec.c \
+	lib/formats/erofs/descriptor.c lib/formats/erofs/read.c \
+	lib/formats/erofs/meta.c \
 	lib/formats/qnx4/qnx4.h lib/formats/qnx4/descriptor.c \
 	lib/formats/qnx4/codec.c lib/formats/qnx4/volume.c \
 	lib/formats/qnx4/extent.c lib/formats/qnx4/bitmap.c \
@@ -289,7 +291,8 @@ test_codec_LDADD = libfsimg-core.la
 test_exfat_SOURCES = test/exfat.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_exfat_LDADD = libfsimg.la
-test_erofs_SOURCES = test/erofs.c test/test.h
+test_erofs_SOURCES = test/erofs.c test/test.h test/erofs-gen.c \
+	test/erofs-gen.h
 test_erofs_LDADD = libfsimg.la
 test_qnx6_SOURCES = test/qnx6.c test/test.h test/scale.h
 test_qnx6_LDADD = libfsimg.la
