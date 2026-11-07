@@ -190,7 +190,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 # Fixture generators support integration tests; they are not tests.
 check_PROGRAMS = $(test_programs) layers-compose hfsplus-marks hfsplus-write-gen \
 	test-iso9660-scale test-hfsplus-scale test-iso9660-write-scale
-QUICK_TESTS = $(test_programs) test/hfsplus-integration.sh \
+QUICK_TESTS = $(test_programs) test/hfsplus-integration.sh test/erofsdump.sh \
 	test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
@@ -766,5 +766,5 @@ EXTRA_DIST += \
 EXTRA_DIST += test/hfsplus-integration.sh test/hfsplus-integration.rb
 
 EXTRA_DIST += test/hfsplus-capture-test.rb test/hfsplus-qualify-test.rb
-EXTRA_DIST += test/erofsdump-test.rb
+EXTRA_DIST += test/erofsdump-test.rb test/erofsdump.sh
 EXTRA_DIST += test/hfsplus-integration-test.rb

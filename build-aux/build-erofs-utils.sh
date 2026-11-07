@@ -11,7 +11,10 @@ fi
 erofs_make=${MAKE:-make}
 tag=v1.9.4
 revision=f36cadb5c563995ab3aa8572a60ed6b721b9557d
-for tool in git cc autoconf automake pkg-config "$erofs_make"; do
+for tool in git cc autoconf automake libtoolize pkg-config "$erofs_make"; do
+    if [ "$tool" = libtoolize ] && command -v glibtoolize >/dev/null; then
+        continue
+    fi
     if ! command -v "$tool" >/dev/null; then
         echo "build-erofs-utils: required development tool is missing: $tool" >&2
         exit 1

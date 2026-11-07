@@ -791,17 +791,19 @@ module ErofsDump
       problem "logical cluster too large for #{size}-byte groups" if lbits > (wide ? 12 : 14)
       raw = read(pos, size)
       anchor = raw.unpack1("L<", offset: size - 4)
+      # The bytes before the anchor, reversed and read as hex, give the
+      # little-endian packed record fields as one integer.
       packed = raw.byteslice(0, size - 4).reverse.unpack1("H*").to_i(16)
       fields = Array.new(count) do |i|
         v = (packed >> (i * bits)) & ((1 << bits) - 1)
         CompactField.new(type: (v >> lobits) & 3, value: v & ((1 << lobits) - 1))
       end
-      Index.new(records: group_records(fields, anchor + bias, first), end_pos: pos + size)
+      Index.new(records: group_records(fields:, base: anchor + bias, first:), end_pos: pos + size)
     end
 
     # Heads take consecutive blocks from `base`, a following big-cluster
     # marker making the head's cluster span several blocks.
-    def group_records(fields, base, first)
+    def group_records(fields:, base:, first:)
       next_block = base
       fields.each_with_index.map do |field, i|
         index = first + i
@@ -990,7 +992,7 @@ module ErofsDump
 
     # The parent rule: `.` names the directory, `..` its parent (the root's
     # own parent is the root), and no other entry names either.
-    def check_parent_rule(ino, entries, parent)
+    def check_parent_rule(ino:, entries:, parent:)
       dot = entries.find { _1.name == "." }
       dotdot = entries.find { _1.name == ".." }
       problem "directory has no . entry" unless dot
@@ -1070,7 +1072,7 @@ module ErofsDump
 
       @directories.add(ino.nid)
       entries = print_directory(ino)
-      check_parent_rule(ino, entries, item.parent) unless entries.empty?
+      check_parent_rule(ino:, entries:, parent: item.parent) unless entries.empty?
       children(entries).reverse.map { Pending.new(nid: _1.nid, expected_type: _1.type, parent: ino.nid) }
     rescue StandardError => e
       # Per-inode boundary: a hostile inode is reported and the walk goes on.

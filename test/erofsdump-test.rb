@@ -19,7 +19,7 @@ class ErofsDumpTest < Minitest::Test
 
   def test_last_nonhead_after_a_big_cluster_marker_is_two_back
     fields = [field(TYPE_HEAD1, 0), field(TYPE_NONHEAD, BIG_CLUSTER_FLAG | 3), field(TYPE_NONHEAD, 5)]
-    head, marker, last = dumper.send(:group_records, fields, 10, 0)
+    head, marker, last = dumper.send(:group_records, fields:, base: 10, first: 0)
 
     assert_equal 10, head.blkaddr
     assert_equal [1, nil, 3], [marker.delta0, marker.delta1, marker.big_blocks]
@@ -28,7 +28,7 @@ class ErofsDumpTest < Minitest::Test
 
   def test_head_after_a_big_cluster_marker_skips_its_blocks
     fields = [field(TYPE_HEAD1, 0), field(TYPE_NONHEAD, BIG_CLUSTER_FLAG | 3), field(TYPE_HEAD1, 7)]
-    _, _, second = dumper.send(:group_records, fields, 10, 0)
+    _, _, second = dumper.send(:group_records, fields:, base: 10, first: 0)
 
     assert_equal 13, second.blkaddr
   end

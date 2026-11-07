@@ -29,7 +29,9 @@
 # that producers which are deterministic give the same bytes. The tools come
 # from $EROFS_UTILS_BIN, default ~/.local/share/fsimg-oracles/erofs-utils/bin.
 # The fixture is built in NAME.tmp-PID beside its final place and renamed
-# into place last, so an interrupted run leaves nothing. NAME must not exist
+# into place last, so an interrupted run leaves nothing; a run killed by
+# SIGKILL leaves NAME.tmp-PID behind, which the next run reports and which the
+# user removes. NAME must not exist
 # yet and the fixture root must lie outside SOURCE. The source manifest is
 # taken before and after mkfs.erofs; a difference fails the run. Extended
 # attributes are read with getfattr or xattr; without either the manifest
@@ -110,12 +112,12 @@ module ErofsCapture
     entries.sort_by! { |path, _| relative(source, path).b }
     groups = entries.select { |_, st| st.nlink > 1 && !st.directory? }.map { |_, st| [st.dev, st.ino] }.uniq
                     .each_with_index.to_h
-    entries.map { |path, st| manifest_line(relative(source, path), path, st, groups[[st.dev, st.ino]]) }
+    entries.map { |path, st| manifest_line(rel: relative(source, path), path:, st:, group: groups[[st.dev, st.ino]]) }
   end
 
   def relative(source, path) = path == source ? "/" : "/#{path.delete_prefix("#{source.chomp('/')}/")}"
 
-  def manifest_line(rel, path, st, group)
+  def manifest_line(rel:, path:, st:, group:)
     [rel.b.dump, KINDS.fetch(st.ftype.to_sym, st.ftype), st.directory? ? "-" : st.size,
      format("%04o", st.mode & 0o7777), st.uid, st.gid, format("%d%09d", st.mtime.to_i, st.mtime.nsec),
      group ? "link#{group}" : "-", xattr_text(path, st), content_text(path, st)].join("\t")
@@ -159,7 +161,11 @@ module ErofsCapture
     raise Error, "fixture root #{plan.root} lies inside the source tree" if inside?(plan.source, plan.root)
     raise Error, "#{plan.dir} exists; fixtures are never overwritten" if File.exist?(plan.dir) || File.symlink?(plan.dir)
 
-    Dir.mkdir(plan.tmp_dir)
+    begin
+      Dir.mkdir(plan.tmp_dir)
+    rescue Errno::EEXIST
+      raise Error, "#{plan.tmp_dir} exists (left by a killed run?); remove it and retry"
+    end
     begin
       write_fixture(plan)
       raise Error, "#{plan.dir} exists; fixtures are never overwritten" if File.exist?(plan.dir)
