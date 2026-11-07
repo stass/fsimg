@@ -45,7 +45,7 @@ static const erofs_feature_t incompat_features[] = {
 	{ EROFS_INCOMPAT_ZTAILPACKING, "ZTAILPACKING", true },
 	{ EROFS_INCOMPAT_FRAGMENTS, "FRAGMENTS/DEDUPE", true },
 	{ EROFS_INCOMPAT_XATTR_PREFIXES, "XATTR_PREFIXES", true },
-	{ EROFS_INCOMPAT_48BIT, "48BIT", false },
+	{ EROFS_INCOMPAT_48BIT, "48BIT", true },
 	{ EROFS_INCOMPAT_METABOX, "METABOX", false }
 };
 

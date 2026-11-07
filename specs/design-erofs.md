@@ -539,7 +539,7 @@ extended inode's high word is then `0xFFFF`, unread like the rest (E10,
 `e10-48-kinds`, the extended flat-inline inodes under one block). Where the
 word is read it is an address like any other, and one outside the domain,
 `0xFFFFFFFF` included, is `FSIMG_ECORRUPT`. For `0xFFFFFFFF` in a flat
-inode with content that is fsimg policy: the kernel reads such a file as
+inode with content, and for the 48-bit null with it, that is fsimg policy: the kernel reads such a file as
 zeros (E3), and no producer writes the word in a flat inode.
 
 ### Chunk-based
@@ -859,7 +859,7 @@ The 8-byte map header sits at the attribute region's end rounded up to 8:
 | 0 | 4 | Fragment offset bits 0 to 31 (bits 32 to 63 are the fragment head's block field on a full index, [below](#packed-fragments)), or a reserved 16-bit word and the 16-bit compressed tail size |
 | 4 | 2 | Advice flags |
 | 6 | 1 | Algorithms: the head-1 algorithm in bits 0 to 3, head-2 in bits 4 to 7 |
-| 7 | 1 | Cluster bits: `lclusterbits - blkszbits` in bits 0 to 3; bit 7 marks a whole-file fragment; bits 4 to 6 carry nothing and are not read on an index. On an [encoded-extent](#encoded-extents) inode of 4- or 8-byte records bits 4 to 7 are zero, else `FSIMG_ECORRUPT`; with 16- or 32-byte records bytes 6 and 7 are the extent count's high half |
+| 7 | 1 | Cluster bits: `lclusterbits - blkszbits` in bits 0 to 3; bit 7 marks a whole-file fragment; bits 4 to 6 carry nothing and are not read on an index. On an [encoded-extent](#encoded-extents) inode of 4- or 8-byte records bits 4 to 6 are zero, else `FSIMG_ECORRUPT`; with 16- or 32-byte records bytes 6 and 7 are the extent count's high half. Bit 7 keeps its whole-file meaning in every form and is tested first, as the kernel does, so a count with bit 47 set is a whole-file fragment |
 
 When bit 7 of byte 7 is set, the whole file lives in the packed inode: the
 header, with that bit cleared, is a 64-bit offset into the packed inode's
@@ -1107,9 +1107,10 @@ extent is shorter than its stored blocks and does not end the file is
 `FSIMG_ECORRUPT`, the kernel's rule (E8, source `zmap.c`, "too much
 compressed data").
 
-A partial reference (bit 15 of a full record; the compact index has no such
-mark, and producers write shared clusters only with the full index: E8,
-`e8-lz4-dedupe`) marks a cluster whose stream decodes to more than this
+A partial reference (bit 15 of a full record, or bit 27 of an
+[encoded extent's](#encoded-extents) length word; the compact index has no
+such mark, and producers write shared clusters only with those two forms:
+E8, `e8-lz4-dedupe`; E10, `e10-48-lz4-b512`) marks a cluster whose stream decodes to more than this
 file's extent, because the cluster is shared. Nothing on disk records the
 stream's full length, so the decoder decodes partially: it produces the
 extent's length and stops, without requiring the stream to end there, and a
@@ -1208,7 +1209,9 @@ A physical cluster is at most 1 MiB stored and its logical extent at most
 inside: its largest stored cluster is exactly 1 MiB (E8, E9,
 `e8-lz4-words6m-big1m` and the `e9-*-words6m-big1m` fixtures) and its
 largest decoded extent 8,192,000 bytes (E8, `e8-lz4-zeros40m-big1m`). A
-larger cluster is `FSIMG_EUNSUPPORTED`. The decoded
+larger cluster is `FSIMG_EUNSUPPORTED`, except an encoded extent's stored
+length, which the [encoded extents](#encoded-extents) make
+`FSIMG_ECORRUPT`. The decoded
 extent is charged to the context when it is decoded, so a volume whose
 clusters exceed the session's memory budget fails with the budget error,
 naming the cluster size, never as corruption.
@@ -1312,28 +1315,57 @@ the first record, each extent starts where the previous one ends, and the
 logical offsets are as for 8 bytes. Every width is read.
 
 The physical length word's low 21 bits are the stored byte length, bit 27
-marks a partial reference, and bits 28 to 31 are the format: 0 for a plain
-extent, otherwise the algorithm plus one (1 LZ4, 3 DEFLATE observed).
+marks a partial reference, bits 21 to 26 are reserved and zero, and bits 28
+to 31 are the format: 0 for a plain extent, otherwise the algorithm plus one
+(1 LZ4, 3 DEFLATE observed). The partial bit means what a full record's
+bit 15 does, [above](#physical-clusters), and like it is ignored on a plain
+extent: `mkfs.erofs -E dedupe` sets it on LZ4 extents that decode a prefix
+of a shared stream (`e10-48-lz4-b512`, `/t10-d/tutu` records 1 and 3, read
+by the kernel to the manifest). A plain extent is stored shifted; under
+the interlaced advice `0x10`, which `mkfs.erofs` sets with fragments
+(`e10-48-frag`, advice `0x35`), a plain extent whose physical offset is a
+block multiple is interlaced instead, rotated by its logical start within
+a block, as the kernel decides it per extent (source `zmap.c`), and as on
+an index it is one block, any other length `FSIMG_ECORRUPT`.
 Explicit logical offsets start at 0, increase strictly and lie below
 `size`; an extent runs to the next extent's offset or to `size`. Under
 advice bit `0x20` the last extent is a fragment in the packed inode at
 offset `pstart_lo << 32 | length word`, the length
 word carrying the offset's low 32 bits and no format or partial bits, and
-it runs to `size` (`e10-48-frag`); a whole-file fragment keeps the
-[legacy header](#packed-fragments) with advice `0x01` clear. A body too
+it runs to `size` (`e10-48-frag`); the 4-byte form has no `pstart_lo`, so
+its fragment offset is the length word alone (kernel source), and a
+32-byte record whose physical offset passes 32 bits cannot name a 64-bit
+offset and is `FSIMG_ECORRUPT`. A whole-file fragment keeps the
+[legacy header](#packed-fragments) with advice `0x01` clear. The
+inline-tail advice `0x08` has no reading under encoded extents, which the
+kernel skips with the header's tail fields, and is `FSIMG_EUNSUPPORTED`
+naming the combination. The big-cluster advice bits give the record size
+there and need no `COMPR_CFGS`, and a stored length is bounded by the
+[cluster limit](#limits) alone: an LZ4 configuration's maximum cluster
+blocks bound an index's clusters, whose block counts it describes, not a
+byte-granular extent. A body too
 short for its records, a stored length beyond the
-[cluster limit](#limits), or a logical offset out of order or out of range
-is `FSIMG_ECORRUPT`. A lookup is a binary search over logical offsets, so
-its cost is logarithmic in the extent count with one record read per step.
+[cluster limit](#limits), a reserved length bit, or a logical offset out of
+order or out of range is `FSIMG_ECORRUPT`. A lookup of 16- or 32-byte
+records is a binary search over logical offsets, one record read per step,
+and each record a search reads must lie strictly between the offsets of
+the records it already read on either side, so two lookups cannot return
+overlapping extents whatever the records neither read hold; verification
+reads every record once and checks the order whole. A 4- or 8-byte record
+is found by its index; a 4-byte record's physical offset is the start
+plus every stored length before it, so the reader keeps the last sum it
+reached for the inode and a sequential read sums each record once, while
+a lookup before that point sums from the first record.
 Physical offsets and lengths need not be block multiples: the kernel and
 `fsck.erofs` read 32-byte records with exact stored lengths and unaligned
 starts (`e10-hand-lz4-exact`, `-bytes`), though `mkfs.erofs` writes only
 block multiples.
 
 Open after E10, each `FSIMG_EUNSUPPORTED` naming it until a producer image
-or a kernel-mounted hand-built one shows its reading: an extent with the
-partial bit 27 set, which no `mkfs.erofs` option produced, and a 16-byte
-record whose physical high half is nonzero, which no producer run reached.
+or a kernel-mounted hand-built one shows its reading: a length word of
+zero, which the kernel reads as an unmapped extent and no producer writes,
+and a 16-byte record whose physical high half is nonzero, which no
+producer run reached.
 
 ## Metadata box
 
@@ -1814,7 +1846,7 @@ minimization searches the writer's accepted block sizes, 4096 first.
 | Attributes | Inline, shared, long prefixes in both placements, filter on and off, ACLs and security labels | Overlong entries, bad shared index, unknown index, bad prefix |
 | Chunks | Both entry widths, several chunk sizes, holes, shared chunks | Device identifiers, high parts, short index, chunk past the domain |
 | Compression | Each algorithm; full and compact indexes across group boundaries; big, plain and interlaced clusters; partial references; inline tails; fragments; compressed directories; reads starting and ending inside a cluster | Bad distances and cycles, bad group packing, marker without big clusters, oversize clusters, truncated and corrupt streams, fragment past the packed inode; the hand-built E15 forms refused by policy: `L > B`, compact advice `0x01` clear, a plain inline tail on an interlaced inode |
-| 48-bit layout | Both superblock forms, the wide one on a small volume; root NID above 65535 through a hand-built image, which no producer places; start blocks and chunk blocks above 2^32 and the bit-63 metadata-box root through sparse fixtures; implicit link counts with and without high bits; omitted dots; every encoded-extent width, fragments and the hand-built 32-byte placements (`e10-*`) | High bits without the feature; a nonzero wide root field without the feature, reported and ignored; encoded extents without the feature (`e10-edit-lz4-no48`), unordered, overcounted (`e10-edit-lz4-counthi`), overlong, with nonzero header bytes or a logical cluster beyond the limit; a stored `.` under bit 4; bit 4 on an extended inode; the partial bit; a 16-byte record with a physical high half; a time sum past 64 bits |
+| 48-bit layout | Both superblock forms, the wide one on a small volume; root NID above 65535 through a hand-built image, which no producer places; start blocks and chunk blocks above 2^32 and the bit-63 metadata-box root through sparse fixtures; implicit link counts with and without high bits; omitted dots; every encoded-extent width, fragments and the hand-built 32-byte placements (`e10-*`) | High bits without the feature; a nonzero wide root field without the feature, reported and ignored; encoded extents without the feature (`e10-edit-lz4-no48`), unordered, overcounted (`e10-edit-lz4-counthi`), overlong, with nonzero header bytes, reserved length bits or a logical cluster beyond the limit; a stored `.` under bit 4; bit 4 on an extended inode; a zero length word; a 16-byte record with a physical high half; a time sum past 64 bits |
 | Metadata box | Plain and compressed boxes at 512 to 4096 bytes; directories, files, chunks, fragments and long prefixes inside; the pool in the primary space and in the box; the root in the box and, without `48BIT`, in the primary space (`e12-flat-box32-plain`, `-poolbox`); reads across box cluster boundaries (`e12-*`) | Box NID with bit 63 or naming a fragment; box inode in the box, without a slot, or in an open layout; a box of encoded extents without `48BIT` (`e12-flat-box32-lz4`); a packed NID with bit 63; tail crossing a box block; bit 63 without the feature; `SHARED_EA_IN_METABOX` without the box or on a compressed box |
 | Verification | Every producer fixture verifies | Every mutation above reports its class; overlapping metadata, a wrong link count |
 | Writer | Empty, small, deep, wide, large-file volumes; every kind it writes; every profile and their combinations; byte identity across source order, budget, scratch and time zone; a poison scan of every unwritten byte | Settings out of range; a source changed between planning and emission |

@@ -640,7 +640,10 @@ banner, was not.
   (`xyxy` at `-C65536` with `--dsunit`: 4294967296), each extent starting
   where the last ended. Length word: low 21 bits the stored length, bits 28
   to 31 the format (0 plain, 1 LZ4, 3 DEFLATE in `e10-48-deflate`), bit 27
-  never produced. Every produced offset and length is a block multiple;
+  the partial reference, set by `-E dedupe` on LZ4 extents that decode a
+  prefix of a shared stream (`e10-48-lz4-b512`, `/t10-d/tutu`: 16-byte
+  records 1 and 3 both name the 4096-byte LZ4 stream at byte 6144 and
+  decode 16369 bytes of it, records 0 and 2 the stream at 2048). Every produced offset and length is a block multiple;
   byte-granular values never appeared with any codec or `--max-extent-bytes`.
   The layout word of an encoded inode is the compressed block count
   (`0x1543` for the 5 GiB file), `0x06` its high half by source, 0 here.
@@ -672,7 +675,7 @@ banner, was not.
   refuse the volume (`bogus i_mode (0)` at the box root), so the box was
   read through the new records. A flipped LZ4 data byte inside a block
   changes content undetected by either tool.
-* **Open.** The partial bit 27; a directory with a start block above 2^32;
+* **Open.** A length word of zero; a directory with a start block above 2^32;
   the bit-6 control on `e10-48-chunk`; a 16-byte record with a nonzero
   physical high half; a produced count above 2^32; kernels other than
   7.0.0-38.

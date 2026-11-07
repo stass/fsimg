@@ -612,6 +612,32 @@ test_root_nid_without_48bit_is_the_16_bit_field(void)
 	EXPECT(!r.sb.reserved_nonzero, "wide root field zero");
 }
 
+/*
+ * The narrow form of the 48-bit superblock, the one mkfs.erofs writes until
+ * the block count passes 32 bits or the root NID 16 (E10, e10-48-small): a
+ * zero wide root field leaves 0x0E the root NID and the block count the
+ * 32-bit field alone.
+ */
+static void
+test_48bit_narrow_form_keeps_the_16_bit_root_nid(void)
+{
+	unsigned char region[REGION_BYTES];
+	region_result_t r;
+
+	region_init(region);
+	put_le(region + SB_INCOMPAT, EROFS_INCOMPAT_48BIT, 4);
+	put_le(region + SB_ROOT16, 0x1234, 2);
+	put_le(region + SB_BLOCKS, 0x89abcdef, 4);
+
+	r = region_decode_checked("48bit_narrow", region, REGION_BYTES);
+
+	EXPECT_STATUS(r.status, FSIMG_OK, r.what, "48bit_narrow");
+	EXPECT(r.sb.root_nid == 0x1234, "root nid is the 16-bit field");
+	EXPECT(r.sb.block_count == 0x89abcdef,
+	    "block count is the 32-bit field alone");
+	EXPECT(!r.sb.reserved_nonzero, "nothing reserved is set");
+}
+
 static void
 test_48bit_widens_root_nid_and_block_count(void)
 {
@@ -4124,15 +4150,38 @@ minimal_image(gen_image_t *image, unsigned blkszbits)
 	image_build(image, &sb, NULL);
 }
 
-/* A reader over an in-memory image, built the way a driver test opens one. */
+/*
+ * A reader over an in-memory image, built the way a driver test opens one.
+ * A sparse volume is longer than its bytes: it reports `size`, holds `far`
+ * at far_offset, and reads as zeros everywhere else past its bytes, so a
+ * 48-bit volume of 2^41 bytes costs only the blocks a test writes.
+ */
 typedef struct volume {
 	fsimg_reader_t	 reader;
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*io;
 	const unsigned char *bytes;
 	uint64_t	 length;
+	uint64_t	 size;
+	const unsigned char *far;
+	uint64_t	 far_offset;
+	uint64_t	 far_length;
 	uint64_t	 baseline;
 } volume_t;
+
+/* The part of [from, from + length) of the source at start, into buffer. */
+static void
+range_copy(unsigned char *buffer, uint64_t from, size_t length,
+    const unsigned char *source, uint64_t start, uint64_t source_length)
+{
+	uint64_t begin = from > start ? from : start;
+	uint64_t end = from + length < start + source_length ? from + length :
+	    start + source_length;
+
+	if (begin < end)
+		bcopy(source + (begin - start), buffer + (begin - from),
+		    (size_t)(end - begin));
+}
 
 static fsimg_status_t
 volume_read(void *argument, uint64_t offset, void *buffer, size_t length,
@@ -4140,8 +4189,13 @@ volume_read(void *argument, uint64_t offset, void *buffer, size_t length,
 {
 	volume_t *v = argument;
 
-	CHECK(offset <= v->length && length <= v->length - offset);
-	bcopy(v->bytes + offset, buffer, length);
+	CHECK(offset <= v->size && length <= v->size - offset);
+	if (v->size != v->length)
+		bzero(buffer, length);
+	range_copy(buffer, offset, length, v->bytes, 0, v->length);
+	if (v->far != NULL)
+		range_copy(buffer, offset, length, v->far, v->far_offset,
+		    v->far_length);
 	*transferred = length;
 	return (FSIMG_OK);
 }
@@ -4149,7 +4203,7 @@ volume_read(void *argument, uint64_t offset, void *buffer, size_t length,
 static fsimg_status_t
 volume_size(void *argument, uint64_t *size, fsimg_error_t *error FSIMG_UNUSED)
 {
-	*size = ((volume_t *)argument)->length;
+	*size = ((volume_t *)argument)->size;
 	return (FSIMG_OK);
 }
 
@@ -4157,17 +4211,30 @@ volume_size(void *argument, uint64_t *size, fsimg_error_t *error FSIMG_UNUSED)
  * Start a volume under memory_bytes of memory and the scratch directory
  * scratch_fd, or with scratch disabled when it is -1.
  */
+static void	volume_connect(volume_t *, uint64_t, int);
+
 static void
 volume_start_scratch(volume_t *v, const unsigned char *bytes, uint64_t length,
     uint64_t memory_bytes, int scratch_fd)
+{
+	bzero(v, sizeof(*v));
+	v->bytes = bytes;
+	v->length = length;
+	v->size = length;
+	volume_connect(v, memory_bytes, scratch_fd);
+}
+
+/*
+ * Open the context and the input of a volume whose bytes and extent are
+ * set, under memory_bytes and the scratch directory scratch_fd.
+ */
+static void
+volume_connect(volume_t *v, uint64_t memory_bytes, int scratch_fd)
 {
 	fsimg_options_t options;
 	fsimg_io_ops_t ops;
 	fsimg_stats_t stats;
 
-	bzero(v, sizeof(*v));
-	v->bytes = bytes;
-	v->length = length;
 	fsimg_options_init(&options);
 	options.memory_bytes = memory_bytes;
 	options.scratch_directory_fd = scratch_fd;
@@ -4182,7 +4249,7 @@ volume_start_scratch(volume_t *v, const unsigned char *bytes, uint64_t length,
 	v->reader.ctx = v->ctx;
 	v->reader.input = v->io;
 	v->reader.ops = &fsimg_erofs_reader_ops;
-	v->reader.slice_bytes = length;
+	v->reader.slice_bytes = v->size;
 	v->reader.state = FSIMG_READER_OPENING;
 	fsimg_read_options_init(&v->reader.options);
 	fsimg_session_init(&v->reader.session, v->ctx, "test", 0);
@@ -4690,11 +4757,11 @@ test_open_refuses_inconsistent_superblock_fields(void)
 }
 
 static void
-test_open_refuses_each_unimplemented_incompatible_bit_by_name(void)
+test_open_accepts_48bit_and_refuses_metabox_by_name(void)
 {
 	static const open_case_t cases[] = {
-		{ "48BIT", { { SB_INCOMPAT, 4, 0x080 } }, true,
-		    FSIMG_EUNSUPPORTED, "48BIT" },
+		{ "48BIT", { { SB_INCOMPAT, 4, 0x080 } }, true, FSIMG_OK,
+		    NULL },
 		{ "METABOX", { { SB_INCOMPAT, 4, 0x100 },
 		    { SB_SLOTS, 1, 1 } }, true, FSIMG_EUNSUPPORTED,
 		    "METABOX" }
@@ -5052,7 +5119,7 @@ test_open_failures_return_all_memory(void)
 		uint64_t	 value;
 		unsigned	 width;
 	} cases[] = {
-		{ "feature refusal", SB_INCOMPAT, 0x080, 4 },
+		{ "extra device refusal", SB_DEVICES, 1, 2 },
 		{ "superblock rule", SB_NSEC, 1000000000, 4 },
 		{ "root outside the domain", SB_META_BLOCK, 3, 4 }
 	};
@@ -11207,6 +11274,1245 @@ test_a_non_head_chaining_to_an_earlier_non_head_of_its_cluster_reads(void)
 	free(content);
 }
 
+/* ---- Encoded extents of the 48-bit layout ---- */
+
+/* The map header of an encoded-extent inode of width bytes. */
+static fsimg_status_t
+xheader_run(uint32_t incompat, unsigned blkszbits, const unsigned char *raw,
+    erofs_layout_t layout, erofs_zheader_t *out, const char **what)
+{
+	erofs_super_t sb;
+
+	bzero(&sb, sizeof(sb));
+	sb.incompat = incompat;
+	sb.blkszbits = (uint8_t)blkszbits;
+	*what = NULL;
+	return (erofs_zheader_decode(raw, &sb, layout, out, what));
+}
+
+/* An encoded-extent map header: the width's advice bits and the bytes. */
+static void
+xheader_bytes(unsigned char *raw, unsigned width, uint16_t advice,
+    uint32_t low, uint8_t byte6, uint8_t byte7)
+{
+	unsigned width_bits = width == 4 ? 0 : width == 8 ? 1 : width == 16 ?
+	    2 : 3;
+
+	bzero(raw, EROFS_ZHEADER_BYTES);
+	le32_put(raw, low);
+	le16_put(raw + 4, (unsigned)(advice | EROFS_ADVICE_EXTENTS |
+	    width_bits << 1));
+	raw[6] = byte6;
+	raw[7] = byte7;
+}
+
+static void
+test_encoded_extent_header_gives_the_width_and_the_count_or_cluster(void)
+{
+	static const unsigned widths[] = { 4, 8, 16, 32 };
+	const uint32_t wide = EROFS_INCOMPAT_48BIT;
+	unsigned char raw[EROFS_ZHEADER_BYTES];
+	erofs_zheader_t h;
+	const char *what;
+
+	for (size_t i = 0; i < ARRAY_SIZE(widths); i++) {
+		unsigned w = widths[i];
+		fsimg_status_t status;
+
+		if (w >= 16)
+			xheader_bytes(raw, w, 0, 5, 0x02, 0x01);
+		else
+			xheader_bytes(raw, w, 0, 0, 0, 0x03);
+		status = xheader_run(wide, 9, raw, EROFS_LAYOUT_COMPRESSED_FULL,
+		    &h, &what);
+		EXPECT(status == FSIMG_OK && h.extent_bytes == w,
+		    "width %u: status %d (%s), %u-byte records", w, (int)status,
+		    what != NULL ? what : "", (unsigned)h.extent_bytes);
+		if (w >= 16)
+			EXPECT(h.extent_count == (UINT64_C(0x0102) << 32 | 5),
+			    "width %u: the count's halves around the advice",
+			    w);
+		else
+			EXPECT(h.lclusterbits == 9 + 3,
+			    "width %u: the logical cluster is B << 3", w);
+	}
+
+	/* A compact index keeps advice 0x01 as its 2-byte-group flag. */
+	xheader_bytes(raw, 4, 0, 0, 0, 0);
+	EXPECT(xheader_run(wide, 9, raw, EROFS_LAYOUT_COMPRESSED_COMPACT, &h,
+	    &what) == FSIMG_OK && h.extent_bytes == 0,
+	    "a compact index under 48BIT is not encoded extents (%s)",
+	    what != NULL ? what : "");
+}
+
+/*
+ * Each rule of an encoded-extent map header. Bit 7 of byte 7 marks a
+ * whole-file fragment before the advice is read, as the kernel tests it,
+ * so in a 4- or 8-byte header only bits 4 to 6 are reserved.
+ */
+static void
+test_encoded_extent_header_refuses_each_bad_field(void)
+{
+	static const struct {
+		const char	*name;
+		unsigned	 width;
+		uint16_t	 advice;
+		uint32_t	 low;
+		uint8_t		 byte6;
+		uint8_t		 byte7;
+		uint32_t	 incompat;	/* beyond 48BIT; ~0: none */
+		unsigned	 blkszbits;
+		fsimg_status_t	 status;
+		const char	*phrase;
+	} cases[] = {
+		{ "4-byte, byte 0 set", 4, 0, 0x01, 0, 0, 0, 9, FSIMG_ECORRUPT,
+		    "reserved bits" },
+		{ "8-byte, byte 3 set", 8, 0, 0x01000000, 0, 0, 0, 9,
+		    FSIMG_ECORRUPT, "reserved bits" },
+		{ "4-byte, byte 6 set", 4, 0, 0, 1, 0, 0, 9, FSIMG_ECORRUPT,
+		    "reserved bits" },
+		{ "8-byte, byte 7 bit 4 set", 8, 0, 0, 0, 0x10, 0, 9,
+		    FSIMG_ECORRUPT, "reserved bits" },
+		{ "4-byte, byte 7 bit 6 set", 4, 0, 0, 0, 0x40, 0, 12,
+		    FSIMG_ECORRUPT, "reserved bits" },
+		{ "8-byte, byte 7 bit 7: a whole-file fragment", 8, 0, 0, 0,
+		    0x80, 0, 9, FSIMG_ECORRUPT,
+		    "whole-file fragment without FRAGMENTS" },
+		{ "8-byte, byte 7 bit 7 with FRAGMENTS", 8, 0, 0, 0, 0x80,
+		    EROFS_INCOMPAT_FRAGMENTS, 9, FSIMG_OK, NULL },
+		{ "16-byte, bytes 0 and 6 are the count", 16, 0, 1, 1, 0, 0, 9,
+		    FSIMG_OK, NULL },
+		{ "4-byte, cluster 8 MiB", 4, 0, 0, 0, 14, 0, 9, FSIMG_OK,
+		    NULL },
+		{ "4-byte, cluster 16 MiB", 4, 0, 0, 0, 15, 0, 9,
+		    FSIMG_EUNSUPPORTED, "logical cluster above 12 MiB" },
+		{ "8-byte, cluster 16 MiB at 4 KiB blocks", 8, 0, 0, 0, 12, 0,
+		    12, FSIMG_EUNSUPPORTED, "logical cluster above 12 MiB" },
+		{ "inline tail", 16, EROFS_ADVICE_INLINE_TAIL, 1, 0, 0,
+		    EROFS_INCOMPAT_ZTAILPACKING, 9, FSIMG_EUNSUPPORTED,
+		    "inline tail with encoded extents" },
+		{ "fragment without FRAGMENTS", 16, EROFS_ADVICE_FRAGMENT, 1,
+		    0, 0, 0, 9, FSIMG_ECORRUPT, "fragment without FRAGMENTS" },
+		{ "fragment with FRAGMENTS", 8, EROFS_ADVICE_FRAGMENT, 0, 0, 0,
+		    EROFS_INCOMPAT_FRAGMENTS, 9, FSIMG_OK, NULL },
+		{ "no 48BIT", 16, 0, 1, 0, 0, ~UINT32_C(0), 9, FSIMG_ECORRUPT,
+		    "encoded extents without 48BIT" },
+	};
+	unsigned char raw[EROFS_ZHEADER_BYTES];
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		uint32_t incompat = cases[i].incompat == ~UINT32_C(0) ? 0 :
+		    EROFS_INCOMPAT_48BIT | cases[i].incompat;
+		erofs_zheader_t h;
+		const char *what;
+		fsimg_status_t status;
+
+		xheader_bytes(raw, cases[i].width, cases[i].advice,
+		    cases[i].low, cases[i].byte6, cases[i].byte7);
+		status = xheader_run(incompat, cases[i].blkszbits, raw,
+		    EROFS_LAYOUT_COMPRESSED_FULL, &h, &what);
+		EXPECT_STATUS(status, cases[i].status, what, cases[i].name);
+		EXPECT(status == FSIMG_OK || phrase_in(what, cases[i].phrase),
+		    "%s: \"%s\" names \"%s\"", cases[i].name,
+		    what != NULL ? what : "", cases[i].phrase);
+	}
+}
+
+static void
+test_encoded_extent_records_decode_the_fields_of_each_width(void)
+{
+	unsigned char raw[EROFS_EXTENT_BYTES_MAX];
+	erofs_xrecord_t r;
+	const char *what = NULL;
+
+	for (size_t i = 0; i < sizeof(raw); i++)
+		raw[i] = (unsigned char)(0x10 + i);
+	bzero(raw + 20, 12);
+	CHECK(erofs_xrecord_decode(raw, 4, &r, &what) == FSIMG_OK);
+	EXPECT(r.length_word == 0x13121110 && r.physical == 0 &&
+	    r.logical == 0, "4-byte: the length word alone");
+	CHECK(erofs_xrecord_decode(raw, 8, &r, &what) == FSIMG_OK);
+	EXPECT(r.length_word == 0x13121110 && r.physical == 0x17161514 &&
+	    r.logical == 0, "8-byte: a 32-bit physical offset");
+	CHECK(erofs_xrecord_decode(raw, 32, &r, &what) == FSIMG_OK);
+	EXPECT(r.physical == UINT64_C(0x1b1a191817161514) &&
+	    r.logical == UINT64_C(0x232221201f1e1d1c),
+	    "32-byte: 64-bit physical and logical offsets in halves");
+	for (size_t i = 20; i < 32; i++) {
+		raw[i] = 1;
+		EXPECT_STATUS(erofs_xrecord_decode(raw, 32, &r, &what),
+		    FSIMG_ECORRUPT, what, "32-byte reserved byte");
+		EXPECT(phrase_in(what, "reserved bytes"), "reserved byte %zu",
+		    i);
+		raw[i] = 0;
+	}
+
+	/* The 16-byte record: its physical high half must be zero. */
+	bzero(raw + 8, 4);
+	CHECK(erofs_xrecord_decode(raw, 16, &r, &what) == FSIMG_OK);
+	EXPECT(r.physical == 0x17161514 && r.logical == 0x1f1e1d1c,
+	    "16-byte: a 64-bit physical and a 32-bit logical offset");
+	raw[11] = 1;
+	EXPECT_STATUS(erofs_xrecord_decode(raw, 16, &r, &what),
+	    FSIMG_EUNSUPPORTED, what, "16-byte physical high half");
+	EXPECT(phrase_in(what, "16-byte encoded extent above 4 GiB"),
+	    "the 16-byte refusal names the form");
+}
+
+static void
+test_encoded_extent_length_word_rules(void)
+{
+	erofs_xlength_t x;
+	const char *what = NULL;
+
+	CHECK(erofs_xlength_decode(UINT32_C(0x1000) | 1u << 28, &x, &what) ==
+	    FSIMG_OK);
+	EXPECT(x.stored_bytes == 0x1000 && x.format == 1 && !x.partial,
+	    "LZ4, 4096 bytes");
+	CHECK(erofs_xlength_decode(UINT32_C(0x100000) | 3u << 28 | 1u << 27,
+	    &x, &what) == FSIMG_OK);
+	EXPECT(x.stored_bytes == 0x100000 && x.format == 3 && x.partial,
+	    "DEFLATE, 1 MiB, partial");
+	CHECK(erofs_xlength_decode(UINT32_C(200) | 1u << 27, &x, &what) ==
+	    FSIMG_OK);
+	EXPECT(x.format == 0 && !x.partial, "the partial bit on a plain extent "
+	    "is ignored");
+
+	EXPECT_STATUS(erofs_xlength_decode(0, &x, &what), FSIMG_EUNSUPPORTED,
+	    what, "zero length word");
+	EXPECT(phrase_in(what, "zero length word"), "zero word phrase");
+	for (unsigned bit = 21; bit <= 26; bit++) {
+		EXPECT_STATUS(erofs_xlength_decode(100u | 1u << bit, &x, &what),
+		    FSIMG_ECORRUPT, what, "length word reserved bit");
+		EXPECT(phrase_in(what, "reserved bits"), "bit %u", bit);
+	}
+	EXPECT_STATUS(erofs_xlength_decode(UINT32_C(0x100001) | 1u << 28, &x,
+	    &what), FSIMG_ECORRUPT, what, "stored length above 1 MiB");
+	EXPECT(phrase_in(what, "above 1 MiB"), "stored length phrase");
+}
+
+/*
+ * An encoded-extent file is built from a plan of extents at B = 512. Each
+ * extent has bytes of its own, stored from a running physical cursor that a
+ * gap moves to an unaligned offset: as an LZ4 stream of exact
+ * length or right-aligned in whole blocks after zero padding, plain in
+ * place, interlaced in one aligned block, as the plan's raw stream, or as
+ * the fragment ending the file in a flat packed inode. The records are
+ * returned for a test to edit before the inode is written.
+ */
+enum {
+	XEXTENTS_MAX = 8,
+	XBLOCK = 512
+};
+
+typedef enum xkind {
+	XK_LZ4,
+	XK_LZ4_PADDED,
+	XK_PLAIN,
+	XK_INTERLACED,
+	XK_RAW,
+	XK_FRAGMENT
+} xkind_t;
+
+typedef struct xextent {
+	uint64_t	 start;
+	xkind_t		 kind;
+	uint32_t	 gap;
+} xextent_t;
+
+typedef struct xplan {
+	uint64_t	 size;
+	size_t		 count;
+	unsigned	 width;
+	uint16_t	 advice;	/* beyond 0x01 and the width */
+	uint8_t		 shift;		/* 4- and 8-byte */
+	uint64_t	 fragment_offset;
+	const unsigned char *raw;	/* an XK_RAW extent's stream */
+	size_t		 raw_length;
+	xextent_t	 extents[XEXTENTS_MAX];
+} xplan_t;
+
+static bool
+xplan_fragment(const xplan_t *plan)
+{
+	return (plan->extents[plan->count - 1].kind == XK_FRAGMENT);
+}
+
+static uint64_t
+xextent_end(const xplan_t *plan, size_t k)
+{
+	return (k + 1 < plan->count ? plan->extents[k + 1].start : plan->size);
+}
+
+/*
+ * The file's bytes: extent k holds pattern seed + k from its start, which
+ * repeats with XPERIOD in an LZ4 extent so that its stream compresses.
+ */
+enum {
+	XPERIOD = 13
+};
+
+static bool
+xkind_lz4(xkind_t kind)
+{
+	return (kind == XK_LZ4 || kind == XK_LZ4_PADDED);
+}
+
+static unsigned char *
+xcontent(const xplan_t *plan, unsigned seed)
+{
+	unsigned char *bytes = calloc((size_t)plan->size, 1);
+
+	CHECK(bytes != NULL);
+	for (size_t k = 0; k < plan->count; k++) {
+		const xextent_t *e = &plan->extents[k];
+
+		for (uint64_t i = e->start; i < xextent_end(plan, k); i++) {
+			size_t within = (size_t)(i - e->start);
+
+			bytes[i] = pattern_byte(seed + (unsigned)k,
+			    xkind_lz4(e->kind) ? within % XPERIOD : within);
+		}
+	}
+	return (bytes);
+}
+
+/*
+ * A 48-bit volume, FRAGMENTS added when the plan ends in a fragment, with
+ * the plan's extents stored and its records in records. The cursor starts
+ * at the first free data block; data_next moves past the last stored byte.
+ */
+static void
+xtree_build(gen_tree_t *tree, const xplan_t *plan, const unsigned char *content,
+    gen_xrecord_t *records)
+{
+	uint32_t incompat = EROFS_INCOMPAT_48BIT |
+	    (xplan_fragment(plan) ? EROFS_INCOMPAT_FRAGMENTS : 0);
+	zvolume_t volume = { incompat, 0, 0, false };
+	unsigned char *stream = calloc((size_t)plan->size + XBLOCK + 64, 1);
+	uint64_t at;
+
+	CHECK(stream != NULL && plan->count <= XEXTENTS_MAX);
+	ztree_new(tree, 9, &volume, (unsigned)((3 * plan->size +
+	    plan->fragment_offset) / XBLOCK) + 4 * XEXTENTS_MAX);
+	at = (uint64_t)tree->data_next * XBLOCK;
+	bzero(records, plan->count * sizeof(*records));
+	for (size_t k = 0; k < plan->count; k++) {
+		const xextent_t *e = &plan->extents[k];
+		const unsigned char *extent = content + e->start;
+		size_t length = (size_t)(xextent_end(plan, k) - e->start);
+		size_t n = 0, stored = 0;
+		unsigned format = 1;
+
+		records[k].logical = e->start;
+		if (e->kind == XK_FRAGMENT)
+			continue;
+		CHECK(plan->width != 4 || k == 0 || e->gap == 0);
+		at += e->gap;
+		if (e->kind == XK_INTERLACED)
+			at = (at + XBLOCK - 1) / XBLOCK * XBLOCK;
+		records[k].physical = at;
+		switch (e->kind) {
+		case XK_LZ4:
+		case XK_LZ4_PADDED:
+			n = gen_lz4_periodic(stream, plan->size + XBLOCK,
+			    extent, length, XPERIOD);
+			CHECK(n != 0);
+			stored = e->kind == XK_LZ4 ? n :
+			    (n + XBLOCK - 1) / XBLOCK * XBLOCK;
+			gen_put_bytes(&tree->image, at + stored - n, stream, n);
+			break;
+		case XK_RAW:
+			stored = plan->raw_length;
+			gen_put_bytes(&tree->image, at, plan->raw, stored);
+			break;
+		case XK_PLAIN:
+			stored = length;
+			format = 0;
+			gen_put_bytes(&tree->image, at, extent, length);
+			break;
+		case XK_INTERLACED:
+			CHECK(length <= XBLOCK);
+			stored = XBLOCK;
+			format = 0;
+			for (size_t j = 0; j < length; j++)
+				gen_put(&tree->image, at +
+				    (e->start % XBLOCK + j) % XBLOCK, extent[j],
+				    1);
+			break;
+		case XK_FRAGMENT:
+			break;
+		}
+		records[k].length = (uint32_t)stored | (uint32_t)format << 28;
+		at += stored;
+	}
+	tree->data_next = (uint32_t)((at + XBLOCK - 1) / XBLOCK);
+	if (xplan_fragment(plan)) {
+		size_t k = plan->count - 1;
+		size_t length = (size_t)(plan->size - plan->extents[k].start);
+		size_t packed_size = (size_t)plan->fragment_offset + length +
+		    64;
+		unsigned char *packed = calloc(packed_size, 1);
+		gen_inode_t proto = file_proto(LAYOUT_FLAT);
+
+		CHECK(packed != NULL);
+		bcopy(content + plan->extents[k].start,
+		    packed + plan->fragment_offset, length);
+		gen_tree_set_packed(tree, gen_tree_add(tree, &proto, packed,
+		    packed_size));
+		records[k].length = (uint32_t)plan->fragment_offset;
+		records[k].physical = plan->fragment_offset >> 32;
+		free(packed);
+	}
+	free(stream);
+}
+
+/* File "f" of the plan with these records and count; returns its NID. */
+static uint64_t
+xfile_add(gen_tree_t *tree, const xplan_t *plan, const gen_xrecord_t *records,
+    uint64_t count)
+{
+	gen_inode_t proto = file_proto(LAYOUT_FLAT);
+	gen_xfile_t xf = { plan->size, count, records[0].physical, records,
+	    plan->count, plan->width, plan->advice, plan->shift };
+	uint64_t nid = gen_tree_add_extents(tree, &proto, &xf);
+
+	root_names(tree, "f", nid, T_FILE);
+	return (nid);
+}
+
+static void
+xtree_with_file(gen_tree_t *tree, const xplan_t *plan,
+    const unsigned char *content)
+{
+	gen_xrecord_t records[XEXTENTS_MAX];
+
+	xtree_build(tree, plan, content, records);
+	(void)xfile_add(tree, plan, records, plan->count);
+}
+
+/* The plan's extents as a zplan, so check_zfile() reads across them. */
+static zplan_t
+xzplan(const xplan_t *plan)
+{
+	zplan_t z;
+
+	bzero(&z, sizeof(z));
+	z.blkszbits = 9;
+	z.size = (size_t)plan->size;
+	z.count = plan->count;
+	for (size_t k = 0; k < plan->count; k++)
+		z.clusters[k].start = plan->extents[k].start;
+	return (z);
+}
+
+/* The file reads back whole and by ranges, and verifies in both scopes. */
+static void
+check_xfile(const char *label, gen_tree_t *tree, const xplan_t *plan,
+    const unsigned char *content)
+{
+	zplan_t z = xzplan(plan);
+
+	check_zfile(label, tree, &z, content);
+	for (size_t s = 0; s < ARRAY_SIZE(zscopes); s++)
+		check_zverify(label, tree, zscopes[s], FSIMG_OK);
+}
+
+/* The plan at another record width, its extents as given. */
+static xplan_t
+xplan_at(const xplan_t *plan, unsigned width)
+{
+	xplan_t p = *plan;
+
+	p.width = width;
+	return (p);
+}
+
+/*
+ * Explicit logical offsets (16 and 32 bytes) with LZ4 and plain extents,
+ * unaligned and exact or padded to blocks; one logical cluster per record (4
+ * and 8 bytes) at clusters of B and 2B, 4-byte extents running on from an
+ * unaligned start.
+ */
+static void
+test_encoded_extents_read_at_every_width(void)
+{
+	static const xplan_t logical = { .size = 2000, .count = 4, .extents = {
+	    { 0, XK_LZ4, 0 }, { 700, XK_PLAIN, 3 }, { 1200, XK_LZ4, 5 },
+	    { 1700, XK_LZ4_PADDED, 0 } } };
+	static const xplan_t clustered = { .size = 1800, .count = 4,
+	    .extents = { { 0, XK_LZ4, 7 }, { 512, XK_PLAIN, 0 },
+	    { 1024, XK_LZ4, 0 }, { 1536, XK_PLAIN, 0 } } };
+	static const xplan_t doubled = { .size = 2500, .count = 3, .shift = 1,
+	    .extents = { { 0, XK_PLAIN, 0 }, { 1024, XK_LZ4_PADDED, 0 },
+	    { 2048, XK_LZ4, 0 } } };
+	static const struct {
+		const xplan_t	*plan;
+		unsigned	 width;
+	} cases[] = {
+		{ &logical, 16 }, { &logical, 32 }, { &clustered, 4 },
+		{ &clustered, 8 }, { &doubled, 4 }, { &doubled, 8 },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		xplan_t plan = xplan_at(cases[i].plan, cases[i].width);
+		unsigned char *content = xcontent(&plan, 21);
+		char label[96];
+		gen_tree_t tree;
+
+		snprintf(label, sizeof(label), "%u-byte records, cluster shift "
+		    "%u", plan.width, (unsigned)plan.shift);
+		xtree_with_file(&tree, &plan, content);
+		check_xfile(label, &tree, &plan, content);
+		gen_tree_free(&tree);
+		free(content);
+	}
+}
+
+/*
+ * Under advice 0x20 the last extent is a fragment of the packed inode, at
+ * the offset whose low 32 bits are the length word; a physical offset
+ * beyond 32 bits, which would make it wider than 64, is corrupt.
+ */
+static void
+test_encoded_extents_end_in_a_fragment_at_every_width(void)
+{
+	static const xplan_t logical = { .size = 900, .count = 2,
+	    .advice = EROFS_ADVICE_FRAGMENT, .fragment_offset = 100,
+	    .extents = { { 0, XK_LZ4, 0 }, { 600, XK_FRAGMENT, 0 } } };
+	static const xplan_t clustered = { .size = 900, .count = 2,
+	    .advice = EROFS_ADVICE_FRAGMENT, .fragment_offset = 100,
+	    .extents = { { 0, XK_LZ4, 3 }, { 512, XK_FRAGMENT, 0 } } };
+	static const unsigned widths[] = { 4, 8, 16, 32 };
+	gen_xrecord_t records[XEXTENTS_MAX];
+
+	for (size_t i = 0; i < ARRAY_SIZE(widths); i++) {
+		xplan_t plan = xplan_at(widths[i] >= 16 ? &logical : &clustered,
+		    widths[i]);
+		unsigned char *content = xcontent(&plan, 27);
+		char label[96];
+		gen_tree_t tree;
+
+		snprintf(label, sizeof(label), "%u-byte records ending in a "
+		    "fragment", plan.width);
+		xtree_with_file(&tree, &plan, content);
+		check_xfile(label, &tree, &plan, content);
+		gen_tree_free(&tree);
+
+		if (plan.width == 32) {
+			xtree_build(&tree, &plan, content, records);
+			records[1].physical = UINT64_C(1) << 32;
+			(void)xfile_add(&tree, &plan, records, plan.count);
+			check_refused("fragment offset above 64 bits", &tree,
+			    FSIMG_ECORRUPT, "encoded fragment offset");
+			gen_tree_free(&tree);
+		}
+		free(content);
+	}
+}
+
+/*
+ * The extent count's bound is ceil(size / B) inclusive: two extents in a
+ * 1000-byte file of 512-byte blocks read. A compressed extent that is not
+ * partial and does not end the file may not store more than it decodes,
+ * even when its stream decodes exactly the extent: a 300-byte LZ4 extent
+ * padded to a block is corrupt by the map's rule, not the decoder's.
+ */
+static void
+test_encoded_extent_count_and_stored_length_boundaries(void)
+{
+	static const xplan_t full = { .size = 1000, .count = 2, .width = 16,
+	    .extents = { { 0, XK_LZ4, 0 }, { 600, XK_LZ4, 0 } } };
+	static const xplan_t padded = { .size = 1000, .count = 2, .width = 16,
+	    .extents = { { 0, XK_LZ4_PADDED, 0 }, { 300, XK_LZ4, 0 } } };
+	unsigned char *content;
+	gen_tree_t tree;
+
+	content = xcontent(&full, 31);
+	xtree_with_file(&tree, &full, content);
+	check_xfile("count equal to the size's blocks", &tree, &full,
+	    content);
+	gen_tree_free(&tree);
+	free(content);
+
+	content = xcontent(&padded, 33);
+	xtree_with_file(&tree, &padded, content);
+	check_refused("padded extent mid-file", &tree, FSIMG_ECORRUPT,
+	    "compressed cluster stores more than it decodes");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/*
+ * The partial bit 27 lets an LZ4 extent's stream decode beyond the extent,
+ * as a full record's partial bit does; without it the same stream is
+ * corrupt. On a plain extent the bit is ignored.
+ */
+static void
+test_encoded_extents_partial_bit_decodes_a_longer_stream(void)
+{
+	unsigned char stream[STREAM_MAX];
+	size_t n = periodic_stream(stream, 1000);
+	xplan_t plan = { .size = 1100, .count = 3, .width = 16, .raw = stream,
+	    .raw_length = n, .extents = { { 0, XK_RAW, 0 }, { 600, XK_LZ4, 0 },
+	    { 900, XK_PLAIN, 0 } } };
+	unsigned char *content = xcontent(&plan, 5);
+	gen_xrecord_t records[XEXTENTS_MAX];
+	gen_tree_t tree;
+
+	for (size_t i = 0; i < 600; i++)
+		content[i] = pattern_byte(3, i % 7);
+	xtree_build(&tree, &plan, content, records);
+	records[0].length |= UINT32_C(1) << 27;
+	records[2].length |= UINT32_C(1) << 27;
+	(void)xfile_add(&tree, &plan, records, plan.count);
+	check_xfile("partial LZ4 extent, partial bit on a plain one", &tree,
+	    &plan, content);
+	gen_tree_free(&tree);
+
+	xtree_build(&tree, &plan, content, records);
+	(void)xfile_add(&tree, &plan, records, plan.count);
+	check_refused("the same stream, not marked partial", &tree,
+	    FSIMG_ECORRUPT, "longer than its capacity");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/*
+ * Under advice 0x10 a plain extent at a block-aligned physical offset is
+ * one block rotated by its logical start within a block; an unaligned one
+ * is shifted. An aligned one of another length is corrupt.
+ */
+static void
+test_encoded_extents_interlace_aligned_plain_extents(void)
+{
+	xplan_t plan = { .size = 1400, .count = 3, .width = 16,
+	    .advice = EROFS_ADVICE_INTERLACED, .extents = { { 0, XK_LZ4, 0 },
+	    { 700, XK_INTERLACED, 0 }, { 1000, XK_PLAIN, 3 } } };
+	unsigned char *content = xcontent(&plan, 9);
+	gen_xrecord_t records[XEXTENTS_MAX];
+	gen_tree_t tree;
+
+	xtree_with_file(&tree, &plan, content);
+	check_xfile("interlaced aligned extent, shifted unaligned one", &tree,
+	    &plan, content);
+	gen_tree_free(&tree);
+
+	xtree_build(&tree, &plan, content, records);
+	records[1].length = 300;
+	(void)xfile_add(&tree, &plan, records, plan.count);
+	check_refused("interlaced aligned extent of 300 bytes", &tree,
+	    FSIMG_ECORRUPT, "interlaced plain extent not one block");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/* One field of a record or of the map edited before the inode is written. */
+typedef enum xedit_id {
+	XE_COUNT,		/* the header's count */
+	XE_LOGICAL,		/* record's logical offset */
+	XE_PHYSICAL_OR,		/* bits ORed into its physical offset */
+	XE_LENGTH,		/* its length word */
+	XE_ADVICE_OR,		/* bits ORed into the advice */
+	XE_NO_48BIT		/* the superblock's 48BIT cleared */
+} xedit_id_t;
+
+/*
+ * A lookup refuses each bad field of the map and its records; each case
+ * edits the plan's valid file once. The extent count is bounded by the
+ * size's blocks, here 4.
+ */
+static void
+test_encoded_extent_lookups_refuse_each_bad_field(void)
+{
+	static const xplan_t base = { .size = 2000, .count = 4, .extents = {
+	    { 0, XK_LZ4, 0 }, { 700, XK_PLAIN, 0 }, { 1200, XK_LZ4, 0 },
+	    { 1700, XK_PLAIN, 0 } } };
+	static const struct {
+		const char	*name;
+		unsigned	 width;
+		xedit_id_t	 edit;
+		size_t		 record;
+		uint64_t	 value;
+		fsimg_status_t	 status;
+		const char	*phrase;
+	} cases[] = {
+		{ "count 5 above 4 blocks", 16, XE_COUNT, 0, 5, FSIMG_ECORRUPT,
+		    "count above the size's blocks" },
+		{ "count with a high half", 32, XE_COUNT, 0,
+		    UINT64_C(1) << 32 | 4, FSIMG_ECORRUPT,
+		    "count above the size's blocks" },
+		{ "count 0 with content", 16, XE_COUNT, 0, 0, FSIMG_ECORRUPT,
+		    "no encoded extent for the content" },
+		{ "first offset not 0", 16, XE_LOGICAL, 0, 5, FSIMG_ECORRUPT,
+		    "logical offsets out of order" },
+		{ "offset equal to the previous", 32, XE_LOGICAL, 2, 700,
+		    FSIMG_ECORRUPT, "logical offsets out of order" },
+		{ "offset below the previous", 16, XE_LOGICAL, 2, 600,
+		    FSIMG_ECORRUPT, "logical offsets out of order" },
+		{ "offset at the size", 16, XE_LOGICAL, 3, 2000,
+		    FSIMG_ECORRUPT, "logical offsets out of order" },
+		{ "logical high half", 32, XE_LOGICAL, 1,
+		    UINT64_C(1) << 32 | 700, FSIMG_ECORRUPT,
+		    "logical offsets out of order" },
+		{ "a later offset of 0", 16, XE_LOGICAL, 1, 0, FSIMG_ECORRUPT,
+		    "logical offsets out of order" },
+		{ "16-byte physical high half", 16, XE_PHYSICAL_OR, 1,
+		    UINT64_C(1) << 32, FSIMG_EUNSUPPORTED,
+		    "16-byte encoded extent above 4 GiB" },
+		{ "32-byte physical high half past the volume", 32,
+		    XE_PHYSICAL_OR, 1, UINT64_C(1) << 32, FSIMG_ECORRUPT,
+		    "physical cluster outside the volume" },
+		{ "zero length word", 16, XE_LENGTH, 1, 0, FSIMG_EUNSUPPORTED,
+		    "zero length word" },
+		{ "length word bit 21", 16, XE_LENGTH, 1, 300 | 1u << 21,
+		    FSIMG_ECORRUPT, "length word reserved bits" },
+		{ "stored length above 1 MiB", 32, XE_LENGTH, 1, 0x100001,
+		    FSIMG_ECORRUPT, "above 1 MiB" },
+		{ "format of an unconfigured algorithm", 16, XE_LENGTH, 1,
+		    500 | 2u << 28, FSIMG_ECORRUPT,
+		    "compression algorithm not configured" },
+		{ "format beyond every algorithm", 16, XE_LENGTH, 1,
+		    500 | 15u << 28, FSIMG_ECORRUPT,
+		    "compression algorithm not configured" },
+		{ "inline-tail advice", 16, XE_ADVICE_OR, 0,
+		    EROFS_ADVICE_INLINE_TAIL, FSIMG_EUNSUPPORTED,
+		    "inline tail with encoded extents" },
+		{ "advice 0x01 on a full index without 48BIT", 16, XE_NO_48BIT,
+		    0, 0, FSIMG_ECORRUPT, "encoded extents without 48BIT" },
+		/* No field edit: the plan's logical cluster shift, set for
+		 * this case below, is the bad field. */
+		{ "8-byte cluster of 16 MiB", 8, XE_ADVICE_OR, 0, 0,
+		    FSIMG_EUNSUPPORTED, "logical cluster above 12 MiB" },
+	};
+	unsigned char *content;
+	gen_xrecord_t records[XEXTENTS_MAX];
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		xplan_t plan = xplan_at(&base, cases[i].width);
+		uint64_t count = plan.count;
+		gen_tree_t tree;
+
+		if (plan.width == 8) {
+			/* One record of a 16 MiB logical cluster. */
+			plan.count = 1;
+			plan.shift = 15;
+			plan.extents[0].kind = XK_PLAIN;
+		}
+		content = xcontent(&plan, 11);
+		xtree_build(&tree, &plan, content, records);
+		switch (cases[i].edit) {
+		case XE_COUNT:
+			count = cases[i].value;
+			break;
+		case XE_LOGICAL:
+			records[cases[i].record].logical = cases[i].value;
+			break;
+		case XE_PHYSICAL_OR:
+			records[cases[i].record].physical |= cases[i].value;
+			break;
+		case XE_LENGTH:
+			records[cases[i].record].length =
+			    (uint32_t)cases[i].value;
+			break;
+		case XE_ADVICE_OR:
+			plan.advice |= (uint16_t)cases[i].value;
+			break;
+		case XE_NO_48BIT:
+			gen_tree_set_incompat(&tree,
+			    EROFS_INCOMPAT_LZ4_0PADDING);
+			break;
+		}
+		(void)xfile_add(&tree, &plan, records, count);
+		check_refused(cases[i].name, &tree, cases[i].status,
+		    cases[i].phrase);
+		for (size_t s = 0; s < ARRAY_SIZE(zscopes); s++)
+			check_zverify(cases[i].name, &tree, zscopes[s],
+			    cases[i].status);
+		gen_tree_free(&tree);
+		free(content);
+	}
+}
+
+/* 4- and 8-byte header bytes 0 to 3 and 6 are reserved in a whole volume. */
+static void
+test_encoded_extent_reserved_header_bytes_refuse_the_file(void)
+{
+	static const unsigned offsets[] = { 0, 3, 6 };
+	xplan_t plan = { .size = 1000, .count = 2, .width = 8, .extents = {
+	    { 0, XK_PLAIN, 0 }, { 512, XK_LZ4, 0 } } };
+	unsigned char *content = xcontent(&plan, 13);
+	gen_xrecord_t records[XEXTENTS_MAX];
+
+	for (size_t i = 0; i < ARRAY_SIZE(offsets); i++) {
+		gen_inode_t proto = file_proto(LAYOUT_FLAT);
+		gen_tree_t tree;
+		uint64_t nid;
+
+		xtree_build(&tree, &plan, content, records);
+		nid = xfile_add(&tree, &plan, records, plan.count);
+		gen_put(&tree.image, gen_zheader_offset(&tree.image, &proto,
+		    nid) + offsets[i], 1, 1);
+		check_refused("8-byte map header reserved byte", &tree,
+		    FSIMG_ECORRUPT, "map header reserved bits");
+		gen_tree_free(&tree);
+	}
+	free(content);
+}
+
+/*
+ * 4-byte records' physical offsets are running sums from the start: a sum
+ * that wraps is corrupt where a lookup reaches it, and where only
+ * verification does, after the last record. A body of records that the
+ * size implies past the volume is corrupt when the inode loads.
+ */
+static void
+test_encoded_extent_running_sums_and_bodies_stay_in_range(void)
+{
+	xplan_t plan = { .size = 1000, .count = 2, .width = 4, .extents = {
+	    { 0, XK_PLAIN, 0 }, { 512, XK_PLAIN, 0 } } };
+	unsigned char *content = xcontent(&plan, 17);
+	gen_xrecord_t records[XEXTENTS_MAX];
+	gen_xfile_t huge = { .size = UINT64_C(1) << 40, .records = records,
+	    .record_count = 2, .width = 8 };
+	gen_inode_t proto = file_proto(LAYOUT_FLAT);
+	const unsigned char *held = NULL;
+	fsimg_reader_t *reader;
+	fsimg_extent_t extent;
+	fsimg_error_t error;
+	gen_tree_t tree;
+	volume_t v;
+
+	/* The start 600 below 2^64 and two extents of 600 bytes. */
+	xtree_build(&tree, &plan, content, records);
+	records[0].physical = UINT64_MAX - 599;
+	records[0].length = 600;
+	records[1].length = 600;
+	(void)xfile_add(&tree, &plan, records, plan.count);
+	gen_tree_seal(&tree);
+	reader = reader_on_entry(&v, &tree.image, "/f");
+	bzero(&error, sizeof(error));
+	check_refusal("4-byte sum wraps before record 1",
+	    fsimg_reader_resolve(reader, 512, &extent, &held, &error),
+	    FSIMG_ECORRUPT, &error, "physical offsets wrap");
+	reader_close(&v, reader);
+	gen_tree_free(&tree);
+
+	/* The start 1000 below 2^64: only the sum after the last wraps. */
+	xtree_build(&tree, &plan, content, records);
+	records[0].physical = UINT64_MAX - 999;
+	records[0].length = 600;
+	records[1].length = 600;
+	(void)xfile_add(&tree, &plan, records, plan.count);
+	for (size_t s = 0; s < ARRAY_SIZE(zscopes); s++)
+		check_zverify("4-byte sum wraps after the last record", &tree,
+		    zscopes[s], FSIMG_ECORRUPT);
+	gen_tree_free(&tree);
+
+	/* 2^31 8-byte records for a size of 2^40: 16 GiB of records. */
+	plan.width = 8;
+	proto.extended = true;
+	xtree_build(&tree, &plan, content, records);
+	root_names(&tree, "f", gen_tree_add_extents(&tree, &proto, &huge),
+	    T_FILE);
+	check_refused("records past the volume", &tree, FSIMG_ECORRUPT,
+	    "inode body outside the address domain");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/*
+ * A lookup reads only the records its search visits, while verification
+ * reads every record: a duplicate logical offset in records 5 and 6 of 8,
+ * which the search for offset 0 (records 4, 2, 1, 0) never reads, resolves
+ * there and fails verification.
+ */
+static void
+test_encoded_extent_duplicate_only_verification_sees_is_corrupt(void)
+{
+	xplan_t plan = { .size = 4096, .count = 8, .width = 16 };
+	unsigned char *content;
+	gen_xrecord_t records[XEXTENTS_MAX];
+	fsimg_reader_t *reader;
+	fsimg_extent_t extent;
+	gen_tree_t tree;
+	volume_t v;
+
+	for (size_t k = 0; k < plan.count; k++)
+		plan.extents[k] = (xextent_t){ 512 * k, XK_PLAIN, 0 };
+	content = xcontent(&plan, 19);
+	xtree_build(&tree, &plan, content, records);
+	records[6].logical = records[5].logical;
+	(void)xfile_add(&tree, &plan, records, plan.count);
+	gen_tree_seal(&tree);
+	reader = reader_on_entry(&v, &tree.image, "/f");
+	extent = resolve_ok(reader, 0);
+	EXPECT(extent.logical_offset == 0 && extent.length == 512,
+	    "offset 0 resolves to the first extent");
+	reader_close(&v, reader);
+	for (size_t s = 0; s < ARRAY_SIZE(zscopes); s++)
+		check_zverify("duplicate offset the lookups miss", &tree,
+		    zscopes[s], FSIMG_ECORRUPT);
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/* A compact index under 48BIT reads advice 0x01 as its 2-byte groups. */
+static void
+test_a_compact_index_under_48bit_keeps_its_2_byte_groups(void)
+{
+	static const zvolume_t wide = { EROFS_INCOMPAT_48BIT, 0, 0, false };
+	zplan_t plan = { .size = 1100, .count = 2, .clusters = {
+	    ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 13), ZC(600, GEN_ZK_PLAIN, 1, 0) } };
+	unsigned char *content = zcontent(&plan, 4);
+	zbuild_t build = { .plan = &plan, .content = content,
+	    .layout = ZLAYOUT_COMPACT };
+	gen_tree_t tree;
+
+	ztree_with_file(&tree, &wide, &build);
+	check_zfile("compact index under 48BIT", &tree, &plan, content);
+	check_zverify("compact index under 48BIT", &tree, FSIMG_VERIFY_PAYLOAD,
+	    FSIMG_OK);
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/* ---- 48-bit fields through a whole volume ---- */
+
+/*
+ * A sparse 48-bit volume: the tree's image, then `far` at far_offset, zeros
+ * elsewhere up to size bytes, which the superblock's block count covers.
+ */
+typedef struct sparse {
+	gen_tree_t	*tree;
+	const unsigned char *far;
+	uint64_t	 far_offset;
+	size_t		 far_length;
+	uint64_t	 size;
+} sparse_t;
+
+static fsimg_status_t
+sparse_open(volume_t *v, const sparse_t *s, fsimg_reader_t **reader,
+    fsimg_error_t *error)
+{
+	gen_tree_seal(s->tree);
+	bzero(v, sizeof(*v));
+	bzero(error, sizeof(*error));
+	v->bytes = s->tree->image.bytes;
+	v->length = s->tree->image.length;
+	v->size = s->size;
+	v->far = s->far;
+	v->far_offset = s->far_offset;
+	v->far_length = s->far_length;
+	volume_connect(v, 16 * 1024 * 1024, -1);
+	*reader = NULL;
+	return (fsimg_reader_open(v->ctx, v->io, NULL, reader, error));
+}
+
+static void
+sparse_close(volume_t *v, fsimg_reader_t *reader)
+{
+	fsimg_reader_free(reader);
+	fsimg_io_free(v->io);
+	fsimg_ctx_free(v->ctx);
+}
+
+/* The entry at path, of length bytes, read whole: the first failure. */
+static fsimg_status_t
+sparse_read(const sparse_t *s, const char *path, unsigned char *out,
+    size_t length, fsimg_error_t *error)
+{
+	const fsimg_entry_t *entry = NULL;
+	fsimg_reader_t *reader;
+	fsimg_status_t status;
+	volume_t v;
+
+	status = sparse_open(&v, s, &reader, error);
+	while (status == FSIMG_OK) {
+		status = fsimg_reader_next(reader, &entry, error);
+		if (status == FSIMG_OK && strcmp(entry->path, path) == 0)
+			break;
+	}
+	if (status == FSIMG_OK)
+		status = entry->size == length ? read_range(reader, 0, out,
+		    length, error) : FSIMG_ESTATE;
+	sparse_close(&v, reader);
+	return (status);
+}
+
+/* Payload verification of the volume; a success must be complete. */
+static fsimg_status_t
+sparse_verify(const sparse_t *s, fsimg_error_t *error)
+{
+	fsimg_verify_report_t report;
+	fsimg_reader_t *reader;
+	fsimg_status_t status;
+	volume_t v;
+
+	bzero(&report, sizeof(report));
+	status = sparse_open(&v, s, &reader, error);
+	if (status == FSIMG_OK)
+		status = fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report,
+		    error);
+	EXPECT(status != FSIMG_OK || report.complete,
+	    "a verified sparse volume is complete");
+	sparse_close(&v, reader);
+	return (status);
+}
+
+/* The file at path reads as want, or fails with status, past the volume. */
+static void
+check_sparse_file(const char *label, const sparse_t *s, const char *path,
+    const unsigned char *want, size_t length, fsimg_status_t status)
+{
+	unsigned char got[XBLOCK];
+	fsimg_error_t error;
+
+	CHECK(length <= sizeof(got));
+	check_refusal(label, sparse_read(s, path, got, length, &error), status,
+	    &error, status == FSIMG_OK ? NULL :
+	    "data blocks outside the volume");
+	if (status == FSIMG_OK)
+		EXPECT(bcmp(got, want, length) == 0, "%s: %s reads back", label,
+		    path);
+}
+
+/*
+ * The wide superblock form names a root above NID 65535, which lists and
+ * verifies; the narrow form keeps the 16-bit root. Moving the wide root to
+ * an empty slot, or clearing it so that the narrow field names NID 0, an
+ * empty slot too, refuses the volume.
+ */
+static void
+test_48bit_superblock_forms_name_the_root(void)
+{
+	enum { WIDE_ROOT = 65600 };
+	gen_dirent_t kid;
+	listing_t *list;
+	gen_tree_t tree;
+	const node_t *node;
+
+	/* 4096 + 32 * 65600 bytes need 514 blocks of 4 KiB. */
+	tree_new(&tree, 12, 520);
+	kid = (gen_dirent_t){ "f", add_file(&tree, LAYOUT_FLAT_INLINE, 40, 3),
+	    T_FILE };
+	gen_tree_dir(&tree, WIDE_ROOT, WIDE_ROOT, &kid, 1);
+	gen_tree_set_48bit(&tree, tree.blocks, WIDE_ROOT);
+	list = walk_ok("wide root NID 65600", &tree);
+	node = find_node(list, "/f");
+	EXPECT(node != NULL && pattern_mismatch(node, 3) == node->size,
+	    "the wide root lists its file");
+	listing_free(list);
+	for (size_t s = 0; s < ARRAY_SIZE(zscopes); s++)
+		check_zverify("wide root NID 65600", &tree, zscopes[s],
+		    FSIMG_OK);
+	gen_super_put(&tree.image, SB_ROOT64, WIDE_ROOT + 1, 8);
+	check_refused("wide root moved to an empty slot", &tree,
+	    FSIMG_ECORRUPT, "inode file type");
+	gen_super_put(&tree.image, SB_ROOT64, 0, 8);
+	check_refused("wide root cleared, narrow root 0 empty", &tree,
+	    FSIMG_ECORRUPT, "inode file type");
+	gen_tree_free(&tree);
+
+	tree_new(&tree, 9, 4);
+	root_names(&tree, "f", add_file(&tree, LAYOUT_FLAT, 700, 4), T_FILE);
+	gen_tree_set_48bit(&tree, tree.blocks, 0);
+	list = walk_ok("narrow form", &tree);
+	node = find_node(list, "/f");
+	EXPECT(node != NULL && pattern_mismatch(node, 4) == node->size,
+	    "the narrow form lists its file");
+	listing_free(list);
+	for (size_t s = 0; s < ARRAY_SIZE(zscopes); s++)
+		check_zverify("narrow form", &tree, zscopes[s], FSIMG_OK);
+	gen_tree_free(&tree);
+}
+
+/*
+ * Flat files at blocks above 2^32 on a sparse volume of 2^32 + 17 blocks:
+ * an extended inode with the high word at 0x06 and a compact one whose
+ * format bit 4 makes the link-count word the high word, and a chunk-based
+ * file with bit 6 naming such a block. Each reads and verifies; raising a
+ * high word, or clearing the block count's high word, puts its data past
+ * the volume.
+ */
+static void
+test_48bit_start_blocks_above_2_32_read_and_verify(void)
+{
+	const uint64_t far_block = (UINT64_C(1) << 32) + 5;
+	unsigned char far[3 * XBLOCK];
+	gen_inode_t ext = file_proto(LAYOUT_FLAT);
+	gen_inode_t compact = file_proto(LAYOUT_FLAT);
+	gen_inode_t chunked = file_proto(LAYOUT_CHUNK_BASED);
+	gen_chunk_t chunk = gen_chunk_block(far_block + 2);
+	const uint16_t chunk_format = GEN_CHUNK_INDEXES | GEN_CHUNK_WIDE;
+	gen_dirent_t kids[3];
+	fsimg_error_t error;
+	gen_tree_t tree;
+	uint64_t root, e, c, k, blocks;
+	sparse_t s;
+
+	fill_pattern(far, sizeof(far), 41);
+	tree_new(&tree, 9, 4);
+	gen_tree_set_incompat(&tree, INCOMPAT_CHUNKED_FILE);
+	root = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	ext.extended = true;
+	ext.size = 300;
+	ext.layout_word = (uint32_t)far_block;
+	ext.nid = e = gen_tree_slot(&tree, GEN_EXTENDED_BYTES, 0);
+	gen_inode_write(&tree.image, &ext);
+	gen_put(&tree.image, gen_inode_offset(&tree.image, e) + 0x06,
+	    far_block >> 32, 2);
+	compact.size = 400;
+	compact.layout_word = (uint32_t)(far_block + 1);
+	compact.format_extra = 0x10;
+	compact.nlink = (uint32_t)((far_block + 1) >> 32);
+	compact.nid = c = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	gen_inode_write(&tree.image, &compact);
+	chunked.size = 500;
+	k = gen_tree_add_chunked(&tree, &chunked, chunk_format, &chunk, 1);
+	kids[0] = (gen_dirent_t){ "c", c, T_FILE };
+	kids[1] = (gen_dirent_t){ "e", e, T_FILE };
+	kids[2] = (gen_dirent_t){ "k", k, T_FILE };
+	gen_tree_dir(&tree, root, root, kids, 3);
+	blocks = (UINT64_C(1) << 32) + tree.blocks;
+	gen_tree_set_48bit(&tree, blocks, root);
+	s = (sparse_t){ &tree, far, far_block * XBLOCK, sizeof(far),
+	    blocks * XBLOCK };
+
+	check_sparse_file("extended", &s, "/e", far, 300, FSIMG_OK);
+	check_sparse_file("compact, bit 4", &s, "/c", far + XBLOCK, 400,
+	    FSIMG_OK);
+	check_sparse_file("chunk, bit 6", &s, "/k", far + 2 * XBLOCK, 500,
+	    FSIMG_OK);
+	check_status("48-bit start blocks verify", sparse_verify(&s, &error),
+	    FSIMG_OK, &error);
+
+	gen_put(&tree.image, gen_inode_offset(&tree.image, e) + 0x06, 2, 2);
+	check_sparse_file("extended high word 2", &s, "/e", far, 300,
+	    FSIMG_ECORRUPT);
+	gen_put(&tree.image, gen_inode_offset(&tree.image, e) + 0x06, 1, 2);
+	gen_put(&tree.image, gen_inode_offset(&tree.image, c) + 0x06, 2, 2);
+	check_sparse_file("compact link word 2", &s, "/c", far + XBLOCK, 400,
+	    FSIMG_ECORRUPT);
+	gen_put(&tree.image, gen_inode_offset(&tree.image, c) + 0x06, 1, 2);
+	chunk.high = 2;
+	gen_chunk_put(&tree, k, &chunked, chunk_format, 0, chunk);
+	check_sparse_file("chunk high part 2", &s, "/k", far + 2 * XBLOCK, 500,
+	    FSIMG_ECORRUPT);
+	chunk.high = 1;
+	gen_chunk_put(&tree, k, &chunked, chunk_format, 0, chunk);
+	gen_super_put(&tree.image, SB_ROOT16, 0, 2);
+	check_sparse_file("block count high word cleared", &s, "/e", far, 300,
+	    FSIMG_ECORRUPT);
+	gen_tree_free(&tree);
+}
+
+/*
+ * A flat start is unread where nothing is stored, the 48-bit null in a
+ * small extended flat-inline inode included; a flat inode with content at
+ * start 0xFFFFFFFF, or at the 48-bit null, is corrupt.
+ */
+static void
+test_48bit_null_starts_are_unread_or_corrupt(void)
+{
+	static const uint16_t highs[] = { 0, 0xffff };
+	gen_inode_t small = file_proto(LAYOUT_FLAT_INLINE);
+	gen_inode_t stored = file_proto(LAYOUT_FLAT);
+	unsigned char bytes[XBLOCK];
+	listing_t *list;
+	const node_t *node;
+	gen_tree_t tree;
+	uint64_t nid;
+
+	fill_pattern(bytes, sizeof(bytes), 7);
+	tree_new(&tree, 9, 4);
+	gen_tree_set_48bit(&tree, tree.blocks, 0);
+	small.extended = true;
+	small.layout_word = UINT32_C(0xffffffff);
+	nid = gen_tree_add(&tree, &small, bytes, 100);
+	gen_put(&tree.image, gen_inode_offset(&tree.image, nid) + 0x06, 0xffff,
+	    2);
+	root_names(&tree, "f", nid, T_FILE);
+	list = walk_ok("unused 48-bit null start", &tree);
+	node = find_node(list, "/f");
+	EXPECT(node != NULL && pattern_mismatch(node, 7) == node->size,
+	    "the inline file reads");
+	listing_free(list);
+	for (size_t s = 0; s < ARRAY_SIZE(zscopes); s++)
+		check_zverify("unused 48-bit null start", &tree, zscopes[s],
+		    FSIMG_OK);
+	gen_tree_free(&tree);
+
+	for (size_t i = 0; i < ARRAY_SIZE(highs); i++) {
+		tree_new(&tree, 9, 4);
+		gen_tree_set_48bit(&tree, tree.blocks, 0);
+		stored.extended = true;
+		nid = gen_tree_add(&tree, &stored, bytes, sizeof(bytes));
+		gen_put(&tree.image, gen_inode_offset(&tree.image, nid) + 0x10,
+		    UINT32_C(0xffffffff), 4);
+		gen_put(&tree.image, gen_inode_offset(&tree.image, nid) + 0x06,
+		    highs[i], 2);
+		root_names(&tree, "f", nid, T_FILE);
+		check_refused(i == 0 ? "start 0xFFFFFFFF with content" :
+		    "48-bit null start with content", &tree, FSIMG_ECORRUPT,
+		    i == 0 ? "data start block 0xFFFFFFFF" :
+		    "data start block 0xFFFFFFFFFFFF");
+		gen_tree_free(&tree);
+	}
+}
+
+/*
+ * Format bit 4 on a directory omits its ".": it lists without one, and a
+ * stored "." beside the bit is corrupt. On an extended non-directory the bit
+ * has no meaning: unsupported.
+ */
+static void
+test_48bit_format_bit_4_omits_the_dot_of_a_directory(void)
+{
+	gen_dirent_t records[3];
+	gen_inode_t ext = file_proto(LAYOUT_FLAT_INLINE);
+	listing_t *list;
+	gen_tree_t tree;
+	uint64_t dir, file, at;
+
+	for (size_t stored_dot = 0; stored_dot < 2; stored_dot++) {
+		size_t n = 0;
+
+		tree_new(&tree, 9, 4);
+		gen_tree_set_48bit(&tree, tree.blocks, 0);
+		dir = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+		file = add_file(&tree, LAYOUT_FLAT_INLINE, 30, 5);
+		if (stored_dot)
+			records[n++] = (gen_dirent_t){ ".", dir, T_DIR };
+		records[n++] = (gen_dirent_t){ "..", 0, T_DIR };
+		records[n++] = (gen_dirent_t){ "x", file, T_FILE };
+		dir_raw(&tree, dir, records, n);
+		at = gen_inode_offset(&tree.image, dir);
+		gen_put(&tree.image, at, tree.image.bytes[at] | 0x10, 1);
+		gen_put(&tree.image, at + 0x06, 2, 2);
+		root_names(&tree, "d", dir, T_DIR);
+		if (stored_dot) {
+			check_refused("stored dot under bit 4", &tree,
+			    FSIMG_ECORRUPT, "in a directory that omits it");
+		} else {
+			list = walk_ok("omitted dot", &tree);
+			EXPECT(find_node(list, "/d/x") != NULL,
+			    "the directory without a dot lists its file");
+			listing_free(list);
+		}
+		gen_tree_free(&tree);
+	}
+
+	tree_new(&tree, 9, 4);
+	gen_tree_set_48bit(&tree, tree.blocks, 0);
+	ext.extended = true;
+	ext.format_extra = 0x10;
+	root_names(&tree, "f", gen_tree_add(&tree, &ext, "abc", 3), T_FILE);
+	check_refused("bit 4 on an extended file", &tree, FSIMG_EUNSUPPORTED,
+	    "extended inode format bit 4");
+	gen_tree_free(&tree);
+}
+
 /* ---- Fuzz seeds ---- */
 
 /* A volume with a directory, stored and inline files and a link. */
@@ -11248,6 +12554,57 @@ write_seed(const char *directory, const char *name, gen_tree_t *tree)
 	CHECK(fwrite(tree->image.bytes, 1, tree->image.length, file) ==
 	    tree->image.length);
 	CHECK(fclose(file) == 0);
+}
+
+/*
+ * Fuzz seeds for the 48-bit layout: a wide-root volume with a compact
+ * bit-4 file and a directory omitting its dot, and an encoded-extent file
+ * at each record width.
+ */
+static void
+emit_48bit_seeds(const char *directory)
+{
+	static const xplan_t logical = { .size = 2000, .count = 4, .extents = {
+	    { 0, XK_LZ4, 0 }, { 700, XK_PLAIN, 3 }, { 1200, XK_LZ4, 5 },
+	    { 1700, XK_LZ4_PADDED, 0 } } };
+	static const xplan_t clustered = { .size = 1800, .count = 4,
+	    .extents = { { 0, XK_LZ4, 7 }, { 512, XK_PLAIN, 0 },
+	    { 1024, XK_LZ4, 0 }, { 1536, XK_PLAIN, 0 } } };
+	static const unsigned widths[] = { 4, 8, 16, 32 };
+	gen_inode_t compact = file_proto(LAYOUT_FLAT_INLINE);
+	gen_dirent_t kids[2], parent;
+	gen_tree_t tree;
+	uint64_t root, dir;
+	char name[32];
+
+	tree_new(&tree, 9, 4);
+	root = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	dir = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	compact.format_extra = 0x10;
+	compact.nlink = 0;
+	kids[0] = (gen_dirent_t){ "d", dir, T_DIR };
+	kids[1] = (gen_dirent_t){ "f", gen_tree_add(&tree, &compact, "abc", 3),
+	    T_FILE };
+	parent = (gen_dirent_t){ "..", root, T_DIR };
+	dir_raw(&tree, dir, &parent, 1);
+	gen_put(&tree.image, gen_inode_offset(&tree.image, dir),
+	    tree.image.bytes[gen_inode_offset(&tree.image, dir)] | 0x10, 1);
+	gen_tree_dir(&tree, root, root, kids, 2);
+	gen_tree_set_48bit(&tree, tree.blocks, root);
+	write_seed(directory, "48bit-wide.seed", &tree);
+	gen_tree_free(&tree);
+
+	for (size_t i = 0; i < ARRAY_SIZE(widths); i++) {
+		xplan_t plan = xplan_at(widths[i] >= 16 ? &logical : &clustered,
+		    widths[i]);
+		unsigned char *content = xcontent(&plan, 21);
+
+		xtree_with_file(&tree, &plan, content);
+		snprintf(name, sizeof(name), "extents-%u.seed", widths[i]);
+		write_seed(directory, name, &tree);
+		gen_tree_free(&tree);
+		free(content);
+	}
 }
 
 /*
@@ -11346,6 +12703,7 @@ emit_seeds(const char *directory)
 	emit_compressed_seeds(directory);
 	emit_tail_seeds(directory);
 	emit_codec_seeds(directory);
+	emit_48bit_seeds(directory);
 }
 
 /* ---- DEFLATE, MicroLZMA and Zstandard clusters ---- */
@@ -11978,6 +13336,7 @@ main(int argc, char **argv)
 	test_name_length_ends_at_the_first_nul_or_the_field_end();
 	test_negative_epochs_decode_as_signed();
 	test_root_nid_without_48bit_is_the_16_bit_field();
+	test_48bit_narrow_form_keeps_the_16_bit_root_nid();
 	test_48bit_widens_root_nid_and_block_count();
 	test_reserved_superblock_bytes_are_reported_not_refused();
 
@@ -12076,7 +13435,7 @@ main(int argc, char **argv)
 	test_open_refuses_an_unknown_incompatible_bit();
 	test_open_refuses_nonzero_extra_devices_before_the_checksum();
 	test_open_refuses_inconsistent_superblock_fields();
-	test_open_refuses_each_unimplemented_incompatible_bit_by_name();
+	test_open_accepts_48bit_and_refuses_metabox_by_name();
 	test_open_pairs_long_prefixes_with_a_plain_table_or_a_packed_inode();
 	test_open_tolerates_unknown_compatible_bits_and_reserved_bytes();
 	test_open_refuses_a_wrong_magic_unless_identity_is_assumed();
@@ -12222,6 +13581,25 @@ main(int argc, char **argv)
 	test_the_count_after_a_tail_or_fragment_head_is_never_read();
 	test_compressed_directories_and_links_are_read();
 	test_a_failed_fragment_window_allocation_is_reported();
+
+	test_encoded_extent_header_gives_the_width_and_the_count_or_cluster();
+	test_encoded_extent_header_refuses_each_bad_field();
+	test_encoded_extent_records_decode_the_fields_of_each_width();
+	test_encoded_extent_length_word_rules();
+	test_encoded_extents_read_at_every_width();
+	test_encoded_extents_end_in_a_fragment_at_every_width();
+	test_encoded_extent_count_and_stored_length_boundaries();
+	test_encoded_extents_partial_bit_decodes_a_longer_stream();
+	test_encoded_extents_interlace_aligned_plain_extents();
+	test_encoded_extent_lookups_refuse_each_bad_field();
+	test_encoded_extent_reserved_header_bytes_refuse_the_file();
+	test_encoded_extent_running_sums_and_bodies_stay_in_range();
+	test_encoded_extent_duplicate_only_verification_sees_is_corrupt();
+	test_a_compact_index_under_48bit_keeps_its_2_byte_groups();
+	test_48bit_superblock_forms_name_the_root();
+	test_48bit_start_blocks_above_2_32_read_and_verify();
+	test_48bit_null_starts_are_unread_or_corrupt();
+	test_48bit_format_bit_4_omits_the_dot_of_a_directory();
 
 	if (failures != 0)
 		fprintf(stderr, "test/erofs.c: %d checks failed\n", failures);

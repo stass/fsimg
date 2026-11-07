@@ -108,6 +108,12 @@ enum {
 #define CHUNK_HOLE_32		UINT32_C(0xffffffff)
 #define CHUNK_HOLE_48		UINT64_C(0xffffffffffff)
 
+/* An encoded extent's length word. */
+#define XLENGTH_STORED		UINT32_C(0x001fffff)
+#define XLENGTH_RESERVED	UINT32_C(0x07e00000)
+#define XLENGTH_PARTIAL		UINT32_C(0x08000000)
+#define XLENGTH_FORMAT_SHIFT	28
+
 /* The MicroLZMA dictionary bounds and the other records' field maxima. */
 #define LZMA_DICT_MIN		EROFS_LZMA_DICT_MIN
 #define LZMA_DICT_MAX		UINT32_C(8388608)
@@ -154,6 +160,9 @@ static fsimg_status_t	dirent_parse(const unsigned char *, size_t, size_t,
 			    size_t, erofs_dirent_t *, const char **);
 static fsimg_status_t	extended_decode(const unsigned char *,
 			    const erofs_super_t *, bool, erofs_inode_t *,
+			    const char **);
+static fsimg_status_t	extents_header_decode(const unsigned char *,
+			    const erofs_super_t *, erofs_zheader_t *,
 			    const char **);
 static fsimg_status_t	group_blocks_before(const erofs_zrecord_t *,
 			    unsigned, bool, uint64_t *, const char **);
@@ -227,6 +236,7 @@ super_parse(const unsigned char *raw, size_t length, erofs_super_t *out,
 {
 	erofs_super_t sb;
 	const unsigned char *name_end;
+	uint64_t wide_root_nid;
 	uint32_t block_count_low;
 	size_t super_bytes;
 
@@ -262,19 +272,24 @@ super_parse(const unsigned char *raw, size_t length, erofs_super_t *out,
 		    what));
 
 	/*
-	 * Under the 48-bit layout the root NID moves to its wide field and
-	 * the 16-bit field holds the block count's bits 32 to 47; otherwise
+	 * The 48-bit layout's superblock has two forms. In the wide form the
+	 * wide root field is nonzero and is the root NID, and the 16-bit
+	 * field holds the block count's bits 32 to 47; in the narrow form,
+	 * the wide field zero, both keep their core meaning (E10,
+	 * e10-48-large wide, e10-48-small narrow). Without the 48-bit layout
 	 * the wide field is reserved.
 	 */
 	block_count_low = fsimg_load_le32(raw + SB_BLOCK_COUNT);
-	if ((sb.incompat & EROFS_INCOMPAT_48BIT) != 0) {
-		sb.root_nid = fsimg_load_le64(raw + SB_WIDE_ROOT_NID);
+	wide_root_nid = fsimg_load_le64(raw + SB_WIDE_ROOT_NID);
+	if ((sb.incompat & EROFS_INCOMPAT_48BIT) != 0 && wide_root_nid != 0) {
+		sb.root_nid = wide_root_nid;
 		sb.block_count = (uint64_t)fsimg_load_le16(raw + SB_ROOT_NID) <<
 		    32 | block_count_low;
 	} else {
 		sb.root_nid = fsimg_load_le16(raw + SB_ROOT_NID);
 		sb.block_count = block_count_low;
-		if (!all_zero(raw + SB_WIDE_ROOT_NID, 8))
+		if ((sb.incompat & EROFS_INCOMPAT_48BIT) == 0 &&
+		    wide_root_nid != 0)
 			sb.reserved_nonzero = true;
 	}
 	if (!all_zero(raw + SB_RESERVED_6A, 2) ||
@@ -1207,7 +1222,9 @@ dirent_parse(const unsigned char *bytes, size_t length, size_t count,
  * when a record of its head type is used, since a file need not use both.
  * The reader requires a logical cluster of one block, and a compact index
  * with 2-byte groups permitted: no producer writes another, so either is
- * unsupported. A structure whose feature the volume lacks is corrupt.
+ * unsupported. A structure whose feature the volume lacks is corrupt, and
+ * advice 0x01 on a full index, which selects encoded extents, needs the
+ * 48-bit layout by policy (E10, e10-edit-lz4-no48).
  */
 fsimg_status_t
 erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
@@ -1231,6 +1248,13 @@ erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
 			.whole_fragment = true
 		};
 		return (FSIMG_OK);
+	}
+	if (layout == EROFS_LAYOUT_COMPRESSED_FULL &&
+	    (advice & EROFS_ADVICE_EXTENTS) != 0) {
+		if ((sb->incompat & EROFS_INCOMPAT_48BIT) == 0)
+			return (reject(FSIMG_ECORRUPT,
+			    "encoded extents without 48BIT", what));
+		return (extents_header_decode(raw, sb, out, what));
 	}
 	if ((cluster_bits & 0x0f) != 0)
 		return (reject(FSIMG_EUNSUPPORTED,
@@ -1285,17 +1309,162 @@ erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
 }
 
 /*
+ * The map header of an encoded-extent inode. Bits 1 and 2 of the advice
+ * give the record size. With 16- or 32-byte records the header holds a
+ * 48-bit extent count around the advice word, bytes 0 to 3 its low half
+ * and bytes 6 and 7 its high; the caller bounds it by the size. With 4- or
+ * 8-byte records bytes 0 to 3 and 6 are zero and byte 7 holds the logical
+ * cluster's shift above the block shift in bits 0 to 3 (bits 4 to 6 zero),
+ * so one record covers B << shift bytes, at most the decoded-extent limit.
+ * The inline-tail advice has no reading under encoded extents, which no
+ * producer writes and the reference readers do not define (E10):
+ * unsupported. The big-cluster bits give the width, so they need no
+ * COMPR_CFGS here. A fragment needs FRAGMENTS, like any other.
+ */
+static fsimg_status_t
+extents_header_decode(const unsigned char *raw, const erofs_super_t *sb,
+    erofs_zheader_t *out, const char **what)
+{
+	uint16_t advice = fsimg_load_le16(raw + 4);
+	unsigned extent_bytes, shift;
+
+	if ((advice & ~EROFS_ADVICE_KNOWN) != 0)
+		return (reject(FSIMG_EUNSUPPORTED, "map header advice bit",
+		    what));
+	if ((advice & EROFS_ADVICE_INLINE_TAIL) != 0)
+		return (reject(FSIMG_EUNSUPPORTED,
+		    "compressed inline tail with encoded extents", what));
+	if ((advice & EROFS_ADVICE_FRAGMENT) != 0 &&
+	    (sb->incompat & EROFS_INCOMPAT_FRAGMENTS) == 0)
+		return (reject(FSIMG_ECORRUPT, "fragment without FRAGMENTS",
+		    what));
+
+	extent_bytes = 4u << ((advice >> 1) & 3);
+	*out = (erofs_zheader_t){
+		.advice = advice,
+		.extent_bytes = (uint8_t)extent_bytes
+	};
+	switch (extent_bytes) {
+	case 4:
+		out->extents_form = EROFS_EXTENTS_RUNNING;
+		break;
+	case 8:
+		out->extents_form = EROFS_EXTENTS_INDEXED;
+		break;
+	default:
+		out->extents_form = EROFS_EXTENTS_SEARCHED;
+		break;
+	}
+	if (out->extents_form == EROFS_EXTENTS_SEARCHED) {
+		out->extent_count = fsimg_load_le32(raw) |
+		    (uint64_t)fsimg_load_le16(raw + 6) << 32;
+		return (FSIMG_OK);
+	}
+	/* Bit 7 of byte 7, the whole-file mark, was tested first. */
+	if (!all_zero(raw, 4) || raw[6] != 0 || (raw[7] & 0x70) != 0)
+		return (reject(FSIMG_ECORRUPT,
+		    "encoded-extent map header reserved bits", what));
+	shift = raw[7] & 0x0f;
+	/* At most 2^12 << 15 = 2^27: no overflow. */
+	if ((UINT32_C(1) << (sb->blkszbits + shift)) >
+	    EROFS_CLUSTER_DECODED_MAX)
+		return (reject(FSIMG_EUNSUPPORTED,
+		    "encoded-extent logical cluster above 12 MiB", what));
+	out->lclusterbits = (uint8_t)(sb->blkszbits + shift);
+	return (FSIMG_OK);
+}
+
+/*
+ * One encoded-extent record of extent_bytes (4, 8, 16 or 32) at raw. Every
+ * width starts with the 32-bit length word. An 8-byte record adds a 32-bit
+ * physical offset; a 16-byte record a 64-bit physical offset in two halves
+ * and a 32-bit logical offset; a 32-byte record 64-bit physical and logical
+ * offsets, each in two halves, and 12 reserved zero bytes. A 16-byte record
+ * whose physical high half is nonzero has no observed reading, since no
+ * producer run reached one (E10): unsupported.
+ */
+fsimg_status_t
+erofs_xrecord_decode(const unsigned char *raw, unsigned extent_bytes,
+    erofs_xrecord_t *out, const char **what)
+{
+	erofs_xrecord_t record;
+
+	bzero(&record, sizeof(record));
+	record.length_word = fsimg_load_le32(raw);
+	switch (extent_bytes) {
+	case 4:
+		break;
+	case 8:
+		record.physical = fsimg_load_le32(raw + 4);
+		break;
+	case 16:
+		if (fsimg_load_le32(raw + 8) != 0)
+			return (reject(FSIMG_EUNSUPPORTED,
+			    "16-byte encoded extent above 4 GiB", what));
+		record.physical = fsimg_load_le32(raw + 4);
+		record.logical = fsimg_load_le32(raw + 12);
+		break;
+	case 32:
+		if (!all_zero(raw + 20, 12))
+			return (reject(FSIMG_ECORRUPT,
+			    "encoded extent reserved bytes", what));
+		record.physical = fsimg_load_le32(raw + 4) |
+		    (uint64_t)fsimg_load_le32(raw + 8) << 32;
+		record.logical = fsimg_load_le32(raw + 12) |
+		    (uint64_t)fsimg_load_le32(raw + 16) << 32;
+		break;
+	default:
+		return (reject(FSIMG_EINVAL, "encoded extent width", what));
+	}
+	*out = record;
+	return (FSIMG_OK);
+}
+
+/*
+ * The length word of an encoded extent that is not a fragment: the stored
+ * bytes in bits 0 to 20, the partial-reference mark in bit 27 and the
+ * format in bits 28 to 31, bits 21 to 26 reserved and zero. The mark means
+ * what a full record's bit 15 does, and like it is ignored on a plain
+ * extent (mkfs.erofs -E dedupe sets it, e10-48-lz4-b512). A word of zero,
+ * which the kernel reads as an unmapped extent and no producer writes, has
+ * no observed reading: unsupported. A stored length above the physical
+ * cluster limit is corrupt, since the field's width allows twice it.
+ */
+fsimg_status_t
+erofs_xlength_decode(uint32_t word, erofs_xlength_t *out, const char **what)
+{
+	uint8_t format = (uint8_t)(word >> XLENGTH_FORMAT_SHIFT);
+
+	if (word == 0)
+		return (reject(FSIMG_EUNSUPPORTED,
+		    "encoded extent with a zero length word", what));
+	if ((word & XLENGTH_RESERVED) != 0)
+		return (reject(FSIMG_ECORRUPT,
+		    "encoded extent length word reserved bits", what));
+	if ((word & XLENGTH_STORED) > EROFS_CLUSTER_STORED_MAX)
+		return (reject(FSIMG_ECORRUPT,
+		    "encoded extent stored length above 1 MiB", what));
+	*out = (erofs_xlength_t){
+		.stored_bytes = word & XLENGTH_STORED,
+		.format = format,
+		.partial = format != 0 && (word & XLENGTH_PARTIAL) != 0
+	};
+	return (FSIMG_OK);
+}
+
+/*
  * The map header the writer emits, the inverse of erofs_zheader_decode()
  * for a header without an inline tail or fragment: the advice word, the
  * two algorithms and a logical cluster of one block, every other bit zero.
- * false for an inline tail, a fragment, an unknown advice bit or an
- * algorithm beyond four bits.
+ * false for an inline tail, a fragment, encoded extents, an unknown advice
+ * bit or an algorithm beyond four bits.
  */
 bool
 erofs_zheader_encode(const erofs_zheader_t *header, unsigned char *raw)
 {
 	if (header->whole_fragment || header->fragment_offset != 0 ||
 	    header->tail_bytes != 0 ||
+	    header->extents_form != EROFS_EXTENTS_NONE ||
 	    (header->advice & ~EROFS_ADVICE_KNOWN) != 0 ||
 	    (header->advice & (EROFS_ADVICE_INLINE_TAIL |
 	    EROFS_ADVICE_FRAGMENT)) != 0 ||

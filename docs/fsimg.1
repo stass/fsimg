@@ -56,7 +56,11 @@ DEFLATE, and with MicroLZMA or Zstandard when the build has liblzma 5.4 or
 libzstd; a file of an algorithm the build lacks fails as unsupported naming
 the library while the rest of the volume reads.
 Inline compressed tails, packed fragments and deduplicated clusters are
-read.
+read, and so are volumes with 48-bit addressing, encoded extents and
+directories without a
+.Pa \&.
+entry included; a volume with a metadata box or extra devices is refused
+as unsupported.
 A created EROFS volume is uncompressed, with 512- to 4096-byte blocks and
 32-bit addressing, and stores files, directories and symbolic links with
 their owner, permission bits and modification time to the nanosecond.

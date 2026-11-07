@@ -278,9 +278,11 @@ chunk_extent(fsimg_reader_t *reader, const erofs_inode_t *inode,
 
 /*
  * The stored extent [0, stored_bytes) of a flat or flat-inline inode, from
- * its start block. A start word of 0xFFFFFFFF, which producers write only
+ * its start block, the layout word with layout_high as bits 32 to 47. A
+ * start word of 0xFFFFFFFF with zero high bits, which producers write only
  * where it is not read, is refused outright: a volume declaring no block
  * count has the input's length as its domain, which can reach that block.
+ * The 48-bit null, 0xFFFF above it, is refused the same way.
  */
 static fsimg_status_t
 flat_extent(const fsimg_reader_t *reader, const erofs_inode_t *inode,
@@ -291,6 +293,9 @@ flat_extent(const fsimg_reader_t *reader, const erofs_inode_t *inode,
 	if (inode->layout_high == 0 && inode->layout_word == UINT32_MAX)
 		return (erofs_reject(error, FSIMG_ECORRUPT,
 		    "data start block 0xFFFFFFFF"));
+	if (inode->layout_high == UINT16_MAX && inode->layout_word == UINT32_MAX)
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "data start block 0xFFFFFFFFFFFF"));
 	start_block = (uint64_t)inode->layout_high << 32 | inode->layout_word;
 	return (stored_extent(reader, start_block, 0, stored_bytes, out,
 	    error));

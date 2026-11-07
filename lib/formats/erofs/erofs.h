@@ -186,18 +186,47 @@ typedef struct erofs_chunk_format {
 } erofs_chunk_format_t;
 
 /*
+ * How an encoded-extent inode's records are found, by their width: a
+ * binary search over the explicit logical offsets of 16- and 32-byte
+ * records (SEARCHED); the logical cluster's record, which names its
+ * physical offset in 8 bytes (INDEXED); or the logical cluster's record of
+ * 4 bytes, whose physical offset is the running sum of the stored lengths
+ * before it (RUNNING). NONE is an indexed inode.
+ */
+typedef enum erofs_extents_form {
+	EROFS_EXTENTS_NONE,
+	EROFS_EXTENTS_SEARCHED,
+	EROFS_EXTENTS_INDEXED,
+	EROFS_EXTENTS_RUNNING
+} erofs_extents_form_t;
+
+/*
  * A decoded map header. A whole-file fragment has no index and no advice:
  * the header is the 63-bit offset of the file's content in the packed
  * inode. Otherwise the first word is the fragment offset's low 32 bits
  * under advice EROFS_ADVICE_FRAGMENT, or holds the compressed inline
  * tail's stored length under EROFS_ADVICE_INLINE_TAIL; never both.
+ *
+ * An encoded-extent inode, a full-index inode of a 48-bit volume with
+ * advice EROFS_ADVICE_EXTENTS, has extent_bytes records of 4, 8, 16 or 32
+ * bytes in place of an index, and no algorithms, inline tail or fragment
+ * offset in its header: each record names its own format, and the last
+ * one is the fragment under EROFS_ADVICE_FRAGMENT. extent_count is the
+ * header's count for 16- and 32-byte records; for 4- and 8-byte records,
+ * each covering one logical cluster of 2^lclusterbits bytes, the header has
+ * none and erofs_inode_load() derives it from the size. extents_form is
+ * EROFS_EXTENTS_NONE and extent_bytes 0 for an index.
  */
 typedef struct erofs_zheader {
 	uint64_t	 fragment_offset;	/* whole or fragment */
+	uint64_t	 extent_count;		/* encoded extents */
+	erofs_extents_form_t extents_form;
 	uint16_t	 advice;
 	uint16_t	 tail_bytes;		/* inline tail */
 	uint8_t		 head1_algorithm;
 	uint8_t		 head2_algorithm;
+	uint8_t		 extent_bytes;		/* encoded extents */
+	uint8_t		 lclusterbits;		/* 4- and 8-byte extents */
 	bool		 whole_fragment;
 } erofs_zheader_t;
 
@@ -322,6 +351,15 @@ typedef struct erofs_prefix {
 #define EROFS_ADVICE_INTERLACED		0x0010u
 #define EROFS_ADVICE_FRAGMENT		0x0020u
 #define EROFS_ADVICE_KNOWN		0x003fu
+/*
+ * On a full-index inode of a 48-bit volume bit 0x01 selects encoded
+ * extents, and bits 1 and 2 give the record size, 4 << ((advice >> 1) & 3).
+ * Records start at the header's end rounded up to their size; 4-byte
+ * records follow a 64-bit physical start there.
+ */
+#define EROFS_ADVICE_EXTENTS		EROFS_ADVICE_COMPACT_2B
+#define EROFS_EXTENT_START_BYTES	8u
+#define EROFS_EXTENT_BYTES_MAX		32u
 /* The largest physical cluster stored and logical extent decoded. */
 #define EROFS_CLUSTER_STORED_MAX	(UINT32_C(1) << 20)
 #define EROFS_CLUSTER_DECODED_MAX	(UINT32_C(12) << 20)
@@ -334,6 +372,29 @@ typedef struct erofs_prefix {
 #define EROFS_FULL_UNIT_RECORDS		16u
 _Static_assert(EROFS_FULL_UNIT_RECORDS <= EROFS_GROUP_RECORDS_MAX,
     "a full-index unit fits the lookup cache's records");
+
+/*
+ * One encoded-extent record as stored: its length word, its physical byte
+ * offset, and its logical byte offset, zero in the 4- and 8-byte forms,
+ * which have none. The 4-byte form stores no physical offset either: the
+ * decoder leaves it zero and a lookup fills in the running sum.
+ */
+typedef struct erofs_xrecord {
+	uint64_t	 physical;
+	uint64_t	 logical;
+	uint32_t	 length_word;
+} erofs_xrecord_t;
+
+/*
+ * An encoded extent's length word decoded: its stored bytes, its format, 0
+ * for a plain extent and otherwise the algorithm plus one, and whether a
+ * compressed extent is a partial reference to its stream.
+ */
+typedef struct erofs_xlength {
+	uint32_t	 stored_bytes;
+	uint8_t		 format;
+	bool		 partial;
+} erofs_xlength_t;
 
 /* The type of an index record, its two type bits. */
 typedef enum erofs_record_type {
@@ -452,15 +513,20 @@ typedef struct erofs_window {
 } erofs_window_t;
 
 /*
- * The compressed lookup's memory of the last index unit it read, a compact
- * group or up to 16 full records of inode nid, decoded. A lookup of another
- * inode discards it, so a hit returns what a fresh read and decode would.
+ * The compressed lookup's memory of inode nid: the last index unit it read,
+ * a compact group or up to 16 full records, decoded; and for 4-byte encoded
+ * extents, whose physical offsets are running sums, the physical offset at
+ * which record run_record starts. A lookup of another inode discards both,
+ * so a hit returns what a fresh read and decode would.
  */
 typedef struct erofs_zcache {
 	erofs_zrecord_t	 records[EROFS_GROUP_RECORDS_MAX];
 	uint64_t	 nid;
 	uint64_t	 unit_offset;		/* in the body; the unit's start */
+	uint64_t	 run_record;		/* 4-byte encoded extents */
+	uint64_t	 run_physical;
 	bool		 unit_valid;
+	bool		 run_valid;
 } erofs_zcache_t;
 
 /*
@@ -567,6 +633,9 @@ fsimg_status_t	erofs_map(fsimg_reader_t *, const erofs_inode_t *,
  */
 fsimg_status_t	erofs_zmap(fsimg_reader_t *, const erofs_inode_t *, uint64_t,
 		    erofs_cluster_t *, fsimg_error_t *);
+fsimg_status_t	erofs_extents_check(fsimg_reader_t *, const erofs_inode_t *,
+		    fsimg_error_t *);
+uint64_t	erofs_extents_offset(const erofs_inode_t *);
 
 /*
  * Decode windows (cluster.c). erofs_cluster_readable() says whether this
@@ -732,6 +801,10 @@ fsimg_status_t	erofs_zheader_decode(const unsigned char *,
 		    const char **);
 fsimg_status_t	erofs_full_record_decode(const unsigned char *, bool,
 		    erofs_zrecord_t *, const char **);
+fsimg_status_t	erofs_xrecord_decode(const unsigned char *, unsigned,
+		    erofs_xrecord_t *, const char **);
+fsimg_status_t	erofs_xlength_decode(uint32_t, erofs_xlength_t *,
+		    const char **);
 bool		erofs_zheader_encode(const erofs_zheader_t *, unsigned char *);
 bool		erofs_full_record_encode(const erofs_zrecord_t *, uint16_t,
 		    unsigned char *);

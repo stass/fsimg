@@ -76,6 +76,17 @@ static const char *const fixture_names[] = {
 #ifdef FSIMG_ZSTD
 	"e9-zstd-words6m-big1m",
 #endif
+	/*
+	 * The E10 48-bit fixtures with compressed files: encoded extents of
+	 * 4, 8 and 16 bytes beside compact and full indexes, partial
+	 * references under dedupe, DEFLATE, fragments under encoded extents,
+	 * and the hand-built 32-byte records with padded, exact and
+	 * unaligned physical extents. Their extents.txt is `dump.erofs -e`
+	 * of every file. e10-48-lz4-big's 5 GiB file is read by
+	 * test-erofs-scale instead.
+	 */
+	"e10-48-lz4", "e10-48-lz4-b512", "e10-48-deflate", "e10-48-frag",
+	"e10-hand-lz4-padded", "e10-hand-lz4-exact", "e10-hand-lz4-bytes",
 };
 
 /* ---- The oracle: dump.erofs -e rows and the manifest ---- */

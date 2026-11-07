@@ -467,4 +467,56 @@ size_t		gen_zfile_records(const gen_zfile_t *, unsigned, uint32_t,
 uint64_t	gen_tree_add_zfile(gen_tree_t *, const gen_inode_t *,
 		    const gen_zfile_t *);
 
+/*
+ * The 48-bit layout's superblock, incompatible bit 0x080 ORed into the
+ * feature word, with a block count of up to 48 bits whose low 32 bits are
+ * stored at 0x24. The wide form, a nonzero root NID, stores the root NID at
+ * 0x70 and the count's bits 32 to 47 at 0x0E. The narrow form, root NID 0,
+ * leaves the 16-bit root NID at 0x0E as it is and needs a count below 2^32.
+ * The image is not resized: a count beyond it describes a sparse volume.
+ */
+void		gen_tree_set_48bit(gen_tree_t *, uint64_t, uint64_t);
+
+/*
+ * Encoded extents: a full-index inode (layout 1) of a 48-bit volume whose
+ * advice has bit 0x01, with records in place of an index. A gen_xrecord_t is
+ * one record as written, each width keeping the fields it has: 4 bytes the
+ * length word alone; 8 bytes it and the physical offset's low 32 bits; 16
+ * bytes it, the 64-bit physical offset in two halves and the logical
+ * offset's low 32 bits; 32 bytes it, both offsets in two halves each and 12
+ * zero bytes.
+ *
+ * A gen_xfile_t is the inode's map. The advice gets 0x01 and the width's
+ * bits 1 and 2 added. For 16- and 32-byte records the map header holds
+ * `count`, its low 32 bits in bytes 0 to 3 and its high 16 in bytes 6 and 7;
+ * for 4- and 8-byte records bytes 0 to 3 and 6 are zero and byte 7 is
+ * `shift`. The records start at the map header's end rounded up to the
+ * width; 4-byte records follow the 64-bit physical `start` placed there.
+ * The size and the records are independent, so a test can write any count.
+ */
+typedef struct gen_xrecord {
+	uint64_t	 physical;
+	uint64_t	 logical;
+	uint32_t	 length;	/* the length word */
+} gen_xrecord_t;
+
+typedef struct gen_xfile {
+	uint64_t		 size;
+	uint64_t		 count;		/* 16- and 32-byte records */
+	uint64_t		 start;		/* 4-byte records */
+	const gen_xrecord_t	*records;
+	size_t			 record_count;
+	unsigned		 width;		/* 4, 8, 16 or 32 */
+	uint16_t		 advice;
+	uint8_t			 shift;		/* 4- and 8-byte records */
+} gen_xfile_t;
+
+/*
+ * Add an encoded-extent inode for the map: prototype fields as
+ * gen_tree_add(), but the layout is 1, the size is the map's and the layout
+ * word 0. The extents' bytes are the caller's to place. Returns the NID.
+ */
+uint64_t	gen_tree_add_extents(gen_tree_t *, const gen_inode_t *,
+		    const gen_xfile_t *);
+
 #endif /* !FSIMG_TEST_EROFS_GEN_H */

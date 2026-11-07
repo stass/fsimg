@@ -61,7 +61,7 @@ module FsimgSpec
           "device_table" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x8)], valid: true),
           "ztailpacking" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x10)], valid: true),
           "fragments" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x20)], valid: true),
-          "bit_48" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x80)]),
+          "bit_48" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x80)], valid: true),
           "unknown_bit" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x200)])
         },
         "sb.devices" => { "extra_device" => change(parameters: NO_CHECKSUM, mutations: [u16(sb(0x56), 1)]) },
@@ -84,9 +84,8 @@ module FsimgSpec
         },
         "inode.chunk_wide" => {
           "eight_byte_without_48bit" => change(parameters: CHUNKED, mutations: [u32(inode(Builder::CHUNK8, 0x10), 0x61)]),
-          # 48BIT is refused at open, so this witness also lacks it and
-          # cannot isolate the 4-byte half of the rule.
-          "four_byte" => change(parameters: CHUNKED, mutations: [u32(inode(Builder::CHUNK4, 0x10), 0x40)])
+          "four_byte" => change(parameters: CHUNKED.merge(NO_CHECKSUM),
+                                mutations: [u32(sb(0x50), 0x84), u32(inode(Builder::CHUNK4, 0x10), 0x40)])
         },
         "inode.reserved" => {
           "compact_word" => change(mutations: [u32(inode(Builder::FILE, 0x1C), 1)]),

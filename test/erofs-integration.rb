@@ -60,8 +60,10 @@ Comparison = Data.define(:diffs, :skipped) do
 end
 NONE = Comparison.of
 Result = Data.define(:name, :verdict, :notes, :skipped)
-# The epoch a fixture was built with, and whether its extended inodes keep source times.
-TimeRule = Data.define(:epoch, :source)
+# The epoch a fixture was built with, whether its extended inodes keep source
+# times, and whether it has the 48-bit layout, whose compact inodes keep them too.
+TimeRule = Data.define(:epoch, :source, :wide)
+COMPACT_TIME_RANGE = 1 << 32
 
 LISTING_KINDS = {
   "file" => "file", "directory" => "dir", "symlink" => "symlink", "fifo" => "fifo",
@@ -76,20 +78,19 @@ MAX_NOTES = 4
 VERIFY_MODES = [[], ["-d"]].freeze
 # The passes of a build with every library; a fixture slipping to
 # "unsupported" must not keep the run green.
-PASS_FLOOR = 118
+PASS_FLOOR = 130
 # Corpus entries left out: capture.rb's in-progress directories (`.tmp-`
-# in the name), and the 5 GiB E13 files, which test-erofs-scale reads by
-# streaming them to a digest, since extracting one here writes 5 GiB.
-STREAMED_FIXTURES = /\Ae13-big5g/
+# in the name), and the 5 GiB E13 and E10 files, which test-erofs-scale
+# reads by streaming them to a digest, since extracting one here writes
+# 5 GiB.
+STREAMED_FIXTURES = /\A(e13-big5g|e10-48-lz4-big\z)/
 # Fixtures covering geometry, inline data, and an attribute-bearing tree.
 WRAPPED_FIXTURES = %w[e1-geom-b512 e3-b4096-inline e6-xattr-default].freeze
 SECTOR = 512
 FIRST_SECTOR = 2048
 
 # The only reasons the reader may give for an image it cannot read yet.
-KNOWN_REFUSALS = [
-  /feature 48BIT\z/, /feature METABOX\z/, /extra devices\z/, /metadata box/
-].freeze
+KNOWN_REFUSALS = [/feature METABOX\z/, /extra devices\z/, /metadata box/].freeze
 
 # A cluster of an algorithm whose library this build lacks, and the codec
 # name `--formats` lists for the library.
@@ -111,12 +112,10 @@ HEAD2_DIGEST_SOURCE = "e9-head2-lzma"
 # listed neither here nor in EXPECTED_CORRUPT must open, list and extract.
 EXPECTED_REFUSALS = {
   "e14-blobdev-b4096" => /extra devices/, "e14-tar-index-b4096" => /extra devices/,
-  "e2-vm-48bit" => /48BIT/,
-  # The current reader's refusals of 48-bit volumes; specs/design-erofs.md gives these and no48 their own
-  # verdicts (several are hostile edits it rejects as corrupt), which the 48BIT reader pins.
-  **%w[48-chunk 48-kinds edit-kinds-extbit4 edit-lz4-counthi edit-small-nlink1 edit-small-wide hand-box32]
-    .to_h { ["e10-#{_1}", /feature 48BIT\z/] },
-  "e10-edit-lz4-no48" => /logical cluster size other than the block size/,
+  # Bit 4 on extended files, which the kernel ignores: refused by policy
+  # (specs/design-erofs.md#48-bit-layout). The box re-mapped by encoded
+  # extents is refused with every metadata-box volume.
+  "e10-edit-kinds-extbit4" => /extended inode format bit 4\z/, "e10-hand-box32" => /feature METABOX\z/,
   "e8-lz4-flag-cleared" => /LZ4 cluster without LZ4_0PADDING/,
   "e8-lz4-flag-cleared-distance0" => /LZ4 cluster without LZ4_0PADDING/,
   "e8-lz4-unpadded" => /LZ4 cluster without LZ4_0PADDING/,
@@ -135,6 +134,9 @@ EXPECTED_CORRUPT = {
   "e7-edit-block-oor" => /data blocks outside the volume/, "e7-edit-device-id" => /chunk device identifier/,
   "e7-edit-format-0x40" => /chunk format 48-bit bit/, "e7-edit-format-0x80" => /chunk format\z/,
   "e7-edit-high-part" => /chunk block high bits/,
+  # E10.md: encoded extents without 48BIT, and a count high half of 1.
+  "e10-edit-lz4-no48" => /encoded extents without 48BIT\z/,
+  "e10-edit-lz4-counthi" => /encoded extent count above the size's blocks\z/,
   "e8-lz4-block-end" => /lz4: /, "e9-head2-head1-wrong" => /lz4: /,
   "e9-head2-lz4-ctrl" => /head-2 record without COMPR_HEAD2/, "e9-head2-lzma" => /head-2 record without COMPR_HEAD2/,
   "e9-head2-wrongalg" => /head-2 record without COMPR_HEAD2/,
@@ -263,13 +265,25 @@ def time_rule(command)
 
   keeps = command.match?(/--mkfs-time(?=\s)/)
   flattened = command.match?(/--ignore-mtime(?=\s)|force-inode-compact/)
-  TimeRule.new(epoch: epoch.to_i, source: keeps && !flattened)
+  TimeRule.new(epoch: epoch.to_i, source: keeps && !flattened, wide: command.match?(/-E\s*\S*48bit/))
 end
 
 # A compact inode holds no time of its own: it delivers the epoch (mkfs
-# chooses it for a source time equal to the epoch in whole seconds). An
-# extended inode delivers the source time, nanoseconds included when the
-# manifest carries them.
+# chooses it for a source time equal to the epoch in whole seconds). Under
+# the 48-bit layout the superblock's epoch is zero and mkfs.erofs 1.9.4
+# keeps whole seconds of the source time: modulo 2^32 in a compact inode
+# (E10, e10-48-small's 1950 and 2110 files), whole in an extended one, which
+# only a hard link or a wide start forces (e10-48-large's z-hl1, whose
+# nanoseconds dump.erofs also shows as zero). Otherwise an extended inode
+# delivers the source time, nanoseconds included when the manifest carries
+# them.
+def wide_time_check(row, seen, compact:)
+  want = compact ? row.seconds % COMPACT_TIME_RANGE : row.seconds
+  return NONE if seen.time == [want, 0]
+
+  Comparison.of("#{row.path}: time #{seen.time.join('.')} != #{want}.0 (whole seconds of #{row.seconds})")
+end
+
 def time_check(row, seen, rule:, mtime:)
   want_key = mtime ? "modified" : "changed"
   unless seen.time_key == want_key
@@ -280,6 +294,8 @@ def time_check(row, seen, rule:, mtime:)
   # Without the MTIME bit an extended inode stores the source's change time,
   # which no manifest column carries.
   return Comparison.of(skipped: [:change_time]) if !mtime && !compact
+
+  return wide_time_check(row, seen, compact:) if rule.source && rule.wide
 
   keeps = rule.source && !compact
   want = [keeps ? row.seconds : rule.epoch, keeps ? row.nanos : 0]
@@ -504,6 +520,10 @@ EMPTY_SHA = Digest::SHA256.hexdigest("")
 # those three images with the bytes fsimg extracts, which match the source
 # manifests. The cause inside rust-fs-erofs is not diagnosed.
 RUST_REFUSALS = {
+  # rust-fs-erofs 0.5.1 has no 48-bit layout.
+  **%w[e1-bt-48bit e2-vm-48bit e13-limits-48bit e10-48-chunk e10-48-deflate e10-48-dotomit e10-48-frag e10-48-kinds e10-48-large
+       e10-48-lz4 e10-48-lz4-b512 e10-48-small e10-edit-small-nlink1 e10-edit-small-wide e10-hand-lz4-bytes
+       e10-hand-lz4-exact e10-hand-lz4-padded].to_h { [_1, /feature_incompat 48bit/] },
   "e4-nearfull-b4096" => /ShortRead \{ offset: 8160, want: 64, got: 32 \}/,
   "e6-xattr-pfx-packed" => /malformed inode: inline PLAIN tail shorter than its extent/,
   "e8-lz4-compact-counts" => /malformed inode: LZ4 /,

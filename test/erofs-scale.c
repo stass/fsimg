@@ -24,7 +24,8 @@
 #include "test.h"
 
 /*
- * The E13 scale fixtures read under the minimum budget. The corpus named by
+ * The E13 scale fixtures, and E10's 5 GiB file behind 32-byte encoded
+ * extents, read under the minimum budget. The corpus named by
  * FSIMG_EROFS_FIXTURES holds each fixture's image.erofs and manifest.txt;
  * `test-erofs-scale NAME` opens one image in a 16 MiB context with a
  * scratch directory, lists every entry and reads every regular file through
@@ -40,9 +41,8 @@
  * image file. The volume callback counts every byte the reader asks for and
  * stops the run at the case's bound, so a reader that strayed into an
  * image's hole, or read a chunked file's hole chunks, fails at the bound
- * rather than reading terabytes. While the reader refuses the 48-bit layout
- * and the metadata box, their cases must fail at open with
- * FSIMG_EUNSUPPORTED inside the same bound.
+ * rather than reading terabytes. While the reader refuses the metadata box,
+ * its case must fail at open with FSIMG_EUNSUPPORTED inside the same bound.
  *
  * The process is the measurement: one fixture per run, charged memory
  * bounded by the metadata cache's maximum, one sort run and the driver's
@@ -73,8 +73,10 @@ enum {
 
 /*
  * One fixture: what open must return; the most image bytes it may read,
- * length_factor times the image's length plus slack bytes; and whether its
- * listing must spool children to scratch.
+ * length_factor times the image's length plus slack bytes; whether its
+ * listing must spool children to scratch; and the decode window its
+ * largest cluster needs, decoded and stored, charged beside the driver's
+ * state when it exceeds what that allows.
  */
 typedef struct scale_case {
 	const char	*name;
@@ -82,6 +84,7 @@ typedef struct scale_case {
 	uint64_t	 length_factor;
 	uint64_t	 slack;
 	bool		 spools;
+	uint64_t	 window;
 } scale_case_t;
 
 /*
@@ -93,18 +96,22 @@ typedef struct scale_case {
  * chunk; the LZ4 image its input once and one compact index group for each
  * of its 1310721 logical clusters, within four times its length; the wide
  * directory its blocks once to prepare and its 100000 inodes once to
- * replay, within twice its length; and each limits image, whose hole spans
- * terabytes, at most 1 MiB whatever its length.
+ * replay, within twice its length; the encoded-extent image its input
+ * about twice and its 961 records, which the metadata cache holds, within
+ * three times its length, its 8,192,000-byte extents decoded in a window
+ * of up to 9 MiB with the stored cluster; and each limits image, whose hole spans terabytes, at most 1 MiB
+ * whatever its length.
  */
 static const scale_case_t cases[] = {
-	{ "e13-big5g", FSIMG_OK, 1, MIB, false },
-	{ "e13-big5g-chunk1m", FSIMG_OK, 1, MIB, false },
-	{ "e13-big5g-lz4", FSIMG_OK, 4, 0, false },
-	{ "e13-dir100k", FSIMG_OK, 2, 0, true },
-	{ "e13-limits-startblk", FSIMG_OK, 0, MIB, false },
-	{ "e13-limits-nid", FSIMG_OK, 0, MIB, false },
-	{ "e13-limits-48bit", FSIMG_EUNSUPPORTED, 0, MIB, false },
-	{ "e13-limits-metabox", FSIMG_EUNSUPPORTED, 0, MIB, false }
+	{ "e13-big5g", FSIMG_OK, 1, MIB, false, 0 },
+	{ "e13-big5g-chunk1m", FSIMG_OK, 1, MIB, false, 0 },
+	{ "e13-big5g-lz4", FSIMG_OK, 4, 0, false, 0 },
+	{ "e13-dir100k", FSIMG_OK, 2, 0, true, 0 },
+	{ "e10-48-lz4-big", FSIMG_OK, 3, 0, false, 9 * MIB },
+	{ "e13-limits-startblk", FSIMG_OK, 0, MIB, false, 0 },
+	{ "e13-limits-nid", FSIMG_OK, 0, MIB, false, 0 },
+	{ "e13-limits-48bit", FSIMG_OK, 0, MIB, false, 0 },
+	{ "e13-limits-metabox", FSIMG_EUNSUPPORTED, 0, MIB, false, 0 }
 };
 
 /* A manifest file row with content, which the walk must meet once. */
@@ -513,7 +520,7 @@ main(int argc, char **argv)
 	fixture_measure(c, scratch_path, &volume, &manifest, &figures);
 	CHECK(close(volume.fd) == 0);
 
-	memory_bound = scale_memory(DRIVER_STATE);
+	memory_bound = scale_memory(DRIVER_STATE + c->window);
 	printf("erofs %s apparent=%" PRIu64 " entries=%" PRIu64
 	    " files=%" PRIu64 " image_calls=%" PRIu64 " image_bytes=%" PRIu64
 	    " image_limit=%" PRIu64 " image_max_end=%" PRIu64

@@ -27,7 +27,7 @@ module FsimgSpec
       BIT_48 = 0x80
       # LZ4_0PADDING, COMPR_CFGS, COMPR_HEAD2, ZTAILPACKING, FRAGMENTS (DEDUPE)
       COMPRESSION_FEATURES = 0x3b
-      READABLE_INCOMPAT = PREFIXES_FEATURE | CHUNKED_FILE | COMPRESSION_FEATURES
+      READABLE_INCOMPAT = PREFIXES_FEATURE | CHUNKED_FILE | COMPRESSION_FEATURES | BIT_48
       BUILTIN_PREFIXES = [1, 2, 3, 4, 6].freeze
       LONG_PREFIX = 0x80
       ACL_INDEXES = [2, 3].freeze
@@ -101,8 +101,10 @@ module FsimgSpec
                    applies_to: ->(inode, _) { inode.chunked? && inode.wide_blocks? }) do |inode, model|
           model.sb.incompat.anybits?(BIT_48) && inode.eight_byte_entries?
         end,
-        inode_rule(id: "inode.reserved", anchor: "compact-inode") do |inode, _|
-          inode.extended ? inode.fields.reserved_a.zero? && inode.fields.reserved_b.bytes.all?(&:zero?) : inode.fields.reserved.zero?
+        inode_rule(id: "inode.reserved", anchor: "compact-inode") do |inode, model|
+          # Under the 48-bit layout the extended word at 0x06 holds start-block bits 32 to 47.
+          inode.extended ? (model.sb.incompat.anybits?(BIT_48) || inode.fields.reserved_a.zero?) &&
+            inode.fields.reserved_b.bytes.all?(&:zero?) : inode.fields.reserved.zero?
         end,
         inode_rule(id: "inode.nanoseconds", anchor: "extended-inode", applies_to: ->(inode, _) { inode.extended }) { |inode, _| inode.fields.nsec < NSEC },
         inode_rule(id: "inode.mode", anchor: "kinds-and-fields") { |inode, _| Model::TYPES.key?(inode.type_bits) },

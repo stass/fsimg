@@ -107,6 +107,7 @@ module FsimgSpec
 
     class Decoder
       CHUNK = 1 << 16
+      BIT_48 = 0x80
       # The scopes that read what a cut-off structure held: a scope and
       # every scope after it.
       DEPENDENTS = {
@@ -134,7 +135,8 @@ module FsimgSpec
 
         @sb = sb
         @block = sb.blkszbits.between?(9, 12) ? 1 << sb.blkszbits : Model::UNKNOWN
-        @domain = FsimgSpec.derive(@block) { sb.blocks.zero? ? @image.length : sb.blocks * _1 }
+        blocks = block_count(sb)
+        @domain = FsimgSpec.derive(@block) { blocks.zero? ? @image.length : blocks * _1 }
         walk unless FsimgSpec.undefined?(@block)
         result(magic, sb, @block, @domain)
       end
@@ -154,6 +156,13 @@ module FsimgSpec
 
       private
 
+      # The 48-bit layout's wide superblock form: a nonzero wide root field
+      # is the root NID and the 16-bit root field the block count's bits 32
+      # to 47 (design: 48-bit layout); otherwise both keep their meaning.
+      def wide_form?(sb) = sb.incompat.anybits?(BIT_48) && sb.wide_root_nid.nonzero?
+      def root_nid(sb) = wide_form?(sb) ? sb.wide_root_nid : sb.root_nid
+      def block_count(sb) = wide_form?(sb) ? sb.root_nid << 32 | sb.blocks : sb.blocks
+
       def result(magic, sb, block, domain)
         Model.new(image_length: @image.length, magic:, sb:, block:, domain:, checksum: checksum_of, inodes: @inodes.freeze,
                   directories: @directories.freeze, tree: @clean ? @tree.freeze : Model::UNKNOWN, cut_off: @cut_off.freeze)
@@ -165,7 +174,7 @@ module FsimgSpec
       # parent. A directory below itself is recorded for the rules but not
       # entered again, so a cycle ends; the entry bound ends a wide tree.
       def walk
-        root = load_inode(@sb.root_nid, "open")
+        root = load_inode(root_nid(@sb), "open")
         return @clean = false unless root&.directory?
 
         queue = [[root, "".b, root.nid, []]]

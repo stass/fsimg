@@ -207,12 +207,15 @@ the head for the count marker and the records after it up to the next head,
 each walk bounded by the decoded-extent limit and the record count. Full
 records are read in windows of 16; a compact lookup reads the one group
 holding a record, computing group boundaries from the record count and the
-header's offset; an encoded-extent lookup binary-searches the records,
-their count read from the header for 16- and 32-byte records and derived
-from the size and the header's logical cluster shift for 4- and 8-byte ones
+header's offset; an encoded-extent lookup binary-searches 16- and 32-byte
+records, whose count the header holds, and indexes 4- and 8-byte ones by
+the logical cluster, their count derived from the size and the header's
+shift, summing 4-byte records' stored lengths for the physical offset
 ([encoded extents](design-erofs.md#encoded-extents)). A
 lookup keeps the last group or record window it read, decoded and
-validated whole, so sequential mapping reads each index byte once.
+validated whole, or for 4-byte records the last running sum, so sequential
+mapping reads each index byte once. Verification reads every encoded
+record once more, in order, since a search reads only some of them.
 The compact group decoder is a pure function in `codec.c` from a group's
 bytes and its position to the normalized records, and is tested at every
 boundary E8 names.

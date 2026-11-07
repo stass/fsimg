@@ -480,7 +480,9 @@ packed_check(fsimg_reader_t *reader, erofs_verifier_t *verifier,
  * packed_check(), and a chunk hole stores nothing. Chunks naming one block
  * claim it once each: the sweep lets data claims overlap, while a
  * directory's blocks are exclusive, so a directory whose chunks share a
- * block is a finding. Each extent is one unit of work.
+ * block is a finding. Each extent is one unit of work. An encoded-extent
+ * inode's records are first read once each, erofs_extents_check(), since
+ * the lookups of the walk need not read them all.
  */
 static fsimg_status_t
 storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
@@ -493,6 +495,9 @@ storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 	fsimg_status_t status;
 
 	block_mask = (uint64_t)erofs_state(reader)->block_bytes - 1;
+	status = erofs_extents_check(reader, inode, error);
+	if (status != FSIMG_OK)
+		return (status);
 	for (offset = 0; offset < inode->size;
 	    offset = extent.logical_offset + extent.length) {
 		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);

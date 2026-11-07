@@ -82,7 +82,9 @@
   its output, uncompressed and under `-c lz4`, with `fsck.erofs`, the
   kernel and rust-fs-erofs at every block size. It refuses `addressing=48`
   (stage 14) and `metabox=plain|lz4` (stage 15) with
-  `FSIMG_EUNSUPPORTED`.
+  `FSIMG_EUNSUPPORTED`. The reader reads the 48-bit layout, encoded
+  extents of every width included; the metadata box (stage 13) is refused
+  at open.
 
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and

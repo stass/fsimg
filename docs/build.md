@@ -1359,12 +1359,13 @@ every nonempty file's SHA-256 must equal the fixture's manifest. The volume
 callback counts each byte the reader requests and stops the run at the
 fixture's bound, a multiple of the image's length plus slack, so a reader that
 read an image's hole, or a chunked file's hole chunks, fails at the bound
-instead of reading terabytes. While the reader refuses the 48-bit layout and
-the metadata box, those images must fail at open with `FSIMG_EUNSUPPORTED`
-inside the same bound. Charged memory is bounded by the metadata cache's
-maximum, one sort run and 512 KiB of state, which 8 bytes of memory per name
-in the wide directory would exceed, and the run's resident-set growth by that
-bound plus 32 MiB; only the wide directory may use scratch, and it must. The
+instead of reading terabytes. While the reader refuses the metadata box, its
+image must fail at open with `FSIMG_EUNSUPPORTED` inside the same bound.
+Charged memory is bounded by the metadata cache's maximum, one sort run and
+512 KiB of state, which 8 bytes of memory per name in the wide directory
+would exceed; E10's 5 GiB file adds 9 MiB of decode window, since its
+encoded extents decode 8,192,000 bytes each. The run's resident-set growth
+is bounded by that bound plus 32 MiB; only the wide directory may use scratch, and it must. The
 checks never copy, hash or walk an image file, so the limits images, 1.6 to
 3.3 TiB apparent and a few KiB allocated, cost what their metadata does:
 
@@ -1382,9 +1383,10 @@ and the scratch directory on an APFS RAM disk:
 | `e13-big5g-chunk1m` | 2 | 81,980 | 3,514,611 | 5,368,712,198 | 1,148,963 | 0 | 2,469,888 | 21.5 |
 | `e13-big5g-lz4` | 2 | 1,630,428 | 74,320,859 | 5,368,712,198 | 2,190,101 | 0 | 3,526,656 | 26.3 |
 | `e13-dir100k` | 100,004 | 100,453 | 5,042,629 | 9 | 5,363,133 | 9,900,220 | 5,775,360 | 0.35 |
+| `e10-48-lz4-big` | 2 | 816,244 | 48,420,371 | 5,368,712,198 | 9,372,963 | 0 | 10,747,904 | 25.1 |
 | `e13-limits-startblk` | 3 | 13 | 39,353 | 1,227 | 1,148,981 | 0 | 1,429,504 | 0.001 |
 | `e13-limits-nid` | 3 | 14 | 53,126 | 15,000 | 1,148,981 | 0 | 1,429,504 | 0.001 |
-| `e13-limits-48bit` | refused | 2 | 37,888 | 0 | 42,272 | 0 | 180,224 | 0.000 |
+| `e13-limits-48bit` | 3 | 14 | 39,926 | 1,800 | 1,149,045 | 0 | 1,445,888 | 0.001 |
 | `e13-limits-metabox` | refused | 2 | 11,264 | 0 | 15,648 | 0 | 118,784 | 0.000 |
 
 Content bytes are what the reader delivered, decoded for the LZ4 file:
@@ -1401,8 +1403,11 @@ charged memory stays at the metadata cache and one sort run. The 5 GiB
 cases spend their time in the test's SHA-256. The limits images read the
 superblock region, their inodes and their files' blocks, which end at the
 volume's last byte (`b.bin` in start block `0xFFFFFFFE`), and nothing in the
-terabytes of hole between.
-`test/erofs-integration.sh` leaves the three 5 GiB fixtures out, since
+terabytes of hole between; `e13-limits-48bit` does the same with start
+blocks past 2^32. `e10-48-lz4-big`'s file is 961 extents of 32-byte
+records: its stored clusters are read about twice, by the map and by the
+decode, and its records come from the metadata cache.
+`test/erofs-integration.sh` leaves the four 5 GiB fixtures out, since
 extracting one writes 5 GiB; this check lists and reads them, without
 verification or extraction.
 

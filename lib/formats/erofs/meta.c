@@ -17,6 +17,8 @@
  * read of it is refused as unsupported.
  */
 
+static fsimg_status_t	extents_measure(const fsimg_erofs_reader_t *,
+			    erofs_inode_t *, fsimg_error_t *);
 static fsimg_status_t	nid_locate(const fsimg_erofs_reader_t *, uint64_t,
 			    erofs_space_t *, uint64_t *, fsimg_error_t *);
 static fsimg_status_t	tail_check(const fsimg_erofs_reader_t *, uint64_t,
@@ -154,8 +156,10 @@ erofs_body_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
  * h_idata_size stored bytes follow the index: the byte after the last full
  * record, or the end of the compact group holding the last record, which
  * erofs_compact_layout() places at the index's end (E15,
- * e15-c-l2b-tail-at-L). The metadata reader bounds the header's read; the
- * caller checks the whole body's span once its end is known.
+ * e15-c-l2b-tail-at-L). An encoded-extent inode's body ends after its
+ * records instead, extents_measure()'s. The metadata reader bounds the
+ * header's read; the caller checks the whole body's span once its end is
+ * known.
  */
 static fsimg_status_t
 zheader_load(fsimg_reader_t *reader, erofs_space_t space, uint64_t offset,
@@ -177,6 +181,8 @@ zheader_load(fsimg_reader_t *reader, erofs_space_t space, uint64_t offset,
 	    &inode->zheader, &what);
 	if (status != FSIMG_OK)
 		return (erofs_reject(error, status, what));
+	if (inode->zheader.extents_form != EROFS_EXTENTS_NONE)
+		return (extents_measure(erofs, inode, error));
 
 	if (inode->zheader.whole_fragment)
 		inode->body_bytes = inode->layout_offset + EROFS_ZHEADER_BYTES;
@@ -185,6 +191,51 @@ zheader_load(fsimg_reader_t *reader, erofs_space_t space, uint64_t offset,
 	    &inode->body_bytes))
 		return (erofs_reject(error, FSIMG_ECORRUPT,
 		    "compressed index length"));
+	return (FSIMG_OK);
+}
+
+/*
+ * The extent count and body end of an encoded-extent inode. With 16- or
+ * 32-byte records the header's count is at most ceil(size / B), by policy:
+ * every extent but the last covers at least a block of content (E10), and
+ * the bound is checked before the records' length is computed, so no count
+ * makes the body longer than the size allows (e10-edit-lz4-counthi). A
+ * file with content has at least one extent. With 4- or 8-byte records the
+ * file has one extent per logical cluster, ceil(size / 2^lclusterbits).
+ * The records start at the header's end rounded up to their size, 4-byte
+ * records after a 64-bit physical start, and have no inline tail after
+ * them. The count is below 2^48 for 16- and 32-byte records and at most
+ * 2^55 for 4- and 8-byte ones (a 64-bit size over 512-byte clusters), so
+ * the records span at most 2^58 bytes and neither the product nor the sum
+ * wraps.
+ */
+static fsimg_status_t
+extents_measure(const fsimg_erofs_reader_t *erofs, erofs_inode_t *inode,
+    fsimg_error_t *error)
+{
+	erofs_zheader_t *header = &inode->zheader;
+	uint64_t blocks, records_offset, unit;
+
+	blocks = (inode->size >> erofs->super.blkszbits) +
+	    ((inode->size & (erofs->block_bytes - 1)) != 0);
+	if (header->extents_form == EROFS_EXTENTS_SEARCHED) {
+		if (header->extent_count > blocks)
+			return (erofs_reject(error, FSIMG_ECORRUPT,
+			    "encoded extent count above the size's blocks"));
+		if (header->extent_count == 0 && inode->size != 0)
+			return (erofs_reject(error, FSIMG_ECORRUPT,
+			    "no encoded extent for the content"));
+	} else {
+		unit = UINT64_C(1) << header->lclusterbits;
+		header->extent_count = inode->size / unit +
+		    (inode->size % unit != 0);
+	}
+	records_offset = erofs_extents_offset(inode);
+	if (header->extents_form == EROFS_EXTENTS_RUNNING)
+		records_offset += EROFS_EXTENT_START_BYTES;
+	inode->body_bytes = records_offset +
+	    header->extent_count * header->extent_bytes;
+	inode->tail_offset = inode->body_bytes;
 	return (FSIMG_OK);
 }
 

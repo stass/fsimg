@@ -2876,6 +2876,118 @@ test_a_prefix_table_in_the_packed_inode_verifies(void)
 	gen_tree_free(&tree);
 }
 
+/* ---- The 48-bit layout's format bit 4 ---- */
+
+enum {
+	SB_WIDE_ROOT = 0x70,
+	INCOMPAT_48BIT = 0x80,
+	FORMAT_BIT_4 = 0x10
+};
+
+/* Without 48BIT the wide root field is reserved like any other byte. */
+static void
+test_a_wide_root_field_without_48bit_leaves_the_report_incomplete(void)
+{
+	clean_t clean;
+
+	clean_new(&clean, 9);
+	put_super(&clean.tree, SB_WIDE_ROOT, 1, 8);
+	check_incomplete("wide root field without 48BIT", &clean.tree,
+	    "reserved superblock byte; verification is incomplete");
+	gen_tree_free(&clean.tree);
+}
+
+/*
+ * A 48-bit volume whose root names directory "d" holding file "x". d has
+ * format bit 4, so its "." is omitted, and stores "..", and "." as well
+ * when stored_dot is set. Its link count is 2, as with a stored dot.
+ */
+static void
+dotless_tree(gen_tree_t *tree, bool stored_dot)
+{
+	gen_inode_t dir = inode_proto(MODE_DIR, LAYOUT_FLAT);
+	gen_dirent_t records[3], kid;
+	size_t block, size, n = 0;
+	unsigned char *bytes;
+	uint64_t d, x;
+
+	tree_new(tree, 9, 4);
+	put_super(tree, SB_INCOMPAT, INCOMPAT_48BIT, 4);
+	d = gen_tree_slot(tree, GEN_COMPACT_BYTES, 0);
+	x = add_file(tree, LAYOUT_INLINE, 30);
+	if (stored_dot)
+		records[n++] = entry(".", d, T_DIR);
+	records[n++] = entry("..", 0, T_DIR);
+	records[n++] = entry("x", x, T_FILE);
+	block = block_bytes(tree);
+	bytes = calloc(block, 1);
+	CHECK(bytes != NULL);
+	size = gen_dir_pack(bytes, block, block, records, n);
+	dir.format_extra = FORMAT_BIT_4;
+	dir.nlink = 2;
+	gen_tree_fill(tree, d, &dir, bytes, size);
+	free(bytes);
+	kid = entry("d", d, T_DIR);
+	fill_dir(tree, 0, 0, &kid, 1);
+}
+
+static void
+test_a_directory_omitting_its_dot_under_bit_4_verifies(void)
+{
+	gen_tree_t tree;
+
+	dotless_tree(&tree, false);
+	expect_verified("directory with bit 4 and no dot", &tree);
+	gen_tree_free(&tree);
+}
+
+static void
+test_a_stored_dot_under_bit_4_is_corrupt(void)
+{
+	gen_tree_t tree;
+
+	dotless_tree(&tree, true);
+	expect_corrupt("directory with bit 4 and a dot", &tree,
+	    "\".\" in a directory that omits it");
+	gen_tree_free(&tree);
+}
+
+/*
+ * Bit 4 on a compact file means a link count of 1, its link-count word
+ * holding start-block bits (0 here): one name verifies, two are corrupt.
+ */
+static void
+test_an_implicit_link_count_of_1_is_checked_against_the_names(void)
+{
+	for (unsigned names = 1; names <= 2; names++) {
+		gen_dirent_t kids[2];
+		gen_tree_t tree;
+		uint64_t file;
+		char phrase[128];
+
+		tree_new(&tree, 9, 4);
+		put_super(&tree, SB_INCOMPAT, INCOMPAT_48BIT, 4);
+		file = add_file(&tree, LAYOUT_INLINE, 40);
+		gen_put(&tree.image, inode_offset(&tree, file),
+		    tree.image.bytes[inode_offset(&tree, file)] | FORMAT_BIT_4,
+		    1);
+		set_nlink(&tree, file, 0);
+		kids[0] = entry("a", file, T_FILE);
+		kids[1] = entry("b", file, T_FILE);
+		fill_dir(&tree, 0, 0, kids, names);
+		if (names == 1) {
+			expect_verified("bit 4 file with one name", &tree);
+		} else {
+			snprintf(phrase, sizeof(phrase),
+			    "link count 1 of inode %llu for 2 names",
+			    (unsigned long long)file);
+			expect_corrupt("bit 4 file with two names", &tree,
+			    phrase);
+		}
+		gen_tree_free(&tree);
+	}
+}
+
 int
 main(void)
 {
@@ -2919,6 +3031,10 @@ main(void)
 	test_a_long_prefix_infix_of_1300_bytes_is_hashed_whole();
 	test_filters_are_not_checked_without_the_feature();
 	test_a_reserved_superblock_byte_leaves_the_report_incomplete();
+	test_a_wide_root_field_without_48bit_leaves_the_report_incomplete();
+	test_a_directory_omitting_its_dot_under_bit_4_verifies();
+	test_a_stored_dot_under_bit_4_is_corrupt();
+	test_an_implicit_link_count_of_1_is_checked_against_the_names();
 	test_an_unknown_compatible_feature_leaves_the_report_incomplete();
 	test_a_disabled_name_filter_leaves_the_report_incomplete();
 	test_the_filter_byte_without_the_feature_is_ignored();

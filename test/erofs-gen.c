@@ -34,6 +34,7 @@ enum {
 	SB_PREFIX_START = 0x5c,
 	SB_PACKED_NID = 0x60,
 	SB_BUILD_TIME = 0x6c,
+	SB_WIDE_ROOT = 0x70,
 	SB_BOX_NID = 0x80
 };
 
@@ -1081,5 +1082,75 @@ gen_tree_add_zfile(gen_tree_t *tree, const gen_inode_t *proto,
 	}
 	free(records);
 	free(tail);
+	return (nid);
+}
+
+void
+gen_tree_set_48bit(gen_tree_t *tree, uint64_t blocks, uint64_t root_nid)
+{
+	const unsigned char *incompat = tree->image.bytes + GEN_SUPER_OFFSET +
+	    SB_INCOMPAT;
+
+	CHECK(blocks >> 48 == 0 && (root_nid != 0 || blocks >> 32 == 0));
+	gen_super_put(&tree->image, SB_INCOMPAT, (incompat[0] | 0x80u) |
+	    (uint32_t)incompat[1] << 8 | (uint32_t)incompat[2] << 16 |
+	    (uint32_t)incompat[3] << 24, 4);
+	gen_super_put(&tree->image, SB_BLOCKS, blocks, 4);
+	if (root_nid == 0)
+		return;
+	gen_super_put(&tree->image, SB_WIDE_ROOT, root_nid, 8);
+	gen_super_put(&tree->image, SB_ROOT16, blocks >> 32, 2);
+}
+
+/* One encoded-extent record at a volume offset, the fields its width has. */
+static void
+xrecord_put(gen_image_t *image, uint64_t at, unsigned width,
+    const gen_xrecord_t *record)
+{
+	gen_put(image, at, record->length, 4);
+	if (width == 8)
+		gen_put(image, at + 4, record->physical, 4);
+	if (width >= 16)
+		gen_put(image, at + 4, record->physical, 8);
+	if (width == 16)
+		gen_put(image, at + 12, record->logical, 4);
+	if (width == 32)
+		gen_put(image, at + 12, record->logical, 8);
+}
+
+uint64_t
+gen_tree_add_extents(gen_tree_t *tree, const gen_inode_t *proto,
+    const gen_xfile_t *xf)
+{
+	unsigned width = xf->width;
+	unsigned width_bits = width == 4 ? 0 : width == 8 ? 1 : width == 16 ?
+	    2 : 3;
+	size_t header_start = round_up(gen_inode_header_bytes(proto), 8);
+	size_t records_start = round_up(header_start + 8, width) +
+	    (width == 4 ? 8 : 0);
+	gen_inode_t inode = *proto;
+	uint64_t nid, base, header;
+
+	CHECK(width == 4 || width == 8 || width == 16 || width == 32);
+	nid = gen_tree_slot(tree, records_start + xf->record_count * width, 0);
+	inode.nid = nid;
+	inode.size = xf->size;
+	inode.layout = 1;
+	inode.layout_word = 0;
+	gen_inode_write(&tree->image, &inode);
+	base = gen_inode_offset(&tree->image, nid);
+	header = base + header_start;
+	if (width >= 16) {
+		gen_put(&tree->image, header, xf->count, 4);
+		gen_put(&tree->image, header + 6, xf->count >> 32, 2);
+	} else
+		gen_put(&tree->image, header + 7, xf->shift, 1);
+	gen_put(&tree->image, header + 4, xf->advice | 0x01u | width_bits << 1,
+	    2);
+	if (width == 4)
+		gen_put(&tree->image, base + records_start - 8, xf->start, 8);
+	for (size_t i = 0; i < xf->record_count; i++)
+		xrecord_put(&tree->image, base + records_start + i * width,
+		    width, &xf->records[i]);
 	return (nid);
 }
