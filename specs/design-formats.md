@@ -31,7 +31,7 @@ resources, and [emission](design-emission.md); a driver does not acquire host
 descriptors or allocate outside its context.
 
 The public names are `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`,
-`ifs`, `hfsplus`, `hfsx`, `apfs`, `udf` and `iso9660`. FAT12,
+`ifs`, `hfsplus`, `hfsx`, `apfs`, `erofs`, `udf` and `iso9660`. FAT12,
 FAT16, and FAT32 share one descriptor and driver; opening selects the variant
 from the validated cluster count. HFS Plus and HFSX share one descriptor
 likewise, and the volume signature selects the variant. Detection follows one bounded probe contract:
@@ -337,6 +337,28 @@ the native formatter's empty layout and adding the catalog in one
 transaction. Native `fsck_apfs`, mount and write-after-create testing on
 macOS gates the writer capability, as native testing does for the QNX
 writers; the Linux checkers are a second opinion, never a substitute.
+
+## EROFS
+
+The [EROFS design](design-erofs.md) defines the Enhanced Read-Only File
+System: a superblock at byte 1024 with closed compatible and incompatible
+feature words and a CRC-32C, compact and extended inodes addressed by
+32-byte slot numbers, flat, inline, chunk-based and compressed data
+layouts with LZ4, MicroLZMA, DEFLATE and Zstandard clusters, packed
+fragments, directories of raw names in byte order, and extended attributes,
+which the reader validates and marks as extra data. The probe's identity
+signature is the magic at byte 1024; block size, feature words, the
+checksum and every inode and directory check are validation. The 48-bit
+layout and the metadata box are experimental profiles; external data
+devices are recognized and unsupported, as is a compressed cluster whose
+codec the build lacks. File hard links are delivered as separate entries,
+and the reader declares the portable name profile. The
+[driver design](design-erofs-driver.md) defines the code.
+
+The writer builds one deterministic layout, uncompressed or LZ4-compressed,
+and on request with the 48-bit layout or a metadata box. A Linux kernel
+mount and `fsck.erofs --extract`, each compared with the source, gate the
+writer capability and each of its profiles.
 
 ## UDF
 

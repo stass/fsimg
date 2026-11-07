@@ -20,8 +20,8 @@ under the common entry model a directory containing any kind outside file,
 directory, symbolic link and FIFO fails its preparation with
 `FSIMG_EUNSUPPORTED` naming the first such entry. One device hides the rest
 of the disc from `t`, `x` and `W`. The same rule is written into every
-format design that can store a device: ISO 9660 Rock Ridge, UDF, HFS Plus
-and APFS. Extracting such an image is a different question: the safe
+format design that can store a device: ISO 9660 Rock Ridge, UDF, HFS Plus,
+APFS and EROFS. Extracting such an image is a different question: the safe
 extractor creates regular files and directories only, and already skips or
 refuses symbolic links and FIFOs, so reading these kinds does not change
 what reaches the host.
@@ -77,9 +77,10 @@ never carries it. Like every field, an absent one has no value, so a device
 whose format stores no number is simply a device without a number.
 
 A pair of 32-bit words is the representation because every format that
-stores a device number stores one of three things, each a pair or smaller:
+stores a device number stores one of four things, each a pair or smaller:
 UDF stores major and minor as two 32-bit identifiers; HFS Plus and APFS
-store a 32-bit macOS `dev_t`, whose split is Apple's and fixed; Rock Ridge
+store a 32-bit macOS `dev_t`, whose split is Apple's and fixed; EROFS stores
+a 32-bit Linux `dev_t`, whose split is Linux's and fixed; Rock Ridge
 stores two 32-bit words that every known writer fills with major and minor.
 A single opaque 64-bit value would merge UDF's and Rock Ridge's two words
 into one number the user has to split again, and would still need the split
@@ -143,6 +144,7 @@ with zero logical bytes, like a FIFO.
 | UDF | File types 7 character, 6 block, 10 socket | The device specification extended attribute (type 12, subtype 1): after its 12-byte header, an implementation-use length (u32), the major (u32) and minor (u32) identifiers, then the implementation-use bytes the length covers, all within the attribute. Absent on a device, present on another kind, or misframed: `FSIMG_ECORRUPT` |
 | HFS Plus | `fileMode` types `020000` character, `060000` block, `0140000` socket | `special` on a device is the macOS `dev_t`: `dev_major` is bits 24 to 31, `dev_minor` bits 0 to 23. On a socket `special` is not interpreted. Both forks are empty, else `FSIMG_ECORRUPT`, as for a FIFO |
 | APFS | Mode types and directory-record types 2 character, 6 block, 12 socket | The device number extended field (type 14, 4 bytes), the macOS `dev_t` split as for HFS Plus. On another kind it is `FSIMG_ECORRUPT`; a device without it is reported without a number, since Apple's format reference does not require the field |
+| EROFS | Mode types `020000` character, `060000` block, `0140000` socket; directory file types 3, 4 and 6 | The layout word of a device inode in the Linux 32-bit encoding: `dev_minor` is bits 0 to 7 with bits 20 to 31 above them, `dev_major` bits 8 to 19 (provisional, the [EROFS design](design-erofs.md#kinds-and-fields)). A device, FIFO or socket with nonzero size or another layout is `FSIMG_ECORRUPT` |
 | QNX4, QNX6, ImageFS | None | The on-disk type bits can name a device, but QNX keeps devices in the process manager's namespace, no native tool records one in these filesystems, the inodes have no device-number field, and fsimg holds no observation of such a record. The types stay `FSIMG_EUNSUPPORTED`, as their designs state |
 | FAT, exFAT | None | The formats cannot express them |
 
@@ -223,6 +225,7 @@ kinds add no new way to make a reader deliver or claim bytes.
 | UDF device without the device specification attribute, or the attribute on a non-device or misframed | `FSIMG_ECORRUPT` |
 | HFS Plus device or socket with a non-empty fork | `FSIMG_ECORRUPT` |
 | APFS device number field on a non-device | `FSIMG_ECORRUPT` |
+| EROFS device, FIFO or socket with a nonzero size or a layout other than flat | `FSIMG_ECORRUPT` |
 | QNX4, QNX6, ImageFS type bits naming a device or socket | `FSIMG_EUNSUPPORTED`, the directory's preparation fails naming the entry, unchanged |
 | `fsimg_writer_add()` with a device or socket kind | `FSIMG_EINVAL`, the catalog's kind, size and source relation |
 | `fsimg_writer_add()` with `FSIMG_META_DEVICE` valid | `FSIMG_EINVAL`, the catalog's metadata validation |
@@ -254,10 +257,12 @@ Each passing case has a seeded failure that proves the check ran.
   socket from its private source tree, compared with the independent
   listing for kind and with the mapped node's host `rdev`, as libisofs
   stores it in `PN` (high and low 32 bits), for the device number.
-* The UDF, HFS Plus and APFS synthesizers, when those readers exist, add
-  the equivalent witnesses from each table row and mutations: the attribute
-  absent, on a file and misframed; a non-empty fork on a device; the
-  extended field on a file; a device without the field reporting no number.
+* The UDF, HFS Plus, APFS and EROFS synthesizers, when those readers
+  exist, add the equivalent witnesses from each table row and mutations:
+  the attribute absent, on a file and misframed; a non-empty fork on a
+  device; the extended field on a file; a device without the field
+  reporting no number; an EROFS device with a nonzero size, and device
+  numbers that exercise both halves of the Linux minor.
 * `test/qnx4.c`, `test/qnx6.c`, `test/ifs.c`: a device type in the mode bits
   still fails preparation with `FSIMG_EUNSUPPORTED`.
 * `test/protocol.c`: entry frames of each new kind validate with zero

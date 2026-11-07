@@ -165,7 +165,7 @@ A driver admits a child once its name has passed the driver's native checks,
 the ones whose failure is corruption, such as an embedded NUL or an empty
 name. Preparation then assigns the child one of two classes. A format whose
 reader operations, which its descriptor names, declare the portable name
-profile, `FSIMG_NAME_PROFILE_PORTABLE` (QNX4, QNX6, ImageFS, UDF and ISO 9660), has
+profile, `FSIMG_NAME_PROFILE_PORTABLE` (QNX4, QNX6, ImageFS, UDF, ISO 9660 and EROFS), has
 every child's component checked by the one common profile function,
 `fsimg_name_in_portable_profile()`:
 strict UTF-8, no NUL, slash, control byte or `0x7f`, neither `.` nor `..`.

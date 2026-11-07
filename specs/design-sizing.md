@@ -47,6 +47,7 @@ to a whole sector, it is the same capacity under either policy.
 | ImageFS | Nothing: the image is exactly its header, mountpoint, records, data and trailer | The 4-byte record and data alignment |
 | HFS Plus and HFSX | Block size over the writer's sizes, 512 to 65536 bytes | The native B-tree node sizes, one extent per fork, the reserved head and tail blocks |
 | APFS | Nothing: the block is 4096 bytes and the block count is already the smallest that fits | The native formatter's fixed regions for the block count, its minimum container and its sizing granularity |
+| EROFS | Block size over the writer's accepted sizes, 4096 first | The writer's one layout and its profile settings; the image is exactly its plan |
 | UDF | Nothing: the block is the sector, and the block count is already the smallest that fits | The 2048-byte default block, the fixed volume layout around the partition, the space bitmap's size |
 | ISO 9660 | Nothing: the image is exactly its descriptors, path tables, directories, continuation region and data | The 2048-byte block and the writer's one layout |
 

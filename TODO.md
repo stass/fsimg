@@ -65,6 +65,19 @@
   plan's evidence decides whether macOS always writes the device number
   extended field, which would tighten the APFS rule for a device without it.
 
+* [Medium] **EROFS reader, verifier and writer** (`lib/formats/erofs/`,
+  `lib/core/`, `lib/codec/`, `lib/layers/`, `lib/write/`, `cmd/fsimg/`,
+  `tools/erofs/`): implement the [format design](specs/design-erofs.md)
+  and [driver design](specs/design-erofs-driver.md) in the stages of the
+  [EROFS plan](docs/erofs-plan.md). Evidence from a pinned `erofs-utils`
+  and Linux kernel mounts comes first and settles the provisional rules
+  (checksum range, compact index packing, codec framings); then CRC-32C and
+  a project-owned LZ4 codec, the reader and verifier with MicroLZMA and
+  Zstandard through the optional libraries, an uncompressed writer and its
+  LZ4 profile with a measured read and encoded copy in common emission, and
+  last the 48-bit layout and metadata box, read and then written. External
+  data devices stay refused.
+
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
   the [layer design](specs/design-layers.md) in the four stages of the

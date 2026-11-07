@@ -659,6 +659,16 @@ and LZVN decoders for compressed files, and a writer registered only after
 macOS checks, mounts and modifies its output, followed by snapshot and
 sealed-volume reading.
 
+EROFS follows its own [plan](erofs-plan.md), the
+[format design](../specs/design-erofs.md) and the
+[driver design](../specs/design-erofs-driver.md): evidence from a pinned
+`erofs-utils` and Linux kernel mounts, CRC-32C and a project-owned LZ4
+codec, a reader and verifier for flat, chunked and compressed volumes with
+MicroLZMA and Zstandard through the optional libraries, an uncompressed
+writer and then its LZ4 profile registered after kernel and `fsck.erofs`
+qualification, and last the 48-bit layout and metadata box, read and then
+written.
+
 UDF follows its own [plan](udf-plan.md): confirmation of the designs
 against ECMA-167 and TR/112 and an oracle corpus, the format-neutral content
 and emission additions, a reader and verifier for physical partitions and

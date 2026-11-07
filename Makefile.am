@@ -425,7 +425,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	docs/todo-qnx4.md docs/architecture-analysis.md docs/ifs-plan.md \
 	docs/ifs-research.md docs/todo-ifs.md docs/todo-salvage-open-checks.md \
 	docs/hfsplus-plan.md docs/hfsplus-research.md docs/todo-hfsplus.md \
-	docs/apfs-plan.md \
+	docs/apfs-plan.md docs/erofs-plan.md \
 	docs/udf-plan.md docs/udf-research.md docs/todo-udf.md \
 	docs/iso9660-plan.md docs/todo-iso9660.md \
 	specs/README.md specs/principles.md specs/architecture.md \
@@ -446,6 +446,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	specs/design-holes.md specs/design-ifs.md specs/design-ifs-driver.md \
 	specs/design-hfsplus.md specs/design-hfsplus-driver.md \
 	specs/design-apfs.md specs/design-apfs-driver.md \
+	specs/design-erofs.md specs/design-erofs-driver.md \
 	specs/design-codecs.md specs/design-compression-libs.md \
 	specs/design-udf.md specs/design-udf-driver.md \
 	specs/design-iso9660.md specs/design-iso9660-driver.md \

@@ -59,7 +59,7 @@ An image is a stack with three slots in fixed order, each at most once:
 
 | Slot | Kind | Names |
 | --- | --- | --- |
-| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`, `hfsplus`, `hfsx`, `apfs`, `udf`, `iso9660`; reserved: `hfs` (classic HFS) |
+| 1 | Filesystem | `fat12`, `fat16`, `fat32`, `exfat`, `qnx6`, `qnx4`, `ifs`, `hfsplus`, `hfsx`, `apfs`, `erofs`, `udf`, `iso9660`; reserved: `hfs` (classic HFS) |
 | 2 | Scheme | `gpt`, `mbr`, `apm` (read only) |
 | 3 | Container | `dmg`, `vhd`, `simg`, `ifsboot`, `hbcifs` |
 
@@ -1022,6 +1022,7 @@ One table serves `type=` on write, the Type selector on read, compose and
 | `fat12`, `fat16`, `fat32` | as `basic` | 0x01, 0x06, 0x0C | none | as `basic` | FAT by MBR convention; FAT16 may also carry 0x04 (below 32 MiB) or 0x0E (LBA) and FAT32 0x0B, accepted on read |
 | `exfat` | as `basic` | 0x07 | none | as `basic` | exFAT |
 | `linux` | `0FC63DAF-8483-4772-8E79-3D69D8477DE4` | 0x83 | none | `Linux filesystem` | Linux filesystem data |
+| `erofs` | as `linux` | 0x83 | none | as `linux` | EROFS, by Linux convention |
 | `apfs` | `7C3457EF-0000-11AA-AA11-00306543ECAC` | none | none | `Apple APFS` | APFS container |
 | `hfs` | `48465300-0000-11AA-AA11-00306543ECAC` | 0xAF | `Apple_HFS` | `Apple HFS/HFS+` | Apple HFS+ |
 | `hfsplus`, `hfsx` | as `hfs` | 0xAF | `Apple_HFS`, `Apple_HFSX` respectively | as `hfs` | HFS Plus and HFSX by convention |
@@ -1214,7 +1215,8 @@ role, as a 128-bit GUID value: its 16 bytes in RFC 4122 text order are the
 epoch as a little-endian 64-bit value, one role byte (1 disk, 2 partition,
 3 VHD, 4 DMG segment, 5 APFS volume, which the
 [APFS writer](design-apfs.md#settings-and-identities) borrows for its
-volume UUID), one byte holding the partition's 1-based slot
+volume UUID, 6 EROFS volume, which the
+[EROFS writer](design-erofs.md#settings-and-sizing) borrows likewise), one byte holding the partition's 1-based slot
 (zero for every other role) and six zero bytes; then
 the version nibble replaces the high nibble of byte 6 with 4 and the
 variant bits replace the top two bits of byte 8 with `10`, so tools accept

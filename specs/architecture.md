@@ -20,7 +20,7 @@ or external formatter. Device use requires permission to read that endpoint.
 
 The format contract covers FAT12, FAT16, FAT32, exFAT, the qualified QNX6
 Power-Safe profiles, QNX4, the QNX image filesystem (ImageFS), HFS Plus,
-HFSX, APFS, UDF and ISO 9660 with independent read and write support. The CLI is
+HFSX, APFS, EROFS, UDF and ISO 9660 with independent read and write support. The CLI is
 tar-like: the modes `c` (create), `x` (extract, or one member to stdout with
 `-O`), `t` (list), `W` (verify, also combined as `cW`) and `i` (info), plus
 `--formats` for capabilities, with `-f` naming the image. Each format
@@ -651,6 +651,23 @@ testing gates it, as native testing does for the QNX writers. A DMG or GPT
 partition around an APFS container is peeled by the layers, so the driver
 reads a bare container.
 
+The [EROFS design](design-erofs.md) defines the Enhanced Read-Only File
+System: a superblock at byte 1024 with closed feature words and a CRC-32C,
+inodes addressed by 32-byte slot numbers, flat, inline, chunked and
+compressed data layouts, directories of byte-ordered raw names, extended
+attributes, and, as experimental profiles, the 48-bit layout and the
+metadata box; external data devices are refused. With no allocation map,
+verification claims metadata exclusively and lets data overlap, as the
+format's deduplication permits. The
+[EROFS driver design](design-erofs-driver.md) turns every NID into bytes
+through one metadata reader and every logical offset into storage through
+one mapper, prevents directory cycles by requiring each directory's `..` to
+name the directory walked from, and delivers holes and decoded clusters
+through common delivery from one-cluster decode windows, one per reader
+kind. The writer
+emits one deterministic layout, uncompressed or LZ4-compressed, and Linux
+kernel mounts with `fsck.erofs` extraction gate it and each later profile.
+
 The [UDF design](design-udf.md) defines the Universal Disk Format, revisions
 1.02 to 2.60: recognition at 32 KiB, anchors, redundant volume descriptor
 sequences, partition maps translating three address spaces, file entries
@@ -1046,7 +1063,12 @@ platform; a library that needs more is not integrated. The
 instance: zstd over libzstd and xz over liblzma, both permissively
 licensed system libraries on FreeBSD and standard packages elsewhere, but
 absent from the macOS base system, which is what makes them optional
-rather than required like zlib.
+rather than required like zlib. A filesystem driver may use an optional
+library only to decode one bounded block into one bounded output, through
+a private entry point in that library's one source file reached through its
+registry row, as EROFS does for MicroLZMA and Zstandard clusters; without
+the library the content that needs it is `FSIMG_EUNSUPPORTED`, naming the
+library, and the rest of the volume stays readable.
 
 Relic, POSIX AWK and the fsimg generation scripts are development tools under the
 [generation contract](design-relic-generation.md). Regeneration records the
@@ -1087,6 +1109,12 @@ project-owned wrapper charged to the context. The
 DMG bzip2 chunks use a project-owned decoder under the same design, so reading
 them links nothing beyond the system zlib.
 
+EROFS's LZ4 clusters use a project-owned LZ4 block decoder and a
+destination-bounded encoder under the same codec design and clean-room
+procedure as LZO1X. LZ4 is a small, publicly described block format, the
+encoder must be deterministic for reproducible images, and a project-owned
+pair carries no notice or import obligations.
+
 The build uses Autoconf, Automake, and Libtool as development tools. Release
 archives contain generated build machinery; users need a C compiler, make,
 and standard host utilities. Public headers are C11 and C++ includable, do not
@@ -1103,7 +1131,7 @@ lib/read/            reader lifecycle and verification
 lib/extract/         safe host extraction
 lib/output/          shared staging, finalization, publication
 lib/layers/          partition schemes, containers, compression, spooling
-lib/codec/           stream codecs: LZO1X, NRV2B; imported LZFSE and LZVN
+lib/codec/           stream codecs: LZO1X, NRV2B, LZ4; imported LZFSE and LZVN
 lib/formats/fat/     FAT codecs, reader, writer
 lib/formats/exfat/   exFAT codecs, reader, writer
 lib/formats/qnx6/    QNX6 codecs, reader, writer, profile verification
@@ -1111,6 +1139,7 @@ lib/formats/qnx4/    QNX4 codecs, reader, writer, verification
 lib/formats/ifs/     ImageFS codecs, reader, writer, verification
 lib/formats/hfsplus/ HFS Plus codecs, Unicode tables, reader, writer, verification
 lib/formats/apfs/    APFS codecs, checkpoints, B-trees, reader, writer, verification
+lib/formats/erofs/   EROFS codecs, mapping, decode windows, reader, writer, verification
 lib/formats/udf/     UDF codecs, translators, reader, writer, verification
 lib/formats/iso9660/ ISO 9660 codecs, views, reader, writer, verification
 compat/             host portability
