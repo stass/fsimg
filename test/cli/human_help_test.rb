@@ -93,7 +93,7 @@ class CliTest < Minitest::Test
       iso9660  yes   yes    yes
       hfsplus  yes   yes    yes
       hfsx     yes   yes    yes
-      erofs    yes   no     no
+      erofs    yes   no     yes
 
       Layer    Kind         Read  Write  Verify  Codecs           Settings
       gpt      scheme       yes   yes    yes     -                sector,disk,type,name,disk-guid,guid

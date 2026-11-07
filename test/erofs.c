@@ -3763,6 +3763,19 @@ test_xxh32_gives_one_value_for_every_split_of_a_message(void)
 	}
 }
 
+/* The filter bit of the name infix then suffix, through the name hash. */
+static unsigned
+filter_bit_of(uint8_t base_index, const unsigned char *infix,
+    size_t infix_length, const unsigned char *suffix, size_t suffix_length)
+{
+	erofs_name_hash_t hash;
+
+	erofs_name_hash_init(&hash, base_index);
+	erofs_name_hash_absorb(&hash, infix, infix_length);
+	erofs_name_hash_absorb(&hash, suffix, suffix_length);
+	return (erofs_name_hash_bit(&hash));
+}
+
 static void
 test_filter_bit_hashes_infix_and_suffix_with_the_prefix_seed(void)
 {
@@ -3770,17 +3783,17 @@ test_filter_bit_hashes_infix_and_suffix_with_the_prefix_seed(void)
 
 	message_fill(msg, sizeof(msg));
 	/* Seed 0x25BBE08F plus the base index; the bit is the hash mod 32. */
-	EXPECT(erofs_xattr_filter_bit(1, NULL, 0, msg, 33) == 26,
+	EXPECT(filter_bit_of(1, NULL, 0, msg, 33) == 26,
 	    "base 1, suffix only: 0xdb804b7a");
-	EXPECT(erofs_xattr_filter_bit(1, msg, 10, msg + 10, 23) == 26,
+	EXPECT(filter_bit_of(1, msg, 10, msg + 10, 23) == 26,
 	    "base 1, infix and suffix of one message");
-	EXPECT(erofs_xattr_filter_bit(4, msg, 4, NULL, 0) == 11,
+	EXPECT(filter_bit_of(4, msg, 4, NULL, 0) == 11,
 	    "base 4, infix only: 0x83c6616b");
-	EXPECT(erofs_xattr_filter_bit(6, NULL, 0, msg, 33) == 31,
+	EXPECT(filter_bit_of(6, NULL, 0, msg, 33) == 31,
 	    "base 6, suffix only: 0x116a82df");
-	EXPECT(erofs_xattr_filter_bit(6, msg, 2, msg + 2, 2) == 13,
+	EXPECT(filter_bit_of(6, msg, 2, msg + 2, 2) == 13,
 	    "base 6, split 4-byte message: 0xe969cbed");
-	EXPECT(erofs_xattr_filter_bit(0, msg, 4, NULL, 0) == 21,
+	EXPECT(filter_bit_of(0, msg, 4, NULL, 0) == 21,
 	    "base 0: 0x2ff521d5");
 }
 
@@ -3825,7 +3838,7 @@ attribute_filter_bit(const unsigned char *image, const erofs_super_t *sb,
 	unsigned k;
 
 	if (x->name_index < EROFS_XATTR_LONG_PREFIX)
-		return (erofs_xattr_filter_bit(x->name_index, NULL, 0, suffix,
+		return (filter_bit_of(x->name_index, NULL, 0, suffix,
 		    x->suffix_length));
 
 	record = image + 4 * (size_t)sb->xattr_prefix_start;
@@ -3835,7 +3848,7 @@ attribute_filter_bit(const unsigned char *image, const erofs_super_t *sb,
 		record += prefix.record_bytes;
 	}
 	CHECK(erofs_prefix_decode(record, 64, &prefix, &what) == FSIMG_OK);
-	return (erofs_xattr_filter_bit(prefix.base_index, record + 3,
+	return (filter_bit_of(prefix.base_index, record + 3,
 	    prefix.infix_length, suffix, x->suffix_length));
 }
 
@@ -7021,13 +7034,19 @@ test_open_accepts_extension_slots_without_a_metadata_box(void)
 
 /*
  * A block count past the input opens, and the walk lists everything that
- * lies inside the input.
+ * lies inside the input. Verification of the same image fails as truncated
+ * before it walks anything.
  */
 static void
 test_a_block_count_past_the_input_lists_what_lies_in_the_input(void)
 {
+	fsimg_verify_report_t report;
+	fsimg_reader_t *reader = NULL;
+	fsimg_error_t error;
+	fsimg_status_t status;
 	gen_tree_t tree;
 	listing_t *list;
+	volume_t v;
 
 	tree_new(&tree, 9, 8);
 	root_names(&tree, "f", add_file(&tree, LAYOUT_FLAT_INLINE, 40, 3),
@@ -7037,6 +7056,21 @@ test_a_block_count_past_the_input_lists_what_lies_in_the_input(void)
 	EXPECT(list->count == 1 && find_node(list, "/f") != NULL &&
 	    find_node(list, "/f")->size == 40, "the file in the input is listed");
 	listing_free(list);
+
+	bzero(&error, sizeof(error));
+	bzero(&report, sizeof(report));
+	volume_start(&v, tree.image.bytes, tree.image.length);
+	status = fsimg_reader_open(v.ctx, v.io, NULL, &reader, &error);
+	EXPECT(status == FSIMG_OK, "a fresh reader opens (%s)", error.message);
+	if (status == FSIMG_OK)
+		status = fsimg_verify(reader, 0, &report, &error);
+	EXPECT(status == FSIMG_ECORRUPT && !report.complete &&
+	    strstr(error.message, "truncated") != NULL,
+	    "verification fails as truncated (status %d, \"%s\")", (int)status,
+	    error.message);
+	fsimg_reader_free(reader);
+	fsimg_io_free(v.io);
+	fsimg_ctx_free(v.ctx);
 	gen_tree_free(&tree);
 }
 

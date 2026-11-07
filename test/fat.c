@@ -803,7 +803,7 @@ test_variants(void)
 
 	/*
 	 * The registry lists every format and its advertised operations:
-	 * EROFS, last, is read only.
+	 * EROFS, last, reads and verifies but does not write.
 	 */
 	cursor = 0;
 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -814,7 +814,7 @@ test_variants(void)
 	}
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 	CHECK(strcmp(format.name, "erofs") == 0);
-	CHECK(format.capabilities == FSIMG_CAP_READ);
+	CHECK(format.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	for (unsigned i = 0; i < 3; i++) {

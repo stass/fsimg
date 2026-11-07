@@ -46,7 +46,7 @@ class CliTest < Minitest::Test
       assert_equal(2, hfs.fetch("write_settings"), name)
     end
     erofs = formats.delete("erofs")
-    assert_equal(1, erofs.fetch("capabilities"), "erofs is read only")
+    assert_equal(5, erofs.fetch("capabilities"), "erofs reads and verifies, no writer")
     assert_equal(127, erofs.fetch("entry_kinds"))
     assert_equal(0x72, erofs.fetch("metadata_fields"))
     assert_equal(1024, erofs.fetch("max_link_target_bytes"))

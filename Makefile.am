@@ -184,7 +184,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify \
 	test-salvage-terminal test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
-	test-erofs \
+	test-erofs test-erofs-verify \
 	test-lzfse test-hfsplus-codec test-hfsplus test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
@@ -296,6 +296,9 @@ test_exfat_LDADD = libfsimg.la
 test_erofs_SOURCES = test/erofs.c test/test.h test/erofs-gen.c \
 	test/erofs-gen.h
 test_erofs_LDADD = libfsimg.la
+test_erofs_verify_SOURCES = test/erofs-verify.c test/test.h \
+	test/erofs-gen.c test/erofs-gen.h
+test_erofs_verify_LDADD = libfsimg.la
 test_qnx6_SOURCES = test/qnx6.c test/test.h test/scale.h
 test_qnx6_LDADD = libfsimg.la
 test_qnx6_write_SOURCES = test/qnx6-write.c test/test.h \

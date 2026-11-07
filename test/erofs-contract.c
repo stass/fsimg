@@ -63,7 +63,8 @@ place_directory(gen_tree_t *tree, const erofs_source_t *sources, size_t count,
 {
 	gen_dirent_t children[MAX_CHILDREN];
 	ptrdiff_t up = dir < 0 ? -1 : parent_of(sources, (size_t)dir);
-	size_t n = 0;
+	uint64_t nid = dir < 0 ? 0 : nids[dir];
+	size_t n = 0, subdirectories = 0;
 
 	for (size_t i = 0; i < count; i++) {
 		if (parent_of(sources, i) != dir)
@@ -72,10 +73,14 @@ place_directory(gen_tree_t *tree, const erofs_source_t *sources, size_t count,
 		children[n++] = (gen_dirent_t){
 		    strrchr(sources[i].path, '/') + 1, nids[i],
 		    sources[i].directory ? 2 : 1 };
+		if (sources[i].directory)
+			subdirectories++;
 	}
 	/* The root is NID 0 and is its own parent. */
-	gen_tree_dir(tree, dir < 0 ? 0 : nids[dir], up < 0 ? 0 : nids[up],
-	    children, n);
+	gen_tree_dir(tree, nid, up < 0 ? 0 : nids[up], children, n);
+	/* A directory's link count is 2 plus its subdirectories. */
+	gen_put(&tree->image, gen_inode_offset(&tree->image, nid) + 0x06,
+	    2 + subdirectories, 2);
 }
 
 unsigned char *

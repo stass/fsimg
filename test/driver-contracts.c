@@ -380,9 +380,10 @@ static const contract_fs_profile_t fs_profiles[] = {
 	    .metadata_cases = hfsplus_metadata,
 	    .metadata_case_count = COUNT(hfsplus_metadata),
 	    .materialize = materialize_hfsx, .max_fixture_bytes = 2 * MIB },
-	/* Read only: the volumes come from the independent generator. */
+	/* Read and verify, no writer: the volumes come from the independent
+	 * generator. */
 	{ .id = "erofs", .format = "erofs", .coverage_profile = true,
-	    .expected_capabilities = FSIMG_CAP_READ,
+	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
 	    .materialize = materialize_erofs, .max_fixture_bytes = 2 * MIB },
 	{ .id = "iso9660", .format = "iso9660", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,

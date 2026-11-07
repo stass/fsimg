@@ -6,7 +6,7 @@
 # manifests. Usage: erofs-integration.rb FSIMG SGDISK CORPUS
 #
 # For each fixture the reader supports it runs the built fsimg (`i`,
-# `t --json`, `x -O`, `x`) and checks every listed entry against
+# `t --json`, `x -O`, `x`, `W` and `W -d`) and checks every listed entry against
 # manifest.txt: kind, size, mode, owner, device numbers, time, SHA-256 of file
 # content, link target and the extended-attribute mark. Times are derived
 # from the fixture's command.txt, never from the reader: under `-T N` without
@@ -14,9 +14,11 @@
 # inode keeps the source time and a compact inode holds the epoch N. On a
 # volume without the MTIME bit an extended inode holds the change time, which
 # is not compared.
-# A fixture without a manifest must open, list and extract, and its
+# Both verifications must succeed on every fixture that reads. A fixture
+# without a manifest must open, list and extract, and its
 # expected.txt digests must match where it has one; the few that end in a
-# refusal are pinned in EXPECTED_REFUSALS. A fixture whose `i` fails with the
+# refusal are pinned in EXPECTED_REFUSALS, and `W` must refuse each of them
+# with the same reason. A fixture whose `i` fails with the
 # "unsupported capability" status is counted and named as not yet supported,
 # never a pass, and only for a reason listed in KNOWN_REFUSALS: any other
 # refusal, or fewer than PASS_FLOOR passes, fails the run. A few
@@ -61,6 +63,8 @@ COMPACT_PRECISION_NS = 1_000_000_000
 SIZED = %w[file symlink].freeze
 DEVICES = %w[chardev blockdev].freeze
 MAX_NOTES = 4
+# The verifications run on every readable fixture: structure, then file data.
+VERIFY_MODES = [[], ["-d"]].freeze
 # Passes today; a fixture slipping to "unsupported" must not keep the run green.
 PASS_FLOOR = 53
 # Fixtures covering geometry, inline data, and an attribute-bearing tree.
@@ -153,6 +157,23 @@ def probe(image)
   raise Unsupported, error["message"] if error && error["status"] == "unsupported capability"
 
   raise "i failed: #{failure_line(out, err)}"
+end
+
+# One verification of the image: the failure text, or nil when it succeeds.
+def verify_once(image, flags)
+  out, err, status = fsimg("W", *flags, "-f", image)
+  status.success? ? nil : "#{['W', *flags].join(' ')}: #{failure_line(out, err)}"
+end
+
+# The text of the first verification mode that fails, or nil when every mode passes.
+def verify_failure(image) = VERIFY_MODES.lazy.filter_map { verify_once(image, _1) }.first
+
+# A pinned refusal must be a verification refusal too, for the same reason.
+def verify_refusal_difference(image, want)
+  text = verify_failure(image)
+  return "verification accepted an image pinned as refused" unless text
+
+  text.match?(want) ? nil : "verification refused for another reason: #{text}"
 end
 
 def listing(image) =
@@ -283,6 +304,7 @@ def compare(name, dir, work)
     got ? compare_entry(row, got, image:, dir: out, expect:) : Comparison.of("#{row.path}: not listed")
   end.sum(NONE)
   found += Comparison.of(*seen.keys.map { "#{_1}: listed but not in the manifest" })
+  found += Comparison.of(*Array(verify_failure(image)))
   verdict = found.diffs.empty? ? :pass : :fail
   Result.new(name:, verdict:, notes: found.diffs.first(MAX_NOTES), skipped: found.skipped)
 end
@@ -313,14 +335,16 @@ end
 # refusal pinned for it.
 def compare_unlisted(name, dir, work)
   out = File.join(work, name)
-  refusal = refusal_of(File.join(dir, "image.erofs"), out)
+  image = File.join(dir, "image.erofs")
+  refusal = refusal_of(image, out)
   pinned = EXPECTED_REFUSALS[name]
   case [refusal, pinned]
   in [nil, _]
-    diffs = digest_differences(dir, out)
+    diffs = digest_differences(dir, out) + Array(verify_failure(image))
     Result.new(name:, verdict: diffs.empty? ? :unchecked : :fail, notes: diffs.first(MAX_NOTES), skipped: [])
   in [String => text, Regexp => want] if text.match?(want)
-    Result.new(name:, verdict: :unsupported, notes: [text], skipped: [])
+    diffs = Array(verify_refusal_difference(image, want))
+    Result.new(name:, verdict: diffs.empty? ? :unsupported : :fail, notes: [text, *diffs], skipped: [])
   in [String => text, _]
     Result.new(name:, verdict: :fail, notes: ["unexpected refusal: #{text}"], skipped: [])
   end

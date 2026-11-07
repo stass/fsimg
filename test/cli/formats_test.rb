@@ -109,7 +109,7 @@ class CliTest < Minitest::Test
     assert_nil(layers.fetch("vhd").fetch("codec_version"), "layers vhd codec version nil")
     assert_equal(".vhd", layers.fetch("vhd").fetch("suffix"), "layers vhd suffix")
     assert_nil(layers.fetch("gpt").fetch("suffix"), "layers gpt suffix nil")
-    expected_capabilities = formats.keys.to_h { [_1, _1 == "erofs" ? 1 : 7] }
+    expected_capabilities = formats.keys.to_h { [_1, _1 == "erofs" ? 5 : 7] }
     assert_equal(expected_capabilities, formats.transform_values { _1.fetch("capabilities") }, "filesystem capabilities match their supported operations")
     assert_equal(((32 * 1024) * 1024), formats.fetch("exfat").fetch("write_cluster_bytes")[-1])
     assert(formats.fetch("exfat").fetch("max_file_bytes").is_a?(String), "formats exfat max file bytes is a String")
