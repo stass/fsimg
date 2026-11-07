@@ -39,7 +39,7 @@
 
 /* What the output bound means. */
 typedef enum lz4_mode {
-	LZ4_FULL,	/* passing it is corrupt; the block ends with the input */
+	LZ4_FULL,	/* passing it is corrupt; the block ends at input end */
 	LZ4_PARTIAL	/* reaching it ends the decode, wherever it falls */
 } lz4_mode_t;
 

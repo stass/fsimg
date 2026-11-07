@@ -135,9 +135,9 @@ fsimg_status_t fsimg_nrv2b_decode(const uint8_t *in, size_t in_len,
  * out[0..step->produced), which may be shorter than the capacity; the caller
  * judges its length. An offset of zero, or an offset reaching before the
  * output start, a literal run or match longer than the room left, and an
- * input ending anywhere else are FSIMG_ECORRUPT. The block's end conditions that bind
- * only encoders (at least five final literals, the last match 12 bytes before
- * the end) are not checked. On every return out[0..step->produced) is the
+ * input ending anywhere else are FSIMG_ECORRUPT. The block's end conditions
+ * that bind only encoders (at least five final literals, the last match 12
+ * bytes before the end) are not checked. On every return out[0..step->produced) is the
  * decoded prefix and nothing past it is written. step must not be NULL.
  */
 fsimg_status_t fsimg_lz4_decode(const uint8_t *in, size_t in_len,
