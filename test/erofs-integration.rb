@@ -89,7 +89,29 @@ EXPECTED_REFUSALS = {
   "e9-head2-head1-wrong" => /LZ4_0PADDING/, "e9-head2-lz4-ctrl" => /LZ4_0PADDING/,
   "e9-head2-lzma" => /LZ4_0PADDING/, "e9-head2-wrongalg" => /LZ4_0PADDING/,
   "e8-lz4-flag-cleared" => /compressed data layout/, "e8-lz4-flag-cleared-distance0" => /compressed data layout/,
-  "e8-lz4-unpadded" => /compressed data layout/
+  "e8-lz4-unpadded" => /compressed data layout/,
+  # Hand-built E15 images (~/.cache/fsimg-erofs/evidence/E15.md): large
+  # logical clusters, compact advice 0x01 clear and interlaced inline tails,
+  # all refused by policy once compression is read.
+  "e15-a-compact-b2048-l4096-adv1" => /LZ4_0PADDING/,
+  "e15-a-compact-b2048-l4096-adv1-lcount" => /LZ4_0PADDING/,
+  "e15-a-compact-b4096-l16384-adv0" => /LZ4_0PADDING/,
+  "e15-a-compact-b4096-l8192-adv0" => /LZ4_0PADDING/,
+  "e15-a-compact-b4096-l8192-adv1flip" => /LZ4_0PADDING/,
+  "e15-a-full-b4096-l16384" => /LZ4_0PADDING/,
+  "e15-a-full-b4096-l8192" => /LZ4_0PADDING/,
+  "e15-b-compact-b2048-adv0" => /LZ4_0PADDING/,
+  "e15-b-compact-b4096-adv0" => /LZ4_0PADDING/,
+  "e15-b-compact-b4096-adv1" => /LZ4_0PADDING/,
+  "e15-c-il-nowrap" => /LZ4_0PADDING/,
+  "e15-c-il-plain-wrap" => /LZ4_0PADDING/,
+  "e15-c-il-rot-wrap" => /LZ4_0PADDING/,
+  "e15-c-il-short" => /LZ4_0PADDING/,
+  "e15-c-l2b-tail-at-B" => /LZ4_0PADDING/,
+  "e15-c-l2b-tail-at-L" => /LZ4_0PADDING/,
+  "e15-c-shift-nowrap" => /LZ4_0PADDING/,
+  "e15-c-shift-short" => /LZ4_0PADDING/,
+  "e15-c-shift-wrap" => /LZ4_0PADDING/
 }.freeze
 
 # Fixtures without a manifest that the reader rejects as corrupt, and the
