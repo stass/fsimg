@@ -207,7 +207,7 @@ fixture behind each answer; the designs carry the answers themselves.
 | Metadata-box layout, root placement, box compression, shared attributes in the box | E12 | Stages 13, 15 | Open, runs before stage 13 |
 | Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | E13 | Stage 8 | Open, runs before stage 8 |
 | The fields a volume with external devices sets, so refusal names it | E14 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
-| The record count and group layout of a compressed inode with `L > B`, and of a compact inode with advice `0x01` clear, on hand-built images the kernel mounts | E15 | Stage 6 | Open; both refused as unsupported until it runs, and still refused if no such image mounts |
+| The record count and group layout of a compressed inode with `L > B`, and of a compact inode with advice `0x01` clear, on hand-built images the kernel mounts | E15 | Stage 6 | Open, runs before stage 6; both refused as unsupported until it runs, and still refused if no such image mounts |
 
 ## Work packages
 
@@ -256,6 +256,7 @@ fixtures, their command records and the oracle output:
 | E12 Metadata box | Box volumes plain and LZ4-compressed, with directories, files and shared attributes inside; where the root lives |
 | E13 Scale | Files beyond 4 GiB through sparse sources; a directory of 100000 entries; a tree placing the root NID and start blocks at their limits |
 | E14 External devices | `--blobdev` and `--tar=i` volumes, structure only |
+| E15 Large logical clusters | Hand-built images through the independent generator: a compressed inode with `L = 2B` and a compact inode with advice `0x01` clear, each mounted by the kernel and checked by `fsck.erofs`, extents compared with `dump.erofs -e` |
 
 * **Deliverable:** `docs/erofs-research.md`: sources and licenses, tool
   identities, per-experiment observations, and for each evidence question an

@@ -538,9 +538,10 @@ end rounded up to the entry width:
 A block number of all ones at the block number's width, the 32-bit field,
 or the 48 bits of the high part and the field under chunk format bit 6, is a
 hole: that chunk reads as zeros, delivered as a
-[zero extent](design-content.md#zero-extents). An 8-byte hole entry is
-therefore a zero high part and device identifier before `0xFFFFFFFF` (E7,
-`e7-chunk8k-forceidx`). Any other chunk occupies
+[zero extent](design-content.md#zero-extents). Without chunk format bit 6 an
+8-byte hole entry is therefore a zero high part and device identifier
+before `0xFFFFFFFF` (E7, `e7-chunk8k-forceidx`); under bit 6 it is a high
+part of `0xFFFF`, a zero device identifier and `0xFFFFFFFF`. Any other chunk occupies
 `min(chunk, size - offset)` bytes from `block * B`, inside the domain (E7,
 `e7-chunk*`, hole and shared entries included). A nonzero high part without
 bit 6, bit 6 without `48BIT`, or a nonzero device identifier, is
@@ -867,9 +868,8 @@ group and 14 bits in a 32-byte group; it holds, from its low end, 12 bits of
 value (the kernel's `max(lclusterbits, 12)`, which `L = B` fixes at 12) and
 then 2 bits of type. On a head the value is `clusterofs`; on a non-head it
 is the backward distance, except in a group's last slot, which holds the
-forward distance instead, capped by the producer at `0x7FF` so that it never
-reads as a count marker; a count marker in the last slot keeps its meaning,
-since the marker bit is tested first. The last slot's backward distance is
+forward distance instead; a count marker in the last slot keeps its
+meaning, since the marker bit is tested first. The last slot's backward distance is
 derived from the slot before it: 1 when that slot is a head or plain record,
 2 when it is a count marker, and otherwise that slot's backward distance
 plus one. Groups are laid out from the header's end: first 8-byte groups
@@ -1294,8 +1294,8 @@ the flat layouts. A compressed file uses:
   The 64 KiB cap is the writer's decision: it keeps every decoded extent
   far inside the readers' 12 MiB limit and bounds the encoder's input
   window, and it lies far below the 1,041,954 decoded bytes the pinned
-  producer puts through one block (E8, `e8-lz4-zeros40m`), so every
-  reader of the producer's output accepts the writer's clusters;
+  producer puts through one block (E8, `e8-lz4-zeros40m`), so a reader
+  proven against the producer's one-block clusters accepts the writer's;
 * blocks that meet the LZ4 [end-of-block
   conditions](design-codecs.md#end-of-block): the last sequence carries at
   least five literals, the last match starts at least 12 bytes before the
