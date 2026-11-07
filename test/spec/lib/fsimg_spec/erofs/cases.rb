@@ -10,8 +10,8 @@ module FsimgSpec
 
     # Materialization and classification use the same Case/Registry funnel
     # as every format; only construction and decoding are EROFS's. The
-    # reader has no writer to create with and no verifier yet, so a case
-    # runs the stages the reader answers.
+    # reader has no writer to create with, and the model classifies the
+    # reading stages only, so a case runs those.
     class Cases
       STAGES = %w[info ls extract].freeze
       BUILDER_SOURCES = %w[layout.rb builder.rb].map { File.join(__dir__, _1) }.freeze

@@ -4,7 +4,10 @@ EROFS volumes, the Linux read-only filesystem, open, list and extract when
 they use neither compression nor chunk-based files, with 512- to 4096-byte
 blocks. `-F erofs` names the format, inside `gpt` or `mbr` as the Linux
 filesystem type. Extended attributes are checked and reported as not
-extracted. A volume with compression, chunk-based files, 48-bit addressing,
+extracted. `W` verifies such a volume in full: link counts, a single name
+for every directory, the ownership of every byte range a structure uses,
+the shared attribute pool, the long-prefix table and the attribute name
+filters. A volume with compression, chunk-based files, 48-bit addressing,
 a metadata box or extra devices is refused as unsupported.
 
 Old Mac disk images and optical discs open through a read-only Apple Partition

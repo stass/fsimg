@@ -100,8 +100,8 @@ static void		texts_report(const erofs_super_t *,
 			    fsimg_volume_info_t *);
 
 /*
- * The reader: open and close here, the directory callbacks in directory.c
- * and resolve in content.c. It has no verification callback.
+ * The reader: open and close here, the directory callbacks in directory.c,
+ * resolve in content.c and full verification in verify.c.
  */
 const fsimg_reader_ops_t fsimg_erofs_reader_ops = {
 	.open = erofs_open,
@@ -112,7 +112,8 @@ const fsimg_reader_ops_t fsimg_erofs_reader_ops = {
 	.key = erofs_key,
 	.ambiguous = "duplicate EROFS directory name",
 	.name_profile = FSIMG_NAME_PROFILE_PORTABLE,
-	.resolve = erofs_resolve
+	.resolve = erofs_resolve,
+	.verify = erofs_verify
 };
 
 fsimg_erofs_reader_t *

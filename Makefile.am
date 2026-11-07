@@ -105,7 +105,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/erofs/descriptor.c lib/formats/erofs/read.c \
 	lib/formats/erofs/meta.c lib/formats/erofs/map.c \
 	lib/formats/erofs/content.c lib/formats/erofs/directory.c \
-	lib/formats/erofs/xattr.c \
+	lib/formats/erofs/verify.c lib/formats/erofs/xattr.c \
 	lib/formats/qnx4/qnx4.h lib/formats/qnx4/descriptor.c \
 	lib/formats/qnx4/codec.c lib/formats/qnx4/volume.c \
 	lib/formats/qnx4/extent.c lib/formats/qnx4/bitmap.c \

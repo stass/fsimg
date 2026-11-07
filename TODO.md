@@ -371,11 +371,34 @@
   `test/erofs.c` opens with the larger budget). The driver design bounds
   directories through metadata scratch; find what the prepare path keeps
   in memory and move it to scratch before stage 8's scale gate.
-* [Medium] **EROFS verifier does not yet assert block-count truncation**
-  (`lib/formats/erofs/`): `test_a_block_count_past_the_input_lists_what_lies_in_the_input`
-  in `test/erofs.c` checks only the listing; the verification assertion
-  that an image shorter than its block count is reported truncated lands
-  with the verifier in stage 4.
+* [Medium] **EROFS payload verification reads a hard-linked file once per
+  name** (`lib/formats/erofs/verify.c`): without a visited set,
+  `fsimg_verify_payload` runs at every name, so `W -d` reads a file with N
+  names N times; a hostile volume of size V whose directory blocks all name
+  one large file makes about V^2/13 bytes of reads, stopped only by the
+  work and time budgets. Read an inode with `nlink > 1` once: spool its
+  NID, sort and deduplicate after the walk, and read each through the
+  driver's content reader with payload accounting, as QNX6 skips later
+  names; state the rule in the driver design. Plain `W` pays too: every
+  name re-runs `storage_claim()`, one mapped extent and one claim record
+  per extent, so a file of E extents with N names spools N * E claims;
+  the deduplicated pass should claim each inode's storage once as well.
+  `test_payload_of_a_file_with_two_names_is_counted_once_per_name` in
+  `test/erofs-verify.c` pins the current count and changes with the fix.
+* [Low] **EROFS verification reports two advisory findings nowhere**
+  (`lib/formats/erofs/verify.c`): the [format design's
+  verification](specs/design-erofs.md#verification) reports the
+  superblock's inode count against the reachable inodes as a difference,
+  and a volume without `SB_CHKSUM` as unprotected, neither a failure; the
+  common `fsimg_verify_report_t` has no field for an advisory finding, so
+  the verifier checks neither. Decide whether the report gains a notes
+  channel (it would serve other formats' advisory counts too) or the
+  design drops both.
+* [Low] **EROFS specification model runs no verification stage**
+  (`test/spec/lib/fsimg_spec/erofs/cases.rb`): `Cases::STAGES` is
+  `info ls extract`; the model should classify `verify` and `verify-deep`
+  as well, from link counts, ownership and the attribute rules, so rule
+  witnesses exercise `fsimg W`.
 * [Low] **EROFS codec does not yet enforce three format-design rules**
   (`lib/formats/erofs/codec.c`): chunk-format bit 6 with 4-byte entries is
   accepted (`erofs_chunk_format_decode`; the design's

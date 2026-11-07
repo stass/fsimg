@@ -363,6 +363,85 @@ fsimg_status_t	erofs_xattr_check(fsimg_reader_t *, const erofs_inode_t *,
 		    bool *, fsimg_error_t *);
 
 /*
+ * XXH32 over a message given in pieces (codec.c): whole 16-byte stripes go
+ * through the four lane accumulators as they complete, and stripe holds
+ * the bytes of the stripe still being filled, which at the end are the
+ * message's last total_bytes % 16 bytes. A copy continues independently.
+ */
+#define EROFS_XXH32_STRIPE_BYTES	16u
+
+typedef struct erofs_xxh32_state {
+	uint64_t	 total_bytes;
+	uint32_t	 accumulator[4];
+	uint32_t	 seed;
+	unsigned char	 stripe[EROFS_XXH32_STRIPE_BYTES];
+	size_t		 stripe_bytes;
+} erofs_xxh32_state_t;
+
+/*
+ * An attribute name's filter hash in progress: XXH32 seeded for the name's
+ * built-in prefix by erofs_name_hash_init(), absorbing the name piece by
+ * piece, a long prefix's infix first and then the suffix. A long prefix's
+ * hash is absorbed once and copied for each attribute using it.
+ */
+typedef erofs_xxh32_state_t erofs_name_hash_t;
+
+/*
+ * Verification (verify.c). Every reachable structure claims its byte range
+ * of the primary space in one class, which the ownership sweep reconciles
+ * after the walk:
+ *
+ *	EXCLUSIVE	the superblock region, directory blocks and the plain
+ *			long-prefix table: overlaps nothing
+ *	BODY		an inode's body: exclusive, except that an inode
+ *			reached by several names claims its one body again
+ *	SHARED		a shared attribute entry: overlaps only an identical
+ *			shared claim, since inodes share pool entries
+ *	DATA		file and symbolic-link blocks: may overlap data,
+ *			since the format permits deduplicated content
+ *
+ * The values order the classes in the claim stream's sort.
+ */
+typedef enum erofs_claim_class {
+	EROFS_CLAIM_EXCLUSIVE = 0,
+	EROFS_CLAIM_BODY = 1,
+	EROFS_CLAIM_SHARED = 2,
+	EROFS_CLAIM_DATA = 3
+} erofs_claim_class_t;
+
+/* The owner a claim names when no inode owns it, such as the superblock. */
+#define EROFS_CLAIM_NO_INODE		UINT64_MAX
+
+/* Long prefixes an index 0x80 | k can name: k has seven bits. */
+#define EROFS_LONG_PREFIX_MAX		128u
+
+/*
+ * One verification's state, from the first claim to the sweep: the claim
+ * stream in scratch, and for each of the first min(xattr_prefix_count,
+ * 128) long prefixes its name hash, seeded with its base index and with
+ * its infix absorbed.
+ */
+typedef struct erofs_verifier {
+	fsimg_stream_t	*claims;
+	erofs_name_hash_t prefixes[EROFS_LONG_PREFIX_MAX];
+} erofs_verifier_t;
+
+fsimg_status_t	erofs_verify(fsimg_reader_t *, unsigned,
+		    fsimg_verify_report_t *, fsimg_error_t *);
+fsimg_status_t	erofs_claim(erofs_verifier_t *, erofs_claim_class_t, uint64_t,
+		    uint64_t, uint64_t, fsimg_error_t *);
+
+/*
+ * Verification's attribute checks (xattr.c): the long-prefix table, loaded
+ * into the verifier and claimed once, and an inode's every attribute, its
+ * shared entries claimed and every name checked against its filter.
+ */
+fsimg_status_t	erofs_prefixes_load(fsimg_reader_t *, erofs_verifier_t *,
+		    fsimg_error_t *);
+fsimg_status_t	erofs_xattr_verify(fsimg_reader_t *, const erofs_inode_t *,
+		    erofs_verifier_t *, fsimg_error_t *);
+
+/*
  * The metadata reader (meta.c), the one place a NID or a metadata offset
  * becomes bytes. Every read goes through bounded I/O after its range is
  * proved inside its space.
@@ -381,9 +460,10 @@ fsimg_status_t	erofs_body_read(fsimg_reader_t *, const erofs_inode_t *,
  * naming the field; erofs_dirent_decode() also returns FSIMG_EINVAL for an
  * index past the block's entries, a caller's error. The exceptions to the
  * length rule are erofs_inode_fixed_bytes(), which reads the two bytes of
- * the format word, the accessors of a structure already decoded, and the two
- * attribute decoders, which read only their fixed head, the 12-byte header
- * or an entry's 4 bytes, and take as length what remains of the region.
+ * the format word, the accessors of a structure already decoded, and the
+ * attribute and long-prefix decoders, which read only their fixed head, the
+ * 12-byte header or a 4-byte entry or record head, and take as length what
+ * remains of the region.
  * Rules that relate one structure to another, such as an address inside
  * the volume, belong to their callers.
  */
@@ -417,7 +497,9 @@ fsimg_status_t	erofs_prefix_decode(const unsigned char *, size_t,
 		    erofs_prefix_t *, const char **);
 uint32_t	erofs_xxh32(const unsigned char *, size_t, const unsigned char *,
 		    size_t, uint32_t);
-unsigned	erofs_xattr_filter_bit(uint8_t, const unsigned char *, size_t,
+void		erofs_name_hash_init(erofs_name_hash_t *, uint8_t);
+void		erofs_name_hash_absorb(erofs_name_hash_t *,
 		    const unsigned char *, size_t);
+unsigned	erofs_name_hash_bit(const erofs_name_hash_t *);
 
 #endif /* !FSIMG_EROFS_H */

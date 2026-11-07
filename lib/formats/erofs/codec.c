@@ -138,21 +138,9 @@ enum {
 #define XXH32_PRIME3		UINT32_C(0xc2b2ae3d)
 #define XXH32_PRIME4		UINT32_C(0x27d4eb2f)
 #define XXH32_PRIME5		UINT32_C(0x165667b1)
-#define XXH32_STRIPE_BYTES	16u
+#define XXH32_STRIPE_BYTES	EROFS_XXH32_STRIPE_BYTES
 
-/*
- * XXH32 over a message given in pieces. Whole 16-byte stripes go through
- * the four lane accumulators as they complete; stripe holds the bytes of
- * the stripe still being filled, which at the end are the message's last
- * total_bytes % 16 bytes.
- */
-typedef struct xxh32_state {
-	uint64_t	 total_bytes;
-	uint32_t	 accumulator[4];
-	uint32_t	 seed;
-	unsigned char	 stripe[XXH32_STRIPE_BYTES];
-	size_t		 stripe_bytes;
-} xxh32_state_t;
+typedef erofs_xxh32_state_t xxh32_state_t;
 
 static bool		all_zero(const unsigned char *, size_t);
 static bool		builtin_prefix(uint8_t);
@@ -1310,16 +1298,27 @@ erofs_xxh32(const unsigned char *first, size_t first_length,
 }
 
 /*
- * The name-filter bit of an attribute: XXH32 of its name without the
+ * The name-filter hash of an attribute: XXH32 of its name without the
  * built-in prefix, seeded with the filter seed plus that prefix's index,
- * modulo 32. For a built-in index the hashed name is the stored suffix
- * and the infix is empty; for a long prefix it is the prefix's infix
- * followed by the suffix, and base_index is the prefix's base index.
+ * and its bit the hash modulo 32. For a built-in index the hashed name is
+ * the stored suffix; for a long prefix it is the prefix's infix followed
+ * by the suffix, and base_index is the prefix's base index.
  */
-unsigned
-erofs_xattr_filter_bit(uint8_t base_index, const unsigned char *infix,
-    size_t infix_length, const unsigned char *suffix, size_t suffix_length)
+void
+erofs_name_hash_init(erofs_name_hash_t *hash, uint8_t base_index)
 {
-	return (erofs_xxh32(infix, infix_length, suffix, suffix_length,
-	    FILTER_SEED + base_index) & 31);
+	xxh32_init(hash, FILTER_SEED + base_index);
+}
+
+void
+erofs_name_hash_absorb(erofs_name_hash_t *hash, const unsigned char *bytes,
+    size_t length)
+{
+	xxh32_absorb(hash, bytes, length);
+}
+
+unsigned
+erofs_name_hash_bit(const erofs_name_hash_t *hash)
+{
+	return (xxh32_finish(hash) & 31);
 }

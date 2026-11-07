@@ -461,7 +461,9 @@ reconciliation against format metadata. FAT keeps its fused chain verification
 and payload read. The strict run utility, which FAT, exFAT and HFS Plus share,
 rejects every overlapping claim in its declared domain; it neither infers
 complete ownership nor defines sharing policy for other formats. QNX6's owner-bearing records, QNX4's claimed
-bitset, and ImageFS's reference and checksum checks keep their own representations.
+bitset, ImageFS's reference and checksum checks, and EROFS's classed claim
+stream, whose sharing rules admit data and shared-attribute overlaps, keep
+their own representations.
 
 Verification reports count delivered non-directory entries as `files`,
 including symbolic links, FIFOs, devices and sockets; `directories` includes

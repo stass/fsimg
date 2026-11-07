@@ -288,29 +288,48 @@ Verification is the common walk with the driver's checks switched on, plus
 streams in scratch: one reference stream and one claim stream, and a second
 claim stream under the metadata box:
 
-* **References**: one record per directory entry other than dot entries,
-  holding the child NID, whether it is a directory, and, from replay, the
-  child's link count. After the walk the stream is sorted by NID; a
-  directory NID appearing more than once, or a non-directory NID whose count
-  differs from its link count, is a finding.
+* **References**: one name record per directory entry other than dot
+  entries, holding the child NID, whether it is a directory, whether its
+  inode is compact, and, from replay, the child's link count, plus one
+  subdirectory record naming the parent for each entry that names a
+  directory; the root contributes its own name record. After the walk the
+  stream is sorted by NID, so each inode's records are adjacent: a
+  directory with more than one name, a directory whose link count is not
+  two plus its subdirectory records (outside the compact exception), or a
+  non-directory whose link count differs from its names is a finding.
 * **Claims**: one record per claimed range with its class, start, length
-  and NID, from open (superblock, configuration records), replay (inode
-  bodies), prepare (directory blocks), content reads (data) and the
-  attribute checks (shared entries, the prefix table). Box claims go to a
-  second stream with the same layout. Each stream is sorted by start and
-  swept once with the [ownership rule](design-erofs.md#verification). The
-  helpers' bounded ownership runs
-  ([verification helpers](design-verification-helpers.md)) reject every
-  overlap, so they check only the exclusive-metadata claims; the driver's
-  own sweep of the same sorted stream checks the rest, admitting overlaps
-  between data claims and between identical shared-entry claims and
-  refusing any other.
+  and owning NID. The verifier's walk loop makes them from what replay
+  left current, so no reading path carries verification hooks: the
+  superblock region and the long-prefix table before the walk, then each
+  reached inode's body, directory blocks or data extents through
+  `erofs_map()`, and, through `xattr.c`, its shared entries. Inode bodies
+  are exclusive metadata in a class of their own. Box claims go to a
+  second stream with the same layout. Each stream is sorted by start, then
+  length, class and owner, and swept once with the
+  [ownership rule](design-erofs.md#verification), keeping the furthest end
+  three groups of claims have reached: exclusive and body claims together,
+  shared claims and data claims. An exclusive or body claim overlapping any
+  other claim, a data claim overlapping a shared one and a shared claim
+  overlapping a different shared range are findings. An inode reached by several names claims its body and storage
+  once per name. An inode has one body, so the sweep takes a body claim
+  identical to the previous one, owner included, as that body again, which
+  is how a NID named several times claims its body once without a visited
+  set; data may overlap anyway, and a directory reached twice fails the
+  reference check, which runs before the sweep. The helpers' ownership runs
+  ([verification helpers](design-verification-helpers.md)) are not used:
+  they reject every overlap, so they could check only the exclusive claims,
+  which the one sweep checks anyway.
 
 `verify.c` also maps and decodes the packed inode's and the box's every
 cluster once, claiming their storage, and checks every fragment range
-against the packed inode's size. A codec the build lacks, an unknown
-compatible bit and an unchecked name filter each mark the result incomplete
-with a reason.
+against the packed inode's size. A codec the build lacks, a nonzero
+reserved byte of the superblock region, an unknown compatible bit and name
+filters the superblock's filter byte turns off each mark the result
+incomplete with a reason: verification fails `FSIMG_EUNSUPPORTED` naming
+it. The three volume-wide reasons are reported after every structural
+check has passed, so a volume that is also corrupt reports its
+corruption; a missing codec, like an unknown attribute index, fails where
+the walk meets it.
 
 ## Writer settings
 

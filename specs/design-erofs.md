@@ -735,7 +735,10 @@ producer image (E6, 26 of 26 inodes each in `e6-xattr-default`,
 `-shared0`, `-pfx-plain` and `-pfx-explicit-plain`; the suffix alone fails
 on 4 of 26 with long prefixes). The reader never uses the filter.
 Verification checks that no present attribute's bit is set, since a wrong
-filter makes the kernel hide an attribute.
+filter makes the kernel hide an attribute. A nonzero filter byte turns the
+filters off, as the kernel treats it; verification of such a volume under
+`XATTR_FILTER` is incomplete, since the byte is reserved and fsimg cannot
+claim to know what a producer meant by it.
 
 ### The extra-data mark
 
