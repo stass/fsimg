@@ -360,6 +360,9 @@ typedef struct erofs_prefix {
 #define EROFS_ADVICE_EXTENTS		EROFS_ADVICE_COMPACT_2B
 #define EROFS_EXTENT_START_BYTES	8u
 #define EROFS_EXTENT_BYTES_MAX		32u
+/* The 32-byte form, the one the writer emits, and the advice selecting it. */
+#define EROFS_EXTENT32_BYTES		32u
+#define EROFS_EXTENT32_ADVICE		(EROFS_ADVICE_EXTENTS | 3u << 1)
 /* The largest physical cluster stored and logical extent decoded. */
 #define EROFS_CLUSTER_STORED_MAX	(UINT32_C(1) << 20)
 #define EROFS_CLUSTER_DECODED_MAX	(UINT32_C(12) << 20)
@@ -772,10 +775,11 @@ fsimg_status_t	erofs_body_read(fsimg_reader_t *, const erofs_inode_t *,
  * head, and take as length what remains of the region. Rules that relate
  * one structure to another, such as an address inside the volume, belong
  * to their callers. The encoders, erofs_super_encode(),
- * erofs_inode_encode(), erofs_zheader_encode() and
- * erofs_full_record_encode(), write a decoder's exact inverse into a
- * buffer of the structure's fixed length, and return false, leaving the
- * buffer unspecified, for a record the encoding cannot represent.
+ * erofs_inode_encode(), erofs_zheader_encode(), erofs_xrecord_encode(),
+ * erofs_xlength_encode() and erofs_full_record_encode(), write a decoder's
+ * exact inverse into a buffer of the structure's fixed length, and return
+ * false, leaving the buffer unspecified, for a record the encoding cannot
+ * represent.
  */
 bool		erofs_magic_matches(const unsigned char *, size_t);
 fsimg_status_t	erofs_super_probe(const unsigned char *, size_t,
@@ -806,6 +810,9 @@ fsimg_status_t	erofs_xrecord_decode(const unsigned char *, unsigned,
 fsimg_status_t	erofs_xlength_decode(uint32_t, erofs_xlength_t *,
 		    const char **);
 bool		erofs_zheader_encode(const erofs_zheader_t *, unsigned char *);
+bool		erofs_xrecord_encode(const erofs_xrecord_t *, unsigned,
+		    unsigned char *);
+bool		erofs_xlength_encode(const erofs_xlength_t *, uint32_t *);
 bool		erofs_full_record_encode(const erofs_zrecord_t *, uint16_t,
 		    unsigned char *);
 void		erofs_compact_layout(uint64_t, uint64_t,

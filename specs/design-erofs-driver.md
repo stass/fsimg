@@ -513,8 +513,9 @@ record per physical cluster in a scratch store: its logical start, the
 logical bytes it holds, its stored length and whether it is plain, which
 is metadata, not payload; a cluster's position among the file's records is
 its block relative to the file's first block. Emission encodes each
-body's index from those records, a full index through `codec.c` and
-encoded extents in `write-lz4.c`, each writing every reserved byte as zero, and the encoded copy checks that every cluster it
+body's index or encoded extents from those records through `codec.c`,
+whose encoders sit beside the decoders and write every reserved byte as
+zero, and the encoded copy checks that every cluster it
 forms matches its record in all four fields, so emission holds one
 window buffer, one output block and the current record. Every byte of the
 output block is written for each cluster: the encoder's bytes are moved to its end and the gap before them

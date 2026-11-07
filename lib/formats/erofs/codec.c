@@ -1478,17 +1478,39 @@ erofs_xlength_decode(uint32_t word, erofs_xlength_t *out, const char **what)
 
 /*
  * The map header the writer emits, the inverse of erofs_zheader_decode()
- * for a header without an inline tail or fragment: the advice word, the
- * two algorithms and a logical cluster of one block, every other bit zero.
- * false for an inline tail, a fragment, encoded extents, an unknown advice
- * bit or an algorithm beyond four bits.
+ * for a header without an inline tail or fragment. An index's header holds
+ * the advice word, the two algorithms and a logical cluster of one block;
+ * a header of 32-byte encoded extents holds the extent count's low 32 bits
+ * in bytes 0 to 3, the advice that selects them in bytes 4 and 5 and the
+ * count's high bits in bytes 6 and 7. Every other bit is zero. The count
+ * is 48 bits wide, but its bit 47 is the header's bit 63, which the
+ * decoder reads first as the whole-file fragment mark, so a count must
+ * stay below 2^47. false for an inline tail, a fragment, encoded extents
+ * of another width or with another advice, a count of 2^47 or more, an
+ * unknown advice bit or an algorithm beyond four bits.
  */
 bool
 erofs_zheader_encode(const erofs_zheader_t *header, unsigned char *raw)
 {
 	if (header->whole_fragment || header->fragment_offset != 0 ||
-	    header->tail_bytes != 0 ||
-	    header->extents_form != EROFS_EXTENTS_NONE ||
+	    header->tail_bytes != 0)
+		return (false);
+	if (header->extents_form == EROFS_EXTENTS_SEARCHED) {
+		if (header->extent_bytes != EROFS_EXTENT32_BYTES ||
+		    header->advice != EROFS_EXTENT32_ADVICE ||
+		    header->extent_count >> 47 != 0 ||
+		    header->head1_algorithm != 0 ||
+		    header->head2_algorithm != 0 || header->lclusterbits != 0)
+			return (false);
+		bzero(raw, EROFS_ZHEADER_BYTES);
+		fsimg_store_le32(raw, (uint32_t)header->extent_count);
+		fsimg_store_le16(raw + 4, header->advice);
+		fsimg_store_le16(raw + 6,
+		    (uint16_t)(header->extent_count >> 32));
+		return (true);
+	}
+	if (header->extents_form != EROFS_EXTENTS_NONE ||
+	    header->extent_bytes != 0 || header->extent_count != 0 ||
 	    (header->advice & ~EROFS_ADVICE_KNOWN) != 0 ||
 	    (header->advice & (EROFS_ADVICE_INLINE_TAIL |
 	    EROFS_ADVICE_FRAGMENT)) != 0 ||
@@ -1498,6 +1520,47 @@ erofs_zheader_encode(const erofs_zheader_t *header, unsigned char *raw)
 	fsimg_store_le16(raw + 4, header->advice);
 	raw[6] = (unsigned char)(header->head1_algorithm |
 	    header->head2_algorithm << 4);
+	return (true);
+}
+
+/*
+ * One 32-byte encoded extent, the inverse of erofs_xrecord_decode() for
+ * that width: the length word, then the physical and the logical byte
+ * offsets, each in two little-endian halves, low first, and 12 zero
+ * bytes. false for any other width, the only one the writer emits.
+ */
+bool
+erofs_xrecord_encode(const erofs_xrecord_t *record, unsigned extent_bytes,
+    unsigned char *raw)
+{
+	if (extent_bytes != EROFS_EXTENT32_BYTES)
+		return (false);
+	bzero(raw, EROFS_EXTENT32_BYTES);
+	fsimg_store_le32(raw, record->length_word);
+	fsimg_store_le32(raw + 4, (uint32_t)record->physical);
+	fsimg_store_le32(raw + 8, (uint32_t)(record->physical >> 32));
+	fsimg_store_le32(raw + 12, (uint32_t)record->logical);
+	fsimg_store_le32(raw + 16, (uint32_t)(record->logical >> 32));
+	return (true);
+}
+
+/*
+ * An encoded extent's length word, the inverse of erofs_xlength_decode():
+ * the stored bytes in bits 0 to 20, the partial mark in bit 27 and the
+ * format in bits 28 to 31. false for a stored length of zero or above the
+ * physical cluster limit, a format beyond four bits, or the partial mark
+ * on a plain extent, which the decoder ignores.
+ */
+bool
+erofs_xlength_encode(const erofs_xlength_t *length, uint32_t *word)
+{
+	if (length->stored_bytes == 0 ||
+	    length->stored_bytes > EROFS_CLUSTER_STORED_MAX ||
+	    length->format > 0x0f || (length->partial && length->format == 0))
+		return (false);
+	*word = length->stored_bytes |
+	    (length->partial ? XLENGTH_PARTIAL : 0) |
+	    (uint32_t)length->format << XLENGTH_FORMAT_SHIFT;
 	return (true);
 }
 

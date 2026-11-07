@@ -402,13 +402,6 @@
   for `e13-big5g-chunk1m`, a 3 MB image.
   Reporting a driver's holes as ZERO ranges would let extraction leave
   them as holes.
-* [Medium] **EROFS encoded extents bypass the codec**
-  (`lib/formats/erofs/write-lz4.c` `write_extents`): the 48-bit writer
-  packs its map header and 32-byte records itself, while the full index
-  goes through `codec.c`, whose encoders decode their output once more.
-  Once the 48-bit reader's extent decoder is in `codec.c`, move the
-  encoding next to it with the same decode-once-more check, so writer and
-  reader cannot drift apart.
 * [Medium] **EROFS start blocks above 32 bits are unchecked in output**
   (`lib/formats/erofs/write-emit.c` `emit_inode`): no test or oracle sees
   fsimg write a start block at or past 2^32, which needs more than 2 TiB

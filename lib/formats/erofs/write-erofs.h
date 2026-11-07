@@ -33,12 +33,9 @@
  * extents of 32-byte records, which start at the first multiple of 32
  * bytes at or after the 8-byte map header's end: 32 bytes after the fixed
  * part, since an inode starts on a 32-byte slot, its fixed part is 32 or
- * 64 bytes and the writer stores no attributes. The header's advice
- * selects encoded extents (bit 0) of 4 << 3 bytes (bits 1 and 2).
+ * 64 bytes and the writer stores no attributes.
  */
-#define EROFS_EXTENT32_BYTES		32u
 #define EROFS_EXTENT32_OFFSET		32u
-#define EROFS_EXTENT32_ADVICE		0x0007u
 
 /*
  * One plan row per catalog ID, row 0 the root. A row holds everything the

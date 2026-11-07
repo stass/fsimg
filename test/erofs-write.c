@@ -3669,6 +3669,102 @@ test_index_encoding_decodes_to_the_same_records(void)
 }
 
 /*
+ * The map header and 32-byte encoded extents the 48-bit LZ4 writer encodes
+ * decode to the same fields, a count and offsets past 32 bits included,
+ * and so do length words of each format; a count whose bit 47 the decoder
+ * would read as the whole-file mark, another width or advice, and a length
+ * word the decoder refuses or would not reproduce are refused.
+ */
+static void
+test_extent_encoding_decodes_to_the_same_records(void)
+{
+	const erofs_xlength_t lengths[] = {
+		{ .stored_bytes = 4096, .format = EROFS_ALGORITHM_LZ4 + 1 },
+		{ .stored_bytes = 512, .format = EROFS_ALGORITHM_LZ4 + 1,
+		    .partial = true },
+		{ .stored_bytes = EROFS_CLUSTER_STORED_MAX },
+	};
+	const erofs_xrecord_t record = {
+		.physical = (UINT64_C(1) << 40) + 4096,
+		.logical = (UINT64_C(1) << 33) + 7,
+		.length_word = 0x10001000u
+	};
+	erofs_zheader_t header = {
+		.extents_form = EROFS_EXTENTS_SEARCHED,
+		.extent_bytes = EROFS_EXTENT32_BYTES,
+		.advice = EROFS_EXTENT32_ADVICE,
+		.extent_count = (UINT64_C(1) << 32) + 5
+	}, zh;
+	erofs_xrecord_t xrecord;
+	erofs_xlength_t xlength, bad;
+	erofs_super_t sb;
+	unsigned char raw[EROFS_EXTENT32_BYTES];
+	const char *what;
+	uint32_t word;
+
+	bzero(&sb, sizeof(sb));
+	sb.blkszbits = 12;
+	sb.incompat = EROFS_INCOMPAT_48BIT | EROFS_INCOMPAT_LZ4_0PADDING;
+	memset(raw, 0xff, sizeof(raw));
+	CHECK(erofs_zheader_encode(&header, raw));
+	CHECK(fsimg_load_le32(raw) == 5 &&
+	    fsimg_load_le16(raw + 4) == EROFS_EXTENT32_ADVICE &&
+	    fsimg_load_le16(raw + 6) == 1);
+	CHECK(erofs_zheader_decode(raw, &sb, EROFS_LAYOUT_COMPRESSED_FULL,
+	    &zh, &what) == FSIMG_OK);
+	CHECK(zh.extents_form == EROFS_EXTENTS_SEARCHED &&
+	    zh.extent_bytes == EROFS_EXTENT32_BYTES &&
+	    zh.advice == EROFS_EXTENT32_ADVICE &&
+	    zh.extent_count == header.extent_count && !zh.whole_fragment);
+	header.extent_count = (UINT64_C(1) << 47) - 1;
+	CHECK(erofs_zheader_encode(&header, raw));
+	CHECK(erofs_zheader_decode(raw, &sb, EROFS_LAYOUT_COMPRESSED_FULL,
+	    &zh, &what) == FSIMG_OK);
+	CHECK(!zh.whole_fragment && zh.extent_count == header.extent_count);
+	header.extent_count = UINT64_C(1) << 47;
+	CHECK(!erofs_zheader_encode(&header, raw));
+	header.extent_count = 1;
+	header.extent_bytes = 16;
+	CHECK(!erofs_zheader_encode(&header, raw));
+	header.extent_bytes = EROFS_EXTENT32_BYTES;
+	header.advice |= EROFS_ADVICE_FRAGMENT;
+	CHECK(!erofs_zheader_encode(&header, raw));
+	header.advice = EROFS_EXTENT32_ADVICE;
+	header.head2_algorithm = 1;
+	CHECK(!erofs_zheader_encode(&header, raw));
+	header = (erofs_zheader_t){ .extent_count = 1 };
+	CHECK(!erofs_zheader_encode(&header, raw));
+
+	memset(raw, 0xff, sizeof(raw));
+	CHECK(erofs_xrecord_encode(&record, EROFS_EXTENT32_BYTES, raw));
+	for (size_t i = 20; i < sizeof(raw); i++)
+		CHECK(raw[i] == 0);
+	CHECK(erofs_xrecord_decode(raw, EROFS_EXTENT32_BYTES, &xrecord,
+	    &what) == FSIMG_OK);
+	CHECK(xrecord.physical == record.physical &&
+	    xrecord.logical == record.logical &&
+	    xrecord.length_word == record.length_word);
+	CHECK(!erofs_xrecord_encode(&record, 16, raw));
+
+	for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+		CHECK(erofs_xlength_encode(&lengths[i], &word));
+		CHECK(erofs_xlength_decode(word, &xlength, &what) == FSIMG_OK);
+		CHECK(xlength.stored_bytes == lengths[i].stored_bytes &&
+		    xlength.format == lengths[i].format &&
+		    xlength.partial == lengths[i].partial);
+	}
+	bad = (erofs_xlength_t){ .format = EROFS_ALGORITHM_LZ4 + 1 };
+	CHECK(!erofs_xlength_encode(&bad, &word));
+	bad.stored_bytes = EROFS_CLUSTER_STORED_MAX + 1;
+	CHECK(!erofs_xlength_encode(&bad, &word));
+	bad.stored_bytes = 4096;
+	bad.format = 0x10;
+	CHECK(!erofs_xlength_encode(&bad, &word));
+	bad = (erofs_xlength_t){ .stored_bytes = 4096, .partial = true };
+	CHECK(!erofs_xlength_encode(&bad, &word));
+}
+
+/*
  * The encoders.
  */
 
@@ -4443,5 +4539,6 @@ main(void)
 	test_addressing48_faults_are_clean();
 	test_wide_super_encoding_decodes_to_the_same_superblock();
 	test_implicit_link_count_encoding();
+	test_extent_encoding_decodes_to_the_same_records();
 	return (0);
 }
