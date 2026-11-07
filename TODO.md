@@ -364,9 +364,6 @@
 
 ## Bugs by subsystem
 
-* [Low] **EROFS fixtures e2-vm-compact and e2-vm-compact-alltime are failed
-  captures** (`~/fsimg-corpus/erofs`): 4096-byte zero stubs; mkfs refused an
-  owner above 65535 in compact form; recapture without the over-range owner.
 * [Low] **EROFS codec does not yet enforce three format-design rules**
   (`lib/formats/erofs/codec.c`): chunk-format bit 6 with 4-byte entries is
   accepted (`erofs_chunk_format_decode`; the design's
