@@ -4153,9 +4153,13 @@ volume_size(void *argument, uint64_t *size, fsimg_error_t *error FSIMG_UNUSED)
 	return (FSIMG_OK);
 }
 
+/*
+ * Start a volume under memory_bytes of memory and the scratch directory
+ * scratch_fd, or with scratch disabled when it is -1.
+ */
 static void
-volume_start_with(volume_t *v, const unsigned char *bytes, uint64_t length,
-    uint64_t memory_bytes)
+volume_start_scratch(volume_t *v, const unsigned char *bytes, uint64_t length,
+    uint64_t memory_bytes, int scratch_fd)
 {
 	fsimg_options_t options;
 	fsimg_io_ops_t ops;
@@ -4166,6 +4170,7 @@ volume_start_with(volume_t *v, const unsigned char *bytes, uint64_t length,
 	v->length = length;
 	fsimg_options_init(&options);
 	options.memory_bytes = memory_bytes;
+	options.scratch_directory_fd = scratch_fd;
 	CHECK(fsimg_ctx_new(&options, &v->ctx, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(v->ctx, &stats, NULL) == FSIMG_OK);
 	v->baseline = stats.memory_bytes;
@@ -4181,6 +4186,13 @@ volume_start_with(volume_t *v, const unsigned char *bytes, uint64_t length,
 	v->reader.state = FSIMG_READER_OPENING;
 	fsimg_read_options_init(&v->reader.options);
 	fsimg_session_init(&v->reader.session, v->ctx, "test", 0);
+}
+
+static void
+volume_start_with(volume_t *v, const unsigned char *bytes, uint64_t length,
+    uint64_t memory_bytes)
+{
+	volume_start_scratch(v, bytes, length, memory_bytes, -1);
 }
 
 static void
@@ -8011,10 +8023,14 @@ test_a_deep_tree_is_listed_to_its_leaf(void)
 	gen_tree_free(&tree);
 }
 
-/* Walk the image counting entries only; last receives the final path. */
+/*
+ * Walk the image under memory_bytes with the scratch directory scratch_fd,
+ * counting entries only; last receives the final path and stats the
+ * context's figures at the end of the walk.
+ */
 static fsimg_status_t
-count_entries(const gen_image_t *image, uint64_t memory_bytes, size_t *count,
-    char *last, size_t last_bytes)
+count_entries(const gen_image_t *image, uint64_t memory_bytes, int scratch_fd,
+    size_t *count, char *last, size_t last_bytes, fsimg_stats_t *stats)
 {
 	const fsimg_entry_t *entry;
 	fsimg_error_t error;
@@ -8022,7 +8038,8 @@ count_entries(const gen_image_t *image, uint64_t memory_bytes, size_t *count,
 	fsimg_status_t status;
 	volume_t v;
 
-	volume_start_with(&v, image->bytes, image->length, memory_bytes);
+	volume_start_scratch(&v, image->bytes, image->length, memory_bytes,
+	    scratch_fd);
 	status = fsimg_reader_open(v.ctx, v.io, NULL, &reader, &error);
 	*count = 0;
 	while (status == FSIMG_OK &&
@@ -8030,13 +8047,18 @@ count_entries(const gen_image_t *image, uint64_t memory_bytes, size_t *count,
 		(*count)++;
 		snprintf(last, last_bytes, "%s", entry->path);
 	}
+	CHECK(fsimg_ctx_get_stats(v.ctx, stats, NULL) == FSIMG_OK);
 	fsimg_reader_free(reader);
 	fsimg_io_free(v.io);
 	fsimg_ctx_free(v.ctx);
 	return (status);
 }
 
-/* One directory of 100000 names over many blocks, all one hard-linked file. */
+/*
+ * One directory of 100000 names over many blocks, all one hard-linked file,
+ * listed under the minimum memory budget: the common walker spools the
+ * children to metadata scratch.
+ */
 static void
 test_a_directory_of_100000_entries_lists_every_name(void)
 {
@@ -8046,11 +8068,14 @@ test_a_directory_of_100000_entries_lists_every_name(void)
 	char (*names)[8] = calloc(ENTRIES, sizeof(*names));
 	unsigned char *bytes = calloc(BLOCKS, block);
 	gen_inode_t dir = inode_proto(MODE_DIR, LAYOUT_FLAT);
+	char directory[] = "erofs-scratch-XXXXXX";
 	char last[PATH_BYTES];
+	fsimg_stats_t stats;
 	fsimg_status_t status;
 	gen_tree_t tree;
 	size_t count, size;
 	uint64_t file;
+	int scratch;
 
 	CHECK(records != NULL && names != NULL && bytes != NULL);
 	tree_new(&tree, BITS, BLOCKS + 8);
@@ -8064,23 +8089,26 @@ test_a_directory_of_100000_entries_lists_every_name(void)
 	size = gen_dir_pack(bytes, BLOCKS * block, block, records, ENTRIES + 2);
 	gen_tree_fill(&tree, 0, &dir, bytes, size);
 	gen_tree_seal(&tree);
-	EXPECT(count_entries(&tree.image, 256 * 1024 * 1024, &count, last,
-	    sizeof(last)) ==
-	    FSIMG_DONE, "the walk of 100000 entries reaches its end");
+	CHECK(mkdtemp(directory) != NULL);
+	scratch = open(directory, O_RDONLY | O_DIRECTORY);
+	CHECK(scratch != -1);
+	status = count_entries(&tree.image, 16 * 1024 * 1024, scratch, &count,
+	    last, sizeof(last), &stats);
+	EXPECT(status == FSIMG_DONE,
+	    "the walk of 100000 entries reaches its end under 16 MiB (status %d)",
+	    (int)status);
 	EXPECT(count == ENTRIES && strcmp(last, "/n099999") == 0,
 	    "%zu entries, the last \"%s\"", count, last);
-	/*
-	 * Known defect (TODO.md, "EROFS directory listing exceeds the
-	 * minimum memory budget"): the design budget of 16 MiB is too small
-	 * for this directory. When the listing moves to metadata scratch
-	 * this expectation flips to FSIMG_DONE with all ENTRIES names; change
-	 * it then and drop the larger budget above.
-	 */
-	status = count_entries(&tree.image, 16 * 1024 * 1024, &count, last,
-	    sizeof(last));
-	EXPECT(status == FSIMG_ELIMIT,
-	    "at 16 MiB the walk fails with the memory limit (status %d)",
-	    (int)status);
+	EXPECT(stats.memory_peak <= 16 * 1024 * 1024 && stats.scratch_peak > 0,
+	    "the children spool to scratch (memory peak %llu, scratch peak %llu)",
+	    (unsigned long long)stats.memory_peak,
+	    (unsigned long long)stats.scratch_peak);
+	/* Without scratch the walk fits in memory or fails with the limit. */
+	EXPECT(count_entries(&tree.image, 16 * 1024 * 1024, -1, &count, last,
+	    sizeof(last), &stats) == FSIMG_ELIMIT,
+	    "without scratch the walk fails with the memory limit");
+	close(scratch);
+	CHECK(rmdir(directory) == 0);
 	gen_tree_free(&tree);
 	free(bytes);
 	free(names);

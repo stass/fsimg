@@ -384,13 +384,6 @@
   dictionary bytes or window log) would make the call self-describing.
   The stream decoders in `cluster.c` also take a non-const input to suit
   zlib's `next_in`; building with `ZLIB_CONST` would keep it const.
-* [Medium] **EROFS directory listing exceeds the minimum memory budget**
-  (`lib/formats/erofs/directory.c`): listing one directory of 100000
-  entries fails under the 16 MiB budget and needs 256 MiB
-  (`test_a_directory_of_100000_entries_lists_every_name` in
-  `test/erofs.c` opens with the larger budget). The driver design bounds
-  directories through metadata scratch; find what the prepare path keeps
-  in memory and move it to scratch before stage 8's scale gate.
 * [Medium] **EROFS writer output may not stay sparse**
   (`lib/formats/erofs/write-emit.c`): the stage 10 qualification's sparse
   source file of 2^32 + 5000 bytes produced an image that occupied about
