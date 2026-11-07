@@ -93,7 +93,7 @@ only:
 | `erofs_prefix_t` | Record span, base index, infix span |
 | `erofs_zheader_t` | Fragment offset or tail size, advice, algorithms, cluster bits, whole-fragment mark, extent count |
 | `erofs_cluster_t` | The normalized cluster: logical start and length, source (volume, inline body or packed inode), physical byte start and stored length, algorithm or plain, interlace offset, partial mark |
-| `erofs_extent_t` | The normalized extent `map.c` returns: logical start and length, kind (stored, zero, inline, cluster, fragment), physical start, and the cluster when compressed |
+| `erofs_extent_t` | The normalized extent `map.c` returns: logical start and length, kind (stored, zero or cluster), physical start of a stored extent, the cluster and the skip into its decoded bytes of a cluster extent, and the fragment mark |
 
 Encoding is the exact inverse and writes every reserved byte as zero. The
 superblock checksum helper takes the final superblock-region bytes and the
@@ -152,7 +152,9 @@ construction.
 `erofs_inode_load(reader, nid, out)` computes the space and offset from the
 NID, reads the fixed part, decodes and validates it, computes the body
 length from the attribute count and layout, and reads the layout header the
-length needs, the map header of a compressed inode. It records the body's
+length needs. A compressed inode's map header is decoded and validated
+here and kept in the inode, so no lookup reads it again and the tail size
+and fragment offset it holds are checked once. It records the body's
 span and checks it against the space and the inline-tail rule. Later
 readers of the body, such as `xattr.c` and `zmap.c`, call
 `erofs_body_read()` for the ranges they need, which refuses a range outside
@@ -165,15 +167,24 @@ domain.
 `erofs_map(reader, inode, offset, out)` takes `offset < size` and returns
 the normalized extent containing it:
 
-* **Flat**: one stored extent of the full blocks, and for flat-inline an
-  inline extent for the tail at its body offset.
+* **Flat**: one stored extent of the full blocks, and for flat-inline a
+  cluster extent for the tail: a shifted plain cluster whose source is the
+  inode's body, at the tail's absolute offset. There is no separate inline
+  kind; a tail is a cluster that is not in blocks.
 * **Chunk-based**: reads the one index entry for `offset`, and returns a
   zero extent for a hole or a stored extent of the chunk's bytes.
 * **Compressed**: asks `zmap.c` for the cluster containing `offset`, and
-  returns a cluster extent; for a fragment, maps the fragment's offset in the
-  packed inode with `erofs_map()` on the packed inode and returns a fragment
-  extent carrying that inner extent. The packed inode uses no fragment, so
-  this nests once.
+  returns a cluster extent. A compressed inline tail is a cluster whose
+  source is the inode's body, decoded like one in blocks. A fragment is a
+  cluster whose source is the packed inode, at the fragment's offset in the
+  packed inode's content: the mapper maps that offset with `erofs_map()` on
+  the packed inode and returns the packed inode's extent, clipped to both
+  the fragment and that extent, with the fragment mark set and, for a
+  cluster extent, the skip from the start of the packed inode's cluster to
+  the fragment's first byte there. A whole-file fragment is the same with
+  the fragment starting at the file's offset 0. Open refuses a packed
+  inode that uses a fragment, its map header fixed from then on, so this
+  nests once by construction; the inner `erofs_map()` refuses one again.
 
 Every returned extent is checked once here: its storage inside the domain
 or the box's content, its logical range inside `[0, size)`, and a cluster
@@ -198,23 +209,28 @@ boundary E8 names.
 `cluster.c` owns up to three windows, one per kind of reader, so no reader
 evicts another's cluster while it walks: the content window, which
 `resolve` hands to delivery as a held extent; the metadata window, which
-serves blocks of compressed directories and the packed inode's prefix
-table; and, under a compressed metadata box, the box window, which serves
+serves blocks of compressed directories, compressed symbolic link targets,
+the packed inode's prefix table and the verifier's decode of the packed
+inode; and, under a compressed metadata box, the box window, which serves
 box reads. A box read never needs another window's cluster, since the box
 inode's map lies in the primary space.
 
 Each window holds one decoded cluster, keyed by the whole normalized
-cluster: its space, one of the closed set volume or box content, its start
-in that space's own coordinates (an absolute volume byte offset, or a byte
+cluster: its source, one of the closed set stored blocks or an inline tail
+in an inode's body (a fragment is never keyed, below), its space, one of
+the closed set volume or box content, its start in that space's own
+coordinates (an absolute volume byte offset, or a byte
 offset of the box's content), stored length, algorithm or plain mode with
 its rotation, decoded length and partial mark. Every field that changes a
 decode's output or its acceptance is part of the key. Two references to the
 same stored bytes that differ in any of these, such as a partial reference
 and a full one to one shared cluster, are different keys, so a hit always
-returns exactly the bytes a fresh decode would. An inline tail copied into
-the content window is keyed the same way, as a plain extent: a primary-space
-tail at its absolute volume byte offset, `meta_blkaddr * B` plus its body
-offset, and a box tail at its offset in the box's content. No source is
+returns exactly the bytes a fresh decode would. An inline tail, compressed
+or plain, fills a window like any cluster and is keyed the same way: a
+primary-space tail at its absolute volume byte offset, `meta_blkaddr * B`
+plus its body offset, and a box tail at its offset in the box's content. A
+fragment is never a key: its bytes are the packed inode's, decoded under
+the packed inode's own cluster. No source is
 keyed by a relative coordinate, so two keys that are equal name the same
 stored bytes.
 
@@ -274,9 +290,10 @@ portable-profile functions.
   primary volume;
 * a zero extent for a chunk hole;
 * a held extent from the content window for a compressed or interlaced
-  cluster, a fragment, and an inline tail; an inline tail is copied into the
-  content window, so delivery never reads from the metadata window, whose
-  contents another lookup may replace.
+  cluster and an inline tail, from the skip on for a fragment's cluster of
+  the packed inode; an inline tail fills the content window like any
+  cluster, so delivery never reads from the metadata window, whose contents
+  another lookup may replace.
 
 Held bytes stay valid until the next `resolve` or walk advance, as the
 content contract states. A symbolic link never reaches `resolve`: replay
@@ -324,8 +341,11 @@ claim stream under the metadata box:
   which the one sweep checks anyway.
 
 `verify.c` also maps and decodes the packed inode's and the box's every
-cluster once, claiming their storage, and checks every fragment range
-against the packed inode's size. A codec the build lacks, a nonzero
+cluster once, claiming their storage, whether or not a reachable file uses
+it. A file's fragment extents claim nothing: the bytes are the packed
+inode's, and mapping them proves the fragment range inside the packed
+inode's content. An entry naming the packed inode is a finding, since the
+packed inode is outside the namespace. A codec the build lacks, a nonzero
 reserved byte of the superblock region, an unknown compatible bit and name
 filters the superblock's filter byte turns off each mark the result
 incomplete with a reason: verification fails `FSIMG_EUNSUPPORTED` naming

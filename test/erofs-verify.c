@@ -2364,7 +2364,7 @@ add_zfile(gen_tree_t *tree, unsigned layout, size_t size,
 	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_FLAT);
 	gen_zfile_t zf = { content, size, layout,
 	    layout == ZLAYOUT_COMPACT ? GEN_ZA_COMPACT_2B : 0, head_algorithms,
-	    clusters, count };
+	    clusters, count, GEN_ZL_BLOCKS, 0 };
 	uint32_t first = tree->data_next;
 	uint64_t nid;
 
@@ -2614,6 +2614,138 @@ test_chunk_based_and_compressed_files_verify_together(void)
 	gen_tree_free(&tree);
 }
 
+/* ---- Fragments and the packed inode ---- */
+
+enum {
+	INCOMPAT_FRAGMENTS = 0x20,
+	PACKED_BYTES = 2048,
+	TAIL_FILE_BYTES = 1300,
+	TAIL_CLUSTER_START = 600,
+	TAIL_FRAGMENT_AT = 37,
+	WHOLE_FILE_BYTES = 900,
+	WHOLE_FRAGMENT_AT = 1000
+};
+
+/*
+ * A volume whose flat packed inode holds the ends of two files: "tail",
+ * an LZ4 cluster then a fragment of the packed inode's bytes from
+ * TAIL_FRAGMENT_AT, and "whole", a whole-file fragment from
+ * WHOLE_FRAGMENT_AT. kids receives the two entries; returns the packed
+ * inode's NID.
+ */
+static uint64_t
+fragment_tree(gen_tree_t *tree, gen_dirent_t kids[2])
+{
+	const gen_zcluster_t tail[2] = {
+		{ 0, 1, GEN_ZK_LZ4_PERIODIC, false, 9, NULL, 0 },
+		{ TAIL_CLUSTER_START, 0, GEN_ZK_PLAIN, false, 0, NULL, 0 }
+	};
+	const gen_zcluster_t whole[1] = {
+		{ 0, 0, GEN_ZK_PLAIN, false, 0, NULL, 0 }
+	};
+	static unsigned char packed[PACKED_BYTES], content[TAIL_FILE_BYTES];
+	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_FLAT);
+	gen_zfile_t tail_file = { content, TAIL_FILE_BYTES, ZLAYOUT_FULL, 0,
+	    0, tail, 2, GEN_ZL_FRAGMENT, TAIL_FRAGMENT_AT };
+	gen_zfile_t whole_file = { packed + WHOLE_FRAGMENT_AT,
+	    WHOLE_FILE_BYTES, ZLAYOUT_FULL, 0, 0, whole, 1, GEN_ZL_WHOLE,
+	    WHOLE_FRAGMENT_AT };
+	uint64_t packed_nid;
+
+	for (size_t i = 0; i < PACKED_BYTES; i++)
+		packed[i] = (unsigned char)(i * 29 + (i >> 7) + 5);
+	for (size_t i = 0; i < TAIL_CLUSTER_START; i++)
+		content[i] = (unsigned char)((i % 9) * 13 + 1);
+	bcopy(packed + TAIL_FRAGMENT_AT, content + TAIL_CLUSTER_START,
+	    TAIL_FILE_BYTES - TAIL_CLUSTER_START);
+
+	tree_new(tree, 9, 16);
+	gen_tree_set_incompat(tree, INCOMPAT_LZ4_0PADDING | INCOMPAT_FRAGMENTS);
+	packed_nid = gen_tree_add(tree, &proto, packed, PACKED_BYTES);
+	gen_tree_set_packed(tree, packed_nid);
+	kids[0] = entry("tail", gen_tree_add_zfile(tree, &proto, &tail_file),
+	    T_FILE);
+	kids[1] = entry("whole", gen_tree_add_zfile(tree, &proto,
+	    &whole_file), T_FILE);
+	return (packed_nid);
+}
+
+static void
+test_files_ending_in_fragments_of_the_packed_inode_verify(void)
+{
+	gen_dirent_t kids[2];
+	gen_tree_t tree;
+
+	(void)fragment_tree(&tree, kids);
+	fill_dir(&tree, 0, 0, kids, 2);
+	gen_tree_seal(&tree);
+	for (size_t i = 0; i < SCOPE_COUNT; i++) {
+		verdict_t v = verify_image(&tree.image, scopes[i]);
+
+		check_verdict("a tail fragment and a whole-file fragment",
+		    scopes[i], &v, FSIMG_OK, NULL);
+		EXPECT(v.report.files == 2 && v.report.logical_bytes ==
+		    TAIL_FILE_BYTES + WHOLE_FILE_BYTES,
+		    "%s: %llu files, %llu logical bytes", scope_name(scopes[i]),
+		    (unsigned long long)v.report.files,
+		    (unsigned long long)v.report.logical_bytes);
+	}
+	gen_tree_free(&tree);
+}
+
+/* The packed inode is outside the namespace: no entry may name it. */
+static void
+test_an_entry_naming_the_packed_inode_is_corrupt(void)
+{
+	gen_dirent_t kids[3];
+	gen_tree_t tree;
+
+	kids[2] = entry("packed", fragment_tree(&tree, kids), T_FILE);
+	fill_dir(&tree, 0, 0, kids, 3);
+	expect_corrupt("an entry naming the packed inode", &tree,
+	    "a directory entry names the packed inode");
+	gen_tree_free(&tree);
+}
+
+/*
+ * Without PLAIN_XATTR_PFX the long-prefix table is content of the packed
+ * inode, from prefix_start * 4; a volume names a packed inode only under
+ * FRAGMENTS, as the kernel reads it. The file's one attribute uses its only
+ * prefix, user. plus "vendor.", and the name filter clears just that name's
+ * bit, so the volume verifies only if the infix was read from the packed
+ * inode.
+ */
+static void
+test_a_prefix_table_in_the_packed_inode_verifies(void)
+{
+	static const char infix[] = "vendor.";
+	const attr_t attr = { 0x80, "first", "1" };
+	region_t region = { .filter = ~(UINT32_C(1) << filter_bit(1, infix,
+	    "first")), .inline_attrs = &attr, .inline_count = 1 };
+	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_FLAT);
+	unsigned char table[12];
+	gen_dirent_t kids[1];
+	gen_tree_t tree;
+
+	/* One record: its length (infix plus the base byte), base 1, infix. */
+	bzero(table, sizeof(table));
+	table[0] = (unsigned char)(sizeof(infix) - 1 + 1);
+	table[2] = 1;
+	bcopy(infix, table + 3, sizeof(infix) - 1);
+
+	tree_new(&tree, 9, 8);
+	gen_tree_set_packed(&tree, gen_tree_add(&tree, &proto, table,
+	    sizeof(table)));
+	kids[0] = entry("f", add_file_with_region(&tree, &region), T_FILE);
+	fill_dir(&tree, 0, 0, kids, 1);
+	set_prefix_table(&tree, 0, 1);
+	gen_tree_set_incompat(&tree, INCOMPAT_XATTR_PREFIXES |
+	    INCOMPAT_FRAGMENTS);
+	gen_tree_set_compat(&tree, COMPAT_XATTR_FILTER | COMPAT_SB_CHKSUM);
+	expect_verified("a long-prefix table in the packed inode", &tree);
+	gen_tree_free(&tree);
+}
+
 int
 main(void)
 {
@@ -2679,5 +2811,8 @@ main(void)
 	test_a_cluster_of_an_algorithm_the_build_lacks_leaves_verification_unsupported();
 	test_lz4_clusters_without_lz4_0padding_leave_verification_unsupported();
 	test_chunk_based_and_compressed_files_verify_together();
+	test_files_ending_in_fragments_of_the_packed_inode_verify();
+	test_an_entry_naming_the_packed_inode_is_corrupt();
+	test_a_prefix_table_in_the_packed_inode_verifies();
 	return (failures == 0 ? 0 : 1);
 }

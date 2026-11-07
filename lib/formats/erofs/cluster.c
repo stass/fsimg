@@ -29,8 +29,11 @@
  * proved, so a decode that fails partway, by corruption or by a budget,
  * leaves an unkeyed window and never a key naming bytes it does not hold.
  *
- * Decoding a cluster reads its stored blocks into the input buffer, at most
- * 1 MiB. A plain cluster is copied, rotated when interlaced. A compressed
+ * Decoding a cluster reads its stored bytes into the input buffer, at most
+ * 1 MiB: whole blocks of the volume, or an inline tail from the primary
+ * space, keyed at its absolute offset so equal keys name equal bytes. A
+ * fragment is no cluster: the mapper resolves it to the packed inode's own.
+ * A plain cluster is copied, rotated when interlaced. A compressed
  * stream is right-aligned in its blocks behind zero padding, so it starts at
  * the first nonzero byte and ends at the cluster's last byte; it is decoded
  * to exactly the extent's length, or under a partial reference to the
@@ -71,6 +74,8 @@ static stream_decoder_t	lz4_decode;
 static stream_decoder_t	deflate_decode;
 static stream_decoder_t	library_decode;
 static const fsimg_compression_ops_t *library_row(unsigned);
+static fsimg_status_t	input_read(fsimg_reader_t *, erofs_window_t *,
+			    const erofs_cluster_t *, fsimg_error_t *);
 static bool		window_holds(const erofs_window_t *,
 			    const erofs_cluster_t *);
 
@@ -161,12 +166,15 @@ erofs_window_fill(fsimg_reader_t *reader, erofs_window_t *window,
 {
 	size_t length = (size_t)cluster->logical_length;
 	size_t stored = cluster->stored_bytes;
-	size_t padding, rotation, transferred, within;
+	size_t padding, rotation, within;
 	fsimg_status_t status;
 
 	if (window_holds(window, cluster))
 		return (FSIMG_OK);
 	window->keyed = false;
+	if (cluster->source == EROFS_SOURCE_PACKED)
+		return (erofs_reject(error, FSIMG_EINVAL,
+		    "decoding a fragment as a cluster"));
 
 	status = erofs_cluster_readable(reader, cluster, error);
 	if (status != FSIMG_OK)
@@ -184,13 +192,9 @@ erofs_window_fill(fsimg_reader_t *reader, erofs_window_t *window,
 	if (status != FSIMG_OK)
 		return (status);
 
-	status = fsimg_reader_bytes(reader, cluster->storage_offset,
-	    window->input, stored, &transferred, error);
+	status = input_read(reader, window, cluster, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (transferred != stored)
-		return (erofs_reject(error, FSIMG_ECORRUPT,
-		    "physical cluster truncated"));
 
 	switch (cluster->mode) {
 	case EROFS_CLUSTER_SHIFTED:
@@ -237,6 +241,32 @@ erofs_window_free(erofs_window_t *window)
 }
 
 /*
+ * Read cluster's stored bytes into window's input: blocks the mapper
+ * proved inside the content domain, where a range past the input's end is
+ * a truncated volume, or an inline tail through the metadata reader.
+ */
+static fsimg_status_t
+input_read(fsimg_reader_t *reader, erofs_window_t *window,
+    const erofs_cluster_t *cluster, fsimg_error_t *error)
+{
+	size_t transferred;
+	fsimg_status_t status;
+
+	if (cluster->source == EROFS_SOURCE_INLINE)
+		return (erofs_meta_read(reader, EROFS_SPACE_PRIMARY,
+		    cluster->storage_offset, cluster->stored_bytes,
+		    window->input, error));
+	status = fsimg_reader_bytes(reader, cluster->storage_offset,
+	    window->input, cluster->stored_bytes, &transferred, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (transferred != cluster->stored_bytes)
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "physical cluster truncated"));
+	return (FSIMG_OK);
+}
+
+/*
  * Whether window holds cluster's bytes: it is keyed and every key field
  * equals the cluster's, the logical offset aside, since the decoded bytes
  * do not depend on where in the file the extent lies.
@@ -251,6 +281,7 @@ window_holds(const erofs_window_t *window, const erofs_cluster_t *cluster)
 	    key->storage_offset == cluster->storage_offset &&
 	    key->stored_bytes == cluster->stored_bytes &&
 	    key->rotation == cluster->rotation &&
+	    key->source == cluster->source &&
 	    key->mode == cluster->mode &&
 	    key->algorithm == cluster->algorithm &&
 	    key->partial == cluster->partial);

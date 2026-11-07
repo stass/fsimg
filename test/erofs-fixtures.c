@@ -30,11 +30,12 @@
  *                a regular file, the SHA-256 of its content last
  *
  * For every regular file stored in a compressed layout, the test walks the
- * reader's mapper (erofs_map) across the file and requires each extent to
- * equal the dump's row: logical start and length, physical start and length.
+ * reader's compressed lookup (erofs_zmap) across the file and requires each
+ * physical cluster to equal the dump's row: logical start and length,
+ * physical start and length.
  * It then reads the file through fsimg_reader_read_at in odd-sized chunks and
  * requires the SHA-256 to equal the manifest's, and finally issues seeded
- * random reads, half straddling the cluster boundaries the mapper reported,
+ * random reads, half straddling the cluster boundaries the lookup reported,
  * each of which must equal the same bytes of the sequential read. The run is
  * skipped (exit status 77) without the corpus or a fixture; a fixture
  * without extents.txt is passed over with a note.
@@ -59,7 +60,9 @@ static const char *const fixture_names[] = {
 	"e8-lz4-compact", "e8-lz4-compact-counts", "e8-lz4-compact-xattr",
 	"e8-lz4-big16k", "e8-lz4-big64k", "e8-lz4-big1m",
 	"e8-lz4-words6m-big1m", "e8-lz4-zeros40m", "e8-lz4-zeros40m-big1m",
-	"e8-lz4hc-legacy", "e9-config-four", "e9-mixed-lz4-lzma",
+	"e8-lz4hc-legacy", "e8-lz4-ztail", "e8-lz4-frag", "e8-lz4-allfrag",
+	"e8-lz4-dedupe", "e8-lz4-zdir", "e8-lz4-zdir-legacy", "e8-lz4-big16k-frag",
+	"e9-config-four", "e9-mixed-lz4-lzma",
 	"e1-cfg-lz4-b4096", "e1-cfg-lz4-b512",
 	/*
 	 * The E9 fixtures with an extents.txt; the zeros40m ones dump only
@@ -361,9 +364,28 @@ note_error(tally_t *tally, const char *path, const char *what,
 }
 
 /*
- * Walk the mapper from offset 0 to the file's size, comparing each extent
- * with the dump's row of the same index, and remember the extent ends as the
- * boundaries the random reads aim at.
+ * Does a physical cluster agree with the dump's row? The dump prints a
+ * fragment, whose bytes lie in the packed inode, as physical 0..0 of length
+ * 0, and an inline tail at its absolute volume offset with its stored size.
+ */
+static bool
+cluster_matches_row(const erofs_cluster_t *cluster, const dump_row_t *row)
+{
+	if (cluster->logical_offset != row->logical_start ||
+	    cluster->logical_length != row->logical_length)
+		return (false);
+	if (cluster->source == EROFS_SOURCE_PACKED)
+		return (row->physical_start == 0 && row->physical_length == 0);
+	return (cluster->storage_offset == row->physical_start &&
+	    cluster->stored_bytes == row->physical_length);
+}
+
+/*
+ * Walk the compressed lookup (erofs_zmap) from offset 0 to the file's size,
+ * comparing each physical cluster with the dump's row of the same index,
+ * and remember the cluster ends as the boundaries the random reads aim at.
+ * The clusters, not erofs_map's extents, are what the dump prints: the
+ * mapper clips a fragment to the packed inode's extents.
  */
 static void
 compare_extents(file_case_t *c)
@@ -377,63 +399,56 @@ compare_extents(file_case_t *c)
 	    sizeof(*c->boundaries));
 	while (offset < c->inode->size) {
 		const dump_row_t *row;
-		erofs_extent_t extent;
+		erofs_cluster_t cluster;
 		fsimg_error_t error;
 		fsimg_status_t status;
 
-		status = erofs_map(c->reader, c->inode, offset, &extent,
+		status = erofs_zmap(c->reader, c->inode, offset, &cluster,
 		    &error);
 		if (status != FSIMG_OK) {
-			note_error(c->tally, c->path, "erofs_map", status,
+			note_error(c->tally, c->path, "erofs_zmap", status,
 			    &error);
 			return;
 		}
-		if (extent.kind != EROFS_EXTENT_CLUSTER ||
-		    extent.cluster.logical_length == 0) {
+		if (cluster.logical_length == 0 ||
+		    cluster.logical_offset != offset) {
 			c->tally->extent_mismatches++;
-			report(c->tally, "%s: offset %" PRIu64 " maps to a "
-			    "non-cluster or empty extent (kind %d)", c->path,
-			    offset, (int)extent.kind);
+			report(c->tally, "%s: offset %" PRIu64 " maps to an "
+			    "empty or misplaced cluster at %" PRIu64, c->path,
+			    offset, cluster.logical_offset);
 			return;
 		}
 		c->tally->extents++;
 		if (index >= dumped->row_count) {
 			c->tally->extent_mismatches++;
-			report(c->tally, "%s: mapper extent %zu at %" PRIu64
+			report(c->tally, "%s: cluster %zu at %" PRIu64
 			    " has no dump row (%zu rows)", c->path, index,
-			    extent.cluster.logical_offset, dumped->row_count);
+			    cluster.logical_offset, dumped->row_count);
 			return;
 		}
 		row = &dumped->rows[index];
-		if (extent.cluster.logical_offset != row->logical_start ||
-		    extent.cluster.logical_length != row->logical_length ||
-		    extent.cluster.storage_offset != row->physical_start ||
-		    extent.cluster.stored_bytes != row->physical_length) {
+		if (!cluster_matches_row(&cluster, row)) {
 			c->tally->extent_mismatches++;
 			report(c->tally, "%s row %zu: dump logical %" PRIu64
 			    "..%" PRIu64 " (%" PRIu64 ") physical %" PRIu64
-			    "..%" PRIu64 " (%" PRIu64 "); mapper logical %"
-			    PRIu64 " (%" PRIu64 ") physical %" PRIu64 " (%"
-			    PRIu32 ")", c->path, index, row->logical_start,
-			    row->logical_end, row->logical_length,
-			    row->physical_start, row->physical_end,
-			    row->physical_length,
-			    extent.cluster.logical_offset,
-			    extent.cluster.logical_length,
-			    extent.cluster.storage_offset,
-			    extent.cluster.stored_bytes);
+			    "..%" PRIu64 " (%" PRIu64 "); cluster logical %"
+			    PRIu64 " (%" PRIu64 ") source %d physical %"
+			    PRIu64 " (%" PRIu32 ")", c->path, index,
+			    row->logical_start, row->logical_end,
+			    row->logical_length, row->physical_start,
+			    row->physical_end, row->physical_length,
+			    cluster.logical_offset, cluster.logical_length,
+			    (int)cluster.source, cluster.storage_offset,
+			    cluster.stored_bytes);
 		}
+		offset = cluster.logical_offset + cluster.logical_length;
 		if (c->boundary_count < dumped->row_count + 1)
-			c->boundaries[c->boundary_count++] =
-			    extent.cluster.logical_offset +
-			    extent.cluster.logical_length;
-		offset = extent.cluster.logical_offset +
-		    extent.cluster.logical_length;
+			c->boundaries[c->boundary_count++] = offset;
 		index++;
 	}
 	if (index < dumped->row_count) {
 		c->tally->extent_mismatches++;
-		report(c->tally, "%s: mapper stopped after %zu extents, dump "
+		report(c->tally, "%s: lookup stopped after %zu clusters, dump "
 		    "has %zu rows", c->path, index, dumped->row_count);
 	}
 }

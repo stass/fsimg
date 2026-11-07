@@ -54,6 +54,8 @@ static fsimg_status_t	inline_entries_walk(fsimg_reader_t *,
 			    bool *, fsimg_error_t *);
 static void		name_bit_add(region_scan_t *, const erofs_xattr_t *,
 			    const unsigned char *);
+static fsimg_status_t	prefix_read(fsimg_reader_t *, uint64_t, size_t, void *,
+			    fsimg_error_t *);
 static fsimg_status_t	shared_entry_verify(fsimg_reader_t *,
 			    const erofs_inode_t *, uint32_t, region_scan_t *,
 			    fsimg_error_t *);
@@ -160,13 +162,14 @@ erofs_xattr_verify(fsimg_reader_t *reader, const erofs_inode_t *inode,
 
 /*
  * Load the long-prefix table into the verifier and claim it. The table
- * starts at byte xattr_prefix_start * 4 of the volume and holds
- * xattr_prefix_count records, each at least 4 bytes, padded to 4; the
- * claim runs to the last record's end. features_decide() refuses the
- * packed inode, so the table of an opened volume is a plain region. Every
- * record is validated; each of the first 128, the ones an index can name,
- * leaves its name hash in the verifier with its infix absorbed, so an
- * attribute's hash only adds its suffix.
+ * starts at byte xattr_prefix_start * 4 of its region and holds
+ * xattr_prefix_count records, each at least 4 bytes, padded to 4. Its
+ * region is the volume under PLAIN_XATTR_PFX, where the claim runs to the
+ * last record's end, and otherwise the packed inode's content, which open
+ * proved present and whose storage the packed inode's own claims cover.
+ * Every record is validated; each of the first 128, the ones an index can
+ * name, leaves its name hash in the verifier with its infix absorbed, so
+ * an attribute's hash only adds its suffix.
  */
 fsimg_status_t
 erofs_prefixes_load(fsimg_reader_t *reader, erofs_verifier_t *verifier,
@@ -177,24 +180,24 @@ erofs_prefixes_load(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 	unsigned char head[4];
 	erofs_prefix_t prefix;
 	const char *what;
-	uint64_t start, offset, remaining;
+	uint64_t start, offset, remaining, region_bytes;
 	fsimg_status_t status;
 
 	if (!erofs->features.long_prefixes || sb->xattr_prefix_count == 0)
 		return (FSIMG_OK);
+	region_bytes = erofs->features.plain_prefixes ? erofs->domain_bytes :
+	    erofs->packed.size;
 	/* A 32-bit count of 4-byte units: the start fits 34 bits. */
 	start = offset = (uint64_t)sb->xattr_prefix_start * 4;
 	for (unsigned k = 0; k < sb->xattr_prefix_count; k++) {
 		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
 		if (status != FSIMG_OK)
 			return (status);
-		remaining = offset < erofs->domain_bytes ?
-		    erofs->domain_bytes - offset : 0;
+		remaining = offset < region_bytes ? region_bytes - offset : 0;
 		if (remaining < sizeof(head))
 			return (erofs_reject(error, FSIMG_ECORRUPT,
 			    "long prefix truncated"));
-		status = erofs_meta_read(reader, EROFS_SPACE_PRIMARY, offset,
-		    sizeof(head), head, error);
+		status = prefix_read(reader, offset, sizeof(head), head, error);
 		if (status != FSIMG_OK)
 			return (status);
 		status = erofs_prefix_decode(head,
@@ -210,16 +213,37 @@ erofs_prefixes_load(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 			if (status != FSIMG_OK)
 				return (status);
 		}
-		/* The decoder proved the record inside the domain. */
+		/* The decoder proved the record inside the region. */
 		offset += prefix.record_bytes;
 	}
+	if (!erofs->features.plain_prefixes)
+		return (FSIMG_OK);
 	return (erofs_claim(verifier, EROFS_CLAIM_EXCLUSIVE, start,
 	    offset - start, EROFS_CLAIM_NO_INODE, error));
 }
 
 /*
- * Absorb length infix bytes at volume offset into hash, a chunk per read
- * and unit of work; the record holding them lies inside the domain.
+ * length bytes at offset of the long-prefix table's region, a range the
+ * caller proved inside it: the volume's primary space for a plain table,
+ * or the packed inode's content.
+ */
+static fsimg_status_t
+prefix_read(fsimg_reader_t *reader, uint64_t offset, size_t length,
+    void *out, fsimg_error_t *error)
+{
+	fsimg_erofs_reader_t *erofs = erofs_state(reader);
+
+	if (erofs->features.plain_prefixes)
+		return (erofs_meta_read(reader, EROFS_SPACE_PRIMARY, offset,
+		    length, out, error));
+	return (erofs_content_read(reader, &erofs->packed, offset, length,
+	    out, error));
+}
+
+/*
+ * Absorb length infix bytes at offset of the table's region into hash, a
+ * chunk per read and unit of work; the record holding them lies inside the
+ * region.
  */
 static fsimg_status_t
 infix_absorb(fsimg_reader_t *reader, uint64_t offset, uint16_t length,
@@ -234,8 +258,8 @@ infix_absorb(fsimg_reader_t *reader, uint64_t offset, uint16_t length,
 		    length - done;
 		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
 		if (status == FSIMG_OK)
-			status = erofs_meta_read(reader, EROFS_SPACE_PRIMARY,
-			    offset + done, take, chunk, error);
+			status = prefix_read(reader, offset + done, take,
+			    chunk, error);
 		if (status != FSIMG_OK)
 			return (status);
 		erofs_name_hash_absorb(hash, chunk, take);

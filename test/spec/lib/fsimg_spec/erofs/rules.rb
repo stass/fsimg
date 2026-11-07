@@ -17,14 +17,16 @@ module FsimgSpec
       NSEC = 1_000_000_000
       # The incompatible feature bits this reader implements (design:
       # Features): right-aligned LZ4 streams, the compression configuration
-      # with big clusters, chunk-based files, the second algorithm slot and
-      # the long-prefix table. Every other bit, known or not, is refused at
-      # open. The model holds no compressed inode: map headers and indexes
+      # with big clusters, chunk-based files, the second algorithm slot,
+      # compressed inline tails, fragments with the packed inode and
+      # deduplicated clusters, and the long-prefix table. Every other bit,
+      # known or not, is refused at open. The model holds no compressed inode: map headers and indexes
       # are tested by test/erofs.c and the producer fixtures.
       PREFIXES_FEATURE = 0x40
       CHUNKED_FILE = 0x04
       BIT_48 = 0x80
-      COMPRESSION_FEATURES = 0x0b # LZ4_0PADDING, COMPR_CFGS, COMPR_HEAD2
+      # LZ4_0PADDING, COMPR_CFGS, COMPR_HEAD2, ZTAILPACKING, FRAGMENTS (DEDUPE)
+      COMPRESSION_FEATURES = 0x3b
       READABLE_INCOMPAT = PREFIXES_FEATURE | CHUNKED_FILE | COMPRESSION_FEATURES
       BUILTIN_PREFIXES = [1, 2, 3, 4, 6].freeze
       LONG_PREFIX = 0x80

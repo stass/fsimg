@@ -1195,13 +1195,19 @@ dirent_parse(const unsigned char *bytes, size_t length, size_t count,
  * The map header of a compressed inode. Byte 6 names the head-1 algorithm
  * in its low four bits and the head-2 algorithm in its high four; byte 7
  * holds the logical cluster size as a shift above the block size in bits 0
- * to 3 and the whole-file fragment mark in bit 7. Whether a named algorithm
- * is configured is judged when a record of its head type is used, since a
- * file need not use both. The reader requires a logical cluster of one
- * block, and a compact index with 2-byte groups permitted: no producer
- * writes another, so either is unsupported. A structure whose feature the
- * volume lacks is corrupt; the inline tail and fragments it has are not
- * read, and are unsupported.
+ * to 3 and the whole-file fragment mark in bit 7. With the mark set, the
+ * header with that bit cleared is a 64-bit offset into the packed inode,
+ * and nothing else is read; producers write it only in a full-index inode
+ * (E8, e8-lz4-allfrag, e8-lz4-zdir), so a compact one is unsupported.
+ * Otherwise the first word is the fragment offset's low half under the
+ * fragment advice, or holds the inline tail's stored length in its high
+ * half under the inline-tail advice, which may not be zero. Both at once
+ * would give the word two meanings, which no producer writes and no reader
+ * agrees on: unsupported. Whether a named algorithm is configured is judged
+ * when a record of its head type is used, since a file need not use both.
+ * The reader requires a logical cluster of one block, and a compact index
+ * with 2-byte groups permitted: no producer writes another, so either is
+ * unsupported. A structure whose feature the volume lacks is corrupt.
  */
 fsimg_status_t
 erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
@@ -1209,14 +1215,22 @@ erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
 {
 	uint16_t advice = fsimg_load_le16(raw + 4);
 	uint8_t algorithms = raw[6], cluster_bits = raw[7];
+	uint16_t tail_bytes = 0;
 	bool big_head1, big_head2;
 
 	if ((cluster_bits & 0x80) != 0) {
 		if ((sb->incompat & EROFS_INCOMPAT_FRAGMENTS) == 0)
 			return (reject(FSIMG_ECORRUPT,
 			    "whole-file fragment without FRAGMENTS", what));
-		return (reject(FSIMG_EUNSUPPORTED, "whole-file fragment",
-		    what));
+		if (layout != EROFS_LAYOUT_COMPRESSED_FULL)
+			return (reject(FSIMG_EUNSUPPORTED,
+			    "whole-file fragment in a compact index", what));
+		*out = (erofs_zheader_t){
+			.fragment_offset = fsimg_load_le64(raw) &
+			    ~(UINT64_C(1) << 63),
+			.whole_fragment = true
+		};
+		return (FSIMG_OK);
 	}
 	if ((cluster_bits & 0x0f) != 0)
 		return (reject(FSIMG_EUNSUPPORTED,
@@ -1229,14 +1243,18 @@ erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
 			return (reject(FSIMG_ECORRUPT,
 			    "compressed inline tail without ZTAILPACKING",
 			    what));
-		return (reject(FSIMG_EUNSUPPORTED, "compressed inline tail",
-		    what));
+		tail_bytes = fsimg_load_le16(raw + 2);
+		if (tail_bytes == 0)
+			return (reject(FSIMG_ECORRUPT,
+			    "compressed inline tail of zero bytes", what));
 	}
 	if ((advice & EROFS_ADVICE_FRAGMENT) != 0) {
 		if ((sb->incompat & EROFS_INCOMPAT_FRAGMENTS) == 0)
 			return (reject(FSIMG_ECORRUPT,
 			    "fragment without FRAGMENTS", what));
-		return (reject(FSIMG_EUNSUPPORTED, "packed fragment", what));
+		if ((advice & EROFS_ADVICE_INLINE_TAIL) != 0)
+			return (reject(FSIMG_EUNSUPPORTED,
+			    "compressed inline tail with a fragment", what));
 	}
 
 	big_head1 = (advice & EROFS_ADVICE_BIG_HEAD1) != 0;
@@ -1256,7 +1274,10 @@ erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
 	}
 
 	*out = (erofs_zheader_t){
+		.fragment_offset = (advice & EROFS_ADVICE_FRAGMENT) != 0 ?
+		    fsimg_load_le32(raw) : 0,
 		.advice = advice,
+		.tail_bytes = tail_bytes,
 		.head1_algorithm = algorithms & 0x0f,
 		.head2_algorithm = algorithms >> 4
 	};
@@ -1272,8 +1293,10 @@ erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
  * backward distance one; big says whether the inode permits big clusters,
  * without which a marker is corrupt. Bits 2 to 14 of the advice word have
  * no meaning this reader knows and are unsupported. A zero backward
- * distance or count is corrupt; so is a marker with bits above its count,
- * which no count fits. The forward distance is not read (erofs_zrecord_t).
+ * distance is corrupt; so is a marker with bits above its count, which no
+ * count fits. A zero count is judged where a cluster uses it, since one
+ * follows a fragment's or inline tail's head. The forward distance is not
+ * read (erofs_zrecord_t).
  */
 fsimg_status_t
 erofs_full_record_decode(const unsigned char *raw, bool big,
@@ -1312,9 +1335,6 @@ erofs_full_record_decode(const unsigned char *raw, bool big,
 		record.backward = backward_field;
 	if (record.backward == 0)
 		return (reject(FSIMG_ECORRUPT, "index backward distance zero",
-		    what));
-	if (record.marker && record.marker_blocks == 0)
-		return (reject(FSIMG_ECORRUPT, "count marker of zero blocks",
 		    what));
 	*out = record;
 	return (FSIMG_OK);
@@ -1425,10 +1445,13 @@ erofs_compact_locate(const erofs_compact_layout_t *layout, uint64_t record,
  *
  * Every record of the group is checked, not only the one a lookup wants,
  * so a decoded group's verdict depends on its bytes alone: a zero backward
- * distance, a marker without big clusters, a marker of zero blocks or
- * directly after a non-head, a non-head right after its head without a
+ * distance, a marker without big clusters or directly after a
+ * non-head, a non-head right after its head without a
  * marker under big clusters, and a walk landing on the wrong record type
- * are corrupt.
+ * are corrupt. A count marker's value is the one exception: a zero count is
+ * legal after the head of an inline tail or a fragment, which only the
+ * lookup knows, so the lookup judges it (zmap.c, cluster_blocks()) and a
+ * read that never reaches the cluster before such a marker does not.
  */
 fsimg_status_t
 erofs_compact_group_decode(const unsigned char *bytes,
@@ -1464,9 +1487,6 @@ erofs_compact_group_decode(const unsigned char *bytes,
 			record->marker = true;
 			record->marker_blocks = value & RECORD_COUNT_MASK;
 			record->backward = 1;
-			if (record->marker_blocks == 0)
-				return (reject(FSIMG_ECORRUPT,
-				    "count marker of zero blocks", what));
 			continue;
 		}
 		if (i == last) {

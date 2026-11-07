@@ -474,10 +474,29 @@
   stays green. Return the status class from `refusal_of` and require it to
   agree with the table.
 
-* [Low] **EROFS inline tails use their own window** (`lib/formats/erofs/`):
-  `content.c` copies an inline tail into a one-block `tail_window` charged at
-  open, while the driver design puts tails in the content decode window,
-  which `cluster.c` now provides. Fold the tail window into it.
+* [Low] **EROFS fragments travel as clusters** (`lib/formats/erofs/zmap.c`,
+  `map.c`, `cluster.c`): `erofs_zmap` returns a fragment as an
+  `erofs_cluster_t` of source `EROFS_SOURCE_PACKED`, which has no stored
+  bytes, so `erofs_window_fill` must refuse it, and `extent_find` threads a
+  `packed` flag whose refusal open's `packed_load` already makes
+  unreachable. Return a fragment's base as its own result kind and drop the
+  flag, so neither guard is needed. Fragment lookups also alternate the
+  file's and the packed inode's index units through the one-NID `zcache`.
+
+* [Low] **EROFS tail window keys carry no metadata space**
+  (`lib/formats/erofs/cluster.c` `input_read`): an inline tail is read from
+  the primary space and its key has no space field, which the driver design
+  requires once the metadata box reads. Carry the space in `erofs_cluster_t`
+  when the box is implemented.
+
+* [Medium] **EROFS hostile tests for the packed inode** (`test/erofs.c`,
+  `test/erofs-verify.c`): no test covers long prefixes outside a plain table
+  with no packed inode, a flat-inline or chunk-based packed inode, a corrupt
+  packed cluster no file references, a compressed inline tail in the
+  verifier, or alternating window fills of two inodes' tails. The count in
+  the marker after the last head under tail or fragment advice is never
+  judged (`zmap.c` `last_cluster`; the record's structure is decoded as any
+  other); test that nothing reads it.
 
 * [Low] **The CLI chooses the allocation unit's noun by format name**
   (`cmd/fsimg/display.c` `format_counts_blocks`): each block-based format

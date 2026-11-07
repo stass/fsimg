@@ -32,16 +32,30 @@
  * which zmap.c finds; the cluster's stored blocks must lie inside the
  * content domain, and its stored and decoded lengths inside the cluster
  * limits, 1 MiB and 12 MiB. A larger cluster is unsupported rather than
- * corrupt: the limits are the reference reader's, not the format's.
+ * corrupt: the limits are the reference reader's, not the format's. An
+ * inline tail, flat or compressed, is a cluster too, stored in the body.
+ *
+ * A fragment maps through the packed inode. For a file of 10000 bytes
+ * whose last cluster, [6000, 10000), is a fragment at packed offset 50000,
+ * offset 7000 is packed offset 51000; if the packed inode's cluster holding
+ * it is [49152, 53248), the extent returned is the file's [6000, 9248), the
+ * part of the fragment that cluster holds, read from the cluster's decoded
+ * bytes 848 on. The packed inode uses no fragment of its own, which the
+ * mapping of it checks, so the mapping nests exactly once.
  */
 
 static fsimg_status_t	chunk_extent(fsimg_reader_t *, const erofs_inode_t *,
 			    uint64_t, erofs_extent_t *, fsimg_error_t *);
 static fsimg_status_t	cluster_extent(fsimg_reader_t *,
-			    const erofs_inode_t *, uint64_t, erofs_extent_t *,
+			    const erofs_inode_t *, uint64_t, bool, erofs_extent_t *,
 			    fsimg_error_t *);
+static fsimg_status_t	extent_find(fsimg_reader_t *, const erofs_inode_t *,
+			    uint64_t, bool, erofs_extent_t *, fsimg_error_t *);
 static fsimg_status_t	flat_extent(const fsimg_reader_t *,
 			    const erofs_inode_t *, uint64_t, erofs_extent_t *,
+			    fsimg_error_t *);
+static fsimg_status_t	fragment_extent(fsimg_reader_t *,
+			    const erofs_cluster_t *, uint64_t, erofs_extent_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	stored_extent(const fsimg_reader_t *, uint64_t,
 			    uint64_t, uint64_t, erofs_extent_t *,
@@ -55,6 +69,17 @@ static fsimg_status_t	stored_extent(const fsimg_reader_t *, uint64_t,
 fsimg_status_t
 erofs_map(fsimg_reader_t *reader, const erofs_inode_t *inode,
     uint64_t offset, erofs_extent_t *out, fsimg_error_t *error)
+{
+	return (extent_find(reader, inode, offset, false, out, error));
+}
+
+/*
+ * The extent of inode holding offset; packed says inode is the packed
+ * inode, mapped for a fragment, which may not use a fragment itself.
+ */
+static fsimg_status_t
+extent_find(fsimg_reader_t *reader, const erofs_inode_t *inode,
+    uint64_t offset, bool packed, erofs_extent_t *out, fsimg_error_t *error)
 {
 	const fsimg_erofs_reader_t *erofs = erofs_state(reader);
 	uint64_t stored_bytes;
@@ -73,31 +98,45 @@ erofs_map(fsimg_reader_t *reader, const erofs_inode_t *inode,
 		if (offset < stored_bytes)
 			return (flat_extent(reader, inode, stored_bytes, out,
 			    error));
+		/* erofs_inode_load() proved the body inside the domain. */
 		*out = (erofs_extent_t){
 			.logical_offset = stored_bytes,
-			.storage_offset = inode->layout_offset,
 			.length = inode->size - stored_bytes,
-			.kind = EROFS_EXTENT_INLINE
+			.kind = EROFS_EXTENT_CLUSTER,
+			.cluster = {
+				.logical_offset = stored_bytes,
+				.logical_length = inode->size - stored_bytes,
+				.storage_offset = inode->offset +
+				    inode->tail_offset,
+				.stored_bytes = (uint32_t)(inode->size -
+				    stored_bytes),
+				.source = EROFS_SOURCE_INLINE,
+				.mode = EROFS_CLUSTER_SHIFTED
+			}
 		};
 		return (FSIMG_OK);
 	case EROFS_LAYOUT_CHUNK_BASED:
 		return (chunk_extent(reader, inode, offset, out, error));
 	case EROFS_LAYOUT_COMPRESSED_FULL:
 	case EROFS_LAYOUT_COMPRESSED_COMPACT:
-		return (cluster_extent(reader, inode, offset, out, error));
+		return (cluster_extent(reader, inode, offset, packed, out,
+		    error));
 	}
 	return (erofs_reject(error, FSIMG_ECORRUPT, "inode data layout"));
 }
 
 /*
- * The cluster extent of compressed inode holding offset. A cluster past the
- * size limits is unsupported and one outside the volume corrupt; erofs_zmap()
- * returns a cluster containing offset inside the inode's size, so one that
- * does not is a driver defect, FSIMG_EINVAL.
+ * The cluster extent of compressed inode holding offset, or the fragment
+ * extent when the cluster is a fragment, which the packed inode may not
+ * use. A cluster past the size limits is unsupported and one outside the
+ * volume corrupt; erofs_zmap() returns a cluster containing offset inside
+ * the inode's size, so one that does not is a driver defect, FSIMG_EINVAL.
+ * An inline tail lies in the body, which erofs_inode_load() proved inside
+ * the domain and a block.
  */
 static fsimg_status_t
 cluster_extent(fsimg_reader_t *reader, const erofs_inode_t *inode,
-    uint64_t offset, erofs_extent_t *out, fsimg_error_t *error)
+    uint64_t offset, bool packed, erofs_extent_t *out, fsimg_error_t *error)
 {
 	erofs_cluster_t cluster;
 	fsimg_status_t status;
@@ -105,6 +144,17 @@ cluster_extent(fsimg_reader_t *reader, const erofs_inode_t *inode,
 	status = erofs_zmap(reader, inode, offset, &cluster, error);
 	if (status != FSIMG_OK)
 		return (status);
+	if (cluster.logical_offset > offset ||
+	    !fsimg_range_fits(cluster.logical_offset, cluster.logical_length,
+	    inode->size))
+		return (erofs_reject(error, FSIMG_EINVAL,
+		    "cluster outside the inode's content"));
+	if (cluster.source == EROFS_SOURCE_PACKED) {
+		if (packed)
+			return (erofs_reject(error, FSIMG_ECORRUPT,
+			    "the packed inode uses a fragment"));
+		return (fragment_extent(reader, &cluster, offset, out, error));
+	}
 
 	if (cluster.stored_bytes > EROFS_CLUSTER_STORED_MAX)
 		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
@@ -112,15 +162,11 @@ cluster_extent(fsimg_reader_t *reader, const erofs_inode_t *inode,
 	if (cluster.logical_length > EROFS_CLUSTER_DECODED_MAX)
 		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
 		    "decoded cluster above 12 MiB"));
-	if (!fsimg_range_fits(cluster.storage_offset, cluster.stored_bytes,
+	if (cluster.source == EROFS_SOURCE_BLOCKS &&
+	    !fsimg_range_fits(cluster.storage_offset, cluster.stored_bytes,
 	    reader->content_domain.length))
 		return (erofs_reject(error, FSIMG_ECORRUPT,
 		    "physical cluster outside the volume"));
-	if (cluster.logical_offset > offset ||
-	    !fsimg_range_fits(cluster.logical_offset, cluster.logical_length,
-	    inode->size))
-		return (erofs_reject(error, FSIMG_EINVAL,
-		    "cluster outside the inode's content"));
 
 	*out = (erofs_extent_t){
 		.logical_offset = cluster.logical_offset,
@@ -129,6 +175,49 @@ cluster_extent(fsimg_reader_t *reader, const erofs_inode_t *inode,
 		.kind = EROFS_EXTENT_CLUSTER,
 		.cluster = cluster
 	};
+	return (FSIMG_OK);
+}
+
+/*
+ * The extent of a file's fragment cluster holding offset: the
+ * fragment's whole range must lie inside the packed inode's content, and
+ * the packed inode's extent holding offset's byte there, clipped to the
+ * fragment, becomes the file's extent. Every operand is below the packed
+ * inode's size once the range fits it, so no sum wraps.
+ */
+static fsimg_status_t
+fragment_extent(fsimg_reader_t *reader, const erofs_cluster_t *cluster,
+    uint64_t offset, erofs_extent_t *out, fsimg_error_t *error)
+{
+	fsimg_erofs_reader_t *erofs = erofs_state(reader);
+	uint64_t base = cluster->storage_offset;
+	uint64_t length = cluster->logical_length;
+	uint64_t first, end, inner_end;
+	erofs_extent_t inner;
+	fsimg_status_t status;
+
+	if (!erofs->has_packed)
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "fragment without a packed inode"));
+	if (!fsimg_range_fits(base, length, erofs->packed.size))
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "fragment past the packed inode's size"));
+	status = extent_find(reader, &erofs->packed,
+	    base + (offset - cluster->logical_offset), true, &inner, error);
+	if (status != FSIMG_OK)
+		return (status);
+
+	first = inner.logical_offset > base ? inner.logical_offset : base;
+	inner_end = inner.logical_offset + inner.length;
+	end = inner_end < base + length ? inner_end : base + length;
+	*out = inner;
+	out->logical_offset = cluster->logical_offset + (first - base);
+	out->length = end - first;
+	out->fragment = true;
+	if (inner.kind == EROFS_EXTENT_STORED)
+		out->storage_offset += first - inner.logical_offset;
+	else if (inner.kind == EROFS_EXTENT_CLUSTER)
+		out->cluster_skip = first - inner.logical_offset;
 	return (FSIMG_OK);
 }
 

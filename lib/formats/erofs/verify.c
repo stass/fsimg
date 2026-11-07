@@ -26,11 +26,18 @@
  * two zero bytes.
  *
  * Claims. Every structure the walk reaches claims its bytes of the volume
- * in one of erofs_claim_class_t's classes: the superblock region and the
- * long-prefix table before the walk, then each inode's body, its
- * directory blocks or file data, and its shared attribute entries. Sorted
- * by start, one sweep applies the ownership rule. A record is the start
- * (u64), the length (u64), the owning NID (u64) and the class (u8).
+ * in one of erofs_claim_class_t's classes: the superblock region, the
+ * long-prefix table and the packed inode before the walk, then each
+ * inode's body, its directory blocks or file data, and its shared
+ * attribute entries. Sorted by start, one sweep applies the ownership
+ * rule. A record is the start (u64), the length (u64), the owning NID (u64)
+ * and the class (u8).
+ *
+ * The packed inode is claimed once, as a file whose every cluster is also
+ * decoded, so a fragment's bytes are claimed and checked where they are
+ * stored. A file's fragment extents claim nothing; mapping them proves the
+ * fragment inside the packed inode's content. No entry may name the packed
+ * inode, which is not in the namespace.
  *
  * Without a visited set a hard-linked inode is reached once per name and
  * claims its body and data each time. Its body claims are identical
@@ -89,6 +96,8 @@ static fsimg_status_t	inode_record(fsimg_reader_t *, erofs_verifier_t *,
 static fsimg_status_t	inode_references_check(uint64_t, uint64_t, uint64_t,
 			    uint32_t, uint8_t, fsimg_error_t *);
 static fsimg_status_t	overlap(uint64_t, const char *, fsimg_error_t *);
+static fsimg_status_t	packed_check(fsimg_reader_t *, erofs_verifier_t *,
+			    fsimg_error_t *);
 static fsimg_status_t	reference_add(fsimg_stream_t *, const reference_t *,
 			    fsimg_error_t *);
 static int		reference_compare(const void *, size_t, const void *,
@@ -101,7 +110,7 @@ static fsimg_status_t	scope_check(const fsimg_erofs_reader_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	scratch_corrupt(fsimg_error_t *, const char *);
 static fsimg_status_t	storage_claim(fsimg_reader_t *, erofs_verifier_t *,
-			    const erofs_inode_t *, erofs_claim_class_t,
+			    const erofs_inode_t *, erofs_claim_class_t, bool,
 			    fsimg_error_t *);
 static fsimg_status_t	verifier_new(fsimg_reader_t *, erofs_verifier_t **,
 			    fsimg_error_t *);
@@ -169,6 +178,8 @@ erofs_verify(fsimg_reader_t *reader, unsigned flags,
 	    EROFS_SUPER_BASE_BYTES +
 	    (uint64_t)sb->extension_slots * EROFS_SUPER_SLOT_BYTES,
 	    EROFS_CLAIM_NO_INODE, error);
+	if (status == FSIMG_OK)
+		status = packed_check(reader, verifier, error);
 	if (status != FSIMG_OK)
 		goto done;
 
@@ -288,9 +299,13 @@ inode_record(fsimg_reader_t *reader, erofs_verifier_t *verifier,
     fsimg_stream_t *references, const erofs_inode_t *inode, uint64_t parent,
     fsimg_error_t *error)
 {
+	const fsimg_erofs_reader_t *erofs = erofs_state(reader);
 	bool directory = inode->kind == FSIMG_ENTRY_DIRECTORY;
 	fsimg_status_t status;
 
+	if (erofs->has_packed && inode->nid == erofs->packed.nid)
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "a directory entry names the packed inode"));
 	status = reference_add(references, &(reference_t){
 		.nid = inode->nid,
 		.nlink = inode->nlink,
@@ -313,12 +328,12 @@ inode_record(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 	switch (inode->kind) {
 	case FSIMG_ENTRY_DIRECTORY:
 		status = storage_claim(reader, verifier, inode,
-		    EROFS_CLAIM_EXCLUSIVE, error);
+		    EROFS_CLAIM_EXCLUSIVE, false, error);
 		break;
 	case FSIMG_ENTRY_FILE:
 	case FSIMG_ENTRY_SYMLINK:
 		status = storage_claim(reader, verifier, inode, EROFS_CLAIM_DATA,
-		    error);
+		    false, error);
 		break;
 	default:
 		break;
@@ -329,22 +344,51 @@ inode_record(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 }
 
 /*
+ * The packed inode, when the volume has one: its body, its storage as data
+ * and its attributes, with every cluster decoded once, which proves the
+ * stored bytes of every fragment whether or not a reachable file uses it.
+ */
+static fsimg_status_t
+packed_check(fsimg_reader_t *reader, erofs_verifier_t *verifier,
+    fsimg_error_t *error)
+{
+	const fsimg_erofs_reader_t *erofs = erofs_state(reader);
+	const erofs_inode_t *packed = &erofs->packed;
+	fsimg_status_t status;
+
+	if (!erofs->has_packed)
+		return (FSIMG_OK);
+	/* erofs_inode_load() proved the body inside the domain. */
+	status = erofs_claim(verifier, EROFS_CLAIM_BODY, packed->offset,
+	    packed->body_bytes, packed->nid, error);
+	if (status == FSIMG_OK)
+		status = storage_claim(reader, verifier, packed,
+		    EROFS_CLAIM_DATA, true, error);
+	if (status == FSIMG_OK)
+		status = erofs_xattr_verify(reader, packed, verifier, error);
+	return (status);
+}
+
+/*
  * Claim every stored extent of inode's content in class, mapped from
- * offset 0 to its size. An extent occupies whole blocks, which erofs_map()
+ * offset 0 to its size, decoding each cluster into the metadata window too
+ * when decode says so. An extent occupies whole blocks, which erofs_map()
  * proved inside the content domain, so rounding its length up to a block
  * stays inside it. A cluster extent claims its physical cluster's blocks,
  * once this build is known to decode it: a cluster it cannot decode leaves
- * the content unverified, FSIMG_EUNSUPPORTED. An inline extent lies in the
- * body, already claimed, and a chunk hole stores nothing. Chunks naming one
- * block claim it once each: the sweep lets data claims overlap, while a
+ * the content unverified, FSIMG_EUNSUPPORTED. An inline tail lies in the
+ * body, already claimed, a fragment in the packed inode, claimed by
+ * packed_check(), and a chunk hole stores nothing. Chunks naming one block
+ * claim it once each: the sweep lets data claims overlap, while a
  * directory's blocks are exclusive, so a directory whose chunks share a
  * block is a finding. Each extent is one unit of work.
  */
 static fsimg_status_t
 storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
-    const erofs_inode_t *inode, erofs_claim_class_t class,
+    const erofs_inode_t *inode, erofs_claim_class_t class, bool decode,
     fsimg_error_t *error)
 {
+	erofs_window_t *window = &erofs_state(reader)->meta_window;
 	erofs_extent_t extent;
 	uint64_t offset, block_mask;
 	fsimg_status_t status;
@@ -357,6 +401,8 @@ storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 			status = erofs_map(reader, inode, offset, &extent, error);
 		if (status != FSIMG_OK)
 			return (status);
+		if (extent.fragment)
+			continue;
 		switch (extent.kind) {
 		case EROFS_EXTENT_STORED:
 			status = erofs_claim(verifier, class,
@@ -367,13 +413,16 @@ storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 		case EROFS_EXTENT_CLUSTER:
 			status = erofs_cluster_readable(reader,
 			    &extent.cluster, error);
-			if (status == FSIMG_OK)
+			if (status == FSIMG_OK && decode)
+				status = erofs_window_fill(reader, window,
+				    &extent.cluster, error);
+			if (status == FSIMG_OK &&
+			    extent.cluster.source == EROFS_SOURCE_BLOCKS)
 				status = erofs_claim(verifier, class,
 				    extent.cluster.storage_offset,
 				    extent.cluster.stored_bytes, inode->nid,
 				    error);
 			break;
-		case EROFS_EXTENT_INLINE:
 		case EROFS_EXTENT_ZERO:
 			break;
 		}

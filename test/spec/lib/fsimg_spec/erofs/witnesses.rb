@@ -59,8 +59,8 @@ module FsimgSpec
           "lz4_0padding" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x1)], valid: true),
           "compr_cfgs" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x2), u16(sb(0x54), 0)], valid: true),
           "device_table" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x8)], valid: true),
-          "ztailpacking" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x10)]),
-          "fragments" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x20)]),
+          "ztailpacking" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x10)], valid: true),
+          "fragments" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x20)], valid: true),
           "bit_48" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x80)]),
           "unknown_bit" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x200)])
         },

@@ -38,10 +38,17 @@
  * give every offset one cluster by construction. Each record visited is one
  * unit of work.
  *
- * Only the records a lookup needs are read. The reader keeps the inode's
- * decoded header and the last index unit read, a compact group or up to 16
- * full records (erofs_zcache_t), so consecutive lookups through one file
- * read each index byte about once.
+ * The file's last cluster may be stored elsewhere than in blocks. Under
+ * the inline-tail advice its stored bytes are the inode's inline tail, and
+ * under the fragment advice its bytes are a fragment, a range of the packed
+ * inode's content; either way its head record's block field names no block
+ * and no count marker follows it. A whole-file fragment has no index at
+ * all: the whole file is one fragment.
+ *
+ * Only the records a lookup needs are read. erofs_inode_load() decoded the
+ * map header, and the reader keeps the last index unit read, a compact
+ * group or up to 16 full records (erofs_zcache_t), so consecutive lookups
+ * through one file read each index byte about once.
  */
 
 /* One lookup's view of an inode's index. */
@@ -66,8 +73,10 @@ static fsimg_status_t	cluster_kind(const zindex_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	head_find(zindex_t *, uint64_t, uint64_t *,
 			    erofs_zrecord_t *, fsimg_error_t *);
-static fsimg_status_t	index_open(fsimg_reader_t *, const erofs_inode_t *,
-			    zindex_t *, fsimg_error_t *);
+static void		index_open(fsimg_reader_t *, const erofs_inode_t *,
+			    zindex_t *);
+static fsimg_status_t	last_cluster(const zindex_t *, const erofs_zrecord_t *,
+			    erofs_cluster_t *, fsimg_error_t *);
 static fsimg_status_t	record_load(zindex_t *, uint64_t, erofs_zrecord_t *,
 			    fsimg_error_t *);
 static uint64_t		record_start(const zindex_t *, uint64_t,
@@ -78,8 +87,9 @@ static fsimg_status_t	unit_load(zindex_t *, const erofs_index_unit_t *,
 /*
  * The physical cluster of compressed inode holding logical offset, which
  * erofs_map() proved below the size: its logical extent, where its stored
- * blocks lie and how they decode. The extent contains offset. The caller
- * checks the cluster against the volume and the cluster limits.
+ * bytes lie and how they decode, or, for a fragment, where in the packed
+ * inode its bytes start. The extent contains offset. The caller checks the
+ * cluster against its source and the cluster limits.
  */
 fsimg_status_t
 erofs_zmap(fsimg_reader_t *reader, const erofs_inode_t *inode,
@@ -92,37 +102,53 @@ erofs_zmap(fsimg_reader_t *reader, const erofs_inode_t *inode,
 	uint32_t blocks;
 	fsimg_status_t status;
 
-	status = index_open(reader, inode, &index, error);
-	if (status != FSIMG_OK)
-		return (status);
+	bzero(&cluster, sizeof(cluster));
+	if (inode->zheader.whole_fragment) {
+		cluster.logical_length = inode->size;
+		cluster.source = EROFS_SOURCE_PACKED;
+		cluster.storage_offset = inode->zheader.fragment_offset;
+		*out = cluster;
+		return (FSIMG_OK);
+	}
+
+	index_open(reader, inode, &index);
 	status = head_find(&index, offset, &head_record, &head, error);
 	if (status != FSIMG_OK)
 		return (status);
 	start = record_start(&index, head_record, &head);
-
-	bzero(&cluster, sizeof(cluster));
-	status = cluster_kind(&index, &head, &cluster, error);
-	if (status != FSIMG_OK)
-		return (status);
-	status = cluster_blocks(&index, head_record, &head, &cluster,
-	    &blocks, error);
-	if (status != FSIMG_OK)
-		return (status);
 	status = cluster_end(&index, head_record, start, &end, error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (end <= offset)
 		return (erofs_reject(error, FSIMG_ECORRUPT,
 		    "index distances skip a head"));
-
-	/*
-	 * A block number has 32 bits and a count 11, and B is at most 2^12,
-	 * so neither product wraps; erofs_map() bounds both.
-	 */
 	cluster.logical_offset = start;
 	cluster.logical_length = end - start;
-	cluster.storage_offset = head.block << index.blkszbits;
-	cluster.stored_bytes = blocks << index.blkszbits;
+
+	if (end == inode->size && (inode->zheader.advice &
+	    (EROFS_ADVICE_INLINE_TAIL | EROFS_ADVICE_FRAGMENT)) != 0) {
+		status = last_cluster(&index, &head, &cluster, error);
+		if (status != FSIMG_OK)
+			return (status);
+	} else {
+		status = cluster_kind(&index, &head, &cluster, error);
+		if (status == FSIMG_OK)
+			status = cluster_blocks(&index, head_record, &head,
+			    &cluster, &blocks, error);
+		if (status != FSIMG_OK)
+			return (status);
+		/*
+		 * A block number has 32 bits and a count 11, and B is at
+		 * most 2^12, so neither product wraps; erofs_map() bounds
+		 * both.
+		 */
+		cluster.storage_offset = head.block << index.blkszbits;
+		cluster.stored_bytes = blocks << index.blkszbits;
+	}
+	if (cluster.source == EROFS_SOURCE_PACKED) {
+		*out = cluster;
+		return (FSIMG_OK);
+	}
 
 	if (cluster.mode != EROFS_CLUSTER_COMPRESSED &&
 	    cluster.logical_length > cluster.stored_bytes)
@@ -138,42 +164,29 @@ erofs_zmap(fsimg_reader_t *reader, const erofs_inode_t *inode,
 }
 
 /*
- * Prepare a lookup of inode: its map header, decoded once per inode and
- * kept in the reader's cache, and where its records lie.
+ * Prepare a lookup of inode: where its records lie, and the reader's index
+ * unit cache, which holds another inode's unit only until this lookup.
  */
-static fsimg_status_t
+static void
 index_open(fsimg_reader_t *reader, const erofs_inode_t *inode,
-    zindex_t *index, fsimg_error_t *error)
+    zindex_t *index)
 {
 	fsimg_erofs_reader_t *erofs = erofs_state(reader);
 	erofs_zcache_t *cache = &erofs->zcache;
-	unsigned char raw[EROFS_ZHEADER_BYTES];
 	uint64_t header_end;
-	const char *what;
-	fsimg_status_t status;
 
-	if (!cache->header_valid || cache->nid != inode->nid) {
-		cache->header_valid = false;
+	if (cache->nid != inode->nid) {
 		cache->unit_valid = false;
-		status = erofs_body_read(reader, inode, inode->layout_offset,
-		    sizeof(raw), raw, error);
-		if (status != FSIMG_OK)
-			return (status);
-		status = erofs_zheader_decode(raw, &erofs->super,
-		    inode->layout, &cache->header, &what);
-		if (status != FSIMG_OK)
-			return (erofs_reject(error, status, what));
 		cache->nid = inode->nid;
-		cache->header_valid = true;
 	}
 
 	/* erofs_inode_decode() measured the body from these same values. */
 	*index = (zindex_t){
 		.reader = reader,
 		.inode = inode,
-		.header = cache->header,
+		.header = inode->zheader,
 		.blkszbits = erofs->super.blkszbits,
-		.big = (cache->header.advice & (EROFS_ADVICE_BIG_HEAD1 |
+		.big = (inode->zheader.advice & (EROFS_ADVICE_BIG_HEAD1 |
 		    EROFS_ADVICE_BIG_HEAD2)) != 0
 	};
 	index->records = inode->size >> index->blkszbits;
@@ -188,6 +201,41 @@ index_open(fsimg_reader_t *reader, const erofs_inode_t *inode,
 		erofs_compact_layout(header_end, index->records,
 		    &index->compact);
 	}
+}
+
+/*
+ * The file's last cluster, head's, when the inode stores it elsewhere: a
+ * fragment of the packed inode at the header's offset, which a full index
+ * extends with the head's block field as bits 32 to 63 (source compress.c
+ * and zmap.c); or the inline tail, decoded by its record's type like any
+ * other cluster. A plain tail on an interlaced inode has no agreed meaning
+ * (E15, e15-c-il-*) and is unsupported.
+ */
+static fsimg_status_t
+last_cluster(const zindex_t *index, const erofs_zrecord_t *head,
+    erofs_cluster_t *cluster, fsimg_error_t *error)
+{
+	const erofs_inode_t *inode = index->inode;
+	fsimg_status_t status;
+
+	if ((index->header.advice & EROFS_ADVICE_FRAGMENT) != 0) {
+		cluster->source = EROFS_SOURCE_PACKED;
+		cluster->storage_offset = index->header.fragment_offset;
+		if (inode->layout == EROFS_LAYOUT_COMPRESSED_FULL)
+			cluster->storage_offset |= head->block << 32;
+		return (FSIMG_OK);
+	}
+
+	status = cluster_kind(index, head, cluster, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (cluster->mode == EROFS_CLUSTER_INTERLACED)
+		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
+		    "plain inline tail on an interlaced inode"));
+	/* erofs_inode_load() proved the tail inside the body and a block. */
+	cluster->source = EROFS_SOURCE_INLINE;
+	cluster->storage_offset = inode->offset + inode->tail_offset;
+	cluster->stored_bytes = inode->zheader.tail_bytes;
 	return (FSIMG_OK);
 }
 
@@ -291,7 +339,10 @@ cluster_kind(const zindex_t *index, const erofs_zrecord_t *head,
  * record or no record is one block. A marker where big clusters are not
  * permitted is corrupt, and so is an LZ4 count above the configured
  * maximum, which a configuration without the record or with zero leaves
- * at one block.
+ * at one block. A marker of zero blocks is corrupt here; it is legal only
+ * after the head of an inline tail or a fragment, whose marker nothing
+ * reads, since the producer writes the stored length, zero for a fragment,
+ * there (mkfs.erofs 1.9.4 with -C16384 -E fragments, e8-lz4-big16k-frag).
  */
 static fsimg_status_t
 cluster_blocks(zindex_t *index, uint64_t head_record,
@@ -323,6 +374,9 @@ cluster_blocks(zindex_t *index, uint64_t head_record,
 	if (!next.marker)
 		return (erofs_reject(error, FSIMG_ECORRUPT,
 		    "big cluster without a count marker"));
+	if (next.marker_blocks == 0)
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "count marker of zero blocks"));
 
 	if (cluster->mode == EROFS_CLUSTER_COMPRESSED &&
 	    cluster->algorithm == EROFS_ALGORITHM_LZ4) {

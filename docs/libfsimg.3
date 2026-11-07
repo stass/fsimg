@@ -39,10 +39,10 @@ The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT,
 classic QNX6 Power-Safe volumes in either byte order, QNX4 volumes, and
 nonbootable QNX ImageFS images in either byte order.
 It reads and creates HFS Plus and HFSX volumes and EROFS volumes.
-EROFS reading includes chunk-based files and files compressed with LZ4 or
-DEFLATE, and with MicroLZMA or Zstandard in a build with liblzma 5.4 or
-libzstd; packed fragments, compressed inline tails and compressed
-directories and symbolic links are not read.
+EROFS reading includes chunk-based files and files, directories and
+symbolic links compressed with LZ4 or DEFLATE, and with MicroLZMA or
+Zstandard in a build with liblzma 5.4 or libzstd, inline compressed tails,
+packed fragments and deduplicated clusters included.
 A created EROFS volume is uncompressed, with 512- to 4096-byte blocks and
 32-bit addressing.
 A file stored in its attribute or compressed with zlib, LZVN or LZFSE is

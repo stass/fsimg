@@ -395,6 +395,12 @@ gen_tree_set_incompat(gen_tree_t *tree, uint32_t incompat)
 	gen_super_put(&tree->image, SB_INCOMPAT, incompat, 4);
 }
 
+void
+gen_tree_set_packed(gen_tree_t *tree, uint64_t nid)
+{
+	gen_super_put(&tree->image, SB_PACKED_NID, nid, 8);
+}
+
 uint32_t
 gen_tree_data(gen_tree_t *tree, const void *content, size_t size)
 {
@@ -876,8 +882,12 @@ gen_zfile_records(const gen_zfile_t *zf, unsigned blkszbits,
 			    c->head2 ? GEN_Z_HEAD2 : GEN_Z_HEAD1;
 			r->clusterofs = (uint16_t)(c->start % block);
 			r->block = first[k];
+			if (zf->last == GEN_ZL_FRAGMENT && k + 1 == zf->cluster_count &&
+			    zf->index_layout == 1)
+				r->block = (uint32_t)(zf->fragment_offset >> 32);
 			prev_head = i;
-		} else if (i == count - 1 && zf->size % block != 0) {
+		} else if (i == count - 1 && zf->size % block != 0 &&
+		    zf->last == GEN_ZL_BLOCKS) {
 			/* The end marker begins an empty cluster at size. */
 			r->type = GEN_Z_PLAIN;
 			r->clusterofs = (uint16_t)(zf->size % block);
@@ -917,16 +927,36 @@ gen_zfile_records(const gen_zfile_t *zf, unsigned blkszbits,
  * offset `at`: leading zero bytes, then the stream. The extent is the file's
  * bytes the cluster covers.
  */
+static size_t	zcluster_encode(size_t, size_t, const gen_zcluster_t *,
+		    const unsigned char *, size_t, unsigned char *);
+
 static void
 zcluster_write(gen_image_t *image, uint64_t at, size_t block,
     const gen_zcluster_t *cluster, const unsigned char *extent, size_t length)
 {
 	size_t span = (size_t)cluster->blocks * block;
 	unsigned char *stream = calloc(span != 0 ? span : 1, 1);
+	size_t stream_length;
+
+	CHECK(stream != NULL);
+	stream_length = zcluster_encode(block, span, cluster, extent, length,
+	    stream);
+	gen_put_bytes(image, at + span - stream_length, stream, stream_length);
+	free(stream);
+}
+
+/*
+ * The stored bytes of one cluster of at most span bytes into stream: a
+ * compressed or raw stream, or a plain cluster's span of block bytes with
+ * the extent in place. Returns their length.
+ */
+static size_t
+zcluster_encode(size_t block, size_t span, const gen_zcluster_t *cluster,
+    const unsigned char *extent, size_t length, unsigned char *stream)
+{
 	size_t stream_length = 0;
 	size_t ofs = (size_t)(cluster->start % block);
 
-	CHECK(stream != NULL);
 	switch (cluster->kind) {
 	case GEN_ZK_PLAIN:
 		CHECK(length <= span);
@@ -954,8 +984,25 @@ zcluster_write(gen_image_t *image, uint64_t at, size_t block,
 		stream_length = cluster->raw_length;
 		break;
 	}
-	gen_put_bytes(image, at + span - stream_length, stream, stream_length);
-	free(stream);
+	return (stream_length);
+}
+
+/*
+ * The inline tail of the file's last cluster into tail, at most a block:
+ * a plain cluster's extent, or its stream. Returns the tail's length.
+ */
+static size_t
+ztail_encode(size_t block, const gen_zfile_t *zf, unsigned char *tail)
+{
+	const gen_zcluster_t *c = &zf->clusters[zf->cluster_count - 1];
+	size_t length = (size_t)(zf->size - c->start);
+	size_t stored;
+
+	CHECK(c->blocks == 0);
+	stored = zcluster_encode(block, block, c,
+	    (const unsigned char *)zf->content + c->start, length, tail);
+	return (c->kind == GEN_ZK_PLAIN || c->kind == GEN_ZK_INTERLACED ?
+	    length : stored);
 }
 
 uint64_t
@@ -965,14 +1012,28 @@ gen_tree_add_zfile(gen_tree_t *tree, const gen_inode_t *proto,
 	size_t block = (size_t)1 << tree->blkszbits;
 	size_t header_start = round_up(gen_inode_header_bytes(proto), 8);
 	gen_zrecord_t *records;
-	size_t count, index_bytes, total_blocks = 0;
+	size_t count, index_bytes, total_blocks = 0, tail_bytes = 0;
 	gen_inode_t inode = *proto;
 	gen_zheader_t header = { 0, zf->advice, zf->algorithms, 0 };
+	unsigned char *tail = calloc(block, 1);
 	uint64_t nid, header_offset;
 
+	CHECK(tail != NULL);
 	CHECK(zf->index_layout == 1 || zf->index_layout == 3);
+	CHECK(zf->last != GEN_ZL_WHOLE || zf->index_layout == 1);
 	count = gen_zfile_records(zf, tree->blkszbits, tree->data_next, &records);
-	if (zf->index_layout == 1) {
+	if (zf->last == GEN_ZL_INLINE) {
+		tail_bytes = ztail_encode(block, zf, tail);
+		header.word0 = (uint32_t)tail_bytes << 16;
+		header.advice |= 0x08;
+	} else if (zf->last == GEN_ZL_FRAGMENT) {
+		CHECK(zf->clusters[zf->cluster_count - 1].blocks == 0);
+		header.word0 = (uint32_t)zf->fragment_offset;
+		header.advice |= 0x20;
+	}
+	if (zf->last == GEN_ZL_WHOLE) {
+		index_bytes = 8;
+	} else if (zf->index_layout == 1) {
 		index_bytes = 16 + 8 * count;
 	} else {
 		/* The index length depends on the header's place modulo 32 only. */
@@ -983,8 +1044,10 @@ gen_tree_add_zfile(gen_tree_t *tree, const gen_inode_t *proto,
 		    count, zf->advice);
 		free(scratch);
 	}
-	nid = gen_tree_slot(tree, header_start + index_bytes, 0);
-	for (size_t k = 0; k < zf->cluster_count; k++) {
+	nid = gen_tree_slot(tree, header_start + index_bytes, tail_bytes);
+	/* An inline tail or a fragment is stored elsewhere, not in blocks. */
+	for (size_t k = 0; k < zf->cluster_count - (zf->last != GEN_ZL_BLOCKS);
+	    k++) {
 		const gen_zcluster_t *c = &zf->clusters[k];
 		uint64_t end = k + 1 < zf->cluster_count ?
 		    zf->clusters[k + 1].start : zf->size;
@@ -1002,12 +1065,21 @@ gen_tree_add_zfile(gen_tree_t *tree, const gen_inode_t *proto,
 	inode.layout_word = (uint32_t)total_blocks;
 	gen_inode_write(&tree->image, &inode);
 	header_offset = gen_zheader_offset(&tree->image, proto, nid);
-	gen_zheader_put(&tree->image, header_offset, &header);
-	if (zf->index_layout == 1)
-		gen_full_index_put(&tree->image, header_offset, records, count);
-	else
-		(void)gen_compact_index_put(&tree->image, header_offset, records,
-		    count, zf->advice);
+	if (zf->last == GEN_ZL_WHOLE) {
+		gen_put(&tree->image, header_offset,
+		    zf->fragment_offset | UINT64_C(1) << 63, 8);
+	} else {
+		gen_zheader_put(&tree->image, header_offset, &header);
+		if (zf->index_layout == 1)
+			gen_full_index_put(&tree->image, header_offset, records,
+			    count);
+		else
+			(void)gen_compact_index_put(&tree->image, header_offset,
+			    records, count, header.advice);
+		gen_put_bytes(&tree->image, header_offset + index_bytes, tail,
+		    tail_bytes);
+	}
 	free(records);
+	free(tail);
 	return (nid);
 }

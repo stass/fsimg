@@ -2,8 +2,10 @@ fsimg 0.1.0 (unreleased)
 
 EROFS volumes, the Linux read-only filesystem, open, list and extract
 with 512- to 4096-byte blocks, including chunk-based files, whose holes
-read as zeros, and files compressed with LZ4 or DEFLATE through full or
-compact indexes and big physical clusters, and with MicroLZMA or Zstandard
+read as zeros, and files, directories and symbolic links compressed with
+LZ4 or DEFLATE through full or compact indexes and big physical clusters,
+inline compressed tails, packed fragments and deduplicated clusters
+included, and with MicroLZMA or Zstandard
 over the optional liblzma (5.4 or later) and libzstd. In a build without
 one of those libraries such a file fails as unsupported naming the library
 while the rest of the volume lists and extracts, and `fsimg --formats -v`
@@ -12,10 +14,9 @@ names the algorithms the build decodes. `-F erofs` names the format, inside
 checked and reported as not extracted. `W` verifies such a volume in full:
 link counts, a single name for every directory, the ownership of every
 byte range a structure uses, the shared attribute pool, the long-prefix
-table and the attribute name filters. A volume with packed fragments,
-compressed inline tails, 48-bit addressing, a metadata box or extra
-devices is refused as unsupported, and so are compressed directories and
-symbolic links.
+table, the attribute name filters and the packed inode. A volume with
+48-bit addressing, a metadata box or extra devices is refused as
+unsupported.
 
 `c -F erofs` creates EROFS volumes: uncompressed, with 512- to 4096-byte
 blocks (`-o cluster=`, 4096 by default) and 32-bit addressing, with files,

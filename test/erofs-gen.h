@@ -198,6 +198,9 @@ uint64_t	gen_tree_add(gen_tree_t *, const gen_inode_t *, const void *,
 /* The superblock's incompatible feature word. */
 void		gen_tree_set_incompat(gen_tree_t *, uint32_t);
 
+/* The superblock's packed NID. */
+void		gen_tree_set_packed(gen_tree_t *, uint64_t);
+
 /*
  * Copy size bytes into the next free data blocks, rounded up to whole blocks
  * and zero after size, and return the first block's number. A chunk's data
@@ -403,9 +406,28 @@ typedef struct gen_zcluster {
 } gen_zcluster_t;
 
 /*
+ * Where a compressed file's last cluster is stored. GEN_ZL_BLOCKS keeps it
+ * in blocks like the others. GEN_ZL_INLINE stores its stream, or a plain
+ * cluster's extent, after the index as a compressed inline tail (advice
+ * 0x08, h_idata_size in the header). GEN_ZL_FRAGMENT makes it a fragment at
+ * fragment_offset of the packed inode (advice 0x20; the header holds the
+ * offset's low 32 bits and a full index's head record the high 32). Either
+ * way the last cluster's `blocks` is 0, and the index ends with no end
+ * marker. GEN_ZL_WHOLE makes the whole file one fragment: the header is the
+ * offset with bit 63 set and no index follows; the layout must be 1. The
+ * caller places a fragment's bytes in the packed inode.
+ */
+typedef enum gen_zlast {
+	GEN_ZL_BLOCKS,
+	GEN_ZL_INLINE,
+	GEN_ZL_FRAGMENT,
+	GEN_ZL_WHOLE
+} gen_zlast_t;
+
+/*
  * A compressed file: the content, and how it is stored. index_layout is 1
  * (full index) or 3 (compact); `advice` and `algorithms` fill the map header
- * (the cluster bits are 0, so L = B).
+ * (the cluster bits are 0, so L = B), with the bit `last` implies added.
  */
 typedef struct gen_zfile {
 	const void		*content;
@@ -415,6 +437,8 @@ typedef struct gen_zfile {
 	uint8_t			 algorithms;
 	const gen_zcluster_t	*clusters;
 	size_t			 cluster_count;
+	gen_zlast_t		 last;
+	uint64_t		 fragment_offset;
 } gen_zfile_t;
 
 /*

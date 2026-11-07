@@ -50,12 +50,13 @@
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
 QNX6 Power-Safe and QNX4 volumes, HFS Plus and HFSX volumes, QNX ImageFS images,
 ISO 9660 images and EROFS volumes.
-EROFS reading covers chunk-based files and files compressed with LZ4 or
+EROFS reading covers chunk-based files and files, directories and
+symbolic links compressed with LZ4 or
 DEFLATE, and with MicroLZMA or Zstandard when the build has liblzma 5.4 or
 libzstd; a file of an algorithm the build lacks fails as unsupported naming
 the library while the rest of the volume reads.
-Packed fragments, compressed inline tails and compressed directories and
-symbolic links are not read.
+Inline compressed tails, packed fragments and deduplicated clusters are
+read.
 A created EROFS volume is uncompressed, with 512- to 4096-byte blocks and
 32-bit addressing, and stores files, directories and symbolic links with
 their owner, permission bits and modification time to the nanosecond.

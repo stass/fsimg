@@ -42,8 +42,8 @@ static const erofs_feature_t incompat_features[] = {
 	{ EROFS_INCOMPAT_COMPR_CFGS, "COMPR_CFGS/BIG_PCLUSTER", true },
 	{ EROFS_INCOMPAT_CHUNKED_FILE, "CHUNKED_FILE", true },
 	{ EROFS_INCOMPAT_DEVICE_TABLE, "DEVICE_TABLE/COMPR_HEAD2", true },
-	{ EROFS_INCOMPAT_ZTAILPACKING, "ZTAILPACKING", false },
-	{ EROFS_INCOMPAT_FRAGMENTS, "FRAGMENTS/DEDUPE", false },
+	{ EROFS_INCOMPAT_ZTAILPACKING, "ZTAILPACKING", true },
+	{ EROFS_INCOMPAT_FRAGMENTS, "FRAGMENTS/DEDUPE", true },
 	{ EROFS_INCOMPAT_XATTR_PREFIXES, "XATTR_PREFIXES", true },
 	{ EROFS_INCOMPAT_48BIT, "48BIT", false },
 	{ EROFS_INCOMPAT_METABOX, "METABOX", false }
@@ -92,6 +92,7 @@ static void		info_report(fsimg_reader_t *);
 static bool		label_printable(const unsigned char *, size_t);
 static void		name_escape(const unsigned char *, size_t, char *,
 			    size_t);
+static fsimg_status_t	packed_load(fsimg_reader_t *, fsimg_error_t *);
 static fsimg_status_t	super_read(fsimg_reader_t *, fsimg_error_t *);
 static void		text_add(fsimg_volume_info_t *, const char *,
 			    const char *);
@@ -150,10 +151,10 @@ erofs_reject(fsimg_error_t *error, fsimg_status_t status, const char *what)
 
 /*
  * Open in the order the format fixes: the superblock region and every
- * superblock rule, the address domain, the feature decision, then the root.
- * A refused feature fails before any inode is read, so no partial view of a
- * refused volume exists. Open reads nothing else: no directory, attribute
- * pool or prefix table.
+ * superblock rule, the address domain, the feature decision, the packed
+ * inode, then the root. A refused feature fails before any inode is read,
+ * so no partial view of a refused volume exists. Open reads nothing else:
+ * no directory, attribute pool or prefix table.
  */
 static fsimg_status_t
 erofs_open(fsimg_reader_t *reader,
@@ -182,6 +183,9 @@ erofs_open(fsimg_reader_t *reader,
 	status = features_decide(erofs, error);
 	if (status != FSIMG_OK)
 		return (status);
+	status = packed_load(reader, error);
+	if (status != FSIMG_OK)
+		return (status);
 
 	status = erofs_inode_load(reader, erofs->super.root_nid, &root, error);
 	if (status != FSIMG_OK)
@@ -189,14 +193,6 @@ erofs_open(fsimg_reader_t *reader,
 	if (root.kind != FSIMG_ENTRY_DIRECTORY)
 		return (erofs_reject(error, FSIMG_ECORRUPT,
 		    "root inode is not a directory"));
-
-	erofs->tail_window = fsimg_alloc(reader->ctx, erofs->block_bytes,
-	    &detail);
-	if (erofs->tail_window == NULL) {
-		if (error != NULL)
-			*error = detail;
-		return (detail.status);
-	}
 
 	info_report(reader);
 	return (FSIMG_OK);
@@ -210,9 +206,48 @@ erofs_close(fsimg_reader_t *reader)
 	if (erofs == NULL)
 		return;
 	erofs_window_free(&erofs->content_window);
-	fsimg_dealloc(erofs->tail_window);
+	erofs_window_free(&erofs->meta_window);
 	fsimg_dealloc(erofs);
 	reader->driver = NULL;
+}
+
+/*
+ * The packed inode, under FRAGMENTS when the superblock names one: a NID of
+ * zero names none, as the reference reader takes it, and a volume using
+ * DEDUPE alone, which shares the bit, has none (E8, e8-lz4-dedupe). It is
+ * a regular file that uses no fragment, read through its own layout, so a
+ * fragment's mapping nests once. A long-prefix table that is no plain
+ * region lives in its content, so such a table without it is corrupt.
+ */
+static fsimg_status_t
+packed_load(fsimg_reader_t *reader, fsimg_error_t *error)
+{
+	fsimg_erofs_reader_t *erofs = erofs_state(reader);
+	erofs_inode_t *packed = &erofs->packed;
+	fsimg_status_t status;
+
+	if ((erofs->super.incompat & EROFS_INCOMPAT_FRAGMENTS) != 0 &&
+	    erofs->super.packed_nid != 0) {
+		status = erofs_inode_load(reader, erofs->super.packed_nid,
+		    packed, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (packed->kind != FSIMG_ENTRY_FILE)
+			return (erofs_reject(error, FSIMG_ECORRUPT,
+			    "packed inode is not a regular file"));
+		if ((packed->layout == EROFS_LAYOUT_COMPRESSED_FULL ||
+		    packed->layout == EROFS_LAYOUT_COMPRESSED_COMPACT) &&
+		    (packed->zheader.whole_fragment ||
+		    (packed->zheader.advice & EROFS_ADVICE_FRAGMENT) != 0))
+			return (erofs_reject(error, FSIMG_ECORRUPT,
+			    "the packed inode uses a fragment"));
+		erofs->has_packed = true;
+	}
+	if (erofs->features.long_prefixes && !erofs->features.plain_prefixes &&
+	    !erofs->has_packed)
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "long prefixes without a plain table or a packed inode"));
+	return (FSIMG_OK);
 }
 
 /*

@@ -835,7 +835,12 @@ The 8-byte map header sits at the attribute region's end rounded up to 8:
 
 When bit 7 of byte 7 is set, the whole file lives in the packed inode: the
 header, with that bit cleared, is a 64-bit offset into the packed inode's
-content, and there is no index. Otherwise the logical cluster size is
+content, there is no index, and the inode's body ends at the header. A
+whole-file fragment is read only in an inode of the full-index layout,
+the only one producers write it in (E8, `e8-lz4-allfrag`, `e8-lz4-zdir`);
+in a compact-index inode it is `FSIMG_EUNSUPPORTED` naming the
+combination, since the readers' agreement there is unchecked. Otherwise the
+logical cluster size is
 `L = 2^lclusterbits`, and the reader requires `L = B` as fsimg policy:
 every pinned producer writes `lclusterbits = blkszbits` (E8) and none can
 write another value, so accepting one would add rules no volume needs.
@@ -875,6 +880,10 @@ both set or both clear, as the kernel requires; unequal is `FSIMG_ECORRUPT`.
 `mkfs.erofs` writes `0x07` on every compact inode with big clusters or a
 non-LZ4 codec and `0x02` alone on full-index inodes (E8, `e8-lz4-big*`; E9).
 Other advice bits are reserved; any of them set is `FSIMG_EUNSUPPORTED`.
+Bits `0x08` and `0x20` together would give the header's first word two
+meanings, a tail size and a fragment offset; no producer writes both and
+the reference readers do not agree on one, so the pair is
+`FSIMG_EUNSUPPORTED` naming it.
 
 ### Index records
 
@@ -1091,13 +1100,15 @@ end of the compact group, holding the file's last byte, record
 the reader requires `L = B` (E15, `e15-c-l2b-tail-at-L` and `-at-B`: with
 `L = 2B`, a tail placed after `ceil(size / B)` rather than `ceil(size / L)`
 records is read as garbage by the kernel and `fsck.erofs`). The tail lies
-within one block. A size of zero, or a tail that crosses a block boundary,
+within one block. A tail size of zero, or a tail that crosses a block boundary,
 is `FSIMG_ECORRUPT`, the kernel's rule. The tail is decoded by its
 record's type like any other cluster: a head when the producer compressed
 it, a plain cluster when compression gained nothing (E8, `e8-lz4-ztail`, 76
 head and 5 plain tails). The tail's record's block number names a block
-holding none of this file's bytes and is not read, and no count marker
-follows it. The tail's block is not necessarily the block holding the
+holding none of this file's bytes and is not read, and neither is a count
+marker after it (see [packed fragments](#packed-fragments) for the marker a
+producer writes there). The tail's block is not necessarily the block holding
+the
 inode's start: when an inode starts near a block's end, its index runs
 into the next block and the tail follows it there (E8, `e8-lz4-ztail`, 5
 of 81 tails, such as `/text008` at `0x23dfe0` with the index ending and
@@ -1124,7 +1135,12 @@ whose last cluster is a fragment (advice bit `0x20`) reads its last bytes,
 from the end of its last ordinary cluster to `size`, from the packed
 inode's content at the fragment offset; a whole-file fragment reads all of
 `[0, size)` from there. The fragment's own record is a head or plain record
-like any other, and no count marker follows it. Its block field is no
+like any other. A count marker after it holds no cluster's length and is
+not read, whatever its count: `mkfs.erofs` 1.9.4 with big clusters writes
+one of zero blocks after a fragment's head (`e8-lz4-big16k-frag`, made
+with `-C16384 -E fragments`, for `/f3` at NID 52 among others), and the
+kernel reads no length for a fragment or an inline tail (source `zmap.c`).
+A zero count after any other head is `FSIMG_ECORRUPT`. Its block field is no
 address: on a full index it holds bits 32 to 63 of the fragment offset,
 whose bits 0 to 31 are the map header's field, and the reader assembles the
 64-bit offset from both; on a compact index the record stores no block
@@ -1136,7 +1152,12 @@ producer fixture reaches that size. The packed inode is read through its
 own data layout, which may be compressed, and its fragments are never
 fragments of it: a packed inode that uses a fragment, or a fragment range
 past the packed inode's size, is `FSIMG_ECORRUPT`. The packed inode is not in
-the namespace.
+the namespace: [verification](#verification) reports a directory entry
+naming it as `FSIMG_ECORRUPT`. A packed NID of 0 names no packed inode,
+and neither does any packed NID without `FRAGMENTS`, as the kernel loads
+the packed inode (source `super.c`); a fragment, or a long-prefix table
+outside a plain region, on a volume without a packed inode is
+`FSIMG_ECORRUPT`.
 
 ### Shared clusters
 
@@ -1280,7 +1301,8 @@ validated as reading validates it.
   once, plus the packed inode, and v1.2 writes 0 (E2, `e2-count-*`,
   `e2-v12-*`).
 * **References.** Every directory entry contributes a reference to its
-  child NID. Each directory NID is referenced exactly once outside its own
+  child NID. No entry may name the packed inode. Each directory NID is
+  referenced exactly once outside its own
   `.` and its children's `..`; each non-directory NID is referenced as many
   times as its link count. A directory's link count is two plus its
   subdirectories (E4, every directory of the `e4-*` fixtures), except that

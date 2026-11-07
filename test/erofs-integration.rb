@@ -76,7 +76,7 @@ MAX_NOTES = 4
 VERIFY_MODES = [[], ["-d"]].freeze
 # The passes of a build with every library; a fixture slipping to
 # "unsupported" must not keep the run green.
-PASS_FLOOR = 104
+PASS_FLOOR = 114
 # Fixtures covering geometry, inline data, and an attribute-bearing tree.
 WRAPPED_FIXTURES = %w[e1-geom-b512 e3-b4096-inline e6-xattr-default].freeze
 SECTOR = 512
@@ -84,7 +84,7 @@ FIRST_SECTOR = 2048
 
 # The only reasons the reader may give for an image it cannot read yet.
 KNOWN_REFUSALS = [
-  %r{feature (48BIT|ZTAILPACKING|FRAGMENTS/DEDUPE)\z}, /extra devices\z/, /metadata box/
+  /feature 48BIT\z/, /extra devices\z/, /metadata box/
 ].freeze
 
 # A cluster of an algorithm whose library this build lacks, and the codec
