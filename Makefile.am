@@ -104,6 +104,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/erofs/erofs.h lib/formats/erofs/codec.c \
 	lib/formats/erofs/descriptor.c lib/formats/erofs/read.c \
 	lib/formats/erofs/meta.c lib/formats/erofs/map.c \
+	lib/formats/erofs/zmap.c lib/formats/erofs/cluster.c \
 	lib/formats/erofs/content.c lib/formats/erofs/directory.c \
 	lib/formats/erofs/verify.c lib/formats/erofs/xattr.c \
 	lib/formats/erofs/write-erofs.h lib/formats/erofs/write-plan.c \
@@ -186,7 +187,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-sandbox test-sandbox-setup test-extract test-protocol test-worker test-staged-verify \
 	test-salvage-terminal test-exfat \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
-	test-erofs test-erofs-verify test-erofs-write \
+	test-erofs test-erofs-verify test-erofs-fixtures test-erofs-write \
 	test-lzfse test-hfsplus-codec test-hfsplus test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
@@ -301,6 +302,8 @@ test_erofs_LDADD = libfsimg.la
 test_erofs_verify_SOURCES = test/erofs-verify.c test/test.h \
 	test/erofs-gen.c test/erofs-gen.h
 test_erofs_verify_LDADD = libfsimg.la
+test_erofs_fixtures_SOURCES = test/erofs-fixtures.c test/test.h
+test_erofs_fixtures_LDADD = libfsimg.la
 test_erofs_write_SOURCES = test/erofs-write.c test/test.h
 test_erofs_write_LDADD = libfsimg.la
 test_qnx6_SOURCES = test/qnx6.c test/test.h test/scale.h

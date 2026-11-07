@@ -56,9 +56,9 @@ module FsimgSpec
         "sb.block_size" => { "above_maximum" => change(parameters: NO_CHECKSUM, mutations: [u8(sb(0x0C), 13)]) },
         "sb.dirblkbits" => { "set" => change(parameters: NO_CHECKSUM, mutations: [u8(sb(0x5A), 1)]) },
         "sb.incompat" => {
-          "lz4_0padding" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x1)]),
-          "compr_cfgs" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x2)]),
-          "device_table" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x8)]),
+          "lz4_0padding" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x1)], valid: true),
+          "compr_cfgs" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x2), u16(sb(0x54), 0)], valid: true),
+          "device_table" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x8)], valid: true),
           "ztailpacking" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x10)]),
           "fragments" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x20)]),
           "bit_48" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x80)]),
@@ -87,10 +87,6 @@ module FsimgSpec
           # 48BIT is refused at open, so this witness also lacks it and
           # cannot isolate the 4-byte half of the rule.
           "four_byte" => change(parameters: CHUNKED, mutations: [u32(inode(Builder::CHUNK4, 0x10), 0x40)])
-        },
-        "inode.layout_profile" => {
-          "compressed_full" => change(mutations: [u16(inode(Builder::FILE), 1 << 1)]),
-          "compressed_compact" => change(mutations: [u16(inode(Builder::FILE), 3 << 1)])
         },
         "inode.reserved" => {
           "compact_word" => change(mutations: [u32(inode(Builder::FILE, 0x1C), 1)]),

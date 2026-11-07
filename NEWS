@@ -1,14 +1,17 @@
 fsimg 0.1.0 (unreleased)
 
-EROFS volumes, the Linux read-only filesystem, open, list and extract when
-they use neither compression nor chunk-based files, with 512- to 4096-byte
-blocks. `-F erofs` names the format, inside `gpt` or `mbr` as the Linux
-filesystem type. Extended attributes are checked and reported as not
-extracted. `W` verifies such a volume in full: link counts, a single name
-for every directory, the ownership of every byte range a structure uses,
-the shared attribute pool, the long-prefix table and the attribute name
-filters. A volume with compression, chunk-based files, 48-bit addressing,
-a metadata box or extra devices is refused as unsupported.
+EROFS volumes, the Linux read-only filesystem, open, list and extract
+with 512- to 4096-byte blocks, including chunk-based files, whose holes
+read as zeros, and files compressed with LZ4 through full or compact
+indexes and big physical clusters. `-F erofs` names the format, inside
+`gpt` or `mbr` as the Linux filesystem type. Extended attributes are
+checked and reported as not extracted. `W` verifies such a volume in full:
+link counts, a single name for every directory, the ownership of every
+byte range a structure uses, the shared attribute pool, the long-prefix
+table and the attribute name filters. A volume with packed fragments,
+compressed inline tails, 48-bit addressing, a metadata box or extra
+devices is refused as unsupported, and so are files compressed with
+MicroLZMA, DEFLATE or Zstandard and compressed directories and symbolic links.
 
 Old Mac disk images and optical discs open through a read-only Apple Partition
 Map scheme, `apm`, in the same stack slot as `gpt` and `mbr`: `hfsplus/apm/dmg`

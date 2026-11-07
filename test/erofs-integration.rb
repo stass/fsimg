@@ -67,7 +67,7 @@ MAX_NOTES = 4
 # The verifications run on every readable fixture: structure, then file data.
 VERIFY_MODES = [[], ["-d"]].freeze
 # Passes today; a fixture slipping to "unsupported" must not keep the run green.
-PASS_FLOOR = 58
+PASS_FLOOR = 74
 # Fixtures covering geometry, inline data, and an attribute-bearing tree.
 WRAPPED_FIXTURES = %w[e1-geom-b512 e3-b4096-inline e6-xattr-default].freeze
 SECTOR = 512
@@ -75,53 +75,46 @@ FIRST_SECTOR = 2048
 
 # The only reasons the reader may give for an image it cannot read yet.
 KNOWN_REFUSALS = [
-  /feature (48BIT|LZ4_0PADDING)\z/, /extra devices\z/, /compressed data layout\z/, /metadata box/
+  %r{feature (48BIT|ZTAILPACKING|FRAGMENTS/DEDUPE)\z}, /extra devices\z/,
+  /compression algorithm (MicroLZMA|DEFLATE|Zstandard)\z/, /metadata box/
 ].freeze
 
 # Fixtures without a manifest that end in a refusal, and its class. Evidence:
-# ~/.cache/fsimg-erofs/evidence/E8.md (LZ4 images, the cleared-flag edits),
-# E9.md (two-header edits), E14.md (extra devices). A fixture listed neither
-# here nor in EXPECTED_CORRUPT must open, list and extract.
+# ~/.cache/fsimg-erofs/evidence/E8.md (the cleared-flag edits), E14.md
+# (extra devices), E15.md (logical clusters of several blocks, compact
+# advice 0x01 clear). A fixture listed neither here nor in EXPECTED_CORRUPT
+# must open, list and extract.
 EXPECTED_REFUSALS = {
   "e14-blobdev-b4096" => /extra devices/, "e14-tar-index-b4096" => /extra devices/,
   "e2-vm-48bit" => /48BIT/,
-  "e8-lz4-block-end" => /LZ4_0PADDING/, "e8-lz4-distance0" => /LZ4_0PADDING/,
-  "e9-head2-head1-wrong" => /LZ4_0PADDING/, "e9-head2-lz4-ctrl" => /LZ4_0PADDING/,
-  "e9-head2-lzma" => /LZ4_0PADDING/, "e9-head2-wrongalg" => /LZ4_0PADDING/,
-  "e8-lz4-flag-cleared" => /compressed data layout/, "e8-lz4-flag-cleared-distance0" => /compressed data layout/,
-  "e8-lz4-unpadded" => /compressed data layout/,
-  # Hand-built E15 images (~/.cache/fsimg-erofs/evidence/E15.md): large
-  # logical clusters, compact advice 0x01 clear and interlaced inline tails,
-  # all refused by policy once compression is read.
-  "e15-a-compact-b2048-l4096-adv1" => /LZ4_0PADDING/,
-  "e15-a-compact-b2048-l4096-adv1-lcount" => /LZ4_0PADDING/,
-  "e15-a-compact-b4096-l16384-adv0" => /LZ4_0PADDING/,
-  "e15-a-compact-b4096-l8192-adv0" => /LZ4_0PADDING/,
-  "e15-a-compact-b4096-l8192-adv1flip" => /LZ4_0PADDING/,
-  "e15-a-full-b4096-l16384" => /LZ4_0PADDING/,
-  "e15-a-full-b4096-l8192" => /LZ4_0PADDING/,
-  "e15-b-compact-b2048-adv0" => /LZ4_0PADDING/,
-  "e15-b-compact-b4096-adv0" => /LZ4_0PADDING/,
-  "e15-b-compact-b4096-adv1" => /LZ4_0PADDING/,
-  "e15-c-il-nowrap" => /LZ4_0PADDING/,
-  "e15-c-il-plain-wrap" => /LZ4_0PADDING/,
-  "e15-c-il-rot-wrap" => /LZ4_0PADDING/,
-  "e15-c-il-short" => /LZ4_0PADDING/,
-  "e15-c-l2b-tail-at-B" => /LZ4_0PADDING/,
-  "e15-c-l2b-tail-at-L" => /LZ4_0PADDING/,
-  "e15-c-shift-nowrap" => /LZ4_0PADDING/,
-  "e15-c-shift-short" => /LZ4_0PADDING/,
-  "e15-c-shift-wrap" => /LZ4_0PADDING/
+  "e8-lz4-flag-cleared" => /LZ4 cluster without LZ4_0PADDING/,
+  "e8-lz4-flag-cleared-distance0" => /LZ4 cluster without LZ4_0PADDING/,
+  "e8-lz4-unpadded" => /LZ4 cluster without LZ4_0PADDING/,
+  **%w[a-compact-b2048-l4096-adv1 a-compact-b2048-l4096-adv1-lcount a-compact-b4096-l16384-adv0
+       a-compact-b4096-l8192-adv0 a-compact-b4096-l8192-adv1flip a-full-b4096-l16384 a-full-b4096-l8192
+       c-l2b-tail-at-B c-l2b-tail-at-L].to_h { ["e15-#{_1}", /logical cluster size other than the block size/] },
+  **%w[b-compact-b2048-adv0 b-compact-b4096-adv0].to_h { ["e15-#{_1}", /compact index without 2-byte groups/] }
 }.freeze
 
 # Fixtures without a manifest that the reader rejects as corrupt, and the
-# rule it names (specs/design-erofs.md#chunk-based). Evidence:
-# ~/.cache/fsimg-erofs/evidence/E7.md, edited chunk indexes and formats.
+# rule it names (specs/design-erofs.md#chunk-based and #compression).
+# Evidence: ~/.cache/fsimg-erofs/evidence/E7.md (edited chunk indexes and
+# formats), E8.md (the hand-written block ends), E9.md (two-header edits),
+# E15.md (hand-placed inline tails on a volume without ZTAILPACKING).
 EXPECTED_CORRUPT = {
   "e7-edit-block-oor" => /data blocks outside the volume/, "e7-edit-device-id" => /chunk device identifier/,
   "e7-edit-format-0x40" => /chunk format 48-bit bit/, "e7-edit-format-0x80" => /chunk format\z/,
-  "e7-edit-high-part" => /chunk block high bits/
+  "e7-edit-high-part" => /chunk block high bits/,
+  "e8-lz4-block-end" => /lz4: /, "e9-head2-head1-wrong" => /lz4: /,
+  "e9-head2-lz4-ctrl" => /head-2 record without COMPR_HEAD2/, "e9-head2-lzma" => /head-2 record without COMPR_HEAD2/,
+  "e9-head2-wrongalg" => /head-2 record without COMPR_HEAD2/,
+  **%w[c-il-nowrap c-il-plain-wrap c-il-rot-wrap c-il-short c-shift-nowrap c-shift-short c-shift-wrap]
+    .to_h { ["e15-#{_1}", /compressed inline tail without ZTAILPACKING/] }
 }.freeze
+
+# Files of a pinned fixture that must still read, by their expected.txt
+# digests: the hand-written LZ4 blocks that meet both end conditions (E8).
+READABLE_DESPITE_REFUSAL = { "e8-lz4-block-end" => %w[./c0-baseline-tail5 ./c8-lastmatch12-tail5] }.freeze
 
 # The reader refuses the image with the "unsupported capability" status.
 class Unsupported < StandardError; end
@@ -169,24 +162,21 @@ def failure_line(out, err)
   line.empty? ? err.strip : line
 end
 
+# A command with --json: its output, or Unsupported when it refused with the
+# "unsupported capability" status, which means the reader does not handle
+# this image, or part of it, yet.
 def run(*args)
   out, err, status = fsimg(*args)
-  raise "#{args.first} failed: #{failure_line(out, err)}" unless status.success?
-
-  out
-end
-
-# `i` is the support probe: a refusal with the unsupported-capability
-# status means the reader does not handle this image yet.
-def probe(image)
-  out, err, status = fsimg("i", "--json", "-f", image)
-  return parse_lines(out).find { _1["type"] == "info" } if status.success?
+  return out if status.success?
 
   error = parse_lines(out).find { _1["type"] == "error" }
   raise Unsupported, error["message"] if error && error["status"] == "unsupported capability"
 
-  raise "i failed: #{failure_line(out, err)}"
+  raise "#{args.first} failed: #{failure_line(out, err)}"
 end
+
+# `i` is the support probe.
+def probe(image) = parse_lines(run("i", "--json", "-f", image)).find { _1["type"] == "info" }
 
 # One verification of the image: the failure text, or nil when it succeeds.
 def verify_once(image, flags)
@@ -213,13 +203,13 @@ def mtime_volume?(info) = info.dig("texts", "compat_features").to_s.split.includ
 
 def extract(image, dir, limit: [])
   FileUtils.mkdir_p(dir, mode: 0o700)
-  run("x", "-E", "-k", *limit, "-f", image, "-C", dir)
+  run("x", "--json", "-E", "-k", *limit, "-f", image, "-C", dir)
 end
 
 # The output limit for extracting a tree, from its manifest rows or its
-# listing: the files' logical bytes, holes included, which a sparse file
-# can raise past the default of 16 times the volume's length, plus room for
-# link targets.
+# listing: the files' logical bytes, holes included, which a sparse or
+# highly compressed file (E8 zeros40m) can raise past the default of 16
+# times the volume's length, plus room for link targets.
 def output_limit(rows) = ["-l", "output=#{rows.select { _1.kind == 'file' }.sum(&:size) + (1 << 20)}"]
 
 def file_sha(dir, path)
@@ -365,6 +355,20 @@ def digest_differences(dir, out)
   end
 end
 
+# The files READABLE_DESPITE_REFUSAL names, read one by one with `x -O`,
+# against their expected.txt digests.
+def readable_differences(name, dir, image)
+  paths = READABLE_DESPITE_REFUSAL.fetch(name, [])
+  return [] if paths.empty?
+
+  sums = File.read(File.join(dir, "expected.txt")).each_line(chomp: true).to_h { _1.split("  ", 2).reverse }
+  paths.filter_map do |path|
+    out, _, status = fsimg("x", "-O", "-f", image, path.delete_prefix("."))
+    got = status.success? ? Digest::SHA256.hexdigest(out) : nil
+    "#{path}: sha256 #{got.inspect} != #{sums[path]}" unless got == sums[path]
+  end
+end
+
 # A fixture without a manifest: it opens, lists and extracts, or ends in the
 # refusal pinned for it.
 def compare_unlisted(name, dir, work)
@@ -377,7 +381,7 @@ def compare_unlisted(name, dir, work)
     diffs = digest_differences(dir, out) + Array(verify_failure(image))
     Result.new(name:, verdict: diffs.empty? ? :unchecked : :fail, notes: diffs.first(MAX_NOTES), skipped: [])
   in [String => text, Regexp => want] if text.match?(want)
-    diffs = Array(verify_refusal_difference(image, want))
+    diffs = [*verify_refusal_difference(image, want), *readable_differences(name, dir, image)]
     refused = EXPECTED_CORRUPT.key?(name) ? :rejected : :unsupported
     Result.new(name:, verdict: diffs.empty? ? refused : :fail, notes: [text, *diffs], skipped: [])
   in [String => text, _]

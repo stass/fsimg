@@ -829,7 +829,7 @@ The 8-byte map header sits at the attribute region's end rounded up to 8:
 | 0 | 4 | Fragment offset bits 0 to 31 (bits 32 to 63 are the fragment head's block field on a full index, [below](#packed-fragments)), or a reserved 16-bit word and the 16-bit compressed tail size |
 | 4 | 2 | Advice flags |
 | 6 | 1 | Algorithms: the head-1 algorithm in bits 0 to 3, head-2 in bits 4 to 7 |
-| 7 | 1 | Cluster bits: `lclusterbits - blkszbits` in bits 0 to 3; bit 7 marks a whole-file fragment |
+| 7 | 1 | Cluster bits: `lclusterbits - blkszbits` in bits 0 to 3; bit 7 marks a whole-file fragment; bits 4 to 6 carry nothing and are not read |
 
 When bit 7 of byte 7 is set, the whole file lives in the packed inode: the
 header, with that bit cleared, is a 64-bit offset into the packed inode's
@@ -911,16 +911,29 @@ the marker, whose block field is 0 on a full index (source `compress.c`).
 The kernel ends an extent at `size` once the next record index reaches the
 record count (source `zmap.c`).
 
-A physical cluster is one block, unless its algorithm's advice bit permits
-big clusters. When it does, the first non-head record of every physical
+A physical cluster is one block, unless its type's advice bit permits
+big clusters: `0x02` for a head-1 cluster, `0x04` for a head-2 cluster and
+for a plain cluster, the pairing of `erofs-utils` (source `zmap.c`). The
+producer sets both bits on a compact inode and `0x02` alone on a full-index
+inode, where it stores every plain cluster in one block with no record
+after it that a marker could occupy (source `compress.c`), so no producer
+fixture separates the pairings.
+When it does, the first non-head record of every physical
 cluster, a one-block cluster included, carries the count marker: `0x800` in
 its backward distance field with the cluster's block count in the low 11
 bits, its backward distance being one (E8, `e8-lz4-big16k`, where markers
 with count 1 occur). A head directly followed by another head or plain
 record, or by no record, has no marker and is one block. A first non-head
 record without the marker, a count of zero, or one for which the
-algorithm's maximum cluster blocks do not allow it, is `FSIMG_ECORRUPT`. A
-marker without the advice bit is `FSIMG_ECORRUPT`.
+algorithm's maximum cluster blocks do not allow it, is `FSIMG_ECORRUPT`.
+LZ4's maximum is its configuration record's field, where zero means one
+block, the reference decoder's reserved case (source `decompress.c`); no
+other algorithm's record carries one, so only the
+[cluster limit](#limits) bounds it. A
+marker without the advice bit is `FSIMG_ECORRUPT`, also where the inode
+permits big clusters only for the other type; `erofs-utils` then reads the
+cluster as one block without looking at the record after it, a laxity no
+producer image needs.
 
 **Full index.** Records are 8 bytes, starting 16 bytes after the map
 header's start, so 8 bytes after its end:
@@ -929,7 +942,8 @@ mark in bit 15, a 16-bit `clusterofs`, and either a 32-bit block number on a
 head or plain record or two 16-bit distances on a non-head record. Bits 2
 to 14 of the advice word are reserved; a set one is `FSIMG_EUNSUPPORTED`
 naming the record bit, since the kernel's development tree gives bit 14 a
-meaning, a compressed hole, that no pinned producer writes.
+meaning, a compressed hole, that no pinned producer writes. Bit 15 means
+nothing on a plain or non-head record and is not judged there.
 
 **Compact index.** Records are packed in groups, each ending in a 32-bit
 anchor block number; a group of 2 records in 8 bytes, or, under advice bit
@@ -996,10 +1010,29 @@ big clusters or anything but a marker with them.
 head whose start lies at or below `o` begins the cluster. A head whose start
 lies above `o` sends the lookup back one record, and a non-head sends it
 back by its backward distance, until a head at or below `o` is found. The
-cluster ends at the next head after it, found by the forward distance, or at
-`size`. A distance of zero, a backward walk that passes record 0, or one
-that would take more steps than there are records, is `FSIMG_ECORRUPT`; the
-number of steps is bounded by the record count.
+cluster ends at the start of the next head or plain record after it, found
+by reading the following records one at a time, or at `size`. Every
+non-head record of the cluster leads back into it: to its head, or to an
+earlier non-head of the cluster, which leads on to the head, a chain an
+extent longer than the 2047 records a distance field holds needs (no
+producer fixture has one: the longest extent, `e8-lz4-zeros40m`, spans
+2000 records). A backward
+distance reaching before the head would give a read starting at that
+record another cluster than a read starting at the head, so it is
+`FSIMG_ECORRUPT`; the reference readers follow it, and no producer writes
+one. A zero
+backward distance or a backward walk that passes record 0 is
+`FSIMG_ECORRUPT`; a walk that would go back, or ahead, further than the
+largest decoded extent the [limits](#limits) allow is `FSIMG_EUNSUPPORTED`,
+so the steps are bounded by the limit as well as by the record count. The
+forward distances non-head records carry, a full record's second distance
+and a compact group's last slot, are not read. They only accelerate
+finding the next head, and trusting them would let a hostile distance that
+skips a head give the bytes after it one cluster for a read starting before
+that head and another for a read starting after it; the record types give
+every offset exactly one cluster. On producer images the two agree:
+`dump.erofs -e`, which follows the distances, reports the mapper's extents
+for every compressed file of the E8 fixtures (`test/erofs-fixtures.c`).
 
 ### Physical clusters
 
@@ -1041,7 +1074,10 @@ A plain cluster stores its extent uncompressed in its blocks. Its extent
 starts at the cluster's first byte (shifted), or, under advice bit `0x10`,
 is rotated by `clusterofs` within the cluster (interlaced): extent byte `j`
 lies at block byte `(clusterofs + j) mod B` (E8, `e8-lz4-frag`, every plain
-cluster). A plain cluster longer than its blocks is `FSIMG_ECORRUPT`.
+cluster). A plain cluster longer than its blocks is `FSIMG_ECORRUPT`, and so
+is an interlaced cluster of more than one block, which the rotation does not
+define and the reference decoder refuses (source `decompress.c`); the
+producer writes plain clusters of one block (source `compress.c`).
 
 ### Compressed inline tail
 

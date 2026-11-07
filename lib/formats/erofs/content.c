@@ -10,12 +10,15 @@
 /*
  * Content: the logical bytes of an inode, located by erofs_map(). Two
  * readers use them. Common delivery asks resolve for the extent holding one
- * offset of the current file and reads it itself: a stored extent is mapped
- * volume bytes, a chunk hole a zero extent, and an inline tail is copied
- * into the tail window, which only resolve writes, and held, so the bytes
- * delivery copies cannot be replaced by another lookup. The driver's own
- * readers, directory preparation and symbolic-link replay, read a logical
- * range of any inode into a buffer of theirs with erofs_content_read().
+ * offset of the current file and reads it itself: a stored extent and a
+ * plain cluster stored shifted are mapped volume bytes, a chunk hole a zero
+ * extent, an inline tail is copied into the tail window, and any other
+ * cluster is decoded into the content window. Only resolve writes those two
+ * windows, and it holds the one it filled, so the bytes delivery copies
+ * cannot be replaced by another lookup. The driver's own readers, directory
+ * preparation and symbolic-link replay, read a logical range of any inode
+ * into a buffer of theirs with erofs_content_read(); they do not read
+ * compressed inodes.
  */
 
 static fsimg_status_t	extent_read(fsimg_reader_t *, const erofs_inode_t *,
@@ -25,10 +28,12 @@ static fsimg_status_t	extent_read(fsimg_reader_t *, const erofs_inode_t *,
 /*
  * The extent of the current file holding offset, below its initialized
  * length, which replay set to its size. A stored extent is returned mapped:
- * delivery reads it through bounded I/O inside the content domain. A hole
- * is returned as a zero extent, which delivery fills with zeros. An inline
- * tail is read from the inode's body into the tail window and returned held,
- * valid until the next resolve or advance.
+ * delivery reads it through bounded I/O inside the content domain, and so
+ * is a plain cluster stored shifted, whose extent starts at its first stored
+ * byte. A hole is returned as a zero extent, which delivery fills with
+ * zeros. An inline tail is read from the inode's body into the tail window,
+ * and any other cluster decoded into the content window; either is returned
+ * held, valid until the next resolve or advance.
  */
 fsimg_status_t
 erofs_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *out,
@@ -70,6 +75,21 @@ erofs_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *out,
 			.length = extent.length
 		};
 		reader->held = erofs->tail_window;
+		return (FSIMG_OK);
+	case EROFS_EXTENT_CLUSTER:
+		*out = (fsimg_extent_t){
+			.logical_offset = extent.logical_offset,
+			.image_offset = extent.storage_offset,
+			.length = extent.length
+		};
+		if (extent.cluster.mode == EROFS_CLUSTER_SHIFTED)
+			return (FSIMG_OK);
+		status = erofs_window_fill(reader, &erofs->content_window,
+		    &extent.cluster, error);
+		if (status != FSIMG_OK)
+			return (status);
+		out->image_offset = 0;
+		reader->held = erofs->content_window.output;
 		return (FSIMG_OK);
 	}
 	return (erofs_reject(error, FSIMG_EINVAL, "extent kind"));
@@ -116,7 +136,8 @@ erofs_content_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
  * length bytes from logical offset of one extent of inode, which holds them
  * all. A stored extent is read from the volume, where a range past the
  * input's end is a truncated volume; an inline one from the inode's body;
- * a zero extent reads nothing.
+ * a zero extent is filled with zeros without reading. The driver's readers do not read compressed
+ * directories and symbolic links, which are unsupported.
  */
 static fsimg_status_t
 extent_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
@@ -141,6 +162,9 @@ extent_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
 	case EROFS_EXTENT_INLINE:
 		return (erofs_body_read(reader, inode,
 		    extent->storage_offset + within, length, out, error));
+	case EROFS_EXTENT_CLUSTER:
+		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
+		    "compressed directory or symbolic link"));
 	case EROFS_EXTENT_ZERO:
 		bzero(out, length);
 		return (FSIMG_OK);

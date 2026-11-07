@@ -208,7 +208,7 @@ Standard input and decompression use a temporary spool, bounded by
 | QNX4 | Yes | QNX 6.5.0 `dinit` layout, including long names |
 | QNX ImageFS (IFS) | Yes | Either byte order; newly created bodies are nonbootable |
 | ISO 9660 | Yes | Rock Ridge, Joliet and primary views; levels 1 to 3, relocated deep trees, BIOS/EFI El Torito boot catalogs |
-| EROFS | Read, extract and verify | Volumes without compression or chunk-based files, with 512- to 4096-byte blocks; extended attributes are checked and reported as not extracted |
+| EROFS | Read, extract and verify | 512- to 4096-byte blocks; chunk-based files, holes included; files compressed with LZ4 through full and compact indexes, big clusters included; no other algorithms, packed fragments, compressed inline tails, compressed directories or compressed symbolic links; extended attributes are checked and reported as not extracted |
 | HFS Plus, HFSX | Yes | Clean, unjournaled volumes that macOS checks, mounts and modifies; reads files compressed with zlib, LZVN or LZFSE; a volume in an HFS wrapper reads as its embedded volume, the outer HFS volume unchecked and an initialized journal in it not supported |
 
 ISO creation writes Rock Ridge and Joliet together. `-o level=1|2|3`

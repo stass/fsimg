@@ -28,12 +28,18 @@
  * blocks, so nothing here or in the verifier's data claims rejects two
  * entries naming one block.
  *
- * The compressed layouts are not read: a volume using them does not open,
- * and an inode claiming one is refused here as well.
+ * A compressed inode's offset maps to the physical cluster holding it,
+ * which zmap.c finds; the cluster's stored blocks must lie inside the
+ * content domain, and its stored and decoded lengths inside the cluster
+ * limits, 1 MiB and 12 MiB. A larger cluster is unsupported rather than
+ * corrupt: the limits are the reference reader's, not the format's.
  */
 
 static fsimg_status_t	chunk_extent(fsimg_reader_t *, const erofs_inode_t *,
 			    uint64_t, erofs_extent_t *, fsimg_error_t *);
+static fsimg_status_t	cluster_extent(fsimg_reader_t *,
+			    const erofs_inode_t *, uint64_t, erofs_extent_t *,
+			    fsimg_error_t *);
 static fsimg_status_t	flat_extent(const fsimg_reader_t *,
 			    const erofs_inode_t *, uint64_t, erofs_extent_t *,
 			    fsimg_error_t *);
@@ -78,10 +84,52 @@ erofs_map(fsimg_reader_t *reader, const erofs_inode_t *inode,
 		return (chunk_extent(reader, inode, offset, out, error));
 	case EROFS_LAYOUT_COMPRESSED_FULL:
 	case EROFS_LAYOUT_COMPRESSED_COMPACT:
-		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
-		    "compressed data layout"));
+		return (cluster_extent(reader, inode, offset, out, error));
 	}
 	return (erofs_reject(error, FSIMG_ECORRUPT, "inode data layout"));
+}
+
+/*
+ * The cluster extent of compressed inode holding offset. A cluster past the
+ * size limits is unsupported and one outside the volume corrupt; erofs_zmap()
+ * returns a cluster containing offset inside the inode's size, so one that
+ * does not is a driver defect, FSIMG_EINVAL.
+ */
+static fsimg_status_t
+cluster_extent(fsimg_reader_t *reader, const erofs_inode_t *inode,
+    uint64_t offset, erofs_extent_t *out, fsimg_error_t *error)
+{
+	erofs_cluster_t cluster;
+	fsimg_status_t status;
+
+	status = erofs_zmap(reader, inode, offset, &cluster, error);
+	if (status != FSIMG_OK)
+		return (status);
+
+	if (cluster.stored_bytes > EROFS_CLUSTER_STORED_MAX)
+		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
+		    "physical cluster above 1 MiB"));
+	if (cluster.logical_length > EROFS_CLUSTER_DECODED_MAX)
+		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
+		    "decoded cluster above 12 MiB"));
+	if (!fsimg_range_fits(cluster.storage_offset, cluster.stored_bytes,
+	    reader->content_domain.length))
+		return (erofs_reject(error, FSIMG_ECORRUPT,
+		    "physical cluster outside the volume"));
+	if (cluster.logical_offset > offset ||
+	    !fsimg_range_fits(cluster.logical_offset, cluster.logical_length,
+	    inode->size))
+		return (erofs_reject(error, FSIMG_EINVAL,
+		    "cluster outside the inode's content"));
+
+	*out = (erofs_extent_t){
+		.logical_offset = cluster.logical_offset,
+		.storage_offset = cluster.storage_offset,
+		.length = cluster.logical_length,
+		.kind = EROFS_EXTENT_CLUSTER,
+		.cluster = cluster
+	};
+	return (FSIMG_OK);
 }
 
 /*

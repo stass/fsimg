@@ -270,4 +270,177 @@ void		gen_tree_set_root(gen_tree_t *, uint64_t);
 size_t		gen_xattr_entry(gen_image_t *, uint64_t, unsigned,
 		    const char *, const void *, size_t);
 
+/*
+ * A test-only LZ4 block encoder. A block is the raw sequence stream with no
+ * frame. Each function returns the block's length, or 0 when it does not fit
+ * the capacity (or, for gen_lz4_sequence(), when an argument has no encoding).
+ *
+ * gen_lz4_literals(): the input as one literal-only sequence.
+ *
+ * gen_lz4_periodic(): for input whose bytes repeat with `period`
+ * (in[i] == in[i - period], checked), one sequence of in[0, period) literals
+ * and a match of offset `period` up to length - 5, then a last sequence of
+ * the final 5 literals. It needs length - period >= 12, the LZ4 end rules: the
+ * last sequence carries at least 5 literals and the last match starts at
+ * least 12 bytes before the end.
+ *
+ * gen_lz4_sequence(): one sequence appended at out, for hostile blocks: any
+ * 16-bit offset, including 0 or one reaching before the output's start. A
+ * match_length of 0 writes a literal-only (final) sequence, otherwise it is at
+ * least 4. Returns the bytes written.
+ */
+size_t		gen_lz4_literals(unsigned char *, size_t, const void *, size_t);
+size_t		gen_lz4_periodic(unsigned char *, size_t, const void *, size_t,
+		    size_t);
+size_t		gen_lz4_sequence(unsigned char *, size_t, const void *, size_t,
+		    unsigned, size_t);
+
+/*
+ * Compressed files. A record is one logical cluster's index entry as the test
+ * wants it read. Its type is one of the GEN_Z_* values; a head or plain
+ * record names its cluster's first block (absolute) and clusterofs; a
+ * non-head one carries the backward distance (or GEN_Z_BIG_MARKER | blocks)
+ * and the forward distance. `partial` is bit 15 of a full record's advice
+ * word and has no place in the compact form.
+ */
+enum {
+	GEN_Z_PLAIN = 0,
+	GEN_Z_HEAD1 = 1,
+	GEN_Z_NONHEAD = 2,
+	GEN_Z_HEAD2 = 3,
+	GEN_Z_BIG_MARKER = 0x800
+};
+
+/* The map header's advice flags this generator knows. */
+enum {
+	GEN_ZA_COMPACT_2B = 0x01,
+	GEN_ZA_BIG1 = 0x02,
+	GEN_ZA_BIG2 = 0x04,
+	GEN_ZA_INTERLACED = 0x10
+};
+
+typedef struct gen_zrecord {
+	uint32_t	 block;
+	uint16_t	 clusterofs;
+	uint16_t	 backward;
+	uint16_t	 forward;
+	uint8_t		 type;
+	bool		 partial;
+} gen_zrecord_t;
+
+/* The 8-byte map header, written as given. */
+typedef struct gen_zheader {
+	uint32_t	 word0;		/* fragment offset low bits, or tail size */
+	uint16_t	 advice;
+	uint8_t		 algorithms;	/* head-1 in bits 0-3, head-2 in 4-7 */
+	uint8_t		 cluster_bits;	/* lclusterbits - blkszbits, bit 7 flag */
+} gen_zheader_t;
+
+void		gen_zheader_put(gen_image_t *, uint64_t, const gen_zheader_t *);
+
+/* Where an inode's map header lies: its attribute region's end rounded to 8. */
+uint64_t	gen_zheader_offset(const gen_image_t *, const gen_inode_t *,
+		    uint64_t);
+
+/*
+ * The full index of count records, 8 bytes each, from 16 bytes after the map
+ * header's start at header_offset.
+ */
+void		gen_full_index_put(gen_image_t *, uint64_t,
+		    const gen_zrecord_t *, size_t);
+
+/*
+ * The compact index of count records from the map header's end, packed in
+ * groups as the design states for the given advice flags. A group's anchor
+ * is computed from the records' blocks: without big clusters (advice 0x06
+ * clear) the block of the last head or plain record before the group, or the
+ * first head's block less one for the first group; with them, the start block
+ * of the first physical cluster not yet accounted for when the group begins
+ * (a cluster is accounted for once its count marker, or its head when it has
+ * none, lies before the group's first record), or the block after the last
+ * cluster when all are. Returns the index length in bytes.
+ */
+size_t		gen_compact_index_put(gen_image_t *, uint64_t,
+		    const gen_zrecord_t *, size_t, uint16_t);
+
+/*
+ * The LZ4 configuration record of a COMPR_CFGS volume at the first record
+ * position after the superblock and `slots` 16-byte extension slots. The
+ * caller sets the superblock's mask and feature bits.
+ */
+void		gen_lz4_config_put(gen_image_t *, unsigned, uint16_t, uint16_t);
+
+/*
+ * One physical cluster of a gen_zfile_t. `start` is the logical offset of
+ * its extent, which runs to the next cluster's start or the file's size. The
+ * clusters must start in distinct, increasing logical clusters, the first at
+ * 0. The stream is written right-aligned in `blocks` blocks after zero
+ * padding:
+ *   PLAIN        the extent at block byte 0 (shifted), at most B bytes;
+ *   INTERLACED   extent byte j at block byte (start mod B + j) mod B;
+ *   LZ4_LITERAL  gen_lz4_literals() of the extent;
+ *   LZ4_PERIODIC gen_lz4_periodic() of the extent with `period`;
+ *   RAW          the caller's bytes (raw, raw_length), whatever they are.
+ * A compressed cluster is head-1, or head-2 when head2 is set; a plain one is
+ * a plain record.
+ */
+typedef enum gen_zkind {
+	GEN_ZK_PLAIN,
+	GEN_ZK_INTERLACED,
+	GEN_ZK_LZ4_LITERAL,
+	GEN_ZK_LZ4_PERIODIC,
+	GEN_ZK_RAW
+} gen_zkind_t;
+
+typedef struct gen_zcluster {
+	uint64_t	 start;
+	uint32_t	 blocks;
+	gen_zkind_t	 kind;
+	bool		 head2;
+	size_t		 period;
+	const void	*raw;
+	size_t		 raw_length;
+} gen_zcluster_t;
+
+/*
+ * A compressed file: the content, and how it is stored. index_layout is 1
+ * (full index) or 3 (compact); `advice` and `algorithms` fill the map header
+ * (the cluster bits are 0, so L = B).
+ */
+typedef struct gen_zfile {
+	const void		*content;
+	size_t			 size;
+	unsigned		 index_layout;
+	uint16_t		 advice;
+	uint8_t			 algorithms;
+	const gen_zcluster_t	*clusters;
+	size_t			 cluster_count;
+} gen_zfile_t;
+
+/*
+ * The records the file's clusters imply, ceil(size / B) of them, allocating
+ * their blocks from first_block on in cluster order. Heads and plain
+ * records sit where clusters start; a non-head has its backward distance to
+ * the cluster's head and its forward distance to the next head or plain
+ * record, or to the record count when none follows. The first non-head of a
+ * compressed cluster carries the count marker when the advice permits big
+ * clusters for its head type. When the last cluster starts before the last
+ * logical cluster and size mod B is nonzero, the last record is the end
+ * marker, a plain record with clusterofs = size mod B (block 0 in a full
+ * index, the block after the last cluster in a compact one). Returns the
+ * count; the caller frees *records.
+ */
+size_t		gen_zfile_records(const gen_zfile_t *, unsigned, uint32_t,
+		    gen_zrecord_t **);
+
+/*
+ * Add a compressed inode for the file: prototype fields as gen_tree_add(), but
+ * the layout is index_layout, the size is the file's and the layout word the
+ * total of the clusters' blocks. Cluster blocks are allocated from
+ * tree->data_next. The body is the fixed part and attribute region, the map
+ * header and the index; the caller writes any attributes. Returns the NID.
+ */
+uint64_t	gen_tree_add_zfile(gen_tree_t *, const gen_inode_t *,
+		    const gen_zfile_t *);
+
 #endif /* !FSIMG_TEST_EROFS_GEN_H */

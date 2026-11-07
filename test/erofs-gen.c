@@ -535,3 +535,479 @@ gen_xattr_entry(gen_image_t *image, uint64_t at, unsigned index,
 	gen_put_bytes(image, at + 4 + suffix_length, value, value_length);
 	return ((4 + suffix_length + value_length + 3) & ~(size_t)3);
 }
+
+/*
+ * The LZ4 encoder writes through a cursor that keeps counting past the
+ * capacity, so a block that does not fit is known by its length alone.
+ */
+typedef struct lz4_out {
+	unsigned char	*bytes;
+	size_t		 capacity;
+	size_t		 at;
+} lz4_out_t;
+
+static void
+lz4_byte(lz4_out_t *out, unsigned value)
+{
+	if (out->at < out->capacity)
+		out->bytes[out->at] = (unsigned char)value;
+	out->at++;
+}
+
+/* A length too large for its nibble: 255-valued bytes and a final remainder. */
+static void
+lz4_extension(lz4_out_t *out, size_t remaining)
+{
+	for (; remaining >= 255; remaining -= 255)
+		lz4_byte(out, 255);
+	lz4_byte(out, (unsigned)remaining);
+}
+
+/*
+ * One sequence: token, literal length extension, literals, and for a match
+ * the 16-bit offset and the match length extension (its nibble holds the
+ * length less 4).
+ */
+static void
+lz4_emit(lz4_out_t *out, const void *literals, size_t literal_length,
+    unsigned offset, size_t match_length)
+{
+	size_t match_extra = match_length != 0 ? match_length - 4 : 0;
+	unsigned literal_nibble = literal_length < 15 ?
+	    (unsigned)literal_length : 15;
+	unsigned match_nibble = match_extra < 15 ? (unsigned)match_extra : 15;
+
+	lz4_byte(out, literal_nibble << 4 | match_nibble);
+	if (literal_length >= 15)
+		lz4_extension(out, literal_length - 15);
+	for (size_t i = 0; i < literal_length; i++)
+		lz4_byte(out, ((const unsigned char *)literals)[i]);
+	if (match_length == 0)
+		return;
+	lz4_byte(out, offset & 0xff);
+	lz4_byte(out, offset >> 8);
+	if (match_extra >= 15)
+		lz4_extension(out, match_extra - 15);
+}
+
+static size_t
+lz4_finish(const lz4_out_t *out)
+{
+	return (out->at <= out->capacity ? out->at : 0);
+}
+
+size_t
+gen_lz4_literals(unsigned char *out, size_t capacity, const void *in,
+    size_t length)
+{
+	lz4_out_t o = { out, capacity, 0 };
+
+	lz4_emit(&o, in, length, 0, 0);
+	return (lz4_finish(&o));
+}
+
+size_t
+gen_lz4_periodic(unsigned char *out, size_t capacity, const void *in,
+    size_t length, size_t period)
+{
+	const unsigned char *p = in;
+	lz4_out_t o = { out, capacity, 0 };
+
+	CHECK(period >= 1 && period <= 0xffff && length >= period + 12);
+	for (size_t i = period; i < length; i++)
+		CHECK(p[i] == p[i - period]);
+	/* The match stops 5 bytes short; the last sequence holds the rest. */
+	lz4_emit(&o, p, period, (unsigned)period, length - 5 - period);
+	lz4_emit(&o, p + length - 5, 5, 0, 0);
+	return (lz4_finish(&o));
+}
+
+size_t
+gen_lz4_sequence(unsigned char *out, size_t capacity, const void *literals,
+    size_t literal_length, unsigned offset, size_t match_length)
+{
+	lz4_out_t o = { out, capacity, 0 };
+
+	if (offset > 0xffff || (match_length != 0 && match_length < 4))
+		return (0);
+	lz4_emit(&o, literals, literal_length, offset, match_length);
+	return (lz4_finish(&o));
+}
+
+void
+gen_zheader_put(gen_image_t *image, uint64_t at, const gen_zheader_t *header)
+{
+	gen_put(image, at + 0, header->word0, 4);
+	gen_put(image, at + 4, header->advice, 2);
+	gen_put(image, at + 6, header->algorithms, 1);
+	gen_put(image, at + 7, header->cluster_bits, 1);
+}
+
+static size_t
+round_up(size_t value, size_t unit)
+{
+	return ((value + unit - 1) / unit * unit);
+}
+
+uint64_t
+gen_zheader_offset(const gen_image_t *image, const gen_inode_t *inode,
+    uint64_t nid)
+{
+	return (gen_inode_offset(image, nid) +
+	    round_up(gen_inode_header_bytes(inode), 8));
+}
+
+void
+gen_lz4_config_put(gen_image_t *image, unsigned slots, uint16_t max_distance,
+    uint16_t max_blocks)
+{
+	uint64_t at = GEN_SUPER_OFFSET + 128 + 16 * (uint64_t)slots;
+
+	gen_put(image, at, 14, 2);
+	gen_put(image, at + 2, max_distance, 2);
+	gen_put(image, at + 4, max_blocks, 2);
+}
+
+static bool
+record_is_head(const gen_zrecord_t *record)
+{
+	return (record->type != GEN_Z_NONHEAD);
+}
+
+void
+gen_full_index_put(gen_image_t *image, uint64_t header_offset,
+    const gen_zrecord_t *records, size_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		const gen_zrecord_t *r = &records[i];
+		uint64_t at = header_offset + 16 + 8 * (uint64_t)i;
+
+		gen_put(image, at, (r->partial ? 0x8000 : 0) | r->type, 2);
+		gen_put(image, at + 2, r->clusterofs, 2);
+		if (record_is_head(r)) {
+			gen_put(image, at + 4, r->block, 4);
+		} else {
+			gen_put(image, at + 4, r->backward, 2);
+			gen_put(image, at + 6, r->forward, 2);
+		}
+	}
+}
+
+/* OR the width low bits of value in at bit bitpos; the bytes start zero. */
+static void
+put_bits(unsigned char *p, unsigned bitpos, unsigned width, uint32_t value)
+{
+	for (unsigned bit = 0; bit < width; bit++) {
+		if (((value >> bit) & 1) != 0)
+			p[(bitpos + bit) / 8] |=
+			    (unsigned char)(1u << ((bitpos + bit) % 8));
+	}
+}
+
+/*
+ * The anchor without big clusters: the block of the last head or plain record
+ * before the group, or, for the first group, one less than the first head's.
+ */
+static uint32_t
+anchor_single(const gen_zrecord_t *records, size_t count, size_t group)
+{
+	for (size_t i = group; i-- > 0;) {
+		if (record_is_head(&records[i]))
+			return (records[i].block);
+	}
+	for (size_t i = 0; i < count; i++) {
+		if (record_is_head(&records[i]))
+			return (records[i].block - 1);
+	}
+	return (0);
+}
+
+/*
+ * The anchor with big clusters: the start block of the first physical cluster
+ * whose marker, or head when it has none, is at or after the group's first
+ * record; the block after the last cluster when every cluster is behind it.
+ */
+static uint32_t
+anchor_big(const gen_zrecord_t *records, size_t count, size_t group)
+{
+	uint32_t after_last = 0;
+
+	for (size_t i = 0; i < count; i++) {
+		bool marked;
+		size_t accounted;
+
+		if (!record_is_head(&records[i]))
+			continue;
+		marked = i + 1 < count &&
+		    records[i + 1].type == GEN_Z_NONHEAD &&
+		    (records[i + 1].backward & GEN_Z_BIG_MARKER) != 0;
+		accounted = marked ? i + 1 : i;
+		if (accounted >= group)
+			return (records[i].block);
+		after_last = records[i].block + (marked ?
+		    (uint32_t)(records[i + 1].backward &
+		    (GEN_Z_BIG_MARKER - 1)) : 1);
+	}
+	return (after_last);
+}
+
+/*
+ * One group of `slots` record slots starting at record `first`, in `bytes`
+ * bytes at p: n fields of fieldbits each from bit 0, the anchor in the last
+ * 4. A slot past the records stays zero.
+ */
+static void
+compact_group(unsigned char *p, size_t bytes, unsigned slots,
+    unsigned fieldbits, const gen_zrecord_t *records, size_t count,
+    size_t first, uint16_t advice)
+{
+	uint32_t anchor = (advice & (GEN_ZA_BIG1 | GEN_ZA_BIG2)) != 0 ?
+	    anchor_big(records, count, first) :
+	    anchor_single(records, count, first);
+
+	for (unsigned slot = 0; slot < slots && first + slot < count; slot++) {
+		const gen_zrecord_t *r = &records[first + slot];
+		uint32_t value;
+
+		if (record_is_head(r))
+			value = r->clusterofs;
+		else if (slot == slots - 1 &&
+		    (r->backward & GEN_Z_BIG_MARKER) == 0)
+			value = r->forward;	/* the last slot: forward */
+		else
+			value = r->backward;
+		CHECK(value < 0x1000);
+		put_bits(p, slot * fieldbits, fieldbits,
+		    value | (uint32_t)r->type << 12);
+	}
+	put_le(p + bytes - 4, anchor, 4);
+}
+
+/*
+ * Pack the records into out, a zeroed buffer of at least 8 * count + 32
+ * bytes, for a map header ending at header_end. Without advice 0x01 every
+ * group is 8 bytes. With it, and more records than the initial run that
+ * brings the offset to a multiple of 32, that run of 8-byte groups is
+ * followed by 32-byte groups of 16 records while 16 remain, then 8-byte
+ * groups. Returns the length.
+ */
+static size_t
+compact_pack(unsigned char *out, uint64_t header_end,
+    const gen_zrecord_t *records, size_t count, uint16_t advice)
+{
+	size_t initial = (size_t)(((32 - header_end % 32) / 4) & 7);
+	bool wide = (advice & GEN_ZA_COMPACT_2B) != 0 && count > initial;
+	size_t at = 0, i = 0;
+
+	CHECK(header_end % 8 == 0);
+	while (i < count) {
+		if (wide && i >= initial && count - i >= 16) {
+			compact_group(out + at, 32, 16, 14, records, count, i,
+			    advice);
+			at += 32;
+			i += 16;
+		} else {
+			compact_group(out + at, 8, 2, 16, records, count, i,
+			    advice);
+			at += 8;
+			i += 2;
+		}
+	}
+	return (at);
+}
+
+size_t
+gen_compact_index_put(gen_image_t *image, uint64_t header_offset,
+    const gen_zrecord_t *records, size_t count, uint16_t advice)
+{
+	unsigned char *packed = calloc(8 * count + 32, 1);
+	size_t length;
+
+	CHECK(packed != NULL);
+	length = compact_pack(packed, header_offset + 8, records, count,
+	    advice);
+	gen_put_bytes(image, header_offset + 8, packed, length);
+	free(packed);
+	return (length);
+}
+
+static bool
+cluster_is_plain(const gen_zcluster_t *cluster)
+{
+	return (cluster->kind == GEN_ZK_PLAIN ||
+	    cluster->kind == GEN_ZK_INTERLACED);
+}
+
+size_t
+gen_zfile_records(const gen_zfile_t *zf, unsigned blkszbits,
+    uint32_t first_block, gen_zrecord_t **records_out)
+{
+	uint64_t block = (uint64_t)1 << blkszbits;
+	size_t count = (size_t)((zf->size + block - 1) / block);
+	gen_zrecord_t *records = calloc(count != 0 ? count : 1, sizeof(*records));
+	size_t *cluster_at = calloc(count != 0 ? count : 1, sizeof(*cluster_at));
+	uint32_t *first = calloc(zf->cluster_count != 0 ? zf->cluster_count : 1,
+	    sizeof(*first));
+	uint32_t next_block = first_block;
+	size_t prev_head = SIZE_MAX, next_head = count;
+
+	CHECK(records != NULL && cluster_at != NULL && first != NULL);
+	for (size_t i = 0; i < count; i++)
+		cluster_at[i] = SIZE_MAX;
+	CHECK(zf->cluster_count == 0 || zf->clusters[0].start == 0);
+	for (size_t k = 0; k < zf->cluster_count; k++) {
+		size_t logical = (size_t)(zf->clusters[k].start / block);
+
+		CHECK(zf->clusters[k].start < zf->size && logical < count);
+		CHECK(cluster_at[logical] == SIZE_MAX);
+		CHECK(k == 0 || zf->clusters[k].start > zf->clusters[k - 1].start);
+		cluster_at[logical] = k;
+		first[k] = next_block;
+		next_block += zf->clusters[k].blocks;
+	}
+	for (size_t i = 0; i < count; i++) {
+		gen_zrecord_t *r = &records[i];
+		size_t k = cluster_at[i];
+
+		if (k != SIZE_MAX) {
+			const gen_zcluster_t *c = &zf->clusters[k];
+
+			r->type = cluster_is_plain(c) ? GEN_Z_PLAIN :
+			    c->head2 ? GEN_Z_HEAD2 : GEN_Z_HEAD1;
+			r->clusterofs = (uint16_t)(c->start % block);
+			r->block = first[k];
+			prev_head = i;
+		} else if (i == count - 1 && zf->size % block != 0) {
+			/* The end marker begins an empty cluster at size. */
+			r->type = GEN_Z_PLAIN;
+			r->clusterofs = (uint16_t)(zf->size % block);
+			r->block = zf->index_layout == 1 ? 0 : next_block;
+		} else {
+			const gen_zrecord_t *head;
+			uint16_t big;
+
+			CHECK(prev_head != SIZE_MAX);
+			head = &records[prev_head];
+			big = head->type == GEN_Z_HEAD2 ? GEN_ZA_BIG2 : GEN_ZA_BIG1;
+			r->type = GEN_Z_NONHEAD;
+			r->backward = (uint16_t)(i - prev_head);
+			if (prev_head == i - 1 && head->type != GEN_Z_PLAIN &&
+			    (zf->advice & big) != 0) {
+				size_t k_head = cluster_at[prev_head];
+
+				r->backward = (uint16_t)(GEN_Z_BIG_MARKER |
+				    zf->clusters[k_head].blocks);
+			}
+		}
+	}
+	for (size_t i = count; i-- > 0;) {
+		if (record_is_head(&records[i]))
+			next_head = i;
+		else
+			records[i].forward = (uint16_t)(next_head - i);
+	}
+	free(cluster_at);
+	free(first);
+	*records_out = records;
+	return (count);
+}
+
+/*
+ * Write one cluster's stream right-aligned in `blocks` blocks at volume
+ * offset `at`: leading zero bytes, then the stream. The extent is the file's
+ * bytes the cluster covers.
+ */
+static void
+zcluster_write(gen_image_t *image, uint64_t at, size_t block,
+    const gen_zcluster_t *cluster, const unsigned char *extent, size_t length)
+{
+	size_t span = (size_t)cluster->blocks * block;
+	unsigned char *stream = calloc(span != 0 ? span : 1, 1);
+	size_t stream_length = 0;
+	size_t ofs = (size_t)(cluster->start % block);
+
+	CHECK(stream != NULL);
+	switch (cluster->kind) {
+	case GEN_ZK_PLAIN:
+		CHECK(length <= span);
+		bcopy(extent, stream, length);
+		stream_length = span;	/* the block's bytes in place, no shift */
+		break;
+	case GEN_ZK_INTERLACED:
+		CHECK(length <= block && span == block);
+		for (size_t j = 0; j < length; j++)
+			stream[(ofs + j) % block] = extent[j];
+		stream_length = span;
+		break;
+	case GEN_ZK_LZ4_LITERAL:
+		stream_length = gen_lz4_literals(stream, span, extent, length);
+		CHECK(stream_length != 0 && stream[0] != 0);
+		break;
+	case GEN_ZK_LZ4_PERIODIC:
+		stream_length = gen_lz4_periodic(stream, span, extent, length,
+		    cluster->period);
+		CHECK(stream_length != 0 && stream[0] != 0);
+		break;
+	case GEN_ZK_RAW:
+		CHECK(cluster->raw_length <= span);
+		bcopy(cluster->raw, stream, cluster->raw_length);
+		stream_length = cluster->raw_length;
+		break;
+	}
+	gen_put_bytes(image, at + span - stream_length, stream, stream_length);
+	free(stream);
+}
+
+uint64_t
+gen_tree_add_zfile(gen_tree_t *tree, const gen_inode_t *proto,
+    const gen_zfile_t *zf)
+{
+	size_t block = (size_t)1 << tree->blkszbits;
+	size_t header_start = round_up(gen_inode_header_bytes(proto), 8);
+	gen_zrecord_t *records;
+	size_t count, index_bytes, total_blocks = 0;
+	gen_inode_t inode = *proto;
+	gen_zheader_t header = { 0, zf->advice, zf->algorithms, 0 };
+	uint64_t nid, header_offset;
+
+	CHECK(zf->index_layout == 1 || zf->index_layout == 3);
+	count = gen_zfile_records(zf, tree->blkszbits, tree->data_next, &records);
+	if (zf->index_layout == 1) {
+		index_bytes = 16 + 8 * count;
+	} else {
+		/* The index length depends on the header's place modulo 32 only. */
+		unsigned char *scratch = calloc(8 * count + 32, 1);
+
+		CHECK(scratch != NULL);
+		index_bytes = 8 + compact_pack(scratch, header_start + 8, records,
+		    count, zf->advice);
+		free(scratch);
+	}
+	nid = gen_tree_slot(tree, header_start + index_bytes, 0);
+	for (size_t k = 0; k < zf->cluster_count; k++) {
+		const gen_zcluster_t *c = &zf->clusters[k];
+		uint64_t end = k + 1 < zf->cluster_count ?
+		    zf->clusters[k + 1].start : zf->size;
+
+		CHECK(tree->data_next + c->blocks <= tree->blocks);
+		zcluster_write(&tree->image, (uint64_t)tree->data_next * block, block,
+		    c, (const unsigned char *)zf->content + c->start,
+		    (size_t)(end - c->start));
+		tree->data_next += c->blocks;
+		total_blocks += c->blocks;
+	}
+	inode.nid = nid;
+	inode.size = zf->size;
+	inode.layout = (uint8_t)zf->index_layout;
+	inode.layout_word = (uint32_t)total_blocks;
+	gen_inode_write(&tree->image, &inode);
+	header_offset = gen_zheader_offset(&tree->image, proto, nid);
+	gen_zheader_put(&tree->image, header_offset, &header);
+	if (zf->index_layout == 1)
+		gen_full_index_put(&tree->image, header_offset, records, count);
+	else
+		(void)gen_compact_index_put(&tree->image, header_offset, records,
+		    count, zf->advice);
+	free(records);
+	return (nid);
+}

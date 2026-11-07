@@ -1838,15 +1838,13 @@ static const inode_case_t inode_cases[] = {
 	    .patches = {FORMAT_FIELD(FORMAT(6))}, .status = FSIMG_ECORRUPT },
 	{ .name = "layout_7_is_corrupt",
 	    .patches = {FORMAT_FIELD(FORMAT(7))}, .status = FSIMG_ECORRUPT },
-	{ .name = "layout_1_is_unsupported",
-	    .patches = {FORMAT_FIELD(FORMAT(1))},
-	    .status = FSIMG_EUNSUPPORTED },
-	{ .name = "layout_3_is_unsupported",
-	    .patches = {FORMAT_FIELD(FORMAT(3))},
-	    .status = FSIMG_EUNSUPPORTED },
-	{ .name = "extended_layout_1_is_unsupported", .extended = true,
+	{ .name = "layout_1_is_a_full_index",
+	    .patches = {FORMAT_FIELD(FORMAT(1))}, .status = FSIMG_OK },
+	{ .name = "layout_3_is_a_compact_index",
+	    .patches = {FORMAT_FIELD(FORMAT(3))}, .status = FSIMG_OK },
+	{ .name = "extended_layout_1_is_a_full_index", .extended = true,
 	    .patches = {FORMAT_FIELD(FORMAT(1) | FORMAT_EXTENDED)},
-	    .status = FSIMG_EUNSUPPORTED },
+	    .status = FSIMG_OK },
 
 	/* Attribute region sizes */
 	{ .name = "attribute_count_0_is_no_region",
@@ -4673,14 +4671,6 @@ static void
 test_open_refuses_each_unimplemented_incompatible_bit_by_name(void)
 {
 	static const open_case_t cases[] = {
-		{ "LZ4_0PADDING", { { SB_INCOMPAT, 4, 0x001 } }, true,
-		    FSIMG_EUNSUPPORTED, "LZ4_0PADDING" },
-		{ "COMPR_CFGS", { { SB_INCOMPAT, 4, 0x002 },
-		    { SB_WORD54, 2, 0 } }, true, FSIMG_EUNSUPPORTED,
-		    "COMPR_CFGS" },
-		{ "DEVICE_TABLE", { { SB_INCOMPAT, 4, 0x008 },
-		    { SB_DEVICES, 2, 0 } }, true, FSIMG_EUNSUPPORTED,
-		    "DEVICE_TABLE" },
 		{ "ZTAILPACKING", { { SB_INCOMPAT, 4, 0x010 } }, true,
 		    FSIMG_EUNSUPPORTED, "ZTAILPACKING" },
 		{ "FRAGMENTS", { { SB_INCOMPAT, 4, 0x020 } }, true,
@@ -5037,7 +5027,7 @@ test_open_failures_return_all_memory(void)
 		uint64_t	 value;
 		unsigned	 width;
 	} cases[] = {
-		{ "feature refusal", SB_INCOMPAT, 0x001, 4 },
+		{ "feature refusal", SB_INCOMPAT, 0x010, 4 },
 		{ "superblock rule", SB_NSEC, 1000000000, 4 },
 		{ "root outside the domain", SB_META_BLOCK, 3, 4 }
 	};
@@ -5393,9 +5383,9 @@ test_inode_load_checks_the_layout_against_the_volume_features(void)
 		fsimg_status_t	 want;
 	} cases[] = {
 		{ "compressed full layout", LAYOUT_COMPRESSED_FULL,
-		    FSIMG_EUNSUPPORTED },
+		    FSIMG_OK },
 		{ "compressed compact layout", LAYOUT_COMPRESSED_COMPACT,
-		    FSIMG_EUNSUPPORTED },
+		    FSIMG_OK },
 		{ "chunk-based layout without CHUNKED_FILE",
 		    LAYOUT_CHUNK_BASED, FSIMG_ECORRUPT }
 	};
@@ -8121,6 +8111,2265 @@ test_a_cycle_to_a_grandparent_below_the_root_is_corrupt(void)
 	gen_tree_free(&tree);
 }
 
+/* ---- Compressed files: map header, index records and compact groups ---- */
+
+/*
+ * These tests call the pure decoders of codec.c directly. Their inputs are
+ * packed here, field by field, from the design's tables, and the layout of a
+ * compact index is recomputed by walking offsets, a different algorithm from
+ * the decoder's initial-run arithmetic.
+ */
+
+static void
+le16_put(unsigned char *p, unsigned value)
+{
+	p[0] = (unsigned char)value;
+	p[1] = (unsigned char)(value >> 8);
+}
+
+static void
+le32_put(unsigned char *p, uint32_t value)
+{
+	le16_put(p, value & 0xffff);
+	le16_put(p + 2, value >> 16);
+}
+
+static bool
+phrase_in(const char *what, const char *phrase)
+{
+	return (phrase == NULL || (what != NULL && strstr(what, phrase) != NULL));
+}
+
+/* ---- Map header ---- */
+
+typedef struct zheader_case {
+	const char	*name;
+	erofs_layout_t	 layout;
+	uint32_t	 incompat;
+	uint16_t	 advice;
+	uint8_t		 algorithms;
+	uint8_t		 cluster_bits;
+	fsimg_status_t	 status;
+	const char	*phrase;
+} zheader_case_t;
+
+static fsimg_status_t
+zheader_run(const zheader_case_t *c, uint16_t advice, erofs_zheader_t *out,
+    const char **what)
+{
+	erofs_super_t sb;
+	unsigned char raw[EROFS_ZHEADER_BYTES];
+
+	bzero(&sb, sizeof(sb));
+	sb.incompat = c->incompat;
+	bzero(raw, sizeof(raw));
+	le32_put(raw, 0x01020304);	/* the word this reader never keeps */
+	le16_put(raw + 4, advice);
+	raw[6] = c->algorithms;
+	raw[7] = c->cluster_bits;
+	return (erofs_zheader_decode(raw, &sb, c->layout, out, what));
+}
+
+static void
+test_map_header_decode_applies_each_rule_of_the_design(void)
+{
+	enum {
+		FULL = EROFS_LAYOUT_COMPRESSED_FULL,
+		COMPACT = EROFS_LAYOUT_COMPRESSED_COMPACT,
+		CFGS = EROFS_INCOMPAT_COMPR_CFGS,
+		TAIL = EROFS_INCOMPAT_ZTAILPACKING,
+		FRAG = EROFS_INCOMPAT_FRAGMENTS
+	};
+	static const zheader_case_t cases[] = {
+		{ "full index without advice", FULL, 0, 0, 0, 0, FSIMG_OK, NULL },
+		{ "full index, head-1 big", FULL, CFGS, 0x02, 0, 0, FSIMG_OK, NULL },
+		{ "full index, head-2 big alone", FULL, CFGS, 0x04, 0, 0,
+		    FSIMG_OK, NULL },
+		{ "full index, interlaced", FULL, 0, 0x10, 0, 0, FSIMG_OK, NULL },
+		{ "compact index with 2-byte groups", COMPACT, 0, 0x01, 0, 0,
+		    FSIMG_OK, NULL },
+		{ "compact index, both big", COMPACT, CFGS, 0x07, 0, 0, FSIMG_OK,
+		    NULL },
+		{ "compact index, unequal big bits (head-1 only)", COMPACT, CFGS,
+		    0x03, 0, 0, FSIMG_ECORRUPT, "unequal" },
+		{ "compact index, unequal big bits (head-2 only)", COMPACT, CFGS,
+		    0x05, 0, 0, FSIMG_ECORRUPT, "unequal" },
+		{ "compact index with advice 0x01 clear", COMPACT, 0, 0x00, 0, 0,
+		    FSIMG_EUNSUPPORTED, "2-byte groups" },
+		{ "compact index, big and 0x01 clear", COMPACT, CFGS, 0x06, 0, 0,
+		    FSIMG_EUNSUPPORTED, "2-byte groups" },
+		{ "big head-1 without COMPR_CFGS", FULL, 0, 0x02, 0, 0,
+		    FSIMG_ECORRUPT, "COMPR_CFGS" },
+		{ "big head-2 without COMPR_CFGS", FULL, 0, 0x04, 0, 0,
+		    FSIMG_ECORRUPT, "COMPR_CFGS" },
+		{ "compact big without COMPR_CFGS", COMPACT, 0, 0x07, 0, 0,
+		    FSIMG_ECORRUPT, "COMPR_CFGS" },
+		{ "logical cluster of 2B", FULL, 0, 0, 0, 1, FSIMG_EUNSUPPORTED,
+		    "logical cluster" },
+		{ "logical cluster of 2^15 B", FULL, 0, 0, 0, 15,
+		    FSIMG_EUNSUPPORTED, "logical cluster" },
+		{ "compressed inline tail without ZTAILPACKING", FULL, 0, 0x08, 0,
+		    0, FSIMG_ECORRUPT, "ZTAILPACKING" },
+		{ "compressed inline tail with ZTAILPACKING", FULL, TAIL, 0x08, 0,
+		    0, FSIMG_EUNSUPPORTED, "inline tail" },
+		{ "fragment without FRAGMENTS", FULL, 0, 0x20, 0, 0,
+		    FSIMG_ECORRUPT, "FRAGMENTS" },
+		{ "fragment with FRAGMENTS", FULL, FRAG, 0x20, 0, 0,
+		    FSIMG_EUNSUPPORTED, "fragment" },
+		{ "whole-file fragment without FRAGMENTS", FULL, 0, 0, 0, 0x80,
+		    FSIMG_ECORRUPT, "FRAGMENTS" },
+		{ "whole-file fragment with FRAGMENTS", FULL, FRAG, 0, 0, 0x80,
+		    FSIMG_EUNSUPPORTED, "whole-file fragment" }
+	};
+	erofs_zheader_t header;
+	zheader_case_t reserved = { NULL, FULL, 0, 0, 0, 0, FSIMG_EUNSUPPORTED,
+	    "advice bit" };
+	const char *what;
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		fsimg_status_t status;
+
+		what = NULL;
+		status = zheader_run(&cases[i], cases[i].advice, &header, &what);
+		expect_status(status, cases[i].status, what, __func__, __LINE__,
+		    cases[i].name);
+		EXPECT(phrase_in(what, cases[i].phrase), "%s: \"%s\" names \"%s\"",
+		    cases[i].name, what != NULL ? what : "", cases[i].phrase);
+	}
+
+	/* Every advice bit above the six defined ones is reserved. */
+	for (unsigned bit = 6; bit < 16; bit++) {
+		char name[48];
+		fsimg_status_t status;
+
+		snprintf(name, sizeof(name), "reserved advice bit %u", bit);
+		what = NULL;
+		reserved.name = name;
+		status = zheader_run(&reserved, (uint16_t)(1u << bit), &header,
+		    &what);
+		expect_status(status, FSIMG_EUNSUPPORTED, what, __func__, __LINE__,
+		    name);
+		EXPECT(phrase_in(what, "advice bit"), "%s: \"%s\"", name,
+		    what != NULL ? what : "");
+	}
+}
+
+static void
+test_map_header_decode_splits_the_algorithm_nibbles_and_keeps_the_advice(void)
+{
+	const zheader_case_t c = { "nibbles", EROFS_LAYOUT_COMPRESSED_FULL,
+	    EROFS_INCOMPAT_COMPR_CFGS, 0, 0x21, 0, FSIMG_OK, NULL };
+	erofs_zheader_t header;
+	const char *what = NULL;
+
+	CHECK(zheader_run(&c, 0x12, &header, &what) == FSIMG_OK);
+	EXPECT(header.head1_algorithm == 1 && header.head2_algorithm == 2 &&
+	    header.advice == 0x12, "head-1 %u, head-2 %u, advice 0x%x",
+	    header.head1_algorithm, header.head2_algorithm, header.advice);
+}
+
+/* ---- Full index records ---- */
+
+enum {
+	REC_MARKER = 0x800,
+	REC_PARTIAL = 0x8000
+};
+
+/* One 8-byte full record from its fields as the table gives them. */
+static void
+full_record_pack(unsigned char raw[8], unsigned advice, unsigned second,
+    uint32_t third)
+{
+	le16_put(raw, advice);
+	le16_put(raw + 2, second);
+	le32_put(raw + 4, third);
+}
+
+/* A record decoded under an inode that permits big clusters, or not. */
+static fsimg_status_t
+full_record_decode(bool big, unsigned advice, unsigned second, uint32_t third,
+    erofs_zrecord_t *out, const char **what)
+{
+	unsigned char raw[8];
+
+	full_record_pack(raw, advice, second, third);
+	*what = NULL;
+	return (erofs_full_record_decode(raw, big, out, what));
+}
+
+static fsimg_status_t
+full_record_run(unsigned advice, unsigned second, uint32_t third,
+    erofs_zrecord_t *out, const char **what)
+{
+	return (full_record_decode(true, advice, second, third, out, what));
+}
+
+static void
+test_full_record_decode_reads_heads_and_plain_records(void)
+{
+	erofs_zrecord_t r;
+	const char *what;
+
+	CHECK(full_record_run(EROFS_RECORD_HEAD1, 300, 77, &r, &what) ==
+	    FSIMG_OK);
+	EXPECT(r.type == EROFS_RECORD_HEAD1 && r.clusterofs == 300 &&
+	    r.block == 77 && !r.partial, "head-1: type %d ofs %u block %llu",
+	    (int)r.type, r.clusterofs, (unsigned long long)r.block);
+	CHECK(full_record_run(EROFS_RECORD_HEAD2, 5, 0xfffffffe, &r, &what) ==
+	    FSIMG_OK);
+	EXPECT(r.type == EROFS_RECORD_HEAD2 && r.clusterofs == 5 &&
+	    r.block == 0xfffffffe, "head-2 with a 32-bit block");
+	CHECK(full_record_run(EROFS_RECORD_PLAIN, 0, 0, &r, &what) == FSIMG_OK);
+	EXPECT(r.type == EROFS_RECORD_PLAIN && r.clusterofs == 0 &&
+	    r.block == 0, "plain record of zeros");
+	CHECK(full_record_run(EROFS_RECORD_PLAIN, 4095, 9, &r, &what) ==
+	    FSIMG_OK);
+	EXPECT(r.clusterofs == 4095 && r.block == 9, "clusterofs 4095");
+}
+
+static void
+test_full_record_decode_marks_partial_references_on_compressed_heads_only(void)
+{
+	erofs_zrecord_t r;
+	const char *what;
+
+	CHECK(full_record_run(REC_PARTIAL | EROFS_RECORD_HEAD1, 1, 2, &r,
+	    &what) == FSIMG_OK);
+	EXPECT(r.partial && r.type == EROFS_RECORD_HEAD1, "head-1, bit 15");
+	CHECK(full_record_run(REC_PARTIAL | EROFS_RECORD_HEAD2, 1, 2, &r,
+	    &what) == FSIMG_OK);
+	EXPECT(r.partial, "head-2, bit 15");
+	CHECK(full_record_run(REC_PARTIAL | EROFS_RECORD_PLAIN, 1, 2, &r,
+	    &what) == FSIMG_OK);
+	EXPECT(!r.partial, "a plain record has nothing to decode partially");
+	CHECK(full_record_run(REC_PARTIAL | EROFS_RECORD_NONHEAD, 0,
+	    1 | 5u << 16, &r, &what) == FSIMG_OK);
+	EXPECT(!r.partial && r.type == EROFS_RECORD_NONHEAD,
+	    "a non-head record carries no partial mark");
+}
+
+static void
+test_full_record_decode_reads_the_two_distances_of_a_non_head(void)
+{
+	erofs_zrecord_t r;
+	const char *what;
+
+	/* backward 3 in the low half of the third word; the high half is the
+	 * forward distance, which is not read, zero included */
+	CHECK(full_record_run(EROFS_RECORD_NONHEAD, 0x1234, 3 | 9u << 16, &r,
+	    &what) == FSIMG_OK);
+	EXPECT(r.type == EROFS_RECORD_NONHEAD && r.backward == 3 &&
+	    !r.marker && r.marker_blocks == 0, "backward %u", r.backward);
+	CHECK(full_record_run(EROFS_RECORD_NONHEAD, 0, 3, &r, &what) ==
+	    FSIMG_OK);
+	EXPECT(r.backward == 3, "a forward distance of zero is accepted");
+	/* bit 11 of the field marks a count, so 0xf7ff is the widest distance */
+	CHECK(full_record_run(EROFS_RECORD_NONHEAD, 0, 0xf7ff | 65535u << 16, &r,
+	    &what) == FSIMG_OK);
+	EXPECT(r.backward == 0xf7ff, "the widest backward distance");
+}
+
+static void
+test_full_record_decode_reads_a_count_marker(void)
+{
+	erofs_zrecord_t r;
+	const char *what;
+
+	CHECK(full_record_run(EROFS_RECORD_NONHEAD, 0, (REC_MARKER | 4) |
+	    7u << 16, &r, &what) == FSIMG_OK);
+	EXPECT(r.marker && r.marker_blocks == 4 && r.backward == 1,
+	    "marker %d blocks %u backward %u", r.marker, r.marker_blocks,
+	    r.backward);
+	CHECK(full_record_run(EROFS_RECORD_NONHEAD, 0, (REC_MARKER | 0x7ff) |
+	    1u << 16, &r, &what) == FSIMG_OK);
+	EXPECT(r.marker && r.marker_blocks == 2047, "the largest count");
+}
+
+typedef struct full_bad_case {
+	const char	*name;
+	unsigned	 advice;
+	uint32_t	 third;
+	fsimg_status_t	 status;
+	const char	*phrase;
+} full_bad_case_t;
+
+static void
+test_full_record_decode_refuses_zero_distances_and_malformed_markers(void)
+{
+	static const full_bad_case_t cases[] = {
+		{ "backward distance zero", EROFS_RECORD_NONHEAD, 0 | 1u << 16,
+		    FSIMG_ECORRUPT, "backward distance zero" },
+		{ "both distances zero", EROFS_RECORD_NONHEAD, 0,
+		    FSIMG_ECORRUPT, "backward distance zero" },
+		{ "marker counting zero blocks", EROFS_RECORD_NONHEAD,
+		    REC_MARKER | 1u << 16, FSIMG_ECORRUPT, "zero blocks" },
+		{ "marker with bit 12 set", EROFS_RECORD_NONHEAD,
+		    (0x1000 | REC_MARKER | 2) | 1u << 16, FSIMG_ECORRUPT,
+		    "count marker field" },
+		{ "marker with bit 14 set", EROFS_RECORD_NONHEAD,
+		    (0x4000 | REC_MARKER | 2) | 1u << 16, FSIMG_ECORRUPT,
+		    "count marker field" },
+		{ "marker with bit 15 set", EROFS_RECORD_NONHEAD,
+		    (0x8000 | REC_MARKER | 2) | 1u << 16, FSIMG_ECORRUPT,
+		    "count marker field" }
+	};
+	erofs_zrecord_t r;
+	const char *what;
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		fsimg_status_t status = full_record_run(cases[i].advice, 0,
+		    cases[i].third, &r, &what);
+
+		expect_status(status, cases[i].status, what, __func__, __LINE__,
+		    cases[i].name);
+		EXPECT(phrase_in(what, cases[i].phrase), "%s: \"%s\" names \"%s\"",
+		    cases[i].name, what != NULL ? what : "", cases[i].phrase);
+	}
+}
+
+static void
+test_full_record_decode_refuses_a_count_marker_without_big_clusters(void)
+{
+	erofs_zrecord_t r;
+	const char *what;
+	fsimg_status_t status;
+
+	status = full_record_decode(false, EROFS_RECORD_NONHEAD, 0,
+	    (REC_MARKER | 2) | 1u << 16, &r, &what);
+	expect_status(status, FSIMG_ECORRUPT, what, __func__, __LINE__,
+	    "a marker where big clusters are not permitted");
+	EXPECT(phrase_in(what, "count marker without big clusters"), "\"%s\"",
+	    what != NULL ? what : "");
+	/* a backward distance that merely has bit 11 clear is no marker */
+	CHECK(full_record_decode(false, EROFS_RECORD_NONHEAD, 0, 0x7ff | 1u << 16,
+	    &r, &what) == FSIMG_OK);
+	EXPECT(!r.marker && r.backward == 0x7ff, "backward 2047, not a marker");
+}
+
+static void
+test_full_record_decode_refuses_each_reserved_advice_bit(void)
+{
+	erofs_zrecord_t r;
+	const char *what;
+
+	for (unsigned bit = 2; bit < 15; bit++) {
+		char name[48];
+		fsimg_status_t status;
+
+		snprintf(name, sizeof(name), "reserved record bit %u", bit);
+		status = full_record_run(EROFS_RECORD_HEAD1 | 1u << bit, 0, 1, &r,
+		    &what);
+		expect_status(status, FSIMG_EUNSUPPORTED, what, __func__, __LINE__,
+		    name);
+		EXPECT(phrase_in(what, "record bit"), "%s: \"%s\"", name,
+		    what != NULL ? what : "");
+	}
+	/* A reserved bit is refused on a non-head record as well. */
+	CHECK(full_record_run(EROFS_RECORD_NONHEAD | 1u << 9, 0, 1 | 1u << 16,
+	    &r, &what) == FSIMG_EUNSUPPORTED);
+}
+
+/* ---- Compact layout ---- */
+
+/* One group of the layout the way a producer lays it out. */
+typedef struct layout_group {
+	uint64_t	 offset;	/* from the header's end */
+	unsigned	 bytes;
+	unsigned	 first;		/* first record */
+	unsigned	 valid;		/* records it holds */
+} layout_group_t;
+
+/*
+ * The groups a producer writes for count records after a header ending at
+ * header_end, by walking offsets: 8-byte groups until the absolute offset is
+ * a multiple of 32, then 32-byte groups while 16 records remain, then 8-byte
+ * groups. Returns how many.
+ */
+static size_t
+layout_by_walking(uint64_t header_end, unsigned count, layout_group_t *groups)
+{
+	uint64_t offset = header_end;
+	unsigned next = 0;
+	size_t n = 0;
+
+	while (next < count) {
+		layout_group_t *g = &groups[n++];
+
+		g->offset = offset - header_end;
+		g->first = next;
+		if (offset % 32 == 0 && count - next >= 16) {
+			g->bytes = 32;
+			g->valid = 16;
+		} else {
+			g->bytes = 8;
+			g->valid = count - next >= 2 ? 2 : 1;
+		}
+		offset += g->bytes;
+		next += g->valid;
+	}
+	return (n);
+}
+
+/*
+ * Every record count the E8 fixtures cover, 1 to 45 and the boundaries 51,
+ * 60 and 71, behind a header ending at each phase modulo 32.
+ */
+static void
+test_compact_layout_matches_the_walked_layout_at_every_phase_and_count(void)
+{
+	static const unsigned extra[] = { 51, 60, 71 };
+
+	for (unsigned phase = 0; phase < 32; phase += 8) {
+		for (unsigned n = 0; n < 45 + ARRAY_SIZE(extra); n++) {
+			unsigned count = n < 45 ? n + 1 : extra[n - 45];
+			uint64_t header_end = 64 + phase;
+			layout_group_t groups[80];
+			erofs_compact_layout_t layout;
+			uint64_t bytes = 0;
+			size_t groups_n;
+
+			groups_n = layout_by_walking(header_end, count, groups);
+			for (size_t g = 0; g < groups_n; g++)
+				bytes += groups[g].bytes;
+			erofs_compact_layout(header_end, count, &layout);
+			EXPECT(layout.records == count && layout.total_bytes == bytes,
+			    "phase %u, %u records: %llu bytes, expected %llu", phase,
+			    count, (unsigned long long)layout.total_bytes,
+			    (unsigned long long)bytes);
+
+			for (unsigned r = 0; r < count; r++) {
+				erofs_index_unit_t got;
+				const layout_group_t *want = NULL;
+
+				for (size_t g = 0; g < groups_n; g++) {
+					if (r >= groups[g].first &&
+					    r < groups[g].first + groups[g].valid)
+						want = &groups[g];
+				}
+				CHECK(want != NULL);
+				erofs_compact_locate(&layout, r, &got);
+				EXPECT(got.offset == want->offset &&
+				    got.bytes == want->bytes &&
+				    got.slots == (want->bytes == 8 ? 2u : 16u) &&
+				    got.valid == want->valid &&
+				    got.slot == r - want->first,
+				    "phase %u, %u records, record %u: offset %llu bytes "
+				    "%u slots %u valid %u slot %u", phase, count, r,
+				    (unsigned long long)got.offset, got.bytes, got.slots,
+				    got.valid, got.slot);
+			}
+		}
+	}
+}
+
+static void
+test_compact_layout_of_an_odd_final_record_fills_a_whole_8_byte_group(void)
+{
+	erofs_compact_layout_t layout;
+	erofs_index_unit_t group;
+
+	/* header end 8 past 64: 6 records in the initial run, 1 left over */
+	erofs_compact_layout(72, 7, &layout);
+	EXPECT(layout.initial_records == 6 && layout.wide_records == 0 &&
+	    layout.total_bytes == 24 + 8, "initial %llu wide %llu bytes %llu",
+	    (unsigned long long)layout.initial_records,
+	    (unsigned long long)layout.wide_records,
+	    (unsigned long long)layout.total_bytes);
+	erofs_compact_locate(&layout, 6, &group);
+	EXPECT(group.bytes == 8 && group.valid == 1 && group.slot == 0 &&
+	    group.offset == 24, "the odd record: bytes %u valid %u slot %u "
+	    "offset %llu", group.bytes, group.valid, group.slot,
+	    (unsigned long long)group.offset);
+}
+
+static void
+test_compact_layout_with_fewer_records_than_the_initial_run_is_all_8_byte(void)
+{
+	erofs_compact_layout_t layout;
+
+	/* 3 records behind a run of 6: two groups, the second odd */
+	erofs_compact_layout(72, 3, &layout);
+	EXPECT(layout.total_bytes == 16 && layout.wide_records == 0 &&
+	    layout.initial_records == 3, "3 records: %llu bytes",
+	    (unsigned long long)layout.total_bytes);
+	/* a header already ending on a multiple of 32 starts 32-byte groups */
+	erofs_compact_layout(96, 16, &layout);
+	EXPECT(layout.initial_records == 0 && layout.wide_records == 16 &&
+	    layout.total_bytes == 32, "16 records at a boundary: wide %llu",
+	    (unsigned long long)layout.wide_records);
+	erofs_compact_layout(96, 15, &layout);
+	EXPECT(layout.wide_records == 0 && layout.total_bytes == 64,
+	    "15 records at a boundary: 8 groups of 8 bytes");
+}
+
+/* ---- Compact groups ---- */
+
+/* One field of a compact group: the two type bits and the 12-bit value. */
+typedef struct zfield {
+	unsigned	 type;
+	unsigned	 value;
+} zfield_t;
+
+#define ZH(ofs)		{ EROFS_RECORD_HEAD1, (ofs) }
+#define ZP(ofs)		{ EROFS_RECORD_PLAIN, (ofs) }
+#define ZNH(dist)	{ EROFS_RECORD_NONHEAD, (dist) }
+#define ZMK(blocks)	{ EROFS_RECORD_NONHEAD, REC_MARKER | (blocks) }
+
+/*
+ * Pack fields into a group of slots (2 or 16) records: 16-bit fields in 8
+ * bytes, 14-bit fields in 32, from bit 0 in order, the anchor in the last 4
+ * bytes. Slots beyond the fields stay zero, plain records at offset 0.
+ */
+static void
+group_pack(unsigned char bytes[32], unsigned slots, const zfield_t *fields,
+    size_t count, uint32_t anchor)
+{
+	unsigned width = slots == 2 ? 16 : 14, length = slots == 2 ? 8 : 32;
+
+	bzero(bytes, 32);
+	CHECK(count <= slots);
+	for (size_t slot = 0; slot < count; slot++) {
+		unsigned field = fields[slot].value | fields[slot].type << 12;
+
+		CHECK(fields[slot].value < 0x1000);
+		for (unsigned bit = 0; bit < width; bit++) {
+			if (((field >> bit) & 1) != 0) {
+				unsigned at = (unsigned)slot * width + bit;
+
+				bytes[at / 8] |= (unsigned char)(1u << (at % 8));
+			}
+		}
+	}
+	le32_put(bytes + length - 4, anchor);
+}
+
+/*
+ * Decode the group. A 32-byte group's unnamed slots are zero plain records,
+ * all valid; an 8-byte group holds as many records as it was given.
+ */
+static fsimg_status_t
+group_run(const zfield_t *fields, size_t count, unsigned slots, bool big,
+    uint32_t anchor, erofs_zrecord_t out[EROFS_GROUP_RECORDS_MAX],
+    const char **what)
+{
+	unsigned char bytes[32];
+	erofs_index_unit_t group = {
+		.offset = 0, .bytes = slots == 2 ? 8u : 32u, .slots = slots,
+		.valid = slots == 2 ? (unsigned)count : 16u, .slot = 0
+	};
+
+	group_pack(bytes, slots, fields, count, anchor);
+	*what = NULL;
+	bzero(out, EROFS_GROUP_RECORDS_MAX * sizeof(out[0]));
+	return (erofs_compact_group_decode(bytes, &group, big, out, what));
+}
+
+static void
+test_compact_group_decode_unpacks_every_14_bit_slot(void)
+{
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	zfield_t fields[16];
+	const char *what;
+
+	for (unsigned i = 0; i < 16; i++) {
+		fields[i] = (zfield_t){ i % 3 == 0 ? EROFS_RECORD_HEAD1 :
+		    i % 3 == 1 ? EROFS_RECORD_PLAIN : EROFS_RECORD_HEAD2,
+		    i * 257 + 3 };
+	}
+	CHECK(group_run(fields, 16, 16, false, 7, r, &what) == FSIMG_OK);
+	for (unsigned i = 0; i < 16; i++) {
+		EXPECT(r[i].type == (erofs_record_type_t)fields[i].type &&
+		    r[i].clusterofs == fields[i].value && r[i].block == 8 + i,
+		    "slot %u: type %d clusterofs %u block %llu", i, (int)r[i].type,
+		    r[i].clusterofs, (unsigned long long)r[i].block);
+	}
+}
+
+static void
+test_compact_group_decode_unpacks_both_16_bit_slots(void)
+{
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	const zfield_t fields[] = { ZH(0xabc), ZP(0x123) };
+	const char *what;
+
+	CHECK(group_run(fields, 2, 2, false, 40, r, &what) == FSIMG_OK);
+	EXPECT(r[0].type == EROFS_RECORD_HEAD1 && r[0].clusterofs == 0xabc &&
+	    r[0].block == 41 && r[1].type == EROFS_RECORD_PLAIN &&
+	    r[1].clusterofs == 0x123 && r[1].block == 42,
+	    "blocks %llu and %llu", (unsigned long long)r[0].block,
+	    (unsigned long long)r[1].block);
+}
+
+static void
+test_compact_group_last_slot_derives_backward_distance_after_head(void)
+{
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	zfield_t fields[16];
+	const char *what;
+
+	for (unsigned i = 0; i < 16; i++)
+		fields[i] = (zfield_t)ZH(i);
+	fields[15] = (zfield_t)ZNH(9);	/* the last slot's field is forward */
+	CHECK(group_run(fields, 16, 16, false, 0, r, &what) == FSIMG_OK);
+	EXPECT(r[15].type == EROFS_RECORD_NONHEAD && r[15].backward == 1 &&
+	    !r[15].marker, "backward %u", r[15].backward);
+
+	/* the 8-byte group's last slot is its second */
+	{
+		const zfield_t pair[] = { ZH(1), ZNH(200) };
+
+		CHECK(group_run(pair, 2, 2, false, 0, r, &what) == FSIMG_OK);
+		EXPECT(r[1].backward == 1, "pair: backward %u", r[1].backward);
+	}
+}
+
+static void
+test_compact_group_last_slot_derives_backward_distance_after_non_head(void)
+{
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	zfield_t fields[16];
+	const char *what;
+
+	for (unsigned i = 0; i < 16; i++)
+		fields[i] = (zfield_t)ZH(i);
+	fields[12] = (zfield_t)ZH(0);
+	fields[13] = (zfield_t)ZNH(1);
+	fields[14] = (zfield_t)ZNH(2);
+	fields[15] = (zfield_t)ZNH(4);
+	CHECK(group_run(fields, 16, 16, false, 0, r, &what) == FSIMG_OK);
+	EXPECT(r[15].backward == 3, "after a non-head of distance 2: backward "
+	    "%u", r[15].backward);
+}
+
+static void
+test_compact_group_last_slot_derives_backward_distance_after_marker(void)
+{
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	zfield_t fields[16];
+	const char *what;
+
+	for (unsigned i = 0; i < 16; i++)
+		fields[i] = (zfield_t)ZH(i);
+	fields[13] = (zfield_t)ZH(0);
+	fields[14] = (zfield_t)ZMK(3);
+	fields[15] = (zfield_t)ZNH(6);
+	CHECK(group_run(fields, 16, 16, true, 0, r, &what) == FSIMG_OK);
+	EXPECT(r[14].marker && r[14].marker_blocks == 3 &&
+	    r[15].backward == 2 && !r[15].marker,
+	    "after a marker: backward %u", r[15].backward);
+}
+
+static void
+test_compact_group_decode_keeps_a_count_marker_in_the_last_slot(void)
+{
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	zfield_t fields[16];
+	const char *what;
+
+	for (unsigned i = 0; i < 16; i++)
+		fields[i] = (zfield_t)ZH(i);
+	fields[15] = (zfield_t)ZMK(5);
+	CHECK(group_run(fields, 16, 16, true, 0, r, &what) == FSIMG_OK);
+	EXPECT(r[15].marker && r[15].marker_blocks == 5 && r[15].backward == 1,
+	    "marker %d blocks %u backward %u", r[15].marker,
+	    r[15].marker_blocks, r[15].backward);
+	{
+		const zfield_t pair[] = { ZH(1), ZMK(0x7ff) };
+
+		CHECK(group_run(pair, 2, 2, true, 0, r, &what) == FSIMG_OK);
+		EXPECT(r[1].marker && r[1].marker_blocks == 2047,
+		    "pair: a marker in the second slot");
+	}
+}
+
+/* A head's block after the records in front of it, by walking the group. */
+static void
+test_compact_group_decode_walks_without_big_clusters(void)
+{
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	const char *what;
+
+	{
+		const zfield_t fields[] = { ZH(10), ZNH(1), ZNH(2), ZH(20) };
+
+		CHECK(group_run(fields, 4, 16, false, 100, r, &what) == FSIMG_OK);
+		EXPECT(r[0].block == 101 && r[3].block == 102,
+		    "a head after two non-heads of one cluster: %llu, %llu",
+		    (unsigned long long)r[0].block, (unsigned long long)r[3].block);
+	}
+	{
+		const zfield_t fields[] = { ZH(1), ZH(2), ZH(3), ZP(4) };
+
+		CHECK(group_run(fields, 4, 16, false, 100, r, &what) == FSIMG_OK);
+		EXPECT(r[0].block == 101 && r[1].block == 102 &&
+		    r[2].block == 103 && r[3].block == 104,
+		    "consecutive heads and plain records add one each");
+	}
+	{
+		/* the group begins inside a cluster headed in an earlier group */
+		const zfield_t fields[] = { ZNH(5), ZH(8) };
+
+		CHECK(group_run(fields, 2, 16, false, 100, r, &what) == FSIMG_OK);
+		EXPECT(r[1].block == 101, "a walk that would leave the group ends "
+		    "there: %llu", (unsigned long long)r[1].block);
+	}
+}
+
+static void
+test_compact_group_decode_walks_with_big_clusters(void)
+{
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	const char *what;
+
+	{
+		/* The design's example: head, marker 4, non-head, head. */
+		const zfield_t fields[] = { ZH(1), ZMK(4), ZNH(2), ZH(2) };
+
+		CHECK(group_run(fields, 4, 16, true, 21, r, &what) == FSIMG_OK);
+		EXPECT(r[0].block == 21 && r[3].block == 25,
+		    "blocks %llu and %llu", (unsigned long long)r[0].block,
+		    (unsigned long long)r[3].block);
+	}
+	{
+		const zfield_t fields[] = { ZH(1), ZH(2), ZH(3) };
+
+		CHECK(group_run(fields, 3, 16, true, 10, r, &what) == FSIMG_OK);
+		EXPECT(r[0].block == 10 && r[1].block == 11 && r[2].block == 12,
+		    "heads without markers are one block each");
+	}
+	{
+		const zfield_t fields[] = { ZH(1), ZMK(2), ZH(2), ZMK(1), ZH(3) };
+
+		CHECK(group_run(fields, 5, 16, true, 5, r, &what) == FSIMG_OK);
+		EXPECT(r[0].block == 5 && r[2].block == 7 && r[4].block == 8,
+		    "clusters of 2, 1: %llu %llu %llu",
+		    (unsigned long long)r[0].block, (unsigned long long)r[2].block,
+		    (unsigned long long)r[4].block);
+	}
+	{
+		/* the cluster's marker lies in this group: the anchor is its start */
+		const zfield_t fields[] = { ZMK(3), ZH(9) };
+
+		CHECK(group_run(fields, 2, 16, true, 40, r, &what) == FSIMG_OK);
+		EXPECT(r[1].block == 43, "a group starting at a marker: %llu",
+		    (unsigned long long)r[1].block);
+	}
+	{
+		/* the marker lies in an earlier group: the anchor is past the cluster */
+		const zfield_t fields[] = { ZNH(3), ZH(9) };
+
+		CHECK(group_run(fields, 2, 16, true, 60, r, &what) == FSIMG_OK);
+		EXPECT(r[1].block == 60, "a group starting after a marker: %llu",
+		    (unsigned long long)r[1].block);
+	}
+}
+
+typedef struct group_bad_case {
+	const char	*name;
+	zfield_t	 fields[4];
+	size_t		 count;
+	unsigned	 slots;
+	bool		 big;
+	const char	*phrase;
+} group_bad_case_t;
+
+static void
+test_compact_group_decode_refuses_each_corrupt_group(void)
+{
+	static const group_bad_case_t cases[] = {
+		{ "backward distance zero", { ZH(0), ZNH(0) }, 2, 16, false,
+		    "distance zero" },
+		{ "non-head right after its head without a marker, big",
+		    { ZH(0), ZNH(1) }, 2, 16, true, "without a count marker" },
+		{ "last slot after a head without a marker, big",
+		    { ZH(0), ZNH(7) }, 2, 2, true, "without a count marker" },
+		{ "marker without big clusters", { ZH(0), ZMK(2) }, 2, 16, false,
+		    "count marker without big clusters" },
+		{ "marker after a non-head record", { ZH(0), ZMK(2), ZNH(2),
+		    ZMK(1) }, 4, 16, true, "after a non-head" },
+		{ "marker of zero blocks", { ZH(0), ZMK(0) }, 2, 16, true,
+		    "zero blocks" },
+		{ "jump landing on a non-head, no big clusters",
+		    { ZH(0), ZNH(1), ZNH(1), ZH(0) }, 4, 16, false,
+		    "wrong record type" },
+		{ "jump landing on a head, big clusters",
+		    { ZH(0), ZMK(2), ZNH(3), ZH(0) }, 4, 16, true,
+		    "wrong record type" }
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+		const char *what;
+		fsimg_status_t status;
+
+		status = group_run(cases[i].fields, cases[i].count, cases[i].slots,
+		    cases[i].big, 10, r, &what);
+		expect_status(status, FSIMG_ECORRUPT, what, __func__, __LINE__,
+		    cases[i].name);
+		EXPECT(phrase_in(what, cases[i].phrase), "%s: \"%s\" names \"%s\"",
+		    cases[i].name, what != NULL ? what : "", cases[i].phrase);
+	}
+}
+
+static void
+test_compact_group_decode_judges_every_record_of_the_group(void)
+{
+	/* the bad record comes after the one a lookup would want */
+	const zfield_t fields[] = { ZH(1), ZH(2), ZNH(0) };
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	const char *what;
+
+	EXPECT(group_run(fields, 3, 16, false, 0, r, &what) == FSIMG_ECORRUPT,
+	    "a zero distance in slot 2 refuses the whole group");
+}
+
+static void
+test_compact_group_of_an_odd_final_record_ignores_the_second_slot(void)
+{
+	erofs_zrecord_t r[EROFS_GROUP_RECORDS_MAX];
+	unsigned char bytes[32];
+	const zfield_t fields[] = { ZH(300) };
+	erofs_index_unit_t group = { .offset = 0, .bytes = 8, .slots = 2,
+	    .valid = 1, .slot = 0 };
+	const char *what = NULL;
+
+	group_pack(bytes, 2, fields, 1, 77);
+	/* a nonzero second slot is a junk non-head with distance zero */
+	le16_put(bytes + 2, EROFS_RECORD_NONHEAD << 12);
+	CHECK(erofs_compact_group_decode(bytes, &group, false, r, &what) ==
+	    FSIMG_OK);
+	EXPECT(r[0].type == EROFS_RECORD_HEAD1 && r[0].clusterofs == 300 &&
+	    r[0].block == 78, "the one record is read: block %llu",
+	    (unsigned long long)r[0].block);
+}
+
+/* ---- Compressed files through the reader ---- */
+
+/*
+ * A compressed file is built by the generator from a plan: the clusters'
+ * kinds and extents. Each extent has bytes of its own, so a cluster read at a
+ * wrong offset or from a wrong place shows as a difference. The volume is
+ * opened and walked to its end, and the file is read back whole and by
+ * ranges that start and end inside clusters and cross their boundaries.
+ */
+
+enum {
+	ZCLUSTERS_MAX = 64,
+	ZRANGES_MAX = 4 * ZCLUSTERS_MAX + 16,
+	ZLAYOUT_FULL = 1,
+	ZLAYOUT_COMPACT = 3,
+	ZLAYOUTS_BOTH = 3,
+	ZPHASES = 4
+};
+
+/* The XATTR counts that put a compact index's first group at each phase. */
+static const unsigned zphase_xattr_counts[ZPHASES] = { 0, 1, 3, 7 };
+
+typedef struct zplan {
+	unsigned	 blkszbits;	/* 0: 9 */
+	size_t		 size;
+	size_t		 count;
+	bool		 big;		/* big clusters permitted */
+	gen_zcluster_t	 clusters[ZCLUSTERS_MAX];
+} zplan_t;
+
+#define ZC(start, kind, blocks, period) \
+	{ (start), (blocks), (kind), false, (period), NULL, 0 }
+#define ZC2(start, kind, blocks, period) \
+	{ (start), (blocks), (kind), true, (period), NULL, 0 }
+#define ZC_RAW(start, blocks, bytes, length) \
+	{ (start), (blocks), GEN_ZK_RAW, false, 0, (bytes), (length) }
+
+static size_t
+zblock(const zplan_t *plan)
+{
+	return ((size_t)1 << (plan->blkszbits != 0 ? plan->blkszbits : 9));
+}
+
+/* How the volume is set up: its features and compression configuration. */
+typedef struct zvolume {
+	uint32_t	 incompat;	/* beyond LZ4_0PADDING */
+	unsigned	 mask;		/* algorithms of COMPR_CFGS; 0: LZ4 alone */
+	unsigned	 max_blocks;	/* the LZ4 record's cluster blocks */
+	bool		 no_padding;	/* LZ4_0PADDING clear */
+} zvolume_t;
+
+static const zvolume_t zvolume_plain = { 0, 0, 0, false };
+static const zvolume_t zvolume_big = { EROFS_INCOMPAT_COMPR_CFGS, 0, 4, false };
+
+/*
+ * The superblock's incompatible features and, under COMPR_CFGS, one
+ * configuration record for each algorithm of the mask, in increasing order,
+ * as the design lays them out.
+ */
+static void
+ztree_new(gen_tree_t *tree, unsigned blkszbits, const zvolume_t *volume,
+    unsigned data_blocks)
+{
+	uint32_t incompat = volume->incompat |
+	    (volume->no_padding ? 0 : EROFS_INCOMPAT_LZ4_0PADDING);
+	unsigned mask = volume->mask != 0 ? volume->mask : 1;
+	uint64_t at = GEN_SUPER_OFFSET + 128;
+
+	tree_new(tree, blkszbits, data_blocks);
+	gen_super_put(&tree->image, SB_INCOMPAT, incompat, 4);
+	if ((incompat & EROFS_INCOMPAT_COMPR_CFGS) == 0)
+		return;
+	gen_super_put(&tree->image, SB_WORD54, mask, 2);
+	if ((mask & 1) != 0) {
+		gen_lz4_config_put(&tree->image, 0, 65535,
+		    (uint16_t)volume->max_blocks);
+		at += 16;
+	}
+	if ((mask & 2) != 0) {
+		gen_put(&tree->image, at, 14, 2);
+		gen_put(&tree->image, at + 2, 65536, 4);	/* dictionary size */
+		at += 16;
+	}
+	if ((mask & 4) != 0) {
+		gen_put(&tree->image, at, 6, 2);
+		gen_put(&tree->image, at + 2, 15, 1);		/* window bits */
+		at += 8;
+	}
+	if ((mask & 8) != 0) {
+		gen_put(&tree->image, at, 6, 2);
+		gen_put(&tree->image, at + 3, 2, 1);		/* window log */
+	}
+}
+
+/*
+ * The bytes of the file: each cluster's extent holds its own pattern, which
+ * repeats with the cluster's period when it is compressed with matches.
+ */
+static unsigned char *
+zcontent(const zplan_t *plan, unsigned seed)
+{
+	unsigned char *bytes = calloc(plan->size != 0 ? plan->size : 1, 1);
+
+	CHECK(bytes != NULL);
+	for (size_t k = 0; k < plan->count; k++) {
+		const gen_zcluster_t *c = &plan->clusters[k];
+		uint64_t end = k + 1 < plan->count ? plan->clusters[k + 1].start :
+		    plan->size;
+
+		for (uint64_t i = c->start; i < end; i++) {
+			uint64_t within = i - c->start;
+
+			bytes[i] = pattern_byte(seed + (unsigned)k,
+			    c->kind == GEN_ZK_LZ4_PERIODIC ? within % c->period :
+			    within);
+		}
+	}
+	return (bytes);
+}
+
+/* One record field edited before the index is written. */
+typedef enum zfield_id {
+	ZF_END = 0,		/* ends a list of patches */
+	ZF_TYPE,
+	ZF_CLUSTEROFS,
+	ZF_BLOCK,
+	ZF_BACKWARD,
+	ZF_FORWARD,
+	ZF_PARTIAL
+} zfield_id_t;
+
+typedef struct zpatch {
+	size_t		 record;
+	zfield_id_t	 field;
+	uint32_t	 value;
+} zpatch_t;
+
+#define ZPATCHES_MAX 4
+
+static void
+zpatches_apply(gen_zrecord_t *records, size_t count, const zpatch_t *patches)
+{
+	for (; patches != NULL && patches->field != ZF_END; patches++) {
+		gen_zrecord_t *r = &records[patches->record];
+
+		CHECK(patches->record < count);
+		switch (patches->field) {
+		case ZF_TYPE:
+			r->type = (uint8_t)patches->value;
+			break;
+		case ZF_CLUSTEROFS:
+			r->clusterofs = (uint16_t)patches->value;
+			break;
+		case ZF_BLOCK:
+			r->block = patches->value;
+			break;
+		case ZF_BACKWARD:
+			r->backward = (uint16_t)patches->value;
+			break;
+		case ZF_FORWARD:
+			r->forward = (uint16_t)patches->value;
+			break;
+		case ZF_PARTIAL:
+			r->partial = patches->value != 0;
+			break;
+		case ZF_END:
+			break;
+		}
+	}
+}
+
+/* What a compressed inode is built from. */
+typedef struct zbuild {
+	const zplan_t		*plan;
+	const unsigned char	*content;
+	const zpatch_t		*patches;	/* NULL: the records as implied */
+	unsigned		 layout;	/* ZLAYOUT_* */
+	uint16_t		 advice;	/* beyond the layout's own */
+	uint8_t			 algorithms;
+	unsigned		 xattr_count;
+	uint16_t		 mode;		/* 0: a regular file */
+} zbuild_t;
+
+static uint16_t
+zadvice(const zplan_t *plan, unsigned layout, uint16_t extra)
+{
+	uint16_t advice = extra;
+
+	if (layout == ZLAYOUT_COMPACT)
+		advice |= GEN_ZA_COMPACT_2B;
+	if (plan->big)
+		advice |= layout == ZLAYOUT_COMPACT ?
+		    (GEN_ZA_BIG1 | GEN_ZA_BIG2) : GEN_ZA_BIG1;
+	return (advice);
+}
+
+/*
+ * Add the file, then rewrite its index with the patches applied to the
+ * records the plan implies. Returns the NID.
+ */
+static uint64_t
+zfile_add(gen_tree_t *tree, const zbuild_t *b)
+{
+	gen_inode_t proto = inode_proto(b->mode != 0 ? b->mode : MODE_FILE,
+	    LAYOUT_FLAT);
+	gen_zfile_t zf = { b->content, b->plan->size, b->layout,
+	    zadvice(b->plan, b->layout, b->advice), b->algorithms,
+	    b->plan->clusters, b->plan->count };
+	uint32_t first_block = tree->data_next;
+	uint64_t nid;
+
+	proto.xattr_count = (uint16_t)b->xattr_count;
+	nid = gen_tree_add_zfile(tree, &proto, &zf);
+	if (b->xattr_count > 1) {
+		/* One inline "user.a" entry fills the region, which moves the
+		 * map header and with it a compact index's first group. */
+		size_t inline_bytes = 4 * (size_t)(b->xattr_count - 1);
+		unsigned char *value = calloc(inline_bytes, 1);
+
+		CHECK(value != NULL && inline_bytes >= 8);
+		fill_pattern(value, inline_bytes - 5, 9);
+		CHECK(gen_xattr_entry(&tree->image, gen_inode_offset(&tree->image,
+		    nid) + GEN_COMPACT_BYTES + 12, 1, "a", value,
+		    inline_bytes - 5) == inline_bytes);
+		free(value);
+	}
+	if (b->patches != NULL || b->plan->size / zblock(b->plan) > 2047) {
+		uint64_t header = gen_zheader_offset(&tree->image, &proto, nid);
+		gen_zrecord_t *records;
+		size_t count = gen_zfile_records(&zf, tree->blkszbits, first_block,
+		    &records);
+
+		/* A distance of 2048 or more would read as a count marker; a
+		 * producer chains non-heads of 2047 instead. */
+		for (size_t i = 0; i < count; i++) {
+			/* Under big clusters the record after a head is the
+			 * count marker, whose field is meant to be large. */
+			bool marker = b->plan->big && i > 0 &&
+			    records[i - 1].type != GEN_Z_NONHEAD;
+
+			if (records[i].type == GEN_Z_NONHEAD && !marker &&
+			    records[i].backward > 2047)
+				records[i].backward = 2047;
+			if (records[i].forward > 2047)
+				records[i].forward = 2047;
+		}
+		zpatches_apply(records, count, b->patches);
+		if (b->layout == ZLAYOUT_FULL)
+			gen_full_index_put(&tree->image, header, records, count);
+		else
+			(void)gen_compact_index_put(&tree->image, header, records,
+			    count, zf.advice);
+		free(records);
+	}
+	return (nid);
+}
+
+static unsigned
+zplan_blocks(const zplan_t *plan)
+{
+	unsigned blocks = 4;
+
+	for (size_t k = 0; k < plan->count; k++)
+		blocks += plan->clusters[k].blocks;
+	return (blocks);
+}
+
+/* A tree with the plan's file named "f" in its root. */
+static void
+ztree_with_file(gen_tree_t *tree, const zvolume_t *volume, const zbuild_t *b)
+{
+	ztree_new(tree, b->plan->blkszbits != 0 ? b->plan->blkszbits : 9,
+	    volume, zplan_blocks(b->plan));
+	root_names(tree, "f", zfile_add(tree, b), T_FILE);
+}
+
+static size_t
+first_difference(const unsigned char *a, const unsigned char *b, size_t length)
+{
+	size_t i;
+
+	for (i = 0; i < length; i++) {
+		if (a[i] != b[i])
+			break;
+	}
+	return (i);
+}
+
+/* An open reader positioned on the tree's one file. */
+typedef struct zreader {
+	volume_t	 v;
+	fsimg_reader_t	*reader;
+	bool		 ok;
+} zreader_t;
+
+static void
+zreader_open(zreader_t *z, const char *label, gen_tree_t *tree, size_t size)
+{
+	const fsimg_entry_t *entry = NULL;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	bzero(&error, sizeof(error));
+	gen_tree_seal(tree);
+	volume_start(&z->v, tree->image.bytes, tree->image.length);
+	z->reader = NULL;
+	status = fsimg_reader_open(z->v.ctx, z->v.io, NULL, &z->reader, &error);
+	if (status == FSIMG_OK)
+		status = fsimg_reader_next(z->reader, &entry, &error);
+	z->ok = status == FSIMG_OK && entry->size == size;
+	EXPECT(z->ok, "%s: the file opens at size %zu (status %d, \"%s\")", label,
+	    size, (int)status, error.message);
+}
+
+static void
+zreader_close(zreader_t *z, const char *label)
+{
+	fsimg_stats_t stats;
+
+	fsimg_reader_free(z->reader);
+	fsimg_io_free(z->v.io);
+	CHECK(fsimg_ctx_get_stats(z->v.ctx, &stats, NULL) == FSIMG_OK);
+	EXPECT(stats.memory_bytes == z->v.baseline,
+	    "%s: closing returns the memory (%llu != %llu)", label,
+	    (unsigned long long)stats.memory_bytes,
+	    (unsigned long long)z->v.baseline);
+	fsimg_ctx_free(z->v.ctx);
+}
+
+/* length bytes at offset through fsimg_reader_read_at(), in as many calls. */
+static fsimg_status_t
+read_range(fsimg_reader_t *reader, uint64_t offset, unsigned char *out,
+    size_t length, fsimg_error_t *error)
+{
+	size_t done = 0;
+
+	while (done < length) {
+		size_t count = 0;
+		fsimg_status_t status = fsimg_reader_read_at(reader, offset + done,
+		    out + done, length - done, &count, error);
+
+		if (status != FSIMG_OK)
+			return (status);
+		if (count == 0)
+			return (FSIMG_ESTATE);
+		done += count;
+	}
+	return (FSIMG_OK);
+}
+
+typedef struct zrange {
+	uint64_t	 offset;
+	size_t		 length;
+} zrange_t;
+
+static size_t
+zrange_add(zrange_t *ranges, size_t n, uint64_t size, uint64_t offset,
+    uint64_t length)
+{
+	if (offset >= size)
+		return (n);
+	if (length > size - offset)
+		length = size - offset;
+	ranges[n++] = (zrange_t){ offset, (size_t)length };
+	return (n);
+}
+
+/*
+ * Reads around every cluster's start and end, and across block boundaries,
+ * forwards and then backwards so that a cache hit and a cache refill both
+ * happen, each compared with the content.
+ */
+static void
+check_zfile_reads(const char *label, gen_tree_t *tree, const zplan_t *plan,
+    const unsigned char *content)
+{
+	zrange_t ranges[ZRANGES_MAX];
+	unsigned char *got = malloc(plan->size);
+	size_t block = zblock(plan), n = 0, size = plan->size;
+	zreader_t z;
+
+	CHECK(got != NULL);
+	for (size_t k = 0; k < plan->count; k++) {
+		uint64_t s = plan->clusters[k].start;
+		uint64_t e = k + 1 < plan->count ? plan->clusters[k + 1].start : size;
+
+		n = zrange_add(ranges, n, size, s > 0 ? s - 1 : 0, 3);
+		n = zrange_add(ranges, n, size, s, 1);
+		n = zrange_add(ranges, n, size, s > 50 ? s - 50 : 0, 100);
+		n = zrange_add(ranges, n, size, e > 1 ? e - 1 : 0, 2);
+	}
+	n = zrange_add(ranges, n, size, 0, size);
+	n = zrange_add(ranges, n, size, size - 1, 1);
+	n = zrange_add(ranges, n, size, size > 3 ? size - 3 : 0, 3);
+	n = zrange_add(ranges, n, size, block - 1, 2);
+	n = zrange_add(ranges, n, size, block, block);
+	n = zrange_add(ranges, n, size, 7, size > 14 ? size - 14 : 1);
+	CHECK(n <= ZRANGES_MAX);
+
+	zreader_open(&z, label, tree, size);
+	for (size_t pass = 0; z.ok && pass < 2; pass++) {
+		for (size_t i = 0; i < n; i++) {
+			const zrange_t *r = &ranges[pass == 0 ? i : n - 1 - i];
+			fsimg_error_t error;
+			fsimg_status_t status;
+
+			bzero(&error, sizeof(error));
+			status = read_range(z.reader, r->offset, got, r->length,
+			    &error);
+			EXPECT(status == FSIMG_OK, "%s: read of %zu bytes at %llu "
+			    "(status %d, \"%s\")", label, r->length,
+			    (unsigned long long)r->offset, (int)status, error.message);
+			if (status == FSIMG_OK)
+				EXPECT(bcmp(got, content + r->offset, r->length) == 0,
+				    "%s: read of %zu bytes at %llu differs at byte %zu",
+				    label, r->length, (unsigned long long)r->offset,
+				    first_difference(got, content + r->offset,
+				    r->length));
+		}
+	}
+	zreader_close(&z, label);
+	free(got);
+}
+
+/* The tree walked to its end, "/f" equal to the content, then read by ranges. */
+static void
+check_zfile(const char *label, gen_tree_t *tree, const zplan_t *plan,
+    const unsigned char *content)
+{
+	listing_t *list = walk_ok(label, tree);
+	const node_t *node = find_node(list, "/f");
+
+	EXPECT(node != NULL && node->size == plan->size,
+	    "%s: the file is listed at size %zu", label, plan->size);
+	if (node != NULL && node->size == plan->size && node->content != NULL)
+		EXPECT(bcmp(node->content, content, plan->size) == 0,
+		    "%s: whole-file read differs at byte %zu", label,
+		    first_difference(node->content, content, plan->size));
+	listing_free(list);
+	check_zfile_reads(label, tree, plan, content);
+}
+
+static const char *
+zlayout_name(unsigned layout)
+{
+	return (layout == ZLAYOUT_FULL ? "full" : "compact");
+}
+
+/* ---- Plans ---- */
+
+/* A file whose clusters cover every kind of record in a small index. */
+static const zplan_t zplan_mixed = {
+	.size = 3500, .count = 5, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+		ZC(1700, GEN_ZK_LZ4_PERIODIC, 1, 9),
+		ZC(2300, GEN_ZK_PLAIN, 1, 0),
+		ZC(2700, GEN_ZK_LZ4_PERIODIC, 1, 11),
+		ZC(3300, GEN_ZK_LZ4_LITERAL, 1, 0)
+	}
+};
+
+/* The same with big clusters: blocks 3, 1, 2 and 1, markers on three. */
+static const zplan_t zplan_big = {
+	.size = 4000, .big = true, .count = 4, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 3, 7),
+		ZC(1700, GEN_ZK_LZ4_PERIODIC, 1, 9),
+		ZC(2500, GEN_ZK_LZ4_PERIODIC, 2, 11),
+		ZC(3600, GEN_ZK_LZ4_LITERAL, 1, 0)
+	}
+};
+
+/*
+ * The deterministic plan of a file of blocks blocks: clusters of 1 to 4
+ * blocks when big, extents of at least their blocks so that no cluster
+ * stores more than it decodes, every start in a later logical cluster than
+ * the one before, and some extents ending on a block boundary. plain is the
+ * kind of the plain clusters mixed in, or -1 for none.
+ */
+static void
+zplan_random(zplan_t *plan, unsigned blkszbits, unsigned blocks,
+    unsigned seed, bool big, int plain)
+{
+	size_t block = (size_t)1 << blkszbits;
+	uint64_t state = seed * UINT64_C(2654435761) + 1, start = 0;
+
+	bzero(plan, sizeof(*plan));
+	plan->blkszbits = blkszbits;
+	plan->big = big;
+	plan->size = (size_t)blocks * block + (seed % 2) * 61;
+	for (;;) {
+		gen_zcluster_t *c = &plan->clusters[plan->count++];
+		uint64_t remaining = plan->size - start, extent, ofs = start % block;
+		unsigned pick, cluster_blocks;
+
+		CHECK(plan->count <= ZCLUSTERS_MAX);
+		state = state * UINT64_C(6364136223846793005) +
+		    UINT64_C(1442695040888963407);
+		pick = (unsigned)(state >> 33);
+		cluster_blocks = big ? 1 + pick % 4 : 1;
+		*c = (gen_zcluster_t){ .start = start, .blocks = cluster_blocks,
+		    .period = 5 + pick % 23 };
+		if (plain >= 0 && pick % 4 == 0) {
+			/* a plain extent reaches into a later logical cluster */
+			c->kind = (gen_zkind_t)plain;
+			c->blocks = 1;
+			extent = block - ofs + (pick >> 4) % (ofs + 1);
+		} else {
+			c->kind = GEN_ZK_LZ4_PERIODIC;
+			extent = (uint64_t)cluster_blocks * block;
+			if ((pick >> 8) % 3 == 0)
+				extent = (start + extent + block - 1) / block * block -
+				    start;
+			else
+				extent += (pick >> 4) % block;
+		}
+		if (extent >= remaining) {
+			if (c->kind == GEN_ZK_LZ4_PERIODIC && remaining < c->period + 12)
+				c->kind = GEN_ZK_LZ4_LITERAL;
+			/* Only a non-head record carries the count of a big cluster,
+			 * and an end marker is no non-head: without one after the
+			 * head the cluster is one block. */
+			if (start / block + 1 >= (plan->size + block - 1) / block -
+			    (plan->size % block != 0 ? 1 : 0))
+				c->blocks = 1;
+			break;
+		}
+		start += extent;
+	}
+}
+
+
+/* ---- Content: fixed plans ---- */
+
+static const zplan_t zplan_one = {
+	.size = 1000, .count = 1, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7)
+	}
+};
+
+static const zplan_t zplan_tiny = {
+	.size = 300, .count = 1, .clusters = {
+		ZC(0, GEN_ZK_LZ4_LITERAL, 1, 0)
+	}
+};
+
+static const zplan_t zplan_multiple = {
+	.size = 2048, .count = 2, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+		ZC(1024, GEN_ZK_LZ4_PERIODIC, 1, 13)
+	}
+};
+
+static const zplan_t zplan_exact = {
+	.size = 1536, .count = 2, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+		ZC(512, GEN_ZK_LZ4_PERIODIC, 1, 13)
+	}
+};
+
+static const zplan_t zplan_last_logical_cluster = {
+	.size = 1596, .count = 3, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+		ZC(1000, GEN_ZK_LZ4_PERIODIC, 1, 9),
+		ZC(1570, GEN_ZK_LZ4_LITERAL, 1, 0)
+	}
+};
+
+static const zplan_t zplan_plain_only = {
+	.size = 1000, .count = 2, .clusters = {
+		ZC(0, GEN_ZK_PLAIN, 1, 0),
+		ZC(512, GEN_ZK_PLAIN, 1, 0)
+	}
+};
+
+/* Interlaced plain clusters at clusterofs 188, 176 and 164; one wraps. */
+static const zplan_t zplan_interlaced = {
+	.size = 1900, .count = 4, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+		ZC(700, GEN_ZK_INTERLACED, 1, 0),
+		ZC(1200, GEN_ZK_INTERLACED, 1, 0),
+		ZC(1700, GEN_ZK_LZ4_LITERAL, 1, 0)
+	}
+};
+
+/* Interlaced plain clusters at clusterofs 0, which rotate by nothing. */
+static const zplan_t zplan_interlaced_zero = {
+	.size = 1600, .count = 3, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+		ZC(1024, GEN_ZK_INTERLACED, 1, 0),
+		ZC(1536, GEN_ZK_INTERLACED, 1, 0)
+	}
+};
+
+static const zplan_t zplan_head2 = {
+	.size = 3500, .count = 5, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+		ZC2(1700, GEN_ZK_LZ4_PERIODIC, 1, 9),
+		ZC(2300, GEN_ZK_PLAIN, 1, 0),
+		ZC2(2700, GEN_ZK_LZ4_PERIODIC, 1, 11),
+		ZC2(3300, GEN_ZK_LZ4_LITERAL, 1, 0)
+	}
+};
+
+/* Big clusters permitted, every cluster one block, markers of count 1. */
+static const zplan_t zplan_big_ones = {
+	.size = 3000, .big = true, .count = 3, .clusters = {
+		ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+		ZC(1100, GEN_ZK_LZ4_PERIODIC, 1, 9),
+		ZC(2100, GEN_ZK_LZ4_PERIODIC, 1, 11)
+	}
+};
+
+static const zvolume_t zvolume_head2 = { EROFS_INCOMPAT_DEVICE_TABLE, 0, 0,
+    false };
+static const zvolume_t zvolume_big_ones = { EROFS_INCOMPAT_COMPR_CFGS, 0, 0,
+    false };
+static const zvolume_t zvolume_no_padding = { 0, 0, 0, true };
+
+typedef struct zcase {
+	const char	*name;
+	const zvolume_t	*volume;
+	uint16_t	 advice;	/* beyond the layout's own */
+	const zplan_t	*plan;
+} zcase_t;
+
+/* Build and check a case in one layout and at one header phase. */
+static void
+zcase_run(const zcase_t *c, unsigned layout, unsigned xattr_count)
+{
+	zbuild_t build = { .plan = c->plan, .layout = layout,
+	    .advice = c->advice, .xattr_count = xattr_count };
+	char label[160];
+	unsigned char *content = zcontent(c->plan, 40);
+	gen_tree_t tree;
+
+	build.content = content;
+	snprintf(label, sizeof(label), "%s (%s index, XATTR count %u)", c->name,
+	    zlayout_name(layout), xattr_count);
+	ztree_with_file(&tree, c->volume, &build);
+	check_zfile(label, &tree, c->plan, content);
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/* A case in the full index and in the compact one at all four header phases. */
+static void
+zcase_run_everywhere(const zcase_t *c)
+{
+	zcase_run(c, ZLAYOUT_FULL, 0);
+	for (unsigned p = 0; p < ZPHASES; p++)
+		zcase_run(c, ZLAYOUT_COMPACT, zphase_xattr_counts[p]);
+}
+
+static void
+test_compressed_files_read_back_byte_for_byte(void)
+{
+	static const zcase_t cases[] = {
+		{ "one compressed cluster and an end marker", &zvolume_plain, 0,
+		    &zplan_one },
+		{ "one cluster inside the only logical cluster", &zvolume_plain, 0,
+		    &zplan_tiny },
+		{ "a size that is a multiple of the block has no end marker",
+		    &zvolume_plain, 0, &zplan_multiple },
+		{ "a cluster of exactly one block is followed by a head",
+		    &zvolume_plain, 0, &zplan_exact },
+		{ "the last cluster starts inside the last logical cluster",
+		    &zvolume_plain, 0, &zplan_last_logical_cluster },
+		{ "compressed and plain clusters, shifted", &zvolume_plain, 0,
+		    &zplan_mixed },
+		{ "plain clusters alone", &zvolume_plain, 0, &zplan_plain_only },
+		{ "plain clusters alone, without LZ4_0PADDING",
+		    &zvolume_no_padding, 0, &zplan_plain_only },
+		{ "interlaced plain clusters at a nonzero clusterofs",
+		    &zvolume_plain, GEN_ZA_INTERLACED, &zplan_interlaced },
+		{ "interlaced plain clusters at clusterofs 0", &zvolume_plain,
+		    GEN_ZA_INTERLACED, &zplan_interlaced_zero },
+		{ "head-2 clusters with COMPR_HEAD2", &zvolume_head2, 0,
+		    &zplan_head2 },
+		{ "big clusters with count markers", &zvolume_big, 0, &zplan_big },
+		{ "big clusters of one block under a maximum of zero",
+		    &zvolume_big_ones, 0, &zplan_big_ones }
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++)
+		zcase_run_everywhere(&cases[i]);
+}
+
+static void
+test_compressed_files_of_many_clusters_read_back_in_both_indexes(void)
+{
+	for (unsigned seed = 1; seed <= 8; seed++) {
+		for (unsigned big = 0; big < 2; big++) {
+			static const int plains[] = { GEN_ZK_PLAIN, GEN_ZK_INTERLACED };
+			int plain = big != 0 ? -1 : plains[seed % 2];
+			char name[96];
+			zplan_t plan;
+			zcase_t c = { name, big != 0 ? &zvolume_big : &zvolume_plain,
+			    plain == GEN_ZK_INTERLACED ? GEN_ZA_INTERLACED : 0, &plan };
+
+			snprintf(name, sizeof(name), "48 blocks, seed %u, %s clusters",
+			    seed, big != 0 ? "big" : "one-block");
+			zplan_random(&plan, 9, 48, seed, big != 0, plain);
+			zcase_run_everywhere(&c);
+		}
+	}
+}
+
+static void
+test_compressed_files_of_4096_byte_blocks_read_back_in_both_indexes(void)
+{
+	for (unsigned seed = 1; seed <= 4; seed++) {
+		for (unsigned big = 0; big < 2; big++) {
+			char name[96];
+			zplan_t plan;
+			zcase_t c = { name, big != 0 ? &zvolume_big : &zvolume_plain, 0,
+			    &plan };
+
+			snprintf(name, sizeof(name), "4096-byte blocks, seed %u, %s",
+			    seed, big != 0 ? "big" : "one-block");
+			zplan_random(&plan, 12, 12, seed, big != 0, big != 0 ? -1 :
+			    GEN_ZK_PLAIN);
+			zcase_run_everywhere(&c);
+		}
+	}
+}
+
+/* ---- Partial references and raw streams ---- */
+
+enum {
+	STREAM_MAX = 512
+};
+
+/* A cluster of one stream, as hostile or hand-made as the caller wants. */
+static void
+raw_file(gen_tree_t *tree, const char *label, unsigned layout, size_t size,
+    const unsigned char *stream, size_t length, const zpatch_t *patches)
+{
+	zplan_t plan = { .size = size, .count = 1, .clusters = {
+	    ZC_RAW(0, 1, stream, length) } };
+	unsigned char *content = zcontent(&plan, 0);
+	zbuild_t build = { .plan = &plan, .content = content, .layout = layout,
+	    .patches = patches };
+
+	(void)label;
+	ztree_with_file(tree, &zvolume_plain, &build);
+	free(content);
+}
+
+/* A periodic block of length decoded bytes of period 7, as gen builds it. */
+static size_t
+periodic_stream(unsigned char *out, size_t length)
+{
+	unsigned char bytes[2 * STREAM_MAX];
+	size_t n;
+
+	for (size_t i = 0; i < length; i++)
+		bytes[i] = pattern_byte(3, i % 7);
+	n = gen_lz4_periodic(out, STREAM_MAX, bytes, length, 7);
+	CHECK(n != 0);
+	return (n);
+}
+
+static void
+test_a_stream_decoding_beyond_a_partial_reference_reads_its_extent(void)
+{
+	unsigned char stream[STREAM_MAX];
+	size_t n = periodic_stream(stream, 1000);
+	zplan_t plan = { .size = 1500, .count = 2, .clusters = {
+	    ZC_RAW(0, 1, stream, n), ZC(600, GEN_ZK_LZ4_PERIODIC, 1, 11) } };
+	static const zpatch_t partial[] = { { 0, ZF_PARTIAL, 1 }, { 0, ZF_END, 0 } };
+	unsigned char *content = zcontent(&plan, 5);
+	zbuild_t build = { .plan = &plan, .content = content,
+	    .layout = ZLAYOUT_FULL, .patches = partial };
+	gen_tree_t tree;
+
+	for (size_t i = 0; i < 600; i++)
+		content[i] = pattern_byte(3, i % 7);
+	ztree_with_file(&tree, &zvolume_plain, &build);
+	check_zfile("partial reference, the stream is longer than the extent",
+	    &tree, &plan, content);
+	gen_tree_free(&tree);
+
+	/* The same stream without the mark decodes more than its extent. */
+	build.patches = NULL;
+	ztree_with_file(&tree, &zvolume_plain, &build);
+	check_refused("the same stream, not marked partial", &tree,
+	    FSIMG_ECORRUPT, "longer than its capacity");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/*
+ * A decode window whose input or output buffer cannot be allocated fails
+ * the read with the context's status, naming the window, and closing the
+ * reader afterwards returns all its memory.
+ */
+static void
+test_a_failed_decode_window_allocation_is_reported_and_cleaned_up(void)
+{
+	zplan_t plan = { .size = 1500, .count = 2, .clusters = {
+	    ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 13), ZC(600, GEN_ZK_LZ4_PERIODIC, 1, 11) } };
+	unsigned char *content = zcontent(&plan, 9);
+	zbuild_t build = { .plan = &plan, .content = content,
+	    .layout = ZLAYOUT_COMPACT };
+	unsigned char got[100];
+	gen_tree_t tree;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	zreader_t z;
+
+	/* The input buffer is the fill's first allocation, the output its
+	 * second. */
+	for (uint64_t nth = 1; nth <= 2; nth++) {
+		ztree_with_file(&tree, &zvolume_plain, &build);
+		zreader_open(&z, "window allocation", &tree, plan.size);
+		if (z.ok) {
+			bzero(&error, sizeof(error));
+			fsimg_test_fail_alloc_after(z.v.ctx, nth);
+			status = read_range(z.reader, 550, got, sizeof(got),
+			    &error);
+			fsimg_test_fail_alloc_after(z.v.ctx, 0);
+			check_refusal("window allocation fails", status,
+			    FSIMG_ENOMEM, &error, "decode window");
+		}
+		zreader_close(&z, "window allocation");
+		gen_tree_free(&tree);
+	}
+	free(content);
+}
+
+static void
+test_a_partial_reference_whose_stream_ends_before_the_extent_is_corrupt(void)
+{
+	unsigned char stream[STREAM_MAX];
+	size_t n = periodic_stream(stream, 500);
+	static const zpatch_t partial[] = { { 0, ZF_PARTIAL, 1 }, { 0, ZF_END, 0 } };
+	zplan_t plan = { .size = 1500, .count = 2, .clusters = {
+	    ZC_RAW(0, 1, stream, n), ZC(600, GEN_ZK_LZ4_PERIODIC, 1, 11) } };
+	unsigned char *content = zcontent(&plan, 5);
+	zbuild_t build = { .plan = &plan, .content = content,
+	    .layout = ZLAYOUT_FULL, .patches = partial };
+	gen_tree_t tree;
+
+	ztree_with_file(&tree, &zvolume_plain, &build);
+	check_refused("partial reference, the stream ends at 500 of 600 bytes",
+	    &tree, FSIMG_ECORRUPT, "ends before the requested length");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+static void
+test_lz4_streams_that_break_the_rules_are_corrupt(void)
+{
+	typedef struct stream_case {
+		const char	*name;
+		size_t		 size;
+		unsigned	 offset;	/* of the match; 0: no stream built */
+		size_t		 periodic;	/* a periodic stream of this length */
+		const char	*phrase;
+	} stream_case_t;
+	static const stream_case_t cases[] = {
+		{ "a match at offset 0", 17, 0, 0, "zero match offset" },
+		{ "a match reaching before the output's start", 17, 9, 0,
+		    "before the output start" },
+		{ "a stream decoding short of the extent", 400, 0, 300,
+		    "wrong length" },
+		{ "a stream decoding past the extent", 400, 0, 500,
+		    "longer than its capacity" },
+		{ "a cluster of zeros", 300, 0, 0, "no stream" }
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		for (unsigned layout = ZLAYOUT_FULL; layout <= ZLAYOUT_COMPACT;
+		    layout += 2) {
+			unsigned char stream[STREAM_MAX];
+			size_t n = 0;
+			gen_tree_t tree;
+			char label[128];
+
+			if (cases[i].periodic != 0) {
+				n = periodic_stream(stream, cases[i].periodic);
+			} else if (i < 2) {
+				n = gen_lz4_sequence(stream, sizeof(stream), "abcd", 4,
+				    cases[i].offset, 8);
+				n += gen_lz4_sequence(stream + n, sizeof(stream) - n,
+				    "efghi", 5, 0, 0);
+			}
+			snprintf(label, sizeof(label), "%s (%s index)", cases[i].name,
+			    zlayout_name(layout));
+			raw_file(&tree, label, layout, cases[i].size, stream, n, NULL);
+			check_refused(label, &tree, FSIMG_ECORRUPT, cases[i].phrase);
+			gen_tree_free(&tree);
+		}
+	}
+}
+
+static void
+test_a_hand_made_lz4_stream_with_a_valid_match_reads_back(void)
+{
+	static const char want[] = "abcdabcdabcdefghi";
+	unsigned char stream[STREAM_MAX];
+	size_t n = gen_lz4_sequence(stream, sizeof(stream), "abcd", 4, 4, 8);
+	gen_tree_t tree;
+	listing_t *list;
+	const node_t *node;
+
+	n += gen_lz4_sequence(stream + n, sizeof(stream) - n, "efghi", 5, 0, 0);
+	raw_file(&tree, "valid match", ZLAYOUT_FULL, 17, stream, n, NULL);
+	list = walk_ok("a hand-made stream with a valid match", &tree);
+	node = find_node(list, "/f");
+	EXPECT(node != NULL && node->size == 17 &&
+	    bcmp(node->content, want, 17) == 0, "the stream's 17 bytes");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+/* ---- Algorithms, features and limits ---- */
+
+static void
+test_lz4_without_lz4_0padding_is_unsupported_but_plain_clusters_read(void)
+{
+	unsigned char *content = zcontent(&zplan_one, 1);
+	zbuild_t build = { .plan = &zplan_one, .content = content,
+	    .layout = ZLAYOUT_FULL };
+	gen_tree_t tree;
+
+	ztree_with_file(&tree, &zvolume_no_padding, &build);
+	check_refused("an LZ4 cluster without LZ4_0PADDING", &tree,
+	    FSIMG_EUNSUPPORTED, "LZ4_0PADDING");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+typedef struct zhostile {
+	const char	*name;
+	const zplan_t	*plan;
+	zvolume_t	 volume;
+	uint8_t		 algorithms;
+	zpatch_t	 patches[ZPATCHES_MAX];
+	unsigned	 layouts;	/* ZL_* mask */
+	fsimg_status_t	 status;
+	const char	*phrase;
+} zhostile_t;
+
+enum {
+	ZL_FULL = 1,
+	ZL_COMPACT = 2,
+	ZL_BOTH = 3,
+	ZV_ALL_ALGORITHMS = 0xf
+};
+
+#define ZHOSTILE_BIG_VOLUME \
+	{ EROFS_INCOMPAT_COMPR_CFGS, 0, 4, false }
+#define ZHOSTILE_ALL_VOLUME \
+	{ EROFS_INCOMPAT_COMPR_CFGS, ZV_ALL_ALGORITHMS, 4, false }
+#define ZHOSTILE_HEAD2_ALL_VOLUME \
+	{ EROFS_INCOMPAT_COMPR_CFGS | EROFS_INCOMPAT_DEVICE_TABLE, \
+	    ZV_ALL_ALGORITHMS, 4, false }
+
+/* A seek straight into the file, where only the records there are read. */
+static void
+check_refused_seek(const char *label, gen_tree_t *tree, const zhostile_t *h,
+    uint64_t seek)
+{
+	zreader_t z;
+	fsimg_error_t error;
+	unsigned char byte;
+	fsimg_status_t status;
+
+	zreader_open(&z, label, tree, h->plan->size);
+	bzero(&error, sizeof(error));
+	status = z.ok ? read_range(z.reader, seek, &byte, 1, &error) :
+	    FSIMG_OK;
+	check_refusal(label, status, h->status, &error, h->phrase);
+	zreader_close(&z, label);
+}
+
+/* Build and read the hostile file from 0, or by a seek when seek is not 0. */
+static void
+zhostile_run_at(const zhostile_t *h, uint64_t seek)
+{
+	for (unsigned layout = ZLAYOUT_FULL; layout <= ZLAYOUT_COMPACT;
+	    layout += 2) {
+		unsigned char *content;
+		zbuild_t build = { .plan = h->plan, .patches = h->patches,
+		    .layout = layout, .algorithms = h->algorithms };
+		char label[160];
+		gen_tree_t tree;
+
+		if ((h->layouts & (layout == ZLAYOUT_FULL ? ZL_FULL : ZL_COMPACT)) == 0)
+			continue;
+		snprintf(label, sizeof(label), "%s (%s index)", h->name,
+		    zlayout_name(layout));
+		content = zcontent(h->plan, 40);
+		build.content = content;
+		ztree_with_file(&tree, &h->volume, &build);
+		if (seek == 0)
+			check_refused(label, &tree, h->status, h->phrase);
+		else
+			check_refused_seek(label, &tree, h, seek);
+		gen_tree_free(&tree);
+		free(content);
+	}
+}
+
+static void
+zhostile_run(const zhostile_t *h)
+{
+	zhostile_run_at(h, 0);
+}
+
+static void
+test_hostile_indexes_are_refused_through_the_rule_they_break(void)
+{
+	static const zhostile_t cases[] = {
+		{ "a backward distance of zero", &zplan_mixed, { 0 }, 0,
+		    { { 2, ZF_BACKWARD, 0 } }, ZL_BOTH, FSIMG_ECORRUPT,
+		    "distance zero" },
+		{ "a clusterofs equal to the block size", &zplan_mixed, { 0 }, 0,
+		    { { 3, ZF_CLUSTEROFS, 512 } }, ZL_BOTH, FSIMG_ECORRUPT,
+		    "clusterofs" },
+		{ "a head starting past the size", &zplan_mixed, { 0 }, 0,
+		    { { 6, ZF_CLUSTEROFS, 500 } }, ZL_BOTH, FSIMG_ECORRUPT,
+		    "past the size" },
+		{ "a count marker without big clusters", &zplan_mixed, { 0 }, 0,
+		    { { 1, ZF_BACKWARD, GEN_Z_BIG_MARKER | 1 } }, ZL_BOTH,
+		    FSIMG_ECORRUPT, "count marker without big" },
+		{ "a head-2 record without COMPR_HEAD2", &zplan_mixed, { 0 }, 0,
+		    { { 3, ZF_TYPE, EROFS_RECORD_HEAD2 } }, ZL_BOTH,
+		    FSIMG_ECORRUPT, "COMPR_HEAD2" },
+		{ "a plain cluster longer than its block", &zplan_mixed, { 0 }, 0,
+		    { { 5, ZF_TYPE, EROFS_RECORD_NONHEAD },
+		    { 5, ZF_BACKWARD, 1 }, { 5, ZF_FORWARD, 1 } }, ZL_BOTH,
+		    FSIMG_ECORRUPT, "plain cluster longer" },
+		{ "a physical cluster outside the volume", &zplan_mixed, { 0 }, 0,
+		    { { 0, ZF_BLOCK, 0x7fffff00 } }, ZL_BOTH, FSIMG_ECORRUPT,
+		    "outside the volume" },
+		{ "a big cluster without its count marker", &zplan_big,
+		    ZHOSTILE_BIG_VOLUME, 0, { { 1, ZF_BACKWARD, 1 } }, ZL_BOTH,
+		    FSIMG_ECORRUPT, "without a count marker" },
+		{ "a count of 5 above the LZ4 maximum of 4", &zplan_big,
+		    ZHOSTILE_BIG_VOLUME, 0,
+		    { { 1, ZF_BACKWARD, GEN_Z_BIG_MARKER | 5 } }, ZL_BOTH,
+		    FSIMG_ECORRUPT, "LZ4 maximum" },
+		{ "a count of 3 under a maximum of 0, which means 1", &zplan_big,
+		    { EROFS_INCOMPAT_COMPR_CFGS, 0, 0, false }, 0, { { 0 } },
+		    ZL_BOTH, FSIMG_ECORRUPT, "LZ4 maximum" },
+		{ "an algorithm the volume does not configure", &zplan_mixed,
+		    { 0 }, 1, { { 0 } }, ZL_BOTH, FSIMG_ECORRUPT,
+		    "not configured" },
+		{ "a head-2 algorithm the volume does not configure",
+		    &zplan_mixed, { EROFS_INCOMPAT_DEVICE_TABLE, 0, 0, false },
+		    0x30, { { 3, ZF_TYPE, EROFS_RECORD_HEAD2 } }, ZL_BOTH,
+		    FSIMG_ECORRUPT, "not configured" },
+		{ "a MicroLZMA cluster", &zplan_mixed, ZHOSTILE_ALL_VOLUME, 1,
+		    { { 0 } }, ZL_BOTH, FSIMG_EUNSUPPORTED, "MicroLZMA" },
+		{ "a DEFLATE cluster", &zplan_mixed, ZHOSTILE_ALL_VOLUME, 2,
+		    { { 0 } }, ZL_BOTH, FSIMG_EUNSUPPORTED, "DEFLATE" },
+		{ "a Zstandard cluster", &zplan_mixed, ZHOSTILE_ALL_VOLUME, 3,
+		    { { 0 } }, ZL_BOTH, FSIMG_EUNSUPPORTED, "Zstandard" },
+		{ "a head-2 DEFLATE cluster after a readable head-1 one",
+		    &zplan_mixed, ZHOSTILE_HEAD2_ALL_VOLUME, 0x20,
+		    { { 3, ZF_TYPE, EROFS_RECORD_HEAD2 } }, ZL_BOTH,
+		    FSIMG_EUNSUPPORTED, "DEFLATE" }
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++)
+		zhostile_run(&cases[i]);
+}
+
+/* These need the lookup to start in the record they spoil. */
+static void
+test_a_seek_into_a_spoiled_non_head_is_refused_through_its_rule(void)
+{
+	static const zhostile_t passes = { "a backward distance passing record 0",
+	    &zplan_mixed, { 0 }, 0, { { 2, ZF_BACKWARD, 3 } }, ZL_BOTH,
+	    FSIMG_ECORRUPT, "passes record 0" };
+	static const zhostile_t skips = { "a non-head that skips the head before "
+	    "it", &zplan_mixed, { 0 }, 0, { { 4, ZF_TYPE, EROFS_RECORD_NONHEAD },
+	    { 4, ZF_BACKWARD, 4 }, { 4, ZF_FORWARD, 1 } }, ZL_BOTH,
+	    FSIMG_ECORRUPT, "skip a head" };
+
+	zhostile_run_at(&passes, 1100);
+	zhostile_run_at(&skips, 2400);
+}
+
+/* Forward distances are not read: any value, zero included, changes nothing. */
+static void
+test_forward_distances_have_no_effect_on_reading(void)
+{
+	static const zpatch_t patches[] = {
+		{ 1, ZF_FORWARD, 9 }, { 2, ZF_FORWARD, 0 }, { 0, ZF_END, 0 }
+	};
+
+	for (unsigned layout = ZLAYOUT_FULL; layout <= ZLAYOUT_COMPACT;
+	    layout += 2) {
+		unsigned char *content = zcontent(&zplan_mixed, 40);
+		zbuild_t build = { .plan = &zplan_mixed, .content = content,
+		    .layout = layout, .patches = patches };
+		char label[96];
+		gen_tree_t tree;
+
+		snprintf(label, sizeof(label), "hostile forward distances (%s "
+		    "index)", zlayout_name(layout));
+		ztree_with_file(&tree, &zvolume_plain, &build);
+		check_zfile(label, &tree, &zplan_mixed, content);
+		gen_tree_free(&tree);
+		free(content);
+	}
+}
+
+static void
+test_a_mid_file_cluster_that_stores_more_than_it_decodes_is_corrupt(void)
+{
+	static const zplan_t plan = {
+		.size = 2000, .count = 3, .clusters = {
+			ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+			ZC(600, GEN_ZK_LZ4_PERIODIC, 1, 9),	/* 450 bytes */
+			ZC(1050, GEN_ZK_LZ4_PERIODIC, 1, 11)
+		}
+	};
+	const zhostile_t h = { "a cluster of 450 bytes stored in 512", &plan,
+	    { 0 }, 0, { { 0 } }, ZL_BOTH, FSIMG_ECORRUPT,
+	    "stores more than it decodes" };
+
+	zhostile_run(&h);
+}
+
+static void
+test_a_compact_walk_landing_on_a_non_head_in_a_wide_group_is_corrupt(void)
+{
+	static const zplan_t plan = {
+		.size = 24 * 512, .count = 4, .clusters = {
+			ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+			ZC(3072, GEN_ZK_LZ4_PERIODIC, 1, 9),
+			ZC(4608, GEN_ZK_LZ4_PERIODIC, 1, 11),
+			ZC(6144, GEN_ZK_LZ4_PERIODIC, 1, 13)
+		}
+	};
+	/* Records 6 to 21 form the 32-byte group; record 8 points at record 7. */
+	const zhostile_t h = { "a distance to a non-head, then a head", &plan,
+	    { 0 }, 0, { { 8, ZF_BACKWARD, 1 } }, ZL_COMPACT, FSIMG_ECORRUPT,
+	    "wrong record type" };
+
+	zhostile_run(&h);
+}
+
+static void
+test_cluster_streams_of_exactly_1_mib_read_and_larger_ones_are_unsupported(void)
+{
+	static const zvolume_t volume = { EROFS_INCOMPAT_COMPR_CFGS, 0, 300,
+	    false };
+	zplan_t exact = { .blkszbits = 12, .size = 256 * 4096 + 50, .big = true,
+	    .count = 1, .clusters = { ZC(0, GEN_ZK_LZ4_PERIODIC, 256, 7) } };
+	zplan_t large = { .blkszbits = 12, .size = 257 * 4096 + 100, .big = true,
+	    .count = 1, .clusters = { ZC_RAW(0, 257, NULL, 0) } };
+	const zhostile_t h = { "a stored cluster of 257 blocks of 4096", &large,
+	    { EROFS_INCOMPAT_COMPR_CFGS, 0, 300, false }, 0, { { 0 } }, ZL_BOTH,
+	    FSIMG_EUNSUPPORTED, "1 MiB" };
+	zcase_t c = { "a stored cluster of exactly 1 MiB", &volume, 0, &exact };
+
+	zcase_run(&c, ZLAYOUT_FULL, 0);
+	zcase_run(&c, ZLAYOUT_COMPACT, 0);
+	zhostile_run(&h);
+}
+
+static void
+test_a_decoded_extent_above_12_mib_is_unsupported(void)
+{
+	static const zplan_t plan = {
+		.blkszbits = 12, .size = (size_t)12 * 1024 * 1024 + 1, .count = 1,
+		.clusters = { ZC_RAW(0, 1, NULL, 0) }
+	};
+	const zhostile_t h = { "a cluster of 12 MiB and a byte", &plan, { 0 }, 0,
+	    { { 0 } }, ZL_BOTH, FSIMG_EUNSUPPORTED, "12 MiB" };
+
+	zhostile_run(&h);
+}
+
+static void
+test_a_physical_cluster_past_a_truncated_image_is_corrupt(void)
+{
+	unsigned char *content = zcontent(&zplan_mixed, 40);
+	zbuild_t build = { .plan = &zplan_mixed, .content = content,
+	    .layout = ZLAYOUT_FULL };
+	gen_tree_t tree;
+
+	ztree_with_file(&tree, &zvolume_plain, &build);
+	/* The fourth cluster, the second compressed one after the plain one,
+	 * is cut in two. */
+	tree.image.length = ((size_t)gen_tree_first_block(9) + 3) * 512 + 100;
+	check_refused("an image ending inside a physical cluster", &tree,
+	    FSIMG_ECORRUPT, "truncated");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+static void
+test_compressed_directories_and_links_are_unsupported(void)
+{
+	unsigned char *content = zcontent(&zplan_one, 1);
+	zbuild_t build = { .plan = &zplan_one, .content = content,
+	    .layout = ZLAYOUT_FULL, .mode = MODE_DIR };
+	gen_tree_t tree;
+
+	ztree_new(&tree, 9, &zvolume_plain, zplan_blocks(&zplan_one));
+	gen_tree_set_root(&tree, zfile_add(&tree, &build));
+	check_refused("a compressed directory", &tree, FSIMG_EUNSUPPORTED,
+	    "compressed directory");
+	gen_tree_free(&tree);
+
+	build.mode = MODE_LINK;
+	ztree_new(&tree, 9, &zvolume_plain, zplan_blocks(&zplan_one));
+	root_names(&tree, "l", zfile_add(&tree, &build), T_LINK);
+	check_refused("a compressed symbolic link", &tree, FSIMG_EUNSUPPORTED,
+	    "compressed directory or symbolic link");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+
+/* ---- Plain clusters under big-cluster advice, and the backward-walk cap ---- */
+
+/* A plain cluster of two blocks, a full extent of both, then a compressed one. */
+static const zplan_t zplan_plain_big = {
+	.size = 2000, .count = 2, .clusters = {
+		ZC(0, GEN_ZK_PLAIN, 2, 0),
+		ZC(1024, GEN_ZK_LZ4_PERIODIC, 1, 9)
+	}
+};
+
+/* Records: plain head, a count marker of two blocks, a head, an end marker. */
+static const zpatch_t zpatch_plain_marker[] = {
+	{ 1, ZF_BACKWARD, GEN_Z_BIG_MARKER | 2 }, { 0, ZF_END, 0 }
+};
+
+static void
+test_an_interlaced_plain_cluster_of_several_blocks_is_corrupt(void)
+{
+	static const zpatch_t patches[] = {
+		{ 0, ZF_TYPE, EROFS_RECORD_PLAIN },
+		{ 1, ZF_BACKWARD, GEN_Z_BIG_MARKER | 2 }, { 0, ZF_END, 0 }
+	};
+
+	for (unsigned layout = ZLAYOUT_FULL; layout <= ZLAYOUT_COMPACT;
+	    layout += 2) {
+		unsigned char *content = zcontent(&zplan_big, 40);
+		zbuild_t build = { .plan = &zplan_big, .content = content,
+		    .patches = patches, .layout = layout,
+		    .advice = GEN_ZA_BIG2 | GEN_ZA_INTERLACED };
+		char label[96];
+		gen_tree_t tree;
+
+		snprintf(label, sizeof(label), "interlaced plain cluster, marker "
+		    "of 2 (%s index)", zlayout_name(layout));
+		ztree_with_file(&tree, &zvolume_big, &build);
+		check_refused(label, &tree, FSIMG_ECORRUPT,
+		    "interlaced plain cluster of several blocks");
+		gen_tree_free(&tree);
+		free(content);
+	}
+}
+
+/* Advice 0x04 lets a plain cluster be big; 0x02 alone does not. */
+static void
+test_plain_clusters_follow_the_head_2_big_advice_bit(void)
+{
+	unsigned char *content = zcontent(&zplan_plain_big, 40);
+	zbuild_t build = { .plan = &zplan_plain_big, .content = content,
+	    .patches = zpatch_plain_marker, .layout = ZLAYOUT_FULL,
+	    .advice = GEN_ZA_BIG1 };
+	gen_tree_t tree;
+
+	ztree_with_file(&tree, &zvolume_big, &build);
+	check_refused("a plain cluster under advice 0x02 with a marker", &tree,
+	    FSIMG_ECORRUPT, "count marker without big clusters");
+	gen_tree_free(&tree);
+
+	build.advice = GEN_ZA_BIG2;
+	ztree_with_file(&tree, &zvolume_big, &build);
+	check_zfile("a plain cluster of two blocks under advice 0x04", &tree,
+	    &zplan_plain_big, content);
+	gen_tree_free(&tree);
+	free(content);
+}
+
+/*
+ * A cluster whose records after the head are all non-heads of distance one
+ * reaches back to its head only past 12 MiB: a lookup stops there.
+ */
+static void
+test_a_backward_walk_past_12_mib_is_unsupported(void)
+{
+	enum { BLOCKS = 3200, FAR = 3100 };
+	const zplan_t plan = { .blkszbits = 12, .size = (size_t)BLOCKS * 4096,
+	    .count = 1, .clusters = { ZC_RAW(0, 1, NULL, 0) } };
+	unsigned char *content = zcontent(&plan, 0);
+	zbuild_t build = { .plan = &plan, .content = content,
+	    .layout = ZLAYOUT_FULL };
+	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_FLAT);
+	fsimg_error_t error;
+	unsigned char byte;
+	gen_tree_t tree;
+	fsimg_status_t status;
+	zreader_t z;
+	uint64_t header;
+
+	ztree_new(&tree, 12, &zvolume_plain, zplan_blocks(&plan));
+	{
+		uint64_t nid = zfile_add(&tree, &build);
+
+		root_names(&tree, "f", nid, T_FILE);
+		header = gen_zheader_offset(&tree.image, &proto, nid);
+	}
+	for (uint64_t i = 1; i < BLOCKS; i++)
+		gen_put(&tree.image, header + 16 + 8 * i + 4, 1, 2);
+
+	zreader_open(&z, "a chain of non-heads of distance 1", &tree, plan.size);
+	bzero(&error, sizeof(error));
+	status = z.ok ? read_range(z.reader, (uint64_t)FAR * 4096, &byte, 1,
+	    &error) : FSIMG_OK;
+	check_refusal("a read 3100 blocks past the head", status,
+	    FSIMG_EUNSUPPORTED, &error, "12 MiB");
+	zreader_close(&z, "a chain of non-heads of distance 1");
+	gen_tree_free(&tree);
+	free(content);
+}
+
+
+/* ---- Chains of non-heads and the largest cluster ---- */
+
+static void
+test_a_cluster_of_12_mib_with_a_nonzero_clusterofs_reads_at_both_ends(void)
+{
+	static const zvolume_t volume = { EROFS_INCOMPAT_COMPR_CFGS, 0, 16,
+	    false };
+	enum { FIRST = 4196, EXTENT = 12 * 1024 * 1024 };
+	static const zplan_t plan = {
+		.blkszbits = 12, .size = FIRST + EXTENT, .big = true, .count = 2,
+		.clusters = {
+			ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 7),
+			ZC(FIRST, GEN_ZK_LZ4_PERIODIC, 13, 11)	/* clusterofs 100 */
+		}
+	};
+	unsigned char *content = zcontent(&plan, 40);
+	unsigned char *got = malloc(plan.size);
+
+	CHECK(got != NULL);
+	for (unsigned layout = ZLAYOUT_FULL; layout <= ZLAYOUT_COMPACT;
+	    layout += 2) {
+		zbuild_t build = { .plan = &plan, .content = content,
+		    .layout = layout };
+		static const uint64_t offsets[] = { FIRST + EXTENT - 1, FIRST, 0 };
+		char label[96];
+		gen_tree_t tree;
+		zreader_t z;
+
+		snprintf(label, sizeof(label), "a cluster of exactly 12 MiB (%s "
+		    "index)", zlayout_name(layout));
+		ztree_with_file(&tree, &volume, &build);
+		zreader_open(&z, label, &tree, plan.size);
+		for (size_t i = 0; z.ok && i < ARRAY_SIZE(offsets); i++) {
+			fsimg_error_t error;
+			fsimg_status_t status;
+
+			bzero(&error, sizeof(error));
+			status = read_range(z.reader, offsets[i], got, 1, &error);
+			EXPECT(status == FSIMG_OK && got[0] == content[offsets[i]],
+			    "%s: byte %llu (status %d, \"%s\")", label,
+			    (unsigned long long)offsets[i], (int)status,
+			    error.message);
+		}
+		if (z.ok) {
+			fsimg_error_t error;
+			fsimg_status_t status;
+
+			bzero(&error, sizeof(error));
+			status = read_range(z.reader, 0, got, plan.size, &error);
+			EXPECT(status == FSIMG_OK && bcmp(got, content, plan.size) == 0,
+			    "%s: whole file (status %d, \"%s\")", label, (int)status,
+			    error.message);
+		}
+		zreader_close(&z, label);
+		gen_tree_free(&tree);
+	}
+	free(got);
+	free(content);
+}
+
+/*
+ * Record 5 becomes a non-head of distance 2, which skips the head at record
+ * 4 and lands on the head at record 3.
+ */
+static void
+test_a_non_head_that_skips_a_head_is_refused_from_both_sides(void)
+{
+	static const zhostile_t skips = { "a non-head skipping a head",
+	    &zplan_mixed, { 0 }, 0, { { 5, ZF_TYPE, EROFS_RECORD_NONHEAD },
+	    { 5, ZF_BACKWARD, 2 } }, ZL_FULL, FSIMG_ECORRUPT,
+	    "index distances skip a head" };
+	static const zhostile_t leaves = { "a non-head leaving its cluster",
+	    &zplan_mixed, { 0 }, 0, { { 5, ZF_TYPE, EROFS_RECORD_NONHEAD },
+	    { 5, ZF_BACKWARD, 2 } }, ZL_FULL, FSIMG_ECORRUPT,
+	    "index backward distance leaves its cluster" };
+
+	zhostile_run_at(&skips, 2800);		/* in record 5's block */
+	zhostile_run_at(&leaves, 2400);		/* inside the head at record 4 */
+}
+
+static void
+test_a_non_head_chaining_to_an_earlier_non_head_of_its_cluster_reads(void)
+{
+	static const zpatch_t patches[] = {
+		{ 2, ZF_BACKWARD, 1 }, { 0, ZF_END, 0 }
+	};
+	unsigned char *content = zcontent(&zplan_mixed, 40);
+	zbuild_t build = { .plan = &zplan_mixed, .content = content,
+	    .patches = patches, .layout = ZLAYOUT_FULL };
+	gen_tree_t tree;
+
+	ztree_with_file(&tree, &zvolume_plain, &build);
+	check_zfile("record 2 chained to non-head record 1", &tree, &zplan_mixed,
+	    content);
+	gen_tree_free(&tree);
+	free(content);
+}
+
 /* ---- Fuzz seeds ---- */
 
 /* A volume with a directory, stored and inline files and a link. */
@@ -8164,6 +10413,30 @@ write_seed(const char *directory, const char *name, gen_tree_t *tree)
 	CHECK(fclose(file) == 0);
 }
 
+/*
+ * Seeds holding one LZ4-compressed file of an LZ4 cluster and a plain one,
+ * in each index form, so the fuzzer reaches the compressed lookups.
+ */
+static void
+emit_compressed_seeds(const char *directory)
+{
+	static const char *const names[] = { "lz4-full.seed", "lz4-compact.seed" };
+	zplan_t plan = { .size = 1100, .count = 2, .clusters = {
+	    ZC(0, GEN_ZK_LZ4_PERIODIC, 1, 13), ZC(600, GEN_ZK_PLAIN, 1, 0) } };
+	unsigned char *content = zcontent(&plan, 4);
+	zbuild_t build = { .plan = &plan, .content = content };
+	gen_tree_t tree;
+
+	for (size_t i = 0; i < 2; i++) {
+		build.layout = i == 0 ? ZLAYOUT_FULL : ZLAYOUT_COMPACT;
+		ztree_with_file(&tree, &zvolume_plain, &build);
+		gen_tree_seal(&tree);
+		write_seed(directory, names[i], &tree);
+		gen_tree_free(&tree);
+	}
+	free(content);
+}
+
 /* --seed DIRECTORY: small volumes for the fuzz corpus. */
 static void
 emit_seeds(const char *directory)
@@ -8180,6 +10453,7 @@ emit_seeds(const char *directory)
 	gen_tree_dir(&tree, 0, 0, NULL, 0);
 	write_seed(directory, "empty-root.seed", &tree);
 	gen_tree_free(&tree);
+	emit_compressed_seeds(directory);
 }
 
 int
@@ -8378,6 +10652,54 @@ main(int argc, char **argv)
 	test_a_deep_tree_is_listed_to_its_leaf();
 	test_a_directory_of_100000_entries_lists_every_name();
 	test_a_cycle_to_a_grandparent_below_the_root_is_corrupt();
+
+	test_map_header_decode_applies_each_rule_of_the_design();
+	test_map_header_decode_splits_the_algorithm_nibbles_and_keeps_the_advice();
+	test_full_record_decode_reads_heads_and_plain_records();
+	test_full_record_decode_marks_partial_references_on_compressed_heads_only();
+	test_full_record_decode_reads_the_two_distances_of_a_non_head();
+	test_full_record_decode_reads_a_count_marker();
+	test_full_record_decode_refuses_zero_distances_and_malformed_markers();
+	test_full_record_decode_refuses_a_count_marker_without_big_clusters();
+	test_full_record_decode_refuses_each_reserved_advice_bit();
+	test_compact_layout_matches_the_walked_layout_at_every_phase_and_count();
+	test_compact_layout_of_an_odd_final_record_fills_a_whole_8_byte_group();
+	test_compact_layout_with_fewer_records_than_the_initial_run_is_all_8_byte();
+	test_compact_group_decode_unpacks_every_14_bit_slot();
+	test_compact_group_decode_unpacks_both_16_bit_slots();
+	test_compact_group_last_slot_derives_backward_distance_after_head();
+	test_compact_group_last_slot_derives_backward_distance_after_non_head();
+	test_compact_group_last_slot_derives_backward_distance_after_marker();
+	test_compact_group_decode_keeps_a_count_marker_in_the_last_slot();
+	test_compact_group_decode_walks_without_big_clusters();
+	test_compact_group_decode_walks_with_big_clusters();
+	test_compact_group_decode_refuses_each_corrupt_group();
+	test_compact_group_decode_judges_every_record_of_the_group();
+	test_compact_group_of_an_odd_final_record_ignores_the_second_slot();
+	test_compressed_files_read_back_byte_for_byte();
+	test_compressed_files_of_many_clusters_read_back_in_both_indexes();
+	test_compressed_files_of_4096_byte_blocks_read_back_in_both_indexes();
+	test_a_stream_decoding_beyond_a_partial_reference_reads_its_extent();
+	test_a_partial_reference_whose_stream_ends_before_the_extent_is_corrupt();
+	test_a_failed_decode_window_allocation_is_reported_and_cleaned_up();
+	test_lz4_streams_that_break_the_rules_are_corrupt();
+	test_a_hand_made_lz4_stream_with_a_valid_match_reads_back();
+	test_lz4_without_lz4_0padding_is_unsupported_but_plain_clusters_read();
+	test_hostile_indexes_are_refused_through_the_rule_they_break();
+	test_a_seek_into_a_spoiled_non_head_is_refused_through_its_rule();
+	test_forward_distances_have_no_effect_on_reading();
+	test_a_mid_file_cluster_that_stores_more_than_it_decodes_is_corrupt();
+	test_a_compact_walk_landing_on_a_non_head_in_a_wide_group_is_corrupt();
+	test_cluster_streams_of_exactly_1_mib_read_and_larger_ones_are_unsupported();
+	test_a_decoded_extent_above_12_mib_is_unsupported();
+	test_an_interlaced_plain_cluster_of_several_blocks_is_corrupt();
+	test_plain_clusters_follow_the_head_2_big_advice_bit();
+	test_a_backward_walk_past_12_mib_is_unsupported();
+	test_a_cluster_of_12_mib_with_a_nonzero_clusterofs_reads_at_both_ends();
+	test_a_non_head_that_skips_a_head_is_refused_from_both_sides();
+	test_a_non_head_chaining_to_an_earlier_non_head_of_its_cluster_reads();
+	test_a_physical_cluster_past_a_truncated_image_is_corrupt();
+	test_compressed_directories_and_links_are_unsupported();
 
 	if (failures != 0)
 		fprintf(stderr, "test/erofs.c: %d checks failed\n", failures);

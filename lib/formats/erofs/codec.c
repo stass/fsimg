@@ -128,11 +128,23 @@ enum {
 
 typedef erofs_xxh32_state_t xxh32_state_t;
 
+/*
+ * Index record fields: the type's two bits, a full record's partial-
+ * reference mark, and the count marker a non-head's backward field may hold
+ * instead of a distance, with the cluster's blocks in its low 11 bits.
+ */
+#define RECORD_TYPE_MASK	0x0003u
+#define RECORD_PARTIAL		0x8000u
+#define RECORD_MARKER		0x0800u
+#define RECORD_COUNT_MASK	0x07ffu
+
 static bool		all_zero(const unsigned char *, size_t);
 static bool		builtin_prefix(uint8_t);
 static fsimg_status_t	compact_decode(const unsigned char *,
 			    const erofs_super_t *, bool, erofs_inode_t *,
 			    const char **);
+static unsigned		compact_field(const unsigned char *, unsigned,
+			    unsigned, erofs_record_type_t *);
 static fsimg_status_t	config_decode(const unsigned char *, size_t, size_t,
 			    const erofs_super_t *, erofs_config_t *,
 			    const char **);
@@ -143,6 +155,8 @@ static fsimg_status_t	dirent_parse(const unsigned char *, size_t, size_t,
 static fsimg_status_t	extended_decode(const unsigned char *,
 			    const erofs_super_t *, bool, erofs_inode_t *,
 			    const char **);
+static fsimg_status_t	group_blocks_before(const erofs_zrecord_t *,
+			    unsigned, bool, uint64_t *, const char **);
 static fsimg_status_t	inode_body_measure(const erofs_super_t *,
 			    erofs_inode_t *, const char **);
 static fsimg_status_t	inode_kind_check(const erofs_inode_t *,
@@ -845,18 +859,21 @@ inode_kind_check(const erofs_inode_t *inode, const char **what)
  * flat-inline inode adds its tail, size mod B; a chunk-based inode adds its
  * index, rounded up to the entry width and one entry per chunk. A
  * flat-inline inode whose size is a nonzero multiple of B would have a
- * whole block as its tail, which is corrupt. A compressed inode's map
- * header and index are not decoded, so its body length is unknown and the
- * layout is unsupported.
+ * whole block as its tail, which is corrupt. A compressed inode adds its
+ * map header, at the attribute region's end rounded up to 8, and its index
+ * of one record per block of content: 8-byte records from 16 bytes after
+ * the header's start, or compact groups from the header's end. Its layout
+ * bytes start at the header.
  */
 static fsimg_status_t
 inode_body_measure(const erofs_super_t *sb, erofs_inode_t *inode,
     const char **what)
 {
 	erofs_chunk_format_t *chunk_format = &inode->chunk_format;
+	erofs_compact_layout_t compact;
 	fsimg_status_t status;
 	uint64_t block_bytes, chunk_count, index_bytes, index_start;
-	uint64_t attributes_end;
+	uint64_t attributes_end, header_start, records;
 
 	block_bytes = UINT64_C(1) << sb->blkszbits;
 	attributes_end = (uint64_t)inode->fixed_bytes + inode->xattr_bytes;
@@ -894,8 +911,24 @@ inode_body_measure(const erofs_super_t *sb, erofs_inode_t *inode,
 		break;
 	case EROFS_LAYOUT_COMPRESSED_FULL:
 	case EROFS_LAYOUT_COMPRESSED_COMPACT:
-		return (reject(FSIMG_EUNSUPPORTED, "compressed data layout",
-		    what));
+		header_start = (attributes_end + 7) & ~(uint64_t)7;
+		records = inode->size / block_bytes +
+		    (inode->size % block_bytes != 0);
+		if (inode->layout == EROFS_LAYOUT_COMPRESSED_FULL) {
+			/* At most 2^55 records: the product cannot wrap. */
+			index_bytes = EROFS_FULL_INDEX_OFFSET +
+			    records * EROFS_FULL_RECORD_BYTES;
+		} else {
+			erofs_compact_layout(header_start + EROFS_ZHEADER_BYTES,
+			    records, &compact);
+			index_bytes = EROFS_ZHEADER_BYTES + compact.total_bytes;
+		}
+		if (!fsimg_add_u64(header_start, index_bytes,
+		    &inode->body_bytes))
+			return (reject(FSIMG_ECORRUPT,
+			    "compressed index length", what));
+		inode->layout_offset = header_start;
+		break;
 	}
 	return (FSIMG_OK);
 }
@@ -1155,6 +1188,391 @@ dirent_parse(const unsigned char *bytes, size_t length, size_t count,
 	out->name_offset = (uint16_t)name_start;
 	out->name_length = (uint16_t)name_length;
 	out->file_type = file_type;
+	return (FSIMG_OK);
+}
+
+/*
+ * The map header of a compressed inode. Byte 6 names the head-1 algorithm
+ * in its low four bits and the head-2 algorithm in its high four; byte 7
+ * holds the logical cluster size as a shift above the block size in bits 0
+ * to 3 and the whole-file fragment mark in bit 7. Whether a named algorithm
+ * is configured is judged when a record of its head type is used, since a
+ * file need not use both. The reader requires a logical cluster of one
+ * block, and a compact index with 2-byte groups permitted: no producer
+ * writes another, so either is unsupported. A structure whose feature the
+ * volume lacks is corrupt; the inline tail and fragments it has are not
+ * read, and are unsupported.
+ */
+fsimg_status_t
+erofs_zheader_decode(const unsigned char *raw, const erofs_super_t *sb,
+    erofs_layout_t layout, erofs_zheader_t *out, const char **what)
+{
+	uint16_t advice = fsimg_load_le16(raw + 4);
+	uint8_t algorithms = raw[6], cluster_bits = raw[7];
+	bool big_head1, big_head2;
+
+	if ((cluster_bits & 0x80) != 0) {
+		if ((sb->incompat & EROFS_INCOMPAT_FRAGMENTS) == 0)
+			return (reject(FSIMG_ECORRUPT,
+			    "whole-file fragment without FRAGMENTS", what));
+		return (reject(FSIMG_EUNSUPPORTED, "whole-file fragment",
+		    what));
+	}
+	if ((cluster_bits & 0x0f) != 0)
+		return (reject(FSIMG_EUNSUPPORTED,
+		    "logical cluster size other than the block size", what));
+	if ((advice & ~EROFS_ADVICE_KNOWN) != 0)
+		return (reject(FSIMG_EUNSUPPORTED, "map header advice bit",
+		    what));
+	if ((advice & EROFS_ADVICE_INLINE_TAIL) != 0) {
+		if ((sb->incompat & EROFS_INCOMPAT_ZTAILPACKING) == 0)
+			return (reject(FSIMG_ECORRUPT,
+			    "compressed inline tail without ZTAILPACKING",
+			    what));
+		return (reject(FSIMG_EUNSUPPORTED, "compressed inline tail",
+		    what));
+	}
+	if ((advice & EROFS_ADVICE_FRAGMENT) != 0) {
+		if ((sb->incompat & EROFS_INCOMPAT_FRAGMENTS) == 0)
+			return (reject(FSIMG_ECORRUPT,
+			    "fragment without FRAGMENTS", what));
+		return (reject(FSIMG_EUNSUPPORTED, "packed fragment", what));
+	}
+
+	big_head1 = (advice & EROFS_ADVICE_BIG_HEAD1) != 0;
+	big_head2 = (advice & EROFS_ADVICE_BIG_HEAD2) != 0;
+	if ((big_head1 || big_head2) &&
+	    (sb->incompat & EROFS_INCOMPAT_COMPR_CFGS) == 0)
+		return (reject(FSIMG_ECORRUPT,
+		    "big physical clusters without COMPR_CFGS", what));
+	if (layout == EROFS_LAYOUT_COMPRESSED_COMPACT) {
+		if (big_head1 != big_head2)
+			return (reject(FSIMG_ECORRUPT,
+			    "compact index with unequal big-cluster advice",
+			    what));
+		if ((advice & EROFS_ADVICE_COMPACT_2B) == 0)
+			return (reject(FSIMG_EUNSUPPORTED,
+			    "compact index without 2-byte groups", what));
+	}
+
+	*out = (erofs_zheader_t){
+		.advice = advice,
+		.head1_algorithm = algorithms & 0x0f,
+		.head2_algorithm = algorithms >> 4
+	};
+	return (FSIMG_OK);
+}
+
+/*
+ * One 8-byte full-index record: a 16-bit advice word with the type in bits
+ * 0 and 1 and the partial-reference mark in bit 15, a 16-bit clusterofs,
+ * then a head's or plain record's 32-bit block, or a non-head record's
+ * backward and forward distances. A backward field with bit 11 set is a
+ * count marker instead, its low 11 bits the cluster's blocks and its
+ * backward distance one; big says whether the inode permits big clusters,
+ * without which a marker is corrupt. Bits 2 to 14 of the advice word have
+ * no meaning this reader knows and are unsupported. A zero backward
+ * distance or count is corrupt; so is a marker with bits above its count,
+ * which no count fits. The forward distance is not read (erofs_zrecord_t).
+ */
+fsimg_status_t
+erofs_full_record_decode(const unsigned char *raw, bool big,
+    erofs_zrecord_t *out, const char **what)
+{
+	erofs_zrecord_t record;
+	uint16_t advice, backward_field;
+
+	advice = fsimg_load_le16(raw);
+	if ((advice & ~(RECORD_TYPE_MASK | RECORD_PARTIAL)) != 0)
+		return (reject(FSIMG_EUNSUPPORTED, "index record bit", what));
+
+	bzero(&record, sizeof(record));
+	record.type = (erofs_record_type_t)(advice & RECORD_TYPE_MASK);
+	if (record.type != EROFS_RECORD_NONHEAD) {
+		record.clusterofs = fsimg_load_le16(raw + 2);
+		record.block = fsimg_load_le32(raw + 4);
+		record.partial = (advice & RECORD_PARTIAL) != 0 &&
+		    record.type != EROFS_RECORD_PLAIN;
+		*out = record;
+		return (FSIMG_OK);
+	}
+
+	backward_field = fsimg_load_le16(raw + 4);
+	if ((backward_field & RECORD_MARKER) != 0) {
+		if (!big)
+			return (reject(FSIMG_ECORRUPT,
+			    "count marker without big clusters", what));
+		if ((backward_field & ~(RECORD_MARKER | RECORD_COUNT_MASK)) != 0)
+			return (reject(FSIMG_ECORRUPT, "count marker field",
+			    what));
+		record.marker = true;
+		record.marker_blocks = backward_field & RECORD_COUNT_MASK;
+		record.backward = 1;
+	} else
+		record.backward = backward_field;
+	if (record.backward == 0)
+		return (reject(FSIMG_ECORRUPT, "index backward distance zero",
+		    what));
+	if (record.marker && record.marker_blocks == 0)
+		return (reject(FSIMG_ECORRUPT, "count marker of zero blocks",
+		    what));
+	*out = record;
+	return (FSIMG_OK);
+}
+
+/*
+ * The compact index's group layout, from the records' count and the
+ * header's end measured from the inode's start, which is a multiple of 32,
+ * so header_end mod 32 is that of the absolute offset. Groups of 2 records
+ * in 8 bytes fill up to the first 32-byte boundary, which takes 6, 4, 2 or
+ * 0 records for a header ending 8, 16, 24 or 0 bytes past one. Then, while
+ * 16 or more records remain, groups of 16 records in 32 bytes, and the rest
+ * in 8-byte groups again; an odd last record fills a whole group. For
+ * example a header ending at offset 72 (8 past 64) with 40 records lays
+ * records 0 to 5 in three 8-byte groups, 6 to 37 in two 32-byte groups and
+ * 38 and 39 in one 8-byte group: 24 + 64 + 8 = 96 bytes.
+ *
+ * This is the layout under advice bit 0x01, the only compact form the
+ * reader accepts. The record count is at most 2^55, the largest size over
+ * the smallest block, so no product here overflows.
+ */
+void
+erofs_compact_layout(uint64_t header_end, uint64_t records,
+    erofs_compact_layout_t *out)
+{
+	uint64_t initial, remaining, wide;
+
+	initial = ((32 - header_end % 32) / 4) & 7;
+	if (initial >= records) {
+		*out = (erofs_compact_layout_t){
+			.records = records,
+			.initial_records = records,
+			.wide_records = 0,
+			.total_bytes = (records + 1) / 2 * 8
+		};
+		return;
+	}
+	remaining = records - initial;
+	wide = remaining / 16 * 16;
+	*out = (erofs_compact_layout_t){
+		.records = records,
+		.initial_records = initial,
+		.wide_records = wide,
+		.total_bytes = initial * 4 + wide * 2 +
+		    (remaining - wide + 1) / 2 * 8
+	};
+}
+
+/*
+ * The group holding record, below layout's count: its offset from the
+ * header's end, its form, how many of its slots hold records (fewer than
+ * two only for an odd last record) and the record's slot.
+ */
+void
+erofs_compact_locate(const erofs_compact_layout_t *layout, uint64_t record,
+    erofs_index_unit_t *out)
+{
+	uint64_t first, offset, within;
+
+	if (record >= layout->initial_records &&
+	    record < layout->initial_records + layout->wide_records) {
+		within = record - layout->initial_records;
+		*out = (erofs_index_unit_t){
+			.offset = layout->initial_records * 4 +
+			    within / 16 * 32,
+			.bytes = 32,
+			.slots = 16,
+			.valid = 16,
+			.slot = (unsigned)(within % 16)
+		};
+		return;
+	}
+	if (record < layout->initial_records) {
+		first = record & ~(uint64_t)1;
+		offset = first * 4;
+	} else {
+		within = record - layout->initial_records -
+		    layout->wide_records;
+		first = record - within % 2;
+		offset = layout->initial_records * 4 +
+		    layout->wide_records * 2 + (within - within % 2) * 4;
+	}
+	*out = (erofs_index_unit_t){
+		.offset = offset,
+		.bytes = 8,
+		.slots = 2,
+		.valid = layout->records - first < 2 ? 1 : 2,
+		.slot = (unsigned)(record - first)
+	};
+}
+
+/*
+ * One compact group, decoded into its valid slots' records. A group is
+ * fields of 16 bits (8-byte groups) or 14 bits (32-byte groups) packed
+ * little-endian from bit 0, followed by a 32-bit anchor block. Each field
+ * holds 12 bits of value, then 2 bits of type. A head's or plain record's
+ * value is its clusterofs. A non-head's is its backward distance or a count
+ * marker, except in the group's last slot, which holds the forward distance
+ * of a non-head that is no marker, which the reader does not use; that
+ * slot's backward distance is derived from the slot before it: one after a
+ * head or plain record, two after a marker, else that slot's distance plus
+ * one, so it is never zero.
+ *
+ * A compact head stores no block. It is the anchor plus a sum gathered by
+ * walking back over the group's records before it, never leaving the group
+ * (group_blocks_before()). big says whether the inode permits big
+ * clusters, which changes both what the anchor counts and the walk.
+ *
+ * Every record of the group is checked, not only the one a lookup wants,
+ * so a decoded group's verdict depends on its bytes alone: a zero backward
+ * distance, a marker without big clusters, a marker of zero blocks or
+ * directly after a non-head, a non-head right after its head without a
+ * marker under big clusters, and a walk landing on the wrong record type
+ * are corrupt.
+ */
+fsimg_status_t
+erofs_compact_group_decode(const unsigned char *bytes,
+    const erofs_index_unit_t *group, bool big, erofs_zrecord_t *out,
+    const char **what)
+{
+	erofs_zrecord_t records[EROFS_GROUP_RECORDS_MAX];
+	const erofs_zrecord_t *before;
+	uint64_t blocks;
+	uint32_t anchor;
+	unsigned last = group->slots - 1, value;
+	fsimg_status_t status;
+
+	bzero(records, sizeof(records));
+	for (unsigned i = 0; i < group->valid; i++) {
+		erofs_zrecord_t *record = &records[i];
+
+		value = compact_field(bytes, group->slots, i, &record->type);
+		if (record->type != EROFS_RECORD_NONHEAD) {
+			record->clusterofs = (uint16_t)value;
+			continue;
+		}
+		before = i > 0 ? &records[i - 1] : NULL;
+		if ((value & RECORD_MARKER) != 0) {
+			if (!big)
+				return (reject(FSIMG_ECORRUPT,
+				    "count marker without big clusters", what));
+			if (before != NULL &&
+			    before->type == EROFS_RECORD_NONHEAD)
+				return (reject(FSIMG_ECORRUPT,
+				    "count marker after a non-head record",
+				    what));
+			record->marker = true;
+			record->marker_blocks = value & RECORD_COUNT_MASK;
+			record->backward = 1;
+			if (record->marker_blocks == 0)
+				return (reject(FSIMG_ECORRUPT,
+				    "count marker of zero blocks", what));
+			continue;
+		}
+		if (i == last) {
+			/* last >= 1, so the slot before exists. */
+			if (before->type != EROFS_RECORD_NONHEAD)
+				record->backward = 1;
+			else if (before->marker)
+				record->backward = 2;
+			else
+				record->backward = before->backward + 1;
+		} else
+			record->backward = (uint16_t)value;
+		if (record->backward == 0)
+			return (reject(FSIMG_ECORRUPT,
+			    "index backward distance zero", what));
+		if (big && record->backward == 1)
+			return (reject(FSIMG_ECORRUPT,
+			    "non-head record after its head without a count "
+			    "marker", what));
+	}
+
+	anchor = fsimg_load_le32(bytes + group->bytes - 4);
+	for (unsigned i = 0; i < group->valid; i++) {
+		if (records[i].type == EROFS_RECORD_NONHEAD)
+			continue;
+		status = group_blocks_before(records, i, big, &blocks, what);
+		if (status != FSIMG_OK)
+			return (status);
+		records[i].block = (uint64_t)anchor + blocks;
+	}
+
+	bcopy(records, out, group->valid * sizeof(records[0]));
+	return (FSIMG_OK);
+}
+
+/*
+ * The value and type of a compact group's field slot. A field spans at
+ * most three bytes from its first, all inside the group: the last field
+ * of an 8-byte group ends at byte 4, of a 32-byte group at byte 27, and
+ * the anchor bytes a read may cover are masked off.
+ */
+static unsigned
+compact_field(const unsigned char *bytes, unsigned slots, unsigned slot,
+    erofs_record_type_t *type)
+{
+	unsigned bit = slot * (slots == 2 ? 16u : 14u);
+	uint32_t word;
+
+	word = (uint32_t)bytes[bit / 8] | (uint32_t)bytes[bit / 8 + 1] << 8 |
+	    (uint32_t)bytes[bit / 8 + 2] << 16;
+	word >>= bit % 8;
+	*type = (erofs_record_type_t)((word >> 12) & RECORD_TYPE_MASK);
+	return (word & 0x0fffu);
+}
+
+/*
+ * The blocks a compact head at slot target lies past its group's anchor.
+ * The walk visits the records before it, from the nearest back to the
+ * group's first, and stops at a jump that would land before the first.
+ *
+ * Without big clusters the anchor is the block of the last cluster before
+ * the group, every cluster is one block, and the sum starts at one: each
+ * head or plain record met adds one, and a non-head jumps back by its
+ * distance to its own head, which is then met. With big clusters the anchor
+ * is the first block of the first cluster the group must still account for,
+ * and the sum starts at zero: a marker adds its cluster's count and skips
+ * the head directly before it, a head met directly is a one-block cluster
+ * without a marker and adds one, and a non-head that is no marker jumps to
+ * its cluster's marker, its distance less one back. A cluster whose marker
+ * lies before the group is in the anchor and is never met. For example,
+ * with big clusters, records head, marker 4, non-head, head after an anchor
+ * of 21 put the second head at block 25.
+ *
+ * Every step moves at least one record back, so the walk ends.
+ */
+static fsimg_status_t
+group_blocks_before(const erofs_zrecord_t *records, unsigned target,
+    bool big, uint64_t *out, const char **what)
+{
+	const erofs_zrecord_t *record;
+	uint64_t sum = big ? 0 : 1;
+	int next, visit = (int)target - 1;
+
+	while (visit >= 0) {
+		record = &records[visit];
+		if (record->type != EROFS_RECORD_NONHEAD) {
+			sum++;
+			visit--;
+			continue;
+		}
+		if (record->marker) {
+			sum += record->marker_blocks;
+			visit -= 2;
+			continue;
+		}
+		next = visit - (int)record->backward + (big ? 1 : 0);
+		if (next < 0)
+			break;
+		if (big ? !records[next].marker :
+		    records[next].type == EROFS_RECORD_NONHEAD)
+			return (reject(FSIMG_ECORRUPT,
+			    "index distance lands on the wrong record type",
+			    what));
+		visit = next;
+	}
+	*out = sum;
 	return (FSIMG_OK);
 }
 

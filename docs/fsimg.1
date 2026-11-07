@@ -50,8 +50,10 @@
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
 QNX6 Power-Safe and QNX4 volumes, HFS Plus and HFSX volumes, QNX ImageFS images
 and ISO 9660 images.
-It also reads EROFS volumes that use neither compression nor chunk-based
-files.
+It also reads EROFS volumes, including chunk-based files and files
+compressed with LZ4; other compression algorithms, packed fragments,
+compressed inline tails and compressed directories and symbolic links are
+not read.
 ISO 9660 reading supports Rock Ridge, Joliet and the primary hierarchy.
 A created HFS Plus or HFSX volume is clean and unjournaled, and an HFSX one is
 case-sensitive.

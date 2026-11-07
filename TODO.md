@@ -449,11 +449,25 @@
   domain. Delivery and salvage handle zero extents; no driver that builds
   an index reports holes yet. Add zero records with the first one (UDF,
   APFS).
+* [Low] **EROFS specification model holds no compressed inode**
+  (`test/spec/lib/fsimg_spec/erofs/`): the model accepts `LZ4_0PADDING` and
+  `COMPR_CFGS` at open but builds no compressed file, so the map header,
+  index and cluster rules of the [format design](specs/design-erofs.md#compression)
+  are exercised only by `test/erofs.c` and the producer fixtures; the model
+  should build full and compact indexes and derive their rule witnesses.
+
+* [Low] **EROFS integration test classifies refusals by table alone**
+  (`test/erofs-integration.rb` `refusal_of`, `compare_unlisted`): the
+  verdict `rejected` or `unsupported` comes from whether a fixture is in
+  `EXPECTED_CORRUPT` or `EXPECTED_REFUSALS`, not from the status the reader
+  returned, so a refusal whose status changes but whose message still matches
+  stays green. Return the status class from `refusal_of` and require it to
+  agree with the table.
 
 * [Low] **EROFS inline tails use their own window** (`lib/formats/erofs/`):
   `content.c` copies an inline tail into a one-block `tail_window` charged at
-  open, while the driver design puts tails in the content decode window. Fold
-  it into that window when `cluster.c` lands (plan stage 6).
+  open, while the driver design puts tails in the content decode window,
+  which `cluster.c` now provides. Fold the tail window into it.
 
 * [Low] **The CLI chooses the allocation unit's noun by format name**
   (`cmd/fsimg/display.c` `format_counts_blocks`): each block-based format

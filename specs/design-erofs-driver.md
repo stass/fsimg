@@ -176,16 +176,19 @@ the normalized extent containing it:
   this nests once.
 
 Every returned extent is checked once here: its storage inside the domain
-or the box's content, its logical range inside `[0, size)`, and its stored
-length inside the [cluster limit](design-erofs.md#limits).
+or the box's content, its logical range inside `[0, size)`, and a cluster
+extent's stored and decoded lengths inside the
+[cluster limits](design-erofs.md#limits).
 
-`zmap.c` reads only the records a lookup needs. A full-index lookup reads
-the record at `floor(o / L)` and, for a non-head, the records its distances
-name, at most the record count in steps; a compact lookup reads the one
-group holding a record, computing group boundaries from the record count and
-the header's offset, never by multiplying an index; an encoded-extent
-lookup binary-searches the records. A lookup keeps the last group or
-record window it read, so sequential mapping reads each index byte once.
+`zmap.c` reads only the records a lookup needs: the record at
+`floor(o / L)`, the records its backward distances name, the record after
+the head for the count marker and the records after it up to the next head,
+each walk bounded by the decoded-extent limit and the record count. Full
+records are read in windows of 16; a compact lookup reads the one group
+holding a record, computing group boundaries from the record count and the
+header's offset; an encoded-extent lookup binary-searches the records. A
+lookup keeps the last group or record window it read, decoded and
+validated whole, so sequential mapping reads each index byte once.
 The compact group decoder is a pure function in `codec.c` from a group's
 bytes and its position to the normalized records, and is tested at every
 boundary E8 names.

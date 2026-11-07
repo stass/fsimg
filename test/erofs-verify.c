@@ -2333,6 +2333,278 @@ test_chunk_based_directories_verify_and_sharing_a_block_is_corrupt(void)
 	gen_tree_free(&tree);
 }
 
+/* ---- Compressed files ---- */
+
+enum {
+	SB_WORD54 = 0x54,
+	INCOMPAT_LZ4_0PADDING = 0x01,
+	INCOMPAT_COMPR_CFGS = 0x02,
+	ZLAYOUT_FULL = 1,
+	ZLAYOUT_COMPACT = 3,
+	ZNO_BLOCK = -1
+};
+
+/*
+ * A compressed file of size bytes, 1100 or less in one LZ4 cluster and more
+ * in two, each extent periodic so that the generator's encoder compresses
+ * it. head_algorithms is the map header's algorithm byte. A block other than
+ * ZNO_BLOCK replaces the first cluster's block in the index, which points
+ * the file at storage the generator did not give it. Returns the NID.
+ */
+static uint64_t
+add_zfile(gen_tree_t *tree, unsigned layout, size_t size,
+    uint8_t head_algorithms, int64_t block)
+{
+	gen_zcluster_t clusters[2] = {
+		{ 0, 1, GEN_ZK_LZ4_PERIODIC, false, 7, NULL, 0 },
+		{ 1100, 1, GEN_ZK_LZ4_PERIODIC, false, 11, NULL, 0 }
+	};
+	size_t count = size > 1100 + 100 ? 2 : 1;
+	unsigned char *content = calloc(size, 1);
+	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_FLAT);
+	gen_zfile_t zf = { content, size, layout,
+	    layout == ZLAYOUT_COMPACT ? GEN_ZA_COMPACT_2B : 0, head_algorithms,
+	    clusters, count };
+	uint32_t first = tree->data_next;
+	uint64_t nid;
+
+	CHECK(content != NULL);
+	for (size_t i = 0; i < size; i++)
+		content[i] = (unsigned char)(i < 1100 ? (i % 7) * 13 + 1 :
+		    ((i - 1100) % 11) * 17 + 3);
+	nid = gen_tree_add_zfile(tree, &proto, &zf);
+	if (block != ZNO_BLOCK) {
+		gen_zrecord_t *records;
+		size_t n = gen_zfile_records(&zf, tree->blkszbits, first, &records);
+		uint64_t header = gen_zheader_offset(&tree->image, &proto, nid);
+
+		records[0].block = (uint32_t)block;
+		if (layout == ZLAYOUT_FULL)
+			gen_full_index_put(&tree->image, header, records, n);
+		else
+			(void)gen_compact_index_put(&tree->image, header, records, n,
+			    zf.advice);
+		free(records);
+	}
+	free(content);
+	return (nid);
+}
+
+/* A volume with LZ4_0PADDING and a root naming the files given. */
+static void
+ztree_new(gen_tree_t *tree, unsigned data_blocks)
+{
+	tree_new(tree, 9, data_blocks);
+	put_super(tree, SB_INCOMPAT, INCOMPAT_LZ4_0PADDING, 4);
+}
+
+static const char *
+zlayout_name(unsigned layout)
+{
+	return (layout == ZLAYOUT_FULL ? "full" : "compact");
+}
+
+static void
+test_a_volume_with_compressed_files_verifies_in_both_scopes(void)
+{
+	static const unsigned sizes[] = { 1000, 2000, 700 };
+	static const unsigned layouts[] = { ZLAYOUT_FULL, ZLAYOUT_COMPACT,
+	    ZLAYOUT_FULL };
+	static const char *const names[] = { "a", "b", "c" };
+	gen_dirent_t kids[3];
+	gen_tree_t tree;
+	uint64_t logical = 0;
+
+	ztree_new(&tree, 16);
+	for (size_t i = 0; i < ARRAY_SIZE(sizes); i++) {
+		kids[i] = entry(names[i], add_zfile(&tree, layouts[i], sizes[i],
+		    0, ZNO_BLOCK), T_FILE);
+		logical += sizes[i];
+	}
+	fill_dir(&tree, 0, 0, kids, 3);
+	gen_tree_seal(&tree);
+	for (size_t i = 0; i < SCOPE_COUNT; i++) {
+		verdict_t v = verify_image(&tree.image, scopes[i]);
+
+		check_verdict("full, compact and full compressed files", scopes[i],
+		    &v, FSIMG_OK, NULL);
+		EXPECT(v.report.logical_bytes == logical, "%s: %llu logical bytes",
+		    scope_name(scopes[i]),
+		    (unsigned long long)v.report.logical_bytes);
+		/* Decoded bytes are not stored bytes, so they are not counted. */
+		EXPECT(v.report.payload_bytes_read <= (scopes[i] == 0 ? 0 :
+		    logical), "%s: %llu payload bytes", scope_name(scopes[i]),
+		    (unsigned long long)v.report.payload_bytes_read);
+	}
+	gen_tree_free(&tree);
+}
+
+/*
+ * A cluster over metadata is a structural finding. The scope that reads
+ * the payload decodes the metadata bytes as a stream first and may refuse
+ * them for that reason, so it must only agree on the class.
+ */
+static void
+check_cluster_over_metadata(const char *name, gen_tree_t *tree,
+    const char *phrase)
+{
+	char full[256];
+
+	snprintf(full, sizeof(full), "invalid EROFS %s", phrase);
+	gen_tree_seal(tree);
+	for (size_t i = 0; i < SCOPE_COUNT; i++) {
+		verdict_t v = verify_image(&tree->image, scopes[i]);
+
+		check_verdict(name, scopes[i], &v, FSIMG_ECORRUPT,
+		    scopes[i] == 0 ? full : NULL);
+	}
+}
+
+static void
+test_a_compressed_cluster_over_an_inode_body_is_corrupt(void)
+{
+	for (unsigned layout = ZLAYOUT_FULL; layout <= ZLAYOUT_COMPACT;
+	    layout += 2) {
+		char name[96];
+		gen_dirent_t kids[1];
+		gen_tree_t tree;
+
+		ztree_new(&tree, 8);
+		kids[0] = entry("f", add_zfile(&tree, layout, 1000, 0,
+		    META_BYTES >> 9), T_FILE);
+		fill_dir(&tree, 0, 0, kids, 1);
+		snprintf(name, sizeof(name), "a cluster on the inode area (%s)",
+		    zlayout_name(layout));
+		check_cluster_over_metadata(name, &tree,
+		    "metadata at byte 4096 overlaps other storage");
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_a_compressed_cluster_over_a_directory_block_is_corrupt(void)
+{
+	for (unsigned layout = ZLAYOUT_FULL; layout <= ZLAYOUT_COMPACT;
+	    layout += 2) {
+		char name[96], phrase[128];
+		uint32_t directory = gen_tree_first_block(9) + 1;
+		gen_dirent_t kids[1];
+		gen_tree_t tree;
+
+		/* The file's one cluster takes the first data block, so the
+		 * root's directory block is the next; the index names it. */
+		ztree_new(&tree, 8);
+		kids[0] = entry("f", add_zfile(&tree, layout, 1000, 0, directory),
+		    T_FILE);
+		fill_dir(&tree, 0, 0, kids, 1);
+		CHECK(start_block(&tree, 0) == directory);
+		snprintf(name, sizeof(name), "a cluster on a directory block (%s)",
+		    zlayout_name(layout));
+		snprintf(phrase, sizeof(phrase), "metadata at byte %llu overlaps "
+		    "other storage", (unsigned long long)block_offset(&tree,
+		    directory));
+		check_cluster_over_metadata(name, &tree, phrase);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_two_files_naming_one_cluster_verify(void)
+{
+	for (unsigned layout = ZLAYOUT_FULL; layout <= ZLAYOUT_COMPACT;
+	    layout += 2) {
+		char name[96];
+		gen_dirent_t kids[2];
+		gen_tree_t tree;
+		uint64_t first;
+
+		ztree_new(&tree, 8);
+		first = add_zfile(&tree, layout, 1000, 0, ZNO_BLOCK);
+		kids[0] = entry("first", first, T_FILE);
+		kids[1] = entry("second", add_zfile(&tree, layout, 1000, 0,
+		    gen_tree_first_block(9)), T_FILE);
+		fill_dir(&tree, 0, 0, kids, 2);
+		snprintf(name, sizeof(name), "two files over one cluster (%s)",
+		    zlayout_name(layout));
+		expect_verified(name, &tree);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_a_cluster_of_another_algorithm_leaves_verification_unsupported(void)
+{
+	gen_dirent_t kids[1];
+	gen_tree_t tree;
+
+	/* COMPR_CFGS with LZ4 and DEFLATE records; the file's head-1 is DEFLATE */
+	ztree_new(&tree, 8);
+	put_super(&tree, SB_INCOMPAT, INCOMPAT_LZ4_0PADDING | INCOMPAT_COMPR_CFGS,
+	    4);
+	put_super(&tree, SB_WORD54, 0x5, 2);
+	gen_lz4_config_put(&tree.image, 0, 65535, 1);
+	gen_put(&tree.image, GEN_SUPER_OFFSET + 128 + 16, 6, 2);
+	gen_put(&tree.image, GEN_SUPER_OFFSET + 128 + 18, 15, 1);
+	kids[0] = entry("f", add_zfile(&tree, ZLAYOUT_FULL, 1000, 2, ZNO_BLOCK),
+	    T_FILE);
+	fill_dir(&tree, 0, 0, kids, 1);
+	check_tree("a DEFLATE cluster", &tree, FSIMG_EUNSUPPORTED, "DEFLATE");
+	gen_tree_free(&tree);
+}
+
+static void
+test_lz4_clusters_without_lz4_0padding_leave_verification_unsupported(void)
+{
+	gen_dirent_t kids[1];
+	gen_tree_t tree;
+
+	tree_new(&tree, 9, 8);
+	kids[0] = entry("f", add_zfile(&tree, ZLAYOUT_FULL, 1000, 0, ZNO_BLOCK),
+	    T_FILE);
+	fill_dir(&tree, 0, 0, kids, 1);
+	check_tree("an LZ4 cluster without LZ4_0PADDING", &tree,
+	    FSIMG_EUNSUPPORTED, "LZ4_0PADDING");
+	gen_tree_free(&tree);
+}
+
+/*
+ * A volume holding both chunk-based and compressed files opens with both
+ * features and verifies: a hole claims nothing, a stored chunk and a
+ * cluster claim their own blocks.
+ */
+static void
+test_chunk_based_and_compressed_files_verify_together(void)
+{
+	gen_chunk_t chunks[2];
+	gen_dirent_t kids[2];
+	gen_inode_t proto = chunk_proto(MODE_FILE, 2 * 512);
+	gen_tree_t tree;
+
+	tree_new(&tree, 9, 16);
+	gen_tree_set_incompat(&tree, INCOMPAT_CHUNKED_FILE |
+	    INCOMPAT_LZ4_0PADDING);
+	chunks[0] = gen_chunk_hole(0);
+	chunks[1] = gen_chunk_block(add_data_block(&tree, 5));
+	kids[0] = entry("chunked", gen_tree_add_chunked(&tree, &proto, 0,
+	    chunks, 2), T_FILE);
+	kids[1] = entry("compressed", add_zfile(&tree, ZLAYOUT_COMPACT, 2000,
+	    0, ZNO_BLOCK), T_FILE);
+	fill_dir(&tree, 0, 0, kids, 2);
+	gen_tree_seal(&tree);
+	for (size_t i = 0; i < SCOPE_COUNT; i++) {
+		verdict_t v = verify_image(&tree.image, scopes[i]);
+
+		check_verdict("a chunk-based and a compressed file", scopes[i],
+		    &v, FSIMG_OK, NULL);
+		EXPECT(v.report.files == 2 &&
+		    v.report.logical_bytes == 2 * 512 + 2000,
+		    "%s: %llu files, %llu logical bytes", scope_name(scopes[i]),
+		    (unsigned long long)v.report.files,
+		    (unsigned long long)v.report.logical_bytes);
+	}
+	gen_tree_free(&tree);
+}
+
 int
 main(void)
 {
@@ -2391,5 +2663,12 @@ main(void)
 	test_a_chunk_over_an_inode_body_is_corrupt();
 	test_a_chunk_over_a_directory_block_is_corrupt();
 	test_chunk_based_directories_verify_and_sharing_a_block_is_corrupt();
+	test_a_volume_with_compressed_files_verifies_in_both_scopes();
+	test_a_compressed_cluster_over_an_inode_body_is_corrupt();
+	test_a_compressed_cluster_over_a_directory_block_is_corrupt();
+	test_two_files_naming_one_cluster_verify();
+	test_a_cluster_of_another_algorithm_leaves_verification_unsupported();
+	test_lz4_clusters_without_lz4_0padding_leave_verification_unsupported();
+	test_chunk_based_and_compressed_files_verify_together();
 	return (failures == 0 ? 0 : 1);
 }

@@ -184,11 +184,12 @@ typedef struct erofs_chunk_format {
 
 /*
  * The decoded fixed part of an inode. layout_offset is where its layout
- * bytes (the inline tail or the chunk index) start and body_bytes where
- * they end, both from the inode's first byte, so [0, body_bytes) is all the
- * inode itself occupies.
- * layout_word is the word at 0x10: a start block, a chunk format or a
- * device number by the inode's layout and kind. layout_high holds start-block
+ * bytes (the inline tail, the chunk index or the compressed map header)
+ * start and body_bytes where they end, both from the inode's first byte, so
+ * [0, body_bytes) is all the inode itself occupies.
+ * layout_word is the word at 0x10: a start block, a chunk format, a
+ * compressed inode's block count or a device number by the inode's layout
+ * and kind. layout_high holds start-block
  * bits 32 to 47 under the 48-bit layout and is zero otherwise.
  * chunk_format is a chunk-based inode's, decoded with the body length it
  * determines, and zero for every other layout.
@@ -278,14 +279,169 @@ typedef struct erofs_prefix {
 } erofs_prefix_t;
 
 /*
+ * Compressed layouts. An inode of either compressed layout starts its
+ * layout bytes with an 8-byte map header at its attribute region's end,
+ * rounded up to 8, and follows it with an index of one record per logical
+ * cluster of B bytes. A full index holds 8-byte records from 16 bytes after
+ * the header's start; a compact index packs records into groups from the
+ * header's end.
+ */
+#define EROFS_ZHEADER_BYTES		8u
+#define EROFS_FULL_INDEX_OFFSET		16u
+#define EROFS_FULL_RECORD_BYTES		8u
+/* Map header advice bits; any other bit is unsupported. */
+#define EROFS_ADVICE_COMPACT_2B		0x0001u
+#define EROFS_ADVICE_BIG_HEAD1		0x0002u
+#define EROFS_ADVICE_BIG_HEAD2		0x0004u
+#define EROFS_ADVICE_INLINE_TAIL	0x0008u
+#define EROFS_ADVICE_INTERLACED		0x0010u
+#define EROFS_ADVICE_FRAGMENT		0x0020u
+#define EROFS_ADVICE_KNOWN		0x003fu
+/* The largest physical cluster stored and logical extent decoded. */
+#define EROFS_CLUSTER_STORED_MAX	(UINT32_C(1) << 20)
+#define EROFS_CLUSTER_DECODED_MAX	(UINT32_C(12) << 20)
+/*
+ * A compact group holds 2 records in 8 bytes or 16 in 32 bytes; the full
+ * index is read in units of up to 16 records.
+ */
+#define EROFS_GROUP_RECORDS_MAX		16u
+#define EROFS_GROUP_BYTES_MAX		32u
+#define EROFS_FULL_UNIT_RECORDS		16u
+_Static_assert(EROFS_FULL_UNIT_RECORDS <= EROFS_GROUP_RECORDS_MAX,
+    "a full-index unit fits the lookup cache's records");
+
+/*
+ * A decoded map header. The first word, the fragment offset or the inline
+ * tail size, belongs to features this reader refuses at open, so it is not
+ * kept.
+ */
+typedef struct erofs_zheader {
+	uint16_t	 advice;
+	uint8_t		 head1_algorithm;
+	uint8_t		 head2_algorithm;
+} erofs_zheader_t;
+
+/* The type of an index record, its two type bits. */
+typedef enum erofs_record_type {
+	EROFS_RECORD_PLAIN = 0,
+	EROFS_RECORD_HEAD1 = 1,
+	EROFS_RECORD_NONHEAD = 2,
+	EROFS_RECORD_HEAD2 = 3
+} erofs_record_type_t;
+
+/*
+ * One index record, normalized from either index form. A head or plain
+ * record starts a physical cluster at clusterofs within its logical cluster
+ * and names its first block. A non-head record lies inside the cluster of
+ * the nearest head before it, backward records back (one for a count
+ * marker). The forward distances records may carry are not kept: the reader
+ * finds a cluster's end from the records' types alone. A count marker, the
+ * first non-head record of a big cluster, carries the cluster's block count.
+ */
+typedef struct erofs_zrecord {
+	uint64_t	 block;			/* head or plain */
+	erofs_record_type_t type;
+	uint16_t	 clusterofs;		/* head or plain */
+	uint16_t	 backward;		/* non-head */
+	uint16_t	 marker_blocks;		/* count marker */
+	bool		 marker;
+	bool		 partial;		/* full head: a partial reference */
+} erofs_zrecord_t;
+
+/*
+ * Where the records of a compact index lie, from the header's end: an
+ * initial run of 8-byte groups up to a 32-byte boundary, then 32-byte groups,
+ * then 8-byte groups. total_bytes is the index's length.
+ */
+typedef struct erofs_compact_layout {
+	uint64_t	 records;
+	uint64_t	 initial_records;	/* in the first run of 8-byte groups */
+	uint64_t	 wide_records;		/* in 32-byte groups */
+	uint64_t	 total_bytes;
+} erofs_compact_layout_t;
+
+/*
+ * The unit of an index a lookup reads to find one record: a compact group,
+ * or up to 16 consecutive full records. offset is measured from the first
+ * record's position, the header's end for a compact index; slots is a
+ * compact group's form.
+ */
+typedef struct erofs_index_unit {
+	uint64_t	 offset;		/* from the first record's place */
+	unsigned	 bytes;			/* 8 or 32 */
+	unsigned	 slots;			/* 2 or 16 */
+	unsigned	 valid;			/* slots holding records */
+	unsigned	 slot;			/* the record's slot */
+} erofs_index_unit_t;
+
+/* How a physical cluster's stored bytes become its logical extent. */
+typedef enum erofs_cluster_mode {
+	EROFS_CLUSTER_SHIFTED,		/* plain: extent byte j at byte j */
+	EROFS_CLUSTER_INTERLACED,	/* plain: rotated by rotation */
+	EROFS_CLUSTER_COMPRESSED	/* a stream of algorithm */
+} erofs_cluster_mode_t;
+
+/*
+ * One normalized physical cluster: its logical extent [logical_offset,
+ * logical_offset + logical_length) of the inode, and stored_bytes of whole
+ * blocks from the volume byte storage_offset. A compressed cluster's stream
+ * decodes to the extent, only partly when partial marks a shared cluster;
+ * a plain cluster stores the extent, from its first byte or rotated so that
+ * extent byte j lies at stored byte (rotation + j) mod stored_bytes. Every
+ * field but logical_offset decides the decoded bytes, so those fields are
+ * the decode window's key.
+ */
+typedef struct erofs_cluster {
+	uint64_t	 logical_offset;
+	uint64_t	 logical_length;
+	uint64_t	 storage_offset;
+	uint32_t	 stored_bytes;
+	uint32_t	 rotation;		/* interlaced */
+	erofs_cluster_mode_t mode;
+	uint8_t		 algorithm;		/* compressed */
+	bool		 partial;		/* compressed */
+} erofs_cluster_t;
+
+/*
+ * A decode window: one decoded cluster, keyed by the cluster it holds.
+ * input holds the stored bytes and output the logical extent; both grow to
+ * the largest cluster seen, charged to the context, and are owned until
+ * close. keyed is false whenever output may not hold the key's bytes.
+ */
+typedef struct erofs_window {
+	erofs_cluster_t	 key;
+	unsigned char	*input;
+	unsigned char	*output;
+	size_t		 input_capacity;
+	size_t		 output_capacity;
+	bool		 keyed;
+} erofs_window_t;
+
+/*
+ * The compressed lookup's memory of the inode it last mapped: that inode's
+ * decoded map header and the last index unit it read, a compact group or up
+ * to 16 full records, decoded. A lookup of another inode discards both, so
+ * a hit returns what a fresh read and decode of the same inode would.
+ */
+typedef struct erofs_zcache {
+	erofs_zrecord_t	 records[EROFS_GROUP_RECORDS_MAX];
+	erofs_zheader_t	 header;
+	uint64_t	 nid;
+	uint64_t	 unit_offset;		/* in the body; the unit's start */
+	bool		 header_valid;
+	bool		 unit_valid;
+} erofs_zcache_t;
+
+/*
  * Where a range of an inode's content is stored, as erofs_map() returns it:
- * in the volume's blocks, inline in the inode's own body, or nowhere, for a
- * chunk hole, which reads as zeros. The kind the compressed layouts add,
- * decoded clusters, joins this closed set.
+ * in the volume's blocks, inline in the inode's own body, in a physical
+ * cluster that must be decoded or rearranged, or nowhere, for a chunk hole,
+ * which reads as zeros.
  */
 typedef enum erofs_extent_kind {
 	EROFS_EXTENT_STORED,
 	EROFS_EXTENT_INLINE,
+	EROFS_EXTENT_CLUSTER,
 	EROFS_EXTENT_ZERO
 } erofs_extent_kind_t;
 
@@ -295,13 +451,16 @@ typedef enum erofs_extent_kind {
  * byte offset for a stored extent and an offset in the inode's body for an
  * inline one; a zero extent has none and leaves it zero. A stored extent's
  * whole blocks lie inside the content domain; an inline extent lies inside
- * the body, which erofs_inode_load() checked.
+ * the body, which erofs_inode_load() checked. A cluster extent is its
+ * cluster's logical extent, and cluster describes it; its stored blocks lie
+ * inside the content domain.
  */
 typedef struct erofs_extent {
 	uint64_t	 logical_offset;
 	uint64_t	 storage_offset;
 	uint64_t	 length;
 	erofs_extent_kind_t kind;
+	erofs_cluster_t	 cluster;		/* a cluster extent */
 } erofs_extent_t;
 
 /*
@@ -331,6 +490,8 @@ typedef struct erofs_features {
  * of the directory listing it: prepare reads a directory below the root
  * from them, and resolve the current file. tail_window holds an inline
  * tail for delivery, one block, charged at open and owned until close.
+ * content_window holds the decoded cluster resolve last handed to delivery,
+ * and zcache the compressed lookup's last header and index unit.
  */
 typedef struct fsimg_erofs_reader {
 	erofs_super_t	 super;
@@ -339,6 +500,8 @@ typedef struct fsimg_erofs_reader {
 	erofs_inode_t	 current;
 	uint64_t	 current_parent;
 	uint64_t	 domain_bytes;
+	erofs_window_t	 content_window;
+	erofs_zcache_t	 zcache;
 	unsigned char	*tail_window;
 	uint32_t	 block_bytes;
 } fsimg_erofs_reader_t;
@@ -352,10 +515,28 @@ fsimg_status_t	erofs_reject(fsimg_error_t *, fsimg_status_t, const char *);
 /*
  * The mapper (map.c), the one place a logical offset of an inode becomes
  * storage, and the content reader (content.c) built on it, which reads a
- * logical range of any inode into a caller buffer.
+ * logical range of any uncompressed inode into a caller buffer.
  */
 fsimg_status_t	erofs_map(fsimg_reader_t *, const erofs_inode_t *,
 		    uint64_t, erofs_extent_t *, fsimg_error_t *);
+
+/*
+ * Compressed lookups (zmap.c): the physical cluster of a compressed inode
+ * holding a logical offset below its size.
+ */
+fsimg_status_t	erofs_zmap(fsimg_reader_t *, const erofs_inode_t *, uint64_t,
+		    erofs_cluster_t *, fsimg_error_t *);
+
+/*
+ * Decode windows (cluster.c). erofs_cluster_readable() says whether this
+ * build decodes a cluster, FSIMG_EUNSUPPORTED naming what it lacks;
+ * erofs_window_fill() leaves a cluster's logical extent in a window's output.
+ */
+fsimg_status_t	erofs_cluster_readable(const fsimg_reader_t *,
+		    const erofs_cluster_t *, fsimg_error_t *);
+fsimg_status_t	erofs_window_fill(fsimg_reader_t *, erofs_window_t *,
+		    const erofs_cluster_t *, fsimg_error_t *);
+void		erofs_window_free(erofs_window_t *);
 fsimg_status_t	erofs_content_read(fsimg_reader_t *, const erofs_inode_t *,
 		    uint64_t, size_t, void *, fsimg_error_t *);
 fsimg_status_t	erofs_resolve(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
@@ -506,6 +687,18 @@ fsimg_status_t	erofs_chunk_format_decode(uint32_t, const erofs_super_t *,
 		    erofs_chunk_format_t *, const char **);
 fsimg_status_t	erofs_chunk_decode(const unsigned char *, size_t,
 		    const erofs_chunk_format_t *, erofs_chunk_t *, const char **);
+fsimg_status_t	erofs_zheader_decode(const unsigned char *,
+		    const erofs_super_t *, erofs_layout_t, erofs_zheader_t *,
+		    const char **);
+fsimg_status_t	erofs_full_record_decode(const unsigned char *, bool,
+		    erofs_zrecord_t *, const char **);
+void		erofs_compact_layout(uint64_t, uint64_t,
+		    erofs_compact_layout_t *);
+void		erofs_compact_locate(const erofs_compact_layout_t *, uint64_t,
+		    erofs_index_unit_t *);
+fsimg_status_t	erofs_compact_group_decode(const unsigned char *,
+		    const erofs_index_unit_t *, bool, erofs_zrecord_t *,
+		    const char **);
 fsimg_status_t	erofs_dirblock_decode(const unsigned char *, size_t,
 		    erofs_dirblock_t *, const char **);
 fsimg_status_t	erofs_dirent_decode(const erofs_dirblock_t *, size_t,

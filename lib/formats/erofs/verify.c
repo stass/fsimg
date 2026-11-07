@@ -332,11 +332,13 @@ inode_record(fsimg_reader_t *reader, erofs_verifier_t *verifier,
  * Claim every stored extent of inode's content in class, mapped from
  * offset 0 to its size. An extent occupies whole blocks, which erofs_map()
  * proved inside the content domain, so rounding its length up to a block
- * stays inside it. An inline extent lies in the body, already claimed, and
- * a chunk hole stores nothing. Chunks naming one block claim it once each:
- * the sweep lets data claims overlap, while a directory's blocks are
- * exclusive, so a directory whose chunks share a block is a finding. Each
- * extent is one unit of work.
+ * stays inside it. A cluster extent claims its physical cluster's blocks,
+ * once this build is known to decode it: a cluster it cannot decode leaves
+ * the content unverified, FSIMG_EUNSUPPORTED. An inline extent lies in the
+ * body, already claimed, and a chunk hole stores nothing. Chunks naming one
+ * block claim it once each: the sweep lets data claims overlap, while a
+ * directory's blocks are exclusive, so a directory whose chunks share a
+ * block is a finding. Each extent is one unit of work.
  */
 static fsimg_status_t
 storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
@@ -355,11 +357,26 @@ storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 			status = erofs_map(reader, inode, offset, &extent, error);
 		if (status != FSIMG_OK)
 			return (status);
-		if (extent.kind != EROFS_EXTENT_STORED)
-			continue;
-		status = erofs_claim(verifier, class, extent.storage_offset,
-		    (extent.length + block_mask) & ~block_mask, inode->nid,
-		    error);
+		switch (extent.kind) {
+		case EROFS_EXTENT_STORED:
+			status = erofs_claim(verifier, class,
+			    extent.storage_offset,
+			    (extent.length + block_mask) & ~block_mask,
+			    inode->nid, error);
+			break;
+		case EROFS_EXTENT_CLUSTER:
+			status = erofs_cluster_readable(reader,
+			    &extent.cluster, error);
+			if (status == FSIMG_OK)
+				status = erofs_claim(verifier, class,
+				    extent.cluster.storage_offset,
+				    extent.cluster.stored_bytes, inode->nid,
+				    error);
+			break;
+		case EROFS_EXTENT_INLINE:
+		case EROFS_EXTENT_ZERO:
+			break;
+		}
 		if (status != FSIMG_OK)
 			return (status);
 	}
