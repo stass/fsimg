@@ -364,6 +364,19 @@
 
 ## Bugs by subsystem
 
+* [Medium] **EROFS design: index end-marker rule is wrong**
+  (`specs/design-erofs.md` "Index records"): real images end with the last
+  cluster's own head or plain record at or before size mod L (e9-zstd-l3
+  /text026: size 106696, last record 26 plain at clusterofs 165, block 215;
+  also e2-count-zt, e8-lz4-frag, e8-lz4-ztail), and with an inline or
+  fragment tail the last head's block is not an address; fix before stage 6.
+* [Medium] **EROFS design: compressed inline tail placement is wrong**
+  (`specs/design-erofs.md`): "within the block that holds the inode's start"
+  is contradicted by e8-lz4-ztail (5 inodes, e.g. inode at 0x23dfe0, tail at
+  0x23e030); only "does not cross a block boundary" holds; fix before stage 6.
+* [Low] **EROFS fixtures e2-vm-compact and e2-vm-compact-alltime are failed
+  captures** (`~/fsimg-corpus/erofs`): 4096-byte zero stubs; mkfs refused an
+  owner above 65535 in compact form; recapture without the over-range owner.
 * [Low] **EROFS driver design names a section that does not exist**
   (`specs/design-erofs-driver.md`, reuse list): it points the MicroLZMA and
   Zstandard block decoders at "the EROFS block-decoding section" of

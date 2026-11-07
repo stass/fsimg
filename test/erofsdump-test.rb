@@ -1,5 +1,6 @@
-# SPDX-License-Identifier: BSD-2-Clause
 # frozen_string_literal: true
+
+# SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
 require "minitest/autorun"
@@ -22,6 +23,15 @@ class ErofsDumpTest < Minitest::Test
                 "The quick brown fox jumps over the lazy dog" => 0xE85EA4DE }
 
     assert_equal vectors, vectors.to_h { |text, _| [text, Xxh32.hash(text)] }
+  end
+
+  # Seed 0x9E3779B1 (the xxHash sanity-check seed) with an empty input and a
+  # 43-byte input, which exercises the four-lane loop and the seed - PRIME1
+  # lane. Values come from an independent implementation of the specification.
+  def test_xxh32_matches_seeded_vectors
+    fox = "The quick brown fox jumps over the lazy dog"
+
+    assert_equal [0x36B78AE7, 0x98C7F3BF], [Xxh32.hash("", seed: 0x9E3779B1), Xxh32.hash(fox, seed: 0x9E3779B1)]
   end
 
   def test_filter_claiming_a_present_attribute_bit_is_a_problem

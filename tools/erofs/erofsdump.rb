@@ -231,7 +231,8 @@ module ErofsDump
     def update(seed, bytes) = bytes.each_byte.reduce(seed) { |c, b| TABLE[(c ^ b) & 0xFF] ^ (c >> 8) }
   end
 
-  # XXH32 as the xxHash specification (doc/xxhash_spec.md) describes it.
+  # XXH32 as doc/xxhash_spec.md in the Cyan4973/xxHash repository (commit
+  # 2ec67caeb18ec15ae60c0853174331089acddfc0) describes it.
   module Xxh32
     PRIME1 = 0x9E3779B1
     PRIME2 = 0x85EBCA77
@@ -705,9 +706,9 @@ module ErofsDump
 
     # Prints the shared entries an inode names and returns them.
     def shared_entries(start:, shared:, stop:)
-      Array.new(shared) do |i|
-        break [] if start + 12 + 4 * (i + 1) > stop
+      return [] if start + 12 + 4 * shared > stop
 
+      Array.new(shared) do |i|
         idx = u32(start + 12 + 4 * i)
         read_xattr_entry(@sb.xattr_blkaddr * @sb.block_size + 4 * idx).tap { say "    shared index #{idx}: #{_1.text}" }
       end
@@ -726,6 +727,7 @@ module ErofsDump
     # of the name without its built-in prefix, seeded with the prefix's
     # index; nil when a long prefix cannot be resolved.
     def filter_bit(index, suffix)
+      return nil if index < 0x80 && !XATTR_PREFIXES.key?(index)
       return Xxh32.hash(suffix, seed: FILTER_SEED + index) % 32 if index < 0x80
 
       long = @prefixes_decoded && @prefixes[index & 0x7F]
@@ -793,7 +795,6 @@ module ErofsDump
     def chunk_entries(ino)
       fmt = ChunkFormat.new(ino.layout_word)
       chunk = @sb.block_size << fmt.bits
-      problem "chunk size #{chunk} exceeds 2^47 bytes" if chunk > 1 << 47
       count = block_count_of(ino.size, chunk)
       start = align(ino.attrs_end, fmt.width)
       span(start, fmt.width * count)
@@ -940,8 +941,7 @@ module ErofsDump
     # The records of one group. A head or plain record's block is its
     # group's anchor plus the blocks of the clusters before it in the group.
     def group_records(fields:, anchor:, first:, big:)
-      fields.each_index.map do |i|
-        field = fields[i]
+      fields.each_with_index.map do |field, i|
         index = first + i
         if field.type == TYPE_NONHEAD
           forward = i == fields.size - 1 && !field.big? ? field.value : nil
