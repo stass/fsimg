@@ -4065,7 +4065,8 @@ volume_size(void *argument, uint64_t *size, fsimg_error_t *error FSIMG_UNUSED)
 }
 
 static void
-volume_start(volume_t *v, const unsigned char *bytes, uint64_t length)
+volume_start_with(volume_t *v, const unsigned char *bytes, uint64_t length,
+    uint64_t memory_bytes)
 {
 	fsimg_options_t options;
 	fsimg_io_ops_t ops;
@@ -4075,7 +4076,7 @@ volume_start(volume_t *v, const unsigned char *bytes, uint64_t length)
 	v->bytes = bytes;
 	v->length = length;
 	fsimg_options_init(&options);
-	options.memory_bytes = 16 * 1024 * 1024;
+	options.memory_bytes = memory_bytes;
 	CHECK(fsimg_ctx_new(&options, &v->ctx, NULL) == FSIMG_OK);
 	CHECK(fsimg_ctx_get_stats(v->ctx, &stats, NULL) == FSIMG_OK);
 	v->baseline = stats.memory_bytes;
@@ -4091,6 +4092,12 @@ volume_start(volume_t *v, const unsigned char *bytes, uint64_t length)
 	v->reader.state = FSIMG_READER_OPENING;
 	fsimg_read_options_init(&v->reader.options);
 	fsimg_session_init(&v->reader.session, v->ctx, "test", 0);
+}
+
+static void
+volume_start(volume_t *v, const unsigned char *bytes, uint64_t length)
+{
+	volume_start_with(v, bytes, length, 16 * 1024 * 1024);
 }
 
 static fsimg_status_t
@@ -6902,6 +6909,473 @@ test_a_compact_inode_time_is_the_stored_word_after_the_epoch(void)
 	gen_tree_free(&tree);
 }
 
+/* ---- Mutation matrix: geometry and features ---- */
+
+/* Every compatible bit alone is read; the open names it and decides it. */
+static void
+test_open_accepts_each_compatible_bit_alone(void)
+{
+	static const struct {
+		uint32_t	 bit;
+		const char	*text;
+	} bits[] = {
+		{ 0x02, "SB_CHKSUM MTIME" },
+		{ 0x04, "SB_CHKSUM XATTR_FILTER" },
+		{ 0x10, "SB_CHKSUM PLAIN_XATTR_PFX" },
+		{ 0x20, "SB_CHKSUM ISHARE_XATTRS" },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(bits); i++) {
+		gen_image_t image;
+		fsimg_error_t error;
+		volume_t v;
+		const erofs_features_t *features;
+
+		minimal_image(&image, 12);
+		gen_super_put(&image, SB_COMPAT, COMPAT_SB_CHKSUM | bits[i].bit,
+		    4);
+		gen_seal(&image);
+		volume_start(&v, image.bytes, image.length);
+		check_status("compatible bit", volume_open(&v, 0, &error),
+		    FSIMG_OK, &error);
+		features = &erofs_state(&v.reader)->features;
+		EXPECT(text_is(&v.reader.info, "compat_features", bits[i].text),
+		    "bit 0x%x: compat_features is \"%s\"", (unsigned)bits[i].bit,
+		    find_text(&v.reader.info, "compat_features") != NULL ?
+		    find_text(&v.reader.info, "compat_features") : "");
+		EXPECT(features->checksum && !features->unknown_compat &&
+		    features->mtime == (bits[i].bit == 0x02) &&
+		    features->xattr_filter == (bits[i].bit == 0x04) &&
+		    features->plain_prefixes == (bits[i].bit == 0x10),
+		    "bit 0x%x decides exactly its own feature",
+		    (unsigned)bits[i].bit);
+		volume_stop(&v, "compatible bit");
+		gen_image_free(&image);
+	}
+}
+
+/* Incompatible bits 9 to 31 are outside the table, whatever else is set. */
+static void
+test_open_refuses_every_unknown_incompatible_bit(void)
+{
+	for (unsigned bit = 9; bit < 32; bit++) {
+		open_case_t c = { .reseal = true, .want = FSIMG_EUNSUPPORTED,
+		    .phrase = "incompatible feature" };
+		char name[24];
+
+		snprintf(name, sizeof(name), "incompatible bit %u", bit);
+		c.name = name;
+		c.patches[0] = (patch_t){ SB_INCOMPAT, 4, UINT32_C(1) << bit };
+		run_open_cases(&c, 1, 0);
+	}
+}
+
+/*
+ * Only 9 to 12 are block sizes: below is corrupt, above the reader's bound
+ * is unsupported. The checksum is off so it cannot refuse first.
+ */
+static void
+test_open_refuses_each_illegal_block_size(void)
+{
+	static const unsigned bits[] = { 0, 1, 7, 8, 13, 16, 31, 255 };
+
+	for (size_t i = 0; i < ARRAY_SIZE(bits); i++) {
+		bool small = bits[i] < 9;
+		open_case_t c = { .want = small ? FSIMG_ECORRUPT :
+		    FSIMG_EUNSUPPORTED, .phrase = "block size" };
+		char name[24];
+
+		snprintf(name, sizeof(name), "blkszbits %u", bits[i]);
+		c.name = name;
+		c.patches[0] = (patch_t){ SB_COMPAT, 4, 0 };
+		c.patches[1] = (patch_t){ SB_BLKSZBITS, 1, bits[i] };
+		run_open_cases(&c, 1, 0);
+	}
+}
+
+/* Extension slots are skipped, however they are filled, without a box. */
+static void
+test_open_accepts_extension_slots_without_a_metadata_box(void)
+{
+	for (unsigned bits = 9; bits <= 12; bits++) {
+		for (unsigned slots = 1; slots <= 4; slots++) {
+			gen_super_t sb = gen_super_default(bits,
+			    minimal_blocks(bits));
+			gen_image_t image;
+			char name[32];
+
+			sb.slots = (uint8_t)slots;
+			sb.box_nid = UINT64_C(0x1122334455667788);
+			image_build(&image, &sb, NULL);
+			snprintf(name, sizeof(name), "B=%u slots=%u", 1u << bits,
+			    slots);
+			check_open(name, &image, FSIMG_OK, NULL);
+			gen_image_free(&image);
+		}
+	}
+}
+
+/*
+ * A block count past the input opens, and the walk lists everything that
+ * lies inside the input.
+ */
+static void
+test_a_block_count_past_the_input_lists_what_lies_in_the_input(void)
+{
+	gen_tree_t tree;
+	listing_t *list;
+
+	tree_new(&tree, 9, 8);
+	root_names(&tree, "f", add_file(&tree, LAYOUT_FLAT_INLINE, 40, 3),
+	    T_FILE);
+	gen_tree_set_blocks(&tree, tree.blocks + 1000);
+	list = walk_ok("block count 1000 past the input", &tree);
+	EXPECT(list->count == 1 && find_node(list, "/f") != NULL &&
+	    find_node(list, "/f")->size == 40, "the file in the input is listed");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+/* ---- Mutation matrix: inodes ---- */
+
+/* A compact and two extended inodes in one volume, MTIME set. */
+static void
+test_compact_and_extended_inodes_deliver_owners_and_times(void)
+{
+	static const struct {
+		const char	*path;
+		bool		 extended;
+		uint32_t	 uid, gid;
+		int64_t		 time;		/* seconds, or the word */
+		uint32_t	 nsec;
+	} want[] = {
+		{ "/c", false, 65535, 65535, 86400, 0 },
+		{ "/e1", true, 65536, 4000000000u, -86401, 999999999 },
+		{ "/e2", true, 4294967295u, 70000, 4102444800, 1 },
+		{ "/e3", true, 0, 0, -INT64_C(5000000000), 0 },
+	};
+	gen_dirent_t kids[ARRAY_SIZE(want)];
+	gen_tree_t tree;
+	listing_t *list;
+
+	tree_new(&tree, 9, 4);
+	for (size_t i = 0; i < ARRAY_SIZE(want); i++) {
+		gen_inode_t proto = file_proto(LAYOUT_FLAT);
+
+		proto.extended = want[i].extended;
+		proto.uid = want[i].uid;
+		proto.gid = want[i].gid;
+		proto.time = want[i].time;
+		proto.time_nsec = want[i].nsec;
+		kids[i] = (gen_dirent_t){ want[i].path + 1,
+		    gen_tree_add(&tree, &proto, NULL, 0), T_FILE };
+	}
+	gen_tree_dir(&tree, 0, 0, kids, ARRAY_SIZE(kids));
+	gen_tree_set_compat(&tree, 1 | 2);
+	list = walk_ok("compact and extended inodes together", &tree);
+	for (size_t i = 0; i < ARRAY_SIZE(want); i++) {
+		const node_t *node = find_node(list, want[i].path);
+
+		EXPECT(node != NULL && node->meta.uid == want[i].uid &&
+		    node->meta.gid == want[i].gid &&
+		    node->meta.modified.seconds == want[i].time &&
+		    node->meta.modified.nanoseconds == want[i].nsec,
+		    "%s: owners %u:%u, time %lld.%09u", want[i].path,
+		    node != NULL ? node->meta.uid : 0,
+		    node != NULL ? node->meta.gid : 0,
+		    node != NULL ? (long long)node->meta.modified.seconds : 0,
+		    node != NULL ? node->meta.modified.nanoseconds : 0);
+	}
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+/* The sizes between the header size and a block, in both layouts. */
+static void
+test_sizes_31_and_32_are_read_byte_for_byte(void)
+{
+	static const size_t sizes[] = { 31, 32 };
+	static const unsigned layouts[] = { LAYOUT_FLAT, LAYOUT_FLAT_INLINE };
+
+	for (size_t s = 0; s < ARRAY_SIZE(sizes); s++) {
+		for (size_t l = 0; l < ARRAY_SIZE(layouts); l++) {
+			gen_tree_t tree;
+			listing_t *list;
+			const node_t *node;
+
+			tree_new(&tree, 9, 4);
+			root_names(&tree, "f", add_file(&tree, layouts[l],
+			    sizes[s], 9), T_FILE);
+			list = walk_ok("size 31 or 32", &tree);
+			node = find_node(list, "/f");
+			EXPECT(node != NULL && node->size == sizes[s] &&
+			    pattern_mismatch(node, 9) == sizes[s],
+			    "layout %u size %zu: every byte read back",
+			    layouts[l], sizes[s]);
+			listing_free(list);
+			gen_tree_free(&tree);
+		}
+	}
+}
+
+/* A child inode with one invalid field stops the walk at that child. */
+static void
+test_a_child_inode_with_an_invalid_field_is_refused_at_the_walk(void)
+{
+	static const struct {
+		const char	*name;
+		uint16_t	 mode;
+		bool		 extended;
+		uint32_t	 time_nsec;
+		unsigned	 layout_bits;	/* patched format bits 1 to 3 */
+		uint16_t	 format_extra;
+		const char	*phrase;
+	} cases[] = {
+		{ "layout 5", MODE_FILE, false, 0, 5, 0, "inode data layout" },
+		{ "layout 6", MODE_FILE, false, 0, 6, 0, "inode data layout" },
+		{ "layout 7", MODE_FILE, false, 0, 7, 0, "inode data layout" },
+		{ "format bit 5", MODE_FILE, false, 0, 0, 0x20, "inode format" },
+		{ "format bit 15", MODE_FILE, true, 0, 0, 0x8000,
+		    "inode format" },
+		{ "nanoseconds 10^9", MODE_FILE, true, 1000000000, 0, 0,
+		    "inode nanoseconds" },
+		{ "mode type 030000", 030644, false, 0, 0, 0,
+		    "inode file type" },
+		{ "mode type 0", 0644, false, 0, 0, 0, "inode file type" },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		gen_inode_t proto = inode_proto(cases[i].mode, LAYOUT_FLAT);
+		gen_tree_t tree;
+		uint64_t nid;
+		uint64_t at;
+
+		proto.extended = cases[i].extended;
+		proto.time_nsec = cases[i].time_nsec;
+		proto.format_extra = cases[i].format_extra;
+		tree_new(&tree, 9, 4);
+		nid = gen_tree_add(&tree, &proto, NULL, 0);
+		root_names(&tree, "n", nid, T_UNKNOWN);
+		if (cases[i].layout_bits != 0) {
+			at = gen_inode_offset(&tree.image, nid);
+			gen_put(&tree.image, at, (cases[i].layout_bits << 1) |
+			    (cases[i].extended ? 1 : 0), 2);
+		}
+		check_refused(cases[i].name, &tree, FSIMG_ECORRUPT,
+		    cases[i].phrase);
+		gen_tree_free(&tree);
+	}
+}
+
+/* ---- Mutation matrix: directories ---- */
+
+/* A root naming "a_b" and "c" in a stored block, whose bytes the caller edits. */
+static uint64_t
+patched_root(gen_tree_t *tree)
+{
+	uint64_t file = add_file(tree, LAYOUT_FLAT_INLINE, 3, 1);
+	uint64_t at = (uint64_t)tree->data_next << tree->blkszbits;
+	gen_dirent_t kids[2] = { { "a_b", file, T_FILE },
+	    { "c", file, T_FILE } };
+
+	gen_tree_dir(tree, 0, 0, kids, 2);
+	return (at);
+}
+
+/* Records are ".", "..", "a_b", "c": 12 bytes each, names after 48. */
+enum {
+	RECORD_BYTES = 12,
+	NAMES_AT = 48
+};
+
+static void
+test_a_stored_directory_block_with_a_bad_field_is_refused(void)
+{
+	static const struct {
+		const char	*name;
+		unsigned	 record;
+		unsigned	 field_at;	/* offset in the record */
+		unsigned	 width;
+		uint64_t	 value;
+		const char	*phrase;
+	} cases[] = {
+		{ "first name offset 0", 0, 8, 2, 0, "directory entry count" },
+		{ "first name offset 13", 0, 8, 2, 13, "directory entry count" },
+		{ "first name offset past the block", 0, 8, 2, 12 * 400,
+		    "directory entry count" },
+		{ "second name offset below the first", 1, 8, 2, 12,
+		    "not increasing" },
+		{ "name offsets repeat", 3, 8, 2, NAMES_AT,
+		    "not increasing" },
+		{ "last name offset past the block", 3, 8, 2, 4000,
+		    "directory name offset" },
+		{ "name type 8", 2, 10, 1, 8, "directory file type" },
+		{ "name type 255", 3, 10, 1, 255, "directory file type" },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		gen_tree_t tree;
+		uint64_t at;
+
+		tree_new(&tree, 9, 4);
+		at = patched_root(&tree);
+		gen_put(&tree.image, at + cases[i].record * RECORD_BYTES +
+		    cases[i].field_at, cases[i].value, cases[i].width);
+		check_refused(cases[i].name, &tree, FSIMG_ECORRUPT,
+		    cases[i].phrase);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_a_nul_or_slash_inside_a_stored_name_is_refused(void)
+{
+	static const unsigned char bytes[] = { 0, '/' };
+
+	for (size_t i = 0; i < ARRAY_SIZE(bytes); i++) {
+		gen_tree_t tree;
+		uint64_t at;
+
+		tree_new(&tree, 9, 4);
+		at = patched_root(&tree);
+		/* The middle of "a_b", which is not the last name. */
+		gen_put(&tree.image, at + NAMES_AT + 1, bytes[i], 1);
+		check_refused(bytes[i] == 0 ? "NUL in a name" :
+		    "slash in a name", &tree, FSIMG_ECORRUPT,
+		    "directory name byte");
+		gen_tree_free(&tree);
+	}
+}
+
+/* A chain of directories named "d", each holding the next. */
+static void
+test_a_deep_tree_is_listed_to_its_leaf(void)
+{
+	enum { DEPTH = 100 };
+	char path[2 * DEPTH + 3];
+	uint64_t nids[DEPTH + 1];
+	gen_tree_t tree;
+	listing_t *list;
+	uint64_t leaf;
+
+	tree_new(&tree, 9, DEPTH + 8);
+	nids[0] = 0;
+	for (size_t i = 1; i <= DEPTH; i++)
+		nids[i] = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	leaf = add_file(&tree, LAYOUT_FLAT_INLINE, 5, 2);
+	for (size_t i = 0; i <= DEPTH; i++) {
+		gen_dirent_t child = i < DEPTH ?
+		    (gen_dirent_t){ "d", nids[i + 1], T_DIR } :
+		    (gen_dirent_t){ "f", leaf, T_FILE };
+
+		gen_tree_dir(&tree, nids[i], i == 0 ? 0 : nids[i - 1], &child, 1);
+	}
+	list = walk_ok("directories 100 deep", &tree);
+	path[0] = '\0';
+	for (size_t i = 0; i < DEPTH; i++)
+		strcat(path, "/d");
+	strcat(path, "/f");
+	EXPECT(list->count == DEPTH + 1 && find_node(list, path) != NULL &&
+	    find_node(list, path)->size == 5, "the leaf file is at depth %d",
+	    DEPTH);
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
+/* Walk the image counting entries only; last receives the final path. */
+static fsimg_status_t
+count_entries(const gen_image_t *image, uint64_t memory_bytes, size_t *count,
+    char *last, size_t last_bytes)
+{
+	const fsimg_entry_t *entry;
+	fsimg_error_t error;
+	fsimg_reader_t *reader = NULL;
+	fsimg_status_t status;
+	volume_t v;
+
+	volume_start_with(&v, image->bytes, image->length, memory_bytes);
+	status = fsimg_reader_open(v.ctx, v.io, NULL, &reader, &error);
+	*count = 0;
+	while (status == FSIMG_OK &&
+	    (status = fsimg_reader_next(reader, &entry, &error)) == FSIMG_OK) {
+		(*count)++;
+		snprintf(last, last_bytes, "%s", entry->path);
+	}
+	fsimg_reader_free(reader);
+	fsimg_io_free(v.io);
+	fsimg_ctx_free(v.ctx);
+	return (status);
+}
+
+/* One directory of 100000 names over many blocks, all one hard-linked file. */
+static void
+test_a_directory_of_100000_entries_lists_every_name(void)
+{
+	enum { ENTRIES = 100000, BLOCKS = 700, BITS = 12 };
+	size_t block = (size_t)1 << BITS;
+	gen_dirent_t *records = calloc(ENTRIES + 2, sizeof(*records));
+	char (*names)[8] = calloc(ENTRIES, sizeof(*names));
+	unsigned char *bytes = calloc(BLOCKS, block);
+	gen_inode_t dir = inode_proto(MODE_DIR, LAYOUT_FLAT);
+	char last[PATH_BYTES];
+	gen_tree_t tree;
+	size_t count, size;
+	uint64_t file;
+
+	CHECK(records != NULL && names != NULL && bytes != NULL);
+	tree_new(&tree, BITS, BLOCKS + 8);
+	file = add_file(&tree, LAYOUT_FLAT, 0, 0);
+	records[0] = (gen_dirent_t){ ".", 0, T_DIR };
+	records[1] = (gen_dirent_t){ "..", 0, T_DIR };
+	for (size_t i = 0; i < ENTRIES; i++) {
+		snprintf(names[i], sizeof(names[i]), "n%06zu", i);
+		records[i + 2] = (gen_dirent_t){ names[i], file, T_FILE };
+	}
+	size = gen_dir_pack(bytes, BLOCKS * block, block, records, ENTRIES + 2);
+	gen_tree_fill(&tree, 0, &dir, bytes, size);
+	gen_tree_seal(&tree);
+	EXPECT(count_entries(&tree.image, 256 * 1024 * 1024, &count, last,
+	    sizeof(last)) ==
+	    FSIMG_DONE, "the walk of 100000 entries reaches its end");
+	EXPECT(count == ENTRIES && strcmp(last, "/n099999") == 0,
+	    "%zu entries, the last \"%s\"", count, last);
+	gen_tree_free(&tree);
+	free(bytes);
+	free(names);
+	free(records);
+}
+
+/*
+ * root -> a -> b -> c, where c lists a, its grandparent. Unlike a listing of
+ * the root or of the parent, c's entry names neither c nor b, so it is
+ * admitted; the descent into a from c then finds a's ".." naming the root
+ * instead of c, and the parent rule refuses it at depth 3 with no root
+ * involved.
+ */
+static void
+test_a_cycle_to_a_grandparent_below_the_root_is_corrupt(void)
+{
+	gen_dirent_t root_kids[1], a_kids[1], b_kids[1], c_kids[1];
+	gen_tree_t tree;
+	uint64_t a, b, c;
+
+	tree_new(&tree, 9, 8);
+	a = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	b = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	c = gen_tree_slot(&tree, GEN_COMPACT_BYTES, 0);
+	root_kids[0] = (gen_dirent_t){ "a", a, T_DIR };
+	a_kids[0] = (gen_dirent_t){ "b", b, T_DIR };
+	b_kids[0] = (gen_dirent_t){ "c", c, T_DIR };
+	c_kids[0] = (gen_dirent_t){ "up", a, T_DIR };
+	gen_tree_dir(&tree, 0, 0, root_kids, 1);
+	gen_tree_dir(&tree, a, 0, a_kids, 1);
+	gen_tree_dir(&tree, b, a, b_kids, 1);
+	gen_tree_dir(&tree, c, b, c_kids, 1);
+	check_refused("c lists the grandparent a", &tree, FSIMG_ECORRUPT,
+	    "dot entry breaks the parent rule");
+	gen_tree_free(&tree);
+}
+
 /* ---- Fuzz seeds ---- */
 
 /* A volume with a directory, stored and inline files and a link. */
@@ -7135,6 +7609,19 @@ main(int argc, char **argv)
 	test_owner_and_permission_bits_are_delivered();
 	test_the_stored_time_is_modified_with_mtime_and_changed_without();
 	test_a_compact_inode_time_is_the_stored_word_after_the_epoch();
+	test_open_accepts_each_compatible_bit_alone();
+	test_open_refuses_every_unknown_incompatible_bit();
+	test_open_refuses_each_illegal_block_size();
+	test_open_accepts_extension_slots_without_a_metadata_box();
+	test_a_block_count_past_the_input_lists_what_lies_in_the_input();
+	test_compact_and_extended_inodes_deliver_owners_and_times();
+	test_sizes_31_and_32_are_read_byte_for_byte();
+	test_a_child_inode_with_an_invalid_field_is_refused_at_the_walk();
+	test_a_stored_directory_block_with_a_bad_field_is_refused();
+	test_a_nul_or_slash_inside_a_stored_name_is_refused();
+	test_a_deep_tree_is_listed_to_its_leaf();
+	test_a_directory_of_100000_entries_lists_every_name();
+	test_a_cycle_to_a_grandparent_below_the_root_is_corrupt();
 
 	if (failures != 0)
 		fprintf(stderr, "test/erofs.c: %d checks failed\n", failures);
