@@ -364,6 +364,13 @@
 
 ## Bugs by subsystem
 
+* [Medium] **EROFS directory listing exceeds the minimum memory budget**
+  (`lib/formats/erofs/directory.c`): listing one directory of 100000
+  entries fails under the 16 MiB budget and needs 256 MiB
+  (`test_a_directory_of_100000_entries_lists_every_name` in
+  `test/erofs.c` opens with the larger budget). The driver design bounds
+  directories through metadata scratch; find what the prepare path keeps
+  in memory and move it to scratch before stage 8's scale gate.
 * [Low] **EROFS codec does not yet enforce three format-design rules**
   (`lib/formats/erofs/codec.c`): chunk-format bit 6 with 4-byte entries is
   accepted (`erofs_chunk_format_decode`; the design's
