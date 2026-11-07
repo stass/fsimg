@@ -78,7 +78,7 @@
   last the 48-bit layout and metadata box, read and then written. External
   data devices stay refused.
   The writer is registered (`write-plan.c`, `write-dir.c`, `write-emit.c`,
-  `write-lz4.c`) with its LZ4 profile, and `tools/erofs/qualify.sh` checks
+  `write-lz4.c`) with its LZ4 and 48-bit profiles, and `tools/erofs/qualify.sh` checks
   its output, uncompressed and under `-c lz4`, with `fsck.erofs`, the
   kernel and rust-fs-erofs at every block size, and under `-a 48` with
   `fsck.erofs`, the kernel and fsimg's own reader, rust-fs-erofs not

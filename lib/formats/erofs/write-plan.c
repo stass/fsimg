@@ -634,9 +634,10 @@ static fsimg_status_t
 measure_files(erofs_plan_t *plan, fsimg_error_t *error)
 {
 	fsimg_writer_t *writer = plan->common.writer;
+	const uint64_t records_max = (uint64_t)UINT32_MAX + 1;
 	erofs_lz4_former_t *former;
 	erofs_row_t row;
-	uint64_t flat, clusters;
+	uint64_t flat, clusters, record_limit;
 	bool measured;
 	fsimg_status_t status;
 
@@ -667,8 +668,14 @@ measure_files(erofs_plan_t *plan, fsimg_error_t *error)
 			status = addressing_exceeded(plan, error);
 			break;
 		}
-		status = erofs_lz4_measure(plan, former, id, row.size, flat,
-		    &clusters, error);
+		/*
+		 * At most 2^32 records are kept: a file with more stays flat
+		 * below, so recording up to flat of them would only fill
+		 * scratch.
+		 */
+		record_limit = flat < records_max ? flat : records_max;
+		status = erofs_lz4_measure(plan, former, id, row.size,
+		    record_limit, &clusters, error);
 		if (status != FSIMG_OK)
 			break;
 		if (clusters >= flat)
@@ -717,17 +724,18 @@ addressing_exceeded(const erofs_plan_t *plan, fsimg_error_t *error)
  * Without addressing=48 the epoch is the format time and span is 0. Under
  * it pass 2 has lowered the epoch to the smallest time and span is the
  * 32-bit offset's range, and a compact link count must be 1, the implicit
- * count whose word carries start-block bits, so every directory is
- * extended. A file
- * measurement compressed keeps the compressed layout. Other content whose
- * size is not a multiple of the block keeps its tail in the body when the
- * fixed part and the tail fit one block (flat-inline), and in a data block
- * of its own otherwise (flat).
+ * count whose word carries start-block bits, so every directory, which
+ * has at least two links, is extended. A file measurement compressed
+ * keeps the compressed layout. Other content whose size is not a multiple
+ * of the block keeps its tail in the body when the fixed part and the
+ * tail fit one block (flat-inline), and in a data block of its own
+ * otherwise (flat).
  */
 static void
 choose_inode_shape(const erofs_plan_t *plan, erofs_row_t *row)
 {
 	const uint64_t span = plan->addressing48 ? UINT32_MAX : 0;
+	const uint32_t links_max = plan->addressing48 ? 1 : UINT16_MAX;
 	uint64_t tail;
 	bool compact_time;
 
@@ -736,8 +744,7 @@ choose_inode_shape(const erofs_plan_t *plan, erofs_row_t *row)
 	    (uint64_t)row->mtime - (uint64_t)plan->epoch <= span;
 	row->extended = row->size > UINT32_MAX || row->uid > UINT16_MAX ||
 	    row->gid > UINT16_MAX ||
-	    row->links > (plan->addressing48 ? 1 : UINT16_MAX) ||
-	    !compact_time;
+	    row->links > links_max || !compact_time;
 	if (row->layout == EROFS_LAYOUT_COMPRESSED_FULL)
 		return;
 	tail = row->size % plan->block_bytes;

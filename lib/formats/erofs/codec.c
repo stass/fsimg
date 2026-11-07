@@ -1478,16 +1478,21 @@ erofs_xlength_decode(uint32_t word, erofs_xlength_t *out, const char **what)
 
 /*
  * The map header the writer emits, the inverse of erofs_zheader_decode()
- * for a header without an inline tail or fragment. An index's header holds
- * the advice word, the two algorithms and a logical cluster of one block;
- * a header of 32-byte encoded extents holds the extent count's low 32 bits
- * in bytes 0 to 3, the advice that selects them in bytes 4 and 5 and the
- * count's high bits in bytes 6 and 7. Every other bit is zero. The count
- * is 48 bits wide, but its bit 47 is the header's bit 63, which the
- * decoder reads first as the whole-file fragment mark, so a count must
- * stay below 2^47. false for an inline tail, a fragment, encoded extents
- * of another width or with another advice, a count of 2^47 or more, an
- * unknown advice bit or an algorithm beyond four bits.
+ * for a full-index inode's header without an inline tail or fragment.
+ *
+ * An index's header holds the advice word, the two algorithms and a
+ * logical cluster of one block. A header of 32-byte encoded extents holds
+ * the extent count's low 32 bits in bytes 0 to 3, the advice that selects
+ * them in bytes 4 and 5 and the count's high bits in bytes 6 and 7. Every
+ * other bit is zero. The count is 48 bits wide, but its bit 47 is the
+ * header's bit 63, which the decoder reads first as the whole-file
+ * fragment mark, so a count must stay below 2^47.
+ *
+ * false for an inline tail, a fragment, encoded extents of another width
+ * or with another advice, a count of 2^47 or more, an index header with
+ * advice bit 0, which on a full index selects encoded extents, or with a
+ * logical cluster other than the block, an unknown advice bit or an
+ * algorithm beyond four bits.
  */
 bool
 erofs_zheader_encode(const erofs_zheader_t *header, unsigned char *raw)
@@ -1511,6 +1516,8 @@ erofs_zheader_encode(const erofs_zheader_t *header, unsigned char *raw)
 	}
 	if (header->extents_form != EROFS_EXTENTS_NONE ||
 	    header->extent_bytes != 0 || header->extent_count != 0 ||
+	    header->lclusterbits != 0 ||
+	    (header->advice & EROFS_ADVICE_EXTENTS) != 0 ||
 	    (header->advice & ~EROFS_ADVICE_KNOWN) != 0 ||
 	    (header->advice & (EROFS_ADVICE_INLINE_TAIL |
 	    EROFS_ADVICE_FRAGMENT)) != 0 ||

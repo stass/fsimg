@@ -2325,7 +2325,10 @@ sparse_write(void *argument, uint64_t offset, const void *buffer,
 	memory_sink_t *sink = argument;
 	size_t skip = 0;
 
+	*transferred = 0;
 	sink->writes++;
+	if (sink->writes == sink->fail_write_at)
+		return (FSIMG_EIO);
 	if (overlap(offset, length, 0, sink->dense_length, &skip) == length)
 		bcopy(buffer, sink->bytes + offset, length);
 	else {
@@ -3827,6 +3830,10 @@ test_extent_encoding_decodes_to_the_same_records(void)
 	CHECK(!erofs_zheader_encode(&header, raw));
 	header = (erofs_zheader_t){ .extent_count = 1 };
 	CHECK(!erofs_zheader_encode(&header, raw));
+	header = (erofs_zheader_t){ .advice = EROFS_ADVICE_EXTENTS };
+	CHECK(!erofs_zheader_encode(&header, raw));
+	header = (erofs_zheader_t){ .lclusterbits = 3 };
+	CHECK(!erofs_zheader_encode(&header, raw));
 
 	memset(raw, 0xff, sizeof(raw));
 	CHECK(erofs_xrecord_encode(&record, EROFS_EXTENT32_BYTES, raw));
@@ -4403,72 +4410,98 @@ test_addressing48_volume_size_passes_32_bits(void)
 	addressing = 0;
 }
 
+#define FAR_START	((UINT64_C(1) << 32) + 8)
+
 /*
- * Start blocks past 2^32, which only more than 2 TiB of stored content
- * reaches: a flat file of noise and an LZ4 file of text, planned on a
- * volume of 2^32 + 64 blocks, are moved to blocks from 2^32 + 8 before
- * emission into a sparse sink. The flat inode carries the high bits in
- * its word at 0x06 and the compressed file's first encoded extent a
- * physical offset past 2^32 blocks, and the reader enumerates and
- * verifies both files' content from there.
+ * Plan a flat file of noise and an LZ4 file of text under addressing=48 on
+ * a volume of 2^32 + 64 blocks, move both to blocks from FAR_START, and
+ * emit into a sparse sink poisoned with poison whose far window holds
+ * them.
  */
 static void
-test_addressing48_start_blocks_pass_32_bits(void)
+emit_far_files(fixture_t *fixture, memory_sink_t *sink, unsigned char poison)
 {
-	const uint64_t far_start = (UINT64_C(1) << 32) + 8;
 	const char *const paths[] = { "/flat", "/packed" };
 	fsimg_write_options_t options;
-	fixture_t fixture;
-	memory_sink_t sink;
-	erofs_super_t sb;
-	erofs_inode_t inode;
-	erofs_xrecord_t record;
 	erofs_row_t row;
-	uint64_t next = far_start;
-	const char *what = NULL;
+	uint64_t next = FAR_START;
 	fsimg_status_t status;
 
-	compression = FSIMG_EROFS_COMPRESSION_LZ4;
-	addressing = 48;
 	tree_reset();
 	add_file(3 * block_size + 100, "/flat")->content = CONTENT_NOISE;
 	add_file(4 * block_size, "/packed")->content = CONTENT_TEXT;
 	reproducible_options(&options);
-	options.volume_bytes = (far_start + 56) * block_size;
-	plan_tree(&fixture, &options);
-	CHECK(row_of_path(&fixture, "/flat").layout !=
+	options.volume_bytes = (FAR_START + 56) * block_size;
+	plan_tree(fixture, &options);
+	CHECK(row_of_path(fixture, "/flat").layout !=
 	    EROFS_LAYOUT_COMPRESSED_FULL);
-	CHECK(row_of_path(&fixture, "/packed").layout ==
+	CHECK(row_of_path(fixture, "/packed").layout ==
 	    EROFS_LAYOUT_COMPRESSED_FULL);
 
-	bzero(&sink, sizeof(sink));
-	sink.length = options.volume_bytes;
-	sink.dense_length = fixture.plan->used_blocks * block_size;
+	/*
+	 * The dense part is the volume as planned, taken before the rows
+	 * move; used_blocks then grows to the far window's end, so the
+	 * emitter's row_placed() accepts the moved rows.
+	 */
+	bzero(sink, sizeof(*sink));
+	sink->length = options.volume_bytes;
+	sink->dense_length = fixture->plan->used_blocks * block_size;
 	for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-		row = row_of_path(&fixture, paths[i]);
+		row = row_of_path(fixture, paths[i]);
 		row.start_block = next;
 		next += erofs_row_data_blocks(&row, block_size);
-		CHECK(erofs_row_set(fixture.plan, id_of_path(&fixture,
-		    paths[i]), &row, &fixture.error) == FSIMG_OK);
+		CHECK(erofs_row_set(fixture->plan, id_of_path(fixture,
+		    paths[i]), &row, &fixture->error) == FSIMG_OK);
 	}
-	fixture.plan->used_blocks = next;
-	sink.far_offset = far_start * block_size;
-	sink.far_length = (next - far_start) * block_size;
-	sink.bytes = malloc((size_t)sink.dense_length);
-	sink.far = malloc((size_t)sink.far_length);
-	CHECK(sink.bytes != NULL && sink.far != NULL);
-	memset(sink.bytes, POISON, (size_t)sink.dense_length);
-	memset(sink.far, POISON, (size_t)sink.far_length);
-	status = emit_into(&fixture, &sink);
+	fixture->plan->used_blocks = next;
+	sink->far_offset = FAR_START * block_size;
+	sink->far_length = (next - FAR_START) * block_size;
+	sink->bytes = malloc((size_t)sink->dense_length);
+	sink->far = malloc((size_t)sink->far_length);
+	CHECK(sink->bytes != NULL && sink->far != NULL);
+	memset(sink->bytes, poison, (size_t)sink->dense_length);
+	memset(sink->far, poison, (size_t)sink->far_length);
+	status = emit_into(fixture, sink);
 	CHECK_CASE(status == FSIMG_OK, "emission failed with %d: %s", status,
-	    fixture.error.message);
+	    fixture->error.message);
+}
+
+/*
+ * Start blocks past 2^32, which only more than 2 TiB of stored content
+ * reaches, planted by emit_far_files(). The flat inode carries the high
+ * bits in its word at 0x06 and the compressed file's first encoded extent
+ * a physical offset past 2^32 blocks; two emissions over different poison
+ * bytes are identical, so the sink's zero_range cleared the blocks the
+ * files left and every slack byte; and the reader enumerates and verifies
+ * both files' content from there.
+ */
+static void
+test_addressing48_start_blocks_pass_32_bits(void)
+{
+	fixture_t fixture, again;
+	memory_sink_t sink, other;
+	erofs_super_t sb;
+	erofs_inode_t inode;
+	erofs_xrecord_t record;
+	erofs_row_t row;
+	const char *what = NULL;
+
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	addressing = 48;
+	emit_far_files(&fixture, &sink, POISON);
+	emit_far_files(&again, &other, POISON_ALT);
+	CHECK(memcmp(sink.bytes, other.bytes, (size_t)sink.dense_length) == 0);
+	CHECK(memcmp(sink.far, other.far, (size_t)sink.far_length) == 0);
+	free(other.bytes);
+	free(other.far);
+	fixture_close(&again);
 
 	sb = decode_image_super(&sink);
 	row = row_of_path(&fixture, "/flat");
 	CHECK(erofs_inode_decode(sink.bytes + row.nid * SLOT,
 	    erofs_row_fixed_bytes(&row), &sb, &inode, &what) == FSIMG_OK);
 	CHECK(inode.layout_high == 1 &&
-	    inode.layout_word == (uint32_t)far_start);
+	    inode.layout_word == (uint32_t)FAR_START);
 	row = row_of_path(&fixture, "/packed");
 	CHECK(erofs_xrecord_decode(sink.bytes + row.nid * SLOT +
 	    erofs_row_fixed_bytes(&row) + EROFS_EXTENT32_OFFSET,

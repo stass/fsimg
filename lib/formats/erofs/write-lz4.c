@@ -516,14 +516,14 @@ erofs_lz4_write_index(erofs_plan_t *plan, const erofs_row_t *row,
  *
  * Cluster i, holding logical bytes [h, e), gives one record: B stored
  * bytes, format LZ4 (the algorithm plus one) or plain (0), at the byte
- * offset of block start_block + i, from logical offset h. A record runs to the next one's logical offset,
- * or to size, so e need not be stored. Each cluster must start where the
- * previous ended and lie within size, so the logical offsets start at 0,
- * increase strictly and tile [0, size); a plan that breaks that is
- * refused. The count is at most ceil(size / B), the bound readers enforce:
- * erofs_row_get() refuses a row with more clusters than that, which the
- * former never forms, since every cluster but the last holds B bytes or
- * more. Block start_block + i is a placed
+ * offset of block start_block + i, from logical offset h. A record runs
+ * to the next one's logical offset, or to size, so e need not be stored.
+ * Each cluster must start where the previous ended and lie within size, so
+ * the logical offsets start at 0, increase strictly and tile [0, size); a
+ * plan that breaks that is refused. The count is at most ceil(size / B),
+ * the bound readers enforce: erofs_row_get() refuses a row with more
+ * clusters than that, which the former never forms, since every cluster
+ * but the last holds B bytes or more. Block start_block + i is a placed
  * block, so its byte offset stays below 2^60.
  */
 static fsimg_status_t
