@@ -10,19 +10,23 @@
 #include "fsimg.h"
 
 /*
- * The LZO1X and NRV2B decoders on arbitrary streams, and the LZO1X
+ * The LZO1X, NRV2B and LZ4 decoders on arbitrary streams, and the LZO1X
  * encoder on arbitrary blocks. The input's first four bytes choose the
  * operation and the rest is the stream or the block:
  *
  *   byte 0     bit 2 selects the encoder, which reads no other header
- *              bits; otherwise bit 0 the codec (0 LZO1X, 1 NRV2B), and
- *              bit 1 adds one to the NRV2B capacity, so 65536 is reachable
- *   bytes 1-2  little-endian v: the LZO1X limit is 16v, the NRV2B
- *              capacity v
+ *              bits; otherwise bit 3 selects LZ4, which reads no other
+ *              header bits; otherwise bit 0 the codec (0 LZO1X, 1 NRV2B),
+ *              and bit 1 adds one to the NRV2B capacity, so 65536 is
+ *              reachable
+ *   bytes 1-2  little-endian v: the LZO1X limit is 16v, the NRV2B and
+ *              LZ4 capacity v
  *   byte 3     the LZO1X call plan: the low nibble n sets the input piece
  *              to 1 + 17n^2 bytes (1 to 3826, from single bytes to whole
  *              chunks), the high nibble c the window capacity to 2^(c mod
- *              13) bytes (1 to 4096)
+ *              13) bytes (1 to 4096). For LZ4 the partial length: b if b
+ *              is below 128, otherwise 128 (b - 127), so 0 to 127 exactly
+ *              and then 128 to 16384 in steps of 128
  *
  * test-codec --seed writes seeds in this format.
  *
@@ -37,6 +41,14 @@
  * is touched. An NRV2B stream accepted under its capacity must decode to
  * the same bytes under the largest capacity.
  *
+ * An LZ4 block is decoded in full mode into a buffer of exactly the
+ * capacity, then in partial mode into a buffer of exactly the partial
+ * length. Full success means done with all input consumed. Wherever the
+ * partial length is no more than the bytes the full decode produced,
+ * successful or not, the partial decode must succeed with exactly that
+ * many bytes, the same as the full decode's prefix; after a full success
+ * a longer length must be refused as corrupt, the block ending first.
+ *
  * A block is encoded by one encoder kept across inputs, whose table the
  * earlier inputs filled, and by a fresh one: the streams must be the same
  * bytes, fit a buffer of exactly the bound, n + n / 255 + 6, leave the
@@ -50,6 +62,7 @@
 #define NRV2B_MAX_INPUT		65535u
 #define NRV2B_MAX_CAPACITY	65536u
 #define FUZZ_ENCODE		4u	/* byte 0: encode the block */
+#define FUZZ_LZ4		8u	/* byte 0: decode an LZ4 block */
 
 /* The outcome of one decode, summed over its calls. */
 typedef struct fuzz_result {
@@ -65,6 +78,7 @@ static void lzo_in_pieces(const uint8_t *, size_t, uint64_t, uint8_t,
     fuzz_result_t *);
 static void exercise_lzo(const uint8_t *, size_t, uint64_t, uint8_t);
 static void exercise_nrv2b(const uint8_t *, size_t, size_t);
+static void exercise_lz4(const uint8_t *, size_t, size_t, size_t);
 static uint8_t *encode_into_bound(fsimg_lzo1x_encoder_t *, const uint8_t *,
     size_t, size_t *);
 static void exercise_encoder(const uint8_t *, size_t);
@@ -241,6 +255,63 @@ exercise_nrv2b(const uint8_t *in, size_t length, size_t capacity)
 	free(out);
 }
 
+/*
+ * One LZ4 block in both modes. Each output buffer is exactly the size the
+ * call is given, so under AddressSanitizer a byte beyond it is a report,
+ * and everything the call did not report producing must keep its poison.
+ */
+static void
+exercise_lz4(const uint8_t *in, size_t length, size_t capacity,
+    size_t wanted)
+{
+	fsimg_codec_step_t full_step, partial_step;
+	fsimg_error_t error;
+	fsimg_status_t full, partial;
+	uint8_t *full_out, *partial_out;
+
+	full_out = fuzz_alloc(capacity);
+	memset(full_out, POISON, capacity);
+	full = fsimg_lz4_decode(in, length, full_out, capacity, &full_step,
+	    &error);
+	if (full_step.consumed > length || full_step.produced > capacity)
+		abort();
+	if (!poison_intact(full_out + full_step.produced,
+	    capacity - full_step.produced))
+		abort();
+	if (full == FSIMG_OK &&
+	    (!full_step.done || full_step.consumed != length))
+		abort();
+	if (full != FSIMG_OK && full != FSIMG_ECORRUPT)
+		abort();
+
+	partial_out = fuzz_alloc(wanted);
+	memset(partial_out, POISON, wanted);
+	partial = fsimg_lz4_decode_partial(in, length, partial_out, wanted,
+	    &partial_step, &error);
+	if (partial_step.consumed > length || partial_step.produced > wanted)
+		abort();
+	if (!poison_intact(partial_out + partial_step.produced,
+	    wanted - partial_step.produced))
+		abort();
+	if (partial == FSIMG_OK &&
+	    (!partial_step.done || partial_step.produced != wanted))
+		abort();
+	if (partial != FSIMG_OK && partial != FSIMG_ECORRUPT)
+		abort();
+
+	/* What the full decode produced is a prefix the partial one reaches. */
+	if (wanted <= full_step.produced) {
+		if (partial != FSIMG_OK ||
+		    memcmp(partial_out, full_out, wanted) != 0)
+			abort();
+	}
+	if (full == FSIMG_OK && wanted > full_step.produced &&
+	    partial != FSIMG_ECORRUPT)
+		abort();
+	free(partial_out);
+	free(full_out);
+}
+
 /* The encoder kept across inputs, and the context that charges it. */
 static fsimg_ctx_t *encoder_ctx;
 static fsimg_lzo1x_encoder_t *kept_encoder;
@@ -336,7 +407,10 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 		return (0);
 	}
 	bound = (uint32_t)data[1] | (uint32_t)data[2] << 8;
-	if ((data[0] & 1) == 0)
+	if ((data[0] & FUZZ_LZ4) != 0)
+		exercise_lz4(data + FUZZ_HEADER_BYTES, size - FUZZ_HEADER_BYTES,
+		    bound, data[3] < 128 ? data[3] : 128u * (data[3] - 127u));
+	else if ((data[0] & 1) == 0)
 		exercise_lzo(data + FUZZ_HEADER_BYTES, size - FUZZ_HEADER_BYTES,
 		    (uint64_t)bound * LZO1X_LIMIT_SCALE, data[3]);
 	else

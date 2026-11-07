@@ -212,8 +212,10 @@ cluster:
 2. skips leading zero bytes when the padding rule applies;
 3. for a plain cluster, copies or rotates the bytes; otherwise calls the
    algorithm's decoder for the extent's decoded length, partially under a
-   partial reference, so the decoder stops there without requiring the
-   stream to end;
+   partial reference, and for LZ4 also when the padding rule does not
+   apply, since the stream's end is then unknown amid the padding that
+   follows it ([physical clusters](design-erofs.md#physical-clusters)), so
+   the decoder stops there without requiring the stream to end;
 4. requires the decoder to produce exactly that length.
 
 The output buffer grows to the decoded length, charged to the context

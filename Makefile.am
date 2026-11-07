@@ -43,6 +43,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/core/fsimg-endian.h \
 	lib/core/unicode.c lib/core/unicode.h lib/core/case-tables.h \
 	lib/core/calendar.c lib/core/sha256.c lib/core/sha256.h \
+	lib/core/crc32c.c lib/core/crc32c.h \
 	lib/core/settings.c lib/core/settings.h \
 	lib/core/codec-memory.c lib/core/codec-memory.h \
 	lib/formats/format.c lib/formats/format.h \
@@ -115,8 +116,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/iso9660/write-names.c lib/formats/iso9660/write-susp.c \
 	lib/formats/iso9660/write-plan.c lib/formats/iso9660/write-emit.c \
 	compat/host.c compat/host.h compat/private.c compat/private.h \
-	lib/codec/codec.h lib/codec/bzip2.c lib/codec/lzo1x.c lib/codec/nrv2b.c \
-	lib/codec/lzfse.c \
+	lib/codec/codec.h lib/codec/bzip2.c lib/codec/lz4.c lib/codec/lzfse.c \
+	lib/codec/lzo1x.c lib/codec/nrv2b.c \
 	lib/formats/ifs/ifs.h lib/formats/ifs/descriptor.c \
 	lib/formats/ifs/records.c lib/formats/ifs/volume.c \
 	lib/formats/ifs/tree.c lib/formats/ifs/names.c \
@@ -277,7 +278,8 @@ hfsplus_marks_SOURCES = test/hfsplus-marks.c test/hfsplus-gen.c \
 	test/hfsplus-gen.h test/test.h
 test_posix_SOURCES = test/posix.c test/test.h
 test_posix_LDADD = libfsimg.la
-test_codec_SOURCES = test/codec.c test/test.h test/bzip2-vectors.h
+test_codec_SOURCES = test/codec.c test/test.h test/bzip2-vectors.h \
+	test/lz4-vectors.h
 # test/codec-integration.sh runs test-codec once per stream; linking the
 # convenience library makes it a plain binary, not a libtool wrapper.
 test_codec_LDADD = libfsimg-core.la

@@ -11,10 +11,10 @@
 #include "fsimg.h"
 
 /*
- * Stream decoders for LZO1X, NRV2B (the 8-bit control-buffer variant) and
- * bzip2, and an LZO1X encoder, declared at the end. A codec sees one compressed
- * stream and one output; it knows nothing of the chunk, header or image
- * that framed the stream. The LZO1X and NRV2B decoders read
+ * Stream decoders for LZO1X, NRV2B (the 8-bit control-buffer variant), LZ4
+ * blocks and bzip2, and an LZO1X encoder, declared at the end. A codec sees one
+ * compressed stream and one output; it knows nothing of the chunk, header or
+ * image that framed the stream. The LZO1X and NRV2B decoders read
  * one input byte at a time with its bound checked first and write one
  * output byte at a time with its bound checked first, so no call reads
  * past its input or writes past its output, and a call's running time is
@@ -126,6 +126,37 @@ fsimg_status_t fsimg_lzo1x_decode(fsimg_lzo1x_decoder_t *,
  */
 fsimg_status_t fsimg_nrv2b_decode(const uint8_t *in, size_t in_len,
     uint8_t *out, size_t capacity, fsimg_codec_step_t *, fsimg_error_t *);
+
+/*
+ * Decode one whole raw LZ4 block, in[0..in_len), into out[0..capacity), which
+ * must not overlap it; the capacity is the output bound. The block must end
+ * exactly at in_len, directly after a sequence's literals. Success sets
+ * step->done, step->consumed is in_len and the output is
+ * out[0..step->produced), which may be shorter than the capacity; the caller
+ * judges its length. An offset of zero, or an offset reaching before the
+ * output start, a literal run or match longer than the room left, and an
+ * input ending anywhere else are FSIMG_ECORRUPT. The block's end conditions that bind
+ * only encoders (at least five final literals, the last match 12 bytes before
+ * the end) are not checked. On every return out[0..step->produced) is the
+ * decoded prefix and nothing past it is written. step must not be NULL.
+ */
+fsimg_status_t fsimg_lz4_decode(const uint8_t *in, size_t in_len,
+    uint8_t *out, size_t capacity, fsimg_codec_step_t *, fsimg_error_t *);
+
+/*
+ * Decode the first length bytes of a raw LZ4 block into out[0..length) and
+ * stop there, mid-sequence if need be, without reading further or requiring
+ * the block to end: the literal run or match that reaches length is copied up
+ * to it, and only its copied literals must be in the input. Success sets
+ * step->done with step->produced equal to length and step->consumed where the
+ * decoder stopped. A block that ends before length bytes is FSIMG_ECORRUPT,
+ * and so is every verdict of fsimg_lz4_decode() met before length is reached,
+ * except that a literal run or match running past length is clipped instead.
+ * done here means the requested length was produced, not that the block
+ * ended.
+ */
+fsimg_status_t fsimg_lz4_decode_partial(const uint8_t *in, size_t in_len,
+    uint8_t *out, size_t length, fsimg_codec_step_t *, fsimg_error_t *);
 
 /*
  * Decode one whole bzip2 stream, in[0..in_len), into out[0..capacity); the

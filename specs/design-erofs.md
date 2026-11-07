@@ -782,10 +782,14 @@ other than LZ4, the stream is right-aligned in the cluster's blocks with
 leading zero bytes; the decoder starts at the first nonzero byte. Without it
 an LZ4 stream starts at the cluster's first byte and may be followed by
 padding. A stream that decodes to fewer bytes than its extent is
-`FSIMG_ECORRUPT`, and so, outside a partial reference, is one that would
-write beyond it; a stream may stop early only where its
-algorithm's framing allows the decoder to know it is complete (provisional
-per algorithm, E8 and E9).
+`FSIMG_ECORRUPT`. Where the stream's end is known, a right-aligned stream
+under `LZ4_0PADDING` and the framed algorithms, one that would write
+beyond its extent is `FSIMG_ECORRUPT` too, outside a partial reference; a
+stream may stop early only where its algorithm's framing allows the
+decoder to know it is complete (provisional per algorithm, E8 and E9).
+An LZ4 stream without `LZ4_0PADDING` has no known end, since padding
+follows it: the decoder stops once the extent is full and does not judge
+what follows (provisional, E8, and the default if E8 cannot answer).
 
 A partial reference (bit 15 of a full record, and its compact equivalent)
 marks a cluster whose stream decodes to more than this file's extent,

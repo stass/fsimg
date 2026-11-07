@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "crc32c.h"
 #include "digest.h"
 #include "host.h"
 #include "internal.h"
@@ -30,6 +31,11 @@ typedef struct callback_state {
 } callback_state_t;
 
 static void test_arithmetic(void);
+static void test_crc32c_check_value(void);
+static void test_crc32c_rfc3720_vectors(void);
+static void test_crc32c_split_updates(void);
+static void test_crc32c_empty_update(void);
+static void test_crc32c_detects_changes(void);
 static void test_context(void);
 static void test_descriptor_cleanup(void);
 static void test_entry_metadata_definitions(void);
@@ -394,6 +400,144 @@ test_sha256_split_updates(void)
 	}
 }
 
+/*
+ * CRC-32C. The expected values are published ones, not computed by the
+ * code under test: the "123456789" check value of the CRC catalogue
+ * (CRC-32C, Castagnoli), and the three 32-byte iSCSI vectors of RFC 3720,
+ * appendix B.4. The standard CRC is the register after the update with
+ * the final complement applied, which the all-ones seed also is.
+ */
+static uint32_t
+crc32c_standard(const void *message, size_t length)
+{
+	return (fsimg_crc32c_update(FSIMG_CRC32C_SEED, message, length) ^
+	    FSIMG_CRC32C_SEED);
+}
+
+static void
+test_crc32c_check_value(void)
+{
+	const char message[] = "123456789";
+
+	CHECK(crc32c_standard(message, 9) == UINT32_C(0xe3069283));
+
+	/* The bare register keeps the complement off. */
+	CHECK(fsimg_crc32c_update(FSIMG_CRC32C_SEED, message, 9) ==
+	    UINT32_C(0x1cf96d7c));
+
+	/* A different message does not reach the check value. */
+	CHECK(crc32c_standard("123456780", 9) != UINT32_C(0xe3069283));
+}
+
+static void
+test_crc32c_rfc3720_vectors(void)
+{
+	unsigned char zeros[32], ones[32], counting[32];
+
+	memset(zeros, 0x00, sizeof(zeros));
+	memset(ones, 0xff, sizeof(ones));
+	for (size_t i = 0; i < sizeof(counting); i++)
+		counting[i] = (unsigned char)i;
+
+	CHECK(crc32c_standard(zeros, sizeof(zeros)) == UINT32_C(0x8a9136aa));
+	CHECK(crc32c_standard(ones, sizeof(ones)) == UINT32_C(0x62a8ab43));
+	CHECK(crc32c_standard(counting, sizeof(counting)) ==
+	    UINT32_C(0x46dd794e));
+
+	/* One flipped bit leaves the counting vector's published value. */
+	counting[17] ^= 0x04;
+	CHECK(crc32c_standard(counting, sizeof(counting)) !=
+	    UINT32_C(0x46dd794e));
+}
+
+/*
+ * Updating in two pieces at any cut, and in three with an empty piece in
+ * between, gives the register of one update. The lengths 0 to 40 cover
+ * every alignment and a tail past the widest word a table-driven or
+ * hardware implementation takes at a time.
+ */
+static void
+test_crc32c_split_updates(void)
+{
+	unsigned char message[40];
+	uint32_t register_value, whole;
+
+	for (size_t i = 0; i < sizeof(message); i++)
+		message[i] = (unsigned char)(i * 37 + 11);
+
+	for (size_t length = 0; length <= sizeof(message); length++) {
+		whole = fsimg_crc32c_update(FSIMG_CRC32C_SEED, message,
+		    length);
+		for (size_t cut = 0; cut <= length; cut++) {
+			register_value = fsimg_crc32c_update(FSIMG_CRC32C_SEED,
+			    message, cut);
+			register_value = fsimg_crc32c_update(register_value,
+			    NULL, 0);
+			register_value = fsimg_crc32c_update(register_value,
+			    message + cut, length - cut);
+			CHECK(register_value == whole);
+		}
+	}
+
+	/* The check value, in nine pieces of one byte. */
+	register_value = FSIMG_CRC32C_SEED;
+	for (const char *p = "123456789"; *p != '\0'; p++)
+		register_value = fsimg_crc32c_update(register_value, p, 1);
+	CHECK((register_value ^ FSIMG_CRC32C_SEED) == UINT32_C(0xe3069283));
+
+	/* A cut does matter to the content: reordering the pieces differs. */
+	register_value = fsimg_crc32c_update(FSIMG_CRC32C_SEED, message + 5,
+	    35);
+	register_value = fsimg_crc32c_update(register_value, message, 5);
+	CHECK(register_value != fsimg_crc32c_update(FSIMG_CRC32C_SEED,
+	    message, sizeof(message)));
+}
+
+static void
+test_crc32c_empty_update(void)
+{
+	const uint32_t seeds[] = { 0, 1, FSIMG_CRC32C_SEED,
+	    UINT32_C(0x1cf96d7c), UINT32_C(0x80000000) };
+
+	for (size_t i = 0; i < sizeof(seeds) / sizeof(seeds[0]); i++) {
+		CHECK(fsimg_crc32c_update(seeds[i], NULL, 0) == seeds[i]);
+		CHECK(fsimg_crc32c_update(seeds[i], "x", 0) == seeds[i]);
+	}
+
+	/* The empty message's standard CRC is zero. */
+	CHECK(crc32c_standard(NULL, 0) == 0);
+
+	/* A one-byte update does move the register. */
+	CHECK(fsimg_crc32c_update(FSIMG_CRC32C_SEED, "x", 1) !=
+	    FSIMG_CRC32C_SEED);
+}
+
+/*
+ * Every single-bit change of a 24-byte message changes the CRC, as does
+ * dropping its last byte.
+ */
+static void
+test_crc32c_detects_changes(void)
+{
+	unsigned char message[24];
+	uint32_t original;
+
+	for (size_t i = 0; i < sizeof(message); i++)
+		message[i] = (unsigned char)(255 - i * 9);
+	original = crc32c_standard(message, sizeof(message));
+
+	for (size_t byte = 0; byte < sizeof(message); byte++) {
+		for (unsigned bit = 0; bit < 8; bit++) {
+			message[byte] ^= (unsigned char)(1u << bit);
+			CHECK(crc32c_standard(message, sizeof(message)) !=
+			    original);
+			message[byte] ^= (unsigned char)(1u << bit);
+		}
+	}
+	CHECK(crc32c_standard(message, sizeof(message)) == original);
+	CHECK(crc32c_standard(message, sizeof(message) - 1) != original);
+}
+
 /* Render path, with components classed by omitted, into a buffer of size
  * bytes and expect exactly the rendering and truncation flag given. The
  * buffer is poisoned first, so a byte written past the terminator shows.
@@ -568,6 +712,11 @@ main(void)
 	test_descriptor_cleanup();
 	test_sha256_vectors();
 	test_sha256_split_updates();
+	test_crc32c_check_value();
+	test_crc32c_rfc3720_vectors();
+	test_crc32c_split_updates();
+	test_crc32c_empty_update();
+	test_crc32c_detects_changes();
 	test_path_render();
 	test_rendered_tail();
 	test_loss_rendering();
