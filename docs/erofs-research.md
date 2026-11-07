@@ -541,6 +541,64 @@ Zstandard clusters at the defaults.
 * Mounting either image alone lists the tree and fails every read; the
   image concatenated with its blob mounts as one device and reads correctly.
 
+### E15 Large logical clusters, compact advice `0x01` clear, interlaced inline tail
+
+Hand-built one-file LZ4 volumes: a `mkfs.erofs -T0 -zlz4 -Elegacy-compress`
+skeleton whose file inode, map header and index are re-laid by the
+experiment's own encoder, each segment compressed by `mkfs.erofs` on its
+own, the superblock checksum recomputed. Oracles: kernel mount with
+SHA-256 against the source, `fsck.erofs --extract`, `dump.erofs -e`.
+Mounting never fails; the header and records are read at the first file
+read.
+
+* `L > B` (`e15-a-*`, full and compact at `L = 2B` and `4B`, `B` 2048 and
+  4096): the kernel and both tools read every image whose compact groups
+  are laid out for `ceil(size / B)` records, the kernel's `totalidx`
+  (source `zmap.c`), while reading only `ceil(size / L)` of the records,
+  the last holding the file's last byte; a record's `lcn` covers
+  `[lcn * L, (lcn + 1) * L)`, a head's `clusterofs` is below `L` and
+  distances count lclusters. The same file with groups laid out for the
+  `L` count fails: kernel `EUCLEAN`, `fsck.erofs` "failed to full
+  decompress", `dump.erofs` "failed to get file blocks range"
+  (`e15-a-compact-b2048-l4096-adv1-lcount`). Compact fields are
+  `max(lclusterbits, 12)` bits wide, 13 and 14 observed; with advice `0x01`
+  set and `L > 4096` a record in a 32-byte group is `EOPNOTSUPP`
+  (`e15-a-compact-b4096-l8192-adv1flip`), so a compact inode with
+  `L > 4096` needs `0x01` clear. `mkfs.erofs` sets `0x01` only for
+  `lclusterbits <= 12` and uses the full index above 14 (source).
+* Advice `0x01` clear (`e15-b-compact-*`, `L = B`, `B` 2048 and 4096,
+  non-head records in every slot): every record sits in an 8-byte group
+  from the header's end, no initial run, no 32-byte group; the kernel and
+  both tools read them and `dump.erofs -e` lists the extents as built. The
+  index is up to twice as long as under `0x01` set, so it cannot be
+  re-laid in place.
+* Inline tail position at `L = 2B` (`e15-c-l2b-tail-at-L`, `-at-B`,
+  `L = 8192`, a 9000-byte segment and a 1500-byte plain tail): the tail
+  starts after the record holding `lcn = (size - 1) >> lclusterbits`,
+  `ceil(size / L)` records on the full index; placed after
+  `ceil(size / B)` records instead, the kernel and `fsck.erofs` both read
+  garbage. Source (`z_erofs_map_blocks_fo`, `nextpackoff` of the last
+  byte's lcluster) says the same for the compact index, not observed.
+* Plain inline tail under interlacing (`e15-c-il-*`, `B = L = 4096`, a
+  tail of `E` bytes at `clusterofs` `C`, advice `0x18`; `e15-c-shift-*`,
+  advice `0x08`, as controls): `mkfs.erofs` 1.9.4 cannot produce the
+  combination, since `may_inline` requires `!may_packing` and
+  `may_packing` holds for the final extent of every file under
+  `fragments`, which also sets `0x10` on every file (source `compress.c`);
+  51 files under `-E ztailpacking,fragments` gave only whole-file
+  fragments and compact inodes with advice `0x31`. The three shifted
+  controls read correctly. Interlaced, the kernel applies the interlaced
+  decoder's rotation to the `E` stored bytes: output `[0, B - C)` comes
+  from input offset `E - (B - C)`, the rest from the input's start. With
+  `E > B - C` it therefore reads the extent stored rotated left by `B - C`
+  correctly (`e15-c-il-rot-wrap`) and the extent stored as is rotated
+  (`e15-c-il-plain-wrap`); with `E <= B - C` the input offset precedes the
+  tail, so the file receives the metadata bytes before the tail in the
+  inode's block, differing between runs (`e15-c-il-nowrap`,
+  `e15-c-il-short`), and no stored form reads correctly. `fsck.erofs`
+  1.9.4 reads bytes from after the inline data, in the following block,
+  in every interlaced case and never agrees with the kernel.
+
 ## Evidence answers
 
 | Question | Answer | Fixtures |
@@ -560,10 +618,11 @@ Zstandard clusters at the defaults.
 | Device-number encoding; sizes and layout words of FIFOs, sockets and devices | Linux 32-bit encoding; size 0, layout 0, FIFO and socket word 0 | `e5-kinds-*` |
 | Attribute header reserved bytes; prefix table placement and units; the filter hash | Zero; plain table at `start * 4` after the shared pool, packed table at `start * 4` of the packed inode's decoded content; XXH32 over the name without its built-in prefix, seed `0x25BBE08F` + base index, every attribute counted | `e6-xattr-*` |
 | Chunk entry forms, holes, shared chunks | As designed; the layout word's upper half is uninitialised and ignored; per-inode `chunkbits` | `e7-chunk*`, `e7-edit-*` |
-| Compact group packing; the last record and the end marker; inline tail placement; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed, the big-cluster head block following the kernel's walk from the group's anchor; the last record is the marker, the last cluster's own head or plain record inside the last logical cluster, or, at `size mod L = 0`, the last cluster's final record, 592 inodes; the inline tail starts at the index end and lies in one block, not necessarily the inode's; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. Open: `L > B` and compact advice `0x01` clear, unobservable with the pinned release and refused until E15 observes them | `e8-*` |
+| Compact group packing; the last record and the end marker; inline tail placement; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed, the big-cluster head block following the kernel's walk from the group's anchor; the last record is the marker, the last cluster's own head or plain record inside the last logical cluster, or, at `size mod L = 0`, the last cluster's final record, 592 inodes; the inline tail starts at the index end and lies in one block, not necessarily the inode's; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. `L > B` and compact advice `0x01` clear are unobservable with the pinned release; E15 observes them hand-built | `e8-*` |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | Framings confirmed; DEFLATE window bits at most 15, MicroLZMA dictionary at least 4096 and format 0, Zstandard format 0; head-2 by hand-built images, accepted by the kernel without `COMPR_HEAD2` | `e9-*` |
 | Every 48-bit field; encoded extents; writer's 32-byte records | Open; blocks stages 12, 14 and 15 | E10 |
 | Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Open; blocks stages 10 and 11 | E11 |
 | Metadata-box layout, root placement, box compression, shared attributes in the box | Open; blocks stages 13 and 15 | E12 |
 | Scale | Open; blocks stage 8 | E13 |
 | The fields a volume with external devices sets | Extra device count nonzero in both producer forms, `DEVICE_TABLE`, device identifier 1 in every chunk; `CHUNKED_FILE` only under `--blobdev` | `e14-*` |
+| Record count and group layout at `L > B`; compact advice `0x01` clear; a plain inline tail under interlacing | Kernel and both tools read `L = 2B` and `4B`: compact groups laid out for `ceil(size / B)` records, `ceil(size / L)` read, fields `max(lclusterbits, 12)` bits wide, so compact with `L > 4096` needs `0x01` clear, and the inline tail follows record `(size - 1) >> lclusterbits`; `0x01` clear is all 8-byte groups from the header's end and reads in every tool; no producer writes any of the three, and the design refuses them by policy. A plain inline tail on an interlaced inode has no agreed reading: the kernel reads it only when `E > B - C` with the extent stored rotated left by `B - C`, otherwise copies preceding metadata into the file, and `fsck.erofs` reads other bytes in every case | `e15-*` |

@@ -833,16 +833,27 @@ The 8-byte map header sits at the attribute region's end rounded up to 8:
 When bit 7 of byte 7 is set, the whole file lives in the packed inode: the
 header, with that bit cleared, is a 64-bit offset into the packed inode's
 content, and there is no index. Otherwise the logical cluster size is
-`L = 2^lclusterbits`, and the reader requires `L = B`: every pinned
-producer writes `lclusterbits = blkszbits` (E8), and with `L = B` the record
-count below is the `ceil(size / B)` that the kernel and `erofs-utils`
-compute, and the record formats' own ceilings, `L` at most 2^16 for a full
+`L = 2^lclusterbits`, and the reader requires `L = B` as fsimg policy:
+every pinned producer writes `lclusterbits = blkszbits` (E8) and none can
+write another value, so accepting one would add rules no volume needs.
+Another value is `FSIMG_EUNSUPPORTED` naming the logical cluster size. With
+`L = B` the record formats' own ceilings, `L` at most 2^16 for a full
 record's `clusterofs` and `lclusterbits` at most 14, or 12 with 32-byte
-groups, for the compact index, hold on every accepted volume. Another
-value is `FSIMG_EUNSUPPORTED` naming the logical cluster size (provisional:
-no producer image has `L > B` and the pinned release cannot build one; E15,
-a hand-built `L > B` image mounted by the kernel, settles whether the record
-count follows `L` or `B`, and refusal stands until it does).
+groups, for the compact index, hold on every accepted volume. The kernel,
+`fsck.erofs` and `dump.erofs` do read `L = 2B` and `4B` on full and compact
+indexes (E15, hand-built `e15-a-*`), and the rules they follow are recorded
+here so that lifting the refusal is a known change: each record describes
+one logical cluster of `L` bytes and `ceil(size / L)` records are read, the
+last holding the file's last byte; the compact group layout, the initial
+8-byte run, the 32-byte groups and the final 8-byte groups, follows
+`ceil(size / B)` (`totalidx` in `zmap.c`; groups laid out for the `L` count
+fail in the kernel and both tools, `e15-a-compact-b2048-l4096-adv1-lcount`);
+compact fields are `max(lclusterbits, 12)` bits wide, so a compact inode
+with `L > 4096` needs advice `0x01` clear, since a 32-byte group's 14-bit
+field holds only 12 bits of value (the kernel returns `EOPNOTSUPP`,
+`e15-a-compact-b4096-l8192-adv1flip`); and the inline tail follows the
+record, or compact group, holding record `(size - 1) >> lclusterbits`
+(`e15-c-l2b-tail-at-L`).
 
 | Advice bit | Meaning |
 | --- | --- |
@@ -868,9 +879,11 @@ non-head or 3 head-2. A head or plain record starts a physical cluster at
 logical offset `i * L + clusterofs`, with `clusterofs < L`, and names its
 first block. A non-head record belongs to the cluster begun by the nearest
 head before it and carries two distances: back to that head's logical
-cluster and forward to the next head's. There are `ceil(size / B)` records,
-`L` being `B`. A physical cluster's logical extent runs from its head to the
-start of the next head or plain record, or to `size` when no record
+cluster and forward to the next head's. There are `ceil(size / L)` records,
+which is `ceil(size / B)` because the reader requires `L = B`
+([map header](#map-header)). A physical cluster's logical extent runs from
+its head to the start of the next head or plain record, or to `size` when
+no record
 follows, so the last extent ends at `size` by construction. A head or plain
 record that starts at `size` begins an empty cluster, which is never read;
 one that starts beyond `size` is `FSIMG_ECORRUPT`. The reader needs no
@@ -933,10 +946,13 @@ more records remain, then 8-byte groups; an odd final record occupies a
 whole 8-byte group whose second slot is zero and never read. The packing
 agrees with `dump.erofs -e` at every header phase and every record count
 from 2 to 71 (E8, `e8-lz4-compact-counts`, `e8-lz4-compact-xattr`, 348
-files). A compact inode with advice bit `0x01` clear, all 8-byte groups by
-the kernel's source, is `FSIMG_EUNSUPPORTED` naming the advice: no producer
-writes one and none has been observed (provisional, E15; refusal stands if
-E15 cannot build one).
+files). A compact inode with advice bit `0x01` clear lays every record in
+8-byte groups from the header's end, with no initial run and no 32-byte
+groups, under the anchor, last-slot and block rules above; the kernel,
+`fsck.erofs` and `dump.erofs` read one (E15, hand-built `e15-b-compact-*`,
+non-head records in every slot). It is `FSIMG_EUNSUPPORTED` naming the
+advice as fsimg policy: no producer writes one, since `mkfs.erofs` sets
+`0x01` on every compact inode (source `compress.c`).
 
 A head or plain record's block number is its group's anchor plus a sum
 gathered by walking back over the records before it in the same group. The
@@ -1028,16 +1044,29 @@ cluster). A plain cluster longer than its blocks is `FSIMG_ECORRUPT`.
 
 Under advice bit `0x08` the physical cluster holding the file's last byte
 is stored in the inode's body: its stored bytes are the `h_idata_size`
-bytes that begin at the index end, the byte after the last full record or
-the end of the last compact group, and they lie within one block. A size of
-zero, or a tail that crosses a block boundary, is `FSIMG_ECORRUPT`, the
-kernel's rule. The tail is decoded by its record's type like any other
-cluster: a head when the producer compressed it, a plain cluster when
-compression gained nothing (E8, `e8-lz4-ztail`, 76 head and 5 plain
-tails). A plain tail under interlacing, which no fixture holds since no
-pinned fixture combines `ztailpacking` with `fragments`, is rotated like any
-other plain cluster, as the reference decoder does whether a cluster is
-inline or not (source `data.c`); provisional until E15 observes one, and the source rule stands if E15 cannot mount one. Its
+bytes that begin at the index end: the byte after the full record, or the
+end of the compact group, holding the file's last byte, record
+`(size - 1) >> lclusterbits`, which is the last record and group because
+the reader requires `L = B` (E15, `e15-c-l2b-tail-at-L` and `-at-B`: with
+`L = 2B`, a tail placed after `ceil(size / B)` rather than `ceil(size / L)`
+records is read as garbage by the kernel and `fsck.erofs`). The tail lies
+within one block. A size of zero, or a tail that crosses a block boundary,
+is `FSIMG_ECORRUPT`, the kernel's rule. The tail is decoded by its
+record's type like any other cluster: a head when the producer compressed
+it, a plain cluster when compression gained nothing (E8, `e8-lz4-ztail`, 76
+head and 5 plain tails). A plain tail on an interlaced inode, advice `0x10`
+with the tail's record of type 0, is `FSIMG_EUNSUPPORTED` naming the
+combination, which no producer fixture holds: `mkfs.erofs` never inlines
+the final extent of a file that `fragments` may pack, and `fragments` is
+what sets `0x10` (source `compress.c`, `may_inline` requires
+`!may_packing`; 51 files under `-E ztailpacking,fragments` give whole-file
+fragments or advice `0x31`, never `0x08` with `0x10`). The reference
+readers have no agreed meaning for one: for a tail of `E` bytes at
+`clusterofs` `C`, the kernel reads it correctly only when `E > B - C` and
+the stored bytes are the extent rotated left by `B - C`; when
+`E <= B - C` it copies bytes preceding the tail in the inode's block into
+the file, and `fsck.erofs` reads bytes after the tail in every interlaced
+case (E15, hand-built `e15-c-il-*`). Its
 record's block number names a block holding none of this
 file's bytes and is not read, and no count marker follows it. The tail's
 block is not necessarily the block holding the inode's start: when an
@@ -1524,7 +1553,7 @@ minimization searches the writer's accepted block sizes, 4096 first.
 | Directories | 1- and 255-byte names, invalid UTF-8, names sorting before `.`, one directory of 100000 entries, deep trees | Name offset zero, unaligned or too large; repeated, unordered or overlapping names; slash or NUL; bad type; type mismatch; parent-rule violations; a second name for a directory |
 | Attributes | Inline, shared, long prefixes in both placements, filter on and off, ACLs and security labels | Overlong entries, bad shared index, unknown index, bad prefix |
 | Chunks | Both entry widths, several chunk sizes, holes, shared chunks | Device identifiers, high parts, short index, chunk past the domain |
-| Compression | Each algorithm; full and compact indexes across group boundaries; big, plain and interlaced clusters; partial references; inline tails; fragments; compressed directories; reads starting and ending inside a cluster | Bad distances and cycles, bad group packing, marker without big clusters, oversize clusters, truncated and corrupt streams, fragment past the packed inode |
+| Compression | Each algorithm; full and compact indexes across group boundaries; big, plain and interlaced clusters; partial references; inline tails; fragments; compressed directories; reads starting and ending inside a cluster | Bad distances and cycles, bad group packing, marker without big clusters, oversize clusters, truncated and corrupt streams, fragment past the packed inode; the hand-built E15 forms refused by policy: `L > B`, compact advice `0x01` clear, a plain inline tail on an interlaced inode |
 | 48-bit layout | Root NID above 65535; start blocks and chunk blocks above 2^32 through sparse fixtures; implicit link counts; omitted dots; every encoded-extent width a producer emits | High bits without the feature; wide root zero; encoded extents unordered, overcounted or overlong; a time sum past 64 bits |
 | Metadata box | Plain and compressed boxes; directories, files and shared attributes inside; reads across box cluster boundaries | Box NID with bit 63 or naming a fragment; box inode in the box; tail crossing a box block; bit 63 without the feature |
 | Verification | Every producer fixture verifies | Every mutation above reports its class; overlapping metadata, a wrong link count |
