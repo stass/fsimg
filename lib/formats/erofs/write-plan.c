@@ -195,9 +195,9 @@ erofs_row_get(erofs_plan_t *plan, uint64_t id, erofs_row_t *row,
 
 /*
  * The invariants every stored row keeps: one of the four kinds the writer
- * emits, nanoseconds below a second, a flat-inline layout only for a tail
- * that fits one block with the fixed part, and, once a NID is assigned,
- * the whole body inside the NID's block.
+ * emits, a FIFO empty, nanoseconds below a second, a flat-inline layout
+ * only for a tail that fits one block with the fixed part, and, once a NID
+ * is assigned, the whole body inside the NID's block.
  */
 static bool
 row_consistent(const erofs_row_t *row, uint32_t block_bytes)
@@ -208,6 +208,7 @@ row_consistent(const erofs_row_t *row, uint32_t block_bytes)
 	type = row->mode & EROFS_MODE_TYPE_MASK;
 	if ((type != EROFS_MODE_REGULAR && type != EROFS_MODE_DIRECTORY &&
 	    type != EROFS_MODE_SYMLINK && type != EROFS_MODE_FIFO) ||
+	    (type == EROFS_MODE_FIFO && row->size != 0) ||
 	    row->mtime_nsec >= NSEC_PER_SEC)
 		return (false);
 	tail = row->size % block_bytes;
@@ -545,8 +546,7 @@ place_metadata(erofs_plan_t *plan, fsimg_error_t *error)
 		row.nid = offset / EROFS_NID_SLOT_BYTES;
 		offset += body;
 		if (offset > limit)
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_WRITER,
+			return (setting_refused(error, FSIMG_ERANGE, "addressing",
 			    "EROFS metadata exceeds 32-bit block addressing"));
 		status = erofs_row_set(plan, id, &row, error);
 		if (status != FSIMG_OK)
@@ -583,8 +583,7 @@ place_data(erofs_plan_t *plan, uint64_t *payload_blocks,
 			return (status);
 		blocks = erofs_row_data_blocks(&row, block_bytes);
 		if (blocks > EROFS_WRITE_BLOCKS_MAX - next)
-			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
-			    FSIMG_OP_WRITER,
+			return (setting_refused(error, FSIMG_ERANGE, "addressing",
 			    "EROFS data exceeds 32-bit block addressing"));
 		row.start_block = blocks != 0 ? next : 0;
 		next += blocks;
