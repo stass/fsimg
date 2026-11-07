@@ -40,7 +40,7 @@ static const erofs_feature_t compat_features[] = {
 static const erofs_feature_t incompat_features[] = {
 	{ EROFS_INCOMPAT_LZ4_0PADDING, "LZ4_0PADDING", false },
 	{ EROFS_INCOMPAT_COMPR_CFGS, "COMPR_CFGS/BIG_PCLUSTER", false },
-	{ EROFS_INCOMPAT_CHUNKED_FILE, "CHUNKED_FILE", false },
+	{ EROFS_INCOMPAT_CHUNKED_FILE, "CHUNKED_FILE", true },
 	{ EROFS_INCOMPAT_DEVICE_TABLE, "DEVICE_TABLE/COMPR_HEAD2", false },
 	{ EROFS_INCOMPAT_ZTAILPACKING, "ZTAILPACKING", false },
 	{ EROFS_INCOMPAT_FRAGMENTS, "FRAGMENTS/DEDUPE", false },

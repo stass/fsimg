@@ -3,6 +3,9 @@
  */
 #include "config.h"
 
+#include <sys/stat.h>
+
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <limits.h>
@@ -11,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "erofs-gen.h"
 #include "erofs.h"
@@ -2120,6 +2124,50 @@ test_inode_decode_classifies_each_case(void)
 	}
 }
 
+/*
+ * FIFOs, sockets and devices have no start block, so the start-block bits 32
+ * to 47 the 48-bit layout adds must be zero: compact inodes keep them in the
+ * link-count word under format bit 4, extended inodes in the word at 0x06.
+ */
+static void
+test_special_files_refuse_start_block_high_bits(void)
+{
+	static const uint16_t modes[] = { MODE_FIFO, MODE_SOCKET, MODE_CHAR,
+	    MODE_BLOCK };
+	erofs_super_t sb = super_for_inodes(12, WIDE, 0, 0);
+
+	for (size_t i = 0; i < ARRAY_SIZE(modes); i++) {
+		for (int extended = 0; extended < 2; extended++) {
+			for (uint64_t high = 0; high < 2; high++) {
+				unsigned char raw[INODE_BUFFER_BYTES];
+				char name[80];
+				inode_result_t r;
+
+				inode_init(raw, extended != 0);
+				put_le(raw + I_MODE, modes[i] | 0600, 2);
+				put_le(raw + I_LAYOUT_WORD, 0, 4);
+				if (extended != 0) {
+					put_le(raw + I_FORMAT, FORMAT_EXTENDED, 2);
+					put_le(raw + IX_SIZE, 0, 8);
+					put_le(raw + IX_HIGH, high, 2);
+				} else {
+					put_le(raw + I_FORMAT, FORMAT_BIT4, 2);
+					put_le(raw + IC_SIZE, 0, 4);
+					put_le(raw + IC_NLINK, high, 2);
+				}
+				snprintf(name, sizeof(name),
+				    "mode %o, %s, high bits %llu", modes[i],
+				    extended != 0 ? "extended" : "compact",
+				    (unsigned long long)high);
+				r = inode_decode_checked(name, raw,
+				    extended != 0 ? 64 : 32, &sb);
+				EXPECT_STATUS(r.status, high != 0 ?
+				    FSIMG_ECORRUPT : FSIMG_OK, r.what, name);
+			}
+		}
+	}
+}
+
 static void
 test_inode_of_length_0_is_corrupt(void)
 {
@@ -2505,6 +2553,26 @@ test_chunk_format_48bit_bit_needs_the_48bit_layout(void)
 	EXPECT(erofs_chunk_format_decode(0x20, &wide, &format, &what) ==
 	    FSIMG_OK && !format.wide && format.entry_bytes == 8,
 	    "bit 6 clear is not wide, even under 48BIT");
+}
+
+/* Bit 6 widens a block number, which a 4-byte entry has no high part for. */
+static void
+test_chunk_format_48bit_bit_needs_8_byte_entries(void)
+{
+	erofs_super_t wide = super_for_inodes(12, WIDE, 0, 0);
+	erofs_chunk_format_t format, before;
+	const char *what = NULL;
+
+	memset(&format, SENTINEL, sizeof(format));
+	before = format;
+	EXPECT(erofs_chunk_format_decode(0x40, &wide, &format, &what) ==
+	    FSIMG_ECORRUPT, "bit 6 with 4-byte entries under 48BIT");
+	EXPECT(bcmp(&format, &before, sizeof(before)) == 0,
+	    "the refusal leaves the output untouched");
+
+	EXPECT(erofs_chunk_format_decode(0x60, &wide, &format, &what) ==
+	    FSIMG_OK && format.wide && format.entry_bytes == 8,
+	    "bit 6 with 8-byte entries under 48BIT is wide");
 }
 
 static void
@@ -4610,8 +4678,6 @@ test_open_refuses_each_unimplemented_incompatible_bit_by_name(void)
 		{ "COMPR_CFGS", { { SB_INCOMPAT, 4, 0x002 },
 		    { SB_WORD54, 2, 0 } }, true, FSIMG_EUNSUPPORTED,
 		    "COMPR_CFGS" },
-		{ "CHUNKED_FILE", { { SB_INCOMPAT, 4, 0x004 } }, true,
-		    FSIMG_EUNSUPPORTED, "CHUNKED_FILE" },
 		{ "DEVICE_TABLE", { { SB_INCOMPAT, 4, 0x008 },
 		    { SB_DEVICES, 2, 0 } }, true, FSIMG_EUNSUPPORTED,
 		    "DEVICE_TABLE" },
@@ -4971,7 +5037,7 @@ test_open_failures_return_all_memory(void)
 		uint64_t	 value;
 		unsigned	 width;
 	} cases[] = {
-		{ "feature refusal", SB_INCOMPAT, 0x004, 4 },
+		{ "feature refusal", SB_INCOMPAT, 0x001, 4 },
 		{ "superblock rule", SB_NSEC, 1000000000, 4 },
 		{ "root outside the domain", SB_META_BLOCK, 3, 4 }
 	};
@@ -6922,6 +6988,630 @@ test_a_compact_inode_time_is_the_stored_word_after_the_epoch(void)
 	gen_tree_free(&tree);
 }
 
+/* ---- Chunk-based files ---- */
+
+/*
+ * A chunk-based file described by a recipe, one letter per chunk: 'd' is a
+ * chunk of its own data blocks and '.' a hole. The helper stores the data,
+ * writes the index and builds the bytes the file must read back as, with
+ * zeros for every hole. A chunk is B << chunkbits bytes and the recipe has
+ * ceil(size / chunk) letters, so the last chunk is short when the size is
+ * not a multiple of it. 48-bit block numbers are not read, so no recipe sets
+ * chunk format bit 6.
+ */
+typedef struct chunk_file {
+	unsigned	 blkszbits;
+	unsigned	 chunkbits;
+	unsigned	 entry_bytes;	/* 4 or 8 */
+	uint16_t	 layout_high;	/* the layout word's unspecified half */
+	uint64_t	 size;
+	const char	*recipe;
+	bool		 extended;
+} chunk_file_t;
+
+static uint16_t
+chunk_format(const chunk_file_t *spec)
+{
+	return ((uint16_t)(spec->chunkbits |
+	    (spec->entry_bytes == 8 ? GEN_CHUNK_INDEXES : 0)));
+}
+
+static gen_inode_t
+chunk_proto(const chunk_file_t *spec)
+{
+	gen_inode_t proto = file_proto(4);
+
+	proto.extended = spec->extended;
+	proto.size = spec->size;
+	return (proto);
+}
+
+/*
+ * A tree whose root names the file as "f". *expect is the file's size bytes
+ * as they must read back, which the caller frees. Returns the file's NID.
+ */
+static uint64_t
+chunk_tree(gen_tree_t *tree, const chunk_file_t *spec, unsigned char **expect)
+{
+	size_t block = (size_t)1 << spec->blkszbits;
+	size_t chunk_bytes = block << spec->chunkbits;
+	size_t count = strlen(spec->recipe);
+	size_t size = (size_t)spec->size;
+	gen_inode_t proto = chunk_proto(spec);
+	gen_chunk_t entries[16];
+	uint64_t nid;
+
+	CHECK(count == (size + chunk_bytes - 1) / chunk_bytes &&
+	    count <= ARRAY_SIZE(entries));
+	tree_new(tree, spec->blkszbits, (size + block - 1) / block + count + 2);
+	gen_tree_set_incompat(tree, EROFS_INCOMPAT_CHUNKED_FILE);
+	*expect = calloc(size != 0 ? size : 1, 1);
+	CHECK(*expect != NULL);
+
+	for (size_t i = 0; i < count; i++) {
+		size_t start = i * chunk_bytes;
+		size_t length = size - start < chunk_bytes ? size - start :
+		    chunk_bytes;
+		size_t stored = (length + block - 1) / block * block;
+		unsigned char *data;
+
+		if (spec->recipe[i] == '.') {
+			entries[i] = gen_chunk_hole(chunk_format(spec));
+			continue;
+		}
+		CHECK(spec->recipe[i] == 'd');
+		fill_pattern(*expect + start, length, 20 + (unsigned)i);
+		data = calloc(stored, 1);
+		CHECK(data != NULL);
+		bcopy(*expect + start, data, length);
+		entries[i] = gen_chunk_block(gen_tree_data(tree, data, stored));
+		free(data);
+	}
+	nid = gen_tree_add_chunked(tree, &proto,
+	    (uint32_t)spec->layout_high << 16 | chunk_format(spec), entries,
+	    count);
+	root_names(tree, "f", nid, T_FILE);
+	return (nid);
+}
+
+/* The walk of the tree must deliver "/f" as exactly the bytes expected. */
+static void
+check_chunk_file_reads(const char *name, gen_tree_t *tree,
+    const unsigned char *expect, size_t size)
+{
+	listing_t *list = walk_ok(name, tree);
+	const node_t *node = find_node(list, "/f");
+
+	EXPECT(node != NULL && node->size == size &&
+	    (size == 0 || bcmp(node->content, expect, size) == 0),
+	    "%s: the file reads back byte for byte", name);
+	listing_free(list);
+}
+
+static void
+test_chunk_files_read_byte_for_byte_at_every_size_and_shape(void)
+{
+	static const chunk_file_t shapes[] = {
+		/* A hole in the middle, and chunks that are one block. */
+		{ .blkszbits = 12, .size = 3 * 4096, .recipe = "d.d" },
+		{ .blkszbits = 12, .size = 3 * 4096, .recipe = "ddd" },
+		{ .blkszbits = 12, .size = 3 * 4096, .recipe = ".d." },
+		/* The last chunk is short. */
+		{ .blkszbits = 12, .size = 2 * 4096 + 1, .recipe = "d.d" },
+		{ .blkszbits = 12, .size = 4096 + 100, .recipe = "d." },
+		{ .blkszbits = 12, .size = 4095, .recipe = "d" },
+		{ .blkszbits = 9, .size = 513, .recipe = "dd" },
+		/* The size is an exact multiple of the chunk. */
+		{ .blkszbits = 12, .size = 2 * 4096, .recipe = "d." },
+		{ .blkszbits = 12, .chunkbits = 1, .size = 2 * 8192,
+		    .recipe = ".d" },
+		/* A chunk is larger than a block. */
+		{ .blkszbits = 12, .chunkbits = 1, .size = 3 * 8192 + 1,
+		    .recipe = "d.dd" },
+		{ .blkszbits = 9, .chunkbits = 3, .size = 5000, .recipe = "d." },
+		/* A file smaller than its one chunk, whole or all hole. */
+		{ .blkszbits = 12, .chunkbits = 2, .size = 100, .recipe = "d" },
+		{ .blkszbits = 12, .chunkbits = 2, .size = 100, .recipe = "." },
+		{ .blkszbits = 12, .chunkbits = 5, .size = 1, .recipe = "." },
+		/* Extended inodes and the layout word's unspecified half. */
+		{ .blkszbits = 12, .size = 3 * 4096 + 7, .recipe = "d.dd",
+		    .extended = true },
+		{ .blkszbits = 12, .layout_high = 0xbeef, .size = 3 * 4096,
+		    .recipe = "d.d" },
+		{ .blkszbits = 12, .layout_high = 0xffff, .size = 4096 + 1,
+		    .recipe = ".d" },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(shapes); i++) {
+		for (unsigned width = 4; width <= 8; width += 4) {
+			chunk_file_t spec = shapes[i];
+			unsigned char *expect;
+			char name[96];
+			gen_tree_t tree;
+
+			spec.entry_bytes = width;
+			snprintf(name, sizeof(name),
+			    "shape %zu, B=%u chunkbits=%u size=%llu \"%s\", "
+			    "%u-byte entries", i, 1u << spec.blkszbits,
+			    spec.chunkbits, (unsigned long long)spec.size,
+			    spec.recipe, width);
+			chunk_tree(&tree, &spec, &expect);
+			check_chunk_file_reads(name, &tree, expect,
+			    (size_t)spec.size);
+			free(expect);
+			gen_tree_free(&tree);
+		}
+	}
+}
+
+/* ---- Chunk extents through resolve ---- */
+
+/* The reader of the tree's image, positioned on the entry named path. */
+static fsimg_reader_t *
+reader_on_entry(volume_t *v, const gen_image_t *image, const char *path)
+{
+	const fsimg_entry_t *entry;
+	fsimg_reader_t *reader = NULL;
+	fsimg_error_t error;
+
+	volume_start(v, image->bytes, image->length);
+	CHECK(fsimg_reader_open(v->ctx, v->io, NULL, &reader, &error) ==
+	    FSIMG_OK);
+	do {
+		CHECK(fsimg_reader_next(reader, &entry, &error) == FSIMG_OK);
+	} while (strcmp(entry->path, path) != 0);
+	return (reader);
+}
+
+static void
+reader_close(volume_t *v, fsimg_reader_t *reader)
+{
+	fsimg_reader_free(reader);
+	fsimg_io_free(v->io);
+	fsimg_ctx_free(v->ctx);
+}
+
+/* The extent the reader resolves at offset, which must succeed unheld. */
+static fsimg_extent_t
+resolve_ok(fsimg_reader_t *reader, uint64_t offset)
+{
+	const unsigned char *held = NULL;
+	fsimg_extent_t extent;
+	fsimg_error_t error;
+
+	CHECK(fsimg_reader_resolve(reader, offset, &extent, &held, &error) ==
+	    FSIMG_OK);
+	CHECK(held == NULL);
+	return (extent);
+}
+
+static void
+test_chunk_hole_resolves_to_a_zero_extent_of_the_chunks_length(void)
+{
+	static const struct {
+		const char	*recipe;
+		uint64_t	 size;
+	} cases[] = {
+		{ "d.d", 2 * 4096 + 100 },
+		{ "d.", 4096 + 100 },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		chunk_file_t spec = { .blkszbits = 12, .entry_bytes = 4,
+		    .size = cases[i].size, .recipe = cases[i].recipe };
+		uint64_t first = gen_tree_first_block(12);
+		unsigned char *expect;
+		fsimg_reader_t *reader;
+		fsimg_extent_t extent;
+		gen_tree_t tree;
+		volume_t v;
+		uint64_t last = cases[i].size - 1;
+
+		chunk_tree(&tree, &spec, &expect);
+		gen_tree_seal(&tree);
+		reader = reader_on_entry(&v, &tree.image, "/f");
+
+		extent = resolve_ok(reader, 10);
+		EXPECT(extent.logical_offset == 0 && extent.length == 4096 &&
+		    extent.image_offset == first * 4096,
+		    "case %zu: a data chunk is a stored extent of its block", i);
+		extent = resolve_ok(reader, 4096 + 5);
+		EXPECT(extent.image_offset == FSIMG_EXTENT_ZERO &&
+		    extent.logical_offset == 4096 &&
+		    extent.length == (cases[i].recipe[2] == 'd' ? 4096 : 100),
+		    "case %zu: the hole is a zero extent of its chunk (%llu, "
+		    "%llu bytes)", i, (unsigned long long)extent.logical_offset,
+		    (unsigned long long)extent.length);
+		extent = resolve_ok(reader, last);
+		EXPECT(extent.logical_offset + extent.length == cases[i].size,
+		    "case %zu: the last chunk ends at the size", i);
+		reader_close(&v, reader);
+		free(expect);
+		gen_tree_free(&tree);
+	}
+}
+
+/* ---- Shared chunks ---- */
+
+static void
+test_chunks_naming_one_block_read_correctly_in_both_files(void)
+{
+	static const unsigned width[] = { 4, 8 };
+
+	for (size_t w = 0; w < ARRAY_SIZE(width); w++) {
+		uint16_t format = width[w] == 8 ? GEN_CHUNK_INDEXES : 0;
+		gen_inode_t proto = file_proto(4);
+		unsigned char shared[4096], own[4096];
+		gen_chunk_t entries[2];
+		gen_dirent_t names[2];
+		gen_tree_t tree;
+		listing_t *list;
+		const node_t *a, *b;
+		uint32_t block;
+
+		fill_pattern(shared, sizeof(shared), 40);
+		fill_pattern(own, sizeof(own), 41);
+		tree_new(&tree, 12, 6);
+		gen_tree_set_incompat(&tree, EROFS_INCOMPAT_CHUNKED_FILE);
+		block = gen_tree_data(&tree, shared, sizeof(shared));
+		entries[0] = gen_chunk_block(block);
+		entries[1] = gen_chunk_block(block);
+		proto.size = 2 * 4096;
+		names[0] = (gen_dirent_t){ "a", gen_tree_add_chunked(&tree,
+		    &proto, format, entries, 2), T_FILE };
+
+		/* The second file shares the block with the first's chunks,
+		 * after a block of its own. */
+		entries[0] = gen_chunk_block(gen_tree_data(&tree, own,
+		    sizeof(own)));
+		entries[1] = gen_chunk_block(block);
+		names[1] = (gen_dirent_t){ "b", gen_tree_add_chunked(&tree,
+		    &proto, format, entries, 2), T_FILE };
+		gen_tree_dir(&tree, 0, 0, names, 2);
+
+		list = walk_ok("shared chunks", &tree);
+		a = find_node(list, "/a");
+		b = find_node(list, "/b");
+		EXPECT(a != NULL && a->size == 8192 &&
+		    bcmp(a->content, shared, 4096) == 0 &&
+		    bcmp(a->content + 4096, shared, 4096) == 0,
+		    "%u-byte entries: both chunks of one file read the block",
+		    width[w]);
+		EXPECT(b != NULL && b->size == 8192 &&
+		    bcmp(b->content, own, 4096) == 0 &&
+		    bcmp(b->content + 4096, shared, 4096) == 0,
+		    "%u-byte entries: another file reads the same block",
+		    width[w]);
+		listing_free(list);
+		gen_tree_free(&tree);
+	}
+}
+
+/* ---- Chunk rules refused through the reader ---- */
+
+typedef struct chunk_mutation {
+	const char	*name;
+	unsigned	 entry_bytes;
+	unsigned	 chunkbits;
+	uint64_t	 size;
+	const char	*recipe;
+	size_t		 index;		/* the entry replaced, if replace */
+	bool		 replace;
+	gen_chunk_t	 entry;
+	uint32_t	 from_end;	/* nonzero: block is blocks - from_end */
+	uint32_t	 word_or;	/* ORed into the layout word */
+	const char	*phrase;
+} chunk_mutation_t;
+
+static void
+test_chunk_files_that_break_a_rule_are_corrupt_naming_it(void)
+{
+	static const chunk_mutation_t cases[] = {
+		{ .name = "a nonzero device identifier", .entry_bytes = 8,
+		    .size = 3 * 4096, .recipe = "d.d", .index = 2,
+		    .replace = true, .entry = { .block = 40, .device = 1 },
+		    .phrase = "chunk device identifier" },
+		{ .name = "a nonzero high part without bit 6",
+		    .entry_bytes = 8, .size = 3 * 4096, .recipe = "d.d",
+		    .index = 0, .replace = true,
+		    .entry = { .block = 40, .high = 1 },
+		    .phrase = "chunk block high bits" },
+		{ .name = "a hole entry with a high part is no hole",
+		    .entry_bytes = 8, .size = 3 * 4096, .recipe = "d.d",
+		    .index = 1, .replace = true,
+		    .entry = { .block = UINT32_MAX, .high = 0xffff },
+		    .phrase = "chunk block high bits" },
+		{ .name = "a chunk block past the domain", .entry_bytes = 4,
+		    .size = 3 * 4096, .recipe = "d.d", .index = 2,
+		    .replace = true, .entry = { .block = 0x7ffffffe },
+		    .phrase = "data blocks outside the volume" },
+		{ .name = "a chunk whose last whole block crosses the end",
+		    .entry_bytes = 4, .chunkbits = 1, .size = 8192,
+		    .recipe = "d", .index = 0, .replace = true, .from_end = 1,
+		    .phrase = "data blocks outside the volume" },
+		{ .name = "format bit 7", .entry_bytes = 4,
+		    .size = 3 * 4096, .recipe = "d.d", .word_or = 0x80,
+		    .phrase = "chunk format" },
+		{ .name = "format bit 15", .entry_bytes = 8,
+		    .size = 3 * 4096, .recipe = "d.d", .word_or = 0x8000,
+		    .phrase = "chunk format" },
+		{ .name = "format bit 6 without 48BIT", .entry_bytes = 8,
+		    .size = 3 * 4096, .recipe = "d.d", .word_or = 0x40,
+		    .phrase = "chunk format 48-bit bit" },
+		/* 48BIT is refused at open, so this volume lacks it too and
+		 * cannot isolate the 4-byte rule; the codec test
+		 * test_chunk_format_48bit_bit_needs_8_byte_entries does. */
+		{ .name = "format bit 6 with 4-byte entries", .entry_bytes = 4,
+		    .size = 3 * 4096, .recipe = "d.d", .word_or = 0x40,
+		    .phrase = "chunk format 48-bit bit" },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		const chunk_mutation_t *m = &cases[i];
+		chunk_file_t spec = { .blkszbits = 12, .chunkbits = m->chunkbits,
+		    .entry_bytes = m->entry_bytes, .size = m->size,
+		    .recipe = m->recipe };
+		gen_inode_t proto = chunk_proto(&spec);
+		unsigned char *expect;
+		gen_tree_t tree;
+		uint64_t nid;
+
+		nid = chunk_tree(&tree, &spec, &expect);
+		if (m->replace) {
+			gen_chunk_t entry = m->entry;
+
+			if (m->from_end != 0)
+				entry.block = tree.blocks - m->from_end;
+			gen_chunk_put(&tree, nid, &proto, chunk_format(&spec),
+			    m->index, entry);
+		}
+		if (m->word_or != 0)
+			set_word(&tree, nid, (uint32_t)chunk_format(&spec) |
+			    m->word_or);
+		check_refused(m->name, &tree, FSIMG_ECORRUPT, m->phrase);
+		free(expect);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_chunk_index_running_past_the_domain_is_refused_when_the_inode_loads(void)
+{
+	gen_inode_t proto = file_proto(4);
+	gen_chunk_t hole = gen_chunk_hole(0);
+	gen_tree_t tree;
+	uint64_t nid;
+
+	/* 2^40 bytes in 4096-byte chunks need a 1 GiB index. */
+	proto.extended = true;
+	proto.size = UINT64_C(1) << 40;
+	tree_new(&tree, 12, 4);
+	gen_tree_set_incompat(&tree, EROFS_INCOMPAT_CHUNKED_FILE);
+	nid = gen_tree_add_chunked(&tree, &proto, 0, &hole, 1);
+	root_names(&tree, "f", nid, T_FILE);
+	check_refused("index past the domain", &tree, FSIMG_ECORRUPT,
+	    "inode body outside the address domain");
+	gen_tree_free(&tree);
+}
+
+/* ---- A large sparse file ---- */
+
+static void
+test_a_file_of_one_hole_chunk_reads_its_last_byte_as_zero(void)
+{
+	gen_inode_t proto = file_proto(4);
+	gen_chunk_t hole = gen_chunk_hole(0);
+	unsigned char window[4096], last = 0xaa;
+	fsimg_reader_t *reader;
+	fsimg_error_t error;
+	fsimg_extent_t extent;
+	gen_tree_t tree;
+	volume_t v;
+	size_t count = 0;
+	uint64_t nid;
+
+	/* One chunk of 4096 << 31 = 2^43 bytes holds the whole 2^40. */
+	proto.extended = true;
+	proto.size = UINT64_C(1) << 40;
+	tree_new(&tree, 12, 4);
+	gen_tree_set_incompat(&tree, EROFS_INCOMPAT_CHUNKED_FILE);
+	nid = gen_tree_add_chunked(&tree, &proto, 31, &hole, 1);
+	root_names(&tree, "f", nid, T_FILE);
+	gen_tree_seal(&tree);
+
+	reader = reader_on_entry(&v, &tree.image, "/f");
+	extent = resolve_ok(reader, proto.size - 1);
+	EXPECT(extent.image_offset == FSIMG_EXTENT_ZERO &&
+	    extent.logical_offset == 0 && extent.length == proto.size,
+	    "the hole chunk is one zero extent of the file's size");
+	CHECK(fsimg_reader_read_at(reader, proto.size - 1, &last, 1, &count,
+	    &error) == FSIMG_OK);
+	EXPECT(count == 1 && last == 0, "the last byte reads as zero");
+	memset(window, 0xaa, sizeof(window));
+	CHECK(fsimg_reader_read_at(reader, UINT64_C(1) << 39, window,
+	    sizeof(window), &count, &error) == FSIMG_OK);
+	EXPECT(count == sizeof(window), "a window reads whole");
+	for (size_t i = 0; i < sizeof(window); i++) {
+		if (window[i] != 0) {
+			EXPECT(false, "window byte %zu is %u", i, window[i]);
+			break;
+		}
+	}
+	reader_close(&v, reader);
+	gen_tree_free(&tree);
+}
+
+/* ---- Salvage of a chunked file ---- */
+
+/*
+ * A chunked file whose data chunk and hole come before a chunk naming a block
+ * past the volume. Extraction under salvage keeps the readable prefix, the
+ * data and the zeros of the hole, as "f.partial" and the sibling whole;
+ * without salvage the damaged chunk fails the extraction.
+ */
+static void
+test_salvage_keeps_a_chunked_files_prefix_through_its_hole(void)
+{
+	enum { BLOCK = 4096 };
+	unsigned char data[BLOCK], prefix[2 * BLOCK], got[3 * BLOCK];
+	gen_inode_t proto = file_proto(4);
+	gen_chunk_t entries[3];
+	gen_dirent_t names[2];
+	fsimg_extract_options_t options;
+	fsimg_reader_t *reader = NULL;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	gen_tree_t tree;
+	volume_t v;
+	char directory[] = "erofs-salvage-XXXXXX";
+	ssize_t got_bytes;
+	int parent, output, fd;
+
+	tree_new(&tree, 12, 8);
+	gen_tree_set_incompat(&tree, EROFS_INCOMPAT_CHUNKED_FILE);
+	fill_pattern(data, sizeof(data), 20);
+	entries[0] = gen_chunk_block(gen_tree_data(&tree, data, sizeof(data)));
+	entries[1] = gen_chunk_hole(0);
+	entries[2] = gen_chunk_block(0x7ffffffe);
+	proto.size = 3 * BLOCK;
+	names[0] = (gen_dirent_t){ "f",
+	    gen_tree_add_chunked(&tree, &proto, 0, entries, 3), T_FILE };
+	names[1] = (gen_dirent_t){ "g", add_file(&tree, LAYOUT_FLAT, 600, 9),
+	    T_FILE };
+	gen_tree_dir(&tree, 0, 0, names, 2);
+	gen_tree_seal(&tree);
+	bcopy(data, prefix, BLOCK);
+	bzero(prefix + BLOCK, BLOCK);
+
+	CHECK(mkdtemp(directory) != NULL);
+	parent = open(directory, O_RDONLY | O_DIRECTORY);
+	CHECK(parent != -1);
+	for (unsigned salvage = 0; salvage < 2; salvage++) {
+		volume_start(&v, tree.image.bytes, tree.image.length);
+		CHECK(fsimg_reader_open(v.ctx, v.io, NULL, &reader, &error) ==
+		    FSIMG_OK);
+		fsimg_extract_options_init(&options);
+		if (salvage != 0)
+			options.flags |= FSIMG_EXTRACT_SALVAGE;
+		status = fsimg_extract_at(reader, parent,
+		    salvage != 0 ? "salvage" : "strict", &options, &error);
+		EXPECT_STATUS(status, salvage != 0 ? FSIMG_EPARTIAL :
+		    FSIMG_ECORRUPT, error.message, salvage != 0 ? "salvage" :
+		    "strict");
+		reader_close(&v, reader);
+	}
+
+	output = openat(parent, "salvage", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(output != -1);
+	fd = openat(output, "f.partial", O_RDONLY | O_NOFOLLOW);
+	CHECK(fd != -1);
+	got_bytes = read(fd, got, sizeof(got));
+	EXPECT(got_bytes == (ssize_t)sizeof(prefix) &&
+	    bcmp(got, prefix, sizeof(prefix)) == 0,
+	    "f.partial is the data chunk then the hole's zeros (%zd bytes)",
+	    got_bytes);
+	CHECK(close(fd) == 0);
+	EXPECT(faccessat(output, "f", F_OK, AT_SYMLINK_NOFOLLOW) == -1,
+	    "the damaged file is not delivered whole");
+	EXPECT(faccessat(output, "g", F_OK, AT_SYMLINK_NOFOLLOW) == 0,
+	    "the sibling is delivered");
+	CHECK(unlinkat(output, "f.partial", 0) == 0);
+	CHECK(unlinkat(output, "g", 0) == 0);
+	CHECK(close(output) == 0);
+	CHECK(unlinkat(parent, "salvage", AT_REMOVEDIR) == 0);
+
+	/* A strict extraction leaves its private output behind, incomplete. */
+	output = openat(parent, "strict", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	if (output != -1) {
+		unlinkat(output, "f", 0);
+		unlinkat(output, "g", 0);
+		CHECK(close(output) == 0);
+		unlinkat(parent, "strict", AT_REMOVEDIR);
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+	gen_tree_free(&tree);
+}
+
+/* ---- Chunk-based directories and symbolic links ---- */
+
+static void
+test_a_chunk_based_directory_lists_its_entries(void)
+{
+	static const unsigned width[] = { 4, 8 };
+
+	for (size_t w = 0; w < ARRAY_SIZE(width); w++) {
+		uint16_t format = width[w] == 8 ? GEN_CHUNK_INDEXES : 0;
+		gen_inode_t proto = inode_proto(MODE_DIR, 4);
+		unsigned char block[4096] = { 0 };
+		gen_dirent_t records[3];
+		gen_dirent_t root_child;
+		gen_chunk_t entry;
+		gen_tree_t tree;
+		listing_t *list;
+		const node_t *dir, *file;
+		uint64_t file_nid, dir_nid;
+
+		tree_new(&tree, 12, 6);
+		gen_tree_set_incompat(&tree, EROFS_INCOMPAT_CHUNKED_FILE);
+		file_nid = add_file(&tree, LAYOUT_FLAT, 600, 7);
+		dir_nid = gen_nid_at(&tree.image, tree.meta_next);
+
+		/* Records are sorted by name bytes: ".", "..", "f". */
+		records[0] = (gen_dirent_t){ ".", dir_nid, T_DIR };
+		records[1] = (gen_dirent_t){ "..", 0, T_DIR };
+		records[2] = (gen_dirent_t){ "f", file_nid, T_FILE };
+		proto.nlink = 2;
+		proto.size = gen_dir_pack(block, sizeof(block), 4096, records,
+		    3);
+		entry = gen_chunk_block(gen_tree_data(&tree, block, 4096));
+		CHECK(gen_tree_add_chunked(&tree, &proto, format, &entry,
+		    1) == dir_nid);
+		root_child = (gen_dirent_t){ "d", dir_nid, T_DIR };
+		gen_tree_dir(&tree, 0, 0, &root_child, 1);
+
+		list = walk_ok("chunk-based directory", &tree);
+		dir = find_node(list, "/d");
+		file = find_node(list, "/d/f");
+		EXPECT(dir != NULL && dir->kind == FSIMG_ENTRY_DIRECTORY,
+		    "%u-byte entries: the directory is listed", width[w]);
+		EXPECT(file != NULL && file->size == 600 &&
+		    pattern_mismatch(file, 7) == 600,
+		    "%u-byte entries: its child is listed and read", width[w]);
+		listing_free(list);
+		gen_tree_free(&tree);
+	}
+}
+
+static void
+test_a_chunk_based_symbolic_link_delivers_its_target(void)
+{
+	static const char target[] = "some/target/path";
+	gen_inode_t proto = inode_proto(MODE_LINK, 4);
+	gen_chunk_t entry;
+	gen_tree_t tree;
+	listing_t *list;
+	const node_t *node;
+	uint64_t nid;
+
+	proto.size = sizeof(target) - 1;
+	tree_new(&tree, 12, 4);
+	gen_tree_set_incompat(&tree, EROFS_INCOMPAT_CHUNKED_FILE);
+	entry = gen_chunk_block(gen_tree_data(&tree, target,
+	    sizeof(target) - 1));
+	nid = gen_tree_add_chunked(&tree, &proto, 0, &entry, 1);
+	root_names(&tree, "l", nid, T_LINK);
+
+	list = walk_ok("chunk-based symbolic link", &tree);
+	node = find_node(list, "/l");
+	EXPECT(node != NULL && node->kind == FSIMG_ENTRY_SYMLINK &&
+	    node->size == sizeof(target) - 1 &&
+	    bcmp(node->content, target, sizeof(target) - 1) == 0,
+	    "the link's target is the chunk's bytes");
+	listing_free(list);
+	gen_tree_free(&tree);
+}
+
 /* ---- Mutation matrix: geometry and features ---- */
 
 /*
@@ -7537,6 +8227,7 @@ main(int argc, char **argv)
 	test_real_four_record_configuration_decodes();
 
 	test_inode_decode_classifies_each_case();
+	test_special_files_refuse_start_block_high_bits();
 	test_inode_of_length_0_is_corrupt();
 	test_fixed_bytes_follow_format_bit_0_only();
 	test_format_bits_5_to_15_are_each_corrupt();
@@ -7553,6 +8244,7 @@ main(int argc, char **argv)
 
 	test_chunk_format_reserved_bits_7_to_15_are_each_corrupt();
 	test_chunk_format_48bit_bit_needs_the_48bit_layout();
+	test_chunk_format_48bit_bit_needs_8_byte_entries();
 	test_chunk_format_sets_size_and_entry_width();
 	test_chunk_entries_decode_to_blocks_and_holes();
 
@@ -7658,6 +8350,15 @@ main(int argc, char **argv)
 	test_stored_and_inline_content_and_hard_links_read_back();
 	test_reads_at_offsets_cross_from_stored_blocks_into_the_inline_tail();
 	test_symbolic_link_targets_are_checked_and_delivered();
+	test_chunk_files_read_byte_for_byte_at_every_size_and_shape();
+	test_chunk_hole_resolves_to_a_zero_extent_of_the_chunks_length();
+	test_chunks_naming_one_block_read_correctly_in_both_files();
+	test_chunk_files_that_break_a_rule_are_corrupt_naming_it();
+	test_chunk_index_running_past_the_domain_is_refused_when_the_inode_loads();
+	test_a_file_of_one_hole_chunk_reads_its_last_byte_as_zero();
+	test_a_chunk_based_directory_lists_its_entries();
+	test_salvage_keeps_a_chunked_files_prefix_through_its_hole();
+	test_a_chunk_based_symbolic_link_delivers_its_target();
 	test_attribute_regions_set_the_extra_data_mark_or_are_refused();
 	test_device_numbers_decode_the_linux_32_bit_encoding();
 	test_fifos_and_sockets_have_no_size_and_no_device_number();

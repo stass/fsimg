@@ -16,10 +16,13 @@ module FsimgSpec
       SMALL_BLOCKS = { block_bits: 9 }.freeze
       ATTRIBUTES = { xattr: 1 }.freeze
       SUBDIRECTORY = { subdirectory: 1 }.freeze
+      CHUNKED = { chunked: 1 }.freeze
+      CHUNKED_DIRECTORIES = { chunked: 1, subdirectory: 1 }.freeze
       # A volume extent of four blocks ends at byte 16384; its last metadata
       # slot is where a 64-byte inode cannot fit.
       SHORT_EXTENT = 16384 / B
       LAST_SLOT = (SHORT_EXTENT * B - Builder::META - 32) / 32
+      LAST_BLOCK = Builder::LENGTH / B - 1
 
       module_function
 
@@ -36,6 +39,10 @@ module FsimgSpec
       def root(index, offset = 0) = entry(Builder::ROOT_DATA, index, offset)
       def sub(index, offset = 0) = entry(Builder::SUB_DATA, index, offset)
       def region(offset = 0) = inode(Builder::FILE, 32 + offset)
+      # The fields of chunk4.bin's index entry number index, and of
+      # chunk8.bin's: its high part (0), device identifier (2) and block (4).
+      def chunk4(index) = inode(Builder::CHUNK4, 32 + 4 * index)
+      def chunk8(index, offset = 4) = inode(Builder::CHUNK8, 32 + 8 * index + offset)
       def entry_bytes(nid:, name_offset:, type:) = Layout::DirectoryEntry.new(nid:, name_offset:, file_type: type).to_binary_s
       def nid_bytes(nid) = [nid].pack("Q<")
 
@@ -51,7 +58,6 @@ module FsimgSpec
         "sb.incompat" => {
           "lz4_0padding" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x1)]),
           "compr_cfgs" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x2)]),
-          "chunked_file" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x4)]),
           "device_table" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x8)]),
           "ztailpacking" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x10)]),
           "fragments" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x20)]),
@@ -71,6 +77,17 @@ module FsimgSpec
           "layout_7" => change(mutations: [u16(inode(Builder::FILE), 7 << 1)])
         },
         "inode.chunk_feature" => { "without_feature" => change(mutations: [u16(inode(Builder::FILE), 4 << 1)]) },
+        "inode.chunk_reserved" => {
+          "bit_7" => change(parameters: CHUNKED, mutations: [u32(inode(Builder::CHUNK4, 0x10), 0x80)]),
+          "bit_15" => change(parameters: CHUNKED, mutations: [u32(inode(Builder::CHUNK4, 0x10), 0x8000)]),
+          "high_half_set" => change(parameters: CHUNKED, mutations: [u32(inode(Builder::CHUNK4, 0x10), 0xABCD0000)], valid: true)
+        },
+        "inode.chunk_wide" => {
+          "eight_byte_without_48bit" => change(parameters: CHUNKED, mutations: [u32(inode(Builder::CHUNK8, 0x10), 0x61)]),
+          # 48BIT is refused at open, so this witness also lacks it and
+          # cannot isolate the 4-byte half of the rule.
+          "four_byte" => change(parameters: CHUNKED, mutations: [u32(inode(Builder::CHUNK4, 0x10), 0x40)])
+        },
         "inode.layout_profile" => {
           "compressed_full" => change(mutations: [u16(inode(Builder::FILE), 1 << 1)]),
           "compressed_compact" => change(mutations: [u16(inode(Builder::FILE), 3 << 1)])
@@ -86,7 +103,8 @@ module FsimgSpec
           "root_past_domain" => change(parameters: NO_CHECKSUM, mutations: [
             u32(sb(0x24), SHORT_EXTENT), u16(sb(0x0E), LAST_SLOT), u16(inode(LAST_SLOT), 1), u16(inode(LAST_SLOT, 4), Builder::DIRECTORY)
           ]),
-          "attributes_past_domain" => change(mutations: [u16(inode(Builder::FILE, 2), 0xFFFF)])
+          "attributes_past_domain" => change(mutations: [u16(inode(Builder::FILE, 2), 0xFFFF)]),
+          "index_past_domain" => change(parameters: CHUNKED, mutations: [u32(inode(Builder::CHUNK4, 8), 10_000 * B)])
         },
         "inode.tail" => {
           "crosses_block" => change(parameters: SMALL_BLOCKS, mutations: [u32(inode(Builder::FILE, 8), 480)]),
@@ -96,6 +114,31 @@ module FsimgSpec
         "inode.data_domain" => {
           "start_block" => change(mutations: [u32(inode(Builder::EXT, 0x10), 0xFFFFFFFF)]),
           "short_extent" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x24), 3)])
+        },
+        "inode.chunk_device" => {
+          "stored_chunk" => change(parameters: CHUNKED, mutations: [u16(chunk8(0, 2), 1)]),
+          "hole_chunk" => change(parameters: CHUNKED, mutations: [u16(chunk8(1, 2), 1)])
+        },
+        "inode.chunk_high_part" => {
+          "stored_chunk" => change(parameters: CHUNKED, mutations: [u16(chunk8(0, 0), 1)]),
+          "hole_chunk" => change(parameters: CHUNKED, mutations: [u16(chunk8(1, 0), 0xFFFF)])
+        },
+        "inode.chunk_domain" => {
+          "block_past_domain" => change(parameters: CHUNKED, mutations: [u32(chunk4(0), 0xFFFFFFF0)]),
+          "second_block_past_domain" => change(parameters: CHUNKED, mutations: [u32(chunk8(0), LAST_BLOCK)]),
+          "short_chunk_past_domain" => change(parameters: CHUNKED, mutations: [u32(chunk4(3), LAST_BLOCK + 1)]),
+          "ends_at_domain_end" => change(parameters: CHUNKED, mutations: [u32(chunk8(0), LAST_BLOCK - 1)], valid: true),
+          "short_chunk_in_last_block" => change(parameters: CHUNKED, mutations: [u32(chunk4(3), LAST_BLOCK)], valid: true),
+          # sub as a chunk-based directory: one chunk of B bytes whose entry,
+          # written over the first bytes of the slot after it, names its block.
+          # That slot is leaf's, and block SUB_DATA / B = 4 is the format and
+          # attribute words leaf already holds, so listing still reads leaf;
+          # the index overlaps leaf's body, which a verification stage
+          # (TODO.md) would report, so the witness must move first.
+          "directory" => change(parameters: CHUNKED_DIRECTORIES, valid: true, mutations: [
+            u16(inode(Builder::SUB), 4 << 1), u32(inode(Builder::SUB, 0x10), 0), u32(inode(Builder::SUB, 32), Builder::SUB_DATA / B)
+          ]),
+          "stored_data" => change(parameters: CHUNKED, mutations: [bytes(Builder::EXT_DATA, "chunk data".b)], valid: true)
         },
         "inode.directory_size" => { "empty" => change(mutations: [u32(inode(Builder::ROOT, 8), 0)]) },
         "xattr.framing" => { "overlong_entry" => change(parameters: ATTRIBUTES, mutations: [u16(region(14), 0x100)]) },
@@ -160,7 +203,7 @@ module FsimgSpec
 
       # The block sizes and feature combinations the matrix lists as valid.
       def profiles = (9..12).map do |bits|
-        Witness.new(id: "erofs.block_size.#{1 << bits}", parameters: { block_bits: bits, xattr: 1, subdirectory: 1 }.freeze,
+        Witness.new(id: "erofs.block_size.#{1 << bits}", parameters: { block_bits: bits, xattr: 1, subdirectory: 1, chunked: 1 }.freeze,
                     mutations: [], intended: nil, rules: [])
       end
     end

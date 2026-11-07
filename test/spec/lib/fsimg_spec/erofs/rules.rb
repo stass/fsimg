@@ -16,19 +16,19 @@ module FsimgSpec
       DIRECTORIES = ->(model, _) { GEOMETRY.call(model, nil) && model.directories.any? }
       NSEC = 1_000_000_000
       # The incompatible feature bits this reader implements (design:
-      # Features): only the long-prefix table. Every other bit, known or
-      # not, is refused at open. A rule moves to accept as a stage
-      # implements its feature.
-      READABLE_INCOMPAT = 0x40
+      # Features): the long-prefix table and chunk-based files. Every other
+      # bit, known or not, is refused at open.
       PREFIXES_FEATURE = 0x40
+      CHUNKED_FILE = 0x04
+      BIT_48 = 0x80
+      READABLE_INCOMPAT = PREFIXES_FEATURE | CHUNKED_FILE
       BUILTIN_PREFIXES = [1, 2, 3, 4, 6].freeze
       LONG_PREFIX = 0x80
       ACL_INDEXES = [2, 3].freeze
-      # The compressed layouts (1 and 3) and the chunk-based layout (4) are
-      # outside the profile. A chunk-based inode on a volume without
-      # CHUNKED_FILE is corrupt, not unsupported (design: Features).
-      UNREAD_LAYOUTS = [1, 3, 4].freeze
-      CHUNKED_FILE = 0x04
+      # The compressed layouts (1 and 3) are outside the profile. A
+      # chunk-based inode on a volume without CHUNKED_FILE is corrupt, not
+      # unsupported (design: Features).
+      UNREAD_LAYOUTS = [1, 3].freeze
       # A directory's data is read when it is listed, a file's when extracted.
       DATA_SCOPE = ->(inode) { inode.directory? ? "directories" : "files" }
 
@@ -55,6 +55,15 @@ module FsimgSpec
                failing = model.inodes.values.compact.select { selected.call(_1, model) && !holds.call(_1, model) }
                Array(scope).one? ? failing.empty? : failing.map(&scope_of).uniq
              })
+      end
+
+      # A rule over every chunk index entry of a chunk-based inode, found
+      # where the data is read, as for flat data.
+      def chunk_rule(id:, &holds)
+        inode_rule(id:, anchor: "chunk-based", scope: %w[directories files], scope_of: DATA_SCOPE,
+                   applies_to: ->(inode, _) { inode.chunked? }) do |inode, model|
+          inode.chunks.each_with_index.all? { |entry, index| holds.call(inode, entry, index, model) }
+        end
       end
 
       def attribute_rule(id:, anchor:, status: "FSIMG_ECORRUPT", category: "normative", applies_to: nil, &holds)
@@ -84,8 +93,14 @@ module FsimgSpec
         inode_rule(id: "inode.layout", anchor: "format-word") { |inode, _| inode.layout <= 4 },
         inode_rule(id: "inode.chunk_feature", anchor: "features",
                    applies_to: ->(inode, model) { inode.layout == 4 && !model.sb.incompat.anybits?(CHUNKED_FILE) }) { false },
+        inode_rule(id: "inode.chunk_reserved", anchor: "chunk-based",
+                   applies_to: ->(inode, _) { inode.chunked? }) { |inode, _| inode.reserved_format_bits.zero? },
+        inode_rule(id: "inode.chunk_wide", anchor: "chunk-based",
+                   applies_to: ->(inode, _) { inode.chunked? && inode.wide_blocks? }) do |inode, model|
+          model.sb.incompat.anybits?(BIT_48) && inode.eight_byte_entries?
+        end,
         inode_rule(id: "inode.layout_profile", anchor: "data-layouts", status: "FSIMG_EUNSUPPORTED", category: "profile",
-                   applies_to: ->(inode, model) { unread_layout?(inode, model) }) { false },
+                   applies_to: ->(inode, _) { UNREAD_LAYOUTS.include?(inode.layout) }) { false },
         inode_rule(id: "inode.reserved", anchor: "compact-inode") do |inode, _|
           inode.extended ? inode.fields.reserved_a.zero? && inode.fields.reserved_b.bytes.all?(&:zero?) : inode.fields.reserved.zero?
         end,
@@ -104,6 +119,9 @@ module FsimgSpec
                    applies_to: ->(inode, model) { (inode.layout.zero? || inode.inline?) && stored_bytes(inode, model).positive? }) do |inode, model|
           FsimgSpec.derive(model.domain) { inode.fields.layout_word * model.block + stored_bytes(inode, model) <= _1 }
         end,
+        chunk_rule(id: "inode.chunk_device") { |_, entry, _, _| entry.device.zero? },
+        chunk_rule(id: "inode.chunk_high_part") { |inode, entry, _, _| inode.wide_blocks? || entry.high.zero? },
+        chunk_rule(id: "inode.chunk_domain") { |inode, entry, index, model| inode.hole?(entry) || chunk_inside?(inode, entry, index, model) },
         inode_rule(id: "inode.directory_size", anchor: "directories",
                    applies_to: ->(inode, _) { inode.directory? }) { |inode, _| inode.size.positive? },
         attribute_rule(id: "xattr.framing", anchor: "inline-region") { |inode, _| attributes(inode).framed },
@@ -137,8 +155,13 @@ module FsimgSpec
 
       def identity?(model) = model.sb_defined? && model.magic == [Layout::MAGIC].pack("V") && model.image_length >= 1028
 
-      def unread_layout?(inode, model) =
-        UNREAD_LAYOUTS.include?(inode.layout) && (inode.layout != 4 || model.sb.incompat.anybits?(CHUNKED_FILE))
+      # Whether a stored chunk's whole blocks lie inside the domain's whole
+      # blocks.
+      def chunk_inside?(inode, entry, index, model)
+        block = model.block
+        blocks = (inode.chunk_length(index, block) + block - 1) / block
+        FsimgSpec.derive(model.domain) { (inode.chunk_block(entry) + blocks) * block <= _1 / block * block }
+      end
 
       # The bytes of an inode's content held in whole blocks.
       def stored_bytes(inode, model) = inode.inline? ? inode.size / model.block * model.block : inode.size

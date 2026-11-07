@@ -389,6 +389,86 @@ gen_tree_add(gen_tree_t *tree, const gen_inode_t *proto, const void *content,
 	return (nid);
 }
 
+void
+gen_tree_set_incompat(gen_tree_t *tree, uint32_t incompat)
+{
+	gen_super_put(&tree->image, SB_INCOMPAT, incompat, 4);
+}
+
+uint32_t
+gen_tree_data(gen_tree_t *tree, const void *content, size_t size)
+{
+	size_t block = (size_t)1 << tree->blkszbits;
+	size_t blocks = (size + block - 1) / block;
+	uint32_t first = tree->data_next;
+
+	CHECK(blocks > 0 && first + blocks <= tree->blocks);
+	gen_put_bytes(&tree->image, (uint64_t)first * block, content, size);
+	tree->data_next += (uint32_t)blocks;
+	return (first);
+}
+
+gen_chunk_t
+gen_chunk_block(uint64_t block)
+{
+	CHECK(block < ((uint64_t)1 << 48));
+	return ((gen_chunk_t){ .block = (uint32_t)block,
+	    .high = (uint16_t)(block >> 32) });
+}
+
+gen_chunk_t
+gen_chunk_hole(uint16_t format)
+{
+	return ((gen_chunk_t){ .block = UINT32_MAX,
+	    .high = (format & GEN_CHUNK_WIDE) != 0 ? UINT16_MAX : 0 });
+}
+
+/* The index starts at the attribute region's end rounded up to the width. */
+static size_t
+chunk_index_start(const gen_inode_t *proto, uint16_t format)
+{
+	size_t width = (format & GEN_CHUNK_INDEXES) != 0 ? 8 : 4;
+
+	return ((gen_inode_header_bytes(proto) + width - 1) / width * width);
+}
+
+void
+gen_chunk_put(gen_tree_t *tree, uint64_t nid, const gen_inode_t *proto,
+    uint16_t format, size_t index, gen_chunk_t chunk)
+{
+	size_t width = (format & GEN_CHUNK_INDEXES) != 0 ? 8 : 4;
+	uint64_t at = gen_inode_offset(&tree->image, nid) +
+	    chunk_index_start(proto, format) + index * width;
+
+	if (width == 4) {
+		gen_put(&tree->image, at, chunk.block, 4);
+		return;
+	}
+	gen_put(&tree->image, at, chunk.high, 2);
+	gen_put(&tree->image, at + 2, chunk.device, 2);
+	gen_put(&tree->image, at + 4, chunk.block, 4);
+}
+
+uint64_t
+gen_tree_add_chunked(gen_tree_t *tree, const gen_inode_t *proto,
+    uint32_t layout_word, const gen_chunk_t *chunks, size_t count)
+{
+	uint16_t format = (uint16_t)layout_word;
+	size_t width = (format & GEN_CHUNK_INDEXES) != 0 ? 8 : 4;
+	size_t header = gen_inode_header_bytes(proto);
+	size_t start = chunk_index_start(proto, format);
+	uint64_t nid = gen_tree_slot(tree, header, start - header + count * width);
+	gen_inode_t inode = *proto;
+
+	inode.nid = nid;
+	inode.layout = 4;
+	inode.layout_word = layout_word;
+	gen_inode_write(&tree->image, &inode);
+	for (size_t i = 0; i < count; i++)
+		gen_chunk_put(tree, nid, proto, format, i, chunks[i]);
+	return (nid);
+}
+
 static int
 dirent_compare(const void *a, const void *b)
 {

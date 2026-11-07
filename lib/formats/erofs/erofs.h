@@ -171,6 +171,18 @@ typedef enum erofs_space {
 } erofs_space_t;
 
 /*
+ * A chunk-based inode's chunk format, the low 16 bits of its layout word.
+ * Index entries are entry_bytes (4 or 8) wide; wide allows 48-bit block
+ * numbers in 8-byte entries.
+ */
+typedef struct erofs_chunk_format {
+	uint64_t	 chunk_bytes;
+	uint8_t		 chunkbits;
+	uint8_t		 entry_bytes;
+	bool		 wide;
+} erofs_chunk_format_t;
+
+/*
  * The decoded fixed part of an inode. layout_offset is where its layout
  * bytes (the inline tail or the chunk index) start and body_bytes where
  * they end, both from the inode's first byte, so [0, body_bytes) is all the
@@ -178,6 +190,8 @@ typedef enum erofs_space {
  * layout_word is the word at 0x10: a start block, a chunk format or a
  * device number by the inode's layout and kind. layout_high holds start-block
  * bits 32 to 47 under the 48-bit layout and is zero otherwise.
+ * chunk_format is a chunk-based inode's, decoded with the body length it
+ * determines, and zero for every other layout.
  * nid, space and offset say where the inode is: erofs_inode_load() sets
  * them, and erofs_inode_decode() alone leaves them zero.
  */
@@ -191,6 +205,7 @@ typedef struct erofs_inode {
 	int64_t		 time;			/* seconds since 1970 */
 	fsimg_entry_kind_t kind;
 	erofs_layout_t	 layout;
+	erofs_chunk_format_t chunk_format;
 	uint32_t	 time_nsec;
 	uint32_t	 fixed_bytes;		/* 32 or 64 */
 	uint32_t	 xattr_bytes;		/* the attribute region */
@@ -205,18 +220,6 @@ typedef struct erofs_inode {
 	/* A 48-bit directory whose "." record is absent. */
 	bool		 omits_dot;
 } erofs_inode_t;
-
-/*
- * A chunk-based inode's chunk format, the low 16 bits of its layout word.
- * Index entries are entry_bytes (4 or 8) wide; wide allows 48-bit block
- * numbers in 8-byte entries.
- */
-typedef struct erofs_chunk_format {
-	uint64_t	 chunk_bytes;
-	uint8_t		 chunkbits;
-	uint8_t		 entry_bytes;
-	bool		 wide;
-} erofs_chunk_format_t;
 
 /* One chunk index entry: a hole, or a chunk stored from block. */
 typedef struct erofs_chunk {
@@ -276,20 +279,23 @@ typedef struct erofs_prefix {
 
 /*
  * Where a range of an inode's content is stored, as erofs_map() returns it:
- * in the volume's blocks, or inline in the inode's own body. The kinds the
- * later layouts add, holes and decoded clusters, join this closed set.
+ * in the volume's blocks, inline in the inode's own body, or nowhere, for a
+ * chunk hole, which reads as zeros. The kind the compressed layouts add,
+ * decoded clusters, joins this closed set.
  */
 typedef enum erofs_extent_kind {
 	EROFS_EXTENT_STORED,
-	EROFS_EXTENT_INLINE
+	EROFS_EXTENT_INLINE,
+	EROFS_EXTENT_ZERO
 } erofs_extent_kind_t;
 
 /*
  * One normalized extent: the logical bytes [logical_offset,
  * logical_offset + length) of an inode, stored from storage_offset, a volume
  * byte offset for a stored extent and an offset in the inode's body for an
- * inline one. A stored extent's whole blocks lie inside the content domain;
- * an inline extent lies inside the body, which erofs_inode_load() checked.
+ * inline one; a zero extent has none and leaves it zero. A stored extent's
+ * whole blocks lie inside the content domain; an inline extent lies inside
+ * the body, which erofs_inode_load() checked.
  */
 typedef struct erofs_extent {
 	uint64_t	 logical_offset;
@@ -348,7 +354,7 @@ fsimg_status_t	erofs_reject(fsimg_error_t *, fsimg_status_t, const char *);
  * storage, and the content reader (content.c) built on it, which reads a
  * logical range of any inode into a caller buffer.
  */
-fsimg_status_t	erofs_map(const fsimg_reader_t *, const erofs_inode_t *,
+fsimg_status_t	erofs_map(fsimg_reader_t *, const erofs_inode_t *,
 		    uint64_t, erofs_extent_t *, fsimg_error_t *);
 fsimg_status_t	erofs_content_read(fsimg_reader_t *, const erofs_inode_t *,
 		    uint64_t, size_t, void *, fsimg_error_t *);

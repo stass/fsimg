@@ -102,12 +102,6 @@ enum {
 #define CHUNK_FORMAT_INDEXES	0x0020u
 #define CHUNK_FORMAT_48BIT	0x0040u
 #define CHUNK_FORMAT_RESERVED	0xff80u
-/*
- * The largest chunk the format allows. With block sizes to 4096 bytes and
- * chunkbits to 31 a chunk is at most 2^43 bytes, so only a superblock that
- * did not come from erofs_region_decode() can reach the bound.
- */
-#define CHUNK_BYTES_MAX_SHIFT	47u
 #define CHUNK_HOLE_32		UINT32_C(0xffffffff)
 #define CHUNK_HOLE_48		UINT64_C(0xffffffffffff)
 
@@ -734,7 +728,8 @@ extended_decode(const unsigned char *raw, const erofs_super_t *sb, bool bit4,
  * least "." and "..", so it is never empty. A symbolic link's target is
  * its content, 1 to EROFS_SYMLINK_MAX bytes. FIFOs, sockets and devices
  * have no content: flat layout and size zero, and a FIFO's or socket's
- * layout word is zero too, where a device keeps its number.
+ * layout word is zero too, where a device keeps its number. Having no
+ * start block, none of them has start-block bits 32 to 47 either.
  */
 static fsimg_status_t
 inode_kind_check(const erofs_inode_t *inode, const char **what)
@@ -765,6 +760,9 @@ inode_kind_check(const erofs_inode_t *inode, const char **what)
 		if (inode->layout != EROFS_LAYOUT_FLAT)
 			return (reject(FSIMG_ECORRUPT,
 			    "special file data layout", what));
+		if (inode->layout_high != 0)
+			return (reject(FSIMG_ECORRUPT,
+			    "special file start-block high bits", what));
 		if (inode->size != 0)
 			return (reject(FSIMG_ECORRUPT, "special file size",
 			    what));
@@ -787,7 +785,7 @@ static fsimg_status_t
 inode_body_measure(const erofs_super_t *sb, erofs_inode_t *inode,
     const char **what)
 {
-	erofs_chunk_format_t chunk_format;
+	erofs_chunk_format_t *chunk_format = &inode->chunk_format;
 	fsimg_status_t status;
 	uint64_t block_bytes, chunk_count, index_bytes, index_start;
 	uint64_t attributes_end;
@@ -811,14 +809,14 @@ inode_body_measure(const erofs_super_t *sb, erofs_inode_t *inode,
 			return (reject(FSIMG_ECORRUPT,
 			    "chunk-based layout without CHUNKED_FILE", what));
 		status = erofs_chunk_format_decode(inode->layout_word, sb,
-		    &chunk_format, what);
+		    chunk_format, what);
 		if (status != FSIMG_OK)
 			return (status);
-		index_start = (attributes_end + chunk_format.entry_bytes - 1) &
-		    ~(uint64_t)(chunk_format.entry_bytes - 1);
-		chunk_count = inode->size / chunk_format.chunk_bytes +
-		    (inode->size % chunk_format.chunk_bytes != 0);
-		if (!fsimg_mul_u64(chunk_count, chunk_format.entry_bytes,
+		index_start = (attributes_end + chunk_format->entry_bytes - 1) &
+		    ~(uint64_t)(chunk_format->entry_bytes - 1);
+		chunk_count = inode->size / chunk_format->chunk_bytes +
+		    (inode->size % chunk_format->chunk_bytes != 0);
+		if (!fsimg_mul_u64(chunk_count, chunk_format->entry_bytes,
 		    &index_bytes) ||
 		    !fsimg_add_u64(index_start, index_bytes,
 		    &inode->body_bytes))
@@ -849,7 +847,10 @@ erofs_device_decode(uint32_t word, uint32_t *major, uint32_t *minor)
 /*
  * A chunk-based inode's chunk format from its layout word. The word's high
  * 16 bits are not part of it: a pinned producer leaves them uninitialised,
- * so they are ignored. The 48-bit bit needs the 48-bit layout.
+ * so they are ignored. The 48-bit bit needs the 48-bit layout and 8-byte
+ * entries, the only ones with high bits for it to widen. A chunk is
+ * B << chunkbits bytes, at most 2^43 with B at most 2^12 and chunkbits at
+ * most 31, so it needs no bound of its own.
  */
 fsimg_status_t
 erofs_chunk_format_decode(uint32_t layout_word, const erofs_super_t *sb,
@@ -857,20 +858,17 @@ erofs_chunk_format_decode(uint32_t layout_word, const erofs_super_t *sb,
 {
 	erofs_chunk_format_t format;
 	uint16_t word = (uint16_t)layout_word;
-	unsigned shift;
 
 	bzero(&format, sizeof(format));
 	if ((word & CHUNK_FORMAT_RESERVED) != 0)
 		return (reject(FSIMG_ECORRUPT, "chunk format", what));
 	if ((word & CHUNK_FORMAT_48BIT) != 0 &&
-	    (sb->incompat & EROFS_INCOMPAT_48BIT) == 0)
+	    ((sb->incompat & EROFS_INCOMPAT_48BIT) == 0 ||
+	    (word & CHUNK_FORMAT_INDEXES) == 0))
 		return (reject(FSIMG_ECORRUPT, "chunk format 48-bit bit", what));
-	shift = sb->blkszbits + (word & CHUNK_FORMAT_BITS);
-	if (shift > CHUNK_BYTES_MAX_SHIFT)
-		return (reject(FSIMG_ECORRUPT, "chunk size", what));
 
 	format.chunkbits = (uint8_t)(word & CHUNK_FORMAT_BITS);
-	format.chunk_bytes = UINT64_C(1) << shift;
+	format.chunk_bytes = UINT64_C(1) << (sb->blkszbits + format.chunkbits);
 	format.entry_bytes = (word & CHUNK_FORMAT_INDEXES) != 0 ? 8 : 4;
 	format.wide = (word & CHUNK_FORMAT_48BIT) != 0;
 	*out = format;

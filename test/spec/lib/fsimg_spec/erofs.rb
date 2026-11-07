@@ -6,9 +6,10 @@ require "fsimg_spec"
 
 module FsimgSpec
   # The EROFS core model: superblock and checksum, compact and extended
-  # inodes, flat and flat-inline data, directory blocks, the parent rule and
-  # the inline attribute region. It is written from specs/design-erofs.md
-  # and shares no code with lib/formats/erofs/ or the C generator.
+  # inodes, flat, flat-inline and chunk-based data, directory blocks, the
+  # parent rule and the inline attribute region. It is written from
+  # specs/design-erofs.md and shares no code with lib/formats/erofs/ or the
+  # C generator.
   module Erofs
   end
 end

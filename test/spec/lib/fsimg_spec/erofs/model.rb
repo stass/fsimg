@@ -8,8 +8,9 @@ module FsimgSpec
   module Erofs
     # One decoded inode: its NID, volume offset, the scope of the check that
     # reaches it (the root is loaded by open, every other inode by listing
-    # its directory), the fixed part and the bytes of its attribute region.
-    Inode = Data.define(:nid, :offset, :scope, :fields, :extended, :region) do
+    # its directory), the fixed part, the bytes of its attribute region and
+    # the entries of a chunk-based inode's index.
+    Inode = Data.define(:nid, :offset, :scope, :fields, :extended, :region, :chunks) do
       def format = fields.format
       def version_bit = format & 1
       def layout = (format >> 1) & 7
@@ -20,11 +21,40 @@ module FsimgSpec
       def fixed_bytes = extended ? 64 : 32
       def region_bytes = fields.xattr_count.zero? ? 0 : 12 + 4 * (fields.xattr_count - 1)
       def inline? = layout == 2
+      def chunked? = layout == 4
       # The layout bytes after the attribute region: the flat-inline tail.
       def tail_bytes(block) = inline? ? size % block : 0
       def body_offset = offset + fixed_bytes + region_bytes
-      def body_bytes(block) = fixed_bytes + region_bytes + tail_bytes(block)
+
+      # The chunk format is the layout word's low half; its high half is
+      # unspecified (design: Chunk-based).
+      def chunk_format = fields.layout_word & 0xFFFF
+      def chunk_size(block) = block << (chunk_format & 0x1F)
+      def eight_byte_entries? = chunk_format.anybits?(0x20)
+      def wide_blocks? = chunk_format.anybits?(0x40)
+      def reserved_format_bits = chunk_format & 0xFF80
+      def entry_width = eight_byte_entries? ? 8 : 4
+      def chunk_count(block) = (size + chunk_size(block) - 1) / chunk_size(block)
+      # The bytes chunk number index covers: the last chunk is short.
+      def chunk_length(index, block) = [chunk_size(block), size - index * chunk_size(block)].min
+      # The index starts at the attribute region's end rounded up to the
+      # entry width, and the body ends after its last entry.
+      def index_offset = (body_offset + entry_width - 1) / entry_width * entry_width
+
+      # The bytes the layout adds after the attribute region.
+      def layout_bytes(block) = chunked? ? index_offset - body_offset + chunk_count(block) * entry_width : tail_bytes(block)
+      def body_bytes(block) = fixed_bytes + region_bytes + layout_bytes(block)
+
+      # A hole is all ones at the block number's width. A stored chunk's
+      # block number is the field, or 48 bits under chunk format bit 6.
+      def hole?(entry) = entry.low == 0xFFFFFFFF && entry.device.zero? && entry.high == (wide_blocks? ? 0xFFFF : 0)
+      def chunk_block(entry) = wide_blocks? ? entry.high << 32 | entry.low : entry.low
+      def readable_layout? = [0, 2, 4].include?(layout)
     end
+
+    # One chunk index entry as stored: a 4-byte entry is its block number
+    # alone, as the low part.
+    ChunkEntry = Data.define(:high, :device, :low)
 
     # One directory entry as stored. The name is nil while the block's
     # offsets do not delimit it.
@@ -179,9 +209,25 @@ module FsimgSpec
         return @inodes[nid] = nil unless bytes
 
         fields = Layout.decode(extended ? Layout::ExtendedInode : Layout::CompactInode, bytes)
-        inode = Inode.new(nid:, offset:, scope:, fields:, extended:, region: "".b)
+        inode = Inode.new(nid:, offset:, scope:, fields:, extended:, region: "".b, chunks: [])
         region = inode.region_bytes.zero? ? "".b : held(offset + inode.fixed_bytes, inode.region_bytes, scope)
-        @inodes[nid] = inode.with(region: region || "".b)
+        inode = inode.with(region: region || "".b)
+        @inodes[nid] = inode.with(chunks: chunks(inode, scope))
+      end
+
+      # The index entries of a chunk-based inode, none where the image does
+      # not hold the whole index: a body outside the volume is for the rules.
+      def chunks(inode, scope)
+        return [] unless inode.chunked?
+
+        index = held(inode.index_offset, inode.chunk_count(@block) * inode.entry_width, scope)
+        return [] unless index
+
+        if inode.eight_byte_entries?
+          index.unpack("vvV" * (index.bytesize / 8)).each_slice(3).map { |high, device, low| ChunkEntry.new(high:, device:, low:) }
+        else
+          index.unpack("V*").map { ChunkEntry.new(high: 0, device: 0, low: _1) }
+        end
       end
 
       # The count bytes at offset, or nil when the image lacks them. A range
@@ -197,7 +243,7 @@ module FsimgSpec
       end
 
       def read_blocks(inode)
-        return [] if inode.layout > 2 || inode.size.zero?
+        return [] unless inode.readable_layout? && inode.size.positive?
 
         (0...((inode.size + @block - 1) / @block)).filter_map do |index|
           valid = [@block, inode.size - index * @block].min
@@ -231,10 +277,12 @@ module FsimgSpec
 
       # count bytes at offset of the inode's content, or nil when the image
       # does not hold them. Flat data is read from its start block; the
-      # inline tail comes from the inode's body.
+      # inline tail comes from the inode's body; a chunk-based inode's from
+      # its chunks.
       def data(inode, offset, count, scope)
         return "".b if count.zero?
         return nil if offset + count > inode.size
+        return chunk_data(inode, offset, count, scope) if inode.chunked?
 
         full = inode.inline? ? inode.size / @block * @block : inode.size
         stored = offset < full ? [count, full - offset].min : 0
@@ -243,8 +291,24 @@ module FsimgSpec
         head && tail && head + tail
       end
 
+      # The bytes of each chunk the range touches: a hole is zeros, any other
+      # chunk reads from its block. Nil when an entry or its bytes are absent.
+      def chunk_data(inode, offset, count, scope)
+        size = inode.chunk_size(@block)
+        pieces = (offset / size..(offset + count - 1) / size).map do |index|
+          entry = inode.chunks[index]
+          start = index * size
+          from = [offset - start, 0].max
+          length = [offset + count, start + size].min - start - from
+          next nil unless entry
+
+          inode.hole?(entry) ? "\0".b * length : held(inode.chunk_block(entry) * @block + from, length, scope)
+        end
+        pieces.join.b if pieces.all?
+      end
+
       def digest(inode)
-        return nil if inode.layout > 2
+        return nil unless inode.readable_layout?
 
         digest = Digest::SHA256.new
         0.step(inode.size - 1, CHUNK) do |offset|

@@ -2111,6 +2111,228 @@ test_payload_of_a_file_with_two_names_is_counted_once_per_name(void)
 	gen_tree_free(&tree);
 }
 
+/* ---- Chunk-based files ---- */
+
+enum {
+	LAYOUT_CHUNKS = 4,
+	INCOMPAT_CHUNKED_FILE = 0x04,
+	CHUNK_BLOCK_BYTES = 512
+};
+
+/* A chunk-based inode (B = 512) of the mode and size, with its index. */
+static gen_inode_t
+chunk_proto(uint16_t mode, uint64_t size)
+{
+	gen_inode_t proto = inode_proto(mode, LAYOUT_CHUNKS);
+
+	proto.size = size;
+	return (proto);
+}
+
+/* A block of test content stored in the next free data block. */
+static uint32_t
+add_data_block(gen_tree_t *tree, unsigned char seed)
+{
+	unsigned char bytes[CHUNK_BLOCK_BYTES];
+
+	for (size_t i = 0; i < sizeof(bytes); i++)
+		bytes[i] = (unsigned char)(seed + i);
+	return (gen_tree_data(tree, bytes, sizeof(bytes)));
+}
+
+/* A 512-byte-block tree that may hold chunk-based files. */
+static void
+chunk_tree_new(gen_tree_t *tree)
+{
+	tree_new(tree, 9, 16);
+	gen_tree_set_incompat(tree, INCOMPAT_CHUNKED_FILE);
+}
+
+static void
+test_chunk_files_with_shared_blocks_and_holes_verify(void)
+{
+	gen_chunk_t a_chunks[3], b_chunks[1], c_chunks[2];
+	gen_dirent_t kids[3];
+	gen_inode_t a_proto = chunk_proto(MODE_FILE, 3 * 512);
+	gen_inode_t b_proto = chunk_proto(MODE_FILE, 512);
+	gen_inode_t c_proto = chunk_proto(MODE_FILE, 2 * 512 - 100);
+	gen_tree_t tree;
+	uint32_t shared;
+	uint64_t a, b, c;
+
+	chunk_tree_new(&tree);
+	shared = add_data_block(&tree, 1);
+
+	/* A names the block twice around a hole, B and C name it again. */
+	a_chunks[0] = gen_chunk_block(shared);
+	a_chunks[1] = gen_chunk_hole(0);
+	a_chunks[2] = gen_chunk_block(shared);
+	a = gen_tree_add_chunked(&tree, &a_proto, 0, a_chunks, 3);
+	b_chunks[0] = gen_chunk_block(shared);
+	b = gen_tree_add_chunked(&tree, &b_proto, 0, b_chunks, 1);
+	c_chunks[0] = gen_chunk_hole(GEN_CHUNK_INDEXES);
+	c_chunks[1] = gen_chunk_block(shared);
+	c = gen_tree_add_chunked(&tree, &c_proto, GEN_CHUNK_INDEXES,
+	    c_chunks, 2);
+	kids[0] = entry("a", a, T_FILE);
+	kids[1] = entry("b", b, T_FILE);
+	kids[2] = entry("c", c, T_FILE);
+	fill_dir(&tree, 0, 0, kids, 3);
+	expect_verified("chunks sharing a block, with holes", &tree);
+	gen_tree_free(&tree);
+}
+
+static void
+test_chunk_holes_claim_nothing_and_verify(void)
+{
+	gen_chunk_t holes[3] = { gen_chunk_hole(0), gen_chunk_hole(0),
+	    gen_chunk_hole(0) };
+	gen_inode_t proto = chunk_proto(MODE_FILE, 2 * 512 + 1);
+	gen_dirent_t kids[2];
+	gen_tree_t tree;
+	uint64_t sparse, wide;
+
+	chunk_tree_new(&tree);
+	sparse = gen_tree_add_chunked(&tree, &proto, 0, holes, 3);
+	wide = gen_tree_add_chunked(&tree, &proto, GEN_CHUNK_INDEXES,
+	    holes, 3);
+	kids[0] = entry("sparse", sparse, T_FILE);
+	kids[1] = entry("sparse8", wide, T_FILE);
+	fill_dir(&tree, 0, 0, kids, 2);
+	gen_tree_seal(&tree);
+	for (size_t i = 0; i < SCOPE_COUNT; i++) {
+		verdict_t v = verify_image(&tree.image, scopes[i]);
+
+		check_verdict("files of nothing but holes", scopes[i], &v,
+		    FSIMG_OK, NULL);
+		EXPECT(v.report.files == 2 &&
+		    v.report.logical_bytes == 2 * (2 * 512 + 1),
+		    "%s: %llu files, %llu logical bytes", scope_name(scopes[i]),
+		    (unsigned long long)v.report.files,
+		    (unsigned long long)v.report.logical_bytes);
+	}
+	gen_tree_free(&tree);
+}
+
+/* A one-block chunk-based file whose one chunk names the given block. */
+static uint64_t
+chunk_file_on(gen_tree_t *tree, uint32_t block)
+{
+	gen_inode_t proto = chunk_proto(MODE_FILE, 512);
+	gen_chunk_t chunk = gen_chunk_block(block);
+
+	return (gen_tree_add_chunked(tree, &proto, 0, &chunk, 1));
+}
+
+static void
+test_a_chunk_over_an_inode_body_is_corrupt(void)
+{
+	gen_dirent_t kid;
+	gen_tree_t tree;
+
+	chunk_tree_new(&tree);
+	kid = entry("f", chunk_file_on(&tree, META_BYTES >> 9), T_FILE);
+	fill_dir(&tree, 0, 0, &kid, 1);
+	expect_corrupt("a chunk on the block of the inodes", &tree,
+	    "metadata at byte 4096 overlaps other storage");
+	gen_tree_free(&tree);
+}
+
+static void
+test_a_chunk_over_a_directory_block_is_corrupt(void)
+{
+	gen_inode_t proto = chunk_proto(MODE_FILE, 512);
+	char phrase[128];
+	gen_dirent_t kid;
+	gen_tree_t tree;
+	uint32_t root_block;
+	uint64_t file;
+
+	chunk_tree_new(&tree);
+	file = chunk_file_on(&tree, add_data_block(&tree, 3));
+	kid = entry("f", file, T_FILE);
+	fill_dir(&tree, 0, 0, &kid, 1);
+
+	/* The root's block exists only now: point the chunk at it. */
+	root_block = start_block(&tree, 0);
+	gen_chunk_put(&tree, file, &proto, 0, 0, gen_chunk_block(root_block));
+	snprintf(phrase, sizeof(phrase), "metadata at byte %llu overlaps other "
+	    "storage", (unsigned long long)block_offset(&tree, root_block));
+	expect_corrupt("a chunk on the root's block", &tree, phrase);
+	gen_tree_free(&tree);
+}
+
+/*
+ * A chunk-based directory of two blocks: ".", ".." and first_name, then "z"
+ * starting the second block. The second chunk names `second` when it is not
+ * 0, else a block of its own holding "z".
+ */
+static uint64_t
+add_chunk_directory(gen_tree_t *tree, uint64_t file, const char *first_name,
+    uint32_t second)
+{
+	gen_dirent_t records[4];
+	gen_inode_t proto = chunk_proto(MODE_DIR, 0);
+	unsigned char blocks[2 * CHUNK_BLOCK_BYTES] = { 0 };
+	gen_chunk_t chunks[2];
+	uint64_t dir = gen_nid_at(&tree->image, tree->meta_next);
+
+	records[0] = entry(".", dir, T_DIR);
+	records[1] = entry("..", 0, T_DIR);
+	records[2] = entry(first_name, file, T_FILE);
+	records[3] = entry("z", file, T_FILE | GEN_STARTS_BLOCK);
+	proto.nlink = 2;
+	proto.size = gen_dir_pack(blocks, sizeof(blocks), CHUNK_BLOCK_BYTES,
+	    records, 4);
+	chunks[0] = gen_chunk_block(gen_tree_data(tree, blocks,
+	    CHUNK_BLOCK_BYTES));
+	chunks[1] = gen_chunk_block(second != 0 ? second :
+	    gen_tree_data(tree, blocks + CHUNK_BLOCK_BYTES,
+	    CHUNK_BLOCK_BYTES));
+	CHECK(gen_tree_add_chunked(tree, &proto, 0, chunks, 2) == dir);
+	return (dir);
+}
+
+/*
+ * A directory block is read as the directory's records, so a directory
+ * cannot name one block in two of its own chunks and still list: the second
+ * would repeat "." out of order. Two directories can share the block that
+ * holds only their last name, which each lists correctly; directory blocks
+ * are exclusive, so that is a finding.
+ */
+static void
+test_chunk_based_directories_verify_and_sharing_a_block_is_corrupt(void)
+{
+	gen_dirent_t kids[2];
+	gen_tree_t tree;
+	uint64_t file, first, second;
+
+	chunk_tree_new(&tree);
+	file = add_file(&tree, LAYOUT_FLAT, 10);
+	set_nlink(&tree, file, 4);
+	first = add_chunk_directory(&tree, file, "a", 0);
+	second = add_chunk_directory(&tree, file, "b", 0);
+	kids[0] = entry("d1", first, T_DIR);
+	kids[1] = entry("d2", second, T_DIR);
+	fill_dir(&tree, 0, 0, kids, 2);
+	expect_verified("two directories of two chunks each", &tree);
+	gen_tree_free(&tree);
+
+	chunk_tree_new(&tree);
+	file = add_file(&tree, LAYOUT_FLAT, 10);
+	set_nlink(&tree, file, 4);
+	first = add_chunk_directory(&tree, file, "a", 0);
+	/* The file's block, then the first directory's two blocks. */
+	second = add_chunk_directory(&tree, file, "b", start_block(&tree,
+	    file) + 2);
+	kids[0] = entry("d1", first, T_DIR);
+	kids[1] = entry("d2", second, T_DIR);
+	fill_dir(&tree, 0, 0, kids, 2);
+	expect_corrupt("two directories sharing their last block", &tree,
+	    "metadata at byte");
+	gen_tree_free(&tree);
+}
+
 int
 main(void)
 {
@@ -2164,5 +2386,10 @@ main(void)
 	test_a_block_count_past_the_input_fails_as_truncated();
 	test_an_entry_naming_the_root_is_corrupt_at_every_depth();
 	test_payload_of_a_file_with_two_names_is_counted_once_per_name();
+	test_chunk_files_with_shared_blocks_and_holes_verify();
+	test_chunk_holes_claim_nothing_and_verify();
+	test_a_chunk_over_an_inode_body_is_corrupt();
+	test_a_chunk_over_a_directory_block_is_corrupt();
+	test_chunk_based_directories_verify_and_sharing_a_block_is_corrupt();
 	return (failures == 0 ? 0 : 1);
 }

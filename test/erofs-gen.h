@@ -195,6 +195,64 @@ void		gen_tree_fill(gen_tree_t *, uint64_t, const gen_inode_t *,
 uint64_t	gen_tree_add(gen_tree_t *, const gen_inode_t *, const void *,
 		    size_t);
 
+/* The superblock's incompatible feature word. */
+void		gen_tree_set_incompat(gen_tree_t *, uint32_t);
+
+/*
+ * Copy size bytes into the next free data blocks, rounded up to whole blocks
+ * and zero after size, and return the first block's number. A chunk's data
+ * lives here, named by the chunk index of an inode.
+ */
+uint32_t	gen_tree_data(gen_tree_t *, const void *, size_t);
+
+/*
+ * Chunk-based files (layout 4). The chunk format is the low 16 bits of the
+ * layout word: chunkbits in bits 0 to 4, GEN_CHUNK_INDEXES for 8-byte index
+ * entries and GEN_CHUNK_WIDE for 48-bit block numbers; any other bit may be
+ * ORed in to build a corrupt one. The high 16 bits of the word are stored as
+ * given, since producers leave them uninitialised.
+ *
+ * A gen_chunk_t is one index entry as written. A 4-byte entry is just block.
+ * An 8-byte entry is high (16 bits), device (16 bits), then block (32 bits),
+ * all little-endian. gen_chunk_block() names a block with the high part the
+ * block's bits 32 to 47 need; gen_chunk_hole(format) is the all-ones block
+ * number at the width the format has: block 0xFFFFFFFF, and under
+ * GEN_CHUNK_WIDE also high 0xFFFF. Fields can be set directly to build a
+ * corrupt entry.
+ */
+enum {
+	GEN_CHUNK_INDEXES = 0x20,
+	GEN_CHUNK_WIDE = 0x40
+};
+
+typedef struct gen_chunk {
+	uint32_t	 block;
+	uint16_t	 high;
+	uint16_t	 device;
+} gen_chunk_t;
+
+gen_chunk_t	gen_chunk_block(uint64_t);
+gen_chunk_t	gen_chunk_hole(uint16_t);
+
+/*
+ * Overwrite index entry `index` of the chunk-based inode at nid, which was
+ * added from the same prototype and chunk format.
+ */
+void		gen_chunk_put(gen_tree_t *, uint64_t, const gen_inode_t *,
+		    uint16_t, size_t, gen_chunk_t);
+
+/*
+ * Add a chunk-based inode shaped by the prototype (size, mode and the rest
+ * as given, layout forced to 4) with the layout word given, its chunk
+ * format in the low half and anything in the high half, and the index of
+ * count entries at the attribute region's end rounded up to the entry
+ * width. The size and the entry count are
+ * independent, so a test can claim more chunks than the index holds.
+ * Returns the NID.
+ */
+uint64_t	gen_tree_add_chunked(gen_tree_t *, const gen_inode_t *,
+		    uint32_t, const gen_chunk_t *, size_t);
+
 /*
  * A compact directory (mode 040755) at nid holding the children and the "."
  * and ".." records, all sorted by name bytes, stored flat in data blocks.

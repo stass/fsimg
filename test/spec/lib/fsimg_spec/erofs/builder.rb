@@ -16,8 +16,14 @@ module FsimgSpec
     #   byte 16384 the subdirectory's data
     #
     # Metadata slots (NID): 1 root, 2 file.txt (compact, flat-inline),
-    # 5 ext.bin (extended, flat-inline), 8 sub, 9 sub/leaf. Slot 0 is unused
+    # 5 ext.bin (extended, flat-inline), 8 sub, 9 sub/leaf, and with the
+    # chunked parameter 12 chunk4.bin and 16 chunk8.bin. Slot 0 is unused
     # so that the byte after the superblock checksum range is padding.
+    #
+    # chunk4.bin has 4-byte entries and four chunks of one block: the block
+    # of ext.bin, a hole, the block of sub's data, and the block of ext.bin
+    # again, which the last, short chunk shares. chunk8.bin has 8-byte entries
+    # and chunks of two blocks: the two blocks from ext.bin's, and a hole.
     module Builder
       NAME = "erofs-independent"
       MAGIC = 0xE0F5E1E2
@@ -27,6 +33,8 @@ module FsimgSpec
       EXT = 5
       SUB = 8
       LEAF = 9
+      CHUNK4 = 12
+      CHUNK8 = 16
       ROOT_DATA = 8192
       EXT_DATA = 12288
       SUB_DATA = 16384
@@ -36,6 +44,10 @@ module FsimgSpec
       FILE_SIZE = 9
       LEAF_SIZE = 7
       TAIL = 5
+      CHUNK4_TAIL = 5
+      EIGHT_BYTE_ENTRIES = 0x20
+      INCOMPAT_CHUNKED_FILE = 4
+      HOLE = 0xFFFFFFFF
       DIRECTORY = 0o040755
       REGULAR = 0o100644
       COMPAT_CHECKSUM = 1
@@ -43,8 +55,8 @@ module FsimgSpec
       # An attribute region of two inline entries, user.a = "b" and
       # user.c = "d": 12 + 4 * (5 - 1) bytes.
       ATTRIBUTE_COUNT = 5
-      PARAMETERS = %i[block_bits checksum xattr subdirectory].freeze
-      DEFAULTS = { block_bits: 12, checksum: 1, xattr: 0, subdirectory: 0 }.freeze
+      PARAMETERS = %i[block_bits checksum xattr subdirectory chunked].freeze
+      DEFAULTS = { block_bits: 12, checksum: 1, xattr: 0, subdirectory: 0, chunked: 0 }.freeze
 
       module_function
 
@@ -55,16 +67,25 @@ module FsimgSpec
         DEFAULTS.merge(parameters).tap do |selected|
           raise BuilderError, "EROFS block_bits is outside 9..12" unless selected[:block_bits].between?(9, 12)
           raise BuilderError, "EROFS flags must be 0 or 1" unless
-            selected.values_at(:checksum, :xattr, :subdirectory).all? { [0, 1].include?(_1) }
+            selected.values_at(:checksum, :xattr, :subdirectory, :chunked).all? { [0, 1].include?(_1) }
         end.freeze
       end
 
       def tree(parameters)
         selected = options(parameters)
         block = 1 << selected[:block_bits]
-        [TreeEntry.file("ext.bin", size: block + TAIL, content: "zero"),
+        [*chunk_entries(selected, block),
+         TreeEntry.file("ext.bin", size: block + TAIL, content: "zero"),
          TreeEntry.file("file.txt", size: FILE_SIZE, content: "zero"),
          *(selected[:subdirectory] == 1 ? [TreeEntry.directory("sub"), TreeEntry.file("sub/leaf", size: LEAF_SIZE, content: "zero")] : [])].freeze
+      end
+
+      # The chunk-based files of a chunked volume, none otherwise.
+      def chunk_entries(selected, block)
+        return [] unless selected[:chunked] == 1
+
+        [TreeEntry.file("chunk4.bin", size: 3 * block + CHUNK4_TAIL, content: "zero"),
+         TreeEntry.file("chunk8.bin", size: 3 * block, content: "zero")]
       end
 
       def write(path, parameters:, tree:, max_bytes:)
@@ -92,8 +113,9 @@ module FsimgSpec
         block = 1 << selected[:block_bits]
         Layout::Superblock.new(
           magic: MAGIC, checksum:, compat: COMPAT_MTIME | (selected[:checksum] == 1 ? COMPAT_CHECKSUM : 0),
-          blkszbits: selected[:block_bits], root_nid: ROOT, inode_count: selected[:subdirectory] == 1 ? 5 : 3,
-          epoch: EPOCH, blocks: LENGTH / block, meta_blkaddr: META / block, volume_name: "fsimg-spec"
+          blkszbits: selected[:block_bits], root_nid: ROOT, inode_count: 3 + 2 * selected[:subdirectory] + 2 * selected[:chunked],
+          epoch: EPOCH, blocks: LENGTH / block, meta_blkaddr: META / block, volume_name: "fsimg-spec",
+          incompat: selected[:chunked] == 1 ? INCOMPAT_CHUNKED_FILE : 0
         ).to_binary_s
       end
 
@@ -112,12 +134,25 @@ module FsimgSpec
       def attribute(suffix, value) =
         (Layout::AttributeEntry.new(suffix_length: suffix.bytesize, name_index: 1, value_length: value.bytesize).to_binary_s + suffix.b + value.b).then { _1.ljust((_1.bytesize + 3) & ~3, "\0".b) }
 
+      # A chunk index entry: the high part, the device identifier and the
+      # block number of an 8-byte entry, or the block number of a 4-byte one.
+      def chunk_entry(block, width:) = width == 8 ? [0, 0, block].pack("v2V") : [block].pack("V")
+
+      # The chunk-based files. Blocks are counted from the start of the image.
+      def chunk_slots(selected)
+        block = 1 << selected[:block_bits]
+        index4 = [EXT_DATA / block, HOLE, SUB_DATA / block, EXT_DATA / block].map { chunk_entry(_1, width: 4) }.join
+        index8 = [EXT_DATA / block, HOLE].map { chunk_entry(_1, width: 8) }.join
+        { CHUNK4 => compact(mode: REGULAR, size: 3 * block + CHUNK4_TAIL, layout: 4, layout_word: 0) + index4,
+          CHUNK8 => compact(mode: REGULAR, size: 3 * block, layout: 4, layout_word: EIGHT_BYTE_ENTRIES | 1) + index8 }
+      end
+
       def slots(selected)
         block = 1 << selected[:block_bits]
         sub = selected[:subdirectory] == 1
         file_attributes = selected[:xattr] == 1
         {
-          ROOT => compact(mode: DIRECTORY, size: root_entries(sub).sum { 12 + _1.first.bytesize }, layout: 0,
+          ROOT => compact(mode: DIRECTORY, size: root_entries(selected).sum { 12 + _1.first.bytesize }, layout: 0,
                           layout_word: ROOT_DATA / block, links: sub ? 3 : 2),
           FILE => compact(mode: REGULAR, size: FILE_SIZE, layout: 2, layout_word: 0xFFFFFFFF,
                           xattr_count: file_attributes ? ATTRIBUTE_COUNT : 0) +
@@ -127,18 +162,21 @@ module FsimgSpec
             SUB => compact(mode: DIRECTORY, size: sub_entries.sum { 12 + _1.first.bytesize }, layout: 0,
                            layout_word: SUB_DATA / block, links: 2),
             LEAF => compact(mode: REGULAR, size: LEAF_SIZE, layout: 2, layout_word: 0xFFFFFFFF) + "\0".b * LEAF_SIZE
-          } : {})
+          } : {}),
+          **(selected[:chunked] == 1 ? chunk_slots(selected) : {})
         }
       end
 
       def directories(selected)
         sub = selected[:subdirectory] == 1
-        { ROOT_DATA => directory_block(root_entries(sub)), **(sub ? { SUB_DATA => directory_block(sub_entries) } : {}) }
+        { ROOT_DATA => directory_block(root_entries(selected)), **(sub ? { SUB_DATA => directory_block(sub_entries) } : {}) }
       end
 
       # [name, nid, file type], in byte order.
-      def root_entries(sub) = [[".", ROOT, 2], ["..", ROOT, 2], ["ext.bin", EXT, 1], ["file.txt", FILE, 1],
-                               *(sub ? [["sub", SUB, 2]] : [])]
+      def root_entries(selected) = [[".", ROOT, 2], ["..", ROOT, 2],
+                                    *(selected[:chunked] == 1 ? [["chunk4.bin", CHUNK4, 1], ["chunk8.bin", CHUNK8, 1]] : []),
+                                    ["ext.bin", EXT, 1], ["file.txt", FILE, 1],
+                                    *(selected[:subdirectory] == 1 ? [["sub", SUB, 2]] : [])]
       def sub_entries = [[".", SUB, 2], ["..", ROOT, 2], ["leaf", LEAF, 1]]
 
       # The entry array, then the names concatenated.

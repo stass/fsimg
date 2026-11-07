@@ -332,8 +332,11 @@ inode_record(fsimg_reader_t *reader, erofs_verifier_t *verifier,
  * Claim every stored extent of inode's content in class, mapped from
  * offset 0 to its size. An extent occupies whole blocks, which erofs_map()
  * proved inside the content domain, so rounding its length up to a block
- * stays inside it. An inline extent lies in the body, already claimed.
- * Each extent is one unit of work.
+ * stays inside it. An inline extent lies in the body, already claimed, and
+ * a chunk hole stores nothing. Chunks naming one block claim it once each:
+ * the sweep lets data claims overlap, while a directory's blocks are
+ * exclusive, so a directory whose chunks share a block is a finding. Each
+ * extent is one unit of work.
  */
 static fsimg_status_t
 storage_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,

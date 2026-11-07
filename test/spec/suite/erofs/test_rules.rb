@@ -36,7 +36,7 @@ class ErofsRulesTest < Minitest::Test
 
   def test_valid_images_decode_to_the_tree_the_builder_wrote
     with_cases do |cases, _registry|
-      [{}, { block_bits: 9, xattr: 1, subdirectory: 1 }, { block_bits: 11, checksum: 0 }].each do |parameters|
+      [{}, { block_bits: 9, xattr: 1, subdirectory: 1, chunked: 1 }, { block_bits: 11, checksum: 0, chunked: 1 }].each do |parameters|
         witness = Erofs::Witnesses::Witness.new(id: "erofs.test.tree", parameters:, mutations: [], intended: nil, rules: [])
         model = cases.call(witness).model
         expected = Erofs::Builder.tree(parameters).map { [_1.path.b, _1.type, _1.type == "file" ? _1.size : nil] }

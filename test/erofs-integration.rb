@@ -17,8 +17,9 @@
 # Both verifications must succeed on every fixture that reads. A fixture
 # without a manifest must open, list and extract, and its
 # expected.txt digests must match where it has one; the few that end in a
-# refusal are pinned in EXPECTED_REFUSALS, and `W` must refuse each of them
-# with the same reason. A fixture whose `i` fails with the
+# refusal are pinned in EXPECTED_REFUSALS, or in EXPECTED_CORRUPT when a
+# rule rejects them, and `W` must refuse each of them with the same reason.
+# A fixture whose `i` fails with the
 # "unsupported capability" status is counted and named as not yet supported,
 # never a pass, and only for a reason listed in KNOWN_REFUSALS: any other
 # refusal, or fewer than PASS_FLOOR passes, fails the run. A few
@@ -66,7 +67,7 @@ MAX_NOTES = 4
 # The verifications run on every readable fixture: structure, then file data.
 VERIFY_MODES = [[], ["-d"]].freeze
 # Passes today; a fixture slipping to "unsupported" must not keep the run green.
-PASS_FLOOR = 53
+PASS_FLOOR = 58
 # Fixtures covering geometry, inline data, and an attribute-bearing tree.
 WRAPPED_FIXTURES = %w[e1-geom-b512 e3-b4096-inline e6-xattr-default].freeze
 SECTOR = 512
@@ -74,24 +75,30 @@ FIRST_SECTOR = 2048
 
 # The only reasons the reader may give for an image it cannot read yet.
 KNOWN_REFUSALS = [
-  /feature (48BIT|LZ4_0PADDING|CHUNKED_FILE)\z/, /extra devices\z/, /compressed data layout\z/, /metadata box/
+  /feature (48BIT|LZ4_0PADDING)\z/, /extra devices\z/, /compressed data layout\z/, /metadata box/
 ].freeze
 
 # Fixtures without a manifest that end in a refusal, and its class. Evidence:
-# ~/.cache/fsimg-erofs/evidence/E7.md (edited chunk indexes), E8.md (LZ4
-# images, the cleared-flag edits), E9.md (two-header edits), E14.md (extra
-# devices). A fixture not listed here must open, list and extract.
+# ~/.cache/fsimg-erofs/evidence/E8.md (LZ4 images, the cleared-flag edits),
+# E9.md (two-header edits), E14.md (extra devices). A fixture listed neither
+# here nor in EXPECTED_CORRUPT must open, list and extract.
 EXPECTED_REFUSALS = {
   "e14-blobdev-b4096" => /extra devices/, "e14-tar-index-b4096" => /extra devices/,
   "e2-vm-48bit" => /48BIT/,
-  "e7-edit-block-oor" => /CHUNKED_FILE/, "e7-edit-device-id" => /CHUNKED_FILE/,
-  "e7-edit-format-0x40" => /CHUNKED_FILE/, "e7-edit-format-0x80" => /CHUNKED_FILE/,
-  "e7-edit-high-part" => /CHUNKED_FILE/, "e7-edit-layout-upper" => /CHUNKED_FILE/,
   "e8-lz4-block-end" => /LZ4_0PADDING/, "e8-lz4-distance0" => /LZ4_0PADDING/,
   "e9-head2-head1-wrong" => /LZ4_0PADDING/, "e9-head2-lz4-ctrl" => /LZ4_0PADDING/,
   "e9-head2-lzma" => /LZ4_0PADDING/, "e9-head2-wrongalg" => /LZ4_0PADDING/,
   "e8-lz4-flag-cleared" => /compressed data layout/, "e8-lz4-flag-cleared-distance0" => /compressed data layout/,
   "e8-lz4-unpadded" => /compressed data layout/
+}.freeze
+
+# Fixtures without a manifest that the reader rejects as corrupt, and the
+# rule it names (specs/design-erofs.md#chunk-based). Evidence:
+# ~/.cache/fsimg-erofs/evidence/E7.md, edited chunk indexes and formats.
+EXPECTED_CORRUPT = {
+  "e7-edit-block-oor" => /data blocks outside the volume/, "e7-edit-device-id" => /chunk device identifier/,
+  "e7-edit-format-0x40" => /chunk format 48-bit bit/, "e7-edit-format-0x80" => /chunk format\z/,
+  "e7-edit-high-part" => /chunk block high bits/
 }.freeze
 
 # The reader refuses the image with the "unsupported capability" status.
@@ -182,10 +189,16 @@ def listing(image) =
 # Whether the volume stores modification times (the MTIME compatible feature).
 def mtime_volume?(info) = info.dig("texts", "compat_features").to_s.split.include?("MTIME")
 
-def extract(image, dir)
+def extract(image, dir, limit: [])
   FileUtils.mkdir_p(dir, mode: 0o700)
-  run("x", "-E", "-k", "-f", image, "-C", dir)
+  run("x", "-E", "-k", *limit, "-f", image, "-C", dir)
 end
+
+# The output limit for extracting a tree, from its manifest rows or its
+# listing: the files' logical bytes, holes included, which a sparse file
+# can raise past the default of 16 times the volume's length, plus room for
+# link targets.
+def output_limit(rows) = ["-l", "output=#{rows.select { _1.kind == 'file' }.sum(&:size) + (1 << 20)}"]
 
 def file_sha(dir, path)
   full = File.join(dir, path)
@@ -298,7 +311,7 @@ def compare(name, dir, work)
   rows = read_manifest(dir).reject { _1.path == "/" }.select { portable?(_1.path) }
   seen = listing(image).to_h { [_1.path, _1] }
   out = File.join(work, name)
-  extract(image, out)
+  extract(image, out, limit: output_limit(rows))
   found = rows.map do |row|
     got = seen.delete(row.path)
     got ? compare_entry(row, got, image:, dir: out, expect:) : Comparison.of("#{row.path}: not listed")
@@ -313,8 +326,7 @@ end
 # whole image reads.
 def refusal_of(image, out)
   probe(image)
-  listing(image)
-  extract(image, out)
+  extract(image, out, limit: output_limit(listing(image)))
   nil
 rescue StandardError => e
   e.message
@@ -337,14 +349,15 @@ def compare_unlisted(name, dir, work)
   out = File.join(work, name)
   image = File.join(dir, "image.erofs")
   refusal = refusal_of(image, out)
-  pinned = EXPECTED_REFUSALS[name]
+  pinned = EXPECTED_REFUSALS[name] || EXPECTED_CORRUPT[name]
   case [refusal, pinned]
   in [nil, _]
     diffs = digest_differences(dir, out) + Array(verify_failure(image))
     Result.new(name:, verdict: diffs.empty? ? :unchecked : :fail, notes: diffs.first(MAX_NOTES), skipped: [])
   in [String => text, Regexp => want] if text.match?(want)
     diffs = Array(verify_refusal_difference(image, want))
-    Result.new(name:, verdict: diffs.empty? ? :unsupported : :fail, notes: [text, *diffs], skipped: [])
+    refused = EXPECTED_CORRUPT.key?(name) ? :rejected : :unsupported
+    Result.new(name:, verdict: diffs.empty? ? refused : :fail, notes: [text, *diffs], skipped: [])
   in [String => text, _]
     Result.new(name:, verdict: :fail, notes: ["unexpected refusal: #{text}"], skipped: [])
   end
@@ -429,7 +442,8 @@ def summary(results, wrapped)
   skipped = results.flat_map(&:skipped).tally.map { |kind, n| "#{n} #{kind}" }.join(", ")
   floor = counts.fetch(:pass, 0) < PASS_FLOOR ? ["fewer than #{PASS_FLOOR} passes"] : []
   line = "summary: #{counts.fetch(:pass, 0)} pass, #{counts.fetch(:fail, 0)} fail, " \
-         "#{counts.fetch(:unsupported, 0)} unsupported, #{counts.fetch(:unchecked, 0)} unchecked " \
+         "#{counts.fetch(:unsupported, 0)} unsupported, #{counts.fetch(:rejected, 0)} rejected as corrupt, " \
+         "#{counts.fetch(:unchecked, 0)} unchecked " \
          "(opened, no manifest); times compared against the command line (change times of extended inodes without MTIME skipped); " \
          "not compared: #{skipped.empty? ? 'nothing' : skipped}"
   [line, counts.fetch(:fail, 0).zero? && wrapped.empty? && floor.empty?, floor]

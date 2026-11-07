@@ -417,16 +417,39 @@
   `info ls extract`; the model should classify `verify` and `verify-deep`
   as well, from link counts, ownership and the attribute rules, so rule
   witnesses exercise `fsimg W`.
-* [Low] **EROFS codec does not yet enforce three format-design rules**
-  (`lib/formats/erofs/codec.c`): chunk-format bit 6 with 4-byte entries is
-  accepted (`erofs_chunk_format_decode`; the design's
-  [chunk-based section](specs/design-erofs.md#chunk-based) says
-  `FSIMG_ECORRUPT`); a nonzero start-block high word on a FIFO, socket or
-  device is accepted (`inode_kind_check` never looks at `layout_high`; the
-  [kinds section](specs/design-erofs.md#kinds-and-fields) says
-  `FSIMG_ECORRUPT`); and the `CHUNK_BYTES_MAX_SHIFT` check is unreachable,
-  since `blkszbits` is at most 12 and `chunkbits` at most 31, and should go
-  with its constant. Each change needs its failing-then-passing test.
+* [Medium] **Interior holes extract as written zeros** (`lib/read/reader.c`
+  `fsimg_reader_next_range`, `lib/extract/extract.c` `copy_content`): the
+  [CLI design](specs/design-cli.md) uses sparse files where possible, and
+  extraction skips the ZERO ranges the reader reports, but the
+  [range query](specs/design-content.md#zero-extents) answers from lengths
+  alone and reports a body with interior zero extents as one DATA range, so
+  an EROFS chunk hole is delivered as zeros and written: `fsimg x` of
+  `e7-chunk8k` allocates all 64 KiB of the wholly sparse `allhole`. Either
+  the range query reports zero extents as ZERO ranges (it then resolves
+  storage, which the design avoids), or extraction leaves all-zero blocks of
+  a fresh file unwritten on its own proof, as the spool filler does. An
+  owner decision, in `design-content.md` or `design-holes.md`. Holes also
+  count against the output limit, so a sparse volume whose files exceed 16
+  times its length needs `-l output` to extract (`test/erofs-integration.rb`
+  `output_limit`).
+* [Medium] **Payload verification fills every zero extent**
+  (`lib/read/reader.c` `fsimg_verify_payload`): `W -d` delivers a hole in
+  64 KiB zero-filled batches, one resolve each, while the zero tail past
+  the initialized length is never synthesized. One 4-byte EROFS hole entry
+  makes a 2^43-byte file in a 16 KiB volume, about 2^27 batches per name,
+  a larger index of holes reaches 2^64 bytes, and hard links multiply it; the work and time limits are unset by default.
+  A zero extent has nothing to check beyond its containment, which resolve
+  checks, so verification could step over it in one unit of work. That
+  needs verification to see extents rather than bytes without resolving
+  twice (a held extent decodes on resolve), and the
+  [content design](specs/design-content.md#zero-extents) to say so.
+* [Low] **The extent index stores no zero records** (`lib/meta/extent.c`
+  `extent_valid`): the [content design](specs/design-content.md#zero-extents)
+  keeps zero extents in the index, coalescing them with each other, while
+  the index refuses an image offset of `FSIMG_EXTENT_ZERO` as outside its
+  domain. Delivery and salvage handle zero extents; no driver that builds
+  an index reports holes yet. Add zero records with the first one (UDF,
+  APFS).
 
 * [Low] **EROFS inline tails use their own window** (`lib/formats/erofs/`):
   `content.c` copies an inline tail into a one-block `tail_window` charged at

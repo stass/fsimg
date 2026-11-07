@@ -46,6 +46,36 @@ class ErofsModelTest < Minitest::Test
     assert_includes classification(model).rule_ids, "erofs.inode.data_domain"
   end
 
+  def test_a_hole_reads_as_zeros_and_chunks_read_from_their_blocks_whether_or_not_shared
+    data = "chunk data".b
+    model = decode(parameters: W::CHUNKED, mutations: [W.bytes(Erofs::Builder::EXT_DATA, data), W.bytes(Erofs::Builder::SUB_DATA, "sub".b)])
+
+    block = "\0".b * W::B
+    # chunk4.bin: ext.bin's block, a hole, sub's block, then 5 bytes of ext.bin's block again.
+    four = data.ljust(W::B, "\0".b) + block + "sub".b.ljust(W::B, "\0".b) + data.byteslice(0, 5)
+    # chunk8.bin: ext.bin's block and the one after it, then a hole of one block.
+    eight = data.ljust(W::B, "\0".b) + "sub".b.ljust(W::B, "\0".b) + block
+    assert_equal [Digest::SHA256.hexdigest(four), Digest::SHA256.hexdigest(eight)],
+                 %w[chunk4.bin chunk8.bin].map { |name| model.tree.find { _1.path == name.b }.sha256 }
+    assert_empty classification(model).rule_ids
+  end
+
+  def test_the_high_half_of_a_chunk_layout_word_changes_nothing
+    plain = decode(parameters: W::CHUNKED, mutations: [])
+    high = decode(parameters: W::CHUNKED, mutations: [W.u32(W.inode(Erofs::Builder::CHUNK4, 0x10), 0xABCD0000)])
+
+    assert_equal plain.tree, high.tree
+  end
+
+  def test_a_chunk_based_body_includes_its_index_rounded_to_the_entry_width
+    model = decode(parameters: W::CHUNKED, mutations: [W.u16(W.inode(Erofs::Builder::CHUNK8, 2), 1)])
+
+    inode = model.inodes.fetch(Erofs::Builder::CHUNK8)
+    # 32 fixed bytes and a 12-byte region end at 44; the index starts at 48.
+    assert_equal 32 + 12 + 4 + 2 * 8, inode.body_bytes(W::B)
+    assert_equal inode.offset + 48, inode.index_offset
+  end
+
   def test_every_mode_type_has_a_listed_kind
     assert_equal Erofs::Model::TYPES.keys.sort, Erofs::Model::KINDS.keys.sort
   end
