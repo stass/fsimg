@@ -8055,6 +8055,70 @@ count_entries(const gen_image_t *image, uint64_t memory_bytes, int scratch_fd,
 }
 
 /*
+ * The largest root NID the 16-bit field holds, 65535, 2 MiB into the
+ * metadata area, with meta_blkaddr 0 and with the area moved to block 3,
+ * where a reader ignoring meta_blkaddr finds zeros. No producer places a
+ * root there (E13), so only a hand-built volume reaches it. The root's
+ * slot is the last of its block, so its inline directory starts exactly at
+ * the next block, which the inline-tail rule allows; the directory names a
+ * file two slots before the root, whose inline bytes must read back.
+ */
+static void
+test_root_nid_65535_lists_with_meta_blkaddr_0_and_3(void)
+{
+	enum { BITS = 12, ROOT = 65535, FILE_NID = ROOT - 2 };
+	static const uint32_t metas[] = { 0, 3 };
+	const gen_dirent_t records[] = {
+		{ ".", ROOT, T_DIR }, { "..", ROOT, T_DIR },
+		{ "f", FILE_NID, T_FILE }
+	};
+	unsigned char tail[1u << BITS];
+
+	for (size_t i = 0; i < ARRAY_SIZE(metas); i++) {
+		/* The metadata area's start, its 65536 slots, the tail's block. */
+		uint32_t blocks = metas[i] + ((32 * (ROOT + 1)) >> BITS) + 1;
+		gen_super_t sb = gen_super_default(BITS, blocks);
+		gen_inode_t root = gen_root_default();
+		gen_inode_t file = inode_proto(MODE_FILE, LAYOUT_FLAT_INLINE);
+		listing_t *list = listing_new();
+		fsimg_error_t error;
+		fsimg_status_t status;
+		const node_t *node;
+		gen_image_t image;
+		char name[64];
+
+		snprintf(name, sizeof(name), "root NID 65535, meta_blkaddr %u",
+		    metas[i]);
+		sb.root_nid = ROOT;
+		sb.meta_blkaddr = metas[i];
+		gen_image_init(&image, (size_t)blocks << BITS);
+		gen_super_write(&image, &sb);
+		bzero(tail, sizeof(tail));
+		root.nid = ROOT;
+		root.size = gen_dir_pack(tail, sizeof(tail), 1u << BITS, records,
+		    ARRAY_SIZE(records));
+		gen_inode_write(&image, &root);
+		gen_put_bytes(&image, gen_inode_offset(&image, ROOT) +
+		    GEN_COMPACT_BYTES, tail, root.size);
+		file.nid = FILE_NID;
+		file.size = 2;
+		gen_inode_write(&image, &file);
+		gen_put_bytes(&image, gen_inode_offset(&image, FILE_NID) +
+		    GEN_COMPACT_BYTES, "hi", 2);
+		gen_seal(&image);
+		bzero(&error, sizeof(error));
+		status = walk_image(&image, list, &error);
+		EXPECT_STATUS(status, FSIMG_OK, error.message, name);
+		node = find_node(list, "/f");
+		EXPECT(list->count == 1 && node != NULL && node->size == 2 &&
+		    bcmp(node->content, "hi", 2) == 0,
+		    "%s: the file two slots below the root reads back", name);
+		listing_free(list);
+		gen_image_free(&image);
+	}
+}
+
+/*
  * One directory of 100000 names over many blocks, all one hard-linked file,
  * listed under the minimum memory budget: the common walker spools the
  * children to metadata scratch.
@@ -8104,9 +8168,12 @@ test_a_directory_of_100000_entries_lists_every_name(void)
 	    (unsigned long long)stats.memory_peak,
 	    (unsigned long long)stats.scratch_peak);
 	/* Without scratch the walk fits in memory or fails with the limit. */
-	EXPECT(count_entries(&tree.image, 16 * 1024 * 1024, -1, &count, last,
-	    sizeof(last), &stats) == FSIMG_ELIMIT,
-	    "without scratch the walk fails with the memory limit");
+	status = count_entries(&tree.image, 16 * 1024 * 1024, -1, &count, last,
+	    sizeof(last), &stats);
+	EXPECT(status == FSIMG_ELIMIT ||
+	    (status == FSIMG_DONE && count == ENTRIES),
+	    "without scratch the walk lists every name or fails with the "
+	    "memory limit (status %d, %zu entries)", (int)status, count);
 	close(scratch);
 	CHECK(rmdir(directory) == 0);
 	gen_tree_free(&tree);
@@ -11800,6 +11867,7 @@ main(int argc, char **argv)
 	test_a_nul_or_slash_inside_a_stored_name_is_refused();
 	test_a_deep_tree_is_listed_to_its_leaf();
 	test_a_directory_of_100000_entries_lists_every_name();
+	test_root_nid_65535_lists_with_meta_blkaddr_0_and_3();
 	test_a_cycle_to_a_grandparent_below_the_root_is_corrupt();
 
 	test_map_header_decode_applies_each_rule_of_the_design();

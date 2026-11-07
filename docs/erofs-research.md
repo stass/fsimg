@@ -591,6 +591,55 @@ nothing for these mounts but the root NID. The answer: the kernel,
 of 0, inodes ending at and moving past block ends, and multi-block
 directories. The writer accepts all four sizes.
 
+### E13 Scale
+
+`e13-big5g`, `e13-big5g-chunk1m`, `e13-big5g-lz4` (one file of 5 GiB +
+3072 bytes, holes with six tags at 0, 4 GiB - 4096, 4 GiB, 4 GiB + 8192,
+5 GiB and the last KiB, and a 6-byte file; plain, `--chunksize=1048576`
+and `-zlz4`, all `-b4096`), `e13-dir100k` (`/d` holding `f00000` to
+`f99999`, empty, beside `sib/small.txt` and `top.txt`), and four limits
+images: `e13-limits-startblk` (`-b512 --dsunit=2147483647`),
+`e13-limits-nid` (`-b512 --dsunit=1073741824`), `e13-limits-48bit` (`-b512
+-E48bit --dsunit=2147483648`) and `e13-limits-metabox` (`-b4096 -m4096`).
+`mkfs.erofs` never writes the gap `--dsunit` opens, so the limits images
+are 1.6 to 3.3 TiB apparent and a few KiB allocated; the plain 5 GiB image
+was made sparse after capture (its stored zero blocks skipped, content
+unchanged). The last five were captured with `capture-sparse.rb`, a copy of
+`capture.rb` kept with the evidence scripts, whose `sha256.txt` holds a
+sparse digest (each allocated extent's offset, length and bytes, holes zero)
+and which records the attribute column of the 100000 empty files as
+`unavailable`. Oracles: kernel mount with `find`, `stat` and SHA-256 against
+the manifest; `fsck.erofs` and `dump.erofs`.
+
+* Files beyond 4 GiB need no 48-bit layout. Plain: `/big5g.bin` is an extended
+  flat-inline inode of size `0x140000C00`, data blocks 1 to 1310720 and a
+  3072-byte inline tail at `0x140001040`; the inode follows its data (NID
+  167772288). Chunked: 5121 four-byte entries with `chunkbits` 8; the chunks
+  holding a tag and the 4096-byte last piece are data blocks, the rest holes
+  `0xFFFFFFFF`, 777 blocks in all. LZ4: a compact index of 1310721 records
+  with 4096-byte logical clusters, on-disk size 22286336. The kernel reads all
+  three to the manifest's SHA-256.
+* `/d` in `e13-dir100k` is a compact flat-inline directory of size
+  1804418: 440 full blocks and a 2178-byte inline tail, 100002 entries with
+  the dots, names in byte order, about 227 entries a block. Its children are
+  compact inodes from NID 115; the inode count is 100005.
+* The largest 32-bit start block is `0xFFFFFFFE` (`b.bin` in
+  `e13-limits-startblk`, block count `0xFFFFFFFF` of 512 bytes);
+  `0xFFFFFFFF` stays the no-block marker of an inline-only inode.
+* NIDs above 2^32 occur without the 48-bit layout: the file inodes of
+  `e13-limits-nid` follow their data at NIDs 51539607696 to 51539607728,
+  and the kernel reads them, its inode numbers equal to the NIDs. The NID
+  formula needs no 32-bit limit.
+* Under `-E48bit` the start blocks reach 2^32 and `3 * 2^31`, the block
+  count's high word at `0x0E`, the root NID in the wide field at `0x70`;
+  `-m4096` puts the root at NID `0x8000000000000000` (bit 63, the metadata
+  box). The kernel reads both, and `fsck.erofs` the 48-bit image.
+* The root NID is 36, 128 under `--MZ` or a large root attribute area, or
+  the bit-63 box root: `mkfs.erofs` allocates the root before other
+  metadata and moves `meta_blkaddr` only when the root's offset exceeds
+  `0xFFFF * 32` bytes, which no input reaches (source). A root NID above
+  65535, and a nonzero `meta_blkaddr`, come only from hand-built images.
+
 ### E14 External devices
 
 `e14-blobdev-b4096` (`--blobdev`), `e14-tar-index-b4096` (`--tar=i`),
@@ -739,6 +788,6 @@ with the `tails` tree added.
 | Every 48-bit field; encoded extents; writer's 32-byte records | Open; blocks stages 12, 14 and 15 | E10 |
 | Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Accepted: at 512, 1024, 2048 and 4096-byte blocks the writer's output passes the kernel, `fsck.erofs` and rust-fs-erofs, with empty and sub-block flat-inline start words of 0, inodes ending at and moving past block ends, and multi-block directories ([E11](#e11-writer-probes)) | E11, `qualify.sh -b` |
 | Metadata-box layout, root placement, box compression, shared attributes in the box | Open; blocks stages 13 and 15 | E12 |
-| Scale | Open; blocks stage 8 | E13 |
+| Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | Files beyond 4 GiB need no 48-bit layout (flat-inline, chunked and LZ4 compact); start blocks reach `0xFFFFFFFE` and NIDs exceed 2^32 without the 48-bit layout; the root NID stays 36 or 128, or bit 63 in a metadata box, so a root NID above 65535 and a nonzero `meta_blkaddr` come only from hand-built images | `e13-*` |
 | The fields a volume with external devices sets | Extra device count nonzero in both producer forms, `DEVICE_TABLE`, device identifier 1 in every chunk; `CHUNKED_FILE` only under `--blobdev` | `e14-*` |
 | Record count and group layout at `L > B`; compact advice `0x01` clear; a plain inline tail under interlacing | Kernel and both tools read `L = 2B` and `4B`: compact groups laid out for `ceil(size / B)` records, `ceil(size / L)` read, fields `max(lclusterbits, 12)` bits wide, so compact with `L > 4096` needs `0x01` clear, and the inline tail follows record `(size - 1) >> lclusterbits` (full index observed, compact from source); `0x01` clear is all 8-byte groups from the header's end and reads in every tool; no producer writes any of the three, and the design refuses them by policy. A plain inline tail on an interlaced inode has no agreed reading: the kernel reads it only when `E > B - C` with the extent stored rotated left by `B - C`, otherwise copies preceding metadata into the file, and `fsck.erofs` reads other bytes in every case | `e15-*` |

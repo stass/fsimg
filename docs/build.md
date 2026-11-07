@@ -1319,6 +1319,63 @@ the VM, and the oracles under `~/.local/share/fsimg-oracles` (or
 `$FSIMG_ORACLES`). The record of a run is in
 [erofs-research.md](erofs-research.md#fsimg-writer-output).
 
+`make check-scale` reads the E13 scale fixtures from `FSIMG_EROFS_FIXTURES`
+with `test-erofs-scale NAME`, one process for each name
+`test-erofs-scale --list` prints, and skips a fixture whose image does not
+exist (exit status 77). Each run opens the image in a 16 MiB context with a
+scratch directory, lists every entry and reads every regular file through the
+public reader, hashing it as it reads; the entry count, every file's size and
+every nonempty file's SHA-256 must equal the fixture's manifest. The volume
+callback counts each byte the reader requests and stops the run at the
+fixture's bound, a multiple of the image's length plus slack, so a reader that
+read an image's hole, or a chunked file's hole chunks, fails at the bound
+instead of reading terabytes. While the reader refuses the 48-bit layout and
+the metadata box, those images must fail at open with `FSIMG_EUNSUPPORTED`
+inside the same bound. Charged memory is bounded by the metadata cache's
+maximum, one sort run and 512 KiB of state, which 8 bytes of memory per name
+in the wide directory would exceed, and the run's resident-set growth by that
+bound plus 32 MiB; only the wide directory may use scratch, and it must. The
+checks never copy, hash or walk an image file, so the limits images, 1.6 to
+3.3 TiB apparent and a few KiB allocated, cost what their metadata does:
+
+```sh
+FSIMG_EROFS_FIXTURES=$HOME/fsimg-corpus/erofs ./test-erofs-scale e13-dir100k
+```
+
+On macOS 26.6.2 (x86_64, Xeon W-3245), Apple clang 21.0.0, `-O2`, the
+fixtures made by `mkfs.erofs` 1.9.4-gf36cadb5 on the internal APFS SSD
+and the scratch directory on an APFS RAM disk:
+
+| Fixture | Entries | Image calls | Image bytes | Content bytes | Memory peak | Scratch peak | RSS growth | Seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `e13-big5g` | 2 | 81,930 | 5,368,750,315 | 5,368,712,198 | 1,150,195 | 0 | 2,482,176 | 18.8 |
+| `e13-big5g-chunk1m` | 2 | 81,980 | 3,514,611 | 5,368,712,198 | 1,148,963 | 0 | 2,469,888 | 21.5 |
+| `e13-big5g-lz4` | 2 | 1,630,428 | 74,320,859 | 5,368,712,198 | 2,190,101 | 0 | 3,526,656 | 26.3 |
+| `e13-dir100k` | 100,004 | 100,453 | 5,042,629 | 9 | 5,363,133 | 9,900,220 | 5,775,360 | 0.35 |
+| `e13-limits-startblk` | 3 | 13 | 39,353 | 1,227 | 1,148,981 | 0 | 1,429,504 | 0.001 |
+| `e13-limits-nid` | 3 | 14 | 53,126 | 15,000 | 1,148,981 | 0 | 1,429,504 | 0.001 |
+| `e13-limits-48bit` | refused | 2 | 37,888 | 0 | 42,272 | 0 | 180,224 | 0.000 |
+| `e13-limits-metabox` | refused | 2 | 11,264 | 0 | 15,648 | 0 | 118,784 | 0.000 |
+
+Content bytes are what the reader delivered, decoded for the LZ4 file:
+5,368,712,198 bytes from the 22,286,336 bytes of its compressed extent.
+The common reader serves a read in 64 KiB steps and maps each step afresh,
+so the plain image reads its 5 GiB of stored zeros once, the chunked image
+reads one 4-byte chunk entry per step and nothing for its hole chunks,
+and the LZ4 image reads its input once beside one compact index group for
+each of its 1,310,721 logical clusters, about three times the image's
+length. The wide directory reads its 441 blocks once to prepare and each of
+its 100,000 child inodes once to replay; its scratch peak is the walker's
+spooled children and their sorted keys, about 99 bytes per name, while
+charged memory stays at the metadata cache and one sort run. The 5 GiB
+cases spend their time in the test's SHA-256. The limits images read the
+superblock region, their inodes and their files' blocks, which end at the
+volume's last byte (`b.bin` in start block `0xFFFFFFFE`), and nothing in the
+terabytes of hole between.
+`test/erofs-integration.sh` leaves the three 5 GiB fixtures out, since
+extracting one writes 5 GiB; this check lists and reads them, without
+verification or extraction.
+
 The HFS Plus work uses the hfsfuse `hfsdump` reader as an independent oracle,
 built the same way from a pinned upstream revision:
 

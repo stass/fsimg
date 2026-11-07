@@ -205,7 +205,7 @@ fixture behind each answer; the designs carry the answers themselves.
 | Every 48-bit field; the extent count's placement; encoded-extent widths; kernel acceptance of the writer's 32-byte records | E10 | Stages 12, 14, 15 | Open, runs before stage 12 |
 | Kernel acceptance of writer output at 512, 1024 and 2048-byte blocks and of the writer's field choices | E11 | Stages 10, 11 | [Answered](erofs-research.md#evidence-answers) for uncompressed output; stage 11's qualification at each block size covers LZ4 output |
 | Metadata-box layout, root placement, box compression, shared attributes in the box | E12 | Stages 13, 15 | Open, runs before stage 13 |
-| Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | E13 | Stage 8 | Open, runs before stage 8 |
+| Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | E13 | Stage 8 | [Answered](erofs-research.md#evidence-answers); a root NID above 65535 by hand-built images only |
 | The fields a volume with external devices sets, so refusal names it | E14 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
 | The record count and group layout of a compressed inode with `L > B`, of a compact inode with advice `0x01` clear, and of a plain inline tail under `ztailpacking` with `fragments`, on hand-built images the kernel mounts | E15 | Stage 6 | [Answered](erofs-research.md#evidence-answers); all three stay refused by policy, their observed rules recorded in the design |
 
@@ -383,15 +383,18 @@ fixtures, their command records and the oracle output:
   The 48-bit fields in `codec.c`, `read.c` and `meta.c`; encoded extents in
   `zmap.c`; omitted dots in `directory.c`.
 * **Gate:** every E10 fixture matches its manifest and verifies; sparse
-  fixtures with start blocks beyond 2^32 read correctly; mutations of every
-  widened field fail with their class.
+  fixtures with start blocks beyond 2^32 read correctly (`e13-limits-48bit`
+  in `test-erofs-scale` reads instead of being refused); a hand-built
+  volume whose wide root NID is above 65535, which no producer places
+  (E13), lists; mutations of every widened field fail with their class.
 
 ### 13. Metadata-box reader
 
 * Re-run E12. Box reads in `meta.c`, box claims in `verify.c`, shared
   attributes in the box in `xattr.c`.
 * **Gate:** every E12 fixture, plain and compressed, matches and verifies;
-  box recursion mutations fail with their class.
+  `e13-limits-metabox`, rooted at NID `0x8000000000000000`, reads in
+  `test-erofs-scale`; box recursion mutations fail with their class.
 
 ### 14. 48-bit writer
 

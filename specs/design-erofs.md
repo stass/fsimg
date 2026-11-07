@@ -336,12 +336,17 @@ The inode with NID `n`, bit 63 clear, begins at byte
 `meta_blkaddr * B + 32 * n` of the volume, computed with checked arithmetic.
 With bit 63 set, it begins at byte `32 * (n with bit 63 cleared)` of the
 [metadata box's](#metadata-box) content. A NID is a slot index, not an inode
-number, and a directory entry's NID is the only key that finds an inode. The
-root NID comes from the superblock: the 16-bit field, or the wide field under
-the 48-bit layout. An inode's fixed part, attribute region and
-layout bytes lie inside the address domain; the fixed part and attribute
-region may cross a block boundary, but an inline tail may not (see
-[flat data](#flat-and-flat-inline)).
+number, and a directory entry's NID is the only key that finds an inode. NIDs
+are 64-bit in every layout: without the 48-bit layout an inode may still lie
+beyond slot 2^32, as `mkfs.erofs` places inodes after their data (E13,
+`e13-limits-nid`), and nothing limits a NID to 32 bits. The root NID comes
+from the superblock: the 16-bit field, or the wide field under the 48-bit
+layout. A reader accepts any `meta_blkaddr` whose metadata area lies in the
+volume; `mkfs.erofs` moves it from 0 only when the root would otherwise pass
+the 16-bit field (source), and the writer keeps it 0. An inode's fixed part,
+attribute region and layout bytes lie inside the address domain; the fixed
+part and attribute region may cross a block boundary, but an inline tail may
+not (see [flat data](#flat-and-flat-inline)).
 
 ### Format word
 
@@ -1520,7 +1525,9 @@ Under `addressing=48` the writer sets `48BIT` and:
   32-byte records, because a full index record cannot hold a block number
   past 32 bits, and the 32-byte record is the one width that carries both
   the physical and the logical offset at 64 bits, as the cluster former's
-  variable-length clusters in files beyond 4 GiB need. E10 confirms that
+  variable-length clusters in files beyond 4 GiB need under this layout;
+  without it a compact index of `B`-sized logical clusters covers such a
+  file (E13, `e13-big5g-lz4`). E10 confirms that
   the kernel accepts it; if E10 cannot answer, the writer refuses
   `compression=lz4` and `metabox=lz4` with `addressing=48`;
 * never omits `.` entries.
@@ -1625,7 +1632,7 @@ minimization searches the writer's accepted block sizes, 4096 first.
 | Attributes | Inline, shared, long prefixes in both placements, filter on and off, ACLs and security labels | Overlong entries, bad shared index, unknown index, bad prefix |
 | Chunks | Both entry widths, several chunk sizes, holes, shared chunks | Device identifiers, high parts, short index, chunk past the domain |
 | Compression | Each algorithm; full and compact indexes across group boundaries; big, plain and interlaced clusters; partial references; inline tails; fragments; compressed directories; reads starting and ending inside a cluster | Bad distances and cycles, bad group packing, marker without big clusters, oversize clusters, truncated and corrupt streams, fragment past the packed inode; the hand-built E15 forms refused by policy: `L > B`, compact advice `0x01` clear, a plain inline tail on an interlaced inode |
-| 48-bit layout | Root NID above 65535; start blocks and chunk blocks above 2^32 through sparse fixtures; implicit link counts; omitted dots; every encoded-extent width a producer emits | High bits without the feature; wide root zero; encoded extents unordered, overcounted or overlong; a time sum past 64 bits |
+| 48-bit layout | Root NID above 65535 through a hand-built image, which no producer places; start blocks and chunk blocks above 2^32 and the bit-63 metadata-box root through sparse fixtures; implicit link counts; omitted dots; every encoded-extent width a producer emits | High bits without the feature; wide root zero; encoded extents unordered, overcounted or overlong; a time sum past 64 bits |
 | Metadata box | Plain and compressed boxes; directories, files and shared attributes inside; reads across box cluster boundaries | Box NID with bit 63 or naming a fragment; box inode in the box; tail crossing a box block; bit 63 without the feature |
 | Verification | Every producer fixture verifies | Every mutation above reports its class; overlapping metadata, a wrong link count |
 | Writer | Empty, small, deep, wide, large-file volumes; every kind it writes; every profile and their combinations; byte identity across source order, budget, scratch and time zone; a poison scan of every unwritten byte | Settings out of range; a source changed between planning and emission |

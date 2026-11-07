@@ -384,6 +384,20 @@
   dictionary bytes or window log) would make the call self-describing.
   The stream decoders in `cluster.c` also take a non-const input to suit
   zlib's `next_in`; building with `ZLIB_CONST` would keep it const.
+* [Low] **EROFS sequential reads of a compressed file re-read the index**
+  (`lib/formats/erofs/zmap.c`): the common reader maps each 64 KiB read
+  step afresh and each lookup reads one compact group, so reading the
+  5 GiB LZ4 file of `e13-big5g-lz4` reads 74 MB from a 25 MB image
+  ([build](docs/build.md), EROFS scale checks). Keeping the last group a
+  lookup read, or mapping a whole step's clusters in one walk, would read
+  the index once.
+* [Low] **EROFS chunk holes extract as written zeros**
+  (`lib/read/reader.c`, `lib/formats/erofs/map.c`): reader ranges are DATA
+  up to the initialized length, so a chunked file's hole chunks, which
+  cost no image reads, are still written by extraction, which writes 5 GiB
+  for `e13-big5g-chunk1m`, a 3 MB image.
+  Reporting a driver's holes as ZERO ranges would let extraction leave
+  them as holes.
 * [Medium] **EROFS writer output may not stay sparse**
   (`lib/formats/erofs/write-emit.c`): the stage 10 qualification's sparse
   source file of 2^32 + 5000 bytes produced an image that occupied about

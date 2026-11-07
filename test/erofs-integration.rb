@@ -76,7 +76,11 @@ MAX_NOTES = 4
 VERIFY_MODES = [[], ["-d"]].freeze
 # The passes of a build with every library; a fixture slipping to
 # "unsupported" must not keep the run green.
-PASS_FLOOR = 114
+PASS_FLOOR = 117
+# Corpus entries left out: capture.rb's in-progress directories (`.tmp-`
+# in the name), and the 5 GiB E13 files, which test-erofs-scale reads by
+# streaming them to a digest, since extracting one here writes 5 GiB.
+STREAMED_FIXTURES = /\Ae13-big5g/
 # Fixtures covering geometry, inline data, and an attribute-bearing tree.
 WRAPPED_FIXTURES = %w[e1-geom-b512 e3-b4096-inline e6-xattr-default].freeze
 SECTOR = 512
@@ -559,7 +563,8 @@ end
 BUILD_CODECS, READABLE_COMPRESSIONS = format_records.then { [build_codecs(_1), readable_compressions(_1)] }.map(&:freeze)
 
 Dir.mktmpdir("fsimg-erofs-") do |work|
-  dirs = Dir.children(CORPUS).sort.map { File.join(CORPUS, _1) }.select { File.directory?(_1) }
+  dirs = Dir.children(CORPUS).sort.reject { _1.include?(".tmp-") || _1.match?(STREAMED_FIXTURES) }
+            .map { File.join(CORPUS, _1) }.select { File.directory?(_1) }
   results = dirs.map { |dir| check(dir, work).tap { report(_1) } } + head2_results(work).each { report(_1) }
   wrapped = wrap_failures(results, work)
   wrapped.each { puts "FAIL        #{_1}" }
