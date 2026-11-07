@@ -12,11 +12,14 @@
 #include "internal.h"
 
 /*
- * Pure decoders of the EROFS on-disk structures: bytes and their length in,
- * a validated record out. Nothing here performs I/O or allocates. Each
- * decoder proves the span it reads before reading it, validates every rule
- * that concerns its structure alone, and publishes its result only after
- * every check passed.
+ * Pure decoders and encoders of the EROFS on-disk structures. A decoder
+ * takes bytes and their length and returns a validated record. It proves
+ * the span it reads before reading it, validates every rule that concerns
+ * its structure alone, and publishes its result only after every check
+ * passed. An encoder is a decoder's exact inverse for the records the
+ * writer emits, every reserved byte zero; it refuses a record it cannot
+ * represent rather than truncate a field. Nothing here performs I/O or
+ * allocates.
  */
 
 /* Superblock field offsets, relative to volume byte 1024. */
@@ -145,6 +148,7 @@ static fsimg_status_t	inode_body_measure(const erofs_super_t *,
 static fsimg_status_t	inode_kind_check(const erofs_inode_t *,
 			    const char **);
 static bool		kind_decode(uint16_t, fsimg_entry_kind_t *);
+static bool		kind_encode(fsimg_entry_kind_t, uint16_t *);
 static int64_t		load_le_s64(const unsigned char *);
 static fsimg_status_t	reject(fsimg_status_t, const char *, const char **);
 static fsimg_status_t	super_parse(const unsigned char *, size_t,
@@ -379,9 +383,27 @@ erofs_region_decode(const unsigned char *region, size_t length,
 }
 
 /*
- * The superblock checksum: CRC-32C over [1024, B) of the volume when the
- * block size B exceeds 1024 bytes, and over [1024, 1024 + B) otherwise,
- * with the checksum field taken as zero. The register starts at all ones
+ * The length of the superblock checksum's covered range, which starts at
+ * volume byte 1024: B - 1024 when the block size B exceeds 1024 bytes, and
+ * B otherwise, so never more than EROFS_SUPER_REGION_BYTES. Zero for a
+ * block shift outside the format's range.
+ */
+size_t
+erofs_super_covered_bytes(unsigned blkszbits)
+{
+	size_t block_bytes;
+
+	if (blkszbits < EROFS_BLKSZBITS_MIN || blkszbits > EROFS_BLKSZBITS_MAX)
+		return (0);
+	block_bytes = (size_t)1 << blkszbits;
+	return (block_bytes > EROFS_SUPER_OFFSET ?
+	    block_bytes - EROFS_SUPER_OFFSET : block_bytes);
+}
+
+/*
+ * The superblock checksum: CRC-32C over the covered range,
+ * erofs_super_covered_bytes() from volume byte 1024, with the checksum
+ * field taken as zero. The register starts at all ones
  * and is stored without the final complement. region starts at volume
  * byte 1024; false means it is shorter than the covered range. The writer
  * calls this once every byte of the range is final.
@@ -391,15 +413,11 @@ erofs_super_checksum(const unsigned char *region, size_t length,
     unsigned blkszbits, uint32_t *checksum)
 {
 	static const unsigned char zero_field[4];
-	size_t block_bytes, covered_bytes;
+	size_t covered_bytes;
 	uint32_t crc;
 
-	if (blkszbits < EROFS_BLKSZBITS_MIN || blkszbits > EROFS_BLKSZBITS_MAX)
-		return (false);
-	block_bytes = (size_t)1 << blkszbits;
-	covered_bytes = block_bytes > EROFS_SUPER_OFFSET ?
-	    block_bytes - EROFS_SUPER_OFFSET : block_bytes;
-	if (length < covered_bytes)
+	covered_bytes = erofs_super_covered_bytes(blkszbits);
+	if (covered_bytes == 0 || length < covered_bytes)
 		return (false);
 
 	crc = fsimg_crc32c_update(FSIMG_CRC32C_SEED, region, SB_CHECKSUM);
@@ -407,6 +425,56 @@ erofs_super_checksum(const unsigned char *region, size_t length,
 	crc = fsimg_crc32c_update(crc, region + SB_CHECKSUM + 4,
 	    covered_bytes - SB_CHECKSUM - 4);
 	*checksum = crc;
+	return (true);
+}
+
+/*
+ * The base superblock into the EROFS_SUPER_BASE_BYTES at raw, the inverse
+ * of super_parse() for a superblock without the 48-bit layout and without
+ * extension slots, which is every superblock the writer emits: its
+ * features are at most SB_CHKSUM and MTIME, and LZ4_0PADDING. The volume
+ * name is its first name_length bytes, NUL-padded. The extra device count
+ * and every reserved byte are zero. false means sb is not of that shape, a
+ * field exceeds its width, the block shift or nanoseconds are outside
+ * their range, or the name holds a NUL; raw is then unspecified.
+ */
+bool
+erofs_super_encode(const erofs_super_t *sb, unsigned char *raw)
+{
+	if ((sb->compat &
+	    ~(EROFS_COMPAT_SB_CHKSUM | EROFS_COMPAT_MTIME)) != 0 ||
+	    (sb->incompat & ~EROFS_INCOMPAT_LZ4_0PADDING) != 0 ||
+	    sb->extension_slots != 0 || sb->box_nid != 0 ||
+	    sb->root_nid > UINT16_MAX || sb->block_count > UINT32_MAX ||
+	    sb->blkszbits < EROFS_BLKSZBITS_MIN ||
+	    sb->blkszbits > EROFS_BLKSZBITS_MAX ||
+	    sb->epoch_nsec >= NSEC_PER_SEC ||
+	    sb->name_length > sizeof(sb->name) ||
+	    memchr(sb->name, '\0', sb->name_length) != NULL)
+		return (false);
+
+	bzero(raw, EROFS_SUPER_BASE_BYTES);
+	fsimg_store_le32(raw, EROFS_MAGIC);
+	fsimg_store_le32(raw + SB_CHECKSUM, sb->checksum);
+	fsimg_store_le32(raw + SB_COMPAT, sb->compat);
+	raw[SB_BLKSZBITS] = sb->blkszbits;
+	fsimg_store_le16(raw + SB_ROOT_NID, (uint16_t)sb->root_nid);
+	fsimg_store_le64(raw + SB_INODE_COUNT, sb->inode_count);
+	fsimg_store_le64(raw + SB_EPOCH, (uint64_t)sb->epoch);
+	fsimg_store_le32(raw + SB_EPOCH_NSEC, sb->epoch_nsec);
+	fsimg_store_le32(raw + SB_BLOCK_COUNT, (uint32_t)sb->block_count);
+	fsimg_store_le32(raw + SB_META_BLKADDR, sb->meta_blkaddr);
+	fsimg_store_le32(raw + SB_XATTR_BLKADDR, sb->xattr_blkaddr);
+	bcopy(sb->uuid, raw + SB_UUID, sizeof(sb->uuid));
+	bcopy(sb->name, raw + SB_NAME, sb->name_length);
+	fsimg_store_le32(raw + SB_INCOMPAT, sb->incompat);
+	fsimg_store_le16(raw + SB_COMPRESSION, sb->compression_word);
+	raw[SB_PREFIX_COUNT] = sb->xattr_prefix_count;
+	fsimg_store_le32(raw + SB_PREFIX_START, sb->xattr_prefix_start);
+	fsimg_store_le64(raw + SB_PACKED_NID, sb->packed_nid);
+	raw[SB_FILTER_RESERVED] = sb->filter_disabled ? 1 : 0;
+	raw[SB_ISHARE_PREFIX] = sb->ishare_prefix;
+	fsimg_store_le32(raw + SB_BUILD_TIME, sb->build_time);
 	return (true);
 }
 
@@ -830,6 +898,123 @@ inode_body_measure(const erofs_super_t *sb, erofs_inode_t *inode,
 		    what));
 	}
 	return (FSIMG_OK);
+}
+
+/*
+ * An inode's fixed part into raw, compact or extended by inode->extended,
+ * so raw receives EROFS_INODE_COMPACT_BYTES or EROFS_INODE_EXTENDED_BYTES.
+ * It is the inverse of erofs_inode_decode() without format bit 4, which
+ * only the 48-bit layout defines; every reserved byte is zero, and sb
+ * supplies the compact form's time base and the block size. false means
+ * the record does not fit: a kind or attribute region the format cannot
+ * express, permission bits beyond 12, or, in the compact form, an owner,
+ * group or link count beyond 16 bits, a size beyond 32 bits, start-block
+ * high bits, or a time that is not the epoch plus a 32-bit offset with the
+ * superblock's nanoseconds. It also means the decoder refuses the encoded
+ * bytes, for a rule a single inode must keep, such as a symbolic link's
+ * length or a FIFO's empty layout word: the encoded inode is decoded once
+ * more, so an inode that encodes is one the reader accepts. raw is then
+ * unspecified.
+ */
+bool
+erofs_inode_encode(const erofs_inode_t *inode, const erofs_super_t *sb,
+    unsigned char *raw)
+{
+	erofs_inode_t decoded;
+	const char *what;
+	uint64_t time_offset;
+	uint32_t xattr_count;
+	uint16_t mode;
+
+	if (inode->layout > EROFS_LAYOUT_CHUNK_BASED || inode->omits_dot ||
+	    inode->permissions > EROFS_MODE_PERMISSIONS ||
+	    !kind_encode(inode->kind, &mode))
+		return (false);
+	xattr_count = 0;
+	if (inode->xattr_bytes != 0) {
+		if (inode->xattr_bytes < EROFS_XATTR_HEADER_BYTES ||
+		    (inode->xattr_bytes - EROFS_XATTR_HEADER_BYTES) % 4 != 0)
+			return (false);
+		xattr_count = (inode->xattr_bytes - EROFS_XATTR_HEADER_BYTES) /
+		    4 + 1;
+		if (xattr_count > UINT16_MAX)
+			return (false);
+	}
+
+	if (inode->extended) {
+		if (inode->time_nsec >= NSEC_PER_SEC ||
+		    (inode->layout_high != 0 &&
+		    (sb->incompat & EROFS_INCOMPAT_48BIT) == 0))
+			return (false);
+		bzero(raw, EROFS_INODE_EXTENDED_BYTES);
+		fsimg_store_le16(raw + IX_HIGH_WORD, inode->layout_high);
+		fsimg_store_le64(raw + IX_SIZE, inode->size);
+		fsimg_store_le32(raw + IX_LAYOUT_WORD, inode->layout_word);
+		fsimg_store_le32(raw + IX_SERIAL, inode->serial);
+		fsimg_store_le32(raw + IX_UID, inode->uid);
+		fsimg_store_le32(raw + IX_GID, inode->gid);
+		fsimg_store_le64(raw + IX_TIME, (uint64_t)inode->time);
+		fsimg_store_le32(raw + IX_TIME_NSEC, inode->time_nsec);
+		fsimg_store_le32(raw + IX_NLINK, inode->nlink);
+	} else {
+		/* Unsigned subtraction is exact once time >= epoch. */
+		if (inode->time < sb->epoch)
+			return (false);
+		time_offset = (uint64_t)inode->time - (uint64_t)sb->epoch;
+		if (time_offset > UINT32_MAX ||
+		    inode->time_nsec != sb->epoch_nsec ||
+		    inode->size > UINT32_MAX || inode->nlink > UINT16_MAX ||
+		    inode->uid > UINT16_MAX || inode->gid > UINT16_MAX ||
+		    inode->layout_high != 0)
+			return (false);
+		bzero(raw, EROFS_INODE_COMPACT_BYTES);
+		fsimg_store_le16(raw + IC_NLINK, (uint16_t)inode->nlink);
+		fsimg_store_le32(raw + IC_SIZE, (uint32_t)inode->size);
+		fsimg_store_le32(raw + IC_TIME, (uint32_t)time_offset);
+		fsimg_store_le32(raw + IC_LAYOUT_WORD, inode->layout_word);
+		fsimg_store_le32(raw + IC_SERIAL, inode->serial);
+		fsimg_store_le16(raw + IC_UID, (uint16_t)inode->uid);
+		fsimg_store_le16(raw + IC_GID, (uint16_t)inode->gid);
+	}
+	/* The first eight bytes are common to both forms. */
+	fsimg_store_le16(raw, (uint16_t)((inode->extended ? FORMAT_EXTENDED :
+	    0) | (unsigned)inode->layout << FORMAT_LAYOUT_SHIFT));
+	fsimg_store_le16(raw + IC_XATTR_COUNT, (uint16_t)xattr_count);
+	fsimg_store_le16(raw + IC_MODE, (uint16_t)(mode | inode->permissions));
+	return (erofs_inode_decode(raw, inode->extended ?
+	    EROFS_INODE_EXTENDED_BYTES : EROFS_INODE_COMPACT_BYTES, sb,
+	    &decoded, &what) == FSIMG_OK);
+}
+
+/* The mode's type bits for a kind; false for a kind EROFS cannot store. */
+static bool
+kind_encode(fsimg_entry_kind_t kind, uint16_t *type)
+{
+	switch (kind) {
+	case FSIMG_ENTRY_FILE:
+		*type = EROFS_MODE_REGULAR;
+		return (true);
+	case FSIMG_ENTRY_DIRECTORY:
+		*type = EROFS_MODE_DIRECTORY;
+		return (true);
+	case FSIMG_ENTRY_SYMLINK:
+		*type = EROFS_MODE_SYMLINK;
+		return (true);
+	case FSIMG_ENTRY_FIFO:
+		*type = EROFS_MODE_FIFO;
+		return (true);
+	case FSIMG_ENTRY_CHAR_DEVICE:
+		*type = EROFS_MODE_CHAR_DEVICE;
+		return (true);
+	case FSIMG_ENTRY_BLOCK_DEVICE:
+		*type = EROFS_MODE_BLOCK_DEVICE;
+		return (true);
+	case FSIMG_ENTRY_SOCKET:
+		*type = EROFS_MODE_SOCKET;
+		return (true);
+	default:
+		return (false);
+	}
 }
 
 /*

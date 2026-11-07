@@ -356,7 +356,9 @@ fixtures, their command records and the oracle output:
 ### 10. Writer qualification and registration
 
 * `tools/erofs/qualify.sh`, run in the Linux check VM, for each output:
-  `fsck.erofs --extract` and a manifest comparison; a read-only kernel loop
+  `fsck.erofs --extract` with no `<E>` line on its standard error, since
+  `fsck.erofs` 1.9.4 reports a superblock checksum mismatch there and still
+  exits 0, and a manifest comparison; a read-only kernel loop
   mount with `find`, `stat` and SHA-256 compared with the source;
   `rust-fs-erofs` extraction; fsimg `W` and `t`.
 * Outputs: empty, small, deep, wide (multi-block directories), large-file

@@ -406,7 +406,10 @@ Emission runs in plan order after the common writer has zeroed the volume:
    as the box's stored blocks, through the LZ4 cluster former under
    `metabox=lz4`; then the box inode is written in the primary area.
 3. The superblock, then the checksum over the final bytes of its covered
-   range.
+   range. Emission does not read the sink back: it keeps its own copy of
+   the covered range, into which every metadata write and, through the
+   copy observer, every source byte that lands there is mirrored, so the
+   copy holds the range's final bytes once the last inode is written.
 
 ## LZ4 planning and emission
 
@@ -457,7 +460,7 @@ once, and the encoder's determinism makes the two agree.
 | Decode windows | Two, three under a compressed metadata box; each at most one decoded cluster plus a 1 MiB input buffer and the codec's state, the MicroLZMA dictionary or Zstandard window the [configuration record](design-erofs.md#configuration) declares included, charged before allocation |
 | Verification | The reference and claim streams in scratch, three under a metadata box, under the common sort's run buffer |
 | Planning | Plan rows in a paged array; directory packing of one directory's names at a time, streamed from the catalog; LZ4 index records in a scratch stream |
-| Emission | One directory block and its name staging block, one LZ4 input window and output block, one box staging block |
+| Emission | One directory block and its name staging block, a copy of the checksum's covered range of at most 3072 bytes, one LZ4 input window and output block, one box staging block |
 
 Work is charged per block read, per index record visited and per decoded
 byte, so an image whose distances force long backward walks, or whose

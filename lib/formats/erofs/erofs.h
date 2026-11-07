@@ -471,29 +471,36 @@ fsimg_status_t	erofs_body_read(fsimg_reader_t *, const erofs_inode_t *,
 		    uint64_t, size_t, void *, fsimg_error_t *);
 
 /*
- * Decoders (codec.c). Each reads only the bytes and length it is given,
- * writes its output only on success, and returns FSIMG_OK, or
- * FSIMG_ECORRUPT or FSIMG_EUNSUPPORTED with *what set to a static phrase
- * naming the field; erofs_dirent_decode() also returns FSIMG_EINVAL for an
- * index past the block's entries, a caller's error. The exceptions to the
- * length rule are erofs_inode_fixed_bytes(), which reads the two bytes of
- * the format word, the accessors of a structure already decoded, and the
- * attribute and long-prefix decoders, which read only their fixed head, the
- * 12-byte header or a 4-byte entry or record head, and take as length what
- * remains of the region.
- * Rules that relate one structure to another, such as an address inside
- * the volume, belong to their callers.
+ * Decoders and encoders (codec.c). Each decoder reads only the bytes and
+ * length it is given, writes its output only on success, and returns
+ * FSIMG_OK, or FSIMG_ECORRUPT or FSIMG_EUNSUPPORTED with *what set to a
+ * static phrase naming the field; erofs_dirent_decode() also returns
+ * FSIMG_EINVAL for an index past the block's entries, a caller's error.
+ * The exceptions to the length rule are erofs_inode_fixed_bytes(), which
+ * reads the two bytes of the format word, the accessors of a structure
+ * already decoded, and the attribute and long-prefix decoders, which read
+ * only their fixed head, the 12-byte header or a 4-byte entry or record
+ * head, and take as length what remains of the region. Rules that relate
+ * one structure to another, such as an address inside the volume, belong
+ * to their callers. The encoders, erofs_super_encode() and
+ * erofs_inode_encode(), write a decoder's exact inverse into a buffer of
+ * the structure's fixed length, and return false, leaving the buffer
+ * unspecified, for a record the encoding cannot represent.
  */
 bool		erofs_magic_matches(const unsigned char *, size_t);
 fsimg_status_t	erofs_super_probe(const unsigned char *, size_t,
 		    const char **);
 fsimg_status_t	erofs_region_decode(const unsigned char *, size_t,
 		    erofs_super_t *, erofs_config_t *, const char **);
+size_t		erofs_super_covered_bytes(unsigned);
 bool		erofs_super_checksum(const unsigned char *, size_t, unsigned,
 		    uint32_t *);
+bool		erofs_super_encode(const erofs_super_t *, unsigned char *);
 size_t		erofs_inode_fixed_bytes(const unsigned char *);
 fsimg_status_t	erofs_inode_decode(const unsigned char *, size_t,
 		    const erofs_super_t *, erofs_inode_t *, const char **);
+bool		erofs_inode_encode(const erofs_inode_t *, const erofs_super_t *,
+		    unsigned char *);
 void		erofs_device_decode(uint32_t, uint32_t *, uint32_t *);
 fsimg_status_t	erofs_chunk_format_decode(uint32_t, const erofs_super_t *,
 		    erofs_chunk_format_t *, const char **);

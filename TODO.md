@@ -77,9 +77,8 @@
   LZ4 profile with a measured read and encoded copy in common emission, and
   last the 48-bit layout and metadata box, read and then written. External
   data devices stay refused.
-  The uncompressed writer plans (`write-plan.c`, `write-dir.c`) but does
-  not emit: `erofs_write_emit()` refuses every plan until `write-emit.c`
-  lands. It sits in the unregistered `fsimg_erofs_write_format`, so
+  The uncompressed writer plans and emits (`write-plan.c`, `write-dir.c`,
+  `write-emit.c`). It sits in the unregistered `fsimg_erofs_write_format`, so
   `fsimg c` cannot select it, until stage 10's kernel and `fsck.erofs`
   qualification registers it with the `docs/fsimg.1` entries for
   `compression=`, `addressing=` and `metabox=`. Until then the writer

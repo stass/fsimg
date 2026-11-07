@@ -5,6 +5,9 @@
 
 #include <sys/stat.h>
 
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,25 +16,41 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "fsimg.h"
 #include "format.h"
+#include "internal.h"
 #include "layer.h"
+#include "meta.h"
 #include "test.h"
 #include "write-erofs.h"
 #include "writer.h"
 
 /*
- * EROFS writer planning tests. Emission is not covered: a plan is checked
- * against an independent model of the layout rules in specs/design-erofs.md
- * ("Layout", "Inodes", "Directories", "Metadata and defaults"). The model
- * works from the test's own description of the tree, in 32-byte slots and
- * with its own directory packer, and shares no code with
- * lib/formats/erofs/write-plan.c. It takes only the catalog's ID order from
- * the writer, since IDs are the catalog's to assign.
+ * EROFS writer tests. A plan is checked against an independent model of
+ * the layout rules in specs/design-erofs.md ("Layout", "Inodes",
+ * "Directories", "Metadata and defaults"). The model works from the test's
+ * own description of the tree, in 32-byte slots and with its own directory
+ * packer, and shares no code with lib/formats/erofs/write-plan.c. It takes
+ * only the catalog's ID order from the writer, since IDs are the catalog's
+ * to assign.
  *
  * Directory packing is also driven directly, and every block it produces is
  * decoded with the reader's decoders.
+ *
+ * Emission is checked from the image it produces. Every entry's content
+ * comes from a provider that serves a pattern of the entry and the offset,
+ * or a link's target. The image is read back through the registered
+ * reader, which enumerates it, compares each entry with its spec, verifies
+ * it and extracts a small subtree. Reproducible images are compared byte
+ * for byte across insertion order, memory and scratch limits and time
+ * zones. A poisoned sink shows that every byte outside the superblock,
+ * the inode bodies and the data blocks the plan describes is written
+ * zero, and that no byte inside them is left unwritten. Failures of
+ * allocation, write and flush, and a source that changed after planning,
+ * fail the emission without leaking. The inode and superblock encoders
+ * are checked against the reader's decoders.
  */
 #define BLOCK		4096u
 #define SLOT		32u
@@ -69,6 +88,7 @@ typedef struct spec {
 	bool		 stamped;
 	int64_t		 mtime;
 	uint32_t	 mtime_nsec;
+	const char	*target;	/* a link's target; its size */
 } spec_t;
 
 typedef struct tree {
@@ -182,15 +202,33 @@ new_writer(fsimg_ctx_t *ctx, const fsimg_write_options_t *options,
 	    &fsimg_erofs_write_format.variants[0], options, writer, error));
 }
 
+/*
+ * Open a fixture over a context with options, or the defaults when NULL.
+ * meta_pages, when not zero, sizes the metadata cache, so a small value
+ * with a scratch directory spills plan rows to scratch.
+ */
+static void
+fixture_open_with(fixture_t *fixture, const fsimg_options_t *options,
+    uint32_t meta_pages)
+{
+	fsimg_stats_t stats;
+	fsimg_status_t status;
+
+	bzero(fixture, sizeof(*fixture));
+	status = fsimg_ctx_new(options, &fixture->ctx, &fixture->error);
+	CHECK_CASE(status == FSIMG_OK, "context creation failed with %d: %s",
+	    status, fixture->error.message);
+	if (meta_pages != 0)
+		CHECK(fsimg_test_meta_cache(fixture->ctx, meta_pages, NULL) ==
+		    FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture->ctx, &stats, NULL) == FSIMG_OK);
+	fixture->memory_baseline = stats.memory_bytes;
+}
+
 static void
 fixture_open(fixture_t *fixture)
 {
-	fsimg_stats_t stats;
-
-	bzero(fixture, sizeof(*fixture));
-	CHECK(fsimg_ctx_new(NULL, &fixture->ctx, NULL) == FSIMG_OK);
-	CHECK(fsimg_ctx_get_stats(fixture->ctx, &stats, NULL) == FSIMG_OK);
-	fixture->memory_baseline = stats.memory_bytes;
+	fixture_open_with(fixture, NULL, 0);
 }
 
 /* Free the writer and require that it released everything it held. */
@@ -202,26 +240,51 @@ fixture_close(fixture_t *fixture)
 	fsimg_writer_free(fixture->writer);
 	CHECK(fsimg_ctx_get_stats(fixture->ctx, &stats, NULL) == FSIMG_OK);
 	CHECK(stats.memory_bytes == fixture->memory_baseline);
+	CHECK(stats.scratch_bytes == 0);
 	fsimg_ctx_free(fixture->ctx);
 }
 
 /*
- * Symbolic link targets come from a provider, which planning never reads;
- * the callbacks answer a read with the link's byte, so a stray read shows.
+ * Entry content comes from a provider, whose source ID is the index of the
+ * entry's spec in the tree: a link serves its target and a file a pattern
+ * of the index and the offset, which differs between files and drifts
+ * within one. changed_source names a source whose validation reports a
+ * change, UINT64_MAX for none. Planning never reads a source.
  */
-static fsimg_status_t
-provider_validate(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
-    fsimg_error_t *error FSIMG_UNUSED)
+static uint64_t changed_source = UINT64_MAX;
+
+static unsigned char
+spec_byte(uint64_t index, uint64_t offset)
 {
-	return (FSIMG_OK);
+	const spec_t *spec = &tree.specs[index];
+
+	if (spec->target != NULL)
+		return ((unsigned char)spec->target[offset]);
+	return ((unsigned char)(index * 131 + offset * 7 + offset / 251));
 }
 
 static fsimg_status_t
-provider_read(void *argument FSIMG_UNUSED, uint64_t id FSIMG_UNUSED,
-    uint64_t offset FSIMG_UNUSED, void *buffer, size_t length,
-    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+provider_validate(void *argument FSIMG_UNUSED, uint64_t id,
+    fsimg_error_t *error FSIMG_UNUSED)
 {
-	memset(buffer, 't', length);
+	return (id == changed_source ? FSIMG_ESOURCE_CHANGED : FSIMG_OK);
+}
+
+static fsimg_status_t
+provider_read(void *argument FSIMG_UNUSED, uint64_t id, uint64_t offset,
+    void *buffer, size_t length, size_t *transferred,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	unsigned char *bytes = buffer;
+	uint64_t size;
+
+	CHECK(id < tree.count);
+	size = tree.specs[id].size;
+	CHECK(offset <= size);
+	if (length > size - offset)
+		length = (size_t)(size - offset);
+	for (size_t i = 0; i < length; i++)
+		bytes[i] = spec_byte(id, offset + i);
 	*transferred = length;
 	return (FSIMG_OK);
 }
@@ -230,7 +293,8 @@ static fsimg_status_t
 add_spec(fixture_t *fixture, const spec_t *spec)
 {
 	fsimg_entry_t entry;
-	fsimg_source_t source = { .kind = FSIMG_SOURCE_ZERO, .id = 0 };
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER,
+	    .id = (uint64_t)(spec - tree.specs) };
 	bool has_content;
 
 	bzero(&entry, sizeof(entry));
@@ -254,9 +318,6 @@ add_spec(fixture_t *fixture, const spec_t *spec)
 		    .precision_ns = 1,
 		    .basis = FSIMG_TIME_UTC };
 	}
-	if (spec->kind == FSIMG_ENTRY_SYMLINK)
-		source = (fsimg_source_t){ .kind = FSIMG_SOURCE_PROVIDER,
-		    .id = 1 };
 	has_content = spec->kind == FSIMG_ENTRY_FILE ||
 	    spec->kind == FSIMG_ENTRY_SYMLINK;
 	return (fsimg_writer_add(fixture->writer, &entry,
@@ -2015,6 +2076,1089 @@ test_directory_walk_merges_dots_across_blocks(void)
 	fixture_close(&fixture);
 }
 
+/*
+ * Emission.
+ */
+#define POISON		0xa5u
+#define POISON_ALT	0x5au
+#define READ_CHUNK	65536u
+#define SUPER_REGION	3072u
+
+/* A volume in memory, filled with a poison byte before emission. */
+typedef struct memory_sink {
+	unsigned char	*bytes;
+	uint64_t	 length;
+	uint64_t	 writes;
+	uint64_t	 fail_write_at;	/* 1-based; 0 for none */
+	bool		 fail_flush;
+} memory_sink_t;
+
+static fsimg_status_t
+memory_size(void *argument, uint64_t *length,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	const memory_sink_t *sink = argument;
+
+	*length = sink->length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+memory_read(void *argument, uint64_t offset, void *buffer, size_t length,
+    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	const memory_sink_t *sink = argument;
+
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	bcopy(sink->bytes + offset, buffer, length);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+memory_write(void *argument, uint64_t offset, const void *buffer,
+    size_t length, size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	memory_sink_t *sink = argument;
+
+	*transferred = 0;
+	sink->writes++;
+	if (sink->writes == sink->fail_write_at)
+		return (FSIMG_EIO);
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	bcopy(buffer, sink->bytes + offset, length);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+memory_flush(void *argument, fsimg_error_t *error FSIMG_UNUSED)
+{
+	const memory_sink_t *sink = argument;
+
+	return (sink->fail_flush ? FSIMG_EIO : FSIMG_OK);
+}
+
+/*
+ * An I/O object over a sink. The writable one has no zero_range, so the
+ * common emitter must overwrite the poison with zeros itself.
+ */
+static fsimg_status_t
+memory_io(fixture_t *fixture, memory_sink_t *sink, bool writable,
+    fsimg_io_t **out)
+{
+	fsimg_io_ops_t ops;
+
+	fsimg_io_ops_init(&ops);
+	ops.get_size = memory_size;
+	ops.read_at = memory_read;
+	if (writable) {
+		ops.write_at = memory_write;
+		ops.flush = memory_flush;
+	}
+	*out = NULL;
+	return (fsimg_io_from_callbacks(fixture->ctx, &ops, sink, out, NULL));
+}
+
+/* Allocate a sink of the planned volume's size, filled with poison. */
+static void
+sink_open(fixture_t *fixture, memory_sink_t *sink, unsigned char poison)
+{
+	fsimg_plan_info_t info;
+
+	CHECK(fixture->plan != NULL);
+	CHECK(fsimg_plan_get_info(&fixture->plan->common, &info, NULL) ==
+	    FSIMG_OK);
+	bzero(sink, sizeof(*sink));
+	sink->length = info.volume_bytes;
+	sink->bytes = malloc((size_t)sink->length);
+	CHECK(sink->bytes != NULL);
+	memset(sink->bytes, poison, (size_t)sink->length);
+}
+
+static fsimg_status_t
+emit_into(fixture_t *fixture, memory_sink_t *sink)
+{
+	fsimg_io_t *output;
+	fsimg_status_t status;
+
+	status = memory_io(fixture, sink, true, &output);
+	if (status == FSIMG_OK)
+		status = fsimg_writer_emit(fixture->writer, output,
+		    &fixture->error);
+	fsimg_io_free(output);
+	return (status);
+}
+
+/* Emit the planned tree into a sink poisoned with poison, which must work. */
+static void
+emit_tree(fixture_t *fixture, memory_sink_t *sink, unsigned char poison)
+{
+	fsimg_status_t status;
+
+	sink_open(fixture, sink, poison);
+	status = emit_into(fixture, sink);
+	CHECK_CASE(status == FSIMG_OK, "emission failed with %d: %s (%s)",
+	    status, fixture->error.message, fixture->error.path);
+}
+
+/*
+ * The tree every emission test but the faults writes. It holds every kind
+ * the writer stores and each layout case: an empty file, one byte, tails
+ * that fit beside the inode, a 4065-byte file whose tail cannot sit beside
+ * a 32-byte inode, exact multiples of the block size, multi-block files
+ * with a tail and a megabyte. Names that sort before "." and ".." lead
+ * the root and a subdirectory, a deep path nests ten levels, "/wide"
+ * spans several directory blocks, and "/owners" holds what only an
+ * extended inode stores: owners above 16 bits and times with nanoseconds
+ * or before 1970. "/small" is the subtree the extraction test copies.
+ */
+#define WIDE_ENTRIES	300u
+#define DEEP_LEVELS	10u
+
+static char long_target[200];
+
+static spec_t *
+add_symlink(const char *target, const char *path)
+{
+	spec_t *spec;
+
+	spec = tree_add(FSIMG_ENTRY_SYMLINK, strlen(target), "%s", path);
+	spec->target = target;
+	return (spec);
+}
+
+static void
+build_round_trip_tree(void)
+{
+	static const uint32_t sizes[] = { 0, 1, 100, 4064, 4065, 4096, 4097,
+	    8192, 8192 + 300, 1000003 };
+	char deep[MAX_PATH] = "";
+
+	tree_reset();
+	for (size_t i = 0; i < sizeof(long_target); i++)
+		long_target[i] = (char)('a' + i % 26);
+
+	add_file(3, "/-a")->mode = 0600;
+	add_directory("/.-b")->mode = 0700;
+	add_file(5, "/.-b/-a");
+	add_file(7, "/.-b/.-b");
+
+	add_directory("/layouts");
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+		add_file(sizes[i], "/layouts/size-%u", sizes[i])->mode = 0640;
+
+	add_directory("/links");
+	add_symlink("size-1", "/links/short");
+	add_symlink("../layouts/size-100", "/links/up")->mode = 0777;
+	add_symlink(long_target, "/links/long");
+	tree_add(FSIMG_ENTRY_FIFO, 0, "/links/pipe")->mode = 0620;
+
+	for (unsigned i = 0; i < DEEP_LEVELS; i++) {
+		size_t used = strlen(deep);
+
+		snprintf(deep + used, sizeof(deep) - used, "/level%u", i);
+		add_directory(deep);
+	}
+	add_file(777, "%s/bottom", deep);
+
+	with_owner(add_directory("/owners"), 70000, 4000000000u)->mode = 0750;
+	with_owner(add_file(10, "/owners/big-ids"), 70000, 4000000000u);
+	with_time(add_file(20, "/owners/nanoseconds"), 1700000123, 123456789);
+	with_time(add_file(30, "/owners/before-1970"), -86400 * 400 + 7,
+	    999999999);
+	with_time(add_file(40, "/owners/whole-seconds"), 1699999999, 0);
+	with_time(add_symlink("big-ids", "/owners/link"), 1600000000, 5);
+
+	add_directory("/small");
+	add_directory("/small/sub");
+	add_file(0, "/small/empty");
+	add_file(1, "/small/one");
+	add_file(5000, "/small/sub/five-thousand");
+	add_file(9000, "/small/sub/nine-thousand");
+
+	add_directory("/wide");
+	for (unsigned i = 0; i < WIDE_ENTRIES; i++)
+		add_file(i % 7, "/wide/n%03u-%s", i,
+		    "0123456789012345678901234567890123456789"
+		    "0123456789012345678901234567890123456789"
+		    "0123456789012345678901234567890123456789");
+}
+
+/* The write options of a volume that stores times as given. */
+static void
+unreproducible_options(fsimg_write_options_t *options)
+{
+	static const unsigned char uuid[16] = { 0xe0, 0xf5, 1, 2, 3, 4, 5, 6,
+	    7, 8, 9, 10, 11, 12, 13, 14 };
+
+	base_options(options);
+	bcopy(uuid, options->volume_uuid, sizeof(uuid));
+}
+
+static uint32_t
+expected_mode(const spec_t *spec)
+{
+	if (spec->mode != 0)
+		return (spec->mode & 07777);
+	if (spec->kind == FSIMG_ENTRY_FILE || spec->kind == FSIMG_ENTRY_FIFO)
+		return (0644);
+	return (0755);
+}
+
+static uint64_t
+expected_size(const spec_t *spec)
+{
+	if (spec->kind == FSIMG_ENTRY_FILE || spec->kind == FSIMG_ENTRY_SYMLINK)
+		return (spec->size);
+	return (0);
+}
+
+/* The stored time: the format time for a reproducible volume or no time. */
+static fsimg_timestamp_t
+expected_time(const spec_t *spec, bool reproducible, int64_t format_time)
+{
+	fsimg_timestamp_t time = { .seconds = format_time };
+
+	if (!reproducible && spec->stamped) {
+		time.seconds = spec->mtime;
+		time.nanoseconds = spec->mtime_nsec;
+	}
+	return (time);
+}
+
+/* The index of the spec at a reader's path, which must be in the tree. */
+static size_t
+spec_at_path(const char *path)
+{
+	for (size_t i = 0; i < tree.count; i++) {
+		if (strcmp(skip_slash(path), skip_slash(tree.specs[i].path)) ==
+		    0)
+			return (i);
+	}
+	fprintf(stderr, "the reader returned %s, which is in no spec\n", path);
+	CHECK(false);
+	return (0);
+}
+
+/* Read the current entry's content in chunks and compare it to its spec. */
+static void
+check_content(fsimg_reader_t *reader, const fsimg_entry_t *entry,
+    size_t index)
+{
+	static unsigned char buffer[READ_CHUNK];
+	size_t length;
+	uint64_t offset;
+
+	for (offset = 0; offset < entry->size; offset += length) {
+		CHECK(fsimg_reader_read_at(reader, offset, buffer,
+		    sizeof(buffer), &length, NULL) == FSIMG_OK);
+		CHECK_CASE(length > 0, "%s: no bytes at %ju", entry->path,
+		    (uintmax_t)offset);
+		for (size_t i = 0; i < length; i++)
+			CHECK_CASE(buffer[i] == spec_byte(index, offset + i),
+			    "%s: byte %ju is %u, want %u", entry->path,
+			    (uintmax_t)(offset + i), buffer[i],
+			    spec_byte(index, offset + i));
+	}
+}
+
+/* Compare an entry the reader enumerates with the spec at its path. */
+static void
+check_entry(fsimg_reader_t *reader, const fsimg_entry_t *entry, size_t index,
+    bool reproducible, int64_t format_time)
+{
+	const spec_t *spec = &tree.specs[index];
+	const fsimg_metadata_t *metadata = &entry->metadata;
+	fsimg_timestamp_t time;
+
+	CHECK_CASE(entry->kind == spec->kind, "%s: kind %d, want %d",
+	    entry->path, entry->kind, spec->kind);
+	CHECK_CASE(entry->size == expected_size(spec),
+	    "%s: size %ju, want %ju", entry->path, (uintmax_t)entry->size,
+	    (uintmax_t)expected_size(spec));
+	CHECK_CASE((metadata->valid & (FSIMG_META_MODE | FSIMG_META_OWNER |
+	    FSIMG_META_MODIFIED)) == (FSIMG_META_MODE | FSIMG_META_OWNER |
+	    FSIMG_META_MODIFIED), "%s: valid %#x", entry->path,
+	    metadata->valid);
+	CHECK_CASE(metadata->mode == expected_mode(spec),
+	    "%s: mode %o, want %o", entry->path, metadata->mode,
+	    expected_mode(spec));
+	CHECK_CASE(metadata->uid == (spec->owned ? spec->uid : 0) &&
+	    metadata->gid == (spec->owned ? spec->gid : 0),
+	    "%s: owner %u:%u", entry->path, metadata->uid, metadata->gid);
+	time = expected_time(spec, reproducible, format_time);
+	CHECK_CASE(metadata->modified.seconds == time.seconds &&
+	    metadata->modified.nanoseconds == time.nanoseconds,
+	    "%s: time %jd.%09u, want %jd.%09u", entry->path,
+	    (intmax_t)metadata->modified.seconds,
+	    metadata->modified.nanoseconds, (intmax_t)time.seconds,
+	    time.nanoseconds);
+	check_content(reader, entry, index);
+}
+
+static fsimg_reader_t *
+open_reader(fixture_t *fixture, memory_sink_t *sink, fsimg_io_t **input)
+{
+	fsimg_reader_t *reader;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	CHECK(memory_io(fixture, sink, false, input) == FSIMG_OK);
+	status = fsimg_reader_open(fixture->ctx, *input, NULL, &reader, &error);
+	CHECK_CASE(status == FSIMG_OK, "the reader refused the image: %d %s",
+	    status, error.message);
+	return (reader);
+}
+
+/* Enumerate the image: each spec once, the implicit root not included. */
+static void
+check_enumeration(fixture_t *fixture, memory_sink_t *sink, bool reproducible)
+{
+	const int64_t format_time = fixture->plan->format_time;
+	bool seen[MAX_SPECS] = { false };
+	const fsimg_entry_t *entry;
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+	fsimg_status_t status;
+	size_t count = 0, index;
+
+	reader = open_reader(fixture, sink, &input);
+	while ((status = fsimg_reader_next(reader, &entry, NULL)) ==
+	    FSIMG_OK) {
+		count++;
+		index = spec_at_path(entry->path);
+		CHECK_CASE(!seen[index], "%s is enumerated twice", entry->path);
+		seen[index] = true;
+		check_entry(reader, entry, index, reproducible, format_time);
+	}
+	CHECK(status == FSIMG_DONE);
+	CHECK_CASE(count == tree.count, "%zu entries, want %zu", count,
+	    tree.count);
+	for (size_t i = 0; i < tree.count; i++)
+		CHECK_CASE(seen[i], "%s is not enumerated", tree.specs[i].path);
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+}
+
+/* The verifier completes cleanly and counts what the specs hold. */
+static void
+check_verification(fixture_t *fixture, memory_sink_t *sink)
+{
+	fsimg_verify_report_t report;
+	fsimg_error_t error;
+	fsimg_reader_t *reader;
+	fsimg_io_t *input;
+	fsimg_status_t status;
+	uint64_t directories = 1, files = 0, bytes = 0;
+
+	for (size_t i = 0; i < tree.count; i++) {
+		if (tree.specs[i].kind == FSIMG_ENTRY_DIRECTORY)
+			directories++;
+		else
+			files++;
+		bytes += expected_size(&tree.specs[i]);
+	}
+	reader = open_reader(fixture, sink, &input);
+	status = fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report, &error);
+	CHECK_CASE(status == FSIMG_OK, "verification failed with %d: %s",
+	    status, error.message);
+	CHECK(report.complete);
+	CHECK(report.directories == directories);
+	CHECK(report.files == files);
+	CHECK(report.logical_bytes == bytes);
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+}
+
+/* A disposable directory under $TMPDIR. */
+static void
+make_temp_directory(char *path, size_t length)
+{
+	const char *base = getenv("TMPDIR");
+
+	snprintf(path, length, "%s/fsimg-erofs-write-XXXXXX",
+	    base != NULL && base[0] != '\0' ? base : "/tmp");
+	CHECK(mkdtemp(path) != NULL);
+}
+
+/* Remove a directory tree the test created. */
+static void
+remove_tree(const char *path)
+{
+	char child[1024];
+	struct dirent *entry;
+	struct stat st;
+	DIR *dir;
+
+	dir = opendir(path);
+	CHECK(dir != NULL);
+	while ((entry = readdir(dir)) != NULL) {
+		if (strcmp(entry->d_name, ".") == 0 ||
+		    strcmp(entry->d_name, "..") == 0)
+			continue;
+		snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+		CHECK(lstat(child, &st) == 0);
+		if (S_ISDIR(st.st_mode))
+			remove_tree(child);
+		else
+			CHECK(unlink(child) == 0);
+	}
+	CHECK(closedir(dir) == 0);
+	CHECK(rmdir(path) == 0);
+}
+
+/* Compare a host file with the bytes its spec describes. */
+static void
+check_host_file(const char *path, size_t index)
+{
+	static unsigned char buffer[READ_CHUNK];
+	const uint64_t size = tree.specs[index].size;
+	struct stat st;
+	uint64_t offset = 0;
+	size_t length;
+	FILE *file;
+
+	CHECK_CASE(stat(path, &st) == 0, "%s was not extracted", path);
+	CHECK_CASE((uint64_t)st.st_size == size, "%s: size %jd, want %ju",
+	    path, (intmax_t)st.st_size, (uintmax_t)size);
+	file = fopen(path, "rb");
+	CHECK(file != NULL);
+	while ((length = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+		for (size_t i = 0; i < length; i++)
+			CHECK_CASE(buffer[i] == spec_byte(index, offset + i),
+			    "%s: byte %ju differs", path,
+			    (uintmax_t)(offset + i));
+		offset += length;
+	}
+	CHECK(offset == size);
+	CHECK(fclose(file) == 0);
+}
+
+/* Extract "/small", the tree's subtree of plain files, and compare it. */
+static void
+check_extraction(fixture_t *fixture, memory_sink_t *sink)
+{
+	static const char *const selection[] = { "/small" };
+	fsimg_extract_options_t options;
+	char directory[256], path[512];
+	fsimg_reader_t *reader;
+	fsimg_error_t error;
+	fsimg_io_t *input;
+	fsimg_status_t status;
+	size_t extracted = 0;
+	int fd;
+
+	make_temp_directory(directory, sizeof(directory));
+	fd = open(directory, O_RDONLY | O_DIRECTORY);
+	CHECK(fd != -1);
+	fsimg_extract_options_init(&options);
+	options.selections = selection;
+	options.selection_count = 1;
+	reader = open_reader(fixture, sink, &input);
+	status = fsimg_extract_at(reader, fd, "out", &options, &error);
+	CHECK_CASE(status == FSIMG_OK, "extraction failed with %d: %s (%s)",
+	    status, error.message, error.path);
+	for (size_t i = 0; i < tree.count; i++) {
+		if (strncmp(tree.specs[i].path, "/small/", 7) != 0 ||
+		    tree.specs[i].kind != FSIMG_ENTRY_FILE)
+			continue;
+		snprintf(path, sizeof(path), "%s/out%s", directory,
+		    tree.specs[i].path);
+		check_host_file(path, i);
+		extracted++;
+	}
+	CHECK(extracted == 4);
+	fsimg_reader_free(reader);
+	fsimg_io_free(input);
+	CHECK(close(fd) == 0);
+	remove_tree(directory);
+}
+
+static void
+check_round_trip(fsimg_write_options_t *options, bool reproducible)
+{
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	build_round_trip_tree();
+	plan_tree(&fixture, options);
+	emit_tree(&fixture, &sink, POISON);
+	check_enumeration(&fixture, &sink, reproducible);
+	check_verification(&fixture, &sink);
+	check_extraction(&fixture, &sink);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+/*
+ * The root alone: its inline tail, "." and "..", is the only content
+ * beside the superblock in the checksum's range.
+ */
+static void
+test_empty_catalog_image_reads_back_as_the_root_alone(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	tree_reset();
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	CHECK(row_at(&fixture, 0).layout == EROFS_LAYOUT_FLAT_INLINE);
+	emit_tree(&fixture, &sink, POISON);
+	CHECK(sink.length == BLOCK);
+	check_enumeration(&fixture, &sink, true);
+	check_verification(&fixture, &sink);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+static void
+test_reproducible_image_reads_back_as_specified(void)
+{
+	fsimg_write_options_t options;
+
+	reproducible_options(&options);
+	check_round_trip(&options, true);
+}
+
+static void
+test_unreproducible_image_stores_given_times_and_owners(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	erofs_row_t row;
+
+	unreproducible_options(&options);
+	check_round_trip(&options, false);
+
+	/* The round trip covers the cases it is meant to. */
+	build_round_trip_tree();
+	plan_tree(&fixture, &options);
+	CHECK(row_of_path(&fixture, "/owners/big-ids").extended);
+	CHECK(row_of_path(&fixture, "/owners/nanoseconds").extended);
+	CHECK(row_of_path(&fixture, "/owners/before-1970").extended);
+	CHECK(!row_of_path(&fixture, "/layouts/size-100").extended);
+	row = row_of_path(&fixture, "/layouts/size-100");
+	CHECK(row.layout == EROFS_LAYOUT_FLAT_INLINE);
+	row = row_of_path(&fixture, "/layouts/size-4065");
+	CHECK(row.layout == EROFS_LAYOUT_FLAT);
+	row = row_of_path(&fixture, "/wide");
+	CHECK(row.size > 4 * BLOCK);
+	fixture_close(&fixture);
+}
+
+/*
+ * Reproducible images.
+ */
+
+/*
+ * One way to build the same image: how the tree is inserted, the
+ * context's limits, and the time zone. A scratch size gives the context a
+ * scratch directory with a one-page metadata cache, so plan rows spill.
+ */
+typedef struct variant {
+	const char	*name;
+	bool		 reverse;
+	uint64_t	 memory_bytes;
+	uint64_t	 scratch_bytes;
+	const char	*time_zone;
+} variant_t;
+
+static void
+set_time_zone(const char *zone)
+{
+	if (zone != NULL)
+		CHECK(setenv("TZ", zone, 1) == 0);
+	else
+		CHECK(unsetenv("TZ") == 0);
+	tzset();
+}
+
+static void
+emit_variant(const variant_t *variant, memory_sink_t *sink)
+{
+	fsimg_write_options_t options;
+	fsimg_options_t context;
+	char directory[256] = "";
+	fixture_t fixture;
+	fsimg_status_t status;
+	int fd = -1;
+
+	fsimg_options_init(&context);
+	if (variant->memory_bytes != 0)
+		context.memory_bytes = variant->memory_bytes;
+	if (variant->scratch_bytes != 0) {
+		make_temp_directory(directory, sizeof(directory));
+		fd = open(directory, O_RDONLY | O_DIRECTORY);
+		CHECK(fd != -1);
+		context.scratch_bytes = variant->scratch_bytes;
+		context.scratch_directory_fd = fd;
+	}
+	reproducible_options(&options);
+	set_time_zone(variant->time_zone);
+	fixture_open_with(&fixture, &context,
+	    variant->scratch_bytes != 0 ? 1 : 0);
+	status = fixture_plan(&fixture, &options, variant->reverse);
+	CHECK_CASE(status == FSIMG_OK, "%s: planning failed with %d: %s",
+	    variant->name, status, fixture.error.message);
+	emit_tree(&fixture, sink, POISON);
+	fixture_close(&fixture);
+	set_time_zone(NULL);
+	if (fd != -1) {
+		CHECK(close(fd) == 0);
+		remove_tree(directory);
+	}
+}
+
+static void
+test_reproducible_image_ignores_order_limits_and_time_zone(void)
+{
+	static const variant_t variants[] = {
+		{ "forward", false, 0, 0, NULL },
+		{ "reverse insertion", true, 0, 0, NULL },
+		{ "minimum memory budget", false, 16u << 20, 0, NULL },
+		{ "scratch with a one-page cache", false, 0, 8u << 20, NULL },
+		{ "time zone", false, 0, 0, "America/New_York" },
+		{ "time zone ahead of UTC", true, 0, 0, "Asia/Kolkata" },
+	};
+	const size_t count = sizeof(variants) / sizeof(variants[0]);
+	memory_sink_t reference, sink;
+
+	build_round_trip_tree();
+	emit_variant(&variants[0], &reference);
+	for (size_t i = 1; i < count; i++) {
+		emit_variant(&variants[i], &sink);
+		CHECK_CASE(sink.length == reference.length &&
+		    bcmp(sink.bytes, reference.bytes,
+		    (size_t)sink.length) == 0, "%s: the image differs",
+		    variants[i].name);
+		free(sink.bytes);
+	}
+	free(reference.bytes);
+}
+
+/*
+ * Poison.
+ */
+
+static void
+mark_range(unsigned char *carries, uint64_t length, uint64_t start,
+    uint64_t count)
+{
+	CHECK(start <= length && count <= length - start);
+	memset(carries + start, 1, (size_t)count);
+}
+
+/*
+ * The bytes of the image that may carry data, one byte each, from the plan
+ * alone: the superblock, each inode's fixed part and inline tail, and the
+ * data blocks' content, which ends at the size under the flat layout and
+ * at the last full block under the flat-inline one.
+ */
+static unsigned char *
+carrying_bytes(fixture_t *fixture, uint64_t length)
+{
+	unsigned char *carries = calloc(1, (size_t)length);
+
+	CHECK(carries != NULL);
+	mark_range(carries, length, EROFS_SUPER_OFFSET, EROFS_SUPER_BASE_BYTES);
+	for (uint64_t id = 0; id <= fixture->writer->count; id++) {
+		erofs_row_t row = row_at(fixture, id);
+		uint64_t tail = erofs_row_tail_bytes(&row, BLOCK);
+		uint64_t data = row.size - tail;
+
+		mark_range(carries, length, row.nid * SLOT,
+		    erofs_row_fixed_bytes(&row) + tail);
+		if (data != 0)
+			mark_range(carries, length, row.start_block * BLOCK,
+			    data);
+	}
+	return (carries);
+}
+
+/* The image with the poison given, from a reproducible plan of the tree. */
+static void
+emit_poisoned(memory_sink_t *sink, unsigned char poison,
+    unsigned char **carries)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	emit_tree(&fixture, sink, poison);
+	if (carries != NULL)
+		*carries = carrying_bytes(&fixture, sink->length);
+	fixture_close(&fixture);
+}
+
+/*
+ * Outside the superblock, the inode bodies and the data the plan names,
+ * the image is zero, the boot area included. Inside them, the same image
+ * comes out under two poison bytes, so the poison cannot be a stale byte
+ * the emitter left in a range it meant to write.
+ */
+static void
+test_emission_leaves_no_stale_byte(void)
+{
+	memory_sink_t poisoned, other;
+	unsigned char *carries;
+
+	build_round_trip_tree();
+	emit_poisoned(&poisoned, POISON, &carries);
+	emit_poisoned(&other, POISON_ALT, NULL);
+
+	CHECK(poisoned.length == other.length);
+	CHECK(poisoned.length > BLOCK);
+	for (uint64_t i = 0; i < EROFS_SUPER_OFFSET; i++)
+		CHECK_CASE(poisoned.bytes[i] == 0, "boot byte %ju is %u",
+		    (uintmax_t)i, poisoned.bytes[i]);
+	for (uint64_t i = 0; i < poisoned.length; i++) {
+		if (!carries[i])
+			CHECK_CASE(poisoned.bytes[i] == 0,
+			    "byte %ju outside any data is %u", (uintmax_t)i,
+			    poisoned.bytes[i]);
+		CHECK_CASE(poisoned.bytes[i] == other.bytes[i],
+		    "byte %ju is %u under poison %#x and %u under %#x",
+		    (uintmax_t)i, poisoned.bytes[i], POISON, other.bytes[i],
+		    POISON_ALT);
+	}
+	free(carries);
+	free(poisoned.bytes);
+	free(other.bytes);
+}
+
+/*
+ * Faults.
+ */
+
+/* An emission that fails fails the writer without leaking. */
+static void
+test_write_failure_fails_emission_at_any_write(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_status_t status;
+	uint64_t writes;
+
+	build_mixed_tree();
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	emit_tree(&fixture, &sink, POISON);
+	writes = sink.writes;
+	free(sink.bytes);
+	fixture_close(&fixture);
+	CHECK(writes > 2);
+
+	for (unsigned scenario = 0; scenario < 3; scenario++) {
+		const uint64_t at[] = { 1, writes / 2, writes };
+
+		plan_tree(&fixture, &options);
+		sink_open(&fixture, &sink, POISON);
+		sink.fail_write_at = at[scenario];
+		status = emit_into(&fixture, &sink);
+		CHECK_CASE(status != FSIMG_OK,
+		    "write %ju failing did not fail the emission",
+		    (uintmax_t)at[scenario]);
+		free(sink.bytes);
+		fixture_close(&fixture);
+	}
+}
+
+static void
+test_flush_failure_fails_emission(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	build_mixed_tree();
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	sink_open(&fixture, &sink, POISON);
+	sink.fail_flush = true;
+	CHECK(emit_into(&fixture, &sink) != FSIMG_OK);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+/* Allocation fails at every point of emission, once planning is done. */
+static void
+test_allocation_failure_during_emission_is_clean(void)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_status_t status;
+	bool succeeded = false;
+	unsigned failures = 0;
+
+	build_mixed_tree();
+	reproducible_options(&options);
+	for (uint64_t attempt = 1; attempt < 4096 && !succeeded; attempt++) {
+		plan_tree(&fixture, &options);
+		sink_open(&fixture, &sink, POISON);
+		fsimg_test_fail_alloc_after(fixture.ctx, attempt);
+		status = emit_into(&fixture, &sink);
+		fsimg_test_fail_alloc_after(fixture.ctx, 0);
+		CHECK_CASE(status == FSIMG_OK || status == FSIMG_ENOMEM,
+		    "allocation %ju failing gave status %d",
+		    (uintmax_t)attempt, status);
+		succeeded = status == FSIMG_OK;
+		failures += status == FSIMG_ENOMEM;
+		free(sink.bytes);
+		fixture_close(&fixture);
+	}
+	CHECK(succeeded);
+	CHECK(failures > 0);
+}
+
+/*
+ * A source changed after planning fails the emission, whatever it was and
+ * wherever it sits in the volume.
+ */
+static void
+check_changed_source(const char *path)
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_status_t status;
+	size_t index = spec_at_path(path);
+
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	sink_open(&fixture, &sink, POISON);
+	changed_source = index;
+	status = emit_into(&fixture, &sink);
+	CHECK_CASE(status == FSIMG_ESOURCE_CHANGED,
+	    "%s: a changed source gave status %d: %s", path, status,
+	    fixture.error.message);
+	changed_source = UINT64_MAX;
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+static void
+test_changed_file_source_fails_emission(void)
+{
+	build_round_trip_tree();
+	check_changed_source("/layouts/size-0");
+	check_changed_source("/layouts/size-100");
+	check_changed_source("/layouts/size-1000003");
+}
+
+static void
+test_changed_link_source_fails_emission(void)
+{
+	build_round_trip_tree();
+	check_changed_source("/links/short");
+	check_changed_source("/links/long");
+}
+
+/*
+ * The encoders.
+ */
+
+static erofs_super_t
+sample_super(void)
+{
+	erofs_super_t sb;
+
+	bzero(&sb, sizeof(sb));
+	sb.compat = EROFS_COMPAT_SB_CHKSUM | EROFS_COMPAT_MTIME;
+	sb.blkszbits = 12;
+	sb.root_nid = 36;
+	sb.inode_count = 9;
+	sb.block_count = 17;
+	sb.epoch = EPOCH;
+	for (unsigned i = 0; i < sizeof(sb.uuid); i++)
+		sb.uuid[i] = (uint8_t)(0x40 + i);
+	bcopy("label", sb.name, 5);
+	sb.name_length = 5;
+	return (sb);
+}
+
+static void
+test_super_encoding_decodes_to_the_same_superblock(void)
+{
+	unsigned char region[SUPER_REGION];
+	erofs_super_t sb = sample_super(), decoded;
+	erofs_config_t config;
+	fsimg_status_t status;
+	const char *what = NULL;
+
+	bzero(region, sizeof(region));
+	CHECK(erofs_super_encode(&sb, region));
+	CHECK(erofs_super_checksum(region, sizeof(region), sb.blkszbits,
+	    &sb.checksum));
+	CHECK(erofs_super_encode(&sb, region));
+	status = erofs_region_decode(region, sizeof(region), &decoded, &config,
+	    &what);
+	CHECK_CASE(status == FSIMG_OK, "decoding refused: %s", what);
+
+	CHECK(bcmp(decoded.uuid, sb.uuid, sizeof(sb.uuid)) == 0);
+	CHECK(decoded.name_length == 5 && bcmp(decoded.name, "label", 5) == 0);
+	CHECK(decoded.root_nid == sb.root_nid);
+	CHECK(decoded.inode_count == sb.inode_count);
+	CHECK(decoded.block_count == sb.block_count);
+	CHECK(decoded.epoch == sb.epoch && decoded.epoch_nsec == 0);
+	CHECK(decoded.compat == sb.compat && decoded.incompat == 0);
+	CHECK(decoded.checksum == sb.checksum);
+	CHECK(decoded.blkszbits == sb.blkszbits);
+	CHECK(decoded.extension_slots == 0 && decoded.box_nid == 0);
+}
+
+static void
+test_super_encoding_refuses_what_it_cannot_store(void)
+{
+	unsigned char raw[EROFS_SUPER_BASE_BYTES];
+	erofs_super_t sb = sample_super();
+
+	CHECK(erofs_super_encode(&sb, raw));
+
+	sb.incompat = EROFS_INCOMPAT_48BIT;
+	CHECK(!erofs_super_encode(&sb, raw));
+
+	sb = sample_super();
+	sb.incompat = EROFS_INCOMPAT_COMPR_CFGS;
+	CHECK(!erofs_super_encode(&sb, raw));
+
+	sb = sample_super();
+	sb.compat |= EROFS_COMPAT_XATTR_FILTER;
+	CHECK(!erofs_super_encode(&sb, raw));
+
+	sb = sample_super();
+	sb.extension_slots = 1;
+	CHECK(!erofs_super_encode(&sb, raw));
+
+	sb = sample_super();
+	sb.root_nid = UINT16_MAX + 1;
+	CHECK(!erofs_super_encode(&sb, raw));
+
+	sb = sample_super();
+	sb.block_count = UINT64_C(1) << 32;
+	CHECK(!erofs_super_encode(&sb, raw));
+
+	sb = sample_super();
+	sb.blkszbits = EROFS_BLKSZBITS_MAX + 1;
+	CHECK(!erofs_super_encode(&sb, raw));
+
+	sb = sample_super();
+	sb.epoch_nsec = 1000000000;
+	CHECK(!erofs_super_encode(&sb, raw));
+
+	sb = sample_super();
+	sb.name[1] = '\0';
+	sb.name_length = 3;
+	CHECK(!erofs_super_encode(&sb, raw));
+}
+
+/* A compact inode fits the sample superblock's epoch and every field. */
+static erofs_inode_t
+sample_inode(bool extended)
+{
+	erofs_inode_t inode;
+
+	bzero(&inode, sizeof(inode));
+	inode.kind = FSIMG_ENTRY_FILE;
+	inode.layout = EROFS_LAYOUT_FLAT_INLINE;
+	inode.extended = extended;
+	inode.permissions = 0640;
+	inode.nlink = 1;
+	inode.size = 5000;
+	inode.layout_word = 77;
+	inode.serial = 9;
+	inode.uid = 1000;
+	inode.gid = 100;
+	inode.time = EPOCH + 3600;
+	return (inode);
+}
+
+static void
+check_inode_round_trip(const erofs_inode_t *inode, size_t fixed_bytes)
+{
+	const erofs_super_t sb = sample_super();
+	unsigned char raw[EROFS_INODE_EXTENDED_BYTES];
+	erofs_inode_t decoded;
+	fsimg_status_t status;
+	const char *what = NULL;
+
+	bzero(raw, sizeof(raw));
+	CHECK(erofs_inode_encode(inode, &sb, raw));
+	status = erofs_inode_decode(raw, fixed_bytes, &sb, &decoded, &what);
+	CHECK_CASE(status == FSIMG_OK, "decoding refused: %s", what);
+	CHECK(decoded.fixed_bytes == fixed_bytes);
+	CHECK(decoded.extended == inode->extended);
+	CHECK(decoded.kind == inode->kind && decoded.layout == inode->layout);
+	CHECK(decoded.permissions == inode->permissions);
+	CHECK(decoded.nlink == inode->nlink && decoded.size == inode->size);
+	CHECK(decoded.layout_word == inode->layout_word);
+	CHECK(decoded.serial == inode->serial);
+	CHECK(decoded.uid == inode->uid && decoded.gid == inode->gid);
+	CHECK(decoded.time == inode->time);
+	CHECK(decoded.time_nsec == inode->time_nsec);
+}
+
+static void
+test_compact_inode_encoding_decodes_to_the_same_inode(void)
+{
+	erofs_inode_t inode = sample_inode(false);
+
+	check_inode_round_trip(&inode, EROFS_INODE_COMPACT_BYTES);
+	inode.kind = FSIMG_ENTRY_DIRECTORY;
+	inode.layout = EROFS_LAYOUT_FLAT;
+	inode.nlink = 3;
+	inode.time = EPOCH;
+	check_inode_round_trip(&inode, EROFS_INODE_COMPACT_BYTES);
+}
+
+static void
+test_extended_inode_encoding_decodes_to_the_same_inode(void)
+{
+	erofs_inode_t inode = sample_inode(true);
+
+	inode.uid = 70000;
+	inode.gid = 4000000000u;
+	inode.size = (UINT64_C(1) << 33) + 100;
+	inode.time = -5;
+	inode.time_nsec = 999999999;
+	inode.nlink = 70000;
+	check_inode_round_trip(&inode, EROFS_INODE_EXTENDED_BYTES);
+}
+
+static void
+test_compact_inode_encoding_refuses_what_it_cannot_store(void)
+{
+	const erofs_super_t sb = sample_super();
+	unsigned char raw[EROFS_INODE_EXTENDED_BYTES];
+	erofs_inode_t inode = sample_inode(false);
+
+	CHECK(erofs_inode_encode(&inode, &sb, raw));
+
+	inode.uid = 70000;
+	CHECK(!erofs_inode_encode(&inode, &sb, raw));
+	inode = sample_inode(false);
+	inode.gid = 70000;
+	CHECK(!erofs_inode_encode(&inode, &sb, raw));
+	inode = sample_inode(false);
+	inode.size = UINT64_C(1) << 32;
+	CHECK(!erofs_inode_encode(&inode, &sb, raw));
+	inode = sample_inode(false);
+	inode.time = sb.epoch - 1;
+	CHECK(!erofs_inode_encode(&inode, &sb, raw));
+	inode = sample_inode(false);
+	inode.time_nsec = sb.epoch_nsec + 1;
+	CHECK(!erofs_inode_encode(&inode, &sb, raw));
+
+	/* The same record fits the extended form. */
+	inode.extended = true;
+	CHECK(erofs_inode_encode(&inode, &sb, raw));
+}
+
 int
 main(void)
 {
@@ -2051,5 +3195,22 @@ main(void)
 	test_directory_blocks_hold_255_byte_names();
 	test_directory_blocks_mix_name_lengths();
 	test_directory_walk_merges_dots_across_blocks();
+
+	test_empty_catalog_image_reads_back_as_the_root_alone();
+	test_reproducible_image_reads_back_as_specified();
+	test_unreproducible_image_stores_given_times_and_owners();
+	test_reproducible_image_ignores_order_limits_and_time_zone();
+	test_emission_leaves_no_stale_byte();
+	test_write_failure_fails_emission_at_any_write();
+	test_flush_failure_fails_emission();
+	test_allocation_failure_during_emission_is_clean();
+	test_changed_file_source_fails_emission();
+	test_changed_link_source_fails_emission();
+
+	test_super_encoding_decodes_to_the_same_superblock();
+	test_super_encoding_refuses_what_it_cannot_store();
+	test_compact_inode_encoding_decodes_to_the_same_inode();
+	test_extended_inode_encoding_decodes_to_the_same_inode();
+	test_compact_inode_encoding_refuses_what_it_cannot_store();
 	return (0);
 }
