@@ -16,13 +16,27 @@
  * included, is decoded or copied into the content window. Only resolve
  * writes that window, and it holds it, so the bytes delivery copies cannot
  * be replaced by another lookup. The driver's own readers, directory
- * preparation, symbolic-link replay and the long-prefix table, read a
- * logical range of any inode into a buffer of theirs with
- * erofs_content_read(), copying clusters through the metadata window.
+ * preparation, symbolic-link replay, the long-prefix table and payload
+ * verification, read a logical range of any inode into a buffer of theirs
+ * with erofs_content_read(), copying clusters through the metadata window.
  */
 
+static bool		cluster_mapped(const erofs_cluster_t *);
 static fsimg_status_t	extent_read(fsimg_reader_t *, const erofs_extent_t *,
-			    uint64_t, size_t, void *, fsimg_error_t *);
+			    uint64_t, size_t, void *, size_t *, fsimg_error_t *);
+
+/*
+ * Whether delivery maps the cluster's bytes in the volume rather than
+ * holding them in the content window: a plain cluster stored shifted in
+ * blocks. Of all clusters, resolve maps exactly these and the content
+ * reader counts exactly these as payload, so the two cannot disagree.
+ */
+static bool
+cluster_mapped(const erofs_cluster_t *cluster)
+{
+	return (cluster->source == EROFS_SOURCE_BLOCKS &&
+	    cluster->mode == EROFS_CLUSTER_SHIFTED);
+}
 
 /*
  * The extent of the current file holding offset, below its initialized
@@ -58,8 +72,7 @@ erofs_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *out,
 		out->image_offset = FSIMG_EXTENT_ZERO;
 		return (FSIMG_OK);
 	case EROFS_EXTENT_CLUSTER:
-		if (extent.cluster.source == EROFS_SOURCE_BLOCKS &&
-		    extent.cluster.mode == EROFS_CLUSTER_SHIFTED) {
+		if (cluster_mapped(&extent.cluster)) {
 			out->image_offset = extent.cluster.storage_offset +
 			    extent.cluster_skip;
 			return (FSIMG_OK);
@@ -80,10 +93,14 @@ erofs_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *out,
  * length bytes of inode's content from logical offset into out, extent by
  * extent. The range must lie inside the inode's size: callers derive it
  * from the size, so a range past it is a driver defect, FSIMG_EINVAL.
+ * When stored is not NULL, the bytes delivery would read from the image
+ * are added to it: those of stored extents and of plain clusters stored
+ * shifted, never decoded bytes or zeros.
  */
 fsimg_status_t
 erofs_content_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
-    uint64_t offset, size_t length, void *out, fsimg_error_t *error)
+    uint64_t offset, size_t length, void *out, size_t *stored,
+    fsimg_error_t *error)
 {
 	unsigned char *cursor = out;
 	erofs_extent_t extent;
@@ -103,7 +120,7 @@ erofs_content_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
 		piece = extent_end - offset < length ?
 		    (size_t)(extent_end - offset) : length;
 		status = extent_read(reader, &extent, offset, piece, cursor,
-		    error);
+		    stored, error);
 		if (status != FSIMG_OK)
 			return (status);
 		cursor += piece;
@@ -121,7 +138,8 @@ erofs_content_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
  */
 static fsimg_status_t
 extent_read(fsimg_reader_t *reader, const erofs_extent_t *extent,
-    uint64_t offset, size_t length, void *out, fsimg_error_t *error)
+    uint64_t offset, size_t length, void *out, size_t *stored,
+    fsimg_error_t *error)
 {
 	erofs_window_t *window = &erofs_state(reader)->meta_window;
 	uint64_t within = offset - extent->logical_offset;
@@ -133,6 +151,9 @@ extent_read(fsimg_reader_t *reader, const erofs_extent_t *extent,
 		status = fsimg_reader_bytes(reader,
 		    extent->storage_offset + within, out, length, &transferred,
 		    error);
+		/* Bytes a failing read confirmed were still read. */
+		if (stored != NULL)
+			*stored += transferred;
 		if (status != FSIMG_OK)
 			return (status);
 		if (transferred != length)
@@ -147,6 +168,8 @@ extent_read(fsimg_reader_t *reader, const erofs_extent_t *extent,
 		/* The extent lies inside the cluster's decoded bytes. */
 		bcopy(window->output + extent->cluster_skip + within, out,
 		    length);
+		if (stored != NULL && cluster_mapped(&extent->cluster))
+			*stored += length;
 		return (FSIMG_OK);
 	case EROFS_EXTENT_ZERO:
 		bzero(out, length);

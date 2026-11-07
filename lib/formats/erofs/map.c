@@ -64,13 +64,23 @@ static fsimg_status_t	stored_extent(const fsimg_reader_t *, uint64_t,
 /*
  * The extent of inode holding logical byte offset, which must be below the
  * inode's size: a caller deriving an offset past it is a driver defect,
- * FSIMG_EINVAL. Every extent returned lies inside its storage.
+ * FSIMG_EINVAL. Every extent returned lies inside its storage, which each
+ * mapper ensures, and holds offset, which the check below ensures
+ * whichever mapper produced it, so a caller stepping from offset to the
+ * extent's end always moves forward.
  */
 fsimg_status_t
 erofs_map(fsimg_reader_t *reader, const erofs_inode_t *inode,
     uint64_t offset, erofs_extent_t *out, fsimg_error_t *error)
 {
-	return (extent_find(reader, inode, offset, false, out, error));
+	fsimg_status_t status;
+
+	status = extent_find(reader, inode, offset, false, out, error);
+	if (status == FSIMG_OK && (offset < out->logical_offset ||
+	    offset - out->logical_offset >= out->length))
+		return (erofs_reject(error, FSIMG_EINVAL,
+		    "extent does not hold the mapped offset"));
+	return (status);
 }
 
 /*

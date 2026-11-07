@@ -237,7 +237,7 @@ prefix_read(fsimg_reader_t *reader, uint64_t offset, size_t length,
 		return (erofs_meta_read(reader, EROFS_SPACE_PRIMARY, offset,
 		    length, out, error));
 	return (erofs_content_read(reader, &erofs->packed, offset, length,
-	    out, error));
+	    out, NULL, error));
 }
 
 /*

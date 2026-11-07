@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -130,12 +131,13 @@ typedef struct verdict {
 
 /*
  * Open the image and either run fsimg_verify() (verify true) or list every
- * entry. The verdict's status is the first step that failed; a listing that
- * reaches its end is FSIMG_OK.
+ * entry, within memory_bytes and max_work (0: unlimited). The verdict's
+ * status is the first step that failed; a listing that reaches its end is
+ * FSIMG_OK.
  */
 static verdict_t
 run_image(const gen_image_t *image, unsigned flags, bool verify,
-    uint64_t memory_bytes)
+    uint64_t memory_bytes, uint64_t max_work)
 {
 	source_t source = { image->bytes, image->length };
 	const fsimg_entry_t *walked;
@@ -149,6 +151,7 @@ run_image(const gen_image_t *image, unsigned flags, bool verify,
 	bzero(&verdict, sizeof(verdict));
 	fsimg_options_init(&options);
 	options.memory_bytes = memory_bytes;
+	options.max_work = max_work;
 	CHECK(fsimg_ctx_new(&options, &ctx, NULL) == FSIMG_OK);
 	fsimg_io_ops_init(&ops);
 	ops.read_at = source_read;
@@ -176,14 +179,14 @@ run_image(const gen_image_t *image, unsigned flags, bool verify,
 static verdict_t
 verify_image(const gen_image_t *image, unsigned flags)
 {
-	return (run_image(image, flags, true, MEMORY_BYTES));
+	return (run_image(image, flags, true, MEMORY_BYTES, 0));
 }
 
 /* The status of listing the image to its end. */
 static fsimg_status_t
 list_image(const gen_image_t *image)
 {
-	return (run_image(image, 0, false, MEMORY_BYTES).status);
+	return (run_image(image, 0, false, MEMORY_BYTES, 0).status);
 }
 
 static const unsigned scopes[SCOPE_COUNT] = { 0, FSIMG_VERIFY_PAYLOAD };
@@ -1077,7 +1080,7 @@ big_check(const char *name, big_t *big, bool extended, uint32_t nlink,
 
 	big_root(big, extended, nlink);
 	gen_seal(&big->image);
-	v = run_image(&big->image, 0, true, BIG_MEMORY);
+	v = run_image(&big->image, 0, true, BIG_MEMORY, 0);
 	EXPECT(v.status == (verifies ? FSIMG_OK : FSIMG_ECORRUPT),
 	    "%s: status %d (%s)", name, (int)v.status, v.error.message);
 	EXPECT(v.report.complete == verifies, "%s: complete is %d", name,
@@ -2052,7 +2055,7 @@ root_entry_case(const char *name, unsigned depth, const char *phrase)
 		fill_dir(&tree, 0, 0, down, 1);
 	}
 	gen_tree_seal(&tree);
-	listing = run_image(&tree.image, 0, false, MEMORY_BYTES);
+	listing = run_image(&tree.image, 0, false, MEMORY_BYTES, 0);
 	snprintf(label, sizeof(label), "%s, listing", name);
 	check_verdict(label, 0, &listing, FSIMG_ECORRUPT, phrase);
 	check_image(name, &tree.image, FSIMG_ECORRUPT, phrase);
@@ -2074,13 +2077,12 @@ test_an_entry_naming_the_root_is_corrupt_at_every_depth(void)
 /* ---- Payload accounting ---- */
 
 /*
- * This pins the current behaviour recorded in TODO.md ("EROFS payload
- * verification reads a hard-linked file once per name"): the walk reaches
- * the inode once per name and reads its content each time. It is expected
- * to change with that fix, to a count of the content once.
+ * A file with two names is counted at each name and its content read once:
+ * verification reads each non-directory's storage after its link count has
+ * matched its names.
  */
 static void
-test_payload_of_a_file_with_two_names_is_counted_once_per_name(void)
+test_payload_of_a_file_with_two_names_is_read_once(void)
 {
 	enum { SIZE = 1000 };
 	gen_dirent_t kids[2];
@@ -2104,11 +2106,49 @@ test_payload_of_a_file_with_two_names_is_counted_once_per_name(void)
 		    scope_name(scopes[i]), (unsigned long long)v.report.files,
 		    (unsigned long long)v.report.logical_bytes);
 		EXPECT(v.report.payload_bytes_read ==
-		    (scopes[i] == 0 ? 0 : 2 * SIZE),
+		    (scopes[i] == 0 ? 0 : SIZE),
 		    "%s: %llu payload bytes", scope_name(scopes[i]),
 		    (unsigned long long)v.report.payload_bytes_read);
 	}
 	gen_tree_free(&tree);
+}
+
+/*
+ * A file whose link count understates its names, whatever the count, is
+ * corrupt before any of its content is read, so naming one large file from
+ * every directory block costs no payload reads.
+ */
+static void
+test_a_file_named_more_often_than_its_link_count_is_never_read(void)
+{
+	static const uint32_t counts[] = { 0, 1, 2 };
+	enum { SIZE = 1000 };
+	gen_dirent_t kids[3];
+	gen_tree_t tree;
+	uint64_t file;
+
+	for (size_t c = 0; c < ARRAY_SIZE(counts); c++) {
+		char label[64];
+		verdict_t v;
+
+		tree_new(&tree, 9, 8);
+		file = add_file(&tree, LAYOUT_FLAT, SIZE);
+		set_nlink(&tree, file, counts[c]);
+		kids[0] = entry("a", file, T_FILE);
+		kids[1] = entry("b", file, T_FILE);
+		kids[2] = entry("c", file, T_FILE);
+		fill_dir(&tree, 0, 0, kids, 3);
+		gen_tree_seal(&tree);
+		v = verify_image(&tree.image, FSIMG_VERIFY_PAYLOAD);
+		snprintf(label, sizeof(label), "link count %" PRIu32
+		    " for three names", counts[c]);
+		check_verdict(label, FSIMG_VERIFY_PAYLOAD, &v, FSIMG_ECORRUPT,
+		    "link count");
+		EXPECT(v.report.payload_bytes_read == 0,
+		    "%s: %llu payload bytes", label,
+		    (unsigned long long)v.report.payload_bytes_read);
+		gen_tree_free(&tree);
+	}
 }
 
 /* ---- Chunk-based files ---- */
@@ -2211,6 +2251,37 @@ test_chunk_holes_claim_nothing_and_verify(void)
 		    (unsigned long long)v.report.files,
 		    (unsigned long long)v.report.logical_bytes);
 	}
+	gen_tree_free(&tree);
+}
+
+/*
+ * A chunk-based file of 2^40 bytes of holes, one 4-byte index entry with
+ * chunkbits 31, verifies within a small work budget: payload verification
+ * skips a hole whole instead of zero-filling it 64 KiB at a time, which
+ * would take 2^24 units.
+ */
+static void
+test_a_terabyte_chunk_hole_verifies_within_a_small_work_budget(void)
+{
+	enum { CHUNKBITS_MAX = 31, WORK = 4096 };
+	gen_chunk_t hole = gen_chunk_hole(CHUNKBITS_MAX);
+	gen_inode_t proto = chunk_proto(MODE_FILE, UINT64_C(1) << 40);
+	gen_dirent_t kids[1];
+	gen_tree_t tree;
+	verdict_t v;
+
+	proto.extended = true;
+	chunk_tree_new(&tree);
+	kids[0] = entry("hole", gen_tree_add_chunked(&tree, &proto,
+	    CHUNKBITS_MAX, &hole, 1), T_FILE);
+	fill_dir(&tree, 0, 0, kids, 1);
+	gen_tree_seal(&tree);
+	v = run_image(&tree.image, FSIMG_VERIFY_PAYLOAD, true, MEMORY_BYTES,
+	    WORK);
+	check_verdict("a 2^40-byte chunk hole", FSIMG_VERIFY_PAYLOAD, &v,
+	    FSIMG_OK, NULL);
+	EXPECT(v.report.payload_bytes_read == 0, "%llu payload bytes",
+	    (unsigned long long)v.report.payload_bytes_read);
 	gen_tree_free(&tree);
 }
 
@@ -2434,6 +2505,65 @@ test_a_volume_with_compressed_files_verifies_in_both_scopes(void)
 		/* Decoded bytes are not stored bytes, so they are not counted. */
 		EXPECT(v.report.payload_bytes_read <= (scopes[i] == 0 ? 0 :
 		    logical), "%s: %llu payload bytes", scope_name(scopes[i]),
+		    (unsigned long long)v.report.payload_bytes_read);
+	}
+	gen_tree_free(&tree);
+}
+
+/*
+ * A compressed file of LZ4 clusters around one plain cluster at
+ * [PLAIN_START, PLAIN_END), of the given kind. advice must carry
+ * GEN_ZA_INTERLACED exactly when the plain cluster is interlaced, since
+ * the map header's advice decides how every plain cluster is stored.
+ */
+static uint64_t
+add_plain_zfile(gen_tree_t *tree, gen_zkind_t plain, uint16_t advice)
+{
+	enum { PLAIN_START = 700, PLAIN_END = 1200, SIZE = 1400 };
+	const gen_zcluster_t clusters[3] = {
+		{ 0, 1, GEN_ZK_LZ4_PERIODIC, false, 7, NULL, 0 },
+		{ PLAIN_START, 1, plain, false, 0, NULL, 0 },
+		{ PLAIN_END, 1, GEN_ZK_LZ4_LITERAL, false, 0, NULL, 0 }
+	};
+	unsigned char content[SIZE];
+	gen_inode_t proto = inode_proto(MODE_FILE, LAYOUT_FLAT);
+	gen_zfile_t zf = { content, SIZE, ZLAYOUT_FULL, advice, 0, clusters,
+	    ARRAY_SIZE(clusters), GEN_ZL_BLOCKS, 0 };
+
+	for (size_t i = 0; i < SIZE; i++)
+		content[i] = (unsigned char)(i < PLAIN_START ?
+		    (i % 7) * 13 + 1 : i * 31 + 5);
+	return (gen_tree_add_zfile(tree, &proto, &zf));
+}
+
+/*
+ * Payload verification counts the bytes delivery maps in the volume. A
+ * plain cluster stored shifted is mapped, so its 500 bytes count; an
+ * interlaced one is rearranged, and LZ4 clusters decoded, into the content
+ * window, so they count nothing.
+ */
+static void
+test_a_shifted_plain_cluster_counts_as_payload_read(void)
+{
+	enum { SHIFTED_BYTES = 1200 - 700 };
+	gen_dirent_t kids[2];
+	gen_tree_t tree;
+
+	ztree_new(&tree, 16);
+	kids[0] = entry("interlaced", add_plain_zfile(&tree,
+	    GEN_ZK_INTERLACED, GEN_ZA_INTERLACED), T_FILE);
+	kids[1] = entry("shifted", add_plain_zfile(&tree, GEN_ZK_PLAIN, 0),
+	    T_FILE);
+	fill_dir(&tree, 0, 0, kids, 2);
+	gen_tree_seal(&tree);
+	for (size_t i = 0; i < SCOPE_COUNT; i++) {
+		verdict_t v = verify_image(&tree.image, scopes[i]);
+
+		check_verdict("shifted and interlaced plain clusters",
+		    scopes[i], &v, FSIMG_OK, NULL);
+		EXPECT(v.report.payload_bytes_read ==
+		    (scopes[i] == 0 ? 0 : SHIFTED_BYTES),
+		    "%s: %llu payload bytes", scope_name(scopes[i]),
 		    (unsigned long long)v.report.payload_bytes_read);
 	}
 	gen_tree_free(&tree);
@@ -2798,13 +2928,16 @@ main(void)
 	test_a_good_long_prefix_table_verifies();
 	test_a_block_count_past_the_input_fails_as_truncated();
 	test_an_entry_naming_the_root_is_corrupt_at_every_depth();
-	test_payload_of_a_file_with_two_names_is_counted_once_per_name();
+	test_payload_of_a_file_with_two_names_is_read_once();
+	test_a_file_named_more_often_than_its_link_count_is_never_read();
 	test_chunk_files_with_shared_blocks_and_holes_verify();
 	test_chunk_holes_claim_nothing_and_verify();
+	test_a_terabyte_chunk_hole_verifies_within_a_small_work_budget();
 	test_a_chunk_over_an_inode_body_is_corrupt();
 	test_a_chunk_over_a_directory_block_is_corrupt();
 	test_chunk_based_directories_verify_and_sharing_a_block_is_corrupt();
 	test_a_volume_with_compressed_files_verifies_in_both_scopes();
+	test_a_shifted_plain_cluster_counts_as_payload_read();
 	test_a_compressed_cluster_over_an_inode_body_is_corrupt();
 	test_a_compressed_cluster_over_a_directory_block_is_corrupt();
 	test_two_files_naming_one_cluster_verify();

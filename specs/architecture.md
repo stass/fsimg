@@ -458,12 +458,18 @@ The [verification helpers](design-verification-helpers.md) own initialized
 payload read-through and the mechanics of exclusive ownership runs. Drivers
 retain traversal scope, repeated-object handling, allocation discovery, and
 reconciliation against format metadata. FAT keeps its fused chain verification
-and payload read. The strict run utility, which FAT, exFAT and HFS Plus share,
-rejects every overlapping claim in its declared domain; it neither infers
-complete ownership nor defines sharing policy for other formats. QNX6's owner-bearing records, QNX4's claimed
-bitset, ImageFS's reference and checksum checks, and EROFS's classed claim
-stream, whose sharing rules admit data and shared-attribute overlaps, keep
-their own representations.
+and payload read. EROFS reads each regular file once through its own content
+reader in the pass over its sorted references, after the file's link count
+has matched its names: an EROFS file has no first name at which delivery could
+read it once, and reading at every name lets one file named from every
+directory block cost the square of the volume
+([driver design](design-erofs-driver.md#verification)). The strict run
+utility, which FAT, exFAT and HFS Plus share, rejects every overlapping claim
+in its declared domain; it neither infers complete ownership nor defines
+sharing policy for other formats. QNX6's owner-bearing records, QNX4's
+claimed bitset, ImageFS's reference and checksum checks, and EROFS's classed
+claim stream, whose sharing rules admit data and shared-attribute overlaps,
+keep their own representations.
 
 Verification reports count delivered non-directory entries as `files`,
 including symbolic links, FIFOs, devices and sockets; `directories` includes

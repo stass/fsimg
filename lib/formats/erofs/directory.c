@@ -167,7 +167,7 @@ blocks_scan(erofs_scan_t *scan, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			return (status);
 		status = erofs_content_read(reader, &scan->directory, offset,
-		    valid, scan->block, error);
+		    valid, scan->block, NULL, error);
 		if (status != FSIMG_OK)
 			return (status);
 		status = erofs_dirblock_decode(scan->block, valid, &block,
@@ -431,7 +431,8 @@ symlink_target_declare(fsimg_reader_t *reader, const erofs_inode_t *inode,
 		return (erofs_reject(error, FSIMG_EUNSUPPORTED,
 		    "symbolic link size"));
 	length = (size_t)inode->size;
-	status = erofs_content_read(reader, inode, 0, length, target, error);
+	status = erofs_content_read(reader, inode, 0, length, target, NULL,
+	    error);
 	if (status != FSIMG_OK)
 		return (status);
 	if (memchr(target, '\0', length) != NULL)

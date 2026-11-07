@@ -25,13 +25,13 @@
  * (u64), the link count of a name (u32), the role (u8), the flags (u8) and
  * two zero bytes.
  *
- * Claims. Every structure the walk reaches claims its bytes of the volume
- * in one of erofs_claim_class_t's classes: the superblock region, the
- * long-prefix table and the packed inode before the walk, then each
- * inode's body, its directory blocks or file data, and its shared
- * attribute entries. Sorted by start, one sweep applies the ownership
- * rule. A record is the start (u64), the length (u64), the owning NID (u64)
- * and the class (u8).
+ * Claims. Every reachable structure claims its bytes of the volume in one
+ * of erofs_claim_class_t's classes: the superblock region, the long-prefix
+ * table and the packed inode before the walk, then each inode's body, its
+ * directory blocks or file data, and its shared attribute entries, at the
+ * points "Each inode is recorded once" below gives. Sorted by start, one
+ * sweep applies the ownership rule. A record is the start (u64), the
+ * length (u64), the owning NID (u64) and the class (u8).
  *
  * The packed inode is claimed once, as a file whose every cluster is also
  * decoded, so a fragment's bytes are claimed and checked where they are
@@ -39,14 +39,17 @@
  * fragment inside the packed inode's content. No entry may name the packed
  * inode, which is not in the namespace.
  *
- * Without a visited set a hard-linked inode is reached once per name and
- * claims its body and data each time. Its body claims are identical
- * records of the body class, which sort adjacent, and an inode has one
- * body, so the sweep accepts a repeated body claim by the same owner as
- * that one body again; data may overlap anyway. A directory reached twice
- * fails the reference check, which runs first, so its blocks never need
- * the same allowance. A hard-linked file's content is read once per name,
- * which the session's work budget bounds.
+ * Each inode is recorded once. The walk claims a directory's body, blocks
+ * and attributes where it reaches the directory, which has one name: a
+ * directory reached twice fails the reference check, which runs before the
+ * sweep. A non-directory may have many names, so the walk records only its
+ * names; the reference pass, where all names of an inode are adjacent,
+ * claims its body, storage and attributes once its link count has matched
+ * its names, and reads a regular file's content there when payload is
+ * verified. A file is therefore read once whatever its names, and never
+ * when its link count is wrong, which is what bounds a volume whose
+ * directory blocks all name one large file. The references stream is the
+ * visited set; nothing else is spooled.
  */
 #define REFERENCE_BYTES		16u
 #define CLAIM_BYTES		25u
@@ -90,13 +93,21 @@ static fsimg_status_t	claim_next(fsimg_reader_t *, fsimg_stream_t *,
 static fsimg_status_t	claims_sweep(fsimg_reader_t *, fsimg_stream_t *,
 			    fsimg_error_t *);
 static int		compare_u64(uint64_t, uint64_t);
+static fsimg_status_t	nondirectory_verify(fsimg_reader_t *, erofs_verifier_t *,
+			    uint64_t, uint32_t, uint8_t, unsigned char *,
+			    fsimg_verify_report_t *, fsimg_error_t *);
 static fsimg_status_t	inode_record(fsimg_reader_t *, erofs_verifier_t *,
 			    fsimg_stream_t *, const erofs_inode_t *, uint64_t,
 			    fsimg_error_t *);
 static fsimg_status_t	inode_references_check(uint64_t, uint64_t, uint64_t,
 			    uint32_t, uint8_t, fsimg_error_t *);
 static fsimg_status_t	overlap(uint64_t, const char *, fsimg_error_t *);
+static fsimg_status_t	inode_claim(fsimg_reader_t *, erofs_verifier_t *,
+			    const erofs_inode_t *, fsimg_error_t *);
 static fsimg_status_t	packed_check(fsimg_reader_t *, erofs_verifier_t *,
+			    fsimg_error_t *);
+static fsimg_status_t	payload_read(fsimg_reader_t *, const erofs_inode_t *,
+			    unsigned char *, fsimg_verify_report_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	reference_add(fsimg_stream_t *, const reference_t *,
 			    fsimg_error_t *);
@@ -104,8 +115,9 @@ static int		reference_compare(const void *, size_t, const void *,
 			    size_t, void *);
 static fsimg_status_t	reference_next(fsimg_reader_t *, fsimg_stream_t *,
 			    uint64_t *, reference_t *, bool *, fsimg_error_t *);
-static fsimg_status_t	references_check(fsimg_reader_t *, fsimg_stream_t *,
-			    fsimg_error_t *);
+static fsimg_status_t	references_pass(fsimg_reader_t *, erofs_verifier_t *,
+			    fsimg_stream_t *, unsigned char *,
+			    fsimg_verify_report_t *, fsimg_error_t *);
 static fsimg_status_t	scope_check(const fsimg_erofs_reader_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	scratch_corrupt(fsimg_error_t *, const char *);
@@ -205,10 +217,6 @@ erofs_verify(fsimg_reader_t *reader, unsigned flags,
 		if (status == FSIMG_OK)
 			status = inode_record(reader, verifier, references,
 			    &erofs->current, erofs->current_parent, error);
-		if (status == FSIMG_OK && buffer != NULL &&
-		    erofs->current.kind != FSIMG_ENTRY_DIRECTORY)
-			status = fsimg_verify_payload(reader, buffer,
-			    PAYLOAD_BUFFER_BYTES, report, error);
 		if (status != FSIMG_OK)
 			goto done;
 	}
@@ -216,14 +224,16 @@ erofs_verify(fsimg_reader_t *reader, unsigned flags,
 	/*
 	 * Reconcile: references first, so a directory reached twice fails
 	 * on a name or link count before its blocks, claimed twice, could
-	 * reach the sweep; then the claims.
+	 * reach the sweep, and each non-directory is claimed and read once in
+	 * the same pass; then the claims.
 	 */
 	status = fsimg_stream_seal(references, error);
 	if (status == FSIMG_OK)
 		status = fsimg_stream_sort(references, reference_compare, NULL,
 		    NULL, &sorted, error);
 	if (status == FSIMG_OK)
-		status = references_check(reader, sorted, error);
+		status = references_pass(reader, verifier, sorted, buffer,
+		    report, error);
 	fsimg_stream_free(sorted);
 	sorted = NULL;
 	if (status == FSIMG_OK)
@@ -289,10 +299,9 @@ verifier_free(erofs_verifier_t *verifier)
 
 /*
  * Record one reached inode, named by an entry of directory parent, or
- * NO_PARENT for the root: its name, a subdirectory of its parent when it
- * is a directory, its body, its storage and its attributes. A directory's
- * blocks are exclusive metadata, and a regular file's and a symbolic
- * link's blocks data; the other kinds store nothing.
+ * NO_PARENT for the root: its name, and a subdirectory of its parent when
+ * it is a directory. A directory, which has one name, also claims its
+ * storage here; a non-directory's storage waits for nondirectory_verify().
  */
 static fsimg_status_t
 inode_record(fsimg_reader_t *reader, erofs_verifier_t *verifier,
@@ -318,10 +327,56 @@ inode_record(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 			.nid = parent,
 			.role = ROLE_SUBDIRECTORY
 		}, error);
-	if (status != FSIMG_OK)
-		return (status);
+	if (status == FSIMG_OK && directory)
+		status = inode_claim(reader, verifier, inode, error);
+	return (status);
+}
+
+/*
+ * One non-directory, once its link count nlink has matched its names: its
+ * storage claimed and, when buffer is not NULL, a regular file's content
+ * read. The inode is loaded again and must still be the non-directory its
+ * names recorded, with their link count and inode form (flags), so what is
+ * claimed and read is what the reference check approved even when the
+ * input changed and no host identity can show it. The records hold no
+ * size, so a size changed between the loads goes unseen: the walk counted
+ * the old size, and the claims and reads use the new one.
+ */
+static fsimg_status_t
+nondirectory_verify(fsimg_reader_t *reader, erofs_verifier_t *verifier,
+    uint64_t nid, uint32_t nlink, uint8_t flags, unsigned char *buffer,
+    fsimg_verify_report_t *report, fsimg_error_t *error)
+{
+	erofs_inode_t inode;
+	fsimg_status_t status;
+
+	status = erofs_inode_load(reader, nid, &inode, error);
+	if (status == FSIMG_OK && (inode.kind == FSIMG_ENTRY_DIRECTORY ||
+	    inode.nlink != nlink ||
+	    inode.extended != ((flags & FLAG_COMPACT) == 0)))
+		status = erofs_reject(error, FSIMG_ECORRUPT,
+		    "inode changed during verification");
+	if (status == FSIMG_OK)
+		status = inode_claim(reader, verifier, &inode, error);
+	if (status == FSIMG_OK && buffer != NULL &&
+	    inode.kind == FSIMG_ENTRY_FILE)
+		status = payload_read(reader, &inode, buffer, report, error);
+	return (status);
+}
+
+/*
+ * An inode's body, its storage and its attributes. A directory's blocks
+ * are exclusive metadata, and a regular file's and a symbolic link's blocks
+ * data; the other kinds store nothing.
+ */
+static fsimg_status_t
+inode_claim(fsimg_reader_t *reader, erofs_verifier_t *verifier,
+    const erofs_inode_t *inode, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
 	/* erofs_inode_load() proved the body inside the domain. */
-	status = erofs_claim(verifier, EROFS_CLAIM_BODY, inode->offset,
+	status = erofs_claim(verifier, EROFS_CLAIM_EXCLUSIVE, inode->offset,
 	    inode->body_bytes, inode->nid, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -344,6 +399,50 @@ inode_record(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 }
 
 /*
+ * A regular file's content, read once through the content reader in
+ * buffer-sized batches, each a unit of work. Each batch maps its start
+ * first, which the content reader then maps again; a batch that starts in
+ * a hole skips the whole hole instead, still a unit of work, so the loop
+ * advances by a buffer or by a hole. A chunk index of a few entries can
+ * describe 2^43-byte holes, which would otherwise cost their length in
+ * zero fills. The report counts the bytes delivery would have read from
+ * the image, which a hole adds nothing to.
+ */
+static fsimg_status_t
+payload_read(fsimg_reader_t *reader, const erofs_inode_t *inode,
+    unsigned char *buffer, fsimg_verify_report_t *report, fsimg_error_t *error)
+{
+	erofs_extent_t extent;
+	uint64_t offset, step;
+	size_t batch, stored;
+	fsimg_status_t status;
+
+	for (offset = 0; offset < inode->size; offset += step) {
+		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
+		if (status == FSIMG_OK)
+			status = erofs_map(reader, inode, offset, &extent,
+			    error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (extent.kind == EROFS_EXTENT_ZERO) {
+			/* erofs_map() checks that the extent holds offset. */
+			step = extent.logical_offset + extent.length - offset;
+			continue;
+		}
+		batch = inode->size - offset > PAYLOAD_BUFFER_BYTES ?
+		    PAYLOAD_BUFFER_BYTES : (size_t)(inode->size - offset);
+		stored = 0;
+		status = erofs_content_read(reader, inode, offset, batch,
+		    buffer, &stored, error);
+		fsimg_stat_add(&report->payload_bytes_read, stored);
+		if (status != FSIMG_OK)
+			return (status);
+		step = batch;
+	}
+	return (FSIMG_OK);
+}
+
+/*
  * The packed inode, when the volume has one: its body, its storage as data
  * and its attributes, with every cluster decoded once, which proves the
  * stored bytes of every fragment whether or not a reachable file uses it.
@@ -359,7 +458,7 @@ packed_check(fsimg_reader_t *reader, erofs_verifier_t *verifier,
 	if (!erofs->has_packed)
 		return (FSIMG_OK);
 	/* erofs_inode_load() proved the body inside the domain. */
-	status = erofs_claim(verifier, EROFS_CLAIM_BODY, packed->offset,
+	status = erofs_claim(verifier, EROFS_CLAIM_EXCLUSIVE, packed->offset,
 	    packed->body_bytes, packed->nid, error);
 	if (status == FSIMG_OK)
 		status = storage_claim(reader, verifier, packed,
@@ -534,13 +633,17 @@ reference_next(fsimg_reader_t *reader, fsimg_stream_t *sorted,
 
 /*
  * One pass over the references sorted by NID: each inode's names and the
- * subdirectories it parents, then its link count checked against them.
- * Every name of one inode records the same count and flags, which scratch
- * read back must show.
+ * subdirectories it parents, then its link count checked against them,
+ * and then each non-directory claimed and read by nondirectory_verify().
+ * This pass is where every file's storage and content are verified. Every
+ * name of one inode records the same count and flags, so records that
+ * disagree mean scratch did not return what was written, or the input
+ * served the inode differently at two of its names.
  */
 static fsimg_status_t
-references_check(fsimg_reader_t *reader, fsimg_stream_t *sorted,
-    fsimg_error_t *error)
+references_pass(fsimg_reader_t *reader, erofs_verifier_t *verifier,
+    fsimg_stream_t *sorted, unsigned char *buffer,
+    fsimg_verify_report_t *report, fsimg_error_t *error)
 {
 	reference_t record;
 	uint64_t cursor, nid, names, subdirectories;
@@ -582,6 +685,9 @@ references_check(fsimg_reader_t *reader, fsimg_stream_t *sorted,
 		if (status == FSIMG_OK)
 			status = inode_references_check(nid, names,
 			    subdirectories, nlink, flags, error);
+		if (status == FSIMG_OK && (flags & FLAG_DIRECTORY) == 0)
+			status = nondirectory_verify(reader, verifier, nid, nlink,
+			    flags, buffer, report, error);
 	}
 	return (status);
 }
@@ -692,47 +798,34 @@ overlap(uint64_t start, const char *what, fsimg_error_t *error)
  * The ownership rule in one pass over the claims sorted by start. Every
  * claim of a pair that overlaps starts no later than the other, so a
  * claim overlaps an earlier one exactly when it starts below the furthest
- * end the earlier claims of that class reached. Exclusive and body claims
- * share one end, since neither may overlap the other:
+ * end the earlier claims of that class reached:
  *
  *	exclusive	overlaps no claim of any class
- *	body		the same, except that a claim identical to the
- *			previous body claim, owner included, is that inode's
- *			one body reached by another name
- *	shared		overlaps no exclusive, body or data claim, and a
+ *	shared		overlaps no exclusive or data claim, and a
  *			shared claim only when the two are the same range;
  *			accepted shared claims are disjoint or identical, so
  *			the last one is the only one a later claim can reach
- *	data		overlaps no exclusive, body or shared claim
+ *	data		overlaps no exclusive or shared claim
  */
 static fsimg_status_t
 claims_sweep(fsimg_reader_t *reader, fsimg_stream_t *sorted,
     fsimg_error_t *error)
 {
-	claim_t claim, body, shared;
+	claim_t claim, shared;
 	uint64_t cursor, exclusive_end, shared_end, data_end;
-	bool more, have_body;
+	bool more;
 	fsimg_status_t status;
 
 	cursor = 0;
 	exclusive_end = shared_end = data_end = 0;
 	bzero(&claim, sizeof(claim));
-	bzero(&body, sizeof(body));
 	bzero(&shared, sizeof(shared));
-	have_body = false;
 	for (;;) {
 		status = claim_next(reader, sorted, &cursor, claim.start, &claim,
 		    &more, error);
 		if (status != FSIMG_OK || !more)
 			return (status);
 		switch (claim.class) {
-		case EROFS_CLAIM_BODY:
-			if (have_body && claim.start == body.start &&
-			    claim.end == body.end && claim.owner == body.owner)
-				continue;
-			body = claim;
-			have_body = true;
-			/* FALLTHROUGH */
 		case EROFS_CLAIM_EXCLUSIVE:
 			if (claim.start < exclusive_end ||
 			    claim.start < shared_end || claim.start < data_end)

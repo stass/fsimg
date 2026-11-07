@@ -326,27 +326,46 @@ claim stream under the metadata box:
   two plus its subdirectory records (outside the compact exception), or a
   non-directory whose link count differs from its names is a finding.
 * **Claims**: one record per claimed range with its class, start, length
-  and owning NID. The verifier's walk loop makes them from what replay
-  left current, so no reading path carries verification hooks: the
-  superblock region and the long-prefix table before the walk, then each
-  reached inode's body, directory blocks or data extents through
-  `erofs_map()`, and, through `xattr.c`, its shared entries. Inode bodies
-  are exclusive metadata in a class of their own. Box claims go to a
-  second stream with the same layout. Each stream is sorted by start, then
+  and owning NID. The verifier makes them itself, so no reading path
+  carries verification hooks: the superblock region and the long-prefix
+  table before the walk, then each inode's body, directory blocks or data
+  extents through `erofs_map()`, and, through `xattr.c`, its shared
+  entries. Inode bodies are exclusive metadata. Box claims go to a second
+  stream with the same layout. Each stream is sorted by start, then
   length, class and owner, and swept once with the
   [ownership rule](design-erofs.md#verification), keeping the furthest end
-  three groups of claims have reached: exclusive and body claims together,
-  shared claims and data claims. An exclusive or body claim overlapping any
-  other claim, a data claim overlapping a shared one and a shared claim
-  overlapping a different shared range are findings. An inode reached by several names claims its body and storage
-  once per name. An inode has one body, so the sweep takes a body claim
-  identical to the previous one, owner included, as that body again, which
-  is how a NID named several times claims its body once without a visited
-  set; data may overlap anyway, and a directory reached twice fails the
-  reference check, which runs before the sweep. The helpers' ownership runs
+  each class of claims has reached: exclusive, shared and data. An
+  exclusive claim overlapping any other claim, a data claim overlapping a
+  shared one and a shared claim overlapping a different shared range are
+  findings. The helpers' ownership runs
   ([verification helpers](design-verification-helpers.md)) are not used:
   they reject every overlap, so they could check only the exclusive claims,
   which the one sweep checks anyway.
+
+Each inode is recorded and read once. The walk claims a directory's body,
+blocks and attributes where it reaches the directory, which has one name;
+a directory reached twice fails the reference check, which runs before the
+sweep. A non-directory contributes only its name records to the walk. The
+pass over the sorted references, where all names of an inode are adjacent,
+loads each non-directory once its link count has matched its names, claims
+its body, storage and attributes, and under payload verification reads a
+regular file's content through `erofs_content_read()`, charging a unit of
+work per 64 KiB batch. The payload count adds the bytes delivery would map
+in the volume: those of stored extents and of plain clusters stored
+shifted in blocks, never decoded, held or zero bytes. A batch that starts
+in a chunk hole skips the whole hole for one unit of work and reads
+nothing, so a chunk index of a few entries describing 2^43-byte holes
+costs its entries, not its length. A file with N names is therefore read
+once and claims its extents once, and a file whose link count is wrong is
+never read, so a hostile volume whose directory blocks all name one large
+file costs one name record per entry and no payload reads. This bounds
+names, not bytes: data claims may overlap, so many inodes, or one chunk
+index, mapping the same large region still read it once per mapping,
+which the session's work and time limits bound. The reference stream is
+the visited set: nothing else is spooled, and no inode claims its body
+twice. Payload is read in NID order, not walk order. QNX6 reads a file at
+its first name and skips later ones; EROFS has no first name, so the
+sorted references stand in for it.
 
 `verify.c` also maps and decodes the packed inode's and the box's every
 cluster once, claiming their storage, whether or not a reachable file uses

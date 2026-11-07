@@ -98,7 +98,9 @@ range it failed to resolve.
 Payload verification reads through the same delivery. A driver whose
 ownership walk already yields each physical run, such as FAT, can instead read
 those runs clipped to the logical length, so verification walks the
-allocation once.
+allocation once. EROFS reads each file once, through its content reader,
+after its link count has matched its names, since a hard-linked EROFS file has
+no first name.
 
 ## Zero extents
 

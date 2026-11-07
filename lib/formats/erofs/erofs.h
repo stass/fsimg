@@ -580,7 +580,7 @@ fsimg_status_t	erofs_window_fill(fsimg_reader_t *, erofs_window_t *,
 		    const erofs_cluster_t *, fsimg_error_t *);
 void		erofs_window_free(erofs_window_t *);
 fsimg_status_t	erofs_content_read(fsimg_reader_t *, const erofs_inode_t *,
-		    uint64_t, size_t, void *, fsimg_error_t *);
+		    uint64_t, size_t, void *, size_t *, fsimg_error_t *);
 fsimg_status_t	erofs_resolve(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
 		    fsimg_error_t *);
 
@@ -631,10 +631,8 @@ typedef erofs_xxh32_state_t erofs_name_hash_t;
  * of the primary space in one class, which the ownership sweep reconciles
  * after the walk:
  *
- *	EXCLUSIVE	the superblock region, directory blocks and the plain
- *			long-prefix table: overlaps nothing
- *	BODY		an inode's body: exclusive, except that an inode
- *			reached by several names claims its one body again
+ *	EXCLUSIVE	the superblock region, inode bodies, directory blocks
+ *			and the plain long-prefix table: overlaps nothing
  *	SHARED		a shared attribute entry: overlaps only an identical
  *			shared claim, since inodes share pool entries
  *	DATA		file and symbolic-link blocks: may overlap data,
@@ -644,9 +642,8 @@ typedef erofs_xxh32_state_t erofs_name_hash_t;
  */
 typedef enum erofs_claim_class {
 	EROFS_CLAIM_EXCLUSIVE = 0,
-	EROFS_CLAIM_BODY = 1,
-	EROFS_CLAIM_SHARED = 2,
-	EROFS_CLAIM_DATA = 3
+	EROFS_CLAIM_SHARED = 1,
+	EROFS_CLAIM_DATA = 2
 } erofs_claim_class_t;
 
 /* The owner a claim names when no inode owns it, such as the superblock. */

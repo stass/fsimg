@@ -416,20 +416,6 @@
   turns out to stay flat is still encoded to its end. Decide whether the
   output limit should be checked against the flat sizes first, and stop a
   measurement once its clusters reach the flat block count.
-* [Medium] **EROFS payload verification reads a hard-linked file once per
-  name** (`lib/formats/erofs/verify.c`): without a visited set,
-  `fsimg_verify_payload` runs at every name, so `W -d` reads a file with N
-  names N times; a hostile volume of size V whose directory blocks all name
-  one large file makes about V^2/13 bytes of reads, stopped only by the
-  work and time budgets. Read an inode with `nlink > 1` once: spool its
-  NID, sort and deduplicate after the walk, and read each through the
-  driver's content reader with payload accounting, as QNX6 skips later
-  names; state the rule in the driver design. Plain `W` pays too: every
-  name re-runs `storage_claim()`, one mapped extent and one claim record
-  per extent, so a file of E extents with N names spools N * E claims;
-  the deduplicated pass should claim each inode's storage once as well.
-  `test_payload_of_a_file_with_two_names_is_counted_once_per_name` in
-  `test/erofs-verify.c` pins the current count and changes with the fix.
 * [Low] **EROFS verification reports two advisory findings nowhere**
   (`lib/formats/erofs/verify.c`): the [format design's
   verification](specs/design-erofs.md#verification) reports the
@@ -439,6 +425,14 @@
   the verifier checks neither. Decide whether the report gains a notes
   channel (it would serve other formats' advisory counts too) or the
   design drops both.
+* [Low] **EROFS verification's reload check has no test**
+  (`lib/formats/erofs/verify.c` `nondirectory_verify`, `test/erofs-verify.c`):
+  the reference pass reloads each non-directory and fails with "inode
+  changed during verification" when its kind, link count or inode form
+  differs from what its names recorded, which only an input that changes
+  between the two loads can cause. No test reaches the message; a
+  callback source returning a different link-count byte on the inode's
+  second read would.
 * [Low] **EROFS specification model runs no verification stage**
   (`test/spec/lib/fsimg_spec/erofs/cases.rb`): `Cases::STAGES` is
   `info ls extract`; the model should classify `verify` and `verify-deep`
