@@ -59,8 +59,8 @@ Inline compressed tails, packed fragments and deduplicated clusters are
 read, and so are volumes with 48-bit addressing, encoded extents and
 directories without a
 .Pa \&.
-entry included; a volume with a metadata box or extra devices is refused
-as unsupported.
+entry included, and volumes with a metadata box, plain or compressed;
+a volume with extra devices is refused as unsupported.
 A created EROFS volume is uncompressed or LZ4-compressed, with 512- to
 4096-byte blocks and 32-bit or 48-bit addressing, and stores files,
 directories and symbolic links with

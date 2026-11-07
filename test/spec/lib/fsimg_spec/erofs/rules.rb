@@ -19,15 +19,18 @@ module FsimgSpec
       # Features): right-aligned LZ4 streams, the compression configuration
       # with big clusters, chunk-based files, the second algorithm slot,
       # compressed inline tails, fragments with the packed inode and
-      # deduplicated clusters, and the long-prefix table. Every other bit,
-      # known or not, is refused at open. The model holds no compressed inode: map headers and indexes
-      # are tested by test/erofs.c and the producer fixtures.
+      # deduplicated clusters, the long-prefix table, the 48-bit layout and
+      # the metadata box. Every other bit is refused at open. The model
+      # holds no compressed inode and no box: map headers, indexes and box
+      # reads are tested by test/erofs.c, test/erofs-verify.c and the
+      # producer fixtures.
       PREFIXES_FEATURE = 0x40
       CHUNKED_FILE = 0x04
       BIT_48 = 0x80
+      METABOX = 0x100
       # LZ4_0PADDING, COMPR_CFGS, COMPR_HEAD2, ZTAILPACKING, FRAGMENTS (DEDUPE)
       COMPRESSION_FEATURES = 0x3b
-      READABLE_INCOMPAT = PREFIXES_FEATURE | CHUNKED_FILE | COMPRESSION_FEATURES | BIT_48
+      READABLE_INCOMPAT = PREFIXES_FEATURE | CHUNKED_FILE | COMPRESSION_FEATURES | BIT_48 | METABOX
       BUILTIN_PREFIXES = [1, 2, 3, 4, 6].freeze
       LONG_PREFIX = 0x80
       ACL_INDEXES = [2, 3].freeze

@@ -17,8 +17,10 @@ byte range a structure uses, the shared attribute pool, the long-prefix
 table, the attribute name filters and the packed inode. Volumes with
 48-bit addressing read too: block numbers and the root NID beyond 32 and
 16 bits, implicit link counts, directories stored without `.`, and files
-mapped by encoded extents of every record width. A volume with a metadata
-box or extra devices is refused as unsupported.
+mapped by encoded extents of every record width, and volumes whose
+inodes, shared attributes and long-prefix table lie in a metadata box,
+plain or compressed, with or without 48-bit addressing. A volume with
+extra devices is refused as unsupported.
 
 `c -F erofs` creates EROFS volumes: uncompressed, or with
 `-o compression=lz4` LZ4-compressed regular files where that saves

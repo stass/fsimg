@@ -41,8 +41,8 @@
  * image file. The volume callback counts every byte the reader asks for and
  * stops the run at the case's bound, so a reader that strayed into an
  * image's hole, or read a chunked file's hole chunks, fails at the bound
- * rather than reading terabytes. While the reader refuses the metadata box,
- * its case must fail at open with FSIMG_EUNSUPPORTED inside the same bound.
+ * rather than reading terabytes. e13-limits-metabox is rooted in its
+ * metadata box, at NID 0x8000000000000000, and reads inside the same bound.
  *
  * The process is the measurement: one fixture per run, charged memory
  * bounded by the metadata cache's maximum, one sort run and the driver's
@@ -111,7 +111,7 @@ static const scale_case_t cases[] = {
 	{ "e13-limits-startblk", FSIMG_OK, 0, MIB, false, 0 },
 	{ "e13-limits-nid", FSIMG_OK, 0, MIB, false, 0 },
 	{ "e13-limits-48bit", FSIMG_OK, 0, MIB, false, 0 },
-	{ "e13-limits-metabox", FSIMG_EUNSUPPORTED, 0, MIB, false, 0 }
+	{ "e13-limits-metabox", FSIMG_OK, 0, MIB, false, 0 }
 };
 
 /* A manifest file row with content, which the walk must meet once. */

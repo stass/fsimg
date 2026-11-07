@@ -82,10 +82,10 @@
   its output, uncompressed and under `-c lz4`, with `fsck.erofs`, the
   kernel and rust-fs-erofs at every block size, and under `-a 48` with
   `fsck.erofs`, the kernel and fsimg's own reader, rust-fs-erofs not
-  reading the 48-bit layout. The reader reads the 48-bit layout, encoded
-  extents of every width included; the metadata box (stage 13) is refused
-  at open, and the writer refuses `metabox=plain|lz4` (stage 15) with
-  `FSIMG_EUNSUPPORTED`.
+  reading the 48-bit layout. It refuses `metabox=plain|lz4` (stage 15)
+  with `FSIMG_EUNSUPPORTED`. The reader reads the 48-bit layout, encoded
+  extents of every width included, and the metadata box, plain or
+  compressed, with the root and the shared pool in either space.
 
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and
@@ -420,6 +420,14 @@
   the verifier checks neither. Decide whether the report gains a notes
   channel (it would serve other formats' advisory counts too) or the
   design drops both.
+* [Low] **The EROFS spec model reads METABOX without judging it**
+  (`test/spec/lib/fsimg_spec/erofs/rules.rb`, `witnesses.rb`): METABOX
+  counts among the readable bits, but the model has no rule for the box's
+  extension slot (`FSIMG_ECORRUPT` without one) or the box inode, and no
+  witness sets the bit, so a model volume with the bit cannot predict open's
+  result. Model the slot rule with a `metabox_without_slot` witness, or a
+  minimal flat box naming a regular file.
+
 * [Low] **EROFS verification's reload check has no test**
   (`lib/formats/erofs/verify.c` `nondirectory_verify`, `test/erofs-verify.c`):
   the reference pass reloads each non-directory and fails with "inode
@@ -496,12 +504,6 @@
   unreachable. Return a fragment's base as its own result kind and drop the
   flag, so neither guard is needed. Fragment lookups also alternate the
   file's and the packed inode's index units through the one-NID `zcache`.
-
-* [Low] **EROFS tail window keys carry no metadata space**
-  (`lib/formats/erofs/cluster.c` `input_read`): an inline tail is read from
-  the primary space and its key has no space field, which the driver design
-  requires once the metadata box reads. Carry the space in `erofs_cluster_t`
-  when the box is implemented.
 
 * [Low] **The CLI chooses the allocation unit's noun by format name**
   (`cmd/fsimg/display.c` `format_counts_blocks`): each block-based format

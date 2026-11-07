@@ -1367,8 +1367,8 @@ every nonempty file's SHA-256 must equal the fixture's manifest. The volume
 callback counts each byte the reader requests and stops the run at the
 fixture's bound, a multiple of the image's length plus slack, so a reader that
 read an image's hole, or a chunked file's hole chunks, fails at the bound
-instead of reading terabytes. While the reader refuses the metadata box, its
-image must fail at open with `FSIMG_EUNSUPPORTED` inside the same bound.
+instead of reading terabytes. `e13-limits-metabox`, rooted in its metadata
+box at NID `0x8000000000000000`, reads inside the same bound.
 Charged memory is bounded by the metadata cache's maximum, one sort run and
 512 KiB of state, which 8 bytes of memory per name in the wide directory
 would exceed; E10's 5 GiB file adds 9 MiB of decode window, since its
@@ -1395,7 +1395,7 @@ and the scratch directory on an APFS RAM disk:
 | `e13-limits-startblk` | 3 | 13 | 39,353 | 1,227 | 1,148,981 | 0 | 1,429,504 | 0.001 |
 | `e13-limits-nid` | 3 | 14 | 53,126 | 15,000 | 1,148,981 | 0 | 1,429,504 | 0.001 |
 | `e13-limits-48bit` | 3 | 14 | 39,926 | 1,800 | 1,149,045 | 0 | 1,445,888 | 0.001 |
-| `e13-limits-metabox` | refused | 2 | 11,264 | 0 | 15,648 | 0 | 118,784 | 0.000 |
+| `e13-limits-metabox` | 1 | 8 | 11,452 | 16 | 1,149,657 | 0 | 1,318,912 | 0.001 |
 
 Content bytes are what the reader delivered, decoded for the LZ4 file:
 5,368,712,198 bytes from the 22,286,336 bytes of its compressed extent.

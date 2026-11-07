@@ -18,7 +18,8 @@
 # without a manifest must open, list and extract, and its
 # expected.txt digests must match where it has one; the few that end in a
 # refusal are pinned in EXPECTED_REFUSALS, or in EXPECTED_CORRUPT when a
-# rule rejects them, and `W` must refuse each of them with the same reason.
+# rule rejects them, a fixture with a manifest included, and `W` must
+# refuse each of them with the same reason.
 # A fixture whose `i` fails with the
 # "unsupported capability" status is counted and named as not yet supported,
 # never a pass, and only for a reason listed in KNOWN_REFUSALS: any other
@@ -78,7 +79,7 @@ MAX_NOTES = 4
 VERIFY_MODES = [[], ["-d"]].freeze
 # The passes of a build with every library; a fixture slipping to
 # "unsupported" must not keep the run green.
-PASS_FLOOR = 130
+PASS_FLOOR = 151
 # Corpus entries left out: capture.rb's in-progress directories (`.tmp-`
 # in the name), and the 5 GiB E13 and E10 files, which test-erofs-scale
 # reads by streaming them to a digest, since extracting one here writes
@@ -90,7 +91,7 @@ SECTOR = 512
 FIRST_SECTOR = 2048
 
 # The only reasons the reader may give for an image it cannot read yet.
-KNOWN_REFUSALS = [/feature METABOX\z/, /extra devices\z/, /metadata box/].freeze
+KNOWN_REFUSALS = [/extra devices\z/].freeze
 
 # A cluster of an algorithm whose library this build lacks, and the codec
 # name `--formats` lists for the library.
@@ -113,9 +114,8 @@ HEAD2_DIGEST_SOURCE = "e9-head2-lzma"
 EXPECTED_REFUSALS = {
   "e14-blobdev-b4096" => /extra devices/, "e14-tar-index-b4096" => /extra devices/,
   # Bit 4 on extended files, which the kernel ignores: refused by policy
-  # (specs/design-erofs.md#48-bit-layout). The box re-mapped by encoded
-  # extents is refused with every metadata-box volume.
-  "e10-edit-kinds-extbit4" => /extended inode format bit 4\z/, "e10-hand-box32" => /feature METABOX\z/,
+  # (specs/design-erofs.md#48-bit-layout).
+  "e10-edit-kinds-extbit4" => /extended inode format bit 4\z/,
   "e8-lz4-flag-cleared" => /LZ4 cluster without LZ4_0PADDING/,
   "e8-lz4-flag-cleared-distance0" => /LZ4 cluster without LZ4_0PADDING/,
   "e8-lz4-unpadded" => /LZ4 cluster without LZ4_0PADDING/,
@@ -125,17 +125,20 @@ EXPECTED_REFUSALS = {
   **%w[b-compact-b2048-adv0 b-compact-b4096-adv0].to_h { ["e15-#{_1}", /compact index without 2-byte groups/] }
 }.freeze
 
-# Fixtures without a manifest that the reader rejects as corrupt, and the
-# rule it names (specs/design-erofs.md#chunk-based and #compression).
-# Evidence: ~/.cache/fsimg-erofs/evidence/E7.md (edited chunk indexes and
-# formats), E8.md (the hand-written block ends), E9.md (two-header edits),
-# E15.md (hand-placed inline tails on a volume without ZTAILPACKING).
+# Fixtures that the reader rejects as corrupt, and the rule it names
+# (specs/design-erofs.md#chunk-based, #compression and #features), judged
+# by that refusal whether or not they have a manifest. Evidence:
+# ~/.cache/fsimg-erofs/evidence/E7.md (edited chunk indexes and formats),
+# E8.md (the hand-written block ends), E9.md (two-header edits), E15.md
+# (hand-placed inline tails on a volume without ZTAILPACKING), E12.md (a
+# box of encoded extents without 48BIT, which the kernel reads).
 EXPECTED_CORRUPT = {
   "e7-edit-block-oor" => /data blocks outside the volume/, "e7-edit-device-id" => /chunk device identifier/,
   "e7-edit-format-0x40" => /chunk format 48-bit bit/, "e7-edit-format-0x80" => /chunk format\z/,
   "e7-edit-high-part" => /chunk block high bits/,
   # E10.md: encoded extents without 48BIT, and a count high half of 1.
   "e10-edit-lz4-no48" => /encoded extents without 48BIT\z/,
+  "e12-flat-box32-lz4" => /encoded extents without 48BIT\z/,
   "e10-edit-lz4-counthi" => /encoded extent count above the size's blocks\z/,
   "e8-lz4-block-end" => /lz4: /, "e9-head2-head1-wrong" => /lz4: /,
   "e9-head2-lz4-ctrl" => /head-2 record without COMPR_HEAD2/, "e9-head2-lzma" => /head-2 record without COMPR_HEAD2/,
@@ -419,8 +422,8 @@ def readable_differences(name, dir, image)
   end
 end
 
-# A fixture without a manifest: it opens, lists and extracts, or ends in the
-# refusal pinned for it.
+# A fixture without a manifest, or one pinned as corrupt: it opens, lists
+# and extracts, or ends in the refusal pinned for it.
 def compare_unlisted(name, dir, work)
   out = File.join(work, name)
   image = File.join(dir, "image.erofs")
@@ -470,7 +473,8 @@ end
 
 def check(dir, work)
   name = File.basename(dir)
-  return compare_unlisted(name, dir, work) unless File.exist?(File.join(dir, "manifest.txt"))
+  pinned_corrupt = EXPECTED_CORRUPT.key?(name)
+  return compare_unlisted(name, dir, work) if pinned_corrupt || !File.exist?(File.join(dir, "manifest.txt"))
 
   compare(name, dir, work)
 rescue Unsupported => e
@@ -524,6 +528,13 @@ RUST_REFUSALS = {
   **%w[e1-bt-48bit e2-vm-48bit e13-limits-48bit e10-48-chunk e10-48-deflate e10-48-dotomit e10-48-frag e10-48-kinds e10-48-large
        e10-48-lz4 e10-48-lz4-b512 e10-48-small e10-edit-small-nlink1 e10-edit-small-wide e10-hand-lz4-bytes
        e10-hand-lz4-exact e10-hand-lz4-padded].to_h { [_1, /feature_incompat 48bit/] },
+  # Nor the metadata box, which it names first on a volume with both bits.
+  **%w[e10-hand-box32 e12-box-chunk e12-box-lz4 e12-box-lz4-b1024 e12-box-lz4-frag e12-box-lz4-m16k
+       e12-box-lz4-pfx-frag e12-box-pfx-lz4 e12-box-pfx-lz4-plainpfx e12-box-pfx-plain e12-box-pfx-plain-b512
+       e12-box-plain e12-box-plain-b512 e12-box-plain-poolbox e12-flat-box-lz4 e12-flat-box-plain
+       e12-flat-box-poolbox e12-flat-box32-plain e12-flat-box32-poolbox e13-limits-metabox
+       e9-mixed-lz4-lzma-meta e9-mixed-lzma-lz4-meta]
+    .to_h { [_1, /feature_incompat metabox/] },
   "e4-nearfull-b4096" => /ShortRead \{ offset: 8160, want: 64, got: 32 \}/,
   "e6-xattr-pfx-packed" => /malformed inode: inline PLAIN tail shorter than its extent/,
   "e8-lz4-compact-counts" => /malformed inode: LZ4 /,

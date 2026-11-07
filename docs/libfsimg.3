@@ -43,8 +43,8 @@ EROFS reading includes chunk-based files and files, directories and
 symbolic links compressed with LZ4 or DEFLATE, and with MicroLZMA or
 Zstandard in a build with liblzma 5.4 or libzstd, inline compressed tails,
 packed fragments and deduplicated clusters included, and volumes with
-48-bit addressing and encoded extents; a volume with a metadata box or
-extra devices is refused with
+48-bit addressing and encoded extents, and volumes with a metadata box,
+plain or compressed; a volume with extra devices is refused with
 .Dv FSIMG_EUNSUPPORTED .
 A created EROFS volume has 512- to 4096-byte blocks and 32-bit or,
 with erofs_addressing 48, 48-bit addressing, and is uncompressed or, under

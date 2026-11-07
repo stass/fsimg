@@ -87,6 +87,17 @@ static const char *const fixture_names[] = {
 	 */
 	"e10-48-lz4", "e10-48-lz4-b512", "e10-48-deflate", "e10-48-frag",
 	"e10-hand-lz4-padded", "e10-hand-lz4-exact", "e10-hand-lz4-bytes",
+	/*
+	 * The E12 metadata-box fixtures with compressed files: every file's
+	 * inode, and so its index or encoded extents, lies in the box, read
+	 * through LZ4 boxes mapped by encoded extents (with fragments, a
+	 * long-prefix table, 16 KiB box clusters and a flat tree) and at
+	 * 1024-byte blocks through an LZ4 box behind a compact index. Their
+	 * extents.txt is `dump.erofs -e` of every file.
+	 */
+	"e12-box-lz4",
+	"e12-box-lz4-b1024", "e12-box-lz4-frag", "e12-box-lz4-m16k",
+	"e12-box-pfx-lz4", "e12-box-lz4-pfx-frag", "e12-flat-box-lz4",
 };
 
 /* ---- The oracle: dump.erofs -e rows and the manifest ---- */
