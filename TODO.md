@@ -402,12 +402,6 @@
   for `e13-big5g-chunk1m`, a 3 MB image.
   Reporting a driver's holes as ZERO ranges would let extraction leave
   them as holes.
-* [Medium] **EROFS start blocks above 32 bits are unchecked in output**
-  (`lib/formats/erofs/write-emit.c` `emit_inode`): no test or oracle sees
-  fsimg write a start block at or past 2^32, which needs more than 2 TiB
-  of stored content; the encoder's unit tests cover the field. A
-  white-box test could plant such a row and emit into a sink that keeps
-  only the metadata area.
 * [Low] **EROFS verification reports two advisory findings nowhere**
   (`lib/formats/erofs/verify.c`): the [format design's
   verification](specs/design-erofs.md#verification) reports the

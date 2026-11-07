@@ -2212,13 +2212,23 @@ test_directory_walk_merges_dots_across_blocks(void)
 #define READ_CHUNK	65536u
 #define SUPER_REGION	3072u
 
-/* A volume in memory, filled with a poison byte before emission. */
+/*
+ * A volume in memory, filled with a poison byte before emission. A sparse
+ * sink, one with far set, is longer than its bytes: bytes hold its first
+ * dense_length, far holds far_length at far_offset, every other byte reads
+ * as zero, and a write must fall inside one of the two, so a 48-bit volume
+ * of 2^44 bytes costs only the blocks a test places.
+ */
 typedef struct memory_sink {
 	unsigned char	*bytes;
 	uint64_t	 length;
 	uint64_t	 writes;
 	uint64_t	 fail_write_at;	/* 1-based; 0 for none */
 	bool		 fail_flush;
+	unsigned char	*far;		/* sparse only */
+	uint64_t	 dense_length;
+	uint64_t	 far_offset;
+	uint64_t	 far_length;
 } memory_sink_t;
 
 static fsimg_status_t
@@ -2268,20 +2278,103 @@ memory_flush(void *argument, fsimg_error_t *error FSIMG_UNUSED)
 }
 
 /*
+ * The part of the request [offset, offset + length) that lies in
+ * [start, start + span): its length, zero when they do not meet, and in
+ * *skip its distance from offset. Sparse offsets stay below 2^46.
+ */
+static size_t
+overlap(uint64_t offset, size_t length, uint64_t start, uint64_t span,
+    size_t *skip)
+{
+	const uint64_t low = offset > start ? offset : start;
+	const uint64_t high = offset + length < start + span ?
+	    offset + length : start + span;
+
+	if (low >= high)
+		return (0);
+	*skip = (size_t)(low - offset);
+	return ((size_t)(high - low));
+}
+
+static fsimg_status_t
+sparse_read(void *argument, uint64_t offset, void *buffer, size_t length,
+    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	const memory_sink_t *sink = argument;
+	unsigned char *out = buffer;
+	size_t skip = 0, count;
+
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	bzero(out, length);
+	count = overlap(offset, length, 0, sink->dense_length, &skip);
+	if (count != 0)
+		bcopy(sink->bytes + offset + skip, out + skip, count);
+	count = overlap(offset, length, sink->far_offset, sink->far_length,
+	    &skip);
+	if (count != 0)
+		bcopy(sink->far + (offset + skip - sink->far_offset),
+		    out + skip, count);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+sparse_write(void *argument, uint64_t offset, const void *buffer,
+    size_t length, size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	memory_sink_t *sink = argument;
+	size_t skip = 0;
+
+	sink->writes++;
+	if (overlap(offset, length, 0, sink->dense_length, &skip) == length)
+		bcopy(buffer, sink->bytes + offset, length);
+	else {
+		CHECK_CASE(overlap(offset, length, sink->far_offset,
+		    sink->far_length, &skip) == length, "write of %zu bytes "
+		    "at %ju outside the sparse sink's bytes", length,
+		    (uintmax_t)offset);
+		bcopy(buffer, sink->far + (offset - sink->far_offset), length);
+	}
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+sparse_zero(void *argument, uint64_t offset, uint64_t length,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	memory_sink_t *sink = argument;
+	size_t skip = 0, count;
+
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	count = overlap(offset, (size_t)length, 0, sink->dense_length, &skip);
+	if (count != 0)
+		bzero(sink->bytes + offset + skip, count);
+	count = overlap(offset, (size_t)length, sink->far_offset,
+	    sink->far_length, &skip);
+	if (count != 0)
+		bzero(sink->far + (offset + skip - sink->far_offset), count);
+	return (FSIMG_OK);
+}
+
+/*
  * An I/O object over a sink. The writable one has no zero_range, so the
- * common emitter must overwrite the poison with zeros itself.
+ * common emitter must overwrite the poison with zeros itself, except over
+ * a sparse sink, which zeros only the bytes it holds.
  */
 static fsimg_status_t
 memory_io(fixture_t *fixture, memory_sink_t *sink, bool writable,
     fsimg_io_t **out)
 {
+	const bool sparse = sink->far != NULL;
 	fsimg_io_ops_t ops;
 
 	fsimg_io_ops_init(&ops);
 	ops.get_size = memory_size;
-	ops.read_at = memory_read;
+	ops.read_at = sparse ? sparse_read : memory_read;
 	if (writable) {
-		ops.write_at = memory_write;
+		ops.write_at = sparse ? sparse_write : memory_write;
+		ops.zero_range = sparse ? sparse_zero : NULL;
 		ops.flush = memory_flush;
 	}
 	*out = NULL;
@@ -4310,6 +4403,87 @@ test_addressing48_volume_size_passes_32_bits(void)
 	addressing = 0;
 }
 
+/*
+ * Start blocks past 2^32, which only more than 2 TiB of stored content
+ * reaches: a flat file of noise and an LZ4 file of text, planned on a
+ * volume of 2^32 + 64 blocks, are moved to blocks from 2^32 + 8 before
+ * emission into a sparse sink. The flat inode carries the high bits in
+ * its word at 0x06 and the compressed file's first encoded extent a
+ * physical offset past 2^32 blocks, and the reader enumerates and
+ * verifies both files' content from there.
+ */
+static void
+test_addressing48_start_blocks_pass_32_bits(void)
+{
+	const uint64_t far_start = (UINT64_C(1) << 32) + 8;
+	const char *const paths[] = { "/flat", "/packed" };
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	erofs_super_t sb;
+	erofs_inode_t inode;
+	erofs_xrecord_t record;
+	erofs_row_t row;
+	uint64_t next = far_start;
+	const char *what = NULL;
+	fsimg_status_t status;
+
+	compression = FSIMG_EROFS_COMPRESSION_LZ4;
+	addressing = 48;
+	tree_reset();
+	add_file(3 * block_size + 100, "/flat")->content = CONTENT_NOISE;
+	add_file(4 * block_size, "/packed")->content = CONTENT_TEXT;
+	reproducible_options(&options);
+	options.volume_bytes = (far_start + 56) * block_size;
+	plan_tree(&fixture, &options);
+	CHECK(row_of_path(&fixture, "/flat").layout !=
+	    EROFS_LAYOUT_COMPRESSED_FULL);
+	CHECK(row_of_path(&fixture, "/packed").layout ==
+	    EROFS_LAYOUT_COMPRESSED_FULL);
+
+	bzero(&sink, sizeof(sink));
+	sink.length = options.volume_bytes;
+	sink.dense_length = fixture.plan->used_blocks * block_size;
+	for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		row = row_of_path(&fixture, paths[i]);
+		row.start_block = next;
+		next += erofs_row_data_blocks(&row, block_size);
+		CHECK(erofs_row_set(fixture.plan, id_of_path(&fixture,
+		    paths[i]), &row, &fixture.error) == FSIMG_OK);
+	}
+	fixture.plan->used_blocks = next;
+	sink.far_offset = far_start * block_size;
+	sink.far_length = (next - far_start) * block_size;
+	sink.bytes = malloc((size_t)sink.dense_length);
+	sink.far = malloc((size_t)sink.far_length);
+	CHECK(sink.bytes != NULL && sink.far != NULL);
+	memset(sink.bytes, POISON, (size_t)sink.dense_length);
+	memset(sink.far, POISON, (size_t)sink.far_length);
+	status = emit_into(&fixture, &sink);
+	CHECK_CASE(status == FSIMG_OK, "emission failed with %d: %s", status,
+	    fixture.error.message);
+
+	sb = decode_image_super(&sink);
+	row = row_of_path(&fixture, "/flat");
+	CHECK(erofs_inode_decode(sink.bytes + row.nid * SLOT,
+	    erofs_row_fixed_bytes(&row), &sb, &inode, &what) == FSIMG_OK);
+	CHECK(inode.layout_high == 1 &&
+	    inode.layout_word == (uint32_t)far_start);
+	row = row_of_path(&fixture, "/packed");
+	CHECK(erofs_xrecord_decode(sink.bytes + row.nid * SLOT +
+	    erofs_row_fixed_bytes(&row) + EROFS_EXTENT32_OFFSET,
+	    EROFS_EXTENT32_BYTES, &record, &what) == FSIMG_OK);
+	CHECK(record.physical == row.start_block * block_size &&
+	    row.start_block > UINT32_MAX);
+	check_enumeration(&fixture, &sink, true);
+	check_verification(&fixture, &sink);
+	free(sink.bytes);
+	free(sink.far);
+	fixture_close(&fixture);
+	compression = FSIMG_EROFS_COMPRESSION_NONE;
+	addressing = 0;
+}
+
 /* Source, allocation, write and cluster-plan faults fail the 48-bit image. */
 static void
 test_addressing48_faults_are_clean(void)
@@ -4536,6 +4710,7 @@ main(void)
 	test_addressing48_extents_cross_the_staging_buffer();
 	at_every_block_size(test_addressing48_image_is_reproducible_and_clean);
 	at_every_block_size(test_addressing48_volume_size_passes_32_bits);
+	at_every_block_size(test_addressing48_start_blocks_pass_32_bits);
 	test_addressing48_faults_are_clean();
 	test_wide_super_encoding_decodes_to_the_same_superblock();
 	test_implicit_link_count_encoding();
