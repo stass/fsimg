@@ -202,9 +202,9 @@ fixture behind each answer; the designs carry the answers themselves.
 | Chunk entry forms, holes, shared chunks | E7 | Stage 5 | [Answered](erofs-research.md#evidence-answers) |
 | Compact group packing at every boundary; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | E8 | Stages 6, 11 | [Answered](erofs-research.md#evidence-answers); `L > B` and compact advice `0x01` clear are refused by policy (E15) |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | E9 | Stage 7 | [Answered](erofs-research.md#evidence-answers); head-2 by hand-built images only |
-| Every 48-bit field; the extent count's placement; encoded-extent widths; kernel acceptance of the writer's 32-byte records | E10 | Stages 12, 14, 15 | Open, runs before stage 12 |
+| Every 48-bit field; the extent count's placement; encoded-extent widths; kernel acceptance of the writer's 32-byte records | E10 | Stages 12, 14, 15 | [Answered](erofs-research.md#evidence-answers); the partial bit on an encoded extent stays refused, unobserved |
 | Kernel acceptance of writer output at 512, 1024 and 2048-byte blocks and of the writer's field choices | E11 | Stages 10, 11 | [Answered](erofs-research.md#evidence-answers), uncompressed output by stage 10 and LZ4 output by stage 11's qualification at each block size |
-| Metadata-box layout, root placement, box compression, shared attributes in the box | E12 | Stages 13, 15 | Open, runs before stage 13 |
+| Metadata-box layout, root placement, box compression, shared attributes in the box | E12 | Stages 13, 15 | [Answered](erofs-research.md#evidence-answers); a box without `48BIT` by hand-patched images only; a pool in a compressed box stays refused, unobserved |
 | Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | E13 | Stage 8 | [Answered](erofs-research.md#evidence-answers); a root NID above 65535 by hand-built images only |
 | The fields a volume with external devices sets, so refusal names it | E14 | Stage 3 | [Answered](erofs-research.md#evidence-answers) |
 | The record count and group layout of a compressed inode with `L > B`, of a compact inode with advice `0x01` clear, and of a plain inline tail under `ztailpacking` with `fragments`, on hand-built images the kernel mounts | E15 | Stage 6 | [Answered](erofs-research.md#evidence-answers); all three stay refused by policy, their observed rules recorded in the design |
@@ -263,8 +263,8 @@ fixtures, their command records and the oracle output:
   answer with its fixture or an open status naming what it blocks.
   Observations that change a rule are edited into the designs.
 * **Gate:** every row consumed by stages 3 to 7 is answered or explicitly
-  open with the design's safe default applied. E10 and E12 may run later,
-  before stage 12, and must if the pinned release changes.
+  open with the design's safe default applied. E10 and E12 ran after the
+  LZ4 writer, before stage 12, and run again if the pinned release changes.
 
 ### 2. Common changes for reading
 
@@ -379,22 +379,35 @@ fixtures, their command records and the oracle output:
 
 ### 12. 48-bit reader
 
-* Re-run E10 against the then-current pinned release and the VM kernel.
-  The 48-bit fields in `codec.c`, `read.c` and `meta.c`; encoded extents in
-  `zmap.c`; omitted dots in `directory.c`.
-* **Gate:** every E10 fixture matches its manifest and verifies; sparse
-  fixtures with start blocks beyond 2^32 read correctly (`e13-limits-48bit`
-  in `test-erofs-scale` reads instead of being refused); a hand-built
-  volume whose wide root NID is above 65535, which no producer places
-  (E13), lists; mutations of every widened field fail with their class.
+* E10 ran against the pinned release and the VM kernel; re-run it only if
+  either changes. Both superblock forms, the 48-bit fields and the unused
+  extended start in `codec.c`, `read.c` and `meta.c`; encoded extents of
+  every width in `zmap.c`; omitted dots in `directory.c`.
+* **Gate:** every E10 fixture matches its manifest and verifies, the
+  hand-built `e10-hand-*` and the accepted `e10-edit-*` forms included;
+  sparse fixtures with start blocks beyond 2^32 read correctly
+  (`e13-limits-48bit` in `test-erofs-scale` reads instead of being
+  refused); a hand-built volume whose wide root NID is above 65535, which
+  no producer places (E13), lists; every `e10-*` fixture's encoded-extent
+  counts satisfy the `ceil(size / B)` bound; `e10-edit-lz4-counthi` and
+  the forms refused by policy fail with their class, as do mutations of
+  every widened field.
 
 ### 13. Metadata-box reader
 
-* Re-run E12. Box reads in `meta.c`, box claims in `verify.c`, shared
-  attributes in the box in `xattr.c`.
-* **Gate:** every E12 fixture, plain and compressed, matches and verifies;
-  `e13-limits-metabox`, rooted at NID `0x8000000000000000`, reads in
-  `test-erofs-scale`; box recursion mutations fail with their class.
+* E12 ran against the pinned release and the VM kernel; re-run it only if
+  either changes. Box reads in `meta.c`, the root in either space, box
+  claims and the long-prefix table in the box in `verify.c`, shared
+  attributes in both placements in `xattr.c`.
+* **Gate:** every E12 fixture except `e12-flat-box32-lz4`, plain and
+  compressed, matches and verifies,
+  the hand-patched `e12-flat-box32-plain`, `e12-flat-box32-poolbox` and
+  `e12-*-poolbox` included, with the shared attributes of `c1` to `c6`
+  correct where Linux 7.0 misreads them; `e12-flat-box32-lz4`, a box of
+  encoded extents without `48BIT`, fails as `FSIMG_ECORRUPT` by the
+  feature-pairing policy although the kernel reads it; `e13-limits-metabox`,
+  rooted at NID `0x8000000000000000`, reads in `test-erofs-scale`; box
+  recursion mutations fail with their class.
 
 ### 14. 48-bit writer
 
@@ -406,10 +419,16 @@ fixtures, their command records and the oracle output:
 
 ### 15. Metadata-box writer
 
-* The `metabox=plain` and `metabox=lz4` profiles.
-* **Gate:** stage 10's qualification for both, with the kernel mounting
-  and `fsck.erofs --extract` matching; then both values are accepted,
-  `metabox=lz4` only when E10 has confirmed the 32-byte records.
+* The `metabox=plain` and `metabox=lz4` profiles, under `addressing=48`
+  with the root in the box and 32-byte encoded extents as the design lays
+  it out, and under `addressing=32` with the root in the primary space and
+  the LZ4 box behind a full index, a form only hand-patched images have
+  shown the kernel and therefore provisional.
+* **Gate:** stage 10's qualification for both profiles at both
+  addressings, with the kernel mounting and `fsck.erofs --extract`
+  matching; then both values are accepted. If the `addressing=32` form
+  fails the kernel, `metabox` with `addressing=32` is refused as
+  `FSIMG_EUNSUPPORTED` and the design is edited to say so.
 
 ## Dependency order
 
@@ -498,9 +517,9 @@ The owner has settled these:
 ## Risks
 
 * **Experimental drift.** Upstream marks the 48-bit layout and the box
-  experimental. Their designs are provisional as a whole, and stages 12 to
-  15 re-run E10 and E12 against the then-current release; a changed layout
-  is edited into the design before code.
+  experimental. E10 and E12 confirmed their designs against release 1.9.4
+  and kernel 7.0; stages 12 to 15 re-run them if either changes, and a
+  changed layout is edited into the design before code.
 * **Kernel availability.** The check VM's kernel must mount every profile
   the writer emits. If it lacks a codec, sub-page block sizes, the 48-bit
   layout (Linux 6.15) or the box (Linux 6.17), the affected writer profile

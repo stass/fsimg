@@ -324,7 +324,7 @@ with majors to 4095 and minors to 1048575, a FIFO and a socket.
   link count apply only to an inode with a block number above 32 bits; a
   device, FIFO or socket has none, so its extended word `0x06` is zero and
   its compact link count is explicit, format bit 4 clear, under `48BIT`
-  too (unobserved: E10).
+  too ([E10](#e10-48-bit-layout) observes it, `e10-48-kinds`).
 
 ### E6 Attributes
 
@@ -526,6 +526,157 @@ Zstandard clusters at the defaults.
   and for the input cut one byte short. The reference decoder
   (`decompress.c`) accepts only `LZMA_STREAM_END`, partial or not.
 
+### E10 48-bit layout
+
+Producer images under `-E48bit` (`--mkfs-time`, epoch 1700000000, fixed
+UUID): `e10-48-small` (`-b4096`: empty, 1-byte, 600-byte and 20000-byte
+files, hard links, symbolic links, a FIFO, a directory of 120 entries, times
+in 1950 and 2110 and with nanoseconds), `e10-48-dotomit` (the same tree,
+`-E48bit,dot-omitted`), `e10-48-large` (`-b512 --dsunit=2^30`, start blocks
+2^30 to 5 * 2^30 and 2^32, 5368709123 blocks, sparse), `e10-48-kinds`
+(every kind, compact at the root and extended under `ext/` with owner
+70000, built in the VM), `e10-48-lz4` and `-lz4-b512` (`-zlz4
+-E48bit,dedupe`, 17 compressed files), `e10-48-deflate`, `e10-48-frag`
+(`-E48bit,fragments`), `e10-48-lz4-big` (one 5 GiB + 3072-byte file, sparse)
+and `e10-48-chunk` (`-E48bit,force-chunk-indexes --chunksize=1024 -b512`,
+its data moved by hand to block 2^32 + 5). Hand-built images through the
+independent LZ4 encoder (`test-codec --encode-lz4`, legacy frame stripped):
+`e10-hand-lz4-padded`, `-exact` and `-bytes` (one 49821-byte file in four
+extents, LZ4 and plain, appended to a producer base with a new extended
+inode of 32-byte records) and `e10-hand-box32` (a producer's LZ4 box
+re-encoded in three extents behind an extended box inode of 32-byte
+records). Byte edits of producer images: `e10-edit-small-wide` (wide
+superblock form on a small volume), `-small-nlink1` (bit 4 on every compact
+file and symbolic link with zero high bits), `-kinds-extbit4` (bit 4 on
+every extended regular file), `-lz4-no48` (`48BIT` cleared on an
+encoded-extent volume) and `-lz4-counthi` (extent count high word 1 on a
+16-byte-record inode). Oracles: kernel mount with SHA-256 of every file
+against the manifest, `ls -aU`, `stat`; `fsck.erofs` with `--extract`;
+`dump.erofs -e`; an independent walker over the raw fields. Every producer
+fixture mounts, matches its manifest and passes `fsck.erofs`. One kernel
+was tried; the minimum kernel for encoded extents, 6.15 by `dump.erofs`'s
+banner, was not.
+
+* **Superblock forms.** The producer writes the narrow form under
+  `-E48bit`: `0x0E` is the root NID, `0x70` is 0 and the block count is
+  32-bit (`e10-48-small`, `e10-48-lz4-big`, `e2-vm-48bit`). The wide form,
+  `0x70` the root NID and `0x0E` the block count's bits 32 to 47, appears
+  only when the count passes 32 bits or the root NID passes 16
+  (`e10-48-large`: `0x24` = `0x40000003`, `0x0E` = 1, `0x70` = 36; source
+  `super.c`). The kernel mounts both, the wide form on a small volume
+  (`e10-edit-small-wide`, same tree hash) and a wide block count above the
+  image's size (no size check at mount). The build-time word is the
+  absolute build time, as E1.
+* **Start-block high word.** `e10-48-large`: a compact file at 2^30 and
+  3 * 2^30 keeps bit 4 clear with `0x06` = link count 1; the file at 2^32 is
+  compact with bit 4 and `0x06` = 1 as start bits 32 to 47; the hard-linked
+  pair at 5 * 2^30 is extended with `0x06` = 1 and the link count at `0x2C`.
+  The kernel reports link counts 1 and 2 and inode numbers equal to the
+  NIDs (85899345956). Source `inode.c`: bit 4 is set only on a compact
+  inode whose start exceeds 32 bits; a compact inode with another link
+  count and a wide start is rewritten extended. An extended flat-inline
+  inode with no full block carries `0x06` = `0xFFFF` and `0x10` =
+  `0xFFFFFFFF`, the 48-bit null start (`e10-48-kinds`, `ext/one`, `ext/hl`,
+  `ext/slink`, `ext/sub`, `/ext`); extended inodes with data blocks, empty
+  files and special files carry 0, and a compact inode keeps its explicit
+  link count beside `0xFFFFFFFF`. Special files, compact and extended:
+  `0x06` = 1 or 0, bit 4 clear, the device number in `0x10`
+  (`0xFFFFFFFF` for 4095:1048575). No producer run placed a directory
+  beyond block 2^32: `mkfs.erofs` fails with "Input/output error" when a
+  multi-block directory lies past 2^32 under `--dsunit`, cause not found,
+  and `--dsunit=4294967296` is silently ignored.
+* **Bit 4 by edit.** Bit 4 with zero high bits on every compact file and
+  symbolic link mounts with link count 1 and the same tree hash
+  (`e10-edit-small-nlink1`). Bit 4 on every extended regular file mounts
+  with link counts unchanged (`e10-edit-kinds-extbit4`): the kernel ignores
+  the bit on an extended inode, as `erofs-utils` does by source; no
+  producer sets it.
+* **Compact times.** With `--mkfs-time` the compact time word is the file
+  time modulo 2^32: 2110-01-01 is stored as 123039111 and 1950 as
+  3663844096, nanoseconds dropped; the kernel reports those words as
+  seconds after the epoch (`e10-48-small`). Source: the compact-form choice
+  compares only the time without the 48-bit layout. The design's rule, a
+  whole second within 2^32 seconds of the epoch, is stricter and right.
+* **Omitted dots.** `-E dot-omitted` implies `48BIT`. A directory carries
+  bit 4 compact with its link count explicit at `0x06` (`/dir`, format
+  `0x0014`, link count 3), its data has `..` first and no `.` (`/dir/sub`:
+  30 bytes against 43 with the dot). `ls -aU` prints `.. leaf .`: the
+  kernel appends a synthetic `.` after the stored entries, and with bit 4
+  set on a directory that stores `.` it lists `.` twice (`e10-48-dotomit`,
+  a hand-edited `e10-48-small`).
+* **Chunks.** The producer writes chunk format `0x0021` under `-E48bit`
+  and reaches no block above 2^32 in a chunk file (`--dsunit` aligns only
+  the first blob and 4-byte arrays cannot carry it). `e10-48-chunk`
+  hand-moves the data to block 2^32 + 5 as source `blobchunk.c` writes it:
+  entries `01 00 00 00 05 00 00 00` (high word at 0, device at 2, low word
+  at 4), chunk format `0x0061`, wide superblock. The kernel reads both
+  files to the manifest; `fsck.erofs` is clean and `--extract` byte-equal.
+  The control with bit 6 clear was not run. The layout word's upper half
+  is uninitialised, as E7.
+* **Index form per file.** Under `-E48bit` the producer still writes
+  legacy compact indexes (layout 3, advice `0x1` as the 2-byte-group flag)
+  and full indexes when the encoded map would be larger (`e10-48-lz4`:
+  `half-rand-1m`, `rand-zero-mix` compact; `half-rand-40k` encoded, width
+  4); a whole-file fragment keeps the legacy map header.
+* **Encoded-extent widths.** All four occur: 4 when every extent has the
+  same logical length and the physical run is contiguous (`half-rand-40k`,
+  `small-mix`, `tutu`); 8 when uniform but not contiguous (`xyxy`, `xyyx`
+  under `dedupe`); 16 otherwise up to 4 GiB (`text200k`, `mixed`,
+  `half-rand-1m` at `-C65536`); 32 beyond 4 GiB (`e10-48-lz4-big`, 961
+  records, extended inode). The 8-byte header sits at the first 8-aligned
+  offset after the inode and its attributes. For 16 and 32 bytes: count low
+  word at 0, advice at 4 (`0x0005` and `0x0007`), count high half at 6. For
+  4 and 8 bytes: bytes 0 to 3 zero, advice `0x0001` or `0x0003`, byte 6
+  zero, byte 7 the logical cluster shift above the block shift (`-C65536`:
+  `00 00 00 00 01 00 00 04`), no count: `ceil(size / (B << byte 7))`
+  extents (source `z_erofs_write_mapheader`). Records start at the header's
+  end rounded up to the record size: inode + 40, 40, 48 and 96. Record
+  fields: 32 bytes, length word, physical low and high, logical low and
+  high, 12 zero bytes (record 1 of the 5 GiB file: 32768 bytes LZ4 at
+  40960, logical 8192000); 16 bytes, length word, physical low and high,
+  logical low only; 8 bytes, length word and a 32-bit physical offset,
+  logical offset the index times the logical cluster; 4 bytes, length word
+  only, preceded by a 64-bit physical start at the records' offset
+  (`xyxy` at `-C65536` with `--dsunit`: 4294967296), each extent starting
+  where the last ended. Length word: low 21 bits the stored length, bits 28
+  to 31 the format (0 plain, 1 LZ4, 3 DEFLATE in `e10-48-deflate`), bit 27
+  never produced. Every produced offset and length is a block multiple;
+  byte-granular values never appeared with any codec or `--max-extent-bytes`.
+  The layout word of an encoded inode is the compressed block count
+  (`0x1543` for the 5 GiB file), `0x06` its high half by source, 0 here.
+* **Fragments.** `e10-48-frag`: advice `0x35`; the last 16-byte record is
+  the fragment, its length word the packed-inode offset's low 32 bits with
+  no format bits (`/mixed`: 12751), its physical low word the high 32 bits,
+  and it runs to the size. Whole-file fragments (`text1k`, `text5k`) use the
+  legacy header; `rand100k` is compact with advice `0x37`. The kernel and
+  `fsck.erofs` read all nine files.
+* **Feature pairing and count by edit.** Clearing `48BIT` on `e10-48-lz4`
+  (`e10-edit-lz4-no48`) mounts with the same tree hash and passes
+  `fsck.erofs`: the kernel reads encoded extents, 4- and 8-byte widths
+  included, and omitted dots without the bit. A count high word of 1 on
+  `half-rand-1m` (`e10-edit-lz4-counthi`) mounts and reads the file at its
+  full size with wrong content from byte 1 (522184 bytes differ);
+  `fsck.erofs` exits 1. The kernel uses the high half and never checks the
+  count against the body.
+* **Hand-built 32-byte records.** The four-extent file (LZ4, plain, LZ4,
+  LZ4 over 49821 bytes) in three placements, block-aligned and zero-padded
+  as `lz4_0padding` lays it out (40960/8192, 49152/12000, 61440/8192,
+  69632/8192), block-aligned with exact stored lengths (5219, 12000, 7151,
+  7279) and contiguous from an unaligned start (40997/5219, 46216/12000,
+  58216/7151, 65367/7279): the kernel reads the file to the expected
+  SHA-256, `fsck.erofs` exits 0 and `--extract` is byte-equal, `dump.erofs
+  -e` lists the four extents through the new NID. The box re-mapped by
+  three 32-byte records (`e10-hand-box32`, box inode NID 1408) mounts with
+  the original's 130 files and tree hash and extracts equal under
+  `fsck.erofs`; setting its first record's format to plain makes both
+  refuse the volume (`bogus i_mode (0)` at the box root), so the box was
+  read through the new records. A flipped LZ4 data byte inside a block
+  changes content undetected by either tool.
+* **Open.** The partial bit 27; a directory with a start block above 2^32;
+  the bit-6 control on `e10-48-chunk`; a 16-byte record with a nonzero
+  physical high half; a produced count above 2^32; kernels other than
+  7.0.0-38.
+
 ### E11 Writer probes
 
 The question was whether the kernel accepts the writer's output at 512,
@@ -590,6 +741,125 @@ nothing for these mounts but the root NID. The answer: the kernel,
 2048 and 4096-byte blocks, with its empty-file and flat-inline start words
 of 0, inodes ending at and moving past block ends, and multi-block
 directories. The writer accepts all four sizes.
+
+### E12 Metadata box
+
+Producer images from `mkfs.erofs` 1.9.4 built in the VM (the source trees
+carry root-owned attributes and an ACL; `-T0`, fixed UUID), each from a
+135-entry tree with two directory levels, a 120-entry directory over one
+block, `user.common=samevalue` shared by `c1` to `c6` and `zcommon/z1` to
+`z6`, an ACL on `c1`, two `user.vendor.alpha.*` names, a compressible
+20000-byte file and a 9000-byte random one: `e12-box-plain` (`-b4096
+-m4096`), `e12-box-lz4` (`-zlz4 -m4096`), `e12-box-lz4-b1024`,
+`e12-box-plain-b512`, `e12-box-lz4-m16k` (`-C16384 -m16384`),
+`e12-box-pfx-plain`, `-pfx-lz4`, `-pfx-plain-b512` and `-pfx-lz4-plainpfx`
+(`--xattr-prefix=user.vendor.alpha.`, the last with
+`-Eplain-xattr-prefixes`), `e12-box-lz4-frag` and `-lz4-pfx-frag`
+(`-Efragments`), `e12-box-chunk` (`--chunksize=4096`), `e12-nobox-lz4`
+(control) and `e12-flat-box-plain` and `-lz4` from a flat 100-entry tree
+whose root fits inline. Hand-patched from producer images, checksum
+recomputed: `e12-box-plain-poolbox` and `e12-flat-box-poolbox` (one block
+appended to the box holding a copy of the shared entry at in-block offset
+`4 * id`, `xattr_blkaddr` pointing at it, compat `0x08` set);
+`e12-flat-box32-plain` and `-lz4` (`48BIT` cleared, the root inode with its
+attributes and inline tail copied from the box to primary slot 48, its `.`
+and `..` rewritten, the 16-bit root field set, the wide field zeroed; the
+flat tree so no child's `..` names the old root); `e12-flat-box32-poolbox`
+(both patches). Oracles: kernel mount with content, `stat` and `getfattr
+-d` compared per path with the source tree; `fsck.erofs` with `--extract`;
+`dump.erofs --cat --nid` of the box; a walker over every inode. Every one
+of the 20 fixtures mounts and passes `fsck.erofs` with no `<E>`; content and
+`stat` match the source on every path.
+
+* **Superblock and box inode.** Every `-m` image has one extension slot,
+  `METABOX 0x100` with `48BIT 0x80` (incompat `0x180`, `0x181` with LZ4),
+  compat `0x07`, `metabox_nid` 38 at `0x80` with bit 63 clear, the wide
+  root `0x8000000000000000`, `meta_blkaddr` 0; `dump.erofs` names kernel
+  6.17 as the minimum. The box inode is NID 38 rather than 37 because the
+  20-byte shared entry sits at byte 1168 of the primary space before it
+  (NID 37 in `e13-limits-metabox`, which has no shared entry). The plain
+  box is a compact flat inode (layout 0) of 12288 bytes occupying the last
+  three blocks of the image, its content zero-padded to a block multiple;
+  the LZ4 box is layout 1 of 8192 bytes with one stored block, mapped by
+  4-byte encoded extents with advice `0x0001` and logical cluster shift 1
+  (header `00 00 00 00 01 00 00 01`), the same form as a regular LZ4 file
+  in the 48-bit image, and the producer
+  stores the box flat when one block would not shrink. `-m` needs a
+  positive size, so the producer writes no plain box beside compressed
+  files; `--MZ` is a different mechanism without a feature bit (source
+  `metabox.c`).
+* **What the box holds.** Every inode but the box inode and the packed
+  inode (NID 40 in `e12-box-lz4-frag`): 142 in the plain image, the LZ4
+  file in `e12-box-lz4`, 16 chunk inodes in `e12-box-chunk`. Every
+  directory entry carries bit 63 (`c1` is `0x8000000000000008`).
+  Directory blocks beyond the inline tail, file blocks and chunks are in
+  the primary volume. Of the inline tails checked at 512, 1024 and 4096
+  bytes none crosses a block multiple inside the content; one inode's
+  header and attribute region straddle a block at 512 bytes (box NID
+  `0x3f`), its tail inside the next block. `dump.erofs --cat` decodes the
+  box to the same bytes, plain and compressed.
+* **Long-prefix table.** Without `-Eplain-xattr-prefixes` the table is in
+  the box content at `xattr_prefix_start` 0, with or without a packed
+  inode (`e12-box-pfx-plain`, `-pfx-lz4`, `-lz4-pfx-frag`; compat `0x07`,
+  no `PLAIN_XATTR_PFX`, which a box volume does not get by default): bytes
+  `0e 00 01 "vendor.alpha."`, zeros to the end of box block 0, the root at
+  NID bit 63 plus 128 at 4096 bytes and plus 16 at 512. The kernel returns
+  the long-prefix names. With the option the table is plain at 297 * 4
+  after the pool and the root is the box's first inode. Source
+  `erofs_xattr_flush_name_prefixes` and kernel `xattr.c`: the table goes to
+  the box and is read from it under `METABOX` without the plain bit, never
+  from the packed inode.
+* **Shared attributes.** No site in `erofs-utils` 1.9.4 sets
+  `SHARED_EA_IN_METABOX`; the pool stays in the primary volume at
+  `xattr_blkaddr * B + 4 * id` (id 292 at 4096 bytes, 36 at 512). Kernel
+  7.0 with that layout: content, `stat` and mode right on every path, but
+  `getfattr -d` wrong on exactly `c1` to `c6` in `e12-box-plain`,
+  `-plain-b512`, `-lz4`, `-lz4-b1024`, `-lz4-frag`, `-box-chunk`,
+  `-lz4-m16k`, `-pfx-lz4-plainpfx` and the flat images: `user.common`
+  missing and garbage names (`F`, `G`, `user.`) with "Operation not
+  supported", while `user.own` and the ACL show; `zcommon/z1` to `z6`,
+  which reference the same shared entry, are right. `c1` to `c6` sit in box
+  page 0 (offsets 288 to about 600), `z1` in page 2; where the prefix table
+  occupies box block 0 and moves every inode one block later
+  (`e12-box-pfx-*`), all 141 paths are right, as they are in the control
+  without a box. Cause (source, a hypothesis consistent with every
+  observation): the kernel's attribute code switches one cached metadata
+  buffer between the box mapping, for inline entries, and the primary
+  mapping, for the pool, through `erofs_init_metabuf`, which changes the
+  mapping without dropping the cached page, and `erofs_bread` reuses the
+  page when the index matches (v6.17 `xattr.c:331, 372`; v7.0 `xattr.c:266,
+  307`; `data.c`); the pool is primary page 0, so a box inode whose
+  attribute area is in box page 0 reads the wrong page. No mount failure,
+  no log line. This is a kernel defect, its cause a hypothesis from source
+  reading, not a reason to place the pool elsewhere; the design keeps the
+  producer's placement. With the pool
+  moved into the box under compat `0x08` (`e12-box-plain-poolbox`,
+  `e12-flat-box-poolbox`, plain boxes) the kernel's attributes equal the
+  source on all 141 and 100 paths and `fsck.erofs` is clean, so that
+  placement is read as the design states; a pool in a compressed box was
+  not built. Compat `0x08` on a volume without `METABOX` mounts, and every
+  shared attribute read fails `Structure needs cleaning`; `fsck.erofs` does
+  not notice.
+* **Box without 48BIT.** `e12-flat-box32-plain`, `-lz4` and `-poolbox`
+  mount with `mounted with root inode @ nid 48` and only the metadata
+  compression line in the log; content and `stat` match, attributes as
+  their base; the entries still carry bit 63; `fsck.erofs` exits 0 and
+  `--extract` yields the 100 entries. The `-lz4` image's box is mapped by
+  encoded extents without `48BIT`, which the kernel reads and the design
+  refuses by its feature-pairing policy. Kernel `super.c` (v6.17 and v7.0)
+  takes the root from the 16-bit field unless `48BIT` and the wide field
+  is nonzero and does not require `48BIT` for `METABOX`; `mkfs.erofs`
+  sets both because the root is in the box (source `inode.c`). No producer
+  writes the form.
+* **Refusals.** `metabox_nid` with bit 63: mount fails `Structure needs
+  cleaning` and `fsck.erofs` fails to read the superblock (source
+  `super.c` self-loop check). No extension slot with `METABOX`: the same.
+  A directory entry with bit 63 in a volume without the box: mount
+  succeeds, `ls` lists the entry, reading it fails with `-117`; `fsck.erofs`
+  reports an I/O error on the inode.
+* **Open.** A pool in a compressed box; a packed NID with bit 63; a box
+  inode with the flat-inline, chunk-based or compact-index layout, which
+  the producer never writes.
 
 ### E13 Scale
 
@@ -832,9 +1102,9 @@ as deep, wide and names, are the uncompressed image byte for byte.
 | Chunk entry forms, holes, shared chunks | As designed; the layout word's upper half is uninitialised and ignored; per-inode `chunkbits` | `e7-chunk*`, `e7-edit-*` |
 | Compact group packing; the last record and the end marker; inline tail placement; partial references; interlacing; cluster and index limits; LZ4 stream termination; the LZ4 distance field | Packing confirmed, the big-cluster head block following the kernel's walk from the group's anchor; the last record is the marker, the last cluster's own head or plain record inside the last logical cluster, or, at `size mod L = 0`, the last cluster's final record, 592 inodes; the inline tail starts at the index end and lies in one block, not necessarily the inode's; partial references in full indexes only; rotation confirmed; 1 MiB stored and 12 MiB decoded are the kernel's limits, and producers write `L = B` always; blocks need five final literals and a last match 12 bytes before the end; distance 65535 written, 0 accepted. `L > B` and compact advice `0x01` clear are unobservable with the pinned release; E15 observes them hand-built | `e8-*` |
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | Framings confirmed; DEFLATE window bits at most 15, MicroLZMA dictionary at least 4096 and format 0, Zstandard format 0; head-2 by hand-built images, accepted by the kernel without `COMPR_HEAD2` | `e9-*` |
-| Every 48-bit field; encoded extents; writer's 32-byte records | Open; blocks stages 12, 14 and 15 | E10 |
+| Every 48-bit field; encoded extents; writer's 32-byte records | Two superblock forms, the wide one only when a value needs it; start-block high word at `0x06`, `0xFFFF` on an unused extended start; compact bit 4 only for a start above 2^32, ignored by the kernel on an extended inode; omitted dots with `..` first and a synthetic `.` appended by the kernel; chunk bit 6 entries read at block 2^32 + 5; all four encoded-extent widths emitted, the count in the header only for 16 and 32 bytes, derived from the size for 4 and 8; the kernel needs neither `48BIT` for encoded extents nor the count to match the body; the kernel and `fsck.erofs` read 32-byte records around the project's LZ4 blocks in three placements and an LZ4 box ([E10](#e10-48-bit-layout)) | `e10-48-*`, `e10-hand-*`, `e10-edit-*` |
 | Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Accepted: at 512, 1024, 2048 and 4096-byte blocks the writer's output passes the kernel, `fsck.erofs` and rust-fs-erofs, with empty and sub-block flat-inline start words of 0, inodes ending at and moving past block ends, and multi-block directories ([E11](#e11-writer-probes)); and with `compression=lz4` at every block size, LZ4 and plain one-block clusters behind full indexes that cross blocks at 512 bytes, end markers and heads in the last logical cluster included ([LZ4 output](#lz4-output)) | E11, `qualify.sh -b`, `qualify.sh -c lz4` |
-| Metadata-box layout, root placement, box compression, shared attributes in the box | Open; blocks stages 13 and 15 | E12 |
+| Metadata-box layout, root placement, box compression, shared attributes in the box | The box is a primary-space inode named at `0x80`, flat, or LZ4 behind 4-byte encoded extents, holding every inode but itself and the packed inode, its blocks last; the root is the box's first inode, after the long-prefix table's block when the table is in the box; `METABOX` and `48BIT` are independent and the kernel mounts a hand-patched box volume without `48BIT` rooted in the primary space; the producer keeps the shared pool in the primary space, which Linux 7.0 misreads for some box inodes, and reads a hand-built pool in the box correctly ([E12](#e12-metadata-box)) | `e12-box-*`, `e12-flat-box32-*`, `e12-*-poolbox` |
 | Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | Files beyond 4 GiB need no 48-bit layout (flat-inline, chunked and LZ4 compact); start blocks reach `0xFFFFFFFE` and NIDs exceed 2^32 without the 48-bit layout; the root NID stays 36 or 128, or bit 63 in a metadata box, so a root NID above 65535 and a nonzero `meta_blkaddr` come only from hand-built images | `e13-*` |
 | The fields a volume with external devices sets | Extra device count nonzero in both producer forms, `DEVICE_TABLE`, device identifier 1 in every chunk; `CHUNKED_FILE` only under `--blobdev` | `e14-*` |
 | Record count and group layout at `L > B`; compact advice `0x01` clear; a plain inline tail under interlacing | Kernel and both tools read `L = 2B` and `4B`: compact groups laid out for `ceil(size / B)` records, `ceil(size / L)` read, fields `max(lclusterbits, 12)` bits wide, so compact with `L > 4096` needs `0x01` clear, and the inline tail follows record `(size - 1) >> lclusterbits` (full index observed, compact from source); `0x01` clear is all 8-byte groups from the header's end and reads in every tool; no producer writes any of the three, and the design refuses them by policy. A plain inline tail on an interlaced inode has no agreed reading: the kernel reads it only when `E > B - C` with the extent stored rotated left by `B - C`, otherwise copies preceding metadata into the file, and `fsck.erofs` reads other bytes in every case | `e15-*` |

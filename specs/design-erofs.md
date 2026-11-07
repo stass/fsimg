@@ -105,10 +105,11 @@ This section explains the model the rules below serve.
 | Metadata box | Inodes and shared attributes in a second metadata space carried by a file, plain or compressed | Emitted under `metabox=plain` or `metabox=lz4` |
 | External data devices | Recognized and refused at open | Never emitted |
 
-The 48-bit layout and the metadata box are experimental upstream. Their
-rules below are provisional as a whole until E10 and E12 confirm them
-against a pinned producer and a kernel that mounts them, and neither is ever
-emitted unless the caller asks for it.
+The 48-bit layout and the metadata box are experimental upstream. E10 and
+E12 confirm their rules below against `mkfs.erofs` 1.9.4 images and the
+Linux 7.0 kernel that mounts them (`e10-*`, `e12-*`); the few forms neither
+experiment observed are marked open where they stand, with a refusal as
+their default. Neither layout is ever emitted unless the caller asks for it.
 
 A feature outside these profiles is refused with `FSIMG_EUNSUPPORTED` naming
 it, never skipped or guessed. A compressed file whose codec this build lacks
@@ -213,7 +214,7 @@ little-endian unless stated.
 | `0x08` | 4 | compatible features | [Features](#features) |
 | `0x0C` | 1 | `blkszbits` | 9 to 12 |
 | `0x0D` | 1 | extension slots `n` | The superblock is `128 + 16 * n` bytes; it ends inside the [superblock region](#volume-identity-and-geometry) |
-| `0x0E` | 2 | root NID | The root directory's NID; under the 48-bit layout, the block count's high 16 bits |
+| `0x0E` | 2 | root NID | The root directory's NID; under the 48-bit layout's [wide form](#48-bit-layout), the block count's high 16 bits instead |
 | `0x10` | 8 | inode count | Advisory; reported, never used to bound a NID |
 | `0x18` | 8 | epoch | Signed seconds since 1970, the time base of compact inodes |
 | `0x20` | 4 | fixed nanoseconds | Below 1000000000, else `FSIMG_ECORRUPT` |
@@ -234,7 +235,7 @@ little-endian unless stated.
 | `0x69` | 1 | image-share prefix index | Reported; not interpreted |
 | `0x6A` | 2 | Reserved | Zero |
 | `0x6C` | 4 | Build time | Reported, below |
-| `0x70` | 8 | Wide root NID | The root's NID under the 48-bit layout; zero otherwise |
+| `0x70` | 8 | Wide root NID | Nonzero under the 48-bit layout selects its [wide form](#48-bit-layout) and is the root's NID; zero otherwise |
 | `0x78` | 8 | Reserved | Zero |
 | `0x80` | 8 | Metadata-box NID | In the first extension slot; the [metadata box](#metadata-box) inode |
 | `0x88` | 8 | Reserved | Zero, when an extension slot covers it |
@@ -319,8 +320,11 @@ a fragment without `FRAGMENTS`, a long-prefix reference without
 `XATTR_PREFIXES`, an encoded extent without `48BIT`, a NID in the second
 metadata space without `METABOX`. The kernel does not check every pairing:
 it reads a head-2 record on a volume without `COMPR_HEAD2` (E9,
-`e9-head2-lzma`) and a chunk-based inode on a volume without `CHUNKED_FILE`
-(E14, `e14-tar-index-b4096`). fsimg requires the bit by policy: the bit is
+`e9-head2-lzma`), a chunk-based inode on a volume without `CHUNKED_FILE`
+(E14, `e14-tar-index-b4096`), and encoded extents and omitted dots on a
+volume without `48BIT` (E10, `e10-edit-lz4-no48`; E12,
+`e12-flat-box32-lz4`, whose box is mapped by encoded extents). fsimg
+requires the bit by policy: the bit is
 what tells a reader, before the first inode, which structures to expect, and
 no pinned-producer volume reaches the rule without it. The `--tar=i` volume
 is refused at open for its nonzero extra-device count before any inode is
@@ -340,8 +344,9 @@ number, and a directory entry's NID is the only key that finds an inode. NIDs
 are 64-bit in every layout: without the 48-bit layout an inode may still lie
 beyond slot 2^32, as `mkfs.erofs` places inodes after their data (E13,
 `e13-limits-nid`), and nothing limits a NID to 32 bits. The root NID comes
-from the superblock: the 16-bit field, or the wide field under the 48-bit
-layout. A reader accepts any `meta_blkaddr` whose metadata area lies in the
+from the superblock: the wide field when the 48-bit layout's wide form
+selects it, otherwise the 16-bit field, on a metadata-box volume too. A
+reader accepts any `meta_blkaddr` whose metadata area lies in the
 volume; `mkfs.erofs` moves it from 0 only when the root would otherwise pass
 the 16-bit field (source), and the writer keeps it 0. An inode's fixed part,
 attribute region and layout bytes lie inside the address domain; the fixed
@@ -399,7 +404,7 @@ nonzero one is `FSIMG_ECORRUPT`.
 | `0x00` | 2 | Format word |
 | `0x02` | 2 | Attribute count |
 | `0x04` | 2 | Mode |
-| `0x06` | 2 | Reserved, zero; the start block's high bits under the 48-bit layout |
+| `0x06` | 2 | Reserved, zero; under the [48-bit layout](#48-bit-layout), the high bits of the start block, or of the compressed block count on a compressed inode |
 | `0x08` | 8 | Size |
 | `0x10` | 4 | Layout word |
 | `0x14` | 4 | Serial number |
@@ -467,7 +472,8 @@ with format-word bit 4, it is zero: a nonzero one is `FSIMG_ECORRUPT`, a
 reserved field required zero. On a compact inode with bit 4 clear the word
 is the link count, under the link-count rules. `mkfs.erofs` never sets bit
 4 on such an inode: it writes the extended word zero and the compact link
-count explicitly (source `inode.c`); E10 checks it on a 48-bit volume.
+count explicitly, on a 48-bit volume too (E10, `e10-48-kinds`, compact and
+extended FIFOs, sockets and devices; `e10-48-large`).
 
 ### Times
 
@@ -527,7 +533,10 @@ a flat-inline inode shorter than `B`, the word addresses nothing and is
 neither read nor validated: every pinned producer writes `0xFFFFFFFF` there
 in a flat-inline inode under one block and 0 in an empty file, and the
 kernel reads neither (E3, `e3-b4096-inline`, where 21 of 25 flat-inline
-inodes carry `0xFFFFFFFF`; `e2-v12-default`, `e2-v15-default`). Where the
+inodes carry `0xFFFFFFFF`; `e2-v12-default`, `e2-v15-default`). Under the
+[48-bit layout](#48-bit-layout) the unused start is 48 bits wide, and an
+extended inode's high word is then `0xFFFF`, unread like the rest (E10,
+`e10-48-kinds`, the extended flat-inline inodes under one block). Where the
 word is read it is an address like any other, and one outside the domain,
 `0xFFFFFFFF` included, is `FSIMG_ECORRUPT`. For `0xFFFFFFFF` in a flat
 inode with content that is fsimg policy: the kernel reads such a file as
@@ -567,7 +576,10 @@ hole: that chunk reads as zeros, delivered as a
 before `0xFFFFFFFF` (E7, `e7-chunk8k-forceidx`); under bit 6 it is a high
 part of `0xFFFF`, a zero device identifier and `0xFFFFFFFF`. Any other chunk occupies
 `min(chunk, size - offset)` bytes from `block * B`, inside the domain (E7,
-`e7-chunk*`, hole and shared entries included). A nonzero high part without
+`e7-chunk*`, hole and shared entries included; E10, `e10-48-chunk`, whose
+entry `01 00 00 00 05 00 00 00` under bit 6 names block 2^32 + 5, the data
+moved there by hand because `mkfs.erofs` places no chunk past 2^32, and the
+kernel and `fsck.erofs` read it). A nonzero high part without
 bit 6, bit 6 without `48BIT`, bit 6 with 4-byte entries, or a nonzero
 device identifier, is `FSIMG_ECORRUPT`. That is fsimg policy, stricter than
 the kernel and `fsck.erofs`, which ignore the high part and the device
@@ -635,7 +647,11 @@ eighth entry of the root and the kernel looks every name up).
 `.` names the directory itself and `..` its parent; the root's `..` names the
 root. Neither is delivered as a child. Under the 48-bit layout a directory
 whose format word has bit 4 set omits `.`; the reader treats it as present
-and requires that no record is named `.`.
+and requires that no record is named `.`. `mkfs.erofs -E dot-omitted`
+writes `..` and the names with no `.`, and the kernel appends a synthetic
+`.` after the stored entries, listing a stored `.` twice when the bit is set
+anyway, so a stored `.` under the bit is wrong by the kernel's reading too
+(E10, `e10-48-dotomit` and a hand-edited `e10-48-small`).
 
 ### The parent rule
 
@@ -717,11 +733,16 @@ inode is compressed. Both placements are observed: `mkfs.erofs` sets
 `PLAIN_XATTR_PFX` itself whenever it writes no packed inode and puts the
 table directly after the shared pool (E6, `e6-xattr-pfx-plain`, byte 1188 =
 297 * 4), and under `fragments` it puts the table at offset 0 of an
-LZ4-compressed packed inode (`e6-xattr-pfx-packed`). E12 checks whether a
-metadata box moves either; a table a pinned producer places elsewhere is
-`FSIMG_EUNSUPPORTED` until the design records it. A volume with long
-prefixes but no packed inode and no
-`PLAIN_XATTR_PFX` is `FSIMG_ECORRUPT`. A record whose
+LZ4-compressed packed inode (`e6-xattr-pfx-packed`). Under the
+[metadata box](#metadata-box) without `PLAIN_XATTR_PFX` the table begins
+instead at byte `xattr_prefix_start * 4` of the box's content, whether or not
+a packed inode exists: `mkfs.erofs` writes it at offset 0 of the box, padded
+to whole box blocks so the root inode follows at NID bit 63 plus
+`k * B / 32` after `k` table blocks, one in every observed image, and the
+kernel reads it there (E12, `e12-box-pfx-plain`, `-pfx-plain-b512`,
+`-pfx-lz4`, `-lz4-pfx-frag`; `-pfx-lz4-plainpfx` keeps the plain
+placement). A volume with long prefixes but no packed inode, no metadata
+box and no `PLAIN_XATTR_PFX` is `FSIMG_ECORRUPT`. A record whose
 base index is not a built-in prefix, or that runs past its region, is
 `FSIMG_ECORRUPT`.
 
@@ -836,7 +857,7 @@ The 8-byte map header sits at the attribute region's end rounded up to 8:
 | 0 | 4 | Fragment offset bits 0 to 31 (bits 32 to 63 are the fragment head's block field on a full index, [below](#packed-fragments)), or a reserved 16-bit word and the 16-bit compressed tail size |
 | 4 | 2 | Advice flags |
 | 6 | 1 | Algorithms: the head-1 algorithm in bits 0 to 3, head-2 in bits 4 to 7 |
-| 7 | 1 | Cluster bits: `lclusterbits - blkszbits` in bits 0 to 3; bit 7 marks a whole-file fragment; bits 4 to 6 carry nothing and are not read |
+| 7 | 1 | Cluster bits: `lclusterbits - blkszbits` in bits 0 to 3; bit 7 marks a whole-file fragment; bits 4 to 6 carry nothing and are not read on an index. On an [encoded-extent](#encoded-extents) inode of 4- or 8-byte records bits 4 to 7 are zero, else `FSIMG_ECORRUPT`; with 16- or 32-byte records bytes 6 and 7 are the extent count's high half |
 
 When bit 7 of byte 7 is set, the whole file lives in the packed inode: the
 header, with that bit cleared, is a 64-bit offset into the packed inode's
@@ -846,10 +867,13 @@ the only one producers write it in (E8, `e8-lz4-allfrag`, `e8-lz4-zdir`);
 in a compact-index inode it is `FSIMG_EUNSUPPORTED` naming the
 combination, since the readers' agreement there is unchecked. Otherwise the
 logical cluster size is
-`L = 2^lclusterbits`, and the reader requires `L = B` as fsimg policy:
-every pinned producer writes `lclusterbits = blkszbits` (E8) and none can
-write another value, so accepting one would add rules no volume needs.
-Another value is `FSIMG_EUNSUPPORTED` naming the logical cluster size. With
+`L = 2^lclusterbits`, and on a full or compact index the reader requires
+`L = B` as fsimg policy:
+every pinned producer writes `lclusterbits = blkszbits` there (E8) and none
+can write another value, so accepting one would add rules no volume needs.
+Another value is `FSIMG_EUNSUPPORTED` naming the logical cluster size.
+[Encoded extents](#encoded-extents) of 4 and 8 bytes have their own
+logical cluster rule, since `mkfs.erofs` writes them with `L > B`. With
 `L = B` the record formats' own ceilings, `L` at most 2^16 for a full
 record's `clusterofs` and `lclusterbits` at most 14, or 12 with 32-byte
 groups, for the compact index, hold on every accepted volume. The kernel,
@@ -880,7 +904,11 @@ the kernel's source).
 
 On a full-index inode of a 48-bit volume, advice bit `0x01` instead selects
 [encoded extents](#encoded-extents), and bits `0x02` and `0x04` then give
-the extent record size. On a compact inode bits `0x02` and `0x04` are equal,
+the extent record size; on a compact inode the bit keeps its 2-byte-group
+meaning there too, and a 48-bit volume holds compact and full indexes
+beside encoded extents, since `mkfs.erofs` picks the smallest form per file
+(E10, `e10-48-lz4`: `half-rand-1m` compact, `half-rand-40k` encoded). On a
+compact inode bits `0x02` and `0x04` are equal,
 both set or both clear, as the kernel requires; unequal is `FSIMG_ECORRUPT`.
 `mkfs.erofs` writes `0x07` on every compact inode with big clusters or a
 non-LZ4 codec and `0x02` alone on full-index inodes (E8, `e8-lz4-big*`; E9).
@@ -1186,27 +1214,53 @@ naming the cluster size, never as corruption.
 
 Incompatible bit `0x080` widens block numbers past 32 bits and adds two
 compact encodings. It changes these fields, and no others; a field this list
-does not widen keeps its core meaning. Every rule in this section is
-provisional until E10 checks it against `mkfs.erofs -E 48bit` images of a
-pinned release and a kernel that mounts them; a rule E10 cannot confirm is
-refused as `FSIMG_EUNSUPPORTED` naming it rather than guessed.
+does not widen keeps its core meaning. E10 observed the rules in this
+section in `mkfs.erofs -E 48bit` images mounted by the Linux 7.0 kernel
+(`e10-48-*`), except where a rule says it rests on source reading, and the
+forms listed as open at the end of [encoded extents](#encoded-extents) are
+refused as `FSIMG_EUNSUPPORTED` naming them rather than guessed.
 
-* **Superblock.** The root NID is the 64-bit field at `0x70`, and the
-  16-bit field at `0x0E` holds the block count's bits 32 to 47.
+* **Superblock.** The superblock has two forms. In the wide form the 64-bit
+  field at `0x70` is nonzero and is the root NID, and the 16-bit field at
+  `0x0E` holds the block count's bits 32 to 47. When `0x70` is zero, the
+  narrow form, `0x0E` is the root NID and the block count is the 32-bit
+  field alone. `mkfs.erofs` writes the narrow form until the block count
+  passes 32 bits or the root NID passes 16 (`e10-48-small`,
+  `e10-48-lz4-big` narrow; `e10-48-large` wide), and the kernel mounts
+  both, the wide form on a small volume included (`e10-edit-small-wide`).
+  A root NID of 0 cannot select the wide form; no producer places the root
+  at NID 0. Without `48BIT` a nonzero `0x70` is a reserved superblock
+  field like any other: the kernel ignores it, and the reader reports it
+  and marks verification incomplete, as for every nonzero reserved
+  superblock byte.
 * **Start blocks.** A flat inode's start block is the layout word plus, as
   bits 32 to 47, the 16-bit word at offset `0x06`: the extended inode's
   reserved word, or the compact inode's link count when that inode
-  carries the implicit link count below.
+  carries the implicit link count below. A compact directory's link count
+  stays explicit, bit 4 or not, so its start block is 32 bits, and only an
+  extended directory can lie beyond block 2^32; that case is unobserved,
+  since `mkfs.erofs` failed to build one (E10), and is read by the uniform
+  extended rule.
+  An unused start is unread at 48 bits as at 32
+  ([flat rules](#flat-and-flat-inline)). On a compressed inode the word
+  holds the compressed block count's high bits by source reading, zero in
+  every observed image; the reader does not use that count.
 * **Implicit link count.** On a compact non-directory inode, format-word bit
   4 means the link count is 1 and the link-count word holds start-block bits
-  instead. On an extended non-directory inode the bit has no published
-  meaning and is `FSIMG_EUNSUPPORTED`.
+  instead (`e10-48-large`, `nl-c` at block 2^32). `mkfs.erofs` sets the bit
+  only when the start block needs it and writes a compact inode with a
+  wide start and another link count extended; the kernel accepts the bit
+  with zero high bits on every file and symbolic link (`e10-edit-small-nlink1`).
+  On an extended non-directory inode the bit has no published meaning and
+  is `FSIMG_EUNSUPPORTED` by policy: the kernel and `erofs-utils` ignore it
+  there (`e10-edit-kinds-extbit4`) and no producer sets it.
 * **Omitted dot.** On a directory, format-word bit 4 means its `.` entry is
-  absent, [above](#order-and-dot-entries).
+  absent, [above](#order-and-dot-entries) (`e10-48-dotomit`).
 * **Chunks.** Chunk format bit 6 permits 48-bit block numbers in 8-byte
-  entries, [above](#chunk-based).
-* **Encoded extents** replace the full index's records when advice bit
-  `0x01` is set, [below](#encoded-extents).
+  entries, [above](#chunk-based) (`e10-48-chunk`); that the kernel needs
+  the bit to read the high word is source reading, unobserved.
+* **Encoded extents** replace the full index's records on a full-index
+  inode whose advice bit `0x01` is set, [below](#encoded-extents).
 
 A wide block number is still checked against the address domain, so a volume
 needs no more backing bytes than its structures reach; a 48-bit fixture can
@@ -1216,62 +1270,134 @@ checked 64-bit arithmetic is `FSIMG_ECORRUPT`.
 ### Encoded extents
 
 An encoded-extent inode stores a list of extents in place of index records.
-The map header holds a 48-bit extent count: its low 32 bits in bytes 0 to
-3 and its high 16 bits in bytes 6 to 7, around the advice word at bytes 4 to
-5 that selects encoded extents (provisional, E10). The record size
-is `4 << ((advice >> 1) & 3)`: 4, 8, 16 or 32 bytes. Records start at the
-first multiple of the record size at or after the map header's end. The
-32-byte record holds a 32-bit physical length word, a 64-bit physical byte
-offset in two 32-bit halves, a 64-bit logical byte offset in two halves,
-and 12 reserved bytes. Smaller records omit fields that a rule supplies
-instead: the 16-byte record has explicit logical offsets, the 8-byte record
-places extents at logical-cluster spacing, and the 4-byte record stores
-only lengths and derives each physical offset by accumulation from a
-leading position. The 32-byte record needs no derivation, so the reader
-always accepts it. The exact derivation for each smaller width is
-established by E10 from every width a pinned producer emits; a smaller
-width no producer emits is `FSIMG_EUNSUPPORTED`.
+The record size is `4 << ((advice >> 1) & 3)`: 4, 8, 16 or 32 bytes, and
+`mkfs.erofs` 1.9.4 emits all four (E10: 4 for uniform contiguous extents,
+`half-rand-40k`; 8 for uniform extents made non-contiguous by `dedupe`,
+`xyxy`; 16 otherwise, `text200k`; 32 for a file beyond 4 GiB,
+`e10-48-lz4-big`). Records start at the first multiple of the record size
+at or after the [map header's](#map-header) end. The map header's meaning
+depends on the width:
+
+* For 16- and 32-byte records it holds a 48-bit extent count: its low 32
+  bits in bytes 0 to 3 and its high 16 bits in bytes 6 to 7, around the
+  advice word at bytes 4 to 5. The count is at most `ceil(size / B)`, by
+  fsimg policy: every extent but the last covers at least one block of
+  content in every observed image and in the writer's output, and the
+  bound is checked before the records' extent is computed, so a count can
+  never make the body longer than the size allows; a larger count is
+  `FSIMG_ECORRUPT`. The kernel uses the high half and never checks the
+  count: a high half of 1 reads a file at its full size with wrong content
+  (`e10-edit-lz4-counthi`), which that bound refuses when the inode loads.
+* For 4- and 8-byte records, header bytes 0 to 3 and 6 are zero, else
+  `FSIMG_ECORRUPT`, and bits 0 to 3 of byte 7 are the logical cluster
+  shift above the block shift, so the logical cluster is `B << shift`; it
+  may exceed `B` (shifts 1, 3 and 4 observed) and is bounded by the
+  [decoded extent limit](#limits), beyond which it is `FSIMG_EUNSUPPORTED`
+  naming the cluster size. There is no count: the file has
+  `ceil(size / logical cluster)` extents, each covering one logical cluster
+  and the last covering the rest, so the count is bounded by the size and
+  the body it implies must lie in the domain like any other.
+
+The 32-byte record holds a 32-bit physical length word, a 64-bit physical
+byte offset in two 32-bit halves, a 64-bit logical byte offset in two halves,
+and 12 reserved zero bytes. The 16-byte record holds the length word, the
+64-bit physical offset and a 32-bit logical offset. The 8-byte record holds
+the length word and a 32-bit physical byte offset; its logical offset is
+its index times the logical cluster. The 4-byte record holds the length
+word alone: a 64-bit physical byte offset at the records' start precedes
+the first record, each extent starts where the previous one ends, and the
+logical offsets are as for 8 bytes. Every width is read.
 
 The physical length word's low 21 bits are the stored byte length, bit 27
 marks a partial reference, and bits 28 to 31 are the format: 0 for a plain
-extent, otherwise the algorithm plus one. Logical offsets increase strictly;
-an extent runs to the next extent's offset or to `size`. Under advice bit
-`0x20` the last extent is a fragment whose offset field addresses the
-packed inode. A count larger than the records the body holds, a stored
-length beyond the [cluster limit](#limits), or a decreasing logical offset
+extent, otherwise the algorithm plus one (1 LZ4, 3 DEFLATE observed).
+Explicit logical offsets start at 0, increase strictly and lie below
+`size`; an extent runs to the next extent's offset or to `size`. Under
+advice bit `0x20` the last extent is a fragment in the packed inode at
+offset `pstart_lo << 32 | length word`, the length
+word carrying the offset's low 32 bits and no format or partial bits, and
+it runs to `size` (`e10-48-frag`); a whole-file fragment keeps the
+[legacy header](#packed-fragments) with advice `0x01` clear. A body too
+short for its records, a stored length beyond the
+[cluster limit](#limits), or a logical offset out of order or out of range
 is `FSIMG_ECORRUPT`. A lookup is a binary search over logical offsets, so
 its cost is logarithmic in the extent count with one record read per step.
+Physical offsets and lengths need not be block multiples: the kernel and
+`fsck.erofs` read 32-byte records with exact stored lengths and unaligned
+starts (`e10-hand-lz4-exact`, `-bytes`), though `mkfs.erofs` writes only
+block multiples.
+
+Open after E10, each `FSIMG_EUNSUPPORTED` naming it until a producer image
+or a kernel-mounted hand-built one shows its reading: an extent with the
+partial bit 27 set, which no `mkfs.erofs` option produced, and a 16-byte
+record whose physical high half is nonzero, which no producer run reached.
 
 ## Metadata box
 
-Incompatible bit `0x100` adds a second metadata space. Its rules are
-provisional until E12 checks them against `mkfs.erofs` metadata-box images
-of a pinned release, plain and compressed, and a kernel that mounts them;
-a rule E12 cannot confirm is refused as `FSIMG_EUNSUPPORTED`.
+Incompatible bit `0x100` adds a second metadata space. E12 confirms the
+rules below for flat and encoded-extent boxes against `mkfs.erofs -m`
+images at 512- to 4096-byte blocks, with chunks, fragments and long
+prefixes inside, and the Linux 7.0 kernel that mounts them (`e12-box-*`);
+the open forms at the end are refused as `FSIMG_EUNSUPPORTED` naming them.
 
 * The metadata-box inode is named by the superblock's field at `0x80`,
   which needs at least one extension slot. Its NID has bit 63 clear: the
-  inode itself lives in the primary space.
+  inode itself lives in the primary space. The kernel refuses a box NID
+  with bit 63 and a box without a slot at mount (E12).
 * The second space is the metadata-box inode's content, read through its
-  own data layout, which may be flat or compressed but never a fragment.
-  An inode whose NID has bit 63 set begins at byte `32 * n'` of that
-  content, where `n'` is the NID without bit 63, and its whole body,
-  including any inline tail, is read from that content. An inline tail may
-  not cross a multiple of `B` within that content.
+  own data layout: flat, or compressed behind a full index or, on a
+  `48BIT` volume, [encoded extents](#encoded-extents). `mkfs.erofs` writes
+  a flat box, or an LZ4 box mapped by 4-byte encoded extents (advice
+  `0x0001`, logical cluster shift 1), and stores the box flat when
+  compression would not shrink it (`e12-box-plain`, `e12-box-lz4`,
+  `e12-box-lz4-m16k`). A box behind a full index is accepted because the
+  [writer](#metadata-box-profile) emits it under `addressing=32`; no
+  producer writes one and no kernel has read one, so it is provisional on
+  the box-writer stage's qualification like the writer form. An inode
+  whose NID has bit 63 set begins at byte `32 * n'` of that content, where
+  `n'` is the NID without bit 63, and its whole body, including any inline
+  tail, is read from that content. An inline tail may not cross a multiple
+  of `B` within that content; the fixed part and attribute region may
+  (`e12-box-plain-b512`).
+* The box and `48BIT` are independent. `mkfs.erofs` sets both, because it
+  puts the root in the box and only the wide root field holds bit 63; the
+  kernel and `fsck.erofs` also accept a box volume without `48BIT`, whose
+  16-bit field names a root in the primary space (`e12-flat-box32-plain`
+  and `-poolbox`, producer images hand-patched at the root; no producer
+  writes the form). The reader takes the root from whichever field the
+  [superblock form](#48-bit-layout) selects and resolves it in its space.
+  `e12-flat-box32-lz4`, the same patch on a box mapped by encoded extents,
+  is `FSIMG_ECORRUPT` by the [feature-pairing policy](#features), which the
+  kernel does not apply.
 * Under `SHARED_EA_IN_METABOX` the shared attribute pool begins at byte
   `xattr_blkaddr * B` of the metadata box's content rather than of the
-  volume. Without `PLAIN_XATTR_PFX`, the long-prefix table lives in the
-  packed inode as in the core profile.
+  volume (`e12-box-plain-poolbox`, hand-built: `mkfs.erofs` 1.9.4 never
+  sets the bit and leaves the pool in the primary space). Both placements
+  are read by the format; Linux 7.0 returns wrong shared attributes for
+  some box inodes under the producer's placement, a kernel defect the
+  [research record](../docs/erofs-research.md#e12-metadata-box) describes,
+  so fsimg's attributes may differ from that kernel's on such a volume.
+* Without `PLAIN_XATTR_PFX` the long-prefix table lives in the box's
+  content, [above](#long-prefixes), not in the packed inode.
 * An inode's data blocks, chunks and physical clusters are always in the
-  primary volume, wherever the inode lives.
+  primary volume, wherever the inode lives (`e12-box-chunk`,
+  `e12-box-lz4`; the box's own stored blocks follow the data).
 * The metadata-box inode and the packed inode never live in the second
-  space and are never fragments. Resolving a metadata-box NID therefore
-  never needs the metadata box, and the nesting is at most one level: an
-  inode in the box, read through the box's layout, whose clusters lie in
-  the volume.
+  space and are never fragments (`e12-box-lz4-frag`: box NID 38, packed
+  NID 40). Resolving a metadata-box NID therefore never needs the metadata
+  box, and the nesting is at most one level: an inode in the box, read
+  through the box's layout, whose clusters lie in the volume.
 
 A NID with bit 63 set in a volume without the metadata box is
-`FSIMG_ECORRUPT`, as is a NID whose inode lies outside its space.
+`FSIMG_ECORRUPT`, as is a NID whose inode lies outside its space; the kernel
+lists such an entry and fails to read it (E12). Open after E12, each
+`FSIMG_EUNSUPPORTED` naming it until a producer image or a kernel-mounted
+hand-built one shows it read: a box inode with the flat-inline, chunk-based
+or compact-index layout; a packed NID with bit 63; and
+`SHARED_EA_IN_METABOX` on a compressed box, whose rule is the same but
+which no fixture holds. `SHARED_EA_IN_METABOX`
+without `METABOX` is `FSIMG_ECORRUPT`; the kernel mounts such a volume and
+fails every shared attribute read.
 
 ## External data devices
 
@@ -1318,13 +1444,14 @@ validated as reading validates it.
   and configuration records, `[1024, end of the last record)`; each distinct
   inode's body in the primary space; the long-prefix table when
   `PLAIN_XATTR_PFX` makes it a plain region (otherwise it is content of the
-  packed inode, whose clusters already claim it as data); every directory's
-  stored blocks; and the metadata box's stored blocks. Shared metadata: each
-  referenced shared attribute entry in the primary space. Data: every flat
-  block, chunk and physical cluster of regular files, symbolic links and the
-  packed inode. Inode bodies and shared entries inside the metadata box
-  claim byte ranges of its content in a second claim stream under the same
-  rules. An exclusive range may not overlap any other claim; a
+  packed inode, whose clusters already claim it as data, or of the metadata
+  box); every directory's stored blocks; and the metadata box's stored
+  blocks. Shared metadata: each referenced shared attribute entry in the
+  primary space. Data: every flat block, chunk and physical cluster of
+  regular files, symbolic links and the packed inode. Inode bodies, shared
+  entries and the long-prefix table inside the metadata box claim byte
+  ranges of its content in a second claim stream under the same rules. An
+  exclusive range may not overlap any other claim; a
   shared-metadata range may overlap only an identical shared-metadata range;
   data ranges may overlap each other. A NID named several times claims its
   body once.
@@ -1347,7 +1474,7 @@ them.
 | Condition | Status |
 | --- | --- |
 | No magic at offset 1024, or a prefix too short to hold it | `FSIMG_EFORMAT` |
-| A recognized volume using external data devices, a 48-bit or metadata-box rule E10 or E12 left unconfirmed, an unknown incompatible bit, a reserved advice or full-record bit, an unknown attribute index or configuration, a block size or cluster size beyond the reader's range, a logical cluster larger than a block, a codec the build lacks, an LZ4 cluster on a volume without `LZ4_0PADDING`, a symbolic-link target over 1024 bytes | `FSIMG_EUNSUPPORTED`, naming the feature |
+| A recognized volume using external data devices, a 48-bit or metadata-box form its section lists as open, an unknown incompatible bit, a reserved advice or full-record bit, an unknown attribute index or configuration, a block size or cluster size beyond the reader's range, a logical cluster larger than a block on an index or beyond the decoded limit on encoded extents, a codec the build lacks, an LZ4 cluster on a volume without `LZ4_0PADDING`, a symbolic-link target over 1024 bytes | `FSIMG_EUNSUPPORTED`, naming the feature |
 | A checksum mismatch; a field outside its range; a structure outside the domain or crossing a boundary it must not cross; a reserved field or bit required zero, outside the superblock and other than the advice and record bits above; unordered or repeated names; a parent-rule violation; a decode that fails or produces the wrong length; a referenced structure past the end of a truncated volume | `FSIMG_ECORRUPT` |
 | Memory, scratch, work or time exhausted, including a decoded cluster above the budget | The budget's error, never `FSIMG_ECORRUPT` |
 | An I/O failure | The I/O error |
@@ -1389,16 +1516,20 @@ become independent files under the [sources design](design-sources.md).
 * Bytes 0 to 1023 are zero. The superblock has no extension slots, except
   the one the [metadata-box profile](#metadata-box-profile) needs. Its
   compatible features are `SB_CHKSUM` and `MTIME`; its incompatible
-  features are none, plus `LZ4_0PADDING` when the [LZ4 profile](#lz4-profile)
-  compresses at least one file, `48BIT` under the
-  [48-bit profile](#48-bit-profile) and `METABOX` under the
+  features are none, plus `LZ4_0PADDING`, with the LZ4 configuration,
+  whenever any LZ4 cluster is written, a file's under the
+  [LZ4 profile](#lz4-profile) or the box's under `metabox=lz4`, `48BIT`
+  under the [48-bit profile](#48-bit-profile) and `METABOX` under the
   [metadata-box profile](#metadata-box-profile).
 * `meta_blkaddr` is 0, so a NID is the inode's byte offset divided by 32.
   The metadata area begins at the first 32-byte boundary at or after the
   superblock's end: byte 1152, NID 36, without slots, and byte 1184, NID
   37, with the box's one slot. Without the box the root's inode is the
-  first, so the root NID always fits its 16-bit field; under the box the
-  root is the box content's first inode and its NID is in the wide field.
+  first, so the root NID always fits its 16-bit field. Under the box with
+  `addressing=48` the root is the box content's first inode and its NID,
+  bit 63, is in the wide field; under the box with `addressing=32` the root
+  follows the box inode in the primary area and its NID is in the 16-bit
+  field ([metadata-box profile](#metadata-box-profile)).
 * The block count is the volume length divided by `B`, rounded down: a
   fixed disk fits the volume to 512-byte sectors, so a zero partial block
   may follow the last block. The inode count is the number of inodes
@@ -1531,26 +1662,38 @@ are reproducible.
 
 Under `addressing=48` the writer sets `48BIT` and:
 
-* writes the root NID in the wide field and the block count's high bits at
-  `0x0E`, so volumes beyond 2^32 blocks can be built;
+* writes the superblock's wide form whatever the volume's size: the root
+  NID in the wide field and the block count's high bits at `0x0E`, so
+  volumes beyond 2^32 blocks can be built and one rule covers every size.
+  `mkfs.erofs` writes the narrow form until a value needs the wide one;
+  the kernel mounts a small volume in the wide form (E10,
+  `e10-edit-small-wide`);
 * writes start blocks above 2^32 with their high bits at offset `0x06`,
   setting the implicit link count on every compact non-directory inode, whose
-  link count is 1 in any case; every directory is written extended, since
-  the implicit rule cannot carry its link count, so an inode's form follows
-  from the catalog alone and never from where its data lands;
+  link count is 1 in any case, a form the kernel accepts with zero high
+  bits too (E10, `e10-edit-small-nlink1`); every directory is written
+  extended, since the implicit rule cannot carry its link count, so an
+  inode's form follows from the catalog alone and never from where its
+  data lands;
 * chooses the epoch as the smallest modification second among the
   catalog's inodes, absent times counted as the format time, with fixed
   nanoseconds zero, and writes an inode compact when its time is a whole
-  second within 2^32 seconds of the epoch and its other fields fit;
+  second within 2^32 seconds of the epoch and its other fields fit. That
+  is stricter than `mkfs.erofs`, which stores a time outside that range
+  modulo 2^32 and drops the nanoseconds, so the kernel reports a wrong
+  time (E10, `e10-48-small`, years 1950 and 2110);
 * under `compression=lz4`, writes compressed files as encoded extents of
   32-byte records, because a full index record cannot hold a block number
   past 32 bits, and the 32-byte record is the one width that carries both
   the physical and the logical offset at 64 bits, as the cluster former's
   variable-length clusters in files beyond 4 GiB need under this layout;
   without it a compact index of `B`-sized logical clusters covers such a
-  file (E13, `e13-big5g-lz4`). E10 confirms that
-  the kernel accepts it; if E10 cannot answer, the writer refuses
-  `compression=lz4` and `metabox=lz4` with `addressing=48`;
+  file (E13, `e13-big5g-lz4`). The physical offsets and lengths are block
+  multiples, as `mkfs.erofs` writes them. E10 confirms that the kernel
+  and `fsck.erofs` read 32-byte records around the project's LZ4 blocks,
+  plain extents included, placed block-aligned and padded, block-aligned
+  with exact lengths, and byte-granular (`e10-hand-lz4-padded`, `-exact`,
+  `-bytes`), and an LZ4 box mapped the same way (`e10-hand-box32`);
 * never omits `.` entries.
 
 The profile is never chosen automatically, not even when a volume would need
@@ -1563,30 +1706,45 @@ Under `metabox=plain` or `metabox=lz4` the writer sets `METABOX` with one
 superblock extension slot and moves every inode except the metadata-box
 inode into the box:
 
-* The primary metadata area holds only the metadata-box inode, at NID 37,
-  the first slot after the superblock and its extension slot.
-  The box's content is laid out as the core metadata area would be, from
-  byte 0, root first; every directory entry names its child with bit 63
-  set.
-* The root's NID carries bit 63, which only the wide root field can hold, so
-  the profile requires `addressing=48`; a request without it is
-  `FSIMG_EINVAL` naming both settings. This is provisional: if E12 shows
-  that the kernel mounts a box with the root in the primary space without
-  `48BIT`, the writer keeps the root there when `addressing=32`.
+* The primary metadata area holds the metadata-box inode at NID 37, the
+  first slot after the superblock and its extension slot (`mkfs.erofs`
+  writes its box inode at NID 38, after a shared entry the writer never
+  has). The box's content is laid out as the core metadata area would be,
+  from byte 0, and every directory entry names a child in the box with bit
+  63 set.
+* Under `addressing=48` the root is the box content's first inode, in the
+  wide root field, and the primary area holds nothing but the box inode:
+  the producer's layout (E12, `e12-box-*`).
+* Under `addressing=32` the root directory's inode follows the box inode
+  in the primary area, so its NID fits the 16-bit field, and every other
+  inode is in the box; the root's `.` and `..` entries and its children's
+  `..` entries name it without bit 63. The format does not couple the box
+  to `48BIT`, and the kernel and `fsck.erofs` read this form on producer
+  images hand-patched at the root (E12, `e12-flat-box32-plain`), but no
+  producer writes it, so the form is provisional until the box-writer
+  stage's kernel qualification mounts the writer's own output; if that
+  fails, `metabox` with `addressing=32` is refused as `FSIMG_EUNSUPPORTED`
+  naming both settings.
 * The box's stored blocks follow the data area, so no data address depends
-  on the box's stored size; under `metabox=lz4` the box is compressed with
-  the LZ4 profile's encoder, and the box inode maps it with 32-byte encoded
-  extents, as every LZ4 file under the [48-bit profile](#48-bit-profile) is.
-  The box inode's body reserves room for `ceil(content / B)` records, the
-  most the cluster former can produce, since each cluster consumes at least
-  `B` input bytes or ends the content; the header's count holds the real
-  number of extents, and the reserved bytes after the last record are zero.
-  The primary metadata area's end, and so every data address, is therefore
-  fixed before the box is encoded.
-* Directory and file data stay in the primary data area, and there are no
-  shared attributes to place. No inode has an inline tail, so the box holds
-  no source bytes and is generated from the plan alone; a tail goes in its
-  own data block.
+  on the box's stored size. Under `metabox=lz4` the box is compressed with
+  the LZ4 profile's encoder and mapped as that profile maps a file at the
+  same addressing: under `addressing=48` by 32-byte encoded extents, unlike
+  `mkfs.erofs`'s 4-byte records, a form the kernel and `fsck.erofs` read
+  (E10, `e10-hand-box32`), the body reserving room for `ceil(content / B)`
+  records, the most the cluster former can produce, since each cluster
+  consumes at least `B` input bytes or ends the content, with the header's
+  count holding the real number and the bytes after the last record zero;
+  under `addressing=32` by the core full index of exactly
+  `ceil(content / B)` records, since encoded extents need `48BIT`
+  ([features](#features)). Either way the box inode's size is known from
+  the content's size, so the primary metadata area's end, and every data
+  address, is fixed before the box is encoded.
+* Directory and file data stay in the primary data area, and the writer
+  stores no extended attributes, so there is no shared pool to place; a
+  writer that stores one in a box volume keeps it in the primary space as
+  `mkfs.erofs` does, [above](#metadata-box). No inode has an inline
+  tail, so the box holds no source bytes and is generated from the plan
+  alone; a tail goes in its own data block.
 
 The box's content is generated from the plan, not read from a source, so its
 compressed size is measured by encoding it once during planning and
@@ -1614,7 +1772,7 @@ change times are not stored and are counted as optional losses under the
 | `epoch` | The format time in reproducible mode, from `-e`: any signed 64-bit second count. The superblock's epoch field is a different value: it holds the format time, and under `erofs_addressing=48` the smallest modification second instead |
 | `erofs_compression` | `none`, the default, or `lz4` |
 | `erofs_addressing` | `32`, the default, or `48` |
-| `erofs_metabox` | `none`, the default, `plain` or `lz4`; not `none` requires `erofs_addressing=48` (provisional, E12); `lz4` also depends on E10's confirmation of 32-byte records |
+| `erofs_metabox` | `none`, the default, `plain` or `lz4`, with either `erofs_addressing` |
 
 The table names settings by their field in the write settings; the
 [driver design](design-erofs-driver.md#writer-settings) gives each field's
@@ -1653,8 +1811,8 @@ minimization searches the writer's accepted block sizes, 4096 first.
 | Attributes | Inline, shared, long prefixes in both placements, filter on and off, ACLs and security labels | Overlong entries, bad shared index, unknown index, bad prefix |
 | Chunks | Both entry widths, several chunk sizes, holes, shared chunks | Device identifiers, high parts, short index, chunk past the domain |
 | Compression | Each algorithm; full and compact indexes across group boundaries; big, plain and interlaced clusters; partial references; inline tails; fragments; compressed directories; reads starting and ending inside a cluster | Bad distances and cycles, bad group packing, marker without big clusters, oversize clusters, truncated and corrupt streams, fragment past the packed inode; the hand-built E15 forms refused by policy: `L > B`, compact advice `0x01` clear, a plain inline tail on an interlaced inode |
-| 48-bit layout | Root NID above 65535 through a hand-built image, which no producer places; start blocks and chunk blocks above 2^32 and the bit-63 metadata-box root through sparse fixtures; implicit link counts; omitted dots; every encoded-extent width a producer emits | High bits without the feature; wide root zero; encoded extents unordered, overcounted or overlong; a time sum past 64 bits |
-| Metadata box | Plain and compressed boxes; directories, files and shared attributes inside; reads across box cluster boundaries | Box NID with bit 63 or naming a fragment; box inode in the box; tail crossing a box block; bit 63 without the feature |
+| 48-bit layout | Both superblock forms, the wide one on a small volume; root NID above 65535 through a hand-built image, which no producer places; start blocks and chunk blocks above 2^32 and the bit-63 metadata-box root through sparse fixtures; implicit link counts with and without high bits; omitted dots; every encoded-extent width, fragments and the hand-built 32-byte placements (`e10-*`) | High bits without the feature; a nonzero wide root field without the feature, reported and ignored; encoded extents without the feature (`e10-edit-lz4-no48`), unordered, overcounted (`e10-edit-lz4-counthi`), overlong, with nonzero header bytes or a logical cluster beyond the limit; a stored `.` under bit 4; bit 4 on an extended inode; the partial bit; a 16-byte record with a physical high half; a time sum past 64 bits |
+| Metadata box | Plain and compressed boxes at 512 to 4096 bytes; directories, files, chunks, fragments and long prefixes inside; the pool in the primary space and in the box; the root in the box and, without `48BIT`, in the primary space (`e12-flat-box32-plain`, `-poolbox`); reads across box cluster boundaries (`e12-*`) | Box NID with bit 63 or naming a fragment; box inode in the box, without a slot, or in an open layout; a box of encoded extents without `48BIT` (`e12-flat-box32-lz4`); a packed NID with bit 63; tail crossing a box block; bit 63 without the feature; `SHARED_EA_IN_METABOX` without the box or on a compressed box |
 | Verification | Every producer fixture verifies | Every mutation above reports its class; overlapping metadata, a wrong link count |
 | Writer | Empty, small, deep, wide, large-file volumes; every kind it writes; every profile and their combinations; byte identity across source order, budget, scratch and time zone; a poison scan of every unwritten byte | Settings out of range; a source changed between planning and emission |
 

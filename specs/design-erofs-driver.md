@@ -128,8 +128,13 @@ Open:
    checks already refused bits outside the format's table). The decision is
    a set of booleans the rest of the driver reads, never the raw words.
 3. Under the metadata box, loads the box inode from the primary space,
-   requires a regular file that uses no fragment, and keeps it, with
-   its validated map parameters, for the life of the reader.
+   requires a regular file that is flat or compressed behind a full index
+   or, with `48BIT`, encoded extents, and that uses no fragment, and keeps
+   it, with its validated map parameters, for the life of the reader. The
+   box does not require `48BIT`: the root NID comes from the field the
+   superblock's form selects and may lie in either space, and a box of
+   encoded extents without the bit fails the feature pairing like any
+   other inode ([metadata box](design-erofs.md#metadata-box)).
 4. Under fragments, loads the packed inode the same way and checks that it is
    a regular file that uses no fragment.
 5. Loads the root inode and requires a directory.
@@ -197,7 +202,10 @@ the head for the count marker and the records after it up to the next head,
 each walk bounded by the decoded-extent limit and the record count. Full
 records are read in windows of 16; a compact lookup reads the one group
 holding a record, computing group boundaries from the record count and the
-header's offset; an encoded-extent lookup binary-searches the records. A
+header's offset; an encoded-extent lookup binary-searches the records,
+their count read from the header for 16- and 32-byte records and derived
+from the size and the header's logical cluster shift for 4- and 8-byte ones
+([encoded extents](design-erofs.md#encoded-extents)). A
 lookup keeps the last group or record window it read, decoded and
 validated whole, so sequential mapping reads each index byte once.
 The compact group decoder is a pure function in `codec.c` from a group's
@@ -400,10 +408,13 @@ catalog position:
    offset, and so its NID, with the block rules of the
    [layout](design-erofs.md#layout), and
    fixes the metadata area's end. Under the box the offsets are in the box's
-   content and the primary area holds the box inode alone; under
-   `metabox=lz4` the box inode's extent list is sized for `ceil(content / B)`
-   records, the cluster former's upper bound, so the area's end does not
-   wait for the box's encoding.
+   content and the primary area holds the box inode alone, or the box inode
+   and the root under `addressing=32`
+   ([metadata-box profile](design-erofs.md#metadata-box-profile)); under
+   `metabox=lz4` the box inode's record list is sized for `ceil(content / B)`
+   records, the full index's exact count under `addressing=32` and the
+   cluster former's upper bound for encoded extents under `addressing=48`,
+   so the area's end does not wait for the box's encoding.
 5. **Data placement.** Assigns each row's start block or first cluster
    block in order, then the box's blocks after the data, and fixes the
    block count and volume length. Under `metabox=lz4` the box's cluster
@@ -455,7 +466,8 @@ the source lifecycle common:
 fills one block with the longest input prefix whose encoding fits, emits a
 plain cluster when one block of input does not, and records each head's
 logical offset. The full-index records, or under 48-bit addressing the
-encoded extents, follow from the heads. Measurement keeps one fixed-size
+encoded extents, follow from the heads, for the LZ4 box as for a file.
+Measurement keeps one fixed-size
 record per physical cluster in a scratch store: its logical start, the
 logical bytes it holds, its stored length and whether it is plain, which
 is metadata, not payload; a cluster's position among the file's records is
