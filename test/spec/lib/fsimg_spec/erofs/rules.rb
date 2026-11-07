@@ -15,8 +15,11 @@ module FsimgSpec
       INODES = ->(model, _) { GEOMETRY.call(model, nil) && model.inodes.values.any? }
       DIRECTORIES = ->(model, _) { GEOMETRY.call(model, nil) && model.directories.any? }
       NSEC = 1_000_000_000
-      # The incompatible feature bits the reader knows (design: Features).
-      KNOWN_INCOMPAT = 0x1FF
+      # The incompatible feature bits this reader implements (design:
+      # Features): only the long-prefix table. Every other bit, known or
+      # not, is refused at open. A rule moves to accept as a stage
+      # implements its feature.
+      READABLE_INCOMPAT = 0x40
       PREFIXES_FEATURE = 0x40
       BUILTIN_PREFIXES = [1, 2, 3, 4, 6].freeze
       LONG_PREFIX = 0x80
@@ -70,7 +73,7 @@ module FsimgSpec
         rule(id: "sb.dirblkbits", scope: "open", anchor: "volume-identity-and-geometry", status: "FSIMG_EUNSUPPORTED",
              category: "profile", applies_to: IDENTITY, predicate: ->(m, _) { m.sb.dirblkbits.zero? }),
         rule(id: "sb.incompat", scope: "open", anchor: "features", status: "FSIMG_EUNSUPPORTED", category: "profile",
-             applies_to: IDENTITY, predicate: ->(m, _) { (m.sb.incompat & ~KNOWN_INCOMPAT).zero? }),
+             applies_to: IDENTITY, predicate: ->(m, _) { (m.sb.incompat & ~READABLE_INCOMPAT).zero? }),
         rule(id: "sb.devices", scope: "open", anchor: "external-data-devices", status: "FSIMG_EUNSUPPORTED", category: "profile",
              applies_to: IDENTITY, predicate: ->(m, _) { m.sb.extra_devices.zero? }),
         rule(id: "sb.checksum", scope: "open", anchor: "superblock-checksum", applies_to: CHECKSUM,
@@ -79,6 +82,8 @@ module FsimgSpec
              predicate: ->(m, _) { m.sb.fixed_nsec < NSEC }),
         inode_rule(id: "inode.format", anchor: "format-word") { |inode, _| inode.format >> 4 == 0 },
         inode_rule(id: "inode.layout", anchor: "format-word") { |inode, _| inode.layout <= 4 },
+        inode_rule(id: "inode.chunk_feature", anchor: "features",
+                   applies_to: ->(inode, model) { inode.layout == 4 && !model.sb.incompat.anybits?(CHUNKED_FILE) }) { false },
         inode_rule(id: "inode.layout_profile", anchor: "data-layouts", status: "FSIMG_EUNSUPPORTED", category: "profile",
                    applies_to: ->(inode, model) { unread_layout?(inode, model) }) { false },
         inode_rule(id: "inode.reserved", anchor: "compact-inode") do |inode, _|

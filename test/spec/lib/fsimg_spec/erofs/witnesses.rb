@@ -48,7 +48,16 @@ module FsimgSpec
         "sb.blkszbits" => { "below_minimum" => change(parameters: NO_CHECKSUM, mutations: [u8(sb(0x0C), 8)]) },
         "sb.block_size" => { "above_maximum" => change(parameters: NO_CHECKSUM, mutations: [u8(sb(0x0C), 13)]) },
         "sb.dirblkbits" => { "set" => change(parameters: NO_CHECKSUM, mutations: [u8(sb(0x5A), 1)]) },
-        "sb.incompat" => { "unknown_bit" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x200)]) },
+        "sb.incompat" => {
+          "lz4_0padding" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x1)]),
+          "compr_cfgs" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x2)]),
+          "chunked_file" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x4)]),
+          "device_table" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x8)]),
+          "ztailpacking" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x10)]),
+          "fragments" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x20)]),
+          "bit_48" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x80)]),
+          "unknown_bit" => change(parameters: NO_CHECKSUM, mutations: [u32(sb(0x50), 0x200)])
+        },
         "sb.devices" => { "extra_device" => change(parameters: NO_CHECKSUM, mutations: [u16(sb(0x56), 1)]) },
         "sb.checksum" => {
           "last_byte_of_range" => change(mutations: [u8(B - 1, 1)]),
@@ -61,6 +70,7 @@ module FsimgSpec
           "layout_5" => change(mutations: [u16(inode(Builder::FILE), 5 << 1)]),
           "layout_7" => change(mutations: [u16(inode(Builder::FILE), 7 << 1)])
         },
+        "inode.chunk_feature" => { "without_feature" => change(mutations: [u16(inode(Builder::FILE), 4 << 1)]) },
         "inode.layout_profile" => {
           "compressed_full" => change(mutations: [u16(inode(Builder::FILE), 1 << 1)]),
           "compressed_compact" => change(mutations: [u16(inode(Builder::FILE), 3 << 1)])
