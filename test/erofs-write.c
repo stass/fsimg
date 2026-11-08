@@ -81,13 +81,18 @@ static uint32_t addressing;
 /* The metadata box base_options() selects; the box tests set it. */
 static fsimg_erofs_metabox_t metabox = FSIMG_EROFS_METABOX_NONE;
 
-/* Report the case before the fatal check names the failed condition. */
+/*
+ * CHECK() that first reports the case. The condition is evaluated once,
+ * since some create a writer.
+ */
 #define CHECK_CASE(condition, ...) do { \
 	if (!(condition)) { \
 		fprintf(stderr, __VA_ARGS__); \
 		fputc('\n', stderr); \
+		fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, \
+		    #condition); \
+		exit(1); \
 	} \
-	CHECK(condition); \
 } while (0)
 
 /*
@@ -989,6 +994,19 @@ test_sector_volume_and_label_geometry(void)
 	options.label = "0123456789abcdef";
 	check_refused(ctx, &options, &label);
 	fsimg_ctx_free(ctx);
+}
+
+/*
+ * A case check evaluates its condition once: some conditions create a
+ * writer, and a second evaluation would create another and leak the first.
+ */
+static void
+test_case_check_evaluates_its_condition_once(void)
+{
+	unsigned evaluations = 0;
+
+	CHECK_CASE(++evaluations == 1, "the first evaluation");
+	CHECK(evaluations == 1);
 }
 
 static void
@@ -5273,6 +5291,7 @@ int
 main(void)
 {
 	CHECK(atexit(report_block_size) == 0);
+	test_case_check_evaluates_its_condition_once();
 	test_default_settings_plan_an_empty_volume();
 	test_unwritten_settings_are_refused_naming_the_setting();
 	test_block_size_selects_512_to_4096();
