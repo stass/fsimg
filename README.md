@@ -208,7 +208,7 @@ Standard input and decompression use a temporary spool, bounded by
 | QNX4 | Yes | QNX 6.5.0 `dinit` layout, including long names |
 | QNX ImageFS (IFS) | Yes | Either byte order; newly created bodies are nonbootable |
 | ISO 9660 | Yes | Rock Ridge, Joliet and primary views; levels 1 to 3, relocated deep trees, BIOS/EFI El Torito boot catalogs |
-| EROFS | Yes | Reads 512- to 4096-byte blocks; chunk-based files, holes included; files compressed with LZ4 or DEFLATE, and MicroLZMA or Zstandard in a build with liblzma 5.4 or libzstd, through full and compact indexes, big clusters, inline compressed tails, packed fragments, deduplicated clusters and compressed directories and symbolic links included; volumes with 48-bit addressing and encoded extents, and with a metadata box, plain or compressed; extended attributes are checked and reported as not extracted. Creates volumes with 512- to 4096-byte blocks, 4096 by default, and 32-bit or 48-bit addressing (`-o addressing=48`), uncompressed or with LZ4-compressed files (`-o compression=lz4`), and with the inodes in a metadata box, plain or LZ4-compressed (`-o metabox=plain` or `lz4`), that `fsck.erofs` and the Linux kernel read back, and rust-fs-erofs too at 32 bits without a box |
+| EROFS | Yes | LZ4, DEFLATE, MicroLZMA and Zstandard; 48-bit addressing and metadata box; creates uncompressed or LZ4 volumes |
 | HFS Plus, HFSX | Yes | Clean, unjournaled volumes that macOS checks, mounts and modifies; reads files compressed with zlib, LZVN or LZFSE; a volume in an HFS wrapper reads as its embedded volume, the outer HFS volume unchecked and an initialized journal in it not supported |
 
 ISO creation writes Rock Ridge and Joliet together. `-o level=1|2|3`
