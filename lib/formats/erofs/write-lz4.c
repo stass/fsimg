@@ -31,6 +31,12 @@
  * block, and writes each compressed inode's full index, or under
  * addressing=48 its encoded extents, from the records, so no payload is
  * staged and the index needs no source.
+ *
+ * Under metabox=lz4 the same former forms the metadata box's clusters
+ * from the content write-emit.c generates, once during planning to record
+ * them after the files' and once during emission to store them, and the
+ * box inode's index or extents are written from those records like a
+ * file's.
  */
 
 /* A cluster record, little endian; bytes 13 to 15 are zero. */
@@ -93,6 +99,17 @@ typedef struct copy_run {
 	uint64_t	 next;
 } copy_run_t;
 
+/*
+ * The box store's sink state: the next of the box's records to match, and
+ * where its block goes, through put.
+ */
+typedef struct box_run {
+	erofs_plan_t	*plan;
+	erofs_put_t	 put;
+	void		*argument;
+	uint64_t	 next;
+} box_run_t;
+
 static void former_start(erofs_lz4_former_t *,
     fsimg_status_t (*)(void *, const erofs_lz4_cluster_t *,
     const unsigned char *, fsimg_error_t *), void *);
@@ -107,10 +124,14 @@ static fsimg_status_t record_cluster(void *, const erofs_lz4_cluster_t *,
     const unsigned char *, fsimg_error_t *);
 static fsimg_status_t store_cluster(void *, const erofs_lz4_cluster_t *,
     const unsigned char *, fsimg_error_t *);
+static fsimg_status_t store_box_cluster(void *, const erofs_lz4_cluster_t *,
+    const unsigned char *, fsimg_error_t *);
 static fsimg_status_t write_extents(erofs_plan_t *, const erofs_row_t *,
     uint64_t, unsigned char *, erofs_put_t, void *, fsimg_error_t *);
 static fsimg_status_t index_record(unsigned char *, size_t *, uint64_t *,
     const erofs_zrecord_t *, uint16_t, erofs_put_t, void *, fsimg_error_t *);
+static fsimg_status_t records_tile(erofs_plan_t *, const erofs_row_t *,
+    fsimg_error_t *);
 static fsimg_status_t corrupt_plan(fsimg_error_t *);
 
 /*
@@ -621,13 +642,12 @@ store_cluster(void *argument, const erofs_lz4_cluster_t *cluster,
  * Store a compressed row's clusters through an encoded copy into its
  * planned blocks, with observe seeing every stored byte. The copy refuses
  * output beyond or short of clusters blocks, and store_cluster() any
- * cluster planning did not record. The caller writes the row's index
- * first: erofs_lz4_write_index() checks that the records tile the file,
- * and record_get() that each is one the former can produce, so a
- * difference found here is reported as the source's. A record damaged in
- * scratch only in a stored length or plain flag the former could also
- * produce is reported the same way; either way nothing outside the file's
- * planned blocks is written.
+ * cluster planning did not record. records_tile() first checks that the
+ * records tile the file, and record_get() that each is one the former can
+ * produce, so a difference found here is reported as the source's. A
+ * record damaged in scratch only in a stored length or plain flag the
+ * former could also produce is reported the same way; either way nothing
+ * outside the file's planned blocks is written.
  */
 fsimg_status_t
 erofs_lz4_copy(erofs_plan_t *plan, erofs_lz4_former_t *former,
@@ -651,9 +671,124 @@ erofs_lz4_copy(erofs_plan_t *plan, erofs_lz4_former_t *former,
 		.observe = observe,
 		.observer_argument = observer_argument
 	};
+	fsimg_status_t status;
 
+	status = records_tile(plan, row, error);
+	if (status != FSIMG_OK)
+		return (status);
 	former_start(former, store_cluster, &run);
 	return (fsimg_emit_encoded_copy(emit, id, &encoding, error));
+}
+
+/*
+ * Whether a compressed row's records tile its content: each that the
+ * former can produce (record_get()), starting where the previous one
+ * ended, within the size, the last ending at it. A damaged scratch record
+ * is refused as a corrupt plan here, before any source byte is read.
+ */
+static fsimg_status_t
+records_tile(erofs_plan_t *plan, const erofs_row_t *row, fsimg_error_t *error)
+{
+	erofs_lz4_cluster_t cluster;
+	uint64_t expected;
+	fsimg_status_t status;
+
+	expected = 0;
+	for (uint64_t i = 0; i < row->clusters; i++) {
+		status = record_get(plan, row->first_cluster + i, &cluster,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (cluster.logical != expected ||
+		    cluster.consumed > row->size - cluster.logical)
+			return (corrupt_plan(error));
+		expected += cluster.consumed;
+	}
+	return (expected == row->size ? FSIMG_OK : corrupt_plan(error));
+}
+
+/*
+ * Measure the metadata box under metabox=lz4: form clusters from the
+ * content produce generates, with no record limit, since the box is always
+ * compressed, appending their records from cluster_count on, and store the
+ * cluster count in *clusters. The caller adopts the records by advancing
+ * cluster_count.
+ */
+fsimg_status_t
+erofs_lz4_box_measure(erofs_plan_t *plan, erofs_lz4_former_t *former,
+    erofs_produce_t produce, void *argument, uint64_t *clusters,
+    fsimg_error_t *error)
+{
+	measure_run_t run = {
+		.plan = plan,
+		.base = plan->cluster_count,
+		.limit = UINT64_MAX
+	};
+	fsimg_status_t status;
+
+	*clusters = 0;
+	former_start(former, record_cluster, &run);
+	status = produce(argument, former_feed, former, error);
+	if (status != FSIMG_OK)
+		return (status);
+	*clusters = former->clusters;
+	return (FSIMG_OK);
+}
+
+/*
+ * The box store's sink: the cluster must be the one planning recorded,
+ * since the content is generated from a plan that has not changed, so a
+ * difference is a corrupt plan; then its whole block goes to the box's
+ * next planned block.
+ */
+static fsimg_status_t
+store_box_cluster(void *argument, const erofs_lz4_cluster_t *cluster,
+    const unsigned char *block, fsimg_error_t *error)
+{
+	box_run_t *run = argument;
+	const erofs_row_t *box = &run->plan->box;
+	const uint32_t block_bytes = run->plan->block_bytes;
+	erofs_lz4_cluster_t planned;
+	fsimg_status_t status;
+
+	if (run->next >= box->clusters)
+		return (corrupt_plan(error));
+	status = record_get(run->plan, box->first_cluster + run->next, &planned,
+	    error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (planned.logical != cluster->logical ||
+	    planned.consumed != cluster->consumed ||
+	    planned.produced != cluster->produced ||
+	    planned.plain != cluster->plain)
+		return (corrupt_plan(error));
+	status = run->put(run->argument,
+	    (box->start_block + run->next) * block_bytes, block, block_bytes,
+	    error);
+	if (status == FSIMG_OK)
+		run->next++;
+	return (status);
+}
+
+/*
+ * Store the metadata box's clusters under metabox=lz4, forming them again
+ * from the content produce generates and writing each block through put at
+ * the box's planned blocks, which lie inside the data area. The content
+ * must yield exactly the box's planned clusters.
+ */
+fsimg_status_t
+erofs_lz4_box_store(erofs_plan_t *plan, erofs_lz4_former_t *former,
+    erofs_produce_t produce, void *argument, erofs_put_t put,
+    void *put_argument, fsimg_error_t *error)
+{
+	box_run_t run = { .plan = plan, .put = put, .argument = put_argument };
+	fsimg_status_t status;
+
+	former_start(former, store_box_cluster, &run);
+	status = produce(argument, former_feed, former, error);
+	if (status == FSIMG_OK && run.next != plan->box.clusters)
+		status = corrupt_plan(error);
+	return (status);
 }
 
 static fsimg_status_t

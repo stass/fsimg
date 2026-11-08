@@ -21,12 +21,13 @@
 # metadata with the source directory's.
 #
 # Usage: qualify.sh [-a addressing] [-b block-bytes] [-c compression]
-#        [-l large-bytes] [-x check,...] FSIMG WORKDIR [SCRATCH]
+#        [-l large-bytes] [-m metabox] [-x check,...] FSIMG WORKDIR [SCRATCH]
 #
 # -a selects the addressing setting, 32 (the default) or 48; -b the block
 # size, 512, 1024, 2048 or 4096 (the default), for every output; -c the
 # compression setting, none (the default) or lz4; -l the size of the large
-# tree's sparse file; -x the checks to skip, of fsck, kernel, rust and
+# tree's sparse file; -m the metadata-box setting, none (the default),
+# plain or lz4; -x the checks to skip, of fsck, kernel, rust and
 # fsimg, each reported as SKIP, for a reader that does not read the layout;
 # skipping fsimg also skips the partitioned outputs, which it copies out.
 # The mixed tree holds text, noise and short files, so under lz4 some files
@@ -46,21 +47,23 @@ set -eu
 addressing=32
 block=4096
 compression=none
+metabox=none
 large_bytes=4294972296		# 2^32 + 5000: past a compact inode's size
 skip=
-while getopts a:b:c:l:x: flag; do
+while getopts a:b:c:l:m:x: flag; do
 	case $flag in
 	a)	addressing=$OPTARG ;;
 	b)	block=$OPTARG ;;
 	c)	compression=$OPTARG ;;
 	l)	large_bytes=$OPTARG ;;
+	m)	metabox=$OPTARG ;;
 	x)	skip=$skip,$OPTARG ;;
 	*)	exit 2 ;;
 	esac
 done
 shift $((OPTIND - 1))
 [ $# -ge 2 ] && [ $# -le 3 ] || {
-	echo "usage: qualify.sh [-a addressing] [-b block-bytes] [-c compression] [-l large-bytes] [-x check,...] FSIMG WORKDIR [SCRATCH]" >&2
+	echo "usage: qualify.sh [-a addressing] [-b block-bytes] [-c compression] [-l large-bytes] [-m metabox] [-x check,...] FSIMG WORKDIR [SCRATCH]" >&2
 	exit 2
 }
 for name in $(printf '%s' "$skip" | tr , ' '); do
@@ -78,6 +81,11 @@ esac
 case $compression in
 none|lz4) ;;
 *)	echo "qualify.sh: compression is none or lz4" >&2
+	exit 2 ;;
+esac
+case $metabox in
+none|plain|lz4) ;;
+*)	echo "qualify.sh: metabox is none, plain or lz4" >&2
 	exit 2 ;;
 esac
 case $block in
@@ -233,6 +241,7 @@ qualify() {
 	rm -f "$image"
 	if ! "$fsimg" c -p -o uuid=$uuid -o cluster=$block \
 	    -o compression=$compression -o addressing=$addressing \
+	    -o metabox=$metabox \
 	    -F "$layout" "$@" \
 	    -f "$image" \
 	    -C "$src" . >"$work/$name.create.log" 2>&1; then

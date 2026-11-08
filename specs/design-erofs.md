@@ -1386,10 +1386,10 @@ the open forms at the end are refused as `FSIMG_EUNSUPPORTED` naming them.
   `0x0001`, logical cluster shift 1) or, at 1024-byte blocks, by a compact
   index (layout 3, advice `0x0001`), and stores the box flat when
   compression would not shrink it (`e12-box-plain`, `e12-box-lz4`,
-  `e12-box-lz4-m16k`, `e12-box-lz4-b1024`). A box behind a full index is accepted because the
-  [writer](#metadata-box-profile) emits it under `addressing=32`; no
-  producer writes one and no kernel has read one, so it is provisional on
-  the box-writer stage's qualification like the writer form. An inode
+  `e12-box-lz4-m16k`, `e12-box-lz4-b1024`). A box behind a full index is
+  the [writer's](#metadata-box-profile) form under `addressing=32`, which
+  the Linux 7.0 kernel and `fsck.erofs` read
+  ([research](../docs/erofs-research.md#metadata-box-output)). An inode
   whose NID has bit 63 set begins at byte `32 * n'` of that content, where
   `n'` is the NID without bit 63, and its whole body, including any inline
   tail, is read from that content. An inline tail may not cross a multiple
@@ -1399,8 +1399,8 @@ the open forms at the end are refused as `FSIMG_EUNSUPPORTED` naming them.
   puts the root in the box and only the wide root field holds bit 63; the
   kernel and `fsck.erofs` also accept a box volume without `48BIT`, whose
   16-bit field names a root in the primary space (`e12-flat-box32-plain`
-  and `-poolbox`, producer images hand-patched at the root; no producer
-  writes the form). The reader takes the root from whichever field the
+  and `-poolbox`, producer images hand-patched at the root, and fsimg's
+  writer under `addressing=32`). The reader takes the root from whichever field the
   [superblock form](#48-bit-layout) selects and resolves it in its space.
   `e12-flat-box32-lz4`, the same patch on a box mapped by encoded extents,
   is `FSIMG_ECORRUPT` by the [feature-pairing policy](#features), which the
@@ -1745,26 +1745,35 @@ inode into the box:
 * The primary metadata area holds the metadata-box inode at NID 37, the
   first slot after the superblock and its extension slot (`mkfs.erofs`
   writes its box inode at NID 38, after a shared entry the writer never
-  has). The box's content is laid out as the core metadata area would be,
-  from byte 0, and every directory entry names a child in the box with bit
-  63 set.
+  has). The box inode is a regular file of mode `0600`, owner 0, one link
+  and the format time, in the form the common rule gives it, with the
+  serial number after every other inode's; the superblock's inode count
+  includes it. The box's content is laid out as the core metadata area
+  would be, from byte 0, and ends at a block boundary as that area does,
+  so the box inode's size is a multiple of `B`; every directory entry names
+  a child in the box with bit 63 set.
 * Under `addressing=48` the root is the box content's first inode, in the
   wide root field, and the primary area holds nothing but the box inode:
   the producer's layout (E12, `e12-box-*`).
 * Under `addressing=32` the root directory's inode follows the box inode
-  in the primary area, so its NID fits the 16-bit field, and every other
+  in the primary area, where its NID fits the 16-bit field unless an LZ4
+  box's index pushes it past 2 MiB, which takes millions of inodes or the
+  indexes of many gigabytes of LZ4 files at small blocks; such a plan is
+  refused as `FSIMG_ERANGE` naming `metabox`. Every other
   inode is in the box; the root's `.` and `..` entries and its children's
   `..` entries name it without bit 63. The format does not couple the box
-  to `48BIT`, and the kernel and `fsck.erofs` read this form on producer
-  images hand-patched at the root (E12, `e12-flat-box32-plain`), but no
-  producer writes it, so the form is provisional until the box-writer
-  stage's kernel qualification mounts the writer's own output; if that
-  fails, `metabox` with `addressing=32` is refused as `FSIMG_EUNSUPPORTED`
-  naming both settings.
+  to `48BIT`: the kernel and `fsck.erofs` read this form on producer
+  images hand-patched at the root (E12, `e12-flat-box32-plain`) and on
+  the writer's own output, its LZ4 box behind a full index included
+  ([research](../docs/erofs-research.md#metadata-box-output)). With the
+  root alone the box is empty: a flat inode of size 0 that stores no
+  block, under either setting.
 * The box's stored blocks follow the data area, so no data address depends
-  on the box's stored size. Under `metabox=lz4` the box is compressed with
-  the LZ4 profile's encoder and mapped as that profile maps a file at the
-  same addressing: under `addressing=48` by 32-byte encoded extents, unlike
+  on the box's stored size. Under `metabox=lz4` a nonempty box is
+  compressed with the LZ4 profile's encoder, its plain clusters holding
+  what does not shrink, even when no block is saved, unlike `mkfs.erofs`,
+  which then stores the box flat; it is mapped as that profile maps a
+  file at the same addressing: under `addressing=48` by 32-byte encoded extents, unlike
   `mkfs.erofs`'s 4-byte records, a form the kernel and `fsck.erofs` read
   (E10, `e10-hand-box32`), the body reserving room for `ceil(content / B)`
   records, the most the cluster former can produce, since each cluster

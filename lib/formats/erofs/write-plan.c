@@ -26,8 +26,14 @@
  *    layout stores at least two blocks (write-lz4.c) and gives it the
  *    compressed layout when that stores fewer.
  * 4. Metadata placement chooses each inode's form and layout, which the
- *    finished link counts decide, and assigns its NID.
- * 5. Data placement assigns each inode's start block in the same order.
+ *    finished link counts decide, and assigns its NID: in the primary
+ *    metadata area, or under a metadata box in the box's content, with
+ *    the box inode in the primary area.
+ * 5. Data placement assigns each inode's start block in the same order,
+ *    then the box's blocks after the data; under metabox=lz4 it encodes
+ *    the box content once to count its clusters, through the box content
+ *    generator emission uses (erofs_box_measure() in write-emit.c), so
+ *    planning and emission form the box from the same bytes.
  * 6. Sizing checks the requested volume size; passes 4 and 5 have kept
  *    every block within the addressing's limit.
  *
@@ -78,7 +84,14 @@ static fsimg_status_t measure_files(erofs_plan_t *, fsimg_error_t *);
 static fsimg_status_t addressing_exceeded(const erofs_plan_t *,
     fsimg_error_t *);
 static void choose_inode_shape(const erofs_plan_t *, erofs_row_t *);
+static uint64_t place_body(uint64_t *, const erofs_row_t *, uint64_t,
+    uint32_t);
+static void plan_box_inode(erofs_plan_t *, uint64_t);
 static fsimg_status_t place_metadata(erofs_plan_t *, fsimg_error_t *);
+static fsimg_status_t place_rows(erofs_plan_t *, bool, uint64_t *,
+    fsimg_error_t *);
+static fsimg_status_t check_root_nid(erofs_plan_t *, fsimg_error_t *);
+static fsimg_status_t place_box_blocks(erofs_plan_t *, fsimg_error_t *);
 static fsimg_status_t place_data(erofs_plan_t *, uint64_t *, uint64_t *,
     fsimg_error_t *);
 static fsimg_status_t size_volume(erofs_plan_t *, fsimg_error_t *);
@@ -97,10 +110,8 @@ const fsimg_writer_ops_t fsimg_erofs_writer_ops = {
  * or whole sectors whose whole blocks fit the block count the addressing
  * allows, no free-space request, a label that leaves the name field a
  * terminator, and the EROFS settings. Values outside each domain are
- * invalid. The writer emits the 32- and 48-bit layouts without a metadata
- * box, uncompressed or with LZ4 files; the box values name layouts it does
- * not write, so they are unsupported rather than invalid. A metadata box
- * needs 48-bit addressing whether or not it is supported.
+ * invalid. The writer emits the 32- and 48-bit layouts, uncompressed or
+ * with LZ4 files, each without a metadata box or with a plain or LZ4 one.
  */
 static fsimg_status_t
 validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
@@ -140,14 +151,6 @@ validate_options(fsimg_write_options_t *options, unsigned variant FSIMG_UNUSED,
 	    options->erofs_metabox != FSIMG_EROFS_METABOX_LZ4)
 		return (setting_refused(error, FSIMG_EINVAL, "metabox",
 		    "EROFS metadata box is none, plain or lz4"));
-	if (options->erofs_metabox != FSIMG_EROFS_METABOX_NONE &&
-	    options->erofs_addressing != 48)
-		return (setting_refused(error, FSIMG_EINVAL, "metabox",
-		    "an EROFS metadata box requires 48-bit addressing"));
-
-	if (options->erofs_metabox != FSIMG_EROFS_METABOX_NONE)
-		return (setting_refused(error, FSIMG_EUNSUPPORTED, "metabox",
-		    "the EROFS writer does not write a metadata box"));
 
 	/* An absent label is an empty name field. */
 	if (options->label == NULL)
@@ -170,7 +173,9 @@ setting_refused(fsimg_error_t *error, fsimg_status_t status, const char *key,
 /*
  * Rows come back from scratch storage, so a row no planning pass writes is
  * refused rather than handed to emission, which copies an inline tail at
- * the offset the NID gives: see row_consistent().
+ * the offset the NID gives: see row_consistent(). Under a metadata box no
+ * row has an inline tail, so emission never derives a volume offset from
+ * a box offset.
  */
 fsimg_status_t
 erofs_row_get(erofs_plan_t *plan, uint64_t id, erofs_row_t *row,
@@ -203,6 +208,8 @@ erofs_row_get(erofs_plan_t *plan, uint64_t id, erofs_row_t *row,
 	row->first_cluster = fsimg_load_le64(raw + ROW_FIRST_CLUSTER);
 	/* A compressed row's records lie among the adopted ones. */
 	if (!row_consistent(row, plan->block_bytes) ||
+	    (plan->metabox != FSIMG_EROFS_METABOX_NONE &&
+	    row->layout == EROFS_LAYOUT_FLAT_INLINE) ||
 	    row->first_cluster > plan->cluster_count ||
 	    row->clusters > plan->cluster_count - row->first_cluster)
 		return (fsimg_error_set(error, FSIMG_ECORRUPT, 0,
@@ -269,6 +276,36 @@ erofs_row_set(erofs_plan_t *plan, uint64_t id, const erofs_row_t *row,
 	fsimg_store_le32(raw + ROW_CLUSTERS, row->clusters);
 	fsimg_store_le64(raw + ROW_FIRST_CLUSTER, row->first_cluster);
 	return (fsimg_array_set(plan->rows, id, raw, error));
+}
+
+/*
+ * Whether catalog row id lives in the metadata box: every row under a box
+ * at addressing=48, every row but the root's at addressing=32, whose root
+ * stays in the primary area, where the 16-bit field can name it
+ * (check_root_nid()).
+ */
+bool
+erofs_row_in_box(const erofs_plan_t *plan, uint64_t id)
+{
+	return (plan->metabox != FSIMG_EROFS_METABOX_NONE &&
+	    (plan->addressing48 || id != 0));
+}
+
+/*
+ * The metadata box inode's body: a file's, except that under addressing=48
+ * a compressed box reserves one 32-byte encoded extent per block of
+ * content, the most clusters the former can make, so the body's size, and
+ * the primary area's end, are known before the box is encoded. The header
+ * counts the extents written; the reserved records after them stay zero.
+ */
+uint64_t
+erofs_box_body_bytes(const erofs_plan_t *plan, const erofs_row_t *box)
+{
+	if (box->layout == EROFS_LAYOUT_COMPRESSED_FULL && plan->addressing48)
+		return (erofs_row_fixed_bytes(box) + EROFS_EXTENT32_OFFSET +
+		    erofs_row_index_records(box, plan->block_bytes) *
+		    EROFS_EXTENT32_BYTES);
+	return (erofs_row_body_bytes(plan, box));
 }
 
 /* The inode's fixed part: 32 bytes compact, 64 extended. */
@@ -729,7 +766,8 @@ addressing_exceeded(const erofs_plan_t *plan, fsimg_error_t *error)
  * keeps the compressed layout. Other content whose size is not a multiple
  * of the block keeps its tail in the body when the fixed part and the
  * tail fit one block (flat-inline), and in a data block of its own
- * otherwise (flat).
+ * otherwise (flat). Under a metadata box no inode has an inline tail, so
+ * the box holds no source bytes and is generated from the plan alone.
  */
 static void
 choose_inode_shape(const erofs_plan_t *plan, erofs_row_t *row)
@@ -749,64 +787,211 @@ choose_inode_shape(const erofs_plan_t *plan, erofs_row_t *row)
 		return;
 	tail = row->size % plan->block_bytes;
 	row->layout = EROFS_LAYOUT_FLAT;
-	if (tail != 0 && erofs_row_fixed_bytes(row) + tail <= plan->block_bytes)
+	if (plan->metabox == FSIMG_EROFS_METABOX_NONE && tail != 0 &&
+	    erofs_row_fixed_bytes(row) + tail <= plan->block_bytes)
 		row->layout = EROFS_LAYOUT_FLAT_INLINE;
 }
 
 /*
- * Pass 4: inodes in ID order, root first, from byte 1152. Each starts on
- * the next 32-byte boundary. An inline tail may not cross a block
- * boundary, and the layout keeps a fixed part in one block, so with a
- * body that is the fixed part and any tail the whole body stays in one
- * block: an inode that would cross starts at the next block. A compressed
- * inode keeps only its fixed part in one block; its index continues
- * across blocks. The area ends at a block boundary. Offsets stay within
- * the addressing's block limit, at most 2^60 bytes, checked after every
- * inode, and each inode adds at most a block and a body, which a file
- * size below 2^64 bounds far below 2^63, so nothing can overflow.
+ * Place a body at *offset, the end of the previous one, and advance past
+ * it: it starts on the next 32-byte boundary, and moves to the next block
+ * when the part of it that may not cross a block would cross one. Returns
+ * the body's offset.
+ */
+static uint64_t
+place_body(uint64_t *offset, const erofs_row_t *row, uint64_t body,
+    uint32_t block_bytes)
+{
+	uint64_t start, within;
+
+	start = (*offset + EROFS_NID_SLOT_BYTES - 1) &
+	    ~(uint64_t)(EROFS_NID_SLOT_BYTES - 1);
+	within = start % block_bytes;
+	if (within + erofs_row_unbroken_bytes(row, block_bytes) > block_bytes)
+		start += block_bytes - within;
+	*offset = start + body;
+	return (start);
+}
+
+/*
+ * The metadata box inode's row for content of content bytes: a regular
+ * file of mode 0600, owner 0, one link and the format time, its form by
+ * the common rule, flat under metabox=plain and compressed under
+ * metabox=lz4 unless the box is empty, which happens only at
+ * addressing=32 with the root alone and stores nothing. Data placement
+ * adds its start block and clusters.
+ */
+static void
+plan_box_inode(erofs_plan_t *plan, uint64_t content)
+{
+	erofs_row_t *box = &plan->box;
+
+	*box = (erofs_row_t){
+		.size = content,
+		.nid = EROFS_WRITE_BOX_NID,
+		.mtime = plan->format_time,
+		.links = 1,
+		.mode = EROFS_MODE_REGULAR | 0600,
+		.layout = plan->metabox == FSIMG_EROFS_METABOX_LZ4 &&
+		    content != 0 ? EROFS_LAYOUT_COMPRESSED_FULL :
+		    EROFS_LAYOUT_FLAT
+	};
+	choose_inode_shape(plan, box);
+	plan->box_body = erofs_box_body_bytes(plan, box);
+}
+
+/*
+ * Pass 4: inodes in ID order, root first, each placed by place_body(): an
+ * inline tail may not cross a block boundary, and the layout keeps a fixed
+ * part in one block, so with a body that is the fixed part and any tail
+ * the whole body stays in one block. A compressed inode keeps only its
+ * fixed part in one block; its index continues across blocks.
+ *
+ * Without a metadata box the inodes fill the primary area from byte 1152.
+ * Under one, the rows erofs_row_in_box() names fill the box's content from
+ * byte 0 by the same rules, their NIDs carrying EROFS_NID_BOX, and the
+ * content ends at a block boundary, as the primary area does; then the
+ * box inode, whose body follows from the content's size, takes NID 37,
+ * and at addressing=32 the root follows it in the primary area. Either
+ * area ends at a block boundary.
+ *
+ * Offsets in either space stay within the addressing's block limit, at
+ * most 2^60 bytes, checked after every inode, and each inode adds at most
+ * a block and a body, which a file size below 2^64 bounds far below 2^63,
+ * so nothing can overflow.
  */
 static fsimg_status_t
 place_metadata(erofs_plan_t *plan, fsimg_error_t *error)
 {
 	const uint32_t block_bytes = plan->block_bytes;
-	const uint64_t limit = plan->blocks_max * block_bytes;
-	erofs_row_t row;
-	uint64_t offset, within, body;
+	uint64_t primary, content;
 	fsimg_status_t status;
 
-	offset = EROFS_WRITE_METADATA_START;
-	for (uint64_t id = 0; id <= plan->common.writer->count; id++) {
-		status = erofs_row_get(plan, id, &row, error);
+	primary = EROFS_WRITE_METADATA_START;
+	if (plan->metabox != FSIMG_EROFS_METABOX_NONE) {
+		content = 0;
+		status = place_rows(plan, true, &content, error);
 		if (status != FSIMG_OK)
 			return (status);
-		choose_inode_shape(plan, &row);
-		body = erofs_row_body_bytes(plan, &row);
-
-		offset = (offset + EROFS_NID_SLOT_BYTES - 1) &
-		    ~(uint64_t)(EROFS_NID_SLOT_BYTES - 1);
-		within = offset % block_bytes;
-		if (within + erofs_row_unbroken_bytes(&row, block_bytes) >
-		    block_bytes)
-			offset += block_bytes - within;
-		row.nid = offset / EROFS_NID_SLOT_BYTES;
-		offset += body;
-		if (offset > limit)
+		content = (content + block_bytes - 1) / block_bytes *
+		    block_bytes;
+		plan_box_inode(plan, content);
+		primary = EROFS_WRITE_BOX_NID * EROFS_NID_SLOT_BYTES +
+		    plan->box_body;
+		if (primary > plan->blocks_max * block_bytes)
 			return (addressing_exceeded(plan, error));
-		status = erofs_row_set(plan, id, &row, error);
-		if (status != FSIMG_OK)
-			return (status);
 	}
-	plan->metadata_end = (offset + block_bytes - 1) / block_bytes *
+	status = place_rows(plan, false, &primary, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = check_root_nid(plan, error);
+	if (status != FSIMG_OK)
+		return (status);
+	plan->metadata_end = (primary + block_bytes - 1) / block_bytes *
 	    block_bytes;
 	return (FSIMG_OK);
 }
 
 /*
+ * Place the rows in the box, or those outside it, in ID order from
+ * *offset, each choosing its form and layout first, and leave *offset at
+ * the last body's end. A row in the box takes EROFS_NID_BOX in its NID.
+ */
+static fsimg_status_t
+place_rows(erofs_plan_t *plan, bool in_box, uint64_t *offset,
+    fsimg_error_t *error)
+{
+	const uint32_t block_bytes = plan->block_bytes;
+	const uint64_t limit = plan->blocks_max * block_bytes;
+	erofs_row_t row;
+	fsimg_status_t status;
+
+	for (uint64_t id = 0; id <= plan->common.writer->count; id++) {
+		if (erofs_row_in_box(plan, id) != in_box)
+			continue;
+		status = erofs_row_get(plan, id, &row, error);
+		if (status != FSIMG_OK)
+			return (status);
+		choose_inode_shape(plan, &row);
+		row.nid = place_body(offset, &row,
+		    erofs_row_body_bytes(plan, &row), block_bytes) /
+		    EROFS_NID_SLOT_BYTES;
+		if (in_box)
+			row.nid |= EROFS_NID_BOX;
+		if (*offset > limit)
+			return (addressing_exceeded(plan, error));
+		status = erofs_row_set(plan, id, &row, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (FSIMG_OK);
+}
+
+/*
+ * Without addressing=48 the superblock names the root in a 16-bit field.
+ * The root's inode is the primary area's first without a box, NID 36, but
+ * under one it follows the box inode, whose body under metabox=lz4 holds
+ * one index record per block of box content, so a box of millions of
+ * inodes, or one holding the indexes of many gigabytes of LZ4 files at
+ * small blocks, would push it past 16 bits: such a plan is refused,
+ * naming the setting.
+ */
+static fsimg_status_t
+check_root_nid(erofs_plan_t *plan, fsimg_error_t *error)
+{
+	erofs_row_t root;
+	fsimg_status_t status;
+
+	if (plan->addressing48)
+		return (FSIMG_OK);
+	status = erofs_row_get(plan, 0, &root, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (root.nid > UINT16_MAX)
+		return (setting_refused(error, FSIMG_ERANGE, "metabox",
+		    "EROFS metadata box puts the root beyond the 16-bit root "
+		    "field; use addressing=48"));
+	return (FSIMG_OK);
+}
+
+/*
+ * Pass 5 for the metadata box: its stored blocks follow the data, from
+ * used_blocks on, so no data address depends on them, and used_blocks
+ * grows to include them. A plain box stores its
+ * content's blocks. An LZ4 box's content, which holds every NID and start
+ * block and so is final now, is encoded once to count its clusters, whose
+ * records follow the files' (erofs_box_measure()); the layout word holds
+ * the count in 32 bits. An empty box stores nothing.
+ */
+static fsimg_status_t
+place_box_blocks(erofs_plan_t *plan, fsimg_error_t *error)
+{
+	erofs_row_t *box = &plan->box;
+	uint64_t blocks;
+	fsimg_status_t status;
+
+	if (plan->metabox == FSIMG_EROFS_METABOX_NONE)
+		return (FSIMG_OK);
+	if (box->layout == EROFS_LAYOUT_COMPRESSED_FULL) {
+		status = erofs_box_measure(plan, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	blocks = erofs_row_data_blocks(box, plan->block_bytes);
+	if (blocks > plan->blocks_max - plan->used_blocks)
+		return (addressing_exceeded(plan, error));
+	box->start_block = blocks != 0 ? plan->used_blocks : 0;
+	plan->used_blocks += blocks;
+	return (FSIMG_OK);
+}
+
+/*
  * Pass 5: each inode's stored blocks, contiguous and in ID order, from the
- * metadata area's end. An inode that stores no block keeps start block 0,
- * the word the layout leaves unused. For the summary it also counts the
- * data blocks and the bytes of file and link content; both stay below the
- * addressing's block limit's byte count, checked per inode.
+ * metadata area's end, then the metadata box's (place_box_blocks()). An
+ * inode that stores no block keeps start block 0, the word the layout
+ * leaves unused. For the summary it also counts the data blocks and the
+ * bytes of file and link content; both stay below the addressing's block
+ * limit's byte count, checked per inode.
  */
 static fsimg_status_t
 place_data(erofs_plan_t *plan, uint64_t *payload_blocks,
@@ -841,7 +1026,8 @@ place_data(erofs_plan_t *plan, uint64_t *payload_blocks,
 		}
 	}
 	plan->used_blocks = next;
-	return (FSIMG_OK);
+	plan->data_end = next;
+	return (place_box_blocks(plan, error));
 }
 
 /*
@@ -852,17 +1038,12 @@ place_data(erofs_plan_t *plan, uint64_t *payload_blocks,
  * block. So block_count * B <= volume_bytes < (block_count + 1) * B.
  * Emission leaves the excess blocks and that partial block zero, and the
  * block count excludes the partial block. validate_options() has already
- * required whole sectors and a block count the addressing allows. An inode's
- * serial number, its 1-based position, is 32 bits in both forms.
+ * required whole sectors and a block count the addressing allows.
  */
 static fsimg_status_t
 size_volume(erofs_plan_t *plan, fsimg_error_t *error)
 {
 	uint64_t requested, volume_bytes;
-
-	if (plan->inode_count > UINT32_MAX)
-		return (fsimg_error_set(error, FSIMG_ERANGE, 0, FSIMG_OP_WRITER,
-		    "EROFS inodes exceed the 32-bit serial number"));
 
 	volume_bytes = plan->common.writer->options.volume_bytes;
 	requested = volume_bytes / plan->block_bytes;
@@ -882,8 +1063,9 @@ size_volume(erofs_plan_t *plan, fsimg_error_t *error)
 /*
  * The plan information. Metadata is everything but file and link content
  * blocks: the boot area, the superblock, the inodes with their inline
- * tails, and directory blocks. A partial block after the last block is
- * part of the volume's length but of no block category.
+ * tails, directory blocks and the metadata box's blocks. A partial block
+ * after the last block is part of the volume's length but of no block
+ * category.
  */
 static void
 summarize(erofs_plan_t *plan, uint64_t payload_blocks)
@@ -934,7 +1116,17 @@ make_plan(fsimg_writer_t *writer, fsimg_error_t *error)
 	plan->addressing48 = writer->options.erofs_addressing == 48;
 	plan->blocks_max = plan->addressing48 ? EROFS_WRITE_BLOCKS_MAX_48 :
 	    EROFS_WRITE_BLOCKS_MAX;
-	plan->inode_count = writer->count + 1;
+	plan->metabox = writer->options.erofs_metabox;
+	/* The catalog's inodes and the root, and the box inode under a box. */
+	plan->inode_count = writer->count + 1 +
+	    (plan->metabox != FSIMG_EROFS_METABOX_NONE);
+	/* An inode's serial number, its 1-based position, is 32 bits. */
+	if (plan->inode_count > UINT32_MAX) {
+		status = fsimg_error_set(error, FSIMG_ERANGE, 0,
+		    FSIMG_OP_WRITER, "EROFS inodes exceed the 32-bit serial "
+		    "number");
+		goto fail;
+	}
 	status = choose_format_time(plan, error);
 	if (status == FSIMG_OK)
 		status = fsimg_container_identifier(writer->options.volume_uuid,

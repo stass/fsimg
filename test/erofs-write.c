@@ -78,6 +78,8 @@ static bool sweeping;
 static fsimg_erofs_compression_t compression = FSIMG_EROFS_COMPRESSION_NONE;
 /* The addressing base_options() selects; the 48-bit tests set it. */
 static uint32_t addressing;
+/* The metadata box base_options() selects; the box tests set it. */
+static fsimg_erofs_metabox_t metabox = FSIMG_EROFS_METABOX_NONE;
 
 /* Report the case before the fatal check names the failed condition. */
 #define CHECK_CASE(condition, ...) do { \
@@ -216,6 +218,7 @@ base_options(fsimg_write_options_t *options)
 	options->label = "test";
 	options->erofs_compression = compression;
 	options->erofs_addressing = addressing;
+	options->erofs_metabox = metabox;
 	if (block_size != BLOCK_DEFAULT)
 		options->allocation_unit_bytes = block_size;
 }
@@ -863,20 +866,9 @@ test_unwritten_settings_are_refused_naming_the_setting(void)
 		    { "unknown compression", FSIMG_EINVAL, "compression" } },
 		{ FSIMG_EROFS_COMPRESSION_NONE, 0,
 		    (fsimg_erofs_metabox_t)9,
-		    { "unknown metabox", FSIMG_EINVAL, "metabox" } },
-		{ FSIMG_EROFS_COMPRESSION_NONE, 32, FSIMG_EROFS_METABOX_PLAIN,
-		    { "metabox with 32-bit addressing", FSIMG_EINVAL,
-		    "metabox" } },
-		{ FSIMG_EROFS_COMPRESSION_NONE, 0, FSIMG_EROFS_METABOX_LZ4,
-		    { "metabox with default addressing", FSIMG_EINVAL,
-		    "metabox" } },
-		{ FSIMG_EROFS_COMPRESSION_NONE, 48, FSIMG_EROFS_METABOX_PLAIN,
-		    { "plain metabox with 48-bit addressing",
-		    FSIMG_EUNSUPPORTED, NULL } },
-		{ FSIMG_EROFS_COMPRESSION_NONE, 48, FSIMG_EROFS_METABOX_LZ4,
-		    { "lz4 metabox with 48-bit addressing",
-		    FSIMG_EUNSUPPORTED, NULL } }
+		    { "unknown metabox", FSIMG_EINVAL, "metabox" } }
 	};
+	static const uint32_t widths[] = { 0, 32, 48 };
 	fsimg_write_options_t options;
 	fsimg_ctx_t *ctx;
 
@@ -896,6 +888,16 @@ test_unwritten_settings_are_refused_naming_the_setting(void)
 	check_accepted(ctx, &options, "48-bit addressing");
 	options.erofs_compression = FSIMG_EROFS_COMPRESSION_LZ4;
 	check_accepted(ctx, &options, "48-bit addressing with LZ4");
+	for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+		reproducible_options(&options);
+		options.erofs_addressing = widths[i];
+		options.erofs_metabox = FSIMG_EROFS_METABOX_PLAIN;
+		check_accepted(ctx, &options, "plain metadata box");
+		options.erofs_metabox = FSIMG_EROFS_METABOX_LZ4;
+		check_accepted(ctx, &options, "LZ4 metadata box");
+		options.erofs_compression = FSIMG_EROFS_COMPRESSION_LZ4;
+		check_accepted(ctx, &options, "LZ4 metadata box and files");
+	}
 	fsimg_ctx_free(ctx);
 }
 
@@ -2987,22 +2989,35 @@ mark_range(unsigned char *carries, uint64_t length, uint64_t start,
  * alone: the superblock, each inode's body, its fixed part and inline tail
  * or index, and the data blocks' content, which ends at the size under the
  * flat layout, at the last full block under the flat-inline one and at the
- * last cluster's end under the compressed one.
+ * last cluster's end under the compressed one. Under a metadata box the
+ * superblock has its extension slot, the bodies the box holds are inside
+ * the box's blocks, and the box inode's body and blocks carry data.
  */
 static unsigned char *
 carrying_bytes(fixture_t *fixture, uint64_t length)
 {
 	unsigned char *carries = calloc(1, (size_t)length);
 
+	const erofs_plan_t *plan = fixture->plan;
+	const bool boxed = plan->metabox != FSIMG_EROFS_METABOX_NONE;
+
 	CHECK(carries != NULL);
-	mark_range(carries, length, EROFS_SUPER_OFFSET, EROFS_SUPER_BASE_BYTES);
+	mark_range(carries, length, EROFS_SUPER_OFFSET, EROFS_SUPER_BASE_BYTES +
+	    (boxed ? EROFS_SUPER_SLOT_BYTES : 0));
+	if (boxed) {
+		mark_range(carries, length, plan->box.nid * SLOT,
+		    plan->box_body);
+		mark_range(carries, length, plan->box.start_block * block_size,
+		    erofs_row_data_blocks(&plan->box, block_size) * block_size);
+	}
 	for (uint64_t id = 0; id <= fixture->writer->count; id++) {
 		erofs_row_t row = row_at(fixture, id);
 		uint64_t tail = erofs_row_tail_bytes(&row, block_size);
 		uint64_t data = row.size - tail;
 
-		mark_range(carries, length, row.nid * SLOT,
-		    erofs_row_body_bytes(fixture->plan, &row));
+		if ((row.nid & EROFS_NID_BOX) == 0)
+			mark_range(carries, length, row.nid * SLOT,
+			    erofs_row_body_bytes(fixture->plan, &row));
 		if (row.layout == EROFS_LAYOUT_COMPRESSED_FULL)
 			data = (uint64_t)row.clusters * block_size;
 		if (data != 0)
@@ -4441,8 +4456,8 @@ emit_far_files(fixture_t *fixture, memory_sink_t *sink, unsigned char poison)
 
 	/*
 	 * The dense part is the volume as planned, taken before the rows
-	 * move; used_blocks then grows to the far window's end, so the
-	 * emitter's row_placed() accepts the moved rows.
+	 * move; used_blocks and data_end then grow to the far window's end,
+	 * so the emitter's row_placed() accepts the moved rows.
 	 */
 	bzero(sink, sizeof(*sink));
 	sink->length = options.volume_bytes;
@@ -4455,6 +4470,7 @@ emit_far_files(fixture_t *fixture, memory_sink_t *sink, unsigned char poison)
 		    paths[i]), &row, &fixture->error) == FSIMG_OK);
 	}
 	fixture->plan->used_blocks = next;
+	fixture->plan->data_end = next;
 	sink->far_offset = FAR_START * block_size;
 	sink->far_length = (next - FAR_START) * block_size;
 	sink->bytes = malloc((size_t)sink->dense_length);
@@ -4645,6 +4661,587 @@ test_implicit_link_count_encoding(void)
 }
 
 /*
+ * The metadata box.
+ */
+
+#define SB_BOX_NID		0x80
+#define BOX_NID			37u
+
+/* Whether row id is one the box holds: all but a 32-bit root. */
+static bool
+expect_in_box(uint64_t id)
+{
+	return (addressing == 48 || id != 0);
+}
+
+/*
+ * The heads of the box inode's clusters, read from the image: each
+ * cluster's logical start, its block and whether it is plain, from the
+ * full index at addressing=32 or the encoded extents at addressing=48.
+ * The box's content is a whole number of blocks, so the full index holds
+ * one record per block and no end marker. The reserved extents after the
+ * header's count are zero. Returns the number of heads.
+ */
+static size_t
+box_heads(const memory_sink_t *sink, const erofs_inode_t *box,
+    uint64_t *logical, uint64_t *block, bool *plain, size_t capacity)
+{
+	const unsigned char *body = sink->bytes + BOX_NID * SLOT +
+	    (box->extended ? EROFS_INODE_EXTENDED_BYTES :
+	    EROFS_INODE_COMPACT_BYTES);
+	const uint64_t records = box->size / block_size;
+	erofs_zrecord_t record;
+	erofs_xrecord_t extent;
+	const char *what = NULL;
+	size_t heads = 0;
+	uint32_t count;
+
+	CHECK(box->size % block_size == 0);
+	if (addressing == 48) {
+		count = fsimg_load_le32(body);
+		CHECK(count == box->layout_word && count <= records);
+		CHECK(fsimg_load_le16(body + 4) == EROFS_EXTENT32_ADVICE);
+		for (uint64_t i = 0; i < count; i++) {
+			CHECK(erofs_xrecord_decode(body + EROFS_EXTENT32_OFFSET +
+			    i * EROFS_EXTENT32_BYTES, EROFS_EXTENT32_BYTES,
+			    &extent, &what) == FSIMG_OK);
+			CHECK(heads < capacity);
+			logical[heads] = extent.logical;
+			block[heads] = extent.physical / block_size;
+			plain[heads++] = extent.length_word >> 28 != EXTENT_LZ4;
+		}
+		for (uint64_t i = EROFS_EXTENT32_OFFSET + count *
+		    EROFS_EXTENT32_BYTES; i < EROFS_EXTENT32_OFFSET + records *
+		    EROFS_EXTENT32_BYTES; i++)
+			CHECK_CASE(body[i] == 0, "reserved extent byte %ju",
+			    (uintmax_t)i);
+		return (heads);
+	}
+	for (size_t i = 0; i < EROFS_FULL_INDEX_OFFSET; i++)
+		CHECK(body[i] == 0);
+	for (uint64_t k = 0; k < records; k++) {
+		CHECK(erofs_full_record_decode(body + EROFS_FULL_INDEX_OFFSET +
+		    k * EROFS_FULL_RECORD_BYTES, false, &record, &what) ==
+		    FSIMG_OK);
+		if (record.type == EROFS_RECORD_NONHEAD)
+			continue;
+		CHECK(heads < capacity);
+		logical[heads] = k * block_size + record.clusterofs;
+		block[heads] = record.block;
+		plain[heads++] = record.type == EROFS_RECORD_PLAIN;
+	}
+	CHECK(heads == box->layout_word);
+	return (heads);
+}
+
+/*
+ * The box's content, read from the image as an independent reader would:
+ * the box inode's flat blocks, or its clusters decoded in order, each
+ * running to the next head or the content's end; the clusters are the
+ * box's blocks in order, after every inode's data.
+ */
+static unsigned char *
+box_content(fixture_t *fixture, const memory_sink_t *sink,
+    const erofs_inode_t *box)
+{
+	enum { HEADS_MAX = 4096 };
+	static uint64_t logical[HEADS_MAX], block[HEADS_MAX];
+	static bool plain[HEADS_MAX];
+	const erofs_row_t *planned = &fixture->plan->box;
+	unsigned char *content;
+	const unsigned char *bytes;
+	fsimg_codec_step_t step;
+	uint64_t end;
+	size_t heads, start;
+
+	content = malloc((size_t)box->size + 1);
+	CHECK(content != NULL);
+	if (box->layout == EROFS_LAYOUT_FLAT) {
+		CHECK(box->layout_word == planned->start_block);
+		bcopy(sink->bytes + planned->start_block * block_size, content,
+		    (size_t)box->size);
+		return (content);
+	}
+	CHECK(box->layout == EROFS_LAYOUT_COMPRESSED_FULL);
+	heads = box_heads(sink, box, logical, block, plain, HEADS_MAX);
+	CHECK(heads == planned->clusters && heads > 0);
+	for (size_t i = 0; i < heads; i++) {
+		end = i + 1 < heads ? logical[i + 1] : box->size;
+		CHECK((i != 0 || logical[0] == 0) && logical[i] < end &&
+		    end - logical[i] <= LZ4_WINDOW);
+		CHECK(block[i] == planned->start_block + i);
+		bytes = sink->bytes + block[i] * block_size;
+		if (plain[i]) {
+			CHECK(end - logical[i] <= block_size);
+			bcopy(bytes, content + logical[i],
+			    (size_t)(end - logical[i]));
+			continue;
+		}
+		for (start = 0; start < block_size && bytes[start] == 0; start++)
+			continue;
+		CHECK(fsimg_lz4_decode(bytes + start, block_size - start,
+		    content + logical[i], (size_t)(end - logical[i]), &step,
+		    NULL) == FSIMG_OK && step.produced == end - logical[i]);
+	}
+	return (content);
+}
+
+/*
+ * Every directory entry of directory row dir names a child in the box with
+ * bit 63, except those naming a 32-bit root in the primary area: "." and
+ * ".." of the root and ".." of each of its subdirectories. Returns how
+ * many entries name the root that way.
+ */
+static uint64_t
+count_unboxed_entries(const memory_sink_t *sink, const erofs_row_t *dir,
+    uint64_t root_nid)
+{
+	const unsigned char *block;
+	uint64_t nid, unboxed = 0;
+	uint16_t count;
+
+	CHECK(dir->layout == EROFS_LAYOUT_FLAT);
+	for (uint64_t b = 0; b * block_size < dir->size; b++) {
+		block = sink->bytes + (dir->start_block + b) * block_size;
+		count = fsimg_load_le16(block + 8) / 12;
+		for (uint16_t e = 0; e < count; e++) {
+			nid = fsimg_load_le64(block + e * 12u);
+			if ((nid & EROFS_NID_BOX) != 0)
+				continue;
+			CHECK(addressing != 48 && nid == root_nid);
+			unboxed++;
+		}
+	}
+	return (unboxed);
+}
+
+/*
+ * The box image's structure: METABOX with one extension slot naming the
+ * box inode at NID 37, beside 48BIT under addressing=48, and LZ4_0PADDING
+ * exactly when a cluster is written, the box's included. The root is the
+ * box's first inode at addressing=48 and follows the box inode in the
+ * primary area at addressing=32; every other inode is in the box. The box
+ * inode is a regular file of the box's whole blocks, flat or compressed
+ * as the setting says, and its content holds each row's inode at the
+ * offset the row's NID names and zero everywhere else. At addressing=32
+ * the entries naming the root without bit 63 are its own two and one in
+ * each subdirectory, as many as its links.
+ */
+static void
+check_box_structure(fixture_t *fixture, const memory_sink_t *sink)
+{
+	const erofs_plan_t *plan = fixture->plan;
+	const unsigned char *raw = sink->bytes + EROFS_SUPER_OFFSET;
+	const erofs_row_t root = row_at(fixture, 0);
+	erofs_super_t sb;
+	erofs_inode_t box, inode;
+	unsigned char *content;
+	const char *what = NULL;
+	uint64_t previous = 0, data_end = 0, unboxed = 0;
+	uint32_t want;
+
+	sb = decode_image_super(sink);
+	want = EROFS_INCOMPAT_METABOX |
+	    (addressing == 48 ? EROFS_INCOMPAT_48BIT : 0) |
+	    (plan->cluster_count != 0 ? EROFS_INCOMPAT_LZ4_0PADDING : 0);
+	CHECK_CASE(sb.incompat == want, "incompat %#x, want %#x", sb.incompat,
+	    want);
+	CHECK(sb.extension_slots == 1 && sb.box_nid == BOX_NID);
+	CHECK(fsimg_load_le64(raw + SB_BOX_NID) == BOX_NID);
+	for (size_t i = SB_BOX_NID + 8; i < EROFS_SUPER_BASE_BYTES +
+	    EROFS_SUPER_SLOT_BYTES; i++)
+		CHECK(raw[i] == 0);
+	CHECK(sb.inode_count == fixture->writer->count + 2);
+	CHECK(sb.root_nid == root.nid);
+	if (addressing == 48) {
+		CHECK(root.nid == EROFS_NID_BOX);
+		CHECK(fsimg_load_le64(raw + SB_WIDE_ROOT) == EROFS_NID_BOX);
+	} else {
+		CHECK(root.nid * SLOT >= BOX_NID * SLOT + plan->box_body &&
+		    root.nid <= UINT16_MAX);
+		CHECK(fsimg_load_le16(raw + SB_BLOCKS_HIGH) == root.nid);
+	}
+
+	CHECK(erofs_inode_decode(sink->bytes + BOX_NID * SLOT,
+	    EROFS_INODE_EXTENDED_BYTES, &sb, &box, &what) == FSIMG_OK);
+	CHECK(box.kind == FSIMG_ENTRY_FILE && box.size == plan->box.size &&
+	    box.size % block_size == 0 && box.nlink == 1);
+	CHECK(box.layout == (metabox == FSIMG_EROFS_METABOX_LZ4 &&
+	    box.size != 0 ? EROFS_LAYOUT_COMPRESSED_FULL : EROFS_LAYOUT_FLAT));
+	CHECK(BOX_NID * SLOT + plan->box_body <= plan->metadata_end);
+
+	content = box_content(fixture, sink, &box);
+	for (uint64_t id = 0; id <= fixture->writer->count; id++) {
+		const erofs_row_t row = row_at(fixture, id);
+		const uint64_t offset = (row.nid & ~EROFS_NID_BOX) * SLOT;
+		const uint64_t blocks = erofs_row_data_blocks(&row, block_size);
+
+		CHECK_CASE(((row.nid & EROFS_NID_BOX) != 0) == expect_in_box(id),
+		    "id %ju: NID %#jx", (uintmax_t)id, (uintmax_t)row.nid);
+		CHECK(row.layout != EROFS_LAYOUT_FLAT_INLINE);
+		if (blocks != 0 && row.start_block + blocks > data_end)
+			data_end = row.start_block + blocks;
+		if ((row.mode & EROFS_MODE_TYPE_MASK) == EROFS_MODE_DIRECTORY)
+			unboxed += count_unboxed_entries(sink, &row, root.nid);
+		if (!expect_in_box(id))
+			continue;
+		CHECK_CASE(offset >= previous && offset +
+		    erofs_row_body_bytes(plan, &row) <= box.size,
+		    "id %ju lies outside the box's order", (uintmax_t)id);
+		for (uint64_t k = previous; k < offset; k++)
+			CHECK_CASE(content[k] == 0, "box byte %ju is %u",
+			    (uintmax_t)k, content[k]);
+		previous = offset + erofs_row_body_bytes(plan, &row);
+		CHECK(erofs_inode_decode(content + offset,
+		    erofs_row_fixed_bytes(&row), &sb, &inode, &what) ==
+		    FSIMG_OK);
+		CHECK_CASE(inode.size == row.size && inode.layout == row.layout &&
+		    inode.extended == row.extended && inode.serial == id + 1,
+		    "id %ju: box inode", (uintmax_t)id);
+	}
+	for (uint64_t k = previous; k < box.size; k++)
+		CHECK_CASE(content[k] == 0, "box byte %ju is %u", (uintmax_t)k,
+		    content[k]);
+	CHECK(unboxed == (addressing == 48 ? 0 : root.links));
+	CHECK(plan->box.start_block == 0 ? box.size == 0 :
+	    plan->box.start_block >= data_end);
+	CHECK(plan->box.start_block + erofs_row_data_blocks(&plan->box,
+	    block_size) == plan->used_blocks || box.size == 0);
+	free(content);
+}
+
+/* One box image of the tree build makes: plan, emit and check it whole. */
+static void
+check_box_round_trip(void (*build)(void))
+{
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	build();
+	reproducible_options(&options);
+	plan_tree(&fixture, &options);
+	emit_tree(&fixture, &sink, POISON);
+	check_box_structure(&fixture, &sink);
+	check_enumeration(&fixture, &sink, true);
+	check_verification(&fixture, &sink);
+	check_extraction(&fixture, &sink);
+	free(sink.bytes);
+	fixture_close(&fixture);
+}
+
+/*
+ * Each box setting at each addressing, around flat files and around LZ4
+ * files, reads back through fsimg's reader, verifier and extractor, and
+ * has the box layout the design gives it.
+ */
+static void
+test_metabox_images_read_back_as_specified(void)
+{
+	static const uint32_t widths[] = { 32, 48 };
+	static const fsimg_erofs_metabox_t boxes[] = {
+		FSIMG_EROFS_METABOX_PLAIN, FSIMG_EROFS_METABOX_LZ4
+	};
+
+	for (size_t w = 0; w < 2; w++) {
+		for (size_t b = 0; b < 2; b++) {
+			addressing = widths[w];
+			metabox = boxes[b];
+			check_box_round_trip(build_round_trip_tree);
+			compression = FSIMG_EROFS_COMPRESSION_LZ4;
+			check_box_round_trip(build_lz4_tree);
+			compression = FSIMG_EROFS_COMPRESSION_NONE;
+		}
+	}
+	metabox = FSIMG_EROFS_METABOX_NONE;
+	addressing = 0;
+}
+
+/*
+ * The root alone: at addressing=32 the box is empty, a flat inode of no
+ * blocks under either setting, and the root follows the box inode; at
+ * addressing=48 the root is the box's only inode.
+ */
+static void
+test_metabox_with_the_root_alone(void)
+{
+	static const uint32_t widths[] = { 32, 48 };
+	static const fsimg_erofs_metabox_t boxes[] = {
+		FSIMG_EROFS_METABOX_PLAIN, FSIMG_EROFS_METABOX_LZ4
+	};
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	for (size_t w = 0; w < 2; w++) {
+		for (size_t b = 0; b < 2; b++) {
+			addressing = widths[w];
+			metabox = boxes[b];
+			tree_reset();
+			reproducible_options(&options);
+			plan_tree(&fixture, &options);
+			CHECK((fixture.plan->box.size == 0) == (addressing == 32));
+			emit_tree(&fixture, &sink, POISON);
+			check_box_structure(&fixture, &sink);
+			check_enumeration(&fixture, &sink, true);
+			check_verification(&fixture, &sink);
+			free(sink.bytes);
+			fixture_close(&fixture);
+		}
+	}
+	metabox = FSIMG_EROFS_METABOX_NONE;
+	addressing = 0;
+}
+
+/*
+ * A box of more blocks than one LZ4 window, at 512-byte blocks, so the
+ * LZ4 box has several clusters and its full index or extents span the
+ * box inode's body across blocks: 500 files in one directory, with times
+ * that make most inodes extended.
+ */
+static void
+test_metabox_of_several_clusters(void)
+{
+	static const uint32_t widths[] = { 32, 48 };
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	block_size = 512;
+	metabox = FSIMG_EROFS_METABOX_LZ4;
+	for (size_t w = 0; w < 2; w++) {
+		addressing = widths[w];
+		tree_reset();
+		add_directory("/many");
+		for (unsigned i = 0; i < 500; i++)
+			with_time(add_file(i % 7, "/many/f%u", i),
+			    OLD_TIME + i * 7919, i % 3 == 0 ? 0 : i);
+		unreproducible_options(&options);
+		plan_tree(&fixture, &options);
+		CHECK(fixture.plan->box.clusters >= 2);
+		emit_tree(&fixture, &sink, POISON);
+		check_box_structure(&fixture, &sink);
+		check_enumeration(&fixture, &sink, false);
+		check_verification(&fixture, &sink);
+		free(sink.bytes);
+		fixture_close(&fixture);
+	}
+	metabox = FSIMG_EROFS_METABOX_NONE;
+	addressing = 0;
+	block_size = BLOCK_DEFAULT;
+}
+
+/*
+ * The box image is the same bytes whatever the insertion order, budget,
+ * scratch or time zone, and leaves no stale byte in the box's blocks, its
+ * inode or anywhere else, under each setting at each addressing; at small
+ * blocks the box spans several blocks and, under LZ4, several clusters.
+ */
+static void
+test_metabox_image_is_reproducible_and_clean(void)
+{
+	static const uint32_t widths[] = { 32, 48 };
+	static const fsimg_erofs_metabox_t boxes[] = {
+		FSIMG_EROFS_METABOX_PLAIN, FSIMG_EROFS_METABOX_LZ4
+	};
+
+	for (size_t w = 0; w < 2; w++) {
+		for (size_t b = 0; b < 2; b++) {
+			addressing = widths[w];
+			metabox = boxes[b];
+			check_identity_variants(build_round_trip_tree);
+			check_no_stale_byte(build_round_trip_tree);
+			compression = FSIMG_EROFS_COMPRESSION_LZ4;
+			check_identity_variants(build_lz4_tree);
+			check_no_stale_byte(build_lz4_tree);
+			compression = FSIMG_EROFS_COMPRESSION_NONE;
+		}
+	}
+	metabox = FSIMG_EROFS_METABOX_NONE;
+	addressing = 0;
+}
+
+/*
+ * The box's own cluster records come back from scratch storage like a
+ * file's, so a damaged one is refused, not stored: a reserved byte set or
+ * a logical start moved.
+ */
+static void
+check_damaged_box_records(void)
+{
+	static const struct {
+		const char	*name;
+		size_t		 at;
+		int		 value;		/* -1: add one to the byte */
+	} cases[] = {
+		{ "reserved byte", 13, 1 },
+		{ "logical start", 0, -1 },
+	};
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	unsigned char byte;
+	uint64_t offset;
+	fsimg_status_t status;
+
+	build_lz4_tree();
+	reproducible_options(&options);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		plan_tree(&fixture, &options);
+		offset = fixture.plan->box.first_cluster * 16 + cases[i].at;
+		CHECK(fsimg_store_read(fixture.plan->cluster_records, offset,
+		    &byte, 1, NULL) == FSIMG_OK);
+		byte = cases[i].value < 0 ? (unsigned char)(byte + 1) :
+		    (unsigned char)cases[i].value;
+		CHECK(fsimg_store_write(fixture.plan->cluster_records, offset,
+		    &byte, 1, NULL) == FSIMG_OK);
+		sink_open(&fixture, &sink, POISON);
+		status = emit_into(&fixture, &sink);
+		CHECK_CASE(status == FSIMG_ESTATE &&
+		    strcmp(fixture.error.message,
+		    "invalid EROFS cluster plan") == 0, "%s: status %d: %s",
+		    cases[i].name, status, fixture.error.message);
+		free(sink.bytes);
+		fixture_close(&fixture);
+	}
+}
+
+/*
+ * Rows come back from scratch storage, so a box row damaged after planning
+ * is refused before anything of it is written: one given an inline tail,
+ * which no inode has under a box and which would land at a volume offset
+ * taken from its box offset; one whose NID lost bit 63; one whose offset
+ * lies past the box's content; and one whose data lies in the box's
+ * blocks.
+ */
+static void
+test_metabox_damaged_rows_are_refused(void)
+{
+	static const char *const cases[] = {
+		"inline tail", "NID without bit 63", "offset past the box",
+		"data in the box's blocks"
+	};
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	erofs_row_t row;
+	uint64_t id;
+	fsimg_status_t status;
+
+	metabox = FSIMG_EROFS_METABOX_PLAIN;
+	for (size_t w = 0; w < 2; w++) {
+		addressing = w == 0 ? 32 : 48;
+		build_round_trip_tree();
+		reproducible_options(&options);
+		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			plan_tree(&fixture, &options);
+			id = id_of_path(&fixture, "/small/one");
+			row = row_at(&fixture, id);
+			CHECK(row.layout == EROFS_LAYOUT_FLAT && row.size == 1);
+			if (i == 0) {
+				row.layout = EROFS_LAYOUT_FLAT_INLINE;
+				row.start_block = 0;
+			} else if (i == 1)
+				row.nid &= ~EROFS_NID_BOX;
+			else if (i == 2)
+				row.nid = EROFS_NID_BOX |
+				    fixture.plan->box.size / SLOT;
+			else
+				row.start_block = fixture.plan->data_end;
+			CHECK(erofs_row_set(fixture.plan, id, &row, NULL) ==
+			    FSIMG_OK);
+			sink_open(&fixture, &sink, POISON);
+			status = emit_into(&fixture, &sink);
+			CHECK_CASE(status == (i == 0 ? FSIMG_ECORRUPT :
+			    FSIMG_ESTATE), "%s at %u: status %d: %s",
+			    cases[i], addressing, status, fixture.error.message);
+			free(sink.bytes);
+			fixture_close(&fixture);
+		}
+	}
+	metabox = FSIMG_EROFS_METABOX_NONE;
+	addressing = 0;
+}
+
+/*
+ * Source, allocation, write and cluster-plan faults fail the box image
+ * cleanly at each addressing; the LZ4 runs also measure the box during
+ * planning, so an allocation failure there is covered.
+ */
+static void
+test_metabox_faults_are_clean(void)
+{
+	static const uint32_t widths[] = { 32, 48 };
+
+	for (size_t w = 0; w < 2; w++) {
+		addressing = widths[w];
+		metabox = FSIMG_EROFS_METABOX_PLAIN;
+		test_write_failure_fails_emission_at_any_write();
+		test_allocation_failure_during_emission_is_clean();
+		metabox = FSIMG_EROFS_METABOX_LZ4;
+		test_write_failure_fails_emission_at_any_write();
+		test_allocation_failure_during_emission_is_clean();
+		test_changed_file_source_fails_emission();
+		test_lz4_source_faults_fail_planning_and_emission();
+		test_lz4_allocation_and_write_failures_are_clean();
+		test_lz4_damaged_cluster_plan_is_refused();
+		compression = FSIMG_EROFS_COMPRESSION_LZ4;
+		check_damaged_box_records();
+		compression = FSIMG_EROFS_COMPRESSION_NONE;
+	}
+	metabox = FSIMG_EROFS_METABOX_NONE;
+	addressing = 0;
+}
+
+/*
+ * The superblock with a metadata box encodes its one extension slot, the
+ * box NID at 0x80, and decodes to the same values; a box NID of zero or
+ * with bit 63, a second slot, or a box NID without METABOX is refused.
+ */
+static void
+test_box_super_encoding_decodes_to_the_same_superblock(void)
+{
+	unsigned char region[SUPER_REGION];
+	erofs_super_t sb = sample_super(), decoded;
+	erofs_config_t config;
+	const char *what = NULL;
+
+	sb.incompat = EROFS_INCOMPAT_METABOX | EROFS_INCOMPAT_48BIT;
+	sb.extension_slots = 1;
+	sb.box_nid = BOX_NID;
+	sb.root_nid = EROFS_NID_BOX;
+	memset(region, 0xff, sizeof(region));
+	bzero(region + EROFS_SUPER_BASE_BYTES + EROFS_SUPER_SLOT_BYTES,
+	    sizeof(region) - EROFS_SUPER_BASE_BYTES - EROFS_SUPER_SLOT_BYTES);
+	CHECK(erofs_super_encode(&sb, region));
+	CHECK(erofs_super_checksum(region, sizeof(region), sb.blkszbits,
+	    &sb.checksum));
+	CHECK(erofs_super_encode(&sb, region));
+	CHECK(erofs_region_decode(region, sizeof(region), &decoded, &config,
+	    &what) == FSIMG_OK);
+	CHECK(decoded.incompat == sb.incompat &&
+	    decoded.extension_slots == 1 && decoded.box_nid == BOX_NID &&
+	    decoded.root_nid == EROFS_NID_BOX && !decoded.reserved_nonzero);
+	for (size_t i = SB_BOX_NID + 8; i < EROFS_SUPER_BASE_BYTES +
+	    EROFS_SUPER_SLOT_BYTES; i++)
+		CHECK(region[i] == 0);
+
+	sb.incompat = EROFS_INCOMPAT_METABOX;
+	sb.root_nid = 40;
+	CHECK(erofs_super_encode(&sb, region));
+	sb.box_nid = 0;
+	CHECK(!erofs_super_encode(&sb, region));
+	sb.box_nid = BOX_NID | EROFS_NID_BOX;
+	CHECK(!erofs_super_encode(&sb, region));
+	sb.box_nid = BOX_NID;
+	sb.extension_slots = 2;
+	CHECK(!erofs_super_encode(&sb, region));
+	sb.extension_slots = 1;
+	sb.incompat = 0;
+	CHECK(!erofs_super_encode(&sb, region));
+}
+
+/*
  * Run a test at each block size the writer accepts, then return to the
  * default. The model, the sweeps and the image checks follow block_size.
  * A failed check exits, and report_block_size() then names the size.
@@ -4746,6 +5343,14 @@ main(void)
 	at_every_block_size(test_addressing48_volume_size_passes_32_bits);
 	at_every_block_size(test_addressing48_start_blocks_pass_32_bits);
 	test_addressing48_faults_are_clean();
+
+	test_box_super_encoding_decodes_to_the_same_superblock();
+	at_every_block_size(test_metabox_images_read_back_as_specified);
+	at_every_block_size(test_metabox_with_the_root_alone);
+	test_metabox_of_several_clusters();
+	at_every_block_size(test_metabox_image_is_reproducible_and_clean);
+	test_metabox_damaged_rows_are_refused();
+	test_metabox_faults_are_clean();
 	test_wide_super_encoding_decodes_to_the_same_superblock();
 	test_implicit_link_count_encoding();
 	test_extent_encoding_decodes_to_the_same_records();

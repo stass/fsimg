@@ -800,7 +800,8 @@ fsimg_status_t	erofs_body_read(fsimg_reader_t *, const erofs_inode_t *,
  * to their callers. The encoders, erofs_super_encode(),
  * erofs_inode_encode(), erofs_zheader_encode(), erofs_xrecord_encode(),
  * erofs_xlength_encode() and erofs_full_record_encode(), write a decoder's
- * exact inverse into a buffer of the structure's fixed length, and return
+ * exact inverse into a buffer of the structure's fixed length, the
+ * superblock's including its extension slots, and return
  * false, leaving the buffer unspecified, for a record the encoding cannot
  * represent.
  */

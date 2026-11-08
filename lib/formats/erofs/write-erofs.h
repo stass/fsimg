@@ -17,10 +17,20 @@
 #define EROFS_WRITE_LABEL_MAX		(EROFS_NAME_FIELD_BYTES - 1)
 /*
  * The metadata area starts at the first 32-byte boundary after a
- * superblock without extension slots: byte 1152, NID 36. The root's inode
- * is the first, so its NID fits the superblock's 16-bit field.
+ * superblock without extension slots: byte 1152, NID 36. Without a
+ * metadata box the root's inode is the first, so its NID fits the
+ * superblock's 16-bit field.
  */
 #define EROFS_WRITE_METADATA_START	(EROFS_SUPER_OFFSET + EROFS_SUPER_BASE_BYTES)
+/*
+ * Under a metadata box the superblock has one extension slot, so the
+ * primary area's first slot is byte 1184, NID 37, where the box inode
+ * lives (specs/design-erofs.md, Metadata-box profile).
+ */
+#define EROFS_WRITE_BOX_NID						\
+	((EROFS_SUPER_OFFSET + EROFS_SUPER_BASE_BYTES +			\
+	EROFS_SUPER_SLOT_BYTES + EROFS_NID_SLOT_BYTES - 1) /		\
+	EROFS_NID_SLOT_BYTES)
 /*
  * The largest block number: 32 bits wide, or 48 under addressing=48, whose
  * start blocks keep bits 32 to 47 in the inode word at 0x06 and whose
@@ -43,7 +53,9 @@
  *   size	content bytes: a file's size, a link's target length or a
  *		directory's packed entries (write-dir.c); zero for a FIFO
  *   nid	the inode's byte offset in the metadata area divided by 32,
- *		zero until metadata placement
+ *		or under a metadata box its offset in the box's content
+ *		divided by 32 with EROFS_NID_BOX set; zero until metadata
+ *		placement
  *   start_block
  *		the first block of the inode's data, its tail block included
  *		under the flat layout, its first cluster under the compressed
@@ -90,20 +102,31 @@ typedef struct erofs_row {
  * with zero fixed nanoseconds: the format time, or under addressing=48
  * (addressing48) the smallest modification second of any row. blocks_max
  * is the largest block number the addressing allows. metadata_end is the
- * block-aligned byte offset where the data area begins; used_blocks counts
- * every block up to the end of the last inode's data and block_count the
- * volume's blocks, at least used_blocks. volume_bytes is the image length:
- * block_count blocks, plus the zero partial block a volume size of whole
- * sectors leaves past them. uuid is the stored identifier.
- * cluster_records holds the cluster records of the compressed files,
- * cluster_count of them, in catalog order (write-lz4.c); it exists only
- * under compression=lz4.
+ * block-aligned byte offset where the data area begins; data_end is the
+ * block after the last inode's data, where any metadata box's blocks
+ * begin; used_blocks counts every block up to data_end and the box's, and
+ * block_count the volume's blocks, at least used_blocks. volume_bytes is
+ * the image length: block_count blocks, plus the zero partial block a
+ * volume size of whole sectors leaves past them. uuid is the stored
+ * identifier.
+ * cluster_records holds the cluster records of the compressed files in
+ * catalog order, then under metabox=lz4 the box's, cluster_count of them
+ * (write-lz4.c); it exists only when something is compressed.
+ *
+ * Under metabox=plain or metabox=lz4 (metabox), box is the metadata box
+ * inode's row, not stored in rows: NID EROFS_WRITE_BOX_NID, links 1, the
+ * format time, size the box content's bytes, which end at a block
+ * boundary, and either the flat layout, under metabox=plain or for an
+ * empty box, or the compressed one with its clusters after the files'.
+ * box_body is its body's bytes, under addressing=48 with room for one
+ * encoded extent per block of content (erofs_box_body_bytes()).
  */
 typedef struct erofs_plan {
 	fsimg_plan_t	 common;
 	fsimg_array_t	*rows;
 	uint64_t	 metadata_end;
 	uint64_t	 used_blocks;
+	uint64_t	 data_end;
 	uint64_t	 block_count;
 	uint64_t	 volume_bytes;
 	uint64_t	 least_volume;		/* LZ4: before measurement */
@@ -111,10 +134,13 @@ typedef struct erofs_plan {
 	fsimg_store_t	*cluster_records;	/* LZ4, write-lz4.c */
 	uint64_t	 cluster_count;		/* records of compressed files */
 	uint64_t	 blocks_max;
+	erofs_row_t	 box;			/* METABOX */
+	uint64_t	 box_body;		/* METABOX */
 	int64_t		 format_time;
 	int64_t		 epoch;
 	uint32_t	 block_bytes;
 	bool		 addressing48;
+	fsimg_erofs_metabox_t metabox;
 	unsigned char	 uuid[16];
 } erofs_plan_t;
 
@@ -187,8 +213,21 @@ typedef struct erofs_lz4_cluster {
 
 typedef struct erofs_lz4_former erofs_lz4_former_t;
 
-/* Write bytes at a volume offset, for the index writer's caller. */
+/*
+ * Write bytes at an offset, for the index writer's caller: a volume
+ * offset, or one in the metadata box's content.
+ */
 typedef fsimg_status_t (*erofs_put_t)(void *, uint64_t, const void *, size_t,
+    fsimg_error_t *);
+
+/*
+ * Generated content in order, for the cluster former: a producer hands
+ * each run of bytes to a consumer, then calls it once with length 0 to end
+ * the content, as a measured read hands a file's bytes over.
+ */
+typedef fsimg_status_t (*erofs_consume_t)(void *, const unsigned char *,
+    size_t, fsimg_error_t *);
+typedef fsimg_status_t (*erofs_produce_t)(void *, erofs_consume_t, void *,
     fsimg_error_t *);
 
 extern const fsimg_writer_ops_t fsimg_erofs_writer_ops;
@@ -203,6 +242,8 @@ uint64_t erofs_row_index_records(const erofs_row_t *, uint32_t);
 uint32_t erofs_row_fixed_bytes(const erofs_row_t *);
 uint32_t erofs_row_tail_bytes(const erofs_row_t *, uint32_t);
 uint64_t erofs_row_data_blocks(const erofs_row_t *, uint32_t);
+bool erofs_row_in_box(const erofs_plan_t *, uint64_t);
+uint64_t erofs_box_body_bytes(const erofs_plan_t *, const erofs_row_t *);
 
 void erofs_dir_pack_init(erofs_dir_pack_t *, uint32_t, unsigned char *);
 bool erofs_dir_pack_fits(const erofs_dir_pack_t *, size_t);
@@ -214,6 +255,7 @@ fsimg_status_t erofs_dir_walk(erofs_plan_t *, uint64_t *, uint64_t,
 
 fsimg_status_t erofs_write_emit(fsimg_writer_t *, fsimg_emit_t *,
     fsimg_error_t *);
+fsimg_status_t erofs_box_measure(erofs_plan_t *, fsimg_error_t *);
 
 fsimg_status_t erofs_lz4_former_new(fsimg_ctx_t *, fsimg_session_t *,
     uint32_t, erofs_lz4_former_t **, fsimg_error_t *);
@@ -225,5 +267,9 @@ fsimg_status_t erofs_lz4_write_index(erofs_plan_t *, const erofs_row_t *,
 fsimg_status_t erofs_lz4_copy(erofs_plan_t *, erofs_lz4_former_t *,
     fsimg_emit_t *, uint64_t, const erofs_row_t *, fsimg_emit_observer_t,
     void *, fsimg_error_t *);
+fsimg_status_t erofs_lz4_box_measure(erofs_plan_t *, erofs_lz4_former_t *,
+    erofs_produce_t, void *, uint64_t *, fsimg_error_t *);
+fsimg_status_t erofs_lz4_box_store(erofs_plan_t *, erofs_lz4_former_t *,
+    erofs_produce_t, void *, erofs_put_t, void *, fsimg_error_t *);
 
 #endif

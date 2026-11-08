@@ -458,28 +458,34 @@ erofs_super_checksum(const unsigned char *region, size_t length,
 }
 
 /*
- * The base superblock into the EROFS_SUPER_BASE_BYTES at raw, the inverse
- * of super_parse() for a superblock without extension slots, which is
- * every superblock the writer emits: its features are at most SB_CHKSUM
- * and MTIME, and LZ4_0PADDING and 48BIT. Under 48BIT it is the wide form,
- * the root NID in the 64-bit field, nonzero since zero selects the narrow
- * form, and the block count's bits 32 to 47 in the 16-bit root NID field;
- * otherwise the root NID is 16 bits and the block count 32. The volume
- * name is its first name_length bytes, NUL-padded. The extra device count
- * and every reserved byte are zero. false means sb is not of that shape, a
- * field exceeds its width, the block shift or nanoseconds are outside
- * their range, or the name holds a NUL; raw is then unspecified.
+ * The superblock and its extension slots into raw, which receives
+ * EROFS_SUPER_BASE_BYTES plus EROFS_SUPER_SLOT_BYTES per slot: the inverse
+ * of super_parse() for every superblock the writer emits. Its features are
+ * at most SB_CHKSUM and MTIME, and LZ4_0PADDING, 48BIT and METABOX. Under
+ * METABOX there is exactly one extension slot, holding the box NID at 0x80,
+ * nonzero and without bit 63, since the box inode lives in the primary
+ * space; otherwise there is no slot and no box NID. Under 48BIT it is the
+ * wide form, the root NID in the 64-bit field, nonzero since zero selects
+ * the narrow form, and the block count's bits 32 to 47 in the 16-bit root
+ * NID field; otherwise the root NID is 16 bits and the block count 32. The
+ * volume name is its first name_length bytes, NUL-padded. The extra device
+ * count and every reserved byte are zero. false means sb is not of that
+ * shape, a field exceeds its width, the block shift or nanoseconds are
+ * outside their range, or the name holds a NUL; raw is then unspecified.
  */
 bool
 erofs_super_encode(const erofs_super_t *sb, unsigned char *raw)
 {
 	const bool wide = (sb->incompat & EROFS_INCOMPAT_48BIT) != 0;
+	const bool box = (sb->incompat & EROFS_INCOMPAT_METABOX) != 0;
 
 	if ((sb->compat &
 	    ~(EROFS_COMPAT_SB_CHKSUM | EROFS_COMPAT_MTIME)) != 0 ||
-	    (sb->incompat &
-	    ~(EROFS_INCOMPAT_LZ4_0PADDING | EROFS_INCOMPAT_48BIT)) != 0 ||
-	    sb->extension_slots != 0 || sb->box_nid != 0 ||
+	    (sb->incompat & ~(EROFS_INCOMPAT_LZ4_0PADDING |
+	    EROFS_INCOMPAT_48BIT | EROFS_INCOMPAT_METABOX)) != 0 ||
+	    (box ? sb->extension_slots != 1 || sb->box_nid == 0 ||
+	    (sb->box_nid & EROFS_NID_BOX) != 0 :
+	    sb->extension_slots != 0 || sb->box_nid != 0) ||
 	    (wide ? sb->root_nid == 0 || sb->block_count >> 48 != 0 :
 	    sb->root_nid > UINT16_MAX || sb->block_count > UINT32_MAX) ||
 	    sb->blkszbits < EROFS_BLKSZBITS_MIN ||
@@ -489,11 +495,13 @@ erofs_super_encode(const erofs_super_t *sb, unsigned char *raw)
 	    memchr(sb->name, '\0', sb->name_length) != NULL)
 		return (false);
 
-	bzero(raw, EROFS_SUPER_BASE_BYTES);
+	bzero(raw, EROFS_SUPER_BASE_BYTES +
+	    (size_t)sb->extension_slots * EROFS_SUPER_SLOT_BYTES);
 	fsimg_store_le32(raw, EROFS_MAGIC);
 	fsimg_store_le32(raw + SB_CHECKSUM, sb->checksum);
 	fsimg_store_le32(raw + SB_COMPAT, sb->compat);
 	raw[SB_BLKSZBITS] = sb->blkszbits;
+	raw[SB_EXTENSION_SLOTS] = sb->extension_slots;
 	if (wide) {
 		fsimg_store_le64(raw + SB_WIDE_ROOT_NID, sb->root_nid);
 		fsimg_store_le16(raw + SB_ROOT_NID,
@@ -516,6 +524,8 @@ erofs_super_encode(const erofs_super_t *sb, unsigned char *raw)
 	raw[SB_FILTER_RESERVED] = sb->filter_disabled ? 1 : 0;
 	raw[SB_ISHARE_PREFIX] = sb->ishare_prefix;
 	fsimg_store_le32(raw + SB_BUILD_TIME, sb->build_time);
+	if (box)
+		fsimg_store_le64(raw + SB_BOX_NID, sb->box_nid);
 	return (true);
 }
 

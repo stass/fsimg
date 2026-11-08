@@ -452,7 +452,8 @@ catalog position:
    offset, and so its NID, with the block rules of the
    [layout](design-erofs.md#layout), and
    fixes the metadata area's end. Under the box the offsets are in the box's
-   content and the primary area holds the box inode alone, or the box inode
+   content, which ends at a block boundary and fixes the box inode's size,
+   and the primary area holds the box inode alone, or the box inode
    and the root under `addressing=32`
    ([metadata-box profile](design-erofs.md#metadata-box-profile)); under
    `metabox=lz4` the box inode's record list is sized for `ceil(content / B)`
@@ -484,7 +485,11 @@ Emission runs in plan order after the common writer has zeroed the volume:
 2. Under the box: the box content, every body in plan order, is generated
    from the plan rows and the cluster records one block at a time and written
    as the box's stored blocks, through the LZ4 cluster former under
-   `metabox=lz4`; then the box inode is written in the primary area.
+   `metabox=lz4`; then the box inode is written in the primary area. Step 1
+   writes no body the box holds, but still runs a compressed file's index
+   encoder over its records, writing nothing, before its encoded copy, so
+   the copy meets only records that tile the file, as it does for a body
+   in the primary area.
 3. The superblock, then the checksum over the final bytes of its covered
    range. Emission does not read the sink back: it keeps its own copy of
    the covered range, into which every metadata write and, through the
@@ -543,7 +548,7 @@ once, and the encoder's determinism makes the two agree.
 | Index lookup | One full record window, one compact group, or one encoded-extent record per search step |
 | Decode windows | Two, three under a compressed metadata box; each at most one decoded cluster plus a 1 MiB input buffer and the codec's state, the MicroLZMA dictionary or Zstandard window the [configuration record](design-erofs.md#configuration) declares included, charged before allocation |
 | Verification | The reference and claim streams in scratch, three under a metadata box, under the common sort's run buffer |
-| Planning | Plan rows in a paged array; directory packing of one directory's names at a time, streamed from the catalog; LZ4 cluster records in a scratch store; for the file being measured, the measured read's 64 KiB batch buffer and the cluster former's window buffer and output block |
+| Planning | Plan rows in a paged array; directory packing of one directory's names at a time, streamed from the catalog; LZ4 cluster records in a scratch store; for the file being measured, the measured read's 64 KiB batch buffer and the cluster former's window buffer and output block; for an LZ4 box, one box content block, a 64 KiB index staging buffer and a cluster former |
 | Emission | One directory block and its name staging block, a copy of the checksum's covered range of at most 3072 bytes, an LZ4 window buffer of two 64 KiB windows and an LZ4 output block, one box staging block |
 
 Work is charged per block read, per index record visited and per decoded

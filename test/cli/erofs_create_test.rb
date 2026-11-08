@@ -117,10 +117,24 @@ class ErofsCreateTest < Minitest::Test
     end
   end
 
-  def test_unwritten_layouts_are_refused
-    result = invoke(arguments: ["c", "-n", "-S", "off", "-R", "-F", "erofs",
-      "-o", "addressing=48", "-o", "metabox=plain", "-C", @source, "."], expected: 1)
-    assert_includes(result.stderr, "metabox".b)
+  def test_metadata_box_writes_reproducibly_at_each_addressing
+    [32, 48].product(%w[plain lz4]).each do |bits, box|
+      label = "#{box} at #{bits}"
+      flags = ["-R", "-e", TIME.to_s, "-o", "addressing=#{bits}", "-o", "metabox=#{box}"]
+      image = create(name: "box-#{box}-#{bits}", flags: flags)
+      again = create(name: "again-#{box}-#{bits}", flags: flags)
+      superblock = image.binread(144, 1024)
+      assert_equal(0x100, superblock.unpack1("L<", offset: 0x50) & 0x100, label)
+      assert_equal(1, superblock.getbyte(0x0d), label)
+      assert_equal(37, superblock.unpack1("Q<", offset: 0x80), label)
+      assert_equal(image.binread, again.binread, label)
+      assert_equal("initialized-payload", record(image: image, command: "W", type: "verify", flags: ["-d"])
+        .fetch("validation_scope"), label)
+      assert_equal(%w[/dir /dir/file /empty /link],
+        record(image: image, command: "t", type: "entry", many: true).map { _1.fetch("path") }.sort, label)
+      assert_equal((@source / "dir/file").binread,
+        invoke(arguments: ["x", "-O", "-S", "off", "-f", image, "/dir/file"]).stdout, label)
+    end
   end
 
   private
