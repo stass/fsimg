@@ -1144,6 +1144,54 @@ One 32-byte extent per 64 KiB cluster replaces one 8-byte full-index
 record per logical cluster, so at small blocks the 48-bit image is the
 smaller.
 
+### Metadata-box output
+
+`tools/erofs/qualify.sh -m` ran on 2026-11-07 at each block size, under
+`-m plain` and `-m lz4`, at both addressings, uncompressed and under
+`-c lz4`, against `fsimg` built from branch `erofs-s15` (the box writer,
+"write the EROFS metadata box"), with `fsck.erofs` 1.9.4-gf36cadb5 on
+macOS and the colima VM's kernel `7.0.0-38-generic`:
+
+```sh
+for c in none lz4; do
+	for a in 32 48; do
+		for m in plain lz4; do
+			for b in 512 1024 2048 4096; do
+				sh tools/erofs/qualify.sh -a $a -b $b -c $c -m $m \
+				    -x rust build/fsimg \
+				    ~/.cache/fsimg-erofs/vm-15/a$a-$m-$b-$c
+			done
+		done
+	done
+done
+```
+
+Every output was created with `-o metabox=plain` or `-o metabox=lz4`:
+`METABOX` with one extension slot naming the box inode at NID 37, every
+other inode in the box with bit 63 in its NID, no inline tail, the box's
+blocks after the data and, under `lz4`, the box formed by the LZ4 cluster
+former. At `-a 48` the root is the box's first inode, named in the wide
+root field, and an LZ4 box is mapped by 32-byte encoded extents. At
+`-a 32` the root follows the box inode in the primary area, named in the
+16-bit field, and an LZ4 box is mapped by a full index of one record per
+block of box content: the form no other producer writes, which E12 had
+shown the kernel only on hand-patched images. The empty tree's box at
+`-a 32` holds no inode and is a flat inode of size 0. Under `-c lz4` the
+files' full indexes or encoded extents lie in the box too.
+
+| Oracle | Outputs | Verdict |
+| --- | --- | --- |
+| `fsck.erofs --extract --preserve` | empty, small, deep, wide, large, every kind, tails, names, mixed, gpt, mbr; and huge at `-a 48` | Pass at every block size under both settings, both addressings and both compression settings |
+| Kernel loop mount | The same | Pass at every block size under both settings, both addressings and both compression settings |
+| fsimg `W`, `t` | The same | Pass at every block size under both settings, both addressings and both compression settings |
+| rust-fs-erofs 0.5.1 | None | Not run (`-x rust`): it reads neither `METABOX` nor `48BIT` |
+
+The 8192-byte block refusal passed in every run. So the provisional
+`addressing=32` form passed the kernel, and both settings are accepted at
+both addressings. The logs are under
+`~/.cache/fsimg-erofs/logs/s15/` (`qualify-none-final.log`, `qualify-lz4.log`)
+on the development host, outside the repository.
+
 ## Evidence answers
 
 | Question | Answer | Fixtures |
@@ -1167,7 +1215,7 @@ smaller.
 | MicroLZMA, DEFLATE and Zstandard framing, configuration records and limits; mixed head-1 and head-2 | Framings confirmed; DEFLATE window bits at most 15, MicroLZMA dictionary at least 4096 and format 0, Zstandard format 0; head-2 by hand-built images, accepted by the kernel without `COMPR_HEAD2` | `e9-*` |
 | Every 48-bit field; encoded extents; writer's 32-byte records | Two superblock forms, the wide one only when a value needs it; start-block high word at `0x06`, `0xFFFF` on an unused extended start; compact bit 4 only for a start above 2^32, ignored by the kernel on an extended inode; omitted dots with `..` first and a synthetic `.` appended by the kernel; chunk bit 6 entries read at block 2^32 + 5; all four encoded-extent widths emitted, the count in the header only for 16 and 32 bytes, derived from the size for 4 and 8; the kernel needs neither `48BIT` for encoded extents nor the count to match the body; the kernel and `fsck.erofs` read 32-byte records around the project's LZ4 blocks in three placements and an LZ4 box ([E10](#e10-48-bit-layout)) | `e10-48-*`, `e10-hand-*`, `e10-edit-*` |
 | Kernel acceptance of writer output at 512 to 2048-byte blocks and of the writer's field choices | Accepted: at 512, 1024, 2048 and 4096-byte blocks the writer's output passes the kernel, `fsck.erofs` and rust-fs-erofs, with empty and sub-block flat-inline start words of 0, inodes ending at and moving past block ends, and multi-block directories ([E11](#e11-writer-probes)); and with `compression=lz4` at every block size, LZ4 and plain one-block clusters behind full indexes that cross blocks at 512 bytes, end markers and heads in the last logical cluster included ([LZ4 output](#lz4-output)) | E11, `qualify.sh -b`, `qualify.sh -c lz4` |
-| Metadata-box layout, root placement, box compression, shared attributes in the box | The box is a primary-space inode named at `0x80`, flat, or LZ4 behind 4-byte encoded extents, holding every inode but itself and the packed inode, its blocks last; the root is the box's first inode, after the long-prefix table's block when the table is in the box; `METABOX` and `48BIT` are independent and the kernel mounts a hand-patched box volume without `48BIT` rooted in the primary space; the producer keeps the shared pool in the primary space, which Linux 7.0 misreads for some box inodes, and reads a hand-built pool in the box correctly ([E12](#e12-metadata-box)) | `e12-box-*`, `e12-flat-box32-*`, `e12-*-poolbox` |
+| Metadata-box layout, root placement, box compression, shared attributes in the box | The box is a primary-space inode named at `0x80`, flat, or LZ4 behind 4-byte encoded extents, holding every inode but itself and the packed inode, its blocks last; the root is the box's first inode, after the long-prefix table's block when the table is in the box; `METABOX` and `48BIT` are independent and the kernel mounts a hand-patched box volume without `48BIT` rooted in the primary space, and fsimg's own box output at both addressings, an LZ4 box behind a full index at 32 bits included ([Metadata-box output](#metadata-box-output)); the producer keeps the shared pool in the primary space, which Linux 7.0 misreads for some box inodes, and reads a hand-built pool in the box correctly ([E12](#e12-metadata-box)) | `e12-box-*`, `e12-flat-box32-*`, `e12-*-poolbox`, `qualify.sh -m` |
 | Scale: files beyond 4 GiB, a directory of 100000 entries, root NIDs and start blocks at their limits | Files beyond 4 GiB need no 48-bit layout (flat-inline, chunked and LZ4 compact); start blocks reach `0xFFFFFFFE` and NIDs exceed 2^32 without the 48-bit layout; the root NID stays 36 or 128, or bit 63 in a metadata box, so a root NID above 65535 and a nonzero `meta_blkaddr` come only from hand-built images | `e13-*` |
 | The fields a volume with external devices sets | Extra device count nonzero in both producer forms, `DEVICE_TABLE`, device identifier 1 in every chunk; `CHUNKED_FILE` only under `--blobdev` | `e14-*` |
 | Record count and group layout at `L > B`; compact advice `0x01` clear; a plain inline tail under interlacing | Kernel and both tools read `L = 2B` and `4B`: compact groups laid out for `ceil(size / B)` records, `ceil(size / L)` read, fields `max(lclusterbits, 12)` bits wide, so compact with `L > 4096` needs `0x01` clear, and the inline tail follows record `(size - 1) >> lclusterbits` (full index observed, compact from source); `0x01` clear is all 8-byte groups from the header's end and reads in every tool; no producer writes any of the three, and the design refuses them by policy. A plain inline tail on an interlaced inode has no agreed reading: the kernel reads it only when `E > B - C` with the extent stored rotated left by `B - C`, otherwise copies preceding metadata into the file, and `fsck.erofs` reads other bytes in every case | `e15-*` |

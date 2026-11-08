@@ -62,7 +62,8 @@ directories without a
 entry included, and volumes with a metadata box, plain or compressed;
 a volume with extra devices is refused as unsupported.
 A created EROFS volume is uncompressed or LZ4-compressed, with 512- to
-4096-byte blocks and 32-bit or 48-bit addressing, and stores files,
+4096-byte blocks and 32-bit or 48-bit addressing, without or with a
+metadata box, plain or LZ4-compressed, and stores files,
 directories and symbolic links with
 their owner, permission bits and modification time to the nanosecond.
 ISO 9660 reading supports Rock Ridge, Joliet and the primary hierarchy.
@@ -1114,9 +1115,18 @@ Linux marks the layout experimental, and older kernels and other readers
 may not read it.
 .It Fl o Ar metabox=none|plain|lz4
 EROFS metadata box; default none.
-plain and lz4 require
-.Ar addressing=48
-and are refused as unsupported.
+plain and lz4 move every inode into a metadata box stored after the data,
+as plain blocks or as LZ4 clusters, except the box's own inode and, under
+.Ar addressing=32 ,
+the root directory's.
+Under
+.Ar addressing=32
+an LZ4 box of millions of inodes, or holding the indexes of many gigabytes
+of LZ4 files at small blocks, would push the root beyond the 16-bit root
+field and is refused; use
+.Ar addressing=48 .
+Linux reads the box from 6.17 and marks it experimental, and older kernels
+and other readers may not read it.
 .It Fl o Ar inodes=count
 QNX6 inode capacity, rounded up to a whole inode-table block; default the
 native formatter's ratio of one inode per 8 to 128 blocks, raised to the

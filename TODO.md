@@ -77,15 +77,17 @@
   LZ4 profile with a measured read and encoded copy in common emission, and
   last the 48-bit layout and metadata box, read and then written. External
   data devices stay refused.
-  The writer is registered (`write-plan.c`, `write-dir.c`, `write-emit.c`,
-  `write-lz4.c`) with its LZ4 and 48-bit profiles, and `tools/erofs/qualify.sh` checks
-  its output, uncompressed and under `-c lz4`, with `fsck.erofs`, the
-  kernel and rust-fs-erofs at every block size, and under `-a 48` with
-  `fsck.erofs`, the kernel and fsimg's own reader, rust-fs-erofs not
-  reading the 48-bit layout. It refuses `metabox=plain|lz4` (stage 15)
-  with `FSIMG_EUNSUPPORTED`. The reader reads the 48-bit layout, encoded
+  Every stage is implemented: the reader reads the 48-bit layout, encoded
   extents of every width included, and the metadata box, plain or
-  compressed, with the root and the shared pool in either space.
+  compressed, with the root and the shared pool in either space, and the
+  writer (`write-plan.c`, `write-dir.c`, `write-emit.c`, `write-lz4.c`)
+  has its LZ4, 48-bit and metadata-box profiles, whose output
+  `tools/erofs/qualify.sh` checks with `fsck.erofs`, the kernel and
+  fsimg's own reader at every block size, and with rust-fs-erofs where it
+  reads the layout: without 48-bit addressing and the box. What remains
+  before the initiative closes is the landing gates, run once on the
+  integrated branch: the sanitizers, fuzzing, CI and the Linux and FreeBSD
+  runs.
 
 * [High] **Tar-like CLI and image layers** (`cmd/fsimg/`, `lib/layers/`,
   `compat/`): implement the [command-line contract](specs/design-cli.md) and

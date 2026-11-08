@@ -31,10 +31,13 @@ directories and symbolic links, the owner, the permission bits and the
 modification time to the nanosecond. Hard links become independent
 files. A fixed `gpt:disk` or `mbr:disk` partition need not be a whole
 number of blocks; the partial block after the volume is zero. `-o uuid=`
-sets the volume UUID; a metadata box is refused as unsupported.
-`fsck.erofs`, a Linux kernel mount and rust-fs-erofs read the output back
-at every block size, rust-fs-erofs only without 48-bit addressing, which
-it does not read (`tools/erofs/qualify.sh`).
+sets the volume UUID. `-o metabox=plain` or `-o metabox=lz4` moves the
+inodes into a metadata box stored after the data, plain or LZ4-compressed,
+at either addressing, the root staying in the primary metadata area at
+32 bits. `fsck.erofs`, a Linux kernel mount and rust-fs-erofs read the
+output back at every block size, rust-fs-erofs only without 48-bit
+addressing or a metadata box, which it does not read
+(`tools/erofs/qualify.sh`).
 
 Old Mac disk images and optical discs open through a read-only Apple Partition
 Map scheme, `apm`, in the same stack slot as `gpt` and `mbr`: `hfsplus/apm/dmg`

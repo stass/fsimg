@@ -444,8 +444,15 @@ The EROFS settings erofs_compression
 erofs_addressing (32 or 48, zero selecting 32) and erofs_metabox
 .Pq Dv FSIMG_EROFS_METABOX_NONE , Dv FSIMG_EROFS_METABOX_PLAIN No or Dv FSIMG_EROFS_METABOX_LZ4
 are declared by FSIMG_SETTING_EROFS; writer construction rejects a
-non-default value for any other format with FSIMG_EINVAL, and the EROFS
-writer rejects a metadata box with FSIMG_EUNSUPPORTED.
+non-default value for any other format with FSIMG_EINVAL.
+Under
+.Dv FSIMG_EROFS_METABOX_PLAIN
+or
+.Dv FSIMG_EROFS_METABOX_LZ4
+the EROFS writer moves every inode but the box's own, and at 32-bit
+addressing the root directory's, into a metadata box stored after the
+data, plain or as LZ4 clusters; planning encodes an LZ4 box once to
+measure it and emission once more.
 The settings byte_order, volume_uuid, inode_capacity and reserve_percent
 select the byte order, the UUID in textual byte order, the inode capacity
 and the reserved-block percentage (default 3) of a format whose record's
