@@ -98,7 +98,12 @@ gen_put_bytes(gen_image_t *image, uint64_t offset, const void *bytes,
     size_t length)
 {
 	CHECK(offset <= image->length && length <= image->length - offset);
-	bcopy(bytes, image->bytes + offset, length);
+	/*
+	 * An empty range may come with no bytes at all (NULL), which bcopy()
+	 * must not see even for a zero length.
+	 */
+	if (length != 0)
+		bcopy(bytes, image->bytes + offset, length);
 }
 
 void
@@ -989,8 +994,14 @@ zcluster_encode(size_t block, size_t span, const gen_zcluster_t *cluster,
 		CHECK(stream_length != 0 && stream[0] != 0);
 		break;
 	case GEN_ZK_RAW:
+		/*
+		 * An empty stream (raw NULL, raw_length 0) writes no bytes and
+		 * leaves the cluster's blocks zero.
+		 */
 		CHECK(cluster->raw_length <= span);
-		bcopy(cluster->raw, stream, cluster->raw_length);
+		CHECK(cluster->raw != NULL || cluster->raw_length == 0);
+		if (cluster->raw_length != 0)
+			bcopy(cluster->raw, stream, cluster->raw_length);
 		stream_length = cluster->raw_length;
 		break;
 	}

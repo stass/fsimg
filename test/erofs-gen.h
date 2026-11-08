@@ -102,7 +102,10 @@ uint64_t	gen_inode_offset(const gen_image_t *, uint64_t);
 size_t		gen_inode_header_bytes(const gen_inode_t *);
 void		gen_inode_write(gen_image_t *, const gen_inode_t *);
 
-/* Little-endian writers: at a volume offset, and at a superblock offset. */
+/*
+ * Little-endian writers: at a volume offset, and at a superblock offset.
+ * gen_put_bytes() accepts NULL bytes for a zero length.
+ */
 void		gen_put(gen_image_t *, uint64_t, uint64_t, unsigned);
 void		gen_put_bytes(gen_image_t *, uint64_t, const void *, size_t);
 void		gen_super_put(gen_image_t *, unsigned, uint64_t, unsigned);
@@ -386,7 +389,8 @@ void		gen_lz4_config_put(gen_image_t *, unsigned, uint16_t, uint16_t);
  *   INTERLACED   extent byte j at block byte (start mod B + j) mod B;
  *   LZ4_LITERAL  gen_lz4_literals() of the extent;
  *   LZ4_PERIODIC gen_lz4_periodic() of the extent with `period`;
- *   RAW          the caller's bytes (raw, raw_length), whatever they are.
+ *   RAW          the caller's bytes (raw, raw_length), whatever they are;
+ *                raw may be NULL for an empty stream, leaving the blocks zero.
  * A compressed cluster is head-1, or head-2 when head2 is set; a plain one is
  * a plain record.
  */
