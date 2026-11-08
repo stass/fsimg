@@ -14,7 +14,9 @@
  * past image_size are never interpreted, so each input is also run cut to
  * the image_size its header declares, when that is shorter, so
  * length-changing mutations keep reaching the table; on that run every
- * read must lie inside the declared image. An opened image must fit the
+ * read must lie inside the declared image. An opened image reports its
+ * header's image_size as the volume size, also when the slice is shorter
+ * and the image is truncated; on every run each read lies inside the
  * slice, and no resource may outlive the reader.
  */
 typedef struct fuzz_input {
@@ -112,9 +114,12 @@ exercise(const uint8_t *data, size_t size)
 	fsimg_read_options_init(&read_options);
 	read_options.format = "ifs";
 	if (fsimg_reader_open(ctx, io, &read_options, &reader, NULL) == FSIMG_OK) {
-		/* An opened image declares a size within the slice. */
+		/* The volume is the header's image_size, which may exceed a
+		 * truncated slice.
+		 */
 		if (fsimg_reader_get_info(reader, &info, NULL) != FSIMG_OK ||
-		    info.volume_bytes > size || info.detail_count > 16)
+		    info.volume_bytes != declared_size(data, size) ||
+		    info.detail_count > 16)
 			abort();
 		while (fsimg_reader_next(reader, &entry, NULL) == FSIMG_OK) {
 			if (entry->kind != FSIMG_ENTRY_FILE &&

@@ -201,9 +201,9 @@ if test ! -f "$susp_corpus/rockridge.seed"; then
 fi
 run_fuzzer "$work_dir/fuzz-iso9660-susp" "$susp_corpus" 8704 10
 
-# ImageFS reads the exact slice with the decoder forced; the seed is a
+# ImageFS reads the exact slice with the decoder forced; the seeds are a
 # generated image with every record kind, implicit parents and names
-# outside the profile.
+# outside the profile, and a truncated image that still opens.
 compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$source_dir/include" -I"$source_dir/compat" \
@@ -212,6 +212,9 @@ ifs_corpus=ifs-fuzz-corpus
 mkdir -p "$ifs_corpus"
 if test ! -f "$ifs_corpus/sample.seed"; then
     ./test-ifs --seed "$ifs_corpus/sample.seed"
+fi
+if test ! -f "$ifs_corpus/truncated.seed"; then
+    ./test-ifs --seed-truncated "$ifs_corpus/truncated.seed"
 fi
 run_fuzzer "$work_dir/fuzz-ifs" "$ifs_corpus" 1048576 10
 

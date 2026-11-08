@@ -5064,14 +5064,16 @@ shadowed_image(gen_t *g)
 	gen_finish(g);
 }
 
+/* Write the first length bytes of the image, all of it or a cut. */
 static void
-write_image(const char *path, const gen_t *g)
+write_image(const char *path, const gen_t *g, size_t length)
 {
 	FILE *out;
 
+	CHECK(length <= g->length);
 	out = fopen(path, "wb");
 	CHECK(out != NULL);
-	CHECK(fwrite(g->image, 1, g->length, out) == g->length);
+	CHECK(fwrite(g->image, 1, length, out) == length);
 	CHECK(fclose(out) == 0);
 }
 
@@ -5640,13 +5642,22 @@ main(int argc, char **argv)
 
 	if (argc == 3 && strcmp(argv[1], "--seed") == 0) {
 		omitted_image(&g);
-		write_image(argv[2], &g);
+		write_image(argv[2], &g, g.length);
+		gen_free(&g);
+		return (0);
+	}
+	/* A truncated image that opens: the record table and the first file
+	 * are present, the second file's data and the trailer are not.
+	 */
+	if (argc == 3 && strcmp(argv[1], "--seed-truncated") == 0) {
+		truncated_image(&g);
+		write_image(argv[2], &g, g.members[1].data_offset);
 		gen_free(&g);
 		return (0);
 	}
 	if (argc == 3 && strcmp(argv[1], "--seed-shadowed") == 0) {
 		shadowed_image(&g);
-		write_image(argv[2], &g);
+		write_image(argv[2], &g, g.length);
 		gen_free(&g);
 		return (0);
 	}
