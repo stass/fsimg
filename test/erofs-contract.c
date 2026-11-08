@@ -87,7 +87,7 @@ unsigned char *
 erofs_contract_image(const erofs_source_t *sources, size_t count,
     erofs_byte_fn_t byte_at, void *argument, size_t *length)
 {
-	uint64_t nids[16];
+	uint64_t nids[16] = { 0 };
 	uint64_t data_bytes = 0;
 	gen_tree_t tree;
 	unsigned char *image;

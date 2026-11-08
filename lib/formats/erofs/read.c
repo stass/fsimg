@@ -123,12 +123,14 @@ erofs_state(const fsimg_reader_t *reader)
 }
 
 /*
- * Report a rejection with the static phrase naming the field or rule, as
+ * Record a rejection with the static phrase naming the field or rule, as
  * "invalid EROFS superblock checksum" or "unsupported EROFS extra devices".
- * Any other status keeps the phrase with the format's name.
+ * Any other status keeps the phrase with the format's name. erofs_reject()
+ * (erofs.h) calls this and returns the status.
  */
-fsimg_status_t
-erofs_reject(fsimg_error_t *error, fsimg_status_t status, const char *what)
+void
+erofs_reject_report(fsimg_error_t *error, fsimg_status_t status,
+    const char *what)
 {
 	char message[sizeof(((fsimg_error_t *)NULL)->message)];
 	const char *verdict;
@@ -145,7 +147,7 @@ erofs_reject(fsimg_error_t *error, fsimg_status_t status, const char *what)
 		break;
 	}
 	snprintf(message, sizeof(message), "%sEROFS %s", verdict, what);
-	return (fsimg_error_set(error, status, 0, FSIMG_OP_READER, message));
+	(void)fsimg_error_set(error, status, 0, FSIMG_OP_READER, message);
 }
 
 /*

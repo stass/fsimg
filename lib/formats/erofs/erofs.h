@@ -637,7 +637,21 @@ extern const fsimg_reader_ops_t fsimg_erofs_reader_ops;
 
 /* Driver state and error reporting (read.c). */
 fsimg_erofs_reader_t *erofs_state(const fsimg_reader_t *);
-fsimg_status_t	erofs_reject(fsimg_error_t *, fsimg_status_t, const char *);
+void		erofs_reject_report(fsimg_error_t *, fsimg_status_t, const char *);
+
+/*
+ * Record a rejection and return its status, which is a failure; it is
+ * returned unchanged. Inline, so the compiler sees that a helper's
+ * `return (erofs_reject(...))` never returns FSIMG_OK and that its caller,
+ * which returns on failure, never reads the outputs a failed helper left
+ * unset.
+ */
+static inline fsimg_status_t
+erofs_reject(fsimg_error_t *error, fsimg_status_t status, const char *what)
+{
+	erofs_reject_report(error, status, what);
+	return (status);
+}
 
 /*
  * The mapper (map.c), the one place a logical offset of an inode becomes

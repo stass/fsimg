@@ -6154,8 +6154,8 @@ test_directory_over_several_blocks_lists_every_name_in_order(void)
 		tree_new(&tree, bits[b], 8);
 		nid = add_file(&tree, LAYOUT_FLAT_INLINE, 3, 1);
 		for (size_t i = 0; i < count; i++) {
-			snprintf(names[i], sizeof(names[i]), "n%03zu-padding-name",
-			    i);
+			CHECK((size_t)snprintf(names[i], sizeof(names[i]),
+			    "n%03zu-padding-name", i) < sizeof(names[i]));
 			kids[i] = (gen_dirent_t){ names[i], nid, T_FILE };
 		}
 		gen_tree_dir(&tree, 0, 0, kids, count);
@@ -6241,7 +6241,8 @@ test_flat_inline_directories_list_their_stored_and_inline_blocks(void)
 		for (size_t i = 0; i < list->count && i < counts[c]; i++) {
 			char path[MANY_BYTES + 1];
 
-			snprintf(path, sizeof(path), "/%s", names[i]);
+			CHECK((size_t)snprintf(path, sizeof(path), "/%s",
+			    names[i]) < sizeof(path));
 			EXPECT(strcmp(list->nodes[i].path, path) == 0,
 			    "directory of %zu bytes: entry %zu is %s", size, i,
 			    path);
@@ -6352,7 +6353,8 @@ test_directory_of_255_byte_names_lists_across_its_block_boundaries(void)
 	for (size_t i = 0; i < list->count && i < LONG_NAMES; i++) {
 		char path[LONG_BYTES + 1];
 
-		snprintf(path, sizeof(path), "/%s", names[i]);
+		CHECK((size_t)snprintf(path, sizeof(path), "/%s", names[i]) <
+		    sizeof(path));
 		EXPECT(strlen(list->nodes[i].path) == 256 &&
 		    strcmp(list->nodes[i].path, path) == 0,
 		    "entry %zu is the full 255-byte name", i);
@@ -8337,12 +8339,18 @@ zheader_run(const zheader_case_t *c, uint16_t advice, erofs_zheader_t *out,
 	return (erofs_zheader_decode(raw, &sb, c->layout, out, what));
 }
 
+/*
+ * Short names for the case table below. The layouts are macros, not
+ * enumerators of an anonymous enum, so they keep the erofs_layout_t type
+ * the table's field has.
+ */
+#define FULL	EROFS_LAYOUT_COMPRESSED_FULL
+#define COMPACT	EROFS_LAYOUT_COMPRESSED_COMPACT
+
 static void
 test_map_header_decode_applies_each_rule_of_the_design(void)
 {
 	enum {
-		FULL = EROFS_LAYOUT_COMPRESSED_FULL,
-		COMPACT = EROFS_LAYOUT_COMPRESSED_COMPACT,
 		CFGS = EROFS_INCOMPAT_COMPR_CFGS,
 		TAIL = EROFS_INCOMPAT_ZTAILPACKING,
 		FRAG = EROFS_INCOMPAT_FRAGMENTS
@@ -8424,6 +8432,9 @@ test_map_header_decode_applies_each_rule_of_the_design(void)
 		    what != NULL ? what : "");
 	}
 }
+
+#undef FULL
+#undef COMPACT
 
 static void
 test_map_header_decode_splits_the_algorithm_nibbles_and_keeps_the_advice(void)

@@ -2742,7 +2742,8 @@ remove_tree(const char *path)
 		if (strcmp(entry->d_name, ".") == 0 ||
 		    strcmp(entry->d_name, "..") == 0)
 			continue;
-		snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+		CHECK((size_t)snprintf(child, sizeof(child), "%s/%s", path,
+		    entry->d_name) < sizeof(child));
 		CHECK(lstat(child, &st) == 0);
 		if (S_ISDIR(st.st_mode))
 			remove_tree(child);
