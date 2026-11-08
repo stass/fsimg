@@ -3473,6 +3473,65 @@ test_tails_at_one_offset_of_both_spaces_read_apart(void)
 	gen_tree_free(&tree);
 }
 
+/* Whether nid is a compact inode with no attribute region. */
+static bool
+compact_without_attributes(const gen_tree_t *tree, uint64_t nid)
+{
+	const unsigned char *raw = tree->image.bytes + inode_offset(tree, nid);
+
+	return (!inode_is_extended(tree, nid) && raw[2] == 0 && raw[3] == 0);
+}
+
+/*
+ * A lookup of an inode in the box reads its index through box reads, each
+ * a lookup of the box inode, so the two use separate caches. Here a shared
+ * cache would go wrong: "x", a compressed file in an indexed box, and the
+ * box inode are both compact inodes without attributes behind a full
+ * index, so their index units lie at the same body offsets. The box lookup
+ * nested in x's first unit load would retag the shared cache with the box's
+ * NID before x's records filled it, so the next box read, loading "y",
+ * would hit x's unit as the box's own. x's index spans two units, so its
+ * lookups replace units as they go; reading its start leaves its first
+ * unit, at the offset of the box's only unit.
+ */
+static void
+test_box_reads_after_a_lookup_in_the_box_use_the_box_cache(void)
+{
+	enum { X_BLOCKS = 17, BLOCK = 512 };
+	gen_inode_t xproto = inode_proto(MODE_FILE, LAYOUT_FLAT);
+	gen_inode_t yproto = inode_proto(MODE_FILE, LAYOUT_INLINE);
+	gen_zcluster_t clusters[X_BLOCKS];
+	unsigned char x[X_BLOCKS * BLOCK], y[100];
+	gen_zfile_t zf = { .content = x, .size = sizeof(x),
+	    .index_layout = ZLAYOUT_FULL, .clusters = clusters,
+	    .cluster_count = X_BLOCKS, .last = GEN_ZL_BLOCKS };
+	gen_dirent_t kids[2];
+	gen_tree_t tree;
+	uint64_t box;
+
+	memset(x, 'x', sizeof(x));
+	memset(y, 'y', sizeof(y));
+	for (size_t i = 0; i < X_BLOCKS; i++)
+		clusters[i] = (gen_zcluster_t){ .start = i * BLOCK,
+		    .blocks = 1, .kind = GEN_ZK_LZ4_PERIODIC, .period = 7 };
+	ztree_new(&tree, BOX_DATA_BLOCKS);
+	gen_tree_box_begin(&tree);
+	kids[0] = entry("x", gen_tree_add_zfile(&tree, &xproto, &zf), T_FILE);
+	kids[1] = entry("y", gen_tree_add(&tree, &yproto, y, sizeof(y)),
+	    T_FILE);
+	fill_dir(&tree, 0, 0, kids, 2);
+	/* An indexed box's bytes leave the area at its end: check x first. */
+	CHECK(compact_without_attributes(&tree, kids[0].nid));
+	box = gen_tree_box_end(&tree, GEN_BOX_INDEXED);
+	CHECK(compact_without_attributes(&tree, box));
+	gen_tree_seal(&tree);
+	check_file_bytes("box reads after a lookup in the box", &tree.image,
+	    (const unsigned char *)"xy", 2, sizeof(y));
+	check_image("box reads after a lookup in the box", &tree.image,
+	    FSIMG_OK, NULL);
+	gen_tree_free(&tree);
+}
+
 int
 main(void)
 {
@@ -3557,5 +3616,6 @@ main(void)
 	test_a_packed_nid_with_bit_63_without_the_box_is_corrupt();
 	test_overlaps_in_either_space_are_corrupt();
 	test_tails_at_one_offset_of_both_spaces_read_apart();
+	test_box_reads_after_a_lookup_in_the_box_use_the_box_cache();
 	return (failures == 0 ? 0 : 1);
 }

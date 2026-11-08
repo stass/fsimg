@@ -505,6 +505,19 @@
   flag, so neither guard is needed. Fragment lookups also alternate the
   file's and the packed inode's index units through the one-NID `zcache`.
 
+* [Low] **EROFS box reads have no guard against nested entry**
+  (`lib/formats/erofs/meta.c` `erofs_meta_read`, `zmap.c` `zcache_of`): a
+  box read uses the box window and `box_zcache`, which are safe only
+  because a box read never needs another box read; that rests on open
+  requiring the box inode to live in the primary space without a fragment.
+  A reader flag set around the box branch of `erofs_meta_read`, refusing
+  nested entry as `FSIMG_EINVAL`, would turn a future change that breaks
+  the rule into a driver error instead of silent corruption. The cache
+  could also hold by construction on its own: tag the cache's NID where a
+  unit or running sum is stored (`unit_load`, `extent_run`) rather than in
+  `zcache_select`, and require it to match for a hit; the box window would
+  still need the guard.
+
 * [Low] **The CLI chooses the allocation unit's noun by format name**
   (`cmd/fsimg/display.c` `format_counts_blocks`): each block-based format
   must join a name list. A descriptor field naming the unit would make it

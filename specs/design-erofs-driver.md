@@ -140,9 +140,9 @@ Open:
    a regular file that uses no fragment. Then, on every volume, rejects
    long prefixes with neither a plain table, a packed inode nor a metadata
    box as `FSIMG_ECORRUPT`
-   ([long prefixes](design-erofs.md#long-prefixes)). Step 2 has already
-   refused every bit the reader does not implement, so the rule judges only
-   features it reads.
+   ([long prefixes](design-erofs.md#long-prefixes)). The probe has
+   already refused every bit the reader does not implement, so the rule
+   judges only features it reads.
 5. Loads the root inode and requires a directory.
 
 Open reads nothing else: no directory, no attribute pool, no prefix table.
@@ -378,13 +378,16 @@ sorted references stand in for it.
 
 `verify.c` also maps and decodes the packed inode's and the box's every
 cluster once, claiming their storage, whether or not a reachable file uses
-it. A file's fragment extents claim nothing: the bytes are the packed
-inode's, and mapping them proves the fragment range inside the packed
-inode's content. An entry naming the packed inode is a finding, since the
-packed inode is outside the namespace. A codec the build lacks, a nonzero
-reserved byte of the superblock region, an unknown compatible bit and name
-filters the superblock's filter byte turns off each mark the result
-incomplete with a reason: verification fails `FSIMG_EUNSUPPORTED` naming
+it. The box's stored blocks are claimed as exclusive metadata, since they
+hold the box's inodes, shared entries and long-prefix table, which claim
+their own bytes in the box's claim stream. A file's fragment extents claim
+nothing: the bytes are the packed inode's, and mapping them proves the
+fragment range inside the packed inode's content. An entry naming the
+packed inode or the metadata box inode is a finding, since neither is in
+the namespace. A codec the build lacks, a nonzero reserved byte of the
+superblock region, an unknown compatible bit and name filters the
+superblock's filter byte turns off each mark the result incomplete with a
+reason: verification fails `FSIMG_EUNSUPPORTED` naming
 it. The three volume-wide reasons are reported after every structural
 check has passed, so a volume that is also corrupt reports its
 corruption; a missing codec, like an unknown attribute index, fails where

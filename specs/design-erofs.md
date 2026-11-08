@@ -1468,8 +1468,8 @@ validated as reading validates it.
   once, plus the packed inode, and v1.2 writes 0 (E2, `e2-count-*`,
   `e2-v12-*`).
 * **References.** Every directory entry contributes a reference to its
-  child NID. No entry may name the packed inode. Each directory NID is
-  referenced exactly once outside its own
+  child NID. No entry may name the packed inode or the metadata box
+  inode. Each directory NID is referenced exactly once outside its own
   `.` and its children's `..`; each non-directory NID is referenced as many
   times as its link count. A directory's link count is two plus its
   subdirectories (E4, every directory of the `e4-*` fixtures), except that
