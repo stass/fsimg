@@ -2440,7 +2440,8 @@ emit_tree(fixture_t *fixture, memory_sink_t *sink, unsigned char poison)
 #define WIDE_ENTRIES	300u
 #define DEEP_LEVELS	10u
 
-static char long_target[200];
+/* A 200-byte target and its terminator. */
+static char long_target[201];
 
 static spec_t *
 add_symlink(const char *target, const char *path)
@@ -2460,7 +2461,7 @@ build_round_trip_tree(void)
 	char deep[MAX_PATH] = "";
 
 	tree_reset();
-	for (size_t i = 0; i < sizeof(long_target); i++)
+	for (size_t i = 0; i < sizeof(long_target) - 1; i++)
 		long_target[i] = (char)('a' + i % 26);
 
 	add_file(3, "/-a")->mode = 0600;
