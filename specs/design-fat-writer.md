@@ -14,9 +14,13 @@ at most 255 UTF-16 units, CP437 short names, and pinned simple uppercase
 comparison. An external sort of `(parent ID, effective name key)` rejects
 duplicate and case-equivalent siblings before allocating an image.
 
-Exact uppercase ASCII 8.3 names use their natural short name. Other names use
-long-name records and an ASCII alias `Fhhhhhhh`, with seven uppercase hexadecimal
-digits. Each directory assigns increasing numbers in catalog child order.
+An ASCII name that fits 8.3 with its base and its extension each in a single
+case uses its natural short name, with the lowercase-base (0x08) and
+lowercase-extension (0x10) flags in directory byte 12 as Windows writes them,
+so firmware that reads only 8.3 names finds `start4.elf` as `START4.ELF`.
+Other names use long-name records and an ASCII alias `Fhhhhhhh`, with seven
+uppercase hexadecimal digits. Each directory assigns increasing numbers in
+catalog child order.
 Every effective name in this alias family reserves its number, including names
 that need a long-name record. A sorted reservation stream is merged with child
 order; the next number skips reserved values. Thus aliases cannot collide with

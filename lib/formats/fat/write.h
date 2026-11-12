@@ -40,7 +40,8 @@ typedef struct fat_plan {
 	unsigned	 variant;
 } fat_plan_t;
 
-bool fsimg_fat_write_short_name(const char *, unsigned char *);
+bool fsimg_fat_write_short_name(const char *, unsigned char *,
+    unsigned char *);
 fsimg_status_t fsimg_fat_layout_get(fat_plan_t *, uint64_t, fat_layout_t *,
     fsimg_error_t *);
 fsimg_status_t fsimg_fat_layout_set(fat_plan_t *, uint64_t,

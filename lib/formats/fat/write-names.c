@@ -37,11 +37,25 @@ static fsimg_status_t check_names(fsimg_stream_t *, fsimg_error_t *);
 static fsimg_status_t assign_aliases(fat_plan_t *, fsimg_stream_t *,
     fsimg_error_t *);
 
+static unsigned char
+fold_upper(char c)
+{
+	return ((unsigned char)(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c));
+}
+
+/* Encode name as an 8.3 entry when it fits one. A base or extension written
+ * entirely in lowercase is stored uppercase with its case flag in *flags
+ * (0x08 base, 0x10 extension), the Windows convention that firmware reading
+ * only 8.3 names relies on. A part mixing both cases needs a long name.
+ */
 bool
-fsimg_fat_write_short_name(const char *name, unsigned char *raw)
+fsimg_fat_write_short_name(const char *name, unsigned char *raw,
+    unsigned char *flags)
 {
 	const char *dot;
 	size_t base, extension;
+	bool lower[2] = { false, false }, upper[2] = { false, false };
+	unsigned part;
 
 	dot = strchr(name, '.');
 	base = dot == NULL ? strlen(name) : (size_t)(dot - name);
@@ -49,18 +63,26 @@ fsimg_fat_write_short_name(const char *name, unsigned char *raw)
 	if (base == 0 || base > 8 || extension > 3 ||
 	    (dot != NULL && extension == 0))
 		return (false);
-	memset(raw, ' ', 11);
 	for (size_t i = 0; name[i] != '\0'; i++) {
 		if (dot != NULL && name + i == dot)
 			continue;
-		if (!((name[i] >= 'A' && name[i] <= 'Z') ||
-		    (name[i] >= '0' && name[i] <= '9') ||
+		part = dot != NULL && name + i > dot;
+		if (name[i] >= 'a' && name[i] <= 'z')
+			lower[part] = true;
+		else if (name[i] >= 'A' && name[i] <= 'Z')
+			upper[part] = true;
+		else if (!((name[i] >= '0' && name[i] <= '9') ||
 		    strchr("$%'-_@~`!(){}^#&", name[i]) != NULL))
 			return (false);
 	}
-	bcopy(name, raw, base);
-	if (dot != NULL)
-		bcopy(dot + 1, raw + 8, extension);
+	if ((lower[0] && upper[0]) || (lower[1] && upper[1]))
+		return (false);
+	memset(raw, ' ', 11);
+	for (size_t i = 0; i < base; i++)
+		raw[i] = fold_upper(name[i]);
+	for (size_t i = 0; i < extension; i++)
+		raw[8 + i] = fold_upper(dot[1 + i]);
+	*flags = (unsigned char)((lower[0] ? 0x08 : 0) | (lower[1] ? 0x10 : 0));
 	return (true);
 }
 
@@ -99,8 +121,9 @@ reservation_compare(const void *a, size_t an FSIMG_UNUSED, const void *b,
 	return (0);
 }
 
-/* Case keys are big-endian scalars. Reserving after case mapping also covers
- * a lowercase spelling of Fhhhhhhh that will itself receive a long name.
+/* Case keys are big-endian scalars. Reserving after case mapping covers every
+ * spelling of Fhhhhhhh: an all-lowercase one is stored as that alias itself,
+ * and a mixed-case one takes a long name.
  */
 static bool
 alias_reservation(const unsigned char *key, size_t length, uint64_t *number)
@@ -266,7 +289,7 @@ assign_aliases(fat_plan_t *plan, fsimg_stream_t *reservations,
 	fsimg_catalog_child_t child;
 	fat_alias_cursor_t reservation = { .stream = reservations };
 	fat_layout_t row, parent;
-	unsigned char short_name[11];
+	unsigned char short_name[11], flags;
 	char alias[9];
 	uint64_t cursor, parent_id, candidate, slots;
 	size_t length, units;
@@ -296,7 +319,7 @@ assign_aliases(fat_plan_t *plan, fsimg_stream_t *reservations,
 		if (status != FSIMG_OK)
 			return (status);
 		slots = 1;
-		if (!fsimg_fat_write_short_name(child.name, short_name)) {
+		if (!fsimg_fat_write_short_name(child.name, short_name, &flags)) {
 			status = fsimg_utf8_to_utf16(child.name, child.name_length,
 			    NULL, 0, &units, error);
 			if (status != FSIMG_OK)
@@ -309,12 +332,14 @@ assign_aliases(fat_plan_t *plan, fsimg_stream_t *reservations,
 			if (candidate > 0x0fffffff)
 				return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 				    FSIMG_OP_WRITER, "FAT alias namespace exhausted"));
+			flags = 0;
 			snprintf(alias, sizeof(alias), "F%07X", (unsigned)candidate);
 			memset(short_name, ' ', sizeof(short_name));
 			bcopy(alias, short_name, 8);
 			candidate++;
 		}
 		bcopy(short_name, row.entry, sizeof(short_name));
+		row.entry[12] = flags;
 		status = fsimg_fat_layout_get(plan, parent_id, &parent, error);
 		if (status != FSIMG_OK)
 			return (status);

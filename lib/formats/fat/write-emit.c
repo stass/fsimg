@@ -198,6 +198,7 @@ emit_directory_header(fat_plan_t *plan, fsimg_emit_t *emit, uint64_t id,
 	raw[0] = '.';
 	raw[32] = raw[33] = '.';
 	raw[11] = raw[43] = 0x10;
+	raw[12] = raw[44] = 0; /* Case flags belong to the directory name only. */
 	parent_cluster = parent->first;
 	/* The FAT32 root always starts at cluster two; '..' still encodes zero
 	 * when it refers to the root, just as on FAT12/16.
@@ -217,13 +218,13 @@ emit_child(fat_plan_t *plan, fsimg_emit_t *emit, const char *name,
 	static const unsigned positions[] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22,
 	    24, 28, 30 };
 	uint16_t units[255], value;
-	unsigned char raw[21 * 32], short_name[11], *slot, checksum;
+	unsigned char raw[21 * 32], short_name[11], flags, *slot, checksum;
 	size_t count, long_slots, index;
 	fsimg_status_t status;
 
 	long_slots = 0;
 	bzero(raw, sizeof(raw));
-	if (!fsimg_fat_write_short_name(name, short_name)) {
+	if (!fsimg_fat_write_short_name(name, short_name, &flags)) {
 		status = fsimg_utf8_to_utf16(name, strlen(name), units, 255, &count, error);
 		if (status != FSIMG_OK)
 			return (status);

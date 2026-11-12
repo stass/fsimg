@@ -201,6 +201,29 @@ for profile in fat12 fat16 fat32; do
     echo "result: minimized $profile passed checker and independent content comparisons"
 done
 
+# Firmware such as the Raspberry Pi boot ROM reads only 8.3 names. The first
+# twelve columns of an mtools listing are the short name with its case flags
+# applied, so names that fit 8.3 in one case must appear there under their own
+# spelling, not as a numbered alias. The mixed-case name has no 8.3 spelling
+# and keeps a numbered alias.
+mkdir "$fixture_dir/case"
+./test-fat-write --create-case "$fixture_dir/case"
+image="$fixture_dir/case/writer.img"
+check_volume "$image"
+"$MDIR" -i "$image" :: | grep ' 1980-01-01 ' | cut -c1-12 | sed 's/ *$//' | LC_ALL=C sort \
+    > "$fixture_dir/case/short-names"
+cat > "$fixture_dir/case/expected" <<'EOF_NAMES'
+F0000000
+UPPER    txt
+config   txt
+kernel8  img
+lower    TXT
+overlays
+start4   elf
+EOF_NAMES
+cmp "$fixture_dir/case/expected" "$fixture_dir/case/short-names"
+echo "result: lowercase 8.3 names visible without long-name support"
+
 # fsimg-created volumes are checked and extracted by independent tools. These
 # checks do not rely on fsimg's decoder to judge its own directory/FAT output.
 printf 'Independent FAT writer fixture.\n' > "$fixture_dir/writer-payload"

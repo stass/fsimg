@@ -93,6 +93,7 @@ static int unsupported_naming(void *, int, const char *, int, const char *);
 static int publication_sync(void *, int);
 static int publication_unlink(void *, int, const char *);
 static void create_external(const char *, const char *, bool);
+static void create_case_external(const char *);
 static void test_scale(void);
 
 static void
@@ -1151,6 +1152,33 @@ create_external(const char *directory, const char *format, bool empty)
 	fixture_close(&fixture);
 }
 
+/* Names that fit 8.3 in one case must read back as plain 8.3 entries: boot
+ * firmware ignores long names. Mixed case needs a long name.
+ */
+static void
+create_case_external(const char *directory)
+{
+	static const char *const paths[] = { "/start4.elf", "/config.txt",
+	    "/kernel8.img", "/Mixed.Txt", "/lower.TXT", "/UPPER.txt", "/overlays" };
+	writer_fixture_t fixture;
+	fsimg_entry_t entry = { .kind = FSIMG_ENTRY_FILE, .size = 0 };
+	fsimg_source_t zero = { .kind = FSIMG_SOURCE_ZERO };
+	int parent;
+
+	fixture_open(&fixture, "fat16", NULL, 1);
+	for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		entry.path = paths[i];
+		entry.kind = i == 6 ? FSIMG_ENTRY_DIRECTORY : FSIMG_ENTRY_FILE;
+		CHECK(fsimg_writer_add(fixture.writer, &entry,
+		    i == 6 ? NULL : &zero, NULL) == FSIMG_OK);
+	}
+	parent = open(directory, O_RDONLY | O_DIRECTORY);
+	CHECK(parent != -1);
+	CHECK(fsimg_writer_write_at(fixture.writer, parent, "writer.img", NULL) == FSIMG_OK);
+	CHECK(close(parent) == 0);
+	fixture_close(&fixture);
+}
+
 static void
 test_scale(void)
 {
@@ -1912,6 +1940,10 @@ main(int argc, char **argv)
 {
 	if (argc == 4 && strcmp(argv[1], "--create-fixed-root") == 0) {
 		create_fixed_root_external(argv[2], argv[3]);
+		return (0);
+	}
+	if (argc == 3 && strcmp(argv[1], "--create-case") == 0) {
+		create_case_external(argv[2]);
 		return (0);
 	}
 	if (argc == 4 && strcmp(argv[1], "--create-minimized") == 0) {

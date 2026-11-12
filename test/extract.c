@@ -637,6 +637,33 @@ test_selection_failure(void)
 	fixture_close(&fixture);
 }
 
+/* A selection may spell every component as its generated alias. */
+static void
+test_nested_alias(void)
+{
+	static const fsimg_entry_t extra[] = {
+		{ .path = "/Mixed Dir", .kind = FSIMG_ENTRY_DIRECTORY },
+		{ .path = "/Mixed Dir/Mixed File", .kind = FSIMG_ENTRY_FILE }
+	};
+	extract_fixture_t fixture;
+	fsimg_extract_options_t options;
+	struct stat st;
+	int root;
+
+	fixture_open_with_entries(&fixture, extra, 2);
+	fsimg_extract_options_init(&options);
+	options.selections = (const char *const[]){ "/f0000001/f0000000" };
+	options.selection_count = 1;
+	CHECK(fsimg_extract_at(fixture.reader, fixture.parent, "nested-alias", &options,
+	    NULL) == FSIMG_OK);
+	root = openat(fixture.parent, "nested-alias", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	CHECK(root != -1);
+	CHECK(fstatat(root, "Mixed Dir/Mixed File", &st, AT_SYMLINK_NOFOLLOW) == 0);
+	CHECK(close(root) == 0);
+	remove_tree(fixture.parent, "nested-alias");
+	fixture_close(&fixture);
+}
+
 static void
 test_alias(void)
 {
@@ -1634,8 +1661,8 @@ main(int argc, char **argv)
 	test_roundtrip("/A/nested/file");
 	test_roundtrip("/A");
 	test_roundtrip("/a/NeStEd/FiLe");
-	test_roundtrip("/a/f0000000/f0000000");
 	test_alias();
+	test_nested_alias();
 	test_selection_failure();
 	test_repeated_root_members_exhaust_work_limit();
 	test_selection_scope();

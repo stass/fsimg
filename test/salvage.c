@@ -314,12 +314,14 @@ damage_listing(fixture_t *f, const char *format, bool root)
 	size_t length = strlen(component);
 
 	if (strncmp(format, "fat", 3) == 0) {
-		bzero(wide, sizeof(wide));
+		/* The lowercase component is an uppercase 8.3 entry with no long
+		 * name. A leading space is an invalid short name.
+		 */
+		memset(wide, ' ', 11);
 		for (size_t i = 0; i < length; i++)
-			wide[2 * i] = (unsigned char)component[i];
-		name = find_bytes(f, wide, 2 * length);
-		/* Claim a two-slot LFN sequence where only one slot exists. */
-		name[-1] = 0x42;
+			wide[i] = (unsigned char)(component[i] - 'a' + 'A');
+		name = find_bytes(f, wide, 11);
+		name[0] = ' ';
 	} else if (strcmp(format, "exfat") == 0) {
 		bzero(wide, sizeof(wide));
 		for (size_t i = 0; i < length; i++)
@@ -939,9 +941,9 @@ typedef struct format_case {
 } format_case_t;
 
 static const format_case_t format_cases[] = {
-	{ .format = "fat12", .message = "FAT long-name checksum or count mismatch" },
-	{ .format = "fat16", .message = "FAT long-name checksum or count mismatch" },
-	{ .format = "fat32", .message = "FAT long-name checksum or count mismatch" },
+	{ .format = "fat12", .message = "FAT short name starts with a space" },
+	{ .format = "fat16", .message = "FAT short name starts with a space" },
+	{ .format = "fat32", .message = "FAT short name starts with a space" },
 	{ .format = "exfat", .message = "invalid exFAT directory entry-set checksum",
 	    .root_rejected_at_open = true },
 	{ .format = "iso9660", .message = "Rock Ridge name holds a NUL or a slash" },
@@ -1088,13 +1090,13 @@ test_format_extraction_retains_good_siblings_and_an_empty_bad_directory(void)
 	}
 }
 
-/* Both root siblings are directories whose only child's LFN is damaged.
+/* Both root siblings are directories whose only child's listing entry is damaged.
  * Salvage must retain the directories even though neither yields a child.
  */
 static void
 test_all_sibling_listings_rejected_retains_directories_and_returns_partial(void)
 {
-	static const unsigned char inner[] = { 'i', 0, 'n', 0, 'n', 0, 'e', 0, 'r', 0 };
+	static const unsigned char inner[] = "INNER      ";
 	fixture_t f;
 	fsimg_extract_options_t options;
 	fsimg_error_t error;
@@ -1104,8 +1106,8 @@ test_all_sibling_listings_rejected_retains_directories_and_returns_partial(void)
 
 	/* The first four fixture paths contain /a and /bad and their files. */
 	fixture_open_prefix(&f, "fat12", 4);
-	name = find_bytes(&f, inner, sizeof(inner));
-	name[-1] = 0x42;
+	name = find_bytes(&f, inner, sizeof(inner) - 1);
+	name[0] = ' ';
 	damage_listing(&f, "fat12", false);
 	fixture_reader(&f);
 	parent = open_destination_parent(directory);
