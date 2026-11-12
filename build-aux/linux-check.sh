@@ -119,7 +119,7 @@ git -C "$top" archive --format=tar -o "$rundir/source.tar" "$commit"
 # removing the container stops the check. The label finds a container left
 # behind if this script is killed outright:
 #   docker ps -a --filter label=fsimg-linux-check
-docker create -i --rm --network none --cidfile "$rundir/cid" \
+docker create -i --rm --init --network none --cidfile "$rundir/cid" \
     --tmpfs /tmp:rw,exec,nosuid,size=8g \
     --label fsimg-linux-check "$(cat "$rundir/iid")" \
     sh -c "$container_program" sh "$check_command" >/dev/null

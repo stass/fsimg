@@ -108,7 +108,11 @@ jobs:
           - gcc: '16'
             codecs: --with-xz=yes --with-zstd=yes
     runs-on: ubuntu-24.04
-    container: gcc:${{ matrix.gcc }}
+    # An init process reaps the orphans the process-group tests kill; as PID 1
+    # the runner's idle process leaves them zombies that kill(0) still sees.
+    container:
+      image: gcc:${{ matrix.gcc }}
+      options: --init
     steps:
       - uses: actions/checkout@v4
       - name: Development tools
