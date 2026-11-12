@@ -155,7 +155,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: vmactions/freebsd-vm@v1
+      # Pinned to the revision whose VM image (builder 2.2.8) passes the sparse
+      # file and timestamp tests; the image behind the moving v1 tag (builder
+      # 2.2.9) does not.
+      - uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc
         with:
           usesh: true
           prepare: |
@@ -191,6 +194,7 @@ jobs:
               sh ../build-aux/ci-check.sh || {
                   status=$?
                   df -h . /tmp >&2
+                  mount >&2
                   for log in $(grep -l "^FAIL" *.log test/*.log 2>/dev/null); do
                       echo "=== $log" >&2
                       tail -n 40 "$log" >&2
