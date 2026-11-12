@@ -186,5 +186,15 @@ jobs:
               cd build
               ../configure CC=clang CXX=clang++ RUBY="$ruby" --with-xz=yes --with-zstd=yes
               gmake -j2
-              sh ../build-aux/ci-check.sh
+              # The VM leaves no artifact, so a failure prints its own
+              # evidence: the failing tests and the disk they ran on.
+              sh ../build-aux/ci-check.sh || {
+                  status=$?
+                  df -h . /tmp >&2
+                  for log in $(grep -l "^FAIL" *.log test/*.log 2>/dev/null); do
+                      echo "=== $log" >&2
+                      tail -n 40 "$log" >&2
+                  done
+                  exit "$status"
+              }
             '
