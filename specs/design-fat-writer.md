@@ -62,8 +62,11 @@ the complete legal variant range, including those boundary counts, and uses a
 bounded binary search for the smallest FAT sector count whose capacity covers
 the resulting data area. Cluster-count classification, legal cluster IDs,
 32-bit sector/file fields, root capacity, and free reserve must all hold.
-There is no convergence loop or image-wide search per entry. Allocation follows
-catalog ID order, starting with the FAT32 root; empty files have no cluster.
+There is no convergence loop or image-wide search per entry. Allocation is
+one next-fit pass in catalog ID order, starting with the FAT32 root: a run
+takes the next free cluster, skipping past any [placed run](#fixed-placement)
+it would overlap. Without placements nothing is skipped and the runs follow
+each other in ID order. Empty files have no cluster.
 
 Candidate rejection distinguishes a volume below or above the variant's cluster
 range, catalog/reserve capacity, insufficient data space and on-disk field
@@ -75,6 +78,78 @@ Without a reserve, a catalog exceeding cluster capacity is described as a
 source tree too large for the selected variant; an explicit cluster size
 qualifies that limit. Diagnostics never
 claim an uncomputed minimum size or a remedy not established by planning.
+
+## Fixed placement
+
+The writer carries `FSIMG_SETTING_PLACEMENT` and honors the
+[placement contract](design-placement.md) with one construction: **the data
+area begins at the lowest placed offset.** The reserved area is padded with
+zero sectors so that cluster 2 starts exactly there, and the lowest placed
+file is cluster 2. Every other placement is a run at a fixed cluster inside
+the data area. Nothing else in the layout changes meaning: the boot
+sectors, FSInfo and backup sectors keep their positions inside the reserved
+area, the FATs and the FAT12/16 root follow it, and the BPB reserved count
+is the one field that grows.
+
+Validation checks every offset against the sector size, and against the
+cluster size when `cluster=` fixes it: an offset that is not a multiple is
+`FSIMG_EINVAL` naming `place`. In the search, a cluster size that does not
+divide every offset is not a candidate, which never empties the search,
+since the sector-sized cluster divides every offset validation accepted. A
+placed run then begins at cluster `2 + (offset - lowest) / cluster_bytes`
+and holds `ceil(size / cluster_bytes)` clusters.
+
+The data start fixes the rest of the geometry without a search. The
+reserved count is the data start in sectors less two FATs and the root, and
+must be at least the writer's normal count (1 for FAT12/16, 32 for FAT32)
+and at most the 16-bit field's 65535. With automatic sizing the cluster
+count is the clusters the allocation pass uses, gaps included, at least the
+end of the highest placed run, plus the free reserve, raised to the
+variant's minimum; the FAT length follows from that count and the volume
+ends after the last cluster. With an exact size the cluster count is the
+data area's length in clusters, which must reach the highest run's end and
+the allocation's end, and the FAT length follows from it; no binary search
+is needed because the data start no longer depends on the FAT length. The
+type margins and cluster-range rules are unchanged.
+
+Two consequences follow and are stated for users. The lowest placement
+cannot lie deep inside a data area whose earlier clusters hold other files:
+earlier bytes are reserved padding, zero, belonging to no file, which a host
+may use for raw sectors a FAT driver never touches. And since the padding is
+reserved sectors, the lowest offset is capped by the reserved-count field:
+about 32 MiB with 512-byte sectors (65535 sectors plus the FATs and root),
+proportionally more with larger sectors. Higher placements may sit anywhere
+in the data area.
+
+The allocation pass is the next-fit pass of the previous section with the
+placed runs fixed first, sorted by cluster. An unplaced run that would
+overlap the next placed run starts after it; the gap left before the run
+stays free. Placed runs are checked in sorted order not to overlap each
+other for the candidate's cluster size. The pass is one traversal in ID
+order, deterministic and independent of the memory budget, and by
+construction no unplaced run, directory or FAT32 root lies inside a placed
+run. Sizing runs the same pass as a simulation: the candidate counters of
+the one catalog traversal hold, per cluster size, the next free cluster and
+the index of the next placed run instead of a plain total, so the pass
+still visits each row once for all candidates. The FAT32 root takes the
+first free cluster the pass gives it, which the BPB's root cluster field
+records; `..` encodes zero when the parent is the root entry, whichever
+cluster the root holds.
+
+Emission streams the FAT in cluster order through the highest used cluster,
+merging two sorted sequences: the unplaced rows, whose clusters increase
+with catalog ID, and the placed runs by cluster. A cluster in neither is
+free and encodes zero, as the zero-initialized tail of the table does. The
+FSInfo free count is the clusters not allocated, gaps included, and its
+next-free hint is the cluster after the highest used run. Payload copies are
+unchanged: each file is copied into the one run its row names.
+
+Rejections follow the diagnostic rules above with two more candidate
+reasons: the lowest placement leaves no room before the data area for the
+reserved sectors, FATs and root, and two placed runs overlap. Each names the
+offsets involved; a reserved count above 65535 is the existing field-limit
+failure. Mixed reasons across candidates report conflicting settings as
+they do today.
 
 ## Metadata and determinism
 

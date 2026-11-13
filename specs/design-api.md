@@ -606,6 +606,16 @@ carry no descriptor and grant no authority; the
 [ISO driver design](design-iso9660-driver.md#writer-settings) states their
 rules.
 
+Under `FSIMG_SETTING_PLACEMENT`, `placements` and `placement_count` name
+files of the writer's own catalog that must be stored as one contiguous run
+at a byte offset of the volume: an array of `fsimg_placement_t`, each an
+absolute image path and a `uint64_t` offset, of at most
+`FSIMG_PLACEMENT_MAX` elements, copied at construction with its paths. A
+zero count is the default and leaves the pointer unread. Like the boot
+paths the paths carry no descriptor and grant no authority; the
+[placement design](design-placement.md) states the contract, the common
+validation and what each format owes.
+
 EROFS has three typed fields under `FSIMG_SETTING_EROFS`:
 `erofs_compression` (`FSIMG_EROFS_COMPRESSION_NONE` or `_LZ4`),
 `erofs_addressing` (32 or 48, zero selecting 32) and `erofs_metabox`

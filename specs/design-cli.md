@@ -277,13 +277,19 @@ representation, syntax, and applicability to the CLI and library. The CLI owns
 argument handling, explicit-key repetition checks, syntax diagnostics, and
 host path preparation; the catalogue performs no image or host-path I/O.
 
-`-o key=value` is the repeatable typed setting, each key at most once. An
+`-o key=value` is the repeatable typed setting, each key at most once,
+except that a key the catalogue declares list-valued repeats once per
+element up to its capacity; `place=` is the one such key. An
 unqualified key always targets the filesystem: `oem=cp437` on read; on
 create `sector` and `cluster` in bytes, and the QNX6 settings
 `endian=little|big`, `uuid=` RFC 4122 text, `inodes=` a positive inode count
 and `reserve=` a percentage up to 100, which every other format rejects
 unless at their defaults; QNX4 shares `inodes=` as its `.inodes` slot count,
 FAT12 and FAT16 take `root=` a positive root directory entry count,
+FAT12, FAT16 and FAT32 take `place=PATH@OFFSET`, the
+[fixed placement](design-placement.md) of the image file `PATH` as one run
+starting at the byte offset `OFFSET` of the volume, in byte-quantity
+syntax, split at the last `@`, once per placed file up to eight,
 and ImageFS shares `endian=` and adds `mountpoint=`, its stored mount path
 of at most 1024 bytes, default `/`, with `mountpoint=` alone storing an
 empty one; its writer takes no boot setting, since it writes

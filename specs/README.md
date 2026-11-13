@@ -17,6 +17,7 @@ Implementation status and sequencing belong in the implementation plan and
 | [Logical content](design-content.md) | Logical, initialized and mapped content; common delivery; optional extent index |
 | [Emission](design-emission.md) | Emission order, sink initialization, emission object, complete source copies |
 | [Settings catalogue](design-settings.md) | Shared typed settings descriptions, applicability, CLI conversion, file settings, and the explicit worker transport boundary |
+| [Fixed placement](design-placement.md) | Image files stored as one run at a caller-given byte offset of the volume: the guarantee, the option and catalogue row, transport, common validation, resolution against the catalog, and what each format owes |
 | [Writer metadata losses](design-metadata-loss.md) | Common refusal and accounting policy, planning callbacks, and narrow timestamp conversions |
 | [Container plans](design-container-plans.md) | Private immutable container state, common planning facts, encoder borrowing, and complete destruction |
 | [Driver contract tests](design-driver-contract-tests.md) | Declarative test profiles, registry coverage, shared scenarios, fault injection, and independent expectations |

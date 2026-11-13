@@ -42,6 +42,7 @@ Each descriptor contains these facts:
 | Syntax | A closed lexical class, its lexical range or choices, and any CLI-only text capacity |
 | Applicability | Read/write use, partition-only use for compose, and the existing filesystem support bit when one applies |
 | File identity | For an I/O setting, its existing `fsimg_file_setting_t` identity and section name |
+| Multiplicity | Single, where a repeated key is a syntax error, or a list with its capacity, where each occurrence of the key appends one element and the occurrence past the capacity is the same syntax error |
 
 Rows are grouped into immutable layer slices and a filesystem slice. A layer
 descriptor references its slice, so its advertised keys and its option checks
@@ -89,7 +90,9 @@ Representation and syntax are different facts. A decimal token does not imply
 that the destination is a `uint32_t`, nor does a four-byte member imply that it
 is an unsigned integer. Value kinds distinguish `uint32_t`, `uint64_t`, signed
 integers when used, `bool`, each concrete public enum type, fixed text arrays,
-16-byte identifiers, borrowed text pointers, and borrowed I/O pointers.
+16-byte identifiers, borrowed text pointers, borrowed I/O pointers, and the
+borrowed placement array with its count, the one list kind, whose default is
+a zero count.
 
 Loads and stores use correctly typed temporaries and source-first
 `bcopy(src, dst, n)` where an offset addresses a member. Enum storage uses its
@@ -117,6 +120,7 @@ Public option initialization and catalogue default tests agree on these values:
 | Filesystem snapshot (read) | `NULL`, the live view |
 | ISO level, boot load sectors | Zero, requesting levels 3 and 4 sectors |
 | ISO boot images | `NULL` |
+| Filesystem placements | `placement_count` zero; the array pointer is then not read |
 | ISO descriptor texts | `NULL`, the format's default text; a pointer to `""` is an explicit field of spaces |
 | ISO volume dates | Absent: the `_set` flag false and the seconds zero |
 | ISO view (read) | `FSIMG_ISO_VIEW_AUTO`, zero |
@@ -169,6 +173,7 @@ The finite syntax classes cover the existing grammar:
 | UUID | RFC 4122 text converted to textual byte order; nil permitted for the filesystem UUID, refused for layer identifiers; the filesystem's own validation may still refuse nil, as APFS does outside reproducible mode |
 | Signed seconds | ISO `created`, `modified`, `expires` and `effective`; the `-e` epoch grammar, an optional leading minus and decimal digits, into an `int64_t` with its presence flag; the range is the owning format's |
 | Text | GPT type/name, MBR type, mountpoint, snapshot name, ISO `boot` and `efiboot` image paths and the ISO descriptor texts `volset`, `publisher`, `preparer`, `application`, `copyright`, `abstract` and `biblio`; checked destination capacity, with format meaning checked by its owner; the snapshot name is UTF-8 of 1 to 255 bytes, held in a 256-byte CLI slot and carried in the worker job as a length-prefixed field of at most 255 bytes; a boot image path holds at most 1024 bytes on the command line and travels in a 1025-byte job field with its own presence bit, since an empty path is a value the library refuses; a descriptor text holds at most 64 or 18 bytes, its capacity in the Joliet descriptor that mirrors it, and travels in a field of that width and a terminator with a presence bit, since an empty text is a value |
+| Placement | `place=PATH@OFFSET`, split at the last `@`: the path a text within the boot image path's capacity, the offset a byte quantity; the row is the list row, [fixed placement](design-placement.md), with capacity `FSIMG_PLACEMENT_MAX` |
 | File path | A host operand retained by the CLI for descriptor preparation |
 
 Choice entries pair spellings with values of the row's declared type. Lexical
@@ -186,7 +191,8 @@ The CLI converts into a temporary typed value and commits it, together with its
 presence flag, only after successful conversion. It rejects overflow, trailing
 characters, inappropriate signs or units, and text that does not fit. A finite
 set of seen catalogue identities detects duplicates on the normal lookup path,
-including repeated values that happen to equal defaults. Deferred qualified
+including repeated values that happen to equal defaults; a list row counts
+its occurrences instead and fails the one past its capacity. Deferred qualified
 keys instead retain their raw key text before `=` for duplicate comparison;
 the argument count bounds that storage, and unknown deferred keys need no
 catalogue identity. A string's tail is initialized when copied into
@@ -288,7 +294,10 @@ There is no generated wire schema in this design. CLI-only explicitness does
 not add a presence bitmap to the job: mode and owner checks occur before
 encoding, while existing API presence flags travel in their existing bits.
 A new transported setting requires an explicit protocol decision and coverage;
-adding a catalogue row cannot silently change the record layout.
+adding a catalogue row cannot silently change the record layout. The
+placement list travels as a count and `FSIMG_PLACEMENT_MAX` fixed records of
+offset and path, the count its presence, as the
+[placement design](design-placement.md#transport) states.
 
 ## Compatibility and verification
 

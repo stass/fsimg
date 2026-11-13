@@ -488,7 +488,10 @@ validation owns relationships among values. The public options remain typed
 records and the worker protocol remains an explicit checked byte encoding.
 Catalogue operations perform no image I/O and confer no host authority; the
 coordinator opens file settings and passes descriptors under the existing
-security contract.
+security contract. A setting may be a bounded list; the one such setting,
+[fixed file placement](design-placement.md), is a format-neutral contract
+under its own capability bit, so a filesystem writer adopts it by carrying
+the bit and honoring the contract, never through a new interface.
 
 Filesystem read settings follow the write side's rule. A format's
 capability record lists the read settings it accepts in `read_settings`, as
@@ -587,7 +590,8 @@ writes.
 The [FAT reader design](design-fat-reader.md) defines FAT directory decoding,
 alias keys, chain resolution, and full allocation verification.
 The [FAT writer design](design-fat-writer.md) defines independent paged layout
-records, deterministic alias reservations, geometry selection, and emission.
+records, deterministic alias reservations, geometry selection, the layout
+around placed files, and emission.
 The [exFAT design](design-exfat.md) defines independent bitmap allocation,
 embedded name mappings, entry sets, and initialized-data semantics.
 The [QNX6 design](design-qnx6.md) defines snapshot selection, uniform block

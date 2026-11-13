@@ -34,13 +34,19 @@ size, so minimization with one is `FSIMG_EINVAL` as well. `min_free_bytes`
 and `reserve_percent` are requirements, not dimensions: a minimized volume
 still contains them. `root=` (`fat_root_entries`) fixes the FAT12/16 root
 capacity, so a minimized root keeps the free entries it asks for; rounded up
-to a whole sector, it is the same capacity under either policy.
+to a whole sector, it is the same capacity under either policy. A
+[placement](design-placement.md) fixes the data area's start at the lowest
+placed offset and keeps the search to the allocation units that divide
+every placed offset; the allocation it must hold is the next-fit pass's
+end, gaps before placed runs included, and the volume ends no earlier than
+the highest placed run. The root capacity is still minimized on FAT12/16,
+though with the data start fixed it only moves reserved padding.
 
 ## Dimensions per format
 
 | Format | Searched under minimization | Kept from the default policy |
 | --- | --- | --- |
-| FAT12/16/32 | Allocation-unit size over the variant's legal units; root capacity on FAT12/16, the smallest sector multiple holding the root's slots unless `root=` fixes it | The variant, its cluster-count minimum and the 16-cluster type margin, the reserved-sector count, two FAT copies |
+| FAT12/16/32 | Allocation-unit size over the variant's legal units, among those dividing every placed offset; root capacity on FAT12/16, the smallest sector multiple holding the root's slots unless `root=` fixes it | The variant, its cluster-count minimum and the 16-cluster type margin, the reserved-sector count, or the data start a placement fixes, two FAT copies |
 | exFAT | Allocation-unit size over the legal units | The 1 MiB minimum, one FAT, the recommended cluster-count rule as a tie-break only |
 | QNX6 | Block size over the classic sizes; inode capacity, the catalog's inodes rounded to a whole table block; the block count at the alignment step instead of the 64-block search step | Byte order, the reserve percentage, the system-run recipe |
 | QNX4 | Nothing: the block is 512 bytes and the block count is already the smallest that fits | The native default layout, the 128-slot `.inodes` minimum, the 4096-byte directory rounding |
