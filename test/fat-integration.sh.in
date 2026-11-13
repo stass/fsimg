@@ -302,3 +302,70 @@ for profile in fat12 fat16; do
     check_volume "$image"
     echo "result: minimized $profile has exactly 32 independently filled root slots"
 done
+
+# Seed: clearing the placed run's first FAT entry must make the independent
+# checker complain. Corrupt the small volume in place after all clean checks;
+# the 512 MiB volume is never copied and is removed before the next fixture.
+for profile in fat32 fat16; do
+    source_dir="$fixture_dir/placed-$profile"
+    mkdir "$source_dir"
+    case "$profile" in
+    fat32) volume=512M; offset=4194304; name=kernel8.img; cluster= ;;
+    fat16) volume=8M; offset=3145728; name=autoboot.txt; cluster=cluster=512 ;;
+    esac
+    printf 'Independent placed file.\n' > "$source_dir/$name"
+    image="$fixture_dir/placed.img"
+    ./fsimg c -S off -F "$profile" -s "$volume" ${cluster:+-o "$cluster"} \
+        -o "place=/$name@$offset" -f "$image" -C "$source_dir" .
+    check_volume "$image"
+    # fatcat requires the FAT32 root at cluster 2. Placing the first file
+    # there relocates the root; fsck and mtools validate that legal layout.
+    if test "$profile" = fat16; then
+        check_fatcat "$image" 512 / "/$name" "$source_dir/$name"
+    fi
+    LC_ALL=${utf8_locale:-C} "$MDIR" -i "$image" "::$name"
+    LC_ALL=${utf8_locale:-C} "$MCOPY" -i "$image" "::$name" "$fixture_dir/placed-content"
+    cmp "$source_dir/$name" "$fixture_dir/placed-content"
+    rm "$fixture_dir/placed-content"
+    '@RUBY@' - "$image" "$offset" "$source_dir/$name" "$profile" <<'RUBY_PLACED'
+# SPDX-License-Identifier: BSD-2-Clause
+# frozen_string_literal: true
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+image, offset, source, profile = ARGV
+File.open(image, "rb") do |file|
+  file.seek(Integer(offset))
+  abort("placed payload differs") unless file.read(File.size(source)) == File.binread(source)
+  if profile == "fat16"
+    file.seek(14)
+    reserved = file.read(2).unpack1("v")
+    abort("sector 2048 is outside reserved area") unless reserved > 2048
+    file.seek(2048 * 512)
+    abort("reserved sector 2048 is not zero") unless file.read(512) == "\0".b * 512
+  end
+end
+RUBY_PLACED
+    if test "$profile" = fat16; then
+        '@RUBY@' - "$image" <<'RUBY_CORRUPT'
+# SPDX-License-Identifier: BSD-2-Clause
+# frozen_string_literal: true
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+File.open(ARGV.fetch(0), "r+b") do |file|
+  boot = file.read(512)
+  reserved = boot.byteslice(14, 2).unpack1("v")
+  fat_sectors = boot.byteslice(22, 2).unpack1("v")
+  boot.getbyte(16).times do |table|
+    file.seek((reserved + table * fat_sectors) * 512 + 2 * 2)
+    file.write("\0\0".b)
+  end
+end
+RUBY_CORRUPT
+        if check_volume "$image" > "$fixture_dir/placed-corrupt.log" 2>&1; then
+            cat "$fixture_dir/placed-corrupt.log"
+            echo 'ERROR: checker missed a freed placed cluster' >&2
+            exit 1
+        fi
+        cat "$fixture_dir/placed-corrupt.log"
+    fi
+    rm "$image"
+    echo "result: placed $profile passed independent payload and geometry checks"
+done

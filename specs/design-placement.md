@@ -206,8 +206,8 @@ code ran.
   4 MiB and the 8 MiB FAT16 record volume with 512-byte clusters and the
   file at 3 MiB both plan, create and verify; the record volume's sector
   2048 lies in the reserved area and holds zeros. Seeded failure: the same
-  record volume with a placement at 3 MiB plus one sector is refused as
-  misaligned.
+  record volume with a placement at 3 MiB plus half a sector is refused as
+  misaligned, as is 3 MiB plus one sector with 1024-byte clusters.
 * **Every refusal.** One case per row of the two tables above and per
   format refusal, each paired with the same options corrected so the
   creation succeeds: count past the bound, NULL array with a nonzero count,

@@ -63,7 +63,8 @@ static const fsimg_format_variant_t fat_variants[] = {
 			.max_name_utf16_units = 255,
 			.max_label_bytes = FAT_LABEL_BYTES,
 			.max_link_target_bytes = 0,
-			.write_settings = FSIMG_SETTING_ROOT_ENTRIES
+			.write_settings = FSIMG_SETTING_ROOT_ENTRIES |
+			    FSIMG_SETTING_PLACEMENT
 		},
 		.id = 12
 	},
@@ -81,7 +82,8 @@ static const fsimg_format_variant_t fat_variants[] = {
 			.max_name_utf16_units = 255,
 			.max_label_bytes = FAT_LABEL_BYTES,
 			.max_link_target_bytes = 0,
-			.write_settings = FSIMG_SETTING_ROOT_ENTRIES
+			.write_settings = FSIMG_SETTING_ROOT_ENTRIES |
+			    FSIMG_SETTING_PLACEMENT
 		},
 		.id = 16
 	},
@@ -98,7 +100,8 @@ static const fsimg_format_variant_t fat_variants[] = {
 			.max_volume_bytes = (uint64_t)UINT32_MAX * 4096,
 			.max_name_utf16_units = 255,
 			.max_label_bytes = FAT_LABEL_BYTES,
-			.max_link_target_bytes = 0
+			.max_link_target_bytes = 0,
+			.write_settings = FSIMG_SETTING_PLACEMENT
 		},
 		.id = 32
 	}

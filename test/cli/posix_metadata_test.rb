@@ -52,7 +52,12 @@ class CliTest < Minitest::Test
     assert_equal(1024, erofs.fetch("max_link_target_bytes"))
     assert_equal(0x402, erofs.fetch("write_settings"))
     formats.each do |name, record|
-      assert_equal(%w[fat12 fat16].include?(name) ? 32 : 0, record.fetch("write_settings"), "#{name} write settings")
+      expected_settings = case name
+      when "fat12", "fat16" then 0x820
+      when "fat32" then 0x800
+      else 0
+      end
+      assert_equal(expected_settings, record.fetch("write_settings"), "#{name} write settings")
       assert_equal(3, record.fetch("entry_kinds"), "#{name} supports only files and directories")
       assert_equal(15, record.fetch("metadata_fields"), "#{name} supports only DOS attributes and timestamps")
       assert_equal(0, record.fetch("max_link_target_bytes"), "#{name} does not support symbolic link targets")

@@ -1209,6 +1209,44 @@ Default the creation and modification dates the planning time (the epoch
 with
 .Fl R )
 and the other two absent.
+.It Fl o Ar place=path@offset
+FAT12, FAT16 and FAT32: store the image file
+.Ar path
+as one contiguous run beginning
+.Ar offset
+bytes from the volume start, so firmware or a test harness can read it
+without a FAT driver.
+The path is the file's absolute path in the image, spelled as the image
+spells it, and splits from the offset at the last
+.Li @ ;
+the offset takes the units of
+.Fl s .
+Repeat the setting for up to 8 files, each at its own offset.
+Each must name a nonempty regular file; no other file or metadata shares the
+clusters of a placed run, and the tail of its last cluster holds zeros.
+.Pp
+The data area begins at the lowest offset, so no file can sit below the
+lowest placement: both FATs, and on FAT12 and FAT16 the root directory, end
+there, and the sectors between the boot sectors and the first FAT are
+reserved, zero and belong to no file.
+Free space between placed runs counts toward
+.Fl Fl free-space .
+Every offset is a multiple of the sector size and of the cluster size, which
+.Ar cluster=
+fixes or the automatic choice, also with
+.Fl M ,
+takes among the sizes dividing every offset.
+The lowest offset must leave room before it for the boot sectors, both FATs
+and a FAT12 or FAT16 root, and lie within the 65535 reserved sectors the boot
+sector can count: about 32 MiB with 512-byte sectors, proportionally more with
+larger ones.
+Higher placements may lie anywhere in the data area that the volume reaches,
+and their runs must not overlap.
+.Pp
+The placement holds for the image as created: a later writer, such as a
+guest's FAT driver rewriting the file, may move it, since FAT has no field
+that pins a file.
+Other formats refuse the setting.
 .It Fl o Ar root=entries
 FAT12 and FAT16 root directory capacity in 32-byte entries, rounded up to a
 whole number of sectors' worth (16 per 512-byte sector), at most 65535 after
@@ -2171,6 +2209,7 @@ fsimg cRf disk.img -F qnx6 -C rootfs @METALOG
 fsimg cn -F exfat -R -m 64M -T /scratch -C files .
 fsimg cWf esp.img -F fat32/gpt -o gpt:type=esp -o gpt:name=EFI -C esp .
 fsimg cf sd.img -F fat32/mbr -o mbr:disk=4G -o mbr:active=yes -C boot .
+fsimg cf slot.img -F fat32 -s 512M -o place=/kernel8.img@4M -C slot .
 fsimg tf sd.img.gz
 curl -s https://example.org/sd.img.gz | fsimg xf - -E -C restored
 fsimg tf data.img --json /

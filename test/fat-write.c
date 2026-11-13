@@ -1935,6 +1935,624 @@ create_minimized_external(const char *directory, const char *format)
 	fixture_close(&fixture);
 }
 
+static void
+add_placement_fixture(writer_fixture_t *fixture, bool reverse)
+{
+	static const struct {
+		const char *path;
+		fsimg_entry_kind_t kind;
+		uint64_t size;
+		fsimg_source_kind_t source_kind;
+	} rows[] = {
+		{ .path = "/EMPTY", .kind = FSIMG_ENTRY_FILE, .size = 0,
+		  .source_kind = FSIMG_SOURCE_PROVIDER },
+		/* F0000002 must skip both later placed runs to fit. */
+		{ .path = "/F0000000", .kind = FSIMG_ENTRY_FILE, .size = 1025,
+		  .source_kind = FSIMG_SOURCE_PROVIDER },
+		{ .path = "/F0000002", .kind = FSIMG_ENTRY_FILE,
+		  .size = 4097, .source_kind = FSIMG_SOURCE_PROVIDER },
+		{ .path = "/HELLO.TXT", .kind = FSIMG_ENTRY_FILE, .size = 513,
+		  .source_kind = FSIMG_SOURCE_PROVIDER },
+		{ .path = "/Nested", .kind = FSIMG_ENTRY_DIRECTORY, .size = 0,
+		  .source_kind = FSIMG_SOURCE_PROVIDER },
+		{ .path = "/Nested/long name.txt", .kind = FSIMG_ENTRY_FILE,
+		  .size = 1537, .source_kind = FSIMG_SOURCE_PROVIDER },
+		{ .path = "/R\303\251sum\303\251 collection.txt", .kind = FSIMG_ENTRY_FILE,
+		  .size = sizeof(payload) - 1, .source_kind = FSIMG_SOURCE_PROVIDER },
+		{ .path = "/ZERO", .kind = FSIMG_ENTRY_FILE,
+		  .size = sizeof(payload) - 1, .source_kind = FSIMG_SOURCE_ZERO },
+		{ .path = "/f0000001", .kind = FSIMG_ENTRY_FILE,
+		  .size = sizeof(payload) - 1, .source_kind = FSIMG_SOURCE_PROVIDER }
+	};
+	fsimg_entry_t entry;
+	fsimg_source_t source;
+	size_t index, count = sizeof(rows) / sizeof(rows[0]);
+
+	for (size_t i = 0; i < count; i++) {
+		index = reverse ? count - i - 1 : i;
+		bzero(&entry, sizeof(entry));
+		entry.path = rows[index].path;
+		entry.kind = rows[index].kind;
+		entry.size = rows[index].size;
+		bzero(&source, sizeof(source));
+		source.kind = rows[index].source_kind;
+		source.id = source.kind == FSIMG_SOURCE_ZERO ? 0 : 1;
+		CHECK(fsimg_writer_add(fixture->writer, &entry,
+		    entry.kind == FSIMG_ENTRY_DIRECTORY ? NULL : &source, NULL) == FSIMG_OK);
+	}
+}
+
+/* Read table entries directly so a redirected placed chain is observable
+ * independently of the reader's chain traversal.
+ */
+static uint32_t
+placement_fat(const memory_sink_t *sink, const fat_geometry_t *g, uint32_t c)
+{
+	const unsigned char *p = sink->bytes + g->fat_offset;
+
+	if (g->variant == 12) {
+		uint32_t pair = fsimg_load_le16(p + c + c / 2);
+
+		return (c % 2 == 0 ? pair & 0xfff : pair >> 4);
+	}
+	return (g->variant == 32 ? fsimg_load_le32(p + c * 4) & 0x0fffffff :
+	    fsimg_load_le16(p + c * 2));
+}
+
+static bool
+placement_chain(const memory_sink_t *sink, const fat_geometry_t *g,
+    uint32_t first, uint32_t count)
+{
+	uint32_t value;
+
+	for (uint32_t i = 0; i < count; i++) {
+		value = placement_fat(sink, g, first + i);
+		if (i + 1 == count ? value < g->eoc_value : value != first + i + 1)
+			return (false);
+	}
+	return (true);
+}
+
+static bool
+placement_zero(const memory_sink_t *sink, uint64_t start, uint64_t end)
+{
+
+	CHECK(start <= end && end <= sink->length);
+	for (uint64_t i = start; i < end; i++)
+		if (sink->bytes[i] != 0)
+			return (false);
+	return (true);
+}
+
+static uint32_t
+placement_entry_cluster(const unsigned char *entry)
+{
+
+	return ((uint32_t)fsimg_load_le16(entry + 20) << 16 |
+	    fsimg_load_le16(entry + 26));
+}
+
+/* Resolve each requested ASCII fixture path independently, using its long
+ * name or 8.3 name. Fixture subdirectories fit one cluster. Return the byte
+ * offset of the short entry, so the same lookup can seed a cluster swap.
+ */
+static uint64_t
+placement_find_entry(const memory_sink_t *sink, const fat_geometry_t *g,
+    const char *path)
+{
+	static const unsigned positions[] = {
+		1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30
+	};
+	const unsigned char *entry;
+	const char *component, *slash;
+	uint64_t directory, length, found;
+	size_t component_length, n, slot;
+	char long_name[261], short_name[13];
+
+	directory = g->variant == 32 ? g->data_offset +
+	    (uint64_t)(g->root_cluster - 2) * g->cluster_bytes : g->root_offset;
+	length = g->variant == 32 ? g->cluster_bytes : g->root_entries * 32;
+	component = path + 1;
+	for (;;) {
+		slash = strchr(component, '/');
+		component_length = slash == NULL ? strlen(component) :
+		    (size_t)(slash - component);
+		bzero(long_name, sizeof(long_name));
+		found = UINT64_MAX;
+		for (uint64_t i = 0; i < length; i += 32) {
+			entry = sink->bytes + directory + i;
+			if (entry[0] == 0)
+				break;
+			if (entry[11] == 0x0f) {
+				slot = entry[0] & 0x1f;
+				CHECK(slot > 0 && slot <= 20);
+				if ((entry[0] & 0x40) != 0)
+					bzero(long_name, sizeof(long_name));
+				for (unsigned j = 0; j < 13; j++) {
+					uint16_t unit = fsimg_load_le16(entry + positions[j]);
+
+					long_name[(slot - 1) * 13 + j] =
+					    unit < 128 ? (char)unit : '\0';
+				}
+				continue;
+			}
+			n = 0;
+			for (unsigned j = 0; j < 8 && entry[j] != ' '; j++)
+				short_name[n++] = (char)entry[j];
+			if (entry[8] != ' ')
+				short_name[n++] = '.';
+			for (unsigned j = 8; j < 11 && entry[j] != ' '; j++)
+				short_name[n++] = (char)entry[j];
+			short_name[n] = '\0';
+			if (entry[0] != 0xe5 && (entry[11] & 8) == 0 &&
+			    ((strlen(long_name) == component_length &&
+			    strncasecmp(long_name, component, component_length) == 0) ||
+			    (strlen(short_name) == component_length &&
+			    strncasecmp(short_name, component, component_length) == 0))) {
+				found = directory + i;
+				break;
+			}
+			bzero(long_name, sizeof(long_name));
+		}
+		if (found == UINT64_MAX || slash == NULL)
+			return (found);
+		entry = sink->bytes + found;
+		if ((entry[11] & 16) == 0)
+			return (UINT64_MAX);
+		directory = g->data_offset +
+		    (uint64_t)(placement_entry_cluster(entry) - 2) * g->cluster_bytes;
+		length = g->cluster_bytes;
+		component = slash + 1;
+	}
+}
+
+static bool
+placement_paths_match(const memory_sink_t *sink, const fat_geometry_t *g,
+    const fsimg_placement_t *placements, size_t count)
+{
+	uint64_t entry, offset;
+	uint32_t first;
+
+	for (size_t p = 0; p < count; p++) {
+		entry = placement_find_entry(sink, g, placements[p].path);
+		if (entry == UINT64_MAX)
+			return (false);
+		first = placement_entry_cluster(sink->bytes + entry);
+		if (first < 2 || first >= g->clusters + 2)
+			return (false);
+		offset = g->data_offset + (uint64_t)(first - 2) * g->cluster_bytes;
+		if (offset != placements[p].offset)
+			return (false);
+	}
+	return (true);
+}
+
+/* claimed[] checks that every file and directory owns disjoint contiguous
+ * chains, independently of the writer's allocation counters.
+ */
+static void
+placement_directory(const memory_sink_t *sink, const fat_geometry_t *g,
+    uint64_t offset, uint64_t length, bool *claimed)
+{
+	const unsigned char *entry;
+	uint32_t first, count, current, next;
+	uint64_t size, start;
+	bool directory;
+
+	for (uint64_t i = 0; i < length; i += 32) {
+		entry = sink->bytes + offset + i;
+		if (entry[0] == 0)
+			break;
+		if (entry[0] == 0xe5 || (entry[11] & 8) != 0 || entry[0] == '.')
+			continue;
+		first = placement_entry_cluster(entry);
+		directory = (entry[11] & 16) != 0;
+		size = fsimg_load_le32(entry + 28);
+		count = directory ? 1 : (uint32_t)((size + g->cluster_bytes - 1) /
+		    g->cluster_bytes);
+		if (count == 0) {
+			CHECK(first == 0);
+			continue;
+		}
+		start = g->data_offset + (uint64_t)(first - 2) * g->cluster_bytes;
+		CHECK(placement_chain(sink, g, first, count));
+		current = first;
+		for (uint32_t j = 0; j < count; j++) {
+			CHECK(current >= 2 && current < g->clusters + 2);
+			CHECK(!claimed[current]);
+			claimed[current] = true;
+			next = placement_fat(sink, g, current);
+			if (j + 1 == count)
+				CHECK(next >= g->eoc_value);
+			current = next;
+		}
+		if (directory) {
+			/* A child of the relocated FAT32 root still encodes .. as 0. */
+			CHECK(placement_entry_cluster(sink->bytes + start + 32) == 0);
+			placement_directory(sink, g, start, g->cluster_bytes,
+			    claimed);
+		}
+	}
+}
+
+/* Seed: without place the offset comparison fails. Reverse insertion and
+ * change cache budgets to expose order-dependent allocation or stale bytes.
+ */
+static void
+test_placed_files_start_at_their_offsets(const char *format, bool several)
+{
+	fsimg_placement_t placements[] = {
+		{ .path = "/F0000000", .offset = 4194304 },
+		{ .path = "/HELLO.TXT", .offset = 4196352 },
+		{ .path = "/Nested/long name.txt", .offset = 4198400 }
+	};
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_plan_info_t info;
+	memory_sink_t sinks[3] = { 0 }, seeded;
+	fat_geometry_t g;
+	bool *claimed;
+	uint64_t root, padding, allocated, left, right;
+	unsigned char saved[2];
+	static const unsigned cluster_fields[] = { 20, 26 };
+	static const unsigned placed_sizes[] = { 1025, 513, 1537 };
+	uint32_t highest, first, count;
+
+	if (strcmp(format, "fat12") == 0)
+		for (unsigned p = 0; p < 3; p++)
+			placements[p].offset -= 3670016;
+
+	for (unsigned pass = 0; pass < 3; pass++) {
+		fsimg_write_options_init(&options);
+		options.flags |= FSIMG_WRITE_REPRODUCIBLE;
+		options.allocation_unit_bytes = 512;
+		options.volume_bytes = strcmp(format, "fat32") == 0 ? 41943040 :
+		    strcmp(format, "fat12") == 0 ? 2097152 : 8388608;
+		options.placements = placements;
+		options.placement_count = pass == 2 ? 0 : several ? 3 : 1;
+		fixture_open(&fixture, format, &options, pass == 1 ? 16 : 1);
+		add_placement_fixture(&fixture, pass == 1);
+		emit_minimize_image(&fixture, &sinks[pass], &info);
+		check_contents(&fixture, &sinks[pass]);
+		CHECK(fsimg_fat_geometry_decode(sinks[pass].bytes,
+		    sinks[pass].length, sinks[pass].length, &g, NULL) == FSIMG_OK);
+		if (pass == 2) {
+			CHECK(g.data_offset != placements[0].offset);
+			/* The control must contain the offset being compared. */
+			CHECK(sinks[pass].length > placements[0].offset + sizeof(payload));
+			CHECK(bcmp(sinks[pass].bytes + placements[0].offset,
+			    payload, sizeof(payload) - 1) != 0);
+			fixture_close(&fixture);
+			continue;
+		}
+		CHECK(g.data_offset == placements[0].offset);
+		CHECK(placement_paths_match(&sinks[pass], &g, placements,
+		    options.placement_count));
+		if (several) {
+			/* The 9-cluster unplaced run fits in neither intervening gap. */
+			left = placement_find_entry(&sinks[pass], &g, "/F0000002");
+			CHECK(left != UINT64_MAX);
+			first = placement_entry_cluster(sinks[pass].bytes + left);
+			CHECK(g.data_offset + (uint64_t)(first - 2) * g.cluster_bytes >=
+			    placements[2].offset + 2048);
+		}
+		for (unsigned p = 0; p < options.placement_count; p++)
+			for (unsigned i = 0; i < placed_sizes[p]; i++)
+				CHECK(sinks[pass].bytes[placements[p].offset + i] ==
+				    (unsigned char)payload[i % (sizeof(payload) - 1)]);
+		padding = g.variant == 32 ? 32 * 512 : 512;
+		CHECK(placement_zero(&sinks[pass], padding, g.fat_offset));
+		seeded = sinks[pass];
+		seeded.bytes = malloc((size_t)seeded.length);
+		CHECK(seeded.bytes != NULL);
+		bcopy(sinks[pass].bytes, seeded.bytes, (size_t)seeded.length);
+		/* Seed: one stale padding byte must fail the same scan. */
+		seeded.bytes[padding] = 1;
+		CHECK(!placement_zero(&seeded, padding, g.fat_offset));
+		seeded.bytes[padding] = 0;
+		first = 2;
+		count = 3;
+		CHECK(placement_chain(&sinks[pass], &g, first, count));
+		/* Seed: redirect the first placed FAT entry to a free cluster. */
+		seeded.bytes[g.fat_offset + (g.variant == 12 ? first + first / 2 :
+		    first * (g.variant / 8))] = 0;
+		CHECK(!placement_chain(&seeded, &g, first, count));
+		if (several) {
+			/* Seed: exchange only the two short entries' start clusters. */
+			bcopy(sinks[pass].bytes, seeded.bytes, (size_t)seeded.length);
+			left = placement_find_entry(&seeded, &g, placements[1].path);
+			right = placement_find_entry(&seeded, &g, placements[2].path);
+			CHECK(left != UINT64_MAX && right != UINT64_MAX);
+			for (unsigned j = 0; j < 2; j++) {
+				bcopy(seeded.bytes + left + cluster_fields[j], saved, 2);
+				bcopy(seeded.bytes + right + cluster_fields[j],
+				    seeded.bytes + left + cluster_fields[j], 2);
+				bcopy(saved, seeded.bytes + right + cluster_fields[j], 2);
+			}
+			CHECK(!placement_paths_match(&seeded, &g, placements,
+			    options.placement_count));
+		}
+		free(seeded.bytes);
+		claimed = calloc((size_t)g.clusters + 2, sizeof(*claimed));
+		CHECK(claimed != NULL);
+		root = g.root_offset;
+		if (g.variant == 32) {
+			CHECK(g.root_cluster != 2);
+			CHECK(fsimg_load_le32(sinks[pass].bytes + 44) == g.root_cluster);
+			CHECK(placement_chain(&sinks[pass], &g, g.root_cluster, 1));
+			claimed[g.root_cluster] = true;
+			root = g.data_offset + (uint64_t)(g.root_cluster - 2) * g.cluster_bytes;
+		}
+		placement_directory(&sinks[pass], &g, root,
+		    g.variant == 32 ? g.cluster_bytes : g.root_entries * 32, claimed);
+		allocated = 0;
+		highest = 1;
+		for (uint32_t c = 2; c < g.clusters + 2; c++) {
+			if (placement_fat(&sinks[pass], &g, c) != 0) {
+				allocated++;
+				highest = c;
+				CHECK(claimed[c]);
+			} else {
+				CHECK(placement_zero(&sinks[pass],
+				    g.data_offset + (uint64_t)(c - 2) * g.cluster_bytes,
+				    g.data_offset + (uint64_t)(c - 1) * g.cluster_bytes));
+			}
+		}
+		if (g.variant == 32) {
+			CHECK(fsimg_load_le32(sinks[pass].bytes + 512 + 488) ==
+			    g.clusters - allocated);
+			CHECK(fsimg_load_le32(sinks[pass].bytes + 512 + 492) == highest + 1);
+		}
+		free(claimed);
+		fixture_close(&fixture);
+	}
+	CHECK(sinks[0].length == sinks[1].length);
+	CHECK(bcmp(sinks[0].bytes, sinks[1].bytes, (size_t)sinks[0].length) == 0);
+	for (unsigned pass = 0; pass < 3; pass++)
+		free(sinks[pass].bytes);
+}
+
+/* Each rejected option is the seed; restoring only that option must emit
+ * a readable image with the same catalog.
+ */
+static void
+test_placement_refusals_pair_with_corrected_options(void)
+{
+	static const struct {
+		const char *name;
+		const char *path;
+		uint64_t offset;
+		uint32_t cluster;
+		uint64_t corrected_offset;
+		const char *corrected_path;
+		bool highest_run;
+		bool collision;
+		fsimg_status_t status;
+		const char *message;
+	} cases[] = {
+		{ .name = "misaligned to sector",
+		  .path = "/HELLO.TXT", .offset = 3145729, .corrected_offset = 3145728,
+		  .status = FSIMG_EINVAL,
+		  .message = NULL },
+		{ .name = "misaligned to cluster",
+		  .path = "/HELLO.TXT", .offset = 3146240, .corrected_offset = 3145728,
+		  .cluster = 1024,
+		  .status = FSIMG_EINVAL, .message = NULL },
+		{ .name = "missing file", .path = "/missing", .corrected_path = "/HELLO.TXT",
+		  .offset = 3145728, .status = FSIMG_EINVAL,
+		  .message = "place names no file in the image" },
+		{ .name = "directory", .path = "/Nested", .corrected_path = "/HELLO.TXT",
+		  .offset = 3145728, .status = FSIMG_EINVAL,
+		  .message = "place must name a nonempty regular file" },
+		{ .name = "empty file", .path = "/EMPTY", .corrected_path = "/HELLO.TXT",
+		  .offset = 3145728, .status = FSIMG_EINVAL,
+		  .message = "place must name a nonempty regular file" },
+		{ .name = "two colliding runs",
+		  .path = "/ZERO", .offset = 3145728, .collision = true,
+		  .status = FSIMG_ERANGE, .message = "overlap" },
+		{ .name = "no room for metadata",
+		  .path = "/HELLO.TXT", .offset = 512, .corrected_offset = 3145728,
+		  .status = FSIMG_ERANGE,
+		  .message = "leaves no room" },
+		{ .name = "offset exceeds format size limits",
+		  .path = "/HELLO.TXT", .offset = 67108864, .corrected_offset = 3145728,
+		  .status = FSIMG_ERANGE,
+		  .message = "size limits" },
+		{ .name = "aligned offset near UINT64_MAX",
+		  .path = "/HELLO.TXT", .offset = UINT64_MAX & ~UINT64_C(0xfff),
+		  .corrected_offset = 3145728,
+		  .status = FSIMG_ERANGE, .message = "size limits" },
+		{ .name = "highest run exceeds fixed volume",
+		  .path = "/HELLO.TXT", .offset = 3145728, .highest_run = true,
+		  .status = FSIMG_ERANGE, .message = "at the placed offsets" }
+	};
+	static const char *const formats[] = { "fat16", "fat32" };
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_placement_t placements[2];
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	memory_sink_t sink;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	for (unsigned f = 0; f < 2; f++) {
+		for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+			for (unsigned corrected = 0; corrected < 2; corrected++) {
+				fsimg_write_options_init(&options);
+				placements[0].path = corrected && cases[c].corrected_path != NULL ?
+				    cases[c].corrected_path : cases[c].path;
+				placements[0].offset = corrected && cases[c].corrected_offset != 0 ?
+				    cases[c].corrected_offset : cases[c].offset;
+				placements[1].path = "/F0000000";
+				placements[1].offset = corrected ? 3276800 : 3146240;
+				options.placements = placements;
+				options.placement_count =
+				    cases[c].collision || cases[c].highest_run ? 2 : 1;
+				options.allocation_unit_bytes = cases[c].cluster == 0 ?
+				    512 : cases[c].cluster;
+				if (cases[c].highest_run) {
+					placements[0].offset = 3145728;
+					placements[1].path = "/ZERO";
+					placements[1].offset = (f == 0 ? 8388608 : 41943040) - 512;
+					if (!corrected)
+						options.volume_bytes = f == 0 ? 8388608 : 41943040;
+				}
+				fixture_open(&fixture, formats[f], NULL, 1);
+				fsimg_writer_free(fixture.writer);
+				fixture.writer = NULL;
+				status = fsimg_writer_new(fixture.ctx, formats[f],
+				    &options, &fixture.writer, &error);
+				if (status == FSIMG_OK) {
+					fsimg_source_ops_t ops;
+
+					fsimg_source_ops_init(&ops);
+					ops.validate = provider_validate;
+					ops.read_at = provider_read;
+					CHECK(fsimg_writer_set_sources(fixture.writer, &ops,
+					    &fixture, NULL) == FSIMG_OK);
+					add_fixture(&fixture, false);
+					status = fsimg_writer_plan(fixture.writer, &plan, &error);
+				}
+				if (corrected) {
+					CHECK(status == FSIMG_OK);
+					bzero(&sink, sizeof(sink));
+					emit_minimize_image(&fixture, &sink, &info);
+					check_contents(&fixture, &sink);
+					free(sink.bytes);
+				} else {
+					if (status != cases[c].status ||
+					    (cases[c].message != NULL &&
+					    strstr(error.message, cases[c].message) == NULL))
+						fprintf(stderr, "%s refusal %s: %d: %s\n",
+						    formats[f], cases[c].name, status, error.message);
+					CHECK(status == cases[c].status);
+					if (cases[c].message == NULL)
+						CHECK(strcmp(error.path, "place") == 0);
+					else
+						CHECK(strstr(error.message, cases[c].message) != NULL);
+				}
+				fixture_close(&fixture);
+			}
+		}
+	}
+}
+
+/* The highest file ends exactly at the volume boundary. A reserve can only
+ * come from the gap between the two placed files, never from trailing space.
+ */
+static void
+test_placement_gaps_count_toward_free_reserve(void)
+{
+	fsimg_placement_t placements[] = {
+		{ .path = "/LOW.TXT", .offset = 3145728 },
+		{ .path = "/HIGH.TXT", .offset = 8388608 - 512 }
+	};
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_entry_t entry = { .kind = FSIMG_ENTRY_FILE, .size = 31 };
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER, .id = 1 };
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	memory_sink_t sink = { 0 };
+	fat_geometry_t g;
+	uint64_t allocated;
+
+	for (unsigned excessive = 0; excessive < 2; excessive++) {
+		fsimg_write_options_init(&options);
+		options.volume_bytes = 8388608;
+		options.allocation_unit_bytes = 512;
+		options.placements = placements;
+		options.placement_count = 2;
+		options.min_free_bytes = excessive ? 5242880 : 512;
+		fixture_open(&fixture, "fat16", &options, 1);
+		for (unsigned p = 0; p < 2; p++) {
+			entry.path = placements[p].path;
+			CHECK(fsimg_writer_add(fixture.writer, &entry, &source, NULL) ==
+			    FSIMG_OK);
+		}
+		if (excessive) {
+			CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_ERANGE);
+			fixture_close(&fixture);
+			continue;
+		}
+		CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+		emit_minimize_image(&fixture, &sink, &info);
+		CHECK(sink.length == options.volume_bytes);
+		CHECK(fsimg_fat_geometry_decode(sink.bytes, sink.length,
+		    sink.length, &g, NULL) == FSIMG_OK);
+		CHECK(placement_paths_match(&sink, &g, placements, 2));
+		allocated = 0;
+		for (uint32_t c = 2; c < g.clusters + 2; c++)
+			if (placement_fat(&sink, &g, c) != 0)
+				allocated++;
+		CHECK(allocated == 2);
+		CHECK(info.free_bytes >= 512);
+		CHECK(info.free_bytes == (g.clusters - allocated) * 512);
+		CHECK(info.free_bytes < 5242880);
+		for (unsigned p = 0; p < 2; p++)
+			CHECK(bcmp(sink.bytes + placements[p].offset, payload, 31) == 0);
+		free(sink.bytes);
+		fixture_close(&fixture);
+	}
+}
+
+/* Seed: fixing each dividing cluster independently supplies the minimum
+ * oracle; a half-cluster offset rules out every candidate larger than 512.
+ */
+static void
+test_minimized_placement_keeps_data_start_and_dividing_cluster(void)
+{
+	static const char *const formats[] = { "fat16", "fat32" };
+	writer_fixture_t fixture;
+	fsimg_write_options_t options;
+	fsimg_placement_t placement = { .path = "/HELLO.TXT", .offset = 3145728 };
+	const fsimg_plan_t *plan;
+	fsimg_plan_info_t info;
+	memory_sink_t sink = { 0 };
+	fat_geometry_t g;
+	uint64_t smallest;
+
+	for (unsigned f = 0; f < 2; f++) {
+		smallest = UINT64_MAX;
+		for (uint32_t cluster = 512; cluster <= 32768; cluster *= 2) {
+			fsimg_write_options_init(&options);
+			options.flags |= FSIMG_WRITE_MINIMIZE;
+			options.placements = &placement;
+			options.placement_count = 1;
+			options.allocation_unit_bytes = cluster;
+			fixture_open(&fixture, formats[f], &options, 1);
+			add_fixture(&fixture, false);
+			CHECK(fsimg_writer_plan(fixture.writer, &plan, NULL) == FSIMG_OK);
+			CHECK(fsimg_plan_get_info(plan, &info, NULL) == FSIMG_OK);
+			if (info.volume_bytes < smallest)
+				smallest = info.volume_bytes;
+			fixture_close(&fixture);
+		}
+		options.allocation_unit_bytes = 0;
+		fixture_open(&fixture, formats[f], &options, 1);
+		add_fixture(&fixture, false);
+		emit_minimize_image(&fixture, &sink, &info);
+		CHECK(info.volume_bytes == smallest);
+		CHECK(fsimg_fat_geometry_decode(sink.bytes, sink.length,
+		    sink.length, &g, NULL) == FSIMG_OK);
+		CHECK(g.data_offset == placement.offset);
+		free(sink.bytes);
+		fixture_close(&fixture);
+		placement.offset += 512;
+		fixture_open(&fixture, formats[f], &options, 1);
+		add_fixture(&fixture, false);
+		emit_minimize_image(&fixture, &sink, &info);
+		CHECK(info.allocation_unit_bytes == 512);
+		CHECK(fsimg_fat_geometry_decode(sink.bytes, sink.length,
+		    sink.length, &g, NULL) == FSIMG_OK);
+		CHECK(g.data_offset == placement.offset);
+		free(sink.bytes);
+		fixture_close(&fixture);
+		placement.offset -= 512;
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1998,6 +2616,14 @@ main(int argc, char **argv)
 		return (0);
 	}
 	CHECK(argc == 1);
+	test_placed_files_start_at_their_offsets("fat12", false);
+	test_placed_files_start_at_their_offsets("fat16", false);
+	test_placed_files_start_at_their_offsets("fat32", false);
+	test_placed_files_start_at_their_offsets("fat16", true);
+	test_placed_files_start_at_their_offsets("fat32", true);
+	test_placement_refusals_pair_with_corrected_options();
+	test_placement_gaps_count_toward_free_reserve();
+	test_minimized_placement_keeps_data_start_and_dividing_cluster();
 	test_minimize_large_files();
 	test_minimize_tiny_files_and_constraints();
 	test_minimize_search_limits();

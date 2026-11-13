@@ -17,11 +17,31 @@
  * implementations; no payload staging or whole FAT is used. Payloads are
  * copied by the common emission object.
  */
+
+/* The FAT stream: entries packed least significant bit first, so FAT12
+ * pairs share a byte, into the emission buffer, which goes to both copies
+ * whenever it fills. written counts the bytes already sent to each copy.
+ */
+typedef struct fat_table_out {
+	unsigned char	*buffer;
+	uint64_t	 written;
+	uint64_t	 accumulator;
+	size_t		 used;
+	unsigned	 bits;
+} fat_table_out_t;
+
 static uint64_t layout_offset(const fat_plan_t *, const fat_layout_t *);
 static fsimg_status_t emit_boot(fat_plan_t *, fsimg_emit_t *, fsimg_error_t *);
+static fsimg_status_t table_flush(fat_plan_t *, fsimg_emit_t *,
+    fat_table_out_t *, fsimg_error_t *);
+static fsimg_status_t table_put(fat_plan_t *, fsimg_emit_t *,
+    fat_table_out_t *, uint32_t, fsimg_error_t *);
+static fsimg_status_t next_row_run(fat_plan_t *, uint64_t *, fat_layout_t *,
+    fsimg_error_t *);
 static fsimg_status_t emit_fat(fat_plan_t *, fsimg_emit_t *, fsimg_error_t *);
 static fsimg_status_t emit_directory_header(fat_plan_t *, fsimg_emit_t *,
-    uint64_t, const fat_layout_t *, const fat_layout_t *, fsimg_error_t *);
+    uint64_t, uint64_t, const fat_layout_t *, const fat_layout_t *,
+    fsimg_error_t *);
 static fsimg_status_t emit_child(fat_plan_t *, fsimg_emit_t *, const char *,
     const fat_layout_t *, const fat_layout_t *, fsimg_error_t *);
 static fsimg_status_t emit_entries(fat_plan_t *, fsimg_emit_t *,
@@ -73,7 +93,7 @@ emit_boot(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	extension = plan->variant == 32 ? 64 : 36;
 	if (plan->variant == 32) {
 		fsimg_store_le32(boot + 36, fat_sectors);
-		fsimg_store_le32(boot + 44, 2);
+		fsimg_store_le32(boot + 44, plan->root_cluster);
 		fsimg_store_le16(boot + 48, 1);
 		fsimg_store_le16(boot + 50, 6);
 	} else
@@ -104,8 +124,8 @@ emit_boot(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	fsimg_store_le32(info, 0x41615252);
 	fsimg_store_le32(info + 484, 0x61417272);
 	fsimg_store_le32(info + 488, plan->clusters - plan->allocated);
-	fsimg_store_le32(info + 492, plan->allocated < plan->clusters ?
-	    plan->allocated + 2 : UINT32_MAX);
+	fsimg_store_le32(info + 492, plan->used_end < plan->clusters + 2 ?
+	    plan->used_end : UINT32_MAX);
 	fsimg_store_le32(info + 508, 0xaa550000);
 	status = fsimg_emit_write(emit, sector, info, sizeof(info), error);
 	if (status != FSIMG_OK)
@@ -114,72 +134,128 @@ emit_boot(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	    sizeof(info), error));
 }
 
-/* Allocations are contiguous and ordered by catalog ID. A single cursor over
- * plan rows supplies chain successors. The bit accumulator packs FAT12 across
- * transfer boundaries as well as the byte-aligned FAT16/FAT32 cases.
- * Free entries and table padding remain zero from output initialization.
+static fsimg_status_t
+table_flush(fat_plan_t *plan, fsimg_emit_t *emit, fat_table_out_t *out,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = fsimg_emit_write(emit, plan->fat_offset + out->written,
+	    out->buffer, out->used, error);
+	if (status != FSIMG_OK)
+		return (status);
+	status = fsimg_emit_write(emit,
+	    plan->fat_offset + plan->fat_bytes + out->written, out->buffer,
+	    out->used, error);
+	out->written += out->used;
+	out->used = 0;
+	return (status);
+}
+
+static fsimg_status_t
+table_put(fat_plan_t *plan, fsimg_emit_t *emit, fat_table_out_t *out,
+    uint32_t value, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	out->accumulator |= (uint64_t)value << out->bits;
+	out->bits += plan->variant;
+	while (out->bits >= 8) {
+		out->buffer[out->used++] = (unsigned char)out->accumulator;
+		out->accumulator >>= 8;
+		out->bits -= 8;
+		if (out->used != FSIMG_EMIT_BUFFER_BYTES)
+			continue;
+		status = table_flush(plan, emit, out, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (FSIMG_OK);
+}
+
+/* The next row from *row_id on that owns a run next fit gave it, or a row
+ * with no clusters when none remains. Next fit hands out runs in ID order
+ * at increasing clusters, so these rows come in cluster order; placed rows
+ * do not, and emit_fat takes their runs from plan->placed instead.
+ */
+static fsimg_status_t
+next_row_run(fat_plan_t *plan, uint64_t *row_id, fat_layout_t *row,
+    fsimg_error_t *error)
+{
+	fsimg_status_t status;
+	uint64_t id;
+
+	while (*row_id <= plan->common.writer->count) {
+		id = (*row_id)++;
+		status = fsimg_fat_layout_get(plan, id, row, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (row->clusters != 0 &&
+		    fsimg_fat_placed_index(plan, id) == plan->placed_count)
+			return (FSIMG_OK);
+	}
+	row->clusters = 0;
+	return (FSIMG_OK);
+}
+
+/* Stream the table in cluster order through the highest used cluster,
+ * merging the two sorted sequences of runs: the next-fit rows and the
+ * placed runs. Each run chains to its successor cluster and ends in the
+ * end-of-chain mark; a cluster in neither sequence is a free gap left
+ * before a placed run and encodes zero. Entries past the highest used
+ * cluster and the table padding remain zero from output initialization.
  */
 static fsimg_status_t
 emit_fat(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 {
-	unsigned char *buffer = fsimg_emit_buffer(emit);
+	fat_table_out_t out = { .buffer = fsimg_emit_buffer(emit) };
 	fat_layout_t row;
-	uint64_t row_id, written, accumulator;
-	uint32_t value, eoc;
-	size_t used;
-	unsigned bits;
+	uint64_t row_id;
+	uint32_t cluster, first, end, eoc, placed;
 	fsimg_status_t status;
+	bool from_row;
 
-	bzero(&row, sizeof(row));
-	row_id = written = accumulator = 0;
-	used = bits = 0;
 	eoc = plan->variant == 12 ? 0xfff :
 	    plan->variant == 16 ? 0xffff : 0x0fffffff;
-	for (uint32_t cluster = 0; cluster < plan->allocated + 2; cluster++) {
-		if (cluster < 2)
-			value = cluster == 0 ? eoc & ~7u : eoc;
-		else {
-			while (row.clusters == 0 || cluster >= row.first + row.clusters) {
-				status = fsimg_fat_layout_get(plan, row_id, &row, error);
-				if (status != FSIMG_OK)
-					return (status);
-				row_id++;
-			}
-			value = cluster + 1 == row.first + row.clusters ? eoc : cluster + 1;
-		}
-		accumulator |= (uint64_t)value << bits;
-		bits += plan->variant;
-		while (bits >= 8) {
-			buffer[used++] = (unsigned char)accumulator;
-			accumulator >>= 8;
-			bits -= 8;
-			if (used != FSIMG_EMIT_BUFFER_BYTES)
-				continue;
-			status = fsimg_emit_write(emit, plan->fat_offset + written,
-			    buffer, used, error);
-			if (status != FSIMG_OK)
-				return (status);
-			status = fsimg_emit_write(emit,
-			    plan->fat_offset + plan->fat_bytes + written, buffer, used, error);
-			if (status != FSIMG_OK)
-				return (status);
-			written += used;
-			used = 0;
-		}
+	status = table_put(plan, emit, &out, eoc & ~7u, error);
+	if (status == FSIMG_OK)
+		status = table_put(plan, emit, &out, eoc, error);
+	row_id = 0;
+	if (status == FSIMG_OK)
+		status = next_row_run(plan, &row_id, &row, error);
+	cluster = 2;
+	placed = 0;
+	while (status == FSIMG_OK) {
+		from_row = row.clusters != 0 && (placed == plan->placed_count ||
+		    row.first < plan->placed[placed].first);
+		if (from_row) {
+			first = row.first;
+			end = row.first + row.clusters;
+		} else if (placed < plan->placed_count) {
+			first = plan->placed[placed].first;
+			end = first + plan->placed[placed].clusters;
+			placed++;
+		} else
+			break;
+		for (; status == FSIMG_OK && cluster < first; cluster++)
+			status = table_put(plan, emit, &out, 0, error);
+		for (; status == FSIMG_OK && cluster < end; cluster++)
+			status = table_put(plan, emit, &out,
+			    cluster + 1 == end ? eoc : cluster + 1, error);
+		if (status == FSIMG_OK && from_row)
+			status = next_row_run(plan, &row_id, &row, error);
 	}
-	if (bits != 0)
-		buffer[used++] = (unsigned char)accumulator;
-	status = fsimg_emit_write(emit, plan->fat_offset + written, buffer,
-	    used, error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (fsimg_emit_write(emit, plan->fat_offset + plan->fat_bytes + written,
-	    buffer, used, error));
+	if (out.bits != 0)
+		out.buffer[out.used++] = (unsigned char)out.accumulator;
+	return (table_flush(plan, emit, &out, error));
 }
 
 static fsimg_status_t
 emit_directory_header(fat_plan_t *plan, fsimg_emit_t *emit, uint64_t id,
-    const fat_layout_t *row, const fat_layout_t *parent, fsimg_error_t *error)
+    uint64_t parent_id, const fat_layout_t *row, const fat_layout_t *parent,
+    fsimg_error_t *error)
 {
 	unsigned char raw[64];
 	uint32_t parent_cluster;
@@ -199,12 +275,10 @@ emit_directory_header(fat_plan_t *plan, fsimg_emit_t *emit, uint64_t id,
 	raw[32] = raw[33] = '.';
 	raw[11] = raw[43] = 0x10;
 	raw[12] = raw[44] = 0; /* Case flags belong to the directory name only. */
-	parent_cluster = parent->first;
-	/* The FAT32 root always starts at cluster two; '..' still encodes zero
-	 * when it refers to the root, just as on FAT12/16.
+	/* '..' encodes zero when it refers to the root, on FAT32 too, whichever
+	 * cluster the FAT32 root holds.
 	 */
-	if (parent->first == 2 && plan->variant == 32)
-		parent_cluster = 0;
+	parent_cluster = parent_id == 0 ? 0 : parent->first;
 	fsimg_store_le16(raw + 32 + 26, (uint16_t)parent_cluster);
 	fsimg_store_le16(raw + 32 + 20, (uint16_t)(parent_cluster >> 16));
 	return (fsimg_emit_write(emit, layout_offset(plan, row), raw,
@@ -285,7 +359,7 @@ emit_entries(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	status = fsimg_fat_layout_get(plan, 0, &row, error);
 	if (status != FSIMG_OK)
 		return (status);
-	status = emit_directory_header(plan, emit, 0, &row, &row, error);
+	status = emit_directory_header(plan, emit, 0, 0, &row, &row, error);
 	if (status != FSIMG_OK)
 		return (status);
 	for (uint64_t id = 1; id <= plan->common.writer->count; id++) {
@@ -303,7 +377,8 @@ emit_entries(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			return (status);
 		if (row.slots != 0)
-			status = emit_directory_header(plan, emit, id, &row, &parent, error);
+			status = emit_directory_header(plan, emit, id,
+			    catalog->parent_id, &row, &parent, error);
 		else
 			status = emit_payload(plan, emit, id, &row, error);
 		if (status != FSIMG_OK)
@@ -312,9 +387,10 @@ emit_entries(fat_plan_t *plan, fsimg_emit_t *emit, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/* The sink is already zero: emit only the boot region, both FAT copies,
- * and directory contents with their files' payloads. Free clusters, unused
- * FAT entries and slack are never written.
+/* The sink is already zero: emit only the boot region, both FAT copies
+ * through the highest used cluster, and directory contents with their
+ * files' payloads. The reserved padding, free clusters, FAT entries past
+ * the highest used cluster and slack are never written.
  */
 fsimg_status_t
 fsimg_fat_write_emit(fsimg_writer_t *writer, fsimg_emit_t *emit,

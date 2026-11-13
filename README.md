@@ -169,6 +169,16 @@ so it keeps room for more. QNX6 has almost no free inodes unless you pass
 FAT32's 65,525 clusters or exFAT's 1 MiB, and then `-M` gives the same
 image.
 
+A boot medium sometimes needs a file at a known byte offset, so firmware
+can read it without a FAT driver. On FAT12, FAT16 and FAT32,
+`-o place=/kernel8.img@4M` stores that file as one contiguous run starting
+4 MiB into the volume; repeat it for up to 8 files. The data area then
+begins at the lowest such offset, behind zero-filled reserved sectors and
+the FATs, so the lowest offset must leave room for both and stay within about 32 MiB
+with 512-byte sectors, and every offset must be a multiple of the cluster
+size. The placement holds for the image as created: a guest that later
+rewrites the file through its FAT driver may move it.
+
 On Linux, a confined creation refuses a source tree that holds a symbolic
 link, because the sandbox cannot confine reading one. Describe each link
 in an mtree manifest with `type=link`, or pass `-S off` for a trusted

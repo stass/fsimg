@@ -231,6 +231,17 @@ candidate evaluated charges one work unit. The plan reports the volume's
 clusters or blocks as `allocation_units` and, for QNX6, `inode_capacity` and
 `free_inodes`, in `fsimg_plan_info_t`, `c -n` and its JSON record.
 
+`-o place=PATH@OFFSET` stores an image file as one contiguous run at a
+fixed byte offset of a FAT12, FAT16 or FAT32 volume, for firmware that reads
+it without a FAT driver; the setting repeats for up to 8 files. The library
+takes it as `placements` and `placement_count`, an array of
+`fsimg_placement_t` bounded by `FSIMG_PLACEMENT_MAX`, under the new
+`FSIMG_SETTING_PLACEMENT` bit, and the worker job carries it. The data area
+begins at the lowest offset behind zero-filled reserved sectors, the
+cluster size divides every offset, and every other file and directory is
+allocated around the placed runs. Other formats refuse it, before the
+worker starts when `-F` names the format.
+
 `-o root=N` sets the FAT12/FAT16 root directory capacity, the library's
 `fat_root_entries`, under the new `FSIMG_SETTING_ROOT_ENTRIES` bit, so a
 minimized image can leave room in its root. The capacity rounds up to a

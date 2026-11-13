@@ -188,6 +188,9 @@ collect_names(fat_plan_t *plan, fsimg_stream_t *names,
 		status = fsimg_fat_write_metadata(plan, &catalog->entry, row.entry, error);
 		if (status != FSIMG_OK)
 			return (status);
+		status = fsimg_fat_place_match(plan, catalog, error);
+		if (status != FSIMG_OK)
+			return (status);
 		status = fsimg_fat_layout_set(plan, id, &row, error);
 		if (status != FSIMG_OK)
 			return (status);

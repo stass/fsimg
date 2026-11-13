@@ -3,14 +3,21 @@
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
 class CliTest < Minitest::Test
+  # Seed: the unsupported-format cases below reject the same setting.
+  def test_fat16_placement_plans_successfully
+    (@root / "source/kernel8.img").binwrite("placed payload".b)
+    invoke(arguments: ["c", "-n", "-S", "off", "-F", "fat16",
+      "-o", "place=/kernel8.img@4M", "-C", "source", "."])
+  end
+
   def test_placement_repeats_up_to_eight_and_ninth_names_the_overflow_word
     settings = 8.times.flat_map { ["-o", "place=/file#{_1}@#{_1}M"] }
-    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "fat16",
+    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "exfat",
       *settings, "-C", "source", "."], expected: 1)
     assert_includes(result.stderr, "write setting does not apply to the image format".b)
     assert_includes(result.stderr, '"place"'.b)
 
-    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "fat16",
+    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "exfat",
       *settings, "-o", "place=/ninth@9M", "-C", "source", "."], expected: 2)
     assert_includes(result.stderr, "setting key is given more times than its list holds".b)
     assert_includes(result.stderr, "place=/ninth@9M".b)
@@ -26,7 +33,7 @@ class CliTest < Minitest::Test
     }
     cases.each do |value, diagnostic|
       word = "place=#{value}"
-      result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "fat16",
+      result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "exfat",
         "-o", word, "-C", "source", "."], expected: 2)
       assert_includes(result.stderr, diagnostic.b, word)
       assert_includes(result.stderr, word.b)
@@ -35,13 +42,13 @@ class CliTest < Minitest::Test
 
   def test_placement_path_past_text_capacity_is_a_syntax_error
     value = "/#{'k' * 1024}@4M"
-    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "fat16",
+    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "exfat",
       "-o", "place=#{value}", "-C", "source", "."], expected: 2)
     assert_includes(result.stderr, "setting value exceeds its text capacity".b)
   end
 
   def test_placement_path_containing_at_sign_splits_at_the_last_at_sign
-    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "fat16",
+    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "exfat",
       "-o", "place=/a@b@4M", "-C", "source", "."], expected: 1)
     assert_includes(result.stderr, "write setting does not apply to the image format".b)
     assert_includes(result.stderr, '"place"'.b)
@@ -56,18 +63,18 @@ class CliTest < Minitest::Test
   end
 
   def test_placement_applicability_is_checked_after_geometry_syntax
-    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "fat16",
+    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "exfat",
       "-o", "place=/k@4M", "-o", "cluster=3", "-C", "source", "."], expected: 2)
     assert_includes(result.stderr, "geometry byte quantities must be powers of two".b)
 
-    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "fat16",
+    result = invoke(arguments: ["c", "-n", "-S", "off", "-F", "exfat",
       "-o", "place=/k@4M", "-C", "source", "."], expected: 1)
     assert_includes(result.stderr, "write setting does not apply to the image format".b)
     assert_includes(result.stderr, '"place"'.b)
   end
 
   def test_placement_is_refused_for_formats_without_the_capability_before_worker_start
-    %w[fat16 fat32 exfat iso9660].each do |format|
+    %w[exfat iso9660].each do |format|
       result = invoke(arguments: ["c", "-n", "-S", "off", "-F", format,
         "-o", "place=/k@4M", "-C", "missing-source", "."], expected: 1)
       assert_includes(result.stderr, "write setting does not apply to the image format".b, format)

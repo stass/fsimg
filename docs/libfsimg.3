@@ -474,6 +474,40 @@ directory's 32-byte entries, rounded up to a whole sector's worth, at most
 volume label and terminating entry (else FSIMG_ERANGE at planning).
 Zero selects the smallest such root, at least 512 entries without
 FSIMG_WRITE_MINIMIZE; a nonzero value holds under both policies.
+The fixed file placements, placements and placement_count under
+FSIMG_SETTING_PLACEMENT, which FAT12, FAT16 and FAT32 name, are an array of
+placement_count
+.Vt fsimg_placement_t
+records, each an absolute image
+.Fa path
+and an
+.Fa offset
+in bytes from the volume start, at most
+.Dv FSIMG_PLACEMENT_MAX
+(8).
+A zero count is the default and leaves the array unread; a count above the
+bound, a nonzero count with a NULL array, a path that is not an absolute
+image path, and two records sharing a path or an offset are FSIMG_EINVAL.
+Writer construction copies the array and its paths, so the caller may
+release them once
+.Fn fsimg_writer_new
+returns.
+Each path must name a nonempty regular file of the catalog, spelled exactly
+as the catalog spells it (else FSIMG_EINVAL at planning), and the writer
+stores the file as one contiguous run beginning at its offset, with no other
+file or metadata in the run's clusters.
+The FAT data area begins at the lowest offset, where the FATs and the FAT12
+or FAT16 root end; the sectors between the boot sectors and the first FAT
+are reserved and zero.
+Free clusters between placed runs count toward min_free_bytes.
+Every offset is a multiple of the sector size and of a fixed
+cluster size (else FSIMG_EINVAL), and the automatic cluster size divides
+every offset.
+An offset that leaves no room for the boot sectors, FATs and root before it,
+needs more than 65535 reserved sectors, overlaps another placed run or lies
+beyond the volume is FSIMG_ERANGE at planning.
+The guarantee is the created image's: a later writer of the volume may move
+the file.
 ImageFS names FSIMG_SETTING_BYTE_ORDER and FSIMG_SETTING_MOUNTPOINT:
 a NULL mountpoint stores
 .Pa / ,

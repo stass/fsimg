@@ -102,20 +102,25 @@ and holds `ceil(size / cluster_bytes)` clusters.
 The data start fixes the rest of the geometry without a search. The
 reserved count is the data start in sectors less two FATs and the root, and
 must be at least the writer's normal count (1 for FAT12/16, 32 for FAT32)
-and at most the 16-bit field's 65535. With automatic sizing the cluster
-count is the clusters the allocation pass uses, gaps included, at least the
-end of the highest placed run, plus the free reserve, raised to the
-variant's minimum; the FAT length follows from that count and the volume
-ends after the last cluster. With an exact size the cluster count is the
-data area's length in clusters, which must reach the highest run's end and
-the allocation's end, and the FAT length follows from it; no binary search
-is needed because the data start no longer depends on the FAT length. The
-type margins and cluster-range rules are unchanged.
+and at most the 16-bit field's 65535. The clusters a volume needs are the
+greater of the clusters through the allocation pass's highest run, gaps
+included (the cluster after that run less the two reserved entries), and
+the allocated clusters plus the free reserve in clusters: gaps are
+free space, as the FSInfo count below reports them, so they count toward
+the reserve. With automatic sizing the cluster count is that need raised to
+the variant's minimum; the FAT length follows from that count and the
+volume ends after the last cluster. With an exact size the cluster count is
+the data area's length in clusters, which must cover that need, and the FAT
+length follows from it; no binary search is needed because the data start
+does not depend on the FAT length. The type margins and cluster-range rules
+are unchanged.
 
 Two consequences follow and are stated for users. The lowest placement
 cannot lie deep inside a data area whose earlier clusters hold other files:
-earlier bytes are reserved padding, zero, belonging to no file, which a host
-may use for raw sectors a FAT driver never touches. And since the padding is
+the bytes between the boot sectors and the first FAT are reserved padding,
+zero, belonging to no file, which a host may use for raw sectors a FAT
+driver never touches; the FATs and the FAT12/16 root follow the padding and
+end at the lowest offset. And since the padding is
 reserved sectors, the lowest offset is capped by the reserved-count field:
 about 32 MiB with 512-byte sectors (65535 sectors plus the FATs and root),
 proportionally more with larger sectors. Higher placements may sit anywhere

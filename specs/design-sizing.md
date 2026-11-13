@@ -39,7 +39,8 @@ to a whole sector, it is the same capacity under either policy. A
 placed offset and keeps the search to the allocation units that divide
 every placed offset; the allocation it must hold is the next-fit pass's
 end, gaps before placed runs included, and the volume ends no earlier than
-the highest placed run. The root capacity is still minimized on FAT12/16,
+the highest placed run. The gaps are free space and count toward the free
+reserve. The root capacity is still minimized on FAT12/16,
 though with the data start fixed it only moves reserved padding.
 
 ## Dimensions per format
