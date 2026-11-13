@@ -223,6 +223,15 @@
   ENOENT instead of a timeout message. Seen once on macOS under heavy load.
   Fail with a named timeout, and size the wait to the harness's own bounds.
 
+* [Low] **Spec cases time out in the output directory sync on a loaded ZFS
+  host** (`test/spec/lib/fsimg_spec/preflight.rb`, the 20 s `seconds`
+  limit): on the FreeBSD 16/ZFS host under load averages of 19-33, three
+  unrelated create cases in one CI-equivalent run spent about 25 s wall and
+  under 0.5 s CPU and ended as `FSIMG_EDURABILITY` ("destination directory
+  sync incomplete") or `FSIMG_ECANCELLED`; each passed on rerun. Decide
+  whether the per-case deadline should exclude publication sync or scale
+  with the host, so a slow fsync is not reported as a case failure.
+
 * [Medium] **FAT integration script into the spec harness**
   (`test/fat-integration.sh.in`, `test/fat.c` `--external` and
   `--make-payload`, `test/fat-write.c` `--create` and `--create-empty`):
