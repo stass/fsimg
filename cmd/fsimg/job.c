@@ -58,9 +58,13 @@
  * its setting, NUL-terminated and zero after the terminator; one byte whose
  * bits say which of the texts is present and one for the dates, since an
  * empty text and a zero date are values; and six zero bytes. The EROFS
- * settings close the record as eight bytes each: the compression
+ * settings follow as eight bytes each: the compression
  * (fsimg_erofs_compression_t), the addressing width and the metadata box
- * (fsimg_erofs_metabox_t). The texts and
+ * (fsimg_erofs_metabox_t). The fixed file placements close the record: the
+ * count as eight bytes, then FSIMG_PLACEMENT_MAX records of an eight-byte
+ * offset and a path in FSIMG_JOB_BOOT_PATH_BYTES, NUL-terminated and zero
+ * after the terminator; a path is never empty, so the count is the
+ * presence, and every record past the count is all zero. The texts and
  * dates are the descriptor rows of the settings table, in its order, so
  * a new descriptor setting changes the record's size: it adds its bytes to
  * FSIMG_JOB_DESCRIPTOR_TEXT_BYTES or FSIMG_JOB_DESCRIPTOR_DATES and so to
@@ -157,7 +161,13 @@ typedef enum job_string_field {
 	JOB_ISO_RESERVED = JOB_ISO_DATE_PRESENT + 1,
 	JOB_EROFS_COMPRESSION_OFFSET = JOB_ISO_RESERVED + 6,
 	JOB_EROFS_ADDRESSING_OFFSET = JOB_EROFS_COMPRESSION_OFFSET + 8,
-	JOB_EROFS_METABOX_OFFSET = JOB_EROFS_ADDRESSING_OFFSET + 8
+	JOB_EROFS_METABOX_OFFSET = JOB_EROFS_ADDRESSING_OFFSET + 8,
+	JOB_PLACEMENT_COUNT_OFFSET = JOB_EROFS_METABOX_OFFSET + 8,
+	JOB_PLACEMENTS_OFFSET = JOB_PLACEMENT_COUNT_OFFSET + 8,
+	/* A size, not an offset: one placement record, its offset and then
+	 * its path.
+	 */
+	JOB_PLACEMENT_BYTES = 8 + FSIMG_JOB_BOOT_PATH_BYTES
 } job_string_field_t;
 
 /* Bits of JOB_IFSBOOT_SET: field n of the ifsboot settings is set, and the
@@ -235,8 +245,14 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_MOUNTPOINT_OFFSET,
     "the layer fields do not overlap");
 _Static_assert(JOB_RESERVED_OFFSET + 7 == JOB_IFSBOOT_OFFSET &&
-    JOB_EROFS_METABOX_OFFSET + 8 == FSIMG_JOB_BYTES,
-    "the EROFS settings close the record");
+    JOB_PLACEMENTS_OFFSET + FSIMG_PLACEMENT_MAX * JOB_PLACEMENT_BYTES ==
+    FSIMG_JOB_BYTES && FSIMG_JOB_BYTES <= FSIMG_FRAME_BYTES,
+    "the placements close the record, which fits one frame");
+_Static_assert(sizeof(((fsimg_worker_request_t *)0)->placement_paths[0]) ==
+    FSIMG_JOB_BOOT_PATH_BYTES &&
+    sizeof(((fsimg_worker_request_t *)0)->placement_storage) /
+    sizeof(fsimg_placement_t) == FSIMG_PLACEMENT_MAX,
+    "the request holds every placement the record carries");
 _Static_assert(FSIMG_JOB_BOOT_PATH_BYTES == FSIMG_BOOT_PATH_TEXT_BYTES &&
     sizeof(((fsimg_worker_request_t *)0)->boot_bios_storage) ==
     FSIMG_JOB_BOOT_PATH_BYTES &&
@@ -315,6 +331,9 @@ static void decode_iso_descriptor(const unsigned char *,
     fsimg_worker_request_t *);
 static void decode_boot_path(const unsigned char *, unsigned, unsigned,
     char *, const char **);
+static bool encode_placements(const fsimg_write_options_t *, unsigned char *);
+static bool placements_valid(const unsigned char *);
+static void decode_placements(const unsigned char *, fsimg_worker_request_t *);
 static void encode_layers(const fsimg_layer_options_t *, unsigned char *);
 static bool layers_valid(const unsigned char *);
 static void decode_layers(const unsigned char *, fsimg_layer_options_t *);
@@ -522,6 +541,88 @@ decode_iso_descriptor(const unsigned char *raw, fsimg_worker_request_t *request)
 			    (slot->wire - JOB_ISO_TEXTS_OFFSET);
 		fsimg_setting_store(slot->row, &targets, &value);
 	}
+}
+
+/*
+ * Write the placement list into its records: false, writing nothing, for
+ * a list the record cannot carry, more than FSIMG_PLACEMENT_MAX elements,
+ * a nonzero count without an array, or a path that is NULL, empty or
+ * without room for its terminator. The library refuses each of those as
+ * well; the record refuses them so a decoded list is one it accepts.
+ */
+static bool
+encode_placements(const fsimg_write_options_t *options, unsigned char *raw)
+{
+	const fsimg_placement_t *placement;
+	unsigned char *record;
+	size_t length;
+
+	if (options->placement_count > FSIMG_PLACEMENT_MAX ||
+	    (options->placement_count != 0 && options->placements == NULL))
+		return (false);
+	for (uint32_t i = 0; i < options->placement_count; i++) {
+		placement = &options->placements[i];
+		if (placement->path == NULL || placement->path[0] == '\0' ||
+		    strnlen(placement->path, FSIMG_JOB_BOOT_PATH_BYTES) ==
+		    FSIMG_JOB_BOOT_PATH_BYTES)
+			return (false);
+	}
+	fsimg_store_le64(raw + JOB_PLACEMENT_COUNT_OFFSET,
+	    options->placement_count);
+	for (uint32_t i = 0; i < options->placement_count; i++) {
+		placement = &options->placements[i];
+		record = raw + JOB_PLACEMENTS_OFFSET + i * JOB_PLACEMENT_BYTES;
+		length = strlen(placement->path);
+		fsimg_store_le64(record, placement->offset);
+		bcopy(placement->path, record + 8, length);
+	}
+	return (true);
+}
+
+/* A count within the capacity, each record within it a nonempty
+ * terminated path with zeros after its terminator, and every record past
+ * it zero.
+ */
+static bool
+placements_valid(const unsigned char *raw)
+{
+	const unsigned char *record;
+	uint64_t count;
+
+	count = fsimg_load_le64(raw + JOB_PLACEMENT_COUNT_OFFSET);
+	if (count > FSIMG_PLACEMENT_MAX)
+		return (false);
+	for (unsigned i = 0; i < FSIMG_PLACEMENT_MAX; i++) {
+		record = raw + JOB_PLACEMENTS_OFFSET + i * JOB_PLACEMENT_BYTES;
+		if (i >= count) {
+			if (!field_zero(record, JOB_PLACEMENT_BYTES))
+				return (false);
+		} else if (record[8] == 0 ||
+		    !string_field_valid(record + 8, FSIMG_JOB_BOOT_PATH_BYTES))
+			return (false);
+	}
+	return (true);
+}
+
+/* The validated placements, copied into the request's backing. */
+static void
+decode_placements(const unsigned char *raw, fsimg_worker_request_t *request)
+{
+	const unsigned char *record;
+	uint32_t count;
+
+	count = (uint32_t)fsimg_load_le64(raw + JOB_PLACEMENT_COUNT_OFFSET);
+	for (uint32_t i = 0; i < count; i++) {
+		record = raw + JOB_PLACEMENTS_OFFSET + i * JOB_PLACEMENT_BYTES;
+		bcopy(record + 8, request->placement_paths[i],
+		    FSIMG_JOB_BOOT_PATH_BYTES);
+		request->placement_storage[i] = (fsimg_placement_t){
+		    .path = request->placement_paths[i],
+		    .offset = fsimg_load_le64(record) };
+	}
+	request->write.placements = count != 0 ? request->placement_storage :
+	    NULL;
+	request->write.placement_count = count;
 }
 
 /* The layer settings after gpt:sector, which travels with the selection. */
@@ -1010,6 +1111,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	fsimg_store_le64(raw + JOB_INPUT_QUANTUM, request->input.quantum);
 	if (!encode_iso_descriptor(&request->write, raw))
 		return (invalid_job(error));
+	if (!encode_placements(&request->write, raw))
+		return (invalid_job(error));
 	return (FSIMG_OK);
 }
 
@@ -1108,7 +1211,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
-	if (!iso_descriptor_valid(raw))
+	if (!iso_descriptor_valid(raw) || !placements_valid(raw))
 		return (invalid_job(error));
 	if (!string_field_valid(raw + JOB_SCHEME_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_CONTAINER_OFFSET, JOB_FORMAT_BYTES) ||
@@ -1230,6 +1333,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	decode_boot_path(raw, JOB_BOOT_EFI_OFFSET, JOB_BOOT_EFI,
 	    request->boot_efi_storage, &request->write.boot_efi);
 	decode_iso_descriptor(raw, request);
+	decode_placements(raw, request);
 	*selection_length = get_field(raw, JOB_SELECTION);
 	*capabilities = (unsigned)get_field(raw, JOB_CAPABILITIES);
 	/* Each path is at least "/" and its terminator. An image path is

@@ -34,10 +34,15 @@ static fsimg_status_t fit_volume(const fsimg_format_t *,
 static fsimg_status_t writer_new_stack(fsimg_ctx_t *, const fsimg_stack_t *,
     const fsimg_format_t *, const fsimg_format_variant_t *,
     const fsimg_write_options_t *, fsimg_writer_t **, fsimg_error_t *);
-static fsimg_status_t check_boot_path(fsimg_writer_t *, const char *,
+static fsimg_status_t check_image_path(fsimg_writer_t *, const char *,
     const char *, fsimg_error_t *);
 static fsimg_status_t copy_texts(fsimg_writer_t *, fsimg_write_options_t *,
     fsimg_error_t *);
+static fsimg_status_t copy_placements(fsimg_writer_t *,
+    fsimg_write_options_t *, fsimg_error_t *);
+static fsimg_status_t check_placements(fsimg_writer_t *,
+    const fsimg_write_options_t *, fsimg_error_t *);
+static fsimg_status_t placement_error(fsimg_error_t *, const char *);
 static fsimg_status_t plan_disk(fsimg_writer_t *, fsimg_error_t *);
 static bool writer_encoded(const fsimg_writer_t *);
 static fsimg_status_t emit_volume(void *, fsimg_io_t *, fsimg_error_t *);
@@ -284,11 +289,17 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	 * paths known to be absolute image paths within the path limit.
 	 */
 	if (status == FSIMG_OK)
-		status = check_boot_path(writer, "boot", selected.boot_bios, error);
+		status = check_image_path(writer, "boot", selected.boot_bios,
+		    error);
 	if (status == FSIMG_OK)
-		status = check_boot_path(writer, "efiboot", selected.boot_efi, error);
+		status = check_image_path(writer, "efiboot", selected.boot_efi,
+		    error);
 	if (status == FSIMG_OK)
 		status = copy_texts(writer, &selected, error);
+	if (status == FSIMG_OK)
+		status = copy_placements(writer, &selected, error);
+	if (status == FSIMG_OK)
+		status = check_placements(writer, &selected, error);
 	if (status == FSIMG_OK)
 		status = driver->writer->validate(&selected, variant->id, error);
 	if (status == FSIMG_OK && writer->disk.scheme != NULL &&
@@ -323,12 +334,13 @@ writer_new_stack(fsimg_ctx_t *ctx, const fsimg_stack_t *stack,
 	return (FSIMG_OK);
 }
 
-/* Whether a boot image path, when there is one, is an absolute image path
- * within the path limit; whether the catalog holds a suitable file there
- * is planning's question. A failure names the setting's key.
+/* Whether an image path setting, a boot image's or a placement's, when
+ * there is one, is an absolute image path within the path limit; whether
+ * the catalog holds a suitable file there is planning's question. A
+ * failure names the setting's key.
  */
 static fsimg_status_t
-check_boot_path(fsimg_writer_t *writer, const char *key, const char *path,
+check_image_path(fsimg_writer_t *writer, const char *key, const char *path,
     fsimg_error_t *error)
 {
 	uint32_t depth;
@@ -430,6 +442,109 @@ copy_texts(fsimg_writer_t *writer, fsimg_write_options_t *options,
 		value.text = next;
 		fsimg_setting_store(row, &targets, &value);
 		next += length + 1;
+	}
+	return (FSIMG_OK);
+}
+
+/* FSIMG_EINVAL naming the place key. */
+static fsimg_status_t
+placement_error(fsimg_error_t *error, const char *message)
+{
+	fsimg_error_set(error, FSIMG_EINVAL, 0, FSIMG_OP_WRITER, message);
+	fsimg_error_path(error, "place");
+	return (FSIMG_EINVAL);
+}
+
+/*
+ * Give the writer its own copy of the placement list and its paths and
+ * point the options at it, so the list need not outlive the caller and
+ * check_placements and the format read only the copy. The settings check
+ * has already held the count within FSIMG_PLACEMENT_MAX, with an array
+ * behind a nonzero count, and the format to one that carries
+ * FSIMG_SETTING_PLACEMENT. The array and the paths share one block,
+ * writer->placements, which the writer frees. Each path pointer is read
+ * once and its text measured once within the context's path limit and
+ * copied at that length, so a caller's list that changes meanwhile cannot
+ * overrun the block; a path at the limit is refused, naming the key.
+ */
+static fsimg_status_t
+copy_placements(fsimg_writer_t *writer, fsimg_write_options_t *options,
+    fsimg_error_t *error)
+{
+	const uint32_t count = options->placement_count;
+	const size_t limit = writer->ctx->options.max_path_bytes;
+	const char *paths[FSIMG_PLACEMENT_MAX];
+	size_t lengths[FSIMG_PLACEMENT_MAX], total;
+	fsimg_placement_t *copies;
+	fsimg_error_t detail;
+	char *next;
+
+	if (count == 0) {
+		options->placements = NULL;
+		return (FSIMG_OK);
+	}
+	if (count > FSIMG_PLACEMENT_MAX || options->placements == NULL)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_WRITER,
+		    "placement list escaped the settings check"));
+	/* At most eight paths, each shorter than the uint32_t path limit, so
+	 * the total stays below 2^36 and cannot wrap a 64-bit size_t, the
+	 * only width the project targets (specs/architecture.md).
+	 */
+	total = count * sizeof(*copies);
+	for (uint32_t i = 0; i < count; i++) {
+		paths[i] = options->placements[i].path;
+		if (paths[i] == NULL)
+			return (placement_error(error, "placement has no path"));
+		lengths[i] = strnlen(paths[i], limit);
+		if (lengths[i] == limit)
+			return (placement_error(error,
+			    "placement path exceeds the path limit"));
+		total += lengths[i] + 1;
+	}
+	copies = fsimg_alloc(writer->ctx, total, &detail);
+	if (copies == NULL) {
+		if (error != NULL)
+			*error = detail;
+		return (detail.status);
+	}
+	writer->placements = copies;
+	next = (char *)(copies + count);
+	for (uint32_t i = 0; i < count; i++) {
+		bcopy(paths[i], next, lengths[i]);
+		next[lengths[i]] = '\0';
+		copies[i] = (fsimg_placement_t){ .path = next,
+		    .offset = options->placements[i].offset };
+		next += lengths[i] + 1;
+	}
+	options->placements = copies;
+	return (FSIMG_OK);
+}
+
+/*
+ * The common validation of the writer's copy of the placement list
+ * (specs/design-placement.md): each path an absolute image path under the
+ * common path rules, and no two placements sharing a path or an offset. A
+ * failure names the place key; what the offsets mean is the format's.
+ */
+static fsimg_status_t
+check_placements(fsimg_writer_t *writer, const fsimg_write_options_t *options,
+    fsimg_error_t *error)
+{
+	const fsimg_placement_t *list = options->placements;
+	fsimg_status_t status;
+
+	for (uint32_t i = 0; i < options->placement_count; i++) {
+		status = check_image_path(writer, "place", list[i].path, error);
+		if (status != FSIMG_OK)
+			return (status);
+		for (uint32_t j = 0; j < i; j++) {
+			if (strcmp(list[i].path, list[j].path) == 0)
+				return (placement_error(error,
+				    "two placements name the same path"));
+			if (list[i].offset == list[j].offset)
+				return (placement_error(error,
+				    "two placements share an offset"));
+		}
 	}
 	return (FSIMG_OK);
 }
@@ -550,6 +665,7 @@ fsimg_writer_free(fsimg_writer_t *writer)
 	fsimg_dealloc(writer->source_record);
 	fsimg_disk_plan_free(&writer->disk);
 	fsimg_dealloc(writer->texts);
+	fsimg_dealloc(writer->placements);
 	fsimg_dealloc(writer);
 }
 

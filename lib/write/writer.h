@@ -257,6 +257,11 @@ struct fsimg_writer {
 	 * options point into it, and NULL when no text is set.
 	 */
 	char		*texts;
+	/* The placement list and its paths, copied at construction into this
+	 * one block, the array first; the options point into it, and NULL
+	 * without placements.
+	 */
+	fsimg_placement_t *placements;
 };
 
 /* Common collection is private; public construction selects a format driver.

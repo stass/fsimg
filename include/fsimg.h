@@ -862,6 +862,17 @@ typedef enum fsimg_erofs_metabox {
 	FSIMG_EROFS_METABOX_LZ4 = 2
 } fsimg_erofs_metabox_t;
 
+/* One fixed file placement: the image file path, an absolute path of a
+ * file in the image being written, never a host path, whose bytes begin
+ * at offset bytes from the volume's start as one unbroken run.
+ */
+typedef struct fsimg_placement {
+	const char	*path;		/* Absolute image path, copied */
+	uint64_t	 offset;	/* Bytes from the volume start */
+} fsimg_placement_t;
+
+#define FSIMG_PLACEMENT_MAX 8u
+
 typedef struct fsimg_write_options {
 	size_t		 size;
 	uint32_t	 version;
@@ -909,6 +920,14 @@ typedef struct fsimg_write_options {
 	uint32_t	 boot_load_sectors;
 	const char	*boot_bios;
 	const char	*boot_efi;
+	/* FSIMG_SETTING_PLACEMENT: placement_count files of the image being
+	 * written, each stored as one contiguous run at its byte offset of
+	 * the volume, at most FSIMG_PLACEMENT_MAX of them, with distinct paths
+	 * and distinct offsets. The array and its paths are copied; a zero
+	 * count, the default, leaves placements unread.
+	 */
+	const fsimg_placement_t *placements;
+	uint32_t	 placement_count;
 	/* FSIMG_SETTING_ISO_DESCRIPTOR: the primary descriptor's text and
 	 * dates, mirrored in the Joliet descriptor. Each text is copied; NULL
 	 * selects the default (FSIMG for the application, spaces elsewhere)
@@ -1243,6 +1262,8 @@ typedef struct fsimg_volume_info {
 #define FSIMG_SETTING_ISO_DESCRIPTOR 0x200u
 /* erofs_compression, erofs_addressing and erofs_metabox. */
 #define FSIMG_SETTING_EROFS 0x400u
+/* placements and placement_count. */
+#define FSIMG_SETTING_PLACEMENT 0x800u
 
 typedef struct fsimg_format_info {
 	char		 name[16];

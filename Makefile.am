@@ -592,6 +592,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/option_syntax_test.rb \
 	test/cli/output_failures_test.rb \
 	test/cli/output_inside_source_test.rb \
+	test/cli/placement_test.rb \
 	test/cli/partitioned_create_test.rb \
 	test/cli/partitioned_test.rb \
 	test/cli/posix_metadata_test.rb \

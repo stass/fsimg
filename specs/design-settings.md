@@ -232,6 +232,10 @@ Validation has three owners with a visible order:
 1. The CLI checks trusted command syntax, duplicate keys, mode use, selected
    owners, and lexical conversion. It may inspect immutable descriptors and
    capability records; it does not open image bytes to interpret an option.
+   When creation names its format, the CLI runs the library's write-settings
+   check against that format's capability record, so a filesystem setting
+   the format does not store is refused before any operand is opened or the
+   worker starts, with the status and diagnostic the writer would give.
 2. Shared library checks validate option structure versions and reserved fields,
    bounded fixed text, enum membership, inactive values, and applicability.
    Every applicable entry point uses these checks before dispatching to an

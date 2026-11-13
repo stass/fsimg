@@ -25,6 +25,7 @@ static fsimg_status_t parse_status(char *const *, bool *);
 static void check_syntax(char *const *);
 static void check_unsupported(char *const *);
 static void test_options(void);
+static void test_placement_list_retained_after_format_refusal(void);
 static void test_modes(void);
 static void test_create_operands(void);
 static bool argument_starts(char *const *, const char *);
@@ -337,21 +338,24 @@ test_options(void)
 	    ".", NULL };
 	char *window[] = { "fsimg", "-i", "-f", "image", "--offset=512",
 	    "--length", "1M", NULL };
-	char *text[] = { "fsimg", "-cn", "-F", "qnx6", "-o", "mountpoint=", ".",
+	char *text[] = { "fsimg", "-cn", "-F", "ifs", "-o", "mountpoint=", ".",
 	    NULL };
+	char *inapplicable_mountpoint[] = { "fsimg", "-cn", "-F", "qnx6", "-o",
+	    "mountpoint=", ".", NULL };
 	/* The job record's mountpoint field holds 1025 bytes and a NUL: one
 	 * more than any format stores, which the writer refuses.
 	 */
 	char longest[11 + 1025 + 1], longer[11 + 1026 + 1];
-	char *text_longest[] = { "fsimg", "-cn", "-F", "qnx6", "-o", longest,
+	char *text_longest[] = { "fsimg", "-cn", "-F", "ifs", "-o", longest,
 	    ".", NULL };
-	char *text_longer[] = { "fsimg", "-cn", "-F", "qnx6", "-o", longer,
+	char *text_longer[] = { "fsimg", "-cn", "-F", "ifs", "-o", longer,
 	    ".", NULL };
 	static const unsigned char uuid[16] = {
 		0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
 		0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67
 	};
 	fsimg_cli_options_t options;
+	fsimg_error_t error;
 	char label[767];
 	char *large_label[] = { "fsimg", "-cn", "-F", "exfat", "-L", label, ".", NULL };
 
@@ -419,6 +423,11 @@ test_options(void)
 	CHECK(options.request.write.mountpoint != NULL &&
 	    options.request.write.mountpoint[0] == '\0');
 	fsimg_cli_release(&options);
+	CHECK(fsimg_cli_parse(7, inapplicable_mountpoint, &options, &error) ==
+	    FSIMG_EINVAL);
+	CHECK(!options.syntax_error);
+	CHECK(strcmp(error.path, "mountpoint") == 0);
+	fsimg_cli_release(&options);
 	memcpy(longest, "mountpoint=", 11);
 	memset(longest + 11, 'm', 1025);
 	longest[11 + 1024] = '\0';
@@ -432,6 +441,49 @@ test_options(void)
 	memset(longer + 11, 'm', 1026);
 	longer[sizeof(longer) - 1] = '\0';
 	check_syntax(text_longer);
+}
+
+static void
+test_placement_list_retained_after_format_refusal(void)
+{
+	char *arguments[] = { "fsimg", "-cn", "-F", "qnx6",
+	    "-o", "place=/a@b@4M", "-o", "place=/k@1K",
+	    "-o", "place=/x@0", "-o", "place=/big@16P",
+	    "-o", "place=/four@4", "-o", "place=/five@5",
+	    "-o", "place=/six@6", "-o", "place=/seven@7", ".", NULL };
+	const fsimg_placement_t expected[] = {
+		{ .path = "/a@b", .offset = UINT64_C(4) * 1024 * 1024 },
+		{ .path = "/k", .offset = 1024 },
+		{ .path = "/x", .offset = 0 },
+		{ .path = "/big", .offset = UINT64_C(16) << 50 },
+		{ .path = "/four", .offset = 4 },
+		{ .path = "/five", .offset = 5 },
+		{ .path = "/six", .offset = 6 },
+		{ .path = "/seven", .offset = 7 }
+	};
+	fsimg_cli_options_t options;
+	fsimg_error_t error;
+
+	/* Settings are stored before validate_creation refuses the format's
+	 * unsupported placement setting; the parsed list remains inspectable.
+	 */
+	CHECK(fsimg_cli_parse((int)(sizeof(arguments) / sizeof(arguments[0]) - 1),
+	    arguments, &options, &error) == FSIMG_EINVAL);
+	CHECK(!options.syntax_error);
+	CHECK(strcmp(error.path, "place") == 0);
+	CHECK(options.request.write.placement_count == 8);
+	CHECK(options.request.write.placements == options.request.placement_storage);
+	for (uint32_t i = 0; i < 8; i++) {
+		CHECK(options.request.write.placements[i].path ==
+		    options.request.placement_paths[i]);
+		CHECK(strcmp(options.request.write.placements[i].path,
+		    expected[i].path) == 0);
+		CHECK(options.request.write.placements[i].offset == expected[i].offset);
+		for (uint32_t j = 0; j < i; j++)
+			CHECK(options.request.write.placements[i].path !=
+			    options.request.write.placements[j].path);
+	}
+	fsimg_cli_release(&options);
 }
 
 /* Mode selection: exactly one mode, or c with W; a dashless first argument
@@ -2552,6 +2604,7 @@ main(int argc, char **argv)
 	test_image_hybrid_field();
 	test_numbers();
 	test_options();
+	test_placement_list_retained_after_format_refusal();
 	test_modes();
 	test_create_operands();
 	test_stacks();

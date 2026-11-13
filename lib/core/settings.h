@@ -72,13 +72,18 @@ typedef enum fsimg_setting_kind {
 	FSIMG_KIND_TEXT,		/* char[size], NUL-terminated */
 	FSIMG_KIND_ID16,		/* unsigned char[16] */
 	FSIMG_KIND_TEXT_POINTER,	/* const char *, borrowed; NULL absent */
-	FSIMG_KIND_IO			/* fsimg_io_t *, borrowed; NULL absent */
+	FSIMG_KIND_IO,			/* fsimg_io_t *, borrowed; NULL absent */
+	/* const fsimg_placement_t *, borrowed, and its uint32_t count at
+	 * count_offset; a zero count is absent and leaves the pointer unread.
+	 */
+	FSIMG_KIND_PLACEMENTS
 } fsimg_setting_kind_t;
 
 /*
  * A typed value, read through the member its row's kind names. A TEXT
  * value is a pointer to the text: a loaded one points into the record,
- * and a stored one is copied from it into the member.
+ * and a stored one is copied from it into the member. A PLACEMENTS value
+ * is the array pointer and its count, the two members of a list row.
  */
 typedef union fsimg_setting_value {
 	uint64_t	 u64;
@@ -95,6 +100,10 @@ typedef union fsimg_setting_value {
 	unsigned char	 id[16];
 	const char	*text;
 	fsimg_io_t	*io;
+	struct {
+		const fsimg_placement_t *items;
+		uint32_t	 count;
+	} placements;
 } fsimg_setting_value_t;
 
 /* The command-line lexical class of a row's value. */
@@ -107,7 +116,11 @@ typedef enum fsimg_setting_syntax {
 	FSIMG_SYNTAX_CHOICE,	/* One of the row's choice spellings */
 	FSIMG_SYNTAX_UUID,	/* RFC 4122 text, stored in textual byte order */
 	FSIMG_SYNTAX_TEXT,	/* Text within the row's text capacity */
-	FSIMG_SYNTAX_PATH	/* A host path the command opens itself */
+	FSIMG_SYNTAX_PATH,	/* A host path the command opens itself */
+	/* PATH@OFFSET, split at the last @: an image path within the row's
+	 * text capacity and a byte quantity; one list element
+	 */
+	FSIMG_SYNTAX_PLACEMENT
 } fsimg_setting_syntax_t;
 
 /* The operations a row applies to. */
@@ -169,6 +182,12 @@ typedef struct fsimg_setting_choice {
  * format's capability record must carry for the row to hold anything but
  * its default, zero when every format accepts it. file is the identity of
  * an FSIMG_RECORD_INPUTS row.
+ *
+ * capacity is the row's multiplicity: zero for a single value, whose key
+ * the command accepts once, or the element capacity of a list, whose key
+ * the command accepts once per element up to it. A list row's value is a
+ * PLACEMENTS array member at offset and its uint32_t count member at
+ * count_offset, in the same record; no other row reads count_offset.
  */
 typedef struct fsimg_setting {
 	const char	*owner;
@@ -179,6 +198,7 @@ typedef struct fsimg_setting {
 	size_t		 size;
 	size_t		 presence;
 	size_t		 text_bytes;
+	size_t		 count_offset;
 	uint64_t	 max;
 	fsimg_setting_record_t record;
 	fsimg_setting_kind_t kind;
@@ -186,6 +206,7 @@ typedef struct fsimg_setting {
 	fsimg_file_setting_t file;
 	unsigned	 scope;
 	uint32_t	 support;
+	uint32_t	 capacity;
 	bool		 nonzero;
 	bool		 image_path;
 } fsimg_setting_t;
@@ -264,7 +285,8 @@ bool fsimg_setting_is_default(const fsimg_setting_t *,
 /*
  * The structural check of one row: a TEXT member terminated within its
  * size, a bool member and presence flag each 0 or 1, an enum value one of
- * the row's choices, and a value whose presence flag is clear holding its
+ * the row's choices, a list's count within its capacity and, when nonzero,
+ * with an array, and a value whose presence flag is clear holding its
  * default. A failure is FSIMG_EINVAL naming the
  * canonical key in error.path.
  */

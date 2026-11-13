@@ -988,6 +988,8 @@ link_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
 }
 
 static const char *validated_boot_bios;
+static const fsimg_placement_t *validated_placements;
+static uint32_t validated_placement_count;
 static unsigned writer_validations;
 
 static fsimg_status_t
@@ -996,6 +998,8 @@ link_writer_validate(fsimg_write_options_t *options,
 {
 	writer_validations++;
 	validated_boot_bios = options->boot_bios;
+	validated_placements = options->placements;
+	validated_placement_count = options->placement_count;
 	options->sector_bytes = 512;
 	return (FSIMG_OK);
 }
@@ -1082,7 +1086,8 @@ static const fsimg_format_variant_t link_variant = {
 	.info = { .name = "test-links", .entry_kinds = FSIMG_ENTRY_FILE |
 	    FSIMG_ENTRY_SYMLINK | FSIMG_ENTRY_DIRECTORY,
 	    .max_link_target_bytes = 1024, .max_file_bytes = UINT64_MAX,
-	    .max_volume_bytes = UINT64_MAX, .write_settings = FSIMG_SETTING_ELTORITO }
+	    .max_volume_bytes = UINT64_MAX, .write_settings =
+	    FSIMG_SETTING_ELTORITO | FSIMG_SETTING_PLACEMENT }
 };
 static const fsimg_format_t link_format = {
 	.variants = &link_variant, .variant_count = 1, .writer = &link_writer_ops
@@ -1292,6 +1297,142 @@ test_host_link_reads_and_retargeted_link_names_image_path(void)
 	}
 	fsimg_ctx_free(ctx);
 	CHECK(close(root) == 0 && rmdir(directory) == 0);
+}
+
+static void
+test_writer_placement_refusals_precede_driver_validation(void)
+{
+	const fsimg_placement_t valid[] = {
+		{ .path = "/one", .offset = 0 },
+		{ .path = "/two", .offset = UINT64_MAX }
+	};
+	const fsimg_placement_t absent[] = { { .path = NULL, .offset = 0 } };
+	const fsimg_placement_t empty[] = { { .path = "", .offset = 0 } };
+	const fsimg_placement_t relative[] = { { .path = "one", .offset = 0 } };
+	const fsimg_placement_t parent[] = { { .path = "/a/../one", .offset = 0 } };
+	const fsimg_placement_t dot[] = { { .path = "/a/./one", .offset = 0 } };
+	const fsimg_placement_t utf8[] = { { .path = "/\xff", .offset = 0 } };
+	const fsimg_placement_t limited[] = { { .path = "/123456789abcdef", .offset = 0 } };
+	const fsimg_placement_t boundary[] = { { .path = "/123456789abcde", .offset = 0 } };
+	const fsimg_placement_t deep[] = { { .path = "/a/b/c", .offset = 0 } };
+	const fsimg_placement_t same_path[] = {
+		{ .path = "/one", .offset = 0 }, { .path = "/one", .offset = 1 }
+	};
+	const fsimg_placement_t same_offset[] = {
+		{ .path = "/one", .offset = 0 }, { .path = "/two", .offset = 0 }
+	};
+	const struct {
+		const char *name;
+		const fsimg_placement_t *items;
+		uint32_t count;
+	} cases[] = {
+		{ "count above capacity", valid, FSIMG_PLACEMENT_MAX + 1 },
+		{ "absent array", NULL, 1 },
+		{ "absent path", absent, 1 },
+		{ "empty path", empty, 1 },
+		{ "relative path", relative, 1 },
+		{ "parent component", parent, 1 },
+		{ "dot component", dot, 1 },
+		{ "invalid UTF-8", utf8, 1 },
+		{ "path at context limit", limited, 1 },
+		{ "duplicate path", same_path, 2 },
+		{ "duplicate offset", same_offset, 2 }
+	};
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	fsimg_error_t error;
+	fsimg_status_t status;
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	ctx->options.max_path_bytes = 16;
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_write_options_init(&options);
+		options.placements = cases[i].items;
+		options.placement_count = cases[i].count;
+		writer_validations = 0;
+		status = fsimg_writer_new_variant(ctx, &link_format, &link_variant,
+		    &options, &writer, &error);
+		if (status != FSIMG_EINVAL)
+			fprintf(stderr, "%s: expected EINVAL, got %d\n", cases[i].name, status);
+		CHECK(status == FSIMG_EINVAL);
+		CHECK(writer == NULL && writer_validations == 0);
+		CHECK(strcmp(error.path, "place") == 0);
+		if (cases[i].items == limited) {
+			CHECK(strlen(boundary[0].path) == ctx->options.max_path_bytes - 1);
+			options.placements = boundary;
+			CHECK(fsimg_writer_new_variant(ctx, &link_format, &link_variant,
+			    &options, &writer, NULL) == FSIMG_OK);
+			CHECK(writer_validations == 1);
+			fsimg_writer_free(writer);
+			writer_validations = 0;
+		}
+		options.placements = valid;
+		options.placement_count = 2;
+		CHECK(fsimg_writer_new_variant(ctx, &link_format, &link_variant,
+		    &options, &writer, NULL) == FSIMG_OK);
+		CHECK(writer_validations == 1);
+		fsimg_writer_free(writer);
+	}
+	ctx->options.max_depth = 2;
+	options.placements = deep;
+	options.placement_count = 1;
+	writer_validations = 0;
+	CHECK(fsimg_writer_new_variant(ctx, &link_format, &link_variant,
+	    &options, &writer, &error) == FSIMG_ELIMIT);
+	CHECK(writer == NULL && writer_validations == 0);
+	CHECK(strcmp(error.path, "place") == 0);
+	fsimg_ctx_free(ctx);
+}
+
+static void
+test_writer_owns_placement_array_and_paths_before_validation(void)
+{
+	fsimg_ctx_t *ctx;
+	fsimg_writer_t *writer;
+	fsimg_write_options_t options;
+	fsimg_placement_t *items;
+	char *first, *second;
+
+	CHECK(fsimg_ctx_new(NULL, &ctx, NULL) == FSIMG_OK);
+	items = malloc(2 * sizeof(*items));
+	first = strdup("/one");
+	second = strdup("/two");
+	CHECK(items != NULL && first != NULL && second != NULL);
+	items[0] = (fsimg_placement_t){ .path = first, .offset = 0 };
+	items[1] = (fsimg_placement_t){ .path = second, .offset = UINT64_MAX };
+	fsimg_write_options_init(&options);
+	options.placements = items;
+	options.placement_count = 2;
+	writer_validations = 0;
+	CHECK(fsimg_writer_new_variant(ctx, &link_format, &link_variant,
+	    &options, &writer, NULL) == FSIMG_OK);
+	CHECK(writer_validations == 1 && validated_placement_count == 2);
+	CHECK(validated_placements == writer->options.placements);
+	CHECK(validated_placements != items);
+	CHECK(validated_placements[0].path != first);
+	CHECK(validated_placements[1].path != second);
+	first[1] = second[1] = 'X';
+	items[0].offset = 42;
+	items[1].path = NULL;
+	free(first);
+	free(second);
+	free(items);
+	CHECK(writer->options.placement_count == 2);
+	CHECK(strcmp(writer->options.placements[0].path, "/one") == 0);
+	CHECK(strcmp(writer->options.placements[1].path, "/two") == 0);
+	CHECK(writer->options.placements[0].offset == 0);
+	CHECK(writer->options.placements[1].offset == UINT64_MAX);
+	fsimg_writer_free(writer);
+
+	options.placements = (const fsimg_placement_t *)(uintptr_t)1;
+	options.placement_count = 0;
+	CHECK(fsimg_writer_new_variant(ctx, &link_format, &link_variant,
+	    &options, &writer, NULL) == FSIMG_OK);
+	CHECK(writer->options.placement_count == 0 && writer->options.placements == NULL);
+	CHECK(validated_placement_count == 0 && validated_placements == NULL);
+	fsimg_writer_free(writer);
+	fsimg_ctx_free(ctx);
 }
 
 static void
@@ -1790,6 +1931,8 @@ main(void)
 	test_link_read_failures_close_source();
 	test_link_read_failures_during_planning_publish_nothing();
 	test_host_link_reads_and_retargeted_link_names_image_path();
+	test_writer_placement_refusals_precede_driver_validation();
+	test_writer_owns_placement_array_and_paths_before_validation();
 	test_writer_owns_validated_boot_paths();
 	test_writer_copies_every_text_and_ignores_later_changes();
 	test_writer_refuses_a_text_past_its_capacity_naming_the_key();

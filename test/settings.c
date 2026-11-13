@@ -80,6 +80,8 @@ static const member_t write_members[] = {
 	WRITE_MEMBER(boot_load_sectors, uint32_t),
 	WRITE_MEMBER(boot_bios, const char *),
 	WRITE_MEMBER(boot_efi, const char *),
+	WRITE_MEMBER(placements, const fsimg_placement_t *),
+	WRITE_MEMBER(placement_count, uint32_t),
 	WRITE_MEMBER(iso_volume_set, const char *),
 	WRITE_MEMBER(iso_publisher, const char *),
 	WRITE_MEMBER(iso_preparer, const char *),
@@ -268,6 +270,9 @@ test_member_bindings(void)
 				continue;
 			}
 			mark_member(coverage, capacity, row->offset, row->size);
+			if (row->kind == FSIMG_KIND_PLACEMENTS)
+				mark_member(coverage, capacity, row->count_offset,
+				    sizeof(uint32_t));
 			if (row->presence != FSIMG_NO_PRESENCE) {
 				CHECK(row->record == FSIMG_RECORD_LAYERS ||
 				    row->record == FSIMG_RECORD_WRITE);
@@ -315,9 +320,9 @@ test_masks_and_files(void)
 	static const uint32_t bits[] = { FSIMG_SETTING_BYTE_ORDER,
 	    FSIMG_SETTING_VOLUME_UUID, FSIMG_SETTING_INODE_CAPACITY,
 	    FSIMG_SETTING_RESERVE, FSIMG_SETTING_MOUNTPOINT, FSIMG_SETTING_ROOT_ENTRIES,
-	    FSIMG_SETTING_ISO_LEVEL, FSIMG_SETTING_ISO_VIEW };
+	    FSIMG_SETTING_ISO_LEVEL, FSIMG_SETTING_ISO_VIEW, FSIMG_SETTING_PLACEMENT };
 	static const char *const bit_keys[] = { "endian", "uuid", "inodes",
-	    "reserve", "mountpoint", "root", "level", "view" };
+	    "reserve", "mountpoint", "root", "level", "view", "place" };
 	static const char *const file_keys[FSIMG_FILE_SETTINGS] = {
 		[FSIMG_FILE_IFSBOOT_STARTUP] = "ifsboot:startup",
 		[FSIMG_FILE_IFSBOOT_PREFIX] = "ifsboot:prefix"
@@ -445,6 +450,10 @@ test_rows(void)
 				    (row->kind == FSIMG_KIND_TEXT_POINTER &&
 				    row->text_bytes != 0));
 				break;
+			case FSIMG_SYNTAX_PLACEMENT:
+				CHECK(row->kind == FSIMG_KIND_PLACEMENTS);
+				CHECK(row->capacity == FSIMG_PLACEMENT_MAX);
+				break;
 			case FSIMG_SYNTAX_PATH:
 				CHECK(row->kind == FSIMG_KIND_IO &&
 				    row->record == FSIMG_RECORD_INPUTS);
@@ -496,6 +505,7 @@ test_defaults(void)
 	const fsimg_layer_t *layer;
 
 	fsimg_write_options_init(&write);
+	CHECK(write.placement_count == 0 && write.placements == NULL);
 	CHECK(write.reserve_percent == 3 &&
 	    write.byte_order == FSIMG_BYTE_ORDER_LITTLE &&
 	    write.mountpoint == NULL && write.inode_capacity == 0 &&
@@ -1225,11 +1235,14 @@ test_iso_read_settings_require_capability(void)
 static void
 test_registered_writers_refuse_unsupported_settings(void)
 {
+	static const fsimg_placement_t placement = { .path = "/k", .offset = 0 };
 	static const struct {
 		const char *key;
 		uint64_t bit;
 		fsimg_write_options_t options;
 	} cases[] = {
+		{ "place", FSIMG_SETTING_PLACEMENT,
+		    { .placements = &placement, .placement_count = 1 } },
 		{ "level", FSIMG_SETTING_ISO_LEVEL, { .iso_level = 3 } },
 		{ "bootload", FSIMG_SETTING_ELTORITO, { .boot_load_sectors = 4 } },
 		{ "boot", FSIMG_SETTING_ELTORITO, { .boot_bios = "/x" } },
@@ -1268,6 +1281,8 @@ test_registered_writers_refuse_unsupported_settings(void)
 			if ((info.write_settings & cases[i].bit) != 0)
 				continue;
 			fsimg_write_options_init(&options);
+			options.placements = cases[i].options.placements;
+			options.placement_count = cases[i].options.placement_count;
 			options.iso_level = cases[i].options.iso_level;
 			options.boot_load_sectors = cases[i].options.boot_load_sectors;
 			options.boot_bios = cases[i].options.boot_bios;
@@ -1290,9 +1305,66 @@ test_registered_writers_refuse_unsupported_settings(void)
 	fsimg_ctx_free(ctx);
 }
 
+static void
+test_placement_catalogue_defaults_storage_and_refusals(void)
+{
+	const fsimg_setting_t *row;
+	const fsimg_placement_t items[] = {
+		{ .path = "/k", .offset = UINT64_MAX }
+	};
+	fsimg_write_options_t options;
+	fsimg_setting_value_t value, loaded;
+	fsimg_setting_records_t records = { .write = &options };
+	fsimg_setting_targets_t targets = { .write = &options };
+	fsimg_format_info_t info = { 0 };
+	fsimg_error_t error;
+
+	row = fsimg_setting_find(&fsimg_filesystem_settings, "place", 5);
+	CHECK(row != NULL);
+	CHECK(row->kind == FSIMG_KIND_PLACEMENTS);
+	CHECK(row->syntax == FSIMG_SYNTAX_PLACEMENT);
+	CHECK(row->capacity == FSIMG_PLACEMENT_MAX);
+	CHECK(row->support == FSIMG_SETTING_PLACEMENT);
+	CHECK(row->record == FSIMG_RECORD_WRITE);
+	CHECK(row->offset == offsetof(fsimg_write_options_t, placements));
+	CHECK(row->count_offset == offsetof(fsimg_write_options_t, placement_count));
+	CHECK(row->text_bytes == FSIMG_BOOT_PATH_TEXT_BYTES && row->image_path);
+	fsimg_write_options_init(&options);
+	options.placements = (const fsimg_placement_t *)(uintptr_t)1;
+	CHECK(fsimg_setting_is_default(row, &records));
+	CHECK(fsimg_setting_check(row, &records, NULL) == FSIMG_OK);
+	options.placement_count = 1;
+	CHECK(!fsimg_setting_is_default(row, &records));
+
+	value = (fsimg_setting_value_t){ .placements = { .items = items, .count = 1 } };
+	fsimg_setting_store(row, &targets, &value);
+	fsimg_setting_load(row, &records, &loaded);
+	CHECK(options.placements == items && options.placement_count == 1);
+	CHECK(loaded.placements.items == items && loaded.placements.count == 1);
+	CHECK(fsimg_setting_check(row, &records, NULL) == FSIMG_OK);
+	options.placement_count = FSIMG_PLACEMENT_MAX + 1;
+	CHECK(fsimg_setting_check(row, &records, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "place") == 0);
+	CHECK(strcmp(error.message, "list setting holds more than its capacity") == 0);
+	options.placement_count = 1;
+	CHECK(fsimg_setting_check(row, &records, NULL) == FSIMG_OK);
+	options.placements = NULL;
+	CHECK(fsimg_setting_check(row, &records, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "place") == 0);
+	CHECK(strcmp(error.message, "list setting has a count but no array") == 0);
+	options.placements = items;
+	CHECK(fsimg_setting_check(row, &records, NULL) == FSIMG_OK);
+	CHECK(fsimg_write_settings_check(&options, &info, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "place") == 0);
+	CHECK(strcmp(error.message, "write setting does not apply to the image format") == 0);
+	info.write_settings = FSIMG_SETTING_PLACEMENT;
+	CHECK(fsimg_write_settings_check(&options, &info, NULL) == FSIMG_OK);
+}
+
 int
 main(void)
 {
+	test_placement_catalogue_defaults_storage_and_refusals();
 	test_iso_catalogue_and_defaults();
 	test_erofs_catalogue_and_defaults();
 	test_erofs_enum_members_are_checked();

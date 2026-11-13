@@ -736,16 +736,26 @@ layer_selected(const cli_parse_t *parse, const fsimg_layer_info_t *layer)
 	return (slot->state == FSIMG_SLOT_NAMED && strcmp(slot->name, layer->name) == 0);
 }
 
+/* How many -o arguments before index named the row. */
+static unsigned
+setting_occurrences(const cli_parse_t *parse, const fsimg_setting_t *row,
+    unsigned index)
+{
+	unsigned count = 0;
+
+	for (unsigned i = 0; i < index; i++) {
+		if (parse->setting_rows[i] == row)
+			count++;
+	}
+	return (count);
+}
+
 /* Whether an -o argument before index named the row. */
 static bool
 setting_given(const cli_parse_t *parse, const fsimg_setting_t *row,
     unsigned index)
 {
-	for (unsigned i = 0; i < index; i++) {
-		if (parse->setting_rows[i] == row)
-			return (true);
-	}
-	return (false);
+	return (setting_occurrences(parse, row, index) != 0);
 }
 
 /*
@@ -833,6 +843,55 @@ convert_number(cli_parse_t *parse, const fsimg_setting_t *row,
 }
 
 /*
+ * One element of a placement list, PATH@OFFSET: the path, everything
+ * before the last "@" so a path may hold "@", nonempty and within the
+ * row's text capacity, and the offset a byte quantity. The element is
+ * written to the request's backing past the list's current count, and
+ * out is the list with it appended, which the caller commits by storing
+ * the new count. The caller has already refused the occurrence past the
+ * row's capacity, so a full backing is a broken invariant, refused before
+ * the backing could be overrun.
+ */
+static fsimg_status_t
+convert_placement(cli_parse_t *parse, const fsimg_setting_t *row,
+    const char *value, const char *word, fsimg_setting_value_t *out)
+{
+	fsimg_worker_request_t *request = &parse->options->request;
+	const fsimg_setting_records_t records = { .write = &request->write };
+	fsimg_setting_value_t list;
+	const char *at;
+	char *path;
+	size_t length;
+	uint64_t offset;
+	uint32_t count;
+
+	fsimg_setting_load(row, &records, &list);
+	count = list.placements.count;
+	if (count >= FSIMG_PLACEMENT_MAX)
+		return (fsimg_error_set(parse->error, FSIMG_ESTATE, 0,
+		    FSIMG_OP_CONTEXT, "placement backing is full"));
+	at = strrchr(value, '@');
+	if (at == NULL || at == value)
+		return (syntax_naming(parse,
+		    "placement requires a nonempty PATH@OFFSET", word));
+	length = (size_t)(at - value);
+	if (length >= row->text_bytes)
+		return (syntax_naming(parse,
+		    "setting value exceeds its text capacity", word));
+	if (fsimg_cli_number(at + 1, true, &offset, parse->error) != FSIMG_OK)
+		return (syntax_naming(parse,
+		    "placement offset requires a byte quantity in range", word));
+	path = request->placement_paths[count];
+	bcopy(value, path, length);
+	path[length] = '\0';
+	request->placement_storage[count] = (fsimg_placement_t){
+	    .path = path, .offset = offset };
+	out->placements.items = request->placement_storage;
+	out->placements.count = count + 1;
+	return (FSIMG_OK);
+}
+
+/*
  * Convert a value by its row's lexical class into a typed temporary. word
  * is the whole argument, which a diagnostic names. A text keeps pointing
  * into the command words, which outlive the parsed command; a path is
@@ -895,6 +954,8 @@ convert_setting(cli_parse_t *parse, const fsimg_setting_t *row,
 		return (FSIMG_OK);
 	case FSIMG_SYNTAX_PATH:
 		return (FSIMG_OK);
+	case FSIMG_SYNTAX_PLACEMENT:
+		return (convert_placement(parse, row, value, word, out));
 	}
 	return (syntax_naming(parse, "unknown setting syntax", word));
 }
@@ -909,8 +970,9 @@ convert_setting(cli_parse_t *parse, const fsimg_setting_t *row,
  * and its value's syntax. A converted value is committed, with its
  * presence flag when the row has one, only after it converted; a file
  * setting's value is a host path the coordinator opens once the command
- * line is known to be valid. The library validates the settings as a
- * whole.
+ * line is known to be valid. A list row's conversion writes its element
+ * into the request's backing past the stored count, and storing the new
+ * count commits it. The library validates the settings as a whole.
  */
 static fsimg_status_t
 parse_setting(cli_parse_t *parse, unsigned index)
@@ -958,10 +1020,17 @@ parse_setting(cli_parse_t *parse, unsigned index)
 		return (syntax_naming(parse, qualifier != NULL ?
 		    "unknown layer setting" : "unknown setting key", text));
 
-	/* The row's repetition and mode, whatever its value would be. */
-	if (setting_given(parse, row, index))
+	/* The row's repetition and mode, whatever its value would be: a
+	 * single value's key once, a list's once per element up to its
+	 * capacity.
+	 */
+	if (row->capacity == 0 && setting_given(parse, row, index))
 		return (syntax_naming(parse, "setting key is given more than once",
 		    text));
+	if (row->capacity != 0 &&
+	    setting_occurrences(parse, row, index) >= row->capacity)
+		return (syntax_naming(parse,
+		    "setting key is given more times than its list holds", text));
 	parse->setting_rows[index] = row;
 	if (creating && (row->scope & FSIMG_SCOPE_WRITE) == 0)
 		return (syntax_naming(parse, "setting applies only to reading",
@@ -1680,8 +1749,10 @@ find_format(cli_parse_t *parse, const char *name, fsimg_format_info_t *info)
 
 /* Creation settings that depend on the writer's capability record: the
  * default label applies only to a format with label capacity, so a format
- * without labels receives none unless -L asks for one (and then fails), and
- * explicit geometry must be legal for the writer profile.
+ * without labels receives none unless -L asks for one (and then fails),
+ * explicit geometry must be legal for the writer profile, and a filesystem
+ * setting the format does not store is refused by the library's own
+ * applicability check before any operand is opened.
  */
 static fsimg_status_t
 validate_creation(cli_parse_t *parse)
@@ -1731,7 +1802,13 @@ validate_creation(cli_parse_t *parse)
 	 */
 	if (sizes[0] != 0 && sizes[1] != 0 && sizes[1] < sizes[0])
 		return (syntax(parse, "cluster size is smaller than sector size"));
-	return (FSIMG_OK);
+	/* Last, so syntax errors and a feature refused as unsupported keep
+	 * their precedence; the writer repeats the check.
+	 */
+	if (parse->unsupported != NULL)
+		return (FSIMG_OK);
+	return (fsimg_write_settings_check(&request->write, &info,
+	    parse->error));
 }
 
 /* Remove suffix from the end of name, ASCII case-insensitively, when what

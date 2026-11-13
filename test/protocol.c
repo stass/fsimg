@@ -14,6 +14,14 @@
 #include "test.h"
 #include "worker.h"
 
+/* These byte offsets are the transport contract, independent of the codec. */
+enum {
+	PLACEMENT_COUNT = 5143,
+	PLACEMENT_RECORDS = 5151,
+	PLACEMENT_RECORD_BYTES = 1033,
+	PLACEMENT_PATH_BYTES = 1025
+};
+
 static void test_frame_splits(uint32_t);
 static void test_malformed_frames(void);
 static void test_error_codec(void);
@@ -65,7 +73,8 @@ write_seed(const char *path)
 {
 	fsimg_worker_request_t request;
 	fsimg_error_t error = { .status = FSIMG_ECORRUPT };
-	unsigned char raw[FSIMG_WIRE_INFO_BYTES];
+	unsigned char raw[FSIMG_JOB_BYTES > FSIMG_WIRE_INFO_BYTES ?
+	    FSIMG_JOB_BYTES : FSIMG_WIRE_INFO_BYTES];
 	int fd;
 
 	_Static_assert(sizeof(raw) >= FSIMG_JOB_BYTES &&
@@ -1076,7 +1085,7 @@ test_job_mountpoint(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == PRESENT + 8 + 6 * 8 + 2 + 6 + 24 + 2080 + 24 + 357 + 3 * 8);
+	CHECK(PLACEMENT_COUNT == PRESENT + 8 + 6 * 8 + 2 + 6 + 24 + 2080 + 24 + 357 + 3 * 8);
 	memset(longest, 'm', FIELD - 1);
 	memset(longer, 'm', FIELD);
 	fsimg_worker_request_init(&request);
@@ -1536,6 +1545,7 @@ test_job_layers(void)
 static void
 other_value(const fsimg_setting_t *row, fsimg_setting_value_t *value)
 {
+	static const fsimg_placement_t placement = { .path = "/a@b", .offset = 42 };
 	const fsimg_setting_choice_t *choice;
 
 	*value = row->initial;
@@ -1547,6 +1557,10 @@ other_value(const fsimg_setting_t *row, fsimg_setting_value_t *value)
 		}
 	}
 	switch (row->kind) {
+	case FSIMG_KIND_PLACEMENTS:
+		value->placements.items = &placement;
+		value->placements.count = 1;
+		break;
 	case FSIMG_KIND_XZ_CHECK:
 		value->xz_check = FSIMG_XZ_SHA256;
 		break;
@@ -1581,6 +1595,15 @@ same_value(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
     const fsimg_setting_value_t *b)
 {
 	switch (row->kind) {
+	case FSIMG_KIND_PLACEMENTS:
+		if (a->placements.count != b->placements.count)
+			return (false);
+		for (uint32_t i = 0; i < a->placements.count; i++) {
+			if (a->placements.items[i].offset != b->placements.items[i].offset ||
+			    strcmp(a->placements.items[i].path, b->placements.items[i].path) != 0)
+				return (false);
+		}
+		return (true);
 	case FSIMG_KIND_U32:
 		return (a->u32 == b->u32);
 	case FSIMG_KIND_U64:
@@ -2045,7 +2068,7 @@ test_image_records(void)
 static void
 test_job_device_input(void)
 {
-	enum { KIND = FSIMG_JOB_BYTES - 3 * 8 - 24 - 357, LENGTH = KIND + 8,
+	enum { KIND = PLACEMENT_COUNT - 3 * 8 - 24 - 357, LENGTH = KIND + 8,
 	    QUANTUM = LENGTH + 8, CAPABILITIES = 23 * 8 };
 	static const struct {
 		unsigned offset;
@@ -2225,7 +2248,7 @@ test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == 5143);
+	CHECK(FSIMG_JOB_BYTES == 13415);
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
 	request.root_paths = image_root;
@@ -2275,7 +2298,7 @@ test_job_erofs_settings_roundtrip_and_reject_invalid_wire_values(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == METABOX + 8);
+	CHECK(PLACEMENT_COUNT == METABOX + 8);
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
 	request.root_paths = image_root;
@@ -2431,7 +2454,7 @@ test_iso_jobs_have_canonical_wire_bytes(void)
 
 	iso_wire_place_string(create_tail, 24, "/b/bios.img");
 	iso_wire_place_string(efi_tail, 1049, "/efi/boot.img");
-	CHECK(FSIMG_JOB_BYTES == 5143);
+	CHECK(FSIMG_JOB_BYTES == 13415);
 	fsimg_worker_request_init(&request);
 	CHECK(request.read.iso_view == FSIMG_ISO_VIEW_AUTO);
 	request.kind = FSIMG_JOB_CREATE;
@@ -2714,6 +2737,151 @@ test_force_location_job_scheme_only(void)
 	    &capabilities, NULL) == FSIMG_OK);
 }
 
+static void
+test_job_placements_roundtrip_and_request_ownership(void)
+{
+	fsimg_worker_request_t request, decoded;
+	fsimg_placement_t items[FSIMG_PLACEMENT_MAX];
+	char paths[FSIMG_PLACEMENT_MAX][PLACEMENT_PATH_BYTES];
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	CHECK(FSIMG_JOB_BYTES == 13415);
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	for (uint32_t i = 0; i < FSIMG_PLACEMENT_MAX; i++) {
+		CHECK(snprintf(paths[i], sizeof(paths[i]), "/file@%u", i) > 0);
+		items[i] = (fsimg_placement_t){ .path = paths[i], .offset = i };
+	}
+	memset(paths[7], 'p', 1024);
+	paths[7][0] = '/';
+	paths[7][1024] = '\0';
+	items[7].offset = UINT64_MAX;
+	request.write.placements = items;
+	request.write.placement_count = FSIMG_PLACEMENT_MAX;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_load_le64(raw + PLACEMENT_COUNT) == FSIMG_PLACEMENT_MAX);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.write.placement_count == FSIMG_PLACEMENT_MAX);
+	CHECK(decoded.write.placements == decoded.placement_storage);
+	for (uint32_t i = 0; i < FSIMG_PLACEMENT_MAX; i++) {
+		CHECK(decoded.write.placements[i].path == decoded.placement_paths[i]);
+		CHECK(decoded.write.placements[i].path != items[i].path);
+		CHECK(strcmp(decoded.write.placements[i].path, items[i].path) == 0);
+		CHECK(decoded.write.placements[i].offset == items[i].offset);
+	}
+	bzero(raw, sizeof(raw));
+	paths[0][1] = 'X';
+	CHECK(strcmp(decoded.write.placements[0].path, "/file@0") == 0);
+	request.write.placement_count = 0;
+	request.write.placements = NULL;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.write.placement_count == 0 && decoded.write.placements == NULL);
+}
+
+static void
+test_job_placement_decode_refusals_have_valid_controls(void)
+{
+	static const struct {
+		const char *name;
+		size_t offset;
+		size_t length;
+		unsigned char byte;
+	} cases[] = {
+		{ "count above capacity", PLACEMENT_COUNT, 1, 9 },
+		{ "unterminated path", PLACEMENT_RECORDS + 8, PLACEMENT_PATH_BYTES, 'x' },
+		{ "empty path", PLACEMENT_RECORDS + 8, 2, 0 },
+		{ "path padding", PLACEMENT_RECORDS + 8 + 3, 1, 'x' },
+		{ "unused offset", PLACEMENT_RECORDS + PLACEMENT_RECORD_BYTES, 1, 1 },
+		{ "unused path", PLACEMENT_RECORDS + PLACEMENT_RECORD_BYTES + 8, 1, 'x' }
+	};
+	fsimg_worker_request_t request, decoded;
+	fsimg_placement_t item = { .path = "/k", .offset = 0 };
+	unsigned char raw[FSIMG_JOB_BYTES], bad[FSIMG_JOB_BYTES];
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	request.write.placements = &item;
+	request.write.placement_count = 1;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		bcopy(raw, bad, sizeof(bad));
+		memset(bad + cases[i].offset, cases[i].byte, cases[i].length);
+		status = fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, &error);
+		if (status != FSIMG_EINVAL)
+			fprintf(stderr, "%s: expected invalid job, got %d\n", cases[i].name, status);
+		CHECK(status == FSIMG_EINVAL);
+		CHECK(strcmp(error.message, "invalid worker job description") == 0);
+		bcopy(raw + cases[i].offset, bad + cases[i].offset, cases[i].length);
+		CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		CHECK(decoded.write.placement_count == 1);
+		CHECK(strcmp(decoded.write.placements[0].path, "/k") == 0);
+	}
+}
+
+static void
+test_job_placement_encode_refusals_have_valid_controls(void)
+{
+	char unterminated[PLACEMENT_PATH_BYTES];
+	fsimg_placement_t valid = { .path = "/k", .offset = 0 };
+	fsimg_placement_t empty = { .path = "", .offset = 0 };
+	fsimg_placement_t absent = { .path = NULL, .offset = 0 };
+	fsimg_placement_t long_path = { .path = unterminated, .offset = 0 };
+	const struct {
+		const char *name;
+		const fsimg_placement_t *items;
+		uint32_t count;
+	} cases[] = {
+		{ "count above capacity", &valid, 9 },
+		{ "absent array", NULL, 1 },
+		{ "empty path", &empty, 1 },
+		{ "absent path", &absent, 1 },
+		{ "unterminated path", &long_path, 1 }
+	};
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t selection;
+	unsigned capabilities;
+
+	memset(unterminated, 'x', sizeof(unterminated));
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		request.write.placements = cases[i].items;
+		request.write.placement_count = cases[i].count;
+		status = fsimg_job_encode(&request, raw, &error);
+		if (status != FSIMG_EINVAL)
+			fprintf(stderr, "%s: expected invalid job, got %d\n", cases[i].name, status);
+		CHECK(status == FSIMG_EINVAL);
+		CHECK(strcmp(error.message, "invalid worker job description") == 0);
+		request.write.placements = &valid;
+		request.write.placement_count = 1;
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		CHECK(decoded.write.placement_count == 1);
+		CHECK(strcmp(decoded.write.placements[0].path, "/k") == 0);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2746,6 +2914,9 @@ main(int argc, char **argv)
 	test_job_force_requires_a_read_and_named_layer_or_compression();
 	test_job_layers();
 	test_job_catalogue();
+	test_job_placements_roundtrip_and_request_ownership();
+	test_job_placement_decode_refusals_have_valid_controls();
+	test_job_placement_encode_refusals_have_valid_controls();
 	test_image_sector_sizes_follow_the_scheme();
 	test_partition_frame_preserves_and_bounds_apm_type();
 	test_image_records();

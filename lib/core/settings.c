@@ -66,6 +66,12 @@ typedef unsigned char id16_t[16];
 	FSIMG_NO_PRESENCE)
 #define TEXT_POINTER(rec, member)	BIND(rec, member,		\
 	FSIMG_KIND_TEXT_POINTER, const char *, FSIMG_NO_PRESENCE)
+/* A list: its array member and the uint32_t member counting it. */
+#define PLACEMENTS_(type, record_id, member, count)	BIND_(type,	\
+	record_id, member, FSIMG_KIND_PLACEMENTS, const fsimg_placement_t *, \
+	FSIMG_NO_PRESENCE), .count_offset = offsetof(type, count) +	\
+	0 * sizeof((uint32_t *)NULL == &MEMBER(type, count))
+#define PLACEMENTS(...)		PLACEMENTS_(__VA_ARGS__)
 #define BYTE_ORDER(rec, member)	BIND(rec, member, FSIMG_KIND_BYTE_ORDER,	\
 	fsimg_byte_order_t, FSIMG_NO_PRESENCE)
 #define DMG_COMPRESSION(rec, member)	BIND(rec, member,		\
@@ -165,9 +171,13 @@ static const fsimg_setting_choice_t xz_check_choices[] = {
  * worker record's field, and the writer by the context's path limit
  * (image_path).
  * bootload, the BIOS entry's load sectors, is bounded by its 16-bit
- * on-disk field. The ISO descriptor texts are borrowed pointers like the
- * mountpoint, bounded by FSIMG_ISO_TEXT_BYTES and FSIMG_ISO_FILE_TEXT_BYTES,
- * the capacities of their fields in the Joliet descriptor with a
+ * on-disk field. place, the fixed file placements
+ * (specs/design-placement.md), is the one list row: each -o place= appends
+ * an element, a path bounded like a boot path and a byte offset, up to
+ * FSIMG_PLACEMENT_MAX; the writer copies the list and its paths itself.
+ * The ISO descriptor texts are borrowed pointers like the mountpoint,
+ * bounded by FSIMG_ISO_TEXT_BYTES and FSIMG_ISO_FILE_TEXT_BYTES, the
+ * capacities of their fields in the Joliet descriptor with a
  * terminator; the four dates are signed Unix seconds behind presence flags,
  * their range the driver's. The pointer texts and the dates are this
  * table's alone: the writer copies each text row, and the command's job
@@ -221,6 +231,12 @@ static const fsimg_setting_t filesystem_rows[] = {
 	{ .key = "bootload", U32(RECORD_WRITE, boot_load_sectors),
 	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT16_MAX, .nonzero = true,
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ELTORITO },
+	{ .key = "place",
+	    PLACEMENTS(RECORD_WRITE, placements, placement_count),
+	    .syntax = FSIMG_SYNTAX_PLACEMENT,
+	    .text_bytes = FSIMG_BOOT_PATH_TEXT_BYTES, .image_path = true,
+	    .capacity = FSIMG_PLACEMENT_MAX,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_PLACEMENT },
 	{ .key = "volset", TEXT_POINTER(RECORD_WRITE, iso_volume_set),
 	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_ISO_TEXT_BYTES,
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_ISO_DESCRIPTOR },
@@ -549,14 +565,17 @@ target_of(const fsimg_setting_t *row, const fsimg_setting_targets_t *targets)
 }
 
 /*
- * The one generic access: copy the member at its offset into a temporary
- * of its exact type, or back. bcopy keeps the access free of alignment and
- * aliasing assumptions about the record.
+ * The one generic access: copy the member at its offset in record into a
+ * temporary of its exact type, or back; a list row's count member at
+ * count_offset travels with its array. bcopy keeps the access free of
+ * alignment and aliasing assumptions about the record.
  */
 static void
-load_member(const fsimg_setting_t *row, const unsigned char *member,
+load_member(const fsimg_setting_t *row, const unsigned char *record,
     fsimg_setting_value_t *value)
 {
+	const unsigned char *member = record + row->offset;
+
 	bzero(value, sizeof(*value));
 	switch (row->kind) {
 	case FSIMG_KIND_NONE:
@@ -610,13 +629,20 @@ load_member(const fsimg_setting_t *row, const unsigned char *member,
 	case FSIMG_KIND_IO:
 		bcopy(member, &value->io, sizeof(value->io));
 		break;
+	case FSIMG_KIND_PLACEMENTS:
+		bcopy(member, &value->placements.items,
+		    sizeof(value->placements.items));
+		bcopy(record + row->count_offset, &value->placements.count,
+		    sizeof(value->placements.count));
+		break;
 	}
 }
 
 static void
-store_member(const fsimg_setting_t *row, unsigned char *member,
+store_member(const fsimg_setting_t *row, unsigned char *record,
     const fsimg_setting_value_t *value)
 {
+	unsigned char *member = record + row->offset;
 	size_t length;
 
 	switch (row->kind) {
@@ -679,6 +705,12 @@ store_member(const fsimg_setting_t *row, unsigned char *member,
 	case FSIMG_KIND_IO:
 		bcopy(&value->io, member, sizeof(value->io));
 		break;
+	case FSIMG_KIND_PLACEMENTS:
+		bcopy(&value->placements.items, member,
+		    sizeof(value->placements.items));
+		bcopy(&value->placements.count, record + row->count_offset,
+		    sizeof(value->placements.count));
+		break;
 	}
 }
 
@@ -686,7 +718,9 @@ store_member(const fsimg_setting_t *row, unsigned char *member,
  * Typed equality. Pointers compare as pointers, never as object
  * representations. The one fixed text ever compared is the empty default,
  * so texts compare by emptiness alone: the first byte decides, which
- * reads nothing past a member whose termination is not yet checked.
+ * reads nothing past a member whose termination is not yet checked. Two
+ * lists are equal with equal counts and, when nonzero, the same array; a
+ * zero count leaves its pointer unread, so every empty list is equal.
  */
 static bool
 values_equal(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
@@ -726,6 +760,10 @@ values_equal(const fsimg_setting_t *row, const fsimg_setting_value_t *a,
 		return (a->text == b->text);
 	case FSIMG_KIND_IO:
 		return (a->io == b->io);
+	case FSIMG_KIND_PLACEMENTS:
+		return (a->placements.count == b->placements.count &&
+		    (a->placements.count == 0 ||
+		    a->placements.items == b->placements.items));
 	}
 	return (false);
 }
@@ -754,7 +792,7 @@ fsimg_setting_load(const fsimg_setting_t *row,
 		*value = row->initial;
 		return;
 	}
-	load_member(row, record + row->offset, value);
+	load_member(row, record, value);
 }
 
 void
@@ -767,7 +805,7 @@ fsimg_setting_store(const fsimg_setting_t *row,
 	record = target_of(row, targets);
 	if (record == NULL)
 		return;
-	store_member(row, record + row->offset, value);
+	store_member(row, record, value);
 	if (row->presence != FSIMG_NO_PRESENCE) {
 		present = true;
 		bcopy(&present, record + row->presence, sizeof(present));
@@ -786,7 +824,7 @@ fsimg_setting_is_default(const fsimg_setting_t *row,
 		return (true);
 	if (row->presence != FSIMG_NO_PRESENCE)
 		return (!presence_flag(row, record));
-	load_member(row, record + row->offset, &value);
+	load_member(row, record, &value);
 	return (values_equal(row, &value, &row->initial));
 }
 
@@ -844,7 +882,16 @@ check_row(const fsimg_setting_t *row, const fsimg_setting_records_t *records,
 	    (row->presence != FSIMG_NO_PRESENCE && record[row->presence] > 1))
 		return (row_error(row, operation, error,
 		    "setting flag is neither false nor true"));
-	load_member(row, record + row->offset, &value);
+	load_member(row, record, &value);
+	/* A list holds at most its capacity, and a nonempty one an array. */
+	if (row->kind == FSIMG_KIND_PLACEMENTS &&
+	    value.placements.count > row->capacity)
+		return (row_error(row, operation, error,
+		    "list setting holds more than its capacity"));
+	if (row->kind == FSIMG_KIND_PLACEMENTS &&
+	    value.placements.count != 0 && value.placements.items == NULL)
+		return (row_error(row, operation, error,
+		    "list setting has a count but no array"));
 	/* An enum holds one of its named values. */
 	if (row->syntax == FSIMG_SYNTAX_CHOICE && row->kind != FSIMG_KIND_NONE &&
 	    fsimg_setting_choice_of(row, &value) == NULL) {
@@ -876,7 +923,7 @@ fsimg_settings_init(const fsimg_setting_slice_t *slice,
 		base = target_of(row, targets);
 		if (base == NULL)
 			continue;
-		store_member(row, base + row->offset, &row->initial);
+		store_member(row, base, &row->initial);
 		if (row->presence != FSIMG_NO_PRESENCE) {
 			absent = false;
 			bcopy(&absent, base + row->presence, sizeof(absent));

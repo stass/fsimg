@@ -1451,6 +1451,8 @@ test_wrap_settings(void)
 	options.boot_load_sectors = defaults.boot_load_sectors;
 	options.boot_bios = defaults.boot_bios;
 	options.boot_efi = defaults.boot_efi;
+	options.placements = defaults.placements;
+	options.placement_count = defaults.placement_count;
 	options.iso_volume_set = defaults.iso_volume_set;
 	options.iso_publisher = defaults.iso_publisher;
 	options.iso_preparer = defaults.iso_preparer;

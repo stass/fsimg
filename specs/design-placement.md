@@ -112,7 +112,7 @@ naming the `place` key in `error.path`:
 | Condition | Status |
 | --- | --- |
 | `placement_count` above `FSIMG_PLACEMENT_MAX`, or nonzero with a NULL array | `FSIMG_EINVAL` |
-| A NULL or empty path, a path that is not an absolute image path under the common path rules, or one past the image-path capacity | `FSIMG_EINVAL` |
+| A NULL or empty path, a path that is not an absolute image path under the common path rules, or one past the image-path capacity, the context's path limit | `FSIMG_EINVAL`; a path deeper than the context's depth limit keeps the path rules' `FSIMG_ELIMIT` |
 | Two placements with the same path, or two with the same offset | `FSIMG_EINVAL` |
 | A nonzero count for a format whose write mask lacks `FSIMG_SETTING_PLACEMENT` | `FSIMG_EINVAL`, from the common applicability check |
 

@@ -219,6 +219,16 @@ typedef struct fsimg_worker_request {
 	 * place in the record.
 	 */
 	char		 iso_text_storage[FSIMG_JOB_DESCRIPTOR_TEXT_BYTES];
+	/* Backing only; write.placements and write.placement_count are the
+	 * authoritative values. The command's parse or the decoder fills the
+	 * first placement_count elements, each path pointing at its own
+	 * entry of placement_paths, since a command word holds the path and
+	 * its offset together and the record holds them in fixed fields. A
+	 * copy of the request keeps pointing into the backing of the request
+	 * that was parsed or decoded, which must outlive it.
+	 */
+	fsimg_placement_t placement_storage[FSIMG_PLACEMENT_MAX];
+	char		 placement_paths[FSIMG_PLACEMENT_MAX][FSIMG_JOB_BOOT_PATH_BYTES];
 } fsimg_worker_request_t;
 
 typedef struct fsimg_worker_result {
