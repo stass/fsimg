@@ -54,8 +54,8 @@ fsimg_status_t	apfs_name_form(apfs_name_rule_t, const char *, size_t,
 /* The 22-bit name hash of a comparison form: CRC-32C over its points as
  * little-endian 32-bit units, from the register value FSIMG_CRC32C_SEED,
  * without a final complement or a terminating NUL, keeping the low 22 bits.
- * The framing is provisional until E4 (specs/design-apfs.md); the native
- * vectors of test/apfs-unicode.c reproduce it.
+ * This is the framing macOS uses (E4); test/apfs-unicode.c checks it
+ * against test/fixtures/apfs/name-hashes.txt.
  */
 uint32_t	apfs_name_hash(const apfs_name_form_t *);
 /* apfs_name_key(form, key, capacity, length) stores the UTF-8 encoding of

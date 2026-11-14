@@ -98,15 +98,13 @@ ruby tools/gen-apfs-tables.rb 17.0.0 UCD-DIRECTORY \
 ```
 
 The version is the generator's required argument, and it accepts only a
-version whose input digests it pins. Version 17.0.0 is provisional until E4:
-it is the version under which a preliminary pair of captures on macOS 26.6.2,
-one case-insensitive and one case-sensitive volume each holding 23 names chosen
-for case pairs and decompositions added in Unicode 9 to 17, reproduces every
-stored hash, while each earlier version tried (9.0.0 to 16.0.0) and simple
-folding miss some. Those names, with the `.fseventsd` directory macOS adds,
-and their stored hashes are the native vectors of `test/apfs-unicode.c`,
-which also checks the tables against the three files above when
-`FSIMG_APFS_UCD` names a directory holding them.
+version whose input digests it pins. 17.0.0 is the version macOS 26.6.2
+applies to names (E4, [the research record](apfs-research.md)).
+`test/apfs-unicode.c` checks the module against the E4 hashes in
+`test/fixtures/apfs/name-hashes.txt`, and against the three files above
+when `FSIMG_APFS_UCD` names a directory holding them.
+The test also checks every vector in `$FSIMG_APFS_NATIVE/e4-vectors.txt`
+when present.
 
 `lib/core/sha256.c` and `lib/core/sha256.h`, the project's one SHA-256
 implementation, are FreeBSD's `sys/crypto/sha2/sha256c.c` and

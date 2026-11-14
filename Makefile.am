@@ -354,6 +354,8 @@ test_hfsplus_unicode_LDADD = libfsimg.la
 test_apfs_unicode_SOURCES = test/apfs-unicode.c test/test.h \
 	test/digest.c test/digest.h
 test_apfs_unicode_LDADD = libfsimg.la
+test_apfs_unicode_CPPFLAGS = $(AM_CPPFLAGS) \
+	-DAPFS_NAME_HASHES='"$(abs_top_srcdir)/test/fixtures/apfs/name-hashes.txt"'
 test_hfsplus_write_SOURCES = test/hfsplus-write.c test/test.h \
 	test/hfsplus-write-check.c test/hfsplus-write-check.h \
 	test/hfsplus-write-fixture.c test/hfsplus-write-fixture.h
@@ -839,3 +841,4 @@ EXTRA_DIST += test/erofsdump-test.rb test/erofsdump.sh test/erofs-integration.sh
 	test/erofs-integration.rb
 EXTRA_DIST += test/hfsplus-integration-test.rb
 EXTRA_DIST += test/apfsdump-test.rb test/apfsdump.sh
+EXTRA_DIST += test/fixtures/apfs/name-hashes.txt

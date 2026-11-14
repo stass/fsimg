@@ -1,0 +1,285 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
+#
+# A curated subset of the APFS directory-record name hashes that macOS
+# stored in experiment E4 (docs/apfs-research.md), on macOS 26.6.2 build
+# 25G83 with volumes formatted by newfs_apfs (2811.160.7.0.4). Captures:
+# apfs-newfs-268435456-e4-names-ci (case-insensitive, incompatible feature
+# 0x1), apfs-newfs-268435456-e4-names-cs (case-sensitive and
+# normalization-insensitive, incompatible feature 0x8), and
+# apfs-newfs-33554432-e4-prefix-ci and -cs for the p/pirhv and q/qodfh pairs.
+# e4-vectors.txt beside the captures holds all 33369 stored names of the two
+# large captures; the p/pirhv and q/qodfh lines come from the prefix captures.
+# Fields, tab-separated: the stored name bytes in hex without the NUL, the
+# personality (ci or cs), the stored length field (bytes with the NUL), and
+# the stored 22-bit hash in decimal.
+# German sharp s (ci)
+73747261c39f65	ci	8	1338499
+c39f	ci	3	2104939
+efac86	ci	4	2139809
+# Turkish dotted and dotless I (ci)
+c4b07374616e62756c	ci	10	1010428
+44c4b059415242414b4952	ci	12	1221788
+697374616e62756c	ci	9	1541999
+49	ci	2	1717770
+c4b1	ci	3	1911112
+c4b17374616e62756c	ci	10	2180471
+646979617262616b6972	ci	11	2358040
+# Greek sigma, final and medial (ci)
+cebfcf83cebfcf82	ci	9	89723
+cea3	ci	3	1207210
+ce8ccea3ce9fcea3	ci	9	1331947
+cea3cea3	ci	5	1916288
+cea3ce91cea3	ci	7	2020656
+# Angstrom, Ohm and Kelvin signs (ci)
+c385	ci	3	2498285
+cea9	ci	3	3222477
+4b	ci	2	4003211
+# Composed and decomposed forms (ci)
+c796	ci	3	411177
+e1bb87	ci	4	1403490
+c3a9	ci	3	1930847
+636166c3a9	ci	6	2648289
+efac81	ci	4	3152335
+e1b9a9	ci	4	4182426
+# Folding not closed under decomposition (ci)
+c589	ci	3	152291
+e1ba96	ci	4	403577
+ce90	ci	3	1283253
+cd85	ci	3	1495452
+e1beb7	ci	4	1538317
+e1beb3	ci	4	1563367
+c7b0	ci	3	1871660
+e1be80	ci	4	1951404
+ceb0	ci	3	2825085
+# Hangul, precomposed and conjoining jamo (ci)
+ec89a2	ci	4	14361
+ec8e80	ci	4	41157
+ebab89	ci	4	73390
+ec9fa0	ci	4	73798
+ec9d8a	ci	4	83205
+ec8db7	ci	4	92571
+# Georgian Mtavruli and Mkhedruli (ci)
+e1b290	ci	4	1633879
+e1b290e1b291e1b292	ci	10	3679617
+e1b2bf	ci	4	3744240
+e182a0	ci	4	1197965
+# ASCII (ci)
+2e68696464656e	ci	8	14517
+782079	ci	4	443196
+49636f6e0d	ci	6	799515
+4d616b6566696c65	ci	9	1164690
+61	ci	2	1988076
+# Case-folding sources (ci)
+ea9f80	ci	4	548966
+ea9f8e	ci	4	594418
+ea9fb5	ci	4	621850
+78ea9f92	ci	5	632914
+ea9f87	ci	4	633144
+# Canonical decompositions (ci)
+f091a4b8	ci	5	1340102
+f0909789	ci	5	2431328
+f0918e83	ci	5	2736048
+e288a6	ci	4	2984
+# CJK compatibility ideographs (ci)
+efa7a4	ci	4	1047
+efa782	ci	4	1562
+efa7a5	ci	4	9673
+f0afa386	ci	5	10612
+# Assigned in Unicode 10.0.0 (ci)
+f091a9be	ci	5	46792
+f091a987	ci	5	55840
+f091a9b7	ci	5	98198
+# Assigned in Unicode 11.0.0 (ci)
+79e1b2bf	ci	5	460383
+79e1b290	ci	5	2542072
+79e1b29b	ci	5	8999
+# Assigned in Unicode 12.0.0 (ci)
+79ea9f85	ci	5	928548
+79ea9f82	ci	5	1139784
+79ea9eba	ci	5	3341823
+# Assigned in Unicode 13.0.0 (ci)
+79f091a4b8	ci	6	1211945
+79ea9fb5	ci	5	3627701
+79ea9f87	ci	5	3640983
+# Assigned in Unicode 14.0.0 (ci)
+79ea9f90	ci	5	1242868
+79f09095b0	ci	6	2096460
+79e2b0af	ci	5	2869162
+# Assigned in Unicode 15.0.0 (ci)
+79f090bbbd	ci	6	2289
+f09e9397	ci	5	7156
+f091ac85	ci	5	13368
+# Assigned in Unicode 15.1.0 (ci)
+e387af	ci	4	1636775
+e2bfbd	ci	4	1695299
+e2bfbc	ci	4	1864955
+# Assigned in Unicode 16.0.0 (ci)
+79e1b289	ci	5	589210
+79f0909789	ci	6	2299279
+79ea9f8b	ci	5	2669317
+# Assigned in Unicode 17.0.0 (ci)
+79f096baa0	ci	6	147113
+79ea9f92	ci	5	3528053
+79ea9f8e	ci	5	3618397
+# Supplementary planes (ci)
+f0939492	ci	5	3593
+f093a8ba	ci	5	9160
+f096a995	ci	5	20187
+f098aea2	ci	5	23439
+f09491bc	ci	5	41160
+# Mixed (ci)
+e2b0aff0afa182f09cb9a6efa5a0eaaebbd49ed1ba	ci	22	38679
+eaaeb3f0909789f0afa382c482cd85e1bba0e1b985e1b892	ci	25	61307
+# Distinct names with equal hashes, in tree order (ci)
+f0909694d09ff0afa6a3f09393a1	ci	15	239257
+f096aaaa	ci	5	239257
+f09f93ace292b7	ci	8	327427
+f0afa0bb	ci	5	327427
+# A name and its extension with an equal hash, in tree order (ci)
+70	ci	2	4148841
+7069726876	ci	6	4148841
+71	ci	2	3859665
+716f646668	ci	6	3859665
+# German sharp s (cs)
+53545241535345	cs	8	299292
+53545241e1ba9e45	cs	9	327374
+7353	cs	3	330464
+5353	cs	3	356217
+efac86	cs	4	403960
+53747261737365	cs	8	1294039
+# Turkish dotted and dotless I (cs)
+497374616e62756c	cs	9	581336
+69cc877374616e62756c	cs	11	1010428
+697374616e62756c	cs	9	1541999
+495354414e42554c	cs	9	1581895
+69	cs	2	1717770
+c4b1	cs	3	1911112
+c4b17374616e62756c	cs	10	2180471
+# Greek sigma, final and medial (cs)
+cebfcf83cebfcf82	cs	9	324803
+cea3	cs	3	1122502
+cf8ccf83cebfcf82	cs	9	1177683
+cf83	cs	3	1207210
+cf8ccf83cebfcf83	cs	9	1331947
+cf82	cs	3	1556754
+cf83cf82	cs	5	1611576
+# Angstrom, Ohm and Kelvin signs (cs)
+4b	cs	2	1573120
+c3a5	cs	3	2498285
+c385	cs	3	2521972
+cf89	cs	3	3222477
+cea9	cs	3	3301537
+# Composed and decomposed forms (cs)
+c796	cs	3	411177
+efac81	cs	4	430386
+4649	cs	3	1403101
+e1bb87	cs	4	1403490
+c389	cs	3	1905606
+c3a9	cs	3	1930847
+434146c389	cs	6	2108838
+636166c3a9	cs	6	2648289
+# Folding not closed under decomposition (cs)
+ceaacc81	cs	5	9363
+cabc6e	cs	4	152291
+efac80	cs	4	211850
+e1ba96	cs	4	403577
+ce90	cs	3	1283253
+ceb9	cs	3	1495452
+ceb1ceb9	cs	5	1563367
+c7b0	cs	3	1871660
+4acc8c	cs	4	1895093
+# Hangul, precomposed and conjoining jamo (cs)
+ec89a2	cs	4	14361
+ec8e80	cs	4	41157
+ebab89	cs	4	73390
+ec9fa0	cs	4	73798
+ec9d8a	cs	4	83205
+ec8db7	cs	4	92571
+# Georgian Mtavruli and Mkhedruli (cs)
+e1b2bf	cs	4	1107144
+e1b290e1b291e1b292	cs	10	1713263
+e1b290	cs	4	3222383
+e2b480	cs	4	1197965
+e18390	cs	4	1633879
+# ASCII (cs)
+2e68696464656e	cs	8	14517
+782079	cs	4	443196
+524541444d45	cs	7	569277
+4d616b6566696c65	cs	9	957477
+6d616b6566696c65	cs	9	1164690
+# Case-folding sources (cs)
+78f09095b0	cs	6	47858
+f09095b0	cs	5	188538
+78ea9f9a	cs	5	549132
+ea9eba	cs	4	618728
+ea9f9a	cs	4	670596
+# Case-folding targets (cs)
+d5af	cs	3	4636
+f09096b8	cs	5	5444
+d4a3	cs	3	8174
+# Canonical decompositions (cs)
+f091a4b8	cs	5	1340102
+f0909789	cs	5	2431328
+f0918e83	cs	5	2736048
+e288a6	cs	4	2984
+# CJK compatibility ideographs (cs)
+efa7a4	cs	4	1047
+efa782	cs	4	1562
+efa7a5	cs	4	9673
+f0afa386	cs	5	10612
+# Assigned in Unicode 10.0.0 (cs)
+f091a9be	cs	5	46792
+f091a987	cs	5	55840
+f091a9b7	cs	5	98198
+# Assigned in Unicode 11.0.0 (cs)
+79e1b290	cs	5	986304
+79e1b2bf	cs	5	3064679
+79f096b98d	cs	6	8117
+# Assigned in Unicode 12.0.0 (cs)
+79ea9f85	cs	5	1340986
+79ea9f82	cs	5	1363696
+79ea9eba	cs	5	3626823
+# Assigned in Unicode 13.0.0 (cs)
+79f091a4b8	cs	6	1211945
+79ea9fb5	cs	5	1430412
+79ea9f87	cs	5	3364283
+# Assigned in Unicode 14.0.0 (cs)
+79e2b0af	cs	5	802299
+79ea9f90	cs	5	1530956
+79ea9f80	cs	5	3403121
+# Assigned in Unicode 15.0.0 (cs)
+79f090bbbd	cs	6	2289
+f09e9397	cs	5	7156
+f091ac85	cs	5	13368
+# Assigned in Unicode 15.1.0 (cs)
+e387af	cs	4	1636775
+e2bfbd	cs	4	1695299
+e2bfbc	cs	4	1864955
+# Assigned in Unicode 16.0.0 (cs)
+79f090b590	cs	6	585115
+79ea9f8b	cs	5	1378222
+79f0909789	cs	6	2299279
+# Assigned in Unicode 17.0.0 (cs)
+79f096baa0	cs	6	25931
+79ea9f92	cs	5	3178445
+79ea9f8e	cs	5	3316965
+# Supplementary planes (cs)
+f0939492	cs	5	3593
+f093a8ba	cs	5	9160
+f096a995	cs	5	20187
+f098aea2	cs	5	23439
+f09491bc	cs	5	41160
+# Mixed (cs)
+ce89f09090a5ea9f87e285a2f090908bc3bc	cs	19	5477
+efa6a8f09b87a8f0918e83eaaebfefaa8eea9e8bc394	cs	23	7640
+# Distinct names with equal hashes, in tree order (cs)
+79f096bb88	cs	6	478657
+f096bab3efa9a1e0a598	cs	11	478657
+78e1b8ac	cs	5	541344
+c6bcf092bf92f09f94acf0afa592f096b98be1b2b5	cs	22	541344
+# A name and its extension with an equal hash, in tree order (cs)
+70	cs	2	4148841
+7069726876	cs	6	4148841
+71	cs	2	3859665
+716f646668	cs	6	3859665

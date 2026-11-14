@@ -22,6 +22,7 @@
 #define SCALAR_LIMIT 0x110000u
 #define UCD_LINE_BYTES 4096
 #define UCD_SEQUENCE_POINTS 64
+#define E4_LINE_BYTES (2 * APFS_NAME_MAX_BYTES + 64)
 
 typedef struct sequence {
 	size_t		 count;
@@ -76,6 +77,13 @@ static void make_form(apfs_name_rule_t, const uint32_t *, size_t,
 static void check_form(apfs_name_rule_t, const uint32_t *, size_t,
     const uint32_t *, size_t, const char *);
 static void test_native_hashes_match_stored_records(void);
+static bool read_e4_line(FILE *, char *, const char *, size_t);
+static unsigned long parse_e4_decimal(const char *, unsigned long,
+    const char *, size_t);
+static size_t check_e4_hashes(FILE *, const char *);
+static void test_e4_fixture_hashes_match(void);
+static void test_fresh_volume_names_hash_natively(void);
+static void test_e4_full_vectors_match_when_present(void);
 static void test_hash_matches_across_chunk_boundaries(void);
 static void test_namespace_keys_follow_volume_rule(void);
 static void test_invalid_names_leave_empty_forms(void);
@@ -107,6 +115,7 @@ case_check(bool condition, const char *format, ...)
 		va_start(args, format);
 		vfprintf(stderr, format, args);
 		va_end(args);
+		/* UCD tests set this diagnostic context and reset it after use. */
 		if (ucd_file != NULL)
 			fprintf(stderr, " file=%s line=%zu", ucd_file, ucd_line);
 		fputc('\n', stderr);
@@ -316,6 +325,192 @@ test_native_hashes_match_stored_records(void)
 		    "native stored hash row=%zu rule=%d point=U+%04X",
 		    i, row->rule, (unsigned)row->points[0]);
 	}
+}
+
+/* Read complete bounded lines, rejecting embedded NULs as malformed input. */
+static bool
+read_e4_line(FILE *file, char *line, const char *path, size_t line_number)
+{
+	size_t length = 0;
+	int byte;
+
+	while ((byte = fgetc(file)) != EOF && byte != '\n') {
+		case_check(byte != 0,
+		    "E4 line contains NUL file=%s line=%zu",
+		    path, line_number);
+		case_check(length < E4_LINE_BYTES - 1,
+		    "E4 line exceeds buffer file=%s line=%zu",
+		    path, line_number);
+		line[length++] = (char)byte;
+	}
+	case_check(ferror(file) == 0, "E4 read file=%s line=%zu",
+	    path, line_number);
+	line[length] = '\0';
+	return (byte != EOF || length != 0);
+}
+
+static unsigned long
+parse_e4_decimal(const char *text, unsigned long maximum,
+    const char *path, size_t line_number)
+{
+	unsigned long value;
+	char *end;
+
+	case_check(*text != '\0', "E4 empty decimal file=%s line=%zu",
+	    path, line_number);
+	for (const char *p = text; *p != '\0'; p++)
+		case_check(*p >= '0' && *p <= '9',
+		    "E4 decimal syntax file=%s line=%zu value=%s",
+		    path, line_number, text);
+	errno = 0;
+	value = strtoul(text, &end, 10);
+	case_check(errno == 0 && *end == '\0' && value <= maximum,
+	    "E4 decimal range file=%s line=%zu value=%s maximum=%lu",
+	    path, line_number, text, maximum);
+	return (value);
+}
+
+static size_t
+check_e4_hashes(FILE *file, const char *path)
+{
+	char line[E4_LINE_BYTES], name[APFS_NAME_MAX_BYTES];
+	char *fields[4], *separator, pair[3];
+	unsigned long stored_length, stored_hash;
+	apfs_name_rule_t rule;
+	size_t line_number = 0, rows = 0, length, hex_length;
+	uint32_t computed_hash;
+	bool hashes_match = true;
+
+	while (read_e4_line(file, line, path, ++line_number)) {
+		if (line[0] == '#' || strspn(line, " \t\r") == strlen(line))
+			continue;
+		fields[0] = line;
+		for (size_t i = 1; i < COUNT(fields); i++) {
+			separator = strchr(fields[i - 1], '\t');
+			case_check(separator != NULL,
+			    "E4 missing field file=%s line=%zu field=%zu",
+			    path, line_number, i + 1);
+			*separator = '\0';
+			fields[i] = separator + 1;
+		}
+		case_check(strchr(fields[3], '\t') == NULL,
+		    "E4 extra field file=%s line=%zu", path, line_number);
+		case_check(strcmp(fields[1], "ci") == 0 ||
+		    strcmp(fields[1], "cs") == 0,
+		    "E4 personality file=%s line=%zu value=%s",
+		    path, line_number, fields[1]);
+		rule = strcmp(fields[1], "ci") == 0 ?
+		    APFS_NAMES_CASELESS : APFS_NAMES_NFD;
+		stored_length = parse_e4_decimal(fields[2],
+		    APFS_NAME_MAX_BYTES + 1, path, line_number);
+		stored_hash = parse_e4_decimal(fields[3], 0x3fffff,
+		    path, line_number);
+
+		hex_length = strlen(fields[0]);
+		case_check(hex_length > 0 && hex_length % 2 == 0 &&
+		    hex_length / 2 <= sizeof(name),
+		    "E4 hex length file=%s line=%zu length=%zu",
+		    path, line_number, hex_length);
+		length = hex_length / 2;
+		for (size_t i = 0; i < length; i++) {
+			pair[0] = fields[0][2 * i];
+			pair[1] = fields[0][2 * i + 1];
+			pair[2] = '\0';
+			case_check(isxdigit((unsigned char)pair[0]) &&
+			    isxdigit((unsigned char)pair[1]),
+			    "E4 hex syntax file=%s line=%zu hex=%s byte=%zu",
+			    path, line_number, fields[0], i);
+			name[i] = (char)strtoul(pair, NULL, 16);
+		}
+		case_check(stored_length == length + 1,
+		    "E4 stored length file=%s line=%zu hex=%s personality=%s stored=%lu computed=%zu",
+		    path, line_number, fields[0], fields[1],
+		    stored_length, length + 1);
+		case_check(apfs_name_form(rule, name, length, &actual) == FSIMG_OK,
+		    "E4 form file=%s line=%zu hex=%s personality=%s",
+		    path, line_number, fields[0], fields[1]);
+		computed_hash = apfs_name_hash(&actual);
+		if (computed_hash != stored_hash) {
+			fprintf(stderr,
+			    "E4 hash file=%s line=%zu hex=%s personality=%s stored=%lu computed=%u\n",
+			    path, line_number, fields[0], fields[1],
+			    stored_hash, (unsigned)computed_hash);
+			hashes_match = false;
+		}
+		rows++;
+	}
+	CHECK(fclose(file) == 0);
+	printf("E4 hashes: %zu data lines file=%s\n", rows, path);
+	case_check(hashes_match, "E4 stored hashes match file=%s", path);
+	return (rows);
+}
+
+static void
+test_e4_fixture_hashes_match(void)
+{
+	FILE *file;
+	size_t rows;
+
+	file = fopen(APFS_NAME_HASHES, "rb");
+	if (file == NULL)
+		perror(APFS_NAME_HASHES);
+	CHECK(file != NULL);
+	rows = check_e4_hashes(file, APFS_NAME_HASHES);
+	case_check(rows == 219,
+	    "E4 fixture data lines expected=219 actual=%zu", rows);
+}
+
+static void
+test_fresh_volume_names_hash_natively(void)
+{
+	/*
+	 * The root and private-directory records of every fresh native
+	 * volume (E4 research record).
+	 */
+	static const struct {
+		const char	*name;
+		uint32_t	 hash;
+	} cases[] = {
+		{ .name = "root", .hash = 2989177 },
+		{ .name = "private-dir", .hash = 2828707 }
+	};
+	for (size_t i = 0; i < COUNT(cases); i++) {
+		CHECK(apfs_name_form(APFS_NAMES_CASELESS, cases[i].name,
+		    strlen(cases[i].name), &actual) == FSIMG_OK);
+		case_check(apfs_name_hash(&actual) == cases[i].hash,
+		    "named caseless hash name=%s stored=%u computed=%u",
+		    cases[i].name, (unsigned)cases[i].hash,
+		    (unsigned)apfs_name_hash(&actual));
+	}
+}
+
+static void
+test_e4_full_vectors_match_when_present(void)
+{
+	char path[4096];
+	const char *directory;
+	FILE *file;
+	size_t rows;
+	int length;
+
+	directory = getenv("FSIMG_APFS_NATIVE");
+	if (directory == NULL) {
+		puts("E4 full vectors skipped: FSIMG_APFS_NATIVE is unset");
+		return;
+	}
+	length = snprintf(path, sizeof(path), "%s/e4-vectors.txt", directory);
+	CHECK(length >= 0 && (size_t)length < sizeof(path));
+	file = fopen(path, "rb");
+	if (file == NULL && errno == ENOENT) {
+		printf("E4 full vectors skipped: file does not exist: %s\n", path);
+		return;
+	}
+	if (file == NULL)
+		perror(path);
+	CHECK(file != NULL);
+	rows = check_e4_hashes(file, path);
+	case_check(rows == 33369,
+	    "E4 full data lines expected=33369 actual=%zu", rows);
 }
 
 static void
@@ -572,12 +767,15 @@ digest_uint32(fsimg_sha256_t *digest, uint32_t value)
 	fsimg_sha256_update(digest, bytes, sizeof(bytes));
 }
 
-/* The digest was computed independently of the generator with Ruby 4.0.7,
- * Unicode 17.0.0: s.unicode_normalize(:nfd) for NFD and
- * s.unicode_normalize(:nfd).downcase(:fold).unicode_normalize(:nfd)
- * for CASELESS.
- * For each scalar in increasing order, serialize NFD then CASELESS, each as
- * a little-endian uint32 count followed by little-endian uint32 points.
+/* Reproduce this digest with Ruby 4.0.7 (Unicode 17.0.0): for every scalar
+ * name_scalar accepts, in increasing order, use unicode_normalize(:nfd)
+ * for NFD and downcase(:fold).unicode_normalize(:nfd) for CASELESS.
+ * Serialize NFD then CASELESS, each as a little-endian uint32 count followed
+ * by little-endian uint32 points. This is exact for single scalars; an
+ * independent table-driven reference built from UnicodeData.txt and
+ * CaseFolding.txt 17.0.0 agrees. Ruby's normalizer must not be an oracle
+ * for multi-mark strings: it misorders Tibetan U+0F73/U+0F75/U+0F81 after
+ * marks such as U+0323 (see the E4 research record).
  * It changes when the pinned Unicode version does.
  */
 static void
@@ -876,6 +1074,7 @@ read_foldings(const char *directory)
 	CHECK(rows > 0);
 	printf("UCD case folding: %zu C/F mappings\n", rows);
 	ucd_file = NULL;
+	ucd_line = 0;
 	return (foldings);
 }
 
@@ -934,12 +1133,17 @@ test_ucd_conformance(void)
 	    "5019ffd530751a741900c849c0e010332f142a3612234639bd200b82138a87db");
 	test_ucd_normalization_matches_columns(directory);
 	test_ucd_caseless_matches_full_folding(directory);
+	ucd_file = NULL;
+	ucd_line = 0;
 }
 
 int
 main(void)
 {
 	test_native_hashes_match_stored_records();
+	test_e4_fixture_hashes_match();
+	test_fresh_volume_names_hash_natively();
+	test_e4_full_vectors_match_when_present();
 	test_hash_matches_across_chunk_boundaries();
 	test_namespace_keys_follow_volume_rule();
 	test_invalid_names_leave_empty_forms();
