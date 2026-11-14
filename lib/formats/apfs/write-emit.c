@@ -16,10 +16,10 @@
  * are empty. The order of work is
  *
  *   payload        every file's content, copied into its run;
- *   trees          the filesystem tree, replayed from the sorted records
- *                  through the planning packer, then the volume object
- *                  map's, extent-reference, snapshot and container object
- *                  map's trees, the two object maps and the volume
+ *   trees          the filesystem, volume object map's, extent-reference,
+ *                  snapshot and container object map's trees, each packed
+ *                  from the generator planning counted it with
+ *                  (write-trees.c), the two object maps and the volume
  *                  superblock;
  *   space manager  the chunk-information, address and bitmap blocks in the
  *                  internal pool, the pool's bitmap and the space manager;
@@ -31,10 +31,8 @@
  * the writer never writes, the tail of every file's last block among them,
  * hold zero; every block written is encoded over a zeroed buffer, so its
  * unused fields and free space hold zero too. A tree's node boundaries come
- * from the packer that planning ran over the same records, and each tree's
- * shape is compared with the planned one before its blocks are named
- * anywhere else, so a divergence fails instead of writing an inconsistent
- * container.
+ * from the same generator and packer that planning ran, so they are the
+ * planned ones by construction.
  */
 
 #define BLOCK			APFS_WRITE_BLOCK_BYTES
@@ -45,44 +43,20 @@
 #define SM_VERSION		1u
 #define REAPER_NEXT_ID		1u
 #define NEXT_DOC_ID		3u
-#define PEXT_KIND_NEW		1u
 #define FORMATTED_BY		"fsimg " PACKAGE_VERSION
 
 _Static_assert(sizeof(FORMATTED_BY) <= APFS_FS_CHANGE_ID_BYTES,
     "the formatting identifier fits its field with a NUL");
 
 /*
- * The state of one emission. key and val hold a generated record; frame
- * holds one record of the sorted stream, whose file-extent values are
- * completed in place; target holds a link target read again. cursor and
- * next are the position of the tree being packed: the sorted stream's
- * offset for the filesystem tree, the records produced, or the catalog IDs
- * passed, for the others. pack_tree() resets both before each tree.
+ * The state of one emission. target holds a link target read again.
  */
 typedef struct apfs_emitter {
 	apfs_plan_t	*plan;
 	fsimg_writer_t	*writer;
 	fsimg_emit_t	*emit;
-	uint64_t	 cursor;
-	uint64_t	 next;
-	unsigned char	 key[APFS_OMAP_KEY_BYTES];
-	unsigned char	 val[APFS_PEXT_VAL_BYTES];
-	unsigned char	 frame[APFS_WRITE_RECORD_MAX];
 	unsigned char	 target[FSIMG_SYMLINK_TARGET_MAX];
 } apfs_emitter_t;
-
-_Static_assert(APFS_OMAP_KEY_BYTES >= APFS_JKEY_BYTES &&
-    APFS_PEXT_VAL_BYTES >= APFS_OMAP_VAL_BYTES,
-    "the generated records fit their buffers");
-
-/*
- * A tree's records as a sequential cursor over the emitter's position:
- * each call produces the next record into record, borrowed until the next
- * call, or returns FSIMG_DONE after the last. A source runs once per tree,
- * in key order, from the position pack_tree() reset.
- */
-typedef fsimg_status_t (*record_source_t)(apfs_emitter_t *, apfs_record_t *,
-    fsimg_error_t *);
 
 /* The plan and the bytes being emitted disagree: an internal error. */
 static fsimg_status_t
@@ -226,62 +200,6 @@ tree_node_write(void *arg, uint64_t k, uint64_t oid,
 	    1, error));
 }
 
-/* The shape a tree packed to equals the one planning counted. */
-static bool
-shape_equal(const apfs_pack_result_t *a, const apfs_pack_result_t *b)
-{
-	if (a->node_count != b->node_count || a->key_count != b->key_count ||
-	    a->levels != b->levels)
-		return (false);
-	for (unsigned level = 0; level < a->levels; level++)
-		if (a->level_nodes[level] != b->level_nodes[level])
-			return (false);
-	return (true);
-}
-
-/*
- * Pack one tree from source with the writing sink. Nodes are written as
- * they close, the root last.
- */
-static fsimg_status_t
-pack_tree(apfs_emitter_t *e, const apfs_pack_profile_t *profile,
-    const apfs_tree_plan_t *tree, bool virtual_oids, record_source_t source,
-    fsimg_error_t *error)
-{
-	apfs_tree_sink_t sink = { e, tree, virtual_oids };
-	apfs_pack_sink_t pack_sink = { &sink, tree_node_oid, tree_node_write };
-	apfs_pack_result_t result;
-	apfs_record_t record;
-	apfs_pack_t *pack;
-	fsimg_status_t status;
-
-	status = apfs_pack_open(e->writer->ctx, profile, APFS_WRITE_XID,
-	    &pack_sink, &pack, error);
-	if (status != FSIMG_OK)
-		return (status);
-	e->cursor = 0;
-	e->next = 0;
-	for (;;) {
-		status = charge(e, error);
-		if (status != FSIMG_OK)
-			break;
-		bzero(&record, sizeof(record));
-		status = source(e, &record, error);
-		if (status == FSIMG_DONE) {
-			status = apfs_pack_finish(pack, &result, error);
-			break;
-		}
-		if (status == FSIMG_OK)
-			status = apfs_pack_add(pack, &record, error);
-		if (status != FSIMG_OK)
-			break;
-	}
-	apfs_pack_free(pack);
-	if (status == FSIMG_OK && !shape_equal(&result, &tree->shape))
-		status = diverged("APFS tree differs from its plan", error);
-	return (status);
-}
-
 /* The root of a planned tree: its last node. */
 static uint64_t
 tree_root_block(const apfs_plan_t *plan, const apfs_tree_plan_t *tree)
@@ -295,11 +213,9 @@ tree_root_block(const apfs_plan_t *plan, const apfs_tree_plan_t *tree)
  * extent must lie inside the run planning gave the file.
  */
 static fsimg_status_t
-complete_extent(apfs_emitter_t *e, const apfs_write_record_t *frame,
+complete_extent(const apfs_write_record_t *frame, unsigned char *val,
     const apfs_row_t *row, fsimg_error_t *error)
 {
-	/* The value lies in the emitter's frame, which is writable. */
-	unsigned char *val = e->frame + (frame->val - e->frame);
 	apfs_extent_key_t key;
 	apfs_extent_val_t extent;
 	uint64_t blocks = apfs_row_blocks(row);
@@ -349,142 +265,60 @@ check_link(apfs_emitter_t *e, const apfs_write_record_t *frame,
 }
 
 /*
- * The next record of the sorted filesystem stream, with file extents
- * completed and link targets checked. The writer emits extended
- * attributes only for symbolic links, so every attribute of a link's row
- * is its target.
+ * Complete a record of the sorted filesystem stream before it is packed.
+ * A file extent gets its physical block, written into val, the record's
+ * value bytes; a link's attribute is checked against the target read
+ * again. The writer emits extended attributes only for symbolic links, so
+ * every attribute of a link's row is its target.
  */
 static fsimg_status_t
-fs_record(apfs_emitter_t *e, apfs_record_t *record,
+fs_complete(void *arg, const apfs_write_record_t *frame, unsigned char *val,
     fsimg_error_t *error)
 {
-	apfs_write_record_t frame;
+	apfs_emitter_t *e = arg;
 	apfs_jkey_t jkey;
 	apfs_row_t row;
-	size_t length;
 	fsimg_status_t status;
 
-	status = fsimg_stream_next(e->plan->records, &e->cursor, e->frame,
-	    sizeof(e->frame), &length, error);
+	if (!apfs_jkey_decode(frame->key, frame->key_len, &jkey))
+		return (diverged("APFS sorted record is inconsistent", error));
+	if (jkey.kind != APFS_J_FILE_EXTENT && jkey.kind != APFS_J_XATTR)
+		return (FSIMG_OK);
+	status = apfs_row_get(e->plan, frame->id, &row, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (!apfs_write_record_decode(e->frame, length, &frame) ||
-	    !apfs_jkey_decode(frame.key, frame.key_len, &jkey))
-		return (diverged("APFS sorted record is inconsistent", error));
-	if (jkey.kind == APFS_J_FILE_EXTENT || jkey.kind == APFS_J_XATTR) {
-		status = apfs_row_get(e->plan, frame.id, &row, error);
-		if (status == FSIMG_OK && jkey.kind == APFS_J_FILE_EXTENT)
-			status = complete_extent(e, &frame, &row, error);
-		if (status == FSIMG_OK && jkey.kind == APFS_J_XATTR) {
-			if (row.kind != FSIMG_ENTRY_SYMLINK)
-				status = diverged("APFS attribute is not a link "
-				    "target", error);
-			else
-				status = check_link(e, &frame, &row, error);
-		}
-		if (status != FSIMG_OK)
-			return (status);
-	}
-	record->key = frame.key;
-	record->key_len = frame.key_len;
-	record->val = frame.val;
-	record->val_len = frame.val_len;
-	return (FSIMG_OK);
-}
-
-/* The next record of the volume object map: filesystem node k at its
- * block, for k counting up from zero.
- */
-static fsimg_status_t
-volume_omap_record(apfs_emitter_t *e, apfs_record_t *record,
-    fsimg_error_t *error)
-{
-	const apfs_tree_plan_t *fs = &e->plan->fs_tree;
-	uint64_t k = e->next;
-	apfs_omap_key_t key = { APFS_WRITE_OID_FS_FIRST + k, APFS_WRITE_XID };
-	apfs_omap_val_t val = { 0, 0, BLOCK };
-
-	if (k == fs->shape.node_count)
-		return (FSIMG_DONE);
-	e->next++;
-	val.address = tree_node_block(e->plan, fs, k);
-	if (!apfs_omap_key_encode(e->key, APFS_OMAP_KEY_BYTES, &key) ||
-	    !apfs_omap_val_encode(e->val, APFS_OMAP_VAL_BYTES, &val))
-		return (diverged("APFS object-map record does not encode",
-		    error));
-	*record = (apfs_record_t){ .key = e->key, .val = e->val,
-	    .key_len = APFS_OMAP_KEY_BYTES, .val_len = APFS_OMAP_VAL_BYTES };
-	return (FSIMG_OK);
+	if (jkey.kind == APFS_J_FILE_EXTENT)
+		return (complete_extent(frame, val, &row, error));
+	if (row.kind != FSIMG_ENTRY_SYMLINK)
+		return (diverged("APFS attribute is not a link target", error));
+	return (check_link(e, frame, &row, error));
 }
 
 /*
- * The next physical-extent record: one per file with content, in catalog
- * order, which is block order and so key order. The record's key is the
- * run's first block and its owner the inode number, which is the file's
- * private ID.
+ * Pack tree id from its generator with the writing sink, which writes
+ * each node as it closes, the root last. The generator is the one planning
+ * counted the tree with, so the node count matches the plan by
+ * construction; a node past it is refused before it is written, and a
+ * shortfall after the root, because every block the tree's nodes occupy
+ * and every pointer to its root were placed from that count.
  */
 static fsimg_status_t
-extentref_record(apfs_emitter_t *e, apfs_record_t *record,
-    fsimg_error_t *error)
+emit_tree(apfs_emitter_t *e, apfs_tree_id_t id, fsimg_error_t *error)
 {
-	apfs_pext_val_t pext;
-	apfs_row_t row;
-	uint64_t id;
+	const apfs_tree_plan_t *tree = &e->plan->trees[id];
+	apfs_tree_sink_t sink = { e, tree, id == APFS_TREE_FS };
+	apfs_pack_sink_t pack_sink = { &sink, tree_node_oid, tree_node_write };
+	apfs_tree_run_t run = { .writer = e->writer, .plan = e->plan,
+	    .sink = &pack_sink, .arg = e };
+	apfs_pack_result_t result;
 	fsimg_status_t status;
 
-	/* next counts the catalog IDs passed; the first is 1. */
-	for (;;) {
-		if (e->next == e->writer->count)
-			return (FSIMG_DONE);
-		id = ++e->next;
-		status = charge(e, error);
-		if (status == FSIMG_OK)
-			status = apfs_row_get(e->plan, id, &row, error);
-		if (status != FSIMG_OK)
-			return (status);
-		if (apfs_row_blocks(&row) != 0)
-			break;
-	}
-	pext = (apfs_pext_val_t){ .length = apfs_row_blocks(&row),
-	    .owner = apfs_write_ino(id), .refcnt = 1, .kind = PEXT_KIND_NEW };
-	if (!apfs_bare_key_encode(e->key, APFS_JKEY_BYTES, APFS_J_PHYS_EXTENT,
-	    row.first_block) ||
-	    !apfs_pext_val_encode(e->val, APFS_PEXT_VAL_BYTES, &pext))
-		return (diverged("APFS physical extent does not encode",
-		    error));
-	*record = (apfs_record_t){ .key = e->key, .val = e->val,
-	    .key_len = APFS_JKEY_BYTES, .val_len = APFS_PEXT_VAL_BYTES };
-	return (FSIMG_OK);
-}
-
-/* The snapshot tree has no records. */
-static fsimg_status_t
-no_record(apfs_emitter_t *e, apfs_record_t *record, fsimg_error_t *error)
-{
-	(void)e;
-	(void)record;
-	(void)error;
-	return (FSIMG_DONE);
-}
-
-/* The container object map's one record: the volume superblock. */
-static fsimg_status_t
-container_omap_record(apfs_emitter_t *e, apfs_record_t *record,
-    fsimg_error_t *error)
-{
-	apfs_omap_key_t key = { APFS_WRITE_OID_VOLUME, APFS_WRITE_XID };
-	apfs_omap_val_t val = { 0, 0, BLOCK };
-
-	if (e->next++ != 0)
-		return (FSIMG_DONE);
-	val.address = apfs_run_block(e->plan, e->plan->volume_run);
-	if (!apfs_omap_key_encode(e->key, APFS_OMAP_KEY_BYTES, &key) ||
-	    !apfs_omap_val_encode(e->val, APFS_OMAP_VAL_BYTES, &val))
-		return (diverged("APFS object-map record does not encode",
-		    error));
-	*record = (apfs_record_t){ .key = e->key, .val = e->val,
-	    .key_len = APFS_OMAP_KEY_BYTES, .val_len = APFS_OMAP_VAL_BYTES };
-	return (FSIMG_OK);
+	if (id == APFS_TREE_FS)
+		run.complete = fs_complete;
+	status = apfs_tree_pack(&run, id, &result, error);
+	if (status == FSIMG_OK && result.node_count != tree->shape.node_count)
+		status = diverged("APFS tree differs from its plan", error);
+	return (status);
 }
 
 /*
@@ -542,9 +376,11 @@ emit_volume(apfs_emitter_t *e, fsimg_error_t *error)
 	fs.snapshot_tree_type = APFS_FS_TREE_PHYSICAL;
 	fs.omap_oid = apfs_run_block(plan, plan->vomap_run);
 	fs.root_tree_oid = APFS_WRITE_OID_FS_FIRST +
-	    plan->fs_tree.shape.node_count - 1;
-	fs.extentref_tree_oid = tree_root_block(plan, &plan->extentref_tree);
-	fs.snapshot_tree_oid = tree_root_block(plan, &plan->snapshot_tree);
+	    plan->trees[APFS_TREE_FS].shape.node_count - 1;
+	fs.extentref_tree_oid = tree_root_block(plan,
+	    &plan->trees[APFS_TREE_EXTENTREF]);
+	fs.snapshot_tree_oid = tree_root_block(plan,
+	    &plan->trees[APFS_TREE_SNAPSHOT]);
 	fs.next_obj_id = plan->next_ino;
 	fs.files = plan->files;
 	fs.directories = plan->directories;
@@ -584,28 +420,24 @@ emit_trees(apfs_emitter_t *e, fsimg_error_t *error)
 	apfs_plan_t *plan = e->plan;
 	fsimg_status_t status;
 
-	status = pack_tree(e, &apfs_pack_fs_tree, &plan->fs_tree, true,
-	    fs_record, error);
+	status = emit_tree(e, APFS_TREE_FS, error);
 	if (status == FSIMG_OK)
-		status = pack_tree(e, &apfs_pack_volume_omap, &plan->vomap_tree,
-		    false, volume_omap_record, error);
+		status = emit_tree(e, APFS_TREE_VOMAP, error);
 	if (status == FSIMG_OK)
-		status = pack_tree(e, &apfs_pack_extentref,
-		    &plan->extentref_tree, false, extentref_record, error);
+		status = emit_tree(e, APFS_TREE_EXTENTREF, error);
 	if (status == FSIMG_OK)
-		status = pack_tree(e, &apfs_pack_snapshot, &plan->snapshot_tree,
-		    false, no_record, error);
+		status = emit_tree(e, APFS_TREE_SNAPSHOT, error);
 	if (status == FSIMG_OK)
 		status = emit_omap(e, plan->vomap_run,
-		    tree_root_block(plan, &plan->vomap_tree), 0, error);
+		    tree_root_block(plan, &plan->trees[APFS_TREE_VOMAP]), 0,
+		    error);
 	if (status == FSIMG_OK)
 		status = emit_volume(e, error);
 	if (status == FSIMG_OK)
-		status = pack_tree(e, &apfs_pack_container_omap,
-		    &plan->comap_tree, false, container_omap_record, error);
+		status = emit_tree(e, APFS_TREE_COMAP, error);
 	if (status == FSIMG_OK)
 		status = emit_omap(e, plan->comap_run,
-		    tree_root_block(plan, &plan->comap_tree),
+		    tree_root_block(plan, &plan->trees[APFS_TREE_COMAP]),
 		    APFS_OMAP_MANUALLY_MANAGED, error);
 	return (status);
 }

@@ -103,7 +103,7 @@
   repeated doubling would, at about the logarithm of the deepest path in
   sorts of the directory records.
   The writer plans and emits (`lib/formats/apfs/write-plan.c`,
-  `write-emit.c`) behind the unregistered descriptor
+  `write-trees.c`, `write-emit.c`) behind the unregistered descriptor
   `fsimg_apfs_write_format`; it joins the registry after native
   qualification (docs/apfs-plan.md, stage 9).
   The specification harness's container model (`test/spec/lib/fsimg_spec/apfs/`)
@@ -128,12 +128,6 @@
   adapter, for native and written images only, does not use the oracle
   confinement.
 
-* [Medium] **APFS writer record generators** (`lib/formats/apfs/write-plan.c`,
-  `write-emit.c`): the volume object map's, extent-reference and container
-  object map's records are generated twice, once with zero addresses for
-  the counting run and once with blocks for the writing run. Emission's
-  shape check catches any count drift, but the two must be kept in step by
-  hand; make one generator per tree, taking the plan, that both runs use.
 * [Low] **APFS writer large-container paths** (`lib/formats/apfs/write-emit.c`,
   `test/apfs-write.c`): the tests' largest container is 256 MiB, one
   chunk-information block, one pool-bitmap block and a one-block space

@@ -95,7 +95,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/apfs/spaceman.c \
 	lib/formats/apfs/unicode.c lib/formats/apfs/unicode-tables.h \
 	lib/formats/apfs/write-apfs.h lib/formats/apfs/write-btree.c \
-	lib/formats/apfs/write-plan.c lib/formats/apfs/write-emit.c \
+	lib/formats/apfs/write-plan.c lib/formats/apfs/write-trees.c \
+	lib/formats/apfs/write-emit.c \
 	lib/formats/apfs/descriptor.c lib/formats/apfs/volume.c \
 	lib/formats/apfs/read.c lib/formats/apfs/inode.c \
 	lib/formats/apfs/directory.c lib/formats/apfs/content.c \

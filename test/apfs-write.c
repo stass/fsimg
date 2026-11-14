@@ -375,21 +375,23 @@ test_empty_tree_has_native_records_and_minimum_container(void)
 	base_options(&options);
 	open_writer(&fixture, &options);
 	plan = plan_ok(&fixture);
-	EXPECT(plan->fs_tree.shape.key_count == 4);
-	EXPECT(plan->fs_tree.shape.node_count == 1);
-	EXPECT(plan->comap_tree.shape.node_count == 1);
-	EXPECT(plan->vomap_tree.shape.node_count == 1);
-	EXPECT(plan->extentref_tree.shape.node_count == 1);
-	EXPECT(plan->snapshot_tree.shape.node_count == 1);
-	EXPECT(plan->vomap_tree.shape.key_count == plan->fs_tree.shape.node_count);
+	EXPECT(plan->trees[APFS_TREE_FS].shape.key_count == 4);
+	EXPECT(plan->trees[APFS_TREE_FS].shape.node_count == 1);
+	EXPECT(plan->trees[APFS_TREE_COMAP].shape.node_count == 1);
+	EXPECT(plan->trees[APFS_TREE_VOMAP].shape.node_count == 1);
+	EXPECT(plan->trees[APFS_TREE_EXTENTREF].shape.node_count == 1);
+	EXPECT(plan->trees[APFS_TREE_SNAPSHOT].shape.node_count == 1);
+	EXPECT(plan->trees[APFS_TREE_VOMAP].shape.key_count ==
+	    plan->trees[APFS_TREE_FS].shape.node_count);
 	EXPECT(plan->meta_blocks == 8);
 	EXPECT(plan->data_blocks == 0);
 	EXPECT(plan->next_ino == 16);
-	EXPECT(plan->next_oid == 1027 + plan->fs_tree.shape.node_count);
+	EXPECT(plan->next_oid == 1027 +
+	    plan->trees[APFS_TREE_FS].shape.node_count);
 	EXPECT(plan->block_count == 1024);
 	EXPECT(plan->files == 0 && plan->directories == 0 &&
 	    plan->symlinks == 0 && plan->others == 0);
-	EXPECT(plan->data_files == 0);
+	EXPECT(plan->trees[APFS_TREE_EXTENTREF].shape.key_count == 0);
 	EXPECT(plan->format_time == EPOCH * INT64_C(1000000000));
 	check_summary(plan);
 	close_writer(&fixture);
@@ -629,11 +631,12 @@ test_mixed_catalog_counts_records_children_and_contiguous_data(void)
 	EXPECT(plan->files == 3 && plan->directories == 1 &&
 	    plan->symlinks == 1 && plan->others == 1);
 	EXPECT(plan->data_blocks == 3);
-	EXPECT(plan->data_files == 2);
+	EXPECT(plan->trees[APFS_TREE_EXTENTREF].shape.key_count == 2);
 	/* Six inode/name pairs, two stream/extent pairs, one link attribute,
 	 * and the four native records. Empty files have no stream records.
 	 */
-	EXPECT(plan->fs_tree.shape.key_count == 4 + 6 * 2 + 2 * 2 + 1);
+	EXPECT(plan->trees[APFS_TREE_FS].shape.key_count ==
+	    4 + 6 * 2 + 2 * 2 + 1);
 	CHECK(apfs_row_get(plan, 0, &row, NULL) == FSIMG_OK);
 	EXPECT(row.children == 4);
 	CHECK(apfs_row_get(plan, 1, &row, NULL) == FSIMG_OK);
@@ -752,11 +755,11 @@ test_wide_directory_has_multiple_leaves_and_strictly_sorted_records(void)
 		add_entry(&fixture, path, FSIMG_ENTRY_FILE, 0);
 	}
 	plan = plan_ok(&fixture);
-	EXPECT(plan->fs_tree.shape.levels > 1);
-	for (unsigned i = 0; i < plan->fs_tree.shape.levels; i++)
-		nodes += plan->fs_tree.shape.level_nodes[i];
-	EXPECT(nodes == plan->fs_tree.shape.node_count);
-	EXPECT(plan->vomap_tree.shape.key_count == nodes);
+	EXPECT(plan->trees[APFS_TREE_FS].shape.levels > 1);
+	for (unsigned i = 0; i < plan->trees[APFS_TREE_FS].shape.levels; i++)
+		nodes += plan->trees[APFS_TREE_FS].shape.level_nodes[i];
+	EXPECT(nodes == plan->trees[APFS_TREE_FS].shape.node_count);
+	EXPECT(plan->trees[APFS_TREE_VOMAP].shape.key_count == nodes);
 	EXPECT(plan->records->count == 4 + 3001 * 2);
 	for (uint64_t i = 0; i < plan->records->count; i++) {
 		CHECK(fsimg_stream_next(plan->records, &cursor, frame,
@@ -794,11 +797,13 @@ compare_plans(apfs_plan_t *a, apfs_plan_t *b)
 	size_t an, bn;
 
 	EXPECT(a->block_count == b->block_count);
-	compare_tree(&a->comap_tree, &b->comap_tree);
-	compare_tree(&a->vomap_tree, &b->vomap_tree);
-	compare_tree(&a->fs_tree, &b->fs_tree);
-	compare_tree(&a->extentref_tree, &b->extentref_tree);
-	compare_tree(&a->snapshot_tree, &b->snapshot_tree);
+	compare_tree(&a->trees[APFS_TREE_COMAP], &b->trees[APFS_TREE_COMAP]);
+	compare_tree(&a->trees[APFS_TREE_VOMAP], &b->trees[APFS_TREE_VOMAP]);
+	compare_tree(&a->trees[APFS_TREE_FS], &b->trees[APFS_TREE_FS]);
+	compare_tree(&a->trees[APFS_TREE_EXTENTREF],
+	    &b->trees[APFS_TREE_EXTENTREF]);
+	compare_tree(&a->trees[APFS_TREE_SNAPSHOT],
+	    &b->trees[APFS_TREE_SNAPSHOT]);
 	EXPECT(a->run_first == b->run_first);
 	EXPECT(a->allocated_blocks == b->allocated_blocks);
 	for (size_t i = 0; i < APFS_FIXED_REGIONS; i++) {
@@ -1405,7 +1410,7 @@ static void
 check_volume_node_mappings(const apfs_plan_t *plan,
     const memory_sink_t *sink)
 {
-	const apfs_tree_plan_t *tree = &plan->vomap_tree;
+	const apfs_tree_plan_t *tree = &plan->trees[APFS_TREE_VOMAP];
 	apfs_kv_size_t sizes = { APFS_OMAP_KEY_BYTES, APFS_OMAP_VAL_BYTES };
 	apfs_omap_key_t key;
 	apfs_omap_val_t value;
@@ -1415,7 +1420,8 @@ check_volume_node_mappings(const apfs_plan_t *plan,
 	bool *seen;
 	uint64_t index, count = 0;
 
-	seen = calloc((size_t)plan->fs_tree.shape.node_count, sizeof(*seen));
+	seen = calloc((size_t)plan->trees[APFS_TREE_FS].shape.node_count,
+	    sizeof(*seen));
 	CHECK(seen != NULL);
 	for (uint64_t k = 0; k < tree->shape.node_count; k++) {
 		bytes = image_block(sink, apfs_run_block(plan, tree->first_run + k));
@@ -1431,18 +1437,20 @@ check_volume_node_mappings(const apfs_plan_t *plan,
 			    entry.val_len, &value));
 			CHECK(key.oid >= APFS_WRITE_OID_FS_FIRST);
 			index = key.oid - APFS_WRITE_OID_FS_FIRST;
-			CHECK(index < plan->fs_tree.shape.node_count);
+			CHECK(index <
+			    plan->trees[APFS_TREE_FS].shape.node_count);
 			EXPECT(!seen[index]);
 			seen[index] = true;
 			count++;
 			EXPECT(key.xid == 1);
 			EXPECT(value.flags == 0 && value.size == BLOCK_BYTES);
 			EXPECT(value.address == apfs_run_block(plan,
-			    plan->fs_tree.first_run + index));
+			    plan->trees[APFS_TREE_FS].first_run + index));
 		}
 	}
-	EXPECT(count == plan->fs_tree.shape.node_count);
-	for (uint64_t i = 0; i < plan->fs_tree.shape.node_count; i++)
+	EXPECT(count == plan->trees[APFS_TREE_FS].shape.node_count);
+	for (uint64_t i = 0;
+	    i < plan->trees[APFS_TREE_FS].shape.node_count; i++)
 		EXPECT(seen[i]);
 	free(seen);
 }
@@ -1571,11 +1579,16 @@ check_container_bytes(const apfs_plan_t *plan, const memory_sink_t *sink)
 	    (sm.ip_block_count - used) * BLOCK_BYTES);
 	expect_zero(sink, (sm.ip_bm_base + sm.ip_bm_size_in_blocks) * BLOCK_BYTES,
 	    (sm.ip_bm_block_count - sm.ip_bm_size_in_blocks) * BLOCK_BYTES);
-	check_tree_bytes(plan, sink, &plan->fs_tree, "filesystem tree");
-	check_tree_bytes(plan, sink, &plan->vomap_tree, "volume object map");
-	check_tree_bytes(plan, sink, &plan->comap_tree, "container object map");
-	check_tree_bytes(plan, sink, &plan->extentref_tree, "extent references");
-	check_tree_bytes(plan, sink, &plan->snapshot_tree, "snapshots");
+	check_tree_bytes(plan, sink, &plan->trees[APFS_TREE_FS],
+	    "filesystem tree");
+	check_tree_bytes(plan, sink, &plan->trees[APFS_TREE_VOMAP],
+	    "volume object map");
+	check_tree_bytes(plan, sink, &plan->trees[APFS_TREE_COMAP],
+	    "container object map");
+	check_tree_bytes(plan, sink, &plan->trees[APFS_TREE_EXTENTREF],
+	    "extent references");
+	check_tree_bytes(plan, sink, &plan->trees[APFS_TREE_SNAPSHOT],
+	    "snapshots");
 	check_object(sink, apfs_run_block(plan, plan->volume_run), 1);
 	check_object(sink, apfs_run_block(plan, plan->vomap_run), 1);
 	check_object(sink, apfs_run_block(plan, plan->comap_run), 1);
@@ -2089,6 +2102,67 @@ test_emitted_metadata_preserves_distinct_nanosecond_times(void)
 }
 
 static void
+test_many_files_with_content_split_the_extent_reference_tree(void)
+{
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	const apfs_tree_plan_t *tree;
+	apfs_entry_t entry;
+	apfs_jkey_t key;
+	apfs_node_t node;
+	const unsigned char *bytes;
+	uint64_t previous_block = 0, records = 0;
+	char path[32];
+
+	catalog_init(&catalog);
+	for (unsigned i = 0; i < 400; i++) {
+		snprintf(path, sizeof(path), "/file-%04u", i);
+		catalog_add(&catalog, path, FSIMG_ENTRY_FILE, 1);
+		if (i % 4 == 0) {
+			snprintf(path, sizeof(path), "/empty-%04u", i);
+			catalog_add(&catalog, path, FSIMG_ENTRY_FILE, 0);
+		}
+	}
+	base_options(&options);
+	plan_catalog(&fixture, &catalog, &options, NULL, false);
+	tree = &fixture.plan->trees[APFS_TREE_EXTENTREF];
+	EXPECT(tree->shape.levels > 1);
+	EXPECT(tree->shape.node_count > 1);
+	EXPECT(tree->shape.key_count == 400);
+	if (emit_ok(&fixture, &sink)) {
+		check_tree_bytes(fixture.plan, &sink, tree, "extent references");
+		/* Check one reference per non-empty file, its length and owner,
+		 * and the absence of references for empty files.
+		 */
+		check_file_placement(&fixture, &sink);
+		/* Leaf runs preserve key order, including across node boundaries. */
+		for (uint64_t k = 0; k < tree->shape.node_count; k++) {
+			bytes = image_block(&sink, apfs_run_block(fixture.plan,
+			    tree->first_run + k));
+			CHECK(apfs_node_decode(bytes, BLOCK_BYTES, &node));
+			if (node.level != 0)
+				continue;
+			for (uint32_t i = 0; i < node.key_count; i++) {
+				CHECK(apfs_entry_decode(bytes, BLOCK_BYTES, &node,
+				    i, NULL, &entry));
+				CHECK(apfs_jkey_decode(bytes + entry.key_off,
+				    entry.key_len, &key));
+				EXPECT(key.kind == APFS_J_PHYS_EXTENT);
+				EXPECT(key.oid > previous_block);
+				previous_block = key.oid;
+				records++;
+			}
+		}
+		EXPECT(records == 400);
+	}
+	free(sink.bytes);
+	close_writer(&fixture);
+	free(catalog.entries);
+}
+
+static void
 test_emitted_empty_many_wide_and_multichunk_shapes(void)
 {
 	static const char *names[] = { "empty", "many", "wide", "multichunk" };
@@ -2111,7 +2185,8 @@ test_emitted_empty_many_wide_and_multichunk_shapes(void)
 		}
 		plan_catalog(&fixture, &catalog, &options, NULL, false);
 		if (shape == 2)
-			EXPECT(fixture.plan->fs_tree.shape.levels >= 2);
+			EXPECT(fixture.plan->trees[APFS_TREE_FS].shape.levels >=
+			    2);
 		if (shape == 3)
 			EXPECT(fixture.plan->pool_bitmaps > 1);
 		if (emit_ok(&fixture, &sink)) {
@@ -2429,7 +2504,8 @@ qualify_images(void)
 		options.volume_bytes = (i == 6 ? 256 : 64) * UINT64_C(1024) * 1024;
 		plan_catalog(&fixture, &catalog, &options, NULL, false);
 		if (i == 3)
-			EXPECT(fixture.plan->fs_tree.shape.levels >= 2);
+			EXPECT(fixture.plan->trees[APFS_TREE_FS].shape.levels >=
+			    2);
 		if (emit_ok(&fixture, &sink)) {
 			CHECK(snprintf(path, sizeof(path), "%s/image.img", directory)
 			    < (int)sizeof(path));
@@ -2465,6 +2541,7 @@ main(int argc, char **argv)
 	CHECK(argc == 1);
 	RUN(test_emitted_mixed_tree_round_trips_both_case_personalities);
 	RUN(test_emitted_metadata_preserves_distinct_nanosecond_times);
+	RUN(test_many_files_with_content_split_the_extent_reference_tree);
 	RUN(test_emitted_empty_many_wide_and_multichunk_shapes);
 	RUN(test_emission_is_identical_across_order_budget_scratch_and_timezone);
 	RUN(test_emission_write_and_flush_failures_release_resources);

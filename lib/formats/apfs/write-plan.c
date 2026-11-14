@@ -62,7 +62,6 @@ _Static_assert(ROW_KIND < APFS_ROW_BYTES, "a row's fields fit its bytes");
 #define PROTECTION_FIFO		4u
 #define NAME_FIELD_FLAGS	APFS_XF_DO_NOT_COPY
 #define DSTREAM_FIELD_FLAGS	APFS_XF_SYSTEM_FIELD
-#define PEXT_KIND_NEW		1u
 #define NS_PER_SECOND		INT64_C(1000000000)
 #define DEFAULT_LABEL		"Untitled"
 #define ROOT_NAME		"root"
@@ -244,7 +243,7 @@ apfs_write_validate(fsimg_write_options_t *options, unsigned variant,
 }
 
 fsimg_status_t
-apfs_row_get(apfs_plan_t *plan, uint64_t id, apfs_row_t *row,
+apfs_row_get(const apfs_plan_t *plan, uint64_t id, apfs_row_t *row,
     fsimg_error_t *error)
 {
 	unsigned char raw[APFS_ROW_BYTES];
@@ -479,7 +478,6 @@ count_entry(apfs_plan_t *plan, const fsimg_entry_t *entry, apfs_row_t *row,
 			return (entry_error(FSIMG_ERANGE, "file data exceeds "
 			    "the largest APFS container", entry->path, error));
 		plan->data_blocks += blocks;
-		plan->data_files += blocks != 0;
 		plan->common.info.initialized_bytes += entry->size;
 		return (FSIMG_OK);
 	case FSIMG_ENTRY_DIRECTORY:
@@ -1062,191 +1060,47 @@ plan_records(apfs_planner_t *planner, fsimg_error_t *error)
 
 /* Pass 4: packing */
 
-/* Builds the k'th generated record of a tree whose records are a counter. */
-typedef bool (*record_fn_t)(uint64_t, unsigned char *, unsigned char *,
-    apfs_record_t *);
-
-/* A volume object-map record: filesystem node k at the checkpoint's XID.
- * The address is a fixed-width field emission fills.
- */
-static bool
-volume_omap_record(uint64_t k, unsigned char *key, unsigned char *val,
-    apfs_record_t *record)
-{
-	apfs_omap_key_t omap_key = { APFS_WRITE_OID_FS_FIRST + k,
-	    APFS_WRITE_XID };
-	apfs_omap_val_t omap_val = { 0, 0, APFS_WRITE_BLOCK_BYTES };
-
-	record->key_len = APFS_OMAP_KEY_BYTES;
-	record->val_len = APFS_OMAP_VAL_BYTES;
-	return (apfs_omap_key_encode(key, APFS_OMAP_KEY_BYTES, &omap_key) &&
-	    apfs_omap_val_encode(val, APFS_OMAP_VAL_BYTES, &omap_val));
-}
-
-/* The container object map's one record, the volume superblock. */
-static bool
-container_omap_record(uint64_t k, unsigned char *key, unsigned char *val,
-    apfs_record_t *record)
-{
-	apfs_omap_key_t omap_key = { APFS_WRITE_OID_VOLUME, APFS_WRITE_XID };
-	apfs_omap_val_t omap_val = { 0, 0, APFS_WRITE_BLOCK_BYTES };
-
-	(void)k;
-	record->key_len = APFS_OMAP_KEY_BYTES;
-	record->val_len = APFS_OMAP_VAL_BYTES;
-	return (apfs_omap_key_encode(key, APFS_OMAP_KEY_BYTES, &omap_key) &&
-	    apfs_omap_val_encode(val, APFS_OMAP_VAL_BYTES, &omap_val));
-}
-
-/* A physical-extent record of the k'th file with content. Only the count
- * matters to planning, since the record's size is fixed.
- */
-static bool
-extentref_record(uint64_t k, unsigned char *key, unsigned char *val,
-    apfs_record_t *record)
-{
-	apfs_pext_val_t pext = { 1, APFS_WRITE_INO_BASE + 1 + k, 1,
-	    PEXT_KIND_NEW };
-
-	record->key_len = APFS_JKEY_BYTES;
-	record->val_len = APFS_PEXT_VAL_BYTES;
-	return (apfs_bare_key_encode(key, APFS_JKEY_BYTES, APFS_J_PHYS_EXTENT,
-	    k + 1) && apfs_pext_val_encode(val, APFS_PEXT_VAL_BYTES, &pext));
-}
-
-/* Run the counting packer over count generated records. */
-static fsimg_status_t
-pack_generated(apfs_planner_t *planner, const apfs_pack_profile_t *profile,
-    uint64_t count, record_fn_t make, apfs_pack_result_t *result,
-    fsimg_error_t *error)
-{
-	fsimg_writer_t *writer = planner->writer;
-	unsigned char key[APFS_OMAP_KEY_BYTES], val[APFS_PEXT_VAL_BYTES];
-	apfs_record_t record;
-	apfs_pack_t *pack;
-	fsimg_status_t status;
-
-	_Static_assert(APFS_OMAP_KEY_BYTES >= APFS_JKEY_BYTES &&
-	    APFS_PEXT_VAL_BYTES >= APFS_OMAP_VAL_BYTES,
-	    "the generated records fit their buffers");
-	status = apfs_pack_open(writer->ctx, profile, APFS_WRITE_XID, NULL,
-	    &pack, error);
-	if (status != FSIMG_OK)
-		return (status);
-	bzero(&record, sizeof(record));
-	record.key = key;
-	record.val = val;
-	for (uint64_t k = 0; status == FSIMG_OK && k < count; k++) {
-		status = fsimg_session_charge(&writer->session, 0, 0, 1, error);
-		if (status != FSIMG_OK)
-			break;
-		if (!make(k, key, val, &record))
-			status = encode_failed(error);
-		else
-			status = apfs_pack_add(pack, &record, error);
-	}
-	if (status == FSIMG_OK)
-		status = apfs_pack_finish(pack, result, error);
-	apfs_pack_free(pack);
-	return (status);
-}
-
-/* Run the counting packer over the sorted filesystem records. */
-static fsimg_status_t
-pack_records(apfs_planner_t *planner, apfs_pack_result_t *result,
-    fsimg_error_t *error)
-{
-	fsimg_writer_t *writer = planner->writer;
-	apfs_write_record_t frame;
-	apfs_record_t record;
-	apfs_pack_t *pack;
-	uint64_t cursor = 0;
-	size_t length;
-	fsimg_status_t status;
-
-	status = apfs_pack_open(writer->ctx, &apfs_pack_fs_tree,
-	    APFS_WRITE_XID, NULL, &pack, error);
-	if (status != FSIMG_OK)
-		return (status);
-	bzero(&record, sizeof(record));
-	for (;;) {
-		status = fsimg_stream_next(planner->plan->records, &cursor,
-		    planner->frame, APFS_WRITE_RECORD_MAX, &length, error);
-		if (status == FSIMG_DONE) {
-			status = apfs_pack_finish(pack, result, error);
-			break;
-		}
-		if (status == FSIMG_OK)
-			status = fsimg_session_charge(&writer->session, 0, 0, 1,
-			    error);
-		if (status != FSIMG_OK)
-			break;
-		if (!apfs_write_record_decode(planner->frame, length, &frame)) {
-			status = writer_error(FSIMG_ESTATE,
-			    "APFS sorted record is inconsistent", error);
-			break;
-		}
-		record.key = frame.key;
-		record.key_len = frame.key_len;
-		record.val = frame.val;
-		record.val_len = frame.val_len;
-		status = apfs_pack_add(pack, &record, error);
-		if (status != FSIMG_OK)
-			break;
-	}
-	apfs_pack_free(pack);
-	return (status);
-}
-
 /*
- * Pack every tree, then give each metadata object its run index in the
- * format design's order: the container object map's block and its tree,
- * the volume superblock, the volume object map's block and its tree, the
- * filesystem, extent-reference and snapshot trees.
+ * Count every tree through its generator (write-trees.c), then give each
+ * metadata object its run index in the format design's order: the
+ * container object map's block and its tree, the volume superblock, the
+ * volume object map's block and its tree, the filesystem, extent-reference
+ * and snapshot trees.
  */
 static fsimg_status_t
 pack_trees(apfs_planner_t *planner, fsimg_error_t *error)
 {
 	apfs_plan_t *plan = planner->plan;
+	apfs_tree_plan_t *trees = plan->trees;
+	apfs_tree_run_t run = { .writer = planner->writer, .plan = plan };
 	fsimg_status_t status;
 
-	status = pack_records(planner, &plan->fs_tree.shape, error);
-	if (status == FSIMG_OK)
-		status = pack_generated(planner, &apfs_pack_volume_omap,
-		    plan->fs_tree.shape.node_count, volume_omap_record,
-		    &plan->vomap_tree.shape, error);
-	if (status == FSIMG_OK)
-		status = pack_generated(planner, &apfs_pack_extentref,
-		    plan->data_files, extentref_record,
-		    &plan->extentref_tree.shape, error);
-	if (status == FSIMG_OK)
-		status = pack_generated(planner, &apfs_pack_snapshot, 0, NULL,
-		    &plan->snapshot_tree.shape, error);
-	if (status == FSIMG_OK)
-		status = pack_generated(planner, &apfs_pack_container_omap, 1,
-		    container_omap_record, &plan->comap_tree.shape, error);
-	if (status != FSIMG_OK)
-		return (status);
+	for (unsigned id = 0; id < APFS_TREE_COUNT; id++) {
+		status = apfs_tree_pack(&run, id, &trees[id].shape, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 	plan->comap_run = 0;
-	plan->comap_tree.first_run = 1;
-	plan->volume_run = plan->comap_tree.first_run +
-	    plan->comap_tree.shape.node_count;
+	trees[APFS_TREE_COMAP].first_run = 1;
+	plan->volume_run = trees[APFS_TREE_COMAP].first_run +
+	    trees[APFS_TREE_COMAP].shape.node_count;
 	plan->vomap_run = plan->volume_run + 1;
-	plan->vomap_tree.first_run = plan->vomap_run + 1;
-	plan->fs_tree.first_run = plan->vomap_tree.first_run +
-	    plan->vomap_tree.shape.node_count;
-	plan->extentref_tree.first_run = plan->fs_tree.first_run +
-	    plan->fs_tree.shape.node_count;
-	plan->snapshot_tree.first_run = plan->extentref_tree.first_run +
-	    plan->extentref_tree.shape.node_count;
-	plan->meta_blocks = plan->snapshot_tree.first_run +
-	    plan->snapshot_tree.shape.node_count;
-	plan->volume_allocated = plan->vomap_tree.shape.node_count + 1 +
-	    plan->fs_tree.shape.node_count +
-	    plan->extentref_tree.shape.node_count +
-	    plan->snapshot_tree.shape.node_count + plan->data_blocks;
+	trees[APFS_TREE_VOMAP].first_run = plan->vomap_run + 1;
+	trees[APFS_TREE_FS].first_run = trees[APFS_TREE_VOMAP].first_run +
+	    trees[APFS_TREE_VOMAP].shape.node_count;
+	trees[APFS_TREE_EXTENTREF].first_run = trees[APFS_TREE_FS].first_run +
+	    trees[APFS_TREE_FS].shape.node_count;
+	trees[APFS_TREE_SNAPSHOT].first_run =
+	    trees[APFS_TREE_EXTENTREF].first_run +
+	    trees[APFS_TREE_EXTENTREF].shape.node_count;
+	plan->meta_blocks = trees[APFS_TREE_SNAPSHOT].first_run +
+	    trees[APFS_TREE_SNAPSHOT].shape.node_count;
+	plan->volume_allocated = trees[APFS_TREE_VOMAP].shape.node_count + 1 +
+	    trees[APFS_TREE_FS].shape.node_count +
+	    trees[APFS_TREE_EXTENTREF].shape.node_count +
+	    trees[APFS_TREE_SNAPSHOT].shape.node_count + plan->data_blocks;
 	plan->next_oid = APFS_WRITE_OID_FS_FIRST +
-	    plan->fs_tree.shape.node_count;
+	    trees[APFS_TREE_FS].shape.node_count;
 	return (FSIMG_OK);
 }
 

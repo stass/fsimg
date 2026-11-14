@@ -50,6 +50,7 @@ record's `read_settings`, as write settings do through `write_settings`.
 | `write-apfs.h` | Plan rows, tree profiles and the plan object |
 | `write-plan.c` | `validate`, `plan`, `free`: settings, the entry pass, record generation, sizing and layout |
 | `write-btree.c` | The bulk B-tree packer that planning and emission both run, so node boundaries cannot disagree |
+| `write-trees.c` | One record generator per generated tree and the one loop that feeds it to the packer, which planning runs with no sink and emission with the writing sink |
 | `write-emit.c` | `emit`: payload copies, trees, object maps, superblocks, space manager and checkpoint |
 
 `object.c` is the only place that interprets an object reference and
@@ -1101,11 +1102,18 @@ filled chunk-information block hold zero too, and the poison scan checks
 both. Each object goes out with
 `fsimg_emit_write()` at its block, its checksum computed as it is encoded.
 The order below is the order of work; block numbers were fixed by layout,
-and the bytes do not depend on the order. Each tree's packing ends with its
-shape, the node count per level and the key count, compared with the one
-planning counted, before any later object names its root; a node past the
-planned count is refused before it is written. Either difference is an
-internal error, `FSIMG_ESTATE`.
+and the bytes do not depend on the order. Every tree, the filesystem tree
+included, has one record generator that both phases call: it reads the
+plan, and the only values it encodes that layout changes are fixed-width
+addresses, as is the file-extent block emission completes in place, so
+planning's counting run and emission's writing run see records of the same
+lengths in the same order. The packer places node boundaries from record
+lengths and count alone and never compares keys, so planning's addresses
+need not be final. A tree's node count
+therefore equals the planned one by construction; emission still refuses a
+node past it before writing it and a shortfall after the root, since every
+block the tree occupies was placed from that count. Either is an internal
+error, `FSIMG_ESTATE`.
 
 1. **Payload.** For each regular-file row in ID order: the common payload
    copy, `fsimg_emit_copy()`, over its run. An empty file uses a zero-length
@@ -1162,7 +1170,7 @@ from a row, the geometry, the sorted records or one of those values.
 | Listing | The root inode, which the level-0 `prepare` checks; per directory: one scan of its records and the common key sort; per entry: one inode lookup and one scan of that inode's attribute records, which follow it. No file payload is read |
 | Content | Per sequential read: one cursor advance per extent; per random offset: one tree descent; per compressed chunk: one decode of at most 64 KiB, and for an inline payload one attribute lookup; per resource-fork file: one framing check at the first read, and one table entry with its neighbours per decoded chunk |
 | Verification | One scan of every tree of every volume; the main and pool claim, file-extent, name-reference, sibling-map, stream-use and collision streams and the extent boundaries, each sorted once; two passes over the chunk structures (claims, then the merge) and one over the bitmaps and pool bitmap; one walk of the selected volume, reading each inode's content once; the array of multiply linked inodes |
-| Planning | One catalog pass, two external sorts (collisions and records), one counting run of the packer per tree, a size scan of at most the probe cap's probes, each costing constant work per fixed region, one layout pass |
+| Planning | One catalog pass, two external sorts (collisions and records), one counting run of the packer per tree, the extent-reference tree's over one pass of the rows, a size scan of at most the probe cap's probes, each costing constant work per fixed region, one layout pass |
 | Emission | Payload bytes, one replay of the sorted records, and metadata proportional to entries and container size |
 
 Resident state per reader is the geometry, the selected superblocks, the

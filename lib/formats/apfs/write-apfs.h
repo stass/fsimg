@@ -253,6 +253,20 @@ bool	apfs_write_record_decode(const unsigned char *, size_t,
 	    apfs_write_record_t *);
 
 /*
+ * The trees the writer generates, in the order planning packs them: the
+ * volume object map holds a record per filesystem-tree node, so it follows
+ * that tree.
+ */
+typedef enum apfs_tree_id {
+	APFS_TREE_FS,		/* the volume's filesystem tree */
+	APFS_TREE_VOMAP,	/* the volume object map's tree */
+	APFS_TREE_EXTENTREF,	/* the extent-reference tree */
+	APFS_TREE_SNAPSHOT,	/* the snapshot-metadata tree, empty */
+	APFS_TREE_COMAP,	/* the container object map's tree */
+	APFS_TREE_COUNT
+} apfs_tree_id_t;
+
+/*
  * A packed tree and the run index of its node 0: node k sits at
  * run_block(first_run + k).
  */
@@ -279,6 +293,7 @@ typedef struct apfs_ephemeral {
  *   run_first		the run's first block, past the fixed regions
  *   allocated_blocks	the allocation, blocks [0, allocated_blocks): the
  *			fixed regions and the run, contiguous
+ *   trees		each generated tree's shape and first run index
  *   comap_run ...	run indexes of the single-block objects; the trees
  *			follow the format design's order
  *   ephemeral		the space manager and the reaper in OID order
@@ -302,11 +317,7 @@ typedef struct apfs_plan {
 	apfs_region_t		 regions[APFS_FIXED_REGIONS];
 	uint64_t		 run_first;
 	uint64_t		 allocated_blocks;
-	apfs_tree_plan_t	 comap_tree;
-	apfs_tree_plan_t	 vomap_tree;
-	apfs_tree_plan_t	 fs_tree;
-	apfs_tree_plan_t	 extentref_tree;
-	apfs_tree_plan_t	 snapshot_tree;
+	apfs_tree_plan_t	 trees[APFS_TREE_COUNT];
 	apfs_ephemeral_t	 ephemeral[APFS_EPHEMERAL_COUNT];
 	unsigned char		 volume_uuid[16];
 	unsigned char		 container_uuid[16];
@@ -322,7 +333,6 @@ typedef struct apfs_plan {
 	uint64_t		 directories;
 	uint64_t		 symlinks;
 	uint64_t		 others;
-	uint64_t		 data_files;
 	uint64_t		 data_blocks;
 	uint64_t		 meta_blocks;
 	int64_t			 format_time;
@@ -331,6 +341,33 @@ typedef struct apfs_plan {
 	uint64_t		 volume_allocated;
 	bool			 case_sensitive;
 } apfs_plan_t;
+
+/*
+ * One run of a generated tree's generator through the packer
+ * (write-trees.c): planning's with no sink, to count, emission's with the
+ * writing sink. The plan is read only, so a generator cannot change what
+ * the other phase's run sees. complete, when not NULL, is called with each
+ * record of the filesystem tree before it is packed, and the other trees
+ * ignore it; it may rewrite the record's val_len value bytes at val but not
+ * their length. arg is its first argument.
+ */
+typedef struct apfs_tree_run {
+	fsimg_writer_t		*writer;
+	const apfs_plan_t	*plan;
+	const apfs_pack_sink_t	*sink;
+	fsimg_status_t		(*complete)(void *, const apfs_write_record_t *,
+				    unsigned char *, fsimg_error_t *);
+	void			*arg;
+} apfs_tree_run_t;
+
+/*
+ * apfs_tree_pack(run, id, result, error) packs tree id from its one
+ * generator and fills result. It charges a unit of work per generator call,
+ * the final one included, and per catalog ID the extent-reference generator
+ * passes.
+ */
+fsimg_status_t	apfs_tree_pack(const apfs_tree_run_t *, apfs_tree_id_t,
+		    apfs_pack_result_t *, fsimg_error_t *);
 
 /* The writer operations: those of write-plan.c and write-emit.c. */
 extern const fsimg_writer_ops_t fsimg_apfs_writer_ops;
@@ -341,7 +378,7 @@ fsimg_status_t	apfs_write_plan(fsimg_writer_t *, fsimg_error_t *);
 void		apfs_write_free(fsimg_plan_t *);
 fsimg_status_t	apfs_write_emit(fsimg_writer_t *, fsimg_emit_t *,
 		    fsimg_error_t *);
-fsimg_status_t	apfs_row_get(apfs_plan_t *, uint64_t, apfs_row_t *,
+fsimg_status_t	apfs_row_get(const apfs_plan_t *, uint64_t, apfs_row_t *,
 		    fsimg_error_t *);
 /* The block of run index i: run_first + i. */
 uint64_t	apfs_run_block(const apfs_plan_t *, uint64_t);
