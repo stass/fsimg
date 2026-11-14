@@ -609,7 +609,11 @@ never called for a symbolic link.
   second buffer of `FSIMG_LZFSE_INPUT_MAX` bytes, the bound on every stored
   chunk.
   A chunk decodes to exactly its length or fails, and the bytes consumed and
-  produced are charged as work.
+  produced are charged as work. A file of a type `compress.c` does not
+  admit, type 1 or LZBITMAP's 13 and 14, is listed with its header's size.
+  The first `resolve` refuses it with `FSIMG_EUNSUPPORTED`. An empty one,
+  which no `resolve` reaches, therefore reads as empty, and under salvage a
+  nonempty one keeps its entry with no bytes.
 
 Mapped extents are checked against `[1, N)` before they are returned;
 delivery then clips them to the request and the initialized length and reads
@@ -742,10 +746,15 @@ streams that are sorted once:
   a sort, not quadratic comparisons.
 
 **Chunk tables.** For each compressed file of a resource-fork type in the
-selected volume, structural verification runs the shared validator's
-`open` and then `chunk` for every entry in ascending order, reading the
-table through the fork's file extents and decoding no payload, as HFS Plus
-checks its tables in `content_check()`. It holds three table entries and
+selected volume, as the common walk makes it current, structural
+verification runs the shared validator's `open` and then `chunk` for every
+entry in ascending order, reading the table through the fork's file
+extents and decoding no payload, as HFS Plus checks its tables in
+`content_check()`; LZBITMAP's type 14 is checked too, since the check needs
+no decoder. The walk from the root never makes current a file whose
+inode's parent field is the private directory, so no entry of such a
+file's table is read: when the record scan finds a compressed one with a
+resource fork, the report is incomplete. It holds three table entries and
 charges one unit of work per entry, so a damaged later entry fails `W`
 without payload read-through.
 

@@ -171,11 +171,11 @@ typedef struct verify {
 	fsimg_stream_t	*file_extents;
 	fsimg_stream_t	*shared;
 	/* The verification flags, and whether the selected volume holds a
-	 * compressed file whose chunk tables are not read, or a directory in
-	 * the private directory, which the walk from the root does not reach.
+	 * directory, or a compressed file's chunk table, in the private
+	 * directory, which the walk from the root does not reach.
 	 */
 	unsigned	 flags;
-	bool		 chunk_tables;
+	bool		 private_tables;
 	bool		 private_directories;
 	/* The selected volume's records were reconciled without a refusal. */
 	bool		 reconciled;
@@ -838,9 +838,7 @@ live_extent_claims(verify_t *v, fsimg_error_t *error)
  * file extents in a tree this pass does not read, which already makes the
  * report incomplete, so its records are not reconciled. With payload
  * read-through the selected volume lists its inodes of several names for
- * the walk, and it notes a compressed file whose chunk tables are not
- * read; that makes the report incomplete after the allocation merge, since
- * those tables hide no blocks from it.
+ * the walk.
  */
 static fsimg_status_t
 volume_records(verify_t *v, fsimg_error_t *error)
@@ -856,10 +854,10 @@ volume_records(verify_t *v, fsimg_error_t *error)
 		records.shared = v->shared;
 	status = apfs_records_check(v->container, volume->fs, volume->index,
 	    v->window, &records, error);
-	if (selected && records.chunk_tables)
-		v->chunk_tables = true;
 	if (selected && records.private_directories)
 		v->private_directories = true;
+	if (selected && records.private_tables)
+		v->private_tables = true;
 	if (selected && status == FSIMG_OK)
 		v->reconciled = true;
 	return (status);
@@ -1701,9 +1699,11 @@ shared_first(fsimg_array_t *array, uint64_t count, uint64_t inode,
 
 /*
  * The common walk of the selected volume: every delivered entry is counted
- * through fsimg_verify_account(), the root among the directories, and with
- * payload read-through each file and symbolic link is read, an inode of
- * several names once, at the first name the walk reaches.
+ * through fsimg_verify_account(), the root among the directories; every
+ * compressed file the walk makes current, delivered or not, has its chunk
+ * table checked, once per name; and with payload read-through each file
+ * and symbolic link is read, an inode of several names once, at the first
+ * name the walk reaches.
  *
  * Reconciliation gave every directory but the root and the private
  * directory exactly one parent, so the directories the walk reaches from
@@ -1748,6 +1748,8 @@ namespace_walk(verify_t *v, unsigned flags, fsimg_verify_report_t *report,
 		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
 			reached++;
 		status = fsimg_verify_account(reader, report, error);
+		if (status == FSIMG_OK && v->apfs->current.compressed)
+			status = apfs_compress_table_check(reader, error);
 		if (status != FSIMG_OK || payload == NULL ||
 		    !fsimg_walk_delivered(reader) ||
 		    (reader->entry.kind != FSIMG_ENTRY_FILE &&
@@ -1842,12 +1844,12 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 		report->allocated_clusters = container->block_count -
 		    apfs->free_blocks;
 	}
-	if (status == FSIMG_OK && v->chunk_tables)
-		incomplete_reason(v, "compressed file", "keeps its content in "
-		    "chunks whose tables verification does not read");
 	if (status == FSIMG_OK && v->private_directories)
 		incomplete_reason(v, "private directory", "holds a directory, "
 		    "which a walk from the root does not reach");
+	if (status == FSIMG_OK && v->private_tables)
+		incomplete_reason(v, "private directory", "holds a compressed "
+		    "file whose chunk table a walk from the root does not reach");
 	if (status == FSIMG_OK)
 		status = namespace_walk(v, flags, report, error);
 	if (status == FSIMG_OK)

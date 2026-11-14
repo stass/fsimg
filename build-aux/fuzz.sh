@@ -248,6 +248,19 @@ mkdir -p "$lzfse_corpus"
 if test ! -f "$lzfse_corpus/lzfse-v1.seed"; then
     ./test-lzfse --seed "$lzfse_corpus"
 fi
+# The LZVN and LZFSE streams macOS stored in E7's APFS compressed files,
+# an inline payload of 3000 bytes and a fork's first 65536-byte chunk,
+# behind the harness's framing byte: bit 0 for LZVN, then the capacity
+# code, 6 for 3072 bytes and 127 for 65536.
+apfs_chunks=${FSIMG_APFS_NATIVE:+$FSIMG_APFS_NATIVE/e7-chunks}
+if test -n "$apfs_chunks" && test -d "$apfs_chunks" &&
+    test ! -f "$lzfse_corpus/apfs-t7-inline.seed"; then
+    for seed in 't7-inline-c3000 015 t7-inline' 't8-chunk0-c65537 377 t8-chunk0' \
+        't11-inline-c3000 014 t11-inline' 't12-chunk0-c65537 376 t12-chunk0'; do
+        set -- $seed
+        { printf "\\$2"; cat "$apfs_chunks/$1"; } > "$lzfse_corpus/apfs-$3.seed"
+    done
+fi
 run_fuzzer "$work_dir/fuzz-lzfse" "$lzfse_corpus" 70000 10
 
 # The stream decoders parse every compressed byte of an untrusted boot

@@ -1216,10 +1216,12 @@ test_compression_listing_branches(void)
 		    .streamed_fork = true, .fork_size = 1, .extra = true,
 		    .wanted = FSIMG_OK },
 		{ .name = "streamed decmpfs with inode uncompressed size",
-		    .streamed_header = true, .inode_size = true,
-		    .uncompressed_size = UINT64_C(0x100000123), .wanted = FSIMG_OK },
+		    .type = 3, .streamed_header = true, .inode_size = true,
+		    .uncompressed_size = 123, .wanted = FSIMG_OK },
 		{ .name = "streamed decmpfs without inode uncompressed size",
-		    .streamed_header = true, .wanted = FSIMG_EUNSUPPORTED }
+		    .type = 3, .streamed_header = true, .wanted = FSIMG_OK },
+		{ .name = "malformed streamed decmpfs header",
+		    .streamed_header = true, .wanted = FSIMG_ECORRUPT }
 	};
 	unsigned char header[] = { 'f', 'p', 'm', 'c', 0, 0, 0, 0,
 		123, 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -1232,7 +1234,7 @@ test_compression_listing_branches(void)
 
 	for (size_t i = 0; i < COUNT(cases); i++) {
 		scenario = cases[i].name;
-		fixture_init(&f, 5, 0);
+		fixture_init(&f, 6, 0);
 		add_root(&f);
 		inode = inode_value(2, 8);
 		inode.bsd_flags = 0x20;
@@ -1245,9 +1247,21 @@ test_compression_listing_branches(void)
 		add_inode(&f, 16, &inode);
 		add_drec(&f, 2, 16, "file", 8, 0, 0);
 		header[4] = cases[i].type;
-		if (cases[i].streamed_header)
+		if (cases[i].streamed_header) {
+			list_record_t *extent;
+
 			add_stream_xattr(&f, 16, "com.apple.decmpfs", 16);
-		else if (!cases[i].missing_header)
+			extent = record_new(&f);
+			extent->key_size = 16;
+			extent->value_size = 24;
+			CHECK(apfs_gen_extent_key_build(extent->key, 16, 100, 0));
+			CHECK(apfs_gen_extent_val_build(extent->value, 24,
+			    &(apfs_gen_extent_val_t){ .length = LIST_BLOCK,
+			    .phys_block = 4000 }));
+			apfs_gen_decmpfs_header(block(&f, 4000), cases[i].type, 123);
+			if (cases[i].wanted == FSIMG_ECORRUPT)
+				block(&f, 4000)[0] = 0;
+		} else if (!cases[i].missing_header)
 			add_xattr(&f, 16, "com.apple.decmpfs", header,
 			    cases[i].header_size, 2);
 		if (cases[i].fork) {
@@ -1261,8 +1275,7 @@ test_compression_listing_branches(void)
 		if (listing_open(&f) && status_is(&f,
 		    fsimg_reader_next(f.reader, &entry, &f.error), cases[i].wanted)
 		    && cases[i].wanted == FSIMG_OK) {
-			size = cases[i].streamed_header ?
-			    cases[i].uncompressed_size : 123;
+			size = 123;
 			expect(entry->size == size, "compression listing logical size");
 			expect(((entry->metadata.valid & FSIMG_META_EXTRA_DATA) != 0)
 			    == cases[i].extra, "compression attribute consumption");

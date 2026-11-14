@@ -10,7 +10,9 @@
 
 /* Byte 0: bit 0 selects raw LZVN; bits 1..7 choose the capacity in
  * 512-byte steps, with code 127 selecting 65536. The rest is exact-size input.
- * test-lzfse --seed writes this framing. Wide output copies must respect the
+ * test-lzfse --seed writes this framing, and build-aux/fuzz.sh adds the APFS
+ * cases, the LZVN and LZFSE payloads and chunks of E7's compressed files,
+ * when FSIMG_APFS_NATIVE names the native captures. Wide output copies must respect the
  * chosen capacity; a tail guard makes that invariant observable without ASan.
  */
 int LLVMFuzzerTestOneInput(const uint8_t *, size_t);

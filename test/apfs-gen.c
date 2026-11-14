@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <zlib.h>
 
 #include "apfs-gen.h"
 
@@ -2033,4 +2034,74 @@ apfs_gen_volume_extent_block(const apfs_gen_volume_t *volume, uint64_t oid,
 		return (true);
 	}
 	return (false);
+}
+
+/* Test framing uses a fixed resource data offset and contiguous payloads. */
+void
+apfs_gen_decmpfs_header(unsigned char *raw, uint32_t type, uint64_t size)
+{
+	put_le(raw, UINT32_C(0x636d7066), 4);
+	put_le(raw + 4, type, 4);
+	put_le(raw + 8, size, 8);
+}
+
+size_t
+apfs_gen_compressed_payload(unsigned char *raw, size_t capacity,
+    uint32_t type, const unsigned char *source, size_t size)
+{
+	uLongf stored = capacity;
+
+	if (type == 3 || type == 4) {
+		if (compress2(raw, &stored, source, size, Z_BEST_COMPRESSION) != Z_OK)
+			return (0);
+		return ((size_t)stored);
+	}
+	if (capacity < size + 1)
+		return (0);
+	raw[0] = type == 7 || type == 8 ? 0x06 :
+	    type == 9 || type == 10 ? 0xcc : 0xff;
+	bcopy(source, raw + 1, size);
+	return (size + 1);
+}
+
+size_t
+apfs_gen_compressed_fork(unsigned char *raw, size_t capacity, uint32_t type,
+    const unsigned char *source, size_t size)
+{
+	size_t chunks = (size + 65535) / 65536;
+	size_t cursor = type == 4 ? 24 + 8 * chunks : 4 * (chunks + 1);
+	size_t stored, length, entry;
+
+	if (cursor > capacity)
+		return (0);
+	bzero(raw, cursor);
+	for (size_t i = 0; i < chunks; i++) {
+		length = size - i * 65536;
+		if (length > 65536)
+			length = 65536;
+		stored = apfs_gen_compressed_payload(raw + cursor,
+		    capacity - cursor, type, source + i * 65536, length);
+		if (stored == 0)
+			return (0);
+		if (type == 4) {
+			entry = 24 + 8 * i;
+			put_le(raw + entry, cursor - 20, 4);
+			put_le(raw + entry + 4, stored, 4);
+		} else
+			put_le(raw + 4 * i, cursor, 4);
+		cursor += stored;
+	}
+	if (type == 4) {
+		/* Big-endian classic resource header and resource length. */
+		const uint32_t words[] = { 16, (uint32_t)cursor,
+		    (uint32_t)cursor - 16, 0, (uint32_t)cursor - 20 };
+
+		for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+			for (unsigned j = 0; j < 4; j++)
+				raw[4 * i + j] = (unsigned char)(words[i] >> (24 - 8 * j));
+		}
+		put_le(raw + 20, chunks, 4);
+	} else
+		put_le(raw + 4 * chunks, cursor, 4);
+	return (cursor);
 }

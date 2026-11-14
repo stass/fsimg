@@ -77,11 +77,15 @@ typedef enum attr_form {
 } attr_form_t;
 
 /* What the attribute pass learnt of one inode: the form and value length
- * of the compression header and the resource fork. A header held in its
- * record is decoded into header; one held in a stream is not read here.
+ * of the compression header and the resource fork, and the stream of
+ * either when it has one. A header held in its record is decoded into
+ * header; one held in a stream is read once the pass is over, when the
+ * entry is current and the read can select the header's stream.
  */
 typedef struct attr_scan {
 	fsimg_decmpfs_header_t header;
+	apfs_stream_t	header_stream;
+	apfs_stream_t	fork_stream;
 	uint64_t	header_length;
 	uint64_t	fork_size;
 	attr_form_t	header_form;
@@ -97,11 +101,10 @@ static fsimg_status_t	attr_scan(fsimg_reader_t *, uint64_t,
 			    const apfs_inode_t *, attr_scan_t *,
 			    fsimg_error_t *);
 static bool		attr_named(const apfs_name_key_t *, const char *);
-static fsimg_status_t	compressed_size(const apfs_inode_t *,
-			    const attr_scan_t *, uint64_t *, bool *,
-			    fsimg_error_t *);
-static fsimg_status_t	compressed_size_streamed(const apfs_inode_t *,
-			    const attr_scan_t *, uint64_t *, bool *,
+static fsimg_status_t	compressed_load(fsimg_reader_t *,
+			    const apfs_inode_t *, attr_scan_t *, uint64_t *,
+			    bool *, fsimg_error_t *);
+static fsimg_status_t	header_read(fsimg_reader_t *, attr_scan_t *,
 			    fsimg_error_t *);
 static void		entry_fill(fsimg_reader_t *, const apfs_inode_t *);
 static fsimg_status_t	fields_read(apfs_inode_t *, const char **,
@@ -341,6 +344,7 @@ attr_classify(fsimg_reader_t *reader, const apfs_inode_t *inode,
 {
 	apfs_name_key_t key;
 	apfs_xattr_val_t val;
+	apfs_stream_t stream;
 	uint64_t length;
 	bool embedded;
 
@@ -356,6 +360,8 @@ attr_classify(fsimg_reader_t *reader, const apfs_inode_t *inode,
 		return (apfs_corrupt(error, ROLE_ATTRIBUTE,
 		    "inline data is too long"));
 	length = embedded ? val.data_len : val.dstream.size;
+	stream = (apfs_stream_t){ .oid = val.stream_oid,
+	    .size = val.dstream.size, .alloced = val.dstream.alloced_size };
 
 	if (inode->kind == FSIMG_ENTRY_SYMLINK &&
 	    attr_named(&key, APFS_XATTR_SYMLINK))
@@ -371,12 +377,19 @@ attr_classify(fsimg_reader_t *reader, const apfs_inode_t *inode,
 			    "header is malformed"));
 		scan->header_form = embedded ? ATTR_INLINE : ATTR_STREAM;
 		scan->header_length = length;
+		if (!embedded)
+			scan->header_stream = stream;
 		return (FSIMG_OK);
 	}
 	if (is_compressed(inode) &&
 	    attr_named(&key, APFS_XATTR_RESOURCE_FORK)) {
+		if (!embedded && length > INT64_MAX)
+			return (apfs_corrupt(error, ROLE_COMPRESSED,
+			    "resource fork size is invalid"));
 		scan->fork_form = embedded ? ATTR_INLINE : ATTR_STREAM;
 		scan->fork_size = length;
+		if (!embedded)
+			scan->fork_stream = stream;
 		return (FSIMG_OK);
 	}
 	scan->extra_data = true;
@@ -412,20 +425,27 @@ attr_scan(fsimg_reader_t *reader, uint64_t number, const apfs_inode_t *inode,
 }
 
 /*
- * A compressed file's size, and whether its resource fork is explained by
- * the compression and so does not set the extra-data mark. The header's
- * size governs and must equal the inode's uncompressed size when the inode
+ * A compressed file's size, whether its resource fork is explained by the
+ * compression and so does not set the extra-data mark, and the state
+ * resolve starts from: the type, the size and the stream holding the
+ * stored bytes. A header held in a stream is read first. The header's size
+ * governs and must equal the inode's uncompressed size when the inode
  * carries one, and the data stream must be empty. A resource-fork type's
  * header is exactly the 16 bytes and its content is in a fork held in a
- * stream; an inline type's content is at most one 64 KiB chunk, and beside
- * it only an empty fork is explained.
+ * stream; an inline type's content is at most one 64 KiB chunk, its
+ * payload in the attribute record or after the header in its stream, and
+ * beside it only an empty fork is explained.
  */
 static fsimg_status_t
-compressed_size(const apfs_inode_t *inode, const attr_scan_t *scan,
-    uint64_t *size, bool *fork_explained, fsimg_error_t *error)
+compressed_load(fsimg_reader_t *reader, const apfs_inode_t *inode,
+    attr_scan_t *scan, uint64_t *size, bool *fork_explained,
+    fsimg_error_t *error)
 {
+	apfs_reader_t *apfs = reader->driver;
 	const apfs_inode_val_t *val = &inode->val;
+	apfs_compressed_t *compression = &apfs->current.compression;
 	fsimg_decmpfs_info_t info;
+	fsimg_status_t status;
 
 	if (scan->header_form == ATTR_ABSENT)
 		return (apfs_corrupt(error, ROLE_COMPRESSED,
@@ -433,9 +453,11 @@ compressed_size(const apfs_inode_t *inode, const attr_scan_t *scan,
 	if (inode->size != 0)
 		return (apfs_corrupt(error, ROLE_COMPRESSED,
 		    "has a data stream"));
-	if (scan->header_form == ATTR_STREAM)
-		return (compressed_size_streamed(inode, scan, size,
-		    fork_explained, error));
+	if (scan->header_form == ATTR_STREAM) {
+		status = header_read(reader, scan, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 	if (!fsimg_decmpfs_type_info(scan->header.type, &info))
 		return (apfs_unsupported(error, ROLE_COMPRESSED,
 		    "compression type is unknown"));
@@ -444,13 +466,17 @@ compressed_size(const apfs_inode_t *inode, const attr_scan_t *scan,
 		return (apfs_corrupt(error, ROLE_COMPRESSED,
 		    "header size differs from the inode's"));
 	*size = scan->header.uncompressed_size;
-	if (info.kind == FSIMG_DECMPFS_INLINE &&
-	    *size > FSIMG_DECMPFS_CHUNK_BYTES)
-		return (apfs_unsupported(error, ROLE_COMPRESSED,
-		    "inline type is larger than 64 KiB"));
+	compression->type = scan->header.type;
+	compression->size = *size;
 	if (info.kind == FSIMG_DECMPFS_INLINE) {
+		if (*size > FSIMG_DECMPFS_CHUNK_BYTES)
+			return (apfs_unsupported(error, ROLE_COMPRESSED,
+			    "inline type is larger than 64 KiB"));
 		*fork_explained = scan->fork_form != ATTR_ABSENT &&
 		    scan->fork_size == 0;
+		compression->streamed = scan->header_form == ATTR_STREAM;
+		apfs_stream_select(apfs, compression->streamed ?
+		    &scan->header_stream : &(apfs_stream_t){ 0 });
 		return (FSIMG_OK);
 	}
 	if (scan->header_length != FSIMG_DECMPFS_HEADER_BYTES)
@@ -463,32 +489,28 @@ compressed_size(const apfs_inode_t *inode, const attr_scan_t *scan,
 		return (apfs_unsupported(error, ROLE_COMPRESSED,
 		    "resource fork is held in its record"));
 	*fork_explained = true;
+	apfs_stream_select(apfs, &scan->fork_stream);
 	return (FSIMG_OK);
 }
 
 /*
- * A header held in a stream is read with the content
- * (specs/design-apfs-driver.md, "Directories"), which the reader does not
- * read yet. Until it does, such a file is listed with the inode's
- * uncompressed size, as native volumes store it beside an inline type,
- * and one whose type cannot be known without the header, the inode
- * carrying no size or the fork holding bytes, is refused.
+ * The 16 bytes of a header held in a stream, read through the content
+ * cursor (specs/design-apfs-driver.md, "Directories"): the one read replay
+ * makes outside the trees. attr_classify() bounded the value's length.
  */
 static fsimg_status_t
-compressed_size_streamed(const apfs_inode_t *inode, const attr_scan_t *scan,
-    uint64_t *size, bool *fork_explained, fsimg_error_t *error)
+header_read(fsimg_reader_t *reader, attr_scan_t *scan, fsimg_error_t *error)
 {
-	const apfs_inode_val_t *val = &inode->val;
+	unsigned char bytes[FSIMG_DECMPFS_HEADER_BYTES];
+	fsimg_status_t status;
 
-	if ((val->internal_flags & APFS_INODE_HAS_UNCOMPRESSED_SIZE) == 0 ||
-	    (scan->fork_form != ATTR_ABSENT && scan->fork_size != 0))
-		return (apfs_unsupported(error, ROLE_COMPRESSED,
-		    "header held in a stream is not read"));
-	if (val->uncompressed_size > INT64_MAX)
+	apfs_stream_select(reader->driver, &scan->header_stream);
+	status = apfs_stream_read(reader, 0, bytes, sizeof(bytes), error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!fsimg_decmpfs_header_decode(bytes, sizeof(bytes), &scan->header))
 		return (apfs_corrupt(error, ROLE_COMPRESSED,
-		    "size is invalid"));
-	*size = val->uncompressed_size;
-	*fork_explained = scan->fork_form != ATTR_ABSENT;
+		    "header is malformed"));
 	return (FSIMG_OK);
 }
 
@@ -560,10 +582,14 @@ apfs_entry_load(fsimg_reader_t *reader, const apfs_child_t *child,
 	if (status != FSIMG_OK)
 		return (status);
 
+	apfs->current = (apfs_current_t){ .inode = child->inode,
+	    .stream = { .oid = inode.val.private_id, .size = inode.size,
+	    .alloced = inode.alloced }, .kind = inode.kind,
+	    .compressed = is_compressed(&inode) };
 	size = inode.size;
-	if (is_compressed(&inode)) {
-		status = compressed_size(&inode, &scan, &size, &fork_explained,
-		    error);
+	if (apfs->current.compressed) {
+		status = compressed_load(reader, &inode, &scan, &size,
+		    &fork_explained, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
@@ -576,9 +602,5 @@ apfs_entry_load(fsimg_reader_t *reader, const apfs_child_t *child,
 		reader->entry.size = size;
 		reader->initialized = size;
 	}
-	apfs->current = (apfs_current_t){ .inode = child->inode,
-	    .private_id = inode.val.private_id, .stream_size = inode.size,
-	    .stream_alloced = inode.alloced, .kind = inode.kind,
-	    .compressed = is_compressed(&inode) };
 	return (FSIMG_OK);
 }

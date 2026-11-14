@@ -4,6 +4,7 @@
 #ifndef FSIMG_APFS_H
 #define FSIMG_APFS_H
 
+#include "decmpfs.h"
 #include "internal.h"
 #include "reader.h"
 
@@ -1659,23 +1660,55 @@ typedef struct apfs_child {
 } apfs_child_t;
 
 /*
+ * A data stream the content cursor reads: the owner of its file extents,
+ * its size and its allocated bytes, all zero for none.
+ */
+typedef struct apfs_stream {
+	uint64_t	oid;
+	uint64_t	size;
+	uint64_t	alloced;
+} apfs_stream_t;
+
+/*
+ * A compressed file as replay validated it (compress.c): the header's type
+ * and size, and whether an inline type's payload follows its header in a
+ * stream rather than in the attribute record. opened says the first
+ * resolve opened the content: a resource-fork type's table is then the
+ * shared validator's description of it. While held is set the decode
+ * window holds chunk `chunk`, length decoded bytes.
+ */
+typedef struct apfs_compressed {
+	fsimg_decmpfs_table_t table;
+	uint64_t	size;
+	uint64_t	chunk;
+	size_t		length;
+	uint32_t	type;
+	bool		streamed;
+	bool		opened;
+	bool		held;
+} apfs_compressed_t;
+
+/*
  * What the reader knows of the current entry once replay made it current:
  * enough for prepare to enter a directory and for content to find a file's
- * storage. stream_size and stream_alloced are the data stream's size and
- * allocated bytes, zero without one. extent is the last extent resolve
- * returned, valid while resolved is set (content.c); making an entry
- * current clears it.
+ * storage. stream is what the content cursor reads: a file's data stream,
+ * or a compressed file's stored bytes, its resource fork or the stream
+ * holding its compression value, none for a payload in its attribute
+ * record. extent is the last extent the stream's lookup returned, valid
+ * while resolved is set (content.c); making an entry current, or
+ * selecting another stream, clears it.
  */
 typedef struct apfs_current {
 	fsimg_extent_t	extent;
+	apfs_stream_t	stream;
+	apfs_compressed_t compression;	/* when compressed */
 	uint64_t	inode;
-	uint64_t	private_id;	/* owner of the file extents */
-	uint64_t	stream_size;
-	uint64_t	stream_alloced;
 	fsimg_entry_kind_t kind;
 	bool		compressed;
 	bool		resolved;
 } apfs_current_t;
+
+typedef struct apfs_window apfs_window_t;
 
 /*
  * The reader's state (read.c). apfs_volume_open(reader, apfs, window, error)
@@ -1717,6 +1750,7 @@ typedef struct apfs_reader {
 	apfs_cursor_t	 content;
 	apfs_fs_t	 fs;		/* the selected volume's superblock */
 	apfs_current_t	 current;
+	apfs_window_t	*window;	/* compress.c, made on first use */
 	apfs_name_form_t form;
 	apfs_name_rule_t rule;
 	uint64_t	 read_xid;
@@ -1750,11 +1784,10 @@ fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,
  * APFS_FEXT_CLAIM_BYTES to records->extents, for the allocation merge to
  * join with the live physical-extent records; when records->shared is not
  * NULL, each non-directory inode of several names appends its number, an
- * 8-byte little-endian record, in ascending order. A compressed file whose
- * content lies in a resource fork sets records->chunk_tables, since
- * verification does not read chunk tables, and a directory record in the
+ * 8-byte little-endian record, in ascending order. A directory record in the
  * private directory naming a directory sets records->private_directories,
- * since a walk from the root does not reach it. The scan's streams live in the
+ * and a compressed file there with a resource fork records->private_tables,
+ * since a walk from the root does not reach either. The scan's streams live in the
  * session's metadata scratch and are freed before it returns.
  */
 #define APFS_FEXT_CLAIM_BYTES		28u
@@ -1769,8 +1802,8 @@ typedef struct apfs_fext_claim {
 typedef struct apfs_records {
 	fsimg_stream_t	*extents;
 	fsimg_stream_t	*shared;	/* optional */
-	bool		 chunk_tables;
 	bool		 private_directories;
+	bool		 private_tables;
 } apfs_records_t;
 
 void		apfs_fext_claim_encode(unsigned char *,
@@ -1841,9 +1874,37 @@ fsimg_status_t	apfs_key(fsimg_reader_t *, const char *, unsigned char *,
 /*
  * Content (content.c; specs/design-apfs-driver.md, "Content"), wired into
  * fsimg_apfs_reader_ops: the extent of the current file holding an offset
- * below its size, judged before it is returned.
+ * below its size, judged before it is returned, or for a compressed file
+ * the decoded chunk compress.c holds.
+ *
+ * apfs_stream_select(apfs, stream) makes stream the one the content cursor
+ * reads, forgetting the extent of any other. apfs_stream_read(reader,
+ * offset, buffer, length, error) reads [offset, offset + length) of the
+ * current stream, which must lie inside its size, through its file
+ * extents: a hole reads as zeros, a mapped extent through the read funnel.
  */
 fsimg_status_t	apfs_resolve(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
 		    fsimg_error_t *);
+void		apfs_stream_select(apfs_reader_t *, const apfs_stream_t *);
+fsimg_status_t	apfs_stream_read(fsimg_reader_t *, uint64_t, void *, size_t,
+		    fsimg_error_t *);
+
+/*
+ * Transparent compression (compress.c; specs/design-apfs-driver.md,
+ * "Compression framing"). apfs_compress_resolve() is apfs_resolve() for
+ * a compressed file: on its first call it opens the content, refusing a
+ * type not admitted, then decodes the chunk holding the offset into the window
+ * unless it is there, and returns it as a held extent clipped to the size.
+ * apfs_compress_table_check(reader, error) is verification's check of
+ * the current file's chunk table, when it is a resource-fork type: the
+ * shared validator's open and then every entry in order, one unit of work
+ * each, decoding nothing. apfs_compress_free(apfs) releases the window.
+ * apfs_codecs() writes the capability record's codecs.
+ */
+fsimg_status_t	apfs_compress_resolve(fsimg_reader_t *, uint64_t,
+		    fsimg_extent_t *, fsimg_error_t *);
+fsimg_status_t	apfs_compress_table_check(fsimg_reader_t *, fsimg_error_t *);
+void		apfs_compress_free(apfs_reader_t *);
+void		apfs_codecs(char *, size_t);
 
 #endif /* !FSIMG_APFS_H */

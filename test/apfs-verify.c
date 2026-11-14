@@ -58,7 +58,7 @@ typedef struct fixture {
 
 static unsigned failures, checks, native_verified, native_refused;
 static unsigned native_complete, native_pending, native_encrypted;
-static unsigned native_compressed, native_snapshots;
+static unsigned native_snapshots;
 static unsigned native_refused_encrypted, native_refused_empty;
 static const char *scenario;
 
@@ -312,6 +312,9 @@ fs_record_compare(const void *left, const void *right)
 		return (strcmp((const char *)a->key + 12,
 		    (const char *)b->key + 12));
 	}
+	if (kind == 4)
+		return (strcmp((const char *)a->key + 10,
+		    (const char *)b->key + 10));
 	if (kind == 5 || kind == 8) {
 		ak = fsimg_load_le64(a->key + 8);
 		bk = fsimg_load_le64(b->key + 8);
@@ -1987,10 +1990,7 @@ native_image(const char *path)
 		if (slot == 0 && strstr(path,
 		    "/e11-enc-addvol/e11-enc-addvol.img") != NULL)
 			message = "APFS volume superblock is encrypted";
-		if (slot == 0 && (strstr(path,
-		    "/apfs-newfs-67108864-e7-compression/image.img") != NULL ||
-		    strstr(path, "/apfs-newfs-67108864-e6-xclone/image.img") != NULL))
-			message = "chunks whose tables verification does not read";
+
 		if (message == NULL && status == FSIMG_EUNSUPPORTED &&
 		    strstr(error.message, "has snapshots") != NULL)
 			message = "has snapshots";
@@ -2004,8 +2004,6 @@ native_image(const char *path)
 			expect(!report.complete, "native report is incomplete");
 			if (strcmp(message, "pending reap") == 0)
 				native_pending++;
-			else if (strstr(message, "chunks") != NULL)
-				native_compressed++;
 			else if (strcmp(message, "has snapshots") == 0)
 				native_snapshots++;
 			else
@@ -2086,16 +2084,189 @@ test_native_captures(void)
 	printf("native verification: %u verified, %u refused\n",
 	    native_verified, native_refused);
 	printf("native reasons: %u complete, %u pending reap, %u encrypted, "
-	    "%u compressed chunk tables, %u snapshots\n", native_complete,
-	    native_pending, native_encrypted, native_compressed, native_snapshots);
+	    "%u snapshots\n", native_complete,
+	    native_pending, native_encrypted, native_snapshots);
 	printf("native refusals: %u encrypted, %u empty container\n",
 	    native_refused_encrypted, native_refused_empty);
 	expect(native_verified != 0, "native gate verified at least one volume");
 }
 
+static void
+compression_attribute_build(fs_tree_t *tree, const char *name,
+    const apfs_gen_xattr_val_t *value)
+{
+	fs_record_t *r = record_add(tree);
+	apfs_gen_name_key_t key = { .oid = 16, .name = name,
+	    .name_len = (uint16_t)strlen(name) };
+
+	r->key_size = (uint16_t)(11 + key.name_len);
+	r->value_size = (uint16_t)(4 + value->data_len);
+	CHECK(apfs_gen_xattr_key_build(r->key, r->key_size, &key));
+	CHECK(apfs_gen_xattr_val_build(r->value, r->value_size, value));
+}
+
+static void
+test_private_directory_compressed_file_leaves_verification_incomplete(void)
+{
+	unsigned char source[37] = { 0 };
+	unsigned char header[16], fields[16];
+	apfs_gen_xfield_t name = { .type = 4, .flags = 2, .size = 5,
+	    .data = (const unsigned char *)"file" };
+	apfs_gen_inode_val_t inode = { .parent = APFS_INO_ROOT,
+	    .private_id = 16, .mode = 0100755, .count = 1,
+	    .bsd_flags = 0x20, .xfields = fields,
+	    .xfields_len = sizeof(fields) };
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *r;
+	size_t stored;
+
+	scenario = "ordinary directory holds a compressed file";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	/* The resource fork replaces the inode's data stream. */
+	r = record_find(tree, 16, 6);
+	*r = tree->records[--tree->count];
+	stored = apfs_gen_compressed_fork(block_at(&f, DATA_BLOCK),
+	    2 * BLOCK, 4, source, sizeof(source));
+	CHECK(stored != 0);
+	CHECK(apfs_gen_xfields_build(fields, sizeof(fields), &name, 1));
+	r = record_find(tree, 16, 3);
+	r->value_size = GEN_INODE_VAL_BYTES + sizeof(fields);
+	CHECK(apfs_gen_inode_val_build(r->value, r->value_size, &inode));
+	apfs_gen_decmpfs_header(header, 4, sizeof(source));
+	compression_attribute_build(tree, "com.apple.decmpfs",
+	    &(apfs_gen_xattr_val_t){ .flags = 2, .data_len = sizeof(header),
+	    .data = header });
+	compression_attribute_build(tree, "com.apple.ResourceFork",
+	    &(apfs_gen_xattr_val_t){ .flags = 1, .data_len = 48,
+	    .stream_oid = 16, .dstream = { .size = stored,
+	    .alloced_size = 2 * BLOCK } });
+	filesystem_build(&f, 0);
+	f.expected_logical_bytes = sizeof(source);
+	verify_fixture(&f, 0, FSIMG_OK, "");
+
+	scenario = "private directory holds a compressed file";
+	/* Move the file's only name and its inode parent together. */
+	r = record_find(tree, APFS_INO_ROOT, 9);
+	*r = tree->records[--tree->count];
+	drec_build(tree, APFS_INO_PRIVATE, 16, "file", 8,
+	    ascii_hash("file"), 0);
+	inode.parent = APFS_INO_PRIVATE;
+	r = record_find(tree, 16, 3);
+	CHECK(apfs_gen_inode_val_build(r->value, r->value_size, &inode));
+	inode_count_set(tree, APFS_INO_ROOT, 0);
+	inode_count_set(tree, APFS_INO_PRIVATE, 1);
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
+	    "holds a compressed file whose chunk table a walk from the root does not reach");
+	fixture_close(&f);
+}
+
+static void
+test_structural_verification_checks_last_compressed_table_entry(void)
+{
+	const size_t size = 3 * 65536 + 37;
+	unsigned char *source = calloc(1, size);
+	unsigned char header[16], fields[16];
+	apfs_gen_xfield_t name = { .type = 4, .flags = 2, .size = 5,
+	    .data = (const unsigned char *)"file" };
+	apfs_gen_inode_val_t inode = { .parent = 2, .private_id = 16,
+	    .mode = 0100755, .count = 1, .bsd_flags = 0x20,
+	    .xfields = fields, .xfields_len = sizeof(fields) };
+	fixture_t f;
+	fs_record_t *r;
+	size_t stored;
+
+	CHECK(source != NULL);
+	CHECK(apfs_gen_xfields_build(fields, sizeof(fields), &name, 1));
+	for (unsigned damaged = 0; damaged < 2; damaged++) {
+		scenario = damaged ? "structural verify rejects damaged last compressed entry" :
+		    "structural verify checks compressed tables without decoding payload";
+		fixture_init(&f, 1);
+		/* Attribute streams have no inode stream reference record. */
+		r = record_find(&f.trees[0], 16, 6);
+		*r = f.trees[0].records[--f.trees[0].count];
+		stored = apfs_gen_compressed_fork(block_at(&f, DATA_BLOCK),
+		    2 * BLOCK, 4, source, size);
+		CHECK(stored != 0);
+		r = record_find(&f.trees[0], 16, 3);
+		r->value_size = GEN_INODE_VAL_BYTES + sizeof(fields);
+		CHECK(apfs_gen_inode_val_build(r->value, r->value_size, &inode));
+		apfs_gen_decmpfs_header(header, 4, size);
+		compression_attribute_build(&f.trees[0], "com.apple.decmpfs",
+		    &(apfs_gen_xattr_val_t){ .flags = 2, .data_len = sizeof(header),
+		    .data = header });
+		compression_attribute_build(&f.trees[0], "com.apple.ResourceFork",
+		    &(apfs_gen_xattr_val_t){ .flags = 1, .data_len = 48,
+		    .stream_oid = 16, .dstream = { .size = stored,
+		    .alloced_size = 2 * BLOCK } });
+		/* Invalid payload proves structural verification never decodes it. */
+		block_at(&f, DATA_BLOCK)[56] = 0;
+		if (damaged)
+			fsimg_store_le32(block_at(&f, DATA_BLOCK) + 24 + 3 * 8 + 4,
+			    UINT32_MAX);
+		filesystem_build(&f, 0);
+		f.expected_logical_bytes = size;
+		verify_fixture(&f, 0, damaged ? FSIMG_ECORRUPT : FSIMG_OK,
+		    damaged ? "decmpfs chunk lies outside the resource data" : "");
+		fixture_close(&f);
+	}
+	free(source);
+}
+
+static void
+test_zero_size_compressed_file_requires_empty_resource_table(void)
+{
+	unsigned char source[1] = { 0 };
+	unsigned char header[16], fields[16];
+	apfs_gen_xfield_t name = { .type = 4, .flags = 2, .size = 5,
+	    .data = (const unsigned char *)"file" };
+	apfs_gen_inode_val_t inode = { .parent = 2, .private_id = 16,
+	    .mode = 0100755, .count = 1, .bsd_flags = 0x20,
+	    .xfields = fields, .xfields_len = sizeof(fields) };
+	fixture_t f;
+	fs_record_t *r;
+	size_t stored;
+
+	CHECK(apfs_gen_xfields_build(fields, sizeof(fields), &name, 1));
+	for (unsigned damaged = 0; damaged < 2; damaged++) {
+		scenario = damaged ? "zero-size compressed file rejects a one-chunk resource table" :
+		    "zero-size compressed file accepts an empty resource table";
+		fixture_init(&f, 1);
+		/* Attribute streams have no inode stream reference record. */
+		r = record_find(&f.trees[0], 16, 6);
+		*r = f.trees[0].records[--f.trees[0].count];
+		stored = apfs_gen_compressed_fork(block_at(&f, DATA_BLOCK),
+		    2 * BLOCK, 4, source, damaged ? sizeof(source) : 0);
+		CHECK(stored != 0);
+		if (!damaged)
+			expect(stored == 24, "empty resource header has zero chunk entries");
+		r = record_find(&f.trees[0], 16, 3);
+		r->value_size = GEN_INODE_VAL_BYTES + sizeof(fields);
+		CHECK(apfs_gen_inode_val_build(r->value, r->value_size, &inode));
+		apfs_gen_decmpfs_header(header, 4, 0);
+		compression_attribute_build(&f.trees[0], "com.apple.decmpfs",
+		    &(apfs_gen_xattr_val_t){ .flags = 2, .data_len = sizeof(header),
+		    .data = header });
+		compression_attribute_build(&f.trees[0], "com.apple.ResourceFork",
+		    &(apfs_gen_xattr_val_t){ .flags = 1, .data_len = 48,
+		    .stream_oid = 16, .dstream = { .size = stored,
+		    .alloced_size = 2 * BLOCK } });
+		filesystem_build(&f, 0);
+		f.expected_logical_bytes = 0;
+		verify_fixture(&f, 0, damaged ? FSIMG_ECORRUPT : FSIMG_OK,
+		    damaged ? "decmpfs chunk table is malformed" : "");
+		fixture_close(&f);
+	}
+}
+
 int
 main(void)
 {
+	test_private_directory_compressed_file_leaves_verification_incomplete();
+	test_structural_verification_checks_last_compressed_table_entry();
+	test_zero_size_compressed_file_requires_empty_resource_table();
 	test_valid_container_counts();
 	test_allocation_damage();
 	test_double_claims();

@@ -452,7 +452,9 @@ inode_record(scan_t *s, const apfs_jkey_t *key, const apfs_record_t *record,
 
 /*
  * An attribute of the inode before it: well formed, and a stream
- * attribute's use. A compressed file's resource fork holds chunk tables.
+ * attribute's use. A compressed file whose inode's parent field is the
+ * private directory, whose resource fork holds a chunk table the walk from
+ * the root does not reach, sets records->private_tables.
  */
 static fsimg_status_t
 attribute_record(scan_t *s, const apfs_record_t *record, fsimg_error_t *error)
@@ -477,9 +479,10 @@ attribute_record(scan_t *s, const apfs_record_t *record, fsimg_error_t *error)
 	    val.data_len > APFS_XATTR_INLINE_MAX)
 		return (apfs_corrupt(error, ROLE_ATTRIBUTE,
 		    "inline data is too long"));
-	if (o->compressed && key.name_len == sizeof(fork) - 1 &&
+	if (o->compressed && o->parent == APFS_INO_PRIVATE &&
+	    key.name_len == sizeof(fork) - 1 &&
 	    bcmp(key.name, fork, sizeof(fork) - 1) == 0)
-		s->records->chunk_tables = true;
+		s->records->private_tables = true;
 	if ((val.flags & APFS_XATTR_DATA_STREAM) == 0)
 		return (FSIMG_OK);
 	return (fact_add(s->uses, &(fact_t){ .use = {

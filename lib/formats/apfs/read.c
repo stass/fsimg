@@ -136,6 +136,7 @@ apfs_close(fsimg_reader_t *reader)
 
 	if (apfs == NULL)
 		return;
+	apfs_compress_free(apfs);
 	apfs_volume_close(apfs);
 	fsimg_dealloc(apfs);
 	reader->driver = NULL;

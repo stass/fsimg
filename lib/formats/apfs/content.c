@@ -3,16 +3,22 @@
  */
 #include "config.h"
 
+#include <strings.h>
+
 #include "apfs.h"
 
 /*
  * File content (specs/design-apfs-driver.md, "Content" and "Salvage";
- * specs/design-apfs.md, "Data streams and file extents").
+ * specs/design-apfs.md, "Data streams and file extents"): the extents of
+ * the current stream, which resolve returns for an uncompressed file and
+ * through which compress.c reads a compressed file's stored bytes.
  *
- * A file's stream is tiled by the file-extent records filed under its
+ * A stream is tiled by the file-extent records filed under its
  * private ID, in logical order from offset zero, each starting where the
- * previous one ends; bytes past the last extent and below the size read as
- * zero. resolve answers one offset with the extent holding it. A random
+ * previous one ends; bytes past the last extent and below the stream's size
+ * read as zero. stream_extent() answers one offset with the extent holding
+ * it. Delivery clips an extent to the file's initialized length, which
+ * replay sets to the data stream's size and salvage may lower. A random
  * offset costs one descent of the content cursor to the last record at or
  * below it; a read continuing where the previous extent ended advances the
  * cursor with next and checks that the record found starts exactly there,
@@ -27,19 +33,18 @@
  * owner, kind and offset, so the record after the stream's last one, or
  * after the last key below the stream's first, is not the stream's.
  *
- * Only resolve moves the content cursor. While apfs->current.resolved is
- * set and current.extent came from a record ending below the stream's
- * size, the cursor rests on that record. An extent that reaches the size
- * is the last one a read delivers from, so its successor is checked at
- * once, which leaves the cursor past it; no later offset advances from it
- * or from the zero tail, which ends there too. A forward read therefore
- * checks every record it could have relied on. The size is the stream's
- * own, not the reader's initialized length, which salvage lowers to a
- * damaged file's prefix: planning and copying the prefix meet the same
- * records.
+ * Only stream_extent() moves the content cursor. While
+ * apfs->current.resolved is set and current.extent came from a record
+ * ending below the stream's size, the cursor rests on that record. An
+ * extent that reaches the size is the last one a read uses, so its successor is
+ * checked at once, which leaves the cursor past it; no later offset
+ * advances from it or from the zero tail, which ends there too. A forward
+ * read therefore checks every record it could have relied on. The size is
+ * the stream's own, not the reader's initialized length, which salvage
+ * lowers to a damaged file's prefix: planning and copying the prefix meet
+ * the same records.
  */
 #define ROLE_EXTENT	"file extent"
-#define ROLE_COMPRESSED	"compressed file"
 
 /* The closed table of extent crypto IDs for an unencrypted volume
  * (provisional, E16): zero alone.
@@ -65,42 +70,92 @@ static fsimg_status_t	resolve_seek(fsimg_reader_t *, uint64_t,
 			    fsimg_error_t *);
 static fsimg_status_t	result_record(fsimg_reader_t *,
 			    const extent_record_t *, fsimg_error_t *);
+static fsimg_status_t	stream_extent(fsimg_reader_t *, uint64_t,
+			    fsimg_error_t *);
 static fsimg_status_t	tiling_check(uint64_t, const extent_record_t *,
 			    fsimg_error_t *);
-static void		result_tail(fsimg_reader_t *, uint64_t);
+static void		result_tail(apfs_reader_t *, uint64_t);
 
 fsimg_status_t
 apfs_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *extent,
     fsimg_error_t *error)
 {
 	apfs_reader_t *apfs = reader->driver;
-	apfs_current_t *current = &apfs->current;
-	uint64_t cached_end;
 	fsimg_status_t status;
 
-	/* Compressed content is outside what this reader decodes. */
-	if (current->compressed)
-		return (apfs_unsupported(error, ROLE_COMPRESSED,
-		    "content is not decoded"));
-
-	cached_end = current->extent.logical_offset + current->extent.length;
-	if (current->resolved && offset >= current->extent.logical_offset &&
-	    offset < cached_end) {
-		*extent = current->extent;
-		return (FSIMG_OK);
-	}
-	if (current->resolved && offset == cached_end) {
-		current->resolved = false;
-		status = resolve_advance(reader, cached_end, error);
-	} else {
-		/* A failure below leaves the cursor anywhere. */
-		current->resolved = false;
-		status = resolve_seek(reader, offset, error);
-	}
+	if (apfs->current.compressed)
+		return (apfs_compress_resolve(reader, offset, extent, error));
+	status = stream_extent(reader, offset, error);
 	if (status != FSIMG_OK)
 		return (status);
-	*extent = current->extent;
+	*extent = apfs->current.extent;
 	return (FSIMG_OK);
+}
+
+void
+apfs_stream_select(apfs_reader_t *apfs, const apfs_stream_t *stream)
+{
+	apfs->current.stream = *stream;
+	apfs->current.resolved = false;
+}
+
+fsimg_status_t
+apfs_stream_read(fsimg_reader_t *reader, uint64_t offset, void *buffer,
+    size_t length, fsimg_error_t *error)
+{
+	apfs_reader_t *apfs = reader->driver;
+	const fsimg_extent_t *extent = &apfs->current.extent;
+	unsigned char *out = buffer;
+	uint64_t size = apfs->current.stream.size, position, within;
+	size_t batch, transferred;
+	fsimg_status_t status;
+
+	if (offset > size || length > size - offset)
+		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+		    "APFS stream read runs past the stream"));
+	for (size_t done = 0; done < length; done += batch) {
+		position = offset + done;
+		status = stream_extent(reader, position, error);
+		if (status != FSIMG_OK)
+			return (status);
+		within = position - extent->logical_offset;
+		batch = length - done;
+		if (batch > extent->length - within)
+			batch = (size_t)(extent->length - within);
+		if (extent->image_offset == FSIMG_EXTENT_ZERO) {
+			bzero(out + done, batch);
+			continue;
+		}
+		status = fsimg_reader_bytes(reader, extent->image_offset + within,
+		    out + done, batch, &transferred, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (FSIMG_OK);
+}
+
+/*
+ * Leave the extent of the current stream holding offset, which is below
+ * its size, in current.extent: the one already there, its successor, or
+ * one a descent finds.
+ */
+static fsimg_status_t
+stream_extent(fsimg_reader_t *reader, uint64_t offset, fsimg_error_t *error)
+{
+	apfs_reader_t *apfs = reader->driver;
+	apfs_current_t *current = &apfs->current;
+	uint64_t cached_end;
+	bool resolved = current->resolved;
+
+	cached_end = current->extent.logical_offset + current->extent.length;
+	if (resolved && offset >= current->extent.logical_offset &&
+	    offset < cached_end)
+		return (FSIMG_OK);
+	/* A failure below leaves the cursor anywhere. */
+	current->resolved = false;
+	if (resolved && offset == cached_end)
+		return (resolve_advance(reader, cached_end, error));
+	return (resolve_seek(reader, offset, error));
 }
 
 /*
@@ -120,7 +175,7 @@ resolve_advance(fsimg_reader_t *reader, uint64_t end, fsimg_error_t *error)
 	if (status != FSIMG_OK)
 		return (status);
 	if (!found) {
-		result_tail(reader, end);
+		result_tail(apfs, end);
 		return (FSIMG_OK);
 	}
 	status = tiling_check(end, &record, error);
@@ -142,7 +197,7 @@ resolve_seek(fsimg_reader_t *reader, uint64_t offset, fsimg_error_t *error)
 	apfs_reader_t *apfs = reader->driver;
 	unsigned char key[APFS_EXTENT_KEY_BYTES];
 	const apfs_extent_key_t search = {
-		.private_id = apfs->current.private_id, .logical = offset };
+		.private_id = apfs->current.stream.oid, .logical = offset };
 	extent_record_t record;
 	uint64_t end = 0;
 	bool positioned, found = false;
@@ -182,23 +237,23 @@ resolve_seek(fsimg_reader_t *reader, uint64_t offset, fsimg_error_t *error)
 		return (apfs_corrupt(error, ROLE_EXTENT, end == 0 ?
 		    "does not start the stream" :
 		    "leaves a gap after the extent before it"));
-	result_tail(reader, end);
+	result_tail(apfs, end);
 	return (FSIMG_OK);
 }
 
 /*
- * The stream's records end at end: the bytes from there to the initialized
- * length read as zero. Every caller has end <= offset < reader->initialized
- * by the resolve contract, so the length is positive.
+ * The stream's records end at end: the bytes from there to its size read
+ * as zero. Every caller has end <= offset < size, so the length is
+ * positive.
  */
 static void
-result_tail(fsimg_reader_t *reader, uint64_t end)
+result_tail(apfs_reader_t *apfs, uint64_t end)
 {
-	apfs_current_t *current = &((apfs_reader_t *)reader->driver)->current;
+	apfs_current_t *current = &apfs->current;
 
 	current->extent = (fsimg_extent_t){ .logical_offset = end,
 	    .image_offset = FSIMG_EXTENT_ZERO,
-	    .length = reader->initialized - end };
+	    .length = current->stream.size - end };
 	current->resolved = true;
 }
 
@@ -227,12 +282,12 @@ result_record(fsimg_reader_t *reader, const extent_record_t *record,
 	bool found, delivered;
 	fsimg_status_t status;
 
-	if (record->end >= current->stream_size) {
+	if (record->end >= current->stream.size) {
 		fsimg_error_clear(&detail);
 		status = extent_after_cursor(apfs, &found, &next, &detail);
 		if (status == FSIMG_OK && found)
 			status = tiling_check(record->end, &next, &detail);
-		delivered = found && next.logical < current->stream_size;
+		delivered = found && next.logical < current->stream.size;
 		if (status != FSIMG_OK && (delivered ||
 		    !fsimg_reader_decode_rejected(reader, &detail, status))) {
 			if (error != NULL)
@@ -296,7 +351,7 @@ extent_at_cursor(apfs_reader_t *apfs, bool *found, extent_record_t *record,
 	if (!apfs_jkey_decode(raw.key, raw.key_len, &header))
 		return (apfs_corrupt(error, ROLE_EXTENT, "key is malformed"));
 	if (header.kind != APFS_J_FILE_EXTENT ||
-	    header.oid != apfs->current.private_id)
+	    header.oid != apfs->current.stream.oid)
 		return (FSIMG_OK);
 	if (!apfs_extent_key_decode(raw.key, raw.key_len, &key) ||
 	    raw.ghost || !apfs_extent_val_decode(raw.val, raw.val_len, &val))
@@ -336,10 +391,12 @@ extent_judge(const apfs_reader_t *apfs, const apfs_extent_key_t *key,
 	    key->logical % block != 0)
 		return (apfs_corrupt(error, ROLE_EXTENT,
 		    "is not in whole blocks"));
-	/* stream_size is at most INT64_MAX, so rounding cannot overflow. */
-	rounded = (current->stream_size + block - 1) / block * block;
-	limit = rounded > current->stream_alloced ? rounded :
-	    current->stream_alloced;
+	/* stream.size is at most INT64_MAX, as replay checks, so rounding
+	 * cannot overflow.
+	 */
+	rounded = (current->stream.size + block - 1) / block * block;
+	limit = rounded > current->stream.alloced ? rounded :
+	    current->stream.alloced;
 	if (key->logical > limit || val->length > limit - key->logical)
 		return (apfs_corrupt(error, ROLE_EXTENT,
 		    "runs past its data stream"));

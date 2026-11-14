@@ -108,31 +108,8 @@ class ApfsContentNativeTest < Minitest::Test
     File.expand_path(directory)
   end
 
-  def compression_reason(directory, records)
-    return "sealed volume is refused by the reader" if directory.include?("e11-sealed")
-    return "manifest has com.apple.decmpfs" if records.any? do |record|
-      record.fetch("xattrs", []).any? { (_1.is_a?(Hash) ? _1.fetch("name") : _1) == "com.apple.decmpfs" } ||
-        (Integer(record.fetch("bsd_flags") { record.fetch("flags", 0) }) & 0x20) != 0
-    end
-
-    # This capture's manifest omits flags and compression attributes. Its
-    # population script uses ditto --hfsCompression for /compressed.
-    if File.basename(directory) == "apfs-newfs-67108864-e6-xclone"
-      return "capture contains ditto --hfsCompression file /compressed"
-    end
-
-    dump_path = File.join(directory, "apfsdump.json")
-
-    return nil unless File.file?(dump_path)
-
-    dump = JSON.parse(File.read(dump_path))
-    compressed = dump.fetch("volumes").any? do |volume|
-      volume.fetch("fs_tree").fetch("records").any? do |record|
-        record["type"] == 3 && (record.fetch("bsd_flags") & 0x20) != 0 ||
-          record["type"] == 4 && record["name"] == "com.apple.decmpfs"
-      end
-    end
-    "apfsdump has compressed files" if compressed
+  def capture_skip_reason(directory)
+    "sealed volume is refused by the reader" if directory.include?("e11-sealed")
   end
 
   def listed_entries(image)
@@ -225,7 +202,7 @@ class ApfsContentNativeTest < Minitest::Test
 
   def compare_capture(manifest)
     directory = File.dirname(manifest)
-    reason = compression_reason(directory, native_records(manifest))
+    reason = capture_skip_reason(directory)
     if reason
       puts "APFS content skipped: #{directory}: #{reason}"
       skip("#{directory}: #{reason}")
@@ -261,6 +238,35 @@ class ApfsContentNativeTest < Minitest::Test
   else
     def test_native_contents_require_capture_directory
       native_directory
+    end
+  end
+
+  def test_native_decmpfs_supported_files_match_digests_and_lzbitmap_is_refused
+    directory = File.join(native_directory, "apfs-newfs-67108864-e7-compression")
+    image = File.join(directory, "image.img")
+    records = native_records(File.join(directory, "native-decmpfs.jsonl"))
+    supported, refused = records.partition { ![13, 14].include?(_1.fetch("type")) }
+    assert_equal(59, supported.length, "supported native compressed files")
+    assert_equal(11, refused.length, "native LZBITMAP files")
+    supported.each do |record|
+      path = record.fetch("path").sub(%r{\A.*?/apfs-mount[^/]*}, "")
+      assert_equal([record.fetch("usize"), record.fetch("sha256")],
+        stdout_digest(image: image, path: path), "type #{record.fetch("type")}: #{path}")
+    end
+    refused.each do |record|
+      path = record.fetch("path").sub(%r{\A.*?/apfs-mount[^/]*}, "")
+      result = invoke(arguments: ["x", "-O", "-f", image, path], expected: nil)
+      refute_equal(0, result.status, "type #{record.fetch("type")}: #{path}")
+      assert_includes(result.stderr, "not supported", path)
+    end
+  end
+
+  def test_structural_verification_completes_for_native_compressed_captures
+    %w[e7-compression e6-xclone].each do |capture|
+      image = File.join(native_directory, "apfs-newfs-67108864-#{capture}", "image.img")
+      result = invoke(arguments: ["W", "-f", image], expected: nil, timeout: 180)
+      assert_equal(0, result.status, "#{capture}: #{result.stdout}\n#{result.stderr}")
+      refute_match(/chunk tables|incomplete/i, result.stdout + result.stderr, capture)
     end
   end
 

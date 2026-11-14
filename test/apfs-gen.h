@@ -665,4 +665,11 @@ bool	apfs_gen_volume_record_block(const apfs_gen_volume_t *, uint64_t,
 bool	apfs_gen_volume_extent_block(const apfs_gen_volume_t *, uint64_t,
     uint64_t, uint64_t *);
 
+/* Caller supplies 16 header bytes and storage for encoded test payloads. */
+void apfs_gen_decmpfs_header(unsigned char *, uint32_t, uint64_t);
+size_t apfs_gen_compressed_payload(unsigned char *, size_t, uint32_t,
+    const unsigned char *, size_t);
+size_t apfs_gen_compressed_fork(unsigned char *, size_t, uint32_t,
+    const unsigned char *, size_t);
+
 #endif /* !FSIMG_TEST_APFS_GEN_H */

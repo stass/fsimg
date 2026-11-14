@@ -68,14 +68,7 @@
   Whether an object-map value flag `0x10` (crypto
   generation) is accepted like the map flag or refused as corrupt, as the
   format design's value rule says, waits on E1's volume records. The volume object map's snapshot fields
-  are not yet compared with the volume's snapshot tree, which the snapshot stage reads. Directories list,
-  but file content does not read yet: `resolve` refuses, so extraction of a
-  nonempty file fails and `x --salvage` reports each one as damaged, and a
-  compressed file whose `com.apple.decmpfs` header is held in a stream is
-  listed with the inode's uncompressed size, the header unread, and refused
-  when its resource fork holds bytes or the inode carries no size. Listing admits
-  every compression type the shared table knows; the content stage refuses
-  the types the format design marks unsupported.
+  are not yet compared with the volume's snapshot tree, which the snapshot stage reads.
   `tools/apfs/apfsdump.rb` does not decode snapshot superblocks, snapshot
   extent-reference trees or the object map's snapshot tree, which the
   snapshot stage needs to read its fixtures.
@@ -83,11 +76,17 @@
   snapshot-tree scan, so a refusal in one snapshot's tree ends the scan and
   damage in later snapshots goes unreported; the snapshot stage should run
   each snapshot as its own part of `verify.c`'s `parts_run()`.
-  Verification does not read the chunk tables of compressed files of a
-  resource-fork type, so a selected volume holding one verifies incomplete
-  after the allocation and file-extent merge (`e7-compression`,
-  `e6-xclone`); the content stage's validator adds them. The
-  reference-count sweep counts file extents, so a stream whose
+  [Medium] Verification marks the report incomplete for a compressed
+  file with a resource fork only when its inode's parent field is the
+  private directory (`records.c` `attribute_record`); names reconciliation
+  does not tie a file's parent field to its names, so a crafted file named
+  only under the private directory with another parent field is never
+  walked, and every replay-only check (its compression header, inline
+  payload framing, a link's target) is skipped while the report says
+  complete. Decide it in `names_join()`, where an inode meets all its
+  names: a non-directory with no name outside the private directory makes
+  the report incomplete, which replaces the attribute-name flag.
+  The reference-count sweep counts file extents, so a stream whose
   extents name one block twice counts twice where the format design counts
   distinct streams; no capture holds such a stream.
   Record reconciliation (`records.c`) leaves open, from review: an unnamed

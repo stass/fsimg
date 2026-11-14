@@ -74,7 +74,8 @@ const fsimg_format_t fsimg_apfs_format = {
 	.variant_count = sizeof(apfs_variants) / sizeof(apfs_variants[0]),
 	.probe_bytes = APFS_PROBE_BYTES,
 	.probe = apfs_probe,
-	.reader = &fsimg_apfs_reader_ops
+	.reader = &fsimg_apfs_reader_ops,
+	.codecs = apfs_codecs
 };
 
 /*
