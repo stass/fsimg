@@ -521,8 +521,10 @@ rest of the entry in the one pass:
 * **Directory.** A directory child's recorded parent must be the directory
   that holds its record, and its name extended field must equal the
   record's name. These are the driver's cycle and sharing rules, which need
-  no claimed-object set because a cycle would give a directory two parents
-  and a second record would give it a second name.
+  no claimed-object set because a cycle through the root would give a
+  directory two parents and a second record would give it a second name.
+  A cycle the root cannot reach is found by
+  [verification's walk](#verification), which must reach every directory.
 * **Attributes.** Each attribute record's key and value header are
   validated. The three names the driver consumes, each only on the inode it
   serves, are those of the format design's
@@ -742,15 +744,21 @@ of those blocks. For each block
 it checks the format design's rules: metadata claims never overlap any other
 claim; data claims overlap only data claims of other trees of the same
 volume; a block is allocated exactly when claimed; each chunk's free count
-and the device's free count equal the clear bits. The file-extent stream,
-sorted by block, is merged with the live tree's physical-extent records:
-every block of a file extent lies inside one, and each extent, clipped to
-the records it spans, yields a `(record, stream, first block, count)`
-piece. A second sort of the pieces by record sweeps their boundaries and
-checks that every block of each record is mapped by as many distinct
-streams as the record's count, so a record no stream maps fails. Clones
-that share one
-data stream contribute one stream. The pool's claim stream is merged the
+and the device's free count equal the clear bits. The file extents are
+joined with the live tree's physical-extent records in one sweep: each
+record contributes an opening at its first block and a closing at its end,
+both carrying its reference count, and each file extent a start and an
+end, all keyed `(volume, block)` and sorted once, openings and starts
+before ends and closings at one block. The sweep keeps two totals, the
+reference counts of the records open and the file extents started and
+not ended, and wherever the block advances, the span just passed must
+have them equal: a mapped block outside every record has no count, a
+record no stream maps has no extent, and every block of a record is mapped
+as many times as its count. Records of one tree never overlap, so over a
+span the open count is one record's or none. The join costs the sort of twice the
+extents and records together, however many records one extent spans, and
+each boundary the sweep reads is charged to `max_work`. Clones that share
+one data stream contribute one stream. The pool's claim stream is merged the
 same way against the pool's bitmap. The main bitmap's bits past `N` are
 not checked ([verification](design-apfs.md#verification)).
 The check the format design holds
@@ -760,6 +768,19 @@ every other volume's allocated block count, a sealed volume's included, is
 checked against the blocks the format design lists there.
 
 **Walk.** The common walker visits the selected volume once. Every
+directory but the root and the private directory has exactly one parent,
+so the directories the walk reaches from the root form a tree, and a cycle
+of directories the root cannot reach exists exactly when the walk reaches
+fewer directories than the filesystem scan counted, which the superblock's
+count equals; such a shortfall is `FSIMG_ECORRUPT` naming both counts. A
+directory record in the private directory that names a directory
+(provisional, E16) makes the report incomplete instead, and the count is not
+judged in that volume, since the walk from the root cannot reach it. The
+walk descends into omitted directories, so a directory counts whether or
+not it is delivered. A volume verification does not walk has no such
+check: finding a cycle there would take repeated joins of each
+directory's parent chain, about the logarithm of the deepest path in
+sorts. Every
 delivered entry is counted through `fsimg_verify_account()`, the one place
 entries are counted, so the report follows the common
 [definitions](design-verification-helpers.md#initialized-payload-read-through):
@@ -1112,7 +1133,7 @@ from a row, the geometry, the sorted records or one of those values.
 | Probe and open | Block 0, one pass over the descriptor ring, one reread of the selected run, the selected checkpoint's mapped objects (one data run), the container and volume map paths, the volume superblocks, the root inodes; the slot-record array and the paged mapping array |
 | Listing | Per directory: one scan of its records and the common key sort; per entry: one inode lookup and one scan of that inode's attribute records, which follow it. No file payload is read |
 | Content | Per sequential read: one cursor advance per extent; per random offset: one tree descent; per compressed chunk: one decode of at most 64 KiB, and for an inline payload one attribute lookup; per resource-fork file: one framing check at the first read, and one table entry with its neighbours per decoded chunk |
-| Verification | One scan of every tree of every volume; the main and pool claim, file-extent, name-reference, sibling-map, stream-use and collision streams, each sorted once, and the `(record, stream)` pairs; two passes over the chunk structures (claims, then the merge) and one over the bitmaps and pool bitmap; one walk of the selected volume, reading each inode's content once; the array of multiply linked inodes |
+| Verification | One scan of every tree of every volume; the main and pool claim, file-extent, name-reference, sibling-map, stream-use and collision streams and the extent boundaries, each sorted once; two passes over the chunk structures (claims, then the merge) and one over the bitmaps and pool bitmap; one walk of the selected volume, reading each inode's content once; the array of multiply linked inodes |
 | Planning | One catalog pass, two external sorts (collisions and records), one counting run of the packer per tree, a size scan of at most the probe cap's probes, each costing constant work per fixed region, one layout pass |
 | Emission | Payload bytes, one replay of the sorted records, and metadata proportional to entries and container size |
 

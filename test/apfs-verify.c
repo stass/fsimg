@@ -36,7 +36,7 @@ typedef struct fs_record {
 } fs_record_t;
 
 typedef struct fs_tree {
-	fs_record_t records[24];
+	fs_record_t records[260];
 	size_t count;
 } fs_tree_t;
 
@@ -489,7 +489,7 @@ fixture_close(fixture_t *f)
 	free(f->bytes);
 }
 
-static void
+static uint64_t
 verify_fixture(fixture_t *f, unsigned flags, fsimg_status_t wanted,
     const char *message)
 {
@@ -499,6 +499,7 @@ verify_fixture(fixture_t *f, unsigned flags, fsimg_status_t wanted,
 	fsimg_reader_t *reader = NULL;
 	fsimg_io_t *slice = NULL;
 	fsimg_status_t status;
+	uint64_t work = 0;
 
 	fsimg_read_options_init(&options);
 	options.format = "apfs";
@@ -533,8 +534,11 @@ verify_fixture(fixture_t *f, unsigned flags, fsimg_status_t wanted,
 			}
 		}
 	}
+	if (reader != NULL)
+		work = reader->session.progress.work;
 	fsimg_reader_free(reader);
 	fsimg_io_free(slice);
+	return (work);
 }
 
 static void
@@ -1534,6 +1538,226 @@ test_file_extent_outside_physical_records_is_corrupt(void)
 }
 
 static void
+test_directory_in_private_directory_is_incomplete(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	unsigned char *raw;
+
+	scenario = "private directory holds a directory";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	inode_count_set(tree, APFS_INO_PRIVATE, 1);
+	inode_build(tree, 17, APFS_INO_PRIVATE, "subdir", 4, 0, 0);
+	drec_build(tree, APFS_INO_PRIVATE, 17, "subdir", 4,
+	    ascii_hash("subdir"), 0);
+	raw = block_at(&f, VOLUME_BASE);
+	fsimg_store_le64(raw + 192, 1);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	filesystem_build(&f, 0);
+
+	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
+	    "private directory holds a directory");
+	fixture_close(&f);
+}
+
+static void
+test_unreachable_directory_cycle_is_corrupt(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	unsigned char *raw;
+
+	scenario = "unreachable directory cycle";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	inode_build(tree, 17, 18, "A", 4, 1, 0);
+	inode_build(tree, 18, 17, "B", 4, 1, 0);
+	drec_build(tree, 18, 17, "A", 4, ascii_hash("A"), 0);
+	drec_build(tree, 17, 18, "B", 4, ascii_hash("B"), 0);
+	raw = block_at(&f, VOLUME_BASE);
+	fsimg_store_le64(raw + 192, 2);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	filesystem_build(&f, 0);
+
+	verify_fixture(&f, 0, FSIMG_ECORRUPT, "unreachable from the root");
+	fixture_close(&f);
+}
+
+/* The second mapping begins inside [DATA_BLOCK, DATA_BLOCK + 2) and
+ * crosses its end. The optional adjacent record covers its last block.
+ */
+static void
+record_boundary_fixture(fixture_t *f, bool adjacent)
+{
+	unsigned char keys[2][GEN_JKEY_BYTES], values[2][GEN_PEXT_VAL_BYTES];
+	apfs_gen_record_t records[2];
+	apfs_gen_pext_val_t physical = { .length = 2, .owner = 16,
+		.refcnt = 1, .kind = 1 };
+	apfs_gen_extent_val_t first = { .length = BLOCK,
+		.phys_block = DATA_BLOCK };
+	fs_record_t *r;
+	unsigned char *raw;
+
+	fixture_init(f, 1);
+	r = record_find(&f->trees[0], 16, 8);
+	CHECK(apfs_gen_extent_val_build(r->value, r->value_size, &first));
+	file_extent_build(&f->trees[0], BLOCK, DATA_BLOCK + 1, 2 * BLOCK);
+	r = record_find(&f->trees[0], 16, 3);
+	/* The dstream is the final extended field of this inode. */
+	fsimg_store_le64(r->value + r->value_size - GEN_DSTREAM_BYTES, 3 * BLOCK);
+	fsimg_store_le64(r->value + r->value_size - GEN_DSTREAM_BYTES + 8,
+	    3 * BLOCK);
+	filesystem_build(f, 0);
+	for (unsigned i = 0; i < (adjacent ? 2u : 1u); i++) {
+		physical.length = i == 0 ? 2 : 1;
+		CHECK(apfs_gen_jkey_build(keys[i], sizeof(keys[i]),
+		    DATA_BLOCK + 2 * i, 2));
+		CHECK(apfs_gen_pext_val_build(values[i], sizeof(values[i]),
+		    &physical));
+		records[i] = (apfs_gen_record_t){ .key = keys[i],
+		    .key_size = sizeof(keys[i]), .value = values[i],
+		    .value_size = sizeof(values[i]) };
+	}
+	node_build(f, 105, 105, PHYSICAL_TREE, 15, records, adjacent ? 2 : 1,
+	    0, 0);
+	if (adjacent) {
+		bit_set(block_at(f, BITMAP_BLOCK), DATA_BLOCK + 2, true);
+		raw = block_at(f, VOLUME_BASE);
+		fsimg_store_le64(raw + 88, 8);
+		CHECK(apfs_gen_seal(raw, BLOCK));
+		allocation_build(f);
+	}
+	f->expected_logical_bytes = 3 * BLOCK;
+}
+
+static void
+test_file_extent_crossing_record_end_into_gap_is_corrupt(void)
+{
+	fixture_t f;
+
+	scenario = "file extent starts inside a record and ends in a gap";
+	record_boundary_fixture(&f, false);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "file extent outside every physical-extent record");
+	fixture_close(&f);
+}
+
+static void
+test_file_extent_crossing_adjacent_records_is_valid(void)
+{
+	fixture_t f;
+
+	scenario = "file extent starts inside a record and crosses into its neighbor";
+	record_boundary_fixture(&f, true);
+	verify_fixture(&f, 0, FSIMG_OK, "");
+	fixture_close(&f);
+}
+
+/* A separate region leaves the small fixtures' single-node layout intact. */
+static void
+clone_filesystem_build(fixture_t *f, unsigned clones, unsigned blocks)
+{
+	apfs_gen_record_t records[260], physical_records[64];
+	apfs_gen_omap_record_t maps[64];
+	unsigned char keys[64][GEN_JKEY_BYTES], values[64][GEN_PEXT_VAL_BYTES];
+	apfs_gen_fs_tree_t tree = { .records = records, .first_oid = 3000,
+		.base = 400, .xid = 10, .block_size = BLOCK,
+		.records_per_leaf = 16, .children_per_index = 16 };
+	apfs_gen_tree_t map_tree = { .records = maps, .base = 301, .xid = 10,
+		.block_size = BLOCK, .records_per_leaf = 64, .children_per_index = 2 };
+	apfs_gen_omap_t map = { .object = { .oid = 300, .xid = 10,
+		.type = 0x4000000b }, .tree_type = PHYSICAL_TREE, .tree_oid = 301 };
+	apfs_gen_pext_val_t physical = { .length = 1, .owner = 16,
+		.refcnt = clones, .kind = 1 };
+	fs_tree_t *fs = &f->trees[0];
+	fs_record_t *r;
+	unsigned char *raw;
+	uint64_t root, nodes, map_root, map_nodes;
+	char name[16];
+
+	CHECK(clones <= 64 && blocks <= 64);
+	fs->count = 0;
+	drec_build(fs, 1, 2, "root", 4, ascii_hash("root"), 0);
+	drec_build(fs, 1, 3, "private", 4, ascii_hash("private"), 0);
+	inode_build(fs, 2, 1, "root", 4, (int32_t)clones, 0);
+	inode_build(fs, 3, 1, "private", 4, 0, 0);
+	for (unsigned i = 0; i < clones; i++) {
+		uint64_t oid = 16 + i;
+
+		CHECK(snprintf(name, sizeof(name), "clone%02u", i) > 0);
+		inode_build(fs, oid, 2, name, 8, 1, blocks * BLOCK);
+		drec_build(fs, 2, oid, name, 8, ascii_hash(name), 0);
+		stream_id_build(fs, 1);
+		r = &fs->records[fs->count - 1];
+		CHECK(apfs_gen_jkey_build(r->key, r->key_size, oid, 6));
+		file_extent_build(fs, 0, DATA_BLOCK, blocks * BLOCK);
+		r = &fs->records[fs->count - 1];
+		CHECK(apfs_gen_extent_key_build(r->key, r->key_size, oid, 0));
+	}
+	tree.count = fs->count;
+	for (size_t i = 0; i < fs->count; i++)
+		records[i] = (apfs_gen_record_t){ .key = fs->records[i].key,
+		    .key_size = fs->records[i].key_size,
+		    .value = fs->records[i].value,
+		    .value_size = fs->records[i].value_size };
+	qsort(records, fs->count, sizeof(records[0]), fs_record_compare);
+	CHECK(apfs_gen_fs_tree_build(f->bytes, IMAGE_BYTES, &tree, maps,
+	    ARRAY_COUNT(maps), &root, &nodes));
+	map_tree.count = nodes;
+	CHECK(apfs_gen_tree_build(f->bytes, IMAGE_BYTES, &map_tree,
+	    &map_root, &map_nodes));
+	CHECK(map_root == 301 && map_nodes == 1);
+	CHECK(apfs_gen_omap_build(block_at(f, 300), BLOCK, &map));
+	for (unsigned i = 0; i < blocks; i++) {
+		CHECK(apfs_gen_jkey_build(keys[i], sizeof(keys[i]), DATA_BLOCK + i, 2));
+		CHECK(apfs_gen_pext_val_build(values[i], sizeof(values[i]), &physical));
+		physical_records[i] = (apfs_gen_record_t){ .key = keys[i],
+		    .key_size = sizeof(keys[i]), .value = values[i],
+		    .value_size = sizeof(values[i]) };
+		bit_set(block_at(f, BITMAP_BLOCK), DATA_BLOCK + i, true);
+	}
+	node_build(f, 105, 105, PHYSICAL_TREE, 15, physical_records, blocks, 0, 0);
+	/* Retire the original object map and filesystem root allocations. */
+	for (unsigned i = 101; i <= 103; i++)
+		bit_set(block_at(f, BITMAP_BLOCK), i, false);
+	bit_set(block_at(f, BITMAP_BLOCK), 300, true);
+	bit_set(block_at(f, BITMAP_BLOCK), 301, true);
+	for (uint64_t i = 0; i < nodes; i++)
+		bit_set(block_at(f, BITMAP_BLOCK), 400 + i, true);
+	raw = block_at(f, VOLUME_BASE);
+	fsimg_store_le64(raw + 88, nodes + 4 + blocks);
+	fsimg_store_le64(raw + 128, 300);
+	fsimg_store_le64(raw + 136, root);
+	fsimg_store_le64(raw + 184, clones);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	allocation_build(f);
+	f->expected_files = clones;
+	f->expected_logical_bytes = (uint64_t)clones * blocks * BLOCK;
+}
+
+static void
+test_many_clones_of_one_extent_fit_a_linear_work_budget(void)
+{
+	fixture_t f;
+	const uint64_t budget = 100000;
+
+	scenario = "64 clone streams over 64 one-block physical records";
+	fixture_init(&f, 1);
+	clone_filesystem_build(&f, 64, 64);
+	(void)verify_fixture(&f, 0, FSIMG_OK, "");
+	/*
+	 * The join sorts and sweeps 2 * (64 + 64) = 256 boundaries. The
+	 * 100000-unit budget leaves room for the tree scans, reconciliation
+	 * and the walk, but not for a join whose work grows with extents
+	 * times records (64 * 64 pieces and their sort).
+	 */
+	f.ctx->options.max_work = budget;
+	(void)verify_fixture(&f, 0, FSIMG_OK, "");
+	fixture_close(&f);
+}
+
+static void
 test_physical_reference_count_exceeds_streams_is_corrupt(void)
 {
 	fixture_t f;
@@ -1910,6 +2134,11 @@ main(void)
 	test_extent_gap_is_corrupt();
 	test_first_extent_after_zero_is_corrupt();
 	test_file_extent_outside_physical_records_is_corrupt();
+	test_directory_in_private_directory_is_incomplete();
+	test_unreachable_directory_cycle_is_corrupt();
+	test_file_extent_crossing_record_end_into_gap_is_corrupt();
+	test_file_extent_crossing_adjacent_records_is_valid();
+	test_many_clones_of_one_extent_fit_a_linear_work_budget();
 	test_physical_reference_count_exceeds_streams_is_corrupt();
 	test_physical_record_without_file_mapping_is_corrupt();
 	test_tree_footer_counts_differ_from_walk_is_corrupt();

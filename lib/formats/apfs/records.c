@@ -626,6 +626,8 @@ drec_record(scan_t *s, const apfs_record_t *record, fsimg_error_t *error)
 	if (key.parent == APFS_INO_ROOT_PARENT ? val.child != APFS_INO_ROOT &&
 	    val.child != APFS_INO_PRIVATE : val.child < s->inode_min)
 		return (apfs_corrupt(error, ROLE_DREC, "names a reserved inode"));
+	if (key.parent == APFS_INO_PRIVATE && type == APFS_DT_DIRECTORY)
+		s->records->private_directories = true;
 	status = drec_sibling(&val, &sibling, error);
 	if (status == FSIMG_OK)
 		status = fact_add(s->names, &(fact_t){ .name = {
@@ -769,11 +771,11 @@ scan_records(scan_t *s, fsimg_error_t *error)
 
 /*
  * One inode against its names: names directory records carrying a sibling
- * ID. Only the root, the private directory and inodes in the private
- * directory may have none. A directory has one name; a file's link count
- * equals its names, and once it has several names or any sibling link,
- * each name has a sibling link and carries a sibling ID; otherwise none
- * does.
+ * ID. Only the root, the private directory and non-directories in the
+ * private directory may have none. Every other directory has one name; a
+ * file's link count equals its names, and once it has several names or
+ * any sibling link, each name has a sibling link and carries a sibling ID;
+ * otherwise none does.
  */
 static fsimg_status_t
 inode_names_check(const fact_t *inode, uint64_t names, uint64_t tagged,
@@ -783,7 +785,8 @@ inode_names_check(const fact_t *inode, uint64_t names, uint64_t tagged,
 
 	if (names == 0) {
 		if (number == APFS_INO_ROOT || number == APFS_INO_PRIVATE ||
-		    inode->inode.parent == APFS_INO_PRIVATE)
+		    (inode->inode.parent == APFS_INO_PRIVATE &&
+		    inode->type != APFS_DT_DIRECTORY))
 			return (FSIMG_OK);
 		return (apfs_corrupt(error, ROLE_INODE,
 		    "is named by no directory record"));

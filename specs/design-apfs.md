@@ -1483,8 +1483,11 @@ records, the sibling links and the sibling maps agree.
 
 A directory has exactly one name. A directory inode's parent must be the
 directory whose record names it, and the root's parent is 1. This makes a
-directory cycle impossible: the first directory to repeat on a path would
-need two parents. A directory inode also carries the name extended field,
+directory cycle through the root impossible: the first directory to repeat
+on a path from the root would need two parents. A cycle no such path
+enters leaves its directories unreachable, so every directory the
+superblock counts must be reachable from the root.
+A directory inode also carries the name extended field,
 which must equal the name of the record naming it (E3: every native inode,
 directories included, carries it on macOS 26.6.2; whether volumes from
 other releases or converted from HFS Plus do is provisional, E16 and the
@@ -1815,7 +1818,13 @@ and its records reconciled:
   sibling ID, parent and name equal those of the directory record carrying
   that ID, and, in a volume with the hard-link map feature, one sibling map
   per sibling link;
-* every inode other than the root and private directories is named by a
+* every directory other than the root and private directories is
+  reachable from the root, so it is named by a directory record that does
+  not lie in the private directory (provisional, E16: no capture holds a
+  directory in the private directory, so one there makes the report
+  incomplete rather than corrupt, and the walk's reachability count is
+  not judged in that volume; if E16 cannot answer, that stands);
+* every other inode is named by a
   directory record, or lies in the private directory, which is where native
   volumes place unnamed inodes (provisional, E16: E3 holds no unnamed
   inode; if E16 cannot answer, the rule stands);

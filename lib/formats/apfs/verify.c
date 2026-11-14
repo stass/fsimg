@@ -3,6 +3,7 @@
  */
 #include "config.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -39,11 +40,12 @@
  * and judged, and damage found outranks the incomplete report.
  *
  * Each volume's filesystem records are reconciled by records.c, which
- * appends every mapped file extent to a stream of its own. The merge clips
- * those extents, sorted by block, to the live physical-extent records, and
- * sweeps the boundaries of the pieces of each record: every block of a
- * record must be mapped as many times as its reference count. The common
- * walk then visits the selected volume.
+ * appends every mapped file extent to a stream of its own. The merge sorts
+ * the boundaries of those extents and of the live physical-extent records
+ * together and sweeps them once: every mapped block lies in a record, and
+ * every block of a record is mapped as many times as its reference count.
+ * The common walk then visits the selected volume and must reach every
+ * directory the filesystem scan counted.
  */
 #define ROLE_VERIFY		"verification"
 #define ROLE_EXTENTREF		"extent-reference tree"
@@ -160,18 +162,23 @@ typedef struct verify {
 	unsigned char	*window;
 	domain_t	 main;
 	domain_t	 pool;
-	/* Every volume's live physical-extent records, LIVE_BYTES each in
-	 * volume and block order; the mapped file extents records.c finds;
-	 * the selected volume's inodes of several names.
+	/* The boundaries of every volume's live physical-extent records and,
+	 * once the merge adds them, of the mapped file extents records.c
+	 * finds; those file extents; the selected volume's inodes of several
+	 * names.
 	 */
-	fsimg_stream_t	*live_extents;
+	fsimg_stream_t	*extent_events;
 	fsimg_stream_t	*file_extents;
 	fsimg_stream_t	*shared;
 	/* The verification flags, and whether the selected volume holds a
-	 * compressed file whose chunk tables are not read.
+	 * compressed file whose chunk tables are not read, or a directory in
+	 * the private directory, which the walk from the root does not reach.
 	 */
 	unsigned	 flags;
 	bool		 chunk_tables;
+	bool		 private_directories;
+	/* The selected volume's records were reconciled without a refusal. */
+	bool		 reconciled;
 	/* The first reason the report is incomplete; status FSIMG_OK while
 	 * there is none.
 	 */
@@ -185,38 +192,28 @@ typedef struct verify {
 	uint32_t	 uuid_count;
 } verify_t;
 
-/* A live physical-extent record, for the file-extent join. */
-typedef struct live_extent {
-	uint64_t	first;
-	uint64_t	count;
-	uint32_t	volume;
-	uint32_t	refcnt;
-} live_extent_t;
-
-#define LIVE_BYTES	24u
-
 /*
- * A boundary of the extent sweep, keyed by its volume and the first block
- * of its physical-extent record: the record opens at its first block with
- * its reference count and closes at its end, and each piece of a file
- * extent inside it enters at its first block and leaves at its end.
+ * A boundary of the extent sweep at a block of a volume: a live
+ * physical-extent record opens at its first block and closes at its end,
+ * both carrying its reference count, and a file extent starts at its first
+ * block and ends at its end. The kinds are numbered so that, at one block,
+ * every opening and start sorts before every end and closing.
  */
 typedef enum {
 	EVENT_OPEN,
-	EVENT_ENTER,
-	EVENT_LEAVE,
+	EVENT_START,
+	EVENT_END,
 	EVENT_CLOSE
 } event_kind_t;
 
 typedef struct event {
-	uint64_t	record;
 	uint64_t	position;
 	uint32_t	volume;
 	uint32_t	refcnt;
 	uint8_t		kind;
 } event_t;
 
-#define EVENT_BYTES	25u
+#define EVENT_BYTES	17u
 /* An inode of several names, then its mark once the walk has read it. */
 #define SHARED_BYTES	9u
 #define PAYLOAD_BYTES	65536u
@@ -283,25 +280,18 @@ static fsimg_status_t	volume_map_claims(verify_t *, fsimg_error_t *);
 static fsimg_status_t	snapshot_claims(verify_t *, fsimg_error_t *);
 static fsimg_status_t	live_extent_claims(verify_t *, fsimg_error_t *);
 static fsimg_status_t	volume_records(verify_t *, fsimg_error_t *);
-static fsimg_status_t	live_add(verify_t *, const live_extent_t *,
-			    fsimg_error_t *);
-static fsimg_status_t	live_next(fsimg_stream_t *, uint64_t *,
-			    live_extent_t *, bool *, fsimg_error_t *);
-static int		fext_compare(const void *, size_t, const void *,
-			    size_t, void *);
 static int		event_compare(const void *, size_t, const void *,
 			    size_t, void *);
 static fsimg_status_t	event_add(fsimg_stream_t *, const event_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	event_next(fsimg_stream_t *, uint64_t *, event_t *,
 			    bool *, fsimg_error_t *);
-static fsimg_status_t	piece_add(fsimg_stream_t *, const live_extent_t *,
-			    uint64_t, uint64_t, fsimg_error_t *);
-static fsimg_status_t	extents_clip(verify_t *, fsimg_stream_t *,
+static fsimg_status_t	span_add(fsimg_stream_t *, uint32_t, uint64_t,
+			    uint64_t, uint32_t, event_kind_t, event_kind_t,
 			    fsimg_error_t *);
-static fsimg_status_t	records_bound(verify_t *, fsimg_stream_t *,
+static fsimg_status_t	extents_bound(verify_t *, fsimg_error_t *);
+static fsimg_status_t	events_sweep(verify_t *, fsimg_stream_t *,
 			    fsimg_error_t *);
-static fsimg_status_t	events_sweep(fsimg_stream_t *, fsimg_error_t *);
 static fsimg_status_t	extents_merge(verify_t *, fsimg_error_t *);
 static fsimg_status_t	shared_load(verify_t *, fsimg_array_t **,
 			    uint64_t *, fsimg_error_t *);
@@ -700,9 +690,9 @@ extent_record(verify_t *v, const apfs_record_t *record, void *arg,
 	    .source = SOURCE_EXTENT };
 	status = claim_add(v, &v->main, &claim, error);
 	if (status == FSIMG_OK && walk->live)
-		status = live_add(v, &(live_extent_t){ .first = key.oid,
-		    .count = value.length, .volume = walk->volume,
-		    .refcnt = (uint32_t)value.refcnt }, error);
+		status = span_add(v->extent_events, walk->volume, key.oid,
+		    value.length, (uint32_t)value.refcnt, EVENT_OPEN,
+		    EVENT_CLOSE, error);
 	if (status == FSIMG_OK)
 		walk->end = key.oid + value.length;
 	return (status);
@@ -868,6 +858,10 @@ volume_records(verify_t *v, fsimg_error_t *error)
 	    v->window, &records, error);
 	if (selected && records.chunk_tables)
 		v->chunk_tables = true;
+	if (selected && records.private_directories)
+		v->private_directories = true;
+	if (selected && status == FSIMG_OK)
+		v->reconciled = true;
 	return (status);
 }
 
@@ -1422,68 +1416,7 @@ pool_merge(verify_t *v, apfs_sm_pager_t *pager, fsimg_error_t *error)
 	return (status);
 }
 
-static fsimg_status_t
-live_add(verify_t *v, const live_extent_t *live, fsimg_error_t *error)
-{
-	unsigned char raw[LIVE_BYTES];
-
-	fsimg_store_le64(raw, live->first);
-	fsimg_store_le64(raw + 8, live->count);
-	fsimg_store_le32(raw + 16, live->volume);
-	fsimg_store_le32(raw + 20, live->refcnt);
-	return (fsimg_stream_append(v->live_extents, raw, sizeof(raw), NULL,
-	    error));
-}
-
-/* Read the live record at offset, or report through read the end. */
-static fsimg_status_t
-live_next(fsimg_stream_t *stream, uint64_t *offset, live_extent_t *live,
-    bool *read, fsimg_error_t *error)
-{
-	unsigned char raw[LIVE_BYTES];
-	size_t length;
-	fsimg_status_t status;
-
-	*read = false;
-	status = fsimg_stream_next(stream, offset, raw, sizeof(raw), &length,
-	    error);
-	if (status == FSIMG_DONE)
-		return (FSIMG_OK);
-	if (status != FSIMG_OK)
-		return (status);
-	if (length != LIVE_BYTES)
-		return (apfs_corrupt(error, ROLE_VERIFY,
-		    "finds a scratch record of the wrong size"));
-	live->first = fsimg_load_le64(raw);
-	live->count = fsimg_load_le64(raw + 8);
-	live->volume = fsimg_load_le32(raw + 16);
-	live->refcnt = fsimg_load_le32(raw + 20);
-	*read = true;
-	return (FSIMG_OK);
-}
-
-/* File extents sort by volume, first block, count, then stream. */
-static int
-fext_compare(const void *a, size_t alen, const void *b, size_t blen,
-    void *argument)
-{
-	apfs_fext_claim_t x, y;
-
-	(void)alen;
-	(void)blen;
-	(void)argument;
-	apfs_fext_claim_decode(a, &x);
-	apfs_fext_claim_decode(b, &y);
-	if (x.volume != y.volume)
-		return (x.volume < y.volume ? -1 : 1);
-	if (x.first != y.first)
-		return (x.first < y.first ? -1 : 1);
-	if (x.count != y.count)
-		return (x.count < y.count ? -1 : 1);
-	return (x.stream < y.stream ? -1 : x.stream > y.stream);
-}
-
-/* Events sort by volume, record, position, then kind. */
+/* Events sort by volume, position, kind, then reference count. */
 static int
 event_compare(const void *a, size_t alen, const void *b, size_t blen,
     void *argument)
@@ -1494,17 +1427,19 @@ event_compare(const void *a, size_t alen, const void *b, size_t blen,
 	(void)alen;
 	(void)blen;
 	(void)argument;
-	u = fsimg_load_le32(x + 16);
-	w = fsimg_load_le32(y + 16);
+	u = fsimg_load_le32(x + 8);
+	w = fsimg_load_le32(y + 8);
 	if (u != w)
 		return (u < w ? -1 : 1);
-	for (size_t at = 0; at < 16; at += 8) {
-		u = fsimg_load_le64(x + at);
-		w = fsimg_load_le64(y + at);
-		if (u != w)
-			return (u < w ? -1 : 1);
-	}
-	return (x[24] < y[24] ? -1 : x[24] > y[24]);
+	u = fsimg_load_le64(x);
+	w = fsimg_load_le64(y);
+	if (u != w)
+		return (u < w ? -1 : 1);
+	if (x[16] != y[16])
+		return (x[16] < y[16] ? -1 : 1);
+	u = fsimg_load_le32(x + 12);
+	w = fsimg_load_le32(y + 12);
+	return (u < w ? -1 : u > w);
 }
 
 static fsimg_status_t
@@ -1512,11 +1447,10 @@ event_add(fsimg_stream_t *events, const event_t *event, fsimg_error_t *error)
 {
 	unsigned char raw[EVENT_BYTES];
 
-	fsimg_store_le64(raw, event->record);
-	fsimg_store_le64(raw + 8, event->position);
-	fsimg_store_le32(raw + 16, event->volume);
-	fsimg_store_le32(raw + 20, event->refcnt);
-	raw[24] = event->kind;
+	fsimg_store_le64(raw, event->position);
+	fsimg_store_le32(raw + 8, event->volume);
+	fsimg_store_le32(raw + 12, event->refcnt);
+	raw[16] = event->kind;
 	return (fsimg_stream_append(events, raw, sizeof(raw), NULL, error));
 }
 
@@ -1535,217 +1469,156 @@ event_next(fsimg_stream_t *events, uint64_t *offset, event_t *event,
 		return (FSIMG_OK);
 	if (status != FSIMG_OK)
 		return (status);
-	if (length != EVENT_BYTES)
+	if (length != EVENT_BYTES || raw[16] > EVENT_CLOSE)
 		return (apfs_corrupt(error, ROLE_VERIFY,
-		    "finds a scratch record of the wrong size"));
-	event->record = fsimg_load_le64(raw);
-	event->position = fsimg_load_le64(raw + 8);
-	event->volume = fsimg_load_le32(raw + 16);
-	event->refcnt = fsimg_load_le32(raw + 20);
-	event->kind = raw[24];
+		    "finds a malformed scratch record"));
+	event->position = fsimg_load_le64(raw);
+	event->volume = fsimg_load_le32(raw + 8);
+	event->refcnt = fsimg_load_le32(raw + 12);
+	event->kind = raw[16];
 	*read = true;
 	return (FSIMG_OK);
 }
 
-/* The piece [first, end) of a file extent inside record. */
+/*
+ * The two boundaries of the span [first, first + count) of volume: opening
+ * at its first block and closing at its end, each with refcnt. Both callers
+ * bound their spans to the container; the check keeps the end exact even
+ * so.
+ */
 static fsimg_status_t
-piece_add(fsimg_stream_t *events, const live_extent_t *record, uint64_t first,
-    uint64_t end, fsimg_error_t *error)
+span_add(fsimg_stream_t *events, uint32_t volume, uint64_t first,
+    uint64_t count, uint32_t refcnt, event_kind_t opening,
+    event_kind_t closing, fsimg_error_t *error)
 {
 	fsimg_status_t status;
 
-	status = event_add(events, &(event_t){ .record = record->first,
-	    .position = first, .volume = record->volume,
-	    .kind = EVENT_ENTER }, error);
+	if (count > UINT64_MAX - first)
+		return (apfs_corrupt(error, ROLE_VERIFY,
+		    "finds an extent past the last block number"));
+	status = event_add(events, &(event_t){ .position = first,
+	    .volume = volume, .refcnt = refcnt, .kind = opening }, error);
 	if (status == FSIMG_OK)
-		status = event_add(events, &(event_t){ .record = record->first,
-		    .position = end, .volume = record->volume,
-		    .kind = EVENT_LEAVE }, error);
+		status = event_add(events, &(event_t){ .position = first + count,
+		    .volume = volume, .refcnt = refcnt, .kind = closing },
+		    error);
 	return (status);
 }
 
-/*
- * Clip each file extent, in block order, to the live physical-extent
- * records it spans: its first block lies in one, and it runs on only into
- * the record of its volume that begins where that one ends. Extents sorted
- * by first block never need a record before the current one, so the
- * current record only advances; a record an extent runs into is read
- * ahead from it. Each piece adds its two boundaries to events.
- */
+/* Each mapped file extent starts and ends beside the live records. */
 static fsimg_status_t
-extents_clip(verify_t *v, fsimg_stream_t *events, fsimg_error_t *error)
+extents_bound(verify_t *v, fsimg_error_t *error)
 {
 	unsigned char raw[APFS_FEXT_CLAIM_BYTES];
-	fsimg_stream_t *extents = NULL;
 	apfs_fext_claim_t extent;
-	live_extent_t live, record;
-	uint64_t extents_at = 0, live_at = 0, ahead_at, at, end, piece_end;
+	uint64_t at = 0;
 	size_t length;
-	bool have_live, read;
 	fsimg_status_t status;
 
 	status = fsimg_stream_seal(v->file_extents, error);
-	if (status == FSIMG_OK)
-		status = fsimg_stream_sort(v->file_extents, fext_compare, NULL,
-		    NULL, &extents, error);
-	if (status == FSIMG_OK)
-		status = live_next(v->live_extents, &live_at, &live,
-		    &have_live, error);
 	while (status == FSIMG_OK) {
-		status = fsimg_stream_next(extents, &extents_at, raw,
+		status = fsimg_stream_next(v->file_extents, &at, raw,
 		    sizeof(raw), &length, error);
-		if (status == FSIMG_DONE) {
-			status = FSIMG_OK;
-			break;
-		}
+		if (status == FSIMG_DONE)
+			return (FSIMG_OK);
 		if (status != FSIMG_OK)
 			break;
-		if (length != APFS_FEXT_CLAIM_BYTES) {
-			status = apfs_corrupt(error, ROLE_VERIFY,
-			    "finds a scratch record of the wrong size");
-			break;
-		}
+		if (length != APFS_FEXT_CLAIM_BYTES)
+			return (apfs_corrupt(error, ROLE_VERIFY,
+			    "finds a malformed scratch record"));
 		apfs_fext_claim_decode(raw, &extent);
-		/* Both lie inside the container, so no end overflows. */
-		while (status == FSIMG_OK && have_live &&
-		    (live.volume < extent.volume ||
-		    (live.volume == extent.volume &&
-		    live.first + live.count <= extent.first)))
-			status = live_next(v->live_extents, &live_at, &live,
-			    &have_live, error);
-		if (status != FSIMG_OK)
-			break;
-		if (!have_live || live.volume != extent.volume ||
-		    live.first > extent.first) {
-			status = apfs_corrupt(error, ROLE_VERIFY, "finds a file "
-			    "extent outside every physical-extent record");
-			break;
-		}
-		record = live;
-		ahead_at = live_at;
-		at = extent.first;
-		end = extent.first + extent.count;
-		for (;;) {
-			piece_end = record.first + record.count < end ?
-			    record.first + record.count : end;
-			status = piece_add(events, &record, at, piece_end,
-			    error);
-			if (status != FSIMG_OK || piece_end == end)
-				break;
-			status = live_next(v->live_extents, &ahead_at, &record,
-			    &read, error);
-			if (status != FSIMG_OK)
-				break;
-			if (!read || record.volume != extent.volume ||
-			    record.first != piece_end) {
-				status = apfs_corrupt(error, ROLE_VERIFY,
-				    "finds a file extent running past its "
-				    "physical-extent records");
-				break;
-			}
-			at = piece_end;
-		}
+		status = span_add(v->extent_events, extent.volume,
+		    extent.first, extent.count, 0, EVENT_START, EVENT_END,
+		    error);
 	}
-	fsimg_stream_free(extents);
 	return (status);
 }
 
-/* Each live record opens and closes its own boundaries. */
-static fsimg_status_t
-records_bound(verify_t *v, fsimg_stream_t *events, fsimg_error_t *error)
-{
-	live_extent_t live;
-	uint64_t at = 0;
-	bool read;
-	fsimg_status_t status;
-
-	for (;;) {
-		status = live_next(v->live_extents, &at, &live, &read, error);
-		if (status != FSIMG_OK || !read)
-			return (status);
-		status = event_add(events, &(event_t){ .record = live.first,
-		    .position = live.first, .volume = live.volume,
-		    .refcnt = live.refcnt, .kind = EVENT_OPEN }, error);
-		if (status == FSIMG_OK)
-			status = event_add(events, &(event_t){
-			    .record = live.first,
-			    .position = live.first + live.count,
-			    .volume = live.volume, .kind = EVENT_CLOSE },
-			    error);
-		if (status != FSIMG_OK)
-			return (status);
-	}
-}
-
 /*
- * Sweep the sorted boundaries record by record. A record's opening sorts
- * first among its boundaries and its closing last, and every piece lies
- * between them, so the spans between successive positions cover the
- * record exactly; over each, the pieces entered and not yet left must
- * number the record's reference count. A block no stream maps has none.
+ * Sweep the sorted boundaries. Between two successive boundaries of a
+ * volume every block is alike: it lies in the live records opened and not
+ * yet closed, whose reference counts add to required, and is mapped by
+ * the file extents started and not yet ended, active of them. Every
+ * file-extent block lies in a live record, and every block of a record is
+ * mapped as many times as its reference count, exactly when active equals
+ * required over every such span: a mapped block outside every record has
+ * required zero, and a record no stream maps has active zero. Every
+ * boundary has its partner, so both totals are zero again past a volume's
+ * last boundary, and since openings and starts sort before ends and
+ * closings at one block, neither total ever falls below zero. Records of
+ * one tree never overlap, so between blocks required is at most one
+ * record's count, and while one block's boundaries are applied at most two.
+ * A mapped block outside every record is reported first, wherever it
+ * lies, as the more specific finding than a count that differs.
  */
 static fsimg_status_t
-events_sweep(fsimg_stream_t *events, fsimg_error_t *error)
+events_sweep(verify_t *v, fsimg_stream_t *events, fsimg_error_t *error)
 {
-	event_t event, record;
-	uint64_t at = 0, position = 0, active = 0;
-	bool read, have_record = false;
+	event_t event, previous = { 0 };
+	uint64_t at = 0, active = 0, required = 0;
+	bool read, miscounted = false;
 	fsimg_status_t status;
 
 	for (;;) {
 		status = event_next(events, &at, &event, &read, error);
-		if (status != FSIMG_OK || !read)
+		if (status != FSIMG_OK)
 			return (status);
-		if (!have_record || event.volume != record.volume ||
-		    event.record != record.record) {
-			if (event.kind != EVENT_OPEN)
-				return (apfs_corrupt(error, ROLE_VERIFY,
-				    "finds a file-extent piece outside its "
+		if (!read)
+			break;
+		status = fsimg_session_charge(&v->reader->session, 0, 0, 1,
+		    error);
+		if (status != FSIMG_OK)
+			return (status);
+		if ((event.volume != previous.volume ||
+		    event.position != previous.position) && active != required) {
+			if (required == 0)
+				return (apfs_corrupt(error, ROLE_VERIFY, "finds a "
+				    "file extent outside every physical-extent "
 				    "record"));
-			record = event;
-			have_record = true;
-			position = event.position;
-			active = 0;
-		} else if (event.position != position) {
-			if (active != record.refcnt)
-				return (apfs_corrupt(error, ROLE_EXTENTREF,
-				    "reference count differs from the streams "
-				    "mapping its blocks"));
-			position = event.position;
+			miscounted = true;
 		}
-		if (event.kind == EVENT_ENTER)
+		switch (event.kind) {
+		case EVENT_OPEN:
+			required += event.refcnt;
+			break;
+		case EVENT_START:
 			active++;
-		else if (event.kind == EVENT_LEAVE)
+			break;
+		case EVENT_END:
 			active--;
+			break;
+		default:
+			required -= event.refcnt;
+			break;
+		}
+		previous = event;
 	}
+	if (miscounted)
+		return (apfs_corrupt(error, ROLE_EXTENTREF, "reference count "
+		    "differs from the streams mapping its blocks"));
+	return (FSIMG_OK);
 }
 
 /*
  * The file extents of every volume against the live physical-extent
- * records: clipped to them, then swept for the reference counts.
+ * records: the boundaries of both, sorted once and swept, so the join
+ * costs the sort of twice their number however many records each file
+ * extent spans.
  */
 static fsimg_status_t
 extents_merge(verify_t *v, fsimg_error_t *error)
 {
-	fsimg_stream_t *events = NULL, *sorted = NULL;
+	fsimg_stream_t *sorted = NULL;
 	fsimg_status_t status;
 
-	status = fsimg_stream_seal(v->live_extents, error);
+	status = extents_bound(v, error);
 	if (status == FSIMG_OK)
-		status = fsimg_stream_new(&v->reader->session, EVENT_BYTES,
-		    &events, error);
+		status = fsimg_stream_seal(v->extent_events, error);
 	if (status == FSIMG_OK)
-		status = extents_clip(v, events, error);
+		status = fsimg_stream_sort(v->extent_events, event_compare,
+		    NULL, NULL, &sorted, error);
 	if (status == FSIMG_OK)
-		status = records_bound(v, events, error);
-	if (status == FSIMG_OK)
-		status = fsimg_stream_seal(events, error);
-	if (status == FSIMG_OK)
-		status = fsimg_stream_sort(events, event_compare, NULL, NULL,
-		    &sorted, error);
-	fsimg_stream_free(events);
-	if (status == FSIMG_OK)
-		status = events_sweep(sorted, error);
+		status = events_sweep(v, sorted, error);
 	fsimg_stream_free(sorted);
 	return (status);
 }
@@ -1831,6 +1704,15 @@ shared_first(fsimg_array_t *array, uint64_t count, uint64_t inode,
  * through fsimg_verify_account(), the root among the directories, and with
  * payload read-through each file and symbolic link is read, an inode of
  * several names once, at the first name the walk reaches.
+ *
+ * Reconciliation gave every directory but the root and the private
+ * directory exactly one parent, so the directories the walk reaches from
+ * the root form a tree, and a cycle of directories, which the root can
+ * never reach, exists exactly when the walk reaches fewer directories than
+ * the scan counted. The superblock's count equals the scan's, which
+ * excludes the root and the private directory as the walk does; the walk
+ * descends into omitted directories too, so every reached directory is
+ * counted whether or not it is delivered.
  */
 static fsimg_status_t
 namespace_walk(verify_t *v, unsigned flags, fsimg_verify_report_t *report,
@@ -1840,7 +1722,8 @@ namespace_walk(verify_t *v, unsigned flags, fsimg_verify_report_t *report,
 	fsimg_array_t *shared = NULL;
 	unsigned char *payload = NULL;
 	fsimg_error_t detail;
-	uint64_t count;
+	char message[96];
+	uint64_t count, reached = 0;
 	bool first;
 	fsimg_status_t status;
 
@@ -1860,8 +1743,11 @@ namespace_walk(verify_t *v, unsigned flags, fsimg_verify_report_t *report,
 			status = FSIMG_OK;
 			break;
 		}
-		if (status == FSIMG_OK)
-			status = fsimg_verify_account(reader, report, error);
+		if (status != FSIMG_OK)
+			break;
+		if (reader->entry.kind == FSIMG_ENTRY_DIRECTORY)
+			reached++;
+		status = fsimg_verify_account(reader, report, error);
 		if (status != FSIMG_OK || payload == NULL ||
 		    !fsimg_walk_delivered(reader) ||
 		    (reader->entry.kind != FSIMG_ENTRY_FILE &&
@@ -1874,6 +1760,13 @@ namespace_walk(verify_t *v, unsigned flags, fsimg_verify_report_t *report,
 		if (status == FSIMG_OK && first)
 			status = fsimg_verify_payload(reader, payload,
 			    PAYLOAD_BYTES, report, error);
+	}
+	if (status == FSIMG_OK && v->reconciled && !v->private_directories &&
+	    reached != v->apfs->fs.directories) {
+		(void)snprintf(message, sizeof(message), "holds directories "
+		    "unreachable from the root: %" PRIu64 " of %" PRIu64
+		    " reached", reached, v->apfs->fs.directories);
+		status = apfs_corrupt(error, ROLE_VOLUME, message);
 	}
 	fsimg_dealloc(payload);
 	fsimg_array_free(shared);
@@ -1933,8 +1826,8 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 		status = fsimg_stream_new(&reader->session, CLAIM_BYTES,
 		    &v->pool.claims, error);
 	if (status == FSIMG_OK)
-		status = fsimg_stream_new(&reader->session, LIVE_BYTES,
-		    &v->live_extents, error);
+		status = fsimg_stream_new(&reader->session, EVENT_BYTES,
+		    &v->extent_events, error);
 	if (status == FSIMG_OK)
 		status = fsimg_stream_new(&reader->session,
 		    APFS_FEXT_CLAIM_BYTES, &v->file_extents, error);
@@ -1952,6 +1845,9 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 	if (status == FSIMG_OK && v->chunk_tables)
 		incomplete_reason(v, "compressed file", "keeps its content in "
 		    "chunks whose tables verification does not read");
+	if (status == FSIMG_OK && v->private_directories)
+		incomplete_reason(v, "private directory", "holds a directory, "
+		    "which a walk from the root does not reach");
 	if (status == FSIMG_OK)
 		status = namespace_walk(v, flags, report, error);
 	if (status == FSIMG_OK)
@@ -1968,7 +1864,7 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 	}
 	fsimg_stream_free(v->shared);
 	fsimg_stream_free(v->file_extents);
-	fsimg_stream_free(v->live_extents);
+	fsimg_stream_free(v->extent_events);
 	fsimg_stream_free(v->pool.claims);
 	fsimg_stream_free(v->main.claims);
 	fsimg_dealloc(v->window);

@@ -1743,7 +1743,9 @@ fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,
  * NULL, each non-directory inode of several names appends its number, an
  * 8-byte little-endian record, in ascending order. A compressed file whose
  * content lies in a resource fork sets records->chunk_tables, since
- * verification does not read chunk tables. The scan's streams live in the
+ * verification does not read chunk tables, and a directory record in the
+ * private directory naming a directory sets records->private_directories,
+ * since a walk from the root does not reach it. The scan's streams live in the
  * session's metadata scratch and are freed before it returns.
  */
 #define APFS_FEXT_CLAIM_BYTES		28u
@@ -1759,6 +1761,7 @@ typedef struct apfs_records {
 	fsimg_stream_t	*extents;
 	fsimg_stream_t	*shared;	/* optional */
 	bool		 chunk_tables;
+	bool		 private_directories;
 } apfs_records_t;
 
 void		apfs_fext_claim_encode(unsigned char *,
