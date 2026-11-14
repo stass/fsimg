@@ -877,7 +877,9 @@ Object-map flags follow a closed table:
 The container map's flags are `0x1` alone in every E1 capture, and the
 volume map's are zero, the crypto-generation flag clear. That flag
 changes no lookup, so it is accepted and ignored. The snapshot count and the most recent snapshot XID must
-agree with the volume's snapshot tree, and the container map has no
+agree with the volume's snapshot metadata tree, the map's snapshot tree
+holds a record for exactly the metadata records' XIDs (E9), and the
+container map has no
 snapshots. A nonzero pending revert range is unsupported. The flags the
 writer emits are a [writer value](#writer-values).
 
@@ -1000,8 +1002,18 @@ a bytewise comparison of the names with their terminating NULs (E4: the 34
 and 29 equal-hash pairs of captures `apfs-newfs-268435456-e4-names-ci` and
 `-cs`, and `apfs-newfs-33554432-e4-prefix-ci` and `-cs`). Attribute names
 of different lengths compare the same way, as their bytes with the
-terminating NUL, so a proper prefix sorts first (E5, `e5-xattr`). How
-snapshot names of different lengths compare is provisional (E9). No
+terminating NUL, so a proper prefix sorts first (E5, `e5-xattr`). Snapshot
+names compare the same way: `Snapshot 1` sorts before `Snapshot 10`, and
+`Snapshot 109` before `Snapshot 11` (E9: the 512 name records of the
+corpus specimen `dissect-apfs-snapshot`). Whether a case-insensitive or
+normalization-insensitive volume folds snapshot names before comparing
+them is provisional (E9, the owner-run capture `e9-snap`): the specimen is
+case-insensitive but its names have no case or normalization pairs, so
+both rules give its order. `e9-snap` tests case folding and its
+case-sensitive companion `e9-snap-cs` normalization folding. Until they
+run, snapshot names compare as bytes in every volume. If names do fold, an
+image whose names sort differently folded fails its ordering check, or
+`snapshot=` misses a name with `FSIMG_EINVAL`; no name is misread. No
 experiment can show how plain directory-record names compare, since no
 native tool formats a plain-key volume (E2), so their tie-break is
 permanently undecided and takes the lenient check below. The reader's
@@ -1547,14 +1559,26 @@ key is the 64-bit word whose low 60 bits are the extent's first block and
 whose kind is 2; its value is a u64 whose low 60 bits are the extent's
 length in blocks and whose high 4 bits are its kind (`1` new or `2` update
 on disk; any other is corrupt), the owning object's ID (u64), and a signed
-32-bit reference count. In the live tree the count is positive and kinds
-are new; how a snapshot's tree records update kinds and counts is
-provisional (E9). A live record's count is the number of distinct streams,
-file and attribute streams alike, that map each of its blocks, so clones
-sharing one data stream count once. Records split where clone branches
+32-bit reference count. In a volume without snapshots every record has
+kind new and a positive count, the number of distinct streams, file and
+attribute streams alike, that map each of its blocks. With snapshots, each
+snapshot's tree holds the records of the interval that ends at that
+snapshot, the live tree those made since the newest snapshot, and a
+block's count is summed over the trees as [verification](#verification)
+states. In `dissect-apfs-snapshot`, whose intervals add files and rewrite
+one block, a block of file data allocated in an interval has a record of
+kind new, owner the inode and count 1. A block that an older tree records
+as new and that the live volume released in the interval has a record of
+kind update, owner `0xFFFFFFFFFFFFFFFF` ([A1]'s invalid owner) and count
+-1 (E9: 1535 new and 511 update records over its 512 snapshot trees, 4 and
+1 in its live tree). The records that multi-block extents, clones and
+stream-backed attributes make in a volume with snapshots are provisional
+(E9, the owner-run capture `e9-snap`); verification checks only the summed
+count, so a different record shape changes no check. Clones sharing one
+data stream count once. Records split where clone branches
 diverge, so every block of a record has the same count, one file extent may
 span several adjacent records, and one record may back several file
-extents. The record's owner field names the object whose write allocated
+extents. A new record's owner field names the object whose write allocated
 the blocks: the inode number for file data, which differs from the private
 ID once a clone branch has a stream of its own, the inode number for a
 compressed file's resource fork, and the stream ID for a user attribute.
@@ -1698,7 +1722,15 @@ unaffected, since every APFS field is decoded from bytes.
 The snapshot metadata tree (physical) holds, per snapshot, a metadata record
 keyed by its XID (the snapshot's extent-reference tree OID and type, volume
 superblock OID, creation and change times, an inode number, flags and its
-name) and a name record mapping the name to the XID. The read setting
+name) and a name record mapping the name to the XID. A name record's key
+has all 60 OID bits set ([A1] gives the OID as all ones) and a name length
+that counts the terminating NUL; a metadata record's value is 50 bytes and
+its name, the same name with its NUL (E9: 512 records of each in
+`dissect-apfs-snapshot`, every name record naming the XID of the metadata
+record with its name). The volume object map's snapshot tree (physical,
+fixed 8-byte keys and 16-byte values) holds one record per snapshot, keyed
+by the same XIDs, whose value is a u32 of flags, 4 bytes of padding and a
+u64 OID, all zero in each of the specimen's 512 records. The read setting
 `snapshot=NAME` selects a snapshot of the selected volume by its exact name
 bytes, valid UTF-8 of 1 to 255 bytes; any other setting value is
 `FSIMG_EINVAL`. Only names of the selected volume match; a missing name is
@@ -1707,17 +1739,42 @@ bytes, valid UTF-8 of 1 to 255 bytes; any other setting value is
 A snapshot view searches the volume's live object map, which retains the
 mappings snapshots need, with the snapshot's XID as the lookup XID, and
 reads the snapshot's volume superblock from the address its metadata record
-gives. Each object is checked against the XID of the structure that reaches
-it: a physical object of the current checkpoint, such as the object map
-itself, against the checkpoint's XID; a virtual object against its lookup
-XID. Which object map the snapshot superblock names, and that copy's header
-OID and storage class, are provisional (E9) and settled before the profile
-is enabled; the reader otherwise reads exactly as for the live volume. A
-snapshot of a dataless-snapshot volume is unsupported. Snapshot flags and
-extended metadata are accepted from a closed table that is provisional
-(E9). If E9 has no specimen, because no native tool or owner image
-provides a snapshot, the snapshot profile is not enabled and `snapshot=`
-fails with `FSIMG_EUNSUPPORTED`. The writer emits an empty snapshot tree.
+gives. That copy is a physical volume superblock, object type
+`0x4000000d`, whose header OID is its address and whose header XID is the
+snapshot's. Its object-map, extent-reference-tree and snapshot-tree OIDs
+are zero, so the live volume object map is the only one, and its root tree
+OID is the live volume's, resolved at the snapshot's XID (E9: all 512
+copies in `dissect-apfs-snapshot`, checksums valid). The copy describes the
+volume as it stood when the snapshot was taken: its object counts are the
+snapshot's, but its snapshot count leaves the snapshot itself out (the
+specimen's copy at index k counts k snapshots, and the first has no
+extended-metadata OID). The copy therefore has rules of its own. Its
+object-map, extent-reference-tree and snapshot-tree OIDs must be zero, and
+its incompatible features must equal the live superblock's, as in all 512
+specimen copies; anything else is `FSIMG_EUNSUPPORTED`. Its root tree OID is
+the one resolved. Its object counts are the snapshot's (E9: the regular
+files of snapshots 0, 1, 255 and 511 match their copies), but verification
+scans and walks the live view whatever `snapshot=` selects, so it checks
+the live counts only. The copy's counts, snapshot count, extended-metadata
+OID and the other ties between a superblock and the trees are not checked. Each object is checked against the XID of the
+structure that reaches it: a physical object of the current checkpoint,
+such as the object map itself, against the checkpoint's XID; the
+snapshot's superblock against the snapshot's XID; a virtual object against
+its lookup XID. The reader otherwise reads exactly as for the live volume.
+
+A snapshot of a dataless-snapshot volume is unsupported. Snapshot flags must
+be zero, the value of every specimen record; any other flag, such as the
+pending-dataless `0x1` or merge-in-progress `0x2` [A1] defines, makes the
+snapshot view `FSIMG_EUNSUPPORTED`, as does a nonzero flag in its
+object-map snapshot record. The volume's extended-metadata OID names
+a virtual object of type `0x1d` with one version per snapshot at that
+snapshot's XID; each of the specimen's 512 versions holds version 1, flags
+zero and its own XID. A snapshot view does not read it. The corpus specimen
+is for research use only and cannot be a fixture, so the snapshot profile
+is enabled only once a native capture provides fixtures. That capture needs
+root to create snapshots: E9's owner-run `e9-snap`. Without it, `snapshot=`
+fails with `FSIMG_EUNSUPPORTED`. The writer emits an empty snapshot metadata
+tree and no object-map snapshot tree.
 
 ## Sealed volumes
 
@@ -1848,10 +1905,13 @@ Claims in the main domain come from the
 the object map itself (kind 11, physical) of the container and of each
 volume, and every node of each map's tree; every live object version an
 object map maps, tombstones excluded, including the versions snapshots
-retain; every physical tree node, including snapshot trees; a nonzero
-keylocker range; every entry of the main free queue; and the data extents
-described below. A reaper that is not idle makes the verification
-incomplete, as [its section](#reaper) states.
+retain; every physical tree node, including the snapshot metadata tree,
+each snapshot's extent-reference tree and the object map's snapshot tree;
+each snapshot's volume superblock; a nonzero keylocker range; every entry
+of the main free queue; and the data extents described below. In
+`dissect-apfs-snapshot` these claims cover 6325 distinct blocks, every one
+allocated in the bitmap; only data claims of different trees overlap (E9). A reaper that is not idle
+makes the verification incomplete, as [its section](#reaper) states.
 
 The internal pool is a domain of its own. Space-manager blocks inside it
 and the entries of the internal-pool free queue are claims in that domain,
@@ -1867,22 +1927,47 @@ physical-extent record of kind new and reference count 1 for each sealed
 file extent over the same block range (E11: 2178 and 6071 records); the
 rules that follow hold for them as written, with no sealed case.
 Records of one tree never overlap; records of different trees of one
-volume may, since a snapshot and the live volume share unchanged extents,
-so a block a snapshot alone still uses is claimed by that snapshot's
-record. Every block of a mapped file extent of the live filesystem tree
-lies inside a live physical-extent record; one extent may span several
-adjacent records. File extents of different streams overlap only inside
-such records, and every block of a live record is mapped by as many
-distinct live streams, file and attribute streams alike, as its reference
-count (E6, `e6-clone`, `e6-xclone`). How a
-snapshot's references enter the counts is provisional (E9).
+volume may. The data rules are:
+
+* a block's live count is the signed sum of the counts of its records over
+  the live tree and every snapshot's tree; without snapshots it is its one
+  record's count;
+* every block a mapped file extent of the live filesystem tree covers lies
+  inside some record, and one extent may span several adjacent records;
+* every block inside a record has a live count equal to the number of
+  distinct live streams, file and attribute streams alike, that map it,
+  zero included, so a negative sum is corrupt.
+
+Without snapshots, counts above 1 are clones (E6, `e6-clone`,
+`e6-xclone`). In `dissect-apfs-snapshot` the 1027 blocks of live count 1
+are exactly the blocks its live file extents map, and the other 512, the
+blocks only snapshots still use, sum to 0; summing over the trees of one
+snapshot and every older one gives the blocks that snapshot's file
+extents map in the same way (E9: snapshots 0, 1, 255 and 511 checked).
+Verification checks the live sum only, so a block that a record of an old
+tree keeps but no snapshot maps passes as a snapshot's block. That the sum
+equals the live stream count when clones or stream-backed attributes meet
+snapshots is provisional (E9, the owner-run capture `e9-snap`, which
+clones a file between snapshots). Meanwhile it is checked as stated: a
+wrong rule fails a valid image's verification and never changes a read.
 
 Metadata claims are exclusive, and data claims never overlap metadata. A
 block is allocated in the main bitmap exactly when it is claimed; each
 chunk's free count and the device's free count equal the clear bits below
 `N`; the bits past `N` are not checked (E15). One check is provisional and
 is not made until its experiment gives the rule: the allocated block count
-of a volume that has snapshots (E9). Every other volume's allocated
+of a volume that has snapshots. `dissect-apfs-snapshot` stores 5813, its
+claims less 512. Its snapshot superblocks, snapshot extent-reference nodes,
+extended-metadata versions and blocks only snapshots keep each number 512,
+so it cannot show which the count leaves out (E9). The owner-run capture
+`e9-snap` frees a different number of data blocks in each interval and
+allocates 300 one-block files in one, giving that snapshot an
+extent-reference tree of more than one node; it separates the data blocks
+and the extent-reference nodes. Snapshot superblocks and extended-metadata
+versions number one per snapshot in every capture so far, so if no capture
+separates them the rule counts one of them, and the count is the same
+either way. Every other
+volume's allocated
 block count equals the nodes of its object-map, filesystem,
 extent-reference and snapshot trees, one block more, and the data blocks
 its physical-extent records cover, a block that clones share counted once;
@@ -2206,7 +2291,7 @@ written: `validate` and the size search fail with `FSIMG_ERANGE` above it.
 | --- | --- | --- | --- | --- |
 | Node fill | Greedy against the root's capacity, 4096 bytes less the 56-byte header and the 40-byte footer: a node, root or not, takes records until the next does not fit, so a level's only node is always a valid root and 40 bytes stay unused in every other node | Policy; E15: `fsck_apfs -n` accepts a leaf packed to 3960 of the 4000 bytes (`e15-fill`); E3's native leaves leave as little as 12 bytes free | | |
 | Last node of a level | What remains when the records end, as few as one record | Policy; E15: `fsck_apfs -n` accepts a last node of one record at the leaf level (`e15-lastleaf1`) and at an index level (`e15-last1`) | | |
-| Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1). In the filesystem tree: flags `0x42`, node size 4096, fixed sizes zero, and a node's table of contents its key count rounded up to a multiple of 8 entries, the shape of 253 of the 254 leaves of `apfs-newfs-268435456-e3-ci`, where every table is a multiple of 8 entries and index nodes hold up to 8 more (E3). The volume object map has the container map's shape: a root leaf of node flags `0x7`, a 448-byte table (112 entries) and tree flags `0x12` in every E1 capture (`apfs-newfs-4194304-plain`, `apfs-newfs-1073741824-plain`, `apfs-newfs-8589934592-plain`, `apfs-hdiutil-33554432-plain` and the four volumes of `apfs-diskutil-2147483648-e10-roles`); in `apfs-newfs-268435456-e3-ci` and `-cs`, an index root of node flags `0x5` whose table holds 144 entries, 576 bytes, the most 16-byte keys with 8-byte child OIDs a node has room for, over leaves of node flags `0x6` with 448-byte tables (E3). A fixed-size tree's table is so sized for the records of the node's kind, leaf or index. The extent-reference and snapshot trees are variable-size and unaligned: tree flags `0x52`, node size 4096, fixed sizes zero, a root leaf of node flags `0x3`, and a table of contents of the key count rounded up to a multiple of 8 entries and at least 8: 64 bytes when empty in every E1 capture, 128 for 9 records (`apfs-newfs-67108864-e5-links`), 192 for 19 (`apfs-newfs-67108864-e6-clone`) and 256 for 27 and 28 (E3). The snapshot tree is empty in every capture, so the tables of a populated one are provisional, taken as the extent-reference tree's; the writer emits it empty, the shape every capture shows, so nothing it writes depends on them. A fixed-size leaf of ghosts that outgrows its native table grows in steps of 8 entries, the table increment [A1] gives; that step is provisional, since no capture shows such a table, and a free-queue leaf of more than 144 ghosts in a native capture would show it. Without one the step stays the increment [A1] gives; the writer's free queues are empty, so it never builds such a leaf. | E1, E3, E5, E6 | A capture with a snapshot, for a populated snapshot tree; a free-queue leaf of more than 144 ghosts, for the step | Native |
+| Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1). In the filesystem tree: flags `0x42`, node size 4096, fixed sizes zero, and a node's table of contents its key count rounded up to a multiple of 8 entries, the shape of 253 of the 254 leaves of `apfs-newfs-268435456-e3-ci`, where every table is a multiple of 8 entries and index nodes hold up to 8 more (E3). The volume object map has the container map's shape: a root leaf of node flags `0x7`, a 448-byte table (112 entries) and tree flags `0x12` in every E1 capture (`apfs-newfs-4194304-plain`, `apfs-newfs-1073741824-plain`, `apfs-newfs-8589934592-plain`, `apfs-hdiutil-33554432-plain` and the four volumes of `apfs-diskutil-2147483648-e10-roles`); in `apfs-newfs-268435456-e3-ci` and `-cs`, an index root of node flags `0x5` whose table holds 144 entries, 576 bytes, the most 16-byte keys with 8-byte child OIDs a node has room for, over leaves of node flags `0x6` with 448-byte tables (E3). A fixed-size tree's table is so sized for the records of the node's kind, leaf or index. The extent-reference and snapshot trees are variable-size and unaligned: tree flags `0x52`, node size 4096, fixed sizes zero, a root leaf of node flags `0x3`, and a table of contents of the key count rounded up to a multiple of 8 entries and at least 8: 64 bytes when empty in every E1 capture, 128 for 9 records (`apfs-newfs-67108864-e5-links`), 192 for 19 (`apfs-newfs-67108864-e6-clone`) and 256 for 27 and 28 (E3). A populated snapshot metadata tree follows the same rule: in `dissect-apfs-snapshot` an index root of node flags `0x1` holds 16 keys in a 16-entry table, over leaves of node flags `0x2` whose 44, 50, 51, 66 and 103 keys have tables of 48, 56, 56, 72 and 104 entries (E9). The volume object map's snapshot tree there is fixed-size, with tree flags `0x10`, 8-byte keys and 16-byte values: an index root of node flags `0x5` with a 202-entry (808-byte) table, (4096 - 56) / 20, the capacity for 8-byte keys and 8-byte child OIDs not counting the root's footer, over leaves of node flags `0x6` with 144-entry (576-byte) tables (E9). The writer emits the snapshot metadata tree as one empty root leaf and no object-map snapshot tree, OID zero (the object-map writer value), the states every native capture without snapshots shows; nothing it writes depends on the populated shapes. A fixed-size leaf of ghosts that outgrows its native table grows in steps of 8 entries, the table increment [A1] gives; that step is provisional, since no capture shows such a table, and a free-queue leaf of more than 144 ghosts in a native capture would show it. Without one the step stays the increment [A1] gives; the writer's free queues are empty, so it never builds such a leaf. | E1, E3, E5, E6, E9 | A free-queue leaf of more than 144 ghosts, for the step | Native |
 | Footer counts | Key count: the tree's leaf records. Node count: its nodes. Longest key and longest value: the largest encoded lengths among its leaf records, zero in an empty tree; an index key repeats a leaf key | [A1]; E3 for the counts and the longest key | | |
 | Object-map flags | Container map `0x1`; volume map zero | [A1]; E1: the container map `0x1` and the volume map zero, crypto-generation flag clear (apfs-newfs-4194304-plain) | | |
 | Empty extent-reference and snapshot trees | One root leaf with no keys | E1, every capture's volume; E2: one node each among an empty volume's 5 allocated blocks | | Native |

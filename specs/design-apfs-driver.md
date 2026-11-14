@@ -284,10 +284,14 @@ the next starts:
    the refusal tables. A missing or ambiguous selection fails here.
 6. **Volume object map.** The live volume object map, a physical object
    checked against the checkpoint XID.
-7. **Snapshot.** With `snapshot=`, the snapshot tree is searched for the
+7. **Snapshot.** With `snapshot=`, the snapshot metadata tree is searched for the
    name record, the metadata record is read, and the snapshot's volume
-   superblock replaces the live one, under the header rule E9 fixes; the
+   superblock, a physical object whose header OID is its address and
+   whose XID is the snapshot's, replaces the live one; the
    lookup XID for the volume's virtual objects becomes the snapshot's.
+   The copy names no object map (E9), so the live volume object map
+   stays the one searched; the copy is checked by its own rules in the
+   [format design](design-apfs.md#snapshots), not by step 5's.
 8. **Volume trees.** The filesystem tree root is resolved through the live
    volume object map at the lookup XID; in the sealed profile, the integrity
    object and the sealed file-extent tree root are read too.
@@ -669,7 +673,8 @@ superblock and the space manager the checkpoint load checked, the copy the
 pager walks; the block of each object map itself, the
 container's and each volume's, and every node of its tree; every live
 object version each object map maps, at its size, tombstones excluded;
-every physical tree node; a nonzero keylocker range, as one range each;
+every physical tree node; each snapshot's volume superblock; a nonzero
+keylocker range, as one range each;
 every main free-queue entry; and the space manager's chunk-information,
 address and chunk bitmap blocks that lie outside the internal pool. The
 writer's layout calls the same `apfs_fixed_regions()` on the fields it
@@ -679,7 +684,8 @@ allocates are one list. The reaper contributes no claim: it must be
 space-manager blocks inside the pool and the internal-pool free queue's
 entries go to a second, smaller claim stream for the pool's own domain,
 merged against the pool's bitmap, so no block is claimed in both.
-For each volume it scans the object map, the snapshot tree, every
+For each volume it scans the object map with the object map's snapshot
+tree, the snapshot metadata tree, each snapshot's volume superblock, every
 extent-reference tree (the live one and each snapshot's), and the
 filesystem tree with dedicated cursors, and in the sealed profile the
 sealed file-extent tree. Each tree is walked from its first record to its
@@ -745,17 +751,19 @@ it checks the format design's rules: metadata claims never overlap any other
 claim; data claims overlap only data claims of other trees of the same
 volume; a block is allocated exactly when claimed; each chunk's free count
 and the device's free count equal the clear bits. The file extents are
-joined with the live tree's physical-extent records in one sweep: each
-record contributes an opening at its first block and a closing at its end,
-both carrying its reference count, and each file extent a start and an
+joined with the physical-extent records of every extent-reference tree of
+the volume, the live one and each snapshot's, in one sweep: each record
+contributes an opening at its first block and a closing at its end, both
+carrying its signed reference count, and each file extent a start and an
 end, all keyed `(volume, block)` and sorted once, openings and starts
 before ends and closings at one block. The sweep keeps two totals, the
-reference counts of the records open and the file extents started and
-not ended, and wherever the block advances, the span just passed must
-have them equal: a mapped block outside every record has no count, a
-record no stream maps has no extent, and every block of a record is mapped
-as many times as its count. Records of one tree never overlap, so over a
-span the open count is one record's or none. The join costs the sort of twice the
+signed sum of the reference counts of the records open and the number of
+file extents started and not ended, and wherever the block advances, the
+span just passed must have them equal. So a mapped block outside every
+record fails, as does a block whose summed count no stream matches, and a
+block only snapshots keep has a summed count of zero, never a negative
+one. Records of one tree never overlap, so over a span each tree adds one
+record's count or none. The join costs the sort of twice the
 extents and records together, however many records one extent spans, and
 each boundary the sweep reads is charged to `max_work`. Clones that share
 one data stream contribute one stream. The pool's claim stream is merged the
@@ -767,7 +775,9 @@ volume that has snapshots, is not made until its experiment gives the rule;
 every other volume's allocated block count, a sealed volume's included, is
 checked against the blocks the format design lists there.
 
-**Walk.** The common walker visits the selected volume once. Every
+**Walk.** The common walker visits the selected volume once, in its live
+view: verification ignores `snapshot=`, since its scans, claims and counts
+are the live volume's. Every
 directory but the root and the private directory has exactly one parent,
 so the directories the walk reaches from the root form a tree, and a cycle
 of directories the root cannot reach exists exactly when the walk reaches
@@ -819,10 +829,11 @@ blocks. A refused feature in any volume, an unknown optional or
 read-only-compatible feature bit, or a reaper that is not idle makes the
 report incomplete with `FSIMG_EUNSUPPORTED`; the walk is never reported
 complete after skipping an object. So do structures whose blocks no claim
-describes: snapshots, whose claims are provisional until E9 gives them (a
-snapshot superblock, the object map's snapshot tree, shared nodes), a
-nonzero EFI jumpstart, and a volume's sealed file-extent tree, integrity
-object or snapshot extension in a profile that does not read them. Such
+describes, or whose rules no capture shows: a nonzero EFI jumpstart; a
+volume's sealed file-extent tree or integrity object in a profile that
+does not read them; and a snapshot with nonzero flags, an object-map
+snapshot record with a nonzero flag, or a snapshot of a dataless-snapshot
+volume. Such
 blocks cannot be told from damage, so an incomplete container pass makes
 no allocation merge; every structure is still read, and damage found
 outranks the incomplete report. The extent-reference and snapshot trees

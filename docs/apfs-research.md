@@ -1306,6 +1306,192 @@ opens `live-a-sb-zeroed` at XID 39, as both do.
 [Truncated containers](../specs/design-apfs.md#truncated-containers)
 records the native refusal beside fsimg's own rule.
 
+### E9 Snapshots
+
+**Creating a snapshot needs root.** On a volume of an attached disk image
+mounted by `hdiutil attach -mountpoint`, as the unprivileged user:
+
+| Method | Result |
+| --- | --- |
+| `fs_snapshot_create(2)` on the volume's root directory, from a ten-line C program | `EPERM`; its manual page says every snapshot call needs the superuser and an entitlement |
+| `/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs_systemsnapshot -s NAME -v MOUNT` | `fs_snapshot_create: Operation not permitted`, exit 255 |
+| `tmutil localsnapshot` | Not run: it takes no mount point and snapshots the host's Time Machine volumes |
+| `diskutil apfs` | Lists and deletes snapshots; no verb creates one |
+
+`diskutil apfs listSnapshots` on the volume afterwards: `No snapshots`.
+`apfs_systemsnapshot` carries Apple's entitlement, so run as root it is
+the likely path. An unsigned program calling `fs_snapshot_create` would
+lack the entitlement even as root, by the manual page; that was not run. The native capture is therefore left to
+the owner, in one terminal:
+
+```sh
+sudo -v
+FSIMG_APFS_NATIVE=/Volumes/Optaine/fsimg-apfs/native \
+  ruby tools/apfs/capture.rb --kind newfs --size 67108864 \
+  --option e9-snap --populate /Volumes/Optaine/fsimg-apfs/e9/e9-snap.sh
+FSIMG_APFS_NATIVE=/Volumes/Optaine/fsimg-apfs/native \
+  ruby tools/apfs/capture.rb --kind newfs --size 67108864 \
+  --option e9-snap-cs --volume name=E9cs,case-sensitive \
+  --populate /Volumes/Optaine/fsimg-apfs/e9/e9-snap.sh
+```
+
+The second run, `e9-snap-cs`, puts the same names on a case-sensitive
+volume, which is normalization-insensitive (E2), to show whether
+normalization folds without case folding.
+
+`capture.rb` runs the script in its own process group with a pipe for
+input, so the script calls `sudo -n` and relies on the credentials that
+`sudo -v` cached. If the host's sudo keeps credentials per terminal and
+refuses the child, the script prints `snapshot NAME refused` and continues.
+In that case a sudoers rule for that one tool, or running the steps by
+hand, is the alternative. With `E9_DRY=1` the script skips the snapshots;
+that run (a throwaway capture, not kept) populated the volume and
+`fsck_apfs -n` passed. The script:
+
+```sh
+#!/bin/sh
+set -eu
+m=$1
+S=/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs_systemsnapshot
+snap() {
+	sync
+	if [ "${E9_DRY:-0}" = 1 ]; then echo "dry: snapshot $1"; return; fi
+	if sudo -n "$S" -s "$1" -v "$m"; then echo "snapshot $1 ok"
+	else echo "snapshot $1 refused: $?"; fi
+}
+fill() { yes "$2" | head -c "$3" > "$m/$1"; }
+over() { yes "$2" | head -c "$4" | dd of="$m/$1" bs=4096 seek="$3" conv=notrunc 2>/dev/null; }
+attr() { xattr -w "$1" "$(yes "$2" | head -c 65536 | tr -d '\n')" "$m/$3"; }
+
+mkdir "$m/d"
+fill d/mod "mod 0" 65536          # 16 blocks, overwritten in the middle
+fill d/del "del 0" 16384          # deleted after the first snapshot
+fill d/src "src 0" 40960          # cloned after the first snapshot
+fill d/keep "keep 0" 4096
+fill d/attr "attr 0" 4096
+attr user.big a d/attr            # a stream-backed attribute, rewritten below
+snap z-first
+
+over d/mod "mod 1" 4 8192         # blocks 4 and 5 rewritten
+rm "$m/d/del"
+attr user.big b d/attr
+fill d/added "added 1" 8192
+cp -c "$m/d/src" "$m/d/clone"
+over d/clone "clone 1" 1 4096     # one block of the clone diverges
+i=0                               # 300 one-block files: more than one
+while [ $i -lt 300 ]; do          # leaf in the next snapshot's tree
+	fill d/m$i "m $i" 4096; i=$((i + 1))
+done
+snap a-second
+
+fill d/n1 "n1" 4096; snap e9-B
+fill d/n2 "n2" 4096; snap e9-b
+fill d/n3 "n3" 4096; snap "$(printf 'e9-\303\251')"
+fill d/n4 "n4" 4096; snap "$(printf 'e9-e\314\201')"
+fill d/n5 "n5" 4096; snap e9-ab
+fill d/n6 "n6" 4096; snap e9-a
+fill d/n7 "n7" 4096; snap e9-f   # before NFC e9-e-acute in bytes, after it in NFD
+
+over d/mod "mod 2" 10 4096        # live view differs from every snapshot
+fill d/live "live" 12288
+rm "$m/d/keep"
+sync
+if [ "${E9_DRY:-0}" != 1 ]; then diskutil apfs listSnapshots "$m" || true; fi
+```
+
+The names test case folding (`e9-B`, `e9-b`) and normalization (NFC and
+NFD `e9-e` with an acute accent, which also shows whether such a pair can
+coexist), a proper prefix (`e9-a`, `e9-ab`), and creation order unlike
+byte order (`z-first` before `a-second`). `e9-f` sorts before NFC `e9-e`
+with an acute accent as bytes and after it in NFD, a witness for
+normalization folding even if the NFD twin is refused. Snapshot names carry no hash, so
+byte order and XID order are the two orders the tree can show. The
+changes between snapshots free different numbers of blocks per snapshot,
+and the 300 files give one snapshot an extent-reference tree of more than
+one node. These separate two of the candidates for the allocated block
+count below, the data blocks and the extent-reference nodes.
+
+**Evidence: the corpus specimen.** `dissect-apfs-snapshot`
+(`~/fsimg-corpus/apfs/SOURCES.md`; research use only, never attached or
+mounted) decompresses to 33554432 bytes, SHA-256
+`21fc98a4708ed18542b20177d1c6bae3a6dc07bdf742a747fceecfe284d33019`. It
+holds one case-insensitive volume, `Snapshots`, formatted by `storagekitd
+(2632.0.54.0.2)` and last modified by `apfs_kext (2632.0.54.0.2)` at XID
+2573. The volume has 512 snapshots, `Snapshot 0` to `Snapshot 511`, at XIDs
+4 to 2566, about five apart. Between consecutive snapshots it gained two
+files and rewrote the one block of inode 18. `tools/apfs/apfsdump.rb
+--records` decodes its snapshot tree. A throwaway decoder (Ruby,
+outside the tree) followed the references the dumper prints but does not
+decode: each snapshot's superblock and extent-reference tree, the object
+map's snapshot tree, the extended-metadata versions, every object-map
+version, the filesystem tree at chosen XIDs, and the bitmap. It verified
+the Fletcher-64 checksums of the snapshot superblocks, the snapshot
+extent-reference roots and every object the object map maps. `fsapfsinfo` stops at the snapshot
+tree's index root (`unable to determine sub node block number`), and
+`apfs-dump-quick` lists the tree's records.
+
+Snapshot metadata tree:
+
+| Item | Value |
+| --- | --- |
+| Tree | Physical, subtype `0x10`, tree flags `0x52`, node size 4096, fixed sizes 0; 17 nodes, 1024 records, longest key 23, longest value 63 |
+| Index root | Node flags `0x1`, level 1, 16 keys, 128-byte table (16 entries) |
+| Leaves | Node flags `0x2`: keys 51 (2 leaves), 50 (8), 44, 103 (4) and 66, tables of 56, 56, 48, 104 and 72 entries |
+| Metadata record | Key 8 bytes: the snapshot's XID, kind 1. Value 50 bytes and the name: extent-reference tree OID, superblock OID, creation and change times, inode number, extent-reference tree type `0x40000002`, flags 0, u16 name length counting the NUL, the name with its NUL (61 to 63 bytes) |
+| Inode number | The snapshot superblock's next object ID (19, 22, 25 and 28 for the first four snapshots) |
+| Name record | Key: OID `0x0FFFFFFFFFFFFFFF` (all 60 bits), kind 11, u16 name length counting the NUL, the name with its NUL (21 to 23 bytes). Value 8 bytes: the snapshot's XID, which in all 512 is the XID of the metadata record with the same name |
+| Order | Metadata records by XID, then name records by name bytes with the NUL: `Snapshot 0`, `Snapshot 1`, `Snapshot 10`, `Snapshot 100` ... `Snapshot 109`, `Snapshot 11`: a proper prefix first, neither numeric nor creation order |
+| Flags | 0 in all 512 |
+
+Snapshot superblocks, at each metadata record's superblock OID:
+
+| Item | Value |
+| --- | --- |
+| Header | Type `0x4000000d` (volume superblock, physical), OID equal to the block address, XID equal to the snapshot's, checksum valid: 512 of 512 |
+| Object map, extent-reference tree, snapshot tree OIDs | 0 in all 512 |
+| Root tree OID | 1028, the live volume's; the live object map resolves it at every snapshot's XID |
+| Counts | The copy at index k counts k snapshots and 2(k + 1) files, and allocated blocks 7, 14, 20, 26, 32 for k = 0 to 4: the volume as it stood before the snapshot |
+| Extended-metadata OID | 0 in the first copy, 1030 in the others |
+
+Volume object map:
+
+| Item | Value |
+| --- | --- |
+| Object map | Flags 0, snapshot count 512, most recent snapshot 2566, the greatest metadata XID |
+| Its snapshot tree | Physical, subtype `0x13`, tree flags `0x10`, keys 8 and values 16 bytes. Eight nodes: an index root of node flags `0x5` with 7 keys and an 808-byte table (202 entries), and leaves of node flags `0x6` with 71 to 81 keys and 576-byte tables (144 entries). 512 records keyed by the metadata records' XIDs; value flags and OID 0 in all |
+| Its tree | 42 nodes, 3693 mappings of 90 OIDs, flags 0. 513 map the filesystem root 1028 (each snapshot's and the live one), 2668 other filesystem nodes, and 512 the extended-metadata object 1030. Every version is the newest at or below some snapshot's XID or the live one, with nothing else retained; every mapped object's header OID and XID equal its key's, and every checksum is valid |
+| Extended metadata | Object 1030, type `0x1d` (virtual), one version per snapshot at its XID: version 1, flags 0, that XID, a distinct UUID, token 0 |
+
+Extent-reference trees and data:
+
+| Item | Value |
+| --- | --- |
+| Snapshot trees | One root leaf each, node flags `0x3`, 64-byte table, header XID one below the snapshot's: the live tree as it stood when the snapshot was taken. Checksums valid |
+| Their records | 2 in the first tree, 4 in each other. Kind new, count 1, owner an inode, for the blocks allocated since the previous snapshot (1535 records). Kind update, count -1, owner `0xFFFFFFFFFFFFFFFF`, for a block an older tree records as new that the live volume released in the interval, here the rewritten block of inode 18 (511 records); the owner is [A1]'s `OWNING_OBJ_ID_INVALID` |
+| Live tree | One root leaf, 5 records: 4 new and an update -1 for block 6452, which the newest snapshot's tree records as new |
+| Summed counts | Over all 513 trees, 1 for 1027 blocks, exactly the blocks the live file extents map, and 0 for 512. Over the trees of snapshots 0 to k, 1 exactly for the blocks snapshot k's file extents map (k = 0, 1, 255, 511 checked: 2, 4, 512 and 1024 blocks) |
+| Totals | Total blocks allocated 1539, every block a new record names; total freed 0, so a block a snapshot keeps is not freed |
+
+Allocation. Claims cover 6325 blocks, each once, and every one is
+allocated in the bitmap: the object map (1), its tree (42) and snapshot
+tree (8), the mapped versions (3693), the live extent-reference tree (1),
+the snapshot metadata tree (17), the snapshot superblocks (512), the
+snapshot extent-reference trees (512) and the data blocks of every
+tree's records (1539). The bitmap's other 395 allocated blocks belong to
+the container: the 155 blocks from block 0, and among the rest the main
+free queue's 237 entries; E9 did not classify them one by one. The volume
+stores 5813 allocated blocks, 6325 less 512. Four of the claims number 512
+each: the snapshot superblocks, the snapshot extent-reference nodes, the
+extended-metadata versions and the blocks only snapshots keep. Each
+superblock copy's allocated count fits all four readings too, since each
+candidate grows by one per snapshot, so the specimen cannot tell which
+claim the count leaves out.
+
+Not shown: case or normalization folding of snapshot names, a snapshot of
+a sealed volume, a dataless-snapshot volume, nonzero snapshot flags,
+clones within a volume that has snapshots, and an extent-reference tree
+of a snapshot with more than one node.
+
 ### E10 Volumes
 
 Containers built with `diskutil apfs addVolume` on a raw attach, by the
@@ -2223,7 +2409,7 @@ under that experiment.
 | Writer acceptance: minimum container size | 1024 blocks, the smallest `fsck_apfs` opens (E1); `fsck_apfs -n` accepts the writer's first form with a volume there ([E15](#e15-writer-probes): `e15-x1vol-all`) | |
 | Writer acceptance: XID 1 for all objects, the formatting identifier, maximum extent length, greedy node fill, maximum volume count rule | `fsck_apfs -n` accepts the first form with a volume, another formatting identifier, native extents of 5 GiB, a leaf packed to the design's capacity, a last node of one record at the leaf and index levels, and maximum volume counts off the formula from 2 to 100 ([E15](#e15-writer-probes)) | Extents longer than 5 GiB |
 | Name hash conventions (initial value, complement, terminating NUL), full or simple case folding, Unicode version, hashed or plain keys per personality | CRC-32C from `0xFFFFFFFF`, no final complement, no NUL, low 22 bits; full folding without Turkic entries, NFD before and after; Unicode 17.0.0; both `newfs_apfs` personalities hash (E4), `hdiutil` volumes too, and no native tool formats a plain-key volume ([E2](#e2-personalities))  | |
-| Comparator tie-breaks for hashed records, attributes and snapshot names | Hashed directory records: 22-bit hash, then name bytes as unsigned bytes, a prefix first (E4); attribute records of one inode by name bytes with the NUL, a proper prefix first (E5, `e5-xattr`) | Snapshot names (E9); plain directory records, which no native tool writes (E2) |
+| Comparator tie-breaks for hashed records, attributes and snapshot names | Hashed directory records: 22-bit hash, then name bytes as unsigned bytes, a prefix first (E4); attribute records of one inode by name bytes with the NUL, a proper prefix first (E5, `e5-xattr`); snapshot names by name bytes with the NUL, a proper prefix first ([E9](#e9-snapshots), `dissect-apfs-snapshot`) | Whether a case- or normalization-insensitive volume folds snapshot names (the owner-run E9 captures `e9-snap` and `e9-snap-cs`; until then bytes); plain directory records, which no native tool writes (E2) |
 | Volume features, flags, role, crypto state and formatting record of `newfs_apfs` and `hdiutil` volumes in both personalities (E2 part) | Identical between the two tools; incompatible `0x1` or `0x8`, optional `0x2`, flags `0x1`, role 0, formatter `newfs_apfs (2811.160.7.0.4)` ([E2](#e2-personalities): `apfs-newfs-67108864-e2-*`, `apfs-hdiutil-67108864-e2-*`) | |
 | Records of an empty volume beyond the root and private directories; its next object identifier (E2 part) | Next object identifier 16, next document ID 3, modification records empty, 5 allocated blocks, on every E2 volume ([E2](#e2-personalities)) | Records beyond the root and private directories (E1's volume records) |
 | Whether the root and private directories count in the volume's object counts (E3 part) | They do not; FIFOs and sockets count as other objects (E3: `apfs-newfs-268435456-e3-ci`, `-cs`) | |
@@ -2231,13 +2417,14 @@ under that experiment.
 | Name length limit and its unit; refusal of invalid UTF-8 and of code points | 255 UTF-16 code units (765 bytes at most); invalid UTF-8 and U+FFFF refused with `EILSEQ` ([E14](#e14-limits): `apfs-newfs-67108864-e14-ci`, `-cs`); unassigned code points, noncharacters and Unicode 18.0.0 characters refused with `EILSEQ`, private-use code points accepted ([E4](#e4-names)) | Whether macOS counts the name as given or its NFD: E14's characters have no decomposition and E4 did not probe length (an E14 run with decomposing characters) |
 | Symbolic-link target limit and storage, the mode of a new link; FIFO, device and socket encodings | 1023 bytes, inline attribute with its NUL; mode `0755`; FIFO record type 1 and socket 12, each with protection class 4 and no extended field but the name (E3, E14) | Devices: no root, so E16 answers; if it cannot, the design's default (a device without the number field has no number) applies |
 | Name extended field on every inode; reserved inodes named by records; private-directory contents; internal flags and protection class of new inodes | On every inode; none named below 16 but the root and private directory; private directory empty; internal flags `0x8000`, protection class 0, or 4 on FIFOs and sockets (E3) | |
-| Physical-extent records for unshared files; data-stream totals; volume allocated-block accounting | One reference record of count 1 and kind new per mapped extent, owner the inode, a 257-block run among them (E3), and natively runs of 163840 and 1310720 blocks in one record ([E15](#e15-writer-probes)); totals written and read count real I/O (E3); total blocks allocated counts the data blocks of the physical-extent records, shared blocks once, the allocated block count adds the nodes of the object-map, filesystem, extent-reference and snapshot trees and one block more, the object-map object in E3's count, and freed blocks leave it (E3: 571 in `apfs-newfs-268435456-e3-ci`; E5, E6: every capture, `e6-xclone` with 315 blocks freed); a sealed volume adds its sealed file-extent nodes and integrity object ([E11](#e11-encrypted-and-sealed)) | Volumes with snapshots (E9) or that freed blocks many times (E16) |
+| Physical-extent records for unshared files; data-stream totals; volume allocated-block accounting | One reference record of count 1 and kind new per mapped extent, owner the inode, a 257-block run among them (E3), and natively runs of 163840 and 1310720 blocks in one record ([E15](#e15-writer-probes)); totals written and read count real I/O (E3); total blocks allocated counts the data blocks of the physical-extent records, shared blocks once, the allocated block count adds the nodes of the object-map, filesystem, extent-reference and snapshot trees and one block more, the object-map object in E3's count, and freed blocks leave it (E3: 571 in `apfs-newfs-268435456-e3-ci`; E5, E6: every capture, `e6-xclone` with 315 blocks freed); a sealed volume adds its sealed file-extent nodes and integrity object ([E11](#e11-encrypted-and-sealed)) | The allocated block count of a volume with snapshots: in `dissect-apfs-snapshot` it is the claims less 512, the count of four different claims ([E9](#e9-snapshots)); the owner-run `e9-snap` separates the data blocks and the extent-reference nodes, while snapshot superblocks and extended-metadata versions stay paired, one per snapshot, so the count is the same whichever it counts. Volumes that freed blocks many times (E16) |
 | Native time and owner limits; whether times are signed | Signed 64-bit nanoseconds, clamped to `-2^63` through `2^63 - 1` (E3, E14) | Owner limits: changing owners needs root, and the image mounts with ownership ignored, storing 99; E16 shows native owners; if it cannot answer, the reader reports stored values and the writer's default owner 0 stands |
 | Sibling links and maps; link counts | Every name of a linked inode has a sibling link and a sibling map, and its directory record carries the sibling ID; the records stay when the names drop back to one; the inode's parent and name field follow a remaining name; the private directory is unused (E5, `e5-links`)  | |
 | Attribute storage, inline limit, stream-backed attributes | Inline up to 3800 bytes, less with long names (3794 with a 127-byte name, 3800 with a 63-byte one); user stream attributes carry flags `0x11`, a resource fork `0x1`; an attribute stream has one user and no data-stream ID record, and a clone gets its own streams over shared blocks; names up to 127 bytes (E5, E6: `e5-xattr`, `e5-xbound`, `e5-xname`, `e5-xlong`, `e6-xclone`)  | |
 | Hole representation in sparse files; clone sharing and its reference records | Holes are extents of physical block 0, a trailing hole included, counted in the allocated bytes and the sparse-bytes field; clones share one data stream until a write gives the writer a new one; physical-extent records split where branches diverge, count distinct streams and name the allocating inode (E6: `e6-sparse`, `e6-clone`)  | |
 | Compression header, inline marker bytes, resource-fork framing per codec, inline size limit, codecs `ditto` and installers choose | The HFS Plus framing field for field; raw markers `0xFF` zlib, LZFSE and LZBITMAP, `0x06` LZVN, `0xCC` on every type 9 payload and type 10 chunk; inline only up to 65536 bytes, and for `ditto` only up to a 3802-byte attribute; `ditto` writes LZVN (7, 8) above 16384 bytes, system files are types 8, 9 and 14, Xcode's 7 and 8 ([E7](#e7-compression)) | Type 1: no producer or specimen on the host; `aa`'s exact attribute limit (between 3017 and 3817 bytes) |
-| Blocks of a deleted volume or snapshot not yet reaped: reaper and reap-list state, and how allocation accounts them | While a deleted volume is reaped: its slot is zero, the container object map still maps its superblock, the reaper has flag `0x2` and names the volume, the reap list holds the volume and the tree being destroyed, freed blocks enter the main free queue at the reaping XID while the volume's still-mapped trees reference them, and the state buffer holds `apfs_reap_state_t`; `fsck_apfs -n` cannot verify such a copy completely, reporting referenced blocks the bitmap shows free. After the reap the reaper keeps one empty reap-list object (E17) | A deleted snapshot (neither `tmutil` nor `diskutil` can make a snapshot of a disk image volume) |
+| Snapshot records, flags, extended metadata, dataless snapshots | Metadata records keyed by XID (value 50 bytes and the name with its NUL), name records of OID `0x0FFFFFFFFFFFFFFF` naming the XID, flags 0; snapshot superblocks physical (`0x4000000d`), OID their address, XID the snapshot's, object-map and tree OIDs 0; one object-map snapshot record per snapshot, flags and OID 0; extended metadata a virtual `0x1d` object with one version per snapshot; extent-reference trees per interval, update records of count -1 ([E9](#e9-snapshots), `dissect-apfs-snapshot`) | Dataless snapshots, nonzero flags and a snapshot of a sealed volume: no specimen; the design refuses them |
+| Blocks of a deleted volume or snapshot not yet reaped: reaper and reap-list state, and how allocation accounts them | While a deleted volume is reaped: its slot is zero, the container object map still maps its superblock, the reaper has flag `0x2` and names the volume, the reap list holds the volume and the tree being destroyed, freed blocks enter the main free queue at the reaping XID while the volume's still-mapped trees reference them, and the state buffer holds `apfs_reap_state_t`; `fsck_apfs -n` cannot verify such a copy completely, reporting referenced blocks the bitmap shows free. After the reap the reaper keeps one empty reap-list object (E17) | A deleted snapshot (creating one needs root, [E9](#e9-snapshots)) |
 | Volume roles and volume groups in multi-volume containers | The roles table of E10, with stored values; System added with `-groupWith` Data gets Data's volume UUID as the group UUID on both, plus optional feature `0x10` on each; slots fill from 0 and a freed slot is reused (E10) | |
 | Encrypted and sealed detection; sealed tree types, node flags, hash types; whether a sealed volume has an extent-reference tree | Encrypted: container flag `0x4` and a one-block keylocker, volume flags `0x8` without `0x1`, filesystem-tree mappings flagged `0x4`; superblocks, maps and the other trees plaintext. `hdiutil -encryption` wraps a plain container in `encrcdsa`. Sealed: incompatible `0x20`, virtual filesystem tree whose nodes have no header (map flag `0x8`, node flags `0x18` plus root or leaf), tree flags `0x1c2`, index values of a relative child OID and a SHA-256 digest of the whole node, integrity object version 2, hash type 1, root hash at 128; an extent-reference tree with one record per sealed file extent ([E11](#e11-encrypted-and-sealed)) | Hash types other than SHA-256, a broken seal, a sealed volume with snapshots, and the child-OID base of a tree whose root is not its lowest OID: no specimen |
 
