@@ -27,6 +27,7 @@ static void check_unsupported(char *const *);
 static void test_options(void);
 static void test_placement_list_retained_after_format_refusal(void);
 static void test_volume_and_snapshot_settings_parse(void);
+static void test_case_settings_parse(void);
 static void test_modes(void);
 static void test_create_operands(void);
 static bool argument_starts(char *const *, const char *);
@@ -467,6 +468,27 @@ test_volume_and_snapshot_settings_parse(void)
 	CHECK(options.request.read.volume_index_set);
 	CHECK(options.request.read.volume_index == UINT32_MAX);
 	CHECK(options.request.read.snapshot == NULL);
+	fsimg_cli_release(&options);
+}
+
+static void
+test_case_settings_parse(void)
+{
+	char *sensitive[] = { "fsimg", "c", "-n", "-F", "fat12", "-o",
+	    "case=sensitive", ".", NULL };
+	char *insensitive[] = { "fsimg", "c", "-n", "-F", "fat12", "-o",
+	    "case=insensitive", ".", NULL };
+	fsimg_cli_options_t options;
+	fsimg_error_t error;
+
+	/* The value is stored before the forced format refuses it. */
+	CHECK(fsimg_cli_parse(8, sensitive, &options, &error) == FSIMG_EINVAL);
+	CHECK(!options.syntax_error);
+	CHECK(strcmp(error.path, "case") == 0);
+	CHECK(options.request.write.case_sensitive);
+	fsimg_cli_release(&options);
+	CHECK(parse(insensitive, &options) == FSIMG_OK);
+	CHECK(!options.request.write.case_sensitive);
 	fsimg_cli_release(&options);
 }
 
@@ -2633,6 +2655,7 @@ main(int argc, char **argv)
 	test_options();
 	test_placement_list_retained_after_format_refusal();
 	test_volume_and_snapshot_settings_parse();
+	test_case_settings_parse();
 	test_modes();
 	test_create_operands();
 	test_stacks();

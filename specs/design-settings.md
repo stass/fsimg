@@ -60,8 +60,10 @@ support; there is no second per-format list of setting names. `sector` and
 checks, rather than acquiring new support bits. `oem` is FAT's read-side
 filesystem setting, outside the read mask because its accepted values mean
 the one supported codepage for every format; `volume` and `snapshot` are
-read-side filesystem settings under the read mask, held by APFS, and `view` is the ISO 9660 `iso_view` setting under
-`FSIMG_SETTING_ISO_VIEW`. The
+read-side filesystem settings under the read mask, held by APFS, and `view` is
+the ISO 9660 `iso_view` setting under `FSIMG_SETTING_ISO_VIEW`. `case` is a
+write-side filesystem setting, APFS's `case_sensitive` volume personality
+under `FSIMG_SETTING_CASE_SENSITIVE`. The
 `FSIMG_SETTING_*` bits form one namespace across write and read fields. A layer row's owner
 is a registry identity, not a repeated test against a string in each consumer.
 A read command validates non-default fields against the selected format's

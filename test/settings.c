@@ -72,6 +72,7 @@ static const member_t write_members[] = {
 	WRITE_MEMBER(sector_bytes, uint32_t),
 	WRITE_MEMBER(allocation_unit_bytes, uint32_t),
 	WRITE_MEMBER(byte_order, fsimg_byte_order_t),
+	WRITE_MEMBER(case_sensitive, bool),
 	WRITE_MEMBER(volume_uuid, unsigned char),
 	WRITE_MEMBER(inode_capacity, uint32_t),
 	WRITE_MEMBER(reserve_percent, uint32_t),
@@ -329,10 +330,11 @@ test_masks_and_files(void)
 	    FSIMG_SETTING_VOLUME_UUID, FSIMG_SETTING_INODE_CAPACITY,
 	    FSIMG_SETTING_RESERVE, FSIMG_SETTING_MOUNTPOINT, FSIMG_SETTING_ROOT_ENTRIES,
 	    FSIMG_SETTING_ISO_LEVEL, FSIMG_SETTING_ISO_VIEW, FSIMG_SETTING_PLACEMENT,
-	    FSIMG_SETTING_VOLUME_INDEX, FSIMG_SETTING_SNAPSHOT };
+	    FSIMG_SETTING_VOLUME_INDEX, FSIMG_SETTING_SNAPSHOT,
+	    FSIMG_SETTING_CASE_SENSITIVE };
 	static const char *const bit_keys[] = { "endian", "uuid", "inodes",
 	    "reserve", "mountpoint", "root", "level", "view", "place", "volume",
-	    "snapshot" };
+	    "snapshot", "case" };
 	static const char *const file_keys[FSIMG_FILE_SETTINGS] = {
 		[FSIMG_FILE_IFSBOOT_STARTUP] = "ifsboot:startup",
 		[FSIMG_FILE_IFSBOOT_PREFIX] = "ifsboot:prefix"
@@ -1403,6 +1405,50 @@ test_registered_readers_refuse_volume_and_snapshot(void)
 }
 
 static void
+test_case_catalogue_and_defaults(void)
+{
+	const fsimg_setting_t *row;
+	fsimg_write_options_t options;
+	const fsimg_setting_records_t records = { .write = &options };
+
+	memset(&options, 0xa5, sizeof(options));
+	fsimg_write_options_init(&options);
+	CHECK(!options.case_sensitive);
+	row = fsimg_setting_find(&fsimg_filesystem_settings, "case", 4);
+	CHECK(row != NULL);
+	CHECK(row->record == FSIMG_RECORD_WRITE && row->kind == FSIMG_KIND_BOOL);
+	CHECK(row->offset == offsetof(fsimg_write_options_t, case_sensitive));
+	CHECK(row->syntax == FSIMG_SYNTAX_CHOICE);
+	CHECK(strcmp(row->choices[0].spelling, "insensitive") == 0);
+	CHECK(!row->choices[0].value.flag);
+	CHECK(strcmp(row->choices[1].spelling, "sensitive") == 0);
+	CHECK(row->choices[1].value.flag);
+	CHECK(row->choices[2].spelling == NULL);
+	CHECK(row->scope == FSIMG_SCOPE_WRITE);
+	CHECK(row->support == FSIMG_SETTING_CASE_SENSITIVE);
+	CHECK(row->presence == FSIMG_NO_PRESENCE);
+	CHECK(!row->initial.flag);
+	CHECK(fsimg_setting_is_default(row, &records));
+	options.case_sensitive = true;
+	CHECK(!fsimg_setting_is_default(row, &records));
+}
+
+static void
+test_case_sensitive_rejects_invalid_bool_without_writer(void)
+{
+	fsimg_write_options_t options;
+	fsimg_error_t error;
+	uint8_t invalid = 2;
+
+	fsimg_write_options_init(&options);
+	bcopy(&invalid, &options.case_sensitive, sizeof(invalid));
+	CHECK(fsimg_write_settings_check(&options, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "case") == 0);
+	/* The byte check refuses it, not the default check that follows. */
+	CHECK(strcmp(error.message, "setting flag is neither false nor true") == 0);
+}
+
+static void
 test_registered_writers_refuse_unsupported_settings(void)
 {
 	static const fsimg_placement_t placement = { .path = "/k", .offset = 0 };
@@ -1422,7 +1468,8 @@ test_registered_writers_refuse_unsupported_settings(void)
 		{ "addressing", FSIMG_SETTING_EROFS,
 		    { .erofs_addressing = 48 } },
 		{ "metabox", FSIMG_SETTING_EROFS,
-		    { .erofs_metabox = FSIMG_EROFS_METABOX_PLAIN } }
+		    { .erofs_metabox = FSIMG_EROFS_METABOX_PLAIN } },
+		{ "case", FSIMG_SETTING_CASE_SENSITIVE, { .case_sensitive = true } }
 	};
 	fsimg_ctx_t *ctx;
 	fsimg_writer_t *writer;
@@ -1445,6 +1492,8 @@ test_registered_writers_refuse_unsupported_settings(void)
 			CHECK(status == FSIMG_EINVAL);
 			CHECK(strcmp(error.path, "view") == 0);
 		}
+		/* No format takes case_sensitive yet, so every writer refuses it. */
+		CHECK((info.write_settings & FSIMG_SETTING_CASE_SENSITIVE) == 0);
 		if ((info.capabilities & FSIMG_CAP_WRITE) == 0)
 			continue;
 		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1462,6 +1511,7 @@ test_registered_writers_refuse_unsupported_settings(void)
 			options.erofs_addressing =
 			    cases[i].options.erofs_addressing;
 			options.erofs_metabox = cases[i].options.erofs_metabox;
+			options.case_sensitive = cases[i].options.case_sensitive;
 			status = fsimg_writer_new(ctx, info.name, &options,
 			    &writer, &error);
 			if (status != FSIMG_EINVAL ||
@@ -1540,6 +1590,8 @@ main(void)
 	test_erofs_enum_members_are_checked();
 	test_erofs_settings_require_capability();
 	test_iso_read_settings_require_capability();
+	test_case_catalogue_and_defaults();
+	test_case_sensitive_rejects_invalid_bool_without_writer();
 	test_volume_and_snapshot_catalogue_and_defaults();
 	test_volume_and_snapshot_structure();
 	test_registered_readers_refuse_volume_and_snapshot();

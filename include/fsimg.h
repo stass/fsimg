@@ -961,6 +961,11 @@ typedef struct fsimg_write_options {
 	fsimg_erofs_compression_t erofs_compression;
 	uint32_t	 erofs_addressing;
 	fsimg_erofs_metabox_t erofs_metabox;
+	/* FSIMG_SETTING_CASE_SENSITIVE: the volume's name comparison, the APFS
+	 * volume personality; false, the default, compares names
+	 * case-insensitively.
+	 */
+	bool		 case_sensitive;
 	/* Borrowed for construction and copied; NULL selects every default. */
 	const fsimg_layer_options_t *layers;
 	/* The file settings: the record is copied at construction and its I/O
@@ -1278,6 +1283,8 @@ typedef struct fsimg_volume_info {
 /* The read options volume_index with volume_index_set, and snapshot. */
 #define FSIMG_SETTING_VOLUME_INDEX 0x1000u
 #define FSIMG_SETTING_SNAPSHOT 0x2000u
+/* case_sensitive. */
+#define FSIMG_SETTING_CASE_SENSITIVE 0x4000u
 
 typedef struct fsimg_format_info {
 	char		 name[16];

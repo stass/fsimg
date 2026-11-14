@@ -253,6 +253,14 @@ accepts either, so every format refuses both once detected, before the
 worker starts when `-F` names the format; a malformed snapshot name is
 refused before the image is opened.
 
+`-o case=insensitive|sensitive` chooses whether a created volume compares
+names with or without regard to case, the APFS volume personality. The
+library takes it as the write option `case_sensitive`, false by default,
+under the new `FSIMG_SETTING_CASE_SENSITIVE` bit of `write_settings`, and
+the worker job carries it. No supported format takes the setting, so every
+format refuses `case=sensitive` before the worker starts; HFS Plus and HFSX
+choose case sensitivity by the format name instead.
+
 `-o root=N` sets the FAT12/FAT16 root directory capacity, the library's
 `fat_root_entries`, under the new `FSIMG_SETTING_ROOT_ENTRIES` bit, so a
 minimized image can leave room in its root. The capacity rounds up to a

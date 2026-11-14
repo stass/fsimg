@@ -17,14 +17,15 @@
  * follow at byte 200: the format name in 16 bytes and the label in 766, each
  * NUL-terminated and zero after the terminator, then one byte saying
  * whether a label is present. Then come the write settings: the 16-byte
- * UUID, the byte order as one byte, and the inode capacity and reserve
- * percentage as eight little-endian bytes each, and the number of the
- * job's paths as eight bytes: a create job's root descriptors, or a read
- * job's members. The read-side selection follows: the
- * selector kind, partition index and GPT sector size as eight bytes each,
- * the three stack slot states as one byte each, the scheme and container
- * names in 16 bytes each (the format name is the filesystem slot's), and
- * the partition selector text in 112. The layer settings follow:
+ * UUID, the byte order and the case sensitivity (0 or 1) as one byte each
+ * and six zero bytes, the inode capacity and reserve percentage as eight
+ * little-endian bytes each, and the number of the job's paths as eight
+ * bytes: a create job's root descriptors, or a read job's members. The
+ * read-side selection follows: the selector kind, partition index and GPT
+ * sector size as eight bytes each, the three stack slot states as one byte
+ * each, the scheme and container names in 16 bytes each (the format name
+ * is the filesystem slot's), and the partition selector text in 112. The
+ * layer settings follow:
  * the GPT and MBR disk lengths and the MBR identifier as eight bytes each,
  * one byte of MBR flags (identifier set, partition active) and seven zero
  * bytes, the disk and partition GUIDs in 16 bytes each, and the GPT type in
@@ -101,6 +102,7 @@ typedef enum job_string_field {
 	JOB_LABEL_PRESENT = JOB_LABEL_OFFSET + JOB_LABEL_BYTES,
 	JOB_UUID_OFFSET = 984,
 	JOB_BYTE_ORDER = 1000,
+	JOB_CASE_SENSITIVE = 1001,
 	JOB_INODES_OFFSET = 1008,
 	JOB_RESERVE_OFFSET = 1016,
 	JOB_PATHS_OFFSET = 1024,
@@ -1172,6 +1174,7 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	bcopy(request->write.volume_uuid, raw + JOB_UUID_OFFSET,
 	    sizeof(request->write.volume_uuid));
 	raw[JOB_BYTE_ORDER] = (unsigned char)request->write.byte_order;
+	raw[JOB_CASE_SENSITIVE] = request->write.case_sensitive ? 1 : 0;
 	fsimg_store_le64(raw + JOB_INODES_OFFSET, request->write.inode_capacity);
 	fsimg_store_le64(raw + JOB_RESERVE_OFFSET, request->write.reserve_percent);
 	fsimg_store_le64(raw + JOB_PATHS_OFFSET, fsimg_job_path_count(request));
@@ -1243,13 +1246,14 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    !string_field_valid(raw + JOB_FORMAT_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_LABEL_OFFSET, JOB_LABEL_BYTES) ||
 	    raw[JOB_LABEL_PRESENT] > 1 || raw[JOB_BYTE_ORDER] > FSIMG_BYTE_ORDER_BIG ||
+	    raw[JOB_CASE_SENSITIVE] > 1 ||
 	    (raw[JOB_LABEL_PRESENT] == 0 && raw[JOB_LABEL_OFFSET] != 0))
 		return (invalid_job(error));
 	for (unsigned i = JOB_LABEL_PRESENT + 1; i < JOB_UUID_OFFSET; i++) {
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
-	for (unsigned i = JOB_BYTE_ORDER + 1; i < JOB_INODES_OFFSET; i++) {
+	for (unsigned i = JOB_CASE_SENSITIVE + 1; i < JOB_INODES_OFFSET; i++) {
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
@@ -1403,6 +1407,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	bcopy(raw + JOB_UUID_OFFSET, request->write.volume_uuid,
 	    sizeof(request->write.volume_uuid));
 	request->write.byte_order = (fsimg_byte_order_t)raw[JOB_BYTE_ORDER];
+	request->write.case_sensitive = raw[JOB_CASE_SENSITIVE] != 0;
 	request->write.inode_capacity =
 	    (uint32_t)fsimg_load_le64(raw + JOB_INODES_OFFSET);
 	request->write.reserve_percent =

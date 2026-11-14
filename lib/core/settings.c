@@ -144,6 +144,10 @@ static const fsimg_setting_choice_t endian_choices[] = {
 	{ "little", { .byte_order = FSIMG_BYTE_ORDER_LITTLE } },
 	{ "big", { .byte_order = FSIMG_BYTE_ORDER_BIG } }, { NULL, { 0 } }
 };
+static const fsimg_setting_choice_t case_choices[] = {
+	{ "insensitive", { .flag = false } }, { "sensitive", { .flag = true } },
+	{ NULL, { 0 } }
+};
 static const fsimg_setting_choice_t dmg_choices[] = {
 	{ "zlib", { .dmg_compression = FSIMG_DMG_ZLIB } },
 	{ "none", { .dmg_compression = FSIMG_DMG_NONE } }, { NULL, { 0 } }
@@ -168,9 +172,11 @@ static const fsimg_setting_choice_t xz_check_choices[] = {
  * request, so the index has a presence flag, and the snapshot name is a
  * borrowed pointer of 1 to 255 bytes of UTF-8, which the reader copies;
  * and the format-specific write fields, each tied to its FSIMG_SETTING_*
- * bit. The mountpoint is a borrowed pointer, NULL for the format's default
- * and "" for an explicit empty path; the command and the writer bound it
- * by the capacity of the volume information's mountpoint. root, the FAT12/16 fixed root's entry count, is
+ * bit. case, APFS's volume personality, is a bool spelled insensitive or
+ * sensitive, insensitive (false) by default. The mountpoint is a borrowed
+ * pointer, NULL for the format's default and "" for an explicit empty
+ * path; the command and the writer bound it by the capacity of the volume
+ * information's mountpoint. root, the FAT12/16 fixed root's entry count, is
  * bounded by its 16-bit on-disk field; the writer rounds it up to whole
  * sectors. The El Torito boot paths are image paths, borrowed like the
  * mountpoint; the command bounds each by FSIMG_BOOT_PATH_TEXT_BYTES, the
@@ -212,6 +218,9 @@ static const fsimg_setting_t filesystem_rows[] = {
 	    .choices = endian_choices,
 	    .initial = { .byte_order = FSIMG_BYTE_ORDER_LITTLE },
 	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_BYTE_ORDER },
+	{ .key = "case", FLAG(RECORD_WRITE, case_sensitive),
+	    .syntax = FSIMG_SYNTAX_CHOICE, .choices = case_choices,
+	    .scope = FSIMG_SCOPE_WRITE, .support = FSIMG_SETTING_CASE_SENSITIVE },
 	{ .key = "uuid", ID16(RECORD_WRITE, volume_uuid),
 	    .syntax = FSIMG_SYNTAX_UUID, .scope = FSIMG_SCOPE_WRITE,
 	    .support = FSIMG_SETTING_VOLUME_UUID },

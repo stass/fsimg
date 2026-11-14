@@ -16,6 +16,11 @@
 
 /* These byte offsets are the transport contract, independent of the codec. */
 enum {
+	/* The case sensitivity, one byte beside the byte order at 1000, and
+	 * the zero padding up to the inode capacity.
+	 */
+	CASE_SENSITIVE = 1001,
+	INODE_CAPACITY = 1008,
 	PLACEMENT_COUNT = 5143,
 	PLACEMENT_RECORDS = 5151,
 	PLACEMENT_RECORD_BYTES = 1033,
@@ -2843,6 +2848,84 @@ test_job_placement_decode_refusals_have_valid_controls(void)
 }
 
 /*
+ * The case sensitivity travels as one byte, 0 or 1, and leaves the padding
+ * after it zero; test_job_catalogue covers the value's round trip alone.
+ */
+static void
+test_job_case_sensitive_roundtrip(void)
+{
+	static const bool values[] = { true, false };
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+		request.write.case_sensitive = values[i];
+		memset(raw, 0xa5, sizeof(raw));
+		CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+		CHECK(raw[CASE_SENSITIVE] == (values[i] ? 1 : 0));
+		for (size_t j = CASE_SENSITIVE + 1; j < INODE_CAPACITY; j++) {
+			if (raw[j] != 0)
+				fprintf(stderr, "job byte %zu is padding but %u\n", j,
+				    raw[j]);
+			CHECK(raw[j] == 0);
+		}
+		CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+		CHECK(decoded.write.case_sensitive == values[i]);
+	}
+}
+
+/* A case byte other than 0 or 1, or nonzero padding after it, is refused;
+ * restoring the byte makes each record valid again.
+ */
+static void
+test_job_case_decode_refusals_have_valid_controls(void)
+{
+	static const struct {
+		size_t offset;
+		unsigned char byte;
+	} cases[] = {
+		{ CASE_SENSITIVE, 2 }, { CASE_SENSITIVE, 0xff },
+		{ CASE_SENSITIVE + 1, 1 }, { CASE_SENSITIVE + 2, 1 },
+		{ CASE_SENSITIVE + 3, 1 }, { CASE_SENSITIVE + 4, 1 },
+		{ CASE_SENSITIVE + 5, 1 }, { INODE_CAPACITY - 1, 1 }
+	};
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES], bad[FSIMG_JOB_BYTES];
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_CREATE;
+	request.root_paths = image_root;
+	request.root_count = 1;
+	request.write.case_sensitive = true;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		bcopy(raw, bad, sizeof(bad));
+		bad[cases[i].offset] = cases[i].byte;
+		status = fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, &error);
+		if (status != FSIMG_EINVAL)
+			fprintf(stderr, "job byte %zu = %u: expected invalid job, got %d\n",
+			    cases[i].offset, cases[i].byte, status);
+		CHECK(status == FSIMG_EINVAL);
+		CHECK(strcmp(error.message, "invalid worker job description") == 0);
+		bad[cases[i].offset] = raw[cases[i].offset];
+		CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+	}
+}
+
+/*
  * The read selection travels at fixed offsets: an explicit volume 0 keeps
  * its presence bit, an absent one is all zero, and a snapshot name of up
  * to 255 bytes arrives in the request's own storage. The encoder refuses a
@@ -3055,6 +3138,8 @@ main(int argc, char **argv)
 	test_job_catalogue();
 	test_job_placements_roundtrip_and_request_ownership();
 	test_job_placement_decode_refusals_have_valid_controls();
+	test_job_case_sensitive_roundtrip();
+	test_job_case_decode_refusals_have_valid_controls();
 	test_job_volume_and_snapshot_roundtrip();
 	test_job_volume_and_snapshot_decode_refusals_have_valid_controls();
 	test_job_placement_encode_refusals_have_valid_controls();

@@ -1106,6 +1106,13 @@ addresses bytes,
 1.
 .It Fl o Ar endian=little|big
 QNX6 and ImageFS on-disk byte order; default little.
+.It Fl o Ar case=insensitive|sensitive
+Whether the volume compares names with or without regard to case, the APFS
+volume personality; default insensitive.
+No supported format takes the setting, so every format refuses
+.Ar case=sensitive
+before the worker starts; HFS Plus and HFSX choose case sensitivity by the
+format name instead.
 .It Fl o Ar uuid=uuid
 QNX6 volume UUID as RFC 4122 text, stored in textual byte order.
 HFS Plus and HFSX store its first eight bytes as the volume identifier.

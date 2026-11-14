@@ -485,6 +485,12 @@ slot count, where zero selects 128 slots raised to the slots the names
 need.
 HFS Plus and HFSX name the UUID alone and store its first eight bytes.
 QNX6, QNX4, HFS Plus and HFSX store no volume_serial and ignore it.
+The setting case_sensitive under FSIMG_SETTING_CASE_SENSITIVE, the APFS
+volume personality, follows the same rule: false, the default, writes a
+volume that compares names case-insensitively, and true one that compares
+them case-sensitively; no supported format names the bit, so true is
+FSIMG_EINVAL for every format, and the HFS Plus and HFSX formats choose
+case sensitivity by name instead.
 The setting mountpoint, a copied string under FSIMG_SETTING_MOUNTPOINT,
 follows the same rule, as does fat_root_entries under
 FSIMG_SETTING_ROOT_ENTRIES, which FAT12 and FAT16 name: the fixed root

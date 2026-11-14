@@ -1411,8 +1411,8 @@ static void
 test_wrap_settings(void)
 {
 	static const char *const keys[] = { "sector", "cluster", "endian",
-	    "uuid", "inodes", "reserve", "mountpoint", "root", "compression",
-	    "addressing", "metabox" };
+	    "case", "uuid", "inodes", "reserve", "mountpoint", "root",
+	    "compression", "addressing", "metabox" };
 	fsimg_write_options_t defaults, options;
 	fsimg_sink_t sink;
 	fsimg_error_t error;
@@ -1471,6 +1471,7 @@ test_wrap_settings(void)
 	options.erofs_compression = defaults.erofs_compression;
 	options.erofs_addressing = defaults.erofs_addressing;
 	options.erofs_metabox = defaults.erofs_metabox;
+	options.case_sensitive = defaults.case_sensitive;
 	options.layers = defaults.layers;
 	options.inputs = defaults.inputs;
 	bcopy(defaults.compression, options.compression,
@@ -1487,15 +1488,16 @@ test_wrap_settings(void)
 		case 0: options.sector_bytes = 512; break;
 		case 1: options.allocation_unit_bytes = 4096; break;
 		case 2: options.byte_order = FSIMG_BYTE_ORDER_BIG; break;
-		case 3: options.volume_uuid[15] = 1; break;
-		case 4: options.inode_capacity = 64; break;
-		case 5: options.reserve_percent = 0; break;
-		case 6: options.mountpoint = ""; break;
-		case 7: options.fat_root_entries = 16; break;
-		case 8:
+		case 3: options.case_sensitive = true; break;
+		case 4: options.volume_uuid[15] = 1; break;
+		case 5: options.inode_capacity = 64; break;
+		case 6: options.reserve_percent = 0; break;
+		case 7: options.mountpoint = ""; break;
+		case 8: options.fat_root_entries = 16; break;
+		case 9:
 			options.erofs_compression = FSIMG_EROFS_COMPRESSION_LZ4;
 			break;
-		case 9: options.erofs_addressing = 48; break;
+		case 10: options.erofs_addressing = 48; break;
 		default: options.erofs_metabox = FSIMG_EROFS_METABOX_PLAIN; break;
 		}
 		bzero(&error, sizeof(error));
