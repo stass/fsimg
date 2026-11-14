@@ -577,7 +577,8 @@ apfs_entry_load(fsimg_reader_t *reader, const apfs_child_t *child,
 		reader->initialized = size;
 	}
 	apfs->current = (apfs_current_t){ .inode = child->inode,
-	    .private_id = inode.val.private_id, .kind = inode.kind,
+	    .private_id = inode.val.private_id, .stream_size = inode.size,
+	    .stream_alloced = inode.alloced, .kind = inode.kind,
 	    .compressed = is_compressed(&inode) };
 	return (FSIMG_OK);
 }

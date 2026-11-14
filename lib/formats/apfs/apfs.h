@@ -1660,14 +1660,21 @@ typedef struct apfs_child {
 
 /*
  * What the reader knows of the current entry once replay made it current:
- * enough for prepare to enter a directory and, later, for content to find
- * a file's storage.
+ * enough for prepare to enter a directory and for content to find a file's
+ * storage. stream_size and stream_alloced are the data stream's size and
+ * allocated bytes, zero without one. extent is the last extent resolve
+ * returned, valid while resolved is set (content.c); making an entry
+ * current clears it.
  */
 typedef struct apfs_current {
+	fsimg_extent_t	extent;
 	uint64_t	inode;
 	uint64_t	private_id;	/* owner of the file extents */
+	uint64_t	stream_size;
+	uint64_t	stream_alloced;
 	fsimg_entry_kind_t kind;
 	bool		compressed;
+	bool		resolved;
 } apfs_current_t;
 
 /*
@@ -1680,7 +1687,8 @@ typedef struct apfs_current {
  * charged when first used; on failure the caller closes the state with
  * apfs_volume_close(), which also accepts a zeroed state.
  *
- * lookup serves inode and attribute lookups, scan a directory's records.
+ * lookup serves inode and attribute lookups, scan a directory's records and
+ * content a file's extents; only resolve moves content.
  * form is the one comparison-form buffer, too large for the stack, that
  * preparation, replay and key derivation use in turn: a form in it is valid
  * only within the function that derived it, since the next driver callback,
@@ -1706,6 +1714,7 @@ typedef struct apfs_reader {
 	apfs_map_t	 volume_map;
 	apfs_cursor_t	 lookup;
 	apfs_cursor_t	 scan;
+	apfs_cursor_t	 content;
 	apfs_fs_t	 fs;		/* the selected volume's superblock */
 	apfs_current_t	 current;
 	apfs_name_form_t form;
@@ -1828,5 +1837,13 @@ fsimg_status_t	apfs_keys(fsimg_reader_t *, const char *,
 		    fsimg_error_t *);
 fsimg_status_t	apfs_key(fsimg_reader_t *, const char *, unsigned char *,
 		    size_t *, fsimg_error_t *);
+
+/*
+ * Content (content.c; specs/design-apfs-driver.md, "Content"), wired into
+ * fsimg_apfs_reader_ops: the extent of the current file holding an offset
+ * below its size, judged before it is returned.
+ */
+fsimg_status_t	apfs_resolve(fsimg_reader_t *, uint64_t, fsimg_extent_t *,
+		    fsimg_error_t *);
 
 #endif /* !FSIMG_APFS_H */

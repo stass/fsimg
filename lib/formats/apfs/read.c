@@ -14,16 +14,13 @@
  * The APFS reader (specs/design-apfs-driver.md, "Open"): block 0, the
  * checkpoint, the space manager, the container object map, the selected
  * volume and its object map, then the volume information. Directories are
- * listed by directory.c and inode.c; file content is not readable yet, so
- * resolve refuses.
+ * listed by directory.c and inode.c, and file content resolved by content.c.
  */
 #define ROLE_CHECKPOINT	"checkpoint superblock"
 
 static fsimg_status_t	apfs_open(fsimg_reader_t *,
 			    const fsimg_format_variant_t *, fsimg_error_t *);
 static void		apfs_close(fsimg_reader_t *);
-static fsimg_status_t	apfs_resolve(fsimg_reader_t *, uint64_t,
-			    fsimg_extent_t *, fsimg_error_t *);
 static fsimg_status_t	block0_read(fsimg_reader_t *, unsigned char *,
 			    apfs_obj_t *, apfs_nx_t *, fsimg_error_t *);
 static void		detail_add(fsimg_volume_info_t *, const char *,
@@ -42,13 +39,6 @@ const fsimg_reader_ops_t fsimg_apfs_reader_ops = {
 	.resolve = apfs_resolve,
 	.verify = apfs_verify
 };
-
-static fsimg_status_t
-apfs_resolve(fsimg_reader_t *reader FSIMG_UNUSED, uint64_t offset
-    FSIMG_UNUSED, fsimg_extent_t *extent FSIMG_UNUSED, fsimg_error_t *error)
-{
-	return (apfs_unsupported(error, "file", "content is not readable"));
-}
 
 /*
  * Read block 0 into window, which holds APFS_BLOCK_MAX bytes: its first

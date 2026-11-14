@@ -98,8 +98,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/apfs/write-plan.c lib/formats/apfs/write-emit.c \
 	lib/formats/apfs/descriptor.c lib/formats/apfs/volume.c \
 	lib/formats/apfs/read.c lib/formats/apfs/inode.c \
-	lib/formats/apfs/directory.c lib/formats/apfs/records.c \
-	lib/formats/apfs/verify.c \
+	lib/formats/apfs/directory.c lib/formats/apfs/content.c \
+	lib/formats/apfs/records.c lib/formats/apfs/verify.c \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
@@ -204,8 +204,9 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-erofs test-erofs-verify test-erofs-faults test-erofs-fixtures \
 	test-erofs-write \
 	test-lzfse test-decmpfs test-hfsplus-codec test-hfsplus \
-	test-apfs-codec test-apfs test-apfs-list test-apfs-write-btree \
-	test-apfs-write test-apfs-spaceman test-apfs-verify \
+	test-apfs-codec test-apfs test-apfs-list test-apfs-content \
+	test-apfs-write-btree test-apfs-write test-apfs-spaceman \
+	test-apfs-verify \
 	test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-apfs-unicode \
@@ -356,6 +357,9 @@ test_apfs_list_SOURCES = test/apfs-list.c test/apfs-gen.c test/apfs-gen.h test/t
 test_apfs_list_LDADD = libfsimg.la
 test_apfs_list_CPPFLAGS = $(AM_CPPFLAGS) \
 	-DAPFS_NAME_HASHES='"$(abs_top_srcdir)/test/fixtures/apfs/name-hashes.txt"'
+test_apfs_content_SOURCES = test/apfs-content.c test/apfs-gen.c \
+	test/apfs-gen.h test/test.h
+test_apfs_content_LDADD = libfsimg.la
 test_apfs_write_btree_SOURCES = test/apfs-write-btree.c test/test.h
 test_apfs_write_btree_LDADD = libfsimg.la
 test_apfs_write_SOURCES = test/apfs-write.c test/test.h
@@ -591,6 +595,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/apm_test.rb \
 	test/cli/apfs_info_test.rb \
 	test/cli/apfs_listing_native_test.rb \
+	test/cli/apfs_content_native_test.rb \
 	test/cli/coordinator_worker_test.rb \
 	test/cli/create_operands_test.rb \
 	test/cli/examples_test.rb \

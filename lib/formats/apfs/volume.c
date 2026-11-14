@@ -284,6 +284,9 @@ apfs_volume_open(fsimg_reader_t *reader, apfs_reader_t *apfs,
 	apfs_cursor_init(&apfs->scan, container,
 	    apfs_fs_tree_profile(apfs->hashed), APFS_OBJ_VIRTUAL,
 	    apfs->fs.root_tree_oid, apfs->read_xid, &apfs->volume_map);
+	apfs_cursor_init(&apfs->content, container,
+	    apfs_fs_tree_profile(apfs->hashed), APFS_OBJ_VIRTUAL,
+	    apfs->fs.root_tree_oid, apfs->read_xid, &apfs->volume_map);
 	return (FSIMG_OK);
 }
 
@@ -324,6 +327,7 @@ names_setup(apfs_reader_t *apfs)
 void
 apfs_volume_close(apfs_reader_t *apfs)
 {
+	apfs_cursor_free(&apfs->content);
 	apfs_cursor_free(&apfs->scan);
 	apfs_cursor_free(&apfs->lookup);
 	apfs_map_close(&apfs->volume_map);

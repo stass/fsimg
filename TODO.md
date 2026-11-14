@@ -700,6 +700,16 @@
   being created, which also settles "A failed extraction keeps any error
   path" for this path.
 
+* [Medium] **A content failure during extraction names no entry**
+  (`lib/extract/extract.c` `extract_file`, `lib/read/`): without
+  `--salvage`, a file whose content the driver refuses, such as an APFS
+  compressed file, fails `x` with the driver's message and the retained
+  destination only, so the user is not told which file failed; `--salvage`
+  names it. Naming it with `entry->path` after `copy_content` fails is not
+  enough: the entry's path is gone by then (a NULL dereference in
+  `fsimg_path_render`), so the name has to be rendered where the reader
+  still holds the walker path, with its omitted-name classes.
+
 * [Low] **The job record moves ifsboot settings type-blind**
   (`cmd/fsimg/job.c` `ifsboot_fields`): the table copies `uint32_t` and
   `bool` members with `bcopy` at `offsetof` positions, so a widened member
