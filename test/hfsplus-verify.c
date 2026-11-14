@@ -781,7 +781,7 @@ hidden_compressed_no_attribute(gen_image_t *image)
 	build_hidden_record(image, hidden, NULL, false);
 }
 
-/* Type 3 stores the three uncompressed bytes inline after its marker. */
+/* Types 3 and 9 store three uncompressed bytes inline after a marker. */
 static void
 build_hidden_compressed(gen_image_t *image, gen_object_t hidden,
     unsigned type, bool bad_signature, bool listed_stub)
@@ -791,11 +791,11 @@ build_hidden_compressed(gen_image_t *image, gen_object_t hidden,
 	unsigned char bytes[20] = { 'f', 'p', 'm', 'c' };
 	gen_attr_value_t attribute = { .id = 41, .type = 0x10,
 	    .name = compression_name, .units = COUNT(compression_name),
-	    .value = bytes, .size = type == 3 ? sizeof(bytes) : 16 };
+	    .value = bytes, .size = type == 3 || type == 9 ? sizeof(bytes) : 16 };
 
 	store_le(bytes + 4, type, 4);
 	store_le(bytes + 8, 3, 8);
-	bytes[16] = 0xff;
+	bytes[16] = type == 9 ? 0xcc : 0xff;
 	bcopy("abc", bytes + 17, 3);
 	if (bad_signature)
 		bytes[0] = 0;
@@ -915,6 +915,35 @@ test_hidden_primary_acceptance(void)
 	hidden_inode_compressed_valid(&image);
 	check_clean_bytes(&image, 1, 2, 3, 0, 0);
 	gen_free(&image);
+}
+
+static void
+test_copy_inline_and_fork_pass_structural_verification(void)
+{
+	static const unsigned types[] = { 9, 10 };
+	static const unsigned char raw[] = { 0xcc, 'a', 'b', 'c' };
+	gen_compressed_chunk_t chunk = { .bytes = raw, .length = sizeof(raw) };
+	gen_image_t image;
+	char description[80];
+
+	for (size_t i = 0; i < COUNT(types); i++) {
+		gen_object_t hidden = { .name = hidden_inode_name,
+		    .units = COUNT(hidden_inode_name), .special = 1 };
+		unsigned char *resource = NULL;
+
+		snprintf(description, sizeof(description),
+		    "type %u copy passes structural verification", types[i]);
+		scenario = description;
+		if (types[i] == 10) {
+			resource = gen_compressed_resource(&chunk, 1,
+			    &hidden.resource_size);
+			hidden.resource = resource;
+		}
+		build_hidden_compressed(&image, hidden, types[i], false, true);
+		check_clean_bytes(&image, 1, 2, 3, 0, 0);
+		gen_free(&image);
+		free(resource);
+	}
 }
 
 static void
@@ -2938,6 +2967,7 @@ main(int argc, char **argv)
 	test_additional_acceptance();
 	test_clean_variants_and_reused_ids();
 	test_hidden_primary_acceptance();
+	test_copy_inline_and_fork_pass_structural_verification();
 	test_corruption_table();
 	test_stray_empty_forks_do_not_prevent_listing_or_reading();
 	test_preflight_refuses_before_scanning();

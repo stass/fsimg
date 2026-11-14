@@ -1532,7 +1532,7 @@ reader does not require:
 
 | Type | Storage | Codec | Reader |
 | --- | --- | --- | --- |
-| 1 | Inline | None | Unsupported: no producer or specimen (E7), until a specimen shows its framing |
+| 1 | Inline | None | Unsupported: no producer or specimen (E7), until a specimen shows its framing; the shared type table knows it and HFS Plus admits it, but admission is per driver |
 | 3 | Inline | zlib | System zlib |
 | 4 | Resource fork | zlib chunks | System zlib |
 | 7 | Inline | LZVN | Imported decoder |

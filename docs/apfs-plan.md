@@ -506,8 +506,10 @@ describe the user-visible options.
   chunks through the shared validator, over zlib and the decoders of
   `lib/codec/lzfse.c`; the capability record's `codecs`. The APFS framing
   is the HFS Plus one (E7), so `compress.c` keeps no validator of its own;
-  it adds the dispatch APFS needs, the LZFSE raw marker `0xFF` and the
-  `0xCC`-marked types 9 and 10, and reads the `com.apple.decmpfs` value
+  the shared type table states every type's storage, codec and raw marker,
+  the LZFSE `0xFF` and the `0xCC` of types 9 and 10 included, and
+  `compress.c` admits its types, dispatches by their facts, and reads the
+  `com.apple.decmpfs` value
   from its record or a stream and a content-bearing resource fork from a
   stream.
 * APFS cases in `fuzz/lzfse.c`, seeded from E7's LZVN, LZFSE and zlib

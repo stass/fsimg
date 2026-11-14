@@ -1058,20 +1058,48 @@ and half random, is compressed; the 1-byte last chunk of `c65537` and
 00 00`, an LZFSE chunk with `bvx$`, and a zlib chunk with its Adler-32,
 with no input after it.
 
-**Against HFS Plus.** The framing is the one
-`lib/formats/hfsplus/codec.c` and `compress.c` decode: the same header,
+**Against HFS Plus.** The framing is the one the shared module
+`lib/formats/decmpfs.c` checks for the HFS Plus reader: the same header,
 resource header, resource table, pairs relative to the data offset plus 4,
-offset words, 64 KiB chunks and the relations `fork_open` and
-`word_table_open` check (`end + map_length` equals the fork's length,
-resource length = data length - 4, count = `ceil(size / 65536)`, table
-inside the data or the fork), and the same zlib (`0xFF`) and LZVN (`0x06`)
-raw markers. Where the HFS Plus reader differs from what macOS writes:
+offset words, 64 KiB chunks and the relations its `open` checks
+(`end + map_length` equals the fork's length, resource length = data
+length - 4, count = `ceil(size / 65536)`, table inside the data or the
+fork), and the same zlib (`0xFF`) and LZVN (`0x06`) raw markers.
+`afsctool`, the E6 producer of the
+[HFS Plus design](../specs/design-hfsplus.md#inline-payloads), writes an
+incompressible LZFSE block as `bvx-` rather than raw-marking it, and never
+writes types 9 or 10; macOS's own compressor does both.
 
-* an LZFSE payload or chunk raw-marked with `0xFF`: `chunk_decode_lzfse`
-  passes it to the decoder, which refuses it, and the
-  [HFS Plus design](../specs/design-hfsplus.md#inline-payloads) says LZFSE
-  has no raw marker, from `afsctool`'s `bvx-` blocks;
-* types 9 and 10, which `hfsplus_compress_check` refuses as unsupported.
+**On HFS Plus.** The same `aa extract -afsc` onto native HFS Plus volumes
+(`newfs_hfs`, `fsck_hfs` OK) writes what it writes on APFS. Two volumes,
+outside the repository in `/Volumes/Optaine/fsimg-apfs/dtab`: a 64 MiB one
+(`hfs-e7.img`, `hfs-e7.sh`) holding `afsc.aar` extracted under all five
+codecs and `split.aar` under `copy`, its attributes read while mounted by
+`decmpfs.rb` into `hfs-decmpfs.jsonl`; and the capture
+`captures/h-hfsplus-16777216-aa-compression`, from
+`tools/hfsplus/capture.rb --populate aa-compression` (text, random and
+zero files of 1, 100, 3000, 65536 and 65537 bytes and a 196608-byte
+mixed file under `zlib`, `lzvn`, `lzfse` and `copy`), whose `fields.json`
+reads the attributes from the unmounted image:
+
+* types 3/4, 7/8, 11/12, 13/14 and 9/10 for `zlib`, `lzvn`, `lzfse`,
+  `lzbitmap` and `copy`;
+* `0xFF` before every incompressible zlib, LZFSE and LZBITMAP payload
+  (the 1- and 100-byte files, `r100`, `r3000`) and chunk (`m200k`'s
+  random chunks, the 1-byte last chunk of `c65537` and `z65537`), and
+  `0x06` before LZVN's; compressed LZFSE begins `bvx2` or `bvxn`;
+* `0xCC` before every type 9 payload (all 46 `split` files, 117- to
+  207-byte attributes, and the capture's 1- to 3000-byte files) and every
+  type 10 chunk; `copy` puts files of 65536 bytes or more in the fork;
+* an incompressible file of 65536 bytes or more left plain, as on APFS.
+
+The HFS Plus reader, dispatching from the shared type table, refuses the
+64 MiB volume's LZBITMAP files as unsupported. It verifies the capture and
+a second 64 MiB volume made the same way without `lzbitmap`
+(`hfs-e7-nobitmap.img`), and its extraction of that volume's 90 files and
+of every capture file equals the kernel's contents by SHA-256 (the capture
+through `test/cli/hfsplus_native_test.rb` with `FSIMG_HFSPLUS_NATIVE`
+naming its parent).
 
 The APFS storage around the framing differs from HFS Plus: the attributes
 are attribute records or attribute streams rather than an attribute B-tree

@@ -112,6 +112,79 @@ fsimg_decmpfs_word_decode(const unsigned char *words, size_t length,
 	return (true);
 }
 
+/* The types macOS writes, the numbers from xnu's decmpfs.h and the framing and
+ * markers from native captures: 0xFF for zlib, whose stream never begins with
+ * it, and for LZFSE and LZBITMAP, whose streams begin with a magic; 0x06 for
+ * LZVN, the code that ends its stream; 0xCC before every payload and chunk of
+ * the uncompressed types 9 and 10. Type 1 is the documented unencoded payload,
+ * which no native tool was seen to write.
+ */
+static const struct {
+	uint32_t		 type;
+	fsimg_decmpfs_info_t	 info;
+} types[] = {
+	{ FSIMG_DECMPFS_TYPE_STORED,
+	  { FSIMG_DECMPFS_INLINE, FSIMG_DECMPFS_CODEC_NONE,
+	    FSIMG_DECMPFS_UNMARKED } },
+	{ FSIMG_DECMPFS_TYPE_ZLIB_INLINE,
+	  { FSIMG_DECMPFS_INLINE, FSIMG_DECMPFS_CODEC_ZLIB, 0xff } },
+	{ FSIMG_DECMPFS_TYPE_ZLIB_FORK,
+	  { FSIMG_DECMPFS_TABLE_RESOURCE, FSIMG_DECMPFS_CODEC_ZLIB, 0xff } },
+	{ FSIMG_DECMPFS_TYPE_LZVN_INLINE,
+	  { FSIMG_DECMPFS_INLINE, FSIMG_DECMPFS_CODEC_LZVN, 0x06 } },
+	{ FSIMG_DECMPFS_TYPE_LZVN_FORK,
+	  { FSIMG_DECMPFS_TABLE_WORDS, FSIMG_DECMPFS_CODEC_LZVN, 0x06 } },
+	{ FSIMG_DECMPFS_TYPE_COPY_INLINE,
+	  { FSIMG_DECMPFS_INLINE, FSIMG_DECMPFS_CODEC_NONE, 0xcc } },
+	{ FSIMG_DECMPFS_TYPE_COPY_FORK,
+	  { FSIMG_DECMPFS_TABLE_WORDS, FSIMG_DECMPFS_CODEC_NONE, 0xcc } },
+	{ FSIMG_DECMPFS_TYPE_LZFSE_INLINE,
+	  { FSIMG_DECMPFS_INLINE, FSIMG_DECMPFS_CODEC_LZFSE, 0xff } },
+	{ FSIMG_DECMPFS_TYPE_LZFSE_FORK,
+	  { FSIMG_DECMPFS_TABLE_WORDS, FSIMG_DECMPFS_CODEC_LZFSE, 0xff } },
+	{ FSIMG_DECMPFS_TYPE_LZBITMAP_INLINE,
+	  { FSIMG_DECMPFS_INLINE, FSIMG_DECMPFS_CODEC_LZBITMAP, 0xff } },
+	{ FSIMG_DECMPFS_TYPE_LZBITMAP_FORK,
+	  { FSIMG_DECMPFS_TABLE_WORDS, FSIMG_DECMPFS_CODEC_LZBITMAP, 0xff } },
+};
+
+bool
+fsimg_decmpfs_type_info(uint32_t type, fsimg_decmpfs_info_t *info)
+{
+	for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		if (types[i].type == type) {
+			*info = types[i].info;
+			return (true);
+		}
+	}
+	return (false);
+}
+
+fsimg_status_t
+fsimg_decmpfs_unencoded(const fsimg_decmpfs_info_t *info,
+    const unsigned char *bytes, size_t stored, size_t expected,
+    const unsigned char **content, fsimg_error_t *error)
+{
+	size_t skip;
+
+	if (info->marker != FSIMG_DECMPFS_UNMARKED && stored != 0 &&
+	    bytes[0] == info->marker)
+		skip = 1;
+	else if (info->codec != FSIMG_DECMPFS_CODEC_NONE) {
+		*content = NULL;
+		return (FSIMG_OK);
+	} else if (info->marker != FSIMG_DECMPFS_UNMARKED)
+		return (corrupt(error,
+		    "decmpfs uncompressed payload or chunk lacks its marker"));
+	else
+		skip = 0;
+	if (stored - skip != expected)
+		return (corrupt(error,
+		    "decmpfs uncompressed payload or chunk has the wrong length"));
+	*content = bytes + skip;
+	return (FSIMG_OK);
+}
+
 /* The chunks a file of size bytes is cut into: ceil(size / 65536). */
 static uint64_t
 chunk_count(uint64_t size)
@@ -125,10 +198,18 @@ fsimg_decmpfs_open(fsimg_decmpfs_kind_t kind, uint64_t fork_length,
     uint64_t size, fsimg_decmpfs_read_t fork_read, void *context,
     fsimg_decmpfs_table_t *table, fsimg_error_t *error)
 {
-	if (kind == FSIMG_DECMPFS_TABLE_RESOURCE)
+	switch (kind) {
+	case FSIMG_DECMPFS_TABLE_RESOURCE:
 		return (rsrc_open(fork_length, size, fork_read, context, table,
 		    error));
-	return (words_open(fork_length, size, fork_read, context, table, error));
+	case FSIMG_DECMPFS_TABLE_WORDS:
+		return (words_open(fork_length, size, fork_read, context, table,
+		    error));
+	case FSIMG_DECMPFS_INLINE:
+		break;
+	}
+	return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+	    "decmpfs kind is not a chunk table"));
 }
 
 /* Check the classic resource header's relations to the fork: the map follows
@@ -183,7 +264,7 @@ rsrc_open(uint64_t fork_length, uint64_t size, fsimg_decmpfs_read_t fork_read,
 	return (FSIMG_OK);
 }
 
-/* Check the table that types 8 and 12 begin the fork with: count + 1
+/* Check a word table, which begins the fork: count + 1
  * little-endian offset words from the fork's start. The first word is the
  * table's end, which must hold the words and lie in the fork. Its length is
  * the writer's choice, so it is never computed from the count, and words
@@ -230,11 +311,18 @@ fsimg_decmpfs_chunk(const fsimg_decmpfs_table_t *table, uint64_t index,
 	if (index >= table->chunks)
 		return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
 		    "decmpfs chunk index is past the table"));
-	if (table->kind == FSIMG_DECMPFS_TABLE_RESOURCE)
-		return (pair_locate(table, index, fork_read, context, offset, stored,
-		    error));
-	return (word_locate(table, index, fork_read, context, offset, stored,
-	    error));
+	switch (table->kind) {
+	case FSIMG_DECMPFS_TABLE_RESOURCE:
+		return (pair_locate(table, index, fork_read, context, offset,
+		    stored, error));
+	case FSIMG_DECMPFS_TABLE_WORDS:
+		return (word_locate(table, index, fork_read, context, offset,
+		    stored, error));
+	case FSIMG_DECMPFS_INLINE:
+		break;
+	}
+	return (fsimg_error_set(error, FSIMG_ESTATE, 0, FSIMG_OP_READER,
+	    "decmpfs table has no table kind"));
 }
 
 /* Read chunk `index`'s pair through a small window of it and its neighbours,

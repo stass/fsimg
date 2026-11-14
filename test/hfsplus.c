@@ -113,6 +113,16 @@ static void test_node_framing(void);
 static void test_record_key_bounds(void);
 static void test_forks(void);
 static void test_compression_word_table_corruption(void);
+static void test_lzfse_inline_raw_marker_returns_content(void);
+static void test_lzfse_fork_reads_compressed_then_raw_chunk(void);
+static void test_lzfse_fork_reads_full_raw_chunk(void);
+static void test_stored_inline_preserves_leading_marker_bytes(void);
+static void test_copy_inline_marker_returns_content(void);
+static void test_copy_fork_markers_return_full_and_one_byte_chunks(void);
+static void test_copy_inline_above_decode_window_is_unsupported(void);
+static void test_copy_fork_missing_last_marker_preserves_first_chunk(void);
+static void test_copy_payload_and_chunk_require_marker(void);
+static void test_marked_payloads_and_chunks_require_exact_content_length(void);
 static void test_journals(void);
 static void test_journal_size_limits(void);
 static void test_labels_info(void);
@@ -3546,11 +3556,13 @@ typedef struct compression_case {
 	gen_plan_t plan;
 	gen_object_t objects[2];
 	gen_attr_value_t attributes[2];
-	unsigned char header[1024];
+	unsigned char header[4096];
 	unsigned char *resource;
 	unsigned char *plain;
 	size_t size;
 } compression_case_t;
+
+static void compression_raw_case_init(compression_case_t *, unsigned, size_t);
 
 static uint32_t
 compression_word(const unsigned char *in)
@@ -3791,6 +3803,155 @@ compression_vector_init(compression_case_t *c, unsigned type,
 	free(raw);
 }
 
+/* Mark every payload or chunk explicitly; the content oracle is c->plain. */
+static void
+compression_raw_case_init(compression_case_t *c, unsigned type, size_t size)
+{
+	gen_compressed_chunk_t chunks[2];
+	unsigned char *raw;
+	size_t count, cursor = 0;
+	bool fork = type == 10 || type == 12;
+	unsigned char marker = type == 9 || type == 10 ? 0xcc : 0xff;
+
+	CHECK(type == 9 || type == 10 || type == 11 || type == 12);
+	CHECK(size != 0 && size <= 65537);
+	compression_case_init(c, type, size, 0);
+	count = fork ? (size + 65535) / 65536 : 1;
+	raw = malloc(size + count);
+	CHECK(raw != NULL);
+	for (size_t i = 0; i < count; i++) {
+		size_t piece = size - i * 65536;
+
+		if (fork && piece > 65536)
+			piece = 65536;
+		raw[cursor] = marker;
+		bcopy(c->plain + i * 65536, raw + cursor + 1, piece);
+		chunks[i] = (gen_compressed_chunk_t){
+		    .bytes = raw + cursor, .length = piece + 1 };
+		cursor += piece + 1;
+	}
+	if (fork) {
+		c->resource = gen_compressed_resource(chunks, count,
+		    &c->objects[0].resource_size);
+		c->objects[0].resource = c->resource;
+	} else {
+		CHECK(16 + cursor <= sizeof(c->header));
+		bcopy(raw, c->header + 16, cursor);
+		c->attributes[0].size = 16 + cursor;
+	}
+	free(raw);
+}
+
+static void
+test_lzfse_inline_raw_marker_returns_content(void)
+{
+	static const size_t sizes[] = { 1, 100 };
+	compression_case_t c;
+	char name[96];
+
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		compression_raw_case_init(&c, 11, sizes[i]);
+		snprintf(name, sizeof(name), "type11_raw_inline_size_%zu",
+		    sizes[i]);
+		compression_content(name, &c);
+		compression_case_free(&c);
+	}
+}
+
+static void
+test_lzfse_fork_reads_compressed_then_raw_chunk(void)
+{
+	const char *name = "type12_compressed_then_raw_chunk";
+	gen_compressed_chunk_t chunks[2];
+	compression_case_t c;
+	unsigned char *raw, *resource;
+	size_t size, second_size;
+
+	if (!decoder_supported())
+		return;
+	compression_vector_init(&c, 12, &lzfse_vectors[1], true, false);
+	second_size = c.size - 65536;
+	raw = malloc(second_size + 1);
+	CHECK(raw != NULL);
+	raw[0] = 0xff;
+	bcopy(c.plain + 65536, raw + 1, second_size);
+	chunks[0] = (gen_compressed_chunk_t){
+	    .bytes = c.resource + compression_word(c.resource),
+	    .length = compression_word(c.resource + 4) -
+	    compression_word(c.resource) };
+	chunks[1] = (gen_compressed_chunk_t){
+	    .bytes = raw, .length = second_size + 1 };
+	resource = gen_compressed_resource(chunks, 2, &size);
+	free(raw);
+	free(c.resource);
+	c.resource = resource;
+	c.objects[0].resource = resource;
+	c.objects[0].resource_size = size;
+
+	compression_content(name, &c);
+	compression_case_free(&c);
+}
+
+static void
+test_lzfse_fork_reads_full_raw_chunk(void)
+{
+	compression_case_t c;
+
+	compression_raw_case_init(&c, 12, 65536);
+	compression_content("type12_raw_full_chunk_stored_65537_bytes", &c);
+	compression_case_free(&c);
+}
+
+static void
+test_stored_inline_preserves_leading_marker_bytes(void)
+{
+	static const unsigned char first_bytes[] = { 0xff, 0xcc };
+	compression_case_t c;
+	char name[96];
+
+	for (size_t i = 0; i < sizeof(first_bytes); i++) {
+		compression_case_init(&c, 1, 100, 0);
+		c.plain[0] = first_bytes[i];
+		c.header[16] = first_bytes[i];
+		snprintf(name, sizeof(name), "type1_preserves_leading_%02x",
+		    first_bytes[i]);
+		compression_content(name, &c);
+		compression_case_free(&c);
+	}
+}
+
+static void
+test_copy_inline_marker_returns_content(void)
+{
+	static const size_t sizes[] = { 1, 100, 3000 };
+	compression_case_t c;
+	char name[96];
+
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		compression_raw_case_init(&c, 9, sizes[i]);
+		snprintf(name, sizeof(name), "type9_marked_inline_size_%zu",
+		    sizes[i]);
+		compression_content(name, &c);
+		compression_case_free(&c);
+	}
+}
+
+static void
+test_copy_fork_markers_return_full_and_one_byte_chunks(void)
+{
+	static const size_t sizes[] = { 65536, 65537 };
+	compression_case_t c;
+	char name[96];
+
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		compression_raw_case_init(&c, 10, sizes[i]);
+		snprintf(name, sizeof(name), "type10_marked_fork_size_%zu",
+		    sizes[i]);
+		compression_content(name, &c);
+		compression_case_free(&c);
+	}
+}
+
 static void
 test_compression_codec_content(void)
 {
@@ -3880,7 +4041,7 @@ compression_listing_failure(const char *name, compression_case_t *c,
 static void
 test_compression_listing_failures(void)
 {
-	static const unsigned unsupported[] = { 0, 2, 13 };
+	static const unsigned unsupported[] = { 0, 2, 13, 14, 15 };
 	static const char *malformed[] = { "missing_attribute", "bad_magic",
 	    "short_attribute", "nonempty_data_fork" };
 	compression_case_t c;
@@ -3927,6 +4088,19 @@ test_compression_listing_failures(void)
 	compression_case_free(&c);
 }
 
+static void
+test_copy_inline_above_decode_window_is_unsupported(void)
+{
+	compression_case_t c;
+
+	compression_raw_case_init(&c, 9, 1);
+	gen_decmpfs_header(c.header, 9, 65537);
+	compression_listing_failure("type9_inline_size_65537", &c,
+	    FSIMG_EUNSUPPORTED, "HFS Plus inline compressed file is larger "
+	    "than the decode window");
+	compression_case_free(&c);
+}
+
 /* Payload failures must be deferred: preparation still lists both siblings. */
 static void
 compression_bad_content(const char *name, compression_case_t *c, size_t confirmed,
@@ -3962,6 +4136,63 @@ compression_bad_content(const char *name, compression_case_t *c, size_t confirme
 	fixture_close(&f);
 	gen_free(&image);
 	free(bytes);
+}
+
+static void
+test_copy_fork_missing_last_marker_preserves_first_chunk(void)
+{
+	compression_case_t c;
+
+	compression_raw_case_init(&c, 10, 65537);
+	c.resource[compression_word(c.resource + 4)] = 0;
+	compression_bad_content(__func__, &c, 65536,
+	    "decmpfs uncompressed payload or chunk lacks its marker");
+	compression_case_free(&c);
+}
+
+static void
+test_copy_payload_and_chunk_require_marker(void)
+{
+	static const unsigned types[] = { 9, 10 };
+	compression_case_t c;
+	char name[96];
+
+	for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		compression_raw_case_init(&c, types[i], 100);
+		if (types[i] == 9)
+			c.header[16] = 0;
+		else
+			c.resource[compression_word(c.resource)] = 0;
+		snprintf(name, sizeof(name), "type%u_missing_marker", types[i]);
+		compression_bad_content(name, &c, 0,
+		    "decmpfs uncompressed payload or chunk lacks its marker");
+		compression_case_free(&c);
+	}
+}
+
+static void
+test_marked_payloads_and_chunks_require_exact_content_length(void)
+{
+	static const unsigned types[] = { 9, 10, 11, 12 };
+	static const size_t declared_sizes[] = { 99, 101 };
+	compression_case_t c;
+	char name[96];
+
+	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+		for (size_t i = 0; i < sizeof(declared_sizes) /
+		    sizeof(declared_sizes[0]); i++) {
+			compression_raw_case_init(&c, types[t], 100);
+			/* Change the decoded length, preserving framing. */
+			c.size = declared_sizes[i];
+			gen_decmpfs_header(c.header, types[t], c.size);
+			snprintf(name, sizeof(name),
+			    "type%u_raw_100_bytes_declared_%zu",
+			    types[t], c.size);
+			compression_bad_content(name, &c, 0,
+			    "decmpfs uncompressed payload or chunk has the wrong length");
+			compression_case_free(&c);
+		}
+	}
 }
 
 /* Frame one arbitrary stored stream without disturbing any fork relation. */
@@ -8162,6 +8393,16 @@ static void (*const tests[])(void) = {
 	test_hard_links,
 	test_attributes_compression,
 	test_compression_content,
+	test_lzfse_inline_raw_marker_returns_content,
+	test_lzfse_fork_reads_compressed_then_raw_chunk,
+	test_lzfse_fork_reads_full_raw_chunk,
+	test_stored_inline_preserves_leading_marker_bytes,
+	test_copy_inline_marker_returns_content,
+	test_copy_fork_markers_return_full_and_one_byte_chunks,
+	test_copy_inline_above_decode_window_is_unsupported,
+	test_copy_fork_missing_last_marker_preserves_first_chunk,
+	test_copy_payload_and_chunk_require_marker,
+	test_marked_payloads_and_chunks_require_exact_content_length,
 	test_compression_codec_content,
 	test_compression_codec_corruption,
 	test_compression_lzfse_scratch_budget,

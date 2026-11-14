@@ -64,6 +64,7 @@ module HfsPlusCapture
     "e4-dirlinks" => ->(_) { HfsPlusPopulateLinks.dir_links },
     "e5" => ->(_) { HfsPlusPopulateAttributes.e5 },
     "e6-sweep" => ->(_) { HfsPlusPopulateCompression.e6_sweep },
+    "aa-compression" => ->(_) { HfsPlusPopulateCompression.aa_compression },
     "e7" => ->(block_size) { HfsPlusPopulateFragmentation.e7(block_size) },
     "e9-create" => ->(_) { HfsPlusPopulateLarge.e9_create },
     "e9-delete" => ->(_) { HfsPlusPopulateLarge.e9_delete },

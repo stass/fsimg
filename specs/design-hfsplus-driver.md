@@ -32,7 +32,7 @@ the module split, the tests and the gates; the drivers share no code.
 | `btree.c` | The B-tree reader: node reads and framing, header records, keyed search, the leaf cursor, level iteration for verification |
 | `catalog.c` | Catalog record validation, the kind table, thread lookup, hard-link resolution, the record-to-entry mapping |
 | `attributes.c` | The attribute scan of one node ID, attribute record validation, the extra-data mark, the compression attribute |
-| `compress.c` | The compression types HFS Plus admits, the resource fork's reads for the shared framing validator, the decode window and dispatch to zlib, LZVN and LZFSE |
+| `compress.c` | The compression types HFS Plus admits, the resource fork's reads for the shared framing validator, the decode window and dispatch from the shared type table to the raw marker, zlib, LZVN and LZFSE |
 | `directory.c` | `prepare`, `replay`, `keys` and `key`; format-owned root children |
 | `read.c` | `fsimg_hfsplus_reader_ops`: open, close, resolve and volume information |
 | `verify.c` | Full verification: tree structure, the catalog pass, the merges, the bitmap comparison, the alternate header |
@@ -354,7 +354,7 @@ zlib streams use the common
 [allocation adapter](design-binary-primitives.md), so their state is charged
 to the same context. A compressed entry's content state holds the type, the
 uncompressed size, the resource fork's index for chunked types, the chunk
-count `ceil(size / 65536)`, and the chunk table's bounds. For types 8 and
+count `ceil(size / 65536)`, and the chunk table's bounds. For types 8, 10 and
 12 the table's base is fork offset zero and its end `T` is the first
 word's value, read from offset zero and required to lie in
 `[4 * (count + 1), logicalSize]`, never computed from the count; the
@@ -367,19 +367,26 @@ When chunk `i` is first needed, the reader reads its entries through a
 small window over the table, so the table is never held whole: for type 4
 the pair of chunk `i` and its neighbours' pairs from the table interval, the
 former carrying the chunk's own length and the others bounding it, and for
-types 8 and 12 the words `i` and `i + 1`, whose
+types 8, 10 and 12 the words `i` and `i + 1`, whose
 difference is the length. The chunk, whose type 4 offset is counted from
-the count, is checked against the payload interval or, for types 8 and
-12, against the table's end `T` and `logicalSize`.
+the count, is checked against the payload interval or, for types 8, 10
+and 12, against the table's end `T` and `logicalSize`.
 
 These table and chunk
 checks, with the decoders of the compression header, the resource header
-and the table entries, are the shared framing validator
+and the table entries and each type's facts, are the shared module
 `lib/formats/decmpfs.[ch]`, which
 [APFS shares](design-apfs-driver.md#compression-framing): `open` checks
-the table against the fork and the size, `chunk` checks one entry, and
+the table against the fork and the size, `chunk` checks one entry, the
+type table gives a type's storage, table kind, codec and raw marker, and
 `compress.c` backs their reads with the resource fork's index. Their
-rejections name the framing, not HFS Plus.
+rejections name the framing, not HFS Plus. `compress.c` admits an explicit
+list of types, every type macOS writes but LZBITMAP's 13 and 14, so a type
+added to the shared table stays unsupported here until listed. It decodes a
+payload or chunk through the module's raw-marker rule: content stored
+unencoded, after the marker or, for type 1, whole, is copied; a type 9 or 10
+payload or chunk without its marker is `FSIMG_ECORRUPT`; and a codec's
+stream goes to its decoder.
 
 Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is
 the window's current chunk, charges the bytes consumed and produced as

@@ -18,6 +18,12 @@
 #
 # `e6(tool)` takes "zlib", "lzvn", "lzfse" or "ditto"; `e6_sweep` runs the
 # sweep with every tool.
+#
+# `aa_compression` writes with macOS's own compressor instead, Apple Archive's
+# `aa extract -afsc ALG -afsc-all`, under each AA_CODECS name, the sources
+# text-, random- and zeros-N at AA_SIZES and mixed-N: what APFS experiment E7
+# found on APFS (raw-marked LZFSE, the uncompressed types 9 and 10 of
+# `-afsc copy`), observed on HFS Plus.
 require "tmpdir"
 require_relative "populate"
 
@@ -30,6 +36,8 @@ module HfsPlusPopulateCompression
   SWEEP_SIZES = [65_536, 65_537, 100_000, 262_144, 1 << 20, 1 << 22, 1 << 24].freeze
   FIT_SIZES = [2000, 4000, 6000, 8000, 10_000, 12_000, 16_000].freeze
   TOOLS = %w[zlib lzvn lzfse ditto].freeze
+  AA_CODECS = %w[zlib lzvn lzfse copy].freeze
+  AA_SIZES = [1, 100, 3000, 65_536, 65_537].freeze
   WORDS = %w[the of and a to in is you that it he was for on are as with his they at be this from have or by one had not but what all were when we there can].freeze
 
   module_function
@@ -47,6 +55,26 @@ module HfsPlusPopulateCompression
   def e6_sweep
     TOOLS.product(SWEEP_SIZES).map { |tool, size| compress_step(tool, "sweep-#{tool}-#{size}", content("zeros", size)) } +
       TOOLS.product(FIT_SIZES).map { |tool, size| compress_step(tool, "fit-#{tool}-#{size}", content("text", size)) }
+  end
+
+  def aa_compression
+    sources = AA_SIZES.product(%w[text random zeros]).map { |size, kind| ["#{kind}-#{size}", content(kind, size)] } <<
+      ["mixed-#{MIXED_SIZE}", content("mixed", MIXED_SIZE)]
+    AA_CODECS.product(sources).map { |codec, (name, bytes)| aa_step(codec, "aa-#{codec}-#{name}", bytes) }
+  end
+
+  # One file through an archive extracted with the codec; `stat` reports the
+  # compressed flag, as aa leaves a file it gains nothing on uncompressed.
+  def aa_step(codec, name, bytes)
+    P.step("aa-#{codec}", name) do |root|
+      Dir.mktmpdir("aa-src") do |src|
+        File.binwrite(File.join(src, name), bytes)
+        archive = File.join(src, "a.aar")
+        P.tool("aa", "archive", "-d", src, "-include-path", name, "-o", archive)
+        P.tool("aa", "extract", "-i", archive, "-d", root, "-afsc", codec, "-afsc-all")
+      end
+      P.observe(P.tool("stat", "-f", "%Sf", File.join(root, name)))
+    end
   end
 
   def compress_step(tool, name, bytes, force: false)

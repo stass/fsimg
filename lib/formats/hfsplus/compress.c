@@ -12,24 +12,14 @@
 #include "hfsplus.h"
 
 /*
- * Transparent compression, the one owner of the encoded forms: the types and
- * their rules, the decode window and the decoders. The framing of the header and
- * the chunk tables is the shared decmpfs validator's, which reads the resource
- * fork through its index here. A compressed file's bytes reach delivery as held
- * extents, one decoded chunk at a time, so its memory does not grow with the
- * file and a stream that inflates without end stops at the window.
+ * Transparent compression: which types HFS Plus admits, the decode window and
+ * the dispatch to the decoders. The shared decmpfs module owns the rest: each
+ * type's facts and its raw marker's rule, and the framing of the header and
+ * the chunk tables, which it reads from the resource fork through its index
+ * here. A compressed file's bytes reach delivery as held extents, one
+ * decoded chunk at a time, so its memory does not grow with the file and a
+ * stream that inflates without end stops at the window.
  */
-
-#define TYPE_STORED		1u	/* the attribute's bytes, unencoded */
-#define TYPE_ZLIB_INLINE	3u
-#define TYPE_ZLIB_FORK		4u
-#define TYPE_LZVN_INLINE	7u
-#define TYPE_LZVN_FORK		8u
-#define TYPE_LZFSE_INLINE	11u
-#define TYPE_LZFSE_FORK		12u
-
-#define ZLIB_RAW_MARKER		0xffu
-#define LZVN_RAW_MARKER		0x06u	/* the code that ends an LZVN stream */
 
 _Static_assert(FSIMG_DECMPFS_CHUNK_BYTES <= FSIMG_LZFSE_OUTPUT_MAX &&
     FSIMG_DECMPFS_STORED_MAX <= FSIMG_LZFSE_INPUT_MAX,
@@ -54,11 +44,8 @@ struct hfsplus_window {
 	unsigned char		 output[FSIMG_DECMPFS_CHUNK_BYTES];
 };
 
-static bool fork_table(uint8_t, fsimg_decmpfs_kind_t *);
+static bool admitted(uint32_t, fsimg_decmpfs_info_t *);
 static fsimg_status_t window_ready(fsimg_reader_t *, fsimg_error_t *);
-static bool raw_marked(const hfsplus_window_t *, size_t, unsigned char);
-static fsimg_status_t raw_decode(hfsplus_window_t *, size_t, size_t,
-    fsimg_error_t *);
 static fsimg_status_t zlib_failed(const hfsplus_window_t *, int,
     fsimg_error_t *);
 static fsimg_status_t zlib_decode(fsimg_reader_t *, hfsplus_window_t *, size_t,
@@ -75,10 +62,35 @@ static fsimg_status_t table_open(fsimg_reader_t *, const hfsplus_file_t *,
     fsimg_decmpfs_kind_t, fsimg_error_t *);
 static fsimg_status_t chunk_load(fsimg_reader_t *, uint64_t, fsimg_error_t *);
 
+/* The types this reader decodes, with their facts: every type macOS writes
+ * but LZBITMAP's 13 and 14, which have no public decoder. A type not listed is
+ * unsupported, so a row added to the shared table changes nothing here.
+ */
+static bool
+admitted(uint32_t type, fsimg_decmpfs_info_t *info)
+{
+	switch (type) {
+	case FSIMG_DECMPFS_TYPE_STORED:
+	case FSIMG_DECMPFS_TYPE_ZLIB_INLINE:
+	case FSIMG_DECMPFS_TYPE_ZLIB_FORK:
+	case FSIMG_DECMPFS_TYPE_LZVN_INLINE:
+	case FSIMG_DECMPFS_TYPE_LZVN_FORK:
+	case FSIMG_DECMPFS_TYPE_COPY_INLINE:
+	case FSIMG_DECMPFS_TYPE_COPY_FORK:
+	case FSIMG_DECMPFS_TYPE_LZFSE_INLINE:
+	case FSIMG_DECMPFS_TYPE_LZFSE_FORK:
+		return (fsimg_decmpfs_type_info(type, info));
+	default:
+		return (false);
+	}
+}
+
 fsimg_status_t
 hfsplus_compress_check(const hfsplus_file_t *file,
     const hfsplus_attr_scan_t *scan, fsimg_error_t *error)
 {
+	fsimg_decmpfs_info_t info;
+
 	if (!scan->compression)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compressed file has no compression attribute"));
@@ -86,60 +98,31 @@ hfsplus_compress_check(const hfsplus_file_t *file,
 	    file->data_fork.total_blocks != 0)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compressed file has a nonempty data fork"));
-	switch (scan->header.type) {
-	case TYPE_STORED:
-	case TYPE_ZLIB_INLINE:
-	case TYPE_LZVN_INLINE:
-	case TYPE_LZFSE_INLINE:
-		if (scan->header.uncompressed_size > FSIMG_DECMPFS_CHUNK_BYTES)
-			return (hfsplus_unsupported(error,
-			    "HFS Plus inline compressed file is larger than "
-			    "the decode window"));
-		return (FSIMG_OK);
-	case TYPE_ZLIB_FORK:
-	case TYPE_LZVN_FORK:
-	case TYPE_LZFSE_FORK:
-		return (FSIMG_OK);
-	default:
+	if (!admitted(scan->header.type, &info))
 		return (hfsplus_unsupported(error,
 		    "HFS Plus compression type is not supported"));
-	}
+	if (info.kind == FSIMG_DECMPFS_INLINE &&
+	    scan->header.uncompressed_size > FSIMG_DECMPFS_CHUNK_BYTES)
+		return (hfsplus_unsupported(error,
+		    "HFS Plus inline compressed file is larger than "
+		    "the decode window"));
+	return (FSIMG_OK);
 }
 
 bool
 hfsplus_compress_known(uint8_t type)
 {
-	return (type == TYPE_STORED || type == TYPE_ZLIB_INLINE ||
-	    type == TYPE_ZLIB_FORK || type == TYPE_LZVN_INLINE ||
-	    type == TYPE_LZVN_FORK || type == TYPE_LZFSE_INLINE ||
-	    type == TYPE_LZFSE_FORK);
-}
+	fsimg_decmpfs_info_t info;
 
-/* Whether a type keeps its chunks in the resource fork, and in which table kind:
- * the one statement of it, so a new type states its kind rather than inherit one.
- */
-static bool
-fork_table(uint8_t type, fsimg_decmpfs_kind_t *kind)
-{
-	switch (type) {
-	case TYPE_ZLIB_FORK:
-		*kind = FSIMG_DECMPFS_TABLE_RESOURCE;
-		return (true);
-	case TYPE_LZVN_FORK:
-	case TYPE_LZFSE_FORK:
-		*kind = FSIMG_DECMPFS_TABLE_WORDS;
-		return (true);
-	default:
-		return (false);
-	}
+	return (admitted(type, &info));
 }
 
 bool
 hfsplus_compress_consumes_fork(uint8_t type)
 {
-	fsimg_decmpfs_kind_t kind;
+	fsimg_decmpfs_info_t info;
 
-	return (fork_table(type, &kind));
+	return (admitted(type, &info) && info.kind != FSIMG_DECMPFS_INLINE);
 }
 
 void
@@ -185,26 +168,6 @@ window_ready(fsimg_reader_t *reader, fsimg_error_t *error)
 	return (FSIMG_OK);
 }
 
-/* Zlib and LZVN share one rule and differ only in the marker: a stored span that
- * begins with its codec's marker is that byte followed by the chunk, whole.
- */
-static bool
-raw_marked(const hfsplus_window_t *window, size_t stored, unsigned char marker)
-{
-	return (stored != 0 && window->input[0] == marker);
-}
-
-static fsimg_status_t
-raw_decode(hfsplus_window_t *window, size_t stored, size_t expected,
-    fsimg_error_t *error)
-{
-	if (stored - 1 != expected)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus raw chunk has the wrong length"));
-	bcopy(window->input + 1, window->output, expected);
-	return (FSIMG_OK);
-}
-
 /* A zlib result that says nothing about the chunk: an allocation failure as the
  * adapter recorded it, or a fault of fsimg or of the zlib library.
  */
@@ -230,8 +193,6 @@ zlib_decode(fsimg_reader_t *reader, hfsplus_window_t *window, size_t stored,
 	z_stream *stream = &window->stream;
 	int code;
 
-	if (raw_marked(window, stored, ZLIB_RAW_MARKER))
-		return (raw_decode(window, stored, expected, error));
 	if (!window->inflating) {
 		fsimg_zlib_memory_bind(&window->memory, reader->ctx, stream);
 		code = inflateInit(stream);
@@ -256,8 +217,8 @@ zlib_decode(fsimg_reader_t *reader, hfsplus_window_t *window, size_t stored,
 	return (FSIMG_OK);
 }
 
-/* The raw marker's rule, then the imported decoder, bounded by exactly expected
- * bytes of output; a stream ending short of them is the image's fault too.
+/* The imported decoder, bounded by exactly expected bytes of output; a stream
+ * ending short of them is the image's fault too.
  */
 static fsimg_status_t
 chunk_decode_lzvn(hfsplus_window_t *window, size_t stored, size_t expected,
@@ -266,8 +227,6 @@ chunk_decode_lzvn(hfsplus_window_t *window, size_t stored, size_t expected,
 	fsimg_codec_step_t step;
 	fsimg_status_t status;
 
-	if (raw_marked(window, stored, LZVN_RAW_MARKER))
-		return (raw_decode(window, stored, expected, error));
 	status = fsimg_lzvn_decode(window->input, stored, window->output,
 	    expected, &step, error);
 	if (status != FSIMG_OK)
@@ -279,7 +238,7 @@ chunk_decode_lzvn(hfsplus_window_t *window, size_t stored, size_t expected,
 }
 
 /* The imported decoder, bounded the same way, with its state charged on the first
- * use. LZFSE has no raw marker: incompressible content is an uncompressed block.
+ * use.
  */
 static fsimg_status_t
 chunk_decode_lzfse(fsimg_reader_t *reader, hfsplus_window_t *window,
@@ -310,6 +269,8 @@ chunk_decode_lzfse(fsimg_reader_t *reader, hfsplus_window_t *window,
 
 /* Decode the current entry's stored bytes, in input, to output: expected bytes
  * or a failure. The work is charged first, which also polls for cancellation.
+ * The shared raw-marker rule comes before the codec: it finds content stored
+ * unencoded, which is copied, or a codec's stream, which goes to its decoder.
  * The output is not valid until the caller says so.
  */
 static fsimg_status_t
@@ -318,32 +279,38 @@ window_decode(fsimg_reader_t *reader, size_t stored, size_t expected,
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	hfsplus_window_t *window = hfsplus->window;
+	const unsigned char *content;
+	fsimg_decmpfs_info_t info;
 	fsimg_status_t status;
 
 	status = fsimg_session_charge(&reader->session, 0, 0,
 	    (uint64_t)stored + expected, error);
 	if (status != FSIMG_OK)
 		return (status);
-	switch (hfsplus->current.compression) {
-	case TYPE_STORED:
-		if (stored != expected)
-			return (hfsplus_corrupt(error,
-			    "HFS Plus stored payload has the wrong length"));
-		bcopy(window->input, window->output, expected);
-		return (FSIMG_OK);
-	case TYPE_ZLIB_INLINE:
-	case TYPE_ZLIB_FORK:
-		return (zlib_decode(reader, window, stored, expected, error));
-	case TYPE_LZVN_INLINE:
-	case TYPE_LZVN_FORK:
-		return (chunk_decode_lzvn(window, stored, expected, error));
-	case TYPE_LZFSE_INLINE:
-	case TYPE_LZFSE_FORK:
-		return (chunk_decode_lzfse(reader, window, stored, expected, error));
-	default:
+	if (!admitted(hfsplus->current.compression, &info))
 		return (hfsplus_corrupt(error,
 		    "invalid prepared HFS Plus compression type"));
+	status = fsimg_decmpfs_unencoded(&info, window->input, stored, expected,
+	    &content, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (content != NULL) {
+		bcopy(content, window->output, expected);
+		return (FSIMG_OK);
 	}
+	switch (info.codec) {
+	case FSIMG_DECMPFS_CODEC_ZLIB:
+		return (zlib_decode(reader, window, stored, expected, error));
+	case FSIMG_DECMPFS_CODEC_LZVN:
+		return (chunk_decode_lzvn(window, stored, expected, error));
+	case FSIMG_DECMPFS_CODEC_LZFSE:
+		return (chunk_decode_lzfse(reader, window, stored, expected, error));
+	case FSIMG_DECMPFS_CODEC_NONE:		/* always unencoded content */
+	case FSIMG_DECMPFS_CODEC_LZBITMAP:	/* never admitted */
+		break;
+	}
+	return (hfsplus_corrupt(error,
+	    "invalid prepared HFS Plus compression type"));
 }
 
 /* The framing validator's way to the bytes of the current entry's resource
@@ -395,7 +362,7 @@ hfsplus_compress_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	const hfsplus_child_t *current = &hfsplus->current;
-	fsimg_decmpfs_kind_t kind;
+	fsimg_decmpfs_info_t info;
 	hfsplus_attr_scan_t scan;
 	hfsplus_window_t *window;
 	fsimg_status_t status;
@@ -417,11 +384,17 @@ hfsplus_compress_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 	    scan.header.uncompressed_size != current->size)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compression attribute changed since it was listed"));
-	if (fork_table(current->compression, &kind)) {
-		status = table_open(reader, file, kind, error);
+	if (!admitted(current->compression, &info))
+		return (hfsplus_corrupt(error,
+		    "invalid prepared HFS Plus compression type"));
+	switch (info.kind) {
+	case FSIMG_DECMPFS_TABLE_RESOURCE:
+	case FSIMG_DECMPFS_TABLE_WORDS:
+		status = table_open(reader, file, info.kind, error);
 		if (status != FSIMG_OK)
 			return (status);
-	} else {
+		break;
+	case FSIMG_DECMPFS_INLINE:
 		status = window_decode(reader, scan.payload_bytes,
 		    (size_t)current->size, error);
 		if (status != FSIMG_OK)
@@ -429,6 +402,7 @@ hfsplus_compress_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 		window->chunk = 0;
 		window->length = (size_t)current->size;
 		window->valid = true;
+		break;
 	}
 	hfsplus->compressed.open = true;
 	return (FSIMG_OK);

@@ -1279,7 +1279,7 @@ Raw markers. A zlib payload or chunk stored raw begins `ff`: the one-byte files
 random chunk of `forced-mixed`, 65537 bytes long. An LZVN chunk stored raw
 begins `06`: the `ditto` last chunk `0668` and its random chunk, 65537 bytes
 long (`0660c676`). `afsctool` LZVN compresses the random chunk instead, 66145
-bytes. LZFSE has no raw marker: an incompressible chunk or file is an LZFSE
+bytes. `afsctool` writes no LZFSE raw marker: an incompressible chunk or file is an LZFSE
 uncompressed block, `62 76 78 2d` (`bvx-`), a count and the bytes, 13 bytes for
 one byte (type 11 payload `6276782d 01000000 ...`), or a compressed block that
 grew (`bvx2`, 66280 bytes for the random chunk). The largest stored chunk

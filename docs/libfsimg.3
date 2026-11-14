@@ -53,8 +53,10 @@ stores each regular file that compresses into fewer blocks as one-block
 LZ4 clusters.
 Planning encodes such a file once to measure it and emission once more,
 and each encoding counts its input bytes as work.
-A file stored in its attribute or compressed with zlib, LZVN or LZFSE is
-decoded, unless its inline content is larger than 64 KiB or its compression
+A file stored in its attribute, stored uncompressed behind a marker in its
+attribute or resource fork (types 9 and 10), or compressed with zlib, LZVN
+or LZFSE is decoded, unless its inline content is larger than 64 KiB or its
+compression
 attribute is not stored inline; those files and any other compression type
 fail with
 .Dv FSIMG_EUNSUPPORTED .

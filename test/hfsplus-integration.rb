@@ -67,7 +67,17 @@ module HfsPlusIntegration
       error: /block size is too large: (?:66145|4294888110|4294965730)/),
     # hfsdump emits bad bytes for these type 8 final partial resource chunks.
     Limitation.new(oracle: "hfsdump", volume: /\Ah-hfsplus-8388608-e6-ditto\z/,
-      member: %r{\A/shape-(?:262145|393217|589825)\z}, error: /SHA256 differs:/)
+      member: %r{\A/shape-(?:262145|393217|589825)\z}, error: /SHA256 differs:/),
+    # TSK reads neither LZFSE nor the 0xCC-marked types 9 and 10 of aa -afsc copy.
+    Limitation.new(oracle: "sleuth", volume: /\Ah-hfsplus-16777216-aa-compression\z/,
+      member: %r{\A/aa-(?:copy|lzfse)-}, error: /Attribute 4352 not found/),
+    # hfsdump reports types 9 and 10 as empty files.
+    Limitation.new(oracle: "hfsdump", volume: /\Ah-hfsplus-16777216-aa-compression\z/,
+      member: %r{\A/aa-copy-}, error: /hfsdump size "0", fsimg \d+\z/),
+    # hfsdump hands a 0xFF raw-marked LZFSE payload or chunk to its decoder.
+    Limitation.new(oracle: "hfsdump", volume: /\Ah-hfsplus-16777216-aa-compression\z/,
+      member: %r{\A/aa-lzfse-(?:mixed-196608|(?:random|text|zeros)-(?:1|100)|random-3000|(?:text|zeros)-65537)\z},
+      error: /SHA256 differs:/)
   ].freeze
 
   Kind = Data.define(:mode, :fls)

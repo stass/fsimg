@@ -118,14 +118,30 @@ it has in hand, at most three 8-byte table entries. It offers:
   interval, is no longer than the stored bound and does not overlap its
   neighbours, and returns the range.
 
+* the type table: given a compression type, whether the module knows it
+  and, if so, its facts: where its bytes are kept (inline after the
+  header, or the resource fork behind a pair table or a word table), its
+  codec (none, zlib, LZVN, LZFSE or LZBITMAP) and its raw marker, `0xFF`,
+  `0x06`, `0xCC` or none. Under a codec, a payload or chunk that begins
+  with the marker is the content after it; under none, every payload and
+  chunk of a marked type is the marker and the content, and an unmarked
+  type's payload is the content;
+* the raw-marker rule: given a type's facts and one payload or chunk with
+  its decoded length, it returns the content stored unencoded, or says the
+  bytes are the codec's stream, or rejects a missing `0xCC` or unencoded
+  content of the wrong length.
+
 A rejection is `FSIMG_ECORRUPT` with a message that names the framing and
 no format, and a failure of the callback passes through unchanged. The
 module owns the five decoders of the framing, for the header, the resource
 header, the resource table, a pair-table entry and a word-table entry, with
-their types and length constants, and the relation checks of `open` and
-`chunk`. Each driver's `compress.c` owns the rest: which types the format
-admits, how the stored bytes are reached, the decode window, the dispatch
-of a chunk to its decoder with the inline markers, and the work charges.
+their types and length constants, the relation checks of `open` and
+`chunk`, the type table, the one statement of every type's facts, and the
+raw-marker rule. Each driver's `compress.c` owns the rest: an explicit list
+of the types the format admits, so a row added to the table admits nothing
+by itself, how the stored bytes are reached, the decode window, the copy of
+unencoded content or the call of the codec's decoder, and the work
+charges.
 The [plan](../docs/apfs-plan.md#common-changes) names the HFS Plus
 functions the module is built from.
 
@@ -133,12 +149,15 @@ The APFS framing is the HFS Plus one field for field (E7): the
 header, the zlib type's resource header, resource table and pairs, and the
 offset words of types 8 and 12, with the relations that `open` and
 `chunk` check, so APFS uses the shared validator unchanged and keeps no validator
-of its own. Type 10 uses the word table of types 8 and 12. What APFS adds
-is dispatch, which `compress.c` owns: an LZFSE payload or chunk stored
-uncompressed begins with the raw marker `0xFF`, as zlib's does, while a
-compressed one begins with `bvx2` or `bvxn`, and a type 9 payload or
-type 10 chunk is the marker `0xCC` and the bytes, as the
-[format design](design-apfs.md#transparent-compression) states. The
+of its own. Type 10 uses the word table of types 8 and 12. The type table
+holds what E7 found, which the HFS Plus reader shares: an LZFSE payload or
+chunk stored uncompressed begins with the raw marker `0xFF`, as zlib's
+does, while a compressed one begins with `bvx2` or `bvxn`, and a type 9
+payload or type 10 chunk is the marker `0xCC` and the bytes, as the
+[format design](design-apfs.md#transparent-compression) states. What APFS
+adds is admission: it lists types 3, 4, 7 to 12, leaving out 1, of which
+no specimen exists, and 13 and 14, which have no decoder, while HFS Plus
+also lists type 1 for its documented meaning. The
 storage around the framing is APFS's own: the `com.apple.decmpfs` value
 may be held in its record or in a stream, a resource fork that supplies
 content is always a stream, and both streams are read through the content

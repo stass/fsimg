@@ -12,6 +12,10 @@
 #include "decmpfs.h"
 #include "test.h"
 
+static void test_type_info_reports_facts_and_preserves_unknown_output(void);
+static void test_unencoded_selects_content_and_preserves_output_on_corruption(void);
+static void test_inline_open_rejects_without_reading_or_changing_table(void);
+
 /* The decmpfs framing: the record decoders, then the relation checks of a
  * chunk table and its chunks over an in-memory resource fork.
  */
@@ -153,6 +157,192 @@ test_compression_header(void)
 	}
 	put_le(p + COMPRESSION_SIZE, UINT64_C(0x8000000000000000), 8);
 	reject(decode_header, p, 16, sizeof(header), "header signed size bound");
+}
+
+static void
+test_type_info_reports_facts_and_preserves_unknown_output(void)
+{
+	static const struct {
+		uint32_t type;
+		bool known;
+		fsimg_decmpfs_kind_t kind;
+		fsimg_decmpfs_codec_t codec;
+		int marker;
+	} cases[] = {
+		{ .type = 0, .known = false },
+		{ .type = 1, .known = true,
+		  .kind = FSIMG_DECMPFS_INLINE,
+		  .codec = FSIMG_DECMPFS_CODEC_NONE,
+		  .marker = FSIMG_DECMPFS_UNMARKED },
+		{ .type = 2, .known = false },
+		{ .type = 3, .known = true,
+		  .kind = FSIMG_DECMPFS_INLINE,
+		  .codec = FSIMG_DECMPFS_CODEC_ZLIB,
+		  .marker = 0xff },
+		{ .type = 4, .known = true,
+		  .kind = FSIMG_DECMPFS_TABLE_RESOURCE,
+		  .codec = FSIMG_DECMPFS_CODEC_ZLIB,
+		  .marker = 0xff },
+		{ .type = 5, .known = false },
+		{ .type = 6, .known = false },
+		{ .type = 7, .known = true,
+		  .kind = FSIMG_DECMPFS_INLINE,
+		  .codec = FSIMG_DECMPFS_CODEC_LZVN,
+		  .marker = 0x06 },
+		{ .type = 8, .known = true,
+		  .kind = FSIMG_DECMPFS_TABLE_WORDS,
+		  .codec = FSIMG_DECMPFS_CODEC_LZVN,
+		  .marker = 0x06 },
+		{ .type = 9, .known = true,
+		  .kind = FSIMG_DECMPFS_INLINE,
+		  .codec = FSIMG_DECMPFS_CODEC_NONE,
+		  .marker = 0xcc },
+		{ .type = 10, .known = true,
+		  .kind = FSIMG_DECMPFS_TABLE_WORDS,
+		  .codec = FSIMG_DECMPFS_CODEC_NONE,
+		  .marker = 0xcc },
+		{ .type = 11, .known = true,
+		  .kind = FSIMG_DECMPFS_INLINE,
+		  .codec = FSIMG_DECMPFS_CODEC_LZFSE,
+		  .marker = 0xff },
+		{ .type = 12, .known = true,
+		  .kind = FSIMG_DECMPFS_TABLE_WORDS,
+		  .codec = FSIMG_DECMPFS_CODEC_LZFSE,
+		  .marker = 0xff },
+		{ .type = 13, .known = true,
+		  .kind = FSIMG_DECMPFS_INLINE,
+		  .codec = FSIMG_DECMPFS_CODEC_LZBITMAP,
+		  .marker = 0xff },
+		{ .type = 14, .known = true,
+		  .kind = FSIMG_DECMPFS_TABLE_WORDS,
+		  .codec = FSIMG_DECMPFS_CODEC_LZBITMAP,
+		  .marker = 0xff },
+		{ .type = 15, .known = false },
+		{ .type = 16, .known = false },
+		{ .type = 255, .known = false },
+		{ .type = UINT32_MAX, .known = false }
+	};
+	fsimg_decmpfs_info_t info, before;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		memset(&info, 0xa5, sizeof(info));
+		bcopy(&info, &before, sizeof(info));
+		case_check(fsimg_decmpfs_type_info(cases[i].type, &info) ==
+		    cases[i].known, "type recognition", cases[i].type);
+		if (!cases[i].known) {
+			case_check(bcmp(&info, &before, sizeof(info)) == 0,
+			    "unknown type preserves output", cases[i].type);
+			continue;
+		}
+		case_check(info.kind == cases[i].kind, "type kind",
+		    cases[i].type);
+		case_check(info.codec == cases[i].codec, "type codec",
+		    cases[i].type);
+		case_check(info.marker == cases[i].marker, "type marker",
+		    cases[i].type);
+	}
+}
+
+static void
+test_unencoded_selects_content_and_preserves_output_on_corruption(void)
+{
+	static const unsigned char ff[] = { 0xff, 'a', 'b' };
+	static const unsigned char cc[] = { 0xcc, 'a', 'b' };
+	static const unsigned char lzvn[] = { 0x06, 'a', 'b' };
+	static const unsigned char zlib[] = { 0x78, 'a', 'b' };
+	static const unsigned char lzfse[] = { 'b', 'v', 'x' };
+	static const unsigned char sentinel = 0xa5;
+	static const char lacks_marker[] =
+	    "decmpfs uncompressed payload or chunk lacks its marker";
+	static const char wrong_length[] =
+	    "decmpfs uncompressed payload or chunk has the wrong length";
+	static const struct {
+		const char *name;
+		uint32_t type;
+		const unsigned char *bytes;
+		size_t stored;
+		size_t expected;
+		fsimg_status_t status;
+		const unsigned char *content;
+		const char *message;
+	} cases[] = {
+		{ .name = "zlib raw marker selects content", .type = 3,
+		  .bytes = ff, .stored = 3, .expected = 2,
+		  .status = FSIMG_OK, .content = ff + 1 },
+		{ .name = "zlib stream goes to codec", .type = 3,
+		  .bytes = zlib, .stored = 3, .expected = 2,
+		  .status = FSIMG_OK, .content = NULL },
+		{ .name = "lzvn raw marker selects content", .type = 7,
+		  .bytes = lzvn, .stored = 3, .expected = 2,
+		  .status = FSIMG_OK, .content = lzvn + 1 },
+		{ .name = "lzfse raw marker selects content", .type = 11,
+		  .bytes = ff, .stored = 3, .expected = 2,
+		  .status = FSIMG_OK, .content = ff + 1 },
+		{ .name = "lzfse stream goes to codec", .type = 11,
+		  .bytes = lzfse, .stored = 3, .expected = 2,
+		  .status = FSIMG_OK, .content = NULL },
+		{ .name = "copy marker selects content", .type = 9,
+		  .bytes = cc, .stored = 3, .expected = 2,
+		  .status = FSIMG_OK, .content = cc + 1 },
+		{ .name = "copy requires its marker", .type = 9,
+		  .bytes = ff, .stored = 3, .expected = 2,
+		  .status = FSIMG_ECORRUPT, .content = &sentinel,
+		  .message = lacks_marker },
+		{ .name = "empty copy lacks marker", .type = 9,
+		  .bytes = cc, .stored = 0, .expected = 0,
+		  .status = FSIMG_ECORRUPT, .content = &sentinel,
+		  .message = lacks_marker },
+		{ .name = "stored ff is content", .type = 1,
+		  .bytes = ff, .stored = 3, .expected = 3,
+		  .status = FSIMG_OK, .content = ff },
+		{ .name = "stored cc is content", .type = 1,
+		  .bytes = cc, .stored = 3, .expected = 3,
+		  .status = FSIMG_OK, .content = cc },
+		{ .name = "empty stored payload is empty content", .type = 1,
+		  .bytes = ff, .stored = 0, .expected = 0,
+		  .status = FSIMG_OK, .content = ff },
+		{ .name = "lone copy marker is empty content", .type = 9,
+		  .bytes = cc, .stored = 1, .expected = 0,
+		  .status = FSIMG_OK, .content = cc + 1 },
+		{ .name = "stored content too short", .type = 1,
+		  .bytes = ff, .stored = 3, .expected = 4,
+		  .status = FSIMG_ECORRUPT, .content = &sentinel,
+		  .message = wrong_length },
+		{ .name = "stored content too long", .type = 1,
+		  .bytes = cc, .stored = 3, .expected = 2,
+		  .status = FSIMG_ECORRUPT, .content = &sentinel,
+		  .message = wrong_length },
+		{ .name = "marked content too short", .type = 9,
+		  .bytes = cc, .stored = 3, .expected = 3,
+		  .status = FSIMG_ECORRUPT, .content = &sentinel,
+		  .message = wrong_length },
+		{ .name = "marked content too long", .type = 3,
+		  .bytes = ff, .stored = 3, .expected = 1,
+		  .status = FSIMG_ECORRUPT, .content = &sentinel,
+		  .message = wrong_length },
+		{ .name = "empty zlib input goes to codec", .type = 3,
+		  .bytes = ff, .stored = 0, .expected = 2,
+		  .status = FSIMG_OK, .content = NULL }
+	};
+	fsimg_decmpfs_info_t info;
+	fsimg_status_t status;
+	const unsigned char *content;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_error_t error = { 0 };
+
+		CHECK(fsimg_decmpfs_type_info(cases[i].type, &info));
+		content = &sentinel;
+		status = fsimg_decmpfs_unencoded(&info, cases[i].bytes,
+		    cases[i].stored, cases[i].expected, &content, &error);
+		case_check(status == cases[i].status, cases[i].name,
+		    cases[i].stored);
+		case_check(content == cases[i].content, cases[i].name,
+		    cases[i].stored);
+		if (cases[i].message != NULL)
+			case_check(strcmp(error.message, cases[i].message) == 0,
+			    cases[i].name, cases[i].stored);
+	}
 }
 
 static void
@@ -344,6 +534,18 @@ check_open_rejection(memory_fork_t *fork, fsimg_decmpfs_kind_t kind,
 	CHECK(error.status == status);
 	CHECK(strcmp(error.message, message) == 0);
 	CHECK(bcmp(&table, &before, sizeof(table)) == 0);
+}
+
+static void
+test_inline_open_rejects_without_reading_or_changing_table(void)
+{
+	unsigned char bytes[128];
+	memory_fork_t fork;
+
+	fork = word_fork(bytes, 1, 8);
+	check_open_rejection(&fork, FSIMG_DECMPFS_INLINE, 1, FSIMG_ESTATE,
+	    "decmpfs kind is not a chunk table");
+	CHECK(fork.reads == 0);
 }
 
 static void
@@ -697,6 +899,9 @@ int
 main(void)
 {
 	test_compression_header();
+	test_type_info_reports_facts_and_preserves_unknown_output();
+	test_unencoded_selects_content_and_preserves_output_on_corruption();
+	test_inline_open_rejects_without_reading_or_changing_table();
 	test_resource_header();
 	test_chunk_index_bounds();
 	test_resource_tables_return_fork_relative_chunk_ranges();

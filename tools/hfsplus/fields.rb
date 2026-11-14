@@ -826,7 +826,7 @@ module HfsPlusFields
     chunks = header[:uncompressed_size].divmod(CHUNK_BYTES).then { |whole, rest| whole + (rest.zero? ? 0 : 1) }
     case header[:type]
     when 4 then classic_table(volume, fork).merge(expected_chunks: chunks)
-    when 8, 12 then offset_table(volume, fork).merge(expected_chunks: chunks)
+    when 8, 10, 12 then offset_table(volume, fork).merge(expected_chunks: chunks)
     else { unexpected_resource_fork_bytes: fork.logical_size }
     end
   end

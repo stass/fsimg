@@ -771,19 +771,6 @@
   partition" without naming the cut, though `i` and `W` report it. Add the
   missing bytes to the message and keep the status, which `i` routes on.
 
-* [Medium] **HFS Plus refuses macOS's raw-marked LZFSE and types 9 and 10**
-  (`lib/formats/hfsplus/compress.c`, `specs/design-hfsplus.md`): macOS's
-  own compressor (`aa extract -afsc lzfse`) stores an incompressible LZFSE
-  payload or chunk as `0xFF` and the bytes, as for zlib, and `-afsc copy`
-  writes types 9 and 10, `0xCC` and the bytes (word table for 10);
-  `/System` holds over 30000 type 9 files. `chunk_decode_lzfse` hands the
-  marked bytes to the decoder, which refuses them, and
-  `hfsplus_compress_check` refuses 9 and 10 as unsupported. The HFS Plus
-  design's "LZFSE has no raw marker" comes from `afsctool`'s `bvx-`
-  blocks. Evidence:
-  [APFS E7](docs/apfs-research.md#e7-compression), observed on APFS;
-  recheck on an HFS Plus volume, then add the marker and the two types.
-
 * [Low] **HFS Plus reports no codecs** (`lib/formats/hfsplus/descriptor.c`):
   the driver decodes zlib, LZVN and LZFSE compressed files, but
   `fsimg_hfsplus_format` sets no `codecs` operation (only

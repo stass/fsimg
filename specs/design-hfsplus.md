@@ -1060,28 +1060,43 @@ only content length; the data fork's `logicalSize` is zero on every type
 | 4 | zlib | Chunks in the resource fork |
 | 7 | LZVN | The bytes after the header |
 | 8 | LZVN | Chunks in the resource fork |
+| 9 | None, after the marker `0xCC` | The bytes after the header |
+| 10 | None, after the marker `0xCC` | Chunks in the resource fork |
 | 11 | LZFSE | The bytes after the header |
 | 12 | LZFSE | Chunks in the resource fork |
 
-Any other type, including the dataless types of newer systems, is
+Types 13 and 14, LZBITMAP, which has no public decoder, and any other
+type, including the dataless types of newer systems, are
 `FSIMG_EUNSUPPORTED`, found at directory preparation and naming the entry.
 zlib is the system library; LZVN and LZFSE are the
 [imported decoders](design-codecs.md#imported-lzfse-and-lzvn-decoders).
-`afsctool` writes types 3, 4, 7, 8, 11 and 12 and `ditto --hfsCompression`
-types 7 and 8; neither writes type 1, which the table keeps for its
-documented meaning [DC]. A compressed file's catalog record has
+Each type's facts, its storage, codec and raw marker, are one table in the
+shared module that
+[APFS shares](design-apfs-driver.md#compression-framing); this design
+chooses which of its types HFS Plus admits. `afsctool` writes types 3, 4,
+7, 8, 11 and 12 and `ditto --hfsCompression` types 7 and 8 (E6); macOS's
+own compressor, Apple Archive's `aa extract -afsc`, writes 3, 4, 7, 8, 11
+and 12, 13 and 14 for LZBITMAP, and 9 and 10 for `-afsc copy`, on HFS
+Plus as on APFS ([APFS E7](../docs/apfs-research.md#e7-compression)). No
+tool writes type 1, which the table keeps for its documented meaning
+[DC]. A compressed file's catalog record has
 `ownerFlags` `0x20`, flag `0x0004` for the attribute, and an empty data
 fork (E6). [DC], [R]
 
 ### Inline payloads
 
-Types 1, 3, 7 and 11 hold the whole content after the header. A payload
-whose first byte is the codec's raw marker holds the content uncompressed
-after that byte: `0xFF` for zlib, which no zlib stream begins with, and
-`0x06` for LZVN, its end-of-stream code. LZFSE has no raw marker:
-incompressible content is an LZFSE uncompressed block, `bvx-` with a count
-and the bytes, which the decoder reads like any other block (E6). The
-decoded length equals the uncompressed size exactly. That size is at most
+Types 1, 3, 7, 9 and 11 hold the whole content after the header. A
+payload whose first byte is the codec's raw marker holds the content
+uncompressed after that byte: `0xFF` for zlib, which no zlib stream begins
+with, and for LZFSE, whose blocks begin with a `bvx` magic, and `0x06` for
+LZVN, its end-of-stream code. macOS's own compressor raw-marks
+incompressible LZFSE content with `0xFF`; `afsctool` writes it as an
+LZFSE uncompressed block, `bvx-` with a count and the bytes, which the
+decoder reads like any other block (E6), so both forms are read. Every
+type 9 payload is the marker `0xCC` and the content, and one that does
+not begin with `0xCC` is `FSIMG_ECORRUPT`; type 1 has no marker, its
+bytes being the content. The decoded length equals the uncompressed size
+exactly. That size is at most
 65536 bytes, the decode window, so an inline payload decodes once and
 whole; a larger inline size is `FSIMG_EUNSUPPORTED` naming the entry. No
 size alone decides where a native compressor stores a file: the whole
@@ -1097,7 +1112,7 @@ decoder that streams the payload, not with a larger window. [DC], [R]
 
 ### Resource-fork payloads
 
-Types 4, 8 and 12 split the content into chunks of 65536 decoded bytes,
+Types 4, 8, 10 and 12 split the content into chunks of 65536 decoded bytes,
 the last one shorter, and keep them in the resource fork, read through its
 extents like any fork:
 
@@ -1123,9 +1138,9 @@ extents like any fork:
   the payload interval, so a chunk that overlaps the table or reaches
   past the declared end, into the map or beyond, is `FSIMG_ECORRUPT` even
   when it lies within the fork. Type 4 stores each chunk's own length
-  beside its offset; types 8 and 12 store only successor offsets, below.
+  beside its offset; types 8, 10 and 12 store only successor offsets, below.
   [DC], [R]
-* **Types 8 and 12** begin the fork, at offset zero, with a table of
+* **Types 8, 10 and 12** begin the fork, at offset zero, with a table of
   `count + 1` little-endian words, the entry for chunk `i` at byte `4 * i`.
   Three quantities are distinct: the table's base, which is fork offset
   zero, its entries being successor-offset words and not pairs; the table's end `T`, which is the first word's value; and the chunk
@@ -1147,8 +1162,10 @@ bytes, 65536 and a margin above the worst-case expansion of every codec and
 the raw marker, and the largest native chunk observed is 66280 bytes, an
 LZFSE block that grew over random content (E6); chunks are ascending and
 do not overlap; each decodes to exactly its length, and a chunk beginning
-with the raw marker holds raw bytes: a zlib chunk `0xFF`, an LZVN chunk
-`0x06`, an LZFSE chunk an uncompressed block as above. Reading checks each
+with the raw marker holds raw bytes: a zlib or LZFSE chunk `0xFF`, an
+LZVN chunk `0x06`, with an LZFSE uncompressed block read as above; every
+type 10 chunk is `0xCC` and its bytes, and one without the marker is
+`FSIMG_ECORRUPT`. Reading checks each
 chunk it decodes against its table neighbours and the fork; verification
 checks the whole table. [DC], [R]
 
@@ -1631,7 +1648,7 @@ code ran. The minimum matrix:
 | Unicode tables | The observable-rows gate of the [table evidence](#unicode-tables-and-their-evidence) on both comparators, and the digest of each generated table |
 | Attributes | Inline at 0, 1 and the largest inline size; fork records with 1, 8 and 9 extents; a continuation gap; an unknown record type; a name of 127 units and one of 128; names differing only in case; an attribute for a missing node ID; a flag disagreeing with the tree in each direction, a record with an attribute and a clear flag included; the extra-data mark on a resource fork, a stored attribute, a consumed compression attribute, a size-0 compressed file with and without a fork or payload and none, listed and named in the extraction loss report |
 | Links and kinds | Symbolic links of 1, 1023 and 1024 bytes and one with a NUL; FIFOs, sockets and devices; hard-link stubs to files and symbolic links, two and three names across directories, a dangling stub, a zero reference, a link count off by one; a stub with `fileMode` 0; a stub dated from the root folder and one from the private data folder; `hlnk`/`hfs+` with another date, read as a file; a directory hard link refused and its Finder-alias look-alike read as a file; `temp` files |
-| Compression | Every type with content of 0, 1, 65535, 65536, 65537 and 200000 bytes; raw-marker chunks; a type 4 header, table and chunk out of range, a chunk inside the fork but past the resource payload, in the map, and a header whose relations fail; for types 8 and 12 a first word below `4 * (count + 1)`, beyond the fork, padded and unpadded, and a table whose words are read from offset zero while the first word points elsewhere; a chunk above the input bound; an inline size above 65536; an LZFSE `bvx-` block; overlapping and descending chunks; a chunk decoding one byte short and one long; an unknown type; a header shorter than 16 bytes; the flag without the attribute; the attribute without the flag; a nonempty data fork; sequential reading decoding each chunk once |
+| Compression | Every type with content of 0, 1, 65535, 65536, 65537 and 200000 bytes; raw-marker chunks; a type 4 header, table and chunk out of range, a chunk inside the fork but past the resource payload, in the map, and a header whose relations fail; for types 8, 10 and 12 a first word below `4 * (count + 1)`, beyond the fork, padded and unpadded, and a table whose words are read from offset zero while the first word points elsewhere; a chunk above the input bound; an inline size above 65536; an LZFSE `bvx-` block; an LZFSE payload and chunk raw-marked with `0xFF`; type 9 and 10 content, and a type 9 payload and type 10 chunk without the `0xCC` marker; overlapping and descending chunks; a chunk decoding one byte short and one long; an unknown type; a header shorter than 16 bytes; the flag without the attribute; the attribute without the flag; a nonempty data fork; sequential reading decoding each chunk once |
 | Journal | Unjournaled, clean empty journal in each byte order, uninitialized journal, transactions present with `start < end` and with `start > end`, `start == end` at a position other than `jhdr_size`, `start == size` with `end == jhdr_size` read as clean, `start` or `end` of 0, above `size` or not a multiple of 512, `size` below 256 KiB and above 1 GiB, external journal, flags with neither `0x1` nor `0x2`, a bad checksum, magic or size; journal files absent on a journaled volume and present on an unjournaled one; a `.journal` fork of two extents, of a length other than `size`, and at a start other than the info block's `offset`; an external journal with and without a `.journal` file; flags `0x3` and `0x6`, which the external row decides |
 | Wrapper | A wrapped volume with its embedded extent at the start, the middle and the end; a signature with no extent; an extent outside the outer volume; location fields at their maxima; a wrapper naming itself; a range shorter than the embedded `N * B` or than 1536 bytes, each refused without naming truncation, and one longer, which reads; slack past the outer volume's end; an embedded `HX`; a slice cut inside the embedded volume, at its header, keeping `kept` bytes with `N * B <= kept < range`, and after the range inside the outer tail; the outer volume's other bytes changed, which verification ignores; a wrapped journal in each state: uninitialized, which reads (`h-hfsplus-16777216-e11-mkfs-w-J`), and initialized (`h-hfsplus-16777216-e11-mkfs-w-J-mounted`), clean, pending and with `offset` in either candidate base, each `FSIMG_EUNSUPPORTED`; an uninitialized wrapped journal whose `offset` does not match the fork |
 | Writer | Both variants; every block size of the writer profile; exact and automatic sizing at each bitmap-block boundary; an empty catalog; a full volume; names at each length after decomposition, each of the four reserved root names with the private data folder's spelled through four U+2400, colliding siblings on each variant, U+2400 stored as U+0000, and the refused names: percent-text values, an all-ignorable name on `hfsplus`, each of the 23 `fsck_hfs` sequences, alone and after a starter, and a Greek letter with U+0301 accepted beside it; label default, 255 units and 256; owner and mode extremes; times at 1904, 1970, 2040 and beyond as counted losses and refusals; symbolic links and FIFOs; a catalog wide enough for map nodes; byte identity across source order, cache size, scratch path and time zone; a poison scan of every unused byte |
