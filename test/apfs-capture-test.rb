@@ -76,6 +76,38 @@ class ApfsCaptureAttachmentsTest < Minitest::Test
     assert_equal "outerr", output
   end
 
+  def test_run_status_sends_stderr_to_the_named_file
+    Dir.mktmpdir do |dir|
+      errors = File.join(dir, "stderr")
+      output, status = ApfsCapture::Log.new.run_status(RbConfig.ruby, "-e", '$stdout.write "out"; $stderr.write "err"', stderr: errors)
+      assert_equal [0, "out", "err"], [status, output, File.binread(errors)]
+    end
+  end
+
+  # A partitioned image lists the disk, its Apple_APFS partition and the container.
+  class PartitionedLog < DeviceLog
+    def run(*argv, timeout: ApfsCapture::COMMAND_TIMEOUT)
+      return super unless File.basename(argv.first) == "hdiutil" && argv[1] == "attach"
+
+      @calls << argv.drop(1)
+      ["/dev/disk5\tGUID_partition_scheme\n/dev/disk5s1\tApple_APFS\n/dev/disk6\tEF57347C-0000-11AA-AA11-0030654\n", true]
+    end
+  end
+
+  def test_attach_names_the_apple_apfs_partition_as_the_store_and_passes_its_flags_on
+    log = PartitionedLog.new
+    attachments = ApfsCapture::Attachments.new(log)
+    attachments.with("fixture.dmg", raw: false, readonly: true, options: %w[-owners off]) do |attached|
+      assert_equal ["/dev/disk5", "/dev/disk5s1", "/dev/disk6"], [attached.device, attached.store, attached.container]
+    end
+    assert_equal %w[attach -readonly -owners off -nomount fixture.dmg], log.calls.first
+  end
+
+  def test_attach_of_an_unpartitioned_image_names_its_own_disk_as_the_store
+    attachments = ApfsCapture::Attachments.new(DeviceLog.new)
+    attachments.with("fixture.img") { assert_equal "/dev/disk123", _1.store }
+  end
+
   private
 
   def assert_process_gone(pid)

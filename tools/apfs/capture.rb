@@ -138,10 +138,12 @@ module ApfsCapture
     # holds its standard error too. The program has its own process group: a
     # timeout or an interrupt kills the group and reaps it, so that nothing it
     # started keeps running. The [cmd, cmd] form of the program keeps a lone
-    # element from being handed to a shell.
-    def run_status(*argv, timeout: COMMAND_TIMEOUT)
+    # element from being handed to a shell. With `stderr`, a file path, the
+    # standard error goes there instead of into the output.
+    def run_status(*argv, timeout: COMMAND_TIMEOUT, stderr: nil)
       out = +"".b
-      code = Open3.popen2([argv.first, argv.first], *argv.drop(1), pgroup: true, err: [:child, :out]) do |input, output, child|
+      error = stderr ? [stderr, "w"] : [:child, :out]
+      code = Open3.popen2([argv.first, argv.first], *argv.drop(1), pgroup: true, err: error) do |input, output, child|
         reader = nil
         begin
           input.close
@@ -196,9 +198,11 @@ module ApfsCapture
     end
   end
 
-  # What attaching an image gives: the image's own disk, and the synthesized
-  # disk of the APFS container in it once the container exists (nil before).
-  Attached = Data.define(:device, :container)
+  # What attaching an image gives: the image's own disk, the synthesized disk of
+  # the APFS container in it once the container exists (nil before), and the
+  # disk `fsck_apfs` checks: the Apple_APFS partition of a partitioned image,
+  # else the image's own disk.
+  Attached = Data.define(:device, :container, :store)
 
   # The images this process attached, detached again by `release`.
   class Attachments
@@ -210,13 +214,18 @@ module ApfsCapture
     def none? = @devices.empty?
 
     # Attach `image` and return its Attached; with `mountpoint` the volume is
-    # also mounted there, otherwise it is left unmounted. A device named in the
+    # also mounted there, otherwise it is left unmounted. `raw` attaches the file
+    # as a raw disk image, which is right for everything but a UDIF file;
+    # `readonly` and `options` (hdiutil flags) are passed on. A device named in the
     # output is recorded before the exit status is judged, since hdiutil can
     # attach a disk and still fail, for example to mount it. The first device
     # listed is the image's own disk; the synthesized disks of the container
     # follow and go away with it.
-    def attach(image, mountpoint: nil)
-      args = [ApfsCapture.tool("hdiutil"), "attach", "-imagekey", "diskimage-class=CRawDiskImage"]
+    def attach(image, mountpoint: nil, raw: true, readonly: false, options: [])
+      args = [ApfsCapture.tool("hdiutil"), "attach"]
+      args += %w[-imagekey diskimage-class=CRawDiskImage] if raw
+      args += ["-readonly"] if readonly
+      args += options
       args += mountpoint ? ["-mountpoint", mountpoint] : ["-nomount"]
       out, ok = @log.run(*args, image, timeout: ATTACH_TIMEOUT)
       device = out[%r{/dev/disk\d+}]
@@ -227,7 +236,8 @@ module ApfsCapture
         raise Error, "cannot attach #{image}: #{out.lines.first}"
       end
 
-      Attached.new(device: device, container: container)
+      store = out.lines.map(&:split).find { |_, type| type == "Apple_APFS" }&.first || device
+      Attached.new(device: device, container: container, store: store)
     end
 
     # Detach `device`: three plain attempts and then a forced one.
@@ -254,8 +264,8 @@ module ApfsCapture
     # interrupt included, the device is detached on a best-effort basis and what
     # left the block is what is raised; a device that cannot be detached stays
     # listed for `release` to report.
-    def with(image, mountpoint: nil)
-      attached = attach(image, mountpoint: mountpoint)
+    def with(image, **how)
+      attached = attach(image, **how)
       result = yield attached
       detach(attached.device)
       result
