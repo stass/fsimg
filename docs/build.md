@@ -1313,6 +1313,22 @@ image with the network enabled, since `linux-check.sh` itself runs offline.
 Sources, licenses, identities and the commands that run each oracle are in
 [apfs-research.md](apfs-research.md).
 
+`test-apfs-write` has two opt-in runs beside its ordinary tests.
+`FSIMG_APFS_QUALIFY_DIR=DIR ./test-apfs-write --qualify` writes the
+qualification images, each with its manifest, into DIR for
+`tools/apfs/qualify.rb`. `./test-apfs-write --native DIR` takes the E1
+captures in DIR (`apfs-newfs-BYTES-plain/image.img`), writes an empty
+container of the same size, decodes both of the capture's checkpoints,
+the formatter's at XID 1 and the newer one, with its own decoder, and compares the two field by field with
+the [writer values](../specs/design-apfs.md#writer-values): a field a row
+takes from the native formatter must equal the capture's, a field built by
+construction or set by policy must equal its row's construction, and UUIDs,
+times and the formatting identifier are exempt. It prints every compared
+field and every difference with the row that explains it, and fails on a
+difference no row explains. A field the format design's first form gives
+is compared with the XID 1 checkpoint, the volume and its trees with the
+newer one.
+
 `test/erofs-integration.sh` also compares fsimg's reading of every fixture
 it reads with rust-fs-erofs 0.5.1
 (`~/.local/share/fsimg-oracles/rust-erofs/bin/rust-fs-erofs`, or under

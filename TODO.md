@@ -128,6 +128,25 @@
   adapter, for native and written images only, does not use the oracle
   confinement.
 
+* [Medium] **APFS writer sealed file-extent tree type**
+  (`lib/formats/apfs/write-emit.c`, `specs/design-apfs.md` writer values,
+  "Snapshot, sealing and integrity fields"): the writer stores zero in the
+  volume superblock's sealed file-extent tree type (offset 1040), the row's
+  value, and in the unnamed tree type at 1044, but every E1 capture and
+  the E10 volumes store `0x40000002` in both with zero OIDs, so
+  `test-apfs-write --native` fails on both fields in all seven captures. `fsck_apfs -n` and mounting
+  accept zero. Make the row and the writer store the native type, then
+  rerun the native qualification, since the bytes change.
+* [Medium] **APFS writer contract-suite profile** (`test/driver-contracts.c`,
+  `specs/design-driver-contract-tests.md`): the writer cannot join the
+  contract suite while the APFS reader refuses regular-file content
+  (`lib/formats/apfs/read.c`), because the writer scenarios read the image
+  back and the reader scenarios a read bit schedules need content. A
+  profile through `fsimg_apfs_write_format` (an optional descriptor pointer,
+  reconciled against that descriptor's operations and excluded from
+  registry coverage) passes ten of the 22 scenarios its bits
+  schedule and fails the rest with "APFS file content is not readable". Add it once content reads,
+  or decide how a writer on a volume-information reader is profiled.
 * [Low] **APFS writer large-container paths** (`lib/formats/apfs/write-emit.c`,
   `test/apfs-write.c`): the tests' largest container is 256 MiB, one
   chunk-information block, one pool-bitmap block and a one-block space

@@ -25,6 +25,7 @@
 #include "sha256.h"
 #include "test.h"
 #include "write-apfs.h"
+#include "apfs-native.h"
 #include "writer.h"
 
 #define BLOCK_BYTES UINT64_C(4096)
@@ -2525,6 +2526,31 @@ qualify_images(void)
 	return (failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
+bool
+apfs_native_emit(const fsimg_write_options_t *options,
+    const fsimg_io_ops_t *ops, void *argument)
+{
+	fixture_t fixture;
+	fsimg_io_t *io = NULL;
+	fsimg_status_t status;
+	unsigned before = failures;
+
+	scenario = "native empty-container writer fixture";
+	status = create_writer(&fixture, options);
+	if (status == FSIMG_OK)
+		status = plan_writer(&fixture);
+	if (status == FSIMG_OK)
+		status = fsimg_io_from_callbacks(fixture.ctx, ops, argument,
+		    &io, &fixture.error);
+	if (status == FSIMG_OK)
+		status = fsimg_writer_emit(fixture.writer, io, &fixture.error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "%s: %s\n", scenario, fixture.error.message);
+	fsimg_io_free(io);
+	close_writer(&fixture);
+	return (status == FSIMG_OK && failures == before);
+}
+
 #define RUN(test) do { \
 	unsigned before = failures; \
 	scenario = #test; \
@@ -2538,12 +2564,15 @@ main(int argc, char **argv)
 {
 	if (argc == 2 && strcmp(argv[1], "--qualify") == 0)
 		return (qualify_images());
+	if (argc == 3 && strcmp(argv[1], "--native") == 0)
+		return (apfs_compare_native(argv[2]));
 	CHECK(argc == 1);
 	RUN(test_emitted_mixed_tree_round_trips_both_case_personalities);
 	RUN(test_emitted_metadata_preserves_distinct_nanosecond_times);
 	RUN(test_many_files_with_content_split_the_extent_reference_tree);
 	RUN(test_emitted_empty_many_wide_and_multichunk_shapes);
 	RUN(test_emission_is_identical_across_order_budget_scratch_and_timezone);
+	failures += apfs_native_test_decoder();
 	RUN(test_emission_write_and_flush_failures_release_resources);
 	RUN(test_emission_allocation_failure_at_each_allocation_is_clean);
 	RUN(test_same_length_changed_link_fails_emission_and_names_path);

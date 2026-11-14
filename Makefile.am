@@ -364,7 +364,8 @@ test_apfs_content_SOURCES = test/apfs-content.c test/apfs-gen.c \
 test_apfs_content_LDADD = libfsimg.la
 test_apfs_write_btree_SOURCES = test/apfs-write-btree.c test/test.h
 test_apfs_write_btree_LDADD = libfsimg.la
-test_apfs_write_SOURCES = test/apfs-write.c test/test.h
+test_apfs_write_SOURCES = test/apfs-write.c test/apfs-native.c \
+	test/apfs-native.h test/test.h
 test_apfs_write_LDADD = libfsimg.la
 test_apfs_spaceman_SOURCES = test/apfs-spaceman.c test/apfs-gen.c \
 	test/apfs-gen.h test/test.h
