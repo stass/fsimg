@@ -733,10 +733,10 @@ must have a size that is a positive multiple of `B`, an address range inside
 no-header is unsupported, since the sealed trees fsimg reads are physical
 and never mapped (provisional, E11). The object read at the address must
 satisfy the header rules with its OID equal to `o` and its XID equal to the
-found key's XID (provisional: E3, while E1 confirms it for the one
-record of every capture with a volume and E8 for the volume superblock
-across mount cycles; if a capture shows an
-object older than its key, the rule becomes "not above the key's XID"). A miss for
+found key's XID (E1 for the one record of every capture with a volume,
+E3 for its 258 filesystem-tree mappings, and E8 for the volume superblock
+across mount cycles; if a capture shows an object older than its key, the
+rule becomes "not above the key's XID"). A miss for
 a reference the format requires is `FSIMG_ECORRUPT`.
 
 Object-map flags follow a closed table:
@@ -830,6 +830,9 @@ because levels fall by one per step: a cycle shows as a level mismatch or a
 repeated address within 16 steps, never as excess height.
 The footer's longest-key, longest-value and count fields are statistics: they
 are never used to size a buffer, and full verification checks the counts.
+The longest key and value are not checked: a native footer can state more
+than every live record holds (E3: longest value 924 bytes in
+`apfs-newfs-268435456-e3-ci`, whose largest live value is 912).
 
 ### Comparators
 
@@ -908,14 +911,14 @@ transition native tools complete before use and is `FSIMG_EUNSUPPORTED`.
 
 | Mask | Bits | Reader | Writer |
 | --- | --- | --- | --- |
-| Incompatible | `0x1` case-insensitive, `0x8` normalization-insensitive | Accepted; select the name rules | Case-insensitive: `0x1`; case-sensitive: `0x8` (provisional, E2) |
+| Incompatible | `0x1` case-insensitive, `0x8` normalization-insensitive | Accepted; select the name rules | Case-insensitive: `0x1`; case-sensitive: `0x8`, as `newfs_apfs` and `hdiutil` set them (E2) |
 | Incompatible | `0x2` dataless snapshots | Accepted for the live view; a snapshot view of such a volume is unsupported | Never |
 | Incompatible | `0x4` encryption rolled | Accepted only with the unencrypted flag | Never |
 | Incompatible | `0x10` incomplete restore | Unsupported | Never |
 | Incompatible | `0x20` sealed | The sealed profile | Never |
 | Incompatible | Any other bit | Unsupported | Never |
 | Read-only compatible | None defined | Any bit accepted for reading | Zero |
-| Optional | `0x1`, `0x4` defragmentation, `0x2` hard-link map records, `0x8` strict access time, `0x10` volume-group inode space | Accepted | Native default, provisional (E2) |
+| Optional | `0x1`, `0x4` defragmentation, `0x2` hard-link map records, `0x8` strict access time, `0x10` volume-group inode space | Accepted | `0x2`, the native default of `newfs_apfs` and `hdiutil` in both personalities (E2) |
 | Optional | Any other bit | Accepted, ignored | Never |
 | Flags | `0x1` unencrypted | Required; without it the volume is encrypted and unsupported | Emitted |
 | Flags | `0x8` one key, `0x10` spilled over, `0x20` spillover cleaner | One key: encrypted, unsupported; spillover: Fusion, unsupported | Never |
@@ -996,14 +999,47 @@ fixed part:
 Inode numbers 0 and 1 are never inodes: 1 is the parent of the root. Inode 2
 is the root directory and 3 the private directory, both directories with
 parent 1. Numbers below 16 are reserved, among them 6 and 7 for the snapshot
-and purgeable directories, and no directory record names one (provisional,
-E3). Ordinary inodes are at least 16, or at least
+and purgeable directories, and no directory record names one other than
+the root and private-directory records under parent 1 (E3: in
+`apfs-newfs-268435456-e3-ci` no other record does, and the first inode the
+system creates, `.fseventsd`, is 16). Ordinary inodes are at least 16, or at least
 `0x0800000000000000` in a System volume whose volume-group inode space is
-enabled. The internal flags are accepted from a closed table
-established from [A1] and, provisionally, E3 to E6; a flag that changes how
-content is read
-and is not implemented, such as one marking data as dataless, is
-unsupported.
+enabled. The internal flags are accepted from the closed table below,
+[A1]'s valid flags, which E5 and E6 may extend with values native volumes
+use; any other bit, `0x20` (`FLAG_UNUSED`, outside [A1]'s valid mask)
+among them, is unsupported. No flag of the table changes where the reader
+finds content: the data stream, the file extents and the compression
+attribute determine it, and nothing past the size is delivered.
+
+| Flag | [A1] name | Native use (E2, E3) |
+| --- | --- | --- |
+| `0x1` | `IS_APFS_PRIVATE` | |
+| `0x2` | `MAINTAIN_DIR_STATS` | |
+| `0x4` | `DIR_STATS_ORIGIN` | |
+| `0x8` | `PROT_CLASS_EXPLICIT` | |
+| `0x10` | `WAS_CLONED` | |
+| `0x40` | `HAS_SECURITY_EA` | `.fseventsd`, with its `com.apple.system.Security` attribute |
+| `0x80` | `BEING_TRUNCATED` | |
+| `0x100` | `HAS_FINDER_INFO` | |
+| `0x200` | `IS_SPARSE` | A file with a hole, with the sparse-bytes field |
+| `0x400` | `WAS_EVER_CLONED` | |
+| `0x800` | `ACTIVE_FILE_TRIMMED` | |
+| `0x1000` | `PINNED_TO_MAIN` | |
+| `0x2000` | `PINNED_TO_TIER2` | |
+| `0x4000` | `HAS_RSRC_FORK` | |
+| `0x8000` | `NO_RSRC_FORK` | Every new inode of each kind E3 creates, the root and private directories included |
+| `0x10000` | `ALLOCATION_SPILLEDOVER` | |
+| `0x20000` | `FAST_PROMOTE` | |
+| `0x40000` | `HAS_UNCOMPRESSED_SIZE` | |
+| `0x80000` | `IS_PURGEABLE` | |
+| `0x100000` | `WANTS_TO_BE_PURGEABLE` | |
+| `0x200000` | `IS_SYNC_ROOT` | |
+| `0x400000` | `SNAPSHOT_COW_EXEMPTION` | |
+
+BSD flags are stored as `chflags(2)` sets them: E3 shows `0x1` `nodump`,
+`0x2` `uchg` and `0x8000` `hidden` set by an unprivileged user, and zero on
+every other entry. A new FIFO or socket has protection class 4, and every
+other new inode class 0 (E3).
 
 | Mode type | Directory record type | Entry kind | Content |
 | --- | --- | --- | --- |
@@ -1019,14 +1055,16 @@ sets `FSIMG_META_OWNER`, `FSIMG_META_MODE` with the low twelve mode bits, and
 all four timestamps. A time counts nanoseconds since the Unix epoch: seconds
 are the floor of its quotient by `10^9`, nanoseconds the remainder, the
 basis is UTC and the precision one nanosecond. The reference declares the
-fields unsigned, and the reader decodes them so. Whether macOS stores a time
-before 1970 as a two's-complement value is provisional (E14): if E14 shows
-it, reader and writer decode the field as signed; if E14 cannot answer, the
-field stays unsigned. The [writer](#writer-values) stores only times that
-read the same either way. Attributes are absent. BSD flags, the
+fields unsigned, but macOS stores a time before 1970 as a two's-complement
+value and clamps every time it is given to `-2^63` through `2^63 - 1`
+nanoseconds (E3, E14: `apfs-newfs-67108864-e14-ci`), so reader and
+[writer](#writer-values) treat the fields as signed 64-bit values.
+Attributes are absent. BSD flags, the
 protection class and the remaining fields have no common representation and
 are not reported; the `UF_COMPRESSED` flag `0x20` selects
-[compression](#transparent-compression).
+[compression](#transparent-compression), and a file with the dataless flag
+`SF_DATALESS` `0x40000000`, whose content is not on the volume, is
+unsupported.
 
 ### Extended fields
 
@@ -1043,9 +1081,32 @@ macOS `dev_t`, bits 24 to 31 `dev_major` and bits 0 to 23 `dev_minor`,
 valid only on a character or block device, `FSIMG_ECORRUPT` on another
 kind, and a device without it has no number). A directory
 record's sibling ID is type 1. Other known types are validated by size and
-ignored; an unknown type with a valid size is ignored when its flags do not
-mark it data-dependent, and is unsupported otherwise. Padding bytes are
-zero.
+ignored, at the sizes [A1] gives in the table below; an unknown type with a
+valid size is ignored when its flags do not mark it data-dependent, and is
+unsupported otherwise. Padding bytes are zero.
+
+| Inode field type | Content | Data size | Flags native volumes give it (E2, E3) |
+| --- | --- | --- | --- |
+| 1 | Snapshot XID | 8 | |
+| 2 | Delta-tree OID | 8 | |
+| 3 | Document ID | 4 | |
+| 4 | Name | NUL-terminated, 2 or more | `0x2` do-not-copy, on every inode |
+| 5 | Previous size | 8 | |
+| 6, 9, 12 | Reserved | Any | |
+| 7 | Finder information | 32 | |
+| 8 | Data stream | 40 | `0x20` system field, on every file with content |
+| 10 | Directory statistics | 32 | |
+| 11 | File-system UUID | 16 | |
+| 13 | Sparse bytes | 8 | `0x28` system field and children-inherit, on a file with a hole |
+| 14 | Device number | 4 | |
+| 15 | Purgeable flags | Any | |
+| 16 | Original sync-root inode | 8 | |
+
+The field flags are [A1]'s: `0x1` data-dependent, `0x2` do-not-copy, `0x8`
+children-inherit, `0x10` user field, `0x20` system field, and `0x4`,
+`0x40` and `0x80` reserved. In the E3 captures a file of size zero carries
+no data-stream field and no directory record carries extended fields; E3
+makes no hard links, whose records carry the sibling ID.
 
 ### Directory records and names
 
@@ -1054,31 +1115,40 @@ either plain, a u16 length and the name with its NUL, or hashed, a u32 word
 whose low 10 bits are the name's length with its NUL and whose high 22 bits
 are the name hash, then the name with its NUL. A volume that is
 case-insensitive or normalization-insensitive uses hashed keys and others
-plain keys (provisional, E2); a record of the other variant is corrupt. The
+plain keys; a record of the other variant is corrupt. E2 shows hashed keys
+on both personalities from `newfs_apfs` and `hdiutil`; neither tool formats
+a volume without one of the two flags, so the plain variant rests on [A1]
+alone. The
 value is the child inode (u64), the time the entry was added (u64), u16
 flags whose low four bits are the type, and extended fields.
 
-A name is the stored bytes without the NUL: nonempty, valid UTF-8
-(provisional: E14 shows whether macOS refuses other byte strings), without
-NUL or `/`, and neither `.` nor `..`; anything else is corrupt. The reader
+A name is the stored bytes without the NUL: nonempty, valid UTF-8 (macOS
+refuses any other byte string with `EILSEQ` on both personalities, E14),
+without NUL or `/`, and neither `.` nor `..`; anything else is corrupt.
+macOS also refuses some valid UTF-8 with `EILSEQ`, the noncharacter U+FFFF
+among them (E14); the writer refuses a name holding a code point macOS
+refuses. Which code points those are is provisional (E4); if E4 cannot
+answer, the writer refuses the noncharacters and the code points
+unassigned in the driver's Unicode version. The reader
 declares no [omitted-names profile](design-directories.md#omitted-names):
 every valid name is delivered, including names with control characters such
 as Finder's `Icon\r`, and the CLI escapes them for display as it does every
 name.
 
-**Name length.** There are two limits, both counted in UTF-8 bytes of the
-stored name without its NUL, and no other passage states a third:
+**Name length.** There are two limits on the stored name without its NUL,
+and no other passage states a third:
 
-* **The reader accepts up to 1022 bytes.** A hashed key's 10-bit length
-  field holds at most 1023 with the NUL. A plain key's u16 length can state
-  more, and a longer plain name is `FSIMG_EUNSUPPORTED`.
-* **The writer accepts up to 255 bytes.** This limit is provisional. macOS
-  limits a name to 255 of some unit, and E14 measures whether that unit is
-  bytes, UTF-16 units or characters and the longest name each native tool
-  accepts. A name of at most 255 bytes is at most 255 of any of those units,
-  so 255 bytes is the default if E14 cannot answer. If E14 shows macOS
-  accepting longer names, the limit rises to the longest byte length every
-  native tool accepts, never above the reader's 1022.
+* **The reader accepts up to 1022 UTF-8 bytes.** A hashed key's 10-bit
+  length field holds at most 1023 with the NUL. A plain key's u16 length
+  can state more, and a longer plain name is `FSIMG_EUNSUPPORTED`.
+* **The writer accepts up to 255 UTF-16 code units**, the limit macOS
+  applies when it creates a name: a character above U+FFFF counts two, any
+  other one. The longest such name is 765 bytes, 255 three-byte
+  characters, inside the reader's limit (E14, on both personalities:
+  `apfs-newfs-67108864-e14-ci` and `-cs`). E14's characters have no
+  decomposition, so whether macOS counts the name as given or its NFD is
+  provisional (E4); if E4 cannot answer, the writer requires both forms to
+  be at most 255 units.
 
 The comparison form of a name depends on the volume:
 
@@ -1201,10 +1271,11 @@ A directory has exactly one name. A directory inode's parent must be the
 directory whose record names it, and the root's parent is 1. This makes a
 directory cycle impossible: the first directory to repeat on a path would
 need two parents. A directory inode also carries the name extended field,
-which must equal the name of the record naming it (provisional: E3 shows
-whether native directories always carry it), so a second record naming the
-directory under
-another name in the same parent is corrupt when it is replayed, and a second
+which must equal the name of the record naming it (E3: every native inode,
+directories included, carries it on macOS 26.6.2; whether volumes from
+other releases or converted from HFS Plus do is provisional, E16 and the
+third-party specimens, and the rule stands if neither answers), so a second record naming the directory
+under another name in the same parent is corrupt when it is replayed, and a second
 record under the same name is a namespace collision. Directory sharing is
 therefore detected exactly, without a claimed-object set.
 
@@ -1223,15 +1294,19 @@ The extents of a stream tile a prefix of its logical range in logical order,
 without gaps or overlap: each starts where the previous one ends, and each
 length is a positive multiple of `B`. No extent extends past the larger of
 the size rounded up to whole blocks and the data-stream field's allocated
-bytes, which exceed the rounded size when space is preallocated; mapped
-extents, not holes, are what the allocated bytes count (provisional: E3 and
-E6 show native preallocation and sparse accounting). Logical bytes
+bytes, which exceed the rounded size when space is preallocated (provisional:
+E6 shows native preallocation). The allocated bytes count holes too: in
+`apfs-newfs-268435456-e3-ci` a file of `2^32 + 4107` bytes written only at
+its end has one hole extent and one mapped block, allocated bytes the size
+rounded up to whole blocks, and a sparse-bytes field holding the hole's
+length (E3). Logical bytes
 past the last extent and below the size read as zero, as do extents whose
 physical block is zero, which mark holes (both representations are
 provisional, E6).
 A mapped extent's blocks lie inside `[1, N)`. Extent flags must be zero, and
 crypto IDs follow a closed table for unencrypted volumes. The table is
-provisional (E3, E6) and holds zero alone until a capture adds a value, so
+provisional (E6) and holds zero alone, the only value on every E3 extent,
+until a capture adds a value, so
 no extent that might be encrypted is delivered. Content past the size,
 including preallocated extents, is never delivered. Two streams may name the same blocks: that is a clone, legal
 when the extent-reference tree accounts for it.
@@ -1254,9 +1329,9 @@ provisional (E9).
 
 A symbolic link's target is the `com.apple.fs.symlink` attribute, owned by
 the filesystem, inline, ending in one NUL that is not part of the target.
-The target is 1 to 1023 bytes, a bound that is provisional (E14 creates
-1023- and 1024-byte targets) and stays if E14 cannot answer, being the limit
-the capability record declares; a longer stored target
+The target is 1 to 1023 bytes, the limit the capability record declares:
+macOS creates a 1023-byte target and refuses a 1024-byte one with
+`ENAMETOOLONG` (E14); a longer stored target
 is `FSIMG_EUNSUPPORTED`, an empty or unterminated one, or one with an
 interior NUL, is corrupt. The entry's size is the target length and its
 content the target bytes, delivered from the decoded record.
@@ -1408,7 +1483,8 @@ and its records reconciled:
   and sibling maps match;
 * every inode other than the root and private directories is named by a
   directory record, or lies in the private directory, which is where native
-  volumes place unnamed inodes (provisional, E3);
+  volumes place unnamed inodes (provisional, E16: E3 holds no unnamed
+  inode; if E16 cannot answer, the rule stands);
 * each data-stream ID's reference count equals the inodes and attributes
   using it, and every file extent belongs to a live stream;
 * every attribute is well formed, and names equivalent under the volume's
@@ -1450,7 +1526,13 @@ Metadata claims are exclusive, and data claims never overlap metadata. A
 block is allocated in the main bitmap exactly when it is claimed; each
 chunk's free count and the device's free count equal the clear bits. Two
 checks are provisional and are not made until their experiment gives the
-rule: the bits past `N` (E15), and each volume's allocated block count (E3).
+rule: the bits past `N` (E15), and the allocated block count of a volume
+that is sealed, has clones or snapshots, or has freed blocks (E11, E6,
+E9, E16). Any other volume's allocated block count, on a volume whose
+total blocks freed is zero, equals the blocks of its object map, of the nodes of its object-map,
+filesystem, extent-reference and snapshot trees, and of its mapped file
+extents; its superblock is not counted (E2 and E3: 5 on an empty volume,
+and 571 = 1 + 4 + 258 + 1 + 1 + 306 in `apfs-newfs-268435456-e3-ci`).
 
 A [truncated container](#truncated-containers) never reaches these checks:
 the reader core fails its verification first.
@@ -1479,8 +1561,8 @@ owns every number and field value:
   the native normalization flag;
 * the native-required records of an empty volume: the root and private
   directories, and every other record E1 shows `newfs_apfs` writing;
-* for each regular file: an inode with a name field and a data-stream field,
-  a data-stream ID record, and, when nonempty, one contiguous run of
+* for each regular file: an inode with a name field and, when nonempty, a
+  data-stream field, a data-stream ID record, one contiguous run of
   blocks, the file extents that tile it, one unless the run is longer than
   the [extent cap](#writer-values), and one physical-extent record owned by
   the stream;
@@ -1504,7 +1586,8 @@ already refuses exact duplicates, and the writer refuses two siblings whose
 comparison forms are equal with `FSIMG_EINVAL`, whose path names one of
 them: an error carries one path. A name longer
 than the writer's [name length](#directory-records-and-names) limit or
-outside the reader's name rules fails the same way.
+outside the reader's name rules, or holding a code point the writer
+refuses, fails the same way.
 
 ### Settings and identities
 
@@ -1686,10 +1769,10 @@ to 100663296 (384 GiB).
 | Inode numbers | Root 2 and private directory 3, both with parent 1; the entry with catalog ID `i`, from 1, gets `15 + i`, so entries are numbered from 16 in catalog order | [A1] for 2, 3 and the minimum 16; policy for the order | | |
 | Private ID | The inode number | [A1]: the value of a file never cloned | | |
 | Volume next object identifier | One past the largest inode number, 16 for an empty volume. It counts inode numbers and is not the container's next OID | [A1] | E1 | Formula: the larger of the native empty volume's value and one past the largest inode number |
-| Directory inode | Child count equal to the directory records it owns, which for the root excludes the private directory; no data-stream field; uncompressed size zero | [A1] | E1, E3 | Formula |
+| Directory inode | Child count equal to the directory records it owns, which for the root excludes the private directory; no data-stream field; uncompressed size zero | [A1]; E3 | | |
 | Non-directory inode | Link count 1 | [A1]: one name | | |
-| Name field | On every entry's inode, the name of its directory record; on the root and private directories, native | E1, E3 | E1, E3 | Native |
-| Internal flags, protection class, write generation | Native: what E1 shows on the root and private directories and E3 on a new entry of each kind | E1, E3 | E1, E3 | Native |
+| Name field | On every entry's inode, the name of its directory record, flags `0x2`; on the root and private directories, native | E1, E3 | | |
+| Internal flags, protection class, write generation | Internal flags `0x8000`. Protection class 4 on a FIFO, 0 on every other inode. Write generation 1 plus the child count on a directory, 2 on a file with content, 1 on any other inode: the values of a native entry created and written once, which the root and private directories of an empty volume (E2) also follow | E2, E3 | | |
 | BSD flags | Zero | Policy | | |
 | Directory statistics records and their inode field, sibling records, document IDs, purgeable and firmlink fields | None | Policy | E1, and the E15 `fsck_apfs -n` probe of a capture with such a record or field removed | Native for which records and fields the root and private directories carry; Formula for any of their values that counts descendants or bytes |
 
@@ -1730,9 +1813,9 @@ to 100663296 (384 GiB).
 | Value | Emitted | Source | Provisional, closed by | Otherwise |
 | --- | --- | --- | --- | --- |
 | Slot, index, role, name | Slot 0, index 0, role 0, the label | Policy | | |
-| Features and flags | Incompatible `0x1` on a case-insensitive volume and `0x8` on a case-sensitive one; flags `0x1`; read-only compatible zero; optional features native | [A1]; E2 | E2 | Native |
-| Object counts | Files: regular files. Directories: directory entries, the root and private directories not counted. Symbolic links. Other: FIFOs. Snapshots: zero | [A1] | E1, E3 | Formula |
-| Allocated block count, total blocks allocated and freed | Allocated: the blocks of the volume's objects and file data; total allocated the same; total freed zero | [A1] | E3, E6 | Formula |
+| Features and flags | Incompatible `0x1` on a case-insensitive volume and `0x8` on a case-sensitive one; flags `0x1`; read-only compatible zero; optional features `0x2` | [A1]; E2 | | |
+| Object counts | Files: regular files. Directories: directory entries, the root and private directories not counted. Symbolic links. Other: FIFOs, as native volumes count FIFOs and sockets. Snapshots: zero | [A1]; E3 | | |
+| Allocated block count, total blocks allocated and freed | Allocated: the blocks of the volume's object map and tree nodes and of its file data, the superblock not counted, as [verification](#verification) states. Total allocated: the file-data blocks alone. Total freed zero | [A1]; E3 | | |
 | Reserve and quota | Zero | [A1]: none | | |
 | Modification and unmount times | The format time | Policy | E1 | Formula: each field holds the format time, or zero where E1 shows a fresh volume holding zero |
 | Formatting record | Identifier `fsimg` followed by the package version, NUL-padded to 32 bytes; the format time; last XID `X` | Policy | E15 | The identifier in the native formatter's form, as E1 captures it |
@@ -1747,24 +1830,24 @@ to 100663296 (384 GiB).
 | --- | --- | --- | --- | --- |
 | Node fill | Greedy against the root's capacity, 4096 bytes less the 56-byte header and the 40-byte footer: a node, root or not, takes records until the next does not fit, so a level's only node is always a valid root and 40 bytes stay unused in every other node | Policy | E15 | The native fill fraction E1 and E3 show |
 | Last node of a level | What remains when the records end, as few as one record | Policy | E15 | The last node takes its predecessor's last record |
-| Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1) | E1, E3 | E1's volume records and E3, for the volume's trees | Native |
-| Footer counts | Key count: the tree's leaf records. Node count: its nodes. Longest key and longest value: the largest encoded lengths packed into it | [A1] | E3 | Formula |
+| Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1). In the filesystem tree: flags `0x42`, node size 4096, fixed sizes zero, and a node's table of contents its key count rounded up to a multiple of 8 entries, the shape of 253 of the 254 leaves of `apfs-newfs-268435456-e3-ci`, where every table is a multiple of 8 entries and index nodes hold up to 8 more (E3) | E1, E3 | E1's volume records, for the volume's other trees | Native |
+| Footer counts | Key count: the tree's leaf records. Node count: its nodes. Longest key and longest value: the largest encoded lengths packed into it | [A1]; E3 for the counts and the longest key | | |
 | Object-map flags | Container map `0x1`; volume map zero | [A1]; E1 for the container map | E1's volume records, for the volume map's crypto-generation flag | Native |
 | Empty extent-reference and snapshot trees | One root leaf with no keys | E1 | E1 | Native |
 | File extent | A nonempty file's run, its size rounded up to 4096 bytes, is tiled by consecutive extents of at most the extent cap, so a file no longer than the cap has one; flags and crypto ID zero | [A1] | | |
 | Extent cap | `2^56 - 4096` bytes, the largest block-aligned length the 56-bit length field holds. The cap follows from the encoding and needs no experiment | [A1]: the field's width | E15, for a lower native limit | The longest extent E15 shows `fsck_apfs` accepting |
-| Data-stream field | Size; allocated bytes the size rounded up to 4096; crypto ID zero; total bytes written the size and total bytes read zero | [A1]; E3 | E3 | Formula |
-| Reference records | Data-stream ID count 1; one physical extent over the file's run, of kind new, its length in blocks, owner the private ID, count 1 | [A1] | E3, E6 | Formula |
+| Data-stream field | Size; allocated bytes the size rounded up to 4096; crypto ID zero; total bytes written the size and total bytes read zero; flags `0x20`. A file of size zero has none, and no data-stream ID or reference record either | [A1]; E3 | | |
+| Reference records | Data-stream ID count 1; one physical extent over the file's run, of kind new, its length in blocks, owner the private ID, count 1 | [A1]; E3 | | |
 
 **Metadata and limits**
 
 | Value | Emitted | Source | Provisional, closed by | Otherwise |
 | --- | --- | --- | --- | --- |
-| Name length | The writer's limit under [name length](#directory-records-and-names) | Policy | E14 | As stated there |
-| Link target | 1 to 1023 bytes, as [symbolic links](#symbolic-links) state | Policy | E14 | Stays |
-| Default owner and modes | Owner and group 0; `0755` for directories and symbolic links; `0644` for files and FIFOs | Policy | E3, for the mode macOS gives a new symbolic link | Stays |
+| Name length | 255 UTF-16 code units, as [name length](#directory-records-and-names) states | E14 | | |
+| Link target | 1 to 1023 bytes, as [symbolic links](#symbolic-links) state | E14 | | |
+| Default owner and modes | Owner and group 0; `0755` for directories and symbolic links; `0644` for files and FIFOs | Policy; E3 for the `0755` macOS gives a new symbolic link under umask 022 | | |
 | Default label | `Untitled`, the volume name when the label is NULL | Policy | | |
-| Time range | 0 through `2^63 - 1` nanoseconds, 1970-01-01 00:00:00 through 2262-04-11 23:47:16.854775807 UTC: the values that read the same signed and unsigned | Policy | E14 | Stays. Signed times extend the range down to `-2^63`; unsigned times extend it up to `2^64 - 1` |
+| Time range | `-2^63` through `2^63 - 1` nanoseconds, 1677-09-21 00:12:43.145224192 through 2262-04-11 23:47:16.854775807 UTC, the range macOS clamps times to | E14 | | |
 | Format time | The UTC host clock sampled once during planning; the epoch in reproducible mode | Policy | | |
 | Minimum container size | 1024 blocks (4 MiB), the smallest container `fsck_apfs` opens. `newfs_apfs` exits 0 from 91 blocks but writes no volume below 93, and `fsck_apfs` refuses every container below 1024 blocks | E1; policy: native qualification must be able to check the output | E15 | The smallest size E15 shows `fsck_apfs` accepting the writer's output |
 | Container size step | One block: `newfs_apfs` formats every block count of the size sweep, odd counts included | E1 | | |
@@ -1780,8 +1863,7 @@ timestamps; block sizes 4096 through 65536 for reading and 4096 for writing,
 in both the sector and allocation-unit masks since APFS addresses whole
 blocks;
 `max_label_bytes` 255; `max_link_target_bytes` 1023; `max_name_utf16_units`
-holding the writer's [name length](#directory-records-and-names) limit in
-bytes, as the other formats whose names are bytes report theirs;
+255, the writer's [name length](#directory-records-and-names) limit;
 `write_settings` with the volume UUID and case sensitivity, and without
 `FSIMG_SETTING_PLACEMENT`; and `read_settings` with the volume index and
 snapshot. Three points follow from rules stated elsewhere:

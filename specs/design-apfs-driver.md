@@ -589,8 +589,10 @@ every file extent lies inside one, and a second sort of
 distinct live streams sharing it. The pool's claim stream is merged the
 same way against the pool's bitmap. The two checks the format design holds
 [provisional](design-apfs.md#verification), the bitmap bits past `N` and
-each volume's allocated block count, are not made until their experiments
-give the rule.
+the allocated block count of a volume that is sealed, has clones or
+snapshots, or has freed blocks, are not made until their experiments give
+the rule; every other volume's allocated block count is checked against the blocks the format
+design lists there.
 
 **Walk.** The common walker visits the selected volume once. Every
 delivered entry is counted through `fsimg_verify_account()`, the one place

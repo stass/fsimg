@@ -225,8 +225,9 @@ The designs record these with their rationale.
    UTF-8 name is delivered, with no omitted-names profile, and the
    namespace key is the volume's comparison form, so equivalent names are
    corruption and queries match the way macOS looks names up. Length has
-   one rule, in UTF-8 bytes: the reader accepts 1022, and the writer 255,
-   a limit that is provisional until E14.
+   one rule per side: the reader accepts 1022 UTF-8 bytes, and the writer
+   255 UTF-16 code units, the limit macOS applies when it creates a name
+   (E14).
 9. **Unicode tables are the driver's.** `tools/gen-apfs-tables.rb`
    generates `lib/formats/apfs/unicode-tables.h` from pinned inputs whose
    digests [references](references.md) records, as HFS Plus owns its
@@ -235,8 +236,8 @@ The designs record these with their rationale.
 10. **Devices and sockets are the read-only kinds.** Their inodes map onto
     the kinds of the [device node design](../specs/design-device-nodes.md#readers),
     and a device's number is its device-number field when present.
-    Evidence (E3, E16) decides only whether a device without the field
-    tightens to corruption.
+    Evidence (E16) decides only whether a device without the field
+    tightens to corruption; E3 ran without root and holds no device.
 11. **Unconsumed attributes set the extra-data bit.** An inode with any
     attribute other than the three the driver consumes marks each of its
     entries, so the omission is visible per entry
@@ -450,7 +451,10 @@ describe the user-visible options.
   inode and attribute; each file keeps the prefix before the damage, a
   damaged child is one named loss, and its siblings extract.
 * **Gate:** `t`, `x -O` and `x` agree with the native manifest (names, kinds,
-  sizes, modes, owners, times, SHA-256 of contents) of every capture without
+  sizes, modes, times, SHA-256 of contents; owners with the dump, since a
+  capture mounted with ownership ignored stores 99 while `stat(2)` reports
+  the mounting user; the `.fseventsd` subtree, which the system rewrites at
+  unmount, left out) of every capture without
   compressed files, bare and through `apfs/gpt`, `apfs/gpt/dmg` and the
   Apple Partition Map fixture; no content byte is delivered from an
   unvalidated extent or a gap; a container cut past everything a listing
