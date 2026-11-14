@@ -110,29 +110,16 @@ typedef struct apfs_planner {
 	unsigned char		 target[FSIMG_SYMLINK_TARGET_MAX];
 } apfs_planner_t;
 
-static fsimg_status_t	emit_unsupported(fsimg_writer_t *, fsimg_emit_t *,
-			    fsimg_error_t *);
-
 /*
- * The writer's operations. This module plans; the emit operation refuses,
- * and the writer's descriptor is outside the registry.
+ * The writer's operations: this module validates and plans, write-emit.c
+ * emits. The writer's descriptor is outside the registry.
  */
 const fsimg_writer_ops_t fsimg_apfs_writer_ops = {
 	.validate = apfs_write_validate,
 	.plan = apfs_write_plan,
-	.emit = emit_unsupported,
+	.emit = apfs_write_emit,
 	.free = apfs_write_free
 };
-
-static fsimg_status_t
-emit_unsupported(fsimg_writer_t *writer, fsimg_emit_t *emit,
-    fsimg_error_t *error)
-{
-	(void)writer;
-	(void)emit;
-	return (fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_WRITER,
-	    "the APFS writer plans images but does not emit them"));
-}
 
 static fsimg_status_t
 writer_error(fsimg_status_t status, const char *message, fsimg_error_t *error)

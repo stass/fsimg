@@ -871,14 +871,12 @@ Object-map flags follow a closed table:
 | --- | --- | --- |
 | `0x1` manually managed (no snapshot support) | Required | Forbidden |
 | `0x2` encrypting, `0x4` decrypting, `0x8` key rolling | Unsupported | Unsupported |
-| `0x10` crypto generation | Accepted; clear in every E1 capture | Accepted (provisional, E1's volume records) |
+| `0x10` crypto generation | Accepted; clear in every E1 capture | Accepted; clear in every E1 capture |
 | Any other bit | Unsupported | Unsupported |
 
-The container map's flags are `0x1` alone in every E1 capture. Whether
-native unencrypted volume maps set the crypto-generation flag is
-provisional (E1's volume records, which the container dump does not
-decode). It changes no lookup, so it stays accepted and ignored if E1
-cannot say. The snapshot count and the most recent snapshot XID must
+The container map's flags are `0x1` alone in every E1 capture, and the
+volume map's are zero, the crypto-generation flag clear. That flag
+changes no lookup, so it is accepted and ignored. The snapshot count and the most recent snapshot XID must
 agree with the volume's snapshot tree, and the container map has no
 snapshots. A nonzero pending revert range is unsupported. The flags the
 writer emits are a [writer value](#writer-values).
@@ -2126,7 +2124,7 @@ written: `validate` and the size search fail with `FSIMG_ERANGE` above it.
 | Container superblock OID | 1 | [A1] | | |
 | Ephemeral and virtual OIDs | From 1024, the first OID [A1] does not reserve, in this order: space manager, reaper, volume superblock, then the filesystem tree's nodes in the order they are completed | E1 for 1024 to 1026: the second form has space manager 1024, reaper 1025, volume superblock 1026, free-queue roots 1027 and 1029 and next OID 1030; policy for the tree's nodes; E1: 1028 holds the filesystem root, its root tree OID in apfs-newfs-4194304-plain's volume superblock; E15: `fsck_apfs -n` accepts the root at 1027 with next OID 1028 (`e15-x1vol-oid`) | | |
 | Container next OID | One past the largest OID assigned | [A1] | | |
-| OID of a physical object: checkpoint-mapping block, object map, object-map node, extent-reference or snapshot tree node, chunk-information block | Its block number | [A1] | | |
+| OID of a physical object: checkpoint-mapping block, object map, object-map node, extent-reference or snapshot tree node, chunk-information or address block | Its block number | [A1] | | |
 | Volume superblock's tree references | Object map, extent-reference tree and snapshot tree by block number; root tree by virtual OID | [A1] | | |
 
 **Inodes and records**
@@ -2184,13 +2182,14 @@ written: `validate` and the size search fail with `FSIMG_ERANGE` above it.
 | Object counts | Files: regular files. Directories: directory entries, the root and private directories not counted. Symbolic links. Other: FIFOs, as native volumes count FIFOs and sockets. Snapshots: zero | [A1]; E3 | | |
 | Allocated block count, total blocks allocated and freed | Allocated: the nodes of the volume's object-map, filesystem, extent-reference and snapshot trees, one block more for the object-map object, and its file-data blocks, as [verification](#verification) states; total allocated the file-data blocks alone, the native value of a volume that has freed no data; total freed zero | [A1]; E3, E5, E6 | | |
 | Reserve and quota | Zero | [A1]: none | | |
-| Modification and unmount times | The format time | Policy | E1's volume records | Formula: each field holds the format time, or zero where E1 shows a fresh volume holding zero |
+| Modification and unmount times | Modification time the format time; unmount time zero, as a fresh native volume holds it | Policy for the modification time: E1's fresh volumes store a modification time some 100 to 200 microseconds after their formatting record's, which a single format time does not reproduce; E1 for the unmount time, zero on every fresh volume (apfs-newfs-4194304-plain, apfs-newfs-1073741824-plain, apfs-hdiutil-33554432-plain) | | |
 | Formatting record | Identifier `fsimg` followed by the package version, NUL-padded to 32 bytes; the format time; last XID `X` | Policy; E15: `fsck_apfs -n` accepts another identifier and reports it, `formatted by fsimg 0.1.0` (`e15-fmtby`) | | |
 | Modification records | Zero | E2: all empty | | |
 | Fields past [A1]'s layout, from offset 1056 | Zero | Policy: [A1] does not give their meaning, and zero carries no residue; E15: `fsck_apfs -n` accepts them zero and a read-only mount reads the volume (`e15-x1vol-tail0`, `e15-tail0`); a read-write mount is untested. Natively nonzero words sit at offsets 1056, 1064, 1068, 1104, 1120 and 1128; `fsck_apfs` names the one at 1056 `apfs_doc_id_index_xid`, natively the formatting XID, accepts it equal to `X` (`e15-x1vol-docx1`) and warns when it is not below the container's next XID (`e15-x1vol`) | | |
 | UUIDs | Volume: the setting. Container: derived as [settings](#settings-and-identities) state. Volume group: zero | Policy | | |
-| Next document ID, clone-information epoch and XID | Next document ID 3 (E2, E3); the epoch and XID native | E1, E2 | E1's volume records, for the epoch and XID | Native |
+| Next document ID, clone-information epoch and XID | Next document ID 3; the epoch and XID zero | E2, E3 for the document ID; E1: the epoch and XID are zero on every fresh volume (apfs-newfs-4194304-plain, apfs-newfs-1073741824-plain, apfs-hdiutil-33554432-plain) | | |
 | Snapshot, sealing and integrity fields | Zero | [A1]: features absent | | |
+| Metadata crypto state | Zero | Policy: an unencrypted volume reads no key, and zero carries no host build number; E1's fresh volumes hold major version 5, persistent class 6, a key OS version and key revision 1. `fsck_apfs -n` accepts zero, the volume mounts read-only and read-write, and modifications pass `fsck_apfs -n` again (the writer's qualification outputs, `tools/apfs/qualify.rb`, both personalities) | | |
 
 **Trees and content**
 
@@ -2200,7 +2199,7 @@ written: `validate` and the size search fail with `FSIMG_ERANGE` above it.
 | Last node of a level | What remains when the records end, as few as one record | Policy; E15: `fsck_apfs -n` accepts a last node of one record at the leaf level (`e15-lastleaf1`) and at an index level (`e15-last1`) | | |
 | Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1). In the filesystem tree: flags `0x42`, node size 4096, fixed sizes zero, and a node's table of contents its key count rounded up to a multiple of 8 entries, the shape of 253 of the 254 leaves of `apfs-newfs-268435456-e3-ci`, where every table is a multiple of 8 entries and index nodes hold up to 8 more (E3). The volume object map has the container map's shape: a root leaf of node flags `0x7`, a 448-byte table (112 entries) and tree flags `0x12` in every E1 capture (`apfs-newfs-4194304-plain`, `apfs-newfs-1073741824-plain`, `apfs-newfs-8589934592-plain`, `apfs-hdiutil-33554432-plain` and the four volumes of `apfs-diskutil-2147483648-e10-roles`); in `apfs-newfs-268435456-e3-ci` and `-cs`, an index root of node flags `0x5` whose table holds 144 entries, 576 bytes, the most 16-byte keys with 8-byte child OIDs a node has room for, over leaves of node flags `0x6` with 448-byte tables (E3). A fixed-size tree's table is so sized for the records of the node's kind, leaf or index. The extent-reference and snapshot trees are variable-size and unaligned: tree flags `0x52`, node size 4096, fixed sizes zero, a root leaf of node flags `0x3`, and a table of contents of the key count rounded up to a multiple of 8 entries and at least 8: 64 bytes when empty in every E1 capture, 128 for 9 records (`apfs-newfs-67108864-e5-links`), 192 for 19 (`apfs-newfs-67108864-e6-clone`) and 256 for 27 and 28 (E3). The snapshot tree is empty in every capture, so the tables of a populated one are provisional, taken as the extent-reference tree's; the writer emits it empty, the shape every capture shows, so nothing it writes depends on them. A fixed-size leaf of ghosts that outgrows its native table grows in steps of 8 entries, the table increment [A1] gives; that step is provisional, since no capture shows such a table, and a free-queue leaf of more than 144 ghosts in a native capture would show it. Without one the step stays the increment [A1] gives; the writer's free queues are empty, so it never builds such a leaf. | E1, E3, E5, E6 | A capture with a snapshot, for a populated snapshot tree; a free-queue leaf of more than 144 ghosts, for the step | Native |
 | Footer counts | Key count: the tree's leaf records. Node count: its nodes. Longest key and longest value: the largest encoded lengths among its leaf records, zero in an empty tree; an index key repeats a leaf key | [A1]; E3 for the counts and the longest key | | |
-| Object-map flags | Container map `0x1`; volume map zero | [A1]; E1 for the container map | E1's volume records, for the volume map's crypto-generation flag | Native |
+| Object-map flags | Container map `0x1`; volume map zero | [A1]; E1: the container map `0x1` and the volume map zero, crypto-generation flag clear (apfs-newfs-4194304-plain) | | |
 | Empty extent-reference and snapshot trees | One root leaf with no keys | E1, every capture's volume; E2: one node each among an empty volume's 5 allocated blocks | | Native |
 | File extent | A nonempty file's run, its size rounded up to 4096 bytes, is tiled by consecutive extents of at most the extent cap, so a file no longer than the cap has one; flags and crypto ID zero | [A1] | | |
 | Extent cap | `2^56 - 4096` bytes, the largest block-aligned length the 56-bit length field holds | [A1]: the field's width; E15: native single extents of 671088640 and 5368709120 bytes, the second above `2^32`, which `fsck_apfs` accepts (apfs-newfs-1073741824-e15-big, apfs-newfs-8589934592-e15-huge) | Lengths above 5368709120 bytes: `fsck_apfs -n` on the writer's large-file test output holding a longer extent, or a capture of a longer native file | 5368709120 bytes (1310720 blocks), the longest extent E15 shows accepted, if neither shows a longer one accepted |

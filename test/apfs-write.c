@@ -3,18 +3,26 @@
  */
 #include "config.h"
 
+#include <sys/stat.h>
+
+#include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
+#include <unistd.h>
 
+#include "fsimg-endian.h"
 #include "fsimg.h"
 #include "format.h"
 #include "internal.h"
 #include "layer.h"
 #include "meta.h"
+#include "sha256.h"
 #include "test.h"
 #include "write-apfs.h"
 #include "writer.h"
@@ -38,6 +46,8 @@ typedef struct fixture {
 	fsimg_writer_t	*writer;
 	apfs_plan_t	*plan;
 	fsimg_error_t	 error;
+	uint64_t	 memory_baseline;
+	uint64_t	 descriptor_baseline;
 } fixture_t;
 
 static void base_options(fsimg_write_options_t *);
@@ -67,8 +77,13 @@ base_options(fsimg_write_options_t *options)
 static fsimg_status_t
 create_writer(fixture_t *fixture, const fsimg_write_options_t *options)
 {
+	fsimg_stats_t stats;
+
 	bzero(fixture, sizeof(*fixture));
 	CHECK(fsimg_ctx_new(NULL, &fixture->ctx, &fixture->error) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture->ctx, &stats, NULL) == FSIMG_OK);
+	fixture->memory_baseline = stats.memory_bytes;
+	fixture->descriptor_baseline = stats.descriptors;
 	return (fsimg_writer_new_variant(fixture->ctx,
 	    &fsimg_apfs_write_format, &fsimg_apfs_write_format.variants[0],
 	    options, &fixture->writer, &fixture->error));
@@ -89,7 +104,14 @@ open_writer(fixture_t *fixture, const fsimg_write_options_t *options)
 static void
 close_writer(fixture_t *fixture)
 {
+	fsimg_stats_t stats;
+
 	fsimg_writer_free(fixture->writer);
+	CHECK(fsimg_ctx_get_stats(fixture->ctx, &stats, NULL) == FSIMG_OK);
+	EXPECT(stats.memory_bytes == fixture->memory_baseline);
+	EXPECT(stats.scratch_bytes == 0);
+	EXPECT(stats.spool_bytes == 0);
+	EXPECT(stats.descriptors == fixture->descriptor_baseline);
 	fsimg_ctx_free(fixture->ctx);
 }
 
@@ -984,11 +1006,1470 @@ test_reproducible_uuids_use_apfs_role_and_distinct_container(void)
 	close_writer(&fixture);
 }
 
-#define RUN(test) do { scenario = #test; test(); } while (0)
+/* Emission fixtures describe the source independently of the plan's rows.
+ * Files use an offset-dependent pattern, so shifted or repeated copies fail.
+ */
+#define EMIT_ENTRIES_MAX 4096u
+#define EMIT_PATH_MAX 512u
+#define EMIT_META (FSIMG_META_MODE | FSIMG_META_OWNER | FSIMG_META_CREATED | \
+    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED | FSIMG_META_CHANGED)
+
+typedef struct emit_entry {
+	fsimg_entry_t	 entry;
+	char		 path[EMIT_PATH_MAX];
+	char		 target[1024];
+} emit_entry_t;
+
+typedef struct emit_catalog {
+	emit_entry_t	*entries;
+	size_t		 count;
+	bool		 changed_link;
+} emit_catalog_t;
+
+typedef struct memory_sink {
+	unsigned char	*bytes;
+	uint64_t	 length;
+	uint64_t	 writes;
+	uint64_t	 initialized_bytes;
+	uint64_t	 zeroing_writes;
+	uint64_t	 first_driver_offset;
+	uint64_t	 last_write_offset;
+	uint64_t	 fail_write_at;
+	bool		 fail_flush;
+	bool		 zero_callback;
+} memory_sink_t;
+
+static unsigned char
+content_byte(uint64_t offset)
+{
+	return ((unsigned char)((offset * 29 + offset / 251 + 17) % 256));
+}
+
+static void
+catalog_init(emit_catalog_t *catalog)
+{
+	bzero(catalog, sizeof(*catalog));
+	catalog->entries = calloc(EMIT_ENTRIES_MAX, sizeof(*catalog->entries));
+	CHECK(catalog->entries != NULL);
+}
+
+static void
+catalog_add(emit_catalog_t *catalog, const char *path,
+    fsimg_entry_kind_t kind, uint64_t size)
+{
+	emit_entry_t *spec;
+	fsimg_metadata_t *metadata;
+	fsimg_timestamp_t timestamp = { .seconds = EPOCH,
+	    .precision_ns = 1, .basis = FSIMG_TIME_UTC };
+
+	CHECK(catalog->count < EMIT_ENTRIES_MAX);
+	spec = &catalog->entries[catalog->count++];
+	CHECK(strlen(path) < sizeof(spec->path));
+	strcpy(spec->path, path);
+	spec->entry = (fsimg_entry_t){ .path = spec->path, .kind = kind,
+	    .size = size };
+	metadata = &spec->entry.metadata;
+	metadata->valid = EMIT_META;
+	metadata->uid = 70000;
+	metadata->gid = 80000;
+	metadata->mode = kind == FSIMG_ENTRY_SYMLINK ? 0777 :
+	    kind == FSIMG_ENTRY_DIRECTORY ? 0750 : 0640;
+	metadata->created = timestamp;
+	metadata->modified = timestamp;
+	metadata->accessed = timestamp;
+	metadata->changed = timestamp;
+	if (kind == FSIMG_ENTRY_SYMLINK) {
+		CHECK(size > 0 && size < sizeof(spec->target));
+		memset(spec->target, 'x', (size_t)size);
+	}
+}
+
+static void
+catalog_mixed(emit_catalog_t *catalog)
+{
+	static const uint64_t sizes[] = { 0, 1, 4095, 4096, 4097,
+	    3 * 1024 * 1024 + 137 };
+	char path[EMIT_PATH_MAX] = "";
+	size_t used;
+
+	catalog_add(catalog, "/files", FSIMG_ENTRY_DIRECTORY, 0);
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		snprintf(path, sizeof(path), "/files/size-%llu",
+		    (unsigned long long)sizes[i]);
+		catalog_add(catalog, path, FSIMG_ENTRY_FILE, sizes[i]);
+	}
+	catalog_add(catalog, "/link-one", FSIMG_ENTRY_SYMLINK, 1);
+	catalog_add(catalog, "/link-long", FSIMG_ENTRY_SYMLINK, 1023);
+	catalog_add(catalog, "/pipe", FSIMG_ENTRY_FIFO, 0);
+	path[0] = '\0';
+	for (unsigned i = 0; i < 20; i++) {
+		used = strlen(path);
+		snprintf(path + used, sizeof(path) - used, "/depth-%02u", i);
+		catalog_add(catalog, path, FSIMG_ENTRY_DIRECTORY, 0);
+	}
+	strcat(path, "/bottom");
+	catalog_add(catalog, path, FSIMG_ENTRY_FILE, 37);
+}
+
+static void
+catalog_many(emit_catalog_t *catalog, bool wide)
+{
+	char path[256];
+	unsigned count = wide ? 3000 : 2000;
+
+	if (wide)
+		catalog_add(catalog, "/wide", FSIMG_ENTRY_DIRECTORY, 0);
+	for (unsigned i = 0; i < count; i++) {
+		snprintf(path, sizeof(path), "%s/file-%04u", wide ? "/wide" :
+		    "", i);
+		catalog_add(catalog, path, FSIMG_ENTRY_FILE, i % 7 + 1);
+	}
+}
+
+static fsimg_status_t
+catalog_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
+    size_t length, size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	const emit_catalog_t *catalog = argument;
+	const emit_entry_t *spec;
+	unsigned char *out = buffer;
+
+	CHECK(id < catalog->count);
+	spec = &catalog->entries[id];
+	CHECK(offset <= spec->entry.size);
+	if (length > spec->entry.size - offset)
+		length = (size_t)(spec->entry.size - offset);
+	if (spec->entry.kind == FSIMG_ENTRY_SYMLINK) {
+		bcopy(spec->target + offset, out, length);
+		if (catalog->changed_link && length != 0)
+			out[0] = 'y';
+	} else {
+		for (size_t i = 0; i < length; i++)
+			out[i] = content_byte(offset + i);
+	}
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+/* A one-page scratch cache is selected only by the identity variants. */
+static void
+prepare_catalog(fixture_t *fixture, const emit_catalog_t *catalog,
+    const fsimg_write_options_t *options, const fsimg_options_t *context,
+    bool reverse)
+{
+	fsimg_source_ops_t sources;
+	fsimg_source_t source = { .kind = FSIMG_SOURCE_PROVIDER };
+	fsimg_stats_t stats;
+	size_t index;
+
+	bzero(fixture, sizeof(*fixture));
+	CHECK(fsimg_ctx_new(context, &fixture->ctx, &fixture->error) == FSIMG_OK);
+	if (context != NULL && context->scratch_directory_fd != -1)
+		CHECK(fsimg_test_meta_cache(fixture->ctx, 1, NULL) == FSIMG_OK);
+	CHECK(fsimg_ctx_get_stats(fixture->ctx, &stats, NULL) == FSIMG_OK);
+	fixture->memory_baseline = stats.memory_bytes;
+	fixture->descriptor_baseline = stats.descriptors;
+	CHECK(fsimg_writer_new_variant(fixture->ctx, &fsimg_apfs_write_format,
+	    &fsimg_apfs_write_format.variants[0], options, &fixture->writer,
+	    &fixture->error) == FSIMG_OK);
+	fsimg_source_ops_init(&sources);
+	sources.validate = link_validate;
+	sources.read_at = catalog_read;
+	CHECK(fsimg_writer_set_sources(fixture->writer, &sources,
+	    (void *)catalog, &fixture->error) == FSIMG_OK);
+	for (size_t i = 0; i < catalog->count; i++) {
+		const fsimg_entry_t *entry;
+
+		index = reverse ? catalog->count - 1 - i : i;
+		entry = &catalog->entries[index].entry;
+		source.id = index;
+		CHECK(fsimg_writer_add(fixture->writer, entry,
+		    entry->kind == FSIMG_ENTRY_FILE ||
+		    entry->kind == FSIMG_ENTRY_SYMLINK ? &source : NULL,
+		    &fixture->error) == FSIMG_OK);
+	}
+}
+
+static void
+plan_catalog(fixture_t *fixture, const emit_catalog_t *catalog,
+    const fsimg_write_options_t *options, const fsimg_options_t *context,
+    bool reverse)
+{
+	prepare_catalog(fixture, catalog, options, context, reverse);
+	plan_ok(fixture);
+}
+
+static fsimg_status_t
+memory_size(void *argument, uint64_t *size,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	const memory_sink_t *sink = argument;
+
+	*size = sink->length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+memory_read(void *argument, uint64_t offset, void *buffer, size_t length,
+    size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	const memory_sink_t *sink = argument;
+
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	bcopy(sink->bytes + offset, buffer, length);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+memory_write(void *argument, uint64_t offset, const void *buffer,
+    size_t length, size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+{
+	memory_sink_t *sink = argument;
+
+	*transferred = 0;
+	sink->writes++;
+	sink->last_write_offset = offset;
+	if (sink->initialized_bytes < sink->length) {
+		CHECK(offset == sink->initialized_bytes);
+		CHECK(length <= sink->length - sink->initialized_bytes);
+		sink->initialized_bytes += length;
+		sink->zeroing_writes++;
+	} else if (sink->writes == sink->zeroing_writes + 1)
+		sink->first_driver_offset = offset;
+	if (sink->writes == sink->fail_write_at)
+		return (FSIMG_EIO);
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	bcopy(buffer, sink->bytes + offset, length);
+	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+memory_zero(void *argument, uint64_t offset, uint64_t length,
+    fsimg_error_t *error)
+{
+	unsigned char zeros[8192] = { 0 };
+	fsimg_status_t status;
+	size_t batch, transferred;
+
+	while (length != 0) {
+		batch = length > sizeof(zeros) ? sizeof(zeros) : (size_t)length;
+		status = memory_write(argument, offset, zeros, batch,
+		    &transferred, error);
+		if (status != FSIMG_OK)
+			return (status);
+		CHECK(transferred == batch);
+		offset += batch;
+		length -= batch;
+	}
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+memory_flush(void *argument, fsimg_error_t *error FSIMG_UNUSED)
+{
+	const memory_sink_t *sink = argument;
+
+	return (sink->fail_flush ? FSIMG_EIO : FSIMG_OK);
+}
+
+static fsimg_status_t
+memory_io(fixture_t *fixture, memory_sink_t *sink, fsimg_io_t **io)
+{
+	fsimg_io_ops_t ops;
+
+	fsimg_io_ops_init(&ops);
+	ops.get_size = memory_size;
+	ops.read_at = memory_read;
+	ops.write_at = memory_write;
+	ops.flush = memory_flush;
+	if (sink->zero_callback)
+		ops.zero_range = memory_zero;
+	*io = NULL;
+	return (fsimg_io_from_callbacks(fixture->ctx, &ops, sink, io,
+	    &fixture->error));
+}
+
+static void
+sink_open(const fixture_t *fixture, memory_sink_t *sink)
+{
+	bzero(sink, sizeof(*sink));
+	sink->length = fixture->plan->block_count * BLOCK_BYTES;
+	sink->bytes = malloc((size_t)sink->length);
+	CHECK(sink->bytes != NULL);
+	memset(sink->bytes, 0xa5, (size_t)sink->length);
+}
+
+static fsimg_status_t
+emit_into(fixture_t *fixture, memory_sink_t *sink)
+{
+	fsimg_io_t *io;
+	fsimg_status_t status;
+
+	status = memory_io(fixture, sink, &io);
+	if (status == FSIMG_OK)
+		status = fsimg_writer_emit(fixture->writer, io, &fixture->error);
+	fsimg_io_free(io);
+	return (status);
+}
+
+static bool
+emit_ok(fixture_t *fixture, memory_sink_t *sink)
+{
+	fsimg_status_t status;
+
+	sink_open(fixture, sink);
+	status = emit_into(fixture, sink);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "%s: emit returned %d: %s (%s)\n", scenario,
+		    status, fixture->error.message, fixture->error.path);
+	EXPECT(status == FSIMG_OK);
+	return (status == FSIMG_OK);
+}
+
+static const unsigned char *
+image_block(const memory_sink_t *sink, uint64_t block)
+{
+	CHECK(block < sink->length / BLOCK_BYTES);
+	return (sink->bytes + block * BLOCK_BYTES);
+}
+
+/* Print the first unexpected byte, including its absolute image offset. */
+static void
+expect_zero(const memory_sink_t *sink, uint64_t offset, uint64_t length)
+{
+	CHECK(offset <= sink->length && length <= sink->length - offset);
+	for (uint64_t i = 0; i < length; i++) {
+		if (sink->bytes[offset + i] == 0)
+			continue;
+		fprintf(stderr, "%s: image byte %llu: got %#x, expected zero\n",
+		    scenario, (unsigned long long)(offset + i),
+		    sink->bytes[offset + i]);
+		failures++;
+		break;
+	}
+}
+
+static void
+check_object(const memory_sink_t *sink, uint64_t block, uint64_t blocks)
+{
+	apfs_obj_t object;
+	const unsigned char *bytes = image_block(sink, block);
+
+	CHECK(blocks <= sink->length / BLOCK_BYTES - block);
+	CHECK(apfs_obj_decode(bytes, (size_t)(blocks * BLOCK_BYTES), &object));
+	if (!apfs_object_verify(bytes, (size_t)(blocks * BLOCK_BYTES))) {
+		fprintf(stderr, "%s: object at block %llu, OID %llu: "
+		    "invalid Fletcher checksum over %llu blocks\n", scenario,
+		    (unsigned long long)block, (unsigned long long)object.oid,
+		    (unsigned long long)blocks);
+		failures++;
+	}
+	EXPECT(object.xid == 1);
+}
+
+static void
+check_tree_bytes(const apfs_plan_t *plan, const memory_sink_t *sink,
+    const apfs_tree_plan_t *tree, const char *role)
+{
+	apfs_node_t node;
+	uint32_t toc_bytes;
+	uint64_t block;
+	char context[256];
+	const char *saved_scenario = scenario;
+
+	for (uint64_t k = 0; k < tree->shape.node_count; k++) {
+		block = apfs_run_block(plan, tree->first_run + k);
+		check_object(sink, block, 1);
+		CHECK(apfs_node_decode(image_block(sink, block), BLOCK_BYTES,
+		    &node));
+		snprintf(context, sizeof(context), "%s: %s block %llu level %u",
+		    saved_scenario, role, (unsigned long long)block, node.level);
+		scenario = context;
+		toc_bytes = (node.flags & APFS_NODE_FIXED_KV) != 0 ?
+		    APFS_TOC_FIXED_BYTES : APFS_TOC_VARIABLE_BYTES;
+		expect_zero(sink, block * BLOCK_BYTES + node.area.free_start,
+		    node.area.free_end - node.area.free_start);
+		expect_zero(sink, block * BLOCK_BYTES + node.area.toc_start +
+		    node.key_count * toc_bytes, node.toc.len -
+		    node.key_count * toc_bytes);
+		if ((node.flags & APFS_NODE_ROOT) == 0)
+			EXPECT(node.free.len >= APFS_BTREE_INFO_BYTES);
+	}
+	scenario = saved_scenario;
+}
+
+/* Decode all leaf mappings, requiring a bijection with filesystem nodes. */
+static void
+check_volume_node_mappings(const apfs_plan_t *plan,
+    const memory_sink_t *sink)
+{
+	const apfs_tree_plan_t *tree = &plan->vomap_tree;
+	apfs_kv_size_t sizes = { APFS_OMAP_KEY_BYTES, APFS_OMAP_VAL_BYTES };
+	apfs_omap_key_t key;
+	apfs_omap_val_t value;
+	apfs_entry_t entry;
+	apfs_node_t node;
+	const unsigned char *bytes;
+	bool *seen;
+	uint64_t index, count = 0;
+
+	seen = calloc((size_t)plan->fs_tree.shape.node_count, sizeof(*seen));
+	CHECK(seen != NULL);
+	for (uint64_t k = 0; k < tree->shape.node_count; k++) {
+		bytes = image_block(sink, apfs_run_block(plan, tree->first_run + k));
+		CHECK(apfs_node_decode(bytes, BLOCK_BYTES, &node));
+		if (node.level != 0)
+			continue;
+		for (uint32_t i = 0; i < node.key_count; i++) {
+			CHECK(apfs_entry_decode(bytes, BLOCK_BYTES, &node, i,
+			    &sizes, &entry));
+			CHECK(apfs_omap_key_decode(bytes + entry.key_off,
+			    entry.key_len, &key));
+			CHECK(apfs_omap_val_decode(bytes + entry.val_off,
+			    entry.val_len, &value));
+			CHECK(key.oid >= APFS_WRITE_OID_FS_FIRST);
+			index = key.oid - APFS_WRITE_OID_FS_FIRST;
+			CHECK(index < plan->fs_tree.shape.node_count);
+			EXPECT(!seen[index]);
+			seen[index] = true;
+			count++;
+			EXPECT(key.xid == 1);
+			EXPECT(value.flags == 0 && value.size == BLOCK_BYTES);
+			EXPECT(value.address == apfs_run_block(plan,
+			    plan->fs_tree.first_run + index));
+		}
+	}
+	EXPECT(count == plan->fs_tree.shape.node_count);
+	for (uint64_t i = 0; i < plan->fs_tree.shape.node_count; i++)
+		EXPECT(seen[i]);
+	free(seen);
+}
+
+static void
+check_bitmap(const memory_sink_t *sink, uint64_t block, uint64_t first,
+    uint64_t end)
+{
+	const unsigned char *bits = image_block(sink, block);
+	bool actual, expected;
+
+	for (uint64_t bit = 0; bit < BLOCK_BYTES * 8; bit++) {
+		actual = (bits[bit / 8] & (1u << (bit % 8))) != 0;
+		expected = first + bit < end;
+		if (actual == expected)
+			continue;
+		fprintf(stderr, "%s: bitmap block %llu bit %llu: got %u, "
+		    "expected %u\n", scenario, (unsigned long long)block,
+		    (unsigned long long)bit, actual, expected);
+		failures++;
+		break;
+	}
+}
+
+static void
+check_container_bytes(const apfs_plan_t *plan, const memory_sink_t *sink)
+{
+	const unsigned char *bytes;
+	apfs_cpm_block_t mappings;
+	apfs_cpm_t mapping;
+	apfs_spaceman_t sm;
+	apfs_chunk_info_t chunk;
+	apfs_cib_t cib;
+	apfs_nx_t nx;
+	uint64_t free_count = 0, block, used;
+
+	CHECK(apfs_nx_decode(sink->bytes, BLOCK_BYTES, &nx));
+	EXPECT(nx.next_oid == plan->next_oid);
+	EXPECT(nx.next_xid == 2);
+	EXPECT(nx.omap_oid == apfs_run_block(plan, plan->comap_run));
+	EXPECT(nx.spaceman_oid == APFS_WRITE_OID_SPACEMAN);
+	EXPECT(nx.reaper_oid == APFS_WRITE_OID_REAPER);
+	EXPECT(bcmp(sink->bytes, image_block(sink, nx.desc_base + 1),
+	    BLOCK_BYTES) == 0);
+	check_object(sink, 0, 1);
+	check_object(sink, nx.desc_base, 1);
+	check_object(sink, nx.desc_base + 1, 1);
+	expect_zero(sink, APFS_NX_BYTES, BLOCK_BYTES - APFS_NX_BYTES);
+	expect_zero(sink, (nx.desc_base + 1) * BLOCK_BYTES + APFS_NX_BYTES,
+	    BLOCK_BYTES - APFS_NX_BYTES);
+	bytes = image_block(sink, nx.desc_base);
+	CHECK(apfs_cpm_block_decode(bytes, BLOCK_BYTES, &mappings));
+	EXPECT(mappings.count == APFS_EPHEMERAL_COUNT);
+	expect_zero(sink, nx.desc_base * BLOCK_BYTES + APFS_CPM_HEADER_BYTES +
+	    mappings.count * APFS_CPM_ENTRY_BYTES, BLOCK_BYTES -
+	    APFS_CPM_HEADER_BYTES - mappings.count * APFS_CPM_ENTRY_BYTES);
+	for (uint32_t i = 0; i < mappings.count; i++) {
+		CHECK(i < APFS_EPHEMERAL_COUNT);
+		CHECK(apfs_cpm_decode(bytes, BLOCK_BYTES, &mappings, i, &mapping));
+		EXPECT(mapping.oid == plan->ephemeral[i].oid);
+		EXPECT(mapping.address == nx.data_base +
+		    plan->ephemeral[i].first_slot);
+		EXPECT(mapping.kind == plan->ephemeral[i].kind);
+		EXPECT(mapping.size == plan->ephemeral[i].bytes);
+		EXPECT(mapping.volume_oid == 0);
+		EXPECT(mapping.flags == APFS_OBJ_EPHEMERAL);
+		check_object(sink, mapping.address, mapping.size / BLOCK_BYTES);
+		if (mapping.oid == nx.reaper_oid)
+			expect_zero(sink, mapping.address * BLOCK_BYTES +
+			    APFS_REAPER_BYTES, mapping.size - APFS_REAPER_BYTES);
+	}
+	CHECK(apfs_spaceman_decode(image_block(sink, nx.data_base),
+	    (size_t)(plan->sm_blocks * BLOCK_BYTES), &sm));
+	EXPECT(sm.devices[0].free_count == plan->block_count -
+	    plan->allocated_blocks);
+	/* The four arrays are packed in this order, with alignment gaps. */
+	used = APFS_SM_BYTES;
+	CHECK(sm.ip_bm_xid_offset >= used);
+	expect_zero(sink, nx.data_base * BLOCK_BYTES + used,
+	    sm.ip_bm_xid_offset - used);
+	used = sm.ip_bm_xid_offset + 8ull * sm.ip_bm_size_in_blocks;
+	CHECK(sm.ip_bitmap_offset >= used);
+	expect_zero(sink, nx.data_base * BLOCK_BYTES + used,
+	    sm.ip_bitmap_offset - used);
+	used = sm.ip_bitmap_offset + 2ull * sm.ip_bm_size_in_blocks;
+	CHECK(sm.ip_bm_free_next_offset >= used);
+	expect_zero(sink, nx.data_base * BLOCK_BYTES + used,
+	    sm.ip_bm_free_next_offset - used);
+	used = sm.ip_bm_free_next_offset + 2ull * sm.ip_bm_block_count;
+	CHECK(sm.devices[0].addr_offset >= used);
+	expect_zero(sink, nx.data_base * BLOCK_BYTES + used,
+	    sm.devices[0].addr_offset - used);
+	used = sm.devices[0].addr_offset + 8ull * (sm.devices[0].cab_count != 0 ?
+	    sm.devices[0].cab_count : sm.devices[0].cib_count);
+	CHECK(used <= plan->sm_blocks * BLOCK_BYTES);
+	expect_zero(sink, nx.data_base * BLOCK_BYTES + used,
+	    plan->sm_blocks * BLOCK_BYTES - used);
+	/* These fixtures fit one address array; no CAB indirection is needed. */
+	CHECK(plan->pool_cabs == 0);
+	for (uint64_t k = 0; k < plan->pool_cibs; k++) {
+		block = sm.ip_base + k;
+		bytes = image_block(sink, block);
+		check_object(sink, block, 1);
+		CHECK(apfs_cib_decode(bytes, BLOCK_BYTES, &cib));
+		for (uint32_t i = 0; i < cib.count; i++) {
+			CHECK(apfs_chunk_info_decode(bytes, BLOCK_BYTES, &cib, i,
+			    &chunk));
+			free_count += chunk.free_count;
+			used = chunk.block_count - chunk.free_count;
+			if (used != 0) {
+				EXPECT(chunk.bitmap_address != 0);
+				check_bitmap(sink, chunk.bitmap_address,
+				    chunk.address, plan->allocated_blocks);
+			} else
+				EXPECT(chunk.bitmap_address == 0);
+		}
+		expect_zero(sink, block * BLOCK_BYTES + APFS_CIB_HEADER_BYTES +
+		    cib.count * APFS_CHUNK_INFO_BYTES, BLOCK_BYTES -
+		    APFS_CIB_HEADER_BYTES - cib.count * APFS_CHUNK_INFO_BYTES);
+	}
+	EXPECT(free_count == sm.devices[0].free_count);
+	used = plan->pool_cibs + plan->pool_cabs + plan->pool_bitmaps;
+	for (uint64_t k = 0; k < sm.ip_bm_size_in_blocks; k++)
+		check_bitmap(sink, sm.ip_bm_base + k, k * BLOCK_BYTES * 8, used);
+	expect_zero(sink, (sm.ip_base + used) * BLOCK_BYTES,
+	    (sm.ip_block_count - used) * BLOCK_BYTES);
+	expect_zero(sink, (sm.ip_bm_base + sm.ip_bm_size_in_blocks) * BLOCK_BYTES,
+	    (sm.ip_bm_block_count - sm.ip_bm_size_in_blocks) * BLOCK_BYTES);
+	check_tree_bytes(plan, sink, &plan->fs_tree, "filesystem tree");
+	check_tree_bytes(plan, sink, &plan->vomap_tree, "volume object map");
+	check_tree_bytes(plan, sink, &plan->comap_tree, "container object map");
+	check_tree_bytes(plan, sink, &plan->extentref_tree, "extent references");
+	check_tree_bytes(plan, sink, &plan->snapshot_tree, "snapshots");
+	check_object(sink, apfs_run_block(plan, plan->volume_run), 1);
+	check_object(sink, apfs_run_block(plan, plan->vomap_run), 1);
+	check_object(sink, apfs_run_block(plan, plan->comap_run), 1);
+	expect_zero(sink, apfs_run_block(plan, plan->volume_run) * BLOCK_BYTES +
+	    APFS_FS_BYTES, BLOCK_BYTES - APFS_FS_BYTES);
+	expect_zero(sink, apfs_run_block(plan, plan->vomap_run) * BLOCK_BYTES +
+	    APFS_OMAP_BYTES, BLOCK_BYTES - APFS_OMAP_BYTES);
+	expect_zero(sink, apfs_run_block(plan, plan->comap_run) * BLOCK_BYTES +
+	    APFS_OMAP_BYTES, BLOCK_BYTES - APFS_OMAP_BYTES);
+	check_volume_node_mappings(plan, sink);
+	expect_zero(sink, (nx.desc_base + 2) * BLOCK_BYTES,
+	    (nx.desc_blocks - 2) * BLOCK_BYTES);
+	expect_zero(sink, (nx.data_base + plan->sm_blocks + 1) * BLOCK_BYTES,
+	    (nx.data_blocks - plan->sm_blocks - 1) * BLOCK_BYTES);
+	expect_zero(sink, plan->allocated_blocks * BLOCK_BYTES,
+	    (plan->block_count - plan->allocated_blocks) * BLOCK_BYTES);
+}
+
+/* Resolve an OID using only physical links in the emitted object map. */
+static uint64_t
+image_omap_lookup(const memory_sink_t *sink, uint64_t block, uint64_t oid,
+    unsigned depth)
+{
+	apfs_kv_size_t sizes = { APFS_OMAP_KEY_BYTES, APFS_OMAP_VAL_BYTES };
+	apfs_omap_key_t key;
+	apfs_omap_val_t value;
+	apfs_entry_t entry;
+	apfs_node_t node;
+	const unsigned char *bytes = image_block(sink, block);
+	uint64_t found = 0, child;
+
+	CHECK(depth < APFS_BTREE_LEVELS_MAX);
+	CHECK(apfs_node_decode(bytes, BLOCK_BYTES, &node));
+	if (node.level != 0)
+		sizes.val = APFS_CHILD_OID_BYTES;
+	for (uint32_t i = 0; i < node.key_count; i++) {
+		CHECK(apfs_entry_decode(bytes, BLOCK_BYTES, &node, i,
+		    &sizes, &entry));
+		if (node.level != 0) {
+			child = image_omap_lookup(sink,
+			    fsimg_load_le64(bytes + entry.val_off), oid, depth + 1);
+			if (child != 0) {
+				EXPECT(found == 0);
+				found = child;
+			}
+			continue;
+		}
+		CHECK(apfs_omap_key_decode(bytes + entry.key_off,
+		    entry.key_len, &key));
+		if (key.oid != oid)
+			continue;
+		CHECK(apfs_omap_val_decode(bytes + entry.val_off,
+		    entry.val_len, &value));
+		EXPECT(found == 0);
+		EXPECT(key.xid == 1 && value.flags == 0);
+		EXPECT(value.size == BLOCK_BYTES);
+		found = value.address;
+	}
+	return (found);
+}
+
+typedef struct extent_check {
+	fixture_t		*fixture;
+	const memory_sink_t	*sink;
+	uint64_t		*covered;
+	unsigned		*references;
+} extent_check_t;
+
+/* Filesystem leaf order must tile each stream, including its zero padding.
+ * Content is read at the physical addresses decoded from the leaf values.
+ */
+static void
+check_image_extent(extent_check_t *check, const unsigned char *key,
+    size_t key_length, const unsigned char *value, size_t value_length)
+{
+	fixture_t *fixture = check->fixture;
+	const fsimg_catalog_entry_t *catalog;
+	apfs_extent_key_t extent_key;
+	apfs_extent_val_t extent;
+	apfs_pext_val_t reference;
+	apfs_jkey_t header;
+	apfs_row_t row;
+	const unsigned char *bytes;
+	uint64_t id, ino, capacity, source_length;
+	const char *saved_scenario = scenario;
+
+	CHECK(apfs_jkey_decode(key, key_length, &header));
+	if (header.kind != APFS_J_FILE_EXTENT &&
+	    header.kind != APFS_J_PHYS_EXTENT)
+		return;
+	ino = header.oid;
+	if (header.kind == APFS_J_PHYS_EXTENT) {
+		CHECK(apfs_pext_val_decode(value, value_length, &reference));
+		ino = reference.owner;
+	}
+	CHECK(ino > APFS_WRITE_INO_BASE);
+	id = ino - APFS_WRITE_INO_BASE;
+	CHECK(id <= fixture->writer->count);
+	CHECK(apfs_row_get(fixture->plan, id, &row, NULL) == FSIMG_OK);
+	CHECK(fsimg_catalog_get(fixture->writer, id, &catalog, NULL) == FSIMG_OK);
+	scenario = catalog->entry.path;
+	CHECK(row.kind == FSIMG_ENTRY_FILE);
+	capacity = apfs_row_blocks(&row) * BLOCK_BYTES;
+	if (header.kind == APFS_J_PHYS_EXTENT) {
+		EXPECT(key_length == APFS_JKEY_BYTES);
+		EXPECT(row.length != 0);
+		EXPECT(header.oid == row.first_block);
+		EXPECT(reference.length == apfs_row_blocks(&row));
+		EXPECT(reference.owner == apfs_write_ino(id));
+		EXPECT(reference.refcnt == 1 && reference.kind == 1);
+		check->references[id]++;
+		scenario = saved_scenario;
+		return;
+	}
+	CHECK(apfs_extent_key_decode(key, key_length, &extent_key));
+	CHECK(apfs_extent_val_decode(value, value_length, &extent));
+	EXPECT(extent_key.logical == check->covered[id]);
+	EXPECT(extent_key.logical % BLOCK_BYTES == 0);
+	CHECK(extent_key.logical <= capacity);
+	CHECK(extent.length > 0 && extent.length % BLOCK_BYTES == 0);
+	CHECK(extent.length <= capacity - extent_key.logical);
+	EXPECT(extent.phys_block == row.first_block +
+	    extent_key.logical / BLOCK_BYTES);
+	CHECK(extent.phys_block < check->sink->length / BLOCK_BYTES);
+	CHECK(extent.length <= check->sink->length -
+	    extent.phys_block * BLOCK_BYTES);
+	bytes = image_block(check->sink, extent.phys_block);
+	source_length = extent_key.logical < row.length ?
+	    row.length - extent_key.logical : 0;
+	if (source_length > extent.length)
+		source_length = extent.length;
+	for (uint64_t i = 0; i < source_length; i++) {
+		unsigned char expected = catalog->storage == FSIMG_STORAGE_ZERO ?
+		    0 : content_byte(extent_key.logical + i);
+
+		if (bytes[i] == expected)
+			continue;
+		fprintf(stderr, "%s: content byte %llu: got %u, expected %u\n",
+		    scenario, (unsigned long long)(extent_key.logical + i),
+		    bytes[i], expected);
+		failures++;
+		break;
+	}
+	expect_zero(check->sink, extent.phys_block * BLOCK_BYTES + source_length,
+	    extent.length - source_length);
+	check->covered[id] += extent.length;
+	scenario = saved_scenario;
+}
+
+/* A nonzero object-map root resolves virtual filesystem node OIDs;
+ * extent-reference nodes instead carry physical child addresses directly.
+ */
+static void
+check_image_extent_tree(extent_check_t *check, uint64_t block,
+    uint64_t omap_root, unsigned depth)
+{
+	apfs_entry_t entry;
+	apfs_node_t node;
+	const unsigned char *bytes = image_block(check->sink, block);
+	uint64_t child;
+
+	CHECK(depth < APFS_BTREE_LEVELS_MAX);
+	CHECK(apfs_node_decode(bytes, BLOCK_BYTES, &node));
+	for (uint32_t i = 0; i < node.key_count; i++) {
+		CHECK(apfs_entry_decode(bytes, BLOCK_BYTES, &node, i, NULL, &entry));
+		if (node.level == 0) {
+			check_image_extent(check, bytes + entry.key_off, entry.key_len,
+			    bytes + entry.val_off, entry.val_len);
+			continue;
+		}
+		CHECK(entry.val_len == APFS_CHILD_OID_BYTES);
+		child = fsimg_load_le64(bytes + entry.val_off);
+		if (omap_root != 0)
+			child = image_omap_lookup(check->sink, omap_root, child, 0);
+		CHECK(child != 0);
+		check_image_extent_tree(check, child, omap_root, depth + 1);
+	}
+}
+
+static void
+check_file_placement(fixture_t *fixture, const memory_sink_t *sink)
+{
+	extent_check_t check = { .fixture = fixture, .sink = sink };
+	apfs_omap_t omap;
+	apfs_nx_t nx;
+	apfs_fs_t volume;
+	apfs_row_t row;
+	uint64_t block, omap_root;
+
+	/* Bootstrap through the container map, then the volume's own map. */
+	CHECK(apfs_nx_decode(sink->bytes, BLOCK_BYTES, &nx));
+	CHECK(apfs_omap_decode(image_block(sink, nx.omap_oid), BLOCK_BYTES, &omap));
+	block = image_omap_lookup(sink, omap.tree_oid, nx.volume_oids[0], 0);
+	CHECK(block != 0);
+	CHECK(apfs_fs_decode(image_block(sink, block), BLOCK_BYTES, &volume));
+	CHECK(apfs_omap_decode(image_block(sink, volume.omap_oid),
+	    BLOCK_BYTES, &omap));
+	omap_root = omap.tree_oid;
+	block = image_omap_lookup(sink, omap_root, volume.root_tree_oid, 0);
+	CHECK(block != 0);
+	check.covered = calloc((size_t)fixture->writer->count + 1,
+	    sizeof(*check.covered));
+	check.references = calloc((size_t)fixture->writer->count + 1,
+	    sizeof(*check.references));
+	CHECK(check.covered != NULL && check.references != NULL);
+	check_image_extent_tree(&check, block, omap_root, 0);
+	check_image_extent_tree(&check, volume.extentref_tree_oid, 0, 0);
+	for (uint64_t id = 1; id <= fixture->writer->count; id++) {
+		CHECK(apfs_row_get(fixture->plan, id, &row, NULL) == FSIMG_OK);
+		if (row.kind != FSIMG_ENTRY_FILE)
+			continue;
+		EXPECT(check.covered[id] == apfs_row_blocks(&row) * BLOCK_BYTES);
+		EXPECT(check.references[id] == (row.length != 0 ? 1u : 0u));
+		if (row.length == 0)
+			EXPECT(row.first_block == 0);
+	}
+	free(check.references);
+	free(check.covered);
+}
+
+static void
+check_time(fsimg_timestamp_t actual, fsimg_timestamp_t expected)
+{
+	EXPECT(actual.seconds == expected.seconds);
+	EXPECT(actual.nanoseconds == expected.nanoseconds);
+	EXPECT(actual.basis == FSIMG_TIME_UTC);
+}
+
+static void
+check_reader_catalog(fixture_t *fixture, memory_sink_t *sink,
+    const emit_catalog_t *catalog)
+{
+	const fsimg_entry_t *entry, *expected;
+	fsimg_volume_info_t info;
+	fsimg_reader_t *reader = NULL;
+	fsimg_io_t *io;
+	fsimg_status_t status;
+	unsigned char target[1024];
+	bool *seen;
+	size_t index, count = 0, length;
+	uint64_t detail_counts[4];
+	static const char *detail_names[] = { "files", "directories",
+	    "symlinks", "other_objects" };
+	const char *saved_scenario = scenario;
+
+	CHECK(memory_io(fixture, sink, &io) == FSIMG_OK);
+	status = fsimg_reader_open(fixture->ctx, io, NULL, &reader, &fixture->error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "%s: reader open returned %d: %s\n", scenario,
+		    status, fixture->error.message);
+	EXPECT(status == FSIMG_OK);
+	if (status != FSIMG_OK) {
+		fsimg_io_free(io);
+		return;
+	}
+	CHECK(fsimg_reader_get_info(reader, &info, NULL) == FSIMG_OK);
+	EXPECT(strcmp(info.label, fixture->writer->options.label) == 0);
+	EXPECT(bcmp(info.uuid, fixture->plan->volume_uuid, 16) == 0);
+	EXPECT(info.allocation_unit_bytes == BLOCK_BYTES);
+	EXPECT(info.sector_bytes == BLOCK_BYTES);
+	EXPECT(info.allocation_units == fixture->plan->block_count);
+	EXPECT(info.volume_bytes == sink->length);
+	EXPECT(info.free_bytes == fixture->plan->common.info.free_bytes);
+	detail_counts[0] = fixture->plan->files;
+	detail_counts[1] = fixture->plan->directories;
+	detail_counts[2] = fixture->plan->symlinks;
+	detail_counts[3] = fixture->plan->others;
+	for (size_t i = 0; i < 4; i++) {
+		for (index = 0; index < info.detail_count; index++)
+			if (strcmp(info.details[index].name, detail_names[i]) == 0)
+				break;
+		CHECK(index < info.detail_count);
+		EXPECT(info.details[index].value == detail_counts[i]);
+	}
+	for (index = 0; index < info.detail_count; index++) {
+		if (strcmp(info.details[index].name, "case_insensitive") == 0)
+			EXPECT(info.details[index].value ==
+			    !fixture->plan->case_sensitive);
+		if (strcmp(info.details[index].name, "norm_insensitive") == 0)
+			EXPECT(info.details[index].value ==
+			    fixture->plan->case_sensitive);
+	}
+	seen = calloc(catalog->count + 1, sizeof(*seen));
+	CHECK(seen != NULL);
+	while ((status = fsimg_reader_next(reader, &entry, &fixture->error)) ==
+	    FSIMG_OK) {
+		for (index = 0; index < catalog->count; index++)
+			if (strcmp(entry->path, catalog->entries[index].path) == 0)
+				break;
+		if (index == catalog->count) {
+			fprintf(stderr, "%s: unexpected reader path %s\n", scenario,
+			    entry->path);
+			failures++;
+			continue;
+		}
+		scenario = entry->path;
+		expected = &catalog->entries[index].entry;
+		EXPECT(!seen[index]);
+		seen[index] = true;
+		count++;
+		EXPECT(entry->kind == expected->kind);
+		EXPECT(entry->size == expected->size);
+		EXPECT((entry->metadata.valid & EMIT_META) == EMIT_META);
+		EXPECT(entry->metadata.mode == expected->metadata.mode);
+		EXPECT(entry->metadata.uid == expected->metadata.uid);
+		EXPECT(entry->metadata.gid == expected->metadata.gid);
+		check_time(entry->metadata.created, expected->metadata.created);
+		check_time(entry->metadata.modified, expected->metadata.modified);
+		check_time(entry->metadata.accessed, expected->metadata.accessed);
+		check_time(entry->metadata.changed, expected->metadata.changed);
+		if (entry->kind == FSIMG_ENTRY_SYMLINK) {
+			status = fsimg_reader_read_at(reader, 0, target,
+			    sizeof(target), &length, &fixture->error);
+			EXPECT(status == FSIMG_OK);
+			EXPECT(length == expected->size);
+			if (length == expected->size)
+				EXPECT(bcmp(target, catalog->entries[index].target,
+				    length) == 0);
+		}
+		scenario = saved_scenario;
+	}
+	if (status != FSIMG_DONE)
+		fprintf(stderr, "%s: reader next returned %d: %s (%s)\n",
+		    scenario, status, fixture->error.message, fixture->error.path);
+	EXPECT(status == FSIMG_DONE);
+	EXPECT(count == catalog->count);
+	for (index = 0; index < catalog->count; index++)
+		EXPECT(seen[index]);
+	free(seen);
+	fsimg_reader_free(reader);
+	fsimg_io_free(io);
+}
+
+static void
+check_mixed_tree_emission(void)
+{
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+
+	catalog_init(&catalog);
+	catalog_mixed(&catalog);
+	for (unsigned sensitive = 0; sensitive < 2; sensitive++) {
+		base_options(&options);
+		options.label = "Emission test";
+		options.case_sensitive = sensitive != 0;
+		prepare_catalog(&fixture, &catalog, &options, NULL, false);
+		plan_ok(&fixture);
+		if (emit_ok(&fixture, &sink)) {
+			check_reader_catalog(&fixture, &sink, &catalog);
+			check_file_placement(&fixture, &sink);
+			check_container_bytes(fixture.plan, &sink);
+		}
+		free(sink.bytes);
+		close_writer(&fixture);
+	}
+	free(catalog.entries);
+}
+
+static void
+test_emitted_mixed_tree_round_trips_both_case_personalities(void)
+{
+	check_mixed_tree_emission();
+}
+
+static void
+test_poisoned_emission_initializes_unused_metadata_and_payload_bytes(void)
+{
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_io_t *io;
+	fsimg_status_t status;
+	char directory[] =
+	    "/Volumes/Optaine/fsimg-apfs/s8e/apfs-poison-XXXXXX";
+	unsigned char buffer[8192];
+	int root, fd;
+
+	catalog_init(&catalog);
+	catalog_mixed(&catalog);
+	CHECK(mkdtemp(directory) != NULL);
+	root = open(directory, O_RDONLY | O_DIRECTORY);
+	CHECK(root != -1);
+	for (size_t i = 0; i < catalog.count; i++) {
+		const emit_entry_t *spec = &catalog.entries[i];
+		const char *path = spec->path + 1;
+
+		switch (spec->entry.kind) {
+		case FSIMG_ENTRY_DIRECTORY:
+			CHECK(mkdirat(root, path, 0700) == 0);
+			break;
+		case FSIMG_ENTRY_FILE:
+			fd = openat(root, path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+			CHECK(fd != -1);
+			for (uint64_t offset = 0; offset < spec->entry.size;) {
+				size_t length = sizeof(buffer);
+
+				if (length > spec->entry.size - offset)
+					length = (size_t)(spec->entry.size - offset);
+				for (size_t j = 0; j < length; j++)
+					buffer[j] = content_byte(offset + j);
+				CHECK(write(fd, buffer, length) == (ssize_t)length);
+				offset += length;
+			}
+			CHECK(close(fd) == 0);
+			break;
+		case FSIMG_ENTRY_SYMLINK:
+			CHECK(symlinkat(spec->target, root, path) == 0);
+			break;
+		case FSIMG_ENTRY_FIFO:
+			/* Host-tree collection does not support FIFOs. */
+			break;
+		default:
+			CHECK(false);
+		}
+	}
+	for (unsigned sensitive = 0; sensitive < 2; sensitive++) {
+		base_options(&options);
+		options.flags |= FSIMG_WRITE_ALLOW_LOSS;
+		options.case_sensitive = sensitive != 0;
+		open_writer(&fixture, &options);
+		CHECK(fsimg_writer_add_tree(fixture.writer, root, "/",
+		    &fixture.error) == FSIMG_OK);
+		plan_ok(&fixture);
+		if (emit_ok(&fixture, &sink)) {
+			check_file_placement(&fixture, &sink);
+			check_container_bytes(fixture.plan, &sink);
+		}
+		free(sink.bytes);
+		close_writer(&fixture);
+
+		/* Host descriptor I/O objects also require zeroed allocations.
+		 * Poison only a fixture with zero sources, which allocate no source
+		 * I/O objects during emission. The host fixture above covers real
+		 * payloads and both inline symlink lengths without poisoning.
+		 * An explicit zero callback avoids poisoning the common I/O layer's
+		 * zero buffer, whose contents rely on the allocator's zeroing contract.
+		 */
+		open_writer(&fixture, &options);
+		for (size_t i = 0; i < catalog.count; i++) {
+			const emit_entry_t *spec = &catalog.entries[i];
+
+			if (spec->entry.kind != FSIMG_ENTRY_SYMLINK)
+				add_entry(&fixture, spec->path, spec->entry.kind,
+				    spec->entry.size);
+		}
+		plan_ok(&fixture);
+		sink_open(&fixture, &sink);
+		sink.zero_callback = true;
+		CHECK(memory_io(&fixture, &sink, &io) == FSIMG_OK);
+		fsimg_test_poison_allocations(fixture.ctx, true);
+		status = fsimg_writer_emit(fixture.writer, io, &fixture.error);
+		fsimg_test_poison_allocations(fixture.ctx, false);
+		fsimg_io_free(io);
+		if (status != FSIMG_OK)
+			fprintf(stderr, "%s: emit returned %d: %s (%s)\n",
+			    scenario, status, fixture.error.message, fixture.error.path);
+		EXPECT(status == FSIMG_OK);
+		if (status == FSIMG_OK) {
+			check_file_placement(&fixture, &sink);
+			check_container_bytes(fixture.plan, &sink);
+		}
+		free(sink.bytes);
+		close_writer(&fixture);
+	}
+	/* Children precede their parents when removing the catalog in reverse. */
+	for (size_t i = catalog.count; i > 0; i--) {
+		const emit_entry_t *spec = &catalog.entries[i - 1];
+
+		if (spec->entry.kind == FSIMG_ENTRY_FIFO)
+			continue;
+		CHECK(unlinkat(root, spec->path + 1,
+		    spec->entry.kind == FSIMG_ENTRY_DIRECTORY ? AT_REMOVEDIR : 0) == 0);
+	}
+	CHECK(close(root) == 0);
+	CHECK(rmdir(directory) == 0);
+	free(catalog.entries);
+}
+
+static void
+test_emitted_metadata_preserves_distinct_nanosecond_times(void)
+{
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_metadata_t *metadata;
+
+	catalog_init(&catalog);
+	catalog_add(&catalog, "/metadata", FSIMG_ENTRY_FILE, 1);
+	metadata = &catalog.entries[0].entry.metadata;
+	metadata->created.seconds = EPOCH - 400;
+	metadata->created.nanoseconds = 123456789;
+	metadata->modified.seconds = EPOCH - 300;
+	metadata->modified.nanoseconds = 234567891;
+	metadata->accessed.seconds = EPOCH - 200;
+	metadata->accessed.nanoseconds = 345678912;
+	metadata->changed.seconds = EPOCH - 100;
+	metadata->changed.nanoseconds = 456789123;
+	base_options(&options);
+	options.flags = 0;
+	memset(options.volume_uuid, 0x57, sizeof(options.volume_uuid));
+	plan_catalog(&fixture, &catalog, &options, NULL, false);
+	if (emit_ok(&fixture, &sink))
+		check_reader_catalog(&fixture, &sink, &catalog);
+	free(sink.bytes);
+	close_writer(&fixture);
+	free(catalog.entries);
+}
+
+static void
+test_emitted_empty_many_wide_and_multichunk_shapes(void)
+{
+	static const char *names[] = { "empty", "many", "wide", "multichunk" };
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	const char *saved_scenario = scenario;
+
+	for (size_t shape = 0; shape < 4; shape++) {
+		scenario = names[shape];
+		catalog_init(&catalog);
+		base_options(&options);
+		if (shape == 1 || shape == 2)
+			catalog_many(&catalog, shape == 2);
+		if (shape == 3) {
+			options.volume_bytes = 256 * 1024 * 1024;
+			catalog_add(&catalog, "/cross-chunk", FSIMG_ENTRY_FILE,
+			    129 * 1024 * 1024 + 17);
+		}
+		plan_catalog(&fixture, &catalog, &options, NULL, false);
+		if (shape == 2)
+			EXPECT(fixture.plan->fs_tree.shape.levels >= 2);
+		if (shape == 3)
+			EXPECT(fixture.plan->pool_bitmaps > 1);
+		if (emit_ok(&fixture, &sink)) {
+			check_container_bytes(fixture.plan, &sink);
+			check_file_placement(&fixture, &sink);
+			check_reader_catalog(&fixture, &sink, &catalog);
+		}
+		free(sink.bytes);
+		close_writer(&fixture);
+		free(catalog.entries);
+	}
+	scenario = saved_scenario;
+}
+
+static void
+set_time_zone(const char *zone)
+{
+	if (zone == NULL)
+		CHECK(unsetenv("TZ") == 0);
+	else
+		CHECK(setenv("TZ", zone, 1) == 0);
+	tzset();
+}
+
+static void
+test_emission_is_identical_across_order_budget_scratch_and_timezone(void)
+{
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fsimg_options_t context;
+	fixture_t fixture;
+	memory_sink_t reference = { 0 }, sink;
+	char directory[4096], other_directory[4096];
+	char path[32];
+	const char *temporary = getenv("TMPDIR");
+	char *saved_zone = getenv("TZ") == NULL ? NULL : strdup(getenv("TZ"));
+	int fd, other_fd;
+
+	catalog_init(&catalog);
+	/* Inline 1023-byte attributes exceed the minimum budget's 2 MiB
+	 * sort run, requiring more than one run and a merge.
+	 */
+	for (unsigned i = 0; i < 3000; i++) {
+		snprintf(path, sizeof(path), "/link-%04u", i);
+		catalog_add(&catalog, path, FSIMG_ENTRY_SYMLINK, 1023);
+	}
+	base_options(&options);
+	if (temporary == NULL)
+		temporary = "/tmp";
+	CHECK(snprintf(directory, sizeof(directory), "%s/identity-XXXXXX",
+	    temporary) < (int)sizeof(directory));
+	CHECK(snprintf(other_directory, sizeof(other_directory),
+	    "%s/identity-XXXXXX", temporary) < (int)sizeof(other_directory));
+	CHECK(mkdtemp(directory) != NULL);
+	fd = open(directory, O_RDONLY | O_DIRECTORY);
+	CHECK(fd != -1);
+	CHECK(mkdtemp(other_directory) != NULL);
+	other_fd = open(other_directory, O_RDONLY | O_DIRECTORY);
+	CHECK(other_fd != -1);
+	for (unsigned variant = 0; variant < 5; variant++) {
+		fsimg_options_init(&context);
+		if (variant >= 2) {
+			context.memory_bytes = 16 * 1024 * 1024;
+			context.scratch_directory_fd = variant == 2 ? fd : other_fd;
+		}
+		set_time_zone(variant == 4 ? "PST8PDT" : "UTC0");
+		plan_catalog(&fixture, &catalog, &options, &context, variant != 0);
+		if (variant >= 2)
+			EXPECT(fixture.plan->records->end >
+			    fsimg_sort_run_bytes(context.memory_bytes));
+		if (emit_ok(&fixture, &sink)) {
+			if (variant == 0)
+				reference = sink;
+			else if (reference.bytes != NULL) {
+				EXPECT(sink.length == reference.length);
+				if (sink.length == reference.length)
+					EXPECT(bcmp(sink.bytes, reference.bytes,
+					    (size_t)sink.length) == 0);
+			}
+		}
+		if (variant != 0 || reference.bytes == NULL)
+			free(sink.bytes);
+		close_writer(&fixture);
+	}
+	set_time_zone(saved_zone);
+	free(saved_zone);
+	free(reference.bytes);
+	CHECK(close(fd) == 0);
+	CHECK(close(other_fd) == 0);
+	CHECK(rmdir(directory) == 0);
+	CHECK(rmdir(other_directory) == 0);
+	free(catalog.entries);
+}
+
+static void
+test_emission_write_and_flush_failures_release_resources(void)
+{
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	apfs_row_t row;
+	fsimg_status_t status;
+	uint64_t writes = 0, zeroing_writes = 0, payload_offset, payload_end;
+
+	catalog_init(&catalog);
+	catalog_add(&catalog, "/file", FSIMG_ENTRY_FILE, 4097);
+	base_options(&options);
+	plan_catalog(&fixture, &catalog, &options, NULL, false);
+	CHECK(apfs_row_get(fixture.plan, 1, &row, NULL) == FSIMG_OK);
+	payload_offset = row.first_block * BLOCK_BYTES;
+	payload_end = payload_offset + apfs_row_blocks(&row) * BLOCK_BYTES;
+	if (emit_ok(&fixture, &sink)) {
+		writes = sink.writes;
+		zeroing_writes = sink.zeroing_writes;
+		EXPECT(sink.initialized_bytes == sink.length);
+		EXPECT(sink.first_driver_offset == payload_offset);
+		EXPECT(sink.last_write_offset == 0);
+	}
+	free(sink.bytes);
+	close_writer(&fixture);
+	CHECK(zeroing_writes != 0 && writes > zeroing_writes + 2);
+	/* Count initialization separately so every write fault reaches APFS. */
+	for (unsigned fault = 0; fault < 4; fault++) {
+		plan_catalog(&fixture, &catalog, &options, NULL, false);
+		sink_open(&fixture, &sink);
+		sink.fail_write_at = fault == 0 ? zeroing_writes + 1 :
+		    fault == 1 ? zeroing_writes + (writes - zeroing_writes) / 2 :
+		    fault == 2 ? writes : 0;
+		sink.fail_flush = fault == 3;
+		status = emit_into(&fixture, &sink);
+		EXPECT(status != FSIMG_OK);
+		EXPECT(status == FSIMG_EIO);
+		EXPECT(sink.zeroing_writes == zeroing_writes);
+		if (fault < 3)
+			EXPECT(sink.writes == sink.fail_write_at);
+		if (fault == 0)
+			EXPECT(sink.last_write_offset == payload_offset);
+		if (fault == 1) {
+			EXPECT(sink.last_write_offset != 0);
+			EXPECT(sink.last_write_offset < payload_offset ||
+			    sink.last_write_offset >= payload_end);
+		}
+		if (fault == 2)
+			EXPECT(sink.last_write_offset == 0);
+		free(sink.bytes);
+		close_writer(&fixture);
+	}
+	free(catalog.entries);
+}
+
+static void
+test_emission_allocation_failure_at_each_allocation_is_clean(void)
+{
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_status_t status;
+	bool succeeded = false;
+	unsigned failed = 0;
+
+	catalog_init(&catalog);
+	catalog_add(&catalog, "/file", FSIMG_ENTRY_FILE, 4097);
+	catalog_add(&catalog, "/link", FSIMG_ENTRY_SYMLINK, 1);
+	base_options(&options);
+	for (uint64_t attempt = 1; attempt < 4096 && !succeeded; attempt++) {
+		plan_catalog(&fixture, &catalog, &options, NULL, false);
+		sink_open(&fixture, &sink);
+		fsimg_test_fail_alloc_after(fixture.ctx, attempt);
+		status = emit_into(&fixture, &sink);
+		fsimg_test_fail_alloc_after(fixture.ctx, 0);
+		if (status != FSIMG_ENOMEM && status != FSIMG_OK)
+			fprintf(stderr, "%s: allocation %llu returned %d: %s\n",
+			    scenario, (unsigned long long)attempt, status,
+			    fixture.error.message);
+		EXPECT(status == FSIMG_ENOMEM || status == FSIMG_OK);
+		succeeded = status == FSIMG_OK;
+		failed += status != FSIMG_OK;
+		free(sink.bytes);
+		close_writer(&fixture);
+	}
+	EXPECT(succeeded && failed > 0);
+	free(catalog.entries);
+}
+
+static void
+test_same_length_changed_link_fails_emission_and_names_path(void)
+{
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	fsimg_status_t status;
+
+	catalog_init(&catalog);
+	catalog_add(&catalog, "/changed-link", FSIMG_ENTRY_SYMLINK, 8);
+	base_options(&options);
+	plan_catalog(&fixture, &catalog, &options, NULL, false);
+	catalog.changed_link = true;
+	sink_open(&fixture, &sink);
+	status = emit_into(&fixture, &sink);
+	EXPECT(status == FSIMG_ESOURCE_CHANGED);
+	EXPECT(strcmp(fixture.error.path, "/changed-link") == 0);
+	free(sink.bytes);
+	close_writer(&fixture);
+	free(catalog.entries);
+}
+/* Hash the source description, never the image being qualified. */
+static void
+source_digest(const emit_entry_t *spec, char hex[65])
+{
+	fsimg_sha256_t sha;
+	unsigned char digest[32], buffer[4096];
+	uint64_t offset = 0;
+	size_t length;
+
+	fsimg_sha256_init(&sha);
+	while (offset < spec->entry.size) {
+		length = spec->entry.size - offset > sizeof(buffer) ?
+		    sizeof(buffer) : (size_t)(spec->entry.size - offset);
+		if (spec->entry.kind == FSIMG_ENTRY_SYMLINK)
+			bcopy(spec->target + offset, buffer, length);
+		else
+			for (size_t i = 0; i < length; i++)
+				buffer[i] = content_byte(offset + i);
+		fsimg_sha256_update(&sha, buffer, length);
+		offset += length;
+	}
+	fsimg_sha256_final(digest, &sha);
+	for (size_t i = 0; i < sizeof(digest); i++)
+		snprintf(hex + i * 2, 3, "%02x", digest[i]);
+}
+
+/* Fixture paths and targets contain only plain ASCII without JSON escapes. */
+static void
+write_native_manifest(const char *path, const emit_catalog_t *catalog)
+{
+	const emit_entry_t *spec;
+	const char *kind;
+	char digest[65];
+	FILE *file;
+
+	file = fopen(path, "wx");
+	CHECK(file != NULL);
+	CHECK(fputs("[\n", file) >= 0);
+	for (size_t i = 0; i < catalog->count; i++) {
+		spec = &catalog->entries[i];
+		switch (spec->entry.kind) {
+		case FSIMG_ENTRY_FILE: kind = "file"; break;
+		case FSIMG_ENTRY_DIRECTORY: kind = "directory"; break;
+		case FSIMG_ENTRY_SYMLINK: kind = "symlink"; break;
+		case FSIMG_ENTRY_FIFO: kind = "fifo"; break;
+		default: CHECK(false); kind = "unknown"; break;
+		}
+		CHECK(fprintf(file, "%s{\"path\":\"%s\",\"kind\":\"%s\","
+		    "\"size\":%llu,\"mode\":%u,\"btime_ns\":%lld,\"mtime_ns\":%lld",
+		    i == 0 ? "" : ",\n", spec->path + 1, kind,
+		    (unsigned long long)spec->entry.size, spec->entry.metadata.mode,
+		    (long long)(EPOCH * INT64_C(1000000000)),
+		    (long long)(EPOCH * INT64_C(1000000000))) > 0);
+		if (spec->entry.kind == FSIMG_ENTRY_SYMLINK)
+			CHECK(fprintf(file, ",\"target\":\"%s\"", spec->target) > 0);
+		if (spec->entry.kind == FSIMG_ENTRY_FILE ||
+		    spec->entry.kind == FSIMG_ENTRY_SYMLINK) {
+			source_digest(spec, digest);
+			CHECK(fprintf(file, ",\"sha256\":\"%s\"", digest) > 0);
+		}
+		CHECK(fputs("}", file) >= 0);
+	}
+	CHECK(fputs("\n]\n", file) >= 0);
+	CHECK(fclose(file) == 0);
+}
+
+/* Run explicitly as test-apfs-write --qualify. Ordinary tests never write
+ * images. The directory must be supplied and its case directories absent.
+ */
+static int
+qualify_images(void)
+{
+	static const char *names[] = { "mixed-ci", "mixed-cs", "many", "wide",
+	    "large", "empty", "multichunk" };
+	const char *root = getenv("FSIMG_APFS_QUALIFY_DIR");
+	char directory[4096], path[4096];
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fixture_t fixture;
+	memory_sink_t sink;
+	FILE *file;
+
+#ifndef __APPLE__
+	return (77);
+#endif
+	if (root == NULL)
+		return (77);
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		scenario = names[i];
+		CHECK(snprintf(directory, sizeof(directory), "%s/%s", root,
+		    names[i]) < (int)sizeof(directory));
+		CHECK(mkdir(directory, 0700) == 0);
+		catalog_init(&catalog);
+		if (i < 2)
+			catalog_mixed(&catalog);
+		if (i == 2 || i == 3)
+			catalog_many(&catalog, i == 3);
+		if (i == 4)
+			catalog_add(&catalog, "/large", FSIMG_ENTRY_FILE,
+			    5 * 1024 * 1024 + 137);
+		if (i == 6)
+			catalog_add(&catalog, "/cross-chunk", FSIMG_ENTRY_FILE,
+			    129 * 1024 * 1024 + 17);
+		base_options(&options);
+		options.label = "Qualification";
+		options.case_sensitive = i == 1;
+		options.volume_bytes = (i == 6 ? 256 : 64) * UINT64_C(1024) * 1024;
+		plan_catalog(&fixture, &catalog, &options, NULL, false);
+		if (i == 3)
+			EXPECT(fixture.plan->fs_tree.shape.levels >= 2);
+		if (emit_ok(&fixture, &sink)) {
+			CHECK(snprintf(path, sizeof(path), "%s/image.img", directory)
+			    < (int)sizeof(path));
+			file = fopen(path, "wx");
+			CHECK(file != NULL);
+			CHECK(fwrite(sink.bytes, 1, (size_t)sink.length, file) ==
+			    sink.length);
+			CHECK(fclose(file) == 0);
+			CHECK(snprintf(path, sizeof(path), "%s/native-manifest.json",
+			    directory) < (int)sizeof(path));
+			write_native_manifest(path, &catalog);
+		}
+		free(sink.bytes);
+		close_writer(&fixture);
+		free(catalog.entries);
+	}
+	return (failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
+}
+
+#define RUN(test) do { \
+	unsigned before = failures; \
+	scenario = #test; \
+	test(); \
+	fprintf(stderr, "%s: %s\n", failures == before ? "PASS" : "FAIL", \
+	    #test); \
+} while (0)
 
 int
-main(void)
+main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--qualify") == 0)
+		return (qualify_images());
+	CHECK(argc == 1);
+	RUN(test_emitted_mixed_tree_round_trips_both_case_personalities);
+	RUN(test_emitted_metadata_preserves_distinct_nanosecond_times);
+	RUN(test_emitted_empty_many_wide_and_multichunk_shapes);
+	RUN(test_emission_is_identical_across_order_budget_scratch_and_timezone);
+	RUN(test_emission_write_and_flush_failures_release_resources);
+	RUN(test_emission_allocation_failure_at_each_allocation_is_clean);
+	RUN(test_same_length_changed_link_fails_emission_and_names_path);
 	RUN(test_sector_and_allocation_units_are_4096_bytes);
 	RUN(test_label_is_utf8_of_at_most_255_bytes);
 	RUN(test_null_label_selects_untitled);
@@ -1012,5 +2493,6 @@ main(void)
 	RUN(test_source_order_does_not_change_plan);
 	RUN(test_reproducible_time_equal_to_epoch_is_exact);
 	RUN(test_reproducible_uuids_use_apfs_role_and_distinct_container);
+	RUN(test_poisoned_emission_initializes_unused_metadata_and_payload_bytes);
 	return (failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 }

@@ -174,6 +174,17 @@ counts and kept only the dump, in
 12000000, 12320768, 40000000, 50000000, and `2^k` and `3 * 2^(k-1)` for
 `k` from 10 to 26.
 
+**Volume records.** The XID-2 volume superblock and volume object map of
+apfs-newfs-4194304-plain, apfs-newfs-1073741824-plain and
+apfs-hdiutil-33554432-plain, decoded from `image.img` at the offsets of
+the format design's volume superblock table: unmount time zero; last
+modification time some 100 to 200 microseconds after the formatting
+record's time; clone-information epoch and XID zero; volume flags `0x1`,
+optional features `0x2`, incompatible features `0x1`; the metadata crypto
+state major version 5, persistent class 6 and key revision 1. The volume
+object map's flags are zero and its tree and snapshot-tree types
+`0x40000002`, as the container map's are.
+
 **Minimum size.** Bisection on sparse files, 4096 bytes at a time:
 
 | Blocks | `newfs_apfs` |
@@ -2206,7 +2217,7 @@ under that experiment.
 | Fixed regions as functions of `N`; size step | The formulas above, to 128 TiB; one block (E1, E12) | |
 | Free queues of a fresh container | XID 1 zero-OID; XID 2 entries as above; node limits `L` and `I` (E1); with entries the oldest XID is the smallest record XID, the count the sum of the runs, and the node limit keeps the formatter's value ([E8](#e8-checkpoint-history)) | |
 | Reaper of a fresh container | Idle, reap IDs 1 and 0, state buffer 3984 bytes (E1) | |
-| Object-map flags; object XID equal to its key's XID | Container map `0x1`; the volume record's XID equals its object's (E1), in all nine E8 captures too ([E8](#e8-checkpoint-history)); all 258 filesystem-tree mappings of `apfs-newfs-268435456-e3-ci` agree (E3) | The volume map's crypto-generation flag (E1's volume records) |
+| Object-map flags; object XID equal to its key's XID | Container map `0x1`; the volume record's XID equals its object's (E1), in all nine E8 captures too ([E8](#e8-checkpoint-history)); all 258 filesystem-tree mappings of `apfs-newfs-268435456-e3-ci` agree (E3); the volume map's flags zero, crypto generation clear (E1, volume records below) | |
 | Tree flags, node fill and table-of-contents sizing | Container object map and free-queue trees as above (E1); filesystem tree `0x42`, tables a multiple of 8 entries, leaves 1 to 88 keys, mostly under 500 bytes free, footer longest value above every live value ([E3](#e3-population)) | The volume's object-map, extent-reference and snapshot trees (E1's volume records) |
 | DMG, GPT and Apple Partition Map layouts around APFS | GPT partition of type `apfs`; raw UDRW; UDZO and UDBZ peeled; ULFO refused; ULMO ambiguous unless forced, then refused; native APM partition typed `Apple_HFS` (E13) | |
 | Writer acceptance: minimum container size | 1024 blocks, the smallest `fsck_apfs` opens (E1); `fsck_apfs -n` accepts the writer's first form with a volume there ([E15](#e15-writer-probes): `e15-x1vol-all`) | |
@@ -2230,5 +2241,3 @@ under that experiment.
 | Volume roles and volume groups in multi-volume containers | The roles table of E10, with stored values; System added with `-groupWith` Data gets Data's volume UUID as the group UUID on both, plus optional feature `0x10` on each; slots fill from 0 and a freed slot is reused (E10) | |
 | Encrypted and sealed detection; sealed tree types, node flags, hash types; whether a sealed volume has an extent-reference tree | Encrypted: container flag `0x4` and a one-block keylocker, volume flags `0x8` without `0x1`, filesystem-tree mappings flagged `0x4`; superblocks, maps and the other trees plaintext. `hdiutil -encryption` wraps a plain container in `encrcdsa`. Sealed: incompatible `0x20`, virtual filesystem tree whose nodes have no header (map flag `0x8`, node flags `0x18` plus root or leaf), tree flags `0x1c2`, index values of a relative child OID and a SHA-256 digest of the whole node, integrity object version 2, hash type 1, root hash at 128; an extent-reference tree with one record per sealed file extent ([E11](#e11-encrypted-and-sealed)) | Hash types other than SHA-256, a broken seal, a sealed volume with snapshots, and the child-OID base of a tree whose root is not its lowest OID: no specimen |
 
-Rows open under E1's volume records wait for the volume records of the E1
-captures: the volume object map and its trees.

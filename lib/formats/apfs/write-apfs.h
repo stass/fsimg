@@ -332,13 +332,15 @@ typedef struct apfs_plan {
 	bool			 case_sensitive;
 } apfs_plan_t;
 
-/* The writer operations, and those of write-plan.c. */
+/* The writer operations: those of write-plan.c and write-emit.c. */
 extern const fsimg_writer_ops_t fsimg_apfs_writer_ops;
 
 fsimg_status_t	apfs_write_validate(fsimg_write_options_t *, unsigned,
 		    fsimg_error_t *);
 fsimg_status_t	apfs_write_plan(fsimg_writer_t *, fsimg_error_t *);
 void		apfs_write_free(fsimg_plan_t *);
+fsimg_status_t	apfs_write_emit(fsimg_writer_t *, fsimg_emit_t *,
+		    fsimg_error_t *);
 fsimg_status_t	apfs_row_get(apfs_plan_t *, uint64_t, apfs_row_t *,
 		    fsimg_error_t *);
 /* The block of run index i: run_first + i. */

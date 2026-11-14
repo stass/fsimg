@@ -1046,7 +1046,11 @@ filled chunk-information block hold zero too, and the poison scan checks
 both. Each object goes out with
 `fsimg_emit_write()` at its block, its checksum computed as it is encoded.
 The order below is the order of work; block numbers were fixed by layout,
-and the bytes do not depend on the order.
+and the bytes do not depend on the order. Each tree's packing ends with its
+shape, the node count per level and the key count, compared with the one
+planning counted, before any later object names its root; a node past the
+planned count is refused before it is written. Either difference is an
+internal error, `FSIMG_ESTATE`.
 
 1. **Payload.** For each regular-file row in ID order: the common payload
    copy, `fsimg_emit_copy()`, over its run. An empty file uses a zero-length
@@ -1058,7 +1062,9 @@ and the bytes do not depend on the order.
    target is read again by catalog ID through the common link-target
    operation and compared byte for byte with the planned attribute. A
    difference fails with `FSIMG_ESOURCE_CHANGED`; no unchecked planned
-   target reaches the output. Leaves are written as they close and index
+   target reaches the output. The writer emits extended attributes only for
+   symbolic links, so an attribute record on any other row is an internal
+   error; a writer that adds attributes changes this check with them. Leaves are written as they close and index
    nodes as their children complete, the root last, with its footer.
 3. **Other trees.** The volume object map's tree, from a counter over the
    filesystem nodes: record `k` maps the first node OID plus `k` to that
