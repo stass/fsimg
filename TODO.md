@@ -76,6 +76,9 @@
   when its resource fork holds bytes or the inode carries no size. Listing admits
   every compression type the shared table knows; the content stage refuses
   the types the format design marks unsupported.
+  `tools/apfs/apfsdump.rb` does not decode snapshot superblocks, snapshot
+  extent-reference trees or the object map's snapshot tree, which the
+  snapshot stage needs to read its fixtures.
   Verification walks each snapshot's extent-reference tree inside the
   snapshot-tree scan, so a refusal in one snapshot's tree ends the scan and
   damage in later snapshots goes unreported; the snapshot stage should run
