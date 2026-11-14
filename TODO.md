@@ -93,6 +93,14 @@
   adapter, for native and written images only, does not use the oracle
   confinement.
 
+* [Low] **APFS fuzz seed reach** (`fuzz/apfs.c`, `test/apfs.c`): the one
+  seed uses 4 KiB blocks and single-block objects, so the harness's
+  per-block checksum repair never reseals a multi-block spaceman and
+  block sizes from 32 KiB up do not fit the 256 KiB input bound. Add a
+  16 KiB seed and a multi-block spaceman, repairing whole object extents,
+  and build the seed from the same layout code as `build_openable()`
+  instead of a compact copy of it.
+
 * [Medium] **EROFS reader, verifier and writer** (`lib/formats/erofs/`,
   `lib/core/`, `lib/codec/`, `lib/layers/`, `lib/write/`, `cmd/fsimg/`,
   `tools/erofs/`): implement the [format design](specs/design-erofs.md)

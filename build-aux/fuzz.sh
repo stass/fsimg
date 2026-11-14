@@ -5,7 +5,8 @@
 # usage: MAKE=make sh fuzz.sh
 #
 # Run from the top of a configured build directory holding test-fat,
-# test-exfat, test-qnx6, test-erofs, test-qnx4, test-hfsplus, test-ifs, test-iso9660,
+# test-exfat, test-qnx6, test-erofs, test-qnx4, test-hfsplus, test-apfs, test-ifs,
+# test-iso9660,
 # test-codec, test-lzfse, test-protocol, test-layers, test-containers, test-compression,
 # test-hbcifs, test-mtree, test-ifsboot and test/spec.sh, which write the
 # seeds, with MAKE naming
@@ -157,6 +158,24 @@ if test ! -f "$hfsplus_corpus/wrap.seed"; then
     ./test-hfsplus --seed-wrap "$hfsplus_corpus/wrap.seed"
 fi
 run_fuzzer "$work_dir/fuzz-hfsplus" "$hfsplus_corpus" 3145728 10
+
+# APFS opens the container through the public reader at the default volume
+# and each slot index, and once without the probe. The harness
+# reseals every block with the generator's independent checksum, so it
+# links test/apfs-gen.c. The seed holds the first 132 KiB of a 1 MiB
+# container; the length bound leaves room for longer mutations.
+compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
+    -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
+    -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \
+    -I"$source_dir/test" \
+    "$source_dir/fuzz/apfs.c" "$source_dir/test/apfs-gen.c" \
+    "$fuzz_library" $codec_libs -o "$work_dir/fuzz-apfs"
+apfs_corpus=apfs-fuzz-corpus
+mkdir -p "$apfs_corpus"
+if test ! -f "$apfs_corpus/container.seed"; then
+    ./test-apfs --seed "$apfs_corpus"
+fi
+run_fuzzer "$work_dir/fuzz-apfs" "$apfs_corpus" 262144 10
 
 # QNX4 derives its block count from the slice length, so its harness also
 # reads exactly the input and forces the decoder. The seeds are generated

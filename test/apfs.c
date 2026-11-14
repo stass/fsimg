@@ -3829,9 +3829,168 @@ test_native_filesystem_captures_walk_and_seek_in_independent_order(void)
 	}
 }
 
-int
-main(void)
+/* The fuzz seed (fuzz/apfs.c): build_openable()'s container packed into
+ * SEED_BLOCKS blocks, so that most mutations land on metadata. Two
+ * checkpoints each own their spaceman and reaper; the container map is an
+ * index node over two leaves, so lookups descend; volumes occupy slots 0
+ * and 2 of four, so the harness's slot loop meets an occupied slot, an
+ * empty one and one past the array.
+ */
+enum {
+	SEED_CONTAINER_BLOCKS = 256,	/* the smallest container, 1 MiB */
+	SEED_BLOCKS = 33,	/* the blocks the seed holds */
+	SEED_MAP = 9,		/* container object map */
+	SEED_DATA = 10,		/* checkpoint data area, four blocks per run */
+	SEED_TREE = 18,		/* container map tree, three blocks */
+	SEED_VOLUMES = 21,	/* APSB, object map and map root per slot */
+	SEED_OCCUPIED = 0x5	/* bitmask of occupied volume slots */
+};
+
+static void
+build_seed(unsigned char *bytes, size_t length)
 {
+	apfs_gen_mapping_t mappings[2][2];
+	apfs_gen_run_t runs[2];
+	apfs_gen_container_t image = {
+		.nx = { .magic = 0x4253584e, .block_size = BLOCK,
+		.block_count = SEED_CONTAINER_BLOCKS, .uuid = { 1, 2, 3 },
+		.desc_base = 1, .desc_blocks = DESCRIPTOR_SLOTS,
+		    .data_base = SEED_DATA,
+		.data_blocks = 8, .max_volumes = VOLUME_MAX,
+		.spaceman_oid = 100, .reaper_oid = 102, .omap_oid = SEED_MAP },
+		.runs = runs, .count = 2, .block0_run = 1, .block0_xid = 10
+	};
+	apfs_gen_spaceman_t spaceman;
+	apfs_gen_omap_record_t records[VOLUME_MAX];
+	apfs_gen_tree_t tree;
+	apfs_gen_fs_t fs;
+	apfs_gen_omap_t map;
+	apfs_gen_node_t node;
+	uint64_t root, blocks;
+
+	for (unsigned i = 0; i < 2; i++) {
+		mappings[i][0] = (apfs_gen_mapping_t){ .type = 0x80000005,
+		    .size = BLOCK, .oid = 100, .address = SEED_DATA + 4 * i };
+		mappings[i][1] = (apfs_gen_mapping_t){ .type = 0x80000011,
+		    .size = BLOCK, .oid = 102,
+		    .address = SEED_DATA + 1 + 4 * i };
+		runs[i] = (apfs_gen_run_t){ .xid = 10 * (i + 1),
+		    .next_xid = 10 * (i + 1) + 1, .mappings = mappings[i],
+		    .mapping_count = 2, .mapping_blocks = 1,
+		    .desc_index = 2 * i, .desc_next = 2 * i + 2,
+		    .data_index = 4 * i, .data_len = 4,
+		    .data_next = (4 * i + 4) % 8 };
+	}
+	CHECK(apfs_gen_spaceman_geometry(BLOCK, SEED_CONTAINER_BLOCKS,
+	    &spaceman) == BLOCK);
+	spaceman.object = (apfs_gen_object_t){ .oid = 100, .xid = 20,
+	    .type = 0x80000005 };
+	spaceman.devices[0].free_count = 8;
+	CHECK(apfs_gen_container_build(bytes, length, &image));
+	/* Block 0 and both checkpoint superblocks, as in build_openable(). */
+	for (unsigned b = 0; b <= NEWEST_NX; b += 2) {
+		fsimg_store_le64(bytes + (size_t)b * BLOCK + 64, 2);
+		for (unsigned slot = 0; slot < VOLUME_MAX; slot++)
+			fsimg_store_le64(bytes + (size_t)b * BLOCK + 184 +
+			    8 * slot, (SEED_OCCUPIED & (1u << slot)) ?
+			    VOLUME_OID + slot : 0);
+		CHECK(apfs_gen_seal(bytes + (size_t)b * BLOCK, BLOCK));
+	}
+	CHECK(apfs_gen_spaceman_build(bytes + (size_t)(SEED_DATA + 4) * BLOCK,
+	    BLOCK, &spaceman));
+	for (unsigned slot = 0; slot < VOLUME_MAX; slot++) {
+		unsigned address = SEED_VOLUMES + 3 * slot;
+		unsigned char *apsb = bytes + (size_t)address * BLOCK;
+
+		records[slot] = (apfs_gen_omap_record_t){
+		    .key = { .oid = VOLUME_OID + slot, .xid = 10 },
+		    .value = { .size = BLOCK, .address = address } };
+		fs = (apfs_gen_fs_t){
+		    .object = { .oid = VOLUME_OID + slot, .xid = 10,
+		    .type = 13 },
+		    .magic = 0x42535041, .index = slot,
+		    .uuid = { 1, 2, 3, (unsigned char)(slot + 1) },
+		    .name = "Seed volume", .flags = 1,
+		    .incompat_features = 9, .root_tree_type = 2,
+		    .extentref_tree_type = 0x40000002,
+		    .snapshot_tree_type = 0x40000002, .omap_oid = address + 1,
+		    .files = 11, .directories = 12, .symlinks = 13,
+		    .other_objects = 14, .snapshots = 15, .alloc_blocks = 16,
+		    .role = 64 };
+		CHECK(apfs_gen_fs_build(apsb, BLOCK, &fs));
+		map = (apfs_gen_omap_t){ .object = { .oid = address + 1,
+		    .xid = 10, .type = 0x4000000b },
+		    .tree_type = 0x40000002, .tree_oid = address + 2 };
+		CHECK(apfs_gen_omap_build(apsb + BLOCK, BLOCK, &map));
+		node = (apfs_gen_node_t){ .object = { .oid = address + 2,
+		    .xid = 10, .type = 0x40000002, .subtype = 11 },
+		    .flags = GEN_APFS_ROOT | GEN_APFS_LEAF | GEN_APFS_FIXED,
+		    .info = { .flags = 0x17, .node_size = BLOCK,
+		    .key_size = 16, .val_size = 16, .node_count = 1 } };
+		CHECK(apfs_gen_node_build(apsb + 2 * BLOCK, BLOCK, &node));
+	}
+	tree = (apfs_gen_tree_t){ .records = records, .count = VOLUME_MAX,
+	    .base = SEED_TREE, .xid = 10, .block_size = BLOCK,
+	    .records_per_leaf = 2, .children_per_index = 2 };
+	CHECK(apfs_gen_tree_build(bytes, length, &tree, &root, &blocks));
+	CHECK(SEED_TREE + blocks <= SEED_VOLUMES);
+	map = (apfs_gen_omap_t){ .object = { .oid = SEED_MAP, .xid = 10,
+	    .type = 0x4000000b }, .flags = 1, .tree_type = 0x40000002,
+	    .tree_oid = root };
+	CHECK(apfs_gen_omap_build(bytes + (size_t)SEED_MAP * BLOCK, BLOCK,
+	    &map));
+}
+
+/* Write directory/container.seed after opening each occupied slot through
+ * the public reader at the newest, clean checkpoint, so a seed that no
+ * longer opens fails here rather than silently starving the fuzzer. The
+ * seed stops short of the container's declared end, which the reader
+ * accepts and reports as missing bytes.
+ */
+static void
+emit_seed(const char *directory)
+{
+	fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_reader_t *reader;
+	apfs_reader_t *apfs;
+	char path[4096];
+	FILE *file;
+
+	scenario = "fuzz seed opens";
+	fixture_init(&f, 0);
+	build_seed(f.bytes, (size_t)SEED_CONTAINER_BLOCKS * BLOCK);
+	fixture_truncate(&f, (uint64_t)SEED_BLOCKS * BLOCK);
+	fsimg_read_options_init(&options);
+	options.volume_index_set = true;
+	for (unsigned slot = 0; slot < VOLUME_MAX; slot++) {
+		if ((SEED_OCCUPIED & (1u << slot)) == 0)
+			continue;
+		options.volume_index = slot;
+		CHECK(status_is(&f, fsimg_reader_open(f.ctx, f.reader.input,
+		    &options, &reader, &f.error), FSIMG_OK));
+		apfs = reader->driver;
+		CHECK(apfs->container.xid == 20 && apfs->container.clean);
+		CHECK(reader->info.missing_bytes ==
+		    (uint64_t)(SEED_CONTAINER_BLOCKS - SEED_BLOCKS) * BLOCK);
+		fsimg_reader_free(reader);
+	}
+	CHECK(snprintf(path, sizeof(path), "%s/container.seed", directory) <
+	    (int)sizeof(path));
+	file = fopen(path, "wb");
+	CHECK(file != NULL);
+	CHECK(fwrite(f.bytes, 1, (size_t)f.length, file) == f.length);
+	CHECK(fclose(file) == 0);
+	fixture_close(&f);
+}
+
+int
+main(int argc, char **argv)
+{
+	if (argc == 3 && strcmp(argv[1], "--seed") == 0) {
+		emit_seed(argv[2]);
+		return (failures == 0 ? 0 : 1);
+	}
 	test_full_open_predecessor_is_openable();
 	test_full_open_private_map_damage_does_not_fall_back();
 	test_full_open_volume_selection();
