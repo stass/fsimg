@@ -817,6 +817,7 @@ EXTRA_DIST += \
 EXTRA_DIST += test/hfsplus-integration.sh test/hfsplus-integration.rb
 
 EXTRA_DIST += test/hfsplus-capture-test.rb test/hfsplus-qualify-test.rb
+EXTRA_DIST += tools/apfs/capture.rb test/apfs-capture-test.rb
 EXTRA_DIST += test/erofsdump-test.rb test/erofsdump.sh test/erofs-integration.sh.in \
 	test/erofs-integration.rb
 EXTRA_DIST += test/hfsplus-integration-test.rb
