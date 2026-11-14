@@ -38,7 +38,7 @@ record's `read_settings`, as write settings do through `write_settings`.
 | `btree.c` | Node validation, the cursor and the comparators |
 | `omap.c` | Object-map lookup at an XID over a cursor |
 | `volume.c` | The volume array, volume selection, superblock validation, snapshot selection and the read XID |
-| `unicode.c` | Name rules; canonical decomposition with canonical reordering, and case folding, over the generated tables; the comparison form under the volume's rule, the name hash, namespace keys |
+| `unicode.c` | Name rules; canonical decomposition with canonical reordering, and case folding, over the generated tables; whether a name holds a code point unassigned in the pinned version or a noncharacter; the comparison form under the volume's rule, the name hash, namespace keys |
 | `unicode-tables.h` | The generated decomposition, combining-class and case-folding tables, and their input digests |
 | `inode.c` | Inode and extended-field decoding, the attribute scan with the extra-data mark, record-to-entry mapping, data-stream lookups |
 | `directory.c` | `prepare`, `replay`, `keys` and `key`; the parent rule for directories |
@@ -382,7 +382,9 @@ requires.
 which `replay` proved is a directory. It seeks the scan cursor to the first
 directory record of that inode and iterates while the owner and kind match.
 For each record it checks the key variant, the name rules, the stored length
-and hash, and the value: the child inode at least 16 (or in the volume-group
+and hash, a mismatch on a name holding a code point unassigned in Unicode
+17.0.0 or a noncharacter being `FSIMG_EUNSUPPORTED` and any other
+`FSIMG_ECORRUPT`, and the value: the child inode at least 16 (or in the volume-group
 space) and a type in the format design's table. It admits the child with a
 17-byte payload: the child inode (u64), the record type (u8) and the sibling
 ID or zero (u64), little-endian. Admission charges the entry; the walker's
@@ -629,10 +631,10 @@ that share one
 data stream contribute one stream. The pool's claim stream is merged the
 same way against the pool's bitmap. The two checks the format design holds
 [provisional](design-apfs.md#verification), the bitmap bits past `N` and
-the allocated block count of a volume that is sealed, has clones or
-snapshots, or has freed blocks, are not made until their experiments give
-the rule; every other volume's allocated block count is checked against the blocks the format
-design lists there.
+the allocated block count of a volume that is sealed or has snapshots, are
+not made until their experiments give the rule; every other volume's
+allocated block count is checked against the blocks the format design
+lists there.
 
 **Walk.** The common walker visits the selected volume once. Every
 delivered entry is counted through `fsimg_verify_account()`, the one place

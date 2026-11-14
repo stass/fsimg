@@ -825,16 +825,6 @@
 
 ## Planned features
 
-* [Medium] **APFS names holding code points unassigned in Unicode
-  17.0.0** (`specs/design-apfs.md`, `lib/formats/apfs/unicode.c`): macOS
-  26.6.2 refuses with `EILSEQ` the unassigned code points, noncharacters and
-  Unicode 18.0.0 characters E4 tried, on both hashed personalities, and
-  accepts private-use code points ([research](docs/apfs-research.md#e4-names)).
-  Decide whether the writer refuses such names too, and whether the reader
-  treats a hash mismatch on such a name, which a macOS with newer tables
-  could write, or an older release that did not refuse them, as unsupported
-  rather than corrupt.
-
 * [Low] **Salvage ranges after interior damage** (`lib/read`, `lib/formats/`):
   deferred extension to the prefix-only [salvage policy](specs/design-salvage.md).
   Design recovery of independently located intact later ranges with explicit

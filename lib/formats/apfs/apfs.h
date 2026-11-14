@@ -10,10 +10,12 @@
 
 /*
  * Names (unicode.c; specs/design-apfs.md, "Directory records and names").
- * A name is the stored bytes without the NUL, counted in UTF-8 bytes. The
- * reader accepts APFS_NAME_MAX_BYTES, the most a hashed key's 10-bit length
- * holds with the NUL; the writer accepts APFS_WRITE_NAME_MAX_BYTES, a limit
- * provisional until E14.
+ * A name is the stored bytes without the NUL. The reader accepts
+ * APFS_NAME_MAX_BYTES UTF-8 bytes, the most a hashed key's 10-bit length
+ * holds with the NUL. The writer accepts APFS_WRITE_NAME_MAX_UNITS UTF-16
+ * code units, the limit macOS applies when it creates a name (E14), in the
+ * name as given and in its NFD, at most 765 UTF-8 bytes, and refuses a name
+ * holding a noncharacter or a code point unassigned in Unicode 17.0.0 (E4).
  *
  * A name's comparison form is a sequence of code points derived by the
  * volume's rule. It is at most APFS_NAME_EXPANSION times its name's length
@@ -23,7 +25,7 @@
  * one UTF-8 byte.
  */
 #define APFS_NAME_MAX_BYTES		1022u
-#define APFS_WRITE_NAME_MAX_BYTES	255u
+#define APFS_WRITE_NAME_MAX_UNITS	255u
 #define APFS_NAME_EXPANSION		3u
 #define APFS_NAME_FORM_POINTS		(APFS_NAME_MAX_BYTES * APFS_NAME_EXPANSION)
 #define APFS_NAME_KEY_BYTES		(APFS_NAME_MAX_BYTES * APFS_NAME_EXPANSION)

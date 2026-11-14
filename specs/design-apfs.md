@@ -812,7 +812,7 @@ Object-map flags follow a closed table:
 | --- | --- | --- |
 | `0x1` manually managed (no snapshot support) | Required | Forbidden |
 | `0x2` encrypting, `0x4` decrypting, `0x8` key rolling | Unsupported | Unsupported |
-| `0x10` crypto generation | Accepted; clear in every E1 capture | Accepted (provisional, E1) |
+| `0x10` crypto generation | Accepted; clear in every E1 capture | Accepted (provisional, E1's volume records) |
 | Any other bit | Unsupported | Unsupported |
 
 The container map's flags are `0x1` alone in every E1 capture. Whether
@@ -1225,11 +1225,16 @@ flags whose low four bits are the type, and extended fields.
 A name is the stored bytes without the NUL: nonempty, valid UTF-8 (macOS
 refuses any other byte string with `EILSEQ` on both personalities, E14),
 without NUL or `/`, and neither `.` nor `..`; anything else is corrupt.
-macOS also refuses some valid UTF-8 with `EILSEQ`, the noncharacter U+FFFF
-among them (E14); the writer refuses a name holding a code point macOS
-refuses. Which code points those are is provisional (E4); if E4 cannot
-answer, the writer refuses the noncharacters and the code points
-unassigned in the driver's Unicode version. The reader
+macOS also refuses some valid UTF-8 with `EILSEQ`: on both personalities
+a name holding a noncharacter, such as U+FFFF (E14), a code point
+unassigned in Unicode 17.0.0 or a character Unicode 18.0.0 adds (E4), while
+private-use code points are accepted (E4). The writer refuses a name holding
+a noncharacter or a code point unassigned in Unicode 17.0.0, the driver's
+version, as macOS does. The reader accepts every valid UTF-8 name whatever
+code points it holds, and classifies a stored hash that does not match the
+name's form by the name: when the name holds such a code point the
+mismatch is `FSIMG_EUNSUPPORTED`, since a newer macOS may hash it with newer
+tables, and otherwise it is `FSIMG_ECORRUPT`. The reader
 declares no [omitted-names profile](design-directories.md#omitted-names):
 every valid name is delivered, including names with control characters such
 as Finder's `Icon\r`, and the CLI escapes them for display as it does every
@@ -1245,10 +1250,12 @@ and no other passage states a third:
   applies when it creates a name: a character above U+FFFF counts two, any
   other one. The longest such name is 765 bytes, 255 three-byte
   characters, inside the reader's limit (E14, on both personalities:
-  `apfs-newfs-67108864-e14-ci` and `-cs`). E14's characters have no
-  decomposition, so whether macOS counts the name as given or its NFD is
-  provisional (E4); if E4 cannot answer, the writer requires both forms to
-  be at most 255 units.
+  `apfs-newfs-67108864-e14-ci` and `-cs`). The writer counts the name as
+  given and also requires its NFD to be at most 255 units. Whether macOS
+  counts the name as given or its NFD is provisional: E14's characters have
+  no decomposition and E4 did not probe length, so an E14 run with names of
+  decomposing characters at the limit closes it, and requiring both forms,
+  which satisfies either rule, stays if that run is not made.
 
 The comparison form of a name depends on the volume:
 
@@ -1316,11 +1323,12 @@ two table sets behind one name. The profile name carries the version.
 
 A comparison form is at most three times its name's length in bytes, which
 is what lets the [namespace key](design-directories.md#namespace) hold the
-form of a 1022-byte name. The bound is provisional until the tables exist:
-the generator computes the largest expansion of any code point and fails
-the build if it exceeds three.
+form of a 1022-byte name. The generator computes the largest expansion of
+any code point and fails if it exceeds three; the Unicode 17.0.0 tables
+stay within it.
 
-The reader checks each hashed record's length and hash, and the namespace key
+The reader checks each hashed record's length and hash, a hash mismatch
+classified as [above](#directory-records-and-names), and the namespace key
 it emits is the comparison form encoded as UTF-8, so two names one volume
 treats as equal are an ambiguous namespace, `FSIMG_ECORRUPT`. A selection
 query is converted the same way, so `t /Readme` finds `README` on a
@@ -1340,10 +1348,12 @@ on a compressed file's resource fork. A flag outside `0x1`, `0x2`, `0x4`
 and `0x10` is unsupported (E5, E6,
 `e5-xattr`, `e6-xclone`). [A1] gives 3804 both as the largest inline size
 and as a bound inline data must stay below. The reader accepts inline data
-of up to 3804 bytes. Native volumes store at most 3800 bytes inline, and
-fewer with a long name: 3794 with a 127-byte name, the longest
-`setxattr(2)` accepts. Larger values are streams (E5, `e5-xbound`,
-`e5-xlong`). Where between 63 and 127 bytes the name starts to lower the
+of up to 3804 bytes. Through `setxattr(2)` native volumes store at most
+3800 bytes inline, and fewer with a long name: 3794 with a 127-byte name,
+the longest `setxattr(2)` accepts. Larger values are streams (E5,
+`e5-xbound`, `e5-xlong`). The kernel's own `com.apple.decmpfs` attribute
+reaches 3802 bytes inline (E7, `ditto`'s `c27441`), so the two native
+bounds differ and the reader's 3804 covers both. Where between 63 and 127 bytes the name starts to lower the
 limit is unmeasured and matters to no rule here. A stream attribute's
 value holds its stream ID, the key its file extents are filed under. No
 data-stream ID record exists for it, and each stream has exactly one
@@ -1736,12 +1746,18 @@ block is allocated in the main bitmap exactly when it is claimed; each
 chunk's free count and the device's free count equal the clear bits. Two
 checks are provisional and are not made until their experiment gives the
 rule: the bits past `N` (E15), and the allocated block count of a volume
-that is sealed, has clones or snapshots, or has freed blocks (E11, E6,
-E9, E16). Any other volume's allocated block count, on a volume whose
-total blocks freed is zero, equals the blocks of its object map, of the nodes of its object-map,
-filesystem, extent-reference and snapshot trees, and of its mapped file
-extents; its superblock is not counted (E2 and E3: 5 on an empty volume,
-and 571 = 1 + 4 + 258 + 1 + 1 + 306 in `apfs-newfs-268435456-e3-ci`).
+that is sealed (E11) or has snapshots (E9). Every other volume's allocated
+block count equals the nodes of its object-map, filesystem,
+extent-reference and snapshot trees, one block more, and the data blocks
+its physical-extent records cover, a block that clones share counted once.
+E3 counts the one block more as the object-map object; E5 and E6 cannot
+tell it from the volume superblock, and the count is the same either way.
+The evidence: 5 on an empty volume and 571 = 1 + 4 + 258 + 1 + 1 + 306 in
+`apfs-newfs-268435456-e3-ci` (E2, E3); every E5 and E6 capture, clones
+included; and `e6-xclone`, which removed a 315-block file and counts
+156 = 151 + 5, so freed blocks leave the count (E6). That a volume which
+has freed blocks many times follows the same rule is provisional (E16); if
+E16 cannot answer, the check stands, since E6's freed file follows it.
 
 A [truncated container](#truncated-containers) never reaches these checks:
 the reader core fails its verification first.
@@ -1956,7 +1972,7 @@ size sweep, which formats each block count the
 to 100663296 (384 GiB), and the two captures and 30 sweep dumps of
 [E12](../docs/apfs-research.md#e12-large-containers), from 512 GiB to
 34359738368 blocks (128 TiB). No container above 34359738368 blocks is
-written.
+written: `validate` and the size search fail with `FSIMG_ERANGE` above it.
 
 **Transactions**
 
@@ -1983,13 +1999,13 @@ written.
 | --- | --- | --- | --- | --- |
 | Inode numbers | Root 2 and private directory 3, both with parent 1; the entry with catalog ID `i`, from 1, gets `15 + i`, so entries are numbered from 16 in catalog order | [A1] for 2, 3 and the minimum 16; policy for the order | | |
 | Private ID | The inode number | [A1]: the value of a file never cloned | | |
-| Volume next object identifier | One past the largest inode number, 16 for an empty volume. It counts inode numbers and is not the container's next OID | [A1] | E1 | Formula: the larger of the native empty volume's value and one past the largest inode number |
+| Volume next object identifier | One past the largest inode number, 16 for an empty volume. It counts inode numbers and is not the container's next OID | [A1]; E2: 16 on every empty volume | | |
 | Directory inode | Child count equal to the directory records it owns, which for the root excludes the private directory; no data-stream field; uncompressed size zero | [A1]; E3 | | |
 | Non-directory inode | Link count 1 | [A1]: one name | | |
 | Name field | On every entry's inode, the name of its directory record, flags `0x2`; on the root and private directories, native | E1, E3 | | |
 | Internal flags, protection class, write generation | Internal flags `0x8000`. Protection class 4 on a FIFO, 0 on every other inode. Write generation 1 plus the child count on a directory, 2 on a file with content, 1 on any other inode: the values of a native entry created and written once, which the root and private directories of an empty volume (E2) also follow | E2, E3 | | |
 | BSD flags | Zero | Policy | | |
-| Directory statistics records and their inode field, sibling records, document IDs, purgeable and firmlink fields | None | Policy | E1, and the E15 `fsck_apfs -n` probe of a capture with such a record or field removed | Native for which records and fields the root and private directories carry; Formula for any of their values that counts descendants or bytes |
+| Directory statistics records and their inode field, sibling records, document IDs, purgeable and firmlink fields | None | Policy; E3: none on any native directory | The E15 `fsck_apfs -n` probe of a capture with such a record or field removed | Native for which records and fields the root and private directories carry; Formula for any of their values that counts descendants or bytes |
 
 **Checkpoint and container superblock**
 
@@ -2021,7 +2037,7 @@ written.
 | Reserve counts, flags, version, structure size | Zero reserves; flags `0x1`; version 1; structure size 2520 | E1 | | |
 | Tier-2 device and queue | Zero | [A1]: no Fusion | | |
 | Free queues | Internal pool and main: zero tree OID, count zero, oldest XID zero; node limits `I = min(512, q(P, 1136))` (E12, bisected: 511 at `P` 580494, 512 at 580497 and at 581634, where `q` is 513) and `L`: `q(N, 4544)` below 2^18 blocks (1 GiB), `q(N, 2272)` from 2^18 and 512 from 2^20 (4 GiB) | E1: the first form | E15 | The second form: a root leaf in each queue, holding at XID 2 what the second form's queues hold: blocks allocated in their domain that hold no live object |
-| Reaper | Idle: head, tail, list count and the six fields of an object being reaped zero; flags `0x1`; next reap ID 1, completed reap ID 0; state buffer of `B - 112` bytes, zero | [A1] for idle and the flag; E1 | | |
+| Reaper | Idle: head, tail, reap-list object count and the six fields of an object being reaped zero; flags `0x1`; next reap ID 1, completed reap ID 0; state buffer of `B - 112` bytes, zero | [A1] for idle and the flag; E1 | | |
 
 **Volume superblock**
 
@@ -2032,11 +2048,11 @@ written.
 | Object counts | Files: regular files. Directories: directory entries, the root and private directories not counted. Symbolic links. Other: FIFOs, as native volumes count FIFOs and sockets. Snapshots: zero | [A1]; E3 | | |
 | Allocated block count, total blocks allocated and freed | Allocated: the nodes of the volume's object-map, filesystem, extent-reference and snapshot trees, one block more for the object-map object, and its file-data blocks, as [verification](#verification) states; total allocated the file-data blocks alone, the native value of a volume that has freed no data; total freed zero | [A1]; E3, E5, E6 | | |
 | Reserve and quota | Zero | [A1]: none | | |
-| Modification and unmount times | The format time | Policy | E1 | Formula: each field holds the format time, or zero where E1 shows a fresh volume holding zero |
+| Modification and unmount times | The format time | Policy | E1's volume records | Formula: each field holds the format time, or zero where E1 shows a fresh volume holding zero |
 | Formatting record | Identifier `fsimg` followed by the package version, NUL-padded to 32 bytes; the format time; last XID `X` | Policy | E15 | The identifier in the native formatter's form, as E1 captures it |
-| Modification records | Zero | E1 | E1 | Native |
+| Modification records | Zero | E2: all empty | | |
 | UUIDs | Volume: the setting. Container: derived as [settings](#settings-and-identities) state. Volume group: zero | Policy | | |
-| Next document ID, clone-information epoch and XID | Native | E1 | E1 | Native |
+| Next document ID, clone-information epoch and XID | Next document ID 3 (E2, E3); the epoch and XID native | E1, E2 | E1's volume records, for the epoch and XID | Native |
 | Snapshot, sealing and integrity fields | Zero | [A1]: features absent | | |
 
 **Trees and content**
@@ -2048,7 +2064,7 @@ written.
 | Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1). In the filesystem tree: flags `0x42`, node size 4096, fixed sizes zero, and a node's table of contents its key count rounded up to a multiple of 8 entries, the shape of 253 of the 254 leaves of `apfs-newfs-268435456-e3-ci`, where every table is a multiple of 8 entries and index nodes hold up to 8 more (E3) | E1, E3 | E1's volume records, for the volume's other trees | Native |
 | Footer counts | Key count: the tree's leaf records. Node count: its nodes. Longest key and longest value: the largest encoded lengths packed into it | [A1]; E3 for the counts and the longest key | | |
 | Object-map flags | Container map `0x1`; volume map zero | [A1]; E1 for the container map | E1's volume records, for the volume map's crypto-generation flag | Native |
-| Empty extent-reference and snapshot trees | One root leaf with no keys | E1 | E1 | Native |
+| Empty extent-reference and snapshot trees | One root leaf with no keys | E1; E2: one node each among an empty volume's 5 allocated blocks | E1's volume records | Native |
 | File extent | A nonempty file's run, its size rounded up to 4096 bytes, is tiled by consecutive extents of at most the extent cap, so a file no longer than the cap has one; flags and crypto ID zero | [A1] | | |
 | Extent cap | `2^56 - 4096` bytes, the largest block-aligned length the 56-bit length field holds. The cap follows from the encoding and needs no experiment | [A1]: the field's width | E15, for a lower native limit | The longest extent E15 shows `fsck_apfs` accepting |
 | Data-stream field | Size; allocated bytes the size rounded up to 4096; crypto ID zero; total bytes written the size and total bytes read zero; flags `0x20`. A file of size zero has none, and no data-stream ID or reference record either | [A1]; E3 | | |
@@ -2110,12 +2126,13 @@ checkpoint was passed over. Its details, in order: `volume_index`,
 | Condition | Status |
 | --- | --- |
 | No `NXSB` magic at offset 32 of block 0, unless the identity is assumed | `FSIMG_EFORMAT` |
-| Recognized but outside the profile: features in the refusal tables, encryption, Fusion, noncontiguous areas, revert or rolling state, unknown data-dependent fields or content-changing flags, names above 1022 bytes, link targets above 1023 bytes, LZBITMAP or unknown compression, tree height above 16 levels, sealed hash types other than SHA-256 | `FSIMG_EUNSUPPORTED` |
+| Recognized but outside the profile: features in the refusal tables, encryption, Fusion, noncontiguous areas, revert or rolling state, unknown data-dependent fields or content-changing flags, names above 1022 bytes, a stored name hash that does not match on a name holding a code point unassigned in Unicode 17.0.0 or a noncharacter, link targets above 1023 bytes, LZBITMAP or unknown compression, tree height above 16 levels, sealed hash types other than SHA-256 | `FSIMG_EUNSUPPORTED` |
 | Checksum, header, range, ordering, tiling, tie, hash, count, reference, repeated node on a path, tombstoned required object, namespace collision in a stored directory, or allocation inconsistency | `FSIMG_ECORRUPT` |
 | A read past the end of a [truncated container](#truncated-containers) | `FSIMG_ECORRUPT`, "image is truncated", from the common read funnel |
 | No `volume=` for a container with several volumes, a `volume=` naming an empty or out-of-range slot, an unknown or malformed snapshot name, any other invalid setting, a catalog name outside the writer's rules, colliding catalog names | `FSIMG_EINVAL` |
 | A host clock outside the writer's [time range](#writer-values) | `FSIMG_ERANGE` |
 | A layout that does not fit the exact size requested, or an automatic size not found within the [probe cap](#writer-values), which the message names | `FSIMG_ERANGE` |
+| A requested size, or one the size search reaches, above the writer's largest container of 34359738368 blocks (128 TiB, [writer values](#writer-values)) | `FSIMG_ERANGE` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
 
 Two names with equal comparison forms in one directory are judged by who

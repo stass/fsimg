@@ -367,7 +367,7 @@ captures with their command records and `fsck_apfs` output:
 | E10 Volumes | `diskutil apfs addVolume` with roles; a volume group if available |
 | E11 Encrypted and sealed | `hdiutil create -encryption`; a sealed System volume from an installer or restore image if available, structure only |
 | E12 Large containers | 1 TiB and 128 TiB sparse containers: address blocks, pool sizes, ring sizes |
-| E13 Layers | `hdiutil` UDRW, UDZO and UDBZ images with and without GPT, and an Apple Partition Map disk holding a container (`hdiutil create -layout SPUD` if it accepts APFS, otherwise an E1 container behind a hand-built map): the layouts the layers peel. One ULFO and one ULMO image record the layer's refusal |
+| E13 Layers | `hdiutil` UDRW, UDZO and UDBZ images with and without GPT, and an Apple Partition Map disk holding a container (`hdiutil create -layout SPUD` if it accepts APFS, otherwise an E1 container behind a hand-built map): the layouts the layers peel. One ULFO image records the layer's refusal; a ULMO image is an xz stream at offset 0, so it is ambiguous unless the read-side stack is given, and with `-F dmg` it fails as unsupported LZMA chunk compression |
 | E14 Limits | Longest accepted name in bytes and characters, invalid UTF-8 refusal, 1023- and 1024-byte link targets, times before 1970 and far ahead |
 | E15 Writer probes | `fsck_apfs -n` on E1 and E3 captures altered one field at a time with checksums repaired: all XIDs set to one, another formatting identifier, a very long extent, node fill changes including a last node of one record, another maximum volume count, bitmap bits past `N` set, a directory-statistics, document-ID, purgeable or firmlink record or field removed, and the writer's first form: an E1 capture rolled back to its XID-1 checkpoint with its volume's objects added to that checkpoint |
 | E16 Used Data volume | Structure-only counts from a copy of a used macOS Data volume the owner provides: entry kinds including sockets and device nodes, where they occur by depth and whether each device carries the device-number field, compression types, snapshots, holes, clones and hard links, and whether the reaper is idle. No names, contents or identities are recorded |
@@ -424,10 +424,10 @@ describe the user-visible options.
   containers, checkpoint rings, object maps, multi-level trees and volumes,
   and their mutations, shared with the contract suite and the fuzz seeds.
 * `fuzz/apfs.c`: probe, selection and object-map paths with checksum repair.
-* **Gate:** `i` and `i -o volume=N` match `diskutil apfs list` for every
-  capture: volume names, UUIDs, roles, block size and count. Every
-  checkpoint and object-map mutation fails with its class. A container
-  whose block 0 magic is damaged opens only with `--force`, and every
+* **Gate:** `i` and `i -o volume=N` match `diskutil apfs list -plist`,
+  whose text form omits Update-role volumes (E10), for every capture:
+  volume names, UUIDs, roles, block size and count. Every checkpoint and
+  object-map mutation fails with its class. A container whose block 0 magic is damaged opens only with `--force`, and every
   other mutation still fails under it. A cut through the descriptor ring
   or the selected checkpoint's data run fails as truncated and never
   selects an older checkpoint; a cut past them opens and `i` reports the
