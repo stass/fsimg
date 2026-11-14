@@ -1418,8 +1418,11 @@ typedef struct fsimg_extract_options {
  * counts it in the statistics' skipped_entries. An entry the reader omits
  * for a name outside the format's profile fails the same way unless
  * SKIP_UNSUPPORTED omits it and its subtree; the statistics'
- * omitted_entries counts it. An error naming an image entry keeps that
- * rendered path; any other failure after creation names the destination.
+ * omitted_entries counts it. A failure creating a directory, or creating
+ * or filling a file, names that entry, unless a layer or codec failing
+ * under the read named itself; cancellation names the destination. An error naming an image entry or a layer
+ * keeps that rendered path; any other failure after creation names the
+ * destination.
  * With manifest_fd, every visited entry, a skipped one included, gets one
  * mtree(5) line carrying its kind, mode, owner and modification time (a
  * wall time read at wall_offset_minutes), a file's size and the SHA-256 of

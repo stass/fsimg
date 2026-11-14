@@ -672,7 +672,8 @@ record_skipped(extract_state_t *state, const fsimg_entry_t *entry,
 }
 
 /* Create a regular file or directory beneath its parent and record its
- * manifest line, counting it complete.
+ * manifest line, counting it complete. A failure creating or filling the
+ * entry names it.
  */
 static fsimg_status_t
 extract_entry(extract_state_t *state, const fsimg_entry_t *entry,
@@ -696,6 +697,19 @@ extract_entry(extract_state_t *state, const fsimg_entry_t *entry,
 		file_digest = state->manifest != NULL ? digest : NULL;
 		status = extract_file(state, entry, name, file_digest, error);
 	}
+	/* Cancellation is the caller's act, not the entry's failure, so it
+	 * names the destination as any other interruption does. An error
+	 * that already carries a path keeps it: a walker path the
+	 * reader rendered, or the registry name of a layer or codec that
+	 * failed under the read. A failed content read may have aborted the
+	 * reader, which releases the entry, so the name comes from the copy
+	 * select_parent made. A delivered path has no omitted component, so it
+	 * renders as a plain path.
+	 */
+	if (status != FSIMG_OK && status != FSIMG_DONE &&
+	    status != FSIMG_ECANCELLED && error != NULL &&
+	    error->path[0] == '\0')
+		fsimg_error_path(error, state->entry_path);
 	if (status == FSIMG_OK)
 		status = record_entry(state, entry, file_digest, NULL, 0, error);
 	if (status == FSIMG_OK)

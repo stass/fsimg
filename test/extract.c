@@ -40,6 +40,12 @@ typedef struct extract_fixture {
 	bool		 cancel;
 } extract_fixture_t;
 
+typedef struct failing_content_io {
+	uint64_t	 content_offset;
+	uint64_t	 size;
+	int		 fd;
+} failing_content_io_t;
+
 static void fixture_open(extract_fixture_t *);
 static void fixture_open_with_entries(extract_fixture_t *,
     const fsimg_entry_t *, size_t);
@@ -86,6 +92,10 @@ static void test_null_member_array_is_invalid(void);
 static void test_extract_members_union_and_manifest_once(void);
 static void test_null_extraction_members_create_no_destination(void);
 static void test_missing_extraction_member_names_error(void);
+static fsimg_status_t failing_content_read(void *, uint64_t, void *, size_t,
+    size_t *, fsimg_error_t *);
+static fsimg_status_t failing_content_size(void *, uint64_t *, fsimg_error_t *);
+static void test_content_read_failure_names_the_entry(void);
 static fsimg_status_t posix_replay(fsimg_reader_t *, const char *,
     const unsigned char *, size_t, fsimg_error_t *);
 static void present_posix_kinds(extract_fixture_t *);
@@ -1197,6 +1207,95 @@ test_missing_extraction_member_names_error(void)
 	fixture_close(&fixture);
 }
 
+static fsimg_status_t
+failing_content_read(void *argument, uint64_t offset, void *buffer,
+    size_t length, size_t *count, fsimg_error_t *error)
+{
+	failing_content_io_t *input = argument;
+	ssize_t result;
+
+	/* Fail reads touching the first content byte, leaving metadata readable. */
+	if (offset <= input->content_offset &&
+	    input->content_offset - offset < length) {
+		*count = 0;
+		return (fsimg_error_set(error, FSIMG_EIO, EIO, FSIMG_OP_IO,
+		    "injected file content read failure"));
+	}
+	result = pread(input->fd, buffer, length, (off_t)offset);
+	*count = result < 0 ? 0 : (size_t)result;
+	if (result < 0)
+		return (fsimg_error_set(error, FSIMG_EIO, errno, FSIMG_OP_IO,
+		    "fixture image read failed"));
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+failing_content_size(void *argument, uint64_t *size,
+    fsimg_error_t *error FSIMG_UNUSED)
+{
+	failing_content_io_t *input = argument;
+
+	*size = input->size;
+	return (FSIMG_OK);
+}
+
+static void
+test_content_read_failure_names_the_entry(void)
+{
+	extract_fixture_t fixture;
+	failing_content_io_t input;
+	fsimg_io_ops_t ops;
+	fsimg_io_t *faulty;
+	fsimg_error_t error;
+	const fsimg_entry_t *entry;
+	fsimg_fat_reader_t *fat;
+	struct stat st;
+	fsimg_status_t status;
+	bool path_matches;
+
+	/* Locate the file's first data cluster on a clean reader, then reopen
+	 * the image through an adapter that fails every read of that byte.
+	 */
+	fixture_open(&fixture);
+	do {
+		CHECK(fsimg_reader_next(fixture.reader, &entry, NULL) == FSIMG_OK);
+	} while (strcmp(entry->path, "/A/nested/file") != 0);
+	CHECK(entry->size == FILE_BYTES);
+	fat = fsimg_fat_state(fixture.reader);
+	input.fd = openat(fixture.parent, "image", O_RDONLY | O_NOFOLLOW);
+	CHECK(input.fd != -1);
+	CHECK(fstat(input.fd, &st) == 0);
+	input.size = (uint64_t)st.st_size;
+	input.content_offset = fsimg_fat_cluster_offset(&fat->geometry,
+	    fat->current_cluster);
+	fsimg_reader_free(fixture.reader);
+	fsimg_io_ops_init(&ops);
+	ops.read_at = failing_content_read;
+	ops.get_size = failing_content_size;
+	CHECK(fsimg_io_from_callbacks(fixture.ctx, &ops, &input, &faulty,
+	    NULL) == FSIMG_OK);
+	CHECK(fsimg_reader_open(fixture.ctx, faulty, NULL, &fixture.reader,
+	    NULL) == FSIMG_OK);
+
+	status = fsimg_extract_at(fixture.reader, fixture.parent, "output", NULL,
+	    &error);
+	CHECK(status == FSIMG_EIO);
+	CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+	/* Judged after cleanup, since a failed CHECK exits at once. */
+	path_matches = strcmp(error.path, "/A/nested/file") == 0;
+	if (!path_matches)
+		fprintf(stderr, "%s:%d: expected error.path=\"/A/nested/file\", "
+		    "got \"%s\"\n", __FILE__, __LINE__, error.path);
+
+	remove_tree(fixture.parent, "output");
+	fsimg_reader_free(fixture.reader);
+	fixture.reader = NULL;
+	fsimg_io_free(faulty);
+	CHECK(close(input.fd) == 0);
+	fixture_close(&fixture);
+	CHECK(path_matches);
+}
+
 /* Test-only cleanup walks solely disposable roots created by this fixture. */
 static void
 remove_tree(int parent, const char *name)
@@ -1682,6 +1781,7 @@ main(int argc, char **argv)
 	test_extract_members_union_and_manifest_once();
 	test_null_extraction_members_create_no_destination();
 	test_missing_extraction_member_names_error();
+	test_content_read_failure_names_the_entry();
 	test_existing();
 	test_limits();
 	test_times();

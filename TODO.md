@@ -686,32 +686,18 @@
   file settings are gone, and callback sinks proving a bound refusal opens
   and resizes nothing for VHD, DMG and simg.
 
-* [Low] **A failed extraction keeps any error path, not only an entry's**
-  (`lib/extract/extract.c` `report_destination`, `include/fsimg.h`): the
-  contract keeps a path that names an image entry and otherwise names the
-  destination, but the code keeps whatever path is set. It holds because
-  nothing on the extraction path sets another; mark an entry path
-  explicitly, or record the destination in its own field, so it holds by
-  construction.
-
-* [Low] **A host name collision during extraction names no entry**
-  (`lib/extract/extract.c` `creation_failed`): extracting the FreeBSD 1.0
-  install CD onto a case-insensitive macOS volume fails at
-  `/filesys/usr/bin/mail` after `/filesys/usr/bin/Mail` with only
-  "exclusive output file creation failed: File exists" and the retained
-  destination; the colliding image entry is not named. Name the entry
-  being created, which also settles "A failed extraction keeps any error
-  path" for this path.
-
-* [Medium] **A content failure during extraction names no entry**
-  (`lib/extract/extract.c` `extract_file`, `lib/read/`): without
-  `--salvage`, a file whose content the driver refuses, such as an APFS
-  compressed file, fails `x` with the driver's message and the retained
-  destination only, so the user is not told which file failed; `--salvage`
-  names it. Naming it with `entry->path` after `copy_content` fails is not
-  enough: the entry's path is gone by then (a NULL dereference in
-  `fsimg_path_render`), so the name has to be rendered where the reader
-  still holds the walker path, with its omitted-name classes.
+* [Medium] **An extraction error has one path slot for three names**
+  (`lib/extract/extract.c` `extract_entry`, `report_destination`,
+  `include/fsimg.h`): a failure creating or filling an entry names the
+  entry, any other failure after creation names the destination, and a
+  layer's or codec's failure during a content read keeps the name it set
+  (`lib/layers/chunks.c` the layer, `lib/layers/zstd.c`,
+  `lib/formats/erofs/cluster.c` "zlib"), which
+  [the API design](specs/design-api.md) requires so `cW` attributes a
+  layer failure. A corrupt DMG chunk inside a file's extent therefore fails
+  `x` naming "dmg", and neither the file nor the destination. Carry the
+  entry or the destination in its own error field so each name holds by
+  construction; the choice changes the public error record.
 
 * [Low] **The job record moves ifsboot settings type-blind**
   (`cmd/fsimg/job.c` `ifsboot_fields`): the table copies `uint32_t` and

@@ -1319,7 +1319,7 @@ test_terminal_content_failure_takes_precedence_over_directory_loss(void)
 	CHECK(fsimg_extract_at(f.reader, parent, "out", &options, &error) == FSIMG_EIO);
 	CHECK(error.status == FSIMG_EIO && error.operation == FSIMG_OP_IO);
 	CHECK(strcmp(error.message, "injected input failure") == 0);
-	CHECK(strcmp(error.path, "out") == 0);
+	CHECK(strcmp(error.path, "/c") == 0);
 	CHECK(f.reader->state == FSIMG_READER_FAILED);
 	expect_losses(&f, 1, 1, "/bad", FSIMG_LOSS_DIRECTORY);
 	remove_tree(parent, "out");
