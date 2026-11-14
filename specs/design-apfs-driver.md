@@ -38,7 +38,7 @@ record's `read_settings`, as write settings do through `write_settings`.
 | `btree.c` | Node validation, the cursor and the comparators |
 | `omap.c` | Object-map lookup at an XID over a cursor |
 | `volume.c` | The volume array, volume selection, superblock validation, snapshot selection and the read XID |
-| `unicode.c` | Name rules; UTF-8 decoding to code points, canonical decomposition with canonical reordering, and case folding, over the generated tables; the comparison form under the volume's rule, the name hash, namespace keys |
+| `unicode.c` | Name rules; canonical decomposition with canonical reordering, and case folding, over the generated tables; the comparison form under the volume's rule, the name hash, namespace keys |
 | `unicode-tables.h` | The generated decomposition, combining-class and case-folding tables, and their input digests |
 | `inode.c` | Inode and extended-field decoding, the attribute scan with the extra-data mark, record-to-entry mapping, data-stream lookups |
 | `directory.c` | `prepare`, `replay`, `keys` and `key`; the parent rule for directories |
@@ -66,6 +66,9 @@ the node rules.
 
 The driver reuses facilities that exist outside it:
 
+* `lib/core/unicode.[ch]`: `fsimg_utf8_decode()` and `fsimg_utf8_encode()`,
+  the strict UTF-8 decoder and the encoder of one code point, between which
+  `unicode.c` builds a comparison form.
 * `lib/core/crc32c.[ch]`: `fsimg_crc32c_update()`, the bare register update,
   to which `unicode.c` applies the conventions the format design gives the
   [name hash](design-apfs.md#directory-records-and-names).

@@ -81,6 +81,33 @@ captures in [the research record](hfsplus-research.md), and against
 `d4aeef80a6b06232340182da3d74bc91e03bfc39de084713eac2d714f10d7f94`), whose folding
 table is compared, never imported: no NetBSD text is in the tree.
 
+The generated `lib/formats/apfs/unicode-tables.h` uses Unicode-3.0 data under
+the same notice. Its inputs are:
+
+| Data | Source | SHA-256 |
+| --- | --- | --- |
+| UnicodeData 17.0.0, combining class and canonical decomposition fields | [Unicode Consortium](https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt) | `2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c` |
+| CaseFolding 17.0.0, statuses C and F | [Unicode Consortium](https://www.unicode.org/Public/17.0.0/ucd/CaseFolding.txt) | `ff8d8fefbf123574205085d6714c36149eb946d717a0c585c27f0f4ef58c4183` |
+| NormalizationTest 17.0.0, the test oracle only | [Unicode Consortium](https://www.unicode.org/Public/17.0.0/ucd/NormalizationTest.txt) | `5019ffd530751a741900c849c0e010332f142a3612234639bd200b82138a87db` |
+
+Regenerate from the directory holding the unmodified downloads with:
+
+```sh
+ruby tools/gen-apfs-tables.rb 17.0.0 UCD-DIRECTORY \
+    lib/formats/apfs/unicode-tables.h
+```
+
+The version is the generator's required argument, and it accepts only a
+version whose input digests it pins. Version 17.0.0 is provisional until E4:
+it is the version under which a preliminary pair of captures on macOS 26.6.2,
+one case-insensitive and one case-sensitive volume each holding 23 names chosen
+for case pairs and decompositions added in Unicode 9 to 17, reproduces every
+stored hash, while each earlier version tried (9.0.0 to 16.0.0) and simple
+folding miss some. Those names, with the `.fseventsd` directory macOS adds,
+and their stored hashes are the native vectors of `test/apfs-unicode.c`,
+which also checks the tables against the three files above when
+`FSIMG_APFS_UCD` names a directory holding them.
+
 `lib/core/sha256.c` and `lib/core/sha256.h`, the project's one SHA-256
 implementation, are FreeBSD's `sys/crypto/sha2/sha256c.c` and
 `sys/crypto/sha2/sha256.h` by Colin Percival, under a BSD-2-Clause notice,

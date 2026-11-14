@@ -14,11 +14,10 @@ typedef struct fsimg_case_pair {
 
 #include "case-tables.h"
 
-static bool utf8_scalar(const unsigned char *, size_t, size_t *, uint32_t *);
 static bool timestamp_valid(const fsimg_timestamp_t *);
 
-static bool
-utf8_scalar(const unsigned char *bytes, size_t length, size_t *used,
+bool
+fsimg_utf8_decode(const unsigned char *bytes, size_t length, size_t *used,
     uint32_t *scalar)
 {
 	uint32_t value, minimum;
@@ -78,7 +77,7 @@ fsimg_utf8_to_utf16(const char *input, size_t length, uint16_t *output,
 	offset = 0;
 	count = 0;
 	while (offset < length) {
-		if (!utf8_scalar((const unsigned char *)input + offset,
+		if (!fsimg_utf8_decode((const unsigned char *)input + offset,
 		    length - offset, &used, &scalar))
 			return (fsimg_error_set(error, FSIMG_EINVAL, 0,
 			    FSIMG_OP_CATALOG, "invalid UTF-8 encoding"));
@@ -101,6 +100,26 @@ fsimg_utf8_to_utf16(const char *input, size_t length, uint16_t *output,
 	}
 	*written = count;
 	return (FSIMG_OK);
+}
+
+size_t
+fsimg_utf8_encode(uint32_t scalar, char *output)
+{
+	size_t units;
+
+	units = scalar < 0x80 ? 1 : scalar < 0x800 ? 2 :
+	    scalar < 0x10000 ? 3 : 4;
+	if (units == 1) {
+		output[0] = (char)scalar;
+		return (1);
+	}
+	for (size_t j = units - 1; j != 0; j--) {
+		output[j] = (char)(0x80 | (scalar & 0x3f));
+		scalar >>= 6;
+	}
+	output[0] = (char)((units == 2 ? 0xc0 : units == 3 ? 0xe0 : 0xf0) |
+	    scalar);
+	return (units);
 }
 
 /* Encode UTF-16 code units as UTF-8, a surrogate pair as its scalar. An
@@ -140,18 +159,8 @@ utf16_encode(const uint16_t *input, size_t length, char *output,
 		    (output != NULL && units > capacity - count))
 			return (fsimg_error_set(error, FSIMG_ERANGE, 0,
 			    FSIMG_OP_CATALOG, "UTF-8 output exceeds buffer"));
-		if (output != NULL) {
-			if (units == 1) {
-				output[count] = (char)scalar;
-			} else {
-				for (size_t j = units - 1; j != 0; j--) {
-					output[count + j] = (char)(0x80 | (scalar & 0x3f));
-					scalar >>= 6;
-				}
-				output[count] = (char)((units == 2 ? 0xc0 :
-				    units == 3 ? 0xe0 : 0xf0) | scalar);
-			}
-		}
+		if (output != NULL)
+			(void)fsimg_utf8_encode(scalar, output + count);
 		count += units;
 	}
 	*written = count;

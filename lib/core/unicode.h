@@ -30,6 +30,16 @@ bool fsimg_dos_time_encode(int64_t, uint32_t *, unsigned char *);
 bool fsimg_time_select_u32(bool, const fsimg_timestamp_t *, int64_t, uint32_t,
     uint32_t, bool, uint32_t *);
 
+/* Decode the one scalar value that starts bytes, of length bytes: strict
+ * UTF-8, refusing overlong forms, surrogates and values above U+10FFFF.
+ * Store the value and the bytes it takes, or return false and store nothing.
+ */
+bool fsimg_utf8_decode(const unsigned char *, size_t, size_t *, uint32_t *);
+/* Store the UTF-8 form of a code point at most U+10FFFF, at most 4 bytes,
+ * without a NUL, and return its length. A surrogate is written in the
+ * three-byte form, which fsimg_utf16_to_wtf8() relies on.
+ */
+size_t fsimg_utf8_encode(uint32_t, char *);
 /* NULL output with capacity zero validates and counts without allocating. */
 fsimg_status_t fsimg_utf8_to_utf16(const char *, size_t, uint16_t *, size_t,
     size_t *, fsimg_error_t *);

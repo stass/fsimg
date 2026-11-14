@@ -13,6 +13,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib/core \
 	-I$(top_srcdir)/lib/formats/qnx6 -I$(top_srcdir)/lib/formats/qnx4 \
 	-I$(top_srcdir)/lib/formats/erofs \
 	-I$(top_srcdir)/lib/formats/iso9660 -I$(top_srcdir)/lib/formats/hfsplus \
+	-I$(top_srcdir)/lib/formats/apfs \
 	$(ZLIB_CFLAGS) $(ZSTD_CFLAGS) $(LZMA_CFLAGS) \
 	-I$(top_srcdir)/lib/formats/ifs \
 	-I$(top_srcdir)/lib/codec
@@ -88,6 +89,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/hfsplus/verify.c \
 	lib/formats/hfsplus/write-hfsplus.h lib/formats/hfsplus/write-plan.c \
 	lib/formats/hfsplus/write-btree.c lib/formats/hfsplus/write-emit.c \
+	lib/formats/apfs/apfs.h lib/formats/apfs/unicode.c \
+	lib/formats/apfs/unicode-tables.h \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
@@ -194,6 +197,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-lzfse test-decmpfs test-hfsplus-codec test-hfsplus \
 	test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
+	test-apfs-unicode \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
 	test-qualify test-fragment test-posix test-layers test-layers-apm \
@@ -347,6 +351,9 @@ test_hfsplus_verify_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_hfsplus_unicode_SOURCES = test/hfsplus-unicode.c test/test.h \
 	test/digest.c test/digest.h
 test_hfsplus_unicode_LDADD = libfsimg.la
+test_apfs_unicode_SOURCES = test/apfs-unicode.c test/test.h \
+	test/digest.c test/digest.h
+test_apfs_unicode_LDADD = libfsimg.la
 test_hfsplus_write_SOURCES = test/hfsplus-write.c test/test.h \
 	test/hfsplus-write-check.c test/hfsplus-write-check.h \
 	test/hfsplus-write-fixture.c test/hfsplus-write-fixture.h
@@ -507,6 +514,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/qnx/vm/ppm2png.py tools/qnx/vm/put.sh \
 	tools/qnx/vm/qsh.py tools/qnx/vm/shot.sh tools/qnx/vm/type.py \
 	tools/qnx/vm/vmstart.sh \
+	tools/gen-apfs-tables.rb \
 	tools/gen-fat-tables.rb tools/gen-hfsplus-tables.rb \
 	tools/hfsplus-unicode-exceptions.txt tools/hfsplus/capture.rb \
 	tools/hfsplus/qualify.rb \
