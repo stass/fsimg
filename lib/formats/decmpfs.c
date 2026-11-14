@@ -286,7 +286,7 @@ words_open(uint64_t fork_length, uint64_t size, fsimg_decmpfs_read_t fork_read,
 	status = fork_read(context, 0, raw, sizeof(raw), error);
 	if (status != FSIMG_OK)
 		return (status);
-	(void)fsimg_decmpfs_word_decode(raw, sizeof(raw), 0, &table_end);
+	table_end = fsimg_load_le32(raw);
 	count = chunk_count(size);
 	if (table_end < (count + 1) * FSIMG_DECMPFS_WORD_BYTES ||
 	    table_end > fork_length)
@@ -393,8 +393,8 @@ word_locate(const fsimg_decmpfs_table_t *table, uint64_t index,
 	    sizeof(raw), error);
 	if (status != FSIMG_OK)
 		return (status);
-	(void)fsimg_decmpfs_word_decode(raw, sizeof(raw), 0, &start_word);
-	(void)fsimg_decmpfs_word_decode(raw, sizeof(raw), 1, &end_word);
+	start_word = fsimg_load_le32(raw);
+	end_word = fsimg_load_le32(raw + FSIMG_DECMPFS_WORD_BYTES);
 	if (end_word < start_word)
 		return (corrupt(error, "decmpfs chunks overlap"));
 	start = table->chunk_base + start_word;
