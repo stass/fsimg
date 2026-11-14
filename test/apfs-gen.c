@@ -1315,3 +1315,22 @@ apfs_gen_file_info_key_build(unsigned char *raw, size_t length,
 	put_le(raw + 8, lba | (uint64_t)type << 56, 8);
 	return (true);
 }
+
+/* Bit-at-a-time CRC-32C over little-endian Unicode scalar values. Callers
+ * supply the comparison form explicitly; this does no Unicode conversion.
+ */
+uint32_t
+apfs_gen_name_hash(const uint32_t *scalars, size_t count)
+{
+	uint32_t crc = UINT32_MAX;
+
+	for (size_t i = 0; i < count; i++) {
+		for (unsigned byte = 0; byte < 4; byte++) {
+			crc ^= (scalars[i] >> (8 * byte)) & 255;
+			for (unsigned bit = 0; bit < 8; bit++)
+				crc = (crc >> 1) ^ ((crc & 1) ?
+				    UINT32_C(0x82f63b78) : 0);
+		}
+	}
+	return (crc & UINT32_C(0x3fffff));
+}

@@ -96,7 +96,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/apfs/unicode.c lib/formats/apfs/unicode-tables.h \
 	lib/formats/apfs/write-apfs.h lib/formats/apfs/write-btree.c \
 	lib/formats/apfs/descriptor.c lib/formats/apfs/volume.c \
-	lib/formats/apfs/read.c \
+	lib/formats/apfs/read.c lib/formats/apfs/inode.c \
+	lib/formats/apfs/directory.c \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
@@ -201,7 +202,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-erofs test-erofs-verify test-erofs-faults test-erofs-fixtures \
 	test-erofs-write \
 	test-lzfse test-decmpfs test-hfsplus-codec test-hfsplus \
-	test-apfs-codec test-apfs test-apfs-write-btree test-apfs-spaceman \
+	test-apfs-codec test-apfs test-apfs-list test-apfs-write-btree test-apfs-spaceman \
 	test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-apfs-unicode \
@@ -348,6 +349,10 @@ test_apfs_codec_SOURCES = test/apfs-codec.c test/apfs-gen.c test/apfs-gen.h \
 test_apfs_codec_LDADD = libfsimg.la
 test_apfs_SOURCES = test/apfs.c test/apfs-gen.c test/apfs-gen.h test/test.h
 test_apfs_LDADD = libfsimg.la
+test_apfs_list_SOURCES = test/apfs-list.c test/apfs-gen.c test/apfs-gen.h test/test.h
+test_apfs_list_LDADD = libfsimg.la
+test_apfs_list_CPPFLAGS = $(AM_CPPFLAGS) \
+	-DAPFS_NAME_HASHES='"$(abs_top_srcdir)/test/fixtures/apfs/name-hashes.txt"'
 test_apfs_write_btree_SOURCES = test/apfs-write-btree.c test/test.h
 test_apfs_write_btree_LDADD = libfsimg.la
 test_apfs_spaceman_SOURCES = test/apfs-spaceman.c test/apfs-gen.c \
@@ -577,6 +582,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/containers_test.rb \
 	test/cli/apm_test.rb \
 	test/cli/apfs_info_test.rb \
+	test/cli/apfs_listing_native_test.rb \
 	test/cli/coordinator_worker_test.rb \
 	test/cli/create_operands_test.rb \
 	test/cli/examples_test.rb \

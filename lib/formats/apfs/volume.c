@@ -36,6 +36,7 @@ static fsimg_status_t	fs_check(const apfs_fs_t *, uint32_t, size_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	name_check(const unsigned char *, size_t *,
 			    fsimg_error_t *);
+static void		names_setup(apfs_reader_t *);
 static fsimg_status_t	selection_invalid(fsimg_error_t *, const char *);
 static fsimg_status_t	volume_choose(const apfs_nx_t *,
 			    const fsimg_read_options_t *, uint32_t *, uint32_t *,
@@ -261,13 +262,49 @@ apfs_volume_open(fsimg_reader_t *reader, apfs_reader_t *apfs,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
-	return (apfs_map_open(container, APFS_MAP_VOLUME, apfs->fs.omap_oid,
-	    apfs->read_xid, window, &apfs->volume_map, error));
+	status = apfs_map_open(container, APFS_MAP_VOLUME, apfs->fs.omap_oid,
+	    apfs->read_xid, window, &apfs->volume_map, error);
+	if (status != FSIMG_OK)
+		return (status);
+	names_setup(apfs);
+	apfs_cursor_init(&apfs->lookup, container,
+	    apfs_fs_tree_profile(apfs->hashed), APFS_OBJ_VIRTUAL,
+	    apfs->fs.root_tree_oid, apfs->read_xid, &apfs->volume_map);
+	apfs_cursor_init(&apfs->scan, container,
+	    apfs_fs_tree_profile(apfs->hashed), APFS_OBJ_VIRTUAL,
+	    apfs->fs.root_tree_oid, apfs->read_xid, &apfs->volume_map);
+	return (FSIMG_OK);
+}
+
+/*
+ * The volume's name rule and key variant ("Directory records and names"):
+ * a case-insensitive or normalization-insensitive volume hashes its
+ * directory-record keys, and the least ordinary inode number, which the
+ * volume-group inode space raises in a System volume.
+ */
+static void
+names_setup(apfs_reader_t *apfs)
+{
+	const apfs_fs_t *fs = &apfs->fs;
+
+	if ((fs->incompat_features & APFS_FS_INCOMPAT_CASE_INSENSITIVE) != 0)
+		apfs->rule = APFS_NAMES_CASELESS;
+	else if ((fs->incompat_features &
+	    APFS_FS_INCOMPAT_NORM_INSENSITIVE) != 0)
+		apfs->rule = APFS_NAMES_NFD;
+	else
+		apfs->rule = APFS_NAMES_BYTES;
+	apfs->hashed = apfs->rule != APFS_NAMES_BYTES;
+	apfs->inode_min = (fs->features & APFS_FS_FEATURE_VOLGRP_INODES) != 0 &&
+	    fs->role == APFS_FS_ROLE_SYSTEM ? APFS_INO_VOLGRP_FIRST :
+	    APFS_INO_FIRST;
 }
 
 void
 apfs_volume_close(apfs_reader_t *apfs)
 {
+	apfs_cursor_free(&apfs->scan);
+	apfs_cursor_free(&apfs->lookup);
 	apfs_map_close(&apfs->volume_map);
 	apfs_map_close(&apfs->container_map);
 	apfs_container_close(&apfs->container);

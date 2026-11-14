@@ -1248,9 +1248,10 @@ nanoseconds (E3, E14: `apfs-newfs-67108864-e14-ci`), so reader and
 Attributes are absent. BSD flags, the
 protection class and the remaining fields have no common representation and
 are not reported; the `UF_COMPRESSED` flag `0x20` selects
-[compression](#transparent-compression), and a file with the dataless flag
+[compression](#transparent-compression), and an inode with the dataless flag
 `SF_DATALESS` `0x40000000`, whose content is not on the volume, is
-unsupported.
+unsupported, on every kind, since a dataless directory would otherwise list
+as empty.
 
 ### Extended fields
 

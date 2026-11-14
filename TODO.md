@@ -68,9 +68,14 @@
   Whether an object-map value flag `0x10` (crypto
   generation) is accepted like the map flag or refused as corrupt, as the
   format design's value rule says, waits on E1's volume records. The volume object map's snapshot fields
-  are not yet compared with the volume's snapshot tree, which the snapshot stage reads. Until directory
-  reading lands, `x --salvage` on an APFS volume reports its root as a lost
-  directory, since the reader's refusal of `prepare` is judged as damage.
+  are not yet compared with the volume's snapshot tree, which the snapshot stage reads. Directories list,
+  but file content does not read yet: `resolve` refuses, so extraction of a
+  nonempty file fails and `x --salvage` reports each one as damaged, and a
+  compressed file whose `com.apple.decmpfs` header is held in a stream is
+  listed with the inode's uncompressed size, the header unread, and refused
+  when its resource fork holds bytes or the inode carries no size. Listing admits
+  every compression type the shared table knows; the content stage refuses
+  the types the format design marks unsupported.
   The specification harness's container model (`test/spec/lib/fsimg_spec/apfs/`)
   is judged on native captures only: `apfs.sm.address_blocks_unmeasured` has
   no witness until a builder renders a container of another block size, and

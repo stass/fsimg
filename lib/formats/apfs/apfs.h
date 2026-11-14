@@ -1113,33 +1113,6 @@ fsimg_status_t	apfs_nx_features(const apfs_nx_t *, const char *,
 		    fsimg_error_t *);
 
 /*
- * The reader's state (read.c). apfs_volume_open(reader, apfs, window, error)
- * (volume.c), given an opened container, reads the space manager's free
- * count, opens the container object map, selects the volume the read
- * options name, validates its superblock and opens its object map, all at
- * the read XID, reading through window, at least B bytes; on failure the
- * caller closes the state with
- * apfs_volume_close(), which also accepts a zeroed state.
- */
-typedef struct apfs_reader {
-	apfs_container_t container;
-	apfs_map_t	 container_map;
-	apfs_map_t	 volume_map;
-	apfs_fs_t	 fs;		/* the selected volume's superblock */
-	uint64_t	 read_xid;
-	uint64_t	 free_blocks;	/* the space manager's main device */
-	uint32_t	 volume_index;
-	uint32_t	 volume_count;	/* nonzero slots of the array */
-	size_t		 label_bytes;	/* the name without its terminator */
-} apfs_reader_t;
-
-extern const fsimg_reader_ops_t fsimg_apfs_reader_ops;
-
-fsimg_status_t	apfs_volume_open(fsimg_reader_t *, apfs_reader_t *,
-		    unsigned char *, fsimg_error_t *);
-void		apfs_volume_close(apfs_reader_t *);
-
-/*
  * Names (unicode.c; specs/design-apfs.md, "Directory records and names").
  * A name is the stored bytes without the NUL. The reader accepts
  * APFS_NAME_MAX_BYTES UTF-8 bytes, the most a hashed key's 10-bit length
@@ -1607,5 +1580,168 @@ bool	apfs_file_info_val_decode(const unsigned char *, size_t,
 	    apfs_file_info_val_t *);
 bool	apfs_file_info_val_encode(unsigned char *, size_t,
 	    const apfs_file_info_val_t *);
+
+/*
+ * Inodes (specs/design-apfs.md, "Inodes"). Inode 1 is the root's parent, 2
+ * the root and 3 the private directory; numbers below 16 are reserved, and
+ * in a System volume with the volume-group inode space ordinary inodes
+ * start at APFS_INO_VOLGRP_FIRST.
+ */
+#define APFS_INO_ROOT_PARENT		1u
+#define APFS_INO_ROOT			2u
+#define APFS_INO_FIRST			16u
+#define APFS_INO_VOLGRP_FIRST		UINT64_C(0x0800000000000000)
+#define APFS_FS_FEATURE_VOLGRP_INODES	0x10u	/* optional feature */
+#define APFS_FS_ROLE_SYSTEM		0x1u
+
+/* The internal flags of [A1]'s valid mask, the closed table; 0x20 is not. */
+#define APFS_INODE_FLAGS_VALID		UINT64_C(0x7fffdf)
+#define APFS_INODE_HAS_UNCOMPRESSED_SIZE UINT64_C(0x40000)
+
+#define APFS_BSD_COMPRESSED		0x00000020u	/* UF_COMPRESSED */
+#define APFS_BSD_DATALESS		0x40000000u	/* SF_DATALESS */
+
+#define APFS_MODE_TYPE_MASK		0170000u
+#define APFS_MODE_FIFO			0010000u
+#define APFS_MODE_CHAR			0020000u
+#define APFS_MODE_DIRECTORY		0040000u
+#define APFS_MODE_BLOCK			0060000u
+#define APFS_MODE_FILE			0100000u
+#define APFS_MODE_SYMLINK		0120000u
+#define APFS_MODE_SOCKET		0140000u
+
+/* Directory-record types: the mode type shifted right by 12. */
+#define APFS_DT_FIFO			1u
+#define APFS_DT_CHAR			2u
+#define APFS_DT_DIRECTORY		4u
+#define APFS_DT_BLOCK			6u
+#define APFS_DT_FILE			8u
+#define APFS_DT_SYMLINK			10u
+#define APFS_DT_SOCKET			12u
+
+/* The names of the attributes the driver consumes ("Extended attributes"). */
+#define APFS_XATTR_SYMLINK		"com.apple.fs.symlink"
+#define APFS_XATTR_DECMPFS		"com.apple.decmpfs"
+#define APFS_XATTR_RESOURCE_FORK	"com.apple.ResourceFork"
+/* Flag 0x10, undefined by [A1], which native stream attributes carry. */
+#define APFS_XATTR_FLAG_UNDEFINED	0x0010u
+#define APFS_XATTR_FLAGS_KNOWN		(APFS_XATTR_DATA_STREAM | \
+	APFS_XATTR_DATA_EMBEDDED | APFS_XATTR_FS_OWNED | \
+	APFS_XATTR_FLAG_UNDEFINED)
+#define APFS_XATTR_INLINE_MAX		3804u
+/* A symbolic link's target, without its NUL (E14). */
+#define APFS_LINK_TARGET_MAX		1023u
+
+/*
+ * One directory record as prepare admits it: the child inode, the record's
+ * type, the sibling ID or zero, and the directory holding the record, which
+ * replay needs for the parent rule after preparation has moved on.
+ */
+typedef struct apfs_child {
+	uint64_t	inode;
+	uint64_t	sibling_id;
+	uint64_t	parent;
+	uint8_t		type;
+} apfs_child_t;
+
+/*
+ * What the reader knows of the current entry once replay made it current:
+ * enough for prepare to enter a directory and, later, for content to find
+ * a file's storage.
+ */
+typedef struct apfs_current {
+	uint64_t	inode;
+	uint64_t	private_id;	/* owner of the file extents */
+	fsimg_entry_kind_t kind;
+	bool		compressed;
+} apfs_current_t;
+
+/*
+ * The reader's state (read.c). apfs_volume_open(reader, apfs, window, error)
+ * (volume.c), given an opened container, reads the space manager's free
+ * count, opens the container object map, selects the volume the read
+ * options name, validates its superblock and opens its object map, all at
+ * the read XID, reading through window, at least B bytes, and sets up the
+ * volume's name rule and its filesystem-tree cursors, whose windows are
+ * charged when first used; on failure the caller closes the state with
+ * apfs_volume_close(), which also accepts a zeroed state.
+ *
+ * lookup serves inode and attribute lookups, scan a directory's records.
+ * form is the one comparison-form buffer, too large for the stack, that
+ * preparation, replay and key derivation use in turn: a form in it is valid
+ * only within the function that derived it, since the next driver callback,
+ * keys among them, overwrites it.
+ */
+typedef struct apfs_reader {
+	apfs_container_t container;
+	apfs_map_t	 container_map;
+	apfs_map_t	 volume_map;
+	apfs_cursor_t	 lookup;
+	apfs_cursor_t	 scan;
+	apfs_fs_t	 fs;		/* the selected volume's superblock */
+	apfs_current_t	 current;
+	apfs_name_form_t form;
+	apfs_name_rule_t rule;
+	uint64_t	 read_xid;
+	uint64_t	 free_blocks;	/* the space manager's main device */
+	uint64_t	 inode_min;	/* the least ordinary inode number */
+	uint32_t	 volume_index;
+	uint32_t	 volume_count;	/* nonzero slots of the array */
+	size_t		 label_bytes;	/* the name without its terminator */
+	bool		 hashed;	/* directory records use hashed keys */
+} apfs_reader_t;
+
+extern const fsimg_reader_ops_t fsimg_apfs_reader_ops;
+
+fsimg_status_t	apfs_volume_open(fsimg_reader_t *, apfs_reader_t *,
+		    unsigned char *, fsimg_error_t *);
+void		apfs_volume_close(apfs_reader_t *);
+
+/*
+ * Entries (inode.c; specs/design-apfs-driver.md, "Directories").
+ * apfs_type_kind(type, kind) maps a directory-record type of the format
+ * design's table to its entry kind, false for any other type.
+ *
+ * apfs_inode_get(apfs, child, name, inode, error) looks child's inode up
+ * through the lookup cursor and validates it against its directory record:
+ * the inode record, its mode type against the record's type, its flags and
+ * extended fields, and for a directory the parent rule and, when name is
+ * not NULL, that its name field is name. It leaves the cursor on the inode
+ * record. Every member of inode is owned: the extended fields are read into
+ * it, and inode->val.xfields is left empty.
+ *
+ * apfs_entry_load(reader, child, name, error) makes the child the current
+ * entry: apfs_inode_get(), then reader->entry and its metadata, then the
+ * attribute records after the inode, which give a symbolic link's target,
+ * a compressed file's size and the extra-data mark. It sets apfs->current;
+ * for a file it sets the entry's size and reader->initialized, and for a
+ * symbolic link fsimg_reader_set_link_target() sets both to the target's
+ * length.
+ */
+typedef struct apfs_inode {
+	apfs_inode_val_t val;
+	uint64_t	 size;		/* the data stream's, zero without one */
+	uint32_t	 rdev;		/* bits 24-31 major, 0-23 minor */
+	fsimg_entry_kind_t kind;
+	bool		 has_dstream;
+	bool		 has_rdev;
+} apfs_inode_t;
+
+bool		apfs_type_kind(uint8_t, fsimg_entry_kind_t *);
+fsimg_status_t	apfs_inode_get(apfs_reader_t *, const apfs_child_t *,
+		    const char *, apfs_inode_t *, fsimg_error_t *);
+fsimg_status_t	apfs_entry_load(fsimg_reader_t *, const apfs_child_t *,
+		    const char *, fsimg_error_t *);
+
+/* Directory operations (directory.c), wired into fsimg_apfs_reader_ops. */
+fsimg_status_t	apfs_prepare(fsimg_reader_t *, fsimg_directory_build_t *,
+		    fsimg_error_t *);
+fsimg_status_t	apfs_replay(fsimg_reader_t *, const char *,
+		    const unsigned char *, size_t, fsimg_error_t *);
+fsimg_status_t	apfs_keys(fsimg_reader_t *, const char *,
+		    const unsigned char *, size_t, fsimg_directory_keys_t *,
+		    fsimg_error_t *);
+fsimg_status_t	apfs_key(fsimg_reader_t *, const char *, unsigned char *,
+		    size_t *, fsimg_error_t *);
 
 #endif /* !FSIMG_APFS_H */

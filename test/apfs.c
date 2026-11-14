@@ -754,8 +754,9 @@ test_full_open_information_and_prepare(void)
 				    details[i].value,
 				    details[i].name);
 			}
-			status_is(&f, fsimg_apfs_reader_ops.prepare(&f.reader,
-			    NULL, &f.error), FSIMG_EUNSUPPORTED);
+			expect(fsimg_apfs_reader_ops.prepare != NULL &&
+			    fsimg_apfs_reader_ops.replay != NULL,
+			    "directory listing operations are wired");
 		}
 		fixture_close(&f);
 	}

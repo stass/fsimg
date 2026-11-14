@@ -494,8 +494,11 @@ and hash, a mismatch on a name holding a code point unassigned in Unicode
 17.0.0 or a noncharacter being `FSIMG_EUNSUPPORTED` and any other
 `FSIMG_ECORRUPT`, and the value: the child inode at least 16 (or in the volume-group
 space) and a type in the format design's table. It admits the child with a
-17-byte payload: the child inode (u64), the record type (u8) and the sibling
-ID or zero (u64), little-endian. Admission charges the entry; the walker's
+25-byte payload: the child inode (u64), the record type (u8), the sibling
+ID or zero (u64) and the directory holding the record (u64), little-endian;
+replay needs the last for the parent rule, since the walker may prepare
+other directories between a directory's preparation and its children's
+replays. Admission charges the entry; the walker's
 key sort then rejects equivalent names. A record `prepare` refuses fails the
 directory, and the refusal names the child with
 `fsimg_directory_name_child()`, so the error's path is the child's and no

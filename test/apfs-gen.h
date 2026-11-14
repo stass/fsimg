@@ -612,4 +612,7 @@ bool	apfs_gen_extent_key_build(unsigned char *, size_t, uint64_t, uint64_t);
 bool	apfs_gen_file_info_key_build(unsigned char *, size_t, uint64_t,
     uint64_t, uint8_t);
 
+/* CRC-32C of explicitly supplied comparison-form scalars, low 22 bits. */
+uint32_t apfs_gen_name_hash(const uint32_t *, size_t);
+
 #endif /* !FSIMG_TEST_APFS_GEN_H */
