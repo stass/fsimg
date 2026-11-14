@@ -142,16 +142,6 @@
   chunk-information blocks, node free space and unused ring slots are not
   checked zero. The I/O sink's `REQUIRE` jumps out of `fsimg_writer_emit`
   and leaks the writer.
-* [Medium] **APFS writer contract-suite profile** (`test/driver-contracts.c`,
-  `specs/design-driver-contract-tests.md`): the writer cannot join the
-  contract suite while the APFS reader refuses regular-file content
-  (`lib/formats/apfs/read.c`), because the writer scenarios read the image
-  back and the reader scenarios a read bit schedules need content. A
-  profile through `fsimg_apfs_write_format` (an optional descriptor pointer,
-  reconciled against that descriptor's operations and excluded from
-  registry coverage) passes ten of the 22 scenarios its bits
-  schedule and fails the rest with "APFS file content is not readable". Add it once content reads,
-  or decide how a writer on a volume-information reader is profiled.
 * [Low] **APFS writer large-container paths** (`lib/formats/apfs/write-emit.c`,
   `test/apfs-write.c`): the tests' largest container is 256 MiB, one
   chunk-information block, one pool-bitmap block and a one-block space

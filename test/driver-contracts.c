@@ -18,6 +18,7 @@
 #include "apfs-gen.h"
 #include "contract.h"
 #include "erofs-contract.h"
+#include "format.h"
 #include "hfsplus-gen.h"
 #include "host.h"
 #include "internal.h"
@@ -140,6 +141,8 @@ typedef struct contract_fs_profile {
 	const char	*id;
 	const char	*format;
 	bool		 coverage_profile;
+	/* An additional writer descriptor shares the named public reader. */
+	const fsimg_format_t *descriptor;
 	unsigned	 expected_capabilities;
 	contract_write_setup_t write;
 	/* Entries the format itself adds to every image. */
@@ -324,6 +327,37 @@ static const contract_metadata_case_t erofs_metadata[] = {
 	OMITTED_CASES(FSIMG_META_ATTRIBUTES),
 };
 
+/* APFS stores all four UTC times to the nanosecond, full-width POSIX
+ * owners and permission bits, symbolic links and FIFOs. The writer stores
+ * no DOS attributes. These expectations are literal format facts.
+ */
+static const contract_metadata_case_t apfs_metadata[] = {
+	QNX_EXACT_CASE,
+	{ .id = "four-nanosecond-times", .kind = FSIMG_ENTRY_FILE,
+	    .source = { .valid = FSIMG_META_CREATED | FSIMG_META_MODIFIED |
+	    FSIMG_META_ACCESSED | FSIMG_META_CHANGED,
+	    .created = TIME(Y2K, 123456789, FSIMG_TIME_UTC, 0),
+	    .modified = TIME(Y2K + 1, 234567891, FSIMG_TIME_UTC, 0),
+	    .accessed = TIME(Y2K + 2, 345678912, FSIMG_TIME_UTC, 0),
+	    .changed = TIME(Y2K + 3, 456789123, FSIMG_TIME_UTC, 0) },
+	    .plan_status = FSIMG_OK,
+	    .checked = FSIMG_META_CREATED | FSIMG_META_MODIFIED |
+	    FSIMG_META_ACCESSED | FSIMG_META_CHANGED,
+	    .stored = {
+	    .created = TIME(Y2K, 123456789, FSIMG_TIME_UTC, 0),
+	    .modified = TIME(Y2K + 1, 234567891, FSIMG_TIME_UTC, 0),
+	    .accessed = TIME(Y2K + 2, 345678912, FSIMG_TIME_UTC, 0),
+	    .changed = TIME(Y2K + 3, 456789123, FSIMG_TIME_UTC, 0) } },
+	{ .id = "wide-owner-and-mode", .kind = FSIMG_ENTRY_FILE,
+	    .source = { .valid = FSIMG_META_OWNER | FSIMG_META_MODE,
+	    .uid = 70000, .gid = 70001, .mode = 0640 },
+	    .plan_status = FSIMG_OK,
+	    .checked = FSIMG_META_OWNER | FSIMG_META_MODE,
+	    .stored = { .uid = 70000, .gid = 70001, .mode = 0640 } },
+	QNX_KIND_CASES,
+	OMITTED_CASES(FSIMG_META_ATTRIBUTES),
+};
+
 static const contract_metadata_case_t qnx4_metadata[] = {
 	QNX_EXACT_CASE,
 	QNX_FRACTION_CASE,
@@ -477,6 +511,13 @@ static const contract_fs_profile_t fs_profiles[] = {
 	    .write = { .flags = WRITE_FLAGS },
 	    .metadata_cases = ifs_metadata,
 	    .metadata_case_count = COUNT(ifs_metadata),
+	    .max_fixture_bytes = 8 * MIB },
+	{ .id = "apfs-writer", .format = "apfs",
+	    .descriptor = &fsimg_apfs_write_format,
+	    .expected_capabilities = ALL_CAPABILITIES,
+	    .write = { .flags = WRITE_FLAGS, .volume_uuid = { 1 } },
+	    .metadata_cases = apfs_metadata,
+	    .metadata_case_count = COUNT(apfs_metadata),
 	    .max_fixture_bytes = 8 * MIB },
 };
 
@@ -1071,8 +1112,14 @@ writer_collect(fixture_t *fixture, const contract_metadata_case_t *test,
 			options.flags &= ~FSIMG_WRITE_ALLOW_LOSS;
 	}
 	fixture->metadata = test;
-	status = fsimg_writer_new(fixture->ctx, fixture->profile->format,
-	    &options, &fixture->writer, error);
+	if (fixture->profile->descriptor != NULL)
+		status = fsimg_writer_new_variant(fixture->ctx,
+		    fixture->profile->descriptor,
+		    &fixture->profile->descriptor->variants[0], &options,
+		    &fixture->writer, error);
+	else
+		status = fsimg_writer_new(fixture->ctx, fixture->profile->format,
+		    &options, &fixture->writer, error);
 	if (status != FSIMG_OK)
 		return (status);
 	fsimg_source_ops_init(&source_ops);
@@ -3042,11 +3089,14 @@ reader_extraction(const contract_fs_profile_t *profile)
 }
 
 /*
- * Registry reconciliation, in both directions, before any fixture runs:
- * every advertised variant has exactly one coverage profile or declaration
- * for volume information only, with matching capabilities; every profile
- * names an advertised variant and has a unique ID; and every profile carries
- * the facts its capabilities oblige.
+ * Registry reconciliation before any fixture runs: every advertised variant
+ * has exactly one coverage profile; every profile names an advertised variant
+ * and has a unique ID. A descriptor profile names its descriptor's one variant
+ * and shares the registered reader, and any registered writer is the
+ * descriptor's. Each declared mask
+ * equals the advertised mask or the descriptor's operations, which include
+ * every advertised bit.
+ * Profiles also carry the fixture facts their capabilities oblige.
  */
 static void
 check_registry(void)
@@ -3065,8 +3115,12 @@ check_registry(void)
 		for (size_t i = 0; i < COUNT(fs_profiles); i++) {
 			if (strcmp(fs_profiles[i].format, info.name) != 0)
 				continue;
-			CONTRACT_CHECK(fs_profiles[i].expected_capabilities ==
-			    info.capabilities);
+			if (fs_profiles[i].descriptor == NULL)
+				CONTRACT_CHECK(fs_profiles[i].expected_capabilities ==
+				    info.capabilities);
+			else
+				CONTRACT_CHECK((fs_profiles[i].expected_capabilities &
+				    info.capabilities) == info.capabilities);
 			coverage += fs_profiles[i].coverage_profile;
 		}
 		if (coverage != 1)
@@ -3104,6 +3158,32 @@ check_registry(void)
 			fprintf(stderr, "profile %s names unadvertised %s\n",
 			    profile->id, profile->format);
 		CONTRACT_CHECK(found);
+		if (profile->descriptor != NULL) {
+			const fsimg_format_t *descriptor = profile->descriptor;
+			const fsimg_format_t *registered;
+			const fsimg_format_variant_t *variant;
+			unsigned capabilities = 0;
+
+			registered = fsimg_format_find(profile->format, &variant);
+			/* Reader scenarios open the public name. Prove that this
+			 * reaches the additional descriptor's reader operations.
+			 */
+			CONTRACT_CHECK(registered != NULL &&
+			    registered->reader == descriptor->reader);
+			CONTRACT_CHECK(registered->writer == NULL ||
+			    registered->writer == descriptor->writer);
+			CONTRACT_CHECK(descriptor->variant_count == 1 &&
+			    strcmp(descriptor->variants[0].info.name,
+			    profile->format) == 0);
+			if (descriptor->reader != NULL) {
+				capabilities |= FSIMG_CAP_READ;
+				if (descriptor->reader->verify != NULL)
+					capabilities |= FSIMG_CAP_VERIFY;
+			}
+			if (descriptor->writer != NULL)
+				capabilities |= FSIMG_CAP_WRITE;
+			CONTRACT_CHECK(capabilities == profile->expected_capabilities);
+		}
 		CONTRACT_CHECK(profile->max_fixture_bytes != 0);
 		if ((profile->expected_capabilities & FSIMG_CAP_WRITE) != 0)
 			CONTRACT_CHECK(profile->metadata_case_count != 0);
