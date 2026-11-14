@@ -14,7 +14,7 @@ class CliTest < Minitest::Test
       assert_xz_corrupt(image: "damaged.xz")
     else
       result = invoke(arguments: arguments, expected: 1)
-      assert_includes(result.stderr, 'writing this compression is not supported "xz"'.b)
+      assert_includes(result.stderr, 'xz: writing this compression is not supported'.b)
       refute_path_exists(@root / "out.img.XZ")
     end
   end
@@ -100,7 +100,7 @@ class CliTest < Minitest::Test
     if xz_supported?
       assert_includes(result.stdout, "liblzma".b)
     else
-      assert_includes(result.stderr, 'writing this compression is not supported "xz"'.b)
+      assert_includes(result.stderr, 'xz: writing this compression is not supported'.b)
     end
     refute_path_exists(@root / "planned.xz")
   end
@@ -111,7 +111,7 @@ class CliTest < Minitest::Test
       result = invoke(arguments: ["c", "-a", "-f", "bad.xz", "-F", "fat12",
         "-o", entry.fetch(:setting), "source"], expected: supported ? entry.fetch(:status) : 1)
 
-      detail = supported ? entry.fetch(:setting).split("=").first : 'writing this compression is not supported "xz"'
+      detail = supported ? entry.fetch(:setting).split("=").first : 'xz: writing this compression is not supported'
       assert_includes(result.stderr, detail.b)
       refute_path_exists(@root / "bad.xz")
     end

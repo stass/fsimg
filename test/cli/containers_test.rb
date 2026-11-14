@@ -3,6 +3,40 @@
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
 class CliTest < Minitest::Test
+  def test_dmg_content_failure_preserves_layer_and_entry_path
+    (@root / "thefile").binwrite("f".b * (700 * 1024))
+    invoke(arguments: ["c", "-f", "content.img", "-F", "fat12", "-s", "1M", "thefile"])
+    disk = (@root / "content.img").binread
+    payload = (@root / "thefile").binread
+    offset = disk.index(payload)
+    refute_nil(offset, "the file's data must be present in the FAT image")
+    assert_equal(0, offset % 512)
+    sector = offset / 512 + 1024
+    image = dmg_image(disk: disk, regions: [[0, sector], [sector, 1],
+      [sector + 1, disk.bytesize / 512 - sector - 1]])
+    (@root / "content.dmg").binwrite(image)
+    %w[clean human json].each { (@root / _1).mkdir }
+    invoke(arguments: ["x", "-f", "content.dmg", "-C", "clean"])
+    assert_equal(payload, (@root / "clean/content/thefile").binread)
+
+    # The middle table holds one data-only sector, beyond probe prefixes.
+    table = image.scan(/<data>(.*?)<\/data>/m)[1].first.unpack1("m0")
+    stream_offset = table.byteslice(204 + 24, 8).unpack1("Q>")
+    assert_equal("x\xda".b, image.byteslice(stream_offset, 2))
+    image.setbyte(stream_offset, 0)
+    (@root / "damaged.dmg").binwrite(image)
+    assert_includes(listing(image: "damaged.dmg"), '"/thefile"')
+
+    human = invoke(arguments: ["x", "-f", "damaged.dmg", "-C", "human"], expected: 1)
+    assert_includes(human.stderr, "dmg: ".b)
+    assert_includes(human.stderr, '"/thefile"'.b)
+    json = invoke(arguments: ["x", "--json", "-f", "damaged.dmg", "-C", "json"], expected: 1)
+    error = json.stdout.lines.map { JSON.parse(_1) }.find { _1["type"] == "error" }
+    refute_nil(error, json.stdout)
+    assert_equal("dmg", error.fetch("layer"))
+    assert_equal("/thefile", error.fetch("path"))
+  end
+
   def test_containers_decode_verify_and_detect_corruption
     partition_fixtures
     root = @root

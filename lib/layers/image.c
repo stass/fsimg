@@ -988,17 +988,18 @@ identify_container(fsimg_image_t *image, const fsimg_layer_t *forced,
 }
 
 /*
- * A layer's own failure names the layer in error.path, so a caller can
- * attribute it, as cW does, without parsing the message. Failures of the
- * image object itself, a limit or an I/O error keep their own path.
+ * A layer's own failure names the layer in error.layer, so a caller can
+ * attribute it, as cW does, without parsing the message. A failure of
+ * another operation, such as a limit or an I/O error, is not the layer's
+ * own and is named here by no layer.
  */
 static fsimg_status_t
 layer_failed(const fsimg_layer_t *layer, fsimg_status_t status,
     fsimg_error_t *error)
 {
 	if (status != FSIMG_OK && layer != NULL && error != NULL &&
-	    error->operation == FSIMG_OP_IMAGE && error->path[0] == '\0')
-		snprintf(error->path, sizeof(error->path), "%s", layer->name);
+	    error->operation == FSIMG_OP_IMAGE)
+		fsimg_error_layer(error, layer->name);
 	return (status);
 }
 

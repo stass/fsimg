@@ -280,6 +280,23 @@ fsimg_error_path(fsimg_error_t *error, const char *path)
 	    sizeof(error->path));
 }
 
+/*
+ * Every name a caller passes comes from a registry record, never from a
+ * caller's text: a layer's name, sized by fsimg_layer_t to fit, a format's,
+ * which fsimg_format_info_t bounds the same way, or a codec's name, a
+ * short literal such as "zlib".
+ */
+_Static_assert(sizeof(((fsimg_error_t *)0)->layer) ==
+    sizeof(((fsimg_format_info_t *)0)->name),
+    "a format name fits the error's layer field");
+
+void
+fsimg_error_layer(fsimg_error_t *error, const char *name)
+{
+	if (error != NULL && error->layer[0] == '\0')
+		snprintf(error->layer, sizeof(error->layer), "%s", name);
+}
+
 void
 fsimg_error_clear(fsimg_error_t *error)
 {

@@ -194,11 +194,13 @@ test_error_codec(void)
 	fsimg_error_t decoded;
 	unsigned char raw[FSIMG_WIRE_ERROR_BYTES];
 
+	strcpy(error.layer, "dmg");
 	strcpy(error.path, "/file");
 	strcpy(error.message, "corrupt allocation");
 	fsimg_wire_error_encode(raw, &error);
 	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_ECORRUPT);
 	CHECK(strcmp(error.path, decoded.path) == 0);
+	CHECK(strcmp(decoded.layer, "dmg") == 0);
 	CHECK(decoded.output_state == FSIMG_OUTPUT_INCOMPLETE);
 	fsimg_store_le64(raw, 0);
 	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_EIO);
@@ -206,6 +208,31 @@ test_error_codec(void)
 	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_EDURABILITY);
 	memset(raw + 336, 'X', 256);
 	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_EIO);
+}
+
+/* Malformed layer bytes and the shorter error record cannot be accepted
+ * as a valid worker failure. Restoring the record decodes again.
+ */
+static void
+test_error_layer_requires_termination_and_current_frame_length(void)
+{
+	fsimg_error_t error = { .status = FSIMG_ECORRUPT,
+	    .operation = FSIMG_OP_IMAGE };
+	fsimg_error_t decoded;
+	unsigned char raw[FSIMG_WIRE_ERROR_BYTES];
+
+	CHECK(FSIMG_WIRE_ERROR_LAYER == 592);
+	CHECK(FSIMG_WIRE_ERROR_BYTES == 608);
+	strcpy(error.layer, "dmg");
+	fsimg_wire_error_encode(raw, &error);
+	CHECK(fsimg_wire_error_decode(raw, 592, &decoded) == FSIMG_EIO);
+	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_ECORRUPT);
+	memset(raw + FSIMG_WIRE_ERROR_LAYER, 'x', 16);
+	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_EIO);
+	CHECK(strcmp(decoded.message, "invalid worker error fields") == 0);
+	raw[FSIMG_WIRE_ERROR_BYTES - 1] = '\0';
+	CHECK(fsimg_wire_error_decode(raw, sizeof(raw), &decoded) == FSIMG_ECORRUPT);
+	CHECK(strlen(decoded.layer) == 15);
 }
 
 static void
@@ -253,6 +280,9 @@ test_error_padding(void)
 	fsimg_error_t error = { .status = FSIMG_EIO };
 	unsigned char raw[FSIMG_WIRE_ERROR_BYTES];
 
+	memset(error.layer, 0xa5, sizeof(error.layer));
+	strcpy(error.layer, "xz");
+	memset(raw, 0xa5, sizeof(raw));
 	memset(error.path, 0xa5, sizeof(error.path));
 	memset(error.message, 0xa5, sizeof(error.message));
 	strcpy(error.path, "/x");
@@ -260,7 +290,10 @@ test_error_padding(void)
 	fsimg_wire_error_encode(raw, &error);
 	for (unsigned i = 83; i < 336; i++)
 		CHECK(raw[i] == 0);
-	for (unsigned i = 344; i < FSIMG_WIRE_ERROR_BYTES; i++)
+	for (unsigned i = 344; i < FSIMG_WIRE_ERROR_LAYER; i++)
+		CHECK(raw[i] == 0);
+	CHECK(memcmp(raw + FSIMG_WIRE_ERROR_LAYER, "xz\0", 3) == 0);
+	for (unsigned i = FSIMG_WIRE_ERROR_LAYER + 3; i < FSIMG_WIRE_ERROR_BYTES; i++)
 		CHECK(raw[i] == 0);
 }
 
@@ -3154,6 +3187,7 @@ main(int argc, char **argv)
 	test_frame_splits(FSIMG_FRAME_BYTES);
 	test_malformed_frames();
 	test_error_codec();
+	test_error_layer_requires_termination_and_current_frame_length();
 	test_job_label();
 	test_job_stream_flags();
 	test_job_device_input();

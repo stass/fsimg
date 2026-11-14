@@ -917,7 +917,17 @@ operation into success or remove a successfully published output.
 ## Resource and byte-adapter records
 
 The public header defines fixed-size error and statistics records. Errors carry
-operation/resource/output-state enums and bounded 256-byte path/message arrays.
+operation/resource/output-state enums, bounded 256-byte path/message arrays
+and a 16-byte `layer` array. `layer` holds the registered name of the
+layer, codec or filesystem a failure belongs to, empty for none; every
+registered name fits, since a layer's name, a format's name and the
+error's field share one size the build checks. A codec decoding a
+filesystem's data names itself by its codec name, which may equal a
+compression's. `path` names a filesystem path, the failing entry or the
+extraction destination, or the caller's input a refusal concerns, such as
+a setting key or a stack token, even one that spells a layer's name; it
+never attributes a failure to a layer, so an extraction that fails in a
+layer under a file's read names both the file and the layer.
 Every error path is rendered: whichever producer fills it, it passes through
 `fsimg_path_render()`, the
 [common rendering](design-directories.md#omitted-names), as do the
@@ -948,8 +958,10 @@ spool length, its peak and the storage the spool file allocated (its
 `st_blocks`, sampled when the spool is sealed), and `FSIMG_OP_IMAGE` identifies a
 failure in an image's scheme, container or compression layer, or in wrap,
 unwrap or compose; a layer's own failure, on open, verification or a read
-through its chunks, carries the layer's registry name in `error.path`, so
-a caller such as `cW` attributes it without parsing the message. Progress snapshots borrow a phase string for the duration
+through its chunks, carries the layer's registry name in `error.layer`, so
+a caller such as `cW` attributes it without parsing the message. A
+failure that already names a layer keeps it, so an outer layer never
+replaces the name of an inner one that failed first. Progress snapshots borrow a phase string for the duration
 of the synchronous callback. Destructors called from a callback do nothing;
 fallible reentry returns `FSIMG_ESTATE`. This protects the active context without
 introducing deferred destruction or callback-driven lifecycle transitions.

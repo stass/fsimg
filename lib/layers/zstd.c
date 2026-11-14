@@ -213,8 +213,7 @@ static fsimg_status_t
 memory_failed(const fsimg_codec_memory_t *memory, fsimg_error_t *error)
 {
 	fsimg_codec_memory_error(memory, error);
-	if (error->path[0] == '\0')
-		snprintf(error->path, sizeof(error->path), "zstd");
+	fsimg_error_layer(error, "zstd");
 	return (error->status);
 }
 
@@ -759,7 +758,7 @@ zstd_block_decode(fsimg_ctx_t *ctx, const unsigned char *input,
 
 /*
  * A failed block decode, by libzstd's code: memory as the adapter
- * recorded it, named for the library; a parameter or stage error as
+ * recorded it, named for the zstd codec; a parameter or stage error as
  * fsimg's own, since every parameter was checked first; and every other
  * code, a window or dictionary refusal among them, as a damaged cluster,
  * since the record pins what a cluster may need.
@@ -789,15 +788,15 @@ block_failed(const fsimg_codec_memory_t *memory, size_t result,
 	}
 }
 
-/* The adapter's first error, named for the library. */
+/* The adapter's first error, named for the zstd codec a filesystem's
+ * block decode uses. */
 static fsimg_status_t
 block_memory_failed(const fsimg_codec_memory_t *memory, fsimg_error_t *error)
 {
 	fsimg_status_t status;
 
 	status = fsimg_codec_memory_error(memory, error);
-	if (error != NULL && error->path[0] == '\0')
-		snprintf(error->path, sizeof(error->path), "libzstd");
+	fsimg_error_layer(error, "zstd");
 	return (status);
 }
 

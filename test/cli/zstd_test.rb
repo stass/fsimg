@@ -14,7 +14,7 @@ class CliTest < Minitest::Test
       assert_zstd_corrupt(image: "damaged.zst")
     else
       result = invoke(arguments: arguments, expected: 1)
-      assert_includes(result.stderr, 'writing this compression is not supported "zstd"'.b)
+      assert_includes(result.stderr, 'zstd: writing this compression is not supported'.b)
       refute_path_exists(@root / "out.img.ZST")
     end
   end
@@ -109,7 +109,7 @@ class CliTest < Minitest::Test
         "-o", "zstd:level=19", "source"])
       invoke(arguments: ["W", "-f", "level19.zst"])
     else
-      assert_includes(result.stderr, 'writing this compression is not supported "zstd"'.b)
+      assert_includes(result.stderr, 'zstd: writing this compression is not supported'.b)
     end
     refute_path_exists(@root / "planned.zst")
   end
@@ -117,7 +117,7 @@ class CliTest < Minitest::Test
   def test_zstd_level_twenty_is_refused_without_output
     result = invoke(arguments: ["c", "--compress=zstd", "-f", "bad.zst", "-F", "fat12",
       "-o", "zstd:level=20", "source"], expected: 1)
-    detail = zstd_supported? ? "zstd:level" : 'writing this compression is not supported "zstd"'
+    detail = zstd_supported? ? "zstd:level" : 'zstd: writing this compression is not supported'
     assert_includes(result.stderr, detail.b)
     refute_path_exists(@root / "bad.zst")
   end
@@ -125,7 +125,7 @@ class CliTest < Minitest::Test
   def test_zstd_level_zero_is_refused_by_the_settings_catalogue
     result = invoke(arguments: ["c", "--compress=zstd", "-f", "zero.zst", "-F", "fat12",
       "-o", "zstd:level=0", "source"], expected: zstd_supported? ? 2 : 1)
-    detail = zstd_supported? ? "zstd:level" : 'writing this compression is not supported "zstd"'
+    detail = zstd_supported? ? "zstd:level" : 'zstd: writing this compression is not supported'
     assert_includes(result.stderr, detail.b)
     refute_path_exists(@root / "zero.zst")
   end

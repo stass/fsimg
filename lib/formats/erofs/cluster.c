@@ -371,8 +371,7 @@ deflate_decode(fsimg_reader_t *reader, const erofs_cluster_t *cluster,
 		return (FSIMG_OK);
 	case Z_MEM_ERROR:
 		status = fsimg_codec_memory_error(&memory, error);
-		if (error != NULL && error->path[0] == '\0')
-			snprintf(error->path, sizeof(error->path), "zlib");
+		fsimg_error_layer(error, "zlib");
 		return (status);
 	case Z_STREAM_ERROR:
 	case Z_VERSION_ERROR:

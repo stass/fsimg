@@ -1928,9 +1928,9 @@ forces_layer(const fsimg_worker_request_t *request, const char *name)
 /*
  * What to suggest --force for, or NULL: a read other than W without
  * --force failed with FSIMG_EFORMAT, as an absent identity fails. A layer
- * names itself in path, and is suggested when the read forces it by name;
- * a failure from the reader, or from detection, which leaves path empty,
- * suggests the filesystem -F names. The status cannot tell an absent
+ * names itself in error.layer, and is suggested when the read forces it by
+ * name; a failure from the reader, or from detection, which names no
+ * layer, suggests the filesystem -F names. The status cannot tell an absent
  * identity from the few other refusals of a forced name, such as a FAT
  * variant that contradicts the cluster count, which --force then reports
  * unchanged.
@@ -1945,8 +1945,8 @@ force_candidate(const fsimg_cli_display_t *display, const fsimg_error_t *error)
 	    request->kind == FSIMG_JOB_VERIFY ||
 	    (request->flags & FSIMG_JOB_FORCE) != 0)
 		return (NULL);
-	if (error->operation == FSIMG_OP_IMAGE && error->path[0] != '\0')
-		return (forces_layer(request, error->path) ? error->path : NULL);
+	if (error->operation == FSIMG_OP_IMAGE && error->layer[0] != '\0')
+		return (forces_layer(request, error->layer) ? error->layer : NULL);
 	if ((error->operation == FSIMG_OP_READER ||
 	    error->operation == FSIMG_OP_IMAGE) &&
 	    fsimg_job_format(request)[0] != '\0')
@@ -2026,9 +2026,9 @@ output_limit_line(fsimg_cli_display_t *display, const fsimg_error_t *error)
 }
 
 /*
- * The failure's one-line summary: its message, the path it names, the host
- * error, the limit that stopped it and, where one fits, the --force spelling
- * that would read the image anyway.
+ * The failure's one-line summary: the layer it belongs to, its message, the
+ * path it names, the host error, the limit that stopped it and, where one
+ * fits, the --force spelling that would read the image anyway.
  */
 static void
 failure_line(fsimg_cli_display_t *display, const fsimg_error_t *error,
@@ -2037,6 +2037,10 @@ failure_line(fsimg_cli_display_t *display, const fsimg_error_t *error,
 	const char *candidate;
 
 	append(display, "fsimg: ");
+	if (error->layer[0] != '\0') {
+		prose(display, error->layer);
+		append(display, ": ");
+	}
 	prose(display, error->message[0] != '\0' ? error->message :
 	    fsimg_status_string(error->status));
 	if (error->message_truncated)
@@ -2086,6 +2090,8 @@ failure(fsimg_cli_display_t *display)
 		string_value(display, fsimg_status_string(error->status));
 		append(display, ",\"message\":");
 		string_value(display, error->message);
+		append(display, ",\"layer\":");
+		string_value(display, error->layer);
 		append(display, ",\"path\":");
 		rendered_value(display, error->path);
 		append(display, ",\"resource\":\"%s\",\"output_state\":\"%s\",\"os_error\":%d,"
@@ -2119,11 +2125,8 @@ failure(fsimg_cli_display_t *display)
 		usage(display, true);
 		return;
 	}
-	/* A layer reports its own failures as image operations naming the
-	 * layer in path, printed like any other path.
-	 */
-	layer = error->operation == FSIMG_OP_IMAGE ? fsimg_layer_find(error->path) :
-	    NULL;
+	layer = error->operation == FSIMG_OP_IMAGE ?
+	    fsimg_layer_find(error->layer) : NULL;
 	/* -T - creates no spool, so its limit is zero: say why. */
 	if (error->resource == FSIMG_RESOURCE_SPOOL && error->limit == 0 &&
 	    strcmp(display->options->scratch, "-") == 0) {

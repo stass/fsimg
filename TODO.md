@@ -696,18 +696,15 @@
   file settings are gone, and callback sinks proving a bound refusal opens
   and resizes nothing for VHD, DMG and simg.
 
-* [Medium] **An extraction error has one path slot for three names**
-  (`lib/extract/extract.c` `extract_entry`, `report_destination`,
-  `include/fsimg.h`): a failure creating or filling an entry names the
-  entry, any other failure after creation names the destination, and a
-  layer's or codec's failure during a content read keeps the name it set
-  (`lib/layers/chunks.c` the layer, `lib/layers/zstd.c`,
-  `lib/formats/erofs/cluster.c` "zlib"), which
-  [the API design](specs/design-api.md) requires so `cW` attributes a
-  layer failure. A corrupt DMG chunk inside a file's extent therefore fails
-  `x` naming "dmg", and neither the file nor the destination. Carry the
-  entry or the destination in its own error field so each name holds by
-  construction; the choice changes the public error record.
+* [Low] **A codec's allocation failure names a layer only for xz and zstd**
+  (`lib/layers/xz.c`, `lib/layers/zstd.c` `memory_failed`,
+  `lib/layers/gzip.c`, `lib/layers/chunks.c`,
+  `lib/formats/hfsplus/compress.c`): the xz and zstd adapters name
+  themselves in `error.layer` when a memory limit stops them, while the
+  zlib inflaters of gzip, DMG chunks and HFS Plus decmpfs name nothing, so
+  the same limit reports a layer for `.xz` and none for `.gz`. Name it in
+  one place, such as a name bound to the codec memory adapter at
+  `fsimg_codec_memory_init`, instead of in each adapter.
 
 * [Low] **The job record moves ifsboot settings type-blind**
   (`cmd/fsimg/job.c` `ifsboot_fields`): the table copies `uint32_t` and

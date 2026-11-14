@@ -33,7 +33,7 @@
  */
 #define FSIMG_JOB_DESCRIPTOR_TEXT_BYTES 317u
 #define FSIMG_JOB_DESCRIPTOR_DATES 4u
-#define FSIMG_WIRE_ERROR_BYTES 592u
+#define FSIMG_WIRE_ERROR_BYTES 608u
 
 /* Result layouts use byte offsets into explicitly encoded buffers. These
  * definitions are shared by the worker, supervisor, and command formatter.
@@ -50,7 +50,8 @@ typedef enum fsimg_wire_error_field {
 	FSIMG_WIRE_ERROR_FLAGS = 64,
 	FSIMG_WIRE_ERROR_CLEANUP = 72,
 	FSIMG_WIRE_ERROR_PATH = 80,
-	FSIMG_WIRE_ERROR_MESSAGE = 336
+	FSIMG_WIRE_ERROR_MESSAGE = 336,
+	FSIMG_WIRE_ERROR_LAYER = 592
 } fsimg_wire_error_field_t;
 
 #define FSIMG_WIRE_INFO_BYTES 6080u

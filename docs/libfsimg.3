@@ -645,7 +645,10 @@ together.
 A stream has no publication: a failure after its first byte reports
 FSIMG_OUTPUT_INCOMPLETE.
 A failure of a layer, on open, verification or a container read, is
-FSIMG_OP_IMAGE with the layer's name in error.path.
+FSIMG_OP_IMAGE with the layer's name in error.layer, the registered name
+of the layer, codec or filesystem a failure belongs to; error.path never
+attributes a failure to a layer, so a file whose read fails in a layer
+names the file in error.path and the layer in error.layer.
 A container without a writer, such as hbcifs, is refused as
 FSIMG_EUNSUPPORTED naming it.
 .Fn fsimg_image_wrap

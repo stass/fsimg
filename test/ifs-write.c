@@ -1563,10 +1563,10 @@ test_stack_rule(void)
 		const char	*stack;
 		const char	*layers;
 	} refused[] = {
-		{ "ifs/gpt", "ifs/gpt" }, { "ifs/mbr", "ifs/mbr" },
-		{ "ifs/vhd", "ifs/vhd" }, { "ifs/dmg", "ifs/dmg" },
-		{ "ifs/simg", "ifs/simg" }, { "ifs/gpt/vhd", "ifs/gpt" },
-		{ "ifs/-/simg", "ifs/simg" }
+		{ "ifs/gpt", "gpt" }, { "ifs/mbr", "mbr" },
+		{ "ifs/vhd", "vhd" }, { "ifs/dmg", "dmg" },
+		{ "ifs/simg", "simg" }, { "ifs/gpt/vhd", "gpt" },
+		{ "ifs/-/simg", "simg" }
 	};
 	static const spec_t one[] = {
 		{ "/a.txt", FSIMG_ENTRY_FILE, 5, 1, NULL }
@@ -1598,14 +1598,17 @@ test_stack_rule(void)
 		CHECK(fsimg_writer_new(ctx, refused[i].stack, &o, &writer,
 		    &error) == FSIMG_EUNSUPPORTED);
 		CHECK(writer == NULL &&
-		    strcmp(error.path, refused[i].layers) == 0);
+		    strcmp(error.layer, refused[i].layers) == 0);
+		CHECK(error.path[0] == '\0');
+		CHECK(strcmp(error.message, "the ifs filesystem cannot sit in a "
+		    "scheme or a padding container") == 0);
 	}
 	/* A scheme is refused before a container's settings are read. */
 	o = options;
 	gpt.vhd_align_bytes = 3;
 	o.layers = &gpt;
 	CHECK(fsimg_writer_new(ctx, "ifs/gpt/vhd", &o, &writer, &error) ==
-	    FSIMG_EUNSUPPORTED && strcmp(error.path, "ifs/gpt") == 0);
+	    FSIMG_EUNSUPPORTED && strcmp(error.layer, "gpt") == 0);
 	o = options;
 	snprintf(o.compression, sizeof(o.compression), "%s", "gzip");
 	CHECK(fsimg_writer_new(ctx, "ifs", &o, &writer, NULL) == FSIMG_OK);
@@ -1623,7 +1626,7 @@ test_stack_rule(void)
 	sink.io = output;
 	CHECK(fsimg_image_wrap(ctx, input, "ifs/vhd", &options, &sink,
 	    &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strcmp(error.path, "ifs/vhd") == 0 && out.writes == 0);
+	CHECK(strcmp(error.layer, "vhd") == 0 && out.writes == 0);
 	fsimg_io_free(output);
 	fsimg_io_free(input);
 	free(volume.bytes);

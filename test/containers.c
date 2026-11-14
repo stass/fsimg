@@ -974,6 +974,105 @@ test_crc_oracle(void)
 	    (const unsigned char *)"56789", 5) == 0xcbf43926u);
 }
 
+static void
+test_registered_layer_names_fit_error_layer(void)
+{
+	fsimg_error_t error;
+	const fsimg_layer_t *layer;
+
+	for (size_t i = 0; (layer = fsimg_layer_at(i)) != NULL; i++) {
+		CHECK(layer->name[0] != '\0');
+		CHECK(memchr(layer->name, '\0', sizeof(layer->name)) != NULL);
+		CHECK(sizeof(layer->name) == sizeof(error.layer));
+	}
+}
+
+static void
+test_dmg_content_failure_preserves_layer_and_entry_path(void)
+{
+	unsigned char *disk = calloc(2048, SECTOR), *root;
+	dmg_spec_t spec = { .sectors = 2048, .tables = 1 };
+	memory_file_t file;
+	fsimg_selector_t selector = { .kind = FSIMG_SELECT_DISK };
+	fsimg_io_t *volume;
+	fsimg_reader_t *reader;
+	fsimg_error_t error;
+	fixture_t f;
+	int output;
+
+	CHECK(disk != NULL);
+	/* FAT12: one reserved sector, two six-sector FATs, 32 root
+	 * sectors, then cluster 1026 at sector 1069 holding the only file.
+	 */
+	bcopy("\xeb\x3c\x90", disk, 3);
+	put_le16(disk + 11, SECTOR);
+	disk[13] = 1;
+	put_le16(disk + 14, 1);
+	disk[16] = 2;
+	put_le16(disk + 17, 512);
+	put_le16(disk + 19, 2048);
+	disk[21] = 0xf8;
+	put_le16(disk + 22, 6);
+	put_le16(disk + 510, 0xaa55);
+	bcopy("\xf8\xff\xff", disk + SECTOR, 3);
+	disk[SECTOR + 1539] = 0xff;
+	disk[SECTOR + 1540] = 0x0f;
+	bcopy(disk + SECTOR, disk + 7 * SECTOR, 6 * SECTOR);
+	root = disk + 13 * SECTOR;
+	bcopy("THEFILE    ", root, 11);
+	root[11] = 0x20;
+	put_le16(root + 26, 1026);
+	put_le32(root + 28, SECTOR);
+	memset(disk + 1069 * SECTOR, 'f', SECTOR);
+	spec.disk = disk;
+	spec.table[0] = (dmg_table_t){ 0, 2048, 3, {
+		{ RUN_RAW, 0, 1069, 0 },
+		{ RUN_ZLIB, 1069, 1, 0 },
+		{ RUN_RAW, 1070, 978, 0 } } };
+
+	for (unsigned damaged = 0; damaged < 2; damaged++) {
+		file = dmg_encode(&spec);
+		/* Only the file's data stream is damaged; directory replay and
+		 * allocation metadata remain readable during extraction.
+		 */
+		if (damaged)
+			file.bytes[1069 * SECTOR] = 0;
+		fixture_init(&f, 16 * MIB, 0);
+		CHECK(fixture_open(&f, &file, "fat12/-/dmg", NULL) == FSIMG_OK);
+		CHECK(fsimg_image_select(f.image, &selector, &volume, NULL) == FSIMG_OK);
+		CHECK(fsimg_reader_open(f.ctx, volume, NULL, &reader, NULL) == FSIMG_OK);
+		if (damaged) {
+			CHECK(fsimg_extract_at(reader, f.scratch, "output", NULL,
+			    &error) == FSIMG_ECORRUPT);
+			CHECK(strcmp(error.path, "/THEFILE") == 0);
+			CHECK(strcmp(error.layer, "dmg") == 0);
+			CHECK(error.output_state == FSIMG_OUTPUT_INCOMPLETE);
+		} else {
+			CHECK(fsimg_extract_at(reader, f.scratch, "output", NULL,
+			    NULL) == FSIMG_OK);
+		}
+		output = openat(f.scratch, "output", O_RDONLY | O_DIRECTORY);
+		CHECK(output != -1);
+		if (!damaged) {
+			unsigned char content[SECTOR];
+			int fd = openat(output, "THEFILE", O_RDONLY);
+
+			CHECK(fd != -1);
+			CHECK(read(fd, content, sizeof(content)) == sizeof(content));
+			CHECK(bcmp(content, disk + 1069 * SECTOR, sizeof(content)) == 0);
+			CHECK(close(fd) == 0);
+		}
+		CHECK(unlinkat(output, "THEFILE", 0) == 0);
+		CHECK(close(output) == 0);
+		CHECK(unlinkat(f.scratch, "output", AT_REMOVEDIR) == 0);
+		fsimg_reader_free(reader);
+		fsimg_io_free(volume);
+		fixture_free(&f);
+		free(file.bytes);
+	}
+	free(disk);
+}
+
 /*
  * A DMG with every accepted run kind opens on detection alone, reports its
  * container, chunk count, codecs and segment ID, serves its disk byte for
@@ -2514,7 +2613,7 @@ test_container_zero_runs(void)
 	CHECK(fixture_open(&f, &files[1], DETECT, NULL) == FSIMG_OK);
 	CHECK(compose_disk(&f, "corrupt", &composed[1], &lengths[1], &error) ==
 	    FSIMG_ECORRUPT);
-	CHECK(strcmp(error.path, "dmg") == 0);
+	CHECK(strcmp(error.layer, "dmg") == 0);
 	fixture_free(&f);
 	for (unsigned i = 0; i < 2; i++) {
 		free(composed[i]);
@@ -2801,7 +2900,7 @@ expect_unchanged_container_detection(memory_file_t *file)
 	    FSIMG_IMAGE_ASSUME_IDENTITY, &assumed);
 	CHECK(forced_status == status);
 	if (status != FSIMG_OK) {
-		CHECK(strcmp(plain.path, assumed.path) == 0);
+		CHECK(strcmp(plain.layer, assumed.layer) == 0);
 		CHECK(strcmp(plain.message, assumed.message) == 0);
 	} else {
 		CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
@@ -2844,7 +2943,7 @@ expect_assumed_container(memory_file_t *intact, memory_file_t *damaged,
 	CHECK(read_disk(&f, 0, expected, (size_t)length, NULL) == FSIMG_OK);
 
 	CHECK(fixture_open(&f, damaged, stack, &error) == FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, layer) == 0);
+	CHECK(strcmp(error.layer, layer) == 0);
 	status = fixture_open_flags(&f, damaged, stack,
 	    FSIMG_IMAGE_ASSUME_IDENTITY, &error);
 	if (status != FSIMG_OK)
@@ -2858,7 +2957,7 @@ expect_assumed_container(memory_file_t *intact, memory_file_t *damaged,
 	CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
 	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
 	    &error) == FSIMG_ECORRUPT);
-	CHECK(strcmp(error.path, layer) == 0);
+	CHECK(strcmp(error.layer, layer) == 0);
 	CHECK(strcmp(error.message, message) == 0);
 	CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
 	CHECK(after.io_calls == before.io_calls);
@@ -2916,7 +3015,7 @@ test_assumed_vhd_cookie_changed_after_open(void)
 	    &error);
 	CHECK(status != FSIMG_OK);
 	CHECK(status == FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, "vhd") == 0);
+	CHECK(strcmp(error.layer, "vhd") == 0);
 	CHECK(strcmp(error.message, "no VHD footer") == 0);
 	CHECK(!report.complete && report.container[0] == '\0');
 	fixture_free(&f);
@@ -3010,7 +3109,7 @@ expect_assumed_container_refused(memory_file_t *file, const char *layer)
 	fixture_init(&f, 16 * MIB, 0);
 	CHECK(fixture_open_flags(&f, file, layer, FSIMG_IMAGE_ASSUME_IDENTITY,
 	    &error) != FSIMG_OK);
-	CHECK(strcmp(error.path, layer) == 0);
+	CHECK(strcmp(error.layer, layer) == 0);
 	fixture_free(&f);
 }
 
@@ -3486,6 +3585,8 @@ main(int argc, char **argv)
 	test_dmg_bzip2_encoded_lengths();
 	test_dmg_bzip2_decoded_limit();
 	test_crc_oracle();
+	test_dmg_content_failure_preserves_layer_and_entry_path();
+	test_registered_layer_names_fit_error_layer();
 	test_dmg_read();
 	test_dmg_legacy_resource_fork();
 	test_dmg_resource_fork_failures();

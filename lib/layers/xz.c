@@ -193,8 +193,7 @@ static fsimg_status_t
 memory_failed(const fsimg_codec_memory_t *memory, fsimg_error_t *error)
 {
 	fsimg_codec_memory_error(memory, error);
-	if (error->path[0] == '\0')
-		snprintf(error->path, sizeof(error->path), "xz");
+	fsimg_error_layer(error, "xz");
 	return (error->status);
 }
 
@@ -632,15 +631,15 @@ microlzma_block_decode(fsimg_ctx_t *ctx, const unsigned char *input,
 	return (block_failed(&memory, code, error));
 }
 
-/* The adapter's first error, named for the library. */
+/* The adapter's first error, named for the xz codec a filesystem's
+ * block decode uses. */
 static fsimg_status_t
 block_memory_failed(const fsimg_codec_memory_t *memory, fsimg_error_t *error)
 {
 	fsimg_status_t status;
 
 	status = fsimg_codec_memory_error(memory, error);
-	if (error != NULL && error->path[0] == '\0')
-		snprintf(error->path, sizeof(error->path), "liblzma");
+	fsimg_error_layer(error, "xz");
 	return (status);
 }
 

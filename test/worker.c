@@ -2282,7 +2282,7 @@ create_request(worker_fixture_t *fixture, const char *stack)
  * the raw intermediate the worker refuses its authority. A stream writes
  * the same bytes to the data channel, which the coordinator relays to
  * stdout and counts. A fault the staged file acquires afterwards fails the
- * verification job, which names the container in error.path; that is
+ * verification job, which names the container in error.layer; that is
  * what cW reports before publishing nothing.
  */
 static void
@@ -2352,7 +2352,7 @@ test_container_create(void)
 	CHECK(fixture.request.input_fd != -1);
 	bzero(&error, sizeof(error));
 	CHECK(run(&fixture, &error) == FSIMG_ECORRUPT);
-	CHECK(error.operation == FSIMG_OP_IMAGE && strcmp(error.path, "dmg") == 0);
+	CHECK(error.operation == FSIMG_OP_IMAGE && strcmp(error.layer, "dmg") == 0);
 	CHECK(close(fixture.request.input_fd) == 0);
 	fixture.request.input_fd = -1;
 	fixture.request.input = (fsimg_input_t){ 0 };
@@ -2364,7 +2364,7 @@ test_container_create(void)
  * A gzip creation writes one member through the raw intermediate and sends
  * an IMAGE record for it, as for a container. A CRC32 flipped in the staged
  * member afterwards fails the verification job, which decodes the member
- * into its spool and names gzip in error.path; that is what cW reports
+ * into its spool and names gzip in error.layer; that is what cW reports
  * before publishing nothing.
  */
 static void
@@ -2411,7 +2411,7 @@ test_compressed_create(void)
 	CHECK(fixture.request.input_fd != -1);
 	bzero(&error, sizeof(error));
 	CHECK(run(&fixture, &error) == FSIMG_ECORRUPT);
-	CHECK(error.operation == FSIMG_OP_IMAGE && strcmp(error.path, "gzip") == 0);
+	CHECK(error.operation == FSIMG_OP_IMAGE && strcmp(error.layer, "gzip") == 0);
 	CHECK(close(fixture.request.input_fd) == 0 &&
 	    close(fixture.request.spool_fd) == 0);
 	fixture.request.input_fd = fixture.request.spool_fd = -1;

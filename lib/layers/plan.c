@@ -221,7 +221,7 @@ resolve_container(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 	if (plan->container->container->writer == NULL) {
 		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
 		    "the container is read only");
-		fsimg_error_path(error, plan->container->name);
+		fsimg_error_layer(error, plan->container->name);
 		return (FSIMG_EUNSUPPORTED);
 	}
 	args = (fsimg_container_plan_args_t){ .ctx = ctx,
@@ -350,7 +350,8 @@ resolve_compression(fsimg_disk_plan_t *plan,
  * sectors, and the container only when it rounds the disk up to a
  * granularity above one byte, the one way a container pads. Compression
  * encodes the disk byte for byte and is never a candidate. NULL passes.
- * The refusal names the filesystem and the layer ("ifs/vhd").
+ * The refusal names the filesystem in its message and the layer in
+ * error.layer.
  */
 static fsimg_status_t
 check_exact_volume(const fsimg_stack_t *stack,
@@ -359,18 +360,17 @@ check_exact_volume(const fsimg_stack_t *stack,
 	const fsimg_stack_slot_t *slot = &stack->slots[FSIMG_LAYER_FILESYSTEM];
 	const fsimg_format_variant_t *variant;
 	const fsimg_format_t *format;
-	char layers[2 * sizeof(slot->name)];
+	char message[sizeof(error->message)];
 
 	if (lengthening == NULL || slot->state != FSIMG_SLOT_NAMED)
 		return (FSIMG_OK);
 	format = fsimg_format_find(slot->name, &variant);
 	if (format == NULL || !format->exact_volume)
 		return (FSIMG_OK);
-	snprintf(layers, sizeof(layers), "%s/%s", slot->name,
-	    lengthening->name);
-	fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
-	    "the filesystem cannot sit in a scheme or a padding container");
-	fsimg_error_path(error, layers);
+	snprintf(message, sizeof(message), "the %s filesystem cannot sit in a "
+	    "scheme or a padding container", slot->name);
+	fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE, message);
+	fsimg_error_layer(error, lengthening->name);
 	return (FSIMG_EUNSUPPORTED);
 }
 
@@ -456,7 +456,7 @@ fsimg_disk_plan_scheme(fsimg_ctx_t *ctx, fsimg_disk_plan_t *plan,
 	if (ops == NULL || !fsimg_scheme_writable(ops)) {
 		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
 		    "the scheme is read only");
-		fsimg_error_path(error, scheme->name);
+		fsimg_error_layer(error, scheme->name);
 		return (FSIMG_EUNSUPPORTED);
 	}
 	plan->scheme = scheme;

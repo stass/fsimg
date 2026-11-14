@@ -1000,9 +1000,8 @@ disk_resolve(void *argument, uint64_t offset, void *buffer, size_t length,
 		}
 		/* A decode failure is the container's, and names it. */
 		if (status != FSIMG_OK) {
-			if (error->operation == FSIMG_OP_IMAGE && error->path[0] == '\0')
-				snprintf(error->path, sizeof(error->path), "%s",
-				    disk->index->layer);
+			if (error->operation == FSIMG_OP_IMAGE)
+				fsimg_error_layer(error, disk->index->layer);
 			return (status);
 		}
 		*transferred += piece;

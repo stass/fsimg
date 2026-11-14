@@ -758,9 +758,9 @@ expect_open(boot_image_t *image, const char *stack, fsimg_status_t status,
 	}
 	if (status != FSIMG_OK) {
 		expect_message(&error, message);
-		if (status != FSIMG_EFORMAT && strcmp(error.path, "ifsboot") != 0) {
+		if (status != FSIMG_EFORMAT && strcmp(error.layer, "ifsboot") != 0) {
 			fprintf(stderr, "\"%s\" names \"%s\"\n", error.message,
-			    error.path);
+			    error.layer);
 			CHECK(!"the failure names another layer");
 		}
 	}
@@ -787,7 +787,7 @@ expect_verify(boot_image_t *image, fsimg_status_t status, const char *message)
 		CHECK(report.scope == FSIMG_VALIDATION_STRUCTURAL);
 	} else {
 		expect_message(&error, message);
-		CHECK(strcmp(error.path, "ifsboot") == 0);
+		CHECK(strcmp(error.layer, "ifsboot") == 0);
 	}
 	fixture_free(&f);
 	free(file.bytes);
@@ -1640,7 +1640,7 @@ test_carried_stack(void)
 		strcpy(options.stack.slots[FSIMG_LAYER_CONTAINER].name, "ifsboot");
 		CHECK(fsimg_image_open(f.ctx, f.io, &options, &opened, &error) ==
 		    FSIMG_EINVAL);
-		CHECK(strcmp(error.path, "ifsboot") == 0);
+		CHECK(strcmp(error.layer, "ifsboot") == 0);
 		fixture_free(&f);
 		free(file.bytes);
 	}
@@ -1669,7 +1669,7 @@ test_carried_stack(void)
 	fsimg_write_options_init(&write);
 	CHECK(fsimg_writer_new(ctx, "fat32/ifsboot", &write, &writer, &error) ==
 	    FSIMG_EINVAL);
-	CHECK(strcmp(error.path, "ifsboot") == 0);
+	CHECK(strcmp(error.layer, "ifsboot") == 0);
 	fsimg_io_ops_init(&ops);
 	ops.read_at = file_read;
 	ops.get_size = file_size;

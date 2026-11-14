@@ -190,12 +190,22 @@ fsimg_frame_read(int fd, fsimg_frame_t *frame, fsimg_error_t *error)
 	return (transfer_frame_bytes(fd, frame->payload, frame->length, false, error));
 }
 
+/* The error frame's text fields have the record's sizes, layer last. */
+_Static_assert(sizeof(((fsimg_error_t *)NULL)->path) ==
+    FSIMG_WIRE_ERROR_MESSAGE - FSIMG_WIRE_ERROR_PATH, "error path field");
+_Static_assert(sizeof(((fsimg_error_t *)NULL)->message) ==
+    FSIMG_WIRE_ERROR_LAYER - FSIMG_WIRE_ERROR_MESSAGE, "error message field");
+_Static_assert(sizeof(((fsimg_error_t *)NULL)->layer) ==
+    FSIMG_WIRE_ERROR_BYTES - FSIMG_WIRE_ERROR_LAYER, "error layer field");
+
 void
 fsimg_wire_error_encode(unsigned char *raw, const fsimg_error_t *error)
 {
-	size_t path_length, message_length;
+	size_t layer_length, path_length, message_length;
 	uint64_t flags;
 
+	/* A layer name always fits its field, so it has no truncation flag. */
+	layer_length = strnlen(error->layer, sizeof(error->layer) - 1);
 	path_length = strnlen(error->path, sizeof(error->path));
 	message_length = strnlen(error->message, sizeof(error->message));
 	flags = (error->offset_valid ? 1u : 0u) |
@@ -225,6 +235,7 @@ fsimg_wire_error_encode(unsigned char *raw, const fsimg_error_t *error)
 	 */
 	bcopy(error->path, raw + FSIMG_WIRE_ERROR_PATH, path_length);
 	bcopy(error->message, raw + FSIMG_WIRE_ERROR_MESSAGE, message_length);
+	bcopy(error->layer, raw + FSIMG_WIRE_ERROR_LAYER, layer_length);
 }
 
 fsimg_status_t
@@ -246,7 +257,8 @@ fsimg_wire_error_decode(const unsigned char *raw, uint32_t length,
 	    flags > 7 ||
 	    fsimg_load_le64(raw + FSIMG_WIRE_ERROR_CLEANUP) > INT32_MAX ||
 	    memchr(raw + FSIMG_WIRE_ERROR_PATH, '\0', 256) == NULL ||
-	    memchr(raw + FSIMG_WIRE_ERROR_MESSAGE, '\0', 256) == NULL)
+	    memchr(raw + FSIMG_WIRE_ERROR_MESSAGE, '\0', 256) == NULL ||
+	    memchr(raw + FSIMG_WIRE_ERROR_LAYER, '\0', 16) == NULL)
 		return (protocol_error(error, "invalid worker error fields"));
 	bzero(&decoded, sizeof(decoded));
 	decoded.status = (fsimg_status_t)
@@ -267,6 +279,7 @@ fsimg_wire_error_decode(const unsigned char *raw, uint32_t length,
 	decoded.cleanup_error = (int)fsimg_load_le64(raw + FSIMG_WIRE_ERROR_CLEANUP);
 	bcopy(raw + FSIMG_WIRE_ERROR_PATH, decoded.path, 256);
 	bcopy(raw + FSIMG_WIRE_ERROR_MESSAGE, decoded.message, 256);
+	bcopy(raw + FSIMG_WIRE_ERROR_LAYER, decoded.layer, 16);
 	if (error != NULL)
 		*error = decoded;
 	return (decoded.status);

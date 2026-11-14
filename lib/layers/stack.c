@@ -32,6 +32,14 @@
 #define XZ_COMPRESSION	NULL
 #endif
 
+/* A registered name is published in layer information and named in a
+ * stack slot, so each holds every name the registry's records hold.
+ */
+_Static_assert(sizeof(((fsimg_layer_info_t *)0)->name) ==
+    FSIMG_LAYER_NAME_BYTES, "a layer name fits its information");
+_Static_assert(sizeof(((fsimg_stack_slot_t *)0)->name) ==
+    FSIMG_LAYER_NAME_BYTES, "a layer name fits a stack slot");
+
 static const fsimg_layer_t layers[] = {
 	{ .name = "gpt", .kind = FSIMG_LAYER_SCHEME, .scheme = &fsimg_gpt_scheme,
 	    .settings = &fsimg_gpt_settings },
@@ -285,7 +293,7 @@ fsimg_stack_carried(const fsimg_stack_t *stack, const fsimg_layer_t *container,
 	    scheme->state == FSIMG_SLOT_NAMED ?
 	    "the container holds a volume, not a partition table" :
 	    "the container holds a different filesystem");
-	fsimg_error_path(error, container->name);
+	fsimg_error_layer(error, container->name);
 	return (FSIMG_EINVAL);
 }
 
@@ -325,7 +333,7 @@ fsimg_compression_named(const char *name, size_t size, bool writing,
 		fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0, FSIMG_OP_IMAGE,
 		    writing ? "writing this compression is not supported" :
 		    "reading this compression is not supported");
-		fsimg_error_path(error, name);
+		fsimg_error_layer(error, layer->name);
 		return (FSIMG_EUNSUPPORTED);
 	}
 	*out = layer;

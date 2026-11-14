@@ -330,8 +330,8 @@ typedef struct fsimg_chunk_index fsimg_chunk_index_t;
  * new makes an empty index for a disk of disk_bytes whose encoded bytes
  * lie in the file range [data_offset, data_offset + data_bytes); owner
  * names the container in messages and layer is its registry name, which
- * a read's failure carries in error.path; both must outlive the index. Records are
- * charged to the session's scratch. append accepts records in any order
+ * a read's failure carries in error.layer; both must outlive the index.
+ * Records are charged to the session's scratch. append accepts records in any order
  * and fails with FSIMG_ECORRUPT for a record outside the disk or the data
  * or whose lengths disagree with its kind. seal sorts the records and
  * keeps them only when they tile the disk exactly, FSIMG_ECORRUPT naming
@@ -844,6 +844,14 @@ typedef struct fsimg_compression_ops {
 			    fsimg_error_t *);
 } fsimg_compression_ops_t;
 
+/* A registered name fits the error record's layer field, the layer
+ * information's name and a stack slot. A longer initializer fails the
+ * build; one that fills the array leaving no terminator fails it under
+ * -Wunterminated-string-initialization, and test/containers.c checks
+ * every record's terminator where a compiler lacks that warning.
+ */
+#define FSIMG_LAYER_NAME_BYTES	sizeof(((fsimg_error_t *)0)->layer)
+
 /* A registered layer. Every layer name the stack grammar accepts outside
  * the filesystem slot is one record; a scheme has scheme operations, a
  * container container operations and a compression compression
@@ -852,7 +860,7 @@ typedef struct fsimg_compression_ops {
  * one statement of the keys it advertises and accepts, NULL for none.
  */
 typedef struct fsimg_layer {
-	const char	*name;
+	char		 name[FSIMG_LAYER_NAME_BYTES];
 	const char	*suffix;	/* File suffix of a container or compression */
 	fsimg_layer_kind_t kind;
 	const fsimg_scheme_ops_t *scheme;
@@ -903,9 +911,10 @@ const fsimg_layer_t *fsimg_stack_layer(const fsimg_stack_t *,
 /*
  * The compression a caller's options name in a field of size bytes, for
  * writing or reading: NULL for an empty name, else the registered
- * compression. An unterminated name, or one the registry lacks as a
- * compression, is FSIMG_EINVAL; a registered compression without the
- * operation is FSIMG_EUNSUPPORTED; each names it in error.path.
+ * compression. An unterminated name is FSIMG_EINVAL naming nothing, and
+ * one the registry lacks as a compression FSIMG_EINVAL naming the caller's
+ * text in error.path; a registered compression without the operation is
+ * FSIMG_EUNSUPPORTED naming it in error.layer.
  */
 fsimg_status_t fsimg_compression_named(const char *, size_t, bool,
     const fsimg_layer_t **, fsimg_error_t *);

@@ -1060,7 +1060,7 @@ layer_unsupported(const contract_layer_profile_t *profile,
 	CONTRACT_STATUS(fsimg_image_open(fixture.ctx, input, &options, &image,
 	    &error), FSIMG_EUNSUPPORTED, &error);
 	CONTRACT_CHECK(image == NULL);
-	CONTRACT_CHECK(strcmp(error.path, profile->name) == 0);
+	CONTRACT_CHECK(strcmp(error.layer, profile->name) == 0);
 	CONTRACT_CHECK(payload->reads == 0);
 	contract_volume_close(input, backing);
 
@@ -1071,7 +1071,7 @@ layer_unsupported(const contract_layer_profile_t *profile,
 	CONTRACT_STATUS(fsimg_writer_new(fixture.ctx, "fat12", &write, &writer,
 	    &error), FSIMG_EUNSUPPORTED, &error);
 	CONTRACT_CHECK(writer == NULL);
-	CONTRACT_CHECK(strcmp(error.path, profile->name) == 0);
+	CONTRACT_CHECK(strcmp(error.layer, profile->name) == 0);
 	fixture_close(&fixture);
 	contract_end();
 }
@@ -1095,7 +1095,7 @@ layer_write_refused(const contract_layer_profile_t *profile)
 	CONTRACT_STATUS(fsimg_writer_new(fixture.ctx, profile->stack, &options,
 	    &writer, &error), FSIMG_EUNSUPPORTED, &error);
 	CONTRACT_CHECK(writer == NULL);
-	CONTRACT_CHECK(strstr(error.path, profile->name) != NULL ||
+	CONTRACT_CHECK(strstr(error.layer, profile->name) != NULL ||
 	    strstr(error.message, profile->name) != NULL);
 	fixture_close(&fixture);
 	contract_end();
@@ -1317,7 +1317,7 @@ seams(void)
 			    cases[i].compression);
 		} else {
 			CONTRACT_CHECK(out.writes == 0 && out.length == 0);
-			CONTRACT_CHECK(strstr(error.path, cases[i].named) !=
+			CONTRACT_CHECK(strstr(error.layer, cases[i].named) !=
 			    NULL || strstr(error.message, cases[i].named) !=
 			    NULL);
 		}
@@ -1366,7 +1366,7 @@ seams(void)
 		    &error), FSIMG_OK, &error);
 		CONTRACT_STATUS(fsimg_image_open(fixture.ctx, input, &options,
 		    &image, &error), FSIMG_EINVAL, &error);
-		CONTRACT_CHECK(strcmp(error.path, "ifsboot") == 0);
+		CONTRACT_CHECK(strcmp(error.layer, "ifsboot") == 0);
 		CONTRACT_CHECK(volume.reads == 0);
 		contract_volume_close(input, backing);
 		fixture_close(&fixture);

@@ -508,7 +508,7 @@ test_read_only_scheme_refused_before_callbacks(void)
 	fsimg_layer_options_init(&layers);
 	CHECK(fsimg_disk_plan_scheme(ctx, &plan, &read_only_layer, &layers, 1,
 	    &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strcmp(error.path, "readonly") == 0);
+	CHECK(strcmp(error.layer, "readonly") == 0);
 	CHECK(plan.scheme == NULL && plan.table.records == NULL);
 	fsimg_disk_plan_free(&plan);
 	fsimg_ctx_free(ctx);

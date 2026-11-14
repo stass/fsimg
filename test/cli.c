@@ -2242,24 +2242,24 @@ test_staged_verification_failure(void)
 	CHECK(strstr(display.buffer, "output was published") == NULL);
 
 	/* A layer's failure names the layer, which the library puts in
-	 * error.path: a table failure the scheme, a container failure the
+	 * error.layer: a table failure the scheme, a container failure the
 	 * container; a filesystem failure names the volume.
 	 */
 	CHECK(fsimg_stack_parse("fat32/gpt/dmg", &options.request.stack, NULL) ==
 	    FSIMG_OK);
 	fsimg_error_set(&error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
 	    "GPT primary entry array CRC32 mismatch");
-	snprintf(error.path, sizeof(error.path), "gpt");
+	snprintf(error.layer, sizeof(error.layer), "gpt");
 	fsimg_cli_display_init(&display, &options, &result, &paths);
 	display.failure = &error;
 	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);
-	CHECK(strstr(display.buffer, "fsimg: GPT primary entry array CRC32 "
-	    "mismatch \"gpt\"\n") != NULL);
+	CHECK(strstr(display.buffer, "fsimg: gpt: GPT primary entry array CRC32 "
+	    "mismatch\n") != NULL);
 	CHECK(strstr(display.buffer, "fsimg: the staged gpt partition table "
 	    "failed verification; nothing was published\n") != NULL);
 	fsimg_error_set(&error, FSIMG_ECORRUPT, 0, FSIMG_OP_IMAGE,
 	    "DMG data fork checksum does not match");
-	snprintf(error.path, sizeof(error.path), "dmg");
+	snprintf(error.layer, sizeof(error.layer), "dmg");
 	fsimg_cli_display_init(&display, &options, &result, &paths);
 	display.failure = &error;
 	CHECK(fsimg_cli_final(&display, &text, NULL) == FSIMG_OK);

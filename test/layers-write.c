@@ -1647,7 +1647,7 @@ test_wrap_unwrap(void)
 	bzero(&error, sizeof(error));
 	CHECK(fsimg_image_wrap(f.ctx, input, "fat16/gpt", &options, &sink,
 	    &error) == FSIMG_EINVAL);
-	CHECK(strcmp(error.path, "fat16") == 0);
+	CHECK(strcmp(error.path, "fat16") == 0 && error.layer[0] == '\0');
 	options.label = "LABEL";
 	CHECK(fsimg_image_wrap(f.ctx, input, "gpt", &options, &sink,
 	    &error) == FSIMG_EINVAL);
@@ -1901,7 +1901,7 @@ test_container_section_publishes_startup_and_names_failed_reread(void)
 	    FSIMG_EFORMAT);
 	CHECK(section == NULL);
 	CHECK(error.operation == FSIMG_OP_IMAGE);
-	CHECK(strcmp(error.path, "ifsboot") == 0);
+	CHECK(strcmp(error.layer, "ifsboot") == 0);
 	fsimg_image_free(image);
 	fsimg_io_free(io);
 	fsimg_io_free(startup_io);

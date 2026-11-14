@@ -426,7 +426,7 @@ expect_corrupt(const buffer_t *gzip, const char *message)
 		fprintf(stderr, "expected \"%s\", got \"%s\"\n", message,
 		    error.message);
 	CHECK(strcmp(error.message, message) == 0);
-	CHECK(strcmp(error.path, "gzip") == 0 &&
+	CHECK(strcmp(error.layer, "gzip") == 0 &&
 	    error.operation == FSIMG_OP_IMAGE);
 	fixture_free(&f);
 }
@@ -606,13 +606,13 @@ test_detection(void)
 	fixture_init(&f, 0);
 	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
 	    &error) == FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, "gzip") == 0);
+	CHECK(strcmp(error.layer, "gzip") == 0);
 	fixture_free(&f);
 	file = (memory_file_t){ .bytes = data, .length = 64 * KIB };
 	fixture_init(&f, 0);
 	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
 	    &error) == FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, "gzip") == 0);
+	CHECK(strcmp(error.layer, "gzip") == 0);
 	fixture_free(&f);
 	/* A registered compression refuses either its signature or its capability. */
 	fixture_init(&f, 0);
@@ -623,12 +623,14 @@ test_detection(void)
 	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f),
 	    &error) == FSIMG_EUNSUPPORTED);
 #endif
-	CHECK(strcmp(error.path, "zstd") == 0);
+	CHECK(strcmp(error.layer, "zstd") == 0);
+	CHECK(error.path[0] == '\0');
 	fixture_free(&f);
 	fixture_init(&f, 0);
 	CHECK(open_file(&f, &file, "dmg", NULL, spool_new(&f),
 	    &error) == FSIMG_EINVAL);
 	CHECK(strcmp(error.path, "dmg") == 0);
+	CHECK(error.layer[0] == '\0');
 	fixture_free(&f);
 	free(gzip.bytes);
 
@@ -656,7 +658,7 @@ test_detection(void)
 	fixture_init(&f, 0);
 	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
 	    &error) == FSIMG_ECORRUPT);
-	CHECK(strcmp(error.path, "gzip") == 0);
+	CHECK(strcmp(error.layer, "gzip") == 0);
 	fixture_free(&f);
 	free(disk);
 	free(data);
@@ -979,7 +981,7 @@ test_streams(void)
 	child = feed(gzip.bytes, gzip.length / 2, &stream);
 	CHECK(open_pipe(&f, stream, "", spool_new(&f), &error) ==
 	    FSIMG_ECORRUPT);
-	CHECK(strcmp(error.path, "gzip") == 0);
+	CHECK(strcmp(error.layer, "gzip") == 0);
 	reap(child);
 	CHECK(close(stream) == 0);
 	fixture_free(&f);
@@ -1112,7 +1114,7 @@ test_xz_registry_reports_build_support(void)
 	CHECK(strstr(error.message,
 	    "reading this compression is not supported") != NULL);
 #endif
-	CHECK(strcmp(error.path, "xz") == 0);
+	CHECK(strcmp(error.layer, "xz") == 0);
 	fixture_free(&f);
 
 	raw[0] = 0xfd;
@@ -1122,7 +1124,7 @@ test_xz_registry_reports_build_support(void)
 	status = open_file(&f, &file, "", NULL, spool_new(&f), &error);
 #ifdef FSIMG_XZ
 	CHECK(status == FSIMG_ECORRUPT);
-	CHECK(strcmp(error.path, "xz") == 0);
+	CHECK(strcmp(error.layer, "xz") == 0);
 #else
 	/* Without operations the row is not surveyed. Open retains the
 	 * raw bytes; asking for image information must reject them.
@@ -1324,7 +1326,7 @@ xz_expect_corrupt(const buffer_t *xz)
 	codec_context(&f, 128 * MIB, 0);
 	CHECK(open_file(&f, &file, "xz", NULL, spool_new(&f), &error) ==
 	    FSIMG_ECORRUPT);
-	CHECK(strcmp(error.path, "xz") == 0);
+	CHECK(strcmp(error.layer, "xz") == 0);
 	CHECK(strstr(error.message, "compressed byte ") != NULL);
 	fixture_free(&f);
 }
@@ -1492,7 +1494,7 @@ test_xz_detection_excludes_alone_and_peels_once(void)
 	file = (memory_file_t){ .bytes = gzip.bytes, .length = gzip.length };
 	CHECK(open_file(&f, &file, "xz", NULL, spool_new(&f), &error) ==
 	    FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, "xz") == 0);
+	CHECK(strcmp(error.layer, "xz") == 0);
 	fixture_free(&f);
 	inner = xz_of(data, 64 * KIB, LZMA_CHECK_CRC64, false);
 	outer = xz_of(inner.bytes, inner.length, LZMA_CHECK_CRC64, false);
@@ -1569,7 +1571,7 @@ test_xz_large_dictionary_fails_before_spooling(void)
 		CHECK(watch != -1);
 		CHECK(open_file(&f, &file, "", NULL, spool, &error) == FSIMG_ELIMIT);
 		CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
-		CHECK(strcmp(error.path, "xz") == 0);
+		CHECK(strcmp(error.layer, "xz") == 0);
 		CHECK(fstat(watch, &st) == 0 && st.st_size == 0);
 		CHECK(close(watch) == 0);
 		fixture_free(&f);
@@ -1695,7 +1697,7 @@ test_xz_preset_nine_exceeds_default_memory(void)
 	CHECK(fsimg_xz_compression.encoder->open(f.ctx, &settings, NULL,
 	    &encoder, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
-	CHECK(strcmp(error.path, "xz") == 0);
+	CHECK(strcmp(error.layer, "xz") == 0);
 	if (encoder != NULL)
 		fsimg_xz_compression.encoder->close(encoder);
 	fixture_free(&f);
@@ -1951,7 +1953,7 @@ test_zstd_registry_reports_build_support(void)
 	CHECK(strstr(error.message,
 	    "reading this compression is not supported") != NULL);
 #endif
-	CHECK(strcmp(error.path, "zstd") == 0);
+	CHECK(strcmp(error.layer, "zstd") == 0);
 	fixture_free(&f);
 }
 
@@ -2255,7 +2257,7 @@ test_zstd_window_limits_precede_spooling(void)
 			    allowed_windows[i], status, error.resource);
 			CHECK_ZSTD_CASE(false, allowed_windows[i]);
 		}
-		CHECK_ZSTD_CASE(strcmp(error.path, "zstd") == 0, allowed_windows[i]);
+		CHECK_ZSTD_CASE(strcmp(error.layer, "zstd") == 0, allowed_windows[i]);
 		CHECK_ZSTD_CASE(fstat(watch, &st) == 0 && st.st_size == 0, allowed_windows[i]);
 		CHECK_ZSTD_CASE(close(watch) == 0, allowed_windows[i]);
 		fixture_free(&f);
@@ -2342,7 +2344,7 @@ test_zstd_legacy_frames_are_never_decoded(void)
 	fixture_init(&f, 0);
 	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f), &error) ==
 	    FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, "zstd") == 0);
+	CHECK(strcmp(error.layer, "zstd") == 0);
 	CHECK(strcmp(error.message, "no zstd signature") == 0);
 	fixture_free(&f);
 	fixture_init(&f, 0);
@@ -2395,7 +2397,7 @@ test_zstd_detection_forces_signature_and_peels_once(void)
 
 	fixture_init(&f, 0);
 	CHECK(open_file(&f, &file, "zstd", NULL, spool_new(&f), &error) == FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, "zstd") == 0);
+	CHECK(strcmp(error.layer, "zstd") == 0);
 	fixture_free(&f);
 	fixture_init(&f, 0);
 	file = (memory_file_t){ .bytes = outer.bytes, .length = outer.length };
@@ -2553,7 +2555,7 @@ test_zstd_encoder_unknown_length_dmg_refuses_large_workspace_before_output(void)
 	CHECK(compressed_output(&f, &file, 19, FSIMG_XZ_CRC64,
 	    "zstd", true, fd, &error) == FSIMG_ELIMIT);
 	CHECK(error.resource == FSIMG_RESOURCE_MEMORY);
-	CHECK(strcmp(error.path, "zstd") == 0);
+	CHECK(strcmp(error.layer, "zstd") == 0);
 	CHECK(fstat(fd, &st) == 0 && st.st_size == 0);
 	CHECK(close(fd) == 0);
 	fixture_free(&f);
@@ -2821,7 +2823,7 @@ test_forced_gzip_requires_magic_without_assumption(void)
 	fixture_init(&f, 0);
 	CHECK(open_file(&f, &file, "gzip", "fat12/-/-", spool_new(&f),
 	    &error) == FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, "gzip") == 0);
+	CHECK(strcmp(error.layer, "gzip") == 0);
 	fixture_free(&f);
 	free(gzip.bytes);
 	free(data);
@@ -2916,7 +2918,7 @@ test_assumed_gzip_still_validates_members(void)
 		f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
 		CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
 		    &error) != FSIMG_OK);
-		CHECK(strcmp(error.path, "gzip") == 0);
+		CHECK(strcmp(error.layer, "gzip") == 0);
 		fixture_free(&f);
 		free(gzip.bytes);
 	}
@@ -2931,7 +2933,7 @@ test_assumed_gzip_still_validates_members(void)
 	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
 	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
 	    &error) == FSIMG_ECORRUPT);
-	CHECK(strcmp(error.path, "gzip") == 0);
+	CHECK(strcmp(error.layer, "gzip") == 0);
 	CHECK(strcmp(error.message, "bytes follow the last gzip member") == 0);
 	fixture_free(&f);
 	free(gzip.bytes);
@@ -2943,7 +2945,7 @@ test_assumed_gzip_still_validates_members(void)
 	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
 	CHECK(open_file(&f, &file, "gzip", NULL, spool_new(&f),
 	    &error) == FSIMG_ECORRUPT);
-	CHECK(strcmp(error.path, "gzip") == 0);
+	CHECK(strcmp(error.layer, "gzip") == 0);
 	CHECK(strcmp(error.message, "gzip member CRC32 mismatch") == 0);
 	fixture_free(&f);
 	free(gzip.bytes);
@@ -3009,13 +3011,13 @@ test_assume_identity_leaves_codec_magic_required(void)
 		fixture_init(&f, 0);
 		status = open_file(&f, &file, names[i], NULL, spool_new(&f), &plain);
 		CHECK(status == FSIMG_EFORMAT);
-		CHECK(strcmp(plain.path, names[i]) == 0);
+		CHECK(strcmp(plain.layer, names[i]) == 0);
 		fixture_free(&f);
 		fixture_init(&f, 0);
 		f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
 		CHECK(open_file(&f, &file, names[i], NULL, spool_new(&f),
 		    &assumed) == status);
-		CHECK(strcmp(plain.path, assumed.path) == 0);
+		CHECK(strcmp(plain.layer, assumed.layer) == 0);
 		CHECK(strcmp(plain.message, assumed.message) == 0);
 		fixture_free(&f);
 		free(encoded.bytes);

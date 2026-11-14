@@ -140,7 +140,7 @@ class CliTest < Minitest::Test
         expected: 1
       )
       assert_includes(result.stderr,
-        "the filesystem cannot sit in a scheme or a padding container \"#{stack}\"".b,
+        "fsimg: #{stack.split("/").last}: the ifs filesystem cannot sit in a scheme or a padding container\n".b,
         stack)
       refute((root / "refused.img").exist?, "refused creation leaves no output image")
     end

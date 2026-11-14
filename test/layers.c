@@ -76,6 +76,7 @@ static void expect_gpt_corrupt(memory_disk_t *, const char *);
 static void test_crc_oracle(void);
 static void test_stack_grammar(void);
 static void test_stack_rejections(void);
+static void test_stack_slot_caller_text_stays_in_path(void);
 static void test_registry(void);
 static void test_gpt_read(void);
 static void test_gpt_selectors(void);
@@ -347,6 +348,49 @@ test_stack_rejections(void)
 	CHECK(error.path_truncated);
 	CHECK(strlen(error.path) == sizeof(error.path) - 1);
 	CHECK(error.path[0] == 'x' && error.path[sizeof(error.path) - 2] == 'e');
+}
+
+static void
+test_stack_slot_caller_text_stays_in_path(void)
+{
+	static const struct {
+		const char	*name;
+		const char	*path;
+	} cases[] = {
+		/* Plain error paths preserve control bytes; only omitted
+		 * components render them as hexadecimal escapes.
+		 */
+		{ "bogus\x1b", "bogus\x1b" },
+		{ "gpt", "gpt" }
+	};
+	memory_disk_t disk = disk_new(512);
+	fixture_t f;
+	fsimg_image_options_t options;
+	fsimg_io_ops_t ops;
+	fsimg_error_t error;
+
+	fixture_init(&f);
+	fsimg_io_ops_init(&ops);
+	ops.read_at = disk_read;
+	ops.get_size = disk_size;
+	CHECK(fsimg_io_from_callbacks(f.ctx, &ops, &disk, &f.io, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fsimg_image_options_init(&options);
+		options.stack.slots[FSIMG_LAYER_CONTAINER].state = FSIMG_SLOT_NAMED;
+		snprintf(options.stack.slots[FSIMG_LAYER_CONTAINER].name,
+		    sizeof(options.stack.slots[FSIMG_LAYER_CONTAINER].name),
+		    "%s", cases[i].name);
+		CHECK(fsimg_image_open(f.ctx, f.io, &options, &f.image,
+		    &error) == FSIMG_EINVAL);
+		CHECK(strcmp(error.message,
+		    "stack slot names a layer of another kind") == 0);
+		CHECK(error.layer[0] == '\0');
+		CHECK(strcmp(error.path, cases[i].path) == 0);
+		CHECK(!error.path_truncated);
+		CHECK(f.image == NULL);
+	}
+	fixture_free(&f);
+	free(disk.bytes);
 }
 
 /* The registry lists every layer once, with the suffixes the command
@@ -658,7 +702,7 @@ expect_scheme_truncated(fixture_t *f, const char *scheme, uint64_t missing)
 	CHECK(fsimg_image_verify(f->image, 0, &report, &error) == FSIMG_ECORRUPT);
 	CHECK(strstr(error.message, "truncated") != NULL);
 	CHECK(strstr(error.message, count) != NULL);
-	CHECK(strcmp(error.path, scheme) == 0);
+	CHECK(strcmp(error.layer, scheme) == 0);
 	if (strcmp(scheme, "gpt") == 0)
 		CHECK(strstr(error.message, "backup") != NULL);
 }
@@ -1824,7 +1868,7 @@ test_assumed_mbr_signature_selects_partition_bytes(void)
 	fixture_init(&f);
 	CHECK(fixture_open(&f, &disk, "fat12/mbr/-", 0, NULL) == FSIMG_OK);
 	CHECK(fsimg_image_get_info(f.image, &info, &error) == FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, "mbr") == 0);
+	CHECK(strcmp(error.layer, "mbr") == 0);
 
 	reopen_assuming_identity(&f, "fat12/mbr/-");
 	CHECK(fsimg_image_get_info(f.image, &info, NULL) == FSIMG_OK);
@@ -1961,7 +2005,7 @@ test_assume_identity_does_not_change_mbr_detection(void)
 	reopen_assuming_identity(&f, "fat12");
 	CHECK(fsimg_image_get_info(f.image, &info, &assumed) == FSIMG_EFORMAT);
 	CHECK(strcmp(plain.message, assumed.message) == 0);
-	CHECK(strcmp(plain.path, assumed.path) == 0);
+	CHECK(strcmp(plain.layer, assumed.layer) == 0);
 	fixture_free(&f);
 	free(disk.bytes);
 }
@@ -2265,6 +2309,7 @@ main(int argc, char **argv)
 	test_crc_oracle();
 	test_stack_grammar();
 	test_stack_rejections();
+	test_stack_slot_caller_text_stays_in_path();
 	test_registry();
 	test_gpt_read();
 	test_gpt_selectors();

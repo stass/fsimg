@@ -1977,7 +1977,7 @@ fsimg_cli_parse(int argc, char **argv, fsimg_cli_options_t *options,
 		status = fsimg_error_set(error, FSIMG_EUNSUPPORTED, 0,
 		    FSIMG_OP_CONTEXT, parse.unsupported);
 		if (parse.unsupported_name[0] != '\0')
-			fsimg_error_path(error, parse.unsupported_name);
+			fsimg_error_layer(error, parse.unsupported_name);
 	}
 	free(parse.limits);
 	free(parse.settings);

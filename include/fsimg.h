@@ -96,6 +96,17 @@ typedef struct fsimg_error {
 	bool		 offset_valid;
 	bool		 path_truncated;
 	bool		 message_truncated;
+	/*
+	 * The registered name of the layer, codec or filesystem the failure
+	 * belongs to, such as "dmg" or "zlib", NUL-terminated and empty for
+	 * none: an image layer failing on open, verification or a read
+	 * through it, a layer a resolved stack or plan refuses, or a codec
+	 * that fails decoding, whose name may equal a compression's. Every
+	 * registered name fits. path never attributes a failure to a layer:
+	 * caller text that spells a layer's name, such as a stack token,
+	 * stays in path.
+	 */
+	char		 layer[16];
 	char		 path[256];
 	char		 message[256];
 } fsimg_error_t;
@@ -975,8 +986,8 @@ typedef struct fsimg_write_options {
 	/* The compression wrapping the whole output, as -z says: a registered
 	 * compression's name, NUL-terminated, such as "gzip", whose layer
 	 * settings then apply; empty for none, the default. A name the
-	 * registry lacks is FSIMG_EINVAL and one this build cannot write
-	 * FSIMG_EUNSUPPORTED, each naming it in error.path.
+	 * registry lacks is FSIMG_EINVAL naming it in error.path, and one
+	 * this build cannot write FSIMG_EUNSUPPORTED naming it in error.layer.
 	 */
 	char		 compression[16];
 	uint64_t	 reserved[4];
@@ -1419,10 +1430,10 @@ typedef struct fsimg_extract_options {
  * for a name outside the format's profile fails the same way unless
  * SKIP_UNSUPPORTED omits it and its subtree; the statistics'
  * omitted_entries counts it. A failure creating a directory, or creating
- * or filling a file, names that entry, unless a layer or codec failing
- * under the read named itself; cancellation names the destination. An error naming an image entry or a layer
- * keeps that rendered path; any other failure after creation names the
- * destination.
+ * or filling a file, names that entry in path, and a layer or codec
+ * failing under the read names itself in layer as well; cancellation names
+ * the destination. An error naming an image entry keeps that rendered
+ * path; any other failure after creation names the destination.
  * With manifest_fd, every visited entry, a skipped one included, gets one
  * mtree(5) line carrying its kind, mode, owner and modification time (a
  * wall time read at wall_offset_minutes), a file's size and the SHA-256 of

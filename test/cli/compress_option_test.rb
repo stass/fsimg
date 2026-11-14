@@ -76,12 +76,12 @@ class CliTest < Minitest::Test
       [["-a", "-f", image], ["--compress=#{name}", "-f", "x.img"]].each do |selection|
         result = invoke(arguments: ["c", *selection, "-F", "fat12", "source"], expected: 1)
         assert_includes(result.stderr.lines,
-          "fsimg: writing this compression is not supported \"#{name}\"\n".b)
+          "fsimg: #{name}: writing this compression is not supported\n".b)
         assert_empty(result.stdout)
       end
       result = invoke(arguments: ["t", "--compress=#{name}", "-f", "human.img"], expected: 1)
       assert_includes(result.stderr.lines,
-        "fsimg: reading this compression is not supported \"#{name}\"\n".b)
+        "fsimg: #{name}: reading this compression is not supported\n".b)
       assert_empty(result.stdout)
       refute_path_exists(@root / image)
       refute_path_exists(@root / "x.img")
@@ -120,7 +120,7 @@ class CliTest < Minitest::Test
       if zstd_supported?
         invoke(arguments: ["W", "-f", image])
       else
-        assert_includes(result.stderr, 'writing this compression is not supported "zstd"'.b)
+        assert_includes(result.stderr, 'zstd: writing this compression is not supported'.b)
         refute_path_exists(@root / image)
       end
     end
@@ -142,9 +142,9 @@ class CliTest < Minitest::Test
         wrong_supported = compression_supported?(name: wrong)
         refused = invoke(arguments: ["t", "--compress=#{wrong}", "-f", "streamed"], expected: 1)
         assert_includes(refused.stderr, wrong_supported ? "no #{wrong} signature".b :
-          "reading this compression is not supported \"#{wrong}\"".b)
+          "#{wrong}: reading this compression is not supported".b)
       else
-        assert_includes(result.stderr, "writing this compression is not supported \"#{name}\"".b)
+        assert_includes(result.stderr, "#{name}: writing this compression is not supported".b)
         assert_empty(result.stdout)
       end
     end
@@ -165,7 +165,7 @@ class CliTest < Minitest::Test
       ["xz", "zstd"].each do |name|
         result = invoke(arguments: [mode, "--compress=#{name}", "-f", "human.img", *options], expected: 1)
         if !compression_supported?(name: name)
-          assert_includes(result.stderr, "reading this compression is not supported \"#{name}\"".b)
+          assert_includes(result.stderr, "#{name}: reading this compression is not supported".b)
           refute_includes(result.stderr, "invalid worker job description".b)
         else
           assert_includes(result.stderr, "no #{name} signature".b)

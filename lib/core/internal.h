@@ -215,6 +215,10 @@ size_t fsimg_rendered_tail(const char *, size_t, size_t);
  * error's path field, with path_truncated set when its tail was kept.
  */
 void fsimg_error_path(fsimg_error_t *, const char *);
+/* Name the layer, codec or filesystem an error belongs to, a registered
+ * name, unless an inner one already named itself.
+ */
+void fsimg_error_layer(fsimg_error_t *, const char *);
 /* Private fault injection: zero disables; n fails the nth subsequent attempt. */
 void fsimg_test_fail_alloc_after(fsimg_ctx_t *, uint64_t);
 /* Private test control: whether a transcode consults the zero ranges its

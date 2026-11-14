@@ -699,12 +699,12 @@ extract_entry(extract_state_t *state, const fsimg_entry_t *entry,
 	}
 	/* Cancellation is the caller's act, not the entry's failure, so it
 	 * names the destination as any other interruption does. An error
-	 * that already carries a path keeps it: a walker path the
-	 * reader rendered, or the registry name of a layer or codec that
-	 * failed under the read. A failed content read may have aborted the
-	 * reader, which releases the entry, so the name comes from the copy
-	 * select_parent made. A delivered path has no omitted component, so it
-	 * renders as a plain path.
+	 * that already carries a walker path the reader rendered keeps it; a
+	 * layer or codec failing under the read names itself in error.layer
+	 * and leaves path empty, so the entry is named too. A failed content read may have
+	 * aborted the reader, which releases the entry, so the name comes
+	 * from the copy select_parent made. A delivered path has no omitted
+	 * component, so it renders as a plain path.
 	 */
 	if (status != FSIMG_OK && status != FSIMG_DONE &&
 	    status != FSIMG_ECANCELLED && error != NULL &&

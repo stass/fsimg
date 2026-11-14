@@ -624,7 +624,7 @@ expect_failure(const buffer_t *bytes, fsimg_status_t status, const char *text)
 		fprintf(stderr, "expected \"%s\" in \"%s\"\n", text,
 		    error.message);
 	CHECK(strstr(error.message, text) != NULL);
-	CHECK(strcmp(error.path, "hbcifs") == 0 &&
+	CHECK(strcmp(error.layer, "hbcifs") == 0 &&
 	    error.operation == FSIMG_OP_IMAGE);
 	fixture_free(&f);
 	return (error);
@@ -816,7 +816,7 @@ test_header(void)
 	fixture_init(&f, 0, 0);
 	CHECK(open_buffer(&f, &file, &bytes, "ifs/-/hbcifs", &error) ==
 	    FSIMG_EFORMAT);
-	CHECK(strcmp(error.path, "hbcifs") == 0);
+	CHECK(strcmp(error.layer, "hbcifs") == 0);
 	fixture_free(&f);
 	fixture_init(&f, 0, 0);
 	CHECK(open_buffer(&f, &file, &bytes, NULL, &error) == FSIMG_OK);
@@ -916,7 +916,7 @@ test_carried(void)
 		fixture_init(&f, 0, 0);
 		CHECK(open_buffer(&f, &file, &bytes, refused[i], &error) ==
 		    FSIMG_EINVAL);
-		CHECK(strcmp(error.path, "hbcifs") == 0);
+		CHECK(strcmp(error.layer, "hbcifs") == 0);
 		if (i < 2)
 			CHECK(file.reads == 0);
 		CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
@@ -929,7 +929,7 @@ test_carried(void)
 	fsimg_write_options_init(&write_options);
 	CHECK(fsimg_writer_new(f.ctx, "fat32/hbcifs", &write_options, &writer,
 	    &error) == FSIMG_EINVAL);
-	CHECK(strcmp(error.path, "hbcifs") == 0);
+	CHECK(strcmp(error.layer, "hbcifs") == 0);
 	/* The carried filesystem passes the rule, but the disk plan refuses
 	 * a container with no writer. (The ImageFS writer is unregistered, so
 	 * the plan is reached directly.)
@@ -941,7 +941,7 @@ test_carried(void)
 	    .session = &session, .stack = &stack, .layers = &layers,
 	    .compression = "",
 	    .partitions = 1 }, &plan, &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strcmp(error.path, "hbcifs") == 0 &&
+	CHECK(strcmp(error.layer, "hbcifs") == 0 &&
 	    strstr(error.message, "read only") != NULL);
 	fsimg_disk_plan_free(&plan);
 	fixture_free(&f);
@@ -1030,7 +1030,7 @@ test_second_spool(void)
 	gzip = gzip_of(&bytes);
 	fixture_init(&f, 0, 0);
 	CHECK(open_buffer(&f, &file, &gzip, NULL, &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strcmp(error.path, "hbcifs") == 0);
+	CHECK(strcmp(error.layer, "hbcifs") == 0);
 	CHECK(strstr(error.message, "hbcifs") != NULL &&
 	    strstr(error.message, "gzip") != NULL);
 	/* The spool held the decompressed file and nothing more. */
@@ -1057,7 +1057,7 @@ test_second_spool(void)
 	options.spool_fd = spool_new(&f);
 	CHECK(fsimg_image_open_stream(f.ctx, ends[0], &options, &f.image,
 	    &error) == FSIMG_EUNSUPPORTED);
-	CHECK(strcmp(error.path, "hbcifs") == 0);
+	CHECK(strcmp(error.layer, "hbcifs") == 0);
 	CHECK(strstr(error.message, "hbcifs") != NULL &&
 	    strstr(error.message, "stream") != NULL);
 	CHECK(waitpid(child, &status, 0) == child);
@@ -1382,7 +1382,7 @@ test_assumed_hbcifs_identity(void)
 	fixture_init(&f, 0, 0);
 	CHECK(open_buffer(&f, &file, &bytes, "ifs/-/hbcifs", &plain) ==
 	    FSIMG_EFORMAT);
-	CHECK(strcmp(plain.path, "hbcifs") == 0);
+	CHECK(strcmp(plain.layer, "hbcifs") == 0);
 	fixture_free(&f);
 
 	/* Naming only ifs leaves container detection unchanged. */
@@ -1394,7 +1394,7 @@ test_assumed_hbcifs_identity(void)
 	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
 	CHECK(open_buffer(&f, &file, &bytes, "ifs", NULL) == FSIMG_OK);
 	CHECK(fsimg_image_get_info(f.image, &info, &assumed) == FSIMG_EFORMAT);
-	CHECK(strcmp(plain.path, assumed.path) == 0);
+	CHECK(strcmp(plain.layer, assumed.layer) == 0);
 	CHECK(strcmp(plain.message, assumed.message) == 0);
 	fixture_free(&f);
 
@@ -1407,7 +1407,7 @@ test_assumed_hbcifs_identity(void)
 	CHECK(fsimg_ctx_get_stats(f.ctx, &before, NULL) == FSIMG_OK);
 	CHECK(fsimg_image_verify(f.image, FSIMG_VERIFY_PAYLOAD, &report,
 	    &assumed) == FSIMG_ECORRUPT);
-	CHECK(strcmp(assumed.path, "hbcifs") == 0);
+	CHECK(strcmp(assumed.layer, "hbcifs") == 0);
 	CHECK(strcmp(assumed.message,
 	    "hbcifs identity was assumed: the header has no hbcifs identity") == 0);
 	CHECK(fsimg_ctx_get_stats(f.ctx, &after, NULL) == FSIMG_OK);
@@ -1435,7 +1435,7 @@ test_assumed_hbcifs_still_validates_payload_length(void)
 	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
 	CHECK(open_buffer(&f, &file, &bytes, "ifs/-/hbcifs", &error) ==
 	    FSIMG_ECORRUPT);
-	CHECK(strcmp(error.path, "hbcifs") == 0);
+	CHECK(strcmp(error.layer, "hbcifs") == 0);
 	CHECK(strstr(error.message, "payload length") != NULL);
 	fixture_free(&f);
 
@@ -1443,7 +1443,7 @@ test_assumed_hbcifs_still_validates_payload_length(void)
 	fixture_init(&f, 0, 0);
 	f.image_flags = FSIMG_IMAGE_ASSUME_IDENTITY;
 	CHECK(open_buffer(&f, &file, &bytes, "ifs/-/hbcifs", &error) != FSIMG_OK);
-	CHECK(strcmp(error.path, "hbcifs") == 0);
+	CHECK(strcmp(error.layer, "hbcifs") == 0);
 	fixture_free(&f);
 	free(bytes.bytes);
 	container_free(&c);

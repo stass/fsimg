@@ -13257,7 +13257,7 @@ test_damaged_codec_streams_are_corrupt_naming_the_algorithm(void)
 /*
  * The decoder's state is charged to the context: an 8 MiB MicroLZMA
  * dictionary that does not fit beside a 9 MiB decode window in the
- * smallest budget, 16 MiB, fails as a memory limit naming liblzma with
+ * smallest budget, 16 MiB, fails as a memory limit naming xz with
  * nothing decoded, and an allocation failure at each of a decode's
  * allocations fails the read and returns all memory.
  */
@@ -13289,8 +13289,8 @@ test_codec_decoder_memory_is_charged_and_returned_on_failure(void)
 		    &tree, large, 16 * 1024 * 1024, out, &error);
 		check_status("an 8 MiB dictionary beside a 9 MiB window",
 		    status, FSIMG_ELIMIT, &error);
-		EXPECT(strcmp(error.path, "liblzma") == 0,
-		    "the memory limit names liblzma, not \"%s\"", error.path);
+		EXPECT(strcmp(error.layer, "xz") == 0,
+		    "the memory limit names xz, not \"%s\"", error.layer);
 		gen_tree_free(&tree);
 		free(bytes);
 		free(out);

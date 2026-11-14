@@ -725,7 +725,10 @@ success is determined by exit status; the mandatory machine completion
 record belongs to `--json`.
 
 Human errors use `fsimg: explanation`, optionally with a quoted pathname and
-an OS error description. Prose has no enclosing quotes. Empty internal
+an OS error description. An error that names a layer, codec or filesystem
+in the record's `layer` field leads with it, `fsimg: dmg: explanation
+/path`, so a corrupt chunk under a file's extraction names both; the JSON
+error record carries it as `layer`, empty for none. Prose has no enclosing quotes. Empty internal
 fields, numeric errno values and generic status prefixes do not appear.
 Resource failures identify the resource, limit and observed demand. Actual
 cleanup failures, retained output and scratch paths, incomplete output,

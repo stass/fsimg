@@ -86,7 +86,7 @@ class CliTest < Minitest::Test
       ],
       expected: 1
     )
-    assert_includes(result.stderr, "the container is read only \"hbcifs\"".b, result.stderr)
+    assert_includes(result.stderr, "hbcifs: the container is read only".b, result.stderr)
     refute((root / "refused.ifs").exist?, "refused creation leaves no output image")
     invoke(arguments: ["cWf", "checked.dmg", "-F", "fat12/gpt/dmg", "-C", "source", "."])
     invoke(arguments: ["cf", "random.dmg", "-F", "fat12/dmg", "-C", "source", "."])

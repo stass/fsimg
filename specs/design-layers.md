@@ -107,7 +107,7 @@ sectors, and a container that rounds the disk up to a granularity above
 one byte, which is how a container pads (DMG and VHD to a 512-byte
 sector, simg to its block). A create or wrap stack that names such a
 filesystem and puts either below it is `FSIMG_EUNSUPPORTED`, naming the
-filesystem and the first such layer (`ifs/gpt`, `ifs/vhd`), when the disk
+filesystem in the message and the first such layer in `error.layer`, when the disk
 plan resolves the stack, before any byte is written: a scheme before any
 container setting is resolved, a container once its settings give its
 granularity. The property is the container's resolved granularity, not a
@@ -598,7 +598,7 @@ descriptor the open fails as a spool limit of zero, as a gzip input does.
 A spool-backed container inside gzip, or arriving as a stream, would need
 a second spool; that combination is `FSIMG_EUNSUPPORTED` naming both
 layers ("the hbcifs container inside gzip needs a second spool"), with the
-container in `error.path`, decided at the container claim before any byte
+container in `error.layer`, decided at the container claim before any byte
 is decoded. The [open question](#open-questions) weighs a second spool.
 
 The disk a spool-backed peel yields is a read-only object of the decoded

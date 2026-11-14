@@ -402,7 +402,7 @@ container padding and the zlib version. `c -f -` streams the image to
 stdout and refuses a terminal; a failure after the first byte reports
 incomplete output. `cW` verifies the container before the table and the
 volume and names the failing layer, which the library reports in
-`error.path`. `-a` requires a container suffix to name the stack's
+`error.layer`. `-a` requires a container suffix to name the stack's
 container and refuses the reserved `.zst` and `.xz` compressions. The
 library adds `fsimg_writer_output` stream sinks and container output, and
 `W -d` folds DMG zero runs and DONT_CARE chunks into its CRC32s without
