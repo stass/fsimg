@@ -672,7 +672,8 @@ container_emit(unsigned char *raw, size_t length,
 		for (uint32_t j = 0; j < run->mapping_count; j++) {
 			mapping = &run->mappings[j];
 			if (mapping->size == 0 || mapping->size % b != 0 ||
-			    mapping->address == 0 || mapping->address >= length / b ||
+			    mapping->address == 0 ||
+			    mapping->address >= length / b ||
 			    mapping->size / b > length / b - mapping->address)
 				return (false);
 		}
@@ -700,10 +701,12 @@ container_emit(unsigned char *raw, size_t length,
 			map = (apfs_gen_checkpoint_t){
 			    .object = { .oid = address, .xid = run->xid,
 			    .type = 0x4000000c },
-			    .mappings = count == 0 ? NULL : run->mappings + first,
+			    .mappings = count == 0 ? NULL :
+			    run->mappings + first,
 			    .count = (uint32_t)count,
 			    .flags = j + 1 == run->mapping_blocks ? 1 : 0 };
-			if (!apfs_gen_checkpoint_build(raw + address * b, b, &map))
+			if (!apfs_gen_checkpoint_build(raw + address * b, b,
+			    &map))
 				return (false);
 		}
 		address = nx.desc_base + (run->desc_index +
@@ -726,34 +729,40 @@ container_emit(unsigned char *raw, size_t length,
 					return (false);
 				spaceman.object = object;
 				if (p->spaceman_ring_blocks != 0) {
-					spaceman.ip_bm_block_count = p->spaceman_ring_blocks;
+					spaceman.ip_bm_block_count =
+					    p->spaceman_ring_blocks;
 					spaceman.devices[0].addr_offset =
 					    spaceman.ip_bm_free_next_offset +
 					    2 * spaceman.ip_bm_block_count;
 					spaceman.devices[1].addr_offset =
-					    spaceman.devices[0].addr_offset + 8 *
-					    (spaceman.devices[0].cab_count != 0 ?
-					    spaceman.devices[0].cab_count :
+					    spaceman.devices[0].addr_offset +
+					    8 *
+					    (spaceman.devices[0].cab_count !=
+					    0 ? spaceman.devices[0].cab_count :
 					    spaceman.devices[0].cib_count);
 				}
-				if (!apfs_gen_spaceman_build(raw + mapping->address * b,
+				if (!apfs_gen_spaceman_build(raw +
+				    mapping->address * b,
 				    mapping->size, &spaceman))
 					return (false);
 			} else if ((mapping->type & 0xffff) == 18) {
 				list = (apfs_gen_reap_list_t){ .object = object,
 				    .capacity = (mapping->size - 64) / 40,
 				    .first = UINT32_MAX, .last = UINT32_MAX };
-				if (!apfs_gen_reap_list_build(raw + mapping->address * b,
+				if (!apfs_gen_reap_list_build(raw +
+				    mapping->address * b,
 				    mapping->size, &list))
 					return (false);
 			} else if ((mapping->type & 0xffff) == 17) {
 				reaper = (apfs_gen_reaper_t){ .object = object,
 				    .flags = 1, .next_reap_id = 1 };
-				if (!apfs_gen_reaper_build(raw + mapping->address * b,
+				if (!apfs_gen_reaper_build(raw +
+				    mapping->address * b,
 				    mapping->size, &reaper))
 					return (false);
 			} else {
-				if (!apfs_gen_object_build(raw + mapping->address * b,
+				if (!apfs_gen_object_build(raw +
+				    mapping->address * b,
 				    mapping->size, &object))
 					return (false);
 			}
@@ -890,7 +899,9 @@ apfs_gen_tree_build(unsigned char *raw, size_t length,
 		if (!apfs_gen_node_build(out, b, &node))
 			goto done;
 		if (p->nonaligned) {
-			/* Shift keys into free space; all relative offsets become odd. */
+			/* Shift keys into free space; all relative offsets
+			 * become odd.
+			 */
 			key_start = 56 + (p->toc_capacity != 0 ?
 			    p->toc_capacity : 4 * plan[i].count);
 			value_end = b - (i + 1 == count ? 40 : 0);
@@ -902,7 +913,8 @@ apfs_gen_tree_build(unsigned char *raw, size_t length,
 			out[key_start] = 0;
 			put_le(out + 44, 16 * plan[i].count + 1, 2);
 			put_le(out + 46, value_end - key_start -
-			    (16 + records[0].value_size) * plan[i].count - 1, 2);
+			    (16 + records[0].value_size) *
+			    plan[i].count - 1, 2);
 			for (size_t j = 0; j < plan[i].count; j++)
 				put_le(out + 56 + 4 * j, 16 * j + 1, 2);
 			apfs_gen_seal(out, b);
@@ -976,7 +988,7 @@ apfs_gen_fs_tree_build(unsigned char *raw, size_t length,
 			    .key_size = p->records[plan[first].key].key_size,
 			    .value = values + 8 * j, .value_size = 8 };
 		}
-		/* Packed spans need nonaligned entries; virtual storage has no flag. */
+		/* Packed spans are nonaligned; virtual storage has no flag. */
 		node = (apfs_gen_node_t){
 		    .object = { .oid = p->first_oid + i, .xid = p->xid,
 		    .type = i + 1 == count ? 2 : 3, .subtype = 14 },
@@ -1039,7 +1051,8 @@ bool
 apfs_gen_inode_val_build(unsigned char *raw, size_t length,
     const apfs_gen_inode_val_t *p)
 {
-	if (length < GEN_INODE_VAL_BYTES || length - GEN_INODE_VAL_BYTES != p->xfields_len)
+	if (length < GEN_INODE_VAL_BYTES ||
+	    length - GEN_INODE_VAL_BYTES != p->xfields_len)
 		return (false);
 	bzero(raw, length);
 	put_le(raw, p->parent, 8);
@@ -1067,7 +1080,8 @@ bool
 apfs_gen_drec_val_build(unsigned char *raw, size_t length,
     const apfs_gen_drec_val_t *p)
 {
-	if (length < GEN_DREC_VAL_BYTES || length - GEN_DREC_VAL_BYTES != p->xfields_len)
+	if (length < GEN_DREC_VAL_BYTES ||
+	    length - GEN_DREC_VAL_BYTES != p->xfields_len)
 		return (false);
 	bzero(raw, length);
 	put_le(raw, p->child, 8);
@@ -1110,7 +1124,8 @@ bool
 apfs_gen_snap_meta_val_build(unsigned char *raw, size_t length,
     const apfs_gen_snap_meta_val_t *p)
 {
-	if (length < GEN_SNAP_META_VAL_BYTES || length - GEN_SNAP_META_VAL_BYTES != (size_t)p->name_len + 1)
+	if (length < GEN_SNAP_META_VAL_BYTES ||
+	    length - GEN_SNAP_META_VAL_BYTES != (size_t)p->name_len + 1)
 		return (false);
 	bzero(raw, length);
 	put_le(raw, p->extentref_tree_oid, 8);
@@ -1129,7 +1144,8 @@ bool
 apfs_gen_file_info_val_build(unsigned char *raw, size_t length,
     const apfs_gen_file_info_val_t *p)
 {
-	if (length < GEN_FILE_INFO_VAL_BYTES || length - GEN_FILE_INFO_VAL_BYTES != p->hash_size)
+	if (length < GEN_FILE_INFO_VAL_BYTES ||
+	    length - GEN_FILE_INFO_VAL_BYTES != p->hash_size)
 		return (false);
 	bzero(raw, length);
 	put_le(raw, p->hashed_len, 2);
@@ -1333,4 +1349,688 @@ apfs_gen_name_hash(const uint32_t *scalars, size_t count)
 		}
 	}
 	return (crc & UINT32_C(0x3fffff));
+}
+
+/*
+ * A bounded test volume: fixed metadata regions leave blocks 256..1023 for
+ * payload. Leaves have a caller-selected fixed record count (eight by default).
+ */
+#define VOLUME_BLOCK 4096u
+#define VOLUME_BLOCKS 1024u
+#define VOLUME_BYTES ((size_t)VOLUME_BLOCK * VOLUME_BLOCKS)
+#define VOLUME_ENTRIES 64u
+#define VOLUME_RECORDS (4 * VOLUME_ENTRIES) /* Total across all record kinds. */
+
+/*
+ * Fixed block layout (all addresses are container-relative):
+ * 0       container superblock
+ * 1..8    checkpoint descriptors
+ * 9..12   checkpoint data: spaceman, reaper, two free-queue roots
+ * 13..60  remaining checkpoint data capacity
+ * 61..76  internal-pool bitmap ring
+ * 77..82  internal pool: chunk-info block, allocation bitmap, spare blocks
+ * 83..89  reserved gap
+ * 90..91  container object map and its tree
+ * 92..99  reserved gap
+ * 100     volume superblock
+ * 101     snapshot tree
+ * 102     extent-reference tree
+ * 103     volume object map
+ * 104..127 volume object-map tree capacity
+ * 128..255 filesystem tree capacity
+ * 256..1023 file payload
+ */
+enum {
+	VOLUME_SPACEMAN = 9,
+	VOLUME_REAPER = 10,
+	VOLUME_FREE_QUEUE_MAIN = 11,
+	VOLUME_FREE_QUEUE_POOL = 12,
+	VOLUME_POOL_BITMAP = 61,
+	VOLUME_CHUNK_INFO = 77,
+	VOLUME_ALLOCATION_BITMAP = 78,
+	VOLUME_POOL_END = 83,
+	VOLUME_CONTAINER_MAP = 90,
+	VOLUME_CONTAINER_MAP_TREE = 91,
+	VOLUME_SUPERBLOCK = 100,
+	VOLUME_SNAPSHOT_TREE = 101,
+	VOLUME_EXTENTREF_TREE = 102,
+	VOLUME_MAP = 103,
+	VOLUME_MAP_TREE = 104,
+	VOLUME_TREE_BASE = 128,
+	VOLUME_DATA_BASE = 256
+};
+
+enum {
+	VOLUME_KIND_PHYSICAL_EXTENT = 2,
+	VOLUME_XFIELD_NAME = 4,
+	VOLUME_XFIELD_DSTREAM = 8,
+	VOLUME_XFIELD_DO_NOT_COPY = 2,
+	VOLUME_DREC_DIRECTORY = 4,
+	VOLUME_DREC_FILE = 8,
+	VOLUME_XATTR_EMBEDDED = 2,
+	VOLUME_OMAP_MANUALLY_MANAGED = 1
+};
+
+typedef struct volume_entry {
+	uint64_t oid;
+	uint64_t parent;
+	uint64_t size;
+	uint64_t physical;
+	unsigned char *data;
+	char name[128];
+	bool directory;
+} volume_entry_t;
+
+typedef struct volume_record {
+	unsigned char key[256];
+	unsigned char value[512];
+	uint16_t key_size;
+	uint16_t value_size;
+} volume_record_t;
+
+struct apfs_gen_volume {
+	volume_entry_t entries[VOLUME_ENTRIES];
+	volume_record_t records[VOLUME_RECORDS];
+	size_t entry_count;
+	size_t record_count;
+	uint64_t attribute_oid;
+	uint16_t records_per_leaf;
+	uint16_t extent_blocks;
+	bool built;
+};
+
+static bool volume_add(apfs_gen_volume_t *, const volume_entry_t *);
+static bool volume_records_build(apfs_gen_volume_t *);
+static bool volume_entry_records(apfs_gen_volume_t *, const volume_entry_t *);
+static bool volume_inode_record(apfs_gen_volume_t *, const volume_entry_t *);
+static bool volume_drec_record(apfs_gen_volume_t *, const volume_entry_t *);
+static bool volume_stream_records(apfs_gen_volume_t *, const volume_entry_t *);
+static int volume_record_compare(const void *, const void *);
+static uint64_t volume_integer(const unsigned char *, unsigned);
+static bool volume_map_build(unsigned char *, uint64_t,
+    const apfs_gen_omap_record_t *, size_t, uint64_t *);
+static bool volume_node_build(unsigned char *, uint64_t, uint32_t,
+    const apfs_gen_record_t *, uint32_t);
+static bool volume_allocation_build(unsigned char *, uint64_t, uint64_t);
+static bool volume_image_build(apfs_gen_volume_t *, unsigned char *);
+
+static uint64_t
+volume_integer(const unsigned char *raw, unsigned width)
+{
+	uint64_t value = 0;
+
+	for (unsigned i = 0; i < width; i++)
+		value |= (uint64_t)raw[i] << (8 * i);
+	return (value);
+}
+
+apfs_gen_volume_t *
+apfs_gen_volume_new(void)
+{
+	apfs_gen_volume_t *volume;
+
+	volume = calloc(1, sizeof(*volume));
+	if (volume == NULL)
+		return (NULL);
+	volume->records_per_leaf = 8;
+	if (!apfs_gen_volume_directory(volume, 2, 1, "root"))
+		goto fail;
+	if (!apfs_gen_volume_directory(volume, 3, 1, "private"))
+		goto fail;
+	return (volume);
+ fail:
+	apfs_gen_volume_free(volume);
+	return (NULL);
+}
+
+void
+apfs_gen_volume_free(apfs_gen_volume_t *volume)
+{
+	if (volume == NULL)
+		return;
+	for (size_t i = 0; i < volume->entry_count; i++)
+		free(volume->entries[i].data);
+	free(volume);
+}
+
+static bool
+volume_add(apfs_gen_volume_t *volume, const volume_entry_t *entry)
+{
+	bool parent_found = entry->parent == 1 && entry->oid <= 3;
+
+	if (volume->built || volume->entry_count == VOLUME_ENTRIES ||
+	    entry->oid < 2 || entry->oid > GEN_JKEY_OID_MASK ||
+	    entry->name[0] == '\0' || strchr(entry->name, '/') != NULL ||
+	    strcmp(entry->name, ".") == 0 || strcmp(entry->name, "..") == 0)
+		return (false);
+	for (size_t i = 0; i < volume->entry_count; i++) {
+		const volume_entry_t *other = &volume->entries[i];
+
+		if (other->oid == entry->oid ||
+		    (other->parent == entry->parent &&
+		    strcmp(other->name, entry->name) == 0))
+			return (false);
+		if (other->oid == entry->parent && other->directory)
+			parent_found = true;
+	}
+	if (!parent_found)
+		return (false);
+	volume->entries[volume->entry_count] = *entry;
+	volume->entry_count++;
+	return (true);
+}
+
+bool
+apfs_gen_volume_directory(apfs_gen_volume_t *volume, uint64_t oid,
+    uint64_t parent, const char *name)
+{
+	volume_entry_t entry = { .oid = oid, .parent = parent,
+	    .directory = true };
+
+	if (strlen(name) >= sizeof(entry.name))
+		return (false);
+	bcopy(name, entry.name, strlen(name) + 1);
+	return (volume_add(volume, &entry));
+}
+
+bool
+apfs_gen_volume_file(apfs_gen_volume_t *volume, uint64_t oid,
+    uint64_t parent, const char *name, const unsigned char *data, size_t size)
+{
+	volume_entry_t entry = { .oid = oid, .parent = parent, .size = size };
+
+	if (strlen(name) >= sizeof(entry.name) || size >
+	    (VOLUME_BLOCKS - VOLUME_DATA_BASE) * VOLUME_BLOCK)
+		return (false);
+	bcopy(name, entry.name, strlen(name) + 1);
+	if (data != NULL && size != 0) {
+		entry.data = malloc(size);
+		if (entry.data == NULL)
+			return (false);
+		bcopy(data, entry.data, size);
+	}
+	if (!volume_add(volume, &entry)) {
+		free(entry.data);
+		return (false);
+	}
+	return (true);
+}
+
+bool
+apfs_gen_volume_layout(apfs_gen_volume_t *volume, uint16_t leaf_records,
+    uint16_t extent_blocks)
+{
+	if (volume->built || leaf_records == 0 || leaf_records > 8)
+		return (false);
+	volume->records_per_leaf = leaf_records;
+	volume->extent_blocks = extent_blocks;
+	return (true);
+}
+
+bool
+apfs_gen_volume_attribute(apfs_gen_volume_t *volume, uint64_t oid)
+{
+	if (volume->built || volume->attribute_oid != 0)
+		return (false);
+	for (size_t i = 0; i < volume->entry_count; i++) {
+		if (volume->entries[i].oid == oid &&
+		    !volume->entries[i].directory) {
+			volume->attribute_oid = oid;
+			return (true);
+		}
+	}
+	return (false);
+}
+
+static bool
+volume_inode_record(apfs_gen_volume_t *volume, const volume_entry_t *entry)
+{
+	unsigned char fields[256], stream[GEN_DSTREAM_BYTES];
+	apfs_gen_xfield_t xf[] = {
+		{ .type = VOLUME_XFIELD_NAME,
+		.flags = VOLUME_XFIELD_DO_NOT_COPY,
+		.data = (const unsigned char *)entry->name,
+		.size = (uint16_t)(strlen(entry->name) + 1) },
+		{ .type = VOLUME_XFIELD_DSTREAM,
+		.data = stream, .size = sizeof(stream) }
+	};
+	uint64_t allocated = entry->physical == 0 ? 0 :
+	    (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK * VOLUME_BLOCK;
+	apfs_gen_dstream_t ds = { .size = entry->size,
+	    .alloced_size = allocated };
+	apfs_gen_inode_val_t inode = { .parent = entry->parent,
+	    .private_id = entry->oid, .count = entry->directory ? 0 : 1,
+	    .mode = entry->directory ? 0040755 : 0100644 };
+	volume_record_t *r;
+	uint16_t nfields = entry->directory ? 1 : 2;
+	size_t length = 4 + 4 * nfields + (xf[0].size + 7u) / 8u * 8u;
+
+	if (entry->directory) {
+		for (size_t i = 0; i < volume->entry_count; i++)
+			inode.count += volume->entries[i].parent == entry->oid;
+	} else {
+		if (!apfs_gen_dstream_build(stream, sizeof(stream), &ds))
+			return (false);
+		length += sizeof(stream);
+	}
+	if (!apfs_gen_xfields_build(fields, length, xf, nfields))
+		return (false);
+	inode.xfields = fields;
+	inode.xfields_len = length;
+	r = &volume->records[volume->record_count++];
+	r->key_size = GEN_JKEY_BYTES;
+	r->value_size = (uint16_t)(GEN_INODE_VAL_BYTES + length);
+	if (!apfs_gen_jkey_build(r->key, r->key_size, entry->oid,
+	    APFS_GEN_KIND_INODE))
+		return (false);
+	if (!apfs_gen_inode_val_build(r->value, r->value_size, &inode))
+		return (false);
+
+	return (true);
+}
+
+static bool
+volume_drec_record(apfs_gen_volume_t *volume, const volume_entry_t *entry)
+{
+	apfs_gen_drec_key_t key = { .parent = entry->parent,
+	    .name = entry->name, .name_len = (uint16_t)strlen(entry->name) };
+	apfs_gen_drec_val_t drec = { .child = entry->oid,
+	    .flags = entry->directory ?
+	    VOLUME_DREC_DIRECTORY : VOLUME_DREC_FILE };
+	volume_record_t *r;
+
+	r = &volume->records[volume->record_count++];
+	r->key_size = (uint16_t)(GEN_DREC_KEY_BYTES + key.name_len + 1);
+	r->value_size = GEN_DREC_VAL_BYTES;
+	if (!apfs_gen_drec_key_build(r->key, r->key_size, &key))
+		return (false);
+	if (!apfs_gen_drec_val_build(r->value, r->value_size, &drec))
+		return (false);
+	return (true);
+}
+
+static bool
+volume_stream_records(apfs_gen_volume_t *volume, const volume_entry_t *entry)
+{
+	uint64_t allocated = entry->physical == 0 ? 0 :
+	    (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK * VOLUME_BLOCK;
+	apfs_gen_extent_val_t extent = { .length = allocated,
+	    .phys_block = entry->physical };
+	volume_record_t *r;
+
+	r = &volume->records[volume->record_count++];
+	r->key_size = GEN_JKEY_BYTES;
+	r->value_size = GEN_DSTREAM_ID_VAL_BYTES;
+	if (!apfs_gen_jkey_build(r->key, r->key_size, entry->oid,
+	    APFS_GEN_KIND_DSTREAM_ID))
+		return (false);
+	if (!apfs_gen_dstream_id_val_build(r->value, r->value_size, 1))
+		return (false);
+	if (volume->attribute_oid == entry->oid) {
+		apfs_gen_name_key_t name = { .oid = entry->oid,
+		    .name = "user.test", .name_len = 9 };
+		apfs_gen_xattr_val_t value = { .flags = VOLUME_XATTR_EMBEDDED,
+		    .data_len = 3,
+		    .data = (const unsigned char *)"abc" };
+
+		if (volume->record_count == VOLUME_RECORDS)
+			return (false);
+		r = &volume->records[volume->record_count++];
+		r->key_size = GEN_NAME_KEY_BYTES + 10;
+		r->value_size = GEN_XATTR_VAL_BYTES + 3;
+		if (!apfs_gen_xattr_key_build(r->key, r->key_size, &name))
+			return (false);
+		if (!apfs_gen_xattr_val_build(r->value, r->value_size, &value))
+			return (false);
+	}
+	for (uint64_t offset = 0; offset < allocated; offset += extent.length) {
+		if (volume->record_count == VOLUME_RECORDS)
+			return (false);
+		extent.length = allocated - offset;
+		if (volume->extent_blocks != 0 && extent.length >
+		    (uint64_t)volume->extent_blocks * VOLUME_BLOCK)
+			extent.length = (uint64_t)volume->extent_blocks *
+			    VOLUME_BLOCK;
+		extent.phys_block = entry->physical + offset / VOLUME_BLOCK;
+		r = &volume->records[volume->record_count++];
+		r->key_size = GEN_EXTENT_KEY_BYTES;
+		r->value_size = GEN_EXTENT_VAL_BYTES;
+		if (!apfs_gen_extent_key_build(r->key, r->key_size, entry->oid,
+		    offset))
+			return (false);
+		if (!apfs_gen_extent_val_build(r->value, r->value_size,
+		    &extent))
+			return (false);
+	}
+	return (true);
+}
+
+static bool
+volume_entry_records(apfs_gen_volume_t *volume, const volume_entry_t *entry)
+{
+	if (!volume_inode_record(volume, entry))
+		return (false);
+	if (!volume_drec_record(volume, entry))
+		return (false);
+	if (entry->directory)
+		return (true);
+	return (volume_stream_records(volume, entry));
+}
+
+static int
+volume_record_compare(const void *left, const void *right)
+{
+	const volume_record_t *a = left, *b = right;
+	uint64_t ak = volume_integer(a->key, 8);
+	uint64_t bk = volume_integer(b->key, 8);
+	uint64_t ao = ak & GEN_JKEY_OID_MASK, bo = bk & GEN_JKEY_OID_MASK;
+	uint8_t kind = (uint8_t)(ak >> 60);
+
+	if (ao != bo)
+		return (ao < bo ? -1 : 1);
+	if (kind != bk >> 60)
+		return (kind < bk >> 60 ? -1 : 1);
+	if (kind == APFS_GEN_KIND_DREC)
+		return (strcmp((const char *)a->key + GEN_DREC_KEY_BYTES,
+		    (const char *)b->key + GEN_DREC_KEY_BYTES));
+	if (kind == APFS_GEN_KIND_FILE_EXTENT) {
+		ak = volume_integer(a->key + 8, 8);
+		bk = volume_integer(b->key + 8, 8);
+		return (ak < bk ? -1 : ak > bk);
+	}
+	return (0);
+}
+
+static bool
+volume_records_build(apfs_gen_volume_t *volume)
+{
+	uint64_t physical = VOLUME_DATA_BASE, blocks;
+
+	volume->record_count = 0;
+	for (size_t i = 0; i < volume->entry_count; i++) {
+		volume_entry_t *entry = &volume->entries[i];
+
+		blocks = entry->data == NULL ? 0 :
+		    (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK;
+		if (blocks > VOLUME_BLOCKS - physical)
+			return (false);
+		entry->physical = blocks == 0 ? 0 : physical;
+		physical += blocks;
+		if (volume->record_count > VOLUME_RECORDS - 3)
+			return (false);
+		if (!volume_entry_records(volume, entry))
+			return (false);
+	}
+	qsort(volume->records, volume->record_count,
+	    sizeof(volume->records[0]), volume_record_compare);
+	return (true);
+}
+
+static bool
+volume_map_build(unsigned char *image, uint64_t address,
+    const apfs_gen_omap_record_t *records, size_t count, uint64_t *blocks)
+{
+	apfs_gen_tree_t tree = { .records = records, .count = count,
+	    .base = address + 1, .xid = 10, .block_size = VOLUME_BLOCK,
+	    .records_per_leaf = 16, .children_per_index = 8 };
+	apfs_gen_omap_t map = {
+		.object = { .oid = address, .xid = 10, .type = 0x4000000b },
+		.flags = address == VOLUME_CONTAINER_MAP ?
+		    VOLUME_OMAP_MANUALLY_MANAGED : 0,
+		.tree_type = 0x40000002
+	};
+
+	if (!apfs_gen_tree_build(image, VOLUME_BYTES, &tree,
+	    &map.tree_oid, blocks))
+		return (false);
+	return (apfs_gen_omap_build(image + address * VOLUME_BLOCK,
+	    VOLUME_BLOCK, &map));
+}
+
+static bool
+volume_node_build(unsigned char *image, uint64_t address, uint32_t subtype,
+    const apfs_gen_record_t *records, uint32_t count)
+{
+	apfs_gen_node_t node = {
+		.object = { .oid = address, .xid = 10,
+		.type = 0x40000002, .subtype = subtype },
+		.flags = GEN_APFS_ROOT | GEN_APFS_LEAF,
+		.info = { .flags = 0x50, .node_size = VOLUME_BLOCK,
+		.key_count = count, .node_count = 1 },
+		.records = records, .count = count
+	};
+
+	return (apfs_gen_node_build(image + address * VOLUME_BLOCK,
+	    VOLUME_BLOCK, &node));
+}
+
+static bool
+volume_allocation_build(unsigned char *image, uint64_t tree_blocks,
+    uint64_t map_blocks)
+{
+	apfs_gen_spaceman_t sm;
+	apfs_gen_chunk_t chunk = { .xid = 10, .block_count = VOLUME_BLOCKS,
+	    .bitmap_address = VOLUME_ALLOCATION_BITMAP };
+	apfs_gen_chunks_t cib = {
+		.object = { .oid = VOLUME_CHUNK_INFO, .xid = 10,
+		.type = 0x40000007 },
+		.chunks = &chunk, .count = 1
+	};
+	unsigned char *bitmap = image + VOLUME_ALLOCATION_BITMAP * VOLUME_BLOCK;
+	unsigned char *raw = image + VOLUME_SPACEMAN * VOLUME_BLOCK;
+	bool used;
+
+	if (apfs_gen_spaceman_geometry(VOLUME_BLOCK, VOLUME_BLOCKS,
+	    &sm) != VOLUME_BLOCK)
+		return (false);
+	sm.object = (apfs_gen_object_t){ .oid = 500, .xid = 10,
+	    .type = 0x80000005 };
+	sm.ip_bm_base = VOLUME_POOL_BITMAP;
+	sm.ip_base = VOLUME_CHUNK_INFO;
+	sm.ip_bm_free_head = 1;
+	sm.ip_bm_free_tail = 15;
+	for (uint64_t i = 0; i < VOLUME_DATA_BASE; i++) {
+		used = i < VOLUME_POOL_END || i == VOLUME_CONTAINER_MAP ||
+		    i == VOLUME_CONTAINER_MAP_TREE ||
+		    (i >= VOLUME_SUPERBLOCK &&
+		    i < VOLUME_MAP_TREE + map_blocks) ||
+		    (i >= VOLUME_TREE_BASE &&
+		    i < VOLUME_TREE_BASE + tree_blocks);
+		if (used)
+			bitmap[i / 8] |= (unsigned char)(1u << (i % 8));
+	}
+	/* The two pool blocks hold the CIB and main allocation bitmap. */
+	image[VOLUME_POOL_BITMAP * VOLUME_BLOCK] = 3;
+	for (uint64_t i = 0; i < VOLUME_BLOCKS; i++)
+		chunk.free_count += (bitmap[i / 8] & (1u << (i % 8))) == 0;
+	sm.devices[0].free_count = chunk.free_count;
+	if (!apfs_gen_chunks_build(image + VOLUME_CHUNK_INFO * VOLUME_BLOCK,
+	    VOLUME_BLOCK, &cib))
+		return (false);
+	if (!apfs_gen_spaceman_build(raw, VOLUME_BLOCK, &sm))
+		return (false);
+	put_le(raw + sm.ip_bm_xid_offset, 10, 8);
+	put_le(raw + sm.ip_bitmap_offset, 0, 2);
+	for (uint32_t i = 0; i < sm.ip_bm_block_count; i++)
+		put_le(raw + sm.ip_bm_free_next_offset + 2 * i,
+		    i == 0 || i + 1 == sm.ip_bm_block_count ? 65535 : i + 1, 2);
+	put_le(raw + sm.devices[0].addr_offset, VOLUME_CHUNK_INFO, 8);
+	return (apfs_gen_seal(raw, VOLUME_BLOCK));
+}
+
+static bool
+volume_image_build(apfs_gen_volume_t *volume, unsigned char *image)
+{
+	apfs_gen_mapping_t mappings[] = {
+		{ .type = 0x80000005, .size = VOLUME_BLOCK,
+		.oid = 500, .address = VOLUME_SPACEMAN },
+		{ .type = 0x80000011, .size = VOLUME_BLOCK,
+		.oid = 501, .address = VOLUME_REAPER },
+		{ .type = 0x80000002, .subtype = 9, .size = VOLUME_BLOCK,
+		.oid = 502, .address = VOLUME_FREE_QUEUE_MAIN },
+		{ .type = 0x80000002, .subtype = 9, .size = VOLUME_BLOCK,
+		.oid = 503, .address = VOLUME_FREE_QUEUE_POOL }
+	};
+	apfs_gen_run_t run = { .xid = 10, .next_xid = 11,
+	    .mappings = mappings, .mapping_count = 4, .mapping_blocks = 1,
+	    .desc_next = 2, .data_len = 4, .data_next = 4 };
+	apfs_gen_container_t container = {
+		.nx = { .magic = 0x4253584e, .block_size = VOLUME_BLOCK,
+		.block_count = VOLUME_BLOCKS, .uuid = { 1 },
+		.incompat_features = 2,
+		.desc_base = 1, .desc_blocks = 8, .data_base = VOLUME_SPACEMAN,
+		.data_blocks = 52, .max_volumes = 1, .volume_oids = { 1000 },
+		.spaceman_oid = 500, .reaper_oid = 501,
+		.omap_oid = VOLUME_CONTAINER_MAP },
+		.runs = &run, .count = 1, .block0_xid = 10
+	};
+	apfs_gen_omap_record_t volume_map = {
+		.key = { .oid = 1000, .xid = 10 },
+		.value = { .size = VOLUME_BLOCK, .address = VOLUME_SUPERBLOCK }
+	};
+	apfs_gen_fs_t fs = {
+		.object = { .oid = 1000, .xid = 10, .type = 13 },
+		.magic = 0x42535041, .uuid = { 2 }, .name = "Contracts",
+		.flags = 1, .root_tree_type = 2,
+		.extentref_tree_type = 0x40000002,
+		.snapshot_tree_type = 0x40000002, .omap_oid = VOLUME_MAP,
+		.snapshot_tree_oid = VOLUME_SNAPSHOT_TREE,
+		.extentref_tree_oid = VOLUME_EXTENTREF_TREE
+	};
+	apfs_gen_record_t records[VOLUME_RECORDS], extents[VOLUME_ENTRIES];
+	apfs_gen_omap_record_t nodes[VOLUME_TREE_BASE - 1];
+	unsigned char keys[VOLUME_ENTRIES][GEN_JKEY_BYTES];
+	unsigned char values[VOLUME_ENTRIES][GEN_PEXT_VAL_BYTES];
+	apfs_gen_fs_tree_t tree = { .records = records,
+	    .count = volume->record_count, .first_oid = 2000,
+	    .base = VOLUME_TREE_BASE, .xid = 10, .block_size = VOLUME_BLOCK,
+	    .records_per_leaf = volume->records_per_leaf,
+	    .children_per_index = 8 };
+	uint64_t tree_blocks, map_blocks, blocks;
+	uint32_t extent_count = 0;
+
+	if (!apfs_gen_container_build(image, VOLUME_BYTES, &container))
+		return (false);
+	if (!volume_map_build(image, VOLUME_CONTAINER_MAP, &volume_map, 1,
+	    &blocks))
+		return (false);
+	for (size_t i = 0; i < volume->record_count; i++) {
+		const volume_record_t *r = &volume->records[i];
+
+		records[i] = (apfs_gen_record_t){ .key = r->key,
+		    .value = r->value, .key_size = r->key_size,
+		    .value_size = r->value_size };
+	}
+	if (!apfs_gen_fs_tree_build(image, VOLUME_BYTES, &tree, nodes,
+	    sizeof(nodes) / sizeof(nodes[0]), &fs.root_tree_oid, &tree_blocks))
+		return (false);
+	if (!volume_map_build(image, VOLUME_MAP, nodes, tree_blocks,
+	    &map_blocks))
+		return (false);
+	if (VOLUME_MAP_TREE + map_blocks > VOLUME_TREE_BASE)
+		return (false);
+	fs.alloc_blocks = 3 + map_blocks + tree_blocks;
+	for (size_t i = 0; i < volume->entry_count; i++) {
+		const volume_entry_t *entry = &volume->entries[i];
+		apfs_gen_pext_val_t extent = { .owner = entry->oid,
+		    .refcnt = 1, .kind = 1 };
+
+		if (entry->directory) {
+			fs.directories += entry->oid > 3;
+			continue;
+		}
+		fs.files++;
+		if (entry->physical == 0)
+			continue;
+		blocks = (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK;
+		extent.length = blocks;
+		if (!apfs_gen_jkey_build(keys[extent_count], GEN_JKEY_BYTES,
+		    entry->physical, VOLUME_KIND_PHYSICAL_EXTENT))
+			return (false);
+		if (!apfs_gen_pext_val_build(values[extent_count],
+		    GEN_PEXT_VAL_BYTES, &extent))
+			return (false);
+		extents[extent_count] = (apfs_gen_record_t){
+		    .key = keys[extent_count], .key_size = GEN_JKEY_BYTES,
+		    .value = values[extent_count],
+		    .value_size = GEN_PEXT_VAL_BYTES };
+		extent_count++;
+		bcopy(entry->data, image + entry->physical * VOLUME_BLOCK,
+		    (size_t)entry->size);
+		for (uint64_t j = entry->physical; j < entry->physical + blocks;
+		    j++)
+			image[VOLUME_ALLOCATION_BITMAP * VOLUME_BLOCK +
+			    j / 8] |= (unsigned char)(1u << (j % 8));
+		fs.alloc_blocks += blocks;
+	}
+	if (!volume_node_build(image, VOLUME_SNAPSHOT_TREE, 16, NULL, 0))
+		return (false);
+	if (!volume_node_build(image, VOLUME_EXTENTREF_TREE, 15, extents,
+	    extent_count))
+		return (false);
+	if (!apfs_gen_fs_build(image + VOLUME_SUPERBLOCK * VOLUME_BLOCK,
+	    VOLUME_BLOCK, &fs))
+		return (false);
+	return (volume_allocation_build(image, tree_blocks, map_blocks));
+}
+
+bool
+apfs_gen_volume_build(apfs_gen_volume_t *volume, unsigned char **bytes,
+    size_t *length)
+{
+	unsigned char *image;
+
+	if (!volume_records_build(volume))
+		return (false);
+	image = calloc(1, VOLUME_BYTES);
+	if (image == NULL)
+		return (false);
+	if (!volume_image_build(volume, image)) {
+		free(image);
+		return (false);
+	}
+	volume->built = true;
+	*bytes = image;
+	*length = VOLUME_BYTES;
+	return (true);
+}
+
+bool
+apfs_gen_volume_record_block(const apfs_gen_volume_t *volume, uint64_t oid,
+    uint8_t kind, uint64_t suffix, uint64_t *block)
+{
+	if (!volume->built)
+		return (false);
+	for (size_t i = 0; i < volume->record_count; i++) {
+		const volume_record_t *r = &volume->records[i];
+		uint64_t key = volume_integer(r->key, 8);
+
+		if ((key & GEN_JKEY_OID_MASK) != oid || key >> 60 != kind)
+			continue;
+		if (kind == APFS_GEN_KIND_FILE_EXTENT &&
+		    volume_integer(r->key + 8, 8) != suffix)
+			continue;
+		*block = VOLUME_TREE_BASE + i / volume->records_per_leaf;
+		return (true);
+	}
+	return (false);
+}
+
+bool
+apfs_gen_volume_extent_block(const apfs_gen_volume_t *volume, uint64_t oid,
+    uint64_t offset, uint64_t *block)
+{
+	if (!volume->built)
+		return (false);
+	for (size_t i = 0; i < volume->entry_count; i++) {
+		const volume_entry_t *entry = &volume->entries[i];
+
+		if (entry->oid != oid || entry->directory ||
+		    offset >= entry->size)
+			continue;
+		*block = entry->physical == 0 ? 0 :
+		    entry->physical + offset / VOLUME_BLOCK;
+		return (true);
+	}
+	return (false);
 }

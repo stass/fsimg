@@ -615,4 +615,54 @@ bool	apfs_gen_file_info_key_build(unsigned char *, size_t, uint64_t,
 /* CRC-32C of explicitly supplied comparison-form scalars, low 22 bits. */
 uint32_t apfs_gen_name_hash(const uint32_t *, size_t);
 
+/*
+ * Owned, bounded fixture volume with 4096-byte blocks and 1024 blocks.
+ * At most 64 entries (including root and private), 256 total records and
+ * 768 payload blocks shared by all files. Inodes, directory records, stream
+ * IDs, attributes and each file extent count toward the record cap; splitting
+ * extents can exhaust it before the entry or payload caps. Build returns false
+ * if the records or metadata trees do not fit their reserved regions.
+ * Names are case-sensitive ASCII components of at most 127 bytes.
+ */
+typedef struct apfs_gen_volume apfs_gen_volume_t;
+
+enum {
+	APFS_GEN_KIND_INODE = 3,
+	APFS_GEN_KIND_XATTR = 4,
+	APFS_GEN_KIND_DSTREAM_ID = 6,
+	APFS_GEN_KIND_FILE_EXTENT = 8,
+	APFS_GEN_KIND_DREC = 9
+};
+
+/* Allocate a volume containing root (OID 2) and private (OID 3), or NULL. */
+apfs_gen_volume_t *apfs_gen_volume_new(void);
+/* Release the volume and copied inputs; accepts NULL. */
+void	apfs_gen_volume_free(apfs_gen_volume_t *);
+/* Add a directory beneath an existing parent; false leaves entries intact. */
+bool	apfs_gen_volume_directory(apfs_gen_volume_t *, uint64_t, uint64_t,
+    const char *);
+/* Copy bytes; NULL data represents an all-hole stream of the given size. */
+bool	apfs_gen_volume_file(apfs_gen_volume_t *, uint64_t, uint64_t,
+    const char *, const unsigned char *, size_t);
+/* Select 1..8 records/leaf and blocks/extent (zero: one extent/file). */
+bool	apfs_gen_volume_layout(apfs_gen_volume_t *, uint16_t, uint16_t);
+/* Add one inline user.test attribute to an existing regular file. */
+bool	apfs_gen_volume_attribute(apfs_gen_volume_t *, uint64_t);
+/*
+ * Build and freeze the volume; caller frees the returned initialized image.
+ * Failure leaves output arguments untouched. Entries cannot be added afterward.
+ */
+bool	apfs_gen_volume_build(apfs_gen_volume_t *, unsigned char **, size_t *);
+/*
+ * Find the leaf block in volume for the record with oid and kind after build.
+ * suffix selects a file extent's logical offset; ignored for other kinds.
+ * For directory records the first matching parent's record is returned.
+ * Store the leaf address in block; false leaves block untouched.
+ */
+bool	apfs_gen_volume_record_block(const apfs_gen_volume_t *, uint64_t,
+    uint8_t, uint64_t, uint64_t *);
+/* Find the physical block at a file offset; holes return block zero. */
+bool	apfs_gen_volume_extent_block(const apfs_gen_volume_t *, uint64_t,
+    uint64_t, uint64_t *);
+
 #endif /* !FSIMG_TEST_APFS_GEN_H */

@@ -620,7 +620,7 @@ until the next `resolve` or advance, as the content design requires.
 ### Salvage
 
 The driver takes part in [salvage extraction](design-salvage.md) with no
-mechanism of its own. `replay` reads no extent but a streamed compression
+salvage state of its own. `replay` reads no extent but a streamed compression
 header's, so the common plan, which
 resolves a file from its first byte, meets damage exactly where a read
 would, and what survives follows from `resolve`:
@@ -629,7 +629,15 @@ would, and what survives follows from `resolve`:
   the decoder rejects: an invalid node on the content cursor's path, a
   malformed file-extent record, a gap or overlap in the tiling, an extent
   outside `[1, N)`, a refused flag or crypto ID. An extent that runs past
-  the slice ends the prefix at the slice's end, byte for byte.
+  the slice ends the prefix at the slice's end, byte for byte. The record
+  after the extent that reaches the size is checked with it, since no
+  later lookup reads it: a record of the stream starting below the size
+  contradicts delivered bytes and rejects that extent's lookup, while a
+  damaged next node, a malformed next record or a record past the size
+  judges no delivered byte and costs the file nothing; the walk or
+  verification reports it where it meets it. The size is the stream's,
+  not the prefix the plan shortens the file to, so copying the prefix
+  meets the records the plan met.
 * **Shared extents.** No lookup reads the extent-reference tree, so damage
   there costs reading nothing and verification reports it. A clone, or any
   file whose extents another file shares, is resolved through its own

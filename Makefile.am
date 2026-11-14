@@ -207,8 +207,8 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-apfs-codec test-apfs test-apfs-list test-apfs-content \
 	test-apfs-write-btree test-apfs-write test-apfs-spaceman \
 	test-apfs-verify \
-	test-hfsplus-salvage \
-	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
+	test-hfsplus-salvage test-apfs-salvage \
+	test-hfsplus-verify test-hfsplus-faults test-apfs-faults test-hfsplus-unicode test-hfsplus-write \
 	test-apfs-unicode \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
@@ -373,6 +373,12 @@ test_apfs_verify_LDADD = libfsimg.la
 test_hfsplus_SOURCES = test/hfsplus.c test/hfsplus-gen.c test/hfsplus-gen.h \
 	test/lzfse-vectors.h test/test.h
 test_hfsplus_LDADD = libfsimg.la $(ZLIB_LIBS)
+test_apfs_faults_SOURCES = test/apfs-faults.c test/apfs-gen.c \
+	test/apfs-gen.h test/test.h
+test_apfs_faults_LDADD = libfsimg.la
+test_apfs_salvage_SOURCES = test/apfs-salvage.c test/apfs-gen.c \
+	test/apfs-gen.h test/test.h
+test_apfs_salvage_LDADD = libfsimg.la
 test_hfsplus_faults_SOURCES = test/hfsplus-faults.c test/hfsplus-gen.c \
 	test/hfsplus-gen.h test/test.h
 test_hfsplus_faults_LDADD = libfsimg.la $(ZLIB_LIBS)
@@ -434,6 +440,7 @@ test_fat_write_SOURCES = test/fat-write.c test/test.h \
 	test/baseline.c test/baseline.h test/digest.c test/digest.h
 test_fat_write_LDADD = libfsimg.la
 test_driver_contracts_SOURCES = test/driver-contracts.c test/contract.c \
+	test/apfs-gen.c test/apfs-gen.h \
 	test/contract.h test/hfsplus-gen.c test/hfsplus-gen.h \
 	test/erofs-contract.c test/erofs-contract.h test/erofs-gen.c \
 	test/erofs-gen.h test/test.h

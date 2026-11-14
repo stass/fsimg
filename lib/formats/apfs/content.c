@@ -28,12 +28,15 @@
  * after the last key below the stream's first, is not the stream's.
  *
  * Only resolve moves the content cursor. While apfs->current.resolved is
- * set and current.extent came from a record ending below the initialized
- * length, the cursor rests on that record. An extent that reaches the
- * initialized length is the last one a read delivers from, so its
- * successor is checked at once, which leaves the cursor past it; no later
- * offset advances from it or from the zero tail, which ends there too.
- * A forward read therefore checks every record it could have relied on.
+ * set and current.extent came from a record ending below the stream's
+ * size, the cursor rests on that record. An extent that reaches the size
+ * is the last one a read delivers from, so its successor is checked at
+ * once, which leaves the cursor past it; no later offset advances from it
+ * or from the zero tail, which ends there too. A forward read therefore
+ * checks every record it could have relied on. The size is the stream's
+ * own, not the reader's initialized length, which salvage lowers to a
+ * damaged file's prefix: planning and copying the prefix meet the same
+ * records.
  */
 #define ROLE_EXTENT	"file extent"
 #define ROLE_COMPRESSED	"compressed file"
@@ -201,8 +204,17 @@ result_tail(fsimg_reader_t *reader, uint64_t end)
 
 /*
  * The record the cursor is on holds the offset. When it reaches the
- * initialized length, the record after it must continue the tiling or not
- * be the stream's, as resolve_advance() would require.
+ * stream's size, the record after it must continue the tiling or not be
+ * the stream's, as resolve_advance() would require. A successor of the
+ * stream starting below the size contradicts bytes this record delivers
+ * and is always rejected. Any other rejection there, a damaged next node,
+ * a malformed next record or a successor past the size, judges no
+ * delivered byte, so under salvage it leaves the record readable and the
+ * walk or verification reports the damage where it meets it
+ * (specs/design-apfs-driver.md, "Salvage"). No later offset of the stream
+ * advances from the cursor, and a failed node load cuts the cursor's path
+ * above the node before reading it, so the next seek reuses only nodes
+ * that loaded: where such a failure left the cursor does not matter.
  */
 static fsimg_status_t
 result_record(fsimg_reader_t *reader, const extent_record_t *record,
@@ -211,15 +223,22 @@ result_record(fsimg_reader_t *reader, const extent_record_t *record,
 	apfs_reader_t *apfs = reader->driver;
 	apfs_current_t *current = &apfs->current;
 	extent_record_t next;
-	bool found;
+	fsimg_error_t detail;
+	bool found, delivered;
 	fsimg_status_t status;
 
-	if (record->end >= reader->initialized) {
-		status = extent_after_cursor(apfs, &found, &next, error);
+	if (record->end >= current->stream_size) {
+		fsimg_error_clear(&detail);
+		status = extent_after_cursor(apfs, &found, &next, &detail);
 		if (status == FSIMG_OK && found)
-			status = tiling_check(record->end, &next, error);
-		if (status != FSIMG_OK)
+			status = tiling_check(record->end, &next, &detail);
+		delivered = found && next.logical < current->stream_size;
+		if (status != FSIMG_OK && (delivered ||
+		    !fsimg_reader_decode_rejected(reader, &detail, status))) {
+			if (error != NULL)
+				*error = detail;
 			return (status);
+		}
 	}
 	current->extent = (fsimg_extent_t){ .logical_offset = record->logical,
 	    .image_offset = record->image_offset,

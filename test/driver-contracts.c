@@ -15,6 +15,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "apfs-gen.h"
 #include "contract.h"
 #include "erofs-contract.h"
 #include "hfsplus-gen.h"
@@ -388,6 +389,7 @@ static const contract_entry_t qnx4_owned[] = {
  * descriptor serves them; QNX6's big-endian byte order is an additional
  * profile beside its little-endian coverage profile.
  */
+static fsimg_status_t materialize_apfs(contract_volume_t *, fsimg_error_t *);
 static fsimg_status_t materialize_hfsplus(contract_volume_t *, fsimg_error_t *);
 static fsimg_status_t materialize_hfsx(contract_volume_t *, fsimg_error_t *);
 static fsimg_status_t materialize_iso(contract_volume_t *, fsimg_error_t *);
@@ -400,6 +402,9 @@ static const contract_fs_profile_t fs_profiles[] = {
 	    .metadata_cases = hfsplus_metadata,
 	    .metadata_case_count = COUNT(hfsplus_metadata),
 	    .materialize = materialize_hfsplus, .max_fixture_bytes = 2 * MIB },
+	{ .id = "apfs", .format = "apfs", .coverage_profile = true,
+	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
+	    .materialize = materialize_apfs, .max_fixture_bytes = 4 * MIB },
 	{ .id = "hfsx", .format = "hfsx", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,
 	    .write = { .flags = WRITE_FLAGS },
@@ -549,6 +554,54 @@ expected_byte(const contract_entry_t *entry, uint64_t identity,
 	if (entry->payload == PAYLOAD_ZERO_SOURCE || zero_at(entry, offset))
 		return (0);
 	return (contract_pattern(identity, offset));
+}
+
+/* Encode the common tree independently; zero-only sources are hole streams. */
+static fsimg_status_t
+materialize_apfs(contract_volume_t *volume, fsimg_error_t *error FSIMG_UNUSED)
+{
+	apfs_gen_volume_t *builder;
+	unsigned char *image, *data;
+	size_t length;
+
+	builder = apfs_gen_volume_new();
+	CONTRACT_CHECK(builder != NULL);
+	for (size_t i = 0; i < SOURCE_COUNT; i++) {
+		const contract_entry_t *entry = &source_tree[i];
+		const char *component = strrchr(entry->path, '/') + 1;
+		uint64_t parent = 2;
+		size_t prefix = (size_t)(component - entry->path - 1);
+
+		for (size_t j = 0; j < i; j++) {
+			if (strlen(source_tree[j].path) == prefix &&
+			    strncmp(source_tree[j].path, entry->path,
+			    prefix) == 0)
+				parent = 16 + j;
+		}
+		if (entry->kind == FSIMG_ENTRY_DIRECTORY) {
+			CONTRACT_CHECK(apfs_gen_volume_directory(builder,
+			    16 + i, parent, component));
+			continue;
+		}
+		CONTRACT_CHECK(entry->kind == FSIMG_ENTRY_FILE);
+		data = NULL;
+		if (entry->size != 0 && entry->payload != PAYLOAD_ZERO_SOURCE &&
+		    entry->payload != PAYLOAD_ZERO_RANGE) {
+			data = malloc((size_t)entry->size);
+			CONTRACT_CHECK(data != NULL);
+			for (size_t j = 0; j < entry->size; j++)
+				data[j] = expected_byte(entry, i + 1, j);
+		}
+		CONTRACT_CHECK(apfs_gen_volume_file(builder, 16 + i, parent,
+		    component, data, (size_t)entry->size));
+		free(data);
+	}
+	CONTRACT_CHECK(apfs_gen_volume_build(builder, &image, &length));
+	contract_volume_init(volume, length, 0);
+	bcopy(image, contract_volume_bytes(volume), length);
+	free(image);
+	apfs_gen_volume_free(builder);
+	return (FSIMG_OK);
 }
 
 /* The independent generator encodes the common tree, including its exact
@@ -2998,15 +3051,6 @@ reader_extraction(const contract_fs_profile_t *profile)
 static void
 check_registry(void)
 {
-	/* Volume-information readers refuse directory operations, so no
-	 * fixture scenario applies to these registered formats.
-	 */
-	static const struct {
-		const char *name;
-		uint32_t capabilities;
-	} information_formats[] = {
-		{ "apfs", FSIMG_CAP_READ | FSIMG_CAP_VERIFY }
-	};
 	fsimg_format_info_t info;
 	fsimg_error_t error;
 	size_t cursor = 0, coverage, advertised = 0;
@@ -3024,13 +3068,6 @@ check_registry(void)
 			CONTRACT_CHECK(fs_profiles[i].expected_capabilities ==
 			    info.capabilities);
 			coverage += fs_profiles[i].coverage_profile;
-		}
-		for (size_t i = 0; i < COUNT(information_formats); i++) {
-			if (strcmp(information_formats[i].name, info.name) != 0)
-				continue;
-			CONTRACT_CHECK(info.capabilities ==
-			    information_formats[i].capabilities);
-			coverage++;
 		}
 		if (coverage != 1)
 			fprintf(stderr, "format %s has %zu coverage profiles\n",

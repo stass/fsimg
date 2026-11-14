@@ -145,6 +145,17 @@
   zeroes the whole volume. Tests need a sparse or zero-skipping sink, or
   unit tests of the placement and encoding helpers.
 
+* [Low] **APFS test fixtures and fault sweeps are built more than once**
+  (`test/apfs-gen.c`, `test/apfs-content.c`, `test/apfs-list.c`,
+  `test/apfs-verify.c`, `test/apfs-faults.c`, `test/hfsplus-faults.c`):
+  the content, listing and verification tests each assemble the container,
+  object maps and space manager themselves beside the shared volume
+  builder, and the APFS fault test repeats the HFS Plus sweep protocol
+  (`sweep`, `attempt`, `cleanup`, the baseline checks) with other prefixes.
+  Give the builder a way to add or edit raw records, move the three
+  fixtures onto it, and share one fault-sweep driver taking an image
+  builder, a stage table and an oracle.
+
 * [Low] **APFS fuzz seed reach** (`fuzz/apfs.c`, `test/apfs.c`): the one
   seed uses 4 KiB blocks and single-block objects, so the harness's
   per-block checksum repair never reseals a multi-block spaceman and
