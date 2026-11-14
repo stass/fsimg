@@ -680,30 +680,72 @@ one transaction, such as a deleted volume's trees:
 | 108 | 4 | State buffer size |
 | 112 | | State buffer |
 
-The reaper is **idle** when its list count is zero and flag `0x2` is clear.
-This definition is provisional (E16, for a used container; E1 confirms
-it for fresh ones), and it is the default if neither settles it. It does not constrain
-the head and tail: they may be zero or name an empty reap-list object, an
-ephemeral object of the selected checkpoint whose blocks the checkpoint
-data area's claim covers, so an empty list adds no claim. Nor does it
-constrain the six fields describing an object being reaped, which mean
-nothing while the flag is clear. If the experiments show that every idle
-native reaper has a zero head and tail, the definition tightens to require
-it. The state buffer lies inside the object. Every fresh native container
-holds an idle reaper with head and tail zero, flags `0x1`, next reap ID 1,
-completed reap ID 0, the six fields of an object being reaped zero, and a
-state buffer of `B - 112` bytes, 3984, all zero (E1, every capture); the
-reader does not constrain the reap IDs or the state buffer size.
+A reap-list object (kind 18, ephemeral) is one link of the list:
 
-Reading never depends on the reaper: an object awaiting deletion is in no
-volume's namespace. Verification of a container whose reaper is not idle is
-incomplete with `FSIMG_EUNSUPPORTED`, naming the pending reap: the blocks of
-an object still being reaped are allocated and no live structure owns them,
-so the allocation check cannot tell them from leaks. How a native container
-accounts those blocks is provisional (E17, which deletes a populated volume
-and a snapshot and captures the container before the reaper finishes).
-Incomplete verification is the default, and it stays if E17 catches no
-reaper at work.
+| Offset | Size | Field |
+| --- | --- | --- |
+| 32 | 8 | OID of the next reap-list object, zero in the last |
+| 40 | 4 | Flags |
+| 44 | 4 | Entry capacity |
+| 48 | 4 | Entry count |
+| 52 | 4 | Index of the first entry, `0xffffffff` when there is none |
+| 56 | 4 | Index of the last entry, likewise |
+| 60 | 4 | Index of the first free entry |
+| 64 | 40 each | Entries: next index (u32), flags (u32), kind (u32), size (u32), OID of the owning volume, OID and XID (u64 each) |
+
+The reap list is **well formed** in exactly one of two shapes: head, tail
+and reap-list object count all zero; or reading from the head yields
+exactly *count* objects, *count* being the reap-list object count at 68,
+each resolving as a reap-list object of the selected checkpoint whose
+entry count is at most its capacity, the last one's next OID zero and its
+OID equal to the tail. Any other shape, including a list that ends early,
+runs past *count* or names an object of another kind, is
+`FSIMG_ECORRUPT`. The reaper is **idle** when flag `0x2` is clear and
+every object of its well-formed list has an entry count of zero; a list
+with entries is pending work. Entries off the list keep stale contents
+and are not read. A reap-list object is an ephemeral object
+of the selected checkpoint whose blocks the checkpoint data area's claim
+covers, so an empty list adds no claim. The definition does not constrain
+the six fields describing an object being reaped: they mean nothing while
+the flag is clear, and after a reap they keep the last completion record
+(kind 13, OID 0, XID 1, entry flags `0xf` in E17).
+
+Native containers hold both shapes. Every E10 and E17 container before a
+deletion has the zero shape with next reap ID 1 and completed reap ID 0;
+after a completed reap the reaper keeps one empty reap-list object as head
+and tail, object count 1, and a completed reap ID one below the next (E17,
+apfs-diskutil-2147483648-e17-clean and apfs-diskutil-2147483648-e17-force;
+E10, apfs-diskutil-2147483648-e10-hole). Whether a container in daily use
+holds another idle shape is provisional (E16), and this definition is the
+default if E16 cannot answer. The state buffer lies inside the object.
+Every fresh native container holds an idle reaper with head and tail zero,
+flags `0x1`, next reap ID 1, completed reap ID 0, the six fields of an
+object being reaped zero, and a state buffer of `B - 112` bytes, 3984, all
+zero (E1, every capture); the reader does not constrain the reap IDs or the
+state buffer size.
+
+While the reaper works, its state buffer starts with the reap state of
+[A1]: the last block reaped (u64), the XID of the snapshot being reaped
+(u64) and the phase (u32; 2 reaps the live tree), packed.
+
+Reading never depends on the reaper: a volume being deleted has a zero
+slot in the volume array, so no selection reaches it. Verification of a
+container whose reaper is not idle is incomplete with
+`FSIMG_EUNSUPPORTED`, naming the pending reap. While a volume is reaped,
+the container object map still maps its superblock, its trees stay
+reachable, and they still reference blocks the reaper has already freed:
+each reaping transaction queues what it freed in the main free queue at
+its own XID, and earlier transactions' queues drain into the bitmap. An
+allocation check that followed those trees would find blocks claimed but
+free, and one that skipped them would not know which allocated blocks the
+reap still owns. `fsck_apfs -n` reports such a container as not verified
+completely, listing blocks the half-deleted volume references that the
+bitmap shows free (E17, the during-003 and during-005 copies of
+apfs-diskutil-2147483648-e17-clean). A deleted snapshot's reap is
+unobserved, and the same rule applies to it. In E17's containers, a
+2 GiB container whose deleted volume held up to 100000 files of at most
+16 KiB, the reap finished within about three seconds and before
+`diskutil apfs deleteVolume` returned.
 
 ## Object maps
 
@@ -944,9 +986,36 @@ Only the selected volume's superblock is required to resolve for reading.
 Verification resolves every volume, because allocation is container-wide.
 
 Roles are reported as numbers, never acted on: a role is not a mount path,
-and a container need not hold a bootable set. A System and a Data volume
+and a container need not hold a bootable set. Any value is accepted. The
+values [A1] names, with the ones `diskutil apfs addVolume -role` stores
+(E10, apfs-diskutil-8589934592-e10-allroles):
+
+| Role | [A1] name | `diskutil` |
+| --- | --- | --- |
+| 0 | None | none or `0` |
+| 1 | System | `S` |
+| 2 | User | |
+| 4 | Recovery | `R` |
+| 8 | VM | `V` |
+| 16 | Preboot | `B` |
+| 32 | Installer | `I` |
+| 64 (1 << 6) | Data | `D` |
+| 128 (2 << 6) | Baseband | |
+| 192 (3 << 6) | Update | `E` |
+| 256 (4 << 6) | xART | |
+| 320 (5 << 6) | Hardware | `H` |
+| 384 (6 << 6) | Backup | `T` |
+| 448 (7 << 6) | Sidecar (heading Reserved 7) | `C` |
+| 512 (8 << 6) | Reserved 8 | |
+| 576 (9 << 6) | Enterprise | |
+| 640 (10 << 6) | Reserved 10 | |
+| 704 (11 << 6) | Prelogin | |
+
+A System and a Data volume
 sharing a volume-group UUID are separate volumes; the reader presents each
-on its own namespace and does not follow firmlinks.
+on its own namespace and does not follow firmlinks. When `diskutil` adds
+a System volume with `-groupWith` an existing Data volume, both get Data's
+volume UUID as their group UUID and optional feature `0x10` (E10).
 
 ## Filesystem records
 
@@ -1900,7 +1969,7 @@ to 100663296 (384 GiB).
 | Mapping block | One mapping per ephemeral object in ascending OID order, with the object's kind, subtype and size 4096, owning volume zero; the last-map flag set | [A1]; E1 | | |
 | Data ring | The space manager in slot 0 and the reaper in slot 1: data index 0, data count 2, next index 2 | E1: the first form | E15 | The second form's slots |
 | Block 0 | Byte for byte the superblock in the descriptor ring | [A1]: a copy; E1: natively it differs only in counter 0 | E15 | Counter 0 larger than the ring superblock's by the difference of the form the writer emits: 4 in the first, 3 in the second |
-| Maximum volume count | `F = min(100, ceil(N * B / 512 MiB))` | [A1]; E1 | | |
+| Maximum volume count | `F = min(100, ceil(N * B / 512 MiB))` | [A1]; E1; E10: 4 at 2 GiB and 16 at 8 GiB, and `diskutil` adds no volume past it | | |
 | Features and flags | Incompatible `0x2`; read-only compatible, optional features and flags zero | [A1]; E1 | | |
 | Counters | Zero | Policy; natively only counter 0, objects checksummed, is nonzero (E1): `7 + C` in the first form's ring superblock and `20 + C` in the second form's, block 0 holding 4 and 3 more | E15 | The second form's values |
 | Ephemeral-information words | Word 0 `(M << 32) + 0x40001`, [A1]'s minimum block count, four structures per volume and version 1, the others zero, with `M = L` up to 128 MiB and 8 above, as [A1] states | [A1]; E1 | | |
@@ -2039,11 +2108,11 @@ free space, attribute data or buffer contents.
 | Truncation | A container cut past everything a listing and extraction touch opens, lists, extracts and reports the missing bytes | A cut through the descriptor ring, the selected checkpoint's data run, a tree node or a file's extent fails `FSIMG_ECORRUPT` where it is reached and never selects an older checkpoint; `W`, wrap and compose fail on every cut |
 | Object maps | Lookups below, at and above stored XIDs; tombstones; multi-level maps | Tombstone with an older live entry, unordered keys, duplicate keys, size not a block multiple, address past `N`, object XID different from the key's |
 | B-trees | Root leaves, three or more levels, fixed and variable tables, aligned and unaligned trees, ghost records in free queues | Table overflow, key or value crossing free space or the footer, ghosts without the flag, wrong levels, repeated node on a path, unsorted keys, child key below its separator, height 17 |
-| Volumes | One and several volumes, each role E10 provides, case-insensitive and case-sensitive personalities | Missing selection with several volumes, empty slot, index mismatch, duplicate UUIDs, every refused feature bit |
+| Volumes | One and several volumes, a gap in the volume array (apfs-diskutil-2147483648-e10-hole), each role E10 provides, case-insensitive and case-sensitive personalities | Missing selection with several volumes, selection of an empty slot, index mismatch, duplicate UUIDs, every refused feature bit |
 | Records | Every kind in each tree, extended fields at their boundaries, names of 1, 255 and 1022 bytes and every Unicode class of E4; an inode with a Finder-information attribute sets the extra-data bit on each of its names | Truncated values, overlapping fields, misaligned field data, wrong hash or length, invalid UTF-8, embedded NUL or slash, dot names, a plain name of 1023 bytes, wrong record variant, type disagreeing with mode; a symbolic link or compressed file with only the attributes the driver consumes does not set the extra-data bit |
 | Content | Files of 0, 1, 4095, 4096, 4097 bytes and above 4 GiB, many extents, holes in both forms, preallocated extents past the size, clones and their overwritten branches, every supported compression type with one and many chunks | Gaps, overlaps, unaligned lengths, extent past both the rounded size and the allocated bytes, extent past `N`, crypto ID outside the table, short or long decoded chunks, chunk table overruns |
 | Links and kinds | Hard links across directories, symbolic links of 1 and 1023 bytes, FIFOs, a character and a block device with and without the device number field, a socket | Mismatched link counts, missing sibling records, directory with two parents, directory cycle, link target of 1024 bytes, the device number field on a file |
-| Verification | Every native fixture the reader accepts verifies, the empty E1 containers of 1024 blocks and more among them, and apfs-newfs-372736-plain, below the 1 MiB minimum, is refused; whose allocated blocks are exactly the fixed regions, both object maps with their trees, the empty volume's objects and the main free queue's entries; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found; the native zero-OID empty queue, a synthetic root leaf with no keys and an idle reaper verify | Each mutation reports its class; a report is never complete after an unsupported object or with a reaper that is not idle |
+| Verification | Every native fixture the reader accepts verifies, the empty E1 containers of 1024 blocks and more among them, and apfs-newfs-372736-plain, below the 1 MiB minimum, is refused; whose allocated blocks are exactly the fixed regions, both object maps with their trees, the empty volume's objects and the main free queue's entries; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found; the native zero-OID empty queue, a synthetic root leaf with no keys and both idle reaper shapes verify, and the reaping E17 copies are incomplete | Each mutation reports its class; a report is never complete after an unsupported object or with a reaper that is not idle |
 | Writer | Empty, small, deep, wide (forcing multi-level trees), large-file and nearly full containers in both personalities; names at the writer's limit; byte identity across source order, budget, scratch and time zone; poison scan of unused bytes; an entry time outside the range is stored as the format time and counted as a loss | Colliding names under each personality, names and labels one byte over their limits, a host clock or epoch outside the time range, a non-empty placement list, sizes that do not fit |
 
 Independent oracles, in order of authority: macOS `fsck_apfs -n`, macOS

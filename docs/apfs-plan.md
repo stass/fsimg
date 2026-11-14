@@ -761,11 +761,15 @@ The owner has settled these:
   supplies them for scripted checks.
 * **Weakly specified comparators.** A wrong tie-break rule would make valid
   images fail ordering checks, never misread them; E4 settles the hashed
-  directory-record rule and E2 and E5 the plain-name rules before stage 4.
-* **Pending reaps.** E17 may not catch a reaper at work. Verification of
-  a container with a pending reap then stays incomplete, which is safe but
-  unhelpful if volumes in daily use often hold one; E16 records whether
-  one does.
+  directory-record rule and E5 the attribute-name rule before stage 4,
+  while plain directory-record and snapshot names keep the lenient check
+  (no native tool formats a plain-key volume, E2; snapshots wait on E9).
+* **Pending reaps.** Verification of a container with a pending reap stays
+  incomplete; `fsck_apfs -n` does not verify one completely either (E17).
+  That is safe but unhelpful if volumes in daily use often hold one. E17's
+  small volume deletions finished before the command returned, snapshot
+  reaps are unobserved, and E16 records whether a used volume's container
+  holds a pending reap.
 * **Provenance.** The designs are written from facts. Research tools and
   tests import nothing from GPL, LGPL or MIT sources. The only imported
   code is the `lzfse` decoder, which is in the tree, audited file by file

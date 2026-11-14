@@ -32,7 +32,7 @@ record's `read_settings`, as write settings do through `write_settings`.
 | --- | --- |
 | `apfs.h` | Private types, constants and prototypes shared by the files below |
 | `descriptor.c` | `fsimg_apfs_format`, added to the static list in `lib/formats/format.c`: the `apfs` variant, its capability record and `codecs` operation, the probe, and the block-0 validation the probe and `open` share |
-| `codec.c` | Fletcher-64 and pure decoders and encoders of the object header, container and volume superblocks, checkpoint map, object map, node header and footer, space-manager records, reaper, filesystem keys and values and extended fields; no I/O |
+| `codec.c` | Fletcher-64 and pure decoders and encoders of the object header, container and volume superblocks, checkpoint map, object map, node header and footer, space-manager records, reaper, reap-list header, filesystem keys and values and extended fields; no I/O |
 | `checkpoint.c` | The descriptor-ring scan, candidate completeness, selection, and the ephemeral mapping table |
 | `object.c` | `apfs_object_read()`: the one function that turns a physical, virtual or ephemeral reference into a validated object in a caller's window |
 | `btree.c` | Node validation, the cursor and the comparators |
@@ -162,7 +162,8 @@ values only:
 | `apfs_omap_t` | flags, snapshot count, tree type and OID, snapshot tree type and OID, most recent snapshot |
 | `apfs_node_t` | node flags, level, key count, the four locations, and for a root the footer |
 | `apfs_spaceman_t` | the geometry counts, the main device's counts and address-array offset, the internal pool's fields, the three free queues |
-| `apfs_reaper_t` | the reap IDs, list head, tail and count, flags, and the fields of an object being reaped |
+| `apfs_reaper_t` | the reap IDs, list head, tail and object count, flags, and the fields of an object being reaped |
+| `apfs_reap_list_t` | next OID, entry count, first and last entry indexes |
 | `apfs_vol_t` | index, the three feature masks, flags, role, UUID, name, tree types and OIDs, counts, group UUID, integrity and sealed-tree OIDs |
 | `apfs_inode_t` | inode number, parent, private ID, four times, internal and BSD flags, count, owner, group, mode, uncompressed size, decoded extended fields |
 | `apfs_drec_t` | parent, name span, stored hash and length, child, add time, type, sibling ID |
@@ -539,7 +540,9 @@ walker. A [truncated container](#truncated-containers) reaches neither: the
 reader core fails its verification first.
 
 **Container pass.** It re-reads the selected checkpoint's descriptor and data
-runs, the space manager, the reaper and the container object map, and appends
+runs, the space manager, the reaper with its reap-list objects (through
+`apfs_object_read()`, to decide whether it is idle) and the container object
+map, and appends
 claims `(first block, count, class, owner)` to a claim stream: the
 [fixed regions](design-apfs.md#ephemeral-objects-and-the-space-manager),
 one claim each, as `apfs_fixed_regions()` lists them from the decoded

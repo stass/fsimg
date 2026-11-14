@@ -1326,6 +1326,179 @@ repository, from `aa extract -afsc` copies made like the capture's:
 `t3-inline-c3000`, `t7-inline-c3000`, `t11-inline-c3000` (LZFSE `bvxn`)
 and the raw-marked `t3-`, `t7-`, `t11-inline-r100`.
 
+### E10 Volumes
+
+Containers built with `diskutil apfs addVolume` on a raw attach, by the
+script `/Volumes/Optaine/fsimg-apfs/e10/e10-volumes.sh`, a copy of which
+sits in each capture directory. For each capture it runs:
+
+```sh
+mkfile -n SIZE image.img
+hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage image.img
+newfs_apfs -v None /dev/diskP            # slot 0, no role
+diskutil apfs addVolume diskC APFS NAME -role R -nomount [EXTRA]  # per volume
+diskutil apfs list diskC                 # saved as diskutil-list.txt (.plist too)
+hdiutil detach /dev/diskP
+fsck_apfs -n /dev/diskP                  # after a fresh attach -nomount; fsck.txt
+```
+
+`diskC` is the synthesized container disk of the physical store `diskP`,
+found in `diskutil apfs list -plist`. `-groupWith` names the volume disk of
+an earlier volume. The first two captures hold `commands.txt`,
+`diskutil-list.txt`, `diskutil-list.plist`, `fsck.txt` and the dumper's
+output; e10-hole, made by hand, holds the commands it ran in
+`commands.txt`, `diskutil-list.txt` after the refill, and `fsck_apfs -n`
+output, exit statuses and dumps of `hole.img` and `refill.img`:
+
+| Capture | Size | Volumes asked for (diskutil role letter) | Result |
+| --- | --- | --- | --- |
+| apfs-diskutil-2147483648-e10-roles | 2 GiB | None; Data `D` with `-reserve 100m -quota 500m`; System `S -groupWith` Data; Preboot `B`; Recovery `R`; VM `V` | Four volumes; Recovery and VM refused with `-69493: You can't add any more APFS Volumes to its APFS Container` |
+| apfs-diskutil-8589934592-e10-allroles | 8 GiB | None; then `D`, `S -groupWith` Data, `B`, `R`, `V`, `I`, `T`, `E`, `X`, `H`, `C`, `Y`, `BR`, `0 -quota 50m`, and two without `-role` | Fourteen volumes; `X`, `Y` and `BR` refused with `-69624: Unable to add a new APFS Volume to an APFS Container` |
+| apfs-diskutil-2147483648-e10-hole | 2 GiB | The e10-roles image; `diskutil apfs deleteVolume` of Data (slot 1), copied as `hole.img`; then `addVolume New -nomount`, copied as `refill.img` | Both `fsck_apfs -n` clean |
+
+Every container passes `fsck_apfs -n`. Container values: maximum volume
+count 4 at 2 GiB (524288 blocks) and 16 at 8 GiB (2097152 blocks), the
+`min(100, ceil(N * B / 512 MiB))` rule, and `diskutil` enforces it; the
+container incompatible features are `0x2` and its flags 0, with or without
+a volume group.
+
+Slots and objects. Volumes fill the volume array from slot 0 in creation
+order, and each superblock's index equals its slot. The superblock OIDs are
+1026 for the formatter's volume and then 1030, 1032, 1034 and so on, two
+apart: each added volume takes the next OID for its superblock and the one
+after for its root tree (slot 1: superblock 1030, root tree 1031; slot 0's
+root tree is 1028). The container object map holds exactly one record per
+volume, its superblock OID, and each volume's object map one record, its
+root tree; every volume object map has flags 0. In e10-hole, deleting slot
+1 zeroes that slot (`fs_oid` 1026, 0, 1032, 1034) and the next volume added
+takes the lowest free slot, 1, with a new OID, 1037 (the container's next
+OID); no other volume moves.
+
+Roles, as stored and as `diskutil` reports them:
+
+| Letter | Stored role | [A1] name | `diskutil apfs list` | Plist `Roles` |
+| --- | --- | --- | --- | --- |
+| none, `0` | 0 | `NONE` | No specific role | empty |
+| `S` | 1 | `SYSTEM` | System | System |
+| `R` | 4 | `RECOVERY` | Recovery | Recovery |
+| `V` | 8 | `VM` | VM | VM |
+| `B` | 16 | `PREBOOT` | Preboot | Preboot |
+| `I` | 32 | `INSTALLER` | Installer | Installer |
+| `D` | 64 (1 << 6) | `DATA` | Data | Data |
+| `E` | 192 (3 << 6) | `UPDATE` | not listed | Update |
+| `H` | 320 (5 << 6) | `HARDWARE` | Hardware | Hardware |
+| `T` | 384 (6 << 6) | `BACKUP` | Backup | Backup |
+| `C` | 448 (7 << 6) | `RESERVED_7` | Time Machine Sidecar | Sidecar |
+| `X`, `Y`, `BR` | refused | | | |
+
+[A1] lists 448 under the heading `RESERVED_7` with the constant
+`APFS_VOL_ROLE_SIDECAR`. `X` and `Y` presumably ask for xART and
+Enterprise, but `diskutil` documents only the letters and refuses both
+with a generic error. The text form of `diskutil apfs list` leaves the Update volume out
+entirely (13 of the 14 volumes in e10-allroles), while the plist form and
+`fsck_apfs` include it, so a comparison against `diskutil` uses
+`diskutil apfs list -plist`. `diskutil`'s volume disk `diskCsK` is slot
+`K - 1` in every E10 container, the hole and refill included.
+
+Volume groups. `-groupWith` on the System volume gives both it and Data a
+volume-group UUID equal to Data's own volume UUID, and sets optional
+feature `0x10` (volume-group inode space) on both: their features are
+`0x12`, every other volume's `0x2`. Neither `diskutil apfs list` form shows
+the group. Deleting Data (e10-hole) leaves System with role 0, a zero
+group UUID and features still `0x12`, and modifies Preboot (its
+modification record names `apfs_kext`), which matches `deleteVolume`'s
+documented best-effort removal of Preboot and Recovery entries.
+
+Reserve and quota. `-reserve 100m -quota 500m` stores a reserve of 24415
+and a quota of 122071 blocks (the byte counts rounded up to whole blocks),
+`-quota 50m` a quota of 12208; volumes without them store zeros. The space
+manager's reserve block count is the sum of the volumes' reserves (24415)
+and its reserve allocation count 5, the reserved volume's allocated blocks.
+`diskutil` reports the reserve as capacity consumed (100003840 bytes for
+Data, 20480 for each empty volume). Volumes `newfs_apfs` makes record
+`newfs_apfs (2811.160.7.0.4)` as their formatter, those `diskutil` adds
+`storagekitd (2811.160.7.0.4)`; all are case-insensitive (incompatible
+`0x1`) with flags `0x1`.
+
+### E17 Pending reap
+
+A 2 GiB container with a volume Keep (`newfs_apfs`) and a volume Victim
+(`diskutil apfs addVolume`, mounted) holding NFILES files of 1 to 16 KiB in
+100 directories; Victim is unmounted, the container detached and copied
+(`before-delete`), attached again with `-nomount`, and Victim deleted with
+`diskutil apfs deleteVolume`. Every copy is `cp -c` of the backing file
+while it is attached (an APFS clone, so each copy is one instant of the
+file). Each kept copy was checked with `fsck_apfs -n` after its own
+`attach -nomount`; `NAME.fsck.txt` holds the output and `fsck-exits.txt`
+the exit statuses. Scripts: `/Volumes/Optaine/fsimg-apfs/e10/e17-reap.sh`,
+`e17-reap-force.sh` and `e17-forcemid.sh`, copied into their captures.
+
+| Capture | NFILES | Delete and detach | Copies kept |
+| --- | --- | --- | --- |
+| apfs-diskutil-2147483648-e17-force | 20000 | `deleteVolume` in the foreground, copies as it returns and 1 s later, then `hdiutil detach -force` (e17-reap-force.sh) | before-delete, after-delete-0, after-detach-force |
+| apfs-diskutil-2147483648-e17-clean | 100000 | `deleteVolume` in the background, a copy every 0.1 s while it runs (12 copies, `during-000` to `during-011`), copies as it returns and 1 s later, then a clean `hdiutil detach` | before-delete, during-003, during-005, during-007, after-delete-0, after-detach-clean |
+| apfs-diskutil-2147483648-e17-forcemid | 100000 | `deleteVolume` in the background, `hdiutil detach -force` 1 s later, copies just before and after the detach | before-delete, before-force, after-detach-forcemid |
+
+No snapshot was deleted: `tmutil localsnapshot` snapshots every volume in
+the host's Time Machine set and cannot target a disk image volume, and
+`diskutil apfs` lists and deletes snapshots but cannot make one.
+
+States seen in e17-clean. Of the copies not kept, during-000 to 002 had
+the before-delete state, 004 that of 003, 006 that of 005, and 008 to 011
+and both after-delete copies that of 007, by their dumps:
+
+| Copy | Checkpoint XID | Slot 1 | Container map has 1030 | Reaper flags | Head and tail | List objects | Next reap ID | Completed reap ID | Reap-list entries | Main free queue blocks | Its XIDs | Free blocks | `fsck_apfs -n` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| before-delete | 1075 | 1030 | yes, XID 1075 | `0x1` | 0 | 0 | 1 | 0 | none | 10034 | 1043 to 1075 | 252618 | exit 0 |
+| during-003 | 1078 | 0 | yes, XID 1078 | `0x3` | 10324 | 1 | 2 | 0 | 2 | 16388 | 1078 | 295421 | exit 8 |
+| during-005 | 1085 | 0 | yes, XID 1085 | `0x3` | 10324 | 1 | 2 | 0 | 2 | 16388 | 1085 | 410121 | exit 8 |
+| during-007, after-detach-clean | 1091 | 0 | no | `0x1` | 10324 | 1 | 2 | 1 | none | 13784 | 1091 | 508440 | exit 0 |
+
+* **Reaping.** In during-003 and during-005 the reaper's object fields name
+  kind 13 (a volume superblock), OID 1030, XID 1076, size 4096, owner 0 and
+  entry flags `0x5` (valid, call). The state buffer starts with [A1]'s
+  `apfs_reap_state_t`: last block reaped 52467, then 186964; snapshot XID
+  0; phase 2, `APFS_REAP_PHASE_ACTIVE_FS`.
+  The one reap-list object, 10324 (the container's next OID before the
+  delete), holds two entries in order: kind `0x40000002` (a physical B-tree),
+  owner 1030, OID 2069 (Victim's snapshot-metadata tree), XID 1076, flags
+  `0x5`; and kind 13, owner 0, OID 1030, XID 1, flags `0xf` (valid,
+  reap-ID record, call, completion). The volume's slot is already zero, so
+  no volume selection reaches it, but the container object map still maps
+  its superblock, rewritten at every reaping transaction.
+* **Accounting.** Each reaping transaction queues the blocks it freed in
+  the main free queue at its own XID (16388 blocks in during-003 and
+  during-005), and earlier transactions' queues drain into the bitmap, so
+  the free count climbs from 252618 to 508440. The half-deleted volume's
+  trees stay reachable through the container object map and still
+  reference blocks the reaper has freed. `fsck_apfs -n` reports the
+  reaping copies as `The container /dev/diskN could not be verified
+  completely.` after `Space Verification failed.`, with 326 `underallocation
+  detected on Main device` ranges of 32766 blocks in during-003 (blocks
+  2068 to 35652) and 7598 ranges of 147466 blocks in during-005 (2068 to
+  165027), all below the reap state's last block. In during-003 every
+  reported block is free in the bitmap and none is in the main free queue:
+  the check finds blocks the deleted volume references that the bitmap
+  shows free.
+* **Finished.** After the reap the reaper is idle in substance but keeps
+  its list: flag `0x1`, one reap-list object (head = tail), completed reap
+  ID 1 = next reap ID - 1, and the object fields left at kind 13, size
+  4096, OID 0, XID 1, entry flags `0xf`, state buffer zero. The list object
+  has count 0, first and last `0xffffffff`, free index 1 and maximum 100;
+  its entry slots keep stale contents on the free chain. It is an ephemeral
+  object mapped by the checkpoint like the space manager. e17-force (XID 67)
+  and both e17-forcemid copies (XID 1088) show the same form, and
+  `fsck_apfs -n` accepts it.
+* **Persistence.** No copy taken after `deleteVolume` returned holds a
+  reaper at work: the reap is checkpointed before the command ends, and
+  `after-delete-0` equals the final state in both e17-force and e17-clean.
+  A forced detach did not interrupt one either. At 1 s (the kept
+  e17-forcemid run) and at 2 s into the delete the reap was already
+  complete when the detach ran; at 0.5 s the forced detach failed with
+  `Resource busy` (exit 16) and the delete then completed. The 0.5 s and
+  2 s runs were not kept. Only copies taken while the command ran caught
+  the reaper at work.
+
 ## Evidence questions
 
 Stage 1 fills this section ([plan](apfs-plan.md), stage 1). Each row is a
@@ -1365,6 +1538,8 @@ under that experiment.
 | Hole representation in sparse files; clone sharing and its reference records | Holes are extents of physical block 0, a trailing hole included, counted in the allocated bytes and the sparse-bytes field; clones share one data stream until a write gives the writer a new one; physical-extent records split where branches diverge, count distinct streams and name the allocating inode | E6, e6-sparse, e6-clone |
 | Physical-extent records for unshared files; volume allocated-block accounting (with E3) | One record of count 1 and kind new per allocated run, owned by the inode; total blocks allocated counts data blocks, the allocated block count adds the volume's metadata nodes; total freed 0 | E5, E6, all their captures |
 | Compression header, inline marker bytes, resource-fork framing per codec, inline size limit, codecs `ditto` and installers choose | The HFS Plus framing field for field; raw markers `0xFF` zlib, LZFSE and LZBITMAP, `0x06` LZVN, `0xCC` on every type 9 payload and type 10 chunk; inline only up to 65536 bytes, and for `ditto` only up to a 3802-byte attribute; `ditto` writes LZVN (7, 8) above 16384 bytes, system files are types 8, 9 and 14, Xcode's 7 and 8 ([E7](#e7-compression)) | Type 1: no producer or specimen on the host; `aa`'s exact attribute limit (between 3017 and 3817 bytes) |
+| Blocks of a deleted volume or snapshot not yet reaped: reaper and reap-list state, and how allocation accounts them | While a deleted volume is reaped: its slot is zero, the container object map still maps its superblock, the reaper has flag `0x2` and names the volume, the reap list holds the volume and the tree being destroyed, freed blocks enter the main free queue at the reaping XID while the volume's still-mapped trees reference them, and the state buffer holds `apfs_reap_state_t`; `fsck_apfs -n` cannot verify such a copy completely, reporting referenced blocks the bitmap shows free. After the reap the reaper keeps one empty reap-list object (E17) | A deleted snapshot (neither `tmutil` nor `diskutil` can make a snapshot of a disk image volume) |
+| Volume roles and volume groups in multi-volume containers | The roles table of E10, with stored values; System added with `-groupWith` Data gets Data's volume UUID as the group UUID on both, plus optional feature `0x10` on each; slots fill from 0 and a freed slot is reused (E10) | |
 
 The volume rows (features, records of an empty volume, inode fields) wait
 for the dumper's volume part and stay open under E1 and E2.
