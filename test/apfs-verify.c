@@ -44,11 +44,17 @@ typedef struct fs_tree {
  * superblock, object map, map root, virtual fs root, snapshots, extents.
  * The CIB and main bitmap live inside the separately accounted pool.
  */
+#define FIXTURE_TREES 3
+
 typedef struct fixture {
 	unsigned char *bytes;
 	uint64_t	 length;
 	apfs_gen_spaceman_t sm;
-	fs_tree_t trees[3];
+	/* FIXTURE_TREES trees, about 100 KiB each, owned like bytes: kept off
+	 * the stack, where every test's fixture would otherwise add up in an
+	 * inlined, sanitized main.
+	 */
+	fs_tree_t	*trees;
 	uint64_t expected_files;
 	uint64_t expected_directories;
 	uint64_t expected_logical_bytes;
@@ -427,6 +433,8 @@ fixture_init(fixture_t *f, unsigned volumes)
 	f->expected_logical_bytes = 2 * BLOCK;
 	f->bytes = calloc(1, IMAGE_BYTES);
 	CHECK(f->bytes != NULL);
+	f->trees = calloc(FIXTURE_TREES, sizeof(*f->trees));
+	CHECK(f->trees != NULL);
 	for (unsigned i = 0; i < volumes; i++)
 		image.nx.volume_oids[i] = 1000 + i;
 	CHECK(apfs_gen_container_build(f->bytes, IMAGE_BYTES, &image));
@@ -489,6 +497,7 @@ fixture_close(fixture_t *f)
 {
 	fsimg_io_free(f->io);
 	fsimg_ctx_free(f->ctx);
+	free(f->trees);
 	free(f->bytes);
 }
 
