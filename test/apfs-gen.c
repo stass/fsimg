@@ -800,3 +800,313 @@ apfs_gen_tree_build(unsigned char *raw, size_t length,
 	free(plan);
 	return (success);
 }
+
+bool
+apfs_gen_dstream_build(unsigned char *raw, size_t length,
+    const apfs_gen_dstream_t *p)
+{
+	if (length != GEN_DSTREAM_BYTES)
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->size, 8);
+	put_le(raw + 8, p->alloced_size, 8);
+	put_le(raw + 16, p->default_crypto_id, 8);
+	put_le(raw + 24, p->total_bytes_written, 8);
+	put_le(raw + 32, p->total_bytes_read, 8);
+	return (true);
+}
+
+bool
+apfs_gen_dir_stats_build(unsigned char *raw, size_t length,
+    const apfs_gen_dir_stats_t *p)
+{
+	if (length != GEN_DIR_STATS_BYTES)
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->num_children, 8);
+	put_le(raw + 8, p->total_size, 8);
+	put_le(raw + 16, p->chained_key, 8);
+	put_le(raw + 24, p->gen_count, 8);
+	return (true);
+}
+
+bool
+apfs_gen_inode_val_build(unsigned char *raw, size_t length,
+    const apfs_gen_inode_val_t *p)
+{
+	if (length < GEN_INODE_VAL_BYTES || length - GEN_INODE_VAL_BYTES != p->xfields_len)
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->parent, 8);
+	put_le(raw + 8, p->private_id, 8);
+	put_le(raw + 16, p->create_time, 8);
+	put_le(raw + 24, p->mod_time, 8);
+	put_le(raw + 32, p->change_time, 8);
+	put_le(raw + 40, p->access_time, 8);
+	put_le(raw + 48, p->internal_flags, 8);
+	put_le(raw + 56, p->count, 4);
+	put_le(raw + 60, p->protection_class, 4);
+	put_le(raw + 64, p->write_generation, 4);
+	put_le(raw + 68, p->bsd_flags, 4);
+	put_le(raw + 72, p->owner, 4);
+	put_le(raw + 76, p->group, 4);
+	put_le(raw + 80, p->mode, 2);
+	put_le(raw + 82, 0, 2);
+	put_le(raw + 84, p->uncompressed_size, 8);
+	if (p->xfields_len != 0)
+		bcopy(p->xfields, raw + 92, p->xfields_len);
+	return (true);
+}
+
+bool
+apfs_gen_drec_val_build(unsigned char *raw, size_t length,
+    const apfs_gen_drec_val_t *p)
+{
+	if (length < GEN_DREC_VAL_BYTES || length - GEN_DREC_VAL_BYTES != p->xfields_len)
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->child, 8);
+	put_le(raw + 8, p->date_added, 8);
+	put_le(raw + 16, p->flags, 2);
+	if (p->xfields_len != 0)
+		bcopy(p->xfields, raw + 18, p->xfields_len);
+	return (true);
+}
+
+bool
+apfs_gen_extent_val_build(unsigned char *raw, size_t length,
+    const apfs_gen_extent_val_t *p)
+{
+	if (length != GEN_EXTENT_VAL_BYTES ||
+	    p->length > UINT64_C(0x00ffffffffffffff))
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->length | (uint64_t)p->flags << 56, 8);
+	put_le(raw + 8, p->phys_block, 8);
+	put_le(raw + 16, p->crypto_id, 8);
+	return (true);
+}
+
+bool
+apfs_gen_pext_val_build(unsigned char *raw, size_t length,
+    const apfs_gen_pext_val_t *p)
+{
+	if (length != GEN_PEXT_VAL_BYTES ||
+	    p->length > GEN_JKEY_OID_MASK || p->kind > 15)
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->length | (uint64_t)p->kind << 60, 8);
+	put_le(raw + 8, p->owner, 8);
+	put_le(raw + 16, p->refcnt, 4);
+	return (true);
+}
+
+bool
+apfs_gen_snap_meta_val_build(unsigned char *raw, size_t length,
+    const apfs_gen_snap_meta_val_t *p)
+{
+	if (length < GEN_SNAP_META_VAL_BYTES || length - GEN_SNAP_META_VAL_BYTES != (size_t)p->name_len + 1)
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->extentref_tree_oid, 8);
+	put_le(raw + 8, p->sblock_oid, 8);
+	put_le(raw + 16, p->create_time, 8);
+	put_le(raw + 24, p->change_time, 8);
+	put_le(raw + 32, p->inum, 8);
+	put_le(raw + 40, p->extentref_tree_type, 4);
+	put_le(raw + 44, p->flags, 4);
+	put_le(raw + 48, (uint64_t)p->name_len + 1, 2);
+	bcopy(p->name, raw + 50, p->name_len);
+	return (true);
+}
+
+bool
+apfs_gen_file_info_val_build(unsigned char *raw, size_t length,
+    const apfs_gen_file_info_val_t *p)
+{
+	if (length < GEN_FILE_INFO_VAL_BYTES || length - GEN_FILE_INFO_VAL_BYTES != p->hash_size)
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->hashed_len, 2);
+	put_le(raw + 2, p->hash_size, 1);
+	if (p->hash_size != 0)
+		bcopy(p->hash, raw + 3, p->hash_size);
+	return (true);
+}
+
+bool
+apfs_gen_jkey_build(unsigned char *raw, size_t length, uint64_t oid,
+    uint8_t kind)
+{
+	if (length != 8 || oid > GEN_JKEY_OID_MASK || kind > 15)
+		return (false);
+	put_le(raw, oid | (uint64_t)kind << 60, 8);
+	return (true);
+}
+
+bool
+apfs_gen_xfields_build(unsigned char *raw, size_t length,
+    const apfs_gen_xfield_t *fields, uint16_t count)
+{
+	size_t used = 0, at;
+
+	for (uint16_t i = 0; i < count; i++)
+		used += ((size_t)fields[i].size + 7) / 8 * 8;
+	if (used > UINT16_MAX || length != 4 + (size_t)count * 4 + used)
+		return (false);
+	bzero(raw, length);
+	put_le(raw, count, 2);
+	put_le(raw + 2, used, 2);
+	at = 4 + (size_t)count * 4;
+	for (uint16_t i = 0; i < count; i++) {
+		raw[4 + i * 4] = fields[i].type;
+		raw[5 + i * 4] = fields[i].flags;
+		put_le(raw + 6 + i * 4, fields[i].size, 2);
+		if (fields[i].size != 0)
+			bcopy(fields[i].data, raw + at, fields[i].size);
+		at += ((size_t)fields[i].size + 7) / 8 * 8;
+	}
+	return (true);
+}
+
+bool
+apfs_gen_drec_key_build(unsigned char *raw, size_t length,
+    const apfs_gen_drec_key_t *p)
+{
+	size_t fixed = p->hashed ? 12 : 10;
+
+	if (length != fixed + p->name_len + 1 ||
+	    p->parent > GEN_JKEY_OID_MASK)
+		return (false);
+	bzero(raw, length);
+	(void)apfs_gen_jkey_build(raw, 8, p->parent, 9);
+	put_le(raw + 8, p->hashed ? (uint64_t)p->hash << 10 |
+	    (p->name_len + 1) : p->name_len + 1, p->hashed ? 4 : 2);
+	bcopy(p->name, raw + fixed, p->name_len);
+	return (true);
+}
+
+static bool
+build_name_key(unsigned char *raw, size_t length,
+    const apfs_gen_name_key_t *p, uint8_t kind)
+{
+	if (length != 10 + (size_t)p->name_len + 1 ||
+	    p->oid > GEN_JKEY_OID_MASK)
+		return (false);
+	bzero(raw, length);
+	(void)apfs_gen_jkey_build(raw, 8, p->oid, kind);
+	put_le(raw + 8, (uint64_t)p->name_len + 1, 2);
+	bcopy(p->name, raw + 10, p->name_len);
+	return (true);
+}
+
+bool
+apfs_gen_xattr_key_build(unsigned char *raw, size_t length,
+    const apfs_gen_name_key_t *p)
+{
+	return (build_name_key(raw, length, p, 4));
+}
+
+bool
+apfs_gen_snap_name_key_build(unsigned char *raw, size_t length,
+    const apfs_gen_name_key_t *p)
+{
+	return (build_name_key(raw, length, p, 11));
+}
+
+bool
+apfs_gen_xattr_val_build(unsigned char *raw, size_t length,
+    const apfs_gen_xattr_val_t *p)
+{
+	bool stream = (p->flags & 1) != 0;
+
+	if (length != 4 + (size_t)p->data_len ||
+	    (stream && p->data_len != 48))
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->flags, 2);
+	put_le(raw + 2, p->data_len, 2);
+	if (stream) {
+		put_le(raw + 4, p->stream_oid, 8);
+		(void)apfs_gen_dstream_build(raw + 12, 40, &p->dstream);
+	} else if (p->data_len != 0)
+		bcopy(p->data, raw + 4, p->data_len);
+	return (true);
+}
+
+bool
+apfs_gen_sibling_val_build(unsigned char *raw, size_t length,
+    const apfs_gen_sibling_val_t *p)
+{
+	if (length != 10 + (size_t)p->name_len + 1)
+		return (false);
+	bzero(raw, length);
+	put_le(raw, p->parent, 8);
+	put_le(raw + 8, (uint64_t)p->name_len + 1, 2);
+	bcopy(p->name, raw + 10, p->name_len);
+	return (true);
+}
+
+bool
+apfs_gen_sibling_key_build(unsigned char *raw, size_t length,
+    uint64_t oid, uint64_t suffix)
+{
+	if (length != 16 || oid > GEN_JKEY_OID_MASK)
+		return (false);
+	(void)apfs_gen_jkey_build(raw, 8, oid, 5);
+	put_le(raw + 8, suffix, 8);
+	return (true);
+}
+
+bool
+apfs_gen_extent_key_build(unsigned char *raw, size_t length,
+    uint64_t oid, uint64_t suffix)
+{
+	if (length != 16 || oid > GEN_JKEY_OID_MASK)
+		return (false);
+	(void)apfs_gen_jkey_build(raw, 8, oid, 8);
+	put_le(raw + 8, suffix, 8);
+	return (true);
+}
+
+bool
+apfs_gen_sibling_map_val_build(unsigned char *raw, size_t length,
+    uint64_t value)
+{
+	if (length != 8)
+		return (false);
+	put_le(raw, value, 8);
+	return (true);
+}
+
+bool
+apfs_gen_dstream_id_val_build(unsigned char *raw, size_t length,
+    uint32_t value)
+{
+	if (length != 4)
+		return (false);
+	put_le(raw, value, 4);
+	return (true);
+}
+
+bool
+apfs_gen_snap_name_val_build(unsigned char *raw, size_t length,
+    uint64_t value)
+{
+	if (length != 8)
+		return (false);
+	put_le(raw, value, 8);
+	return (true);
+}
+
+bool
+apfs_gen_file_info_key_build(unsigned char *raw, size_t length,
+    uint64_t oid, uint64_t lba, uint8_t type)
+{
+	if (length != 16 || oid > GEN_JKEY_OID_MASK ||
+	    lba > UINT64_C(0x00ffffffffffffff))
+		return (false);
+	(void)apfs_gen_jkey_build(raw, 8, oid, 13);
+	put_le(raw + 8, lba | (uint64_t)type << 56, 8);
+	return (true);
+}

@@ -1159,3 +1159,1131 @@ apfs_reap_list_encode(unsigned char *raw, size_t length,
 	fsimg_store_le32(raw + 60, list->free);
 	return (true);
 }
+
+/*
+ * Filesystem-tree records. The key and value decoders follow the container
+ * rules above: a fixed part is proved inside the record before a field is
+ * read, and a variable part, a name or an extended-field blob, is proved to
+ * end the record exactly. A key decoder also proves its key's kind, which
+ * selects the layout it reads. Kinds of inodes, flags policy, field types,
+ * name validity, hashes and order are the checks of inode.c, directory.c
+ * and content.c (specs/design-apfs-driver.md, "Codecs").
+ */
+
+static bool	jkey_load(const unsigned char *, size_t, uint32_t, size_t,
+		    uint64_t *);
+static void	jkey_store(unsigned char *, uint64_t, uint32_t);
+static int32_t	load_le32_signed(const unsigned char *);
+static int64_t	load_le64_signed(const unsigned char *);
+static bool	name_fits(size_t, size_t, uint16_t, uint32_t);
+static bool	name_key_decode(const unsigned char *, size_t, uint32_t,
+		    size_t, apfs_name_key_t *);
+static bool	name_key_encode(unsigned char *, size_t, uint32_t, size_t,
+		    const apfs_name_key_t *);
+static bool	name_span(const unsigned char *, size_t, size_t, uint32_t,
+		    const char **, uint16_t *);
+static void	name_store(unsigned char *, size_t, const char *, uint16_t);
+static bool	padding_zero(const apfs_xfield_t *);
+static bool	type_repeated(unsigned char *, uint8_t);
+static uint32_t	xfield_padded(uint32_t);
+static bool	xfield_step(const apfs_xfields_t *, uint16_t, size_t *,
+		    apfs_xfield_t *);
+static bool	xfields_copyable(const apfs_xfields_t *, size_t, size_t);
+
+/*
+ * Signed fields, read as two's complement without the implementation-defined
+ * conversion of an unsigned value above the signed maximum.
+ */
+static int64_t
+load_le64_signed(const unsigned char *raw)
+{
+	uint64_t value;
+
+	value = fsimg_load_le64(raw);
+	if (value <= INT64_MAX)
+		return ((int64_t)value);
+	return (-(int64_t)~value - 1);
+}
+
+static int32_t
+load_le32_signed(const unsigned char *raw)
+{
+	uint32_t value;
+
+	value = fsimg_load_le32(raw);
+	if (value <= INT32_MAX)
+		return ((int32_t)value);
+	return (-(int32_t)~value - 1);
+}
+
+/*
+ * Reads the OID of a key whose fixed part, the header included, is fixed
+ * bytes: refuses a key shorter than that or of a kind other than kind.
+ */
+static bool
+jkey_load(const unsigned char *raw, size_t length, uint32_t kind,
+    size_t fixed, uint64_t *oid)
+{
+	uint64_t word;
+
+	if (length < fixed)
+		return (false);
+	word = fsimg_load_le64(raw);
+	if (word >> APFS_JKEY_KIND_SHIFT != kind)
+		return (false);
+	*oid = word & APFS_JKEY_OID_MASK;
+	return (true);
+}
+
+/* The caller has proved oid within APFS_JKEY_OID_MASK. */
+static void
+jkey_store(unsigned char *raw, uint64_t oid, uint32_t kind)
+{
+	fsimg_store_le64(raw, oid | (uint64_t)kind << APFS_JKEY_KIND_SHIFT);
+}
+
+/*
+ * A name stored at offset at with stored bytes, its NUL included: it must
+ * end the record exactly and end in its NUL. The caller has proved at
+ * within length.
+ */
+static bool
+name_span(const unsigned char *raw, size_t length, size_t at,
+    uint32_t stored, const char **name, uint16_t *name_len)
+{
+	if (stored == 0 || length - at != stored || raw[length - 1] != '\0')
+		return (false);
+	*name = (const char *)(raw + at);
+	*name_len = (uint16_t)(stored - 1);
+	return (true);
+}
+
+/*
+ * Whether a name of name_len bytes fits a record of length bytes: stored
+ * with its NUL from offset at, it must end the record, and its length with
+ * the NUL must fit a length field holding at most max.
+ */
+static bool
+name_fits(size_t length, size_t at, uint16_t name_len, uint32_t max)
+{
+	return ((uint32_t)name_len + 1 <= max && length >= at &&
+	    length - at == (size_t)name_len + 1);
+}
+
+static void
+name_store(unsigned char *raw, size_t at, const char *name,
+    uint16_t name_len)
+{
+	if (name_len > 0)
+		bcopy(name, raw + at, name_len);
+	raw[at + name_len] = '\0';
+}
+
+/* Key header */
+
+bool
+apfs_jkey_decode(const unsigned char *raw, size_t length, apfs_jkey_t *key)
+{
+	uint64_t word;
+
+	if (length < APFS_JKEY_BYTES)
+		return (false);
+
+	word = fsimg_load_le64(raw);
+	key->oid = word & APFS_JKEY_OID_MASK;
+	key->kind = (uint8_t)(word >> APFS_JKEY_KIND_SHIFT);
+	return (true);
+}
+
+bool
+apfs_jkey_encode(unsigned char *raw, size_t length, const apfs_jkey_t *key)
+{
+	if (length < APFS_JKEY_BYTES || key->oid > APFS_JKEY_OID_MASK ||
+	    key->kind > APFS_JKEY_KIND_MASK)
+		return (false);
+
+	jkey_store(raw, key->oid, key->kind);
+	return (true);
+}
+
+bool
+apfs_bare_key_decode(const unsigned char *raw, size_t length, uint8_t kind,
+    uint64_t *oid)
+{
+	if (length != APFS_JKEY_BYTES)
+		return (false);
+	return (jkey_load(raw, length, kind, APFS_JKEY_BYTES, oid));
+}
+
+bool
+apfs_bare_key_encode(unsigned char *raw, size_t length, uint8_t kind,
+    uint64_t oid)
+{
+	if (length != APFS_JKEY_BYTES || oid > APFS_JKEY_OID_MASK ||
+	    kind > APFS_JKEY_KIND_MASK)
+		return (false);
+
+	jkey_store(raw, oid, kind);
+	return (true);
+}
+
+/* Extended fields */
+
+static uint32_t
+xfield_padded(uint32_t size)
+{
+	return ((size + APFS_XF_ALIGN - 1) & ~(APFS_XF_ALIGN - 1));
+}
+
+/*
+ * Field index of a blob whose fields before it take *offset bytes of the
+ * data area: proves its header and its padded data inside the blob, then
+ * fills field and advances *offset past the padding. It trusts xf's span
+ * and count only, and every read stays inside the span, so an edited blob
+ * description cannot widen a field past it.
+ */
+static bool
+xfield_step(const apfs_xfields_t *xf, uint16_t index, size_t *offset,
+    apfs_xfield_t *field)
+{
+	const unsigned char *head;
+	uint64_t data_start;
+	uint32_t padded;
+	uint16_t size;
+
+	data_start = APFS_XF_BLOB_BYTES +
+	    (uint64_t)xf->count * APFS_XF_HEADER_BYTES;
+	if (index >= xf->count || data_start > xf->length)
+		return (false);
+	head = xf->raw + APFS_XF_BLOB_BYTES +
+	    (size_t)index * APFS_XF_HEADER_BYTES;
+	size = fsimg_load_le16(head + 2);
+	padded = xfield_padded(size);
+	if (data_start + *offset + padded > xf->length)
+		return (false);
+
+	field->type = head[0];
+	field->flags = head[1];
+	field->size = size;
+	field->data = xf->raw + data_start + *offset;
+	*offset += padded;
+	return (true);
+}
+
+/*
+ * Whether type is already marked in seen, a set of the 256 field types; it
+ * is marked on return either way.
+ */
+static bool
+type_repeated(unsigned char *seen, uint8_t type)
+{
+	unsigned char bit;
+	bool repeated;
+
+	bit = (unsigned char)(1u << (type % 8));
+	repeated = (seen[type / 8] & bit) != 0;
+	seen[type / 8] |= bit;
+	return (repeated);
+}
+
+/* Whether the bytes padding a proved field to its alignment are zero. */
+static bool
+padding_zero(const apfs_xfield_t *field)
+{
+	uint32_t i;
+
+	for (i = field->size; i < xfield_padded(field->size); i++)
+		if (field->data[i] != 0)
+			return (false);
+	return (true);
+}
+
+bool
+apfs_xfields_decode(const unsigned char *raw, size_t length,
+    apfs_xfields_t *xf)
+{
+	unsigned char seen[256 / 8];
+	apfs_xfields_t blob;
+	apfs_xfield_t field;
+	size_t offset;
+	uint16_t i;
+
+	if (length == 0) {
+		xf->raw = NULL;
+		xf->length = 0;
+		xf->count = 0;
+		xf->used = 0;
+		return (true);
+	}
+	if (length < APFS_XF_BLOB_BYTES)
+		return (false);
+
+	/* The headers and the used data fill the blob exactly. */
+	blob.raw = raw;
+	blob.length = length;
+	blob.count = fsimg_load_le16(raw);
+	blob.used = fsimg_load_le16(raw + 2);
+	if (APFS_XF_BLOB_BYTES + (uint64_t)blob.count * APFS_XF_HEADER_BYTES +
+	    blob.used != length)
+		return (false);
+
+	/* Each field's padded data follows the last, and the used count is
+	 * their sum.
+	 */
+	bzero(seen, sizeof(seen));
+	offset = 0;
+	for (i = 0; i < blob.count; i++) {
+		if (!xfield_step(&blob, i, &offset, &field))
+			return (false);
+		if (!padding_zero(&field))
+			return (false);
+		if (type_repeated(seen, field.type))
+			return (false);
+	}
+	if (offset != blob.used)
+		return (false);
+
+	*xf = blob;
+	return (true);
+}
+
+bool
+apfs_xfield_get(const apfs_xfields_t *xf, uint16_t index,
+    apfs_xfield_t *field)
+{
+	apfs_xfield_t found;
+	size_t offset;
+	uint32_t i;
+
+	offset = 0;
+	for (i = 0; i <= index; i++)
+		if (!xfield_step(xf, (uint16_t)i, &offset, &found))
+			return (false);
+	*field = found;
+	return (true);
+}
+
+bool
+apfs_xfield_find(const apfs_xfields_t *xf, uint8_t type,
+    apfs_xfield_t *field)
+{
+	apfs_xfield_t found;
+	size_t offset;
+	uint16_t i;
+
+	offset = 0;
+	for (i = 0; i < xf->count; i++) {
+		if (!xfield_step(xf, i, &offset, &found))
+			return (false);
+		if (found.type == type) {
+			*field = found;
+			return (true);
+		}
+	}
+	return (false);
+}
+
+bool
+apfs_xfields_size(const apfs_xfield_t *fields, uint16_t count,
+    size_t *size)
+{
+	uint64_t used;
+	uint16_t i;
+
+	used = 0;
+	for (i = 0; i < count; i++)
+		used += xfield_padded(fields[i].size);
+	if (used > UINT16_MAX)
+		return (false);
+
+	*size = APFS_XF_BLOB_BYTES + (size_t)count * APFS_XF_HEADER_BYTES +
+	    (size_t)used;
+	return (true);
+}
+
+bool
+apfs_xfields_encode(unsigned char *raw, size_t length,
+    const apfs_xfield_t *fields, uint16_t count)
+{
+	unsigned char seen[256 / 8];
+	unsigned char *head;
+	size_t at, size;
+	uint32_t padded;
+	uint16_t i;
+
+	if (!apfs_xfields_size(fields, count, &size) || size != length)
+		return (false);
+	bzero(seen, sizeof(seen));
+	for (i = 0; i < count; i++)
+		if (type_repeated(seen, fields[i].type))
+			return (false);
+
+	at = APFS_XF_BLOB_BYTES + (size_t)count * APFS_XF_HEADER_BYTES;
+	fsimg_store_le16(raw, count);
+	fsimg_store_le16(raw + 2, (uint16_t)(size - at));
+	for (i = 0; i < count; i++) {
+		head = raw + APFS_XF_BLOB_BYTES +
+		    (size_t)i * APFS_XF_HEADER_BYTES;
+		head[0] = fields[i].type;
+		head[1] = fields[i].flags;
+		fsimg_store_le16(head + 2, fields[i].size);
+		padded = xfield_padded(fields[i].size);
+		if (fields[i].size > 0)
+			bcopy(fields[i].data, raw + at, fields[i].size);
+		bzero(raw + at + fields[i].size, padded - fields[i].size);
+		at += padded;
+	}
+	return (true);
+}
+
+bool
+apfs_xfield_u32(const apfs_xfield_t *field, uint32_t *value)
+{
+	if (field->size != sizeof(uint32_t))
+		return (false);
+	*value = fsimg_load_le32(field->data);
+	return (true);
+}
+
+bool
+apfs_xfield_u64(const apfs_xfield_t *field, uint64_t *value)
+{
+	if (field->size != sizeof(uint64_t))
+		return (false);
+	*value = fsimg_load_le64(field->data);
+	return (true);
+}
+
+bool
+apfs_xfield_name(const apfs_xfield_t *field, const char **name,
+    uint16_t *name_len)
+{
+	if (field->size == 0 || field->data[field->size - 1] != '\0')
+		return (false);
+	*name = (const char *)field->data;
+	*name_len = (uint16_t)(field->size - 1);
+	return (true);
+}
+
+/*
+ * Whether a record encoder may copy blob xf after its fixed part of fixed
+ * bytes: the record's length is exactly both, and the blob decodes.
+ */
+static bool
+xfields_copyable(const apfs_xfields_t *xf, size_t length, size_t fixed)
+{
+	apfs_xfields_t check;
+
+	return (length >= fixed && length - fixed == xf->length &&
+	    apfs_xfields_decode(xf->raw, xf->length, &check));
+}
+
+/* Data streams and directory statistics */
+
+bool
+apfs_dstream_decode(const unsigned char *raw, size_t length,
+    apfs_dstream_t *dstream)
+{
+	if (length != APFS_DSTREAM_BYTES)
+		return (false);
+
+	dstream->size = fsimg_load_le64(raw);
+	dstream->alloced_size = fsimg_load_le64(raw + 8);
+	dstream->default_crypto_id = fsimg_load_le64(raw + 16);
+	dstream->total_bytes_written = fsimg_load_le64(raw + 24);
+	dstream->total_bytes_read = fsimg_load_le64(raw + 32);
+	return (true);
+}
+
+bool
+apfs_dstream_encode(unsigned char *raw, size_t length,
+    const apfs_dstream_t *dstream)
+{
+	if (length != APFS_DSTREAM_BYTES)
+		return (false);
+
+	fsimg_store_le64(raw, dstream->size);
+	fsimg_store_le64(raw + 8, dstream->alloced_size);
+	fsimg_store_le64(raw + 16, dstream->default_crypto_id);
+	fsimg_store_le64(raw + 24, dstream->total_bytes_written);
+	fsimg_store_le64(raw + 32, dstream->total_bytes_read);
+	return (true);
+}
+
+bool
+apfs_dir_stats_decode(const unsigned char *raw, size_t length,
+    apfs_dir_stats_t *stats)
+{
+	if (length != APFS_DIR_STATS_BYTES)
+		return (false);
+
+	stats->num_children = fsimg_load_le64(raw);
+	stats->total_size = fsimg_load_le64(raw + 8);
+	stats->chained_key = fsimg_load_le64(raw + 16);
+	stats->gen_count = fsimg_load_le64(raw + 24);
+	return (true);
+}
+
+bool
+apfs_dir_stats_encode(unsigned char *raw, size_t length,
+    const apfs_dir_stats_t *stats)
+{
+	if (length != APFS_DIR_STATS_BYTES)
+		return (false);
+
+	fsimg_store_le64(raw, stats->num_children);
+	fsimg_store_le64(raw + 8, stats->total_size);
+	fsimg_store_le64(raw + 16, stats->chained_key);
+	fsimg_store_le64(raw + 24, stats->gen_count);
+	return (true);
+}
+
+/* Inodes */
+
+bool
+apfs_inode_val_decode(const unsigned char *raw, size_t length,
+    apfs_inode_val_t *inode)
+{
+	apfs_xfields_t xfields;
+
+	if (length < APFS_INODE_VAL_BYTES ||
+	    !apfs_xfields_decode(raw + APFS_INODE_VAL_BYTES,
+	    length - APFS_INODE_VAL_BYTES, &xfields))
+		return (false);
+
+	inode->xfields = xfields;
+	inode->parent = fsimg_load_le64(raw);
+	inode->private_id = fsimg_load_le64(raw + 8);
+	inode->create_time = load_le64_signed(raw + 16);
+	inode->mod_time = load_le64_signed(raw + 24);
+	inode->change_time = load_le64_signed(raw + 32);
+	inode->access_time = load_le64_signed(raw + 40);
+	inode->internal_flags = fsimg_load_le64(raw + 48);
+	inode->count = load_le32_signed(raw + 56);
+	inode->protection_class = fsimg_load_le32(raw + 60);
+	inode->write_generation = fsimg_load_le32(raw + 64);
+	inode->bsd_flags = fsimg_load_le32(raw + 68);
+	inode->owner = fsimg_load_le32(raw + 72);
+	inode->group = fsimg_load_le32(raw + 76);
+	inode->mode = fsimg_load_le16(raw + 80);
+	inode->uncompressed_size = fsimg_load_le64(raw + 84);
+	return (true);
+}
+
+bool
+apfs_inode_val_encode(unsigned char *raw, size_t length,
+    const apfs_inode_val_t *inode)
+{
+	if (!xfields_copyable(&inode->xfields, length, APFS_INODE_VAL_BYTES))
+		return (false);
+
+	fsimg_store_le64(raw, inode->parent);
+	fsimg_store_le64(raw + 8, inode->private_id);
+	fsimg_store_le64(raw + 16, (uint64_t)inode->create_time);
+	fsimg_store_le64(raw + 24, (uint64_t)inode->mod_time);
+	fsimg_store_le64(raw + 32, (uint64_t)inode->change_time);
+	fsimg_store_le64(raw + 40, (uint64_t)inode->access_time);
+	fsimg_store_le64(raw + 48, inode->internal_flags);
+	fsimg_store_le32(raw + 56, (uint32_t)inode->count);
+	fsimg_store_le32(raw + 60, inode->protection_class);
+	fsimg_store_le32(raw + 64, inode->write_generation);
+	fsimg_store_le32(raw + 68, inode->bsd_flags);
+	fsimg_store_le32(raw + 72, inode->owner);
+	fsimg_store_le32(raw + 76, inode->group);
+	fsimg_store_le16(raw + 80, inode->mode);
+	fsimg_store_le16(raw + 82, 0);
+	fsimg_store_le64(raw + 84, inode->uncompressed_size);
+	if (inode->xfields.length > 0)
+		bcopy(inode->xfields.raw, raw + APFS_INODE_VAL_BYTES,
+		    inode->xfields.length);
+	return (true);
+}
+
+/* Directory records */
+
+bool
+apfs_drec_key_decode(const unsigned char *raw, size_t length, bool hashed,
+    apfs_drec_key_t *key)
+{
+	const char *name;
+	uint64_t parent;
+	size_t at;
+	uint32_t hash, stored, word;
+	uint16_t name_len;
+
+	at = hashed ? APFS_DREC_HASHED_KEY_BYTES : APFS_DREC_KEY_BYTES;
+	if (!jkey_load(raw, length, APFS_J_DREC, at, &parent))
+		return (false);
+	if (hashed) {
+		word = fsimg_load_le32(raw + 8);
+		stored = word & APFS_DREC_LEN_MASK;
+		hash = (word & APFS_DREC_HASH_MASK) >> APFS_DREC_HASH_SHIFT;
+	} else {
+		stored = fsimg_load_le16(raw + 8);
+		hash = 0;
+	}
+	if (!name_span(raw, length, at, stored, &name, &name_len))
+		return (false);
+
+	key->name = name;
+	key->parent = parent;
+	key->hash = hash;
+	key->name_len = name_len;
+	key->hashed = hashed;
+	return (true);
+}
+
+bool
+apfs_drec_key_encode(unsigned char *raw, size_t length,
+    const apfs_drec_key_t *key)
+{
+	size_t at;
+	uint32_t max, stored;
+	bool hash_fits;
+
+	if (key->hashed) {
+		at = APFS_DREC_HASHED_KEY_BYTES;
+		max = APFS_DREC_LEN_MASK;
+		hash_fits = key->hash <=
+		    APFS_DREC_HASH_MASK >> APFS_DREC_HASH_SHIFT;
+	} else {
+		at = APFS_DREC_KEY_BYTES;
+		max = UINT16_MAX;
+		hash_fits = key->hash == 0;
+	}
+	if (key->parent > APFS_JKEY_OID_MASK || !hash_fits ||
+	    !name_fits(length, at, key->name_len, max))
+		return (false);
+
+	stored = (uint32_t)key->name_len + 1;
+	jkey_store(raw, key->parent, APFS_J_DREC);
+	if (key->hashed)
+		fsimg_store_le32(raw + 8, key->hash << APFS_DREC_HASH_SHIFT |
+		    stored);
+	else
+		fsimg_store_le16(raw + 8, (uint16_t)stored);
+	name_store(raw, at, key->name, key->name_len);
+	return (true);
+}
+
+bool
+apfs_drec_val_decode(const unsigned char *raw, size_t length,
+    apfs_drec_val_t *drec)
+{
+	apfs_xfields_t xfields;
+
+	if (length < APFS_DREC_VAL_BYTES ||
+	    !apfs_xfields_decode(raw + APFS_DREC_VAL_BYTES,
+	    length - APFS_DREC_VAL_BYTES, &xfields))
+		return (false);
+
+	drec->xfields = xfields;
+	drec->child = fsimg_load_le64(raw);
+	drec->date_added = load_le64_signed(raw + 8);
+	drec->flags = fsimg_load_le16(raw + 16);
+	return (true);
+}
+
+bool
+apfs_drec_val_encode(unsigned char *raw, size_t length,
+    const apfs_drec_val_t *drec)
+{
+	if (!xfields_copyable(&drec->xfields, length, APFS_DREC_VAL_BYTES))
+		return (false);
+
+	fsimg_store_le64(raw, drec->child);
+	fsimg_store_le64(raw + 8, (uint64_t)drec->date_added);
+	fsimg_store_le16(raw + 16, drec->flags);
+	if (drec->xfields.length > 0)
+		bcopy(drec->xfields.raw, raw + APFS_DREC_VAL_BYTES,
+		    drec->xfields.length);
+	return (true);
+}
+
+/*
+ * Keys holding a u16 name length after the header and the name after their
+ * fixed part of fixed bytes: extended attributes and snapshot names.
+ */
+static bool
+name_key_decode(const unsigned char *raw, size_t length, uint32_t kind,
+    size_t fixed, apfs_name_key_t *key)
+{
+	const char *name;
+	uint64_t oid;
+	uint16_t name_len, stored;
+
+	if (!jkey_load(raw, length, kind, fixed, &oid))
+		return (false);
+	stored = fsimg_load_le16(raw + 8);
+	if (!name_span(raw, length, fixed, stored, &name, &name_len))
+		return (false);
+
+	key->name = name;
+	key->oid = oid;
+	key->name_len = name_len;
+	return (true);
+}
+
+static bool
+name_key_encode(unsigned char *raw, size_t length, uint32_t kind,
+    size_t fixed, const apfs_name_key_t *key)
+{
+	if (key->oid > APFS_JKEY_OID_MASK ||
+	    !name_fits(length, fixed, key->name_len, UINT16_MAX))
+		return (false);
+
+	jkey_store(raw, key->oid, kind);
+	fsimg_store_le16(raw + 8, (uint16_t)(key->name_len + 1));
+	name_store(raw, fixed, key->name, key->name_len);
+	return (true);
+}
+
+/* Extended attributes */
+
+bool
+apfs_xattr_key_decode(const unsigned char *raw, size_t length,
+    apfs_name_key_t *key)
+{
+	return (name_key_decode(raw, length, APFS_J_XATTR,
+	    APFS_XATTR_KEY_BYTES, key));
+}
+
+bool
+apfs_xattr_key_encode(unsigned char *raw, size_t length,
+    const apfs_name_key_t *key)
+{
+	return (name_key_encode(raw, length, APFS_J_XATTR,
+	    APFS_XATTR_KEY_BYTES, key));
+}
+
+bool
+apfs_xattr_val_decode(const unsigned char *raw, size_t length,
+    apfs_xattr_val_t *xattr)
+{
+	apfs_dstream_t dstream;
+	uint64_t stream_oid;
+	uint16_t data_len, flags;
+
+	if (length < APFS_XATTR_VAL_BYTES)
+		return (false);
+	flags = fsimg_load_le16(raw);
+	data_len = fsimg_load_le16(raw + 2);
+
+	/* The layout flag in force selects inline data or a stream. */
+	switch (flags & (APFS_XATTR_DATA_STREAM | APFS_XATTR_DATA_EMBEDDED)) {
+	case APFS_XATTR_DATA_EMBEDDED:
+		if (length - APFS_XATTR_VAL_BYTES != data_len)
+			return (false);
+		bzero(&dstream, sizeof(dstream));
+		stream_oid = 0;
+		xattr->data = raw + APFS_XATTR_VAL_BYTES;
+		break;
+	case APFS_XATTR_DATA_STREAM:
+		if (data_len != APFS_XATTR_STREAM_BYTES ||
+		    length - APFS_XATTR_VAL_BYTES != data_len)
+			return (false);
+		stream_oid = fsimg_load_le64(raw + APFS_XATTR_VAL_BYTES);
+		(void)apfs_dstream_decode(raw + APFS_XATTR_VAL_BYTES + 8,
+		    APFS_DSTREAM_BYTES, &dstream);
+		xattr->data = NULL;
+		break;
+	default:
+		return (false);
+	}
+
+	xattr->dstream = dstream;
+	xattr->stream_oid = stream_oid;
+	xattr->flags = flags;
+	xattr->data_len = data_len;
+	return (true);
+}
+
+bool
+apfs_xattr_val_encode(unsigned char *raw, size_t length,
+    const apfs_xattr_val_t *xattr)
+{
+	bool stream;
+
+	switch (xattr->flags &
+	    (APFS_XATTR_DATA_STREAM | APFS_XATTR_DATA_EMBEDDED)) {
+	case APFS_XATTR_DATA_EMBEDDED:
+		stream = false;
+		break;
+	case APFS_XATTR_DATA_STREAM:
+		if (xattr->data_len != APFS_XATTR_STREAM_BYTES)
+			return (false);
+		stream = true;
+		break;
+	default:
+		return (false);
+	}
+	if (length < APFS_XATTR_VAL_BYTES ||
+	    length - APFS_XATTR_VAL_BYTES != xattr->data_len)
+		return (false);
+
+	fsimg_store_le16(raw, xattr->flags);
+	fsimg_store_le16(raw + 2, xattr->data_len);
+	if (stream) {
+		fsimg_store_le64(raw + APFS_XATTR_VAL_BYTES, xattr->stream_oid);
+		(void)apfs_dstream_encode(raw + APFS_XATTR_VAL_BYTES + 8,
+		    APFS_DSTREAM_BYTES, &xattr->dstream);
+	} else if (xattr->data_len > 0)
+		bcopy(xattr->data, raw + APFS_XATTR_VAL_BYTES, xattr->data_len);
+	return (true);
+}
+
+/* Sibling links, sibling maps and data-stream IDs */
+
+bool
+apfs_sibling_key_decode(const unsigned char *raw, size_t length,
+    apfs_sibling_key_t *key)
+{
+	uint64_t inode;
+
+	if (length != APFS_SIBLING_KEY_BYTES ||
+	    !jkey_load(raw, length, APFS_J_SIBLING_LINK,
+	    APFS_SIBLING_KEY_BYTES, &inode))
+		return (false);
+
+	key->inode = inode;
+	key->sibling_id = fsimg_load_le64(raw + 8);
+	return (true);
+}
+
+bool
+apfs_sibling_key_encode(unsigned char *raw, size_t length,
+    const apfs_sibling_key_t *key)
+{
+	if (length != APFS_SIBLING_KEY_BYTES ||
+	    key->inode > APFS_JKEY_OID_MASK)
+		return (false);
+
+	jkey_store(raw, key->inode, APFS_J_SIBLING_LINK);
+	fsimg_store_le64(raw + 8, key->sibling_id);
+	return (true);
+}
+
+bool
+apfs_sibling_val_decode(const unsigned char *raw, size_t length,
+    apfs_sibling_val_t *sibling)
+{
+	const char *name;
+	uint16_t name_len, stored;
+
+	if (length < APFS_SIBLING_VAL_BYTES)
+		return (false);
+	stored = fsimg_load_le16(raw + 8);
+	if (!name_span(raw, length, APFS_SIBLING_VAL_BYTES, stored, &name,
+	    &name_len))
+		return (false);
+
+	sibling->name = name;
+	sibling->parent = fsimg_load_le64(raw);
+	sibling->name_len = name_len;
+	return (true);
+}
+
+bool
+apfs_sibling_val_encode(unsigned char *raw, size_t length,
+    const apfs_sibling_val_t *sibling)
+{
+	if (!name_fits(length, APFS_SIBLING_VAL_BYTES, sibling->name_len,
+	    UINT16_MAX))
+		return (false);
+
+	fsimg_store_le64(raw, sibling->parent);
+	fsimg_store_le16(raw + 8, (uint16_t)(sibling->name_len + 1));
+	name_store(raw, APFS_SIBLING_VAL_BYTES, sibling->name,
+	    sibling->name_len);
+	return (true);
+}
+
+bool
+apfs_sibling_map_val_decode(const unsigned char *raw, size_t length,
+    uint64_t *inode)
+{
+	if (length != APFS_SIBLING_MAP_VAL_BYTES)
+		return (false);
+
+	*inode = fsimg_load_le64(raw);
+	return (true);
+}
+
+bool
+apfs_sibling_map_val_encode(unsigned char *raw, size_t length,
+    uint64_t inode)
+{
+	if (length != APFS_SIBLING_MAP_VAL_BYTES)
+		return (false);
+
+	fsimg_store_le64(raw, inode);
+	return (true);
+}
+
+bool
+apfs_dstream_id_val_decode(const unsigned char *raw, size_t length,
+    uint32_t *refcnt)
+{
+	if (length != APFS_DSTREAM_ID_VAL_BYTES)
+		return (false);
+
+	*refcnt = fsimg_load_le32(raw);
+	return (true);
+}
+
+bool
+apfs_dstream_id_val_encode(unsigned char *raw, size_t length,
+    uint32_t refcnt)
+{
+	if (length != APFS_DSTREAM_ID_VAL_BYTES)
+		return (false);
+
+	fsimg_store_le32(raw, refcnt);
+	return (true);
+}
+
+/* File and physical extents */
+
+bool
+apfs_extent_key_decode(const unsigned char *raw, size_t length,
+    apfs_extent_key_t *key)
+{
+	uint64_t private_id;
+
+	if (length != APFS_EXTENT_KEY_BYTES ||
+	    !jkey_load(raw, length, APFS_J_FILE_EXTENT, APFS_EXTENT_KEY_BYTES,
+	    &private_id))
+		return (false);
+
+	key->private_id = private_id;
+	key->logical = fsimg_load_le64(raw + 8);
+	return (true);
+}
+
+bool
+apfs_extent_key_encode(unsigned char *raw, size_t length,
+    const apfs_extent_key_t *key)
+{
+	if (length != APFS_EXTENT_KEY_BYTES ||
+	    key->private_id > APFS_JKEY_OID_MASK)
+		return (false);
+
+	jkey_store(raw, key->private_id, APFS_J_FILE_EXTENT);
+	fsimg_store_le64(raw + 8, key->logical);
+	return (true);
+}
+
+bool
+apfs_extent_val_decode(const unsigned char *raw, size_t length,
+    apfs_extent_val_t *extent)
+{
+	uint64_t len_and_flags;
+
+	if (length != APFS_EXTENT_VAL_BYTES)
+		return (false);
+
+	len_and_flags = fsimg_load_le64(raw);
+	extent->length = len_and_flags & APFS_EXTENT_LEN_MASK;
+	extent->flags = (uint8_t)(len_and_flags >> APFS_EXTENT_FLAGS_SHIFT);
+	extent->phys_block = fsimg_load_le64(raw + 8);
+	extent->crypto_id = fsimg_load_le64(raw + 16);
+	return (true);
+}
+
+bool
+apfs_extent_val_encode(unsigned char *raw, size_t length,
+    const apfs_extent_val_t *extent)
+{
+	if (length != APFS_EXTENT_VAL_BYTES ||
+	    extent->length > APFS_EXTENT_LEN_MASK)
+		return (false);
+
+	fsimg_store_le64(raw, extent->length |
+	    (uint64_t)extent->flags << APFS_EXTENT_FLAGS_SHIFT);
+	fsimg_store_le64(raw + 8, extent->phys_block);
+	fsimg_store_le64(raw + 16, extent->crypto_id);
+	return (true);
+}
+
+bool
+apfs_pext_val_decode(const unsigned char *raw, size_t length,
+    apfs_pext_val_t *pext)
+{
+	uint64_t len_and_kind;
+
+	if (length != APFS_PEXT_VAL_BYTES)
+		return (false);
+
+	len_and_kind = fsimg_load_le64(raw);
+	pext->length = len_and_kind & APFS_PEXT_LEN_MASK;
+	pext->kind = (uint8_t)(len_and_kind >> APFS_PEXT_KIND_SHIFT);
+	pext->owner = fsimg_load_le64(raw + 8);
+	pext->refcnt = load_le32_signed(raw + 16);
+	return (true);
+}
+
+bool
+apfs_pext_val_encode(unsigned char *raw, size_t length,
+    const apfs_pext_val_t *pext)
+{
+	if (length != APFS_PEXT_VAL_BYTES ||
+	    pext->length > APFS_PEXT_LEN_MASK ||
+	    pext->kind > APFS_PEXT_KIND_MASK)
+		return (false);
+
+	fsimg_store_le64(raw, pext->length |
+	    (uint64_t)pext->kind << APFS_PEXT_KIND_SHIFT);
+	fsimg_store_le64(raw + 8, pext->owner);
+	fsimg_store_le32(raw + 16, (uint32_t)pext->refcnt);
+	return (true);
+}
+
+/* Snapshot metadata and names */
+
+bool
+apfs_snap_meta_val_decode(const unsigned char *raw, size_t length,
+    apfs_snap_meta_val_t *snap)
+{
+	const char *name;
+	uint16_t name_len, stored;
+
+	if (length < APFS_SNAP_META_VAL_BYTES)
+		return (false);
+	stored = fsimg_load_le16(raw + 48);
+	if (!name_span(raw, length, APFS_SNAP_META_VAL_BYTES, stored, &name,
+	    &name_len))
+		return (false);
+
+	snap->name = name;
+	snap->extentref_tree_oid = fsimg_load_le64(raw);
+	snap->sblock_oid = fsimg_load_le64(raw + 8);
+	snap->create_time = load_le64_signed(raw + 16);
+	snap->change_time = load_le64_signed(raw + 24);
+	snap->inum = fsimg_load_le64(raw + 32);
+	snap->extentref_tree_type = fsimg_load_le32(raw + 40);
+	snap->flags = fsimg_load_le32(raw + 44);
+	snap->name_len = name_len;
+	return (true);
+}
+
+bool
+apfs_snap_meta_val_encode(unsigned char *raw, size_t length,
+    const apfs_snap_meta_val_t *snap)
+{
+	if (!name_fits(length, APFS_SNAP_META_VAL_BYTES, snap->name_len,
+	    UINT16_MAX))
+		return (false);
+
+	fsimg_store_le64(raw, snap->extentref_tree_oid);
+	fsimg_store_le64(raw + 8, snap->sblock_oid);
+	fsimg_store_le64(raw + 16, (uint64_t)snap->create_time);
+	fsimg_store_le64(raw + 24, (uint64_t)snap->change_time);
+	fsimg_store_le64(raw + 32, snap->inum);
+	fsimg_store_le32(raw + 40, snap->extentref_tree_type);
+	fsimg_store_le32(raw + 44, snap->flags);
+	fsimg_store_le16(raw + 48, (uint16_t)(snap->name_len + 1));
+	name_store(raw, APFS_SNAP_META_VAL_BYTES, snap->name, snap->name_len);
+	return (true);
+}
+
+bool
+apfs_snap_name_key_decode(const unsigned char *raw, size_t length,
+    apfs_name_key_t *key)
+{
+	return (name_key_decode(raw, length, APFS_J_SNAP_NAME,
+	    APFS_SNAP_NAME_KEY_BYTES, key));
+}
+
+bool
+apfs_snap_name_key_encode(unsigned char *raw, size_t length,
+    const apfs_name_key_t *key)
+{
+	return (name_key_encode(raw, length, APFS_J_SNAP_NAME,
+	    APFS_SNAP_NAME_KEY_BYTES, key));
+}
+
+bool
+apfs_snap_name_val_decode(const unsigned char *raw, size_t length,
+    uint64_t *xid)
+{
+	if (length != APFS_SNAP_NAME_VAL_BYTES)
+		return (false);
+
+	*xid = fsimg_load_le64(raw);
+	return (true);
+}
+
+bool
+apfs_snap_name_val_encode(unsigned char *raw, size_t length, uint64_t xid)
+{
+	if (length != APFS_SNAP_NAME_VAL_BYTES)
+		return (false);
+
+	fsimg_store_le64(raw, xid);
+	return (true);
+}
+
+/* File information */
+
+bool
+apfs_file_info_key_decode(const unsigned char *raw, size_t length,
+    apfs_file_info_key_t *key)
+{
+	uint64_t private_id, word;
+
+	if (length != APFS_FILE_INFO_KEY_BYTES ||
+	    !jkey_load(raw, length, APFS_J_FILE_INFO, APFS_FILE_INFO_KEY_BYTES,
+	    &private_id))
+		return (false);
+
+	word = fsimg_load_le64(raw + 8);
+	key->private_id = private_id;
+	key->lba = word & APFS_FILE_INFO_LBA_MASK;
+	key->type = (uint8_t)(word >> APFS_FILE_INFO_TYPE_SHIFT);
+	return (true);
+}
+
+bool
+apfs_file_info_key_encode(unsigned char *raw, size_t length,
+    const apfs_file_info_key_t *key)
+{
+	if (length != APFS_FILE_INFO_KEY_BYTES ||
+	    key->private_id > APFS_JKEY_OID_MASK ||
+	    key->lba > APFS_FILE_INFO_LBA_MASK)
+		return (false);
+
+	jkey_store(raw, key->private_id, APFS_J_FILE_INFO);
+	fsimg_store_le64(raw + 8, key->lba |
+	    (uint64_t)key->type << APFS_FILE_INFO_TYPE_SHIFT);
+	return (true);
+}
+
+bool
+apfs_file_info_val_decode(const unsigned char *raw, size_t length,
+    apfs_file_info_val_t *info)
+{
+	if (length < APFS_FILE_INFO_VAL_BYTES ||
+	    length - APFS_FILE_INFO_VAL_BYTES != raw[2])
+		return (false);
+
+	info->hash = raw + APFS_FILE_INFO_VAL_BYTES;
+	info->hashed_len = fsimg_load_le16(raw);
+	info->hash_size = raw[2];
+	return (true);
+}
+
+bool
+apfs_file_info_val_encode(unsigned char *raw, size_t length,
+    const apfs_file_info_val_t *info)
+{
+	if (length < APFS_FILE_INFO_VAL_BYTES ||
+	    length - APFS_FILE_INFO_VAL_BYTES != info->hash_size)
+		return (false);
+
+	fsimg_store_le16(raw, info->hashed_len);
+	raw[2] = info->hash_size;
+	if (info->hash_size > 0)
+		bcopy(info->hash, raw + APFS_FILE_INFO_VAL_BYTES,
+		    info->hash_size);
+	return (true);
+}

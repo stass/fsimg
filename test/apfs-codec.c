@@ -13,6 +13,14 @@
 #include "test.h"
 #include "fsimg-endian.h"
 
+typedef struct fs_xfield_failure {
+	const char *name;
+	size_t length;
+	unsigned offset;
+	unsigned width;
+	uint64_t value;
+} fs_xfield_failure_t;
+
 typedef struct native_run {
 	size_t		offset;
 	const char	*hex;
@@ -2135,9 +2143,2279 @@ test_patterned_encodes(void)
 	}
 }
 
+
+/*
+ * Each filesystem-record check compares fields against an independent fixture,
+ * then encodes over a pattern. Bad lengths must leave both destinations intact.
+ * A private copy provides a real extra byte for the overlong-input checks.
+ */
+static void
+check_fs_dstream(const unsigned char *bytes, size_t length,
+    const apfs_dstream_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_dstream_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_dstream_decode(raw, length, &got), "dstream decode");
+	expect(got.size == want->size, "dstream size");
+	expect(got.alloced_size == want->alloced_size, "dstream alloced_size");
+	expect(got.default_crypto_id == want->default_crypto_id, "dstream default_crypto_id");
+	expect(got.total_bytes_written == want->total_bytes_written, "dstream total_bytes_written");
+	expect(got.total_bytes_read == want->total_bytes_read, "dstream total_bytes_read");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_dstream_encode(encoded, length, &got),
+	    "dstream encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "dstream byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_dstream_t, output,
+		    apfs_dstream_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_dstream_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_dir_stats(const unsigned char *bytes, size_t length,
+    const apfs_dir_stats_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_dir_stats_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_dir_stats_decode(raw, length, &got), "dir_stats decode");
+	expect(got.num_children == want->num_children, "dir_stats num_children");
+	expect(got.total_size == want->total_size, "dir_stats total_size");
+	expect(got.chained_key == want->chained_key, "dir_stats chained_key");
+	expect(got.gen_count == want->gen_count, "dir_stats gen_count");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_dir_stats_encode(encoded, length, &got),
+	    "dir_stats encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "dir_stats byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_dir_stats_t, output,
+		    apfs_dir_stats_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_dir_stats_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_inode_val(const unsigned char *bytes, size_t length,
+    const apfs_inode_val_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_inode_val_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_inode_val_decode(raw, length, &got), "inode_val decode");
+	expect(got.parent == want->parent, "inode_val parent");
+	expect(got.private_id == want->private_id, "inode_val private_id");
+	expect(got.create_time == want->create_time, "inode_val create_time");
+	expect(got.mod_time == want->mod_time, "inode_val mod_time");
+	expect(got.change_time == want->change_time, "inode_val change_time");
+	expect(got.access_time == want->access_time, "inode_val access_time");
+	expect(got.internal_flags == want->internal_flags, "inode_val internal_flags");
+	expect(got.uncompressed_size == want->uncompressed_size, "inode_val uncompressed_size");
+	expect(got.count == want->count, "inode_val count");
+	expect(got.protection_class == want->protection_class, "inode_val protection_class");
+	expect(got.write_generation == want->write_generation, "inode_val write_generation");
+	expect(got.bsd_flags == want->bsd_flags, "inode_val bsd_flags");
+	expect(got.owner == want->owner, "inode_val owner");
+	expect(got.group == want->group, "inode_val group");
+	expect(got.mode == want->mode, "inode_val mode");
+	expect(got.xfields.length == want->xfields.length &&
+	    got.xfields.count == want->xfields.count &&
+	    got.xfields.used == want->xfields.used, "inode_val xfield framing");
+	if (want->xfields.length != 0)
+		expect(memcmp(got.xfields.raw, want->xfields.raw,
+		    want->xfields.length) == 0, "inode_val xfield bytes");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_inode_val_encode(encoded, length, &got),
+	    "inode_val encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "inode_val byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_inode_val_t, output,
+		    apfs_inode_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_inode_val_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_drec_key(const unsigned char *bytes, size_t length,
+    const apfs_drec_key_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_drec_key_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_drec_key_decode(raw, length, want->hashed, &got), "drec_key decode");
+	expect(got.parent == want->parent, "drec_key parent");
+	expect(got.hash == want->hash, "drec_key hash");
+	expect(got.name_len == want->name_len, "drec_key name_len");
+	expect(got.hashed == want->hashed, "drec_key hashed");
+	expect(memcmp(got.name, want->name, want->name_len) == 0,
+	    "drec_key name bytes exclude stored NUL");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_drec_key_encode(encoded, length, &got),
+	    "drec_key encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "drec_key byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_drec_key_t, output,
+		    apfs_drec_key_decode(raw, bad, want->hashed, &output));
+		REJECT_WRITE(encoded, apfs_drec_key_encode(encoded, bad, &got));
+	}
+	raw[7] &= 0x0f;
+	REJECT_OUTPUT(apfs_drec_key_t, output,
+	    apfs_drec_key_decode(raw, length, want->hashed, &output));
+}
+
+static void
+check_fs_drec_val(const unsigned char *bytes, size_t length,
+    const apfs_drec_val_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_drec_val_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_drec_val_decode(raw, length, &got), "drec_val decode");
+	expect(got.child == want->child, "drec_val child");
+	expect(got.date_added == want->date_added, "drec_val date_added");
+	expect(got.flags == want->flags, "drec_val flags");
+	expect(got.xfields.length == want->xfields.length &&
+	    got.xfields.count == want->xfields.count &&
+	    got.xfields.used == want->xfields.used, "drec_val xfield framing");
+	if (want->xfields.length != 0)
+		expect(memcmp(got.xfields.raw, want->xfields.raw,
+		    want->xfields.length) == 0, "drec_val xfield bytes");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_drec_val_encode(encoded, length, &got),
+	    "drec_val encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "drec_val byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_drec_val_t, output,
+		    apfs_drec_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_drec_val_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_xattr_key(const unsigned char *bytes, size_t length,
+    const apfs_name_key_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_name_key_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_xattr_key_decode(raw, length, &got), "xattr_key decode");
+	expect(got.oid == want->oid, "xattr_key oid");
+	expect(got.name_len == want->name_len, "xattr_key name_len");
+	expect(memcmp(got.name, want->name, want->name_len) == 0,
+	    "xattr_key name bytes exclude stored NUL");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_xattr_key_encode(encoded, length, &got),
+	    "xattr_key encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "xattr_key byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_name_key_t, output,
+		    apfs_xattr_key_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_xattr_key_encode(encoded, bad, &got));
+	}
+	raw[7] &= 0x0f;
+	REJECT_OUTPUT(apfs_name_key_t, output,
+	    apfs_xattr_key_decode(raw, length, &output));
+}
+
+static void
+check_fs_snap_name_key(const unsigned char *bytes, size_t length,
+    const apfs_name_key_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_name_key_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_snap_name_key_decode(raw, length, &got), "snap_name_key decode");
+	expect(got.oid == want->oid, "snap_name_key oid");
+	expect(got.name_len == want->name_len, "snap_name_key name_len");
+	expect(memcmp(got.name, want->name, want->name_len) == 0,
+	    "snap_name_key name bytes exclude stored NUL");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_snap_name_key_encode(encoded, length, &got),
+	    "snap_name_key encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "snap_name_key byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_name_key_t, output,
+		    apfs_snap_name_key_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_snap_name_key_encode(encoded, bad, &got));
+	}
+	raw[7] &= 0x0f;
+	REJECT_OUTPUT(apfs_name_key_t, output,
+	    apfs_snap_name_key_decode(raw, length, &output));
+}
+
+static void
+check_fs_xattr_val(const unsigned char *bytes, size_t length,
+    const apfs_xattr_val_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_xattr_val_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_xattr_val_decode(raw, length, &got), "xattr_val decode");
+	expect(got.flags == want->flags, "xattr_val flags");
+	expect(got.data_len == want->data_len, "xattr_val data_len");
+	if ((want->flags & 1) != 0) {
+		expect(got.stream_oid == want->stream_oid, "xattr stream OID");
+		expect(got.data == NULL, "stream attribute has no inline span");
+		expect(got.dstream.size == want->dstream.size,
+		    "stream attribute size");
+		expect(got.dstream.alloced_size == want->dstream.alloced_size,
+		    "stream attribute alloced_size");
+		expect(got.dstream.default_crypto_id == want->dstream.default_crypto_id,
+		    "stream attribute default_crypto_id");
+		expect(got.dstream.total_bytes_written == want->dstream.total_bytes_written,
+		    "stream attribute total_bytes_written");
+		expect(got.dstream.total_bytes_read == want->dstream.total_bytes_read,
+		    "stream attribute total_bytes_read");
+	} else
+		expect(memcmp(got.data, want->data, want->data_len) == 0,
+		    "inline attribute bytes");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_xattr_val_encode(encoded, length, &got),
+	    "xattr_val encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "xattr_val byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_xattr_val_t, output,
+		    apfs_xattr_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_xattr_val_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_sibling_key(const unsigned char *bytes, size_t length,
+    const apfs_sibling_key_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_sibling_key_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_sibling_key_decode(raw, length, &got), "sibling_key decode");
+	expect(got.inode == want->inode, "sibling_key inode");
+	expect(got.sibling_id == want->sibling_id, "sibling_key sibling_id");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_sibling_key_encode(encoded, length, &got),
+	    "sibling_key encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "sibling_key byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_sibling_key_t, output,
+		    apfs_sibling_key_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_sibling_key_encode(encoded, bad, &got));
+	}
+	raw[7] &= 0x0f;
+	REJECT_OUTPUT(apfs_sibling_key_t, output,
+	    apfs_sibling_key_decode(raw, length, &output));
+}
+
+static void
+check_fs_sibling_val(const unsigned char *bytes, size_t length,
+    const apfs_sibling_val_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_sibling_val_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_sibling_val_decode(raw, length, &got), "sibling_val decode");
+	expect(got.parent == want->parent, "sibling_val parent");
+	expect(got.name_len == want->name_len, "sibling_val name_len");
+	expect(memcmp(got.name, want->name, want->name_len) == 0,
+	    "sibling_val name bytes exclude stored NUL");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_sibling_val_encode(encoded, length, &got),
+	    "sibling_val encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "sibling_val byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_sibling_val_t, output,
+		    apfs_sibling_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_sibling_val_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_extent_key(const unsigned char *bytes, size_t length,
+    const apfs_extent_key_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_extent_key_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_extent_key_decode(raw, length, &got), "extent_key decode");
+	expect(got.private_id == want->private_id, "extent_key private_id");
+	expect(got.logical == want->logical, "extent_key logical");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_extent_key_encode(encoded, length, &got),
+	    "extent_key encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "extent_key byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_extent_key_t, output,
+		    apfs_extent_key_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_extent_key_encode(encoded, bad, &got));
+	}
+	raw[7] &= 0x0f;
+	REJECT_OUTPUT(apfs_extent_key_t, output,
+	    apfs_extent_key_decode(raw, length, &output));
+}
+
+static void
+check_fs_extent_val(const unsigned char *bytes, size_t length,
+    const apfs_extent_val_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_extent_val_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_extent_val_decode(raw, length, &got), "extent_val decode");
+	expect(got.length == want->length, "extent_val length");
+	expect(got.phys_block == want->phys_block, "extent_val phys_block");
+	expect(got.crypto_id == want->crypto_id, "extent_val crypto_id");
+	expect(got.flags == want->flags, "extent_val flags");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_extent_val_encode(encoded, length, &got),
+	    "extent_val encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "extent_val byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_extent_val_t, output,
+		    apfs_extent_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_extent_val_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_pext_val(const unsigned char *bytes, size_t length,
+    const apfs_pext_val_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_pext_val_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_pext_val_decode(raw, length, &got), "pext_val decode");
+	expect(got.length == want->length, "pext_val length");
+	expect(got.owner == want->owner, "pext_val owner");
+	expect(got.refcnt == want->refcnt, "pext_val refcnt");
+	expect(got.kind == want->kind, "pext_val kind");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_pext_val_encode(encoded, length, &got),
+	    "pext_val encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "pext_val byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_pext_val_t, output,
+		    apfs_pext_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_pext_val_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_snap_meta_val(const unsigned char *bytes, size_t length,
+    const apfs_snap_meta_val_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_snap_meta_val_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_snap_meta_val_decode(raw, length, &got), "snap_meta_val decode");
+	expect(got.extentref_tree_oid == want->extentref_tree_oid, "snap_meta_val extentref_tree_oid");
+	expect(got.sblock_oid == want->sblock_oid, "snap_meta_val sblock_oid");
+	expect(got.create_time == want->create_time, "snap_meta_val create_time");
+	expect(got.change_time == want->change_time, "snap_meta_val change_time");
+	expect(got.inum == want->inum, "snap_meta_val inum");
+	expect(got.extentref_tree_type == want->extentref_tree_type, "snap_meta_val extentref_tree_type");
+	expect(got.flags == want->flags, "snap_meta_val flags");
+	expect(got.name_len == want->name_len, "snap_meta_val name_len");
+	expect(memcmp(got.name, want->name, want->name_len) == 0,
+	    "snap_meta_val name bytes exclude stored NUL");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_snap_meta_val_encode(encoded, length, &got),
+	    "snap_meta_val encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "snap_meta_val byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_snap_meta_val_t, output,
+		    apfs_snap_meta_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_snap_meta_val_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_file_info_key(const unsigned char *bytes, size_t length,
+    const apfs_file_info_key_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_file_info_key_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_file_info_key_decode(raw, length, &got), "file_info_key decode");
+	expect(got.private_id == want->private_id, "file_info_key private_id");
+	expect(got.lba == want->lba, "file_info_key lba");
+	expect(got.type == want->type, "file_info_key type");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_file_info_key_encode(encoded, length, &got),
+	    "file_info_key encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "file_info_key byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_file_info_key_t, output,
+		    apfs_file_info_key_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_file_info_key_encode(encoded, bad, &got));
+	}
+	raw[7] &= 0x0f;
+	REJECT_OUTPUT(apfs_file_info_key_t, output,
+	    apfs_file_info_key_decode(raw, length, &output));
+}
+
+static void
+check_fs_file_info_val(const unsigned char *bytes, size_t length,
+    const apfs_file_info_val_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_file_info_val_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_file_info_val_decode(raw, length, &got), "file_info_val decode");
+	expect(got.hashed_len == want->hashed_len, "file_info_val hashed_len");
+	expect(got.hash_size == want->hash_size, "file_info_val hash_size");
+	expect(memcmp(got.hash, want->hash, want->hash_size) == 0,
+	    "file information hash bytes");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_file_info_val_encode(encoded, length, &got),
+	    "file_info_val encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "file_info_val byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(apfs_file_info_val_t, output,
+		    apfs_file_info_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_file_info_val_encode(encoded, bad, &got));
+	}
+}
+
+static void
+check_fs_jkey(const unsigned char *bytes, size_t length,
+    const apfs_jkey_t *want)
+{
+	unsigned char raw[1024], encoded[1024];
+	apfs_jkey_t got;
+
+	expect(length + 1 <= sizeof(raw), "fixture fits record buffer");
+	bzero(raw, sizeof(raw));
+	bcopy(bytes, raw, length);
+	expect(apfs_jkey_decode(raw, length, &got), "jkey decode");
+	expect(got.oid == want->oid, "jkey oid");
+	expect(got.kind == want->kind, "jkey kind");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_jkey_encode(encoded, length, &got),
+	    "jkey encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "jkey byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "encoder preserves trailing guard");
+	REJECT_WRITE(encoded, apfs_jkey_encode(encoded, length - 1, &got));
+	REJECT_OUTPUT(apfs_jkey_t, output,
+	    apfs_jkey_decode(raw, 7, &output));
+	expect(apfs_jkey_decode(raw, length + 1, &got),
+	    "key header accepts a suffix");
+}
+
+static void
+check_fs_bare_key(const unsigned char *bytes, size_t length,
+    const apfs_jkey_t *want)
+{
+	unsigned char raw[9] = {0}, encoded[9];
+	const size_t bad_lengths[] = { 7, 9 };
+	uint64_t oid;
+
+	expect(length == 8, "native bare key is exactly eight bytes");
+	bcopy(bytes, raw, length);
+	expect(apfs_bare_key_decode(raw, length, want->kind, &oid),
+	    "bare key decodes with expected kind");
+	expect(oid == want->oid, "bare key OID agrees with native dump");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_bare_key_encode(encoded, length, want->kind, oid),
+	    "bare key encode");
+	expect(memcmp(encoded, bytes, length) == 0,
+	    "bare key byte roundtrip over pattern");
+	expect(encoded[length] == 0xa5, "bare key preserves trailing guard");
+	for (size_t i = 0; i < sizeof(bad_lengths) / sizeof(bad_lengths[0]); i++) {
+		REJECT_OUTPUT(uint64_t, output,
+		    apfs_bare_key_decode(raw, bad_lengths[i], want->kind, &output));
+		REJECT_WRITE(encoded, apfs_bare_key_encode(encoded,
+		    bad_lengths[i], want->kind, oid));
+	}
+	REJECT_OUTPUT(uint64_t, output,
+	    apfs_bare_key_decode(raw, length, want->kind ^ 1, &output));
+}
+
+static void
+check_fs_sibling_map_val(const unsigned char *bytes, size_t length, uint64_t want)
+{
+	unsigned char raw[16] = {0}, encoded[16];
+	uint64_t got;
+
+	bcopy(bytes, raw, length);
+	expect(apfs_sibling_map_val_decode(raw, length, &got), "sibling_map_val decode");
+	expect(got == want, "sibling_map_val value");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_sibling_map_val_encode(encoded, length, got), "sibling_map_val encode");
+	expect(memcmp(bytes, encoded, length) == 0, "sibling_map_val byte roundtrip");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(uint64_t, output,
+		    apfs_sibling_map_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_sibling_map_val_encode(encoded, bad, got));
+	}
+}
+
+static void
+check_fs_dstream_id_val(const unsigned char *bytes, size_t length, uint32_t want)
+{
+	unsigned char raw[16] = {0}, encoded[16];
+	uint32_t got;
+
+	bcopy(bytes, raw, length);
+	expect(apfs_dstream_id_val_decode(raw, length, &got), "dstream_id_val decode");
+	expect(got == want, "dstream_id_val value");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_dstream_id_val_encode(encoded, length, got), "dstream_id_val encode");
+	expect(memcmp(bytes, encoded, length) == 0, "dstream_id_val byte roundtrip");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(uint32_t, output,
+		    apfs_dstream_id_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_dstream_id_val_encode(encoded, bad, got));
+	}
+}
+
+static void
+check_fs_snap_name_val(const unsigned char *bytes, size_t length, uint64_t want)
+{
+	unsigned char raw[16] = {0}, encoded[16];
+	uint64_t got;
+
+	bcopy(bytes, raw, length);
+	expect(apfs_snap_name_val_decode(raw, length, &got), "snap_name_val decode");
+	expect(got == want, "snap_name_val value");
+	memset(encoded, 0xa5, sizeof(encoded));
+	expect(apfs_snap_name_val_encode(encoded, length, got), "snap_name_val encode");
+	expect(memcmp(bytes, encoded, length) == 0, "snap_name_val byte roundtrip");
+	for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+		REJECT_OUTPUT(uint64_t, output,
+		    apfs_snap_name_val_decode(raw, bad, &output));
+		REJECT_WRITE(encoded, apfs_snap_name_val_encode(encoded, bad, got));
+	}
+}
+
+/* Walk and lookup must expose the same unpadded data and field metadata. */
+static void
+check_fs_xfields(const unsigned char *bytes, size_t length,
+    const apfs_xfield_t *want, uint16_t count, uint16_t used)
+{
+	unsigned char raw[1024] = {0}, encoded[1024];
+	apfs_xfields_t blob;
+	apfs_xfield_t field, found;
+	size_t size;
+
+	expect(length + 1 <= sizeof(raw), "blob fits fixture buffer");
+	if (length != 0)
+		bcopy(bytes, raw, length);
+	expect(apfs_xfields_decode(raw, length, &blob), "xfield blob decode");
+	expect(blob.length == length && blob.count == count && blob.used == used,
+	    "xfield count, padded data count and length");
+	for (uint16_t i = 0; i < count; i++) {
+		expect(apfs_xfield_get(&blob, i, &field), "walk extended field");
+		expect(apfs_xfield_find(&blob, want[i].type, &found),
+		    "find extended field by type");
+		expect(field.type == want[i].type && field.flags == want[i].flags &&
+		    field.size == want[i].size &&
+		    memcmp(field.data, want[i].data, field.size) == 0,
+		    "extended field metadata and unpadded data");
+		expect(found.type == field.type && found.flags == field.flags &&
+		    found.size == field.size && found.data == field.data,
+		    "lookup agrees with walk");
+	}
+	expect(apfs_xfields_size(want, count, &size), "extended field size");
+	/* Zero fields may be represented by an empty span or a four-byte blob. */
+	if (length != 0) {
+		expect(size == length, "extended field computed size");
+		memset(encoded, 0xa5, sizeof(encoded));
+		expect(apfs_xfields_encode(encoded, length, want, count),
+		    "extended field encode");
+		expect(memcmp(raw, encoded, length) == 0,
+		    "extended field bytes and zero padding overwrite pattern");
+		for (size_t bad = length - 1; bad <= length + 1; bad += 2) {
+			REJECT_OUTPUT(apfs_xfields_t, output,
+			    apfs_xfields_decode(raw, bad, &output));
+			REJECT_WRITE(encoded,
+			    apfs_xfields_encode(encoded, bad, want, count));
+		}
+	}
+	REJECT_OUTPUT(apfs_xfield_t, output,
+	    apfs_xfield_get(&blob, count, &output));
+	REJECT_OUTPUT(apfs_xfield_t, output,
+	    apfs_xfield_find(&blob, 255, &output));
+}
+
+static void
+test_native_fs_records(void)
+{
+	{
+		/* apfs-newfs-268435456-e3-ci, node block 1007, record 2. */
+		static const unsigned char key[] = {
+			0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30
+		};
+		static const unsigned char value[] = {
+			0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0xeb, 0x6b, 0xde, 0x2b, 0xc8, 0xd7, 0xe7, 0x18,
+			0x32, 0x4c, 0xae, 0x5e, 0xc8, 0xd7, 0xe7, 0x18,
+			0x32, 0x4c, 0xae, 0x5e, 0xc8, 0xd7, 0xe7, 0x18,
+			0x22, 0x6e, 0xc4, 0x68, 0xc8, 0xd7, 0xe7, 0x18,
+			0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0xf5, 0x01, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00,
+			0xed, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00,
+			0x04, 0x02, 0x05, 0x00, 0x72, 0x6f, 0x6f, 0x74,
+			0x00, 0x00, 0x00, 0x00
+		};
+		static const unsigned char xf_data_0[] = {
+			0x72, 0x6f, 0x6f, 0x74, 0x00
+		};
+		const apfs_xfield_t fields[] = {
+			{ .data = xf_data_0, .size = 5,
+			  .type = 4, .flags = 2 },
+		};
+		const apfs_inode_val_t want = {
+		    .parent = 1, .private_id = 2,
+		    .create_time = UINT64_C(1794640231259859947),
+		    .mod_time = UINT64_C(1794640232112344114),
+		    .change_time = UINT64_C(1794640232112344114),
+		    .access_time = UINT64_C(1794640232281566754),
+		    .internal_flags = 32768, .uncompressed_size = 0,
+		    .count = 11, .protection_class = 0,
+		    .write_generation = 12, .bsd_flags = 0,
+		    .owner = 501, .group = 20, .mode = 16877,
+		    .xfields = { .raw = value + 92, .length = 16, .count = 1, .used = 8 } };
+		const apfs_jkey_t header = { .oid = 2, .kind = 3 };
+		apfs_inode_val_t inode;
+		apfs_xfield_t field;
+		const char *name;
+		uint16_t name_len;
+
+		scenario = "native root_inode: block 1007, record 2";
+		check_fs_jkey(key, 8, &header);
+		check_fs_bare_key(key, sizeof(key), &header);
+		check_fs_inode_val(value, sizeof(value), &want);
+		check_fs_xfields(value + 92, sizeof(value) - 92,
+		    fields, 1, 8);
+		expect(apfs_inode_val_decode(value, sizeof(value), &inode),
+		    "root inode decode");
+		expect(apfs_xfield_find(&inode.xfields, 4, &field),
+		    "root inode has a name field");
+		expect(apfs_xfield_name(&field, &name, &name_len),
+		    "root inode name decode");
+		expect(name == (const char *)field.data && name_len == 4 &&
+		    memcmp(name, "root", name_len) == 0,
+		    "root name borrows field data and excludes terminal NUL");
+	}
+	{
+		/* apfs-newfs-268435456-e3-ci, node block 1007, record 22. */
+		static const unsigned char key[] = {
+			0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30
+		};
+		static const unsigned char value[] = {
+			0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0xd0, 0x61, 0xa4, 0x3c, 0xc8, 0xd7, 0xe7, 0x18,
+			0x20, 0x75, 0x06, 0x5c, 0xcb, 0xd7, 0xe7, 0x18,
+			0xeb, 0x36, 0x07, 0x5c, 0xcb, 0xd7, 0xe7, 0x18,
+			0x20, 0x75, 0x06, 0x5c, 0xcb, 0xd7, 0xe7, 0x18,
+			0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x63, 0x00, 0x00, 0x00, 0x63, 0x00, 0x00, 0x00,
+			0x80, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x38, 0x00,
+			0x04, 0x02, 0x0f, 0x00, 0x08, 0x20, 0x28, 0x00,
+			0x66, 0x73, 0x65, 0x76, 0x65, 0x6e, 0x74, 0x73,
+			0x64, 0x2d, 0x75, 0x75, 0x69, 0x64, 0x00, 0x00,
+			0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		static const unsigned char xf_data_0[] = {
+			0x66, 0x73, 0x65, 0x76, 0x65, 0x6e, 0x74, 0x73,
+			0x64, 0x2d, 0x75, 0x75, 0x69, 0x64, 0x00
+		};
+		static const unsigned char xf_data_1[] = {
+			0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		const apfs_xfield_t fields[] = {
+			{ .data = xf_data_0, .size = 15,
+			  .type = 4, .flags = 2 },
+			{ .data = xf_data_1, .size = 40,
+			  .type = 8, .flags = 32 },
+		};
+		const apfs_inode_val_t want = {
+		    .parent = 16, .private_id = 17,
+		    .create_time = UINT64_C(1794640231541268944),
+		    .mod_time = UINT64_C(1794640244952692000),
+		    .change_time = UINT64_C(1794640244952741611),
+		    .access_time = UINT64_C(1794640244952692000),
+		    .internal_flags = 32768, .uncompressed_size = 0,
+		    .count = 1, .protection_class = 0,
+		    .write_generation = 2, .bsd_flags = 0,
+		    .owner = 99, .group = 99, .mode = 33152,
+		    .xfields = { .raw = value + 92, .length = 68, .count = 2, .used = 56 } };
+		const apfs_jkey_t header = { .oid = 17, .kind = 3 };
+		apfs_xfields_t blob;
+		apfs_xfield_t field;
+
+		scenario = "native file_inode: block 1007, record 22";
+		check_fs_jkey(key, 8, &header);
+		check_fs_bare_key(key, sizeof(key), &header);
+		check_fs_inode_val(value, sizeof(value), &want);
+		check_fs_xfields(value + 92, sizeof(value) - 92,
+		    fields, 2, 56);
+		expect(apfs_xfields_decode(value + 92, sizeof(value) - 92,
+		    &blob), "native scalar blob");
+		expect(apfs_xfield_find(&blob, 8, &field),
+		    "native dstream field");
+	{
+			const apfs_dstream_t stream = {
+			    .size = 36, .alloced_size = 4096,
+			    .default_crypto_id = 0, .total_bytes_written = 36,
+			    .total_bytes_read = 36 };
+
+			check_fs_dstream(field.data, field.size, &stream);
+	}
+	}
+	{
+		/* apfs-newfs-67108864-e6-sparse, node block 239, record 22. */
+		static const unsigned char key[] = {
+			0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30
+		};
+		static const unsigned char value[] = {
+			0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x86, 0x9b, 0x0f, 0x02, 0xbb, 0xd7, 0xe7, 0x18,
+			0xc0, 0x69, 0x9d, 0x06, 0xbb, 0xd7, 0xe7, 0x18,
+			0xc0, 0x69, 0x9d, 0x06, 0xbb, 0xd7, 0xe7, 0x18,
+			0x38, 0xa7, 0xb3, 0x25, 0xbb, 0xd7, 0xe7, 0x18,
+			0x00, 0x82, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x63, 0x00, 0x00, 0x00, 0x63, 0x00, 0x00, 0x00,
+			0xa4, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x38, 0x00,
+			0x04, 0x02, 0x06, 0x00, 0x08, 0x20, 0x28, 0x00,
+			0x0d, 0x28, 0x08, 0x00, 0x73, 0x74, 0x61, 0x72,
+			0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x0f, 0x00,
+			0x00, 0x00, 0x00, 0x00
+		};
+		static const unsigned char xf_data_0[] = {
+			0x73, 0x74, 0x61, 0x72, 0x74, 0x00
+		};
+		static const unsigned char xf_data_1[] = {
+			0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		static const unsigned char xf_data_2[] = {
+			0x00, 0xf0, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		const apfs_xfield_t fields[] = {
+			{ .data = xf_data_0, .size = 6,
+			  .type = 4, .flags = 2 },
+			{ .data = xf_data_1, .size = 40,
+			  .type = 8, .flags = 32 },
+			{ .data = xf_data_2, .size = 8,
+			  .type = 13, .flags = 40 },
+		};
+		const apfs_inode_val_t want = {
+		    .parent = 18, .private_id = 19,
+		    .create_time = UINT64_C(1794640174723865478),
+		    .mod_time = UINT64_C(1794640174800267712),
+		    .change_time = UINT64_C(1794640174800267712),
+		    .access_time = UINT64_C(1794640175321818936),
+		    .internal_flags = 33280, .uncompressed_size = 0,
+		    .count = 1, .protection_class = 0,
+		    .write_generation = 3, .bsd_flags = 0,
+		    .owner = 99, .group = 99, .mode = 33188,
+		    .xfields = { .raw = value + 92, .length = 72, .count = 3, .used = 56 } };
+		const apfs_jkey_t header = { .oid = 19, .kind = 3 };
+		apfs_xfields_t blob;
+		apfs_xfield_t field;
+		uint64_t scalar;
+
+		scenario = "native sparse_inode: block 239, record 22";
+		check_fs_jkey(key, 8, &header);
+		check_fs_bare_key(key, sizeof(key), &header);
+		check_fs_inode_val(value, sizeof(value), &want);
+		check_fs_xfields(value + 92, sizeof(value) - 92,
+		    fields, 3, 56);
+		expect(apfs_xfields_decode(value + 92, sizeof(value) - 92,
+		    &blob), "native scalar blob");
+		expect(apfs_xfield_find(&blob, 8, &field),
+		    "native dstream field");
+	{
+			const apfs_dstream_t stream = {
+			    .size = 1048576, .alloced_size = 1048576,
+			    .default_crypto_id = 0, .total_bytes_written = 4096,
+			    .total_bytes_read = 1048576 };
+
+			check_fs_dstream(field.data, field.size, &stream);
+	}
+		expect(apfs_xfield_find(&blob, 13, &field),
+		    "native sparse_bytes field");
+		expect(apfs_xfield_u64(&field, &scalar) &&
+		    scalar == 1044480, "native sparse_bytes scalar");
+	}
+	{
+		/* apfs-newfs-67108864-e7-compression, node block 4269, record 52. */
+		static const unsigned char key[] = {
+			0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30
+		};
+		static const unsigned char value[] = {
+			0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0xd8, 0x58, 0x36, 0x56, 0xed, 0xd7, 0xe7, 0x18,
+			0xd8, 0x58, 0x36, 0x56, 0xed, 0xd7, 0xe7, 0x18,
+			0xa7, 0x7f, 0xe1, 0xbe, 0xfd, 0xd7, 0xe7, 0x18,
+			0xda, 0xcd, 0x2f, 0x2b, 0xef, 0xd7, 0xe7, 0x18,
+			0x00, 0x40, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0xa2, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
+			0x63, 0x00, 0x00, 0x00, 0x63, 0x00, 0x00, 0x00,
+			0xa4, 0x81, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00,
+			0x04, 0x02, 0x05, 0x00, 0x63, 0x31, 0x30, 0x6d,
+			0x00, 0x00, 0x00, 0x00
+		};
+		static const unsigned char xf_data_0[] = {
+			0x63, 0x31, 0x30, 0x6d, 0x00
+		};
+		const apfs_xfield_t fields[] = {
+			{ .data = xf_data_0, .size = 5,
+			  .type = 4, .flags = 2 },
+		};
+		const apfs_inode_val_t want = {
+		    .parent = 18, .private_id = 23,
+		    .create_time = UINT64_C(1794640390884055256),
+		    .mod_time = UINT64_C(1794640390884055256),
+		    .change_time = UINT64_C(1794640461359579047),
+		    .access_time = UINT64_C(1794640398752140762),
+		    .internal_flags = 278528,
+		    .uncompressed_size = 10485760, .count = 1,
+		    .protection_class = 0, .write_generation = 162,
+		    .bsd_flags = 32, .owner = 99, .group = 99,
+		    .mode = 33188, .xfields = { .raw = value + 92, .length = 16,
+		    .count = 1, .used = 8 } };
+		const apfs_jkey_t header = { .oid = 23, .kind = 3 };
+
+		scenario = "native compressed_inode: block 4269, record 52";
+		check_fs_jkey(key, 8, &header);
+		check_fs_bare_key(key, sizeof(key), &header);
+		check_fs_inode_val(value, sizeof(value), &want);
+		check_fs_xfields(value + 92, sizeof(value) - 92,
+		    fields, 1, 8);
+	}
+	{
+		/* apfs-newfs-268435456-e3-ci, node block 1007, record 0. */
+		static const unsigned char key[] = {
+			0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90,
+			0x0c, 0x8c, 0xa6, 0xac, 0x70, 0x72, 0x69, 0x76,
+			0x61, 0x74, 0x65, 0x2d, 0x64, 0x69, 0x72, 0x00
+		};
+		static const unsigned char value[] = {
+			0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x15, 0x7d, 0xde, 0x2b, 0xc8, 0xd7, 0xe7, 0x18,
+			0x04, 0x00
+		};
+		const apfs_drec_val_t want = {
+		    .child = 3, .date_added = UINT64_C(1794640231259864341),
+		    .flags = 4, .xfields = { .raw = value + 18, .length = 0,
+		    .count = 0, .used = 0 } };
+		const apfs_jkey_t header = { .oid = 1, .kind = 9 };
+		const apfs_drec_key_t key_want = {
+		    .parent = 1, .hash = 2828707, .hashed = true,
+		    .name_len = 11, .name = "private-dir" };
+
+		scenario = "native hashed_drec: block 1007, record 0";
+		check_fs_jkey(key, 8, &header);
+		check_fs_drec_key(key, sizeof(key), &key_want);
+		check_fs_drec_val(value, sizeof(value), &want);
+		check_fs_xfields(value + 18, sizeof(value) - 18,
+		    NULL, 0, 0);
+	}
+	{
+		/* apfs-newfs-67108864-e5-links, node block 238, record 25. */
+		static const unsigned char key[] = {
+			0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90,
+			0x02, 0x98, 0xb4, 0x7b, 0x66, 0x00
+		};
+		static const unsigned char value[] = {
+			0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0xa3, 0xc8, 0x76, 0x69, 0xb9, 0xd7, 0xe7, 0x18,
+			0x08, 0x00, 0x01, 0x00, 0x08, 0x00, 0x01, 0x02,
+			0x08, 0x00, 0x2b, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00
+		};
+		static const unsigned char xf_data_0[] = {
+			0x2b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		const apfs_xfield_t fields[] = {
+			{ .data = xf_data_0, .size = 8,
+			  .type = 1, .flags = 2 },
+		};
+		const apfs_drec_val_t want = {
+		    .child = 42, .date_added = UINT64_C(1794640167868745891),
+		    .flags = 8, .xfields = { .raw = value + 18, .length = 16,
+		    .count = 1, .used = 8 } };
+		const apfs_jkey_t header = { .oid = 19, .kind = 9 };
+		const apfs_drec_key_t key_want = {
+		    .parent = 19, .hash = 2026790, .hashed = true,
+		    .name_len = 1, .name = "f" };
+		apfs_xfields_t blob;
+		apfs_xfield_t field;
+		uint64_t scalar;
+
+		scenario = "native sibling_drec: block 238, record 25";
+		check_fs_jkey(key, 8, &header);
+		check_fs_drec_key(key, sizeof(key), &key_want);
+		check_fs_drec_val(value, sizeof(value), &want);
+		check_fs_xfields(value + 18, sizeof(value) - 18,
+		    fields, 1, 8);
+		expect(apfs_xfields_decode(value + 18, sizeof(value) - 18,
+		    &blob), "native scalar blob");
+		expect(apfs_xfield_find(&blob, 1, &field),
+		    "native sibling_id field");
+		expect(apfs_xfield_u64(&field, &scalar) &&
+		    scalar == 43, "native sibling_id scalar");
+	}
+	{
+		/* apfs-newfs-67108864-e7-compression, node block 4269, record 54. */
+		static const unsigned char key[] = {
+			0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+			0x12, 0x00, 0x63, 0x6f, 0x6d, 0x2e, 0x61, 0x70,
+			0x70, 0x6c, 0x65, 0x2e, 0x64, 0x65, 0x63, 0x6d,
+			0x70, 0x66, 0x73, 0x00
+		};
+		static const unsigned char value[] = {
+			0x02, 0x00, 0x10, 0x00, 0x66, 0x70, 0x6d, 0x63,
+			0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x00,
+			0x00, 0x00, 0x00, 0x00
+		};
+		static const unsigned char inline_data[] = {
+			0x66, 0x70, 0x6d, 0x63, 0x08, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0xa0, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		const apfs_xattr_val_t want = {
+		    .flags = 2, .data_len = 16,
+		    .stream_oid = 0, .data = inline_data };
+		const apfs_jkey_t header = { .oid = 23, .kind = 4 };
+		const apfs_name_key_t key_want = {
+		    .oid = 23, .name_len = 17,
+		    .name = "com.apple.decmpfs" };
+
+		scenario = "native inline_xattr: block 4269, record 54";
+		check_fs_jkey(key, 8, &header);
+		check_fs_xattr_key(key, sizeof(key), &key_want);
+		check_fs_xattr_val(value, sizeof(value), &want);
+	}
+	{
+		/* apfs-newfs-67108864-e5-xattr, node block 1048, record 18. */
+		static const unsigned char key[] = {
+			0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+			0x0e, 0x00, 0x75, 0x73, 0x65, 0x72, 0x2e, 0x73,
+			0x31, 0x30, 0x34, 0x38, 0x35, 0x37, 0x36, 0x00
+		};
+		static const unsigned char value[] = {
+			0x11, 0x00, 0x30, 0x00, 0x23, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00
+		};
+		const apfs_xattr_val_t want = {
+		    .flags = 17, .data_len = 48,
+		    .stream_oid = 35, .dstream = { .size = 1048576,
+		    .alloced_size = 1048576, .default_crypto_id = 0,
+		    .total_bytes_written = 0, .total_bytes_read = 0 } };
+		const apfs_jkey_t header = { .oid = 18, .kind = 4 };
+		const apfs_name_key_t key_want = {
+		    .oid = 18, .name_len = 13, .name = "user.s1048576" };
+
+		scenario = "native stream_xattr: block 1048, record 18";
+		check_fs_jkey(key, 8, &header);
+		check_fs_xattr_key(key, sizeof(key), &key_want);
+		check_fs_xattr_val(value, sizeof(value), &want);
+	}
+	{
+		/* apfs-newfs-67108864-e5-links, node block 235, record 22. */
+		static const unsigned char key[] = {
+			0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50,
+			0x2b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		static const unsigned char value[] = {
+			0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x02, 0x00, 0x66, 0x00
+		};
+		const apfs_sibling_val_t want = {
+		    .parent = 19, .name_len = 1, .name = "f" };
+		const apfs_jkey_t header = { .oid = 42, .kind = 5 };
+		const apfs_sibling_key_t key_want = {
+		    .inode = 42, .sibling_id = 43 };
+
+		scenario = "native sibling_link: block 235, record 22";
+		check_fs_jkey(key, 8, &header);
+		check_fs_sibling_key(key, sizeof(key), &key_want);
+		check_fs_sibling_val(value, sizeof(value), &want);
+	}
+	{
+		/* apfs-newfs-67108864-e5-links, node block 235, record 26. */
+		static const unsigned char key[] = {
+			0x2b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0
+		};
+		static const unsigned char value[] = {
+			0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		const apfs_jkey_t header = { .oid = 43, .kind = 12 };
+
+		scenario = "native sibling_map: block 235, record 26";
+		check_fs_jkey(key, 8, &header);
+		check_fs_bare_key(key, sizeof(key), &header);
+		check_fs_sibling_map_val(value, sizeof(value), 42);
+	}
+	{
+		/* apfs-newfs-268435456-e3-ci, node block 1007, record 23. */
+		static const unsigned char key[] = {
+			0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x60
+		};
+		static const unsigned char value[] = {
+			0x01, 0x00, 0x00, 0x00
+		};
+		const apfs_jkey_t header = { .oid = 17, .kind = 6 };
+
+		scenario = "native dstream_id: block 1007, record 23";
+		check_fs_jkey(key, 8, &header);
+		check_fs_bare_key(key, sizeof(key), &header);
+		check_fs_dstream_id_val(value, sizeof(value), 1);
+	}
+	{
+		/* apfs-newfs-67108864-e6-sparse, node block 239, record 24. */
+		static const unsigned char key[] = {
+			0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		static const unsigned char value[] = {
+			0x00, 0xf0, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		const apfs_extent_val_t want = {
+		    .length = 1044480, .flags = 0,
+		    .phys_block = 0, .crypto_id = 0 };
+		const apfs_jkey_t header = { .oid = 19, .kind = 8 };
+		const apfs_extent_key_t key_want = {
+		    .private_id = 19, .logical = 0 };
+
+		scenario = "native hole_extent: block 239, record 24";
+		check_fs_jkey(key, 8, &header);
+		check_fs_extent_key(key, sizeof(key), &key_want);
+		check_fs_extent_val(value, sizeof(value), &want);
+	}
+	{
+		/* apfs-newfs-268435456-e3-ci, node block 1007, record 24. */
+		static const unsigned char key[] = {
+			0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		static const unsigned char value[] = {
+			0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x78, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		const apfs_extent_val_t want = {
+		    .length = 4096, .flags = 0,
+		    .phys_block = 376, .crypto_id = 0 };
+		const apfs_jkey_t header = { .oid = 17, .kind = 8 };
+		const apfs_extent_key_t key_want = {
+		    .private_id = 17, .logical = 0 };
+
+		scenario = "native mapped_extent: block 1007, record 24";
+		check_fs_jkey(key, 8, &header);
+		check_fs_extent_key(key, sizeof(key), &key_want);
+		check_fs_extent_val(value, sizeof(value), &want);
+	}
+	{
+		/* apfs-newfs-67108864-e6-clone, node block 337, record 4. */
+		static const unsigned char key[] = {
+			0xec, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20
+		};
+		static const unsigned char value[] = {
+			0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+			0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x02, 0x00, 0x00, 0x00
+		};
+		const apfs_pext_val_t want = {
+		    .length = 15, .kind = 1, .owner = 23,
+		    .refcnt = 2 };
+		const apfs_jkey_t header = { .oid = 236, .kind = 2 };
+
+		scenario = "native shared_pext: block 337, record 4";
+		check_fs_jkey(key, 8, &header);
+		check_fs_bare_key(key, sizeof(key), &header);
+		check_fs_pext_val(value, sizeof(value), &want);
+	}
+}
+
+/* Typed destinations let one prefix walker check every output byte. */
+typedef union fs_record_output {
+	apfs_jkey_t jkey;
+	uint64_t bare_key;
+	apfs_xfields_t xfields;
+	apfs_dstream_t dstream;
+	apfs_dir_stats_t dir_stats;
+	apfs_inode_val_t inode_val;
+	apfs_drec_key_t drec_key;
+	apfs_drec_val_t drec_val;
+	apfs_name_key_t xattr_key;
+	apfs_xattr_val_t xattr_val;
+	apfs_sibling_key_t sibling_key;
+	apfs_sibling_val_t sibling_val;
+	uint64_t sibling_map_val;
+	uint32_t dstream_id_val;
+	apfs_extent_key_t extent_key;
+	apfs_extent_val_t extent_val;
+	apfs_pext_val_t pext_val;
+	apfs_snap_meta_val_t snap_meta_val;
+	apfs_name_key_t snap_name_key;
+	uint64_t snap_name_val;
+	apfs_file_info_key_t file_info_key;
+	apfs_file_info_val_t file_info_val;
+} fs_record_output_t;
+
+typedef struct fs_record_prefix_case {
+	const char *name;
+	const unsigned char *bytes;
+	size_t length;
+	bool (*decode)(const unsigned char *, size_t, fs_record_output_t *);
+} fs_record_prefix_case_t;
+
+static bool
+decode_fs_jkey(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_jkey_decode(raw, length, &output->jkey));
+}
+
+static bool
+decode_fs_bare_key(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_bare_key_decode(raw, length, 3, &output->bare_key));
+}
+
+static bool
+decode_fs_xfields(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_xfields_decode(raw, length, &output->xfields));
+}
+
+static bool
+decode_fs_dstream(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_dstream_decode(raw, length, &output->dstream));
+}
+
+static bool
+decode_fs_dir_stats(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_dir_stats_decode(raw, length, &output->dir_stats));
+}
+
+static bool
+decode_fs_inode_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_inode_val_decode(raw, length, &output->inode_val));
+}
+
+static bool
+decode_fs_drec_key(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_drec_key_decode(raw, length, false, &output->drec_key));
+}
+
+static bool
+decode_fs_drec_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_drec_val_decode(raw, length, &output->drec_val));
+}
+
+static bool
+decode_fs_xattr_key(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_xattr_key_decode(raw, length, &output->xattr_key));
+}
+
+static bool
+decode_fs_xattr_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_xattr_val_decode(raw, length, &output->xattr_val));
+}
+
+static bool
+decode_fs_sibling_key(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_sibling_key_decode(raw, length, &output->sibling_key));
+}
+
+static bool
+decode_fs_sibling_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_sibling_val_decode(raw, length, &output->sibling_val));
+}
+
+static bool
+decode_fs_sibling_map_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_sibling_map_val_decode(raw, length, &output->sibling_map_val));
+}
+
+static bool
+decode_fs_dstream_id_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_dstream_id_val_decode(raw, length, &output->dstream_id_val));
+}
+
+static bool
+decode_fs_extent_key(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_extent_key_decode(raw, length, &output->extent_key));
+}
+
+static bool
+decode_fs_extent_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_extent_val_decode(raw, length, &output->extent_val));
+}
+
+static bool
+decode_fs_pext_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_pext_val_decode(raw, length, &output->pext_val));
+}
+
+static bool
+decode_fs_snap_meta_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_snap_meta_val_decode(raw, length, &output->snap_meta_val));
+}
+
+static bool
+decode_fs_snap_name_key(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_snap_name_key_decode(raw, length, &output->snap_name_key));
+}
+
+static bool
+decode_fs_snap_name_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_snap_name_val_decode(raw, length, &output->snap_name_val));
+}
+
+static bool
+decode_fs_file_info_key(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_file_info_key_decode(raw, length, &output->file_info_key));
+}
+
+static bool
+decode_fs_file_info_val(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_file_info_val_decode(raw, length, &output->file_info_val));
+}
+
+static bool
+decode_fs_drec_hashed_key(const unsigned char *raw, size_t length,
+    fs_record_output_t *output)
+{
+	return (apfs_drec_key_decode(raw, length, true, &output->drec_key));
+}
+
+/*
+ * Each allocation ends at the supplied span so ASan sees a read beyond it.
+ * malloc(0) supplies the zero-length case without providing a readable byte.
+ */
+static void
+check_fs_record_prefixes(const fs_record_prefix_case_t *test)
+{
+	fs_record_output_t output, saved;
+	unsigned char *prefix;
+	char description[160];
+
+	scenario = test->name;
+	expect(test->decode(test->bytes, test->length, &output),
+	    "complete fixture decodes before checking its prefixes");
+	for (size_t length = 0; length < test->length; length++) {
+		(void)snprintf(description, sizeof(description), "%s: prefix %zu/%zu",
+		    test->name, length, test->length);
+		scenario = description;
+		prefix = malloc(length);
+		expect(prefix != NULL || length == 0, "allocate exact prefix span");
+		if (length != 0)
+			bcopy(test->bytes, prefix, length);
+		memset(&output, 0xa5, sizeof(output));
+		bcopy(&output, &saved, sizeof(output));
+		/* A zero-length xfield span is the documented absent blob. */
+		if (test->decode == decode_fs_xfields && length == 0) {
+			expect(test->decode(prefix, length, &output),
+			    "zero-length xfield prefix decodes as an absent blob");
+			expect(output.xfields.raw == NULL &&
+			    output.xfields.length == 0 && output.xfields.count == 0 &&
+			    output.xfields.used == 0, "absent blob has no fields or span");
+		} else {
+			expect(!test->decode(prefix, length, &output),
+			    "truncated prefix is refused");
+			expect(memcmp(&output, &saved, sizeof(output)) == 0,
+			    "truncated prefix preserves complete output");
+		}
+		free(prefix);
+	}
+	scenario = test->name;
+}
+
+static void
+test_fs_record_prefixes(void)
+{
+	/* Minimal complete records avoid optional blobs forming valid prefixes. */
+	static const unsigned char jkey[8] = { [0] = 2, [7] = 0x30 };
+	static const unsigned char xfields[16] = {
+		[0] = 1, [2] = 8, [4] = 4, [6] = 3, [8] = 'a'
+	};
+	static const unsigned char dstream[40] = { 1 };
+	static const unsigned char dir_stats[32] = { 2 };
+	static const unsigned char inode[92] = { 3 };
+	static const unsigned char drec[18] = { 4 };
+	static const unsigned char drec_key[14] = {
+		[0] = 2, [7] = 0x90, [8] = 4, [10] = 'a',
+		[11] = 'b', [12] = 'c'
+	};
+	static const unsigned char hashed_key[16] = {
+		[0] = 2, [7] = 0x90, [8] = 4, [9] = 4, [12] = 'a',
+		[13] = 'b', [14] = 'c'
+	};
+	static const unsigned char xattr_key[14] = {
+		[0] = 2, [7] = 0x40, [8] = 4, [10] = 'a',
+		[11] = 'b', [12] = 'c'
+	};
+	static const unsigned char inline_xattr[7] = {
+		2, 0, 3, 0, 'a', 'b', 'c'
+	};
+	static const unsigned char stream_xattr[52] = { 1, 0, 48 };
+	static const unsigned char sibling_key[16] = { [0] = 2, [7] = 0x50 };
+	static const unsigned char sibling_val[14] = {
+		[0] = 2, [8] = 4, [10] = 'a', [11] = 'b', [12] = 'c'
+	};
+	static const unsigned char u64[8] = { 5 };
+	static const unsigned char u32[4] = { 6 };
+	static const unsigned char extent_key[16] = { [0] = 2, [7] = 0x80 };
+	static const unsigned char extent_val[24] = { 7 };
+	static const unsigned char pext[20] = { 8 };
+	static const unsigned char snap_meta[55] = {
+		[0] = 2, [48] = 5, [50] = 's', [51] = 'n',
+		[52] = 'a', [53] = 'p'
+	};
+	static const unsigned char snap_name[15] = {
+		[0] = 2, [7] = 0xb0, [8] = 5, [10] = 's', [11] = 'n',
+		[12] = 'a', [13] = 'p'
+	};
+	static const unsigned char info_key[16] = { [0] = 2, [7] = 0xd0 };
+	static const unsigned char info_val[7] = { 1, 0, 4, 1, 2, 3, 4 };
+	const fs_record_prefix_case_t cases[] = {
+		{ .name = "jkey", .bytes = jkey,
+		    .length = sizeof(jkey), .decode = decode_fs_jkey },
+		{ .name = "bare_key", .bytes = jkey,
+		    .length = sizeof(jkey), .decode = decode_fs_bare_key },
+		{ .name = "xfields", .bytes = xfields,
+		    .length = sizeof(xfields), .decode = decode_fs_xfields },
+		{ .name = "dstream", .bytes = dstream,
+		    .length = sizeof(dstream), .decode = decode_fs_dstream },
+		{ .name = "dir_stats", .bytes = dir_stats,
+		    .length = sizeof(dir_stats), .decode = decode_fs_dir_stats },
+		{ .name = "inode_val", .bytes = inode,
+		    .length = sizeof(inode), .decode = decode_fs_inode_val },
+		{ .name = "drec_key", .bytes = drec_key,
+		    .length = sizeof(drec_key), .decode = decode_fs_drec_key },
+		{ .name = "drec_hashed_key", .bytes = hashed_key,
+		    .length = sizeof(hashed_key), .decode = decode_fs_drec_hashed_key },
+		{ .name = "drec_val", .bytes = drec,
+		    .length = sizeof(drec), .decode = decode_fs_drec_val },
+		{ .name = "xattr_key", .bytes = xattr_key,
+		    .length = sizeof(xattr_key), .decode = decode_fs_xattr_key },
+		{ .name = "xattr_val_inline", .bytes = inline_xattr,
+		    .length = sizeof(inline_xattr), .decode = decode_fs_xattr_val },
+		{ .name = "xattr_val_stream", .bytes = stream_xattr,
+		    .length = sizeof(stream_xattr), .decode = decode_fs_xattr_val },
+		{ .name = "sibling_key", .bytes = sibling_key,
+		    .length = sizeof(sibling_key), .decode = decode_fs_sibling_key },
+		{ .name = "sibling_val", .bytes = sibling_val,
+		    .length = sizeof(sibling_val), .decode = decode_fs_sibling_val },
+		{ .name = "sibling_map_val", .bytes = u64,
+		    .length = sizeof(u64), .decode = decode_fs_sibling_map_val },
+		{ .name = "dstream_id_val", .bytes = u32,
+		    .length = sizeof(u32), .decode = decode_fs_dstream_id_val },
+		{ .name = "extent_key", .bytes = extent_key,
+		    .length = sizeof(extent_key), .decode = decode_fs_extent_key },
+		{ .name = "extent_val", .bytes = extent_val,
+		    .length = sizeof(extent_val), .decode = decode_fs_extent_val },
+		{ .name = "pext_val", .bytes = pext,
+		    .length = sizeof(pext), .decode = decode_fs_pext_val },
+		{ .name = "snap_meta_val", .bytes = snap_meta,
+		    .length = sizeof(snap_meta), .decode = decode_fs_snap_meta_val },
+		{ .name = "snap_name_key", .bytes = snap_name,
+		    .length = sizeof(snap_name), .decode = decode_fs_snap_name_key },
+		{ .name = "snap_name_val", .bytes = u64,
+		    .length = sizeof(u64), .decode = decode_fs_snap_name_val },
+		{ .name = "file_info_key", .bytes = info_key,
+		    .length = sizeof(info_key), .decode = decode_fs_file_info_key },
+		{ .name = "file_info_val", .bytes = info_val,
+		    .length = sizeof(info_val), .decode = decode_fs_file_info_val },
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+		check_fs_record_prefixes(&cases[i]);
+}
+
+static void
+test_generated_fs_records(void)
+{
+	unsigned char raw[1024], blob[84], stream_raw[40];
+	static const unsigned char name[] = { 'a', 'b', 0 };
+	static const unsigned char u64[] = { 8, 7, 6, 5, 4, 3, 2, 0x81 };
+	static const unsigned char u32[] = { 4, 3, 2, 0xf1 };
+	const apfs_gen_dstream_t stream = {
+		.size = UINT64_C(0xfedcba9876543210), .alloced_size = 4096,
+		.default_crypto_id = 19, .total_bytes_written = 123,
+		.total_bytes_read = 456
+	};
+	const apfs_gen_xfield_t gen_fields[] = {
+		{ .data = name, .size = 3, .type = 4, .flags = 2 },
+		{ .data = u64, .size = 8, .type = 13, .flags = 0x28 },
+		{ .data = u32, .size = 4, .type = 14, .flags = 0x10 },
+		{ .data = stream_raw, .size = 40, .type = 8, .flags = 0x20 }
+	};
+	const apfs_xfield_t fields[] = {
+		{ .data = name, .size = 3, .type = 4, .flags = 2 },
+		{ .data = u64, .size = 8, .type = 13, .flags = 0x28 },
+		{ .data = u32, .size = 4, .type = 14, .flags = 0x10 },
+		{ .data = stream_raw, .size = 40, .type = 8, .flags = 0x20 }
+	};
+	apfs_xfields_t decoded_blob;
+	apfs_xfield_t field;
+	uint64_t decoded_u64;
+	uint32_t decoded_u32;
+
+	scenario = "generated extended fields: padded data excludes headers";
+	expect(apfs_gen_dstream_build(stream_raw, sizeof(stream_raw), &stream),
+	    "data stream builder");
+	expect(apfs_gen_xfields_build(blob, sizeof(blob), gen_fields, 4),
+	    "extended field builder");
+	bzero(raw, sizeof(raw));
+	bcopy(blob, raw, sizeof(blob));
+	check_fs_xfields(raw, sizeof(blob), fields, 4, 64);
+	expect(apfs_xfields_decode(blob, sizeof(blob), &decoded_blob),
+	    "generated scalar blob");
+	expect(apfs_xfield_find(&decoded_blob, 13, &field), "find u64 field");
+	expect(apfs_xfield_u64(&field, &decoded_u64) &&
+	    decoded_u64 == UINT64_C(0x8102030405060708), "u64 field endian");
+	REJECT_OUTPUT(uint32_t, output, apfs_xfield_u32(&field, &output));
+	expect(apfs_xfield_find(&decoded_blob, 14, &field), "find u32 field");
+	expect(apfs_xfield_u32(&field, &decoded_u32) &&
+	    decoded_u32 == 0xf1020304, "u32 field endian");
+	REJECT_OUTPUT(uint64_t, output, apfs_xfield_u64(&field, &output));
+	check_fs_xfields(raw, 0, NULL, 0, 0);
+	{
+		const apfs_dstream_t want = {
+		    .size = UINT64_C(0xfedcba9876543210), .alloced_size = 4096,
+		    .default_crypto_id = 19, .total_bytes_written = 123,
+		    .total_bytes_read = 456 };
+		const apfs_gen_dstream_t params = {
+		    .size = UINT64_C(0xfedcba9876543210), .alloced_size = 4096,
+		    .default_crypto_id = 19, .total_bytes_written = 123,
+		    .total_bytes_read = 456 };
+
+		scenario = "generated dstream";
+		expect(apfs_gen_dstream_build(raw, 40, &params),
+		    "dstream builder");
+		check_fs_dstream(raw, 40, &want);
+	}
+	{
+		const apfs_dir_stats_t want = {
+		    .num_children = UINT64_C(0x8123456789abcdef),
+		    .total_size = UINT64_C(0xfedcba9876543210),
+		    .chained_key = 42, .gen_count = 19 };
+		const apfs_gen_dir_stats_t params = {
+		    .num_children = UINT64_C(0x8123456789abcdef),
+		    .total_size = UINT64_C(0xfedcba9876543210),
+		    .chained_key = 42, .gen_count = 19 };
+
+		scenario = "generated dir_stats";
+		expect(apfs_gen_dir_stats_build(raw, 32, &params),
+		    "dir_stats builder");
+		check_fs_dir_stats(raw, 32, &want);
+	}
+	{
+		const apfs_inode_val_t want = {
+		    .parent = UINT64_C(0x8123456789abcdef),
+		    .private_id = UINT64_C(0xfedcba9876543210),
+		    .create_time = (-INT64_C(1)),
+		    .mod_time = (-INT64_C(9223372036854775807)),
+		    .change_time = UINT64_C(0x7fffffffffffffff),
+		    .access_time = (-INT64_C(1234567890)),
+		    .internal_flags = UINT64_C(0xf1e2d3c4b5a69788),
+		    .count = (-INT64_C(2147483647)),
+		    .protection_class = 0x87654321u,
+		    .write_generation = 0xfedcba98u,
+		    .bsd_flags = 0xf1234567u, .owner = 0xf1e2d3c4u,
+		    .group = 0x8a9bacbdu, .mode = 64188,
+		    .uncompressed_size = UINT64_C(0x8877665544332211),
+		    .xfields = { .raw = blob, .length = 84, .count = 4, .used = 64 } };
+		const apfs_gen_inode_val_t params = {
+		    .parent = UINT64_C(0x8123456789abcdef),
+		    .private_id = UINT64_C(0xfedcba9876543210),
+		    .create_time = (-INT64_C(1)),
+		    .mod_time = (-INT64_C(9223372036854775807)),
+		    .change_time = UINT64_C(0x7fffffffffffffff),
+		    .access_time = (-INT64_C(1234567890)),
+		    .internal_flags = UINT64_C(0xf1e2d3c4b5a69788),
+		    .count = (-INT64_C(2147483647)),
+		    .protection_class = 0x87654321u,
+		    .write_generation = 0xfedcba98u,
+		    .bsd_flags = 0xf1234567u, .owner = 0xf1e2d3c4u,
+		    .group = 0x8a9bacbdu, .mode = 64188,
+		    .uncompressed_size = UINT64_C(0x8877665544332211), .xfields = blob,
+		    .xfields_len = 84 };
+		unsigned char encoded[184], expected[184];
+		apfs_inode_val_t record = want;
+
+		scenario = "generated inode_val";
+		expect(apfs_gen_inode_val_build(raw, 176, &params),
+		    "inode_val builder");
+		check_fs_inode_val(raw, 176, &want);
+
+		scenario = "inode writer encodes xfields in place before record";
+		memset(encoded, 0xa5, sizeof(encoded));
+		memset(expected, 0xa5, sizeof(expected));
+		bcopy(raw, expected, 176);
+		expect(apfs_xfields_encode(encoded + 92, sizeof(blob),
+		    fields, 4), "encode blob after fixed record part");
+		expect(apfs_xfields_decode(encoded + 92, sizeof(blob),
+		    &record.xfields), "record borrows its in-place blob");
+		expect(apfs_inode_val_encode(encoded, 176, &record),
+		    "encode record with blob copied onto itself");
+		expect(memcmp(encoded, expected, sizeof(encoded)) == 0,
+		    "complete record matches builder and preserves trailing guards");
+	}
+	{
+		const apfs_drec_val_t want = {
+		    .child = UINT64_C(0xfedcba9876543210),
+		    .date_added = (-INT64_C(1234567890123456789)), .flags = 65244,
+		    .xfields = { .raw = blob, .length = 84, .count = 4, .used = 64 } };
+		const apfs_gen_drec_val_t params = {
+		    .child = UINT64_C(0xfedcba9876543210),
+		    .date_added = (-INT64_C(1234567890123456789)), .flags = 65244,
+		    .xfields = blob, .xfields_len = 84 };
+		unsigned char encoded[110], expected[110];
+		apfs_drec_val_t record = want;
+
+		scenario = "generated drec_val";
+		expect(apfs_gen_drec_val_build(raw, 102, &params),
+		    "drec_val builder");
+		check_fs_drec_val(raw, 102, &want);
+
+		scenario = "drec writer encodes xfields in place before record";
+		memset(encoded, 0xa5, sizeof(encoded));
+		memset(expected, 0xa5, sizeof(expected));
+		bcopy(raw, expected, 102);
+		expect(apfs_xfields_encode(encoded + 18, sizeof(blob),
+		    fields, 4), "encode blob after fixed record part");
+		expect(apfs_xfields_decode(encoded + 18, sizeof(blob),
+		    &record.xfields), "record borrows its in-place blob");
+		expect(apfs_drec_val_encode(encoded, 102, &record),
+		    "encode record with blob copied onto itself");
+		expect(memcmp(encoded, expected, sizeof(encoded)) == 0,
+		    "complete record matches builder and preserves trailing guards");
+	}
+	{
+		const apfs_extent_val_t want = {
+		    .length = UINT64_C(0xfedcba98765432), .flags = 169,
+		    .phys_block = UINT64_C(0xfedcba9876543210),
+		    .crypto_id = UINT64_C(0x87654321abcdef01) };
+		const apfs_gen_extent_val_t params = {
+		    .length = UINT64_C(0x00fedcba98765432), .flags = 0xa9,
+		    .phys_block = UINT64_C(0xfedcba9876543210),
+		    .crypto_id = UINT64_C(0x87654321abcdef01) };
+
+		scenario = "generated extent_val";
+		expect(apfs_gen_extent_val_build(raw, 24, &params),
+		    "extent_val builder");
+		check_fs_extent_val(raw, 24, &want);
+	}
+	{
+		const apfs_pext_val_t want = {
+		    .length = UINT64_C(0xfedcba987654321), .kind = 15,
+		    .owner = UINT64_C(0xfedcba9876543210),
+		    .refcnt = (-INT64_C(2147483647)) };
+		const apfs_gen_pext_val_t params = {
+		    .length = UINT64_C(0x0fedcba987654321), .kind = 15,
+		    .owner = UINT64_C(0xfedcba9876543210),
+		    .refcnt = (-INT64_C(2147483647)) };
+
+		scenario = "generated pext_val";
+		expect(apfs_gen_pext_val_build(raw, 20, &params),
+		    "pext_val builder");
+		check_fs_pext_val(raw, 20, &want);
+	}
+	{
+		const apfs_snap_meta_val_t want = {
+		    .extentref_tree_oid = UINT64_C(0xfedcba9876543210),
+		    .sblock_oid = UINT64_C(0x8123456789abcdef),
+		    .create_time = (-INT64_C(1234)), .change_time = (-INT64_C(5678)),
+		    .inum = UINT64_C(0xf123456789abcdef),
+		    .extentref_tree_type = 0x87654321u,
+		    .flags = 0xfedcba98u, .name = "snap", .name_len = 4 };
+		const apfs_gen_snap_meta_val_t params = {
+		    .extentref_tree_oid = UINT64_C(0xfedcba9876543210),
+		    .sblock_oid = UINT64_C(0x8123456789abcdef),
+		    .create_time = (-INT64_C(1234)), .change_time = (-INT64_C(5678)),
+		    .inum = UINT64_C(0xf123456789abcdef),
+		    .extentref_tree_type = 0x87654321u,
+		    .flags = 0xfedcba98u, .name = "snap", .name_len = 4 };
+
+		scenario = "generated snap_meta_val";
+		expect(apfs_gen_snap_meta_val_build(raw, 55, &params),
+		    "snap_meta_val builder");
+		check_fs_snap_meta_val(raw, 55, &want);
+	}
+	{
+		const apfs_file_info_val_t want = {
+		    .hashed_len = 65244, .hash_size = 4, .hash = u32 };
+		const apfs_gen_file_info_val_t params = {
+		    .hashed_len = 65244, .hash_size = 4, .hash = u32 };
+
+		scenario = "generated file_info_val";
+		expect(apfs_gen_file_info_val_build(raw, 7, &params),
+		    "file_info_val builder");
+		check_fs_file_info_val(raw, 7, &want);
+	}
+	{
+		const apfs_drec_key_t want = {
+		    .parent = UINT64_C(0xfedcba987654321), .hash = 0,
+		    .name = "file", .name_len = 4, .hashed = false };
+		const apfs_gen_drec_key_t params = {
+		    .parent = UINT64_C(0xfedcba987654321), .hash = 0,
+		    .name = "file", .name_len = 4, .hashed = false };
+
+		scenario = "generated drec_key";
+		expect(apfs_gen_drec_key_build(raw, 15, &params),
+		    "drec_key builder");
+		check_fs_drec_key(raw, 15, &want);
+	}
+	{
+		const apfs_name_key_t want = {
+		    .oid = UINT64_C(0xfedcba987654321), .name = "attr",
+		    .name_len = 4 };
+		const apfs_gen_name_key_t params = {
+		    .oid = UINT64_C(0xfedcba987654321), .name = "attr",
+		    .name_len = 4 };
+
+		scenario = "generated xattr_key";
+		expect(apfs_gen_xattr_key_build(raw, 15, &params),
+		    "xattr_key builder");
+		check_fs_xattr_key(raw, 15, &want);
+	}
+	{
+		const apfs_name_key_t want = {
+		    .oid = UINT64_C(0xfedcba987654321), .name = "snap",
+		    .name_len = 4 };
+		const apfs_gen_name_key_t params = {
+		    .oid = UINT64_C(0xfedcba987654321), .name = "snap",
+		    .name_len = 4 };
+
+		scenario = "generated snap_name_key";
+		expect(apfs_gen_snap_name_key_build(raw, 15, &params),
+		    "snap_name_key builder");
+		check_fs_snap_name_key(raw, 15, &want);
+	}
+	{
+		const apfs_sibling_val_t want = {
+		    .parent = UINT64_C(0xfedcba9876543210), .name = "link",
+		    .name_len = 4 };
+		const apfs_gen_sibling_val_t params = {
+		    .parent = UINT64_C(0xfedcba9876543210), .name = "link",
+		    .name_len = 4 };
+
+		scenario = "generated sibling_val";
+		expect(apfs_gen_sibling_val_build(raw, 15, &params),
+		    "sibling_val builder");
+		check_fs_sibling_val(raw, 15, &want);
+	}
+	{
+		const apfs_sibling_key_t want = {
+		    .inode = UINT64_C(0xfedcba987654321),
+		    .sibling_id = UINT64_C(0xfedcba9876543210) };
+
+		scenario = "generated sibling_key";
+		expect(apfs_gen_sibling_key_build(raw, 16, UINT64_C(0xfedcba987654321),
+		    UINT64_C(0xfedcba9876543210)),
+		    "sibling_key builder");
+		check_fs_sibling_key(raw, 16, &want);
+	}
+	{
+		const apfs_extent_key_t want = {
+		    .private_id = UINT64_C(0xfedcba987654321),
+		    .logical = UINT64_C(0xfedcba9876543210) };
+
+		scenario = "generated extent_key";
+		expect(apfs_gen_extent_key_build(raw, 16, UINT64_C(0xfedcba987654321),
+		    UINT64_C(0xfedcba9876543210)),
+		    "extent_key builder");
+		check_fs_extent_key(raw, 16, &want);
+	}
+	{
+		const apfs_file_info_key_t want = {
+		    .private_id = UINT64_C(0xfedcba987654321),
+		    .lba = UINT64_C(0xfedcba98765432), .type = 241 };
+
+		scenario = "generated file_info_key";
+		expect(apfs_gen_file_info_key_build(raw, 16, UINT64_C(0xfedcba987654321),
+		    UINT64_C(0xfedcba98765432), 241),
+		    "file_info_key builder");
+		check_fs_file_info_key(raw, 16, &want);
+	}
+	{
+		const apfs_jkey_t want = {
+		    .oid = UINT64_C(0xfedcba987654321), .kind = 15 };
+
+		scenario = "generated jkey";
+		expect(apfs_gen_jkey_build(raw, 8, UINT64_C(0xfedcba987654321), 15),
+		    "jkey builder");
+		check_fs_jkey(raw, 8, &want);
+	}
+	{
+		const apfs_xattr_val_t want = {
+		    .data = u32, .flags = 61442, .data_len = 4,
+		    .stream_oid = 0 };
+		const apfs_gen_xattr_val_t params = {
+		    .data = u32, .flags = 61442, .data_len = 4,
+		    .stream_oid = 0 };
+
+		scenario = "generated xattr_val";
+		expect(apfs_gen_xattr_val_build(raw, 8, &params),
+		    "xattr_val builder");
+		check_fs_xattr_val(raw, 8, &want);
+	}
+	scenario = "generated sibling_map_val";
+	expect(apfs_gen_sibling_map_val_build(raw, 8, UINT64_C(0xfedcba9876543210)),
+	    "sibling_map_val builder");
+	check_fs_sibling_map_val(raw, 8, UINT64_C(0xfedcba9876543210));
+	scenario = "generated dstream_id_val";
+	expect(apfs_gen_dstream_id_val_build(raw, 4, 0xfedcba98u),
+	    "dstream_id_val builder");
+	check_fs_dstream_id_val(raw, 4, 0xfedcba98u);
+	scenario = "generated snap_name_val";
+	expect(apfs_gen_snap_name_val_build(raw, 8, UINT64_C(0xfedcba9876543210)),
+	    "snap_name_val builder");
+	check_fs_snap_name_val(raw, 8, UINT64_C(0xfedcba9876543210));
+	{
+		const apfs_gen_inode_val_t params = { .count = 1 };
+		const apfs_inode_val_t want = { .count = 1 };
+
+		scenario = "fixed inode has no extended fields";
+		expect(apfs_gen_inode_val_build(raw, 92, &params), "inode builder");
+		check_fs_inode_val(raw, 92, &want);
+	}
+	{
+		const apfs_gen_drec_val_t params = { .child = 42, .flags = 8 };
+		const apfs_drec_val_t want = { .child = 42, .flags = 8 };
+
+		scenario = "fixed directory record has no extended fields";
+		expect(apfs_gen_drec_val_build(raw, 18, &params), "drec builder");
+		check_fs_drec_val(raw, 18, &want);
+	}
+	{
+		const apfs_gen_drec_key_t params = { .name = "ab", .parent = 2,
+		    .name_len = 2, .hashed = true, .hash = 0x3fffff };
+		const apfs_drec_key_t want = { .name = "ab", .parent = 2,
+		    .name_len = 2, .hashed = true, .hash = 0x3fffff };
+
+		scenario = "generated hashed key uses all 22 hash bits";
+		expect(apfs_gen_drec_key_build(raw, 15, &params), "hashed builder");
+		check_fs_drec_key(raw, 15, &want);
+	}
+	{
+		const apfs_gen_xattr_val_t params = { .flags = 0x8001,
+		    .stream_oid = UINT64_C(0xfedcba9876543210), .data_len = 48,
+		    .dstream = stream };
+		const apfs_xattr_val_t want = { .flags = 0x8001,
+		    .stream_oid = UINT64_C(0xfedcba9876543210), .data_len = 48,
+		    .dstream = { .size = UINT64_C(0xfedcba9876543210),
+		    .alloced_size = 4096, .default_crypto_id = 19,
+		    .total_bytes_written = 123, .total_bytes_read = 456 } };
+
+		scenario = "generated stream attribute retains unrelated flag bits";
+		expect(apfs_gen_xattr_val_build(raw, 52, &params), "stream builder");
+		check_fs_xattr_val(raw, 52, &want);
+	}
+}
+
+static void
+test_fs_edited_xfield_spans(void)
+{
+	static const unsigned char data[] = { 1, 2, 3, 4 };
+	const apfs_gen_xfield_t fields[] = {
+		{ .type = 4, .size = 3, .data = data },
+		{ .type = 13, .size = 4, .data = data }
+	};
+	unsigned char *raw, *shortened;
+	apfs_xfields_t blob;
+
+	for (unsigned edit = 0; edit < 2; edit++) {
+		scenario = edit == 0 ? "decoded blob count exceeds its span" :
+		    "decoded blob span ends inside last field";
+		raw = malloc(28);
+		expect(raw != NULL, "allocate exact blob span");
+		expect(apfs_gen_xfields_build(raw, 28, fields, 2),
+		    "build two distinct extended fields");
+		expect(apfs_xfields_decode(raw, 28, &blob),
+		    "decode complete blob before editing its description");
+		if (edit == 0) {
+			blob.count = 8;
+		} else {
+			/* Keep the heap boundary at the edited span for ASan. */
+			shortened = realloc(raw, 23);
+			expect(shortened != NULL, "shrink allocation to edited span");
+			raw = shortened;
+			blob.raw = raw;
+			blob.length = 23;
+		}
+		REJECT_OUTPUT(apfs_xfield_t, output,
+		    apfs_xfield_get(&blob, blob.count - 1, &output));
+		REJECT_OUTPUT(apfs_xfield_t, output,
+		    apfs_xfield_find(&blob, 13, &output));
+		free(raw);
+	}
+}
+
+static void
+test_fs_xfield_rejections(void)
+{
+	static const unsigned char data[] = { 1, 2, 3, 4 };
+	const apfs_gen_xfield_t fields[] = {
+		{ .type = 4, .flags = 2, .size = 3, .data = data },
+		{ .type = 4, .flags = 2, .size = 4, .data = data }
+	};
+	const fs_xfield_failure_t cases[] = {
+		{ .name = "headers exceed blob",
+		    .length = 16, .offset = 0, .width = 2, .value = 65535 },
+		{ .name = "used is smaller than padded data",
+		    .length = 16, .offset = 2, .width = 2, .value = 7 },
+		{ .name = "used is larger than padded data",
+		    .length = 16, .offset = 2, .width = 2, .value = 9 },
+		{ .name = "field data exceeds blob",
+		    .length = 16, .offset = 6, .width = 2, .value = 17 },
+		{ .name = "last field lacks padding",
+		    .length = 11, .offset = 2, .width = 2, .value = 8 },
+		{ .name = "padding contains a nonzero byte",
+		    .length = 16, .offset = 11, .width = 1, .value = 1 },
+		{ .name = "one-byte blob",
+		    .length = 1, .offset = 0, .width = 1, .value = 0 },
+		{ .name = "two-byte blob",
+		    .length = 2, .offset = 0, .width = 1, .value = 0 },
+		{ .name = "three-byte blob",
+		    .length = 3, .offset = 0, .width = 1, .value = 0 }
+	};
+	unsigned char raw[64], encoded[256], record[256];
+	apfs_inode_val_t inode = {0};
+	apfs_drec_val_t drec = {0};
+	apfs_xfields_t blob;
+	apfs_xfield_t huge = { .data = data, .type = 4, .size = 65535 };
+	apfs_xfield_t repeated[] = {
+		{ .data = data, .type = 4, .size = 3 },
+		{ .data = data, .type = 4, .size = 4 }
+	};
+	const size_t bad_inode_lengths[] = { 92, 107, 109 };
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		scenario = cases[i].name;
+		expect(apfs_gen_xfields_build(raw, 16, fields, 1), "blob builder");
+		put_le(raw + cases[i].offset, cases[i].value, cases[i].width);
+		REJECT_OUTPUT(apfs_xfields_t, output,
+		    apfs_xfields_decode(raw, cases[i].length, &output));
+		/* Record codecs must validate a borrowed blob before copying it. */
+		blob = (apfs_xfields_t){ .raw = raw, .length = cases[i].length };
+		inode.xfields = blob;
+		drec.xfields = blob;
+		REJECT_WRITE(encoded, apfs_inode_val_encode(encoded,
+		    92 + cases[i].length, &inode));
+		REJECT_WRITE(encoded, apfs_drec_val_encode(encoded,
+		    18 + cases[i].length, &drec));
+		bzero(record, sizeof(record));
+		bcopy(raw, record + 92, cases[i].length);
+		REJECT_OUTPUT(apfs_inode_val_t, output,
+		    apfs_inode_val_decode(record, 92 + cases[i].length, &output));
+		bzero(record, sizeof(record));
+		bcopy(raw, record + 18, cases[i].length);
+		REJECT_OUTPUT(apfs_drec_val_t, output,
+		    apfs_drec_val_decode(record, 18 + cases[i].length, &output));
+	}
+	scenario = "extended-field types repeat";
+	expect(apfs_gen_xfields_build(raw, 28, fields, 2), "repeated builder");
+	REJECT_OUTPUT(apfs_xfields_t, output,
+	    apfs_xfields_decode(raw, 28, &output));
+	REJECT_WRITE(encoded, apfs_xfields_encode(encoded, 28, repeated, 2));
+	inode.xfields = (apfs_xfields_t){ .raw = raw, .length = 28 };
+	drec.xfields = inode.xfields;
+	REJECT_WRITE(encoded, apfs_inode_val_encode(encoded, 120, &inode));
+	REJECT_WRITE(encoded, apfs_drec_val_encode(encoded, 46, &drec));
+
+	scenario = "extended-field padded data exceeds u16 used count";
+	REJECT_OUTPUT(size_t, output, apfs_xfields_size(&huge, 1, &output));
+	REJECT_WRITE(encoded, apfs_xfields_encode(encoded, sizeof(encoded),
+	    &huge, 1));
+
+	scenario = "inode encoded length must equal fixed part plus blob";
+	expect(apfs_gen_xfields_build(raw, 16, fields, 1), "valid blob builder");
+	expect(apfs_xfields_decode(raw, 16, &inode.xfields), "valid blob decode");
+	for (size_t i = 0;
+	    i < sizeof(bad_inode_lengths) / sizeof(bad_inode_lengths[0]); i++) {
+		REJECT_WRITE(encoded,
+		    apfs_inode_val_encode(encoded, bad_inode_lengths[i], &inode));
+	}
+}
+
+static void
+test_fs_xfield_name_rejections(void)
+{
+	static const unsigned char data[] = { 'r', 'o', 'o', 't' };
+	const uint16_t sizes[] = { sizeof(data), 0 };
+	const char *name, *saved_name = "unchanged";
+	uint16_t name_len;
+	apfs_xfield_t field;
+
+	for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		scenario = sizes[i] == 0 ? "name field has zero size" :
+		    "name field lacks terminal NUL";
+		field = (apfs_xfield_t){ .data = data, .size = sizes[i], .type = 4 };
+		name = saved_name;
+		name_len = 0xa5a5;
+		expect(!apfs_xfield_name(&field, &name, &name_len),
+		    "malformed name field is refused");
+		expect(name == saved_name && name_len == 0xa5a5,
+		    "rejected name field preserves both outputs");
+	}
+}
+
+static void
+test_fs_name_rejections(void)
+{
+	unsigned char raw[128], encoded[1200];
+	static const char long_name[1023] = { 'x' };
+	const apfs_gen_drec_key_t drec = { .parent = 2, .name = "abc",
+	    .name_len = 3 };
+	const apfs_gen_drec_key_t hashed = { .parent = 2, .name = "abc",
+	    .name_len = 3, .hashed = true, .hash = 0x123456 };
+	const apfs_gen_name_key_t name = { .oid = 2, .name = "abc",
+	    .name_len = 3 };
+	const apfs_gen_sibling_val_t sibling = { .parent = 2, .name = "abc",
+	    .name_len = 3 };
+	const apfs_gen_snap_meta_val_t snap = { .name = "abc", .name_len = 3 };
+
+	for (unsigned defect = 0; defect < 3; defect++) {
+		scenario = defect == 0 ? "stored name has zero length" :
+		    defect == 1 ? "stored name lacks terminal NUL" :
+		    "stored name length runs past record";
+		expect(apfs_gen_drec_key_build(raw, 14, &drec), "plain key builder");
+		if (defect == 1)
+			raw[13] = 'x';
+		else
+			put_le(raw + 8, defect == 0 ? 0 : 5, 2);
+		REJECT_OUTPUT(apfs_drec_key_t, output,
+		    apfs_drec_key_decode(raw, 14, false, &output));
+		expect(apfs_gen_drec_key_build(raw, 16, &hashed), "hashed builder");
+		if (defect == 1)
+			raw[15] = 'x';
+		else
+			put_le(raw + 8, (0x123456u << 10) |
+			    (defect == 0 ? 0 : 5), 4);
+		REJECT_OUTPUT(apfs_drec_key_t, output,
+		    apfs_drec_key_decode(raw, 16, true, &output));
+		expect(apfs_gen_xattr_key_build(raw, 14, &name), "xattr key builder");
+		if (defect == 1)
+			raw[13] = 'x';
+		else
+			put_le(raw + 8, defect == 0 ? 0 : 5, 2);
+		REJECT_OUTPUT(apfs_name_key_t, output,
+		    apfs_xattr_key_decode(raw, 14, &output));
+		expect(apfs_gen_snap_name_key_build(raw, 14, &name),
+		    "snapshot key builder");
+		if (defect == 1)
+			raw[13] = 'x';
+		else
+			put_le(raw + 8, defect == 0 ? 0 : 5, 2);
+		REJECT_OUTPUT(apfs_name_key_t, output,
+		    apfs_snap_name_key_decode(raw, 14, &output));
+		expect(apfs_gen_sibling_val_build(raw, 14, &sibling),
+		    "sibling value builder");
+		if (defect == 1)
+			raw[13] = 'x';
+		else
+			put_le(raw + 8, defect == 0 ? 0 : 5, 2);
+		REJECT_OUTPUT(apfs_sibling_val_t, output,
+		    apfs_sibling_val_decode(raw, 14, &output));
+		expect(apfs_gen_snap_meta_val_build(raw, 54, &snap),
+		    "snapshot value builder");
+		if (defect == 1)
+			raw[53] = 'x';
+		else
+			put_le(raw + 48, defect == 0 ? 0 : 5, 2);
+		REJECT_OUTPUT(apfs_snap_meta_val_t, output,
+		    apfs_snap_meta_val_decode(raw, 54, &output));
+	}
+	scenario = "hashed length is smaller than the key span";
+	expect(apfs_gen_drec_key_build(raw, 16, &hashed), "hashed builder");
+	put_le(raw + 8, (0x123456u << 10) | 3, 4);
+	/* The shortened name also ends in NUL: only the span check can reject. */
+	raw[14] = 0;
+	REJECT_OUTPUT(apfs_drec_key_t, output,
+	    apfs_drec_key_decode(raw, 16, true, &output));
+
+	/* Encoders receive names without NUL; the stored length includes it. */
+	{
+		apfs_drec_key_t key = { .parent = 2, .hashed = true,
+		    .name = long_name, .name_len = 1023 };
+
+		scenario = "hashed name length plus NUL exceeds ten bits";
+		REJECT_WRITE(encoded, apfs_drec_key_encode(encoded, 1036, &key));
+		scenario = "directory hash exceeds 22 bits";
+		key.name_len = 3;
+		key.hash = 0x400000;
+		REJECT_WRITE(encoded, apfs_drec_key_encode(encoded, 16, &key));
+		scenario = "plain directory key cannot hold a hash";
+		key.hashed = false;
+		key.hash = 1;
+		REJECT_WRITE(encoded, apfs_drec_key_encode(encoded, 14, &key));
+	}
+}
+
+static void
+test_fs_value_rejections(void)
+{
+	unsigned char raw[128], encoded[128];
+	static const unsigned char data[] = { 1, 2, 3, 4 };
+	apfs_gen_xattr_val_t params = { .data = data, .data_len = 4 };
+	apfs_xattr_val_t value = { .data = data, .data_len = 4 };
+	const apfs_gen_file_info_val_t info = { .hash = data,
+	    .hash_size = 4, .hashed_len = 4096 };
+
+	for (unsigned flags = 0; flags <= 3; flags += 3) {
+		scenario = flags == 0 ? "attribute has neither storage flag" :
+		    "attribute has both storage flags";
+		params.flags = 2;
+		expect(apfs_gen_xattr_val_build(raw, 8, &params), "xattr builder");
+		put_le(raw, flags, 2);
+		REJECT_OUTPUT(apfs_xattr_val_t, output,
+		    apfs_xattr_val_decode(raw, 8, &output));
+		value.flags = flags;
+		REJECT_WRITE(encoded, apfs_xattr_val_encode(encoded, 8, &value));
+	}
+	scenario = "inline attribute data length disagrees with value span";
+	params.flags = 2;
+	expect(apfs_gen_xattr_val_build(raw, 8, &params), "inline builder");
+	put_le(raw + 2, 3, 2);
+	REJECT_OUTPUT(apfs_xattr_val_t, output,
+	    apfs_xattr_val_decode(raw, 8, &output));
+	value.flags = 2;
+	value.data_len = 3;
+	REJECT_WRITE(encoded, apfs_xattr_val_encode(encoded, 8, &value));
+
+	scenario = "stream attribute data length is not 48";
+	bzero(raw, sizeof(raw));
+	put_le(raw, 1, 2);
+	put_le(raw + 2, 47, 2);
+	REJECT_OUTPUT(apfs_xattr_val_t, output,
+	    apfs_xattr_val_decode(raw, 51, &output));
+	value.flags = 1;
+	value.data_len = 47;
+	REJECT_WRITE(encoded, apfs_xattr_val_encode(encoded, 51, &value));
+
+	scenario = "file information hash size disagrees with value span";
+	expect(apfs_gen_file_info_val_build(raw, 7, &info), "file info builder");
+	raw[2] = 3;
+	REJECT_OUTPUT(apfs_file_info_val_t, output,
+	    apfs_file_info_val_decode(raw, 7, &output));
+	{
+		const apfs_file_info_val_t bad = { .hash = data, .hash_size = 3 };
+
+		REJECT_WRITE(encoded, apfs_file_info_val_encode(encoded, 7, &bad));
+	}
+}
+
+static void
+test_fs_encoder_ranges(void)
+{
+	unsigned char encoded[128];
+	const uint64_t large_oid = UINT64_C(0x1000000000000000);
+	const apfs_jkey_t header = { .oid = large_oid, .kind = 3 };
+	const apfs_jkey_t kind = { .kind = 16 };
+	const apfs_drec_key_t drec = { .parent = large_oid,
+	    .name = "a", .name_len = 1 };
+	const apfs_name_key_t name = { .oid = large_oid,
+	    .name = "a", .name_len = 1 };
+	const apfs_sibling_key_t sibling = { .inode = large_oid };
+	const apfs_extent_key_t extent = { .private_id = large_oid };
+	apfs_file_info_key_t info = { .private_id = large_oid };
+	const apfs_extent_val_t length = { .length = UINT64_C(1) << 56 };
+	apfs_pext_val_t pext = { .length = UINT64_C(1) << 60 };
+
+	scenario = "key OID exceeds sixty bits";
+	REJECT_WRITE(encoded, apfs_bare_key_encode(encoded, 8, 3, large_oid));
+	REJECT_WRITE(encoded, apfs_jkey_encode(encoded, 8, &header));
+	REJECT_WRITE(encoded, apfs_drec_key_encode(encoded, 12, &drec));
+	REJECT_WRITE(encoded, apfs_xattr_key_encode(encoded, 12, &name));
+	REJECT_WRITE(encoded, apfs_snap_name_key_encode(encoded, 12, &name));
+	REJECT_WRITE(encoded, apfs_sibling_key_encode(encoded, 16, &sibling));
+	REJECT_WRITE(encoded, apfs_extent_key_encode(encoded, 16, &extent));
+	REJECT_WRITE(encoded, apfs_file_info_key_encode(encoded, 16, &info));
+	scenario = "key kind exceeds four bits";
+	REJECT_WRITE(encoded, apfs_bare_key_encode(encoded, 8, 16, 2));
+	REJECT_WRITE(encoded, apfs_jkey_encode(encoded, 8, &kind));
+	scenario = "file extent length exceeds fifty-six bits";
+	REJECT_WRITE(encoded, apfs_extent_val_encode(encoded, 24, &length));
+	scenario = "physical extent length exceeds sixty bits";
+	REJECT_WRITE(encoded, apfs_pext_val_encode(encoded, 20, &pext));
+	scenario = "physical extent kind exceeds four bits";
+	pext.length = 1;
+	pext.kind = 16;
+	REJECT_WRITE(encoded, apfs_pext_val_encode(encoded, 20, &pext));
+	scenario = "file information LBA exceeds fifty-six bits";
+	info.private_id = 2;
+	info.lba = UINT64_C(1) << 56;
+	REJECT_WRITE(encoded, apfs_file_info_key_encode(encoded, 16, &info));
+}
+
 int
 main(void)
 {
+	test_native_fs_records();
+	test_generated_fs_records();
+	test_fs_record_prefixes();
+	test_fs_edited_xfield_spans();
+	test_fs_xfield_rejections();
+	test_fs_xfield_name_rejections();
+	test_fs_name_rejections();
+	test_fs_value_rejections();
+	test_fs_encoder_ranges();
 	test_native_blocks();
 	test_patterned_encodes();
 	test_fletcher();

@@ -891,4 +891,403 @@ fsimg_status_t	apfs_name_key(const apfs_name_form_t *, char *, size_t,
  */
 bool		apfs_name_assigned(const char *, size_t);
 
+/*
+ * Filesystem-tree records (specs/design-apfs.md, "Filesystem records"). A
+ * key starts with an 8-byte header holding the owner's object ID in its low
+ * 60 bits and the record kind in its high 4; the kind selects the rest of
+ * the key and the value. Sizes are each record's fixed part; a name stored
+ * after a u16 or 10-bit length counts its NUL in that length.
+ */
+#define APFS_JKEY_BYTES			8u
+#define APFS_JKEY_OID_MASK		UINT64_C(0x0fffffffffffffff)
+#define APFS_JKEY_KIND_SHIFT		60u
+#define APFS_JKEY_KIND_MASK		0xfu
+
+#define APFS_J_SNAP_METADATA		1u	/* record kinds */
+#define APFS_J_PHYS_EXTENT		2u
+#define APFS_J_INODE			3u
+#define APFS_J_XATTR			4u
+#define APFS_J_SIBLING_LINK		5u
+#define APFS_J_DSTREAM_ID		6u
+#define APFS_J_CRYPTO_STATE		7u	/* identified, never decoded */
+#define APFS_J_FILE_EXTENT		8u
+#define APFS_J_DREC			9u
+#define APFS_J_DIR_STATS		10u
+#define APFS_J_SNAP_NAME		11u
+#define APFS_J_SIBLING_MAP		12u
+#define APFS_J_FILE_INFO		13u
+
+#define APFS_INODE_VAL_BYTES		92u
+
+/* A plain directory-record key stores a u16 name length after the header,
+ * a hashed one a u32 of the length (low 10 bits) and the hash (high 22).
+ * The mask and shift are E4's: the reference prints the mask wrongly.
+ */
+#define APFS_DREC_KEY_BYTES		10u
+#define APFS_DREC_HASHED_KEY_BYTES	12u
+#define APFS_DREC_LEN_MASK		0x000003ffu
+#define APFS_DREC_HASH_MASK		0xfffffc00u
+#define APFS_DREC_HASH_SHIFT		10u
+#define APFS_DREC_VAL_BYTES		18u
+#define APFS_DREC_TYPE_MASK		0x000fu	/* in the value's flags */
+
+#define APFS_XATTR_KEY_BYTES		10u
+#define APFS_XATTR_VAL_BYTES		4u
+#define APFS_XATTR_STREAM_BYTES		48u	/* stream OID and data stream */
+#define APFS_XATTR_DATA_STREAM		0x0001u
+#define APFS_XATTR_DATA_EMBEDDED	0x0002u
+#define APFS_XATTR_FS_OWNED		0x0004u
+
+#define APFS_SIBLING_KEY_BYTES		16u
+#define APFS_SIBLING_VAL_BYTES		10u
+#define APFS_SIBLING_MAP_VAL_BYTES	8u
+#define APFS_DSTREAM_ID_VAL_BYTES	4u
+
+#define APFS_EXTENT_KEY_BYTES		16u
+#define APFS_EXTENT_VAL_BYTES		24u
+#define APFS_EXTENT_LEN_MASK		UINT64_C(0x00ffffffffffffff)
+#define APFS_EXTENT_FLAGS_SHIFT		56u
+
+#define APFS_PEXT_VAL_BYTES		20u
+#define APFS_PEXT_LEN_MASK		UINT64_C(0x0fffffffffffffff)
+#define APFS_PEXT_KIND_SHIFT		60u
+#define APFS_PEXT_KIND_MASK		0xfu
+
+#define APFS_DSTREAM_BYTES		40u
+#define APFS_DIR_STATS_BYTES		32u
+
+#define APFS_SNAP_META_VAL_BYTES	50u
+#define APFS_SNAP_NAME_KEY_BYTES	10u
+#define APFS_SNAP_NAME_VAL_BYTES	8u
+
+/* A file-information key packs a type (high 8 bits) and a block address. */
+#define APFS_FILE_INFO_KEY_BYTES	16u
+#define APFS_FILE_INFO_VAL_BYTES	3u
+#define APFS_FILE_INFO_LBA_MASK		UINT64_C(0x00ffffffffffffff)
+#define APFS_FILE_INFO_TYPE_SHIFT	56u
+
+/*
+ * Extended fields: a 4-byte blob header (field count, used data bytes), a
+ * 4-byte header per field (type, flags, data size), then each field's data
+ * padded with zeros to a multiple of APFS_XF_ALIGN bytes. The used count is
+ * the padded data alone (E2, E3), not the headers the reference adds.
+ */
+#define APFS_XF_BLOB_BYTES		4u
+#define APFS_XF_HEADER_BYTES		4u
+#define APFS_XF_ALIGN			8u
+
+#define APFS_XF_INO_SNAP_XID		1u	/* inode field types */
+#define APFS_XF_INO_DELTA_TREE_OID	2u
+#define APFS_XF_INO_DOCUMENT_ID		3u
+#define APFS_XF_INO_NAME		4u
+#define APFS_XF_INO_PREV_FSIZE		5u
+#define APFS_XF_INO_FINDER_INFO		7u
+#define APFS_XF_INO_DSTREAM		8u
+#define APFS_XF_INO_DIR_STATS		10u
+#define APFS_XF_INO_FS_UUID		11u
+#define APFS_XF_INO_SPARSE_BYTES	13u
+#define APFS_XF_INO_RDEV		14u
+#define APFS_XF_INO_PURGEABLE_FLAGS	15u
+#define APFS_XF_INO_ORIG_SYNC_ROOT	16u
+#define APFS_XF_DREC_SIBLING_ID		1u	/* a directory-record field */
+
+#define APFS_XF_DATA_DEPENDENT		0x01u	/* field flags */
+#define APFS_XF_DO_NOT_COPY		0x02u
+#define APFS_XF_CHILDREN_INHERIT	0x08u
+#define APFS_XF_USER_FIELD		0x10u
+#define APFS_XF_SYSTEM_FIELD		0x20u
+
+/*
+ * Decoded filesystem-tree records. Key and value are decoded separately,
+ * as the tree stores them, so a search key is built without a value; the
+ * modules serving entries join them. A name or data member is a borrowed
+ * span of the bytes decoded, valid while they are; a decoded name excludes
+ * the NUL its stored length counts. Times count nanoseconds since 1970 as
+ * signed values (specs/design-apfs.md, "Inodes").
+ */
+typedef struct apfs_jkey {
+	uint64_t	oid;
+	uint8_t		kind;
+} apfs_jkey_t;
+
+/* An extended-field blob as decoded: the bytes it spans, empty when the
+ * record has none, its field count and its used data bytes.
+ */
+typedef struct apfs_xfields {
+	const unsigned char *raw;
+	size_t		length;
+	uint16_t	count;
+	uint16_t	used;
+} apfs_xfields_t;
+
+/* One extended field and its data, without the padding. */
+typedef struct apfs_xfield {
+	const unsigned char *data;
+	uint16_t	size;
+	uint8_t		type;
+	uint8_t		flags;
+} apfs_xfield_t;
+
+typedef struct apfs_dstream {
+	uint64_t	size;
+	uint64_t	alloced_size;
+	uint64_t	default_crypto_id;
+	uint64_t	total_bytes_written;
+	uint64_t	total_bytes_read;
+} apfs_dstream_t;
+
+typedef struct apfs_dir_stats {
+	uint64_t	num_children;
+	uint64_t	total_size;
+	uint64_t	chained_key;
+	uint64_t	gen_count;
+} apfs_dir_stats_t;
+
+typedef struct apfs_inode_val {
+	apfs_xfields_t	xfields;
+	uint64_t	parent;
+	uint64_t	private_id;	/* owner of the file extents */
+	int64_t		create_time;
+	int64_t		mod_time;
+	int64_t		change_time;
+	int64_t		access_time;
+	uint64_t	internal_flags;
+	uint64_t	uncompressed_size;
+	int32_t		count;		/* directory: children; else links */
+	uint32_t	protection_class;
+	uint32_t	write_generation;
+	uint32_t	bsd_flags;
+	uint32_t	owner;
+	uint32_t	group;
+	uint16_t	mode;
+} apfs_inode_val_t;
+
+typedef struct apfs_drec_key {
+	const char	*name;
+	uint64_t	 parent;	/* the key's OID */
+	uint32_t	 hash;		/* 22 bits; zero in a plain key */
+	uint16_t	 name_len;
+	bool		 hashed;
+} apfs_drec_key_t;
+
+typedef struct apfs_drec_val {
+	apfs_xfields_t	xfields;
+	uint64_t	child;
+	int64_t		date_added;
+	uint16_t	flags;		/* the type in APFS_DREC_TYPE_MASK */
+} apfs_drec_val_t;
+
+typedef struct apfs_name_key {
+	const char	*name;
+	uint64_t	 oid;
+	uint16_t	 name_len;
+} apfs_name_key_t;		/* an attribute's or a snapshot name's */
+
+/* An attribute value: inline data, or a stream (data is then NULL). */
+typedef struct apfs_xattr_val {
+	const unsigned char *data;
+	apfs_dstream_t	dstream;
+	uint64_t	stream_oid;
+	uint16_t	flags;
+	uint16_t	data_len;	/* as stored */
+} apfs_xattr_val_t;
+
+typedef struct apfs_sibling_key {
+	uint64_t	inode;		/* the key's OID */
+	uint64_t	sibling_id;
+} apfs_sibling_key_t;
+
+typedef struct apfs_sibling_val {
+	const char	*name;
+	uint64_t	 parent;
+	uint16_t	 name_len;
+} apfs_sibling_val_t;
+
+typedef struct apfs_extent_key {
+	uint64_t	private_id;	/* the key's OID */
+	uint64_t	logical;	/* byte offset in the stream */
+} apfs_extent_key_t;
+
+typedef struct apfs_extent_val {
+	uint64_t	length;		/* bytes, 56 bits */
+	uint64_t	phys_block;	/* zero for a hole */
+	uint64_t	crypto_id;
+	uint8_t		flags;
+} apfs_extent_val_t;
+
+/* A physical extent; its key is a bare header whose OID is the first
+ * block.
+ */
+typedef struct apfs_pext_val {
+	uint64_t	length;		/* blocks, 60 bits */
+	uint64_t	owner;
+	int32_t		refcnt;
+	uint8_t		kind;		/* 4 bits */
+} apfs_pext_val_t;
+
+typedef struct apfs_snap_meta_val {
+	const char	*name;
+	uint64_t	 extentref_tree_oid;
+	uint64_t	 sblock_oid;
+	int64_t		 create_time;
+	int64_t		 change_time;
+	uint64_t	 inum;
+	uint32_t	 extentref_tree_type;
+	uint32_t	 flags;
+	uint16_t	 name_len;
+} apfs_snap_meta_val_t;
+
+typedef struct apfs_file_info_key {
+	uint64_t	private_id;	/* the key's OID */
+	uint64_t	lba;		/* 56 bits */
+	uint8_t		type;
+} apfs_file_info_key_t;
+
+typedef struct apfs_file_info_val {
+	const unsigned char *hash;
+	uint16_t	hashed_len;
+	uint8_t		hash_size;
+} apfs_file_info_val_t;
+
+/*
+ * Filesystem-record decoders and encoders (codec.c), under the record codec
+ * rules above. apfs_jkey_decode() reads the header of any key of at least
+ * APFS_JKEY_BYTES, which selects the record's decoders. A record whose key
+ * is that header alone (snapshot metadata, physical extent, inode, data
+ * stream ID, crypto state, directory statistics, sibling map) decodes it
+ * with apfs_bare_key_decode(), which refuses any other length or a kind
+ * other than its argument; apfs_bare_key_encode() writes one. Every other
+ * key decoder likewise refuses a key of another kind, and a key or value
+ * decoder refuses a length its fixed part and stored lengths do not fill
+ * exactly. A stored name must end in its NUL; its other bytes are the
+ * caller's to judge, as are kinds, flags, types, hashes and order
+ * (specs/design-apfs-driver.md, "Codecs"). Reserved bytes are written as
+ * zero and not judged, as in the container records. An encoder writes the
+ * key header with its record's kind and refuses an OID above
+ * APFS_JKEY_OID_MASK or a field wider than its stored bits; it copies a name
+ * or data span from the pointer its record holds.
+ */
+bool	apfs_jkey_decode(const unsigned char *, size_t, apfs_jkey_t *);
+bool	apfs_jkey_encode(unsigned char *, size_t, const apfs_jkey_t *);
+bool	apfs_bare_key_decode(const unsigned char *, size_t, uint8_t,
+	    uint64_t *);
+bool	apfs_bare_key_encode(unsigned char *, size_t, uint8_t, uint64_t);
+
+/*
+ * An inode or directory-record value ends in an extended-field blob when it
+ * is longer than its fixed part. apfs_xfields_decode() accepts a blob whose
+ * headers and padded data fill it exactly, with the used count equal to the
+ * padded data, zero padding and no type repeated; a length of zero is no
+ * blob. Padding frames the next field, so it is shape, unlike a reserved
+ * field. apfs_xfield_get() returns field index of a decoded blob and
+ * apfs_xfield_find() the field of a type, reporting through its return
+ * whether the blob holds one; both walk the headers again, every read
+ * inside the blob's span, so a decoded blob, at most 256 fields since no
+ * type repeats, costs at most 256 steps per call. apfs_xfields_size()
+ * computes the blob length for fields, refusing one whose used count does
+ * not fit 16 bits, and apfs_xfields_encode() writes exactly that length,
+ * refusing a repeated type.
+ *
+ * The inode and directory-record encoders copy the blob their record holds
+ * after the fixed part, after proving it decodes. A writer encodes the blob
+ * in place after the fixed part, decodes it into the record, then encodes
+ * the record; the copy is then onto itself. A blob overlapping the fixed
+ * part being written is not allowed.
+ */
+bool	apfs_xfields_decode(const unsigned char *, size_t, apfs_xfields_t *);
+bool	apfs_xfield_get(const apfs_xfields_t *, uint16_t, apfs_xfield_t *);
+bool	apfs_xfield_find(const apfs_xfields_t *, uint8_t, apfs_xfield_t *);
+bool	apfs_xfields_size(const apfs_xfield_t *, uint16_t, size_t *);
+bool	apfs_xfields_encode(unsigned char *, size_t, const apfs_xfield_t *,
+	    uint16_t);
+/* A field holding one little-endian integer of exactly its size, and a
+ * field holding a name ending in its NUL, returned without it.
+ */
+bool	apfs_xfield_u32(const apfs_xfield_t *, uint32_t *);
+bool	apfs_xfield_u64(const apfs_xfield_t *, uint64_t *);
+bool	apfs_xfield_name(const apfs_xfield_t *, const char **, uint16_t *);
+
+/* The data stream of an inode field or a stream attribute, and directory
+ * statistics, as a field or a kind-10 value: exact spans.
+ */
+bool	apfs_dstream_decode(const unsigned char *, size_t, apfs_dstream_t *);
+bool	apfs_dstream_encode(unsigned char *, size_t, const apfs_dstream_t *);
+bool	apfs_dir_stats_decode(const unsigned char *, size_t,
+	    apfs_dir_stats_t *);
+bool	apfs_dir_stats_encode(unsigned char *, size_t,
+	    const apfs_dir_stats_t *);
+
+bool	apfs_inode_val_decode(const unsigned char *, size_t,
+	    apfs_inode_val_t *);
+bool	apfs_inode_val_encode(unsigned char *, size_t,
+	    const apfs_inode_val_t *);
+
+/* The bool selects the hashed key, the volume's variant. */
+bool	apfs_drec_key_decode(const unsigned char *, size_t, bool,
+	    apfs_drec_key_t *);
+bool	apfs_drec_key_encode(unsigned char *, size_t, const apfs_drec_key_t *);
+bool	apfs_drec_val_decode(const unsigned char *, size_t, apfs_drec_val_t *);
+bool	apfs_drec_val_encode(unsigned char *, size_t, const apfs_drec_val_t *);
+
+/* Exactly one of the stream and embedded flags must be set: it selects the
+ * value's layout, inline data of data_len bytes or a stream reference of
+ * APFS_XATTR_STREAM_BYTES. The other flags are the caller's.
+ */
+bool	apfs_xattr_key_decode(const unsigned char *, size_t,
+	    apfs_name_key_t *);
+bool	apfs_xattr_key_encode(unsigned char *, size_t,
+	    const apfs_name_key_t *);
+bool	apfs_xattr_val_decode(const unsigned char *, size_t,
+	    apfs_xattr_val_t *);
+bool	apfs_xattr_val_encode(unsigned char *, size_t,
+	    const apfs_xattr_val_t *);
+
+bool	apfs_sibling_key_decode(const unsigned char *, size_t,
+	    apfs_sibling_key_t *);
+bool	apfs_sibling_key_encode(unsigned char *, size_t,
+	    const apfs_sibling_key_t *);
+bool	apfs_sibling_val_decode(const unsigned char *, size_t,
+	    apfs_sibling_val_t *);
+bool	apfs_sibling_val_encode(unsigned char *, size_t,
+	    const apfs_sibling_val_t *);
+/* A sibling map's value is the inode the sibling ID names. */
+bool	apfs_sibling_map_val_decode(const unsigned char *, size_t, uint64_t *);
+bool	apfs_sibling_map_val_encode(unsigned char *, size_t, uint64_t);
+/* A data-stream ID's value is the stream's reference count. */
+bool	apfs_dstream_id_val_decode(const unsigned char *, size_t, uint32_t *);
+bool	apfs_dstream_id_val_encode(unsigned char *, size_t, uint32_t);
+
+bool	apfs_extent_key_decode(const unsigned char *, size_t,
+	    apfs_extent_key_t *);
+bool	apfs_extent_key_encode(unsigned char *, size_t,
+	    const apfs_extent_key_t *);
+bool	apfs_extent_val_decode(const unsigned char *, size_t,
+	    apfs_extent_val_t *);
+bool	apfs_extent_val_encode(unsigned char *, size_t,
+	    const apfs_extent_val_t *);
+bool	apfs_pext_val_decode(const unsigned char *, size_t, apfs_pext_val_t *);
+bool	apfs_pext_val_encode(unsigned char *, size_t, const apfs_pext_val_t *);
+
+bool	apfs_snap_meta_val_decode(const unsigned char *, size_t,
+	    apfs_snap_meta_val_t *);
+bool	apfs_snap_meta_val_encode(unsigned char *, size_t,
+	    const apfs_snap_meta_val_t *);
+/* A snapshot name's key holds the name; its value is the snapshot's XID. */
+bool	apfs_snap_name_key_decode(const unsigned char *, size_t,
+	    apfs_name_key_t *);
+bool	apfs_snap_name_key_encode(unsigned char *, size_t,
+	    const apfs_name_key_t *);
+bool	apfs_snap_name_val_decode(const unsigned char *, size_t, uint64_t *);
+bool	apfs_snap_name_val_encode(unsigned char *, size_t, uint64_t);
+
+/* A file-information value is a data hash of hash_size bytes. */
+bool	apfs_file_info_key_decode(const unsigned char *, size_t,
+	    apfs_file_info_key_t *);
+bool	apfs_file_info_key_encode(unsigned char *, size_t,
+	    const apfs_file_info_key_t *);
+bool	apfs_file_info_val_decode(const unsigned char *, size_t,
+	    apfs_file_info_val_t *);
+bool	apfs_file_info_val_encode(unsigned char *, size_t,
+	    const apfs_file_info_val_t *);
+
 #endif /* !FSIMG_APFS_H */

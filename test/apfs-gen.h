@@ -341,4 +341,190 @@ bool	apfs_gen_container_build(unsigned char *, size_t,
 bool	apfs_gen_reap_list_build(unsigned char *, size_t,
     const apfs_gen_reap_list_t *);
 
+/* Filesystem records use independent offsets and packed-word layouts. */
+enum {
+	GEN_DSTREAM_BYTES = 40,
+	GEN_DIR_STATS_BYTES = 32,
+	GEN_INODE_VAL_BYTES = 92,
+	GEN_DREC_VAL_BYTES = 18,
+	GEN_EXTENT_VAL_BYTES = 24,
+	GEN_PEXT_VAL_BYTES = 20,
+	GEN_SNAP_META_VAL_BYTES = 50,
+	GEN_FILE_INFO_VAL_BYTES = 3,
+	GEN_JKEY_BYTES = 8,
+	GEN_DREC_KEY_BYTES = 10,
+	GEN_DREC_HASHED_KEY_BYTES = 12,
+	GEN_NAME_KEY_BYTES = 10,
+	GEN_SIBLING_KEY_BYTES = 16,
+	GEN_SIBLING_VAL_BYTES = 10,
+	GEN_SIBLING_MAP_VAL_BYTES = 8,
+	GEN_DSTREAM_ID_VAL_BYTES = 4,
+	GEN_EXTENT_KEY_BYTES = 16,
+	GEN_SNAP_NAME_VAL_BYTES = 8,
+	GEN_FILE_INFO_KEY_BYTES = 16,
+	GEN_XATTR_VAL_BYTES = 4,
+	GEN_XATTR_STREAM_BYTES = 48,
+	GEN_XF_BLOB_BYTES = 4,
+	GEN_XF_HEADER_BYTES = 4,
+	GEN_XF_ALIGN = 8
+};
+
+typedef struct apfs_gen_dstream {
+	uint64_t	size;
+	uint64_t	alloced_size;
+	uint64_t	default_crypto_id;
+	uint64_t	total_bytes_written;
+	uint64_t	total_bytes_read;
+} apfs_gen_dstream_t;
+
+bool	apfs_gen_dstream_build(unsigned char *, size_t,
+    const apfs_gen_dstream_t *);
+
+typedef struct apfs_gen_dir_stats {
+	uint64_t	num_children;
+	uint64_t	total_size;
+	uint64_t	chained_key;
+	uint64_t	gen_count;
+} apfs_gen_dir_stats_t;
+
+bool	apfs_gen_dir_stats_build(unsigned char *, size_t,
+    const apfs_gen_dir_stats_t *);
+
+typedef struct apfs_gen_inode_val {
+	uint64_t	parent;
+	uint64_t	private_id;
+	int64_t	create_time;
+	int64_t	mod_time;
+	int64_t	change_time;
+	int64_t	access_time;
+	uint64_t	internal_flags;
+	int32_t	count;
+	uint32_t	protection_class;
+	uint32_t	write_generation;
+	uint32_t	bsd_flags;
+	uint32_t	owner;
+	uint32_t	group;
+	uint16_t	mode;
+	uint64_t	uncompressed_size;
+	const unsigned char *xfields;
+	size_t	xfields_len;
+} apfs_gen_inode_val_t;
+
+bool	apfs_gen_inode_val_build(unsigned char *, size_t,
+    const apfs_gen_inode_val_t *);
+
+typedef struct apfs_gen_drec_val {
+	uint64_t	child;
+	int64_t	date_added;
+	uint16_t	flags;
+	const unsigned char *xfields;
+	size_t	xfields_len;
+} apfs_gen_drec_val_t;
+
+bool	apfs_gen_drec_val_build(unsigned char *, size_t,
+    const apfs_gen_drec_val_t *);
+
+typedef struct apfs_gen_extent_val {
+	uint64_t	length;
+	uint64_t	phys_block;
+	uint64_t	crypto_id;
+	uint8_t		flags;
+} apfs_gen_extent_val_t;
+
+bool	apfs_gen_extent_val_build(unsigned char *, size_t,
+    const apfs_gen_extent_val_t *);
+
+typedef struct apfs_gen_pext_val {
+	uint64_t	length;
+	uint64_t	owner;
+	int32_t	refcnt;
+	uint8_t		kind;
+} apfs_gen_pext_val_t;
+
+bool	apfs_gen_pext_val_build(unsigned char *, size_t,
+    const apfs_gen_pext_val_t *);
+
+typedef struct apfs_gen_snap_meta_val {
+	uint64_t	extentref_tree_oid;
+	uint64_t	sblock_oid;
+	int64_t	create_time;
+	int64_t	change_time;
+	uint64_t	inum;
+	uint32_t	extentref_tree_type;
+	uint32_t	flags;
+	const char *name;
+	uint16_t	name_len;
+} apfs_gen_snap_meta_val_t;
+
+bool	apfs_gen_snap_meta_val_build(unsigned char *, size_t,
+    const apfs_gen_snap_meta_val_t *);
+
+typedef struct apfs_gen_file_info_val {
+	uint16_t	hashed_len;
+	uint8_t	hash_size;
+	const unsigned char *hash;
+} apfs_gen_file_info_val_t;
+
+bool	apfs_gen_file_info_val_build(unsigned char *, size_t,
+    const apfs_gen_file_info_val_t *);
+
+#define GEN_JKEY_OID_MASK UINT64_C(0x0fffffffffffffff)
+
+typedef struct apfs_gen_xfield {
+	const unsigned char *data;
+	uint16_t	size;
+	uint8_t		type;
+	uint8_t		flags;
+} apfs_gen_xfield_t;
+
+typedef struct apfs_gen_drec_key {
+	const char	*name;
+	uint64_t	parent;
+	uint32_t	hash;
+	uint16_t	name_len;
+	bool		hashed;
+} apfs_gen_drec_key_t;
+
+typedef struct apfs_gen_name_key {
+	const char	*name;
+	uint64_t	oid;
+	uint16_t	name_len;
+} apfs_gen_name_key_t;
+
+typedef struct apfs_gen_sibling_val {
+	const char	*name;
+	uint64_t	parent;
+	uint16_t	name_len;
+} apfs_gen_sibling_val_t;
+
+typedef struct apfs_gen_xattr_val {
+	const unsigned char *data;
+	apfs_gen_dstream_t dstream;
+	uint64_t	stream_oid;
+	uint16_t	flags;
+	uint16_t	data_len;
+} apfs_gen_xattr_val_t;
+
+bool	apfs_gen_jkey_build(unsigned char *, size_t, uint64_t, uint8_t);
+bool	apfs_gen_xfields_build(unsigned char *, size_t,
+    const apfs_gen_xfield_t *, uint16_t);
+bool	apfs_gen_drec_key_build(unsigned char *, size_t,
+    const apfs_gen_drec_key_t *);
+bool	apfs_gen_xattr_key_build(unsigned char *, size_t,
+    const apfs_gen_name_key_t *);
+bool	apfs_gen_snap_name_key_build(unsigned char *, size_t,
+    const apfs_gen_name_key_t *);
+bool	apfs_gen_xattr_val_build(unsigned char *, size_t,
+    const apfs_gen_xattr_val_t *);
+bool	apfs_gen_sibling_key_build(unsigned char *, size_t, uint64_t,
+    uint64_t);
+bool	apfs_gen_sibling_val_build(unsigned char *, size_t,
+    const apfs_gen_sibling_val_t *);
+bool	apfs_gen_sibling_map_val_build(unsigned char *, size_t, uint64_t);
+bool	apfs_gen_dstream_id_val_build(unsigned char *, size_t, uint32_t);
+bool	apfs_gen_snap_name_val_build(unsigned char *, size_t, uint64_t);
+bool	apfs_gen_extent_key_build(unsigned char *, size_t, uint64_t, uint64_t);
+bool	apfs_gen_file_info_key_build(unsigned char *, size_t, uint64_t,
+    uint64_t, uint8_t);
+
 #endif /* !FSIMG_TEST_APFS_GEN_H */

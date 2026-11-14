@@ -40,7 +40,7 @@ record's `read_settings`, as write settings do through `write_settings`.
 | `volume.c` | The volume array, volume selection, superblock validation, snapshot selection and the read XID |
 | `unicode.c` | Name rules; canonical decomposition with canonical reordering, and case folding, over the generated tables; whether a name holds a code point unassigned in the pinned version or a noncharacter; the comparison form under the volume's rule, the name hash, namespace keys |
 | `unicode-tables.h` | The generated decomposition, combining-class and case-folding tables, and their input digests |
-| `inode.c` | Inode and extended-field decoding, the attribute scan with the extra-data mark, record-to-entry mapping, data-stream lookups |
+| `inode.c` | Inode and extended-field interpretation, the attribute scan with the extra-data mark, record-to-entry mapping, data-stream lookups |
 | `directory.c` | `prepare`, `replay`, `keys` and `key`; the parent rule for directories |
 | `content.c` | `resolve`: file extents, holes and the dispatch to `compress.c` |
 | `compress.c` | The compression types and their rules, inline payloads, the reads of a resource fork through its file extents, the decode window, and calls to the shared framing validator, zlib and the imported decoders |
@@ -198,10 +198,35 @@ and the offsets of the space manager's arrays are proved by the pager in
 | `apfs_reaper_t` | the reap IDs, list head, tail and object count, flags, and the fields of an object being reaped |
 | `apfs_reap_list_t` | next OID, entry count, first and last entry indexes |
 | `apfs_vol_t` | index, the three feature masks, flags, role, UUID, name, tree types and OIDs, counts, group UUID, integrity and sealed-tree OIDs |
-| `apfs_inode_t` | inode number, parent, private ID, four times, internal and BSD flags, count, owner, group, mode, uncompressed size, decoded extended fields |
-| `apfs_drec_t` | parent, name span, stored hash and length, child, add time, type, sibling ID |
-| `apfs_xattr_t` | owner, name span, flags, and the inline data span or the stream reference |
-| `apfs_extent_t` | private ID, logical offset, length, physical block, flags, crypto ID |
+| `apfs_jkey_t` | a filesystem-tree key's header: owner OID (60 bits) and record kind (4 bits) |
+| `apfs_xfields_t`, `apfs_xfield_t` | an extended-field blob's span, field count and used data; one field's type, flags, size and data span |
+| `apfs_dstream_t`, `apfs_dir_stats_t` | a data stream's size, allocated bytes, default crypto ID and byte counters; directory statistics' child count, total size, chained key and generation |
+| `apfs_inode_val_t` | parent, private ID, four signed times, internal and BSD flags, count, protection class, write generation, owner, group, mode, uncompressed size, extended fields |
+| `apfs_drec_key_t`, `apfs_drec_val_t` | parent, name span, stored hash (hashed keys); child, add time, flags with the type, extended fields (the sibling ID among them) |
+| `apfs_name_key_t`, `apfs_xattr_val_t` | an attribute's or snapshot name's owner and name span; an attribute's flags, stored data length, and the inline data span or the stream OID and data stream |
+| `apfs_sibling_key_t`, `apfs_sibling_val_t` | inode and sibling ID; parent and name span. A sibling map's value is an inode number, a data-stream ID's a reference count |
+| `apfs_extent_key_t`, `apfs_extent_val_t` | private ID and logical offset; length (56 bits), flags (8 bits), physical block, crypto ID |
+| `apfs_pext_val_t` | a physical extent's length in blocks (60 bits), kind (4 bits), owner, signed reference count; its key is a bare header naming the first block |
+| `apfs_snap_meta_val_t` | a snapshot's extent-reference tree OID and type, superblock OID, signed creation and change times, inode number, flags, name span. A snapshot name's value is its XID |
+| `apfs_file_info_key_t`, `apfs_file_info_val_t` | private ID, block address (56 bits), info type (8 bits); hashed length, hash size, hash span |
+
+Filesystem-tree keys and values are decoded separately, as the tree stores
+them, so a search key is built without a value; `inode.c`, `directory.c` and
+`content.c` join a record's key and value into the entry they serve. A
+borrowed name or data span points into the decoded bytes. A key's header
+selects its record's decoders; a key that is the header alone is decoded by
+one function that requires exactly that length and the expected kind, so no
+caller has to remember the length. A crypto-state record is identified by
+its kind and never decoded. The split of checks:
+
+| Owner | Checks |
+| --- | --- |
+| `codec.c` | fixed parts; each key's kind; a stored name ending the record exactly with its NUL; an attribute's single layout flag (inline or stream) and the data length it implies; a file-information hash ending the value; an extended-field blob whose headers and data fill it exactly, each field's data zero-padded to 8 bytes, the used count equal to the padded data (E2, E3) and no type repeated |
+| `inode.c` | inode kinds, mode and type agreement, internal flags, extended-field types and their sizes, the name field, the device number |
+| `directory.c` | name validity and length limits, the stored hash, the sibling ID's rules |
+| `content.c` | attribute flags beyond the layout flag, the inline bound, extent flags, crypto IDs, extent tiling |
+| `verify.c` | physical-extent kinds, owners and reference counts |
+| `volume.c` | snapshot metadata and names |
 
 Encoding is the exact inverse and writes every reserved byte as zero, so an
 emitted object contains no unspecified byte; the space manager's data-zone
