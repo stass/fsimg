@@ -411,8 +411,8 @@ typedef struct apfs_sm_fq {
  * not decoded: nothing reads it, and the encoder writes it as zero, its
  * value in every native capture. The array offsets (addr_offset and the
  * pool ring's three) are returned as stored: the arrays may lie past the
- * first block, so the pager in spaceman.c proves each array's span inside
- * the object before it reads one.
+ * first block, so apfs_spaceman_check() proves each array's span inside
+ * the object before the pager reads one.
  */
 typedef struct apfs_spaceman {
 	apfs_sm_device_t devices[APFS_SM_DEVICES];
@@ -700,6 +700,8 @@ typedef struct apfs_container {
 	uint64_t	 mapping_count;
 	uint64_t	 block_count;
 	uint64_t	 xid;		/* the selected checkpoint's */
+	apfs_spaceman_t	 spaceman;	/* the selected checkpoint's, checked */
+	uint64_t	 spaceman_address; /* its first block */
 	uint32_t	 block_size;
 	bool		 clean;		/* no newer checkpoint was torn */
 } apfs_container_t;
@@ -763,14 +765,13 @@ fsimg_status_t	apfs_reaper_idle(apfs_container_t *, unsigned char *, bool *,
  * The object's size must be ref's blocks, one when zero: a mapping or
  * object-map value stating another size is FSIMG_ECORRUPT before anything
  * is read, so a hostile size cannot make a read stream the container. The
- * space manager is the one object of several blocks; its reference takes
- * its size from its mapping, which only the data run bounds until its
- * reader checks it against the size its geometry implies. It streams its
- * blocks through
- * window, the checksum running over them; window holds its first block on
- * return. The encrypted and
- * nonpersistent flags are FSIMG_EUNSUPPORTED. apfs_block_read() is the one
- * read of a block by number, refusing one outside [1, N).
+ * space manager is the one object of several blocks: apfs_spaceman_read()
+ * passes the size its geometry implies, so a mapping stating another size
+ * fails before its blocks are read. It streams its blocks through window,
+ * the checksum running over them; window holds its first block on return.
+ * The encrypted and nonpersistent flags are FSIMG_EUNSUPPORTED.
+ * apfs_block_read() is the one read of a block by number, refusing one
+ * outside [1, N).
  */
 typedef struct apfs_map apfs_map_t;
 
@@ -789,6 +790,146 @@ fsimg_status_t	apfs_block_read(apfs_container_t *, uint64_t, unsigned char *,
 		    const char *, fsimg_error_t *);
 fsimg_status_t	apfs_object_read(apfs_container_t *, const apfs_ref_t *,
 		    unsigned char *, apfs_obj_t *, fsimg_error_t *);
+
+/*
+ * The space manager (spaceman.c; specs/design-apfs.md, "Ephemeral objects
+ * and the space manager").
+ *
+ * apfs_spaceman_check(sm, block_size, block_count, blocks, error) applies
+ * the rules that tie a decoded space manager to the container's B and N:
+ * the chunk geometry and the main device's counts (an address-block count
+ * that breaks the relation is FSIMG_EUNSUPPORTED at a block size other than
+ * 4096 and 16384, whose threshold no capture settles), an empty tier-2
+ * device, a pool bitmap covering the pool, and arrays that lie past the
+ * fixed structure, naturally aligned, disjoint, and ending no later than
+ * the native packing of the same counts ends. blocks receives the size
+ * those arrays imply, the smallest whole number of blocks holding the
+ * structure and them, which the geometry therefore bounds. An array past
+ * that packing is FSIMG_EUNSUPPORTED, a provisional rule; everything else
+ * is FSIMG_ECORRUPT.
+ *
+ * apfs_spaceman_read(container, window, error) is the one read of the
+ * selected checkpoint's space manager, which the checkpoint load makes: a
+ * Fusion container is FSIMG_EUNSUPPORTED; the fixed structure is decoded
+ * from the first block, unverified, and checked, which gives the size its
+ * arrays imply within the geometry's bound; the object is read through
+ * apfs_object_read() at that size, so the mapped size must equal it before
+ * any further block is read; and the verified copy is checked again and
+ * kept in container->spaceman,
+ * its first block in container->spaceman_address. window holds that block
+ * on return.
+ *
+ * apfs_fixed_regions(nx, sm, regions, error) lists the fixed regions of a
+ * container, the block ranges its superblock and space manager state by
+ * position and size: block 0, the checkpoint descriptor and data areas, the
+ * pool's bitmap ring and the internal pool. It is a pure function of those
+ * fields, the one list both sides use: verification passes the decoded
+ * selected superblock and space manager and claims each region; the writer
+ * passes the fields it is about to encode and lays out the blocks outside
+ * them. regions receives them in ascending block order; a region that is
+ * empty, leaves [0, N) or overlaps another is FSIMG_ECORRUPT, named by role,
+ * which the writer, whose fields are its own, treats as an internal error.
+ *
+ * apfs_native_geometry(block_count, nx, sm) zeroes nx and sm and fills the
+ * fields the native formatter derives from N alone for 4096-byte blocks
+ * (specs/design-apfs.md, "Writer values"): B and N, the maximum volume
+ * count, the checkpoint areas, the ephemeral-information word, and the
+ * space manager's chunk geometry, main-device counts, internal pool, bitmap
+ * ring's size, packed array offsets and free-queue node limits; the ring's
+ * slots, counts, XIDs and identifiers are the writer's. It returns false for
+ * an N of zero or above APFS_WRITER_BLOCKS_MAX. Its space manager passes
+ * apfs_spaceman_check(), and its fields give apfs_fixed_regions() the
+ * native layout. Below about 83 blocks that layout does not fit in N, which
+ * apfs_fixed_regions() reports; the writer's minimum container size, which
+ * planning applies, lies far above.
+ */
+#define APFS_WRITER_BLOCK_SIZE		4096u
+#define APFS_WRITER_BLOCKS_MAX		34359738368ull
+
+typedef enum apfs_region_kind {
+	APFS_REGION_BLOCK0,
+	APFS_REGION_DESCRIPTORS,
+	APFS_REGION_DATA,
+	APFS_REGION_POOL_RING,
+	APFS_REGION_POOL,
+	APFS_FIXED_REGIONS
+} apfs_region_kind_t;
+
+typedef struct apfs_region {
+	uint64_t		first;
+	uint64_t		count;
+	apfs_region_kind_t	kind;
+} apfs_region_t;
+
+fsimg_status_t	apfs_spaceman_check(const apfs_spaceman_t *, uint32_t,
+		    uint64_t, uint64_t *, fsimg_error_t *);
+fsimg_status_t	apfs_spaceman_read(apfs_container_t *, unsigned char *,
+		    fsimg_error_t *);
+fsimg_status_t	apfs_fixed_regions(const apfs_nx_t *, const apfs_spaceman_t *,
+		    apfs_region_t[APFS_FIXED_REGIONS], fsimg_error_t *);
+const char	*apfs_region_role(apfs_region_kind_t);
+bool		apfs_native_geometry(uint64_t, apfs_nx_t *, apfs_spaceman_t *);
+
+/*
+ * The space-manager pager (spaceman.c), for verification: one pass over the
+ * container's checked space manager, container->spaceman, the same copy
+ * apfs_fixed_regions() is given. It holds four blocks whatever the
+ * container's size: one block of the space manager's arrays at a time, the
+ * current address block, the current chunk-information block and a bitmap.
+ * It charges one unit of work per chunk and per block it reads. A pass has
+ * no rewind: each pass opens its own pager.
+ *
+ * apfs_sm_pager_open(container, pager, error) allocates the pager.
+ *
+ * apfs_sm_pager_next(pager, chunk, found, error) visits the main device's
+ * chunks in ascending order, reading each address block and
+ * chunk-information block once, through the address array, as the first
+ * chunk it covers is reached. The ith block of either kind must carry index
+ * i and the entry count the geometry gives it, so no block is visited
+ * twice; chunk k must start at block k * 8B, cover the blocks the geometry
+ * gives it, have a free count not above them, an XID not above the
+ * checkpoint's, and a bitmap address inside the container, or zero when the
+ * chunk is entirely free. Past the last chunk found is false, and the
+ * device's free count must equal the sum of the chunks' free counts.
+ *
+ * apfs_sm_pager_bitmap(pager, bits, error) borrows the bitmap block of the
+ * chunk last visited, B bytes, bit i of byte j (least significant first)
+ * standing for block 8j + i of the chunk, or NULL for an entirely free
+ * chunk. Its first call per chunk reads the block and requires the clear
+ * bits among the chunk's blocks to equal its free count; bits past them,
+ * past N in the last chunk, are not judged.
+ *
+ * apfs_sm_pager_pool_bitmap(pager, k, block, bits, error) borrows block k of
+ * the internal pool's current bitmap, k below the bitmap's size in blocks,
+ * through the ring's bitmap-index array: the slot it names must lie inside
+ * the ring and its XID not above the checkpoint's; nothing else of the ring
+ * is judged, so two indexes may name one slot. block receives the block
+ * read.
+ *
+ * A borrowed bitmap is valid until the next call on the pager. After a
+ * failure other than FSIMG_EINVAL, which reports a misuse and changes
+ * nothing, only apfs_sm_pager_free() may be called; it accepts NULL.
+ */
+typedef struct apfs_sm_pager apfs_sm_pager_t;
+
+typedef struct apfs_sm_chunk {
+	apfs_chunk_info_t info;
+	uint64_t	index;		/* chunk number on the device */
+	uint64_t	cib_address;	/* the chunk-information block */
+	uint64_t	cab_address;	/* its address block, zero without */
+	bool		first_of_cib;	/* the first chunk its CIB lists */
+	bool		first_of_cab;	/* the first chunk its CAB covers */
+} apfs_sm_chunk_t;
+
+fsimg_status_t	apfs_sm_pager_open(apfs_container_t *, apfs_sm_pager_t **,
+		    fsimg_error_t *);
+void		apfs_sm_pager_free(apfs_sm_pager_t *);
+fsimg_status_t	apfs_sm_pager_next(apfs_sm_pager_t *, apfs_sm_chunk_t *,
+		    bool *, fsimg_error_t *);
+fsimg_status_t	apfs_sm_pager_bitmap(apfs_sm_pager_t *,
+		    const unsigned char **, fsimg_error_t *);
+fsimg_status_t	apfs_sm_pager_pool_bitmap(apfs_sm_pager_t *, uint32_t,
+		    uint64_t *, const unsigned char **, fsimg_error_t *);
 
 /*
  * B-trees (btree.c): the one place that interprets a node. A tree profile

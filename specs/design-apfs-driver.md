@@ -46,7 +46,7 @@ record's `read_settings`, as write settings do through `write_settings`.
 | `compress.c` | The compression types and their rules, inline payloads, the reads of a resource fork through its file extents, the decode window, and calls to the shared framing validator, zlib and the imported decoders |
 | `read.c` | `fsimg_apfs_reader_ops`: open, close and volume information |
 | `verify.c` | Container-wide verification: claims, reconciliation streams, the bitmap merge and the walk |
-| `spaceman.c` | `apfs_fixed_regions()`, the one list of fixed regions that verification claims and the writer lays out; the space-manager pager over chunk-information blocks and bitmaps, for verification |
+| `spaceman.c` | `apfs_fixed_regions()`, the one list of fixed regions that verification claims and the writer lays out; the space manager's read and geometry check; the geometry the native formatter derives from `N`, which the writer plans; the space-manager pager over address, chunk-information and bitmap blocks, for verification |
 | `write-apfs.h` | Plan rows, tree profiles and the plan object |
 | `write-plan.c` | `validate`, `plan`, `free`: settings, the entry pass, record generation, sizing and layout |
 | `write-btree.c` | The bulk B-tree packer that planning and emission both run, so node boundaries cannot disagree |
@@ -361,9 +361,12 @@ length step 10 reports.
 
 It reads the block with one exact read, verifies the checksum, and checks
 kind, subtype, storage class, OID and XID. One object can span several
-blocks, the space manager. Its mapped size is first checked against the size
+blocks, the space manager. Its reader, `apfs_spaceman_read()`, decodes the
+fixed structure from the first block, unverified, only to learn the size
 the [geometry implies](design-apfs.md#ephemeral-objects-and-the-space-manager)
-for its structure and arrays; its blocks then pass through the same
+for its structure and arrays, and passes that size in the reference, so a
+mapped size that differs fails before the read; its blocks then pass
+through the same
 window one at a time, the checksum running over them, and its fixed
 structure, which lies in the first block, is decoded from there. The arrays
 after it can run into later blocks (E12: from 2520 to 6736 at 128 TiB), so
@@ -608,13 +611,14 @@ walker. A [truncated container](#truncated-containers) reaches neither: the
 reader core fails its verification first.
 
 **Container pass.** It re-reads the selected checkpoint's descriptor and data
-runs, the space manager, the reaper with its reap-list objects (through
+runs, the reaper with its reap-list objects (through
 `apfs_object_read()`, to decide whether it is idle) and the container object
 map, and appends
 claims `(first block, count, class, owner)` to a claim stream: the
 [fixed regions](design-apfs.md#ephemeral-objects-and-the-space-manager),
-one claim each, as `apfs_fixed_regions()` lists them from the decoded
-superblock and space manager; the block of each object map itself, the
+one claim each, as `apfs_fixed_regions()` lists them from the selected
+superblock and the space manager the checkpoint load checked, the copy the
+pager walks; the block of each object map itself, the
 container's and each volume's, and every node of its tree; every live
 object version each object map maps, at its size, tombstones excluded;
 every physical tree node; a nonzero keylocker range, as one range each;
@@ -678,8 +682,11 @@ charges one unit of work per entry, so a damaged later entry fails `W`
 without payload read-through.
 
 **Allocation merge.** The claim stream is sorted by first block. The merge
-walks it with `spaceman.c`'s pager, which visits chunk-information blocks in
-address order and each chunk's bitmap block in 4 KiB windows. For each block
+walks it with `spaceman.c`'s pager, which visits the chunks in ascending
+order, each address and chunk-information block once as its first chunk is
+reached, and reads each chunk's bitmap block, one block at a time. The
+container pass walks a pager of its own, reading no bitmap, for the claims
+of those blocks. For each block
 it checks the format design's rules: metadata claims never overlap any other
 claim; data claims overlap only data claims of other trees of the same
 volume; a block is allocated exactly when claimed; each chunk's free count
@@ -1034,7 +1041,7 @@ from a row, the geometry, the sorted records or one of those values.
 | Probe and open | Block 0, one pass over the descriptor ring, one reread of the selected run, the selected checkpoint's mapped objects (one data run), the container and volume map paths, the volume superblocks, the root inodes; the slot-record array and the paged mapping array |
 | Listing | Per directory: one scan of its records and the common key sort; per entry: one inode lookup and one scan of that inode's attribute records, which follow it. No file payload is read |
 | Content | Per sequential read: one cursor advance per extent; per random offset: one tree descent; per compressed chunk: one decode of at most 64 KiB, and for an inline payload one attribute lookup; per resource-fork file: one framing check at the first read, and one table entry with its neighbours per decoded chunk |
-| Verification | One scan of every tree of every volume; the main and pool claim, file-extent, name-reference, sibling-map, stream-use and collision streams, each sorted once, and the `(record, stream)` pairs; one pass over the chunk structures, bitmaps and pool bitmap; one walk of the selected volume, reading each inode's content once; the array of multiply linked inodes |
+| Verification | One scan of every tree of every volume; the main and pool claim, file-extent, name-reference, sibling-map, stream-use and collision streams, each sorted once, and the `(record, stream)` pairs; two passes over the chunk structures (claims, then the merge) and one over the bitmaps and pool bitmap; one walk of the selected volume, reading each inode's content once; the array of multiply linked inodes |
 | Planning | One catalog pass, two external sorts (collisions and records), one counting run of the packer per tree, a size scan of at most the probe cap's probes, each costing at most one row search per fixed region, one layout pass |
 | Emission | Payload bytes, one replay of the sorted records, and metadata proportional to entries and container size |
 

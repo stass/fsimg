@@ -621,19 +621,35 @@ blocks have no address block and 508 have two, at 16384 bytes 2043 none and
 2044 two). At other block sizes the threshold is provisional, closed by the
 same bisection with `newfs_apfs -b`; until then a container of such a block
 size whose address-block count breaks the relation is
-`FSIMG_EUNSUPPORTED` rather than corrupt; the arrays
-lie inside the object, whose mapped size must be the smallest whole
-number of blocks holding the structure and its arrays (two blocks in E12
-from 3 to 7.8 TiB and from 50 TiB). The internal-pool and
-tier-2 fields are consistent with the same rules. Any other value is
-corrupt.
+`FSIMG_EUNSUPPORTED` rather than corrupt. The arrays
+lie inside the object, each at or past the structure's 2520 bytes, aligned
+to its entry size, disjoint from the others and ending no later than the
+packed order above ends for the same counts, and the object's mapped
+size must be the smallest whole number of blocks holding the structure and
+its arrays (two blocks in E12 from 3 to 7.8 TiB and from 50 TiB); the
+reader checks it before reading the object's blocks. Ending within the
+packing is provisional: every E1 and E12 dump is a fresh container, and
+whether a resized or aged one moves an array past it is closed by E18,
+which grows and shrinks a native container and dumps its space manager
+after each step, and by E16's used volume. Until then, and if neither
+answers, a space manager with an array past the packing
+is `FSIMG_EUNSUPPORTED`, so no block past its first is read either way.
+The pool's bitmap
+size in blocks is `ceil(P / (8 * B))` for a pool of `P` blocks, its ring
+holds at least that many slots and fewer than `0xffff`, and the tier-2
+device's counts are zero outside Fusion. Any other value is corrupt.
 
 A chunk-information block (kind 7) holds an index, a count and 32-byte
 records: last-modifying XID, first block, block count, free count and bitmap
 block. A chunk-information address block (kind 6) holds an index, a count and
 block numbers of chunk-information blocks. The main device's address array
 names chunk-information blocks when its address-block count is zero and
-address blocks otherwise. Each bitmap block covers one chunk, bit `i` of
+address blocks otherwise. The `i`th chunk-information block of the device
+carries index `i` and holds `min(K, chunks - i * K)` records, `K` being the
+chunks per block, and the `i`th address block likewise; since a block's
+index is its position, no block is listed twice. Chunk `k` starts at block
+`8 * B * k`, covers `min(8 * B, N - 8 * B * k)` blocks, and has a free
+count not above them and an XID not above the checkpoint's. Each bitmap block covers one chunk, bit `i` of
 byte `j` (least significant first) standing for block `8j + i` of the chunk.
 The internal pool is a block range reserved as a whole in the main bitmaps,
 from which the space manager allocates its own blocks, tracked by the pool's

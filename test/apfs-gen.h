@@ -349,6 +349,8 @@ typedef struct apfs_gen_container {
 	size_t	count;
 	size_t	block0_run;
 	uint64_t	block0_xid;
+	/* Zero selects the native ring size; arrays always remain packed. */
+	uint32_t	spaceman_ring_blocks;
 } apfs_gen_container_t;
 
 typedef struct apfs_gen_reap_entry {
@@ -393,6 +395,9 @@ typedef struct apfs_gen_tree {
 /* The tree occupies consecutive blocks, leaves first and root last. */
 bool	apfs_gen_tree_build(unsigned char *, size_t, const apfs_gen_tree_t *,
     uint64_t *, uint64_t *);
+/* Independent geometry; returns the packed object's byte size, or zero. */
+size_t	apfs_gen_spaceman_geometry(uint32_t, uint64_t,
+    apfs_gen_spaceman_t *);
 bool	apfs_gen_container_build(unsigned char *, size_t,
     const apfs_gen_container_t *);
 bool	apfs_gen_reap_list_build(unsigned char *, size_t,

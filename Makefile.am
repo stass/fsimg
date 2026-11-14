@@ -92,6 +92,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/apfs/apfs.h lib/formats/apfs/codec.c \
 	lib/formats/apfs/object.c lib/formats/apfs/checkpoint.c \
 	lib/formats/apfs/btree.c lib/formats/apfs/omap.c \
+	lib/formats/apfs/spaceman.c \
 	lib/formats/apfs/unicode.c lib/formats/apfs/unicode-tables.h \
 	lib/formats/apfs/write-apfs.h lib/formats/apfs/write-btree.c \
 	lib/formats/apfs/descriptor.c lib/formats/apfs/volume.c \
@@ -200,7 +201,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-erofs test-erofs-verify test-erofs-faults test-erofs-fixtures \
 	test-erofs-write \
 	test-lzfse test-decmpfs test-hfsplus-codec test-hfsplus \
-	test-apfs-codec test-apfs test-apfs-write-btree \
+	test-apfs-codec test-apfs test-apfs-write-btree test-apfs-spaceman \
 	test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-apfs-unicode \
@@ -349,6 +350,9 @@ test_apfs_SOURCES = test/apfs.c test/apfs-gen.c test/apfs-gen.h test/test.h
 test_apfs_LDADD = libfsimg.la
 test_apfs_write_btree_SOURCES = test/apfs-write-btree.c test/test.h
 test_apfs_write_btree_LDADD = libfsimg.la
+test_apfs_spaceman_SOURCES = test/apfs-spaceman.c test/apfs-gen.c \
+	test/apfs-gen.h test/test.h
+test_apfs_spaceman_LDADD = libfsimg.la
 test_hfsplus_SOURCES = test/hfsplus.c test/hfsplus-gen.c test/hfsplus-gen.h \
 	test/lzfse-vectors.h test/test.h
 test_hfsplus_LDADD = libfsimg.la $(ZLIB_LIBS)

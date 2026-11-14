@@ -599,6 +599,41 @@ apfs_gen_reap_list_build(unsigned char *raw, size_t length,
 	return (apfs_gen_seal(raw, length));
 }
 
+/* Geometry from the format relations, without using the APFS driver. */
+size_t
+apfs_gen_spaceman_geometry(uint32_t b, uint64_t n, apfs_gen_spaceman_t *sm)
+{
+	uint64_t chunks, cibs, cabs, pool, bitmap, end;
+
+	if (b < 4096 || b > 65536 || (b & (b - 1)) != 0 || n == 0)
+		return (0);
+	chunks = n / (8 * b) + (n % (8 * b) != 0);
+	cibs = (chunks + (b - 40) / 32 - 1) / ((b - 40) / 32);
+	cabs = cibs <= (b - 40) / 8 ? 0 :
+	    (cibs + (b - 40) / 8 - 1) / ((b - 40) / 8);
+	pool = 3 * (chunks + cibs + cabs);
+	bitmap = (pool + 8 * b - 1) / (8 * b);
+	if (cibs > UINT32_MAX || cabs > UINT32_MAX || bitmap * 16 >= 65535)
+		return (0);
+	*sm = (apfs_gen_spaceman_t){ .block_size = b,
+	    .blocks_per_chunk = 8 * b, .chunks_per_cib = (b - 40) / 32,
+	    .cibs_per_cab = (b - 40) / 8, .struct_size = 2520,
+	    .ip_block_count = pool, .ip_bm_size_in_blocks = (uint32_t)bitmap,
+	    .ip_bm_block_count = (uint32_t)(16 * bitmap),
+	    .ip_bm_tx_multiplier = 16, .ip_bm_xid_offset = 2520 };
+	sm->devices[0] = (apfs_gen_device_t){ .block_count = n,
+	    .chunk_count = chunks, .cib_count = (uint32_t)cibs,
+	    .cab_count = (uint32_t)cabs };
+	sm->ip_bitmap_offset = (uint32_t)(2520 + 8 * bitmap);
+	end = sm->ip_bitmap_offset + 2 * bitmap;
+	sm->ip_bm_free_next_offset = (uint32_t)((end + 7) / 8 * 8);
+	sm->devices[0].addr_offset = sm->ip_bm_free_next_offset +
+	    2 * sm->ip_bm_block_count;
+	end = sm->devices[0].addr_offset + 8 * (cabs != 0 ? cabs : cibs);
+	sm->devices[1].addr_offset = (uint32_t)end;
+	return ((size_t)((end + b - 1) / b * b));
+}
+
 /* Emit into a private image; the public builder publishes only on success. */
 static bool
 container_emit(unsigned char *raw, size_t length,
@@ -686,10 +721,21 @@ container_emit(unsigned char *raw, size_t length,
 			    .xid = run->xid, .type = mapping->type,
 			    .subtype = mapping->subtype };
 			if ((mapping->type & 0xffff) == 5) {
-				spaceman = (apfs_gen_spaceman_t){ .object = object,
-				    .block_size = (uint32_t)b,
-				    .blocks_per_chunk = (uint32_t)b * 8,
-				    .struct_size = 2520 };
+				if (apfs_gen_spaceman_geometry((uint32_t)b,
+				    nx.block_count, &spaceman) == 0)
+					return (false);
+				spaceman.object = object;
+				if (p->spaceman_ring_blocks != 0) {
+					spaceman.ip_bm_block_count = p->spaceman_ring_blocks;
+					spaceman.devices[0].addr_offset =
+					    spaceman.ip_bm_free_next_offset +
+					    2 * spaceman.ip_bm_block_count;
+					spaceman.devices[1].addr_offset =
+					    spaceman.devices[0].addr_offset + 8 *
+					    (spaceman.devices[0].cab_count != 0 ?
+					    spaceman.devices[0].cab_count :
+					    spaceman.devices[0].cib_count);
+				}
 				if (!apfs_gen_spaceman_build(raw + mapping->address * b,
 				    mapping->size, &spaceman))
 					return (false);

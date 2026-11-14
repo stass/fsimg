@@ -673,9 +673,10 @@ apfs_ephemeral_find(apfs_container_t *container, uint64_t oid, bool *found,
 }
 
 /*
- * Read every mapped object once; apfs_object_read() checks it. Only the
- * space manager spans several blocks; the size its geometry implies is
- * checked by its own reader, and the data run bounds it here.
+ * Read every mapped object once; apfs_object_read() checks it. The space
+ * manager, the one object of several blocks, goes through its own reader,
+ * which checks it against the container and reads it at the size its
+ * geometry implies; every other mapped object is one block.
  */
 static fsimg_status_t
 mapped_objects_read(apfs_container_t *container, unsigned char *window,
@@ -692,10 +693,14 @@ mapped_objects_read(apfs_container_t *container, unsigned char *window,
 		if (status != FSIMG_OK)
 			return (status);
 		mapping_decode(raw, &mapping);
+		if (mapping.oid == container->nx.spaceman_oid) {
+			status = apfs_spaceman_read(container, window, error);
+			if (status != FSIMG_OK)
+				return (status);
+			continue;
+		}
 		ref = (apfs_ref_t){ .role = "checkpoint object",
 		    .oid = mapping.oid, .xid = container->xid,
-		    .blocks = mapping.kind == APFS_KIND_SPACEMAN ?
-		    mapping.size / container->block_size : 1,
 		    .storage = APFS_OBJ_EPHEMERAL, .subtype = mapping.subtype,
 		    .kind = mapping.kind };
 		status = apfs_object_read(container, &ref, window, NULL, error);

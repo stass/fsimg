@@ -351,15 +351,16 @@ build_openable(fixture_t *f, unsigned occupied_slots)
 	apfs_gen_fs_t fs;
 	apfs_gen_omap_t map;
 	apfs_gen_node_t node;
-	apfs_gen_spaceman_t spaceman = {
-		.object = { .oid = 100, .xid = 20, .type = 0x80000005 },
-		.block_size = f->block_size,
-		    .devices = { { .free_count = 700 } }
-	};
+	apfs_gen_spaceman_t spaceman;
 	uint64_t root, blocks;
 	size_t count = 0;
 
 	build_checkpoints(f, 2, 10);
+	CHECK(apfs_gen_spaceman_geometry(f->block_size, BLOCKS,
+	    &spaceman) == f->block_size);
+	spaceman.object = (apfs_gen_object_t){ .oid = 100, .xid = 20,
+	    .type = 0x80000005 };
+	spaceman.devices[0].free_count = 700;
 	for (unsigned b = 0; b <= NEWEST_NX; b += 2) {
 		fsimg_store_le64(block_at(f, b) + 64, 2);
 		fsimg_store_le32(block_at(f, b) + 180, VOLUME_MAX);
@@ -1435,7 +1436,9 @@ test_wrapping_runs_large_tables_and_multiblock_objects(void)
 		    .data_base = DATA_SPACEMAN, .data_blocks = 300,
 		    .max_volumes = 100, .spaceman_oid = 100, .reaper_oid = 102,
 		    .omap_oid = MAP_BLOCK },
-		    .runs = &run, .count = 1, .block0_xid = 10 };
+		    .runs = &run, .count = 1, .block0_xid = 10,
+		    .spaceman_ring_blocks =
+		    cases[c].object_blocks == 2 ? 1000 : 0 };
 		run = (apfs_gen_run_t){ .xid = 10, .next_xid = 11,
 		    .mappings = mappings, .mapping_count = cases[c].count,
 		    .mapping_blocks = cases[c].map_blocks,

@@ -72,12 +72,8 @@
   seeks stepping back over equal keys; the cursor's ordering and separator
   checks are strict. Whether an object-map value flag `0x10` (crypto
   generation) is accepted like the map flag or refused as corrupt, as the
-  format design's value rule says, waits on E1's volume records.
-  The checkpoint load streams the space manager at the size its mapping
-  states, bounded only by the data run; the size its geometry implies is
-  to be checked before that read once `spaceman.c` computes it. The
-  volume object map's snapshot fields are not yet compared with the
-  volume's snapshot tree, which the snapshot stage reads. Until directory
+  format design's value rule says, waits on E1's volume records. The volume object map's snapshot fields
+  are not yet compared with the volume's snapshot tree, which the snapshot stage reads. Until directory
   reading lands, `x --salvage` on an APFS volume reports its root as a lost
   directory, since the reader's refusal of `prepare` is judged as damage.
 
