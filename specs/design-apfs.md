@@ -403,8 +403,8 @@ data area are the selected superblock's. A never-written slot is all zero
 (E1: slots 4 to `D - 1` of every capture with a volume, slots 2 to 7 of
 apfs-newfs-372736-plain); its checksum fails, so it is unused, neither a
 candidate nor a mapping block, and never a fault in itself. Two candidates with the same XID are an
-ambiguous tie, `FSIMG_ECORRUPT`: each checkpoint writes its superblock once
-(provisional, E8). A candidate's **descriptor run is whole** when:
+ambiguous tie, `FSIMG_ECORRUPT`: each checkpoint writes its superblock once,
+and E8 finds no XID twice in any of its nine ring captures. A candidate's **descriptor run is whole** when:
 
 1. the run has at least two blocks, lies in the ring, and ends at the
    candidate's own slot;
@@ -422,10 +422,17 @@ without reading a block again. A slot that matches a candidate's XID matches
 no other candidate's, because XIDs are distinct, so judging every run costs
 at most `D` record reads plus one per candidate. The selected checkpoint is
 the candidate with the largest XID whose descriptor run is whole; if no
-candidate's run is whole, the image is `FSIMG_ECORRUPT`. A candidate with a larger XID whose run is not whole is a
-checkpoint a crash interrupted: the reader passes over it, as macOS mounts
-the newest superblock that is not malformed, and reports the volume's
-`clean` state as false.
+candidate's run is whole, the image is `FSIMG_ECORRUPT`. A candidate with
+a larger XID whose run is not whole is a checkpoint a crash interrupted:
+the reader passes over it and reports the volume's `clean` state as false.
+`fsck_apfs` does the same in E8, passing over a valid newest superblock
+whose mapping block is zeroed. A newest superblock that is itself invalid
+is no candidate, so the next older checkpoint is selected without
+affecting `clean`; in E8 `fsck_apfs` checks it, and the kernel mounts it.
+Older checkpoints remain readable because the native driver reuses neither
+their slots nor their freed blocks at once: in E8 the 1 GiB container's
+ring keeps its last 8 checkpoints, and the free queues hold freed blocks
+for more transactions than that.
 
 The selected checkpoint's mappings are then checked together: every mapped
 block run lies inside the checkpoint's data run without straddling the data
@@ -435,16 +442,30 @@ read once and must have a valid header whose OID, kind and subtype equal the
 mapping's and whose XID is not above the checkpoint's, and the container
 object map must be a valid physical object. A failure in this phase is
 `FSIMG_ECORRUPT`: the reader does not fall back to an older checkpoint after
-judging a newer one complete (provisional: E8 shows whether macOS does).
-Selection therefore reads the `D` descriptor blocks once, the selected run's
-mapping blocks a second time, and one checkpoint's data run.
+judging a newer one's descriptor run whole. This is fsimg policy, stricter
+than macOS: in E8 `fsck_apfs` and the kernel pass over a newest checkpoint
+whose descriptor blocks are valid and whose mapped objects are zeroed, and
+mount the older one. A newest superblock and mapping block that are whole
+vouch for that checkpoint, so fsimg reports the damage rather than present
+the older state it superseded. Selection therefore reads the `D`
+descriptor blocks once, the selected run's mapping blocks a second time,
+and one checkpoint's data run.
 
-Block 0 does not select the checkpoint; it constrains the candidates and is
-a copy of a committed superblock. In every E1 capture it equals the newest
-ring superblock except for counter 0 at offset 984, which is 3 larger (4 in
-apfs-newfs-372736-plain), and the checksum. A block-0 XID larger than every whole
-candidate's is `FSIMG_ECORRUPT` (provisional: E8 shows the order in which
-macOS writes block 0 and the descriptor ring).
+Block 0 does not select the checkpoint; it constrains the candidates. It is
+a copy of the superblock the last unmount committed: E8 finds it equal,
+after each unmount, to the newest ring superblock except for the checksum
+and counter 0 at offset 984, which is 3 larger (4 in
+apfs-newfs-372736-plain, as in every E1 capture) and shows block 0
+checksummed after the ring copy, and finds it left at the previous unmount's XID while a volume
+is mounted. A crash after a mount has committed a checkpoint therefore
+leaves block 0 older than the newest checkpoint. A block-0 XID larger than every whole candidate's is
+`FSIMG_ECORRUPT`, as a committed checkpoint lost from the ring. This is
+fsimg policy, and it rests on block 0 reaching the disk after the ring
+superblock at unmount, which E8 infers from the counter but cannot observe;
+if it does not, a crash between the two writes leaves a container that
+fsimg refuses and macOS opens. In E8 `fsck_apfs` checks the older
+checkpoint of a copy whose block 0 is newer without remark, and the kernel
+mounts the copy.
 
 A noncontiguous area (bit 31 set) is `FSIMG_EUNSUPPORTED`: its tree layout
 has no evidence. Every E1 capture uses contiguous areas, up to 384 GiB in
@@ -486,6 +507,14 @@ common read funnel, which fails a request past the slice with
 * **Full verification fails on every truncated container**, in the reader
   core, before the driver's verification runs, and wrap and compose refuse
   to package one.
+
+These rules are fsimg policy. In E8 macOS opens none of three cut copies,
+cut inside the descriptor ring, inside the selected data run and past both
+checkpoint areas: the attached disk publishes no volume and `fsck_apfs`
+fails to open it with `ERANGE`, which suggests, without a test of a short
+tail cut, that macOS refuses any container shorter than its block count.
+fsimg reads a container whose missing tail nothing it touches references,
+and like macOS selects no older checkpoint from a cut image.
 
 ### Ephemeral objects and the space manager
 
@@ -624,9 +653,10 @@ one ghost record in those of 8 GiB and 100 GiB; the main queue holds one
 record of two blocks (E1, apfs-newfs-33554432-plain and
 apfs-newfs-8589934592-plain). A free-queue root leaf with no keys appears in no
 capture. The node limits are the functions of `N` that
-[writer values](#writer-values) gives. The oldest XID of a queue with several XIDs is provisional
-(E8); until then the reader requires only an oldest XID not above the
-checkpoint's and does not interpret the node limit.
+[writer values](#writer-values) gives. In a native queue with entries the oldest XID is the smallest record
+XID, and the node limit keeps the value the formatter wrote (E8). The
+reader requires only an oldest XID not above the checkpoint's and does
+not interpret the node limit.
 
 ### Reaper
 
@@ -703,9 +733,10 @@ must have a size that is a positive multiple of `B`, an address range inside
 no-header is unsupported, since the sealed trees fsimg reads are physical
 and never mapped (provisional, E11). The object read at the address must
 satisfy the header rules with its OID equal to `o` and its XID equal to the
-found key's XID (provisional: E3 and E8, E1 confirming it for the one
-record of every capture with a volume; if a capture shows an object
-older than its key, the rule becomes "not above the key's XID"). A miss for
+found key's XID (provisional: E3, while E1 confirms it for the one
+record of every capture with a volume and E8 for the volume superblock
+across mount cycles; if a capture shows an
+object older than its key, the rule becomes "not above the key's XID"). A miss for
 a reference the format requires is `FSIMG_ECORRUPT`.
 
 Object-map flags follow a closed table:
@@ -1776,7 +1807,7 @@ free space, attribute data or buffer contents.
 
 | Area | Valid cases | Invalid cases |
 | --- | --- | --- |
-| Probe and checkpoints | Raw native containers and ones inside GPT, an Apple Partition Map and UDRW, UDZO and UDBZ DMGs; block sizes 4096 to 65536 in synthetic images; checkpoint rings with wrapped runs, several committed checkpoints and a torn newest one (E8); a container whose block 0 magic is rewritten, with the checksum repaired, opens with an assumed identity | Short prefix, bad checksum, wrong kind or OID, `N * B` overflow, overlapping areas, run not ending at its superblock, missing or misplaced last-map flag, overlapping mapped runs, mapped object XID above the checkpoint, equal-XID disagreement, block 0 newer than every checkpoint; the rewritten magic without an assumed identity is `FSIMG_EFORMAT`; with one, every other mutation of this row still fails, a magic rewritten without repairing the checksum among them, and `W` fails naming the assumed check; a ULFO DMG fails in the layer |
+| Probe and checkpoints | Raw native containers and ones inside GPT, an Apple Partition Map and UDRW, UDZO and UDBZ DMGs; block sizes 4096 to 65536 in synthetic images; checkpoint rings with wrapped runs, several committed checkpoints and a torn newest one with block 0 no newer than the checkpoint selected, as a crash leaves it (E8); a container whose block 0 magic is rewritten, with the checksum repaired, opens with an assumed identity | Short prefix, bad checksum, wrong kind or OID, `N * B` overflow, overlapping areas, run not ending at its superblock, missing or misplaced last-map flag, overlapping mapped runs, mapped object XID above the checkpoint, equal-XID disagreement, block 0 newer than every checkpoint; the rewritten magic without an assumed identity is `FSIMG_EFORMAT`; with one, every other mutation of this row still fails, a magic rewritten without repairing the checksum among them, and `W` fails naming the assumed check; a ULFO DMG fails in the layer |
 | Truncation | A container cut past everything a listing and extraction touch opens, lists, extracts and reports the missing bytes | A cut through the descriptor ring, the selected checkpoint's data run, a tree node or a file's extent fails `FSIMG_ECORRUPT` where it is reached and never selects an older checkpoint; `W`, wrap and compose fail on every cut |
 | Object maps | Lookups below, at and above stored XIDs; tombstones; multi-level maps | Tombstone with an older live entry, unordered keys, duplicate keys, size not a block multiple, address past `N`, object XID different from the key's |
 | B-trees | Root leaves, three or more levels, fixed and variable tables, aligned and unaligned trees, ghost records in free queues | Table overflow, key or value crossing free space or the footer, ghosts without the flag, wrong levels, repeated node on a path, unsorted keys, child key below its separator, height 17 |

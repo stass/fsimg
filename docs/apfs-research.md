@@ -294,6 +294,189 @@ flags take these observations, and its [writer
 values](../specs/design-apfs.md#writer-values) take the formulas and the
 first form.
 
+### E8 Checkpoint history
+
+**Question.** How the native driver fills and reuses the checkpoint areas
+across mounts, what block 0 holds against the descriptor ring, how the free
+queues and the container object map change, and what native tools do with
+a container whose newest checkpoint is damaged or which is cut short. It
+feeds [checkpoint selection](../specs/design-apfs.md#checkpoint-selection),
+[truncated containers](../specs/design-apfs.md#truncated-containers) and
+[free queues](../specs/design-apfs.md#free-queues).
+
+**Captures.** Outside the repository, under `/Volumes/Optaine/fsimg-apfs/`:
+
+| Path | Content |
+| --- | --- |
+| `native/apfs-newfs-1073741824-e8-history/` | The base capture: `capture.rb --kind newfs --size 1073741824 --option e8-history`, one case-insensitive volume `FSIMG`, `fsck_apfs -n` clean |
+| `e8/cNN.img`, `e8/cNN.json`, `e8/ring-NN.txt` | The container after mount cycle `NN` (01 to 07; `c00.json` and `ring-00.txt` describe the base image), its `apfsdump.rb --json` dump, and a per-slot summary of the descriptor ring |
+| `e8/live-05.img`, `e8/live-05.json`, `e8/ring-live-05.txt` | A clone of the backing file taken during cycle 5 while the volume was mounted, after `sync` |
+| `e8/derived/NAME.txt`, `NAME.json`, `NAME.mount.txt` | Each damaged copy's `fsck_apfs -n` and `fsapfsinfo` output, its dump, and its read-only mount; the copies themselves are deleted, and `e8/derive.sh` and `e8/zero-many.sh` remake them from `c07.img` and `live-05.img`. The exit status `NAME.txt` prints for `fsapfsinfo` is that of a pipe to `head` |
+| `e8/derived/exits.txt`, `NAME.quick.out`, `NAME.quick.txt` | The exit statuses of `fsapfsinfo` on every copy and of `apfs-dump-quick` on two, from a rerun on copies remade the same way, and `apfs-dump-quick`'s output and log |
+| `e8/mountpoint.txt` | The refused mount-point attempts of the procedure |
+| `e8/cycle.sh`, `ring.rb`, `derive.sh`, `mountro.sh`, `zero-many.sh` | The scratch scripts that ran the cycles, summarized the ring, and made and checked the copies |
+
+**Procedure.** A working copy of the base image is attached with
+`hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage` and its
+volume mounted with `diskutil mount`; unprivileged, both `hdiutil
+-mountroot` and `diskutil mount -mountPoint` refused a mount point in the
+scratch directory. Cycle `n` writes one file of `64 KiB * (3n + 1)` and a
+directory holding one small file, deletes cycle `n - 2`'s, runs `sync`,
+unmounts, detaches, clones the image with `cp -c` (the scratch volume is
+APFS) and dumps the clone. Cycle 1 also renames the volume `E8HIST`. Cycle
+5 then writes 20 small files with a `sync` after each, and cycles 6 and 7
+write 100 each, to drive the data area round. The descriptor area has
+`D = 16` blocks from block 1 and the data area 992 blocks from block 17.
+
+| Cycle | Ring XIDs (superblocks) | Block 0 XID | Selected slot | Descriptor run | Data run | Main queue count / oldest XID | Internal-pool queue count / oldest XID | Container object map block (XID) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| base | 1-2 (2) | 2 | 3 | 2+2 | 2+4 | 2 / 2 | 2 / 2 | 1060 (2) |
+| 1 | 1-7 (7) | 7 | 13 | 12+2 | 22+4 | 32 / 2 | 12 / 2 | 1158 (7) |
+| 2 | 4-11 (8) | 11 | 5 | 4+2 | 38+4 | 55 / 2 | 20 / 2 | 1296 (11) |
+| 3 | 8-15 (8) | 15 | 13 | 12+2 | 54+4 | 145 / 2 | 24 / 4 | 1486 (15) |
+| 4 | 12-19 (8) | 19 | 5 | 4+2 | 70+4 | 286 / 2 | 24 / 8 | 1725 (19) |
+| 5 | 36-43 (8) | 43 | 5 | 4+2 | 166+4 | 602 / 11 | 24 / 32 | 1284 (43) |
+| 6 | 140-147 (8) | 147 | 5 | 4+2 | 582+4 | 320 / 115 | 24 / 136 | 1321 (147) |
+| 7 | 244-251 (8) | 251 | 5 | 4+2 | 6+4 | 321 / 219 | 24 / 240 | 1295 (251) |
+| live, in cycle 5 | 33-40 (8) | 19 | 15 | 14+2 | 154+4 | 603 / 8 | 24 / 29 | 2162 (40) |
+
+Runs are written `index+length` within their area, and the selected slot is
+the slot of the newest valid superblock in the ring.
+
+**Descriptor ring.**
+
+* Every checkpoint is two descriptor blocks, a mapping block with the
+  last-map flag followed by its superblock, so the 16-slot ring holds 8
+  checkpoints once full. A cycle commits 4 checkpoints (5 in cycle 1, 24 in
+  cycle 5 and 104 in each of cycles 6 and 7), and the 251 checkpoints go
+  round the descriptor ring about 31 times. The ring first wraps in cycle 2
+  (`ring-02.txt`: XID 9 in slots 0 and 1 beside XIDs 4 to 8 in slots 6 to
+  15).
+* Slots are reused in order and nothing is cleared: until a slot is
+  overwritten it keeps an older checkpoint whose blocks are valid. Before
+  the first wrap the unused slots are all zero (`ring-00.txt`,
+  `ring-01.txt`).
+* No XID appears in two superblocks of a ring in any capture. Every
+  superblock's next indices are its own runs' index plus length modulo the
+  area, and its next XID is one above its XID.
+* Runs start at even slots of an even ring, so no descriptor run straddles
+  the ring's end; that case is not observed.
+
+**Data area and ephemeral objects.**
+
+* The selected checkpoint of every capture maps four
+  ephemeral objects, in the order space manager (OID 1024), reaper (1025),
+  internal-pool free-queue tree (1027) and main free-queue tree (1029), one
+  block each, in consecutive data blocks and with the checkpoint's own XID;
+  the formatter's first checkpoint (XID 1), still in the ring of the base
+  capture and cycle 1, maps only the first two. Every
+  checkpoint relocates all four, so the data run advances by 4 per
+  checkpoint.
+* The data run wraps: XID 249's run is `990+4` and its mapping places the
+  space manager at data block 990, the reaper at 991 and the two queue trees
+  at 0 and 1 (`ring-07.txt`, slot 0). The run straddles the area's end; no
+  single object does.
+* Older checkpoints stay whole. In `derived/g-oldest-only` the superblocks
+  of the seven newest checkpoints are zeroed, and `fsck_apfs -n` checks the
+  oldest one in the ring, XID 244, and reports the container OK.
+
+**Block 0.**
+
+* After every unmount block 0 is the newest ring superblock except for its
+  checksum and the low byte of `counters[0]` at offset 984
+  (`NX_CNTR_OBJ_CKSUM_SET`), which is 3 larger in block 0 in all eight
+  captures, the formatter's included (`ring-NN.txt`, `cNN.json`). Block 0
+  is therefore checksummed after the ring copy; that it also reaches the
+  disk after it is an inference from that counter, not an observation.
+* During a mount block 0 is not rewritten: the live clone holds block 0 at
+  XID 19, the previous unmount's, while the ring holds XIDs 33 to 40
+  (`ring-live-05.txt`). A container whose mount a crash interrupts after the
+  mount has committed a checkpoint therefore has a block 0 older than its
+  newest checkpoint, and no capture shows a block 0 newer than every
+  checkpoint in the ring.
+
+**Free queues and the object map.**
+
+* In both queues with entries, in every capture, the count equals the sum
+  of the records' runs and the oldest XID equals the smallest record XID.
+  The node limits keep the formatter's values, 116 for the main queue and 1
+  for the internal pool's, while the main queue's single leaf holds up to
+  159 records (`c07.json`). The tier-2 entry stays all zero. The base
+  capture's queues already hold entries, 2 blocks each at XID 2, and its
+  block 0 differs from the ring superblock as above. Both differ from the
+  [writer values](../specs/design-apfs.md#writer-values) for block 0 and
+  the free queues, which E1 owns; whether checkpoint XID 2 is
+  `newfs_apfs`'s own or written by the capture's later `hdiutil attach
+  -nomount` is not established here.
+* Freed blocks are held for a window of transactions: from cycle 5 on, and
+  in the live clone, the main queue's oldest XID is the checkpoint's XID
+  less 32, and from cycle 3 on the internal pool's is the checkpoint's XID
+  less 11. Both windows are wider than the 8 checkpoints the ring holds,
+  which explains why the older checkpoints' physical objects are still in
+  place.
+* The container object map is a new physical object in every cycle, with
+  the checkpoint's XID, and keeps one record, the volume superblock, whose
+  object XID equals its key's XID in every capture.
+
+**Damaged copies.** Copies of `c07.img` (block 0 equal to the newest
+checkpoint, XID 251 in slots 4 and 5, data run `6+4` at blocks 23 to 26)
+and of `live-05.img` (block 0 at XID 19, newest checkpoint XID 40 in slots
+14 and 15, data run `154+4` at blocks 171 to 174). `fsck_apfs -n` runs on
+the attached whole disk; the read-only mount is `diskutil mount readOnly`.
+
+| Copy | Damage | `fsck_apfs -n` | Read-only mount | `fsapfsinfo` | `apfsdump.rb` |
+| --- | --- | --- | --- | --- | --- |
+| `base-c07` | None | Checks XID 251; OK, exit 0 | Mounts | Exit 0 | Selects XID 251, no problems |
+| `a-sb-zeroed` | Newest superblock (block 6) | Checks XID 250, with no message about the lost checkpoint or block 0; OK, exit 0 | Mounts | Exit 0 | Selects XID 250; block 0 newer than the latest checkpoint |
+| `b-map-zeroed` | Newest mapping block (block 5) | `cpm: found zeroed-out block`, `checkpoint 5 (xid 251) checkpoint map is invalid`, then checks XID 250; OK, exit 0 | Mounts | Exit 0 | Keeps XID 251 and reports its run broken |
+| `c-data-zeroed` | Newest data run (blocks 23 to 26) | `nr: found zeroed-out block`, `checkpoint 5 (xid 251) failed consistency check`, then checks XID 250; OK, exit 0 | Mounts | Exit 0 | Keeps XID 251 and reports every mapped object invalid |
+| `g-oldest-only` | The seven newest superblocks (blocks 2, 4, 6, 10, 12, 14, 16) | Checks XID 244; OK, exit 0 | Not run | Exit 0 | Selects XID 244; block 0 newer |
+| `live-base` | None | Checks XID 40, with no remark on the older block 0; OK, exit 0 | Mounts; files `b0` to `b19` | Exit 0 | Selects XID 40 |
+| `live-a-sb-zeroed` | Newest superblock (block 16) | Checks XID 39; OK, exit 0 | Mounts XID 39's tree: `b19`, present at XID 40, is absent | Exit 0 | Selects XID 39 |
+| `live-c-data-zeroed` | Newest data run (blocks 171 to 174) | `checkpoint 15 (xid 40) failed consistency check`, then checks XID 39; OK, exit 0 | Mounts XID 39's tree: `b19` is absent | Exit 0 | Keeps XID 40 and reports the mapped objects invalid |
+| `d-trunc-ring` | Cut after block 8, inside the descriptor ring | The attach publishes no volume; `device /dev/rdisk7 failed to open with error: Result too large`, exit 66 | No volume | Exit 1: the read of block 9 fails | Every missing block reported |
+| `e-trunc-data` | Cut after block 24, inside the selected data run | As `d-trunc-ring`, exit 66 | No volume | Exit 1: the read of the object map at block 1295 fails | Every missing block reported |
+| `f-trunc-past` | Cut after block 1008, past both checkpoint areas | As `d-trunc-ring`, exit 66 | No volume | Exit 1, as `e-trunc-data` | Every missing block reported |
+
+* `fsck_apfs` falls back to the next older checkpoint in all three kinds
+  of in-place damage: a zeroed newest superblock, a zeroed newest mapping
+  block, and valid descriptor blocks over a zeroed data run. The kernel
+  falls back in the two kinds tried on the live copies, a zeroed superblock
+  and a zeroed data run, where the mounted tree is visibly the older
+  checkpoint's and `diskutil` reports an ordinary mount. On the copies of
+  `c07.img` the kernel mounts all three, but the two checkpoints' trees
+  cannot be told apart, so which one it mounts is not shown; on
+  `a-sb-zeroed` it may have used block 0, a valid copy of XID 251.
+  `fsck_apfs` exits 0 and reports the container OK while printing `error:`
+  lines about the checkpoint it passed over, so its exit status does not
+  detect a damaged newest checkpoint.
+* `fsck_apfs` prints nothing about a block 0 one XID ahead of the
+  checkpoint it checks, and the kernel mounts that copy.
+* macOS opens none of the three cut copies, so it selects no checkpoint
+  from them either. All three keep only a short prefix; a container
+  missing only a short tail is not tried, though the `ERANGE` failure
+  suggests the same refusal.
+* `apfs-dump-quick` (`derived/a-sb-zeroed.quick.out`,
+  `derived/c-data-zeroed.quick.out`) mounts the newest ring superblock
+  whose checksum is valid, noting `Mounting xid different from NXSB at 0`:
+  on `a-sb-zeroed` it mounts XID 250 and dumps the volume, exit 0; on
+  `c-data-zeroed` it mounts XID 251, stops with `Checksum error in spaceman`
+  and `Unable to init container`, exit 255, and does not try XID 250.
+* `fsapfsinfo` reads into the descriptor ring, failing at block 9 on
+  `d-trunc-ring`, but not the selected data run's last two blocks: on
+  `e-trunc-data`, which lacks them, it fails only at the object map.
+
+**Consequences.** [Checkpoint selection](../specs/design-apfs.md#checkpoint-selection)
+states its duplicate-XID, no-fallback and block-0 rules against this
+evidence. The no-fallback and block-0 rules are fsimg policy, stricter than
+macOS: fsimg refuses `a-sb-zeroed`, `b-map-zeroed` and `c-data-zeroed`,
+which `fsck_apfs` checks at XID 250 and the kernel mounts,
+`g-oldest-only`, which `fsck_apfs` checks at XID 244, and
+`live-c-data-zeroed`, which `fsck_apfs` and the kernel open at XID 39; it
+opens `live-a-sb-zeroed` at XID 39, as both do.
+[Truncated containers](../specs/design-apfs.md#truncated-containers)
+records the native refusal beside fsimg's own rule.
+
 ## Evidence questions
 
 Stage 1 fills this section ([plan](apfs-plan.md), stage 1). Each row is a
@@ -305,14 +488,14 @@ under that experiment.
 | Container superblock type word; first unreserved OID; volume-count rule | `0x80000001`; 1024; `min(100, ceil(N * B / 512 MiB))` (E1, every capture) | Reaper and free-queue layouts beyond the fresh state (E8, E16) |
 | Fletcher-64 on captured blocks | Reproduces every stored checksum (E1) | |
 | Checkpoint area sizes and placement by container size; contiguity | The formulas above; contiguous to 384 GiB (E1) | Above 100663296 blocks (E12) |
-| Mapped ephemeral objects and their XIDs; ring states | Two checkpoints, XIDs 1 and 2, mappings above (E1) | After mount cycles; torn checkpoints (E8) |
+| Mapped ephemeral objects and their XIDs; ring states | Two checkpoints, XIDs 1 and 2, mappings above (E1); after mount cycles every checkpoint relocates four one-block objects (space manager, reaper, both free-queue trees) carrying its XID, the 1 GiB container's 16-slot ring holds 8 two-block checkpoints reused in order and never cleared, and `fsck_apfs` passes over a newest checkpoint with a zeroed superblock, mapping block or data run to the next older one ([E8](#e8-checkpoint-history)) | |
 | Descriptor and data ring slots, mapping order, OIDs from 1024, block 0 against the ring superblock | Slots 0 to 3 and data slots 0 to 5; ascending OID; 1024 to 1027, 1029; block 0 differs only in counter 0 (E1) | What holds OID 1028 (E1's volume records) |
 | Space manager fields, internal-pool sizing, chunk structures, address-block threshold, bitmaps of free chunks | As above; free chunks have no bitmap (E1) | Address-block threshold (E12) |
 | Bitmap bits past `N` | Clear (E1) | Whether `fsck_apfs` accepts them set (E15) |
 | Fixed regions as functions of `N`; size step | The formulas above; one block (E1) | Above 100663296 blocks (E12) |
-| Free queues of a fresh container | XID 1 zero-OID; XID 2 entries as above; node limits `L` and `I` (E1) | Queues with several XIDs (E8) |
+| Free queues of a fresh container | XID 1 zero-OID; XID 2 entries as above; node limits `L` and `I` (E1); with entries the oldest XID is the smallest record XID, the count the sum of the runs, and the node limit keeps the formatter's value ([E8](#e8-checkpoint-history)) | |
 | Reaper of a fresh container | Idle, reap IDs 1 and 0, state buffer 3984 bytes (E1) | |
-| Object-map flags; object XID equal to its key's XID | Container map `0x1`; the volume record's XID equals its object's (E1) | Volume maps (E1's volume records); more records (E3, E8) |
+| Object-map flags; object XID equal to its key's XID | Container map `0x1`; the volume record's XID equals its object's (E1), in all nine E8 captures too ([E8](#e8-checkpoint-history)) | Volume maps (E1's volume records); more records (E3) |
 | Tree flags, node fill and table-of-contents sizing | Container object map and free-queue trees as above (E1) | Volume trees (E1's volume records, E3) |
 | Writer acceptance: minimum container size | 1024 blocks, the smallest `fsck_apfs` opens (E1) | Acceptance of the writer's output (E15) |
 

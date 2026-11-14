@@ -193,7 +193,8 @@ the next starts:
    fields. Candidates are sorted by XID, which rejects duplicates, and
    judged from the largest down against the slot records alone, never
    rereading a block; the first whose run is whole is selected, and a larger
-   one whose run is not sets `clean` to false. The selected run's mapping
+   one whose run is not sets `clean` to false. A block 0 newer than the
+   selected checkpoint fails the open. The selected run's mapping
    blocks are then read again, their mappings copied into a paged array
    sorted by OID, which rejects duplicate OIDs, and their block runs checked
    against the data run, its wrap and each other; each mapped object is
@@ -972,7 +973,7 @@ salvage row in `test/apfs-salvage.c` and the others in `test/apfs.c`:
 
 | Contract | Passing case | Paired failure |
 | --- | --- | --- |
-| Truncation | A container cut past everything a listing and an extraction touch opens, lists, extracts and reports the missing bytes | The same container cut through the descriptor ring, the selected data run, a tree node and a file extent fails `FSIMG_ECORRUPT`, "image is truncated", where each is reached. A cut that removes the newest checkpoint fails the open, while the same checkpoint torn in place, its blocks present and invalid, opens the older one with `clean` false. Full verification fails on every cut |
+| Truncation | A container cut past everything a listing and an extraction touch opens, lists, extracts and reports the missing bytes | The same container cut through the descriptor ring, the selected data run, a tree node and a file extent fails `FSIMG_ECORRUPT`, "image is truncated", where each is reached. A cut that removes the newest checkpoint fails the open, while the same checkpoint torn in place, its superblock valid and a mapping block invalid, opens the next older checkpoint with `clean` false when block 0 is no newer than that checkpoint, and fails when block 0 is newer. Full verification fails on every cut |
 | Assumed identity | A container whose block-0 magic is rewritten and whose checksum, which covers the magic, is repaired opens and lists under `FSIMG_READ_ASSUME_IDENTITY` | Without the flag it is `FSIMG_EFORMAT`; with it, the magic rewritten without the repair fails the checksum, each other validation mutation of block 0 still fails with its class, a descriptor block without its magic is not a candidate, and full verification fails naming the assumed check |
 | Link target | A link's target is listed and extracted with `resolve` instrumented to fail for a link, at 1 and 1023 bytes | A target with an interior NUL, without its final NUL or of 1024 bytes fails in a listing, which reads no content |
 | Extra data | An inode with one unconsumed attribute sets `FSIMG_META_EXTRA_DATA` on each of its names | A link, and a compressed file of each storage, holding only the attributes the driver consumes, do not set it; `com.apple.decmpfs` on an inode that is not a compressed file does |
