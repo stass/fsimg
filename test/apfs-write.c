@@ -1972,13 +1972,17 @@ test_poisoned_emission_initializes_unused_metadata_and_payload_bytes(void)
 	memory_sink_t sink;
 	fsimg_io_t *io;
 	fsimg_status_t status;
-	char directory[] =
-	    "/Volumes/Optaine/fsimg-apfs/s8e/apfs-poison-XXXXXX";
+	const char *temporary = getenv("TMPDIR");
+	char directory[4096];
 	unsigned char buffer[8192];
 	int root, fd;
 
 	catalog_init(&catalog);
 	catalog_mixed(&catalog);
+	if (temporary == NULL || temporary[0] == '\0')
+		temporary = "/tmp";
+	CHECK(snprintf(directory, sizeof(directory), "%s/apfs-poison-XXXXXX",
+	    temporary) < (int)sizeof(directory));
 	CHECK(mkdtemp(directory) != NULL);
 	root = open(directory, O_RDONLY | O_DIRECTORY);
 	CHECK(root != -1);
