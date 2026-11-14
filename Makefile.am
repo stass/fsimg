@@ -89,8 +89,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/hfsplus/verify.c \
 	lib/formats/hfsplus/write-hfsplus.h lib/formats/hfsplus/write-plan.c \
 	lib/formats/hfsplus/write-btree.c lib/formats/hfsplus/write-emit.c \
-	lib/formats/apfs/apfs.h lib/formats/apfs/unicode.c \
-	lib/formats/apfs/unicode-tables.h \
+	lib/formats/apfs/apfs.h lib/formats/apfs/codec.c \
+	lib/formats/apfs/unicode.c lib/formats/apfs/unicode-tables.h \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
@@ -195,6 +195,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-erofs test-erofs-verify test-erofs-faults test-erofs-fixtures \
 	test-erofs-write \
 	test-lzfse test-decmpfs test-hfsplus-codec test-hfsplus \
+	test-apfs-codec \
 	test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-apfs-unicode \
@@ -336,6 +337,9 @@ test_decmpfs_SOURCES = test/decmpfs.c test/test.h
 test_decmpfs_LDADD = libfsimg.la
 test_hfsplus_codec_SOURCES = test/hfsplus-codec.c test/test.h
 test_hfsplus_codec_LDADD = libfsimg.la
+test_apfs_codec_SOURCES = test/apfs-codec.c test/apfs-gen.c test/apfs-gen.h \
+	test/test.h
+test_apfs_codec_LDADD = libfsimg.la
 test_hfsplus_SOURCES = test/hfsplus.c test/hfsplus-gen.c test/hfsplus-gen.h \
 	test/lzfse-vectors.h test/test.h
 test_hfsplus_LDADD = libfsimg.la $(ZLIB_LIBS)

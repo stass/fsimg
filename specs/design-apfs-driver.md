@@ -152,17 +152,30 @@ Every APFS integer is little-endian and decoded with the shared
 big-endian resource-fork header of a compressed file is decoded by the
 shared [framing validator](#compression-framing), so no file of the driver
 reads a big-endian field.
-Decoded records are C structures with `_t` typedefs holding validated
-values only:
+Decoded records are C structures with `_t` typedefs. A decoder judges a
+record's shape: it proves every byte it reads inside its span and that the
+fields framing the record, such as a count of entries, a node's areas and
+table-of-contents entries or a state buffer's size, agree with that span,
+and a rejected record leaves its output untouched. Values are the
+callers': magic, block size and geometry are `descriptor.c`'s and
+`checkpoint.c`'s; kind, subtype, storage class, OID and XID are
+`object.c`'s; key order, levels, node flags against the tree, alignment and
+record lengths are `btree.c`'s; object-map flags and values are `omap.c`'s;
+and the offsets of the space manager's arrays are proved by the pager in
+`spaceman.c`, which reads them in windows. The records:
 
 | Type | Fields |
 | --- | --- |
-| `apfs_obj_t` | checksum, OID, XID, kind, storage class, flags, subtype |
+| `apfs_obj_t` | checksum, OID, XID, kind, flags (the storage class among them), subtype |
 | `apfs_nx_t` | block size, block count, the three feature masks, UUID, next OID and XID, both area descriptions and this checkpoint's runs, space manager, object map and reaper OIDs, maximum volume count, volume OID array |
-| `apfs_cpm_t` | kind, subtype, byte size, volume OID, ephemeral OID, address |
-| `apfs_omap_t` | flags, snapshot count, tree type and OID, snapshot tree type and OID, most recent snapshot |
-| `apfs_node_t` | node flags, level, key count, the four locations, and for a root the footer |
-| `apfs_spaceman_t` | the geometry counts, the main device's counts and address-array offset, the internal pool's fields, the three free queues |
+| `apfs_cpm_block_t`, `apfs_cpm_t` | a mapping block's flags and count; a mapping's kind, flags, subtype, byte size, volume OID, ephemeral OID, address |
+| `apfs_omap_t` | flags, snapshot count, tree type and OID, snapshot tree type and OID, most recent snapshot, pending revert range |
+| `apfs_omap_key_t`, `apfs_omap_val_t` | OID and XID; flags, size, address |
+| `apfs_node_t` | node flags, level, key count, the four locations, the areas they imply, and for a root the footer (`apfs_btree_info_t`) |
+| `apfs_toc_t`, `apfs_entry_t` | a table-of-contents entry as stored; its key and value spans in the node, or a ghost |
+| `apfs_spaceman_t` | the geometry counts, each device's counts and address-array offset, the internal pool's fields and bitmap ring, the three free queues, version and structure size |
+| `apfs_cib_t`, `apfs_chunk_info_t` | a chunk-information or address block's index and count; a chunk's XID, first block, block and free counts, bitmap block |
+| `apfs_fq_key_t` | a free-queue record's XID and first block |
 | `apfs_reaper_t` | the reap IDs, list head, tail and object count, flags, and the fields of an object being reaped |
 | `apfs_reap_list_t` | next OID, entry count, first and last entry indexes |
 | `apfs_vol_t` | index, the three feature masks, flags, role, UUID, name, tree types and OIDs, counts, group UUID, integrity and sealed-tree OIDs |
@@ -172,7 +185,9 @@ values only:
 | `apfs_extent_t` | private ID, logical offset, length, physical block, flags, crypto ID |
 
 Encoding is the exact inverse and writes every reserved byte as zero, so an
-emitted object contains no unspecified byte. The Fletcher-64 function is
+emitted object contains no unspecified byte; the space manager's data-zone
+state, which nothing reads, is not decoded and is encoded as zero, its
+value in every E1 capture. The Fletcher-64 function is
 tested against blocks captured in E1, whose stored checksums the format
 design's [arithmetic](design-apfs.md#object-header-and-checksum)
 reproduces.
