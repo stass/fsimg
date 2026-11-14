@@ -20,7 +20,6 @@
  * step, so a path is at most the height, and a walk visits each node once.
  */
 
-#define TREE_FLAGS_KNOWN	0x1ffu
 #define NODE_FLAGS_KNOWN	(APFS_NODE_ROOT | APFS_NODE_LEAF | \
 				    APFS_NODE_FIXED_KV | APFS_NODE_HASHED | \
 				    APFS_NODE_NOHEADER)
@@ -164,11 +163,10 @@ node_check(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 		if (node->level >= APFS_BTREE_LEVELS_MAX)
 			return (apfs_unsupported(error, role,
 			    "is taller than 16 levels"));
-		if ((node->info.flags & ~TREE_FLAGS_KNOWN) != 0)
+		if ((node->info.flags & ~APFS_BTREE_FLAGS_KNOWN) != 0)
 			return (apfs_corrupt(error, role,
 			    "has unknown tree flags"));
-		if ((node->info.flags & (APFS_BTREE_HASHED |
-		    APFS_BTREE_NOHEADER | APFS_BTREE_NONPERSISTENT)) != 0)
+		if ((node->info.flags & APFS_BTREE_FLAGS_REFUSED) != 0)
 			return (apfs_unsupported(error, role,
 			    "is a hashed, headerless or nonpersistent tree"));
 		storage_flags = cursor->storage == APFS_OBJ_PHYSICAL ?

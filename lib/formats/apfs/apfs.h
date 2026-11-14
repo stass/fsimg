@@ -52,6 +52,7 @@
 #define APFS_SUBTYPE_NONE		0u
 #define APFS_SUBTYPE_FREE_QUEUE		9u
 #define APFS_SUBTYPE_OMAP		11u
+#define APFS_SUBTYPE_FSTREE		14u	/* a volume's filesystem tree */
 
 /* The container superblock. APFS_NX_BYTES ends its last decoded field. */
 #define APFS_NX_MAGIC			0x4253584eu	/* "NXSB" */
@@ -103,6 +104,7 @@
 #define APFS_TOC_FIXED_BYTES		4u
 #define APFS_TOC_VARIABLE_BYTES		8u
 #define APFS_TOC_GHOST			0xffffu	/* value offset of a ghost */
+#define APFS_FREE_LIST_EMPTY		0xffffu	/* offset of an empty free list */
 #define APFS_BTREE_LEVELS_MAX		16u
 #define APFS_CHILD_OID_BYTES		8u	/* an index node's value */
 
@@ -122,6 +124,10 @@
 #define APFS_BTREE_KV_NONALIGNED	0x040u
 #define APFS_BTREE_HASHED		0x080u
 #define APFS_BTREE_NOHEADER		0x100u
+#define APFS_BTREE_FLAGS_KNOWN		0x1ffu
+/* Sealed and nonpersistent trees, which fsimg neither reads nor writes. */
+#define APFS_BTREE_FLAGS_REFUSED	(APFS_BTREE_HASHED | APFS_BTREE_NOHEADER | \
+				    APFS_BTREE_NONPERSISTENT)
 
 /*
  * The space manager. APFS_SM_BYTES ends its fixed structure, through the

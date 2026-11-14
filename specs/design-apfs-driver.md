@@ -816,10 +816,15 @@ keeps one open node per level.
 * **Progress.** The largest record the writer emits is bounded by its name
   and link-target limits. A static assertion proves that two such records
   fit an empty node, so a record always fits a fresh node and the fallback
-  above always has room.
+  above always has room. The packer itself admits a record only when it
+  fits an empty node and two index records carrying its key fit one, so
+  every index node closed full has at least two children, only a level's
+  last node may have one, and the height grows with the logarithm of the
+  record count.
 
-The packer writes through a sink. Planning's sink counts the nodes of each
-level; emission's writes each node as it closes. Both number nodes by
+The packer writes through a sink. Planning passes none and takes the node
+counts of each level the packer returns; emission's sink writes each node
+as it closes. Both number nodes by
 completion: the `k`th node closed is node `k` of its tree, children before
 their parent and the root last. The root's footer statistics are totals the
 packer accumulates.

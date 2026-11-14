@@ -874,7 +874,8 @@ or the start of the footer in a root node: the value occupies
 `[end - offset, end - offset + length)`. In a fixed-size tree, leaf values
 have the footer's fixed value size and index values are 8-byte child OIDs.
 A hashed index value appends the child's digest to its OID. A value offset of
-`0xffff` is a ghost, legal only in a tree whose flags allow ghosts.
+`0xffff` is a ghost, legal only in a tree whose flags allow ghosts. An empty
+key or value free list has offset `0xffff` and length zero [A1].
 
 ### Validation
 
@@ -2072,8 +2073,8 @@ written: `validate` and the size search fail with `FSIMG_ERANGE` above it.
 | --- | --- | --- | --- | --- |
 | Node fill | Greedy against the root's capacity, 4096 bytes less the 56-byte header and the 40-byte footer: a node, root or not, takes records until the next does not fit, so a level's only node is always a valid root and 40 bytes stay unused in every other node | Policy | E15 | The native fill fraction E1 and E3 show |
 | Last node of a level | What remains when the records end, as few as one record | Policy | E15 | The last node takes its predecessor's last record |
-| Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1). In the filesystem tree: flags `0x42`, node size 4096, fixed sizes zero, and a node's table of contents its key count rounded up to a multiple of 8 entries, the shape of 253 of the 254 leaves of `apfs-newfs-268435456-e3-ci`, where every table is a multiple of 8 entries and index nodes hold up to 8 more (E3) | E1, E3 | E1's volume records, for the volume's other trees | Native |
-| Footer counts | Key count: the tree's leaf records. Node count: its nodes. Longest key and longest value: the largest encoded lengths packed into it | [A1]; E3 for the counts and the longest key | | |
+| Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1). In the filesystem tree: flags `0x42`, node size 4096, fixed sizes zero, and a node's table of contents its key count rounded up to a multiple of 8 entries, the shape of 253 of the 254 leaves of `apfs-newfs-268435456-e3-ci`, where every table is a multiple of 8 entries and index nodes hold up to 8 more (E3). A table of a fixed-size tree that outgrows its native size, in an index node or a leaf of ghosts, grows in steps of 8 entries, the table increment [A1] gives; that step is provisional, since no capture shows such a table, and an object map of more than about 12000 mappings in a native capture would show it. Without one the step stays | E1, E3 | E1's volume records, for the volume's other trees | Native |
+| Footer counts | Key count: the tree's leaf records. Node count: its nodes. Longest key and longest value: the largest encoded lengths among its leaf records, zero in an empty tree; an index key repeats a leaf key | [A1]; E3 for the counts and the longest key | | |
 | Object-map flags | Container map `0x1`; volume map zero | [A1]; E1 for the container map | E1's volume records, for the volume map's crypto-generation flag | Native |
 | Empty extent-reference and snapshot trees | One root leaf with no keys | E1; E2: one node each among an empty volume's 5 allocated blocks | E1's volume records | Native |
 | File extent | A nonempty file's run, its size rounded up to 4096 bytes, is tiled by consecutive extents of at most the extent cap, so a file no longer than the cap has one; flags and crypto ID zero | [A1] | | |
