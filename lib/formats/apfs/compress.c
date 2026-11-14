@@ -399,7 +399,7 @@ content_open(fsimg_reader_t *reader, fsimg_error_t *error)
 	apfs_reader_t *apfs = reader->driver;
 	apfs_compressed_t *compression = &apfs->current.compression;
 	fsimg_decmpfs_info_t info;
-	size_t stored;
+	size_t stored = 0;
 	fsimg_status_t status;
 
 	if (!admitted(compression->type, &info))
