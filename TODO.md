@@ -76,6 +76,10 @@
   when its resource fork holds bytes or the inode carries no size. Listing admits
   every compression type the shared table knows; the content stage refuses
   the types the format design marks unsupported.
+  Verification walks each snapshot's extent-reference tree inside the
+  snapshot-tree scan, so a refusal in one snapshot's tree ends the scan and
+  damage in later snapshots goes unreported; the snapshot stage should run
+  each snapshot as its own part of `verify.c`'s `parts_run()`.
   The writer plans (`lib/formats/apfs/write-plan.c`) behind the unregistered
   descriptor `fsimg_apfs_write_format`; emission (`write-emit.c`) is not
   written, so emission refuses with `FSIMG_EUNSUPPORTED`.
