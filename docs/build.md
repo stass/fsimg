@@ -1280,6 +1280,25 @@ and fails when the built `mkfs.erofs` lacks a
 codec. The tool identities, the Linux kernel oracle and the rust-fs-erofs
 oracle are in [erofs-research.md](erofs-research.md).
 
+The APFS work uses three external programs as independent oracles, each built
+at pinned inputs by `build-aux/build-apfs-oracles.sh TOOL [new-directory]`
+into `~/.local/share/fsimg-oracles/TOOL` by default:
+
+```sh
+sh build-aux/build-apfs-oracles.sh libfsapfs   # fsapfsinfo
+sh build-aux/build-apfs-oracles.sh apfs-fuse    # apfs-dump, apfsutil
+sh build-aux/build-apfs-oracles.sh apfsprogs    # apfsck, mkapfs; Linux only
+```
+
+The destination must be new, so remove a failed build's directory to retry;
+`MAKE=gmake` selects GNU make where `make` is BSD make. The helper needs
+Git or curl, a C compiler and make for `libfsapfs` and `apfsprogs`, and
+CMake, a C++ compiler and the system zlib and bzip2 for `apfs-fuse`.
+`apfsprogs` needs the Linux headers: run it in the `build-aux/linux-check.sh`
+image with the network enabled, since `linux-check.sh` itself runs offline.
+Sources, licenses, identities and the commands that run each oracle are in
+[apfs-research.md](apfs-research.md).
+
 `test/erofs-integration.sh` also compares fsimg's reading of every fixture
 it reads with rust-fs-erofs 0.5.1
 (`~/.local/share/fsimg-oracles/rust-erofs/bin/rust-fs-erofs`, or under

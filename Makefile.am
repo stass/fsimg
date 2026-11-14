@@ -449,6 +449,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	build-aux/build-fatcat.sh build-aux/fatcat-freebsd.patch \
 	build-aux/build-cdrtools.sh build-aux/build-hfsfuse.sh \
 	build-aux/build-erofs-utils.sh docs/erofs-research.md \
+	build-aux/build-apfs-oracles.sh docs/apfs-research.md \
 	build-aux/build-msan-zlib.sh \
 	build-aux/linux-check.sh build-aux/linux-check/Dockerfile \
 	docs/implementation-plan.md docs/build.md docs/platform-evidence.md \
