@@ -368,7 +368,7 @@ captures with their command records and `fsck_apfs` output:
 | E12 Large containers | 1 TiB and 128 TiB sparse containers: address blocks, pool sizes, ring sizes |
 | E13 Layers | `hdiutil` UDRW, UDZO and UDBZ images with and without GPT, and an Apple Partition Map disk holding a container (`hdiutil create -layout SPUD` if it accepts APFS, otherwise an E1 container behind a hand-built map): the layouts the layers peel. One ULFO and one ULMO image record the layer's refusal |
 | E14 Limits | Longest accepted name in bytes and characters, invalid UTF-8 refusal, 1023- and 1024-byte link targets, times before 1970 and far ahead |
-| E15 Writer probes | `fsck_apfs -n` on E1 and E3 captures altered one field at a time with checksums repaired: all XIDs set to one, another formatting identifier, a very long extent, node fill changes including a last node of one record, another maximum volume count, bitmap bits past `N` set, and a directory-statistics, document-ID, purgeable or firmlink record or field removed |
+| E15 Writer probes | `fsck_apfs -n` on E1 and E3 captures altered one field at a time with checksums repaired: all XIDs set to one, another formatting identifier, a very long extent, node fill changes including a last node of one record, another maximum volume count, bitmap bits past `N` set, a directory-statistics, document-ID, purgeable or firmlink record or field removed, and the writer's first form: an E1 capture rolled back to its XID-1 checkpoint with its volume's objects added to that checkpoint |
 | E16 Used Data volume | Structure-only counts from a copy of a used macOS Data volume the owner provides: entry kinds including sockets and device nodes, where they occur by depth and whether each device carries the device-number field, compression types, snapshots, holes, clones and hard links, and whether the reaper is idle. No names, contents or identities are recorded |
 | E17 Pending reap | In an E10 container, delete a populated volume with `diskutil apfs deleteVolume` and, where E9 gave one, a snapshot. Copy the backing file as each command returns, after a forced detach and after a clean one; dump the reaper, reap lists and free queues of each copy and run `fsck_apfs -n` on it |
 
@@ -467,7 +467,8 @@ describe the user-visible options.
   the report incomplete; both empty free-queue forms verifying; `W` failing
   on every truncated container and on one opened with an assumed identity,
   naming the assumed check.
-* **Gate:** every capture verifies, or its findings are classified in the
+* **Gate:** every capture the reader accepts verifies (E1's 91-block
+  capture lies below the reader's 1 MiB minimum and is refused), or its findings are classified in the
   research record as fsimg rules widened only from evidence; every mutation
   fails with its class.
 
@@ -517,7 +518,8 @@ describe the user-visible options.
   independent checker; byte identity across source order, budget, scratch
   and time zone; a poison scan; faults; a non-empty placement list
   refused; `--native`, comparing an empty container field by field with
-  the E1 capture of the same size. The writer joins the contract-suite
+  the E1 capture of the same size in the forms the writer values cite,
+  which needs a decoder for its older checkpoint. The writer joins the contract-suite
   profile.
 * **Gate:** every check passes; every row of the
   [writer values](../specs/design-apfs.md#writer-values) carries its

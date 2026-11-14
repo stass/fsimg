@@ -159,8 +159,9 @@ values only:
 
 Encoding is the exact inverse and writes every reserved byte as zero, so an
 emitted object contains no unspecified byte. The Fletcher-64 function is
-tested against blocks captured in E1 before any fixture is read, as the
-format design [requires](design-apfs.md#object-header-and-checksum).
+tested against blocks captured in E1, whose stored checksums the format
+design's [arithmetic](design-apfs.md#object-header-and-checksum)
+reproduces.
 
 The compression codecs are reused as they stand. A stored chunk is at most
 `FSIMG_LZFSE_INPUT_MAX` bytes and a decoded one at most
@@ -187,7 +188,8 @@ the next starts:
 2. **Checkpoint.** `checkpoint.c` reads the descriptor ring once with one
    block window. For each slot it records, in a paged array of fixed-size
    slot records in metadata scratch, the block's kind (superblock, valid
-   mapping block or other), XID, last-map flag and its superblock run
+   mapping block or other), XID, last-map flag, its `N`, data base and data
+   count, whose geometry the pass validates, and its superblock run
    fields. Candidates are sorted by XID, which rejects duplicates, and
    judged from the largest down against the slot records alone, never
    rereading a block; the first whose run is whole is selected, and a larger
@@ -638,7 +640,7 @@ the common settings check enforces; `volume_uuid` nonzero unless
 `volume_serial` is ignored, since the CLI generates one for every format.
 
 `volume_bytes` is zero or a multiple of 4096 of at least the writer's
-minimum container size. That minimum is the native formatter's, a
+minimum container size. That minimum, 1024 blocks, is a
 [writer value](design-apfs.md#writer-values), and can be larger than the
 1 MiB below which the reader refuses a container: the two bounds answer
 different questions and `validate` uses only the writer's.
@@ -990,8 +992,12 @@ back through the reader and verifier and through an independent checker
 written from the format design, sharing no code with the driver. It compares
 bytes across source order, metadata cache size, scratch placement and time
 zone, scans every unused byte for poison, and with `--native` compares an
-empty container's structures with the E1 capture of the same size field by
-field, apart from UUIDs, times and the formatting identifier. It checks the
+empty container's fields with the
+[writer values](design-apfs.md#writer-values): a value a row cites from E1
+must equal the E1 capture of the same size, in the form the row names, and a
+value built by a construction or set by policy, such as the volume slot, the
+next OID, the counters or the XIDs, must equal its row's construction.
+UUIDs, times and the formatting identifier are exempt. It checks the
 packer at its boundaries: records that exactly fill a node and one byte
 more, a level whose last node holds one record, a root with two children,
 and trees of one, two and three levels; and the layout at its own: a file

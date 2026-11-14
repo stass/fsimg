@@ -315,9 +315,9 @@ inside `[1, N)` and do not overlap each other or block 0. Bytes past offset
 1408 within block 0 are not interpreted by the reader. A slice longer than
 `N * B` has ignored slack past it; a shorter one is a
 [truncated container](#truncated-containers). The 1 MiB minimum is the
-reader's bound; the smallest container the writer emits is the native
-formatter's, which [writer values](#writer-values) gives and which can be
-larger.
+reader's bound; the smallest container the writer emits is the one
+[writer values](#writer-values) gives, 1024 blocks, the smallest
+`fsck_apfs` opens.
 
 The keylocker and media keylocker ranges locate keybags, which only
 encrypted volumes use. Reading an unencrypted volume ignores both; a nonzero
@@ -400,7 +400,7 @@ it and says block 0 may be an old version, used "only to find the
 checkpoints". A candidate's block count and data area may therefore differ
 from block 0's, as after a resize block 0 does not yet show, and `N` and the
 data area are the selected superblock's. A never-written slot is all zero
-(E1: slots 4 to 7 of every capture with a volume, slots 2 to 7 of
+(E1: slots 4 to `D - 1` of every capture with a volume, slots 2 to 7 of
 apfs-newfs-372736-plain); its checksum fails, so it is unused, neither a
 candidate nor a mapping block, and never a fault in itself. Two candidates with the same XID are an
 ambiguous tie, `FSIMG_ECORRUPT`: each checkpoint writes its superblock once
@@ -450,7 +450,8 @@ A noncontiguous area (bit 31 set) is `FSIMG_EUNSUPPORTED`: its tree layout
 has no evidence. Every E1 capture uses contiguous areas, up to 384 GiB in
 the size sweep; that larger native containers do too is provisional
 (E12). The bit is tested with block 0's geometry, before any
-ring rule, so every `FSIMG_ECORRUPT` of this section describes a container
+ring rule, and as part of each candidate's geometry, whose data area need
+not match block 0's, so every `FSIMG_ECORRUPT` of this section describes a container
 whose areas are contiguous.
 
 A descriptor or data block past the end of a
@@ -538,7 +539,9 @@ list and marking a slot in use. This reading of the arrays fits every E1
 capture (apfs-newfs-4194304-plain: head 2, tail 0, slot 1 current, slot 0
 last in the list) but [A1] does not state it, so it is provisional (E8,
 whose mount cycles move the ring); verification reads the current bitmap
-through the index array and checks nothing else of the ring until E8.
+through the index array, each index below the bitmap block count and each
+XID not above the checkpoint's, or the container is `FSIMG_ECORRUPT`, and
+checks nothing else of the ring until E8.
 
 Its counts are tied to the geometry, so no loop over them is bounded only by
 the work budget. These relations come from [A1], and every E1 capture and
@@ -648,8 +651,8 @@ one transaction, such as a deleted volume's trees:
 | 112 | | State buffer |
 
 The reaper is **idle** when its list count is zero and flag `0x2` is clear.
-This definition is provisional (E1 for a fresh container, E16 for a used
-one), and it is the default if neither settles it. It does not constrain
+This definition is provisional (E16, for a used container; E1 confirms
+it for fresh ones), and it is the default if neither settles it. It does not constrain
 the head and tail: they may be zero or name an empty reap-list object, an
 ephemeral object of the selected checkpoint whose blocks the checkpoint
 data area's claim covers, so an empty list adds no claim. Nor does it
@@ -700,7 +703,8 @@ must have a size that is a positive multiple of `B`, an address range inside
 no-header is unsupported, since the sealed trees fsimg reads are physical
 and never mapped (provisional, E11). The object read at the address must
 satisfy the header rules with its OID equal to `o` and its XID equal to the
-found key's XID (provisional: E1, E3 and E8; if a capture shows an object
+found key's XID (provisional: E3 and E8, E1 confirming it for the one
+record of every capture with a volume; if a capture shows an object
 older than its key, the rule becomes "not above the key's XID"). A miss for
 a reference the format requires is `FSIMG_ECORRUPT`.
 
@@ -1507,7 +1511,7 @@ order above fixes block numbers only: emission may write the blocks in any
 order and produces the same bytes.
 
 Automatic sizing chooses the first block count of its search that holds the layout,
-the native minimum container size, the requested free space and the native
+the writer's minimum container size, the requested free space and the native
 reserve, if any; the [sizing design](design-sizing.md#dimensions-per-format)
 states the dimensions. Whether a block count fits is not monotone in it: a
 fixed region grows in jumps, one of which can take more blocks than a size
@@ -1547,8 +1551,7 @@ instead of repeating a number. The columns:
   experiment for a native observation, and policy for fsimg's choice.
 * **Provisional, closed by** is empty for a settled value. A row that names
   an experiment there is provisional: its *Emitted* cell is the working
-  value until that experiment runs, and "native" there means the value has
-  no working form before E1.
+  value until that experiment runs.
 * **Otherwise** is what the writer emits when the experiment contradicts
   the working value or cannot isolate the question. *Stays* keeps the
   working value. *Native* takes the value decoded, field by field, from the
@@ -1563,13 +1566,12 @@ instead of repeating a number. The columns:
   stays unregistered. A captured value is never copied into a populated
   container.
 
-E1 formats containers on the development host with `newfs_apfs`. If it
-yields no capture there is no native layout to reproduce, and the writer
-stays unregistered, the state the [scope](#scope-and-evidence) gives a
-writer that has not passed native qualification. `X` is the checkpoint's
+E1 formats containers on the development host with `newfs_apfs`; its
+captures and size sweep are in the
+[research notes](../docs/apfs-research.md#e1-empty-containers). `X` is the checkpoint's
 XID.
 
-E1 shows `newfs_apfs` committing two checkpoints. The **first form**, at
+`newfs_apfs` commits two checkpoints (E1). The **first form**, at
 XID 1, holds the container alone: a mapping block and its superblock in
 descriptor slots 0 and 1, the space manager and the reaper in data slots 0
 and 1, an empty container object map, both free queues empty in the
@@ -1588,7 +1590,9 @@ writer emits the second form, whose values the rows that name it give.
 
 In the formulas below, `C` is the chunk-information block count, `F` the
 maximum volume count and `P` the internal pool's block count, and
-`q(x, k)` is `ceil(x / k)` with a result of 2 raised to 3. Every formula
+`q(x, k)` is `ceil(x / k)`, except that a quotient of 2 becomes 3. These
+formulas, `q` and the `8 * M * F` term among them, are fits to the
+captures, not rules [A1] states, and `E` is a quarter of the data area. Every formula
 reproduces all eight E1 captures and the 90 dumps of the E1 size sweep,
 which formats each block count the
 [research notes](../docs/apfs-research.md#e1-empty-containers) list, from 92
@@ -1631,14 +1635,14 @@ to 100663296 (384 GiB).
 
 | Value | Emitted | Source | Provisional, closed by | Otherwise |
 | --- | --- | --- | --- | --- |
-| Checkpoint area sizes and bases | With `E = L + I + 3 + 8 * M * F`: the descriptor area at block 1, of `4 * (ceil(E / 101) + 1)` blocks, 101 being the mappings a block holds; the data area right after it, of `4 * E` blocks; `L`, `I` and `M` as the rows below give them | E1 | E12, above 100663296 blocks | No container above 100663296 blocks is written |
+| Checkpoint area sizes and bases | With `E = L + I + 3 + 8 * M * F`: the descriptor area at block 1, of `4 * (ceil(E / 101) + 1)` blocks, 101 being the mappings a block holds; the data area right after it, of `4 * E` blocks; `L`, `I` and `M` as the rows below give them. Until E12 runs no container above 100663296 blocks is written: `validate` and the size search fail with `FSIMG_ERANGE` above it | E1 | E12, above 100663296 blocks | Stays |
 | Descriptor ring | One mapping block in slot 0 and the superblock in slot 1: first-block index 0, block count 2, next index 2; every other slot zero | E1: the first form | E15 | The second form's slots |
 | Mapping block | One mapping per ephemeral object in ascending OID order, with the object's kind, subtype and size 4096, owning volume zero; the last-map flag set | [A1]; E1 | | |
 | Data ring | The space manager in slot 0 and the reaper in slot 1: data index 0, data count 2, next index 2 | E1: the first form | E15 | The second form's slots |
-| Block 0 | Byte for byte the superblock in the descriptor ring | [A1]: a copy; E1: natively it differs only in counter 0 | E15 | Counter 0 three larger than the ring superblock's |
+| Block 0 | Byte for byte the superblock in the descriptor ring | [A1]: a copy; E1: natively it differs only in counter 0 | E15 | Counter 0 larger than the ring superblock's by the difference of the form the writer emits: 4 in the first, 3 in the second |
 | Maximum volume count | `F = min(100, ceil(N * B / 512 MiB))` | [A1]; E1 | | |
 | Features and flags | Incompatible `0x2`; read-only compatible, optional features and flags zero | [A1]; E1 | | |
-| Counters | Zero | Policy; E1 shows only counter 0, objects checksummed, nonzero: 8 in the first form's ring superblock, and `20 + C` in the second form's | E15 | The second form's values |
+| Counters | Zero | Policy; natively only counter 0, objects checksummed, is nonzero (E1): `7 + C` in the first form's ring superblock and `20 + C` in the second form's, block 0 holding 4 and 3 more | E15 | The second form's values |
 | Ephemeral-information words | Word 0 `(M << 32) + 0x40001`, [A1]'s minimum block count, four structures per volume and version 1, the others zero, with `M = L` up to 128 MiB and 8 above, as [A1] states | [A1]; E1 | | |
 | Newest mounted version | Zero, as in the first form | E1 | E15 | The second form's `2811160007000004` |
 | Fusion fields, keylocker ranges, EFI jumpstart, test fields | Zero | [A1]: features absent | | |
@@ -1651,7 +1655,7 @@ to 100663296 (384 GiB).
 | Chunk-information entry | XID `X`; first block `32768 * i` for chunk `i`; block count 32768, or `N - 32768 * i` in the last chunk; free count the chunk's clear bits; bitmap address zero for a chunk with no allocated block | [A1] for the fields; E1 | | |
 | Bitmap bits past `N` | Zero | E1 | The E15 `fsck_apfs -n` probe of a capture with those bits set | Stays |
 | Free counts | The device's free count is `N` less the allocated blocks and equals the sum of the chunks' free counts | [A1] | | |
-| Internal pool | The pool's bitmap ring of 16 blocks, the transaction multiplier 16 times a bitmap of one block, right after the data area; the pool right after the ring, of `P = 3 * (chunks + C)` blocks; both allocated in the main bitmaps; the pool's bitmap set exactly for the chunk-information and bitmap blocks placed in it | E1 | E12, for address blocks and for a pool bitmap of more than one block (`P` above 32768, about 1.3 TiB) | No container above 100663296 blocks is written |
+| Internal pool | The pool's bitmap ring of 16 blocks, the transaction multiplier 16 times a bitmap of one block, right after the data area; the pool right after the ring, of `P = 3 * (chunks + C)` blocks; both allocated in the main bitmaps; the pool's bitmap set exactly for the chunk-information, address and bitmap blocks placed in it | E1 | E12, for address blocks and for a pool bitmap of more than one block (`P` above 32768, about 1.3 TiB) | No container above 100663296 blocks is written |
 | Internal-pool blocks | Inside the pool, ascending from its base: the chunk-information blocks, then the address blocks, then one bitmap block per chunk that holds an allocated block, in chunk order | E1: the first form, as apfs-newfs-107374182400-plain's XID-1 blocks show (seven chunk-information blocks from the base, then the bitmaps of chunks 0 and 22) | E12, for the address blocks | Native |
 | Internal-pool ring fields | Free head 1 and tail 15; slot 0 current, with XID `X`; free-next `0xffff` for slot 0, `i + 1` for slots 1 to 14 and `0xffff` for slot 15 | E1: the first form | | |
 | Reserve counts, flags, version, structure size | Zero reserves; flags `0x1`; version 1; structure size 2520 | E1 | | |
@@ -1780,7 +1784,7 @@ free space, attribute data or buffer contents.
 | Records | Every kind in each tree, extended fields at their boundaries, names of 1, 255 and 1022 bytes and every Unicode class of E4; an inode with a Finder-information attribute sets the extra-data bit on each of its names | Truncated values, overlapping fields, misaligned field data, wrong hash or length, invalid UTF-8, embedded NUL or slash, dot names, a plain name of 1023 bytes, wrong record variant, type disagreeing with mode; a symbolic link or compressed file with only the attributes the driver consumes does not set the extra-data bit |
 | Content | Files of 0, 1, 4095, 4096, 4097 bytes and above 4 GiB, many extents, holes in both forms, preallocated extents past the size, clones and their overwritten branches, every supported compression type with one and many chunks | Gaps, overlaps, unaligned lengths, extent past both the rounded size and the allocated bytes, extent past `N`, crypto ID outside the table, short or long decoded chunks, chunk table overruns |
 | Links and kinds | Hard links across directories, symbolic links of 1 and 1023 bytes, FIFOs, a character and a block device with and without the device number field, a socket | Mismatched link counts, missing sibling records, directory with two parents, directory cycle, link target of 1024 bytes, the device number field on a file |
-| Verification | Every native fixture verifies, the empty E1 containers among them, whose allocated blocks are exactly the fixed regions, both object maps with their trees and the empty volume's objects; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found; both empty free-queue forms and an idle reaper verify | Each mutation reports its class; a report is never complete after an unsupported object or with a reaper that is not idle |
+| Verification | Every native fixture the reader accepts verifies, the empty E1 containers of 1024 blocks and more among them, and apfs-newfs-372736-plain, below the 1 MiB minimum, is refused; whose allocated blocks are exactly the fixed regions, both object maps with their trees, the empty volume's objects and the main free queue's entries; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found; the native zero-OID empty queue, a synthetic root leaf with no keys and an idle reaper verify | Each mutation reports its class; a report is never complete after an unsupported object or with a reaper that is not idle |
 | Writer | Empty, small, deep, wide (forcing multi-level trees), large-file and nearly full containers in both personalities; names at the writer's limit; byte identity across source order, budget, scratch and time zone; poison scan of unused bytes; an entry time outside the range is stored as the format time and counted as a loss | Colliding names under each personality, names and labels one byte over their limits, a host clock or epoch outside the time range, a non-empty placement list, sizes that do not fit |
 
 Independent oracles, in order of authority: macOS `fsck_apfs -n`, macOS

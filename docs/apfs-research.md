@@ -186,7 +186,7 @@ counts and kept only the dump, in
 `fsck_apfs -n` refuses every container below 1024 blocks with `error:
 device /dev/rdiskN failed to open with error: Result too large`, exit 66
 (bisected: 1023 refused, 1024 accepted). [A1]'s 1 MiB minimum, the
-reader's, lies between: the reader refuses the 93- to 255-block containers
+reader's, lies between: the reader refuses the 91- to 255-block containers
 `newfs_apfs` makes, and `fsck_apfs` refuses them too.
 
 **Two checkpoints.** Every container with a volume holds two checkpoints.
@@ -201,7 +201,10 @@ not touch keep XID 1 (in apfs-newfs-8589934592-plain, 63 of 64 chunks).
 `fsck_apfs -n` accepts the XID-1 state alone: a copy of
 apfs-newfs-4194304-plain with descriptor blocks 3 and 4 zeroed and block 0
 replaced by block 2, the XID-1 superblock, checks "the checkpoint with
-transaction ID 1" and appears OK.
+transaction ID 1" and appears OK (`/Volumes/Optaine/fsimg-apfs/e1/probe-x1.img`
+and `probe-x1.fsck`). The XID-1 values this section quotes for containers
+with a volume were read from the older checkpoint's raw blocks; the bisection
+logs are `/Volumes/Optaine/fsimg-apfs/e1/bisect-results.log`.
 
 **Container values per capture** (XID 2 unless noted; all areas
 contiguous):
@@ -256,9 +259,11 @@ in the last chunk's bitmap are clear.
   `1 + D`; the descriptor area `D = 4 * (ceil(E / 101) + 1)` blocks from
   block 1.
 * Counter 0 is `20 + C` in the newest ring superblock and `23 + C` in
-  block 0 (8 and 12 in the XID-1-only capture); every other counter is zero.
+  block 0 (in the XID-1 ring superblock `7 + C`, read from block 2 of each image,
+since the dump decodes only the newest checkpoint); every other counter is zero.
 
-Every capture and every sweep dump fits all of these; the sweep's samples
+Every capture and every sweep dump fits all of these, except that the two
+containers without a volume, 91 and 92 blocks, hold counter 0 at 8 and 12; the sweep's samples
 on both sides of 4544, 9088, 13632, 2^15, 2^17, 2^18 and 2^20 blocks fix the
 breakpoints. The sweep holds no address block, so the address-block
 threshold, and whether address blocks count in `P`, stay open (E12); no
@@ -270,7 +275,8 @@ apfs-newfs-33554432-plain (the XID-1 chunk-information and bitmap blocks),
 one ghost record at the pool base in the 8 GiB and 100 GiB captures. The
 main queue holds two blocks, where apfs-newfs-372736-plain keeps its
 container object map and that map's node: right after the pool up to 1 GiB, and at blocks 122880 and 727449 in the 8
-GiB and 100 GiB captures, where the XID-2 objects lie in chunks 2 and 11.
+GiB and 100 GiB captures (chunks 3 and 22); there the XID-2 objects lie in
+chunks 2 and 11.
 Queued blocks are allocated in the bitmaps, and the device's free count
 equals the bitmap recount. The pool's XID-1 layout is chunk-information
 blocks from the base, then bitmap blocks in chunk order
