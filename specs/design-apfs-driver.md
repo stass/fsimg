@@ -86,7 +86,7 @@ The driver reuses facilities that exist outside it:
 Two things are the driver's own. Fletcher-64 lives in `codec.c`, since no
 other format uses it. The Unicode tables are generated into
 `unicode-tables.h` by `tools/gen-apfs-tables.rb` from the Unicode Character
-Database at the version E4 establishes, with the digests of the pinned
+Database 17.0.0, the version macOS applies (E4), with the digests of the pinned
 inputs recorded in `docs/references.md`, as the format design
 [states](design-apfs.md#directory-records-and-names). HFS Plus owns its
 tables the same way and the two are not shared: the formats apply different
@@ -349,9 +349,10 @@ and folding read the generated tables. The form is produced as code
 points into a bounded buffer: the generator computes the largest expansion
 of any code point and fails the build above the format design's bound, and
 the buffer holds that expansion of the longest name the reader accepts. The
-hash is `fsimg_crc32c_update()` over the code points, under the conventions
-the format design gives. The namespace key is the form as UTF-8, bounded by
-the same expansion, so it fits the common key buffer of
+hash is `fsimg_crc32c_update()` from `FSIMG_CRC32C_SEED` over the code points
+as little-endian 32-bit units, without the final complement, masked to its low
+22 bits, as the format design gives. The namespace key is the form as
+UTF-8, bounded by the same expansion, so it fits the common key buffer of
 `FSIMG_DIRECTORY_KEY_BYTES`, the 4096 bytes the
 [directory design](design-directories.md#namespace) sizes for the longest
 APFS name.
@@ -563,9 +564,9 @@ streams that are sorted once:
 * collision records `(parent, comparison form, record)` for every
   directory record, sorted by parent and comparison form, so equivalent
   names are found whatever their stored hashes say, including when the
-  hashes are unchecked or wrong, and in volumes the common walker does not
-  visit; adjacent equal forms are a collision, so an adversarial directory
-  costs a sort, not quadratic comparisons.
+  hashes are wrong, and in volumes the common walker does not visit;
+  adjacent equal forms are a collision, so an adversarial directory costs
+  a sort, not quadratic comparisons.
 
 **Chunk tables.** For each compressed file of a resource-fork type in the
 selected volume, structural verification runs the shared validator's
@@ -964,11 +965,12 @@ only that nothing objected.
 format design with its own offset tables, Fletcher-64, node packing and
 CRC-32C; it shares no code with `lib/formats/apfs/`, and `test/apfs.c`, the
 salvage test, the contract profile and the fuzz seeds all build their
-containers with it. Its names use a small alphabet whose
-comparison forms it computes itself, plus the E4 vectors with their recorded
-hashes, so it needs no normalizer of its own. It builds containers in memory
-at every legal block size, with chosen checkpoint rings, object maps,
-multi-level trees, volumes, records and extents, and mutates them.
+containers with it. Its names use a small alphabet whose comparison forms
+it computes itself, plus the E4 vectors with their recorded hashes
+(`test/fixtures/apfs/name-hashes.txt`), so it needs no normalizer of its
+own. It builds containers in memory at every legal block size, with
+chosen checkpoint rings, object maps, multi-level trees, volumes, records
+and extents, and mutates them.
 `test/apfs.c` runs the format design's
 [acceptance matrix](design-apfs.md#acceptance-and-independent-validation)
 over it. Beyond that matrix come the common contracts the driver joins, the
@@ -983,13 +985,13 @@ salvage row in `test/apfs-salvage.c` and the others in `test/apfs.c`:
 | Salvage | A file whose third extent record is damaged is extracted as a `.partial` of its first two extents; a compressed file with a bad chunk keeps the chunks before it; a damaged inode costs its entry and a damaged directory record its listing, each reported, with the siblings extracted | Each fixture fails as a whole without salvage; an injected read fault, scratch failure or cancellation during salvage is terminal, not a loss; damage in the extent-reference tree changes no extracted byte and fails verification |
 | Verification counts | A file with three names adds three to `files` and three sizes to `logical_bytes` and its size once to `payload_bytes_read`; a hole, a compressed file and a link add nothing to that count | The same file with a wrong link count fails before any payload read; a read fault injected in one of its blocks fails the payload scope once, not once per name |
 | Chunk table | A resource-fork file of many chunks, of each table kind, reads from a random offset | A count that does not cover the size fails the read of the file's first byte; an entry outside the payload fails the read of its own chunk while the chunks before it read correctly; an entry out of order or overlapping a neighbour fails at the first chunk whose neighbour check sees it, which can be the chunk before it; full verification fails the file in every case |
-| Collisions | A two-volume container whose unselected volume holds names that differ only in case on a case-sensitive volume verifies | The same names in a case-insensitive unselected volume, stored with different hashes, fail `W` as a collision |
+| Collisions | A two-volume container whose unselected volume holds names that differ only in case on a case-sensitive volume verifies | The same names in a case-insensitive unselected volume, each stored with its correct and therefore shared hash, fail `W` as a collision |
 | Empty-container allocation | The generator's empty container in the native layout, its bitmap ring outside the pool and both object maps in the run, verifies complete, and every allocated block is one the claims name; the E1 empty captures do the same in the integration test | With the bitmap bit of one block of each fixed region, and of each object map's own block, cleared in turn, verification fails naming a claimed block marked free |
 
 `test/apfs-unicode.c` checks the generated tables: each table's digest
 equals the one `docs/references.md` records for the pinned inputs, and the
-comparison forms of the `NormalizationTest.txt` vectors and of the E4
-vectors match.
+comparison forms of the `NormalizationTest.txt` vectors match, and so do
+the hashes of the E4 vectors in `test/fixtures/apfs/name-hashes.txt`.
 
 `test/apfs-write.c` creates containers through the public API and reads them
 back through the reader and verifier and through an independent checker

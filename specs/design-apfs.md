@@ -836,20 +836,26 @@ are never used to size a buffer, and full verification checks the counts.
 | Tree | Key order |
 | --- | --- |
 | Object map | OID, then XID |
-| Filesystem | Owner (low 60 bits), then kind (top 4 bits), then the kind's suffix: hashed directory record by its hash and length word, then name bytes; plain directory record, extended attribute and snapshot name by name bytes; file extent by logical offset; sibling link by sibling ID; file information by its packed word |
+| Filesystem | Owner (low 60 bits), then kind (top 4 bits), then the kind's suffix: hashed directory record by its 22-bit hash, then name bytes; plain directory record, extended attribute and snapshot name by name bytes; file extent by logical offset; sibling link by sibling ID; file information by its packed word |
 | Extent reference | Block, then kind |
 | Snapshot metadata | XID, then kind, then name bytes for names |
 | Free queue | XID, then block |
 | Sealed file extents | Private ID, then logical offset |
 
-Integer fields compare numerically, never as serialized bytes. How names of
-different lengths compare, and whether the hashed record's whole 32-bit word
-or only its hash bits order the records, are provisional (E4, E5); the
-reader's ordering checks use the observed rule, so a wrong guess would make
-valid images fail rather than misread. If an experiment leaves a tie-break
-undecided, the ordering check accepts either order of the keys it concerns,
-and a lookup scans the records that share the decided part of the key
-instead of seeking among them.
+Integer fields compare numerically, never as serialized bytes. Hashed
+directory records order by the 22-bit hash alone, not by the 32-bit word
+that also holds the length; records of equal hash order by their stored
+name bytes as unsigned bytes, a name that is a prefix of another first:
+a bytewise comparison of the names with their terminating NULs (E4: the 34
+and 29 equal-hash pairs of captures `apfs-newfs-268435456-e4-names-ci` and
+`-cs`, and `apfs-newfs-33554432-e4-prefix-ci` and `-cs`). How plain
+directory-record, extended-attribute and snapshot names of different
+lengths compare is provisional (E2, E5); the reader's ordering checks use
+the observed rule, so a wrong guess would make valid images fail rather
+than misread. If an experiment leaves a tie-break undecided, the ordering
+check accepts either order of the keys it concerns, and a lookup scans
+the records that share the decided part of the key instead of seeking
+among them.
 
 ## Volumes
 
@@ -1081,31 +1087,56 @@ The comparison form of a name depends on the volume:
 * case-sensitive and normalization-insensitive: the NFD of the name;
 * otherwise: the name's bytes.
 
+macOS 26.6.2 applies Unicode 17.0.0 to these forms (E4). Case folding is
+full folding, the `C` and `F` entries of `CaseFolding.txt` without the
+Turkic `T` entries: `ß`, `ẞ` and `ss` are one name, `İ` (U+0130) folds to
+`i` followed by U+0307 and so equals `i̇` but not `i`, and `ı` (U+0131) is
+a name of its own. Final and medial sigma fold together, U+0345 folds to
+`ι`, Georgian Mtavruli folds to Mkhedruli, and Hangul syllables decompose
+algorithmically, so a precomposed syllable equals its conjoining jamo. A
+CJK compatibility ideograph with a canonical decomposition, a singleton,
+equals its unified ideograph on both hashed personalities; the twelve
+ideographs of the compatibility block without one, such as U+FA0E, are
+unified ideographs and stay as they are. NFD comes before folding, which
+matters for a name such as `a` U+0345 U+0301. The outer NFD changes the
+form of no single code point at Unicode 17.0.0 and of no name E4 created,
+and is kept as the definition.
+
+The evidence is in [the research record](../docs/apfs-research.md#e4-names):
+
+* Each of 20000 names was created in turn in capture
+  `apfs-newfs-268435456-e4-names-ci` and again in `-cs`. A creation failed
+  with `EEXIST` exactly when an earlier name had the same comparison form,
+  and every stored hash matches the form's hash below.
+* Unicode 16.0.0 tables mispredict the hash of 431 of those names, each
+  holding a character that 17.0.0 adds with a case folding, such as U+A7CE
+  and U+16EA0. In captures `apfs-newfs-33554432-e4-u17marks-ci` and `-cs`
+  the 34 combining marks 17.0.0 adds reorder as 17.0.0 says, which 16.0.0
+  tables do not predict.
+* In captures `apfs-newfs-33554432-e4-u18-ci` and `-cs` macOS refuses with
+  `EILSEQ` each of the 79 names E4 made that hold a character 18.0.0 adds.
+
+A record stores the name in the bytes it was created with, neither
+normalized nor folded, and its length field counts those bytes and the
+NUL; a name equal to an existing one under the comparison form is refused
+and the existing spelling stays. Distinct names with equal hashes are both
+stored and ordered by their bytes, as the [key order](#comparators)
+states; equality is decided by the comparison form, never by the hash.
+
 The hash is computed from the comparison form as a sequence of code points:
 CRC-32C (the Castagnoli polynomial, reflected) over the code points as
-little-endian 32-bit units, with the conventions [A1] gives for the initial
-value, the final complement and the terminating NUL, keeping the low 22
-bits. E4 settles two groups of provisional rules with test vectors, and
-each group has its own gate:
-
-* **Hash framing:** the initial value, the final complement and the
-  terminating NUL. They affect only the stored hash. If E4 cannot settle
-  them, the reader does not check stored hashes, which no read depends on
-  since a directory is listed by its owner range, and the writer, which
-  must emit them, stays unregistered.
-* **Comparison semantics:** which Unicode version macOS applies, whether
-  case folding is full or simple, the normalization form and its order
-  with folding, and how CJK compatibility ideographs decompose. They decide
-  which names are equal, so they cannot be left unchecked: a wrong form
-  would merge distinct names or separate equal ones. A personality whose
-  comparison form E4 has not settled is refused for reading with
-  `FSIMG_EUNSUPPORTED` naming the personality, and the writer does not
-  offer it. A volume that compares names by their bytes depends on none of
-  these rules and is never refused for them.
+little-endian 32-bit units, starting from `0xFFFFFFFF`, without the final
+complement and without a terminating NUL, keeping the low 22 bits. `root`
+hashes to 2989177 and `private-dir` to 2828707. [A1] states the same value
+as the complement of a standard CRC-32C, but over a NUL-terminated string;
+the NUL is not hashed. E4 reproduces the stored hash of every name, 15774
+in the case-insensitive capture and 17595 in the normalization-insensitive
+one; `test/fixtures/apfs/name-hashes.txt` holds a curated subset of them
+for the tests.
 
 The tables are the driver's own. `tools/gen-apfs-tables.rb` generates
-`lib/formats/apfs/unicode-tables.h` from the Unicode Character Database at
-the version E4 establishes, with the Unicode-3.0 license notice. The
+`lib/formats/apfs/unicode-tables.h` from the Unicode Character Database
+17.0.0, with the Unicode-3.0 license notice. The
 generator requires that version as its input and has no default, so no
 table is generated from a guess. `docs/references.md` records the digests
 of the pinned input files. HFS
@@ -1836,7 +1867,7 @@ sufficient.
 | A1 | Apple, *Apple File System Reference*, 2020-06-22 | Public format documentation; facts paraphrased, no prose or declarations copied |
 | A2 | Apple, *File System Programming Guide*, APFS FAQ | Behavior and limits |
 | A3 | macOS `newfs_apfs(8)`, `fsck_apfs(8)`, `hdiutil(1)`, `diskutil(8)` | Native oracles, run on disposable images only |
-| U1 | Unicode Character Database at the version E4 establishes: `UnicodeData.txt`, `CaseFolding.txt`, `NormalizationTest.txt` | Unicode-3.0 licensed data; generated tables and test vectors |
+| U1 | Unicode Character Database 17.0.0 (E4): `UnicodeData.txt`, `CaseFolding.txt`, `NormalizationTest.txt` | Unicode-3.0 licensed data; generated tables and test vectors |
 | Z1 | `lzfse` reference implementation | BSD-3-Clause; decoder files imported with their notice |
 | L1 | `apfsprogs` (`apfsck`, `mkapfs`), `apfs-fuse`, `libfsapfs` | GPL-2.0 and LGPL-3.0 external oracles; no code, declarations or identifiers enter the tree |
 | G1 | `go-filesystems/apfs` | BSD-3-Clause comparison point for structural questions; no code imported |

@@ -79,7 +79,7 @@ Non-goals:
 | Third-party APFS images | Untrusted specimens under `~/fsimg-corpus/apfs`, never attached or mounted | Images other producers and other macOS releases wrote, read by fsimg and the external checkers only |
 | `go-filesystems/apfs` | BSD-3-Clause | Comparison point for structural questions the reference leaves open; nothing is imported |
 | `lzfse` reference implementation | BSD-3-Clause; its decoder files are in `lib/codec/lzfse/` with their notice and audit record ([references](references.md#lzfse-and-lzvn-decoders)) | The LZFSE and LZVN decoders, reused as they stand |
-| Unicode Character Database, at the version E4 establishes | Unicode-3.0 data | Normalization and case-folding tables; `NormalizationTest.txt` as their oracle |
+| Unicode Character Database 17.0.0, the version E4 establishes | Unicode-3.0 data | Normalization and case-folding tables; `NormalizationTest.txt` as their oracle |
 
 ## Existing owners the driver reuses
 
@@ -295,7 +295,7 @@ the experiment cannot answer.
 | Records of an empty volume beyond the root and private directories; its next object identifier; whether the two directories count in the volume's object counts | E1, E3 | Writer |
 | Directory-statistics, document-ID, purgeable and firmlink records and fields on native directories, and whether `fsck_apfs` requires them | E1, E3, E15 | Writer |
 | Name hash conventions (initial value, complement, terminating NUL), full or simple case folding, Unicode version, hashed or plain keys per personality | E2, E4 | Names, stage 4 |
-| Comparator tie-breaks for hashed records, attributes and snapshot names | E4, E5 | B-tree ordering |
+| Comparator tie-breaks for hashed records, attributes and snapshot names | E2, E4, E5 | B-tree ordering |
 | Name length limit and its unit; refusal of invalid UTF-8 | E14 | Name rules, writer |
 | Symbolic-link target limit and storage, and the mode macOS gives a new link; FIFO, device and socket encodings; whether every device carries the device-number field | E3, E14, E16 | Kinds, link limit, writer defaults |
 | Name extended field on every inode; reserved inodes named by directory records; private-directory contents; internal flags and protection class of new inodes | E1, E3 | Reader, verifier, writer |
@@ -729,11 +729,12 @@ The owner has settled these:
   layout, and for a value that depends on the catalog or on time a
   construction the captures confirm, without which the writer is not
   registered. Until stage 9 passes the writer stays unregistered.
-* **Unicode version.** If macOS hashes names with an older Unicode version,
-  names containing characters whose folding or decomposition differs
-  between versions would hash differently. E4 establishes the version and
-  the pinned tables follow it; the risk is confined to such names, and
-  each macOS release's capture set rechecks it.
+* **Unicode version.** If a macOS release hashes names with another
+  Unicode version than the pinned tables, names containing characters whose
+  folding or decomposition differs between the versions hash differently.
+  E4 establishes Unicode 17.0.0 for macOS 26.6.2 and the pinned tables
+  follow it; the risk is confined to such names, and each macOS release's
+  capture set rechecks it.
 * **Extraction ceiling.** The default output limit is 16 times the selected
   volume's length ([security design](../specs/design-security.md#safe-extraction)).
   A volume whose sparse, cloned or compressed files expand further fails by
@@ -748,8 +749,8 @@ The owner has settled these:
   need administrator rights; stage 0 records which, and the CI macOS runner
   supplies them for scripted checks.
 * **Weakly specified comparators.** A wrong tie-break rule would make valid
-  images fail ordering checks, never misread them; E4 settles the rules
-  before stage 4.
+  images fail ordering checks, never misread them; E4 settles the hashed
+  directory-record rule and E2 and E5 the plain-name rules before stage 4.
 * **Pending reaps.** E17 may not catch a reaper at work. Verification of
   a container with a pending reap then stays incomplete, which is safe but
   unhelpful if volumes in daily use often hold one; E16 records whether

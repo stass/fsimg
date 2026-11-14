@@ -477,6 +477,164 @@ opens `live-a-sb-zeroed` at XID 39, as both do.
 [Truncated containers](../specs/design-apfs.md#truncated-containers)
 records the native refusal beside fsimg's own rule.
 
+### E4 Names
+
+**Procedure.** All captures run `capture.rb --kind newfs` on the host
+above, once with `--volume name=FSIMG,case-insensitive` (`-ci`) and once
+with `--volume name=FSIMG,case-sensitive` (`-cs`). Each populate script
+makes one directory `e4` and creates its names in a fixed order with
+Ruby's `File.open(path, WRONLY | CREAT | EXCL)` on the raw UTF-8 bytes,
+recording each outcome. Of names that are equal under a volume's rules,
+the first created is the one stored.
+
+* `e4-names`, 268435456 bytes, 20000 names (list `names.txt`, SHA-256
+  `4b285e6a4d6bb04034335ae28dbf6f9f68a930521deffa5e2b84f359f5d7055d`):
+  every case-folding source of Unicode 17.0.0 alone and after `x`; every
+  case-folding target; every canonical decomposition in its composed and
+  decomposed forms, among them the 1002 CJK compatibility ideographs and
+  their 902 distinct unified ideographs; 300 Hangul syllables precomposed
+  and as conjoining jamo; the characters each Unicode version from 10.0.0
+  to 17.0.0 first assigns with a case folding, a decomposition or a
+  nonzero combining class, plus 120 others per version; 466 distinct
+  supplementary-plane characters; hand-made groups (ASCII, German sharp s,
+  Turkish I, Greek sigma, Angstrom, Ohm and Kelvin signs, composed forms,
+  foldings not closed under decomposition, Georgian Mtavruli); and random
+  names of up to eight of these code points.
+* `e4-prefix`, 33554432 bytes: `pirhv`, `p`, `q` and `qodfh`, each long
+  name sharing its prefix's hash.
+* `e4-u17marks`, 33554432 bytes: each of the 34 combining marks Unicode
+  17.0.0 adds after `a`, on both sides of U+0301 (marks of class 220 and
+  234) or of U+0323 (marks of class 230).
+* `e4-u18`, 33554432 bytes: the 84 names that discriminate Unicode 18.0.0
+  from 17.0.0, each new case pair as target then source and each new mark
+  of combining class other than 230 on both sides of U+0301.
+* `e4-unassigned`, 33554432 bytes: unassigned code points, noncharacters
+  and private-use characters (its files are named `*-cn-*`).
+
+Every capture's `fsck_apfs -n` reports the container OK. Each record's
+stored bytes, length field and hash come from `apfsdump.json`
+(`apfsdump.rb --records --json`) beside each image. The populate scripts,
+name lists, per-name outcomes and throwaway analysis scripts are in
+`$FSIMG_APFS_NATIVE/e4-inputs/`. The analysis scripts read the two large
+captures' `apfsdump.json` copied beside them as `dump-ci.json` and
+`dump-cs.json`; `gen-names.rb` ran when the UCD directory held 9.0.0 to
+17.0.0; and the archived `populate-common.rb` takes the list name as a
+parameter, which the two large captures ran without.
+
+**Captures and vectors.** `apfs-newfs-268435456-e4-names-ci` and `-cs`,
+and `apfs-newfs-33554432-e4-` followed by `prefix`, `u17marks`, `u18` and
+`unassigned`, each `-ci` and `-cs`.
+`$FSIMG_APFS_NATIVE/e4-vectors.txt` holds the 33369 stored names of the
+two large captures as `name-hex`, personality (`ci` or `cs`), length field
+and hash, tab-separated, and `e4-equivalence.txt` beside it every
+creation's outcome with the stored name it matched.
+`test/fixtures/apfs/name-hashes.txt` holds 219 vectors covering every
+group in both personalities: 211 from `e4-vectors.txt` and the 8 rows of
+the prefix captures, whose `p` and `q` on the case-sensitive volume also
+appear in `e4-vectors.txt` with the same hashes.
+
+**Outcomes.** No creation in `e4-names` failed with `EILSEQ` or `EINVAL`.
+Every stored name is the byte string its successful creation passed, and
+every length field is its byte length plus one.
+
+| Capture | Records in `e4` | `EEXIST` | Equal-hash pairs |
+| --- | --- | --- | --- |
+| `e4-names-ci` (incompatible feature `0x1`) | 15774 | 4226 | 34 |
+| `e4-names-cs` (incompatible feature `0x8`) | 17595 | 2405 | 29 |
+
+| Group | Names | `EEXIST`, ci | `EEXIST`, cs |
+| --- | --- | --- | --- |
+| Case-folding sources | 3133 | 131 | 22 |
+| Case-folding targets | 1496 | 1496 | 26 |
+| Canonical decompositions | 1315 | 1027 | 1027 |
+| CJK compatibility and unified ideographs | 1904 | 1002 | 1002 |
+| Hangul | 609 | 305 | 305 |
+| ASCII | 15 | 6 | 0 |
+| German sharp s | 14 | 11 | 0 |
+| Turkish I | 15 | 6 | 1 |
+| Greek sigma | 16 | 11 | 0 |
+| Angstrom, Ohm and Kelvin signs | 11 | 8 | 5 |
+| Composed forms | 20 | 14 | 10 |
+| Folding not closed under decomposition | 28 | 18 | 7 |
+| Georgian Mtavruli | 8 | 4 | 0 |
+| Supplementary planes | 466 | 3 | 0 |
+| First assigned in 11.0.0, 12.0.0, 13.0.0, 14.0.0, 16.0.0, 17.0.0 | 1305 | 79, 7, 3, 40, 27, 28 | 0 |
+| First assigned in 10.0.0, 12.1.0, 15.0.0, 15.1.0 | 284 | 0 | 0 |
+| Random mixed names | 9361 | 0 | 0 |
+
+Selected equivalences on the case-insensitive volume: `ẞ`, `ss`, `SS` and
+`Ss` equal `ß`; `i` equals `I`, `i̇` equals `İ`, `ı` and `İ` are distinct
+from `I` and from each other, and `İstanbul` and `istanbul` are both
+stored; `σ` and `ς` equal `Σ`; `ι` and `Ι` equal U+0345; `ᾼ`, `αι` and
+`ΑΙ` equal `ᾳ`; `ff` equals `ﬀ` and `ʼn` equals `ŉ`; `ა` equals `Ა`
+(Mtavruli U+1C90); U+212B and `å` equal `Å`. On the case-sensitive volume
+only the canonical equivalences hold: `A` U+030A and U+212B equal `Å`,
+U+2126 equals `Ω`, U+212A equals `K`, and every jamo spelling and every
+CJK compatibility ideograph equals its canonical equivalent.
+
+**The comparison form and the hash.** A throwaway implementation of NFD
+and case folding read from each version's `UnicodeData.txt` and
+`CaseFolding.txt` tested every candidate against every stored hash and
+every outcome of `e4-names` (a creation should fail with `EEXIST` exactly
+when an earlier name has the same form):
+
+| Candidate | Unicode | Hash mismatches | Outcome mismatches |
+| --- | --- | --- | --- |
+| ci: NFD of full folding (`C`, `F`) of NFD | 17.0.0 | 0 | 0 |
+| ci: the same | 16.0.0 / 15.1.0 / 14.0.0 / 13.0.0 / 12.0.0 / 11.0.0 / 10.0.0 | 431 / 1065 / 1065 / 1653 / 1707 / 1821 / 2934 | 56 / 130 / 130 / 210 / 217 / 231 / 390 |
+| ci: full folding of NFD, without the outer NFD | 17.0.0 | 0 | 0 |
+| ci: simple folding (`C`, `S`) | 17.0.0 | 250 | 16 |
+| ci: full folding with Turkic `T` entries | 17.0.0 | 252 | 24 |
+| ci: NFD of full folding of the name, without the inner NFD | 17.0.0 | 3 | 1 |
+| cs: NFD | 17.0.0, 16.0.0 | 0 | 0 |
+| cs: NFD | 15.1.0 / 13.0.0 / 12.1.0 | 264 / 264 / 279 | 20 / 20 / 21 |
+
+The hash that reproduces every record is CRC-32C, reflected polynomial
+`0x82F63B78`, over the form's code points as little-endian 32-bit units,
+from initial value `0xFFFFFFFF`, with no final complement and no
+terminating NUL, masked to 22 bits. The other seven combinations of
+initial value 0, final complement and NUL fail on the fresh volume's
+`root` (2989177) and `private-dir` (2828707).
+
+Between 16.0.0 and 17.0.0 the `e4-names` set discriminates only through
+case foldings: 28 code points, such as U+A7CE, U+A7D2, U+A7D4 and U+16EA0
+onward (Beria Erfe). `e4-u17marks` adds the canonical ordering of 17.0.0's
+new marks: in both personalities each second spelling fails with `EEXIST`,
+and every stored hash matches the 17.0.0 form, while 16.0.0 tables
+mispredict all 34 outcomes and 30 of the 34 hashes (the other four names
+are already in canonical order). Between 15.1.0 and 16.0.0, 47 code points
+discriminate, 27 by new foldings (such as U+1C89, U+A7CB, U+10D50) and 20
+by new decompositions (such as U+105C9, U+11383). No code point of the set
+that an older version assigns changes its folding or decomposition between
+the versions. The outer NFD of the case-insensitive form changes no single
+code point's form at 17.0.0, and no name of the set tells the two forms
+apart; the inner NFD matters for U+0345 before another mark. At 17.0.0 the
+largest expansion of one code point's case-insensitive form is three times
+its UTF-8 length (U+1D1C0, among others). Ruby 4.0.7's own
+`unicode_normalize(:nfd)` misorders Tibetan vowel signs (U+0F73, U+0F75,
+U+0F81) after marks such as U+0323 and mispredicts seven stored hashes, so
+it is no oracle for these vectors.
+
+**Unicode 18.0.0 and unassigned code points.** In `e4-u18-ci` and `-cs`
+every name holding a character Unicode 18.0.0 adds (79 of 84) fails with
+`EILSEQ`. The five that succeed hold only 17.0.0 characters (the targets
+U+0277, U+027C, U+AB4B, U+AB4C and `ss`), and their stored hashes match the
+17.0.0 forms. In `e4-unassigned-ci` and `-cs`, U+0378, `a` U+0378, U+E0000
+and the noncharacters U+FFFF, U+FDD0, U+2FFFF and U+10FFFE fail with
+`EILSEQ`, while the private-use U+E000 and U+F0000 and the assigned U+2E30
+succeed, in both personalities.
+
+**Order and collisions.** In both large captures the directory's records
+sort by the 22-bit hash, and the sort by the whole 32-bit word with the
+length below it fails. All 34 and 29 equal-hash pairs (none larger) hold
+distinct names with distinct forms, each created successfully and ordered
+by their bytes as unsigned bytes. The tie order differs from the order of
+the forms in 8 and 3 of the pairs and from length-then-bytes in 17 and 6,
+so neither of those is the rule. In the prefix captures `p` precedes
+`pirhv` and `q` precedes `qodfh` (hashes 4148841 and 3859665) whichever was
+created first. The pair counts match a uniform 22-bit hash (about 30 and
+37 expected).
+
 ## Evidence questions
 
 Stage 1 fills this section ([plan](apfs-plan.md), stage 1). Each row is a
@@ -498,6 +656,8 @@ under that experiment.
 | Object-map flags; object XID equal to its key's XID | Container map `0x1`; the volume record's XID equals its object's (E1), in all nine E8 captures too ([E8](#e8-checkpoint-history)) | Volume maps (E1's volume records); more records (E3) |
 | Tree flags, node fill and table-of-contents sizing | Container object map and free-queue trees as above (E1) | Volume trees (E1's volume records, E3) |
 | Writer acceptance: minimum container size | 1024 blocks, the smallest `fsck_apfs` opens (E1) | Acceptance of the writer's output (E15) |
+| Name hash conventions (initial value, complement, terminating NUL), full or simple case folding, Unicode version, hashed or plain keys per personality | CRC-32C from `0xFFFFFFFF`, no final complement, no NUL, low 22 bits; full folding without Turkic entries, NFD before and after; Unicode 17.0.0; both `newfs_apfs` personalities hash (E4) | Plain keys (E2) |
+| Comparator tie-breaks for hashed records, attributes and snapshot names | Hashed directory records: 22-bit hash, then name bytes as unsigned bytes, a prefix first (E4) | Attributes and snapshot names (E5); plain directory records (E2) |
 
 The volume rows (features, records of an empty volume, inode fields) wait
 for the dumper's volume part and stay open under E1 and E2.
