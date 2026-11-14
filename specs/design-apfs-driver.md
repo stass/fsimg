@@ -699,10 +699,11 @@ checks that every block of each record is mapped by as many distinct
 streams as the record's count, so a record no stream maps fails. Clones
 that share one
 data stream contribute one stream. The pool's claim stream is merged the
-same way against the pool's bitmap. The two checks the format design holds
-[provisional](design-apfs.md#verification), the bitmap bits past `N` and
-the allocated block count of a volume that is sealed or has snapshots, are
-not made until their experiments give the rule; every other volume's
+same way against the pool's bitmap. The main bitmap's bits past `N` are
+not checked ([verification](design-apfs.md#verification)).
+The check the format design holds provisional, the allocated block count
+of a volume that is sealed or has snapshots, is not made until its
+experiments give the rule; every other volume's
 allocated block count is checked against the blocks the format design
 lists there.
 
@@ -819,18 +820,16 @@ keeps one open node per level.
   filled a node and gone on, so a root that is not a leaf has at least two
   children. A tree with no records is one root leaf with no keys.
 * **Last nodes.** The last node of a level holds what remains, as few as one
-  record, which the reader's validation accepts. That `fsck_apfs` accepts
-  such a node is a provisional [writer value](design-apfs.md#writer-values)
-  (E15). If it does not, the last node of a level takes its predecessor's
-  last record, at the cost of holding one closed node per level.
-* **Progress.** The largest record the writer emits is bounded by its name
-  and link-target limits. A static assertion proves that two such records
-  fit an empty node, so a record always fits a fresh node and the fallback
-  above always has room. The packer itself admits a record only when it
-  fits an empty node and two index records carrying its key fit one, so
-  every index node closed full has at least two children, only a level's
-  last node may have one, and the height grows with the logarithm of the
-  record count.
+  record, which the reader's validation and `fsck_apfs` accept at the leaf
+  and index levels ([writer values](design-apfs.md#writer-values), E15).
+* **Progress.** The largest record the writer emits, leaf or index (the
+  longest key and its 8-byte child OID), is bounded by its name and
+  link-target limits. A static assertion proves that such a record fits an
+  empty node, so a record always fits a fresh node.
+  The packer admits a record only when it fits an empty node and two
+  index records carrying its key fit one, so every index node closed full
+  has at least two children, only a level's last node may have one, and
+  the height grows with the logarithm of the record count.
 
 The packer writes through a sink. Planning passes none and takes the node
 counts of each level the packer returns; emission's sink writes each node
