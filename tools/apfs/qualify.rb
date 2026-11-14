@@ -47,6 +47,7 @@
 #   qualify.rb --root /Volumes/Optaine/apfs-qualify --fsimg BUILD/fsimg \
 #     "$FSIMG_APFS_NATIVE"/apfs-newfs-67108864-small/image.img
 require "digest"
+require "fiddle"
 require "fileutils"
 require "json"
 require "optparse"
@@ -336,7 +337,7 @@ module ApfsQualify
     def run
       FileUtils.mkdir_p(@mountpoint)
       begin
-        FileUtils.cp(@image.source, @path)
+        ApfsQualify.clone_image(@image.source, @path)
         steps = STEPS.to_h { [_1, attempt(_1)] }
       ensure
         released = release
@@ -703,6 +704,29 @@ module ApfsQualify
     return if stat.directory? && stat.uid == Process.euid && (stat.mode & 0o022).zero?
 
     raise Error, "#{path} is not a directory private to this user"
+  end
+
+  # Copy an image by cloning it with clonefile(2), which shares its blocks and
+  # keeps its holes. A byte copy would write every hole of a sparse container,
+  # terabytes for the large captures, and `cp -c` falls back to one whenever
+  # cloning fails, so clonefile is called directly: an image that cannot be
+  # cloned, on another volume or a filesystem without clones, is refused.
+  def clone_image(source, target)
+    return if clonefile_function.call(source, target, 0).zero?
+
+    errno = Fiddle.last_error
+    unclonable = [Errno::EXDEV::Errno, Errno::ENOTSUP::Errno].include?(errno)
+    hint = unclonable ? "; keep the image and --root on one APFS volume" : ""
+    raise Error, "cannot clone #{source} to #{target}: #{SystemCallError.new(errno).message}#{hint}"
+  end
+
+  # clonefile(2) as a callable, resolved when first used so that loading this
+  # file on a host without it, such as Linux, needs no symbol.
+  private_class_method def clonefile_function
+    symbol = Fiddle.dlopen(nil)["clonefile"]
+    Fiddle::Function.new(symbol, [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT], Fiddle::TYPE_INT)
+  rescue Fiddle::DLError
+    raise Error, "clonefile(2) is not available on this host"
   end
 
   # Remove a mount point or the directory of them only when it is empty. A
