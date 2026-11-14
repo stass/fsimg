@@ -4096,13 +4096,13 @@ test_compression_word_table_corruption(void)
 		const char *message;
 	} cases[] = {
 		{ "table_overlaps_payload", 7, 16, 16,
-		    "HFS Plus compressed file's chunk table is malformed" },
+		    "decmpfs chunk table is malformed" },
 		{ "table_past_fork", 17, 16, 16,
-		    "HFS Plus compressed file's chunk table is malformed" },
+		    "decmpfs chunk table is malformed" },
 		{ "descending_offsets", 8, 7, 16,
-		    "HFS Plus chunks overlap" },
+		    "decmpfs chunks overlap" },
 		{ "stored_above_bound", 8, 8 + 69633, 8 + 69633,
-		    "HFS Plus chunk lies outside the resource data" }
+		    "decmpfs chunk lies outside the resource data" }
 	};
 	char name[112];
 
@@ -4133,7 +4133,7 @@ test_compression_word_table_corruption(void)
 static void
 test_compression_resource_map_offsets(void)
 {
-	const char *message = "HFS Plus resource fork's header does not match the fork";
+	const char *message = "decmpfs resource header does not match the fork";
 	compression_case_t c;
 	uint32_t first_chunk;
 

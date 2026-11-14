@@ -13,10 +13,11 @@
 
 /*
  * Transparent compression, the one owner of the encoded forms: the types and
- * their rules, the decode window, the chunk table and the decoders. A compressed
- * file's bytes reach delivery as held extents, one decoded chunk at a time, so
- * its memory does not grow with the file and a stream that inflates without end
- * stops at the window.
+ * their rules, the decode window and the decoders. The framing of the header and
+ * the chunk tables is the shared decmpfs validator's, which reads the resource
+ * fork through its index here. A compressed file's bytes reach delivery as held
+ * extents, one decoded chunk at a time, so its memory does not grow with the
+ * file and a stream that inflates without end stops at the window.
  */
 
 #define TYPE_STORED		1u	/* the attribute's bytes, unencoded */
@@ -30,8 +31,8 @@
 #define ZLIB_RAW_MARKER		0xffu
 #define LZVN_RAW_MARKER		0x06u	/* the code that ends an LZVN stream */
 
-_Static_assert(HFSPLUS_CHUNK_BYTES <= FSIMG_LZFSE_OUTPUT_MAX &&
-    HFSPLUS_CHUNK_STORED_MAX <= FSIMG_LZFSE_INPUT_MAX,
+_Static_assert(FSIMG_DECMPFS_CHUNK_BYTES <= FSIMG_LZFSE_OUTPUT_MAX &&
+    FSIMG_DECMPFS_STORED_MAX <= FSIMG_LZFSE_INPUT_MAX,
     "every chunk is within the imported decoders' bounds");
 
 /* One charged allocation per reader, made by the first compressed file resolved
@@ -49,18 +50,11 @@ struct hfsplus_window {
 	size_t			 length;
 	bool			 inflating;
 	bool			 valid;
-	unsigned char		 input[HFSPLUS_CHUNK_STORED_MAX];
-	unsigned char		 output[HFSPLUS_CHUNK_BYTES];
+	unsigned char		 input[FSIMG_DECMPFS_STORED_MAX];
+	unsigned char		 output[FSIMG_DECMPFS_CHUNK_BYTES];
 };
 
-/* Where a type's chunks are found in its resource fork. */
-typedef enum {
-	CHUNK_TABLE_NONE,	/* in the attribute: no resource fork */
-	CHUNK_TABLE_RESOURCE,	/* the resource map's block table, type 4 */
-	CHUNK_TABLE_WORDS	/* the fork's successor-offset words, types 8, 12 */
-} chunk_table_t;
-
-static chunk_table_t chunk_table(uint8_t);
+static bool fork_table(uint8_t, fsimg_decmpfs_kind_t *);
 static fsimg_status_t window_ready(fsimg_reader_t *, fsimg_error_t *);
 static bool raw_marked(const hfsplus_window_t *, size_t, unsigned char);
 static fsimg_status_t raw_decode(hfsplus_window_t *, size_t, size_t,
@@ -75,14 +69,10 @@ static fsimg_status_t chunk_decode_lzfse(fsimg_reader_t *, hfsplus_window_t *,
     size_t, size_t, fsimg_error_t *);
 static fsimg_status_t window_decode(fsimg_reader_t *, size_t, size_t,
     fsimg_error_t *);
-static fsimg_status_t fork_open(fsimg_reader_t *, const hfsplus_file_t *,
+static fsimg_status_t fork_bytes(void *, uint64_t, void *, size_t,
     fsimg_error_t *);
-static fsimg_status_t chunk_locate(fsimg_reader_t *, uint64_t, uint64_t *,
-    size_t *, fsimg_error_t *);
-static fsimg_status_t word_table_open(fsimg_reader_t *, const hfsplus_file_t *,
-    fsimg_error_t *);
-static fsimg_status_t word_chunk_locate(fsimg_reader_t *, uint64_t, uint64_t *,
-    size_t *, fsimg_error_t *);
+static fsimg_status_t table_open(fsimg_reader_t *, const hfsplus_file_t *,
+    fsimg_decmpfs_kind_t, fsimg_error_t *);
 static fsimg_status_t chunk_load(fsimg_reader_t *, uint64_t, fsimg_error_t *);
 
 fsimg_status_t
@@ -96,12 +86,12 @@ hfsplus_compress_check(const hfsplus_file_t *file,
 	    file->data_fork.total_blocks != 0)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compressed file has a nonempty data fork"));
-	switch (scan->cmpf.type) {
+	switch (scan->header.type) {
 	case TYPE_STORED:
 	case TYPE_ZLIB_INLINE:
 	case TYPE_LZVN_INLINE:
 	case TYPE_LZFSE_INLINE:
-		if (scan->cmpf.uncompressed_size > HFSPLUS_CHUNK_BYTES)
+		if (scan->header.uncompressed_size > FSIMG_DECMPFS_CHUNK_BYTES)
 			return (hfsplus_unsupported(error,
 			    "HFS Plus inline compressed file is larger than "
 			    "the decode window"));
@@ -125,27 +115,31 @@ hfsplus_compress_known(uint8_t type)
 	    type == TYPE_LZFSE_FORK);
 }
 
-/* The one statement of which types keep their chunks in the resource fork, and
- * in which table format, so a new type states its format rather than inherit one.
+/* Whether a type keeps its chunks in the resource fork, and in which table kind:
+ * the one statement of it, so a new type states its kind rather than inherit one.
  */
-static chunk_table_t
-chunk_table(uint8_t type)
+static bool
+fork_table(uint8_t type, fsimg_decmpfs_kind_t *kind)
 {
 	switch (type) {
 	case TYPE_ZLIB_FORK:
-		return (CHUNK_TABLE_RESOURCE);
+		*kind = FSIMG_DECMPFS_TABLE_RESOURCE;
+		return (true);
 	case TYPE_LZVN_FORK:
 	case TYPE_LZFSE_FORK:
-		return (CHUNK_TABLE_WORDS);
+		*kind = FSIMG_DECMPFS_TABLE_WORDS;
+		return (true);
 	default:
-		return (CHUNK_TABLE_NONE);
+		return (false);
 	}
 }
 
 bool
 hfsplus_compress_consumes_fork(uint8_t type)
 {
-	return (chunk_table(type) != CHUNK_TABLE_NONE);
+	fsimg_decmpfs_kind_t kind;
+
+	return (fork_table(type, &kind));
 }
 
 void
@@ -352,110 +346,42 @@ window_decode(fsimg_reader_t *reader, size_t stored, size_t expected,
 	}
 }
 
-/* Index the resource fork and check the classic resource header's relations to
- * the fork: the map follows the data and lies in the fork, so no chunk can be
- * read from inside it (the sizes then put it exactly at the data's end), and
- * its table's place: the table interval [D + 4, D + 8 + 8 * count)
- * must end inside the declared data, D plus the data length, and the rest of the
- * data is the payload interval. Nothing here assumes the native data offset or
- * map length. All sums are of 32-bit values in 64 bits. The declared size must
- * agree with the count, so a size is only as large as a table the fork holds.
+/* The framing validator's way to the bytes of the current entry's resource
+ * fork: the fork's index, which table_open() builds.
  */
 static fsimg_status_t
-fork_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
+fork_bytes(void *context, uint64_t offset, void *buffer, size_t length,
     fsimg_error_t *error)
 {
-	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
-	hfsplus_compressed_t *compressed = &hfsplus->compressed;
-	unsigned char raw[HFSPLUS_RSRC_BYTES];
-	hfsplus_rsrc_table_t table;
-	hfsplus_rsrc_t rsrc;
-	uint64_t count, end, table_end;
-	fsimg_status_t status;
+	fsimg_reader_t *reader = context;
 
-	status = hfsplus_fork_index(reader, file->id, HFSPLUS_FORK_RESOURCE,
-	    &file->resource_fork, &hfsplus->file, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (hfsplus->file == NULL || file->resource_fork.logical_size < sizeof(raw))
-		return (hfsplus_corrupt(error,
-		    "HFS Plus compressed file's resource fork is too short"));
-	status = hfsplus_fork_read(reader, hfsplus->file, 0, raw, sizeof(raw),
-	    error);
-	if (status != FSIMG_OK)
-		return (status);
-	(void)hfsplus_rsrc_decode(raw, sizeof(raw), &rsrc);
-	end = (uint64_t)rsrc.data_offset + rsrc.data_length;
-	if (rsrc.data_length < HFSPLUS_RSRC_TABLE_BYTES ||
-	    end + rsrc.map_length != file->resource_fork.logical_size ||
-	    rsrc.map_offset < end ||
-	    (uint64_t)rsrc.map_offset + rsrc.map_length >
-	    file->resource_fork.logical_size)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus resource fork's header does not match the fork"));
-	status = hfsplus_fork_read(reader, hfsplus->file, rsrc.data_offset, raw,
-	    HFSPLUS_RSRC_TABLE_BYTES, error);
-	if (status != FSIMG_OK)
-		return (status);
-	(void)hfsplus_rsrc_table_decode(raw, HFSPLUS_RSRC_TABLE_BYTES, &table);
-	count = hfsplus->current.size / HFSPLUS_CHUNK_BYTES +
-	    (hfsplus->current.size % HFSPLUS_CHUNK_BYTES != 0);
-	table_end = (uint64_t)rsrc.data_offset + HFSPLUS_RSRC_TABLE_BYTES +
-	    (uint64_t)table.chunk_count * HFSPLUS_CHUNK_PAIR_BYTES;
-	if (table.resource_length != rsrc.data_length - 4 ||
-	    table.chunk_count != count || table_end > end)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus compressed file's chunk table is malformed"));
-	compressed->chunk_base = (uint64_t)rsrc.data_offset + 4;
-	compressed->table_offset = (uint64_t)rsrc.data_offset +
-	    HFSPLUS_RSRC_TABLE_BYTES;
-	compressed->payload_start = table_end;
-	compressed->payload_end = end;
-	compressed->chunks = count;
-	return (FSIMG_OK);
+	return (hfsplus_fork_read(reader, hfsplus_state(reader)->file, offset,
+	    buffer, length, error));
 }
 
-/* Index the resource fork and check the table that types 8 and 12 begin it with:
- * count + 1 little-endian offset words from the fork's start. The first word is
- * the table's end, which must hold the words and lie in the fork. Its length is
- * the writer's choice, so it is never computed from the count, and words between
- * the last offset and the table's end are not read. All the rest of the fork is
- * the payload interval.
+/* Index the resource fork and check its chunk table, keeping the index only for
+ * a table that passes. A fork of no blocks has no index; its logical size is then
+ * zero, which the validator refuses before it reads.
  */
 static fsimg_status_t
-word_table_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
-    fsimg_error_t *error)
+table_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
+    fsimg_decmpfs_kind_t kind, fsimg_error_t *error)
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
-	hfsplus_compressed_t *compressed = &hfsplus->compressed;
-	unsigned char raw[HFSPLUS_CHUNK_WORD_BYTES];
-	uint64_t count;
-	uint32_t table_end;
 	fsimg_status_t status;
 
 	status = hfsplus_fork_index(reader, file->id, HFSPLUS_FORK_RESOURCE,
 	    &file->resource_fork, &hfsplus->file, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (hfsplus->file == NULL || file->resource_fork.logical_size < sizeof(raw))
-		return (hfsplus_corrupt(error,
-		    "HFS Plus compressed file's resource fork is too short"));
-	status = hfsplus_fork_read(reader, hfsplus->file, 0, raw, sizeof(raw),
+	status = fsimg_decmpfs_open(kind, file->resource_fork.logical_size,
+	    hfsplus->current.size, fork_bytes, reader, &hfsplus->compressed.table,
 	    error);
-	if (status != FSIMG_OK)
-		return (status);
-	(void)hfsplus_chunk_word_decode(raw, sizeof(raw), 0, &table_end);
-	count = hfsplus->current.size / HFSPLUS_CHUNK_BYTES +
-	    (hfsplus->current.size % HFSPLUS_CHUNK_BYTES != 0);
-	if (table_end < (count + 1) * HFSPLUS_CHUNK_WORD_BYTES ||
-	    table_end > file->resource_fork.logical_size)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus compressed file's chunk table is malformed"));
-	compressed->table_offset = 0;
-	compressed->payload_start = table_end;
-	compressed->payload_end = file->resource_fork.logical_size;
-	compressed->chunks = count;
-	return (FSIMG_OK);
+	if (status != FSIMG_OK) {
+		fsimg_extent_index_free(hfsplus->file);
+		hfsplus->file = NULL;
+	}
+	return (status);
 }
 
 /* Open the current entry's compressed content, on its first resolve. Its record
@@ -469,6 +395,7 @@ hfsplus_compress_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 {
 	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
 	const hfsplus_child_t *current = &hfsplus->current;
+	fsimg_decmpfs_kind_t kind;
 	hfsplus_attr_scan_t scan;
 	hfsplus_window_t *window;
 	fsimg_status_t status;
@@ -486,19 +413,14 @@ hfsplus_compress_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 		status = hfsplus_compress_check(file, &scan, error);
 	if (status != FSIMG_OK)
 		return (status);
-	if (scan.cmpf.type != current->compression ||
-	    scan.cmpf.uncompressed_size != current->size)
+	if (scan.header.type != current->compression ||
+	    scan.header.uncompressed_size != current->size)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compression attribute changed since it was listed"));
-	if (hfsplus_compress_consumes_fork(current->compression)) {
-		status = chunk_table(current->compression) == CHUNK_TABLE_RESOURCE ?
-		    fork_open(reader, file, error) :
-		    word_table_open(reader, file, error);
-		if (status != FSIMG_OK) {
-			fsimg_extent_index_free(hfsplus->file);
-			hfsplus->file = NULL;
+	if (fork_table(current->compression, &kind)) {
+		status = table_open(reader, file, kind, error);
+		if (status != FSIMG_OK)
 			return (status);
-		}
 	} else {
 		status = window_decode(reader, scan.payload_bytes,
 		    (size_t)current->size, error);
@@ -512,90 +434,6 @@ hfsplus_compress_open(fsimg_reader_t *reader, const hfsplus_file_t *file,
 	return (FSIMG_OK);
 }
 
-/* Read chunk `chunk`'s table entry through a small window of it and its
- * neighbours, so the table is never held whole, and check it against them, the
- * table and the declared data: the chunk's offset counts from the count. raw has
- * room for three pairs and only last - first + 1 of them are read, so it may be
- * partly filled. Every index decoded here stays at or below last - first, which
- * is at most 2, so each decode lies in the filled part and cannot fail.
- */
-static fsimg_status_t
-chunk_locate(fsimg_reader_t *reader, uint64_t chunk, uint64_t *offset,
-    size_t *stored, fsimg_error_t *error)
-{
-	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
-	const hfsplus_compressed_t *compressed = &hfsplus->compressed;
-	unsigned char raw[3 * HFSPLUS_CHUNK_PAIR_BYTES];
-	hfsplus_chunk_t entry, neighbour;
-	uint64_t first, last, start;
-	fsimg_status_t status;
-
-	first = chunk == 0 ? 0 : chunk - 1;
-	last = chunk + 1 == compressed->chunks ? chunk : chunk + 1;
-	status = hfsplus_fork_read(reader, hfsplus->file,
-	    compressed->table_offset + first * HFSPLUS_CHUNK_PAIR_BYTES, raw,
-	    (size_t)(last - first + 1) * HFSPLUS_CHUNK_PAIR_BYTES, error);
-	if (status != FSIMG_OK)
-		return (status);
-	(void)hfsplus_chunk_pair_decode(raw, sizeof(raw),
-	    (uint32_t)(chunk - first), &entry);
-	start = compressed->chunk_base + entry.offset;
-	if (entry.length > HFSPLUS_CHUNK_STORED_MAX ||
-	    start < compressed->payload_start ||
-	    start + entry.length > compressed->payload_end)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus chunk lies outside the resource data"));
-	if (first != chunk) {
-		(void)hfsplus_chunk_pair_decode(raw, sizeof(raw), 0, &neighbour);
-		if ((uint64_t)neighbour.offset + neighbour.length > entry.offset)
-			return (hfsplus_corrupt(error,
-			    "HFS Plus chunks overlap"));
-	}
-	if (last != chunk) {
-		(void)hfsplus_chunk_pair_decode(raw, sizeof(raw),
-		    (uint32_t)(last - first), &neighbour);
-		if ((uint64_t)entry.offset + entry.length > neighbour.offset)
-			return (hfsplus_corrupt(error,
-			    "HFS Plus chunks overlap"));
-	}
-	*offset = start;
-	*stored = entry.length;
-	return (FSIMG_OK);
-}
-
-/* Chunk `chunk`'s span in a type 8 or 12 table: its offset word to its successor,
- * so a chunk's neighbours are the two words that define it. The table holds both
- * words, since its end was checked against the count and the fork. raw is
- * exactly those two words, so neither decode can fail.
- */
-static fsimg_status_t
-word_chunk_locate(fsimg_reader_t *reader, uint64_t chunk, uint64_t *offset,
-    size_t *stored, fsimg_error_t *error)
-{
-	fsimg_hfsplus_reader_t *hfsplus = hfsplus_state(reader);
-	const hfsplus_compressed_t *compressed = &hfsplus->compressed;
-	unsigned char raw[2 * HFSPLUS_CHUNK_WORD_BYTES];
-	uint32_t end, start;
-	fsimg_status_t status;
-
-	status = hfsplus_fork_read(reader, hfsplus->file,
-	    compressed->table_offset + chunk * HFSPLUS_CHUNK_WORD_BYTES, raw,
-	    sizeof(raw), error);
-	if (status != FSIMG_OK)
-		return (status);
-	(void)hfsplus_chunk_word_decode(raw, sizeof(raw), 0, &start);
-	(void)hfsplus_chunk_word_decode(raw, sizeof(raw), 1, &end);
-	if (end < start)
-		return (hfsplus_corrupt(error, "HFS Plus chunks overlap"));
-	if (start < compressed->payload_start || end > compressed->payload_end ||
-	    end - start > HFSPLUS_CHUNK_STORED_MAX)
-		return (hfsplus_corrupt(error,
-		    "HFS Plus chunk lies outside the resource data"));
-	*offset = start;
-	*stored = end - start;
-	return (FSIMG_OK);
-}
-
 fsimg_status_t
 hfsplus_compress_table_check(fsimg_reader_t *reader, fsimg_error_t *error)
 {
@@ -604,14 +442,13 @@ hfsplus_compress_table_check(fsimg_reader_t *reader, fsimg_error_t *error)
 	size_t stored;
 	fsimg_status_t status;
 
-	for (uint64_t chunk = 0; chunk < hfsplus->compressed.chunks; chunk++) {
+	for (uint64_t chunk = 0; chunk < hfsplus->compressed.table.chunks;
+	    chunk++) {
 		status = fsimg_session_charge(&reader->session, 0, 0, 1, error);
 		if (status != FSIMG_OK)
 			return (status);
-		status = chunk_table(hfsplus->current.compression) ==
-		    CHUNK_TABLE_RESOURCE ?
-		    chunk_locate(reader, chunk, &offset, &stored, error) :
-		    word_chunk_locate(reader, chunk, &offset, &stored, error);
+		status = fsimg_decmpfs_chunk(&hfsplus->compressed.table, chunk,
+		    fork_bytes, reader, &offset, &stored, error);
 		if (status != FSIMG_OK)
 			return (status);
 	}
@@ -629,17 +466,16 @@ chunk_load(fsimg_reader_t *reader, uint64_t chunk, fsimg_error_t *error)
 
 	/* A failed decode may have overwritten output, so never leave it marked valid. */
 	window->valid = false;
-	status = chunk_table(hfsplus->current.compression) == CHUNK_TABLE_RESOURCE ?
-	    chunk_locate(reader, chunk, &offset, &stored, error) :
-	    word_chunk_locate(reader, chunk, &offset, &stored, error);
+	status = fsimg_decmpfs_chunk(&hfsplus->compressed.table, chunk,
+	    fork_bytes, reader, &offset, &stored, error);
 	if (status == FSIMG_OK)
 		status = hfsplus_fork_read(reader, hfsplus->file, offset,
 		    window->input, stored, error);
 	if (status != FSIMG_OK)
 		return (status);
-	logical = chunk * HFSPLUS_CHUNK_BYTES;
-	expected = hfsplus->current.size - logical < HFSPLUS_CHUNK_BYTES ?
-	    (size_t)(hfsplus->current.size - logical) : HFSPLUS_CHUNK_BYTES;
+	logical = chunk * FSIMG_DECMPFS_CHUNK_BYTES;
+	expected = hfsplus->current.size - logical < FSIMG_DECMPFS_CHUNK_BYTES ?
+	    (size_t)(hfsplus->current.size - logical) : FSIMG_DECMPFS_CHUNK_BYTES;
 	status = window_decode(reader, stored, expected, error);
 	if (status != FSIMG_OK)
 		return (status);
@@ -659,7 +495,7 @@ hfsplus_compress_resolve(fsimg_reader_t *reader, uint64_t offset,
     fsimg_extent_t *extent, fsimg_error_t *error)
 {
 	hfsplus_window_t *window = hfsplus_state(reader)->window;
-	uint64_t chunk = offset / HFSPLUS_CHUNK_BYTES;
+	uint64_t chunk = offset / FSIMG_DECMPFS_CHUNK_BYTES;
 	fsimg_status_t status;
 
 	if (!window->valid || window->chunk != chunk) {
@@ -667,7 +503,7 @@ hfsplus_compress_resolve(fsimg_reader_t *reader, uint64_t offset,
 		if (status != FSIMG_OK)
 			return (status);
 	}
-	extent->logical_offset = chunk * HFSPLUS_CHUNK_BYTES;
+	extent->logical_offset = chunk * FSIMG_DECMPFS_CHUNK_BYTES;
 	extent->length = window->length;
 	reader->held = window->output;
 	return (FSIMG_OK);

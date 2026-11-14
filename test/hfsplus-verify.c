@@ -2345,7 +2345,7 @@ static const corruption_t corruptions[] = {
 	{ "hidden_inode_compressed_no_attribute",
 	    hidden_inode_compressed_no_attribute, FSIMG_ECORRUPT, "HFS Plus compressed file has no compression attribute" },
 	{ "hidden_inode_bad_table_referenced",
-	    hidden_inode_bad_table_referenced, FSIMG_ECORRUPT, "HFS Plus compressed file's chunk table is malformed" },
+	    hidden_inode_bad_table_referenced, FSIMG_ECORRUPT, "decmpfs chunk table is malformed" },
 	{ "used extent has zero count",
 	    extent_zero_count, FSIMG_ECORRUPT, "extent" },
 	{ "used extent follows unused descriptor",

@@ -20,12 +20,7 @@ enum {
 	ATTRIBUTE_KEY_UNITS = 12,
 	ATTRIBUTE_KEY_NAME = 14,
 	CATALOG_KEY_PARENT = 2,
-	CATALOG_KEY_NAME = 8,
-	COMPRESSION_TYPE = 4,
-	COMPRESSION_SIZE = 8,
-	RESOURCE_MAP = 4,
-	RESOURCE_DATA_LENGTH = 8,
-	RESOURCE_MAP_LENGTH = 12
+	CATALOG_KEY_NAME = 8
 };
 
 /* All disk positions below come from specs/design-hfsplus.md's tables. */
@@ -78,27 +73,12 @@ ADAPTER(attr)
 ADAPTER(jib)
 ADAPTER(journal)
 ADAPTER(mdb)
-ADAPTER(cmpf)
-ADAPTER(rsrc)
-ADAPTER(rsrc_table)
 #undef ADAPTER
 
 static bool
 decode_type(const unsigned char *p, size_t n, void *out)
 {
 	return (hfsplus_catalog_type(p, n, out));
-}
-
-static bool
-decode_pair(const unsigned char *p, size_t n, void *out)
-{
-	return (hfsplus_chunk_pair_decode(p, n, 0, out));
-}
-
-static bool
-decode_word(const unsigned char *p, size_t n, void *out)
-{
-	return (hfsplus_chunk_word_decode(p, n, 0, out));
 }
 
 /* Codecs reject bad framing without modifying any byte of their output. */
@@ -675,99 +655,6 @@ test_journals(void)
 	}
 }
 
-/* Compression framing mixes little-endian metadata with resource BE words. */
-static void
-test_compression_header(void)
-{
-	unsigned char p[16] = {0}, bad[16];
-	hfsplus_cmpf_t cmpf;
-	size_t i;
-
-	bcopy("fpmc", p, 4);
-	put_le(p + COMPRESSION_TYPE, 0x12345678, 4);
-	put_le(p + COMPRESSION_SIZE, UINT64_C(0x7fffffffffffffff), 8);
-	check_span(decode_cmpf, p, 16, sizeof(cmpf), false, "cmpf");
-	CHECK(hfsplus_cmpf_decode(p, 16, &cmpf));
-	CHECK(cmpf.type == 0x12345678);
-	CHECK(cmpf.uncompressed_size == UINT64_C(0x7fffffffffffffff));
-	for (i = 0; i < 4; i++) {
-		bcopy(p, bad, 16);
-		bad[i] ^= 1;
-		reject(decode_cmpf, bad, 16, sizeof(cmpf), "cmpf magic byte");
-	}
-	put_le(p + COMPRESSION_SIZE, UINT64_C(0x8000000000000000), 8);
-	reject(decode_cmpf, p, 16, sizeof(cmpf), "cmpf signed size bound");
-}
-
-static void
-test_resource_header(void)
-{
-	unsigned char p[16] = {0};
-	hfsplus_rsrc_t rsrc;
-	hfsplus_rsrc_table_t table;
-
-	put_be(p, 0x12345678, 4);
-	put_be(p + RESOURCE_MAP, 0x23456789, 4);
-	put_be(p + RESOURCE_DATA_LENGTH, 0x3456789a, 4);
-	put_be(p + RESOURCE_MAP_LENGTH, 0x456789ab, 4);
-	check_span(decode_rsrc, p, 16, sizeof(rsrc), false, "resource");
-	CHECK(hfsplus_rsrc_decode(p, 16, &rsrc));
-	CHECK(rsrc.data_offset == 0x12345678 && rsrc.map_offset == 0x23456789);
-	CHECK(rsrc.data_length == 0x3456789a && rsrc.map_length == 0x456789ab);
-	put_le(p + RESOURCE_MAP, 0x89abcdef, 4);
-	check_span(decode_rsrc_table, p, 8, sizeof(table), false, "resource table");
-	CHECK(hfsplus_rsrc_table_decode(p, 8, &table));
-	CHECK(table.resource_length == 0x12345678 && table.chunk_count == 0x89abcdef);
-}
-
-static void
-test_chunk_index_bounds(void)
-{
-	unsigned char p[16] = {0};
-	hfsplus_chunk_t chunk, before;
-	uint32_t word, old;
-	size_t i;
-	static const uint32_t indices[] = {
-		0, 1, 2, 0x20000000, 0x40000000, UINT32_MAX
-	};
-
-	put_le(p, 0x12345678, 4);
-	put_le(p + 4, 0x23456789, 4);
-	put_le(p + 8, 0x3456789a, 4);
-	put_le(p + 12, 0x456789ab, 4);
-	/* These spans begin at the first entry, after the table header. */
-	check_span(decode_pair, p, 8, sizeof(chunk), false, "chunk pair");
-	check_span(decode_word, p, 4, sizeof(word), false, "chunk word");
-	for (i = 0; i < sizeof(indices) / sizeof(indices[0]); i++) {
-		memset(&chunk, 0xa5, sizeof(chunk));
-		bcopy(&chunk, &before, sizeof(chunk));
-		word = old = 0xa5a5a5a5;
-		if (indices[i] < 2) {
-			case_check(hfsplus_chunk_pair_decode(p, 16,
-			    indices[i], &chunk), "pair decode", indices[i]);
-			case_check(chunk.offset ==
-			    (indices[i] == 0 ? 0x12345678u : 0x3456789au),
-			    "pair offset LE", indices[i]);
-			case_check(chunk.length ==
-			    (indices[i] == 0 ? 0x23456789u : 0x456789abu),
-			    "pair length LE", indices[i]);
-			case_check(hfsplus_chunk_word_decode(p, 8,
-			    indices[i], &word), "word decode", indices[i]);
-			case_check(word ==
-			    (indices[i] == 0 ? 0x12345678u : 0x23456789u),
-			    "word value LE", indices[i]);
-		} else {
-			case_check(!hfsplus_chunk_pair_decode(p, 16, indices[i], &chunk),
-			    "pair index", indices[i]);
-			case_check(bcmp(&chunk, &before, sizeof(chunk)) == 0,
-			    "pair failure atomicity", indices[i]);
-			case_check(!hfsplus_chunk_word_decode(p, 8, indices[i], &word),
-			    "word index", indices[i]);
-			case_check(word == old, "word failure atomicity", indices[i]);
-		}
-	}
-}
-
 /* Constructors own their units and reject oversized names atomically. */
 static void
 test_search_key_bounds(void)
@@ -875,8 +762,5 @@ main(void)
 	test_attributes();
 	test_locations();
 	test_journals();
-	test_compression_header();
-	test_resource_header();
-	test_chunk_index_bounds();
 	return (0);
 }

@@ -46,20 +46,20 @@ scan_record(const hfsplus_akey_t *key, const hfsplus_record_t *record,
 	if (attr.type != HFSPLUS_ATTR_INLINE)
 		return (hfsplus_unsupported(error,
 		    "HFS Plus compression attribute is not stored inline"));
-	if (!hfsplus_cmpf_decode(record->data + attr.data_offset, attr.data_size,
-	    &scan->cmpf))
+	if (!fsimg_decmpfs_header_decode(record->data + attr.data_offset,
+	    attr.data_size, &scan->header))
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compression attribute's header is malformed"));
 	scan->compression = true;
-	bytes = attr.data_size - HFSPLUS_CMPF_BYTES;
+	bytes = attr.data_size - FSIMG_DECMPFS_HEADER_BYTES;
 	scan->payload_bytes = bytes;
 	if (payload == NULL)
 		return (FSIMG_OK);
-	if (bytes > HFSPLUS_CHUNK_STORED_MAX)
+	if (bytes > FSIMG_DECMPFS_STORED_MAX)
 		return (hfsplus_corrupt(error,
 		    "HFS Plus compression attribute's payload is too long"));
-	bcopy(record->data + attr.data_offset + HFSPLUS_CMPF_BYTES, payload,
-	    bytes);
+	bcopy(record->data + attr.data_offset + FSIMG_DECMPFS_HEADER_BYTES,
+	    payload, bytes);
 	return (FSIMG_OK);
 }
 

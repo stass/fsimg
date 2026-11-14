@@ -1626,10 +1626,13 @@ comparison is an explicit skip, and no Linux result is recorded
 
 `test-hfsplus-codec` decodes hand-laid HFS Plus records at the format design's
 offsets, at every truncated length and with hostile framing fields.
+`test-decmpfs` does the same for the compression header, the resource
+header and the chunk-table entries of the shared decmpfs framing, and checks
+its table and chunk relations over in-memory resource forks.
 `test-hfsplus-unicode` computes the three pinned table digests through the
 driver's lookups, compares decomposition with a compiled-in subset of the native
 E3 vectors, and checks the exchanges, name admission, comparators and
-namespace keys. Neither reads a capture at run time or writes a file.
+namespace keys. None of the three reads a capture at run time or writes a file.
 `test-hfsplus-salvage` extracts generated volumes under salvage into a private
 fixture: clean and damaged compressed files, broken overflow walks, truncated
 volumes and a rejected listing, with a plain sibling proving the walk went on.

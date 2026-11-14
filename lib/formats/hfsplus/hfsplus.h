@@ -4,6 +4,7 @@
 #ifndef FSIMG_HFSPLUS_H
 #define FSIMG_HFSPLUS_H
 
+#include "decmpfs.h"
 #include "reader.h"
 
 /* HFS Plus and HFSX (specs/design-hfsplus.md and
@@ -30,13 +31,6 @@
 #define HFSPLUS_JIB_BYTES		180u
 #define HFSPLUS_JOURNAL_BYTES		44u
 #define HFSPLUS_MDB_BYTES		130u	/* through the embedded extent */
-#define HFSPLUS_CMPF_BYTES		16u
-#define HFSPLUS_RSRC_BYTES		16u
-#define HFSPLUS_RSRC_TABLE_BYTES	8u
-#define HFSPLUS_CHUNK_PAIR_BYTES	8u
-#define HFSPLUS_CHUNK_WORD_BYTES	4u
-#define HFSPLUS_CHUNK_BYTES		65536u	/* a chunk's decoded length */
-#define HFSPLUS_CHUNK_STORED_MAX	69632u	/* its stored bound */
 
 /* A name holds at most 255 units; each is at most three UTF-8 bytes, a
  * surrogate pair four for its two.
@@ -252,32 +246,6 @@ typedef struct hfsplus_mdb {
 	uint16_t	 embedded_count;
 } hfsplus_mdb_t;
 
-/* The header of a compression attribute's value. */
-typedef struct hfsplus_cmpf {
-	uint64_t	 uncompressed_size;
-	uint32_t	 type;
-} hfsplus_cmpf_t;
-
-/* The classic resource file header at the start of a type 4 resource fork. */
-typedef struct hfsplus_rsrc {
-	uint32_t	 data_offset;
-	uint32_t	 map_offset;
-	uint32_t	 data_length;
-	uint32_t	 map_length;
-} hfsplus_rsrc_t;
-
-/* The eight bytes at a type 4 resource fork's data offset. */
-typedef struct hfsplus_rsrc_table {
-	uint32_t	 resource_length;
-	uint32_t	 chunk_count;
-} hfsplus_rsrc_table_t;
-
-/* One entry of a type 4 chunk table; offset counts from the chunk count. */
-typedef struct hfsplus_chunk {
-	uint32_t	 offset;
-	uint32_t	 length;
-} hfsplus_chunk_t;
-
 /* A volume's name order. */
 typedef enum hfsplus_compare {
 	HFSPLUS_COMPARE_FOLDED,
@@ -295,9 +263,8 @@ typedef enum hfsplus_compare {
  *   fork and extents attribute records are refused at any other length. An
  *   inline attribute record's value must fit, and bytes after it are accepted.
  * - A minimum buffer: the header, fork data, node descriptor, B-tree header,
- *   journal info block, journal header, master directory block, catalog type,
- *   compression header, resource header and chunk table header read a fixed
- *   prefix of what may be a longer buffer.
+ *   journal info block, journal header, master directory block and catalog
+ *   type read a fixed prefix of what may be a longer buffer.
  * - The span a key must fit: the three key decoders, whose own length field
  *   says how many bytes the key takes.
  */
@@ -327,20 +294,6 @@ bool hfsplus_mdb_decode(const unsigned char *, size_t, hfsplus_mdb_t *);
  * the output. Without that, a "BD" block is a classic HFS volume, not a wrapper.
  */
 bool hfsplus_wrapper_decode(const unsigned char *, size_t, hfsplus_mdb_t *);
-bool hfsplus_cmpf_decode(const unsigned char *, size_t, hfsplus_cmpf_t *);
-bool hfsplus_rsrc_decode(const unsigned char *, size_t, hfsplus_rsrc_t *);
-bool hfsplus_rsrc_table_decode(const unsigned char *, size_t,
-    hfsplus_rsrc_table_t *);
-/* hfsplus_chunk_pair_decode() and hfsplus_chunk_word_decode(), given (table,
- * table_bytes, index, out), decode entry `index` of a chunk table, false when
- * it lies outside table_bytes. table is the first entry: for a
- * pair, of a type 4 table, the byte after hfsplus_rsrc_table_t; for a word, of
- * a type 8 or 12 table, the fork's start.
- */
-bool hfsplus_chunk_pair_decode(const unsigned char *, size_t, uint32_t,
-    hfsplus_chunk_t *);
-bool hfsplus_chunk_word_decode(const unsigned char *, size_t, uint32_t,
-    uint32_t *);
 
 /* Per-unit lookups (unicode.c). hfsplus_fold_unit() is the folded
  * comparator's value, zero for an ignorable unit, and
@@ -633,17 +586,12 @@ typedef struct hfsplus_child {
 } hfsplus_child_t;
 
 /* The current entry's compressed content, open from its first resolve until the
- * walker advances. A fork's table is described in fork offsets: entries start at
- * table_offset, a chunk's offset counts from chunk_base, and every chunk lies in
- * [payload_start, payload_end). All but open are zero for an inline payload.
+ * walker advances. table is a fork's checked chunk table, zero for an inline
+ * payload.
  */
 typedef struct hfsplus_compressed {
-	uint64_t	 chunk_base;
-	uint64_t	 table_offset;
-	uint64_t	 payload_start;
-	uint64_t	 payload_end;
-	uint64_t	 chunks;
-	bool		 open;
+	fsimg_decmpfs_table_t	 table;
+	bool			 open;
 } hfsplus_compressed_t;
 
 typedef struct hfsplus_window hfsplus_window_t;
@@ -934,10 +882,10 @@ void hfsplus_child_fill(const hfsplus_primary_t *, hfsplus_child_t *);
  * scan, error) validates the attribute records of one node ID. compressed says
  * the object is a compressed file, whose com.apple.decmpfs is then its content,
  * not a stored attribute: scan->stored reports the rest and scan->compression
- * the attribute, whose header scan->cmpf holds. An attribute of that name held
- * in a fork record is FSIMG_EUNSUPPORTED. scan->payload_bytes is the length of
- * what follows the header. payload, when not NULL, is a buffer of
- * HFSPLUS_CHUNK_STORED_MAX bytes that receives those bytes, since the scan's
+ * the attribute, whose decoded header scan->header holds. An attribute of that
+ * name held in a fork record is FSIMG_EUNSUPPORTED. scan->payload_bytes is the
+ * length of what follows the header. payload, when not NULL, is a buffer of
+ * FSIMG_DECMPFS_STORED_MAX bytes that receives those bytes, since the scan's
  * later nodes overwrite the node holding them; a listing passes NULL and reads
  * no payload.
  *
@@ -949,10 +897,10 @@ void hfsplus_child_fill(const hfsplus_primary_t *, hfsplus_child_t *);
  * a stub answers with its indirect node's record, which only a walk resolves.
  */
 typedef struct hfsplus_attr_scan {
-	hfsplus_cmpf_t	 cmpf;
-	size_t		 payload_bytes;
-	bool		 stored;
-	bool		 compression;
+	fsimg_decmpfs_header_t	 header;
+	size_t			 payload_bytes;
+	bool			 stored;
+	bool			 compression;
 } hfsplus_attr_scan_t;
 
 fsimg_status_t hfsplus_attr_scan(fsimg_reader_t *, uint32_t, bool,

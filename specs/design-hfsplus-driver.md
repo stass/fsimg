@@ -24,7 +24,7 @@ the module split, the tests and the gates; the drivers share no code.
 | --- | --- |
 | `hfsplus.h` | Private types, constants and prototypes shared by the files below, among them the one table of the four [format-owned root names](design-hfsplus.md#private-directories-and-format-owned-files) as stored units, which `directory.c` recognizes by and `write-plan.c` refuses by |
 | `descriptor.c` | `fsimg_hfsplus_format`: the `hfsplus` and `hfsx` names, their capability records, the probe, the reader operations and the writer descriptor |
-| `codec.c` | Big-endian decode and encode of the volume header, fork data, extent records, node descriptor, B-tree header record, catalog keys and records, attribute keys and records, journal info block and header, master directory block, and the little-endian compression header and chunk tables; pure functions without I/O |
+| `codec.c` | Big-endian decode and encode of the volume header, fork data, extent records, node descriptor, B-tree header record, catalog keys and records, attribute keys and records, journal info block and header, and master directory block; pure functions without I/O |
 | `unicode.c` | UTF-16 and UTF-8 conversion with the `/` and `:` and the U+0000 and U+2400 exchanges, decomposition, the folded and binary comparators, namespace keys |
 | `unicode-tables.h` | The generated decomposition, combining-class and fold tables, the fold table as a two-level table over the 65536 unit values, and their input digests |
 | `volume.c` | Open: the wrapper, the header and geometry, the journal policy, the special files, the three trees and the root |
@@ -32,7 +32,7 @@ the module split, the tests and the gates; the drivers share no code.
 | `btree.c` | The B-tree reader: node reads and framing, header records, keyed search, the leaf cursor, level iteration for verification |
 | `catalog.c` | Catalog record validation, the kind table, thread lookup, hard-link resolution, the record-to-entry mapping |
 | `attributes.c` | The attribute scan of one node ID, attribute record validation, the extra-data mark, the compression attribute |
-| `compress.c` | The compression header and chunk tables, the decode window and dispatch to zlib, LZVN and LZFSE |
+| `compress.c` | The compression types HFS Plus admits, the resource fork's reads for the shared framing validator, the decode window and dispatch to zlib, LZVN and LZFSE |
 | `directory.c` | `prepare`, `replay`, `keys` and `key`; format-owned root children |
 | `read.c` | `fsimg_hfsplus_reader_ops`: open, close, resolve and volume information |
 | `verify.c` | Full verification: tree structure, the catalog pass, the merges, the bitmap comparison, the alternate header |
@@ -77,8 +77,6 @@ derives from them, `hfsplus_geometry_t` and `hfsplus_tree_t`, whose header
 | `hfsplus_attr_t` | Record type, inline size and offset, or fork, or eight extents |
 | `hfsplus_jib_t`, `hfsplus_journal_t` | Journal info block and header fields, the header's byte order |
 | `hfsplus_mdb_t` | The wrapper fields the format design names |
-| `hfsplus_cmpf_t` | Compression type and uncompressed size |
-| `hfsplus_rsrc_t`, `hfsplus_rsrc_table_t`, `hfsplus_chunk_t` | A type 4 resource fork's header, its resource length and chunk count, and one chunk's offset and length |
 
 A borrowed key pointer is valid until its node buffer is reused, which the
 B-tree reader's cursor discipline below fixes. A search key is a different
@@ -372,7 +370,18 @@ former carrying the chunk's own length and the others bounding it, and for
 types 8 and 12 the words `i` and `i + 1`, whose
 difference is the length. The chunk, whose type 4 offset is counted from
 the count, is checked against the payload interval or, for types 8 and
-12, against the table's end `T` and `logicalSize`. Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is
+12, against the table's end `T` and `logicalSize`.
+
+These table and chunk
+checks, with the decoders of the compression header, the resource header
+and the table entries, are the shared framing validator
+`lib/formats/decmpfs.[ch]`, which
+[APFS shares](design-apfs-driver.md#compression-framing): `open` checks
+the table against the fork and the size, `chunk` checks one entry, and
+`compress.c` backs their reads with the resource fork's index. Their
+rejections name the framing, not HFS Plus.
+
+Resolving offset `o` decodes chunk `floor(o / 65536)` unless it is
 the window's current chunk, charges the bytes consumed and produced as
 work, and returns the decoded span. A codec error, a chunk that decodes to
 the wrong length, or one stored beyond the input bound is `FSIMG_ECORRUPT`.

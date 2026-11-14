@@ -48,6 +48,7 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/core/settings.c lib/core/settings.h \
 	lib/core/codec-memory.c lib/core/codec-memory.h \
 	lib/formats/format.c lib/formats/format.h \
+	lib/formats/decmpfs.c lib/formats/decmpfs.h \
 	lib/io/io.c lib/output/publish.c lib/output/publish.h \
 	lib/output/write.c \
 	lib/extract/extract.c lib/extract/extract.h \
@@ -190,7 +191,8 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-exfat-scale test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write \
 	test-erofs test-erofs-verify test-erofs-faults test-erofs-fixtures \
 	test-erofs-write \
-	test-lzfse test-hfsplus-codec test-hfsplus test-hfsplus-salvage \
+	test-lzfse test-decmpfs test-hfsplus-codec test-hfsplus \
+	test-hfsplus-salvage \
 	test-hfsplus-verify test-hfsplus-faults test-hfsplus-unicode test-hfsplus-write \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
@@ -326,6 +328,8 @@ test_qnx4_write_SOURCES = test/qnx4-write.c test/test.h test/scale.h
 test_qnx4_write_LDADD = libfsimg.la
 test_lzfse_SOURCES = test/lzfse.c test/lzfse-vectors.h test/test.h
 test_lzfse_LDADD = libfsimg.la
+test_decmpfs_SOURCES = test/decmpfs.c test/test.h
+test_decmpfs_LDADD = libfsimg.la
 test_hfsplus_codec_SOURCES = test/hfsplus-codec.c test/test.h
 test_hfsplus_codec_LDADD = libfsimg.la
 test_hfsplus_SOURCES = test/hfsplus.c test/hfsplus-gen.c test/hfsplus-gen.h \

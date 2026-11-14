@@ -405,8 +405,8 @@ prepare_named(hfsplus_prepare_t *prepare, const hfsplus_record_t *record,
 		}
 		scan.stored = true;
 	} else if (compressed) {
-		child.size = scan.cmpf.uncompressed_size;
-		child.compression = (uint8_t)scan.cmpf.type;
+		child.size = scan.header.uncompressed_size;
+		child.compression = (uint8_t)scan.header.type;
 	}
 	child.extra_data = scan.stored ||
 	    (primary.kind != FSIMG_ENTRY_DIRECTORY &&
