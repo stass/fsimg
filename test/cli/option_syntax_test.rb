@@ -154,12 +154,14 @@ class CliTest < Minitest::Test
     )
     [
       [["t", "-F", "fat32/-/vhd", "-f", "human.img"], "no VHD footer".b],
+      [["cf", "syntax.img", "-F", "apfs", "-C", "source", "."],
+        "unsupported writer format".b],
       [
         [
           "cf",
           "syntax.img",
           "-F",
-          "apfs",
+          "hfs",
           "-C",
           "source",
           "."

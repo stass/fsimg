@@ -400,7 +400,8 @@ help(fsimg_cli_display_t *display)
 		    "    -d              With W, also read initialized file data\n"
 		    "    -e epoch        Reproducible Unix timestamp; requires -R\n"
 		    "    -F stack        Required: the filesystem (fat12, fat16, fat32, exfat,\n"
-		    "                    qnx6, qnx4, ifs, iso9660, hfsplus, hfsx or erofs),\n"
+		    "                    qnx6, qnx4, ifs, iso9660, hfsplus, hfsx, erofs or\n"
+		    "                    apfs, which is read-only),\n"
 		    "                    optionally followed by gpt or mbr and by dmg, vhd or\n"
 		    "                    simg, joined by /, such as\n"
 		    "                    fat32/gpt/dmg\n"
@@ -1084,17 +1085,17 @@ partition(fsimg_cli_display_t *display, const unsigned char *raw)
 	append(display, "%s%s\n", active ? ", active" : "", selected ? ", selected" : "");
 }
 
-/* The allocation unit's name in human output: QNX filesystems, HFS Plus
- * and EROFS allocate in blocks, the other formats in clusters. JSON keeps one field name. The
- * frame decoder checks that a wire format name is terminated. A new
- * block-based format joins this list.
+/* The allocation unit's name in human output: QNX filesystems, HFS Plus,
+ * EROFS and APFS allocate in blocks, the other formats in clusters. JSON
+ * keeps one field name. The frame decoder checks that a wire format name is
+ * terminated. A new block-based format joins this list.
  */
 static bool
 format_counts_blocks(const char *format)
 {
 	return (strcmp(format, "qnx4") == 0 || strcmp(format, "qnx6") == 0 ||
 	    strcmp(format, "hfsplus") == 0 || strcmp(format, "hfsx") == 0 ||
-	    strcmp(format, "erofs") == 0);
+	    strcmp(format, "erofs") == 0 || strcmp(format, "apfs") == 0);
 }
 
 /* The volume's named details in the driver's order, values in decimal. */

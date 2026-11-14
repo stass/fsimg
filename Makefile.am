@@ -94,6 +94,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/apfs/btree.c lib/formats/apfs/omap.c \
 	lib/formats/apfs/unicode.c lib/formats/apfs/unicode-tables.h \
 	lib/formats/apfs/write-apfs.h lib/formats/apfs/write-btree.c \
+	lib/formats/apfs/descriptor.c lib/formats/apfs/volume.c \
+	lib/formats/apfs/read.c \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \
@@ -569,6 +571,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/container_create_test.rb \
 	test/cli/containers_test.rb \
 	test/cli/apm_test.rb \
+	test/cli/apfs_info_test.rb \
 	test/cli/coordinator_worker_test.rb \
 	test/cli/create_operands_test.rb \
 	test/cli/examples_test.rb \

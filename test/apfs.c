@@ -11,6 +11,7 @@
 
 #include "apfs.h"
 #include "apfs-gen.h"
+#include "format.h"
 #include "fsimg-endian.h"
 #include "reader.h"
 #include "test.h"
@@ -93,6 +94,7 @@ enum {
 typedef struct fixture {
 	unsigned	char *bytes;
 	uint64_t	length;
+	uint32_t	block_size;
 	uint64_t	baseline;
 	uint64_t	read_calls;
 	const struct mutation *reread_mutation;
@@ -150,7 +152,7 @@ static unsigned char *
 block_at(fixture_t *f, uint64_t block)
 {
 	CHECK(block < BLOCKS);
-	return (f->bytes + block * BLOCK);
+	return (f->bytes + block * f->block_size);
 }
 
 static void
@@ -220,14 +222,15 @@ reader_init(fixture_t *f, uint64_t work)
 }
 
 static void
-fixture_init(fixture_t *f, uint64_t work)
+fixture_init_block_size(fixture_t *f, uint64_t work, uint32_t block_size)
 {
 	fsimg_io_ops_t ops;
 
 	bzero(f, sizeof(*f));
-	f->bytes = calloc(1, IMAGE_BYTES);
+	f->block_size = block_size;
+	f->length = (uint64_t)block_size * BLOCKS;
+	f->bytes = calloc(1, f->length);
 	CHECK(f->bytes != NULL);
-	f->length = IMAGE_BYTES;
 	reader_init(f, work);
 	fsimg_io_ops_init(&ops);
 	ops.read_at = memory_read;
@@ -239,10 +242,17 @@ fixture_init(fixture_t *f, uint64_t work)
 }
 
 static void
+fixture_init(fixture_t *f, uint64_t work)
+{
+	fixture_init_block_size(f, work, BLOCK);
+}
+
+static void
 fixture_close(fixture_t *f)
 {
 	fsimg_stats_t stats;
 
+	fsimg_apfs_reader_ops.close(&f->reader);
 	apfs_container_close(&f->container);
 	fsimg_io_free(f->reader.narrowed);
 	fsimg_io_free(f->io);
@@ -284,7 +294,8 @@ build_container_map(fixture_t *f)
 		.flags = 1, .tree_type = 0x40000002, .tree_oid = TREE_BASE
 	};
 
-	CHECK(apfs_gen_omap_build(block_at(f, MAP_BLOCK), BLOCK, &omap));
+	CHECK(apfs_gen_omap_build(block_at(f, MAP_BLOCK), f->block_size,
+	    &omap));
 }
 
 /* Each checkpoint has private data so damage cannot affect its predecessor. */
@@ -294,7 +305,7 @@ build_checkpoints(fixture_t *f, unsigned count, uint64_t block0_xid)
 	apfs_gen_mapping_t mappings[3][2];
 	apfs_gen_run_t runs[3];
 	apfs_gen_container_t image = {
-		.nx = { .magic = 0x4253584e, .block_size = BLOCK,
+		.nx = { .magic = 0x4253584e, .block_size = f->block_size,
 		.block_count = BLOCKS, .uuid = { 1, 2, 3 },
 		.desc_base = 1, .desc_blocks = DESCRIPTOR_SLOTS,
 		    .data_base = DATA_SPACEMAN,
@@ -307,10 +318,11 @@ build_checkpoints(fixture_t *f, unsigned count, uint64_t block0_xid)
 	CHECK(count >= 1 && count <= 3);
 	for (unsigned i = 0; i < count; i++) {
 		mappings[i][0] = (apfs_gen_mapping_t){ .type = 0x80000005,
-		    .size = BLOCK, .oid = 100,
+		    .size = f->block_size, .oid = 100,
 		    .address = DATA_SPACEMAN + 4 * i };
 		mappings[i][1] = (apfs_gen_mapping_t){ .type = 0x80000011,
-		    .size = BLOCK, .oid = 102, .address = DATA_REAPER + 4 * i };
+		    .size = f->block_size, .oid = 102,
+		    .address = DATA_REAPER + 4 * i };
 		runs[i] = (apfs_gen_run_t){ .xid = 10 * (i + 1),
 		    .next_xid = 10 * (i + 1) + 1, .mappings = mappings[i],
 		    .mapping_count = 2, .mapping_blocks = 1,
@@ -318,8 +330,642 @@ build_checkpoints(fixture_t *f, unsigned count, uint64_t block0_xid)
 		    .data_index = 4 * i, .data_len = 4,
 		    .data_next = 4 * i + 4 };
 	}
-	CHECK(apfs_gen_container_build(f->bytes, IMAGE_BYTES, &image));
+	CHECK(apfs_gen_container_build(f->bytes, f->length, &image));
 	build_container_map(f);
+}
+
+/* Full-open fixtures keep the older checkpoint to catch accidental fallback.
+ * occupied_slots is a bitmask of volume-array indexes.
+ * Three blocks per volume: APSB, physical object map, empty map root.
+ */
+#define VOLUME_BASE 500u
+#define VOLUME_OID 2000u
+#define VOLUME_SLOT 2u
+#define VOLUME_MAX 4u
+
+static void
+build_openable(fixture_t *f, unsigned occupied_slots)
+{
+	apfs_gen_omap_record_t records[VOLUME_MAX];
+	apfs_gen_tree_t tree;
+	apfs_gen_fs_t fs;
+	apfs_gen_omap_t map;
+	apfs_gen_node_t node;
+	apfs_gen_spaceman_t spaceman = {
+		.object = { .oid = 100, .xid = 20, .type = 0x80000005 },
+		.block_size = f->block_size,
+		    .devices = { { .free_count = 700 } }
+	};
+	uint64_t root, blocks;
+	size_t count = 0;
+
+	build_checkpoints(f, 2, 10);
+	for (unsigned b = 0; b <= NEWEST_NX; b += 2) {
+		fsimg_store_le64(block_at(f, b) + 64, 2);
+		fsimg_store_le32(block_at(f, b) + 180, VOLUME_MAX);
+		for (unsigned slot = 0; slot < VOLUME_MAX; slot++)
+			fsimg_store_le64(block_at(f, b) + 184 + 8 * slot,
+			    (occupied_slots & (1u << slot)) ?
+			    VOLUME_OID + slot : 0);
+		CHECK(apfs_gen_seal(block_at(f, b), f->block_size));
+	}
+	CHECK(apfs_gen_spaceman_build(block_at(f, NEWEST_SPACEMAN),
+	    f->block_size, &spaceman));
+	for (unsigned slot = 0; slot < VOLUME_MAX; slot++) {
+		unsigned address = VOLUME_BASE + 3 * slot;
+
+		/* Map every slot so the no-volume case still has a valid
+		    tree. */
+		records[count++] = (apfs_gen_omap_record_t){
+		    .key = { .oid = VOLUME_OID + slot, .xid = 10 },
+		    .value = { .size = f->block_size, .address = address } };
+		fs = (apfs_gen_fs_t){
+		    .object = { .oid = VOLUME_OID + slot, .xid = 10,
+		    .type = 13 },
+		    .magic = 0x42535041, .index = slot,
+		    .uuid = { 1, 2, 3, (unsigned char)(slot + 1) },
+		    .name = "Selected volume", .flags = 1,
+		    .incompat_features = 9, .root_tree_type = 2,
+		    .extentref_tree_type = 0x40000002,
+		    .snapshot_tree_type = 0x40000002, .omap_oid = address + 1,
+		    .files = 11, .directories = 12, .symlinks = 13,
+		    .other_objects = 14, .snapshots = 15, .alloc_blocks = 16,
+		    .role = 64 };
+		CHECK(apfs_gen_fs_build(block_at(f, address), f->block_size,
+		    &fs));
+		map = (apfs_gen_omap_t){ .object = { .oid = address + 1,
+		    .xid = 10, .type = 0x4000000b },
+		    .tree_type = 0x40000002, .tree_oid = address + 2 };
+		CHECK(apfs_gen_omap_build(block_at(f, address + 1),
+		    f->block_size, &map));
+		node = (apfs_gen_node_t){ .object = { .oid = address + 2,
+		    .xid = 10, .type = 0x40000002, .subtype = 11 },
+		    .flags = GEN_APFS_ROOT | GEN_APFS_LEAF | GEN_APFS_FIXED,
+		    .info = { .flags = 0x17, .node_size = f->block_size,
+		    .key_size = 16, .val_size = 16, .node_count = 1 } };
+		CHECK(apfs_gen_node_build(block_at(f, address + 2),
+		    f->block_size, &node));
+	}
+	tree = (apfs_gen_tree_t){ .records = records, .count = count,
+	    .base = TREE_BASE, .xid = 10, .block_size = f->block_size,
+	    .records_per_leaf = VOLUME_MAX, .children_per_index = 2 };
+	CHECK(apfs_gen_tree_build(f->bytes, f->length, &tree, &root, &blocks));
+	map = (apfs_gen_omap_t){ .object = { .oid = MAP_BLOCK,
+	    .xid = 10, .type = 0x4000000b }, .flags = 1,
+	    .tree_type = 0x40000002, .tree_oid = root };
+	CHECK(apfs_gen_omap_build(block_at(f, MAP_BLOCK), f->block_size, &map));
+}
+
+static fsimg_status_t
+full_open(fixture_t *f)
+{
+	return (fsimg_apfs_reader_ops.open(&f->reader, NULL, &f->error));
+}
+
+/* The predecessor must open independently for a fallback test to prove
+ * that refusal came from the selected state rather than an unusable past.
+ */
+static void
+test_full_open_predecessor_is_openable(void)
+{
+	fixture_t f;
+
+	scenario = "full open predecessor is openable";
+	fixture_init(&f, 0);
+	build_openable(&f, 1u << VOLUME_SLOT);
+	bzero(block_at(&f, NEWEST_NX), BLOCK);
+	if (status_is(&f, full_open(&f), FSIMG_OK)) {
+		apfs_reader_t *apfs = f.reader.driver;
+
+		expect(apfs->container.xid == 10,
+		    "predecessor checkpoint selected");
+		expect(apfs->fs.uuid[3] == 3, "predecessor volume resolves");
+	}
+	fixture_close(&f);
+}
+
+/* Damage only the newest checkpoint's private map. The corrupt block
+ * remains present when removing its superblock selects the predecessor.
+ */
+static void
+test_full_open_private_map_damage_does_not_fall_back(void)
+{
+	fixture_t f;
+	fsimg_reader_t *reader = NULL;
+	apfs_gen_omap_t map = {
+		.object = { .oid = NEWEST_OMAP, .xid = 20, .type = 0x4000000b },
+		.flags = 1, .tree_type = 0x40000002, .tree_oid = TREE_BASE
+	};
+
+	scenario = "full open private map damage does not fall back";
+	fixture_init(&f, 0);
+	build_openable(&f, 1u << VOLUME_SLOT);
+	CHECK(apfs_gen_omap_build(block_at(&f, NEWEST_OMAP), BLOCK, &map));
+	mutate(&f, &(mutation_t){ .block = NEWEST_NX,
+	    .offset = NX_OMAP_OID_OFFSET, .value = NEWEST_OMAP, .width = 8 });
+	block_at(&f, NEWEST_OMAP)[0] ^= 1;
+	status_is(&f, fsimg_reader_open(f.ctx, f.io, NULL, &reader,
+	    &f.error), FSIMG_ECORRUPT);
+	fsimg_reader_free(reader);
+	reader = NULL;
+
+	bzero(block_at(&f, NEWEST_NX), BLOCK);
+	if (status_is(&f, fsimg_reader_open(f.ctx, f.io, NULL, &reader,
+	    &f.error), FSIMG_OK)) {
+		apfs_reader_t *apfs = reader->driver;
+
+		expect(apfs->container.xid == 10,
+		    "predecessor opens with newest private map still corrupt");
+	}
+	fsimg_reader_free(reader);
+	fixture_close(&f);
+}
+
+static void
+test_full_open_volume_selection(void)
+{
+	static const struct {
+		const char *name;
+		unsigned slots;
+		bool selected;
+		uint32_t index;
+		fsimg_status_t status;
+		const char *message;
+	} cases[] = {
+		{ .name = "explicit occupied slot", .slots = 5,
+		    .selected = true, .index = 2, .status = FSIMG_OK },
+		{ .name = "explicit empty slot", .slots = 5,
+		    .selected = true, .index = 1, .status = FSIMG_EINVAL,
+		    .message = "slot 1 is empty" },
+		{ .name = "index equals maximum", .slots = 5,
+		    .selected = true, .index = 4, .status = FSIMG_EINVAL,
+		    .message = "maximum of 4" },
+		{ .name = "index exceeds maximum", .slots = 5,
+		    .selected = true, .index = UINT32_MAX,
+		    .status = FSIMG_EINVAL,
+		    .message = "maximum of 4" },
+		{ .name = "only volume in nonzero slot", .slots = 4,
+		    .selected = false, .index = 0, .status = FSIMG_OK },
+		{ .name = "ambiguous volumes", .slots = 5,
+		    .selected = false, .index = 0, .status = FSIMG_EINVAL,
+		    .message = "2 volumes in slots 0 to 2" },
+		{ .name = "no volumes", .slots = 0, .status = FSIMG_EINVAL,
+		    .message = "holds no volume" }
+	};
+	fixture_t f;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		scenario = cases[i].name;
+		fixture_init(&f, 0);
+		build_openable(&f, cases[i].slots);
+		f.reader.options.volume_index_set = cases[i].selected;
+		f.reader.options.volume_index = cases[i].index;
+		if (status_is(&f, full_open(&f), cases[i].status)) {
+			if (cases[i].status == FSIMG_OK) {
+				apfs_reader_t *apfs = f.reader.driver;
+
+				expect(apfs->volume_index == 2,
+				    "selected volume is slot 2");
+				expect(apfs->fs.uuid[3] == 3,
+				    "selected volume UUID");
+			} else {
+				expect(strstr(f.error.message,
+				    cases[i].message) != NULL,
+				    "selection diagnostic names count or slot");
+				expect(strstr(f.error.message,
+				    "Selected volume") == NULL,
+				    "selection diagnostic exposes no volume name");
+			}
+		}
+		fixture_close(&f);
+	}
+}
+
+static void
+test_full_open_volume_validation(void)
+{
+	static const mutation_t cases[] = {
+		{ .name = "volume magic",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 32, .value = 0, .width = 4,
+		    .status = FSIMG_ECORRUPT },
+		{ .name = "volume slot mismatch",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 36, .value = 1, .width = 4,
+		    .status = FSIMG_ECORRUPT },
+		{ .name = "volume zero UUID",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 240, .value = 0, .width = 8,
+		    .status = FSIMG_ECORRUPT },
+		{ .name = "volume invalid UTF-8",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 704, .value = 128, .width = 1,
+		    .status = FSIMG_ECORRUPT },
+		{ .name = "volume sealed",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 56, .value = 32, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume incomplete restore",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 56, .value = 16, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume unknown incompat",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 56, .value = 128, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume encrypted",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 264, .value = 0, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume one key",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 264, .value = 9, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume spilled over",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 264, .value = 17, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume spillover cleaner",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 264, .value = 33, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume unknown flags",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 264, .value = 129, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume revert XID",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 160, .value = 1, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume revert OID",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 168, .value = 1, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume rolling OID",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 976, .value = 1, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume root-to XID",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 968, .value = 1, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "volume root tree type",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 116, .value = 1073741826, .width = 4,
+		    .status = FSIMG_ECORRUPT },
+		{ .name = "volume extentref tree type",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 120, .value = 2, .width = 4,
+		    .status = FSIMG_ECORRUPT },
+		{ .name = "volume snapshot tree type",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 124, .value = 2, .width = 4,
+		    .status = FSIMG_ECORRUPT },
+		{ .name = "volume case insensitive",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 56, .value = 1, .width = 8,
+		    .status = FSIMG_OK },
+		{ .name = "volume normalization insensitive",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 56, .value = 8, .width = 8,
+		    .status = FSIMG_OK },
+		{ .name = "volume dataless snapshots",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 56, .value = 2, .width = 8,
+		    .status = FSIMG_OK },
+		{ .name = "volume encryption rolled unencrypted",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 56, .value = 4, .width = 8,
+		    .status = FSIMG_OK },
+		{ .name = "volume extentref flag",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 264, .value = 65, .width = 8,
+		    .status = FSIMG_OK },
+		{ .name = "volume read-only features",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 48, .value = UINT64_MAX, .width = 8,
+		    .status = FSIMG_OK },
+		{ .name = "volume optional features",
+		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
+		    .offset = 40, .value = UINT64_MAX, .width = 8,
+		    .status = FSIMG_OK },
+	};
+	fixture_t f;
+	unsigned char *raw;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		for (unsigned assume = 0; assume < 2; assume++) {
+			scenario = cases[i].name;
+			fixture_init(&f, 0);
+			build_openable(&f, 1u << VOLUME_SLOT);
+			if (cases[i].offset == 240)
+				bzero(block_at(&f, cases[i].block) + 240, 16);
+			mutate(&f, &cases[i]);
+			if (assume) {
+				f.bytes[32] ^= 1;
+				CHECK(apfs_gen_seal(f.bytes, BLOCK));
+				f.reader.options.flags =
+				    FSIMG_READ_ASSUME_IDENTITY;
+			}
+			status_is(&f, full_open(&f), cases[i].status);
+			fixture_close(&f);
+		}
+	}
+	scenario = "volume name without terminator";
+	fixture_init(&f, 0);
+	build_openable(&f, 1u << VOLUME_SLOT);
+	raw = block_at(&f, VOLUME_BASE + 3 * VOLUME_SLOT);
+	memset(raw + 704, 'n', 256);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	status_is(&f, full_open(&f), FSIMG_ECORRUPT);
+	fixture_close(&f);
+}
+
+static void
+test_full_open_information_and_prepare(void)
+{
+	static const struct {
+		const char *name;
+		uint64_t value;
+	} details[] = {
+		{ .name = "volume_index", .value = 2 },
+		{ .name = "volume_count", .value = 1 },
+		{ .name = "role", .value = 64 },
+		{ .name = "case_insensitive", .value = 1 },
+		{ .name = "norm_insensitive", .value = 1 },
+		{ .name = "checkpoint_xid", .value = 20 },
+		{ .name = "read_xid", .value = 20 },
+		{ .name = "files", .value = 11 },
+		{ .name = "directories", .value = 12 },
+		{ .name = "symlinks", .value = 13 },
+		{ .name = "other_objects", .value = 14 },
+		{ .name = "snapshots", .value = 15 },
+		{ .name = "volume_blocks", .value = 16 },
+		{ .name = "sealed", .value = 0 },
+		{ .name = "seal_broken_xid", .value = 0 }
+	};
+	fixture_t f;
+	fsimg_volume_info_t *info;
+	unsigned char *raw;
+
+	for (unsigned long_name = 0; long_name < 2; long_name++) {
+		scenario = long_name ? "255-byte volume label" :
+		    "full volume information";
+		fixture_init(&f, 0);
+		build_openable(&f, 1u << VOLUME_SLOT);
+		raw = block_at(&f, VOLUME_BASE + 3 * VOLUME_SLOT);
+		if (long_name) {
+			memset(raw + 704, 'n', 255);
+			raw[959] = 0;
+			CHECK(apfs_gen_seal(raw, BLOCK));
+		}
+		if (status_is(&f, full_open(&f), FSIMG_OK)) {
+			info = &f.reader.info;
+			expect(strcmp(info->format, "apfs") == 0,
+			    "format apfs");
+			expect(strcmp(info->profile, APFS_PROFILE) == 0,
+			    "Unicode profile");
+			expect(strcmp(info->label, (char *)raw + 704) == 0,
+			    "entire label");
+			expect(memcmp(info->uuid, raw + 240, 16) == 0,
+			    "UUID bytes");
+			expect(info->volume_bytes == IMAGE_BYTES,
+			    "container bytes");
+			expect(info->allocation_units == BLOCKS,
+			    "container blocks");
+			expect(info->allocation_unit_bytes == BLOCK,
+			    "allocation unit bytes");
+			expect(info->sector_bytes == BLOCK, "sector bytes");
+			expect(info->free_bytes == 700 * BLOCK,
+			    "main-device free bytes");
+			expect(info->clean && !info->io_error,
+			    "clean without I/O error");
+			expect(info->time_basis == FSIMG_TIME_UTC,
+			    "UTC timestamps");
+			expect(info->scope == FSIMG_VALIDATION_HEADER,
+			    "header validation scope");
+			expect(info->detail_count == 15, "fifteen details");
+			for (size_t i = 0; i < 15 && i < info->detail_count;
+			    i++) {
+				expect(strcmp(info->details[i].name,
+				    details[i].name) == 0,
+				    details[i].name);
+				expect(info->details[i].value ==
+				    details[i].value,
+				    details[i].name);
+			}
+			status_is(&f, fsimg_apfs_reader_ops.prepare(&f.reader,
+			    NULL, &f.error), FSIMG_EUNSUPPORTED);
+		}
+		fixture_close(&f);
+	}
+}
+
+static void
+test_full_open_probe_and_assumed_identity(void)
+{
+	static const mutation_t cases[] = {
+		{ .name = "block zero missing magic", .offset = 32,
+		    .value = 0, .width = 4, .status = FSIMG_EFORMAT },
+		{ .name = "block zero wrong kind", .offset = 24,
+		    .value = 2147483650, .width = 4, .status = FSIMG_ECORRUPT },
+		{ .name = "block zero wrong OID", .offset = 8,
+		    .value = 2, .width = 8, .status = FSIMG_ECORRUPT },
+		{ .name = "block zero physical storage", .offset = 24,
+		    .value = 1073741825, .width = 4, .status = FSIMG_ECORRUPT },
+		{ .name = "block zero virtual storage", .offset = 24,
+		    .value = 1, .width = 4, .status = FSIMG_ECORRUPT },
+		{ .name = "block zero bad block size", .offset = 36,
+		    .value = 6144, .width = 4, .status = FSIMG_ECORRUPT },
+		{ .name = "block zero bad block count", .offset = 40,
+		    .value = 255, .width = 8, .status = FSIMG_ECORRUPT },
+		{ .name = "block zero Fusion", .offset = 64,
+		    .value = 258, .width = 8, .status = FSIMG_EUNSUPPORTED },
+		{ .name = "block zero version one", .offset = 64,
+		    .value = 1, .width = 8, .status = FSIMG_EUNSUPPORTED },
+		{ .name = "block zero unknown incompat", .offset = 64,
+		    .value = 130, .width = 8, .status = FSIMG_EUNSUPPORTED },
+		{ .name = "block zero low-capacity without Fusion",
+		    .offset = 48,
+		    .value = 2, .width = 8, .status = FSIMG_ECORRUPT },
+		{ .name = "block zero zero XID", .offset = 16,
+		    .value = 0, .width = 8, .status = FSIMG_ECORRUPT },
+		{ .name = "block zero encrypted", .offset = 24,
+		    .value = 0x90000001u, .width = 4,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "block zero nonpersistent", .offset = 24,
+		    .value = 0x88000001u, .width = 4,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "block zero unknown flag", .offset = 1264,
+		    .value = 1, .width = 8, .status = FSIMG_EUNSUPPORTED },
+		{ .name = "block zero software cryptography flag",
+		    .offset = 1264, .value = 4, .width = 8,
+		    .status = FSIMG_OK },
+		{ .name = "block zero stale checksum", .kind = MUTATE_CHECKSUM,
+		    .status = FSIMG_ECORRUPT }
+	};
+	fixture_t f;
+	const fsimg_format_variant_t *variant;
+	fsimg_status_t wanted;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		for (unsigned assume = 0; assume < 2; assume++) {
+			scenario = cases[i].name;
+			fixture_init(&f, 0);
+			build_openable(&f, 1u << VOLUME_SLOT);
+			mutate(&f, &cases[i]);
+			status_is(&f, fsimg_apfs_format.probe(f.bytes, BLOCK,
+			    IMAGE_BYTES, &variant, &f.error), cases[i].status);
+			f.reader.options.flags =
+			    assume ? FSIMG_READ_ASSUME_IDENTITY : 0;
+			/* The probe's absent identity is open's failed
+			 * identity check, FSIMG_ECORRUPT unless assumed
+			 * (fsimg_reader_identity()).
+			 */
+			wanted = cases[i].status;
+			if (wanted == FSIMG_EFORMAT)
+				wanted = assume ? FSIMG_OK : FSIMG_ECORRUPT;
+			if (status_is(&f, full_open(&f), wanted) &&
+			    wanted == FSIMG_OK)
+				expect((f.reader.assumed_identity != NULL) ==
+				    (cases[i].status == FSIMG_EFORMAT),
+				    "only a failed identity is recorded");
+			fixture_close(&f);
+		}
+	}
+	scenario = "probe prefix shorter than one block";
+	fixture_init(&f, 0);
+	build_openable(&f, 1u << VOLUME_SLOT);
+	status_is(&f, fsimg_apfs_format.probe(f.bytes, BLOCK - 1,
+	    BLOCK - 1, &variant, &f.error), FSIMG_ECORRUPT);
+	fixture_truncate(&f, BLOCK - 1);
+	status_is(&f, full_open(&f), FSIMG_ECORRUPT);
+	fixture_close(&f);
+
+	scenario = "assumed identity retains checksum validation";
+	fixture_init(&f, 0);
+	build_openable(&f, 1u << VOLUME_SLOT);
+	f.bytes[32] ^= 1;
+	f.reader.options.flags =
+	    FSIMG_READ_ASSUME_IDENTITY;
+	status_is(&f, full_open(&f), FSIMG_ECORRUPT);
+	fixture_close(&f);
+}
+
+static void
+test_probe_uses_4096_byte_prefix_and_open_checks_whole_block(void)
+{
+	fixture_t f;
+	const fsimg_format_variant_t *variant;
+	unsigned char *prefix;
+
+	scenario = "APFS probe needs only 4096 bytes";
+	expect(fsimg_apfs_format.probe_bytes == 4096, "probe_bytes is 4096");
+	prefix = malloc(4096);
+	CHECK(prefix != NULL);
+
+	scenario = "16384-byte block probes from a 4096-byte allocation";
+	fixture_init_block_size(&f, 0, 16384);
+	build_openable(&f, 1u << VOLUME_SLOT);
+	bcopy(f.bytes, prefix, 4096);
+	status_is(&f, fsimg_apfs_format.probe(prefix, 4096,
+	    f.length, &variant, &f.error), FSIMG_OK);
+
+	scenario = "16384-byte block exceeds 8192-byte volume";
+	status_is(&f, fsimg_apfs_format.probe(prefix, 4096,
+	    8192, &variant, &f.error), FSIMG_ECORRUPT);
+
+	scenario = "undamaged 16384-byte container opens";
+	if (!status_is(&f, full_open(&f), FSIMG_OK)) {
+		free(prefix);
+		fixture_close(&f);
+		return;
+	}
+	fixture_close(&f);
+
+	for (unsigned assume = 0; assume < 2; assume++) {
+		scenario = assume ?
+		    "assumed identity checks beyond probe prefix" :
+		    "open checks beyond probe prefix";
+		fixture_init_block_size(&f, 0, 16384);
+		build_openable(&f, 1u << VOLUME_SLOT);
+		/* Leave block zero's checksum stale beyond the probe's
+		    allocation. */
+		f.bytes[8192] ^= 1;
+		bcopy(f.bytes, prefix, 4096);
+		status_is(&f, fsimg_apfs_format.probe(prefix, 4096,
+		    f.length, &variant, &f.error), FSIMG_OK);
+		f.reader.options.flags =
+		    assume ? FSIMG_READ_ASSUME_IDENTITY : 0;
+		if (status_is(&f, full_open(&f), FSIMG_ECORRUPT))
+			expect(strstr(f.error.message, "bad checksum") != NULL,
+			    "open fails on the block-0 checksum");
+		fixture_close(&f);
+	}
+	free(prefix);
+}
+
+static void
+test_full_open_checkpoint_features_and_free_count(void)
+{
+	static const mutation_t cases[] = {
+		{ .name = "container object map checksum", .block = MAP_BLOCK,
+		    .kind = MUTATE_CHECKSUM, .status = FSIMG_ECORRUPT },
+		{ .name = "selected checkpoint Fusion", .block = NEWEST_NX,
+		    .offset = 64, .value = 0x102, .width = 8,
+		    .status = FSIMG_EUNSUPPORTED },
+		{ .name = "main free count above container blocks",
+		    .block = NEWEST_SPACEMAN, .offset = 72,
+		    .value = BLOCKS + 1, .width = 8, .status = FSIMG_ECORRUPT }
+	};
+	fixture_t f;
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		for (unsigned assume = 0; assume < 2; assume++) {
+			scenario = cases[i].name;
+			fixture_init(&f, 0);
+			build_openable(&f, 1u << VOLUME_SLOT);
+			mutate(&f, &cases[i]);
+			if (assume) {
+				f.bytes[32] ^= 1;
+				CHECK(apfs_gen_seal(f.bytes, BLOCK));
+				f.reader.options.flags =
+				    FSIMG_READ_ASSUME_IDENTITY;
+			}
+			status_is(&f, full_open(&f), cases[i].status);
+			fixture_close(&f);
+		}
+	}
+}
+
+static void
+test_full_open_truncated_container(void)
+{
+	static const uint64_t cuts[] = { 5 * BLOCK, 38 * BLOCK, 512 * BLOCK };
+	fixture_t f;
+	fsimg_reader_t *reader = NULL;
+	fsimg_volume_info_t info;
+
+	for (size_t i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+		scenario = "full open truncated container";
+		fixture_init(&f, 0);
+		build_openable(&f, 1u << VOLUME_SLOT);
+		fixture_truncate(&f, cuts[i]);
+		if (i < 2) {
+			if (status_is(&f, full_open(&f), FSIMG_ECORRUPT))
+				expect(strcmp(f.error.message,
+				    "image is truncated") == 0,
+				    "truncation never selects older state");
+		} else if (status_is(&f, fsimg_reader_open(f.ctx,
+		    f.reader.input, NULL, &reader, &f.error), FSIMG_OK)) {
+			CHECK(fsimg_reader_get_info(reader, &info, &f.error) ==
+			    FSIMG_OK);
+			expect(info.missing_bytes == IMAGE_BYTES - cuts[i],
+			    "missing bytes");
+			fsimg_reader_free(reader);
+		}
+		fixture_close(&f);
+	}
 }
 
 static void
@@ -346,7 +992,8 @@ test_selected_descriptor_changed_while_read(void)
 		fixture_init(&f, 0);
 		build_checkpoints(&f, 2, 10);
 		f.reread_mutation = &cases[i];
-		/* The ring scan reads its eight slots before rereading selection. */
+		/* The ring scan reads its eight slots before rereading
+		    selection. */
 		f.reread_after = DESCRIPTOR_SLOTS;
 		if (status_is(&f, checkpoint_open(&f), FSIMG_ECORRUPT))
 			expect(strstr(f.error.message,
@@ -417,10 +1064,12 @@ test_descriptor_flags_and_subtypes_exclude_newest_checkpoint(void)
 		{ .mutation = { .name = "subtyped newest NX ignored",
 		    .block = NEWEST_NX, .offset = OBJECT_SUBTYPE_OFFSET,
 		    .value = 1, .width = 4 }, .clean = true },
-		{ .mutation = { .name = "encrypted newest mapping makes torn run",
+		{ .mutation = {
+		    .name = "encrypted newest mapping makes torn run",
 		    .block = NEWEST_MAP, .offset = OBJECT_TYPE_OFFSET,
 		    .value = 0x5000000c, .width = 4 } },
-		{ .mutation = { .name = "subtyped newest mapping makes torn run",
+		{ .mutation = {
+		    .name = "subtyped newest mapping makes torn run",
 		    .block = NEWEST_MAP, .offset = OBJECT_SUBTYPE_OFFSET,
 		    .value = 1, .width = 4 } }
 	};
@@ -500,7 +1149,8 @@ test_torn_newest_checkpoint_opens_older_unclean(void)
 			build_checkpoints(&f, 2, committed ? 20 : 10);
 			mutate(&f, &cases[i]);
 			if (status_is(&f, checkpoint_open(&f),
-			    committed ? FSIMG_ECORRUPT : FSIMG_OK) && !committed) {
+			    committed ? FSIMG_ECORRUPT : FSIMG_OK) &&
+			    !committed) {
 				expect(f.container.xid == 10,
 				    "older checkpoint selected");
 				expect(!f.container.clean,
@@ -582,10 +1232,13 @@ test_selected_checkpoint_damage_never_falls_back(void)
 	static const mutation_t cases[] = {
 		{ .name = "mapped bad checksum", .block = NEWEST_SPACEMAN,
 		    .kind = MUTATE_CHECKSUM },
-		{ .name = "selected container map bad checksum", .block = MAP_BLOCK,
+		{ .name = "selected container map bad checksum",
+		    .block = MAP_BLOCK,
 		    .kind = MUTATE_CHECKSUM },
-		{ .name = "selected container map wrong kind", .block = MAP_BLOCK,
-		    .offset = OBJECT_TYPE_OFFSET, .value = 0x4000000d, .width = 4 },
+		{ .name = "selected container map wrong kind",
+		    .block = MAP_BLOCK,
+		    .offset = OBJECT_TYPE_OFFSET, .value = 0x4000000d,
+		    .width = 4 },
 		{ .name = "mapped wrong kind", .block = NEWEST_SPACEMAN,
 		    .offset = OBJECT_TYPE_OFFSET,
 		    .value = 0x80000006, .width = 4 },
@@ -802,7 +1455,8 @@ test_wrapping_runs_large_tables_and_multiblock_objects(void)
 		if (cases[c].reverse) {
 			for (uint32_t i = 0; i < run.mapping_count / 2; i++) {
 				swap = mappings[i];
-				mappings[i] = mappings[run.mapping_count - 1 - i];
+				mappings[i] =
+				    mappings[run.mapping_count - 1 - i];
 				mappings[run.mapping_count - 1 - i] = swap;
 			}
 		}
@@ -822,7 +1476,8 @@ test_wrapping_runs_large_tables_and_multiblock_objects(void)
 				expect(found && mapping.address == 32 + i,
 				    "paged lookup finds each mapping");
 			}
-			for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+			for (size_t i = 0;
+			    i < sizeof(absent) / sizeof(absent[0]); i++) {
 				CHECK(apfs_ephemeral_find(&f.container,
 				    absent[i],
 				    &found, &mapping, &f.error) == FSIMG_OK);
@@ -844,7 +1499,8 @@ test_last_map_flag_belongs_only_on_last_mapping_block(void)
 		scenario = "last-map flag on wrong one of two mapping blocks";
 		fixture_init(&f, 0);
 		build_checkpoints(&f, 2, 10);
-		/* Extend the newest run by one empty mapping block and move NX. */
+		/* Extend the newest run by one empty mapping block and move
+		    NX. */
 		bcopy(block_at(&f, NEWEST_NX), block_at(&f, EXTENDED_NX),
 		    BLOCK);
 		bzero(block_at(&f, NEWEST_NX), BLOCK);
@@ -993,7 +1649,8 @@ test_physical_and_ephemeral_object_references(void)
 		    &header, &f.error), mutations[i].status);
 		fixture_close(&f);
 	}
-	for (size_t i = 0; i < sizeof(references) / sizeof(references[0]); i++) {
+	for (size_t i = 0; i < sizeof(references) / sizeof(references[0]);
+	    i++) {
 		scenario = references[i].name;
 		fixture_init(&f, 0);
 		build_checkpoints(&f, 1, 10);
@@ -1004,7 +1661,8 @@ test_physical_and_ephemeral_object_references(void)
 		ref = (apfs_ref_t){ .role = "test object",
 		    .oid = references[i].oid,
 		    .xid = 10, .storage = references[i].storage,
-		    .kind = references[i].storage == APFS_OBJ_PHYSICAL ? 13 : 5 };
+		    .kind = references[i].storage == APFS_OBJ_PHYSICAL ?
+		    13 : 5 };
 		if (references[i].checksum)
 			block_at(&f, OBJECT_BLOCK)[0] ^= 1;
 		if (references[i].slice != 0)
@@ -1127,7 +1785,8 @@ test_multilevel_cursors_seek_and_visit_in_order(void)
 		}
 		for (unsigned direction = 0; direction < 2; direction++) {
 			for (uint64_t oid = 998; oid <= 1033; oid++) {
-				bool wanted = direction == 0 ? oid >= 1000 : oid <= 1030;
+				bool wanted = direction == 0 ? oid >= 1000 :
+				    oid <= 1030;
 				uint64_t target = direction == 0 ?
 				    (oid > 1030 ? 1030 : oid - oid % 2) :
 				    (oid < 1000 ? 1000 : oid + oid % 2);
@@ -1309,7 +1968,8 @@ test_map_lookup_selects_versions_and_deleted_entries_do_not_fall_back(void)
 	bool found;
 
 	for (unsigned deleted = 0; deleted < 2; deleted++) {
-		scenario = deleted ? "deleted newest version never falls through" :
+		scenario = deleted ?
+		    "deleted newest version never falls through" :
 		    "map lookup chooses greatest XID not above request";
 		fixture_init(&f, 0);
 		build_checkpoints(&f, 1, 10);
@@ -1331,7 +1991,8 @@ test_map_lookup_selects_versions_and_deleted_entries_do_not_fall_back(void)
 		for (size_t i = 0; i < sizeof(xids) / sizeof(xids[0]); i++) {
 			if (status_is(&f, apfs_map_lookup(&map, 1026, xids[i],
 			    &found, &key, &value, &f.error), FSIMG_OK)) {
-				expect(found == (expected[i] != 0 && !(deleted && expected[i] == 20)),
+				expect(found == (expected[i] != 0 &&
+				    !(deleted && expected[i] == 20)),
 				    "version lookup presence");
 				if (found)
 					expect(key.xid == expected[i],
@@ -1566,7 +2227,8 @@ test_entry_hook_distinguishes_index_and_leaf_entries(void)
 	fsimg_status_t status;
 	bool found;
 
-	scenario = "entry hook receives index and leaf records in height three tree";
+	scenario =
+	    "entry hook receives index and leaf records in height three tree";
 	fixture_init(&f, 0);
 	build_checkpoints(&f, 1, 10);
 	CHECK(checkpoint_open(&f) == FSIMG_OK);
@@ -1629,9 +2291,12 @@ test_cursor_seek_rejects_key_lengths_outside_profile_bounds(void)
 	bool found;
 
 	for (unsigned loaded = 0; loaded < 2; loaded++) {
-		for (size_t d = 0; d < sizeof(directions) / sizeof(directions[0]); d++) {
-			for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
-				scenario = loaded ? "invalid seek length on loaded cursor" :
+		for (size_t d = 0;
+		    d < sizeof(directions) / sizeof(directions[0]); d++) {
+			for (size_t i = 0;
+			    i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+				scenario = loaded ?
+				    "invalid seek length on loaded cursor" :
 				    "invalid seek length before root load";
 				fixture_init(&f, 0);
 				build_checkpoints(&f, 1, 10);
@@ -2033,7 +2698,8 @@ check_native_image(const char *path)
 		    APFS_MAP_CONTAINER,
 		    f.container.nx.omap_oid, f.container.xid, window, &map,
 		    &f.error), FSIMG_OK)) {
-			for (unsigned i = 0; i < f.container.nx.max_volumes; i++) {
+			for (unsigned i = 0; i < f.container.nx.max_volumes;
+			    i++) {
 				if (f.container.nx.volume_oids[i] == 0)
 					continue;
 				ref = (apfs_ref_t){ .role = "native volume",
@@ -2049,6 +2715,19 @@ check_native_image(const char *path)
 		if (status_is(&f, apfs_reaper_idle(&f.container, window, &idle,
 		    &f.error), FSIMG_OK))
 			expect(idle, "native reaper is idle");
+		for (unsigned i = 0; i < f.container.nx.max_volumes; i++) {
+			fsimg_reader_t *reader = NULL;
+			fsimg_read_options_t options;
+
+			if (f.container.nx.volume_oids[i] == 0)
+				continue;
+			fsimg_read_options_init(&options);
+			options.volume_index_set = true;
+			options.volume_index = i;
+			status_is(&f, fsimg_reader_open(f.ctx, f.io, &options,
+			    &reader, &f.error), FSIMG_OK);
+			fsimg_reader_free(reader);
+		}
 	}
 	free(window);
 	fixture_close(&f);
@@ -2076,7 +2755,8 @@ test_native_captures(void)
 	if (directory == NULL)
 		puts("SKIP native captures (FSIMG_APFS_NATIVE is unset)");
 	else {
-		for (size_t i = 0; i < sizeof(captures) / sizeof(captures[0]); i++) {
+		for (size_t i = 0; i < sizeof(captures) / sizeof(captures[0]);
+		    i++) {
 			CHECK(snprintf(path, sizeof(path), "%s/%s/image.img",
 			    directory,
 			    captures[i].directory) < (int)sizeof(path));
@@ -2107,6 +2787,15 @@ test_native_captures(void)
 int
 main(void)
 {
+	test_full_open_predecessor_is_openable();
+	test_full_open_private_map_damage_does_not_fall_back();
+	test_full_open_volume_selection();
+	test_full_open_volume_validation();
+	test_full_open_information_and_prepare();
+	test_full_open_probe_and_assumed_identity();
+	test_probe_uses_4096_byte_prefix_and_open_checks_whole_block();
+	test_full_open_checkpoint_features_and_free_count();
+	test_full_open_truncated_container();
 	test_selected_descriptor_changed_while_read();
 	test_private_container_map_damage_never_falls_back();
 	test_descriptor_flags_and_subtypes_exclude_newest_checkpoint();

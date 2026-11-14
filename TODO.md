@@ -75,7 +75,11 @@
   format design's value rule says, waits on E1's volume records.
   The checkpoint load streams the space manager at the size its mapping
   states, bounded only by the data run; the size its geometry implies is
-  to be checked before that read once `spaceman.c` computes it.
+  to be checked before that read once `spaceman.c` computes it. The
+  volume object map's snapshot fields are not yet compared with the
+  volume's snapshot tree, which the snapshot stage reads. Until directory
+  reading lands, `x --salvage` on an APFS volume reports its root as a lost
+  directory, since the reader's refusal of `prepare` is judged as damage.
 
 * [Medium] **EROFS reader, verifier and writer** (`lib/formats/erofs/`,
   `lib/core/`, `lib/codec/`, `lib/layers/`, `lib/write/`, `cmd/fsimg/`,
@@ -550,8 +554,9 @@
 
 * [Low] **The CLI chooses the allocation unit's noun by format name**
   (`cmd/fsimg/display.c` `format_counts_blocks`): each block-based format
-  must join a name list. A descriptor field naming the unit would make it
-  hold by construction.
+  must join a name list, and a new format left off it is shown in clusters.
+  A block-unit bit or unit noun in `fsimg_format_info_t` would make it hold
+  by construction.
 
 * [Low] **Spec harness oracle step can fail on EINTR** (`test/spec/`): a quick run
   under `check-asan` reported `harness_error` for

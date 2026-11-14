@@ -39,6 +39,8 @@
 
 static void	btree_info_load(const unsigned char *, apfs_btree_info_t *);
 static void	btree_info_store(unsigned char *, const apfs_btree_info_t *);
+static void	fs_change_decode(const unsigned char *, apfs_fs_change_t *);
+static void	fs_change_encode(unsigned char *, const apfs_fs_change_t *);
 static bool	cib_header_decode(const unsigned char *, size_t, uint32_t,
 		    apfs_cib_t *);
 static bool	cib_header_encode(unsigned char *, size_t, uint32_t,
@@ -2285,5 +2287,134 @@ apfs_file_info_val_encode(unsigned char *raw, size_t length,
 	if (info->hash_size > 0)
 		bcopy(info->hash, raw + APFS_FILE_INFO_VAL_BYTES,
 		    info->hash_size);
+	return (true);
+}
+
+/* A formatting or modification record: a 32-byte identifier, then its time
+ * and the last XID it wrote.
+ */
+static void
+fs_change_decode(const unsigned char *raw, apfs_fs_change_t *change)
+{
+	bcopy(raw, change->id, APFS_FS_CHANGE_ID_BYTES);
+	change->time = fsimg_load_le64(raw + 32);
+	change->last_xid = fsimg_load_le64(raw + 40);
+}
+
+static void
+fs_change_encode(unsigned char *raw, const apfs_fs_change_t *change)
+{
+	bcopy(change->id, raw, APFS_FS_CHANGE_ID_BYTES);
+	fsimg_store_le64(raw + 32, change->time);
+	fsimg_store_le64(raw + 40, change->last_xid);
+}
+
+bool
+apfs_fs_decode(const unsigned char *raw, size_t length, apfs_fs_t *fs)
+{
+	if (length < APFS_FS_BYTES)
+		return (false);
+
+	fs->magic = fsimg_load_le32(raw + 32);
+	fs->index = fsimg_load_le32(raw + 36);
+	fs->features = fsimg_load_le64(raw + 40);
+	fs->ro_compat_features = fsimg_load_le64(raw + 48);
+	fs->incompat_features = fsimg_load_le64(raw + 56);
+	fs->unmount_time = fsimg_load_le64(raw + 64);
+	fs->reserve_blocks = fsimg_load_le64(raw + 72);
+	fs->quota_blocks = fsimg_load_le64(raw + 80);
+	fs->alloc_blocks = fsimg_load_le64(raw + 88);
+	bcopy(raw + 96, fs->crypto, APFS_FS_CRYPTO_BYTES);
+	fs->root_tree_type = fsimg_load_le32(raw + 116);
+	fs->extentref_tree_type = fsimg_load_le32(raw + 120);
+	fs->snapshot_tree_type = fsimg_load_le32(raw + 124);
+	fs->omap_oid = fsimg_load_le64(raw + 128);
+	fs->root_tree_oid = fsimg_load_le64(raw + 136);
+	fs->extentref_tree_oid = fsimg_load_le64(raw + 144);
+	fs->snapshot_tree_oid = fsimg_load_le64(raw + 152);
+	fs->revert_to_xid = fsimg_load_le64(raw + 160);
+	fs->revert_to_oid = fsimg_load_le64(raw + 168);
+	fs->next_obj_id = fsimg_load_le64(raw + 176);
+	fs->files = fsimg_load_le64(raw + 184);
+	fs->directories = fsimg_load_le64(raw + 192);
+	fs->symlinks = fsimg_load_le64(raw + 200);
+	fs->other_objects = fsimg_load_le64(raw + 208);
+	fs->snapshots = fsimg_load_le64(raw + 216);
+	fs->blocks_allocated = fsimg_load_le64(raw + 224);
+	fs->blocks_freed = fsimg_load_le64(raw + 232);
+	bcopy(raw + 240, fs->uuid, APFS_UUID_BYTES);
+	fs->modified_time = fsimg_load_le64(raw + 256);
+	fs->flags = fsimg_load_le64(raw + 264);
+	fs_change_decode(raw + 272, &fs->formatted_by);
+	for (unsigned i = 0; i < APFS_FS_CHANGES; i++)
+		fs_change_decode(raw + 320 + 48 * i, &fs->modified_by[i]);
+	bcopy(raw + 704, fs->name, APFS_FS_NAME_BYTES);
+	fs->next_doc_id = fsimg_load_le32(raw + 960);
+	fs->role = fsimg_load_le16(raw + 964);
+	fs->root_to_xid = fsimg_load_le64(raw + 968);
+	fs->rolling_state_oid = fsimg_load_le64(raw + 976);
+	fs->clone_epoch = fsimg_load_le64(raw + 984);
+	fs->clone_xid = fsimg_load_le64(raw + 992);
+	fs->snapshot_ext_oid = fsimg_load_le64(raw + 1000);
+	bcopy(raw + 1008, fs->group_uuid, APFS_UUID_BYTES);
+	fs->integrity_oid = fsimg_load_le64(raw + 1024);
+	fs->fext_tree_oid = fsimg_load_le64(raw + 1032);
+	fs->fext_tree_type = fsimg_load_le32(raw + 1040);
+	return (true);
+}
+
+/* The reserved field at 966 is written zero. */
+bool
+apfs_fs_encode(unsigned char *raw, size_t length, const apfs_fs_t *fs)
+{
+	if (length < APFS_FS_BYTES)
+		return (false);
+
+	fsimg_store_le32(raw + 32, fs->magic);
+	fsimg_store_le32(raw + 36, fs->index);
+	fsimg_store_le64(raw + 40, fs->features);
+	fsimg_store_le64(raw + 48, fs->ro_compat_features);
+	fsimg_store_le64(raw + 56, fs->incompat_features);
+	fsimg_store_le64(raw + 64, fs->unmount_time);
+	fsimg_store_le64(raw + 72, fs->reserve_blocks);
+	fsimg_store_le64(raw + 80, fs->quota_blocks);
+	fsimg_store_le64(raw + 88, fs->alloc_blocks);
+	bcopy(fs->crypto, raw + 96, APFS_FS_CRYPTO_BYTES);
+	fsimg_store_le32(raw + 116, fs->root_tree_type);
+	fsimg_store_le32(raw + 120, fs->extentref_tree_type);
+	fsimg_store_le32(raw + 124, fs->snapshot_tree_type);
+	fsimg_store_le64(raw + 128, fs->omap_oid);
+	fsimg_store_le64(raw + 136, fs->root_tree_oid);
+	fsimg_store_le64(raw + 144, fs->extentref_tree_oid);
+	fsimg_store_le64(raw + 152, fs->snapshot_tree_oid);
+	fsimg_store_le64(raw + 160, fs->revert_to_xid);
+	fsimg_store_le64(raw + 168, fs->revert_to_oid);
+	fsimg_store_le64(raw + 176, fs->next_obj_id);
+	fsimg_store_le64(raw + 184, fs->files);
+	fsimg_store_le64(raw + 192, fs->directories);
+	fsimg_store_le64(raw + 200, fs->symlinks);
+	fsimg_store_le64(raw + 208, fs->other_objects);
+	fsimg_store_le64(raw + 216, fs->snapshots);
+	fsimg_store_le64(raw + 224, fs->blocks_allocated);
+	fsimg_store_le64(raw + 232, fs->blocks_freed);
+	bcopy(fs->uuid, raw + 240, APFS_UUID_BYTES);
+	fsimg_store_le64(raw + 256, fs->modified_time);
+	fsimg_store_le64(raw + 264, fs->flags);
+	fs_change_encode(raw + 272, &fs->formatted_by);
+	for (unsigned i = 0; i < APFS_FS_CHANGES; i++)
+		fs_change_encode(raw + 320 + 48 * i, &fs->modified_by[i]);
+	bcopy(fs->name, raw + 704, APFS_FS_NAME_BYTES);
+	fsimg_store_le32(raw + 960, fs->next_doc_id);
+	fsimg_store_le16(raw + 964, fs->role);
+	fsimg_store_le16(raw + 966, 0);
+	fsimg_store_le64(raw + 968, fs->root_to_xid);
+	fsimg_store_le64(raw + 976, fs->rolling_state_oid);
+	fsimg_store_le64(raw + 984, fs->clone_epoch);
+	fsimg_store_le64(raw + 992, fs->clone_xid);
+	fsimg_store_le64(raw + 1000, fs->snapshot_ext_oid);
+	bcopy(fs->group_uuid, raw + 1008, APFS_UUID_BYTES);
+	fsimg_store_le64(raw + 1024, fs->integrity_oid);
+	fsimg_store_le64(raw + 1032, fs->fext_tree_oid);
+	fsimg_store_le32(raw + 1040, fs->fext_tree_type);
 	return (true);
 }

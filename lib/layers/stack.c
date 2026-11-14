@@ -62,7 +62,7 @@ static const fsimg_layer_t layers[] = {
 #define LAYER_COUNT	(sizeof(layers) / sizeof(layers[0]))
 
 /* Filesystem names the grammar reserves without a driver. */
-static const char *const reserved_filesystems[] = { "apfs", "hfs" };
+static const char *const reserved_filesystems[] = { "hfs" };
 
 #define RESERVED_COUNT	(sizeof(reserved_filesystems) / sizeof(reserved_filesystems[0]))
 

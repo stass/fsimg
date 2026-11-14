@@ -82,6 +82,7 @@ extern const fsimg_format_t fsimg_hfsplus_format;
 extern const fsimg_format_t fsimg_ifs_format;
 extern const fsimg_format_t fsimg_iso9660_format;
 extern const fsimg_format_t fsimg_erofs_format;
+extern const fsimg_format_t fsimg_apfs_format;
 
 /*
  * What a set of probes says about one input, under the one claim rule for

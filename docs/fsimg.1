@@ -49,7 +49,8 @@
 .Nm
 reads and creates FAT12, FAT16, FAT32, ordinary one-FAT exFAT, classic
 QNX6 Power-Safe and QNX4 volumes, HFS Plus and HFSX volumes, QNX ImageFS images,
-ISO 9660 images and EROFS volumes.
+ISO 9660 images and EROFS volumes, and shows the volume information of APFS
+containers.
 EROFS reading covers chunk-based files and files, directories and
 symbolic links compressed with LZ4 or
 DEFLATE, and with MicroLZMA or Zstandard when the build has liblzma 5.4 or
@@ -76,6 +77,18 @@ or
 leaves room, it has no free block, so macOS can mount it but not add to it.
 It can remove a stored file only where rounding to a larger block has left the
 catalog free nodes.
+An APFS container is read for its volume information alone:
+.Cm i
+reports one volume, its name as the label, its UUID, the container's block
+size, block count and free space, and as details the volume's slot index, the
+container's volume count, the volume's role as a number, whether it compares
+names without regard to case or to normalization, the checkpoint and read
+transaction identifiers, its object counts and its allocated blocks.
+A container holding one volume opens it; one holding several needs
+.Fl o Ar volume=INDEX ,
+and the refusal names the count and the lowest and highest occupied slots.
+Listing, extraction and verification fail as not supported, as do encrypted,
+Fusion and sealed volumes.
 An HFS Plus volume inside a classic HFS wrapper is read and verified as that
 embedded volume: the outer HFS volume is not checked, and a wrapped volume whose
 journal has been initialized is refused as not supported.
@@ -229,7 +242,7 @@ for directory extraction, under the ordinary destination checks.
 The image's layers, inner to outer, separated by
 .Ql / ;
 the filesystem name is fat12, fat16, fat32, exfat, qnx6, qnx4, ifs, iso9660,
-hfsplus, hfsx or erofs.
+hfsplus, hfsx, erofs or apfs, which is read-only.
 Required for
 .Cm c .
 The slots are the filesystem, the partition scheme (gpt, mbr, or the read-only
@@ -290,11 +303,11 @@ UTF-8, and
 which forces the GPT sector size and requires gpt in
 .Fl F ,
 are accepted.
-No supported format accepts
-.Ar volume=
-or
-.Ar snapshot= :
-every format refuses either at any value, an explicit
+APFS accepts
+.Ar volume= ;
+no supported format accepts
+.Ar snapshot= .
+A format refuses a setting it does not accept at any value, an explicit
 .Ar volume=0
 included, once detection or
 .Fl F
@@ -2223,8 +2236,8 @@ A sandbox-unavailable warning under automatic mode alone is not failure.
 .Nm
 recognizes the following and reports each as not supported, with status 1,
 after the rest of the command line is checked:
-reading or writing zstd or xz in a build without its library, and the
-reserved filesystem names apfs and hfs.
+reading or writing zstd or xz in a build without its library, creating an
+APFS container, and the reserved filesystem name hfs.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 fsimg cf boot.img -F fat32 -L BOOT -s 64M -C esp .

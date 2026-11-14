@@ -256,8 +256,8 @@ the next starts:
 1. **Block 0.** One read of 4096 bytes, then `B` bytes once the block size
    is known. The `NXSB` magic is checked as the one identity check; the
    header's kind and OID, the checksum, the geometry, the features and the
-   areas are validated as the format design states, by the function the
-   probe calls.
+   areas are validated as the format design states, by the checks the
+   probe shares.
 2. **Checkpoint.** `checkpoint.c` reads the descriptor ring once with one
    block window. For each slot it records, in a paged array of fixed-size
    slot records in metadata scratch, the block's kind (superblock, valid
@@ -314,8 +314,11 @@ descriptor block is a checkpoint candidate only with its own magic, which is
 validation.
 
 `descriptor.c` holds one function that validates block 0's bytes after the
-magic. The probe calls it on the prefix it is given and step 1 on the block
-it read, so `open` makes every validation check the probe makes, as the
+magic, given the bytes it holds and the volume length; it verifies the
+checksum when the bytes hold the whole block. Step 1 calls it on the block
+it read, which is the whole block, and the probe on its 4096-byte prefix,
+which holds the whole block only when `B` is 4096, so `open` makes every
+validation check the probe makes, as the
 [format contract](design-formats.md#format-descriptors-and-profiles)
 requires of an open that runs without a probe, and the two cannot drift
 apart.

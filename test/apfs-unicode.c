@@ -1416,6 +1416,7 @@ test_assignment_matches_native_outcomes_when_native_is_set(void)
 int
 main(void)
 {
+	CHECK(strcmp(APFS_PROFILE, "apfs-unicode-" APFS_UNICODE_VERSION) == 0);
 	test_native_hashes_match_stored_records();
 	test_e4_fixture_hashes_match();
 	test_fresh_volume_names_hash_natively();

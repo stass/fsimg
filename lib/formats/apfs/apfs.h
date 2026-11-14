@@ -5,6 +5,7 @@
 #define FSIMG_APFS_H
 
 #include "internal.h"
+#include "reader.h"
 
 /* APFS (specs/design-apfs.md and specs/design-apfs-driver.md). */
 
@@ -165,6 +166,35 @@
 #define APFS_REAP_LIST_BYTES		64u
 #define APFS_REAP_LIST_ENTRY_BYTES	40u
 #define APFS_REAP_LIST_NONE		0xffffffffu	/* no entry index */
+
+/* Volume superblock (specs/design-apfs.md, "Volume superblock"). */
+#define APFS_FS_MAGIC			0x42535041u	/* "APSB" */
+#define APFS_FS_BYTES			1044u
+#define APFS_FS_NAME_BYTES		256u	/* with its terminator */
+#define APFS_FS_CRYPTO_BYTES		20u
+#define APFS_FS_CHANGE_ID_BYTES		32u
+#define APFS_FS_CHANGES			8u	/* modification records */
+#define APFS_FS_TREE_VIRTUAL		APFS_KIND_BTREE_ROOT
+#define APFS_FS_TREE_PHYSICAL		(APFS_OBJ_PHYSICAL | APFS_KIND_BTREE_ROOT)
+
+#define APFS_FS_INCOMPAT_CASE_INSENSITIVE	0x01u
+#define APFS_FS_INCOMPAT_DATALESS_SNAPSHOTS	0x02u
+#define APFS_FS_INCOMPAT_ENCRYPTION_ROLLED	0x04u
+#define APFS_FS_INCOMPAT_NORM_INSENSITIVE	0x08u
+#define APFS_FS_INCOMPAT_INCOMPLETE_RESTORE	0x10u
+#define APFS_FS_INCOMPAT_SEALED			0x20u
+#define APFS_FS_FLAG_UNENCRYPTED		0x01u
+#define APFS_FS_FLAG_ONE_KEY			0x08u
+#define APFS_FS_FLAG_SPILLED_OVER		0x10u
+#define APFS_FS_FLAG_SPILLOVER_CLEANER		0x20u
+#define APFS_FS_FLAG_CHECK_EXTENT_REFS		0x40u
+
+/*
+ * The information profile: "apfs-unicode-" and the Unicode version of the
+ * name tables, APFS_UNICODE_VERSION in unicode-tables.h, which
+ * test/apfs-unicode.c checks it against.
+ */
+#define APFS_PROFILE			"apfs-unicode-17.0.0"
 
 /*
  * Container structures: decoded records holding every field of their fixed
@@ -455,6 +485,65 @@ typedef struct apfs_reap_list {
 	uint32_t	free;
 } apfs_reap_list_t;
 
+/* A formatting or modification record of a volume superblock. */
+typedef struct apfs_fs_change {
+	unsigned char	id[APFS_FS_CHANGE_ID_BYTES];	/* software, raw */
+	uint64_t	time;
+	uint64_t	last_xid;
+} apfs_fs_change_t;
+
+/*
+ * A volume superblock. The name is the raw field: the volume module checks
+ * its terminator and encoding. Tree types are whole type words, storage
+ * flags included.
+ */
+typedef struct apfs_fs {
+	apfs_fs_change_t formatted_by;
+	apfs_fs_change_t modified_by[APFS_FS_CHANGES];
+	unsigned char	name[APFS_FS_NAME_BYTES];
+	unsigned char	uuid[APFS_UUID_BYTES];
+	unsigned char	group_uuid[APFS_UUID_BYTES];
+	unsigned char	crypto[APFS_FS_CRYPTO_BYTES];
+	uint64_t	features;
+	uint64_t	ro_compat_features;
+	uint64_t	incompat_features;
+	uint64_t	unmount_time;
+	uint64_t	reserve_blocks;
+	uint64_t	quota_blocks;
+	uint64_t	alloc_blocks;
+	uint64_t	omap_oid;		/* physical */
+	uint64_t	root_tree_oid;		/* virtual */
+	uint64_t	extentref_tree_oid;	/* physical */
+	uint64_t	snapshot_tree_oid;	/* physical */
+	uint64_t	revert_to_xid;
+	uint64_t	revert_to_oid;
+	uint64_t	next_obj_id;
+	uint64_t	files;
+	uint64_t	directories;
+	uint64_t	symlinks;
+	uint64_t	other_objects;
+	uint64_t	snapshots;
+	uint64_t	blocks_allocated;
+	uint64_t	blocks_freed;
+	uint64_t	modified_time;
+	uint64_t	flags;
+	uint64_t	root_to_xid;
+	uint64_t	rolling_state_oid;
+	uint64_t	clone_epoch;
+	uint64_t	clone_xid;
+	uint64_t	snapshot_ext_oid;
+	uint64_t	integrity_oid;
+	uint64_t	fext_tree_oid;
+	uint32_t	magic;
+	uint32_t	index;		/* slot in the container's array */
+	uint32_t	root_tree_type;
+	uint32_t	extentref_tree_type;
+	uint32_t	snapshot_tree_type;
+	uint32_t	fext_tree_type;
+	uint32_t	next_doc_id;
+	uint16_t	role;
+} apfs_fs_t;
+
 /*
  * Fletcher-64 (codec.c). The checksum covers an object from byte 8 to its
  * end as little-endian 32-bit words. An object of several blocks feeds its
@@ -586,6 +675,8 @@ bool	apfs_reap_list_decode(const unsigned char *, size_t,
 	    apfs_reap_list_t *);
 bool	apfs_reap_list_encode(unsigned char *, size_t,
 	    const apfs_reap_list_t *);
+bool	apfs_fs_decode(const unsigned char *, size_t, apfs_fs_t *);
+bool	apfs_fs_encode(unsigned char *, size_t, const apfs_fs_t *);
 
 /*
  * Diagnostics (object.c). A failure names the object's role, such as
@@ -614,6 +705,9 @@ typedef struct apfs_container {
 } apfs_container_t;
 
 /*
+ * apfs_block_size_valid(b) is the block size rule: a power of two from
+ * APFS_BLOCK_MIN through APFS_BLOCK_MAX.
+ *
  * apfs_nx_geometry(nx, role, error) applies the container geometry rules to
  * a decoded superblock: block size, block count, maximum volume count and
  * volume array, the two areas, which must be contiguous (a noncontiguous
@@ -639,6 +733,7 @@ typedef struct apfs_container {
  * that is not well formed is FSIMG_ECORRUPT, and idle reports whether no
  * object is being reaped and every list object holds no entry.
  */
+bool		apfs_block_size_valid(uint32_t);
 fsimg_status_t	apfs_nx_geometry(const apfs_nx_t *, const char *,
 		    fsimg_error_t *);
 fsimg_status_t	apfs_checkpoint_open(fsimg_reader_t *, const apfs_obj_t *,
@@ -826,6 +921,51 @@ fsimg_status_t	apfs_map_open(apfs_container_t *, apfs_map_kind_t, uint64_t,
 void		apfs_map_close(apfs_map_t *);
 fsimg_status_t	apfs_map_lookup(apfs_map_t *, uint64_t, uint64_t, bool *,
 		    apfs_omap_key_t *, apfs_omap_val_t *, fsimg_error_t *);
+
+/*
+ * Container superblock checks (descriptor.c). apfs_block0_check(raw, length,
+ * header, nx, error) validates block 0 after its magic, the identity check
+ * its caller has made: length must hold one block, the header must be the
+ * container superblock's with a valid checksum over B bytes, and the
+ * geometry and features must pass; on success it stores the decoded header
+ * and superblock. Open runs it on the block it read. The probe runs the
+ * private function behind it on its 4096-byte prefix, with the volume
+ * length in place of the block's, so it verifies the checksum only when the
+ * prefix holds the block, and open makes every check the probe makes.
+ * apfs_nx_features(nx, role, error) applies the feature table alone; open
+ * applies it to the selected checkpoint's superblock too.
+ */
+fsimg_status_t	apfs_block0_check(const unsigned char *, size_t, apfs_obj_t *,
+		    apfs_nx_t *, fsimg_error_t *);
+fsimg_status_t	apfs_nx_features(const apfs_nx_t *, const char *,
+		    fsimg_error_t *);
+
+/*
+ * The reader's state (read.c). apfs_volume_open(reader, apfs, window, error)
+ * (volume.c), given an opened container, reads the space manager's free
+ * count, opens the container object map, selects the volume the read
+ * options name, validates its superblock and opens its object map, all at
+ * the read XID, reading through window, at least B bytes; on failure the
+ * caller closes the state with
+ * apfs_volume_close(), which also accepts a zeroed state.
+ */
+typedef struct apfs_reader {
+	apfs_container_t container;
+	apfs_map_t	 container_map;
+	apfs_map_t	 volume_map;
+	apfs_fs_t	 fs;		/* the selected volume's superblock */
+	uint64_t	 read_xid;
+	uint64_t	 free_blocks;	/* the space manager's main device */
+	uint32_t	 volume_index;
+	uint32_t	 volume_count;	/* nonzero slots of the array */
+	size_t		 label_bytes;	/* the name without its terminator */
+} apfs_reader_t;
+
+extern const fsimg_reader_ops_t fsimg_apfs_reader_ops;
+
+fsimg_status_t	apfs_volume_open(fsimg_reader_t *, apfs_reader_t *,
+		    unsigned char *, fsimg_error_t *);
+void		apfs_volume_close(apfs_reader_t *);
 
 /*
  * Names (unicode.c; specs/design-apfs.md, "Directory records and names").

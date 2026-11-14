@@ -2990,14 +2990,23 @@ reader_extraction(const contract_fs_profile_t *profile)
 
 /*
  * Registry reconciliation, in both directions, before any fixture runs:
- * every advertised variant has exactly one coverage profile whose declared
- * capabilities equal the advertised ones; every profile names an advertised
- * variant and has a unique ID; and every profile carries the facts its
- * capabilities oblige.
+ * every advertised variant has exactly one coverage profile or declaration
+ * for volume information only, with matching capabilities; every profile
+ * names an advertised variant and has a unique ID; and every profile carries
+ * the facts its capabilities oblige.
  */
 static void
 check_registry(void)
 {
+	/* Volume-information readers refuse directory operations, so no
+	 * fixture scenario applies to these registered formats.
+	 */
+	static const struct {
+		const char *name;
+		uint32_t capabilities;
+	} information_formats[] = {
+		{ "apfs", FSIMG_CAP_READ }
+	};
 	fsimg_format_info_t info;
 	fsimg_error_t error;
 	size_t cursor = 0, coverage, advertised = 0;
@@ -3015,6 +3024,13 @@ check_registry(void)
 			CONTRACT_CHECK(fs_profiles[i].expected_capabilities ==
 			    info.capabilities);
 			coverage += fs_profiles[i].coverage_profile;
+		}
+		for (size_t i = 0; i < COUNT(information_formats); i++) {
+			if (strcmp(information_formats[i].name, info.name) != 0)
+				continue;
+			CONTRACT_CHECK(info.capabilities ==
+			    information_formats[i].capabilities);
+			coverage++;
 		}
 		if (coverage != 1)
 			fprintf(stderr, "format %s has %zu coverage profiles\n",

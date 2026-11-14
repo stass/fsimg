@@ -80,6 +80,63 @@ typedef struct apfs_gen_nx {
 	uint64_t	media_keylocker_count;
 } apfs_gen_nx_t;
 
+/* Volume layout from design-apfs.md, "Volume superblock". */
+typedef struct apfs_gen_fs_change {
+	unsigned char id[32];
+	uint64_t time;
+	uint64_t last_xid;
+} apfs_gen_fs_change_t;
+
+typedef struct apfs_gen_fs {
+	apfs_gen_object_t object;
+	apfs_gen_fs_change_t formatted_by;
+	apfs_gen_fs_change_t modified_by[8];
+	unsigned char crypto[20];
+	unsigned char uuid[16];
+	unsigned char name[256];
+	unsigned char group_uuid[16];
+	uint32_t magic;
+	uint32_t index;
+	uint64_t features;
+	uint64_t ro_compat_features;
+	uint64_t incompat_features;
+	uint64_t unmount_time;
+	uint64_t reserve_blocks;
+	uint64_t quota_blocks;
+	uint64_t alloc_blocks;
+	uint32_t root_tree_type;
+	uint32_t extentref_tree_type;
+	uint32_t snapshot_tree_type;
+	uint64_t omap_oid;
+	uint64_t root_tree_oid;
+	uint64_t extentref_tree_oid;
+	uint64_t snapshot_tree_oid;
+	uint64_t revert_to_xid;
+	uint64_t revert_to_oid;
+	uint64_t next_obj_id;
+	uint64_t files;
+	uint64_t directories;
+	uint64_t symlinks;
+	uint64_t other_objects;
+	uint64_t snapshots;
+	uint64_t blocks_allocated;
+	uint64_t blocks_freed;
+	uint64_t modified_time;
+	uint64_t flags;
+	uint32_t next_doc_id;
+	uint16_t role;
+	uint64_t root_to_xid;
+	uint64_t rolling_state_oid;
+	uint64_t clone_epoch;
+	uint64_t clone_xid;
+	uint64_t snapshot_ext_oid;
+	uint64_t integrity_oid;
+	uint64_t fext_tree_oid;
+	uint32_t fext_tree_type;
+} apfs_gen_fs_t;
+
+bool	apfs_gen_fs_build(unsigned char *, size_t, const apfs_gen_fs_t *);
+
 typedef struct apfs_gen_mapping {
 	uint32_t	type;
 	uint32_t	subtype;

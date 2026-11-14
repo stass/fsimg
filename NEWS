@@ -1,5 +1,18 @@
 fsimg 0.1.0 (unreleased)
 
+APFS containers can be inspected: `fsimg i` reports one volume of an
+unencrypted APFS container, bare or inside GPT, an Apple Partition Map or a
+DMG, with its name as the label, its UUID, the container's block size, block
+count and free space, and the volume's index, role, case sensitivity,
+checkpoint and object counts as details. `-o volume=INDEX` selects the
+volume by its slot index; a container holding one volume opens it without
+the setting, and the refusal for one holding several names the count and
+the lowest and highest occupied slots. A damaged block-0 magic opens only
+with `--force`, and a truncated container whose missing tail nothing read
+references reports the missing bytes. `t`, `x` and `W` fail as unsupported
+on APFS, and encrypted, Fusion and sealed volumes are refused as
+unsupported.
+
 EROFS volumes, the Linux read-only filesystem, open, list and extract
 with 512- to 4096-byte blocks, including chunk-based files, whose holes
 read as zeros, and files, directories and symbolic links compressed with
@@ -248,9 +261,10 @@ by its slot index, and one snapshot of it, by its exact name of 1 to 255 bytes o
 takes them as the read options `volume_index`, with its presence flag
 `volume_index_set` so that index 0 is a request, and `snapshot`, under the
 new `FSIMG_SETTING_VOLUME_INDEX` and `FSIMG_SETTING_SNAPSHOT` bits of
-`read_settings`, and the worker job carries them. No supported format
-accepts either, so every format refuses both once detected, before the
-worker starts when `-F` names the format; a malformed snapshot name is
+`read_settings`, and the worker job carries them. APFS accepts `volume=`;
+no supported format accepts `snapshot=`, and a format refuses a setting it
+does not accept once detected, before the worker starts when `-F` names the
+format; a malformed snapshot name is
 refused before the image is opened.
 
 `-o case=insensitive|sensitive` chooses whether a created volume compares

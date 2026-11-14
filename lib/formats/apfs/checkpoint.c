@@ -110,6 +110,12 @@ range_inside(uint64_t start, uint64_t count, uint64_t n)
 	return (count != 0 && start >= 1 && start < n && count <= n - start);
 }
 
+bool
+apfs_block_size_valid(uint32_t b)
+{
+	return (b >= APFS_BLOCK_MIN && b <= APFS_BLOCK_MAX && (b & (b - 1)) == 0);
+}
+
 fsimg_status_t
 apfs_nx_geometry(const apfs_nx_t *nx, const char *role, fsimg_error_t *error)
 {
@@ -119,7 +125,7 @@ apfs_nx_geometry(const apfs_nx_t *nx, const char *role, fsimg_error_t *error)
 	if (nx->desc_noncontiguous || nx->data_noncontiguous)
 		return (apfs_unsupported(error, role,
 		    "has a noncontiguous checkpoint area"));
-	if (b < APFS_BLOCK_MIN || b > APFS_BLOCK_MAX || (b & (b - 1)) != 0)
+	if (!apfs_block_size_valid(b))
 		return (apfs_corrupt(error, role, "has an invalid block size"));
 	if (!fsimg_mul_u64(n, b, &bytes) || bytes < (UINT64_C(1) << 20))
 		return (apfs_corrupt(error, role, "has an invalid block count"));

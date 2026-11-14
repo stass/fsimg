@@ -345,15 +345,22 @@ validation, in the division the
 [format contract](design-formats.md#format-descriptors-and-profiles) makes
 for every format.
 
-The probe inspects the first 65536 bytes, the largest legal block, cut to
-the volume length. Without the magic it makes no claim, `FSIMG_EFORMAT`.
-With it, it claims the image: `FSIMG_OK` when the first `B` bytes are
-present and the header's kind and OID, the checksum, the geometry and the
-incompatible features pass; `FSIMG_ECORRUPT` for a volume shorter than one
-block, a wrong kind or OID, a bad checksum or bad geometry;
-`FSIMG_EUNSUPPORTED` for an incompatible feature outside the table. The
-probe proves only that the image is an APFS container; the checkpoint `open`
-selects may be newer than block 0.
+The probe inspects the first 4096 bytes, the smallest legal block, cut to
+the volume length. The shared detection prefix is the largest any probe
+asks for, so a probe reading the largest block, 65536 bytes, would raise
+every image's detection read beyond the 34816 bytes the ISO 9660 probe
+needs, to serve one format. The checksum covers the whole block, so the
+probe verifies it only for a 4096-byte block; for a larger one, `open`
+reads the whole block and verifies it. Without the magic the probe makes
+no claim, `FSIMG_EFORMAT`. With it, it claims the image: `FSIMG_OK` when
+the volume holds `B` bytes and the header's kind and OID, the checksum of
+a 4096-byte block, the geometry and the incompatible features pass;
+`FSIMG_ECORRUPT` for a volume shorter than one block, a wrong kind or OID,
+a bad checksum or bad geometry; `FSIMG_EUNSUPPORTED` for an incompatible
+feature outside the table. The checksum is never waived: a container with
+a larger block and a bad block-0 checksum is detected as APFS and fails to
+open. The probe proves only that the image is an APFS container; the
+checkpoint `open` selects may be newer than block 0.
 
 Opening with an assumed identity (`--force`, `FSIMG_READ_ASSUME_IDENTITY`)
 runs no probe. `open` waives the magic of block 0 alone, through

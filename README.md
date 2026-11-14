@@ -219,6 +219,7 @@ Standard input and decompression use a temporary spool, bounded by
 | QNX ImageFS (IFS) | Yes | Either byte order; newly created bodies are nonbootable |
 | ISO 9660 | Yes | Rock Ridge, Joliet and primary views; levels 1 to 3, relocated deep trees, BIOS/EFI El Torito boot catalogs |
 | EROFS | Yes | LZ4, DEFLATE, MicroLZMA and Zstandard; 48-bit addressing and metadata box; creates uncompressed or LZ4 volumes |
+| APFS | Volume information only | `fsimg i` on unencrypted containers, bare or in GPT, APM or DMG; one volume per reader, selected by `-o volume=INDEX`; listing and extraction are not supported |
 | HFS Plus, HFSX | Yes | Clean, unjournaled volumes that macOS checks, mounts and modifies; reads files compressed with zlib, LZVN or LZFSE; a volume in an HFS wrapper reads as its embedded volume, the outer HFS volume unchecked and an initialized journal in it not supported |
 
 ISO creation writes Rock Ridge and Joliet together. `-o level=1|2|3`

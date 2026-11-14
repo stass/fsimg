@@ -4404,9 +4404,189 @@ test_fs_encoder_ranges(void)
 	REJECT_WRITE(encoded, apfs_file_info_key_encode(encoded, 16, &info));
 }
 
+static void
+test_volume_superblock_fields_and_roundtrip(void)
+{
+	unsigned char raw[4096] = {0}, encoded[4096] = {0};
+	apfs_gen_fs_t source = { .object = { .oid = 901, .xid = 10,
+	    .type = 13 } };
+	apfs_fs_t decoded;
+
+	scenario = "volume superblock fields and roundtrip";
+	source.magic = 0x12345600u + 1;
+	source.index = 0x12345600u + 2;
+	source.features = UINT64_C(0x1234567800000000) + 3;
+	source.ro_compat_features = UINT64_C(0x1234567800000000) + 4;
+	source.incompat_features = UINT64_C(0x1234567800000000) + 5;
+	source.unmount_time = UINT64_C(0x1234567800000000) + 6;
+	source.reserve_blocks = UINT64_C(0x1234567800000000) + 7;
+	source.quota_blocks = UINT64_C(0x1234567800000000) + 8;
+	source.alloc_blocks = UINT64_C(0x1234567800000000) + 9;
+	source.root_tree_type = 0x12345600u + 10;
+	source.extentref_tree_type = 0x12345600u + 11;
+	source.snapshot_tree_type = 0x12345600u + 12;
+	source.omap_oid = UINT64_C(0x1234567800000000) + 13;
+	source.root_tree_oid = UINT64_C(0x1234567800000000) + 14;
+	source.extentref_tree_oid = UINT64_C(0x1234567800000000) + 15;
+	source.snapshot_tree_oid = UINT64_C(0x1234567800000000) + 16;
+	source.revert_to_xid = UINT64_C(0x1234567800000000) + 17;
+	source.revert_to_oid = UINT64_C(0x1234567800000000) + 18;
+	source.next_obj_id = UINT64_C(0x1234567800000000) + 19;
+	source.files = UINT64_C(0x1234567800000000) + 20;
+	source.directories = UINT64_C(0x1234567800000000) + 21;
+	source.symlinks = UINT64_C(0x1234567800000000) + 22;
+	source.other_objects = UINT64_C(0x1234567800000000) + 23;
+	source.snapshots = UINT64_C(0x1234567800000000) + 24;
+	source.blocks_allocated = UINT64_C(0x1234567800000000) + 25;
+	source.blocks_freed = UINT64_C(0x1234567800000000) + 26;
+	source.modified_time = UINT64_C(0x1234567800000000) + 27;
+	source.flags = UINT64_C(0x1234567800000000) + 28;
+	source.next_doc_id = 0x12345600u + 29;
+	source.role = 0xabcd;
+	source.root_to_xid = UINT64_C(0x1234567800000000) + 31;
+	source.rolling_state_oid = UINT64_C(0x1234567800000000) + 32;
+	source.clone_epoch = UINT64_C(0x1234567800000000) + 33;
+	source.clone_xid = UINT64_C(0x1234567800000000) + 34;
+	source.snapshot_ext_oid = UINT64_C(0x1234567800000000) + 35;
+	source.integrity_oid = UINT64_C(0x1234567800000000) + 36;
+	source.fext_tree_oid = UINT64_C(0x1234567800000000) + 37;
+	source.fext_tree_type = 0x12345600u + 38;
+	for (unsigned i = 0; i < 20; i++)
+		source.crypto[i] = (unsigned char)(i + 20);
+	for (unsigned i = 0; i < 16; i++)
+		source.uuid[i] = (unsigned char)(i + 16);
+	for (unsigned i = 0; i < 256; i++)
+		source.name[i] = (unsigned char)(i + 256);
+	for (unsigned i = 0; i < 16; i++)
+		source.group_uuid[i] = (unsigned char)(i + 80);
+	for (unsigned i = 0; i < 32; i++)
+		source.formatted_by.id[i] = (unsigned char)(i + 1);
+	source.formatted_by.time = UINT64_C(0x123456789abcdef0);
+	source.formatted_by.last_xid = 500;
+	for (unsigned i = 0; i < 8; i++) {
+		for (unsigned j = 0; j < 32; j++)
+			source.modified_by[i].id[j] = (unsigned char)(32 * i + j);
+		source.modified_by[i].time = UINT64_C(0xfedcba9800000000) + i;
+		source.modified_by[i].last_xid = UINT64_C(0x9876543200000000) + i;
+	}
+	expect(apfs_gen_fs_build(raw, sizeof(raw), &source), "build APSB");
+	expect(apfs_fs_decode(raw, sizeof(raw), &decoded), "decode APSB");
+	expect(decoded.magic == source.magic,
+	    "magic at offset 32");
+	expect(decoded.index == source.index,
+	    "index at offset 36");
+	expect(decoded.features == source.features,
+	    "features at offset 40");
+	expect(decoded.ro_compat_features == source.ro_compat_features,
+	    "ro_compat_features at offset 48");
+	expect(decoded.incompat_features == source.incompat_features,
+	    "incompat_features at offset 56");
+	expect(decoded.unmount_time == source.unmount_time,
+	    "unmount_time at offset 64");
+	expect(decoded.reserve_blocks == source.reserve_blocks,
+	    "reserve_blocks at offset 72");
+	expect(decoded.quota_blocks == source.quota_blocks,
+	    "quota_blocks at offset 80");
+	expect(decoded.alloc_blocks == source.alloc_blocks,
+	    "alloc_blocks at offset 88");
+	expect(decoded.root_tree_type == source.root_tree_type,
+	    "root_tree_type at offset 116");
+	expect(decoded.extentref_tree_type == source.extentref_tree_type,
+	    "extentref_tree_type at offset 120");
+	expect(decoded.snapshot_tree_type == source.snapshot_tree_type,
+	    "snapshot_tree_type at offset 124");
+	expect(decoded.omap_oid == source.omap_oid,
+	    "omap_oid at offset 128");
+	expect(decoded.root_tree_oid == source.root_tree_oid,
+	    "root_tree_oid at offset 136");
+	expect(decoded.extentref_tree_oid == source.extentref_tree_oid,
+	    "extentref_tree_oid at offset 144");
+	expect(decoded.snapshot_tree_oid == source.snapshot_tree_oid,
+	    "snapshot_tree_oid at offset 152");
+	expect(decoded.revert_to_xid == source.revert_to_xid,
+	    "revert_to_xid at offset 160");
+	expect(decoded.revert_to_oid == source.revert_to_oid,
+	    "revert_to_oid at offset 168");
+	expect(decoded.next_obj_id == source.next_obj_id,
+	    "next_obj_id at offset 176");
+	expect(decoded.files == source.files,
+	    "files at offset 184");
+	expect(decoded.directories == source.directories,
+	    "directories at offset 192");
+	expect(decoded.symlinks == source.symlinks,
+	    "symlinks at offset 200");
+	expect(decoded.other_objects == source.other_objects,
+	    "other_objects at offset 208");
+	expect(decoded.snapshots == source.snapshots,
+	    "snapshots at offset 216");
+	expect(decoded.blocks_allocated == source.blocks_allocated,
+	    "blocks_allocated at offset 224");
+	expect(decoded.blocks_freed == source.blocks_freed,
+	    "blocks_freed at offset 232");
+	expect(decoded.modified_time == source.modified_time,
+	    "modified_time at offset 256");
+	expect(decoded.flags == source.flags,
+	    "flags at offset 264");
+	expect(decoded.next_doc_id == source.next_doc_id,
+	    "next_doc_id at offset 960");
+	expect(decoded.role == source.role,
+	    "role at offset 964");
+	expect(decoded.root_to_xid == source.root_to_xid,
+	    "root_to_xid at offset 968");
+	expect(decoded.rolling_state_oid == source.rolling_state_oid,
+	    "rolling_state_oid at offset 976");
+	expect(decoded.clone_epoch == source.clone_epoch,
+	    "clone_epoch at offset 984");
+	expect(decoded.clone_xid == source.clone_xid,
+	    "clone_xid at offset 992");
+	expect(decoded.snapshot_ext_oid == source.snapshot_ext_oid,
+	    "snapshot_ext_oid at offset 1000");
+	expect(decoded.integrity_oid == source.integrity_oid,
+	    "integrity_oid at offset 1024");
+	expect(decoded.fext_tree_oid == source.fext_tree_oid,
+	    "fext_tree_oid at offset 1032");
+	expect(decoded.fext_tree_type == source.fext_tree_type,
+	    "fext_tree_type at offset 1040");
+	expect(memcmp(decoded.crypto, source.crypto, 20) == 0,
+	    "crypto at offset 96");
+	expect(memcmp(decoded.uuid, source.uuid, 16) == 0,
+	    "uuid at offset 240");
+	expect(memcmp(decoded.name, source.name, 256) == 0,
+	    "name at offset 704");
+	expect(memcmp(decoded.group_uuid, source.group_uuid, 16) == 0,
+	    "group_uuid at offset 1008");
+	expect(memcmp(decoded.formatted_by.id, source.formatted_by.id, 32) == 0 &&
+	    decoded.formatted_by.time == source.formatted_by.time &&
+	    decoded.formatted_by.last_xid == source.formatted_by.last_xid,
+	    "formatting record at offset 272");
+	for (unsigned i = 0; i < 8; i++)
+		expect(memcmp(decoded.modified_by[i].id,
+		    source.modified_by[i].id, 32) == 0 &&
+		    decoded.modified_by[i].time == source.modified_by[i].time &&
+		    decoded.modified_by[i].last_xid == source.modified_by[i].last_xid,
+		    "modification records at offset 320, stride 48");
+	encoded[966] = 0xa5;
+	encoded[967] = 0x5a;
+	expect(apfs_fs_encode(encoded, sizeof(encoded), &decoded), "encode APSB");
+	expect(encoded[966] == 0 && encoded[967] == 0,
+	    "encoder initializes the reserved field");
+	expect(memcmp(raw + 32, encoded + 32, sizeof(raw) - 32) == 0,
+	    "encoded payload matches independent encoder including reserved bytes");
+	expect(apfs_fs_decode(raw, 1044, &decoded), "exact-length decode accepted");
+	expect(apfs_fs_encode(encoded, 1044, &decoded), "exact-length encode accepted");
+	for (size_t length = 0; length < 1044; length++) {
+		expect(!apfs_fs_decode(raw, length, &decoded), "short decode refused");
+		memset(encoded, 0xa5, sizeof(encoded));
+		expect(!apfs_fs_encode(encoded, length, &decoded), "short encode refused");
+		for (size_t i = 0; i < sizeof(encoded); i++)
+			expect(encoded[i] == 0xa5, "short encode leaves buffer untouched");
+	}
+}
+
 int
 main(void)
 {
+	test_volume_superblock_fields_and_roundtrip();
 	test_native_fs_records();
 	test_generated_fs_records();
 	test_fs_record_prefixes();

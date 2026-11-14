@@ -286,6 +286,66 @@ apfs_gen_nx_build(unsigned char *raw, size_t length, const apfs_gen_nx_t *p)
 	return (apfs_gen_seal(raw, length));
 }
 
+/* Independent APSB encoder; reserved bytes come from the zeroed buffer. */
+bool
+apfs_gen_fs_build(unsigned char *raw, size_t length, const apfs_gen_fs_t *p)
+{
+	if (!block_fits(length, 1044))
+		return (false);
+	write_object(raw, &p->object);
+	put_le(raw + 32, p->magic, 4);
+	put_le(raw + 36, p->index, 4);
+	put_le(raw + 40, p->features, 8);
+	put_le(raw + 48, p->ro_compat_features, 8);
+	put_le(raw + 56, p->incompat_features, 8);
+	put_le(raw + 64, p->unmount_time, 8);
+	put_le(raw + 72, p->reserve_blocks, 8);
+	put_le(raw + 80, p->quota_blocks, 8);
+	put_le(raw + 88, p->alloc_blocks, 8);
+	put_le(raw + 116, p->root_tree_type, 4);
+	put_le(raw + 120, p->extentref_tree_type, 4);
+	put_le(raw + 124, p->snapshot_tree_type, 4);
+	put_le(raw + 128, p->omap_oid, 8);
+	put_le(raw + 136, p->root_tree_oid, 8);
+	put_le(raw + 144, p->extentref_tree_oid, 8);
+	put_le(raw + 152, p->snapshot_tree_oid, 8);
+	put_le(raw + 160, p->revert_to_xid, 8);
+	put_le(raw + 168, p->revert_to_oid, 8);
+	put_le(raw + 176, p->next_obj_id, 8);
+	put_le(raw + 184, p->files, 8);
+	put_le(raw + 192, p->directories, 8);
+	put_le(raw + 200, p->symlinks, 8);
+	put_le(raw + 208, p->other_objects, 8);
+	put_le(raw + 216, p->snapshots, 8);
+	put_le(raw + 224, p->blocks_allocated, 8);
+	put_le(raw + 232, p->blocks_freed, 8);
+	put_le(raw + 256, p->modified_time, 8);
+	put_le(raw + 264, p->flags, 8);
+	put_le(raw + 960, p->next_doc_id, 4);
+	put_le(raw + 964, p->role, 2);
+	put_le(raw + 968, p->root_to_xid, 8);
+	put_le(raw + 976, p->rolling_state_oid, 8);
+	put_le(raw + 984, p->clone_epoch, 8);
+	put_le(raw + 992, p->clone_xid, 8);
+	put_le(raw + 1000, p->snapshot_ext_oid, 8);
+	put_le(raw + 1024, p->integrity_oid, 8);
+	put_le(raw + 1032, p->fext_tree_oid, 8);
+	put_le(raw + 1040, p->fext_tree_type, 4);
+	bcopy(p->crypto, raw + 96, 20);
+	bcopy(p->uuid, raw + 240, 16);
+	bcopy(p->name, raw + 704, 256);
+	bcopy(p->group_uuid, raw + 1008, 16);
+	bcopy(p->formatted_by.id, raw + 272, 32);
+	put_le(raw + 304, p->formatted_by.time, 8);
+	put_le(raw + 312, p->formatted_by.last_xid, 8);
+	for (unsigned i = 0; i < 8; i++) {
+		bcopy(p->modified_by[i].id, raw + 320 + 48 * i, 32);
+		put_le(raw + 352 + 48 * i, p->modified_by[i].time, 8);
+		put_le(raw + 360 + 48 * i, p->modified_by[i].last_xid, 8);
+	}
+	return (apfs_gen_seal(raw, length));
+}
+
 bool
 apfs_gen_omap_build(unsigned char *raw, size_t length, const apfs_gen_omap_t *p)
 {
