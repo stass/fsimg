@@ -189,6 +189,7 @@ fields_read(apfs_inode_t *inode, const char **name, uint16_t *name_len,
 				    "data stream is malformed"));
 			inode->has_dstream = true;
 			inode->size = dstream.size;
+			inode->alloced = dstream.alloced_size;
 			break;
 		case APFS_XF_INO_RDEV:
 			if (inode->kind != FSIMG_ENTRY_CHAR_DEVICE &&
@@ -203,6 +204,31 @@ fields_read(apfs_inode_t *inode, const char **name, uint16_t *name_len,
 		}
 	}
 	return (FSIMG_OK);
+}
+
+fsimg_status_t
+apfs_inode_decode(const apfs_record_t *record, apfs_inode_t *inode,
+    const char **name, uint16_t *name_len, fsimg_error_t *error)
+{
+	const apfs_inode_val_t *val = &inode->val;
+
+	bzero(inode, sizeof(*inode));
+	if (record->ghost || !apfs_inode_val_decode(record->val,
+	    record->val_len, &inode->val))
+		return (apfs_corrupt(error, ROLE_INODE, "is malformed"));
+	if (!apfs_type_kind((val->mode & APFS_MODE_TYPE_MASK) >> 12,
+	    &inode->kind))
+		return (apfs_corrupt(error, ROLE_INODE, "has an invalid type"));
+	if ((val->internal_flags & ~APFS_INODE_FLAGS_VALID) != 0)
+		return (apfs_unsupported(error, ROLE_INODE,
+		    "has unsupported internal flags"));
+	/* The dataless flag is judged on every kind: a directory whose
+	 * records are not on the volume would otherwise list as empty.
+	 */
+	if ((val->bsd_flags & APFS_BSD_DATALESS) != 0)
+		return (apfs_unsupported(error, ROLE_INODE,
+		    "content is not on the volume"));
+	return (fields_read(inode, name, name_len, error));
 }
 
 fsimg_status_t
@@ -230,26 +256,12 @@ apfs_inode_get(apfs_reader_t *apfs, const apfs_child_t *child,
 	if (!found || !apfs_bare_key_decode(record.key, record.key_len,
 	    APFS_J_INODE, &oid) || oid != child->inode)
 		return (apfs_corrupt(error, ROLE_INODE, "is missing"));
-	if (record.ghost || !apfs_inode_val_decode(record.val, record.val_len,
-	    &inode->val))
-		return (apfs_corrupt(error, ROLE_INODE, "is malformed"));
-
-	if ((val->mode & APFS_MODE_TYPE_MASK) >> 12 != child->type ||
-	    !apfs_type_kind(child->type, &inode->kind))
-		return (apfs_corrupt(error, ROLE_INODE,
-		    "type does not match its directory record"));
-	if ((val->internal_flags & ~APFS_INODE_FLAGS_VALID) != 0)
-		return (apfs_unsupported(error, ROLE_INODE,
-		    "has unsupported internal flags"));
-	/* The dataless flag is judged on every kind: a directory whose
-	 * records are not on the volume would otherwise list as empty.
-	 */
-	if ((val->bsd_flags & APFS_BSD_DATALESS) != 0)
-		return (apfs_unsupported(error, ROLE_INODE,
-		    "content is not on the volume"));
-	status = fields_read(inode, &stored, &stored_len, error);
+	status = apfs_inode_decode(&record, inode, &stored, &stored_len, error);
 	if (status != FSIMG_OK)
 		return (status);
+	if ((val->mode & APFS_MODE_TYPE_MASK) >> 12 != child->type)
+		return (apfs_corrupt(error, ROLE_INODE,
+		    "type does not match its directory record"));
 
 	/* The parent and sharing rules: a directory has one parent and one
 	 * name, so no cycle or second name survives replay.

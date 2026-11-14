@@ -80,6 +80,26 @@
   snapshot-tree scan, so a refusal in one snapshot's tree ends the scan and
   damage in later snapshots goes unreported; the snapshot stage should run
   each snapshot as its own part of `verify.c`'s `parts_run()`.
+  Verification does not read the chunk tables of compressed files of a
+  resource-fork type, so a selected volume holding one verifies incomplete
+  after the allocation and file-extent merge (`e7-compression`,
+  `e6-xclone`); the content stage's validator adds them. The
+  reference-count sweep counts file-extent pieces, so a stream whose
+  extents name one block twice counts twice where the format design counts
+  distinct streams; no capture holds such a stream.
+  Record reconciliation (`records.c`) leaves open, from review: an unnamed
+  inode in the private directory is not held to a link count (no capture
+  has one; E16); a file inode's parent and name field are not matched with
+  one of its names, nor a directory's name field outside the selected
+  volume's replay; symbolic-link targets and `com.apple.decmpfs` headers
+  of non-selected volumes are not judged; directory cycles unreachable from
+  the root pass, since the design's acyclicity argument starts at the root;
+  clipping file extents to physical-extent records makes a piece per
+  record an extent spans, so many diverged clones of one large file cost
+  extents times records, where one sweep over raw extent and record
+  boundaries would be linear; and `apfs_inode_get()` judges the inode's
+  flags before its type against the directory record, so such an inode
+  with both faults reports unsupported.
   The writer plans and emits (`lib/formats/apfs/write-plan.c`,
   `write-emit.c`) behind the unregistered descriptor
   `fsimg_apfs_write_format`; it joins the registry after native

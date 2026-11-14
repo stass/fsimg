@@ -98,7 +98,8 @@ libfsimg_core_la_SOURCES = lib/core/context.c lib/core/internal.h \
 	lib/formats/apfs/write-plan.c lib/formats/apfs/write-emit.c \
 	lib/formats/apfs/descriptor.c lib/formats/apfs/volume.c \
 	lib/formats/apfs/read.c lib/formats/apfs/inode.c \
-	lib/formats/apfs/directory.c lib/formats/apfs/verify.c \
+	lib/formats/apfs/directory.c lib/formats/apfs/records.c \
+	lib/formats/apfs/verify.c \
 	lib/formats/exfat/exfat.h lib/formats/exfat/descriptor.c \
 	lib/formats/exfat/codec.c \
 	lib/formats/exfat/boot.c lib/formats/exfat/allocation.c \

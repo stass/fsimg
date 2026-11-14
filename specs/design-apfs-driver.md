@@ -680,7 +680,10 @@ merged against the pool's bitmap, so no block is claimed in both.
 For each volume it scans the object map, the snapshot tree, every
 extent-reference tree (the live one and each snapshot's), and the
 filesystem tree with dedicated cursors, and in the sealed profile the
-sealed file-extent tree. Each physical-extent record appends a data claim,
+sealed file-extent tree. Each tree is walked from its first record to its
+end, and the nodes the walk loads and the records it visits must equal its
+footer's node and key counts, since a walk of a valid tree loads each node
+once. Each physical-extent record appends a data claim,
 owner `(volume, tree)`; the filesystem scan, or the sealed file-extent
 scan, appends a file-extent record `(block, count, volume, stream ID)` for
 each mapped extent to a third stream; hole extents, whose physical block is
@@ -695,16 +698,19 @@ extents (8) lie together under its stream ID, which a clone or a written
 clone branch can make differ from the inode number, so extents tile their
 stream wherever it
 lies; attributes and extended fields are well formed; counts by kind
-accumulate for the superblock. Each sibling link's parent and name are
-looked up with a second cursor, and the directory record found must name
-the inode and carry the link's sibling ID. Facts that join different
-owners go to streams that are sorted once:
+accumulate for the superblock. Facts that join different owners go to
+streams that are sorted once:
 
 * name references `(child, parent, type, has sibling ID)`, joined with
   the inodes in scan order to check existence, kind, a directory's single
   parent, each file's link count, and that an inode's names carry sibling
   IDs exactly when it has sibling links, one per name;
-* sibling maps `(sibling ID, inode)`, joined with the sibling links;
+* sibling links `(sibling ID, inode, parent, name)`, joined with the same
+  facts of every directory record that carries a sibling ID, so each link
+  equals the record it describes and every such record has its link, and
+  with the sibling maps `(sibling ID, inode)`. A join rather than a lookup
+  per link keeps the cost a sort: a plain-key directory's names take no
+  part in the key order, and a lookup in one would scan the directory;
 * stream uses `(stream ID, kind, size, allocated bytes)`, from each inode's
   data-stream field and each stream attribute, joined with the streams
   found by the scan, `(stream ID, data-stream ID count or none, end of the

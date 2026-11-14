@@ -861,3 +861,16 @@ apfs_fs_tree_profile(bool hashed)
 {
 	return (hashed ? &fs_tree_hashed : &fs_tree_plain);
 }
+
+fsimg_status_t
+apfs_cursor_counts_check(const apfs_cursor_t *cursor, uint64_t keys,
+    fsimg_error_t *error)
+{
+	if (cursor->loads != cursor->info.node_count)
+		return (apfs_corrupt(error, cursor->profile->role,
+		    "node count differs from its footer"));
+	if (keys != cursor->info.key_count)
+		return (apfs_corrupt(error, cursor->profile->role,
+		    "key count differs from its footer"));
+	return (FSIMG_OK);
+}

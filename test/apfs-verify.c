@@ -27,6 +27,19 @@
 #define PHYSICAL_TREE 0x40000002u
 #define ARRAY_COUNT(a) (sizeof(a) / sizeof((a)[0]))
 
+/* Records own their spans; descriptor sorting leaves their storage stable. */
+typedef struct fs_record {
+	unsigned char key[128];
+	unsigned char value[256];
+	uint16_t key_size;
+	uint16_t value_size;
+} fs_record_t;
+
+typedef struct fs_tree {
+	fs_record_t records[24];
+	size_t count;
+} fs_tree_t;
+
 /* Fixed regions occupy 0..82. Each volume owns six blocks at 100 + 10*i:
  * superblock, object map, map root, virtual fs root, snapshots, extents.
  * The CIB and main bitmap live inside the separately accounted pool.
@@ -35,12 +48,18 @@ typedef struct fixture {
 	unsigned char *bytes;
 	uint64_t	 length;
 	apfs_gen_spaceman_t sm;
+	fs_tree_t trees[3];
+	uint64_t expected_files;
+	uint64_t expected_directories;
+	uint64_t expected_logical_bytes;
 	fsimg_ctx_t	*ctx;
 	fsimg_io_t	*io;
 } fixture_t;
 
 static unsigned failures, checks, native_verified, native_refused;
-static unsigned native_container, native_pending, native_encrypted;
+static unsigned native_complete, native_pending, native_encrypted;
+static unsigned native_compressed, native_snapshots;
+static unsigned native_refused_encrypted, native_refused_empty;
 static const char *scenario;
 
 static void
@@ -158,6 +177,188 @@ extents_build(fixture_t *f, uint64_t address, uint64_t first, uint64_t count)
 	node_build(f, address, address, PHYSICAL_TREE, 15, &record, 1, 0, 0);
 }
 
+static fs_record_t *
+record_add(fs_tree_t *tree)
+{
+	CHECK(tree->count < ARRAY_COUNT(tree->records));
+	return (&tree->records[tree->count++]);
+}
+
+static fs_record_t *
+record_find(fs_tree_t *tree, uint64_t owner, unsigned kind)
+{
+	for (size_t i = 0; i < tree->count; i++) {
+		uint64_t key = fsimg_load_le64(tree->records[i].key);
+
+		if ((key & GEN_JKEY_OID_MASK) == owner && key >> 60 == kind)
+			return (&tree->records[i]);
+	}
+	CHECK(false);
+	return (NULL);
+}
+
+/* Ordinary fixture names are ASCII; collision tests supply Unicode scalars. */
+static uint32_t
+ascii_hash(const char *name)
+{
+	uint32_t scalars[128];
+	size_t length = strlen(name);
+
+	CHECK(length <= ARRAY_COUNT(scalars));
+	for (size_t i = 0; i < length; i++)
+		scalars[i] = name[i] >= 'A' && name[i] <= 'Z' ?
+		    (uint32_t)(name[i] + 'a' - 'A') : (unsigned char)name[i];
+	return (apfs_gen_name_hash(scalars, length));
+}
+
+static void
+inode_build(fs_tree_t *tree, uint64_t oid, uint64_t parent, const char *name,
+    uint8_t type, int32_t count, uint64_t size)
+{
+	unsigned char fields[128], stream[GEN_DSTREAM_BYTES];
+	apfs_gen_xfield_t xf[] = {
+		{ .type = 4, .flags = 2,
+		.data = (const unsigned char *)name,
+		.size = (uint16_t)(strlen(name) + 1) },
+		{ .type = 8, .data = stream, .size = sizeof(stream) }
+	};
+	apfs_gen_dstream_t ds = { .size = size, .alloced_size = size };
+	apfs_gen_inode_val_t inode = { .parent = parent, .private_id = oid,
+		.mode = (uint16_t)((type << 12) | 0755), .count = count };
+	fs_record_t *r = record_add(tree);
+	uint16_t nfields = size != 0 ? 2 : 1;
+	size_t length = 4 + 4 * nfields + (xf[0].size + 7u) / 8u * 8u;
+
+	if (size != 0) {
+		CHECK(apfs_gen_dstream_build(stream, sizeof(stream), &ds));
+		length += sizeof(stream);
+	}
+	CHECK(length <= sizeof(fields));
+	CHECK(apfs_gen_xfields_build(fields, length, xf, nfields));
+	inode.xfields = fields;
+	inode.xfields_len = length;
+	r->key_size = GEN_JKEY_BYTES;
+	r->value_size = (uint16_t)(GEN_INODE_VAL_BYTES + length);
+	CHECK(apfs_gen_jkey_build(r->key, r->key_size, oid, 3));
+	CHECK(apfs_gen_inode_val_build(r->value, r->value_size, &inode));
+}
+
+static void
+drec_build(fs_tree_t *tree, uint64_t parent, uint64_t child,
+    const char *name, uint8_t type, uint32_t hash, uint64_t sibling)
+{
+	unsigned char fields[16], id[8];
+	apfs_gen_drec_key_t key = { .parent = parent, .name = name,
+		.name_len = (uint16_t)strlen(name), .hash = hash, .hashed = true };
+	apfs_gen_drec_val_t value = { .child = child, .flags = type };
+	apfs_gen_xfield_t xf = { .type = 1, .data = id, .size = sizeof(id) };
+	fs_record_t *r = record_add(tree);
+
+	if (sibling != 0) {
+		fsimg_store_le64(id, sibling);
+		CHECK(apfs_gen_xfields_build(fields, sizeof(fields), &xf, 1));
+		value.xfields = fields;
+		value.xfields_len = sizeof(fields);
+	}
+	r->key_size = (uint16_t)(GEN_DREC_HASHED_KEY_BYTES + key.name_len + 1);
+	r->value_size = (uint16_t)(GEN_DREC_VAL_BYTES + value.xfields_len);
+	CHECK(apfs_gen_drec_key_build(r->key, r->key_size, &key));
+	CHECK(apfs_gen_drec_val_build(r->value, r->value_size, &value));
+}
+
+static void
+stream_id_build(fs_tree_t *tree, uint32_t references)
+{
+	fs_record_t *r = record_add(tree);
+
+	r->key_size = GEN_JKEY_BYTES;
+	r->value_size = GEN_DSTREAM_ID_VAL_BYTES;
+	CHECK(apfs_gen_jkey_build(r->key, r->key_size, 16, 6));
+	CHECK(apfs_gen_dstream_id_val_build(r->value, r->value_size, references));
+}
+
+static void
+file_extent_build(fs_tree_t *tree, uint64_t offset, uint64_t physical,
+    uint64_t length)
+{
+	fs_record_t *r = record_add(tree);
+	apfs_gen_extent_val_t value = { .length = length, .phys_block = physical };
+
+	r->key_size = GEN_EXTENT_KEY_BYTES;
+	r->value_size = GEN_EXTENT_VAL_BYTES;
+	CHECK(apfs_gen_extent_key_build(r->key, r->key_size, 16, offset));
+	CHECK(apfs_gen_extent_val_build(r->value, r->value_size, &value));
+}
+
+/* Compare the stored owner/kind tuple, then the kind's stored suffix. */
+static int
+fs_record_compare(const void *left, const void *right)
+{
+	const apfs_gen_record_t *a = left, *b = right;
+	uint64_t ak = fsimg_load_le64(a->key), bk = fsimg_load_le64(b->key);
+	uint64_t ao = ak & GEN_JKEY_OID_MASK, bo = bk & GEN_JKEY_OID_MASK;
+	unsigned kind = (unsigned)(ak >> 60);
+
+	if (ao != bo)
+		return (ao < bo ? -1 : 1);
+	if (kind != bk >> 60)
+		return (kind < bk >> 60 ? -1 : 1);
+	if (kind == 9) {
+		uint32_t ah = fsimg_load_le32(a->key + 8) >> 10;
+		uint32_t bh = fsimg_load_le32(b->key + 8) >> 10;
+
+		if (ah != bh)
+			return (ah < bh ? -1 : 1);
+		return (strcmp((const char *)a->key + 12,
+		    (const char *)b->key + 12));
+	}
+	if (kind == 5 || kind == 8) {
+		ak = fsimg_load_le64(a->key + 8);
+		bk = fsimg_load_le64(b->key + 8);
+		return (ak < bk ? -1 : ak > bk);
+	}
+	return (0);
+}
+
+static void
+filesystem_build(fixture_t *f, unsigned volume)
+{
+	fs_tree_t *tree = &f->trees[volume];
+	apfs_gen_record_t records[24];
+	apfs_gen_omap_record_t map;
+	apfs_gen_fs_tree_t layout = { .records = records, .count = tree->count,
+		.first_oid = 2000 + volume, .base = VOLUME_BASE + 10 * volume + 3,
+		.xid = 10, .block_size = BLOCK, .records_per_leaf = 24,
+		.children_per_index = 2 };
+	uint64_t root, blocks;
+
+	for (size_t i = 0; i < tree->count; i++)
+		records[i] = (apfs_gen_record_t){ .key = tree->records[i].key,
+		    .key_size = tree->records[i].key_size,
+		    .value = tree->records[i].value,
+		    .value_size = tree->records[i].value_size };
+	qsort(records, tree->count, sizeof(records[0]), fs_record_compare);
+	CHECK(apfs_gen_fs_tree_build(f->bytes, IMAGE_BYTES, &layout, &map, 1,
+	    &root, &blocks));
+	CHECK(root == 2000 + volume && blocks == 1);
+}
+
+static void
+filesystem_init(fixture_t *f, unsigned volume)
+{
+	fs_tree_t *tree = &f->trees[volume];
+
+	drec_build(tree, 1, 2, "root", 4, ascii_hash("root"), 0);
+	drec_build(tree, 1, 3, "private", 4, ascii_hash("private"), 0);
+	inode_build(tree, 2, 1, "root", 4, 1, 0);
+	inode_build(tree, 3, 1, "private", 4, 0, 0);
+	drec_build(tree, 2, 16, "file", 8, ascii_hash("file"), 0);
+	inode_build(tree, 16, 2, "file", 8, 1, 2 * BLOCK);
+	stream_id_build(tree, 1);
+	file_extent_build(tree, 0, DATA_BLOCK + 10 * volume, 2 * BLOCK);
+	filesystem_build(f, volume);
+}
+
 /* Counts come from the explicit bitmap, independently of claim collection. */
 static void
 allocation_build(fixture_t *f)
@@ -218,6 +419,9 @@ fixture_init(fixture_t *f, unsigned volumes)
 
 	bzero(f, sizeof(*f));
 	f->length = IMAGE_BYTES;
+	f->expected_files = 1;
+	f->expected_directories = 1;
+	f->expected_logical_bytes = 2 * BLOCK;
 	f->bytes = calloc(1, IMAGE_BYTES);
 	CHECK(f->bytes != NULL);
 	for (unsigned i = 0; i < volumes; i++)
@@ -242,7 +446,7 @@ fixture_init(fixture_t *f, unsigned volumes)
 			.object = { .oid = 1000 + i, .xid = 10, .type = 13 },
 			.magic = 0x42535041, .index = i, .uuid = { 2, i + 1 },
 			.name = "Verify", .flags = 1, .incompat_features = 9,
-			.alloc_blocks = 7,
+			.alloc_blocks = 7, .files = 1,
 			.root_tree_type = 2, .extentref_tree_type = PHYSICAL_TREE,
 			.snapshot_tree_type = PHYSICAL_TREE, .omap_oid = base + 1,
 			.root_tree_oid = 2000 + i, .snapshot_tree_oid = base + 4,
@@ -258,7 +462,7 @@ fixture_init(fixture_t *f, unsigned volumes)
 			.value = { .size = BLOCK, .address = base } };
 		CHECK(apfs_gen_fs_build(block_at(f, base), BLOCK, &fs));
 		map_build(f, base + 1, &fs_map, 1);
-		node_build(f, base + 3, 2000 + i, 2, 14, NULL, 0, 0, 0);
+		filesystem_init(f, i);
 		node_build(f, base + 4, base + 4, PHYSICAL_TREE, 16,
 		    NULL, 0, 0, 0);
 		extents_build(f, base + 5, DATA_BLOCK + 10 * i, 2);
@@ -305,16 +509,27 @@ verify_fixture(fixture_t *f, unsigned flags, fsimg_status_t wanted,
 	status = fsimg_reader_open(f->ctx, slice, &options, &reader, &error);
 	if (status_is(status, FSIMG_OK, &error, "")) {
 		status = fsimg_verify(reader, 0, &report, &error);
-		if (status_is(status, wanted, &error, message) &&
-		    wanted == FSIMG_EUNSUPPORTED) {
-			expect(!report.complete, "container report is incomplete");
-			if (strcmp(message, "covers the container alone") == 0) {
-				expect(report.free_clusters ==
-				    f->sm.devices[0].free_count,
+		if (status_is(status, wanted, &error, message)) {
+			if (wanted == FSIMG_EUNSUPPORTED)
+				expect(!report.complete, "container report is incomplete");
+			if (wanted == FSIMG_OK) {
+				fsimg_volume_info_t info;
+
+				expect(report.complete, "verification is complete");
+				expect(report.files == f->expected_files,
+				    "report counts non-directory entries");
+				expect(report.directories == f->expected_directories,
+				    "report counts directories including root");
+				expect(report.logical_bytes == f->expected_logical_bytes,
+				    "report counts logical bytes");
+				expect(report.free_clusters == f->sm.devices[0].free_count,
 				    "report gives main device free count");
-				expect(report.allocated_clusters ==
-				    BLOCKS - f->sm.devices[0].free_count,
+				expect(report.allocated_clusters == BLOCKS -
+				    f->sm.devices[0].free_count,
 				    "allocated count is N minus free count");
+				CHECK(fsimg_reader_get_info(reader, &info, &error) == FSIMG_OK);
+				expect((info.valid & FSIMG_VOLUME_FREE) != 0,
+				    "reader publishes verified free space");
 			}
 		}
 	}
@@ -329,7 +544,7 @@ test_valid_container_counts(void)
 
 	scenario = "valid container counts";
 	fixture_init(&f, 1);
-	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED, "covers the container alone");
+	verify_fixture(&f, 0, FSIMG_OK, "");
 	fixture_close(&f);
 }
 
@@ -435,8 +650,8 @@ test_volume_allocated_block_count(void)
 		fsimg_store_le64(raw + 88, count);
 		CHECK(apfs_gen_seal(raw, BLOCK));
 		verify_fixture(&f, 0,
-		    count == 7 ? FSIMG_EUNSUPPORTED : FSIMG_ECORRUPT,
-		    count == 7 ? "covers the container alone" :
+		    count == 7 ? FSIMG_OK : FSIMG_ECORRUPT,
+		    count == 7 ? "" :
 		    "allocated block count differs from its trees");
 		fixture_close(&f);
 	}
@@ -913,14 +1128,14 @@ test_free_queues(void)
 	scenario = "empty main free-queue leaf";
 	fixture_init(&f, 1);
 	queue_build(&f, 1, 0, 0, 300);
-	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED, "covers the container alone");
+	verify_fixture(&f, 0, FSIMG_OK, "");
 	fixture_close(&f);
 
 	scenario = "nonempty main free queue";
 	fixture_init(&f, 1);
 	bit_set(block_at(&f, BITMAP_BLOCK), 300, true);
 	queue_build(&f, 1, 1, 1, 300);
-	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED, "covers the container alone");
+	verify_fixture(&f, 0, FSIMG_OK, "");
 	queue_build(&f, 1, 1, 2, 300);
 	verify_fixture(&f, 0, FSIMG_ECORRUPT, "count differs from its records");
 	fixture_close(&f);
@@ -1006,7 +1221,7 @@ test_pool_claims(void)
 	fixture_init(&f, 1);
 	bit_set(block_at(&f, 61), POOL_QUEUE_BLOCK - CIB_BLOCK, true);
 	queue_build(&f, 0, 1, 1, POOL_QUEUE_BLOCK);
-	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED, "covers the container alone");
+	verify_fixture(&f, 0, FSIMG_OK, "");
 	bit_set(block_at(&f, 61), POOL_QUEUE_BLOCK - CIB_BLOCK, false);
 	verify_fixture(&f, 0, FSIMG_ECORRUPT, "claimed but free");
 	fixture_close(&f);
@@ -1035,6 +1250,424 @@ test_truncation_and_assumed_identity(void)
 	CHECK(apfs_gen_seal(block_at(&f, 0), BLOCK));
 	verify_fixture(&f, FSIMG_READ_ASSUME_IDENTITY, FSIMG_ECORRUPT,
 	    "apfs identity was assumed: NXSB magic at offset 32 of block 0");
+	fixture_close(&f);
+}
+
+/* Count mutations target the inode value's documented count field. */
+static void
+inode_count_set(fs_tree_t *tree, uint64_t oid, uint32_t count)
+{
+	fs_record_t *r = record_find(tree, oid, 3);
+
+	fsimg_store_le32(r->value + 56, count);
+}
+
+static void
+add_second_file_name(fixture_t *f)
+{
+	fs_tree_t *tree = &f->trees[0];
+
+	drec_build(tree, 2, 16, "alias", 8, ascii_hash("alias"), 0);
+	inode_count_set(tree, 2, 2);
+}
+
+static void
+test_link_count_differs_from_names_is_corrupt(void)
+{
+	fixture_t f;
+
+	scenario = "file with two names and link count one";
+	fixture_init(&f, 1);
+	add_second_file_name(&f);
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT, "link count differs from its names");
+	fixture_close(&f);
+}
+
+static void
+test_child_count_differs_from_records_is_corrupt(void)
+{
+	fixture_t f;
+
+	scenario = "root child count differs from its directory records";
+	fixture_init(&f, 1);
+	inode_count_set(&f.trees[0], 2, 2);
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "child count differs from its directory records");
+	fixture_close(&f);
+}
+
+static void
+test_stream_reference_count_differs_from_inode_users_is_corrupt(void)
+{
+	fixture_t f;
+	fs_record_t *r;
+
+	scenario = "stream reference count two with one inode user";
+	fixture_init(&f, 1);
+	r = record_find(&f.trees[0], 16, 6);
+	CHECK(apfs_gen_dstream_id_val_build(r->value, r->value_size, 2));
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "reference count differs from its inodes");
+	fixture_close(&f);
+}
+
+static void
+test_multiple_names_without_sibling_links_is_corrupt(void)
+{
+	fixture_t f;
+
+	scenario = "file with two names but no sibling links";
+	fixture_init(&f, 1);
+	add_second_file_name(&f);
+	inode_count_set(&f.trees[0], 16, 2);
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "links differ from the inode's names");
+	fixture_close(&f);
+}
+
+static void
+test_name_with_sibling_id_without_link_is_corrupt(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *name;
+
+	scenario = "single name carries a sibling ID without a link";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	name = record_find(tree, 2, 9);
+	drec_build(tree, 2, 16, "file", 8, ascii_hash("file"), 500);
+	*name = tree->records[--tree->count];
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "carries a sibling ID its inode has no link for");
+	fixture_close(&f);
+}
+
+static void
+test_sibling_link_without_name_sibling_id_is_corrupt(void)
+{
+	fixture_t f;
+	fs_record_t *r;
+	apfs_gen_sibling_val_t link = { .parent = 2, .name = "file",
+		.name_len = 4 };
+
+	scenario = "sibling link names a directory record without its sibling ID";
+	fixture_init(&f, 1);
+	r = record_add(&f.trees[0]);
+	r->key_size = GEN_SIBLING_KEY_BYTES;
+	r->value_size = GEN_SIBLING_VAL_BYTES + link.name_len + 1;
+	CHECK(apfs_gen_sibling_key_build(r->key, r->key_size, 16, 500));
+	CHECK(apfs_gen_sibling_val_build(r->value, r->value_size, &link));
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "APFS sibling link links differ from the inode's names");
+	fixture_close(&f);
+}
+
+static void
+test_sibling_link_name_differs_from_directory_record_is_corrupt(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *name, *r;
+	apfs_gen_sibling_val_t link = { .parent = 2, .name = "alias",
+		.name_len = 5 };
+
+	scenario = "sibling link and directory record share an ID but differ in name";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	name = record_find(tree, 2, 9);
+	drec_build(tree, 2, 16, "file", 8, ascii_hash("file"), 500);
+	*name = tree->records[--tree->count];
+	r = record_add(tree);
+	r->key_size = GEN_SIBLING_KEY_BYTES;
+	r->value_size = GEN_SIBLING_VAL_BYTES + link.name_len + 1;
+	CHECK(apfs_gen_sibling_key_build(r->key, r->key_size, 16, 500));
+	CHECK(apfs_gen_sibling_val_build(r->value, r->value_size, &link));
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT, "differs from its directory record");
+	fixture_close(&f);
+}
+
+static void
+test_name_sibling_id_differs_from_link_is_corrupt(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *name, *r;
+	apfs_gen_sibling_val_t link = { .parent = 2, .name = "file",
+		.name_len = 4 };
+
+	scenario = "directory record carries an ID below its inode's sibling link ID";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	name = record_find(tree, 2, 9);
+	drec_build(tree, 2, 16, "file", 8, ascii_hash("file"), 499);
+	*name = tree->records[--tree->count];
+	r = record_add(tree);
+	r->key_size = GEN_SIBLING_KEY_BYTES;
+	r->value_size = GEN_SIBLING_VAL_BYTES + link.name_len + 1;
+	CHECK(apfs_gen_sibling_key_build(r->key, r->key_size, 16, 500));
+	CHECK(apfs_gen_sibling_val_build(r->value, r->value_size, &link));
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "carries a sibling ID no sibling link has");
+	fixture_close(&f);
+}
+
+/* Separate inodes keep link reconciliation valid until the collision sort. */
+static void
+add_collision(fixture_t *f, unsigned volume, const char *first,
+    const char *second, uint32_t hash)
+{
+	fs_tree_t *tree = &f->trees[volume];
+	unsigned char *raw = block_at(f, VOLUME_BASE + 10 * volume);
+
+	inode_count_set(tree, 2, 3);
+	inode_build(tree, 17, 2, first, 8, 1, 0);
+	inode_build(tree, 18, 2, second, 8, 1, 0);
+	drec_build(tree, 2, 17, first, 8, hash, 0);
+	drec_build(tree, 2, 18, second, 8, hash, 0);
+	fsimg_store_le64(raw + 184, 3);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	filesystem_build(f, volume);
+}
+
+static void
+test_case_equivalent_names_in_one_directory_is_corrupt(void)
+{
+	fixture_t f;
+
+	scenario = "case insensitive directory contains a and A with correct hashes";
+	fixture_init(&f, 1);
+	add_collision(&f, 0, "a", "A", ascii_hash("a"));
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "directory holds names the volume treats as equal");
+	fixture_close(&f);
+}
+
+static void
+test_normalization_equivalent_stored_spellings_is_corrupt(void)
+{
+	static const uint32_t nfd[] = { 'e', 0x301 };
+	fixture_t f;
+	unsigned char *raw;
+
+	/* NFC and NFD differ as bytes but both hash their NFD scalar form. */
+	scenario = "normalization insensitive directory contains NFC and NFD names";
+	fixture_init(&f, 1);
+	raw = block_at(&f, VOLUME_BASE);
+	fsimg_store_le64(raw + 56, 8);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	add_collision(&f, 0, "\xc3\xa9", "e\xcc\x81",
+	    apfs_gen_name_hash(nfd, ARRAY_COUNT(nfd)));
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "directory holds names the volume treats as equal");
+	fixture_close(&f);
+}
+
+static void
+test_collision_in_nonselected_volume_is_corrupt(void)
+{
+	fixture_t f;
+
+	scenario = "nonselected volume contains equivalent sibling names";
+	fixture_init(&f, 2);
+	add_collision(&f, 1, "a", "A", ascii_hash("a"));
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "directory holds names the volume treats as equal");
+	fixture_close(&f);
+}
+
+static void
+test_extent_gap_is_corrupt(void)
+{
+	fixture_t f;
+	fs_record_t *r;
+	apfs_gen_extent_val_t extent = { .length = BLOCK, .phys_block = DATA_BLOCK };
+
+	scenario = "gap between file extents";
+	fixture_init(&f, 1);
+	r = record_find(&f.trees[0], 16, 8);
+	CHECK(apfs_gen_extent_val_build(r->value, r->value_size, &extent));
+	file_extent_build(&f.trees[0], 2 * BLOCK, DATA_BLOCK + 1, BLOCK);
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT, "extents do not tile their stream");
+	fixture_close(&f);
+}
+
+static void
+test_first_extent_after_zero_is_corrupt(void)
+{
+	fixture_t f;
+	fs_record_t *r;
+
+	scenario = "first file extent starts after zero";
+	fixture_init(&f, 1);
+	r = record_find(&f.trees[0], 16, 8);
+	CHECK(apfs_gen_extent_key_build(r->key, r->key_size, 16, BLOCK));
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT, "extents do not tile their stream");
+	fixture_close(&f);
+}
+
+static void
+test_file_extent_outside_physical_records_is_corrupt(void)
+{
+	fixture_t f;
+	fs_record_t *r;
+	apfs_gen_extent_val_t extent = { .length = 2 * BLOCK, .phys_block = 300 };
+
+	scenario = "file extent outside every physical extent record";
+	fixture_init(&f, 1);
+	r = record_find(&f.trees[0], 16, 8);
+	CHECK(apfs_gen_extent_val_build(r->value, r->value_size, &extent));
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "file extent outside every physical-extent record");
+	fixture_close(&f);
+}
+
+static void
+test_physical_reference_count_exceeds_streams_is_corrupt(void)
+{
+	fixture_t f;
+	unsigned char key[GEN_JKEY_BYTES], value[GEN_PEXT_VAL_BYTES];
+	apfs_gen_pext_val_t extent = { .length = 2, .owner = 16,
+		.refcnt = 2, .kind = 1 };
+	apfs_gen_record_t record = { .key = key, .key_size = sizeof(key),
+		.value = value, .value_size = sizeof(value) };
+
+	scenario = "physical extent reference count two mapped by one stream";
+	fixture_init(&f, 1);
+	CHECK(apfs_gen_jkey_build(key, sizeof(key), DATA_BLOCK, 2));
+	CHECK(apfs_gen_pext_val_build(value, sizeof(value), &extent));
+	node_build(&f, 105, 105, PHYSICAL_TREE, 15, &record, 1, 0, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "reference count differs from the streams mapping its blocks");
+	fixture_close(&f);
+}
+
+static void
+test_physical_record_without_file_mapping_is_corrupt(void)
+{
+	fixture_t f;
+	fs_record_t *r;
+	apfs_gen_extent_val_t hole = { .length = 2 * BLOCK };
+
+	scenario = "physical extent record mapped by no stream";
+	fixture_init(&f, 1);
+	r = record_find(&f.trees[0], 16, 8);
+	CHECK(apfs_gen_extent_val_build(r->value, r->value_size, &hole));
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "reference count differs from the streams mapping its blocks");
+	fixture_close(&f);
+}
+
+static void
+test_tree_footer_counts_differ_from_walk_is_corrupt(void)
+{
+	static const struct {
+		const char *name;
+		uint64_t block;
+	} trees[] = {
+		{ "container object map", 91 },
+		{ "volume object map", 102 },
+		{ "extent reference tree", 105 },
+		{ "snapshot tree", 104 },
+		{ "free queue", 11 },
+		{ "filesystem tree", 103 }
+	};
+	fixture_t f;
+	unsigned char *footer;
+	char label[128];
+
+	for (size_t i = 0; i < ARRAY_COUNT(trees); i++) {
+		for (unsigned nodes = 0; nodes < 2; nodes++) {
+			CHECK(snprintf(label, sizeof(label), "%s footer %s count",
+			    trees[i].name, nodes ? "node" : "key") < (int)sizeof(label));
+			scenario = label;
+			fixture_init(&f, 1);
+			if (trees[i].block == 11)
+				queue_build(&f, 1, 0, 0, 300);
+			footer = block_at(&f, trees[i].block) + BLOCK - GEN_APFS_FOOTER;
+			footer += nodes ? 32 : 24;
+			fsimg_store_le64(footer, fsimg_load_le64(footer) + 1);
+			CHECK(apfs_gen_seal(block_at(&f, trees[i].block), BLOCK));
+			verify_fixture(&f, 0, FSIMG_ECORRUPT, nodes ?
+			    "node count differs from its footer" :
+			    "key count differs from its footer");
+			fixture_close(&f);
+		}
+	}
+}
+
+static void
+test_superblock_counts_differ_from_inode_kinds_is_corrupt(void)
+{
+	static const struct {
+		const char *name;
+		unsigned offset;
+	} counts[] = {
+		{ "superblock file count differs from inodes", 184 },
+		{ "superblock directory count differs from inodes", 192 }
+	};
+	fixture_t f;
+	unsigned char *raw;
+
+	for (size_t i = 0; i < ARRAY_COUNT(counts); i++) {
+		scenario = counts[i].name;
+		fixture_init(&f, 1);
+		raw = block_at(&f, VOLUME_BASE);
+		fsimg_store_le64(raw + counts[i].offset,
+		    fsimg_load_le64(raw + counts[i].offset) + 1);
+		CHECK(apfs_gen_seal(raw, BLOCK));
+		verify_fixture(&f, 0, FSIMG_ECORRUPT,
+		    "object counts differ from its inodes");
+		fixture_close(&f);
+	}
+}
+
+static void
+test_clean_namespace_verifies_completely(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *r;
+	unsigned char *raw;
+	apfs_gen_name_key_t key = { .oid = 18, .name = "com.apple.fs.symlink",
+		.name_len = sizeof("com.apple.fs.symlink") - 1 };
+	apfs_gen_xattr_val_t target = { .flags = 6,
+		.data = (const unsigned char *)"file", .data_len = 5 };
+
+	scenario = "clean root, subdirectory, mapped regular file and symlink";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	inode_count_set(tree, 2, 3);
+	inode_build(tree, 17, 2, "subdir", 4, 0, 0);
+	inode_build(tree, 18, 2, "link", 10, 1, 0);
+	drec_build(tree, 2, 17, "subdir", 4, ascii_hash("subdir"), 0);
+	drec_build(tree, 2, 18, "link", 10, ascii_hash("link"), 0);
+	r = record_add(tree);
+	r->key_size = GEN_NAME_KEY_BYTES + key.name_len + 1;
+	r->value_size = GEN_XATTR_VAL_BYTES + target.data_len;
+	CHECK(apfs_gen_xattr_key_build(r->key, r->key_size, &key));
+	CHECK(apfs_gen_xattr_val_build(r->value, r->value_size, &target));
+	raw = block_at(&f, VOLUME_BASE);
+	fsimg_store_le64(raw + 192, 1);
+	fsimg_store_le64(raw + 200, 1);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	filesystem_build(&f, 0);
+	f.expected_files = 2;
+	f.expected_directories = 2;
+	f.expected_logical_bytes = 2 * BLOCK + 4;
+	verify_fixture(&f, 0, FSIMG_OK, "");
 	fixture_close(&f);
 }
 
@@ -1097,10 +1730,24 @@ native_image(const char *path)
 		options.volume_index = slot;
 		status = fsimg_reader_open(ctx, slice, &options, &reader, &error);
 		if (status != FSIMG_OK) {
+			bool encrypted_capture =
+			    (slot == 1 && strstr(path,
+			    "/e11-enc-addvol/e11-enc-addvol.img") != NULL) ||
+			    (slot == 0 && (strstr(path,
+			    "/e11-enc-newfs/e11-enc-newfs.img") != NULL ||
+			    strstr(path, "/e11-enc-newfs-pop/e11-enc-newfs-pop.img") != NULL ||
+			    strstr(path, "/e11-enc-encryptvol/e11-enc-encryptvol.img") != NULL));
+
 			printf("REFUSED %s volume %u: %s\n", path, slot, error.message);
-			native_refused++;
+			if (encrypted_capture && status_is(status, FSIMG_EUNSUPPORTED,
+			    &error, "APFS volume superblock is encrypted")) {
+				native_refused_encrypted++;
+				native_refused++;
+			} else if (!encrypted_capture)
+				status_is(status, FSIMG_OK, &error, "");
 			continue;
 		}
+
 		/* Use the selected checkpoint for subsequent occupied slots. */
 		nx = ((apfs_reader_t *)reader->driver)->container.nx;
 		status = fsimg_verify(reader, 0, &report, &error);
@@ -1109,24 +1756,36 @@ native_image(const char *path)
 		/* Captured reaper flags are 3 with two entries in 003 and
 		 * 005; 007 has flags 1 and an empty list, so is idle.
 		 */
-		message = "covers the container alone";
+		message = NULL;
 		if (strstr(path, "-e17-clean/during-003.img") != NULL ||
 		    strstr(path, "-e17-clean/during-005.img") != NULL)
 			message = "pending reap";
 		if (slot == 0 && strstr(path,
 		    "/e11-enc-addvol/e11-enc-addvol.img") != NULL)
 			message = "APFS volume superblock is encrypted";
-		if (status_is(status, FSIMG_EUNSUPPORTED, &error, message)) {
-			expect(!report.complete, "native report is incomplete");
-			if (strcmp(message, "covers the container alone") == 0)
-				native_container++;
-			else if (strcmp(message, "pending reap") == 0)
-				native_pending++;
-			else {
-				expect(strcmp(error.message, message) == 0,
-				    "encrypted sibling has the exact diagnostic");
-				native_encrypted++;
+		if (slot == 0 && (strstr(path,
+		    "/apfs-newfs-67108864-e7-compression/image.img") != NULL ||
+		    strstr(path, "/apfs-newfs-67108864-e6-xclone/image.img") != NULL))
+			message = "chunks whose tables verification does not read";
+		if (message == NULL && status == FSIMG_EUNSUPPORTED &&
+		    strstr(error.message, "has snapshots") != NULL)
+			message = "has snapshots";
+		if (message == NULL) {
+			if (status_is(status, FSIMG_OK, &error, "")) {
+				expect(report.complete, "native verification is complete");
+				native_complete++;
+				native_verified++;
 			}
+		} else if (status_is(status, FSIMG_EUNSUPPORTED, &error, message)) {
+			expect(!report.complete, "native report is incomplete");
+			if (strcmp(message, "pending reap") == 0)
+				native_pending++;
+			else if (strstr(message, "chunks") != NULL)
+				native_compressed++;
+			else if (strcmp(message, "has snapshots") == 0)
+				native_snapshots++;
+			else
+				native_encrypted++;
 			native_verified++;
 		}
 		fsimg_reader_free(reader);
@@ -1135,9 +1794,16 @@ native_image(const char *path)
 	if (!occupied) {
 		fsimg_read_options_init(&options);
 		status = fsimg_reader_open(ctx, slice, &options, &reader, &error);
-		expect(status != FSIMG_OK, "empty container is refused");
 		printf("REFUSED %s: %s\n", path, error.message);
-		native_refused++;
+		/* This newfs specimen contains no volumes and has invalid geometry. */
+		if (strstr(path, "/apfs-newfs-372736-plain/image.img") != NULL) {
+			if (status_is(status, FSIMG_ECORRUPT, &error,
+			    "APFS container superblock has an invalid block count")) {
+				native_refused_empty++;
+				native_refused++;
+			}
+		} else
+			expect(false, "unexpected capture without an occupied volume");
 		fsimg_reader_free(reader);
 	}
  done:
@@ -1195,8 +1861,11 @@ test_native_captures(void)
 	scenario = "native captures";
 	printf("native verification: %u verified, %u refused\n",
 	    native_verified, native_refused);
-	printf("native reasons: %u container alone, %u pending reap, "
-	    "%u encrypted\n", native_container, native_pending, native_encrypted);
+	printf("native reasons: %u complete, %u pending reap, %u encrypted, "
+	    "%u compressed chunk tables, %u snapshots\n", native_complete,
+	    native_pending, native_encrypted, native_compressed, native_snapshots);
+	printf("native refusals: %u encrypted, %u empty container\n",
+	    native_refused_encrypted, native_refused_empty);
 	expect(native_verified != 0, "native gate verified at least one volume");
 }
 
@@ -1227,6 +1896,25 @@ main(void)
 	test_refused_volume_map_preserves_extent_damage();
 	test_pool_claims();
 	test_truncation_and_assumed_identity();
+	test_link_count_differs_from_names_is_corrupt();
+	test_child_count_differs_from_records_is_corrupt();
+	test_stream_reference_count_differs_from_inode_users_is_corrupt();
+	test_multiple_names_without_sibling_links_is_corrupt();
+	test_name_with_sibling_id_without_link_is_corrupt();
+	test_sibling_link_without_name_sibling_id_is_corrupt();
+	test_sibling_link_name_differs_from_directory_record_is_corrupt();
+	test_name_sibling_id_differs_from_link_is_corrupt();
+	test_case_equivalent_names_in_one_directory_is_corrupt();
+	test_normalization_equivalent_stored_spellings_is_corrupt();
+	test_collision_in_nonselected_volume_is_corrupt();
+	test_extent_gap_is_corrupt();
+	test_first_extent_after_zero_is_corrupt();
+	test_file_extent_outside_physical_records_is_corrupt();
+	test_physical_reference_count_exceeds_streams_is_corrupt();
+	test_physical_record_without_file_mapping_is_corrupt();
+	test_tree_footer_counts_differ_from_walk_is_corrupt();
+	test_superblock_counts_differ_from_inode_kinds_is_corrupt();
+	test_clean_namespace_verifies_completely();
 	test_native_captures();
 	printf("APFS verification: %u checks, %u failures\n", checks, failures);
 	return (failures != 0);

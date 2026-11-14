@@ -36,9 +36,14 @@
  * does not read, such as an EFI jumpstart. Any of them makes the report
  * incomplete with FSIMG_EUNSUPPORTED, and the merge is then not made, since
  * it could not tell their blocks from damage; every structure is still read
- * and judged, and damage found outranks the incomplete report. Record
- * reconciliation, chunk tables and the namespace walk lie outside this
- * pass, so a report that passes it is incomplete too.
+ * and judged, and damage found outranks the incomplete report.
+ *
+ * Each volume's filesystem records are reconciled by records.c, which
+ * appends every mapped file extent to a stream of its own. The merge clips
+ * those extents, sorted by block, to the live physical-extent records, and
+ * sweeps the boundaries of the pieces of each record: every block of a
+ * record must be mapped as many times as its reference count. The common
+ * walk then visits the selected volume.
  */
 #define ROLE_VERIFY		"verification"
 #define ROLE_EXTENTREF		"extent-reference tree"
@@ -155,6 +160,18 @@ typedef struct verify {
 	unsigned char	*window;
 	domain_t	 main;
 	domain_t	 pool;
+	/* Every volume's live physical-extent records, LIVE_BYTES each in
+	 * volume and block order; the mapped file extents records.c finds;
+	 * the selected volume's inodes of several names.
+	 */
+	fsimg_stream_t	*live_extents;
+	fsimg_stream_t	*file_extents;
+	fsimg_stream_t	*shared;
+	/* The verification flags, and whether the selected volume holds a
+	 * compressed file whose chunk tables are not read.
+	 */
+	unsigned	 flags;
+	bool		 chunk_tables;
 	/* The first reason the report is incomplete; status FSIMG_OK while
 	 * there is none.
 	 */
@@ -167,6 +184,42 @@ typedef struct verify {
 	unsigned char	 uuids[APFS_NX_VOLUMES_MAX][APFS_UUID_BYTES];
 	uint32_t	 uuid_count;
 } verify_t;
+
+/* A live physical-extent record, for the file-extent join. */
+typedef struct live_extent {
+	uint64_t	first;
+	uint64_t	count;
+	uint32_t	volume;
+	uint32_t	refcnt;
+} live_extent_t;
+
+#define LIVE_BYTES	24u
+
+/*
+ * A boundary of the extent sweep, keyed by its volume and the first block
+ * of its physical-extent record: the record opens at its first block with
+ * its reference count and closes at its end, and each piece of a file
+ * extent inside it enters at its first block and leaves at its end.
+ */
+typedef enum {
+	EVENT_OPEN,
+	EVENT_ENTER,
+	EVENT_LEAVE,
+	EVENT_CLOSE
+} event_kind_t;
+
+typedef struct event {
+	uint64_t	record;
+	uint64_t	position;
+	uint32_t	volume;
+	uint32_t	refcnt;
+	uint8_t		kind;
+} event_t;
+
+#define EVENT_BYTES	25u
+/* An inode of several names, then its mark once the walk has read it. */
+#define SHARED_BYTES	9u
+#define PAYLOAD_BYTES	65536u
 
 /* One physical-extent tree walk: its owner and the end of its last record. */
 typedef struct extent_walk {
@@ -229,6 +282,33 @@ static fsimg_status_t	volume_identity(verify_t *, uint32_t, apfs_fs_t *,
 static fsimg_status_t	volume_map_claims(verify_t *, fsimg_error_t *);
 static fsimg_status_t	snapshot_claims(verify_t *, fsimg_error_t *);
 static fsimg_status_t	live_extent_claims(verify_t *, fsimg_error_t *);
+static fsimg_status_t	volume_records(verify_t *, fsimg_error_t *);
+static fsimg_status_t	live_add(verify_t *, const live_extent_t *,
+			    fsimg_error_t *);
+static fsimg_status_t	live_next(fsimg_stream_t *, uint64_t *,
+			    live_extent_t *, bool *, fsimg_error_t *);
+static int		fext_compare(const void *, size_t, const void *,
+			    size_t, void *);
+static int		event_compare(const void *, size_t, const void *,
+			    size_t, void *);
+static fsimg_status_t	event_add(fsimg_stream_t *, const event_t *,
+			    fsimg_error_t *);
+static fsimg_status_t	event_next(fsimg_stream_t *, uint64_t *, event_t *,
+			    bool *, fsimg_error_t *);
+static fsimg_status_t	piece_add(fsimg_stream_t *, const live_extent_t *,
+			    uint64_t, uint64_t, fsimg_error_t *);
+static fsimg_status_t	extents_clip(verify_t *, fsimg_stream_t *,
+			    fsimg_error_t *);
+static fsimg_status_t	records_bound(verify_t *, fsimg_stream_t *,
+			    fsimg_error_t *);
+static fsimg_status_t	events_sweep(fsimg_stream_t *, fsimg_error_t *);
+static fsimg_status_t	extents_merge(verify_t *, fsimg_error_t *);
+static fsimg_status_t	shared_load(verify_t *, fsimg_array_t **,
+			    uint64_t *, fsimg_error_t *);
+static fsimg_status_t	shared_first(fsimg_array_t *, uint64_t, uint64_t,
+			    bool *, fsimg_error_t *);
+static fsimg_status_t	namespace_walk(verify_t *, unsigned,
+			    fsimg_verify_report_t *, fsimg_error_t *);
 static fsimg_status_t	volume_trees(verify_t *, uint32_t, const apfs_fs_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	volume_pass(verify_t *, uint32_t, fsimg_error_t *);
@@ -475,7 +555,8 @@ incomplete_reason(verify_t *v, const char *role, const char *what)
 
 /*
  * Walk a tree from its first record, calling fn, when given, on each
- * record. The nodes of a physical tree are claimed: each node on the path
+ * record, and compare the nodes and records the walk met with the footer's
+ * counts. The nodes of a physical tree are claimed: each node on the path
  * the first time it appears at its level, which an in-order walk reaches
  * once. An ephemeral tree's nodes lie in the checkpoint data area, which
  * its fixed region claims.
@@ -487,6 +568,7 @@ tree_walk(verify_t *v, apfs_cursor_t *cursor, record_fn_t fn, void *arg,
 	uint64_t seen[APFS_BTREE_LEVELS_MAX] = { 0 };
 	bool physical = cursor->storage == APFS_OBJ_PHYSICAL;
 	apfs_record_t record;
+	uint64_t keys = 0;
 	fsimg_status_t status;
 	bool found;
 
@@ -502,7 +584,8 @@ tree_walk(verify_t *v, apfs_cursor_t *cursor, record_fn_t fn, void *arg,
 				return (status);
 		}
 		if (!found)
-			break;
+			return (apfs_cursor_counts_check(cursor, keys, error));
+		keys++;
 		if (fn != NULL) {
 			apfs_cursor_record(cursor, &record);
 			status = fn(v, &record, arg, error);
@@ -584,9 +667,9 @@ map_walk(verify_t *v, apfs_map_kind_t kind, uint64_t oid, apfs_omap_t *omap,
 /*
  * A physical-extent record: a data claim of its volume. Records of one
  * tree never overlap, which keeps same-tree claims out of the merge's
- * folding. A live record is of kind new with a positive count; how a
- * snapshot's tree records them is provisional (E9), so only the kind's
- * range is judged there.
+ * folding. A live record is of kind new with a positive count, and is kept
+ * for the file-extent join; how a snapshot's tree records them is
+ * provisional (E9), so only the kind's range is judged there.
  */
 static fsimg_status_t
 extent_record(verify_t *v, const apfs_record_t *record, void *arg,
@@ -616,6 +699,10 @@ extent_record(verify_t *v, const apfs_record_t *record, void *arg,
 	    .volume = walk->volume, .class = CLAIM_DATA,
 	    .source = SOURCE_EXTENT };
 	status = claim_add(v, &v->main, &claim, error);
+	if (status == FSIMG_OK && walk->live)
+		status = live_add(v, &(live_extent_t){ .first = key.oid,
+		    .count = value.length, .volume = walk->volume,
+		    .refcnt = (uint32_t)value.refcnt }, error);
 	if (status == FSIMG_OK)
 		walk->end = key.oid + value.length;
 	return (status);
@@ -757,6 +844,34 @@ live_extent_claims(verify_t *v, fsimg_error_t *error)
 }
 
 /*
+ * The volume's filesystem records (records.c). A sealed volume keeps its
+ * file extents in a tree this pass does not read, which already makes the
+ * report incomplete, so its records are not reconciled. With payload
+ * read-through the selected volume lists its inodes of several names for
+ * the walk, and it notes a compressed file whose chunk tables are not
+ * read; that makes the report incomplete after the allocation merge, since
+ * those tables hide no blocks from it.
+ */
+static fsimg_status_t
+volume_records(verify_t *v, fsimg_error_t *error)
+{
+	const volume_walk_t *volume = v->volume;
+	bool selected = volume->index == v->apfs->volume_index;
+	apfs_records_t records = { .extents = v->file_extents };
+	fsimg_status_t status;
+
+	if (volume->fs->fext_tree_oid != 0)
+		return (FSIMG_OK);
+	if (selected && (v->flags & FSIMG_VERIFY_PAYLOAD) != 0)
+		records.shared = v->shared;
+	status = apfs_records_check(v->container, volume->fs, volume->index,
+	    v->window, &records, error);
+	if (selected && records.chunk_tables)
+		v->chunk_tables = true;
+	return (status);
+}
+
+/*
  * A volume's trees: its object map, snapshot tree and extent-reference
  * trees, each a part of its own, so a refusal in one leaves the others
  * read. The checks that join them need all three whole. Without
@@ -770,7 +885,7 @@ volume_trees(verify_t *v, uint32_t index, const apfs_fs_t *fs,
     fsimg_error_t *error)
 {
 	static const part_fn_t parts[] = { volume_map_claims,
-	    snapshot_claims, live_extent_claims };
+	    snapshot_claims, live_extent_claims, volume_records };
 	volume_walk_t walk = { .fs = fs, .index = index,
 	    .snapshots = { .volume = index } };
 	fsimg_status_t status;
@@ -1307,7 +1422,465 @@ pool_merge(verify_t *v, apfs_sm_pager_t *pager, fsimg_error_t *error)
 	return (status);
 }
 
-/* Both domains' merges over one pager pass. */
+static fsimg_status_t
+live_add(verify_t *v, const live_extent_t *live, fsimg_error_t *error)
+{
+	unsigned char raw[LIVE_BYTES];
+
+	fsimg_store_le64(raw, live->first);
+	fsimg_store_le64(raw + 8, live->count);
+	fsimg_store_le32(raw + 16, live->volume);
+	fsimg_store_le32(raw + 20, live->refcnt);
+	return (fsimg_stream_append(v->live_extents, raw, sizeof(raw), NULL,
+	    error));
+}
+
+/* Read the live record at offset, or report through read the end. */
+static fsimg_status_t
+live_next(fsimg_stream_t *stream, uint64_t *offset, live_extent_t *live,
+    bool *read, fsimg_error_t *error)
+{
+	unsigned char raw[LIVE_BYTES];
+	size_t length;
+	fsimg_status_t status;
+
+	*read = false;
+	status = fsimg_stream_next(stream, offset, raw, sizeof(raw), &length,
+	    error);
+	if (status == FSIMG_DONE)
+		return (FSIMG_OK);
+	if (status != FSIMG_OK)
+		return (status);
+	if (length != LIVE_BYTES)
+		return (apfs_corrupt(error, ROLE_VERIFY,
+		    "finds a scratch record of the wrong size"));
+	live->first = fsimg_load_le64(raw);
+	live->count = fsimg_load_le64(raw + 8);
+	live->volume = fsimg_load_le32(raw + 16);
+	live->refcnt = fsimg_load_le32(raw + 20);
+	*read = true;
+	return (FSIMG_OK);
+}
+
+/* File extents sort by volume, first block, count, then stream. */
+static int
+fext_compare(const void *a, size_t alen, const void *b, size_t blen,
+    void *argument)
+{
+	apfs_fext_claim_t x, y;
+
+	(void)alen;
+	(void)blen;
+	(void)argument;
+	apfs_fext_claim_decode(a, &x);
+	apfs_fext_claim_decode(b, &y);
+	if (x.volume != y.volume)
+		return (x.volume < y.volume ? -1 : 1);
+	if (x.first != y.first)
+		return (x.first < y.first ? -1 : 1);
+	if (x.count != y.count)
+		return (x.count < y.count ? -1 : 1);
+	return (x.stream < y.stream ? -1 : x.stream > y.stream);
+}
+
+/* Events sort by volume, record, position, then kind. */
+static int
+event_compare(const void *a, size_t alen, const void *b, size_t blen,
+    void *argument)
+{
+	const unsigned char *x = a, *y = b;
+	uint64_t u, w;
+
+	(void)alen;
+	(void)blen;
+	(void)argument;
+	u = fsimg_load_le32(x + 16);
+	w = fsimg_load_le32(y + 16);
+	if (u != w)
+		return (u < w ? -1 : 1);
+	for (size_t at = 0; at < 16; at += 8) {
+		u = fsimg_load_le64(x + at);
+		w = fsimg_load_le64(y + at);
+		if (u != w)
+			return (u < w ? -1 : 1);
+	}
+	return (x[24] < y[24] ? -1 : x[24] > y[24]);
+}
+
+static fsimg_status_t
+event_add(fsimg_stream_t *events, const event_t *event, fsimg_error_t *error)
+{
+	unsigned char raw[EVENT_BYTES];
+
+	fsimg_store_le64(raw, event->record);
+	fsimg_store_le64(raw + 8, event->position);
+	fsimg_store_le32(raw + 16, event->volume);
+	fsimg_store_le32(raw + 20, event->refcnt);
+	raw[24] = event->kind;
+	return (fsimg_stream_append(events, raw, sizeof(raw), NULL, error));
+}
+
+static fsimg_status_t
+event_next(fsimg_stream_t *events, uint64_t *offset, event_t *event,
+    bool *read, fsimg_error_t *error)
+{
+	unsigned char raw[EVENT_BYTES];
+	size_t length;
+	fsimg_status_t status;
+
+	*read = false;
+	status = fsimg_stream_next(events, offset, raw, sizeof(raw), &length,
+	    error);
+	if (status == FSIMG_DONE)
+		return (FSIMG_OK);
+	if (status != FSIMG_OK)
+		return (status);
+	if (length != EVENT_BYTES)
+		return (apfs_corrupt(error, ROLE_VERIFY,
+		    "finds a scratch record of the wrong size"));
+	event->record = fsimg_load_le64(raw);
+	event->position = fsimg_load_le64(raw + 8);
+	event->volume = fsimg_load_le32(raw + 16);
+	event->refcnt = fsimg_load_le32(raw + 20);
+	event->kind = raw[24];
+	*read = true;
+	return (FSIMG_OK);
+}
+
+/* The piece [first, end) of a file extent inside record. */
+static fsimg_status_t
+piece_add(fsimg_stream_t *events, const live_extent_t *record, uint64_t first,
+    uint64_t end, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	status = event_add(events, &(event_t){ .record = record->first,
+	    .position = first, .volume = record->volume,
+	    .kind = EVENT_ENTER }, error);
+	if (status == FSIMG_OK)
+		status = event_add(events, &(event_t){ .record = record->first,
+		    .position = end, .volume = record->volume,
+		    .kind = EVENT_LEAVE }, error);
+	return (status);
+}
+
+/*
+ * Clip each file extent, in block order, to the live physical-extent
+ * records it spans: its first block lies in one, and it runs on only into
+ * the record of its volume that begins where that one ends. Extents sorted
+ * by first block never need a record before the current one, so the
+ * current record only advances; a record an extent runs into is read
+ * ahead from it. Each piece adds its two boundaries to events.
+ */
+static fsimg_status_t
+extents_clip(verify_t *v, fsimg_stream_t *events, fsimg_error_t *error)
+{
+	unsigned char raw[APFS_FEXT_CLAIM_BYTES];
+	fsimg_stream_t *extents = NULL;
+	apfs_fext_claim_t extent;
+	live_extent_t live, record;
+	uint64_t extents_at = 0, live_at = 0, ahead_at, at, end, piece_end;
+	size_t length;
+	bool have_live, read;
+	fsimg_status_t status;
+
+	status = fsimg_stream_seal(v->file_extents, error);
+	if (status == FSIMG_OK)
+		status = fsimg_stream_sort(v->file_extents, fext_compare, NULL,
+		    NULL, &extents, error);
+	if (status == FSIMG_OK)
+		status = live_next(v->live_extents, &live_at, &live,
+		    &have_live, error);
+	while (status == FSIMG_OK) {
+		status = fsimg_stream_next(extents, &extents_at, raw,
+		    sizeof(raw), &length, error);
+		if (status == FSIMG_DONE) {
+			status = FSIMG_OK;
+			break;
+		}
+		if (status != FSIMG_OK)
+			break;
+		if (length != APFS_FEXT_CLAIM_BYTES) {
+			status = apfs_corrupt(error, ROLE_VERIFY,
+			    "finds a scratch record of the wrong size");
+			break;
+		}
+		apfs_fext_claim_decode(raw, &extent);
+		/* Both lie inside the container, so no end overflows. */
+		while (status == FSIMG_OK && have_live &&
+		    (live.volume < extent.volume ||
+		    (live.volume == extent.volume &&
+		    live.first + live.count <= extent.first)))
+			status = live_next(v->live_extents, &live_at, &live,
+			    &have_live, error);
+		if (status != FSIMG_OK)
+			break;
+		if (!have_live || live.volume != extent.volume ||
+		    live.first > extent.first) {
+			status = apfs_corrupt(error, ROLE_VERIFY, "finds a file "
+			    "extent outside every physical-extent record");
+			break;
+		}
+		record = live;
+		ahead_at = live_at;
+		at = extent.first;
+		end = extent.first + extent.count;
+		for (;;) {
+			piece_end = record.first + record.count < end ?
+			    record.first + record.count : end;
+			status = piece_add(events, &record, at, piece_end,
+			    error);
+			if (status != FSIMG_OK || piece_end == end)
+				break;
+			status = live_next(v->live_extents, &ahead_at, &record,
+			    &read, error);
+			if (status != FSIMG_OK)
+				break;
+			if (!read || record.volume != extent.volume ||
+			    record.first != piece_end) {
+				status = apfs_corrupt(error, ROLE_VERIFY,
+				    "finds a file extent running past its "
+				    "physical-extent records");
+				break;
+			}
+			at = piece_end;
+		}
+	}
+	fsimg_stream_free(extents);
+	return (status);
+}
+
+/* Each live record opens and closes its own boundaries. */
+static fsimg_status_t
+records_bound(verify_t *v, fsimg_stream_t *events, fsimg_error_t *error)
+{
+	live_extent_t live;
+	uint64_t at = 0;
+	bool read;
+	fsimg_status_t status;
+
+	for (;;) {
+		status = live_next(v->live_extents, &at, &live, &read, error);
+		if (status != FSIMG_OK || !read)
+			return (status);
+		status = event_add(events, &(event_t){ .record = live.first,
+		    .position = live.first, .volume = live.volume,
+		    .refcnt = live.refcnt, .kind = EVENT_OPEN }, error);
+		if (status == FSIMG_OK)
+			status = event_add(events, &(event_t){
+			    .record = live.first,
+			    .position = live.first + live.count,
+			    .volume = live.volume, .kind = EVENT_CLOSE },
+			    error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+}
+
+/*
+ * Sweep the sorted boundaries record by record. A record's opening sorts
+ * first among its boundaries and its closing last, and every piece lies
+ * between them, so the spans between successive positions cover the
+ * record exactly; over each, the pieces entered and not yet left must
+ * number the record's reference count. A block no stream maps has none.
+ */
+static fsimg_status_t
+events_sweep(fsimg_stream_t *events, fsimg_error_t *error)
+{
+	event_t event, record;
+	uint64_t at = 0, position = 0, active = 0;
+	bool read, have_record = false;
+	fsimg_status_t status;
+
+	for (;;) {
+		status = event_next(events, &at, &event, &read, error);
+		if (status != FSIMG_OK || !read)
+			return (status);
+		if (!have_record || event.volume != record.volume ||
+		    event.record != record.record) {
+			if (event.kind != EVENT_OPEN)
+				return (apfs_corrupt(error, ROLE_VERIFY,
+				    "finds a file-extent piece outside its "
+				    "record"));
+			record = event;
+			have_record = true;
+			position = event.position;
+			active = 0;
+		} else if (event.position != position) {
+			if (active != record.refcnt)
+				return (apfs_corrupt(error, ROLE_EXTENTREF,
+				    "reference count differs from the streams "
+				    "mapping its blocks"));
+			position = event.position;
+		}
+		if (event.kind == EVENT_ENTER)
+			active++;
+		else if (event.kind == EVENT_LEAVE)
+			active--;
+	}
+}
+
+/*
+ * The file extents of every volume against the live physical-extent
+ * records: clipped to them, then swept for the reference counts.
+ */
+static fsimg_status_t
+extents_merge(verify_t *v, fsimg_error_t *error)
+{
+	fsimg_stream_t *events = NULL, *sorted = NULL;
+	fsimg_status_t status;
+
+	status = fsimg_stream_seal(v->live_extents, error);
+	if (status == FSIMG_OK)
+		status = fsimg_stream_new(&v->reader->session, EVENT_BYTES,
+		    &events, error);
+	if (status == FSIMG_OK)
+		status = extents_clip(v, events, error);
+	if (status == FSIMG_OK)
+		status = records_bound(v, events, error);
+	if (status == FSIMG_OK)
+		status = fsimg_stream_seal(events, error);
+	if (status == FSIMG_OK)
+		status = fsimg_stream_sort(events, event_compare, NULL, NULL,
+		    &sorted, error);
+	fsimg_stream_free(events);
+	if (status == FSIMG_OK)
+		status = events_sweep(sorted, error);
+	fsimg_stream_free(sorted);
+	return (status);
+}
+
+/*
+ * The selected volume's inodes of several names, which the scan appended
+ * in ascending order, copied into a paged array of SHARED_BYTES records
+ * whose last byte marks an inode the walk has read.
+ */
+static fsimg_status_t
+shared_load(verify_t *v, fsimg_array_t **array, uint64_t *count,
+    fsimg_error_t *error)
+{
+	unsigned char raw[SHARED_BYTES];
+	uint64_t at = 0, previous = 0;
+	size_t length;
+	fsimg_status_t status;
+
+	*array = NULL;
+	*count = v->shared->count;
+	if (*count == 0)
+		return (FSIMG_OK);
+	status = fsimg_stream_seal(v->shared, error);
+	if (status == FSIMG_OK)
+		status = fsimg_array_new(&v->reader->session, SHARED_BYTES,
+		    *count, array, error);
+	for (uint64_t i = 0; status == FSIMG_OK && i < *count; i++) {
+		status = fsimg_stream_next(v->shared, &at, raw, 8, &length,
+		    error);
+		if (status == FSIMG_DONE || (status == FSIMG_OK &&
+		    (length != 8 || (i > 0 && fsimg_load_le64(raw) <=
+		    previous))))
+			return (apfs_corrupt(error, ROLE_VERIFY,
+			    "finds its list of linked inodes out of order"));
+		previous = fsimg_load_le64(raw);
+		raw[8] = 0;
+		if (status == FSIMG_OK)
+			status = fsimg_array_set(*array, i, raw, error);
+	}
+	return (status);
+}
+
+/*
+ * Whether the walk reads inode now: true unless it is one of several names
+ * already read; the first time an inode of several names is met, it is
+ * marked. The array is searched by halving.
+ */
+static fsimg_status_t
+shared_first(fsimg_array_t *array, uint64_t count, uint64_t inode,
+    bool *first, fsimg_error_t *error)
+{
+	unsigned char raw[SHARED_BYTES];
+	uint64_t low = 0, high = count, middle, number;
+	fsimg_status_t status;
+
+	*first = true;
+	while (low < high) {
+		middle = low + (high - low) / 2;
+		status = fsimg_array_get(array, middle, raw, error);
+		if (status != FSIMG_OK)
+			return (status);
+		number = fsimg_load_le64(raw);
+		if (number < inode) {
+			low = middle + 1;
+			continue;
+		}
+		if (number > inode) {
+			high = middle;
+			continue;
+		}
+		if (raw[8] != 0) {
+			*first = false;
+			return (FSIMG_OK);
+		}
+		raw[8] = 1;
+		return (fsimg_array_set(array, middle, raw, error));
+	}
+	return (FSIMG_OK);
+}
+
+/*
+ * The common walk of the selected volume: every delivered entry is counted
+ * through fsimg_verify_account(), the root among the directories, and with
+ * payload read-through each file and symbolic link is read, an inode of
+ * several names once, at the first name the walk reaches.
+ */
+static fsimg_status_t
+namespace_walk(verify_t *v, unsigned flags, fsimg_verify_report_t *report,
+    fsimg_error_t *error)
+{
+	fsimg_reader_t *reader = v->reader;
+	fsimg_array_t *shared = NULL;
+	unsigned char *payload = NULL;
+	fsimg_error_t detail;
+	uint64_t count;
+	bool first;
+	fsimg_status_t status;
+
+	status = shared_load(v, &shared, &count, error);
+	if (status == FSIMG_OK && (flags & FSIMG_VERIFY_PAYLOAD) != 0) {
+		payload = fsimg_alloc(reader->ctx, PAYLOAD_BYTES, &detail);
+		if (payload == NULL) {
+			status = detail.status;
+			if (error != NULL)
+				*error = detail;
+		}
+	}
+	report->directories = 1;
+	while (status == FSIMG_OK) {
+		status = fsimg_walk_next(reader, error);
+		if (status == FSIMG_DONE) {
+			status = FSIMG_OK;
+			break;
+		}
+		if (status == FSIMG_OK)
+			status = fsimg_verify_account(reader, report, error);
+		if (status != FSIMG_OK || payload == NULL ||
+		    !fsimg_walk_delivered(reader) ||
+		    (reader->entry.kind != FSIMG_ENTRY_FILE &&
+		    reader->entry.kind != FSIMG_ENTRY_SYMLINK))
+			continue;
+		first = true;
+		if (shared != NULL)
+			status = shared_first(shared, count,
+			    v->apfs->current.inode, &first, error);
+		if (status == FSIMG_OK && first)
+			status = fsimg_verify_payload(reader, payload,
+			    PAYLOAD_BYTES, report, error);
+	}
+	fsimg_dealloc(payload);
+	fsimg_array_free(shared);
+	return (status);
+}
+
+/* Both domains' merges over one pager pass, then the file extents'. */
 static fsimg_status_t
 allocation_merge(verify_t *v, fsimg_error_t *error)
 {
@@ -1320,6 +1893,8 @@ allocation_merge(verify_t *v, fsimg_error_t *error)
 	if (status == FSIMG_OK)
 		status = pool_merge(v, pager, error);
 	apfs_sm_pager_free(pager);
+	if (status == FSIMG_OK)
+		status = extents_merge(v, error);
 	return (status);
 }
 
@@ -1334,7 +1909,6 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 	fsimg_error_t detail;
 	fsimg_status_t status;
 
-	(void)flags;
 	reader->session.progress.phase = "APFS verification";
 	v = fsimg_alloc(reader->ctx, sizeof(*v), &detail);
 	if (v == NULL) {
@@ -1343,7 +1917,7 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 		return (detail.status);
 	}
 	*v = (verify_t){ .reader = reader, .apfs = apfs,
-	    .container = container,
+	    .container = container, .flags = flags,
 	    .main = { .name = "container", .first = 0,
 	    .end = container->block_count },
 	    .pool = { .name = "internal pool", .first = sm->ip_base,
@@ -1359,6 +1933,15 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 		status = fsimg_stream_new(&reader->session, CLAIM_BYTES,
 		    &v->pool.claims, error);
 	if (status == FSIMG_OK)
+		status = fsimg_stream_new(&reader->session, LIVE_BYTES,
+		    &v->live_extents, error);
+	if (status == FSIMG_OK)
+		status = fsimg_stream_new(&reader->session,
+		    APFS_FEXT_CLAIM_BYTES, &v->file_extents, error);
+	if (status == FSIMG_OK)
+		status = fsimg_stream_new(&reader->session, 8, &v->shared,
+		    error);
+	if (status == FSIMG_OK)
 		status = container_pass(v, error);
 	if (status == FSIMG_OK && v->incomplete.status == FSIMG_OK) {
 		status = allocation_merge(v, error);
@@ -1366,17 +1949,26 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 		report->allocated_clusters = container->block_count -
 		    apfs->free_blocks;
 	}
+	if (status == FSIMG_OK && v->chunk_tables)
+		incomplete_reason(v, "compressed file", "keeps its content in "
+		    "chunks whose tables verification does not read");
+	if (status == FSIMG_OK)
+		status = namespace_walk(v, flags, report, error);
 	if (status == FSIMG_OK)
 		status = fsimg_reader_stable(reader, error);
-	if (status == FSIMG_OK) {
-		if (v->incomplete.status == FSIMG_OK)
-			incomplete_reason(v, ROLE_VERIFY,
-			    "covers the container alone: filesystem records, "
-			    "chunk tables and the namespace are unchecked");
+	if (status == FSIMG_OK && v->incomplete.status != FSIMG_OK) {
 		if (error != NULL)
 			*error = v->incomplete;
 		status = v->incomplete.status;
 	}
+	if (status == FSIMG_OK) {
+		reader->info.free_bytes = report->free_clusters *
+		    container->block_size;
+		reader->info.valid |= FSIMG_VOLUME_FREE;
+	}
+	fsimg_stream_free(v->shared);
+	fsimg_stream_free(v->file_extents);
+	fsimg_stream_free(v->live_extents);
 	fsimg_stream_free(v->pool.claims);
 	fsimg_stream_free(v->main.claims);
 	fsimg_dealloc(v->window);

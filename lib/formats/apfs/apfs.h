@@ -1053,6 +1053,16 @@ fsimg_status_t	apfs_cursor_next(apfs_cursor_t *, bool *, fsimg_error_t *);
 void		apfs_cursor_record(const apfs_cursor_t *, apfs_record_t *);
 
 /*
+ * apfs_cursor_counts_check(cursor, keys, error), after a walk from
+ * apfs_cursor_first() to the end of its tree that visited keys records,
+ * compares the walk with the root's footer: a walk of a valid tree loads
+ * each node once, so its loads must equal the node count and keys the key
+ * count (specs/design-apfs.md, "Validation"). A mismatch is FSIMG_ECORRUPT.
+ */
+fsimg_status_t	apfs_cursor_counts_check(const apfs_cursor_t *, uint64_t,
+		    fsimg_error_t *);
+
+/*
  * The filesystem tree's profile for a volume whose directory records use
  * hashed keys (true) or plain ones. Keys order by owner, kind and the
  * kind's suffix, and a key shorter than its kind's suffix, such as a header
@@ -1591,9 +1601,11 @@ bool	apfs_file_info_val_encode(unsigned char *, size_t,
  */
 #define APFS_INO_ROOT_PARENT		1u
 #define APFS_INO_ROOT			2u
+#define APFS_INO_PRIVATE		3u	/* the private directory */
 #define APFS_INO_FIRST			16u
 #define APFS_INO_VOLGRP_FIRST		UINT64_C(0x0800000000000000)
-#define APFS_FS_FEATURE_VOLGRP_INODES	0x10u	/* optional feature */
+#define APFS_FS_FEATURE_HARDLINK_MAPS	0x2u	/* optional features */
+#define APFS_FS_FEATURE_VOLGRP_INODES	0x10u
 #define APFS_FS_ROLE_SYSTEM		0x1u
 
 /* The internal flags of [A1]'s valid mask, the closed table; 0x20 is not. */
@@ -1681,6 +1693,11 @@ typedef struct apfs_current {
  * rules and refusal tables: open runs it on the selected volume and
  * verification on every volume. name_bytes receives the name's length.
  *
+ * apfs_volume_rule(fs) is the name rule a volume's incompatible features
+ * select; a volume of any rule but APFS_NAMES_BYTES hashes its
+ * directory-record keys. apfs_inode_min(fs) is its least ordinary inode
+ * number, which the volume-group inode space raises in a System volume.
+ *
  * apfs_verify() (verify.c) is the reader's structural verification.
  */
 typedef struct apfs_reader {
@@ -1710,8 +1727,47 @@ void		apfs_volume_close(apfs_reader_t *);
 fsimg_status_t	apfs_volume_read(apfs_container_t *, apfs_map_t *, uint32_t,
 		    uint64_t, unsigned char *, apfs_fs_t *, size_t *,
 		    fsimg_error_t *);
+apfs_name_rule_t apfs_volume_rule(const apfs_fs_t *);
+uint64_t	apfs_inode_min(const apfs_fs_t *);
 fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,
 		    fsimg_verify_report_t *, fsimg_error_t *);
+
+/*
+ * Record reconciliation (records.c; specs/design-apfs-driver.md,
+ * "Verification"). apfs_records_check(container, fs, volume, window,
+ * records, error) scans the filesystem tree of the volume in slot volume,
+ * whose superblock fs verification has read, and reconciles its records.
+ * Each mapped file extent appends an apfs_fext_claim_t of
+ * APFS_FEXT_CLAIM_BYTES to records->extents, for the allocation merge to
+ * join with the live physical-extent records; when records->shared is not
+ * NULL, each non-directory inode of several names appends its number, an
+ * 8-byte little-endian record, in ascending order. A compressed file whose
+ * content lies in a resource fork sets records->chunk_tables, since
+ * verification does not read chunk tables. The scan's streams live in the
+ * session's metadata scratch and are freed before it returns.
+ */
+#define APFS_FEXT_CLAIM_BYTES		28u
+
+typedef struct apfs_fext_claim {
+	uint64_t	first;		/* physical block */
+	uint64_t	count;		/* blocks */
+	uint64_t	stream;
+	uint32_t	volume;
+} apfs_fext_claim_t;
+
+typedef struct apfs_records {
+	fsimg_stream_t	*extents;
+	fsimg_stream_t	*shared;	/* optional */
+	bool		 chunk_tables;
+} apfs_records_t;
+
+void		apfs_fext_claim_encode(unsigned char *,
+		    const apfs_fext_claim_t *);
+void		apfs_fext_claim_decode(const unsigned char *,
+		    apfs_fext_claim_t *);
+fsimg_status_t	apfs_records_check(apfs_container_t *, const apfs_fs_t *,
+		    uint32_t, unsigned char *, apfs_records_t *,
+		    fsimg_error_t *);
 
 /*
  * Entries (inode.c; specs/design-apfs-driver.md, "Directories").
@@ -1726,6 +1782,13 @@ fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,
  * record. Every member of inode is owned: the extended fields are read into
  * it, and inode->val.xfields is left empty.
  *
+ * apfs_inode_decode(record, inode, name, name_len, error) applies to one
+ * inode record the rules that need no directory record: its value, a
+ * known mode type, its flags and its extended fields, returning the name
+ * field's span, NULL when it has none, and leaving inode->val.xfields on
+ * the record's bytes. apfs_inode_get() runs it on the record it finds;
+ * verification runs it on every inode its scan meets.
+ *
  * apfs_entry_load(reader, child, name, error) makes the child the current
  * entry: apfs_inode_get(), then reader->entry and its metadata, then the
  * attribute records after the inode, which give a symbolic link's target,
@@ -1737,6 +1800,7 @@ fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,
 typedef struct apfs_inode {
 	apfs_inode_val_t val;
 	uint64_t	 size;		/* the data stream's, zero without one */
+	uint64_t	 alloced;	/* the data stream's allocated bytes */
 	uint32_t	 rdev;		/* bits 24-31 major, 0-23 minor */
 	fsimg_entry_kind_t kind;
 	bool		 has_dstream;
@@ -1746,6 +1810,8 @@ typedef struct apfs_inode {
 bool		apfs_type_kind(uint8_t, fsimg_entry_kind_t *);
 fsimg_status_t	apfs_inode_get(apfs_reader_t *, const apfs_child_t *,
 		    const char *, apfs_inode_t *, fsimg_error_t *);
+fsimg_status_t	apfs_inode_decode(const apfs_record_t *, apfs_inode_t *,
+		    const char **, uint16_t *, fsimg_error_t *);
 fsimg_status_t	apfs_entry_load(fsimg_reader_t *, const apfs_child_t *,
 		    const char *, fsimg_error_t *);
 

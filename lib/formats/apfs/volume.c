@@ -288,27 +288,37 @@ apfs_volume_open(fsimg_reader_t *reader, apfs_reader_t *apfs,
 }
 
 /*
- * The volume's name rule and key variant ("Directory records and names"):
- * a case-insensitive or normalization-insensitive volume hashes its
- * directory-record keys, and the least ordinary inode number, which the
- * volume-group inode space raises in a System volume.
+ * The volume's name rule ("Directory records and names"): a
+ * case-insensitive or normalization-insensitive volume hashes its
+ * directory-record keys.
  */
+apfs_name_rule_t
+apfs_volume_rule(const apfs_fs_t *fs)
+{
+	if ((fs->incompat_features & APFS_FS_INCOMPAT_CASE_INSENSITIVE) != 0)
+		return (APFS_NAMES_CASELESS);
+	if ((fs->incompat_features & APFS_FS_INCOMPAT_NORM_INSENSITIVE) != 0)
+		return (APFS_NAMES_NFD);
+	return (APFS_NAMES_BYTES);
+}
+
+uint64_t
+apfs_inode_min(const apfs_fs_t *fs)
+{
+	return ((fs->features & APFS_FS_FEATURE_VOLGRP_INODES) != 0 &&
+	    fs->role == APFS_FS_ROLE_SYSTEM ? APFS_INO_VOLGRP_FIRST :
+	    APFS_INO_FIRST);
+}
+
+/* The selected volume's name rule, key variant and least ordinary inode. */
 static void
 names_setup(apfs_reader_t *apfs)
 {
 	const apfs_fs_t *fs = &apfs->fs;
 
-	if ((fs->incompat_features & APFS_FS_INCOMPAT_CASE_INSENSITIVE) != 0)
-		apfs->rule = APFS_NAMES_CASELESS;
-	else if ((fs->incompat_features &
-	    APFS_FS_INCOMPAT_NORM_INSENSITIVE) != 0)
-		apfs->rule = APFS_NAMES_NFD;
-	else
-		apfs->rule = APFS_NAMES_BYTES;
+	apfs->rule = apfs_volume_rule(fs);
 	apfs->hashed = apfs->rule != APFS_NAMES_BYTES;
-	apfs->inode_min = (fs->features & APFS_FS_FEATURE_VOLGRP_INODES) != 0 &&
-	    fs->role == APFS_FS_ROLE_SYSTEM ? APFS_INO_VOLGRP_FIRST :
-	    APFS_INO_FIRST;
+	apfs->inode_min = apfs_inode_min(fs);
 }
 
 void
