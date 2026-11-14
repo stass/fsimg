@@ -1741,8 +1741,7 @@ such as a used macOS System volume shows whether a snapshot is itself
 sealed, and a nonzero broken-seal XID until a sealed volume modified after
 sealing shows which nodes keep no header. Without digests a headerless
 node would have no check binding it to its OID, so the default is refusal
-rather than reading without checks. The `seal_broken_xid` detail reports
-the stored XID, zero for every volume that opens.
+rather than reading without checks.
 
 The sealed profile reads names and content through the sealed tree. It
 checks every visited node's digest against its parent and the root's
@@ -2237,8 +2236,8 @@ UTC time basis, header scope, and `clean` false when a newer incomplete
 checkpoint was passed over. Its details, in order: `volume_index`,
 `volume_count`, `role`, `case_insensitive`, `norm_insensitive`,
 `checkpoint_xid`, `read_xid`, `files`, `directories`, `symlinks`,
-`other_objects`, `snapshots`, `volume_blocks`, `sealed` and
-`seal_broken_xid`: fifteen values, all read while opening.
+`other_objects`, `snapshots`, `volume_blocks` and `sealed`: fourteen
+values, all read while opening.
 
 ## Failure classification
 

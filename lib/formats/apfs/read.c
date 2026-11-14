@@ -159,12 +159,12 @@ detail_add(fsimg_volume_info_t *info, const char *name, uint64_t value)
 }
 
 /*
- * The volume information and its fifteen details, in the format design's
+ * The volume information and its fourteen details, in the format design's
  * order ("Information and capabilities"). The container's length is
  * N * B of the selected checkpoint, whatever the slice holds, so the reader
  * core derives the missing bytes of a truncated container. The label is
  * the validated volume name, the only image text reported. A sealed volume
- * is refused while opening, so sealed and seal_broken_xid are zero.
+ * is refused while opening, so sealed is zero.
  */
 static void
 report_info(fsimg_reader_t *reader)
@@ -207,5 +207,4 @@ report_info(fsimg_reader_t *reader)
 	detail_add(info, "snapshots", fs->snapshots);
 	detail_add(info, "volume_blocks", fs->alloc_blocks);
 	detail_add(info, "sealed", 0);
-	detail_add(info, "seal_broken_xid", 0);
 }

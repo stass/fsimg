@@ -702,8 +702,7 @@ test_full_open_information_and_prepare(void)
 		{ .name = "other_objects", .value = 14 },
 		{ .name = "snapshots", .value = 15 },
 		{ .name = "volume_blocks", .value = 16 },
-		{ .name = "sealed", .value = 0 },
-		{ .name = "seal_broken_xid", .value = 0 }
+		{ .name = "sealed", .value = 0 }
 	};
 	fixture_t f;
 	fsimg_volume_info_t *info;
@@ -745,7 +744,7 @@ test_full_open_information_and_prepare(void)
 			    "UTC timestamps");
 			expect(info->scope == FSIMG_VALIDATION_HEADER,
 			    "header validation scope");
-			expect(info->detail_count == 15, "fifteen details");
+			expect(info->detail_count == 14, "fourteen details");
 			for (size_t i = 0; i < 15 && i < info->detail_count;
 			    i++) {
 				expect(strcmp(info->details[i].name,
