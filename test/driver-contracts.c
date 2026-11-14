@@ -3005,7 +3005,7 @@ check_registry(void)
 		const char *name;
 		uint32_t capabilities;
 	} information_formats[] = {
-		{ "apfs", FSIMG_CAP_READ }
+		{ "apfs", FSIMG_CAP_READ | FSIMG_CAP_VERIFY }
 	};
 	fsimg_format_info_t info;
 	fsimg_error_t error;

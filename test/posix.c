@@ -298,7 +298,7 @@ test_capability_records(void)
 			continue;
 		}
 		if (strcmp(info.name, "apfs") == 0) {
-			CHECK(info.capabilities == FSIMG_CAP_READ);
+			CHECK(info.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 			CHECK(info.entry_kinds == (FSIMG_ENTRY_FILE |
 			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
 			    FSIMG_ENTRY_FIFO | FSIMG_ENTRY_CHAR_DEVICE |

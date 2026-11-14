@@ -655,8 +655,9 @@ failures keep their own operations and stay terminal, as the salvage
 walker. A [truncated container](#truncated-containers) reaches neither: the
 reader core fails its verification first.
 
-**Container pass.** It re-reads the selected checkpoint's descriptor and data
-runs, the reaper with its reap-list objects (through
+**Container pass.** It starts from the checkpoint open selected and checked,
+its superblock, mappings and space manager, and re-reads the reaper with its
+reap-list objects (through
 `apfs_object_read()`, to decide whether it is idle) and the container object
 map, and appends
 claims `(first block, count, class, owner)` to a claim stream: the
@@ -790,7 +791,15 @@ completed verification sets `FSIMG_VOLUME_FREE` from the counted free
 blocks. A refused feature in any volume, an unknown optional or
 read-only-compatible feature bit, or a reaper that is not idle makes the
 report incomplete with `FSIMG_EUNSUPPORTED`; the walk is never reported
-complete after skipping an object.
+complete after skipping an object. So do structures whose blocks no claim
+describes: snapshots, whose claims are provisional until E9 gives them (a
+snapshot superblock, the object map's snapshot tree, shared nodes), a
+nonzero EFI jumpstart, and a volume's sealed file-extent tree, integrity
+object or snapshot extension in a profile that does not read them. Such
+blocks cannot be told from damage, so an incomplete container pass makes
+no allocation merge; every structure is still read, and damage found
+outranks the incomplete report. The extent-reference and snapshot trees
+are subtypes 15 and 16 (E3, `apfs-newfs-268435456-e3-ci`).
 
 ## Writer settings
 

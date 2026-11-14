@@ -39,7 +39,8 @@ const fsimg_reader_ops_t fsimg_apfs_reader_ops = {
 	.key = apfs_key,
 	.ambiguous = "APFS directory holds names the volume treats as equal",
 	.name_profile = FSIMG_NAME_PROFILE_NONE,
-	.resolve = apfs_resolve
+	.resolve = apfs_resolve,
+	.verify = apfs_verify
 };
 
 static fsimg_status_t

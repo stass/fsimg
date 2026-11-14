@@ -818,7 +818,7 @@ test_variants(void)
 	    FSIMG_CAP_VERIFY));
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_OK);
 	CHECK(strcmp(format.name, "apfs") == 0);
-	CHECK(format.capabilities == FSIMG_CAP_READ);
+	CHECK(format.capabilities == (FSIMG_CAP_READ | FSIMG_CAP_VERIFY));
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	CHECK(fsimg_format_next(&cursor, &format, NULL) == FSIMG_DONE);
 	for (unsigned i = 0; i < 3; i++) {

@@ -1673,6 +1673,15 @@ typedef struct apfs_current {
  * preparation, replay and key derivation use in turn: a form in it is valid
  * only within the function that derived it, since the next driver callback,
  * keys among them, overwrites it.
+ *
+ * apfs_volume_read(container, container_map, index, xid, window, fs,
+ * name_bytes, error) reads the superblock of slot index, which must lie
+ * below the container's maximum volume count and be nonempty, through
+ * the container object map at xid and applies the volume superblock's own
+ * rules and refusal tables: open runs it on the selected volume and
+ * verification on every volume. name_bytes receives the name's length.
+ *
+ * apfs_verify() (verify.c) is the reader's structural verification.
  */
 typedef struct apfs_reader {
 	apfs_container_t container;
@@ -1698,6 +1707,11 @@ extern const fsimg_reader_ops_t fsimg_apfs_reader_ops;
 fsimg_status_t	apfs_volume_open(fsimg_reader_t *, apfs_reader_t *,
 		    unsigned char *, fsimg_error_t *);
 void		apfs_volume_close(apfs_reader_t *);
+fsimg_status_t	apfs_volume_read(apfs_container_t *, apfs_map_t *, uint32_t,
+		    uint64_t, unsigned char *, apfs_fs_t *, size_t *,
+		    fsimg_error_t *);
+fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,
+		    fsimg_verify_report_t *, fsimg_error_t *);
 
 /*
  * Entries (inode.c; specs/design-apfs-driver.md, "Directories").

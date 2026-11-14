@@ -227,11 +227,31 @@ fs_check(const apfs_fs_t *fs, uint32_t index, size_t *name_bytes,
 }
 
 fsimg_status_t
+apfs_volume_read(apfs_container_t *container, apfs_map_t *container_map,
+    uint32_t index, uint64_t xid, unsigned char *window, apfs_fs_t *fs,
+    size_t *name_bytes, fsimg_error_t *error)
+{
+	apfs_ref_t ref;
+	fsimg_status_t status;
+
+	ref = (apfs_ref_t){ .map = container_map, .role = ROLE_VOLUME,
+	    .oid = container->nx.volume_oids[index], .xid = xid,
+	    .storage = APFS_OBJ_VIRTUAL, .subtype = APFS_SUBTYPE_NONE,
+	    .kind = APFS_KIND_FS };
+	status = apfs_object_read(container, &ref, window, NULL, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!apfs_fs_decode(window, container->block_size, fs))
+		return (apfs_corrupt(error, ROLE_VOLUME,
+		    "is shorter than its structure"));
+	return (fs_check(fs, index, name_bytes, error));
+}
+
+fsimg_status_t
 apfs_volume_open(fsimg_reader_t *reader, apfs_reader_t *apfs,
     unsigned char *window, fsimg_error_t *error)
 {
 	apfs_container_t *container = &apfs->container;
-	apfs_ref_t ref;
 	fsimg_status_t status;
 
 	apfs->read_xid = container->xid;
@@ -248,18 +268,9 @@ apfs_volume_open(fsimg_reader_t *reader, apfs_reader_t *apfs,
 	    &apfs->volume_index, &apfs->volume_count, error);
 	if (status != FSIMG_OK)
 		return (status);
-	ref = (apfs_ref_t){ .map = &apfs->container_map, .role = ROLE_VOLUME,
-	    .oid = container->nx.volume_oids[apfs->volume_index],
-	    .xid = apfs->read_xid, .storage = APFS_OBJ_VIRTUAL,
-	    .subtype = APFS_SUBTYPE_NONE, .kind = APFS_KIND_FS };
-	status = apfs_object_read(container, &ref, window, NULL, error);
-	if (status != FSIMG_OK)
-		return (status);
-	if (!apfs_fs_decode(window, container->block_size, &apfs->fs))
-		return (apfs_corrupt(error, ROLE_VOLUME,
-		    "is shorter than its structure"));
-	status = fs_check(&apfs->fs, apfs->volume_index, &apfs->label_bytes,
-	    error);
+	status = apfs_volume_read(container, &apfs->container_map,
+	    apfs->volume_index, apfs->read_xid, window, &apfs->fs,
+	    &apfs->label_bytes, error);
 	if (status != FSIMG_OK)
 		return (status);
 	status = apfs_map_open(container, APFS_MAP_VOLUME, apfs->fs.omap_oid,

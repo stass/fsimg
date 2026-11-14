@@ -52,7 +52,7 @@ class CliTest < Minitest::Test
     assert_equal(1024, erofs.fetch("max_link_target_bytes"))
     assert_equal(0x402, erofs.fetch("write_settings"))
     apfs = formats.delete("apfs")
-    assert_equal(1, apfs.fetch("capabilities"))
+    assert_equal(5, apfs.fetch("capabilities"))
     assert_equal(127, apfs.fetch("entry_kinds"))
     assert_equal(0x77, apfs.fetch("metadata_fields"))
     assert_equal(1023, apfs.fetch("max_link_target_bytes"))
