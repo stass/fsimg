@@ -1593,6 +1593,13 @@ check_container_bytes(const apfs_plan_t *plan, const memory_sink_t *sink)
 	check_object(sink, apfs_run_block(plan, plan->volume_run), 1);
 	check_object(sink, apfs_run_block(plan, plan->vomap_run), 1);
 	check_object(sink, apfs_run_block(plan, plan->comap_run), 1);
+	bytes = image_block(sink, apfs_run_block(plan, plan->volume_run));
+	EXPECT(fsimg_load_le64(bytes + 1032) == 0);
+	EXPECT(fsimg_load_le32(bytes + 1040) == 0x40000002u);
+	EXPECT(fsimg_load_le32(bytes + 1044) == 0x40000002u);
+	/* Bytes beyond the encoded superblock, including the reserved OID,
+	 * are zero; the reserved tree type is part of the encoded fields.
+	 */
 	expect_zero(sink, apfs_run_block(plan, plan->volume_run) * BLOCK_BYTES +
 	    APFS_FS_BYTES, BLOCK_BYTES - APFS_FS_BYTES);
 	expect_zero(sink, apfs_run_block(plan, plan->vomap_run) * BLOCK_BYTES +

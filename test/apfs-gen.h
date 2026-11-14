@@ -133,6 +133,7 @@ typedef struct apfs_gen_fs {
 	uint64_t integrity_oid;
 	uint64_t fext_tree_oid;
 	uint32_t fext_tree_type;
+	uint32_t reserved_tree_type;
 } apfs_gen_fs_t;
 
 bool	apfs_gen_fs_build(unsigned char *, size_t, const apfs_gen_fs_t *);

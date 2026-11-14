@@ -128,15 +128,20 @@
   adapter, for native and written images only, does not use the oracle
   confinement.
 
-* [Medium] **APFS writer sealed file-extent tree type**
-  (`lib/formats/apfs/write-emit.c`, `specs/design-apfs.md` writer values,
-  "Snapshot, sealing and integrity fields"): the writer stores zero in the
-  volume superblock's sealed file-extent tree type (offset 1040), the row's
-  value, and in the unnamed tree type at 1044, but every E1 capture and
-  the E10 volumes store `0x40000002` in both with zero OIDs, so
-  `test-apfs-write --native` fails on both fields in all seven captures. `fsck_apfs -n` and mounting
-  accept zero. Make the row and the writer store the native type, then
-  rerun the native qualification, since the bytes change.
+* [Medium] **APFS native comparison gaps** (`test/apfs-native.c`): review
+  findings left open in `test-apfs-write --native`. Capture-row
+  `expect_row` calls discard their construction argument, so formulas such
+  as the pool ring tail `16 * b - 1` read as checks while only writer equals
+  native is compared. Writer-versus-native differences in record counts,
+  mapping presence and chunk counts go through `REQUIRE`, are reported as a
+  malformed capture and skip that capture's later comparisons. Filesystem
+  records and checkpoint mappings are matched by search, not in order, so an
+  ordering error goes unseen. Object-map destination addresses, node header
+  bytes 44 to 55, record alignment, directory-record value lengths and
+  extended fields are not compared; the unused bytes of the mapping block,
+  chunk-information blocks, node free space and unused ring slots are not
+  checked zero. The I/O sink's `REQUIRE` jumps out of `fsimg_writer_emit`
+  and leaks the writer.
 * [Medium] **APFS writer contract-suite profile** (`test/driver-contracts.c`,
   `specs/design-driver-contract-tests.md`): the writer cannot join the
   contract suite while the APFS reader refuses regular-file content

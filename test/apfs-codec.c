@@ -4451,6 +4451,7 @@ test_volume_superblock_fields_and_roundtrip(void)
 	source.integrity_oid = UINT64_C(0x1234567800000000) + 36;
 	source.fext_tree_oid = UINT64_C(0x1234567800000000) + 37;
 	source.fext_tree_type = 0x12345600u + 38;
+	source.reserved_tree_type = 0x12345600u + 39;
 	for (unsigned i = 0; i < 20; i++)
 		source.crypto[i] = (unsigned char)(i + 20);
 	for (unsigned i = 0; i < 16; i++)
@@ -4547,6 +4548,8 @@ test_volume_superblock_fields_and_roundtrip(void)
 	    "fext_tree_oid at offset 1032");
 	expect(decoded.fext_tree_type == source.fext_tree_type,
 	    "fext_tree_type at offset 1040");
+	expect(decoded.reserved_tree_type == source.reserved_tree_type,
+	    "reserved_tree_type at offset 1044");
 	expect(memcmp(decoded.crypto, source.crypto, 20) == 0,
 	    "crypto at offset 96");
 	expect(memcmp(decoded.uuid, source.uuid, 16) == 0,
@@ -4572,9 +4575,9 @@ test_volume_superblock_fields_and_roundtrip(void)
 	    "encoder initializes the reserved field");
 	expect(memcmp(raw + 32, encoded + 32, sizeof(raw) - 32) == 0,
 	    "encoded payload matches independent encoder including reserved bytes");
-	expect(apfs_fs_decode(raw, 1044, &decoded), "exact-length decode accepted");
-	expect(apfs_fs_encode(encoded, 1044, &decoded), "exact-length encode accepted");
-	for (size_t length = 0; length < 1044; length++) {
+	expect(apfs_fs_decode(raw, 1048, &decoded), "exact-length decode accepted");
+	expect(apfs_fs_encode(encoded, 1048, &decoded), "exact-length encode accepted");
+	for (size_t length = 0; length < 1048; length++) {
 		expect(!apfs_fs_decode(raw, length, &decoded), "short decode refused");
 		memset(encoded, 0xa5, sizeof(encoded));
 		expect(!apfs_fs_encode(encoded, length, &decoded), "short encode refused");

@@ -291,7 +291,7 @@ apfs_gen_nx_build(unsigned char *raw, size_t length, const apfs_gen_nx_t *p)
 bool
 apfs_gen_fs_build(unsigned char *raw, size_t length, const apfs_gen_fs_t *p)
 {
-	if (!block_fits(length, 1044))
+	if (!block_fits(length, 1048))
 		return (false);
 	write_object(raw, &p->object);
 	put_le(raw + 32, p->magic, 4);
@@ -332,6 +332,7 @@ apfs_gen_fs_build(unsigned char *raw, size_t length, const apfs_gen_fs_t *p)
 	put_le(raw + 1024, p->integrity_oid, 8);
 	put_le(raw + 1032, p->fext_tree_oid, 8);
 	put_le(raw + 1040, p->fext_tree_type, 4);
+	put_le(raw + 1044, p->reserved_tree_type, 4);
 	bcopy(p->crypto, raw + 96, 20);
 	bcopy(p->uuid, raw + 240, 16);
 	bcopy(p->name, raw + 704, 256);

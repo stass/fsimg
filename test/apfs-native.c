@@ -76,7 +76,7 @@ typedef enum native_disk_offset {
 	VOLUME_EXTENT_TYPE = 120,
 	VOLUME_SNAPSHOT_TYPE = 124,
 	VOLUME_SEALED_TYPE = 1040,
-	VOLUME_UNUSED = 1044
+	VOLUME_RESERVED_TYPE = 1044
 } native_disk_offset_t;
 
 static const char row_tree_shape[] =
@@ -91,7 +91,7 @@ static const char row_sparse_records[] =
 	    "records, document IDs, purgeable and firmlink fields";
 
 static const char row_omap_snapshots[] =
-	"Object-map snapshot count, latest-snapshot XID, snapshot tree and "
+	"Object-map snapshot count, latest-snapshot XID, snapshot tree OID and "
 	    "pending revert range";
 
 static const char row_sm_state[] =
@@ -301,8 +301,9 @@ native_record(const unsigned char *node, uint32_t index,
 	if (value_length > end - value || key + key_length > value)
 		return (false);
 	/* Consumers may read a filesystem key word, a directory value's
-	 * first 18 bytes, or an inode's fixed 92-byte body. Object maps
-	 * and free queues have exact fixed-size records, including ghosts.
+	 * first 18 bytes, or an inode's 8-byte key and fixed 92-byte body.
+	 * Object maps and free queues have exact fixed-size records,
+	 * including ghosts.
 	 */
 	if (N32(node, OBJECT_SUBTYPE) == TREE_OMAP &&
 	    ((flags & NODE_FIXED) == 0 || key_length != 16 ||
@@ -313,7 +314,8 @@ native_record(const unsigned char *node, uint32_t index,
 		return (false);
 	if (N32(node, OBJECT_SUBTYPE) == TREE_FILESYSTEM && (flags & NODE_LEAF)
 	    != 0 &&
-	    ((N64(node + key, 0) >> 60 == 3 && value_length < 92) ||
+	    ((N64(node + key, 0) >> 60 == 3 &&
+	    (key_length != 8 || value_length < 92)) ||
 	    (N64(node + key, 0) >> 60 == 9 && value_length < 18)))
 		return (false);
 	record->key = node + key;
@@ -762,6 +764,19 @@ expect_row(const char *field, const char *row, uint64_t writer,
 		failures++;
 }
 
+/* Writer construction checks have no native capture operand. */
+static void
+expect_writer_value(const char *field, const char *row, uint64_t value,
+    uint64_t required)
+{
+	construction_fields++;
+	printf("%s %s: writer=%llu required=%llu [row: %s]\n",
+	    value == required ? "CONSTRUCTION" : "FAIL construction", field,
+	    (unsigned long long)value, (unsigned long long)required, row);
+	if (value != required)
+		failures++;
+}
+
 /* XID-2 volume objects have no first-form counterpart. Assert their
  * transaction shape before comparing the writer's single-transaction XID.
  */
@@ -980,7 +995,7 @@ native_compare_trees(native_image_t *writer, native_image_t *native)
 {
 	static const char *names[] = { "container omap", "volume omap",
 	    "filesystem", "extent-reference", "snapshot" };
-	
+
 	static const struct {
 		const char *name;
 		size_t offset;
@@ -1061,10 +1076,9 @@ native_compare_trees(native_image_t *writer, native_image_t *native)
 		native_equal(i == 0 ? "container map flags" :
 		    "volume map flags",
 		    "Object-map flags", N32(w, 32), N32(n, 32));
-		native_equal("omap tree type", "Volume superblock's tree "
-		    "references",
+		native_equal("omap tree type", "Object-map tree types",
 		    N32(w, 40), N32(n, 40));
-		native_equal("omap snapshot tree type", row_omap_snapshots,
+		native_equal("omap snapshot tree type", "Object-map tree types",
 		    N32(w, 44), N32(n, 44));
 		expect_unused_bytes("omap unused bytes", w, n,
 		    88, 4096 - 88);
@@ -1073,6 +1087,17 @@ native_compare_trees(native_image_t *writer, native_image_t *native)
 		native_range("omap snapshot state", row_omap_snapshots,
 		    w, n, 56, 32);
 	}
+}
+
+/* The xattr name length includes its terminating NUL. */
+static bool
+native_purgeable_key_valid(const native_record_t *record)
+{
+	return (record->key_length == 32 &&
+	    N64(record->key, 0) == (UINT64_C(4) << 60 | 2) &&
+	    N16(record->key, 8) == 22 &&
+	    bcmp(record->key + 10, "purgeable-drecs-fixed", 21) == 0 &&
+	    record->key[31] == 0);
 }
 
 /* An empty namespace has two reserved inodes and their names. Other
@@ -1111,13 +1136,7 @@ native_compare_inodes(native_image_t *writer, native_image_t *native)
 				    &nrec));
 				if (N64(nrec.key, 0) >> 60 != 4)
 					continue;
-				REQUIRE(nrec.key_length == 31);
-				EXPECT(N64(nrec.key, 0) == (UINT64_C(4) << 60 |
-				    2));
-				EXPECT(N16(nrec.key, 8) == 21);
-				EXPECT(bcmp(nrec.key + 10,
-				    "purgeable-drecs-fixed", 21) == 0);
-				EXPECT(nrec.key[30] == 0);
+				EXPECT(native_purgeable_key_valid(&nrec));
 			}
 			expect_row(field, row_sparse_records,
 			    wkind_count[kind],
@@ -1180,6 +1199,8 @@ native_compare_inodes(native_image_t *writer, native_image_t *native)
 			}
 		}
 		REQUIRE(found_writer && found_native);
+		REQUIRE(wrec.key_length == 8);
+		REQUIRE(nrec.key_length == 8);
 		REQUIRE(wrec.value_length >= 92 && nrec.value_length >= 92);
 		REQUIRE(snprintf(field, sizeof(field), "inode %llu parent",
 		    (unsigned long long)inode) < (int)sizeof(field));
@@ -1265,6 +1286,25 @@ native_chunk_bitmap(native_image_t *image, const unsigned char *entry,
 	return (free_blocks);
 }
 
+/* A bitmap present on only one side must describe catalog blocks in a chunk
+ * the other image leaves entirely free, with no other allocation in it.
+ */
+static bool
+catalog_only_chunk(const unsigned char *entry, const unsigned char *other,
+    uint64_t catalog_first, uint64_t catalog_blocks)
+{
+	uint64_t first = N64(entry, 8), count = N32(entry, 16);
+	uint64_t catalog_last = catalog_first + catalog_blocks;
+	uint64_t overlap_first = first > catalog_first ? first : catalog_first;
+	uint64_t overlap_last = first + count < catalog_last ?
+	    first + count : catalog_last;
+
+	if (overlap_first >= overlap_last || N32(other, 20) != N32(other, 16))
+		return (false);
+	EXPECT(count - N32(entry, 20) == overlap_last - overlap_first);
+	return (true);
+}
+
 static void
 native_compare_chunks(native_image_t *writer, native_image_t *native)
 {
@@ -1275,6 +1315,11 @@ native_compare_chunks(native_image_t *writer, native_image_t *native)
 	uint64_t nfirst = N64(native->nx, 160);
 	uint64_t wused = cibs, nused = N32(native->sm, 64);
 	uint64_t wfree = 0, nfree = 0;
+	const uint64_t wcatalog_blocks = 8, ncatalog_blocks = 2;
+	/* Bitmap objects needed only because this side's catalog uses a chunk
+	 * that the other image leaves entirely free.
+	 */
+	uint64_t wcatalog_bitmaps = 0, ncatalog_bitmaps = 0;
 	char field[160];
 
 	REQUIRE(cibs == N32(native->sm, 64));
@@ -1305,20 +1350,30 @@ native_compare_chunks(native_image_t *writer, native_image_t *native)
 			    (int)sizeof(field));
 			native_range(field, "Chunk-information entry", w, n, 0,
 			    20);
-			if (wa != 0 && na != 0)
-				native_equal("chunk bitmap relative placement",
-				    "Internal-pool blocks", wa - wpool, na -
-				    npool);
-			if (na != 0)
-				expect_native_value("native bitmap ordering",
-				    "Internal-pool blocks", na - npool,
-				    nused++);
-			if (wa != 0)
-				wused++;
 			wfree += native_chunk_bitmap(writer, w, wb, wfirst,
-			    wfirst + 8);
+			    wfirst + wcatalog_blocks);
 			nfree += native_chunk_bitmap(native, n, nb, nfirst,
-			    nfirst + 2);
+			    nfirst + ncatalog_blocks);
+			expect_writer_value("writer chunk bitmap presence",
+			    "Chunk-information entry", wa != 0,
+			    N32(w, 20) < N32(w, 16));
+			expect_native_value("native chunk bitmap presence",
+			    "Chunk-information entry", na != 0,
+			    N32(n, 20) < N32(n, 16));
+			wcatalog_bitmaps += catalog_only_chunk(w, n, wfirst,
+			    wcatalog_blocks);
+			ncatalog_bitmaps += catalog_only_chunk(n, w, nfirst,
+			    ncatalog_blocks);
+			if (na != 0) {
+				expect_native_value("native bitmap ordering",
+				    "Internal-pool blocks", na - npool, nused);
+				nused++;
+			}
+			if (wa != 0) {
+				expect_writer_value("writer bitmap ordering",
+				    "Internal-pool blocks", wa - wpool, wused);
+				wused++;
+			}
 			native_range("chunk bitmap except catalog allocation",
 			    "Chunk-information entry; Bitmap bits past N", wb,
 			    nb,
@@ -1334,6 +1389,9 @@ native_compare_chunks(native_image_t *writer, native_image_t *native)
 	    "[rows: Free counts; Allocated block count, total blocks allocated "
 	    "and freed; Internal-pool blocks]\n",
 	    (unsigned long long)wused, (unsigned long long)nused);
+	native_equal("pool usage from catalog-only chunks",
+	    "Internal-pool blocks", wused + ncatalog_bitmaps,
+	    nused + wcatalog_bitmaps);
 	REQUIRE(native_read(writer, N64(writer->sm, 168), wb));
 	REQUIRE(native_read(native, N64(native->sm, 168), nb));
 	for (uint64_t bit = 0; bit < 32768; bit++) {
@@ -1342,13 +1400,7 @@ native_compare_chunks(native_image_t *writer, native_image_t *native)
 
 		EXPECT(wset == (bit < wused));
 		EXPECT(nset == (bit < nused));
-		if (bit >= wused && bit < nused)
-			nb[bit / 8] &= (unsigned char)~(1u << (bit % 8));
-		if (bit >= nused && bit < wused)
-			wb[bit / 8] &= (unsigned char)~(1u << (bit % 8));
 	}
-	native_range("internal pool bitmap except catalog bitmap count",
-	    "Internal-pool blocks", wb, nb, 0, 4096);
 }
 
 static void
@@ -1500,6 +1552,7 @@ native_compare_spaceman(native_image_t *writer, native_image_t *native)
 	    N16(ws, 322), N16(ns, 322), 16 * bitmap_blocks - 1);
 	REQUIRE(bitmap_blocks <= N32(ns, 160));
 	REQUIRE(16 * bitmap_blocks <= N32(ns, 164));
+	REQUIRE(16 * bitmap_blocks <= N32(ws, 164));
 	for (uint64_t i = 0; i < bitmap_blocks; i++) {
 		expect_row("pool bitmap XID", "Internal-pool ring fields",
 		    N64(ws, N32(ws, 324) + 8 * i),
@@ -1636,28 +1689,26 @@ native_compare_volume(native_image_t *writer, native_image_t *native)
 	    offset <= VOLUME_SNAPSHOT_TYPE; offset += 4) {
 		REQUIRE(snprintf(field, sizeof(field), "volume tree type %zu",
 		    offset) < (int)sizeof(field));
-		native_equal(field, "Volume superblock's tree references",
+		native_equal(field, "Volume tree types",
 		    N32(wv, offset), N32(nv, offset));
 	}
-	/* No writer-values row names offset 1044, a tree type the native
-	 * formatter sets beside the sealed file-extent tree's; a difference
-	 * there is unexplained, as at 1040.
-	 */
-	native_equal("volume tree type (offset 1044)", "none",
-	    N32(wv, VOLUME_UNUSED), N32(nv, VOLUME_UNUSED));
-	expect_unused_bytes("volume bytes 1048..1055", wv, nv, 1048, 8);
-	expect_unused_bytes("volume reserved 966", wv, nv, 966, 2);
+	EXPECT(N64(wv, 1032) == 0);
 	native_equal("sealed file-extent tree type (offset 1040)",
-	    "Snapshot, sealing and integrity fields",
-	    N32(wv, VOLUME_SEALED_TYPE),
+	    "Volume tree types", N32(wv, VOLUME_SEALED_TYPE),
 	    N32(nv, VOLUME_SEALED_TYPE));
+	native_equal("reserved tree type (offset 1044)", "Volume tree types",
+	    N32(wv, VOLUME_RESERVED_TYPE), N32(nv, VOLUME_RESERVED_TYPE));
+	native_equal("reserved tree OID", "Volume tree types",
+	    N64(wv, 1048), N64(nv, 1048));
+	EXPECT(N64(wv, 1048) == 0);
+	expect_unused_bytes("volume reserved 966", wv, nv, 966, 2);
 	expect_row("volume next inode", "Volume next object identifier",
 	    N64(wv, 176), N64(nv, 176), 16);
 	for (size_t i = 0; i < 7; i++) {
 		REQUIRE(snprintf(field, sizeof(field), "volume counter %zu", i)
 		    <
 		    (int)sizeof(field));
-		expect_row(field, "Object counts",
+		expect_row(field, i < 5 ? "Object counts" : row_allocated,
 		    N64(wv, 184 + i * 8), N64(nv, 184 + i * 8), 0);
 	}
 	expect_row("volume allocated blocks", row_allocated,
@@ -1784,6 +1835,42 @@ apfs_native_test_decoder(void)
 	EXPECT(!native_record(node, 0, &record));
 	native_put(node, 64, UINT64_C(9) << 60 | 2, 8);
 	EXPECT(!native_record(node, 0, &record));
+
+	scenario = "native inode key is exactly eight bytes";
+	native_put(node, 58, 8, 2);
+	native_put(node, 60, 92, 2);
+	native_put(node, 62, 92, 2);
+	native_put(node, 64, UINT64_C(3) << 60 | 2, 8);
+	EXPECT(native_record(node, 0, &record));
+
+	scenario = "native decoder rejects a sixteen-byte inode key";
+	native_put(node, 58, 16, 2);
+	EXPECT(!native_record(node, 0, &record));
+
+	scenario = "native purgeable attribute key includes its NUL";
+	bzero(node, sizeof(node));
+	native_put(node, OBJECT_SUBTYPE, TREE_FILESYSTEM, 4);
+	native_put(node, NODE_FLAGS, NODE_LEAF, 2);
+	native_put(node, NODE_RECORD_COUNT, 1, 4);
+	native_put(node, NODE_TOC_LENGTH, 8, 2);
+	native_put(node, 58, 32, 2);
+	native_put(node, 60, 4, 2);
+	native_put(node, 62, 4, 2);
+	native_put(node, 64, UINT64_C(4) << 60 | 2, 8);
+	native_put(node, 72, 22, 2);
+	bcopy("purgeable-drecs-fixed", node + 74, 22);
+	if (native_record(node, 0, &record))
+		EXPECT(native_purgeable_key_valid(&record));
+	else
+		EXPECT(!"purgeable attribute record rejected");
+
+	scenario = "native purgeable attribute key rejects an omitted NUL";
+	native_put(node, 58, 31, 2);
+	native_put(node, 72, 21, 2);
+	if (native_record(node, 0, &record))
+		EXPECT(!native_purgeable_key_valid(&record));
+	else
+		EXPECT(!"short purgeable attribute record not decoded");
 
 	scenario = "native map root, index and leaf flags match their types";
 	bzero(node, sizeof(node));

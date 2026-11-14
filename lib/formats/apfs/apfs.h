@@ -172,7 +172,7 @@
 
 /* Volume superblock (specs/design-apfs.md, "Volume superblock"). */
 #define APFS_FS_MAGIC			0x42535041u	/* "APSB" */
-#define APFS_FS_BYTES			1044u
+#define APFS_FS_BYTES			1048u
 #define APFS_FS_NAME_BYTES		256u	/* with its terminator */
 #define APFS_FS_CRYPTO_BYTES		20u
 #define APFS_FS_CHANGE_ID_BYTES		32u
@@ -543,6 +543,7 @@ typedef struct apfs_fs {
 	uint32_t	extentref_tree_type;
 	uint32_t	snapshot_tree_type;
 	uint32_t	fext_tree_type;
+	uint32_t	reserved_tree_type;	/* [A1] reserved_type */
 	uint32_t	next_doc_id;
 	uint16_t	role;
 } apfs_fs_t;

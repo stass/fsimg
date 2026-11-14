@@ -2360,6 +2360,7 @@ apfs_fs_decode(const unsigned char *raw, size_t length, apfs_fs_t *fs)
 	fs->integrity_oid = fsimg_load_le64(raw + 1024);
 	fs->fext_tree_oid = fsimg_load_le64(raw + 1032);
 	fs->fext_tree_type = fsimg_load_le32(raw + 1040);
+	fs->reserved_tree_type = fsimg_load_le32(raw + 1044);
 	return (true);
 }
 
@@ -2416,5 +2417,6 @@ apfs_fs_encode(unsigned char *raw, size_t length, const apfs_fs_t *fs)
 	fsimg_store_le64(raw + 1024, fs->integrity_oid);
 	fsimg_store_le64(raw + 1032, fs->fext_tree_oid);
 	fsimg_store_le32(raw + 1040, fs->fext_tree_type);
+	fsimg_store_le32(raw + 1044, fs->reserved_tree_type);
 	return (true);
 }

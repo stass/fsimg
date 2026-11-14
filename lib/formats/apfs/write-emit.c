@@ -374,6 +374,13 @@ emit_volume(apfs_emitter_t *e, fsimg_error_t *error)
 	fs.root_tree_type = APFS_FS_TREE_VIRTUAL;
 	fs.extentref_tree_type = APFS_FS_TREE_PHYSICAL;
 	fs.snapshot_tree_type = APFS_FS_TREE_PHYSICAL;
+	/*
+	 * Native formatters type the absent sealed file-extent tree and the
+	 * reserved tree physical and leave their OIDs zero (writer values,
+	 * E1).
+	 */
+	fs.fext_tree_type = APFS_FS_TREE_PHYSICAL;
+	fs.reserved_tree_type = APFS_FS_TREE_PHYSICAL;
 	fs.omap_oid = apfs_run_block(plan, plan->vomap_run);
 	fs.root_tree_oid = APFS_WRITE_OID_FS_FIRST +
 	    plan->trees[APFS_TREE_FS].shape.node_count - 1;
