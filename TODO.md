@@ -65,6 +65,17 @@
   entries are the read-only kinds of `specs/design-device-nodes.md`; the
   plan's evidence decides whether macOS always writes the device number
   extended field, which would tighten the APFS rule for a device without it.
+  Open points for the B-tree cursor (`lib/formats/apfs/btree.c`): the
+  filesystem tree's undecided tie-breaks (plain directory-record names,
+  snapshot names until E9) need an ordering check that accepts either order
+  of keys the comparator calls equal, across node boundaries and with GE
+  seeks stepping back over equal keys; the cursor's ordering and separator
+  checks are strict. Whether an object-map value flag `0x10` (crypto
+  generation) is accepted like the map flag or refused as corrupt, as the
+  format design's value rule says, waits on E1's volume records.
+  The checkpoint load streams the space manager at the size its mapping
+  states, bounded only by the data run; the size its geometry implies is
+  to be checked before that read once `spaceman.c` computes it.
 
 * [Medium] **EROFS reader, verifier and writer** (`lib/formats/erofs/`,
   `lib/core/`, `lib/codec/`, `lib/layers/`, `lib/write/`, `cmd/fsimg/`,

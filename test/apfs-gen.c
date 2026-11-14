@@ -3,9 +3,19 @@
  */
 #include "config.h"
 
+#include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 
 #include "apfs-gen.h"
+
+/* Each plan entry names a contiguous range of records or child nodes. */
+typedef struct tree_plan {
+	size_t	first;
+	size_t	count;
+	size_t	key;
+	uint16_t	level;
+} tree_plan_t;
 
 static bool block_fits(size_t, size_t);
 static void put_le(unsigned char *, uint64_t, unsigned);
@@ -495,4 +505,298 @@ apfs_gen_node_build(unsigned char *raw, size_t length, const apfs_gen_node_t *p)
 	if (root)
 		write_info(raw + value_end, &p->info);
 	return (apfs_gen_seal(raw, length));
+}
+
+bool
+apfs_gen_reap_list_build(unsigned char *raw, size_t length,
+    const apfs_gen_reap_list_t *p)
+{
+	const apfs_gen_reap_entry_t *entry;
+	unsigned char *out;
+
+	if (!block_fits(length, 64) || p->capacity > (length - 64) / 40 ||
+	    p->count > p->capacity || (p->count != 0 && p->entries == NULL))
+		return (false);
+	write_object(raw, &p->object);
+	put_le(raw + 32, p->next, 8);
+	put_le(raw + 40, p->flags, 4);
+	put_le(raw + 44, p->capacity, 4);
+	put_le(raw + 48, p->count, 4);
+	put_le(raw + 52, p->first, 4);
+	put_le(raw + 56, p->last, 4);
+	put_le(raw + 60, p->free, 4);
+	for (uint32_t i = 0; i < p->count; i++) {
+		entry = &p->entries[i];
+		out = raw + 64 + 40 * (size_t)i;
+		put_le(out, entry->next, 4);
+		put_le(out + 4, entry->flags, 4);
+		put_le(out + 8, entry->kind, 4);
+		put_le(out + 12, entry->size, 4);
+		put_le(out + 16, entry->volume_oid, 8);
+		put_le(out + 24, entry->oid, 8);
+		put_le(out + 32, entry->xid, 8);
+	}
+	return (apfs_gen_seal(raw, length));
+}
+
+/* Emit into a private image; the public builder publishes only on success. */
+static bool
+container_emit(unsigned char *raw, size_t length,
+    const apfs_gen_container_t *p)
+{
+	const apfs_gen_mapping_t *mapping;
+	const apfs_gen_run_t *run;
+	apfs_gen_checkpoint_t map;
+	apfs_gen_reaper_t reaper;
+	apfs_gen_spaceman_t spaceman;
+	apfs_gen_reap_list_t list;
+	apfs_gen_object_t object;
+	apfs_gen_nx_t nx;
+	size_t b = p->nx.block_size, capacity, first, count;
+	uint64_t address;
+
+	if (b < 4096 || b > 65536 || (b & (b - 1)) != 0 ||
+	    p->nx.block_count > length / b || p->count == 0 ||
+	    p->runs == NULL || p->block0_run >= p->count ||
+	    p->nx.desc_blocks == 0 || p->nx.data_blocks == 0 ||
+	    p->nx.desc_base == 0 || p->nx.data_base == 0 ||
+	    p->nx.desc_base >= length / b ||
+	    p->nx.desc_blocks > length / b - p->nx.desc_base ||
+	    p->nx.data_base >= length / b ||
+	    p->nx.data_blocks > length / b - p->nx.data_base)
+		return (false);
+	capacity = (b - 40) / 40;
+	for (size_t i = 0; i < p->count; i++) {
+		run = &p->runs[i];
+		if (run->mapping_blocks == 0 ||
+		    run->mapping_blocks >= p->nx.desc_blocks ||
+		    run->desc_index >= p->nx.desc_blocks ||
+		    run->mapping_count > capacity * run->mapping_blocks ||
+		    (run->mapping_count != 0 && run->mappings == NULL))
+			return (false);
+		for (uint32_t j = 0; j < run->mapping_count; j++) {
+			mapping = &run->mappings[j];
+			if (mapping->size == 0 || mapping->size % b != 0 ||
+			    mapping->address == 0 || mapping->address >= length / b ||
+			    mapping->size / b > length / b - mapping->address)
+				return (false);
+		}
+	}
+	for (size_t i = 0; i < p->count; i++) {
+		run = &p->runs[i];
+		nx = p->nx;
+		nx.object = (apfs_gen_object_t){ .oid = 1, .xid = run->xid,
+		    .type = 0x80000001 };
+		nx.next_xid = run->next_xid;
+		nx.desc_index = run->desc_index;
+		nx.desc_len = run->mapping_blocks + 1;
+		nx.data_index = run->data_index;
+		nx.data_len = run->data_len;
+		nx.desc_next = run->desc_next;
+		nx.data_next = run->data_next;
+		for (uint32_t j = 0; j < run->mapping_blocks; j++) {
+			address = nx.desc_base +
+			    (run->desc_index + (uint64_t)j) % nx.desc_blocks;
+			first = j * capacity;
+			count = first < run->mapping_count ?
+			    run->mapping_count - first : 0;
+			if (count > capacity)
+				count = capacity;
+			map = (apfs_gen_checkpoint_t){
+			    .object = { .oid = address, .xid = run->xid,
+			    .type = 0x4000000c },
+			    .mappings = count == 0 ? NULL : run->mappings + first,
+			    .count = (uint32_t)count,
+			    .flags = j + 1 == run->mapping_blocks ? 1 : 0 };
+			if (!apfs_gen_checkpoint_build(raw + address * b, b, &map))
+				return (false);
+		}
+		address = nx.desc_base + (run->desc_index +
+		    (uint64_t)run->mapping_blocks) % nx.desc_blocks;
+		if (!apfs_gen_nx_build(raw + address * b, b, &nx))
+			return (false);
+		if (i == p->block0_run) {
+			nx.object.xid = p->block0_xid;
+			if (!apfs_gen_nx_build(raw, b, &nx))
+				return (false);
+		}
+		for (uint32_t j = 0; j < run->mapping_count; j++) {
+			mapping = &run->mappings[j];
+			object = (apfs_gen_object_t){ .oid = mapping->oid,
+			    .xid = run->xid, .type = mapping->type,
+			    .subtype = mapping->subtype };
+			if ((mapping->type & 0xffff) == 5) {
+				spaceman = (apfs_gen_spaceman_t){ .object = object,
+				    .block_size = (uint32_t)b,
+				    .blocks_per_chunk = (uint32_t)b * 8,
+				    .struct_size = 2520 };
+				if (!apfs_gen_spaceman_build(raw + mapping->address * b,
+				    mapping->size, &spaceman))
+					return (false);
+			} else if ((mapping->type & 0xffff) == 18) {
+				list = (apfs_gen_reap_list_t){ .object = object,
+				    .capacity = (mapping->size - 64) / 40,
+				    .first = UINT32_MAX, .last = UINT32_MAX };
+				if (!apfs_gen_reap_list_build(raw + mapping->address * b,
+				    mapping->size, &list))
+					return (false);
+			} else if ((mapping->type & 0xffff) == 17) {
+				reaper = (apfs_gen_reaper_t){ .object = object,
+				    .flags = 1, .next_reap_id = 1 };
+				if (!apfs_gen_reaper_build(raw + mapping->address * b,
+				    mapping->size, &reaper))
+					return (false);
+			} else {
+				if (!apfs_gen_object_build(raw + mapping->address * b,
+				    mapping->size, &object))
+					return (false);
+			}
+		}
+	}
+	return (true);
+}
+
+bool
+apfs_gen_container_build(unsigned char *raw, size_t length,
+    const apfs_gen_container_t *p)
+{
+	unsigned char *image;
+	bool success;
+
+	image = malloc(length);
+	if (image == NULL)
+		return (false);
+	bcopy(raw, image, length);
+	success = container_emit(image, length, p);
+	if (success)
+		bcopy(image, raw, length);
+	free(image);
+	return (success);
+}
+
+
+bool
+apfs_gen_tree_build(unsigned char *raw, size_t length,
+    const apfs_gen_tree_t *p, uint64_t *root, uint64_t *blocks)
+{
+	tree_plan_t *plan = NULL;
+	apfs_gen_record_t *records = NULL;
+	unsigned char *keys = NULL, *values = NULL, *image = NULL, *out;
+	apfs_gen_node_t node;
+	size_t b = p->block_size, capacity, count = 0, start, end, n, first;
+	size_t width, key_start, value_end;
+	bool success = false;
+
+	if (b < 4096 || b > 65536 || (b & (b - 1)) != 0 ||
+	    p->base == 0 || p->base >= length / b || p->count == 0 ||
+	    p->records == NULL || p->records_per_leaf == 0 ||
+	    p->children_per_index < 2)
+		return (false);
+	capacity = length / b - p->base;
+	if ((p->count - 1) / p->records_per_leaf >= capacity)
+		return (false);
+	for (size_t i = 1; i < p->count; i++) {
+		if (p->records[i - 1].key.oid > p->records[i].key.oid ||
+		    (p->records[i - 1].key.oid == p->records[i].key.oid &&
+		    p->records[i - 1].key.xid >= p->records[i].key.xid))
+			return (false);
+	}
+	width = p->records_per_leaf > p->children_per_index ?
+	    p->records_per_leaf : p->children_per_index;
+	if (width > (b - 96) / 36)
+		return (false);
+	plan = calloc(capacity, sizeof(*plan));
+	records = calloc(width, sizeof(*records));
+	keys = calloc(width, 16);
+	values = calloc(width, 16);
+	image = calloc(capacity, b);
+	if (plan == NULL || records == NULL || keys == NULL ||
+	    values == NULL || image == NULL)
+		goto done;
+	for (size_t i = 0; i < p->count;) {
+		n = p->count - i;
+		if (n > p->records_per_leaf)
+			n = p->records_per_leaf;
+		if (count == capacity)
+			goto done;
+		plan[count++] = (tree_plan_t){ .first = i, .count = n,
+		    .key = i };
+		i += n;
+	}
+	start = 0;
+	end = count;
+	while (end - start > 1) {
+		first = count;
+		for (size_t i = start; i < end;) {
+			n = end - i;
+			if (n > p->children_per_index)
+				n = p->children_per_index;
+			if (count == capacity || plan[i].level == 15)
+				goto done;
+			plan[count++] = (tree_plan_t){ .first = i, .count = n,
+			    .key = plan[i].key, .level = plan[i].level + 1 };
+			i += n;
+		}
+		start = first;
+		end = count;
+	}
+	for (size_t i = 0; i < count; i++) {
+		for (size_t j = 0; j < plan[i].count; j++) {
+			first = plan[i].first + j;
+			n = plan[i].level == 0 ? first : plan[first].key;
+			apfs_gen_omap_key_build(keys + 16 * j, 16,
+			    &p->records[n].key);
+			if (plan[i].level == 0)
+				apfs_gen_omap_value_build(values + 16 * j, 16,
+				    &p->records[n].value);
+			else
+				put_le(values + 16 * j, p->base + first, 8);
+			records[j] = (apfs_gen_record_t){ .key = keys + 16 * j,
+			    .value = values + 16 * j, .key_size = 16,
+			    .value_size = plan[i].level == 0 ? 16 : 8 };
+		}
+		node = (apfs_gen_node_t){
+		    .object = { .oid = p->base + i, .xid = p->xid,
+		    .type = i + 1 == count ? 0x40000002 : 0x40000003,
+		    .subtype = 11 },
+		    .info = { .flags = 0x17 | (p->nonaligned ? 0x40 : 0),
+		    .node_size = (uint32_t)b, .key_size = 16, .val_size = 16,
+		    .key_count = p->count, .node_count = count },
+		    .records = records, .count = (uint32_t)plan[i].count,
+		    .level = plan[i].level,
+		    .flags = 4 | (plan[i].level == 0 ? 2 : 0) |
+		    (i + 1 == count ? 1 : 0), .toc_capacity = p->toc_capacity };
+		out = image + i * b;
+		if (!apfs_gen_node_build(out, b, &node))
+			goto done;
+		if (p->nonaligned) {
+			/* Shift keys into free space; all relative offsets become odd. */
+			key_start = 56 + (p->toc_capacity != 0 ?
+			    p->toc_capacity : 4 * plan[i].count);
+			value_end = b - (i + 1 == count ? 40 : 0);
+			if (key_start + 16 * plan[i].count + 1 >=
+			    value_end - records[0].value_size * plan[i].count)
+				goto done;
+			memmove(out + key_start + 1, out + key_start,
+			    16 * plan[i].count);
+			out[key_start] = 0;
+			put_le(out + 44, 16 * plan[i].count + 1, 2);
+			put_le(out + 46, value_end - key_start -
+			    (16 + records[0].value_size) * plan[i].count - 1, 2);
+			for (size_t j = 0; j < plan[i].count; j++)
+				put_le(out + 56 + 4 * j, 16 * j + 1, 2);
+			apfs_gen_seal(out, b);
+		}
+	}
+	bcopy(image, raw + p->base * b, count * b);
+	*root = p->base + count - 1;
+	*blocks = count;
+	success = true;
+ done:
+	free(image);
+	free(values);
+	free(keys);
+	free(records);
+	free(plan);
+	return (success);
 }

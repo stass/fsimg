@@ -155,6 +155,11 @@
 #define APFS_REAPER_FLAG_RESERVED	0x1u	/* always set */
 #define APFS_REAPER_FLAG_CONTINUE	0x2u	/* an object is being reaped */
 
+/* A reap-list object; its entries start at APFS_REAP_LIST_BYTES. */
+#define APFS_REAP_LIST_BYTES		64u
+#define APFS_REAP_LIST_ENTRY_BYTES	40u
+#define APFS_REAP_LIST_NONE		0xffffffffu	/* no entry index */
+
 /*
  * Container structures: decoded records holding every field of their fixed
  * structure except reserved bytes. An object's header is decoded on its own
@@ -433,6 +438,17 @@ typedef struct apfs_reaper {
 	uint32_t	state_size;
 } apfs_reaper_t;
 
+/* A reap-list object: one link of the reaper's list. */
+typedef struct apfs_reap_list {
+	uint64_t	next;		/* the next link's OID, zero in the last */
+	uint32_t	flags;
+	uint32_t	capacity;	/* entries */
+	uint32_t	count;
+	uint32_t	first;		/* entry indexes, or APFS_REAP_LIST_NONE */
+	uint32_t	last;
+	uint32_t	free;
+} apfs_reap_list_t;
+
 /*
  * Fletcher-64 (codec.c). The checksum covers an object from byte 8 to its
  * end as little-endian 32-bit words. An object of several blocks feeds its
@@ -554,6 +570,256 @@ bool	apfs_fq_val_encode(unsigned char *, size_t, uint64_t);
 /* The reaper is accepted only when its state buffer lies inside it. */
 bool	apfs_reaper_decode(const unsigned char *, size_t, apfs_reaper_t *);
 bool	apfs_reaper_encode(unsigned char *, size_t, const apfs_reaper_t *);
+
+/* A reap-list object is accepted only when its entry array, capacity
+ * entries from APFS_REAP_LIST_BYTES, lies inside it and its entry count is
+ * at most its capacity. The entries are not decoded: the reader only asks
+ * whether a list holds any.
+ */
+bool	apfs_reap_list_decode(const unsigned char *, size_t,
+	    apfs_reap_list_t *);
+bool	apfs_reap_list_encode(unsigned char *, size_t,
+	    const apfs_reap_list_t *);
+
+/*
+ * Diagnostics (object.c). A failure names the object's role, such as
+ * "container object map" or "checkpoint descriptor", and what is wrong with
+ * it, never its bytes: "APFS <role> <what>", under FSIMG_OP_READER.
+ */
+fsimg_status_t	apfs_corrupt(fsimg_error_t *, const char *, const char *);
+fsimg_status_t	apfs_unsupported(fsimg_error_t *, const char *, const char *);
+
+/*
+ * The container being read (checkpoint.c): the selected checkpoint's
+ * superblock and geometry, and its ephemeral mapping table, a paged array of
+ * the checkpoint's mappings sorted by ephemeral OID in metadata scratch.
+ * block_size and block_count are B and N; before a checkpoint is selected
+ * they are block 0's, afterwards the selected superblock's.
+ */
+typedef struct apfs_container {
+	fsimg_reader_t	*reader;
+	struct fsimg_store *mappings;
+	apfs_nx_t	 nx;		/* the selected superblock */
+	uint64_t	 mapping_count;
+	uint64_t	 block_count;
+	uint64_t	 xid;		/* the selected checkpoint's */
+	uint32_t	 block_size;
+	bool		 clean;		/* no newer checkpoint was torn */
+} apfs_container_t;
+
+/*
+ * apfs_nx_geometry(nx, role, error) applies the container geometry rules to
+ * a decoded superblock: block size, block count, maximum volume count and
+ * volume array, the two areas, which must be contiguous (a noncontiguous
+ * area is FSIMG_EUNSUPPORTED, tested first), and the keylocker ranges.
+ * Block 0 and every checkpoint candidate pass through it.
+ *
+ * apfs_checkpoint_open(reader, header, nx, container, error) selects the
+ * checkpoint, given block 0's validated header and superblock, and fills
+ * container; on failure container holds nothing to close. The steps and
+ * their statuses are specs/design-apfs.md, "Checkpoint selection": every
+ * failure after a checkpoint is selected is final, with no fallback to an
+ * older one: FSIMG_ECORRUPT for damage, FSIMG_EUNSUPPORTED for a mapped object
+ * outside the profile. The checks end with the container object map's
+ * header, read as a physical object; apfs_map_open() judges its contents.
+ * apfs_container_close() frees the mapping table and may be called on a
+ * zeroed container.
+ *
+ * apfs_ephemeral_find(container, oid, found, mapping, error) looks up an
+ * ephemeral OID in the mapping table.
+ *
+ * apfs_reaper_idle(container, window, idle, error) reads the reaper and its
+ * reap list (specs/design-apfs.md, "Reaper") through window, B bytes: a list
+ * that is not well formed is FSIMG_ECORRUPT, and idle reports whether no
+ * object is being reaped and every list object holds no entry.
+ */
+fsimg_status_t	apfs_nx_geometry(const apfs_nx_t *, const char *,
+		    fsimg_error_t *);
+fsimg_status_t	apfs_checkpoint_open(fsimg_reader_t *, const apfs_obj_t *,
+		    const apfs_nx_t *, apfs_container_t *, fsimg_error_t *);
+void		apfs_container_close(apfs_container_t *);
+fsimg_status_t	apfs_ephemeral_find(apfs_container_t *, uint64_t, bool *,
+		    apfs_cpm_t *, fsimg_error_t *);
+fsimg_status_t	apfs_reaper_idle(apfs_container_t *, unsigned char *, bool *,
+		    fsimg_error_t *);
+
+/*
+ * Objects (object.c): the one place that interprets an object reference.
+ * A reference names the storage class, OID, kind and subtype it demands and
+ * the XID it is read at; a virtual reference also names the object map that
+ * resolves it. apfs_object_read(container, ref, window, header, error)
+ * resolves the reference, reads the object through window, B bytes,
+ * verifies its checksum over all its blocks, and checks its header against
+ * the reference (specs/design-apfs.md, "Object header and checksum"):
+ *
+ *   physical   the OID is the block, in [1, N); the XID is not above ref's;
+ *   virtual    ref's map resolves the OID at ref's XID, and the object's XID
+ *              equals the found key's; a miss is FSIMG_ECORRUPT;
+ *   ephemeral  the mapping table resolves the OID, and the mapping's kind
+ *              and subtype must be ref's; the XID is not above the
+ *              checkpoint's, whatever ref's XID.
+ *
+ * The object's size must be ref's blocks, one when zero: a mapping or
+ * object-map value stating another size is FSIMG_ECORRUPT before anything
+ * is read, so a hostile size cannot make a read stream the container. The
+ * space manager is the one object of several blocks; its reference takes
+ * its size from its mapping, which only the data run bounds until its
+ * reader checks it against the size its geometry implies. It streams its
+ * blocks through
+ * window, the checksum running over them; window holds its first block on
+ * return. The encrypted and
+ * nonpersistent flags are FSIMG_EUNSUPPORTED. apfs_block_read() is the one
+ * read of a block by number, refusing one outside [1, N).
+ */
+typedef struct apfs_map apfs_map_t;
+
+typedef struct apfs_ref {
+	apfs_map_t	*map;		/* virtual only */
+	const char	*role;		/* names the object in diagnostics */
+	uint64_t	 oid;
+	uint64_t	 xid;
+	uint32_t	 blocks;	/* the size it must have; zero is one */
+	uint32_t	 storage;	/* APFS_OBJ_PHYSICAL, _VIRTUAL, _EPHEMERAL */
+	uint32_t	 subtype;
+	uint16_t	 kind;
+} apfs_ref_t;
+
+fsimg_status_t	apfs_block_read(apfs_container_t *, uint64_t, unsigned char *,
+		    const char *, fsimg_error_t *);
+fsimg_status_t	apfs_object_read(apfs_container_t *, const apfs_ref_t *,
+		    unsigned char *, apfs_obj_t *, fsimg_error_t *);
+
+/*
+ * B-trees (btree.c): the one place that interprets a node. A tree profile
+ * states what a tree's records look like: its subtype, its comparator, the
+ * length bounds of its keys and of its leaf values, and its fixed key and
+ * value sizes, both zero for a tree of variable-size entries. An index
+ * node's value is always a child OID. A comparator orders two keys whose
+ * lengths lie within the profile's bounds and must be total over any bytes
+ * of such lengths.
+ *
+ * entry_check, optional, serves trees whose records differ by kind: it
+ * judges each entry of a node as it is loaded, after the generic checks and
+ * before any entry is used, such as a key and value length per record kind;
+ * its failure is the load's.
+ *
+ * A cursor belongs to one tree: its profile, storage class, root OID, the XID
+ * its nodes are read at, and for a virtual tree the map resolving its nodes.
+ * It holds the root-to-leaf path, one window of B bytes per level allocated
+ * as the path deepens and kept until apfs_cursor_free(). Every node loaded
+ * passes the validation of specs/design-apfs.md, "Validation", including the
+ * separator bounds its parent gives it; a node repeated on the path is
+ * FSIMG_ECORRUPT and a root above level 15 FSIMG_EUNSUPPORTED.
+ *
+ * apfs_cursor_seek() positions on the last record at or below key
+ * (APFS_SEEK_LE) or the first at or above it (APFS_SEEK_GE), descending from
+ * the deepest node on the path whose bounds contain key, which must have a
+ * length within the profile's key bounds; apfs_cursor_first()
+ * on the first record; apfs_cursor_next() on the following one. Each
+ * reports through found whether the cursor is on a record; a cursor that is
+ * not stays so until the next seek or first. apfs_cursor_record() borrows the
+ * current record's spans, valid until the cursor next moves or is freed.
+ */
+typedef int	(*apfs_compare_fn_t)(const unsigned char *, size_t,
+		    const unsigned char *, size_t);
+typedef struct apfs_record apfs_record_t;
+typedef fsimg_status_t (*apfs_entry_check_fn_t)(const apfs_record_t *, bool,
+		    fsimg_error_t *);
+
+typedef struct apfs_tree_profile {
+	const char	*role;
+	apfs_compare_fn_t compare;
+	apfs_entry_check_fn_t entry_check;	/* optional; leaf is its bool */
+	uint32_t	 subtype;
+	uint16_t	 key_min;
+	uint16_t	 key_max;
+	uint16_t	 val_min;	/* leaf values */
+	uint16_t	 val_max;
+	uint16_t	 fixed_key;	/* both zero: variable-size entries */
+	uint16_t	 fixed_val;
+} apfs_tree_profile_t;
+
+typedef enum {
+	APFS_SEEK_LE,
+	APFS_SEEK_GE
+} apfs_seek_t;
+
+struct apfs_record {
+	const unsigned char *key;
+	const unsigned char *val;	/* NULL for a ghost */
+	size_t		 key_len;
+	size_t		 val_len;
+	bool		 ghost;
+};
+
+/*
+ * One level of a cursor's path. low and high are the separator bounds the
+ * node was entered under, spans in its ancestors' windows: every key of the
+ * node is at least low and below high, and a NULL bound is open.
+ */
+typedef struct apfs_path_level {
+	unsigned char	*window;
+	const unsigned char *low;
+	const unsigned char *high;
+	apfs_node_t	 node;
+	uint64_t	 oid;
+	size_t		 low_len;
+	size_t		 high_len;
+	uint32_t	 index;		/* table-of-contents position */
+} apfs_path_level_t;
+
+typedef struct apfs_cursor {
+	apfs_container_t *container;
+	const apfs_tree_profile_t *profile;
+	apfs_map_t	*map;		/* virtual trees */
+	apfs_btree_info_t info;		/* the root's footer, once loaded */
+	apfs_path_level_t path[APFS_BTREE_LEVELS_MAX];
+	uint64_t	 root;
+	uint64_t	 xid;
+	uint32_t	 storage;
+	unsigned	 depth;		/* levels of path loaded */
+	bool		 positioned;	/* on a record */
+} apfs_cursor_t;
+
+void		apfs_cursor_init(apfs_cursor_t *, apfs_container_t *,
+		    const apfs_tree_profile_t *, uint32_t, uint64_t, uint64_t,
+		    apfs_map_t *);
+void		apfs_cursor_free(apfs_cursor_t *);
+fsimg_status_t	apfs_cursor_seek(apfs_cursor_t *, const unsigned char *,
+		    size_t, apfs_seek_t, bool *, fsimg_error_t *);
+fsimg_status_t	apfs_cursor_first(apfs_cursor_t *, bool *, fsimg_error_t *);
+fsimg_status_t	apfs_cursor_next(apfs_cursor_t *, bool *, fsimg_error_t *);
+void		apfs_cursor_record(const apfs_cursor_t *, apfs_record_t *);
+
+/*
+ * Object maps (omap.c). apfs_map_open(container, kind, oid, xid, window, map,
+ * error) reads the object-map object at physical oid, read at xid, through
+ * window and checks its flags against the closed table for its kind, its
+ * tree type and, for the container's map, that it has no snapshots and no
+ * revert range; the volume map's snapshot fields are checked against the
+ * volume's snapshot tree by its caller. The map's tree nodes are read at
+ * xid too. apfs_map_lookup(map, oid, xid, found, key, value, error)
+ * resolves virtual oid at xid: the greatest key not above (oid, xid), a
+ * miss when that key names another OID or its value is deleted, and a found
+ * value checked for its flags, size and range. apfs_map_close() frees the
+ * map's cursor.
+ */
+typedef enum {
+	APFS_MAP_CONTAINER,
+	APFS_MAP_VOLUME
+} apfs_map_kind_t;
+
+struct apfs_map {
+	apfs_cursor_t	 cursor;
+	apfs_omap_t	 omap;
+	apfs_map_kind_t	 kind;
+};
+
+fsimg_status_t	apfs_map_open(apfs_container_t *, apfs_map_kind_t, uint64_t,
+		    uint64_t, unsigned char *, apfs_map_t *, fsimg_error_t *);
+void		apfs_map_close(apfs_map_t *);
+fsimg_status_t	apfs_map_lookup(apfs_map_t *, uint64_t, uint64_t, bool *,
+		    apfs_omap_key_t *, apfs_omap_val_t *, fsimg_error_t *);
 
 /*
  * Names (unicode.c; specs/design-apfs.md, "Directory records and names").

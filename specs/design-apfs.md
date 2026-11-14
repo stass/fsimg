@@ -421,8 +421,9 @@ and E8 finds no XID twice in any of its nine ring captures. A candidate's **desc
    the last-map flag `0x1`, and no flag outside it is set;
 3. every mapping names an object kind and subtype and a byte size that is a
    positive multiple of `B`;
-4. the candidate's next-index fields lie within their rings and its next XID
-   exceeds its XID.
+4. the candidate's data run (its first index below the data area's size and
+   its length at most that size) and its next-index fields lie within their
+   rings, and its next XID exceeds its XID.
 
 Each of these depends only on one descriptor block and its slot, so one pass
 over the ring records them per slot, and runs are judged from those records
@@ -449,7 +450,8 @@ and the space manager and reaper OIDs are mapped with their kinds. Each mapped o
 read once and must have a valid header whose OID, kind and subtype equal the
 mapping's and whose XID is not above the checkpoint's, and the container
 object map must be a valid physical object. A failure in this phase is
-`FSIMG_ECORRUPT`: the reader does not fall back to an older checkpoint after
+`FSIMG_ECORRUPT`, or `FSIMG_EUNSUPPORTED` for an object outside the
+profile, such as an encrypted one: the reader does not fall back to an older checkpoint after
 judging a newer one's descriptor run whole. This is fsimg policy, stricter
 than macOS: in E8 `fsck_apfs` and the kernel pass over a newest checkpoint
 whose descriptor blocks are valid and whose mapped objects are zeroed, and
@@ -507,7 +509,9 @@ common read funnel, which fails a request past the slice with
 
 * **Selection never passes over a missing block.** The ring pass reads all
   `D` descriptor blocks and the selected checkpoint's data run through the
-  funnel, so a cut through either fails the open. No candidate is judged
+  funnel, so a cut through either fails the open. Of the data run it reads
+  the mapped objects and the run's highest block: a truncated image is cut
+  at its tail, so that block is the first a cut through the run reaches. No candidate is judged
   "not whole" because its blocks are missing, which would silently select
   older state from a truncated image.
 * **Nothing is sized from `N` while opening.** The mapping array is sized by

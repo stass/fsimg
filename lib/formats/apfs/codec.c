@@ -1114,3 +1114,48 @@ apfs_reaper_encode(unsigned char *raw, size_t length,
 	fsimg_store_le32(raw + 108, reaper->state_size);
 	return (true);
 }
+
+/* Reap list */
+
+bool
+apfs_reap_list_decode(const unsigned char *raw, size_t length,
+    apfs_reap_list_t *list)
+{
+	uint32_t capacity, count;
+
+	if (length < APFS_REAP_LIST_BYTES)
+		return (false);
+	capacity = fsimg_load_le32(raw + 44);
+	count = fsimg_load_le32(raw + 48);
+	if (capacity > (length - APFS_REAP_LIST_BYTES) /
+	    APFS_REAP_LIST_ENTRY_BYTES || count > capacity)
+		return (false);
+
+	list->next = fsimg_load_le64(raw + 32);
+	list->flags = fsimg_load_le32(raw + 40);
+	list->capacity = capacity;
+	list->count = count;
+	list->first = fsimg_load_le32(raw + 52);
+	list->last = fsimg_load_le32(raw + 56);
+	list->free = fsimg_load_le32(raw + 60);
+	return (true);
+}
+
+bool
+apfs_reap_list_encode(unsigned char *raw, size_t length,
+    const apfs_reap_list_t *list)
+{
+	if (length < APFS_REAP_LIST_BYTES ||
+	    list->capacity > (length - APFS_REAP_LIST_BYTES) /
+	    APFS_REAP_LIST_ENTRY_BYTES || list->count > list->capacity)
+		return (false);
+
+	fsimg_store_le64(raw + 32, list->next);
+	fsimg_store_le32(raw + 40, list->flags);
+	fsimg_store_le32(raw + 44, list->capacity);
+	fsimg_store_le32(raw + 48, list->count);
+	fsimg_store_le32(raw + 52, list->first);
+	fsimg_store_le32(raw + 56, list->last);
+	fsimg_store_le32(raw + 60, list->free);
+	return (true);
+}

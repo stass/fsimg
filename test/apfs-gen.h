@@ -272,4 +272,73 @@ bool	apfs_gen_fq_value_build(unsigned char *, size_t, uint64_t);
 uint64_t apfs_gen_checksum(const unsigned char *, size_t);
 bool	apfs_gen_seal(unsigned char *, size_t);
 
+/* A checkpoint borrows its mapping array; objects are emitted from mappings. */
+typedef struct apfs_gen_run {
+	uint64_t	xid;
+	uint64_t	next_xid;
+	const apfs_gen_mapping_t *mappings;
+	uint32_t	mapping_count;
+	uint32_t	mapping_blocks;
+	uint32_t	desc_index;
+	uint32_t	data_index;
+	uint32_t	data_len;
+	uint32_t	desc_next;
+	uint32_t	data_next;
+} apfs_gen_run_t;
+
+typedef struct apfs_gen_container {
+	apfs_gen_nx_t	nx;
+	const apfs_gen_run_t *runs;
+	size_t	count;
+	size_t	block0_run;
+	uint64_t	block0_xid;
+} apfs_gen_container_t;
+
+typedef struct apfs_gen_reap_entry {
+	uint32_t	next;
+	uint32_t	flags;
+	uint32_t	kind;
+	uint32_t	size;
+	uint64_t	volume_oid;
+	uint64_t	oid;
+	uint64_t	xid;
+} apfs_gen_reap_entry_t;
+
+typedef struct apfs_gen_reap_list {
+	apfs_gen_object_t	object;
+	const apfs_gen_reap_entry_t *entries;
+	uint64_t	next;
+	uint32_t	flags;
+	uint32_t	capacity;
+	uint32_t	count;
+	uint32_t	first;
+	uint32_t	last;
+	uint32_t	free;
+} apfs_gen_reap_list_t;
+
+typedef struct apfs_gen_omap_record {
+	apfs_gen_omap_key_t	key;
+	apfs_gen_omap_value_t	value;
+} apfs_gen_omap_record_t;
+
+typedef struct apfs_gen_tree {
+	const apfs_gen_omap_record_t *records;
+	size_t	count;
+	uint64_t	base;
+	uint64_t	xid;
+	uint32_t	block_size;
+	uint16_t	records_per_leaf;
+	uint16_t	children_per_index;
+	uint16_t	toc_capacity;
+	bool	nonaligned;
+} apfs_gen_tree_t;
+
+/* The tree occupies consecutive blocks, leaves first and root last. */
+bool	apfs_gen_tree_build(unsigned char *, size_t, const apfs_gen_tree_t *,
+    uint64_t *, uint64_t *);
+bool	apfs_gen_container_build(unsigned char *, size_t,
+    const apfs_gen_container_t *);
+bool	apfs_gen_reap_list_build(unsigned char *, size_t,
+    const apfs_gen_reap_list_t *);
+
 #endif /* !FSIMG_TEST_APFS_GEN_H */
