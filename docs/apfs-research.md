@@ -835,6 +835,311 @@ macOS keeps times as signed 64-bit nanoseconds from `-2^63` (1677-09-21
 A creation time is lowered to a new mtime below it only when the mtime is
 smaller compared unsigned, so a negative mtime leaves it alone.
 
+### E5 Links and attributes
+
+**Procedure.** Each capture is a 64 MiB `newfs` container with one
+case-insensitive volume, made with
+`FSIMG_APFS_NATIVE=... E5_OUT=<capture>/native-manifest.ndjson
+tools/apfs/capture.rb --kind newfs --size 67108864 --option LABEL
+--populate SCRIPT`; `fsck_apfs -n` reports every one OK. The populate
+scripts and their helpers live in the experiment's scratch directory and
+are not committed; `manifest.json` of each capture records the script's
+path and SHA-256. Three helpers: `pattern.rb SIZE TAG` prints SIZE bytes in
+which every 4096-byte block starts with `TAG block N` and is filled with a
+letter that depends on TAG and N, so every block differs; `setxattr.rb PATH
+NAME SIZE TAG` sets one attribute to that pattern with `setxattr(2)` and
+`XATTR_NOFOLLOW` (an argument list cannot carry a 1 MiB value for `xattr
+-wx`); `manifest.rb MOUNT OUT` writes the native manifest described below.
+The links script (`$s` is the scratch script directory):
+
+```sh
+for g in two three back backp drop same; do mkdir -p "$m/$g/a" "$m/$g/b" "$m/$g/c"; done
+$s/pattern.rb 5000 two > "$m/two/a/f";    ln "$m/two/a/f" "$m/two/b/f"
+$s/pattern.rb 5000 three > "$m/three/a/f"; ln "$m/three/a/f" "$m/three/b/f"; ln "$m/three/a/f" "$m/three/c/f"
+$s/pattern.rb 5000 back > "$m/back/a/f";  ln "$m/back/a/f" "$m/back/b/f";  ln "$m/back/a/f" "$m/back/c/f"
+rm "$m/back/b/f" "$m/back/c/f"
+$s/pattern.rb 5000 backp > "$m/backp/a/f"; ln "$m/backp/a/f" "$m/backp/b/f"; ln "$m/backp/a/f" "$m/backp/c/f"
+rm "$m/backp/a/f" "$m/backp/b/f"
+$s/pattern.rb 5000 drop > "$m/drop/a/f";  ln "$m/drop/a/f" "$m/drop/b/f";  ln "$m/drop/a/f" "$m/drop/c/f"
+rm "$m/drop/a/f"
+$s/pattern.rb 5000 same > "$m/same/a/x";  ln "$m/same/a/x" "$m/same/a/y"
+sync; $s/manifest.rb "$m" "$E5_OUT"; sync
+```
+
+The attribute scripts set one attribute per file so each record's form can
+be read from the dump:
+
+```sh
+# e5-xattr: user.v of each size on x/sN, user.sN of each size on the
+# directory x and on x/all, plus xattr -w user.tool on x/all
+for n in 0 1 3803 3804 3805 65536 1048576; do
+  : > "$m/x/s$n"; $s/setxattr.rb "$m/x/s$n" user.v $n "v$n"
+  $s/setxattr.rb "$m/x" "user.s$n" $n "d$n"
+done
+: > "$m/x/all"
+for n in 0 1 3803 3804 3805 65536 1048576; do $s/setxattr.rb "$m/x/all" "user.s$n" $n "a$n"; done
+xattr -w user.tool 'written by xattr -w' "$m/x/all"
+long=$(printf 'n%.0s' $(jot 127))
+: > "$m/x/long"; $s/setxattr.rb "$m/x/long" "$long" 3804 long
+$s/setxattr.rb "$m/x/long" "${long}m" 1 toolong   # fails: File name too long
+# e5-xbound: user.v of 16 64 128 256 512 1000 1024 1025 2000 2048 2049
+#   3000 3072 3500 3700 3790 3800 3802 bytes, one file each
+# e5-xname: names v, user.v and 127 x n with v:3800 v:3801 v:3802
+#   user.v:3801 long:3000 long:3700 long:3800 long:3801
+# e5-xlong: a 127-byte name with every size 3700 to 3800 and a 63-byte
+#   name with every size 3780 to 3801, one file each
+```
+
+**Native manifest.** `native-manifest.ndjson` sits next to `image.img` in
+each capture. It holds one JSON object per line for every entry of the
+volume, the root (`/`) first and then depth-first with names in byte order;
+`.fseventsd`, `.Spotlight-V100`, `.Trashes` and `.TemporaryItems` at the
+root are skipped. Fields: `path`, `kind` (`file`, `dir`, `symlink`,
+`fifo`, `socket`, `chr`, `blk`), `size`, `mode` (octal string), `uid`,
+`gid`, `ino`, `nlink`, `atime_ns`, `mtime_ns`, `ctime_ns`, `birthtime_ns`
+(nanoseconds since the epoch), `sha256` (of a regular file's data or a
+symbolic link's target, otherwise null) and `xattrs`, a list of `{name,
+size, sha256}` in `listxattr(2)` order, read without following links. The
+populate script writes it last, reading every byte once before taking the
+`lstat` values, so the recorded times are those stored in the image. The
+reads also raise each file's total-bytes-read counter, so the read totals
+in these captures count the manifest pass.
+
+**Captures.** `apfs-newfs-67108864-e5-links`,
+`apfs-newfs-67108864-e5-xattr`, `apfs-newfs-67108864-e5-xbound`,
+`apfs-newfs-67108864-e5-xname` and `apfs-newfs-67108864-e5-xlong`, read
+with `apfsdump.rb --records`.
+
+**Hard links.** Directory inodes 19 to 21 are `two/a` to `two/c`, 23 to 25
+`three/*`, 27 to 29 `back/*`, 31 to 33 `backp/*`, 35 to 37 `drop/*` and 39
+`same/a`.
+
+| Group | Inode, its parent and name field | Link count | Sibling links (ID: parent, name) | Sibling maps |
+| --- | --- | --- | --- | --- |
+| two | 42, 19, `f` | 2 | 43: 19 `f`; 44: 20 `f` | 43, 44 to 42 |
+| three | 45, 23, `f` | 3 | 46: 23; 47: 24; 48: 25, all `f` | 46, 47, 48 to 45 |
+| back (first name kept) | 49, 27, `f` | 1 | 50: 27 `f` | 50 to 49 |
+| backp (first two removed) | 53, 33, `f` | 1 | 56: 33 `f` | 56 to 53 |
+| drop (first removed) | 57, 36, `f` | 2 | 59: 36; 60: 37, both `f` | 59, 60 to 57 |
+| same (one directory) | 61, 39, `x` | 2 | 62: 39 `x`; 63: 39 `y` | 62, 63 to 61 |
+
+* Every directory record naming a linked inode, the first name included,
+  carries the sibling-ID extended field (type 1, flags `0x2`, 8 bytes)
+  equal to its own sibling link's ID. Records of files never linked carry
+  no extended fields.
+* Sibling IDs are fresh object IDs: the first `ln` takes two, one for the
+  existing name and one for the new (43 and 44 after inode 42).
+* Unlinking back to one name keeps the records of the remaining name: the
+  `back` and `backp` inodes have link count 1, one sibling link, one map,
+  and a directory record that still carries the sibling ID.
+* The inode's parent and name field name one of its links. When that name
+  is removed they move to a remaining one: `backp` to its only name `c`,
+  `drop` to `b`, the remaining name with the smaller sibling ID.
+* The private directory is unused: its child count is 0 and no inode has
+  it as parent. Linked inodes carry internal flags `0x8000` only.
+* The volume has the hard-link map feature `0x2`, and every sibling ID has
+  a sibling map naming the inode. Sibling links sort under the inode by
+  sibling ID.
+* All names of one inode share one data stream with data-stream ID count 1
+  and one physical-extent record of count 1; the manifest lists each name
+  with the same `ino` and `nlink`.
+
+**Attributes.** Inline records have flags `0x2`; stream records `0x11`
+and a 48-byte value.
+
+| Name length (bytes) | Largest inline value | Smallest stream value | Captures |
+| --- | --- | --- | --- |
+| 1 (`v`) | 3800 | 3801 | e5-xname |
+| 6 (`user.v`) | 3800 | 3801 | e5-xbound, e5-xname, e5-xattr |
+| 63 | 3800 | 3801 | e5-xlong |
+| 127 | 3794 | 3795 | e5-xlong, e5-xname, e5-xattr |
+
+* Values of 0 and 1 bytes are inline (data length 0 and 1), as is every
+  tested size from 16 to 3800 with a short name; 3801, 3802, 3803, 3804,
+  3805, 65536 and 1048576 bytes are streams. The reference's 3804 is never
+  reached: native writes at most 3800 bytes inline.
+* The observations fit two limits together: a value is inline when it is
+  at most 3800 bytes and the record's key and value, `8 + 2 + name length
+  with NUL` and `4 + value length`, total at most 3936 bytes. Only the
+  127-byte name reaches the second limit, so the 3936 rests on one name
+  length.
+* A 127-byte name is stored (name length 128 with its NUL); a 128-byte name
+  is refused by `setxattr(2)` with `ENAMETOOLONG`.
+* Every stream record of a user attribute (29 of 29 across the captures;
+  more in e6-xclone) has flags `0x11`: the
+  stream flag and `0x10`, which the reference does not define. No inline
+  record has `0x10`.
+* A stream value is a fresh object ID and a data-stream field: the size,
+  allocated bytes the size rounded up to 4096, crypto ID 0, bytes written
+  and read 0. The stream's file extents are filed under the stream ID, no
+  data-stream ID record exists for it, and its physical-extent record has
+  kind new, count 1 and the stream ID as owner (the reference names the
+  attribute record's ID).
+* Attribute records of one inode sort by name bytes, a proper prefix first:
+  `user.s0`, `user.s1`, `user.s1048576`, `user.s3803`, ... , `user.s65536`,
+  `user.tool`. A directory's attributes take the same forms, and `xattr -w`
+  writes the same inline form as `setxattr(2)`.
+
+### E6 Sparse files and clones
+
+**Procedure.** As in E5, with these populate scripts:
+
+```sh
+# e6-sparse
+mkdir "$m/s"
+$s/pattern.rb 4096 start | dd of="$m/s/start" bs=4096 seek=255 2>/dev/null
+$s/pattern.rb 4096 mid0 > "$m/s/mid"; $s/pattern.rb 4096 mid1 | dd of="$m/s/mid" bs=4096 seek=256 conv=notrunc 2>/dev/null
+$s/pattern.rb 4096 end > "$m/s/end"; truncate -s 1m "$m/s/end"
+: > "$m/s/all"; truncate -s 1m "$m/s/all"
+truncate -s 10m "$m/s/unaligned"; printf hello | dd of="$m/s/unaligned" bs=1 seek=5000000 conv=notrunc 2>/dev/null
+dd if=/dev/zero of="$m/s/zeros" bs=4096 count=16 2>/dev/null
+sync; $s/manifest.rb "$m" "$E5_OUT"; sync
+
+# e6-clone: every original is 16 blocks
+blk() { $s/pattern.rb 4096 "$1" | dd of="$2" bs=4096 seek="$3" conv=notrunc 2>/dev/null; }
+for g in a b c d e f g; do mkdir "$m/$g"; $s/pattern.rb 65536 "orig$g" > "$m/$g/orig"; done
+sync
+cp -c "$m/a/orig" "$m/a/clone"
+cp -c "$m/b/orig" "$m/b/c1"; cp -c "$m/b/c1" "$m/b/c2"
+cp -c "$m/c/orig" "$m/c/first"; blk newc "$m/c/first" 0
+cp -c "$m/d/orig" "$m/d/mid";   blk newd "$m/d/mid" 7
+cp -c "$m/e/orig" "$m/e/app";   $s/pattern.rb 4096 newe >> "$m/e/app"
+cp -c "$m/f/orig" "$m/f/clone"; blk newf "$m/f/orig" 7
+cp -c "$m/g/orig" "$m/g/clone"; rm "$m/g/orig"
+sync; $s/manifest.rb "$m" "$E5_OUT"; sync
+
+# e6-xclone: a file with stream attribute user.big (65536 bytes) and inline
+# user.small, cloned; a clone whose data is written; a clone whose user.big
+# is rewritten; and a compressed file
+mkdir "$m/x"
+$s/pattern.rb 65536 xorig > "$m/x/orig"
+$s/setxattr.rb "$m/x/orig" user.big 65536 big; $s/setxattr.rb "$m/x/orig" user.small 1 small
+sync
+cp -c "$m/x/orig" "$m/x/clone"
+cp -c "$m/x/orig" "$m/x/dataw"; $s/pattern.rb 4096 neww | dd of="$m/x/dataw" bs=4096 seek=3 conv=notrunc 2>/dev/null
+cp -c "$m/x/orig" "$m/x/xattrw"; $s/setxattr.rb "$m/x/xattrw" user.big 65536 big2
+jot 200000 > "$m/plain"; ditto --hfsCompression "$m/plain" "$m/compressed"; rm "$m/plain"
+sync; $s/manifest.rb "$m" "$E5_OUT"; sync
+```
+
+**Captures.** `apfs-newfs-67108864-e6-sparse`,
+`apfs-newfs-67108864-e6-clone` and `apfs-newfs-67108864-e6-xclone`, each
+with its native manifest.
+
+**Sparse files.** File extents are (logical offset, length, physical
+block); sizes in bytes.
+
+| File | File extents | Size | Allocated bytes | Sparse bytes | Bytes written |
+| --- | --- | --- | --- | --- | --- |
+| start | (0, 1044480, 0), (1044480, 4096, 203) | 1048576 | 1048576 | 1044480 | 4096 |
+| mid | (0, 4096, 204), (4096, 1044480, 0), (1048576, 4096, 205) | 1052672 | 1052672 | 1044480 | 8192 |
+| end | (0, 4096, 206), (4096, 1044480, 0) | 1048576 | 1048576 | 1044480 | 4096 |
+| all | (0, 1048576, 0) | 1048576 | 1048576 | 1048576 | 0 |
+| unaligned | (0, 4997120, 0), (4997120, 4096, 207), (5001216, 5484544, 0) | 10485760 | 10485760 | 10481664 | 5 |
+| zeros | (0, 65536, 208) | 65536 | 65536 | none | 65536 |
+
+* Every hole is a file extent whose physical block is 0, at the start, in
+  the middle and at the end; a hole made by extending the size is explicit
+  too. The extents tile the size rounded up to 4096 with no gap.
+* The allocated bytes count holes: they equal the total length of the
+  extents, not the mapped bytes.
+* A sparse inode has internal flags `0x8200` (`IS_SPARSE` and
+  `NO_RSRC_FORK`) and the sparse-bytes extended field (type 13, flags
+  `0x28`, system field and children inherit, 8 bytes) equal to the total
+  length of its hole extents. Zeros written with `dd` are stored, with no
+  sparse flag or field.
+* Holes have no physical-extent record. One record covers each allocated
+  run, whatever the file extents: `mid`'s blocks 204 and 205 are one record
+  of 2 blocks, though they back logical offsets 0 and 1 MiB.
+* Bytes written counts the bytes passed to `write(2)`: 5 for `unaligned`.
+
+**Clones.** Inode, its private ID and internal flags; then each stream's
+data-stream ID count and file extents; then the physical-extent records
+(first block/length: owner, count). Data-stream ID counts not given are 1;
+all records have kind new.
+
+| Group | Inodes | Streams | Physical-extent records |
+| --- | --- | --- | --- |
+| a: clone | orig 19 and clone 32, private 19, both `0x8410` | 19: count 2, (0, 65536, 203) | 203/16: 19, 1 |
+| b: clone of a clone | orig 21, c1 33, c2 34, private 21, all `0x8410` | 21: count 3, (0, 65536, 219) | 219/16: 21, 1 |
+| c: clone's first block written | orig 23, private 23, `0x8410`; first 35, private 36, `0x8400` | 23: count 1, (0, 65536, 235); 36: count 1, (0, 4096, 324), (4096, 61440, 236) | 235/1: 23, 1; 236/15: 23, 2; 324/1: 35, 1 |
+| d: clone's block 7 written | orig 25, private 25, `0x8410`; mid 37, private 38, `0x8400` | 25: (0, 65536, 251); 38: (0, 28672, 251), (28672, 4096, 325), (32768, 32768, 259) | 251/7: 25, 2; 258/1: 25, 1; 259/8: 25, 2; 325/1: 37, 1 |
+| e: block appended to the clone | orig 27, private 27, `0x8410`; app 39, private 40, `0x8400` | 27: (0, 65536, 267); 40: (0, 65536, 267), (65536, 4096, 326) | 267/16: 27, 2; 326/1: 39, 1 |
+| f: original's block 7 written | orig 29, private 42, `0x8400`; clone 41, private 29, `0x8410` | 29: (0, 65536, 283); 42: (0, 28672, 283), (28672, 4096, 327), (32768, 32768, 291) | 283/7: 29, 2; 290/1: 29, 1; 291/8: 29, 2; 327/1: 29, 1 |
+| g: original removed | clone 43, private 31, `0x8410` | 31: count 1, (0, 65536, 299) | 299/16: 31, 1 |
+
+* `cp -c` makes the clone share the source's data stream: the same private
+  ID, and a data-stream ID count equal to the inodes sharing it (2, or 3
+  for a clone of a clone). Their one physical-extent record has count 1:
+  physical counts count streams, not inodes.
+* A write to any sharer, the source included (group f), gives the writing
+  inode a new stream under a fresh object ID; its extents repeat the old
+  mapping with new blocks for the written or appended range, and the old
+  stream's count drops by one. The other inode keeps the old stream.
+* The physical-extent records split where the branches diverge: the parts
+  both streams still map have count 2, a replaced part only the old stream
+  maps keeps count 1, and the new blocks get their own record of count 1.
+  One file extent may therefore span several records (stream 23's one
+  extent covers 235/1 and 236/15), as one record may cover several
+  extents (`mid` in e6-sparse). Each record's count equals the number of
+  distinct streams with an extent over its blocks, for all 19 records.
+* A record's owner is the inode number of the inode whose write allocated
+  the blocks, not its private ID: 324 belongs to inode 35, whose stream is
+  36, and 327 to inode 29, whose stream is 42. The owner stays when that
+  inode moves to another stream or is removed (299 names removed inode 31,
+  whose stream lives on in the clone). The reference names the private ID.
+* `WAS_CLONED` (`0x10`) is set on the source and on every clone and
+  cleared from an inode a write gives a new stream; it stays on an inode
+  whose stream is no longer shared (orig 23, count 1). `WAS_EVER_CLONED`
+  (`0x400`) stays on all of them. The reference describes `WAS_CLONED` as
+  set on the inode created by cloning.
+* A clone's data-stream field starts as a copy of its source's: `first`
+  has 69632 bytes written, the source's 65536 plus its own 4096.
+
+**Clones with stream attributes** (e6-xclone). `orig` is inode 19 with
+data stream 19 and `user.big` in stream 20 (blocks 219 to 234).
+
+| Inode | Data stream | `user.big` stream and its extent |
+| --- | --- | --- |
+| orig 19, `0x8410` | 19, count 3: (0, 65536, 203) | 20: (0, 65536, 219) |
+| clone 21, `0x8410` | 19 | 22: (0, 65536, 219) |
+| dataw 23, `0x8400` | 25, count 1: (0, 12288, 203), (12288, 4096, 242), (16384, 49152, 207) | 24: (0, 65536, 219) |
+| xattrw 26, `0x8410` | 19 | 28: (0, 65536, 243) |
+| compressed 30 | none; `com.apple.ResourceFork` stream 31: (0, 405504, 574) | |
+
+Physical-extent records: 203/3: 19, 2; 206/1: 19, 1; 207/12: 19, 2;
+219/16: 20, 3; 242/1: 23, 1; 243/16: 28, 1; 574/99: 30, 1.
+
+* `cp -c` gives the clone a stream ID of its own for each stream
+  attribute, with extents over the source's blocks; the inline attribute is
+  copied. No attribute stream has a data-stream ID record, and each has one
+  attribute using it.
+* Record 219's count 3 counts the attribute streams 20, 22 and 24 that map
+  it; rewriting `xattrw`'s attribute replaced its stream with 28 on new
+  blocks and left the data stream shared.
+* The resource fork of the compressed file has flags `0x1` alone, without
+  `0x10`, bytes written 402482, no data-stream ID record, and its record
+  names the inode 30 as owner, not the stream 31.
+
+**Volume block counts.** In every capture below the volume's total blocks
+allocated equals the blocks of its physical-extent records, shared blocks
+once, and its allocated block count adds the volume's metadata blocks: the
+nodes of the object-map, filesystem, extent-reference and snapshot trees
+and one block more, the object-map object or the volume superblock, which
+the counts cannot tell apart. Total blocks freed is 0 in each. The totals
+are cumulative, as [A1] defines them: e6-xclone, which removes a
+315-block file, has 466 allocated and 315 freed, and the difference, 151,
+is the blocks of its physical-extent records; its allocated block count
+is 156.
+
+| Capture | Allocated block count | Total allocated | Metadata blocks (filesystem-tree nodes) |
+| --- | --- | --- | --- |
+| apfs-newfs-33554432-plain (fresh) | 5 | 0 | 5 (1) |
+| e5-links | 23 | 15 | 8 (4) |
+| e5-xattr | 836 | 829 | 7 (3) |
+| e6-sparse | 29 | 24 | 5 (1) |
+| e6-clone | 126 | 119 | 7 (3) |
+
 ## Evidence questions
 
 Stage 1 fills this section ([plan](apfs-plan.md), stage 1). Each row is a
@@ -868,6 +1173,11 @@ under that experiment.
 | Name extended field on every inode; reserved inodes named by records; private-directory contents; internal flags and protection class of new inodes | On every inode; none named below 16 but the root and private directory; private directory empty; internal flags `0x8000`, protection class 0, or 4 on FIFOs and sockets. (E3). | |
 | Physical-extent records for unshared files; data-stream totals; volume allocated-block accounting (E3 part; clones are E6's) | One reference record per mapped extent, owner the inode; totals written and read count real I/O; allocated blocks the object map, tree nodes and file data, total allocated the file data. (E3). | |
 | Native time and owner limits; whether times are signed | Signed 64-bit nanoseconds, clamped to `-2^63` through `2^63 - 1`. Owner limits open: changing owners needs root, and the image mounts with ownership ignored, storing 99; E16 shows native owners; if it cannot answer, the reader reports stored values and the writer's default owner 0 stands. (E3, E14). | |
+| Attribute-name order (with E4) | Attribute records of one inode sort by name bytes, a proper prefix first | E5, e5-xattr |
+| Sibling links and maps; link counts | Every name of a linked inode has a sibling link and a sibling map, and its directory record carries the sibling ID; the records stay when the names drop back to one; the inode's parent and name field follow a remaining name; the private directory is unused | E5, e5-links |
+| Attribute storage, inline limit, stream-backed attributes | Inline up to 3800 bytes, less with long names (3794 with a 127-byte name, 3800 with a 63-byte one); user stream attributes carry flags `0x11`, a resource fork `0x1`; an attribute stream has one user and no data-stream ID record, and a clone gets its own streams over shared blocks; names up to 127 bytes | E5, E6, e5-xattr, e5-xbound, e5-xname, e5-xlong, e6-xclone |
+| Hole representation in sparse files; clone sharing and its reference records | Holes are extents of physical block 0, a trailing hole included, counted in the allocated bytes and the sparse-bytes field; clones share one data stream until a write gives the writer a new one; physical-extent records split where branches diverge, count distinct streams and name the allocating inode | E6, e6-sparse, e6-clone |
+| Physical-extent records for unshared files; volume allocated-block accounting (with E3) | One record of count 1 and kind new per allocated run, owned by the inode; total blocks allocated counts data blocks, the allocated block count adds the volume's metadata nodes; total freed 0 | E5, E6, all their captures |
 
 The volume rows (features, records of an empty volume, inode fields) wait
 for the dumper's volume part and stay open under E1 and E2.

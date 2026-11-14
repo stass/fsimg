@@ -542,25 +542,36 @@ extent-reference tree (the live one and each snapshot's), and the
 filesystem tree with dedicated cursors, and in the sealed profile the
 sealed file-extent tree. Each physical-extent record appends a data claim,
 owner `(volume, tree)`; the filesystem scan, or the sealed file-extent
-scan, appends a file-extent record `(block, count, volume, private ID)` to
-a third stream.
+scan, appends a file-extent record `(block, count, volume, stream ID)` for
+each mapped extent to a third stream; hole extents, whose physical block is
+zero, have no physical-extent record and append nothing.
 
 **Record reconciliation.** The filesystem scan visits each object's records
 together because they share the owner prefix, so most checks are local and
 need no storage: the inode record (kind 3) is followed by its attributes
-(4), sibling links (5), the data-stream ID (6) and extents (8) of a stream
-whose private ID is the inode number, and, for a directory, its directory
-records (9), whose count must equal the child count; extents tile their
-stream; attributes and extended fields are well formed; counts by kind
-accumulate for the superblock. Facts that join different owners go to
-streams that are sorted once:
+(4), sibling links (5) and, for a directory, its directory records (9),
+whose count must equal the child count; a stream's data-stream ID (6) and
+extents (8) lie together under its stream ID, which a clone or a written
+clone branch can make differ from the inode number, so extents tile their
+stream wherever it
+lies; attributes and extended fields are well formed; counts by kind
+accumulate for the superblock. Each sibling link's parent and name are
+looked up with a second cursor, and the directory record found must name
+the inode and carry the link's sibling ID. Facts that join different
+owners go to streams that are sorted once:
 
-* name references `(child, parent, type)`, joined with the inodes in scan
-  order to check existence, kind, a directory's single parent and each
-  file's link count;
+* name references `(child, parent, type, has sibling ID)`, joined with
+  the inodes in scan order to check existence, kind, a directory's single
+  parent, each file's link count, and that an inode's names carry sibling
+  IDs exactly when it has sibling links, one per name;
 * sibling maps `(sibling ID, inode)`, joined with the sibling links;
-* stream uses `(private ID)` from inodes and stream-backed attributes,
-  joined with the data-stream ID records' counts;
+* stream uses `(stream ID, kind, size, allocated bytes)`, from each inode's
+  data-stream field and each stream attribute, joined with the streams
+  found by the scan, `(stream ID, data-stream ID count or none, end of the
+  last extent)`: an inode stream's count equals its inode uses, an
+  attribute stream has one use and no data-stream ID record, as native
+  volumes write it, every stream found has a use, and no stream's extents
+  end past the larger of a user's size rounded up and its allocated bytes;
 * collision records `(parent, comparison form, record)` for every
   directory record, sorted by parent and comparison form, so equivalent
   names are found whatever their stored hashes say, including when the
@@ -584,9 +595,13 @@ claim; data claims overlap only data claims of other trees of the same
 volume; a block is allocated exactly when claimed; each chunk's free count
 and the device's free count equal the clear bits. The file-extent stream,
 sorted by block, is merged with the live tree's physical-extent records:
-every file extent lies inside one, and a second sort of
-`(record, stream)` pairs checks that each record's count equals the
-distinct live streams sharing it. The pool's claim stream is merged the
+every block of a file extent lies inside one, and each extent, clipped to
+the records it spans, yields a `(record, stream, first block, count)`
+piece. A second sort of the pieces by record sweeps their boundaries and
+checks that every block of each record is mapped by as many distinct
+streams as the record's count, so a record no stream maps fails. Clones
+that share one
+data stream contribute one stream. The pool's claim stream is merged the
 same way against the pool's bitmap. The two checks the format design holds
 [provisional](design-apfs.md#verification), the bitmap bits past `N` and
 the allocated block count of a volume that is sealed, has clones or

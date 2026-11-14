@@ -851,14 +851,16 @@ that also holds the length; records of equal hash order by their stored
 name bytes as unsigned bytes, a name that is a prefix of another first:
 a bytewise comparison of the names with their terminating NULs (E4: the 34
 and 29 equal-hash pairs of captures `apfs-newfs-268435456-e4-names-ci` and
-`-cs`, and `apfs-newfs-33554432-e4-prefix-ci` and `-cs`). How plain
-directory-record, extended-attribute and snapshot names of different
-lengths compare is provisional (E2, E5); the reader's ordering checks use
-the observed rule, so a wrong guess would make valid images fail rather
-than misread. If an experiment leaves a tie-break undecided, the ordering
-check accepts either order of the keys it concerns, and a lookup scans
-the records that share the decided part of the key instead of seeking
-among them.
+`-cs`, and `apfs-newfs-33554432-e4-prefix-ci` and `-cs`). Attribute names
+of different lengths compare the same way, as their bytes with the
+terminating NUL, so a proper prefix sorts first (E5, `e5-xattr`). How plain
+directory-record names and snapshot names of different lengths compare is
+provisional (E2 found no native tool that formats plain keys; snapshot
+names wait on E9); the reader's ordering checks use the observed rule, so
+a wrong guess would make valid images fail rather than misread. If an
+experiment leaves a tie-break undecided, the ordering check accepts either
+order of the keys it concerns, and a lookup scans the records that share
+the decided part of the key instead of seeking among them.
 
 ## Volumes
 
@@ -1005,24 +1007,24 @@ the root and private-directory records under parent 1 (E3: in
 system creates, `.fseventsd`, is 16). Ordinary inodes are at least 16, or at least
 `0x0800000000000000` in a System volume whose volume-group inode space is
 enabled. The internal flags are accepted from the closed table below,
-[A1]'s valid flags, which E5 and E6 may extend with values native volumes
-use; any other bit, `0x20` (`FLAG_UNUSED`, outside [A1]'s valid mask)
+[A1]'s valid flags, which hold every value the native captures use (E2, E3,
+E5, E6); any other bit, `0x20` (`FLAG_UNUSED`, outside [A1]'s valid mask)
 among them, is unsupported. No flag of the table changes where the reader
 finds content: the data stream, the file extents and the compression
 attribute determine it, and nothing past the size is delivered.
 
-| Flag | [A1] name | Native use (E2, E3) |
+| Flag | [A1] name | Native use (E2, E3, E5, E6) |
 | --- | --- | --- |
 | `0x1` | `IS_APFS_PRIVATE` | |
 | `0x2` | `MAINTAIN_DIR_STATS` | |
 | `0x4` | `DIR_STATS_ORIGIN` | |
 | `0x8` | `PROT_CLASS_EXPLICIT` | |
-| `0x10` | `WAS_CLONED` | |
+| `0x10` | `WAS_CLONED` | A clone and its source (E6) |
 | `0x40` | `HAS_SECURITY_EA` | `.fseventsd`, with its `com.apple.system.Security` attribute |
 | `0x80` | `BEING_TRUNCATED` | |
 | `0x100` | `HAS_FINDER_INFO` | |
-| `0x200` | `IS_SPARSE` | A file with a hole, with the sparse-bytes field |
-| `0x400` | `WAS_EVER_CLONED` | |
+| `0x200` | `IS_SPARSE` | A file with a hole, with the sparse-bytes field (E3, E6) |
+| `0x400` | `WAS_EVER_CLONED` | A clone and its source (E6) |
 | `0x800` | `ACTIVE_FILE_TRIMMED` | |
 | `0x1000` | `PINNED_TO_MAIN` | |
 | `0x2000` | `PINNED_TO_TIER2` | |
@@ -1035,6 +1037,10 @@ attribute determine it, and nothing past the size is delivered.
 | `0x100000` | `WANTS_TO_BE_PURGEABLE` | |
 | `0x200000` | `IS_SYNC_ROOT` | |
 | `0x400000` | `SNAPSHOT_COW_EXEMPTION` | |
+
+Neither clone flag says the stream is shared now: was cloned stays on an
+inode while it keeps the stream it had when cloned, the source's included
+(E6).
 
 BSD flags are stored as `chflags(2)` sets them: E3 shows `0x1` `nodump`,
 `0x2` `uchg` and `0x8000` `hidden` set by an unprivileged user, and zero on
@@ -1076,8 +1082,8 @@ sizes and padding must fit the record exactly; the used-data count must
 equal the padded sum. A field type appears at most once. The meaning of a
 type depends on the record kind. Inode fields the reader decodes: the data
 stream (type 8, 40 bytes), the name (type 4, NUL-terminated UTF-8), the
-sparse byte count (type 13) and the device number (type 14, 4 bytes: the
-macOS `dev_t`, bits 24 to 31 `dev_major` and bits 0 to 23 `dev_minor`,
+sparse byte count (type 13, 8 bytes) and the device number (type 14, 4
+bytes: the macOS `dev_t`, bits 24 to 31 `dev_major` and bits 0 to 23 `dev_minor`,
 valid only on a character or block device, `FSIMG_ECORRUPT` on another
 kind, and a device without it has no number). A directory
 record's sibling ID is type 1. Other known types are validated by size and
@@ -1234,6 +1240,22 @@ stream reference (flag `0x1`): a stream OID and a data-stream field. Flag
 `0x4` marks an attribute the filesystem owns. Exactly one of the inline and
 stream flags is set, an inline length fits the record and is at most 3804
 bytes, and a stream's extents follow the [data-stream rules](#data-streams-and-file-extents).
+Flag `0x10`, which [A1] does not define, may accompany the stream flag and
+is ignored: native volumes set it on stream attributes of user names, not
+on a compressed file's resource fork. A flag outside `0x1`, `0x2`, `0x4`
+and `0x10` is unsupported (E5, E6,
+`e5-xattr`, `e6-xclone`). [A1] gives 3804 both as the largest inline size
+and as a bound inline data must stay below. The reader accepts inline data
+of up to 3804 bytes. Native volumes store at most 3800 bytes inline, and
+fewer with a long name: 3794 with a 127-byte name, the longest
+`setxattr(2)` accepts. Larger values are streams (E5, `e5-xbound`,
+`e5-xlong`). Where between 63 and 127 bytes the name starts to lower the
+limit is unmeasured and matters to no rule here. A stream attribute's
+value holds its stream ID, the key its file extents are filed under. No
+data-stream ID record exists for it, and each stream has exactly one
+attribute using it: a clone made with `cp -c` gets a stream ID of its own
+for each stream attribute, whose extents name the source's blocks (E6,
+`e6-xclone`).
 
 The common entry model has no extended attributes, so the reader delivers
 none: attribute names and values are neither listed nor extracted. The
@@ -1257,11 +1279,16 @@ them costs no second lookup. Verification validates every attribute record.
 ### Hard links and siblings
 
 Several directory records may name one non-directory inode, whose link count
-counts them. Each name of an inode with several names has a sibling-link
-record under the inode (sibling ID, parent inode, name), and its directory
-record carries the sibling ID; a volume with the hard-link map feature also
-has a sibling-map record under each sibling ID naming the inode
-(provisional, E5). The common model has no hard-link
+counts them. Each name of an inode that has had several names has a
+sibling-link record under the inode (sibling ID, parent inode, name), and
+its directory record carries the sibling ID; a volume with the hard-link map
+feature also has a sibling-map record under each sibling ID naming the
+inode. Sibling IDs are object IDs of their own. The records stay when the
+names drop back to one, so an inode with link count 1 has either no
+sibling records and no sibling ID on its directory record, or one of each.
+The inode's parent and name field are those of one of its names and move to
+a remaining name when that one is removed, and hard links do not use the
+private directory (E5, `e5-links`). The common model has no hard-link
 representation, so the reader delivers every name as its own entry with the
 inode's metadata and content; a file's content is read through each name
 independently. Verification checks that the link count, the directory
@@ -1288,24 +1315,33 @@ the inode's private ID: the key suffix is the extent's logical byte offset,
 and the value is a u64 whose low 56 bits are the extent's length in bytes and
 whose high 8 bits are flags, the extent's first physical block (u64), and a
 crypto ID (u64). A data-stream ID record under the private ID holds its
-reference count.
+reference count, the number of inodes using the stream: clones share one
+stream, and so one private ID, until a write gives the writing inode a
+stream of its own (E6, `e6-clone`).
 
 The extents of a stream tile a prefix of its logical range in logical order,
 without gaps or overlap: each starts where the previous one ends, and each
 length is a positive multiple of `B`. No extent extends past the larger of
 the size rounded up to whole blocks and the data-stream field's allocated
-bytes, which exceed the rounded size when space is preallocated (provisional:
-E6 shows native preallocation). The allocated bytes count holes too: in
+bytes, which exceed the rounded size when space is preallocated
+(provisional, E16: neither E3 nor E6 shows native preallocation; if E16
+cannot answer, the rule stands). The allocated bytes count holes as well
+as mapped extents: a sparse native file's allocated bytes equal the total
+length of its extents (E6, `e6-sparse`), and in
 `apfs-newfs-268435456-e3-ci` a file of `2^32 + 4107` bytes written only at
-its end has one hole extent and one mapped block, allocated bytes the size
-rounded up to whole blocks, and a sparse-bytes field holding the hole's
-length (E3). Logical bytes
-past the last extent and below the size read as zero, as do extents whose
-physical block is zero, which mark holes (both representations are
-provisional, E6).
+its end has one hole extent and one mapped block and allocated bytes the
+size rounded up to whole blocks (E3). Extents whose physical block is
+zero mark holes and read as zero. Native files mark every hole with such an
+extent, at the start, in the middle and after the last data, and their
+extents tile the whole rounded size (E6, `e6-sparse`). Logical bytes past
+the last extent and below the size, which native volumes do not write,
+also read as zero: a policy, since such a tail delivers no stored bytes and
+reads like a trailing hole.
+A sparse native file has the internal flag `0x200` and a sparse-bytes field
+equal to the total length of its hole extents (E3, E6).
 A mapped extent's blocks lie inside `[1, N)`. Extent flags must be zero, and
 crypto IDs follow a closed table for unencrypted volumes. The table is
-provisional (E6) and holds zero alone, the only value on every E3 extent,
+provisional (E16) and holds zero alone, the only value on every E3 extent,
 until a capture adds a value, so
 no extent that might be encrypted is delivered. Content past the size,
 including preallocated extents, is never delivered. Two streams may name the same blocks: that is a clone, legal
@@ -1323,7 +1359,18 @@ length in blocks and whose high 4 bits are its kind (`1` new or `2` update
 on disk; any other is corrupt), the owning object's ID (u64), and a signed
 32-bit reference count. In the live tree the count is positive and kinds
 are new; how a snapshot's tree records update kinds and counts is
-provisional (E9).
+provisional (E9). A live record's count is the number of distinct streams,
+file and attribute streams alike, that map each of its blocks, so clones
+sharing one data stream count once. Records split where clone branches
+diverge, so every block of a record has the same count, one file extent may
+span several adjacent records, and one record may back several file
+extents. The record's owner field names the object whose write allocated
+the blocks: the inode number for file data, which differs from the private
+ID once a clone branch has a stream of its own, the inode number for a
+compressed file's resource fork, and the stream ID for a user attribute.
+[A1] names the private ID and the attribute record's ID. The owner may
+since have moved to another stream or been removed, so verification checks
+no rule on it (E5, E6, `e5-xattr`, `e6-clone`, `e6-xclone`).
 
 ### Symbolic links
 
@@ -1479,14 +1526,20 @@ and its records reconciled:
 
 * each directory record names an existing inode whose mode matches its
   type, and each directory's child count equals its records;
-* each non-directory's link count equals its names, which its sibling links
-  and sibling maps match;
+* each non-directory's link count equals its names; an inode with more than
+  one name, or with any sibling link, has one sibling link per name whose
+  sibling ID, parent and name equal those of the directory record carrying
+  that ID, and, in a volume with the hard-link map feature, one sibling map
+  per sibling link;
 * every inode other than the root and private directories is named by a
   directory record, or lies in the private directory, which is where native
   volumes place unnamed inodes (provisional, E16: E3 holds no unnamed
   inode; if E16 cannot answer, the rule stands);
-* each data-stream ID's reference count equals the inodes and attributes
-  using it, and every file extent belongs to a live stream;
+* each data-stream ID's reference count equals the inodes using it, and
+  every file extent belongs to a live stream: an inode's private ID, or a
+  stream attribute's stream ID, which exactly one attribute uses and which
+  has no data-stream ID record; each stream's extents respect the size and
+  allocated bytes of the data-stream field that names it;
 * every attribute is well formed, and names equivalent under the volume's
   rules never share a parent;
 * the volume superblock's object counts equal the counted inodes by kind.
@@ -1516,11 +1569,13 @@ provisional (E11); without one, its sealed file extents are its data claims.
 Records of one tree never overlap; records of different trees of one
 volume may, since a snapshot and the live volume share unchanged extents,
 so a block a snapshot alone still uses is claimed by that snapshot's
-record. Every mapped file extent of the live filesystem tree lies inside a
-live physical-extent record, and file extents overlap one another only
-inside one such record, whose reference count equals the live streams
-sharing it. How a snapshot's references enter the counts is provisional
-(E9).
+record. Every block of a mapped file extent of the live filesystem tree
+lies inside a live physical-extent record; one extent may span several
+adjacent records. File extents of different streams overlap only inside
+such records, and every block of a live record is mapped by as many
+distinct live streams, file and attribute streams alike, as its reference
+count (E6, `e6-clone`, `e6-xclone`). How a
+snapshot's references enter the counts is provisional (E9).
 
 Metadata claims are exclusive, and data claims never overlap metadata. A
 block is allocated in the main bitmap exactly when it is claimed; each
@@ -1565,7 +1620,7 @@ owns every number and field value:
   data-stream field, a data-stream ID record, one contiguous run of
   blocks, the file extents that tile it, one unless the run is longer than
   the [extent cap](#writer-values), and one physical-extent record owned by
-  the stream;
+  the inode;
 * for each directory: an inode with a name field and child count; for each
   symbolic link: an inode and an inline filesystem-owned
   `com.apple.fs.symlink` attribute; for each FIFO: an inode with no data
@@ -1815,7 +1870,7 @@ to 100663296 (384 GiB).
 | Slot, index, role, name | Slot 0, index 0, role 0, the label | Policy | | |
 | Features and flags | Incompatible `0x1` on a case-insensitive volume and `0x8` on a case-sensitive one; flags `0x1`; read-only compatible zero; optional features `0x2` | [A1]; E2 | | |
 | Object counts | Files: regular files. Directories: directory entries, the root and private directories not counted. Symbolic links. Other: FIFOs, as native volumes count FIFOs and sockets. Snapshots: zero | [A1]; E3 | | |
-| Allocated block count, total blocks allocated and freed | Allocated: the blocks of the volume's object map and tree nodes and of its file data, the superblock not counted, as [verification](#verification) states. Total allocated: the file-data blocks alone. Total freed zero | [A1]; E3 | | |
+| Allocated block count, total blocks allocated and freed | Allocated: the nodes of the volume's object-map, filesystem, extent-reference and snapshot trees, one block more for the object-map object, and its file-data blocks, as [verification](#verification) states; total allocated the file-data blocks alone, the native value of a volume that has freed no data; total freed zero | [A1]; E3, E5, E6 | | |
 | Reserve and quota | Zero | [A1]: none | | |
 | Modification and unmount times | The format time | Policy | E1 | Formula: each field holds the format time, or zero where E1 shows a fresh volume holding zero |
 | Formatting record | Identifier `fsimg` followed by the package version, NUL-padded to 32 bytes; the format time; last XID `X` | Policy | E15 | The identifier in the native formatter's form, as E1 captures it |
@@ -1837,7 +1892,7 @@ to 100663296 (384 GiB).
 | File extent | A nonempty file's run, its size rounded up to 4096 bytes, is tiled by consecutive extents of at most the extent cap, so a file no longer than the cap has one; flags and crypto ID zero | [A1] | | |
 | Extent cap | `2^56 - 4096` bytes, the largest block-aligned length the 56-bit length field holds. The cap follows from the encoding and needs no experiment | [A1]: the field's width | E15, for a lower native limit | The longest extent E15 shows `fsck_apfs` accepting |
 | Data-stream field | Size; allocated bytes the size rounded up to 4096; crypto ID zero; total bytes written the size and total bytes read zero; flags `0x20`. A file of size zero has none, and no data-stream ID or reference record either | [A1]; E3 | | |
-| Reference records | Data-stream ID count 1; one physical extent over the file's run, of kind new, its length in blocks, owner the private ID, count 1 | [A1]; E3 | | |
+| Reference records | Data-stream ID count 1; one physical extent over the file's run, of kind new, its length in blocks, owner the inode number, which is the private ID, count 1 | [A1]; E3, E5, E6, runs of at most 257 blocks | E15, for longer runs, which E3, E5 and E6 do not show | Formula |
 
 **Metadata and limits**
 

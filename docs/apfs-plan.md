@@ -359,7 +359,7 @@ captures with their command records and `fsck_apfs` output:
 | E2 Personalities | Case-sensitive and case-insensitive volumes from `newfs_apfs` and `hdiutil`; feature and flag words |
 | E3 Population | Names of 1, 255 and longer lengths; files of 0, 1, 4095, 4096, 4097, 65536 bytes and beyond 4 GiB (sparse source); nested and wide directories; symbolic links; `mkfifo`; `mknod` and a socket as root; modes, owners and times at their limits |
 | E4 Names | One directory of 20000 names including composed and decomposed forms, case pairs, German sharp s, Turkish dotted and dotless I, Greek sigma, Hangul, CJK compatibility ideographs, Georgian Mtavruli, characters whose folding is not closed under decomposition, characters assigned in each recent Unicode version, and supplementary-plane characters, in both personalities; each stored hash recorded as a test vector, and collisions of the 22-bit hash |
-| E5 Links and attributes | Two and three hard links across directories, unlinked back to one; attributes of 0, 1, 3804 and 3805 bytes and larger |
+| E5 Links and attributes | Two and three hard links across directories, unlinked back to one; attributes of 0 and 1 bytes, sizes around the inline limit with names of 1 to 127 bytes, and of 64 KiB and 1 MiB |
 | E6 Sparse and clones | `truncate` and seek-writes; `cp -c` then overwrite one branch |
 | E7 Compression | `ditto --hfsCompression` on small and large files; installed applications; each codec type found, inline and resource-fork |
 | E8 Checkpoint history | Mount, write, unmount several times, capturing the ring; copies truncated or with the newest checkpoint's blocks zeroed |
