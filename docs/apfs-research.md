@@ -2057,6 +2057,137 @@ and both after-delete copies that of 007, by their dumps:
   2 s runs were not kept. Only copies taken while the command ran caught
   the reaper at work.
 
+### E18 Resized container
+
+**Procedure.** `diskutil apfs resizeContainer` grows a container only
+into space its physical store has: free partition-map space after its
+partition, or for a whole-disk container the device past a container
+shrunk earlier. The scripted runs give the container that room with a GPT
+partition and free space after it. `e18-resize.sh OUTDIR IMAGE_BYTES INITIAL STEP...` (copied
+into each capture beside `summarize.rb`, which prints the comparisons
+below) runs `mkfile -n IMAGE_BYTES`, attaches the file with
+`hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage`, makes
+a GPT map with `diskutil partitionDisk DISK 2 GPT APFS E18 INITIAL "Free
+Space" gap R` (an EFI partition, the APFS partition at byte 209735680 and
+free space after it) and unmounts the volume. Then, for the initial state
+`s0` and after each `diskutil apfs resizeContainer CONTAINER STEP` (`sN`),
+it clones the backing file while the disk is attached (`cp -c`,
+`sN-live`), detaches it, clones it again (`sN`), dumps both with
+`apfsdump.rb --offset 209735680` (`.json` and `.txt`), attaches it again
+with `-nomount`, runs `fsck_apfs -n` on the APFS partition (`sN.fsck.txt`)
+and leaves it attached for the next step. With `MOUNT=1` the volume is
+mounted for each resize and a third clone, `sN-unmounted`, is taken after
+`diskutil unmountDisk` and before the detach. Nothing needs administrator
+rights. `commands.txt` holds every command with its output and exit
+status. The `-live` and `-unmounted` images were deleted after their dumps
+were written; the `sN.img` images are kept.
+
+| Capture | Image | Initial | Steps |
+| --- | --- | --- | --- |
+| apfs-diskutil-17179869184-e18-gpt | 16 GiB | `1g` | `8g`, `0` (grow to fit, 16970113024 bytes), `8g`, `2g`, `500m`, `0` |
+| apfs-diskutil-17179869184-e18-mounted | 16 GiB | `1g` | `8g`, `0`, `500m`, volume mounted for each (`MOUNT=1`) |
+| apfs-diskutil-9895604649984-e18-large | 9 TiB | `4t` | `0` (9895394893824 bytes), `4t`, `2t` |
+| apfs-diskutil-1073741824-e18-rawshrink | 1 GiB | `newfs_apfs` on the whole disk | `500m`, by `e18-rawshrink.sh OUTDIR` with the same clone, dump and check steps and `resizeContainer ... limits` before and after; the volume is not mounted |
+
+`resizeContainer ... limits` on a whole-disk container (no partition map,
+as `newfs_apfs` makes one) reports the device size, 1073741824 bytes, as
+the maximum, so a container that fills its device cannot grow; it
+shrinks, and the e18-rawshrink container then has 122070 blocks on a 262144-block device, with slack past `N * B` that
+`fsck_apfs -n` accepts. Every `fsck_apfs -n`, 16 runs, exits 0 with
+"appears to be OK", and no dump reports a problem.
+
+**Observations** (block size 4096 throughout; XID and areas from the
+selected checkpoint superblock of the detached clone; `S` the space
+manager's mapped blocks; offsets of the pool XID, bitmap-index and
+free-next arrays and the main and tier-2 address arrays; `D` the
+descriptor area, the data area, the pool `P` and the pool's bitmap ring
+each as base + blocks; ring position the superblock's descriptor index and
+length; `F` the maximum volume count):
+
+| Capture, state | XID | `N` | Chunks | CIBs | CABs | `S` | Array offsets | `D` | Data | Pool | Bitmap ring | Space manager OID | Ring position | `F` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| gpt s0 | 4 | 244141 | 8 | 1 | 0 | 1 | 2520, 2528, 2536, 2568, 2576 | 1 + 12 | 13 + 744 | 773 + 27 | 757 + 16 | 1024 | 6, 2 | 2 |
+| gpt s1 | 5 | 1953125 | 60 | 1 | 0 | 1 | 2520, 2528, 2536, 2568, 2576 | 6910 + 64 | 823 + 5904 | 6727 + 183 | 6974 + 16 | 1030 | 0, 2 | 15 |
+| gpt s2 | 6 | 4143094 | 127 | 2 | 0 | 1 | 2520, 2528, 2536, 2568, 2584 | 17633 + 108 | 6990 + 10256 | 17246 + 387 | 17741 + 16 | 1032 | 0, 2 | 32 |
+| gpt s3 | 8 | 1953125 | 60 | 1 | 0 | 1 | 2520, 2528, 2536, 2568, 2576 | 6910 + 64 | 823 + 5904 | 6727 + 183 | 6974 + 16 | 1035 | 0, 2 | 15 |
+| gpt s4 | 10 | 488281 | 15 | 1 | 0 | 1 | 2520, 2528, 2536, 2568, 2576 | 8938 + 24 | 6990 + 1900 | 8890 + 48 | 8962 + 16 | 1038 | 0, 2 | 4 |
+| gpt s5 | 12 | 122070 | 4 | 1 | 0 | 1 | 2520, 2528, 2536, 2568, 2576 | 412 + 8 | 1 + 380 | 397 + 15 | 381 + 16 | 1041 | 0, 2 | 1 |
+| gpt s6 | 13 | 4143094 | 127 | 2 | 0 | 1 | 2520, 2528, 2536, 2568, 2584 | 19621 + 108 | 8978 + 10256 | 19234 + 387 | 19729 + 16 | 1043 | 0, 2 | 32 |
+| mounted s1 | 11 | 1953125 | 60 | 1 | 0 | 1 | 2520, 2528, 2536, 2568, 2576 | 6928 + 64 | 841 + 5904 | 6745 + 183 | 6992 + 16 | 1030 | 6, 2 | 15 |
+| mounted s2 | 18 | 4143094 | 127 | 2 | 0 | 1 | 2520, 2528, 2536, 2568, 2584 | 17651 + 108 | 7008 + 10256 | 17264 + 387 | 17759 + 16 | 1033 | 6, 2 | 32 |
+| mounted s3 | 28 | 122070 | 4 | 1 | 0 | 1 | 2520, 2528, 2536, 2568, 2576 | 412 + 8 | 1 + 380 | 397 + 15 | 381 + 16 | 1039 | 6, 2 | 1 |
+| large s0 | 4 | 976562500 | 29803 | 237 | 0 | 2 | 2520, 2544, 2552, 2648, 4544 | 1 + 284 | 285 + 27988 | 28321 + 90120 | 28273 + 48 | 1024 | 6, 2 | 100 |
+| large s1 | 5 | 2415867894 | 73727 | 586 | 2 | 1 | 2520, 2576, 2592, 2816, 2832 | 369834 + 288 | 341386 + 28448 | 118441 + 222945 | 370122 + 112 | 1030 | 0, 2 | 100 |
+| large s2 | 7 | 976562500 | 29803 | 237 | 0 | 2 | 2520, 2544, 2552, 2648, 4544 | 118109 + 284 | 90121 + 27988 | 1 + 90120 | 118393 + 48 | 1033 | 0, 2 | 100 |
+| large s3 | 9 | 488281250 | 14902 | 119 | 0 | 1 | 2520, 2536, 2544, 2608, 3560 | 191324 + 280 | 163504 + 27820 | 118441 + 45063 | 191604 + 32 | 1036 | 0, 2 | 100 |
+| rawshrink s1 | 4 | 122070 | 4 | 1 | 0 | 1 | 2520, 2528, 2536, 2568, 2576 | 1473 + 8 | 1062 + 380 | 1458 + 15 | 1442 + 16 | 1030 | 0, 2 | 1 |
+
+The steps cross one chunk-information block's capacity of 126 chunks
+both ways (60 to 127 chunks, gpt s1 to s2, and 4 to 127, s5 to s6; back
+from s2 to s3) and the address-block
+threshold both ways (237 to 586 chunk-information blocks, large s0 to s1,
+and back from s1 to s2).
+
+* **Arrays.** In every state, resized or not, the arrays sit exactly at
+  the packing [the format design](../specs/design-apfs.md#ephemeral-objects-and-the-space-manager)
+  gives for the state's own counts, and `S` is the smallest number of
+  blocks holding the structure and its arrays. Where the packing of the
+  new counts differs from the old one, every array moves to it: crossing into address blocks moves the main
+  address array from 2648 (237 block numbers, ending at 4544) to 2816 (two
+  address blocks), and `S` falls from 2 to 1; shrinking back restores 2648
+  and `S = 2`.
+* **A resize rebuilds the space manager and the checkpoint areas.** Each
+  resize writes a new space manager under a new ephemeral OID (1030 and
+  up; the reaper keeps 1025), whose fields are those `newfs_apfs` writes
+  for the new `N`: chunk, chunk-information and address-block counts, the
+  pool's size, bitmap size and ring slots, and both free queues' node
+  limits. The descriptor and data areas take the sizes a fresh format of
+  the new `N` has. `$FSIMG_APFS_NATIVE/e18-fresh/nBLOCKS.apfsdump.json`
+  holds a fresh `newfs_apfs` format of each `N` above (`commands.txt`
+  there gives the commands; `compare.rb` writes the comparison to
+  `compare.txt`), and each agrees with the resized state in every one of
+  these sizes, counts and offsets; only the bases differ.
+* **Placement.** The areas move to new bases within `[1, N)`. The four
+  areas still form one contiguous run, but in another order than a fresh
+  format's descriptor, data, ring, pool: data, pool, descriptor, ring
+  (gpt s1), pool, data, descriptor, ring (large s1), or data, ring, pool,
+  descriptor with the data area at block 1 (gpt s5); the pool starts at
+  block 1 in large s2. The address blocks still precede the
+  chunk-information blocks they name (large s1: 118441, then 118442 on;
+  the second at 118949).
+* **Descriptor ring.** The resize's checkpoint is written in a new ring at
+  slots 0 and 1, superblock first-block index 0 and length 2, the first
+  form of the [writer values](../specs/design-apfs.md#writer-values);
+  later mount cycles advance it (mounted s1 to s3: index 6).
+* **Block 0.** Block 0 never lags: in every live clone, the volume
+  mounted or not, block 0 has the selected checkpoint's XID, block count
+  and descriptor and data areas, and the live and detached dumps of each
+  unmounted step agree. Every clone was taken after `resizeContainer` returned, so no
+  state between the ring write and the block 0 write was observed.
+* **Free queues and reaper.** After every resize the internal pool's
+  queue is empty in the zero-OID form. The checkpoint of every resize but
+  one maps three ephemeral objects (reaper, space manager, main queue
+  tree). The main queue holds the old areas' blocks and those queued
+  before the resize (811 blocks in gpt s1: 12 at XIDs 2 to 4 and 799 at
+  the resize's XID 5, the old areas at blocks 1 to 800; 118452 in large
+  s1), in runs that all lie below the new `N`.
+* **A reap in the mounted shrink.** The mounted shrink to `500m` (mounted
+  s3-live, the resize checkpoint at XID 25; the detached s3 is at XID 28
+  after the unmount) also maps a reap-list object: the reaper has one empty list object, head
+  and tail its OID 1038, next reap ID 2 and completed reap ID 1; its six
+  fields of the object being reaped keep a completion record of kind
+  `0x40000002` (a physical B-tree), OID 0, XID 1 and entry flags `0x3`
+  (E17 kept kind 13 and flags `0xf` there), and the list object's stale
+  entry 0 names OID 65538 at XID 22. This is the completed-reap shape the
+  [format design](../specs/design-apfs.md#reaper) accepts as idle. The
+  unmounted shrinks to the same `N` (gpt s5, rawshrink s1) run no reap.
+* **Other fields.** The maximum volume count follows the new `N`
+  (`min(100, ceil(N * B / 512 MiB))`: 2, 15, 32, 4 and 1 in gpt, 100 in
+  large). The blocked-out
+  range and the eviction-mapping tree OID stay zero; the reaper OID, UUID
+  and features do not change. The dumps show no field the designs do not
+  cover.
+
 ## Evidence questions
 
 Stage 1 fills this section ([plan](apfs-plan.md), stage 1). Each row is a
@@ -2067,10 +2198,10 @@ under that experiment.
 | --- | --- | --- |
 | Container superblock type word; first unreserved OID; volume-count rule | `0x80000001`; 1024; `min(100, ceil(N * B / 512 MiB))` (E1, every capture) | A used container's reaper and free queues (E16) |
 | Fletcher-64 on captured blocks | Reproduces every stored checksum (E1) | |
-| Checkpoint area sizes and placement by container size; contiguity | The formulas above, with E12's space-manager term; contiguous in every dump, to 128 TiB and a 1 PiB container of 16384-byte blocks (E1, E12) | |
+| Checkpoint area sizes and placement by container size; contiguity | The formulas above, with E12's space-manager term; contiguous in every dump, to 128 TiB and a 1 PiB container of 16384-byte blocks (E1, E12); a resize writes the sizes of a fresh format of the new block count at new bases, still one contiguous run but in another order, the data area or the pool at block 1 in some (E18) | |
 | Mapped ephemeral objects and their XIDs; ring states | Two checkpoints, XIDs 1 and 2, mappings above (E1); after mount cycles every checkpoint relocates four one-block objects (space manager, reaper, both free-queue trees) carrying its XID, the 1 GiB container's 16-slot ring holds 8 two-block checkpoints reused in order and never cleared, and `fsck_apfs` passes over a newest checkpoint with a zeroed superblock, mapping block or data run to the next older one ([E8](#e8-checkpoint-history)) | |
 | Descriptor and data ring slots, mapping order, OIDs from 1024, block 0 against the ring superblock | Slots 0 to 3 and data slots 0 to 5; ascending OID; 1024 to 1027, 1029; block 0 differs only in counter 0 (E1); 1028 is the filesystem root (E1: apfs-newfs-4194304-plain's volume superblock), and `fsck_apfs -n` accepts the writer's root at 1027 ([E15](#e15-writer-probes): `e15-x1vol-oid`) | |
-| Space manager fields, internal-pool sizing, chunk structures, address-block threshold, bitmaps of free chunks | As above; free chunks have no bitmap (E1); address blocks above 507 chunk-information blocks at 4096-byte blocks and 2043 at 16384 (provisional at other block sizes), counted in the pool and placed before the blocks they name (E12) | |
+| Space manager fields, internal-pool sizing, chunk structures, address-block threshold, bitmaps of free chunks | As above; free chunks have no bitmap (E1); address blocks above 507 chunk-information blocks at 4096-byte blocks and 2043 at 16384 (provisional at other block sizes), counted in the pool and placed before the blocks they name (E12); a resize writes a new space manager with the fields and packed array offsets of a fresh format of the new block count (E18) | Whether an aged container keeps the arrays within the packing (E16) |
 | Bitmap bits past `N` | Clear (E1); `fsck_apfs -n` accepts them set and leaves them out of the free counts, `apfsck` refuses them ([E15](#e15-writer-probes): `e15-pastn-all`) | |
 | Fixed regions as functions of `N`; size step | The formulas above, to 128 TiB; one block (E1, E12) | |
 | Free queues of a fresh container | XID 1 zero-OID; XID 2 entries as above; node limits `L` and `I` (E1); with entries the oldest XID is the smallest record XID, the count the sum of the runs, and the node limit keeps the formatter's value ([E8](#e8-checkpoint-history)) | |

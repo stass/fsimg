@@ -416,8 +416,13 @@ block count equal block 0's, and whose XID is nonzero. Block 0 serves only
 to find the ring: [A1]'s mounting procedure reads the descriptor base from
 it and says block 0 may be an old version, used "only to find the
 checkpoints". A candidate's block count and data area may therefore differ
-from block 0's, as after a resize block 0 does not yet show, and `N` and the
-data area are the selected superblock's. A never-written slot is all zero
+from block 0's, and `N` and the data area are the selected superblock's.
+A native resize is not such a case: it moves the descriptor area too, and
+once `diskutil apfs resizeContainer` returns, block 0 already holds the
+resize checkpoint's XID, block count and areas, even while the disk is
+attached (E18, every live clone). A block 0 from before a resize would
+name the old ring, and the reader would select among the checkpoints left
+there, as for any older block 0. A never-written slot is all zero
 (E1: slots 4 to `D - 1` of every capture with a volume, slots 2 to 7 of
 apfs-newfs-372736-plain); its checksum fails, so it is unused, neither a
 candidate nor a mapping block, and never a fault in itself. Two candidates with the same XID are an
@@ -631,12 +636,15 @@ to its entry size, disjoint from the others and ending no later than the
 packed order above ends for the same counts, and the object's mapped
 size must be the smallest whole number of blocks holding the structure and
 its arrays (two blocks in E12 from 3 to 7.8 TiB and from 50 TiB); the
-reader checks it before reading the object's blocks. Ending within the
-packing is provisional: every E1 and E12 dump is a fresh container, and
-whether a resized or aged one moves an array past it is closed by E18,
-which grows and shrinks a native container and dumps its space manager
-after each step, and by E16's used volume. Until then, and if neither
-answers, a space manager with an array past the packing
+reader checks it before reading the object's blocks. A resize keeps the
+packing: it writes a new space manager whose counts, pool, ring and array
+offsets are those a fresh format of the new block count has, and `S`
+follows them (E18, every state of its four captures; in
+apfs-diskutil-9895604649984-e18-large `S` goes from 2 to 1 and back to 2
+as the container grows past 507 chunk-information blocks and shrinks
+below them). Whether an aged container moves an array past the packing
+is provisional, closed by E16's used volume. Until then, and if E16 does
+not answer, a space manager with an array past the packing
 is `FSIMG_EUNSUPPORTED`, so no block past its first is read either way.
 The pool's bitmap
 size in blocks is `ceil(P / (8 * B))` for a pool of `P` blocks, its ring
@@ -717,7 +725,8 @@ record of two blocks (E1, apfs-newfs-33554432-plain and
 apfs-newfs-8589934592-plain). A free-queue root leaf with no keys appears in no
 capture. The node limits are the functions of `N` that
 [writer values](#writer-values) gives. In a native queue with entries the oldest XID is the smallest record
-XID, and the node limit keeps the value the formatter wrote (E8). The
+XID, and the node limit keeps the value the formatter wrote (E8); a
+resize writes the formatter's value for the new block count (E18). The
 reader requires only an oldest XID not above the checkpoint's and does
 not interpret the node limit.
 
