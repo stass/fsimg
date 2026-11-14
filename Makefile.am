@@ -204,6 +204,7 @@ check_PROGRAMS = $(test_programs) layers-compose hfsplus-marks hfsplus-write-gen
 	test-iso9660-scale test-hfsplus-scale test-iso9660-write-scale \
 	test-erofs-scale
 QUICK_TESTS = $(test_programs) test/hfsplus-integration.sh test/erofsdump.sh test/erofs-integration.sh \
+	test/apfsdump.sh \
 	test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
@@ -507,6 +508,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	tools/hfsplus/qualify.rb \
 	tools/erofs/capture.rb tools/erofs/erofsdump.rb tools/erofs/head2-bit.rb \
 	tools/erofs/manifest.rb tools/erofs/qualify.sh \
+	tools/apfs/apfsdump.rb \
 	tools/hfsplus/check-unicode-tables.rb \
 	tools/hfsplus/e8_interrupt.rb tools/hfsplus/fields.rb \
 	tools/hfsplus/index_keys.rb tools/hfsplus/ndif.rb \
@@ -823,3 +825,4 @@ EXTRA_DIST += tools/apfs/capture.rb test/apfs-capture-test.rb
 EXTRA_DIST += test/erofsdump-test.rb test/erofsdump.sh test/erofs-integration.sh.in \
 	test/erofs-integration.rb
 EXTRA_DIST += test/hfsplus-integration-test.rb
+EXTRA_DIST += test/apfsdump-test.rb test/apfsdump.sh
