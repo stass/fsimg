@@ -1499,6 +1499,184 @@ and both after-delete copies that of 007, by their dumps:
   2 s runs were not kept. Only copies taken while the command ran caught
   the reaper at work.
 
+### E12 Large containers
+
+**Procedure.** `capture.rb --kind newfs --option e12-1t` at 1 TiB
+(apfs-newfs-1099511627776-e12-1t). At 128 TiB the same commands ran by
+hand (`e12-sweep/manual-capture.sh`), because `capture.rb` hashes the
+whole image and 128 TiB of holes takes days on this host:
+apfs-newfs-140737488355328-e12-128t holds `commands.txt`, `fsck.txt` and
+`apfsdump.json`, but no manifest and no image hash. Both end `fsck_apfs -n`
+with "appears to be OK" and exit 0; both dumps report no problem; the
+sparse images hold 4.4 MiB and 37 MiB. A sweep (`e12-sweep/sweep.rb`)
+formatted 30 more sizes the same way, checked each with `fsck_apfs -n`
+(all OK), kept the dump in `$FSIMG_APFS_NATIVE/e12-sweep/nBLOCKS/apfsdump.json`
+and deleted the image (`e12-sweep/sweep.log`): 512, 640 and 768 GiB, 2, 3,
+4, 8, 16, 32, 50, 64, 100 and 112 TiB, a bisection of the address-block
+threshold between 1 and 128 TiB (4.98 to 64.5 TiB), and three sizes at
+23.4 TiB around the cap on `I`. Above 128 TiB it formatted and checked,
+without a dump, 256 TiB, 512 TiB, 1, 2 and 4 PiB, and two sizes near
+2 PiB, with dumps, bisect the address-block threshold at 16384-byte
+blocks. The 1 PiB dump comes from one more format of that size by hand,
+with the same commands and no `fsck_apfs`.
+
+**Largest size.** `newfs_apfs` refused no size: every size tried, up to
+4 PiB (2^52 bytes), formats and passes `fsck_apfs -n`; larger sizes were
+not tried. The superblocks read at 256 TiB and 512 TiB (2^37 blocks) have
+4096-byte blocks and the one at 1 PiB 16384-byte blocks
+(`e13-layers/e13-record.log`, which records those formats too).
+
+**Container values** (XID 2; base + blocks; all areas contiguous; `S` the
+space manager's mapped blocks, `A` the address blocks, `I` and `L` the
+internal-pool and main free-queue node limits; `M` 8 and `F` 100 in every
+row):
+
+| Capture | `N` | Descriptor | Data | Pool ring | Pool | Chunks, `C`, `A` | `S` | `I`, `L` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| apfs-newfs-1099511627776-e12-1t | 268435456 | 1 + 280 | 281 + 27748 | 28029 + 16 | 28045 + 24774 | 8192, 66, 0 | 1 | 22, 512 |
+| e12-sweep/n2093285376 (7.8 TiB) | 2093285376 | 1 + 288 | 289 + 28352 | 28641 + 96 | 28737 + 193167 | 63882, 507, 0 | 2 | 171, 512 |
+| e12-sweep/n2093318144 | 2093318144 | 1 + 288 | 289 + 28344 | 28633 + 96 | 28729 + 193179 | 63883, 508, 2 | 1 | 171, 512 |
+| apfs-newfs-140737488355328-e12-128t | 34359738368 | 1 + 300 | 301 + 29716 | 30017 + 1552 | 31569 + 3170748 | 1048576, 8323, 17 | 2 | 512, 512 |
+| e12-sweep/n68719476736-b16384 (1 PiB) | 68719476736 | 1 + 72 | 73 + 26636 | 26709 + 208 | 26917 + 1575951 | 524288, 1029, 0 | 1 | 128, 128 |
+
+The 1 TiB free count is 268382627 and the 128 TiB one 34356536041; both
+equal the bitmap recount.
+
+**Formulas.** E1's formulas hold with four extensions, and with them every
+4096-byte dump, the two captures and the 30 sweep dumps from 512 GiB to
+128 TiB, reproduces the area sizes and bases, `C`, `A`, `P`, the pool
+bitmap and ring, the array offsets, `S`, `I`, `L`, `M` and `F`
+(`e12-sweep/check.rb`):
+
+* `A = 0` when `C <= 507`, the chunk-information blocks per address block,
+  and `ceil(C / 507)` otherwise. Bisected at 7.8 TiB: 507
+  chunk-information blocks have no address block and a two-block space
+  manager holding 507 addresses; 508 have two address blocks and a
+  one-block space manager. The threshold is that count, not whether the
+  addresses fit the object. At 16384-byte blocks it is 2043, again the
+  chunk-information blocks per address block: `e12-sweep/n136567848960-b16384`
+  (2 PiB, 2043 chunk-information blocks) has none and
+  `n136567980032-b16384`, one chunk larger, two.
+* `P = 3 * (chunks + C + A)`: address blocks count (128 TiB: 3170748, not
+  the 3170697 of `3 * (chunks + C)`).
+* The pool bitmap is `b = ceil(P / 32768)` blocks and the ring `16 * b`
+  slots (transaction multiplier 16). The space manager's arrays are packed
+  after the structure: the ring's XID array at 2520 (`8 * b` bytes), the
+  bitmap-index array after it (`2 * b`), the free-next array at the next
+  multiple of 8 (two bytes per slot), then the main address array (`A`
+  entries, or `C` when `A` is zero) and the empty tier-2 array; 128 TiB:
+  2520, 3296, 3496, 6600 and 6736. `S` is the smallest whole number of
+  blocks holding all of it: two in the sweep from 3 TiB to 7.8 TiB (196 to
+  507 chunk-information blocks, no address block) and from 50 TiB up, where
+  the ring arrays alone pass 4096 bytes; one otherwise.
+* `E = L + I + 2 * S + 1 + 8 * M * F`, E1's constant 3 being `S = 1`
+  (`S = 2` at 128 TiB: `E = 7429`, data 29716); `I = min(512, q(P, 1136))`,
+  bisected at 23.4 TiB: `n6290472960` (`P` 580494) has 511,
+  `n6290505728` (`P` 580497, the first `q` of 512) and `n6302826496`
+  (`P` 581634, `q` 513) have 512.
+* Block 0's counter 0 is E1's `23 + C`, plus `A + 1` with address blocks,
+  in every dump of either block size (35); the other counters are zero.
+
+At 16384-byte blocks the [A1] relations in `B` hold: 131072 blocks per
+chunk, 510 chunks per chunk-information block, 2043 per address block, a
+pool bitmap of `ceil(P / 131072)` blocks, and a descriptor area of
+`4 * (ceil(E / 408) + 1)` blocks, 408 mappings fitting a block; both node
+limits are 128, and `E = 128 + 128 + 2 + 1 + 6400 = 6659` fits the data
+area.
+
+**Pool contents.** The internal pool holds the address blocks too. In
+apfs-newfs-140737488355328-e12-128t each address block precedes the up to
+507 chunk-information blocks it names: the pool base 31569, then
+chunk-information blocks 0 to 506 at 31570 to 32076, the second address
+block at 32077, blocks 507 on from 32078, and so on to chunk-information
+block 8322 at 39908; the bitmaps of chunks 0 to 97 follow at 39909 to
+40006, then chunk 6576's XID-1 bitmap at 40007. At XID 2 the space manager
+added chunk 3288's bitmap at 40010 and rewrote address block 0 (to 40008) and
+chunk-information block 26 (to 40009), and the internal-pool queue holds
+31569 and 31596, their XID-1 places, as ghost records. Without address
+blocks the layout is E1's: apfs-newfs-1099511627776-e12-1t has
+chunk-information blocks 0 to 65 at 28045 to 28110 and the bitmaps of
+chunks 0, 1 and 74 at 28111 to 28113, with chunk-information block 0's XID-2
+rewrite at 28114 and chunk 37's bitmap at 28115. The XID-2 ring state of
+the 128 TiB capture is
+E1's with `b = 97`: bitmap indexes 97, 1, ..., 96, head 98, tail 0,
+free-next `0xffff` in slots 0 to 97 and 0 in slot 1551. Its XID-1 mapping
+block, still in the descriptor ring, maps the two-block space manager to
+data slots 0 and 1 and the reaper to slot 2; XID 2 fills slots 3 to 7.
+
+**Placement outside the fixed regions.** The volume superblock, the
+container object map and its node lie far above the pool and at no fixed
+fraction of `N`: blocks 1232081 to 1232083 (chunk 37) at 1 TiB and
+107767403 to 107767405 (chunk 3288) at 128 TiB, with the XID-1 copies the
+main queue holds at 2431385 (chunk 74) and 215502028 (chunk 6576). The
+writer places its run after the fixed regions instead
+([layout](../specs/design-apfs.md#layout)).
+
+**Design edits.** The format design's contiguity rule, address-block
+threshold, space-manager arrays and mapped size, and pool contents take
+these observations, and its writer values take the extended formulas, the
+address-block order, the ring and data-ring forms for `S` and `b` above
+one, and 128 TiB as the largest container written.
+
+### E13 Layers
+
+**Procedure.** In `$FSIMG_APFS_NATIVE/e13-layers` (`e13-make.sh`,
+`e13-make.log`): `hdiutil create -size 64m -fs APFS -volname E13` with
+`-layout GPTSPUD` and `-layout NONE`, then `hdiutil convert` of each to
+UDZO, UDBZ, ULFO and ULMO. `hdiutil create` takes `-format` only with
+`-srcfolder` or `-srcdevice` ("-format requires -srcfolder or
+-srcdevice"), so every compressed image comes from `convert`. Each image
+was read with `fsimg i -f IMAGE` from a build of `apfs-land` (1a6ebc3c),
+in which APFS is not registered. `e13-record.sh` reruns every read with
+its exit status, the `-F dmg` reads, the image classes, the refused
+`hdiutil` and `diskutil` commands and the whole APM procedure, recreating
+the APM images, into `e13-record.log`.
+
+**UDRW is raw.** `hdiutil create` writes a UDRW image as a flat raw disk
+of exactly 64 MiB with no `koly` trailer; `hdiutil imageinfo` names its
+class `CRawDiskImage`, and converting a UDZO image back to UDRW gives the
+same. The DMG layer never sees one: the layers read it as a bare disk.
+
+**Apple Partition Map.** `hdiutil create -layout SPUD -fs APFS` fails,
+"create failed - Invalid argument", exit 1, and `diskutil partitionDisk
+diskN APM APFS E13 100%` on an attached raw image refuses: "APFS
+Containers are only allowed on GPT partition schemes". `diskutil
+partitionDisk diskN APM JHFS+ E13 100%` makes a native map (driver
+descriptor `ER`, block size 512; entry 1 `Apple_partition_map` at block 1,
+63 blocks, named "Apple"; entry 2 `Apple_HFS` at block 64, 130992 blocks;
+entry 3 `Apple_Free`, 16 blocks), and `newfs_apfs -v E13` formats entry 2
+as a container, exit 0, `fsck_apfs -n` OK, leaving its type `Apple_HFS`
+(e13-apm-native.img). e13-apm-typed.img is a copy with the type rewritten
+to `Apple_APFS` by hand, and e13-apm-udzo.dmg a UDZO conversion of the
+native one.
+
+**What the layers report:**
+
+| Image | Stack | Report | Exit |
+| --- | --- | --- | --- |
+| e13-gpt-udrw.dmg | `gpt` | GPT, 512-byte sectors; partition 1 `apfs`, 67067904 bytes at 20 KiB, named "disk image", no filesystem; "Volume: none selected: no recognized filesystem in any partition" | 0 |
+| e13-gpt-udzo.dmg | `gpt/dmg` | DMG of 9 chunks (zero, zlib), then as above | 0 |
+| e13-gpt-udbz.dmg | `gpt/dmg` | DMG of 9 chunks (zero, bzip2), then as above | 0 |
+| e13-gpt-ulfo.dmg, e13-none-ulfo.dmg | | "DMG run uses LZFSE compression, which is not supported" | 1 |
+| e13-gpt-ulmo.dmg, e13-none-ulmo.dmg | | "the input passes for both a compressed and an uncompressed image; force the compression or a stack"; with `-F dmg`, "DMG run uses LZMA compression, which is not supported" | 1 |
+| e13-none-udrw.dmg, e13-none-udzo.dmg, e13-none-udbz.dmg | | "no partition table or filesystem recognized"; e13-none-udzo.dmg with `-F dmg` the same | 1 |
+| e13-apm-native.img | `apm` | APM, 512-byte sectors; partition 1 `Apple_partition_map`, 32256 bytes at 512 bytes, named "Apple", no filesystem; partition 2 `Apple_HFS`, 67067904 bytes at 32 KiB, no filesystem; no volume selected | 0 |
+| e13-apm-typed.img | `apm` | As above, partition 2 `Apple_APFS` | 0 |
+| e13-apm-udzo.dmg | `apm/dmg` | DMG of 5 chunks (zero, zlib), then as e13-apm-native.img | 0 |
+
+Peeling stops at the partition holding the container, which the layers
+find and report with its type; only the filesystem step finds nothing. A
+ULMO image is ambiguous without a stack because its first chunk is an xz
+stream at offset 0 (`fd 37 7a 58 5a 00`), so the xz probe claims the file
+beside the DMG trailer; [LZMA chunks in
+DMG](todo-hfsplus.md) tracks the change that lets the trailer outrank it.
+
+**Design edits.** The format design's probe section takes the raw UDRW,
+the native APM partition typed `Apple_HFS`, and the ULMO ambiguity. The
+[partition-type table](../specs/design-layers.md#partition-types) already
+names the GPT type `apfs` and gives APFS no APM type, and the DMG
+table refuses lzfse and lzma chunks; neither needs a change.
+
 ## Evidence questions
 
 Stage 1 fills this section ([plan](apfs-plan.md), stage 1). Each row is a
@@ -1509,16 +1687,17 @@ under that experiment.
 | --- | --- | --- |
 | Container superblock type word; first unreserved OID; volume-count rule | `0x80000001`; 1024; `min(100, ceil(N * B / 512 MiB))` (E1, every capture) | Reaper and free-queue layouts beyond the fresh state (E8, E16) |
 | Fletcher-64 on captured blocks | Reproduces every stored checksum (E1) | |
-| Checkpoint area sizes and placement by container size; contiguity | The formulas above; contiguous to 384 GiB (E1) | Above 100663296 blocks (E12) |
+| Checkpoint area sizes and placement by container size; contiguity | The formulas above, with E12's space-manager term; contiguous in every dump, to 128 TiB and a 1 PiB container of 16384-byte blocks (E1, E12) | |
 | Mapped ephemeral objects and their XIDs; ring states | Two checkpoints, XIDs 1 and 2, mappings above (E1); after mount cycles every checkpoint relocates four one-block objects (space manager, reaper, both free-queue trees) carrying its XID, the 1 GiB container's 16-slot ring holds 8 two-block checkpoints reused in order and never cleared, and `fsck_apfs` passes over a newest checkpoint with a zeroed superblock, mapping block or data run to the next older one ([E8](#e8-checkpoint-history)) | |
 | Descriptor and data ring slots, mapping order, OIDs from 1024, block 0 against the ring superblock | Slots 0 to 3 and data slots 0 to 5; ascending OID; 1024 to 1027, 1029; block 0 differs only in counter 0 (E1) | What holds OID 1028 (E1's volume records) |
-| Space manager fields, internal-pool sizing, chunk structures, address-block threshold, bitmaps of free chunks | As above; free chunks have no bitmap (E1) | Address-block threshold (E12) |
+| Space manager fields, internal-pool sizing, chunk structures, address-block threshold, bitmaps of free chunks | As above; free chunks have no bitmap (E1); address blocks above 507 chunk-information blocks at 4096-byte blocks and 2043 at 16384 (provisional at other block sizes), counted in the pool and placed before the blocks they name (E12) | |
 | Bitmap bits past `N` | Clear (E1) | Whether `fsck_apfs` accepts them set (E15) |
-| Fixed regions as functions of `N`; size step | The formulas above; one block (E1) | Above 100663296 blocks (E12) |
+| Fixed regions as functions of `N`; size step | The formulas above, to 128 TiB; one block (E1, E12) | |
 | Free queues of a fresh container | XID 1 zero-OID; XID 2 entries as above; node limits `L` and `I` (E1); with entries the oldest XID is the smallest record XID, the count the sum of the runs, and the node limit keeps the formatter's value ([E8](#e8-checkpoint-history)) | |
 | Reaper of a fresh container | Idle, reap IDs 1 and 0, state buffer 3984 bytes (E1) | |
 | Object-map flags; object XID equal to its key's XID | Container map `0x1`; the volume record's XID equals its object's (E1), in all nine E8 captures too ([E8](#e8-checkpoint-history)) | Volume maps (E1's volume records); more records (E3) |
 | Tree flags, node fill and table-of-contents sizing | Container object map and free-queue trees as above (E1) | Volume trees (E1's volume records, E3) |
+| DMG, GPT and Apple Partition Map layouts around APFS | GPT partition of type `apfs`; raw UDRW; UDZO and UDBZ peeled; ULFO refused; ULMO ambiguous unless forced, then refused; native APM partition typed `Apple_HFS` (E13) | |
 | Writer acceptance: minimum container size | 1024 blocks, the smallest `fsck_apfs` opens (E1) | Acceptance of the writer's output (E15) |
 | Name hash conventions (initial value, complement, terminating NUL), full or simple case folding, Unicode version, hashed or plain keys per personality | CRC-32C from `0xFFFFFFFF`, no final complement, no NUL, low 22 bits; full folding without Turkic entries, NFD before and after; Unicode 17.0.0; both `newfs_apfs` personalities hash (E4) | Plain keys (E2) |
 | Comparator tie-breaks for hashed records, attributes and snapshot names | Hashed directory records: 22-bit hash, then name bytes as unsigned bytes, a prefix first (E4) | Attributes and snapshot names (E5); plain directory records (E2) |

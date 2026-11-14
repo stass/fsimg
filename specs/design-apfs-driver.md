@@ -300,10 +300,13 @@ It reads the block with one exact read, verifies the checksum, and checks
 kind, subtype, storage class, OID and XID. One object can span several
 blocks, the space manager. Its mapped size is first checked against the size
 the [geometry implies](design-apfs.md#ephemeral-objects-and-the-space-manager)
-for its structure and address array; its blocks then pass through the same
+for its structure and arrays; its blocks then pass through the same
 window one at a time, the checksum running over them, and its fixed
-structure, which lies in the first block, is decoded from there. The address
-array is read later, in windows, by the verification pager. No buffer is
+structure, which lies in the first block, is decoded from there. The arrays
+after it can run into later blocks (E12: from 2520 to 6736 at 128 TiB), so
+the pool ring's XID, bitmap-index and free-next arrays and the address
+array are read later, by offset and in windows, by the verification pager.
+No buffer is
 sized from a mapped size. A failure names the object's role, never its
 bytes.
 
