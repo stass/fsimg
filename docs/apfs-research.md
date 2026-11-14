@@ -1431,8 +1431,8 @@ image is a bare container and the GPTSPUD image a GPT disk ("EFI PART" in
 sector 1) with one `Apple_APFS` partition. The container inside is plain:
 container flags `0x0`, a zero keylocker, volume flags `0x1` unencrypted,
 no problems in the dump. A build of `apfs-next` (99d98715), where APFS is
-not registered, reports every `encrcdsa` image, and `inner.img`, as "no partition table
-or filesystem recognized", exit 1: no layer peels the wrapper.
+not registered, reports every `encrcdsa` image, and `inner.img`, as "no
+partition table or filesystem recognized", exit 1: no layer peels the wrapper.
 
 **APFS encryption:**
 

@@ -575,10 +575,10 @@ describe the user-visible options.
 * The sealed file-extent tree, headerless hashed nodes mapped with the
   no-header flag, relative child OIDs, and the SHA-256 integrity chain.
 * **Gate:** E11's sealed volume (`e11-sealed`, the 50 MiB application
-  cryptex) lists and extracts matching the native listing and digests of
-  `native-manifest.txt`; a modified index node or leaf fails the chain, as
-  `fsck_apfs -n` fails it (`e11-tamper-fsck.log`, `e11-leaf-tamper-fsck.log`); its
-  allocated block count verifies; no authenticity is reported.
+  cryptex) lists and extracts matching the names, types, modes, file sizes
+  and SHA-256 digests of `native-manifest.txt`; a modified index node or
+  leaf fails the chain, as `fsck_apfs -n` fails it (`e11-tamper-fsck.log`,
+  `e11-leaf-tamper-fsck.log`); its allocated block count verifies; no authenticity is reported.
 
 ### 12. Specification harness model
 

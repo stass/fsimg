@@ -322,8 +322,8 @@ reader's bound; the smallest container the writer emits is the one
 The keylocker and media keylocker ranges locate keybags, which only
 encrypted volumes use. A disk-image container holding a software-encrypted
 volume has a one-block keylocker and the software-cryptography flag, also
-when its other volumes are unencrypted; the keybag is wrapped, so the block is not a plain
-object (E11, every encrypted capture). Reading an unencrypted volume ignores
+when its other volumes are unencrypted; the keybag is wrapped, so the
+block is not a plain object (E11, every encrypted capture). Reading an unencrypted volume ignores
 both ranges; a nonzero range must lie inside `[1, N)`, verification claims
 it as one range, and its contents are never read.
 
@@ -849,8 +849,8 @@ so a flag that disagrees is `FSIMG_ECORRUPT`. A headerless node has no
 header to check; its parent's digest identifies it instead, which is why
 only an intact seal is read.
 
-An object with a header, read at the address, must satisfy the header rules with its OID equal to `o` and its XID equal to the
-found key's XID (E1 for the one record of every capture with a volume,
+An object with a header, read at the address, must satisfy the header
+rules with its OID equal to `o` and its XID equal to the found key's XID (E1 for the one record of every capture with a volume,
 E3 for its 258 filesystem-tree mappings, and E8 for the volume superblock
 across mount cycles; if a capture shows an object older than its key, the
 rule becomes "not above the key's XID"). A miss for
@@ -916,20 +916,23 @@ A hashed index value is the child's OID minus the root node's OID (u64),
 then the child's digest at the hash type's length: 40 bytes for SHA-256,
 not [A1]'s 64-byte maximum (E11: the root of one captured cryptex, OID
 1378, names its first child 57, which the map resolves as OID 1435). The
-base is provisional (E11): in both captured trees the root has the lowest
-OID, so the root's OID and the tree's lowest OID read the same, and a tree
-whose root is not its lowest OID would tell them apart. The reader uses
-the root's OID; a wrong base fails the child's digest check as
-`FSIMG_ECORRUPT`, never a silent misread, because only an intact seal is
-read. A value offset of
-`0xffff` is a ghost, legal only in a tree whose flags allow ghosts.
+base is provisional, with no planned experiment: in both captured trees
+the root has the lowest OID, so the root's OID and the tree's lowest OID
+read the same, and a tree whose root is not its lowest OID would close
+it. The reader uses the root's OID; a wrong base fails the child's digest
+check as `FSIMG_ECORRUPT`, never a silent misread, because only an intact
+seal is read.
+
+A value offset of `0xffff` is a ghost, legal only in a tree whose flags
+allow ghosts.
 An empty key or value free list has offset `0xffff` and length zero [A1].
 
 ### Validation
 
 Every node a reader visits passes these checks before any entry is used:
 
-* header and checksum, unless the tree is a sealed tree with no-header nodes;
+* header and checksum; a headerless node of a sealed tree instead matches
+  its parent's digest, or the root the integrity object's root hash;
 * node flags consistent with its position: root exactly at the tree's top,
   leaf exactly at level 0, fixed-size, hashed and no-header flags equal to
   the tree's, the root's included (E11: root `0x19`, index `0x18`, leaf
@@ -1726,19 +1729,20 @@ The integrity metadata object (kind 30) is a virtual object with an
 ordinary header. It holds a version, flags, a hash type (1 SHA-256, 2
 SHA-512/256, 3 SHA-384, 4 SHA-512), the offset of the root hash within the
 object, and the XID at which the seal was broken, if any (E11: version 2,
-flags 0, hash type 1, offset 128, broken XID 0 in both). The offset must be
-at least 128, past the header and the fixed fields, and leave the whole
-hash inside the object.
+flags 0, hash type 1, offset 128, broken XID 0 in both). The version must
+be 2, the only one captured; any other is `FSIMG_EUNSUPPORTED`. The offset
+must be at least 128, past the header and version 2's fixed and reserved
+fields, and leave the whole hash inside the object.
 
-Neither captured cryptex has a snapshot or a broken seal, so both cases are
-provisional (E11) and refused by default with `FSIMG_EUNSUPPORTED`: a
-snapshot view of a sealed volume until a specimen such as a used macOS
-System volume shows whether a snapshot is itself sealed, and a nonzero
-broken-seal XID until a sealed volume modified after sealing shows which
-nodes keep no header. Without digests a headerless node would have no
-check binding it to its OID, so the default is refusal rather than reading
-without checks. The `seal_broken_xid` detail reports the stored XID, zero
-for every volume that opens.
+Neither captured cryptex has a snapshot or a broken seal, so both cases
+are provisional, with no planned experiment, and refused by default with
+`FSIMG_EUNSUPPORTED`: a snapshot view of a sealed volume until a specimen
+such as a used macOS System volume shows whether a snapshot is itself
+sealed, and a nonzero broken-seal XID until a sealed volume modified after
+sealing shows which nodes keep no header. Without digests a headerless
+node would have no check binding it to its OID, so the default is refusal
+rather than reading without checks. The `seal_broken_xid` detail reports
+the stored XID, zero for every volume that opens.
 
 The sealed profile reads names and content through the sealed tree. It
 checks every visited node's digest against its parent and the root's

@@ -387,7 +387,8 @@ bytes.
 A cursor belongs to one tree: its root reference, storage class, comparator
 and record codec, and for a sealed volume's filesystem tree the hash
 length and the expected root digest. In such a tree `btree.c` adds the
-root's OID to each index value's child OID, reads the child as a
+root's OID to each index value's child OID, an overflow being
+`FSIMG_ECORRUPT`, reads the child as a
 headerless reference, and compares its digest with the parent's value, or
 the root's with the integrity object's root hash, before the
 [validation checks](design-apfs.md#validation) run; a mismatch is
