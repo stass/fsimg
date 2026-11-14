@@ -21,6 +21,7 @@
 #include "host.h"
 #include "internal.h"
 #include "meta.h"
+#include "reader.h"
 
 /*
  * Common filesystem driver contracts.
@@ -3229,6 +3230,167 @@ contract_memory_peak_is_independent_of_budget(
 	return (equal);
 }
 
+#define NAMESPACE_KEY_ENTRIES 700u
+
+typedef struct namespace_key_fixture {
+	bool		 oversized;
+	bool		 merged;
+} namespace_key_fixture_t;
+
+static void
+namespace_key_progress(void *argument, const fsimg_progress_t *progress)
+{
+	namespace_key_fixture_t *fixture = argument;
+
+	if (progress->phase != NULL &&
+	    strcmp(progress->phase, "metadata merge") == 0)
+		fixture->merged = true;
+}
+
+static void
+namespace_key_close(fsimg_reader_t *reader)
+{
+	/* The fake driver borrows its state from the test's stack. */
+	reader->driver = NULL;
+}
+
+static fsimg_status_t
+namespace_key_prepare(fsimg_reader_t *reader FSIMG_UNUSED,
+    fsimg_directory_build_t *build, fsimg_error_t *error)
+{
+	char name[32];
+	fsimg_status_t status;
+
+	CONTRACT_CHECK(fsimg_directory_level(build) == 0);
+	/* Reverse admission order makes the namespace key sort reorder keys. */
+	for (unsigned i = NAMESPACE_KEY_ENTRIES; i != 0; i--) {
+		(void)snprintf(name, sizeof(name), "entry-%04u", i - 1);
+		status = fsimg_directory_admit(build, name, NULL, 0, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+namespace_key_replay(fsimg_reader_t *reader,
+    const char *name FSIMG_UNUSED, const unsigned char *payload FSIMG_UNUSED,
+    size_t length, fsimg_error_t *error FSIMG_UNUSED)
+{
+	CONTRACT_CHECK(length == 0);
+	reader->entry.kind = FSIMG_ENTRY_FILE;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+namespace_key_keys(fsimg_reader_t *reader, const char *name,
+    const unsigned char *payload FSIMG_UNUSED, size_t length,
+    fsimg_directory_keys_t *keys, fsimg_error_t *error FSIMG_UNUSED)
+{
+	namespace_key_fixture_t *fixture = reader->driver;
+	size_t name_length = strlen(name);
+
+	CONTRACT_CHECK(length == 0);
+	CONTRACT_CHECK(name_length <= FSIMG_DIRECTORY_KEY_BYTES);
+	keys->count = 1;
+	keys->length[0] = FSIMG_DIRECTORY_KEY_BYTES;
+	/* Distinct keys share a long prefix, differing only at the end. */
+	memset(keys->key[0], 'k', FSIMG_DIRECTORY_KEY_BYTES);
+	bcopy(name, keys->key[0] + FSIMG_DIRECTORY_KEY_BYTES - name_length,
+	    name_length);
+	/* Misreport one length without writing outside the supplied buffer. */
+	if (fixture->oversized && strcmp(name, "entry-0350") == 0)
+		keys->length[0]++;
+	return (FSIMG_OK);
+}
+
+static const fsimg_reader_ops_t namespace_key_ops = {
+	.close = namespace_key_close,
+	.prepare = namespace_key_prepare,
+	.replay = namespace_key_replay,
+	.keys = namespace_key_keys,
+	.ambiguous = "duplicate test namespace key"
+};
+
+static void
+reader_namespace_key_limits(const contract_fs_profile_t *backing_profile)
+{
+	static const struct {
+		const char *scenario;
+		bool oversized;
+	} cases[] = {
+		{ .scenario = "maximum-namespace-keys-merge" },
+		{ .scenario = "oversized-namespace-key", .oversized = true }
+	};
+	/*
+	 * sort.c gives a run memory_bytes / 8, roughly half for key bytes:
+	 * 16 MiB permits about 255 records of 8 + 4096 bytes per run, so
+	 * 700 keys need several runs; the progress hook proves a merge.
+	 */
+	const ctx_setup_t setup = { .memory_bytes = 16 * MIB };
+
+	for (size_t i = 0; i < COUNT(cases); i++) {
+		namespace_key_fixture_t keys = { .oversized = cases[i].oversized };
+		fixture_t fixture;
+		contract_volume_t volume;
+		fsimg_io_t *backing, *slice;
+		fsimg_reader_t *reader;
+		const fsimg_entry_t *entry;
+		fsimg_error_t error;
+		fsimg_status_t status;
+		char expected_path[32];
+		unsigned count = 0;
+
+		if (!contract_begin("fake", cases[i].scenario))
+			continue;
+		materialize(backing_profile, &volume);
+		fixture_open(&fixture, backing_profile, &setup);
+		slice = contract_volume_open(fixture.ctx, &volume, false, &backing);
+		CONTRACT_STATUS(reader_open(&fixture, slice, &reader, &error),
+		    FSIMG_OK, &error);
+		/*
+		 * Public open establishes common reader state; replace only the
+		 * format driver, as in the fake readers in test/common.c.
+		 */
+		reader->ops->close(reader);
+		reader->driver = &keys;
+		reader->ops = &namespace_key_ops;
+		fixture.ctx->options.progress = namespace_key_progress;
+		fixture.ctx->options.progress_argument = &keys;
+
+		contract_phase("list", 0);
+		if (keys.oversized) {
+			CONTRACT_STATUS(fsimg_reader_next(reader, &entry, &error),
+			    FSIMG_ESTATE, &error);
+			CONTRACT_CHECK(error.status == FSIMG_ESTATE);
+			CONTRACT_CHECK(strcmp(error.message,
+			    "driver produced an oversized namespace key") == 0);
+			CONTRACT_CHECK(entry == NULL);
+		} else {
+			while ((status = fsimg_reader_next(reader, &entry,
+			    &error)) == FSIMG_OK) {
+				contract_phase("entry", count);
+				CONTRACT_CHECK(count < NAMESPACE_KEY_ENTRIES);
+				(void)snprintf(expected_path, sizeof(expected_path),
+				    "/entry-%04u", NAMESPACE_KEY_ENTRIES - count - 1);
+				CONTRACT_CHECK(strcmp(entry->path, expected_path) == 0);
+				CONTRACT_CHECK(entry->kind == FSIMG_ENTRY_FILE);
+				count++;
+			}
+			CONTRACT_STATUS(status, FSIMG_DONE, &error);
+			CONTRACT_CHECK(entry == NULL);
+			CONTRACT_CHECK(count == NAMESPACE_KEY_ENTRIES);
+			CONTRACT_CHECK(keys.merged);
+		}
+
+		fsimg_reader_free(reader);
+		contract_volume_close(slice, backing);
+		fixture_close(&fixture);
+		contract_volume_free(&volume);
+		contract_end();
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3236,6 +3398,7 @@ main(int argc, char **argv)
 
 	contract_init(argc, argv);
 	check_registry();
+	reader_namespace_key_limits(&fs_profiles[0]);
 	for (size_t i = 0; i < COUNT(fs_profiles); i++) {
 		if (!contract_memory_peak_is_independent_of_budget(&fs_profiles[i]))
 			memory_peaks_equal = false;

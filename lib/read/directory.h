@@ -36,11 +36,18 @@ typedef enum fsimg_name_profile {
 #define FSIMG_DIRECTORY_RECORD_BYTES \
 	(1u + FSIMG_DIRECTORY_NAME_BYTES + FSIMG_DIRECTORY_PAYLOAD_BYTES)
 /* A namespace key: opaque bytes the driver derives from one spelling. Every
- * key buffer handed to a driver holds this many bytes: the exact bytes of a
- * 1024-byte component, and four bytes for each of a component's at most 255
- * UTF-16 units.
+ * key buffer handed to a driver holds this many bytes, and each driver
+ * asserts that its own longest key fits.
+ *
+ * The longest is the comparison form of a 1022-byte APFS name: at most three
+ * times its length, provisionally (specs/design-apfs.md), and 4096 bytes
+ * still hold four times.
+ *
+ * Key records are as long as their keys, so the bound costs no scratch
+ * storage. It sizes the stack buffers that carry one entry's keys and the
+ * per-record slots of the key sort's merge.
  */
-#define FSIMG_DIRECTORY_KEY_BYTES 1024u
+#define FSIMG_DIRECTORY_KEY_BYTES 4096u
 #define FSIMG_DIRECTORY_KEYS 2u
 
 /* The keys one entry answers to, such as a long name and its alias. */

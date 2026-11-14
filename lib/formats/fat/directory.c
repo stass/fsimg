@@ -323,7 +323,7 @@ fsimg_fat_replay(fsimg_reader_t *reader, const char *name,
 	    FSIMG_OK);
 }
 
-_Static_assert(255 * 4 <= FSIMG_DIRECTORY_KEY_BYTES,
+_Static_assert(FAT_KEY_BYTES <= FSIMG_DIRECTORY_KEY_BYTES,
     "a FAT name key fits a directory key buffer");
 
 /* An entry answers to its displayed name and its short-name alias. */

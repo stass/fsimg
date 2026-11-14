@@ -152,7 +152,7 @@ common code:
    `snapshot` rows, the CLI `-o volume=` and `-o snapshot=` on reading
    commands, and the worker job their encoding.
 2. **Key bound**, stage 2. `FSIMG_DIRECTORY_KEY_BYTES`
-   (`lib/read/directory.h:43`) is 1024 and rises to the 4096 bytes the
+   (`lib/read/directory.h`) holds the 4096 bytes the
    [directories design](../specs/design-directories.md#namespace) states,
    room for the longest APFS comparison form of a 1022-byte name.
 3. **Case-sensitivity write setting**, stage 2. `fsimg_write_options_t`

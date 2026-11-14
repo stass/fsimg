@@ -56,13 +56,12 @@
   [APFS plan](docs/apfs-plan.md). Native macOS evidence comes first and
   confirms the reference's tables, the name-hash conventions and the native
   empty-container layout, closing the designs' provisional values; then the
-  common changes (`volume=` and `snapshot=` read settings, the 4096-byte
-  `FSIMG_DIRECTORY_KEY_BYTES`, the `case=` write setting, the `apfs`
-  registration rows); the reader, verifier and compression over the
-  existing zero and held extents, CRC-32C and `lzfse` decoders, with
-  normalization tables the driver owns; a writer registered only after
-  `fsck_apfs -n`, mount and write-after-create pass; then snapshots, sealed
-  volumes and the specification harness model. Socket and device
+  common changes (`volume=` and `snapshot=` read settings, the `case=`
+  write setting, the `apfs` registration rows); the reader, verifier and
+  compression over the existing zero and held extents, CRC-32C and `lzfse`
+  decoders, with normalization tables the driver owns; a writer registered
+  only after `fsck_apfs -n`, mount and write-after-create pass; then snapshots,
+  sealed volumes and the specification harness model. Socket and device
   entries are the read-only kinds of `specs/design-device-nodes.md`; the
   plan's evidence decides whether macOS always writes the device number
   extended field, which would tighten the APFS rule for a device without it.
@@ -386,6 +385,14 @@
 
 ## Bugs by subsystem
 
+* [Low] **Directory key scratch lives on the stack** (`lib/read/directory.c`):
+  `fsimg_directory_admit`, `fsimg_walk_match` and `prepare_level` hold
+  `fsimg_directory_keys_t` and key-record buffers sized by the 4096-byte
+  `FSIMG_DIRECTORY_KEY_BYTES`, about 12 KiB per frame and 26 KiB on the
+  deepest preparation chain. Default thread stacks hold it; an embedder
+  calling the library on a 16 KiB thread stack does not. The three never
+  overlap on one reader, so one budget-charged buffer set owned by the
+  walk, as `walk->record` already is, would serve all three.
 * [Low] **EROFS cluster decode errors name no cluster**
   (`lib/formats/erofs/cluster.c`): a corrupt stream of any algorithm
   reports the check it failed ("invalid EROFS Zstandard stream is

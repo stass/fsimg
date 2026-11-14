@@ -7,8 +7,12 @@
 #include "reader.h"
 
 #define FAT_NAME_BYTES 1021u
-/* A name key: four bytes per scalar of at most 255 UTF-16 units. */
-#define FAT_KEY_BYTES FSIMG_DIRECTORY_KEY_BYTES
+/* The UTF-16 units of the longest long name. */
+#define FAT_NAME_UNITS 255u
+/* A name key: four bytes per scalar of at most FAT_NAME_UNITS units. It sizes
+ * the writer's collision records; the reader's keys fit the common key buffer.
+ */
+#define FAT_KEY_BYTES (FAT_NAME_UNITS * 4u)
 #define FAT_DIRECTORY_LIMIT (2u * 1024u * 1024u)
 /* The reader's supported table count. It sizes the mirrored table window,
  * so geometry decoding must refuse any larger count before a reader exists.

@@ -263,7 +263,7 @@ fsimg_fat_name_validate(const char *name, fsimg_error_t *error)
 	 * Revalidate encoding here because replay also consumes private records.
 	 */
 	status = fsimg_utf8_to_utf16(name, length, NULL, 0, &units, error);
-	if (status != FSIMG_OK || units > 255)
+	if (status != FSIMG_OK || units > FAT_NAME_UNITS)
 		return (fsimg_fat_corrupt(error, "invalid FAT filename encoding or length"));
 	for (size_t i = 0; i < length; i++) {
 		if ((unsigned char)name[i] < 0x20 || name[i] == 0x7f ||
@@ -368,7 +368,8 @@ fsimg_fat_entry_name(fat_lfn_t *lfn, const unsigned char *raw, char *name,
 			return (fsimg_fat_corrupt(error, "unterminated FAT long-name padding"));
 		length++;
 	}
-	if (length == 0 || length > 255 || length <= (lfn->slots - 1) * 13)
+	if (length == 0 || length > FAT_NAME_UNITS ||
+	    length <= (lfn->slots - 1) * 13)
 		return (fsimg_fat_corrupt(error, "invalid FAT long-name length"));
 	for (size_t i = length + 1; i < total; i++) {
 		if (lfn->units[i] != 0xffff)
@@ -387,12 +388,13 @@ fsimg_status_t
 fsimg_fat_name_key(const char *name, unsigned char *key, size_t *length,
     fsimg_error_t *error)
 {
-	uint16_t units[255];
+	uint16_t units[FAT_NAME_UNITS];
 	uint32_t scalar;
 	size_t count, written;
 	fsimg_status_t status;
 
-	status = fsimg_utf8_to_utf16(name, strlen(name), units, 255, &count, error);
+	status = fsimg_utf8_to_utf16(name, strlen(name), units, FAT_NAME_UNITS,
+	    &count, error);
 	if (status != FSIMG_OK)
 		return (fsimg_fat_corrupt(error, "invalid FAT name in collision stream"));
 	written = 0;
