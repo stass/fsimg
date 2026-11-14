@@ -66,7 +66,13 @@ read-side filesystem settings under the read mask, held by APFS, and `view` is t
 is a registry identity, not a repeated test against a string in each consumer.
 A read command validates non-default fields against the selected format's
 mask after detection and before driver open. A forced format lets the CLI
-refuse an unsupported key before starting the worker.
+refuse an unsupported key before starting the worker. Before detection the
+reader checks each read field's form alone: the snapshot name, measured
+within the row's 256-byte capacity, is 1 to 255 bytes of strict UTF-8.
+The reader then copies the name, measuring it again within that
+capacity, and every later check and the driver read the copy, never the
+caller's string. The CLI runs the same form check on every read before
+starting the worker, so a malformed name never reaches it.
 
 The catalogue includes all fields subject to shared setting applicability,
 even if a particular field has no CLI spelling. Ordinary mode flags, resource

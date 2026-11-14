@@ -904,9 +904,52 @@ test_reader_view_rejected_before_driver_open_or_image_reads(void)
 	reader_fixture_close(&f);
 }
 
+/*
+ * volume= and snapshot= reach the common mask check on the FAT fixture,
+ * forced or detected, and are refused naming their keys; a malformed
+ * snapshot name is refused before detection reads the image.
+ */
+static void
+test_reader_refuses_volume_and_snapshot(void)
+{
+	reader_fixture_t f;
+	fsimg_read_options_t options;
+	fsimg_reader_t *reader;
+	fsimg_error_t error;
+	unsigned reads;
+
+	reader_fixture_open(&f);
+	for (unsigned forced = 0; forced < 2; forced++) {
+		fsimg_read_options_init(&options);
+		options.format = forced ? "fat12" : NULL;
+		options.volume_index_set = true;
+		CHECK(fsimg_reader_open(f.ctx, f.io, &options, &reader, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "volume") == 0);
+		CHECK(strstr(error.message, "read setting does not apply") != NULL);
+		fsimg_read_options_init(&options);
+		options.format = forced ? "fat12" : NULL;
+		options.snapshot = "before-upgrade";
+		CHECK(fsimg_reader_open(f.ctx, f.io, &options, &reader, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "snapshot") == 0);
+		CHECK(strstr(error.message, "read setting does not apply") != NULL);
+	}
+	fsimg_read_options_init(&options);
+	reads = f.image.reads;
+	options.snapshot = "\xff";
+	CHECK(fsimg_reader_open(f.ctx, f.io, &options, &reader, &error) ==
+	    FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "snapshot") == 0 && f.image.reads == reads);
+	CHECK(strcmp(error.message,
+	    "setting must be UTF-8 of 1 to 255 bytes") == 0);
+	reader_fixture_close(&f);
+}
+
 /* The BPB still probes as FAT12; corrupt only a FAT reserved entry,
  * which the driver's open checks. AUTO therefore reaches the corrupt
- * table, while JOLIET must be refused before that read, forced or detected.
+ * table, while JOLIET, volume= and snapshot= must be refused before that
+ * read, forced or detected.
  */
 static void
 test_view_applicability_precedes_driver_open(void)
@@ -933,6 +976,17 @@ test_view_applicability_precedes_driver_open(void)
 		    FSIMG_EINVAL);
 		CHECK(strcmp(error.path, "view") == 0);
 		CHECK(strstr(error.message, "read setting does not apply") != NULL);
+		/* volume= and snapshot= take the same path. */
+		options.iso_view = FSIMG_ISO_VIEW_AUTO;
+		options.volume_index_set = true;
+		CHECK(fsimg_reader_open(f.ctx, f.io, &options, &reader, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "volume") == 0);
+		options.volume_index_set = false;
+		options.snapshot = "s";
+		CHECK(fsimg_reader_open(f.ctx, f.io, &options, &reader, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "snapshot") == 0);
 	}
 	reader_fixture_close(&f);
 }
@@ -1955,6 +2009,7 @@ main(void)
 	test_restart_requires_full_verification_and_finished_walk();
 	test_reader_view_rejected_before_driver_open_or_image_reads();
 	test_view_applicability_precedes_driver_open();
+	test_reader_refuses_volume_and_snapshot();
 	test_decoded_link_payload_verification_charges_work();
 	return (held_failures == 0 ? 0 : 1);
 }

@@ -242,6 +242,17 @@ cluster size divides every offset, and every other file and directory is
 allocated around the placed runs. Other formats refuse it, before the
 worker starts when `-F` names the format.
 
+`-o volume=INDEX` and `-o snapshot=NAME` on the reading commands select one
+volume of a filesystem that keeps several in one container, as APFS does,
+by its slot index, and one snapshot of it, by its exact name of 1 to 255 bytes of UTF-8. The library
+takes them as the read options `volume_index`, with its presence flag
+`volume_index_set` so that index 0 is a request, and `snapshot`, under the
+new `FSIMG_SETTING_VOLUME_INDEX` and `FSIMG_SETTING_SNAPSHOT` bits of
+`read_settings`, and the worker job carries them. No supported format
+accepts either, so every format refuses both once detected, before the
+worker starts when `-F` names the format; a malformed snapshot name is
+refused before the image is opened.
+
 `-o root=N` sets the FAT12/FAT16 root directory capacity, the library's
 `fat_root_entries`, under the new `FSIMG_SETTING_ROOT_ENTRIES` bit, so a
 minimized image can leave room in its root. The capacity rounds up to a

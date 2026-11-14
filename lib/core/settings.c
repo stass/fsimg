@@ -9,6 +9,7 @@
 
 #include "internal.h"
 #include "settings.h"
+#include "unicode.h"
 
 /*
  * Row construction. Each binding macro names a record and a member once
@@ -102,6 +103,8 @@ typedef unsigned char id16_t[16];
 	uint32_t, FLAG_OFFSET(flag))
 #define FLAG_SET(member, flag)	BIND(RECORD_LAYERS, member, FSIMG_KIND_BOOL, \
 	bool, FLAG_OFFSET(flag))
+#define READ_U32_SET(member, flag)	BIND(RECORD_READ, member,	\
+	FSIMG_KIND_U32, uint32_t, PRESENCE_OFFSET(fsimg_read_options_t, flag))
 #define NO_STORAGE		.record = FSIMG_RECORD_NONE,		\
 	.kind = FSIMG_KIND_NONE, .presence = FSIMG_NO_PRESENCE
 
@@ -160,11 +163,14 @@ static const fsimg_setting_choice_t xz_check_choices[] = {
  * The filesystem's settings: geometry, which every writer accepts and
  * validates against its own profile; oem, the read side's acknowledgement
  * of the CP437 short names every FAT read already uses; view, the read
- * side's ISO 9660 view; and the format-specific write fields, each tied
- * to its FSIMG_SETTING_* bit. The mountpoint is a borrowed pointer, NULL
- * for the format's default and "" for an explicit empty path; the command
- * and the writer bound it by the capacity of the volume
- * information's mountpoint. root, the FAT12/16 fixed root's entry count, is
+ * side's ISO 9660 view; volume and snapshot, the read side's selection of
+ * one volume of a container and one snapshot of it, where volume=0 is a
+ * request, so the index has a presence flag, and the snapshot name is a
+ * borrowed pointer of 1 to 255 bytes of UTF-8, which the reader copies;
+ * and the format-specific write fields, each tied to its FSIMG_SETTING_*
+ * bit. The mountpoint is a borrowed pointer, NULL for the format's default
+ * and "" for an explicit empty path; the command and the writer bound it
+ * by the capacity of the volume information's mountpoint. root, the FAT12/16 fixed root's entry count, is
  * bounded by its 16-bit on-disk field; the writer rounds it up to whole
  * sectors. The El Torito boot paths are image paths, borrowed like the
  * mountpoint; the command bounds each by FSIMG_BOOT_PATH_TEXT_BYTES, the
@@ -196,6 +202,12 @@ static const fsimg_setting_t filesystem_rows[] = {
 	    .syntax = FSIMG_SYNTAX_CHOICE, .choices = view_choices,
 	    .initial = { .iso_view = FSIMG_ISO_VIEW_AUTO },
 	    .scope = FSIMG_SCOPE_READ, .support = FSIMG_SETTING_ISO_VIEW },
+	{ .key = "volume", READ_U32_SET(volume_index, volume_index_set),
+	    .syntax = FSIMG_SYNTAX_COUNT, .max = UINT32_MAX,
+	    .scope = FSIMG_SCOPE_READ, .support = FSIMG_SETTING_VOLUME_INDEX },
+	{ .key = "snapshot", TEXT_POINTER(RECORD_READ, snapshot),
+	    .syntax = FSIMG_SYNTAX_TEXT, .text_bytes = FSIMG_SNAPSHOT_TEXT_BYTES,
+	    .scope = FSIMG_SCOPE_READ, .support = FSIMG_SETTING_SNAPSHOT },
 	{ .key = "endian", BYTE_ORDER(RECORD_WRITE, byte_order), .syntax = FSIMG_SYNTAX_CHOICE,
 	    .choices = endian_choices,
 	    .initial = { .byte_order = FSIMG_BYTE_ORDER_LITTLE },
@@ -463,6 +475,7 @@ static fsimg_status_t row_error(const fsimg_setting_t *, fsimg_operation_t,
     fsimg_error_t *, const char *);
 static fsimg_status_t check_row(const fsimg_setting_t *,
     const fsimg_setting_records_t *, fsimg_operation_t, fsimg_error_t *);
+static bool read_text_valid(const fsimg_setting_t *, const char *);
 
 const fsimg_setting_t *
 fsimg_setting_find(const fsimg_setting_slice_t *slice, const char *key,
@@ -905,7 +918,30 @@ check_row(const fsimg_setting_t *row, const fsimg_setting_records_t *records,
 	    !values_equal(row, &value, &row->initial))
 		return (row_error(row, operation, error,
 		    "setting has a value but is not set"));
+	/* A read text, never empty, is UTF-8 within its capacity. */
+	if (row->record == FSIMG_RECORD_READ &&
+	    row->kind == FSIMG_KIND_TEXT_POINTER && value.text != NULL &&
+	    !read_text_valid(row, value.text)) {
+		snprintf(message, sizeof(message),
+		    "setting must be UTF-8 of 1 to %zu bytes", row->text_bytes - 1);
+		return (row_error(row, operation, error, message));
+	}
 	return (FSIMG_OK);
+}
+
+/*
+ * A read text, borrowed from the caller: measured within its row's
+ * capacity, so an unterminated or overlong text is never read past it,
+ * and then nonempty strict UTF-8.
+ */
+static bool
+read_text_valid(const fsimg_setting_t *row, const char *text)
+{
+	size_t length, units;
+
+	length = strnlen(text, row->text_bytes);
+	return (length != 0 && length < row->text_bytes &&
+	    fsimg_utf8_to_utf16(text, length, NULL, 0, &units, NULL) == FSIMG_OK);
 }
 
 void

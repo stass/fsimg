@@ -223,6 +223,7 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	fsimg_error_t detail;
 	fsimg_reader_t *reader;
 	fsimg_status_t status;
+	size_t length;
 
 	if (out != NULL)
 		*out = NULL;
@@ -273,6 +274,23 @@ fsimg_reader_open(fsimg_ctx_t *ctx, fsimg_io_t *input,
 	reader->options = *options;
 	reader->options.format = NULL;
 	fsimg_session_init(&reader->session, ctx, "image reading", 0);
+	/*
+	 * The snapshot name is the caller's only for this call: copy it, and
+	 * let the checks before the driver opens, and the driver, read the
+	 * copy. It is measured again within its capacity, since a name that
+	 * grew from another thread since the check above must not be read
+	 * past it; format_open checks the copy's form again.
+	 */
+	if (options->snapshot != NULL) {
+		length = strnlen(options->snapshot, sizeof(reader->snapshot));
+		if (length == sizeof(reader->snapshot)) {
+			status = fsimg_error_set(error, FSIMG_ESTATE, 0,
+			    FSIMG_OP_READER, "snapshot name changed while copied");
+			goto fail;
+		}
+		bcopy(options->snapshot, reader->snapshot, length);
+		reader->options.snapshot = reader->snapshot;
+	}
 	status = fsimg_io_identity(input, &reader->identity,
 	    &reader->host_identity, error);
 	if (status != FSIMG_OK)

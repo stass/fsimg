@@ -7,6 +7,7 @@
 #include "directory.h"
 #include "io.h"
 #include "meta.h"
+#include "settings.h"
 
 typedef struct fsimg_format_variant fsimg_format_variant_t;
 
@@ -150,11 +151,13 @@ struct fsimg_reader {
 	/* The caller's decoding options, copied at open for the driver's
 	 * open to read, such as the view a format with several presents.
 	 * Common code has checked each setting's form and that a non-default
-	 * one applies to the format. Every borrowed pointer is cleared after
-	 * the copy, format among them: the name is borrowed for detection
-	 * only.
+	 * one applies to the format. No pointer refers to the caller's
+	 * memory: format is cleared, since the name is borrowed for detection
+	 * only, and snapshot, when not NULL, points at the reader's own copy
+	 * of the name in snapshot, which is what those checks read.
 	 */
 	fsimg_read_options_t options;
+	char		 snapshot[FSIMG_SNAPSHOT_TEXT_BYTES];
 	/* The first identity check a forced open waived although it failed,
 	 * a static phrase such as "FAT[0] does not repeat the media byte", or
 	 * NULL. Only fsimg_reader_identity() sets it, so fsimg_verify(),

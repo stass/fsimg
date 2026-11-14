@@ -26,6 +26,7 @@ static void check_syntax(char *const *);
 static void check_unsupported(char *const *);
 static void test_options(void);
 static void test_placement_list_retained_after_format_refusal(void);
+static void test_volume_and_snapshot_settings_parse(void);
 static void test_modes(void);
 static void test_create_operands(void);
 static bool argument_starts(char *const *, const char *);
@@ -441,6 +442,32 @@ test_options(void)
 	memset(longer + 11, 'm', 1026);
 	longer[sizeof(longer) - 1] = '\0';
 	check_syntax(text_longer);
+}
+
+/*
+ * volume= stores its index with the presence flag, so 0 is a request,
+ * and snapshot= keeps pointing at its command word. Without a forced
+ * format the parse accepts both; the detected format decides later.
+ */
+static void
+test_volume_and_snapshot_settings_parse(void)
+{
+	char *zero[] = { "fsimg", "-t", "-o", "volume=0", "-o",
+	    "snapshot=before-upgrade", "-f", "image", NULL };
+	char *largest[] = { "fsimg", "-t", "-o", "volume=4294967295", "-f",
+	    "image", NULL };
+	fsimg_cli_options_t options;
+
+	CHECK(parse(zero, &options) == FSIMG_OK);
+	CHECK(options.request.read.volume_index_set);
+	CHECK(options.request.read.volume_index == 0);
+	CHECK(options.request.read.snapshot == zero[5] + strlen("snapshot="));
+	fsimg_cli_release(&options);
+	CHECK(parse(largest, &options) == FSIMG_OK);
+	CHECK(options.request.read.volume_index_set);
+	CHECK(options.request.read.volume_index == UINT32_MAX);
+	CHECK(options.request.read.snapshot == NULL);
+	fsimg_cli_release(&options);
 }
 
 static void
@@ -2605,6 +2632,7 @@ main(int argc, char **argv)
 	test_numbers();
 	test_options();
 	test_placement_list_retained_after_format_refusal();
+	test_volume_and_snapshot_settings_parse();
 	test_modes();
 	test_create_operands();
 	test_stacks();

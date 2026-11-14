@@ -60,11 +60,16 @@
  * empty text and a zero date are values; and six zero bytes. The EROFS
  * settings follow as eight bytes each: the compression
  * (fsimg_erofs_compression_t), the addressing width and the metadata box
- * (fsimg_erofs_metabox_t). The fixed file placements close the record: the
+ * (fsimg_erofs_metabox_t). The fixed file placements follow: the
  * count as eight bytes, then FSIMG_PLACEMENT_MAX records of an eight-byte
  * offset and a path in FSIMG_JOB_BOOT_PATH_BYTES, NUL-terminated and zero
  * after the terminator; a path is never empty, so the count is the
- * presence, and every record past the count is all zero. The texts and
+ * presence, and every record past the count is all zero. The read
+ * selection closes the record: the volume index as eight bytes, one byte
+ * whose bit says the index is set, since index 0 is a value, then the
+ * snapshot name's length as one byte and the name in
+ * FSIMG_JOB_SNAPSHOT_BYTES, zero past its length; a name is never empty,
+ * so the length is the presence, and it holds no NUL. The texts and
  * dates are the descriptor rows of the settings table, in its order, so
  * a new descriptor setting changes the record's size: it adds its bytes to
  * FSIMG_JOB_DESCRIPTOR_TEXT_BYTES or FSIMG_JOB_DESCRIPTOR_DATES and so to
@@ -167,7 +172,12 @@ typedef enum job_string_field {
 	/* A size, not an offset: one placement record, its offset and then
 	 * its path.
 	 */
-	JOB_PLACEMENT_BYTES = 8 + FSIMG_JOB_BOOT_PATH_BYTES
+	JOB_PLACEMENT_BYTES = 8 + FSIMG_JOB_BOOT_PATH_BYTES,
+	JOB_VOLUME_INDEX_OFFSET = JOB_PLACEMENTS_OFFSET +
+	    FSIMG_PLACEMENT_MAX * JOB_PLACEMENT_BYTES,
+	JOB_READ_FLAGS = JOB_VOLUME_INDEX_OFFSET + 8,
+	JOB_SNAPSHOT_LENGTH = JOB_READ_FLAGS + 1,
+	JOB_SNAPSHOT_OFFSET = JOB_SNAPSHOT_LENGTH + 1
 } job_string_field_t;
 
 /* Bits of JOB_IFSBOOT_SET: field n of the ifsboot settings is set, and the
@@ -202,6 +212,8 @@ typedef struct iso_layout {
 	size_t		 count;
 } iso_layout_t;
 
+/* Bits of JOB_READ_FLAGS: the volume index is set. */
+#define JOB_VOLUME_INDEX_SET	0x01u
 /* Bits of JOB_BOOT_PRESENT. */
 #define JOB_BOOT_BIOS	0x01u
 #define JOB_BOOT_EFI	0x02u
@@ -245,9 +257,15 @@ _Static_assert(JOB_DISK_GUID_OFFSET + 16 == JOB_GUID_OFFSET &&
     JOB_COMPRESSION_OFFSET + JOB_COMPRESSION_BYTES == JOB_MOUNTPOINT_OFFSET,
     "the layer fields do not overlap");
 _Static_assert(JOB_RESERVED_OFFSET + 7 == JOB_IFSBOOT_OFFSET &&
-    JOB_PLACEMENTS_OFFSET + FSIMG_PLACEMENT_MAX * JOB_PLACEMENT_BYTES ==
-    FSIMG_JOB_BYTES && FSIMG_JOB_BYTES <= FSIMG_FRAME_BYTES,
-    "the placements close the record, which fits one frame");
+    JOB_SNAPSHOT_OFFSET + FSIMG_JOB_SNAPSHOT_BYTES == FSIMG_JOB_BYTES &&
+    FSIMG_JOB_BYTES <= FSIMG_FRAME_BYTES,
+    "the read selection closes the record, which fits one frame");
+_Static_assert(FSIMG_JOB_SNAPSHOT_BYTES == UINT8_MAX &&
+    FSIMG_JOB_SNAPSHOT_BYTES + 1 == FSIMG_SNAPSHOT_TEXT_BYTES &&
+    sizeof(((fsimg_worker_request_t *)0)->snapshot_storage) ==
+    FSIMG_SNAPSHOT_TEXT_BYTES,
+    "a length byte spans the snapshot field, which holds every name the "
+    "command accepts, as does the request");
 _Static_assert(sizeof(((fsimg_worker_request_t *)0)->placement_paths[0]) ==
     FSIMG_JOB_BOOT_PATH_BYTES &&
     sizeof(((fsimg_worker_request_t *)0)->placement_storage) /
@@ -334,6 +352,11 @@ static void decode_boot_path(const unsigned char *, unsigned, unsigned,
 static bool encode_placements(const fsimg_write_options_t *, unsigned char *);
 static bool placements_valid(const unsigned char *);
 static void decode_placements(const unsigned char *, fsimg_worker_request_t *);
+static bool encode_read_selection(const fsimg_read_options_t *,
+    unsigned char *);
+static bool read_selection_valid(const unsigned char *);
+static void decode_read_selection(const unsigned char *,
+    fsimg_worker_request_t *);
 static void encode_layers(const fsimg_layer_options_t *, unsigned char *);
 static bool layers_valid(const unsigned char *);
 static void decode_layers(const unsigned char *, fsimg_layer_options_t *);
@@ -623,6 +646,77 @@ decode_placements(const unsigned char *raw, fsimg_worker_request_t *request)
 	request->write.placements = count != 0 ? request->placement_storage :
 	    NULL;
 	request->write.placement_count = count;
+}
+
+/*
+ * The read selection: the volume index, its presence bit, and the snapshot
+ * name after its length byte. An index without its flag, or a name the
+ * field cannot carry (empty, or longer than FSIMG_JOB_SNAPSHOT_BYTES), is
+ * refused (false), as decoding would refuse its bytes. Whether a name is
+ * UTF-8 is the library's check, which the worker's reader runs.
+ */
+static bool
+encode_read_selection(const fsimg_read_options_t *read, unsigned char *raw)
+{
+	size_t length = 0;
+
+	if (!read->volume_index_set && read->volume_index != 0)
+		return (false);
+	if (read->snapshot != NULL) {
+		length = strnlen(read->snapshot, FSIMG_JOB_SNAPSHOT_BYTES + 1);
+		if (length == 0 || length > FSIMG_JOB_SNAPSHOT_BYTES)
+			return (false);
+	}
+	fsimg_store_le64(raw + JOB_VOLUME_INDEX_OFFSET, read->volume_index);
+	raw[JOB_READ_FLAGS] = read->volume_index_set ? JOB_VOLUME_INDEX_SET : 0;
+	raw[JOB_SNAPSHOT_LENGTH] = (unsigned char)length;
+	if (length != 0)
+		bcopy(read->snapshot, raw + JOB_SNAPSHOT_OFFSET, length);
+	return (true);
+}
+
+/*
+ * An index within uint32_t, and nonzero only with its bit, the one bit
+ * defined; then a name whose first length bytes are all nonzero and whose
+ * remaining bytes are all zero. The length byte cannot pass the field.
+ */
+static bool
+read_selection_valid(const unsigned char *raw)
+{
+	uint64_t index;
+	unsigned length;
+
+	index = fsimg_load_le64(raw + JOB_VOLUME_INDEX_OFFSET);
+	if (index > UINT32_MAX ||
+	    (raw[JOB_READ_FLAGS] & ~JOB_VOLUME_INDEX_SET) != 0 ||
+	    (raw[JOB_READ_FLAGS] == 0 && index != 0))
+		return (false);
+	length = raw[JOB_SNAPSHOT_LENGTH];
+	for (unsigned i = 0; i < FSIMG_JOB_SNAPSHOT_BYTES; i++) {
+		if ((raw[JOB_SNAPSHOT_OFFSET + i] == 0) != (i >= length))
+			return (false);
+	}
+	return (true);
+}
+
+/* The validated read selection; the name is copied into the request's
+ * backing and terminated there.
+ */
+static void
+decode_read_selection(const unsigned char *raw, fsimg_worker_request_t *request)
+{
+	unsigned length;
+
+	request->read.volume_index =
+	    (uint32_t)fsimg_load_le64(raw + JOB_VOLUME_INDEX_OFFSET);
+	request->read.volume_index_set =
+	    (raw[JOB_READ_FLAGS] & JOB_VOLUME_INDEX_SET) != 0;
+	length = raw[JOB_SNAPSHOT_LENGTH];
+	if (length == 0)
+		return;
+	bcopy(raw + JOB_SNAPSHOT_OFFSET, request->snapshot_storage, length);
+	request->snapshot_storage[length] = '\0';
+	request->read.snapshot = request->snapshot_storage;
 }
 
 /* The layer settings after gpt:sector, which travels with the selection. */
@@ -1111,7 +1205,8 @@ fsimg_job_encode(const fsimg_worker_request_t *request, unsigned char *raw,
 	fsimg_store_le64(raw + JOB_INPUT_QUANTUM, request->input.quantum);
 	if (!encode_iso_descriptor(&request->write, raw))
 		return (invalid_job(error));
-	if (!encode_placements(&request->write, raw))
+	if (!encode_placements(&request->write, raw) ||
+	    !encode_read_selection(&request->read, raw))
 		return (invalid_job(error));
 	return (FSIMG_OK);
 }
@@ -1211,7 +1306,8 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 		if (raw[i] != 0)
 			return (invalid_job(error));
 	}
-	if (!iso_descriptor_valid(raw) || !placements_valid(raw))
+	if (!iso_descriptor_valid(raw) || !placements_valid(raw) ||
+	    !read_selection_valid(raw))
 		return (invalid_job(error));
 	if (!string_field_valid(raw + JOB_SCHEME_OFFSET, JOB_FORMAT_BYTES) ||
 	    !string_field_valid(raw + JOB_CONTAINER_OFFSET, JOB_FORMAT_BYTES) ||
@@ -1334,6 +1430,7 @@ fsimg_job_decode(const unsigned char *raw, uint32_t length,
 	    request->boot_efi_storage, &request->write.boot_efi);
 	decode_iso_descriptor(raw, request);
 	decode_placements(raw, request);
+	decode_read_selection(raw, request);
 	*selection_length = get_field(raw, JOB_SELECTION);
 	*capabilities = (unsigned)get_field(raw, JOB_CAPABILITIES);
 	/* Each path is at least "/" and its terminator. An image path is

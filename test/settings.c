@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -104,7 +105,13 @@ static const member_t write_members[] = {
 
 static const member_t read_members[] = {
 	{ "iso_view", offsetof(fsimg_read_options_t, iso_view),
-	    sizeof(fsimg_iso_view_t), _Alignof(fsimg_iso_view_t) }
+	    sizeof(fsimg_iso_view_t), _Alignof(fsimg_iso_view_t) },
+	{ "volume_index", offsetof(fsimg_read_options_t, volume_index),
+	    sizeof(uint32_t), _Alignof(uint32_t) },
+	{ "volume_index_set", offsetof(fsimg_read_options_t, volume_index_set),
+	    sizeof(bool), _Alignof(bool) },
+	{ "snapshot", offsetof(fsimg_read_options_t, snapshot),
+	    sizeof(const char *), _Alignof(const char *) }
 };
 
 static const member_t input_members[] = {
@@ -275,7 +282,8 @@ test_member_bindings(void)
 				    sizeof(uint32_t));
 			if (row->presence != FSIMG_NO_PRESENCE) {
 				CHECK(row->record == FSIMG_RECORD_LAYERS ||
-				    row->record == FSIMG_RECORD_WRITE);
+				    row->record == FSIMG_RECORD_WRITE ||
+				    row->record == FSIMG_RECORD_READ);
 				mark_member(coverage, capacity, row->presence,
 				    sizeof(bool));
 			}
@@ -320,9 +328,11 @@ test_masks_and_files(void)
 	static const uint32_t bits[] = { FSIMG_SETTING_BYTE_ORDER,
 	    FSIMG_SETTING_VOLUME_UUID, FSIMG_SETTING_INODE_CAPACITY,
 	    FSIMG_SETTING_RESERVE, FSIMG_SETTING_MOUNTPOINT, FSIMG_SETTING_ROOT_ENTRIES,
-	    FSIMG_SETTING_ISO_LEVEL, FSIMG_SETTING_ISO_VIEW, FSIMG_SETTING_PLACEMENT };
+	    FSIMG_SETTING_ISO_LEVEL, FSIMG_SETTING_ISO_VIEW, FSIMG_SETTING_PLACEMENT,
+	    FSIMG_SETTING_VOLUME_INDEX, FSIMG_SETTING_SNAPSHOT };
 	static const char *const bit_keys[] = { "endian", "uuid", "inodes",
-	    "reserve", "mountpoint", "root", "level", "view", "place" };
+	    "reserve", "mountpoint", "root", "level", "view", "place", "volume",
+	    "snapshot" };
 	static const char *const file_keys[FSIMG_FILE_SETTINGS] = {
 		[FSIMG_FILE_IFSBOOT_STARTUP] = "ifsboot:startup",
 		[FSIMG_FILE_IFSBOOT_PREFIX] = "ifsboot:prefix"
@@ -374,8 +384,10 @@ test_masks_and_files(void)
 	for (size_t i = 0; i < slice->count; i++)
 		covered |= slice->rows[i].support;
 	cursor = 0;
-	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK)
+	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK) {
 		CHECK((info.write_settings & ~covered) == 0);
+		CHECK((info.read_settings & ~covered) == 0);
+	}
 	for (unsigned f = 0; f < FSIMG_FILE_SETTINGS; f++) {
 		fsimg_file_setting_name(f, key, sizeof(key));
 		CHECK(strcmp(key, file_keys[f]) == 0);
@@ -1232,6 +1244,164 @@ test_iso_read_settings_require_capability(void)
 	CHECK(fsimg_read_settings_check(&options, &info, NULL) == FSIMG_OK);
 }
 
+/*
+ * The volume and snapshot rows bind the read record's volume_index, its
+ * presence flag and the borrowed snapshot pointer; initialization leaves
+ * them absent.
+ */
+static void
+test_volume_and_snapshot_catalogue_and_defaults(void)
+{
+	const fsimg_setting_t *volume, *snapshot;
+	fsimg_read_options_t read;
+	const fsimg_setting_records_t records = { .read = &read };
+
+	memset(&read, 0xa5, sizeof(read));
+	fsimg_read_options_init(&read);
+	CHECK(read.volume_index == 0 && !read.volume_index_set);
+	CHECK(read.snapshot == NULL);
+	volume = fsimg_setting_find(&fsimg_filesystem_settings, "volume", 6);
+	snapshot = fsimg_setting_find(&fsimg_filesystem_settings, "snapshot", 8);
+	CHECK(volume != NULL && snapshot != NULL);
+	CHECK(volume->record == FSIMG_RECORD_READ && volume->kind == FSIMG_KIND_U32);
+	CHECK(volume->offset == offsetof(fsimg_read_options_t, volume_index));
+	CHECK(volume->presence ==
+	    offsetof(fsimg_read_options_t, volume_index_set));
+	CHECK(volume->syntax == FSIMG_SYNTAX_COUNT && volume->max == UINT32_MAX);
+	CHECK(!volume->nonzero && volume->initial.u32 == 0);
+	CHECK(volume->scope == FSIMG_SCOPE_READ);
+	CHECK(volume->support == FSIMG_SETTING_VOLUME_INDEX);
+	CHECK(snapshot->record == FSIMG_RECORD_READ);
+	CHECK(snapshot->kind == FSIMG_KIND_TEXT_POINTER);
+	CHECK(snapshot->offset == offsetof(fsimg_read_options_t, snapshot));
+	CHECK(snapshot->presence == FSIMG_NO_PRESENCE);
+	CHECK(snapshot->syntax == FSIMG_SYNTAX_TEXT && !snapshot->nonzero);
+	CHECK(snapshot->text_bytes == 256 && snapshot->initial.text == NULL);
+	CHECK(snapshot->scope == FSIMG_SCOPE_READ);
+	CHECK(snapshot->support == FSIMG_SETTING_SNAPSHOT);
+	/* The writer's text copies and the job's descriptor texts walk only
+	 * the write record's texts; the reader copies the snapshot itself.
+	 */
+	CHECK(!fsimg_setting_is_borrowed_text(snapshot));
+	CHECK(fsimg_setting_is_default(volume, &records));
+	CHECK(fsimg_setting_is_default(snapshot, &records));
+	/* An explicit index 0 is a value, not the default. */
+	read.volume_index_set = true;
+	CHECK(!fsimg_setting_is_default(volume, &records));
+}
+
+/*
+ * Before detection each read setting is checked for form alone: an index
+ * only with its flag, a flag of 0 or 1, and a snapshot name of 1 to 255
+ * bytes of strict UTF-8. Each failure names its key.
+ */
+static void
+test_volume_and_snapshot_structure(void)
+{
+	static const char *const malformed[] = {
+		"", "\xff", "\xc0\xaf", "\xed\xa0\x80", "a\xe2\x82"
+	};
+	fsimg_read_options_t options;
+	fsimg_error_t error;
+	char name[257], *unterminated;
+	bool flag;
+
+	fsimg_read_options_init(&options);
+	options.volume_index = 3;
+	CHECK(fsimg_read_settings_check(&options, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "volume") == 0);
+	options.volume_index_set = true;
+	CHECK(fsimg_read_settings_check(&options, NULL, NULL) == FSIMG_OK);
+	options.volume_index = UINT32_MAX;
+	CHECK(fsimg_read_settings_check(&options, NULL, NULL) == FSIMG_OK);
+	memset(&flag, 2, sizeof(flag));
+	bcopy(&flag, &options.volume_index_set, sizeof(flag));
+	CHECK(fsimg_read_settings_check(&options, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "volume") == 0);
+
+	fsimg_read_options_init(&options);
+	for (size_t i = 0; i < sizeof(malformed) / sizeof(malformed[0]); i++) {
+		options.snapshot = malformed[i];
+		error.path[0] = '\0';
+		CHECK(fsimg_read_settings_check(&options, NULL, &error) ==
+		    FSIMG_EINVAL);
+		CHECK(strcmp(error.path, "snapshot") == 0);
+	}
+	/* A name filling the capacity with no NUL is refused without a read
+	 * past it, which a sanitizer run would report.
+	 */
+	unterminated = malloc(256);
+	CHECK(unterminated != NULL);
+	memset(unterminated, 'n', 256);
+	options.snapshot = unterminated;
+	CHECK(fsimg_read_settings_check(&options, NULL, &error) == FSIMG_EINVAL);
+	CHECK(strcmp(error.path, "snapshot") == 0);
+	CHECK(strcmp(error.message,
+	    "setting must be UTF-8 of 1 to 255 bytes") == 0);
+	free(unterminated);
+	memset(name, 'n', sizeof(name) - 1);
+	name[256] = '\0';
+	options.snapshot = name;
+	name[255] = '\0';
+	CHECK(fsimg_read_settings_check(&options, NULL, NULL) == FSIMG_OK);
+	options.snapshot = "com.apple.os.update-\xc3\xa9\xf0\x9f\x93\xb8";
+	CHECK(fsimg_read_settings_check(&options, NULL, NULL) == FSIMG_OK);
+}
+
+/*
+ * No registered format's read_settings carries the volume or snapshot
+ * bit, so once the format is chosen the generic mask check refuses either
+ * at any value but its default: an explicit volume 0 included, since its
+ * presence flag makes it a request. The loop walks the format registry,
+ * so a format added later is covered without naming it here.
+ */
+static void
+test_registered_readers_refuse_volume_and_snapshot(void)
+{
+	static const struct {
+		const char *key;
+		uint32_t bit;
+		uint32_t volume_index;
+		bool volume_index_set;
+		const char *snapshot;
+	} cases[] = {
+		{ "volume", FSIMG_SETTING_VOLUME_INDEX, 0, true, NULL },
+		{ "volume", FSIMG_SETTING_VOLUME_INDEX, 7, true, NULL },
+		{ "snapshot", FSIMG_SETTING_SNAPSHOT, 0, false, "s" }
+	};
+	fsimg_read_options_t read;
+	fsimg_format_info_t info;
+	fsimg_error_t error;
+	fsimg_status_t status;
+	size_t cursor = 0;
+	unsigned formats = 0;
+
+	while (fsimg_format_next(&cursor, &info, NULL) == FSIMG_OK) {
+		formats++;
+		fsimg_read_options_init(&read);
+		CHECK(fsimg_read_settings_check(&read, &info, NULL) == FSIMG_OK);
+		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			if ((info.read_settings & cases[i].bit) != 0)
+				continue;
+			fsimg_read_options_init(&read);
+			read.volume_index = cases[i].volume_index;
+			read.volume_index_set = cases[i].volume_index_set;
+			read.snapshot = cases[i].snapshot;
+			error.path[0] = '\0';
+			status = fsimg_read_settings_check(&read, &info, &error);
+			if (status != FSIMG_EINVAL ||
+			    strcmp(error.path, cases[i].key) != 0)
+				fprintf(stderr, "%s: %s refusal: status %d, key %s\n",
+				    info.name, cases[i].key, status, error.path);
+			CHECK(status == FSIMG_EINVAL);
+			CHECK(strcmp(error.path, cases[i].key) == 0);
+			CHECK(strcmp(error.message,
+			    "read setting does not apply to the image format") == 0);
+		}
+	}
+	CHECK(formats != 0);
+}
+
 static void
 test_registered_writers_refuse_unsupported_settings(void)
 {
@@ -1370,6 +1540,9 @@ main(void)
 	test_erofs_enum_members_are_checked();
 	test_erofs_settings_require_capability();
 	test_iso_read_settings_require_capability();
+	test_volume_and_snapshot_catalogue_and_defaults();
+	test_volume_and_snapshot_structure();
+	test_registered_readers_refuse_volume_and_snapshot();
 	test_registered_writers_refuse_unsupported_settings();
 	test_slices();
 	test_member_bindings();

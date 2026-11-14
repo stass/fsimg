@@ -1554,15 +1554,17 @@ interpret_read(cli_parse_t *parse)
 			    "use -F fs/- or --partition"));
 		request->flags |= FSIMG_JOB_FORCE;
 	}
+	/*
+	 * Check each read setting's form, such as a snapshot name's UTF-8,
+	 * and with a forced format its applicability, before any input is
+	 * prepared or a worker starts.
+	 */
 	if (fsimg_job_format(request)[0] == '\0' || parse->reserved)
-		return (FSIMG_OK);
+		return (fsimg_read_settings_check(&request->read, NULL,
+		    parse->error));
 	status = find_format(parse, fsimg_job_format(request), &info);
 	if (status != FSIMG_OK)
 		return (status);
-	/*
-	 * A forced format is known now, so a read setting it does not accept
-	 * is refused here, before any input is prepared or a worker starts.
-	 */
 	return (fsimg_read_settings_check(&request->read, &info, parse->error));
 }
 

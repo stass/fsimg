@@ -1196,6 +1196,17 @@ typedef struct fsimg_read_options {
 	uint32_t	 fat_codepage;
 	/* FSIMG_SETTING_ISO_VIEW: the ISO 9660 view to read. */
 	fsimg_iso_view_t iso_view;
+	/* FSIMG_SETTING_VOLUME_INDEX: the slot index of the volume to open in
+	 * a container holding several. It is read only while volume_index_set
+	 * is true, so index 0 is a request; unset, it must be zero.
+	 */
+	uint32_t	 volume_index;
+	bool		 volume_index_set;
+	/* FSIMG_SETTING_SNAPSHOT: the snapshot of the volume to open, by its
+	 * exact name, or NULL for the live volume. Borrowed for the duration
+	 * of fsimg_reader_open(); a name is valid UTF-8 of 1 to 255 bytes.
+	 */
+	const char	*snapshot;
 	uint64_t	 reserved[4];
 } fsimg_read_options_t;
 
@@ -1264,6 +1275,9 @@ typedef struct fsimg_volume_info {
 #define FSIMG_SETTING_EROFS 0x400u
 /* placements and placement_count. */
 #define FSIMG_SETTING_PLACEMENT 0x800u
+/* The read options volume_index with volume_index_set, and snapshot. */
+#define FSIMG_SETTING_VOLUME_INDEX 0x1000u
+#define FSIMG_SETTING_SNAPSHOT 0x2000u
 
 typedef struct fsimg_format_info {
 	char		 name[16];

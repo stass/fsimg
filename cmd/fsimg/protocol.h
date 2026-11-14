@@ -8,7 +8,7 @@
 
 #define FSIMG_FRAME_HEADER 16u
 #define FSIMG_FRAME_BYTES 16384u
-#define FSIMG_JOB_BYTES 13415u
+#define FSIMG_JOB_BYTES 13680u
 /* The job record's mountpoint field: one byte more than the longest
  * mountpoint any format stores, 1024 bytes, and its NUL, so the writer,
  * not the record, refuses a longer one.
@@ -18,6 +18,10 @@
  * its NUL, the command's capacity for the setting.
  */
 #define FSIMG_JOB_BOOT_PATH_BYTES 1025u
+/* The snapshot name's field: the longest name, 255 bytes, after a length
+ * byte; a name has no NUL, so the field needs no terminator.
+ */
+#define FSIMG_JOB_SNAPSHOT_BYTES 255u
 /* The ISO 9660 descriptor settings of the job record: the descriptor rows
  * of the settings table, found by walking it. Their texts lie back to back
  * in table order, each in its row's text_bytes, FSIMG_JOB_DESCRIPTOR_TEXT_BYTES

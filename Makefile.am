@@ -581,6 +581,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/erofs_create_test.rb \
 	test/cli/erofs_settings_test.rb \
 	test/cli/iso_settings_test.rb test/cli/iso_truncated_test.rb \
+	test/cli/volume_snapshot_settings_test.rb \
 	test/cli/isohybrid_test.rb \
 	test/cli/fat_root_test.rb test/cli/fat_truncated_test.rb \
 	test/cli/salvage_test.rb \

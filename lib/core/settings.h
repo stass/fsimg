@@ -143,6 +143,11 @@ typedef enum fsimg_setting_syntax {
 #define FSIMG_ISO_TEXT_BYTES		65u
 #define FSIMG_ISO_FILE_TEXT_BYTES	19u
 
+/* The capacity of a snapshot name, the read setting snapshot: at most 255
+ * bytes and the terminator.
+ */
+#define FSIMG_SNAPSHOT_TEXT_BYTES	256u
+
 /* A row without a presence flag. */
 #define FSIMG_NO_PRESENCE	SIZE_MAX
 
@@ -286,9 +291,12 @@ bool fsimg_setting_is_default(const fsimg_setting_t *,
  * The structural check of one row: a TEXT member terminated within its
  * size, a bool member and presence flag each 0 or 1, an enum value one of
  * the row's choices, a list's count within its capacity and, when nonzero,
- * with an array, and a value whose presence flag is clear holding its
- * default. A failure is FSIMG_EINVAL naming the
- * canonical key in error.path.
+ * with an array, a value whose presence flag is clear holding its
+ * default, and a pointer text of the read record, when not NULL, strict
+ * UTF-8 of one byte to one less than its text_bytes, measured within that
+ * capacity. The one such text, the snapshot name, has no empty value, so
+ * the rule is the read record's as a whole. A failure is FSIMG_EINVAL
+ * naming the canonical key in error.path.
  */
 fsimg_status_t fsimg_setting_check(const fsimg_setting_t *,
     const fsimg_setting_records_t *, fsimg_error_t *);

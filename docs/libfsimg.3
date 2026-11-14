@@ -245,6 +245,25 @@ FSIMG_IMAGE_ASSUME_IDENTITY in the image options' flags does the same for
 every layer the options name, each named layer slot of the stack and a forced
 compression, and requires a named slot or that compression; detected layers
 are unaffected, and detection never assumes an identity.
+.Pp
+A read setting at a value other than its default applies only to a format
+whose record's read_settings mask names its bit; once detection or the
+named format has chosen the format,
+.Fn fsimg_reader_open
+returns FSIMG_EINVAL naming any other before the driver opens.
+The read option volume_index, under FSIMG_SETTING_VOLUME_INDEX, selects
+one volume of a filesystem that keeps several in one container, as APFS
+does, by its slot index, and is
+read only while volume_index_set is true, so index 0 is a request; a
+nonzero index without the flag is FSIMG_EINVAL.
+The read option snapshot, under FSIMG_SETTING_SNAPSHOT, names a snapshot
+of the selected volume, NULL for the live volume; the string is borrowed
+for the duration of
+.Fn fsimg_reader_open ,
+and one that is empty, longer than 255 bytes or not valid UTF-8 is
+FSIMG_EINVAL before detection; the reader keeps its own copy.
+No supported format names either bit, so a set index or a non-NULL
+snapshot is FSIMG_EINVAL for every format.
 A stack naming a filesystem must fix the volume's location:
 .Fn fsimg_image_select
 with FSIMG_SELECT_AUTOMATIC returns FSIMG_EINVAL unless the scheme slot is

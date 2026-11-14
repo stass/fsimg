@@ -19,7 +19,16 @@ enum {
 	PLACEMENT_COUNT = 5143,
 	PLACEMENT_RECORDS = 5151,
 	PLACEMENT_RECORD_BYTES = 1033,
-	PLACEMENT_PATH_BYTES = 1025
+	PLACEMENT_PATH_BYTES = 1025,
+	/* The read selection closes the record: the volume index, one byte of
+	 * presence bits, the snapshot name's length and its bytes.
+	 */
+	VOLUME_INDEX = 13415,
+	READ_FLAGS = 13423,
+	SNAPSHOT_LENGTH = 13424,
+	SNAPSHOT_NAME = 13425,
+	SNAPSHOT_NAME_BYTES = 255,
+	JOB_BYTES = 13680
 };
 
 static void test_frame_splits(uint32_t);
@@ -2248,7 +2257,7 @@ test_job_xz_settings_roundtrip_and_reject_invalid_wire_values(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == 13415);
+	CHECK(FSIMG_JOB_BYTES == JOB_BYTES);
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
 	request.root_paths = image_root;
@@ -2454,7 +2463,7 @@ test_iso_jobs_have_canonical_wire_bytes(void)
 
 	iso_wire_place_string(create_tail, 24, "/b/bios.img");
 	iso_wire_place_string(efi_tail, 1049, "/efi/boot.img");
-	CHECK(FSIMG_JOB_BYTES == 13415);
+	CHECK(FSIMG_JOB_BYTES == JOB_BYTES);
 	fsimg_worker_request_init(&request);
 	CHECK(request.read.iso_view == FSIMG_ISO_VIEW_AUTO);
 	request.kind = FSIMG_JOB_CREATE;
@@ -2747,7 +2756,7 @@ test_job_placements_roundtrip_and_request_ownership(void)
 	uint64_t selection;
 	unsigned capabilities;
 
-	CHECK(FSIMG_JOB_BYTES == 13415);
+	CHECK(FSIMG_JOB_BYTES == JOB_BYTES);
 	fsimg_worker_request_init(&request);
 	request.kind = FSIMG_JOB_CREATE;
 	request.root_paths = image_root;
@@ -2833,6 +2842,136 @@ test_job_placement_decode_refusals_have_valid_controls(void)
 	}
 }
 
+/*
+ * The read selection travels at fixed offsets: an explicit volume 0 keeps
+ * its presence bit, an absent one is all zero, and a snapshot name of up
+ * to 255 bytes arrives in the request's own storage. The encoder refuses a
+ * name the field cannot carry: empty, or longer than 255 bytes.
+ */
+static void
+test_job_volume_and_snapshot_roundtrip(void)
+{
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES];
+	char name[SNAPSHOT_NAME_BYTES + 2];
+	uint64_t selection;
+	unsigned capabilities;
+
+	CHECK(FSIMG_JOB_BYTES == JOB_BYTES);
+	CHECK(SNAPSHOT_NAME + SNAPSHOT_NAME_BYTES == JOB_BYTES);
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	memset(raw, 0xa5, sizeof(raw));
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	for (size_t i = VOLUME_INDEX; i < JOB_BYTES; i++)
+		CHECK(raw[i] == 0);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(!decoded.read.volume_index_set && decoded.read.volume_index == 0);
+	CHECK(decoded.read.snapshot == NULL);
+
+	request.read.volume_index_set = true;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_load_le64(raw + VOLUME_INDEX) == 0 && raw[READ_FLAGS] == 1);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.read.volume_index_set && decoded.read.volume_index == 0);
+
+	memset(name, 's', SNAPSHOT_NAME_BYTES);
+	name[SNAPSHOT_NAME_BYTES] = '\0';
+	request.read.volume_index = UINT32_MAX;
+	request.read.snapshot = name;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(fsimg_load_le64(raw + VOLUME_INDEX) == UINT32_MAX);
+	CHECK(raw[SNAPSHOT_LENGTH] == SNAPSHOT_NAME_BYTES);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.read.volume_index == UINT32_MAX);
+	CHECK(decoded.read.snapshot == decoded.snapshot_storage);
+	CHECK(strcmp(decoded.read.snapshot, name) == 0);
+
+	request.read.snapshot = "a";
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	CHECK(raw[SNAPSHOT_LENGTH] == 1 && raw[SNAPSHOT_NAME] == 'a');
+	for (size_t i = SNAPSHOT_NAME + 1; i < JOB_BYTES; i++)
+		CHECK(raw[i] == 0);
+	CHECK(fsimg_job_decode(raw, sizeof(raw), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(strcmp(decoded.read.snapshot, "a") == 0);
+
+	request.read.snapshot = "";
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
+	request.read.snapshot = NULL;
+	request.read.volume_index_set = false;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
+	request.read.volume_index = 0;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	memset(name, 's', SNAPSHOT_NAME_BYTES + 1);
+	name[SNAPSHOT_NAME_BYTES + 1] = '\0';
+	request.read.snapshot = name;
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_EINVAL);
+}
+
+/* Each malformed read selection is refused, and restoring the byte decodes. */
+static void
+test_job_volume_and_snapshot_decode_refusals_have_valid_controls(void)
+{
+	static const struct {
+		const char *name;
+		size_t offset;
+		unsigned char byte;
+	} cases[] = {
+		{ "index beyond uint32", VOLUME_INDEX + 4, 1 },
+		{ "unknown presence bit", READ_FLAGS, 3 },
+		{ "name byte past its length", SNAPSHOT_NAME + 2, 'x' },
+		{ "NUL within the name", SNAPSHOT_NAME + 1, 0 },
+		{ "last field byte past a short name", JOB_BYTES - 1, 'x' }
+	};
+	fsimg_worker_request_t request, decoded;
+	unsigned char raw[FSIMG_JOB_BYTES], bad[FSIMG_JOB_BYTES];
+	fsimg_error_t error;
+	fsimg_status_t status;
+	uint64_t selection;
+	unsigned capabilities;
+
+	fsimg_worker_request_init(&request);
+	request.kind = FSIMG_JOB_LIST;
+	request.read.volume_index_set = true;
+	request.read.volume_index = 5;
+	request.read.snapshot = "ab";
+	CHECK(fsimg_job_encode(&request, raw, NULL) == FSIMG_OK);
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		bcopy(raw, bad, sizeof(bad));
+		bad[cases[i].offset] = cases[i].byte;
+		status = fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, &error);
+		if (status != FSIMG_EINVAL)
+			fprintf(stderr, "%s: expected invalid job, got %d\n",
+			    cases[i].name, status);
+		CHECK(status == FSIMG_EINVAL);
+		CHECK(strcmp(error.message, "invalid worker job description") == 0);
+		bad[cases[i].offset] = raw[cases[i].offset];
+		CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+		    &capabilities, NULL) == FSIMG_OK);
+	}
+	/* An index without its presence bit, and name bytes without a length. */
+	bcopy(raw, bad, sizeof(bad));
+	bad[READ_FLAGS] = 0;
+	CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	bad[VOLUME_INDEX] = 0;
+	CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(!decoded.read.volume_index_set);
+	bad[SNAPSHOT_LENGTH] = 0;
+	CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_EINVAL);
+	bzero(bad + SNAPSHOT_NAME, SNAPSHOT_NAME_BYTES);
+	CHECK(fsimg_job_decode(bad, sizeof(bad), &decoded, &selection,
+	    &capabilities, NULL) == FSIMG_OK);
+	CHECK(decoded.read.snapshot == NULL);
+}
+
 static void
 test_job_placement_encode_refusals_have_valid_controls(void)
 {
@@ -2916,6 +3055,8 @@ main(int argc, char **argv)
 	test_job_catalogue();
 	test_job_placements_roundtrip_and_request_ownership();
 	test_job_placement_decode_refusals_have_valid_controls();
+	test_job_volume_and_snapshot_roundtrip();
+	test_job_volume_and_snapshot_decode_refusals_have_valid_controls();
 	test_job_placement_encode_refusals_have_valid_controls();
 	test_image_sector_sizes_follow_the_scheme();
 	test_partition_frame_preserves_and_bounds_apm_type();
