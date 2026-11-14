@@ -4,20 +4,28 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
-# Print the container-level structure of an APFS image: every field of the
-# block-0 container superblock, the checkpoint descriptor ring (each
-# superblock and checkpoint-mapping block, the latest valid superblock
-# marked), the ephemeral objects of the selected checkpoint, the container
-# object map and its B-tree, the volume superblocks it resolves (address and
-# checksum only), the space manager with its chunk-information chain,
-# bitmap free-count recounts, internal pool and free-queue trees, and the
-# reaper with its reap lists.
+# Print the structure of an APFS image: every field of the block-0
+# container superblock, the checkpoint descriptor ring (each superblock and
+# checkpoint-mapping block, the latest valid superblock marked), the
+# ephemeral objects of the selected checkpoint, the container object map and
+# its B-tree, each volume, the space manager with its chunk-information
+# chain, bitmap free-count recounts, internal pool and free-queue trees, and
+# the reaper with its reap lists.
 #
-#   apfsdump.rb [--offset BYTES] [--json] IMAGE
+# A volume is shown with every field of its superblock, its object map, and
+# its file-system, extent-reference, snapshot metadata and (on a sealed
+# volume) file extent trees, every record decoded, its integrity metadata,
+# a summary of its records by type, and the decmpfs header of each
+# compressed file.
+#
+#   apfsdump.rb [--offset BYTES] [--volume N] [--records] [--json] IMAGE
 #
 # IMAGE is a raw container; --offset names where the container starts in it,
-# for a container inside a partitioned disk image. --json prints the same
-# document as JSON with stable keys, so dumps of two captures can be diffed.
+# for a container inside a partitioned disk image. --volume N dumps only the
+# volume in slot N of the superblock's volume array. --records lists every
+# node and record of the volume trees; without it each tree shows its root
+# node and counts. --json prints the same document as JSON with stable keys,
+# so dumps of two captures can be diffed.
 #
 # The dumper is written from Apple's "Apple File System Reference"
 # (2020-06-22) and shares no code with lib/. Every object it reads has its
@@ -28,9 +36,6 @@
 # limit, never by a count read from the image alone. The exit status is 0
 # for a clean dump and 1 when there is any problem or the image cannot be
 # read as a container at all.
-#
-# The volume superblocks and file-system trees are another layer: a later
-# module reads them through ObjectMap#lookup and BTree with its own codecs.
 require "json"
 require "optparse"
 require "set"
@@ -52,7 +57,7 @@ module ApfsDump
   # All ephemeral objects of a checkpoint together; native ones hold a few
   # blocks.
   MAX_EPHEMERAL_BYTES = 64 << 20
-  # Leaf records one tree walk keeps.
+  # Leaf records one tree walk decodes.
   MAX_TREE_RECORDS = 1 << 20
   # Problems kept and printed; any further ones are only counted.
   MAX_PROBLEMS = 10_000
@@ -124,8 +129,8 @@ module ApfsDump
 
   # Field tables: [name, byte offset, codec]. A codec is an unpack directive
   # (one value, or an array when it ends in a count), a Symbol naming an
-  # entry of Layout::CODECS, or [table, stride, count] for an array of
-  # nested structures.
+  # entry of Layout::CODECS, a table for one nested structure, or
+  # [table, stride, count] for an array of them.
   OBJ_FIELDS = [
     [:cksum, 0, "Q<"], [:oid, 8, "Q<"], [:xid, 16, "Q<"], [:type, 24, "L<"], [:subtype, 28, "L<"]
   ].freeze
@@ -223,6 +228,171 @@ module ApfsDump
     [:oid, 24, "Q<"], [:xid, 32, "Q<"]
   ].freeze
 
+  # ---- volumes ------------------------------------------------------------
+
+  APFS_MAGIC = 0x42535041 # "APSB"
+  KIND_FSTREE = 0x0E
+  KIND_BLOCKREFTREE = 0x0F
+  KIND_SNAPMETATREE = 0x10
+  KIND_INTEGRITY_META = 0x1E
+  KIND_FEXT_TREE = 0x1F
+
+  VOL_FEATURES = {
+    0x1 => "DEFRAG_PRERELEASE", 0x2 => "HARDLINK_MAP_RECORDS", 0x4 => "DEFRAG", 0x8 => "STRICTATIME",
+    0x10 => "VOLGRP_SYSTEM_INO_SPACE"
+  }.freeze
+  VOL_ROCOMPAT = {}.freeze
+  VOL_INCOMPAT = {
+    0x1 => "CASE_INSENSITIVE", 0x2 => "DATALESS_SNAPS", 0x4 => "ENC_ROLLED", 0x8 => "NORMALIZATION_INSENSITIVE",
+    0x10 => "INCOMPLETE_RESTORE", 0x20 => "SEALED_VOLUME", 0x40 => "RESERVED_40"
+  }.freeze
+  VOL_INCOMPAT_CASE_INSENSITIVE = 0x1
+  VOL_INCOMPAT_NORMALIZATION_INSENSITIVE = 0x8
+  VOL_FS_FLAGS = {
+    0x1 => "UNENCRYPTED", 0x2 => "RESERVED_2", 0x4 => "RESERVED_4", 0x8 => "ONEKEY", 0x10 => "SPILLEDOVER",
+    0x20 => "RUN_SPILLOVER_CLEANER", 0x40 => "ALWAYS_CHECK_EXTENTREF", 0x80 => "RESERVED_80", 0x100 => "RESERVED_100"
+  }.freeze
+  # A volume has at most one role: one of the low six bits, or an
+  # enumerated value shifted left by six.
+  VOL_ROLES = {
+    0x0 => "NONE", 0x1 => "SYSTEM", 0x2 => "USER", 0x4 => "RECOVERY", 0x8 => "VM", 0x10 => "PREBOOT",
+    0x20 => "INSTALLER", 0x40 => "DATA", 0x80 => "BASEBAND", 0xC0 => "UPDATE", 0x100 => "XART",
+    0x140 => "HARDWARE", 0x180 => "BACKUP", 0x1C0 => "SIDECAR", 0x200 => "RESERVED_8", 0x240 => "ENTERPRISE",
+    0x280 => "RESERVED_10", 0x2C0 => "PRELOGIN"
+  }.freeze
+
+  META_CRYPTO_FIELDS = [
+    [:major_version, 0, "S<"], [:minor_version, 2, "S<"], [:cpflags, 4, "L<"], [:persistent_class, 8, "L<"],
+    [:key_os_version, 12, "L<"], [:key_revision, 16, "S<"], [:unused, 18, "S<"]
+  ].freeze
+  MODIFIED_BY_FIELDS = [[:id, 0, :name32], [:timestamp, 32, "Q<"], [:last_xid, 40, "Q<"]].freeze
+  APFS_MAX_HIST = 8
+  APFS_FIELDS = [
+    [:magic, 32, "L<"], [:fs_index, 36, "L<"], [:features, 40, "Q<"], [:readonly_compatible_features, 48, "Q<"],
+    [:incompatible_features, 56, "Q<"], [:unmount_time, 64, "Q<"], [:fs_reserve_block_count, 72, "Q<"],
+    [:fs_quota_block_count, 80, "Q<"], [:fs_alloc_count, 88, "Q<"], [:meta_crypto, 96, META_CRYPTO_FIELDS],
+    [:root_tree_type, 116, "L<"], [:extentref_tree_type, 120, "L<"], [:snap_meta_tree_type, 124, "L<"],
+    [:omap_oid, 128, "Q<"], [:root_tree_oid, 136, "Q<"], [:extentref_tree_oid, 144, "Q<"],
+    [:snap_meta_tree_oid, 152, "Q<"], [:revert_to_xid, 160, "Q<"], [:revert_to_sblock_oid, 168, "Q<"],
+    [:next_obj_id, 176, "Q<"], [:num_files, 184, "Q<"], [:num_directories, 192, "Q<"], [:num_symlinks, 200, "Q<"],
+    [:num_other_fsobjects, 208, "Q<"], [:num_snapshots, 216, "Q<"], [:total_blocks_alloced, 224, "Q<"],
+    [:total_blocks_freed, 232, "Q<"], [:vol_uuid, 240, :uuid], [:last_mod_time, 256, "Q<"], [:fs_flags, 264, "Q<"],
+    [:formatted_by, 272, MODIFIED_BY_FIELDS], [:modified_by, 320, [MODIFIED_BY_FIELDS, 48, APFS_MAX_HIST]],
+    [:volname, 704, :volname], [:next_doc_id, 960, "L<"], [:role, 964, "S<"], [:reserved, 966, "S<"],
+    [:root_to_xid, 968, "Q<"], [:er_state_oid, 976, "Q<"], [:cloneinfo_id_epoch, 984, "Q<"],
+    [:cloneinfo_xid, 992, "Q<"], [:snap_meta_ext_oid, 1000, "Q<"], [:volume_group_id, 1008, :uuid],
+    [:integrity_meta_oid, 1024, "Q<"], [:fext_tree_oid, 1032, "Q<"], [:fext_tree_type, 1040, "L<"],
+    [:reserved_type, 1044, "L<"], [:reserved_oid, 1048, "Q<"]
+  ].freeze
+
+  INTEGRITY_META_FIELDS = [
+    [:version, 32, "L<"], [:flags, 36, "L<"], [:hash_type, 40, "L<"], [:root_hash_offset, 44, "L<"],
+    [:broken_xid, 48, "Q<"]
+  ].freeze
+  INTEGRITY_FLAGS = { 0x1 => "SEAL_BROKEN" }.freeze
+  HASH_TYPES = { 0 => "INVALID", 1 => "SHA256", 2 => "SHA512_256", 3 => "SHA384", 4 => "SHA512" }.freeze
+
+  # ---- file-system records --------------------------------------------------
+
+  OBJ_ID_MASK = 0x0FFF_FFFF_FFFF_FFFF
+  OBJ_TYPE_SHIFT = 60
+  J_TYPE_SNAP_METADATA = 1
+  J_TYPE_EXTENT = 2
+  J_TYPE_INODE = 3
+  J_TYPE_XATTR = 4
+  J_TYPE_SIBLING_LINK = 5
+  J_TYPE_DSTREAM_ID = 6
+  J_TYPE_CRYPTO_STATE = 7
+  J_TYPE_FILE_EXTENT = 8
+  J_TYPE_DIR_REC = 9
+  J_TYPE_DIR_STATS = 10
+  J_TYPE_SNAP_NAME = 11
+  J_TYPE_SIBLING_MAP = 12
+  J_TYPE_FILE_INFO = 13
+  J_TYPES = {
+    0 => "ANY", 1 => "SNAP_METADATA", 2 => "EXTENT", 3 => "INODE", 4 => "XATTR", 5 => "SIBLING_LINK",
+    6 => "DSTREAM_ID", 7 => "CRYPTO_STATE", 8 => "FILE_EXTENT", 9 => "DIR_REC", 10 => "DIR_STATS",
+    11 => "SNAP_NAME", 12 => "SIBLING_MAP", 13 => "FILE_INFO", 15 => "INVALID"
+  }.freeze
+  J_KINDS = { 0 => "ANY", 1 => "NEW", 2 => "UPDATE", 3 => "DEAD", 4 => "UPDATE_REFCNT", 255 => "INVALID" }.freeze
+
+  INODE_FIELDS = [
+    [:parent_id, 0, "Q<"], [:private_id, 8, "Q<"], [:create_time, 16, "Q<"], [:mod_time, 24, "Q<"],
+    [:change_time, 32, "Q<"], [:access_time, 40, "Q<"], [:internal_flags, 48, "Q<"],
+    [:nchildren_or_nlink, 56, "l<"], [:default_protection_class, 60, "L<"], [:write_generation_counter, 64, "L<"],
+    [:bsd_flags, 68, "L<"], [:owner, 72, "L<"], [:group, 76, "L<"], [:mode, 80, "S<"], [:pad1, 82, "S<"],
+    [:uncompressed_size, 84, "Q<"]
+  ].freeze
+  INODE_VAL_SIZE = 92
+  INODE_FLAGS = {
+    0x1 => "IS_APFS_PRIVATE", 0x2 => "MAINTAIN_DIR_STATS", 0x4 => "DIR_STATS_ORIGIN", 0x8 => "PROT_CLASS_EXPLICIT",
+    0x10 => "WAS_CLONED", 0x20 => "FLAG_UNUSED", 0x40 => "HAS_SECURITY_EA", 0x80 => "BEING_TRUNCATED",
+    0x100 => "HAS_FINDER_INFO", 0x200 => "IS_SPARSE", 0x400 => "WAS_EVER_CLONED", 0x800 => "ACTIVE_FILE_TRIMMED",
+    0x1000 => "PINNED_TO_MAIN", 0x2000 => "PINNED_TO_TIER2", 0x4000 => "HAS_RSRC_FORK", 0x8000 => "NO_RSRC_FORK",
+    0x10000 => "ALLOCATION_SPILLEDOVER", 0x20000 => "FAST_PROMOTE", 0x40000 => "HAS_UNCOMPRESSED_SIZE",
+    0x80000 => "IS_PURGEABLE", 0x100000 => "WANTS_TO_BE_PURGEABLE", 0x200000 => "IS_SYNC_ROOT",
+    0x400000 => "SNAPSHOT_COW_EXEMPTION"
+  }.freeze
+  # File types of an inode's mode (S_IFMT) and of a directory record's
+  # flags (DT_*), by the name both share.
+  MODE_TYPES = {
+    0o010000 => "FIFO", 0o020000 => "CHR", 0o040000 => "DIR", 0o060000 => "BLK", 0o100000 => "REG",
+    0o120000 => "LNK", 0o140000 => "SOCK", 0o160000 => "WHT"
+  }.freeze
+  S_IFMT = 0o170000
+  DT_TYPES = {
+    0 => "UNKNOWN", 1 => "FIFO", 2 => "CHR", 4 => "DIR", 6 => "BLK", 8 => "REG", 10 => "LNK", 12 => "SOCK", 14 => "WHT"
+  }.freeze
+  DREC_TYPE_MASK = 0x000F
+  DREC_VAL_SIZE = 18
+  J_DREC_LEN_MASK = 0x0000_03FF
+  J_DREC_HASH_SHIFT = 10
+
+  XATTR_FLAGS = { 0x1 => "DATA_STREAM", 0x2 => "DATA_EMBEDDED", 0x4 => "FILE_SYSTEM_OWNED", 0x8 => "RESERVED_8" }.freeze
+  XATTR_DATA_STREAM = 0x1
+  XATTR_DATA_EMBEDDED = 0x2
+  SYMLINK_EA_NAME = "com.apple.fs.symlink"
+  DECMPFS_EA_NAME = "com.apple.decmpfs"
+  # The decmpfs header (magic "fpmc", compression type, uncompressed size)
+  # is macOS's, not the APFS reference's; only it is decoded.
+  DECMPFS_MAGIC = 0x636D_7066
+  DECMPFS_FIELDS = [[:magic, 0, "L<"], [:compression_type, 4, "L<"], [:uncompressed_size, 8, "Q<"]].freeze
+  # Leading bytes of inline extended-attribute data shown in a record.
+  XATTR_DATA_SHOWN = 32
+
+  DSTREAM_FIELDS = [
+    [:size, 0, "Q<"], [:alloced_size, 8, "Q<"], [:default_crypto_id, 16, "Q<"], [:total_bytes_written, 24, "Q<"],
+    [:total_bytes_read, 32, "Q<"]
+  ].freeze
+  DIR_STATS_FIELDS = [[:num_children, 0, "Q<"], [:total_size, 8, "Q<"], [:chained_key, 16, "Q<"], [:gen_count, 24, "Q<"]].freeze
+  SNAP_METADATA_FIELDS = [
+    [:extentref_tree_oid, 0, "Q<"], [:sblock_oid, 8, "Q<"], [:create_time, 16, "Q<"], [:change_time, 24, "Q<"],
+    [:inum, 32, "Q<"], [:extentref_tree_type, 40, "L<"], [:snap_flags, 44, "L<"], [:name_len, 48, "S<"]
+  ].freeze
+  SNAP_META_FLAGS = { 0x1 => "PENDING_DATALESS", 0x2 => "MERGE_IN_PROGRESS" }.freeze
+  PEXT_LEN_MASK = 0x0FFF_FFFF_FFFF_FFFF
+  PEXT_KIND_SHIFT = 60
+  FILE_EXTENT_LEN_MASK = 0x00FF_FFFF_FFFF_FFFF
+  FILE_EXTENT_FLAG_SHIFT = 56
+  FILE_INFO_TYPES = { 1 => "DATA_HASH" }.freeze
+
+  XF_FLAGS = {
+    0x1 => "DATA_DEPENDENT", 0x2 => "DO_NOT_COPY", 0x4 => "RESERVED_4", 0x8 => "CHILDREN_INHERIT",
+    0x10 => "USER_FIELD", 0x20 => "SYSTEM_FIELD", 0x40 => "RESERVED_40", 0x80 => "RESERVED_80"
+  }.freeze
+  # Extended-field types: name and how the data decodes (an unpack
+  # directive, a Symbol of Layout::CODECS, a field table, :text for a
+  # NUL-terminated string, or :hex for opaque bytes).
+  INODE_XFIELDS = {
+    1 => [:snap_xid, "Q<"], 2 => [:delta_tree_oid, "Q<"], 3 => [:document_id, "L<"], 4 => [:name, :text],
+    5 => [:prev_fsize, "Q<"], 6 => [:reserved_6, :hex], 7 => [:finder_info, :hex], 8 => [:dstream, DSTREAM_FIELDS],
+    9 => [:reserved_9, :hex], 10 => [:dir_stats, DIR_STATS_FIELDS], 11 => [:fs_uuid, :uuid],
+    12 => [:reserved_12, :hex], 13 => [:sparse_bytes, "Q<"], 14 => [:rdev, "L<"], 15 => [:purgeable_flags, :hex],
+    16 => [:orig_sync_root_id, "Q<"]
+  }.freeze
+  INO_EXT_TYPE_DSTREAM = 8
+  DREC_XFIELDS = { 1 => [:sibling_id, "Q<"] }.freeze
+
   # Fletcher-64 as APFS uses it: over the object's bytes from offset 8 to its
   # end, read as little-endian 32-bit words, both sums modulo 2^32 - 1.
   module Fletcher64
@@ -246,7 +416,9 @@ module ApfsDump
     CODECS = {
       uuid: [16, ->(b) { b.unpack("H8H4H4H4H12").join("-") }],
       prange: [16, ->(b) { b.unpack("q<Q<").then { |start, count| { start_paddr: start, block_count: count } } }],
-      nloc: [4, ->(b) { b.unpack("S<S<").then { |off, len| { off:, len: } } }]
+      nloc: [4, ->(b) { b.unpack("S<S<").then { |off, len| { off:, len: } } }],
+      name32: [32, ->(b) { Layout.text(b) }],
+      volname: [256, ->(b) { Layout.text(b) }]
     }.freeze
 
     module_function
@@ -262,6 +434,8 @@ module ApfsDump
           CODECS.fetch(codec).then { |len, fn| fn.(slice(bytes, off, len)) }
         in [Array => table, Integer => stride, Integer => count]
           Array.new(count) { decode(bytes, table, base: off + _1 * stride) }
+        in [Array, *] => table
+          decode(bytes, table, base: off)
         in /\d\z/ # a repeat count: "Q<4" is an array of four values
           bytes.unpack("@#{off}#{codec}")
         else
@@ -278,6 +452,14 @@ module ApfsDump
       raise Error, "structure ends before byte #{off + len}" if off + len > bytes.bytesize
 
       bytes.byteslice(off, len)
+    end
+
+    # The bytes before the first NUL as a UTF-8 string, or, when they are
+    # not valid UTF-8, their escaped form, so every name prints and
+    # serialises as JSON.
+    def text(bytes)
+      str = bytes.byteslice(0, bytes.index("\0") || bytes.bytesize).dup.force_encoding(Encoding::UTF_8)
+      str.valid_encoding? ? str : str.b.dump
     end
 
     ARRAY_WIDTHS = { "Q<" => 8, "S<" => 2 }.freeze
@@ -410,8 +592,10 @@ module ApfsDump
     def find(oid, xid) = @by_oid.fetch(oid, []).select { _1[:xid] <= xid }.max_by { _1[:xid] }
   end
 
-  # Walks a B-tree from its root and returns its nodes and leaf records.
-  # `fetch` maps a child OID to its Obj (raising Error when it cannot);
+  # Walks a B-tree from its root and returns its nodes and leaf records;
+  # given a block, it yields each record instead of keeping it, so a
+  # caller that only counts holds none of them. `fetch` maps a child OID
+  # to its Obj (raising Error when it cannot);
   # `problem` receives a message for each rule a node breaks. The walk is
   # bounded: levels fall by one per step from at most MAX_TREE_LEVEL, a node
   # is visited once, and at most MAX_TREE_NODES nodes are read.
@@ -428,9 +612,11 @@ module ApfsDump
       @subtype = subtype
     end
 
-    def walk(root_oid)
+    def walk(root_oid, &each)
       @nodes = []
       @records = []
+      @each = each || @records.method(:<<)
+      @decoded = 0
       @seen = Set.new
       @full = false
       visit(root_oid, level: nil, info: nil)
@@ -554,15 +740,16 @@ module ApfsDump
     def leaf(entries)
       entries.each do |entry|
         next problem("a #{entry.key.bytesize}/#{entry.value&.bytesize}-byte record is not a #{@codec.name} record") unless fits?(entry)
-        break full if @records.size >= MAX_TREE_RECORDS
+        break full if @decoded >= MAX_TREE_RECORDS
 
-        @records << @codec.record.(entry.key, entry.value)
+        @decoded += 1
+        @each.(@codec.record.(entry.key, entry.value))
       end
     end
 
     # Reports, once per walk, that the record limit stopped keeping records.
     def full
-      problem("record limit #{MAX_TREE_RECORDS} reached; further records are not kept") unless @full
+      problem("record limit #{MAX_TREE_RECORDS} reached; further records are not decoded") unless @full
       @full = true
       nil
     end
@@ -583,13 +770,32 @@ module ApfsDump
     end
   end
 
+  # A section boundary for a reader with a #problem method: a failure inside
+  # one structure is recorded and the dump goes on with the next.
+  module Sections
+    private
+
+    def section(name)
+      yield
+    rescue StandardError => e
+      problem("#{name}: #{e.is_a?(Error) ? '' : "#{e.class}: "}#{e.message}")
+      { error: e.message }
+    end
+  end
+
   # Reads the container layer of an image into one document (nested hashes
   # with stable keys) and collects every problem met on the way.
   class Container
+    include Sections
+
     attr_reader :problems
 
-    def initialize(image)
+    # `volume` selects one volume by its slot in the superblock's array of
+    # volumes; `records` keeps every volume tree record in the document.
+    def initialize(image, volume: nil, records: false)
       @image = image
+      @volume = volume
+      @records = records
       @problems = []
       @unrecorded = 0
       @ephemeral_bytes = 0
@@ -629,15 +835,6 @@ module ApfsDump
       { **fields, error: text }
     end
 
-    # A section boundary: a failure inside one structure is recorded and the
-    # dump goes on with the next.
-    def section(name)
-      yield
-    rescue StandardError => e
-      problem("#{name}: #{e.is_a?(Error) ? '' : "#{e.class}: "}#{e.message}")
-      { error: e.message }
-    end
-
     # ---- objects --------------------------------------------------------
 
     def in_container?(addr, blocks) = addr.positive? && blocks.positive? && addr + blocks <= @block_count
@@ -659,14 +856,24 @@ module ApfsDump
 
     # Marks the blocks of `span` as read for one structure. Returns false,
     # claiming nothing, when any of them already was. The ephemeral objects
-    # and the space manager's chain claim their blocks, so naming one block
-    # many times cannot multiply their work; every other read is bounded by
-    # a fixed limit of this dumper.
+    # and the space manager's chain claim their blocks, and so does every
+    # object of a volume (#read_once), so naming one block many times cannot
+    # multiply their work; every other read is bounded by a fixed limit of
+    # this dumper.
     def claim(span)
       return false if span.any? { @claimed.include?(_1) }
 
       @claimed.merge(span)
       true
+    end
+
+    # Reads an object no other structure has read. A volume reads all its
+    # objects so: a block that many trees, volumes or object-map entries
+    # name is read and walked once.
+    def read_once(addr, what)
+      raise Error, "#{what}: block #{addr} is already read for another structure" unless claim(addr..addr)
+
+      read_object(addr, what)
     end
 
     def raw_block(addr, what)
@@ -868,13 +1075,15 @@ module ApfsDump
                 block_size: @block_size, storage: STORAGE_EPHEMERAL, subtype:)
     end
 
-    # Each volume superblock OID resolved through the container object map:
-    # where it lives and whether its checksum holds. Its fields are another
-    # layer's.
+    # Each volume superblock OID resolved through the container object map,
+    # or only the selected one's, and the volume read from it.
     def volumes
       raise Error, "the container object map is unreadable" unless @omap
 
-      @sb[:fs_oid].each_with_index.reject { |oid, _| oid.zero? }.map { |oid, slot| volume(oid, slot) }
+      slots = @sb[:fs_oid].each_with_index.reject { |oid, _| oid.zero? }
+      slots = slots.select { |_, slot| slot == @volume } if @volume
+      problem("volumes: no volume in slot #{@volume}") if slots.empty? && @volume
+      slots.map { |oid, slot| section("volume #{slot}") { volume(oid, slot) } }
     end
 
     def volume(oid, slot)
@@ -886,9 +1095,13 @@ module ApfsDump
       # A volume superblock is one block; a mapping says otherwise is reported
       # and its first block read.
       problem("#{what}: mapped size #{found[:size]}, expected #{@block_size}") if found[:size] != @block_size
+      # Slots naming one superblock would multiply the work of its trees.
+      return failure("#{what}: block #{found[:paddr]} is already read for another structure", slot:, oid:) unless claim(found[:paddr]..found[:paddr])
       obj = read_object(found[:paddr], what)
       check_header(obj, what, kind: KIND_FS, storage: STORAGE_VIRTUAL, oid:)
-      obj.document({ slot:, omap_xid: found[:xid], magic: obj.bytes.unpack1("@32L<") })
+      fields = Volume.new(obj, slot:, read: method(:read_once), read_block: method(:raw_block), problem: method(:problem),
+                               block_size: @block_size, records: @records).dump
+      obj.document({ slot:, omap_xid: found[:xid], **fields })
     rescue Error => e
       failure("volumes: #{e.message}", slot:, oid:)
     end
@@ -1087,12 +1300,468 @@ module ApfsDump
     end
   end
 
+  # The records of a sealed volume's file extent tree: a file's private ID
+  # and logical address, mapped to a length (flags in the top eight bits)
+  # and a physical block. A ghost record has no value. The type name, which
+  # file-system records carry too, is what the volume summary counts.
+  FEXT_CODEC = Codec.new(
+    name: "file extent tree", key_size: 16, value_size: 16,
+    record: lambda do |key, value|
+      private_id, logical_addr = key.unpack("Q<Q<")
+      len_and_flags, phys_block_num = value ? value.unpack("Q<Q<") : [nil, nil]
+      { type_name: "FEXT", private_id:, logical_addr:, length: len_and_flags && len_and_flags & FILE_EXTENT_LEN_MASK,
+        extent_flags: len_and_flags && len_and_flags >> FILE_EXTENT_FLAG_SHIFT, phys_block_num: }
+    end
+  )
+
+  # Decoding of file-system records, which the file-system tree, the
+  # extent-reference tree and the snapshot metadata tree all hold: a j_key_t
+  # header, whose top four bits are the record type and the rest an object
+  # ID, then the rest of the key and the value as that type lays them out.
+  # A record that breaks a rule carries a `problems` list; one whose bytes
+  # end before a field carries an `error` instead of its fields. The name
+  # hash of a directory record is shown as stored, not verified.
+  module Records
+    XF_BLOB_FIELDS = [[:num_exts, 0, "S<"], [:used_data, 2, "S<"]].freeze
+    X_FIELD_FIELDS = [[:type, 0, "C"], [:flags, 1, "C"], [:size, 2, "S<"]].freeze
+    XF_BLOB_SIZE = 4
+    X_FIELD_SIZE = 4
+    DREC_VAL_FIELDS = [[:file_id, 0, "Q<"], [:date_added, 8, "Q<"], [:flags, 16, "S<"]].freeze
+    XATTR_VAL_FIELDS = [[:flags, 0, "S<"], [:xdata_len, 2, "S<"]].freeze
+    XATTR_VAL_SIZE = 4
+    PHYS_EXT_FIELDS = [[:len_and_kind, 0, "Q<"], [:owning_obj_id, 8, "Q<"], [:refcnt, 16, "l<"]].freeze
+    FILE_EXTENT_FIELDS = [[:len_and_flags, 0, "Q<"], [:phys_block_num, 8, "Q<"], [:crypto_id, 16, "Q<"]].freeze
+    SNAP_METADATA_NAME_AT = 50
+    FILE_DATA_HASH_FIELDS = [[:hashed_len, 0, "S<"], [:hash_size, 2, "C"]].freeze
+    FILE_DATA_HASH_AT = 3
+    # Key and value sizes of the record types whose layout fixes them; nil
+    # where a name or extended fields make the size vary.
+    SIZES = {
+      J_TYPE_SNAP_METADATA => [8, nil], J_TYPE_EXTENT => [8, 20], J_TYPE_INODE => [8, nil],
+      J_TYPE_SIBLING_LINK => [16, nil], J_TYPE_DSTREAM_ID => [8, 4], J_TYPE_CRYPTO_STATE => [8, nil],
+      J_TYPE_FILE_EXTENT => [16, 24], J_TYPE_DIR_STATS => [8, 32], J_TYPE_SNAP_NAME => [nil, 8],
+      J_TYPE_SIBLING_MAP => [8, 8], J_TYPE_FILE_INFO => [16, nil]
+    }.freeze
+
+    module_function
+
+    # The codec of a volume's file-system trees; `hashed` selects the
+    # directory-record key with a name hash.
+    def codec(hashed:)
+      Codec.new(name: "file-system", key_size: nil, value_size: nil,
+                record: ->(key, value) { decode(key, value || "".b, hashed:) })
+    end
+
+    def decode(key, value, hashed:)
+      head = Layout.field(key, 0, "Q<")
+      type = head >> OBJ_TYPE_SHIFT
+      base = { obj_id: head & OBJ_ID_MASK, type:, type_name: J_TYPES.fetch(type) { "unknown(#{type})" } }
+      fields = body(type, key, value, hashed:)
+      problems = size_problems(type, key:, value:) + fields.fetch(:problems, [])
+      { **base, **fields.except(:problems), **(problems.empty? ? {} : { problems: }) }
+    rescue Error => e
+      { **(base || { obj_id: nil, type: nil, type_name: "unreadable" }), error: e.message }
+    end
+
+    def body(type, key, value, hashed:)
+      case type
+      when J_TYPE_SNAP_METADATA then snap_metadata(value)
+      when J_TYPE_EXTENT then phys_extent(value)
+      when J_TYPE_INODE then inode(value)
+      when J_TYPE_XATTR then xattr(key, value)
+      when J_TYPE_SIBLING_LINK then sibling_link(key, value)
+      when J_TYPE_DSTREAM_ID then { refcnt: Layout.field(value, 0, "L<") }
+      when J_TYPE_CRYPTO_STATE then { value_size: value.bytesize } # identified, not decoded
+      when J_TYPE_FILE_EXTENT then file_extent(key, value)
+      when J_TYPE_DIR_REC then drec(key, value, hashed:)
+      when J_TYPE_DIR_STATS then Layout.decode(value, DIR_STATS_FIELDS)
+      when J_TYPE_SNAP_NAME then snap_name(key, value)
+      when J_TYPE_SIBLING_MAP then { file_id: Layout.field(value, 0, "Q<") }
+      when J_TYPE_FILE_INFO then file_info(key, value)
+      else { key_size: key.bytesize, value_size: value.bytesize }
+      end
+    end
+
+    def size_problems(type, key:, value:)
+      key_size, value_size = SIZES.fetch(type, [nil, nil])
+      [("key of #{key.bytesize} bytes, expected #{key_size}" if key_size && key.bytesize != key_size),
+       ("value of #{value.bytesize} bytes, expected #{value_size}" if value_size && value.bytesize != value_size)].compact
+    end
+
+    # A name of `len` bytes, its NUL included, that ends the structure in
+    # `bytes` at `at`: the name and the rules it breaks.
+    def name(bytes, at:, len:)
+      raw = Layout.slice(bytes, at, len)
+      problems = [("name of #{len} bytes does not end in NUL" unless raw.end_with?("\0")),
+                  ("#{bytes.bytesize - at - len} bytes follow the name" if bytes.bytesize != at + len)]
+      [Layout.text(raw), problems.compact]
+    end
+
+    def inode(value)
+      fields = Layout.decode(value, INODE_FIELDS)
+      { **Layout.with_names(fields, internal_flags: INODE_FLAGS),
+        file_type: MODE_TYPES.fetch(fields[:mode] & S_IFMT, "unknown"),
+        **xfields(value, at: INODE_VAL_SIZE, types: INODE_XFIELDS) }
+    end
+
+    # A directory entry. Its key holds the name length and, in a volume
+    # with hashed keys, a 22-bit name hash above it; its value the target's
+    # file ID, the date added, a flags word whose low four bits are the
+    # entry's type, and extended fields.
+    def drec(key, value, hashed:)
+      if hashed
+        word = Layout.field(key, 8, "L<")
+        len = word & J_DREC_LEN_MASK
+        name, problems = name(key, at: 12, len:)
+        key_fields = { name_len: len, name_hash: word >> J_DREC_HASH_SHIFT, name: }
+      else
+        len = Layout.field(key, 8, "S<")
+        name, problems = name(key, at: 10, len:)
+        key_fields = { name_len: len, name: }
+      end
+      val = Layout.decode(value, DREC_VAL_FIELDS)
+      xf = xfields(value, at: DREC_VAL_SIZE, types: DREC_XFIELDS)
+      { **key_fields, **val, dir_type: DT_TYPES.fetch(val[:flags] & DREC_TYPE_MASK, "unknown"), **xf,
+        problems: problems + xf.fetch(:problems, []) }
+    end
+
+    # The extended fields from `at` to the end of `bytes`: an xf_blob_t
+    # (field count and bytes of data), one x_field_t per field, then each
+    # field's data in the same order, each padded to a multiple of eight
+    # bytes. The count is trusted only as far as the bytes hold headers.
+    # xf_used_data is compared with the padded data alone: the reference
+    # says it also counts the x_field_t headers, but every native record
+    # seen stores the data size (a root inode's one 5-byte name field: 8).
+    def xfields(bytes, at:, types:)
+      return { xfields: [] } if bytes.bytesize == at
+
+      blob = Layout.decode(bytes, XF_BLOB_FIELDS, base: at)
+      room = (bytes.bytesize - at - XF_BLOB_SIZE) / X_FIELD_SIZE
+      heads = Array.new([blob[:num_exts], room].min) { Layout.decode(bytes, X_FIELD_FIELDS, base: at + XF_BLOB_SIZE + _1 * X_FIELD_SIZE) }
+      data_at = at + XF_BLOB_SIZE + heads.size * X_FIELD_SIZE
+      # Where each field's data starts, then where the last one ends.
+      offsets = heads.each_with_object([data_at]) { |head, offs| offs << offs.last + pad8(head[:size]) }
+      data_end = offsets.last
+      fields = heads.zip(offsets).map { |head, off| xfield(bytes, head:, at: off, types:) }
+      used = data_end - data_at
+      repeated = heads.map { _1[:type] }.tally.select { |_, n| n > 1 }.keys
+      problems = [
+        ("#{blob[:num_exts]} extended fields, room for #{room} headers" if blob[:num_exts] > room),
+        ("extended-field data takes #{used} bytes, the blob says #{blob[:used_data]}" if used != blob[:used_data]),
+        ("extended-field data ends at #{data_end}, the record at #{bytes.bytesize}" if data_end != bytes.bytesize),
+        ("extended-field types #{repeated.join(', ')} repeat" unless repeated.empty?)
+      ].compact + fields.filter_map { "extended field #{_1[:type]}: #{_1[:error]}" if _1[:error] }
+      { xf_num_exts: blob[:num_exts], xf_used_data: blob[:used_data], xfields: fields, problems: }
+    end
+
+    def pad8(size) = (size + 7) & ~7
+
+    def xfield(bytes, head:, at:, types:)
+      name, codec = types.fetch(head[:type]) { [:"unknown_#{head[:type]}", :hex] }
+      field = { type: head[:type], name:, flags: head[:flags], flags_names: Layout.names(XF_FLAGS, head[:flags]), size: head[:size] }
+      data = Layout.slice(bytes, at, head[:size])
+      { **field, value: xfield_value(data, codec) }
+    rescue Error => e
+      { **field, error: e.message }
+    end
+
+    def xfield_value(data, codec)
+      case codec
+      when :text then Layout.text(data)
+      when :hex then data.unpack1("H*")
+      else Layout.field(data, 0, codec)
+      end
+    end
+
+    # An extended attribute: its data inline or in a data stream, as its
+    # flags say. Inline data is shown as a symbolic link's target, as a
+    # decmpfs header, or as its leading bytes.
+    def xattr(key, value)
+      len = Layout.field(key, 8, "S<")
+      name, problems = name(key, at: 10, len:)
+      head = Layout.decode(value, XATTR_VAL_FIELDS)
+      stream, embedded = [XATTR_DATA_STREAM, XATTR_DATA_EMBEDDED].map { head[:flags].anybits?(_1) }
+      data = Layout.slice(value, XATTR_VAL_SIZE, head[:xdata_len])
+      problems += [("flags name #{stream ? 'both' : 'neither'} a data stream and inline data" if stream == embedded),
+                   ("#{value.bytesize - XATTR_VAL_SIZE - data.bytesize} bytes follow the data" if value.bytesize != XATTR_VAL_SIZE + data.bytesize)].compact
+      { name_len: len, name:, **Layout.with_names(head, flags: XATTR_FLAGS), **xattr_data(name, data, stream:), problems: }
+    end
+
+    def xattr_data(name, data, stream:)
+      if stream then { stream_oid: Layout.field(data, 0, "Q<"), dstream: Layout.decode(data, DSTREAM_FIELDS, base: 8) }
+      elsif name == SYMLINK_EA_NAME then { target: Layout.text(data) }
+      elsif name == DECMPFS_EA_NAME
+        header = Layout.decode(data, DECMPFS_FIELDS)
+        { decmpfs: { **header, magic_ok: header[:magic] == DECMPFS_MAGIC } }
+      else { data_hex: data.byteslice(0, XATTR_DATA_SHOWN).unpack1("H*") }
+      end
+    end
+
+    def sibling_link(key, value)
+      parent_id, len = Layout.field(value, 0, "Q<"), Layout.field(value, 8, "S<")
+      name, problems = name(value, at: 10, len:)
+      { sibling_id: Layout.field(key, 8, "Q<"), parent_id:, name_len: len, name:, problems: }
+    end
+
+    # A file extent: the key's logical address, the value's length (flags in
+    # the top eight bits), physical block and crypto ID.
+    def file_extent(key, value)
+      val = Layout.decode(value, FILE_EXTENT_FIELDS)
+      { logical_addr: Layout.field(key, 8, "Q<"), length: val[:len_and_flags] & FILE_EXTENT_LEN_MASK,
+        extent_flags: val[:len_and_flags] >> FILE_EXTENT_FLAG_SHIFT, **val.except(:len_and_flags) }
+    end
+
+    # A physical extent of the extent-reference tree; its object ID is the
+    # extent's first block.
+    def phys_extent(value)
+      val = Layout.decode(value, PHYS_EXT_FIELDS)
+      kind = val[:len_and_kind] >> PEXT_KIND_SHIFT
+      { length: val[:len_and_kind] & PEXT_LEN_MASK, kind:, kind_name: J_KINDS.fetch(kind) { "unknown(#{kind})" },
+        **val.except(:len_and_kind) }
+    end
+
+    def snap_metadata(value)
+      fields = Layout.decode(value, SNAP_METADATA_FIELDS)
+      name, problems = name(value, at: SNAP_METADATA_NAME_AT, len: fields[:name_len])
+      { **Layout.with_names(fields, snap_flags: SNAP_META_FLAGS), name:, problems: }
+    end
+
+    def snap_name(key, value)
+      len = Layout.field(key, 8, "S<")
+      name, problems = name(key, at: 10, len:)
+      { name_len: len, name:, snap_xid: Layout.field(value, 0, "Q<"), problems: }
+    end
+
+    # A file-info record of a sealed volume: the key's info type (top eight
+    # bits) and logical block address, the value's data hash.
+    def file_info(key, value)
+      word = Layout.field(key, 8, "Q<")
+      info_type = word >> FILE_EXTENT_FLAG_SHIFT
+      hash = Layout.decode(value, FILE_DATA_HASH_FIELDS)
+      { info_type:, info_type_name: FILE_INFO_TYPES.fetch(info_type) { "unknown(#{info_type})" },
+        lba: word & FILE_EXTENT_LEN_MASK, **hash, hash: Layout.slice(value, FILE_DATA_HASH_AT, hash[:hash_size]).unpack1("H*") }
+    end
+  end
+
+  # Counts of a volume's records as its trees are walked: records by type
+  # across all its trees (each type lives in one tree), inodes by file
+  # type, and the bytes their data streams and file extents hold.
+  class Summary
+    def initialize
+      @records = Hash.new(0)
+      @inodes = Hash.new(0)
+      @totals = Hash.new(0)
+    end
+
+    def add(record)
+      @records[record[:type_name]] += 1
+      case record
+      in { type: J_TYPE_INODE, file_type:, xfields: }
+        @inodes[file_type] += 1
+        xfields.each { add_dstream(_1[:value]) if _1[:type] == INO_EXT_TYPE_DSTREAM && _1[:value].is_a?(Hash) }
+      in { type: J_TYPE_FILE_EXTENT, length: } then @totals[:file_extent_bytes] += length
+      in { type_name: "FEXT", length: Integer => length } then @totals[:fext_bytes] += length
+      in { type: J_TYPE_XATTR, flags: } then @totals[flags.anybits?(XATTR_DATA_STREAM) ? :xattrs_in_streams : :xattrs_inline] += 1
+      else nil
+      end
+    end
+
+    def to_h = { records: @records.values.sum, by_type: @records.sort.to_h, inodes: @inodes.sort.to_h, **@totals.sort.to_h }
+
+    private
+
+    def add_dstream(dstream)
+      @totals[:dstream_size] += dstream[:size]
+      @totals[:dstream_alloced_size] += dstream[:alloced_size]
+    end
+  end
+
+  # Reads one volume: every field of its superblock, its object map, and the
+  # trees it names, each record decoded. Virtual OIDs resolve through the
+  # volume object map at the superblock's XID. `read` reads a physical
+  # object, once, and checks its checksum, `read_block` reads a block as it
+  # is, and
+  # `problem` records a problem; all three are the container's. With
+  # `records` every tree node and record is in the document; without, each
+  # tree shows its root node and counts, and the summary counts the
+  # records. The decmpfs header of each compressed file is listed either
+  # way, read from the first block of its data stream when it is not
+  # inline: the walks note which streams decmpfs attributes name and where
+  # every stream's extent at offset 0 starts, and the headers are read
+  # once all trees are walked, whatever order the records came in.
+  class Volume
+    include Sections
+
+    def initialize(obj, slot:, read:, read_block:, problem:, block_size:, records:)
+      @obj = obj
+      @label = "volume #{slot}"
+      @read = read
+      @read_block = read_block
+      @problem = problem
+      @block_size = block_size
+      @records = records
+      @summary = Summary.new
+      @compressed = []
+      # Data-stream IDs that decmpfs attributes name, each to its inode.
+      @decmpfs_streams = {}
+      # The first physical block of each data stream's extent at offset 0.
+      @first_blocks = {}
+    end
+
+    def dump
+      sb = Layout.with_names(Layout.decode(@obj.bytes, APFS_FIELDS),
+                             features: VOL_FEATURES, readonly_compatible_features: VOL_ROCOMPAT,
+                             incompatible_features: VOL_INCOMPAT, fs_flags: VOL_FS_FLAGS)
+      problem(format("magic 0x%08x is not APSB", sb[:magic])) if sb[:magic] != APFS_MAGIC
+      # Directory-record keys carry a name hash in a case- or
+      # normalization-insensitive volume.
+      hashed = sb[:incompatible_features].anybits?(VOL_INCOMPAT_CASE_INSENSITIVE | VOL_INCOMPAT_NORMALIZATION_INSENSITIVE)
+      fs = Records.codec(hashed:)
+      {
+        **sb, role_name: VOL_ROLES.fetch(sb[:role]) { format("unknown(0x%x)", _1) }, drec_keys: hashed ? "hashed" : "plain",
+        omap: section(:omap) { object_map(sb[:omap_oid]) },
+        fs_tree: section(:fs_tree) do
+          tree("file-system tree", oid: sb[:root_tree_oid], type: sb[:root_tree_type], subtype: KIND_FSTREE, codec: fs)
+        end,
+        extentref_tree: section(:extentref_tree) do
+          tree("extent-reference tree", oid: sb[:extentref_tree_oid], type: sb[:extentref_tree_type],
+                                        subtype: KIND_BLOCKREFTREE, codec: fs)
+        end,
+        snap_meta_tree: section(:snap_meta_tree) do
+          tree("snapshot metadata tree", oid: sb[:snap_meta_tree_oid], type: sb[:snap_meta_tree_type],
+                                         subtype: KIND_SNAPMETATREE, codec: fs)
+        end,
+        fext_tree: section(:fext_tree) do
+          tree("file extent tree", oid: sb[:fext_tree_oid], type: sb[:fext_tree_type], subtype: KIND_FEXT_TREE, codec: FEXT_CODEC)
+        end,
+        integrity_meta: section(:integrity_meta) { integrity_meta(sb[:integrity_meta_oid]) },
+        summary: section(:summary) { @summary.to_h },
+        compressed: section(:compressed) { compressed }
+      }
+    end
+
+    private
+
+    # Records `text` as a problem of this volume and returns it.
+    def problem(text) = "#{@label} #{text}".tap { @problem.(_1) }
+
+    def object_map(oid)
+      what = "#{@label} object map"
+      obj = @read.(oid, what)
+      obj.header_problems(kind: KIND_OMAP, storage: STORAGE_PHYSICAL, oid: obj.addr).each { problem("object map: #{_1}") }
+      fields = Layout.with_names(Layout.decode(obj.bytes, OMAP_FIELDS), flags: OMAP_FLAGS)
+      walk = btree("object map tree", OMAP_CODEC, storage: STORAGE_PHYSICAL, subtype: KIND_OMAP).walk(fields[:tree_oid])
+      @omap = ObjectMap.new(walk[:records])
+      obj.document({ **fields, tree: tree_doc(fields[:tree_oid], nodes: walk[:nodes], kept: walk[:records], count: walk[:records].size) })
+    end
+
+    # Walks the tree whose root is `oid` (none when zero); `type` is the
+    # superblock's object type for it, which says whether `oid` is virtual
+    # or physical. Each record goes to the summary and has its problems
+    # reported; it is kept only with `records`.
+    def tree(what, oid:, type:, subtype:, codec:)
+      return nil if oid.zero?
+
+      problem(format("%s: type 0x%x is not a B-tree", what, type)) if (type & 0xFFFF) != KIND_BTREE
+      kept = []
+      count = 0
+      walk = btree(what, codec, storage: type & STORAGE_MASK, subtype:).walk(oid) do |record|
+        count += 1
+        note(what, record)
+        kept << record if @records
+      end
+      tree_doc(oid, nodes: walk[:nodes], kept:, count:)
+    end
+
+    def btree(what, codec, storage:, subtype:)
+      fetch = storage == STORAGE_VIRTUAL ? ->(oid) { virtual(oid, what) } : ->(oid) { @read.(oid, "#{@label} #{what}") }
+      BTree.new(fetch:, problem: @problem, codec:, what: "#{@label} #{what}", block_size: @block_size, storage:, subtype:)
+    end
+
+    def note(what, record)
+      @summary.add(record)
+      [*record[:error], *record[:problems]].each do
+        problem("#{what}: #{record[:type_name]} record of object #{record[:obj_id]}: #{_1}")
+      end
+      compression(record)
+    end
+
+    # Notes what the decmpfs headers need: an inline header, a stream a
+    # decmpfs attribute names, or where a stream's first extent starts (a
+    # file extent, or a sealed volume's file extent tree record; block 0
+    # marks a hole).
+    def compression(record)
+      case record
+      in { type: J_TYPE_XATTR, name: DECMPFS_EA_NAME, decmpfs: }
+        @compressed << { obj_id: record[:obj_id], stream_oid: nil, **decmpfs }
+      in { type: J_TYPE_XATTR, name: DECMPFS_EA_NAME, stream_oid: }
+        @decmpfs_streams[stream_oid] = record[:obj_id]
+      in { type: J_TYPE_FILE_EXTENT, obj_id: stream, logical_addr: 0, phys_block_num: Integer => block } if block.positive?
+        @first_blocks[stream] = block
+      in { type_name: "FEXT", private_id: stream, logical_addr: 0, phys_block_num: Integer => block } if block.positive?
+        @first_blocks[stream] = block
+      else nil
+      end
+    end
+
+    # The decmpfs header of every compressed file: the inline ones, then
+    # each one read from the first block of its stream.
+    def compressed
+      @compressed + @decmpfs_streams.map do |stream, inode|
+        block = @first_blocks[stream]
+        header = block ? decmpfs_block(block) : { error: problem("decmpfs stream #{stream} of inode #{inode} has no extent at offset 0") }
+        { obj_id: inode, stream_oid: stream, **header }
+      end
+    end
+
+    def decmpfs_block(addr)
+      header = Layout.decode(@read_block.(addr, "#{@label} decmpfs data"), DECMPFS_FIELDS)
+      { **header, magic_ok: header[:magic] == DECMPFS_MAGIC }
+    rescue Error => e
+      { error: problem("decmpfs data at block #{addr}: #{e.message}") }
+    end
+
+    # A tree's document: its counts, and its nodes and the records `kept`
+    # with `records`, else its root node. `count` is every record decoded,
+    # which `kept` holds only with `records`.
+    def tree_doc(oid, nodes:, kept:, count:)
+      counts = { root_oid: oid, node_count: nodes.size, record_count: count }
+      @records ? { **counts, nodes:, records: kept } : { **counts, root: nodes.first }
+    end
+
+    # The object a virtual OID names in the volume object map at the
+    # superblock's XID.
+    def virtual(oid, what)
+      raise Error, "the volume object map is unreadable" unless @omap
+
+      found = @omap.find(oid, @obj.xid)
+      raise Error, "virtual oid #{oid} is not in the volume object map at xid #{@obj.xid}" unless found
+      raise Error, "virtual oid #{oid} is deleted in the volume object map" if found[:flags].anybits?(OMAP_VAL_DELETED)
+
+      @read.(found[:paddr], "#{@label} #{what} (virtual oid #{oid})")
+    end
+
+    def integrity_meta(oid)
+      return nil if oid.zero?
+
+      obj = virtual(oid, "integrity metadata")
+      obj.header_problems(kind: KIND_INTEGRITY_META, storage: STORAGE_VIRTUAL, oid:).each { problem("integrity metadata: #{_1}") }
+      fields = Layout.with_names(Layout.decode(obj.bytes, INTEGRITY_META_FIELDS), flags: INTEGRITY_FLAGS)
+      obj.document({ **fields, hash_type_name: HASH_TYPES.fetch(fields[:hash_type]) { "unknown(#{fields[:hash_type]})" } })
+    end
+  end
+
   # Prints a document as indented `key: value` lines. Integers whose key
-  # names a checksum, type or flag word print in hexadecimal. A hash of
+  # names a checksum, type or flag word print in hexadecimal, a file mode
+  # in octal. A hash of
   # scalars inside an array prints on one line; trailing zeros of an integer
   # array are counted instead of printed.
   module Text
     HEX_KEY = /cksum|type\z|flags\z|features\z|magic\z|subtype\z/
+    OCTAL_KEY = /mode\z/
+    # Printable ASCII; any other string, such as a name from the image with
+    # control characters, prints escaped.
+    PLAIN_TEXT = /\A[ -~]*\z/
 
     module_function
 
@@ -1128,8 +1797,12 @@ module ApfsDump
     def scalar(key, value)
       case value
       when nil then "-"
-      when Integer then key.to_s.match?(HEX_KEY) ? format("0x%x", value) : value.to_s
-      when String then value.ascii_only? ? value : value.dump
+      when Integer
+        if key.to_s.match?(HEX_KEY) then format("0x%x", value)
+        elsif key.to_s.match?(OCTAL_KEY) then format("0%o", value)
+        else value.to_s
+        end
+      when String then value.match?(PLAIN_TEXT) ? value : value.dump
       else value.to_s
       end
     end
@@ -1138,15 +1811,19 @@ module ApfsDump
   def self.main(argv)
     offset = 0
     json = false
-    parser = OptionParser.new("usage: apfsdump.rb [--offset BYTES] [--json] IMAGE") do |o|
+    volume = nil
+    records = false
+    parser = OptionParser.new("usage: apfsdump.rb [--offset BYTES] [--volume N] [--records] [--json] IMAGE") do |o|
       o.on("--offset BYTES", Integer) { offset = _1 }
+      o.on("--volume N", Integer) { volume = _1 }
+      o.on("--records") { records = true }
       o.on("--json") { json = true }
     end
     paths = parser.parse(argv)
     raise Error, parser.banner unless paths.size == 1
 
     File.open(paths.first, "rb") do |io|
-      container = Container.new(Image.new(io, offset:))
+      container = Container.new(Image.new(io, offset:), volume:, records:)
       doc = container.dump
       json ? $stdout.puts(JSON.pretty_generate(doc)) : Text.render(doc.except(:problems), $stdout)
       container.problems.each { $stdout.puts("problem: #{_1}") } unless json

@@ -117,7 +117,7 @@ class ApfsDumpTest < Minitest::Test
 
     assert_empty container.problems
     assert_equal [1, true], [doc[:checkpoints][:selected], doc[:checkpoints][:descriptor_area][1][:latest]]
-    assert_equal [1026, 12, 0x42535041], doc[:volumes].first.values_at(:oid, :addr, :magic)
+    assert_equal [1026, 12, APFS_MAGIC, "TEST"], doc[:volumes].first.values_at(:oid, :addr, :magic, :volname)
     assert_equal [39, 39], doc[:spaceman][:devices].first.values_at(:free_count, :bitmap_free)
     assert_equal({ used: 1, free: 1 }, doc[:spaceman][:internal_pool].slice(:used, :free))
     assert_equal 0x1, doc[:reaper][:flags]
@@ -146,6 +146,128 @@ class ApfsDumpTest < Minitest::Test
     assert_raises(Error) { Container.new(image).dump }
   end
 
+  def test_a_volume_resolves_its_file_system_tree_through_its_object_map
+    container = Container.new(Image.new(BytesIO.new(bytes: container_image)), records: true)
+    volume = container.dump[:volumes].first
+
+    assert_empty container.problems
+    assert_equal ["CASE_INSENSITIVE", "hashed", 15], [volume[:incompatible_features_names], volume[:drec_keys], volume[:omap][:tree][:records].first[:paddr]]
+    assert_equal %w[INODE XATTR DIR_REC FILE_EXTENT], volume[:fs_tree][:records].map { _1[:type_name] }
+    assert_equal({ "DIR_REC" => 1, "FEXT" => 1, "FILE_EXTENT" => 1, "INODE" => 1, "XATTR" => 1 }, volume[:summary][:by_type])
+    assert_equal [70_000, 73_728, 4096], volume[:summary].values_at(:dstream_size, :file_extent_bytes, :fext_bytes)
+  end
+
+  # The decmpfs attribute of file 24 names data stream 40, whose extent at
+  # offset 0 the volume's file extent tree places at block 16.
+  def test_a_decmpfs_header_is_read_from_its_data_stream
+    volume = Container.new(Image.new(BytesIO.new(bytes: container_image))).dump[:volumes].first
+
+    assert_equal [{ obj_id: 24, stream_oid: 40, magic: DECMPFS_MAGIC, compression_type: 7, uncompressed_size: 20_000,
+                    magic_ok: true }], volume[:compressed]
+  end
+
+  def test_a_decmpfs_stream_without_a_first_extent_is_reported
+    container = Container.new(Image.new(BytesIO.new(bytes: container_image(fext_oid: 0))))
+    volume = container.dump[:volumes].first
+
+    assert_includes container.problems, "volume 0 decmpfs stream 40 of inode 24 has no extent at offset 0"
+    assert_equal [24, 40], volume[:compressed].first.values_at(:obj_id, :stream_oid)
+  end
+
+  # A crafted volume whose file extent tree root is its file-system tree's
+  # node walks that block once.
+  def test_a_block_named_by_two_trees_is_read_once
+    container = Container.new(Image.new(BytesIO.new(bytes: container_image(fext_oid: 15))))
+    container.dump
+
+    assert(container.problems.any? { _1.include?("block 15 is already read for another structure") })
+  end
+
+  def test_two_slots_naming_one_volume_read_it_once
+    container = Container.new(Image.new(BytesIO.new(bytes: container_image(fs_oid: [1026, 1026]))))
+    volumes = container.dump[:volumes]
+
+    assert_equal [true, false], volumes.map { _1.key?(:fs_tree) }
+    assert(container.problems.any? { _1.include?("block 12 is already read for another structure") })
+  end
+
+  def test_without_records_a_volume_tree_shows_counts_only
+    volume = Container.new(Image.new(BytesIO.new(bytes: container_image))).dump[:volumes].first
+
+    assert_equal [1028, 1, 4], volume[:fs_tree].values_at(:root_oid, :node_count, :record_count)
+    refute_includes volume[:fs_tree].keys, :records
+  end
+
+  def test_volume_selects_one_slot_and_reports_a_missing_one
+    container = Container.new(Image.new(BytesIO.new(bytes: container_image)), volume: 5)
+
+    assert_equal [], container.dump[:volumes]
+    assert_includes container.problems, "volumes: no volume in slot 5"
+  end
+
+  def test_an_inode_decodes_its_fields_and_extended_fields
+    record = fs_record(INODE_RECORD)
+
+    assert_equal [24, "INODE", 20, "REG", 0o100644], record.values_at(:obj_id, :type_name, :parent_id, :file_type, :mode)
+    assert_equal "WAS_CLONED,NO_RSRC_FORK", record[:internal_flags_names]
+    assert_equal [[4, :name, "f70000"], [8, :dstream, 70_000]],
+                 record[:xfields].map { [_1[:type], _1[:name], _1[:value].is_a?(Hash) ? _1[:value][:size] : _1[:value]] }
+    assert_equal [2, 48], record.values_at(:xf_num_exts, :xf_used_data)
+    refute_includes record.keys, :problems
+  end
+
+  def test_a_hashed_directory_record_keeps_its_stored_length_and_hash
+    record = fs_record(DREC_RECORD)
+
+    assert_equal [2, "DIR_REC", 6, 0x2B29A3, "hard1"], record.values_at(:obj_id, :type_name, :name_len, :name_hash, :name)
+    assert_equal [27, "REG", [28]], [record[:file_id], record[:dir_type], record[:xfields].map { _1[:value] }]
+  end
+
+  def test_a_plain_directory_record_has_a_16_bit_name_length
+    key = [(J_TYPE_DIR_REC << 60) | 2, 3].pack("Q<S<") + "ab\0"
+    record = Records.decode(key, [5, 0, 4].pack("Q<Q<S<"), hashed: false)
+
+    assert_equal [3, "ab", "DIR"], record.values_at(:name_len, :name, :dir_type)
+  end
+
+  def test_a_file_extent_splits_its_length_from_its_flags
+    record = fs_record(FILE_EXTENT_RECORD)
+
+    assert_equal [4096, 73_728, 0x12, 206, 0], record.values_at(:logical_addr, :length, :extent_flags, :phys_block_num, :crypto_id)
+  end
+
+  def test_an_extended_field_count_beyond_the_record_is_bounded_and_reported
+    key, value = INODE_RECORD
+    damaged = value.dup.tap { _1.bytesplice(INODE_VAL_SIZE, 2, [0xFFFF].pack("S<")) }
+    record = Records.decode(key, damaged, hashed: true)
+
+    # 152 value bytes: 92 of inode, 4 of blob, room for 14 field headers.
+    assert_equal 14, record[:xfields].size
+    assert_includes record[:problems], "65535 extended fields, room for 14 headers"
+  end
+
+  def test_a_name_running_past_its_key_is_an_error_not_an_exception
+    key = [(J_TYPE_DIR_REC << 60) | 2, 200].pack("Q<L<") + "short\0"
+    record = Records.decode(key, [5, 0, 8].pack("Q<Q<S<"), hashed: true)
+
+    assert_equal "DIR_REC", record[:type_name]
+    assert_match(/structure ends before/, record[:error])
+  end
+
+  def test_inline_attributes_show_a_symlink_target_and_a_decmpfs_header
+    link = xattr_record(2, SYMLINK_EA_NAME, "a/b\0")
+    decmpfs = xattr_record(3, DECMPFS_EA_NAME, [DECMPFS_MAGIC, 3, 20_000].pack("L<L<Q<") + "data")
+
+    assert_equal "a/b", fs_record(link)[:target]
+    assert_equal({ magic: DECMPFS_MAGIC, compression_type: 3, uncompressed_size: 20_000, magic_ok: true }, fs_record(decmpfs)[:decmpfs])
+  end
+
+  def test_an_unknown_record_type_is_reported_by_its_sizes
+    record = Records.decode([14 << 60 | 9].pack("Q<"), "xyz", hashed: true)
+
+    assert_equal [9, "unknown(14)", 8, 3], record.values_at(:obj_id, :type_name, :key_size, :value_size)
+  end
+
   def test_text_prints_hex_flag_words_and_counts_trailing_zeros
     out = StringIO.new
     Text.render({ sb: { flags: 0x12, fs_oid: [1026, 0, 0], rows: [{ oid: 1, type: 0x40000002 }] } }, out)
@@ -153,7 +275,45 @@ class ApfsDumpTest < Minitest::Test
     assert_equal "sb:\n  flags: 0x12\n  fs_oid: 1026 (+2 zero)\n  rows[0]: oid=1 type=0x40000002\n", out.string
   end
 
+  def test_text_escapes_control_characters_in_names
+    out = StringIO.new
+    Text.render({ name: "a\e[2Jb" }, out)
+
+    assert_equal "name: \"a\\e[2Jb\"\n", out.string
+  end
+
+  # Hand-packed file-system records, laid out as the reference gives them.
+  # An inode (j_inode_val_t, 92 bytes) with a name and a data-stream
+  # extended field: blob (count 2, 48 bytes of data), two x_field_t
+  # headers, then the name padded to 8 bytes and the 40-byte j_dstream_t.
+  INODE_RECORD = [
+    [(3 << 60) | 24].pack("Q<"),
+    [20, 24, 1, 2, 3, 4, 0x8010, 1, 0, 1, 0, 99, 99, 0o100644, 0, 0].pack("Q<7l<L<5S<S<Q<") +
+      [2, 48, 4, 2, 7, 8, 0x20, 40].pack("S<S<CCS<CCS<") + "f70000\0".ljust(8, "\0") +
+      [70_000, 73_728, 0, 70_000, 0].pack("Q<5")
+  ].freeze
+  # A hashed directory record of "hard1" (length 6 with its NUL, hash
+  # 0x2b29a3) for file 27, type REG, with a sibling-ID extended field.
+  DREC_RECORD = [
+    [(9 << 60) | 2, (0x2B29A3 << 10) | 6].pack("Q<L<") + "hard1\0",
+    [27, 0, 8].pack("Q<Q<S<") + [1, 8, 1, 2, 8].pack("S<S<CCS<") + [28].pack("Q<")
+  ].freeze
+  # File 24's decmpfs attribute, its data in stream 40 (j_xattr_dstream_t:
+  # the stream ID and a 40-byte j_dstream_t).
+  DECMPFS_STREAM_RECORD = [
+    [(4 << 60) | 24, 18].pack("Q<S<") + "com.apple.decmpfs\0",
+    [1, 48, 40, 197, 4096, 0, 197, 0].pack("S<S<Q<6")
+  ].freeze
+  # A file extent of file 24 at 4096: 73728 bytes, flags 0x12, block 206.
+  FILE_EXTENT_RECORD = [[(8 << 60) | 24, 4096].pack("Q<Q<"), [(0x12 << 56) | 73_728, 206, 0].pack("Q<3")].freeze
+
   private
+
+  def fs_record((key, value)) = Records.decode(key, value, hashed: true)
+
+  def xattr_record(obj_id, name, data)
+    [[(J_TYPE_XATTR << 60) | obj_id, name.bytesize + 1].pack("Q<S<") + "#{name}\0", [XATTR_DATA_EMBEDDED, data.bytesize].pack("S<S<") + data]
+  end
 
   def walk(nodes)
     problems = []
@@ -169,11 +329,11 @@ class ApfsDumpTest < Minitest::Test
   # A sealed root node of a fixed 16/16 physical tree. Keys fill the key
   # area from its start; values fill the value area back from the footer. A
   # nil value is a ghost.
-  def node_block(oid:, level:, entries:, nkeys: entries.size)
+  def node_block(oid:, level:, entries:, nkeys: entries.size, subtype: KIND_OMAP)
     toc_len = TOC_ENTRIES * 4
     flags = NODE_ROOT | NODE_FIXED | (level.zero? ? NODE_LEAF : 0)
     block = "\0".b * BLOCK
-    put(block, 0, [0, oid, 1, KIND_BTREE | STORAGE_PHYSICAL, KIND_OMAP, flags, level, nkeys, 0, toc_len].pack("Q<Q<Q<L<L<S<S<L<S<S<"))
+    put(block, 0, [0, oid, 1, KIND_BTREE | STORAGE_PHYSICAL, subtype, flags, level, nkeys, 0, toc_len].pack("Q<Q<Q<L<L<S<S<L<S<S<"))
     entries.each_with_index do |(key, value), i|
       put(block, NODE_HEADER_END + i * 4, [i * 16, value ? (i + 1) * 16 : BTOFF_INVALID].pack("S<S<"))
       put(block, NODE_HEADER_END + toc_len + i * 16, key)
@@ -201,15 +361,22 @@ class ApfsDumpTest < Minitest::Test
   # at 1, the checkpoint superblock at 2), the space manager and reaper in
   # the data area at 3 and 4, the object map at 10 with its tree at 11
   # naming the volume superblock at 12, one chunk-information block at 20
-  # with its bitmap at 21, and the internal-pool bitmap ring at 22.
-  def container_image(cibs: [20], spaceman_size: BLOCK)
-    sb = seal(superblock_block(block_count: 64, fs_oid: [1026], omap_oid: 10))
+  # with its bitmap at 21, and the internal-pool bitmap ring at 22. The
+  # volume's object map is at 13 with its tree at 14, which maps the
+  # file-system tree's virtual root 1028 to block 15. The volume's file
+  # extent tree is at 17; the decmpfs data it points to is at 16.
+  def container_image(cibs: [20], spaceman_size: BLOCK, fs_oid: [1026], fext_oid: 17)
+    sb = seal(superblock_block(block_count: 64, fs_oid:, omap_oid: 10))
     omap_record = [[1026, 1].pack("Q<Q<"), [0, BLOCK, 12].pack("L<L<q<")] # (oid, xid) -> (flags, size, paddr)
     blocks = {
       0 => sb, 1 => checkpoint_map(spaceman_size:), 2 => sb,
       3 => spaceman(cibs:), 4 => object(oid: 1025, type: 0x8000_0011, fields: { 64 => [1].pack("L<") }), # reaper flags
-      10 => omap, 11 => node_block(oid: 11, level: 0, entries: [omap_record]),
-      12 => object(oid: 1026, type: KIND_FS, fields: { 32 => "APSB" }),
+      10 => omap(oid: 10, tree: 11), 11 => node_block(oid: 11, level: 0, entries: [omap_record]),
+      12 => volume_superblock(fext_oid:),
+      13 => omap(oid: 13, tree: 14), 14 => node_block(oid: 14, level: 0, entries: [fs_root_record]),
+      15 => fs_node_block(oid: 1028, records: [INODE_RECORD, DECMPFS_STREAM_RECORD, DREC_RECORD, FILE_EXTENT_RECORD]),
+      16 => [DECMPFS_MAGIC, 7, 20_000].pack("L<L<Q<").ljust(BLOCK, "\0"),
+      17 => node_block(oid: 17, level: 0, entries: [[[40, 0].pack("Q<Q<"), [4096, 16].pack("Q<Q<")]], subtype: KIND_FEXT_TREE),
       20 => chunk_info, 21 => bitmap(25), 22 => bitmap(1)
     }
     Array.new(64) { blocks.fetch(_1) { "\0".b * BLOCK } }.join
@@ -248,8 +415,39 @@ class ApfsDumpTest < Minitest::Test
   # Index 0, one chunk: xid 1, first block 0, 64 blocks, 39 free, bitmap at 21.
   def chunk_info = object(oid: 20, type: 0x4000_0007, fields: { 32 => [0, 1, 1, 0, 64, 39, 21].pack("L<L<Q<Q<L<L<Q<") })
 
-  # Manually managed, no snapshots, physical tree types, tree at 11.
-  def omap = object(oid: 10, type: 0x4000_000B, fields: { 32 => [1, 0, 0x4000_0002, 0x4000_0002, 11].pack("L<4Q<") })
+  # Manually managed, no snapshots, physical tree types.
+  def omap(oid:, tree:) = object(oid:, type: 0x4000_000B, fields: { 32 => [1, 0, 0x4000_0002, 0x4000_0002, tree].pack("L<4Q<") })
+
+  # Case-insensitive, its object map at 13, a virtual file-system tree
+  # rooted at 1028, a physical file extent tree at 17, no extent-reference
+  # or snapshot tree, named TEST.
+  def volume_superblock(fext_oid:)
+    object(oid: 1026, type: KIND_FS, fields: { 32 => "APSB", 56 => [VOL_INCOMPAT_CASE_INSENSITIVE].pack("Q<"),
+                                               116 => [KIND_BTREE].pack("L<"), 128 => [13, 1028].pack("Q<Q<"),
+                                               704 => "TEST", 1032 => [fext_oid, 0x4000_0002].pack("Q<L<") })
+  end
+
+  # Virtual OID 1028 at xid 1 lives at block 15.
+  def fs_root_record = [[1028, 1].pack("Q<Q<"), [0, BLOCK, 15].pack("L<L<q<")]
+
+  # A virtual root and leaf node of a file-system tree, whose records vary
+  # in size: 8-byte kvloc_t entries (key offset and length, value offset
+  # and length), keys from the end of the table of contents, values back
+  # from the footer.
+  def fs_node_block(oid:, records:)
+    toc_len = TOC_ENTRIES * 8
+    block = "\0".b * BLOCK
+    put(block, 0, [0, oid, 1, KIND_BTREE, KIND_FSTREE, NODE_ROOT | NODE_LEAF, 0, records.size, 0, toc_len].pack("Q<Q<Q<L<L<S<S<L<S<S<"))
+    records.each_with_index.reduce([0, 0]) do |(k_off, v_end), ((key, value), i)|
+      v_end += value.bytesize
+      put(block, NODE_HEADER_END + i * 8, [k_off, key.bytesize, v_end, value.bytesize].pack("S<4"))
+      put(block, NODE_HEADER_END + toc_len + k_off, key)
+      put(block, BLOCK - TREE_INFO_SIZE - v_end, value)
+      [k_off + key.bytesize, v_end]
+    end
+    put(block, BLOCK - TREE_INFO_SIZE, [0, BLOCK, 0, 0, 64, 256, records.size, 1].pack("L<6Q<2"))
+    seal(block)
+  end
 
   # A bitmap block whose first `used` bits are set.
   def bitmap(used) = (("1" * used).ljust(BLOCK * 8, "0")).then { [_1].pack("b*") }
