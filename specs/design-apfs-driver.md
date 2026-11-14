@@ -218,8 +218,8 @@ the next starts:
 9. **Root.** Inodes 2 and 3 are looked up and must be directories with
    parent 1.
 10. **Information.** The volume information and its details are filled from
-    the decoded objects. The volume's length is the declared `N * B`,
-    whatever the slice holds.
+    the decoded objects. The volume's length is `N * B` with the selected
+    superblock's `N`, whatever the slice holds.
 
 `reader->content_domain` is `[B, N * B)`, the container without block 0.
 APFS has no separate data region, so the domain does little beyond bounding
@@ -828,7 +828,7 @@ Planning runs a fixed sequence of passes over the frozen catalog:
      takes the first node OID plus `k`. The container's next OID follows
      the last.
    * **Ephemeral table.** The space manager, whose size the geometry gives,
-     the reaper and the two free-queue roots are listed in OID order with
+     and the reaper are listed in OID order with
      kind, subtype, byte size and their slots in the checkpoint data area,
      assigned in that order from the first slot.
    * **Internal pool.** Count the chunk-information blocks, the address
@@ -894,9 +894,9 @@ and the bytes do not depend on the order.
    its address array names the blocks just written, and its device free
    count is the sum of the entries' free counts, which is `N` less the
    allocation ranges.
-5. **Checkpoint.** The space manager, the idle reaper and the two empty
-   free-queue roots go to the slots the ephemeral table gives them in the
-   checkpoint data area. The mapping block is encoded from the same table,
+5. **Checkpoint.** The space manager, whose free queues are empty in the
+   zero-OID form, and the idle reaper go to the slots the ephemeral table
+   gives them in the checkpoint data area. The mapping block is encoded from the same table,
    one mapping per object in table order, so the mappings and the objects
    cannot disagree. The container superblock follows it in the descriptor
    ring, and block 0 receives the copy.
