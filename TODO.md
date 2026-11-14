@@ -50,17 +50,19 @@
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
 * [Medium] **APFS reader, verifier and writer** (`lib/formats/apfs/`,
-  `lib/read/`, `lib/core/`, `lib/codec/`, `cmd/fsimg/`, `tools/apfs/`):
-  implement the [format design](specs/design-apfs.md) and
+  `lib/read/`, `lib/core/`, `lib/layers/`, `cmd/fsimg/`, `tools/apfs/`,
+  `test/spec/`): implement the [format design](specs/design-apfs.md) and
   [driver design](specs/design-apfs-driver.md) in the stages of the
   [APFS plan](docs/apfs-plan.md). Native macOS evidence comes first and
   confirms the reference's tables, the name-hash conventions and the native
-  empty-container layout; then the common changes (256-byte label,
-  `volume=` and `snapshot=` read settings with `read_settings`, zero and
-  held content extents, the 4096-byte key bound, CRC-32C and normalization
-  tables, the `case=` write setting); the reader, verifier, compression
-  through the imported `lzfse` decoders, and a writer registered only after
-  `fsck_apfs -n`, mount and write-after-create pass. Socket and device
+  empty-container layout, closing the designs' provisional values; then the
+  common changes (`volume=` and `snapshot=` read settings, the 4096-byte
+  `FSIMG_DIRECTORY_KEY_BYTES`, the `case=` write setting, the `apfs`
+  registration rows); the reader, verifier and compression over the
+  existing zero and held extents, CRC-32C and `lzfse` decoders, with
+  normalization tables the driver owns; a writer registered only after
+  `fsck_apfs -n`, mount and write-after-create pass; then snapshots, sealed
+  volumes and the specification harness model. Socket and device
   entries are the read-only kinds of `specs/design-device-nodes.md`; the
   plan's evidence decides whether macOS always writes the device number
   extended field, which would tighten the APFS rule for a device without it.
@@ -490,8 +492,7 @@
   keeps zero extents in the index, coalescing them with each other, while
   the index refuses an image offset of `FSIMG_EXTENT_ZERO` as outside its
   domain. Delivery and salvage handle zero extents; no driver that builds
-  an index reports holes yet. Add zero records with the first one (UDF,
-  APFS).
+  an index reports holes yet. Add zero records with the first one (UDF).
 * [Low] **EROFS specification model holds no compressed inode**
   (`test/spec/lib/fsimg_spec/erofs/`): the model accepts `LZ4_0PADDING` and
   `COMPR_CFGS` at open but builds no compressed file, so the map header,
@@ -763,6 +764,14 @@
   partition" without naming the cut, though `i` and `W` report it. Add the
   missing bytes to the message and keep the status, which `i` routes on.
 
+* [Low] **HFS Plus reports no codecs** (`lib/formats/hfsplus/descriptor.c`):
+  the driver decodes zlib, LZVN and LZFSE compressed files, but
+  `fsimg_hfsplus_format` sets no `codecs` operation (only
+  `lib/formats/erofs/descriptor.c` sets one), so
+  `fsimg_format_info_t.codecs` is empty for `hfsplus` and `hfsx`. Add the
+  operation, leaving out LZVN and LZFSE where the imported decoders refuse
+  the host's byte order.
+
 ## Security residuals
 
 * [Low] **Offer the LZFSE and LZVN defect fixes upstream** (`lib/codec/lzfse/`,
@@ -903,7 +912,8 @@
   `lib/source/`, `lib/read/`, `lib/extract/`, `lib/formats/apfs/`): APFS
   stores Finder information, resource forks, quarantine flags and other
   metadata as extended attributes, which the entry model cannot carry, so
-  the APFS reader exposes none and its writer writes none, as the
+  the APFS reader exposes none, marking each such entry with the
+  extra-data bit, and its writer writes none, as the
   [APFS design](specs/design-apfs.md#extended-attributes) states. Design a
   bounded common representation (names, sizes, content delivery, loss
   policy, safe-extraction stance) before any format advertises it; the

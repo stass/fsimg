@@ -15,9 +15,10 @@ capabilities, and the writer is registered only after native qualification
 The APFS container is the filesystem's own structure, not a layer. The
 [layer design](design-layers.md) calls a disk-image format a container and
 always writes this structure out as "APFS container"; this document does the
-same. A DMG, a GPT partition or a bounded slice around an APFS container is
-peeled by the layers before the driver opens it, so the driver reads a bare
-APFS container whose block 0 is its superblock.
+same. A DMG, a GPT or Apple Partition Map partition, or a bounded slice
+around an APFS container is peeled by the layers before the driver opens it,
+so the driver reads a bare APFS container whose block 0 is its superblock;
+[probe and identity](#probe-and-identity) states what the layers cover.
 
 This document is an original description of disk-format facts and fsimg
 requirements. It contains no copied reference prose, C declarations, or code.
@@ -36,10 +37,22 @@ Evidence has three meanings here, as in the QNX designs:
   combination is valid, nor what current macOS emits; the reference predates
   several macOS releases.
 * **Observation**: a measured property of a named native fixture from the
-  plan's experiments (E1 through E16). An observation is not a universal
+  plan's experiments (E1 through E17). An observation is not a universal
   format rule.
 * **fsimg policy**: a deliberate validation, capability or construction rule.
   It can be stricter than macOS without redefining the format.
+
+A rule or value stated ahead of its observation is **provisional**. It names
+the experiment that closes it, and "E8 checks" or "E1 shows" names an
+experiment that is to settle the point, not a result. Each provisional item
+also has a default for an experiment that cannot answer, for example
+because no specimen exists or a native tool refuses the probe:
+
+* A provisional reader rule stays as written unless its passage gives
+  another default. It is the stricter reading, so an image outside it is
+  refused with the stated status and never misread.
+* The writer's provisional values and their defaults are collected in
+  [writer values](#writer-values).
 
 Offsets and constants below come from [A1]. Before code relies on a table,
 the plan's evidence stage checks it against native fixtures with an
@@ -234,8 +247,10 @@ read as little-endian 32-bit words, with both sums taken modulo
 m`, starting from zero. The stored value is `c1 | c2 << 32` with
 `c1 = m - ((s1 + s2) mod m)` and `c2 = m - ((s1 + c1) mod m)`. A stored
 checksum is valid exactly when recomputing it gives the stored value. The
-arithmetic is checked against native blocks (E1) before any fixture is read
-through the driver.
+arithmetic is provisional until E1 reproduces the stored checksums of native
+blocks, before any fixture is read through the driver. It has no default:
+without a checksum that matches native blocks no object can be validated,
+and no reader is built.
 
 The type flags this document uses are the storage class in bits 30 and 31
 (`0` virtual, `0x80000000` ephemeral, `0x40000000` physical), no-header
@@ -251,7 +266,9 @@ met.
 
 The superblock is `NXSB` (`0x4253584e` little-endian) at offset 32 of an
 object of kind 1 with OID 1, whose header carries the ephemeral storage
-flag (the exact type word is checked by E1). The fields the driver uses:
+flag. The exact type word, `0x80000001`, is provisional (E1); if E1 cannot
+confirm it, the reader requires kind 1 and ignores the word's flag bits. The
+fields the driver uses:
 
 | Offset | Size | Field |
 | --- | --- | --- |
@@ -293,12 +310,21 @@ flag (the exact type word is checked by E1). The fields the driver uses:
 | 1392 | 16 | Media keylocker range |
 
 The geometry rules are fsimg's acceptance of [A1]'s limits: `B` a power of
-two from 4096 through 65536; `N * B`, computed checked, at most the slice
-length, the excess beyond `N * B` being ignored slack; `N` at least the
+two from 4096 through 65536; `N * B` computed checked; `N` at least the
 container minimum of [A1], 1 MiB worth of blocks; the maximum volume count
 from 1 through 100, every OID slot at or past it zero. The two areas lie
 inside `[1, N)` and do not overlap each other or block 0. Bytes past offset
-1408 within block 0 are not interpreted by the reader.
+1408 within block 0 are not interpreted by the reader. A slice longer than
+`N * B` has ignored slack past it; a shorter one is a
+[truncated container](#truncated-containers). The 1 MiB minimum is the
+reader's bound; the smallest container the writer emits is the native
+formatter's, which [writer values](#writer-values) gives and which can be
+larger.
+
+The keylocker and media keylocker ranges locate keybags, which only
+encrypted volumes use. Reading an unencrypted volume ignores both; a nonzero
+range must lie inside `[1, N)`, verification claims it as one range, and its
+contents are never read.
 
 Feature handling is a closed table per mask:
 
@@ -308,23 +334,55 @@ Feature handling is a closed table per mask:
 | Incompatible | `0x1` version 1, `0x100` Fusion | Unsupported | Never |
 | Incompatible | Any other bit | Unsupported | Never |
 | Read-only compatible | None defined | Any bit accepted for reading | Zero |
-| Optional | `0x1` defragmentation, `0x2` low-capacity Fusion mode | Accepted; `0x2` with the Fusion bit only | Native default (E1) |
+| Optional | `0x1` defragmentation, `0x2` low-capacity Fusion mode | Accepted; `0x2` with the Fusion bit only | Native default, provisional (E1) |
 | Optional | Any other bit | Accepted, ignored | Never |
-| Flags | `0x4` software cryptography | Accepted; informs the encryption report | Native default (E1) |
+| Flags | `0x4` software cryptography | Accepted; informs the encryption report | Native default, provisional (E1) |
 
 ### Probe and identity
 
-The probe's identity signature is the `NXSB` magic at offset 32 together with
-object kind 1 and OID 1 in the header. The probe inspects the first 65536
-bytes, the largest legal block, cut to the volume length. With the signature
-present it claims the image: `FSIMG_OK` when the first `B` bytes are present
-and their checksum, the geometry and the incompatible features pass;
-`FSIMG_ECORRUPT` for a volume shorter than one block, a bad checksum or bad
-geometry; `FSIMG_EUNSUPPORTED` for an incompatible feature outside the
-table. The probe proves only that the image is an APFS container; the
-checkpoint `open` selects may be newer than block 0. A GPT disk or DMG never
-reaches this probe with its own header at offset 0, because the layers peel
-it first.
+The identity check is the `NXSB` magic at offset 32 of block 0 and nothing
+else. The header's object kind and OID, the checksum, the geometry, the
+features and each checkpoint candidate's magic, kind and checksum are
+validation, in the division the
+[format contract](design-formats.md#format-descriptors-and-profiles) makes
+for every format.
+
+The probe inspects the first 65536 bytes, the largest legal block, cut to
+the volume length. Without the magic it makes no claim, `FSIMG_EFORMAT`.
+With it, it claims the image: `FSIMG_OK` when the first `B` bytes are
+present and the header's kind and OID, the checksum, the geometry and the
+incompatible features pass; `FSIMG_ECORRUPT` for a volume shorter than one
+block, a wrong kind or OID, a bad checksum or bad geometry;
+`FSIMG_EUNSUPPORTED` for an incompatible feature outside the table. The
+probe proves only that the image is an APFS container; the checkpoint `open`
+selects may be newer than block 0.
+
+Opening with an assumed identity (`--force`, `FSIMG_READ_ASSUME_IDENTITY`)
+runs no probe. `open` waives the magic of block 0 alone, through
+`fsimg_reader_identity()`, which records the failed check so that full
+verification fails as the format contract states, and it runs every
+validation check the probe makes, at any input length. The checksum is one
+of them and is never waived. Fletcher-64 covers the magic, so the flag
+changes the result only for a block 0 whose magic differs and whose
+checksum is valid for the bytes it holds; a block whose magic was damaged
+after its checksum was computed fails the checksum, with or without the
+flag. A descriptor block is a checkpoint candidate only with its own magic,
+whatever was assumed about block 0.
+
+A disk or DMG never reaches this probe with its own header at offset 0,
+because the layers peel it first:
+
+* On a GPT disk the container is the partition of type
+  `7C3457EF-0000-11AA-AA11-00306543ECAC`.
+* On an [Apple Partition Map](design-layers.md#apm) disk no partition type
+  is tied to `apfs`. A partition holding a container, such as one of type
+  `Apple_APFS`, is a candidate like every other used entry and is selected
+  because this probe claims it. The layers read that scheme and never write
+  it, so no APFS image fsimg creates has one.
+* A [DMG](design-layers.md#dmg-udif) is read when its chunks are raw (UDRW),
+  zlib (UDZO) or bzip2 (UDBZ). LZFSE (ULFO) and LZMA (ULMO) chunks fail in
+  the layer as unsupported chunk compression, naming the type, before any
+  APFS code runs: that is a layer limit, not an APFS rule.
 
 ### Checkpoint selection
 
@@ -339,8 +397,8 @@ modulo the data area's size.
 A candidate superblock is a descriptor block whose checksum, magic, kind and
 geometry are valid, whose block size, block count, UUID and areas equal
 block 0's, and whose XID is nonzero. Two candidates with the same XID are an
-ambiguous tie, `FSIMG_ECORRUPT`: each checkpoint writes its superblock once,
-which E8 checks. A candidate's **descriptor run is whole** when:
+ambiguous tie, `FSIMG_ECORRUPT`: each checkpoint writes its superblock once
+(provisional, E8). A candidate's **descriptor run is whole** when:
 
 1. the run has at least two blocks, lies in the ring, and ends at the
    candidate's own slot;
@@ -371,16 +429,53 @@ read once and must have a valid header whose OID, kind and subtype equal the
 mapping's and whose XID is not above the checkpoint's, and the container
 object map must be a valid physical object. A failure in this phase is
 `FSIMG_ECORRUPT`: the reader does not fall back to an older checkpoint after
-judging a newer one complete, and E8 checks whether macOS does. Selection
-therefore reads the `D` descriptor blocks once, the selected run's mapping
-blocks a second time, and one checkpoint's data run.
+judging a newer one complete (provisional: E8 shows whether macOS does).
+Selection therefore reads the `D` descriptor blocks once, the selected run's
+mapping blocks a second time, and one checkpoint's data run.
 
 Block 0 does not select the checkpoint; it constrains the candidates and is
 a copy of a committed superblock. A block-0 XID larger than every whole
-candidate's is `FSIMG_ECORRUPT`, a rule E8 checks against the order in which
-macOS writes block 0 and the descriptor ring. A noncontiguous area (bit 31
-set) is `FSIMG_EUNSUPPORTED`: its tree layout has no evidence, and E1 and
-E12 check that native containers use contiguous areas.
+candidate's is `FSIMG_ECORRUPT` (provisional: E8 shows the order in which
+macOS writes block 0 and the descriptor ring).
+
+A noncontiguous area (bit 31 set) is `FSIMG_EUNSUPPORTED`: its tree layout
+has no evidence, and that native containers use contiguous areas is
+provisional (E1, E12). The bit is tested with block 0's geometry, before any
+ring rule, so every `FSIMG_ECORRUPT` of this section describes a container
+whose areas are contiguous.
+
+A descriptor or data block past the end of a
+[truncated container](#truncated-containers) is not a slot that fails these
+rules: its read fails the open.
+
+### Truncated containers
+
+A slice shorter than `N * B` opens by the
+[common rule for a truncated volume](architecture.md#byte-and-object-boundaries).
+The driver has no truncation check of its own. Every read goes through the
+common read funnel, which fails a request past the slice with
+`FSIMG_ECORRUPT`, "image is truncated", and volume information reports
+`N * B` as the container's length, from which the reader core derives
+`missing_bytes`. The rest follows:
+
+* **Selection never passes over a missing block.** The ring pass reads all
+  `D` descriptor blocks and the selected checkpoint's data run through the
+  funnel, so a cut through either fails the open. No candidate is judged
+  "not whole" because its blocks are missing, which would silently select
+  older state from a truncated image.
+* **Nothing is sized from `N` while opening.** The mapping array is sized by
+  mapping blocks already read, and the space manager object is read whole
+  before its free count is used. The chunk-information blocks and bitmaps,
+  whose number follows `N`, are read only by verification.
+* **A missing tail nothing references does not stop reading.** Open, list
+  and extract succeed when every object, node and extent they touch lies in
+  the slice; one that does not fails where it is reached, and a partial
+  extraction is not success.
+* **Addresses are still judged against `N`.** An address at or past `N` is
+  corrupt; an address below `N` and past the slice is truncation.
+* **Full verification fails on every truncated container**, in the reader
+  core, before the driver's verification runs, and wrap and compose refuse
+  to package one.
 
 ### Ephemeral objects and the space manager
 
@@ -421,16 +516,18 @@ structures are read only by verification. Its layout:
 | 340 | 4 | Structure size |
 
 Its counts are tied to the geometry, so no loop over them is bounded only by
-the work budget. These relations come from [A1] and are checked against
-every E1 and E12 capture before the driver enforces them: the main device's
+the work budget. These relations come from [A1] and are provisional until
+every E1 and E12 capture satisfies them; one a capture contradicts is
+corrected here before the driver enforces it: the main device's
 block count is `N` and its chunk count
 `ceil(N / (8 * B))`; chunks per chunk-information block are
 `floor((B - 40) / 32)` and chunk-information blocks per address block
 `floor((B - 40) / 8)`; the chunk-information block count is
 `ceil(chunks / chunks per block)`; the address-block count is zero when the
-chunk-information addresses fit the object, as E1 and E12 establish, and
-otherwise `ceil(chunk-information blocks / per address block)`; the address
-array lies inside the object, whose mapped size must be the smallest whole
+chunk-information addresses fit the object (the threshold is provisional,
+E1 and E12), and otherwise
+`ceil(chunk-information blocks / per address block)`; the address array
+lies inside the object, whose mapped size must be the smallest whole
 number of blocks holding the structure and that array. The internal-pool and
 tier-2 fields are consistent with the same rules. Any other value is
 corrupt.
@@ -444,17 +541,97 @@ address blocks otherwise. Each bitmap block covers one chunk, bit `i` of
 byte `j` (least significant first) standing for block `8j + i` of the chunk.
 The internal pool is a block range reserved as a whole in the main bitmaps,
 from which the space manager allocates its own blocks, tracked by the pool's
-bitmap ring; which space-manager blocks live inside it is an observation
-(E1, E12). A free queue is an ephemeral B-tree whose keys are
-`(XID, block)` and whose value is a block count, absent in a ghost record
-meaning one block. The reaper (kind 17) holds the state of deferred
-deletions; the reader validates its header and requires no reaping in
-progress only where verification states so.
+bitmap ring; which space-manager blocks live inside it is provisional
+(E1, E12), and the [writer values](#writer-values) hold the working
+placement.
 
-How the native formatter sizes the internal pool, the checkpoint areas and
-the address arrays, whether a fully free chunk has a bitmap block, and how
-bits past `N` in the last chunk are set are observations (E1, E12) that the
-verifier's and writer's tables record.
+The **fixed regions** of a container are the block ranges its superblock
+and space manager state by position and size: block 0, the checkpoint
+descriptor area, the checkpoint data area, the internal pool, and the
+pool's bitmap ring, which lies at the bitmap base, outside the pool. This
+list is defined once. Verification claims exactly these ranges, from the
+fields it decoded, and the writer lays out exactly these ranges, from the
+fields it is about to encode, so the two cannot disagree about which
+blocks are fixed.
+
+That a chunk with no allocated block has no bitmap block, stored as a zero
+bitmap address, is provisional (E1 and E12, whose large sparse containers
+hold entirely free chunks). On that reading a zero address with a free count
+equal to the chunk's block count is an entirely free chunk and any other
+zero address is corrupt; if the captures show a bitmap block for every
+chunk, every zero address is corrupt. How the native formatter sizes the
+internal pool, the checkpoint areas and the address arrays, and how it sets
+the bits past `N` in the last chunk, are provisional too (E1, E12);
+[writer values](#writer-values) holds the working values. Until E1 shows the
+rule for the bits past `N`, verification does not check them.
+
+### Free queues
+
+The space manager names three free queues: the internal pool's, the main
+device's and tier 2's. Each is a 40-byte entry: a u64 count of queued
+blocks, the OID of its tree, the oldest XID in it, a u16 node limit, and
+reserved bytes. The tier-2 entry is all zero outside Fusion.
+
+A queue's tree is an ephemeral B-tree of subtype 9 with fixed 16-byte keys,
+`(XID u64, first block i64)`, ordered by XID and then block, and an 8-byte
+value, the run's block count. A ghost record has no value and stands for one
+block. Its nodes are ephemeral objects in the checkpoint data area, found
+through the checkpoint's mappings like the space manager itself.
+
+An empty queue has two legal forms, and the reader accepts both: a zero tree
+OID with a zero count, and a tree whose root is a leaf with no keys. In
+every queue the count equals the sum of its records' runs, and each run lies
+inside its domain: `[1, N)` for the main queue, the internal pool's range
+for the pool's. What the oldest XID and the node limit hold in native queues
+is provisional (E1 for an empty queue, E8 for one with entries); until then
+the reader requires only an oldest XID not above the checkpoint's and does
+not interpret the node limit. Which empty form the native formatter writes
+is provisional (E1) and is a [writer value](#writer-values).
+
+### Reaper
+
+The reaper (kind 17, ephemeral) holds the state of deletions too large for
+one transaction, such as a deleted volume's trees:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 32 | 8 | Next reap ID |
+| 40 | 8 | Completed reap ID |
+| 48 | 8 | Head of the reap list: the OID of a reap-list object (kind 18, ephemeral), zero when there is none |
+| 56 | 8 | Tail of the reap list |
+| 64 | 4 | Flags: `0x1` reserved and always set, `0x2` an object is being reaped |
+| 68 | 4 | Reap-list object count |
+| 72 | 4 | Kind of the object being reaped |
+| 76 | 4 | Its size |
+| 80 | 8 | OID of the volume that owned it |
+| 88 | 8 | Its OID |
+| 96 | 8 | Its XID |
+| 104 | 4 | Flags of its reap-list entry |
+| 108 | 4 | State buffer size |
+| 112 | | State buffer |
+
+The reaper is **idle** when its list count is zero and flag `0x2` is clear.
+This definition is provisional (E1 for a fresh container, E16 for a used
+one), and it is the default if neither settles it. It does not constrain
+the head and tail: they may be zero or name an empty reap-list object, an
+ephemeral object of the selected checkpoint whose blocks the checkpoint
+data area's claim covers, so an empty list adds no claim. Nor does it
+constrain the six fields describing an object being reaped, which mean
+nothing while the flag is clear. If the experiments show that every idle
+native reaper has a zero head and tail, the definition tightens to require
+it. The state buffer lies inside the object. The values a fresh native
+container gives the two reap IDs and the state buffer size are provisional
+(E1); the reader does not constrain them.
+
+Reading never depends on the reaper: an object awaiting deletion is in no
+volume's namespace. Verification of a container whose reaper is not idle is
+incomplete with `FSIMG_EUNSUPPORTED`, naming the pending reap: the blocks of
+an object still being reaped are allocated and no live structure owns them,
+so the allocation check cannot tell them from leaks. How a native container
+accounts those blocks is provisional (E17, which deletes a populated volume
+and a snapshot and captures the container before the reaper finishes).
+Incomplete verification is the default, and it stays if E17 catches no
+reaper at work.
 
 ## Object maps
 
@@ -482,10 +659,11 @@ value is deleted; it never falls through to an older entry. A found value
 must have a size that is a positive multiple of `B`, an address range inside
 `[1, N)`, and no flag outside `{saved}`; encrypted is unsupported and
 no-header is unsupported, since the sealed trees fsimg reads are physical
-and never mapped (E11 checks this). The object read at the address must
+and never mapped (provisional, E11). The object read at the address must
 satisfy the header rules with its OID equal to `o` and its XID equal to the
-found key's XID. A miss for a reference the format requires is
-`FSIMG_ECORRUPT`.
+found key's XID (provisional: E1, E3 and E8; if a capture shows an object
+older than its key, the rule becomes "not above the key's XID"). A miss for
+a reference the format requires is `FSIMG_ECORRUPT`.
 
 Object-map flags follow a closed table:
 
@@ -493,13 +671,15 @@ Object-map flags follow a closed table:
 | --- | --- | --- |
 | `0x1` manually managed (no snapshot support) | Required | Forbidden |
 | `0x2` encrypting, `0x4` decrypting, `0x8` key rolling | Unsupported | Unsupported |
-| `0x10` crypto generation | As E1 shows | As E1 shows |
+| `0x10` crypto generation | Accepted (provisional, E1) | Accepted (provisional, E1) |
 | Any other bit | Unsupported | Unsupported |
 
-The snapshot count and the most recent snapshot XID must agree with the
-volume's snapshot tree, and the container map has no snapshots. A nonzero
-pending revert range is unsupported. The writer emits the flags of the
-native empty container.
+Whether native unencrypted maps set the crypto-generation flag is
+provisional (E1). It changes no lookup, so it stays accepted and ignored if
+E1 cannot say. The snapshot count and the most recent snapshot XID must
+agree with the volume's snapshot tree, and the container map has no
+snapshots. A nonzero pending revert range is unsupported. The flags the
+writer emits are a [writer value](#writer-values).
 
 The container object map resolves volume superblocks; a volume's object map
 resolves that volume's filesystem-tree nodes and, where present, its other
@@ -567,6 +747,11 @@ Every node a reader visits passes these checks before any entry is used:
 
 A node's address is never revisited on one root-to-leaf path, and the height
 bound with the per-tree key-count and node-count work charge bounds a scan.
+The two failures differ in kind. A repeated address is `FSIMG_ECORRUPT`: no
+valid tree has one. A height above 16 levels is `FSIMG_EUNSUPPORTED`: such a
+tree can be valid, and the bound is fsimg's. They cannot be confused,
+because levels fall by one per step: a cycle shows as a level mismatch or a
+repeated address within 16 steps, never as excess height.
 The footer's longest-key, longest-value and count fields are statistics: they
 are never used to size a buffer, and full verification checks the counts.
 
@@ -583,9 +768,12 @@ are never used to size a buffer, and full verification checks the counts.
 
 Integer fields compare numerically, never as serialized bytes. How names of
 different lengths compare, and whether the hashed record's whole 32-bit word
-or only its hash bits order the records, are evidence questions (E4); the
+or only its hash bits order the records, are provisional (E4, E5); the
 reader's ordering checks use the observed rule, so a wrong guess would make
-valid images fail rather than misread.
+valid images fail rather than misread. If an experiment leaves a tie-break
+undecided, the ordering check accepts either order of the keys it concerns,
+and a lookup scans the records that share the decided part of the key
+instead of seeking among them.
 
 ## Volumes
 
@@ -638,14 +826,14 @@ transition native tools complete before use and is `FSIMG_EUNSUPPORTED`.
 
 | Mask | Bits | Reader | Writer |
 | --- | --- | --- | --- |
-| Incompatible | `0x1` case-insensitive, `0x8` normalization-insensitive | Accepted; select the name rules | Case-insensitive: `0x1`; case-sensitive: `0x8` if native (E2) |
+| Incompatible | `0x1` case-insensitive, `0x8` normalization-insensitive | Accepted; select the name rules | Case-insensitive: `0x1`; case-sensitive: `0x8` (provisional, E2) |
 | Incompatible | `0x2` dataless snapshots | Accepted for the live view; a snapshot view of such a volume is unsupported | Never |
 | Incompatible | `0x4` encryption rolled | Accepted only with the unencrypted flag | Never |
 | Incompatible | `0x10` incomplete restore | Unsupported | Never |
 | Incompatible | `0x20` sealed | The sealed profile | Never |
 | Incompatible | Any other bit | Unsupported | Never |
 | Read-only compatible | None defined | Any bit accepted for reading | Zero |
-| Optional | `0x1`, `0x4` defragmentation, `0x2` hard-link map records, `0x8` strict access time, `0x10` volume-group inode space | Accepted | Native default (E2) |
+| Optional | `0x1`, `0x4` defragmentation, `0x2` hard-link map records, `0x8` strict access time, `0x10` volume-group inode space | Accepted | Native default, provisional (E2) |
 | Optional | Any other bit | Accepted, ignored | Never |
 | Flags | `0x1` unencrypted | Required; without it the volume is encrypted and unsupported | Emitted |
 | Flags | `0x8` one key, `0x10` spilled over, `0x20` spillover cleaner | One key: encrypted, unsupported; spillover: Fusion, unsupported | Never |
@@ -726,11 +914,12 @@ fixed part:
 Inode numbers 0 and 1 are never inodes: 1 is the parent of the root. Inode 2
 is the root directory and 3 the private directory, both directories with
 parent 1. Numbers below 16 are reserved, among them 6 and 7 for the snapshot
-and purgeable directories, and no directory record names one (E3 checks
-native volumes). Ordinary inodes are at least 16, or at least
+and purgeable directories, and no directory record names one (provisional,
+E3). Ordinary inodes are at least 16, or at least
 `0x0800000000000000` in a System volume whose volume-group inode space is
 enabled. The internal flags are accepted from a closed table
-established from [A1] and E3 to E6; a flag that changes how content is read
+established from [A1] and, provisionally, E3 to E6; a flag that changes how
+content is read
 and is not implemented, such as one marking data as dataless, is
 unsupported.
 
@@ -748,9 +937,11 @@ sets `FSIMG_META_OWNER`, `FSIMG_META_MODE` with the low twelve mode bits, and
 all four timestamps. A time counts nanoseconds since the Unix epoch: seconds
 are the floor of its quotient by `10^9`, nanoseconds the remainder, the
 basis is UTC and the precision one nanosecond. The reference declares the
-fields unsigned; whether macOS stores times before 1970 as two's-complement
-values is checked by E14, and the reader and writer read the field as
-signed exactly when E14 shows it. Attributes are absent. BSD flags, the
+fields unsigned, and the reader decodes them so. Whether macOS stores a time
+before 1970 as a two's-complement value is provisional (E14): if E14 shows
+it, reader and writer decode the field as signed; if E14 cannot answer, the
+field stays unsigned. The [writer](#writer-values) stores only times that
+read the same either way. Attributes are absent. BSD flags, the
 protection class and the remaining fields have no common representation and
 are not reported; the `UF_COMPRESSED` flag `0x20` selects
 [compression](#transparent-compression).
@@ -781,19 +972,31 @@ either plain, a u16 length and the name with its NUL, or hashed, a u32 word
 whose low 10 bits are the name's length with its NUL and whose high 22 bits
 are the name hash, then the name with its NUL. A volume that is
 case-insensitive or normalization-insensitive uses hashed keys and others
-plain keys (E2); a record of the other variant is corrupt. The value is the
-child inode (u64), the time the entry was added (u64), u16 flags whose low
-four bits are the type, and extended fields.
+plain keys (provisional, E2); a record of the other variant is corrupt. The
+value is the child inode (u64), the time the entry was added (u64), u16
+flags whose low four bits are the type, and extended fields.
 
-A name is the stored bytes without the NUL: nonempty, valid UTF-8 (E14
-checks that macOS refuses other byte strings), without NUL or `/`, and
-neither `.` nor `..`; anything else is corrupt. A name is at most 1022
-bytes, the most a hashed key's length field holds with the NUL; a longer
-plain name is `FSIMG_EUNSUPPORTED`. macOS limits names to 255 characters
-(E14 measures the unit), so native names stay well below that bound. The reader declares no
-[omitted-names profile](design-directories.md#omitted-names): every valid
-name is delivered, including names with control characters such as Finder's
-`Icon\r`, and the CLI escapes them for display as it does every name.
+A name is the stored bytes without the NUL: nonempty, valid UTF-8
+(provisional: E14 shows whether macOS refuses other byte strings), without
+NUL or `/`, and neither `.` nor `..`; anything else is corrupt. The reader
+declares no [omitted-names profile](design-directories.md#omitted-names):
+every valid name is delivered, including names with control characters such
+as Finder's `Icon\r`, and the CLI escapes them for display as it does every
+name.
+
+**Name length.** There are two limits, both counted in UTF-8 bytes of the
+stored name without its NUL, and no other passage states a third:
+
+* **The reader accepts up to 1022 bytes.** A hashed key's 10-bit length
+  field holds at most 1023 with the NUL. A plain key's u16 length can state
+  more, and a longer plain name is `FSIMG_EUNSUPPORTED`.
+* **The writer accepts up to 255 bytes.** This limit is provisional. macOS
+  limits a name to 255 of some unit, and E14 measures whether that unit is
+  bytes, UTF-16 units or characters and the longest name each native tool
+  accepts. A name of at most 255 bytes is at most 255 of any of those units,
+  so 255 bytes is the default if E14 cannot answer. If E14 shows macOS
+  accepting longer names, the limit rises to the longest byte length every
+  native tool accepts, never above the reader's 1022.
 
 The comparison form of a name depends on the volume:
 
@@ -806,13 +1009,39 @@ The hash is computed from the comparison form as a sequence of code points:
 CRC-32C (the Castagnoli polynomial, reflected) over the code points as
 little-endian 32-bit units, with the conventions [A1] gives for the initial
 value, the final complement and the terminating NUL, keeping the low 22
-bits. E4 settles, with test vectors, those conventions, the order of
-folding and decomposition, whether case folding is full or simple, how CJK
-compatibility ideographs decompose, and which Unicode version macOS
-applies, before the driver checks any hash. The tables are generated from
-the Unicode Character Database at the version E4 establishes, with their
-Unicode-3.0 license notice, by the same generator family as the FAT tables;
-the profile name carries the version.
+bits. E4 settles two groups of provisional rules with test vectors, and
+each group has its own gate:
+
+* **Hash framing:** the initial value, the final complement and the
+  terminating NUL. They affect only the stored hash. If E4 cannot settle
+  them, the reader does not check stored hashes, which no read depends on
+  since a directory is listed by its owner range, and the writer, which
+  must emit them, stays unregistered.
+* **Comparison semantics:** which Unicode version macOS applies, whether
+  case folding is full or simple, the normalization form and its order
+  with folding, and how CJK compatibility ideographs decompose. They decide
+  which names are equal, so they cannot be left unchecked: a wrong form
+  would merge distinct names or separate equal ones. A personality whose
+  comparison form E4 has not settled is refused for reading with
+  `FSIMG_EUNSUPPORTED` naming the personality, and the writer does not
+  offer it. A volume that compares names by their bytes depends on none of
+  these rules and is never refused for them.
+
+The tables are the driver's own. `tools/gen-apfs-tables.rb` generates
+`lib/formats/apfs/unicode-tables.h` from the Unicode Character Database at
+the version E4 establishes, with the Unicode-3.0 license notice. The
+generator requires that version as its input and has no default, so no
+table is generated from a guess. `docs/references.md` records the digests
+of the pinned input files. HFS
+Plus owns its tables the same way, and the two are not shared: the formats
+apply different Unicode versions and folding rules, so one owner would hold
+two table sets behind one name. The profile name carries the version.
+
+A comparison form is at most three times its name's length in bytes, which
+is what lets the [namespace key](design-directories.md#namespace) hold the
+form of a 1022-byte name. The bound is provisional until the tables exist:
+the generator computes the largest expansion of any code point and fails
+the build if it exceeds three.
 
 The reader checks each hashed record's length and hash, and the namespace key
 it emits is the comparison form encoded as UTF-8, so two names one volume
@@ -829,12 +1058,24 @@ stream reference (flag `0x1`): a stream OID and a data-stream field. Flag
 stream flags is set, an inline length fits the record and is at most 3804
 bytes, and a stream's extents follow the [data-stream rules](#data-streams-and-file-extents).
 
-The common entry model has no extended attributes, so the reader exposes
-none: Finder information, resource forks, quarantine flags and other
-attributes are not listed, extracted or counted as losses, a limitation the
-user documentation states. The driver reads three names itself:
-`com.apple.fs.symlink`, `com.apple.decmpfs` and `com.apple.ResourceFork`.
-Verification validates every attribute record.
+The common entry model has no extended attributes, so the reader delivers
+none: attribute names and values are neither listed nor extracted. The
+driver consumes three attributes itself, each only on the inode it serves:
+`com.apple.fs.symlink` on a symbolic link, `com.apple.decmpfs` on a
+compressed file, and `com.apple.ResourceFork` on a file whose compression
+type stores its content there.
+
+An inode with any other attribute record holds data the entry model cannot
+carry: Finder information, a resource fork that compression does not
+consume, quarantine flags and every other name. Each entry naming that
+inode sets
+[`FSIMG_META_EXTRA_DATA`](design-metadata.md#metadata-fields), as the
+[HFS Plus reader](design-hfsplus.md#stored-attributes-and-the-extra-data-mark)
+does. The bit makes the omission visible per entry in listings, in `--json`
+and in the extraction loss report; no format stores it, so the capability
+record's `metadata_fields` does not list it. An inode's attributes are the
+kind-4 records under its own number, next to its inode record, so finding
+them costs no second lookup. Verification validates every attribute record.
 
 ### Hard links and siblings
 
@@ -842,7 +1083,8 @@ Several directory records may name one non-directory inode, whose link count
 counts them. Each name of an inode with several names has a sibling-link
 record under the inode (sibling ID, parent inode, name), and its directory
 record carries the sibling ID; a volume with the hard-link map feature also
-has a sibling-map record under each sibling ID naming the inode (E5). The common model has no hard-link
+has a sibling-map record under each sibling ID naming the inode
+(provisional, E5). The common model has no hard-link
 representation, so the reader delivers every name as its own entry with the
 inode's metadata and content; a file's content is read through each name
 independently. Verification checks that the link count, the directory
@@ -852,8 +1094,9 @@ A directory has exactly one name. A directory inode's parent must be the
 directory whose record names it, and the root's parent is 1. This makes a
 directory cycle impossible: the first directory to repeat on a path would
 need two parents. A directory inode also carries the name extended field,
-which must equal the name of the record naming it (E3 checks that native
-directories always carry it), so a second record naming the directory under
+which must equal the name of the record naming it (provisional: E3 shows
+whether native directories always carry it), so a second record naming the
+directory under
 another name in the same parent is corrupt when it is replayed, and a second
 record under the same name is a namespace collision. Directory sharing is
 therefore detected exactly, without a claimed-object set.
@@ -874,14 +1117,16 @@ without gaps or overlap: each starts where the previous one ends, and each
 length is a positive multiple of `B`. No extent extends past the larger of
 the size rounded up to whole blocks and the data-stream field's allocated
 bytes, which exceed the rounded size when space is preallocated; mapped
-extents, not holes, are what the allocated bytes count (E3 and E6 check
-native preallocation and sparse accounting). Logical bytes
+extents, not holes, are what the allocated bytes count (provisional: E3 and
+E6 show native preallocation and sparse accounting). Logical bytes
 past the last extent and below the size read as zero, as do extents whose
-physical block is zero, which mark holes (E6 checks both representations).
+physical block is zero, which mark holes (both representations are
+provisional, E6).
 A mapped extent's blocks lie inside `[1, N)`. Extent flags must be zero, and
-crypto IDs follow the closed table E3 and E6 establish for unencrypted
-volumes. Content past the size, including preallocated extents, is never
-delivered. Two streams may name the same blocks: that is a clone, legal
+crypto IDs follow a closed table for unencrypted volumes. The table is
+provisional (E3, E6) and holds zero alone until a capture adds a value, so
+no extent that might be encrypted is delivered. Content past the size,
+including preallocated extents, is never delivered. Two streams may name the same blocks: that is a clone, legal
 when the extent-reference tree accounts for it.
 
 The reader resolves an offset by seeking the last extent at or below it, so
@@ -895,14 +1140,16 @@ whose kind is 2; its value is a u64 whose low 60 bits are the extent's
 length in blocks and whose high 4 bits are its kind (`1` new or `2` update
 on disk; any other is corrupt), the owning object's ID (u64), and a signed
 32-bit reference count. In the live tree the count is positive and kinds
-are new; how a snapshot's tree records update kinds and counts is checked
-by E9.
+are new; how a snapshot's tree records update kinds and counts is
+provisional (E9).
 
 ### Symbolic links
 
 A symbolic link's target is the `com.apple.fs.symlink` attribute, owned by
 the filesystem, inline, ending in one NUL that is not part of the target.
-The target is 1 to 1023 bytes, a bound E14 checks; a longer stored target
+The target is 1 to 1023 bytes, a bound that is provisional (E14 creates
+1023- and 1024-byte targets) and stays if E14 cannot answer, being the limit
+the capability record declares; a longer stored target
 is `FSIMG_EUNSUPPORTED`, an empty or unterminated one, or one with an
 interior NUL, is corrupt. The entry's size is the target length and its
 content the target bytes, delivered from the decoded record.
@@ -923,42 +1170,54 @@ inode carries one, and the data stream must be empty.
 | 4 | Resource fork | zlib chunks | System zlib |
 | 7 | Inline | LZVN | Imported decoder |
 | 8 | Resource fork | LZVN chunks | Imported decoder |
-| 9, 10 | Inline, resource fork | Uncompressed | Copied (E7) |
+| 9, 10 | Inline, resource fork | Uncompressed | Copied (provisional, E7; unsupported if no specimen shows the framing) |
 | 11 | Inline | LZFSE | Imported decoder |
 | 12 | Resource fork | LZFSE chunks | Imported decoder |
 | 13, 14 | Inline, resource fork | LZBITMAP | Unsupported: no public decoder |
 | other | | | Unsupported |
 
 **Inline types.** The compressed bytes follow the header in the attribute.
-Each inline codec marks stored-uncompressed data with a leading byte, which
-E7 records per codec. Inline content is decoded whole into one 64 KiB
-buffer: an inline type's uncompressed size is at most 64 KiB, which E7
-checks against native files, and a larger one is unsupported.
+Each inline codec marks stored-uncompressed data with a leading byte. The
+markers are provisional for APFS (E7); the working values are those the
+[HFS Plus design](design-hfsplus.md#transparent-compression) measured for
+the same attribute, `0xFF` for zlib and `0x06` for LZVN, and they stay if E7
+finds no such file. Inline content is decoded whole into one 64 KiB
+buffer: an inline type's uncompressed size is at most 64 KiB (provisional,
+E7), and a larger one is unsupported.
 
 **Resource-fork types.** The compressed bytes are in the
 `com.apple.ResourceFork` attribute, read as a stream. The zlib type wraps
 its chunk table in the classic resource-fork format, whose header is
 big-endian, while the chunk table inside it is little-endian; the LZVN and
 LZFSE types begin the attribute with a little-endian table of chunk
-offsets. E7 tabulates both framings field by field. The table gives each
+offsets. Both framings are provisional until E7 tabulates them field by
+field; a type E7 finds no specimen of is unsupported. The table gives each
 64 KiB chunk's compressed range; every chunk decodes to exactly 64 KiB
-except the last, which decodes to the remainder. A short or long result, an
-out-of-range or overlapping chunk, a table that does not cover the size, or
-input left after a chunk's end marker (unless E7 shows macOS pads chunks) is
-corrupt.
+except the last, which decodes to the remainder. A stored chunk is at most
+`FSIMG_LZFSE_INPUT_MAX` bytes, 69632, the input bound the
+[codec adapter](design-codecs.md#imported-lzfse-and-lzvn-decoders) states,
+which the driver applies to every codec's chunk as the HFS Plus reader
+does. A short or long result, an out-of-range, overlapping or longer chunk,
+a table that does not cover the size, or input left after a chunk's end
+marker is corrupt; that macOS never pads a chunk is provisional (E7).
 
 Decoded bytes count toward the extraction output limit like any other
 content, and that limit defaults to 16 times the selected volume length, so extracting
 a volume whose compressed files, holes, clones or hard links expand past
-that needs an explicit `-l output`, as the
-[security design](design-security.md#safe-extraction) states.
+that needs an explicit `-l output=BYTES`, or `-l output=unlimited` for a
+trusted image, as the [security design](design-security.md#safe-extraction)
+states.
 
 **Delivery.** Delivery receives decoded bytes one chunk at a time as
-[held extents](design-content.md), so memory is one 64 KiB output and one
-compressed chunk regardless of file size, and decoding work is charged per
-byte produced. The LZVN and LZFSE decoders are Apple's BSD-3-Clause
+[held extents](design-content.md), so memory is one 64 KiB output buffer,
+one stored chunk of at most `FSIMG_LZFSE_INPUT_MAX` bytes and the LZFSE
+decoder's scratch, regardless of file size, and decoding work is charged
+per byte produced. The LZVN and LZFSE decoders are Apple's BSD-3-Clause
 reference code imported under the
-[codec design](design-codecs.md#imported-lzfse-and-lzvn-decoders).
+[codec design](design-codecs.md#imported-lzfse-and-lzvn-decoders). Both
+return `FSIMG_EUNSUPPORTED` on a big-endian host, so types 7, 8, 11 and 12
+are unsupported there. The zlib types and the rest of the reader are
+unaffected, since every APFS field is decoded from bytes.
 
 ## Snapshots
 
@@ -978,19 +1237,22 @@ gives. Each object is checked against the XID of the structure that reaches
 it: a physical object of the current checkpoint, such as the object map
 itself, against the checkpoint's XID; a virtual object against its lookup
 XID. Which object map the snapshot superblock names, and that copy's header
-OID and storage class, are checked by E9 before the profile is enabled; the
-reader otherwise reads exactly as for the live volume. A snapshot of a
-dataless-snapshot volume is unsupported. Snapshot flags and extended
-metadata are accepted from a closed table (E9). The writer emits an empty
-snapshot tree.
+OID and storage class, are provisional (E9) and settled before the profile
+is enabled; the reader otherwise reads exactly as for the live volume. A
+snapshot of a dataless-snapshot volume is unsupported. Snapshot flags and
+extended metadata are accepted from a closed table that is provisional
+(E9). If E9 has no specimen, because no native tool or owner image
+provides a snapshot, the snapshot profile is not enabled and `snapshot=`
+fails with `FSIMG_EUNSUPPORTED`. The writer emits an empty snapshot tree.
 
 ## Sealed volumes
 
 A sealed volume has the sealed incompatible bit, a nonzero integrity
 metadata OID, and a nonzero sealed file-extent tree. Its filesystem tree is
 physical and hashed: each index value carries the digest of its child, and
-leaf nodes may have no header (the tree types and node flags are checked by
-E11). Its file extents are in the sealed file-extent
+leaf nodes may have no header (the tree types and node flags are
+provisional, E11; without a sealed specimen the profile is not enabled and
+a sealed volume is `FSIMG_EUNSUPPORTED`). Its file extents are in the sealed file-extent
 tree, keyed by private ID and logical offset, instead of the filesystem tree.
 The integrity metadata object (kind 30) holds a version, flags, a hash type
 (1 SHA-256, 2 SHA-512/256, 3 SHA-384, 4 SHA-512), the offset of the root hash
@@ -1038,8 +1300,8 @@ and its records reconciled:
 * each non-directory's link count equals its names, which its sibling links
   and sibling maps match;
 * every inode other than the root and private directories is named by a
-  directory record, or lies in the private directory, which E3 checks is
-  where native volumes place unnamed inodes;
+  directory record, or lies in the private directory, which is where native
+  volumes place unnamed inodes (provisional, E3);
 * each data-stream ID's reference count equals the inodes and attributes
   using it, and every file extent belongs to a live stream;
 * every attribute is well formed, and names equivalent under the volume's
@@ -1047,12 +1309,15 @@ and its records reconciled:
 * the volume superblock's object counts equal the counted inodes by kind.
 
 **Allocation.** Every block is claimed exactly as the space manager says.
-Claims in the main domain come from block 0 and the checkpoint areas; the
-internal pool, as one range; every object-map node and every live object
-version an object map maps, tombstones excluded, including the versions
-snapshots retain; every physical tree node, including snapshot trees; the
-reaper's lists; every entry of the main free queue; and the data extents
-described below.
+Claims in the main domain come from the
+[fixed regions](#ephemeral-objects-and-the-space-manager), one range each;
+the object map itself (kind 11, physical) of the container and of each
+volume, and every node of each map's tree; every live object version an
+object map maps, tombstones excluded, including the versions snapshots
+retain; every physical tree node, including snapshot trees; a nonzero
+keylocker range; every entry of the main free queue; and the data extents
+described below. A reaper that is not idle makes the verification
+incomplete, as [its section](#reaper) states.
 
 The internal pool is a domain of its own. Space-manager blocks inside it
 and the entries of the internal-pool free queue are claims in that domain,
@@ -1063,21 +1328,25 @@ Data blocks are claimed through the physical-extent records of every
 extent-reference tree of a volume, the live tree and each snapshot's. In a
 sealed volume, whose file extents live in the sealed file-extent tree,
 those extents are checked against the reference records in the same way,
-and whether a sealed volume has an extent-reference tree at all is checked
-by E11; without one, its sealed file extents are its data claims.
+and whether a sealed volume has an extent-reference tree at all is
+provisional (E11); without one, its sealed file extents are its data claims.
 Records of one tree never overlap; records of different trees of one
 volume may, since a snapshot and the live volume share unchanged extents,
 so a block a snapshot alone still uses is claimed by that snapshot's
 record. Every mapped file extent of the live filesystem tree lies inside a
 live physical-extent record, and file extents overlap one another only
 inside one such record, whose reference count equals the live streams
-sharing it. How a snapshot's references enter the counts is checked by E9.
+sharing it. How a snapshot's references enter the counts is provisional
+(E9).
 
 Metadata claims are exclusive, and data claims never overlap metadata. A
 block is allocated in the main bitmap exactly when it is claimed; each
-chunk's free count and the device's free count equal the clear bits; bits
-past `N` follow the observed rule (E1). Each volume's allocated block count
-follows the observed accounting (E3).
+chunk's free count and the device's free count equal the clear bits. Two
+checks are provisional and are not made until their experiment gives the
+rule: the bits past `N` (E1), and each volume's allocated block count (E3).
+
+A [truncated container](#truncated-containers) never reaches these checks:
+the reader core fails its verification first.
 
 **Namespace.** The selected volume's walk performs namespace validation,
 path limits and, with payload read-through, reads every file's content
@@ -1093,10 +1362,10 @@ makes the verification incomplete with `FSIMG_EUNSUPPORTED`.
 The writer builds a new container in one deterministic layout that
 reproduces what the native formatter, `newfs_apfs`, produces for an empty
 container of the same size (E1, E2), then adds the catalog's entries in one
-transaction. It emits:
+transaction. This list names what it emits; [writer values](#writer-values)
+owns every number and field value:
 
-* block size 4096, one checkpoint, XID 1 for every object unless E1 shows a
-  native requirement otherwise, and the native checkpoint-area sizes for the
+* block size 4096 and one checkpoint, in the native checkpoint areas for the
   container's size;
 * one volume in slot 0, unencrypted, role none, named by the label;
 * case-insensitive by default; case-sensitive with `case=sensitive`, with
@@ -1104,17 +1373,18 @@ transaction. It emits:
 * the native-required records of an empty volume: the root and private
   directories, and every other record E1 shows `newfs_apfs` writing;
 * for each regular file: an inode with a name field and a data-stream field,
-  a data-stream ID record with count 1, and, when nonempty, one file extent
-  over a contiguous run of blocks and one physical-extent record with count
-  1 owned by the stream;
+  a data-stream ID record, and, when nonempty, one contiguous run of
+  blocks, the file extents that tile it, one unless the run is longer than
+  the [extent cap](#writer-values), and one physical-extent record owned by
+  the stream;
 * for each directory: an inode with a name field and child count; for each
-  symbolic link: an inode with mode `0120755` unless the entry gives a mode,
-  and an inline filesystem-owned `com.apple.fs.symlink` attribute; for each
-  FIFO: an inode with no data stream;
+  symbolic link: an inode and an inline filesystem-owned
+  `com.apple.fs.symlink` attribute; for each FIFO: an inode with no data
+  stream;
 * a directory record in the parent for every entry, in the key variant the
   volume's flags select, with the type of its kind;
 * an empty extent-reference tree when there are no files, an empty snapshot
-  tree, empty free queues and an idle reaper in the native form;
+  tree, empty [free queues](#free-queues) and an idle [reaper](#reaper);
 * the space manager's chunk structures and bitmaps marking exactly the
   allocated blocks.
 
@@ -1124,34 +1394,45 @@ writer, so the writer emits no holes. It emits no clones, compression,
 extended attributes, hard links, snapshots, sealing, encryption or second
 volume. A catalog name is checked against the volume's rules: the catalog
 already refuses exact duplicates, and the writer refuses two siblings whose
-comparison forms are equal, naming both, with `FSIMG_EINVAL`. A name longer
-than 255 bytes or outside the reader's name rules fails the same way; E14
-measures whether macOS's own limit counts bytes or characters, and the
-writer's limit follows the bytes macOS accepts.
+comparison forms are equal with `FSIMG_EINVAL`, whose path names one of
+them: an error carries one path. A name longer
+than the writer's [name length](#directory-records-and-names) limit or
+outside the reader's name rules fails the same way.
 
 ### Settings and identities
 
 | Setting | Field | Meaning |
 | --- | --- | --- |
-| `-L` | `label` | Volume name, UTF-8 of at most 255 bytes; NULL selects `Untitled` |
+| `-L` | `label` | Volume name, UTF-8 of at most 255 bytes; NULL selects the [default label](#writer-values) |
 | `uuid=` | `volume_uuid` | Volume UUID in text order. All zero is refused outside reproducible mode; in reproducible mode it is derived from the epoch by the [layer identifier rule](design-layers.md#identifiers) with role 5. Without `-R` and `uuid=` the CLI supplies a random version 4 UUID |
 | `case=` | `case_sensitive` | `insensitive`, the default, or `sensitive` |
 | `cluster=` | `allocation_unit_bytes` | Zero or 4096 |
 | `sector=` | `sector_bytes` | Zero or 4096: APFS addresses whole blocks |
 
+The writer does not carry `FSIMG_SETTING_PLACEMENT`, so a non-empty
+[placement](design-placement.md) list fails the common applicability check.
+
 The container UUID is derived from the volume UUID: the first 16 bytes of
 the SHA-256 of the ASCII bytes `fsimg-apfs-container` followed by the volume
 UUID, with the version nibble set to 8 and the variant bits to `10`. It is
 therefore distinct from the volume UUID, reproducible, and needs no setting.
-Owner and group default to 0 and modes to `0755` for directories and
-symbolic links and `0644` for files and FIFOs, under the
-[metadata policy](design-metadata.md#writer-policy). A time is stored in
-nanoseconds; an absent time takes the format time, the planning clock or, in
-reproducible mode, the epoch, and a time outside the field's range, which
-E14 decides as the [inode rules](#inodes) state, is a loss under the
-policy. Directory-record add times, the
-superblock times and the formatting record's time are the format time; the
-formatting identifier is `fsimg` followed by the package version.
+An absent owner, group or mode takes the
+[default owner and modes](#writer-values) under the
+[metadata policy](design-metadata.md#writer-policy).
+
+A time is stored in nanoseconds. The **format time** is the UTC host clock
+sampled once during planning or, in reproducible mode, the epoch.
+Directory-record add times, the superblock times and the formatting
+record's time are the format time, and in reproducible mode so is every
+stored time. Otherwise:
+
+* an absent time takes the format time, which is no loss;
+* an entry's time outside the writer's [time range](#writer-values) takes
+  the format time and is a counted loss under the policy;
+* a format time outside that range is refused, not counted: the host clock
+  with `FSIMG_ERANGE` and an epoch at option validation, as the
+  [loss design](design-metadata-loss.md#defaults-and-reproducibility)
+  states.
 
 ### Layout
 
@@ -1160,21 +1441,201 @@ encoded length depends only on the catalog: physical block numbers and
 counts have fixed widths. Planning can therefore pack every tree and count
 its nodes before any block is placed, then place metadata and data, and
 emission fills in the addresses without changing a node's contents
-otherwise. The order of regions follows the native empty container (E1): block 0,
-the checkpoint areas, the space manager's internal pool, then the container
-object map, the volume's superblock, object map, filesystem tree,
-extent-reference tree and snapshot tree, then file data in catalog order,
-each file one run. Trees are built bottom-up from their sorted records, each
-node filled as far as its free space allows, with virtual OIDs and
-object-map records assigned in node order. Every allocated block is a prefix
-of the container plus the native fixed regions, so the bitmaps are runs of
-ones and zeros.
+otherwise.
 
-Automatic sizing chooses the smallest block count that holds the layout,
+The allocated blocks are the fixed regions and the run:
+
+* The [fixed regions](#ephemeral-objects-and-the-space-manager) are the
+  one list verification claims: block 0, the checkpoint descriptor area,
+  the checkpoint data area, the internal pool, which holds the space
+  manager's chunk-information, address and bitmap blocks, and the pool's
+  bitmap ring. Each sits at the block and has the size the native formatter
+  gives it for `N`. Where the address blocks and the ring's blocks lie, and
+  the order of blocks inside the pool, are provisional
+  [writer values](#writer-values).
+* The **run** holds everything else, allocated in ascending block order
+  from the first block outside the fixed regions: the container object map,
+  the volume's superblock, object map, filesystem tree, extent-reference
+  tree and snapshot tree, then file data in catalog order. A fixed region
+  above the run's start is skipped, and a file, whose blocks are always
+  contiguous, starts after a region it would straddle.
+
+Trees are built bottom-up from their sorted records, with virtual OIDs and
+object-map records assigned in node order. The bitmaps are a few runs of
+ones and zeros, built from the region table without a pass over blocks. The
+order above fixes block numbers only: emission may write the blocks in any
+order and produces the same bytes.
+
+Automatic sizing chooses the first block count of its search that holds the layout,
 the native minimum container size, the requested free space and the native
-reserve, if any (E1); the [sizing design](design-sizing.md#dimensions-per-format)
-states the dimensions. The maximum volume count follows the native rule for
-the container's size (E1).
+reserve, if any; the [sizing design](design-sizing.md#dimensions-per-format)
+states the dimensions. Whether a block count fits is not monotone in it: a
+fixed region grows in jumps, one of which can take more blocks than a size
+step adds, and a region above the run's start moves, which changes the file
+that must start after it. The search assumes nothing about how the regions
+change with `N` beyond what each probe measures, and its result is the
+first block count of a deterministic upward sequence that fits. It need not
+be the smallest fitting count: a region that moves can remove a
+displacement gap at a size the sequence skips. Reproducibility needs only
+the sequence to be fixed:
+
+* It starts at a lower bound that holds for every `N`: block 0, the run's
+  blocks and the requested free space, none of which depends on `N`, raised
+  to the minimum container size and rounded up to the size step.
+* A probe that fails measures its shortfall: the blocks by which the run,
+  displacement gaps included, ends past `N`, plus any free space missing.
+  The next probe is `N` plus the shortfall rounded up to the size step, and
+  at least one step. No block count below `N` plus the shortfall can hold
+  the layout `N` planned, and a displaced file costs one probe rather than
+  one per step across its gap. The first probe that fits ends the search.
+* A probe evaluates the layout's arithmetic over the fixed-region list of
+  its `N`. It places nothing and allocates nothing, so its cost is
+  proportional to the number of regions: constant work for each, and one
+  search of the plan's rows for a region the run reaches.
+* Each failed probe advances past its whole shortfall, so the probes
+  number about the times growth of the `N`-dependent regions outruns the
+  previous jump, a handful in practice. The [probe cap](#writer-values)
+  bounds them whatever the regions do; a search that reaches it fails with
+  `FSIMG_ERANGE` naming the cap.
+
+### Writer values
+
+This section owns every value the writer emits; other sections refer to it
+instead of repeating a number. The columns:
+
+* **Source** is [A1] for a value the reference's rules determine, an
+  experiment for a native observation, and policy for fsimg's choice.
+* **Provisional, closed by** is empty for a settled value. A row that names
+  an experiment there is provisional: its *Emitted* cell is the working
+  value until that experiment runs, and "native" there means the value has
+  no working form before E1.
+* **Otherwise** is what the writer emits when the experiment contradicts
+  the working value or cannot isolate the question. *Stays* keeps the
+  working value. *Native* takes the value decoded, field by field, from the
+  E1 capture of the same personality and size, and is used only for a
+  constant of the empty layout: a value that is the same for every catalog
+  and every format time. *Formula* is for a value that depends on the
+  catalog or on time, such as a child count, an object count, an
+  allocated-block count, a footer count, a next identifier or a timestamp.
+  Such a value is always built by the construction in its *Emitted* cell.
+  If the experiment contradicts that construction, the one that reproduces
+  the experiment's captures replaces it, and if none is found the writer
+  stays unregistered. A captured value is never copied into a populated
+  container.
+
+E1 formats containers on the development host with `newfs_apfs`. If it
+yields no capture there is no native layout to reproduce, and the writer
+stays unregistered, the state the [scope](#scope-and-evidence) gives a
+writer that has not passed native qualification. `X` is the checkpoint's
+XID.
+
+**Transactions**
+
+| Value | Emitted | Source | Provisional, closed by | Otherwise |
+| --- | --- | --- | --- | --- |
+| Object XID `X` | 1, in every object header and every object-map key | Policy; [A1] requires only a nonzero XID not above the checkpoint's | E1, E15 | Native: each object of the native empty container keeps its captured XID, and each object fsimg adds takes the newest of them |
+| Container next XID | `X + 1` | [A1] | | |
+| Object-map snapshot count, latest-snapshot XID, snapshot tree and pending revert range | Zero | [A1]: no snapshots | | |
+| Volume revert-to, root-to and encryption-rolling fields | Zero | [A1]: no transition | | |
+
+**Object identifiers**
+
+| Value | Emitted | Source | Provisional, closed by | Otherwise |
+| --- | --- | --- | --- | --- |
+| Container superblock OID | 1 | [A1] | | |
+| Ephemeral and virtual OIDs | From 1024, the first OID [A1] does not reserve, in this order: space manager, reaper, internal-pool free-queue root, main free-queue root, volume superblock, then the filesystem tree's nodes in the order they are completed | [A1] for 1024; policy for the order | E1 | Native order for the objects the native container has, then the filesystem tree's nodes |
+| Container next OID | One past the largest OID assigned | [A1] | | |
+| OID of a physical object: checkpoint-mapping block, object map, object-map node, extent-reference or snapshot tree node, chunk-information block | Its block number | [A1] | | |
+| Volume superblock's tree references | Object map, extent-reference tree and snapshot tree by block number; root tree by virtual OID | [A1] | | |
+
+**Inodes and records**
+
+| Value | Emitted | Source | Provisional, closed by | Otherwise |
+| --- | --- | --- | --- | --- |
+| Inode numbers | Root 2 and private directory 3, both with parent 1; the entry with catalog ID `i`, from 1, gets `15 + i`, so entries are numbered from 16 in catalog order | [A1] for 2, 3 and the minimum 16; policy for the order | | |
+| Private ID | The inode number | [A1]: the value of a file never cloned | | |
+| Volume next object identifier | One past the largest inode number, 16 for an empty volume. It counts inode numbers and is not the container's next OID | [A1] | E1 | Formula: the larger of the native empty volume's value and one past the largest inode number |
+| Directory inode | Child count equal to the directory records it owns, which for the root excludes the private directory; no data-stream field; uncompressed size zero | [A1] | E1, E3 | Formula |
+| Non-directory inode | Link count 1 | [A1]: one name | | |
+| Name field | On every entry's inode, the name of its directory record; on the root and private directories, native | E1, E3 | E1, E3 | Native |
+| Internal flags, protection class, write generation | Native: what E1 shows on the root and private directories and E3 on a new entry of each kind | E1, E3 | E1, E3 | Native |
+| BSD flags | Zero | Policy | | |
+| Directory statistics records and their inode field, sibling records, document IDs, purgeable and firmlink fields | None | Policy | E1, and the E15 `fsck_apfs -n` probe of a capture with such a record or field removed | Native for which records and fields the root and private directories carry; Formula for any of their values that counts descendants or bytes |
+
+**Checkpoint and container superblock**
+
+| Value | Emitted | Source | Provisional, closed by | Otherwise |
+| --- | --- | --- | --- | --- |
+| Checkpoint area sizes and bases | Functions of `N` that reproduce every E1 and E12 capture | E1, E12 | E1, E12 | A step table when no function fits: a block count between two captures takes the areas of the larger one, and no container above the largest capture is written |
+| Descriptor ring | One mapping block in slot 0 and the superblock in slot 1: first-block index 0, block count 2, next index 2; every other slot zero | Policy within [A1]'s ring rules | E1 | Native slots |
+| Mapping block | One mapping per ephemeral object in ascending OID order, with the object's kind, subtype and size, owning volume zero; the last-map flag set | [A1] | E1 | Native order |
+| Data ring | The ephemeral objects in OID order from slot 0: data index 0, data count their blocks, next index that count | Policy within [A1]'s ring rules | E1 | Native slots |
+| Block 0 | Byte for byte the superblock in the descriptor ring | [A1]: a copy | E1 | The native difference, reproduced |
+| Maximum volume count | `min(100, ceil(N * B / 512 MiB))` | [A1] | E1, E15 | Native |
+| Features and flags | Incompatible `0x2`; read-only compatible zero; optional features and flags native | [A1]; E1 | E1 | Native |
+| Counters, ephemeral-information words, newest mounted version | Native | E1 | E1 | Native |
+| Fusion fields, keylocker ranges, EFI jumpstart, test fields | Zero | [A1]: features absent | | |
+
+**Space manager**
+
+| Value | Emitted | Source | Provisional, closed by | Otherwise |
+| --- | --- | --- | --- | --- |
+| Geometry | 32768 blocks per chunk; `ceil(N / 32768)` chunks; 126 chunks per chunk-information block; 507 chunk-information blocks per address block; `ceil(chunks / 126)` chunk-information blocks; address blocks by the [reader's relations](#ephemeral-objects-and-the-space-manager) | [A1] | E1, E12 | Native |
+| Chunk-information entry | XID `X`; first block `32768 * i` for chunk `i`; block count 32768, or `N - 32768 * i` in the last chunk; free count the chunk's clear bits; bitmap address zero for a chunk with no allocated block | [A1] for the fields | E1, E12 | Formula |
+| Bitmap bits past `N` | Zero | Policy | E1, and the E15 `fsck_apfs -n` probe of a capture with those bits set | Stays |
+| Free counts | The device's free count is `N` less the allocated blocks and equals the sum of the chunks' free counts | [A1] | | |
+| Internal pool | The pool's size and base and the bitmap ring's size and base as native functions of `N`; the whole pool and the ring allocated in the main bitmaps; the pool's bitmap set exactly for the chunk-information, address and bitmap blocks placed in it | E1, E12 | E1, E12 | A step table when no function fits, on the same captures as the checkpoint areas: a block count between two captures takes the pool's and the ring's size and base from the larger one; a block count those ranges do not lie below is not a candidate size; and no container above the largest capture is written |
+| Internal-pool blocks | Inside the pool, ascending from its base: the chunk-information blocks, then the address blocks, then one bitmap block per chunk that holds an allocated block. The blocks of the pool's own bitmap ring are a fixed region of their own at the space manager's bitmap base, outside the pool | Policy for the order; [A1] for the separate bitmap base | E1, and E12 for the address blocks | Native |
+| Internal-pool ring fields, reserve counts, flags, version, structure size | Native | E1 | E1 | Native |
+| Tier-2 device and queue | Zero | [A1]: no Fusion | | |
+| Free queues | Internal pool and main: one root leaf with no keys each, count zero, oldest XID zero, node limit native | E1 | E1 | Native form |
+| Reaper | Idle, with head, tail and list count zero, flag `0x1` set and the state buffer zero; reap IDs and state buffer size native | [A1] for idle and the flag | E1 | Native |
+
+**Volume superblock**
+
+| Value | Emitted | Source | Provisional, closed by | Otherwise |
+| --- | --- | --- | --- | --- |
+| Slot, index, role, name | Slot 0, index 0, role 0, the label | Policy | | |
+| Features and flags | Incompatible `0x1` on a case-insensitive volume and `0x8` on a case-sensitive one; flags `0x1`; read-only compatible zero; optional features native | [A1]; E2 | E2 | Native |
+| Object counts | Files: regular files. Directories: directory entries, the root and private directories not counted. Symbolic links. Other: FIFOs. Snapshots: zero | [A1] | E1, E3 | Formula |
+| Allocated block count, total blocks allocated and freed | Allocated: the blocks of the volume's objects and file data; total allocated the same; total freed zero | [A1] | E3, E6 | Formula |
+| Reserve and quota | Zero | [A1]: none | | |
+| Modification and unmount times | The format time | Policy | E1 | Formula: each field holds the format time, or zero where E1 shows a fresh volume holding zero |
+| Formatting record | Identifier `fsimg` followed by the package version, NUL-padded to 32 bytes; the format time; last XID `X` | Policy | E15 | The identifier in the native formatter's form, as E1 captures it |
+| Modification records | Zero | E1 | E1 | Native |
+| UUIDs | Volume: the setting. Container: derived as [settings](#settings-and-identities) state. Volume group: zero | Policy | | |
+| Next document ID, clone-information epoch and XID | Native | E1 | E1 | Native |
+| Snapshot, sealing and integrity fields | Zero | [A1]: features absent | | |
+
+**Trees and content**
+
+| Value | Emitted | Source | Provisional, closed by | Otherwise |
+| --- | --- | --- | --- | --- |
+| Node fill | Greedy against the root's capacity, 4096 bytes less the 56-byte header and the 40-byte footer: a node, root or not, takes records until the next does not fit, so a level's only node is always a valid root and 40 bytes stay unused in every other node | Policy | E15 | The native fill fraction E1 and E3 show |
+| Last node of a level | What remains when the records end, as few as one record | Policy | E15 | The last node takes its predecessor's last record |
+| Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree | E1, E3 | E1, E3 | Native |
+| Footer counts | Key count: the tree's leaf records. Node count: its nodes. Longest key and longest value: the largest encoded lengths packed into it | [A1] | E3 | Formula |
+| Object-map flags | Container map `0x1`; volume map zero | [A1] | E1, for the crypto-generation flag | Native |
+| Empty extent-reference and snapshot trees | One root leaf with no keys | E1 | E1 | Native |
+| File extent | A nonempty file's run, its size rounded up to 4096 bytes, is tiled by consecutive extents of at most the extent cap, so a file no longer than the cap has one; flags and crypto ID zero | [A1] | | |
+| Extent cap | `2^56 - 4096` bytes, the largest block-aligned length the 56-bit length field holds. The cap follows from the encoding and needs no experiment | [A1]: the field's width | E15, for a lower native limit | The longest extent E15 shows `fsck_apfs` accepting |
+| Data-stream field | Size; allocated bytes the size rounded up to 4096; crypto ID zero; total bytes written the size and total bytes read zero | [A1]; E3 | E3 | Formula |
+| Reference records | Data-stream ID count 1; one physical extent over the file's run, of kind new, its length in blocks, owner the private ID, count 1 | [A1] | E3, E6 | Formula |
+
+**Metadata and limits**
+
+| Value | Emitted | Source | Provisional, closed by | Otherwise |
+| --- | --- | --- | --- | --- |
+| Name length | The writer's limit under [name length](#directory-records-and-names) | Policy | E14 | As stated there |
+| Link target | 1 to 1023 bytes, as [symbolic links](#symbolic-links) state | Policy | E14 | Stays |
+| Default owner and modes | Owner and group 0; `0755` for directories and symbolic links; `0644` for files and FIFOs | Policy | E3, for the mode macOS gives a new symbolic link | Stays |
+| Default label | `Untitled`, the volume name when the label is NULL | Policy | | |
+| Time range | 0 through `2^63 - 1` nanoseconds, 1970-01-01 00:00:00 through 2262-04-11 23:47:16.854775807 UTC: the values that read the same signed and unsigned | Policy | E14 | Stays. Signed times extend the range down to `-2^63`; unsigned times extend it up to `2^64 - 1` |
+| Format time | The UTC host clock sampled once during planning; the epoch in reproducible mode | Policy | | |
+| Minimum container size | The smallest size `newfs_apfs` formats | E1 | E1, E15 | The smallest size E1 holds a capture for |
+| Container size step | The step between the block counts `newfs_apfs` produces | E1 | E1 | One block |
+| Probe cap | `2^16` probes of the automatic size search. Each failed probe jumps past its whole shortfall, so a search needs a probe only when `N`-dependent regions outgrow the previous jump; the cap bounds a pathological region table, not an expected search | Policy | | |
+| Unused bytes | Zero: reserved and unused fields, node free space, unused ring slots, the tail of a file's last block and every free block | Policy | | |
 
 ## Information and capabilities
 
@@ -1185,11 +1646,26 @@ timestamps; block sizes 4096 through 65536 for reading and 4096 for writing,
 in both the sector and allocation-unit masks since APFS addresses whole
 blocks;
 `max_label_bytes` 255; `max_link_target_bytes` 1023; `max_name_utf16_units`
-255; `write_settings` with the volume UUID and case sensitivity; and
-`read_settings` with the volume index and snapshot.
+holding the writer's [name length](#directory-records-and-names) limit in
+bytes, as the other formats whose names are bytes report theirs;
+`write_settings` with the volume UUID and case sensitivity, and without
+`FSIMG_SETTING_PLACEMENT`; and `read_settings` with the volume index and
+snapshot. Three points follow from rules stated elsewhere:
+
+* `metadata_fields` lists neither the device number nor
+  `FSIMG_META_EXTRA_DATA`: the reader reports both and no writer stores
+  either.
+* `codecs` names the compression this build decodes in compressed files, in
+  type order: `deflate, zlib <version>; lzvn; lzfse`, or
+  `deflate, zlib <version>` alone on a big-endian host, where the imported
+  decoders refuse.
+* APFS is little-endian only, so the descriptor has no byte-order operation
+  and the writer no byte-order setting.
 
 Volume information reports `apfs` and the profile, the volume name as the
-label, the volume UUID, the container's byte length, block count, block size
+label, the volume UUID, the container's declared byte length `N * B`, from
+which the reader core derives `missing_bytes` for a
+[truncated container](#truncated-containers), its block count, block size
 and free bytes from the space manager, the block size as the sector size,
 UTC time basis, header scope, and `clean` false when a newer incomplete
 checkpoint was passed over. Its details, in order: `volume_index`,
@@ -1202,11 +1678,24 @@ checkpoint was passed over. Its details, in order: `volume_index`,
 
 | Condition | Status |
 | --- | --- |
-| No `NXSB` signature | `FSIMG_EFORMAT` |
+| No `NXSB` magic at offset 32 of block 0, unless the identity is assumed | `FSIMG_EFORMAT` |
 | Recognized but outside the profile: features in the refusal tables, encryption, Fusion, noncontiguous areas, revert or rolling state, unknown data-dependent fields or content-changing flags, names above 1022 bytes, link targets above 1023 bytes, LZBITMAP or unknown compression, tree height above 16 levels, sealed hash types other than SHA-256 | `FSIMG_EUNSUPPORTED` |
-| Checksum, header, range, ordering, tiling, tie, hash, count, reference, tombstoned required object, namespace collision or allocation inconsistency | `FSIMG_ECORRUPT` |
-| No `volume=` for a container with several volumes, a `volume=` naming an empty or out-of-range slot, an unknown or malformed snapshot name, any other invalid setting, a name outside the writer's rules, colliding names | `FSIMG_EINVAL` |
+| Checksum, header, range, ordering, tiling, tie, hash, count, reference, repeated node on a path, tombstoned required object, namespace collision in a stored directory, or allocation inconsistency | `FSIMG_ECORRUPT` |
+| A read past the end of a [truncated container](#truncated-containers) | `FSIMG_ECORRUPT`, "image is truncated", from the common read funnel |
+| No `volume=` for a container with several volumes, a `volume=` naming an empty or out-of-range slot, an unknown or malformed snapshot name, any other invalid setting, a catalog name outside the writer's rules, colliding catalog names | `FSIMG_EINVAL` |
+| A host clock outside the writer's [time range](#writer-values) | `FSIMG_ERANGE` |
+| A layout that does not fit the exact size requested, or an automatic size not found within the [probe cap](#writer-values), which the message names | `FSIMG_ERANGE` |
 | Budget, scratch, work or descriptor exhaustion | `FSIMG_ELIMIT` |
+
+Two names with equal comparison forms in one directory are judged by who
+supplied them: in an image they are damage, `FSIMG_ECORRUPT`; in a catalog
+they are the caller's input, `FSIMG_EINVAL`.
+
+The reader takes part in [salvage extraction](design-salvage.md). The
+opening checks, from the probe through checkpoint and volume selection,
+stay terminal. Damage met after them costs what salvage defines: a file
+keeps the prefix before its first damaged extent or chunk, and a damaged
+directory or entry is skipped and reported.
 
 Diagnostics quote at most one bounded, escaped name and never node slack,
 free space, attribute data or buffer contents.
@@ -1215,15 +1704,16 @@ free space, attribute data or buffer contents.
 
 | Area | Valid cases | Invalid cases |
 | --- | --- | --- |
-| Probe and checkpoints | Raw, GPT and DMG-wrapped native containers; block sizes 4096 to 65536 in synthetic images; checkpoint rings with wrapped runs, several committed checkpoints and a torn newest one (E8) | Short prefix, bad checksum, wrong kind, geometry past the slice, overlapping areas, run not ending at its superblock, missing or misplaced last-map flag, overlapping mapped runs, mapped object XID above the checkpoint, equal-XID disagreement, block 0 newer than every checkpoint |
+| Probe and checkpoints | Raw native containers and ones inside GPT, an Apple Partition Map and UDRW, UDZO and UDBZ DMGs; block sizes 4096 to 65536 in synthetic images; checkpoint rings with wrapped runs, several committed checkpoints and a torn newest one (E8); a container whose block 0 magic is rewritten, with the checksum repaired, opens with an assumed identity | Short prefix, bad checksum, wrong kind or OID, `N * B` overflow, overlapping areas, run not ending at its superblock, missing or misplaced last-map flag, overlapping mapped runs, mapped object XID above the checkpoint, equal-XID disagreement, block 0 newer than every checkpoint; the rewritten magic without an assumed identity is `FSIMG_EFORMAT`; with one, every other mutation of this row still fails, a magic rewritten without repairing the checksum among them, and `W` fails naming the assumed check; a ULFO DMG fails in the layer |
+| Truncation | A container cut past everything a listing and extraction touch opens, lists, extracts and reports the missing bytes | A cut through the descriptor ring, the selected checkpoint's data run, a tree node or a file's extent fails `FSIMG_ECORRUPT` where it is reached and never selects an older checkpoint; `W`, wrap and compose fail on every cut |
 | Object maps | Lookups below, at and above stored XIDs; tombstones; multi-level maps | Tombstone with an older live entry, unordered keys, duplicate keys, size not a block multiple, address past `N`, object XID different from the key's |
 | B-trees | Root leaves, three or more levels, fixed and variable tables, aligned and unaligned trees, ghost records in free queues | Table overflow, key or value crossing free space or the footer, ghosts without the flag, wrong levels, repeated node on a path, unsorted keys, child key below its separator, height 17 |
 | Volumes | One and several volumes, each role E10 provides, case-insensitive and case-sensitive personalities | Missing selection with several volumes, empty slot, index mismatch, duplicate UUIDs, every refused feature bit |
-| Records | Every kind in each tree, extended fields at their boundaries, names of 1 to 255 bytes and every Unicode class of E4 | Truncated values, overlapping fields, misaligned field data, wrong hash or length, invalid UTF-8, embedded NUL or slash, dot names, wrong record variant, type disagreeing with mode |
+| Records | Every kind in each tree, extended fields at their boundaries, names of 1, 255 and 1022 bytes and every Unicode class of E4; an inode with a Finder-information attribute sets the extra-data bit on each of its names | Truncated values, overlapping fields, misaligned field data, wrong hash or length, invalid UTF-8, embedded NUL or slash, dot names, a plain name of 1023 bytes, wrong record variant, type disagreeing with mode; a symbolic link or compressed file with only the attributes the driver consumes does not set the extra-data bit |
 | Content | Files of 0, 1, 4095, 4096, 4097 bytes and above 4 GiB, many extents, holes in both forms, preallocated extents past the size, clones and their overwritten branches, every supported compression type with one and many chunks | Gaps, overlaps, unaligned lengths, extent past both the rounded size and the allocated bytes, extent past `N`, crypto ID outside the table, short or long decoded chunks, chunk table overruns |
 | Links and kinds | Hard links across directories, symbolic links of 1 and 1023 bytes, FIFOs, a character and a block device with and without the device number field, a socket | Mismatched link counts, missing sibling records, directory with two parents, directory cycle, link target of 1024 bytes, the device number field on a file |
-| Verification | Every native fixture verifies; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found | Each mutation reports its class; a report is never complete after an unsupported object |
-| Writer | Empty, small, deep, wide (forcing multi-level trees), large-file and nearly full containers in both personalities; byte identity across source order, budget, scratch and time zone; poison scan of unused bytes | Colliding names under each personality, oversized names and labels, times outside the range, sizes that do not fit |
+| Verification | Every native fixture verifies, the empty E1 containers among them, whose allocated blocks are exactly the fixed regions, both object maps with their trees and the empty volume's objects; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found; both empty free-queue forms and an idle reaper verify | Each mutation reports its class; a report is never complete after an unsupported object or with a reaper that is not idle |
+| Writer | Empty, small, deep, wide (forcing multi-level trees), large-file and nearly full containers in both personalities; names at the writer's limit; byte identity across source order, budget, scratch and time zone; poison scan of unused bytes; an entry time outside the range is stored as the format time and counted as a loss | Colliding names under each personality, names and labels one byte over their limits, a host clock or epoch outside the time range, a non-empty placement list, sizes that do not fit |
 
 Independent oracles, in order of authority: macOS `fsck_apfs -n`, macOS
 mounting through `hdiutil attach` with file reads compared against the

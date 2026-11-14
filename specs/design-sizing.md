@@ -11,7 +11,8 @@ and the geometry settings the caller left open. It has two policies:
   native formatters choose for a volume of that size. For QNX6 the block size
   is a setting with a default of 1024 and the inode capacity follows the
   native ladder; for HFS Plus it is a setting with a default of 4096. The volume is the smallest legal one for the chosen
-  candidate.
+  candidate, except that APFS takes the first fit of its size search,
+  which the APFS paragraph below states.
 * **Minimize.** `FSIMG_WRITE_MINIMIZE`, CLI `-M`, chooses the candidate whose
   volume is the smallest in bytes, over every setting the caller left open.
   It is for images whose size matters more than headroom or native
@@ -53,7 +54,7 @@ though with the data start fixed it only moves reserved padding.
 | QNX4 | Nothing: the block is 512 bytes and the block count is already the smallest that fits | The native default layout, the 128-slot `.inodes` minimum, the 4096-byte directory rounding |
 | ImageFS | Nothing: the image is exactly its header, mountpoint, records, data and trailer | The 4-byte record and data alignment |
 | HFS Plus and HFSX | Block size over the writer's sizes, 512 to 65536 bytes | The native B-tree node sizes, one extent per fork, the reserved head and tail blocks |
-| APFS | Nothing: the block is 4096 bytes and the block count is already the smallest that fits | The native formatter's fixed regions for the block count, its minimum container and its sizing granularity |
+| APFS | Nothing: the block is 4096 bytes and the block count is already the first that fits in the APFS size search | The native formatter's fixed regions for the block count, its minimum container and its sizing granularity |
 | EROFS | Block size over the writer's accepted sizes, 4096 first | The writer's one layout and its profile settings; the image is exactly its plan |
 | UDF | Nothing: the block is the sector, and the block count is already the smallest that fits | The 2048-byte default block, the fixed volume layout around the partition, the space bitmap's size |
 | ISO 9660 | Nothing: the image is exactly its descriptors, path tables, directories, continuation region and data | The 2048-byte block and the writer's one layout |
@@ -115,12 +116,18 @@ B-tree node sizes are fixed, so the trees' node counts depend on the
 catalog alone and are packed once; a candidate block size only rounds the
 tree forks and the accumulated fork totals to whole blocks, so each costs a
 few constant-time steps.
-For APFS the default block count is the smallest one, in steps of the
+For APFS the default block count is the first one, in steps of the
 native formatter's granularity, whose fixed regions (checkpoint areas,
 internal pool and chunk structures, all functions of the block count),
 metadata trees, file data and requested free space fit, found by the
-binary search the [driver design](design-apfs-driver.md#planning) states,
-so minimization returns the default container.
+scan the [driver design](design-apfs-driver.md#planning) states. A block
+count's fit is not monotone, since a fixed region can grow by more than a
+step adds, so the scan climbs from a lower bound that does not depend on
+the block count (block 0, the trees, the file data and the free space),
+each failed probe advancing by its measured shortfall. Each probe is arithmetic over the short list of fixed
+regions, and the scan fails with `FSIMG_ERANGE` at the
+[probe cap](design-apfs.md#writer-values). Minimization returns the default
+container.
 
 For UDF the default block count is the smallest whose partition holds the
 space bitmap, the file set descriptor, the objects and the free reserve,

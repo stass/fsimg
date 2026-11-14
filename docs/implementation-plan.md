@@ -653,11 +653,12 @@ APFS follows its own [plan](apfs-plan.md), the
 [format design](../specs/design-apfs.md) and the
 [driver design](../specs/design-apfs-driver.md): native evidence from
 macOS's `newfs_apfs`, `fsck_apfs` and `hdiutil`, the common changes it needs
-(the wider label, filesystem read settings, zero and held content extents,
-normalization tables), a reader and container-wide verifier, imported LZFSE
-and LZVN decoders for compressed files, and a writer registered only after
-macOS checks, mounts and modifies its output, followed by snapshot and
-sealed-volume reading.
+(volume and snapshot read settings, the wider directory key bound, the
+case-sensitivity write setting), a reader and container-wide verifier with
+normalization tables the driver owns, compressed files through the shared
+LZFSE and LZVN decoders, and a writer registered only after macOS checks,
+mounts and modifies its output, followed by snapshot and sealed-volume
+reading.
 
 EROFS follows its own [plan](erofs-plan.md), the
 [format design](../specs/design-erofs.md) and the

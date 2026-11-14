@@ -323,14 +323,14 @@ object maps keyed by object and transaction, one B-tree format, volume
 superblocks with closed feature tables, filesystem records, hashed directory
 names compared under Unicode normalization and case folding, sparse and
 cloned data streams, transparent compression, snapshots and sealed volumes.
-The probe's identity signature is the `NXSB` magic with the superblock's
-object kind and identifier; `open` selects the newest complete checkpoint
-and one volume, chosen by the `volume=` read setting when the container
-holds several, and a snapshot by `snapshot=`. The identity check
-is the `NXSB` magic; the object kind and identifier, the checksums and
-every checkpoint and tree check are validation. Encryption and Fusion are
-recognized and unsupported. The [driver design](design-apfs-driver.md)
-defines the code.
+The probe's identity signature is the `NXSB` magic at offset 32 of block 0;
+`open` selects the newest complete checkpoint and one volume, chosen by the
+`volume=` read setting when the container holds several, and a snapshot by
+`snapshot=`. The identity check is that magic and nothing else; the
+superblock's object kind and identifier, the checksums, the geometry, the
+features and every checkpoint and tree check are validation. Encryption and
+Fusion are recognized and unsupported. The
+[driver design](design-apfs-driver.md) defines the code.
 
 The writer builds a new container with one unencrypted volume, reproducing
 the native formatter's empty layout and adding the catalog in one
