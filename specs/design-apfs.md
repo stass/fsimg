@@ -1008,12 +1008,12 @@ system creates, `.fseventsd`, is 16). Ordinary inodes are at least 16, or at lea
 `0x0800000000000000` in a System volume whose volume-group inode space is
 enabled. The internal flags are accepted from the closed table below,
 [A1]'s valid flags, which hold every value the native captures use (E2, E3,
-E5, E6); any other bit, `0x20` (`FLAG_UNUSED`, outside [A1]'s valid mask)
+E5, E6, E7); any other bit, `0x20` (`FLAG_UNUSED`, outside [A1]'s valid mask)
 among them, is unsupported. No flag of the table changes where the reader
 finds content: the data stream, the file extents and the compression
 attribute determine it, and nothing past the size is delivered.
 
-| Flag | [A1] name | Native use (E2, E3, E5, E6) |
+| Flag | [A1] name | Native use (E2, E3, E5, E6, E7) |
 | --- | --- | --- |
 | `0x1` | `IS_APFS_PRIVATE` | |
 | `0x2` | `MAINTAIN_DIR_STATS` | |
@@ -1028,11 +1028,11 @@ attribute determine it, and nothing past the size is delivered.
 | `0x800` | `ACTIVE_FILE_TRIMMED` | |
 | `0x1000` | `PINNED_TO_MAIN` | |
 | `0x2000` | `PINNED_TO_TIER2` | |
-| `0x4000` | `HAS_RSRC_FORK` | |
-| `0x8000` | `NO_RSRC_FORK` | Every new inode of each kind E3 creates, the root and private directories included |
+| `0x4000` | `HAS_RSRC_FORK` | A compressed file whose resource-fork attribute holds bytes (E7) |
+| `0x8000` | `NO_RSRC_FORK` | Every new inode of each kind E3 creates, the root and private directories included; a compressed file without a resource-fork attribute (E7) |
 | `0x10000` | `ALLOCATION_SPILLEDOVER` | |
 | `0x20000` | `FAST_PROMOTE` | |
-| `0x40000` | `HAS_UNCOMPRESSED_SIZE` | |
+| `0x40000` | `HAS_UNCOMPRESSED_SIZE` | Every compressed file, with the uncompressed-size field (E7) |
 | `0x80000` | `IS_PURGEABLE` | |
 | `0x100000` | `WANTS_TO_BE_PURGEABLE` | |
 | `0x200000` | `IS_SYNC_ROOT` | |
@@ -1262,7 +1262,7 @@ none: attribute names and values are neither listed nor extracted. The
 driver consumes three attributes itself, each only on the inode it serves:
 `com.apple.fs.symlink` on a symbolic link, `com.apple.decmpfs` on a
 compressed file, and `com.apple.ResourceFork` on a file whose compression
-type stores its content there.
+type stores its content there, or of size zero beside an inline type.
 
 An inode with any other attribute record holds data the entry model cannot
 carry: Finder information, a resource fork that compression does not
@@ -1392,43 +1392,98 @@ by the compressed bytes. The entry's size is the header's
 uncompressed size, which must equal the inode's uncompressed size when the
 inode carries one, and the data stream must be empty.
 
+The `com.apple.decmpfs` value may be held in its record or in a stream
+([extended attributes](#extended-attributes)), and the reader reads both
+forms, a stream through the content cursor. A value shorter than 16 bytes
+or longer than 16 + `FSIMG_LZFSE_INPUT_MAX` is corrupt, a length checked
+before a streamed value is read; after the header is decoded, a
+resource-fork type's value must be exactly 16 bytes in either form, and
+an inline type's payload, the bytes after the header, is what the reader
+reads and decodes. A resource-fork type's `com.apple.ResourceFork` is
+read as a stream; one held in its record is unsupported, a form no native
+volume shows (E7). A resource-fork attribute of size zero beside an
+inline type, in either form, is consumed and holds no content; its record
+and extents are verified like any other.
+
+On native volumes (E7, `e7-compression`, `e7-decmpfs-split`), which the
+reader does not require:
+
+* the inode has BSD flag `UF_COMPRESSED` (`0x20`),
+  `INODE_HAS_UNCOMPRESSED_SIZE` with the header's size, no data-stream
+  field and no file extents of its own;
+* `INODE_HAS_RSRC_FORK` is set when the resource-fork attribute holds
+  bytes and `INODE_NO_RSRC_FORK` when there is no such attribute; `ditto`
+  gives an inline type a resource-fork attribute of size zero and neither
+  flag;
+* a `com.apple.decmpfs` value of up to 127 bytes is in its record and one
+  of 129 bytes or more in a stream; every non-empty resource fork is in a
+  stream.
+
 | Type | Storage | Codec | Reader |
 | --- | --- | --- | --- |
-| 1 | Inline | None | Copied |
+| 1 | Inline | None | Unsupported: no producer or specimen (E7), until a specimen shows its framing |
 | 3 | Inline | zlib | System zlib |
 | 4 | Resource fork | zlib chunks | System zlib |
 | 7 | Inline | LZVN | Imported decoder |
 | 8 | Resource fork | LZVN chunks | Imported decoder |
-| 9, 10 | Inline, resource fork | Uncompressed | Copied (provisional, E7; unsupported if no specimen shows the framing) |
+| 9, 10 | Inline, resource fork | None, after a `0xCC` marker | Copied |
 | 11 | Inline | LZFSE | Imported decoder |
 | 12 | Resource fork | LZFSE chunks | Imported decoder |
 | 13, 14 | Inline, resource fork | LZBITMAP | Unsupported: no public decoder |
 | other | | | Unsupported |
 
 **Inline types.** The compressed bytes follow the header in the attribute.
-Each inline codec marks stored-uncompressed data with a leading byte. The
-markers are provisional for APFS (E7); the working values are those the
-[HFS Plus design](design-hfsplus.md#transparent-compression) measured for
-the same attribute, `0xFF` for zlib and `0x06` for LZVN, and they stay if E7
-finds no such file. Inline content is decoded whole into one 64 KiB
-buffer: an inline type's uncompressed size is at most 64 KiB (provisional,
-E7), and a larger one is unsupported.
+A payload whose first byte is its codec's raw marker holds the content
+uncompressed after that byte: `0xFF` for zlib and for LZFSE, neither of
+whose streams begins with it, and `0x06` for LZVN, its end-of-stream code
+(E7, `e7-compression`). Every type 9 payload macOS writes begins with the
+marker `0xCC`; the reader treats one that does not as corrupt, a rule of
+its own, since no specimen shows what macOS does with it. Inline content
+is decoded whole into one 64 KiB buffer: an inline type's uncompressed
+size is at most 64 KiB, and a larger one is unsupported. macOS stores a
+type inline only when the size is at most 65536 bytes and the whole
+attribute, header included, fits about 3800 bytes (3802 measured for
+`ditto`; E7).
 
 **Resource-fork types.** The compressed bytes are in the
-`com.apple.ResourceFork` attribute, read as a stream. The zlib type wraps
-its chunk table in the classic resource-fork format, whose header is
-big-endian, while the chunk table inside it is little-endian; the LZVN and
-LZFSE types begin the attribute with a little-endian table of chunk
-offsets. Both framings are provisional until E7 tabulates them field by
-field; a type E7 finds no specimen of is unsupported. The table gives each
-64 KiB chunk's compressed range; every chunk decodes to exactly 64 KiB
-except the last, which decodes to the remainder. A stored chunk is at most
-`FSIMG_LZFSE_INPUT_MAX` bytes, 69632, the input bound the
+`com.apple.ResourceFork` attribute, read as a stream. The fork holds one
+chunk per 64 KiB of content, `ceil(size / 65536)` chunks, in content order;
+every chunk decodes to exactly 64 KiB except the last, which decodes to
+the remainder.
+
+The zlib type wraps its chunk table in the classic resource-fork format.
+The fork begins with four big-endian u32 words: the data offset, the map
+offset, the data length and the map length. At the data offset is a
+big-endian u32 resource length, then a little-endian u32 chunk count and
+that many little-endian u32 (offset, length) pairs, offsets counted from
+the data offset plus 4. The reader checks the relations the
+[shared validator](design-apfs-driver.md#compression-framing) checks: the
+data holds at least the resource length and count, data and map end the
+fork with the map after the data, the resource length is the data length
+minus 4, the count is `ceil(size / 65536)` and the pairs end inside the
+data. Every native fork has data offset 256 with zeros from byte 16 to
+256, a 50-byte map holding one `cmpf` resource, and pairs back to back
+from offset `4 + 8 * count` to the data's end (E7).
+
+Types 8, 10 and 12 begin the fork with count + 1 little-endian u32 offset
+words from the fork's start: the first is the table's end, which lies
+inside the fork and holds the words, and each chunk runs from its word to
+the next. In every native fork the first word is `(count + 1) * 4` and the
+last is the fork's length (E7).
+
+A chunk whose first byte is its codec's raw marker, the inline marker
+above, holds that byte and the chunk's content uncompressed, so a raw
+chunk is at most 65537 bytes. Every type 10 chunk macOS writes is `0xCC`
+and its content, and the reader treats one that does not begin with
+`0xCC` as corrupt. A stored chunk is at most `FSIMG_LZFSE_INPUT_MAX` bytes,
+69632, the input bound the
 [codec adapter](design-codecs.md#imported-lzfse-and-lzvn-decoders) states,
 which the driver applies to every codec's chunk as the HFS Plus reader
 does. A short or long result, an out-of-range, overlapping or longer chunk,
 a table that does not cover the size, or input left after a chunk's end
-marker is corrupt; that macOS never pads a chunk is provisional (E7).
+marker is corrupt. macOS writes chunks back to back with no padding and
+ends each compressed chunk with its codec's end marker, LZVN's 8-byte end
+code, LZFSE's `bvx$` or zlib's Adler-32 with no input after it (E7).
 
 Decoded bytes count toward the extraction output limit like any other
 content, and that limit defaults to 16 times the selected volume length, so extracting
@@ -1535,11 +1590,16 @@ and its records reconciled:
   directory record, or lies in the private directory, which is where native
   volumes place unnamed inodes (provisional, E16: E3 holds no unnamed
   inode; if E16 cannot answer, the rule stands);
-* each data-stream ID's reference count equals the inodes using it, and
-  every file extent belongs to a live stream: an inode's private ID, or a
-  stream attribute's stream ID, which exactly one attribute uses and which
-  has no data-stream ID record; each stream's extents respect the size and
-  allocated bytes of the data-stream field that names it;
+* every file extent belongs to a live stream, an inode's private ID or the
+  stream ID one attribute record names, and a data-stream ID record's
+  reference count equals the inodes using its stream:
+  * an inode's stream always has a record;
+  * an attribute's stream, used by its one attribute alone, has none:
+    native user attribute streams (E5) and the `com.apple.decmpfs` and
+    `com.apple.ResourceFork` streams of compressed files (E7) carry none,
+    and a record present is a violation;
+  * each stream's extents respect the size and allocated bytes of the
+    data-stream field that names it;
 * every attribute is well formed, and names equivalent under the volume's
   rules never share a parent;
 * the volume superblock's object counts equal the counted inodes by kind.

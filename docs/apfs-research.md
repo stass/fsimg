@@ -1140,6 +1140,192 @@ is 156.
 | e6-sparse | 29 | 24 | 5 (1) |
 | e6-clone | 126 | 119 | 7 (3) |
 
+### E7 Compression
+
+**Procedure.** On the host above, with stock tools only: `ditto
+--hfsCompression`, a preserving `ditto` copy, and Apple Archive's `aa
+extract -afsc ALG -afsc-all`, the one stock tool that names the codec
+(`afsctool` is not installed and was not used). The scripts live in the
+scratch directory `/Volumes/Optaine/fsimg-apfs/e7/scripts`, outside the
+repository. `gen-src.rb` writes 20 deterministic sources: `cN` is N bytes
+of numbered text lines, `rN` N bytes from Ruby's `Random.new(seed)`, `zN`
+N zero bytes and `m200k` 100000 text bytes then 100000 random bytes, at
+the sizes the tables below name. `afsc.aar` is `aa archive` of eleven of
+them. The two captures:
+
+```sh
+FSIMG_APFS_NATIVE=/Volumes/Optaine/fsimg-apfs/native
+capture.rb --kind newfs --size 67108864 --option e7-compression \
+    --populate populate-e7.sh
+capture.rb --kind newfs --size 33554432 --option e7-decmpfs-split \
+    --populate populate-e7-split.sh
+```
+
+`populate-e7.sh`, given the mount point `$m`:
+
+```sh
+for f in "$src"/*; do                    # the 20 sources
+	ditto --hfsCompression "$f" "$m/ditto/$(basename "$f")"
+done
+for a in zlib lzvn lzfse lzbitmap copy; do
+	mkdir "$m/afsc/$a"
+	aa extract -i afsc.aar -d "$m/afsc/$a" -afsc "$a" -afsc-all
+done
+ditto /Applications/Xcode.app/Contents/Applications/FileMerge.app \
+    "$m/app/FileMerge.app"
+```
+
+`populate-e7-split.sh` runs `aa extract -afsc copy -afsc-all` on 46
+random files of 100 to 190 bytes, step 2. Both captures end `fsck_apfs -n`
+"appears to be OK" with exit 0 and dump with no problem; `apfsdump.json`
+and `apfsdump.txt` (both with `--records`) lie beside each image. While
+mounted, the populate script read every compressed file's
+`com.apple.decmpfs` and `com.apple.ResourceFork` through
+`getxattr(XATTR_SHOWCOMPRESSION)` into `native-decmpfs.jsonl` (header,
+framing, chunk table, SHA-256 of the contents) and the contents' SHA-256
+into `native-sha256.txt`, both in the e7-compression capture directory.
+A later read-only attach decoded every stored framing independently of the
+kernel (zlib with Ruby's binding, LZFSE and LZVN with `compression_tool
+-decode -a lzfse`, LZVN wrapped in a `bvxn` block) and compared the result
+with the contents read through the volume: `native-redecode.txt`, 59 of
+59 non-LZBITMAP files equal, every chunk exactly 65536 bytes or the
+remainder, no zlib input left over; the 11 LZBITMAP files have no decoder.
+The same `getxattr` read surveyed the host's own files, and compared the
+captured FileMerge files with their Xcode originals. Probes before the
+captures, on the APFS scratch volume itself (`/Volumes/Optaine/fsimg-apfs/e7`
+`t2`, `t3`, `t4` and `aa`, same sources and commands), bisected the
+`ditto` thresholds below and showed `aa` leaving `r65536`, `r1m` and
+`r10m` plain.
+
+**Who writes which type.**
+
+| Producer | Types | Observed rule |
+| --- | --- | --- |
+| `ditto --hfsCompression` | 7, 8 | Compresses only files over 16384 bytes (16384 stays plain, 16385 is compressed) and leaves incompressible ones (`r65536`, `r1m`, `r10m`) plain |
+| `aa extract -afsc zlib`, `lzvn`, `lzfse`, `lzbitmap` | 3/4, 7/8, 11/12, 13/14 | Compresses every file it gains on, small ones included; leaves a wholly incompressible file of 65536 bytes or more plain (`r65536`, `r1m`, `r10m`, probe `aa`) and raw-marks an incompressible small payload (`r100`, `r3000`) or chunk (`m200k`) |
+| `aa extract -afsc copy` | 9/10 | Stores every file uncompressed behind the `0xCC` marker |
+| Preserving `ditto` of FileMerge.app | 8 | Copies type, chunk table and contents unchanged (4 files, compared with the originals) |
+
+`ditto` stores a type inline only when the uncompressed size is at most
+65536 bytes and the whole attribute at most 3802 bytes: `z65536` is inline
+(514 bytes), `z65537` goes to the fork although its encoding is smaller,
+`c27441` is inline at 3802 bytes and `c27442`, 3803 bytes encoded, goes to
+the fork (probe `t4` bisected every size from 27400 to 27450). Under its four
+codecs `aa` keeps the same 65536-byte limit (`z65536` inline, `z65537` in
+the fork), while `-afsc copy` puts `z65536` in the fork as type 10, its
+attribute being too large; its attribute limit is only bracketed, a 3017-byte attribute
+inline and a 3817-byte one (`c3800` in the probe `aa/copy`) in the
+fork. A copy of a `/System` application fails (`ditto`
+cannot recreate `restricted` directories unprivileged), hence FileMerge
+from the App Store's Xcode.
+
+In the wild, by `decmpfs` type (`/Library` not surveyed):
+
+| Tree | 7 | 8 | 9 | 14 |
+| --- | --- | --- | --- | --- |
+| `/System/Applications` | | 10096 | 518 | |
+| `/System/Library` | | 96577 | 30198 | 65 |
+| `/System/iOSSupport` | | 4703 | 61 | |
+| `/System/Volumes/Preboot/Cryptexes` | | | 1844 | 7936 |
+| `/usr` | | 15537 | 792 | |
+| `/Applications` (Xcode) | 1495 | 22153 | | |
+
+No zlib, LZFSE, type 1, 10 or 13 file occurs in the surveyed trees (home
+directories not surveyed). All 31569 type 9 files under
+`/System/Applications`, `/System/Library`, `/System/iOSSupport` and `/usr`
+(`type9-check.rb`, output in `/Volumes/Optaine/fsimg-apfs/e7/type9-check.txt`)
+are 1 to 111 bytes, with a payload of `0xCC` then the contents and no
+resource fork.
+
+**Header and inode.** Every one of the 70 compressed files in
+e7-compression has the header `66 70 6d 63`, a little-endian u32 type and
+a little-endian u64 size equal to the contents' length. Every inode has
+BSD flags `0x20`, `INODE_HAS_UNCOMPRESSED_SIZE` (`0x40000`) with
+`uncompressed_size` equal to the header's size, no data-stream field, no
+file extents and no data-stream ID record of its own. The internal flags
+are `0x44000` (`HAS_RSRC_FORK`) for the 35 resource-fork files, `0x48000`
+(`NO_RSRC_FORK`) for `aa`'s 32 inline ones, and `0x40000` alone for
+`ditto`'s 3 inline ones (`c20000`, `c27441`, `z65536`), which also carry
+an empty `com.apple.ResourceFork` stream (size 0, no extents).
+
+**Attribute storage.** `com.apple.decmpfs` is held in its record
+(`DATA_EMBEDDED`) up to 127 bytes and in a stream (`DATA_STREAM`, one
+extent) from 129 bytes: in e7-decmpfs-split the 117- to 127-byte values are
+embedded and the 129- to 207-byte ones streamed (128 was not produced), and
+in e7-compression every 16-byte header of a fork type and the 100- and
+117-byte inline values are embedded, the 200-byte and larger ones streamed.
+Every non-empty `com.apple.ResourceFork` is a stream. No attribute stream
+has a data-stream ID record: the 61 such records belong to the
+uncompressed files.
+
+**Inline payloads.** The bytes after the header:
+
+| Type | Compressed payload begins | Raw-marked payload (`c100`, `r100`, `r3000`) |
+| --- | --- | --- |
+| 3 zlib | `78 5e` (a zlib stream) | `0xFF`, then the contents |
+| 7 LZVN | the first opcode (`e0`, `68`) | `0x06`, then the contents |
+| 9 copy | | `0xCC`, then the contents, on every file |
+| 11 LZFSE | `bvx2` or `bvxn` | `0xFF`, then the contents |
+| 13 LZBITMAP | `5a` (`ZBM`) | `0xFF`, then the contents |
+
+No LZFSE payload or chunk in the capture begins with an uncompressed
+`bvx-` block; blocks after the first were not examined.
+
+**Resource-fork framing.** Type 4 (`afsc/zlib`: `c1m`, `c65537`, `m200k`,
+`z65537`), offsets from the fork's start:
+
+| Bytes | Field | Observed |
+| --- | --- | --- |
+| 0-3 | Data offset, big-endian | 256 |
+| 4-7 | Map offset, big-endian | data offset + data length |
+| 8-11 | Data length, big-endian | to the payload's end |
+| 12-15 | Map length, big-endian | 50 |
+| 16-255 | | zero |
+| 256-259 | Resource length, big-endian | data length - 4 |
+| 260-263 | Chunk count, little-endian | `ceil(size / 65536)` |
+| 264- | (offset, length) pairs, little-endian, from byte 260 | first offset `4 + 8 * count`, each chunk where the previous ends, the last ending at the data's end |
+| map offset | Resource map, 50 bytes | `00` x 24, `00 1c 00 32 00 00`, `cmpf`, `00 00 00 0a 00 01 ff ff`, `00` x 8; the fork ends here |
+
+Types 8, 10, 12 and 14 (every other fork): count + 1 little-endian u32
+words from byte 0; the first is `(count + 1) * 4`, each chunk runs from
+its word to the next with no gap, and the last word is the fork's length.
+
+Chunks hold 65536 content bytes, the last the remainder. A chunk that does
+not compress is the raw marker and its bytes, 65537 stored bytes for a whole
+chunk: `m200k`'s last two chunks, wholly random, are raw under LZVN
+(`0x06`), zlib, LZFSE and LZBITMAP (`0xFF`), while its second, half text
+and half random, is compressed; the 1-byte last chunk of `c65537` and
+`z65537` is the marker and that byte, 2 bytes. Every type 10 chunk is
+`0xCC` and its bytes. A compressed LZVN chunk ends with `06 00 00 00 00 00
+00 00`, an LZFSE chunk with `bvx$`, and a zlib chunk with its Adler-32,
+with no input after it.
+
+**Against HFS Plus.** The framing is the one
+`lib/formats/hfsplus/codec.c` and `compress.c` decode: the same header,
+resource header, resource table, pairs relative to the data offset plus 4,
+offset words, 64 KiB chunks and the relations `fork_open` and
+`word_table_open` check (`end + map_length` equals the fork's length,
+resource length = data length - 4, count = `ceil(size / 65536)`, table
+inside the data or the fork), and the same zlib (`0xFF`) and LZVN (`0x06`)
+raw markers. Where the HFS Plus reader differs from what macOS writes:
+
+* an LZFSE payload or chunk raw-marked with `0xFF`: `chunk_decode_lzfse`
+  passes it to the decoder, which refuses it, and the
+  [HFS Plus design](../specs/design-hfsplus.md#inline-payloads) says LZFSE
+  has no raw marker, from `afsctool`'s `bvx-` blocks;
+* types 9 and 10, which `hfsplus_compress_check` refuses as unsupported.
+
+The APFS storage around the framing differs from HFS Plus: the attributes
+are attribute records or attribute streams rather than an attribute B-tree
+value and a resource fork.
+
+**Fuzz seeds.** In `$FSIMG_APFS_NATIVE/e7-chunks`, outside the
+repository, from `aa extract -afsc` copies made like the capture's:
+`t4-chunk0-c65537` (zlib, 5800 bytes), `t8-chunk0-c65537` (LZVN, 8438),
+`t12-chunk0-c65537` (LZFSE `bvx2`, 4079), the inline payloads
+`t3-inline-c3000`, `t7-inline-c3000`, `t11-inline-c3000` (LZFSE `bvxn`)
+and the raw-marked `t3-`, `t7-`, `t11-inline-r100`.
+
 ## Evidence questions
 
 Stage 1 fills this section ([plan](apfs-plan.md), stage 1). Each row is a
@@ -1178,6 +1364,7 @@ under that experiment.
 | Attribute storage, inline limit, stream-backed attributes | Inline up to 3800 bytes, less with long names (3794 with a 127-byte name, 3800 with a 63-byte one); user stream attributes carry flags `0x11`, a resource fork `0x1`; an attribute stream has one user and no data-stream ID record, and a clone gets its own streams over shared blocks; names up to 127 bytes | E5, E6, e5-xattr, e5-xbound, e5-xname, e5-xlong, e6-xclone |
 | Hole representation in sparse files; clone sharing and its reference records | Holes are extents of physical block 0, a trailing hole included, counted in the allocated bytes and the sparse-bytes field; clones share one data stream until a write gives the writer a new one; physical-extent records split where branches diverge, count distinct streams and name the allocating inode | E6, e6-sparse, e6-clone |
 | Physical-extent records for unshared files; volume allocated-block accounting (with E3) | One record of count 1 and kind new per allocated run, owned by the inode; total blocks allocated counts data blocks, the allocated block count adds the volume's metadata nodes; total freed 0 | E5, E6, all their captures |
+| Compression header, inline marker bytes, resource-fork framing per codec, inline size limit, codecs `ditto` and installers choose | The HFS Plus framing field for field; raw markers `0xFF` zlib, LZFSE and LZBITMAP, `0x06` LZVN, `0xCC` on every type 9 payload and type 10 chunk; inline only up to 65536 bytes, and for `ditto` only up to a 3802-byte attribute; `ditto` writes LZVN (7, 8) above 16384 bytes, system files are types 8, 9 and 14, Xcode's 7 and 8 ([E7](#e7-compression)) | Type 1: no producer or specimen on the host; `aa`'s exact attribute limit (between 3017 and 3817 bytes) |
 
 The volume rows (features, records of an empty volume, inode fields) wait
 for the dumper's volume part and stay open under E1 and E2.

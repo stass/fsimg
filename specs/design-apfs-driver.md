@@ -129,11 +129,20 @@ of a chunk to its decoder with the inline markers, and the work charges.
 The [plan](../docs/apfs-plan.md#common-changes) names the HFS Plus
 functions the module is built from.
 
-That the APFS framing is the HFS Plus one is provisional (E7), as the
-format design [states](design-apfs.md#transparent-compression). If E7 shows
-a difference, `compress.c` keeps a validator of its own for the part that
-differs and calls the shared one for the rest; a type E7 finds no specimen
-of stays unsupported.
+The APFS framing is the HFS Plus one field for field (E7): the
+header, the zlib type's resource header, resource table and pairs, and the
+offset words of types 8 and 12, with the relations that `open` and
+`chunk` check, so APFS uses the shared validator unchanged and keeps no validator
+of its own. Type 10 uses the word table of types 8 and 12. What APFS adds
+is dispatch, which `compress.c` owns: a stored LZFSE payload or chunk
+begins with the raw marker `0xFF`, as zlib's does, and a type 9 payload or
+type 10 chunk is the marker `0xCC` and the bytes, as the
+[format design](design-apfs.md#transparent-compression) states. The
+storage around the framing is APFS's own: the `com.apple.decmpfs` value
+may be held in its record or in a stream, a resource fork that supplies
+content is always a stream, and both streams are read through the content
+cursor; a size-zero resource-fork attribute beside an inline type is
+accepted in either form and supplies nothing.
 
 ## Codecs
 
@@ -411,8 +420,14 @@ rest of the entry in the one pass:
   `fsimg_reader_set_link_target()`.
 * **Compressed file.** `replay` validates the `com.apple.decmpfs` header
   against the inode and records the type, the uncompressed size and, for a
-  resource-fork type, the fork attribute's data-stream reference. An inline
-  payload stays in its record, where `resolve` finds it again by name.
+  resource-fork type, the fork attribute's data-stream reference. A header
+  held in a stream is read here: the value's length is checked against the
+  common [bounds](design-apfs.md#transparent-compression), its 16 bytes
+  are read through the content cursor, and a resource-fork type's length
+  is then checked to be exactly 16. This is the one read `replay` makes
+  outside the trees. An inline payload held in its record stays there,
+  where `resolve` finds it again by name; one held in a stream is recorded
+  by its data-stream reference, as a fork is.
 
 The entry snapshot is then built:
 
@@ -451,7 +466,9 @@ never called for a symbolic link.
 * **Compressed file.** Chunk `c = o / 65536` is decoded into a 64 KiB
   window, unless it is the chunk already there, and the result is a held
   extent over that chunk clipped to the size. An inline type has one chunk,
-  decoded from its attribute record. For a resource-fork type the first
+  decoded from its attribute record, or its payload, the stream's bytes
+  after the header and at most `FSIMG_LZFSE_INPUT_MAX` of them, is read
+  into the stored-chunk buffer. For a resource-fork type the first
   `resolve` of the file validates the fork's
   [framing](design-apfs.md#transparent-compression) with the shared
   validator's `open`, which checks that the table's entry count covers the
@@ -480,7 +497,8 @@ until the next `resolve` or advance, as the content design requires.
 ### Salvage
 
 The driver takes part in [salvage extraction](design-salvage.md) with no
-mechanism of its own. `replay` reads no extent, so the common plan, which
+mechanism of its own. `replay` reads no extent but a streamed compression
+header's, so the common plan, which
 resolves a file from its first byte, meets damage exactly where a read
 would, and what survives follows from `resolve`:
 
@@ -498,7 +516,8 @@ would, and what survives follows from `resolve`:
   entry, a fork extent or the decoder rejects, and no later chunk is
   recovered, as on HFS Plus. A fork's framing and an inline payload are
   checked by the first `resolve`, so damage there leaves no recoverable
-  bytes. Copying
+  bytes; a damaged streamed header is a rejection in `replay` and costs
+  the entry. Copying
   the prefix decodes its chunks again, which charges their work a second
   time.
 * **Entries.** A rejection in `replay`, of a missing or invalid inode, an
@@ -998,7 +1017,7 @@ salvage row in `test/apfs-salvage.c` and the others in `test/apfs.c`:
 | Truncation | A container cut past everything a listing and an extraction touch opens, lists, extracts and reports the missing bytes | The same container cut through the descriptor ring, the selected data run, a tree node and a file extent fails `FSIMG_ECORRUPT`, "image is truncated", where each is reached. A cut that removes the newest checkpoint fails the open, while the same checkpoint torn in place, its superblock valid and a mapping block invalid, opens the next older checkpoint with `clean` false when block 0 is no newer than that checkpoint, and fails when block 0 is newer. Full verification fails on every cut |
 | Assumed identity | A container whose block-0 magic is rewritten and whose checksum, which covers the magic, is repaired opens and lists under `FSIMG_READ_ASSUME_IDENTITY` | Without the flag it is `FSIMG_EFORMAT`; with it, the magic rewritten without the repair fails the checksum, each other validation mutation of block 0 still fails with its class, a descriptor block without its magic is not a candidate, and full verification fails naming the assumed check |
 | Link target | A link's target is listed and extracted with `resolve` instrumented to fail for a link, at 1 and 1023 bytes | A target with an interior NUL, without its final NUL or of 1024 bytes fails in a listing, which reads no content |
-| Extra data | An inode with one unconsumed attribute sets `FSIMG_META_EXTRA_DATA` on each of its names | A link, and a compressed file of each storage, holding only the attributes the driver consumes, do not set it; `com.apple.decmpfs` on an inode that is not a compressed file does |
+| Extra data | An inode with one unconsumed attribute sets `FSIMG_META_EXTRA_DATA` on each of its names | A link, and a compressed file of each storage, holding only the attributes the driver consumes, do not set it, nor does `ditto`'s size-zero resource-fork attribute beside an inline type; `com.apple.decmpfs` on an inode that is not a compressed file does |
 | Salvage | A file whose third extent record is damaged is extracted as a `.partial` of its first two extents; a compressed file with a bad chunk keeps the chunks before it; a damaged inode costs its entry and a damaged directory record its listing, each reported, with the siblings extracted | Each fixture fails as a whole without salvage; an injected read fault, scratch failure or cancellation during salvage is terminal, not a loss; damage in the extent-reference tree changes no extracted byte and fails verification |
 | Verification counts | A file with three names adds three to `files` and three sizes to `logical_bytes` and its size once to `payload_bytes_read`; a hole, a compressed file and a link add nothing to that count | The same file with a wrong link count fails before any payload read; a read fault injected in one of its blocks fails the payload scope once, not once per name |
 | Chunk table | A resource-fork file of many chunks, of each table kind, reads from a random offset | A count that does not cover the size fails the read of the file's first byte; an entry outside the payload fails the read of its own chunk while the chunks before it read correctly; an entry out of order or overlapping a neighbour fails at the first chunk whose neighbour check sees it, which can be the chunk before it; full verification fails the file in every case |

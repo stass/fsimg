@@ -501,16 +501,23 @@ describe the user-visible options.
   shared module in the same commit.
 * `compress.c`: the compression types, inline payloads and resource-fork
   chunks through the shared validator, over zlib and the decoders of
-  `lib/codec/lzfse.c`; the capability record's `codecs`. E7 confirms that
-  the APFS framing is the HFS Plus one; for a part E7 shows to differ,
-  `compress.c` keeps a validator of its own.
-* APFS cases in `fuzz/lzfse.c`, seeded from E7's LZVN and LZFSE chunks.
+  `lib/codec/lzfse.c`; the capability record's `codecs`. The APFS framing
+  is the HFS Plus one (E7), so `compress.c` keeps no validator of its own;
+  it adds the dispatch APFS needs, the LZFSE raw marker `0xFF` and the
+  `0xCC`-marked types 9 and 10, and reads the `com.apple.decmpfs` value
+  from its record or a stream and a content-bearing resource fork from a
+  stream.
+* APFS cases in `fuzz/lzfse.c`, seeded from E7's LZVN, LZFSE and zlib
+  chunks and inline payloads in `$FSIMG_APFS_NATIVE/e7-chunks`.
 * Tests: every supported type with one and many chunks; truncated headers,
   overlapping or short chunks, output-size mismatches, and expansion bombs;
   a damaged last table entry leaving the earlier chunks readable and
   failing structural verification without payload read-through; LZBITMAP
   refused; a salvaged file keeping the chunks before its first bad one.
-* **Gate:** E7's compressed files match their native digests, and the HFS
+* **Gate:** every compressed file of `apfs-newfs-67108864-e7-compression`
+  but the LZBITMAP ones (59 files) matches its native digest in that
+  capture's `native-decmpfs.jsonl`, the 11 LZBITMAP files are refused as
+  unsupported, and the HFS
   Plus compression tests and corpus results are unchanged.
 
 ### 8. Writer, unregistered
