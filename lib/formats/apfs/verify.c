@@ -170,13 +170,13 @@ typedef struct verify {
 	fsimg_stream_t	*extent_events;
 	fsimg_stream_t	*file_extents;
 	fsimg_stream_t	*shared;
-	/* The verification flags, and whether the selected volume holds a
-	 * directory, or a compressed file's chunk table, in the private
-	 * directory, which the walk from the root does not reach.
+	/* The verification flags, and whether the selected volume holds an
+	 * inode, and a directory among them, that the walk from the root does
+	 * not reach (apfs_records_check()).
 	 */
 	unsigned	 flags;
-	bool		 private_tables;
-	bool		 private_directories;
+	bool		 unreached;
+	bool		 unreached_directory;
 	/* The selected volume's records were reconciled without a refusal. */
 	bool		 reconciled;
 	/* The first reason the report is incomplete; status FSIMG_OK while
@@ -854,12 +854,11 @@ volume_records(verify_t *v, fsimg_error_t *error)
 		records.shared = v->shared;
 	status = apfs_records_check(v->container, volume->fs, volume->index,
 	    v->window, &records, error);
-	if (selected && records.private_directories)
-		v->private_directories = true;
-	if (selected && records.private_tables)
-		v->private_tables = true;
-	if (selected && status == FSIMG_OK)
+	if (selected && status == FSIMG_OK) {
 		v->reconciled = true;
+		v->unreached = records.unreached;
+		v->unreached_directory = records.unreached_directory;
+	}
 	return (status);
 }
 
@@ -1763,7 +1762,7 @@ namespace_walk(verify_t *v, unsigned flags, fsimg_verify_report_t *report,
 			status = fsimg_verify_payload(reader, payload,
 			    PAYLOAD_BYTES, report, error);
 	}
-	if (status == FSIMG_OK && v->reconciled && !v->private_directories &&
+	if (status == FSIMG_OK && v->reconciled && !v->unreached_directory &&
 	    reached != v->apfs->fs.directories) {
 		(void)snprintf(message, sizeof(message), "holds directories "
 		    "unreachable from the root: %" PRIu64 " of %" PRIu64
@@ -1844,12 +1843,9 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 		report->allocated_clusters = container->block_count -
 		    apfs->free_blocks;
 	}
-	if (status == FSIMG_OK && v->private_directories)
-		incomplete_reason(v, "private directory", "holds a directory, "
-		    "which a walk from the root does not reach");
-	if (status == FSIMG_OK && v->private_tables)
-		incomplete_reason(v, "private directory", "holds a compressed "
-		    "file whose chunk table a walk from the root does not reach");
+	if (status == FSIMG_OK && v->unreached)
+		incomplete_reason(v, "private directory", "holds entries the "
+		    "walk from the root does not reach");
 	if (status == FSIMG_OK)
 		status = namespace_walk(v, flags, report, error);
 	if (status == FSIMG_OK)

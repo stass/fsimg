@@ -76,24 +76,12 @@
   snapshot-tree scan, so a refusal in one snapshot's tree ends the scan and
   damage in later snapshots goes unreported; the snapshot stage should run
   each snapshot as its own part of `verify.c`'s `parts_run()`.
-  [Medium] Verification marks the report incomplete for a compressed
-  file with a resource fork only when its inode's parent field is the
-  private directory (`records.c` `attribute_record`); names reconciliation
-  does not tie a file's parent field to its names, so a crafted file named
-  only under the private directory with another parent field is never
-  walked, and every replay-only check (its compression header, inline
-  payload framing, a link's target) is skipped while the report says
-  complete. Decide it in `names_join()`, where an inode meets all its
-  names: a non-directory with no name outside the private directory makes
-  the report incomplete, which replaces the attribute-name flag.
-  The reference-count sweep counts file extents, so a stream whose
+  [Medium] The reference-count sweep counts file extents, so a stream whose
   extents name one block twice counts twice where the format design counts
   distinct streams; no capture holds such a stream.
   Record reconciliation (`records.c`) leaves open, from review: an unnamed
   inode in the private directory is not held to a link count (no capture
-  has one; E16); a file inode's parent and name field are not matched with
-  one of its names, nor a directory's name field outside the selected
-  volume's replay; symbolic-link targets and `com.apple.decmpfs` headers
+  has one; E16); symbolic-link targets and `com.apple.decmpfs` headers
   of non-selected volumes are not judged; and `apfs_inode_get()` judges
   the inode's flags before its type against the directory record, so such
   an inode with both faults reports unsupported. [Low] A directory cycle the root

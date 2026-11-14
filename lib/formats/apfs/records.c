@@ -23,9 +23,10 @@
  * Facts that join different owners go to streams in metadata scratch, each
  * sorted once after the scan and merged with its partner:
  *
- *   names	each directory record's (child, parent, sibling ID, type),
- *		merged with inodes, each inode's (number, parent, count,
- *		sibling links, type), appended in scan order and so sorted;
+ *   names	each directory record's (child, parent, sibling ID, type)
+ *		and name, merged with inodes, each inode's (number, parent,
+ *		count, sibling links, type) and name field, appended in scan
+ *		order and so sorted;
  *   links	each sibling link's (sibling ID, inode, parent, name), merged
  *		with tags, the same of each directory record carrying a
  *		sibling ID, and with maps, each sibling map's (sibling ID,
@@ -37,9 +38,11 @@
  *   forms	each directory record's (parent, comparison form): adjacent
  *		equal records are names the volume treats as equal.
  *
- * Facts of fixed shape are fact_t records; links, tags and forms carry a
- * name and are byte strings led by big-endian integers, so that they sort
- * as bytes and two of them are equal exactly when their bytes are.
+ * Facts of fixed shape are fact_t records, and a names or inodes fact is
+ * followed by its name, empty for an inode without a name field; links,
+ * tags and forms carry a name and are byte strings led by big-endian
+ * integers, so that they sort as bytes and two of them are equal exactly
+ * when their bytes are.
  *
  * Every stream record comes from a record read, so the streams are bounded
  * by the scratch budget, and every join is a sort and a merge: an
@@ -84,13 +87,24 @@ typedef struct fact {
 	uint8_t		type;
 } fact_t;
 
+/* A names or inodes record as read: the fact and the name after it. */
+typedef struct named {
+	fact_t		 fact;
+	const unsigned char *name;
+	size_t		 name_len;
+} named_t;
+
 #define FACT_BYTES	33u
+/* A names or inodes record: the fact, then a name of the reader's length. */
+#define NAMED_BYTES	(FACT_BYTES + APFS_NAME_MAX_BYTES)
 /* A sibling record: sibling ID, inode and parent, then the name. */
 #define SIBLING_HEAD	24u
 /* The longest byte record: a forms record, the parent and the comparison
- * form's UTF-8; a sibling record is shorter.
+ * form's UTF-8; a sibling, names or inodes record is shorter.
  */
 #define RECORD_BYTES_MAX (8u + APFS_NAME_KEY_BYTES)
+_Static_assert(NAMED_BYTES <= RECORD_BYTES_MAX,
+    "a names or inodes record fits a byte record buffer");
 
 /* The records of one owner seen so far. */
 typedef struct object {
@@ -101,9 +115,9 @@ typedef struct object {
 	uint64_t	extent_end;	/* logical end of the stream's extents */
 	uint32_t	refcnt;		/* the data-stream ID record's */
 	int32_t		count;		/* the inode's child or link count */
+	uint16_t	name_field_len;	/* in scan_t name_field */
 	uint8_t		type;		/* the inode's mode type */
 	bool		inode;
-	bool		compressed;
 	bool		stream_id;
 	bool		extents;
 } object_t;
@@ -127,6 +141,8 @@ typedef struct scan {
 	 */
 	unsigned char	*record;
 	unsigned char	*other;
+	/* The current inode's name field, APFS_NAME_MAX_BYTES. */
+	unsigned char	*name_field;
 	fsimg_stream_t	*names;
 	fsimg_stream_t	*inodes;
 	fsimg_stream_t	*links;
@@ -151,12 +167,19 @@ static int		fact_compare(const void *, size_t, const void *, size_t,
 			    void *);
 static int		bytes_compare(const void *, size_t, const void *, size_t,
 			    void *);
+static void		fact_encode(unsigned char *, const fact_t *);
+static void		fact_decode(const unsigned char *, fact_t *);
 static fsimg_status_t	fact_add(fsimg_stream_t *, const fact_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	fact_next(fsimg_stream_t *, uint64_t *, fact_t *,
 			    bool *, fsimg_error_t *);
 static fsimg_status_t	bytes_next(fsimg_stream_t *, uint64_t *,
 			    unsigned char *, size_t *, bool *, fsimg_error_t *);
+static fsimg_status_t	named_add(fsimg_stream_t *, unsigned char *,
+			    const fact_t *, const void *, size_t,
+			    fsimg_error_t *);
+static fsimg_status_t	named_next(fsimg_stream_t *, uint64_t *,
+			    unsigned char *, named_t *, bool *, fsimg_error_t *);
 static fsimg_status_t	sibling_add(fsimg_stream_t *, unsigned char *,
 			    uint64_t, uint64_t, uint64_t, const char *, uint16_t,
 			    fsimg_error_t *);
@@ -186,6 +209,7 @@ static fsimg_status_t	object_end(scan_t *, fsimg_error_t *);
 static fsimg_status_t	scan_records(scan_t *, fsimg_error_t *);
 static fsimg_status_t	inode_names_check(const fact_t *, uint64_t,
 			    uint64_t, fsimg_error_t *);
+static bool		inode_identifies(const named_t *, const named_t *);
 static fsimg_status_t	names_join(scan_t *, fsimg_error_t *);
 static fsimg_status_t	links_join(scan_t *, fsimg_error_t *);
 static fsimg_status_t	stream_check(const fact_t *, uint64_t, uint64_t,
@@ -249,14 +273,28 @@ bytes_compare(const void *a, size_t alen, const void *b, size_t blen,
 	return (alen < blen ? -1 : alen > blen);
 }
 
+static void
+fact_encode(unsigned char *raw, const fact_t *fact)
+{
+	for (size_t i = 0; i < 4; i++)
+		fsimg_store_le64(raw + 8 * i, fact->value[i]);
+	raw[32] = fact->type;
+}
+
+static void
+fact_decode(const unsigned char *raw, fact_t *fact)
+{
+	for (size_t i = 0; i < 4; i++)
+		fact->value[i] = fsimg_load_le64(raw + 8 * i);
+	fact->type = raw[32];
+}
+
 static fsimg_status_t
 fact_add(fsimg_stream_t *stream, const fact_t *fact, fsimg_error_t *error)
 {
 	unsigned char raw[FACT_BYTES];
 
-	for (size_t i = 0; i < 4; i++)
-		fsimg_store_le64(raw + 8 * i, fact->value[i]);
-	raw[32] = fact->type;
+	fact_encode(raw, fact);
 	return (fsimg_stream_append(stream, raw, sizeof(raw), NULL, error));
 }
 
@@ -279,9 +317,7 @@ fact_next(fsimg_stream_t *stream, uint64_t *offset, fact_t *fact, bool *read,
 	if (length != FACT_BYTES)
 		return (apfs_corrupt(error, ROLE_TREE,
 		    "scratch record has the wrong size"));
-	for (size_t i = 0; i < 4; i++)
-		fact->value[i] = fsimg_load_le64(raw + 8 * i);
-	fact->type = raw[32];
+	fact_decode(raw, fact);
 	*read = true;
 	return (FSIMG_OK);
 }
@@ -304,6 +340,41 @@ bytes_next(fsimg_stream_t *stream, uint64_t *offset, unsigned char *record,
 		return (apfs_corrupt(error, ROLE_TREE,
 		    "scratch record has the wrong size"));
 	*read = true;
+	return (FSIMG_OK);
+}
+
+/* Append fact followed by name_len bytes of name, built in raw. */
+static fsimg_status_t
+named_add(fsimg_stream_t *stream, unsigned char *raw, const fact_t *fact,
+    const void *name, size_t name_len, fsimg_error_t *error)
+{
+	fact_encode(raw, fact);
+	if (name_len != 0)
+		bcopy(name, raw + FACT_BYTES, name_len);
+	return (fsimg_stream_append(stream, raw, FACT_BYTES + name_len, NULL,
+	    error));
+}
+
+/*
+ * Read the names or inodes record at offset into raw, decoded into named,
+ * whose name points into raw.
+ */
+static fsimg_status_t
+named_next(fsimg_stream_t *stream, uint64_t *offset, unsigned char *raw,
+    named_t *named, bool *read, fsimg_error_t *error)
+{
+	size_t length;
+	fsimg_status_t status;
+
+	status = bytes_next(stream, offset, raw, &length, read, error);
+	if (status != FSIMG_OK || !*read)
+		return (status);
+	if (length < FACT_BYTES)
+		return (apfs_corrupt(error, ROLE_TREE,
+		    "scratch record has the wrong size"));
+	fact_decode(raw, &named->fact);
+	named->name = raw + FACT_BYTES;
+	named->name_len = length - FACT_BYTES;
 	return (FSIMG_OK);
 }
 
@@ -403,7 +474,15 @@ inode_record(scan_t *s, const apfs_jkey_t *key, const apfs_record_t *record,
 	o->parent = inode.val.parent;
 	o->count = inode.val.count;
 	o->type = (uint8_t)((inode.val.mode & APFS_MODE_TYPE_MASK) >> 12);
-	o->compressed = (inode.val.bsd_flags & APFS_BSD_COMPRESSED) != 0;
+	/* The name field must be one of the inode's names, which the
+	 * reader bounds; names_join() compares the two.
+	 */
+	if (name_len > APFS_NAME_MAX_BYTES)
+		return (apfs_unsupported(error, ROLE_INODE,
+		    "name field is longer than the reader accepts"));
+	if (name_len != 0)
+		bcopy(name, s->name_field, name_len);
+	o->name_field_len = name_len;
 	/* Numbers 0 and 1 are never inodes; the root and the private
 	 * directory are directories under inode 1.
 	 */
@@ -452,14 +531,11 @@ inode_record(scan_t *s, const apfs_jkey_t *key, const apfs_record_t *record,
 
 /*
  * An attribute of the inode before it: well formed, and a stream
- * attribute's use. A compressed file whose inode's parent field is the
- * private directory, whose resource fork holds a chunk table the walk from
- * the root does not reach, sets records->private_tables.
+ * attribute's use.
  */
 static fsimg_status_t
 attribute_record(scan_t *s, const apfs_record_t *record, fsimg_error_t *error)
 {
-	static const char fork[] = APFS_XATTR_RESOURCE_FORK;
 	object_t *o = &s->object;
 	apfs_name_key_t key;
 	apfs_xattr_val_t val;
@@ -479,10 +555,6 @@ attribute_record(scan_t *s, const apfs_record_t *record, fsimg_error_t *error)
 	    val.data_len > APFS_XATTR_INLINE_MAX)
 		return (apfs_corrupt(error, ROLE_ATTRIBUTE,
 		    "inline data is too long"));
-	if (o->compressed && o->parent == APFS_INO_PRIVATE &&
-	    key.name_len == sizeof(fork) - 1 &&
-	    bcmp(key.name, fork, sizeof(fork) - 1) == 0)
-		s->records->private_tables = true;
 	if ((val.flags & APFS_XATTR_DATA_STREAM) == 0)
 		return (FSIMG_OK);
 	return (fact_add(s->uses, &(fact_t){ .use = {
@@ -629,13 +701,12 @@ drec_record(scan_t *s, const apfs_record_t *record, fsimg_error_t *error)
 	if (key.parent == APFS_INO_ROOT_PARENT ? val.child != APFS_INO_ROOT &&
 	    val.child != APFS_INO_PRIVATE : val.child < s->inode_min)
 		return (apfs_corrupt(error, ROLE_DREC, "names a reserved inode"));
-	if (key.parent == APFS_INO_PRIVATE && type == APFS_DT_DIRECTORY)
-		s->records->private_directories = true;
 	status = drec_sibling(&val, &sibling, error);
 	if (status == FSIMG_OK)
-		status = fact_add(s->names, &(fact_t){ .name = {
+		status = named_add(s->names, s->record, &(fact_t){ .name = {
 		    .child = val.child, .parent = key.parent,
-		    .sibling = sibling }, .type = type }, error);
+		    .sibling = sibling }, .type = type }, key.name,
+		    key.name_len, error);
 	if (status == FSIMG_OK && sibling != 0)
 		status = sibling_add(s->tags, s->record, sibling, val.child,
 		    key.parent, key.name, key.name_len, error);
@@ -722,10 +793,10 @@ object_end(scan_t *s, fsimg_error_t *error)
 		    (o->type != APFS_DT_DIRECTORY && o->children != 0))
 			return (apfs_corrupt(error, ROLE_INODE,
 			    "child count differs from its directory records"));
-		status = fact_add(s->inodes, &(fact_t){ .inode = {
+		status = named_add(s->inodes, s->record, &(fact_t){ .inode = {
 		    .number = o->oid, .parent = o->parent,
 		    .count = (uint64_t)o->count, .links = o->links },
-		    .type = o->type }, error);
+		    .type = o->type }, s->name_field, o->name_field_len, error);
 		if (status != FSIMG_OK)
 			return (status);
 	} else if (o->children != 0 && o->oid != APFS_INO_ROOT_PARENT)
@@ -814,51 +885,86 @@ inode_names_check(const fact_t *inode, uint64_t names, uint64_t tagged,
 }
 
 /*
+ * Whether the inode's parent and name field identify the name, a directory
+ * record of it: the parents are equal, and so are the names unless the
+ * inode has no name field.
+ */
+static bool
+inode_identifies(const named_t *inode, const named_t *name)
+{
+	if (name->fact.name.parent != inode->fact.inode.parent)
+		return (false);
+	return (inode->name_len == 0 || (inode->name_len == name->name_len &&
+	    bcmp(inode->name, name->name, name->name_len) == 0));
+}
+
+/*
  * Names sorted by child, merged with the inodes in scan order: every name
- * names an inode of its type, and a directory's names its parent.
+ * names an inode of its type, a directory has a name field, and an inode's
+ * parent and name field identify one of its names, so a directory's
+ * identify its one name. The walk from the root reaches an inode only
+ * through a name outside the private directory, so an inode without one,
+ * other than the root and the private directory themselves, is recorded as
+ * unreached. The inode is read into s->record and each name into s->other.
  */
 static fsimg_status_t
 names_join(scan_t *s, fsimg_error_t *error)
 {
-	fact_t inode, name;
-	uint64_t inodes_at = 0, names_at = 0, names, tagged;
-	bool have_inode, have_name;
+	named_t inode, name;
+	uint64_t inodes_at = 0, names_at = 0, names, tagged, number;
+	bool have_inode, have_name, identified, reachable;
 	fsimg_status_t status;
 
 	status = sort_replace(&s->names, fact_compare, error);
 	if (status == FSIMG_OK)
 		status = fsimg_stream_seal(s->inodes, error);
 	if (status == FSIMG_OK)
-		status = fact_next(s->names, &names_at, &name, &have_name,
-		    error);
+		status = named_next(s->names, &names_at, s->other, &name,
+		    &have_name, error);
 	while (status == FSIMG_OK) {
-		status = fact_next(s->inodes, &inodes_at, &inode, &have_inode,
-		    error);
+		status = named_next(s->inodes, &inodes_at, s->record, &inode,
+		    &have_inode, error);
 		if (status != FSIMG_OK || !have_inode)
 			break;
+		number = inode.fact.inode.number;
 		/* A name before this inode names none: the check after
 		 * the loop reports it.
 		 */
-		if (have_name && name.name.child < inode.inode.number)
+		if (have_name && name.fact.name.child < number)
 			break;
+		if (inode.fact.type == APFS_DT_DIRECTORY && inode.name_len == 0)
+			return (apfs_corrupt(error, ROLE_INODE,
+			    "directory has no name field"));
 		names = tagged = 0;
+		identified = reachable = false;
 		while (status == FSIMG_OK && have_name &&
-		    name.name.child == inode.inode.number) {
-			if (name.type != inode.type)
+		    name.fact.name.child == number) {
+			if (name.fact.type != inode.fact.type)
 				return (apfs_corrupt(error, ROLE_DREC,
 				    "type differs from its inode"));
-			if (inode.type == APFS_DT_DIRECTORY &&
-			    name.name.parent != inode.inode.parent)
-				return (apfs_corrupt(error, ROLE_INODE,
-				    "directory names another parent"));
 			names++;
-			tagged += name.name.sibling != 0;
-			status = fact_next(s->names, &names_at, &name,
-			    &have_name, error);
+			tagged += name.fact.name.sibling != 0;
+			identified = identified ||
+			    inode_identifies(&inode, &name);
+			reachable = reachable ||
+			    name.fact.name.parent != APFS_INO_PRIVATE;
+			status = named_next(s->names, &names_at, s->other,
+			    &name, &have_name, error);
 		}
 		if (status == FSIMG_OK)
-			status = inode_names_check(&inode, names, tagged,
+			status = inode_names_check(&inode.fact, names, tagged,
 			    error);
+		if (status != FSIMG_OK)
+			break;
+		if (names != 0 && !identified)
+			return (apfs_corrupt(error, ROLE_INODE,
+			    "parent or name field differs from its names"));
+		if (!reachable && number != APFS_INO_ROOT &&
+		    number != APFS_INO_PRIVATE) {
+			s->records->unreached = true;
+			if (inode.fact.type == APFS_DT_DIRECTORY)
+				s->records->unreached_directory = true;
+		}
 	}
 	if (status == FSIMG_OK && have_name)
 		return (apfs_corrupt(error, ROLE_DREC,
@@ -1087,8 +1193,8 @@ scan_open(scan_t *s, unsigned char *window, fsimg_error_t *error)
 {
 	apfs_container_t *container = s->container;
 	fsimg_session_t *session = &container->reader->session;
-	fsimg_stream_t **facts[] = { &s->names, &s->inodes, &s->maps,
-	    &s->uses, &s->streams };
+	fsimg_stream_t **facts[] = { &s->maps, &s->uses, &s->streams };
+	fsimg_stream_t **named[] = { &s->names, &s->inodes };
 	fsimg_stream_t **bytes[] = { &s->links, &s->tags, &s->forms };
 	const apfs_tree_profile_t *profile;
 	fsimg_error_t detail;
@@ -1109,16 +1215,20 @@ scan_open(scan_t *s, unsigned char *window, fsimg_error_t *error)
 	    &detail);
 	if (s->form != NULL)
 		s->record = fsimg_alloc(container->reader->ctx,
-		    2 * RECORD_BYTES_MAX, &detail);
+		    2 * RECORD_BYTES_MAX + APFS_NAME_MAX_BYTES, &detail);
 	if (s->form == NULL || s->record == NULL) {
 		if (error != NULL)
 			*error = detail;
 		return (detail.status);
 	}
 	s->other = s->record + RECORD_BYTES_MAX;
+	s->name_field = s->other + RECORD_BYTES_MAX;
 	for (size_t i = 0; status == FSIMG_OK &&
 	    i < sizeof(facts) / sizeof(facts[0]); i++)
 		status = fsimg_stream_new(session, FACT_BYTES, facts[i], error);
+	for (size_t i = 0; status == FSIMG_OK &&
+	    i < sizeof(named) / sizeof(named[0]); i++)
+		status = fsimg_stream_new(session, NAMED_BYTES, named[i], error);
 	for (size_t i = 0; status == FSIMG_OK &&
 	    i < sizeof(bytes) / sizeof(bytes[0]); i++)
 		status = fsimg_stream_new(session, RECORD_BYTES_MAX, bytes[i],

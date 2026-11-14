@@ -1541,6 +1541,211 @@ test_file_extent_outside_physical_records_is_corrupt(void)
 }
 
 static void
+test_file_inode_parent_differs_from_its_only_name_is_corrupt(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *r;
+	unsigned char *raw;
+
+	scenario = "file inode parent differs from its only root directory record";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	inode_build(tree, 17, 2, "subdir", 4, 0, 0);
+	drec_build(tree, 2, 17, "subdir", 4, ascii_hash("subdir"), 0);
+	inode_count_set(tree, 2, 2);
+	r = record_find(tree, 16, 3);
+	fsimg_store_le64(r->value, 17);
+	raw = block_at(&f, VOLUME_BASE);
+	fsimg_store_le64(raw + 192, 1);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	filesystem_build(&f, 0);
+
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "parent or name field differs from its names");
+	fixture_close(&f);
+}
+
+static void
+test_file_inode_name_differs_from_its_only_name_is_corrupt(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *r;
+
+	scenario = "file inode name differs from its only directory record";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	r = record_find(tree, 16, 3);
+	inode_build(tree, 16, 2, "other", 8, 1, 2 * BLOCK);
+	*r = tree->records[--tree->count];
+	filesystem_build(&f, 0);
+
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "parent or name field differs from its names");
+	fixture_close(&f);
+}
+
+static void
+test_symlink_named_only_in_private_directory_is_incomplete(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *r;
+	unsigned char *raw;
+	apfs_gen_name_key_t key = { .oid = 18, .name = "com.apple.fs.symlink",
+		.name_len = sizeof("com.apple.fs.symlink") - 1 };
+	apfs_gen_xattr_val_t target = { .flags = 6,
+		.data = (const unsigned char *)"file", .data_len = 5 };
+
+	scenario = "symlink named only in the private directory";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	inode_count_set(tree, APFS_INO_PRIVATE, 1);
+	inode_build(tree, 18, APFS_INO_PRIVATE, "link", 10, 1, 0);
+	drec_build(tree, APFS_INO_PRIVATE, 18, "link", 10,
+	    ascii_hash("link"), 0);
+	r = record_add(tree);
+	r->key_size = GEN_NAME_KEY_BYTES + key.name_len + 1;
+	r->value_size = GEN_XATTR_VAL_BYTES + target.data_len;
+	CHECK(apfs_gen_xattr_key_build(r->key, r->key_size, &key));
+	CHECK(apfs_gen_xattr_val_build(r->value, r->value_size, &target));
+	raw = block_at(&f, VOLUME_BASE);
+	fsimg_store_le64(raw + 200, 1);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	filesystem_build(&f, 0);
+
+	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
+	    "private directory holds entries the walk from the root does not reach");
+	fixture_close(&f);
+}
+
+static void
+test_file_inode_under_private_directory_without_a_name_is_incomplete(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *r;
+
+	scenario = "file inode under the private directory has no directory record";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	r = record_find(tree, APFS_INO_ROOT, 9);
+	*r = tree->records[--tree->count];
+	r = record_find(tree, 16, 3);
+	fsimg_store_le64(r->value, APFS_INO_PRIVATE);
+	inode_count_set(tree, APFS_INO_ROOT, 0);
+	filesystem_build(&f, 0);
+
+	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
+	    "private directory holds entries the walk from the root does not reach");
+	fixture_close(&f);
+}
+
+static void
+verify_hard_link_inode_name(uint64_t parent, const char *name)
+{
+	static const struct {
+		uint64_t parent;
+		uint64_t sibling;
+		const char *name;
+	} links[] = {
+		{ .parent = 2, .sibling = 500, .name = "file" },
+		{ .parent = 17, .sibling = 501, .name = "alias" }
+	};
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *r;
+	unsigned char *raw;
+
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	inode_build(tree, 17, 2, "subdir", 4, 1, 0);
+	drec_build(tree, 2, 17, "subdir", 4, ascii_hash("subdir"), 0);
+	inode_count_set(tree, 2, 2);
+	r = record_find(tree, 16, 3);
+	inode_build(tree, 16, parent, name, 8, 2, 2 * BLOCK);
+	*r = tree->records[--tree->count];
+	/* Replace the original untagged name with its sibling-tagged record. */
+	r = record_find(tree, 2, 9);
+	*r = tree->records[--tree->count];
+	for (size_t i = 0; i < ARRAY_COUNT(links); i++) {
+		apfs_gen_sibling_val_t link = { .parent = links[i].parent,
+			.name = links[i].name,
+			.name_len = (uint16_t)strlen(links[i].name) };
+
+		drec_build(tree, link.parent, 16, link.name, 8,
+		    ascii_hash(link.name), links[i].sibling);
+		r = record_add(tree);
+		r->key_size = GEN_SIBLING_KEY_BYTES;
+		r->value_size = GEN_SIBLING_VAL_BYTES + link.name_len + 1;
+		CHECK(apfs_gen_sibling_key_build(r->key, r->key_size, 16,
+		    links[i].sibling));
+		CHECK(apfs_gen_sibling_val_build(r->value, r->value_size, &link));
+		r = record_add(tree);
+		r->key_size = GEN_JKEY_BYTES;
+		r->value_size = GEN_SIBLING_MAP_VAL_BYTES;
+		CHECK(apfs_gen_jkey_build(r->key, r->key_size,
+		    links[i].sibling, 12));
+		CHECK(apfs_gen_sibling_map_val_build(r->value, r->value_size, 16));
+	}
+	raw = block_at(&f, VOLUME_BASE);
+	fsimg_store_le64(raw + 192, 1);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	filesystem_build(&f, 0);
+	f.expected_files = 2;
+	f.expected_directories = 2;
+	f.expected_logical_bytes = 4 * BLOCK;
+
+	verify_fixture(&f, 0, FSIMG_OK, "");
+	fixture_close(&f);
+}
+
+static void
+test_hard_link_inode_identifying_first_link_verifies_completely(void)
+{
+	scenario = "hard link inode identifies the first name with lower parent number";
+	verify_hard_link_inode_name(2, "file");
+}
+
+static void
+test_hard_link_inode_identifying_second_link_verifies_completely(void)
+{
+	scenario = "hard link inode identifies the second link in another directory";
+	verify_hard_link_inode_name(17, "alias");
+}
+
+static void
+test_directory_inode_without_name_field_is_corrupt(void)
+{
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *r;
+	unsigned char *raw;
+	apfs_gen_inode_val_t inode = { .parent = APFS_INO_ROOT,
+	    .private_id = 17, .mode = 0040755, .count = 0 };
+
+	scenario = "ordinary directory inode has no name extended field";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	drec_build(tree, APFS_INO_ROOT, 17, "subdir", 4,
+	    ascii_hash("subdir"), 0);
+	inode_count_set(tree, APFS_INO_ROOT, 2);
+	r = record_add(tree);
+	r->key_size = GEN_JKEY_BYTES;
+	r->value_size = GEN_INODE_VAL_BYTES;
+	CHECK(apfs_gen_jkey_build(r->key, r->key_size, 17, 3));
+	CHECK(apfs_gen_inode_val_build(r->value, r->value_size, &inode));
+	raw = block_at(&f, VOLUME_BASE);
+	fsimg_store_le64(raw + 192, 1);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	filesystem_build(&f, 0);
+
+	verify_fixture(&f, 0, FSIMG_ECORRUPT, "directory has no name field");
+	fixture_close(&f);
+}
+
+static void
 test_directory_in_private_directory_is_incomplete(void)
 {
 	fixture_t f;
@@ -1560,7 +1765,7 @@ test_directory_in_private_directory_is_incomplete(void)
 	filesystem_build(&f, 0);
 
 	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
-	    "private directory holds a directory");
+	    "private directory holds entries the walk from the root does not reach");
 	fixture_close(&f);
 }
 
@@ -2159,7 +2364,58 @@ test_private_directory_compressed_file_leaves_verification_incomplete(void)
 	inode_count_set(tree, APFS_INO_PRIVATE, 1);
 	filesystem_build(&f, 0);
 	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
-	    "holds a compressed file whose chunk table a walk from the root does not reach");
+	    "private directory holds entries the walk from the root does not reach");
+	fixture_close(&f);
+}
+
+static void
+test_private_directory_compressed_file_with_root_parent_is_corrupt(void)
+{
+	unsigned char source[37] = { 0 };
+	unsigned char header[16], fields[16];
+	apfs_gen_xfield_t name = { .type = 4, .flags = 2, .size = 5,
+	    .data = (const unsigned char *)"file" };
+	apfs_gen_inode_val_t inode = { .parent = APFS_INO_ROOT,
+	    .private_id = 16, .mode = 0100755, .count = 1,
+	    .bsd_flags = 0x20, .xfields = fields,
+	    .xfields_len = sizeof(fields) };
+	fixture_t f;
+	fs_tree_t *tree;
+	fs_record_t *r;
+	size_t stored;
+
+	scenario = "compressed file named only in private directory has root inode parent";
+	fixture_init(&f, 1);
+	tree = &f.trees[0];
+	/* The resource fork replaces the inode's data stream. */
+	r = record_find(tree, 16, 6);
+	*r = tree->records[--tree->count];
+	stored = apfs_gen_compressed_fork(block_at(&f, DATA_BLOCK),
+	    2 * BLOCK, 4, source, sizeof(source));
+	CHECK(stored != 0);
+	CHECK(apfs_gen_xfields_build(fields, sizeof(fields), &name, 1));
+	r = record_find(tree, 16, 3);
+	r->value_size = GEN_INODE_VAL_BYTES + sizeof(fields);
+	CHECK(apfs_gen_inode_val_build(r->value, r->value_size, &inode));
+	apfs_gen_decmpfs_header(header, 4, sizeof(source));
+	compression_attribute_build(tree, "com.apple.decmpfs",
+	    &(apfs_gen_xattr_val_t){ .flags = 2, .data_len = sizeof(header),
+	    .data = header });
+	compression_attribute_build(tree, "com.apple.ResourceFork",
+	    &(apfs_gen_xattr_val_t){ .flags = 1, .data_len = 48,
+	    .stream_oid = 16, .dstream = { .size = stored,
+	    .alloced_size = 2 * BLOCK } });
+
+	/* Move only the directory record; the inode still names the root. */
+	r = record_find(tree, APFS_INO_ROOT, 9);
+	*r = tree->records[--tree->count];
+	drec_build(tree, APFS_INO_PRIVATE, 16, "file", 8,
+	    ascii_hash("file"), 0);
+	inode_count_set(tree, APFS_INO_ROOT, 0);
+	inode_count_set(tree, APFS_INO_PRIVATE, 1);
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "parent or name field differs from its names");
 	fixture_close(&f);
 }
 
@@ -2305,6 +2561,14 @@ main(void)
 	test_extent_gap_is_corrupt();
 	test_first_extent_after_zero_is_corrupt();
 	test_file_extent_outside_physical_records_is_corrupt();
+	test_file_inode_parent_differs_from_its_only_name_is_corrupt();
+	test_file_inode_name_differs_from_its_only_name_is_corrupt();
+	test_private_directory_compressed_file_with_root_parent_is_corrupt();
+	test_symlink_named_only_in_private_directory_is_incomplete();
+	test_file_inode_under_private_directory_without_a_name_is_incomplete();
+	test_hard_link_inode_identifying_first_link_verifies_completely();
+	test_hard_link_inode_identifying_second_link_verifies_completely();
+	test_directory_inode_without_name_field_is_corrupt();
 	test_directory_in_private_directory_is_incomplete();
 	test_unreachable_directory_cycle_is_corrupt();
 	test_file_extent_crossing_record_end_into_gap_is_corrupt();

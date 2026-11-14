@@ -722,10 +722,24 @@ lies; attributes and extended fields are well formed; counts by kind
 accumulate for the superblock. Facts that join different owners go to
 streams that are sorted once:
 
-* name references `(child, parent, type, has sibling ID)`, joined with
-  the inodes in scan order to check existence, kind, a directory's single
-  parent, each file's link count, and that an inode's names carry sibling
-  IDs exactly when it has sibling links, one per name;
+* name references `(child, parent, sibling ID, type, name)`, joined with
+  the inodes `(number, parent, count, sibling links, type, name field)` in
+  scan order to check existence, kind, a directory's single name and its
+  name field, each file's link count, that an inode's names carry sibling
+  IDs exactly when it has sibling links, one per name, and that a named
+  inode's parent and name field are those of one of its names. The same join decides
+  reachability from the directory records alone, which the walk follows: an
+  inode other than the root and private directories with no name outside
+  the private directory is one the walk from the root does not reach, and
+  in the selected volume it makes the report incomplete ("holds entries
+  the walk from the root does not reach"), whatever its kind, since the
+  checks only the walk makes, a compressed file's header and chunk table,
+  a symbolic link's target, a directory's descent, are not made on it.
+  Since a directory has one name, no inode the walk misses escapes this
+  rule except beneath an unreached directory, which itself makes the
+  report incomplete, or in a cycle of directories the root cannot reach,
+  which the walk's reachability count reports as corrupt unless an
+  unreached directory has already made the report incomplete;
 * sibling links `(sibling ID, inode, parent, name)`, joined with the same
   facts of every directory record that carries a sibling ID, so each link
   equals the record it describes and every such record has its link, and
@@ -752,10 +766,10 @@ verification runs the shared validator's `open` and then `chunk` for every
 entry in ascending order, reading the table through the fork's file
 extents and decoding no payload, as HFS Plus checks its tables in
 `content_check()`; LZBITMAP's type 14 is checked too, since the check needs
-no decoder. The walk from the root never makes current a file whose
-inode's parent field is the private directory, so no entry of such a
-file's table is read: when the record scan finds a compressed one with a
-resource fork, the report is incomplete. It holds three table entries and
+no decoder. A file the walk from the root does not reach has no table
+read, and the record scan makes the report incomplete for it, as for every
+check the walk makes (see the names join above). It holds three table
+entries and
 charges one unit of work per entry, so a damaged later entry fails `W`
 without payload read-through.
 
@@ -801,9 +815,10 @@ so the directories the walk reaches from the root form a tree, and a cycle
 of directories the root cannot reach exists exactly when the walk reaches
 fewer directories than the filesystem scan counted, which the superblock's
 count equals; such a shortfall is `FSIMG_ECORRUPT` naming both counts. A
-directory record in the private directory that names a directory
-(provisional, E16) makes the report incomplete instead, and the count is not
-judged in that volume, since the walk from the root cannot reach it. The
+directory the names join finds unreached, one named only in the private
+directory (provisional, E16), makes the report incomplete instead, and the
+count is not judged in that volume, since the walk from the root cannot
+reach it or anything beneath it. The
 walk descends into omitted directories, so a directory counts whether or
 not it is delivered. A volume verification does not walk has no such
 check: finding a cycle there would take repeated joins of each

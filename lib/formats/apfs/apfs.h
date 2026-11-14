@@ -1785,11 +1785,12 @@ fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,
  * APFS_FEXT_CLAIM_BYTES to records->extents, for the allocation merge to
  * join with the live physical-extent records; when records->shared is not
  * NULL, each non-directory inode of several names appends its number, an
- * 8-byte little-endian record, in ascending order. A directory record in the
- * private directory naming a directory sets records->private_directories,
- * and a compressed file there with a resource fork records->private_tables,
- * since a walk from the root does not reach either. The scan's streams live in the
- * session's metadata scratch and are freed before it returns.
+ * 8-byte little-endian record, in ascending order. An inode, other than the
+ * root and the private directory, that no directory record outside the
+ * private directory names is one a walk from the root does not reach: it
+ * sets records->unreached, and records->unreached_directory too when it is
+ * a directory. The scan's streams live in the session's metadata scratch
+ * and are freed before it returns.
  */
 #define APFS_FEXT_CLAIM_BYTES		28u
 
@@ -1803,8 +1804,8 @@ typedef struct apfs_fext_claim {
 typedef struct apfs_records {
 	fsimg_stream_t	*extents;
 	fsimg_stream_t	*shared;	/* optional */
-	bool		 private_directories;
-	bool		 private_tables;
+	bool		 unreached;
+	bool		 unreached_directory;
 } apfs_records_t;
 
 void		apfs_fext_claim_encode(unsigned char *,

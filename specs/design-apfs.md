@@ -1877,16 +1877,22 @@ and its records reconciled:
   sibling ID, parent and name equal those of the directory record carrying
   that ID, and, in a volume with the hard-link map feature, one sibling map
   per sibling link;
-* every directory other than the root and private directories is
-  reachable from the root, so it is named by a directory record that does
-  not lie in the private directory (provisional, E16: no capture holds a
-  directory in the private directory, so one there makes the report
-  incomplete rather than corrupt, and the walk's reachability count is
-  not judged in that volume; if E16 cannot answer, that stands);
-* every other inode is named by a
-  directory record, or lies in the private directory, which is where native
-  volumes place unnamed inodes (provisional, E16: E3 holds no unnamed
-  inode; if E16 cannot answer, the rule stands);
+* each inode named by directory records has a parent field, and a name
+  field when present, equal to the parent and name of one of those records: a directory's single
+  record, or one of a file's names; a directory always has a name field;
+* every inode other than the root and private directories is named by a
+  directory record, or is a non-directory whose parent field is the private
+  directory, which is where native volumes place unnamed inodes
+  (provisional, E16: E3 holds no unnamed inode; if E16 cannot answer, the
+  rule stands);
+* an inode other than the root and private directories that no directory
+  record outside the private directory names is one the walk from the root
+  does not reach, whatever its kind, so the checks the walk makes are not
+  made on it. Such an inode in the selected volume makes the report
+  incomplete rather than corrupt, and when one is a directory the walk's
+  reachability count is not judged in that volume (provisional, E16: no
+  capture holds an inode named only in the private directory, nor an
+  unnamed one; if E16 cannot answer, that stands);
 * every file extent belongs to a live stream, an inode's private ID or the
   stream ID one attribute record names, and a data-stream ID record's
   reference count equals the inodes using its stream:
