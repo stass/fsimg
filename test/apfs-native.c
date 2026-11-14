@@ -2017,7 +2017,7 @@ native_run_capture(const char *directory, const char *name, uint64_t size)
 	fsimg_io_ops_t ops;
 	struct stat st;
 	char path[4096], temporary[4096], label[256];
-	const char *scratch = getenv("TMPDIR");
+	const char *volatile scratch = getenv("TMPDIR");
 	unsigned before = failures;
 
 	CHECK(capture != NULL);

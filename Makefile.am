@@ -352,16 +352,16 @@ test_hfsplus_codec_SOURCES = test/hfsplus-codec.c test/test.h
 test_hfsplus_codec_LDADD = libfsimg.la
 test_apfs_codec_SOURCES = test/apfs-codec.c test/apfs-gen.c test/apfs-gen.h \
 	test/test.h
-test_apfs_codec_LDADD = libfsimg.la
+test_apfs_codec_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_apfs_SOURCES = test/apfs.c test/apfs-gen.c test/apfs-gen.h test/test.h
-test_apfs_LDADD = libfsimg.la
+test_apfs_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_apfs_list_SOURCES = test/apfs-list.c test/apfs-gen.c test/apfs-gen.h test/test.h
-test_apfs_list_LDADD = libfsimg.la
+test_apfs_list_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_apfs_list_CPPFLAGS = $(AM_CPPFLAGS) \
 	-DAPFS_NAME_HASHES='"$(abs_top_srcdir)/test/fixtures/apfs/name-hashes.txt"'
 test_apfs_content_SOURCES = test/apfs-content.c test/apfs-gen.c \
 	test/apfs-gen.h test/test.h
-test_apfs_content_LDADD = libfsimg.la
+test_apfs_content_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_apfs_write_btree_SOURCES = test/apfs-write-btree.c test/test.h
 test_apfs_write_btree_LDADD = libfsimg.la
 test_apfs_write_SOURCES = test/apfs-write.c test/apfs-native.c \
@@ -369,19 +369,19 @@ test_apfs_write_SOURCES = test/apfs-write.c test/apfs-native.c \
 test_apfs_write_LDADD = libfsimg.la
 test_apfs_spaceman_SOURCES = test/apfs-spaceman.c test/apfs-gen.c \
 	test/apfs-gen.h test/test.h
-test_apfs_spaceman_LDADD = libfsimg.la
+test_apfs_spaceman_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_apfs_verify_SOURCES = test/apfs-verify.c test/apfs-gen.c \
 	test/apfs-gen.h test/test.h
-test_apfs_verify_LDADD = libfsimg.la
+test_apfs_verify_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_hfsplus_SOURCES = test/hfsplus.c test/hfsplus-gen.c test/hfsplus-gen.h \
 	test/lzfse-vectors.h test/test.h
 test_hfsplus_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_apfs_faults_SOURCES = test/apfs-faults.c test/apfs-gen.c \
 	test/apfs-gen.h test/test.h
-test_apfs_faults_LDADD = libfsimg.la
+test_apfs_faults_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_apfs_salvage_SOURCES = test/apfs-salvage.c test/apfs-gen.c \
 	test/apfs-gen.h test/test.h
-test_apfs_salvage_LDADD = libfsimg.la
+test_apfs_salvage_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_hfsplus_faults_SOURCES = test/hfsplus-faults.c test/hfsplus-gen.c \
 	test/hfsplus-gen.h test/test.h
 test_hfsplus_faults_LDADD = libfsimg.la $(ZLIB_LIBS)
@@ -447,7 +447,7 @@ test_driver_contracts_SOURCES = test/driver-contracts.c test/contract.c \
 	test/contract.h test/hfsplus-gen.c test/hfsplus-gen.h \
 	test/erofs-contract.c test/erofs-contract.h test/erofs-gen.c \
 	test/erofs-gen.h test/test.h
-test_driver_contracts_LDADD = libfsimg.la
+test_driver_contracts_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_layer_contracts_SOURCES = test/layer-contracts.c test/contract.c \
 	test/contract.h
 test_layer_contracts_LDADD = libfsimg.la
