@@ -614,5 +614,15 @@ uint32_t	apfs_name_hash(const apfs_name_form_t *);
  */
 fsimg_status_t	apfs_name_key(const apfs_name_form_t *, char *, size_t,
 		    size_t *);
+/* apfs_name_assigned(name, length), for a name apfs_name_form accepted, is
+ * true when every code point of the name is assigned in Unicode 17.0.0
+ * (APFS_UNICODE_VERSION), private use included. Unicode never assigns a
+ * noncharacter, so a name holding one is false. The writer refuses a name
+ * for which it is false; the reader classifies a stored hash mismatch on
+ * such a name as FSIMG_EUNSUPPORTED rather than FSIMG_ECORRUPT. Bytes that
+ * are not strict UTF-8 are false, which is no classification: the reader
+ * has already refused them as corrupt.
+ */
+bool		apfs_name_assigned(const char *, size_t);
 
 #endif /* !FSIMG_APFS_H */

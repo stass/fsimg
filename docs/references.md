@@ -104,7 +104,9 @@ applies to names (E4, [the research record](apfs-research.md)).
 `test/fixtures/apfs/name-hashes.txt`, and against the three files above
 when `FSIMG_APFS_UCD` names a directory holding them.
 The test also checks every vector in `$FSIMG_APFS_NATIVE/e4-vectors.txt`
-when present.
+when present, and when `FSIMG_APFS_NATIVE` is set, that the assigned-code-point
+predicate refuses exactly the names macOS refused with `EILSEQ` in the eight
+`$FSIMG_APFS_NATIVE/e4-inputs/results-*.tsv` outcome files.
 
 `lib/core/sha256.c` and `lib/core/sha256.h`, the project's one SHA-256
 implementation, are FreeBSD's `sys/crypto/sha2/sha256c.c` and

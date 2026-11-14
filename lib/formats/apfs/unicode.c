@@ -51,6 +51,7 @@ static size_t	fold(uint32_t, uint32_t *);
 static void	reorder(apfs_name_form_t *);
 static bool	fold_form(apfs_name_form_t *);
 static bool	dot_name(const char *, size_t);
+static bool	assigned(uint32_t);
 
 static unsigned
 combining_class(uint32_t point)
@@ -173,6 +174,25 @@ dot_name(const char *name, size_t length)
 	    (length == 2 && name[0] == '.' && name[1] == '.'));
 }
 
+/* Whether point is a scalar value the pinned version assigns; the
+ * generator checks that no noncharacter is.
+ */
+static bool
+assigned(uint32_t point)
+{
+	size_t page;
+	unsigned i, byte;
+
+	page = point >> 8;
+	if (page >= sizeof(apfs_assigned_index))
+		return (false);
+	i = apfs_assigned_index[page];
+	if (i == 0)
+		return (false);
+	byte = apfs_assigned_pages[i - 1][(point & 0xff) >> 3];
+	return (((byte >> (point & 7)) & 1) != 0);
+}
+
 fsimg_status_t
 apfs_name_form(apfs_name_rule_t rule, const char *name, size_t length,
     apfs_name_form_t *form)
@@ -272,4 +292,20 @@ apfs_name_key(const apfs_name_form_t *form, char *key, size_t capacity,
 		total += fsimg_utf8_encode(form->points[i], key + total);
 	*length = total;
 	return (FSIMG_OK);
+}
+
+bool
+apfs_name_assigned(const char *name, size_t length)
+{
+	const unsigned char *bytes;
+	uint32_t point;
+	size_t used;
+
+	bytes = (const unsigned char *)name;
+	for (size_t offset = 0; offset < length; offset += used) {
+		if (!fsimg_utf8_decode(bytes + offset, length - offset, &used,
+		    &point) || !assigned(point))
+			return (false);
+	}
+	return (true);
 }

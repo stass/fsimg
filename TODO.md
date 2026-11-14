@@ -825,14 +825,6 @@
 
 ## Planned features
 
-* [Medium] **APFS assigned-code-point table** (`tools/gen-apfs-tables.rb`,
-  `lib/formats/apfs/unicode.c`): the name rules of
-  [the format design](specs/design-apfs.md#directory-records-and-names) need
-  a predicate for code points unassigned in Unicode 17.0.0 and
-  noncharacters, generated from `UnicodeData.txt` with its First/Last range
-  entries. The writer refuses such names and the reader classifies a hash
-  mismatch on one as `FSIMG_EUNSUPPORTED`; test both with U+0378 and U+FFFF.
-
 * [Low] **Salvage ranges after interior damage** (`lib/read`, `lib/formats/`):
   deferred extension to the prefix-only [salvage policy](specs/design-salvage.md).
   Design recovery of independently located intact later ranges with explicit

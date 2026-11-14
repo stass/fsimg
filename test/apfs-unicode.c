@@ -20,6 +20,8 @@
 
 #define COUNT(a) (sizeof(a) / sizeof((a)[0]))
 #define SCALAR_LIMIT 0x110000u
+/* UnicodeData.txt 17.0.0 assigns 299382 points, including 2048 surrogates. */
+#define ASSIGNED_SCALARS 297334
 #define UCD_LINE_BYTES 4096
 #define UCD_SEQUENCE_POINTS 64
 #define E4_LINE_BYTES (2 * APFS_NAME_MAX_BYTES + 64)
@@ -104,6 +106,16 @@ static void test_ucd_normalization_matches_columns(const char *);
 static folding_t *read_foldings(const char *);
 static void test_ucd_caseless_matches_full_folding(const char *);
 static void test_ucd_conformance(void);
+static void check_assigned_point(uint32_t, bool);
+static void test_unassigned_and_noncharacter_points_are_refused(void);
+static void test_ascii_private_use_and_empty_names_are_assigned(void);
+static void test_assigned_range_interiors_and_endpoints_are_accepted(void);
+static void test_last_assigned_point_accepted_and_next_refused(void);
+static void test_every_noncharacter_is_refused_alone_and_embedded(void);
+static void test_assignment_refuses_non_strict_utf8(void);
+static bool *read_ucd_assignment(const char *);
+static void test_every_scalar_assignment_matches_ucd_and_digest(void);
+static void test_assignment_matches_native_outcomes_when_native_is_set(void);
 
 static void
 case_check(bool condition, const char *format, ...)
@@ -1137,6 +1149,270 @@ test_ucd_conformance(void)
 	ucd_line = 0;
 }
 
+/* Check both the scalar and its occurrence between assigned ASCII points. */
+static void
+check_assigned_point(uint32_t point, bool wanted)
+{
+	uint32_t points[] = {'a', point, 'z'};
+	char name[6];
+	size_t length;
+
+	length = encode_name(&point, 1, name, sizeof(name));
+	case_check(apfs_name_assigned(name, length) == wanted,
+	    "assignment alone point=U+%04X expected=%d", (unsigned)point,
+	    wanted);
+	length = encode_name(points, COUNT(points), name, sizeof(name));
+	case_check(apfs_name_assigned(name, length) == wanted,
+	    "assignment embedded point=U+%04X expected=%d", (unsigned)point,
+	    wanted);
+}
+
+static void
+test_unassigned_and_noncharacter_points_are_refused(void)
+{
+	CHECK(!apfs_name_assigned("\xcd\xb8", 2));
+	CHECK(!apfs_name_assigned("\xef\xbf\xbf", 3));
+	CHECK(!apfs_name_assigned("a\xcd\xb8", 3));
+}
+
+static void
+test_ascii_private_use_and_empty_names_are_assigned(void)
+{
+	CHECK(apfs_name_assigned("plain ASCII", 11));
+	/* Assignment is vacuous for empty names; callers reject them elsewhere. */
+	CHECK(apfs_name_assigned("", 0));
+	check_assigned_point(0xe000, true);
+	check_assigned_point(0xf0000, true);
+	check_assigned_point(0x10fffd, true);
+}
+
+static void
+test_assigned_range_interiors_and_endpoints_are_accepted(void)
+{
+	/* First, interior, Last for five UnicodeData.txt 17.0.0 ranges. */
+	static const uint32_t points[] = {
+		0x3400, 0x3500, 0x4dbf,
+		0x4e00, 0x4e01, 0x9fff,
+		0xac00, 0xac01, 0xd7a3,
+		0x17000, 0x17001, 0x187ff,
+		0x20000, 0x20001, 0x2a6df
+	};
+
+	for (size_t i = 0; i < COUNT(points); i++)
+		check_assigned_point(points[i], true);
+}
+
+static void
+test_last_assigned_point_accepted_and_next_refused(void)
+{
+	/* Adjacent assigned/unassigned pairs verified in UnicodeData.txt 17.0.0. */
+	static const uint32_t last_assigned[] = {
+		0x377, 0x85b, 0xd7a3, 0x1faf8, 0x2a6df
+	};
+
+	for (size_t i = 0; i < COUNT(last_assigned); i++) {
+		check_assigned_point(last_assigned[i], true);
+		check_assigned_point(last_assigned[i] + 1, false);
+	}
+}
+
+static void
+test_every_noncharacter_is_refused_alone_and_embedded(void)
+{
+	for (uint32_t point = 0xfdd0; point <= 0xfdef; point++)
+		check_assigned_point(point, false);
+	for (uint32_t plane = 0; plane <= 16; plane++) {
+		check_assigned_point((plane << 16) | 0xfffe, false);
+		check_assigned_point((plane << 16) | 0xffff, false);
+	}
+}
+
+static void
+test_assignment_refuses_non_strict_utf8(void)
+{
+	static const invalid_name_t invalid[] = {
+		{ "lone continuation", "\x80", 1 },
+		{ "truncated sequence", "\xe2\x82", 2 },
+		{ "encoded surrogate", "\xed\xa0\x80", 3 },
+		{ "overlong two", "\xc0\x80", 2 },
+		{ "overlong three", "\xe0\x80\x80", 3 },
+		{ "above scalar range", "\xf4\x90\x80\x80", 4 }
+	};
+
+	for (size_t i = 0; i < COUNT(invalid); i++)
+		case_check(!apfs_name_assigned(invalid[i].bytes, invalid[i].length),
+		    "assignment rejects %s", invalid[i].label);
+}
+
+/* Build a flat oracle from UCD rows, independent of the generated page map.
+ * First/Last pairs include every point between their endpoints. Surrogate
+ * rows remain in the map but are excluded from the scalar traversal below.
+ */
+static bool *
+read_ucd_assignment(const char *directory)
+{
+	char line[UCD_LINE_BYTES], range_name[UCD_LINE_BYTES];
+	char *fields[15], *end, *first_suffix, *last_suffix;
+	bool *assigned, in_range = false;
+	FILE *file;
+	unsigned long point;
+	uint32_t range_start = 0, previous = 0;
+	size_t rows = 0;
+
+	check_digest(directory, "UnicodeData.txt", APFS_UCD_UNICODEDATA_SHA256);
+	assigned = calloc(SCALAR_LIMIT, sizeof(*assigned));
+	CHECK(assigned != NULL);
+	file = open_ucd(directory, "UnicodeData.txt");
+	while (read_ucd_line(file, line)) {
+		CHECK(split_fields(line, fields, COUNT(fields)) == COUNT(fields));
+		CHECK(isxdigit((unsigned char)fields[0][0]));
+		errno = 0;
+		point = strtoul(fields[0], &end, 16);
+		case_check(errno == 0 && *end == '\0' && point < SCALAR_LIMIT &&
+		    (rows == 0 || point > previous), "ordered UCD assignment point");
+		previous = (uint32_t)point;
+		rows++;
+		first_suffix = strstr(fields[1], ", First>");
+		last_suffix = strstr(fields[1], ", Last>");
+		if (first_suffix != NULL) {
+			CHECK(!in_range && strcmp(first_suffix, ", First>") == 0);
+			*first_suffix = '\0';
+			CHECK(fields[1][0] == '<');
+			bcopy(fields[1], range_name, strlen(fields[1]) + 1);
+			range_start = (uint32_t)point;
+			in_range = true;
+		} else if (last_suffix != NULL) {
+			CHECK(in_range && strcmp(last_suffix, ", Last>") == 0);
+			*last_suffix = '\0';
+			CHECK(strcmp(fields[1], range_name) == 0);
+			for (uint32_t member = range_start; member <= point; member++)
+				assigned[member] = true;
+			in_range = false;
+		} else {
+			CHECK(!in_range);
+			assigned[point] = true;
+		}
+	}
+	CHECK(!in_range && rows > 0);
+	CHECK(fclose(file) == 0);
+	ucd_file = NULL;
+	ucd_line = 0;
+	return (assigned);
+}
+
+/* SHA-256 of one byte (0 or 1) per scalar in increasing order, including
+ * U+0000 and excluding U+D800..U+DFFF. Reproduce with:
+ * FSIMG_APFS_UCD=$HOME/.local/share/fsimg-oracles/ucd/17.0.0 \
+ *     make check TESTS=test-apfs-unicode
+ * The "Scalar assignment: ... SHA-256 <hex>" line in test-apfs-unicode.log
+ * gives the value after the UCD comparison has confirmed every scalar.
+ */
+static void
+test_every_scalar_assignment_matches_ucd_and_digest(void)
+{
+	static const char wanted[] =
+	    "f4d679f0ca488249e63ff5666bd1119f7ee19c723ec838b19736490e53349192";
+	char name[4], hex[FSIMG_SHA256_DIGEST_STRING_LENGTH];
+	fsimg_sha256_t digest;
+	const char *directory;
+	bool *assigned = NULL;
+	unsigned char answer, expected_answer;
+	size_t length, accepted = 0;
+
+	directory = getenv("FSIMG_APFS_UCD");
+	if (directory != NULL)
+		assigned = read_ucd_assignment(directory);
+	else
+		puts("Assignment UCD comparison skipped: FSIMG_APFS_UCD is unset");
+	fsimg_sha256_init(&digest);
+	for (uint32_t point = 0; point < SCALAR_LIMIT; point++) {
+		if (point >= 0xd800 && point <= 0xdfff)
+			continue;
+		length = encode_name(&point, 1, name, sizeof(name));
+		answer = apfs_name_assigned(name, length) ? 1 : 0;
+		fsimg_sha256_update(&digest, &answer, 1);
+		accepted += answer;
+		if (assigned == NULL)
+			continue;
+		expected_answer = assigned[point] ? 1 : 0;
+		case_check(answer == expected_answer,
+		    "UCD assignment point=U+%04X expected=%u actual=%u",
+		    (unsigned)point, (unsigned)expected_answer, (unsigned)answer);
+	}
+	sha256_final_hex(&digest, hex);
+	printf("Scalar assignment: %zu accepted, SHA-256 %s\n", accepted, hex);
+	CHECK(accepted == ASSIGNED_SCALARS);
+	case_check(strcmp(hex, wanted) == 0, "scalar assignment SHA-256");
+	free(assigned);
+}
+
+static void
+test_assignment_matches_native_outcomes_when_native_is_set(void)
+{
+	static const char *files[] = {
+		"results-ci.tsv", "results-cs.tsv",
+		"results-cn-ci.tsv", "results-cn-cs.tsv",
+		"results-u17m-ci.tsv", "results-u17m-cs.tsv",
+		"results-u18-ci.tsv", "results-u18-cs.tsv"
+	};
+	char path[4096], line[E4_LINE_BYTES], name[APFS_NAME_MAX_BYTES];
+	char *outcome, pair[3];
+	const char *directory;
+	FILE *file;
+	size_t rows, length, hex_length;
+	int path_length;
+	bool wanted;
+
+	directory = getenv("FSIMG_APFS_NATIVE");
+	if (directory == NULL) {
+		puts("E4 assignment outcomes skipped: FSIMG_APFS_NATIVE is unset");
+		return;
+	}
+	/* When FSIMG_APFS_NATIVE is set, every listed file must exist. */
+	for (size_t i = 0; i < COUNT(files); i++) {
+		path_length = snprintf(path, sizeof(path), "%s/e4-inputs/%s",
+		    directory, files[i]);
+		CHECK(path_length >= 0 && (size_t)path_length < sizeof(path));
+		file = fopen(path, "rb");
+		if (file == NULL)
+			perror(path);
+		CHECK(file != NULL);
+		rows = 0;
+		while (read_e4_line(file, line, path, rows + 1)) {
+			outcome = strchr(line, '\t');
+			case_check(outcome != NULL,
+			    "E4 outcome missing file=%s line=%zu", path, rows + 1);
+			*outcome++ = '\0';
+			case_check(strcmp(outcome, "ok") == 0 ||
+			    strcmp(outcome, "EEXIST") == 0 ||
+			    strcmp(outcome, "EILSEQ") == 0,
+			    "E4 outcome file=%s hex=%s value=%s", path, line, outcome);
+			hex_length = strlen(line);
+			case_check(hex_length > 0 && hex_length % 2 == 0 &&
+			    hex_length / 2 <= sizeof(name),
+			    "E4 outcome hex length file=%s hex=%s", path, line);
+			length = hex_length / 2;
+			for (size_t j = 0; j < length; j++) {
+				pair[0] = line[2 * j];
+				pair[1] = line[2 * j + 1];
+				pair[2] = '\0';
+				case_check(isxdigit((unsigned char)pair[0]) &&
+				    isxdigit((unsigned char)pair[1]),
+				    "E4 outcome hex syntax file=%s hex=%s", path, line);
+				name[j] = (char)strtoul(pair, NULL, 16);
+			}
+			wanted = strcmp(outcome, "EILSEQ") != 0;
+			case_check(apfs_name_assigned(name, length) == wanted,
+			    "E4 assignment file=%s hex=%s outcome=%s expected=%d",
+			    path, line, outcome, wanted);
+			rows++;
+		}
+		CHECK(fclose(file) == 0);
+		case_check(rows > 0, "E4 outcomes nonempty file=%s", path);
+		printf("E4 assignment: %zu rows checked file=%s\n", rows, path);
+	}
+}
+
 int
 main(void)
 {
@@ -1153,5 +1429,13 @@ main(void)
 	test_long_combining_run_reorders_stably();
 	test_every_scalar_respects_key_bound_and_matches_digest();
 	test_ucd_conformance();
+	test_unassigned_and_noncharacter_points_are_refused();
+	test_ascii_private_use_and_empty_names_are_assigned();
+	test_assigned_range_interiors_and_endpoints_are_accepted();
+	test_last_assigned_point_accepted_and_next_refused();
+	test_every_noncharacter_is_refused_alone_and_embedded();
+	test_assignment_refuses_non_strict_utf8();
+	test_every_scalar_assignment_matches_ucd_and_digest();
+	test_assignment_matches_native_outcomes_when_native_is_set();
 	return (0);
 }

@@ -438,9 +438,12 @@ describe the user-visible options.
 * `unicode.c`, `inode.c`, `directory.c` and `content.c`, the cursor's scan
   operations in `btree.c`, and `tools/gen-apfs-tables.rb` with the
   generated `unicode-tables.h`, which `test/apfs-unicode.c` checks against
-  the recorded input digests, `NormalizationTest.txt` and the E4 vectors.
+  the recorded input digests, `NormalizationTest.txt` and the E4 vectors
+  and refusals.
 * Tests cover the format design's record, name, link and content rows,
-  including hash vectors from E4 in both personalities, holes, clones, hard
+  including hash vectors from E4 in both personalities, a stored hash
+  mismatch on a name holding U+0378 or U+FFFF being `FSIMG_EUNSUPPORTED`
+  and on any other name `FSIMG_ECORRUPT`, holes, clones, hard
   links, symbolic links of 1 and 1023 bytes, FIFOs, a socket, devices with
   and without the device-number field, the extra-data bit, and files
   beyond 4 GiB.
@@ -528,7 +531,8 @@ describe the user-visible options.
 * `test/apfs-write.c`: round trips through the reader, verifier and the
   independent checker; byte identity across source order, budget, scratch
   and time zone; a poison scan; faults; a non-empty placement list
-  refused; `--native`, comparing an empty container field by field with
+  refused; a name holding U+0378 or U+FFFF refused with `FSIMG_EINVAL`;
+  `--native`, comparing an empty container field by field with
   the E1 capture of the same size in the forms the writer values cite,
   which needs a decoder for its older checkpoint. The writer joins the contract-suite
   profile.

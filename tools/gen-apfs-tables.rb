@@ -2,11 +2,13 @@
 # frozen_string_literal: true
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
-# Generate the APFS combining class, canonical decomposition and case-folding
-# tables from the Unicode Character Database. The rules are those of
-# specs/design-apfs.md, "Directory records and names": a name's comparison
-# form is its NFD, and on a case-insensitive volume the NFD of the full case
-# folding (CaseFolding.txt statuses C and F) of its NFD.
+# Generate the APFS combining class, canonical decomposition, case-folding
+# and assigned-code-point tables from the Unicode Character Database. The
+# rules are those of specs/design-apfs.md, "Directory records and names": a
+# name's comparison form is its NFD, and on a case-insensitive volume the NFD
+# of the full case folding (CaseFolding.txt statuses C and F) of its NFD; the
+# writer refuses a name holding a noncharacter or a code point the pinned
+# version does not assign.
 #
 #   ruby tools/gen-apfs-tables.rb VERSION UCD-DIRECTORY unicode-tables.h
 #
@@ -35,13 +37,15 @@ module ApfsTables
   HANGUL_TAILS = 28
   HANGUL_V_T = 21 * HANGUL_TAILS
   PAGE_POINTS = 256
+  # Noncharacters: U+FDD0 to U+FDEF and the last two points of each plane.
+  NONCHARACTERS = [*0xFDD0..0xFDEF, *(0..16).flat_map { [(_1 << 16) | 0xFFFE, (_1 << 16) | 0xFFFF] }].freeze
   # A mapping entry is the offset of its points shifted over their count.
   LENGTH_BITS = 3
   # The format design's bound on a comparison form's UTF-8 length, as a
   # multiple of its name's.
   EXPANSION_LIMIT = 3
 
-  Record = Data.define(:code, :combining_class, :canonical)
+  Record = Data.define(:code, :name, :combining_class, :canonical)
   Paged = Data.define(:index, :pages)
   Page = Data.define(:number, :values)
   Pool = Data.define(:entries, :points)
@@ -60,6 +64,7 @@ module ApfsTables
       classes: class_values(records),
       decompositions: table_decompositions(records, decompose),
       folds:,
+      assigned: assigned_flags(records),
       expansion: expansion(decompose, folds)
     ))
   end
@@ -75,6 +80,7 @@ module ApfsTables
       fields = line.chomp.split(";", -1)
       Record.new(
         code: fields[0].to_i(16),
+        name: fields[1],
         combining_class: fields[3].to_i,
         # A tagged mapping is a compatibility one, which NFD never applies.
         canonical: fields[5].start_with?("<") ? [] : fields[5].split.map { _1.to_i(16) }
@@ -119,6 +125,29 @@ module ApfsTables
     records.select { _1.canonical.any? && !hangul?(_1.code) }.to_h { [_1.code, decompose.call(_1.code)] }
   end
 
+  # Whether each point below SCALAR_LIMIT is a scalar value the records
+  # assign: a listed point, or one in the range of a "<..., First>" record
+  # and the "<..., Last>" record after it. Private-use points are assigned
+  # (E4: macOS accepts them); surrogates are listed but are not scalar
+  # values; Unicode never assigns a noncharacter, which this checks.
+  def assigned_flags(records)
+    points = records.chunk_while { |first, last| range_pair?(first, last) }
+      .flat_map do |run|
+        abort(format("Unpaired range record at U+%04X", run.first.code)) if run.size == 1 && range_name(run.first)
+        (run.first.code..run.last.code).to_a
+      end
+      .reject { SURROGATES.cover?(_1) }
+    abort("A noncharacter is assigned") if points.intersect?(NONCHARACTERS)
+    points.each_with_object(Array.new(SCALAR_LIMIT, false)) { |point, flags| flags[point] = true }
+  end
+
+  # The range a "<NAME, First>" or "<NAME, Last>" record bounds, as
+  # [NAME, "First" or "Last"], or nil for a record of one point.
+  def range_name(record) = record.name.match(/\A<(.+), (First|Last)>\z/)&.captures
+
+  def range_pair?(first, last) =
+    ([range_name(first), range_name(last)] in [[name, "First"], [^name, "Last"]])
+
   # The largest ratio, rounded up, of the UTF-8 length of a point's NFD or
   # case-insensitive comparison form to its own. Either can be the longer:
   # folding expands some points and shrinks others.
@@ -144,19 +173,32 @@ module ApfsTables
     end
   end
 
-  # Split values into pages, keeping those that are not all zero. An index
-  # entry is 1 + the kept page's position, and 0 for an all-zero page; the
-  # index ends after the last kept page, and every page beyond it is zero.
-  def paged(values)
-    pages = values.each_slice(PAGE_POINTS).with_index.filter_map do |page, number|
-      Page.new(number:, values: page) if page.any?(&:positive?)
-    end
-    abort("More pages than a uint8_t index holds") if pages.size > 255
-    positions = pages.each_with_index.to_h { |page, position| [page.number, position + 1] }
-    Paged.new(index: (0..pages.last.number).map { positions.fetch(_1, 0) }, pages:)
+  # Keep each distinct page that is not all zero once, as the page of its
+  # first number. An index entry is 1 + the kept page's position, and 0 for
+  # an all-zero page; the index ends after the last page that is not all
+  # zero, and every page beyond it is zero.
+  def paged(pages)
+    kept = pages.each_with_index
+      .filter_map { |values, number| Page.new(number:, values:) if values.any?(&:positive?) }
+      .uniq(&:values)
+    abort("More distinct pages than a uint8_t index holds") if kept.size > 255
+    positions = kept.each_with_index.to_h { |page, position| [page.values, position + 1] }
+    last = pages.rindex { _1.any?(&:positive?) }
+    Paged.new(index: pages.first(last + 1).map { positions.fetch(_1, 0) }, pages: kept)
   end
 
-  def render(version:, digests:, classes:, decompositions:, folds:, expansion:)
+  def value_pages(values) = values.each_slice(PAGE_POINTS).to_a
+
+  # Pack flags into one 256-bit bitmap of 32 bytes per page, bit p & 7 of
+  # byte (p & 0xff) >> 3. The fully assigned pages of the ideograph and
+  # private-use blocks are equal, so paged keeps one copy of them.
+  def bitmap_pages(flags)
+    flags.each_slice(PAGE_POINTS).map do |page|
+      page.each_slice(8).map { |bits| bits.each_with_index.sum { |set, bit| set ? 1 << bit : 0 } }
+    end
+  end
+
+  def render(version:, digests:, classes:, decompositions:, folds:, assigned:, expansion:)
     decomposition_pool = pool(decompositions)
     fold_pool = pool(folds)
     [
@@ -164,16 +206,19 @@ module ApfsTables
       "#include <stdint.h>\n",
       constants(version:, digests:, expansion:),
       class_comment,
-      paged_table(name: "apfs_class", table: paged(classes),
+      paged_table(name: "apfs_class", table: paged(value_pages(classes)),
                   type: "uint8_t", per_row: 16, value_format: "%3d"),
       decomposition_comment,
-      paged_table(name: "apfs_decomp", table: paged(decomposition_pool.entries),
+      paged_table(name: "apfs_decomp", table: paged(value_pages(decomposition_pool.entries)),
                   type: "uint16_t", per_row: 8, value_format: "0x%04x"),
       points_table("apfs_decomp_points", decomposition_pool.points),
       fold_comment,
-      paged_table(name: "apfs_fold", table: paged(fold_pool.entries),
+      paged_table(name: "apfs_fold", table: paged(value_pages(fold_pool.entries)),
                   type: "uint16_t", per_row: 8, value_format: "0x%04x"),
-      points_table("apfs_fold_points", fold_pool.points)
+      points_table("apfs_fold_points", fold_pool.points),
+      assigned_comment,
+      paged_table(name: "apfs_assigned", table: paged(bitmap_pages(assigned)),
+                  type: "uint8_t", per_row: 8, value_format: "0x%02x")
     ].join("\n")
   end
 
@@ -190,8 +235,10 @@ module ApfsTables
        * Each table is two-level, for any scalar value p: a page p >> 8 at or
        * beyond the length of NAME_index is all zero; otherwise let i be
        * NAME_index[p >> 8]; i == 0 means the page is all zero, and otherwise
-       * the value is NAME_pages[i - 1][p & 0xff]. Every index entry is in
-       * bounds of its pages by construction.
+       * the value is NAME_pages[i - 1][p & 0xff], except that apfs_assigned
+       * holds bits (see its comment). Pages with equal values share one,
+       * labelled by its first page number. Every index entry is in bounds of
+       * its pages by construction.
        */
     C
   end
@@ -241,6 +288,18 @@ module ApfsTables
     C
   end
 
+  def assigned_comment
+    <<~C
+      /*
+       * The scalar values the pinned version assigns, private use included,
+       * as bitmaps: with i the index entry of page p >> 8 as above, p is
+       * assigned when i != 0 and bit p & 7 of
+       * apfs_assigned_pages[i - 1][(p & 0xff) >> 3] is set. No noncharacter
+       * (U+FDD0 to U+FDEF, U+nFFFE and U+nFFFF) or surrogate is assigned.
+       */
+    C
+  end
+
   def paged_table(name:, table:, type:, per_row:, value_format:)
     rows = table.pages.flat_map do |page|
       [
@@ -254,7 +313,7 @@ module ApfsTables
       *table.index.each_slice(16).map { "\t#{_1.map { |value| format("%3d", value) }.join(", ")}," },
       "};",
       "",
-      "static const #{type} #{name}_pages[#{table.pages.size}][#{PAGE_POINTS}] = {",
+      "static const #{type} #{name}_pages[#{table.pages.size}][#{table.pages.first.values.size}] = {",
       *rows,
       "};",
       ""
