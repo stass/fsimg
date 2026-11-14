@@ -1186,7 +1186,7 @@ apfs_gen_drec_key_build(unsigned char *raw, size_t length,
 	bzero(raw, length);
 	(void)apfs_gen_jkey_build(raw, 8, p->parent, 9);
 	put_le(raw + 8, p->hashed ? (uint64_t)p->hash << 10 |
-	    (p->name_len + 1) : p->name_len + 1, p->hashed ? 4 : 2);
+	    (p->name_len + 1u) : p->name_len + 1u, p->hashed ? 4 : 2);
 	bcopy(p->name, raw + fixed, p->name_len);
 	return (true);
 }

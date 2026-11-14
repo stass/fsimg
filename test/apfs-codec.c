@@ -724,7 +724,7 @@ check_native_node(const unsigned char *raw, const native_node_t *fixture)
 	    toc_length &&
 	    node.area.free_start == 72 + toc_length && node.area.value_end ==
 	    4056 &&
-	    node.area.free_end == 4056 - sizes.val, "absolute node areas");
+	    node.area.free_end == 4056u - sizes.val, "absolute node areas");
 	expect(apfs_btree_info_decode(raw + 4056, 40, &info), "native footer");
 	expect(info.flags == fixture->info_flags &&
 	    info.node_size == 4096 && info.key_size == 16 &&
@@ -737,7 +737,7 @@ check_native_node(const unsigned char *raw, const native_node_t *fixture)
 	expect(apfs_entry_decode(raw, 4096, &node, 0, &sizes, &entry),
 	    "native TOC entry");
 	expect(entry.key_off == node.area.key_start && entry.key_len == 16 &&
-	    entry.val_off == 4056 - sizes.val && entry.val_len == sizes.val &&
+	    entry.val_off == 4056u - sizes.val && entry.val_len == sizes.val &&
 	    !entry.ghost, "native record absolute spans");
 	if (fixture->subtype == APFS_KIND_OMAP) {
 		expect(apfs_omap_key_decode(raw + entry.key_off, 16, &omap_key),
@@ -1013,7 +1013,7 @@ test_truncated_records(void)
 	apfs_omap_val_t omap_value = {0};
 	apfs_fq_key_t queue_key = {0};
 	apfs_btree_info_t info = {0};
-	char name[80];
+	static char name[80];	/* scenario points here */
 
 	scenario = "fixed structures one byte short";
 	REJECT_OUTPUT(apfs_obj_t, decoded, apfs_obj_decode(raw, 31, &decoded));
