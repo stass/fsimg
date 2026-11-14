@@ -745,7 +745,10 @@ The owner has settled these:
   folding or decomposition differs between the versions hash differently.
   E4 establishes Unicode 17.0.0 for macOS 26.6.2 and the pinned tables
   follow it; the risk is confined to such names, and each macOS release's
-  capture set rechecks it.
+  capture set rechecks it. A mismatch on a name holding a code point
+  unassigned in 17.0.0 is unsupported, not corrupt; a name of characters
+  assigned in 17.0.0 hashed by a release with older tables still reads as
+  corrupt.
 * **Extraction ceiling.** The default output limit is 16 times the selected
   volume's length ([security design](../specs/design-security.md#safe-extraction)).
   A volume whose sparse, cloned or compressed files expand further fails by

@@ -134,8 +134,9 @@ header, the zlib type's resource header, resource table and pairs, and the
 offset words of types 8 and 12, with the relations that `open` and
 `chunk` check, so APFS uses the shared validator unchanged and keeps no validator
 of its own. Type 10 uses the word table of types 8 and 12. What APFS adds
-is dispatch, which `compress.c` owns: a stored LZFSE payload or chunk
-begins with the raw marker `0xFF`, as zlib's does, and a type 9 payload or
+is dispatch, which `compress.c` owns: an LZFSE payload or chunk stored
+uncompressed begins with the raw marker `0xFF`, as zlib's does, while a
+compressed one begins with `bvx2` or `bvxn`, and a type 9 payload or
 type 10 chunk is the marker `0xCC` and the bytes, as the
 [format design](design-apfs.md#transparent-compression) states. The
 storage around the framing is APFS's own: the `com.apple.decmpfs` value
@@ -692,7 +693,9 @@ the common settings check enforces; `volume_uuid` nonzero unless
 minimum container size. That minimum, 1024 blocks, is a
 [writer value](design-apfs.md#writer-values), and can be larger than the
 1 MiB below which the reader refuses a container: the two bounds answer
-different questions and `validate` uses only the writer's.
+different questions and `validate` uses only the writer's. A
+`volume_bytes` above the writer's largest container, 34359738368 blocks
+(128 TiB), fails with `FSIMG_ERANGE`.
 
 The capability record's `write_settings` names `FSIMG_SETTING_VOLUME_UUID`
 and `FSIMG_SETTING_CASE_SENSITIVE`, the latter governing the
@@ -853,8 +856,9 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    probe adds it, rounded up to the step and at least one step. Each probe
    is charged as work, and the
    scan fails with `FSIMG_ERANGE` naming the
-   [probe cap](design-apfs.md#writer-values) when it reaches it. The
-   maximum volume count follows from `N`.
+   [probe cap](design-apfs.md#writer-values) when it reaches it, or the
+   writer's largest container, 34359738368 blocks, when a probe passes it.
+   The maximum volume count follows from `N`.
 6. **Layout.** Assign every block and identifier, in this order:
    * **Regions.** `apfs_fixed_regions()` fills the table of fixed regions
      from the superblock and space-manager fields planned for `N`, as it

@@ -252,7 +252,7 @@ in the last chunk's bitmap are clear.
 * `F = min(100, ceil(N / 131072))`, [A1]'s one volume per 512 MiB.
 * `P = 3 * (chunks + C)`, the pool's block count; the pool ring, 16 blocks,
   lies right after the data area and the pool right after the ring.
-* `I = q(P, 1136)`; `L = q(N, 4544)` below 2^18 blocks, `q(N, 2272)` from
+* `I = q(P, 1136)`, capped at 512 above E1's sizes ([E12](#e12-large-containers)); `L = q(N, 4544)` below 2^18 blocks, `q(N, 2272)` from
   2^18 and 512 from 2^20.
 * `M = L` up to 32768 blocks (128 MiB) and 8 above, as [A1] states.
 * `E = L + I + 3 + 8 * M * F`; the data area is `4 * E` blocks from
@@ -266,8 +266,8 @@ Every capture and every sweep dump fits all of these, except that the two
 containers without a volume, 91 and 92 blocks, hold counter 0 at 8 and 12; the sweep's samples
 on both sides of 4544, 9088, 13632, 2^15, 2^17, 2^18 and 2^20 blocks fix the
 breakpoints. The sweep holds no address block, so the address-block
-threshold, and whether address blocks count in `P`, stay open (E12); no
-sample reaches a pool bitmap of more than one block (`P` above 32768).
+threshold, and whether address blocks count in `P`, are
+[E12](#e12-large-containers)'s; no sample reaches a pool bitmap of more than one block (`P` above 32768).
 
 **Free queues and pool contents.** At XID 2 the internal-pool queue holds
 the pool blocks the space manager rewrote: blocks 149 and 150 of
@@ -1702,6 +1702,7 @@ under that experiment.
 | Name hash conventions (initial value, complement, terminating NUL), full or simple case folding, Unicode version, hashed or plain keys per personality | CRC-32C from `0xFFFFFFFF`, no final complement, no NUL, low 22 bits; full folding without Turkic entries, NFD before and after; Unicode 17.0.0; both `newfs_apfs` personalities hash (E4), `hdiutil` volumes too, and no native tool formats a plain-key volume ([E2](#e2-personalities))  | |
 | Comparator tie-breaks for hashed records, attributes and snapshot names | Hashed directory records: 22-bit hash, then name bytes as unsigned bytes, a prefix first (E4); attribute records of one inode by name bytes with the NUL, a proper prefix first (E5, `e5-xattr`) | Snapshot names (E9); plain directory records, which no native tool writes (E2) |
 | Volume features, flags, role, crypto state and formatting record of `newfs_apfs` and `hdiutil` volumes in both personalities (E2 part) | Identical between the two tools; incompatible `0x1` or `0x8`, optional `0x2`, flags `0x1`, role 0, formatter `newfs_apfs (2811.160.7.0.4)` ([E2](#e2-personalities): `apfs-newfs-67108864-e2-*`, `apfs-hdiutil-67108864-e2-*`) | |
+| Records of an empty volume beyond the root and private directories; its next object identifier (E2 part) | Next object identifier 16, next document ID 3, modification records empty, 5 allocated blocks, on every E2 volume ([E2](#e2-personalities)) | Records beyond the root and private directories (E1's volume records) |
 | Whether the root and private directories count in the volume's object counts (E3 part) | They do not; FIFOs and sockets count as other objects (E3: `apfs-newfs-268435456-e3-ci`, `-cs`) | |
 | Directory-statistics, document-ID, purgeable and firmlink records on native directories (E3 part; whether `fsck_apfs` requires them is E15's) | None on any populated directory; the root alone holds the `purgeable-drecs-fixed` attribute (E3) | |
 | Name length limit and its unit; refusal of invalid UTF-8 and of code points | 255 UTF-16 code units (765 bytes at most); invalid UTF-8 and U+FFFF refused with `EILSEQ` ([E14](#e14-limits): `apfs-newfs-67108864-e14-ci`, `-cs`); unassigned code points, noncharacters and Unicode 18.0.0 characters refused with `EILSEQ`, private-use code points accepted ([E4](#e4-names)) | Whether macOS counts the name as given or its NFD: E14's characters have no decomposition and E4 did not probe length (an E14 run with decomposing characters) |

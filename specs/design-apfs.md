@@ -467,8 +467,10 @@ and one checkpoint's data run.
 Block 0 does not select the checkpoint; it constrains the candidates. It is
 a copy of the superblock the last unmount committed: E8 finds it equal,
 after each unmount, to the newest ring superblock except for the checksum
-and counter 0 at offset 984, which is 3 larger (4 in
-apfs-newfs-372736-plain, as in every E1 capture) and shows block 0
+and counter 0 at offset 984, which is 3 larger (in
+apfs-newfs-372736-plain 4 larger, as in every fresh E1 capture, whose
+ring holds the first form; the writer table gives 4 for the first form and
+3 for the second) and shows block 0
 checksummed after the ring copy, and finds it left at the previous unmount's XID while a volume
 is mounted. A crash after a mount has committed a checkpoint therefore
 leaves block 0 older than the newest checkpoint. A block-0 XID larger than every whole candidate's is
@@ -583,11 +585,14 @@ naming the current bitmap's slots; and the free-next array holds one u16
 per slot, linking the free slots from the free head, `0xffff` ending the
 list and marking a slot in use. This reading of the arrays fits every E1
 capture (apfs-newfs-4194304-plain: head 2, tail 0, slot 1 current, slot 0
-last in the list) but [A1] does not state it, so it is provisional (E8,
-whose mount cycles move the ring); verification reads the current bitmap
-through the index array, each index below the bitmap block count and each
-XID not above the checkpoint's, or the container is `FSIMG_ECORRUPT`, and
-checks nothing else of the ring until E8.
+last in the list) and E12's XID-2 state at `b = 97`, but [A1] does not
+state it and no capture shows the ring after mount cycles move it, so it is
+provisional: E8's runs did not record the pool ring, and an E8 mount-cycle
+run that dumps it closes the question. Verification reads the current
+bitmap through the index array, each index below the bitmap block count and
+each XID not above the checkpoint's, or the container is `FSIMG_ECORRUPT`,
+and checks nothing else of the ring; that stays the rule if the run is not
+made.
 
 Its counts are tied to the geometry, so no loop over them is bounded only by
 the work budget. These relations come from [A1], and every E1 capture and
@@ -742,7 +747,9 @@ and tail, object count 1, and a completed reap ID one below the next (E17,
 apfs-diskutil-2147483648-e17-clean and apfs-diskutil-2147483648-e17-force;
 E10, apfs-diskutil-2147483648-e10-hole). Whether a container in daily use
 holds another idle shape is provisional (E16), and this definition is the
-default if E16 cannot answer. The state buffer lies inside the object.
+default if E16 cannot answer. The state buffer must lie inside the
+object, 112 plus its size at most the object's size, or the reaper is
+`FSIMG_ECORRUPT`.
 Every fresh native container holds an idle reaper with head and tail zero,
 flags `0x1`, next reap ID 1, completed reap ID 0, the six fields of an
 object being reaped zero, and a state buffer of `B - 112` bytes, 3984, all
@@ -920,11 +927,13 @@ a bytewise comparison of the names with their terminating NULs (E4: the 34
 and 29 equal-hash pairs of captures `apfs-newfs-268435456-e4-names-ci` and
 `-cs`, and `apfs-newfs-33554432-e4-prefix-ci` and `-cs`). Attribute names
 of different lengths compare the same way, as their bytes with the
-terminating NUL, so a proper prefix sorts first (E5, `e5-xattr`). How plain
-directory-record names and snapshot names of different lengths compare is
-provisional (E2 found no native tool that formats plain keys; snapshot
-names wait on E9); the reader's ordering checks use the observed rule, so
-a wrong guess would make valid images fail rather than misread. If an
+terminating NUL, so a proper prefix sorts first (E5, `e5-xattr`). How
+snapshot names of different lengths compare is provisional (E9). No
+experiment can show how plain directory-record names compare, since no
+native tool formats a plain-key volume (E2), so their tie-break is
+permanently undecided and takes the lenient check below. The reader's
+ordering checks use the observed rules, so a wrong one would make valid
+images fail rather than misread. If an
 experiment leaves a tie-break undecided, the ordering check accepts either
 order of the keys it concerns, and a lookup scans the records that share
 the decided part of the key instead of seeking among them.
@@ -1132,7 +1141,7 @@ attribute determine it, and nothing past the size is delivered.
 | `0x200000` | `IS_SYNC_ROOT` | |
 | `0x400000` | `SNAPSHOT_COW_EXEMPTION` | |
 
-Neither clone flag says the stream is shared now: was cloned stays on an
+Neither clone flag proves that the stream is shared: was cloned stays on an
 inode while it keeps the stream it had when cloned, the source's included
 (E6).
 
@@ -1348,12 +1357,10 @@ on a compressed file's resource fork. A flag outside `0x1`, `0x2`, `0x4`
 and `0x10` is unsupported (E5, E6,
 `e5-xattr`, `e6-xclone`). [A1] gives 3804 both as the largest inline size
 and as a bound inline data must stay below. The reader accepts inline data
-of up to 3804 bytes. Through `setxattr(2)` native volumes store at most
-3800 bytes inline, and fewer with a long name: 3794 with a 127-byte name,
-the longest `setxattr(2)` accepts. Larger values are streams (E5,
-`e5-xbound`, `e5-xlong`). The kernel's own `com.apple.decmpfs` attribute
-reaches 3802 bytes inline (E7, `ditto`'s `c27441`), so the two native
-bounds differ and the reader's 3804 covers both. Where between 63 and 127 bytes the name starts to lower the
+of up to 3804 bytes. Native volumes store at most 3800 bytes inline, and
+fewer with a long name: 3794 with a 127-byte name, the longest
+`setxattr(2)` accepts. Larger values are streams (E5, `e5-xbound`,
+`e5-xlong`). Where between 63 and 127 bytes the name starts to lower the
 limit is unmeasured and matters to no rule here. A stream attribute's
 value holds its stream ID, the key its file extents are filed under. No
 data-stream ID record exists for it, and each stream has exactly one
@@ -2160,7 +2167,7 @@ free space, attribute data or buffer contents.
 | Records | Every kind in each tree, extended fields at their boundaries, names of 1, 255 and 1022 bytes and every Unicode class of E4; an inode with a Finder-information attribute sets the extra-data bit on each of its names | Truncated values, overlapping fields, misaligned field data, wrong hash or length, invalid UTF-8, embedded NUL or slash, dot names, a plain name of 1023 bytes, wrong record variant, type disagreeing with mode; a symbolic link or compressed file with only the attributes the driver consumes does not set the extra-data bit |
 | Content | Files of 0, 1, 4095, 4096, 4097 bytes and above 4 GiB, many extents, holes in both forms, preallocated extents past the size, clones and their overwritten branches, every supported compression type with one and many chunks | Gaps, overlaps, unaligned lengths, extent past both the rounded size and the allocated bytes, extent past `N`, crypto ID outside the table, short or long decoded chunks, chunk table overruns |
 | Links and kinds | Hard links across directories, symbolic links of 1 and 1023 bytes, FIFOs, a character and a block device with and without the device number field, a socket | Mismatched link counts, missing sibling records, directory with two parents, directory cycle, link target of 1024 bytes, the device number field on a file |
-| Verification | Every native fixture the reader accepts verifies, the empty E1 containers of 1024 blocks and more among them, and apfs-newfs-372736-plain, below the 1 MiB minimum, is refused; whose allocated blocks are exactly the fixed regions, both object maps with their trees, the empty volume's objects and the main free queue's entries; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found; the native zero-OID empty queue, a synthetic root leaf with no keys and both idle reaper shapes verify, and the reaping E17 copies are incomplete | Each mutation reports its class; a report is never complete after an unsupported object or with a reaper that is not idle |
+| Verification | Every native fixture the reader accepts verifies, the empty E1 containers of 1024 blocks and more among them, whose allocated blocks are exactly the fixed regions, both object maps with their trees, the empty volume's objects and the main free queue's entries; apfs-newfs-372736-plain, below the 1 MiB minimum, is refused; leaked and doubly claimed blocks, free-count mismatches and broken reference counts are found; the native zero-OID empty queue, a synthetic root leaf with no keys and both idle reaper shapes verify, and the reaping E17 copies are incomplete; a hash mismatch on a name holding U+0378 or U+FFFF is unsupported and any other mismatch corrupt | Each mutation reports its class; a report is never complete after an unsupported object or with a reaper that is not idle |
 | Writer | Empty, small, deep, wide (forcing multi-level trees), large-file and nearly full containers in both personalities; names at the writer's limit; byte identity across source order, budget, scratch and time zone; poison scan of unused bytes; an entry time outside the range is stored as the format time and counted as a loss | Colliding names under each personality, names and labels one byte over their limits, a host clock or epoch outside the time range, a non-empty placement list, sizes that do not fit |
 
 Independent oracles, in order of authority: macOS `fsck_apfs -n`, macOS
