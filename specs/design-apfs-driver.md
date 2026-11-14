@@ -352,15 +352,21 @@ length step 10 reports.
 ## Objects
 
 `apfs_object_read(reader, ref, window)` takes a reference
-`(storage class, OID, XID, kind, subtype, map)` and a window of `B` bytes:
+`(storage class, OID, XID, kind, subtype, map, headerless)` and a window of
+`B` bytes; `headerless` is set only by the cursor of a sealed volume's
+filesystem tree:
 
 * physical: the OID is the block, which must lie in `[1, N)`;
 * virtual: `omap.c` resolves the OID at the reference's XID through the
-  named map's cursor, and the object's XID must equal the found key's;
+  named map's cursor, and the object's XID must equal the found key's.
+  The found value's no-header flag must equal `headerless`, or the read is
+  `FSIMG_ECORRUPT`;
 * ephemeral: binary search of the paged mapping array.
 
 It reads the block with one exact read, verifies the checksum, and checks
-kind, subtype, storage class, OID and XID. One object can span several
+kind, subtype, storage class, OID and XID. A headerless node skips these
+checks; it is accepted only through its digest, which `btree.c` checks
+before the node is used. One object can span several
 blocks, the space manager. Its reader, `apfs_spaceman_read()`, decodes the
 fixed structure from the first block, unverified, only to learn the size
 the [geometry implies](design-apfs.md#ephemeral-objects-and-the-space-manager)
@@ -379,7 +385,13 @@ bytes.
 ## B-trees
 
 A cursor belongs to one tree: its root reference, storage class, comparator
-and record codec. It holds the current root-to-leaf path, one window and one
+and record codec, and for a sealed volume's filesystem tree the hash
+length and the expected root digest. In such a tree `btree.c` adds the
+root's OID to each index value's child OID, reads the child as a
+headerless reference, and compares its digest with the parent's value, or
+the root's with the integrity object's root hash, before the
+[validation checks](design-apfs.md#validation) run; a mismatch is
+`FSIMG_ECORRUPT`. It holds the current root-to-leaf path, one window and one
 table-of-contents position per level, plus the separator bounds each level
 was entered under. Windows are allocated as the path deepens and kept for the
 session; a tree of height `h` holds at most `h` windows, and the format

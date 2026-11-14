@@ -153,8 +153,8 @@ Clones share physical extents between data streams; the extent-reference
 tree counts references. Snapshots retain old object-map entries and their
 own extent-reference trees. Transparent compression stores a file's bytes in
 a `com.apple.decmpfs` attribute or a resource-fork attribute instead of its
-data stream. A sealed system volume authenticates its filesystem tree with a
-hash tree and stores file extents in a separate tree. Encryption wraps
+data stream. A sealed volume records a hash tree over its filesystem tree and
+stores file extents in a separate tree. Encryption wraps
 metadata and data in keys held in keybags. Fusion spreads one container over
 two devices.
 
@@ -178,7 +178,7 @@ two devices.
 | --- | --- | --- |
 | Unencrypted container | See the list below | See the [writer profile](#profile) |
 | Snapshots | A named snapshot of the selected volume, read at its XID; verification including snapshot-retained blocks | Never emitted |
-| Sealed system volume | The sealed file-extent tree and hashed nodes; the metadata integrity chain checked to the stored root hash, reported as not authenticated | Never emitted |
+| Sealed volume | The sealed file-extent tree and hashed nodes; the metadata integrity chain checked to the stored root hash, reported as not authenticated | Never emitted |
 | Encrypted volume, Fusion container, noncontiguous checkpoint area, incomplete restore | Recognized and refused as unsupported, naming the feature | Never emitted |
 
 The unencrypted-container reader accepts:
@@ -320,9 +320,9 @@ reader's bound; the smallest container the writer emits is the one
 `fsck_apfs` opens.
 
 The keylocker and media keylocker ranges locate keybags, which only
-encrypted volumes use. A container holding an encrypted volume has a
-one-block keylocker and the software-cryptography flag, also when its other
-volumes are unencrypted; the keybag is wrapped, so the block is not a plain
+encrypted volumes use. A disk-image container holding a software-encrypted
+volume has a one-block keylocker and the software-cryptography flag, also
+when its other volumes are unencrypted; the keybag is wrapped, so the block is not a plain
 object (E11, every encrypted capture). Reading an unencrypted volume ignores
 both ranges; a nonzero range must lie inside `[1, N)`, verification claims
 it as one range, and its contents are never read.
@@ -836,16 +836,20 @@ Resolving virtual OID `o` at XID `T` seeks the greatest key not above
 `(o, T)`. The lookup misses when no such key has OID `o`, or when the found
 value is deleted; it never falls through to an older entry. A found value
 must have a size that is a positive multiple of `B`, an address range inside
-`[1, N)`, and no flag outside `{saved, no-header}`. No-header is required
-on every filesystem-tree node of a [sealed volume](#sealed-volumes) and
-forbidden on every other object, the sealed volume's integrity object
-included (E11: 316 and 6196 node mappings with `0x8` alone, the integrity
-object's with no flag, in the two captured cryptexes). Encrypted is
+`[1, N)`, and no flag outside `{saved, no-header}`. Encrypted is
 unsupported; it marks the filesystem-tree nodes of an encrypted volume
-(E11, every encrypted capture). A no-header node has no header to check:
-while the seal is intact, its parent's digest identifies it. Any other
-object read at the address must
-satisfy the header rules with its OID equal to `o` and its XID equal to the
+(E11, every encrypted capture).
+
+No-header is required on every filesystem-tree node of a
+[sealed volume](#sealed-volumes) and forbidden on every other object, the
+sealed volume's integrity object included (E11: 316 and 6196 node
+mappings with `0x8` alone, the integrity object's with no flag, in the two
+captured cryptexes). The reference being resolved says which it expects,
+so a flag that disagrees is `FSIMG_ECORRUPT`. A headerless node has no
+header to check; its parent's digest identifies it instead, which is why
+only an intact seal is read.
+
+An object with a header, read at the address, must satisfy the header rules with its OID equal to `o` and its XID equal to the
 found key's XID (E1 for the one record of every capture with a volume,
 E3 for its 258 filesystem-tree mappings, and E8 for the volume superblock
 across mount cycles; if a capture shows an object older than its key, the
@@ -910,10 +914,14 @@ or the start of the footer in a root node: the value occupies
 have the footer's fixed value size and index values are 8-byte child OIDs.
 A hashed index value is the child's OID minus the root node's OID (u64),
 then the child's digest at the hash type's length: 40 bytes for SHA-256,
-not [A1]'s 64-byte maximum (E11: in both captured cryptexes the root,
-OID 1378 in one, names its first child 57, which the map resolves as OID
-1435; the root has the tree's lowest OID in both, so an offset from that
-OID reads the same). A value offset of
+not [A1]'s 64-byte maximum (E11: the root of one captured cryptex, OID
+1378, names its first child 57, which the map resolves as OID 1435). The
+base is provisional (E11): in both captured trees the root has the lowest
+OID, so the root's OID and the tree's lowest OID read the same, and a tree
+whose root is not its lowest OID would tell them apart. The reader uses
+the root's OID; a wrong base fails the child's digest check as
+`FSIMG_ECORRUPT`, never a silent misread, because only an intact seal is
+read. A value offset of
 `0xffff` is a ghost, legal only in a tree whose flags allow ghosts.
 An empty key or value free list has offset `0xffff` and length zero [A1].
 
@@ -1029,9 +1037,10 @@ The superblock's index equals its slot in the container array, its UUID is
 not all zero (verification checks that it differs from every other
 volume's), its name is valid UTF-8
 of at most 255 bytes with a terminator inside the field, and its tree types
-are the ones [A1] gives for each tree: the root tree virtual, in a sealed
-volume too, the others physical, the sealed file-extent tree among them
-(E11: `0x00000002` and `0x40000002` in both captured cryptexes). A nonzero revert-to XID or superblock
+are the ones [A1] gives for each tree: the root tree virtual, the others
+physical. A sealed volume follows the same rule: its filesystem tree is
+virtual and its sealed file-extent tree physical (E11: `0x00000002` and
+`0x40000002` in both captured cryptexes). A nonzero revert-to XID or superblock
 OID, a nonzero encryption-rolling state, or a nonzero root-to XID is a
 transition native tools complete before use and is `FSIMG_EUNSUPPORTED`.
 
@@ -1704,36 +1713,44 @@ hashed and no header. Each index value carries its child's OID relative to
 the root and the child's digest, as [the node layout](#node-layout) states.
 A digest is the hash of the whole `B`-byte child node, its zero header bytes
 included (E11: 315 and 6195 digests, every one in both cryptexes). The
-leaves hold no file-extent records: file extents are in the sealed
-file-extent tree, a physical tree with fixed 16-byte keys `(private ID u64,
-logical offset u64)` and 16-byte values `(length and flags u64, physical
-block u64)`, length in the low 56 bits, ordered by private ID then logical
-offset. Its flags must be zero and its length a positive multiple of `B`
-(E11: 2178 and 6071 records). The integrity metadata object (kind 30) is a
-virtual object with an ordinary header. It holds a version, flags, a hash type
-(1 SHA-256, 2 SHA-512/256, 3 SHA-384, 4 SHA-512), the offset of the root hash
-within the object, which must leave the hash inside the object, and the XID
-at which the seal was broken, if any (E11: version 2, flags 0, hash type 1,
-offset 128, broken XID 0 in both).
+leaves hold no file-extent records.
 
-Neither captured cryptex has a snapshot or a broken seal. Whether a
-snapshot of a sealed volume is itself sealed is unproven; a snapshot view
-of a sealed volume is `FSIMG_EUNSUPPORTED` until a specimen, such as a
-used macOS System volume, shows its structure.
+File extents are in the sealed file-extent tree, a physical tree with
+fixed 16-byte keys `(private ID u64, logical offset u64)` and 16-byte
+values `(length and flags u64, physical block u64)`, length in the low 56
+bits, ordered by private ID then logical offset. Each extent's flags must
+be zero and its length a positive multiple of `B` (E11: 2178 and 6071
+records).
 
-The sealed profile reads names and content through the sealed tree. When the
-seal is intact (a zero broken-seal XID), it checks every visited node's
-digest against its parent and the root's against the stored root hash with
-SHA-256, the hash fsimg already carries; other hash types are unsupported.
-`fsck_apfs -n` makes the same check: one changed byte in a leaf's free
-space is "invalid node hash for node 1435" (E11, `e11-tamper-fsck.log`). A
-successful check covers the filesystem metadata only, relative to the
-stored root: file content is covered by the file-information records'
-hashes, which fsimg does not check, and no authenticity claim is possible
-without a trusted root, so the information never reports one. A broken seal
-is reported through the `seal_broken_xid` detail and the volume is read
-without digest checks, because nodes written after the break no longer
-match their parents' digests.
+The integrity metadata object (kind 30) is a virtual object with an
+ordinary header. It holds a version, flags, a hash type (1 SHA-256, 2
+SHA-512/256, 3 SHA-384, 4 SHA-512), the offset of the root hash within the
+object, and the XID at which the seal was broken, if any (E11: version 2,
+flags 0, hash type 1, offset 128, broken XID 0 in both). The offset must be
+at least 128, past the header and the fixed fields, and leave the whole
+hash inside the object.
+
+Neither captured cryptex has a snapshot or a broken seal, so both cases are
+provisional (E11) and refused by default with `FSIMG_EUNSUPPORTED`: a
+snapshot view of a sealed volume until a specimen such as a used macOS
+System volume shows whether a snapshot is itself sealed, and a nonzero
+broken-seal XID until a sealed volume modified after sealing shows which
+nodes keep no header. Without digests a headerless node would have no
+check binding it to its OID, so the default is refusal rather than reading
+without checks. The `seal_broken_xid` detail reports the stored XID, zero
+for every volume that opens.
+
+The sealed profile reads names and content through the sealed tree. It
+checks every visited node's digest against its parent and the root's
+against the stored root hash with SHA-256, the hash fsimg already carries;
+other hash types are unsupported. `fsck_apfs -n` makes the same check: one
+changed byte in the free space of an index node or of a leaf is "invalid
+node hash for node 1435" or "for node 1379" (E11, `e11-tamper-fsck.log`,
+`e11-leaf-tamper-fsck.log`). A successful check covers the filesystem
+metadata only, relative to the stored root: file content is covered by
+the file-information records' hashes, which fsimg does not check, and no
+authenticity claim is possible without a trusted root, so the information
+never reports one.
 
 ## Refused features
 
@@ -1817,10 +1834,10 @@ Data blocks are claimed through the physical-extent records of every
 extent-reference tree of a volume, the live tree and each snapshot's. In a
 sealed volume, whose file extents live in the sealed file-extent tree,
 those extents are checked against the reference records in the same way.
-A sealed volume has an extent-reference tree with one physical-extent
-record, kind new and reference count 1, for each sealed file extent,
-naming the same block ranges (E11: 2178 and 6071 records in the two
-cryptexes).
+Both captured sealed volumes have an extent-reference tree, with one
+physical-extent record of kind new and reference count 1 for each sealed
+file extent over the same block range (E11: 2178 and 6071 records); the
+rules that follow hold for them as written, with no sealed case.
 Records of one tree never overlap; records of different trees of one
 volume may, since a snapshot and the live volume share unchanged extents,
 so a block a snapshot alone still uses is claimed by that snapshot's

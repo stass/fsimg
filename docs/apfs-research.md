@@ -1420,7 +1420,9 @@ captures, each directory holding the image, `apfsdump.json`,
 
 Everything runs unprivileged. `unlockVolume` with `-mountpoint` fails
 "Insufficient privileges (-69863)"; without it the volume mounts under
-`/Volumes`.
+`/Volumes`. `e11-encrypted-probes.sh`, with its log
+`e11-encrypted-probes.log` in the same directory, records that refusal,
+the one-slot `addVolume` refusal and the `fsimg i` runs below.
 
 **Encrypted disk images are not APFS encryption.** All four `hdiutil
 -encryption` images start with the magic `encrcdsa` and version 2 and are
@@ -1429,8 +1431,8 @@ image is a bare container and the GPTSPUD image a GPT disk ("EFI PART" in
 sector 1) with one `Apple_APFS` partition. The container inside is plain:
 container flags `0x0`, a zero keylocker, volume flags `0x1` unencrypted,
 no problems in the dump. A build of `apfs-next` (99d98715), where APFS is
-not registered, reports every `encrcdsa` image as "no partition table or
-filesystem recognized", exit 1: no layer peels the wrapper.
+not registered, reports every `encrcdsa` image, and `inner.img`, as "no partition table
+or filesystem recognized", exit 1: no layer peels the wrapper.
 
 **APFS encryption:**
 
@@ -1476,8 +1478,12 @@ digest of the hashed tree, `exttrees.rb` compares the sealed file-extent
 tree with the extent-reference tree, `fileinfo.rb` reads file-information
 records, `e11-tamper.rb` changes one byte) with `e11-sealed-analysis.sh`
 and its log `e11-sealed-analysis.log`, which covers `os.dmg` too, and
-`e11-sealed-fsck.log` and `e11-tamper-fsck.log`. The `os.dmg` copy
-(SHA-256 `dddd7a2e...3596`) is not kept.
+`e11-sealed-fsck.log`, `e11-tamper-fsck.log` and `e11-leaf-tamper-fsck.log`.
+The `os.dmg` copy (SHA-256 `dddd7a2e...3596`) is not kept; its dumps are,
+as `os-apfsdump.json` and `os-apfsdump.txt`. `e11-sealed-manifest.sh`
+mounts a copy of `app.dmg` read-only and writes `native-manifest.txt`:
+the type, mode and size of each of its 565 directories and 2632 regular
+files (hard links counted per name) and the SHA-256 of each file.
 
 **Layering.** `hdiutil imageinfo` names each a `CRawDiskImage` (UDRW) with
 partition scheme none: a bare container at byte 0, no layer to peel. The
@@ -1488,12 +1494,12 @@ as for every raw container while APFS is unregistered.
 
 | Field | `app.dmg` | `os.dmg` |
 | --- | --- | --- |
-| Container | `B` 4096, `N` 12800, flags 0, incompatible `0x2`, keylocker zero, one volume slot | flags 0, incompatible `0x2`, keylocker zero |
+| Container | `B` 4096, `N` 12800, flags 0, incompatible `0x2`, keylocker zero, one volume slot | `B` 4096, `N` 615424, flags 0, incompatible `0x2`, keylocker zero, five volume slots |
 | Volume name, role | AppCryptex, none (0) | CheerG25G83.x86_64SystemCryptex, none (0) |
 | Incompatible, flags | `0x21` case-insensitive and sealed; `0x1` unencrypted | the same |
 | Tree types | root `0x00000002` (virtual); extent reference, snapshot and sealed file extents `0x40000002` (physical) | the same |
 | Integrity metadata, sealed file-extent tree | OIDs 1376 and 233 | 1878 and 48268 |
-| Formatter; last modifier | `newfs_apfs (2142.41.2.100.2)`; `apfs_sealvolume (2811.160.7.0.4)` at XID 28, after `apfs_kext` at 27 | formatter the same |
+| Formatter; last modifier | `newfs_apfs (2142.41.2.100.2)`; `apfs_sealvolume (2811.160.7.0.4` (the 32-byte field cuts it) at XID 28, after `apfs_kext (2142.41.2.100.2)` at 27 | the same at XIDs 22 and 21 |
 | Snapshots | none; snapshot tree one empty node | the same |
 
 **Object map and integrity object.** The volume map's flags are `0x0`. It
@@ -1537,11 +1543,13 @@ the 32-byte hash.
 
 **File information.** All 4574 records of `app.dmg` have info type 1 (data
 hash), hash size 32 and a 35-byte value; hashed lengths are 1 to 4 blocks.
-For the 876 records whose object ID is a private ID in the sealed
-file-extent tree, the address reads as a logical block of that stream,
-and SHA-256 over the hashed length at the block the tree maps there
-equals the stored hash. The other 3698 records, of 1315 objects, 1300 of
-them not inodes, were not resolved; fsimg does not check these hashes.
+Reading the address as a logical block of the stream whose private ID
+is the record's object ID, 2176 records have a sealed file extent there.
+For 876 of them SHA-256 over the hashed length at the block the tree maps
+equals the stored hash; for the other 1300 it does not. The remaining
+2398 records have no extent at their address under their object ID or the
+inode's private ID. The probe does not explain the 3698; fsimg does not
+check these hashes.
 
 **Sealed file extents and extent references** (`exttrees.rb`). The sealed
 file-extent tree is physical, subtype 31, fixed 16-byte keys and values
@@ -1556,19 +1564,22 @@ and 4415.
 
 **Allocated blocks.** The volume's allocated block count is the
 [unsealed rule](../specs/design-apfs.md#verification) plus the sealed file-extent tree's nodes
-and the integrity object: `app.dmg` 10552 = 1 (object map) + 5 (map nodes)
-+ 316 (filesystem nodes) + 21 (extent-reference nodes) + 1 (snapshot node)
-+ 21 (sealed file-extent nodes) + 1 (integrity object) + 10186 (data
+and the integrity object. For `app.dmg`, 10552 is 1 (object map), 5 (map
+nodes), 316 (filesystem nodes), 21 (extent-reference nodes), 1 (snapshot
+node), 21 (sealed file-extent nodes), 1 (integrity object) and 10186 (data
 blocks); `os.dmg` 584389 = 1 + 57 + 6196 + 77 + 1 + 56 + 1 + 578000.
 
 **Native check.** `fsck_apfs -n` on a read-only raw attach of a copy
 checks "the fsroot tree", "the file extent tree" and "the extent ref
-tree": OK, exit 0 (`e11-sealed-fsck.log`). With one byte of a leaf's free
-space changed (`e11-tamper.rb`, block 692), the records still parse;
-`sealwalk.rb` finds one digest mismatch and `fsck_apfs -n` reports
-"error: hash validation: invalid node hash for node 1435 (root oid: 1378,
-seal xid: 28, broken xid: 0)", "fsroot tree is invalid", exit 8
-(`e11-tamper-fsck.log`).
+tree": OK, exit 0 (`e11-sealed-fsck.log`). One byte changed in the free
+space of one node (`e11-tamper.rb`) leaves the records parsing; `sealwalk.rb`
+finds one digest mismatch and `fsck_apfs -n` fails, exit 8, "fsroot tree is
+invalid":
+
+| Node changed | `fsck_apfs -n` | Log |
+| --- | --- | --- |
+| Block 692, OID 1435, index node at level 1 | "invalid node hash for node 1435 (root oid: 1378, seal xid: 28, broken xid: 0)" | `e11-tamper-fsck.log` |
+| Block 366, OID 1379, leaf | "invalid node hash for node 1379 (root oid: 1378, seal xid: 28, broken xid: 0)" | `e11-leaf-tamper-fsck.log` |
 
 **Dumper.** `apfsdump.rb` decodes the integrity object and the sealed
 file-extent tree but reads the headerless nodes as objects and index values
@@ -2078,7 +2089,7 @@ under that experiment.
 | Name length limit and its unit; refusal of invalid UTF-8 and of code points | 255 UTF-16 code units (765 bytes at most); invalid UTF-8 and U+FFFF refused with `EILSEQ` ([E14](#e14-limits): `apfs-newfs-67108864-e14-ci`, `-cs`); unassigned code points, noncharacters and Unicode 18.0.0 characters refused with `EILSEQ`, private-use code points accepted ([E4](#e4-names)) | Whether macOS counts the name as given or its NFD: E14's characters have no decomposition and E4 did not probe length (an E14 run with decomposing characters) |
 | Symbolic-link target limit and storage, the mode of a new link; FIFO, device and socket encodings | 1023 bytes, inline attribute with its NUL; mode `0755`; FIFO record type 1 and socket 12, each with protection class 4 and no extended field but the name (E3, E14) | Devices: no root, so E16 answers; if it cannot, the design's default (a device without the number field has no number) applies |
 | Name extended field on every inode; reserved inodes named by records; private-directory contents; internal flags and protection class of new inodes | On every inode; none named below 16 but the root and private directory; private directory empty; internal flags `0x8000`, protection class 0, or 4 on FIFOs and sockets (E3) | |
-| Physical-extent records for unshared files; data-stream totals; volume allocated-block accounting | One reference record of count 1 and kind new per mapped extent, owner the inode, a 257-block run among them (E3), and natively runs of 163840 and 1310720 blocks in one record ([E15](#e15-writer-probes)); totals written and read count real I/O (E3); total blocks allocated counts the data blocks of the physical-extent records, shared blocks once, the allocated block count adds the nodes of the object-map, filesystem, extent-reference and snapshot trees and one block more, the object-map object in E3's count, and freed blocks leave it (E3: 571 in `apfs-newfs-268435456-e3-ci`; E5, E6: every capture, `e6-xclone` with 315 blocks freed) | Sealed volumes (E11), volumes with snapshots (E9) or that freed blocks many times (E16) |
+| Physical-extent records for unshared files; data-stream totals; volume allocated-block accounting | One reference record of count 1 and kind new per mapped extent, owner the inode, a 257-block run among them (E3), and natively runs of 163840 and 1310720 blocks in one record ([E15](#e15-writer-probes)); totals written and read count real I/O (E3); total blocks allocated counts the data blocks of the physical-extent records, shared blocks once, the allocated block count adds the nodes of the object-map, filesystem, extent-reference and snapshot trees and one block more, the object-map object in E3's count, and freed blocks leave it (E3: 571 in `apfs-newfs-268435456-e3-ci`; E5, E6: every capture, `e6-xclone` with 315 blocks freed); a sealed volume adds its sealed file-extent nodes and integrity object ([E11](#e11-encrypted-and-sealed)) | Volumes with snapshots (E9) or that freed blocks many times (E16) |
 | Native time and owner limits; whether times are signed | Signed 64-bit nanoseconds, clamped to `-2^63` through `2^63 - 1` (E3, E14) | Owner limits: changing owners needs root, and the image mounts with ownership ignored, storing 99; E16 shows native owners; if it cannot answer, the reader reports stored values and the writer's default owner 0 stands |
 | Sibling links and maps; link counts | Every name of a linked inode has a sibling link and a sibling map, and its directory record carries the sibling ID; the records stay when the names drop back to one; the inode's parent and name field follow a remaining name; the private directory is unused (E5, `e5-links`)  | |
 | Attribute storage, inline limit, stream-backed attributes | Inline up to 3800 bytes, less with long names (3794 with a 127-byte name, 3800 with a 63-byte one); user stream attributes carry flags `0x11`, a resource fork `0x1`; an attribute stream has one user and no data-stream ID record, and a clone gets its own streams over shared blocks; names up to 127 bytes (E5, E6: `e5-xattr`, `e5-xbound`, `e5-xname`, `e5-xlong`, `e6-xclone`)  | |
@@ -2086,7 +2097,7 @@ under that experiment.
 | Compression header, inline marker bytes, resource-fork framing per codec, inline size limit, codecs `ditto` and installers choose | The HFS Plus framing field for field; raw markers `0xFF` zlib, LZFSE and LZBITMAP, `0x06` LZVN, `0xCC` on every type 9 payload and type 10 chunk; inline only up to 65536 bytes, and for `ditto` only up to a 3802-byte attribute; `ditto` writes LZVN (7, 8) above 16384 bytes, system files are types 8, 9 and 14, Xcode's 7 and 8 ([E7](#e7-compression)) | Type 1: no producer or specimen on the host; `aa`'s exact attribute limit (between 3017 and 3817 bytes) |
 | Blocks of a deleted volume or snapshot not yet reaped: reaper and reap-list state, and how allocation accounts them | While a deleted volume is reaped: its slot is zero, the container object map still maps its superblock, the reaper has flag `0x2` and names the volume, the reap list holds the volume and the tree being destroyed, freed blocks enter the main free queue at the reaping XID while the volume's still-mapped trees reference them, and the state buffer holds `apfs_reap_state_t`; `fsck_apfs -n` cannot verify such a copy completely, reporting referenced blocks the bitmap shows free. After the reap the reaper keeps one empty reap-list object (E17) | A deleted snapshot (neither `tmutil` nor `diskutil` can make a snapshot of a disk image volume) |
 | Volume roles and volume groups in multi-volume containers | The roles table of E10, with stored values; System added with `-groupWith` Data gets Data's volume UUID as the group UUID on both, plus optional feature `0x10` on each; slots fill from 0 and a freed slot is reused (E10) | |
-| Encrypted and sealed detection; sealed tree types, node flags, hash types; whether a sealed volume has an extent-reference tree | Encrypted: container flag `0x4` and a one-block keylocker, volume flags `0x8` without `0x1`, filesystem-tree mappings flagged `0x4`; superblocks, maps and the other trees plaintext. `hdiutil -encryption` wraps a plain container in `encrcdsa`. Sealed: incompatible `0x20`, virtual filesystem tree whose nodes have no header (map flag `0x8`, node flags `0x18` plus root or leaf), tree flags `0x1c2`, index values of a relative child OID and a SHA-256 digest of the whole node, integrity object version 2, hash type 1, root hash at 128; an extent-reference tree with one record per sealed file extent ([E11](#e11-encrypted-and-sealed)) | Hash types other than SHA-256, a broken seal and a sealed volume with snapshots: no specimen |
+| Encrypted and sealed detection; sealed tree types, node flags, hash types; whether a sealed volume has an extent-reference tree | Encrypted: container flag `0x4` and a one-block keylocker, volume flags `0x8` without `0x1`, filesystem-tree mappings flagged `0x4`; superblocks, maps and the other trees plaintext. `hdiutil -encryption` wraps a plain container in `encrcdsa`. Sealed: incompatible `0x20`, virtual filesystem tree whose nodes have no header (map flag `0x8`, node flags `0x18` plus root or leaf), tree flags `0x1c2`, index values of a relative child OID and a SHA-256 digest of the whole node, integrity object version 2, hash type 1, root hash at 128; an extent-reference tree with one record per sealed file extent ([E11](#e11-encrypted-and-sealed)) | Hash types other than SHA-256, a broken seal, a sealed volume with snapshots, and the child-OID base of a tree whose root is not its lowest OID: no specimen |
 
 Rows open under E1's volume records wait for the volume records of the E1
 captures: the volume object map and its trees.
