@@ -3,6 +3,8 @@
  */
 #include "config.h"
 
+#include <string.h>
+
 #include "apfs.h"
 #include "fsimg-endian.h"
 #include "reader.h"
@@ -15,9 +17,19 @@
  *
  * Every node is validated as it is loaded (node_check()), against the
  * profile, the root's footer and the separator bounds its parent gave it,
- * so a node referenced twice, a subtree repeated under two separators or a
- * cycle fails before any of its records is used; levels fall by one per
- * step, so a path is at most the height, and a walk visits each node once.
+ * so a cycle, and outside undecided classes a node referenced twice or a
+ * subtree repeated under two separators, fails before any of its records is
+ * used; levels fall by one per step, so a path is at most the height, and a
+ * walk visits each node once.
+ *
+ * In a tree whose profile has undecided classes, a subtree whose keys all
+ * belong to one such class can lie under two separators of that class, and
+ * nested, such repetition multiplies. The cursor therefore counts the nodes
+ * it loads from each seek or first: a walk of a valid tree loads each node
+ * once after a path of at most the height, so more loads than the slice has
+ * blocks, plus the height, is FSIMG_ECORRUPT, and every walk costs at most
+ * the image's size. The records a repeated subtree yields twice belong to
+ * the one class, whose consumer refuses equal names.
  */
 
 #define NODE_FLAGS_KNOWN	(APFS_NODE_ROOT | APFS_NODE_LEAF | \
@@ -38,10 +50,39 @@ typedef enum {
 	FIRST_NOT_BELOW
 } bound_t;
 
+/* A filesystem-tree key's projection, which fs_compare() orders. */
+typedef struct fs_order {
+	const unsigned char *name;	/* stored name, NUL included */
+	size_t		 name_len;
+	uint64_t	 oid;
+	uint64_t	 number;	/* the suffix's integer */
+	uint8_t		 kind;
+} fs_order_t;
+
+static int		bytes_compare(const unsigned char *, size_t,
+			    const unsigned char *, size_t);
 static fsimg_status_t	child_load(apfs_cursor_t *, unsigned,
 			    fsimg_error_t *);
 static fsimg_status_t	entry_lengths(const apfs_cursor_t *,
 			    const apfs_entry_t *, bool, fsimg_error_t *);
+static int		fs_compare(const unsigned char *, size_t,
+			    const unsigned char *, size_t, bool);
+static int		fs_compare_hashed(const unsigned char *, size_t,
+			    const unsigned char *, size_t);
+static int		fs_compare_plain(const unsigned char *, size_t,
+			    const unsigned char *, size_t);
+static fsimg_status_t	fs_entry_check(const apfs_record_t *, bool,
+			    fsimg_error_t *);
+static fsimg_status_t	fs_entry_check_hashed(const apfs_record_t *, bool,
+			    fsimg_error_t *);
+static fsimg_status_t	fs_entry_check_plain(const apfs_record_t *, bool,
+			    fsimg_error_t *);
+static void		fs_order(const unsigned char *, size_t, bool,
+			    fs_order_t *);
+static bool		fs_undecided_plain(const unsigned char *, size_t);
+static bool		key_precedes(const apfs_tree_profile_t *,
+			    const unsigned char *, size_t, const unsigned char *,
+			    size_t);
 static bool		level_contains(const apfs_cursor_t *,
 			    const apfs_path_level_t *, const unsigned char *,
 			    size_t);
@@ -130,6 +171,22 @@ entry_lengths(const apfs_cursor_t *cursor, const apfs_entry_t *entry,
 }
 
 /*
+ * Whether key a may come before key b in a tree: below it under the
+ * comparator, or in the same undecided class. Two keys of a decided class
+ * that compare equal are one key stored twice.
+ */
+static bool
+key_precedes(const apfs_tree_profile_t *profile, const unsigned char *a,
+    size_t a_len, const unsigned char *b, size_t b_len)
+{
+	int order = profile->compare(a, a_len, b, b_len);
+
+	if (order != 0)
+		return (order < 0);
+	return (profile->undecided != NULL && profile->undecided(a, a_len));
+}
+
+/*
  * The node checks of specs/design-apfs.md, "Validation", for path[depth],
  * whose window and decoded header are loaded and whose bounds are set.
  */
@@ -212,15 +269,18 @@ node_check(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 			if (status != FSIMG_OK)
 				return (status);
 		}
-		if (previous != NULL && profile->compare(previous,
-		    previous_len, key, entry.key_len) >= 0)
+		if (previous != NULL && !key_precedes(profile, previous,
+		    previous_len, key, entry.key_len))
 			return (apfs_corrupt(error, role,
 			    "node has keys out of order"));
 		previous = key;
 		previous_len = entry.key_len;
 	}
 
-	/* Keys increase, so the first and the last decide the bounds. */
+	/* Keys never decrease, so the first and the last decide the bounds.
+	 * An undecided class can continue past the next separator, so the
+	 * last key may equal that separator when its class is undecided.
+	 */
 	if (node->key_count != 0) {
 		(void)node_entry(cursor, level, 0, &entry);
 		if (level->low != NULL && profile->compare(window +
@@ -228,8 +288,8 @@ node_check(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 		    level->low_len) < 0)
 			return (apfs_corrupt(error, role,
 			    "node lies outside its parent's separators"));
-		if (level->high != NULL && profile->compare(previous,
-		    previous_len, level->high, level->high_len) >= 0)
+		if (level->high != NULL && !key_precedes(profile, previous,
+		    previous_len, level->high, level->high_len))
 			return (apfs_corrupt(error, role,
 			    "node lies outside its parent's separators"));
 	}
@@ -252,6 +312,10 @@ node_load(apfs_cursor_t *cursor, unsigned depth, uint64_t oid,
 
 	cursor->depth = depth;
 	cursor->positioned = false;
+	if (++cursor->loads > cursor->container->reader->slice_bytes /
+	    cursor->container->block_size + APFS_BTREE_LEVELS_MAX)
+		return (apfs_corrupt(error, cursor->profile->role,
+		    "repeats nodes beyond the image's blocks"));
 	/* Defensive: levels fall by one per step from a root below 16. */
 	if (depth >= APFS_BTREE_LEVELS_MAX)
 		return (apfs_corrupt(error, cursor->profile->role,
@@ -336,7 +400,7 @@ child_load(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 /*
  * The position in a level's node of the first key above key, or of the
  * first key not below it, by binary search over keys node_check() proved
- * increasing; the key count when there is none.
+ * never decreasing; the key count when there is none.
  */
 static fsimg_status_t
 node_bound(const apfs_cursor_t *cursor, const apfs_path_level_t *level,
@@ -363,6 +427,11 @@ node_bound(const apfs_cursor_t *cursor, const apfs_path_level_t *level,
 	return (FSIMG_OK);
 }
 
+/*
+ * Whether key lies strictly between a level's bounds, so that every record
+ * before the level's subtree is below key and every record after it above,
+ * even where keys equal to a bound lie on both sides of it.
+ */
 static bool
 level_contains(const apfs_cursor_t *cursor, const apfs_path_level_t *level,
     const unsigned char *key, size_t key_len)
@@ -370,7 +439,7 @@ level_contains(const apfs_cursor_t *cursor, const apfs_path_level_t *level,
 	apfs_compare_fn_t compare = cursor->profile->compare;
 
 	return ((level->low == NULL ||
-	    compare(key, key_len, level->low, level->low_len) >= 0) &&
+	    compare(key, key_len, level->low, level->low_len) > 0) &&
 	    (level->high == NULL ||
 	    compare(key, key_len, level->high, level->high_len) < 0));
 }
@@ -429,6 +498,7 @@ apfs_cursor_seek(apfs_cursor_t *cursor, const unsigned char *key,
 
 	*found = false;
 	cursor->positioned = false;
+	cursor->loads = 0;
 	status = fsimg_session_charge(&cursor->container->reader->session, 0,
 	    0, 1, error);
 	if (status != FSIMG_OK)
@@ -449,12 +519,15 @@ apfs_cursor_seek(apfs_cursor_t *cursor, const unsigned char *key,
 		depth--;
 	cursor->depth = depth + 1;
 
-	/* In an index node, take the last child whose separator is not above
-	 * the key, or the first child when every separator is.
+	/* In an index node, LE takes the last child whose separator is not
+	 * above the key; GE the last whose separator is below it, since keys
+	 * of an undecided class equal to the key can end that child. Either
+	 * takes the first child when there is none.
 	 */
 	while (cursor->path[depth].node.level != 0) {
 		level = &cursor->path[depth];
-		status = node_bound(cursor, level, key, key_len, FIRST_ABOVE,
+		status = node_bound(cursor, level, key, key_len,
+		    mode == APFS_SEEK_LE ? FIRST_ABOVE : FIRST_NOT_BELOW,
 		    &position, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -504,6 +577,7 @@ apfs_cursor_first(apfs_cursor_t *cursor, bool *found, fsimg_error_t *error)
 
 	*found = false;
 	cursor->positioned = false;
+	cursor->loads = 0;
 	status = fsimg_session_charge(&cursor->container->reader->session, 0,
 	    0, 1, error);
 	if (status != FSIMG_OK)
@@ -566,4 +640,224 @@ apfs_cursor_record(const apfs_cursor_t *cursor, apfs_record_t *record)
 		record->val = level->window + entry.val_off;
 		record->val_len = entry.val_len;
 	}
+}
+
+/*
+ * The filesystem tree. A key orders by its projection: owner, kind, then
+ * the suffix its kind orders by, as an integer and then as bytes:
+ *
+ *   file extent		the logical offset
+ *   sibling link		the sibling ID
+ *   file information		the packed word
+ *   hashed directory record	the 22-bit hash, then the stored name
+ *   extended attribute		the stored name
+ *
+ * A stored name is compared with its NUL as unsigned bytes, so a name
+ * sorts before the longer names it is a prefix of; macOS orders hashed
+ * directory records and attribute names so. The 32-bit word of a hashed
+ * key orders by its hash alone, not the length it also holds. A plain
+ * directory record projects to its owner and kind alone: how macOS orders
+ * plain names cannot be observed, since no native tool formats a plain-key
+ * volume, so the records of one directory form one undecided class.
+ *
+ * A suffix field a key is too short to hold projects to zero, and missing
+ * name bytes to none, so the order is total over any bytes, and a search
+ * key that is a header alone orders at or before every key of its owner and
+ * kind: a GE seek with it reaches their first record. The entry check
+ * refuses such a key in a node.
+ */
+static void
+fs_order(const unsigned char *key, size_t key_len, bool hashed,
+    fs_order_t *order)
+{
+	uint64_t header = fsimg_load_le64(key);	/* key_min is the header */
+	size_t name_start = key_len;		/* key_len: no name */
+
+	*order = (fs_order_t){ .oid = header & APFS_JKEY_OID_MASK,
+	    .kind = (uint8_t)(header >> APFS_JKEY_KIND_SHIFT) };
+	switch (order->kind) {
+	case APFS_J_FILE_EXTENT:
+	case APFS_J_SIBLING_LINK:
+	case APFS_J_FILE_INFO:
+		if (key_len >= APFS_JKEY_BYTES + 8)
+			order->number = fsimg_load_le64(key + APFS_JKEY_BYTES);
+		break;
+	case APFS_J_DREC:
+		if (!hashed)
+			break;
+		if (key_len >= APFS_DREC_HASHED_KEY_BYTES)
+			order->number = fsimg_load_le32(key + APFS_JKEY_BYTES) >>
+			    APFS_DREC_HASH_SHIFT;
+		name_start = APFS_DREC_HASHED_KEY_BYTES;
+		break;
+	case APFS_J_XATTR:
+		name_start = APFS_XATTR_KEY_BYTES;
+		break;
+	default:
+		break;
+	}
+	if (name_start < key_len) {
+		order->name = key + name_start;
+		order->name_len = key_len - name_start;
+	}
+}
+
+static int
+fs_compare(const unsigned char *a, size_t a_len, const unsigned char *b,
+    size_t b_len, bool hashed)
+{
+	fs_order_t x, y;
+
+	fs_order(a, a_len, hashed, &x);
+	fs_order(b, b_len, hashed, &y);
+	if (x.oid != y.oid)
+		return (x.oid < y.oid ? -1 : 1);
+	if (x.kind != y.kind)
+		return (x.kind < y.kind ? -1 : 1);
+	if (x.number != y.number)
+		return (x.number < y.number ? -1 : 1);
+	return (bytes_compare(x.name, x.name_len, y.name, y.name_len));
+}
+
+/*
+ * Unsigned bytes in order, a prefix before the longer spans it begins. An
+ * empty span may be NULL, which memcmp() must not see even for no bytes.
+ */
+static int
+bytes_compare(const unsigned char *a, size_t a_len, const unsigned char *b,
+    size_t b_len)
+{
+	size_t common = a_len < b_len ? a_len : b_len;
+	int order = common == 0 ? 0 : memcmp(a, b, common);
+
+	if (order != 0)
+		return (order < 0 ? -1 : 1);
+	if (a_len != b_len)
+		return (a_len < b_len ? -1 : 1);
+	return (0);
+}
+
+static int
+fs_compare_hashed(const unsigned char *a, size_t a_len,
+    const unsigned char *b, size_t b_len)
+{
+	return (fs_compare(a, a_len, b, b_len, true));
+}
+
+static int
+fs_compare_plain(const unsigned char *a, size_t a_len,
+    const unsigned char *b, size_t b_len)
+{
+	return (fs_compare(a, a_len, b, b_len, false));
+}
+
+/* In the plain profile, a directory record's class is its directory's. */
+static bool
+fs_undecided_plain(const unsigned char *key, size_t key_len)
+{
+	(void)key_len;
+	return ((fsimg_load_le64(key) >> APFS_JKEY_KIND_SHIFT) == APFS_J_DREC);
+}
+
+/*
+ * A key of a kind the filesystem tree holds, of the shape its decoder
+ * accepts. Snapshot metadata, physical extents and snapshot names belong to
+ * other trees, and kinds 0, 14 and 15 to none.
+ */
+static fsimg_status_t
+fs_entry_check(const apfs_record_t *record, bool hashed, fsimg_error_t *error)
+{
+	apfs_jkey_t header;
+	apfs_drec_key_t drec;
+	apfs_name_key_t name;
+	apfs_sibling_key_t sibling;
+	apfs_extent_key_t extent;
+	apfs_file_info_key_t info;
+	uint64_t oid;
+	bool valid;
+
+	if (!apfs_jkey_decode(record->key, record->key_len, &header))
+		return (apfs_corrupt(error, "filesystem tree",
+		    "node has a malformed key"));
+	switch (header.kind) {
+	case APFS_J_INODE:
+	case APFS_J_DSTREAM_ID:
+	case APFS_J_CRYPTO_STATE:
+	case APFS_J_DIR_STATS:
+	case APFS_J_SIBLING_MAP:
+		valid = apfs_bare_key_decode(record->key, record->key_len,
+		    header.kind, &oid);
+		break;
+	case APFS_J_XATTR:
+		valid = apfs_xattr_key_decode(record->key, record->key_len,
+		    &name);
+		break;
+	case APFS_J_SIBLING_LINK:
+		valid = apfs_sibling_key_decode(record->key, record->key_len,
+		    &sibling);
+		break;
+	case APFS_J_FILE_EXTENT:
+		valid = apfs_extent_key_decode(record->key, record->key_len,
+		    &extent);
+		break;
+	case APFS_J_DREC:
+		valid = apfs_drec_key_decode(record->key, record->key_len,
+		    hashed, &drec);
+		break;
+	case APFS_J_FILE_INFO:
+		valid = apfs_file_info_key_decode(record->key,
+		    record->key_len, &info);
+		break;
+	default:
+		return (apfs_corrupt(error, "filesystem tree",
+		    "node has a key of a kind outside the tree"));
+	}
+	if (!valid)
+		return (apfs_corrupt(error, "filesystem tree",
+		    "node has a malformed key"));
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+fs_entry_check_hashed(const apfs_record_t *record, bool leaf,
+    fsimg_error_t *error)
+{
+	(void)leaf;
+	return (fs_entry_check(record, true, error));
+}
+
+static fsimg_status_t
+fs_entry_check_plain(const apfs_record_t *record, bool leaf,
+    fsimg_error_t *error)
+{
+	(void)leaf;
+	return (fs_entry_check(record, false, error));
+}
+
+/* Key and value lengths are judged per kind, by the entry check and by the
+ * modules decoding values, so the profile bounds only the header.
+ */
+static const apfs_tree_profile_t fs_tree_hashed = {
+	.role = "filesystem tree",
+	.compare = fs_compare_hashed,
+	.entry_check = fs_entry_check_hashed,
+	.subtype = APFS_SUBTYPE_FSTREE,
+	.key_min = APFS_JKEY_BYTES, .key_max = UINT16_MAX,
+	.val_min = 0, .val_max = UINT16_MAX
+};
+
+static const apfs_tree_profile_t fs_tree_plain = {
+	.role = "filesystem tree",
+	.compare = fs_compare_plain,
+	.undecided = fs_undecided_plain,
+	.entry_check = fs_entry_check_plain,
+	.subtype = APFS_SUBTYPE_FSTREE,
+	.key_min = APFS_JKEY_BYTES, .key_max = UINT16_MAX,
+	.val_min = 0, .val_max = UINT16_MAX
+};
+
+const apfs_tree_profile_t *
+apfs_fs_tree_profile(bool hashed)
+{
+	return (hashed ? &fs_tree_hashed : &fs_tree_plain);
 }

@@ -2648,9 +2648,1017 @@ test_work_and_memory_limits_release_partial_open(void)
 	fixture_close(&f);
 }
 
+/* Key descriptions keep record intent separate from its byte encoding. */
+typedef struct fs_key_case {
+	uint64_t owner;
+	uint64_t number;
+	const char *name;
+	uint8_t kind;
+	bool header_only;
+} fs_key_case_t;
+
+static apfs_gen_record_t
+fs_key_build(unsigned char *raw, const fs_key_case_t *key, bool hashed)
+{
+	apfs_gen_drec_key_t drec;
+	apfs_gen_name_key_t name;
+	size_t length = 8;
+
+	CHECK(apfs_gen_jkey_build(raw, 8, key->owner, key->kind));
+	if (!key->header_only) {
+		switch (key->kind) {
+		case 4:
+			name = (apfs_gen_name_key_t){ .oid = key->owner,
+			    .name = key->name,
+			    .name_len = (uint16_t)strlen(key->name) };
+			length = 10 + name.name_len + 1;
+			CHECK(apfs_gen_xattr_key_build(raw, length, &name));
+			break;
+		case 5:
+			length = 16;
+			CHECK(apfs_gen_sibling_key_build(raw, length,
+			    key->owner, key->number));
+			break;
+		case 8:
+			length = 16;
+			CHECK(apfs_gen_extent_key_build(raw, length,
+			    key->owner, key->number));
+			break;
+		case 9:
+			drec = (apfs_gen_drec_key_t){ .parent = key->owner,
+			    .hash = (uint32_t)key->number, .name = key->name,
+			    .name_len = (uint16_t)strlen(key->name),
+			    .hashed = hashed };
+			length = (hashed ? 12 : 10) + drec.name_len + 1;
+			CHECK(apfs_gen_drec_key_build(raw, length, &drec));
+			break;
+		case 13:
+			length = 16;
+			CHECK(apfs_gen_file_info_key_build(raw, length,
+			    key->owner, key->number & UINT64_C(0xffffffffffffff),
+			    (uint8_t)(key->number >> 56)));
+			break;
+		default:
+			break;
+		}
+	}
+	return ((apfs_gen_record_t){ .key = raw, .key_size = (uint16_t)length });
+}
+
+/*
+ * The oracle reads integers byte by byte and compares suffixes directly,
+ * without the driver's projection structure or endian/record decoders.
+ * It also accepts header-only search keys, which sort at or before stored keys.
+ */
+static uint64_t
+fs_test_integer(const unsigned char *bytes, size_t width)
+{
+	uint64_t value = 0;
+
+	for (size_t i = 0; i < width; i++)
+		value += (uint64_t)bytes[i] << (8 * i);
+	return (value);
+}
+
+static int
+fs_test_compare(const unsigned char *a, size_t a_len,
+    const unsigned char *b, size_t b_len, bool hashed)
+{
+	uint64_t ah = fs_test_integer(a, 8), bh = fs_test_integer(b, 8);
+	uint64_t ao = ah % (UINT64_C(1) << 60);
+	uint64_t bo = bh % (UINT64_C(1) << 60), av, bv;
+	unsigned kind = (unsigned)(ah >> 60);
+	size_t start;
+
+	if (ao != bo)
+		return (ao < bo ? -1 : 1);
+	if (kind != bh >> 60)
+		return (kind < (bh >> 60) ? -1 : 1);
+	if (kind == 5 || kind == 8 || kind == 13) {
+		av = a_len < 16 ? 0 : fs_test_integer(a + 8, 8);
+		bv = b_len < 16 ? 0 : fs_test_integer(b + 8, 8);
+		return (av < bv ? -1 : av > bv);
+	}
+	if (kind == 9 && hashed) {
+		av = a_len < 12 ? 0 : fs_test_integer(a + 8, 4) / 1024;
+		bv = b_len < 12 ? 0 : fs_test_integer(b + 8, 4) / 1024;
+		if (av != bv)
+			return (av < bv ? -1 : 1);
+		start = 12;
+	} else if (kind == 4) {
+		start = 10;
+	} else {
+		return (0);
+	}
+	for (size_t i = start; i < a_len && i < b_len; i++)
+		if (a[i] != b[i])
+			return (a[i] < b[i] ? -1 : 1);
+	return (a_len < b_len ? -1 : a_len > b_len);
+}
+
+static void
+test_filesystem_comparator_orders_owners_kinds_and_suffixes(void)
+{
+	static const struct {
+		const char *name;
+		fs_key_case_t left;
+		fs_key_case_t right;
+		int hashed_order;
+		int plain_order;
+	} cases[] = {
+		{ "owner precedes kind", { .owner = 1, .kind = 12 },
+		    { .owner = 2, .kind = 3 }, -1, -1 },
+		{ "sixty bit owner", { .owner = GEN_JKEY_OID_MASK - 1,
+		    .kind = 12 }, { .owner = GEN_JKEY_OID_MASK, .kind = 3 }, -1, -1 },
+		{ "extent offsets are numeric", { .owner = 2, .kind = 8,
+		    .number = 0xff }, { .owner = 2, .kind = 8, .number = 0x100 }, -1, -1 },
+		{ "sibling IDs are numeric", { .owner = 2, .kind = 5,
+		    .number = 0xff }, { .owner = 2, .kind = 5, .number = 0x100 }, -1, -1 },
+		{ "file info packed word is numeric", { .owner = 2, .kind = 13,
+		    .number = 0xff }, { .owner = 2, .kind = 13, .number = 0x100 }, -1, -1 },
+		{ "file info includes type bits", { .owner = 2, .kind = 13,
+		    .number = UINT64_C(0x00ffffffffffffff) },
+		    { .owner = 2, .kind = 13,
+		    .number = UINT64_C(0x0100000000000000) }, -1, -1 },
+		{ "sibling header first", { .owner = 2, .kind = 5,
+		    .header_only = true }, { .owner = 2, .kind = 5,
+		    .number = 1 }, -1, -1 },
+		{ "file info header first", { .owner = 2, .kind = 13,
+		    .header_only = true }, { .owner = 2, .kind = 13,
+		    .number = 1 }, -1, -1 },
+		{ "xattr header first", { .owner = 2, .kind = 4,
+		    .header_only = true }, { .owner = 2, .kind = 4,
+		    .name = "ab" }, -1, -1 },
+		{ "hash precedes name", { .owner = 2, .kind = 9,
+		    .number = 0xff, .name = "z" }, { .owner = 2, .kind = 9,
+		    .number = 0x100, .name = "a" }, -1, 0 },
+		{ "hash tie uses name", { .owner = 2, .kind = 9,
+		    .number = 7, .name = "ab" }, { .owner = 2, .kind = 9,
+		    .number = 7, .name = "abc" }, -1, 0 },
+		{ "length bits do not precede name", { .owner = 2, .kind = 9,
+		    .number = 7, .name = "aaaa" }, { .owner = 2, .kind = 9,
+		    .number = 7, .name = "z" }, -1, 0 },
+		{ "names use unsigned bytes", { .owner = 2, .kind = 9,
+		    .number = 7, .name = "z" }, { .owner = 2, .kind = 9,
+		    .number = 7, .name = "\xc3" }, -1, 0 },
+		{ "xattr prefix first", { .owner = 2, .kind = 4, .name = "ab" },
+		    { .owner = 2, .kind = 4, .name = "abc" }, -1, -1 },
+		{ "xattr unsigned bytes", { .owner = 2, .kind = 4, .name = "z" },
+		    { .owner = 2, .kind = 4, .name = "\xc3" }, -1, -1 },
+		{ "extent header first", { .owner = 2, .kind = 8,
+		    .header_only = true }, { .owner = 2, .kind = 8,
+		    .number = 1 }, -1, -1 },
+		{ "search header follows previous kind", { .owner = 2, .kind = 8,
+		    .number = 1 }, { .owner = 2, .kind = 9,
+		    .header_only = true }, -1, -1 },
+		{ "directory header starts class", { .owner = 2, .kind = 9,
+		    .header_only = true }, { .owner = 2, .kind = 9,
+		    .number = 7, .name = "z" }, -1, 0 }
+	};
+	static const uint8_t kinds[] = { 3, 4, 5, 6, 8, 9, 10, 12, 13 };
+	unsigned char keys[2 * (sizeof(cases) / sizeof(cases[0]))][64];
+	apfs_gen_record_t records[sizeof(keys) / sizeof(keys[0])];
+	unsigned char kind_keys[sizeof(kinds)][64];
+	apfs_gen_record_t kind_records[sizeof(kinds)];
+	const apfs_tree_profile_t *profile;
+	char pair[256];
+	int order, reverse;
+
+	for (unsigned hashed = 0; hashed < 2; hashed++) {
+		profile = apfs_fs_tree_profile(hashed != 0);
+		scenario = "filesystem profile shape";
+		expect(profile->subtype == 14 && profile->key_min == 8 &&
+		    profile->fixed_key == 0 && profile->fixed_val == 0 &&
+		    strcmp(profile->role, "filesystem tree") == 0,
+		    "variable-size filesystem profile");
+		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			scenario = cases[i].name;
+			records[2 * i] = fs_key_build(keys[2 * i],
+			    &cases[i].left, hashed != 0);
+			records[2 * i + 1] = fs_key_build(keys[2 * i + 1],
+			    &cases[i].right, hashed != 0);
+			order = profile->compare(records[2 * i].key,
+			    records[2 * i].key_size, records[2 * i + 1].key,
+			    records[2 * i + 1].key_size);
+			order = (order > 0) - (order < 0);
+			expect(order == (hashed ? cases[i].hashed_order :
+			    cases[i].plain_order), "expected key order");
+		}
+		for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); i++) {
+			for (size_t j = 0; j < sizeof(records) / sizeof(records[0]); j++) {
+				CHECK(snprintf(pair, sizeof(pair),
+				    "%s comparator pair %zu (%s) / %zu (%s)",
+				    hashed ? "hashed" : "plain", i, cases[i / 2].name,
+				    j, cases[j / 2].name) < (int)sizeof(pair));
+				scenario = pair;
+				order = profile->compare(records[i].key,
+				    records[i].key_size, records[j].key,
+				    records[j].key_size);
+				reverse = profile->compare(records[j].key,
+				    records[j].key_size, records[i].key,
+				    records[i].key_size);
+				order = (order > 0) - (order < 0);
+				reverse = (reverse > 0) - (reverse < 0);
+				expect(order == -reverse, "pair is antisymmetric");
+				expect(order == fs_test_compare(records[i].key,
+				    records[i].key_size, records[j].key,
+				    records[j].key_size, hashed != 0),
+				    "independent oracle agrees");
+			}
+		}
+		scenario = "kind order within one owner";
+		for (size_t i = 0; i < sizeof(kinds); i++)
+			kind_records[i] = fs_key_build(kind_keys[i],
+			    &(fs_key_case_t){ .owner = 2, .kind = kinds[i],
+			    .name = "a", .number = 1 }, hashed != 0);
+		for (size_t i = 1; i < sizeof(kinds); i++)
+			expect(profile->compare(kind_records[i - 1].key,
+			    kind_records[i - 1].key_size, kind_records[i].key,
+			    kind_records[i].key_size) < 0, "kinds increase");
+	}
+}
+
+static void
+test_hashed_comparator_ignores_name_length_bits(void)
+{
+	unsigned char original[64], different_length[64];
+	apfs_gen_record_t record;
+	const apfs_tree_profile_t *profile = apfs_fs_tree_profile(true);
+
+	scenario = "hashed word length bits have no ordering significance";
+	record = fs_key_build(original, &(fs_key_case_t){ .owner = 42,
+	    .kind = 9, .number = 7, .name = "ab" }, true);
+	bcopy(original, different_length, record.key_size);
+	/* Deliberately inconsistent length: comparison is total even for search
+	 * keys that the entry checker would refuse as stored records.
+	 */
+	different_length[8] ^= 1;
+	expect(profile->compare(original, record.key_size, different_length,
+	    record.key_size) == 0, "same hash and name compare equal");
+	expect(profile->compare(different_length, record.key_size, original,
+	    record.key_size) == 0, "length bits ignored in both directions");
+}
+
+/* Tree nodes use XID 5; the cursor and physical volume map use XID 10. */
+static uint64_t
+build_fs_tree(fixture_t *f, const apfs_gen_record_t *records, size_t count,
+    unsigned per_leaf, bool newer_version)
+{
+	apfs_gen_omap_record_t mappings[128], versions[129];
+	apfs_gen_fs_tree_t tree = { .records = records, .count = count,
+	    .first_oid = 2000, .base = OBJECT_BLOCK, .xid = 5,
+	    .block_size = BLOCK, .records_per_leaf = per_leaf,
+	    .children_per_index = 2 };
+	apfs_gen_tree_t map_tree;
+	apfs_gen_omap_t map;
+	uint64_t root, blocks, map_root, map_blocks;
+	size_t n = 0;
+
+	CHECK(apfs_gen_fs_tree_build(f->bytes, IMAGE_BYTES, &tree,
+	    mappings, 128, &root, &blocks));
+	for (size_t i = 0; i < blocks; i++) {
+		versions[n++] = mappings[i];
+		if (newer_version && i == 0) {
+			versions[n] = mappings[i];
+			versions[n].key.xid = 11;
+			/* A zero block makes accidental use of the future version fail. */
+			versions[n].value.address = OBJECT_BLOCK + 128;
+			n++;
+		}
+	}
+	map_tree = (apfs_gen_tree_t){ .records = versions, .count = n,
+	    .base = TREE_BASE, .xid = 10, .block_size = BLOCK,
+	    .records_per_leaf = 4, .children_per_index = 2 };
+	CHECK(apfs_gen_tree_build(f->bytes, IMAGE_BYTES, &map_tree,
+	    &map_root, &map_blocks));
+	bzero(block_at(f, MAP_BLOCK), BLOCK);
+	map = (apfs_gen_omap_t){ .object = { .oid = MAP_BLOCK, .xid = 10,
+	    .type = 0x4000000b }, .tree_type = 0x40000002,
+	    .tree_oid = map_root };
+	CHECK(apfs_gen_omap_build(block_at(f, MAP_BLOCK), BLOCK, &map));
+	return (root);
+}
+
+static void
+expect_fs_record(apfs_cursor_t *cursor, const apfs_gen_record_t *wanted)
+{
+	apfs_record_t record;
+
+	apfs_cursor_record(cursor, &record);
+	expect(record.key != NULL && record.key_len == wanted->key_size &&
+	    bcmp(record.key, wanted->key, wanted->key_size) == 0,
+	    "cursor lands on exact stored key");
+	expect(record.val_len == wanted->value_size && !record.ghost &&
+	    (record.val_len == 0 || bcmp(record.val, wanted->value,
+	    record.val_len) == 0), "cursor returns matching value");
+}
+
+static void
+expect_fs_seek(fixture_t *f, apfs_cursor_t *cursor,
+    const apfs_gen_record_t *key, apfs_seek_t mode,
+    const apfs_gen_record_t *wanted)
+{
+	bool found;
+
+	if (status_is(f, apfs_cursor_seek(cursor, key->key, key->key_size,
+	    mode, &found, &f->error), FSIMG_OK)) {
+		expect(found, "seek finds a record");
+		if (found)
+			expect_fs_record(cursor, wanted);
+	}
+}
+
+static void
+test_plain_directory_class_spans_leaves_and_seeks_to_both_edges(void)
+{
+	static const fs_key_case_t keys_in_order[] = {
+		{ .owner = 42, .kind = 3 },
+		{ .owner = 42, .kind = 9, .name = "z" },
+		{ .owner = 42, .kind = 9, .name = "b" },
+		{ .owner = 42, .kind = 9, .name = "y" },
+		{ .owner = 42, .kind = 9, .name = "a" },
+		{ .owner = 42, .kind = 9, .name = "x" },
+		{ .owner = 42, .kind = 9, .name = "c" },
+		{ .owner = 42, .kind = 9, .name = "w" },
+		{ .owner = 42, .kind = 9, .name = "d" },
+		{ .owner = 42, .kind = 9, .name = "v" },
+		{ .owner = 42, .kind = 9, .name = "e" },
+		{ .owner = 42, .kind = 10 },
+	};
+	static const size_t outside_directory[] = { 0, 11 };
+	unsigned char keys[12][64], header[8], any_name[64];
+	unsigned char values[12];
+	apfs_gen_record_t records[12], search;
+	apfs_cursor_t cursor;
+	apfs_map_t map;
+	fixture_t f;
+	uint64_t root;
+	size_t visited = 0;
+	fsimg_status_t status;
+	bool found;
+
+	scenario = "plain directory class spans leaves at older mapped XID";
+	fixture_init(&f, 0);
+	build_checkpoints(&f, 1, 10);
+	CHECK(checkpoint_open(&f) == FSIMG_OK);
+	for (size_t i = 0; i < 12; i++) {
+		records[i] = fs_key_build(keys[i], &keys_in_order[i], false);
+		values[i] = (unsigned char)i;
+		records[i].value = &values[i];
+		records[i].value_size = 1;
+	}
+	root = build_fs_tree(&f, records, 12, 2, true);
+	CHECK(map_open(&f, &map, APFS_MAP_VOLUME) == FSIMG_OK);
+	apfs_cursor_init(&cursor, &f.container, apfs_fs_tree_profile(false),
+	    APFS_OBJ_VIRTUAL, root, 10, &map);
+	status = apfs_cursor_first(&cursor, &found, &f.error);
+	while (status == FSIMG_OK && found) {
+		CHECK(visited < 12);
+		expect_fs_record(&cursor, &records[visited++]);
+		status = apfs_cursor_next(&cursor, &found, &f.error);
+	}
+	status_is(&f, status, FSIMG_OK);
+	expect(visited == 12, "walk visits each record once in stored order");
+	expect(cursor.path[0].node.level >= 2, "tree has at least three levels");
+	expect(cursor.info.key_count == 12, "root counts leaf records");
+	search = fs_key_build(header, &(fs_key_case_t){ .owner = 42,
+	    .kind = 9, .header_only = true }, false);
+	expect_fs_seek(&f, &cursor, &search, APFS_SEEK_GE, &records[1]);
+	expect_fs_seek(&f, &cursor, &search, APFS_SEEK_LE, &records[10]);
+	search = fs_key_build(any_name, &(fs_key_case_t){ .owner = 42,
+	    .kind = 9, .name = "any name" }, false);
+	expect_fs_seek(&f, &cursor, &search, APFS_SEEK_GE, &records[1]);
+	expect_fs_seek(&f, &cursor, &search, APFS_SEEK_LE, &records[10]);
+	for (size_t edge = 0; edge < 2; edge++) {
+		size_t i = outside_directory[edge];
+
+		expect_fs_seek(&f, &cursor, &records[i], APFS_SEEK_GE, &records[i]);
+		expect_fs_seek(&f, &cursor, &records[i], APFS_SEEK_LE, &records[i]);
+	}
+	apfs_cursor_free(&cursor);
+	apfs_map_close(&map);
+	fixture_close(&f);
+}
+
+/* Replace the two-child root without relying on encoded TOC offsets. */
+static void
+replace_fs_root(fixture_t *f, uint64_t root,
+    const apfs_gen_record_t *left, const apfs_gen_record_t *right)
+{
+	unsigned char children[2][8];
+	apfs_gen_record_t separators[2] = { *left, *right };
+	apfs_gen_node_t node;
+	unsigned char *raw = block_at(f, OBJECT_BLOCK + root - 2000);
+
+	for (unsigned i = 0; i < 2; i++) {
+		CHECK(apfs_gen_sibling_map_val_build(children[i], 8, 2000 + i));
+		separators[i].value = children[i];
+		separators[i].value_size = 8;
+	}
+	node = (apfs_gen_node_t){ .object = { .oid = root, .xid = 5,
+	    .type = 2, .subtype = 14 }, .flags = GEN_APFS_ROOT, .level = 1,
+	    .records = separators, .count = 2,
+	    .info = { .flags = 0x40, .node_size = BLOCK,
+	    .longest_key = 64, .longest_val = 8, .key_count = 4,
+	    .node_count = 3 } };
+	bzero(raw, BLOCK);
+	CHECK(apfs_gen_node_build(raw, BLOCK, &node));
+}
+
+typedef enum fs_tree_damage {
+	FS_DUPLICATE_LEAF,
+	FS_DUPLICATE_BOUNDARY,
+	FS_DUPLICATE_INODE,
+	FS_REVERSED_LEAF,
+	FS_REVERSED_BOUNDARY,
+	FS_BELOW_SEPARATOR,
+	FS_BAD_INDEX_KIND,
+	FS_VALID_ROOT
+} fs_tree_damage_t;
+
+static void
+test_filesystem_trees_refuse_duplicates_and_decreasing_keys(void)
+{
+	static const struct {
+		const char *name;
+		fs_tree_damage_t damage;
+		unsigned per_leaf;
+		bool hashed;
+		const char *error;
+		fs_key_case_t separator;
+	} cases[] = {
+		{ .name = "plain duplicate in one inode leaf",
+		    .damage = FS_DUPLICATE_INODE, .per_leaf = 4, .hashed = false,
+		    .error = "keys out of order" },
+		{ .name = "plain owner decreases in one leaf",
+		    .damage = FS_REVERSED_LEAF, .per_leaf = 4, .hashed = false,
+		    .error = "keys out of order" },
+		{ .name = "plain owner decreases across two leaves",
+		    .damage = FS_REVERSED_BOUNDARY, .per_leaf = 2, .hashed = false,
+		    .error = "lies outside its parent's separators" },
+		{ .name = "plain left leaf below replaced separator",
+		    .damage = FS_BELOW_SEPARATOR, .per_leaf = 2, .hashed = false,
+		    .error = "lies outside its parent's separators",
+		    .separator = { .owner = 43, .kind = 9, .name = "a", .number = 7 } },
+		{ .name = "hashed duplicate in one leaf",
+		    .damage = FS_DUPLICATE_LEAF, .per_leaf = 4, .hashed = true,
+		    .error = "keys out of order" },
+		{ .name = "hashed left leaf ends at right separator",
+		    .damage = FS_DUPLICATE_BOUNDARY, .per_leaf = 2, .hashed = true,
+		    .error = "lies outside its parent's separators" },
+		{ .name = "hashed owner decreases in one leaf",
+		    .damage = FS_REVERSED_LEAF, .per_leaf = 4, .hashed = true,
+		    .error = "keys out of order" },
+		{ .name = "hashed owner decreases across two leaves",
+		    .damage = FS_REVERSED_BOUNDARY, .per_leaf = 2, .hashed = true,
+		    .error = "lies outside its parent's separators" },
+		{ .name = "hashed left leaf below replaced separator",
+		    .damage = FS_BELOW_SEPARATOR, .per_leaf = 2, .hashed = true,
+		    .error = "lies outside its parent's separators",
+		    .separator = { .owner = 43, .kind = 9, .name = "a", .number = 7 } },
+		{ .name = "plain foreign kind in two-child root",
+		    .damage = FS_BAD_INDEX_KIND, .per_leaf = 2, .hashed = false,
+		    .error = "kind outside the tree",
+		    .separator = { .owner = 42, .kind = 2 } },
+		{ .name = "hashed foreign kind in two-child root",
+		    .damage = FS_BAD_INDEX_KIND, .per_leaf = 2, .hashed = true,
+		    .error = "kind outside the tree",
+		    .separator = { .owner = 42, .kind = 2 } },
+		{ .name = "plain valid separators rebuilt over two leaves",
+		    .damage = FS_VALID_ROOT, .per_leaf = 2, .hashed = false,
+		    .error = NULL,
+		    .separator = { .owner = 42, .kind = 9, .name = "a",
+		    .number = 7 } },
+		{ .name = "hashed valid separators rebuilt over two leaves",
+		    .damage = FS_VALID_ROOT, .per_leaf = 2, .hashed = true,
+		    .error = NULL,
+		    .separator = { .owner = 42, .kind = 9, .name = "a",
+		    .number = 7 } }
+	};
+	static const char *names[] = { "a", "b", "c", "d" };
+	unsigned char keys[4][64], separator_key[64];
+	apfs_gen_record_t records[4], separator;
+	apfs_cursor_t cursor;
+	apfs_map_t map;
+	fixture_t f;
+	uint64_t root;
+	fsimg_status_t status;
+	bool found;
+
+	for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+		size_t visited = 0;
+
+		scenario = cases[c].name;
+		fixture_init(&f, 0);
+		build_checkpoints(&f, 1, 10);
+		CHECK(checkpoint_open(&f) == FSIMG_OK);
+		for (unsigned i = 0; i < 4; i++)
+			records[i] = fs_key_build(keys[i], &(fs_key_case_t){
+			    .owner = 42, .kind = 9, .name = names[i], .number = 7 },
+			    cases[c].hashed);
+		switch (cases[c].damage) {
+		case FS_DUPLICATE_LEAF:
+			records[1] = records[0];
+			break;
+		case FS_DUPLICATE_BOUNDARY:
+			records[1] = records[2];
+			break;
+		case FS_DUPLICATE_INODE:
+			records[0] = fs_key_build(keys[0], &(fs_key_case_t){
+			    .owner = 42, .kind = 3 }, false);
+			records[1] = records[0];
+			break;
+		case FS_REVERSED_LEAF:
+		case FS_REVERSED_BOUNDARY:
+			records[1] = fs_key_build(keys[1], &(fs_key_case_t){
+			    .owner = 43, .kind = 9, .name = "b", .number = 7 },
+			    cases[c].hashed);
+			break;
+		case FS_BELOW_SEPARATOR:
+			for (unsigned i = 2; i < 4; i++)
+				records[i] = fs_key_build(keys[i], &(fs_key_case_t){
+				    .owner = 44, .kind = 9, .name = names[i],
+				    .number = 7 }, cases[c].hashed);
+			break;
+		case FS_VALID_ROOT:
+		case FS_BAD_INDEX_KIND:
+			break;
+		}
+		root = build_fs_tree(&f, records, 4, cases[c].per_leaf, false);
+		if (cases[c].damage == FS_BELOW_SEPARATOR ||
+		    cases[c].damage == FS_BAD_INDEX_KIND ||
+		    cases[c].damage == FS_VALID_ROOT) {
+			separator = fs_key_build(separator_key, &cases[c].separator,
+			    cases[c].hashed);
+			replace_fs_root(&f, root, &separator, &records[2]);
+		}
+		CHECK(map_open(&f, &map, APFS_MAP_VOLUME) == FSIMG_OK);
+		apfs_cursor_init(&cursor, &f.container,
+		    apfs_fs_tree_profile(cases[c].hashed), APFS_OBJ_VIRTUAL,
+		    root, 10, &map);
+		status = apfs_cursor_first(&cursor, &found, &f.error);
+		while (status == FSIMG_OK && found) {
+			CHECK(visited < 4);
+			expect_fs_record(&cursor, &records[visited++]);
+			status = apfs_cursor_next(&cursor, &found, &f.error);
+		}
+		if (cases[c].error != NULL) {
+			status_is(&f, status, FSIMG_ECORRUPT);
+			expect(strstr(f.error.message, cases[c].error) != NULL,
+			    cases[c].error);
+		} else {
+			status_is(&f, status, FSIMG_OK);
+			expect(visited == 4, "rebuilt valid root walks every record");
+		}
+		expect(!found && !cursor.positioned, "walk leaves no current record");
+		apfs_cursor_free(&cursor);
+		apfs_map_close(&map);
+		fixture_close(&f);
+	}
+}
+
+static void
+test_plain_directory_walk_accepts_identical_stored_keys(void)
+{
+	static const struct {
+		const char *name;
+		unsigned per_leaf;
+		unsigned repeated;
+	} cases[] = {
+		{ "plain identical names adjacent in one leaf", 4, 0 },
+		{ "plain child last identical to next separator", 2, 2 }
+	};
+	static const char *names[] = { "a", "b", "c", "d" };
+	unsigned char keys[4][64], values[] = { 0, 1, 2, 3 };
+	apfs_gen_record_t records[4];
+	apfs_cursor_t cursor;
+	apfs_map_t map;
+	fixture_t f;
+	uint64_t root;
+	fsimg_status_t status;
+	bool found;
+
+	for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+		size_t visited = 0;
+
+		scenario = cases[c].name;
+		fixture_init(&f, 0);
+		build_checkpoints(&f, 1, 10);
+		CHECK(checkpoint_open(&f) == FSIMG_OK);
+		for (unsigned i = 0; i < 4; i++)
+			records[i] = fs_key_build(keys[i], &(fs_key_case_t){
+			    .owner = 42, .kind = 9, .name = names[i] }, false);
+		records[1] = records[cases[c].repeated];
+		/* Distinct values prove that every stored duplicate is yielded. */
+		for (unsigned i = 0; i < 4; i++) {
+			records[i].value = &values[i];
+			records[i].value_size = 1;
+		}
+		root = build_fs_tree(&f, records, 4, cases[c].per_leaf, false);
+		CHECK(map_open(&f, &map, APFS_MAP_VOLUME) == FSIMG_OK);
+		apfs_cursor_init(&cursor, &f.container, apfs_fs_tree_profile(false),
+		    APFS_OBJ_VIRTUAL, root, 10, &map);
+		status = apfs_cursor_first(&cursor, &found, &f.error);
+		while (status == FSIMG_OK && found) {
+			CHECK(visited < 4);
+			expect_fs_record(&cursor, &records[visited++]);
+			status = apfs_cursor_next(&cursor, &found, &f.error);
+		}
+		status_is(&f, status, FSIMG_OK);
+		expect(visited == 4, "walk includes both copies of the repeated name");
+		apfs_cursor_free(&cursor);
+		apfs_map_close(&map);
+		fixture_close(&f);
+	}
+}
+
+/*
+ * Start with eight mapped leaves and three index levels. Replace one node
+ * per level with references to the same child, under alternating a/z keys
+ * of one plain directory class. Fanout two at the root repeats a leaf once;
+ * fanout sixteen at every level would yield 4096 copies from four nodes.
+ */
+static uint64_t
+build_repeated_plain_subtree(fixture_t *f, bool nested,
+    const apfs_gen_record_t *leaf)
+{
+	static const unsigned node_indices[] = { 0, 8, 12, 14 };
+	unsigned char keys[2][64], child_bytes[8];
+	apfs_gen_record_t records[16], separators[2];
+	apfs_gen_node_t node;
+	uint64_t root, child = 2000;
+
+	separators[0] = fs_key_build(keys[0], &(fs_key_case_t){
+	    .owner = 42, .kind = 9, .name = "a" }, false);
+	separators[1] = fs_key_build(keys[1], &(fs_key_case_t){
+	    .owner = 42, .kind = 9, .name = "z" }, false);
+	for (unsigned i = 0; i < 8; i++)
+		records[i] = *leaf;
+	root = build_fs_tree(f, records, 8, 1, false);
+	for (unsigned level = 1; level <= 3; level++) {
+		unsigned count = 1;
+		uint64_t oid = 2000 + node_indices[level];
+		unsigned char *raw = block_at(f, OBJECT_BLOCK + node_indices[level]);
+
+		if (nested)
+			count = 16;
+		else if (level == 3)
+			count = 2;
+		CHECK(apfs_gen_sibling_map_val_build(child_bytes, 8, child));
+		for (unsigned i = 0; i < count; i++) {
+			records[i] = separators[i % 2];
+			records[i].value = child_bytes;
+			records[i].value_size = 8;
+		}
+		node = (apfs_gen_node_t){ .object = { .oid = oid, .xid = 5,
+		    .type = level == 3 ? 2 : 3, .subtype = 14 },
+		    .flags = level == 3 ? GEN_APFS_ROOT : 0, .level = level,
+		    .records = records, .count = count,
+		    .info = { .flags = 0x40, .node_size = BLOCK,
+		    .longest_key = 64, .longest_val = 8,
+		    .key_count = nested ? 4096 : 2, .node_count = 15 } };
+		bzero(raw, BLOCK);
+		CHECK(apfs_gen_node_build(raw, BLOCK, &node));
+		child = oid;
+	}
+	return (root);
+}
+
+static void
+test_plain_repeated_subtree_walk_is_bounded_by_image_blocks(void)
+{
+	unsigned char key[64];
+	apfs_gen_record_t leaf;
+	apfs_cursor_t cursor;
+	apfs_map_t map;
+	fixture_t f;
+	uint64_t root;
+	fsimg_status_t status;
+	bool found;
+
+	for (unsigned nested = 0; nested < 2; nested++) {
+		size_t visited = 0;
+
+		scenario = nested ? "nested repeated plain subtree exceeds image blocks" :
+		    "single repeated plain reference walks twice within image bound";
+		fixture_init(&f, 0);
+		build_checkpoints(&f, 1, 10);
+		CHECK(checkpoint_open(&f) == FSIMG_OK);
+		leaf = fs_key_build(key, &(fs_key_case_t){ .owner = 42,
+		    .kind = 9, .name = "repeated" }, false);
+		root = build_repeated_plain_subtree(&f, nested != 0, &leaf);
+		CHECK(map_open(&f, &map, APFS_MAP_VOLUME) == FSIMG_OK);
+		apfs_cursor_init(&cursor, &f.container, apfs_fs_tree_profile(false),
+		    APFS_OBJ_VIRTUAL, root, 10, &map);
+		status = apfs_cursor_first(&cursor, &found, &f.error);
+		while (status == FSIMG_OK && found) {
+			/* Also cap the test if the cursor's load guard regresses. */
+			CHECK(visited < 4096);
+			expect_fs_record(&cursor, &leaf);
+			visited++;
+			status = apfs_cursor_next(&cursor, &found, &f.error);
+		}
+		if (nested) {
+			status_is(&f, status, FSIMG_ECORRUPT);
+			expect(strstr(f.error.message,
+			    "repeats nodes beyond the image's blocks") != NULL,
+			    "nested repetition reaches the cursor load bound");
+			expect(visited > 2 && visited < 4096,
+			    "walk stops before expanding the repeated subtree fully");
+		} else {
+			status_is(&f, status, FSIMG_OK);
+			expect(visited == 2, "single repeated reference yields both records");
+		}
+		expect(!found && !cursor.positioned, "completed walk has no record");
+		apfs_cursor_free(&cursor);
+		apfs_map_close(&map);
+		fixture_close(&f);
+	}
+}
+
+static void
+test_filesystem_entry_check_accepts_each_filesystem_key_kind(void)
+{
+	static const struct {
+		const char *name;
+		fs_key_case_t key;
+	} cases[] = {
+		{ "inode", { .owner = 42, .kind = 3 } },
+		{ "xattr", { .owner = 42, .kind = 4, .name = "attr" } },
+		{ "sibling link", { .owner = 42, .kind = 5, .number = 7 } },
+		{ "dstream ID", { .owner = 42, .kind = 6 } },
+		{ "crypto state", { .owner = 42, .kind = 7 } },
+		{ "file extent", { .owner = 42, .kind = 8, .number = 4096 } },
+		{ "directory record", { .owner = 42, .kind = 9, .number = 7,
+		    .name = "entry" } },
+		{ "directory statistics", { .owner = 42, .kind = 10 } },
+		{ "sibling map", { .owner = 42, .kind = 12 } },
+		{ "file info", { .owner = 42, .kind = 13, .number = 1 } }
+	};
+	unsigned char key[64];
+	apfs_gen_record_t generated;
+	apfs_record_t record;
+	fsimg_error_t error;
+	const apfs_tree_profile_t *profile;
+
+	for (unsigned hashed = 0; hashed < 2; hashed++) {
+		profile = apfs_fs_tree_profile(hashed != 0);
+		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			scenario = cases[i].name;
+			generated = fs_key_build(key, &cases[i].key, hashed != 0);
+			record = (apfs_record_t){ .key = key,
+			    .key_len = generated.key_size };
+			for (unsigned leaf = 0; leaf < 2; leaf++)
+				expect(profile->entry_check(&record, leaf != 0, &error) ==
+				    FSIMG_OK, "valid key accepted in index and leaf");
+		}
+	}
+}
+
+static void
+test_hashed_seeks_find_exact_separators_and_gaps_between_leaves(void)
+{
+	unsigned char keys[8][64], gap_key[64];
+	apfs_gen_record_t records[8], gap;
+	apfs_cursor_t cursor;
+	apfs_map_t map;
+	fixture_t f;
+	uint64_t root;
+
+	scenario = "hashed GE and LE at exact separators and between leaves";
+	fixture_init(&f, 0);
+	build_checkpoints(&f, 1, 10);
+	CHECK(checkpoint_open(&f) == FSIMG_OK);
+	for (unsigned i = 0; i < 8; i++)
+		records[i] = fs_key_build(keys[i], &(fs_key_case_t){
+		    .owner = 42, .kind = 9, .number = 2 * i + 2, .name = "a" }, true);
+	root = build_fs_tree(&f, records, 8, 2, false);
+	CHECK(map_open(&f, &map, APFS_MAP_VOLUME) == FSIMG_OK);
+	apfs_cursor_init(&cursor, &f.container, apfs_fs_tree_profile(true),
+	    APFS_OBJ_VIRTUAL, root, 10, &map);
+	for (unsigned i = 0; i < 8; i++) {
+		expect_fs_seek(&f, &cursor, &records[i], APFS_SEEK_GE, &records[i]);
+		expect_fs_seek(&f, &cursor, &records[i], APFS_SEEK_LE, &records[i]);
+		if (i == 0 || i % 2 != 0)
+			continue;
+		gap = fs_key_build(gap_key, &(fs_key_case_t){ .owner = 42,
+		    .kind = 9, .number = 2 * i + 1, .name = "a" }, true);
+		expect_fs_seek(&f, &cursor, &gap, APFS_SEEK_GE, &records[i]);
+		expect_fs_seek(&f, &cursor, &gap, APFS_SEEK_LE, &records[i - 1]);
+	}
+	apfs_cursor_free(&cursor);
+	apfs_map_close(&map);
+	fixture_close(&f);
+}
+
+static void
+test_filesystem_entry_check_refuses_foreign_kinds_and_malformed_keys(void)
+{
+	static const struct {
+		const char *name;
+		uint8_t kind;
+		const char *error;
+	} cases[] = {
+		{ "invalid kind zero", 0, "kind outside the tree" },
+		{ "snapshot metadata kind", 1, "kind outside the tree" },
+		{ "physical extent kind", 2, "kind outside the tree" },
+		{ "snapshot name kind", 11, "kind outside the tree" },
+		{ "invalid kind fourteen", 14, "kind outside the tree" },
+		{ "invalid kind fifteen", 15, "kind outside the tree" },
+		{ "drec missing name and length", 9, "malformed key" },
+		{ "xattr missing name and length", 4, "malformed key" },
+		{ "extent missing logical offset", 8, "malformed key" }
+	};
+	unsigned char key[8];
+	apfs_record_t record;
+	fsimg_error_t error;
+	const apfs_tree_profile_t *profile;
+
+	for (unsigned hashed = 0; hashed < 2; hashed++) {
+		profile = apfs_fs_tree_profile(hashed != 0);
+		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			scenario = cases[i].name;
+			CHECK(apfs_gen_jkey_build(key, sizeof(key), 42, cases[i].kind));
+			record = (apfs_record_t){ .key = key, .key_len = sizeof(key) };
+			for (unsigned leaf = 0; leaf < 2; leaf++) {
+				expect(profile->entry_check(&record, leaf != 0, &error) ==
+				    FSIMG_ECORRUPT, "bad key refused in index and leaf");
+				expect(strstr(error.message, cases[i].error) != NULL,
+				    cases[i].error);
+			}
+		}
+	}
+}
+
+typedef struct native_fs_sample native_fs_sample_t;
+
+/* Two hashed directory records of one directory with the same 22-bit hash. */
+static bool
+native_hash_tie(const unsigned char *a, size_t a_len, const unsigned char *b,
+    size_t b_len)
+{
+	return (a_len >= 12 && b_len >= 12 &&
+	    fs_test_integer(a, 8) == fs_test_integer(b, 8) &&
+	    (fs_test_integer(a, 8) >> 60) == 9 &&
+	    fs_test_integer(a + 8, 4) >> 10 == fs_test_integer(b + 8, 4) >> 10);
+}
+
+struct native_fs_sample {
+	native_fs_sample_t *next;
+	size_t length;
+	unsigned char key[];
+};
+
+/* Apple File System Reference: apfs_superblock_t field offsets and
+ * APFS_INCOMPAT_CASE_INSENSITIVE / APFS_INCOMPAT_NORMALIZATION_INSENSITIVE.
+ */
+enum {
+	NATIVE_VOLUME_INCOMPAT_OFFSET = 56,
+	NATIVE_VOLUME_OMAP_OID_OFFSET = 128,
+	NATIVE_VOLUME_ROOT_OID_OFFSET = 136,
+	NATIVE_INCOMPAT_CASE_INSENSITIVE = 0x1,
+	NATIVE_INCOMPAT_NORMALIZATION_INSENSITIVE = 0x8,
+	/* The e4-names capture corpus contains at least 15000 directory entries. */
+	NATIVE_NAMES_MIN_DRECS = 15000
+};
+
+static native_fs_sample_t *
+walk_native_fs_tree(fixture_t *f, apfs_cursor_t *cursor, bool hashed,
+    bool many_names)
+{
+	unsigned char *previous;
+	native_fs_sample_t *samples = NULL, **tail = &samples, *sample;
+	apfs_record_t record;
+	uint64_t count = 0, drecs = 0, hash_ties = 0;
+	size_t previous_len = 0;
+	fsimg_status_t status;
+	bool found;
+
+	previous = malloc(UINT16_MAX);
+	CHECK(previous != NULL);
+	/* No native plain-key volume exists: strict increase is a hashed oracle. */
+	status = apfs_cursor_first(cursor, &found, &f->error);
+	while (status == FSIMG_OK && found) {
+		apfs_cursor_record(cursor, &record);
+		CHECK(record.key != NULL && record.key_len <= UINT16_MAX);
+		if (hashed && count != 0) {
+			expect(fs_test_compare(previous, previous_len, record.key,
+			    record.key_len, hashed) < 0,
+			    "native adjacent keys strictly increase under independent order");
+			expect(cursor->profile->compare(previous, previous_len,
+			    record.key, record.key_len) < 0,
+			    "native adjacent keys strictly increase under profile order");
+			if (native_hash_tie(previous, previous_len,
+			    record.key, record.key_len))
+				hash_ties++;
+		}
+		bcopy(record.key, previous, record.key_len);
+		previous_len = record.key_len;
+		if (count % 97 == 0) {
+			sample = malloc(sizeof(*sample) + record.key_len);
+			CHECK(sample != NULL);
+			sample->next = NULL;
+			sample->length = record.key_len;
+			bcopy(record.key, sample->key, record.key_len);
+			*tail = sample;
+			tail = &sample->next;
+		}
+		if ((fs_test_integer(record.key, 8) >> 60) == 9)
+			drecs++;
+		count++;
+		status = apfs_cursor_next(cursor, &found, &f->error);
+	}
+	if (status_is(f, status, FSIMG_OK)) {
+		expect(count == cursor->info.key_count,
+		    "native leaf record count equals root footer key count");
+		if (many_names) {
+			expect(drecs >= NATIVE_NAMES_MIN_DRECS,
+			    "names capture holds at least 15000 drecs");
+			if (hashed)
+				expect(hash_ties != 0,
+				    "names capture orders equal-hash drecs by name");
+		}
+	}
+	printf("native filesystem tree: %llu records, %llu directory records\n",
+	    (unsigned long long)count, (unsigned long long)drecs);
+	free(previous);
+	return (samples);
+}
+
+static void
+seek_native_fs_samples(fixture_t *f, apfs_cursor_t *cursor,
+    native_fs_sample_t *samples)
+{
+	native_fs_sample_t *sample;
+	apfs_record_t record;
+	fsimg_status_t status;
+	bool found;
+
+	for (sample = samples; sample != NULL; sample = sample->next) {
+		for (unsigned direction = 0; direction < 2; direction++) {
+			status = apfs_cursor_seek(cursor, sample->key,
+			    sample->length,
+			    direction == 0 ? APFS_SEEK_GE : APFS_SEEK_LE,
+			    &found, &f->error);
+			if (!status_is(f, status, FSIMG_OK))
+				continue;
+			expect(found, "native sampled seek finds a record");
+			if (!found)
+				continue;
+			apfs_cursor_record(cursor, &record);
+			expect(record.key_len == sample->length &&
+			    bcmp(record.key, sample->key, sample->length) == 0,
+			    "native sampled GE/LE lands on exact key");
+		}
+	}
+}
+
+static void
+check_native_fs_tree(fixture_t *f, const unsigned char *volume,
+    bool many_names)
+{
+	unsigned char *window;
+	native_fs_sample_t *samples, *sample;
+	apfs_cursor_t cursor;
+	apfs_map_t map;
+	uint64_t incompat, map_oid, root_oid;
+	fsimg_status_t status;
+	bool hashed;
+
+	incompat = fs_test_integer(volume + NATIVE_VOLUME_INCOMPAT_OFFSET, 8);
+	map_oid = fs_test_integer(volume + NATIVE_VOLUME_OMAP_OID_OFFSET, 8);
+	root_oid = fs_test_integer(volume + NATIVE_VOLUME_ROOT_OID_OFFSET, 8);
+	hashed = (incompat & (NATIVE_INCOMPAT_CASE_INSENSITIVE |
+	    NATIVE_INCOMPAT_NORMALIZATION_INSENSITIVE)) != 0;
+	window = malloc(f->container.block_size);
+	CHECK(window != NULL);
+	status = apfs_map_open(&f->container, APFS_MAP_VOLUME, map_oid,
+	    f->container.xid, window, &map, &f->error);
+	if (!status_is(f, status, FSIMG_OK)) {
+		free(window);
+		return;
+	}
+	apfs_cursor_init(&cursor, &f->container, apfs_fs_tree_profile(hashed),
+	    APFS_OBJ_VIRTUAL, root_oid, f->container.xid, &map);
+	samples = walk_native_fs_tree(f, &cursor, hashed, many_names);
+	/* Exact landing is established only for hashed native volumes; no plain
+	 * native volume exists, and its directory class permits equal keys.
+	 */
+	if (hashed)
+		seek_native_fs_samples(f, &cursor, samples);
+	while (samples != NULL) {
+		sample = samples;
+		samples = sample->next;
+		free(sample);
+	}
+	apfs_cursor_free(&cursor);
+	apfs_map_close(&map);
+	free(window);
+}
+
 /* Native bytes enter exclusively through the public read-only I/O adapter. */
 static void
-check_native_image(const char *path)
+check_native_image(const char *path, bool filesystem, bool many_names)
 {
 	unsigned char initial[BLOCK], *window;
 	apfs_obj_t header;
@@ -2708,9 +3716,10 @@ check_native_image(const char *path)
 				    .oid = f.container.nx.volume_oids[i],
 				    .xid = f.container.xid, .kind = 13,
 				    .storage = APFS_OBJ_VIRTUAL, .map = &map };
-				status_is(&f, apfs_object_read(&f.container,
-				    &ref,
-				    window, NULL, &f.error), FSIMG_OK);
+				if (status_is(&f, apfs_object_read(&f.container,
+				    &ref, window, NULL, &f.error), FSIMG_OK) &&
+				    filesystem)
+					check_native_fs_tree(&f, window, many_names);
 			}
 			apfs_map_close(&map);
 		}
@@ -2768,7 +3777,7 @@ test_native_captures(void)
 				    "%s/%s/%s", directory,
 				    captures[i].directory,
 				    captures[i].alternate) < (int)sizeof(path));
-			check_native_image(path);
+			check_native_image(path, false, false);
 		}
 	}
 	directory = getenv("FSIMG_APFS_E8");
@@ -2781,8 +3790,42 @@ test_native_captures(void)
 		CHECK(glob(path, 0, NULL, &paths) == 0);
 		CHECK(paths.gl_pathc != 0);
 		for (size_t i = 0; i < paths.gl_pathc; i++)
-			check_native_image(paths.gl_pathv[i]);
+			check_native_image(paths.gl_pathv[i], false, false);
 		globfree(&paths);
+	}
+}
+
+static void
+test_native_filesystem_captures_walk_and_seek_in_independent_order(void)
+{
+	static const char *captures[] = {
+		"apfs-newfs-268435456-e3-ci",
+		"apfs-newfs-268435456-e3-cs",
+		"apfs-newfs-268435456-e4-names-ci",
+		"apfs-newfs-268435456-e4-names-cs",
+		"apfs-newfs-33554432-e4-prefix-ci",
+		"apfs-newfs-33554432-e4-prefix-cs",
+		"apfs-newfs-67108864-e5-xattr",
+		"apfs-newfs-67108864-e5-xname",
+		"apfs-newfs-67108864-e5-xlong",
+		"apfs-newfs-67108864-e5-xbound",
+		"apfs-newfs-67108864-e5-links"
+	};
+	const char *directory = getenv("FSIMG_APFS_NATIVE");
+	char path[4096];
+
+	if (directory == NULL) {
+		puts("SKIP native filesystem captures (FSIMG_APFS_NATIVE is unset)");
+		return;
+	}
+	for (size_t i = 0; i < sizeof(captures) / sizeof(captures[0]); i++) {
+		CHECK(snprintf(path, sizeof(path), "%s/%s/image.img", directory,
+		    captures[i]) < (int)sizeof(path));
+		if (access(path, F_OK) != 0 && errno == ENOENT) {
+			printf("SKIP missing native filesystem capture: %s\n", path);
+			continue;
+		}
+		check_native_image(path, true, strstr(captures[i], "e4-names") != NULL);
 	}
 }
 
@@ -2828,7 +3871,17 @@ main(void)
 	test_reap_list_codec_and_generator_reject_out_of_bounds_arrays();
 	test_assemblers_leave_buffers_untouched_on_bad_parameters();
 	test_work_and_memory_limits_release_partial_open();
+	test_filesystem_comparator_orders_owners_kinds_and_suffixes();
+	test_hashed_comparator_ignores_name_length_bits();
+	test_plain_directory_walk_accepts_identical_stored_keys();
+	test_plain_repeated_subtree_walk_is_bounded_by_image_blocks();
+	test_filesystem_entry_check_accepts_each_filesystem_key_kind();
+	test_plain_directory_class_spans_leaves_and_seeks_to_both_edges();
+	test_filesystem_trees_refuse_duplicates_and_decreasing_keys();
+	test_hashed_seeks_find_exact_separators_and_gaps_between_leaves();
+	test_filesystem_entry_check_refuses_foreign_kinds_and_malformed_keys();
 	test_native_captures();
+	test_native_filesystem_captures_walk_and_seek_in_independent_order();
 	printf("APFS: %u status checks, %u failures\n", scenarios, failures);
 	return (failures == 0 ? 0 : 1);
 }

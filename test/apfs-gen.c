@@ -781,6 +781,44 @@ apfs_gen_container_build(unsigned char *raw, size_t length,
 }
 
 
+/* Leaves precede parents; each index groups nodes of the preceding level. */
+static bool
+tree_plan_build(tree_plan_t *plan, size_t capacity, size_t record_count,
+    unsigned per_leaf, unsigned per_index, size_t *node_count)
+{
+	size_t count = 0, start, end, first, n;
+
+	for (size_t i = 0; i < record_count;) {
+		n = record_count - i;
+		if (n > per_leaf)
+			n = per_leaf;
+		if (count == capacity)
+			return (false);
+		plan[count++] = (tree_plan_t){ .first = i, .count = n,
+		    .key = i };
+		i += n;
+	}
+	start = 0;
+	end = count;
+	while (end - start > 1) {
+		first = count;
+		for (size_t i = start; i < end;) {
+			n = end - i;
+			if (n > per_index)
+				n = per_index;
+			if (count == capacity || plan[i].level == 15)
+				return (false);
+			plan[count++] = (tree_plan_t){ .first = i, .count = n,
+			    .key = plan[i].key, .level = plan[i].level + 1 };
+			i += n;
+		}
+		start = first;
+		end = count;
+	}
+	*node_count = count;
+	return (true);
+}
+
 bool
 apfs_gen_tree_build(unsigned char *raw, size_t length,
     const apfs_gen_tree_t *p, uint64_t *root, uint64_t *blocks)
@@ -789,7 +827,7 @@ apfs_gen_tree_build(unsigned char *raw, size_t length,
 	apfs_gen_record_t *records = NULL;
 	unsigned char *keys = NULL, *values = NULL, *image = NULL, *out;
 	apfs_gen_node_t node;
-	size_t b = p->block_size, capacity, count = 0, start, end, n, first;
+	size_t b = p->block_size, capacity, count = 0, n, first;
 	size_t width, key_start, value_end;
 	bool success = false;
 
@@ -819,33 +857,9 @@ apfs_gen_tree_build(unsigned char *raw, size_t length,
 	if (plan == NULL || records == NULL || keys == NULL ||
 	    values == NULL || image == NULL)
 		goto done;
-	for (size_t i = 0; i < p->count;) {
-		n = p->count - i;
-		if (n > p->records_per_leaf)
-			n = p->records_per_leaf;
-		if (count == capacity)
-			goto done;
-		plan[count++] = (tree_plan_t){ .first = i, .count = n,
-		    .key = i };
-		i += n;
-	}
-	start = 0;
-	end = count;
-	while (end - start > 1) {
-		first = count;
-		for (size_t i = start; i < end;) {
-			n = end - i;
-			if (n > p->children_per_index)
-				n = p->children_per_index;
-			if (count == capacity || plan[i].level == 15)
-				goto done;
-			plan[count++] = (tree_plan_t){ .first = i, .count = n,
-			    .key = plan[i].key, .level = plan[i].level + 1 };
-			i += n;
-		}
-		start = first;
-		end = count;
-	}
+	if (!tree_plan_build(plan, capacity, p->count, p->records_per_leaf,
+	    p->children_per_index, &count))
+		goto done;
 	for (size_t i = 0; i < count; i++) {
 		for (size_t j = 0; j < plan[i].count; j++) {
 			first = plan[i].first + j;
@@ -902,6 +916,91 @@ apfs_gen_tree_build(unsigned char *raw, size_t length,
 	free(image);
 	free(values);
 	free(keys);
+	free(records);
+	free(plan);
+	return (success);
+}
+
+bool
+apfs_gen_fs_tree_build(unsigned char *raw, size_t length,
+    const apfs_gen_fs_tree_t *p, apfs_gen_omap_record_t *maps,
+    size_t map_capacity, uint64_t *root, uint64_t *blocks)
+{
+	tree_plan_t *plan = NULL;
+	apfs_gen_record_t *records = NULL;
+	unsigned char *values = NULL, *image = NULL;
+	apfs_gen_node_t node;
+	size_t b = p->block_size, count = 0, capacity, first;
+	size_t width;
+	uint32_t longest_key = 0, longest_val = 8;
+	bool success = false;
+
+	if (b < 4096 || b > 65536 || (b & (b - 1)) != 0 ||
+	    p->base == 0 || p->base >= length / b || p->count == 0 ||
+	    p->records == NULL || p->records_per_leaf == 0 ||
+	    p->children_per_index < 2 || p->first_oid == 0 || maps == NULL)
+		return (false);
+	capacity = length / b - p->base;
+	if (capacity > map_capacity)
+		capacity = map_capacity;
+	if (capacity == 0 || (p->count - 1) / p->records_per_leaf >= capacity ||
+	    capacity - 1 > UINT64_MAX - p->first_oid)
+		return (false);
+	width = p->records_per_leaf > p->children_per_index ?
+	    p->records_per_leaf : p->children_per_index;
+	plan = calloc(capacity, sizeof(*plan));
+	records = calloc(width, sizeof(*records));
+	values = calloc(width, 8);
+	image = calloc(capacity, b);
+	if (plan == NULL || records == NULL || values == NULL || image == NULL)
+		goto done;
+	for (size_t i = 0; i < p->count; i++) {
+		if (p->records[i].key_size > longest_key)
+			longest_key = p->records[i].key_size;
+		if (p->records[i].value_size > longest_val)
+			longest_val = p->records[i].value_size;
+	}
+	if (!tree_plan_build(plan, capacity, p->count, p->records_per_leaf,
+	    p->children_per_index, &count))
+		goto done;
+	for (size_t i = 0; i < count; i++) {
+		for (size_t j = 0; j < plan[i].count; j++) {
+			first = plan[i].first + j;
+			if (plan[i].level == 0) {
+				records[j] = p->records[first];
+				continue;
+			}
+			put_le(values + 8 * j, p->first_oid + first, 8);
+			records[j] = (apfs_gen_record_t){
+			    .key = p->records[plan[first].key].key,
+			    .key_size = p->records[plan[first].key].key_size,
+			    .value = values + 8 * j, .value_size = 8 };
+		}
+		/* Packed spans need nonaligned entries; virtual storage has no flag. */
+		node = (apfs_gen_node_t){
+		    .object = { .oid = p->first_oid + i, .xid = p->xid,
+		    .type = i + 1 == count ? 2 : 3, .subtype = 14 },
+		    .info = { .flags = 0x40, .node_size = (uint32_t)b,
+		    .longest_key = longest_key, .longest_val = longest_val,
+		    .key_count = p->count, .node_count = count },
+		    .records = records, .count = (uint32_t)plan[i].count,
+		    .level = plan[i].level,
+		    .flags = (plan[i].level == 0 ? GEN_APFS_LEAF : 0) |
+		    (i + 1 == count ? GEN_APFS_ROOT : 0) };
+		if (!apfs_gen_node_build(image + i * b, b, &node))
+			goto done;
+	}
+	bcopy(image, raw + p->base * b, count * b);
+	for (size_t i = 0; i < count; i++)
+		maps[i] = (apfs_gen_omap_record_t){
+		    .key = { .oid = p->first_oid + i, .xid = p->xid },
+		    .value = { .size = (uint32_t)b, .address = p->base + i } };
+	*root = p->first_oid + count - 1;
+	*blocks = count;
+	success = true;
+ done:
+	free(image);
+	free(values);
 	free(records);
 	free(plan);
 	return (success);

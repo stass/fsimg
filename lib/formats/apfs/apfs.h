@@ -938,7 +938,17 @@ fsimg_status_t	apfs_sm_pager_pool_bitmap(apfs_sm_pager_t *, uint32_t,
  * value sizes, both zero for a tree of variable-size entries. An index
  * node's value is always a child OID. A comparator orders two keys whose
  * lengths lie within the profile's bounds and must be total over any bytes
- * of such lengths.
+ * of such lengths. It is a weak order: keys it calls equal form classes,
+ * and a class is either decided, holding at most one key of the tree, or
+ * undecided, when the format leaves the order of its keys open.
+ *
+ * undecided, optional, tells whether a key's class is undecided; NULL means
+ * every class is decided. Keys of one undecided class may lie in either
+ * order, within a node and across nodes, so a child may end in keys equal
+ * to the separator after it; no key of any class lies out of order. The
+ * cursor does not refuse two equal keys of such a class, which is its
+ * consumer's to judge. A lookup in such a class seeks its first key and
+ * scans the class, since seeking cannot tell its keys apart.
  *
  * entry_check, optional, serves trees whose records differ by kind: it
  * judges each entry of a node as it is loaded, after the generic checks and
@@ -954,9 +964,12 @@ fsimg_status_t	apfs_sm_pager_pool_bitmap(apfs_sm_pager_t *, uint32_t,
  * FSIMG_ECORRUPT and a root above level 15 FSIMG_EUNSUPPORTED.
  *
  * apfs_cursor_seek() positions on the last record at or below key
- * (APFS_SEEK_LE) or the first at or above it (APFS_SEEK_GE), descending from
- * the deepest node on the path whose bounds contain key, which must have a
- * length within the profile's key bounds; apfs_cursor_first()
+ * (APFS_SEEK_LE) or the first at or above it (APFS_SEEK_GE), so among
+ * records the comparator calls equal to key on the last or the first. It
+ * descends from the deepest node on the path whose bounds strictly contain
+ * key, which must have a length within the profile's key bounds; a walk from
+ * a seek or first that loads more nodes than the slice has blocks, plus the
+ * height, repeats nodes and is FSIMG_ECORRUPT. apfs_cursor_first()
  * on the first record; apfs_cursor_next() on the following one. Each
  * reports through found whether the cursor is on a record; a cursor that is
  * not stays so until the next seek or first. apfs_cursor_record() borrows the
@@ -965,12 +978,14 @@ fsimg_status_t	apfs_sm_pager_pool_bitmap(apfs_sm_pager_t *, uint32_t,
 typedef int	(*apfs_compare_fn_t)(const unsigned char *, size_t,
 		    const unsigned char *, size_t);
 typedef struct apfs_record apfs_record_t;
+typedef bool	(*apfs_undecided_fn_t)(const unsigned char *, size_t);
 typedef fsimg_status_t (*apfs_entry_check_fn_t)(const apfs_record_t *, bool,
 		    fsimg_error_t *);
 
 typedef struct apfs_tree_profile {
 	const char	*role;
 	apfs_compare_fn_t compare;
+	apfs_undecided_fn_t undecided;		/* optional */
 	apfs_entry_check_fn_t entry_check;	/* optional; leaf is its bool */
 	uint32_t	 subtype;
 	uint16_t	 key_min;
@@ -997,7 +1012,8 @@ struct apfs_record {
 /*
  * One level of a cursor's path. low and high are the separator bounds the
  * node was entered under, spans in its ancestors' windows: every key of the
- * node is at least low and below high, and a NULL bound is open.
+ * node is at least low and below high, or equal to high in an undecided
+ * class, and a NULL bound is open.
  */
 typedef struct apfs_path_level {
 	unsigned char	*window;
@@ -1019,6 +1035,7 @@ typedef struct apfs_cursor {
 	uint64_t	 root;
 	uint64_t	 xid;
 	uint32_t	 storage;
+	uint64_t	 loads;		/* nodes loaded since seek or first */
 	unsigned	 depth;		/* levels of path loaded */
 	bool		 positioned;	/* on a record */
 } apfs_cursor_t;
@@ -1032,6 +1049,20 @@ fsimg_status_t	apfs_cursor_seek(apfs_cursor_t *, const unsigned char *,
 fsimg_status_t	apfs_cursor_first(apfs_cursor_t *, bool *, fsimg_error_t *);
 fsimg_status_t	apfs_cursor_next(apfs_cursor_t *, bool *, fsimg_error_t *);
 void		apfs_cursor_record(const apfs_cursor_t *, apfs_record_t *);
+
+/*
+ * The filesystem tree's profile for a volume whose directory records use
+ * hashed keys (true) or plain ones. Keys order by owner, kind and the
+ * kind's suffix, and a key shorter than its kind's suffix, such as a header
+ * alone, orders at or before every key of its owner and kind, so a GE seek
+ * with it reaches their first record. In the plain
+ * profile the directory records of one owner form one undecided class:
+ * their names take no part in the order, so a name lookup scans the
+ * directory. The entry check judges every key, in index and leaf nodes,
+ * with its kind's decoder and refuses a kind the tree does not hold; values
+ * are judged by the modules that decode them.
+ */
+const apfs_tree_profile_t *apfs_fs_tree_profile(bool);
 
 /*
  * Object maps (omap.c). apfs_map_open(container, kind, oid, xid, window, map,

@@ -401,10 +401,14 @@ design bounds `h` by 16, a taller tree being `FSIMG_EUNSUPPORTED`.
 `btree.c` offers three operations:
 
 * `seek(cursor, key, mode)`: position on the last record at or below the
-  key, or the first at or above it. The search starts from the deepest
-  level whose separator bounds contain the key, so consecutive nearby seeks
-  read only the nodes that change; otherwise it descends from the root,
-  validating each node as it is loaded.
+  key, or the first at or above it, so among records the comparator calls
+  equal to the key on the last or the first. The search starts from the
+  deepest level whose separator bounds strictly contain the key, so
+  consecutive nearby seeks read only the nodes that change; otherwise it
+  descends from the root, validating each node as it is loaded. Descending
+  for the first record at or above the key takes the child before the first
+  separator not below it, because where a tie-break is undecided that child
+  can end in records equal to the key.
 * `next(cursor)`: advance to the following record, climbing and descending
   as needed; the bounds of every node entered are checked against its
   parent's separators.
@@ -419,7 +423,32 @@ visits each node once: every node's keys must lie within the separator
 range its parent gives it, and the ranges of a parent's children are
 disjoint and increasing, so a node referenced from two places, or a
 subtree repeated under two separators, fails the range check before its
-records are used, and a scan is bounded by the tree's distinct nodes.
+records are used, and a scan is bounded by the tree's distinct nodes. The
+exception is an undecided class, below.
+
+A comparator is a weak order whose classes of equal keys are decided,
+holding at most one key, or undecided, where the format design's
+[comparators](design-apfs.md#comparators) leave the tie-break open. The
+profile names the undecided classes; their keys may lie in either order,
+within a node and across nodes, and no key lies out of order; equal keys
+of one such class are their consumer's to refuse. Two children's ranges can
+then share keys of one undecided class, so a subtree holding only such keys
+can lie under two separators, and nested, the repetition multiplies. The
+cursor counts the nodes it loads from each seek or first and refuses, as
+`FSIMG_ECORRUPT`, a walk loading more than the slice has blocks plus the
+height, which no valid tree reaches; a scan is thus bounded by the image's
+size, and the records repeated belong to the one class.
+
+The filesystem tree has a profile per directory-record key variant. In the
+hashed profile every class is decided. In the plain profile a plain
+directory record orders by its owner and kind alone, since no weak order
+on the names can agree with every order the format leaves open; the
+records of one directory form one undecided class, a name lookup scans the
+directory, and a record repeated as above is refused by the walker's key
+sort as an equivalent name. The profile's entry check judges every key, in
+index and leaf nodes, with its kind's decoder, so the comparator orders only
+well-formed keys; values are judged by the modules that decode them, so a
+damaged value costs its own record and not the node that holds it.
 
 The reader keeps these cursors: the container object map (open only), the
 volume object map, a filesystem lookup cursor for inode and attribute

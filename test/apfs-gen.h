@@ -392,6 +392,29 @@ typedef struct apfs_gen_tree {
 	bool	nonaligned;
 } apfs_gen_tree_t;
 
+typedef struct apfs_gen_fs_tree {
+	const apfs_gen_record_t *records;
+	size_t	count;
+	uint64_t	first_oid;
+	uint64_t	base;
+	uint64_t	xid;
+	uint32_t	block_size;
+	uint16_t	records_per_leaf;
+	uint16_t	children_per_index;
+} apfs_gen_fs_tree_t;
+
+/*
+ * Virtual, variable-size filesystem tree, leaves first and root last.
+ * On success maps[0..*blocks) describes every node in OID order. The caller
+ * owns maps and supplies its capacity. On failure outputs remain untouched.
+ * Input spans are borrowed. Ordering is the caller's responsibility, allowing
+ * malformed fixtures. Separators copy child first keys; node_build can replace
+ * any generated node to override separators or repeat child references.
+ */
+bool	apfs_gen_fs_tree_build(unsigned char *, size_t,
+    const apfs_gen_fs_tree_t *, apfs_gen_omap_record_t *, size_t,
+    uint64_t *, uint64_t *);
+
 /* The tree occupies consecutive blocks, leaves first and root last. */
 bool	apfs_gen_tree_build(unsigned char *, size_t, const apfs_gen_tree_t *,
     uint64_t *, uint64_t *);

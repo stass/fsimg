@@ -948,13 +948,21 @@ Every node a reader visits passes these checks before any entry is used:
   times the entry size; every key range inside the key area and before the
   free space, every value range after the free space and inside the value
   area, offsets aligned to 8 bytes unless the tree says not aligned;
-* every key and value length within its record codec's minimum and maximum;
+* every key length within its record codec's minimum and maximum, and every
+  value length within the tree's; in the filesystem tree each key is also
+  decoded by its kind's codec, and a value is judged by the record decoder
+  that uses it, so a damaged value costs its record and not its node;
 * keys strictly increasing under the tree's comparator; the first key of a
   child not below the separator naming it, and every key of a child below the
-  next separator in the parent.
+  next separator in the parent. Keys whose tie-break is undecided
+  ([comparators](#comparators)) may instead be equal under the comparator,
+  in either order and across nodes, a child's last key then equal to the
+  next separator; equal keys of such a class are their consumer's to refuse.
 
 A node's address is never revisited on one root-to-leaf path, and the height
-bound with the per-tree key-count and node-count work charge bounds a scan.
+bound and the work charge of each load bound a seek. A walk from one seek
+loads at most as many nodes as the slice has blocks, plus the height, since
+a valid tree's walk loads each node once; more is `FSIMG_ECORRUPT`.
 The two failures differ in kind. A repeated address is `FSIMG_ECORRUPT`: no
 valid tree has one. A height above 16 levels is `FSIMG_EUNSUPPORTED`: such a
 tree can be valid, and the bound is fsimg's. They cannot be confused,
