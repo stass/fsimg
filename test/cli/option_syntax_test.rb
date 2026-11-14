@@ -179,7 +179,7 @@ class CliTest < Minitest::Test
     if zstd_supported?
       invoke(arguments: ["W", "-f", "suffix.img.zst"])
     else
-      assert_includes(result.stderr, 'writing this compression is not supported "zstd"'.b)
+      assert_includes(result.stderr, "fsimg: zstd: writing this compression is not supported\n".b)
       refute_path_exists(@root / "suffix.img.zst")
     end
 

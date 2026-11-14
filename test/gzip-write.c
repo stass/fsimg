@@ -326,8 +326,12 @@ test_compression_names(void)
 		dirty_stack();
 		CHECK(fsimg_writer_new(f.ctx, "fat12/gpt", &options, &writer,
 		    &error) == cases[i].status && writer == NULL);
+		/* A name the registry lacks is the path; a registered layer that
+		 * cannot write names itself as the layer.
+		 */
 		if (cases[i].name != NULL)
-			CHECK(strcmp(error.path, cases[i].name) == 0);
+			CHECK(strcmp(cases[i].status == FSIMG_EUNSUPPORTED ?
+			    error.layer : error.path, cases[i].name) == 0);
 		bzero(&image, sizeof(image));
 		dirty_stack();
 		CHECK(wrap(&f, &volume, "fat12/gpt", &options, &image, NULL) ==

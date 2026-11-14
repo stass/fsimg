@@ -121,7 +121,8 @@ test_compression_refusals_name_the_layer(void)
 				CHECK(strcmp(options.request.compression, cases[i].name) == 0);
 			} else {
 				CHECK(status == FSIMG_EUNSUPPORTED && !options.syntax_error);
-				CHECK(strcmp(error.path, cases[i].name) == 0);
+				CHECK(strcmp(error.layer, cases[i].name) == 0 &&
+				    error.path[0] == '\0');
 				CHECK(strcmp(error.message, mode == 2 ?
 				    "reading this compression is not supported" :
 				    "writing this compression is not supported") == 0);
