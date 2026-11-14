@@ -76,6 +76,27 @@
   are not yet compared with the volume's snapshot tree, which the snapshot stage reads. Until directory
   reading lands, `x --salvage` on an APFS volume reports its root as a lost
   directory, since the reader's refusal of `prepare` is judged as damage.
+  The specification harness's container model (`test/spec/lib/fsimg_spec/apfs/`)
+  is judged on native captures only: `apfs.sm.address_blocks_unmeasured` has
+  no witness until a builder renders a container of another block size, and
+  `fsck_apfs -n` refuses the model's two-level container object map, the
+  native root leaf resealed as an index node over a leaf in a free block,
+  which kept the leaf's 448-byte table of contents ("invalid btn_table_space
+  (0, 448), given btn_flags (0x5)"); the builder must size an index node's
+  table as `write-btree.c` does before a multi-level tree serves a case. The format design does not say whether open or full verification
+  checks the space manager's count relations, the keylocker ranges and the
+  container map's snapshot fields; the model places them as `rules.rb` states.
+  Review findings left for the next part: open-scope object-map rules judge
+  every record and node rather than the lookup paths open visits; encrypted
+  and nonpersistent flags outside checkpoint mappings classify as corrupt
+  rather than unsupported; the selected checkpoint's feature masks are not
+  judged, only block 0's; chunk-structure expansion is capped by names, not
+  records; a mapped object past the read bound classifies as corrupt rather
+  than unclassified; the object-map, address-block and bitmap addresses are
+  not judged against `N`, nor is the data run's highest block read; the
+  height and object-flag witnesses also fire corrupt rules; and the oracle
+  adapter, for native and written images only, does not use the oracle
+  confinement.
 
 * [Medium] **EROFS reader, verifier and writer** (`lib/formats/erofs/`,
   `lib/core/`, `lib/codec/`, `lib/layers/`, `lib/write/`, `cmd/fsimg/`,

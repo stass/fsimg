@@ -576,7 +576,7 @@ structures are read only by verification. Its layout:
 | 40 | 4 | Chunks per chunk-information block |
 | 44 | 4 | Chunk-information blocks per address block |
 | 48 | 48 | Main device: block count, chunk count, chunk-information block count, address block count, free count, offset of its address array in this object |
-| 96 | 48 | Tier-2 device, all zero outside Fusion |
+| 96 | 48 | Tier-2 device: outside Fusion every count is zero and only its address offset is set, naming its empty array |
 | 144 | 4 | Flags |
 | 148 | 36 | Internal-pool transaction multiplier, block count, bitmap size and block count, bitmap base, pool base |
 | 184 | 16 | Reserve block count and reserve allocation count |
