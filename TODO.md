@@ -790,6 +790,18 @@
   `fsimg_format_info_t.codecs` is empty for `hfsplus` and `hfsx`. Add the
   operation, leaving out LZVN and LZFSE where the imported decoders refuse
   the host's byte order.
+* [Low] **Encrypted disk images read as unrecognized** (`lib/layers/`):
+  an `hdiutil create -encryption` image starts with the magic `encrcdsa`
+  and no layer knows it, so `fsimg i` says "no partition table or
+  filesystem recognized" (`docs/apfs-research.md`, E11). Recognize the
+  magic and refuse it as `FSIMG_EUNSUPPORTED`, naming an encrypted disk
+  image.
+* [Low] **`apfsdump.rb` misreads sealed filesystem trees**
+  (`tools/apfs/apfsdump.rb`): it checks headerless nodes as objects and
+  resolves hashed index values as absolute OIDs, so it reports spurious
+  problems on every sealed volume's filesystem tree. Skip the header for
+  no-header mappings, add the root's OID to each child OID, and check the
+  child digests as E11's `sealwalk.rb` probe does.
 
 ## Security residuals
 

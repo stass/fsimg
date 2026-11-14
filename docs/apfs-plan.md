@@ -365,7 +365,7 @@ captures with their command records and `fsck_apfs` output:
 | E8 Checkpoint history | Mount, write, unmount several times, capturing the ring; copies truncated or with the newest checkpoint's blocks zeroed |
 | E9 Snapshots | A local snapshot of a disk-image volume where `tmutil` permits, or an owner-provided image; data changed after the snapshot |
 | E10 Volumes | `diskutil apfs addVolume` with roles; a volume group if available |
-| E11 Encrypted and sealed | `hdiutil create -encryption`; a sealed System volume from an installer or restore image if available, structure only |
+| E11 Encrypted and sealed | `newfs_apfs -E`, `diskutil apfs addVolume -passphrase` and `encryptVolume`, and `hdiutil create -encryption` for contrast; copies of the host's sealed cryptex images; structure only |
 | E12 Large containers | 1 TiB and 128 TiB sparse containers: address blocks, pool sizes, ring sizes |
 | E13 Layers | `hdiutil` UDRW, UDZO and UDBZ images with and without GPT, and an Apple Partition Map disk holding a container (`hdiutil create -layout SPUD` if it accepts APFS, otherwise an E1 container behind a hand-built map): the layouts the layers peel. One ULFO image records the layer's refusal; a ULMO image is an xz stream at offset 0, so it is ambiguous unless the read-side stack is given, and with `-F dmg` it fails as unsupported LZMA chunk compression |
 | E14 Limits | Longest accepted name in bytes and characters, invalid UTF-8 refusal, 1023- and 1024-byte link targets, times before 1970 and far ahead |
@@ -572,9 +572,12 @@ describe the user-visible options.
 
 ### 11. Sealed volumes
 
-* The sealed file-extent tree, hashed nodes and the SHA-256 integrity chain.
-* **Gate:** E11's sealed volume lists and extracts with native digests; a
-  modified node fails the chain; no authenticity is reported.
+* The sealed file-extent tree, headerless hashed nodes mapped with the
+  no-header flag, relative child OIDs, and the SHA-256 integrity chain.
+* **Gate:** E11's sealed volume (`e11-sealed`, the 50 MiB application
+  cryptex) lists and extracts with native digests; a modified node fails
+  the chain, as `fsck_apfs -n` fails it (`e11-tamper-fsck.log`); its
+  allocated block count verifies; no authenticity is reported.
 
 ### 12. Specification harness model
 

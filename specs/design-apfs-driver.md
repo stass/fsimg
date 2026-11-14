@@ -701,11 +701,11 @@ that share one
 data stream contribute one stream. The pool's claim stream is merged the
 same way against the pool's bitmap. The main bitmap's bits past `N` are
 not checked ([verification](design-apfs.md#verification)).
-The check the format design holds provisional, the allocated block count
-of a volume that is sealed or has snapshots, is not made until its
-experiments give the rule; every other volume's
-allocated block count is checked against the blocks the format design
-lists there.
+The check the format design holds
+[provisional](design-apfs.md#verification), the allocated block count of a
+volume that has snapshots, is not made until its experiment gives the rule;
+every other volume's allocated block count, a sealed volume's included, is
+checked against the blocks the format design lists there.
 
 **Walk.** The common walker visits the selected volume once. Every
 delivered entry is counted through `fsimg_verify_account()`, the one place
