@@ -76,6 +76,9 @@
   when its resource fork holds bytes or the inode carries no size. Listing admits
   every compression type the shared table knows; the content stage refuses
   the types the format design marks unsupported.
+  The writer plans (`lib/formats/apfs/write-plan.c`) behind the unregistered
+  descriptor `fsimg_apfs_write_format`; emission (`write-emit.c`) is not
+  written, so emission refuses with `FSIMG_EUNSUPPORTED`.
   The specification harness's container model (`test/spec/lib/fsimg_spec/apfs/`)
   is judged on native captures only: `apfs.sm.address_blocks_unmeasured` has
   no witness until a builder renders a container of another block size, and

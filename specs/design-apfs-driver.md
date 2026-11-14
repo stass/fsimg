@@ -796,12 +796,13 @@ complete after skipping an object.
 
 `validate` accepts the common options under the format design's
 [settings](design-apfs.md#settings-and-identities): `sector_bytes` and
-`allocation_unit_bytes` zero or 4096; `label` NULL, selecting the
+`allocation_unit_bytes` zero or 4096; `label` NULL or empty, selecting the
 [default label](design-apfs.md#writer-values), or valid UTF-8 of at most
 255 bytes; `fat_root_entries`, `byte_order`,
 `inode_capacity`, `reserve_percent` and `mountpoint` at their defaults, which
 the common settings check enforces; `volume_uuid` nonzero unless
-`FSIMG_WRITE_REPRODUCIBLE` is set; `epoch` inside the writer's time range.
+`FSIMG_WRITE_REPRODUCIBLE` is set; under it, `epoch` inside the writer's
+time range.
 `volume_serial` is ignored, since the CLI generates one for every format.
 
 `volume_bytes` is zero or a multiple of 4096 of at least the writer's
@@ -844,11 +845,13 @@ keeps one open node per level.
   is 40 unused bytes in every other node, under one percent.
 * **Fit.** A node holds `n` records whose keys take `K` bytes and whose
   values take `V` when `toc(n) + K + V <= C`. `toc(n)` is the table's length
-  for `n` entries, four bytes each in a fixed-size tree and eight otherwise,
-  with the spare capacity the tree's profile gives it. A key or value counts
-  its length rounded up to 8 bytes unless the tree is unaligned. The
-  profile's table capacity, alignment, flags and fill are
-  [writer values](design-apfs.md#writer-values).
+  for `n` entries, four bytes each in a fixed-size tree and eight otherwise:
+  `n` rounded up to a multiple of 8 entries and at least 8, and in a
+  fixed-size tree at least the most records of the node's kind, leaf or
+  index, that `C` holds with their entries, also rounded up. A key or
+  value counts its length rounded up to 8 bytes unless the tree is
+  unaligned. The table sizing and the profile's alignment, flags and fill
+  are [writer values](design-apfs.md#writer-values).
 * **Records.** A leaf record is the stream's key and value. An index record
   is the child's first key, whole, with the child's 8-byte OID as its value:
   the virtual OID in the filesystem tree, the block number in a physical
@@ -886,8 +889,8 @@ packer accumulates.
 ### The plan
 
 The plan object embeds `fsimg_plan_t` and holds the geometry, the table of
-fixed regions and the allocation ranges, the volume flags, the format time,
-the UUIDs, each tree's node counts and first run index, the ephemeral table,
+fixed regions, the run's first block and the allocated block count, the
+volume flags, the format time, the UUIDs, each tree's node counts and first run index, the ephemeral table,
 and one paged array of rows keyed by catalog ID, row 0 being the root. A row
 holds the parent's row, the child count, the content length, the data
 blocks of the files before it in catalog order, the first data block, and
@@ -950,17 +953,16 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    * the container object map, over its one record, the volume superblock.
 5. **Size.** `fits(N)` is the arithmetic of step 6 without its
    assignments, and step 6 runs the same code, so sizing and layout cannot
-   disagree. It fills the region list for `N` and walks the regions in
-   ascending order, carrying the number of run blocks placed below the
-   region at hand. Metadata blocks are placed one by one and continue past
-   a region. Where a region falls among file data, one binary search of the
-   rows, by the data blocks before each file, finds the file that would
-   straddle it; that file and those after it resume past the region. `N`
-   fits when the last run ends at or
-   below `N` and `N` less the allocation ranges leaves the requested free
-   space. A probe writes no row and allocates nothing: its cost is
-   proportional to the region count, with at most one row search per
-   region.
+   disagree. It fills the region list for `N` and checks that the regions,
+   in ascending block order, form one gapless prefix from block 0, as the native formatter
+   places them; a list that does not is an internal error
+   (`FSIMG_ESTATE`), never a run around a region. The run starts after the
+   prefix and holds the metadata blocks and then the file data,
+   contiguous, so it ends at the prefix plus the metadata blocks from
+   step 4 plus the data blocks from step 1, and the allocation is the
+   blocks below that end. `N` fits when the end plus the requested free
+   space is at most `N`. A probe writes no row and allocates nothing: its
+   cost is proportional to the region count.
 
    With exact `volume_bytes`, `N = volume_bytes / 4096`, and an `N` that
    does not fit fails with `FSIMG_ERANGE`. With automatic sizing, `N` is
@@ -969,9 +971,11 @@ Planning runs a fixed sequence of passes over the frozen catalog:
    starts at the lower bound, which is block 0, the run's metadata blocks
    from step 4, the data blocks from step 1 and the requested free space,
    raised to the minimum container and rounded up to the step. A failed
-   probe returns its shortfall, the blocks by which the run, displacement
-   gaps included, ends past `N` plus any free space missing, and the next
-   probe adds it, rounded up to the step and at least one step. Each probe
+   probe returns its shortfall: the smallest count holding the probe's
+   layout is the run's end plus the requested free space, and the
+   shortfall is what that count exceeds `N` by. The next probe adds it,
+   rounded up to the step and at least one
+   step. Each probe
    is charged as work, and the
    scan fails with `FSIMG_ERANGE` naming the
    [probe cap](design-apfs.md#writer-values) when it reaches it, or the
@@ -980,8 +984,9 @@ Planning runs a fixed sequence of passes over the frozen catalog:
 6. **Layout.** Assign every block and identifier, in this order:
    * **Regions.** `apfs_fixed_regions()` fills the table of fixed regions
      from the superblock and space-manager fields planned for `N`, as it
-     does for verification from decoded fields. `run_block(i)` is the `i`th
-     block outside them in ascending order, a pure function of the table.
+     does for verification from decoded fields, and the writer's geometry
+     step checks that they form the prefix step 5 requires. `run_block(i)`
+     is the block after the prefix plus `i`.
    * **Metadata.** Each metadata object has a run index and sits at
      `run_block` of it. The indexes follow the format design's order: the
      container object map's own block and then its tree, the volume
@@ -989,13 +994,14 @@ Planning runs a fixed sequence of passes over the frozen catalog:
      filesystem tree, the extent-reference tree, the snapshot tree. Node
      `k` of a tree has the tree's first index plus `k`.
    * **Files.** Each nonempty file, in catalog order, takes one contiguous
-     run: it starts at the block after the previous assignment, or, when a
-     fixed region would interrupt it there, after that region. Its row
-     records the first block, and file runs ascend with the catalog ID.
-   * **Allocation ranges.** The fixed regions, the metadata blocks and the
-     file runs, merged where they touch, form a short sorted list of
-     disjoint ranges: at most two per fixed region and one more. It is the
-     only description of allocation the space manager is built from.
+     run starting at the block after the previous one, the first after the
+     metadata blocks: a file whose data starts at offset `b` of the data
+     blocks starts at the run's first block plus the metadata blocks plus
+     `b`. Its row records the first block, and file runs ascend with the
+     catalog ID.
+   * **Allocation.** The fixed regions, the metadata blocks and the file
+     runs are one range from block 0 to the run's end, the only
+     description of allocation the space manager is built from.
    * **Identifiers.** OIDs are assigned in the order the
      [writer values](design-apfs.md#writer-values) give; filesystem node `k`
      takes the first node OID plus `k`. The container's next OID follows
@@ -1005,7 +1011,7 @@ Planning runs a fixed sequence of passes over the frozen catalog:
      kind, subtype, byte size and their slots in the checkpoint data area,
      assigned in that order from the first slot.
    * **Internal pool.** Count the chunk-information blocks, the address
-     blocks and one bitmap block per chunk that an allocation range
+     blocks and one bitmap block per chunk that the allocation
      touches, and assign them pool blocks in the order the
      [writer values](design-apfs.md#writer-values) give. They fit the pool
      by the native size the format design gives it; planning checks that
@@ -1051,12 +1057,12 @@ and the bytes do not depend on the order.
    files in catalog order, which is block order and so key order. The empty
    snapshot tree, the volume object map, the volume superblock, and the
    container object map's tree and object.
-4. **Space manager.** One cursor walks the allocation ranges and the
-   chunks together, both ascending. For each chunk it counts the allocated
+4. **Space manager.** One cursor walks the chunks in ascending order
+   against the allocated range. For each chunk it counts the allocated
    blocks inside it, which gives the entry's free count, and when that
    count is not zero it writes the chunk's bitmap block at its pool block:
-   whole bytes of ones and zeros for each range and gap and the partial
-   bytes at their edges. What the bits past `N` hold, and the entry of a
+   whole bytes of ones up to the range's end, then zeros, and the partial
+   byte at the edge. What the bits past `N` hold, and the entry of a
    chunk with no allocated block, which gets no bitmap block, are writer
    values. The entries fill the
    chunk-information blocks in chunk order, each written when it is full
@@ -1066,7 +1072,7 @@ and the bytes do not depend on the order.
    exactly the pool blocks taken. Last comes the space manager object:
    its address array names the blocks just written, and its device free
    count is the sum of the entries' free counts, which is `N` less the
-   allocation ranges.
+   allocated blocks.
 5. **Checkpoint.** The space manager, whose free queues are empty in the
    zero-OID form, and the idle reaper go to the slots the ephemeral table
    gives them in the checkpoint data area. The mapping block is encoded from the same table,
@@ -1086,7 +1092,7 @@ from a row, the geometry, the sorted records or one of those values.
 | Listing | Per directory: one scan of its records and the common key sort; per entry: one inode lookup and one scan of that inode's attribute records, which follow it. No file payload is read |
 | Content | Per sequential read: one cursor advance per extent; per random offset: one tree descent; per compressed chunk: one decode of at most 64 KiB, and for an inline payload one attribute lookup; per resource-fork file: one framing check at the first read, and one table entry with its neighbours per decoded chunk |
 | Verification | One scan of every tree of every volume; the main and pool claim, file-extent, name-reference, sibling-map, stream-use and collision streams, each sorted once, and the `(record, stream)` pairs; two passes over the chunk structures (claims, then the merge) and one over the bitmaps and pool bitmap; one walk of the selected volume, reading each inode's content once; the array of multiply linked inodes |
-| Planning | One catalog pass, two external sorts (collisions and records), one counting run of the packer per tree, a size scan of at most the probe cap's probes, each costing at most one row search per fixed region, one layout pass |
+| Planning | One catalog pass, two external sorts (collisions and records), one counting run of the packer per tree, a size scan of at most the probe cap's probes, each costing constant work per fixed region, one layout pass |
 | Emission | Payload bytes, one replay of the sorted records, and metadata proportional to entries and container size |
 
 Resident state per reader is the geometry, the selected superblocks, the
@@ -1095,7 +1101,7 @@ been resolved, the 64 KiB decode window, the stored-chunk buffer of
 `FSIMG_LZFSE_INPUT_MAX` bytes and the codec's state: the LZFSE decoder's
 scratch, or zlib's inflate state through the common allocation adapter. The
 link-target buffer is the reader core's. Resident state per writer is one
-node buffer per level of the tree being packed and the allocation ranges.
+node buffer per level of the tree being packed.
 Everything proportional to entries, records or blocks is charged scratch.
 Every loop charges the session and observes cancellation.
 
@@ -1172,9 +1178,9 @@ next OID, the counters or the XIDs, must equal its row's construction.
 UUIDs, times and the formatting identifier are exempt. It checks the
 packer at its boundaries: records that exactly fill a node and one byte
 more, a level whose last node holds one record, a root with two children,
-and trees of one, two and three levels; and the layout at its own: a file
-that would straddle a fixed region, and the sizes on either side of each
-change in the fixed regions, where the automatic size must fit and equal
+and trees of one, two and three levels; and the layout at its own: the
+run contiguous after the fixed-region prefix, and the sizes on either side
+of each change in the fixed regions, where the automatic size must fit and equal
 the first fit of the specified probe sequence, which the test recomputes
 independently. The scan is
 also run alone over a predicate that never fits, which must fail

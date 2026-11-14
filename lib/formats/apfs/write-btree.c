@@ -86,7 +86,7 @@ struct apfs_pack {
 
 static fsimg_status_t	level_add(apfs_pack_t *, unsigned,
 			    const apfs_record_t *, fsimg_error_t *);
-static bool		level_fits(const apfs_pack_profile_t *,
+static bool		level_fits(const apfs_pack_profile_t *, bool,
 			    const pack_level_t *, uint32_t, uint32_t);
 static fsimg_status_t	level_open(apfs_pack_t *, fsimg_error_t *);
 static fsimg_status_t	node_close(apfs_pack_t *, unsigned, bool,
@@ -98,21 +98,21 @@ static fsimg_status_t	pack_error(fsimg_error_t *, fsimg_status_t,
 static bool		profile_valid(const apfs_pack_profile_t *);
 static fsimg_status_t	record_check(const apfs_pack_profile_t *,
 			    const apfs_record_t *, fsimg_error_t *);
+static uint32_t		round_toc(uint32_t);
 static uint32_t		stored_length(const apfs_pack_profile_t *, uint32_t);
-static uint32_t		toc_bytes(const apfs_pack_profile_t *, uint32_t);
+static uint32_t		toc_bytes(const apfs_pack_profile_t *, bool, uint32_t);
 
 /*
- * The native shapes. The filesystem tree is variable-size and unaligned.
- * An object map and a free queue have fixed-size records and a table sized
- * from the start for the most entries a node could hold: 112 for 16-byte
- * keys and values, 144 for 16-byte keys and 8-byte values.
+ * The native shapes, whose volume trees E1 and E3 show (specs/design-apfs.md,
+ * "Writer values"). The filesystem, extent-reference and snapshot trees
+ * are variable-size and unaligned; an object map and a free queue have
+ * fixed-size records.
  */
 const apfs_pack_profile_t apfs_pack_fs_tree = {
 	.role = "filesystem tree",
 	.storage = APFS_OBJ_VIRTUAL,
 	.subtype = APFS_SUBTYPE_FSTREE,
-	.tree_flags = APFS_BTREE_SEQUENTIAL_INSERT | APFS_BTREE_KV_NONALIGNED,
-	.toc_min = 0
+	.tree_flags = APFS_BTREE_SEQUENTIAL_INSERT | APFS_BTREE_KV_NONALIGNED
 };
 
 const apfs_pack_profile_t apfs_pack_container_omap = {
@@ -121,8 +121,32 @@ const apfs_pack_profile_t apfs_pack_container_omap = {
 	.subtype = APFS_SUBTYPE_OMAP,
 	.tree_flags = APFS_BTREE_SEQUENTIAL_INSERT | APFS_BTREE_PHYSICAL,
 	.fixed_key = APFS_OMAP_KEY_BYTES,
-	.fixed_val = APFS_OMAP_VAL_BYTES,
-	.toc_min = 112
+	.fixed_val = APFS_OMAP_VAL_BYTES
+};
+
+const apfs_pack_profile_t apfs_pack_volume_omap = {
+	.role = "volume object map",
+	.storage = APFS_OBJ_PHYSICAL,
+	.subtype = APFS_SUBTYPE_OMAP,
+	.tree_flags = APFS_BTREE_SEQUENTIAL_INSERT | APFS_BTREE_PHYSICAL,
+	.fixed_key = APFS_OMAP_KEY_BYTES,
+	.fixed_val = APFS_OMAP_VAL_BYTES
+};
+
+const apfs_pack_profile_t apfs_pack_extentref = {
+	.role = "extent-reference tree",
+	.storage = APFS_OBJ_PHYSICAL,
+	.subtype = APFS_SUBTYPE_EXTENTREF,
+	.tree_flags = APFS_BTREE_SEQUENTIAL_INSERT | APFS_BTREE_PHYSICAL |
+	    APFS_BTREE_KV_NONALIGNED
+};
+
+const apfs_pack_profile_t apfs_pack_snapshot = {
+	.role = "snapshot tree",
+	.storage = APFS_OBJ_PHYSICAL,
+	.subtype = APFS_SUBTYPE_SNAPMETA,
+	.tree_flags = APFS_BTREE_SEQUENTIAL_INSERT | APFS_BTREE_PHYSICAL |
+	    APFS_BTREE_KV_NONALIGNED
 };
 
 const apfs_pack_profile_t apfs_pack_free_queue = {
@@ -132,8 +156,7 @@ const apfs_pack_profile_t apfs_pack_free_queue = {
 	.tree_flags = APFS_BTREE_SEQUENTIAL_INSERT | APFS_BTREE_ALLOW_GHOSTS |
 	    APFS_BTREE_EPHEMERAL,
 	.fixed_key = APFS_FQ_KEY_BYTES,
-	.fixed_val = APFS_FQ_VAL_BYTES,
-	.toc_min = 144
+	.fixed_val = APFS_FQ_VAL_BYTES
 };
 
 static fsimg_status_t
@@ -156,22 +179,40 @@ stored_length(const apfs_pack_profile_t *profile, uint32_t length)
 }
 
 /*
- * The length of a table of contents for entries keys: entries rounded up
- * to the table's increment, and at least the profile's minimum. entries is
- * at most ENTRIES_MAX + 1, so the product cannot overflow.
+ * The length of the table of contents of a leaf or index node of entries
+ * keys, as the native formatter sizes it. A variable-size table holds the
+ * entries rounded up to the table's increment, and at least one
+ * increment. A fixed-size table holds at least a full node: as many
+ * records of the node's kind, with their entries, as APFS_PACK_CAPACITY
+ * holds, rounded up the same way. An object map's leaf, with 16-byte keys
+ * and values, gets 112 entries; its index nodes, with 8-byte child OIDs,
+ * and a free queue's leaf, with 8-byte values, get 144. Only a leaf of
+ * ghosts can hold more keys than a full node, and its table grows with
+ * them. entries is at most ENTRIES_MAX + 1, so the product cannot
+ * overflow.
  */
 static uint32_t
-toc_bytes(const apfs_pack_profile_t *profile, uint32_t entries)
+toc_bytes(const apfs_pack_profile_t *profile, bool leaf, uint32_t entries)
 {
-	uint32_t capacity, entry_bytes;
+	uint32_t entries_min, record_bytes, full_node;
 
-	capacity = (entries + TOC_INCREMENT - 1) / TOC_INCREMENT *
-	    TOC_INCREMENT;
-	if (capacity < profile->toc_min)
-		capacity = profile->toc_min;
-	entry_bytes = profile->fixed_key != 0 ? APFS_TOC_FIXED_BYTES :
-	    APFS_TOC_VARIABLE_BYTES;
-	return (capacity * entry_bytes);
+	entries_min = entries == 0 ? 1 : entries;
+	if (profile->fixed_key == 0)
+		return (round_toc(entries_min) * APFS_TOC_VARIABLE_BYTES);
+	record_bytes = APFS_TOC_FIXED_BYTES +
+	    stored_length(profile, profile->fixed_key) + (leaf ?
+	    stored_length(profile, profile->fixed_val) : APFS_CHILD_OID_BYTES);
+	full_node = APFS_PACK_CAPACITY / record_bytes;
+	if (entries_min < full_node)
+		entries_min = full_node;
+	return (round_toc(entries_min) * APFS_TOC_FIXED_BYTES);
+}
+
+/* entries rounded up to the table's increment. */
+static uint32_t
+round_toc(uint32_t entries)
+{
+	return ((entries + TOC_INCREMENT - 1) / TOC_INCREMENT * TOC_INCREMENT);
 }
 
 /*
@@ -180,10 +221,10 @@ toc_bytes(const apfs_pack_profile_t *profile, uint32_t entries)
  * APFS_PACK_CAPACITY, so the sum cannot overflow.
  */
 static bool
-level_fits(const apfs_pack_profile_t *profile, const pack_level_t *level,
-    uint32_t key_stored, uint32_t val_stored)
+level_fits(const apfs_pack_profile_t *profile, bool leaf,
+    const pack_level_t *level, uint32_t key_stored, uint32_t val_stored)
 {
-	return (toc_bytes(profile, level->count + 1) + level->key_bytes +
+	return (toc_bytes(profile, leaf, level->count + 1) + level->key_bytes +
 	    key_stored + level->val_bytes + val_stored <= APFS_PACK_CAPACITY);
 }
 
@@ -247,7 +288,7 @@ level_add(apfs_pack_t *pack, unsigned depth, const apfs_record_t *record,
 	val_stored = record->ghost ? 0 :
 	    stored_length(profile, (uint32_t)record->val_len);
 	if (level->count != 0 &&
-	    !level_fits(profile, level, key_stored, val_stored)) {
+	    !level_fits(profile, depth == 0, level, key_stored, val_stored)) {
 		status = node_close(pack, depth, false, error);
 		if (status != FSIMG_OK)
 			return (status);
@@ -302,7 +343,7 @@ node_encode(apfs_pack_t *pack, unsigned depth, bool root, uint64_t oid)
 		return (false);
 
 	/* The free space lies between the keys and the values. */
-	toc_len = toc_bytes(profile, level->count);
+	toc_len = toc_bytes(profile, depth == 0, level->count);
 	value_end = APFS_WRITE_BLOCK_BYTES -
 	    (root ? APFS_BTREE_INFO_BYTES : 0);
 	free_len = value_end - APFS_NODE_HEADER_BYTES - toc_len -
@@ -431,7 +472,8 @@ profile_valid(const apfs_pack_profile_t *profile)
 		return (false);
 	if ((profile->fixed_key == 0) != (profile->fixed_val == 0))
 		return (false);
-	return (toc_bytes(profile, 2) < APFS_PACK_CAPACITY);
+	return (toc_bytes(profile, true, 2) < APFS_PACK_CAPACITY &&
+	    toc_bytes(profile, false, 2) < APFS_PACK_CAPACITY);
 }
 
 fsimg_status_t
@@ -503,10 +545,10 @@ record_check(const apfs_pack_profile_t *profile, const apfs_record_t *record,
 	key_stored = stored_length(profile, (uint32_t)record->key_len);
 	val_stored = record->ghost ? 0 :
 	    stored_length(profile, (uint32_t)record->val_len);
-	if (toc_bytes(profile, 1) + key_stored + val_stored >
+	if (toc_bytes(profile, true, 1) + key_stored + val_stored >
 	    APFS_PACK_CAPACITY ||
-	    toc_bytes(profile, 2) + 2 * (key_stored + APFS_CHILD_OID_BYTES) >
-	    APFS_PACK_CAPACITY)
+	    toc_bytes(profile, false, 2) + 2 * (key_stored +
+	    APFS_CHILD_OID_BYTES) > APFS_PACK_CAPACITY)
 		return (pack_error(error, FSIMG_EINVAL, profile->role,
 		    "record does not fit a node"));
 	return (FSIMG_OK);

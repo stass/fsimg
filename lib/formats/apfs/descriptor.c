@@ -6,6 +6,7 @@
 #include "apfs.h"
 #include "format.h"
 #include "fsimg-endian.h"
+#include "write-apfs.h"
 
 #define ROLE_BLOCK0		"container superblock"
 /* The probe reads the smallest block; see apfs_probe(). */
@@ -39,27 +40,30 @@ static fsimg_status_t apfs_probe(const unsigned char *, size_t, uint64_t,
  * format design's capability record states; volume_index selects the
  * volume of a container holding several.
  */
+#define APFS_VARIANT_INFO						\
+	.name = "apfs",							\
+	.profile = APFS_PROFILE,					\
+	.entry_kinds = FSIMG_ENTRY_FILE |				\
+	    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |		\
+	    FSIMG_ENTRY_FIFO | FSIMG_ENTRY_CHAR_DEVICE |		\
+	    FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET,		\
+	.metadata_fields = FSIMG_META_CREATED |				\
+	    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |			\
+	    FSIMG_META_CHANGED | FSIMG_META_OWNER |			\
+	    FSIMG_META_MODE,						\
+	.sector_size_mask = APFS_BLOCK_SIZES,				\
+	.allocation_unit_size_mask = APFS_BLOCK_SIZES,			\
+	.max_name_utf16_units = APFS_WRITE_NAME_MAX_UNITS,		\
+	.max_label_bytes = APFS_LABEL_MAX,				\
+	.max_link_target_bytes = APFS_LINK_TARGET_MAX,			\
+	.read_settings = FSIMG_SETTING_VOLUME_INDEX
+
 static const fsimg_format_variant_t apfs_variants[] = {
 	{
 		.info = {
-			.name = "apfs",
-			.profile = APFS_PROFILE,
-			.entry_kinds = FSIMG_ENTRY_FILE |
-			    FSIMG_ENTRY_DIRECTORY | FSIMG_ENTRY_SYMLINK |
-			    FSIMG_ENTRY_FIFO | FSIMG_ENTRY_CHAR_DEVICE |
-			    FSIMG_ENTRY_BLOCK_DEVICE | FSIMG_ENTRY_SOCKET,
-			.metadata_fields = FSIMG_META_CREATED |
-			    FSIMG_META_MODIFIED | FSIMG_META_ACCESSED |
-			    FSIMG_META_CHANGED | FSIMG_META_OWNER |
-			    FSIMG_META_MODE,
-			.sector_size_mask = APFS_BLOCK_SIZES,
-			.allocation_unit_size_mask = APFS_BLOCK_SIZES,
+			APFS_VARIANT_INFO,
 			.max_file_bytes = UINT64_MAX,
-			.max_volume_bytes = UINT64_MAX,
-			.max_name_utf16_units = APFS_WRITE_NAME_MAX_UNITS,
-			.max_label_bytes = APFS_LABEL_MAX,
-			.max_link_target_bytes = APFS_LINK_TARGET_MAX,
-			.read_settings = FSIMG_SETTING_VOLUME_INDEX
+			.max_volume_bytes = UINT64_MAX
 		},
 		.id = 0		/* The only variant. */
 	}
@@ -71,6 +75,45 @@ const fsimg_format_t fsimg_apfs_format = {
 	.probe_bytes = APFS_PROBE_BYTES,
 	.probe = apfs_probe,
 	.reader = &fsimg_apfs_reader_ops
+};
+
+/*
+ * The registered descriptor reads and verifies. The registry lists a
+ * writer only after the native qualification cycle has accepted its
+ * output, so the writer has its own descriptor, reachable only by code
+ * that names it. It writes 4096-byte blocks, at most the largest
+ * container's, and stores the volume UUID and the case sensitivity; it
+ * does not name placement, so a placement list fails the common settings
+ * check.
+ */
+#define APFS_WRITE_BLOCK_SIZES	(1u << 12)
+_Static_assert(APFS_WRITE_BLOCK_SIZES == APFS_WRITE_BLOCK_BYTES,
+    "the writer's capability record states its block size");
+#define APFS_WRITE_BYTES_MAX	(APFS_WRITER_BLOCKS_MAX * APFS_WRITE_BLOCK_BYTES)
+
+static const fsimg_format_variant_t apfs_write_variants[] = {
+	{
+		.info = {
+			APFS_VARIANT_INFO,
+			.max_file_bytes = APFS_WRITE_BYTES_MAX,
+			.max_volume_bytes = APFS_WRITE_BYTES_MAX,
+			.write_allocation_unit_size_mask =
+			    APFS_WRITE_BLOCK_SIZES,
+			.write_settings = FSIMG_SETTING_VOLUME_UUID |
+			    FSIMG_SETTING_CASE_SENSITIVE
+		},
+		.id = 0
+	}
+};
+
+const fsimg_format_t fsimg_apfs_write_format = {
+	.variants = apfs_write_variants,
+	.variant_count = sizeof(apfs_write_variants) /
+	    sizeof(apfs_write_variants[0]),
+	.probe_bytes = APFS_PROBE_BYTES,
+	.probe = apfs_probe,
+	.reader = &fsimg_apfs_reader_ops,
+	.writer = &fsimg_apfs_writer_ops
 };
 
 /*

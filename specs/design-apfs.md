@@ -1949,7 +1949,7 @@ refuses, fails the same way.
 
 | Setting | Field | Meaning |
 | --- | --- | --- |
-| `-L` | `label` | Volume name, UTF-8 of at most 255 bytes; NULL selects the [default label](#writer-values) |
+| `-L` | `label` | Volume name, UTF-8 of at most 255 bytes; NULL or empty selects the [default label](#writer-values) |
 | `uuid=` | `volume_uuid` | Volume UUID in text order. All zero is refused outside reproducible mode; in reproducible mode it is derived from the epoch by the [layer identifier rule](design-layers.md#identifiers) with role 5. Without `-R` and `uuid=` the CLI supplies a random version 4 UUID |
 | `case=` | `case_sensitive` | `insensitive`, the default, or `sensitive` |
 | `cluster=` | `allocation_unit_bytes` | Zero or 4096 |
@@ -1993,20 +1993,23 @@ The allocated blocks are the fixed regions and the run:
 
 * The [fixed regions](#ephemeral-objects-and-the-space-manager) are the
   one list verification claims: block 0, the checkpoint descriptor area,
-  the checkpoint data area, the internal pool, which holds the space
-  manager's chunk-information, address and bitmap blocks, and the pool's
-  bitmap ring. Each sits at the block and has the size the native formatter
-  gives it for `N`, as [writer values](#writer-values) state.
-* The **run** holds everything else, allocated in ascending block order
-  from the first block outside the fixed regions: the container object map,
-  the volume's superblock, object map, filesystem tree, extent-reference
-  tree and snapshot tree, then file data in catalog order. A fixed region
-  above the run's start is skipped, and a file, whose blocks are always
-  contiguous, starts after a region it would straddle.
+  the checkpoint data area, the internal pool's bitmap ring, and the
+  internal pool, which holds the space manager's chunk-information, address
+  and bitmap blocks. Each sits at the block and has the size the native
+  formatter gives it for `N`, as [writer values](#writer-values) state. The
+  native formatter places them in that order as one gapless prefix from
+  block 0; the writer checks that the list it derives for `N` does, and a
+  list that does not is an internal error rather than a layout that skips a
+  region.
+* The **run** holds everything else, contiguous from the first block after
+  the prefix: the container object map, the volume's superblock, object
+  map, filesystem tree, extent-reference tree and snapshot tree, then file
+  data in catalog order. The allocation is therefore one range, from block
+  0 to the run's end.
 
 Trees are built bottom-up from their sorted records, with virtual OIDs and
-object-map records assigned in node order. The bitmaps are a few runs of
-ones and zeros, built from the region table without a pass over blocks. The
+object-map records assigned in node order. The bitmaps are a run of ones
+and then zeros, built from the allocated range without a pass over blocks. The
 order above fixes block numbers only: emission may write the blocks in any
 order and produces the same bytes.
 
@@ -2015,27 +2018,25 @@ the writer's minimum container size, the requested free space and the native
 reserve, if any; the [sizing design](design-sizing.md#dimensions-per-format)
 states the dimensions. Whether a block count fits is not monotone in it: a
 fixed region grows in jumps, one of which can take more blocks than a size
-step adds, and a region above the run's start moves, which changes the file
-that must start after it. The search assumes nothing about how the regions
-change with `N` beyond what each probe measures, and its result is the
-first block count of a deterministic upward sequence that fits. It need not
-be the smallest fitting count: a region that moves can remove a
-displacement gap at a size the sequence skips. Reproducibility needs only
-the sequence to be fixed:
+step adds, and moves the run's start with it. The search assumes nothing
+about how the regions change with `N` beyond what each probe measures, and
+its result is the first block count of a deterministic upward sequence
+that fits. When the prefix never shrinks as `N` grows, that first fit is
+also the smallest fitting count, since each probe's successor is the
+smallest count that could hold its prefix; the search does not rely on
+it. Reproducibility needs only the sequence to be fixed:
 
 * It starts at a lower bound that holds for every `N`: block 0, the run's
   blocks and the requested free space, none of which depends on `N`, raised
   to the minimum container size and rounded up to the size step.
-* A probe that fails measures its shortfall: the blocks by which the run,
-  displacement gaps included, ends past `N`, plus any free space missing.
-  The next probe is `N` plus the shortfall rounded up to the size step, and
-  at least one step. No block count below `N` plus the shortfall can hold
-  the layout `N` planned, and a displaced file costs one probe rather than
-  one per step across its gap. The first probe that fits ends the search.
+* A probe that fails measures its shortfall: the blocks by which the run's
+  end plus the requested free space exceeds `N`. The next probe is `N`
+  plus the shortfall rounded up to the size step, and at least one step.
+  No block count below `N` plus the shortfall can hold the layout `N`
+  planned. The first probe that fits ends the search.
 * A probe evaluates the layout's arithmetic over the fixed-region list of
   its `N`. It places nothing and allocates nothing, so its cost is
-  proportional to the number of regions: constant work for each, and one
-  search of the plan's rows for a region the run reaches.
+  proportional to the number of regions.
 * Each failed probe advances past its whole shortfall, so the probes
   number about the times growth of the `N`-dependent regions outruns the
   previous jump, a handful in practice. The [probe cap](#writer-values)
@@ -2197,10 +2198,10 @@ written: `validate` and the size search fail with `FSIMG_ERANGE` above it.
 | --- | --- | --- | --- | --- |
 | Node fill | Greedy against the root's capacity, 4096 bytes less the 56-byte header and the 40-byte footer: a node, root or not, takes records until the next does not fit, so a level's only node is always a valid root and 40 bytes stay unused in every other node | Policy; E15: `fsck_apfs -n` accepts a leaf packed to 3960 of the 4000 bytes (`e15-fill`); E3's native leaves leave as little as 12 bytes free | | |
 | Last node of a level | What remains when the records end, as few as one record | Policy; E15: `fsck_apfs -n` accepts a last node of one record at the leaf level (`e15-lastleaf1`) and at an index level (`e15-last1`) | | |
-| Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1). In the filesystem tree: flags `0x42`, node size 4096, fixed sizes zero, and a node's table of contents its key count rounded up to a multiple of 8 entries, the shape of 253 of the 254 leaves of `apfs-newfs-268435456-e3-ci`, where every table is a multiple of 8 entries and index nodes hold up to 8 more (E3). A table of a fixed-size tree that outgrows its native size, in an index node or a leaf of ghosts, grows in steps of 8 entries, the table increment [A1] gives; that step is provisional, since no capture shows such a table, and an object map of more than about 12000 mappings in a native capture would show it. Without one the step stays | E1, E3 | E1's volume records, for the volume's other trees | Native |
+| Table-of-contents capacity, key-area start, alignment, tree flags, and the footer's node size and fixed key and value sizes | Native, per tree. The container object map's root leaf: node flags `0x7`, a 448-byte table of contents at offset 0, tree flags `0x12`, node size 4096, keys and values of 16 bytes (E1). In the filesystem tree: flags `0x42`, node size 4096, fixed sizes zero, and a node's table of contents its key count rounded up to a multiple of 8 entries, the shape of 253 of the 254 leaves of `apfs-newfs-268435456-e3-ci`, where every table is a multiple of 8 entries and index nodes hold up to 8 more (E3). The volume object map has the container map's shape: a root leaf of node flags `0x7`, a 448-byte table (112 entries) and tree flags `0x12` in every E1 capture (`apfs-newfs-4194304-plain`, `apfs-newfs-1073741824-plain`, `apfs-newfs-8589934592-plain`, `apfs-hdiutil-33554432-plain` and the four volumes of `apfs-diskutil-2147483648-e10-roles`); in `apfs-newfs-268435456-e3-ci` and `-cs`, an index root of node flags `0x5` whose table holds 144 entries, 576 bytes, the most 16-byte keys with 8-byte child OIDs a node has room for, over leaves of node flags `0x6` with 448-byte tables (E3). A fixed-size tree's table is so sized for the records of the node's kind, leaf or index. The extent-reference and snapshot trees are variable-size and unaligned: tree flags `0x52`, node size 4096, fixed sizes zero, a root leaf of node flags `0x3`, and a table of contents of the key count rounded up to a multiple of 8 entries and at least 8: 64 bytes when empty in every E1 capture, 128 for 9 records (`apfs-newfs-67108864-e5-links`), 192 for 19 (`apfs-newfs-67108864-e6-clone`) and 256 for 27 and 28 (E3). The snapshot tree is empty in every capture, so the tables of a populated one are provisional, taken as the extent-reference tree's; the writer emits it empty, the shape every capture shows, so nothing it writes depends on them. A fixed-size leaf of ghosts that outgrows its native table grows in steps of 8 entries, the table increment [A1] gives; that step is provisional, since no capture shows such a table, and a free-queue leaf of more than 144 ghosts in a native capture would show it. Without one the step stays the increment [A1] gives; the writer's free queues are empty, so it never builds such a leaf. | E1, E3, E5, E6 | A capture with a snapshot, for a populated snapshot tree; a free-queue leaf of more than 144 ghosts, for the step | Native |
 | Footer counts | Key count: the tree's leaf records. Node count: its nodes. Longest key and longest value: the largest encoded lengths among its leaf records, zero in an empty tree; an index key repeats a leaf key | [A1]; E3 for the counts and the longest key | | |
 | Object-map flags | Container map `0x1`; volume map zero | [A1]; E1 for the container map | E1's volume records, for the volume map's crypto-generation flag | Native |
-| Empty extent-reference and snapshot trees | One root leaf with no keys | E1; E2: one node each among an empty volume's 5 allocated blocks | E1's volume records | Native |
+| Empty extent-reference and snapshot trees | One root leaf with no keys | E1, every capture's volume; E2: one node each among an empty volume's 5 allocated blocks | | Native |
 | File extent | A nonempty file's run, its size rounded up to 4096 bytes, is tiled by consecutive extents of at most the extent cap, so a file no longer than the cap has one; flags and crypto ID zero | [A1] | | |
 | Extent cap | `2^56 - 4096` bytes, the largest block-aligned length the 56-bit length field holds | [A1]: the field's width; E15: native single extents of 671088640 and 5368709120 bytes, the second above `2^32`, which `fsck_apfs` accepts (apfs-newfs-1073741824-e15-big, apfs-newfs-8589934592-e15-huge) | Lengths above 5368709120 bytes: `fsck_apfs -n` on the writer's large-file test output holding a longer extent, or a capture of a longer native file | 5368709120 bytes (1310720 blocks), the longest extent E15 shows accepted, if neither shows a longer one accepted |
 | Data-stream field | Size; allocated bytes the size rounded up to 4096; crypto ID zero; total bytes written the size and total bytes read zero; flags `0x20`. A file of size zero has none, and no data-stream ID or reference record either | [A1]; E3 | | |
@@ -2213,7 +2214,7 @@ written: `validate` and the size search fail with `FSIMG_ERANGE` above it.
 | Name length | 255 UTF-16 code units, as [name length](#directory-records-and-names) states | E14 | | |
 | Link target | 1 to 1023 bytes, as [symbolic links](#symbolic-links) state | E14 | | |
 | Default owner and modes | Owner and group 0; `0755` for directories and symbolic links; `0644` for files and FIFOs | Policy; E3 for the `0755` macOS gives a new symbolic link under umask 022 | | |
-| Default label | `Untitled`, the volume name when the label is NULL | Policy | | |
+| Default label | `Untitled`, the volume name when the label is NULL or empty | Policy | | |
 | Time range | `-2^63` through `2^63 - 1` nanoseconds, 1677-09-21 00:12:43.145224192 through 2262-04-11 23:47:16.854775807 UTC, the range macOS clamps times to | E14 | | |
 | Format time | The UTC host clock sampled once during planning; the epoch in reproducible mode | Policy | | |
 | Minimum container size | 1024 blocks (4 MiB), the smallest container `fsck_apfs` opens. `newfs_apfs` exits 0 from 91 blocks but writes no volume below 93, and `fsck_apfs` refuses every container below 1024 blocks | E1; policy: native qualification must be able to check the output; E15: `fsck_apfs -n` accepts the first form at 1024 blocks (`e15-x1vol-all`) | | |

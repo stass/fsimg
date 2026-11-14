@@ -59,8 +59,7 @@ static const apfs_pack_profile_t physical_ghosts = {
 	.tree_flags = APFS_BTREE_SEQUENTIAL_INSERT | APFS_BTREE_PHYSICAL |
 	    APFS_BTREE_ALLOW_GHOSTS,
 	.fixed_key = APFS_FQ_KEY_BYTES,
-	.fixed_val = APFS_FQ_VAL_BYTES,
-	.toc_min = 144
+	.fixed_val = APFS_FQ_VAL_BYTES
 };
 
 /* Leaf totals also supply an independent oracle for the root footer. */
@@ -110,6 +109,9 @@ static void	check_cursor(fsimg_ctx_t *, const packed_tree_t *,
 static packed_tree_t check_stream(const apfs_pack_profile_t *,
 		    const stream_t *);
 static void	test_empty_trees_have_native_tables_and_footers(void);
+static void	test_volume_omap_two_levels_have_native_tables(void);
+static void	test_extentref_roots_have_native_tables(void);
+static void	test_extentref_leaf_fits_110_unpadded_values_then_splits(void);
 static void	test_one_record_round_trips(void);
 static void	test_exactly_full_leaf_then_one_byte_more_splits(void);
 static void	test_fixed_leaf_overflow_leaves_one_record_and_two_children(void);
@@ -223,9 +225,18 @@ make_record(const apfs_pack_profile_t *profile, const stream_t *stream,
 	memset(value, (int)(index % 251 + 1), val_len);
 	for (unsigned i = 0; i < 8; i++)
 		key[i] = (unsigned char)(index >> (56 - i * 8));
-	if (profile == &apfs_pack_container_omap) {
+	if (profile == &apfs_pack_container_omap ||
+	    profile == &apfs_pack_volume_omap) {
 		fsimg_store_le64(key, index + 1);
 		fsimg_store_le64(key + 8, TEST_XID);
+	}
+	if (profile == &apfs_pack_extentref) {
+		CHECK(key_len == 8 && val_len == 20);
+		/* One allocated block, owned by inode 16, with one reference. */
+		fsimg_store_le64(key, (UINT64_C(2) << 60) | (index + 1));
+		fsimg_store_le64(value, (UINT64_C(1) << 60) | 1);
+		fsimg_store_le64(value + 8, 16);
+		fsimg_store_le32(value + 16, 1);
 	}
 	ghost = stream->ghosts && index % 3 != 1;
 	*record = (apfs_record_t){ .key = key, .key_len = key_len,
@@ -296,7 +307,7 @@ check_node_header(const unsigned char *raw, const apfs_node_t *node,
     const apfs_pack_profile_t *profile, uint64_t index, bool root)
 {
 	apfs_obj_t object;
-	uint32_t entries, entry_bytes;
+	uint32_t entries, entry_bytes, record_bytes;
 	uint16_t flags;
 
 	CHECK(apfs_object_verify(raw, BLOCK));
@@ -320,10 +331,21 @@ check_node_header(const unsigned char *raw, const apfs_node_t *node,
 	CHECK(node->val_free.off == APFS_FREE_LIST_EMPTY);
 	CHECK(node->val_free.len == 0);
 	CHECK(node->toc.off == 0);
-	/* Every table rounds to eight entries before applying its floor. */
-	entries = (node->key_count + 7) / 8 * 8;
-	if (entries < profile->toc_min)
-		entries = profile->toc_min;
+	/*
+	 * This checks every node for consistency with the table-size rule;
+	 * the literal-value tests supply the native evidence for that rule.
+	 * Reserve a full fixed-record node's table, or eight variable slots.
+	 * Index records use child OIDs rather than the leaf value size.
+	 */
+	entries = 8;
+	if (profile->fixed_key != 0) {
+		record_bytes = profile->fixed_key + APFS_TOC_FIXED_BYTES +
+		    (node->level == 0 ? profile->fixed_val :
+		    APFS_CHILD_OID_BYTES);
+		entries = (APFS_PACK_CAPACITY / record_bytes + 7) / 8 * 8;
+	}
+	if (entries < node->key_count)
+		entries = (node->key_count + 7) / 8 * 8;
 	entry_bytes = profile->fixed_key == 0 ? APFS_TOC_VARIABLE_BYTES :
 	    APFS_TOC_FIXED_BYTES;
 	CHECK(node->toc.len == entries * entry_bytes);
@@ -533,7 +555,8 @@ check_cursor(fsimg_ctx_t *ctx, const packed_tree_t *tree,
 	bool found;
 
 	codec = (apfs_tree_profile_t){ .role = profile->role,
-	    .compare = profile == &apfs_pack_container_omap ?
+	    .compare = (profile == &apfs_pack_container_omap ||
+	    profile == &apfs_pack_volume_omap) ?
 	    compare_omap : compare_bytes, .subtype = profile->subtype,
 	    .key_min = 8, .key_max = BLOCK, .val_max = BLOCK,
 	    .fixed_key = profile->fixed_key, .fixed_val = profile->fixed_val };
@@ -633,28 +656,142 @@ check_stream(const apfs_pack_profile_t *profile, const stream_t *stream)
 static void
 test_empty_trees_have_native_tables_and_footers(void)
 {
-	const apfs_pack_profile_t *profiles[] = {
-		&apfs_pack_fs_tree, &apfs_pack_container_omap, &apfs_pack_free_queue
+	typedef struct native_shape {
+		const apfs_pack_profile_t *profile;
+		uint16_t node_flags;
+		uint16_t table_bytes;
+		uint32_t tree_flags;
+		uint32_t key_bytes;
+		uint32_t val_bytes;
+	} native_shape_t;
+	/*
+	 * The empty filesystem's 64-byte table and free queue's 576-byte
+	 * table are derived from the sizing rule, without native captures.
+	 * The other empty-tree table sizes have native capture evidence.
+	 */
+	const native_shape_t cases[] = {
+		{ &apfs_pack_fs_tree, 0x3, 64, 0x42, 0, 0 },
+		{ &apfs_pack_container_omap, 0x7, 448, 0x12, 16, 16 },
+		{ &apfs_pack_volume_omap, 0x7, 448, 0x12, 16, 16 },
+		{ &apfs_pack_extentref, 0x3, 64, 0x52, 0, 0 },
+		{ &apfs_pack_snapshot, 0x3, 64, 0x52, 0, 0 },
+		{ &apfs_pack_free_queue, 0x7, 576, 0xe, 16, 8 }
 	};
-	const uint32_t footer_flags[] = { 0x42, 0x12, 0xe };
-	const uint16_t table_lengths[] = { 0, 448, 576 };
 	packed_tree_t tree;
 	apfs_node_t node;
 	stream_t stream = { 0 };
 
-	scenario = __func__;
-	for (unsigned i = 0; i < 3; i++) {
-		tree = check_stream(profiles[i], &stream);
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		scenario = cases[i].profile->role;
+		tree = check_stream(cases[i].profile, &stream);
 		CHECK(tree.result.node_count == 1 && tree.result.levels == 1);
 		CHECK(apfs_node_decode(captured_node(&tree.capture, 0), BLOCK,
 		    &node));
 		CHECK(node.key_count == 0);
-		CHECK(node.flags == (APFS_NODE_ROOT | APFS_NODE_LEAF |
-		    (i == 0 ? 0 : APFS_NODE_FIXED_KV)));
-		CHECK(node.info.flags == footer_flags[i]);
-		CHECK(node.toc.len == table_lengths[i]);
+		CHECK(node.flags == cases[i].node_flags);
+		CHECK(node.toc.len == cases[i].table_bytes);
+		CHECK(node.info.flags == cases[i].tree_flags);
+		CHECK(node.info.node_size == 4096);
+		CHECK(node.info.key_size == cases[i].key_bytes);
+		CHECK(node.info.val_size == cases[i].val_bytes);
 		free(tree.capture.bytes);
 	}
+}
+
+static void
+test_volume_omap_two_levels_have_native_tables(void)
+{
+	stream_t stream = { .count = 112, .key_size = 16, .val_size = 16 };
+	packed_tree_t tree;
+	apfs_node_t node;
+
+	scenario = __func__;
+	/* A leaf holds 111 mappings; one more requires an index root. */
+	tree = check_stream(&apfs_pack_volume_omap, &stream);
+	CHECK(tree.result.levels == 2 && tree.result.node_count == 3);
+	for (uint64_t i = 0; i < tree.capture.count; i++) {
+		CHECK(apfs_node_decode(captured_node(&tree.capture, i), BLOCK,
+		    &node));
+		if (i + 1 == tree.capture.count) {
+			CHECK(node.flags == 0x5 && node.level == 1);
+			CHECK(node.toc.len == 576 && node.key_count == 2);
+			CHECK(node.info.flags == 0x12);
+			CHECK(node.info.node_size == 4096);
+			CHECK(node.info.key_size == 16 &&
+			    node.info.val_size == 16);
+		} else {
+			CHECK(node.flags == 0x6 && node.level == 0);
+			CHECK(node.toc.len == 448);
+		}
+	}
+	free(tree.capture.bytes);
+}
+
+static void
+test_extentref_roots_have_native_tables(void)
+{
+	typedef struct extentref_shape {
+		uint32_t records;
+		uint16_t table_bytes;
+	} extentref_shape_t;
+	const extentref_shape_t cases[] = {
+		{ .records = 9, .table_bytes = 128 },
+		{ .records = 19, .table_bytes = 192 },
+		{ .records = 27, .table_bytes = 256 },
+		{ .records = 28, .table_bytes = 256 }
+	};
+	stream_t stream = { .key_size = 8, .val_size = 20 };
+	packed_tree_t tree;
+	apfs_node_t node;
+
+	scenario = __func__;
+	/* Native captures: apfs-newfs-67108864-e5-links, -e6-clone,
+	 * apfs-newfs-268435456-e3-ci and -cs, respectively.
+	 */
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		stream.count = cases[i].records;
+		tree = check_stream(&apfs_pack_extentref, &stream);
+		CHECK(tree.result.node_count == 1 && tree.result.levels == 1);
+		CHECK(apfs_node_decode(captured_node(&tree.capture, 0), BLOCK,
+		    &node));
+		CHECK(node.key_count == cases[i].records);
+		CHECK(node.toc.len == cases[i].table_bytes);
+		CHECK(node.flags == 0x3);
+		CHECK(node.info.flags == 0x52);
+		free(tree.capture.bytes);
+	}
+}
+
+static void
+test_extentref_leaf_fits_110_unpadded_values_then_splits(void)
+{
+	stream_t stream = { .count = 110, .key_size = 8, .val_size = 20 };
+	packed_tree_t tree;
+	apfs_node_t node;
+
+	scenario = __func__;
+	/*
+	 * 896 TOC bytes + 110 * (8 + 20) = 3976, leaving 24 bytes.
+	 * Record 111 needs 4004 bytes: 110 is the exact capacity under
+	 * roundup8(max(n, 1)) * 8 + n * (8 + 20) <= 4000.
+	 * Padding each value to 24 bytes would prevent this one-node fit.
+	 */
+	tree = check_stream(&apfs_pack_extentref, &stream);
+	CHECK(tree.result.node_count == 1 && tree.result.levels == 1);
+	CHECK(apfs_node_decode(captured_node(&tree.capture, 0), BLOCK, &node));
+	CHECK(node.key_count == 110 && node.toc.len == 896);
+	CHECK(node.area.free_end - node.area.free_start == 24);
+	free(tree.capture.bytes);
+
+	stream.count = 111;
+	tree = check_stream(&apfs_pack_extentref, &stream);
+	CHECK(tree.result.node_count == 3 && tree.result.levels == 2);
+	CHECK(tree.result.level_nodes[0] == 2);
+	CHECK(apfs_node_decode(captured_node(&tree.capture, 0), BLOCK, &node));
+	CHECK(node.level == 0 && node.key_count == 110);
+	CHECK(apfs_node_decode(captured_node(&tree.capture, 1), BLOCK, &node));
+	CHECK(node.level == 0 && node.key_count == 1);
+	free(tree.capture.bytes);
 }
 
 static void
@@ -963,12 +1100,15 @@ test_nonroot_nodes_keep_room_for_a_footer(void)
 static unsigned
 omap_capacity(unsigned value_bytes)
 {
-	unsigned count, table_entries;
+	unsigned count, table_entries, minimum_entries;
 
+	minimum_entries = APFS_PACK_CAPACITY /
+	    (APFS_OMAP_KEY_BYTES + APFS_TOC_FIXED_BYTES + value_bytes);
+	minimum_entries = (minimum_entries + 7) / 8 * 8;
 	for (count = 1; ; count++) {
 		table_entries = (count + 7) / 8 * 8;
-		if (table_entries < 112)
-			table_entries = 112;
+		if (table_entries < minimum_entries)
+			table_entries = minimum_entries;
 		if (table_entries * APFS_TOC_FIXED_BYTES +
 		    count * (APFS_OMAP_KEY_BYTES + value_bytes) >
 		    APFS_PACK_CAPACITY)
@@ -993,7 +1133,7 @@ test_finish_grows_a_level_when_the_top_overflows(void)
 
 	scenario = __func__;
 	/*
-	 * 4*max(roundup(n,8),112) + n*(16+value) <= 4000 gives
+	 * A 448-byte leaf table and a 576-byte index table leave room for
 	 * 111 leaf records and 142 index children. Thus 111*142 = 15762
 	 * records fill a level-1 root; record 15763 needs a 143rd child.
 	 * Before finish only 142 leaves have closed, so that child is still
@@ -1124,28 +1264,27 @@ test_tree_taller_than_sixteen_levels_is_refused(void)
 static void
 test_malformed_profiles_are_refused_at_open(void)
 {
-	apfs_pack_profile_t profiles[9];
+	apfs_pack_profile_t profiles[8];
 	fsimg_error_t error;
 	fsimg_ctx_t *ctx;
 	apfs_pack_t *pack;
 	fsimg_stats_t before, after;
 
 	scenario = __func__;
-	for (unsigned i = 0; i < 9; i++)
+	for (unsigned i = 0; i < 8; i++)
 		profiles[i] = physical_aligned;
 	profiles[0].role = NULL;
 	profiles[1].fixed_key = APFS_OMAP_KEY_BYTES;
 	profiles[2].fixed_val = APFS_OMAP_VAL_BYTES;
-	profiles[3].toc_min = 1000;
-	profiles[4].tree_flags &= ~APFS_BTREE_PHYSICAL;
-	profiles[5].storage = APFS_OBJ_VIRTUAL;
-	profiles[6].tree_flags |= 0x200;
-	profiles[7].tree_flags |= APFS_BTREE_HASHED;
-	profiles[8].storage = 0x12345678;
+	profiles[3].tree_flags &= ~APFS_BTREE_PHYSICAL;
+	profiles[4].storage = APFS_OBJ_VIRTUAL;
+	profiles[5].tree_flags |= 0x200;
+	profiles[6].tree_flags |= APFS_BTREE_HASHED;
+	profiles[7].storage = 0x12345678;
 
 	ctx = context_new();
 	CHECK(fsimg_ctx_get_stats(ctx, &before, NULL) == FSIMG_OK);
-	for (unsigned i = 0; i < 9; i++) {
+	for (unsigned i = 0; i < 8; i++) {
 		/* A non-NULL input proves open clears the output on refusal. */
 		pack = (apfs_pack_t *)&profiles[i];
 		check_status(apfs_pack_open(ctx, &profiles[i], TEST_XID, NULL,
@@ -1324,6 +1463,9 @@ int
 main(void)
 {
 	test_empty_trees_have_native_tables_and_footers();
+	test_volume_omap_two_levels_have_native_tables();
+	test_extentref_roots_have_native_tables();
+	test_extentref_leaf_fits_110_unpadded_values_then_splits();
 	test_one_record_round_trips();
 	test_exactly_full_leaf_then_one_byte_more_splits();
 	test_fixed_leaf_overflow_leaves_one_record_and_two_children();

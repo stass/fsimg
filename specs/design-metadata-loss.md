@@ -131,7 +131,7 @@ umask. Timestamp defaults follow the format's explicit policy:
 | QNX4 | UTC host clock sampled once during planning, within 0 through 2147483647 | Epoch within that same interval |
 | QNX6 and ImageFS | UTC host clock sampled once during planning, within 0 through 4294967295 | Epoch within that same interval |
 | HFS Plus | UTC host clock sampled once during planning, within 1904-01-01 00:00:00 through 2040-02-06 06:28:15 UTC | Epoch within that same interval |
-| APFS | UTC host clock sampled once during planning, within the writer's [time range](design-apfs.md#writer-values), provisionally 1970-01-01 00:00:00 through 2262-04-11 23:47:16 UTC | Epoch within that same interval |
+| APFS | UTC host clock sampled once during planning, within the writer's [time range](design-apfs.md#writer-values), 1677-09-21 00:12:43.145224192 through 2262-04-11 23:47:16.854775807 UTC | Epoch within that same interval |
 | UDF | UTC host clock sampled once during planning, within years 1 through 9999 | Epoch within that same interval |
 | ISO 9660 | UTC host clock sampled once during planning, within 1900-01-01 00:00:00 through 2155-12-31 23:59:59 UTC | Epoch within that same interval |
 | EROFS | UTC host clock sampled once during planning, any signed 64-bit second count | Epoch, with zero nanoseconds |

@@ -54,6 +54,8 @@
 #define APFS_SUBTYPE_FREE_QUEUE		9u
 #define APFS_SUBTYPE_OMAP		11u
 #define APFS_SUBTYPE_FSTREE		14u	/* a volume's filesystem tree */
+#define APFS_SUBTYPE_EXTENTREF		15u	/* a volume's extent-reference tree */
+#define APFS_SUBTYPE_SNAPMETA		16u	/* a volume's snapshot tree */
 
 /* The container superblock. APFS_NX_BYTES ends its last decoded field. */
 #define APFS_NX_MAGIC			0x4253584eu	/* "NXSB" */
