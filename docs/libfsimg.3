@@ -38,9 +38,17 @@ lists
 The public C11 API supports FAT12, FAT16, FAT32, ordinary one-FAT exFAT,
 classic QNX6 Power-Safe volumes in either byte order, QNX4 volumes, and
 nonbootable QNX ImageFS images in either byte order.
-It reads and creates HFS Plus and HFSX volumes and EROFS volumes.
-It opens APFS containers for their volume information: the reader's
-directory operations fail with FSIMG_EUNSUPPORTED.
+It reads and creates HFS Plus and HFSX volumes, EROFS volumes and APFS
+containers.
+APFS reading opens an unencrypted container, bare or inside GPT, an Apple
+Partition Map or a DMG, and one volume of it; it lists, extracts and verifies
+files, directories, symbolic links, FIFOs and hard links, lists devices and
+sockets as read-only kinds, reads sparse files, clones and files compressed
+with zlib, LZVN or LZFSE, and delivers no extended attributes.
+Encrypted, Fusion and sealed volumes, and files compressed with LZBITMAP, are
+refused with FSIMG_EUNSUPPORTED.
+APFS writing creates a container of one volume with 4096-byte blocks that holds
+files, directories, symbolic links and FIFOs.
 EROFS reading includes chunk-based files and files, directories and
 symbolic links compressed with LZ4 or DEFLATE, and with MicroLZMA or
 Zstandard in a build with liblzma 5.4 or libzstd, inline compressed tails,
@@ -491,12 +499,15 @@ QNX4 names inode_capacity alone, the
 slot count, where zero selects 128 slots raised to the slots the names
 need.
 HFS Plus and HFSX name the UUID alone and store its first eight bytes.
-QNX6, QNX4, HFS Plus and HFSX store no volume_serial and ignore it.
+APFS names the UUID and the case sensitivity and stores the UUID as the
+volume UUID; it refuses an all-zero UUID with FSIMG_EINVAL unless
+FSIMG_WRITE_REPRODUCIBLE derives one from the epoch.
+QNX6, QNX4, HFS Plus, HFSX and APFS store no volume_serial and ignore it.
 The setting case_sensitive under FSIMG_SETTING_CASE_SENSITIVE, the APFS
 volume personality, follows the same rule: false, the default, writes a
 volume that compares names case-insensitively, and true one that compares
-them case-sensitively; no supported format names the bit, so true is
-FSIMG_EINVAL for every format, and the HFS Plus and HFSX formats choose
+them case-sensitively; only APFS names the bit, so true is
+FSIMG_EINVAL for every other format, and the HFS Plus and HFSX formats choose
 case sensitivity by name instead.
 The setting mountpoint, a copied string under FSIMG_SETTING_MOUNTPOINT,
 follows the same rule, as does fat_root_entries under

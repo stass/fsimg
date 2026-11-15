@@ -1,17 +1,41 @@
 fsimg 0.1.0 (unreleased)
 
-APFS containers can be inspected: `fsimg i` reports one volume of an
-unencrypted APFS container, bare or inside GPT, an Apple Partition Map or a
-DMG, with its name as the label, its UUID, the container's block size, block
-count and free space, and the volume's index, role, case sensitivity,
-checkpoint and object counts as details. `-o volume=INDEX` selects the
-volume by its slot index; a container holding one volume opens it without
-the setting, and the refusal for one holding several names the count and
-the lowest and highest occupied slots. A damaged block-0 magic opens only
-with `--force`, and a truncated container whose missing tail nothing read
-references reports the missing bytes. `t`, `x` and `W` fail as unsupported
-on APFS, and encrypted, Fusion and sealed volumes are refused as
-unsupported.
+APFS containers can be read, verified and created. `fsimg i`, `t`, `x`, `x -O`
+and `W` open an unencrypted APFS container, bare or inside GPT, an Apple
+Partition Map or a DMG. `i` reports one volume with its name as the label, its
+UUID, the container's block size, block count and free space, and the volume's
+index, role, case sensitivity, checkpoint and object counts as details.
+`-o volume=INDEX` selects the volume by its slot index; a container holding one
+volume opens it without the setting, and the refusal for one holding several
+names the count and the lowest and highest occupied slots. `t` and `x` deliver
+files, directories, symbolic links, FIFOs and hard links with owner, mode and
+all four timestamps, and list devices and sockets as read-only kinds. Sparse
+files read their holes as zeros, clones read, and files macOS compressed with
+zlib, LZVN or LZFSE read as their decoded bytes; an LZBITMAP file is refused as
+unsupported, and `fsimg --formats -v` names the decoders the build has.
+Extended attributes are neither listed nor extracted. `W` checks
+the container and the selected volume structurally: the space manager, the
+object maps, the trees, link and child counts, and sibling names that are equal
+under the volume's comparison. A damaged block-0 magic opens only with
+`--force`, and a truncated container whose missing tail nothing read
+references reports the missing bytes. Encrypted, Fusion and sealed volumes are
+refused as unsupported, and snapshots cannot be selected.
+
+`c -F apfs` creates a container with one volume of 4096-byte blocks, also
+inside `gpt` and `gpt/dmg`. Automatic sizing picks the smallest container that
+holds the tree, `-s` gives an exact size of up to 34359738368 blocks (128 TiB),
+`-o case=sensitive|insensitive` picks the volume personality, `-o uuid=` the
+volume UUID and `-L` the volume name. It stores files, directories, symbolic
+links and FIFOs with owner, mode and all four timestamps, and writes no holes,
+clones, compression, extended attributes, hard links, snapshots, sealing,
+encryption or second volume. Two sibling names equal under the volume's
+comparison are refused naming one path, and placement lists are refused.
+`fsck_apfs -n` accepts the output and macOS mounts it; macOS can add, rename
+and remove files on a bare or GPT output, the DMG fsimg writes being a
+read-only UDIF image, and `tools/apfs/qualify.rb` runs that cycle, with
+`tools/apfs/outputs.rb` building its outputs. Unless `-s` or `--free-space`
+leaves room, an automatically sized container has little free space, so macOS
+may run out of space adding to it.
 
 EROFS volumes, the Linux read-only filesystem, open, list and extract
 with 512- to 4096-byte blocks, including chunk-based files, whose holes
@@ -271,8 +295,8 @@ refused before the image is opened.
 names with or without regard to case, the APFS volume personality. The
 library takes it as the write option `case_sensitive`, false by default,
 under the new `FSIMG_SETTING_CASE_SENSITIVE` bit of `write_settings`, and
-the worker job carries it. No supported format takes the setting, so every
-format refuses `case=sensitive` before the worker starts; HFS Plus and HFSX
+the worker job carries it. APFS takes the setting; every other format
+refuses `case=sensitive` before the worker starts, and HFS Plus and HFSX
 choose case sensitivity by the format name instead.
 
 `-o root=N` sets the FAT12/FAT16 root directory capacity, the library's
