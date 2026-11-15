@@ -19,7 +19,9 @@
 # and the decmpfs header of each compressed file. Each snapshot is shown
 # with its metadata record, the volume superblock it names and that
 # superblock's file-system root resolved at the snapshot's XID, and its
-# extent-reference tree.
+# extent-reference tree. A sealed volume's file-system tree is hashed and
+# headerless: each node is checked against the SHA-256 digest its parent
+# stores, the root against the integrity metadata's root hash.
 #
 #   apfsdump.rb [--offset BYTES] [--volume N] [--records] [--json] IMAGE
 #
@@ -41,6 +43,7 @@
 # limit, never by a count read from the image alone. The exit status is 0
 # for a clean dump and 1 when there is any problem or the image cannot be
 # read as a container at all.
+require "digest"
 require "json"
 require "optparse"
 require "set"
@@ -114,6 +117,7 @@ module ApfsDump
   }.freeze
   OMAP_VAL_FLAGS = { 0x1 => "DELETED", 0x2 => "SAVED", 0x4 => "ENCRYPTED", 0x8 => "NOHEADER", 0x10 => "CRYPTO_GENERATION" }.freeze
   OMAP_VAL_DELETED = 0x1
+  OMAP_VAL_NOHEADER = 0x8
   OMAP_SNAPSHOT_FLAGS = { 0x1 => "DELETED", 0x2 => "REVERTED" }.freeze
   NODE_FLAGS = {
     0x1 => "ROOT", 0x2 => "LEAF", 0x4 => "FIXED_KV_SIZE", 0x8 => "HASHED", 0x10 => "NOHEADER",
@@ -122,11 +126,19 @@ module ApfsDump
   NODE_ROOT = 0x1
   NODE_LEAF = 0x2
   NODE_FIXED = 0x4
+  NODE_HASHED = 0x8
+  NODE_NOHEADER = 0x10
   TREE_FLAGS = {
     0x1 => "UINT64_KEYS", 0x2 => "SEQUENTIAL_INSERT", 0x4 => "ALLOW_GHOSTS", 0x8 => "EPHEMERAL",
     0x10 => "PHYSICAL", 0x20 => "NONPERSISTENT", 0x40 => "KV_NONALIGNED", 0x80 => "HASHED", 0x100 => "NOHEADER"
   }.freeze
   TREE_ALLOW_GHOSTS = 0x4
+  TREE_HASHED = 0x80
+  # A hashed index value: the child OID less the root OID, then the
+  # SHA-256 of the child node, the only hash this dumper checks.
+  SHA256_SIZE = 32
+  HASHED_INDEX_VALUE_SIZE = 8 + SHA256_SIZE
+  U64_MASK = (1 << 64) - 1
   BTOFF_INVALID = 0xFFFF
   SM_FLAGS = { 0x1 => "VERSIONED" }.freeze
   REAPER_FLAGS = { 0x1 => "BHM_FLAG", 0x2 => "CONTINUE" }.freeze
@@ -263,6 +275,7 @@ module ApfsDump
   }.freeze
   VOL_INCOMPAT_CASE_INSENSITIVE = 0x1
   VOL_INCOMPAT_NORMALIZATION_INSENSITIVE = 0x8
+  VOL_INCOMPAT_SEALED = 0x20
   VOL_FS_FLAGS = {
     0x1 => "UNENCRYPTED", 0x2 => "RESERVED_2", 0x4 => "RESERVED_4", 0x8 => "ONEKEY", 0x10 => "SPILLEDOVER",
     0x20 => "RUN_SPILLOVER_CLEANER", 0x40 => "ALWAYS_CHECK_EXTENTREF", 0x80 => "RESERVED_80", 0x100 => "RESERVED_100"
@@ -305,7 +318,14 @@ module ApfsDump
     [:broken_xid, 48, "Q<"]
   ].freeze
   INTEGRITY_FLAGS = { 0x1 => "SEAL_BROKEN" }.freeze
+  INTEGRITY_SEAL_BROKEN = 0x1
   HASH_TYPES = { 0 => "INVALID", 1 => "SHA256", 2 => "SHA512_256", 3 => "SHA384", 4 => "SHA512" }.freeze
+  HASH_SIZES = { 1 => 32, 2 => 32, 3 => 48, 4 => 64 }.freeze
+  HASH_SHA256 = 1
+  # Version 2 is the only one captured; its root hash starts past the
+  # header and the version's fixed and reserved fields.
+  INTEGRITY_VERSION = 2
+  INTEGRITY_ROOT_HASH_MIN = 128
 
   # ---- file-system records --------------------------------------------------
 
@@ -514,9 +534,14 @@ module ApfsDump
   end
 
   # One object as read from the image: its block address, bytes, decoded
-  # header, and whether its stored checksum matches.
-  Obj = Data.define(:addr, :bytes, :header, :computed) do
-    def self.from(addr, bytes) = new(addr:, bytes:, header: Layout.decode(bytes, OBJ_FIELDS), computed: Fletcher64.compute(bytes))
+  # header, and whether its stored checksum matches. A `headerless` object
+  # was read through an object-map mapping with the no-header flag: its
+  # first 32 bytes are not a header and hold no checksum, so the summary
+  # leaves them out and no header rule applies to it.
+  Obj = Data.define(:addr, :bytes, :header, :computed, :headerless) do
+    def self.from(addr, bytes, headerless: false)
+      new(addr:, bytes:, header: Layout.decode(bytes, OBJ_FIELDS), computed: Fletcher64.compute(bytes), headerless:)
+    end
 
     def cksum_ok? = header[:cksum] == computed
     def oid = header[:oid]
@@ -526,6 +551,8 @@ module ApfsDump
     def subtype = header[:subtype]
 
     def summary
+      return { addr:, headerless: true } if headerless
+
       { addr:, **header, cksum_ok: cksum_ok?, type_name: Layout.type_name(header[:type]),
         subtype_name: Layout.kind_name(subtype) }
     end
@@ -538,8 +565,12 @@ module ApfsDump
       summary.merge(fields)
     end
 
-    # The rules of the reference this object breaks, as messages.
+    # The rules of the reference this object breaks, as messages. A
+    # headerless object has no header to keep them, which is itself a
+    # problem wherever a header is expected.
     def header_problems(kind:, storage:, subtype: nil, oid: nil)
+      return ["mapped without a header"] if headerless
+
       [
         ("kind #{Layout.kind_name(self.kind)}, expected #{Layout.kind_name(kind)}" if self.kind != kind),
         ("storage #{STORAGE.fetch(self.storage, 'invalid')}, expected #{STORAGE.fetch(storage)}" if self.storage != storage),
@@ -624,6 +655,13 @@ module ApfsDump
   # `problem` receives a message for each rule a node breaks. The walk is
   # bounded: levels fall by one per step from at most MAX_TREE_LEVEL, a node
   # is visited once, and at most MAX_TREE_NODES nodes are read.
+  #
+  # In a hashed tree (a sealed volume's file-system tree) an index value is
+  # the child's OID less the root's OID, then the child's SHA-256; each
+  # child's digest is checked against it, and the root's against the digest
+  # #walk is given. Its nodes may be headerless, which only a digest binds
+  # to their OIDs, so a headerless node in a tree without hashes is a
+  # problem. A node whose digest does not match is reported and still walked.
   class BTree
     Entry = Data.define(:key, :value)
 
@@ -637,14 +675,18 @@ module ApfsDump
       @subtype = subtype
     end
 
-    def walk(root_oid, &each)
+    # `digest` is the SHA-256 the root must have, nil when nothing stores one.
+    def walk(root_oid, digest: nil, &each)
+      @root_oid = root_oid
+      # Set from the root's footer by #tree_info.
+      @ghosts = @hashed = false
       @nodes = []
       @records = []
       @each = each || @records.method(:<<)
       @decoded = 0
       @seen = Set.new
       @full = false
-      visit(root_oid, level: nil, info: nil)
+      visit(root_oid, level: nil, info: nil, digest:)
       { nodes: @nodes, records: @records }
     end
 
@@ -658,29 +700,53 @@ module ApfsDump
     end
 
     # `level` is the level the parent implies, nil for the root; `info` is
-    # the root's footer, which fixes the record sizes of every node.
-    def visit(oid, level:, info:)
+    # the root's footer, which fixes the record sizes of every node;
+    # `digest` is the SHA-256 stored for the node, nil when nothing stores
+    # one.
+    def visit(oid, level:, info:, digest:)
       return problem("node limit #{MAX_TREE_NODES} reached at oid #{oid}") if @seen.size >= MAX_TREE_NODES
       return problem("node #{oid} is reached twice") unless @seen.add?(oid)
 
       obj = @fetch.(oid)
       root = info.nil?
-      obj.header_problems(kind: root ? KIND_BTREE : KIND_BTREE_NODE, storage: @storage, subtype: @subtype)
-         .each { problem("node #{oid}: #{_1}") }
       node = Layout.decode(obj.bytes, NODE_FIELDS)
       info = tree_info(oid, obj) if root
-      return unless node_shape_ok?(oid, node, level:, root:)
+      # In a hashed tree the digest stands in for a header, whose place
+      # holds zeros; anywhere else a headerless node breaks the header rules.
+      if obj.headerless && @hashed
+        problem("node #{oid}: mapped without a header, but its first #{OBJ_HEADER_SIZE} bytes are not zero") unless
+          obj.bytes.byteslice(0, OBJ_HEADER_SIZE).delete("\0").empty?
+      else
+        obj.header_problems(kind: root ? KIND_BTREE : KIND_BTREE_NODE, storage: @storage, subtype: @subtype)
+           .each { problem("node #{oid}: #{_1}") }
+      end
+      digest_problems(oid, obj, digest:, root:)
+      return unless node_shape_ok?(oid, node, headerless: obj.headerless, level:, root:)
 
       entries = entries(oid, obj.bytes, node, info:, root:)
       @nodes << node_summary(obj, node, info:, root:, entries:)
-      node[:level].zero? ? leaf(entries) : children(entries, level: node[:level], info:)
+      node[:level].zero? ? leaf(entries) : children(oid, entries, level: node[:level], info:)
     rescue Error => e
       problem("node #{oid}: #{e.message}")
     end
 
+    # Compares the node's SHA-256 with the `digest` its parent, or for the
+    # root the integrity metadata, stores. A hashed tree's root must have one.
+    def digest_problems(oid, obj, digest:, root:)
+      if digest
+        actual = Digest::SHA256.digest(obj.bytes)
+        problem("node #{oid}: SHA-256 #{actual.unpack1('H*')} does not match the stored digest #{digest.unpack1('H*')}") if actual != digest
+      elsif @hashed && root
+        problem("root #{oid}: hashed tree has no root hash to check")
+      end
+    end
+
+    # Decodes the root's footer and keeps the two flags that change how
+    # every node of the tree is read: ghosts allowed, and hashed.
     def tree_info(oid, obj)
       info = Layout.decode(obj.bytes, TREE_INFO_FIELDS, base: @block_size - TREE_INFO_SIZE)
       @ghosts = info[:flags].anybits?(TREE_ALLOW_GHOSTS)
+      @hashed = info[:flags].anybits?(TREE_HASHED)
       problem("root #{oid}: footer node size #{info[:node_size]}, expected #{@block_size}") if info[:node_size] != @block_size
       if @codec.key_size && [info[:key_size], info[:val_size]] != [@codec.key_size, @codec.value_size]
         problem("root #{oid}: footer key and value sizes #{info[:key_size]}/#{info[:val_size]}, " \
@@ -691,12 +757,15 @@ module ApfsDump
 
     # Reports every flag and level rule the node breaks. Returns whether its
     # level is usable: a wrong level would let the walk recurse without bound.
-    def node_shape_ok?(oid, node, level:, root:)
+    # The HASHED flag follows the tree, NOHEADER the node's mapping.
+    def node_shape_ok?(oid, node, headerless:, level:, root:)
       as_implied = level.nil? || node[:level] == level
       in_bound = node[:level] <= MAX_TREE_LEVEL
       problems = [
         ("ROOT flag #{node[:flags].anybits?(NODE_ROOT)}, expected #{root}" if node[:flags].anybits?(NODE_ROOT) != root),
         ("LEAF flag disagrees with level #{node[:level]}" if node[:flags].anybits?(NODE_LEAF) != node[:level].zero?),
+        ("HASHED flag disagrees with the tree" if node[:flags].anybits?(NODE_HASHED) != @hashed),
+        ("NOHEADER flag disagrees with its mapping" if node[:flags].anybits?(NODE_NOHEADER) != headerless),
         ("level #{node[:level]}, expected #{level}" unless as_implied),
         ("level #{node[:level]} is above #{MAX_TREE_LEVEL}" unless in_bound)
       ].compact
@@ -786,11 +855,27 @@ module ApfsDump
       entry.key.bytesize == @codec.key_size && (entry.value.nil? || entry.value.bytesize == @codec.value_size)
     end
 
-    def children(entries, level:, info:)
+    # Visits the child each index entry of node `oid` names. A hashed
+    # index value holds the child's OID less the root's and the child's
+    # digest, and a sum past 64 bits is a problem, never a wrapped OID;
+    # any other holds the child's OID.
+    def children(oid, entries, level:, info:)
       entries.each do |entry|
-        next problem("index entry without a child") if entry.value.nil? || entry.value.bytesize < 8
+        if @hashed
+          size = entry.value.to_s.bytesize
+          next problem("node #{oid}: hashed index value of #{size} bytes, expected #{HASHED_INDEX_VALUE_SIZE}") if
+            size != HASHED_INDEX_VALUE_SIZE
 
-        visit(entry.value.unpack1("Q<"), level: level - 1, info:)
+          relative, digest = entry.value.unpack("Q<a#{SHA256_SIZE}")
+          child = @root_oid + relative
+          next problem("node #{oid}: child OID #{@root_oid} + #{relative} overflows 64 bits") if child > U64_MASK
+
+          visit(child, level: level - 1, info:, digest:)
+        else
+          next problem("index entry without a child") if entry.value.nil? || entry.value.bytesize < 8
+
+          visit(entry.value.unpack1("Q<"), level: level - 1, info:, digest: nil)
+        end
       end
     end
   end
@@ -865,15 +950,15 @@ module ApfsDump
     def in_container?(addr, blocks) = addr.positive? && blocks.positive? && addr + blocks <= @block_count
 
     # Reads the object at `addr`, `blocks` long, and reports a checksum
-    # mismatch. Block 0 is read through #block_zero.
-    def read_object(addr, what, blocks: 1)
+    # mismatch unless it is `headerless`. Block 0 is read through #block_zero.
+    def read_object(addr, what, blocks: 1, headerless: false)
       raise Error, "#{what}: blocks #{addr}+#{blocks} are outside the container (#{@block_count} blocks)" unless in_container?(addr, blocks)
 
-      checked(Obj.from(addr, @image.read(addr * @block_size, blocks * @block_size)), what)
+      checked(Obj.from(addr, @image.read(addr * @block_size, blocks * @block_size), headerless:), what)
     end
 
     def checked(obj, what)
-      return obj if obj.cksum_ok?
+      return obj if obj.headerless || obj.cksum_ok?
 
       problem(format("%s at block %d: checksum 0x%016x, computed 0x%016x", what, obj.addr, obj.header[:cksum], obj.computed))
       obj
@@ -895,10 +980,10 @@ module ApfsDump
     # Reads an object no other structure has read. A volume reads all its
     # objects so: a block that many trees, volumes or object-map entries
     # name is read and walked once.
-    def read_once(addr, what)
+    def read_once(addr, what, headerless: false)
       raise Error, "#{what}: block #{addr} is already read for another structure" unless claim(addr..addr)
 
-      read_object(addr, what)
+      read_object(addr, what, headerless:)
     end
 
     def raw_block(addr, what)
@@ -1663,6 +1748,9 @@ module ApfsDump
       # nil when either is unreadable.
       @omap_fields = nil
       @omap_snapshot_xids = nil
+      # The SHA-256 root hash of a sealed volume's integrity metadata, nil
+      # when there is none to check the file-system tree's root against.
+      @root_hash = nil
       # Data-stream IDs that decmpfs attributes name, each to its inode.
       @decmpfs_streams = {}
       # The first physical block of each data stream's extent at offset 0.
@@ -1676,11 +1764,15 @@ module ApfsDump
       problem(format("magic 0x%08x is not APSB", sb[:magic])) if sb[:magic] != APFS_MAGIC
       # Directory-record keys carry a name hash in a case- or
       # normalization-insensitive volume.
-      hashed = sb[:incompatible_features].anybits?(VOL_INCOMPAT_CASE_INSENSITIVE | VOL_INCOMPAT_NORMALIZATION_INSENSITIVE)
-      fs = Records.codec(hashed:)
+      name_hashed = sb[:incompatible_features].anybits?(VOL_INCOMPAT_CASE_INSENSITIVE | VOL_INCOMPAT_NORMALIZATION_INSENSITIVE)
+      fs = Records.codec(hashed: name_hashed)
+      sealed_problems(sb)
       omap = section(:omap) { object_map(sb[:omap_oid]) }
+      # Before the file-system tree, whose root hash it holds.
+      integrity_meta = section(:integrity_meta) { integrity_meta(sb[:integrity_meta_oid]) }
       fs_tree = section(:fs_tree) do
-        tree("file-system tree", oid: sb[:root_tree_oid], type: sb[:root_tree_type], subtype: KIND_FSTREE, codec: fs)
+        tree("file-system tree", oid: sb[:root_tree_oid], type: sb[:root_tree_type], subtype: KIND_FSTREE, codec: fs,
+                                 digest: @root_hash)
       end
       extentref_tree = section(:extentref_tree) do
         tree("extent-reference tree", oid: sb[:extentref_tree_oid], type: sb[:extentref_tree_type],
@@ -1693,15 +1785,16 @@ module ApfsDump
                                        each: ->(record) { @snapshots << record if record[:type] == J_TYPE_SNAP_METADATA })
       end
       {
-        **sb, role_name: VOL_ROLES.fetch(sb[:role]) { format("unknown(0x%x)", _1) }, drec_keys: hashed ? "hashed" : "plain",
+        **sb, role_name: VOL_ROLES.fetch(sb[:role]) { format("unknown(0x%x)", _1) }, drec_keys: name_hashed ? "hashed" : "plain",
         omap:, fs_tree:, extentref_tree:,
         snap_meta_tree: meta_tree,
         # After the live trees and the object map, which it reads.
         snapshots: section(:snapshots) { snapshots(sb, fs, meta_read: meta_tree.nil? || meta_tree[:node_count].to_i.positive?) },
         fext_tree: section(:fext_tree) do
-          tree("file extent tree", oid: sb[:fext_tree_oid], type: sb[:fext_tree_type], subtype: KIND_FEXT_TREE, codec: FEXT_CODEC)
+          tree("file extent tree", oid: sb[:fext_tree_oid], type: sb[:fext_tree_type], subtype: KIND_FEXT_TREE, codec: FEXT_CODEC,
+                                   each: fext_rules)
         end,
-        integrity_meta: section(:integrity_meta) { integrity_meta(sb[:integrity_meta_oid]) },
+        integrity_meta:,
         summary: section(:summary) { @summary.to_h },
         compressed: section(:compressed) { compressed }
       }
@@ -1746,13 +1839,14 @@ module ApfsDump
     # superblock's object type for it, which says whether `oid` is virtual
     # or physical. Each record has its problems reported, goes to `each`
     # and, in a `live` tree, to the summary; it is kept only with `records`.
-    def tree(what, oid:, type:, subtype:, codec:, live: true, each: nil)
+    # `digest` is the SHA-256 the root must have.
+    def tree(what, oid:, type:, subtype:, codec:, live: true, each: nil, digest: nil)
       return nil if oid.zero?
 
       problem(format("%s: type 0x%x is not a B-tree", what, type)) if (type & 0xFFFF) != KIND_BTREE
       kept = []
       count = 0
-      walk = btree(what, codec, storage: type & STORAGE_MASK, subtype:).walk(oid) do |record|
+      walk = btree(what, codec, storage: type & STORAGE_MASK, subtype:).walk(oid, digest:) do |record|
         count += 1
         note(what, record, live:)
         each&.(record)
@@ -1895,7 +1989,7 @@ module ApfsDump
     end
 
     # The object a virtual OID names in the volume object map at the
-    # superblock's XID.
+    # superblock's XID, headerless when its mapping has the no-header flag.
     def virtual(oid, what)
       raise Error, "the volume object map is unreadable" unless @omap
 
@@ -1903,16 +1997,74 @@ module ApfsDump
       raise Error, "virtual oid #{oid} is not in the volume object map at xid #{@obj.xid}" unless found
       raise Error, "virtual oid #{oid} is deleted in the volume object map" if found[:flags].anybits?(OMAP_VAL_DELETED)
 
-      @read.(found[:paddr], "#{@label} #{what} (virtual oid #{oid})")
+      @read.(found[:paddr], "#{@label} #{what} (virtual oid #{oid})", headerless: found[:flags].anybits?(OMAP_VAL_NOHEADER))
     end
 
+    # The sealed feature names a sealed volume, which has integrity metadata
+    # and a file extent tree. The converse is not checked.
+    def sealed_problems(sb)
+      return unless sb[:incompatible_features].anybits?(VOL_INCOMPAT_SEALED)
+
+      problem("sealed volume: no integrity metadata") if sb[:integrity_meta_oid].zero?
+      problem("sealed volume: no file extent tree") if sb[:fext_tree_oid].zero?
+    end
+
+    # The integrity metadata of a sealed volume. Its root hash, when it is a
+    # SHA-256 inside the object, becomes @root_hash, which the file-system
+    # tree's root must match. A broken seal is reported, since its digests
+    # are not expected to match.
     def integrity_meta(oid)
       return nil if oid.zero?
 
       obj = virtual(oid, "integrity metadata")
       obj.header_problems(kind: KIND_INTEGRITY_META, storage: STORAGE_VIRTUAL, oid:).each { problem("integrity metadata: #{_1}") }
       fields = Layout.with_names(Layout.decode(obj.bytes, INTEGRITY_META_FIELDS), flags: INTEGRITY_FLAGS)
-      obj.document({ **fields, hash_type_name: HASH_TYPES.fetch(fields[:hash_type]) { "unknown(#{fields[:hash_type]})" } })
+      problem("integrity metadata: version #{fields[:version]}, expected #{INTEGRITY_VERSION}") if fields[:version] != INTEGRITY_VERSION
+      if fields[:flags].anybits?(INTEGRITY_SEAL_BROKEN) || fields[:broken_xid].positive?
+        problem("integrity metadata: seal broken at xid #{fields[:broken_xid]}")
+      end
+      root_hash = stored_root_hash(obj.bytes, fields)
+      if fields[:hash_type] == HASH_SHA256
+        @root_hash = root_hash
+      else
+        problem("integrity metadata: hash type #{fields[:hash_type]} is not checked; only SHA-256 is")
+      end
+      obj.document({ **fields, hash_type_name: HASH_TYPES.fetch(fields[:hash_type]) { "unknown(#{fields[:hash_type]})" },
+                     root_hash: root_hash&.unpack1("H*") })
+    end
+
+    # The root hash at the offset the integrity metadata names, the hash
+    # type's length; nil for an unknown hash type, and nil and a problem
+    # when it is not wholly past the fixed fields and inside the object.
+    def stored_root_hash(bytes, fields)
+      size = HASH_SIZES[fields[:hash_type]]
+      return nil unless size
+
+      offset = fields[:root_hash_offset]
+      unless offset >= INTEGRITY_ROOT_HASH_MIN && offset + size <= bytes.bytesize
+        problem("integrity metadata: root hash at #{offset}+#{size} is outside #{INTEGRITY_ROOT_HASH_MIN}...#{bytes.bytesize}")
+        return nil
+      end
+      bytes.byteslice(offset, size)
+    end
+
+    # The rules of a sealed file extent tree's records, as a callback for
+    # #tree: keys ascend by private ID then logical offset, and each extent
+    # has no flags and a length that is a positive multiple of the block
+    # size. A ghost record has a key only.
+    def fext_rules
+      last = nil
+      lambda do |record|
+        key = record.values_at(:private_id, :logical_addr)
+        at = "file extent tree: extent #{key.join('/')}"
+        problem("#{at}: key does not follow #{last.join('/')}") if last && (key <=> last) <= 0
+        last = key
+        next unless record[:length]
+
+        problem(format("%s: flags 0x%x, expected 0", at, record[:extent_flags])) unless record[:extent_flags].zero?
+        problem("#{at}: length #{record[:length]} is not a positive multiple of #{@block_size}") unless
+          record[:length].positive? && (record[:length] % @block_size).zero?
+      end
     end
   end
 

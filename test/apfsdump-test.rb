@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Stanislav Sedov <stas@deglitch.com>
 
+require "digest"
 require "minitest/autorun"
 require "stringio"
 require_relative "../tools/apfs/apfsdump"
@@ -11,6 +12,18 @@ class ApfsDumpTest < Minitest::Test
   include ApfsDump
 
   BLOCK = 4096
+  SEALED_VOLUME_FEATURE = 0x20
+  NODE_HASHED_FLAG = 0x8
+  NODE_NOHEADER_FLAG = 0x10
+  OMAP_NOHEADER_FLAG = 0x8
+  SEALED_TREE_FLAGS = 0x1C2
+  FS_ROOT_OID = 1028
+  ROOT_HASH_OFFSET = 128
+  FREE_SPACE_OFFSET = BLOCK / 2
+  SEALED_LEAF_BLOCK = 18
+  SEALED_LEAF_OID = 1029
+  INTEGRITY_META_OID = 1030
+  INTEGRITY_META_BLOCK = 19
 
   # An in-memory image with the two calls Image makes of a file.
   BytesIO = Data.define(:bytes) do
@@ -69,7 +82,7 @@ class ApfsDumpTest < Minitest::Test
   def test_omap_leaf_records_are_decoded_from_a_root_node
     node = node_block(oid: 9, level: 0, entries: [[[1026, 2].pack("Q<Q<"), [0, BLOCK, 50].pack("L<L<q<")],
                                                   [[1027, 3].pack("Q<Q<"), [1, BLOCK, 51].pack("L<L<q<")]])
-    tree, problems = walk(9 => node)
+    tree, problems = walk({ 9 => node })
 
     assert_empty problems
     assert_equal [[1026, 2, 50, ""], [1027, 3, 51, "DELETED"]], tree[:records].map { _1.values_at(:oid, :xid, :paddr, :flags_names) }
@@ -78,7 +91,7 @@ class ApfsDumpTest < Minitest::Test
   def test_a_key_count_beyond_the_table_of_contents_is_reported_and_bounded
     node = node_block(oid: 9, level: 0, entries: [[[1026, 2].pack("Q<Q<"), [0, BLOCK, 50].pack("L<L<q<")]],
                       nkeys: 0xFFFF_FFFF)
-    tree, problems = walk(9 => node)
+    tree, problems = walk({ 9 => node })
 
     assert_match(/4294967295 keys, the table of contents holds #{TOC_ENTRIES}/, problems.first)
     assert_equal 1, tree[:records].size
@@ -98,7 +111,7 @@ class ApfsDumpTest < Minitest::Test
 
   def test_a_ghost_in_a_tree_without_ghosts_is_reported_and_dropped
     node = node_block(oid: 9, level: 0, entries: [[[1026, 2].pack("Q<Q<"), nil]])
-    tree, problems = walk(9 => node)
+    tree, problems = walk({ 9 => node })
 
     assert_equal [], tree[:records]
     assert(problems.any? { _1.include?("ghost record in a tree that does not allow ghosts") })
@@ -106,10 +119,123 @@ class ApfsDumpTest < Minitest::Test
 
   def test_an_index_node_naming_itself_stops_the_walk
     node = node_block(oid: 9, level: 1, entries: [[[1, 0].pack("Q<Q<"), [9].pack("Q<")]])
-    tree, problems = walk(9 => node)
+    tree, problems = walk({ 9 => node })
 
     assert_equal 1, tree[:nodes].size
     assert(problems.any? { _1.include?("reached twice") })
+  end
+
+  def test_a_headerless_hashed_tree_decodes_every_leaf_record
+    nodes = hashed_tree_nodes
+
+    tree, problems = walk_hashed(nodes, digest: Digest::SHA256.digest(nodes.fetch(100)))
+
+    assert_empty problems
+    assert_equal 3, tree[:nodes].size
+    assert_equal [fs_record(INODE_RECORD), fs_record(DREC_RECORD)], tree[:records]
+  end
+
+  def test_a_hashed_child_oid_past_64_bits_is_reported
+    root_oid = 100
+    child_oid = 99
+    child = hashed_node_block(level: 0, entries: [INODE_RECORD], root: false)
+    relative_oid = 2**64 - 1
+    entries = [[INODE_RECORD.first, [relative_oid].pack("Q<") + Digest::SHA256.digest(child)]]
+    root = hashed_node_block(level: 1, entries:, root: true)
+    nodes = { root_oid => root, child_oid => child }
+    fetched = []
+    fetch = lambda do |oid|
+      fetched << oid
+      bytes = nodes.fetch(oid) { raise Error, "unexpected virtual OID #{oid}" }
+      Obj.from(oid, bytes, headerless: true)
+    end
+
+    tree, problems = walk_hashed(nodes, digest: Digest::SHA256.digest(root), fetch:)
+
+    assert_equal 1, problems.size
+    assert_match(/overflows 64 bits/, problems.first)
+    assert_equal [root_oid], fetched
+    assert_empty tree[:records]
+  end
+
+  def test_a_headerless_node_in_a_tree_without_hashes_is_reported
+    node = fs_node_block(oid: 0, records: [INODE_RECORD], headerless: true,
+                         node_flags: NODE_ROOT | NODE_LEAF | NODE_NOHEADER_FLAG)
+
+    _tree, problems = walk_hashed({ 100 => node }, digest: nil)
+
+    assert_equal ["tree: node 100: mapped without a header"], problems
+  end
+
+  def test_a_headerless_hashed_node_with_nonzero_header_bytes_is_reported
+    node = hashed_node_block(level: 0, entries: [INODE_RECORD], root: true)
+    node.setbyte(31, 1)
+
+    _tree, problems = walk_hashed({ 100 => node }, digest: Digest::SHA256.digest(node))
+
+    assert_equal ["tree: node 100: mapped without a header, but its first 32 bytes are not zero"], problems
+  end
+
+  def test_a_node_hashed_flag_that_disagrees_with_the_tree_is_reported
+    node = fs_node_block(oid: 0, records: [INODE_RECORD], headerless: true,
+                         tree_flags: SEALED_TREE_FLAGS,
+                         node_flags: NODE_ROOT | NODE_LEAF | NODE_NOHEADER_FLAG)
+
+    _tree, problems = walk_hashed({ 100 => node }, digest: Digest::SHA256.digest(node))
+
+    assert_equal ["tree: node 100: HASHED flag disagrees with the tree"], problems
+  end
+
+  def test_a_node_noheader_flag_that_disagrees_with_its_mapping_is_reported
+    node = fs_node_block(oid: 0, records: [INODE_RECORD], headerless: true,
+                         tree_flags: SEALED_TREE_FLAGS,
+                         node_flags: NODE_ROOT | NODE_LEAF | NODE_HASHED_FLAG)
+
+    _tree, problems = walk_hashed({ 100 => node }, digest: Digest::SHA256.digest(node))
+
+    assert_equal ["tree: node 100: NOHEADER flag disagrees with its mapping"], problems
+  end
+
+  def test_a_hashed_index_value_must_have_exactly_40_bytes
+    [8, 39, 41].each do |size|
+      entries = [[INODE_RECORD.first, "\0".b * size]]
+      node = hashed_node_block(level: 1, entries:, root: true)
+
+      tree, problems = walk_hashed({ 100 => node }, digest: Digest::SHA256.digest(node))
+
+      assert_equal ["tree: node 100: hashed index value of #{size} bytes, expected 40"], problems
+      assert_equal [], tree[:records]
+    end
+  end
+
+  def test_a_bad_leaf_digest_names_the_leaf_and_preserves_the_other_leaf_records
+    nodes = hashed_tree_nodes
+    root_digest = Digest::SHA256.digest(nodes.fetch(100))
+    stored_digest = Digest::SHA256.hexdigest(nodes.fetch(101))
+    damaged = flip_free_space(nodes.fetch(101))
+    nodes = nodes.merge(101 => damaged)
+
+    tree, problems = walk_hashed(nodes, digest: root_digest)
+
+    assert_equal ["tree: node 101: SHA-256 #{Digest::SHA256.hexdigest(damaged)} does not match the stored digest #{stored_digest}"],
+                 problems
+    assert_includes tree[:records], fs_record(DREC_RECORD)
+  end
+
+  def test_a_wrong_root_digest_names_the_root_oid
+    nodes = hashed_tree_nodes
+    wrong_digest = Digest::SHA256.digest("wrong root")
+
+    _tree, problems = walk_hashed(nodes, digest: wrong_digest)
+
+    assert_equal ["tree: node 100: SHA-256 #{Digest::SHA256.hexdigest(nodes.fetch(100))} does not match the stored digest #{wrong_digest.unpack1('H*')}"],
+                 problems
+  end
+
+  def test_a_hashed_tree_without_a_root_digest_reports_the_missing_hash
+    _tree, problems = walk_hashed(hashed_tree_nodes, digest: nil)
+
+    assert_equal ["tree: root 100: hashed tree has no root hash to check"], problems
   end
 
   def test_a_damaged_container_is_reported_section_by_section
@@ -186,6 +312,149 @@ class ApfsDumpTest < Minitest::Test
     assert_equal %w[INODE XATTR DIR_REC FILE_EXTENT], volume[:fs_tree][:records].map { _1[:type_name] }
     assert_equal({ "DIR_REC" => 1, "FEXT" => 1, "FILE_EXTENT" => 1, "INODE" => 1, "XATTR" => 1 }, volume[:summary][:by_type])
     assert_equal [70_000, 73_728, 4096], volume[:summary].values_at(:dstream_size, :file_extent_bytes, :fext_bytes)
+  end
+
+  def test_a_sealed_volume_checks_headerless_nodes_and_reports_its_root_hash
+    bytes = container_image(sealed: true)
+    root = bytes.byteslice(15 * BLOCK, BLOCK)
+    container = Container.new(Image.new(BytesIO.new(bytes:)), records: true)
+
+    volume = container.dump[:volumes].first
+
+    assert_empty container.problems
+    assert_equal [2, 3], volume[:fs_tree].values_at(:node_count, :record_count)
+    assert_equal %w[INODE XATTR DIR_REC], volume[:fs_tree][:records].map { _1[:type_name] }
+    assert_equal Digest::SHA256.hexdigest(root), volume[:integrity_meta][:root_hash]
+  end
+
+  def test_a_sealed_volume_reports_a_leaf_changed_in_free_space
+    bytes = container_image(sealed: true)
+    leaf = bytes.byteslice(SEALED_LEAF_BLOCK * BLOCK, BLOCK)
+    damaged = flip_free_space(leaf)
+    put(bytes, SEALED_LEAF_BLOCK * BLOCK, damaged)
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    container.dump
+
+    assert_equal ["volume 0 file-system tree: node #{SEALED_LEAF_OID}: SHA-256 #{Digest::SHA256.hexdigest(damaged)} does not match the stored digest #{Digest::SHA256.hexdigest(leaf)}"],
+                 container.problems
+  end
+
+  def test_a_sealed_file_extent_with_nonzero_flags_is_reported
+    bytes = container_image(sealed: true, fext_flags: 1)
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    container.dump
+
+    assert_equal ["volume 0 file extent tree: extent 40/0: flags 0x1, expected 0"], container.problems
+  end
+
+  def test_a_sealed_file_extent_with_a_partial_block_length_is_reported
+    bytes = container_image(sealed: true, fext_length: BLOCK + 1)
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    container.dump
+
+    assert_equal ["volume 0 file extent tree: extent 40/0: length 4097 is not a positive multiple of 4096"], container.problems
+  end
+
+  def test_a_sealed_file_extent_with_zero_length_is_reported
+    bytes = container_image(sealed: true, fext_length: 0)
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    container.dump
+
+    assert_equal ["volume 0 file extent tree: extent 40/0: length 0 is not a positive multiple of 4096"], container.problems
+  end
+
+  def test_integrity_metadata_mapped_without_a_header_is_reported
+    bytes = container_image(sealed: true, integrity_mapping_flags: OMAP_NOHEADER_FLAG)
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    container.dump
+
+    assert_equal ["volume 0 integrity metadata: mapped without a header"], container.problems
+  end
+
+  def test_an_unsupported_integrity_metadata_version_is_reported
+    bytes = container_image(sealed: true, integrity_meta: { version: 1 })
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    container.dump
+
+    assert_equal ["volume 0 integrity metadata: version 1, expected 2"], container.problems
+  end
+
+  def test_an_integrity_root_hash_must_fit_past_the_fixed_fields_and_inside_the_block
+    [ROOT_HASH_OFFSET - 1, BLOCK - 31].each do |offset|
+      bytes = container_image(sealed: true, integrity_meta: { root_hash_offset: offset })
+      container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+      container.dump
+
+      assert_equal ["volume 0 integrity metadata: root hash at #{offset}+32 is outside 128...4096",
+                    "volume 0 file-system tree: root #{FS_ROOT_OID}: hashed tree has no root hash to check"],
+                   container.problems
+    end
+  end
+
+  def test_an_integrity_hash_type_other_than_sha256_is_reported
+    bytes = container_image(sealed: true, integrity_meta: { hash_type: 2 })
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    container.dump
+
+    assert_equal ["volume 0 integrity metadata: hash type 2 is not checked; only SHA-256 is",
+                  "volume 0 file-system tree: root #{FS_ROOT_OID}: hashed tree has no root hash to check"],
+                 container.problems
+  end
+
+  def test_either_a_broken_seal_flag_or_a_broken_xid_reports_the_seal
+    [{ flags: 1, broken_xid: 0 }, { flags: 0, broken_xid: 7 }].each do |metadata|
+      bytes = container_image(sealed: true, integrity_meta: metadata)
+      container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+      container.dump
+
+      assert_equal ["volume 0 integrity metadata: seal broken at xid #{metadata.fetch(:broken_xid)}"],
+                   container.problems, metadata.inspect
+    end
+  end
+
+  def test_a_sealed_volume_without_integrity_metadata_is_reported
+    bytes = container_image(sealed: true, integrity_meta_oid: 0)
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    container.dump
+
+    assert_equal ["volume 0 sealed volume: no integrity metadata",
+                  "volume 0 file-system tree: root #{FS_ROOT_OID}: hashed tree has no root hash to check"],
+                 container.problems
+  end
+
+  def test_a_sealed_volume_without_a_file_extent_tree_is_reported
+    bytes = container_image(sealed: true, fext_oid: 0)
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    container.dump
+
+    assert_equal ["volume 0 sealed volume: no file extent tree",
+                  "volume 0 decmpfs stream 40 of inode 24 has no extent at offset 0"], container.problems
+  end
+
+  def test_file_extent_keys_must_increase_by_id_then_offset_without_duplicates
+    [[41, 0], [40, BLOCK], [40, 0]].each do |previous|
+      records = [previous, [40, 0]].map do |id, offset|
+        [[id, offset].pack("Q<Q<"), [BLOCK, 16].pack("Q<Q<")]
+      end
+      bytes = container_image(sealed: true, fext_records: records)
+      container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+      container.dump
+
+      assert_equal ["volume 0 file extent tree: extent 40/0: key does not follow #{previous.join('/')}"],
+                   container.problems
+    end
   end
 
   # The decmpfs attribute of file 24 names data stream 40, whose extent at
@@ -559,12 +828,38 @@ class ApfsDumpTest < Minitest::Test
     [[(J_TYPE_XATTR << 60) | obj_id, name.bytesize + 1].pack("Q<S<") + "#{name}\0", [XATTR_DATA_EMBEDDED, data.bytesize].pack("S<S<") + data]
   end
 
-  def walk(nodes)
+  def walk(nodes, fetch: nil, codec: OMAP_CODEC, storage: STORAGE_PHYSICAL, subtype: KIND_OMAP, **options)
     problems = []
-    tree = BTree.new(fetch: ->(oid) { Obj.from(oid, nodes.fetch(oid)) }, problem: ->(text) { problems << text },
-                     codec: OMAP_CODEC, what: "tree", block_size: BLOCK, storage: STORAGE_PHYSICAL,
-                     subtype: KIND_OMAP).walk(nodes.keys.first)
+    fetch ||= ->(oid) { Obj.from(oid, nodes.fetch(oid)) }
+    tree = BTree.new(fetch:, problem: ->(text) { problems << text },
+                     codec:, what: "tree", block_size: BLOCK, storage:,
+                     subtype:).walk(nodes.keys.first, **options)
     [tree, problems]
+  end
+
+  def walk_hashed(nodes, digest:, fetch: nil)
+    fetch ||= ->(oid) { Obj.from(oid, nodes.fetch(oid), headerless: true) }
+    name_hashed_records = Records.codec(hashed: true)
+    walk(nodes, fetch:, digest:, codec: name_hashed_records,
+         storage: STORAGE_VIRTUAL, subtype: KIND_FSTREE)
+  end
+
+  # Child OIDs 101 and 102 are stored as offsets 1 and 2 from root 100.
+  def hashed_tree_nodes
+    first = hashed_node_block(level: 0, entries: [INODE_RECORD], root: false)
+    second = hashed_node_block(level: 0, entries: [DREC_RECORD], root: false)
+    entries = [[INODE_RECORD.first, [1].pack("Q<") + Digest::SHA256.digest(first)],
+               [DREC_RECORD.first, [2].pack("Q<") + Digest::SHA256.digest(second)]]
+    { 100 => hashed_node_block(level: 1, entries:, root: true), 101 => first, 102 => second }
+  end
+
+  def hashed_node_block(level:, entries:, root:)
+    fs_node_block(oid: 0, records: entries, level:, root:, headerless: true,
+                  tree_flags: SEALED_TREE_FLAGS)
+  end
+
+  def flip_free_space(bytes)
+    bytes.dup.tap { _1.setbyte(FREE_SPACE_OFFSET, _1.getbyte(FREE_SPACE_OFFSET) ^ 1) }
   end
 
   # Table-of-contents entries in a test node: 4-byte kvoff_t entries.
@@ -610,22 +905,46 @@ class ApfsDumpTest < Minitest::Test
   # file-system tree's virtual root 1028 to block 15. The volume's file
   # extent tree is at 17; the decmpfs data it points to is at 16.
   def container_image(cibs: [20], spaceman_size: BLOCK, fs_oid: [1026], fext_oid: 17,
-                      older_layout: false, extra_blocks: {})
+                      older_layout: false, extra_blocks: {}, sealed: false, fext_flags: 0, fext_length: BLOCK,
+                      fext_records: nil, integrity_meta: {}, integrity_mapping_flags: 0,
+                      integrity_meta_oid: sealed ? INTEGRITY_META_OID : 0)
     sb = seal(superblock_block(block_count: 64, fs_oid:, omap_oid: 10))
+    fext_records ||= [[[40, 0].pack("Q<Q<"), [(fext_flags << 56) | fext_length, 16].pack("Q<Q<")]]
     omap_record = [[1026, 1].pack("Q<Q<"), [0, BLOCK, 12].pack("L<L<q<")] # (oid, xid) -> (flags, size, paddr)
     blocks = {
       0 => sb, 1 => checkpoint_map(spaceman_size:), 2 => sb,
       3 => spaceman(cibs:, older_layout:), 4 => object(oid: 1025, type: 0x8000_0011, fields: { 64 => [1].pack("L<") }), # reaper flags
       10 => omap(oid: 10, tree: 11), 11 => node_block(oid: 11, level: 0, entries: [omap_record]),
-      12 => volume_superblock(fext_oid:),
+      12 => volume_superblock(fext_oid:, sealed:, integrity_meta_oid:),
       13 => omap(oid: 13, tree: 14), 14 => node_block(oid: 14, level: 0, entries: [fs_root_record]),
-      15 => fs_node_block(oid: 1028, records: [INODE_RECORD, DECMPFS_STREAM_RECORD, DREC_RECORD, FILE_EXTENT_RECORD]),
+      15 => fs_node_block(oid: FS_ROOT_OID, records: [INODE_RECORD, DECMPFS_STREAM_RECORD, DREC_RECORD, FILE_EXTENT_RECORD]),
       16 => [DECMPFS_MAGIC, 7, 20_000].pack("L<L<Q<").ljust(BLOCK, "\0"),
-      17 => node_block(oid: 17, level: 0, entries: [[[40, 0].pack("Q<Q<"), [4096, 16].pack("Q<Q<")]], subtype: KIND_FEXT_TREE),
+      17 => node_block(oid: 17, level: 0, entries: fext_records, subtype: KIND_FEXT_TREE),
       20 => chunk_info, 21 => bitmap(25), 22 => bitmap(1)
     }
+    if sealed
+      leaf = hashed_node_block(level: 0, entries: [INODE_RECORD, DECMPFS_STREAM_RECORD, DREC_RECORD], root: false)
+      root = hashed_node_block(level: 1, root: true,
+                               entries: [[INODE_RECORD.first, [SEALED_LEAF_OID - FS_ROOT_OID].pack("Q<") + Digest::SHA256.digest(leaf)]])
+      mappings = [fs_root_record(flags: OMAP_NOHEADER_FLAG),
+                  fs_root_record(oid: SEALED_LEAF_OID, paddr: SEALED_LEAF_BLOCK, flags: OMAP_NOHEADER_FLAG),
+                  fs_root_record(oid: INTEGRITY_META_OID, paddr: INTEGRITY_META_BLOCK, flags: integrity_mapping_flags)]
+      blocks = blocks.merge(
+        14 => node_block(oid: 14, level: 0, entries: mappings), 15 => root, SEALED_LEAF_BLOCK => leaf,
+        INTEGRITY_META_BLOCK => integrity_meta_block(root_hash: Digest::SHA256.digest(root), **integrity_meta)
+      )
+    end
     blocks = blocks.merge(extra_blocks)
     Array.new(64) { blocks.fetch(_1) { "\0".b * BLOCK } }.join
+  end
+
+  # The hash stays at ROOT_HASH_OFFSET; overriding its declared offset
+  # tests invalid pointers without overwriting fields or extending the block.
+  def integrity_meta_block(root_hash:, version: 2, flags: 0, hash_type: 1,
+                           root_hash_offset: ROOT_HASH_OFFSET, broken_xid: 0)
+    object(oid: INTEGRITY_META_OID, type: KIND_INTEGRITY_META,
+           fields: { 32 => [version, flags, hash_type, root_hash_offset, broken_xid].pack("L<4Q<"),
+                     ROOT_HASH_OFFSET => root_hash })
   end
 
   def object(oid:, type:, fields: {}, subtype: 0, xid: 1)
@@ -679,18 +998,20 @@ class ApfsDumpTest < Minitest::Test
   # rooted at 1028 by default, named TEST. The caller supplies the file
   # extent tree; extent-reference and snapshot metadata trees default to absent.
   def volume_superblock(fext_oid:, oid: 1026, xid: 1, type: KIND_FS, extentref_oid: 0,
-                        snap_meta_oid: 0, num_snapshots: 0, num_files: 0, root_oid: 1028)
+                        snap_meta_oid: 0, num_snapshots: 0, num_files: 0, root_oid: FS_ROOT_OID,
+                        sealed: false, integrity_meta_oid: 0)
+    incompatible = VOL_INCOMPAT_CASE_INSENSITIVE | (sealed ? SEALED_VOLUME_FEATURE : 0)
     extentref_type = extentref_oid.zero? ? 0 : 0x4000_0002
     snap_meta_type = snap_meta_oid.zero? ? 0 : 0x4000_0002
-    object(oid:, xid:, type:, fields: { 32 => "APSB", 56 => [VOL_INCOMPAT_CASE_INSENSITIVE].pack("Q<"),
+    object(oid:, xid:, type:, fields: { 32 => "APSB", 56 => [incompatible].pack("Q<"),
                                                116 => [KIND_BTREE, extentref_type, snap_meta_type].pack("L<3"),
                                                128 => [13, root_oid, extentref_oid, snap_meta_oid].pack("Q<4"),
                                                184 => [num_files].pack("Q<"), 216 => [num_snapshots].pack("Q<"),
-                                               704 => "TEST", 1032 => [fext_oid, 0x4000_0002].pack("Q<L<") })
+                                               704 => "TEST", 1024 => [integrity_meta_oid].pack("Q<"), 1032 => [fext_oid, 0x4000_0002].pack("Q<L<") })
   end
 
   # Virtual OID 1028 at xid 1 lives at block 15.
-  def fs_root_record(xid: 1, paddr: 15) = [[1028, xid].pack("Q<Q<"), [0, BLOCK, paddr].pack("L<L<q<")]
+  def fs_root_record(oid: FS_ROOT_OID, xid: 1, paddr: 15, flags: 0) = [[oid, xid].pack("Q<Q<"), [flags, BLOCK, paddr].pack("L<L<q<")]
 
   def snap_meta_record(xid:, name:, sblock:, extentref:, create_time: 100, change_time: 200, inum: 2)
     [[(1 << 60) | xid].pack("Q<"),
@@ -743,20 +1064,26 @@ class ApfsDumpTest < Minitest::Test
   # A virtual root and leaf node of a file-system tree, whose records vary
   # in size: 8-byte kvloc_t entries (key offset and length, value offset
   # and length), keys from the end of the table of contents, values back
-  # from the footer.
-  def fs_node_block(oid:, records:, type: KIND_BTREE, subtype: KIND_FSTREE, xid: 1)
+  # from the footer in a root, or from the block end in a child. A
+  # headerless hashed node keeps the first 32 bytes zero and has no checksum.
+  def fs_node_block(oid:, records:, type: KIND_BTREE, subtype: KIND_FSTREE, xid: 1,
+                    level: 0, root: true, headerless: false, tree_flags: 0, node_flags: nil)
     toc_len = TOC_ENTRIES * 8
     block = "\0".b * BLOCK
-    put(block, 0, [0, oid, xid, type, subtype, NODE_ROOT | NODE_LEAF, 0, records.size, 0, toc_len].pack("Q<Q<Q<L<L<S<S<L<S<S<"))
+    flags = (root ? NODE_ROOT : 0) | (level.zero? ? NODE_LEAF : 0)
+    flags |= NODE_HASHED_FLAG | NODE_NOHEADER_FLAG if headerless
+    put(block, 8, [oid, xid, type, subtype].pack("Q<Q<L<L<")) unless headerless
+    put(block, 32, [node_flags || flags, level, records.size, 0, toc_len].pack("S<S<L<S<S<"))
+    values_end = BLOCK - (root ? TREE_INFO_SIZE : 0)
     records.each_with_index.reduce([0, 0]) do |(k_off, v_end), ((key, value), i)|
       v_end += value.bytesize
       put(block, NODE_HEADER_END + i * 8, [k_off, key.bytesize, v_end, value.bytesize].pack("S<4"))
       put(block, NODE_HEADER_END + toc_len + k_off, key)
-      put(block, BLOCK - TREE_INFO_SIZE - v_end, value)
+      put(block, values_end - v_end, value)
       [k_off + key.bytesize, v_end]
     end
-    put(block, BLOCK - TREE_INFO_SIZE, [0, BLOCK, 0, 0, 64, 256, records.size, 1].pack("L<6Q<2"))
-    seal(block)
+    put(block, BLOCK - TREE_INFO_SIZE, [tree_flags, BLOCK, 0, 0, 64, 256, records.size, 1].pack("L<6Q<2")) if root
+    headerless ? block : seal(block)
   end
 
   # A bitmap block whose first `used` bits are set.

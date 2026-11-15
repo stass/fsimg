@@ -1805,10 +1805,15 @@ invalid":
 | Block 692, OID 1435, index node at level 1 | "invalid node hash for node 1435 (root oid: 1378, seal xid: 28, broken xid: 0)" | `e11-tamper-fsck.log` |
 | Block 366, OID 1379, leaf | "invalid node hash for node 1379 (root oid: 1378, seal xid: 28, broken xid: 0)" | `e11-leaf-tamper-fsck.log` |
 
-**Dumper.** `apfsdump.rb` decodes the integrity object and the sealed
-file-extent tree but reads the headerless nodes as objects and index values
-as absolute OIDs, so all nine of its problems on `app.dmg` are on the
-filesystem tree; `sealwalk.rb` stands in for it.
+**Dumper.** `apfsdump.rb` decodes the integrity object, the sealed
+file-extent tree and the hashed filesystem tree: it reads headerless nodes
+without a header, resolves index values relative to the root OID and checks
+every child digest and the root hash. On `app.dmg` it reports no problems,
+316 filesystem-tree nodes and 14938 records, and the root hash matches
+`app.dmg.root_hash`; a copy with one byte changed in the free space of leaf
+OID 1380 is one digest mismatch for that node. The nine filesystem-tree
+problems in the capture's `apfsdump.txt` and `apfsdump.json` are the
+dumper's own misreading, not the image's: rerun it to get a clean dump.
 
 ### E12 Large containers
 
