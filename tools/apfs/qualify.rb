@@ -47,7 +47,6 @@
 #   qualify.rb --root /Volumes/Optaine/apfs-qualify --fsimg BUILD/fsimg \
 #     "$FSIMG_APFS_NATIVE"/apfs-newfs-67108864-small/image.img
 require "digest"
-require "fiddle"
 require "fileutils"
 require "json"
 require "open3"
@@ -737,8 +736,14 @@ module ApfsQualify
   end
 
   # clonefile(2) as a callable, resolved when first used so that loading this
-  # file on a host without it, such as Linux, needs no symbol.
+  # file on a host without it, such as Linux, needs neither the symbol nor
+  # Fiddle, which Ruby 4.0 no longer ships as a default gem.
   private_class_method def clonefile_function
+    begin
+      require "fiddle"
+    rescue LoadError
+      raise Error, "clonefile(2) needs Ruby's fiddle library, which is not installed"
+    end
     symbol = Fiddle.dlopen(nil)["clonefile"]
     Fiddle::Function.new(symbol, [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT], Fiddle::TYPE_INT)
   rescue Fiddle::DLError

@@ -14,6 +14,9 @@ set -eu
 #
 #   tools/apfs/apfsck-linux.sh DIR/outputs/*/image.*
 #
+# Each result starts with NAME: pass or NAME: FAIL. NAME: error means the
+# checker could not execute or exited with a shell-encoded signal status;
+# NAME: skipped: REASON means the input is not a bare container.
 # Exit status 0 when every bare container passes with no output.
 usage='usage: apfsck-linux.sh IMAGE...'
 test "$#" -ge 1 || { echo "$usage" >&2; exit 2; }
@@ -61,7 +64,16 @@ done
             name=$(cat "$n.name")
             if test "$(dd if="$image" bs=1 skip=32 count=4 2>/dev/null)" != NXSB; then
                 echo "$name: skipped: not a bare container"
-            elif /tmp/o/bin/apfsck "$image" >/tmp/out 2>&1 && ! test -s /tmp/out; then
+                continue
+            fi
+            checker_status=0
+            /tmp/o/bin/apfsck "$image" >/tmp/out 2>&1 || checker_status=$?
+            if test "$checker_status" -gt 128 ||
+                test "$checker_status" -eq 126 || test "$checker_status" -eq 127; then
+                status=1
+                echo "$name: error"
+                sed -n 1,20p /tmp/out
+            elif test "$checker_status" -eq 0 && ! test -s /tmp/out; then
                 echo "$name: pass"
             else
                 status=1

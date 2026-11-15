@@ -224,7 +224,7 @@ check_PROGRAMS = $(test_programs) layers-compose hfsplus-marks hfsplus-write-gen
 	test-iso9660-scale test-hfsplus-scale test-iso9660-write-scale \
 	test-erofs-scale
 QUICK_TESTS = $(test_programs) test/hfsplus-integration.sh test/erofsdump.sh test/erofs-integration.sh \
-	test/apfsdump.sh test/apfs-tools.sh \
+	test/apfsdump.sh test/apfs-tools.sh test/apfs-integration.sh \
 	test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
@@ -233,7 +233,7 @@ QUICK_TESTS = $(test_programs) test/hfsplus-integration.sh test/erofsdump.sh tes
 	test/iso9660-corpus-check.sh test/iso9660-integration.sh \
 	test/iso9660-boot.sh test/iso9660-writer.sh
 TESTS = $(QUICK_TESTS) test/spec.sh
-nodist_check_SCRIPTS = test/erofs-integration.sh test/fat-integration.sh test/exfat-integration.sh \
+nodist_check_SCRIPTS = test/erofs-integration.sh test/apfs-integration.sh test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
 	test/layers-integration.sh test/containers-integration.sh \
@@ -604,8 +604,6 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/containers_test.rb \
 	test/cli/apm_test.rb \
 	test/cli/apfs_info_test.rb \
-	test/cli/apfs_listing_native_test.rb \
-	test/cli/apfs_content_native_test.rb \
 	test/cli/coordinator_worker_test.rb \
 	test/cli/create_operands_test.rb \
 	test/cli/examples_test.rb \
@@ -900,6 +898,8 @@ EXTRA_DIST += test/hfsplus-integration.sh test/hfsplus-integration.rb
 EXTRA_DIST += test/hfsplus-capture-test.rb test/hfsplus-qualify-test.rb
 EXTRA_DIST += tools/apfs/capture.rb test/apfs-capture-test.rb
 EXTRA_DIST += tools/apfs/qualify.rb test/apfs-qualify-test.rb
+EXTRA_DIST += test/apfs-integration.sh.in test/apfs-integration.rb test/apfs-integration-test.rb \
+	test/apfs-native/listing_test.rb test/apfs-native/content_test.rb
 EXTRA_DIST += tools/apfs/outputs.rb test/apfs-outputs-test.rb test/apfs-tools.sh \
 	tools/apfs/apfsck-linux.sh
 EXTRA_DIST += test/erofsdump-test.rb test/erofsdump.sh test/erofs-integration.sh.in \

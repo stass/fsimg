@@ -5,7 +5,7 @@
 require "json"
 require "minitest/autorun"
 require "pathname"
-require_relative "process"
+require_relative "../cli/process"
 
 # Compare host observations to t --json without mounting or reading content.
 # The dump's inode owners avoid the host mount's noowners translation. Times

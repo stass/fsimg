@@ -112,6 +112,28 @@
   adapter, for native and written images only, does not use the oracle
   confinement.
 
+* [Medium] **APFS reader refuses third-party space managers**
+  (`lib/formats/apfs/spaceman.c`): `i`, `t` and `W` refuse every
+  `mkapfs-linux/*.img` specimen of `~/fsimg-corpus/apfs` (apfsprogs output)
+  and `dissect-apfs-case_insensitive_beta` and `_case_sensitive_beta` with
+  "APFS space manager has an array inside its structure or unaligned", where
+  `fsapfsinfo` and `apfs-dump-quick` read each volume (`CI16`, `Case
+  Insensitive (beta)`). Decide from the specimens' space-manager layouts
+  whether the packing rule is stricter than the format, or whether a reader
+  should accept what it does not verify.
+* [Medium] **APFS verifier refuses `dissect-apfs-snapshot`**
+  (`lib/formats/apfs/verify.c`): `i`, `t` and `x -O` read it, `W` refuses it
+  with "APFS extent-reference tree has a record of an invalid kind or
+  count". MATRIX.md predicts a clean verify from apfsck; `fsapfsinfo` fails on
+  its snapshot metadata tree, so no oracle confirms either side yet. Dump the
+  extent-reference tree and judge the record.
+* [Low] **APFS corpus results unrecorded** (`test/apfs-integration.rb`): the
+  observed columns of `~/fsimg-corpus/apfs/MATRIX.md` are empty, so the
+  integration reports every specimen as unrecorded. Fill them from a run
+  once the two items above are decided. Two observations differ from the
+  matrix's predictions in diagnosis only: `go-apfs-secure` (encrypted DMG)
+  and `app-kitty` (ULMO DMG) are refused as "unknown format" rather than as
+  a recognized layer with an unsupported feature.
 * [Medium] **APFS native comparison gaps** (`test/apfs-native.c`): review
   findings left open in `test-apfs-write --native`. Capture-row
   `expect_row` calls discard their construction argument, so formulas such

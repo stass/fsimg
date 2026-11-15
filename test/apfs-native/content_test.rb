@@ -5,7 +5,7 @@
 require "json"
 require "minitest/autorun"
 require "pathname"
-require_relative "process"
+require_relative "../cli/process"
 
 require "digest"
 require "fileutils"

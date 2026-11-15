@@ -1313,6 +1313,80 @@ image with the network enabled, since `linux-check.sh` itself runs offline.
 Sources, licenses, identities and the commands that run each oracle are in
 [apfs-research.md](apfs-research.md).
 
+### APFS reader interoperability
+
+`test/apfs-integration.sh`, part of `make check-quick`, checks the reader
+against that evidence in three parts. Missing inputs or tools are reported
+as skipped with the reason, never as passed. The script exits 1 if anything
+fails, 0 if anything passes and nothing fails, and 77 otherwise. It first
+runs the unit tests of its parsers (`test/apfs-integration-test.rb`).
+
+```sh
+FSIMG_APFS_NATIVE=/Volumes/Optaine/fsimg-apfs/native \
+FSIMG_APFS_CORPUS=$HOME/fsimg-corpus/apfs \
+    make -j16 check TESTS='test/apfs-integration.sh'
+```
+
+* **manifests**: `test/apfs-native/listing_test.rb` and `content_test.rb`,
+  which only this script runs, over the captures of `FSIMG_APFS_NATIVE`:
+  `t --json`, `x -O` and `x` agree with each native manifest (paths, kinds,
+  sizes, modes, times, owners, SHA-256) and `W` verifies the compressed
+  captures. A run whose tests all skip is a skip. The `diskutil` comparison
+  of `i` stays in `test/cli/apfs_info_test.rb`.
+* **captures**: each `apfs-*/image.img` of at most 16 GiB. A larger one
+  (the 100 GiB to 128 TiB sparse captures) is skipped, never attached or
+  copied. fsimg `i --json` of each volume (the APFS partition of a GPT
+  disk, each occupied slot of a multi-volume container) gives the block size
+  and count, the volume UUIDs and names, the file, directory, symlink and
+  other-object counts and the snapshot counts, and `fsapfsinfo` and
+  `apfs-dump-quick` must report the same wherever they report the fact; they
+  run on bare containers only. fsimg `W` over every volume and the checker
+  must both accept for a verdict comparison to pass. Two refusals skip with
+  both reasons: a refusal can also mean a failure to run. Missing verdicts
+  fail. The checkers are `fsck_apfs -n` on macOS, run on a clonefile(2) clone
+  attached read only and unmounted, so the build directory must be on the
+  captures' volume, and `apfsck`. `apfsck` runs from `$APFSCK` or
+  `$FSIMG_ORACLES/apfsprogs/bin/apfsck` where built (Linux), or with
+  `FSIMG_APFS_DOCKER=1` through `tools/apfs/apfsck-linux.sh`, which builds
+  apfsprogs in Docker and so needs the network. A capture fsimg refuses by
+  design is named with its refusal in `REFUSED` of
+  `test/apfs-integration.rb`. Known apfsck defects are skips with their
+  reasons: captures it rejects that `fsck_apfs` accepts (`APFSCK_REJECTS`)
+  and one it accepts that `fsck_apfs` refuses (`APFSCK_ACCEPTS`).
+* **corpus**: each specimen in the results table of `FSIMG_APFS_CORPUS`'s
+  `MATRIX.md`, on a private copy (a clone, or a byte copy of at most 2 GiB):
+  `i`, `t`, `x -O` of the first listed file and `W`, on the first volume of
+  a multi-volume container, must give the row's four observed cells, each
+  `ok` (exit 0 and a complete summary), `refused (STATUS)` with fsimg's
+  error status, `refused (MESSAGE)` for `x -O`, or `no file`. A command that
+  gives no verdict (killed, timed out, an exit without a complete summary,
+  or `x -O` failing without a diagnostic) fails the row. A row with an
+  empty observed cell is reported as unrecorded with what was observed,
+  which is not a pass.
+
+Oracles are found under `FSIMG_ORACLES`, by default
+`~/.local/share/fsimg-oracles`. With `FSIMG_APFS_NATIVE` set the script is
+not quick: the native content comparison spawns one `x -O` per file, and
+the captures part attaches each capture for `fsck_apfs`.
+
+Results on macOS 26.6.2 (25G83, Intel) with `FSIMG_APFS_NATIVE` naming the
+captures of [apfs-research.md](apfs-research.md), `FSIMG_APFS_CORPUS` naming
+`~/fsimg-corpus/apfs` and `FSIMG_APFS_DOCKER=1`; the build directory is on
+the captures' volume:
+
+| Part | Tool and version | Result |
+| --- | --- | --- |
+| manifests | fsimg against the native manifests | `listing_test.rb`: 12 runs, 12 captures matched, no skips. `content_test.rb`: 18 runs, 62334 assertions, every file of every capture matched; one skip, the sealed e11 capture, which the reader refuses. It spawns one `x -O` per file and runs for over half an hour |
+| captures | `fsck_apfs -n` of macOS 26.6.2 (`/sbin/fsck_apfs` SHA-256 `cb766c122d2412c7...`), `hdiutil` of the same release | 44 captures accepted by both; `apfs-newfs-372736-plain` refused by both, a skipped comparison |
+| captures | `fsapfsinfo 20261030` | 42 bare containers agree; 2 GPT disks skipped as not bare; `apfs-newfs-372736-plain` skipped, refused by fsimg by design |
+| captures | `apfs-dump-quick` at `66b86bd` | as `fsapfsinfo`: 42 agree, 3 skipped |
+| captures | `apfsck b9c4cb4` in Docker 29.9.2 through `tools/apfs/apfsck-linux.sh` | 31 agree; 11 skipped as known apfsck rejections of captures `fsck_apfs` accepts (`APFSCK_REJECTS`: name length, name hashes of the Unicode 17 marks, a reserved role, two decmpfs layouts); `apfs-newfs-372736-plain` skipped, accepted by apfsck alone; 2 GPT disks skipped |
+| captures | none | 4 captures above 16 GiB skipped: `apfs-newfs-107374182400-plain`, `apfs-newfs-1099511627776-e12-1t`, `apfs-newfs-140737488355328-e12-128t`, `apfs-diskutil-9895604649984-e18-large` |
+| corpus | fsimg against `MATRIX.md` | 33 rows unrecorded: the matrix has no observed results yet (TODO.md). Observed: 12 specimens give `ok` for `i`, `t`, `x -O` and `W`; `dissect-apfs-jhfs_converted` (512 bytes short) and `dissect-apfs-snapshot` list and extract but `W` refuses them; the 7 `mkapfs-linux` images and the two `_beta` dissect images are refused with "APFS space manager has an array inside its structure or unaligned" (TODO.md); `dissect-apfs-corrupt` is refused as corrupt, as predicted; the encrypted volumes and the ULFO DMGs are refused as unsupported; the encrypted DMG, the ULMO DMG and the zip are refused as unknown formats |
+
+On Linux `fsck_apfs` is skipped, and `fsapfsinfo` and `apfs-dump-quick` run
+where they are built; FreeBSD has not run the script.
+
 `test-apfs-write` has two opt-in runs beside its ordinary tests.
 `FSIMG_APFS_QUALIFY_DIR=DIR ./test-apfs-write --qualify` writes the
 qualification images, each with its manifest, into DIR for
