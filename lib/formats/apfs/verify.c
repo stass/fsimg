@@ -564,8 +564,9 @@ tree_walk(verify_t *v, apfs_cursor_t *cursor, record_fn_t fn, void *arg,
  * Every live version an object map maps, at its size: tombstones are
  * skipped. A full scan has no lookup XID to stop at, so every record's XID,
  * a tombstone's too, must be nonzero and not above the checkpoint's. An
- * encrypted or headerless object, which a lookup refuses, is still judged
- * and claimed at its size, and makes the report incomplete.
+ * encrypted or headerless object, which a read refuses outside a sealed
+ * filesystem tree, is still judged and claimed at its size, and makes the
+ * report incomplete.
  */
 static fsimg_status_t
 mapped_record(verify_t *v, const apfs_record_t *record, void *arg,
@@ -999,7 +1000,7 @@ volume_records(verify_t *v, fsimg_error_t *error)
 	apfs_records_t records = { .extents = v->file_extents };
 	fsimg_status_t status;
 
-	if (volume->fs->fext_tree_oid != 0)
+	if ((volume->fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0)
 		return (FSIMG_OK);
 	if (selected && (v->flags & FSIMG_VERIFY_PAYLOAD) != 0)
 		records.shared = v->shared;
@@ -1047,7 +1048,7 @@ volume_trees(verify_t *v, uint32_t index, const apfs_fs_t *fs,
 	fsimg_status_t status;
 	unsigned refused;
 
-	if (fs->fext_tree_oid != 0 || fs->integrity_oid != 0)
+	if ((fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0)
 		incomplete_reason(v, ROLE_VOLUME,
 		    "holds structures verification does not read");
 	v->volume = &walk;
@@ -1080,6 +1081,11 @@ volume_trees(verify_t *v, uint32_t index, const apfs_fs_t *fs,
 			    "has dataless snapshots");
 		return (FSIMG_OK);
 	}
+	/* A sealed volume's file-extent tree, which made the report
+	 * incomplete above, counts blocks no walk claimed.
+	 */
+	if ((fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0)
+		return (FSIMG_OK);
 	if (fs->alloc_blocks != walk.blocks)
 		return (apfs_corrupt(error, ROLE_VOLUME,
 		    "allocated block count differs from its trees"));

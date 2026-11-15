@@ -1376,7 +1376,7 @@ the captures' volume:
 
 | Part | Tool and version | Result |
 | --- | --- | --- |
-| manifests | fsimg against the native manifests | `listing_test.rb`: 12 runs, 12 captures matched, no skips. `content_test.rb`: 18 runs, 62334 assertions, every file of every capture matched; one skip, the sealed e11 capture, which the reader refuses. It spawns one `x -O` per file and runs for over half an hour |
+| manifests | fsimg against the native manifests | `listing_test.rb`: 12 runs, 12 captures matched, no skips. `content_test.rb`: 18 runs, 79750 assertions, no skips; every file of every capture matched, except the 1394 LZBITMAP files of the sealed e11 capture, which the reader refuses by design. It spawns one `x -O` per file and runs for over half an hour |
 | captures | `fsck_apfs -n` of macOS 26.6.2 (`/sbin/fsck_apfs` SHA-256 `cb766c122d2412c7...`), `hdiutil` of the same release | 44 captures accepted by both; `apfs-newfs-372736-plain` refused by both, a skipped comparison |
 | captures | `fsapfsinfo 20261030` | 42 bare containers agree; 2 GPT disks skipped as not bare; `apfs-newfs-372736-plain` skipped, refused by fsimg by design |
 | captures | `apfs-dump-quick` at `66b86bd` | as `fsapfsinfo`: 42 agree, 3 skipped |

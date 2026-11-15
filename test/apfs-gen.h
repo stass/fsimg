@@ -409,14 +409,17 @@ typedef struct apfs_gen_fs_tree {
 	uint32_t	block_size;
 	uint16_t	records_per_leaf;
 	uint16_t	children_per_index;
+	/* SHA-256 headerless nodes; root has first_oid, other OIDs follow. */
+	bool	sealed;
 } apfs_gen_fs_tree_t;
 
 /*
- * Virtual, variable-size filesystem tree, leaves first and root last.
+ * Virtual, variable-size filesystem tree; blocks store leaves before the root.
  * On success maps[0..*blocks) describes every node in OID order. The caller
  * owns maps and supplies its capacity. On failure outputs remain untouched.
  * Input spans are borrowed. Ordering is the caller's responsibility, allowing
- * malformed fixtures. Separators copy child first keys; node_build can replace
+ * malformed fixtures. Sealed index values hold root-relative OIDs and hashes.
+ * Separators copy child first keys; node_build can replace
  * any generated node to override separators or repeat child references.
  */
 bool	apfs_gen_fs_tree_build(unsigned char *, size_t,
@@ -695,6 +698,24 @@ bool	apfs_gen_volume_snapshot_roots(const apfs_gen_volume_t *, uint64_t *,
 
 /* Allocate a volume containing root (OID 2) and private (OID 3), or NULL. */
 apfs_gen_volume_t *apfs_gen_volume_new(void);
+/* Select sealed encoding before build; snapshots are not supported. */
+bool	apfs_gen_volume_sealed(apfs_gen_volume_t *);
+/* Physical blocks and absolute image offsets of mapping flag words. */
+typedef struct apfs_gen_sealed_info {
+	uint64_t superblock;
+	uint64_t root;
+	uint64_t index;
+	uint64_t leaf;
+	uint64_t integrity;
+	uint64_t extent_leaf;
+	uint64_t root_mapping_flags;
+	uint64_t integrity_mapping_flags;
+} apfs_gen_sealed_info_t;
+
+bool	apfs_gen_volume_sealed_info(const apfs_gen_volume_t *,
+    apfs_gen_sealed_info_t *);
+/* Restore digests using the original topology, preserving edited OIDs/lengths. */
+bool	apfs_gen_volume_reseal(const apfs_gen_volume_t *, unsigned char *, size_t);
 /* Release the volume and copied inputs; accepts NULL. */
 void	apfs_gen_volume_free(apfs_gen_volume_t *);
 /* Add a directory beneath an existing parent; false leaves entries intact. */

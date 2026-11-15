@@ -999,9 +999,6 @@ test_incomplete_containers_preserve_corruption_errors(void)
 	} reasons[] = {
 		{ "busy reaper", "pending reap", 10, 64, 3 },
 		{ "encrypted volume", "is encrypted", 110, 264, 0 },
-		{ "sealed volume", "is sealed", 110, 56, 0x29 },
-		{ "integrity tree", "holds structures", 110, 1024, 300 },
-		{ "fext tree", "holds structures", 110, 1032, 300 },
 		{ "unsupported volume map", "has unsupported flags",
 		    111, 32, 0x80000000 },
 		{ "EFI jumpstart", "has an EFI jumpstart", 2, 1272, 300 }
@@ -1063,6 +1060,130 @@ test_incomplete_containers_preserve_corruption_errors(void)
 			verify_fixture(&f, 0, damage_cases[damage].status, message);
 			fixture_close(&f);
 		}
+	}
+}
+
+/* Without the sealed bit these fields do not change verification's scope. */
+static void
+test_unsealed_integrity_fields_preserve_allocation_checks(void)
+{
+	static const struct {
+		const char *name;
+		bool leak;
+		bool double_claim;
+		fsimg_status_t status;
+		const char *message;
+	} cases[] = {
+		{ .name = "unsealed auxiliary OID", .status = FSIMG_OK, .message = "" },
+		{ .name = "unsealed auxiliary OID with leak", .leak = true,
+		    .status = FSIMG_ECORRUPT, .message = "allocated but claimed by nothing" },
+		{ .name = "unsealed auxiliary OID with double claim", .double_claim = true,
+		    .status = FSIMG_ECORRUPT, .message = "claimed by both" }
+	};
+	static const unsigned offsets[] = { 1024, 1032 };
+	fixture_t f;
+
+	for (size_t i = 0; i < ARRAY_COUNT(offsets); i++) {
+		for (size_t j = 0; j < ARRAY_COUNT(cases); j++) {
+			scenario = cases[j].name;
+			fixture_init(&f, 1);
+			fsimg_store_le64(block_at(&f, VOLUME_BASE) + offsets[i], 300);
+			CHECK(apfs_gen_seal(block_at(&f, VOLUME_BASE), BLOCK));
+			if (cases[j].leak)
+				bit_set(block_at(&f, BITMAP_BLOCK), 300, true);
+			if (cases[j].double_claim)
+				extents_build(&f, 105, 102, 2);
+			allocation_build(&f);
+			verify_fixture(&f, 0, cases[j].status, cases[j].message);
+			fixture_close(&f);
+		}
+	}
+}
+
+/* Incomplete ownership skips allocation judgments; malformed records fail. */
+static void
+test_generated_sealed_verification_is_incomplete(void)
+{
+	typedef enum sealed_verify_damage {
+		SEALED_VERIFY_INTACT,
+		SEALED_VERIFY_LEAK,
+		SEALED_VERIFY_FREE_CLAIM,
+		SEALED_VERIFY_DOUBLE_CLAIM,
+		SEALED_VERIFY_OUT_OF_DOMAIN,
+		SEALED_VERIFY_MALFORMED
+	} sealed_verify_damage_t;
+	static const struct {
+		const char *name;
+		sealed_verify_damage_t damage;
+		fsimg_status_t status;
+		const char *message;
+	} cases[] = {
+		{ .name = "sealed intact", .damage = SEALED_VERIFY_INTACT,
+		    .status = FSIMG_EUNSUPPORTED,
+		    .message = "holds structures verification does not read" },
+		{ .name = "sealed leak", .damage = SEALED_VERIFY_LEAK,
+		    .status = FSIMG_EUNSUPPORTED,
+		    .message = "holds structures verification does not read" },
+		{ .name = "sealed free claim", .damage = SEALED_VERIFY_FREE_CLAIM,
+		    .status = FSIMG_EUNSUPPORTED,
+		    .message = "holds structures verification does not read" },
+		{ .name = "sealed double claim", .damage = SEALED_VERIFY_DOUBLE_CLAIM,
+		    .status = FSIMG_EUNSUPPORTED,
+		    .message = "holds structures verification does not read" },
+		{ .name = "sealed out-of-domain extent",
+		    .damage = SEALED_VERIFY_OUT_OF_DOMAIN,
+		    .status = FSIMG_ECORRUPT, .message = "outside the container" },
+		{ .name = "sealed malformed extent", .damage = SEALED_VERIFY_MALFORMED,
+		    .status = FSIMG_ECORRUPT, .message = "wrong length" }
+	};
+	unsigned char source[BLOCK] = { 1 }, key[8], value[GEN_PEXT_VAL_BYTES];
+	apfs_gen_pext_val_t extent = { .length = 1, .owner = 16,
+	    .refcnt = 1, .kind = 1 };
+	apfs_gen_record_t record = { .key = key, .key_size = sizeof(key),
+	    .value = value, .value_size = sizeof(value) };
+	apfs_gen_sealed_info_t info;
+	apfs_gen_volume_t *volume;
+	fixture_t f;
+	uint64_t data, free_count;
+	size_t size;
+
+	for (size_t i = 0; i < ARRAY_COUNT(cases); i++) {
+		scenario = cases[i].name;
+		fixture_init(&f, 1);
+		free(f.bytes);
+		volume = apfs_gen_volume_new();
+		CHECK(volume != NULL);
+		CHECK(apfs_gen_volume_sealed(volume));
+		CHECK(apfs_gen_volume_file(volume, 16, 2, "file", source, sizeof(source)));
+		CHECK(apfs_gen_volume_build(volume, &f.bytes, &size));
+		CHECK(size == f.length);
+		CHECK(apfs_gen_volume_sealed_info(volume, &info));
+		CHECK(apfs_gen_volume_extent_block(volume, 16, 0, &data));
+		if (cases[i].damage == SEALED_VERIFY_LEAK)
+			bit_set(block_at(&f, BITMAP_BLOCK), 900, true);
+		if (cases[i].damage == SEALED_VERIFY_FREE_CLAIM)
+			bit_set(block_at(&f, BITMAP_BLOCK), data, false);
+		if (cases[i].damage == SEALED_VERIFY_DOUBLE_CLAIM ||
+		    cases[i].damage == SEALED_VERIFY_OUT_OF_DOMAIN ||
+		    cases[i].damage == SEALED_VERIFY_MALFORMED) {
+			CHECK(apfs_gen_jkey_build(key, sizeof(key),
+			    cases[i].damage == SEALED_VERIFY_OUT_OF_DOMAIN ? BLOCKS : info.root, 2));
+			CHECK(apfs_gen_pext_val_build(value, sizeof(value), &extent));
+			if (cases[i].damage == SEALED_VERIFY_MALFORMED)
+				record.value_size = 1;
+			node_build(&f, 102, 102, PHYSICAL_TREE, 15, &record, 1, 0, 0);
+		}
+		/* Keep the allocation summaries consistent with the edited bitmap. */
+		free_count = 0;
+		for (unsigned j = 0; j < BLOCKS; j++)
+			free_count += (block_at(&f, BITMAP_BLOCK)[j / 8] & (1u << (j % 8))) == 0;
+		fsimg_store_le32(block_at(&f, CIB_BLOCK) + 60, (uint32_t)free_count);
+		fsimg_store_le64(block_at(&f, 9) + 72, free_count);
+		CHECK(apfs_gen_seal(block_at(&f, CIB_BLOCK), BLOCK));
+		CHECK(apfs_gen_seal(block_at(&f, 9), BLOCK));
+		verify_fixture(&f, 0, cases[i].status, cases[i].message);
+		fixture_close(&f);
+		apfs_gen_volume_free(volume);
 	}
 }
 
@@ -2691,6 +2812,8 @@ main(void)
 	test_extent_records_in_one_tree_must_not_overlap();
 	test_free_count_mismatches();
 	test_incomplete_containers_preserve_corruption_errors();
+	test_generated_sealed_verification_is_incomplete();
+	test_unsealed_integrity_fields_preserve_allocation_checks();
 	test_free_queues();
 	test_empty_free_queues_reject_future_oldest_xid();
 	test_free_queue_records_reject_future_xids();

@@ -9,6 +9,17 @@
 #include <zlib.h>
 
 #include "apfs-gen.h"
+#include "sha256.h"
+
+static void
+node_digest(const unsigned char *raw, size_t length, unsigned char *digest)
+{
+	fsimg_sha256_t ctx;
+
+	fsimg_sha256_init(&ctx);
+	fsimg_sha256_update(&ctx, raw, length);
+	fsimg_sha256_final(digest, &ctx);
+}
 
 /* Each plan entry names a contiguous range of records or child nodes. */
 typedef struct tree_plan {
@@ -966,7 +977,8 @@ apfs_gen_fs_tree_build(unsigned char *raw, size_t length,
 	apfs_gen_node_t node;
 	size_t b = p->block_size, count = 0, capacity, first;
 	size_t width;
-	uint32_t longest_key = 0, longest_val = 8;
+	uint32_t longest_key = 0, longest_val = p->sealed ? 40 : 8;
+	size_t child_bytes = p->sealed ? 40 : 8;
 	bool success = false;
 
 	if (b < 4096 || b > 65536 || (b & (b - 1)) != 0 ||
@@ -984,7 +996,7 @@ apfs_gen_fs_tree_build(unsigned char *raw, size_t length,
 	    p->records_per_leaf : p->children_per_index;
 	plan = calloc(capacity, sizeof(*plan));
 	records = calloc(width, sizeof(*records));
-	values = calloc(width, 8);
+	values = calloc(width, child_bytes);
 	image = calloc(capacity, b);
 	if (plan == NULL || records == NULL || values == NULL || image == NULL)
 		goto done;
@@ -1004,32 +1016,51 @@ apfs_gen_fs_tree_build(unsigned char *raw, size_t length,
 				records[j] = p->records[first];
 				continue;
 			}
-			put_le(values + 8 * j, p->first_oid + first, 8);
+			/* Sealed OIDs put the root first, children relative to it. */
+			put_le(values + child_bytes * j,
+			    p->sealed ? first + 1 : p->first_oid + first, 8);
+			if (p->sealed)
+				node_digest(image + first * b, b,
+				    values + child_bytes * j + 8);
 			records[j] = (apfs_gen_record_t){
 			    .key = p->records[plan[first].key].key,
 			    .key_size = p->records[plan[first].key].key_size,
-			    .value = values + 8 * j, .value_size = 8 };
+			    .value = values + child_bytes * j,
+			    .value_size = (uint16_t)child_bytes };
 		}
 		/* Packed spans are nonaligned; virtual storage has no flag. */
 		node = (apfs_gen_node_t){
 		    .object = { .oid = p->first_oid + i, .xid = p->xid,
 		    .type = i + 1 == count ? 2 : 3, .subtype = 14 },
-		    .info = { .flags = 0x40, .node_size = (uint32_t)b,
+		    .info = { .flags = p->sealed ? 0x1c2 : 0x40,
+		    .node_size = (uint32_t)b,
 		    .longest_key = longest_key, .longest_val = longest_val,
 		    .key_count = p->count, .node_count = count },
 		    .records = records, .count = (uint32_t)plan[i].count,
 		    .level = plan[i].level,
 		    .flags = (plan[i].level == 0 ? GEN_APFS_LEAF : 0) |
-		    (i + 1 == count ? GEN_APFS_ROOT : 0) };
+		    (i + 1 == count ? GEN_APFS_ROOT : 0) |
+		    (p->sealed ? 0x18 : 0) };
 		if (!apfs_gen_node_build(image + i * b, b, &node))
 			goto done;
+		if (p->sealed)
+			bzero(image + i * b, 32);
 	}
 	bcopy(image, raw + p->base * b, count * b);
 	for (size_t i = 0; i < count; i++)
 		maps[i] = (apfs_gen_omap_record_t){
-		    .key = { .oid = p->first_oid + i, .xid = p->xid },
-		    .value = { .size = (uint32_t)b, .address = p->base + i } };
-	*root = p->first_oid + count - 1;
+		    .key = { .oid = p->first_oid + (p->sealed ?
+		    (i + 1 == count ? 0 : i + 1) : i), .xid = p->xid },
+		    .value = { .flags = p->sealed ? 8 : 0,
+		    .size = (uint32_t)b, .address = p->base + i } };
+	/* The object-map builder requires ascending OIDs. */
+	if (p->sealed) {
+		apfs_gen_omap_record_t last = maps[count - 1];
+
+		bcopy(maps, maps + 1, (count - 1) * sizeof(*maps));
+		maps[0] = last;
+	}
+	*root = p->first_oid + (p->sealed ? 0 : count - 1);
 	*blocks = count;
 	success = true;
  done:
@@ -1474,6 +1505,10 @@ struct apfs_gen_volume {
 	uint16_t snapshot_records_per_leaf;
 	uint16_t records_per_leaf;
 	uint16_t extent_blocks;
+	bool sealed;
+	size_t sealed_records;
+	uint64_t sealed_nodes;
+	apfs_gen_sealed_info_t sealed_info;
 	bool built;
 };
 
@@ -1494,6 +1529,25 @@ static bool volume_image_build(apfs_gen_volume_t *, unsigned char *);
 static bool volume_snapshots_build(apfs_gen_volume_t *, unsigned char *);
 static bool volume_snapshot_tree_build(unsigned char *, apfs_gen_node_t,
     uint16_t, uint64_t *);
+
+bool
+apfs_gen_volume_sealed(apfs_gen_volume_t *volume)
+{
+	if (volume->built || volume->snapshot_count != 0)
+		return (false);
+	volume->sealed = true;
+	return (true);
+}
+
+bool
+apfs_gen_volume_sealed_info(const apfs_gen_volume_t *volume,
+    apfs_gen_sealed_info_t *info)
+{
+	if (!volume->built || !volume->sealed)
+		return (false);
+	*info = volume->sealed_info;
+	return (true);
+}
 
 static uint64_t
 volume_integer(const unsigned char *raw, unsigned width)
@@ -1655,7 +1709,8 @@ apfs_gen_volume_snapshot(apfs_gen_volume_t *volume,
 	apfs_gen_volume_t *view;
 	size_t length = strlen(options->name);
 
-	if (volume->built || volume->snapshot_count == VOLUME_SNAPSHOTS ||
+	if (volume->built || volume->sealed ||
+	    volume->snapshot_count == VOLUME_SNAPSHOTS ||
 	    length == 0 || length > 255 ||
 	    (options->metadata_name != NULL &&
 	    strlen(options->metadata_name) > 255))
@@ -2019,6 +2074,138 @@ volume_allocation_build(unsigned char *image, uint64_t tree_blocks,
 	return (apfs_gen_seal(raw, VOLUME_BLOCK));
 }
 
+/* Extents retain the record order: private ID, then logical byte offset. */
+static bool
+volume_sealed_extents(apfs_gen_volume_t *volume, unsigned char *image,
+    uint64_t base, uint64_t *root, uint64_t *blocks)
+{
+	tree_plan_t plan[VOLUME_RECORDS];
+	apfs_gen_record_t extents[VOLUME_RECORDS], records[8];
+	unsigned char keys[VOLUME_RECORDS][16], values[VOLUME_RECORDS][16];
+	unsigned char children[8][8];
+	size_t count = 0, nodes;
+
+	for (size_t i = 0; i < volume->record_count; i++) {
+		const volume_record_t *r = &volume->records[i];
+		uint64_t key = volume_integer(r->key, 8);
+
+		if (key >> 60 != APFS_GEN_KIND_FILE_EXTENT)
+			continue;
+		put_le(keys[count], key & GEN_JKEY_OID_MASK, 8);
+		bcopy(r->key + 8, keys[count] + 8, 8);
+		bcopy(r->value, values[count], 16);
+		extents[count] = (apfs_gen_record_t){ .key = keys[count],
+		    .key_size = 16, .value = values[count], .value_size = 16 };
+		count++;
+	}
+	/* Even an empty sealed volume names an empty physical extent root. */
+	if (count == 0) {
+		apfs_gen_node_t node = { .object = { .oid = base, .xid = 10,
+		    .type = 0x40000002, .subtype = 31 }, .flags = 7,
+		    .info = { .flags = 0x12, .node_size = VOLUME_BLOCK,
+		    .key_size = 16, .val_size = 16, .node_count = 1 } };
+
+		if (base >= VOLUME_DATA_BASE || !apfs_gen_node_build(
+		    image + base * VOLUME_BLOCK, VOLUME_BLOCK, &node))
+			return (false);
+		*root = base;
+		*blocks = 1;
+		return (true);
+	}
+	if (!tree_plan_build(plan, VOLUME_RECORDS, count, 8, 8, &nodes) ||
+	    nodes > VOLUME_DATA_BASE - base)
+		return (false);
+	for (size_t i = 0; i < nodes; i++) {
+		apfs_gen_node_t node = { .object = { .oid = base + i,
+		    .xid = 10, .type = i + 1 == nodes ? 0x40000002 : 0x40000003,
+		    .subtype = 31 }, .flags = GEN_APFS_FIXED |
+		    (plan[i].level == 0 ? GEN_APFS_LEAF : 0) |
+		    (i + 1 == nodes ? GEN_APFS_ROOT : 0), .level = plan[i].level,
+		    .info = { .flags = 0x12, .node_size = VOLUME_BLOCK,
+		    .key_size = 16, .val_size = 16, .longest_key = 16,
+		    .longest_val = 16, .key_count = count, .node_count = nodes },
+		    .records = records, .count = (uint32_t)plan[i].count };
+
+		for (size_t j = 0; j < plan[i].count; j++) {
+			size_t first = plan[i].first + j;
+
+			if (plan[i].level == 0)
+				records[j] = extents[first];
+			else {
+				put_le(children[j], base + first, 8);
+				records[j] = (apfs_gen_record_t){
+				    .key = extents[plan[first].key].key, .key_size = 16,
+				    .value = children[j], .value_size = 8 };
+			}
+		}
+		if (!apfs_gen_node_build(image + (base + i) * VOLUME_BLOCK,
+		    VOLUME_BLOCK, &node))
+			return (false);
+	}
+	*root = base + nodes - 1;
+	*blocks = nodes;
+	return (true);
+}
+
+bool
+apfs_gen_volume_reseal(const apfs_gen_volume_t *volume, unsigned char *image,
+    size_t length)
+{
+	tree_plan_t plan[VOLUME_RECORDS];
+	size_t count;
+	unsigned char *raw, *integrity;
+
+	if (!volume->sealed || length != VOLUME_BYTES ||
+	    !tree_plan_build(plan, VOLUME_RECORDS, volume->sealed_records,
+	    volume->records_per_leaf, 8, &count) || count != volume->sealed_nodes)
+		return (false);
+	/* Original child positions let malformed relative OIDs remain malformed. */
+	for (size_t i = 0; i < count; i++) {
+		size_t end = VOLUME_BLOCK - (i + 1 == count ? 40 : 0);
+
+		raw = image + (VOLUME_TREE_BASE + i) * VOLUME_BLOCK;
+		if (plan[i].level == 0)
+			continue;
+		for (size_t j = 0; j < plan[i].count; j++) {
+			/* Generated index values are packed 40 bytes apiece. */
+			size_t offset = 40 * (j + 1);
+
+			node_digest(image + (VOLUME_TREE_BASE + plan[i].first + j) *
+			    VOLUME_BLOCK, VOLUME_BLOCK, raw + end - offset + 8);
+		}
+	}
+	integrity = image + volume->sealed_info.integrity * VOLUME_BLOCK;
+	node_digest(image + volume->sealed_info.root * VOLUME_BLOCK,
+	    VOLUME_BLOCK, integrity + 128);
+	return (apfs_gen_seal(integrity, VOLUME_BLOCK));
+}
+
+/* Locate the flag word in the fixed-size object-map leaves. */
+static bool
+volume_mapping_flags(const unsigned char *image, uint64_t blocks,
+    uint64_t oid, uint64_t *offset)
+{
+	for (uint64_t i = 0; i < blocks; i++) {
+		const unsigned char *raw = image + (VOLUME_MAP_TREE + i) * VOLUME_BLOCK;
+		size_t keys = 56 + (size_t)volume_integer(raw + 42, 2);
+		size_t end = VOLUME_BLOCK - ((volume_integer(raw + 32, 2) & 1) ? 40 : 0);
+
+		if ((volume_integer(raw + 32, 2) & 2) == 0)
+			continue;
+		for (size_t j = 0; j < volume_integer(raw + 36, 4); j++) {
+			size_t toc = 56 + (size_t)volume_integer(raw + 40, 2) + 4 * j;
+			size_t key = keys + (size_t)volume_integer(raw + toc, 2);
+
+			if (volume_integer(raw + key, 8) != oid)
+				continue;
+			*offset = (VOLUME_MAP_TREE + i) * VOLUME_BLOCK + end -
+			    volume_integer(raw + toc + 2, 2);
+			return (true);
+		}
+	}
+	return (false);
+}
+
 static bool
 volume_image_build(apfs_gen_volume_t *volume, unsigned char *image)
 {
@@ -2067,7 +2254,8 @@ volume_image_build(apfs_gen_volume_t *volume, unsigned char *image)
 	    .base = VOLUME_TREE_BASE, .xid = 10, .block_size = VOLUME_BLOCK,
 	    .records_per_leaf = volume->records_per_leaf,
 	    .children_per_index = 8 };
-	uint64_t tree_blocks, map_blocks, blocks;
+	uint64_t tree_blocks, map_blocks, blocks, extent_blocks = 0;
+	size_t record_count = 0, map_count;
 	uint32_t extent_count = 0;
 
 	if (!apfs_gen_container_build(image, VOLUME_BYTES, &container))
@@ -2078,18 +2266,78 @@ volume_image_build(apfs_gen_volume_t *volume, unsigned char *image)
 	for (size_t i = 0; i < volume->record_count; i++) {
 		const volume_record_t *r = &volume->records[i];
 
-		records[i] = (apfs_gen_record_t){ .key = r->key,
+		if (volume->sealed && volume_integer(r->key, 8) >> 60 ==
+		    APFS_GEN_KIND_FILE_EXTENT)
+			continue;
+		records[record_count++] = (apfs_gen_record_t){ .key = r->key,
 		    .value = r->value, .key_size = r->key_size,
 		    .value_size = r->value_size };
+	}
+	tree.count = record_count;
+	tree.sealed = volume->sealed;
+	if (volume->sealed && record_count <= tree.records_per_leaf) {
+		volume->records_per_leaf = (uint16_t)((record_count + 1) / 2);
+		tree.records_per_leaf = volume->records_per_leaf;
 	}
 	if (!apfs_gen_fs_tree_build(image, VOLUME_BYTES, &tree, nodes,
 	    sizeof(nodes) / sizeof(nodes[0]), &fs.root_tree_oid, &tree_blocks))
 		return (false);
-	if (!volume_map_build(image, VOLUME_MAP, nodes, tree_blocks,
+	map_count = (size_t)tree_blocks;
+	if (volume->sealed) {
+		apfs_gen_object_t integrity = { .oid = 3000, .xid = 10,
+		    .type = 30 };
+		apfs_gen_sealed_info_t *info = &volume->sealed_info;
+		unsigned char *raw;
+
+		if (tree_blocks >= sizeof(nodes) / sizeof(nodes[0]) ||
+		    VOLUME_TREE_BASE + tree_blocks + 1 >= VOLUME_DATA_BASE)
+			return (false);
+		*info = (apfs_gen_sealed_info_t){ .superblock = VOLUME_SUPERBLOCK,
+		    .root = VOLUME_TREE_BASE + tree_blocks - 1,
+		    .index = VOLUME_TREE_BASE + tree_blocks - 1,
+		    .leaf = VOLUME_TREE_BASE,
+		    .integrity = VOLUME_TREE_BASE + tree_blocks,
+		    .extent_leaf = VOLUME_TREE_BASE + tree_blocks + 1 };
+		/* Prefer a non-root index so tampering tests exercise a child digest. */
+		for (uint64_t i = 0; i + 1 < tree_blocks; i++)
+			if (volume_integer(image + (VOLUME_TREE_BASE + i) *
+			    VOLUME_BLOCK + 34, 2) != 0) {
+				info->index = VOLUME_TREE_BASE + i;
+				break;
+			}
+		volume->sealed_records = record_count;
+		volume->sealed_nodes = tree_blocks;
+		raw = image + info->integrity * VOLUME_BLOCK;
+		if (!apfs_gen_object_build(raw, VOLUME_BLOCK, &integrity))
+			return (false);
+		put_le(raw + 32, 2, 4);
+		put_le(raw + 40, 1, 4);
+		put_le(raw + 44, 128, 4);
+		if (!apfs_gen_volume_reseal(volume, image, VOLUME_BYTES))
+			return (false);
+		nodes[map_count++] = (apfs_gen_omap_record_t){
+		    .key = { .oid = integrity.oid, .xid = 10 },
+		    .value = { .size = VOLUME_BLOCK, .address = info->integrity } };
+		fs.incompat_features |= 0x20;
+		fs.integrity_oid = integrity.oid;
+		fs.fext_tree_type = 0x40000002;
+		if (!volume_sealed_extents(volume, image, info->extent_leaf,
+		    &fs.fext_tree_oid, &extent_blocks))
+			return (false);
+	}
+	if (!volume_map_build(image, VOLUME_MAP, nodes, map_count,
 	    &map_blocks))
 		return (false);
 	if (VOLUME_MAP_TREE + map_blocks > VOLUME_TREE_BASE)
 		return (false);
+	if (volume->sealed) {
+		if (!volume_mapping_flags(image, map_blocks, fs.root_tree_oid,
+		    &volume->sealed_info.root_mapping_flags) ||
+		    !volume_mapping_flags(image, map_blocks, fs.integrity_oid,
+		    &volume->sealed_info.integrity_mapping_flags))
+			return (false);
+		tree_blocks += 1 + extent_blocks;
+	}
 	fs.alloc_blocks = 3 + map_blocks + tree_blocks;
 	for (size_t i = 0; i < volume->entry_count; i++) {
 		const volume_entry_t *entry = &volume->entries[i];
@@ -2618,18 +2866,32 @@ bool
 apfs_gen_volume_record_block(const apfs_gen_volume_t *volume, uint64_t oid,
     uint8_t kind, uint64_t suffix, uint64_t *block)
 {
+	size_t position = 0, extent_position = 0;
+
 	if (!volume->built)
 		return (false);
 	for (size_t i = 0; i < volume->record_count; i++) {
 		const volume_record_t *r = &volume->records[i];
 		uint64_t key = volume_integer(r->key, 8);
 
+		if (volume->sealed && key >> 60 == APFS_GEN_KIND_FILE_EXTENT) {
+			extent_position++;
+			if (kind == APFS_GEN_KIND_FILE_EXTENT &&
+			    (key & GEN_JKEY_OID_MASK) == oid &&
+			    volume_integer(r->key + 8, 8) == suffix) {
+				*block = volume->sealed_info.extent_leaf +
+				    (extent_position - 1) / 8;
+				return (true);
+			}
+			continue;
+		}
+		position++;
 		if ((key & GEN_JKEY_OID_MASK) != oid || key >> 60 != kind)
 			continue;
 		if (kind == APFS_GEN_KIND_FILE_EXTENT &&
 		    volume_integer(r->key + 8, 8) != suffix)
 			continue;
-		*block = volume->tree_base + i / volume->records_per_leaf;
+		*block = volume->tree_base + (position - 1) / volume->records_per_leaf;
 		return (true);
 	}
 	return (false);

@@ -402,9 +402,10 @@ root's OID to each index value's child OID, an overflow being
 headerless reference, and compares its digest with the parent's value, or
 the root's with the integrity object's root hash, before the
 [validation checks](design-apfs.md#validation) run; a mismatch is
-`FSIMG_ECORRUPT`. It holds the current root-to-leaf path, one window and one
-table-of-contents position per level, plus the separator bounds each level
-was entered under. Windows are allocated as the path deepens and kept for the
+`FSIMG_ECORRUPT`, as is a matching node whose first 32 bytes, where
+a header would be, are not zero. It holds the current root-to-leaf path,
+one window and one table-of-contents position per level, plus the separator
+bounds each level was entered under. Windows are allocated as the path deepens and kept for the
 session; a tree of height `h` holds at most `h` windows, and the format
 design bounds `h` by 16, a taller tree being `FSIMG_EUNSUPPORTED`.
 
@@ -462,8 +463,9 @@ damaged value costs its own record and not the node that holds it.
 
 The reader keeps these cursors: the container object map (open only), the
 volume object map, a filesystem lookup cursor for inode and attribute
-lookups, a filesystem scan cursor for directory records, a content cursor for
-file extents, and, in the sealed profile, the sealed file-extent tree.
+lookups, a filesystem scan cursor for directory records, and a content cursor
+for file extents, which in the sealed profile is over the sealed file-extent
+tree instead of the filesystem tree.
 Verification adds its own scan cursors. Because every cursor's windows are
 charged when first needed, a small tree costs one window.
 

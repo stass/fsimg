@@ -142,11 +142,11 @@ apfs_map_lookup(apfs_map_t *map, uint64_t oid, uint64_t xid, bool *found,
 	    (found_value.flags & APFS_OMAP_VAL_DELETED) != 0)
 		return (FSIMG_OK);
 
-	if ((found_value.flags & (APFS_OMAP_VAL_ENCRYPTED |
-	    APFS_OMAP_VAL_NOHEADER)) != 0)
+	if ((found_value.flags & APFS_OMAP_VAL_ENCRYPTED) != 0)
 		return (apfs_unsupported(error, role,
-		    "maps an encrypted or headerless object"));
-	if ((found_value.flags & ~APFS_OMAP_VAL_SAVED) != 0)
+		    "maps an encrypted object"));
+	if ((found_value.flags & ~(APFS_OMAP_VAL_SAVED |
+	    APFS_OMAP_VAL_NOHEADER)) != 0)
 		return (apfs_corrupt(error, role, "has invalid value flags"));
 	if (found_value.size == 0 ||
 	    found_value.size % container->block_size != 0 ||

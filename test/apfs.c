@@ -702,7 +702,7 @@ test_full_open_volume_validation(void)
 		{ .name = "volume sealed",
 		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
 		    .offset = 56, .value = 32, .width = 8,
-		    .status = FSIMG_EUNSUPPORTED },
+		    .status = FSIMG_ECORRUPT },
 		{ .name = "volume incomplete restore",
 		    .block = VOLUME_BASE + 3 * VOLUME_SLOT,
 		    .offset = 56, .value = 16, .width = 8,
@@ -2156,7 +2156,7 @@ test_map_values_enforce_flags_sizes_and_address_ranges(void)
 		    .value = 4, .width = 4, .status = FSIMG_EUNSUPPORTED },
 		{ .name = "headerless mapping", .block = LEAF0,
 		    .offset = OMAP_VALUE_FLAGS_OFFSET,
-		    .value = 8, .width = 4, .status = FSIMG_EUNSUPPORTED },
+		    .value = 8, .width = 4, .status = FSIMG_ECORRUPT },
 		{ .name = "crypto-generation value flag", .block = LEAF0,
 		    .offset = OMAP_VALUE_FLAGS_OFFSET,
 		    .value = 16, .width = 4, .status = FSIMG_ECORRUPT },
@@ -2190,8 +2190,24 @@ test_map_values_enforce_flags_sizes_and_address_ranges(void)
 		build_tree(&f, 1, 1, 2, false, 0);
 		mutate(&f, &cases[i]);
 		CHECK(map_open(&f, &map, APFS_MAP_CONTAINER) == FSIMG_OK);
-		status_is(&f, apfs_map_lookup(&map, 1000, 10, &found,
-		    &key, &value, &f.error), cases[i].status);
+		if (cases[i].value == 8 && cases[i].offset == OMAP_VALUE_FLAGS_OFFSET) {
+			unsigned char window[BLOCK];
+			apfs_ref_t ref = { .role = "ordinary mapped object", .oid = 1000,
+			    .xid = 10, .kind = 13, .map = &map,
+			    .storage = APFS_OBJ_VIRTUAL };
+
+			CHECK(apfs_map_lookup(&map, 1000, 10, &found,
+			    &key, &value, &f.error) == FSIMG_OK && found);
+			expect(value.flags == 8, "lookup preserves the no-header flag");
+			CHECK(apfs_gen_object_build(block_at(&f, value.address), BLOCK,
+			    &(apfs_gen_object_t){ .oid = 1000, .xid = key.xid, .type = 13 }));
+			if (status_is(&f, apfs_object_read(&f.container, &ref, window,
+			    NULL, &f.error), cases[i].status))
+				expect(strstr(f.error.message, "wrong no-header flag") != NULL,
+				    "ordinary object refuses headerless mapping");
+		} else
+			status_is(&f, apfs_map_lookup(&map, 1000, 10, &found,
+			    &key, &value, &f.error), cases[i].status);
 		apfs_map_close(&map);
 		fixture_close(&f);
 	}

@@ -967,7 +967,8 @@ An empty key or value free list has offset `0xffff` and length zero [A1].
 Every node a reader visits passes these checks before any entry is used:
 
 * header and checksum; a headerless node of a sealed tree instead matches
-  its parent's digest, or the root the integrity object's root hash;
+  its parent's digest, or the root the integrity object's root hash, and
+  its first 32 bytes, where a header would be, are zero;
 * node flags consistent with its position: root exactly at the tree's top,
   leaf exactly at level 0, fixed-size, hashed and no-header flags equal to
   the tree's, the root's included (E11: root `0x19`, index `0x18`, leaf
@@ -1850,7 +1851,9 @@ ordinary header. It holds a version, flags, a hash type (1 SHA-256, 2
 SHA-512/256, 3 SHA-384, 4 SHA-512), the offset of the root hash within the
 object, and the XID at which the seal was broken, if any (E11: version 2,
 flags 0, hash type 1, offset 128, broken XID 0 in both). The version must
-be 2, the only one captured; any other is `FSIMG_EUNSUPPORTED`. The offset
+be 2, the only one captured; any other is `FSIMG_EUNSUPPORTED`. The flags
+must be zero, the only value captured: [A1]'s one flag marks a broken
+seal, refused below, and any nonzero flags are `FSIMG_EUNSUPPORTED`. The offset
 must be at least 128, past the header and version 2's fixed and reserved
 fields, and leave the whole hash inside the object.
 

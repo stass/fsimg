@@ -4,10 +4,12 @@
 #include "config.h"
 
 #include <string.h>
+#include <strings.h>
 
 #include "apfs.h"
 #include "fsimg-endian.h"
 #include "reader.h"
+#include "sha256.h"
 
 /*
  * B-tree cursors (specs/design-apfs-driver.md, "B-trees"): node validation,
@@ -30,6 +32,19 @@
  * blocks, plus the height, is FSIMG_ECORRUPT, and every walk costs at most
  * the image's size. The records a repeated subtree yields twice belong to
  * the one class, whose consumer refuses equal names.
+ *
+ * A sealed cursor (apfs_cursor_seal()) reads a sealed volume's filesystem
+ * tree, whose nodes are hashed and headerless: each index value is the
+ * child's OID relative to the root's, then the child's SHA-256 digest. A
+ * node has no header or checksum to check, so node_load() reads it as a
+ * headerless reference and accepts it only when the digest of its B bytes
+ * equals the one its parent's value names, or for the root the integrity
+ * object's root hash, before node_check() looks at any of it. Every
+ * filesystem-tree node a listing or extraction reads is thus bound to the
+ * stored root hash, and a changed byte anywhere in it is FSIMG_ECORRUPT.
+ * The binding stops there: the sealed file-extent tree is an ordinary
+ * physical tree, checked by its Fletcher checksums alone, and file content
+ * is not checked.
  */
 
 #define NODE_FLAGS_KNOWN	(APFS_NODE_ROOT | APFS_NODE_LEAF | \
@@ -59,9 +74,16 @@ typedef struct fs_order {
 	uint8_t		 kind;
 } fs_order_t;
 
+/* A sealed node's first bytes, where an object header would be. */
+static const unsigned char zero_header[APFS_OBJ_HEADER_BYTES];
+
 static int		bytes_compare(const unsigned char *, size_t,
 			    const unsigned char *, size_t);
+static uint16_t		child_bytes(const apfs_cursor_t *);
 static fsimg_status_t	child_load(apfs_cursor_t *, unsigned,
+			    fsimg_error_t *);
+static fsimg_status_t	digest_check(const apfs_cursor_t *,
+			    const unsigned char *, const unsigned char *,
 			    fsimg_error_t *);
 static fsimg_status_t	entry_lengths(const apfs_cursor_t *,
 			    const apfs_entry_t *, bool, fsimg_error_t *);
@@ -95,7 +117,7 @@ static bool		node_entry(const apfs_cursor_t *,
 			    const apfs_path_level_t *, uint32_t,
 			    apfs_entry_t *);
 static fsimg_status_t	node_load(apfs_cursor_t *, unsigned, uint64_t,
-			    fsimg_error_t *);
+			    const unsigned char *, fsimg_error_t *);
 static fsimg_status_t	root_load(apfs_cursor_t *, fsimg_error_t *);
 static fsimg_status_t	step(apfs_cursor_t *, direction_t, bool *,
 			    fsimg_error_t *);
@@ -110,6 +132,16 @@ apfs_cursor_init(apfs_cursor_t *cursor, apfs_container_t *container,
 }
 
 void
+apfs_cursor_seal(apfs_cursor_t *cursor, const unsigned char *root_hash)
+{
+	/* Before any load, so no node on the path was read unsealed. */
+	cursor->depth = 0;
+	cursor->positioned = false;
+	cursor->sealed = true;
+	bcopy(root_hash, cursor->root_hash, APFS_SEAL_HASH_BYTES);
+}
+
+void
 apfs_cursor_free(apfs_cursor_t *cursor)
 {
 	for (unsigned i = 0; i < APFS_BTREE_LEVELS_MAX; i++) {
@@ -120,10 +152,19 @@ apfs_cursor_free(apfs_cursor_t *cursor)
 	cursor->positioned = false;
 }
 
+/* The length of an index node's value: a child OID, and in a sealed tree
+ * the child's digest after it.
+ */
+static uint16_t
+child_bytes(const apfs_cursor_t *cursor)
+{
+	return (cursor->sealed ? APFS_HASHED_CHILD_BYTES : APFS_CHILD_OID_BYTES);
+}
+
 /*
  * Resolve entry index of a level's node. A fixed-size entry's lengths are
  * the tree's fixed key size and, for a leaf, its fixed value size; an index
- * node's value is a child OID.
+ * node's value is child_bytes().
  */
 static bool
 node_entry(const apfs_cursor_t *cursor, const apfs_path_level_t *level,
@@ -132,7 +173,7 @@ node_entry(const apfs_cursor_t *cursor, const apfs_path_level_t *level,
 	const apfs_tree_profile_t *profile = cursor->profile;
 	apfs_kv_size_t sizes = { .key = profile->fixed_key,
 	    .val = level->node.level == 0 ? profile->fixed_val :
-	    APFS_CHILD_OID_BYTES };
+	    child_bytes(cursor) };
 
 	return (apfs_entry_decode(level->window,
 	    cursor->container->block_size, &level->node, index, &sizes, entry));
@@ -141,7 +182,7 @@ node_entry(const apfs_cursor_t *cursor, const apfs_path_level_t *level,
 /*
  * An entry's key and value lengths against the profile: a ghost, which has
  * no value, only in a leaf of a tree that allows ghosts; a leaf value within
- * the profile's bounds; an index value exactly a child OID.
+ * the profile's bounds; an index value exactly child_bytes().
  */
 static fsimg_status_t
 entry_lengths(const apfs_cursor_t *cursor, const apfs_entry_t *entry,
@@ -164,7 +205,7 @@ entry_lengths(const apfs_cursor_t *cursor, const apfs_entry_t *entry,
 	    entry->val_len > profile->val_max))
 		return (apfs_corrupt(error, profile->role,
 		    "node has a value of the wrong length"));
-	if (!leaf && entry->val_len != APFS_CHILD_OID_BYTES)
+	if (!leaf && entry->val_len != child_bytes(cursor))
 		return (apfs_corrupt(error, profile->role,
 		    "node has a value of the wrong length"));
 	return (FSIMG_OK);
@@ -204,16 +245,23 @@ node_check(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 	size_t previous_len = 0;
 	uint32_t storage_flags;
 	fsimg_status_t status;
+	uint16_t sealed_flags = cursor->sealed ?
+	    APFS_NODE_HASHED | APFS_NODE_NOHEADER : 0;
 	bool leaf = node->level == 0, fixed = profile->fixed_key != 0;
 
-	/* Hashed and headerless nodes belong to sealed trees. */
-	if ((node->flags & (APFS_NODE_HASHED | APFS_NODE_NOHEADER)) != 0)
+	/* Hashed and headerless nodes belong to sealed trees, which only a
+	 * sealed cursor reads; in one, every node has both flags.
+	 */
+	if (!cursor->sealed &&
+	    (node->flags & (APFS_NODE_HASHED | APFS_NODE_NOHEADER)) != 0)
 		return (apfs_unsupported(error, role,
 		    "node is hashed or headerless"));
 	if ((node->flags & ~NODE_FLAGS_KNOWN) != 0 ||
 	    ((node->flags & APFS_NODE_ROOT) != 0) != (depth == 0) ||
 	    ((node->flags & APFS_NODE_LEAF) != 0) != leaf ||
-	    ((node->flags & APFS_NODE_FIXED_KV) != 0) != fixed)
+	    ((node->flags & APFS_NODE_FIXED_KV) != 0) != fixed ||
+	    (node->flags & (APFS_NODE_HASHED | APFS_NODE_NOHEADER)) !=
+	    sealed_flags)
 		return (apfs_corrupt(error, role, "node has invalid flags"));
 
 	if (depth == 0) {
@@ -223,7 +271,9 @@ node_check(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 		if ((node->info.flags & ~APFS_BTREE_FLAGS_KNOWN) != 0)
 			return (apfs_corrupt(error, role,
 			    "has unknown tree flags"));
-		if ((node->info.flags & APFS_BTREE_FLAGS_REFUSED) != 0)
+		if ((node->info.flags & APFS_BTREE_NONPERSISTENT) != 0 ||
+		    (!cursor->sealed &&
+		    (node->info.flags & APFS_BTREE_SEALED) != 0))
 			return (apfs_unsupported(error, role,
 			    "is a hashed, headerless or nonpersistent tree"));
 		storage_flags = cursor->storage == APFS_OBJ_PHYSICAL ?
@@ -231,6 +281,8 @@ node_check(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 		    APFS_BTREE_EPHEMERAL : 0;
 		if ((node->info.flags & (APFS_BTREE_PHYSICAL |
 		    APFS_BTREE_EPHEMERAL)) != storage_flags ||
+		    (node->info.flags & APFS_BTREE_SEALED) !=
+		    (cursor->sealed ? APFS_BTREE_SEALED : 0) ||
 		    node->info.node_size != cursor->container->block_size ||
 		    node->info.key_size != profile->fixed_key ||
 		    node->info.val_size != profile->fixed_val)
@@ -297,13 +349,34 @@ node_check(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 }
 
 /*
- * Load node oid as path[depth], whose bounds the caller has set. The path
- * is cut to depth first, so a failure leaves the cursor on the shallower
- * path it can still use, and not on any record.
+ * A sealed node's B bytes, its zero header included, against the digest
+ * that names it.
+ */
+static fsimg_status_t
+digest_check(const apfs_cursor_t *cursor, const unsigned char *window,
+    const unsigned char *digest, fsimg_error_t *error)
+{
+	unsigned char actual[FSIMG_SHA256_DIGEST_LENGTH];
+	fsimg_sha256_t sha;
+
+	fsimg_sha256_init(&sha);
+	fsimg_sha256_update(&sha, window, cursor->container->block_size);
+	fsimg_sha256_final(actual, &sha);
+	if (memcmp(actual, digest, APFS_SEAL_HASH_BYTES) != 0)
+		return (apfs_corrupt(error, cursor->profile->role,
+		    "node does not match its digest"));
+	return (FSIMG_OK);
+}
+
+/*
+ * Load node oid as path[depth], whose bounds the caller has set; in a
+ * sealed tree digest names its expected SHA-256 digest, and NULL otherwise.
+ * The path is cut to depth first, so a failure leaves the cursor on the
+ * shallower path it can still use, and not on any record.
  */
 static fsimg_status_t
 node_load(apfs_cursor_t *cursor, unsigned depth, uint64_t oid,
-    fsimg_error_t *error)
+    const unsigned char *digest, fsimg_error_t *error)
 {
 	apfs_path_level_t *level = &cursor->path[depth];
 	apfs_ref_t ref;
@@ -336,11 +409,24 @@ node_load(apfs_cursor_t *cursor, unsigned depth, uint64_t oid,
 	ref = (apfs_ref_t){ .map = cursor->map, .role = cursor->profile->role,
 	    .oid = oid, .xid = cursor->xid, .storage = cursor->storage,
 	    .subtype = cursor->profile->subtype,
-	    .kind = depth == 0 ? APFS_KIND_BTREE_ROOT : APFS_KIND_BTREE_NODE };
+	    .kind = depth == 0 ? APFS_KIND_BTREE_ROOT : APFS_KIND_BTREE_NODE,
+	    .headerless = cursor->sealed };
 	status = apfs_object_read(cursor->container, &ref, level->window, NULL,
 	    error);
 	if (status != FSIMG_OK)
 		return (status);
+	/* A sealed node is used only once its digest has matched, and its
+	 * first bytes, where an object header would be, are zero.
+	 */
+	if (cursor->sealed) {
+		status = digest_check(cursor, level->window, digest, error);
+		if (status != FSIMG_OK)
+			return (status);
+		if (memcmp(level->window, zero_header,
+		    APFS_OBJ_HEADER_BYTES) != 0)
+			return (apfs_corrupt(error, cursor->profile->role,
+			    "node has a nonzero header"));
+	}
 	if (!apfs_node_decode(level->window, cursor->container->block_size,
 	    &level->node))
 		return (apfs_corrupt(error, cursor->profile->role,
@@ -358,20 +444,24 @@ root_load(apfs_cursor_t *cursor, fsimg_error_t *error)
 {
 	cursor->path[0].low = cursor->path[0].high = NULL;
 	cursor->path[0].low_len = cursor->path[0].high_len = 0;
-	return (node_load(cursor, 0, cursor->root, error));
+	return (node_load(cursor, 0, cursor->root,
+	    cursor->sealed ? cursor->root_hash : NULL, error));
 }
 
 /*
  * Load the child of path[depth] at its index as path[depth + 1]. The
  * child's bounds are the separator naming it and the next one, or past the
- * last separator the parent's own upper bound.
+ * last separator the parent's own upper bound. In a sealed tree the value
+ * names the child's OID relative to the root's and then its digest.
  */
 static fsimg_status_t
 child_load(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 {
 	apfs_path_level_t *parent = &cursor->path[depth];
 	apfs_path_level_t *child = &cursor->path[depth + 1];
+	const unsigned char *value, *digest = NULL;
 	apfs_entry_t entry;
+	uint64_t oid;
 
 	/* Defensive, as in node_load(). */
 	if (depth + 1 >= APFS_BTREE_LEVELS_MAX)
@@ -393,8 +483,16 @@ child_load(apfs_cursor_t *cursor, unsigned depth, fsimg_error_t *error)
 		child->high = parent->window + next.key_off;
 		child->high_len = next.key_len;
 	}
-	return (node_load(cursor, depth + 1,
-	    fsimg_load_le64(parent->window + entry.val_off), error));
+	value = parent->window + entry.val_off;
+	oid = fsimg_load_le64(value);
+	if (cursor->sealed) {
+		if (oid > UINT64_MAX - cursor->root)
+			return (apfs_corrupt(error, cursor->profile->role,
+			    "node names a child OID out of range"));
+		oid += cursor->root;
+		digest = value + APFS_CHILD_OID_BYTES;
+	}
+	return (node_load(cursor, depth + 1, oid, digest, error));
 }
 
 /*

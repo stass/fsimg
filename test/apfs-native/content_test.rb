@@ -33,10 +33,10 @@ class ApfsContentNativeTest < Minitest::Test
 
   def excluded?(path) = path == "/" || path == "/.fseventsd" || path.start_with?("/.fseventsd/")
 
-  def index_paths(records)
+  def index_paths(records, include_event_logs: false)
     entries = records.filter_map do |record|
       path = image_path(record.fetch("path"))
-      [path, record] unless excluded?(path)
+      [path, record] unless path == "/" || (!include_event_logs && excluded?(path))
     end
     assert_equal(entries.length, entries.map(&:first).uniq.length, "duplicate listing or manifest paths")
     entries.to_h
@@ -108,17 +108,13 @@ class ApfsContentNativeTest < Minitest::Test
     File.expand_path(directory)
   end
 
-  def capture_skip_reason(directory)
-    "sealed volume is refused by the reader" if directory.include?("e11-sealed")
-  end
-
-  def listed_entries(image)
+  def listed_entries(image, include_event_logs: false)
     result = invoke(arguments: ["t", "--json", *@partition_arguments, "-f", image], expected: nil, timeout: 180)
     assert_equal(0, result.status, "#{image}: t --json\n#{result.stdout}\n#{result.stderr}")
     records = result.stdout.lines.map { JSON.parse(_1) }
     assert_equal("summary", records.last.fetch("type"), image)
     assert_equal(true, records.last.fetch("complete"), image)
-    index_paths(records.select { _1.fetch("type") == "entry" })
+    index_paths(records.select { _1.fetch("type") == "entry" }, include_event_logs: include_event_logs)
   end
 
   def compare_listing(image:, manifest:, directory:)
@@ -202,11 +198,6 @@ class ApfsContentNativeTest < Minitest::Test
 
   def compare_capture(manifest)
     directory = File.dirname(manifest)
-    reason = capture_skip_reason(directory)
-    if reason
-      puts "APFS content skipped: #{directory}: #{reason}"
-      skip("#{directory}: #{reason}")
-    end
     image = File.join(directory, "image.img")
     REPORT[:compared] += 1
     expected = compare_listing(image: image, manifest: manifest, directory: directory)
@@ -218,6 +209,34 @@ class ApfsContentNativeTest < Minitest::Test
     end
     REPORT[:matched] += 1
     puts "APFS content matched: #{File.basename(directory)} (#{expected.length} entries)"
+  end
+
+  # Capture paths can contain spaces; only the fixed prefix is tokenized.
+  def sealed_manifest(path)
+    kinds = { "Directory" => "directory", "Regular File" => "file", "Symbolic Link" => "symlink" }
+    lines = File.readlines(path, chomp: true)
+    assert_match(/\A# mount: /, lines.first, "sealed manifest mount header")
+    entries = {}
+    digests = {}
+    lines.drop(1).each do |line|
+      case line
+      when /\Aentry (Directory|Regular File|Symbolic Link) ([0-7]+) (\d+) (\..*)\z/
+        kind, mode, size, member = Regexp.last_match.captures
+        member = image_path(member)
+        next if member == "/"
+
+        refute(entries.key?(member), "duplicate sealed entry: #{member}")
+        entries[member] = { kind: kinds.fetch(kind), mode: Integer(mode, 8), size: Integer(size, 10) }.freeze
+      when /\Asha256 ([0-9a-f]{64})  (\..*)\z/
+        digest, member = Regexp.last_match.captures
+        member = image_path(member)
+        refute(digests.key?(member), "duplicate sealed digest: #{member}")
+        digests[member] = digest
+      else
+        flunk("unrecognized sealed manifest line: #{line.inspect}")
+      end
+    end
+    [entries.freeze, digests.freeze]
   end
 
   public
@@ -270,10 +289,63 @@ class ApfsContentNativeTest < Minitest::Test
     end
   end
 
-  def test_sealed_capture_is_excluded_from_content_comparisons
-    native_directory
-    puts "APFS content skipped: e11-sealed: sealed volume is refused by the reader"
-    skip("e11-sealed: sealed volume is refused by the reader")
+  def test_sealed_capture_lists_manifest_and_salvages_supported_files
+    directory = File.join(native_directory, "e11-sealed")
+    image = File.join(directory, "app.dmg")
+    skip("sealed capture unavailable: #{image}") unless File.file?(image)
+
+    entries, digests = sealed_manifest(File.join(directory, "native-manifest.txt"))
+    actual = listed_entries(image, include_event_logs: true)
+    assert_equal(entries.keys.sort, actual.keys.sort, "sealed manifest has exactly the listed entries")
+    entries.each do |path, entry|
+      listed = actual.fetch(path)
+      assert_equal(entry.fetch(:kind), listed.fetch("kind"), path)
+      assert_equal(entry.fetch(:mode) & 0o7777, listed.fetch("mode") & 0o7777, path)
+      next if entry.fetch(:kind) == "directory"
+
+      assert_equal(entry.fetch(:size), Integer(listed.fetch("size_bytes"), 10), path)
+    end
+    files = entries.select { |_path, entry| entry.fetch(:kind) == "file" }
+    assert_equal(files.keys.sort, digests.keys.sort, "one digest for every regular file")
+
+    destination = @root / "sealed-extract"
+    destination.mkdir(0o700)
+    result = invoke(arguments: ["x", "--salvage", "--json", "-f", image, "-C", destination.to_s],
+      expected: 1, timeout: 600)
+    errors = result.stdout.lines.map { JSON.parse(_1) }.select { _1.fetch("type") == "error" }
+    assert_equal(1, errors.length, "one incomplete extraction result")
+    error = errors.first
+    assert_equal(-14, error.fetch("code"), "FSIMG_EPARTIAL")
+    assert_equal(false, error.fetch("complete"))
+    assert_equal("incomplete", error.fetch("output_state"))
+    assert_equal(0, error.fetch("cleanup_error"))
+    assert_equal("1394", error.fetch("salvage_losses"))
+    roots = destination.children
+    assert_equal(1, roots.length, "one extracted sealed image root")
+    extracted = roots.first
+    present, absent = files.keys.partition { (extracted / _1.delete_prefix("/")).file? }
+    # E11: the application cryptex's files other than its LZBITMAP ones.
+    assert_equal(1238, present.length, "supported regular files extracted")
+    assert_equal(1394, absent.length, "LZBITMAP regular files refused")
+    extracted_kinds = extracted.glob("**/*", File::FNM_DOTMATCH)
+      .reject { _1.relative_path_from(extracted).to_s == "." }.to_h do |output|
+        kind = output.lstat.ftype
+        ["/#{output.relative_path_from(extracted)}", kind == "link" ? "symlink" : kind]
+      end
+    wanted_kinds = entries.reject { |path, _entry| absent.include?(path) }.transform_values { _1.fetch(:kind) }
+    assert_equal(wanted_kinds, extracted_kinds, "exact extracted paths and kinds, including empty directories")
+    present.each do |path|
+      output = extracted / path.delete_prefix("/")
+      assert_equal(files.fetch(path).fetch(:size), output.size, path)
+      assert_equal(digests.fetch(path), Digest::SHA256.file(output).hexdigest, path)
+    end
+    absent.sort.first(25).each do |path|
+      refusal = invoke(arguments: ["x", "-O", "-f", image, path], expected: nil, timeout: 180)
+      refute_equal(0, refusal.status, path)
+      assert_includes(refusal.stderr, "compression type is not supported", path)
+    end
+    REPORT[:compared] += 1
+    REPORT[:matched] += 1
   end
 
   def test_unused_truncated_tail_preserves_listing_and_extraction

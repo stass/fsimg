@@ -45,7 +45,13 @@ Partition Map or a DMG, and one volume of it; it lists, extracts and verifies
 files, directories, symbolic links, FIFOs and hard links, lists devices and
 sockets as read-only kinds, reads sparse files, clones and files compressed
 with zlib, LZVN or LZFSE, and delivers no extended attributes.
-Encrypted, Fusion and sealed volumes, and files compressed with LZBITMAP, are
+A sealed volume is read with each filesystem-tree node checked against the
+seal's stored root hash, which checks the metadata's integrity and never its
+authenticity; file contents and their extent map are not checked against the
+seal, and verification of the volume is incomplete.
+Its snapshots, a broken seal and a seal hashed other than with SHA-256 are
+refused with FSIMG_EUNSUPPORTED.
+Encrypted and Fusion volumes, and files compressed with LZBITMAP, are
 refused with FSIMG_EUNSUPPORTED.
 APFS writing creates a container of one volume with 4096-byte blocks that holds
 files, directories, symbolic links and FIFOs.

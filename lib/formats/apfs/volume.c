@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "apfs.h"
 #include "fsimg-endian.h"
@@ -25,17 +26,19 @@
 #define ROLE_COPY	"snapshot superblock"
 #define ROLE_MAP	"volume object map"
 #define ROLE_MAP_TREE	"volume object-map snapshot tree"
+#define ROLE_INTEGRITY	"integrity object"
 
 /* The most bytes a snapshot name holds stored, its NUL included. */
 #define SNAP_NAME_STORED_MAX	(APFS_SNAP_NAME_KEY_MAX - APFS_SNAP_NAME_KEY_BYTES)
 
-/* The incompatible features a volume may carry. Incomplete restore and
- * sealing are known and unsupported, so they are outside the accepted set.
+/* The incompatible features a volume may carry. Incomplete restore is
+ * known and unsupported, so it is outside the accepted set.
  */
 #define FS_INCOMPAT_ACCEPTED	(APFS_FS_INCOMPAT_CASE_INSENSITIVE |	\
 	    APFS_FS_INCOMPAT_DATALESS_SNAPSHOTS |			\
 	    APFS_FS_INCOMPAT_ENCRYPTION_ROLLED |			\
-	    APFS_FS_INCOMPAT_NORM_INSENSITIVE)
+	    APFS_FS_INCOMPAT_NORM_INSENSITIVE |			\
+	    APFS_FS_INCOMPAT_SEALED)
 /* The volume flags the reader accepts; unencrypted is also required. */
 #define FS_FLAGS_ACCEPTED	(APFS_FS_FLAG_UNENCRYPTED |		\
 	    APFS_FS_FLAG_CHECK_EXTENT_REFS)
@@ -43,6 +46,8 @@
 static fsimg_status_t	free_count_read(apfs_reader_t *, unsigned char *,
 			    fsimg_error_t *);
 static void		cursors_init(apfs_reader_t *, uint64_t, uint64_t);
+static fsimg_status_t	integrity_read(apfs_reader_t *, unsigned char *,
+			    fsimg_error_t *);
 static fsimg_status_t	fs_check(const apfs_fs_t *, uint32_t, size_t *,
 			    fsimg_error_t *);
 static int		map_snapshot_compare(const unsigned char *, size_t,
@@ -212,7 +217,8 @@ name_check(const unsigned char *name, size_t *length, fsimg_error_t *error)
  * The volume superblock's own rules: its magic, its slot, a nonzero UUID,
  * the name, then the refusal tables in the order a feature makes the rest
  * meaningless: incompatible features, flags, transitions, and last the tree
- * types, which a sealed volume, refused above, would state differently.
+ * types. A sealed volume names its integrity object and its sealed
+ * file-extent tree, a physical tree.
  */
 static fsimg_status_t
 fs_check(const apfs_fs_t *fs, uint32_t index, size_t *name_bytes,
@@ -220,6 +226,7 @@ fs_check(const apfs_fs_t *fs, uint32_t index, size_t *name_bytes,
 {
 	static const unsigned char zero[APFS_UUID_BYTES];
 	fsimg_status_t status;
+	bool sealed = (fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0;
 
 	if (fs->magic != APFS_FS_MAGIC)
 		return (apfs_corrupt(error, ROLE_VOLUME, "has no APSB magic"));
@@ -232,8 +239,6 @@ fs_check(const apfs_fs_t *fs, uint32_t index, size_t *name_bytes,
 	if (status != FSIMG_OK)
 		return (status);
 
-	if ((fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0)
-		return (apfs_unsupported(error, ROLE_VOLUME, "is sealed"));
 	if ((fs->incompat_features & APFS_FS_INCOMPAT_INCOMPLETE_RESTORE) != 0)
 		return (apfs_unsupported(error, ROLE_VOLUME,
 		    "has an incomplete restore"));
@@ -261,9 +266,13 @@ fs_check(const apfs_fs_t *fs, uint32_t index, size_t *name_bytes,
 		    "has a pending root change"));
 	if (fs->root_tree_type != APFS_FS_TREE_VIRTUAL ||
 	    fs->extentref_tree_type != APFS_FS_TREE_PHYSICAL ||
-	    fs->snapshot_tree_type != APFS_FS_TREE_PHYSICAL)
+	    fs->snapshot_tree_type != APFS_FS_TREE_PHYSICAL ||
+	    (sealed && fs->fext_tree_type != APFS_FS_TREE_PHYSICAL))
 		return (apfs_corrupt(error, ROLE_VOLUME,
 		    "has invalid tree types"));
+	if (sealed && (fs->integrity_oid == 0 || fs->fext_tree_oid == 0))
+		return (apfs_corrupt(error, ROLE_VOLUME,
+		    "is sealed without its integrity object or extent tree"));
 	return (FSIMG_OK);
 }
 
@@ -318,6 +327,15 @@ apfs_volume_open(fsimg_reader_t *reader, apfs_reader_t *apfs,
 	    container->xid, window, &apfs->volume_map, error);
 	if (status != FSIMG_OK)
 		return (status);
+	if ((apfs->fs.incompat_features & APFS_FS_INCOMPAT_SEALED) != 0) {
+		/* Whether a snapshot is itself sealed is unknown. */
+		if (reader->options.snapshot != NULL)
+			return (apfs_unsupported(error, ROLE_VOLUME,
+			    "is sealed, and its snapshots are not read"));
+		status = integrity_read(apfs, window, error);
+		if (status != FSIMG_OK)
+			return (status);
+	}
 	if (reader->options.snapshot != NULL) {
 		status = snapshot_select(apfs, reader->options.snapshot, window,
 		    error);
@@ -331,8 +349,60 @@ apfs_volume_open(fsimg_reader_t *reader, apfs_reader_t *apfs,
 }
 
 /*
- * The three filesystem-tree cursors of a view: its root, resolved with
- * every node it reaches through the live volume object map at xid.
+ * The integrity object of the selected sealed volume (specs/design-apfs.md,
+ * "Sealed volumes"), read through the live volume object map at the read
+ * XID: its version, flags, hash type and broken-seal XID from the closed
+ * tables, and the root hash, which must lie inside the object past its
+ * fixed fields, kept for the filesystem tree's cursors.
+ */
+static fsimg_status_t
+integrity_read(apfs_reader_t *apfs, unsigned char *window,
+    fsimg_error_t *error)
+{
+	apfs_container_t *container = &apfs->container;
+	apfs_integrity_t integrity;
+	apfs_ref_t ref;
+	fsimg_status_t status;
+
+	ref = (apfs_ref_t){ .map = &apfs->volume_map, .role = ROLE_INTEGRITY,
+	    .oid = apfs->fs.integrity_oid, .xid = apfs->read_xid,
+	    .storage = APFS_OBJ_VIRTUAL, .subtype = APFS_SUBTYPE_NONE,
+	    .kind = APFS_KIND_INTEGRITY_META };
+	status = apfs_object_read(container, &ref, window, NULL, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (!apfs_integrity_decode(window, container->block_size, &integrity))
+		return (apfs_corrupt(error, ROLE_INTEGRITY,
+		    "is shorter than its structure"));
+	if (integrity.version != APFS_INTEGRITY_VERSION)
+		return (apfs_unsupported(error, ROLE_INTEGRITY,
+		    "has an unsupported version"));
+	if (integrity.broken_xid != 0)
+		return (apfs_unsupported(error, ROLE_INTEGRITY,
+		    "records a broken seal"));
+	if (integrity.flags != 0)
+		return (apfs_unsupported(error, ROLE_INTEGRITY,
+		    "has unsupported flags"));
+	if (integrity.hash_type != APFS_INTEGRITY_HASH_SHA256)
+		return (apfs_unsupported(error, ROLE_INTEGRITY,
+		    "uses a hash other than SHA-256"));
+	if (integrity.root_hash_offset < APFS_INTEGRITY_FIXED_BYTES ||
+	    integrity.root_hash_offset > container->block_size -
+	    APFS_SEAL_HASH_BYTES)
+		return (apfs_corrupt(error, ROLE_INTEGRITY,
+		    "has its root hash outside the object"));
+	bcopy(window + integrity.root_hash_offset, apfs->root_hash,
+	    APFS_SEAL_HASH_BYTES);
+	apfs->sealed = true;
+	return (FSIMG_OK);
+}
+
+/*
+ * The three cursors of a view: lookup and scan over its filesystem tree,
+ * resolved with every node they reach through the live volume object map
+ * at xid and, in a sealed volume, bound to the root hash; content over the
+ * tree that holds the file extents, the filesystem tree or a sealed
+ * volume's physical sealed file-extent tree.
  */
 static void
 cursors_init(apfs_reader_t *apfs, uint64_t root, uint64_t xid)
@@ -343,8 +413,16 @@ cursors_init(apfs_reader_t *apfs, uint64_t root, uint64_t xid)
 	    APFS_OBJ_VIRTUAL, root, xid, &apfs->volume_map);
 	apfs_cursor_init(&apfs->scan, &apfs->container, profile,
 	    APFS_OBJ_VIRTUAL, root, xid, &apfs->volume_map);
-	apfs_cursor_init(&apfs->content, &apfs->container, profile,
-	    APFS_OBJ_VIRTUAL, root, xid, &apfs->volume_map);
+	if (!apfs->sealed) {
+		apfs_cursor_init(&apfs->content, &apfs->container, profile,
+		    APFS_OBJ_VIRTUAL, root, xid, &apfs->volume_map);
+		return;
+	}
+	apfs_cursor_seal(&apfs->lookup, apfs->root_hash);
+	apfs_cursor_seal(&apfs->scan, apfs->root_hash);
+	apfs_cursor_init(&apfs->content, &apfs->container,
+	    apfs_sealed_extent_tree_profile(), APFS_OBJ_PHYSICAL,
+	    apfs->fs.fext_tree_oid, xid, NULL);
 }
 
 void

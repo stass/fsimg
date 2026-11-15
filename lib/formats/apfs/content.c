@@ -31,7 +31,12 @@
  *
  * The stream's records are adjacent in the tree, which orders keys by
  * owner, kind and offset, so the record after the stream's last one, or
- * after the last key below the stream's first, is not the stream's.
+ * after the last key below the stream's first, is not the stream's. A
+ * sealed volume keeps its file extents in the sealed file-extent tree
+ * instead (specs/design-apfs.md, "Sealed volumes"), whose keys order by
+ * private ID and offset alone; the content cursor is over that tree, and
+ * extent_key_encode() and extent_at_cursor() are the two places that tell
+ * the trees' records apart.
  *
  * Only stream_extent() moves the content cursor. While
  * apfs->current.resolved is set and current.extent came from a record
@@ -61,6 +66,8 @@ static fsimg_status_t	extent_after_cursor(apfs_reader_t *, bool *,
 			    extent_record_t *, fsimg_error_t *);
 static fsimg_status_t	extent_at_cursor(apfs_reader_t *, bool *,
 			    extent_record_t *, fsimg_error_t *);
+static bool		extent_key_encode(const apfs_reader_t *,
+			    unsigned char *, const apfs_extent_key_t *);
 static fsimg_status_t	extent_judge(const apfs_reader_t *,
 			    const apfs_extent_key_t *, const apfs_extent_val_t *,
 			    extent_record_t *, fsimg_error_t *);
@@ -75,6 +82,58 @@ static fsimg_status_t	stream_extent(fsimg_reader_t *, uint64_t,
 static fsimg_status_t	tiling_check(uint64_t, const extent_record_t *,
 			    fsimg_error_t *);
 static void		result_tail(apfs_reader_t *, uint64_t);
+static int		sealed_extent_compare(const unsigned char *, size_t,
+			    const unsigned char *, size_t);
+
+/* Both trees' extent keys fit the one search buffer. */
+_Static_assert(APFS_SEALED_EXTENT_KEY_BYTES == APFS_EXTENT_KEY_BYTES,
+    "sealed and file-extent keys differ in size");
+
+/* The sealed file-extent tree: fixed keys of private ID then offset. */
+static const apfs_tree_profile_t sealed_extent_tree = {
+	.role = "sealed file-extent tree",
+	.compare = sealed_extent_compare,
+	.subtype = APFS_SUBTYPE_FEXT,
+	.key_min = APFS_SEALED_EXTENT_KEY_BYTES,
+	.key_max = APFS_SEALED_EXTENT_KEY_BYTES,
+	.val_min = APFS_SEALED_EXTENT_VAL_BYTES,
+	.val_max = APFS_SEALED_EXTENT_VAL_BYTES,
+	.fixed_key = APFS_SEALED_EXTENT_KEY_BYTES,
+	.fixed_val = APFS_SEALED_EXTENT_VAL_BYTES,
+};
+
+const apfs_tree_profile_t *
+apfs_sealed_extent_tree_profile(void)
+{
+	return (&sealed_extent_tree);
+}
+
+/* Keys of the profile's fixed size, as the cursor guarantees. */
+static int
+sealed_extent_compare(const unsigned char *a, size_t a_len,
+    const unsigned char *b, size_t b_len)
+{
+	apfs_extent_key_t x = { 0 }, y = { 0 };
+
+	(void)apfs_sealed_extent_key_decode(a, a_len, &x);
+	(void)apfs_sealed_extent_key_decode(b, b_len, &y);
+	if (x.private_id != y.private_id)
+		return (x.private_id < y.private_id ? -1 : 1);
+	if (x.logical != y.logical)
+		return (x.logical < y.logical ? -1 : 1);
+	return (0);
+}
+
+/* The content cursor's key for a stream offset, in its tree's encoding. */
+static bool
+extent_key_encode(const apfs_reader_t *apfs, unsigned char *raw,
+    const apfs_extent_key_t *key)
+{
+	if (apfs->sealed)
+		return (apfs_sealed_extent_key_encode(raw,
+		    APFS_SEALED_EXTENT_KEY_BYTES, key));
+	return (apfs_extent_key_encode(raw, APFS_EXTENT_KEY_BYTES, key));
+}
 
 fsimg_status_t
 apfs_resolve(fsimg_reader_t *reader, uint64_t offset, fsimg_extent_t *extent,
@@ -203,7 +262,7 @@ resolve_seek(fsimg_reader_t *reader, uint64_t offset, fsimg_error_t *error)
 	bool positioned, found = false;
 	fsimg_status_t status;
 
-	if (!apfs_extent_key_encode(key, sizeof(key), &search))
+	if (!extent_key_encode(apfs, key, &search))
 		return (apfs_corrupt(error, ROLE_EXTENT,
 		    "private ID is invalid"));
 
@@ -348,14 +407,28 @@ extent_at_cursor(apfs_reader_t *apfs, bool *found, extent_record_t *record,
 
 	*found = false;
 	apfs_cursor_record(&apfs->content, &raw);
-	if (!apfs_jkey_decode(raw.key, raw.key_len, &header))
-		return (apfs_corrupt(error, ROLE_EXTENT, "key is malformed"));
-	if (header.kind != APFS_J_FILE_EXTENT ||
-	    header.oid != apfs->current.stream.oid)
-		return (FSIMG_OK);
-	if (!apfs_extent_key_decode(raw.key, raw.key_len, &key) ||
-	    raw.ghost || !apfs_extent_val_decode(raw.val, raw.val_len, &val))
-		return (apfs_corrupt(error, ROLE_EXTENT, "is malformed"));
+	if (apfs->sealed) {
+		/* Every record of the sealed tree is a file extent. */
+		if (!apfs_sealed_extent_key_decode(raw.key, raw.key_len,
+		    &key) || raw.ghost ||
+		    !apfs_sealed_extent_val_decode(raw.val, raw.val_len, &val))
+			return (apfs_corrupt(error, ROLE_EXTENT,
+			    "is malformed"));
+		if (key.private_id != apfs->current.stream.oid)
+			return (FSIMG_OK);
+	} else {
+		if (!apfs_jkey_decode(raw.key, raw.key_len, &header))
+			return (apfs_corrupt(error, ROLE_EXTENT,
+			    "key is malformed"));
+		if (header.kind != APFS_J_FILE_EXTENT ||
+		    header.oid != apfs->current.stream.oid)
+			return (FSIMG_OK);
+		if (!apfs_extent_key_decode(raw.key, raw.key_len, &key) ||
+		    raw.ghost ||
+		    !apfs_extent_val_decode(raw.val, raw.val_len, &val))
+			return (apfs_corrupt(error, ROLE_EXTENT,
+			    "is malformed"));
+	}
 	status = extent_judge(apfs, &key, &val, record, error);
 	if (status != FSIMG_OK)
 		return (status);

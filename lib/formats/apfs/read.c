@@ -159,8 +159,9 @@ detail_add(fsimg_volume_info_t *info, const char *name, uint64_t value)
  * order ("Information and capabilities"). The container's length is
  * N * B of the selected checkpoint, whatever the slice holds, so the reader
  * core derives the missing bytes of a truncated container. The label is
- * the validated volume name, the only image text reported. A sealed volume
- * is refused while opening, so sealed is zero. In a snapshot view the
+ * the validated volume name, the only image text reported. sealed says
+ * whether the volume was read through its seal; no authenticity is ever
+ * claimed, since nothing vouches for the root hash. In a snapshot view the
  * object counts, snapshot count and allocated blocks are the snapshot
  * superblock copy's, the volume as it stood, and read_xid is the
  * snapshot's; the identity comes from the live superblock, whose name the
@@ -207,5 +208,5 @@ report_info(fsimg_reader_t *reader)
 	detail_add(info, "other_objects", view->other_objects);
 	detail_add(info, "snapshots", view->snapshots);
 	detail_add(info, "volume_blocks", view->alloc_blocks);
-	detail_add(info, "sealed", 0);
+	detail_add(info, "sealed", apfs->sealed);
 }

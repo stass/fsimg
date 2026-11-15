@@ -2163,6 +2163,66 @@ apfs_extent_val_encode(unsigned char *raw, size_t length,
 	return (true);
 }
 
+/*
+ * A sealed file-extent tree's records: the same extent as a file-extent
+ * record, keyed by private ID and logical offset without a record header,
+ * and without a crypto ID, which decodes as zero.
+ */
+bool
+apfs_sealed_extent_key_decode(const unsigned char *raw, size_t length,
+    apfs_extent_key_t *key)
+{
+	if (length != APFS_SEALED_EXTENT_KEY_BYTES)
+		return (false);
+
+	key->private_id = fsimg_load_le64(raw);
+	key->logical = fsimg_load_le64(raw + 8);
+	return (true);
+}
+
+bool
+apfs_sealed_extent_key_encode(unsigned char *raw, size_t length,
+    const apfs_extent_key_t *key)
+{
+	if (length != APFS_SEALED_EXTENT_KEY_BYTES)
+		return (false);
+
+	fsimg_store_le64(raw, key->private_id);
+	fsimg_store_le64(raw + 8, key->logical);
+	return (true);
+}
+
+bool
+apfs_sealed_extent_val_decode(const unsigned char *raw, size_t length,
+    apfs_extent_val_t *extent)
+{
+	uint64_t len_and_flags;
+
+	if (length != APFS_SEALED_EXTENT_VAL_BYTES)
+		return (false);
+
+	len_and_flags = fsimg_load_le64(raw);
+	extent->length = len_and_flags & APFS_EXTENT_LEN_MASK;
+	extent->flags = (uint8_t)(len_and_flags >> APFS_EXTENT_FLAGS_SHIFT);
+	extent->phys_block = fsimg_load_le64(raw + 8);
+	extent->crypto_id = 0;
+	return (true);
+}
+
+bool
+apfs_sealed_extent_val_encode(unsigned char *raw, size_t length,
+    const apfs_extent_val_t *extent)
+{
+	if (length != APFS_SEALED_EXTENT_VAL_BYTES ||
+	    extent->length > APFS_EXTENT_LEN_MASK || extent->crypto_id != 0)
+		return (false);
+
+	fsimg_store_le64(raw, extent->length |
+	    (uint64_t)extent->flags << APFS_EXTENT_FLAGS_SHIFT);
+	fsimg_store_le64(raw + 8, extent->phys_block);
+	return (true);
+}
+
 bool
 apfs_pext_val_decode(const unsigned char *raw, size_t length,
     apfs_pext_val_t *pext)
@@ -2474,5 +2534,41 @@ apfs_fs_encode(unsigned char *raw, size_t length, const apfs_fs_t *fs)
 	fsimg_store_le64(raw + 1032, fs->fext_tree_oid);
 	fsimg_store_le32(raw + 1040, fs->fext_tree_type);
 	fsimg_store_le32(raw + 1044, fs->reserved_tree_type);
+	return (true);
+}
+
+/*
+ * A sealed volume's integrity object, after its object header: version,
+ * flags, hash type and root-hash offset (u32 each), then the broken-seal
+ * XID (u64), and reserved words to APFS_INTEGRITY_FIXED_BYTES.
+ */
+bool
+apfs_integrity_decode(const unsigned char *raw, size_t length,
+    apfs_integrity_t *integrity)
+{
+	if (length < APFS_INTEGRITY_FIXED_BYTES)
+		return (false);
+
+	integrity->version = fsimg_load_le32(raw + 32);
+	integrity->flags = fsimg_load_le32(raw + 36);
+	integrity->hash_type = fsimg_load_le32(raw + 40);
+	integrity->root_hash_offset = fsimg_load_le32(raw + 44);
+	integrity->broken_xid = fsimg_load_le64(raw + 48);
+	return (true);
+}
+
+bool
+apfs_integrity_encode(unsigned char *raw, size_t length,
+    const apfs_integrity_t *integrity)
+{
+	if (length < APFS_INTEGRITY_FIXED_BYTES)
+		return (false);
+
+	fsimg_store_le32(raw + 32, integrity->version);
+	fsimg_store_le32(raw + 36, integrity->flags);
+	fsimg_store_le32(raw + 40, integrity->hash_type);
+	fsimg_store_le32(raw + 44, integrity->root_hash_offset);
+	fsimg_store_le64(raw + 48, integrity->broken_xid);
+	bzero(raw + 56, APFS_INTEGRITY_FIXED_BYTES - 56);
 	return (true);
 }

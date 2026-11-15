@@ -164,6 +164,13 @@ apfs_object_read(apfs_container_t *container, const apfs_ref_t *ref,
 	fsimg_status_t status;
 	bool found;
 
+	/* Only a sealed tree's virtual node is headerless, and it has no
+	 * header to return.
+	 */
+	if (ref->headerless &&
+	    (ref->storage != APFS_OBJ_VIRTUAL || header != NULL))
+		return (fsimg_error_set(error, FSIMG_EINVAL, 0,
+		    FSIMG_OP_READER, "invalid headerless reference"));
 	expected = ref->blocks == 0 ? 1 : ref->blocks;
 	xid = ref->xid;
 	switch (ref->storage) {
@@ -203,6 +210,10 @@ apfs_object_read(apfs_container_t *container, const apfs_ref_t *ref,
 		if (!found)
 			return (apfs_corrupt(error, ref->role,
 			    "is missing from its object map"));
+		if (((value.flags & APFS_OMAP_VAL_NOHEADER) != 0) !=
+		    ref->headerless)
+			return (apfs_corrupt(error, ref->role,
+			    "is mapped with the wrong no-header flag"));
 		address = value.address;
 		blocks = value.size / container->block_size;
 		rule = XID_EQUAL;
@@ -222,6 +233,11 @@ apfs_object_read(apfs_container_t *container, const apfs_ref_t *ref,
 		    &sum, error);
 	if (status != FSIMG_OK)
 		return (status);
+	/* A headerless node's digest, which its cursor checks, stands in
+	 * for its checksum and header.
+	 */
+	if (ref->headerless)
+		return (FSIMG_OK);
 	if (apfs_fletcher_value(&sum) != fsimg_load_le64(window))
 		return (apfs_corrupt(error, ref->role, "has a bad checksum"));
 	return (object_check(ref, window, container->block_size, rule, xid,

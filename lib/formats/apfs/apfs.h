@@ -49,6 +49,7 @@
 #define APFS_KIND_FS			13u	/* volume superblock */
 #define APFS_KIND_NX_REAPER		17u
 #define APFS_KIND_NX_REAP_LIST		18u
+#define APFS_KIND_INTEGRITY_META	30u	/* a sealed volume's seal */
 
 /* Object subtypes: the tree a node belongs to. */
 #define APFS_SUBTYPE_NONE		0u
@@ -58,6 +59,7 @@
 #define APFS_SUBTYPE_EXTENTREF		15u	/* a volume's extent-reference tree */
 #define APFS_SUBTYPE_SNAPMETA		16u	/* a volume's snapshot tree */
 #define APFS_SUBTYPE_OMAP_SNAPSHOT	19u	/* an object map's snapshot tree */
+#define APFS_SUBTYPE_FEXT		31u	/* a sealed file-extent tree */
 
 /* The container superblock. APFS_NX_BYTES ends its last decoded field. */
 #define APFS_NX_MAGIC			0x4253584eu	/* "NXSB" */
@@ -115,6 +117,11 @@
 #define APFS_FREE_LIST_EMPTY		0xffffu	/* offset of an empty free list */
 #define APFS_BTREE_LEVELS_MAX		16u
 #define APFS_CHILD_OID_BYTES		8u	/* an index node's value */
+/* A hashed index node's value: the child's OID relative to the root's,
+ * then the child's SHA-256 digest, the one hash fsimg reads.
+ */
+#define APFS_SEAL_HASH_BYTES		32u
+#define APFS_HASHED_CHILD_BYTES		(APFS_CHILD_OID_BYTES + APFS_SEAL_HASH_BYTES)
 
 #define APFS_NODE_ROOT			0x0001u	/* node flags */
 #define APFS_NODE_LEAF			0x0002u
@@ -133,8 +140,11 @@
 #define APFS_BTREE_HASHED		0x080u
 #define APFS_BTREE_NOHEADER		0x100u
 #define APFS_BTREE_FLAGS_KNOWN		0x1ffu
-/* Sealed and nonpersistent trees, which fsimg neither reads nor writes. */
-#define APFS_BTREE_FLAGS_REFUSED	(APFS_BTREE_HASHED | APFS_BTREE_NOHEADER | \
+/* A sealed tree's flags, which only a sealed cursor reads; the writer
+ * emits neither those nor a nonpersistent tree's.
+ */
+#define APFS_BTREE_SEALED		(APFS_BTREE_HASHED | APFS_BTREE_NOHEADER)
+#define APFS_BTREE_FLAGS_REFUSED	(APFS_BTREE_SEALED | \
 				    APFS_BTREE_NONPERSISTENT)
 
 /*
@@ -561,6 +571,23 @@ typedef struct apfs_fs {
 } apfs_fs_t;
 
 /*
+ * A sealed volume's integrity object (specs/design-apfs.md, "Sealed
+ * volumes"): fixed fields through APFS_INTEGRITY_FIXED_BYTES, the end of
+ * version 2's reserved words, and the root hash at root_hash_offset.
+ */
+#define APFS_INTEGRITY_FIXED_BYTES	128u
+#define APFS_INTEGRITY_VERSION		2u
+#define APFS_INTEGRITY_HASH_SHA256	1u
+
+typedef struct apfs_integrity {
+	uint64_t	broken_xid;	/* the XID that broke the seal, or zero */
+	uint32_t	version;
+	uint32_t	flags;
+	uint32_t	hash_type;
+	uint32_t	root_hash_offset;
+} apfs_integrity_t;
+
+/*
  * Fletcher-64 (codec.c). The checksum covers an object from byte 8 to its
  * end as little-endian 32-bit words. An object of several blocks feeds its
  * bytes in pieces: apfs_fletcher_init(), apfs_fletcher_update() over each
@@ -696,6 +723,14 @@ bool	apfs_reap_list_encode(unsigned char *, size_t,
 bool	apfs_fs_decode(const unsigned char *, size_t, apfs_fs_t *);
 bool	apfs_fs_encode(unsigned char *, size_t, const apfs_fs_t *);
 
+/* A sealed volume's integrity object: its fixed fields, which the volume
+ * module judges. The root hash lies at root_hash_offset in the object.
+ */
+bool	apfs_integrity_decode(const unsigned char *, size_t,
+	    apfs_integrity_t *);
+bool	apfs_integrity_encode(unsigned char *, size_t,
+	    const apfs_integrity_t *);
+
 /*
  * Diagnostics (object.c). A failure names the object's role, such as
  * "container object map" or "checkpoint descriptor", and what is wrong with
@@ -788,6 +823,11 @@ fsimg_status_t	apfs_reaper_idle(apfs_container_t *, unsigned char *, bool *,
  * fails before its blocks are read. It streams its blocks through window,
  * the checksum running over them; window holds its first block on return.
  * The encrypted and nonpersistent flags are FSIMG_EUNSUPPORTED.
+ * A headerless reference, which only a sealed tree's cursor makes, names a
+ * virtual node mapped with the no-header flag: the flag must equal the
+ * reference's either way, or the read is FSIMG_ECORRUPT, and a headerless
+ * node is read without checksum or header checks, since its parent's
+ * digest, which the cursor checks, identifies it instead.
  * apfs_block_read() is the one read of a block by number, refusing one
  * outside [1, N).
  */
@@ -802,6 +842,7 @@ typedef struct apfs_ref {
 	uint32_t	 storage;	/* APFS_OBJ_PHYSICAL, _VIRTUAL, _EPHEMERAL */
 	uint32_t	 subtype;
 	uint16_t	 kind;
+	bool		 headerless;	/* a sealed tree's node */
 } apfs_ref_t;
 
 fsimg_status_t	apfs_block_read(apfs_container_t *, uint64_t, unsigned char *,
@@ -958,9 +999,9 @@ fsimg_status_t	apfs_sm_pager_pool_bitmap(apfs_sm_pager_t *, uint32_t,
  * states what a tree's records look like: its subtype, its comparator, the
  * length bounds of its keys and of its leaf values, and its fixed key and
  * value sizes, both zero for a tree of variable-size entries. An index
- * node's value is always a child OID. A comparator orders two keys whose
- * lengths lie within the profile's bounds and must be total over any bytes
- * of such lengths. It is a weak order: keys it calls equal form classes,
+ * node's value is a child OID, or in a sealed tree a hashed child value.
+ * A comparator orders two keys whose lengths lie within the profile's
+ * bounds and must be total over any bytes of such lengths. It is a weak order: keys it calls equal form classes,
  * and a class is either decided, holding at most one key of the tree, or
  * undecided, when the format leaves the order of its keys open.
  *
@@ -1060,11 +1101,20 @@ typedef struct apfs_cursor {
 	uint64_t	 loads;		/* nodes loaded since seek or first */
 	unsigned	 depth;		/* levels of path loaded */
 	bool		 positioned;	/* on a record */
+	bool		 sealed;	/* hashed, headerless nodes */
+	unsigned char	 root_hash[APFS_SEAL_HASH_BYTES];	/* sealed only */
 } apfs_cursor_t;
 
 void		apfs_cursor_init(apfs_cursor_t *, apfs_container_t *,
 		    const apfs_tree_profile_t *, uint32_t, uint64_t, uint64_t,
 		    apfs_map_t *);
+/*
+ * apfs_cursor_seal(cursor, root_hash) makes a virtual cursor, right after
+ * apfs_cursor_init(), read a sealed tree: hashed headerless nodes, each
+ * accepted only when its SHA-256 digest equals its parent's value, the
+ * root's equal to root_hash, APFS_SEAL_HASH_BYTES copied.
+ */
+void		apfs_cursor_seal(apfs_cursor_t *, const unsigned char *);
 void		apfs_cursor_free(apfs_cursor_t *);
 fsimg_status_t	apfs_cursor_seek(apfs_cursor_t *, const unsigned char *,
 		    size_t, apfs_seek_t, bool *, fsimg_error_t *);
@@ -1096,6 +1146,11 @@ fsimg_status_t	apfs_cursor_counts_check(const apfs_cursor_t *, uint64_t,
  */
 const apfs_tree_profile_t *apfs_fs_tree_profile(bool);
 
+/* A sealed volume's sealed file-extent tree's profile (content.c): fixed
+ * keys ordered by private ID, then logical offset.
+ */
+const apfs_tree_profile_t *apfs_sealed_extent_tree_profile(void);
+
 /*
  * Object maps (omap.c). apfs_map_open(container, kind, oid, xid, window, map,
  * error) reads the object-map object at physical oid, read at xid, through
@@ -1106,8 +1161,10 @@ const apfs_tree_profile_t *apfs_fs_tree_profile(bool);
  * xid too. apfs_map_lookup(map, oid, xid, found, key, value, error)
  * resolves virtual oid at xid: the greatest key not above (oid, xid), a
  * miss when that key names another OID or its value is deleted, and a found
- * value checked for its flags, size and range. apfs_map_close() frees the
- * map's cursor.
+ * value checked for its flags, size and range: an encrypted value is
+ * FSIMG_EUNSUPPORTED, and the no-header flag is left for
+ * apfs_object_read() to compare with its reference. apfs_map_close() frees
+ * the map's cursor.
  */
 typedef enum {
 	APFS_MAP_CONTAINER,
@@ -1270,6 +1327,8 @@ bool		apfs_name_assigned(const char *, size_t);
 #define APFS_EXTENT_VAL_BYTES		24u
 #define APFS_EXTENT_LEN_MASK		UINT64_C(0x00ffffffffffffff)
 #define APFS_EXTENT_FLAGS_SHIFT		56u
+#define APFS_SEALED_EXTENT_KEY_BYTES	16u
+#define APFS_SEALED_EXTENT_VAL_BYTES	16u
 
 #define APFS_PEXT_VAL_BYTES		20u
 #define APFS_PEXT_LEN_MASK		UINT64_C(0x0fffffffffffffff)
@@ -1596,6 +1655,18 @@ bool	apfs_extent_val_decode(const unsigned char *, size_t,
 	    apfs_extent_val_t *);
 bool	apfs_extent_val_encode(unsigned char *, size_t,
 	    const apfs_extent_val_t *);
+/* A sealed file-extent tree's records: a key of private ID and logical
+ * offset with no header, and a value of length, flags and physical block,
+ * decoded into the file extent's types with a zero crypto ID.
+ */
+bool	apfs_sealed_extent_key_decode(const unsigned char *, size_t,
+	    apfs_extent_key_t *);
+bool	apfs_sealed_extent_key_encode(unsigned char *, size_t,
+	    const apfs_extent_key_t *);
+bool	apfs_sealed_extent_val_decode(const unsigned char *, size_t,
+	    apfs_extent_val_t *);
+bool	apfs_sealed_extent_val_encode(unsigned char *, size_t,
+	    const apfs_extent_val_t *);
 bool	apfs_pext_val_decode(const unsigned char *, size_t, apfs_pext_val_t *);
 bool	apfs_pext_val_encode(unsigned char *, size_t, const apfs_pext_val_t *);
 
@@ -1810,6 +1881,8 @@ typedef struct apfs_reader {
 	size_t		 label_bytes;	/* the name without its terminator */
 	bool		 hashed;	/* directory records use hashed keys */
 	bool		 snapshot;	/* opened at snapshot_fs's view */
+	bool		 sealed;	/* read through the seal */
+	unsigned char	 root_hash[APFS_SEAL_HASH_BYTES];	/* sealed only */
 } apfs_reader_t;
 
 extern const fsimg_reader_ops_t fsimg_apfs_reader_ops;

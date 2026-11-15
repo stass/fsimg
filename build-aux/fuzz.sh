@@ -167,7 +167,7 @@ run_fuzzer "$work_dir/fuzz-hfsplus" "$hfsplus_corpus" 3145728 10
 compile_fuzzer -std=c11 -O1 -g -fno-omit-frame-pointer \
     -fsanitize=fuzzer,address,undefined -fsanitize-address-use-after-scope \
     -I"$build_dir" -I"$source_dir/include" -I"$source_dir/compat" \
-    -I"$source_dir/test" \
+    -I"$source_dir/lib/core" -I"$source_dir/test" \
     "$source_dir/fuzz/apfs.c" "$source_dir/test/apfs-gen.c" \
     "$fuzz_library" $codec_libs -o "$work_dir/fuzz-apfs"
 apfs_corpus=apfs-fuzz-corpus

@@ -1303,9 +1303,422 @@ test_salvage_stops_before_bad_compressed_chunk(void)
 	free(source);
 }
 
+/* Sealed fixtures use the same callback I/O and content assertions as above. */
+/* Ten extents also split the physical sealed file-extent tree. */
+#define SEALED_FILE_SIZE (9 * CONTENT_BLOCK + 37)
+#define SEALED_HOLE_SIZE (CONTENT_BLOCK + 19)
+
+static apfs_gen_volume_t *
+sealed_fixture(content_fixture_t *f, apfs_gen_sealed_info_t *info)
+{
+	apfs_gen_volume_t *volume = apfs_gen_volume_new();
+	unsigned char source[SEALED_FILE_SIZE];
+	fsimg_io_ops_t ops;
+	size_t size;
+
+	bzero(f, sizeof(*f));
+	CHECK(volume != NULL);
+	for (size_t i = 0; i < sizeof(source); i++)
+		source[i] = (unsigned char)(i % 251);
+	CHECK(apfs_gen_volume_sealed(volume));
+	CHECK(apfs_gen_volume_layout(volume, 1, 1));
+	CHECK(apfs_gen_volume_directory(volume, 16, 2, "dir"));
+	CHECK(apfs_gen_volume_file(volume, 17, 16, "file", source, sizeof(source)));
+	CHECK(apfs_gen_volume_file(volume, 18, 2, "hole", NULL, SEALED_HOLE_SIZE));
+	CHECK(apfs_gen_volume_file(volume, 19, 2, "empty", NULL, 0));
+	CHECK(apfs_gen_volume_build(volume, &f->image, &size));
+	f->available = size;
+	CHECK(apfs_gen_volume_sealed_info(volume, info));
+	/* Listing seeks directory records and need not visit the first inode. */
+	CHECK(apfs_gen_volume_record_block(volume, 2, APFS_GEN_KIND_DREC, 0,
+	    &info->leaf));
+	CHECK(info->index != info->root);
+	CHECK(integer(block(f, info->root) + 34, 2) >= 2);
+	CHECK(fsimg_ctx_new(NULL, &f->ctx, &f->error) == FSIMG_OK);
+	fsimg_io_ops_init(&ops);
+	ops.read_at = image_read;
+	ops.get_size = image_size;
+	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, f, &f->io, &f->error) == FSIMG_OK);
+	return (volume);
+}
+
+static fsimg_status_t
+sealed_open(content_fixture_t *f, const fsimg_read_options_t *options)
+{
+	return (fsimg_reader_open(f->ctx, f->io, options, &f->reader, &f->error));
+}
+
+static void
+sealed_extract(content_fixture_t *f, const unsigned char *source,
+    const unsigned char *zeros)
+{
+	char directory[] = "/tmp/fsimg-apfs-sealed-XXXXXX";
+	static const char *paths[] = { "dir/file", "hole", "empty" };
+	const unsigned char *expected[] = { source, zeros, zeros };
+	const size_t sizes[] = { SEALED_FILE_SIZE, SEALED_HOLE_SIZE, 0 };
+	unsigned char bytes[SEALED_FILE_SIZE];
+	fsimg_extract_options_t options;
+	int parent, output, file;
+	size_t offset;
+	ssize_t count;
+
+	CHECK(mkdtemp(directory) != NULL);
+	parent = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(parent != -1);
+	fsimg_reader_free(f->reader);
+	f->reader = NULL;
+	CHECK(sealed_open(f, NULL) == FSIMG_OK);
+	fsimg_extract_options_init(&options);
+	if (status_is(f, fsimg_extract_at(f->reader, parent, "out", &options,
+	    &f->error), FSIMG_OK)) {
+		output = openat(parent, "out", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+		CHECK(output != -1);
+		for (size_t i = 0; i < COUNT(paths); i++) {
+			file = openat(output, paths[i], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+			CHECK(file != -1);
+			offset = 0;
+			while (offset < sizes[i]) {
+				count = read(file, bytes + offset, sizes[i] - offset);
+				CHECK(count > 0);
+				offset += (size_t)count;
+			}
+			expect(bcmp(bytes, expected[i], sizes[i]) == 0, paths[i]);
+			expect(read(file, bytes, 1) == 0, "extracted file has exact length");
+			CHECK(close(file) == 0);
+			CHECK(unlinkat(output, paths[i], 0) == 0);
+		}
+		CHECK(unlinkat(output, "dir", AT_REMOVEDIR) == 0);
+		CHECK(close(output) == 0);
+		CHECK(unlinkat(parent, "out", AT_REMOVEDIR) == 0);
+	}
+	CHECK(close(parent) == 0);
+	CHECK(rmdir(directory) == 0);
+}
+
+static void
+test_sealed_volume_lists_reads_and_extracts(void)
+{
+	static const struct {
+		const char *path;
+		uint32_t kind;
+		uint32_t mode;
+		uint64_t size;
+	} entries[] = {
+		{ "/dir", FSIMG_ENTRY_DIRECTORY, 0755, 0 },
+		{ "/dir/file", FSIMG_ENTRY_FILE, 0644, SEALED_FILE_SIZE },
+		{ "/empty", FSIMG_ENTRY_FILE, 0644, 0 },
+		{ "/hole", FSIMG_ENTRY_FILE, 0644, SEALED_HOLE_SIZE }
+	};
+	unsigned char source[SEALED_FILE_SIZE], zeros[SEALED_HOLE_SIZE] = { 0 };
+	bool seen[COUNT(entries)] = { false }, found_detail = false;
+	apfs_gen_sealed_info_t locations;
+	apfs_gen_volume_t *volume;
+	content_fixture_t f;
+	fsimg_volume_info_t info;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	size_t count = 0;
+
+	scenario = "sealed listing, multi-extent and hole reads, extraction";
+	volume = sealed_fixture(&f, &locations);
+	for (size_t i = 0; i < sizeof(source); i++)
+		source[i] = (unsigned char)(i % 251);
+	if (status_is(&f, sealed_open(&f, NULL), FSIMG_OK)) {
+		CHECK(fsimg_reader_get_info(f.reader, &info, &f.error) == FSIMG_OK);
+		for (uint32_t i = 0; i < info.detail_count; i++) {
+			if (strcmp(info.details[i].name, "sealed") != 0)
+				continue;
+			found_detail = true;
+			expect(info.details[i].value == 1, "sealed detail is 1");
+		}
+		expect(found_detail, "sealed information detail exists");
+		while ((status = fsimg_reader_next(f.reader, &entry,
+		    &f.error)) == FSIMG_OK) {
+			bool found = false;
+
+			count++;
+			for (size_t i = 0; i < COUNT(entries); i++) {
+				if (strcmp(entry->path, entries[i].path) != 0)
+					continue;
+				found = true;
+				expect(!seen[i], "each path occurs once");
+				seen[i] = true;
+				expect(entry->kind == entries[i].kind, "entry kind");
+				expect((entry->metadata.mode & 07777) == entries[i].mode,
+				    "entry permissions");
+				expect(entry->size == entries[i].size, "entry size");
+				if (entry->kind != FSIMG_ENTRY_FILE)
+					continue;
+				if (strcmp(entry->path, "/dir/file") == 0) {
+					expect_read(&f, 0, sizeof(source), source, sizeof(source), FSIMG_OK, NULL);
+					expect_read(&f, CONTENT_BLOCK - 7, CONTENT_BLOCK + 29,
+					    source + CONTENT_BLOCK - 7, CONTENT_BLOCK + 29, FSIMG_OK, NULL);
+				} else if (entry->size != 0)
+					expect_read(&f, 0, sizeof(zeros), zeros, sizeof(zeros), FSIMG_OK, NULL);
+			}
+			expect(found, "no unexpected listing entry");
+		}
+		status_is(&f, status, FSIMG_DONE);
+		expect(count == COUNT(entries), "exact listing entry count");
+		for (size_t i = 0; i < COUNT(entries); i++)
+			expect(seen[i], entries[i].path);
+		sealed_extract(&f, source, zeros);
+	}
+	fixture_free(&f);
+	apfs_gen_volume_free(volume);
+}
+
+typedef enum sealed_damage {
+	SEALED_INDEX_LENGTH,
+	SEALED_CHILD_OVERFLOW,
+	SEALED_CHILD_UNMAPPED,
+	SEALED_NODE_MAPPING,
+	SEALED_INTEGRITY_MAPPING,
+	SEALED_VERSION,
+	SEALED_INTEGRITY_FLAGS,
+	SEALED_BROKEN_XID,
+	SEALED_HASH_TYPE,
+	SEALED_HASH_OFFSET_LOW,
+	SEALED_HASH_OFFSET_HIGH,
+	SEALED_NO_INTEGRITY,
+	SEALED_NO_EXTENTS,
+	SEALED_EXTENT_TREE_TYPE,
+	SEALED_SNAPSHOT,
+	SEALED_EXTENT_FLAGS,
+	SEALED_EXTENT_LENGTH,
+	SEALED_NODE_HASHED_FLAG,
+	SEALED_NODE_NOHEADER_FLAG,
+	SEALED_INDEX_TAMPER,
+	SEALED_LEAF_TAMPER,
+	SEALED_LEAF_HEADER,
+	SEALED_ROOT_HEADER,
+	SEALED_ROOT_HASH_TAMPER
+} sealed_damage_t;
+
+/* Nodes pack values backward from the footer (root) or block end. */
+static unsigned char *
+sealed_first_value(unsigned char *raw)
+{
+	size_t toc = 56 + (size_t)integer(raw + 40, 2);
+	size_t end = CONTENT_BLOCK - ((integer(raw + 32, 2) & 1) ? 40 : 0);
+	bool fixed = (integer(raw + 32, 2) & 4) != 0;
+
+	return (raw + end - integer(raw + toc + (fixed ? 2 : 4), 2));
+}
+
+static void
+sealed_damage_apply(content_fixture_t *f, const apfs_gen_volume_t *volume,
+    const apfs_gen_sealed_info_t *info, sealed_damage_t damage)
+{
+	unsigned char *root = block(f, info->root);
+	unsigned char *index = block(f, info->index);
+	unsigned char *leaf = block(f, info->leaf);
+	unsigned char *integrity = block(f, info->integrity);
+	unsigned char *superblock = block(f, info->superblock);
+	unsigned char *extent = block(f, info->extent_leaf);
+	uint64_t mapping;
+	bool reseal = true;
+
+	switch (damage) {
+	case SEALED_INDEX_LENGTH:
+		fsimg_store_le16(index + 56 + integer(index + 40, 2) + 6, 39);
+		break;
+	case SEALED_CHILD_OVERFLOW:
+		fsimg_store_le64(sealed_first_value(root), UINT64_MAX);
+		break;
+	case SEALED_CHILD_UNMAPPED:
+		fsimg_store_le64(sealed_first_value(root), 100000);
+		break;
+	case SEALED_NODE_MAPPING:
+	case SEALED_INTEGRITY_MAPPING:
+		mapping = damage == SEALED_NODE_MAPPING ? info->root_mapping_flags :
+		    info->integrity_mapping_flags;
+		fsimg_store_le32(f->image + mapping, damage == SEALED_NODE_MAPPING ? 0 : 8);
+		CHECK(apfs_gen_seal(block(f, mapping / CONTENT_BLOCK), CONTENT_BLOCK));
+		break;
+	case SEALED_VERSION:
+		fsimg_store_le32(integrity + 32, 3);
+		break;
+	case SEALED_INTEGRITY_FLAGS:
+		fsimg_store_le32(integrity + 36, 1);
+		break;
+	case SEALED_BROKEN_XID:
+		fsimg_store_le64(integrity + 48, 1);
+		break;
+	case SEALED_HASH_TYPE:
+		fsimg_store_le32(integrity + 40, 2);
+		break;
+	case SEALED_HASH_OFFSET_LOW:
+	case SEALED_HASH_OFFSET_HIGH:
+		fsimg_store_le32(integrity + 44,
+		    damage == SEALED_HASH_OFFSET_LOW ? 64 : CONTENT_BLOCK - 16);
+		break;
+	case SEALED_NO_INTEGRITY:
+		fsimg_store_le64(superblock + 1024, 0);
+		break;
+	case SEALED_NO_EXTENTS:
+		fsimg_store_le64(superblock + 1032, 0);
+		break;
+	case SEALED_EXTENT_TREE_TYPE:
+		fsimg_store_le32(superblock + 1040, 2);
+		break;
+	case SEALED_SNAPSHOT:
+		break;
+	case SEALED_EXTENT_FLAGS:
+		sealed_first_value(extent)[7] = 1;
+		break;
+	case SEALED_EXTENT_LENGTH:
+		fsimg_store_le64(sealed_first_value(extent), CONTENT_BLOCK - 1);
+		break;
+	case SEALED_NODE_HASHED_FLAG:
+	case SEALED_NODE_NOHEADER_FLAG:
+		fsimg_store_le16(leaf + 32, (uint16_t)(integer(leaf + 32, 2) &
+		    ~(damage == SEALED_NODE_HASHED_FLAG ? 8 : 16)));
+		break;
+	case SEALED_INDEX_TAMPER:
+	case SEALED_LEAF_TAMPER: {
+		unsigned char *raw = damage == SEALED_INDEX_TAMPER ? index : leaf;
+		size_t free_start = 56 + (size_t)integer(raw + 42, 2) +
+		    (size_t)integer(raw + 44, 2);
+
+		CHECK(integer(raw + 46, 2) > 0);
+		raw[free_start] ^= 1;
+		reseal = false;
+		break;
+	}
+	case SEALED_LEAF_HEADER:
+		CHECK(info->leaf != info->root);
+		CHECK(integer(leaf + 34, 2) == 0);
+		leaf[31] = 1;
+		break;
+	case SEALED_ROOT_HEADER:
+		CHECK((integer(root + 32, 2) & 1) != 0);
+		root[31] = 1;
+		break;
+	case SEALED_ROOT_HASH_TAMPER:
+		integrity[128] ^= 1;
+		reseal = false;
+		break;
+	}
+	CHECK(apfs_gen_seal(superblock, CONTENT_BLOCK));
+	CHECK(apfs_gen_seal(extent, CONTENT_BLOCK));
+	if (reseal)
+		CHECK(apfs_gen_volume_reseal(volume, f->image, (size_t)f->available));
+	else
+		CHECK(apfs_gen_seal(integrity, CONTENT_BLOCK));
+}
+
+static void
+test_sealed_volume_refusals_and_tampering(void)
+{
+	static const struct {
+		const char *name;
+		sealed_damage_t damage;
+		fsimg_status_t status;
+		const char *message;
+		bool content;
+	} cases[] = {
+		{ .name = "sealed index value length", .damage = SEALED_INDEX_LENGTH,
+		    .status = FSIMG_ECORRUPT, .message = "wrong length" },
+		{ .name = "sealed relative OID overflow", .damage = SEALED_CHILD_OVERFLOW,
+		    .status = FSIMG_ECORRUPT, .message = "child OID out of range" },
+		{ .name = "sealed relative OID unmapped", .damage = SEALED_CHILD_UNMAPPED,
+		    .status = FSIMG_ECORRUPT, .message = "missing from its object map" },
+		{ .name = "sealed node mapping lacks no-header",
+		    .damage = SEALED_NODE_MAPPING,
+		    .status = FSIMG_ECORRUPT, .message = "wrong no-header flag" },
+		{ .name = "sealed integrity mapping has no-header",
+		    .damage = SEALED_INTEGRITY_MAPPING,
+		    .status = FSIMG_ECORRUPT, .message = "wrong no-header flag" },
+		{ .name = "sealed integrity version 3", .damage = SEALED_VERSION,
+		    .status = FSIMG_EUNSUPPORTED, .message = "unsupported version" },
+		{ .name = "sealed integrity flags", .damage = SEALED_INTEGRITY_FLAGS,
+		    .status = FSIMG_EUNSUPPORTED, .message = "unsupported flags" },
+		{ .name = "sealed broken XID", .damage = SEALED_BROKEN_XID,
+		    .status = FSIMG_EUNSUPPORTED, .message = "broken seal" },
+		{ .name = "sealed hash type 2", .damage = SEALED_HASH_TYPE,
+		    .status = FSIMG_EUNSUPPORTED, .message = "other than SHA-256" },
+		{ .name = "sealed root hash offset 64", .damage = SEALED_HASH_OFFSET_LOW,
+		    .status = FSIMG_ECORRUPT, .message = "root hash outside" },
+		{ .name = "sealed root hash offset B-16", .damage = SEALED_HASH_OFFSET_HIGH,
+		    .status = FSIMG_ECORRUPT, .message = "root hash outside" },
+		{ .name = "sealed zero integrity OID", .damage = SEALED_NO_INTEGRITY,
+		    .status = FSIMG_ECORRUPT, .message = "without its integrity" },
+		{ .name = "sealed zero extent OID", .damage = SEALED_NO_EXTENTS,
+		    .status = FSIMG_ECORRUPT, .message = "without its integrity" },
+		{ .name = "sealed wrong extent tree type", .damage = SEALED_EXTENT_TREE_TYPE,
+		    .status = FSIMG_ECORRUPT, .message = "tree type" },
+		{ .name = "sealed snapshot view", .damage = SEALED_SNAPSHOT,
+		    .status = FSIMG_EUNSUPPORTED, .message = "snapshots are not read" },
+		{ .name = "sealed extent flags", .damage = SEALED_EXTENT_FLAGS,
+		    .status = FSIMG_EUNSUPPORTED, .message = "flags", .content = true },
+		{ .name = "sealed extent unaligned length", .damage = SEALED_EXTENT_LENGTH,
+		    .status = FSIMG_ECORRUPT, .message = "not in whole blocks",
+		    .content = true },
+		{ .name = "sealed leaf lacks HASHED", .damage = SEALED_NODE_HASHED_FLAG,
+		    .status = FSIMG_ECORRUPT, .message = "invalid flags" },
+		{ .name = "sealed leaf lacks NOHEADER", .damage = SEALED_NODE_NOHEADER_FLAG,
+		    .status = FSIMG_ECORRUPT, .message = "invalid flags" },
+		{ .name = "sealed index free-space tamper", .damage = SEALED_INDEX_TAMPER,
+		    .status = FSIMG_ECORRUPT, .message = "does not match its digest" },
+		{ .name = "sealed leaf free-space tamper", .damage = SEALED_LEAF_TAMPER,
+		    .status = FSIMG_ECORRUPT, .message = "does not match its digest" },
+		{ .name = "sealed leaf nonzero header", .damage = SEALED_LEAF_HEADER,
+		    .status = FSIMG_ECORRUPT, .message = "nonzero header" },
+		{ .name = "sealed root nonzero header", .damage = SEALED_ROOT_HEADER,
+		    .status = FSIMG_ECORRUPT, .message = "nonzero header" },
+		{ .name = "sealed stored root hash tamper", .damage = SEALED_ROOT_HASH_TAMPER,
+		    .status = FSIMG_ECORRUPT, .message = "does not match its digest" }
+	};
+	apfs_gen_sealed_info_t info;
+	apfs_gen_volume_t *volume;
+	content_fixture_t f;
+	fsimg_read_options_t options;
+	const fsimg_entry_t *entry;
+	fsimg_status_t status;
+	unsigned char byte;
+	size_t count;
+
+	for (size_t i = 0; i < COUNT(cases); i++) {
+		scenario = cases[i].name;
+		volume = sealed_fixture(&f, &info);
+		sealed_damage_apply(&f, volume, &info, cases[i].damage);
+		fsimg_read_options_init(&options);
+		if (cases[i].damage == SEALED_SNAPSHOT)
+			options.snapshot = "snapshot";
+		status = sealed_open(&f, &options);
+		if (cases[i].content) {
+			/* Unsupported extents must not prevent opening or listing. */
+			if (status_is(&f, status, FSIMG_OK)) {
+				bool found = false;
+
+				while ((status = fsimg_reader_next(f.reader, &entry,
+		    &f.error)) == FSIMG_OK) {
+					if (strcmp(entry->path, "/dir/file") != 0)
+						continue;
+					found = true;
+					status = fsimg_reader_read_at(f.reader, 0, &byte, 1, &count, &f.error);
+					expect(count == 0, "bad sealed extent delivers no bytes");
+					break;
+				}
+				expect(found, "sealed file lists before extent refusal");
+			}
+		} else if (status == FSIMG_OK) {
+			while ((status = fsimg_reader_next(f.reader, &entry, &f.error)) == FSIMG_OK)
+				continue;
+		}
+		if (status_is(&f, status, cases[i].status))
+			expect(strstr(f.error.message, cases[i].message) != NULL, cases[i].message);
+		fixture_free(&f);
+		apfs_gen_volume_free(volume);
+	}
+}
+
 int
 main(void)
 {
+	test_sealed_volume_lists_reads_and_extracts();
+	test_sealed_volume_refusals_and_tampering();
 	test_holes_and_unrecorded_tail_read_as_zero();
 	test_extent_lengths_and_random_boundaries();
 	test_refused_extents_preserve_only_the_valid_prefix();
