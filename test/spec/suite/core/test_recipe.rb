@@ -247,7 +247,7 @@ class TestRecipe < Minitest::Test
     "exact volume beyond the output ceiling" =>
       [/setting size 4097 exceeds 4096/, ->(_) { creation("root" => "manifest", "tree" => [], "settings" => { "size" => 4097 }) }],
     "unknown creation setting" =>
-      [/unknown setting "label"/, ->(_) { creation("root" => "manifest", "tree" => [], "settings" => { "label" => 1 }) }],
+      [/unknown setting "volume_name"/, ->(_) { creation("root" => "manifest", "tree" => [], "settings" => { "volume_name" => 1 }) }],
     "unknown source root" =>
       [/unknown source root "archive"/, ->(_) { creation("root" => "archive", "tree" => [], "settings" => {}) }],
     "source without a root" => [/source is not an object of root/, ->(_) { creation("tree" => [], "settings" => {}) }]

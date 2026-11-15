@@ -57,7 +57,8 @@ module FsimgSpec
       # Rules no native base can target, and why.
       UNTARGETED = {
         "apfs.sm.address_blocks_unmeasured" =>
-          "needs a container whose block size is neither 4096 nor 16384, which no native capture holds"
+          "needs a container whose block size is neither 4096 nor 16384, which no native capture holds and the " \
+          "writer, whose blocks are 4096 bytes, never writes"
       }.freeze
 
       module_function

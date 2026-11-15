@@ -43,7 +43,9 @@ class TestApfsRules < Minitest::Test
 
   def test_registry_accepts_every_container_rule
     assert_operator registry.rules.size, :>=, 50
-    assert(registry.rules.all? { _1.id.start_with?("apfs.") && _1.source.start_with?("specs/design-apfs.md#") })
+    format_rules, extraction_rules = registry.rules.partition { Apfs::Rules.format_rule?(_1) }
+    assert(format_rules.all? { _1.id.start_with?("apfs.") && _1.source.start_with?("specs/design-apfs.md#") })
+    assert_equal %w[apfs.extract.safe_kinds host.name.collision host.name.unrepresentable], extraction_rules.map(&:id).sort
   end
 
   def test_an_image_without_the_magic_violates_only_identity
@@ -86,7 +88,8 @@ class TestApfsRules < Minitest::Test
     bases = Apfs::Witnesses::BASES.map { Apfs::Witnesses::Base.open(_1, native(_1)) }
     # The hash rules judge names only with the design's Unicode tables.
     unjudged = Apfs::Names::TABLES_MATCH ? [] : %w[apfs.drec.hash apfs.drec.hash_unassigned]
-    targeted = registry.rules.reject { Apfs::Witnesses::UNTARGETED.key?(_1.id) || unjudged.include?(_1.id) }
+    # Creations target the input and destination rules (test_writer).
+    targeted = registry.rules.reject { Apfs::Rules.created?(_1) || Apfs::Witnesses::UNTARGETED.key?(_1.id) || unjudged.include?(_1.id) }
     witnesses = targeted.to_h { |rule| [rule.id, bases.flat_map { |base| rule.domain.call(base).map { [_1, base] } }] }
     assert_empty witnesses.select { _2.empty? }.keys, "rules without a witness"
     missed = witnesses.values.flatten(1).reject { |witness, base| flagged?(witness, base) }.map { _1.first.id }

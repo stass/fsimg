@@ -93,11 +93,24 @@
   join finds such a cycle; joining each directory's parent chain by
   repeated doubling would, at about the logarithm of the deepest path in
   sorts of the directory records.
-  The specification harness's APFS model (`test/spec/lib/fsimg_spec/apfs/`)
-  is judged on native captures only: `apfs.sm.address_blocks_unmeasured` has
-  no witness until a builder renders a container of another block size, and
-  no builder renders the writer's one-volume profile, so no generated case
-  runs fsimg on an APFS image. The record level models inodes, directory
+  In the specification harness's APFS model (`test/spec/lib/fsimg_spec/apfs/`),
+  `apfs.sm.address_blocks_unmeasured` has no targeted witness: no native
+  capture and no writer output has a block size other than 4096 or 16384,
+  so only an independent builder of another block size could target it.
+  The writer's creation cases (`apfs/cases.rb`) copy ISO 9660's creation
+  plumbing (`Classified`, the source model whose explicit size leaves input
+  unclassified, the promoted-recipe reader) and its `extract.safe_kinds`
+  rule; one shared creation source model and safe-kinds rule beside
+  `DestinationRules` would serve both. An explicit size stays unclassified
+  at create although `WriterLayout.regions` and a bound on the run could
+  prove a small tree fits, and `WriterLayout` does not yet judge the run's
+  order (the container object map at the prefix's end) or the container
+  UUID's derivation from the volume UUID.
+  Coverage reports `apfs.extract.safe_kinds` as not exercised although its
+  creation runs and passes: a creation's destination violations come from
+  the created image, classified after create, while coverage counts the
+  classification made before it.
+  The record level models inodes, directory
   records, file extents and data-stream ID records; attributes beyond their
   stream IDs, sibling links and maps, symbolic links, compression,
   directory statistics, the extent-reference and snapshot trees, sealed

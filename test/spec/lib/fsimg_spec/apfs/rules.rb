@@ -66,7 +66,28 @@ module FsimgSpec
       HEADED = ->(node, _) { !node.head.nil? }
 
       def all = [*container_rules, *checkpoint_rules, *object_map_rules, *node_rules, *space_rules, *queue_rules, *reaper_rules,
-                 *VolumeRules.all, *RecordRules.all]
+                 *VolumeRules.all, *RecordRules.all, *CreationRules.all, *destination_rules]
+
+      # Whether rule's witnesses are creations rather than mutations of a
+      # native capture: the input rules judge a source, and the destination
+      # rules a created image's namespace.
+      def created?(rule) = rule.input? || rule.scopes == ["destination"]
+
+      # Whether rule is stated by the format design, not by extraction.
+      def format_rule?(rule) = !rule.scopes.include?("destination")
+
+      # What extraction must refuse in a namespace (Namespace), judged where
+      # the model walked one: the reader's safe extraction creates only
+      # regular files and directories (specs/design-security.md), and the
+      # host's name trials decide collisions and names it cannot hold.
+      def destination_rules = [
+        Rule.new(id: "apfs.extract.safe_kinds", category: "profile", policy: "must_reject", status: "FSIMG_EUNSUPPORTED",
+                 scopes: ["destination"], applies_to: ->(m, _) { !FsimgSpec.undefined?(m.tree) },
+                 predicate: ->(m, _) { m.tree.all? { %w[file directory].include?(_1.type) } },
+                 domain: -> { Creations.for_rule("apfs.extract.safe_kinds") }, source: "specs/design-security.md#safe-extraction"),
+        *DestinationRules.with_domains(collision: -> { Creations.for_rule("host.name.collision") },
+                                       unrepresentable: -> { Creations.for_rule("host.name.unrepresentable") })
+      ]
 
       def container_rules = [
         rule(id: "identity", scope: "open", anchor: "probe-and-identity", status: "FSIMG_EFORMAT", category: "profile",

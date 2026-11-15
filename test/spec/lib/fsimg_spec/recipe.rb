@@ -17,7 +17,7 @@ module FsimgSpec
   end
 
   # The fsimg format names the harness models.
-  MODELED_FORMATS = %w[fat12 fat16 fat32 iso9660 erofs].freeze
+  MODELED_FORMATS = %w[fat12 fat16 fat32 iso9660 erofs apfs].freeze
 
   # Parameter and setting names, and builder and tool names, which may also
   # hold dots and dashes, as in mkfs.fat. Neither kind can be empty, name
@@ -204,7 +204,12 @@ module FsimgSpec
     PATH_SETTINGS = %i[boot efiboot].freeze
     TEXT_SETTINGS = %i[volset publisher preparer application copyright abstract biblio].freeze
     DATE_SETTINGS = %i[created modified expires effective].freeze
-    SETTINGS = (BYTE_SETTINGS + COUNT_SETTINGS + PATH_SETTINGS + TEXT_SETTINGS + DATE_SETTINGS).freeze
+    # A volume label, bounded UTF-8 that may be empty, and the settings
+    # that name one of a closed set of words.
+    LABEL_SETTINGS = %i[label].freeze
+    CHOICE_SETTINGS = { case: %w[insensitive sensitive].freeze }.freeze
+    SETTINGS = (BYTE_SETTINGS + COUNT_SETTINGS + PATH_SETTINGS + TEXT_SETTINGS + DATE_SETTINGS + LABEL_SETTINGS +
+                CHOICE_SETTINGS.keys).freeze
     MAX_SETTING_PATH_BYTES = 1024
     MAX_DESCRIPTOR_TEXT_BYTES = 64 # the command's capacity, an a-character field
 
@@ -215,7 +220,9 @@ module FsimgSpec
       unknown = settings.keys - SETTINGS
       raise RecipeError, "unknown setting #{FsimgSpec.shown(unknown.first.to_s)}" if unknown.any?
 
-      counts = RecipeValues.named_integers(settings.except(*PATH_SETTINGS, *TEXT_SETTINGS, *DATE_SETTINGS), what: "setting")
+      words = settings.slice(*LABEL_SETTINGS).to_h { |name, value| [name, Source.label(name, value)] }
+                      .merge(settings.slice(*CHOICE_SETTINGS.keys).to_h { |name, value| [name, Source.choice(name, value)] })
+      counts = RecipeValues.named_integers(settings.except(*PATH_SETTINGS, *TEXT_SETTINGS, *DATE_SETTINGS, *words.keys), what: "setting")
       counts.each do |name, value|
         next unless COUNT_SYNTAX.key?(name)
 
@@ -245,7 +252,26 @@ module FsimgSpec
       raise RecipeError, "special source kinds require a manifest root" if root == "directory" &&
         tree.any? { %w[symlink fifo].include?(_1.type) }
 
-      super(tree:, settings: counts.merge(paths, texts, dates).sort.to_h.freeze, root:)
+      super(tree:, settings: counts.merge(paths, texts, dates, words).sort.to_h.freeze, root:)
+    end
+
+    # A label setting's value, frozen: UTF-8 of at most
+    # MAX_SETTING_PATH_BYTES without NUL, which may be empty.
+    def self.label(name, value)
+      unless value.is_a?(String) && value.encoding == Encoding::UTF_8 && value.valid_encoding? &&
+          value.bytesize <= MAX_SETTING_PATH_BYTES && !value.include?("\0")
+        raise RecipeError, "setting #{name} is not bounded UTF-8 text"
+      end
+
+      value.dup.freeze
+    end
+
+    # A choice setting's value, frozen: one of its words.
+    def self.choice(name, value)
+      words = CHOICE_SETTINGS.fetch(name)
+      raise RecipeError, "setting #{name} is not one of #{words.join(", ")}" unless words.include?(value)
+
+      value.dup.freeze
     end
 
     def manifest? = root == "manifest"

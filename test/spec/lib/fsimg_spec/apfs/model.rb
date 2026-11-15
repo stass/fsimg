@@ -93,16 +93,20 @@ module FsimgSpec
     # object_map_tree the container object map and its tree; volumes the
     # resolution of each volume slot; filesystems the Volume each resolved
     # slot holds; space the space manager, its chunk structures, free queues
-    # and reaper (Space).
+    # and reaper (Space); tree the known tree of the one volume's namespace
+    # (Namespace), which decode walks only when asked, since only an image
+    # whose stages extract it needs one.
     class Model < Data.define(:image_length, :magic, :block0, :superblock, :ring, :candidates, :checkpoint,
-                              :object_map, :object_map_tree, :volumes, :filesystems, :space)
+                              :object_map, :object_map_tree, :volumes, :filesystems, :space, :tree)
       # The bound on nodes one tree walk visits and on chunk structures,
       # far above every native capture's; a walk that reaches one leaves
       # the scope that reads the rest unclassified.
       NODE_BOUND = 4096
       CHUNK_BLOCK_BOUND = 1 << 16
 
-      def self.decode(view)
+      UNWALKED = Undefined.new(reason: "the namespace was not walked")
+
+      def self.decode(view, namespace: false)
         head = view.read(0, [view.length, PROBE_BYTES].min)
         superblock = Layout.find(Layout::ContainerSuperblock, head, at: Layout::BODY) ||
                      Undefined.new(reason: "the image ends inside the block-0 superblock")
@@ -110,9 +114,18 @@ module FsimgSpec
         checkpoints = Checkpoints.decode(view, superblock, block0)
         checkpoint = checkpoints.checkpoint
         object_map, tree, volumes = object_map_parts(checkpoint)
+        filesystems = filesystems(checkpoint, volumes)
         new(image_length: view.length, magic: head.byteslice(32, 4) || "".b, block0:, superblock:,
             ring: checkpoints.ring, candidates: checkpoints.candidates, checkpoint:, object_map:,
-            object_map_tree: tree, volumes:, filesystems: filesystems(checkpoint, volumes), space: Space.decode(checkpoint))
+            object_map_tree: tree, volumes:, filesystems:, space: Space.decode(checkpoint),
+            tree: namespace ? namespace(checkpoint, filesystems) : UNWALKED)
+      end
+
+      # The namespace of the container's one volume, the writer's profile.
+      def self.namespace(checkpoint, filesystems)
+        return Undefined.new(reason: "the container resolves #{filesystems.size} volumes, not one") unless filesystems.one?
+
+        Namespace.decode(filesystems.first, checkpoint.reader)
       end
 
       def self.block0(view, head, superblock)
@@ -142,7 +155,7 @@ module FsimgSpec
         volumes.select(&:resolved?).map { Volume.decode(checkpoint, _1, bound: NODE_BOUND) }
       end
 
-      private_class_method :block0, :object_map_parts, :filesystems
+      private_class_method :block0, :object_map_parts, :filesystems, :namespace
 
       def object_map_fields = object_map.body(Layout::ObjectMap)
 

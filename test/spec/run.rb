@@ -26,6 +26,7 @@ require "fsimg_spec"
 require "fsimg_spec/fat"
 require "fsimg_spec/iso9660"
 require "fsimg_spec/erofs"
+require "fsimg_spec/apfs"
 
 module FsimgSpec
   # Minitest attaches reporters only through plugins: Minitest.run calls

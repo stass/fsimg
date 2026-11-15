@@ -77,7 +77,7 @@ module FsimgSpec
       volset: ["-o", "volset="], publisher: ["-o", "publisher="], preparer: ["-o", "preparer="],
       application: ["-o", "application="], copyright: ["-o", "copyright="], abstract: ["-o", "abstract="],
       biblio: ["-o", "biblio="], created: ["-o", "created="], modified: ["-o", "modified="],
-      expires: ["-o", "expires="], effective: ["-o", "effective="]
+      expires: ["-o", "expires="], effective: ["-o", "effective="], label: ["-L"], case: ["-o", "case="]
     }.freeze
 
     # fsimg is the binary's absolute path, and environment the harness's
