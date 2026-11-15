@@ -657,6 +657,15 @@ typedef struct apfs_gen_snapshot {
 	bool corrupt_name_length;
 	uint32_t meta_flags;
 	uint32_t omap_flags;
+	bool omit_name;
+	/* Any request adds one record at XID 9, leaving header counts intact. */
+	bool extra_omap_record;
+	bool refuse_extentref;
+	bool refuse_superblock;
+	/* Replace the first interval record's kind and signed count. */
+	bool override_extentref;
+	uint8_t extentref_kind;
+	int32_t extentref_count;
 	bool omit_metadata;
 	bool omit_omap_record;
 } apfs_gen_snapshot_t;
@@ -665,6 +674,7 @@ typedef struct apfs_gen_snapshot {
 typedef struct apfs_gen_snapshot_info {
 	uint64_t xid;
 	uint64_t superblock;
+	uint64_t extentref;
 } apfs_gen_snapshot_info_t;
 
 /* Freeze current entries under a unique 1..255 byte name; at most 8 snapshots. */

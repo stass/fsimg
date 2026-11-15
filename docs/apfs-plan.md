@@ -363,7 +363,7 @@ captures with their command records and `fsck_apfs` output:
 | E6 Sparse and clones | `truncate` and seek-writes; `cp -c` then overwrite one branch |
 | E7 Compression | `ditto --hfsCompression` on small and large files; installed applications; each codec type found, inline and resource-fork |
 | E8 Checkpoint history | Mount, write, unmount several times, capturing the ring; copies truncated or with the newest checkpoint's blocks zeroed |
-| E9 Snapshots | Snapshots of a disk-image volume, with data modified, deleted, added, cloned and overwritten in the middle between them, and names that collide under case folding or normalization: the owner's runs `e9-snap` and, on a case-sensitive volume, `e9-snap-cs`, whose snapshots `apfs_systemsnapshot -s` refuses even as root, so they wait on a way the owner chooses from E9's list; until then, static decoding of the corpus specimen `dissect-apfs-snapshot` |
+| E9 Snapshots | Snapshots of a disk-image volume, with data modified, deleted, added, cloned and overwritten in the middle between them, and names that collide under case folding or normalization: the owner's runs `e9-snap` and, on a case-sensitive volume, `e9-snap-cs`, whose snapshots `apfs_systemsnapshot -s` refuses even as root, so they need a host with SIP and AMFI off and are optional; the specimen `dissect-apfs-snapshot` is decoded and checked in their place |
 | E10 Volumes | `diskutil apfs addVolume` with roles; a volume group if available |
 | E11 Encrypted and sealed | `newfs_apfs -E`, `diskutil apfs addVolume -passphrase` and `encryptVolume`, and `hdiutil create -encryption` for contrast; copies of the host's sealed cryptex images; structure only |
 | E12 Large containers | 1 TiB and 128 TiB sparse containers: address blocks, pool sizes, ring sizes |
@@ -565,11 +565,13 @@ describe the user-visible options.
 
 ### 10. Snapshots
 
-* The `snapshot=` setting through the volume module, snapshot claims in
-  verification, and E9 fixtures: the owner-run capture `e9-snap`, since
-  the corpus specimen E9 decodes is for research use only.
-* **Gate:** E9's snapshot reads return the old data and the live view the
-  new; verification of a volume with snapshots completes.
+* The `snapshot=` setting through the volume module and snapshot claims in
+  verification. Fixtures come from the test generator: the corpus specimen
+  E9 decodes is for research use only, and the owner-run capture `e9-snap`
+  needs a host with SIP and AMFI off, so it is optional evidence for the
+  provisional rules rather than a prerequisite.
+* **Gate:** the specimen's snapshot reads return the old data and the live
+  view the new; verification of a volume with snapshots completes.
 
 ### 11. Sealed volumes
 

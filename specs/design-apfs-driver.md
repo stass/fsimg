@@ -709,7 +709,18 @@ filesystem tree with dedicated cursors, and in the sealed profile the
 sealed file-extent tree. Each tree is walked from its first record to its
 end, and the nodes the walk loads and the records it visits must equal its
 footer's node and key counts, since a walk of a valid tree loads each node
-once. Each physical-extent record appends a data claim,
+once. Each snapshot's superblock copy, read under the copy's rules, and its
+extent-reference tree are parts of their own, read as its metadata record
+is met, so a refusal in one snapshot leaves the rest of it and every later
+snapshot read, and damage found there still outranks the incomplete
+report. Each name record's metadata record is found by a seek of a second
+cursor over the snapshot metadata tree. Once the volume's trees are whole,
+the object map's snapshot tree and the metadata records, both in XID order
+and the metadata before the all-ones names, are walked side by side, so
+the map is proved to hold exactly the metadata records' XIDs without
+storing either. The volume's extended-metadata object is not read: its
+versions are mapped objects, claimed with the object map. Each
+physical-extent record appends a data claim,
 owner `(volume, tree)`; the filesystem scan, or the sealed file-extent
 scan, appends a file-extent record `(block, count, volume, stream ID)` for
 each mapped extent to a third stream; hole extents, whose physical block is
@@ -793,11 +804,12 @@ the volume, the live one and each snapshot's, in one sweep: each record
 contributes an opening at its first block and a closing at its end, both
 carrying its signed reference count, and each file extent a start and an
 end, all keyed `(volume, block)` and sorted once, openings and starts
-before ends and closings at one block. The sweep keeps two totals, the
-signed sum of the reference counts of the records open and the number of
+before ends and closings at one block. The sweep keeps three totals, the
+records open, the signed sum of their reference counts and the number of
 file extents started and not ended, and wherever the block advances, the
-span just passed must have them equal. So a mapped block outside every
-record fails, as does a block whose summed count no stream matches, and a
+span just passed must have the sum equal the file extents. So a mapped
+block outside every record fails, reported as such when no record is
+open, as does a block whose summed count no stream matches, and a
 block only snapshots keep has a summed count of zero, never a negative
 one. Records of one tree never overlap, so over a span each tree adds one
 record's count or none. The join costs the sort of twice the

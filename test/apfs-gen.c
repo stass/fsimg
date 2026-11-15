@@ -1463,7 +1463,6 @@ typedef struct volume_snapshot {
 struct apfs_gen_volume {
 	volume_snapshot_t snapshots[VOLUME_SNAPSHOTS];
 	size_t snapshot_count;
-	uint64_t data_base;
 	uint64_t tree_base;
 	uint64_t omap_snapshot_root;
 
@@ -1914,19 +1913,10 @@ volume_record_compare(const void *left, const void *right)
 static bool
 volume_records_build(apfs_gen_volume_t *volume)
 {
-	uint64_t physical = volume->data_base == 0 ? VOLUME_DATA_BASE :
-	    volume->data_base, blocks;
-
 	volume->record_count = 0;
 	for (size_t i = 0; i < volume->entry_count; i++) {
 		volume_entry_t *entry = &volume->entries[i];
 
-		blocks = entry->data == NULL ? 0 :
-		    (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK;
-		if (blocks > VOLUME_BLOCKS - physical)
-			return (false);
-		entry->physical = blocks == 0 ? 0 : physical;
-		physical += blocks;
 		if (volume->record_count > VOLUME_RECORDS - 3)
 			return (false);
 		if (!volume_entry_records(volume, entry))
@@ -2292,6 +2282,113 @@ volume_snapshot_tree_build(unsigned char *image, apfs_gen_node_t node,
 	    VOLUME_BLOCK, &node));
 }
 
+/* Unchanged files retain their physical run across adjacent views. New bytes
+ * use fresh blocks, so an interval never both allocates and releases a block.
+ */
+static bool
+volume_view_payload_plan(apfs_gen_volume_t *view,
+    const apfs_gen_volume_t *previous, uint64_t *next)
+{
+	for (size_t i = 0; i < view->entry_count; i++) {
+		volume_entry_t *entry = &view->entries[i];
+		uint64_t blocks;
+
+		entry->physical = 0;
+		if (entry->data == NULL)
+			continue;
+		if (previous != NULL) {
+			for (size_t j = 0; j < previous->entry_count; j++) {
+				const volume_entry_t *old = &previous->entries[j];
+
+				if (old->oid == entry->oid && old->data != NULL &&
+				    old->size == entry->size &&
+				    bcmp(old->data, entry->data, (size_t)entry->size) == 0) {
+					entry->physical = old->physical;
+					break;
+				}
+			}
+		}
+		if (entry->physical != 0)
+			continue;
+		blocks = (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK;
+		if (blocks > VOLUME_BLOCKS - *next)
+			return (false);
+		entry->physical = *next;
+		*next += blocks;
+	}
+	return (true);
+}
+
+/* The bounded fixture uses a block-owner table as an independent interval
+ * oracle. A newly present run contributes +1; a released run contributes -1.
+ * Scanning physical addresses emits sorted, nonoverlapping records directly.
+ */
+static bool
+volume_interval_build(unsigned char *image, uint64_t root, uint64_t xid,
+    const apfs_gen_volume_t *previous, const apfs_gen_volume_t *view,
+    const apfs_gen_snapshot_t *fault)
+{
+	uint64_t owners[2][VOLUME_BLOCKS] = {{0}};
+	const apfs_gen_volume_t *views[] = { previous, view };
+	apfs_gen_record_t records[2 * VOLUME_ENTRIES];
+	unsigned char keys[2 * VOLUME_ENTRIES][8];
+	unsigned char values[2 * VOLUME_ENTRIES][GEN_PEXT_VAL_BYTES];
+	uint32_t count = 0;
+	unsigned char *raw = image + root * VOLUME_BLOCK;
+
+	for (size_t i = 0; i < 2; i++) {
+		if (views[i] == NULL)
+			continue;
+		for (size_t j = 0; j < views[i]->entry_count; j++) {
+			const volume_entry_t *entry = &views[i]->entries[j];
+			uint64_t blocks = (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK;
+
+			if (entry->physical == 0)
+				continue;
+			for (uint64_t b = 0; b < blocks; b++)
+				owners[i][entry->physical + b] = entry->oid;
+		}
+	}
+	for (uint64_t b = VOLUME_DATA_BASE; b < VOLUME_BLOCKS;) {
+		uint64_t first = b, old = owners[0][b], current = owners[1][b];
+		apfs_gen_pext_val_t value = { .owner = current,
+		    .kind = 1, .refcnt = 1 };
+
+		if (old == current) {
+			b++;
+			continue;
+		}
+		while (b < VOLUME_BLOCKS && owners[0][b] == old &&
+		    owners[1][b] == current)
+			b++;
+		value.length = b - first;
+		if (current == 0) {
+			value.owner = UINT64_MAX;
+			value.kind = 2;
+			value.refcnt = -1;
+		}
+		if (count == 0 && fault != NULL && fault->override_extentref) {
+			value.kind = fault->extentref_kind;
+			value.refcnt = fault->extentref_count;
+		}
+		if (count == 2 * VOLUME_ENTRIES)
+			return (false);
+		if (!apfs_gen_jkey_build(keys[count], 8, first, 2) ||
+		    !apfs_gen_pext_val_build(values[count], GEN_PEXT_VAL_BYTES, &value))
+			return (false);
+		records[count] = (apfs_gen_record_t){ .key = keys[count],
+		    .key_size = 8, .value = values[count],
+		    .value_size = GEN_PEXT_VAL_BYTES };
+		count++;
+	}
+	if (!volume_node_build(image, root, 15, records, count))
+		return (false);
+	put_le(raw + 16, xid, 8);
+	if (fault != NULL && fault->refuse_extentref)
+		put_le(raw + 24, 0x50000002, 4);
+	return (apfs_gen_seal(raw, VOLUME_BLOCK));
+}
+
 /* Each frozen view owns copied inputs. Allocate its payload before the live
  * payload, then emit complete virtual trees and retain every map version.
  * Only the root OID is shared: index children use disjoint virtual OIDs.
@@ -2301,31 +2398,29 @@ volume_snapshots_build(apfs_gen_volume_t *volume, unsigned char *image)
 {
 	apfs_gen_omap_record_t maps[VOLUME_TREE_BASE - 1];
 	apfs_gen_record_t metadata[2 * VOLUME_SNAPSHOTS];
-	apfs_gen_record_t snapshot_records[VOLUME_SNAPSHOTS];
+	apfs_gen_record_t snapshot_records[VOLUME_SNAPSHOTS + 1];
 	volume_snapshot_t *names[VOLUME_SNAPSHOTS];
 	unsigned char keys[2 * VOLUME_SNAPSHOTS][272];
 	unsigned char values[2 * VOLUME_SNAPSHOTS][320];
-	unsigned char snapshot_keys[VOLUME_SNAPSHOTS][8];
-	unsigned char snapshot_values[VOLUME_SNAPSHOTS][16] = {{0}};
+	unsigned char snapshot_keys[VOLUME_SNAPSHOTS + 1][8];
+	unsigned char snapshot_values[VOLUME_SNAPSHOTS + 1][16] = {{0}};
 	uint64_t payload = VOLUME_DATA_BASE, tree_base = VOLUME_TREE_BASE;
 	uint64_t blocks, live_root, map_blocks, extra, live_tree_blocks = 0;
 	size_t map_count = 0, metadata_count = 0, snapshot_count = 0;
+	bool extra_omap_record = false;
 	unsigned char *live = image + VOLUME_SUPERBLOCK * VOLUME_BLOCK;
 	unsigned char *bitmap = image + VOLUME_ALLOCATION_BITMAP * VOLUME_BLOCK;
 
 	for (size_t i = 0; i <= volume->snapshot_count; i++) {
 		apfs_gen_volume_t *view = i == volume->snapshot_count ? volume :
 		    volume->snapshots[i].view;
+		const apfs_gen_volume_t *previous = i == 0 ? NULL :
+		    volume->snapshots[i - 1].view;
 
-		view->data_base = payload;
+		if (!volume_view_payload_plan(view, previous, &payload))
+			return (false);
 		if (!volume_records_build(view))
 			return (false);
-		for (size_t j = 0; j < view->entry_count; j++) {
-			const volume_entry_t *entry = &view->entries[j];
-
-			if (entry->data != NULL)
-				payload += (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK;
-		}
 	}
 	/* The live builder supplies the unchanged container and volume identity,
 	 * live extent references, and allocator geometry. */
@@ -2345,7 +2440,6 @@ volume_snapshots_build(apfs_gen_volume_t *volume, unsigned char *image)
 		    .base = tree_base, .xid = xid, .block_size = VOLUME_BLOCK,
 		    .records_per_leaf = view->records_per_leaf,
 		    .children_per_index = 8 };
-		unsigned char *copy;
 
 		if (!volume_view_tree_build(view, image, tree, maps + map_count,
 		    sizeof(maps) / sizeof(maps[0]) - map_count, live_root, &blocks))
@@ -2353,6 +2447,9 @@ volume_snapshots_build(apfs_gen_volume_t *volume, unsigned char *image)
 		map_count += blocks;
 		tree_base += blocks;
 		if (is_live) {
+			if (!volume_interval_build(image, VOLUME_EXTENTREF_TREE, 10,
+			    volume->snapshots[i - 1].view, view, NULL))
+				return (false);
 			live_tree_blocks = blocks;
 			continue;
 		}
@@ -2360,15 +2457,20 @@ volume_snapshots_build(apfs_gen_volume_t *volume, unsigned char *image)
 		uint64_t extentref = extra++;
 
 		snapshot->info = (apfs_gen_snapshot_info_t){ .xid = xid,
-		    .superblock = extra++ };
-		if (!volume_node_build(image, extentref, 15, NULL, 0))
-			return (false);
-		copy = image + extentref * VOLUME_BLOCK;
-		put_le(copy + 16, xid, 8);
-		if (!apfs_gen_seal(copy, VOLUME_BLOCK))
+		    .superblock = extra++, .extentref = extentref };
+		if (!volume_interval_build(image, extentref, xid,
+		    i == 0 ? NULL : volume->snapshots[i - 1].view, view,
+		    &snapshot->options))
 			return (false);
 		if (!volume_snapshot_superblock_build(snapshot, image, live, i, blocks))
 			return (false);
+		if (snapshot->options.refuse_superblock) {
+			unsigned char *copy = image + snapshot->info.superblock * VOLUME_BLOCK;
+
+			put_le(copy + 144, extentref, 8);
+			if (!apfs_gen_seal(copy, VOLUME_BLOCK))
+				return (false);
+		}
 		if (!snapshot->options.omit_metadata) {
 			size_t n = metadata_count++;
 			const char *metadata_name = snapshot->options.metadata_name == NULL ?
@@ -2399,16 +2501,29 @@ volume_snapshots_build(apfs_gen_volume_t *volume, unsigned char *image)
 			    .key = snapshot_keys[n], .key_size = 8,
 			    .value = snapshot_values[n], .value_size = 16 };
 		}
+		extra_omap_record |= snapshot->options.extra_omap_record;
 		names[i] = snapshot;
+	}
+	/* Snapshot XIDs are 1..8; XID 9 has no metadata record. */
+	if (extra_omap_record) {
+		size_t n = snapshot_count++;
+
+		put_le(snapshot_keys[n], 9, 8);
+		snapshot_records[n] = (apfs_gen_record_t){
+		    .key = snapshot_keys[n], .key_size = 8,
+		    .value = snapshot_values[n], .value_size = 16 };
 	}
 	qsort(names, volume->snapshot_count, sizeof(names[0]),
 	    volume_snapshot_name_compare);
 	for (size_t i = 0; i < volume->snapshot_count; i++) {
-		size_t n = metadata_count++;
+		size_t n;
 		apfs_gen_name_key_t key = { .oid = GEN_JKEY_OID_MASK,
 		    .name = names[i]->name,
 		    .name_len = (uint16_t)strlen(names[i]->name) };
 
+		if (names[i]->options.omit_name)
+			continue;
+		n = metadata_count++;
 		metadata[n] = (apfs_gen_record_t){ .key = keys[n],
 		    .key_size = (uint16_t)(11 + key.name_len),
 		    .value = values[n], .value_size = 8 };
@@ -2477,9 +2592,14 @@ apfs_gen_volume_build(apfs_gen_volume_t *volume, unsigned char **bytes,
     size_t *length)
 {
 	unsigned char *image;
+	uint64_t payload = VOLUME_DATA_BASE;
 
-	if (!volume_records_build(volume))
-		return (false);
+	if (volume->snapshot_count == 0) {
+		if (!volume_view_payload_plan(volume, NULL, &payload))
+			return (false);
+		if (!volume_records_build(volume))
+			return (false);
+	}
 	image = calloc(1, VOLUME_BYTES);
 	if (image == NULL)
 		return (false);

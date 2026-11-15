@@ -40,7 +40,13 @@ enum {
 	NODE_RECORD_COUNT = 36,
 	NODE_TABLE_OFFSET = 40,
 	TOC_VALUE_OFFSET = 4,
-	SNAP_META_SUPERBLOCK = 8
+	SNAP_META_SUPERBLOCK = 8,
+	ALLOCATION_BITMAP = 78,
+	CHUNK_INFO = 77,
+	CHUNK_FREE_COUNT = 60,
+	SPACEMAN = 9,
+	DEVICE_FREE_COUNT = 72,
+	PAYLOAD_BASE = 256
 };
 
 typedef struct fixture {
@@ -64,6 +70,9 @@ typedef struct refusal_case {
 
 static unsigned failures;
 static const char *scenario;
+
+static void expect_verification(fixture_t *, unsigned, fsimg_status_t,
+    const char *);
 
 #define EXPECT(condition) do { \
 	if (!(condition)) { \
@@ -108,11 +117,11 @@ add_file(apfs_gen_volume_t *volume, uint64_t oid, const char *name)
 }
 
 static fixture_t
-history(const apfs_gen_snapshot_t *first)
+history_with_snapshots(const apfs_gen_snapshot_t *first,
+    const apfs_gen_snapshot_t *second)
 {
 	fixture_t f = { .volume = apfs_gen_volume_new() };
 	unsigned char bytes[CONTENT_SIZE];
-	apfs_gen_snapshot_t second = { .name = "a-second" };
 
 	CHECK(f.volume != NULL);
 	CHECK(apfs_gen_volume_layout(f.volume, 4, 1));
@@ -126,12 +135,20 @@ history(const apfs_gen_snapshot_t *first)
 	CHECK(apfs_gen_volume_rewrite(f.volume, 100, bytes, sizeof(bytes)));
 	CHECK(apfs_gen_volume_remove(f.volume, 101));
 	add_file(f.volume, 103, "added");
-	CHECK(apfs_gen_volume_snapshot(f.volume, &second));
+	CHECK(apfs_gen_volume_snapshot(f.volume, second));
 	content(bytes, 2);
 	CHECK(apfs_gen_volume_rewrite(f.volume, 100, bytes, sizeof(bytes)));
 	add_file(f.volume, 104, "live");
 	CHECK(apfs_gen_volume_build(f.volume, &f.bytes, &f.size));
 	return (f);
+}
+
+static fixture_t
+history(const apfs_gen_snapshot_t *first)
+{
+	apfs_gen_snapshot_t second = { .name = "a-second" };
+
+	return (history_with_snapshots(first, &second));
 }
 
 static void
@@ -408,7 +425,7 @@ test_snapshot_record_damage_and_flags_are_refused(void)
 		{ .name = "name record cannot select XID zero",
 		.snapshot = { .name = "z-first", .override_name_xid = true,
 		.name_xid = 0 }, .status = FSIMG_ECORRUPT,
-		.message = "names a snapshot newer than the checkpoint" },
+		.message = "names a snapshot of XID zero" },
 		{ .name = "name record cannot select XID above checkpoint",
 		.snapshot = { .name = "z-first", .override_name_xid = true,
 		.name_xid = UINT64_MAX }, .status = FSIMG_ECORRUPT,
@@ -618,6 +635,8 @@ test_snapshot_trees_cross_leaf_boundaries(void)
 	char expected[256] = "/d\n";
 
 	scenario = "snapshot lookup trees have index roots over several leaves";
+	expect_verification(&f, 0, FSIMG_OK, NULL);
+	expect_verification(&f, FSIMG_VERIFY_PAYLOAD, FSIMG_OK, NULL);
 	CHECK(apfs_gen_volume_snapshot_roots(f.volume, &live, &metadata, &omap));
 	EXPECT(integer(f.bytes + metadata * BLOCK + NODE_LEVEL, 2) == 1);
 	EXPECT(integer(f.bytes + omap * BLOCK + NODE_LEVEL, 2) == 1);
@@ -715,6 +734,8 @@ test_verification_uses_live_view_even_when_snapshot_selected(fixture_t *f)
 		fsimg_volume_info_t current, saved;
 		fsimg_error_t ea, eb;
 		fsimg_status_t sa, sb;
+		uint64_t free_blocks = 0;
+		const unsigned char *bitmap = f->bytes + ALLOCATION_BITMAP * BLOCK;
 
 		scenario = i == 0 ? "structural verification ignores snapshot selection" :
 		    "payload verification ignores snapshot selection";
@@ -723,18 +744,22 @@ test_verification_uses_live_view_even_when_snapshot_selected(fixture_t *f)
 		CHECK(fsimg_reader_get_info(live.reader, &current, NULL) == FSIMG_OK);
 		bzero(&ea, sizeof(ea));
 		sa = fsimg_verify(live.reader, flags[i], &a, &ea);
-		EXPECT(sa == FSIMG_EUNSUPPORTED);
-		EXPECT(strstr(ea.message,
-		    "has snapshots, whose allocation verification does not judge") != NULL);
+		EXPECT(sa == FSIMG_OK);
+		EXPECT(a.complete);
+		for (size_t block = 0; block < f->size / BLOCK; block++)
+			free_blocks += (bitmap[block / 8] & (1u << (block % 8))) == 0;
+		EXPECT(a.free_clusters == free_blocks);
+		EXPECT(a.allocated_clusters == f->size / BLOCK - free_blocks);
+
 		EXPECT(a.files == detail(&current, "files"));
 		if (require_view(f, "z-first", &snapshot)) {
 			CHECK(fsimg_reader_get_info(snapshot.reader, &saved, NULL) == FSIMG_OK);
 			EXPECT(detail(&saved, "files") != detail(&current, "files"));
 			bzero(&eb, sizeof(eb));
 			sb = fsimg_verify(snapshot.reader, flags[i], &b, &eb);
-			EXPECT(sb == FSIMG_EUNSUPPORTED);
-			EXPECT(strstr(eb.message,
-			    "has snapshots, whose allocation verification does not judge") != NULL);
+			EXPECT(sb == FSIMG_OK);
+			EXPECT(b.complete);
+
 			EXPECT(b.files == detail(&current, "files"));
 			EXPECT(sa == sb);
 			EXPECT(strcmp(ea.message, eb.message) == 0);
@@ -743,6 +768,476 @@ test_verification_uses_live_view_even_when_snapshot_selected(fixture_t *f)
 		}
 		close_view(&live);
 	}
+}
+
+static void
+expect_verification(fixture_t *f, unsigned flags, fsimg_status_t wanted,
+    const char *message)
+{
+	fsimg_verify_report_t report = {0};
+	fsimg_error_t error = {0};
+	fsimg_status_t status;
+	session_t session;
+
+	if (!require_view(f, NULL, &session))
+		return;
+	status = fsimg_verify(session.reader, flags, &report, &error);
+	if (status != wanted || (message != NULL &&
+	    strstr(error.message, message) == NULL)) {
+		fprintf(stderr, "FAIL %s: verify expected status=%d message=%s; "
+		    "got status=%d message=%s\n", scenario, wanted,
+		    message == NULL ? "(none)" : message, status, error.message);
+		failures++;
+	}
+	EXPECT(report.complete == (wanted == FSIMG_OK));
+	close_view(&session);
+}
+
+static fixture_t
+shared_payload(const apfs_gen_snapshot_t *snapshot)
+{
+	fixture_t f = { .volume = apfs_gen_volume_new() };
+	apfs_gen_snapshot_t second = { .name = "unchanged" };
+
+	CHECK(f.volume != NULL);
+	CHECK(apfs_gen_volume_directory(f.volume, 50, 2, "d"));
+	add_file(f.volume, 100, "shared");
+	CHECK(apfs_gen_volume_snapshot(f.volume, snapshot));
+	CHECK(apfs_gen_volume_snapshot(f.volume, &second));
+	CHECK(apfs_gen_volume_build(f.volume, &f.bytes, &f.size));
+	return (f);
+}
+
+static void
+test_live_snapshot_count_matches_metadata_tree(fixture_t *f)
+{
+	uint64_t live, metadata, omap, count;
+	fixture_t empty = { .volume = apfs_gen_volume_new() };
+
+	CHECK(apfs_gen_volume_snapshot_roots(f->volume, &live, &metadata, &omap));
+	count = integer(f->bytes + live * BLOCK + APSB_SNAPSHOTS, 8);
+	CHECK(count == 2);
+	scenario = "live snapshot count off by one differs from metadata tree";
+	patch(f, live, APSB_SNAPSHOTS, count + 1, 8);
+	expect_verification(f, 0, FSIMG_ECORRUPT,
+	    "snapshot count differs from its snapshot tree");
+	patch(f, live, APSB_SNAPSHOTS, count, 8);
+
+	CHECK(empty.volume != NULL);
+	CHECK(apfs_gen_volume_build(empty.volume, &empty.bytes, &empty.size));
+	CHECK(apfs_gen_volume_snapshot_roots(empty.volume, &live, &metadata, &omap));
+	scenario = "volume without snapshots rejects a nonzero snapshot count";
+	expect_verification(&empty, 0, FSIMG_OK, NULL);
+	patch(&empty, live, APSB_SNAPSHOTS, 1, 8);
+	expect_verification(&empty, 0, FSIMG_ECORRUPT,
+	    "snapshot count differs from its snapshot tree");
+	release_fixture(&empty);
+}
+
+static void
+test_snapshot_intervals_record_new_and_released_payload(fixture_t *f)
+{
+	static const struct {
+		uint64_t block_offset;
+		uint64_t owner;
+		uint64_t length;
+		unsigned kind;
+	} expected[3][4] = {
+		{
+			{ .block_offset = 0, .owner = 100, .length = 4, .kind = 1 },
+			{ .block_offset = 4, .owner = 101, .length = 1, .kind = 1 },
+			{ .block_offset = 5, .owner = 102, .length = 1, .kind = 1 }
+		}, {
+			{ .block_offset = 0, .owner = UINT64_MAX, .length = 4, .kind = 2 },
+			{ .block_offset = 4, .owner = UINT64_MAX, .length = 1, .kind = 2 },
+			{ .block_offset = 6, .owner = 100, .length = 4, .kind = 1 },
+			{ .block_offset = 10, .owner = 103, .length = 1, .kind = 1 }
+		}, {
+			{ .block_offset = 6, .owner = UINT64_MAX, .length = 4, .kind = 2 },
+			{ .block_offset = 11, .owner = 100, .length = 4, .kind = 1 },
+			{ .block_offset = 15, .owner = 104, .length = 1, .kind = 1 }
+		}
+	};
+	static const unsigned counts[] = { 3, 4, 3 };
+	apfs_gen_snapshot_info_t first, second;
+	uint64_t live, metadata, omap, roots[3];
+
+	scenario = "new payload belongs to its interval and releases use signed updates";
+	CHECK(apfs_gen_volume_snapshot_info(f->volume, 0, &first));
+	CHECK(apfs_gen_volume_snapshot_info(f->volume, 1, &second));
+	CHECK(apfs_gen_volume_snapshot_roots(f->volume, &live, &metadata, &omap));
+	roots[0] = first.extentref;
+	roots[1] = second.extentref;
+	roots[2] = integer(f->bytes + live * BLOCK + APSB_EXTENTREF, 8);
+	for (size_t i = 0; i < 3; i++) {
+		const unsigned char *raw = f->bytes + roots[i] * BLOCK;
+		unsigned table = GEN_APFS_NODE_HEADER + integer(raw + NODE_TABLE_OFFSET, 2);
+		unsigned key_base = table + integer(raw + NODE_TABLE_OFFSET + 2, 2);
+		uint64_t end = 0;
+
+		CHECK(integer(raw + NODE_LEVEL, 2) == 0);
+		CHECK(integer(raw + NODE_RECORD_COUNT, 4) == counts[i]);
+		for (unsigned j = 0; j < counts[i]; j++) {
+			const unsigned char *toc = raw + table + 8 * j;
+			const unsigned char *key = raw + key_base + integer(toc, 2);
+			const unsigned char *value = raw + BLOCK - GEN_APFS_FOOTER -
+			    integer(toc + TOC_VALUE_OFFSET, 2);
+			uint64_t block_and_kind = integer(key, 8);
+			uint64_t length_and_kind = integer(value, 8);
+			uint64_t block = block_and_kind & GEN_JKEY_OID_MASK;
+			uint64_t length = length_and_kind & GEN_JKEY_OID_MASK;
+
+			EXPECT(block_and_kind >> 60 == 2);
+			EXPECT(block >= end);
+			EXPECT(block == PAYLOAD_BASE + expected[i][j].block_offset);
+			EXPECT(length == expected[i][j].length);
+			EXPECT(length_and_kind >> 60 == expected[i][j].kind);
+			EXPECT(integer(value + 8, 8) == expected[i][j].owner);
+			EXPECT(integer(value + 16, 4) ==
+			    (expected[i][j].kind == 1 ? 1 : UINT32_MAX));
+			end = block + length;
+		}
+	}
+}
+
+static void
+test_snapshot_signed_counts_match_live_streams(void)
+{
+	static const struct {
+		const char *name;
+		int32_t count;
+		uint8_t kind;
+	} cases[] = {
+		{ .name = "negative sum on a live mapped block", .kind = 2,
+		    .count = -2 },
+		{ .name = "update leaves a live mapped block with sum zero",
+		    .kind = 2, .count = -1 },
+		{ .name = "sum two on a block mapped once", .kind = 1, .count = 1 }
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		apfs_gen_snapshot_t snapshot = { .name = "shared" };
+		fixture_t f = shared_payload(&snapshot);
+		apfs_gen_snapshot_info_t second;
+		uint64_t physical;
+		unsigned char key[8], value[GEN_PEXT_VAL_BYTES];
+		apfs_gen_pext_val_t extent = { .length = 1,
+		    .owner = cases[i].kind == 2 ? UINT64_MAX : 100,
+		    .kind = cases[i].kind, .refcnt = cases[i].count };
+		apfs_gen_record_t record = { .key = key, .key_size = 8,
+		    .value = value, .value_size = sizeof(value) };
+		apfs_gen_node_t node = {
+			.flags = GEN_APFS_ROOT | GEN_APFS_LEAF,
+			.info = { .flags = 0x50, .node_size = BLOCK,
+			.key_count = 1, .node_count = 1 },
+			.records = &record, .count = 1
+		};
+
+		CHECK(apfs_gen_volume_snapshot_info(f.volume, 1, &second));
+		CHECK(apfs_gen_volume_extent_block(f.volume, 100, 0, &physical));
+		CHECK(apfs_gen_jkey_build(key, sizeof(key), physical, 2));
+		CHECK(apfs_gen_pext_val_build(value, sizeof(value), &extent));
+		node.object = (apfs_gen_object_t){ .oid = second.extentref,
+		    .xid = second.xid, .type = 0x40000002, .subtype = 15 };
+		CHECK(apfs_gen_node_build(f.bytes + second.extentref * BLOCK,
+		    BLOCK, &node));
+
+		scenario = cases[i].name;
+		expect_verification(&f, 0, FSIMG_ECORRUPT,
+		    "reference count differs from the streams mapping its blocks");
+		release_fixture(&f);
+	}
+}
+
+static void
+test_snapshot_only_block_cannot_have_negative_sum(void)
+{
+	apfs_gen_snapshot_t first = { .name = "z-first" };
+	apfs_gen_snapshot_t second = { .name = "a-second",
+	    .override_extentref = true, .extentref_kind = 2,
+	    .extentref_count = -2 };
+	fixture_t f = history_with_snapshots(&first, &second);
+
+	scenario = "released snapshot-only block has summed count minus one";
+	expect_verification(&f, 0, FSIMG_ECORRUPT,
+	    "reference count differs from the streams mapping its blocks");
+	release_fixture(&f);
+}
+
+static void
+test_snapshot_record_sets_and_flags_are_verified(void)
+{
+	static const refusal_case_t cases[] = {
+		{ .name = "missing object-map snapshot record with intact header",
+		.snapshot = { .name = "z-first", .omit_omap_record = true },
+		.status = FSIMG_ECORRUPT,
+		.message = "differs from the snapshot metadata records" },
+		{ .name = "extra object-map snapshot record with intact header",
+		.snapshot = { .name = "z-first", .extra_omap_record = true },
+		.status = FSIMG_ECORRUPT,
+		.message = "differs from the snapshot metadata records" },
+		{ .name = "verification rejects a name record of XID zero",
+		.snapshot = { .name = "z-first", .override_name_xid = true },
+		.status = FSIMG_ECORRUPT,
+		.message = "names a snapshot of XID zero" },
+		{ .name = "name has no metadata record",
+		.snapshot = { .name = "z-first", .omit_metadata = true },
+		.status = FSIMG_ECORRUPT,
+		.message = "snapshot has no metadata record" },
+		{ .name = "metadata has no name record",
+		.snapshot = { .name = "z-first", .omit_name = true },
+		.status = FSIMG_ECORRUPT,
+		.message = "has a snapshot without a name record" },
+		{ .name = "name record selects metadata carrying another name",
+		.snapshot = { .name = "z-first", .metadata_name = "different" },
+		.status = FSIMG_ECORRUPT,
+		.message = "metadata names another snapshot" },
+		{ .name = "metadata flags make verification incomplete",
+		.snapshot = { .name = "z-first", .meta_flags = 1 },
+		.status = FSIMG_EUNSUPPORTED,
+		.message = "APFS snapshot has unsupported flags" },
+		{ .name = "object-map snapshot flags make verification incomplete",
+		.snapshot = { .name = "z-first", .omap_flags = 1 },
+		.status = FSIMG_EUNSUPPORTED,
+		.message = "volume object map snapshot record has unsupported flags" }
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		fixture_t f = history(&cases[i].snapshot);
+
+		scenario = cases[i].name;
+		expect_verification(&f, 0, cases[i].status, cases[i].message);
+		release_fixture(&f);
+	}
+}
+
+static void
+test_snapshot_name_oid_and_metadata_xid_are_verified(void)
+{
+	for (unsigned metadata_record = 0; metadata_record < 2; metadata_record++) {
+		apfs_gen_snapshot_t first = { .name = "z-first" };
+		fixture_t f = history(&first);
+		uint64_t live, metadata, omap;
+		unsigned char *raw;
+		unsigned table, key_base, key_offset;
+
+		scenario = metadata_record ? "metadata record has XID zero" :
+		    "name record OID is not all ones";
+		CHECK(apfs_gen_volume_snapshot_roots(f.volume, &live, &metadata, &omap));
+		expect_verification(&f, 0, FSIMG_OK, NULL);
+		raw = f.bytes + metadata * BLOCK;
+		table = GEN_APFS_NODE_HEADER + integer(raw + NODE_TABLE_OFFSET, 2);
+		key_base = table + integer(raw + NODE_TABLE_OFFSET + 2, 2);
+		/* Metadata XIDs 1 and 2 precede the two name records. Change
+		 * only the first key of the selected kind; name XIDs stay valid.
+		 */
+		key_offset = key_base + integer(raw + table +
+		    (metadata_record ? 0 : 16), 2);
+		patch(&f, metadata, key_offset, metadata_record ?
+		    UINT64_C(0x1000000000000000) :
+		    UINT64_C(0xbffffffffffffffe), 8);
+		expect_verification(&f, 0, FSIMG_ECORRUPT, metadata_record ?
+		    "APFS snapshot metadata tree names a snapshot of XID zero" :
+		    "APFS snapshot metadata tree has a malformed name record");
+		release_fixture(&f);
+	}
+}
+
+static void
+test_dataless_snapshot_volume_verification_is_incomplete(void)
+{
+	apfs_gen_snapshot_t first = { .name = "z-first" };
+	fixture_t f = history(&first);
+	uint64_t live, metadata, omap;
+
+	scenario = "valid snapshots in a dataless-snapshot volume";
+	CHECK(apfs_gen_volume_snapshot_roots(f.volume, &live, &metadata, &omap));
+	expect_verification(&f, 0, FSIMG_OK, NULL);
+	patch(&f, live, APSB_INCOMPAT,
+	    integer(f.bytes + live * BLOCK + APSB_INCOMPAT, 8) | 2, 8);
+	/* Snapshot copies carry the same incompatible features as live. */
+	for (size_t i = 0; i < 2; i++) {
+		apfs_gen_snapshot_info_t saved;
+
+		CHECK(apfs_gen_volume_snapshot_info(f.volume, i, &saved));
+		patch(&f, saved.superblock, APSB_INCOMPAT,
+		    integer(f.bytes + live * BLOCK + APSB_INCOMPAT, 8), 8);
+	}
+	expect_verification(&f, 0, FSIMG_EUNSUPPORTED,
+	    "APFS volume superblock has dataless snapshots");
+	release_fixture(&f);
+}
+
+static void
+test_object_map_snapshot_tree_header_is_verified(void)
+{
+	for (unsigned missing_root = 0; missing_root < 2; missing_root++) {
+		apfs_gen_snapshot_t first = { .name = "z-first" };
+		fixture_t f = history(&first);
+		uint64_t live, metadata, omap, map;
+
+		scenario = missing_root ? "counted map snapshots have no tree" :
+		    "nonzero map snapshot tree has a nonphysical type";
+		CHECK(apfs_gen_volume_snapshot_roots(f.volume, &live, &metadata, &omap));
+		expect_verification(&f, 0, FSIMG_OK, NULL);
+		map = integer(f.bytes + live * BLOCK + APSB_OMAP, 8);
+		patch(&f, map, missing_root ? OMAP_SNAPSHOT_TREE : OMAP_SNAPSHOT_TYPE,
+		    missing_root ? 0 : 2, missing_root ? 8 : 4);
+		expect_verification(&f, 0, FSIMG_ECORRUPT, missing_root ?
+		    "differs from the snapshot metadata records" :
+		    "APFS volume object map has an invalid snapshot tree");
+		release_fixture(&f);
+	}
+}
+
+static void
+test_object_map_snapshot_ghost_record_is_corrupt(void)
+{
+	apfs_gen_snapshot_t first = { .name = "z-first" };
+	fixture_t f = history(&first);
+	uint64_t live, metadata, omap;
+	unsigned char *raw;
+	unsigned table;
+
+	scenario = "object-map snapshot tree contains a fixed-size ghost record";
+	CHECK(apfs_gen_volume_snapshot_roots(f.volume, &live, &metadata, &omap));
+	/* Allow ghosts at the B-tree layer so verification judges the record.
+	 * A fixed TOC entry stores key offset then value offset; 0xffff
+	 * denotes no value even though the tree declares a fixed value size.
+	 */
+	raw = f.bytes + omap * BLOCK;
+	patch(&f, omap, BLOCK - GEN_APFS_FOOTER,
+	    integer(raw + BLOCK - GEN_APFS_FOOTER, 4) | 4, 4);
+	expect_verification(&f, 0, FSIMG_OK, NULL);
+	table = GEN_APFS_NODE_HEADER + integer(raw + NODE_TABLE_OFFSET, 2);
+	patch(&f, omap, table + 2, GEN_APFS_GHOST, 2);
+	expect_verification(&f, 0, FSIMG_ECORRUPT,
+	    "has a malformed record");
+	release_fixture(&f);
+}
+
+static void
+test_equal_snapshot_record_counts_require_matching_xids(void)
+{
+	apfs_gen_snapshot_t first = { .name = "z-first" };
+	fixture_t f = history(&first);
+	apfs_gen_snapshot_info_t second;
+	uint64_t live, metadata, omap, map;
+	unsigned char *raw;
+	unsigned table, key_base, key_offset, value_offset;
+
+	scenario = "metadata XIDs one and three differ from map XIDs two and three";
+	CHECK(apfs_gen_volume_snapshot_roots(f.volume, &live, &metadata, &omap));
+	CHECK(apfs_gen_volume_snapshot_info(f.volume, 1, &second));
+	/* Move the second snapshot from XID 2 to 3. Its trees were already
+	 * present at XID 2 and remain valid at XID 3. Names sort a-second first.
+	 */
+	raw = f.bytes + metadata * BLOCK;
+	table = GEN_APFS_NODE_HEADER + integer(raw + NODE_TABLE_OFFSET, 2);
+	key_base = table + integer(raw + NODE_TABLE_OFFSET + 2, 2);
+	key_offset = key_base + integer(raw + table + 8, 2);
+	value_offset = BLOCK - GEN_APFS_FOOTER -
+	    integer(raw + table + 16 + TOC_VALUE_OFFSET, 2);
+	patch(&f, metadata, key_offset, UINT64_C(0x1000000000000003), 8);
+	patch(&f, metadata, value_offset, 3, 8);
+	patch(&f, second.superblock, OBJECT_XID, 3, 8);
+	map = integer(f.bytes + live * BLOCK + APSB_OMAP, 8);
+	patch(&f, map, 64, 3, 8);
+
+	/* Preserve both the count and largest XID, replacing only membership. */
+	raw = f.bytes + omap * BLOCK;
+	table = GEN_APFS_NODE_HEADER + integer(raw + NODE_TABLE_OFFSET, 2);
+	key_base = table + integer(raw + NODE_TABLE_OFFSET + 2, 2);
+	key_offset = key_base + integer(raw + table, 2);
+	patch(&f, omap, key_offset, 2, 8);
+	key_offset = key_base + integer(raw + table + 4, 2);
+	patch(&f, omap, key_offset, 3, 8);
+	expect_verification(&f, 0, FSIMG_ECORRUPT,
+	    "differs from the snapshot metadata records");
+	release_fixture(&f);
+}
+
+static void
+test_snapshot_refusals_do_not_hide_later_tree_damage(void)
+{
+	static const apfs_gen_snapshot_t refusals[] = {
+		{ .name = "z-first", .refuse_extentref = true },
+		{ .name = "z-first", .refuse_superblock = true },
+		{ .name = "z-first", .meta_flags = 1 },
+		{ .name = "z-first", .omap_flags = 1 }
+	};
+	static const char *messages[] = {
+		"is encrypted or nonpersistent",
+		"snapshot superblock names trees of its own",
+		"APFS snapshot has unsupported flags",
+		"volume object map snapshot record has unsupported flags"
+	};
+
+	for (size_t i = 0; i < sizeof(refusals) / sizeof(refusals[0]); i++) {
+		apfs_gen_snapshot_t second = { .name = "a-second" };
+		fixture_t f = history_with_snapshots(&refusals[i], &second);
+
+		scenario = messages[i];
+		expect_verification(&f, 0, FSIMG_EUNSUPPORTED, messages[i]);
+		release_fixture(&f);
+
+		second.override_extentref = true;
+		second.extentref_kind = 3;
+		second.extentref_count = -1;
+		f = history_with_snapshots(&refusals[i], &second);
+		expect_verification(&f, 0, FSIMG_ECORRUPT,
+		    "extent-reference tree has a record of an invalid kind or count");
+		release_fixture(&f);
+	}
+}
+
+static void
+test_snapshot_copy_refusal_does_not_hide_its_extent_damage(void)
+{
+	apfs_gen_snapshot_t first = { .name = "z-first",
+	    .refuse_superblock = true, .override_extentref = true,
+	    .extentref_kind = 3, .extentref_count = 1 };
+	fixture_t f = history(&first);
+
+	scenario = "refused snapshot copy still permits its own extent tree to be checked";
+	expect_verification(&f, 0, FSIMG_ECORRUPT,
+	    "extent-reference tree has a record of an invalid kind or count");
+	release_fixture(&f);
+}
+
+static void
+test_snapshot_superblock_is_claimed_in_allocation_bitmap(void)
+{
+	apfs_gen_snapshot_t first = { .name = "z-first" };
+	fixture_t f = history(&first);
+	apfs_gen_snapshot_info_t snapshot;
+	unsigned char *bitmap = f.bytes + ALLOCATION_BITMAP * BLOCK;
+
+	scenario = "snapshot superblock is claimed but its bitmap bit is free";
+	CHECK(apfs_gen_volume_snapshot_info(f.volume, 0, &snapshot));
+	bitmap[snapshot.superblock / 8] &=
+	    (unsigned char)~(1u << (snapshot.superblock % 8));
+	patch(&f, CHUNK_INFO, CHUNK_FREE_COUNT,
+	    integer(f.bytes + CHUNK_INFO * BLOCK + CHUNK_FREE_COUNT, 4) + 1, 4);
+	patch(&f, SPACEMAN, DEVICE_FREE_COUNT,
+	    integer(f.bytes + SPACEMAN * BLOCK + DEVICE_FREE_COUNT, 8) + 1, 8);
+	expect_verification(&f, 0, FSIMG_ECORRUPT, "claimed but free");
+	release_fixture(&f);
+}
+
+static void
+test_snapshot_allocated_block_count_is_not_checked(fixture_t *f)
+{
+	uint64_t live, metadata, omap;
+	unsigned char original[BLOCK];
+
+	scenario = "snapshot volume allocated block count is not checked";
+	CHECK(apfs_gen_volume_snapshot_roots(f->volume, &live, &metadata, &omap));
+	bcopy(f->bytes + live * BLOCK, original, BLOCK);
+	patch(f, live, APSB_ALLOC_BLOCKS, UINT64_MAX, 8);
+	expect_verification(f, 0, FSIMG_OK, NULL);
+	expect_verification(f, FSIMG_VERIFY_PAYLOAD, FSIMG_OK, NULL);
+	bcopy(original, f->bytes + live * BLOCK, BLOCK);
 }
 
 int
@@ -764,6 +1259,20 @@ main(void)
 	test_later_snapshot_requires_exact_records_after_le_seek();
 	test_snapshot_names_accept_255_bytes_and_match_utf8_exactly();
 	test_verification_uses_live_view_even_when_snapshot_selected(&f);
+	test_live_snapshot_count_matches_metadata_tree(&f);
+	test_snapshot_intervals_record_new_and_released_payload(&f);
+	test_snapshot_signed_counts_match_live_streams();
+	test_snapshot_only_block_cannot_have_negative_sum();
+	test_snapshot_record_sets_and_flags_are_verified();
+	test_snapshot_name_oid_and_metadata_xid_are_verified();
+	test_dataless_snapshot_volume_verification_is_incomplete();
+	test_object_map_snapshot_tree_header_is_verified();
+	test_object_map_snapshot_ghost_record_is_corrupt();
+	test_equal_snapshot_record_counts_require_matching_xids();
+	test_snapshot_refusals_do_not_hide_later_tree_damage();
+	test_snapshot_copy_refusal_does_not_hide_its_extent_damage();
+	test_snapshot_superblock_is_claimed_in_allocation_bitmap();
+	test_snapshot_allocated_block_count_is_not_checked(&f);
 	release_fixture(&f);
 	printf("APFS snapshot failures=%u\n", failures);
 	return (failures == 0 ? 0 : 1);

@@ -1775,7 +1775,17 @@ typedef struct apfs_window apfs_window_t;
  * number, which the volume-group inode space raises in a System volume.
  *
  * apfs_snapshot_tree_profile() is the snapshot metadata tree's profile:
- * metadata records keyed by XID, then name records by their name bytes.
+ * metadata records keyed by XID, then name records by their name bytes;
+ * apfs_map_snapshot_tree_profile() the volume object map's snapshot tree's,
+ * one fixed record per snapshot keyed by its XID.
+ * apfs_snapshot_meta_find(cursor, name, length, xid, meta, error) finds
+ * the metadata record at xid through a cursor over the snapshot metadata
+ * tree; it must exist and carry the name's length bytes, or the tree is
+ * FSIMG_ECORRUPT. meta's name points into the cursor's node and is valid
+ * until the cursor next moves or is freed. apfs_snapshot_copy_read(container, live, oid, xid,
+ * window, copy, error) reads the snapshot superblock copy at oid into copy
+ * and applies its own rules, against the live superblock live
+ * (specs/design-apfs.md, "Snapshots"). Open and verification use both.
  *
  * apfs_verify() (verify.c) is the reader's structural verification.
  */
@@ -1812,6 +1822,12 @@ fsimg_status_t	apfs_volume_read(apfs_container_t *, apfs_map_t *, uint32_t,
 		    fsimg_error_t *);
 void		apfs_volume_live(apfs_reader_t *);
 const apfs_tree_profile_t *apfs_snapshot_tree_profile(void);
+const apfs_tree_profile_t *apfs_map_snapshot_tree_profile(void);
+fsimg_status_t	apfs_snapshot_meta_find(apfs_cursor_t *, const char *, size_t,
+		    uint64_t, apfs_snap_meta_val_t *, fsimg_error_t *);
+fsimg_status_t	apfs_snapshot_copy_read(apfs_container_t *, const apfs_fs_t *,
+		    uint64_t, uint64_t, unsigned char *, apfs_fs_t *,
+		    fsimg_error_t *);
 apfs_name_rule_t apfs_volume_rule(const apfs_fs_t *);
 uint64_t	apfs_inode_min(const apfs_fs_t *);
 fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,

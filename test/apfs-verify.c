@@ -631,36 +631,60 @@ test_double_claims(void)
 	fixture_close(&f);
 }
 
-/* The live and snapshot trees have separate nodes but share their data run. */
+/* Keep the I/O session but replace its bytes with an independent generated
+ * volume. Frozen and live views retain the file's physical payload run.
+ */
+static void
+snapshot_fixture_init(fixture_t *f, const char *first, const char *second)
+{
+	apfs_gen_snapshot_info_t saved;
+	uint64_t physical, live_root;
+	unsigned table, key_base;
+	const unsigned char *raw;
+	apfs_gen_volume_t *volume = apfs_gen_volume_new();
+	apfs_gen_snapshot_t snapshot = { .name = first };
+	unsigned char payload[2 * BLOCK] = {1};
+	size_t length;
+	uint64_t free_blocks = 0;
+
+	CHECK(volume != NULL);
+	fixture_init(f, 1);
+	free(f->bytes);
+	CHECK(apfs_gen_volume_file(volume, 16, 2, "shared", payload,
+	    sizeof(payload)));
+	CHECK(apfs_gen_volume_snapshot(volume, &snapshot));
+	if (second != NULL) {
+		snapshot.name = second;
+		CHECK(apfs_gen_volume_snapshot(volume, &snapshot));
+	}
+	CHECK(apfs_gen_volume_build(volume, &f->bytes, &length));
+	f->length = length;
+	CHECK(apfs_gen_volume_snapshot_info(volume, 0, &saved));
+	CHECK(apfs_gen_volume_extent_block(volume, 16, 0, &physical));
+	raw = block_at(f, saved.extentref);
+	table = GEN_APFS_NODE_HEADER + fsimg_load_le16(raw + 40);
+	key_base = table + fsimg_load_le16(raw + 42);
+	expect((fsimg_load_le64(raw + key_base + fsimg_load_le16(raw + table)) &
+	    GEN_JKEY_OID_MASK) == physical,
+	    "live file retains the first snapshot's physical payload address");
+	live_root = fsimg_load_le64(block_at(f, VOLUME_BASE) + 144);
+	expect(fsimg_load_le32(block_at(f, live_root) + 36) == 0,
+	    "unchanged payload needs no live interval records");
+	for (uint64_t i = 0; i < BLOCKS; i++)
+		free_blocks += (block_at(f, BITMAP_BLOCK)[i / 8] &
+		    (1u << (i % 8))) == 0;
+	f->sm.devices[0].free_count = free_blocks;
+	apfs_gen_volume_free(volume);
+}
+
 static void
 test_snapshot_shares_data_with_live_volume(void)
 {
 	fixture_t f;
-	unsigned char key[8], value[GEN_SNAP_META_VAL_BYTES + 5];
-	apfs_gen_snap_meta_val_t meta = {
-		.extentref_tree_oid = 300, .sblock_oid = 301,
-		.extentref_tree_type = PHYSICAL_TREE, .name = "snap", .name_len = 4
-	};
-	apfs_gen_record_t record = { .key = key, .key_size = sizeof(key),
-		.value = value, .value_size = sizeof(value) };
-	unsigned char *raw;
 
 	scenario = "snapshot shares data with live volume";
-	fixture_init(&f, 1);
-	CHECK(apfs_gen_jkey_build(key, sizeof(key), 9, 1));
-	CHECK(apfs_gen_snap_meta_val_build(value, sizeof(value), &meta));
-	node_build(&f, 104, 104, PHYSICAL_TREE, 16, &record, 1, 0, 0);
-	extents_build(&f, 300, DATA_BLOCK, 2);
-	bcopy(block_at(&f, 100), block_at(&f, 301), BLOCK);
-	bit_set(block_at(&f, BITMAP_BLOCK), 300, true);
-	bit_set(block_at(&f, BITMAP_BLOCK), 301, true);
-	raw = block_at(&f, 101);
-	fsimg_store_le32(raw + 36, 1);
-	fsimg_store_le64(raw + 64, 9);
-	CHECK(apfs_gen_seal(raw, BLOCK));
-	allocation_build(&f);
-	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
-	    "has snapshots");
+	snapshot_fixture_init(&f, "snap", NULL);
+	verify_fixture(&f, 0, FSIMG_OK, "");
 	fixture_close(&f);
 }
 
@@ -709,54 +733,39 @@ test_volume_uuids_must_be_distinct(void)
 	fixture_close(&f);
 }
 
-/* Name keys at OID 1 precede metadata at XIDs 8 and 9. */
+/* Metadata keys precede names at the all-ones OID. Names compare by their
+ * stored bytes, independently of the stored name length.
+ */
 static void
 test_snapshot_names_order_by_stored_bytes(void)
 {
 	fixture_t f;
-	unsigned char meta_keys[2][8], meta_values[2][GEN_SNAP_META_VAL_BYTES + 3];
-	unsigned char name_keys[2][13], name_values[2][8];
 	apfs_gen_record_t records[4], reversed[4];
-	const char *const names[] = { "aa", "b" };
-	unsigned char *raw;
+	unsigned char original[BLOCK], *raw;
+	unsigned table, key_base;
 
 	scenario = "snapshot names aa then b in byte order";
-	fixture_init(&f, 1);
-	for (unsigned i = 0; i < 2; i++) {
-		apfs_gen_snap_meta_val_t meta = {
-			.extentref_tree_oid = 300 + i, .sblock_oid = 302 + i,
-			.extentref_tree_type = PHYSICAL_TREE,
-			.name = names[i], .name_len = (uint16_t)strlen(names[i])
-		};
-		apfs_gen_name_key_t name = { .name = names[i], .oid = 1,
-			.name_len = (uint16_t)strlen(names[i]) };
-		size_t meta_size = GEN_SNAP_META_VAL_BYTES + name.name_len + 1;
-		size_t name_size = 10 + name.name_len + 1;
-
-		CHECK(apfs_gen_jkey_build(meta_keys[i], 8, 8 + i, 1));
-		CHECK(apfs_gen_snap_meta_val_build(meta_values[i], meta_size, &meta));
-		CHECK(apfs_gen_snap_name_key_build(name_keys[i], name_size, &name));
-		CHECK(apfs_gen_snap_name_val_build(name_values[i], 8, 8 + i));
-		records[2 + i] = (apfs_gen_record_t){ .key = meta_keys[i],
-		    .key_size = 8, .value = meta_values[i], .value_size = meta_size };
-		records[i] = (apfs_gen_record_t){ .key = name_keys[i],
-		    .key_size = name_size, .value = name_values[i], .value_size = 8 };
-		extents_build(&f, 300 + i, DATA_BLOCK, 2);
-		bit_set(block_at(&f, BITMAP_BLOCK), 300 + i, true);
-	}
+	snapshot_fixture_init(&f, "aa", "b");
+	verify_fixture(&f, 0, FSIMG_OK, "");
 	raw = block_at(&f, 101);
-	fsimg_store_le32(raw + 36, 2);
-	fsimg_store_le64(raw + 64, 9);
-	CHECK(apfs_gen_seal(raw, BLOCK));
-	allocation_build(&f);
-	node_build(&f, 104, 104, PHYSICAL_TREE, 16, records, 4, 0, 0);
-	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED, "has snapshots");
+	bcopy(raw, original, BLOCK);
+	table = GEN_APFS_NODE_HEADER + fsimg_load_le16(raw + 40);
+	key_base = table + fsimg_load_le16(raw + 42);
+	for (unsigned i = 0; i < 4; i++) {
+		const unsigned char *toc = original + table + 8 * i;
 
+		records[i] = (apfs_gen_record_t){
+		    .key = original + key_base + fsimg_load_le16(toc),
+		    .key_size = fsimg_load_le16(toc + 2),
+		    .value = original + BLOCK - GEN_APFS_FOOTER -
+		    fsimg_load_le16(toc + 4),
+		    .value_size = fsimg_load_le16(toc + 6) };
+	}
 	scenario = "snapshot names b then aa in length order";
 	bcopy(records, reversed, sizeof(records));
-	reversed[0] = records[1];
-	reversed[1] = records[0];
-	node_build(&f, 104, 104, PHYSICAL_TREE, 16, reversed, 4, 0, 0);
+	reversed[2] = records[3];
+	reversed[3] = records[2];
+	node_build(&f, 101, 101, PHYSICAL_TREE, 16, reversed, 4, 0, 0);
 	verify_fixture(&f, 0, FSIMG_ECORRUPT, "keys out of order");
 	fixture_close(&f);
 }
@@ -840,7 +849,8 @@ test_snapshot_xids_must_not_exceed_checkpoint(void)
 		.extentref_tree_oid = 300, .sblock_oid = 301,
 		.extentref_tree_type = PHYSICAL_TREE, .name = "snap", .name_len = 4
 	};
-	apfs_gen_name_key_t name = { .name = "snap", .oid = 1, .name_len = 4 };
+	apfs_gen_name_key_t name = { .name = "snap",
+	    .oid = GEN_JKEY_OID_MASK, .name_len = 4 };
 	apfs_gen_record_t records[] = {
 		{ .key = name_key, .key_size = sizeof(name_key),
 		.value = name_value, .value_size = sizeof(name_value) },
@@ -850,6 +860,8 @@ test_snapshot_xids_must_not_exceed_checkpoint(void)
 	unsigned char *raw;
 
 	for (unsigned metadata = 0; metadata < 2; metadata++) {
+		apfs_gen_record_t ordered[2];
+
 		scenario = metadata ? "snapshot metadata has future XID" :
 		    "snapshot name has future XID";
 		fixture_init(&f, 1);
@@ -859,12 +871,23 @@ test_snapshot_xids_must_not_exceed_checkpoint(void)
 		    &meta));
 		CHECK(apfs_gen_snap_name_key_build(name_key, sizeof(name_key), &name));
 		CHECK(apfs_gen_snap_name_val_build(name_value, sizeof(name_value), 11));
+		ordered[0] = records[1];
+		ordered[1] = records[0];
+
 		/* Isolate the metadata key from the name value's XID check. */
 		node_build(&f, 104, 104, PHYSICAL_TREE, 16,
-		    metadata ? &records[1] : records,
+		    metadata ? &records[1] : ordered,
 		    metadata ? 1 : ARRAY_COUNT(records), 0, 0);
 		extents_build(&f, 300, DATA_BLOCK, 2);
 		bcopy(block_at(&f, 100), block_at(&f, 301), BLOCK);
+		raw = block_at(&f, 301);
+		fsimg_store_le64(raw + 8, 301);
+		fsimg_store_le64(raw + 16, 9);
+		fsimg_store_le32(raw + 24, 0x4000000d);
+		fsimg_store_le64(raw + 128, 0);
+		fsimg_store_le64(raw + 144, 0);
+		fsimg_store_le64(raw + 152, 0);
+		CHECK(apfs_gen_seal(raw, BLOCK));
 		bit_set(block_at(&f, BITMAP_BLOCK), 300, true);
 		bit_set(block_at(&f, BITMAP_BLOCK), 301, true);
 		raw = block_at(&f, 101);
@@ -977,7 +1000,6 @@ test_incomplete_containers_preserve_corruption_errors(void)
 		{ "busy reaper", "pending reap", 10, 64, 3 },
 		{ "encrypted volume", "is encrypted", 110, 264, 0 },
 		{ "sealed volume", "is sealed", 110, 56, 0x29 },
-		{ "snapshot extension", "holds structures", 110, 1000, 300 },
 		{ "integrity tree", "holds structures", 110, 1024, 300 },
 		{ "fext tree", "holds structures", 110, 1032, 300 },
 		{ "unsupported volume map", "has unsupported flags",
@@ -2018,6 +2040,103 @@ test_physical_reference_count_exceeds_streams_is_corrupt(void)
 }
 
 static void
+test_live_extent_update_or_zero_count_without_snapshots_is_corrupt(void)
+{
+	static const apfs_gen_pext_val_t extents[] = {
+		{ .length = 2, .owner = UINT64_MAX, .refcnt = 1, .kind = 2 },
+		{ .length = 2, .owner = 16, .refcnt = 0, .kind = 1 }
+	};
+
+	for (size_t i = 0; i < ARRAY_COUNT(extents); i++) {
+		fixture_t f;
+		unsigned char key[8], value[GEN_PEXT_VAL_BYTES];
+		apfs_gen_record_t record = { .key = key, .key_size = 8,
+		    .value = value, .value_size = sizeof(value) };
+
+		scenario = i == 0 ? "update record without snapshots" :
+		    "zero reference count without snapshots";
+		fixture_init(&f, 1);
+		CHECK(apfs_gen_jkey_build(key, sizeof(key), DATA_BLOCK, 2));
+		CHECK(apfs_gen_pext_val_build(value, sizeof(value), &extents[i]));
+		node_build(&f, 105, 105, PHYSICAL_TREE, 15, &record, 1, 0, 0);
+		verify_fixture(&f, 0, FSIMG_ECORRUPT,
+		    "extent-reference tree has a record of an invalid kind or count");
+		fixture_close(&f);
+	}
+}
+
+static void
+test_refused_filesystem_records_preserve_live_extent_update_damage(void)
+{
+	fixture_t f;
+	unsigned char key[8], value[GEN_PEXT_VAL_BYTES];
+	apfs_gen_record_t record = { .key = key, .key_size = sizeof(key) };
+	apfs_gen_pext_val_t extent = { .length = 2, .owner = UINT64_MAX,
+	    .refcnt = 1, .kind = 2 };
+	fs_record_t *crypto;
+
+	scenario = "filesystem encryption-state record refuses reconciliation";
+	fixture_init(&f, 1);
+	/* Keep the virtual filesystem root mapped and readable, but give
+	 * records.c a recognized record kind it explicitly refuses to judge.
+	 * The empty snapshot tree and live extent tree remain supported.
+	 */
+	crypto = record_add(&f.trees[0]);
+	CHECK(apfs_gen_jkey_build(crypto->key, 8, 16, 7));
+	crypto->key_size = 8;
+	filesystem_build(&f, 0);
+	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
+	    "APFS filesystem tree holds encryption state");
+
+	scenario = "live update without snapshots outranks filesystem-record refusal";
+	CHECK(apfs_gen_jkey_build(key, sizeof(key), DATA_BLOCK, 2));
+	CHECK(apfs_gen_pext_val_build(value, sizeof(value), &extent));
+	record.value = value;
+	record.value_size = sizeof(value);
+	node_build(&f, 105, 105, PHYSICAL_TREE, 15, &record, 1, 0, 0);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT,
+	    "APFS extent-reference tree has a record of an invalid kind or count");
+	fixture_close(&f);
+}
+
+static void
+test_snapshot_extended_metadata_versions_are_claimed(void)
+{
+	fixture_t f;
+	unsigned char *raw;
+	apfs_gen_object_t object = { .oid = 3000, .xid = 9, .type = 29 };
+	apfs_gen_omap_record_t maps[] = {
+		{ .key = { .oid = 2000, .xid = 10 },
+		.value = { .size = BLOCK, .address = 103 } },
+		{ .key = { .oid = 3000, .xid = 8 },
+		.value = { .size = BLOCK, .address = 300 } },
+		{ .key = { .oid = 3000, .xid = 9 },
+		.value = { .size = BLOCK, .address = 301 } }
+	};
+
+	scenario = "snapshot extended metadata is a mapped virtual object";
+	fixture_init(&f, 1);
+	map_build(&f, 101, maps, ARRAY_COUNT(maps));
+	for (unsigned i = 0; i < 2; i++) {
+		object.xid = 8 + i;
+		CHECK(apfs_gen_object_build(block_at(&f, 300 + i), BLOCK, &object));
+		bit_set(block_at(&f, BITMAP_BLOCK), 300 + i, true);
+	}
+	raw = block_at(&f, VOLUME_BASE);
+	fsimg_store_le64(raw + 1000, 3000);
+	fsimg_store_le64(raw + 88, 9);
+	CHECK(apfs_gen_seal(raw, BLOCK));
+	allocation_build(&f);
+	verify_fixture(&f, 0, FSIMG_OK, "");
+
+	scenario = "older snapshot extended-metadata version is claimed but free";
+	bit_set(block_at(&f, BITMAP_BLOCK), 300, false);
+	allocation_build(&f);
+	verify_fixture(&f, 0, FSIMG_ECORRUPT, "claimed but free");
+	fixture_close(&f);
+}
+
+static void
 test_physical_record_without_file_mapping_is_corrupt(void)
 {
 	fixture_t f;
@@ -2608,6 +2727,9 @@ main(void)
 	test_file_extent_crossing_adjacent_records_is_valid();
 	test_many_clones_of_one_extent_fit_a_linear_work_budget();
 	test_physical_reference_count_exceeds_streams_is_corrupt();
+	test_live_extent_update_or_zero_count_without_snapshots_is_corrupt();
+	test_refused_filesystem_records_preserve_live_extent_update_damage();
+	test_snapshot_extended_metadata_versions_are_claimed();
 	test_physical_record_without_file_mapping_is_corrupt();
 	test_tree_footer_counts_differ_from_walk_is_corrupt();
 	test_superblock_counts_differ_from_inode_kinds_is_corrupt();

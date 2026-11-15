@@ -67,19 +67,18 @@
   extended field, which would tighten the APFS rule for a device without it.
   Whether an object-map value flag `0x10` (crypto
   generation) is accepted like the map flag or refused as corrupt, as the
-  format design's value rule says, waits on E1's volume records. Verification
-  does not yet check that the volume object map's snapshot tree holds a
-  record for exactly the snapshot metadata records' XIDs, and it refuses an
-  update record (count -1) in the live extent-reference tree, which E9's
-  corpus specimen holds, so `W` fails there; both belong to the snapshot
-  stage's verification part. The stage's gate needs a native snapshot of
-  a disk-image volume, which `apfs_systemsnapshot` refuses even as root; the
-  E9 section of `docs/apfs-research.md` lists the other ways, each the
-  owner's choice.
-  Verification walks each snapshot's extent-reference tree inside the
-  snapshot-tree scan, so a refusal in one snapshot's tree ends the scan and
-  damage in later snapshots goes unreported; the snapshot stage should run
-  each snapshot as its own part of `verify.c`'s `parts_run()`.
+  format design's value rule says, waits on E1's volume records.
+  [Low] The snapshot rules a native capture alone decides stay provisional
+  with safe defaults (name folding, nonzero flags, dataless snapshots,
+  record shapes of clones made between snapshots): `e9-snap` needs a
+  snapshot of a disk-image volume, which only a host with SIP and AMFI off
+  can take; the E9 section of `docs/apfs-research.md` lists the ways.
+  [Low] A volume whose snapshots were all deleted but whose object map
+  keeps an empty snapshot tree has its allocated block count checked with
+  that tree's node counted; no capture shows whether macOS counts it, so
+  `e9-snap` should delete its snapshots once and record the count. A
+  refusal in a volume object map's own tree leaves the map's snapshot tree
+  unwalked, so damage there is not reported.
   [Medium] The reference-count sweep counts file extents, so a stream whose
   extents name one block twice counts twice where the format design counts
   distinct streams; no capture holds such a stream.
@@ -168,7 +167,12 @@
   (`sweep`, `attempt`, `cleanup`, the baseline checks) with other prefixes.
   Give the builder a way to add or edit raw records, move the three
   fixtures onto it, and share one fault-sweep driver taking an image
-  builder, a stage table and an oracle.
+  builder, a stage table and an oracle. `volume_snapshots_build` in the
+  generator plans payloads, builds a bootstrap image, rebuilds the
+  historical and live trees over it, injects faults, encodes records and
+  finalizes allocation in one function; split it into named phases so
+  which bootstrap results survive is visible without tracing
+  `volume_image_build`.
 
 * [Low] **APFS fuzz seed reach** (`fuzz/apfs.c`, `test/apfs.c`): the one
   seed uses 4 KiB blocks and single-block objects, so the harness's
@@ -344,6 +348,14 @@
   sync incomplete") or `FSIMG_ECANCELLED`; each passed on rerun. Decide
   whether the per-case deadline should exclude publication sync or scale
   with the host, so a slow fsync is not reported as a case failure.
+
+* [Low] **CLI RSS qualification fails an allocation once on a loaded
+  FreeBSD host** (`test/qualify-cli.rb`, `make check-cli-rss`): at a load
+  average of about 59, the exFAT create of 100000 entries under the 16 MiB
+  budget ended as `FSIMG_ENOMEM` with resource `none`, a raw allocation
+  failure rather than the budget, and passed on rerun. Find which allocation
+  fails under the guard's address-space limit, and whether the limit leaves
+  the host allocator enough headroom.
 
 * [Medium] **FAT integration script into the spec harness**
   (`test/fat-integration.sh.in`, `test/fat.c` `--external` and

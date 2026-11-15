@@ -902,11 +902,11 @@ Object-map flags follow a closed table:
 
 The container map's flags are `0x1` alone in every E1 capture, and the
 volume map's are zero, the crypto-generation flag clear. That flag
-changes no lookup, so it is accepted and ignored. The snapshot count and the most recent snapshot XID must
-agree with the volume's snapshot metadata tree, the map's snapshot tree
-holds a record for exactly the metadata records' XIDs (E9), and the
-container map has no
-snapshots. A nonzero pending revert range is unsupported. The flags the
+changes no lookup, so it is accepted and ignored. The map's snapshot
+count and most recent snapshot XID, and the live volume superblock's
+snapshot count, must agree with the volume's snapshot metadata tree. The
+map's snapshot tree holds a record for exactly the metadata records' XIDs
+(E9), and the container map has no snapshots. A nonzero pending revert range is unsupported. The flags the
 writer emits are a [writer value](#writer-values).
 
 The container object map resolves volume superblocks; a volume's object map
@@ -1807,7 +1807,9 @@ snapshot view `FSIMG_EUNSUPPORTED`, as does a nonzero flag in its
 object-map snapshot record. The volume's extended-metadata OID names
 a virtual object of type `0x1d` with one version per snapshot at that
 snapshot's XID; each of the specimen's 512 versions holds version 1, flags
-zero and its own XID. A snapshot view does not read it. The corpus specimen
+zero and its own XID. Neither a snapshot view nor verification reads it;
+its versions are mapped objects, which verification claims with the object
+map. The corpus specimen
 is for research use only and cannot be a fixture, so the reader's tests
 build snapshot views with the independent test generator from these rules.
 Native fixtures, as E9's `e9-snap` plans, need a way to snapshot a

@@ -53,12 +53,8 @@ static fsimg_status_t	name_check(const unsigned char *, size_t *,
 			    fsimg_error_t *);
 static void		names_setup(apfs_reader_t *);
 static fsimg_status_t	selection_invalid(fsimg_error_t *, const char *);
-static fsimg_status_t	snapshot_copy_read(apfs_reader_t *, uint64_t, uint64_t,
-			    unsigned char *, fsimg_error_t *);
 static int		snapshot_compare(const unsigned char *, size_t,
 			    const unsigned char *, size_t);
-static fsimg_status_t	snapshot_meta_read(apfs_cursor_t *, const char *,
-			    size_t, uint64_t, uint64_t *, fsimg_error_t *);
 static fsimg_status_t	snapshot_name_find(apfs_reader_t *, apfs_cursor_t *,
 			    const char *, size_t, uint64_t *, fsimg_error_t *);
 static fsimg_status_t	snapshot_select(apfs_reader_t *, const char *,
@@ -378,8 +374,9 @@ snapshot_select(apfs_reader_t *apfs, const char *name, unsigned char *window,
     fsimg_error_t *error)
 {
 	apfs_container_t *container = &apfs->container;
+	apfs_snap_meta_val_t meta;
 	apfs_cursor_t cursor;
-	uint64_t xid, copy_oid;
+	uint64_t xid, copy_oid = 0;
 	size_t length;
 	fsimg_status_t status;
 
@@ -400,13 +397,19 @@ snapshot_select(apfs_reader_t *apfs, const char *name, unsigned char *window,
 	    apfs->fs.snapshot_tree_oid, container->xid, NULL);
 	status = snapshot_name_find(apfs, &cursor, name, length, &xid, error);
 	if (status == FSIMG_OK)
-		status = snapshot_meta_read(&cursor, name, length, xid,
-		    &copy_oid, error);
+		status = apfs_snapshot_meta_find(&cursor, name, length, xid,
+		    &meta, error);
+	if (status == FSIMG_OK && meta.flags != 0)
+		status = apfs_unsupported(error, ROLE_SNAPSHOT,
+		    "has unsupported flags");
+	if (status == FSIMG_OK)
+		copy_oid = meta.sblock_oid;
 	apfs_cursor_free(&cursor);
 	if (status == FSIMG_OK)
 		status = map_snapshot_check(apfs, xid, error);
 	if (status == FSIMG_OK)
-		status = snapshot_copy_read(apfs, copy_oid, xid, window, error);
+		status = apfs_snapshot_copy_read(container, &apfs->fs, copy_oid,
+		    xid, window, &apfs->snapshot_fs, error);
 	if (status != FSIMG_OK)
 		return (status);
 	apfs->snapshot = true;
@@ -454,7 +457,10 @@ snapshot_name_find(apfs_reader_t *apfs, apfs_cursor_t *cursor,
 	    !apfs_snap_name_val_decode(record.val, record.val_len, xid))
 		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
 		    "has a malformed name record"));
-	if (*xid == 0 || *xid > apfs->container.xid)
+	if (*xid == 0)
+		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
+		    "names a snapshot of XID zero"));
+	if (*xid > apfs->container.xid)
 		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
 		    "names a snapshot newer than the checkpoint"));
 	return (FSIMG_OK);
@@ -462,15 +468,15 @@ snapshot_name_find(apfs_reader_t *apfs, apfs_cursor_t *cursor,
 
 /*
  * The metadata record at the snapshot's XID, a bare record header as its
- * key: it must exist, carry the name the name record does, and have no
- * flags. It gives the address of the snapshot's superblock copy.
+ * key: it must exist and carry the name the name record does. Its decoded
+ * value, whose name points into the cursor's node, is returned in meta.
  */
-static fsimg_status_t
-snapshot_meta_read(apfs_cursor_t *cursor, const char *name, size_t length,
-    uint64_t xid, uint64_t *copy_oid, fsimg_error_t *error)
+fsimg_status_t
+apfs_snapshot_meta_find(apfs_cursor_t *cursor, const char *name,
+    size_t length, uint64_t xid, apfs_snap_meta_val_t *meta,
+    fsimg_error_t *error)
 {
 	unsigned char key[APFS_JKEY_BYTES];
-	apfs_snap_meta_val_t meta;
 	apfs_record_t record;
 	fsimg_status_t status;
 	bool positioned;
@@ -488,16 +494,12 @@ snapshot_meta_read(apfs_cursor_t *cursor, const char *name, size_t length,
 		return (apfs_corrupt(error, ROLE_SNAPSHOT,
 		    "has no metadata record"));
 	if (record.ghost || record.key_len != APFS_JKEY_BYTES ||
-	    !apfs_snap_meta_val_decode(record.val, record.val_len, &meta))
+	    !apfs_snap_meta_val_decode(record.val, record.val_len, meta))
 		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
 		    "has a malformed metadata record"));
-	if (meta.name_len != length || memcmp(meta.name, name, length) != 0)
+	if (meta->name_len != length || memcmp(meta->name, name, length) != 0)
 		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
 		    "metadata names another snapshot"));
-	if (meta.flags != 0)
-		return (apfs_unsupported(error, ROLE_SNAPSHOT,
-		    "has unsupported flags"));
-	*copy_oid = meta.sblock_oid;
 	return (FSIMG_OK);
 }
 
@@ -551,12 +553,11 @@ map_snapshot_check(apfs_reader_t *apfs, uint64_t xid, fsimg_error_t *error)
  * the one searched, and its incompatible features are the live ones, so
  * the live name rule reads it. Its name, UUID and counts are not checked.
  */
-static fsimg_status_t
-snapshot_copy_read(apfs_reader_t *apfs, uint64_t oid, uint64_t xid,
-    unsigned char *window, fsimg_error_t *error)
+fsimg_status_t
+apfs_snapshot_copy_read(apfs_container_t *container, const apfs_fs_t *live,
+    uint64_t oid, uint64_t xid, unsigned char *window, apfs_fs_t *copy,
+    fsimg_error_t *error)
 {
-	apfs_container_t *container = &apfs->container;
-	apfs_fs_t *copy = &apfs->snapshot_fs;
 	apfs_obj_t header;
 	apfs_ref_t ref;
 	fsimg_status_t status;
@@ -578,7 +579,7 @@ snapshot_copy_read(apfs_reader_t *apfs, uint64_t oid, uint64_t xid,
 	    copy->snapshot_tree_oid != 0)
 		return (apfs_unsupported(error, ROLE_COPY,
 		    "names trees of its own"));
-	if (copy->incompat_features != apfs->fs.incompat_features)
+	if (copy->incompat_features != live->incompat_features)
 		return (apfs_unsupported(error, ROLE_COPY,
 		    "has other incompatible features"));
 	return (FSIMG_OK);
@@ -626,6 +627,12 @@ const apfs_tree_profile_t *
 apfs_snapshot_tree_profile(void)
 {
 	return (&snapshot_tree);
+}
+
+const apfs_tree_profile_t *
+apfs_map_snapshot_tree_profile(void)
+{
+	return (&map_snapshot_tree);
 }
 
 /*

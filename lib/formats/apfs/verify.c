@@ -33,23 +33,27 @@
  *
  * Some blocks may be held by objects no claim describes: those of a reap in
  * progress, of a volume whose superblock names a refused feature, of
- * snapshots, whose claims are provisional (E9), and of structures this pass
- * does not read, such as an EFI jumpstart. Any of them makes the report
+ * snapshots whose flags no capture shows, and of structures this pass does
+ * not read, such as an EFI jumpstart. Any of them makes the report
  * incomplete with FSIMG_EUNSUPPORTED, and the merge is then not made, since
  * it could not tell their blocks from damage; every structure is still read
  * and judged, and damage found outranks the incomplete report.
  *
  * Each volume's filesystem records are reconciled by records.c, which
  * appends every mapped file extent to a stream of its own. The merge sorts
- * the boundaries of those extents and of the live physical-extent records
- * together and sweeps them once: every mapped block lies in a record, and
- * every block of a record is mapped as many times as its reference count.
- * The common walk then visits the selected volume and must reach every
- * directory the filesystem scan counted.
+ * the boundaries of those extents and of the physical-extent records of
+ * every extent-reference tree, the live one and each snapshot's, together
+ * and sweeps them once: every mapped block lies in a record, and every
+ * block of a record is mapped by as many streams as the counts of the
+ * records holding it sum to. The common walk then visits the selected
+ * volume and must reach every directory the filesystem scan counted.
  */
 #define ROLE_VERIFY		"verification"
 #define ROLE_EXTENTREF		"extent-reference tree"
 #define ROLE_SNAPSHOTS		"snapshot metadata tree"
+#define ROLE_SNAPSHOT		"snapshot"
+#define ROLE_MAP		"volume object map"
+#define ROLE_MAP_TREE		"volume object-map snapshot tree"
 #define ROLE_FREE_QUEUE		"free queue"
 #define ROLE_VOLUME		"volume superblock"
 
@@ -82,6 +86,7 @@ typedef enum {
 	SOURCE_SPACEMAN,
 	SOURCE_FREE_QUEUE,
 	SOURCE_EXTENT,
+	SOURCE_SNAPSHOT,
 	SOURCES
 } claim_source_t;
 
@@ -93,7 +98,8 @@ static const char *const source_names[SOURCES] = {
 	[SOURCE_NODE] = "a tree node",
 	[SOURCE_SPACEMAN] = "a space-manager block",
 	[SOURCE_FREE_QUEUE] = "a free-queue entry",
-	[SOURCE_EXTENT] = "a physical extent"
+	[SOURCE_EXTENT] = "a physical extent",
+	[SOURCE_SNAPSHOT] = "a snapshot superblock"
 };
 
 /* A claim: blocks [first, first + count) of its domain; a data claim names
@@ -132,17 +138,28 @@ typedef struct spans {
 	bool		 have_next;
 } spans_t;
 
-/* One snapshot-tree walk: the volume's slot and what the records count. */
+/*
+ * One snapshot metadata walk: a second cursor over the tree, which finds
+ * each name's metadata record, and the metadata and name records counted.
+ * The last metadata record met is held for its snapshot's parts, which
+ * take no argument but the verifier: its XID, superblock and
+ * extent-reference tree. Metadata records ascend by XID, so once the walk
+ * ends xid is the newest snapshot's.
+ */
 typedef struct snapshot_walk {
-	uint64_t	count;
-	uint64_t	newest;
-	uint32_t	volume;
+	apfs_cursor_t	*metadata;
+	uint64_t	 count;
+	uint64_t	 named;
+	uint64_t	 xid;
+	uint64_t	 superblock;
+	uint64_t	 extentref;
 } snapshot_walk_t;
 
 /*
  * The volume whose trees are read: its slot and superblock, its object
- * map's header, what its snapshot tree counts and the blocks its claims
- * cover.
+ * map's header, its snapshot metadata walk, the blocks its claims cover,
+ * and whether its live extent-reference tree holds a record of kind update
+ * or a count not positive, which only a volume with snapshots may.
  */
 typedef struct volume_walk {
 	const apfs_fs_t	*fs;
@@ -150,6 +167,7 @@ typedef struct volume_walk {
 	snapshot_walk_t	 snapshots;
 	uint64_t	 blocks;
 	uint32_t	 index;
+	bool		 released;
 } volume_walk_t;
 
 typedef struct verify {
@@ -159,10 +177,10 @@ typedef struct verify {
 	unsigned char	*window;
 	domain_t	 main;
 	domain_t	 pool;
-	/* The boundaries of every volume's live physical-extent records and,
-	 * once the merge adds them, of the mapped file extents records.c
-	 * finds; those file extents; the selected volume's inodes of several
-	 * names.
+	/* The boundaries of the physical-extent records of every volume's
+	 * extent-reference trees and, once the merge adds them, of the mapped
+	 * file extents records.c finds; those file extents; the selected
+	 * volume's inodes of several names.
 	 */
 	fsimg_stream_t	*extent_events;
 	fsimg_stream_t	*file_extents;
@@ -190,11 +208,12 @@ typedef struct verify {
 } verify_t;
 
 /*
- * A boundary of the extent sweep at a block of a volume: a live
- * physical-extent record opens at its first block and closes at its end,
- * both carrying its reference count, and a file extent starts at its first
- * block and ends at its end. The kinds are numbered so that, at one block,
- * every opening and start sorts before every end and closing.
+ * A boundary of the extent sweep at a block of a volume: a physical-extent
+ * record, of any of the volume's trees, opens at its first block and closes
+ * at its end, both carrying its signed reference count, and a file extent
+ * starts at its first block and ends at its end. The kinds are numbered so
+ * that, at one block, every opening and start sorts before every end and
+ * closing.
  */
 typedef enum {
 	EVENT_OPEN,
@@ -206,7 +225,7 @@ typedef enum {
 typedef struct event {
 	uint64_t	position;
 	uint32_t	volume;
-	uint32_t	refcnt;
+	int32_t		refcnt;
 	uint8_t		kind;
 } event_t;
 
@@ -260,8 +279,21 @@ static fsimg_status_t	extent_record(verify_t *, const apfs_record_t *,
 			    void *, fsimg_error_t *);
 static fsimg_status_t	extents_walk(verify_t *, uint32_t, bool, uint64_t,
 			    fsimg_error_t *);
+static fsimg_status_t	map_snapshot_record(verify_t *, const apfs_record_t *,
+			    void *, fsimg_error_t *);
 static fsimg_status_t	snapshot_record(verify_t *, const apfs_record_t *,
 			    void *, fsimg_error_t *);
+static fsimg_status_t	snapshot_name(verify_t *, const apfs_record_t *,
+			    snapshot_walk_t *, fsimg_error_t *);
+static fsimg_status_t	snapshot_metadata(verify_t *, const apfs_record_t *,
+			    const apfs_jkey_t *, snapshot_walk_t *,
+			    fsimg_error_t *);
+static fsimg_status_t	snapshot_superblock_claims(verify_t *,
+			    fsimg_error_t *);
+static fsimg_status_t	snapshot_extent_claims(verify_t *, fsimg_error_t *);
+static bool		metadata_xid(apfs_cursor_t *, bool, uint64_t *);
+static fsimg_status_t	snapshot_xids_check(verify_t *, const volume_walk_t *,
+			    fsimg_error_t *);
 static fsimg_status_t	queue_record(verify_t *, const apfs_record_t *,
 			    void *, fsimg_error_t *);
 static fsimg_status_t	queue_walk(verify_t *, uint32_t, domain_t *,
@@ -280,7 +312,7 @@ static fsimg_status_t	event_add(fsimg_stream_t *, const event_t *,
 static fsimg_status_t	event_next(fsimg_stream_t *, uint64_t *, event_t *,
 			    bool *, fsimg_error_t *);
 static fsimg_status_t	span_add(fsimg_stream_t *, uint32_t, uint64_t,
-			    uint64_t, uint32_t, event_kind_t, event_kind_t,
+			    uint64_t, int32_t, event_kind_t, event_kind_t,
 			    fsimg_error_t *);
 static fsimg_status_t	extents_bound(verify_t *, fsimg_error_t *);
 static fsimg_status_t	events_sweep(verify_t *, fsimg_stream_t *,
@@ -303,7 +335,7 @@ static fsimg_status_t	pool_queue_claims(verify_t *, fsimg_error_t *);
 static fsimg_status_t	part_end(verify_t *, fsimg_status_t,
 			    const fsimg_error_t *, fsimg_error_t *);
 static fsimg_status_t	parts_run(verify_t *, const part_fn_t *, size_t,
-			    bool *, fsimg_error_t *);
+			    unsigned *, fsimg_error_t *);
 static fsimg_status_t	container_pass(verify_t *, fsimg_error_t *);
 static fsimg_status_t	spans_open(domain_t *, spans_t *, fsimg_error_t *);
 static fsimg_status_t	spans_read(spans_t *, claim_t *, bool *,
@@ -571,14 +603,16 @@ mapped_record(verify_t *v, const apfs_record_t *record, void *arg,
 
 /*
  * Claim an object map, its tree's nodes and the versions it maps, reading
- * it at the checkpoint's XID through a cursor of its own. The decoded
- * header is returned in omap.
+ * it at the checkpoint's XID through a cursor of its own, and the nodes of
+ * its snapshot tree, which only a volume's map has. The decoded header is
+ * returned in omap.
  */
 static fsimg_status_t
 map_walk(verify_t *v, apfs_map_kind_t kind, uint64_t oid, apfs_omap_t *omap,
     fsimg_error_t *error)
 {
 	apfs_container_t *container = v->container;
+	apfs_cursor_t snapshots;
 	apfs_map_t map;
 	fsimg_status_t status;
 
@@ -592,15 +626,46 @@ map_walk(verify_t *v, apfs_map_kind_t kind, uint64_t oid, apfs_omap_t *omap,
 		status = tree_walk(v, &map.cursor, mapped_record,
 		    (void *)map.cursor.profile->role, error);
 	apfs_map_close(&map);
+	if (status != FSIMG_OK || omap->snapshot_tree_oid == 0)
+		return (status);
+	if (omap->snapshot_tree_type != TREE_PHYSICAL)
+		return (apfs_corrupt(error, ROLE_MAP,
+		    "has an invalid snapshot tree"));
+	apfs_cursor_init(&snapshots, container, apfs_map_snapshot_tree_profile(),
+	    APFS_OBJ_PHYSICAL, omap->snapshot_tree_oid, container->xid, NULL);
+	status = tree_walk(v, &snapshots, map_snapshot_record, NULL, error);
+	apfs_cursor_free(&snapshots);
 	return (status);
 }
 
 /*
- * A physical-extent record: a data claim of its volume. Records of one
- * tree never overlap, which keeps same-tree claims out of the merge's
- * folding. A live record is of kind new with a positive count, and is kept
- * for the file-extent join; how a snapshot's tree records them is
- * provisional (E9), so only the kind's range is judged there.
+ * An object-map snapshot record: its XID is joined with the snapshot
+ * metadata records' by snapshot_xids_check(). A nonzero flag, which no
+ * capture shows, makes the report incomplete; the OID is reserved and not
+ * judged.
+ */
+static fsimg_status_t
+map_snapshot_record(verify_t *v, const apfs_record_t *record, void *arg,
+    fsimg_error_t *error)
+{
+	(void)arg;
+	if (record->ghost)
+		return (apfs_corrupt(error, ROLE_MAP_TREE,
+		    "has a malformed record"));
+	if (fsimg_load_le32(record->val) != 0)
+		incomplete_reason(v, ROLE_MAP,
+		    "snapshot record has unsupported flags");
+	return (FSIMG_OK);
+}
+
+/*
+ * A physical-extent record, of the live tree or a snapshot's: a data claim
+ * of its volume, and an opening and a closing of the extent sweep carrying
+ * its signed count. Records of one tree never overlap, which keeps
+ * same-tree claims out of the merge's folding. A block's count is summed
+ * over the volume's trees, so either kind and any count is accepted here;
+ * a live record of kind update or a count not positive is noted for
+ * volume_trees(), since only a volume with snapshots holds one.
  */
 static fsimg_status_t
 extent_record(verify_t *v, const apfs_record_t *record, void *arg,
@@ -618,11 +683,11 @@ extent_record(verify_t *v, const apfs_record_t *record, void *arg,
 	    !apfs_pext_val_decode(record->val, record->val_len, &value))
 		return (apfs_corrupt(error, ROLE_EXTENTREF,
 		    "has a malformed record"));
-	if ((value.kind != PEXT_KIND_NEW && value.kind != PEXT_KIND_UPDATE) ||
-	    (walk->live && (value.kind != PEXT_KIND_NEW ||
-	    value.refcnt <= 0)))
+	if (value.kind != PEXT_KIND_NEW && value.kind != PEXT_KIND_UPDATE)
 		return (apfs_corrupt(error, ROLE_EXTENTREF,
 		    "has a record of an invalid kind or count"));
+	if (walk->live && (value.kind != PEXT_KIND_NEW || value.refcnt <= 0))
+		v->volume->released = true;
 	if (key.oid < walk->end)
 		return (apfs_corrupt(error, ROLE_EXTENTREF,
 		    "has overlapping records"));
@@ -630,10 +695,10 @@ extent_record(verify_t *v, const apfs_record_t *record, void *arg,
 	    .volume = walk->volume, .class = CLAIM_DATA,
 	    .source = SOURCE_EXTENT };
 	status = claim_add(v, &v->main, &claim, error);
-	if (status == FSIMG_OK && walk->live)
+	if (status == FSIMG_OK)
 		status = span_add(v->extent_events, walk->volume, key.oid,
-		    value.length, (uint32_t)value.refcnt, EVENT_OPEN,
-		    EVENT_CLOSE, error);
+		    value.length, value.refcnt, EVENT_OPEN, EVENT_CLOSE,
+		    error);
 	if (status == FSIMG_OK)
 		walk->end = key.oid + value.length;
 	return (status);
@@ -655,52 +720,185 @@ extents_walk(verify_t *v, uint32_t volume, bool live, uint64_t root,
 	return (status);
 }
 
-/*
- * A snapshot-tree record: a metadata record's extent-reference tree is
- * walked; a name record is checked for shape. The snapshot XID either one
- * gives is not above the checkpoint's.
- */
+/* A snapshot metadata tree record: a snapshot's metadata or a name. */
 static fsimg_status_t
 snapshot_record(verify_t *v, const apfs_record_t *record, void *arg,
     fsimg_error_t *error)
 {
-	snapshot_walk_t *walk = arg;
-	apfs_snap_meta_val_t meta;
-	apfs_name_key_t name;
 	apfs_jkey_t key;
-	uint64_t xid;
 
 	if (record->ghost ||
 	    !apfs_jkey_decode(record->key, record->key_len, &key))
 		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
 		    "has a malformed record"));
-	if (key.kind == APFS_J_SNAP_NAME) {
-		if (!apfs_snap_name_key_decode(record->key, record->key_len,
-		    &name) ||
-		    !apfs_snap_name_val_decode(record->val, record->val_len,
-		    &xid))
-			return (apfs_corrupt(error, ROLE_SNAPSHOTS,
-			    "has a malformed name record"));
-		if (xid > v->container->xid)
-			return (apfs_corrupt(error, ROLE_SNAPSHOTS,
-			    "names a snapshot newer than the checkpoint"));
-		return (FSIMG_OK);
-	}
-	if (key.kind != APFS_J_SNAP_METADATA ||
+	if (key.kind == APFS_J_SNAP_NAME)
+		return (snapshot_name(v, record, arg, error));
+	return (snapshot_metadata(v, record, &key, arg, error));
+}
+
+/*
+ * A name record: its key's OID is all ones, and its XID, nonzero and not
+ * above the checkpoint's, keys a metadata record carrying the same name,
+ * found through the walk's second cursor. Names are distinct keys and a
+ * metadata record carries one name, so no two names find one record, and
+ * once the names number the metadata records every snapshot has one.
+ */
+static fsimg_status_t
+snapshot_name(verify_t *v, const apfs_record_t *record, snapshot_walk_t *walk,
+    fsimg_error_t *error)
+{
+	apfs_snap_meta_val_t meta;
+	apfs_name_key_t name;
+	uint64_t xid;
+
+	if (!apfs_snap_name_key_decode(record->key, record->key_len, &name) ||
+	    name.oid != APFS_JKEY_OID_MASK ||
+	    !apfs_snap_name_val_decode(record->val, record->val_len, &xid))
+		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
+		    "has a malformed name record"));
+	if (xid == 0)
+		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
+		    "names a snapshot of XID zero"));
+	if (xid > v->container->xid)
+		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
+		    "names a snapshot newer than the checkpoint"));
+	walk->named++;
+	return (apfs_snapshot_meta_find(walk->metadata, name.name, name.name_len,
+	    xid, &meta, error));
+}
+
+/*
+ * A metadata record: its XID, nonzero and not above the checkpoint's, is
+ * counted, and the snapshot's superblock and extent-reference tree are
+ * each read as a part of their own, so a refusal in one snapshot leaves
+ * the rest of it and every later snapshot read. Nonzero flags, which no
+ * capture shows, make the report incomplete.
+ */
+static fsimg_status_t
+snapshot_metadata(verify_t *v, const apfs_record_t *record,
+    const apfs_jkey_t *key, snapshot_walk_t *walk, fsimg_error_t *error)
+{
+	static const part_fn_t parts[] = { snapshot_superblock_claims,
+	    snapshot_extent_claims };
+	apfs_snap_meta_val_t meta;
+
+	if (key->kind != APFS_J_SNAP_METADATA ||
 	    record->key_len != APFS_JKEY_BYTES ||
 	    !apfs_snap_meta_val_decode(record->val, record->val_len, &meta))
 		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
 		    "has a malformed metadata record"));
-	if (key.oid > v->container->xid)
+	if (key->oid == 0)
+		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
+		    "names a snapshot of XID zero"));
+	if (key->oid > v->container->xid)
 		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
 		    "names a snapshot newer than the checkpoint"));
 	if (meta.extentref_tree_type != TREE_PHYSICAL)
 		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
 		    "names an invalid extent-reference tree"));
+	if (meta.flags != 0)
+		incomplete_reason(v, ROLE_SNAPSHOT, "has unsupported flags");
 	walk->count++;
-	walk->newest = key.oid;
-	return (extents_walk(v, walk->volume, false, meta.extentref_tree_oid,
+	walk->xid = key->oid;
+	walk->superblock = meta.sblock_oid;
+	walk->extentref = meta.extentref_tree_oid;
+	/* A refused part has made the report incomplete, and the checks that
+	 * join the volume's trees need none of a snapshot's parts.
+	 */
+	return (parts_run(v, parts, sizeof(parts) / sizeof(parts[0]), NULL,
 	    error));
+}
+
+/* A snapshot's superblock copy, claimed and read under its own rules. */
+static fsimg_status_t
+snapshot_superblock_claims(verify_t *v, fsimg_error_t *error)
+{
+	const snapshot_walk_t *walk = &v->volume->snapshots;
+	apfs_fs_t copy;
+	fsimg_status_t status;
+
+	status = metadata_claim(v, &v->main, SOURCE_SNAPSHOT, walk->superblock,
+	    1, error);
+	if (status == FSIMG_OK)
+		status = apfs_snapshot_copy_read(v->container, v->volume->fs,
+		    walk->superblock, walk->xid, v->window, &copy, error);
+	return (status);
+}
+
+/* A snapshot's extent-reference tree. */
+static fsimg_status_t
+snapshot_extent_claims(verify_t *v, fsimg_error_t *error)
+{
+	return (extents_walk(v, v->volume->index, false,
+	    v->volume->snapshots.extentref, error));
+}
+
+/*
+ * The XID of the metadata record a snapshot metadata cursor stands on;
+ * false at the end of the metadata records, the cursor's end or the first
+ * name record.
+ */
+static bool
+metadata_xid(apfs_cursor_t *cursor, bool positioned, uint64_t *xid)
+{
+	apfs_record_t record;
+	apfs_jkey_t key;
+
+	if (!positioned)
+		return (false);
+	apfs_cursor_record(cursor, &record);
+	if (!apfs_jkey_decode(record.key, record.key_len, &key) ||
+	    key.kind != APFS_J_SNAP_METADATA)
+		return (false);
+	*xid = key.oid;
+	return (true);
+}
+
+/*
+ * The object map's snapshot tree holds a record for exactly the metadata
+ * records' XIDs. Both trees order their records by XID, and a snapshot
+ * metadata tree's metadata records precede its names, whose OID is all
+ * ones, so the two are walked side by side: each step must find a record
+ * in both with one XID, and both must end together. Their records were
+ * judged by the walks that claimed them.
+ */
+static fsimg_status_t
+snapshot_xids_check(verify_t *v, const volume_walk_t *walk,
+    fsimg_error_t *error)
+{
+	apfs_container_t *container = v->container;
+	uint64_t map_oid = walk->omap.snapshot_tree_oid, xid = 0;
+	apfs_cursor_t metadata, map;
+	apfs_record_t record = { 0 };
+	bool in_metadata, in_map = false, more;
+	fsimg_status_t status;
+
+	apfs_cursor_init(&metadata, container, apfs_snapshot_tree_profile(),
+	    APFS_OBJ_PHYSICAL, walk->fs->snapshot_tree_oid, container->xid,
+	    NULL);
+	apfs_cursor_init(&map, container, apfs_map_snapshot_tree_profile(),
+	    APFS_OBJ_PHYSICAL, map_oid, container->xid, NULL);
+	status = apfs_cursor_first(&metadata, &in_metadata, error);
+	if (status == FSIMG_OK && map_oid != 0)
+		status = apfs_cursor_first(&map, &in_map, error);
+	while (status == FSIMG_OK) {
+		more = metadata_xid(&metadata, in_metadata, &xid);
+		if (!more && !in_map)
+			break;
+		if (in_map)
+			apfs_cursor_record(&map, &record);
+		if (!more || !in_map || fsimg_load_le64(record.key) != xid) {
+			status = apfs_corrupt(error, ROLE_MAP_TREE,
+			    "differs from the snapshot metadata records");
+			break;
+		}
+		status = apfs_cursor_next(&metadata, &in_metadata, error);
+		if (status == FSIMG_OK)
+			status = apfs_cursor_next(&map, &in_map, error);
+	}
+	apfs_cursor_free(&map);
+	apfs_cursor_free(&metadata);
+	return (status);
 }
 
 /*
@@ -750,20 +948,32 @@ volume_map_claims(verify_t *v, fsimg_error_t *error)
 	    &v->volume->omap, error));
 }
 
-/* The volume's snapshot tree and each snapshot's extent-reference tree. */
+/*
+ * The volume's snapshot metadata tree: each snapshot's parts run as its
+ * metadata record is met, and each name record's metadata record is found
+ * through a second cursor over the same tree. Every snapshot has a name.
+ */
 static fsimg_status_t
 snapshot_claims(verify_t *v, fsimg_error_t *error)
 {
-	volume_walk_t *volume = v->volume;
-	apfs_cursor_t cursor;
+	snapshot_walk_t *walk = &v->volume->snapshots;
+	apfs_cursor_t cursor, metadata;
 	fsimg_status_t status;
 
 	apfs_cursor_init(&cursor, v->container, apfs_snapshot_tree_profile(),
-	    APFS_OBJ_PHYSICAL, volume->fs->snapshot_tree_oid, v->container->xid,
-	    NULL);
-	status = tree_walk(v, &cursor, snapshot_record, &volume->snapshots,
-	    error);
+	    APFS_OBJ_PHYSICAL, v->volume->fs->snapshot_tree_oid,
+	    v->container->xid, NULL);
+	apfs_cursor_init(&metadata, v->container, apfs_snapshot_tree_profile(),
+	    APFS_OBJ_PHYSICAL, v->volume->fs->snapshot_tree_oid,
+	    v->container->xid, NULL);
+	walk->metadata = &metadata;
+	status = tree_walk(v, &cursor, snapshot_record, walk, error);
+	walk->metadata = NULL;
+	apfs_cursor_free(&metadata);
 	apfs_cursor_free(&cursor);
+	if (status == FSIMG_OK && walk->named != walk->count)
+		return (apfs_corrupt(error, ROLE_SNAPSHOTS,
+		    "has a snapshot without a name record"));
 	return (status);
 }
 
@@ -804,44 +1014,70 @@ volume_records(verify_t *v, fsimg_error_t *error)
 }
 
 /*
- * A volume's trees: its object map, snapshot tree and extent-reference
- * trees, each a part of its own, so a refusal in one leaves the others
- * read. The checks that join them need all three whole. Without
- * snapshots, the allocated block count must equal the blocks its claims
- * cover, the object-map object, which E3 counts as the one block more,
- * among them; with them that count is provisional (E9), as are their
- * claims, and the report is incomplete.
+ * A volume's trees: its object map with the map's snapshot tree, its
+ * snapshot metadata tree with each snapshot's superblock and
+ * extent-reference tree, its live extent-reference tree and its filesystem
+ * records, each a part of its own, so a refusal in one leaves the others
+ * read. The checks that join the trees need these parts whole, but not a
+ * snapshot's own parts, whose refusal has made the report incomplete; the
+ * live records' rule needs only the snapshot and live extent walks, so
+ * damage it finds outranks a refusal elsewhere in the volume. A
+ * snapshot of a dataless-snapshot volume, whose blocks no capture shows,
+ * makes it incomplete too. The extended-metadata object is read by no
+ * part: its versions are mapped objects, claimed with the object map.
+ *
+ * The object map's snapshot count and newest XID and the live
+ * superblock's snapshot count must all equal the metadata tree's.
+ *
+ * Without snapshots every live physical-extent record is of kind new with
+ * a positive count, and the allocated block count must equal the blocks
+ * the volume's claims cover, the object-map object, which E3 counts as the
+ * one block more, among them. With snapshots, which blocks that count
+ * leaves out is provisional (E9), so it is not checked.
  */
 static fsimg_status_t
 volume_trees(verify_t *v, uint32_t index, const apfs_fs_t *fs,
     fsimg_error_t *error)
 {
-	static const part_fn_t parts[] = { volume_map_claims,
-	    snapshot_claims, live_extent_claims, volume_records };
-	volume_walk_t walk = { .fs = fs, .index = index,
-	    .snapshots = { .volume = index } };
+	enum { MAP, SNAPSHOTS, LIVE, RECORDS, PARTS };
+	static const part_fn_t parts[PARTS] = { [MAP] = volume_map_claims,
+	    [SNAPSHOTS] = snapshot_claims, [LIVE] = live_extent_claims,
+	    [RECORDS] = volume_records };
+	volume_walk_t walk = { .fs = fs, .index = index };
 	fsimg_status_t status;
-	bool whole;
+	unsigned refused;
 
-	if (fs->fext_tree_oid != 0 || fs->integrity_oid != 0 ||
-	    fs->snapshot_ext_oid != 0)
+	if (fs->fext_tree_oid != 0 || fs->integrity_oid != 0)
 		incomplete_reason(v, ROLE_VOLUME,
 		    "holds structures verification does not read");
 	v->volume = &walk;
 	v->tally = &walk.blocks;
-	status = parts_run(v, parts, sizeof(parts) / sizeof(parts[0]),
-	    &whole, error);
+	status = parts_run(v, parts, PARTS, &refused, error);
 	v->tally = NULL;
 	v->volume = NULL;
-	if (status != FSIMG_OK || !whole)
+	if (status != FSIMG_OK)
 		return (status);
+	if ((refused & (1u << SNAPSHOTS | 1u << LIVE)) == 0 &&
+	    walk.snapshots.count == 0 && walk.released)
+		return (apfs_corrupt(error, ROLE_EXTENTREF,
+		    "has a record of an invalid kind or count"));
+	if (refused != 0)
+		return (FSIMG_OK);
 	if (walk.omap.snapshot_count != walk.snapshots.count ||
-	    walk.omap.most_recent_snapshot != walk.snapshots.newest)
-		return (apfs_corrupt(error, "volume object map",
+	    walk.omap.most_recent_snapshot != walk.snapshots.xid)
+		return (apfs_corrupt(error, ROLE_MAP,
 		    "disagrees with the snapshot tree"));
-	if (walk.snapshots.count != 0 || walk.omap.snapshot_tree_oid != 0) {
-		incomplete_reason(v, ROLE_VOLUME, "has snapshots, whose "
-		    "allocation verification does not judge");
+	if (fs->snapshots != walk.snapshots.count)
+		return (apfs_corrupt(error, ROLE_VOLUME,
+		    "snapshot count differs from its snapshot tree"));
+	status = snapshot_xids_check(v, &walk, error);
+	if (status != FSIMG_OK)
+		return (status);
+	if (walk.snapshots.count != 0) {
+		if ((fs->incompat_features &
+		    APFS_FS_INCOMPAT_DATALESS_SNAPSHOTS) != 0)
+			incomplete_reason(v, ROLE_VOLUME,
+			    "has dataless snapshots");
 		return (FSIMG_OK);
 	}
 	if (fs->alloc_blocks != walk.blocks)
@@ -1050,24 +1286,26 @@ part_end(verify_t *v, fsimg_status_t status, const fsimg_error_t *detail,
 
 /*
  * Run parts that depend on nothing an earlier one reads, each ending
- * through part_end(); whole reports whether every part completed
- * unrefused.
+ * through part_end(). refused, unless NULL, receives a mask with bit i set
+ * when part i was refused; count is at most the mask's width.
  */
 static fsimg_status_t
-parts_run(verify_t *v, const part_fn_t *parts, size_t count, bool *whole,
-    fsimg_error_t *error)
+parts_run(verify_t *v, const part_fn_t *parts, size_t count,
+    unsigned *refused, fsimg_error_t *error)
 {
 	fsimg_error_t detail;
 	fsimg_status_t status = FSIMG_OK;
+	unsigned mask = 0;
 
-	*whole = true;
 	for (size_t i = 0; status == FSIMG_OK && i < count; i++) {
 		bzero(&detail, sizeof(detail));
 		status = parts[i](v, &detail);
 		if (status == FSIMG_EUNSUPPORTED)
-			*whole = false;
+			mask |= 1u << i;
 		status = part_end(v, status, &detail, error);
 	}
+	if (refused != NULL)
+		*refused = mask;
 	return (status);
 }
 
@@ -1086,7 +1324,6 @@ container_pass(verify_t *v, fsimg_error_t *error)
 	const apfs_nx_t *nx = &v->container->nx;
 	fsimg_error_t detail;
 	fsimg_status_t status;
-	bool whole;
 
 	if ((nx->features & ~(uint64_t)NX_FEATURES_KNOWN) != 0 ||
 	    nx->ro_compat_features != 0)
@@ -1095,7 +1332,7 @@ container_pass(verify_t *v, fsimg_error_t *error)
 	if (nx->efi_jumpstart != 0)
 		incomplete_reason(v, "container superblock",
 		    "has an EFI jumpstart, which verification does not read");
-	status = parts_run(v, parts, sizeof(parts) / sizeof(parts[0]), &whole,
+	status = parts_run(v, parts, sizeof(parts) / sizeof(parts[0]), NULL,
 	    error);
 	for (uint32_t i = 0; status == FSIMG_OK && i < nx->max_volumes; i++) {
 		if (nx->volume_oids[i] == 0)
@@ -1387,7 +1624,7 @@ event_add(fsimg_stream_t *events, const event_t *event, fsimg_error_t *error)
 
 	fsimg_store_le64(raw, event->position);
 	fsimg_store_le32(raw + 8, event->volume);
-	fsimg_store_le32(raw + 12, event->refcnt);
+	fsimg_store_le32(raw + 12, (uint32_t)event->refcnt);
 	raw[16] = event->kind;
 	return (fsimg_stream_append(events, raw, sizeof(raw), NULL, error));
 }
@@ -1398,6 +1635,7 @@ event_next(fsimg_stream_t *events, uint64_t *offset, event_t *event,
 {
 	unsigned char raw[EVENT_BYTES];
 	size_t length;
+	uint32_t u;
 	fsimg_status_t status;
 
 	*read = false;
@@ -1412,7 +1650,10 @@ event_next(fsimg_stream_t *events, uint64_t *offset, event_t *event,
 		    "finds a malformed scratch record"));
 	event->position = fsimg_load_le64(raw);
 	event->volume = fsimg_load_le32(raw + 8);
-	event->refcnt = fsimg_load_le32(raw + 12);
+	/* The count was stored as its two's-complement bits. */
+	u = fsimg_load_le32(raw + 12);
+	event->refcnt = u <= INT32_MAX ? (int32_t)u :
+	    -(int32_t)(UINT32_MAX - u) - 1;
 	event->kind = raw[16];
 	*read = true;
 	return (FSIMG_OK);
@@ -1426,7 +1667,7 @@ event_next(fsimg_stream_t *events, uint64_t *offset, event_t *event,
  */
 static fsimg_status_t
 span_add(fsimg_stream_t *events, uint32_t volume, uint64_t first,
-    uint64_t count, uint32_t refcnt, event_kind_t opening,
+    uint64_t count, int32_t refcnt, event_kind_t opening,
     event_kind_t closing, fsimg_error_t *error)
 {
 	fsimg_status_t status;
@@ -1443,7 +1684,7 @@ span_add(fsimg_stream_t *events, uint32_t volume, uint64_t first,
 	return (status);
 }
 
-/* Each mapped file extent starts and ends beside the live records. */
+/* Each mapped file extent starts and ends beside the records. */
 static fsimg_status_t
 extents_bound(verify_t *v, fsimg_error_t *error)
 {
@@ -1474,26 +1715,30 @@ extents_bound(verify_t *v, fsimg_error_t *error)
 
 /*
  * Sweep the sorted boundaries. Between two successive boundaries of a
- * volume every block is alike: it lies in the live records opened and not
- * yet closed, whose reference counts add to required, and is mapped by
- * the file extents started and not yet ended, active of them. Every
- * file-extent block lies in a live record, and every block of a record is
- * mapped as many times as its reference count, exactly when active equals
- * required over every such span: a mapped block outside every record has
- * required zero, and a record no stream maps has active zero. Every
- * boundary has its partner, so both totals are zero again past a volume's
- * last boundary, and since openings and starts sort before ends and
- * closings at one block, neither total ever falls below zero. Records of
- * one tree never overlap, so between blocks required is at most one
- * record's count, and while one block's boundaries are applied at most two.
- * A mapped block outside every record is reported first, wherever it
- * lies, as the more specific finding than a count that differs.
+ * volume every block is alike, and three totals describe it: open, the
+ * records opened and not yet closed that hold it; required, the sum of
+ * their signed reference counts; and active, the file extents started and
+ * not yet ended that map it. Every file-extent block lies in a record, and
+ * every block of a record is mapped by as many streams as its summed
+ * count, exactly when open is nonzero wherever active is and active equals
+ * required over every such span. A block only snapshots keep sums to zero, and a sum
+ * below zero matches no stream, so it differs. Every boundary has its
+ * partner, so the totals are zero again past a volume's last boundary,
+ * and since openings and starts sort before ends and closings at one
+ * block, neither open nor active ever falls below zero. Records of one
+ * tree never overlap, so each tree adds at most one record's count
+ * between blocks and two while one block's boundaries are applied; the
+ * sum is still checked against its range, since the number of trees has
+ * no bound but the budgets. A mapped block outside every record is
+ * reported first, wherever it lies, as the more specific finding than a
+ * count that differs.
  */
 static fsimg_status_t
 events_sweep(verify_t *v, fsimg_stream_t *events, fsimg_error_t *error)
 {
 	event_t event, previous = { 0 };
-	uint64_t at = 0, active = 0, required = 0;
+	uint64_t at = 0, active = 0, open = 0;
+	int64_t required = 0, delta;
 	bool read, miscounted = false;
 	fsimg_status_t status;
 
@@ -1508,17 +1753,15 @@ events_sweep(verify_t *v, fsimg_stream_t *events, fsimg_error_t *error)
 		if (status != FSIMG_OK)
 			return (status);
 		if ((event.volume != previous.volume ||
-		    event.position != previous.position) && active != required) {
-			if (required == 0)
+		    event.position != previous.position) &&
+		    (required < 0 || active != (uint64_t)required)) {
+			if (open == 0)
 				return (apfs_corrupt(error, ROLE_VERIFY, "finds a "
 				    "file extent outside every physical-extent "
 				    "record"));
 			miscounted = true;
 		}
 		switch (event.kind) {
-		case EVENT_OPEN:
-			required += event.refcnt;
-			break;
 		case EVENT_START:
 			active++;
 			break;
@@ -1526,7 +1769,17 @@ events_sweep(verify_t *v, fsimg_stream_t *events, fsimg_error_t *error)
 			active--;
 			break;
 		default:
-			required -= event.refcnt;
+			delta = event.kind == EVENT_OPEN ? event.refcnt :
+			    -(int64_t)event.refcnt;
+			if (delta > 0 ? required > INT64_MAX - delta :
+			    required < INT64_MIN - delta)
+				return (apfs_corrupt(error, ROLE_EXTENTREF,
+				    "reference counts sum past their range"));
+			required += delta;
+			if (event.kind == EVENT_OPEN)
+				open++;
+			else
+				open--;
 			break;
 		}
 		previous = event;
@@ -1538,10 +1791,10 @@ events_sweep(verify_t *v, fsimg_stream_t *events, fsimg_error_t *error)
 }
 
 /*
- * The file extents of every volume against the live physical-extent
- * records: the boundaries of both, sorted once and swept, so the join
- * costs the sort of twice their number however many records each file
- * extent spans.
+ * The file extents of every volume against the physical-extent records of
+ * all its trees: the boundaries of both, sorted once and swept, so the
+ * join costs the sort of twice their number however many records each
+ * file extent spans.
  */
 static fsimg_status_t
 extents_merge(verify_t *v, fsimg_error_t *error)

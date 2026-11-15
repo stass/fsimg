@@ -23,7 +23,10 @@ refused as unsupported. `-o snapshot=NAME` opens a snapshot of the selected
 volume by its exact name: `t` and `x` deliver the volume as it stood when the
 snapshot was taken, `i` reports the snapshot's transaction as `read_xid` and
 the snapshot's object counts, and `W` opens the snapshot and then checks the
-live volume. A name the volume does not hold is an invalid argument; a
+live volume. `W` also checks a volume's snapshots: each snapshot's records,
+superblock and extent-reference tree, the object map's snapshot records, and
+every data block's reference count summed over the live and snapshot trees;
+the allocated block count of a volume with snapshots is not checked. A name the volume does not hold is an invalid argument; a
 snapshot with flags set, or one of a volume that keeps dataless snapshots, is
 refused as unsupported.
 
