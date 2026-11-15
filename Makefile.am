@@ -210,7 +210,8 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	test-apfs-write-btree test-apfs-write test-apfs-spaceman \
 	test-apfs-verify \
 	test-hfsplus-salvage test-apfs-salvage \
-	test-hfsplus-verify test-hfsplus-faults test-apfs-faults test-hfsplus-unicode test-hfsplus-write \
+	test-hfsplus-verify test-hfsplus-faults test-apfs-faults \
+	test-apfs-snapshot test-hfsplus-unicode test-hfsplus-write \
 	test-apfs-unicode \
 	test-ifs test-iso9660 test-iso9660-faults test-iso9660-write \
 	test-ifs-write test-cli \
@@ -379,6 +380,9 @@ test_hfsplus_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_apfs_faults_SOURCES = test/apfs-faults.c test/apfs-gen.c \
 	test/apfs-gen.h test/test.h
 test_apfs_faults_LDADD = libfsimg.la $(ZLIB_LIBS)
+test_apfs_snapshot_SOURCES = test/apfs-snapshot.c test/apfs-gen.c \
+	test/apfs-gen.h test/test.h
+test_apfs_snapshot_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_apfs_salvage_SOURCES = test/apfs-salvage.c test/apfs-gen.c \
 	test/apfs-gen.h test/test.h
 test_apfs_salvage_LDADD = libfsimg.la $(ZLIB_LIBS)
@@ -607,6 +611,7 @@ EXTRA_DIST = LICENSE README.md NEWS AGENTS.md CLAUDE.md TODO.md \
 	test/cli/containers_test.rb \
 	test/cli/apm_test.rb \
 	test/cli/apfs_info_test.rb \
+	test/cli/apfs_snapshot_test.rb \
 	test/cli/coordinator_worker_test.rb \
 	test/cli/create_operands_test.rb \
 	test/cli/examples_test.rb \

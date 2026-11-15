@@ -67,11 +67,15 @@
   extended field, which would tighten the APFS rule for a device without it.
   Whether an object-map value flag `0x10` (crypto
   generation) is accepted like the map flag or refused as corrupt, as the
-  format design's value rule says, waits on E1's volume records. The volume object map's snapshot fields
-  are not yet compared with the volume's snapshot tree, which the snapshot stage reads.
-  The snapshot stage's fixtures need a native snapshot of a disk-image
-  volume, which `apfs_systemsnapshot` refuses even as root; the E9 section
-  of `docs/apfs-research.md` lists the other ways, each the owner's choice.
+  format design's value rule says, waits on E1's volume records. Verification
+  does not yet check that the volume object map's snapshot tree holds a
+  record for exactly the snapshot metadata records' XIDs, and it refuses an
+  update record (count -1) in the live extent-reference tree, which E9's
+  corpus specimen holds, so `W` fails there; both belong to the snapshot
+  stage's verification part. The stage's gate needs a native snapshot of
+  a disk-image volume, which `apfs_systemsnapshot` refuses even as root; the
+  E9 section of `docs/apfs-research.md` lists the other ways, each the
+  owner's choice.
   Verification walks each snapshot's extent-reference tree inside the
   snapshot-tree scan, so a refusal in one snapshot's tree ends the scan and
   damage in later snapshots goes unreported; the snapshot stage should run

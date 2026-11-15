@@ -54,9 +54,6 @@
 #define ROLE_VOLUME		"volume superblock"
 
 #define TREE_PHYSICAL		(APFS_OBJ_PHYSICAL | APFS_KIND_BTREE_ROOT)
-/* A snapshot name of at most 255 bytes, stored with its NUL. */
-#define SNAP_NAME_KEY_MAX	(APFS_SNAP_NAME_KEY_BYTES + 256u)
-#define SNAP_META_VAL_MAX	(APFS_SNAP_META_VAL_BYTES + 256u)
 /* The optional features verification knows (specs/design-apfs.md,
  * "Container superblock" and "Volume superblock"); no read-only-compatible
  * feature is known.
@@ -237,10 +234,6 @@ typedef fsimg_status_t (*part_fn_t)(verify_t *, fsimg_error_t *);
 typedef fsimg_status_t (*record_fn_t)(verify_t *, const apfs_record_t *,
 		    void *, fsimg_error_t *);
 
-static int		snapshot_compare(const unsigned char *, size_t,
-			    const unsigned char *, size_t);
-static int		jkey_compare(const unsigned char *, size_t,
-			    const unsigned char *, size_t);
 static int		pair_compare(const unsigned char *, size_t,
 			    const unsigned char *, size_t);
 static int		claim_compare(const void *, size_t, const void *, size_t,
@@ -333,19 +326,10 @@ static fsimg_status_t	allocation_merge(verify_t *, fsimg_error_t *);
 /* The extent-reference tree: bare keys of kind 2, ordered by block. */
 static const apfs_tree_profile_t extentref_tree = {
 	.role = ROLE_EXTENTREF,
-	.compare = jkey_compare,
+	.compare = apfs_jkey_compare,
 	.subtype = APFS_SUBTYPE_EXTENTREF,
 	.key_min = APFS_JKEY_BYTES, .key_max = APFS_JKEY_BYTES,
 	.val_min = APFS_PEXT_VAL_BYTES, .val_max = APFS_PEXT_VAL_BYTES
-};
-
-/* The snapshot metadata tree: metadata records by XID, then names. */
-static const apfs_tree_profile_t snapshot_tree = {
-	.role = ROLE_SNAPSHOTS,
-	.compare = snapshot_compare,
-	.subtype = APFS_SUBTYPE_SNAPMETA,
-	.key_min = APFS_JKEY_BYTES, .key_max = SNAP_NAME_KEY_MAX,
-	.val_min = APFS_SNAP_NAME_VAL_BYTES, .val_max = SNAP_META_VAL_MAX
 };
 
 /* A free queue: (XID, block) keys and a block count, or a ghost for one. */
@@ -357,49 +341,6 @@ static const apfs_tree_profile_t queue_tree = {
 	.val_min = APFS_FQ_VAL_BYTES, .val_max = APFS_FQ_VAL_BYTES,
 	.fixed_key = APFS_FQ_KEY_BYTES, .fixed_val = APFS_FQ_VAL_BYTES
 };
-
-/* Keys led by a record header order by its OID (low 60 bits), then kind. */
-static int
-jkey_compare(const unsigned char *a, size_t alen, const unsigned char *b,
-    size_t blen)
-{
-	uint64_t x = fsimg_load_le64(a), y = fsimg_load_le64(b);
-	uint64_t xo = x & APFS_JKEY_OID_MASK, yo = y & APFS_JKEY_OID_MASK;
-
-	(void)alen;
-	(void)blen;
-	if (xo != yo)
-		return (xo < yo ? -1 : 1);
-	x >>= APFS_JKEY_KIND_SHIFT;
-	y >>= APFS_JKEY_KIND_SHIFT;
-	return (x < y ? -1 : x > y);
-}
-
-/*
- * Snapshot keys order as record headers, then name records by their stored
- * name bytes with the terminating NUL, as attribute names do; that names
- * of different lengths compare this way is provisional (E9). A name key
- * shorter than its fixed part orders before every name of its header.
- */
-static int
-snapshot_compare(const unsigned char *a, size_t alen, const unsigned char *b,
-    size_t blen)
-{
-	const size_t at = APFS_SNAP_NAME_KEY_BYTES;
-	size_t common;
-	int order;
-
-	order = jkey_compare(a, alen, b, blen);
-	if (order != 0 || (alen <= at && blen <= at))
-		return (order);
-	if (alen <= at || blen <= at)
-		return (alen <= at ? -1 : 1);
-	common = (alen < blen ? alen : blen) - at;
-	order = memcmp(a + at, b + at, common);
-	if (order != 0)
-		return (order < 0 ? -1 : 1);
-	return (alen < blen ? -1 : alen > blen);
-}
 
 /* Two u64 integers, the first deciding. */
 static int
@@ -817,7 +758,7 @@ snapshot_claims(verify_t *v, fsimg_error_t *error)
 	apfs_cursor_t cursor;
 	fsimg_status_t status;
 
-	apfs_cursor_init(&cursor, v->container, &snapshot_tree,
+	apfs_cursor_init(&cursor, v->container, apfs_snapshot_tree_profile(),
 	    APFS_OBJ_PHYSICAL, volume->fs->snapshot_tree_oid, v->container->xid,
 	    NULL);
 	status = tree_walk(v, &cursor, snapshot_record, &volume->snapshots,
@@ -1804,6 +1745,8 @@ apfs_verify(fsimg_reader_t *reader, unsigned flags,
 	fsimg_status_t status;
 
 	reader->session.progress.phase = "APFS verification";
+	/* Verification judges the live volume whatever snapshot= selects. */
+	apfs_volume_live(apfs);
 	v = fsimg_alloc(reader->ctx, sizeof(*v), &detail);
 	if (v == NULL) {
 		if (error != NULL)

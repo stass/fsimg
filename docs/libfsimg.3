@@ -274,9 +274,17 @@ for the duration of
 .Fn fsimg_reader_open ,
 and one that is empty, longer than 255 bytes or not valid UTF-8 is
 FSIMG_EINVAL before detection; the reader keeps its own copy.
-APFS names FSIMG_SETTING_VOLUME_INDEX; no supported format names
-FSIMG_SETTING_SNAPSHOT, so a non-NULL snapshot is FSIMG_EINVAL for every
-format, and a set index for every format but APFS.
+APFS names both; every other format names neither, so a set index or a
+non-NULL snapshot is FSIMG_EINVAL for it.
+An APFS snapshot is found by its exact name bytes, and a name the selected
+volume does not hold is FSIMG_EINVAL; the reader then delivers the volume as
+it stood when the snapshot was taken, the volume information reports the
+snapshot's transaction as the read_xid detail and the snapshot's object
+counts, and
+.Fn fsimg_verify
+on such a reader checks the live volume.
+A snapshot with flags set, or one of a volume that keeps dataless snapshots,
+is FSIMG_EUNSUPPORTED.
 Without the setting an APFS container holding one volume opens it, and one
 holding several or none is FSIMG_EINVAL.
 A stack naming a filesystem must fix the volume's location:

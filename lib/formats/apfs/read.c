@@ -160,7 +160,11 @@ detail_add(fsimg_volume_info_t *info, const char *name, uint64_t value)
  * N * B of the selected checkpoint, whatever the slice holds, so the reader
  * core derives the missing bytes of a truncated container. The label is
  * the validated volume name, the only image text reported. A sealed volume
- * is refused while opening, so sealed is zero.
+ * is refused while opening, so sealed is zero. In a snapshot view the
+ * object counts, snapshot count and allocated blocks are the snapshot
+ * superblock copy's, the volume as it stood, and read_xid is the
+ * snapshot's; the identity comes from the live superblock, whose name the
+ * volume rules validated.
  */
 static void
 report_info(fsimg_reader_t *reader)
@@ -168,6 +172,7 @@ report_info(fsimg_reader_t *reader)
 	const apfs_reader_t *apfs = reader->driver;
 	const apfs_container_t *container = &apfs->container;
 	const apfs_fs_t *fs = &apfs->fs;
+	const apfs_fs_t *view = apfs->snapshot ? &apfs->snapshot_fs : fs;
 	fsimg_volume_info_t *info = &reader->info;
 
 	strcpy(info->format, "apfs");
@@ -196,11 +201,11 @@ report_info(fsimg_reader_t *reader)
 	    APFS_FS_INCOMPAT_NORM_INSENSITIVE) != 0);
 	detail_add(info, "checkpoint_xid", container->xid);
 	detail_add(info, "read_xid", apfs->read_xid);
-	detail_add(info, "files", fs->files);
-	detail_add(info, "directories", fs->directories);
-	detail_add(info, "symlinks", fs->symlinks);
-	detail_add(info, "other_objects", fs->other_objects);
-	detail_add(info, "snapshots", fs->snapshots);
-	detail_add(info, "volume_blocks", fs->alloc_blocks);
+	detail_add(info, "files", view->files);
+	detail_add(info, "directories", view->directories);
+	detail_add(info, "symlinks", view->symlinks);
+	detail_add(info, "other_objects", view->other_objects);
+	detail_add(info, "snapshots", view->snapshots);
+	detail_add(info, "volume_blocks", view->alloc_blocks);
 	detail_add(info, "sealed", 0);
 }

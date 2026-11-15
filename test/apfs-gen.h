@@ -629,7 +629,7 @@ uint32_t apfs_gen_name_hash(const uint32_t *, size_t);
 /*
  * Owned, bounded fixture volume with 4096-byte blocks and 1024 blocks.
  * At most 64 entries (including root and private), 256 total records and
- * 768 payload blocks shared by all files. Inodes, directory records, stream
+ * 768 blocks shared by payloads and snapshot objects. Inodes, directory records, stream
  * IDs, attributes and each file extent count toward the record cap; splitting
  * extents can exhaust it before the entry or payload caps. Build returns false
  * if the records or metadata trees do not fit their reserved regions.
@@ -644,6 +644,44 @@ enum {
 	APFS_GEN_KIND_FILE_EXTENT = 8,
 	APFS_GEN_KIND_DREC = 9
 };
+
+/* Snapshot inputs are copied; flags and omissions create refusal fixtures. */
+typedef struct apfs_gen_snapshot {
+	const char *name;
+	/* NULL keeps the snapshot name; otherwise copy this metadata name. */
+	const char *metadata_name;
+	/* With override_name_xid, emit name_xid instead of the creation XID. */
+	uint64_t name_xid;
+	bool override_name_xid;
+	/* Keep key bytes intact but store a length one byte too short. */
+	bool corrupt_name_length;
+	uint32_t meta_flags;
+	uint32_t omap_flags;
+	bool omit_metadata;
+	bool omit_omap_record;
+} apfs_gen_snapshot_t;
+
+/* Physical location of a frozen view, available after a successful build. */
+typedef struct apfs_gen_snapshot_info {
+	uint64_t xid;
+	uint64_t superblock;
+} apfs_gen_snapshot_info_t;
+
+/* Freeze current entries under a unique 1..255 byte name; at most 8 snapshots. */
+bool	apfs_gen_volume_snapshot(apfs_gen_volume_t *, const apfs_gen_snapshot_t *);
+/* Split both snapshot trees into leaves of 1..8 records; zero: one leaf. */
+bool	apfs_gen_volume_snapshot_layout(apfs_gen_volume_t *, uint16_t);
+/* Replace a regular file's copied payload in subsequent views. NULL: holes. */
+bool	apfs_gen_volume_rewrite(apfs_gen_volume_t *, uint64_t,
+    const unsigned char *, size_t);
+/* Remove an existing non-directory entry from subsequent views. */
+bool	apfs_gen_volume_remove(apfs_gen_volume_t *, uint64_t);
+/* After build, fetch creation-order XID and physical superblock address. */
+bool	apfs_gen_volume_snapshot_info(const apfs_gen_volume_t *, size_t,
+    apfs_gen_snapshot_info_t *);
+/* After build, fetch live superblock, metadata root and omap snapshot root. */
+bool	apfs_gen_volume_snapshot_roots(const apfs_gen_volume_t *, uint64_t *,
+    uint64_t *, uint64_t *);
 
 /* Allocate a volume containing root (OID 2) and private (OID 3), or NULL. */
 apfs_gen_volume_t *apfs_gen_volume_new(void);

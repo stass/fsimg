@@ -57,6 +57,7 @@
 #define APFS_SUBTYPE_FSTREE		14u	/* a volume's filesystem tree */
 #define APFS_SUBTYPE_EXTENTREF		15u	/* a volume's extent-reference tree */
 #define APFS_SUBTYPE_SNAPMETA		16u	/* a volume's snapshot tree */
+#define APFS_SUBTYPE_OMAP_SNAPSHOT	19u	/* an object map's snapshot tree */
 
 /* The container superblock. APFS_NX_BYTES ends its last decoded field. */
 #define APFS_NX_MAGIC			0x4253584eu	/* "NXSB" */
@@ -84,6 +85,9 @@
 #define APFS_OMAP_BYTES			88u
 #define APFS_OMAP_KEY_BYTES		16u
 #define APFS_OMAP_VAL_BYTES		16u
+/* An object map's snapshot record: the snapshot's XID; flags, padding, OID. */
+#define APFS_OMAP_SNAP_KEY_BYTES	8u
+#define APFS_OMAP_SNAP_VAL_BYTES	16u
 
 #define APFS_OMAP_MANUALLY_MANAGED	0x01u	/* object-map flags */
 #define APFS_OMAP_ENCRYPTING		0x02u
@@ -1278,6 +1282,9 @@ bool		apfs_name_assigned(const char *, size_t);
 #define APFS_SNAP_META_VAL_BYTES	50u
 #define APFS_SNAP_NAME_KEY_BYTES	10u
 #define APFS_SNAP_NAME_VAL_BYTES	8u
+/* The longest snapshot-tree key and value: a name of 255 bytes and its NUL. */
+#define APFS_SNAP_NAME_KEY_MAX		(APFS_SNAP_NAME_KEY_BYTES + 256u)
+#define APFS_SNAP_META_VAL_MAX		(APFS_SNAP_META_VAL_BYTES + 256u)
 
 /* A file-information key packs a type (high 8 bits) and a block address. */
 #define APFS_FILE_INFO_KEY_BYTES	16u
@@ -1487,6 +1494,11 @@ typedef struct apfs_file_info_val {
  * or data span from the pointer its record holds.
  */
 bool	apfs_jkey_decode(const unsigned char *, size_t, apfs_jkey_t *);
+/* Keys of at least APFS_JKEY_BYTES ordered by their headers alone: by OID
+ * (the low 60 bits), then kind. A tree profile's comparator.
+ */
+int	apfs_jkey_compare(const unsigned char *, size_t,
+	    const unsigned char *, size_t);
 bool	apfs_jkey_encode(unsigned char *, size_t, const apfs_jkey_t *);
 bool	apfs_bare_key_decode(const unsigned char *, size_t, uint8_t,
 	    uint64_t *);
@@ -1730,10 +1742,18 @@ typedef struct apfs_window apfs_window_t;
  * (volume.c), given an opened container, reads the space manager's free
  * count, opens the container object map, selects the volume the read
  * options name, validates its superblock and opens its object map, all at
- * the read XID, reading through window, at least B bytes, and sets up the
- * volume's name rule and its filesystem-tree cursors, whose windows are
- * charged when first used; on failure the caller closes the state with
+ * the checkpoint XID, reading through window, at least B bytes; with the
+ * snapshot option it selects that snapshot (specs/design-apfs.md,
+ * "Snapshots"), setting snapshot, snapshot_fs and the snapshot's XID as
+ * read_xid. It then sets up the volume's name rule, from the live
+ * superblock fs, and the filesystem-tree cursors of the view, whose windows
+ * are charged when first used; on failure the caller closes the state with
  * apfs_volume_close(), which also accepts a zeroed state.
+ * apfs_volume_live(apfs) returns an untouched reader to the live view, for
+ * verification, which walks the live volume whatever snapshot= selects:
+ * snapshot becomes false, read_xid the checkpoint's and the cursors the
+ * live root's. The volume information, reported at open, keeps describing
+ * the view the reader was opened at.
  *
  * lookup serves inode and attribute lookups, scan a directory's records and
  * content a file's extents; only resolve moves content.
@@ -1754,6 +1774,9 @@ typedef struct apfs_window apfs_window_t;
  * directory-record keys. apfs_inode_min(fs) is its least ordinary inode
  * number, which the volume-group inode space raises in a System volume.
  *
+ * apfs_snapshot_tree_profile() is the snapshot metadata tree's profile:
+ * metadata records keyed by XID, then name records by their name bytes.
+ *
  * apfs_verify() (verify.c) is the reader's structural verification.
  */
 typedef struct apfs_reader {
@@ -1764,17 +1787,19 @@ typedef struct apfs_reader {
 	apfs_cursor_t	 scan;
 	apfs_cursor_t	 content;
 	apfs_fs_t	 fs;		/* the selected volume's superblock */
+	apfs_fs_t	 snapshot_fs;	/* with snapshot=, the snapshot's copy */
 	apfs_current_t	 current;
 	apfs_window_t	*window;	/* compress.c, made on first use */
 	apfs_name_form_t form;
 	apfs_name_rule_t rule;
-	uint64_t	 read_xid;
+	uint64_t	 read_xid;	/* the view's lookup XID */
 	uint64_t	 free_blocks;	/* the space manager's main device */
 	uint64_t	 inode_min;	/* the least ordinary inode number */
 	uint32_t	 volume_index;
 	uint32_t	 volume_count;	/* nonzero slots of the array */
 	size_t		 label_bytes;	/* the name without its terminator */
 	bool		 hashed;	/* directory records use hashed keys */
+	bool		 snapshot;	/* opened at snapshot_fs's view */
 } apfs_reader_t;
 
 extern const fsimg_reader_ops_t fsimg_apfs_reader_ops;
@@ -1785,6 +1810,8 @@ void		apfs_volume_close(apfs_reader_t *);
 fsimg_status_t	apfs_volume_read(apfs_container_t *, apfs_map_t *, uint32_t,
 		    uint64_t, unsigned char *, apfs_fs_t *, size_t *,
 		    fsimg_error_t *);
+void		apfs_volume_live(apfs_reader_t *);
+const apfs_tree_profile_t *apfs_snapshot_tree_profile(void);
 apfs_name_rule_t apfs_volume_rule(const apfs_fs_t *);
 uint64_t	apfs_inode_min(const apfs_fs_t *);
 fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,

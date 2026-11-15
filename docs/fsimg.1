@@ -99,8 +99,17 @@ Extended attributes are neither listed nor extracted.
 checks the container and the selected volume: the space manager, the object
 maps, the trees, link and child counts, and sibling names that are equal under
 the volume's comparison.
-Encrypted, Fusion and sealed volumes are refused as not supported, and a
-snapshot cannot be selected.
+Encrypted, Fusion and sealed volumes are refused as not supported.
+.Ar snapshot=NAME
+reads the selected volume as it stood when that snapshot was taken:
+.Cm i
+reports the snapshot's transaction as read_xid and the snapshot's object
+counts, and
+.Cm W
+opens the named snapshot, so a name the volume does not hold still fails,
+then checks the live volume.
+A snapshot with flags set, or one of a volume that keeps dataless snapshots,
+is refused as not supported.
 A created APFS container holds one volume of 4096-byte blocks and stores
 files, directories, symbolic links and FIFOs with owner, mode and all four
 timestamps; it writes no holes, clones, compression, extended attributes, hard
@@ -334,9 +343,11 @@ which forces the GPT sector size and requires gpt in
 .Fl F ,
 are accepted.
 APFS accepts
-.Ar volume= ;
-no supported format accepts
-.Ar snapshot= .
+.Ar volume=
+and
+.Ar snapshot= ;
+a snapshot name the selected volume does not hold is refused as an invalid
+argument.
 A format refuses a setting it does not accept at any value, an explicit
 .Ar volume=0
 included, once detection or

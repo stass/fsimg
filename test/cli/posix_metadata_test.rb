@@ -58,7 +58,7 @@ class CliTest < Minitest::Test
     assert_equal(1023, apfs.fetch("max_link_target_bytes"))
     assert_equal(255, apfs.fetch("max_label_bytes"))
     assert_equal(0x4002, apfs.fetch("write_settings"))
-    assert_equal(0x1000, apfs.fetch("read_settings"))
+    assert_equal(0x3000, apfs.fetch("read_settings"))
     formats.each do |name, record|
       expected_settings = case name
       when "fat12", "fat16" then 0x820

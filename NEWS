@@ -19,7 +19,13 @@ object maps, the trees, link and child counts, and sibling names that are equal
 under the volume's comparison. A damaged block-0 magic opens only with
 `--force`, and a truncated container whose missing tail nothing read
 references reports the missing bytes. Encrypted, Fusion and sealed volumes are
-refused as unsupported, and snapshots cannot be selected.
+refused as unsupported. `-o snapshot=NAME` opens a snapshot of the selected
+volume by its exact name: `t` and `x` deliver the volume as it stood when the
+snapshot was taken, `i` reports the snapshot's transaction as `read_xid` and
+the snapshot's object counts, and `W` opens the snapshot and then checks the
+live volume. A name the volume does not hold is an invalid argument; a
+snapshot with flags set, or one of a volume that keeps dataless snapshots, is
+refused as unsupported.
 
 `c -F apfs` creates a container with one volume of 4096-byte blocks, also
 inside `gpt` and `gpt/dmg`. Automatic sizing picks the smallest container that
@@ -285,9 +291,8 @@ by its slot index, and one snapshot of it, by its exact name of 1 to 255 bytes o
 takes them as the read options `volume_index`, with its presence flag
 `volume_index_set` so that index 0 is a request, and `snapshot`, under the
 new `FSIMG_SETTING_VOLUME_INDEX` and `FSIMG_SETTING_SNAPSHOT` bits of
-`read_settings`, and the worker job carries them. APFS accepts `volume=`;
-no supported format accepts `snapshot=`, and a format refuses a setting it
-does not accept once detected, before the worker starts when `-F` names the
+`read_settings`, and the worker job carries them. APFS accepts both, and a
+format refuses a setting it does not accept once detected, before the worker starts when `-F` names the
 format; a malformed snapshot name is
 refused before the image is opened.
 

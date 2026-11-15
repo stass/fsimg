@@ -1450,12 +1450,29 @@ typedef struct volume_record {
 	uint16_t value_size;
 } volume_record_t;
 
+#define VOLUME_SNAPSHOTS 8u
+
+typedef struct volume_snapshot {
+	apfs_gen_volume_t *view;
+	apfs_gen_snapshot_t options;
+	char name[256];
+	char metadata_name[256];
+	apfs_gen_snapshot_info_t info;
+} volume_snapshot_t;
+
 struct apfs_gen_volume {
+	volume_snapshot_t snapshots[VOLUME_SNAPSHOTS];
+	size_t snapshot_count;
+	uint64_t data_base;
+	uint64_t tree_base;
+	uint64_t omap_snapshot_root;
+
 	volume_entry_t entries[VOLUME_ENTRIES];
 	volume_record_t records[VOLUME_RECORDS];
 	size_t entry_count;
 	size_t record_count;
 	uint64_t attribute_oid;
+	uint16_t snapshot_records_per_leaf;
 	uint16_t records_per_leaf;
 	uint16_t extent_blocks;
 	bool built;
@@ -1475,6 +1492,9 @@ static bool volume_node_build(unsigned char *, uint64_t, uint32_t,
     const apfs_gen_record_t *, uint32_t);
 static bool volume_allocation_build(unsigned char *, uint64_t, uint64_t);
 static bool volume_image_build(apfs_gen_volume_t *, unsigned char *);
+static bool volume_snapshots_build(apfs_gen_volume_t *, unsigned char *);
+static bool volume_snapshot_tree_build(unsigned char *, apfs_gen_node_t,
+    uint16_t, uint64_t *);
 
 static uint64_t
 volume_integer(const unsigned char *raw, unsigned width)
@@ -1495,6 +1515,7 @@ apfs_gen_volume_new(void)
 	if (volume == NULL)
 		return (NULL);
 	volume->records_per_leaf = 8;
+	volume->tree_base = VOLUME_TREE_BASE;
 	if (!apfs_gen_volume_directory(volume, 2, 1, "root"))
 		goto fail;
 	if (!apfs_gen_volume_directory(volume, 3, 1, "private"))
@@ -1512,6 +1533,8 @@ apfs_gen_volume_free(apfs_gen_volume_t *volume)
 		return;
 	for (size_t i = 0; i < volume->entry_count; i++)
 		free(volume->entries[i].data);
+	for (size_t i = 0; i < volume->snapshot_count; i++)
+		apfs_gen_volume_free(volume->snapshots[i].view);
 	free(volume);
 }
 
@@ -1575,6 +1598,131 @@ apfs_gen_volume_file(apfs_gen_volume_t *volume, uint64_t oid,
 		free(entry.data);
 		return (false);
 	}
+	return (true);
+}
+
+bool
+apfs_gen_volume_rewrite(apfs_gen_volume_t *volume, uint64_t oid,
+    const unsigned char *data, size_t size)
+{
+	unsigned char *copy = NULL;
+
+	if (volume->built || size >
+	    (VOLUME_BLOCKS - VOLUME_DATA_BASE) * VOLUME_BLOCK)
+		return (false);
+	for (size_t i = 0; i < volume->entry_count; i++) {
+		volume_entry_t *entry = &volume->entries[i];
+
+		if (entry->oid != oid || entry->directory)
+			continue;
+		if (data != NULL && size != 0) {
+			copy = malloc(size);
+			if (copy == NULL)
+				return (false);
+			bcopy(data, copy, size);
+		}
+		free(entry->data);
+		entry->data = copy;
+		entry->size = size;
+		return (true);
+	}
+	return (false);
+}
+
+bool
+apfs_gen_volume_remove(apfs_gen_volume_t *volume, uint64_t oid)
+{
+	if (volume->built)
+		return (false);
+	for (size_t i = 0; i < volume->entry_count; i++) {
+		if (volume->entries[i].oid != oid || volume->entries[i].directory)
+			continue;
+		free(volume->entries[i].data);
+		volume->entry_count--;
+		memmove(&volume->entries[i], &volume->entries[i + 1],
+		    (volume->entry_count - i) * sizeof(volume->entries[0]));
+		if (volume->attribute_oid == oid)
+			volume->attribute_oid = 0;
+		return (true);
+	}
+	return (false);
+}
+
+bool
+apfs_gen_volume_snapshot(apfs_gen_volume_t *volume,
+    const apfs_gen_snapshot_t *options)
+{
+	volume_snapshot_t *snapshot;
+	apfs_gen_volume_t *view;
+	size_t length = strlen(options->name);
+
+	if (volume->built || volume->snapshot_count == VOLUME_SNAPSHOTS ||
+	    length == 0 || length > 255 ||
+	    (options->metadata_name != NULL &&
+	    strlen(options->metadata_name) > 255))
+		return (false);
+	for (size_t i = 0; i < volume->snapshot_count; i++) {
+		if (strcmp(options->name, volume->snapshots[i].name) == 0)
+			return (false);
+	}
+	view = calloc(1, sizeof(*view));
+	if (view == NULL)
+		return (false);
+	view->records_per_leaf = volume->records_per_leaf;
+	view->extent_blocks = volume->extent_blocks;
+	view->attribute_oid = volume->attribute_oid;
+	for (size_t i = 0; i < volume->entry_count; i++) {
+		const volume_entry_t *entry = &volume->entries[i];
+		bool added = entry->directory ?
+		    apfs_gen_volume_directory(view, entry->oid, entry->parent,
+		    entry->name) : apfs_gen_volume_file(view, entry->oid,
+		    entry->parent, entry->name, entry->data, (size_t)entry->size);
+
+		if (!added) {
+			apfs_gen_volume_free(view);
+			return (false);
+		}
+	}
+	snapshot = &volume->snapshots[volume->snapshot_count++];
+	snapshot->view = view;
+	snapshot->options = *options;
+	bcopy(options->name, snapshot->name, length + 1);
+	snapshot->options.name = snapshot->name;
+	if (options->metadata_name != NULL) {
+		strcpy(snapshot->metadata_name, options->metadata_name);
+		snapshot->options.metadata_name = snapshot->metadata_name;
+	}
+	return (true);
+}
+
+bool
+apfs_gen_volume_snapshot_layout(apfs_gen_volume_t *volume, uint16_t count)
+{
+	if (volume->built || count > 8)
+		return (false);
+	volume->snapshot_records_per_leaf = count;
+	return (true);
+}
+
+bool
+apfs_gen_volume_snapshot_info(const apfs_gen_volume_t *volume, size_t index,
+    apfs_gen_snapshot_info_t *info)
+{
+	if (!volume->built || index >= volume->snapshot_count)
+		return (false);
+	*info = volume->snapshots[index].info;
+	return (true);
+}
+
+bool
+apfs_gen_volume_snapshot_roots(const apfs_gen_volume_t *volume,
+    uint64_t *superblock, uint64_t *metadata, uint64_t *omap)
+{
+	if (!volume->built)
+		return (false);
+	*superblock = VOLUME_SUPERBLOCK;
+	*metadata = VOLUME_SNAPSHOT_TREE;
+	*omap = volume->omap_snapshot_root;
 	return (true);
 }
 
@@ -1766,7 +1914,8 @@ volume_record_compare(const void *left, const void *right)
 static bool
 volume_records_build(apfs_gen_volume_t *volume)
 {
-	uint64_t physical = VOLUME_DATA_BASE, blocks;
+	uint64_t physical = volume->data_base == 0 ? VOLUME_DATA_BASE :
+	    volume->data_base, blocks;
 
 	volume->record_count = 0;
 	for (size_t i = 0; i < volume->entry_count; i++) {
@@ -1996,6 +2145,333 @@ volume_image_build(apfs_gen_volume_t *volume, unsigned char *image)
 	return (volume_allocation_build(image, tree_blocks, map_blocks));
 }
 
+/* Order map versions by integers, independently of their byte encoding. */
+static int
+volume_version_compare(const void *left, const void *right)
+{
+	const apfs_gen_omap_record_t *a = left, *b = right;
+
+	if (a->key.oid != b->key.oid)
+		return (a->key.oid < b->key.oid ? -1 : 1);
+	return (a->key.xid < b->key.xid ? -1 : a->key.xid > b->key.xid);
+}
+
+static int
+volume_snapshot_name_compare(const void *left, const void *right)
+{
+	const volume_snapshot_t *const *a = left, *const *b = right;
+
+	return (strcmp((*a)->name, (*b)->name));
+}
+
+/* Emit one complete view and redirect its root mapping to the shared OID. */
+static bool
+volume_view_tree_build(apfs_gen_volume_t *view, unsigned char *image,
+    apfs_gen_fs_tree_t tree, apfs_gen_omap_record_t *maps, size_t capacity,
+    uint64_t shared_root, uint64_t *blocks)
+{
+	apfs_gen_record_t records[VOLUME_RECORDS];
+	uint64_t root;
+	unsigned char *raw;
+
+	for (size_t i = 0; i < view->record_count; i++) {
+		const volume_record_t *r = &view->records[i];
+
+		records[i] = (apfs_gen_record_t){ .key = r->key,
+		    .key_size = r->key_size, .value = r->value,
+		    .value_size = r->value_size };
+	}
+	tree.records = records;
+	if (!apfs_gen_fs_tree_build(image, VOLUME_BYTES, &tree, maps,
+	    capacity, &root, blocks) || tree.base + *blocks > VOLUME_DATA_BASE)
+		return (false);
+	/* Roots have no parent reference; changing their OID preserves every
+	 * child reference and gives every view the live root's identity. */
+	raw = image + (tree.base + *blocks - 1) * VOLUME_BLOCK;
+	put_le(raw + 8, shared_root, 8);
+	if (!apfs_gen_seal(raw, VOLUME_BLOCK))
+		return (false);
+	maps[*blocks - 1].key.oid = shared_root;
+	view->tree_base = tree.base;
+	for (size_t i = 0; i < view->entry_count; i++) {
+		const volume_entry_t *entry = &view->entries[i];
+
+		if (entry->data != NULL)
+			bcopy(entry->data, image + entry->physical * VOLUME_BLOCK,
+			    (size_t)entry->size);
+	}
+	return (true);
+}
+
+/* Copy the volume identity, replacing counts and physical snapshot fields. */
+static bool
+volume_snapshot_superblock_build(const volume_snapshot_t *snapshot,
+    unsigned char *image, const unsigned char *live, size_t index,
+    uint64_t tree_blocks)
+{
+	unsigned char *copy = image + snapshot->info.superblock * VOLUME_BLOCK;
+	uint64_t map_blocks = 0, level = (tree_blocks + 15) / 16;
+	uint64_t allocated, files = 0, directories = 0;
+	const apfs_gen_volume_t *view = snapshot->view;
+
+	do {
+		map_blocks += level;
+		level = level == 1 ? 0 : (level + 7) / 8;
+	} while (level != 0);
+	allocated = 3 + map_blocks + tree_blocks;
+	for (size_t i = 0; i < view->entry_count; i++) {
+		const volume_entry_t *entry = &view->entries[i];
+
+		files += !entry->directory;
+		directories += entry->directory && entry->oid > 3;
+		if (entry->data != NULL)
+			allocated += (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK;
+	}
+	/* Count the superblock, two physical roots, map and view payload. */
+	bcopy(live, copy, VOLUME_BLOCK);
+	put_le(copy + 8, snapshot->info.superblock, 8);
+	put_le(copy + 16, snapshot->info.xid, 8);
+	put_le(copy + 24, 0x4000000d, 4);
+	put_le(copy + 88, allocated, 8);
+	put_le(copy + 128, 0, 8);
+	put_le(copy + 144, 0, 8);
+	put_le(copy + 152, 0, 8);
+	put_le(copy + 184, files, 8);
+	put_le(copy + 192, directories, 8);
+	put_le(copy + 216, index, 8);
+	return (apfs_gen_seal(copy, VOLUME_BLOCK));
+}
+
+/* The root keeps its reserved address; child leaves use the extra-block pool.
+ * A zero leaf limit preserves the single-node layout. At most sixteen records
+ * are supplied, so one index level covers every supported split.
+ */
+static bool
+volume_snapshot_tree_build(unsigned char *image, apfs_gen_node_t node,
+    uint16_t per_leaf, uint64_t *extra)
+{
+	apfs_gen_record_t separators[2 * VOLUME_SNAPSHOTS];
+	unsigned char addresses[2 * VOLUME_SNAPSHOTS][8];
+	const apfs_gen_record_t *records = node.records;
+	uint32_t count = node.count, leaves;
+	uint64_t root = node.object.oid;
+
+	if (per_leaf == 0 || count <= per_leaf)
+		return (apfs_gen_node_build(image + root * VOLUME_BLOCK,
+		    VOLUME_BLOCK, &node));
+	leaves = (count + per_leaf - 1) / per_leaf;
+	if (*extra + leaves > VOLUME_BLOCKS)
+		return (false);
+	node.flags &= (uint16_t)~GEN_APFS_ROOT;
+	node.object.type = 0x40000003;
+	for (uint32_t i = 0; i < leaves; i++) {
+		uint32_t first = i * per_leaf;
+		uint64_t address = (*extra)++;
+
+		node.object.oid = address;
+		node.records = records + first;
+		node.count = count - first;
+		if (node.count > per_leaf)
+			node.count = per_leaf;
+		if (!apfs_gen_node_build(image + address * VOLUME_BLOCK,
+		    VOLUME_BLOCK, &node))
+			return (false);
+		put_le(addresses[i], address, 8);
+		separators[i] = (apfs_gen_record_t){ .key = records[first].key,
+		    .key_size = records[first].key_size,
+		    .value = addresses[i], .value_size = 8 };
+	}
+	node.object.oid = root;
+	node.object.type = 0x40000002;
+	node.flags = (node.flags & (uint16_t)~GEN_APFS_LEAF) | GEN_APFS_ROOT;
+	node.level = 1;
+	node.records = separators;
+	node.count = leaves;
+	node.info.node_count = leaves + 1;
+	return (apfs_gen_node_build(image + root * VOLUME_BLOCK,
+	    VOLUME_BLOCK, &node));
+}
+
+/* Each frozen view owns copied inputs. Allocate its payload before the live
+ * payload, then emit complete virtual trees and retain every map version.
+ * Only the root OID is shared: index children use disjoint virtual OIDs.
+ */
+static bool
+volume_snapshots_build(apfs_gen_volume_t *volume, unsigned char *image)
+{
+	apfs_gen_omap_record_t maps[VOLUME_TREE_BASE - 1];
+	apfs_gen_record_t metadata[2 * VOLUME_SNAPSHOTS];
+	apfs_gen_record_t snapshot_records[VOLUME_SNAPSHOTS];
+	volume_snapshot_t *names[VOLUME_SNAPSHOTS];
+	unsigned char keys[2 * VOLUME_SNAPSHOTS][272];
+	unsigned char values[2 * VOLUME_SNAPSHOTS][320];
+	unsigned char snapshot_keys[VOLUME_SNAPSHOTS][8];
+	unsigned char snapshot_values[VOLUME_SNAPSHOTS][16] = {{0}};
+	uint64_t payload = VOLUME_DATA_BASE, tree_base = VOLUME_TREE_BASE;
+	uint64_t blocks, live_root, map_blocks, extra, live_tree_blocks = 0;
+	size_t map_count = 0, metadata_count = 0, snapshot_count = 0;
+	unsigned char *live = image + VOLUME_SUPERBLOCK * VOLUME_BLOCK;
+	unsigned char *bitmap = image + VOLUME_ALLOCATION_BITMAP * VOLUME_BLOCK;
+
+	for (size_t i = 0; i <= volume->snapshot_count; i++) {
+		apfs_gen_volume_t *view = i == volume->snapshot_count ? volume :
+		    volume->snapshots[i].view;
+
+		view->data_base = payload;
+		if (!volume_records_build(view))
+			return (false);
+		for (size_t j = 0; j < view->entry_count; j++) {
+			const volume_entry_t *entry = &view->entries[j];
+
+			if (entry->data != NULL)
+				payload += (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK;
+		}
+	}
+	/* The live builder supplies the unchanged container and volume identity,
+	 * live extent references, and allocator geometry. */
+	if (!volume_image_build(volume, image))
+		return (false);
+	live_root = volume_integer(live + 136, 8);
+	extra = payload;
+	if (extra + 2 * volume->snapshot_count + 1 > VOLUME_BLOCKS)
+		return (false);
+	volume->omap_snapshot_root = extra++;
+	for (size_t i = 0; i <= volume->snapshot_count; i++) {
+		bool is_live = i == volume->snapshot_count;
+		apfs_gen_volume_t *view = is_live ? volume : volume->snapshots[i].view;
+		uint64_t xid = is_live ? 10 : i + 1;
+		apfs_gen_fs_tree_t tree = { .count = view->record_count,
+		    .first_oid = 3000 + 128 * i,
+		    .base = tree_base, .xid = xid, .block_size = VOLUME_BLOCK,
+		    .records_per_leaf = view->records_per_leaf,
+		    .children_per_index = 8 };
+		unsigned char *copy;
+
+		if (!volume_view_tree_build(view, image, tree, maps + map_count,
+		    sizeof(maps) / sizeof(maps[0]) - map_count, live_root, &blocks))
+			return (false);
+		map_count += blocks;
+		tree_base += blocks;
+		if (is_live) {
+			live_tree_blocks = blocks;
+			continue;
+		}
+		volume_snapshot_t *snapshot = &volume->snapshots[i];
+		uint64_t extentref = extra++;
+
+		snapshot->info = (apfs_gen_snapshot_info_t){ .xid = xid,
+		    .superblock = extra++ };
+		if (!volume_node_build(image, extentref, 15, NULL, 0))
+			return (false);
+		copy = image + extentref * VOLUME_BLOCK;
+		put_le(copy + 16, xid, 8);
+		if (!apfs_gen_seal(copy, VOLUME_BLOCK))
+			return (false);
+		if (!volume_snapshot_superblock_build(snapshot, image, live, i, blocks))
+			return (false);
+		if (!snapshot->options.omit_metadata) {
+			size_t n = metadata_count++;
+			const char *metadata_name = snapshot->options.metadata_name == NULL ?
+			    snapshot->name : snapshot->options.metadata_name;
+			apfs_gen_snap_meta_val_t value = {
+			    .extentref_tree_oid = extentref,
+			    .sblock_oid = snapshot->info.superblock,
+			    .create_time = (int64_t)xid, .change_time = (int64_t)xid,
+			    .extentref_tree_type = 0x40000002,
+			    .flags = snapshot->options.meta_flags,
+			    .name = metadata_name,
+			    .name_len = (uint16_t)strlen(metadata_name) };
+
+			metadata[n] = (apfs_gen_record_t){ .key = keys[n],
+			    .key_size = 8, .value = values[n],
+			    .value_size = (uint16_t)(51 + value.name_len) };
+			if (!apfs_gen_jkey_build(keys[n], 8, xid, 1) ||
+			    !apfs_gen_snap_meta_val_build(values[n],
+			    metadata[n].value_size, &value))
+				return (false);
+		}
+		if (!snapshot->options.omit_omap_record) {
+			size_t n = snapshot_count++;
+
+			put_le(snapshot_keys[n], xid, 8);
+			put_le(snapshot_values[n], snapshot->options.omap_flags, 4);
+			snapshot_records[n] = (apfs_gen_record_t){
+			    .key = snapshot_keys[n], .key_size = 8,
+			    .value = snapshot_values[n], .value_size = 16 };
+		}
+		names[i] = snapshot;
+	}
+	qsort(names, volume->snapshot_count, sizeof(names[0]),
+	    volume_snapshot_name_compare);
+	for (size_t i = 0; i < volume->snapshot_count; i++) {
+		size_t n = metadata_count++;
+		apfs_gen_name_key_t key = { .oid = GEN_JKEY_OID_MASK,
+		    .name = names[i]->name,
+		    .name_len = (uint16_t)strlen(names[i]->name) };
+
+		metadata[n] = (apfs_gen_record_t){ .key = keys[n],
+		    .key_size = (uint16_t)(11 + key.name_len),
+		    .value = values[n], .value_size = 8 };
+		if (!apfs_gen_snap_name_key_build(keys[n], metadata[n].key_size,
+		    &key) || !apfs_gen_snap_name_val_build(values[n], 8,
+		    names[i]->options.override_name_xid ? names[i]->options.name_xid :
+		    names[i]->info.xid))
+			return (false);
+		if (names[i]->options.corrupt_name_length)
+			put_le(keys[n] + GEN_JKEY_BYTES, key.name_len, 2);
+	}
+	apfs_gen_node_t metadata_node = {
+		.object = { .oid = VOLUME_SNAPSHOT_TREE, .xid = 10,
+		.type = 0x40000002, .subtype = 16 },
+		.flags = GEN_APFS_ROOT | GEN_APFS_LEAF,
+		.info = { .flags = 0x50, .node_size = VOLUME_BLOCK,
+		.key_count = metadata_count, .node_count = 1 },
+		.records = metadata, .count = (uint32_t)metadata_count
+	};
+	if (!volume_snapshot_tree_build(image, metadata_node,
+	    volume->snapshot_records_per_leaf, &extra))
+		return (false);
+	apfs_gen_node_t snapshot_node = {
+		.object = { .oid = volume->omap_snapshot_root, .xid = 10,
+		.type = 0x40000002, .subtype = 19 },
+		.flags = GEN_APFS_ROOT | GEN_APFS_LEAF | GEN_APFS_FIXED,
+		.info = { .flags = 0x10, .node_size = VOLUME_BLOCK,
+		.key_size = 8, .val_size = 16,
+		.key_count = snapshot_count, .node_count = 1 },
+		.records = snapshot_records, .count = (uint32_t)snapshot_count
+	};
+	if (!volume_snapshot_tree_build(image, snapshot_node,
+	    volume->snapshot_records_per_leaf, &extra))
+		return (false);
+	qsort(maps, map_count, sizeof(maps[0]), volume_version_compare);
+	if (!volume_map_build(image, VOLUME_MAP, maps, map_count, &map_blocks) ||
+	    VOLUME_MAP_TREE + map_blocks > VOLUME_TREE_BASE)
+		return (false);
+	unsigned char *map = image + VOLUME_MAP * VOLUME_BLOCK;
+
+	put_le(map + 36, volume->snapshot_count, 4);
+	put_le(map + 44, 0x40000002, 4);
+	put_le(map + 56, volume->omap_snapshot_root, 8);
+	put_le(map + 64, volume->snapshot_count, 8);
+	uint64_t allocated = 3 + map_blocks + live_tree_blocks;
+
+	for (size_t i = 0; i < volume->entry_count; i++) {
+		const volume_entry_t *entry = &volume->entries[i];
+
+		if (entry->data != NULL)
+			allocated += (entry->size + VOLUME_BLOCK - 1) / VOLUME_BLOCK;
+	}
+	put_le(live + 88, allocated, 8);
+	put_le(live + 216, volume->snapshot_count, 8);
+
+	if (!apfs_gen_seal(map, VOLUME_BLOCK) || !apfs_gen_seal(live, VOLUME_BLOCK))
+		return (false);
+	for (uint64_t i = VOLUME_DATA_BASE; i < extra; i++)
+		bitmap[i / 8] |= (unsigned char)(1u << (i % 8));
+	return (volume_allocation_build(image, tree_base - VOLUME_TREE_BASE,
+	    map_blocks));
+}
+
 bool
 apfs_gen_volume_build(apfs_gen_volume_t *volume, unsigned char **bytes,
     size_t *length)
@@ -2007,7 +2483,8 @@ apfs_gen_volume_build(apfs_gen_volume_t *volume, unsigned char **bytes,
 	image = calloc(1, VOLUME_BYTES);
 	if (image == NULL)
 		return (false);
-	if (!volume_image_build(volume, image)) {
+	if (!(volume->snapshot_count == 0 ? volume_image_build(volume, image) :
+	    volume_snapshots_build(volume, image))) {
 		free(image);
 		return (false);
 	}
@@ -2032,7 +2509,7 @@ apfs_gen_volume_record_block(const apfs_gen_volume_t *volume, uint64_t oid,
 		if (kind == APFS_GEN_KIND_FILE_EXTENT &&
 		    volume_integer(r->key + 8, 8) != suffix)
 			continue;
-		*block = VOLUME_TREE_BASE + i / volume->records_per_leaf;
+		*block = volume->tree_base + i / volume->records_per_leaf;
 		return (true);
 	}
 	return (false);

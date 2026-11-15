@@ -1323,6 +1323,22 @@ name_store(unsigned char *raw, size_t at, const char *name,
 
 /* Key header */
 
+int
+apfs_jkey_compare(const unsigned char *a, size_t alen, const unsigned char *b,
+    size_t blen)
+{
+	uint64_t x = fsimg_load_le64(a), y = fsimg_load_le64(b);
+	uint64_t xo = x & APFS_JKEY_OID_MASK, yo = y & APFS_JKEY_OID_MASK;
+
+	(void)alen;
+	(void)blen;
+	if (xo != yo)
+		return (xo < yo ? -1 : 1);
+	x >>= APFS_JKEY_KIND_SHIFT;
+	y >>= APFS_JKEY_KIND_SHIFT;
+	return (x < y ? -1 : x > y);
+}
+
 bool
 apfs_jkey_decode(const unsigned char *raw, size_t length, apfs_jkey_t *key)
 {

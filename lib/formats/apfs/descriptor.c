@@ -56,7 +56,7 @@ static fsimg_status_t apfs_probe(const unsigned char *, size_t, uint64_t,
 	.max_name_utf16_units = APFS_WRITE_NAME_MAX_UNITS,		\
 	.max_label_bytes = APFS_LABEL_MAX,				\
 	.max_link_target_bytes = APFS_LINK_TARGET_MAX,			\
-	.read_settings = FSIMG_SETTING_VOLUME_INDEX
+	.read_settings = FSIMG_SETTING_VOLUME_INDEX | FSIMG_SETTING_SNAPSHOT
 
 /*
  * The writer writes 4096-byte blocks and stores the volume UUID and the

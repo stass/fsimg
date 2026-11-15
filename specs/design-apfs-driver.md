@@ -286,13 +286,18 @@ the next starts:
 6. **Volume object map.** The live volume object map, a physical object
    checked against the checkpoint XID.
 7. **Snapshot.** With `snapshot=`, the snapshot metadata tree is searched for the
-   name record, the metadata record is read, and the snapshot's volume
-   superblock, a physical object whose header OID is its address and
-   whose XID is the snapshot's, replaces the live one; the
+   name record, the metadata record is read, the live object map's
+   snapshot tree is searched for the snapshot's record, and the
+   snapshot's volume superblock, a physical object whose header OID is
+   its address and whose XID is the snapshot's, is read; the
    lookup XID for the volume's virtual objects becomes the snapshot's.
    The copy names no object map (E9), so the live volume object map
    stays the one searched; the copy is checked by its own rules in the
-   [format design](design-apfs.md#snapshots), not by step 5's.
+   [format design](design-apfs.md#snapshots), not by step 5's. The live
+   superblock stays the selected volume's: its name rule, least inode
+   number, label and UUID apply to the view, and verification reads it.
+   The copy supplies the filesystem root and the counts the volume
+   information reports.
 8. **Volume trees.** The filesystem tree root is resolved through the live
    volume object map at the lookup XID; in the sealed profile, the integrity
    object and the sealed file-extent tree root are read too.
@@ -809,7 +814,10 @@ checked against the blocks the format design lists there.
 
 **Walk.** The common walker visits the selected volume once, in its live
 view: verification ignores `snapshot=`, since its scans, claims and counts
-are the live volume's. Every
+are the live volume's, and a reader opened at a snapshot points its
+filesystem-tree cursors at the live root and the checkpoint XID before the
+walk starts. Verification needs an untouched reader and leaves it done, so
+no read sees the switch. Every
 directory but the root and the private directory has exactly one parent,
 so the directories the walk reaches from the root form a tree, and a cycle
 of directories the root cannot reach exists exactly when the walk reaches

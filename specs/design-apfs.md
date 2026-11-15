@@ -1790,6 +1790,15 @@ structure that reaches it: a physical object of the current checkpoint,
 such as the object map itself, against the checkpoint's XID; the
 snapshot's superblock against the snapshot's XID; a virtual object against
 its lookup XID. The reader otherwise reads exactly as for the live volume.
+The name record's XID must be nonzero and not above the checkpoint's, and
+must key a metadata record carrying the same name, and the object map's
+snapshot tree must hold a record at that XID; anything else is
+`FSIMG_ECORRUPT`. A snapshot view's volume information reports the
+snapshot's XID as `read_xid` and the copy's object counts, snapshot count
+and allocated blocks as `files` to `volume_blocks`, the volume as it stood;
+the label, UUID, role and name-rule details are the live superblock's,
+which the volume rules validated, since the copy's name and UUID are not
+checked.
 
 A snapshot of a dataless-snapshot volume is unsupported. Snapshot flags must
 be zero, the value of every specimen record; any other flag, such as the
@@ -1799,12 +1808,14 @@ object-map snapshot record. The volume's extended-metadata OID names
 a virtual object of type `0x1d` with one version per snapshot at that
 snapshot's XID; each of the specimen's 512 versions holds version 1, flags
 zero and its own XID. A snapshot view does not read it. The corpus specimen
-is for research use only and cannot be a fixture, so the snapshot profile
-is enabled only once a native capture provides fixtures. A capture with
-snapshots, as E9's `e9-snap` plans, needs a way to snapshot a disk-image
-volume: `apfs_systemsnapshot` refuses even as root, and each other way
-changes the host or needs Apple's entitlement (E9). Without it, `snapshot=` fails
-with `FSIMG_EUNSUPPORTED`. The writer emits an empty snapshot metadata
+is for research use only and cannot be a fixture, so the reader's tests
+build snapshot views with the independent test generator from these rules.
+Native fixtures, as E9's `e9-snap` plans, need a way to snapshot a
+disk-image volume: `apfs_systemsnapshot` refuses even as root, and each
+other way changes the host or needs Apple's entitlement (E9). Until one
+exists, the questions only a capture answers keep the defaults above:
+names compare as bytes, and nonzero flags and dataless-snapshot volumes are
+refused. The writer emits an empty snapshot metadata
 tree and no object-map snapshot tree.
 
 ## Sealed volumes
