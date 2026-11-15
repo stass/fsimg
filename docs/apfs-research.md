@@ -2385,6 +2385,99 @@ and back from s1 to s2).
   and features do not change. The dumps show no field the designs do not
   cover.
 
+## fsimg writer output
+
+`tools/apfs/outputs.rb` builds the writer outputs of the
+[plan](apfs-plan.md#9-native-qualification-and-writer-registration): each
+row's source tree on the scratch volume, the image `fsimg c -W -p` makes of
+it, and the manifest of the tree beside the image. `tools/apfs/qualify.rb`
+then takes every image through the native cycle on the
+[host above](#native-procedure) (macOS 26.6.2, `25G83`), unprivileged, the
+rows expected to run out of space with `--tolerate-full` and the others
+without, so that any refusal there fails the cycle; `hdiutil info` lists
+none of the images afterwards:
+
+```
+outputs.rb --fsimg BUILD/fsimg --root DIR > rows.tsv
+qualify.rb --root QDIR --fsimg BUILD/fsimg --tolerate-full \
+  $(awk '$2 == "full" { print $3 }' rows.tsv)
+qualify.rb --root QDIR --fsimg BUILD/fsimg $(awk '$2 == "room" { print $3 }' rows.tsv)
+tools/apfs/apfsck-linux.sh DIR/outputs/*/image.*
+```
+
+**Result: every cycle passes, on all 16 outputs, with no `fsck_apfs -n`
+finding before or after the native modifications.** The outputs, with the
+entries their manifests list:
+
+| Output | Tree | Stack | Size | Free | Entries | Native refusals |
+| --- | --- | --- | --- | --- | --- | --- |
+| minimum | empty | `apfs` | 4 MiB (automatic) | 3.6 MiB | 0 | large file |
+| minimum-cs | empty | `apfs`, case-sensitive | 4 MiB (automatic) | 3.6 MiB | 0 | large file |
+| mixed-ci | mixed | `apfs` | 4 MiB (automatic) | 2.5 MiB | 31 | large file |
+| mixed-cs | mixed, case-only names | `apfs`, case-sensitive | 4 MiB (automatic) | 2.5 MiB | 35 | large file |
+| small | mixed | `apfs` | 64 MiB | 62.1 MiB | 31 | none |
+| small-cs | mixed, case-only names | `apfs`, case-sensitive | 64 MiB | 62.1 MiB | 35 | none |
+| multichunk | one 200 MiB file | `apfs` | 1 GiB, 8 bitmap chunks | 819.8 MiB | 2 | none |
+| multichunk-cs | one 200 MiB file | `apfs`, case-sensitive | 1 GiB, 8 bitmap chunks | 819.8 MiB | 2 | none |
+| huge | one 6 GiB file | `apfs` | 8 GiB | 1.9 GiB | 2 | none |
+| full | 48 files of 1 MiB | `apfs` | 52.6 MiB (automatic, 4 MiB free) | 4 MiB | 50 | large file |
+| deep | 100 nested directories | `apfs` | 4 MiB (automatic) | 3.2 MiB | 201 | large file |
+| wide-cs | 6000 entries in one directory | `apfs`, case-sensitive | 26.8 MiB (automatic, 4 MiB free) | 4 MiB | 6002 | large file |
+| gpt-mixed | mixed | `apfs/gpt` | 64 MiB | 62.1 MiB | 31 | none |
+| gpt-wide | 6000 entries in one directory | `apfs/gpt` | 64 MiB | 41.0 MiB | 6002 | none |
+| dmg-mixed-cs | mixed, case-only names | `apfs/gpt/dmg`, case-sensitive | 64 MiB | 62.1 MiB | 35 | read-only |
+| dmg-deep | 100 nested directories | `apfs/gpt/dmg` | 4 MiB (automatic) | 3.2 MiB | 201 | read-only |
+
+The mixed tree holds files of 0, 1, 4095, 4096, 4097, 65536 and 1000003
+bytes, a 255-byte ASCII name, names of 127 two-byte and 63 four-byte
+(surrogate-pair) characters, precomposed and decomposed accents, CJK,
+symbolic links that are relative, dangling, 1023 bytes long and Unicode, an
+empty directory, a nested path and two FIFOs; mixed-case adds `Readme`,
+`README` and `readme` in one directory. Every other tree but the empty one
+holds one FIFO. The wide tree's filesystem tree has three levels and the
+deep and mixed ones two (`apfsdump.rb`). The huge file is one extent of
+6442455040 bytes with one physical-extent record of 1572865 blocks, longer
+than any native capture shows ([E15](#e15-writer-probes)), which closes the
+[extent cap](../specs/design-apfs.md#writer-values) row.
+
+The steps, as they ran:
+
+* `fsck_apfs -n` on the attached, unmounted disk, before and after the
+  modifications: only progress lines.
+* Mounted compares, read-only with owners off: `find` and `lstat` match the
+  manifest in kind, size, mode, birth and modification times, link target
+  and SHA-256 of every file and link target, both before the modifications
+  and on the remount after them. The mtree entries (FIFOs and the
+  case-only names) have no birth time to compare.
+* Modifications, read-write: a file created, appends of 1 to 100000 bytes
+  interleaved with another file's blocks, a rename, a folder made and one
+  removed, an unlink, and a 16 MiB file. A container sized automatically
+  with no free-space request takes everything but the large file. With
+  1 MiB (256 blocks) free, macOS refused even the first `mkdir` of full and
+  wide-cs (`ENOSPC`); with 4 MiB free it takes every change but the large
+  file. A UDIF file fsimg writes is UDRO or UDZO, both read-only formats,
+  so the DMG rows attach read-only and skip the modifications.
+* fsimg on the modified image: `W` verifies it, `t --json` lists the same
+  tree, and `x -O` delivers each nonempty file with its SHA-256.
+
+In an earlier run of gpt-wide, one of its 5142 `x -O` calls, one per
+nonempty file, delivered the file's four bytes and then exited 1 with no
+diagnostic while the host was also running `apfsck` in Docker. 15300
+repeated calls, 3000 of them under a 96-process CPU load, did not reproduce
+it ([TODO](../TODO.md), the CLI's final report).
+
+The independent checkers run on the same outputs: `apfsck` (`b9c4cb4`,
+through `tools/apfs/apfsck-linux.sh` in the `build-aux/linux-check.sh`
+image) exits 0 with no output on all twelve bare containers and skips the
+GPT disks and UDIF files, and `fsapfsinfo` (`20261030`, on macOS) reads each
+bare container. Neither looks inside a GPT disk or a UDIF file, so the
+wrapped rows have only the native cycle.
+
+What that bounds: containers up to 8 GiB, a single extent of 6 GiB, 6000
+entries in a directory and 100 levels of directories. Larger containers are
+not qualified natively ([TODO](../TODO.md), the writer's large-container
+paths).
+
 ## Evidence questions
 
 Stage 1 fills this section ([plan](apfs-plan.md), stage 1). Each row is a

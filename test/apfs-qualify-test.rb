@@ -296,6 +296,48 @@ class ApfsQualifyTest < Minitest::Test
     end
   end
 
+  def test_acl_detects_an_access_control_entry_on_a_directory
+    Dir.mktmpdir do |dir|
+      refute ApfsQualify.acl?(dir)
+      assert system(*["/bin/chmod", "+a", "everyone allow add_file", dir])
+      assert ApfsQualify.acl?(dir)
+    end
+  end
+
+  def test_private_directory_check_rejects_an_acl_even_with_mode_0700
+    Dir.mktmpdir do |dir|
+      File.chmod(0o700, dir)
+      assert ApfsQualify.private?(dir)
+      assert system(*["/bin/chmod", "+a", "everyone allow add_file", dir])
+      refute ApfsQualify.private?(dir)
+    end
+  end
+
+  def test_private_directory_check_rejects_mode_0777
+    Dir.mktmpdir do |dir|
+      File.chmod(0o777, dir)
+      refute ApfsQualify.private?(dir)
+    end
+  end
+
+  def test_private_directory_check_rejects_a_symbolic_link_to_a_private_directory
+    Dir.mktmpdir do |dir|
+      Dir.mktmpdir do |target|
+        File.chmod(0o700, target)
+        link = File.join(dir, "link")
+        File.symlink(target, link)
+        refute ApfsQualify.private?(link)
+      end
+    end
+  end
+
+  def test_root_rejects_a_directory_with_an_acl
+    Dir.mktmpdir do |dir|
+      assert system(*["/bin/chmod", "+a", "everyone allow add_file", dir])
+      assert_raises(ApfsQualify::Error) { ApfsQualify.private_directory(dir) }
+    end
+  end
+
   def test_main_refuses_a_source_inside_root_and_an_empty_image_list
     Dir.mktmpdir do |dir|
       inside = write_image(File.join(dir, "root"), "image.img", 32 => "NXSB")

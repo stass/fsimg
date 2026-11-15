@@ -402,18 +402,6 @@
   is also written twice (`cmd/fsimg/main.c`, `worker-parent.c`
   `prepare_request`); one helper in `compat/clock.c` would hold it.
 
-* [Medium] **A supervision error can cut a record** (`cmd/fsimg/worker-parent.c`
-  `supervise_operation`, `cmd/fsimg/main.c`): cancellation, a deadline, or a
-  failure of the output relay or of polling ends supervision while the relay
-  may be part-way through writing one record, and the relay is then
-  stopped, so standard output can end inside that record and the final
-  report follows on the same line, leaving `--json` output malformed. A
-  worker's failure cannot do this, since control and raw data are read only
-  while the relay is idle. Letting the relay finish its one bounded record
-  within the exit grace, or starting the final report on a fresh line when
-  forwarded bytes went unconfirmed, would keep every earlier record and the
-  error record parseable.
-
 * [Medium] **Spec harness stage harness errors** (`test/spec/lib/fsimg_spec/outcome.rb`,
   `case_run.rb`): a stage's `harness_error` outcome covers both host faults
   (fsimg could not be launched, a sandbox status that differs from the
@@ -647,6 +635,30 @@
   `specs/design-spec-testing.md`): the design caps the quick profile at about 60 s
   added to `make check`, but `test/spec.sh` takes several minutes. Bring it back
   under the ceiling with a smoke subset, or change the ceiling.
+
+* [Medium] **A supervision error can cut a record** (`cmd/fsimg/worker-parent.c`
+  `supervise_operation`, `cmd/fsimg/main.c`): cancellation, a deadline, or a
+  failure of the output relay or of polling ends supervision while the relay
+  may be part-way through writing one record, and the relay is then
+  stopped, so standard output can end inside that record and the final
+  report follows on the same line, leaving `--json` output malformed. A
+  worker's failure cannot do this, since control and raw data are read only
+  while the relay is idle. Letting the relay finish its one bounded record
+  within the exit grace, or starting the final report on a fresh line when
+  forwarded bytes went unconfirmed, would keep every earlier record and the
+  error record parseable.
+
+* [Medium] **A failed final report exits silently** (`cmd/fsimg/main.c`
+  after `fsimg_output_run`, `worker-parent.c` `observe_process`): when the
+  final report's relay fails, its error replaces a successful status, and
+  the stderr-only retry's own failure is discarded, so the command can
+  exit 1 having written nothing but the data. One of the 5142 `x -O`
+  calls, one per nonempty file, in the APFS gpt-wide qualification
+  (docs/apfs-research.md, fsimg writer output) did exactly that on a loaded
+  host; 15300 repeats did not, so which relay step failed is unknown. The 2-second exit grace after channel EOF is the
+  likeliest trigger under load. A last fixed diagnostic written to fd 2 when
+  both attempts fail, and a grace that does not fail an operation whose
+  output was already confirmed, would close it.
 
 * [Medium] **CLI relays a listing one entry at a time** (`cmd/fsimg/worker-parent.c`,
   `worker-child.c`): a listing's cost is the three-process relay, not the reader.

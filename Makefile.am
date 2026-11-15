@@ -224,7 +224,7 @@ check_PROGRAMS = $(test_programs) layers-compose hfsplus-marks hfsplus-write-gen
 	test-iso9660-scale test-hfsplus-scale test-iso9660-write-scale \
 	test-erofs-scale
 QUICK_TESTS = $(test_programs) test/hfsplus-integration.sh test/erofsdump.sh test/erofs-integration.sh \
-	test/apfsdump.sh \
+	test/apfsdump.sh test/apfs-tools.sh \
 	test/fat-integration.sh test/exfat-integration.sh \
 	test/qnx6-integration.sh test/qnx4-integration.sh \
 	test/ifs-integration.sh \
@@ -900,6 +900,8 @@ EXTRA_DIST += test/hfsplus-integration.sh test/hfsplus-integration.rb
 EXTRA_DIST += test/hfsplus-capture-test.rb test/hfsplus-qualify-test.rb
 EXTRA_DIST += tools/apfs/capture.rb test/apfs-capture-test.rb
 EXTRA_DIST += tools/apfs/qualify.rb test/apfs-qualify-test.rb
+EXTRA_DIST += tools/apfs/outputs.rb test/apfs-outputs-test.rb test/apfs-tools.sh \
+	tools/apfs/apfsck-linux.sh
 EXTRA_DIST += test/erofsdump-test.rb test/erofsdump.sh test/erofs-integration.sh.in \
 	test/erofs-integration.rb
 EXTRA_DIST += test/hfsplus-integration-test.rb

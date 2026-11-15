@@ -50,6 +50,7 @@ require "digest"
 require "fiddle"
 require "fileutils"
 require "json"
+require "open3"
 require "optparse"
 require "tmpdir"
 require_relative "capture"
@@ -700,10 +701,25 @@ module ApfsQualify
     raise Error, "#{path} lies inside a git work tree" if ApfsCapture.inside_work_tree?(path)
 
     FileUtils.mkdir_p(path)
-    stat = File.lstat(path)
-    return if stat.directory? && stat.uid == Process.euid && (stat.mode & 0o022).zero?
+    return if private?(path)
 
     raise Error, "#{path} is not a directory private to this user"
+  end
+
+  # A directory of this user's that no one else may write: neither by its mode
+  # nor by an access control list, which on macOS can grant what the mode
+  # denies.
+  def private?(path)
+    stat = File.lstat(path)
+    stat.directory? && stat.uid == Process.euid && (stat.mode & 0o022).zero? && !acl?(path)
+  end
+
+  # `ls -lde` prints each entry of an access control list on a line of its own.
+  def acl?(path)
+    out, status = Open3.capture2e("/bin/ls", "-lde", path)
+    raise Error, "ls -lde #{path}: #{out}" unless status.success?
+
+    out.lines.drop(1).any? { _1.match?(/\A\s*\d+: /) }
   end
 
   # Copy an image by cloning it with clonefile(2), which shares its blocks and
