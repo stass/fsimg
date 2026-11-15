@@ -1823,6 +1823,47 @@ from 362,128 to 3,620,921 (10.00 times) and metadata passes stay at 2.513.
 Total verification I/O grows from 467,720 to 4,852,450 (10.37 times), including
 scratch I/O across merge levels. Peak charged memory remains 5,363,280 bytes.
 
+`test-apfs-scale` builds each APFS container from `test/apfs-gen.c` and serves
+it through callback I/O, computing every block from its address; no image file
+is written, however large the container. It opens the reader under a 16 MiB
+memory budget, walks the entries, and reports the measurements on one line.
+`--large` and `--extents` verify payload; the default, `--wide`, the accepted
+16-level `--deep`, `--names` and `--big-file` verify metadata only. The
+17-level tree is refused before verification.
+Run `./test-apfs-scale --large`, `--wide 1000000`,
+`--extents 1000000`, `--deep`, `--names 1000000` or `--big-file` in the build
+directory; `make check-scale` runs each. `--large` is a 128 TiB container,
+2^35 blocks of 4096 bytes, with the space manager, chunk-info and address
+blocks of that size and also extracts its one-block file; `--wide` one
+directory of a million entries; `--extents` one file of a million extent
+records, half of which are holes, checked against a computed byte pattern;
+`--deep` a filesystem tree of the reader's maximal height, 16 levels;
+`--names` one inode with a million names; `--big-file` a 5 GiB file read past
+`2^32`. `next_range` answers from lengths alone, so the holes report as DATA
+that reads as zeros.
+
+The wide directory's replay costs 0.272 source node loads per entry for its
+inode lookups, so the lookups do not dominate and the reader keeps its tree
+descents rather than sorting a directory's child inodes
+([driver design](../specs/design-apfs-driver.md#directories)).
+
+Reference macOS x86_64 measurements (Xeon W-3245); resource sizes and RSS are
+bytes, and seconds include opening, walking, verifying and extraction where
+selected. The names, 1000 row is a reference run and is not part of
+`make check-scale`:
+
+| Case | Entries | Height | Reads | I/O calls | Source node loads | Peak scratch | Peak charged memory | Peak RSS | Seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| default, 32 files | 32 | 2 | 114 | 114 | 42 | 0 | 1211140 | 3145728 | 0.002 |
+| large, 128 TiB | 1 | 1 | 16989 | 16991 | 15 | 0 | 1642126 | 3608576 | 0.191 |
+| wide, 1000000 | 1000000 | 4 | 883539 | 1376552 | 883462 | 307806835 | 5441889 | 19533824 | 23.392 |
+| extents, 1000000 | 1 | 4 | 1203306 | 1275606 | 203217 | 93000774 | 5401872 | 11026432 | 14.534 |
+| deep, 16 levels | 1 | 16 | 156 | 156 | 84 | 0 | 1321633 | 3215360 | 0.002 |
+| deep, 17 levels (refused) | 0 | 17 | 26 | 26 | 2 | 0 | 1182985 | 3239936 | 0.000 |
+| names, 1000000 | 1000000 | 4 | 340273 | 984745 | 340196 | 297807014 | 5441889 | 19857408 | 25.180 |
+| big file, 5 GiB | 1 | 1 | 126 | 126 | 10 | 0 | 1207028 | 3108864 | 0.002 |
+| names, 1000 | 1000 | 3 | 423 | 423 | 351 | 0 | 1289178 | 3293184 | 0.015 |
+
 `test-hfsplus-write` plans, packs and emits through the writer of
 `fsimg_hfsplus_format`: round trips through the reader and the verifier,
 an independent raw checker (`test/hfsplus-write-check.c`) written from the format

@@ -221,7 +221,7 @@ test_programs = test-core test-endian test-endian-unsigned-char \
 	header-cxx test-codec test-hbcifs test-ifsboot test-ifsboot-write
 # Fixture generators support integration tests; they are not tests.
 check_PROGRAMS = $(test_programs) layers-compose hfsplus-marks hfsplus-write-gen \
-	test-iso9660-scale test-hfsplus-scale test-iso9660-write-scale \
+	test-iso9660-scale test-hfsplus-scale test-apfs-scale test-iso9660-write-scale \
 	test-erofs-scale
 QUICK_TESTS = $(test_programs) test/hfsplus-integration.sh test/erofsdump.sh test/erofs-integration.sh \
 	test/apfsdump.sh test/apfs-tools.sh test/apfs-integration.sh \
@@ -419,6 +419,9 @@ test_iso9660_scale_LDADD = libfsimg.la
 test_hfsplus_scale_SOURCES = test/hfsplus-scale.c test/hfsplus-gen.h \
 	test/test.h test/scale.h
 test_hfsplus_scale_LDADD = libfsimg.la
+test_apfs_scale_SOURCES = test/apfs-scale.c test/apfs-gen.c test/apfs-gen.h \
+	test/test.h test/scale.h
+test_apfs_scale_LDADD = libfsimg.la $(ZLIB_LIBS)
 test_iso9660_write_scale_SOURCES = test/iso9660-write-scale.c test/test.h test/scale.h
 test_iso9660_write_scale_LDADD = libfsimg.la
 test_ifs_SOURCES = test/ifs.c test/test.h test/scale.h
@@ -735,7 +738,14 @@ baseline-record: test-fat test-fat-write test-exfat test/baseline.sh
 	mv $(srcdir)/test/baseline.txt.new $(srcdir)/test/baseline.txt
 check-scale: test-meta-sort test-catalog test-fat test-fat-write test-exfat-scale \
 	    test-qnx6 test-qnx6-write test-qnx4 test-qnx4-write test-ifs test-iso9660-scale \
-	    test-iso9660-write-scale test-hfsplus-scale test-erofs-scale
+	    test-iso9660-write-scale test-hfsplus-scale test-apfs-scale test-erofs-scale
+	./test-apfs-scale
+	./test-apfs-scale --large
+	./test-apfs-scale --wide
+	./test-apfs-scale --extents
+	./test-apfs-scale --deep
+	./test-apfs-scale --names
+	./test-apfs-scale --big-file
 	./test-hfsplus-scale --catalog 1000000
 	./test-hfsplus-scale --wide
 	./test-hfsplus-scale --extents
