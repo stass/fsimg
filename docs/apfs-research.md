@@ -1308,7 +1308,7 @@ records the native refusal beside fsimg's own rule.
 
 ### E9 Snapshots
 
-**Creating a snapshot needs root.** On a volume of an attached disk image
+**Creating a snapshot needs more than root.** On a volume of an attached disk image
 mounted by `hdiutil attach -mountpoint`, as the unprivileged user:
 
 | Method | Result |
@@ -1319,10 +1319,8 @@ mounted by `hdiutil attach -mountpoint`, as the unprivileged user:
 | `diskutil apfs` | Lists and deletes snapshots; no verb creates one |
 
 `diskutil apfs listSnapshots` on the volume afterwards: `No snapshots`.
-`apfs_systemsnapshot` carries Apple's entitlement, so run as root it is
-the likely path. An unsigned program calling `fs_snapshot_create` would
-lack the entitlement even as root, by the manual page; that was not run. The native capture is therefore left to
-the owner, in one terminal:
+`apfs_systemsnapshot` carries an Apple entitlement, so the owner ran the
+captures as root, in one terminal (the result follows the script):
 
 ```sh
 sudo -v
@@ -1341,10 +1339,8 @@ normalization folds without case folding.
 
 `capture.rb` runs the script in its own process group with a pipe for
 input, so the script calls `sudo -n` and relies on the credentials that
-`sudo -v` cached. If the host's sudo keeps credentials per terminal and
-refuses the child, the script prints `snapshot NAME refused` and continues.
-In that case a sudoers rule for that one tool, or running the steps by
-hand, is the alternative. With `E9_DRY=1` the script skips the snapshots;
+`sudo -v` cached; a refused snapshot prints `snapshot NAME refused` and
+the script continues. With `E9_DRY=1` the script skips the snapshots;
 that run (a throwaway capture, not kept) populated the volume and
 `fsck_apfs -n` passed. The script:
 
@@ -1411,6 +1407,33 @@ and the 300 files give one snapshot an extent-reference tree of more than
 one node. These separate two of the candidates for the allocated block
 count below, the data blocks and the extent-reference nodes.
 
+**Result: refused as root as well.** Both runs, on macOS 26.6.2 (25G83)
+with System Integrity Protection enabled, hold no snapshot:
+
+| Capture | Volume | Snapshot steps | Volume after the script |
+| --- | --- | --- | --- |
+| `apfs-newfs-67108864-e9-snap` | `FSIMG`, case-insensitive | `sudo -n` ran `apfs_systemsnapshot` for all nine names; each printed `fs_snapshot_create: Operation not permitted` and exited 255; `diskutil apfs listSnapshots`: `No snapshots for disk7s1` | Superblock snapshot count 0; snapshot metadata tree one root leaf, no records; object map snapshot count 0, most recent snapshot 0, no snapshot tree; XID 14; `fsck_apfs -n` passes |
+| `apfs-newfs-67108864-e9-snap-cs` | `E9cs`, case-sensitive and normalization-insensitive | The same nine refusals | The same |
+
+`sudo -n` either runs the tool as root or fails without running it, and
+the tool ran, so root does not lift the refusal. Neither capture records
+the host's state beyond `sw_vers` and `uname`; checked on the host
+afterwards, `csrutil status` reports System Integrity Protection enabled,
+and the tool's one snapshot entitlement is
+`com.apple.private.apfs.arv.limited.snapshot`
+(`codesign -d --entitlements -`, beside
+`com.apple.private.security.bootpolicy.readonly`), which by its name covers a limited
+snapshot of an authenticated root volume, not a data volume of an
+attached image. The two captures answer none of E9's questions and are
+not fixtures. The ways left all change the host or need Apple's consent,
+so choosing one is the owner's:
+
+| Way | What it costs | What it can show |
+| --- | --- | --- |
+| `tmutil localsnapshot` | Snapshots every volume the Time Machine backup includes, the host's among them; whether that set can include an attached image's volume is untested | Snapshots with data changes between them; not the name questions, since every name is `com.apple.TimeMachine.<date>.local` |
+| A program calling `fs_snapshot_create` with Apple's snapshot entitlement (`com.apple.developer.vfs.snapshot` in Apple's developer documentation; the manual page names none) | Unverified here: the entitlement is expected to need a provisioning profile from Apple, and an ad-hoc signature claiming it to run only with AMFI disabled, which needs SIP off | Everything `e9-snap.sh` asks, names included |
+| The same program in a macOS guest with SIP and AMFI disabled | A guest to set up; the host keeps SIP | The same |
+
 **Evidence: the corpus specimen.** `dissect-apfs-snapshot`
 (`~/fsimg-corpus/apfs/SOURCES.md`; research use only, never attached or
 mounted) decompresses to 33554432 bytes, SHA-256
@@ -1420,13 +1443,16 @@ holds one case-insensitive volume, `Snapshots`, formatted by `storagekitd
 2573. The volume has 512 snapshots, `Snapshot 0` to `Snapshot 511`, at XIDs
 4 to 2566, about five apart. Between consecutive snapshots it gained two
 files and rewrote the one block of inode 18. `tools/apfs/apfsdump.rb
---records` decodes its snapshot tree. A throwaway decoder (Ruby,
-outside the tree) followed the references the dumper prints but does not
-decode: each snapshot's superblock and extent-reference tree, the object
-map's snapshot tree, the extended-metadata versions, every object-map
-version, the filesystem tree at chosen XIDs, and the bitmap. It verified
-the Fletcher-64 checksums of the snapshot superblocks, the snapshot
-extent-reference roots and every object the object map maps. `fsapfsinfo` stops at the snapshot
+--records` decodes its snapshot tree, each snapshot's superblock and
+extent-reference tree, each snapshot's filesystem root resolved at its
+XID, and the object map's snapshot tree, and reports no problem; the
+superblock, object-map snapshot tree and extent-reference rows below are
+in its output, the checksums of every snapshot superblock and
+extent-reference root verified. A throwaway decoder (Ruby, outside the
+tree) followed what the dumper does not: the extended-metadata versions,
+every object-map version, the filesystem tree at chosen XIDs, and the
+bitmap. It verified the checksum of every object the object map maps.
+`fsapfsinfo` stops at the snapshot
 tree's index root (`unable to determine sub node block number`), and
 `apfs-dump-quick` lists the tree's records.
 
@@ -1487,7 +1513,8 @@ superblock copy's allocated count fits all four readings too, since each
 candidate grows by one per snapshot, so the specimen cannot tell which
 claim the count leaves out.
 
-Not shown: case or normalization folding of snapshot names, a snapshot of
+Not shown, since no snapshot could be made on this host (above): case or
+normalization folding of snapshot names, a snapshot of
 a sealed volume, a dataless-snapshot volume, nonzero snapshot flags,
 clones within a volume that has snapshots, and an extent-reference tree
 of a snapshot with more than one node.
@@ -2502,7 +2529,7 @@ under that experiment.
 | Writer acceptance: minimum container size | 1024 blocks, the smallest `fsck_apfs` opens (E1); `fsck_apfs -n` accepts the writer's first form with a volume there ([E15](#e15-writer-probes): `e15-x1vol-all`) | |
 | Writer acceptance: XID 1 for all objects, the formatting identifier, maximum extent length, greedy node fill, maximum volume count rule | `fsck_apfs -n` accepts the first form with a volume, another formatting identifier, native extents of 5 GiB, a leaf packed to the design's capacity, a last node of one record at the leaf and index levels, and maximum volume counts off the formula from 2 to 100 ([E15](#e15-writer-probes)) | Extents longer than 5 GiB |
 | Name hash conventions (initial value, complement, terminating NUL), full or simple case folding, Unicode version, hashed or plain keys per personality | CRC-32C from `0xFFFFFFFF`, no final complement, no NUL, low 22 bits; full folding without Turkic entries, NFD before and after; Unicode 17.0.0; both `newfs_apfs` personalities hash (E4), `hdiutil` volumes too, and no native tool formats a plain-key volume ([E2](#e2-personalities))  | |
-| Comparator tie-breaks for hashed records, attributes and snapshot names | Hashed directory records: 22-bit hash, then name bytes as unsigned bytes, a prefix first (E4); attribute records of one inode by name bytes with the NUL, a proper prefix first (E5, `e5-xattr`); snapshot names by name bytes with the NUL, a proper prefix first ([E9](#e9-snapshots), `dissect-apfs-snapshot`) | Whether a case- or normalization-insensitive volume folds snapshot names (the owner-run E9 captures `e9-snap` and `e9-snap-cs`; until then bytes); plain directory records, which no native tool writes (E2) |
+| Comparator tie-breaks for hashed records, attributes and snapshot names | Hashed directory records: 22-bit hash, then name bytes as unsigned bytes, a prefix first (E4); attribute records of one inode by name bytes with the NUL, a proper prefix first (E5, `e5-xattr`); snapshot names by name bytes with the NUL, a proper prefix first ([E9](#e9-snapshots), `dissect-apfs-snapshot`) | Whether a case- or normalization-insensitive volume folds snapshot names (the E9 captures `e9-snap` and `e9-snap-cs`, whose snapshots macOS refuses even as root; bytes until a capture shows a pair); plain directory records, which no native tool writes (E2) |
 | Volume features, flags, role, crypto state and formatting record of `newfs_apfs` and `hdiutil` volumes in both personalities (E2 part) | Identical between the two tools; incompatible `0x1` or `0x8`, optional `0x2`, flags `0x1`, role 0, formatter `newfs_apfs (2811.160.7.0.4)` ([E2](#e2-personalities): `apfs-newfs-67108864-e2-*`, `apfs-hdiutil-67108864-e2-*`) | |
 | Records of an empty volume beyond the root and private directories; its next object identifier (E2 part) | Next object identifier 16, next document ID 3, modification records empty, 5 allocated blocks, on every E2 volume ([E2](#e2-personalities)) | Records beyond the root and private directories (E1's volume records) |
 | Whether the root and private directories count in the volume's object counts (E3 part) | They do not; FIFOs and sockets count as other objects (E3: `apfs-newfs-268435456-e3-ci`, `-cs`) | |

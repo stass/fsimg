@@ -1036,8 +1036,9 @@ normalization-insensitive volume folds snapshot names before comparing
 them is provisional (E9, the owner-run capture `e9-snap`): the specimen is
 case-insensitive but its names have no case or normalization pairs, so
 both rules give its order. `e9-snap` tests case folding and its
-case-sensitive companion `e9-snap-cs` normalization folding. Until they
-run, snapshot names compare as bytes in every volume. If names do fold, an
+case-sensitive companion `e9-snap-cs` normalization folding, but macOS
+refuses their snapshots even as root (E9). Until a capture shows such a
+pair, snapshot names compare as bytes in every volume. If names do fold, an
 image whose names sort differently folded fails its ordering check, or
 `snapshot=` misses a name with `FSIMG_EINVAL`; no name is misread. No
 experiment can show how plain directory-record names compare, since no
@@ -1799,9 +1800,11 @@ a virtual object of type `0x1d` with one version per snapshot at that
 snapshot's XID; each of the specimen's 512 versions holds version 1, flags
 zero and its own XID. A snapshot view does not read it. The corpus specimen
 is for research use only and cannot be a fixture, so the snapshot profile
-is enabled only once a native capture provides fixtures. That capture needs
-root to create snapshots: E9's owner-run `e9-snap`. Without it, `snapshot=`
-fails with `FSIMG_EUNSUPPORTED`. The writer emits an empty snapshot metadata
+is enabled only once a native capture provides fixtures. A capture with
+snapshots, as E9's `e9-snap` plans, needs a way to snapshot a disk-image
+volume: `apfs_systemsnapshot` refuses even as root, and each other way
+changes the host or needs Apple's entitlement (E9). Without it, `snapshot=` fails
+with `FSIMG_EUNSUPPORTED`. The writer emits an empty snapshot metadata
 tree and no object-map snapshot tree.
 
 ## Sealed volumes

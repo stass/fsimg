@@ -12,20 +12,25 @@
 # chain, bitmap free-count recounts, internal pool and free-queue trees, and
 # the reaper with its reap lists.
 #
-# A volume is shown with every field of its superblock, its object map, and
-# its file-system, extent-reference, snapshot metadata and (on a sealed
-# volume) file extent trees, every record decoded, its integrity metadata,
-# a summary of its records by type, and the decmpfs header of each
-# compressed file.
+# A volume is shown with every field of its superblock, its object map with
+# its snapshot tree, and its file-system, extent-reference, snapshot
+# metadata and (on a sealed volume) file extent trees, every record decoded,
+# its snapshots, its integrity metadata, a summary of its records by type,
+# and the decmpfs header of each compressed file. Each snapshot is shown
+# with its metadata record, the volume superblock it names and that
+# superblock's file-system root resolved at the snapshot's XID, and its
+# extent-reference tree.
 #
 #   apfsdump.rb [--offset BYTES] [--volume N] [--records] [--json] IMAGE
 #
 # IMAGE is a raw container; --offset names where the container starts in it,
 # for a container inside a partitioned disk image. --volume N dumps only the
 # volume in slot N of the superblock's volume array. --records lists every
-# node and record of the volume trees; without it each tree shows its root
-# node and counts. --json prints the same document as JSON with stable keys,
-# so dumps of two captures can be diffed.
+# node and record of the volume trees and every field of each snapshot
+# superblock; without it each live tree shows its root node and counts, and
+# each snapshot one line: its superblock's header XID, checksum and counts,
+# and its extent-reference tree's counts. --json prints the same document
+# as JSON with stable keys, so dumps of two captures can be diffed.
 #
 # The dumper is written from Apple's "Apple File System Reference"
 # (2020-06-22) and shares no code with lib/. Every object it reads has its
@@ -78,6 +83,7 @@ module ApfsDump
   KIND_FS = 0x0D
   KIND_NX_REAPER = 0x11
   KIND_NX_REAP_LIST = 0x12
+  KIND_OMAP_SNAPSHOT = 0x13
 
   OBJECT_KINDS = {
     0x00 => "INVALID", 0x01 => "NX_SUPERBLOCK", 0x02 => "BTREE", 0x03 => "BTREE_NODE",
@@ -108,6 +114,7 @@ module ApfsDump
   }.freeze
   OMAP_VAL_FLAGS = { 0x1 => "DELETED", 0x2 => "SAVED", 0x4 => "ENCRYPTED", 0x8 => "NOHEADER", 0x10 => "CRYPTO_GENERATION" }.freeze
   OMAP_VAL_DELETED = 0x1
+  OMAP_SNAPSHOT_FLAGS = { 0x1 => "DELETED", 0x2 => "REVERTED" }.freeze
   NODE_FLAGS = {
     0x1 => "ROOT", 0x2 => "LEAF", 0x4 => "FIXED_KV_SIZE", 0x8 => "HASHED", 0x10 => "NOHEADER",
     0x8000 => "CHECK_KOFF_INVAL"
@@ -576,6 +583,16 @@ module ApfsDump
       oid, xid = key.unpack("Q<Q<")
       flags, size, paddr = value ? value.unpack("L<L<q<") : [nil, nil, nil]
       { oid:, xid:, flags:, flags_names: flags && Layout.names(OMAP_VAL_FLAGS, flags), size:, paddr: }
+    end
+  )
+
+  # An object map's snapshot record: a snapshot's XID, its flags and an
+  # OID the reference reserves (zero). A ghost record has no value.
+  OMAP_SNAPSHOT_CODEC = Codec.new(
+    name: "omap snapshot", key_size: 8, value_size: 16,
+    record: lambda do |key, value|
+      flags, _pad, oid = value ? value.unpack("L<L<Q<") : [nil, nil, nil]
+      { xid: key.unpack1("Q<"), flags:, flags_names: flags && Layout.names(OMAP_SNAPSHOT_FLAGS, flags), oid: }
     end
   )
 
@@ -1612,8 +1629,23 @@ module ApfsDump
   # inline: the walks note which streams decmpfs attributes name and where
   # every stream's extent at offset 0 starts, and the headers are read
   # once all trees are walked, whatever order the records came in.
+  #
+  # Each snapshot metadata record is kept, with or without `records`, and
+  # once the live trees are walked each snapshot is shown with the volume
+  # superblock it names and its own extent-reference tree. A snapshot's
+  # trees are views of the past, so their records are checked but stay out
+  # of the summary and the decmpfs headers, which describe the live volume.
   class Volume
     include Sections
+
+    # The fields of a snapshot metadata record a snapshot shows.
+    SNAPSHOT_META = %i[
+      name snap_flags snap_flags_names create_time change_time inum sblock_oid extentref_tree_oid extentref_tree_type
+    ].freeze
+    # The fields of a snapshot metadata record and of its superblock that
+    # its line shows without `records`: what they point at and count.
+    SNAPSHOT_META_BRIEF = %i[name snap_flags sblock_oid extentref_tree_oid].freeze
+    SNAPSHOT_SUPERBLOCK_BRIEF = %i[omap_oid root_tree_oid snap_meta_ext_oid num_files num_directories num_snapshots fs_alloc_count].freeze
 
     def initialize(obj, slot:, read:, read_block:, problem:, block_size:, records:)
       @obj = obj
@@ -1625,6 +1657,12 @@ module ApfsDump
       @records = records
       @summary = Summary.new
       @compressed = []
+      # The snapshot metadata records, in tree order.
+      @snapshots = []
+      # The volume object map's fields and the XIDs of its snapshot records,
+      # nil when either is unreadable.
+      @omap_fields = nil
+      @omap_snapshot_xids = nil
       # Data-stream IDs that decmpfs attributes name, each to its inode.
       @decmpfs_streams = {}
       # The first physical block of each data stream's extent at offset 0.
@@ -1640,20 +1678,26 @@ module ApfsDump
       # normalization-insensitive volume.
       hashed = sb[:incompatible_features].anybits?(VOL_INCOMPAT_CASE_INSENSITIVE | VOL_INCOMPAT_NORMALIZATION_INSENSITIVE)
       fs = Records.codec(hashed:)
+      omap = section(:omap) { object_map(sb[:omap_oid]) }
+      fs_tree = section(:fs_tree) do
+        tree("file-system tree", oid: sb[:root_tree_oid], type: sb[:root_tree_type], subtype: KIND_FSTREE, codec: fs)
+      end
+      extentref_tree = section(:extentref_tree) do
+        tree("extent-reference tree", oid: sb[:extentref_tree_oid], type: sb[:extentref_tree_type],
+                                      subtype: KIND_BLOCKREFTREE, codec: fs)
+      end
+      # Only this tree's metadata records are snapshots.
+      meta_tree = section(:snap_meta_tree) do
+        tree("snapshot metadata tree", oid: sb[:snap_meta_tree_oid], type: sb[:snap_meta_tree_type],
+                                       subtype: KIND_SNAPMETATREE, codec: fs,
+                                       each: ->(record) { @snapshots << record if record[:type] == J_TYPE_SNAP_METADATA })
+      end
       {
         **sb, role_name: VOL_ROLES.fetch(sb[:role]) { format("unknown(0x%x)", _1) }, drec_keys: hashed ? "hashed" : "plain",
-        omap: section(:omap) { object_map(sb[:omap_oid]) },
-        fs_tree: section(:fs_tree) do
-          tree("file-system tree", oid: sb[:root_tree_oid], type: sb[:root_tree_type], subtype: KIND_FSTREE, codec: fs)
-        end,
-        extentref_tree: section(:extentref_tree) do
-          tree("extent-reference tree", oid: sb[:extentref_tree_oid], type: sb[:extentref_tree_type],
-                                        subtype: KIND_BLOCKREFTREE, codec: fs)
-        end,
-        snap_meta_tree: section(:snap_meta_tree) do
-          tree("snapshot metadata tree", oid: sb[:snap_meta_tree_oid], type: sb[:snap_meta_tree_type],
-                                         subtype: KIND_SNAPMETATREE, codec: fs)
-        end,
+        omap:, fs_tree:, extentref_tree:,
+        snap_meta_tree: meta_tree,
+        # After the live trees and the object map, which it reads.
+        snapshots: section(:snapshots) { snapshots(sb, fs, meta_read: meta_tree.nil? || meta_tree[:node_count].to_i.positive?) },
         fext_tree: section(:fext_tree) do
           tree("file extent tree", oid: sb[:fext_tree_oid], type: sb[:fext_tree_type], subtype: KIND_FEXT_TREE, codec: FEXT_CODEC)
         end,
@@ -1675,14 +1719,34 @@ module ApfsDump
       fields = Layout.with_names(Layout.decode(obj.bytes, OMAP_FIELDS), flags: OMAP_FLAGS)
       walk = btree("object map tree", OMAP_CODEC, storage: STORAGE_PHYSICAL, subtype: KIND_OMAP).walk(fields[:tree_oid])
       @omap = ObjectMap.new(walk[:records])
-      obj.document({ **fields, tree: tree_doc(fields[:tree_oid], nodes: walk[:nodes], kept: walk[:records], count: walk[:records].size) })
+      @omap_fields = fields
+      obj.document({ **fields, tree: tree_doc(fields[:tree_oid], nodes: walk[:nodes], kept: walk[:records], count: walk[:records].size),
+                     snapshot_tree: section(:omap_snapshot_tree) { omap_snapshot_tree(fields) } })
+    end
+
+    # The object map's snapshot tree: one record per snapshot, keyed by its
+    # XID, which #snapshots compares with the metadata records.
+    def omap_snapshot_tree(fields)
+      oid = fields[:snapshot_tree_oid]
+      if oid.zero?
+        @omap_snapshot_xids = []
+        return nil
+      end
+
+      what = "object map snapshot tree"
+      problem(format("%s: type 0x%x is not a physical B-tree", what, fields[:snapshot_tree_type])) if
+        fields[:snapshot_tree_type] != (STORAGE_PHYSICAL | KIND_BTREE)
+      walk = btree(what, OMAP_SNAPSHOT_CODEC, storage: STORAGE_PHYSICAL, subtype: KIND_OMAP_SNAPSHOT).walk(oid)
+      # A root that could not be read leaves the XIDs unknown.
+      @omap_snapshot_xids = walk[:records].map { _1[:xid] } unless walk[:nodes].empty?
+      tree_doc(oid, nodes: walk[:nodes], kept: walk[:records], count: walk[:records].size)
     end
 
     # Walks the tree whose root is `oid` (none when zero); `type` is the
     # superblock's object type for it, which says whether `oid` is virtual
-    # or physical. Each record goes to the summary and has its problems
-    # reported; it is kept only with `records`.
-    def tree(what, oid:, type:, subtype:, codec:)
+    # or physical. Each record has its problems reported, goes to `each`
+    # and, in a `live` tree, to the summary; it is kept only with `records`.
+    def tree(what, oid:, type:, subtype:, codec:, live: true, each: nil)
       return nil if oid.zero?
 
       problem(format("%s: type 0x%x is not a B-tree", what, type)) if (type & 0xFFFF) != KIND_BTREE
@@ -1690,10 +1754,86 @@ module ApfsDump
       count = 0
       walk = btree(what, codec, storage: type & STORAGE_MASK, subtype:).walk(oid) do |record|
         count += 1
-        note(what, record)
+        note(what, record, live:)
+        each&.(record)
         kept << record if @records
       end
       tree_doc(oid, nodes: walk[:nodes], kept:, count:)
+    end
+
+    # Every snapshot the metadata records name, in XID order, with its
+    # superblock and extent-reference tree. `meta_read` is false when the
+    # snapshot metadata tree has a root that could not be read, and then
+    # nothing is compared with its records, which would all seem missing.
+    def snapshots(sb, codec, meta_read:)
+      snapshot_counts(sb, @snapshots.map { _1[:obj_id] }) if meta_read
+      @snapshots.map { |meta| section("snapshot #{meta[:obj_id]}") { snapshot(meta, codec) } }
+    end
+
+    # Compares the metadata records' XIDs with the superblock's snapshot
+    # count and, when the object map and its snapshot tree were read, with
+    # the map's snapshot records, count and most recent snapshot. A record
+    # flagged deleted is compared like any other, and an empty map's most
+    # recent snapshot is taken to be 0: no capture shows a snapshot being
+    # deleted, so a volume caught in one may report a difference here.
+    def snapshot_counts(sb, xids)
+      problem("snapshots: superblock counts #{sb[:num_snapshots]}, metadata records #{xids.size}") if sb[:num_snapshots] != xids.size
+      return unless @omap_fields && @omap_snapshot_xids
+
+      omap_xids = @omap_snapshot_xids
+      unmapped = xids - omap_xids
+      unnamed = omap_xids - xids
+      problem("snapshots: #{unmapped.size} XIDs, first #{unmapped.first}, have no object-map snapshot record") unless unmapped.empty?
+      problem("snapshots: #{unnamed.size} object-map snapshot records, first #{unnamed.first}, have no metadata record") unless unnamed.empty?
+      count, recent = @omap_fields.values_at(:snap_count, :most_recent_snap)
+      problem("snapshots: object map counts #{count}, snapshot records #{omap_xids.size}") if count != omap_xids.size
+      newest = omap_xids.max || 0
+      problem("snapshots: object map's most recent snapshot #{recent}, newest record #{newest}") if recent != newest
+    end
+
+    # A snapshot with `records`: its metadata, every field of its superblock,
+    # the mapping of its file-system root and its extent-reference tree.
+    # Without, one line of scalars: the superblock's header XID, checksum
+    # and counts, the root's block and the extent-reference tree's counts.
+    # A metadata record too short to decode names nothing to read.
+    def snapshot(meta, codec)
+      xid = meta[:obj_id]
+      return { xid:, error: "metadata record unreadable: #{meta[:error]}" } if meta[:error]
+
+      sb = snapshot_superblock(meta[:sblock_oid], xid)
+      root = sb[:root_tree_oid]&.positive? ? root_mapping(sb[:root_tree_oid], xid) : nil
+      refs = tree("snapshot #{xid} extent-reference tree", oid: meta[:extentref_tree_oid], type: meta[:extentref_tree_type],
+                                                           subtype: KIND_BLOCKREFTREE, codec:, live: false)
+      return { xid:, **meta.slice(*SNAPSHOT_META), superblock: sb, root_tree: root, extentref_tree: refs } if @records
+
+      { xid:, **meta.slice(*SNAPSHOT_META_BRIEF), superblock_xid: sb[:xid], superblock_cksum_ok: sb[:cksum_ok],
+        **(sb[:error] ? { superblock_error: sb[:error] } : {}), **sb.slice(*SNAPSHOT_SUPERBLOCK_BRIEF),
+        root_tree_paddr: root&.dig(:paddr), extentref_nodes: refs&.dig(:node_count), extentref_records: refs&.dig(:record_count) }
+    end
+
+    # The volume superblock a snapshot names: a physical object at `oid`,
+    # or the reason it cannot be read.
+    def snapshot_superblock(oid, xid)
+      what = "snapshot #{xid} superblock"
+      obj = @read.(oid, what)
+      obj.header_problems(kind: KIND_FS, storage: STORAGE_PHYSICAL, oid: obj.addr).each { problem("#{what}: #{_1}") }
+      fields = Layout.with_names(Layout.decode(obj.bytes, APFS_FIELDS),
+                                 features: VOL_FEATURES, readonly_compatible_features: VOL_ROCOMPAT,
+                                 incompatible_features: VOL_INCOMPAT, fs_flags: VOL_FS_FLAGS)
+      problem(format("%s: magic 0x%08x is not APSB", what, fields[:magic])) if fields[:magic] != APFS_MAGIC
+      obj.document(fields)
+    rescue Error => e
+      { error: problem(e.message) }
+    end
+
+    # Where the volume object map puts a snapshot's file-system root at the
+    # snapshot's XID; the block is not read, since it may be a node the live
+    # tree shares.
+    def root_mapping(oid, xid)
+      found = @omap&.find(oid, xid)
+      return { oid:, error: problem("snapshot #{xid}: root tree oid #{oid} has no object-map record at its XID") } unless found
+
+      { oid:, **found.slice(:xid, :flags, :flags_names, :size, :paddr) }
     end
 
     def btree(what, codec, storage:, subtype:)
@@ -1701,11 +1841,13 @@ module ApfsDump
       BTree.new(fetch:, problem: @problem, codec:, what: "#{@label} #{what}", block_size: @block_size, storage:, subtype:)
     end
 
-    def note(what, record)
-      @summary.add(record)
+    def note(what, record, live:)
       [*record[:error], *record[:problems]].each do
         problem("#{what}: #{record[:type_name]} record of object #{record[:obj_id]}: #{_1}")
       end
+      return unless live
+
+      @summary.add(record)
       compression(record)
     end
 

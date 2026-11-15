@@ -69,9 +69,9 @@
   generation) is accepted like the map flag or refused as corrupt, as the
   format design's value rule says, waits on E1's volume records. The volume object map's snapshot fields
   are not yet compared with the volume's snapshot tree, which the snapshot stage reads.
-  `tools/apfs/apfsdump.rb` does not decode snapshot superblocks, snapshot
-  extent-reference trees or the object map's snapshot tree, which the
-  snapshot stage needs to read its fixtures.
+  The snapshot stage's fixtures need a native snapshot of a disk-image
+  volume, which `apfs_systemsnapshot` refuses even as root; the E9 section
+  of `docs/apfs-research.md` lists the other ways, each the owner's choice.
   Verification walks each snapshot's extent-reference tree inside the
   snapshot-tree scan, so a refusal in one snapshot's tree ends the scan and
   damage in later snapshots goes unreported; the snapshot stage should run

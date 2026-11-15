@@ -84,6 +84,18 @@ class ApfsDumpTest < Minitest::Test
     assert_equal 1, tree[:records].size
   end
 
+  def test_omap_snapshot_codec_decodes_flags_and_reserved_oid
+    record = OMAP_SNAPSHOT_CODEC.record.call([4].pack("Q<"), [3, 0, 99].pack("L<L<Q<"))
+
+    assert_equal({ xid: 4, flags: 3, flags_names: "DELETED,REVERTED", oid: 99 }, record)
+  end
+
+  def test_omap_snapshot_codec_keeps_ghost_flags_absent
+    record = OMAP_SNAPSHOT_CODEC.record.call([4].pack("Q<"), nil)
+
+    assert_equal({ xid: 4, flags: nil, flags_names: nil, oid: nil }, record)
+  end
+
   def test_a_ghost_in_a_tree_without_ghosts_is_reported_and_dropped
     node = node_block(oid: 9, level: 0, entries: [[[1026, 2].pack("Q<Q<"), nil]])
     tree, problems = walk(9 => node)
@@ -217,6 +229,219 @@ class ApfsDumpTest < Minitest::Test
     refute_includes volume[:fs_tree].keys, :records
   end
 
+  def test_snapshots_dump_their_superblock_headers_and_counts
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image)), records: true)
+
+    volume = container.dump[:volumes].first
+
+    assert_empty container.problems
+    assert_equal [4, 8], volume[:omap][:snapshot_tree][:records].map { _1[:xid] }
+    assert_equal [{ addr: 26, oid: 26, xid: 4, magic: APFS_MAGIC, cksum_ok: true, num_snapshots: 1, num_files: 11 },
+                  { addr: 27, oid: 27, xid: 8, magic: APFS_MAGIC, cksum_ok: true, num_snapshots: 2, num_files: 22 }],
+                 volume[:snapshots].map { _1[:superblock].slice(:addr, :oid, :xid, :magic, :cksum_ok, :num_snapshots, :num_files) }
+  end
+
+  # Historical roots at XIDs 2 and 6 precede snapshots 4 and 8; the live
+  # root at XID 9 must not replace either historical mapping.
+  def test_snapshot_roots_are_resolved_at_the_snapshot_xid
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image)), records: true)
+
+    volume = container.dump[:volumes].first
+
+    assert_equal({ xid: 9, paddr: 15 }, volume[:omap][:tree][:records].last.slice(:xid, :paddr))
+    assert_equal [{ oid: 1028, xid: 2, paddr: 30 }, { oid: 1028, xid: 6, paddr: 31 }],
+                 volume[:snapshots].map { _1[:root_tree].slice(:oid, :xid, :paddr) }
+  end
+
+  def test_snapshots_dump_their_metadata_fields
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image)), records: true)
+
+    snapshots = container.dump[:volumes].first[:snapshots]
+
+    assert_equal [{ xid: 4, name: "older", create_time: 100, change_time: 200, inum: 2,
+                    snap_flags: 0, extentref_tree_oid: 28, extentref_tree_type: 0x4000_0002 },
+                  { xid: 8, name: "newer", create_time: 100, change_time: 200, inum: 2,
+                    snap_flags: 0, extentref_tree_oid: 29, extentref_tree_type: 0x4000_0002 }],
+                 snapshots.map { _1.slice(:xid, :name, :create_time, :change_time, :inum, :snap_flags,
+                                         :extentref_tree_oid, :extentref_tree_type) }
+  end
+
+  def test_snapshots_dump_their_extent_reference_records
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image)), records: true)
+
+    snapshots = container.dump[:volumes].first[:snapshots]
+
+    assert_equal [[{ obj_id: 41, type_name: "EXTENT", length: 2 }],
+                  [{ obj_id: 42, type_name: "EXTENT", length: 3 }]],
+                 snapshots.map { |snap| snap[:extentref_tree][:records].map { _1.slice(:obj_id, :type_name, :length) } }
+  end
+
+  def test_a_snapshot_superblock_with_no_root_has_no_root_mapping
+    bytes = snapshot_container_image(older_root_oid: 0)
+    container = Container.new(Image.new(BytesIO.new(bytes:)), records: true)
+
+    snapshot = container.dump[:volumes].first[:snapshots].first
+
+    assert_equal 0, snapshot[:superblock][:root_tree_oid]
+    assert_nil snapshot[:root_tree]
+    assert_empty container.problems
+  end
+
+  def test_snapshot_extent_records_stay_out_of_the_live_summary
+    volume = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image)), records: true).dump[:volumes].first
+
+    assert_equal({ "DIR_REC" => 1, "EXTENT" => 1, "FEXT" => 1, "FILE_EXTENT" => 1,
+                   "INODE" => 1, "SNAP_METADATA" => 2, "SNAP_NAME" => 2, "XATTR" => 1 }, volume[:summary][:by_type])
+    assert_equal [24], volume[:compressed].map { _1[:obj_id] }
+  end
+
+  def test_without_records_snapshots_are_flat_scalar_hashes
+    volume = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image))).dump[:volumes].first
+
+    assert_equal [{ xid: 4, name: "older", superblock_xid: 4, superblock_cksum_ok: true,
+                    root_tree_oid: 1028, root_tree_paddr: 30, extentref_records: 1 },
+                  { xid: 8, name: "newer", superblock_xid: 8, superblock_cksum_ok: true,
+                    root_tree_oid: 1028, root_tree_paddr: 31, extentref_records: 1 }],
+                 volume[:snapshots].map { _1.slice(:xid, :name, :superblock_xid, :superblock_cksum_ok,
+                                                 :root_tree_oid, :root_tree_paddr, :extentref_records) }
+    volume[:snapshots].each do |snapshot|
+      snapshot.each do |key, value|
+        refute value.is_a?(Hash) || value.is_a?(Array), "snapshot #{snapshot[:xid]} field #{key} must be scalar"
+      end
+    end
+  end
+
+  def test_text_prints_each_snapshot_on_one_line
+    volume = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image))).dump[:volumes].first
+    out = StringIO.new
+
+    Text.render({ snapshots: volume[:snapshots] }, out)
+
+    assert_equal 2, out.string.lines.size
+    assert_match(/\Asnapshots\[0\]: xid=4 name=older .*superblock_xid=4 .*root_tree_paddr=30 .*extentref_records=1\n/, out.string)
+    assert_match(/\nsnapshots\[1\]: xid=8 name=newer .*superblock_xid=8 .*root_tree_paddr=31 .*extentref_records=1\n\z/, out.string)
+  end
+
+  def test_an_object_map_snapshot_without_metadata_is_reported
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image(snapshot_xids: [4, 8, 9]))))
+
+    container.dump
+
+    assert_equal ["volume 0 snapshots: 1 object-map snapshot records, first 9, have no metadata record"], container.problems
+  end
+
+  def test_an_object_map_snapshot_count_disagreement_is_reported
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image(snap_count: 3))))
+
+    container.dump
+
+    assert_equal ["volume 0 snapshots: object map counts 3, snapshot records 2"], container.problems
+  end
+
+  def test_snapshot_metadata_without_an_object_map_snapshot_record_is_reported
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image(snapshot_xids: [4]))))
+
+    container.dump
+
+    assert_equal ["volume 0 snapshots: 1 XIDs, first 8, have no object-map snapshot record"], container.problems
+  end
+
+  def test_an_object_map_most_recent_snapshot_disagreement_is_reported
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image(most_recent_snap: 7))))
+
+    container.dump
+
+    assert_equal ["volume 0 snapshots: object map's most recent snapshot 7, newest record 8"], container.problems
+  end
+
+  def test_a_superblock_snapshot_count_disagreement_is_reported
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image(num_snapshots: 3))))
+
+    container.dump
+
+    assert_equal ["volume 0 snapshots: superblock counts 3, metadata records 2"], container.problems
+  end
+
+  # An unreadable superblock must not hide the same snapshot's extent tree.
+  def test_a_snapshot_superblock_outside_the_container_preserves_its_extent_tree
+    container = Container.new(Image.new(BytesIO.new(bytes: snapshot_container_image(older_sblock: 64))), records: true)
+
+    snapshot = container.dump[:volumes].first[:snapshots].first
+
+    assert_equal ["volume 0 snapshot 4 superblock: blocks 64+1 are outside the container (64 blocks)"],
+                 container.problems
+    assert_equal [41], snapshot[:extentref_tree][:records].map { _1[:obj_id] }
+  end
+
+  def test_snapshot_metadata_in_the_live_file_system_tree_is_not_a_snapshot
+    live_metadata = snap_meta_record(xid: 12, name: "live", sblock: 64, extentref: 0)
+    bytes = snapshot_container_image(extra_live_records: [live_metadata])
+    container = Container.new(Image.new(BytesIO.new(bytes:)), records: true)
+
+    volume = container.dump[:volumes].first
+
+    assert_includes volume[:fs_tree][:records].map { _1.slice(:type_name, :obj_id) },
+                    { type_name: "SNAP_METADATA", obj_id: 12 }
+    assert_equal [4, 8], volume[:snapshots].map { _1[:xid] }
+    assert_empty container.problems
+  end
+
+  def test_an_unreadable_object_map_snapshot_root_skips_dependent_cross_checks
+    # Block 14 already belongs to the object map; block 64 is outside the image.
+    { 14 => "block 14 is already read for another structure",
+      64 => "blocks 64+1 are outside the container (64 blocks)" }.each do |oid, failure|
+      bytes = snapshot_container_image(snapshot_tree_oid: oid)
+      container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+      volume = container.dump[:volumes].first
+
+      assert_equal [4, 8], volume[:snapshots].map { _1[:xid] }
+      assert_equal ["volume 0 object map snapshot tree: node #{oid}: volume 0 object map snapshot tree: #{failure}"],
+                   container.problems, "root OID #{oid}"
+    end
+  end
+
+  def test_an_unreadable_snapshot_metadata_root_skips_dependent_cross_checks
+    { 14 => "block 14 is already read for another structure",
+      64 => "blocks 64+1 are outside the container (64 blocks)" }.each do |oid, failure|
+      bytes = snapshot_container_image(snap_meta_oid: oid)
+      container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+      volume = container.dump[:volumes].first
+
+      assert_empty volume[:snapshots]
+      assert_equal ["volume 0 snapshot metadata tree: node #{oid}: volume 0 snapshot metadata tree: #{failure}"],
+                   container.problems, "root OID #{oid}"
+    end
+  end
+
+  def test_a_short_snapshot_metadata_value_yields_an_error_without_reading_its_trees
+    # Neither named tree can be read: the superblock is outside the image
+    # and block 14 already belongs to the object map.
+    key, value = snap_meta_record(xid: 4, name: "older", sblock: 64, extentref: 14)
+    bytes = snapshot_container_image(older_metadata: [key, value.byteslice(0, 16)])
+    container = Container.new(Image.new(BytesIO.new(bytes:)), records: true)
+
+    snapshots = container.dump[:volumes].first[:snapshots]
+
+    assert_equal({ xid: 4, error: "metadata record unreadable: structure ends before byte 16" }, snapshots.first)
+    assert_equal [8], snapshots.drop(1).map { _1[:xid] }
+    assert_equal ["volume 0 snapshot metadata tree: SNAP_METADATA record of object 4: structure ends before byte 16"],
+                 container.problems
+  end
+
+  def test_without_records_an_unreadable_snapshot_superblock_has_a_scalar_error
+    bytes = snapshot_container_image(older_sblock: 64)
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+
+    snapshot = container.dump[:volumes].first[:snapshots].first
+
+    error = "volume 0 snapshot 4 superblock: blocks 64+1 are outside the container (64 blocks)"
+    assert_equal error, snapshot[:superblock_error]
+    assert_equal [error], container.problems
+    refute_includes snapshot.keys, :superblock
+  end
+
   def test_volume_selects_one_slot_and_reports_a_missing_one
     container = Container.new(Image.new(BytesIO.new(bytes: container_image)), volume: 5)
 
@@ -348,17 +573,17 @@ class ApfsDumpTest < Minitest::Test
   # A sealed root node of a fixed 16/16 physical tree. Keys fill the key
   # area from its start; values fill the value area back from the footer. A
   # nil value is a ghost.
-  def node_block(oid:, level:, entries:, nkeys: entries.size, subtype: KIND_OMAP)
+  def node_block(oid:, level:, entries:, nkeys: entries.size, subtype: KIND_OMAP, key_size: 16, value_size: 16)
     toc_len = TOC_ENTRIES * 4
     flags = NODE_ROOT | NODE_FIXED | (level.zero? ? NODE_LEAF : 0)
     block = "\0".b * BLOCK
     put(block, 0, [0, oid, 1, KIND_BTREE | STORAGE_PHYSICAL, subtype, flags, level, nkeys, 0, toc_len].pack("Q<Q<Q<L<L<S<S<L<S<S<"))
     entries.each_with_index do |(key, value), i|
-      put(block, NODE_HEADER_END + i * 4, [i * 16, value ? (i + 1) * 16 : BTOFF_INVALID].pack("S<S<"))
-      put(block, NODE_HEADER_END + toc_len + i * 16, key)
-      put(block, BLOCK - TREE_INFO_SIZE - (i + 1) * 16, value) if value
+      put(block, NODE_HEADER_END + i * 4, [i * key_size, value ? (i + 1) * value_size : BTOFF_INVALID].pack("S<S<"))
+      put(block, NODE_HEADER_END + toc_len + i * key_size, key)
+      put(block, BLOCK - TREE_INFO_SIZE - (i + 1) * value_size, value) if value
     end
-    put(block, BLOCK - TREE_INFO_SIZE, [0x12, BLOCK, 16, 16, 16, 16, entries.size, 1].pack("L<6Q<2"))
+    put(block, BLOCK - TREE_INFO_SIZE, [0x12, BLOCK, key_size, value_size, key_size, value_size, entries.size, 1].pack("L<6Q<2"))
     seal(block)
   end
 
@@ -384,7 +609,8 @@ class ApfsDumpTest < Minitest::Test
   # volume's object map is at 13 with its tree at 14, which maps the
   # file-system tree's virtual root 1028 to block 15. The volume's file
   # extent tree is at 17; the decmpfs data it points to is at 16.
-  def container_image(cibs: [20], spaceman_size: BLOCK, fs_oid: [1026], fext_oid: 17, older_layout: false)
+  def container_image(cibs: [20], spaceman_size: BLOCK, fs_oid: [1026], fext_oid: 17,
+                      older_layout: false, extra_blocks: {})
     sb = seal(superblock_block(block_count: 64, fs_oid:, omap_oid: 10))
     omap_record = [[1026, 1].pack("Q<Q<"), [0, BLOCK, 12].pack("L<L<q<")] # (oid, xid) -> (flags, size, paddr)
     blocks = {
@@ -398,12 +624,13 @@ class ApfsDumpTest < Minitest::Test
       17 => node_block(oid: 17, level: 0, entries: [[[40, 0].pack("Q<Q<"), [4096, 16].pack("Q<Q<")]], subtype: KIND_FEXT_TREE),
       20 => chunk_info, 21 => bitmap(25), 22 => bitmap(1)
     }
+    blocks = blocks.merge(extra_blocks)
     Array.new(64) { blocks.fetch(_1) { "\0".b * BLOCK } }.join
   end
 
-  def object(oid:, type:, fields: {}, subtype: 0)
+  def object(oid:, type:, fields: {}, subtype: 0, xid: 1)
     block = "\0".b * BLOCK
-    put(block, 8, [oid, 1, type, subtype].pack("Q<Q<L<L<"))
+    put(block, 8, [oid, xid, type, subtype].pack("Q<Q<L<L<"))
     fields.each { |off, bytes| put(block, off, bytes) }
     seal(block)
   end
@@ -440,29 +667,87 @@ class ApfsDumpTest < Minitest::Test
   # Index 0, one chunk: xid 1, first block 0, 64 blocks, 39 free, bitmap at 21.
   def chunk_info = object(oid: 20, type: 0x4000_0007, fields: { 32 => [0, 1, 1, 0, 64, 39, 21].pack("L<L<Q<Q<L<L<Q<") })
 
-  # Manually managed, no snapshots, physical tree types.
-  def omap(oid:, tree:) = object(oid:, type: 0x4000_000B, fields: { 32 => [1, 0, 0x4000_0002, 0x4000_0002, tree].pack("L<4Q<") })
+  # Manually managed, physical tree types; no snapshots by default.
+  def omap(oid:, tree:, snap_count: 0, snapshot_tree_oid: 0, most_recent_snap: 0,
+           snapshot_tree_type: 0x4000_0002)
+    object(oid:, type: 0x4000_000B,
+           fields: { 32 => [1, snap_count, 0x4000_0002, snapshot_tree_type, tree,
+                            snapshot_tree_oid, most_recent_snap].pack("L<4Q<3") })
+  end
 
   # Case-insensitive, its object map at 13, a virtual file-system tree
-  # rooted at 1028, a physical file extent tree at 17, no extent-reference
-  # or snapshot tree, named TEST.
-  def volume_superblock(fext_oid:)
-    object(oid: 1026, type: KIND_FS, fields: { 32 => "APSB", 56 => [VOL_INCOMPAT_CASE_INSENSITIVE].pack("Q<"),
-                                               116 => [KIND_BTREE].pack("L<"), 128 => [13, 1028].pack("Q<Q<"),
+  # rooted at 1028 by default, named TEST. The caller supplies the file
+  # extent tree; extent-reference and snapshot metadata trees default to absent.
+  def volume_superblock(fext_oid:, oid: 1026, xid: 1, type: KIND_FS, extentref_oid: 0,
+                        snap_meta_oid: 0, num_snapshots: 0, num_files: 0, root_oid: 1028)
+    extentref_type = extentref_oid.zero? ? 0 : 0x4000_0002
+    snap_meta_type = snap_meta_oid.zero? ? 0 : 0x4000_0002
+    object(oid:, xid:, type:, fields: { 32 => "APSB", 56 => [VOL_INCOMPAT_CASE_INSENSITIVE].pack("Q<"),
+                                               116 => [KIND_BTREE, extentref_type, snap_meta_type].pack("L<3"),
+                                               128 => [13, root_oid, extentref_oid, snap_meta_oid].pack("Q<4"),
+                                               184 => [num_files].pack("Q<"), 216 => [num_snapshots].pack("Q<"),
                                                704 => "TEST", 1032 => [fext_oid, 0x4000_0002].pack("Q<L<") })
   end
 
   # Virtual OID 1028 at xid 1 lives at block 15.
-  def fs_root_record = [[1028, 1].pack("Q<Q<"), [0, BLOCK, 15].pack("L<L<q<")]
+  def fs_root_record(xid: 1, paddr: 15) = [[1028, xid].pack("Q<Q<"), [0, BLOCK, paddr].pack("L<L<q<")]
+
+  def snap_meta_record(xid:, name:, sblock:, extentref:, create_time: 100, change_time: 200, inum: 2)
+    [[(1 << 60) | xid].pack("Q<"),
+     [extentref, sblock, create_time, change_time, inum, 0x4000_0002, 0, name.bytesize + 1].pack("Q<5L<2S<") + "#{name}\0"]
+  end
+
+  def snap_name_record(name:, xid:)
+    [[(11 << 60) | 0x0FFF_FFFF_FFFF_FFFF, name.bytesize + 1].pack("Q<S<") + "#{name}\0", [xid].pack("Q<")]
+  end
+
+  def extent_record(block:, length:)
+    [[(2 << 60) | block].pack("Q<"), [(1 << 60) | length, 24, 1].pack("Q<Q<L<")]
+  end
+
+  def extentref_block(oid:, block:, length:)
+    fs_node_block(oid:, type: 0x4000_0002, subtype: 0x0F,
+                  records: [extent_record(block:, length:)])
+  end
+
+  # Blocks 24-29 hold snapshot metadata, the omap snapshot tree, two
+  # superblocks and their extent trees. Block 18 holds the live extents.
+  # Historical root blocks are present but are only resolved, not walked.
+  def snapshot_container_image(snapshot_xids: [4, 8], snap_count: snapshot_xids.size,
+                               most_recent_snap: snapshot_xids.max, num_snapshots: 2, older_sblock: 26,
+                               snap_meta_oid: 24, snapshot_tree_oid: 25, older_metadata: nil,
+                               extra_live_records: [], older_root_oid: 1028)
+    metadata = [older_metadata || snap_meta_record(xid: 4, name: "older", sblock: older_sblock, extentref: 28),
+                snap_meta_record(xid: 8, name: "newer", sblock: 27, extentref: 29),
+                snap_name_record(name: "newer", xid: 8), snap_name_record(name: "older", xid: 4)]
+    roots = [fs_root_record(xid: 2, paddr: 30), fs_root_record(xid: 6, paddr: 31), fs_root_record(xid: 9)]
+    snapshot_entries = snapshot_xids.map { [[_1].pack("Q<"), [0, 0, 0].pack("L<L<Q<")] }
+    container_image(extra_blocks: {
+      12 => volume_superblock(fext_oid: 17, xid: 10, extentref_oid: 18, snap_meta_oid:, num_snapshots:),
+      13 => omap(oid: 13, tree: 14, snap_count:, snapshot_tree_oid:, most_recent_snap:),
+      14 => node_block(oid: 14, level: 0, entries: roots),
+      15 => fs_node_block(oid: 1028, xid: 9,
+                          records: [INODE_RECORD, DECMPFS_STREAM_RECORD, DREC_RECORD, FILE_EXTENT_RECORD] + extra_live_records),
+      18 => extentref_block(oid: 18, block: 40, length: 1),
+      24 => fs_node_block(oid: 24, type: 0x4000_0002, subtype: 0x10, records: metadata),
+      25 => node_block(oid: 25, level: 0, entries: snapshot_entries, subtype: 0x13, key_size: 8),
+      26 => volume_superblock(fext_oid: 0, oid: 26, xid: 4, type: 0x4000_000D, num_snapshots: 1, num_files: 11, root_oid: older_root_oid),
+      27 => volume_superblock(fext_oid: 0, oid: 27, xid: 8, type: 0x4000_000D, num_snapshots: 2, num_files: 22),
+      28 => extentref_block(oid: 28, block: 41, length: 2),
+      29 => extentref_block(oid: 29, block: 42, length: 3),
+      30 => fs_node_block(oid: 1028, xid: 2, records: []),
+      31 => fs_node_block(oid: 1028, xid: 6, records: [])
+    })
+  end
 
   # A virtual root and leaf node of a file-system tree, whose records vary
   # in size: 8-byte kvloc_t entries (key offset and length, value offset
   # and length), keys from the end of the table of contents, values back
   # from the footer.
-  def fs_node_block(oid:, records:)
+  def fs_node_block(oid:, records:, type: KIND_BTREE, subtype: KIND_FSTREE, xid: 1)
     toc_len = TOC_ENTRIES * 8
     block = "\0".b * BLOCK
-    put(block, 0, [0, oid, 1, KIND_BTREE, KIND_FSTREE, NODE_ROOT | NODE_LEAF, 0, records.size, 0, toc_len].pack("Q<Q<Q<L<L<S<S<L<S<S<"))
+    put(block, 0, [0, oid, xid, type, subtype, NODE_ROOT | NODE_LEAF, 0, records.size, 0, toc_len].pack("Q<Q<Q<L<L<S<S<L<S<S<"))
     records.each_with_index.reduce([0, 0]) do |(k_off, v_end), ((key, value), i)|
       v_end += value.bytesize
       put(block, NODE_HEADER_END + i * 8, [k_off, key.bytesize, v_end, value.bytesize].pack("S<4"))

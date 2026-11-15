@@ -363,7 +363,7 @@ captures with their command records and `fsck_apfs` output:
 | E6 Sparse and clones | `truncate` and seek-writes; `cp -c` then overwrite one branch |
 | E7 Compression | `ditto --hfsCompression` on small and large files; installed applications; each codec type found, inline and resource-fork |
 | E8 Checkpoint history | Mount, write, unmount several times, capturing the ring; copies truncated or with the newest checkpoint's blocks zeroed |
-| E9 Snapshots | Snapshots of a disk-image volume, which only root can create (`apfs_systemsnapshot -s`, run by the owner as `e9-snap` and, on a case-sensitive volume, `e9-snap-cs`), with data modified, deleted, added, cloned and overwritten in the middle between them, and names that collide under case folding or normalization; until then, static decoding of the corpus specimen `dissect-apfs-snapshot` |
+| E9 Snapshots | Snapshots of a disk-image volume, with data modified, deleted, added, cloned and overwritten in the middle between them, and names that collide under case folding or normalization: the owner's runs `e9-snap` and, on a case-sensitive volume, `e9-snap-cs`, whose snapshots `apfs_systemsnapshot -s` refuses even as root, so they wait on a way the owner chooses from E9's list; until then, static decoding of the corpus specimen `dissect-apfs-snapshot` |
 | E10 Volumes | `diskutil apfs addVolume` with roles; a volume group if available |
 | E11 Encrypted and sealed | `newfs_apfs -E`, `diskutil apfs addVolume -passphrase` and `encryptVolume`, and `hdiutil create -encryption` for contrast; copies of the host's sealed cryptex images; structure only |
 | E12 Large containers | 1 TiB and 128 TiB sparse containers: address blocks, pool sizes, ring sizes |
