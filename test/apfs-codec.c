@@ -996,13 +996,48 @@ test_fletcher(void)
 } while (0)
 
 static void
+test_spaceman_decodes_both_layouts_and_encodes_only_current(void)
+{
+	apfs_gen_spaceman_t generated;
+	apfs_spaceman_t decoded;
+	unsigned char raw[4096] = { 0 }, encoded[4096];
+
+	scenario = "generated current space manager structure end";
+	expect(apfs_gen_spaceman_geometry(4096, 1024, &generated) == 4096,
+	    "current geometry");
+	expect(apfs_gen_spaceman_build(raw, sizeof(raw), &generated),
+	    "current builder");
+	expect(apfs_spaceman_decode(raw, sizeof(raw), &decoded),
+	    "current decode");
+	expect(decoded.structure_end == APFS_SM_BYTES,
+	    "current structure ends at 2520");
+
+	scenario = "generated older space manager cannot encode";
+	expect(apfs_gen_spaceman_geometry_older(4096, 1024, &generated) ==
+	    4096, "older geometry");
+	bzero(raw, sizeof(raw));
+	/* These bytes belong to the older XID array, not version and size. */
+	fsimg_store_le64(raw + 336, (UINT64_C(1) << 32) | 10);
+	expect(apfs_gen_spaceman_build(raw, sizeof(raw), &generated),
+	    "older builder");
+	expect(apfs_spaceman_decode(raw, sizeof(raw), &decoded),
+	    "older decode");
+	expect(decoded.structure_end == APFS_SM_OLDER_BYTES,
+	    "older structure ends at 336");
+	expect(decoded.version == 0 && decoded.struct_size == 0,
+	    "older layout has no version or structure size");
+	REJECT_WRITE(encoded, apfs_spaceman_encode(encoded, sizeof(encoded),
+	    &decoded));
+}
+
+static void
 test_truncated_records(void)
 {
 	unsigned char raw[4096] = {0}, encoded[4096];
 	apfs_obj_t object = {0};
 	apfs_nx_t nx = {0};
 	apfs_omap_t omap = {0};
-	apfs_spaceman_t spaceman = {0};
+	apfs_spaceman_t spaceman = { .structure_end = APFS_SM_BYTES };
 	apfs_reaper_t reaper = {0};
 	apfs_cpm_block_t checkpoint = { .count = 1 };
 	apfs_cpm_t mapping = {0};
@@ -4602,6 +4637,7 @@ main(void)
 	test_native_blocks();
 	test_patterned_encodes();
 	test_fletcher();
+	test_spaceman_decodes_both_layouts_and_encodes_only_current();
 	test_truncated_records();
 	test_object_lengths();
 	test_nx_area_counts();

@@ -400,7 +400,8 @@ allocation_build(fixture_t *f)
 }
 
 static void
-fixture_init(fixture_t *f, unsigned volumes)
+fixture_init_layout(fixture_t *f, unsigned volumes,
+    apfs_gen_layout_t layout)
 {
 	apfs_gen_mapping_t mappings[] = {
 		{ .type = 0x80000005, .size = BLOCK, .oid = 500, .address = 9 },
@@ -438,7 +439,12 @@ fixture_init(fixture_t *f, unsigned volumes)
 	for (unsigned i = 0; i < volumes; i++)
 		image.nx.volume_oids[i] = 1000 + i;
 	CHECK(apfs_gen_container_build(f->bytes, IMAGE_BYTES, &image));
-	CHECK(apfs_gen_spaceman_geometry(BLOCK, BLOCKS, &f->sm) == BLOCK);
+	if (layout == APFS_GEN_LAYOUT_OLDER)
+		CHECK(apfs_gen_spaceman_geometry_older(BLOCK, BLOCKS,
+		    &f->sm) == BLOCK);
+	else
+		CHECK(apfs_gen_spaceman_geometry(BLOCK, BLOCKS,
+		    &f->sm) == BLOCK);
 	f->sm.object = (apfs_gen_object_t){ .oid = 500, .xid = 10,
 		.type = 0x80000005 };
 	f->sm.ip_bm_base = 61;
@@ -490,6 +496,12 @@ fixture_init(fixture_t *f, unsigned volumes)
 	ops.read_at = memory_read;
 	ops.get_size = memory_size;
 	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, f, &f->io, NULL) == FSIMG_OK);
+}
+
+static void
+fixture_init(fixture_t *f, unsigned volumes)
+{
+	fixture_init_layout(f, volumes, APFS_GEN_LAYOUT_CURRENT);
 }
 
 static void
@@ -560,6 +572,17 @@ test_valid_container_counts(void)
 
 	scenario = "valid container counts";
 	fixture_init(&f, 1);
+	verify_fixture(&f, 0, FSIMG_OK, "");
+	fixture_close(&f);
+}
+
+static void
+test_older_layout_container_verifies(void)
+{
+	fixture_t f;
+
+	scenario = "older layout container verifies";
+	fixture_init_layout(&f, 1, APFS_GEN_LAYOUT_OLDER);
 	verify_fixture(&f, 0, FSIMG_OK, "");
 	fixture_close(&f);
 }
@@ -2533,6 +2556,7 @@ main(void)
 	test_structural_verification_checks_last_compressed_table_entry();
 	test_zero_size_compressed_file_requires_empty_resource_table();
 	test_valid_container_counts();
+	test_older_layout_container_verifies();
 	test_allocation_damage();
 	test_double_claims();
 	test_snapshot_shares_data_with_live_volume();

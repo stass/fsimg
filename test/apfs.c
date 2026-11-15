@@ -54,6 +54,7 @@ enum {
 	NX_BLOCK_COUNT_OFFSET = 40,
 	OMAP_TREE_TYPE_OFFSET = 40,
 	REAPER_HEAD_OFFSET = 48,
+	NATIVE_VOLUME_INCOMPAT_OFFSET = 56,
 	NODE_KEY0_OFFSET = 56,
 	REAPER_TAIL_OFFSET = 56,
 	NODE_VALUE0_OFFSET = 58,
@@ -74,6 +75,7 @@ enum {
 	NODE_KEY3_OID_OFFSET = 120,
 	NX_DATA_BASE_OFFSET = 120,
 	NX_DESC_NEXT_OFFSET = 128,
+	NATIVE_VOLUME_ROOT_OID_OFFSET = 136,
 	NX_DESC_INDEX_OFFSET = 136,
 	NX_DESC_LEN_OFFSET = 140,
 	NX_DATA_LEN_OFFSET = 148,
@@ -344,7 +346,8 @@ build_checkpoints(fixture_t *f, unsigned count, uint64_t block0_xid)
 #define VOLUME_MAX 4u
 
 static void
-build_openable(fixture_t *f, unsigned occupied_slots)
+build_openable_layout(fixture_t *f, unsigned occupied_slots,
+    apfs_gen_layout_t layout)
 {
 	apfs_gen_omap_record_t records[VOLUME_MAX];
 	apfs_gen_tree_t tree;
@@ -356,8 +359,12 @@ build_openable(fixture_t *f, unsigned occupied_slots)
 	size_t count = 0;
 
 	build_checkpoints(f, 2, 10);
-	CHECK(apfs_gen_spaceman_geometry(f->block_size, BLOCKS,
-	    &spaceman) == f->block_size);
+	if (layout == APFS_GEN_LAYOUT_OLDER)
+		CHECK(apfs_gen_spaceman_geometry_older(f->block_size,
+		    BLOCKS, &spaceman) == f->block_size);
+	else
+		CHECK(apfs_gen_spaceman_geometry(f->block_size, BLOCKS,
+		    &spaceman) == f->block_size);
 	spaceman.object = (apfs_gen_object_t){ .oid = 100, .xid = 20,
 	    .type = 0x80000005 };
 	spaceman.devices[0].free_count = 700;
@@ -370,6 +377,12 @@ build_openable(fixture_t *f, unsigned occupied_slots)
 			    VOLUME_OID + slot : 0);
 		CHECK(apfs_gen_seal(block_at(f, b), f->block_size));
 	}
+	/*
+	 * The container builder left a current-layout version and size at
+	 * 336, where the older layout's XID array lies; start it from zero.
+	 */
+	if (layout == APFS_GEN_LAYOUT_OLDER)
+		bzero(block_at(f, NEWEST_SPACEMAN), f->block_size);
 	CHECK(apfs_gen_spaceman_build(block_at(f, NEWEST_SPACEMAN),
 	    f->block_size, &spaceman));
 	for (unsigned slot = 0; slot < VOLUME_MAX; slot++) {
@@ -415,6 +428,130 @@ build_openable(fixture_t *f, unsigned occupied_slots)
 	    .xid = 10, .type = 0x4000000b }, .flags = 1,
 	    .tree_type = 0x40000002, .tree_oid = root };
 	CHECK(apfs_gen_omap_build(block_at(f, MAP_BLOCK), f->block_size, &map));
+}
+
+static void
+build_openable(fixture_t *f, unsigned occupied_slots)
+{
+	build_openable_layout(f, occupied_slots, APFS_GEN_LAYOUT_CURRENT);
+}
+
+/* A plain-name root with one regular file backed by one physical extent. */
+static void
+build_openable_file(fixture_t *f, apfs_gen_layout_t layout,
+    const unsigned char *bytes, size_t length)
+{
+	enum {
+		NAME_KEY_BYTES = GEN_DREC_KEY_BYTES + sizeof("file"),
+		STREAM_FIELDS_BYTES = GEN_XF_BLOB_BYTES +
+		    GEN_XF_HEADER_BYTES + GEN_DSTREAM_BYTES,
+		FILE_INODE_BYTES = GEN_INODE_VAL_BYTES + STREAM_FIELDS_BYTES
+	};
+	unsigned char keys[4][32] = { { 0 } }, values[4][160] = { { 0 } };
+	unsigned char fields[STREAM_FIELDS_BYTES], stream[GEN_DSTREAM_BYTES];
+	apfs_gen_record_t records[4];
+	apfs_gen_omap_record_t mapping;
+	apfs_gen_fs_tree_t tree = { .records = records, .count = 4,
+	    .first_oid = 2100, .base = 600, .xid = 10, .block_size = BLOCK,
+	    .records_per_leaf = 4, .children_per_index = 2 };
+	apfs_gen_tree_t map_tree = { .records = &mapping, .count = 1,
+	    .base = VOLUME_BASE + 3 * VOLUME_SLOT + 2, .xid = 10,
+	    .block_size = BLOCK, .records_per_leaf = 1,
+	    .children_per_index = 2 };
+	apfs_gen_drec_key_t name = { .parent = 2, .name = "file",
+	    .name_len = 4 };
+	apfs_gen_drec_val_t drec = { .child = 16, .flags = 8 };
+	apfs_gen_dstream_t data = { .size = length, .alloced_size = BLOCK };
+	apfs_gen_extent_val_t extent = { .length = BLOCK, .phys_block = 700 };
+	apfs_gen_xfield_t field = { .type = 8, .data = stream,
+	    .size = sizeof(stream) };
+	apfs_gen_inode_val_t inode = { .parent = 1, .private_id = 2,
+	    .mode = 0040755, .count = 1 };
+	unsigned char *volume;
+	uint64_t root, blocks;
+
+	CHECK(length <= BLOCK);
+	build_openable_layout(f, 1u << VOLUME_SLOT, layout);
+	CHECK(apfs_gen_jkey_build(keys[0], GEN_JKEY_BYTES, 2, 3));
+	CHECK(apfs_gen_inode_val_build(values[0], GEN_INODE_VAL_BYTES, &inode));
+	records[0] = (apfs_gen_record_t){ .key = keys[0],
+	    .key_size = GEN_JKEY_BYTES,
+	    .value = values[0], .value_size = GEN_INODE_VAL_BYTES };
+	CHECK(apfs_gen_drec_key_build(keys[1], NAME_KEY_BYTES, &name));
+	CHECK(apfs_gen_drec_val_build(values[1], GEN_DREC_VAL_BYTES, &drec));
+	records[1] = (apfs_gen_record_t){ .key = keys[1],
+	    .key_size = NAME_KEY_BYTES,
+	    .value = values[1], .value_size = GEN_DREC_VAL_BYTES };
+	CHECK(apfs_gen_dstream_build(stream, sizeof(stream), &data));
+	CHECK(apfs_gen_xfields_build(fields, STREAM_FIELDS_BYTES, &field, 1));
+	inode = (apfs_gen_inode_val_t){ .parent = 2, .private_id = 16,
+	    .mode = 0100644, .count = 1, .xfields = fields,
+	    .xfields_len = STREAM_FIELDS_BYTES };
+	CHECK(apfs_gen_jkey_build(keys[2], GEN_JKEY_BYTES, 16, 3));
+	CHECK(apfs_gen_inode_val_build(values[2], FILE_INODE_BYTES, &inode));
+	records[2] = (apfs_gen_record_t){ .key = keys[2],
+	    .key_size = GEN_JKEY_BYTES,
+	    .value = values[2], .value_size = FILE_INODE_BYTES };
+	CHECK(apfs_gen_jkey_build(keys[3], GEN_JKEY_BYTES, 16, 8));
+	CHECK(apfs_gen_extent_val_build(values[3], GEN_EXTENT_VAL_BYTES,
+	    &extent));
+	records[3] = (apfs_gen_record_t){ .key = keys[3],
+	    .key_size = GEN_EXTENT_KEY_BYTES,
+	    .value = values[3], .value_size = GEN_EXTENT_VAL_BYTES };
+	CHECK(apfs_gen_fs_tree_build(f->bytes, f->length, &tree, &mapping,
+	    1, &root, &blocks));
+	CHECK(apfs_gen_tree_build(f->bytes, f->length, &map_tree,
+	    &root, &blocks));
+	volume = block_at(f, VOLUME_BASE + 3 * VOLUME_SLOT);
+	fsimg_store_le64(volume + NATIVE_VOLUME_INCOMPAT_OFFSET, 0);
+	fsimg_store_le64(volume + NATIVE_VOLUME_ROOT_OID_OFFSET, 2100);
+	CHECK(apfs_gen_seal(volume, BLOCK));
+	bcopy(bytes, block_at(f, 700), length);
+}
+
+static void
+test_older_layout_container_lists_and_reads_like_current(void)
+{
+	static const unsigned char payload[] = "APFS older layout payload";
+	const apfs_gen_layout_t layouts[] = { APFS_GEN_LAYOUT_CURRENT,
+	    APFS_GEN_LAYOUT_OLDER };
+	fixture_t f;
+	fsimg_reader_t *reader;
+	const fsimg_entry_t *entry;
+	unsigned char delivered[sizeof(payload)];
+	size_t count;
+
+	for (size_t i = 0; i < sizeof(layouts) / sizeof(layouts[0]); i++) {
+		scenario = layouts[i] == APFS_GEN_LAYOUT_CURRENT ?
+		    "current layout lists and reads file" :
+		    "older layout lists and reads file";
+		fixture_init(&f, 0);
+		build_openable_file(&f, layouts[i], payload, sizeof(payload));
+		reader = NULL;
+		if (!status_is(&f, fsimg_reader_open(f.ctx, f.io, NULL,
+		    &reader, &f.error), FSIMG_OK)) {
+			fsimg_reader_free(reader);
+			fixture_close(&f);
+			continue;
+		}
+		if (status_is(&f, fsimg_reader_next(reader, &entry,
+		    &f.error), FSIMG_OK)) {
+			expect(strcmp(entry->path, "/file") == 0 &&
+			    entry->kind == FSIMG_ENTRY_FILE &&
+			    entry->size == sizeof(payload),
+			    "tree lists one file");
+			if (status_is(&f, fsimg_reader_read_at(reader, 0,
+			    delivered, sizeof(delivered), &count, &f.error),
+			    FSIMG_OK))
+				expect(count == sizeof(payload) &&
+				    bcmp(delivered, payload, count) == 0,
+				    "file bytes match the shared payload");
+			status_is(&f, fsimg_reader_next(reader, &entry,
+			    &f.error), FSIMG_DONE);
+		}
+		fsimg_reader_free(reader);
+		fixture_close(&f);
+	}
 }
 
 static fsimg_status_t
@@ -3514,9 +3651,7 @@ struct native_fs_sample {
  * APFS_INCOMPAT_CASE_INSENSITIVE / APFS_INCOMPAT_NORMALIZATION_INSENSITIVE.
  */
 enum {
-	NATIVE_VOLUME_INCOMPAT_OFFSET = 56,
 	NATIVE_VOLUME_OMAP_OID_OFFSET = 128,
-	NATIVE_VOLUME_ROOT_OID_OFFSET = 136,
 	NATIVE_INCOMPAT_CASE_INSENSITIVE = 0x1,
 	NATIVE_INCOMPAT_NORMALIZATION_INSENSITIVE = 0x8,
 	/* The e4-names capture corpus contains at least 15000 directory entries. */
@@ -3992,6 +4127,7 @@ main(int argc, char **argv)
 		emit_seed(argv[2]);
 		return (failures == 0 ? 0 : 1);
 	}
+	test_older_layout_container_lists_and_reads_like_current();
 	test_full_open_predecessor_is_openable();
 	test_full_open_private_map_damage_does_not_fall_back();
 	test_full_open_volume_selection();

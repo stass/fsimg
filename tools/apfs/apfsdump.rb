@@ -196,10 +196,18 @@ module ApfsDump
     [:ip_bm_block_count, 164, "L<"], [:ip_bm_base, 168, "Q<"], [:ip_base, 176, "Q<"],
     [:fs_reserve_block_count, 184, "Q<"], [:fs_reserve_alloc_count, 192, "Q<"],
     [:fq, 200, [FREE_QUEUE_FIELDS, 40, 3]], [:ip_bm_free_head, 320, "S<"], [:ip_bm_free_tail, 322, "S<"],
-    [:ip_bm_xid_offset, 324, "L<"], [:ip_bitmap_offset, 328, "L<"], [:ip_bm_free_next_offset, 332, "L<"],
+    [:ip_bm_xid_offset, 324, "L<"], [:ip_bitmap_offset, 328, "L<"], [:ip_bm_free_next_offset, 332, "L<"]
+  ].freeze
+  # The fixed structure has two layouts (specs/design-apfs.md, "Ephemeral
+  # objects and the space manager"): the current one adds these fields and
+  # ends at SPACEMAN_CURRENT_END; the older one ends at SPACEMAN_OLDER_END,
+  # where its arrays begin.
+  SPACEMAN_CURRENT_FIELDS = [
     [:version, 336, "L<"], [:struct_size, 340, "L<"],
     [:datazone, 344, [ALLOCATION_ZONE_FIELDS, 136, 2 * ALLOCATION_ZONES_PER_DEVICE]]
   ].freeze
+  SPACEMAN_CURRENT_END = 2520
+  SPACEMAN_OLDER_END = 336
   # Internal-pool ring blocks are indexed by u16; 0xffff is the end marker.
   IP_BM_INDEX_INVALID = 0xFFFF
   IP_BM_BLOCK_COUNT_MAX = 0xFFFE
@@ -1113,13 +1121,28 @@ module ApfsDump
       check_header(obj, "space manager", kind: KIND_SPACEMAN, storage: STORAGE_EPHEMERAL, oid: @sb[:spaceman_oid])
       sm = Layout.decode(obj.bytes, SPACEMAN_FIELDS)
       problem("space manager: block size #{sm[:block_size]}, the container's #{@block_size}") if sm[:block_size] != @block_size
+      layout = spaceman_layout(obj.bytes, sm)
       obj.document({
-        **Layout.with_names(sm.except(:dev, :fq, :datazone), flags: SM_FLAGS),
-        datazone: allocation_zones(sm[:datazone]),
+        **Layout.with_names(sm.except(:dev, :fq), flags: SM_FLAGS),
+        **layout.except(:datazone),
+        **layout.slice(:datazone).transform_values { allocation_zones(_1) },
         devices: sm[:dev].each_with_index.map { |dev, i| device(obj, dev:, index: i) },
         internal_pool: section(:internal_pool) { internal_pool(obj, sm) },
         free_queues: sm[:fq].each_with_index.map { |fq, i| free_queue(fq, i) }
       })
+    end
+
+    # The reader's layout rule: a structure size of SPACEMAN_CURRENT_END
+    # selects the current layout; otherwise arrays from SPACEMAN_OLDER_END
+    # select the older one, whose bytes at 336 are its XID array. Anything
+    # else is shown as the current layout, structure size and all.
+    def spaceman_layout(bytes, sm)
+      current = Layout.decode(bytes, SPACEMAN_CURRENT_FIELDS)
+      lowest = sm.values_at(:ip_bm_xid_offset, :ip_bitmap_offset, :ip_bm_free_next_offset)
+                 .push(sm[:dev].first[:addr_offset]).min
+      return { structure_end: SPACEMAN_OLDER_END } if current[:struct_size] != SPACEMAN_CURRENT_END && lowest == SPACEMAN_OLDER_END
+
+      { structure_end: SPACEMAN_CURRENT_END, **current }
     end
 
     def allocation_zones(zones)

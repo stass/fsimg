@@ -36,12 +36,17 @@ static void test_native_geometry_matches_embedded_captures(void);
 static void test_json_integer_extractor_is_bounded(void);
 static void test_native_dumps_match_geometry_and_regions(void);
 static void test_spaceman_rejects_inconsistent_geometry_and_arrays(void);
+static void test_older_spaceman_accepts_supported_block_sizes(void);
+static void test_older_spaceman_rejects_invalid_arrays(void);
+static void test_older_xid_high_half_selects_current_structure(void);
+static void test_current_spaceman_distinguishes_invalid_and_unknown_sizes(void);
 static void test_wrong_cab_count_depends_on_proven_block_size(void);
 static void test_array_end_determines_implied_size(void);
 static void test_checkpoint_keeps_verified_spaceman(void);
 static void test_mapped_size_mismatch_rejected_before_extra_block_read(void);
 static void test_pager_walks_small_and_large_sparse_containers(void);
-static void test_checkpoint_rejects_hostile_first_block_before_object_read(void);
+static void
+    test_checkpoint_rejects_hostile_first_block_before_object_read(void);
 static void test_checkpoint_rejects_fusion(void);
 static void test_pager_caches_second_spaceman_block(void);
 static void test_pager_rejects_damaged_chunk_structures(void);
@@ -69,9 +74,13 @@ status_is(fsimg_status_t status, fsimg_status_t wanted,
 		failures++;
 		return (false);
 	}
-	if (wanted != FSIMG_OK)
-		expect(strstr(error->message, role) != NULL,
-		    "failure names the affected role");
+	if (wanted != FSIMG_OK && strstr(error->message, role) == NULL) {
+		fprintf(stderr,
+		    "%s: expected message containing '%s', got '%s'\n",
+		    scenario, role, error->message);
+		failures++;
+		return (false);
+	}
 	return (true);
 }
 
@@ -121,10 +130,14 @@ fixed_regions_match(const apfs_nx_t *nx, const apfs_spaceman_t *sm)
 {
 	const apfs_region_t expected[] = {
 		{ .first = 0, .count = 1, .kind = APFS_REGION_BLOCK0 },
-		{ .first = nx->desc_base, .count = nx->desc_blocks, .kind = APFS_REGION_DESCRIPTORS },
-		{ .first = nx->data_base, .count = nx->data_blocks, .kind = APFS_REGION_DATA },
-		{ .first = sm->ip_bm_base, .count = sm->ip_bm_block_count, .kind = APFS_REGION_POOL_RING },
-		{ .first = sm->ip_base, .count = sm->ip_block_count, .kind = APFS_REGION_POOL }
+		{ .first = nx->desc_base, .count = nx->desc_blocks,
+		    .kind = APFS_REGION_DESCRIPTORS },
+		{ .first = nx->data_base, .count = nx->data_blocks,
+		    .kind = APFS_REGION_DATA },
+		{ .first = sm->ip_bm_base, .count = sm->ip_bm_block_count,
+		    .kind = APFS_REGION_POOL_RING },
+		{ .first = sm->ip_base, .count = sm->ip_block_count,
+		    .kind = APFS_REGION_POOL }
 	};
 	apfs_region_t regions[APFS_FIXED_REGIONS];
 	fsimg_error_t error = { 0 };
@@ -135,7 +148,8 @@ fixed_regions_match(const apfs_nx_t *nx, const apfs_spaceman_t *sm)
 	for (unsigned i = 0; i < APFS_FIXED_REGIONS; i++) {
 		expect(regions[i].first == expected[i].first &&
 		    regions[i].count == expected[i].count &&
-		    regions[i].kind == expected[i].kind, "fixed region range and role");
+		    regions[i].kind == expected[i].kind,
+		    "fixed region range and role");
 		expect(strlen(apfs_region_role(regions[i].kind)) != 0,
 		    "region has a diagnostic role");
 		if (i != 0)
@@ -351,7 +365,9 @@ static const native_case_t native_cases[] = {
 	    .free_queues = { { .node_limit = 175 },
 	      { .node_limit = 512 } } },
 	  .mapped_bytes = 4096 },
-	/* $FSIMG_APFS_NATIVE/apfs-newfs-140737488355328-e12-128t/apfsdump.json */
+	/*
+	 * $FSIMG_APFS_NATIVE/apfs-newfs-140737488355328-e12-128t/apfsdump.json
+	 */
 	{ .path = "apfs-newfs-140737488355328-e12-128t",
 	  .nx = { .block_size = 4096,
 	    .block_count = 34359738368ull,
@@ -396,12 +412,15 @@ test_native_geometry_matches_embedded_captures(void)
 
 	for (size_t i = 0; i < ARRAY_COUNT(native_cases); i++) {
 		scenario = native_cases[i].path;
-		CHECK(apfs_native_geometry(native_cases[i].nx.block_count, &nx, &sm));
-		geometry_equal(&nx, &sm, &native_cases[i].nx, &native_cases[i].sm);
+		CHECK(apfs_native_geometry(native_cases[i].nx.block_count, &nx,
+		    &sm));
+		geometry_equal(&nx, &sm, &native_cases[i].nx,
+		    &native_cases[i].sm);
 		if (status_is(apfs_spaceman_check(&sm, nx.block_size,
 		    nx.block_count, &blocks, &error), FSIMG_OK, &error,
 		    "space manager"))
-			expect(blocks * nx.block_size == native_cases[i].mapped_bytes,
+			expect(blocks * nx.block_size ==
+			    native_cases[i].mapped_bytes,
 			    "implied size equals captured mapping size");
 		fixed_regions_match(&nx, &sm);
 	}
@@ -499,7 +518,8 @@ json_value_end(const char *p, const char *end)
 static json_span_t
 json_member(json_span_t object, const char *key)
 {
-	const char *p = json_space(object.first, object.end), *name, *value, *end;
+	const char *p = json_space(object.first, object.end), *name, *value,
+	    *end;
 	size_t length = strlen(key);
 
 	if (p == object.end || *p++ != '{')
@@ -580,7 +600,8 @@ test_json_integer_extractor_is_bounded(void)
 	json_span_t root = { object, object + sizeof(object) - 1 };
 	uint64_t number;
 
-	scenario = "JSON extractor bounds fields, integers, strings and nesting";
+	scenario = "JSON extractor bounds fields, integers, strings and "
+	    "nesting";
 	expect(json_integer(json_member(root, "n"), UINT64_MAX, &number) &&
 	    number == UINT64_MAX, "direct member overrides nested name");
 	expect(!json_integer(json_member(root, "missing"), UINT64_MAX, &number),
@@ -590,7 +611,8 @@ test_json_integer_extractor_is_bounded(void)
 	    "integer overflow returns failure");
 	expect(!json_integer(json_member(root, "n"), UINT32_MAX, &number),
 	    "narrow field overflow returns failure");
-	expect(json_string_end(truncated, truncated + sizeof(truncated) - 1) == NULL,
+	expect(json_string_end(truncated,
+	    truncated + sizeof(truncated) - 1) == NULL,
 	    "escape at end of span returns failure");
 	memset(nested, '[', 65);
 	memset(nested + 65, ']', 65);
@@ -680,7 +702,8 @@ native_fields(json_span_t root, apfs_nx_t *nx, apfs_spaceman_t *sm,
 				continue;
 			JSON_FIELD(mapping, "size", size);
 			if (found && size != *mapped_bytes) {
-				expect(false, "space-manager mapping sizes disagree");
+				expect(false,
+				    "space-manager mapping sizes disagree");
 				return (false);
 			}
 			*mapped_bytes = size;
@@ -723,23 +746,34 @@ test_native_dumps_match_geometry_and_regions(void)
 			fd = open(scenario, O_RDONLY);
 			CHECK(fd >= 0);
 			CHECK(fstat(fd, &st) == 0);
-			/* The largest capture is 244 MiB; reject unbounded inputs. */
-			CHECK(st.st_size > 0 && st.st_size <= 512 * 1024 * 1024);
-			bytes = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE,
+			/*
+			 * The largest capture is 244 MiB; reject unbounded
+			 * inputs.
+			 */
+			CHECK(st.st_size > 0 &&
+			    st.st_size <= 512 * 1024 * 1024);
+			bytes = mmap(NULL, (size_t)st.st_size, PROT_READ,
+			    MAP_PRIVATE,
 			    fd, 0);
 			CHECK(bytes != MAP_FAILED);
-			if (native_fields((json_span_t){ bytes, bytes + st.st_size },
+			if (native_fields((json_span_t){ bytes,
+			    bytes + st.st_size },
 			    &nx, &sm, &mapped_bytes)) {
-				if (status_is(apfs_spaceman_check(&sm, nx.block_size,
-				    nx.block_count, &blocks, &error), FSIMG_OK, &error,
+				if (status_is(apfs_spaceman_check(&sm,
+				    nx.block_size,
+				    nx.block_count, &blocks, &error), FSIMG_OK,
+				    &error,
 				    "space manager"))
-					expect(blocks * nx.block_size == mapped_bytes,
+					expect(blocks * nx.block_size ==
+					    mapped_bytes,
 					    "mapped size equals implied size");
 				fixed_regions_match(&nx, &sm);
 				if (nx.block_size == BLOCK) {
-					CHECK(apfs_native_geometry(nx.block_count,
+					CHECK(apfs_native_geometry(
+					    nx.block_count,
 					    &generated_nx, &generated_sm));
-					geometry_equal(&generated_nx, &generated_sm, &nx, &sm);
+					geometry_equal(&generated_nx,
+					    &generated_sm, &nx, &sm);
 				}
 				checked++;
 			}
@@ -789,8 +823,10 @@ test_spaceman_rejects_inconsistent_geometry_and_arrays(void)
 		SM_MUTATION(ip_bm_size_in_blocks, 2, "does not fit its pool"),
 		SM_MUTATION(ip_bm_block_count, 0, "does not fit its pool"),
 		SM_MUTATION(ip_bm_block_count, 65535, "does not fit its pool"),
-		SM_MUTATION(ip_bm_xid_offset, 2512, "inside its structure or unaligned"),
-		SM_MUTATION(ip_bm_xid_offset, 2521, "inside its structure or unaligned"),
+		SM_MUTATION(ip_bm_xid_offset, 2512,
+		    "inside its structure or unaligned"),
+		SM_MUTATION(ip_bm_xid_offset, 2521,
+		    "inside its structure or unaligned"),
 		SM_MUTATION(ip_bitmap_offset, 2520, "overlapping arrays"),
 		SM_MUTATION(ip_bm_free_next_offset, 2528, "overlapping arrays"),
 		/* Address and XID arrays are non-adjacent in the array list. */
@@ -809,7 +845,8 @@ test_spaceman_rejects_inconsistent_geometry_and_arrays(void)
 		scenario = mutations[i].name;
 		CHECK(apfs_native_geometry(2097152, &nx, &sm));
 		if (mutations[i].width == 8)
-			bcopy(&mutations[i].value, (char *)&sm + mutations[i].offset, 8);
+			bcopy(&mutations[i].value,
+			    (char *)&sm + mutations[i].offset, 8);
 		else {
 			CHECK(mutations[i].width == 4);
 			value32 = (uint32_t)mutations[i].value;
@@ -818,6 +855,146 @@ test_spaceman_rejects_inconsistent_geometry_and_arrays(void)
 		status_is(apfs_spaceman_check(&sm, BLOCK, nx.block_count,
 		    &blocks, &error), mutations[i].status, &error,
 		    mutations[i].message);
+	}
+}
+
+static void
+test_older_spaceman_accepts_supported_block_sizes(void)
+{
+	const uint32_t sizes[] = { 4096, 16384 };
+	apfs_gen_spaceman_t generated;
+	apfs_spaceman_t sm;
+	unsigned char raw[16384];
+	fsimg_error_t error = { 0 };
+	uint64_t blocks;
+
+	for (unsigned i = 0; i < ARRAY_COUNT(sizes); i++) {
+		scenario = sizes[i] == 4096 ? "older layout at 4096" :
+		    "older layout at 16384";
+		CHECK(apfs_gen_spaceman_geometry_older(sizes[i], 1024,
+		    &generated) == sizes[i]);
+		expect(generated.ip_bm_xid_offset == 336 &&
+		    generated.ip_bitmap_offset == 344 &&
+		    generated.ip_bm_free_next_offset == 352 &&
+		    generated.devices[0].addr_offset == 384 &&
+		    generated.devices[1].addr_offset == 392,
+		    "older arrays have the reference packing");
+		bzero(raw, sizeof(raw));
+		/* The builder must preserve the caller's XID array at 336. */
+		fsimg_store_le64(raw + 336, 10);
+		CHECK(apfs_gen_spaceman_build(raw, sizes[i], &generated));
+		expect(fsimg_load_le64(raw + 336) == 10,
+		    "older builder leaves the XID array intact");
+		CHECK(apfs_spaceman_decode(raw, sizes[i], &sm));
+		if (status_is(apfs_spaceman_check(&sm, sizes[i], 1024,
+		    &blocks, &error), FSIMG_OK, &error, "space manager"))
+			expect(blocks == 1,
+			    "older packed extent implies one block");
+	}
+}
+
+static void
+test_older_spaceman_rejects_invalid_arrays(void)
+{
+	static const struct {
+		const char *name;
+		uint32_t offset;
+		uint32_t value;
+		fsimg_status_t status;
+		const char *message;
+	} cases[] = {
+		{ "older XID below structure", 324, 328, FSIMG_ECORRUPT,
+		    "invalid structure size" },
+		{ "older XID unaligned", 324, 337, FSIMG_ECORRUPT,
+		    "invalid structure size" },
+		{ "older bitmap index overlaps XID", 328, 336, FSIMG_ECORRUPT,
+		    "overlapping arrays" },
+		{ "older bitmap index unaligned", 328, 345, FSIMG_ECORRUPT,
+		    "inside its structure or unaligned" },
+		{ "older address array past packing", 80, 392,
+		    FSIMG_EUNSUPPORTED, "packed extent" }
+	};
+	apfs_gen_spaceman_t generated;
+	apfs_spaceman_t sm;
+	unsigned char raw[BLOCK];
+	fsimg_error_t error = { 0 };
+	uint64_t blocks;
+
+	CHECK(apfs_gen_spaceman_geometry_older(BLOCK, 1024,
+	    &generated) == BLOCK);
+	for (size_t i = 0; i < ARRAY_COUNT(cases); i++) {
+		scenario = cases[i].name;
+		bzero(raw, sizeof(raw));
+		CHECK(apfs_gen_spaceman_build(raw, sizeof(raw), &generated));
+		fsimg_store_le32(raw + cases[i].offset, cases[i].value);
+		CHECK(apfs_spaceman_decode(raw, sizeof(raw), &sm));
+		status_is(apfs_spaceman_check(&sm, BLOCK, 1024, &blocks,
+		    &error), cases[i].status, &error, cases[i].message);
+	}
+}
+
+static void
+test_older_xid_high_half_selects_current_structure(void)
+{
+	apfs_gen_spaceman_t generated;
+	apfs_spaceman_t sm;
+	unsigned char raw[BLOCK];
+	fsimg_error_t error = { 0 };
+	uint64_t blocks;
+
+	scenario = "older XID high half 2520 selects current structure";
+	CHECK(apfs_gen_spaceman_geometry_older(BLOCK, 1024,
+	    &generated) == BLOCK);
+	bzero(raw, sizeof(raw));
+	fsimg_store_le64(raw + 336, (UINT64_C(2520) << 32) | 10);
+	CHECK(apfs_gen_spaceman_build(raw, sizeof(raw), &generated));
+	CHECK(apfs_spaceman_decode(raw, sizeof(raw), &sm));
+	status_is(apfs_spaceman_check(&sm, BLOCK, 1024, &blocks, &error),
+	    FSIMG_ECORRUPT, &error, "inside its structure or unaligned");
+}
+
+static void
+test_current_spaceman_distinguishes_invalid_and_unknown_sizes(void)
+{
+	const uint32_t sizes[] = { 0, 2528, 4096 };
+	apfs_gen_spaceman_t generated;
+	apfs_spaceman_t sm;
+	unsigned char raw[BLOCK];
+	fsimg_error_t error = { 0 };
+	uint64_t blocks;
+
+	for (unsigned i = 0; i < ARRAY_COUNT(sizes); i++) {
+		const char *names[] = { "current structure size 0",
+		    "current structure size 2528",
+		    "unknown layout with arrays past structure size 4096" };
+
+		scenario = names[i];
+		CHECK(apfs_gen_spaceman_geometry(BLOCK, 1024,
+		    &generated) == BLOCK);
+		generated.struct_size = sizes[i];
+		if (sizes[i] == 4096) {
+			generated.ip_bm_xid_offset += 4096 - 2520;
+			generated.ip_bitmap_offset += 4096 - 2520;
+			generated.ip_bm_free_next_offset += 4096 - 2520;
+			for (unsigned d = 0; d < 2; d++)
+				generated.devices[d].addr_offset += 4096 - 2520;
+		}
+		bzero(raw, sizeof(raw));
+		CHECK(apfs_gen_spaceman_build(raw, sizeof(raw), &generated));
+		CHECK(apfs_spaceman_decode(raw, sizeof(raw), &sm));
+		status_is(apfs_spaceman_check(&sm, BLOCK, 1024, &blocks,
+		    &error), sizes[i] == 4096 ? FSIMG_EUNSUPPORTED :
+		    FSIMG_ECORRUPT, &error, sizes[i] == 4096 ?
+		    "structure size of an unknown layout" :
+		    "invalid structure size");
+		if (sizes[i] == 4096) {
+			scenario = "unknown layout with wrong chunk geometry";
+			fsimg_store_le32(raw + 36, generated.blocks_per_chunk - 1);
+			CHECK(apfs_spaceman_decode(raw, sizeof(raw), &sm));
+			status_is(apfs_spaceman_check(&sm, BLOCK, 1024, &blocks,
+			    &error), FSIMG_ECORRUPT, &error,
+			    "wrong chunk geometry");
+		}
 	}
 }
 
@@ -835,13 +1012,16 @@ test_wrong_cab_count_depends_on_proven_block_size(void)
 		scenario = sizes[i] == 8192 ? "unproven CAB threshold at 8192" :
 		    sizes[i] == 4096 ? "wrong CAB count at 4096" :
 		    "wrong CAB count at 16384";
-		CHECK(apfs_gen_spaceman_geometry(sizes[i], 1024, &generated) != 0);
+		CHECK(apfs_gen_spaceman_geometry(sizes[i], 1024,
+		    &generated) != 0);
 		bzero(raw, sizeof(raw));
 		CHECK(apfs_gen_spaceman_build(raw, sizes[i], &generated));
 		CHECK(apfs_spaceman_decode(raw, sizes[i], &sm));
-		CHECK(apfs_spaceman_check(&sm, sizes[i], 1024, &blocks, &error) == FSIMG_OK);
+		CHECK(apfs_spaceman_check(&sm, sizes[i], 1024, &blocks,
+		    &error) == FSIMG_OK);
 		sm.devices[0].cab_count = 1;
-		status_is(apfs_spaceman_check(&sm, sizes[i], 1024, &blocks, &error),
+		status_is(apfs_spaceman_check(&sm, sizes[i], 1024, &blocks,
+		    &error),
 		    sizes[i] == 8192 ? FSIMG_EUNSUPPORTED : FSIMG_ECORRUPT,
 		    &error, "address-block count");
 	}
@@ -857,12 +1037,14 @@ test_array_end_determines_implied_size(void)
 
 	scenario = "packed bitmap of one block implies one space-manager block";
 	CHECK(apfs_native_geometry(1024, &nx, &sm));
-	CHECK(apfs_spaceman_check(&sm, BLOCK, 1024, &blocks, &error) == FSIMG_OK);
+	CHECK(apfs_spaceman_check(&sm, BLOCK, 1024, &blocks,
+	    &error) == FSIMG_OK);
 	expect(blocks == 1, "packed size is one block");
 	scenario = "larger ring packs the address array into the second block";
 	sm.ip_bm_block_count = 1000;
 	sm.devices[0].addr_offset = sm.ip_bm_free_next_offset + 2000;
-	CHECK(apfs_spaceman_check(&sm, BLOCK, 1024, &blocks, &error) == FSIMG_OK);
+	CHECK(apfs_spaceman_check(&sm, BLOCK, 1024, &blocks,
+	    &error) == FSIMG_OK);
 	expect(blocks == 2, "packed larger ring implies two blocks");
 }
 
@@ -950,7 +1132,9 @@ static fsimg_status_t checkpoint_open(fixture_t *);
 static void fixture_close(fixture_t *);
 static bool walk_chunks(fixture_t *, apfs_sm_pager_t *);
 
-/* Only the emitter of a value supplies its target; all damage is stated here. */
+/*
+ * Only the emitter of a value supplies its target; all damage is stated here.
+ */
 typedef struct damage_targets {
 	uint64_t *address;
 	uint64_t *cab_address;
@@ -1072,7 +1256,8 @@ emit_cib(fixture_t *f, uint64_t index, unsigned char *raw)
 		left = f->nx.block_count - k * BLOCKS_PER_CHUNK;
 		chunks[i] = (apfs_gen_chunk_t){ .xid = FIXTURE_XID,
 		    .address = k * BLOCKS_PER_CHUNK,
-		    .block_count = (uint32_t)(left < BLOCKS_PER_CHUNK ? left : BLOCKS_PER_CHUNK) };
+		    .block_count = (uint32_t)(left < BLOCKS_PER_CHUNK ?
+		    left : BLOCKS_PER_CHUNK) };
 		chunks[i].free_count = chunks[i].block_count;
 		if (k == 0 || k + 1 == chunk_count) {
 			chunks[i].free_count--;
@@ -1081,7 +1266,8 @@ emit_cib(fixture_t *f, uint64_t index, unsigned char *raw)
 		}
 	}
 	cib = (apfs_gen_chunks_t){ .object = { .oid = CIB_BASE + index,
-	    .xid = FIXTURE_XID, .type = PHYSICAL_CIB }, .index = (uint32_t)index,
+	    .xid = FIXTURE_XID, .type = PHYSICAL_CIB },
+	    .index = (uint32_t)index,
 	    .count = count, .chunks = chunks };
 	apply_damage(f, index, (damage_targets_t){ .cib = &cib,
 	    .chunk = &chunks[0] });
@@ -1100,7 +1286,8 @@ emit_cab(fixture_t *f, uint64_t index, unsigned char *raw)
 	for (uint32_t i = 0; i < count; i++)
 		addresses[i] = cib_address(f, first + i);
 	cab = (apfs_gen_addresses_t){ .object = { .oid = CAB_BASE + index,
-	    .xid = FIXTURE_XID, .type = PHYSICAL_CAB }, .index = (uint32_t)index,
+	    .xid = FIXTURE_XID, .type = PHYSICAL_CAB },
+	    .index = (uint32_t)index,
 	    .count = count, .addresses = addresses };
 	apply_damage(f, index, (damage_targets_t){ .cab = &cab });
 	CHECK(apfs_gen_addresses_build(raw, BLOCK, &cab));
@@ -1136,17 +1323,22 @@ sparse_read(void *argument, uint64_t offset, void *buffer, size_t length,
 	else if (block >= CAB_BASE &&
 	    block - CAB_BASE < f->sm.devices[0].cab_count)
 		emit_cab(f, block - CAB_BASE, raw);
-	else if (block == bitmap_base || block == bitmap_base + 1 || block == EXTERNAL_BITMAP_BLOCK) {
+	else if (block == bitmap_base || block == bitmap_base + 1 ||
+	    block == EXTERNAL_BITMAP_BLOCK) {
 		raw[0] = 1;
 		/* Bits past N are outside the last chunk's free-count check. */
-		if (block == bitmap_base + 1 && f->nx.block_count == SMALL_BLOCKS)
+		if (block == bitmap_base + 1 &&
+		    f->nx.block_count == SMALL_BLOCKS)
 			raw[BLOCK - 1] = 0xff;
 	} else if (block >= RING_BASE && block - RING_BASE <
 	    f->sm.ip_bm_block_count)
 		memset(raw, (int)(0x50 + block - RING_BASE), BLOCK);
 	else
-		CHECK(false); /* An unexpected read must not become silent zero I/O. */
-	/* The unverified peek is valid but differs from the checksummed copy. */
+		/* An unexpected read must not become silent zero I/O. */
+		CHECK(false);
+	/*
+	 * The unverified peek is valid but differs from the checksummed copy.
+	 */
 	if (block == SM_BLOCK && f->different_peek && f->sm_reads[0] == 1) {
 		fsimg_store_le32(raw + 148, 17);
 		CHECK(apfs_gen_seal(raw, BLOCK));
@@ -1195,7 +1387,8 @@ emit_spaceman(fixture_t *f)
 			next = (uint16_t)(2 * b);
 		if ((i >= b && i < 2 * b) || i + 1 == ring)
 			next = 65535;
-		fsimg_store_le16(raw + f->sm.ip_bm_free_next_offset + 2 * i, next);
+		fsimg_store_le16(raw + f->sm.ip_bm_free_next_offset + 2 * i,
+		    next);
 	}
 	for (uint32_t i = 0; i < addresses; i++) {
 		address = f->sm.devices[0].cab_count == 0 ? cib_address(f, i) :
@@ -1203,7 +1396,8 @@ emit_spaceman(fixture_t *f)
 		if (f->sm.devices[0].cab_count != 0)
 			apply_damage(f, i, (damage_targets_t){
 			    .cab_address = &address });
-		fsimg_store_le64(raw + f->sm.devices[0].addr_offset + 8 * i, address);
+		fsimg_store_le64(raw + f->sm.devices[0].addr_offset + 8 * i,
+		    address);
 	}
 	CHECK(apfs_gen_seal(raw, f->sm_bytes));
 }
@@ -1212,15 +1406,20 @@ static void
 fixture_init(fixture_t *f, uint64_t n, pager_damage_t damage)
 {
 	apfs_gen_mapping_t mappings[] = {
-		{ .type = EPHEMERAL_SM, .size = BLOCK, .oid = SM_OID, .address = SM_BLOCK },
-		{ .type = EPHEMERAL_REAPER, .size = BLOCK, .oid = REAPER_OID, .address = REAPER_BLOCK }
+		{ .type = EPHEMERAL_SM, .size = BLOCK, .oid = SM_OID,
+		    .address = SM_BLOCK },
+		{ .type = EPHEMERAL_REAPER, .size = BLOCK, .oid = REAPER_OID,
+		    .address = REAPER_BLOCK }
 	};
 	apfs_gen_checkpoint_t checkpoint = {
-		.object = { .oid = 1, .xid = FIXTURE_XID, .type = PHYSICAL_CHECKPOINT },
+		.object = { .oid = 1, .xid = FIXTURE_XID,
+		    .type = PHYSICAL_CHECKPOINT },
 		.mappings = mappings, .count = 2, .flags = 1
 	};
-	apfs_gen_object_t omap = { .oid = OMAP_BLOCK, .xid = FIXTURE_XID, .type = PHYSICAL_OMAP };
-	apfs_gen_reaper_t reaper = { .object = { .oid = REAPER_OID, .xid = FIXTURE_XID,
+	apfs_gen_object_t omap = { .oid = OMAP_BLOCK, .xid = FIXTURE_XID,
+	    .type = PHYSICAL_OMAP };
+	apfs_gen_reaper_t reaper = { .object = { .oid = REAPER_OID,
+	    .xid = FIXTURE_XID,
 	    .type = EPHEMERAL_REAPER }, .flags = 1, .next_reap_id = 1 };
 	fsimg_options_t options;
 	fsimg_io_ops_t ops;
@@ -1235,7 +1434,8 @@ fixture_init(fixture_t *f, uint64_t n, pager_damage_t damage)
 	    .desc_base = 1, .desc_blocks = 8, .data_base = SM_BLOCK,
 	    .data_blocks = 32, .desc_index = 0, .desc_len = 2, .desc_next = 2,
 	    .data_len = 9, .data_next = 9, .max_volumes = 100,
-	    .spaceman_oid = SM_OID, .reaper_oid = REAPER_OID, .omap_oid = OMAP_BLOCK };
+	    .spaceman_oid = SM_OID, .reaper_oid = REAPER_OID,
+	    .omap_oid = OMAP_BLOCK };
 	CHECK(apfs_gen_spaceman_geometry(BLOCK, n, &f->sm) == BLOCK);
 	f->sm.object = (apfs_gen_object_t){ .oid = SM_OID, .xid = FIXTURE_XID,
 	    .type = EPHEMERAL_SM };
@@ -1249,14 +1449,18 @@ fixture_init(fixture_t *f, uint64_t n, pager_damage_t damage)
 	CHECK(apfs_gen_nx_build(f->prefix, BLOCK, &f->nx));
 	CHECK(apfs_gen_nx_build(f->prefix + 2 * BLOCK, BLOCK, &f->nx));
 	CHECK(apfs_gen_checkpoint_build(f->prefix + BLOCK, BLOCK, &checkpoint));
-	CHECK(apfs_gen_reaper_build(f->prefix + REAPER_BLOCK * BLOCK, BLOCK, &reaper));
-	CHECK(apfs_gen_object_build(f->prefix + OMAP_BLOCK * BLOCK, BLOCK, &omap));
+	CHECK(apfs_gen_reaper_build(f->prefix + REAPER_BLOCK * BLOCK, BLOCK,
+	    &reaper));
+	CHECK(apfs_gen_object_build(f->prefix + OMAP_BLOCK * BLOCK, BLOCK,
+	    &omap));
 	emit_spaceman(f);
 
 	fsimg_options_init(&options);
 	/* The context's smallest supported memory limit is 16 MiB. */
 	options.memory_bytes = 16 * 1024 * 1024;
-	/* Each metadata read charges both the APFS operation and bounded I/O. */
+	/*
+	 * Each metadata read charges both the APFS operation and bounded I/O.
+	 */
 	options.max_work = f->sm.devices[0].chunk_count +
 	    2 * (f->sm.devices[0].cib_count + f->sm.devices[0].cab_count +
 	    f->sm.ip_bm_size_in_blocks + 2) + 256;
@@ -1270,7 +1474,8 @@ fixture_init(fixture_t *f, uint64_t n, pager_damage_t damage)
 	fsimg_io_ops_init(&ops);
 	ops.read_at = sparse_read;
 	ops.get_size = sparse_size;
-	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, f, &f->io, NULL) == FSIMG_OK);
+	CHECK(fsimg_io_from_callbacks(f->ctx, &ops, f, &f->io,
+	    NULL) == FSIMG_OK);
 	f->reader.input = f->io;
 	f->reader.slice_bytes = n * BLOCK;
 }
@@ -1306,11 +1511,14 @@ test_checkpoint_keeps_verified_spaceman(void)
 	fixture_t f;
 	unsigned char encoded[BLOCK] = { 0 };
 
-	scenario = "checkpoint retains checked bytes rather than the valid peek";
+	scenario = "checkpoint retains checked bytes rather than the valid "
+	    "peek";
 	fixture_init(&f, SMALL_BLOCKS, DAMAGE_NONE);
 	f.different_peek = true;
-	if (status_is(checkpoint_open(&f), FSIMG_OK, &f.error, "space manager")) {
-		CHECK(apfs_spaceman_encode(encoded, BLOCK, &f.container.spaceman));
+	if (status_is(checkpoint_open(&f), FSIMG_OK, &f.error,
+	    "space manager")) {
+		CHECK(apfs_spaceman_encode(encoded, BLOCK,
+		    &f.container.spaceman));
 		expect(memcmp(encoded + 32, f.prefix + SM_BLOCK * BLOCK + 32,
 		    2520 - 32) == 0, "container holds every generated field");
 	}
@@ -1328,12 +1536,15 @@ test_mapped_size_mismatch_rejected_before_extra_block_read(void)
 	map = f.prefix + BLOCK;
 	fsimg_store_le32(map + 48, 2 * BLOCK);
 	CHECK(apfs_gen_seal(map, BLOCK));
-	status_is(checkpoint_open(&f), FSIMG_ECORRUPT, &f.error, "has the wrong size");
+	status_is(checkpoint_open(&f), FSIMG_ECORRUPT, &f.error,
+	    "has the wrong size");
 	expect(f.extra_sm_reads == 0, "extra mapped block never read");
 	fixture_close(&f);
 }
 
-/* Grow the data run with the mapping; keep its tail probe outside the object. */
+/*
+ * Grow the data run with the mapping; keep its tail probe outside the object.
+ */
 static void
 fixture_map_spaceman(fixture_t *f, uint32_t bytes)
 {
@@ -1366,7 +1577,8 @@ test_checkpoint_rejects_hostile_first_block_before_object_read(void)
 	uint32_t mapped_bytes;
 
 	for (unsigned i = 0; i < 2; i++) {
-		scenario = i == 0 ? "wrong chunk geometry before inflated object read" :
+		scenario = i == 0 ? "wrong chunk geometry before inflated "
+		    "object read" :
 		    "inflated CIB count before large matching mapping read";
 		fixture_init(&f, 1048576, DAMAGE_NONE);
 		/* Matching size for B=4096, cab_count=0, cib_count=2^28. */
@@ -1378,19 +1590,31 @@ test_checkpoint_rejects_hostile_first_block_before_object_read(void)
 		end = 2568ull + 8ull * f.sm.devices[0].cib_count;
 		mapped_bytes = (uint32_t)((end + BLOCK - 1) / BLOCK * BLOCK);
 		fixture_map_spaceman(&f, mapped_bytes);
-		/* Emit only fixed fields; the hostile array is never materialized. */
+		/*
+		 * Emit only fixed fields; the hostile array is never
+		 * materialized.
+		 */
 		CHECK(apfs_gen_spaceman_build(f.prefix + SM_BLOCK * BLOCK,
 		    BLOCK, &f.sm));
 		status_is(checkpoint_open(&f), FSIMG_ECORRUPT, &f.error,
 		    i == 0 ? "wrong chunk geometry" : "device counts");
-		expect(f.sm_reads[0] == 1, "only the unverified first block is read");
+		expect(f.sm_reads[0] == 1,
+		    "only the unverified first block is read");
 		CHECK(f.reads <= ARRAY_COUNT(f.read_log));
 		for (uint64_t k = 0; k < f.reads; k++)
 			expect(f.read_log[k] <= SM_BLOCK ||
 			    f.read_log[k] >= SM_BLOCK + mapped_bytes / BLOCK,
-			    "read log contains no block past the object's first block");
+			    "read log contains no block past the object's "
+			    "first block");
 		fixture_close(&f);
 	}
+
+	scenario = "current structure size bit flip with stale checksum";
+	fixture_init(&f, SMALL_BLOCKS, DAMAGE_NONE);
+	fsimg_store_le32(f.prefix + SM_BLOCK * BLOCK + 340, 2520 ^ 0x1000);
+	status_is(checkpoint_open(&f), FSIMG_ECORRUPT, &f.error,
+	    "invalid structure size");
+	fixture_close(&f);
 }
 
 static void
@@ -1416,20 +1640,27 @@ walk_chunks(fixture_t *f, apfs_sm_pager_t *pager)
 	bool found;
 
 	for (uint64_t k = 0; k < chunks; k++) {
-		if (!status_is(apfs_sm_pager_next(pager, &chunk, &found, &f->error),
+		if (!status_is(apfs_sm_pager_next(pager, &chunk, &found,
+		    &f->error),
 		    FSIMG_OK, &f->error, "chunk"))
 			return (false);
 		expect(found, "next chunk found");
 		if (!found)
 			return (false);
 		expect(chunk.index == k, "chunk indexes ascend");
-		expect(chunk.info.address == k * BLOCKS_PER_CHUNK, "chunk starts at its position");
-		expect(chunk.first_of_cib == (k % CHUNKS_PER_CIB == 0), "first chunk of CIB");
+		expect(chunk.info.address == k * BLOCKS_PER_CHUNK,
+		    "chunk starts at its position");
+		expect(chunk.first_of_cib == (k % CHUNKS_PER_CIB == 0),
+		    "first chunk of CIB");
 		expect(chunk.first_of_cab == (f->sm.devices[0].cab_count != 0 &&
-		    k % (CHUNKS_PER_CIB * CIBS_PER_CAB) == 0), "first chunk of CAB");
-		expect(chunk.cib_address == CIB_BASE + k / CHUNKS_PER_CIB, "CIB physical address");
-		expect(chunk.cab_address == (f->sm.devices[0].cab_count == 0 ? 0 :
-		    CAB_BASE + k / (CHUNKS_PER_CIB * CIBS_PER_CAB)), "CAB physical address");
+		    k % (CHUNKS_PER_CIB * CIBS_PER_CAB) == 0),
+		    "first chunk of CAB");
+		expect(chunk.cib_address == CIB_BASE + k / CHUNKS_PER_CIB,
+		    "CIB physical address");
+		expect(chunk.cab_address ==
+		    (f->sm.devices[0].cab_count == 0 ? 0 :
+		    CAB_BASE + k / (CHUNKS_PER_CIB * CIBS_PER_CAB)),
+		    "CAB physical address");
 		if (!status_is(apfs_sm_pager_bitmap(pager, &bits, &f->error),
 		    FSIMG_OK, &f->error, "chunk"))
 			return (false);
@@ -1437,7 +1668,8 @@ walk_chunks(fixture_t *f, apfs_sm_pager_t *pager)
 		if (bits != NULL)
 			for (uint32_t i = 0; i < chunk.info.block_count; i++)
 				clear -= (bits[i / 8] >> (i % 8)) & 1;
-		expect(clear == chunk.info.free_count, "bitmap clear bits match free count");
+		expect(clear == chunk.info.free_count,
+		    "bitmap clear bits match free count");
 		expect((bits == NULL) == (k != 0 && k + 1 != chunks),
 		    "fully free chunks omit bitmap");
 		free_sum += clear;
@@ -1446,7 +1678,8 @@ walk_chunks(fixture_t *f, apfs_sm_pager_t *pager)
 	    FSIMG_OK, &f->error, "space manager"))
 		return (false);
 	expect(!found, "iteration ends with found false");
-	expect(free_sum == f->sm.devices[0].free_count, "device free count recounted");
+	expect(free_sum == f->sm.devices[0].free_count,
+	    "device free count recounted");
 	return (true);
 }
 
@@ -1458,7 +1691,8 @@ test_pager_caches_second_spaceman_block(void)
 	const unsigned char *bits;
 	uint64_t block, first_reads, second_reads;
 
-	scenario = "two-block space manager caches its second-block address array";
+	scenario = "two-block space manager caches its second-block address "
+	    "array";
 	fixture_init(&f, 127 * BLOCKS_PER_CHUNK, DAMAGE_NONE);
 	f.sm.ip_bm_block_count = 1000;
 	f.sm.ip_bm_free_tail = 999;
@@ -1479,7 +1713,8 @@ test_pager_caches_second_spaceman_block(void)
 	    "chunk walk never reads first-block pool arrays");
 	expect(f.sm_reads[1] == second_reads + 1,
 	    "both CIB addresses reuse one cached second-block read");
-	CHECK(apfs_sm_pager_pool_bitmap(pager, 0, &block, &bits, &f.error) == FSIMG_OK);
+	CHECK(apfs_sm_pager_pool_bitmap(pager, 0, &block, &bits,
+	    &f.error) == FSIMG_OK);
 	expect(f.sm_reads[0] == first_reads + 1 &&
 	    f.sm_reads[1] == second_reads + 1,
 	    "pool slot and XID reuse one first-block read");
@@ -1499,10 +1734,12 @@ test_pager_walks_small_and_large_sparse_containers(void)
 	uint64_t peak_growth[ARRAY_COUNT(sizes)] = { 0 };
 
 	for (unsigned i = 0; i < ARRAY_COUNT(sizes); i++) {
-		scenario = i == 0 ? "pager walks partial and fully free chunks" :
+		scenario = i == 0 ? "pager walks partial and fully free "
+		    "chunks" :
 		    "pager walks two CABs with bounded memory and linear work";
 		fixture_init(&f, sizes[i], DAMAGE_NONE);
-		if (!status_is(checkpoint_open(&f), FSIMG_OK, &f.error, "space manager")) {
+		if (!status_is(checkpoint_open(&f), FSIMG_OK, &f.error,
+		    "space manager")) {
 			fixture_close(&f);
 			continue;
 		}
@@ -1510,13 +1747,16 @@ test_pager_walks_small_and_large_sparse_containers(void)
 		memory_before = stats.memory_bytes;
 		before = f.reader.session.progress.work;
 		reads_before = f.reads;
-		if (status_is(apfs_sm_pager_open(&f.container, &pager, &f.error),
+		if (status_is(apfs_sm_pager_open(&f.container, &pager,
+		    &f.error),
 		    FSIMG_OK, &f.error, "space manager")) {
-			expect(f.reads == reads_before, "pager open reads nothing");
+			expect(f.reads == reads_before,
+			    "pager open reads nothing");
 			expect(f.reader.session.progress.work == before,
 			    "pager open charges no work");
 			status_is(apfs_sm_pager_bitmap(pager, &bits, &f.error),
-			    FSIMG_EINVAL, &f.error, "no space-manager chunk visited");
+			    FSIMG_EINVAL, &f.error,
+			    "no space-manager chunk visited");
 			status_is(apfs_sm_pager_pool_bitmap(pager,
 			    f.sm.ip_bm_size_in_blocks, &block, &bits, &f.error),
 			    FSIMG_EINVAL, &f.error, "out of range");
@@ -1525,27 +1765,43 @@ test_pager_walks_small_and_large_sparse_containers(void)
 				fixture_close(&f);
 				continue;
 			}
-			for (uint32_t k = 0; k < f.sm.ip_bm_size_in_blocks; k++) {
-				CHECK(apfs_sm_pager_pool_bitmap(pager, k, &block, &bits,
+			for (uint32_t k = 0; k < f.sm.ip_bm_size_in_blocks;
+			    k++) {
+				CHECK(apfs_sm_pager_pool_bitmap(pager, k,
+				    &block, &bits,
 				    &f.error) == FSIMG_OK);
-				expect(block == RING_BASE + f.sm.ip_bm_size_in_blocks + k,
+				expect(block ==
+				    RING_BASE + f.sm.ip_bm_size_in_blocks + k,
 				    "pool bitmap follows index array");
 				expect(bits[0] == (unsigned char)(0x50 +
-				    f.sm.ip_bm_size_in_blocks + k), "selected ring slot bytes");
+				    f.sm.ip_bm_size_in_blocks + k),
+				    "selected ring slot bytes");
 			}
 			expected_reads = f.sm.devices[0].cib_count +
-			    f.sm.devices[0].cab_count + 3 + f.sm.ip_bm_size_in_blocks;
+			    f.sm.devices[0].cab_count + 3 +
+			    f.sm.ip_bm_size_in_blocks;
 			expect(f.reads - reads_before == expected_reads,
-			    "arrays, each CIB, CAB and selected bitmap read once");
-			/* Bounded I/O charges one unit per read, besides the pager's. */
+			    "arrays, each CIB, CAB and selected bitmap read "
+			    "once");
+			/*
+			 * Bounded I/O charges one unit per read, besides the
+			 * pager's.
+			 */
 			expect(f.reader.session.progress.work - before ==
 			    f.sm.devices[0].chunk_count + 2 * expected_reads,
-			    "work equals chunks plus metadata and I/O read charges");
-			CHECK(fsimg_ctx_get_stats(f.ctx, &stats, NULL) == FSIMG_OK);
-			/* No reset API: compare peak growth from the open container. */
+			    "work equals chunks plus metadata and I/O read "
+			    "charges");
+			CHECK(fsimg_ctx_get_stats(f.ctx, &stats,
+			    NULL) == FSIMG_OK);
+			/*
+			 * No reset API: compare peak growth from the open
+			 * container.
+			 */
 			peak_growth[i] = stats.memory_peak - memory_before;
-			expect(peak_growth[i] >= 4 * BLOCK && peak_growth[i] <= 32 * 1024,
-			    "peak covers four block buffers and bounded pager overhead");
+			expect(peak_growth[i] >= 4 * BLOCK &&
+			    peak_growth[i] <= 32 * 1024,
+			    "peak covers four block buffers and bounded pager "
+			    "overhead");
 			apfs_sm_pager_free(pager);
 		}
 		fixture_close(&f);
@@ -1565,9 +1821,12 @@ test_pager_rejects_damaged_chunk_structures(void)
 	} cases[] = {
 		{ .name = "CIB index wrong", .damage = DAMAGE_CIB_INDEX,
 		    .message = "out of order", .blocks = SMALL_BLOCKS },
-		{ .name = "CIB listed twice directly", .damage = DAMAGE_CIB_REPEAT,
-		    .message = "out of order", .blocks = 127 * BLOCKS_PER_CHUNK },
-		{ .name = "CIB listed twice in CAB", .damage = DAMAGE_CIB_REPEAT,
+		{ .name = "CIB listed twice directly",
+		    .damage = DAMAGE_CIB_REPEAT,
+		    .message = "out of order",
+		    .blocks = 127 * BLOCKS_PER_CHUNK },
+		{ .name = "CIB listed twice in CAB",
+		    .damage = DAMAGE_CIB_REPEAT,
 		    .message = "out of order", .blocks = LARGE_BLOCKS },
 		{ .name = "CIB entry count wrong", .damage = DAMAGE_CIB_COUNT,
 		    .message = "wrong entry count", .blocks = SMALL_BLOCKS },
@@ -1578,21 +1837,36 @@ test_pager_rejects_damaged_chunk_structures(void)
 		{ .name = "CAB entry count wrong", .damage = DAMAGE_CAB_COUNT,
 		    .message = "wrong entry count", .blocks = LARGE_BLOCKS },
 		{ .name = "CIB address zero", .damage = DAMAGE_CIB_ZERO,
-		    .message = "outside the container", .blocks = SMALL_BLOCKS },
-		{ .name = "CIB address outside device", .damage = DAMAGE_CIB_OUTSIDE,
-		    .message = "outside the container", .blocks = SMALL_BLOCKS },
-		{ .name = "chunk first block wrong", .damage = DAMAGE_CHUNK_FIRST,
-		    .message = "does not cover the blocks", .blocks = SMALL_BLOCKS },
-		{ .name = "chunk block count wrong", .damage = DAMAGE_CHUNK_BLOCKS,
-		    .message = "does not cover the blocks", .blocks = SMALL_BLOCKS },
-		{ .name = "chunk free count above block count", .damage = DAMAGE_CHUNK_FREE,
-		    .message = "more free blocks than blocks", .blocks = SMALL_BLOCKS },
-		{ .name = "allocated chunk omits bitmap", .damage = DAMAGE_CHUNK_NO_BITMAP,
-		    .message = "bitmap address its counts do not allow", .blocks = SMALL_BLOCKS },
-		{ .name = "chunk bitmap outside device", .damage = DAMAGE_CHUNK_BITMAP_OUTSIDE,
-		    .message = "bitmap address its counts do not allow", .blocks = SMALL_BLOCKS },
-		{ .name = "chunk newer than checkpoint", .damage = DAMAGE_CHUNK_XID,
-		    .message = "newer than the checkpoint", .blocks = SMALL_BLOCKS }
+		    .message = "outside the container",
+		    .blocks = SMALL_BLOCKS },
+		{ .name = "CIB address outside device",
+		    .damage = DAMAGE_CIB_OUTSIDE,
+		    .message = "outside the container",
+		    .blocks = SMALL_BLOCKS },
+		{ .name = "chunk first block wrong",
+		    .damage = DAMAGE_CHUNK_FIRST,
+		    .message = "does not cover the blocks",
+		    .blocks = SMALL_BLOCKS },
+		{ .name = "chunk block count wrong",
+		    .damage = DAMAGE_CHUNK_BLOCKS,
+		    .message = "does not cover the blocks",
+		    .blocks = SMALL_BLOCKS },
+		{ .name = "chunk free count above block count",
+		    .damage = DAMAGE_CHUNK_FREE,
+		    .message = "more free blocks than blocks",
+		    .blocks = SMALL_BLOCKS },
+		{ .name = "allocated chunk omits bitmap",
+		    .damage = DAMAGE_CHUNK_NO_BITMAP,
+		    .message = "bitmap address its counts do not allow",
+		    .blocks = SMALL_BLOCKS },
+		{ .name = "chunk bitmap outside device",
+		    .damage = DAMAGE_CHUNK_BITMAP_OUTSIDE,
+		    .message = "bitmap address its counts do not allow",
+		    .blocks = SMALL_BLOCKS },
+		{ .name = "chunk newer than checkpoint",
+		    .damage = DAMAGE_CHUNK_XID,
+		    .message = "newer than the checkpoint",
+		    .blocks = SMALL_BLOCKS }
 	};
 	fixture_t f;
 	apfs_sm_pager_t *pager;
@@ -1604,9 +1878,11 @@ test_pager_rejects_damaged_chunk_structures(void)
 		scenario = cases[i].name;
 		fixture_init(&f, cases[i].blocks, cases[i].damage);
 		CHECK(checkpoint_open(&f) == FSIMG_OK);
-		CHECK(apfs_sm_pager_open(&f.container, &pager, &f.error) == FSIMG_OK);
+		CHECK(apfs_sm_pager_open(&f.container, &pager,
+		    &f.error) == FSIMG_OK);
 		do {
-			status = apfs_sm_pager_next(pager, &chunk, &found, &f.error);
+			status = apfs_sm_pager_next(pager, &chunk, &found,
+			    &f.error);
 		} while (status == FSIMG_OK && found);
 		status_is(status, FSIMG_ECORRUPT, &f.error, cases[i].message);
 		apfs_sm_pager_free(pager);
@@ -1648,7 +1924,8 @@ test_device_free_count_mismatch_fails_at_end(void)
 	CHECK(checkpoint_open(&f) == FSIMG_OK);
 	CHECK(apfs_sm_pager_open(&f.container, &pager, &f.error) == FSIMG_OK);
 	for (uint64_t k = 0; k < f.sm.devices[0].chunk_count; k++) {
-		CHECK(apfs_sm_pager_next(pager, &chunk, &found, &f.error) == FSIMG_OK);
+		CHECK(apfs_sm_pager_next(pager, &chunk, &found,
+		    &f.error) == FSIMG_OK);
 		expect(found, "every chunk accepted before final sum check");
 	}
 	status_is(apfs_sm_pager_next(pager, &chunk, &found, &f.error),
@@ -1672,8 +1949,10 @@ test_pool_bitmap_rejects_invalid_slot_and_future_xid(void)
 		    "pool bitmap XID newer than checkpoint";
 		fixture_init(&f, SMALL_BLOCKS, damages[i]);
 		CHECK(checkpoint_open(&f) == FSIMG_OK);
-		CHECK(apfs_sm_pager_open(&f.container, &pager, &f.error) == FSIMG_OK);
-		status_is(apfs_sm_pager_pool_bitmap(pager, 0, &block, &bits, &f.error),
+		CHECK(apfs_sm_pager_open(&f.container, &pager,
+		    &f.error) == FSIMG_OK);
+		status_is(apfs_sm_pager_pool_bitmap(pager, 0, &block, &bits,
+		    &f.error),
 		    FSIMG_ECORRUPT, &f.error, i == 0 ? "outside its ring" :
 		    "newer than the checkpoint");
 		apfs_sm_pager_free(pager);
@@ -1690,7 +1969,8 @@ test_chunk_bitmap_outside_pool_is_passed_through(void)
 	const unsigned char *bits;
 	bool found;
 
-	scenario = "chunk bitmap inside container outside internal pool accepted";
+	scenario = "chunk bitmap inside container outside internal pool "
+	    "accepted";
 	fixture_init(&f, SMALL_BLOCKS, BITMAP_OUTSIDE_POOL);
 	CHECK(checkpoint_open(&f) == FSIMG_OK);
 	CHECK(apfs_sm_pager_open(&f.container, &pager, &f.error) == FSIMG_OK);
@@ -1699,7 +1979,8 @@ test_chunk_bitmap_outside_pool_is_passed_through(void)
 	    "external bitmap address preserved for verification");
 	if (status_is(apfs_sm_pager_bitmap(pager, &bits, &f.error), FSIMG_OK,
 	    &f.error, "chunk"))
-		expect(bits != NULL && bits[0] == 1, "external bitmap bytes read");
+		expect(bits != NULL && bits[0] == 1,
+		    "external bitmap bytes read");
 	apfs_sm_pager_free(pager);
 	fixture_close(&f);
 }
@@ -1710,6 +1991,10 @@ main(void)
 	test_native_geometry_matches_embedded_captures();
 	test_json_integer_extractor_is_bounded();
 	test_spaceman_rejects_inconsistent_geometry_and_arrays();
+	test_older_spaceman_accepts_supported_block_sizes();
+	test_older_spaceman_rejects_invalid_arrays();
+	test_older_xid_high_half_selects_current_structure();
+	test_current_spaceman_distinguishes_invalid_and_unknown_sizes();
 	test_wrong_cab_count_depends_on_proven_block_size();
 	test_array_end_determines_implied_size();
 	test_checkpoint_keeps_verified_spaceman();

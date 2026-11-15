@@ -134,12 +134,16 @@
 				    APFS_BTREE_NONPERSISTENT)
 
 /*
- * The space manager. APFS_SM_BYTES ends its fixed structure, through the
- * data-zone state that starts at APFS_SM_DATAZONE_OFFSET; its arrays follow
+ * The space manager. Its fixed structure has two layouts
+ * (specs/design-apfs.md, "Ephemeral objects and the space manager"): the
+ * current one ends at APFS_SM_BYTES, after its version, its structure size
+ * and the data-zone state that starts at APFS_SM_DATAZONE_OFFSET; the older
+ * one has none of those and ends at APFS_SM_OLDER_BYTES. Its arrays follow
  * at the offsets its fields name. Device and free-queue indexes select the
  * entries of its two device and three free-queue arrays.
  */
 #define APFS_SM_BYTES			2520u
+#define APFS_SM_OLDER_BYTES		336u
 #define APFS_SM_DATAZONE_OFFSET		344u
 #define APFS_SM_DEVICE_MAIN		0u
 #define APFS_SM_DEVICE_TIER2		1u
@@ -410,7 +414,10 @@ typedef struct apfs_sm_fq {
 } apfs_sm_fq_t;
 
 /*
- * The space manager's fixed structure. The data-zone allocation state is
+ * The space manager's fixed structure. structure_end is its end, the layout
+ * apfs_spaceman_decode() chose: APFS_SM_BYTES for the current layout,
+ * APFS_SM_OLDER_BYTES for the older one, whose version and struct_size are
+ * zero because it has no such fields. The data-zone allocation state is
  * not decoded: nothing reads it, and the encoder writes it as zero, its
  * value in every native capture. The array offsets (addr_offset and the
  * pool ring's three) are returned as stored: the arrays may lie past the
@@ -436,8 +443,9 @@ typedef struct apfs_spaceman {
 	uint32_t	ip_bm_xid_offset;	/* the pool's bitmap ring */
 	uint32_t	ip_bitmap_offset;
 	uint32_t	ip_bm_free_next_offset;
-	uint32_t	version;
-	uint32_t	struct_size;
+	uint32_t	structure_end;	/* APFS_SM_BYTES or _OLDER_BYTES */
+	uint32_t	version;	/* the current layout's */
+	uint32_t	struct_size;	/* the current layout's */
 	uint16_t	ip_bm_free_head;
 	uint16_t	ip_bm_free_tail;
 } apfs_spaceman_t;
@@ -643,6 +651,8 @@ bool	apfs_btree_info_encode(unsigned char *, size_t,
 
 bool	apfs_spaceman_decode(const unsigned char *, size_t, apfs_spaceman_t *);
 bool	apfs_spaceman_encode(unsigned char *, size_t, const apfs_spaceman_t *);
+/* The lowest offset of the arrays apfs_spaceman_check() bounds. */
+uint32_t apfs_spaceman_lowest_array(const apfs_spaceman_t *);
 
 /* Chunk-information and address blocks are accepted only when their count
  * of records fits the block; the record readers take the decoded header and
@@ -800,17 +810,20 @@ fsimg_status_t	apfs_object_read(apfs_container_t *, const apfs_ref_t *,
  * and the space manager").
  *
  * apfs_spaceman_check(sm, block_size, block_count, blocks, error) applies
- * the rules that tie a decoded space manager to the container's B and N:
- * the chunk geometry and the main device's counts (an address-block count
- * that breaks the relation is FSIMG_EUNSUPPORTED at a block size other than
- * 4096 and 16384, whose threshold no capture settles), an empty tier-2
- * device, a pool bitmap covering the pool, and arrays that lie past the
- * fixed structure, naturally aligned, disjoint, and ending no later than
- * the native packing of the same counts ends. blocks receives the size
- * those arrays imply, the smallest whole number of blocks holding the
- * structure and them, which the geometry therefore bounds. An array past
- * that packing is FSIMG_EUNSUPPORTED, a provisional rule; everything else
- * is FSIMG_ECORRUPT.
+ * the rules that tie a decoded space manager to the container's B and N.
+ * They cover the chunk geometry and the main device's counts (an
+ * address-block count that breaks the relation is FSIMG_EUNSUPPORTED at a
+ * block size other than 4096 and 16384, whose threshold no capture
+ * settles), an empty tier-2 device and a pool bitmap covering the pool.
+ * Then a current layout's structure size other than 2520 is
+ * FSIMG_EUNSUPPORTED when it is larger and every array lies past it, as a
+ * later layout's would, and FSIMG_ECORRUPT otherwise. Last, the arrays lie
+ * past the fixed structure of its layout, naturally aligned, disjoint, and
+ * ending no later than the native packing of the same counts, laid out from
+ * the end of that structure. blocks receives the size those arrays imply,
+ * the smallest whole number of blocks holding the structure and them, which
+ * the geometry therefore bounds. An array past that packing is
+ * FSIMG_EUNSUPPORTED, a provisional rule; everything else is FSIMG_ECORRUPT.
  *
  * apfs_spaceman_read(container, window, error) is the one read of the
  * selected checkpoint's space manager, which the checkpoint load makes: a
@@ -838,14 +851,15 @@ fsimg_status_t	apfs_object_read(apfs_container_t *, const apfs_ref_t *,
  * fields the native formatter derives from N alone for 4096-byte blocks
  * (specs/design-apfs.md, "Writer values"): B and N, the maximum volume
  * count, the checkpoint areas, the ephemeral-information word, and the
- * space manager's chunk geometry, main-device counts, internal pool, bitmap
- * ring's size, packed array offsets and free-queue node limits; the ring's
- * slots, counts, XIDs and identifiers are the writer's. It returns false for
- * an N of zero or above APFS_WRITER_BLOCKS_MAX. Its space manager passes
- * apfs_spaceman_check(), and its fields give apfs_fixed_regions() the
- * native layout. Below about 83 blocks that layout does not fit in N, which
- * apfs_fixed_regions() reports; the writer's minimum container size, which
- * planning applies, lies far above.
+ * space manager's current layout, chunk geometry, main-device counts,
+ * internal pool, bitmap ring's size, packed array offsets and free-queue
+ * node limits; the ring's slots, counts, XIDs and identifiers are the
+ * writer's. It returns false for an N of zero or above
+ * APFS_WRITER_BLOCKS_MAX. Its space manager passes apfs_spaceman_check(),
+ * and its fields give apfs_fixed_regions() the native layout. Below about
+ * 83 blocks that layout does not fit in N, which apfs_fixed_regions()
+ * reports; the writer's minimum container size, which planning applies,
+ * lies far above.
  */
 #define APFS_WRITER_BLOCK_SIZE		4096u
 #define APFS_WRITER_BLOCKS_MAX		34359738368ull

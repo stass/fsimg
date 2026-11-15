@@ -165,7 +165,7 @@ static uint64_t
 sm_implied_blocks(const apfs_spaceman_t *sm, uint32_t block_size)
 {
 	sm_array_t arrays[ARRAYS];
-	uint64_t end = APFS_SM_BYTES;
+	uint64_t end = sm->structure_end;
 
 	sm_arrays(sm, arrays);
 	for (unsigned i = 0; i < ARRAYS; i++)
@@ -175,10 +175,11 @@ sm_implied_blocks(const apfs_spaceman_t *sm, uint32_t block_size)
 }
 
 /*
- * The native packing, which every E1 and E12 dump shows: the arrays in
- * sm_arrays() order from the end of the fixed structure, the free-next
- * array at the next multiple of 8, then the tier-2 address array, empty.
- * Returns the end of the arrays.
+ * The native packing, which every E1 and E12 dump and every older-layout
+ * specimen shows: the arrays in sm_arrays() order from the end of the
+ * fixed structure in either layout, the free-next array at the next
+ * multiple of 8, then the tier-2 address array, empty. Returns the end of
+ * the arrays.
  */
 static uint64_t
 sm_pack(apfs_spaceman_t *sm)
@@ -186,7 +187,7 @@ sm_pack(apfs_spaceman_t *sm)
 	sm_array_t arrays[ARRAYS];
 	uint64_t end;
 
-	sm->ip_bm_xid_offset = APFS_SM_BYTES;
+	sm->ip_bm_xid_offset = sm->structure_end;
 	sm_arrays(sm, arrays);
 	sm->ip_bitmap_offset = (uint32_t)(sm->ip_bm_xid_offset +
 	    arrays[ARRAY_XID].bytes);
@@ -250,6 +251,24 @@ apfs_spaceman_check(const apfs_spaceman_t *sm, uint32_t block_size,
 		    "has a pool bitmap that does not fit its pool"));
 
 	/*
+	 * The decoder recognizes the older layout by its arrays, so what it
+	 * reads as the current layout may hold any structure size. Only 2520
+	 * is known. A larger size with every array past it, in a space manager
+	 * the rules above tie to the container, may be a later layout. Any
+	 * other size describes no layout, as a damaged size or a damaged older
+	 * layout's array offset gives.
+	 */
+	if (sm->structure_end == APFS_SM_BYTES &&
+	    sm->struct_size != APFS_SM_BYTES) {
+		if (sm->struct_size > APFS_SM_BYTES &&
+		    apfs_spaceman_lowest_array(sm) >= sm->struct_size)
+			return (apfs_unsupported(error, ROLE_SM,
+			    "has the structure size of an unknown layout"));
+		return (apfs_corrupt(error, ROLE_SM,
+		    "has an invalid structure size"));
+	}
+
+	/*
 	 * The arrays may lie anywhere past the structure, but end no later
 	 * than the native packing of the same counts does, so the counts
 	 * checked above bound the object's size. Only fresh containers show
@@ -263,7 +282,7 @@ apfs_spaceman_check(const apfs_spaceman_t *sm, uint32_t block_size,
 		if (arrays[i].offset + arrays[i].bytes > packed_end)
 			return (apfs_unsupported(error, ROLE_SM,
 			    "has an array past its packed extent"));
-		if (arrays[i].offset < APFS_SM_BYTES ||
+		if (arrays[i].offset < sm->structure_end ||
 		    arrays[i].offset % arrays[i].width != 0)
 			return (apfs_corrupt(error, ROLE_SM,
 			    "has an array inside its structure or unaligned"));
@@ -406,8 +425,13 @@ apfs_native_geometry(uint64_t block_count, apfs_nx_t *nx, apfs_spaceman_t *sm)
 	bzero(nx, sizeof(*nx));
 	bzero(sm, sizeof(*sm));
 
-	/* The space manager: N bounds every count below u32. */
+	/*
+	 * The space manager, in the current layout, the only one the writer
+	 * emits: N bounds every count below u32.
+	 */
 	sm_geometry(APFS_WRITER_BLOCK_SIZE, block_count, &g);
+	sm->structure_end = APFS_SM_BYTES;
+	sm->struct_size = APFS_SM_BYTES;
 	pool = NATIVE_POOL_FACTOR * (g.chunks + g.cibs + g.cabs);
 	bitmap = ceil_div(pool, g.blocks_per_chunk);
 	ring = NATIVE_RING_MULTIPLIER * bitmap;

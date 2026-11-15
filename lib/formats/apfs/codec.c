@@ -816,6 +816,24 @@ sm_fq_encode(unsigned char *raw, const apfs_sm_fq_t *fq)
 	fsimg_store_le64(raw + 32, 0);
 }
 
+/*
+ * The lowest offset of the arrays apfs_spaceman_check() bounds: the pool
+ * ring's three and the main device's address array.
+ */
+uint32_t
+apfs_spaceman_lowest_array(const apfs_spaceman_t *sm)
+{
+	const uint32_t offsets[] = { sm->ip_bm_xid_offset,
+	    sm->ip_bitmap_offset, sm->ip_bm_free_next_offset,
+	    sm->devices[APFS_SM_DEVICE_MAIN].addr_offset };
+	uint32_t lowest = UINT32_MAX;
+
+	for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++)
+		if (offsets[i] < lowest)
+			lowest = offsets[i];
+	return (lowest);
+}
+
 bool
 apfs_spaceman_decode(const unsigned char *raw, size_t length,
     apfs_spaceman_t *sm)
@@ -849,16 +867,38 @@ apfs_spaceman_decode(const unsigned char *raw, size_t length,
 	sm->ip_bm_xid_offset = fsimg_load_le32(raw + 324);
 	sm->ip_bitmap_offset = fsimg_load_le32(raw + 328);
 	sm->ip_bm_free_next_offset = fsimg_load_le32(raw + 332);
+
+	/*
+	 * The layout rule (specs/design-apfs.md; for the older layout,
+	 * provisional): a structure size of APFS_SM_BYTES selects the current
+	 * layout. Otherwise a lowest array offset of APFS_SM_OLDER_BYTES
+	 * selects the older layout, which ends there, so that its bytes from
+	 * 336 are its XID array rather than a version and a size. Anything
+	 * else decodes as the current layout, whose structure size
+	 * apfs_spaceman_check() then judges.
+	 */
+	sm->version = 0;
+	sm->struct_size = 0;
+	if (fsimg_load_le32(raw + 340) != APFS_SM_BYTES &&
+	    apfs_spaceman_lowest_array(sm) == APFS_SM_OLDER_BYTES) {
+		sm->structure_end = APFS_SM_OLDER_BYTES;
+		return (true);
+	}
+	sm->structure_end = APFS_SM_BYTES;
 	sm->version = fsimg_load_le32(raw + 336);
 	sm->struct_size = fsimg_load_le32(raw + 340);
 	return (true);
 }
 
+/*
+ * Only the current layout encodes: the writer emits no other, and the older
+ * layout's arrays lie where this writes the version, size and data zone.
+ */
 bool
 apfs_spaceman_encode(unsigned char *raw, size_t length,
     const apfs_spaceman_t *sm)
 {
-	if (length < APFS_SM_BYTES)
+	if (length < APFS_SM_BYTES || sm->structure_end != APFS_SM_BYTES)
 		return (false);
 
 	fsimg_store_le32(raw + 32, sm->block_size);

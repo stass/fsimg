@@ -123,6 +123,25 @@ class ApfsDumpTest < Minitest::Test
     assert_equal 0x1, doc[:reaper][:flags]
   end
 
+  def test_current_spaceman_dump_keeps_version_and_structure_size
+    container = Container.new(Image.new(BytesIO.new(bytes: container_image)))
+    spaceman = container.dump.fetch(:spaceman)
+
+    assert_equal 2520, spaceman[:structure_end]
+    assert_equal 1, spaceman.fetch(:version)
+    assert_equal 2520, spaceman.fetch(:struct_size)
+  end
+
+  def test_older_spaceman_dump_omits_current_structure_fields
+    bytes = container_image(older_layout: true)
+    container = Container.new(Image.new(BytesIO.new(bytes:)))
+    spaceman = container.dump.fetch(:spaceman)
+
+    assert_equal 336, spaceman[:structure_end]
+    %i[version struct_size datazone].each { refute spaceman.key?(_1), _1.to_s }
+    assert_empty container.problems
+  end
+
   # A crafted chain that names one block many times reads it once.
   def test_a_repeated_chunk_information_block_is_read_once
     container = Container.new(Image.new(BytesIO.new(bytes: container_image(cibs: [20, 20]))))
@@ -365,12 +384,12 @@ class ApfsDumpTest < Minitest::Test
   # volume's object map is at 13 with its tree at 14, which maps the
   # file-system tree's virtual root 1028 to block 15. The volume's file
   # extent tree is at 17; the decmpfs data it points to is at 16.
-  def container_image(cibs: [20], spaceman_size: BLOCK, fs_oid: [1026], fext_oid: 17)
+  def container_image(cibs: [20], spaceman_size: BLOCK, fs_oid: [1026], fext_oid: 17, older_layout: false)
     sb = seal(superblock_block(block_count: 64, fs_oid:, omap_oid: 10))
     omap_record = [[1026, 1].pack("Q<Q<"), [0, BLOCK, 12].pack("L<L<q<")] # (oid, xid) -> (flags, size, paddr)
     blocks = {
       0 => sb, 1 => checkpoint_map(spaceman_size:), 2 => sb,
-      3 => spaceman(cibs:), 4 => object(oid: 1025, type: 0x8000_0011, fields: { 64 => [1].pack("L<") }), # reaper flags
+      3 => spaceman(cibs:, older_layout:), 4 => object(oid: 1025, type: 0x8000_0011, fields: { 64 => [1].pack("L<") }), # reaper flags
       10 => omap(oid: 10, tree: 11), 11 => node_block(oid: 11, level: 0, entries: [omap_record]),
       12 => volume_superblock(fext_oid:),
       13 => omap(oid: 13, tree: 14), 14 => node_block(oid: 14, level: 0, entries: [fs_root_record]),
@@ -396,20 +415,26 @@ class ApfsDumpTest < Minitest::Test
                                                 40 => mappings.map { _1.pack("L<4Q<3") }.join })
   end
 
-  # The space manager of the 64-block container. The main device's
-  # chunk-information addresses (`cibs`) sit at 2568; the internal pool's
-  # bitmap XID, ring index and free-next arrays at 2520, 2528 and 2536.
-  def spaceman(cibs:)
+  # The space manager of the 64-block container, in the current layout
+  # (structure end 2520) or the older one (336, no version or structure
+  # size). From the structure end lie the internal pool's bitmap XID, ring
+  # index and free-next arrays, at +0, +8 and +16, and the main device's
+  # chunk-information addresses (`cibs`) at +48.
+  def spaceman(cibs:, older_layout: false)
+    structure_end = older_layout ? 336 : 2520
+    address_offset = structure_end + 48
     geometry = [BLOCK, 32_768, 126, 507].pack("L<4") # block size, blocks per chunk, chunks per CIB, CIBs per CAB
     # block count, chunk count, CIB count, CAB count, free count, address offset, reserved
-    device = [64, 1, cibs.size, 0, 39, 2568, 0, 0].pack("Q<Q<L<L<Q<L<L<Q<")
+    device = [64, 1, cibs.size, 0, 39, address_offset, 0, 0].pack("Q<Q<L<L<Q<L<L<Q<")
     # flags VERSIONED; pool: tx multiplier, block count, bitmap blocks, ring blocks, ring base, pool base
     pool = [1, 16, 2, 1, 1, 22, 23].pack("L<L<Q<L<L<Q<Q<")
-    # ring free head and tail, the three array offsets, version, structure size
-    ring = [0xFFFF, 0, 2520, 2528, 2536, 1, 2520].pack("S<S<L<5")
+    # ring free head and tail, the three array offsets, then in the current layout version and structure size
+    ring = [0xFFFF, 0, structure_end, structure_end + 8, structure_end + 16].pack("S<S<L<3")
+    ring += [1, 2520].pack("L<2") unless older_layout
     arrays = [1, 0, 0xFFFF].pack("Q<S<x6S<") # bitmap XID 1, ring index 0, free-next end marker
     object(oid: 1024, type: 0x8000_0005,
-           fields: { 32 => geometry + device, 144 => pool, 320 => ring, 2520 => arrays, 2568 => cibs.pack("Q<*") })
+           fields: { 32 => geometry + device, 144 => pool, 320 => ring,
+                     structure_end => arrays, address_offset => cibs.pack("Q<*") })
   end
 
   # Index 0, one chunk: xid 1, first block 0, 64 blocks, 39 free, bitmap at 21.

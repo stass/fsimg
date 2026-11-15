@@ -187,6 +187,11 @@ typedef struct apfs_gen_queue {
 	uint16_t	node_limit;
 } apfs_gen_queue_t;
 
+typedef enum apfs_gen_layout {
+	APFS_GEN_LAYOUT_CURRENT,
+	APFS_GEN_LAYOUT_OLDER
+} apfs_gen_layout_t;
+
 typedef struct apfs_gen_spaceman {
 	apfs_gen_object_t object;
 	uint32_t	block_size;
@@ -209,6 +214,8 @@ typedef struct apfs_gen_spaceman {
 	uint32_t	ip_bm_free_next_offset;
 	uint32_t	version;
 	uint32_t	struct_size;
+	/* The older layout omits version, size and data zone. */
+	apfs_gen_layout_t layout;
 	apfs_gen_device_t devices[2];
 	apfs_gen_queue_t free_queues[3];
 } apfs_gen_spaceman_t;
@@ -421,6 +428,9 @@ bool	apfs_gen_tree_build(unsigned char *, size_t, const apfs_gen_tree_t *,
     uint64_t *, uint64_t *);
 /* Independent geometry; returns the packed object's byte size, or zero. */
 size_t	apfs_gen_spaceman_geometry(uint32_t, uint64_t,
+    apfs_gen_spaceman_t *);
+/* Older fixed structure; same geometry contract, arrays packed from 336. */
+size_t	apfs_gen_spaceman_geometry_older(uint32_t, uint64_t,
     apfs_gen_spaceman_t *);
 bool	apfs_gen_container_build(unsigned char *, size_t,
     const apfs_gen_container_t *);

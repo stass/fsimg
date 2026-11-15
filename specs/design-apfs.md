@@ -587,17 +587,43 @@ structures are read only by verification. Its layout:
 | 184 | 16 | Reserve block count and reserve allocation count |
 | 200 | 120 | Three free queues (internal pool, main, tier 2): count, tree OID, oldest XID, node limit |
 | 320 | 16 | Internal-pool bitmap ring: free head and tail, XID and bitmap offsets, free-next offset |
-| 336 | 4 | Version |
-| 340 | 4 | Structure size: 2520 in every E1 capture, the end of the data-zone field |
-| 344 | 2176 | Data-zone allocation state: two devices of eight zones, 136 bytes each; all zero in every E1 capture |
+| 336 | 4 | Version, current layout only |
+| 340 | 4 | Structure size, current layout only: 2520 in every E1 capture, the end of the data-zone field |
+| 344 | 2176 | Data-zone allocation state, current layout only: two devices of eight zones, 136 bytes each; all zero in every E1 capture |
+
+The fixed structure has two layouts. The current layout, in every E1, E12
+and E18 capture and the only one the writer emits, holds the version,
+structure size and data-zone fields and ends at 2520. The older layout ends
+at 336: it has none of those three fields, and its arrays begin at 336.
+apfsprogs' `mkapfs` writes it (the seven `mkapfs-linux` images of the
+corpus), and so did the 2016 macOS beta that made
+dissect-apfs-case_insensitive_beta and dissect-apfs-case_sensitive_beta;
+`fsapfsinfo` reads all nine, and `apfsck` passes the seven `mkapfs` images
+(the corpus's `verdicts.txt`). The reader tells the
+layouts apart by this rule: a structure size of 2520 at 340 selects the
+current layout; otherwise the lowest array offset being 336 selects the
+older layout, whose u32 at 340 is the high half of the XID array's first
+entry (0 in every specimen); anything else is read as the current layout
+with a structure size other than 2520. A larger size with every array past
+it is `FSIMG_EUNSUPPORTED`, as a later layout's would be; any other size is
+`FSIMG_ECORRUPT`, so damage to the size or to an older layout's array
+offsets is reported as corruption. The
+older-layout rule is provisional: those nine images are its only evidence,
+each with a one-block pool bitmap, sixteen ring slots and one
+chunk-information block. A `mkapfs` image above 16 GiB, whose main device
+has two chunk-information blocks, dumped with apfsdump closes the question
+of its packing beyond one address-array entry; if none is made, the rule
+stands as stated, since it is the current layout's packing moved to 336.
 
 The arrays follow the structure, at the offsets its fields name; in every
-E1 and E12 dump they are packed in this order: the pool ring's XID array at
-2520, its bitmap-index array right after it, its free-next array at the
-next multiple of 8, the main device's address array right after that and
-the tier-2 device's after it. With a one-block pool bitmap they lie at
-2520, 2528, 2536 and 2568; with 97 bitmap blocks at 2520, 3296, 3496 and
-6600 (apfs-newfs-140737488355328-e12-128t). The pool's bitmap
+E1 and E12 dump and every older-layout specimen they are packed in this
+order from the end of the fixed structure: the pool ring's XID array, its
+bitmap-index array right after it, its free-next array at the next
+multiple of 8, the main device's address array right after that and the
+tier-2 device's after it. With a one-block pool bitmap they lie at 2520,
+2528, 2536 and 2568 in the current layout and at 336, 344, 352 and 384 in
+the older one; with 97 bitmap blocks at 2520, 3296, 3496 and 6600
+(apfs-newfs-140737488355328-e12-128t). The pool's bitmap
 ring has `bitmap block count` slots of one bitmap each at the bitmap base.
 The XID array holds `bitmap size` u64 values, the XID each current bitmap
 was written in; the bitmap-index array holds `bitmap size` u16 slot indexes
@@ -631,7 +657,7 @@ blocks have no address block and 508 have two, at 16384 bytes 2043 none and
 same bisection with `newfs_apfs -b`; until then a container of such a block
 size whose address-block count breaks the relation is
 `FSIMG_EUNSUPPORTED` rather than corrupt. The arrays
-lie inside the object, each at or past the structure's 2520 bytes, aligned
+lie inside the object, each at or past the end of the fixed structure, aligned
 to its entry size, disjoint from the others and ending no later than the
 packed order above ends for the same counts, and the object's mapped
 size must be the smallest whole number of blocks holding the structure and

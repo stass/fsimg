@@ -717,7 +717,6 @@ emit_spaceman(apfs_emitter_t *e, uint64_t free_total, fsimg_error_t *error)
 	sm.devices[APFS_SM_DEVICE_MAIN].free_count = free_total;
 	sm.flags = SM_FLAGS;
 	sm.version = SM_VERSION;
-	sm.struct_size = APFS_SM_BYTES;
 	sm.ip_bm_free_head = (uint16_t)b;
 	sm.ip_bm_free_tail = (uint16_t)(sm.ip_bm_block_count - 1);
 	status = block_buffer(e, blocks, &buffer, error);

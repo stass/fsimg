@@ -112,15 +112,6 @@
   adapter, for native and written images only, does not use the oracle
   confinement.
 
-* [Medium] **APFS reader refuses third-party space managers**
-  (`lib/formats/apfs/spaceman.c`): `i`, `t` and `W` refuse every
-  `mkapfs-linux/*.img` specimen of `~/fsimg-corpus/apfs` (apfsprogs output)
-  and `dissect-apfs-case_insensitive_beta` and `_case_sensitive_beta` with
-  "APFS space manager has an array inside its structure or unaligned", where
-  `fsapfsinfo` and `apfs-dump-quick` read each volume (`CI16`, `Case
-  Insensitive (beta)`). Decide from the specimens' space-manager layouts
-  whether the packing rule is stricter than the format, or whether a reader
-  should accept what it does not verify.
 * [Medium] **APFS verifier refuses `dissect-apfs-snapshot`**
   (`lib/formats/apfs/verify.c`): `i`, `t` and `x -O` read it, `W` refuses it
   with "APFS extent-reference tree has a record of an invalid kind or
@@ -130,10 +121,16 @@
 * [Low] **APFS corpus results unrecorded** (`test/apfs-integration.rb`): the
   observed columns of `~/fsimg-corpus/apfs/MATRIX.md` are empty, so the
   integration reports every specimen as unrecorded. Fill them from a run
-  once the two items above are decided. Two observations differ from the
+  once the verifier item above is decided. Two observations differ from the
   matrix's predictions in diagnosis only: `go-apfs-secure` (encrypted DMG)
   and `app-kitty` (ULMO DMG) are refused as "unknown format" rather than as
   a recognized layer with an unsupported feature.
+* [Low] **APFS volume open decodes the space manager twice**
+  (`lib/formats/apfs/volume.c`, `free_count_read`): it reads and decodes the
+  selected checkpoint's space manager again only for the main device's free
+  count, which `container->spaceman` already holds checked. Use that copy
+  and drop the second decode site, checking the read-count tests in
+  `test/apfs.c`.
 * [Medium] **APFS native comparison gaps** (`test/apfs-native.c`): review
   findings left open in `test-apfs-write --native`. Capture-row
   `expect_row` calls discard their construction argument, so formulas such
