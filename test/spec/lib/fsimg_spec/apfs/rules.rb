@@ -58,14 +58,15 @@ module FsimgSpec
                       .select { |spec, node| applies_to.call(node, model) && !holds.call(node, spec, model) }
                       .map { _1.first.scope }.uniq
         end
-        scopes = %w[open verification]
+        scopes = %w[open directories verification]
         policy == :unsupported ? unsupported(id:, scope: scopes, anchor:, applies_to: TREES, predicate:) : rule(id:, scope: scopes, anchor:, applies_to: TREES, predicate:)
       end
 
       # A node with a decoded head; the header rule alone judges the rest.
       HEADED = ->(node, _) { !node.head.nil? }
 
-      def all = [*container_rules, *checkpoint_rules, *object_map_rules, *node_rules, *space_rules, *queue_rules, *reaper_rules]
+      def all = [*container_rules, *checkpoint_rules, *object_map_rules, *node_rules, *space_rules, *queue_rules, *reaper_rules,
+                 *VolumeRules.all, *RecordRules.all]
 
       def container_rules = [
         rule(id: "identity", scope: "open", anchor: "probe-and-identity", status: "FSIMG_EFORMAT", category: "profile",
@@ -135,9 +136,9 @@ module FsimgSpec
 
       def node_rules = [
         node_rule(id: "btree.header") { |node, spec, model| node_header?(node, spec, model.checkpoint) },
-        node_rule(id: "btree.flags", applies_to: HEADED) do |node, _, _|
+        node_rule(id: "btree.flags", applies_to: HEADED) do |node, spec, _|
           flags = node.head.flags
-          flags.anybits?(BTree::ROOT) == node.root && flags.anybits?(BTree::LEAF) == node.leaf? && node.fixed? &&
+          flags.anybits?(BTree::ROOT) == node.root && flags.anybits?(BTree::LEAF) == node.leaf? && node.fixed? == spec.fixed? &&
             (flags & ~BTree::KNOWN_NODE_FLAGS).zero?
         end,
         node_rule(id: "btree.footer", applies_to: ->(node, _) { node.root && node.head }) do |node, spec, model|
@@ -233,14 +234,17 @@ module FsimgSpec
         value.byte_size.positive? && (value.byte_size % size).zero? && value.address >= 1 && value.address + value.byte_size / size <= checkpoint.block_count
       end
 
-      # Every tree the model decoded: the container object map's and each
-      # free queue's.
+      # Every tree the model decoded: the container object map's, each
+      # free queue's, and each volume's object map and filesystem tree.
       def trees(model)
         object_map = FsimgSpec.undefined?(model.object_map_tree) ? [] : [model.object_map_tree]
         queues = FsimgSpec.undefined?(model.space) ? [] : model.space.queues.filter_map(&:tree)
-        object_map + queues
+        volumes = model.filesystems.flat_map { [_1.object_map_tree, _1.tree] }.reject { FsimgSpec.undefined?(_1) }
+        object_map + queues + volumes
       end
 
+      # A virtual node's OID is the one its parent names; the volume rules
+      # judge its XID against the object-map record that resolved it.
       def node_header?(node, spec, checkpoint)
         object = node.object
         kind = node.root ? :root_node : :node
@@ -248,14 +252,18 @@ module FsimgSpec
         object && object.valid?(kind:, storage: spec.storage, oid:, xid: checkpoint.xid) && object.header.subtype == spec.subtype
       end
 
+      # The tree flag each storage class sets; a virtual tree sets neither.
+      STORAGE_TREE_FLAGS = { PHYSICAL => BTree::PHYSICAL_TREE, EPHEMERAL => BTree::EPHEMERAL_TREE, VIRTUAL => 0 }.freeze
+
+      # A variable-size tree's footer states fixed sizes of zero.
       def footer_valid?(footer, spec, checkpoint)
         return false unless footer
 
-        storage = spec.storage == PHYSICAL ? BTree::PHYSICAL_TREE : BTree::EPHEMERAL_TREE
-        other = spec.storage == PHYSICAL ? BTree::EPHEMERAL_TREE : BTree::PHYSICAL_TREE
+        storage = STORAGE_TREE_FLAGS.fetch(spec.storage)
+        others = (BTree::PHYSICAL_TREE | BTree::EPHEMERAL_TREE) & ~storage
         footer.node_size == checkpoint.block_size && (footer.tree_flags & ~BTree::KNOWN_TREE_FLAGS).zero? &&
-          footer.tree_flags.anybits?(storage) && !footer.tree_flags.anybits?(other) &&
-          footer.key_size == spec.key_size && footer.value_size == spec.value_size
+          (footer.tree_flags & (BTree::PHYSICAL_TREE | BTree::EPHEMERAL_TREE)) == storage && !footer.tree_flags.anybits?(others) &&
+          footer.key_size == spec.key_size.to_i && footer.value_size == spec.value_size.to_i
       end
 
       # The root footer's key and node counts are the tree's, once the walk
@@ -275,9 +283,21 @@ module FsimgSpec
 
         orders = keys.map(&spec.order)
         bounds = [node.lower, node.upper].map { _1 && spec.order.call(_1) }
-        orders.each_cons(2).all? { (_1 <=> _2).negative? } &&
+        # Keys of an undecided tie-break may be equal (design: Validation).
+        increasing = keys.zip(orders).each_cons(2).all? do |(a, a_order), (b, b_order)|
+          comparison = a_order <=> b_order
+          comparison.negative? || (comparison.zero? && spec.undecided.call(a) && spec.undecided.call(b))
+        end
+        increasing &&
           (bounds.first.nil? || orders.empty? || (orders.first <=> bounds.first) >= 0) &&
-          (bounds.last.nil? || orders.all? { (_1 <=> bounds.last).negative? })
+          (bounds.last.nil? || keys.zip(orders).all? { |key, order| below_separator?(key, order, node.upper, bounds.last, spec) })
+      end
+
+      # A key is below the next separator, or equal to it when both have an
+      # undecided tie-break (design: Validation).
+      def below_separator?(key, order, separator, separator_order, spec)
+        comparison = order <=> separator_order
+        comparison.negative? || (comparison.zero? && spec.undecided.call(key) && spec.undecided.call(separator))
       end
 
       def space_geometry?(space)

@@ -9,8 +9,10 @@ module FsimgSpec
   # superblock, checkpoint selection over the descriptor ring, the mapped
   # ephemeral objects, the container object map and its tree, the generic
   # B-tree node, the space manager with its chunk structures and bitmaps,
-  # the free queues and the reaper. It is written from specs/design-apfs.md
-  # and shares no code with lib/formats/apfs/ or the C generator.
+  # the free queues and the reaper; and each volume's superblock, object
+  # map and filesystem tree, with the inode, directory-record, extent and
+  # data-stream records and their name hashing. It is written from
+  # specs/design-apfs.md and shares no code with lib/formats/apfs/ or the C generator.
   module Apfs
   end
 end
@@ -19,7 +21,12 @@ require_relative "apfs/layout"
 require_relative "apfs/model"
 require_relative "apfs/checkpoint"
 require_relative "apfs/btree"
+require_relative "apfs/records"
+require_relative "apfs/volume"
 require_relative "apfs/space"
 require_relative "apfs/rules"
+require_relative "apfs/volume_rules"
+require_relative "apfs/record_rules"
+require_relative "apfs/volume_witnesses"
 require_relative "apfs/witnesses"
 require_relative "apfs/oracles"

@@ -284,13 +284,138 @@ module FsimgSpec
         uint64 :xid
       end
 
+      # The volume superblock from offset 32 (design: Volume superblock).
+      # The counts at 184 are files, directories, symbolic links, other
+      # objects and snapshots, then blocks allocated and freed.
+      class VolumeSuperblock < BinData::Record
+        endian :little
+        uint32 :magic
+        uint32 :slot
+        uint64 :optional_features
+        uint64 :readonly_features
+        uint64 :incompatible_features
+        uint64 :unmount_time
+        uint64 :reserve_blocks
+        uint64 :quota_blocks
+        uint64 :allocated_blocks
+        string :crypto_state, length: 20
+        uint32 :root_tree_type
+        uint32 :extent_tree_type
+        uint32 :snapshot_tree_type
+        uint64 :object_map_oid
+        uint64 :root_tree_oid
+        uint64 :extent_tree_oid
+        uint64 :snapshot_tree_oid
+        uint64 :revert_xid
+        uint64 :revert_superblock_oid
+        uint64 :next_oid
+        uint64 :file_count
+        uint64 :directory_count
+        uint64 :symlink_count
+        uint64 :other_count
+        uint64 :snapshot_count
+        uint64 :blocks_allocated
+        uint64 :blocks_freed
+        string :uuid, length: 16
+        uint64 :modification_time
+        uint64 :flags
+        string :formatter, length: 48
+        string :modifications, length: 384
+        string :name, length: 256
+        uint32 :next_document_id
+        uint16 :role
+        uint16 :reserved
+        uint64 :root_to_xid
+        uint64 :rolling_state_oid
+        uint64 :clone_epoch
+        uint64 :clone_xid
+        uint64 :snapshot_metadata_oid
+        string :group_uuid, length: 16
+        uint64 :integrity_oid
+        uint64 :sealed_extent_tree_oid
+        uint32 :sealed_extent_tree_type
+        uint32 :reserved_type
+        uint64 :reserved_oid
+      end
+
+      # The filesystem-tree key header: the owner in the low 60 bits and
+      # the record kind in the top 4 (design: Key families).
+      class RecordKey < BinData::Record
+        endian :little
+        uint64 :word
+      end
+
+      # An inode value's 92-byte fixed part (design: Inodes).
+      class Inode < BinData::Record
+        endian :little
+        uint64 :parent_id
+        uint64 :private_id
+        int64 :created
+        int64 :modified
+        int64 :changed
+        int64 :accessed
+        uint64 :internal_flags
+        int32 :child_or_link_count
+        uint32 :protection_class
+        uint32 :write_generation
+        uint32 :bsd_flags
+        uint32 :owner
+        uint32 :group
+        uint16 :mode
+        uint16 :reserved
+        uint64 :uncompressed_size
+      end
+
+      # A directory record value's fixed part (design: Directory records
+      # and names).
+      class DirectoryRecord < BinData::Record
+        endian :little
+        uint64 :child
+        int64 :added
+        uint16 :flags
+      end
+
+      # A file-extent value (design: Data streams and file extents).
+      class FileExtent < BinData::Record
+        endian :little
+        uint64 :length_and_flags
+        uint64 :physical_block
+        uint64 :crypto_id
+      end
+
+      # The data-stream extended field, type 8.
+      class DataStream < BinData::Record
+        endian :little
+        uint64 :logical_size
+        uint64 :allocated
+        uint64 :crypto_id
+        uint64 :written
+        uint64 :bytes_read
+      end
+
+      # An extended-field blob's counts and one field's descriptor
+      # (design: Extended fields).
+      class FieldsHead < BinData::Record
+        endian :little
+        uint16 :field_count
+        uint16 :used_bytes
+      end
+
+      class FieldEntry < BinData::Record
+        endian :little
+        uint8 :field_type
+        uint8 :flags
+        uint16 :data_size
+      end
+
       # The records that start at object byte BODY, and those that are
       # read at an offset their container gives.
       OBJECT_BODIES = [ContainerSuperblock, CheckpointMapHead, SpaceManager, ChunkBlockHead, ObjectMap, NodeHead,
-                       Reaper, ReapList].freeze
+                       Reaper, ReapList, VolumeSuperblock].freeze
       RECORDS = [ObjectHeader, *OBJECT_BODIES, CheckpointMapping, SpaceDevice, FreeQueueEntry, ChunkInfo,
                  ObjectMapKey, ObjectMapValue, FreeQueueKey, NodeFooter, FixedEntry, VariableEntry,
-                 ReapListEntry].freeze
+                 ReapListEntry, RecordKey, Inode, DirectoryRecord, FileExtent, DataStream, FieldsHead,
+                 FieldEntry].freeze
 
       # Immutable values generated from each layout's field table, one
       # member per field, so decoded records support methods and pattern
@@ -310,7 +435,8 @@ module FsimgSpec
       def self.size(record) = record.new.num_bytes
 
       # The unpack directive of each integer field type the layouts use.
-      DIRECTIVES = { BinData::Uint64le => "Q<", BinData::Uint32le => "V", BinData::Uint16le => "v", BinData::Uint8 => "C" }.freeze
+      DIRECTIVES = { BinData::Uint64le => "Q<", BinData::Uint32le => "V", BinData::Uint16le => "v", BinData::Uint8 => "C",
+                     BinData::Int64le => "q<", BinData::Int32le => "l<" }.freeze
 
       # The unpack directive of a flat record, generated from its field
       # table, so that a table of thousands of records decodes in one call:

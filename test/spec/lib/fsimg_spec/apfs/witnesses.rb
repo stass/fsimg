@@ -51,6 +51,8 @@ module FsimgSpec
       # E1 with one empty volume, two committed checkpoints and both free
       # queues holding one record.
       BASE = "apfs-newfs-4194304-plain"
+      # Every native capture some witness mutates.
+      BASES = [BASE, VolumeWitnesses::RECORD_BASE].freeze
 
       # Rules no native base can target, and why.
       UNTARGETED = {
@@ -78,27 +80,77 @@ module FsimgSpec
         mutations + [bytes(at, Fletcher64.seal(view.read(at, blocks * base.block_size)).byteslice(0, 8))]
       end
 
+      # The table-of-contents lengths of the object map's fixed-size nodes,
+      # as the native formatter sizes them (design: Writer values): a leaf
+      # holds 112 entries of 16-byte keys and values, an index node 144
+      # entries of 16-byte keys and 8-byte child OIDs.
+      LEAF_TABLE = 448
+      INDEX_TABLE = 576
+      EMPTY_LIST = 0xFFFF
+
       # A non-root node of the container object map at block address,
-      # with entries [key bytes, value bytes] in a fixed-size table.
+      # with entries [key bytes, value bytes] in a leaf's fixed-size table.
       def child_node(base, address, entries)
         size = base.block_size
         header = Layout::ObjectHeader.new(oid: address, xid: base.xid, object_type: KINDS.fetch(:node) | PHYSICAL,
                                           subtype: KINDS.fetch(:object_map)).to_binary_s
         table = entries.each_with_index.map { |_, i| Layout::FixedEntry.new(key_offset: 16 * i, value_offset: 16 * (i + 1)).to_binary_s }.join
-        toc_length = 4 * [entries.size, 1].max.then { (_1 + 3) / 4 * 4 }
         keys = entries.map(&:first).join
-        head = Layout::NodeHead.new(flags: BTree::LEAF | BTree::FIXED, key_count: entries.size, toc_length:,
-                                    free_offset: keys.bytesize, free_length: size - 56 - toc_length - 32 * entries.size).to_binary_s
-        body = header + head + table.ljust(toc_length, "\0") + keys
+        head = node_head(flags: BTree::LEAF | BTree::FIXED, level: 0, key_count: entries.size, toc_length: LEAF_TABLE,
+                         keys: keys.bytesize, free_length: size - BTree::NODE_DATA - LEAF_TABLE - 32 * entries.size)
+        body = header + head + table.ljust(LEAF_TABLE, "\0") + keys
         values = entries.reverse.map(&:last).join
         Fletcher64.seal(body.ljust(size - values.bytesize, "\0") + values)
       end
 
-      # The object map's root made an index node naming child at block
-      # address through its one entry, its footer counting two nodes.
+      def node_head(flags:, level:, key_count:, toc_length:, keys:, free_length:) =
+        Layout::NodeHead.new(flags:, level:, key_count:, toc_length:, free_offset: keys, free_length:, key_free_offset: EMPTY_LIST,
+                             value_free_offset: EMPTY_LIST).to_binary_s
+
+      # The object map's root rewritten as an index node whose one entry,
+      # the root's first key, names child at block address, with an index
+      # node's table and its footer counting two nodes.
       def root_naming(base, child)
-        resealed(base, base.object_map_root, [32, :u16, BTree::ROOT | BTree::FIXED], [34, :u16, 1], [omap_value_at(base), :u64, child],
-                 [base.block_size - BTree::FOOTER_BYTES + 32, :u64, 2])
+        size = base.block_size
+        root = base.model.object_map_tree.nodes.first
+        footer_at = size - BTree::FOOTER_BYTES
+        header = Layout::ObjectHeader.new(oid: root.object.address, xid: base.xid, object_type: KINDS.fetch(:root_node) | PHYSICAL,
+                                          subtype: KINDS.fetch(:object_map)).to_binary_s
+        key = Layout::ObjectMapKey.new(**root.entries.first.key.to_h).to_binary_s
+        head = node_head(flags: BTree::ROOT | BTree::FIXED, level: 1, key_count: 1, toc_length: INDEX_TABLE, keys: key.bytesize,
+                         free_length: footer_at - BTree::NODE_DATA - INDEX_TABLE - key.bytesize - BTree::INDEX_VALUE_BYTES)
+        table = Layout::FixedEntry.new(key_offset: 0, value_offset: BTree::INDEX_VALUE_BYTES).to_binary_s.ljust(INDEX_TABLE, "\0")
+        footer = root.object.bytes.byteslice(footer_at, BTree::FOOTER_BYTES).dup.tap { _1[32, 8] = [2].pack("Q<") }
+        node = (header + head + table + key).ljust(footer_at - BTree::INDEX_VALUE_BYTES, "\0") + [child].pack("Q<") + footer
+        [bytes(root.object.address * size, Fletcher64.seal(node))]
+      end
+
+      # The container object map made two levels deep: its root an index
+      # node over a leaf in a free block holding the root's records, that
+      # block allocated in its chunk's bitmap and both free counts. A valid
+      # container, which no witness mutates but the oracles judge.
+      def two_level_object_map(base)
+        free = base.free_block
+        entries = base.model.object_map_tree.records.map do |key, value|
+          [Layout::ObjectMapKey.new(**key.to_h).to_binary_s, Layout::ObjectMapValue.new(**value.to_h).to_binary_s]
+        end
+        [bytes(free * base.block_size, child_node(base, free, entries)), *root_naming(base, free), *allocated(base, free)]
+      end
+
+      # The mutations marking a free block allocated: its bit in the chunk
+      # bitmap set, and the chunk's and the device's free counts one lower
+      # (design: Ephemeral objects and the space manager).
+      def allocated(base, block)
+        space = base.model.space
+        chunk = block / space.blocks_per_chunk
+        info = space.chunk_infos[chunk]
+        bit = block - info.first_block
+        bitmap_byte = info.bitmap_block * base.block_size + bit / 8
+        chunk_block = space.chunk_blocks[chunk / space.chunks_per_block].address
+        info_at = Layout::BODY + Layout.size(Layout::ChunkBlockHead) + Layout.size(Layout::ChunkInfo) * (chunk % space.chunks_per_block)
+        [u8(bitmap_byte, base.view.read(bitmap_byte, 1).ord | (1 << (bit % 8))),
+         *resealed(base, chunk_block, [info_at + 20, :u32, info.free_count - 1]),
+         *resealed(base, base.space_manager, [72, :u64, space.manager.main[:free_count] - 1])]
       end
 
       def raw_value_offset(base, address) = base.view.read(address * base.block_size + 58, 2).unpack1("v")
@@ -109,11 +161,11 @@ module FsimgSpec
 
       def omap_value_at(base) = base.block_size - BTree::FOOTER_BYTES - raw_value_offset(base, base.object_map_root)
 
-      # Rule => witness name => mutations.
+      # Rule => witness name => mutations, the container rules' on BASE and
+      # the volume and record rules' on their bases.
       def changes(base)
-        return {} unless base.name == BASE
-
-        [container(base), checkpoint(base), object_map(base), nodes(base), space(base), reaper(base)].reduce(:merge)
+        container = base.name == BASE ? [container(base), checkpoint(base), object_map(base), nodes(base), space(base), reaper(base)].reduce(:merge) : {}
+        container.merge(VolumeWitnesses.changes(base))
       end
 
       def container(base)

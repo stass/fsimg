@@ -177,8 +177,8 @@ module FsimgSpec
 
       # The oracles' hook for a reading case, when the run has a shell and
       # the case's image is valid and unmutated, so its tree is known; an
-      # image of another class would reach an oracle only under the
-      # confinement the nightly and deep profiles name.
+      # image of another class never reaches an oracle
+      # (specs/design-spec-testing.md#process-boundary-and-host-safety).
       def oracles(recipe)
         return nil unless @shell && recipe.reading? && recipe.kind == "valid" && recipe.mutations.empty?
 

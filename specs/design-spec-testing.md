@@ -755,11 +755,7 @@ The preflight also checks:
   below the host's `PATH_MAX`, because the runner walks by path while fsimg
   works descriptor-relative;
 * that the soft `RLIMIT_NOFILE` fsimg inherits is at least the `fds` limit;
-* that `trials/` and `cases/` report the same `st_dev`;
-* when oracle confinement is configured, that a fixed command run through it
-  writes a file inside its directory and exits 0, which shows that the
-  command runs programs at all, and can neither write a file outside the
-  case directory nor read a sentinel file the harness placed outside it.
+* that `trials/` and `cases/` report the same `st_dev`.
 
 Each invocation follows one lifetime:
 
@@ -970,13 +966,15 @@ gains no command, option or interface for testing alone.
 
 Generated images are never mounted. A hostile image can attack an oracle as
 well as fsimg, so oracle exposure follows an image's provenance, not its
-classification. Oracles read class A bases and images fsimg created in every
-profile. Other images reach them only in the nightly and deep profiles, and
-only through an OS sandbox command named by `FSIMG_SPEC_ORACLE_CONFINE`, as the
-preflight checks. The sandbox allows writes only in the case directory, and
-reads only there and in the tool's installation and shared libraries, locale
-data, `/etc/mtools.conf` and `oracle-home/`, the same files an unconfined
-oracle reads. Without one, those observations are reported unavailable.
+classification. Oracles read class A bases and images fsimg created, in every
+profile, and no other image: never one the harness built or mutated for a
+class B or C case. A process sandbox would not make that exposure safe: an
+oracle can reach parsers outside any process, as `fsck_apfs` reads the disk
+`hdiutil` attaches, which the kernel probes, and a sandbox command the harness
+did not write is trusted before anything checks it. The APFS adapter takes
+no image path: it takes only an image value whose two constructors name the
+fixed files a native capture and fsimg's create stage write, where the
+harness never writes a mutated image.
 
 ## Generation and shrinking
 
@@ -1080,7 +1078,7 @@ rule families, and would then stay optional and outside CI.
 | --- | --- | --- | --- |
 | `quick` | `make check`, `make check-spec` | Harness self-tests; every deterministic witness within its ceilings through fsimg: a valid one or one of a `must_accept` rule through every reading stage, and one of any other policy through the first stage that checks its rule; 100-300 PropCheck examples, of which a sample of a few per variant runs fsimg; a few trees mtools populates and the formatter base of each variant, through every reading stage; every promoted case | At most about 60 s added to `make check` on the macOS host. Beyond that, `make check` keeps a smoke subset and `check-spec` runs the rest. |
 | `nightly` | `make check-spec-extended` | Thousands of random examples, deterministic witnesses through every stage, 50-150 oracle cross-checks, 150 trees mtools populates, class C cases | 10-30 min |
-| `deep` | `make check-spec-deep` | Large volumes, broad mutation matrices, every oracle on every case | Explicit opt-in |
+| `deep` | `make check-spec-deep` | Large volumes, broad mutation matrices, every oracle on every class A base and created image | Explicit opt-in |
 
 The budgets are targets, which measurement adjusts. Every profile sets ceilings
 on image capacity, file count, path depth, memory, scratch, extracted bytes,

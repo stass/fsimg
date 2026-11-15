@@ -11,17 +11,16 @@ module FsimgSpec
 
   # Establishes the host before any case (specs/design-spec-testing.md#runner)
   # in the results directory's preflight/, which it removes when it
-  # finishes. It checks the host's path and descriptor limits, the trials
-  # and cases filesystems and any oracle confinement, then runs one valid
-  # creation, and every reading stage on a sample image no fsimg writer
-  # produced, through fsimg with the run's options. It answers the Runner
-  # every case uses, which applies RLIMIT_AS only where it works, and the
-  # sandbox status every invocation must report.
+  # finishes. It checks the host's path and descriptor limits and the
+  # trials and cases filesystems, then runs one valid creation, and every
+  # reading stage on a sample image no fsimg writer produced, through
+  # fsimg with the run's options. It answers the Runner every case uses,
+  # which applies RLIMIT_AS only where it works, and the sandbox status
+  # every invocation must report.
   class Preflight
     # The case directory roots the runner walks by path, beyond the results
     # directory, with the longest id a recipe may carry.
     LONGEST_CASE_ROOT = "/cases/#{"x" * 128}/source".length
-    SENTINEL = "fsimg-spec-sentinel"
     # The confinement statuses an accepted stage can report: fsimg's
     # summaries also name unknown (cmd/fsimg/display.c), but only before a
     # worker has reported its confinement, and a worker makes every
@@ -61,7 +60,6 @@ module FsimgSpec
       directory = File.join(@results, "preflight")
       Dir.mkdir(directory, 0o700)
       checked = begin
-        check_confinement(directory)
         run_valid_cases(directory, address_space: address_space?)
       rescue Exception
         # A cleanup that raised here would replace the exception in flight,
@@ -115,43 +113,6 @@ module FsimgSpec
       devices = %w[trials cases].map { File.stat(File.join(@results, _1)).dev }.uniq
       raise PreflightError, "trials/ and cases/ lie on different filesystems" unless devices.one?
     end
-
-    # FSIMG_SPEC_ORACLE_CONFINE names a command that runs an oracle inside
-    # an OS sandbox. A probe run through it must write inside its directory
-    # and exit 0, the positive control that shows the command runs programs
-    # at all, and must neither write outside the directory nor read a
-    # sentinel placed outside it.
-    PROBE_SCRIPT = 'echo x > inside || exit 3; echo x > "$1" 2>/dev/null; cat "$2" 2>/dev/null; exit 0'
-
-    def check_confinement(directory)
-      confine = @environment["FSIMG_SPEC_ORACLE_CONFINE"].to_s.split
-      return if confine.empty?
-
-      sentinel = File.join(@results, "#{SENTINEL}.txt")
-      outside = File.join(@results, "#{SENTINEL}.written")
-      File.write(sentinel, SENTINEL)
-      begin
-        probe = Invocation.run([*confine, "/bin/sh", "-c", PROBE_SCRIPT, "probe", outside, sentinel],
-                               chdir: directory, env: { "PATH" => @environment.fetch("PATH") },
-                               limits: probe_limits)
-        problem = confinement_problem(probe, directory:, outside:)
-        raise PreflightError, "#{confine.join(" ")} #{problem}" if problem
-      ensure
-        FileUtils.rm_f([sentinel, outside])
-      end
-    end
-
-    def confinement_problem(probe, directory:, outside:)
-      if probe.launch_error then "cannot start: #{probe.launch_error}"
-      elsif probe.exit_status != 0 || probe.leftover || !File.file?(File.join(directory, "inside"))
-        "did not run the probe to completion inside its directory"
-      elsif File.exist?(outside) || probe.stdout.include?(SENTINEL)
-        "lets an oracle write or read outside its case directory"
-      end
-    end
-
-    def probe_limits = Invocation::Limits.new(wall_seconds: 30, cpu_seconds: 30, file_bytes: 1 << 20,
-                                              address_space_bytes: nil, capture_bytes: 1 << 20)
 
     # A one-file FAT16 creation, whose summary reports the sandbox status,
     # then every reading stage on the sample, so the reading stages do not

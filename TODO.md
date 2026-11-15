@@ -93,14 +93,28 @@
   join finds such a cycle; joining each directory's parent chain by
   repeated doubling would, at about the logarithm of the deepest path in
   sorts of the directory records.
-  The specification harness's container model (`test/spec/lib/fsimg_spec/apfs/`)
+  The specification harness's APFS model (`test/spec/lib/fsimg_spec/apfs/`)
   is judged on native captures only: `apfs.sm.address_blocks_unmeasured` has
   no witness until a builder renders a container of another block size, and
-  `fsck_apfs -n` refuses the model's two-level container object map, the
-  native root leaf resealed as an index node over a leaf in a free block,
-  which kept the leaf's 448-byte table of contents ("invalid btn_table_space
-  (0, 448), given btn_flags (0x5)"); the builder must size an index node's
-  table as `write-btree.c` does before a multi-level tree serves a case. The format design does not say whether open or full verification
+  no builder renders the writer's one-volume profile, so no generated case
+  runs fsimg on an APFS image. The record level models inodes, directory
+  records, file extents and data-stream ID records; attributes beyond their
+  stream IDs, sibling links and maps, symbolic links, compression,
+  directory statistics, the extent-reference and snapshot trees, sealed
+  volumes and the namespace walk's reachability have no rules yet. Volume
+  and record rules judge every resolved volume with the selected volume's
+  scopes, where a non-selected volume's faults are verification's.
+  `apfsck` is not installed on the development host, so its adapter has
+  only reported unavailable. Rules the volume and record review listed as
+  missing: distinct volume UUIDs, the volume map's
+  pending revert range, the device-number field on a non-device, the
+  sparse-bytes field and flag, a plain name over 1022 bytes, attribute
+  streams' size limits, hashed and no-header node flags in an unsealed
+  tree; and the record model's readability items: positional
+  `[type, flags, data]` and `[key, value]` tuples, single-letter rule
+  lambda parameters and reflective policy dispatch in
+  `volume_rules.rb` and `record_rules.rb`, and object-map lookup by scan
+  rather than seek. The format design does not say whether open or full verification
   checks the space manager's count relations, the keylocker ranges and the
   container map's snapshot fields; the model places them as `rules.rb` states.
   Review findings left for the next part: open-scope object-map rules judge
@@ -111,9 +125,7 @@
   records; a mapped object past the read bound classifies as corrupt rather
   than unclassified; the object-map, address-block and bitmap addresses are
   not judged against `N`, nor is the data run's highest block read; the
-  height and object-flag witnesses also fire corrupt rules; and the oracle
-  adapter, for native and written images only, does not use the oracle
-  confinement.
+  height and object-flag witnesses also fire corrupt rules.
 
 * [Medium] **APFS verifier refuses `dissect-apfs-snapshot`**
   (`lib/formats/apfs/verify.c`): `i`, `t` and `x -O` read it, `W` refuses it
@@ -299,14 +311,6 @@
   (`test/spec/lib/fsimg_spec/fat/bases.rb`): formatter bases are built only
   with mkfs.fat and mtools, so a FreeBSD host without them runs on builder
   bases alone. Add the `newfs_msdos` formatter adapter.
-
-* [Medium] **Spec harness oracles never read targeted or malformed images**
-  (`test/spec/lib/fsimg_spec/fat/cases.rb`, `test/spec/lib/fsimg_spec/fat/oracles.rb`):
-  the oracles read only valid, unmutated case images, as every profile
-  allows unconfined. The nightly and deep profiles should also run them on
-  class B and C images through `FSIMG_SPEC_ORACLE_CONFINE`, which the
-  preflight checks but no oracle runs through yet, and report those
-  observations unavailable without it.
 
 * [Medium] **Spec harness replays no tool-built base**
   (`test/spec/lib/fsimg_spec/fat/cases.rb` `Cases.unreplayable`,

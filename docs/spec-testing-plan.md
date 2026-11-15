@@ -272,10 +272,8 @@ review and commit gates.
 * The preflight fails the run when the longest walked root (`dest/` or
   `source/` with a 128-byte id)
   plus the profile's `path` ceiling exceeds the host's `PATH_MAX`, when the soft
-  `RLIMIT_NOFILE` is below the `fds` limit, when `trials/` and `cases/`
-  differ in `st_dev`, and when the oracle confinement command lets a write
-  outside the case directory or a read of the sentinel succeed (for example,
-  `env`).
+  `RLIMIT_NOFILE` is below the `fds` limit, and when `trials/` and `cases/`
+  differ in `st_dev`.
 * The name funnel refuses an empty name, `.`, `..`, `a/b` and a name with
   NUL without creating anything, and creates the exact bytes of a name whose
   Ruby string is tagged ISO-8859-1 or CP437. On default APFS a case pair and

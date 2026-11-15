@@ -63,20 +63,6 @@ class TestPreflight < Minitest::Test
     end
   end
 
-  # env confines nothing, and false runs nothing: the probe's positive
-  # control refuses a command that cannot run the oracle at all.
-  def test_confinement_that_confines_nothing_or_runs_nothing_fails
-    { "env" => /outside its case directory/, "false" => /did not run the probe/ }.each do |command, message|
-      with_results do |results|
-        environment = { "PATH" => ENV.fetch("PATH"), "FSIMG_SPEC_ORACLE_CONFINE" => command }
-        error = assert_raises(FsimgSpec::PreflightError) { preflight(results, environment:) }
-
-        assert_match message, error.message, command
-        assert_equal %w[cases trials], Dir.children(results).sort, "#{command}: the probe left files behind"
-      end
-    end
-  end
-
   private
 
   def with_results
@@ -93,7 +79,7 @@ class TestPreflight < Minitest::Test
     (1..components).reduce(root) { |path, _| File.join(path, "d" * 200).tap { Dir.mkdir(_1) } }
   end
 
-  def preflight(results, environment: { "PATH" => ENV.fetch("PATH") }) =
+  def preflight(results) =
     FsimgSpec::Preflight.new(results:, profile: PROFILE, fsimg: "/nonexistent/fsimg",
-                             environment:, sample: NO_SAMPLE).call
+                             environment: { "PATH" => ENV.fetch("PATH") }, sample: NO_SAMPLE).call
 end

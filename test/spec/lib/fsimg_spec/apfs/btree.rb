@@ -28,34 +28,61 @@ module FsimgSpec
       FOOTER_BYTES = 40
       INDEX_VALUE_BYTES = 8
 
+      # The smallest key of a variable-size tree: the filesystem tree's
+      # 8-byte owner and kind word (design: Key families).
+      KEY_HEADER_BYTES = 8
+      FILESYSTEM_SUBTYPE = 14
+
       # A tree's codec: its subtype and storage class, fixed key and value
-      # sizes and their decoders, the order of its keys and the scope of the
-      # check that reads its nodes.
-      Spec = Data.define(:name, :subtype, :storage, :key_size, :value_size, :key, :value, :order, :scope)
+      # sizes (nil in a variable-size tree) and their decoders, the order of
+      # its keys, whether a key's tie-break is undecided so that equal keys
+      # are legal (design: Comparators), and the scope of the check that
+      # reads its nodes.
+      Spec = Data.define(:name, :subtype, :storage, :key_size, :value_size, :key, :value, :order, :undecided, :scope) do
+        def fixed? = !key_size.nil?
+      end
 
       OBJECT_MAP = Spec.new(
         name: "container object map", subtype: KINDS.fetch(:object_map), storage: PHYSICAL, key_size: 16, value_size: 16,
         key: ->(bytes) { Layout.find(Layout::ObjectMapKey, bytes) }, value: ->(bytes) { Layout.find(Layout::ObjectMapValue, bytes) },
-        order: ->(key) { [key.oid, key.xid] }, scope: "open"
+        order: ->(key) { [key.oid, key.xid] }, undecided: ->(_) { false }, scope: "open"
       )
+      # A volume's object map has the container map's codec; the volume
+      # superblock names it, and open reads it to resolve the root tree.
+      VOLUME_OBJECT_MAP = OBJECT_MAP.with(name: "volume object map")
       FREE_QUEUE = Spec.new(
         name: "free queue", subtype: 9, storage: EPHEMERAL, key_size: 16, value_size: 8,
         key: ->(bytes) { Layout.find(Layout::FreeQueueKey, bytes) }, value: ->(bytes) { bytes.unpack1("Q<") },
-        order: ->(key) { [key.xid, key.first_block] }, scope: "verification"
+        order: ->(key) { [key.xid, key.first_block] }, undecided: ->(_) { false }, scope: "verification"
+      )
+
+      # A volume's filesystem tree: virtual nodes resolved through the
+      # volume object map, variable-size keys decoded as Records.key does
+      # for the volume's directory-record variant, and leaf values kept as
+      # bytes for the record decoders. A plain directory record's name has
+      # no decided order, so it orders by owner and kind alone. Directory
+      # traversal reads its nodes.
+      def self.filesystem(hashed:) = Spec.new(
+        name: "filesystem tree", subtype: FILESYSTEM_SUBTYPE, storage: VIRTUAL, key_size: nil, value_size: nil,
+        key: ->(bytes) { Records.key(bytes, hashed:) }, value: ->(bytes) { bytes },
+        order: ->(key) { [key.owner, key.kind, *(key.undecided? ? [] : key.suffix)] }, undecided: ->(key) { key.undecided? }, scope: "directories"
       )
 
       # One table-of-contents entry: its decoded key, nil when its range
-      # leaves the node, and its value bytes, GHOST, or nil likewise.
-      Entry = Data.define(:key, :value, :placed)
+      # leaves the node, and its value bytes, GHOST, or nil likewise;
+      # key_at and value_at are where the table places them in the node.
+      Entry = Data.define(:key, :value, :placed, :key_at, :value_at)
 
       # One node as the walk reached it. ref is the address or OID its
       # parent named, expected_level the level its parent requires (nil at
       # the root), lower and upper the separators that bound its keys,
       # tree_flags the root footer's, and revisit whether ref is already on
-      # its path. head, footer and entries are nil and empty when the object
-      # is missing.
-      Node = Data.define(:ref, :object, :root, :expected_level, :lower, :upper, :tree_flags, :revisit, :head, :footer,
-                         :entries, :table_placed) do
+      # its path. mapping is the object-map record a virtual ref resolved
+      # through, [key, value] or nil for a miss, and nil in a physical or
+      # ephemeral tree. head, footer and entries are nil and empty when the
+      # object is missing.
+      Node = Data.define(:ref, :object, :mapping, :root, :expected_level, :lower, :upper, :tree_flags, :revisit, :head,
+                         :footer, :entries, :table_placed) do
         def level = head.level
         def leaf? = head.level.zero?
         def fixed? = head.flags.anybits?(FIXED)
@@ -68,11 +95,13 @@ module FsimgSpec
       module_function
 
       # The tree under root_ref in checkpoint. Physical nodes are blocks of
-      # the container, ephemeral ones the checkpoint's mapped objects.
-      # The walk takes one node past bound, so that complete says whether
-      # the tree held more.
-      def walk(spec, root_ref, checkpoint:, bound:)
-        nodes = Enumerator.new { visit(_1, spec, checkpoint, root_ref, path: [], parent: nil, lower: nil, upper: nil) }.take(bound + 1)
+      # the container, ephemeral ones the checkpoint's mapped objects and
+      # virtual ones what object_map, a decoded object-map tree, resolves
+      # their OIDs to at the checkpoint's XID. The walk takes one node past
+      # bound, so that complete says whether the tree held more.
+      def walk(spec, root_ref, checkpoint:, bound:, object_map: nil)
+        reach = Reach.new(spec:, checkpoint:, object_map:)
+        nodes = Enumerator.new { visit(_1, reach, root_ref, path: [], parent: nil, lower: nil, upper: nil) }.take(bound + 1)
         records = nodes.take(bound).select { _1.head && _1.leaf? && !_1.revisit }.flat_map do |node|
           node.entries.filter_map do |entry|
             value = entry.value == GHOST ? :ghost : entry.value && spec.value.call(entry.value)
@@ -82,8 +111,11 @@ module FsimgSpec
         Tree.new(spec:, nodes: nodes.take(bound), records:, complete: nodes.size <= bound)
       end
 
-      def visit(out, spec, checkpoint, ref, path:, parent:, lower:, upper:)
-        node = node(spec, checkpoint, ref, parent:, revisit: path.include?(ref), lower:, upper:)
+      # What a walk reads its nodes with.
+      Reach = Data.define(:spec, :checkpoint, :object_map)
+
+      def visit(out, reach, ref, path:, parent:, lower:, upper:)
+        node = node(reach, ref, parent:, revisit: path.include?(ref), lower:, upper:)
         out << node
         # Levels fall by one per step, so no valid path is deeper than the
         # height bound; a deeper one ends here.
@@ -93,16 +125,18 @@ module FsimgSpec
         node.entries.zip(keys.drop(1) + [upper]).each do |entry, following|
           next unless entry.value.is_a?(String) && entry.key
 
-          visit(out, spec, checkpoint, entry.value.unpack1("Q<"), path: path + [ref], parent: node, lower: entry.key, upper: following)
+          visit(out, reach, entry.value.unpack1("Q<"), path: path + [ref], parent: node, lower: entry.key, upper: following)
         end
       end
 
-      def node(spec, checkpoint, ref, parent:, revisit:, lower:, upper:)
-        object = resolve(spec, checkpoint, ref)
+      def node(reach, ref, parent:, revisit:, lower:, upper:)
+        spec, checkpoint = reach.spec, reach.checkpoint
+        mapping = spec.storage == VIRTUAL ? ObjectMapLookup.find(reach.object_map, ref, checkpoint.xid) : nil
+        object = resolve(reach, ref, mapping)
         head = object&.body(Layout::NodeHead)
         root = parent.nil?
         footer = root && object ? Layout.find(Layout::NodeFooter, object.bytes, at: checkpoint.block_size - FOOTER_BYTES) : nil
-        fields = { ref:, object:, root:, expected_level: parent && parent.level - 1, lower:, upper:, revisit:,
+        fields = { ref:, object:, mapping:, root:, expected_level: parent && parent.level - 1, lower:, upper:, revisit:,
                    tree_flags: root ? footer&.tree_flags : parent.tree_flags, head:, footer: }
         return Node.new(**fields, entries: [], table_placed: false) unless head
 
@@ -110,10 +144,13 @@ module FsimgSpec
              .then { Node.new(**fields, entries: _1.entries, table_placed: _1.placed?) }
       end
 
-      def resolve(spec, checkpoint, ref)
-        return checkpoint.find_ephemeral(ref) if spec.storage == EPHEMERAL
-
-        ref.between?(1, checkpoint.block_count - 1) ? checkpoint.reader.object(ref) : nil
+      def resolve(reach, ref, mapping)
+        checkpoint = reach.checkpoint
+        case reach.spec.storage
+        when EPHEMERAL then checkpoint.find_ephemeral(ref)
+        when VIRTUAL then mapping && ObjectMapLookup.live?(mapping) ? checkpoint.reader.object(mapping.last.address) : nil
+        else ref.between?(1, checkpoint.block_count - 1) ? checkpoint.reader.object(ref) : nil
+        end
       end
 
       # The table of contents of one node and the ranges it gives (design:
@@ -143,20 +180,35 @@ module FsimgSpec
 
         def entry(index)
           fixed = head.flags.anybits?(FIXED)
+          # A node whose fixed flag disagrees with its tree reads its table
+          # as the flag says; the flags rule judges the disagreement.
           raw = Layout.find(fixed ? Layout::FixedEntry : Layout::VariableEntry, bytes, at: table_start + entry_size * index)
-          return Entry.new(key: nil, value: nil, placed: false) unless raw
+          # A fixed-size entry in a variable-size tree has no sizes to read.
+          return Entry.new(key: nil, value: nil, placed: false, key_at: nil, value_at: nil) unless raw && (spec.fixed? || !fixed)
 
           key_size = fixed ? spec.key_size : raw.key_length
           value_size = fixed ? value_size_of : raw.value_length
           key_at = key_area + raw.key_offset
           value_at = value_end - raw.value_offset
-          key_placed = aligned?(raw.key_offset) && key_at + key_size <= free_start
+          # A key lies below the free space and inside the node, whatever
+          # the image's free-space offset claims; a misplaced one stays an
+          # entry, undecoded, for the table rule to judge.
+          key_placed = aligned?(raw.key_offset) && key_at + key_size <= [free_start, value_end].min
           value_placed = raw.value_offset == GHOST || (aligned?(raw.value_offset) && value_at >= free_end && value_at + value_size <= value_end)
           # A key or value whose length is not the codec's is not decoded.
-          sized = key_size == spec.key_size && value_size == value_size_of
+          sized = sized?(key_size, value_size)
           Entry.new(key: key_placed && sized ? spec.key.call(bytes.byteslice(key_at, key_size)) : nil,
                     value: value(raw.value_offset, at: value_at, size: value_size, placed: value_placed && sized),
-                    placed: key_placed && value_placed)
+                    placed: key_placed && value_placed, key_at:, value_at:)
+        end
+
+        # The codec's sizes in a fixed-size tree. A variable-size tree's
+        # keys hold at least the key header, and its index values are child
+        # OIDs; its leaf values are the record decoders' to judge.
+        def sized?(key_size, value_size)
+          return key_size == spec.key_size && value_size == value_size_of if spec.fixed?
+
+          key_size >= KEY_HEADER_BYTES && (head.level.zero? || value_size == INDEX_VALUE_BYTES)
         end
 
         def value_size_of = head.level.zero? ? spec.value_size : INDEX_VALUE_BYTES

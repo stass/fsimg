@@ -873,8 +873,13 @@ EXTRA_DIST += \
 	test/spec/lib/fsimg_spec/apfs/layout.rb \
 	test/spec/lib/fsimg_spec/apfs/model.rb \
 	test/spec/lib/fsimg_spec/apfs/oracles.rb \
+	test/spec/lib/fsimg_spec/apfs/record_rules.rb \
+	test/spec/lib/fsimg_spec/apfs/records.rb \
 	test/spec/lib/fsimg_spec/apfs/rules.rb \
 	test/spec/lib/fsimg_spec/apfs/space.rb \
+	test/spec/lib/fsimg_spec/apfs/volume.rb \
+	test/spec/lib/fsimg_spec/apfs/volume_rules.rb \
+	test/spec/lib/fsimg_spec/apfs/volume_witnesses.rb \
 	test/spec/lib/fsimg_spec/apfs/witnesses.rb \
 	test/spec/lib/fsimg_spec/erofs.rb \
 	test/spec/lib/fsimg_spec/erofs/builder.rb \

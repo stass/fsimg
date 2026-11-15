@@ -12,6 +12,10 @@ module FsimgSpec
     # first lines it wrote otherwise, and unavailable on a host without
     # it. Neither mounts or writes the image: hdiutil attaches it read
     # only, and both checkers run in their read-only modes.
+    #
+    # Attaching lets the kernel probe the image, which no process sandbox
+    # confines, so the checkers read only an Unmutated image
+    # (specs/design-spec-testing.md#process-boundary-and-host-safety).
     module Oracles
       TOOLS = %w[fsck_apfs apfsck].freeze
       LIMITS = Invocation::Limits.new(wall_seconds: 300, cpu_seconds: 300, file_bytes: 1 << 20, address_space_bytes: nil,
@@ -19,12 +23,39 @@ module FsimgSpec
       QUOTED_LINES = 8
       DEVICE = %r{\A/dev/disk\d+\z}
 
+      # An image no harness mutation touched, the only input the checkers
+      # take. It takes no image path or ImageView: its two constructors
+      # each name the fixed file only a native capture or fsimg's create
+      # stage writes, and the harness writes a mutated view to neither.
+      # A plain class, not a Data, so no #with can swap the path.
+      class Unmutated
+        attr_reader :path
+
+        private_class_method :new
+
+        # The capture name under the native capture directory root
+        # ($FSIMG_APFS_NATIVE).
+        def self.native(name, root:) = new(File.join(root, name, "image.img"))
+
+        # The image create wrote in a case directory.
+        def self.created(directory) = new(File.join(directory, Runner::CREATED))
+
+        def initialize(path)
+          @path = File.expand_path(path).freeze
+          freeze
+        end
+      end
+
       module_function
 
-      # One Observation per tool of the image at path. environment names
+      # One Observation per tool of an Unmutated image. environment names
       # the programs: FSCK_APFS and HDIUTIL override the system paths, and
       # APFSCK, or else PATH, finds apfsck.
-      def observe(path, environment: ENV) = { "fsck_apfs" => fsck_apfs(path, environment), "apfsck" => apfsck(path, environment) }
+      def observe(image, environment: ENV)
+        raise HarnessError, "the APFS checkers read only an Unmutated image" unless image.is_a?(Unmutated)
+
+        { "fsck_apfs" => fsck_apfs(image.path, environment), "apfsck" => apfsck(image.path, environment) }
+      end
 
       def fsck_apfs(path, environment)
         return Observation.unavailable("fsck_apfs runs on macOS only") unless RUBY_PLATFORM.include?("darwin")
@@ -42,7 +73,7 @@ module FsimgSpec
         program = environment["APFSCK"] || find_on_path("apfsck", environment.fetch("PATH", ""))
         return Observation.unavailable("no apfsck") unless program && File.executable?(program)
 
-        verdict(run([program, File.expand_path(path)]), "apfsck")
+        verdict(run([program, path]), "apfsck")
       end
 
       # Attaches the image read only as a raw disk without mounting it,
@@ -51,7 +82,7 @@ module FsimgSpec
       # that stays attached, disagrees, so no observation stands without
       # the checker having run and the disk having gone.
       def attached(hdiutil, path)
-        attach = run([hdiutil, "attach", "-readonly", "-nomount", "-imagekey", "diskimage-class=CRawDiskImage", File.expand_path(path)])
+        attach = run([hdiutil, "attach", "-readonly", "-nomount", "-imagekey", "diskimage-class=CRawDiskImage", path])
         device = attach.stdout.to_s.lines.filter_map { _1.split.first }.find { DEVICE.match?(_1) }
         begin
           return verdict(attach, "hdiutil attach") unless attach.exit_status&.zero?

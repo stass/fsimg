@@ -85,12 +85,41 @@ class TestApfsLayout < Minitest::Test
     Layout::ReapListEntry => [
       [:next_index, 0, 4], [:flags, 4, 4], [:object_type, 8, 4], [:byte_size, 12, 4], [:volume_oid, 16, 8], [:oid, 24, 8],
       [:xid, 32, 8]
-    ]
+    ],
+    # Volume superblock: where the design's table gives one row for several
+    # fields, they follow in the row's order at the reference's widths.
+    Layout::VolumeSuperblock => [
+      [:magic, 32, 4], [:slot, 36, 4], [:optional_features, 40, 8], [:readonly_features, 48, 8],
+      [:incompatible_features, 56, 8], [:unmount_time, 64, 8], [:reserve_blocks, 72, 8], [:quota_blocks, 80, 8],
+      [:allocated_blocks, 88, 8], [:crypto_state, 96, 20], [:root_tree_type, 116, 4], [:extent_tree_type, 120, 4],
+      [:snapshot_tree_type, 124, 4], [:object_map_oid, 128, 8], [:root_tree_oid, 136, 8], [:extent_tree_oid, 144, 8],
+      [:snapshot_tree_oid, 152, 8], [:revert_xid, 160, 8], [:revert_superblock_oid, 168, 8], [:next_oid, 176, 8],
+      [:file_count, 184, 8], [:directory_count, 192, 8], [:symlink_count, 200, 8], [:other_count, 208, 8],
+      [:snapshot_count, 216, 8], [:blocks_allocated, 224, 8], [:blocks_freed, 232, 8], [:uuid, 240, 16],
+      [:modification_time, 256, 8], [:flags, 264, 8], [:formatter, 272, 48], [:modifications, 320, 384],
+      [:name, 704, 256], [:next_document_id, 960, 4], [:role, 964, 2], [:root_to_xid, 968, 8],
+      [:rolling_state_oid, 976, 8], [:clone_epoch, 984, 8], [:clone_xid, 992, 8], [:snapshot_metadata_oid, 1000, 8],
+      [:group_uuid, 1008, 16], [:integrity_oid, 1024, 8], [:sealed_extent_tree_oid, 1032, 8],
+      [:sealed_extent_tree_type, 1040, 4], [:reserved_type, 1044, 4], [:reserved_oid, 1048, 8]
+    ],
+    Layout::Inode => [
+      [:parent_id, 0, 8], [:private_id, 8, 8], [:created, 16, 8], [:modified, 24, 8], [:changed, 32, 8],
+      [:accessed, 40, 8], [:internal_flags, 48, 8], [:child_or_link_count, 56, 4], [:protection_class, 60, 4],
+      [:write_generation, 64, 4], [:bsd_flags, 68, 4], [:owner, 72, 4], [:group, 76, 4], [:mode, 80, 2],
+      [:uncompressed_size, 84, 8]
+    ],
+    Layout::DirectoryRecord => [[:child, 0, 8], [:added, 8, 8], [:flags, 16, 2]],
+    Layout::FileExtent => [[:length_and_flags, 0, 8], [:physical_block, 8, 8], [:crypto_id, 16, 8]],
+    Layout::DataStream => [[:logical_size, 0, 8], [:allocated, 8, 8], [:crypto_id, 16, 8], [:written, 24, 8],
+                           [:bytes_read, 32, 8]],
+    Layout::FieldsHead => [[:field_count, 0, 2], [:used_bytes, 2, 2]],
+    Layout::FieldEntry => [[:field_type, 0, 1], [:flags, 1, 1], [:data_size, 2, 2]]
   }.freeze
 
   # Where each record ends in its object: the end the design gives.
   ENDS = { Layout::ContainerSuperblock => 1408, Layout::SpaceManager => 2520, Layout::ObjectMap => 88, Layout::NodeHead => 56,
-           Layout::Reaper => 112, Layout::ReapList => 64, Layout::SpaceDevice => 48, Layout::FreeQueueEntry => 40 }.freeze
+           Layout::Reaper => 112, Layout::ReapList => 64, Layout::SpaceDevice => 48, Layout::FreeQueueEntry => 40,
+           Layout::VolumeSuperblock => 1056, Layout::Inode => 92 }.freeze
 
   def test_every_field_lies_where_the_design_places_it
     assert_empty SPECIFICATION.flat_map { |record, rows| mismatches(record, rows) }

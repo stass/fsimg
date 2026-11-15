@@ -91,10 +91,11 @@ module FsimgSpec
     # object, superblock its decoded body; ring, candidates and checkpoint
     # are the checkpoint selection's (Checkpoints); object_map and
     # object_map_tree the container object map and its tree; volumes the
-    # resolution of each volume slot; space the space manager, its chunk
-    # structures, free queues and reaper (Space).
+    # resolution of each volume slot; filesystems the Volume each resolved
+    # slot holds; space the space manager, its chunk structures, free queues
+    # and reaper (Space).
     class Model < Data.define(:image_length, :magic, :block0, :superblock, :ring, :candidates, :checkpoint,
-                              :object_map, :object_map_tree, :volumes, :space)
+                              :object_map, :object_map_tree, :volumes, :filesystems, :space)
       # The bound on nodes one tree walk visits and on chunk structures,
       # far above every native capture's; a walk that reaches one leaves
       # the scope that reads the rest unclassified.
@@ -111,7 +112,7 @@ module FsimgSpec
         object_map, tree, volumes = object_map_parts(checkpoint)
         new(image_length: view.length, magic: head.byteslice(32, 4) || "".b, block0:, superblock:,
             ring: checkpoints.ring, candidates: checkpoints.candidates, checkpoint:, object_map:,
-            object_map_tree: tree, volumes:, space: Space.decode(checkpoint))
+            object_map_tree: tree, volumes:, filesystems: filesystems(checkpoint, volumes), space: Space.decode(checkpoint))
       end
 
       def self.block0(view, head, superblock)
@@ -135,45 +136,87 @@ module FsimgSpec
         [object, tree, VolumeResolution.resolve(checkpoint, tree)]
       end
 
-      private_class_method :block0, :object_map_parts
+      def self.filesystems(checkpoint, volumes)
+        return [] if FsimgSpec.undefined?(volumes)
+
+        volumes.select(&:resolved?).map { Volume.decode(checkpoint, _1, bound: NODE_BOUND) }
+      end
+
+      private_class_method :block0, :object_map_parts, :filesystems
 
       def object_map_fields = object_map.body(Layout::ObjectMap)
 
-      # The scopes a reached bound or an unreadable part left undecided.
+      RECORD_SCOPES = %w[directories files verification].freeze
+
+      # The scopes a reached bound or an unreadable part left undecided. A
+      # volume object map read only in part leaves open undecided and every
+      # scope that reads records, since the nodes it did not map read as
+      # missing. So does a sealed volume, whose profile is not modelled, and
+      # a filesystem tree read only in part leaves the record scopes
+      # undecided; so do a hashed volume's names when the harness's Unicode
+      # tables are not the design's, since the hash rules cannot judge them.
       def unclassified_scopes
         ring_bounded = FsimgSpec.undefined?(ring) && ring.reason == Checkpoints::RING_BOUNDED
-        open = ring_bounded || [object_map_tree].reject { FsimgSpec.undefined?(_1) }.any? { !_1.complete } ? ["open"] : []
+        partial_maps = filesystems.select(&:map_decoded?).reject { _1.object_map_tree.complete }
+        open = ring_bounded || partial_object_map? || !partial_maps.empty? || filesystems.any?(&:sealed?) ? ["open"] : []
+        unread = !partial_maps.empty? || filesystems.any? { _1.sealed? || (_1.tree_decoded? && !_1.tree.complete) }
+        unjudged_names = !Names::TABLES_MATCH && filesystems.any? { _1.tree_decoded? && _1.hashed? }
+        record_scopes = unread ? RECORD_SCOPES : []
+        names = unjudged_names ? ["directories"] : []
         verification = !FsimgSpec.undefined?(space) && !space.complete ? ["verification"] : []
-        open | verification
+        open | record_scopes | names | verification
       end
+
+      def partial_object_map? = !FsimgSpec.undefined?(object_map_tree) && !object_map_tree.complete
 
       def record_problems(_result) = []
     end
 
+    # Resolution through a decoded object-map tree (design: Object maps):
+    # the greatest key not above (oid, xid), a miss when it names another
+    # OID. A ghost record, which no object-map tree may hold, is a miss.
+    module ObjectMapLookup
+      module_function
+
+      # The [key, value] record the lookup lands on, or nil for a miss.
+      def find(tree, oid, xid)
+        bound = [oid, xid]
+        found = tree.records.select { |key, _| ([key.oid, key.xid] <=> bound) <= 0 }.max_by { |key, _| [key.oid, key.xid] }
+        found && found.first.oid == oid && found.last != :ghost ? found : nil
+      end
+
+      # A found record that is not deleted, whose object is the one read.
+      def live?(found) = !found.last.flags.anybits?(BTree::DELETED)
+
+      # Whether object is a valid virtual object of kind with the OID the
+      # lookup asked for and its record's XID.
+      def resolved?(found, object, kind)
+        return false unless found && live?(found) && object
+
+        key = found.first
+        object.sealed && object.typed?(kind, VIRTUAL) && object.header.oid == key.oid && object.header.xid == key.xid
+      end
+    end
+
     # The object a volume slot of the selected superblock resolves to
-    # through the container object map at the checkpoint's XID (design:
-    # Object maps): found is the record the lookup lands on, or nil for a
-    # miss, and object what its address holds. A ghost record, which no
-    # object-map tree may hold, is a miss.
+    # through the container object map at the checkpoint's XID: found is
+    # the record the lookup lands on, or nil for a miss, and object what
+    # its address holds.
     VolumeResolution = Data.define(:oid, :found, :object) do
       def self.resolve(checkpoint, tree)
         sb = checkpoint.superblock
         sb.volume_oids.take([sb.max_volumes, Geometry::MAX_VOLUMES].min).reject(&:zero?).map do |oid|
-          bound = [oid, checkpoint.xid]
-          found = tree.records.select { |key, _| ([key.oid, key.xid] <=> bound) <= 0 }.max_by { |key, _| [key.oid, key.xid] }
-          found = nil unless found && found.first.oid == oid && found.last != :ghost
+          found = ObjectMapLookup.find(tree, oid, checkpoint.xid)
           new(oid:, found:, object: found && checkpoint.reader.object(found.last.address))
         end
       end
 
+      # The slot index the volume array gives this OID.
+      def slot(superblock) = superblock.volume_oids.index(oid)
+
       # The design's resolution: a live record whose object is a valid
       # virtual volume superblock with OID oid and the record's XID.
-      def resolved?
-        return false unless found && !found.last.flags.anybits?(BTree::DELETED) && object
-
-        key = found.first
-        object.sealed && object.typed?(:volume, VIRTUAL) && object.header.oid == oid && object.header.xid == key.xid
-      end
+      def resolved? = ObjectMapLookup.resolved?(found, object, :volume)
     end
   end
 end
