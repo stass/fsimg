@@ -90,10 +90,6 @@
   join finds such a cycle; joining each directory's parent chain by
   repeated doubling would, at about the logarithm of the deepest path in
   sorts of the directory records.
-  The writer plans and emits (`lib/formats/apfs/write-plan.c`,
-  `write-trees.c`, `write-emit.c`) behind the unregistered descriptor
-  `fsimg_apfs_write_format`; it joins the registry after native
-  qualification (docs/apfs-plan.md, stage 9).
   The specification harness's container model (`test/spec/lib/fsimg_spec/apfs/`)
   is judged on native captures only: `apfs.sm.address_blocks_unmeasured` has
   no witness until a builder renders a container of another block size, and

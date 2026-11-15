@@ -83,11 +83,6 @@ extern const fsimg_format_t fsimg_ifs_format;
 extern const fsimg_format_t fsimg_iso9660_format;
 extern const fsimg_format_t fsimg_erofs_format;
 extern const fsimg_format_t fsimg_apfs_format;
-/* The APFS writer's descriptor, outside the registry, which lists a writer
- * once native qualification accepts its output; only code that names it,
- * such as its tests, reaches it.
- */
-extern const fsimg_format_t fsimg_apfs_write_format;
 
 /*
  * What a set of probes says about one input, under the one claim rule for

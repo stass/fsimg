@@ -58,12 +58,27 @@ static fsimg_status_t apfs_probe(const unsigned char *, size_t, uint64_t,
 	.max_link_target_bytes = APFS_LINK_TARGET_MAX,			\
 	.read_settings = FSIMG_SETTING_VOLUME_INDEX
 
+/*
+ * The writer writes 4096-byte blocks and stores the volume UUID and the
+ * case sensitivity; it does not name placement, so a placement list fails
+ * the common settings check. The writer refuses a container above its
+ * largest, APFS_WRITER_BLOCKS_MAX blocks; the stated limits are the
+ * reader's.
+ */
+#define APFS_WRITE_BLOCK_SIZES	(1u << 12)
+_Static_assert(APFS_WRITE_BLOCK_SIZES == APFS_WRITE_BLOCK_BYTES,
+    "the capability record states the writer's block size");
+
 static const fsimg_format_variant_t apfs_variants[] = {
 	{
 		.info = {
 			APFS_VARIANT_INFO,
 			.max_file_bytes = UINT64_MAX,
-			.max_volume_bytes = UINT64_MAX
+			.max_volume_bytes = UINT64_MAX,
+			.write_allocation_unit_size_mask =
+			    APFS_WRITE_BLOCK_SIZES,
+			.write_settings = FSIMG_SETTING_VOLUME_UUID |
+			    FSIMG_SETTING_CASE_SENSITIVE
 		},
 		.id = 0		/* The only variant. */
 	}
@@ -75,46 +90,8 @@ const fsimg_format_t fsimg_apfs_format = {
 	.probe_bytes = APFS_PROBE_BYTES,
 	.probe = apfs_probe,
 	.reader = &fsimg_apfs_reader_ops,
+	.writer = &fsimg_apfs_writer_ops,
 	.codecs = apfs_codecs
-};
-
-/*
- * The registered descriptor reads and verifies. The registry lists a
- * writer only after the native qualification cycle has accepted its
- * output, so the writer has its own descriptor, reachable only by code
- * that names it. It writes 4096-byte blocks, at most the largest
- * container's, and stores the volume UUID and the case sensitivity; it
- * does not name placement, so a placement list fails the common settings
- * check.
- */
-#define APFS_WRITE_BLOCK_SIZES	(1u << 12)
-_Static_assert(APFS_WRITE_BLOCK_SIZES == APFS_WRITE_BLOCK_BYTES,
-    "the writer's capability record states its block size");
-#define APFS_WRITE_BYTES_MAX	(APFS_WRITER_BLOCKS_MAX * APFS_WRITE_BLOCK_BYTES)
-
-static const fsimg_format_variant_t apfs_write_variants[] = {
-	{
-		.info = {
-			APFS_VARIANT_INFO,
-			.max_file_bytes = APFS_WRITE_BYTES_MAX,
-			.max_volume_bytes = APFS_WRITE_BYTES_MAX,
-			.write_allocation_unit_size_mask =
-			    APFS_WRITE_BLOCK_SIZES,
-			.write_settings = FSIMG_SETTING_VOLUME_UUID |
-			    FSIMG_SETTING_CASE_SENSITIVE
-		},
-		.id = 0
-	}
-};
-
-const fsimg_format_t fsimg_apfs_write_format = {
-	.variants = apfs_write_variants,
-	.variant_count = sizeof(apfs_write_variants) /
-	    sizeof(apfs_write_variants[0]),
-	.probe_bytes = APFS_PROBE_BYTES,
-	.probe = apfs_probe,
-	.reader = &fsimg_apfs_reader_ops,
-	.writer = &fsimg_apfs_writer_ops
 };
 
 /*

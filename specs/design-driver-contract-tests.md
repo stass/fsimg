@@ -70,13 +70,10 @@ of the production registry:
 A public name can have several profiles, for example different supported byte
 orders or an option combination whose resource path differs. Exactly one is its
 coverage profile. Additional profiles add targeted witnesses; they cannot hide
-a missing mandatory scenario in the coverage profile. A profile can also name
-an unregistered descriptor, such as a writer awaiting native qualification,
-whose one variant carries the public name and whose reader operations are that
-name's. Such a profile is an additional one: the coverage profile still
-exercises the registered descriptor with independently generated volumes, and
-the descriptor profile adds the writer's scenarios. FAT12, FAT16 and FAT32
-are separate coverage keys even though one production descriptor serves them.
+a missing mandatory scenario in the coverage profile. Every profile declares
+its name's advertised capability mask; a writer awaiting native
+qualification is tested by its own tests until it is registered, not by a
+profile. FAT12, FAT16 and FAT32 are separate coverage keys even though one production descriptor serves them.
 The same rule covers each separately enumerated QNX profile. Internal numeric
 variant IDs are not stable test identities.
 
@@ -158,13 +155,8 @@ The runner enumerates `fsimg_format_next()` before running any fixture. It
 matches public names, not array positions, and checks both directions:
 
 1. Every advertised variant has exactly one coverage profile.
-2. Every profile names an advertised variant; profile IDs are unique. A
-   profile that names a descriptor names the public name that the descriptor's
-   one variant carries, shares its reader operations, and has the registered
-   writer, if any.
-3. The independently declared capability mask equals the advertised mask, or,
-   for a profile that names a descriptor, that descriptor's operations, which
-   include every advertised bit.
+2. Every profile names an advertised variant; profile IDs are unique.
+3. The independently declared capability mask equals the advertised mask.
 4. Every advertised operation has its required fixture facts and common
    scenario families. Each profile's optional cases are internally consistent.
 5. The run records completion for each scheduled `(profile, scenario)` pair.

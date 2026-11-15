@@ -18,7 +18,6 @@
 #include "apfs-gen.h"
 #include "contract.h"
 #include "erofs-contract.h"
-#include "format.h"
 #include "hfsplus-gen.h"
 #include "host.h"
 #include "internal.h"
@@ -35,8 +34,8 @@
  * answer. Each scenario is a plain function reading as setup, operation,
  * assertion and cleanup; nothing here knows a format beyond its profile.
  *
- * Writable formats use reader fixtures produced by the common writer;
- * read-only formats supply independent materializers of the same tree.
+ * A profile with a materializer reads independently generated volumes of
+ * the source tree; the others read the common writer's reproducible image.
  * Writer-produced fixtures are round-trip integration evidence: the
  * format-local tests, the Ruby models and the integration scripts with
  * other implementations keep that role.
@@ -141,8 +140,6 @@ typedef struct contract_fs_profile {
 	const char	*id;
 	const char	*format;
 	bool		 coverage_profile;
-	/* An additional writer descriptor shares the named public reader. */
-	const fsimg_format_t *descriptor;
 	unsigned	 expected_capabilities;
 	contract_write_setup_t write;
 	/* Entries the format itself adds to every image. */
@@ -421,7 +418,8 @@ static const contract_entry_t qnx4_owned[] = {
 
 /* FAT12, FAT16 and FAT32 are separate coverage keys although one
  * descriptor serves them; QNX6's big-endian byte order is an additional
- * profile beside its little-endian coverage profile.
+ * profile beside its little-endian coverage profile, and APFS has an
+ * additional profile reading the writer's output.
  */
 static fsimg_status_t materialize_apfs(contract_volume_t *, fsimg_error_t *);
 static fsimg_status_t materialize_hfsplus(contract_volume_t *, fsimg_error_t *);
@@ -437,8 +435,18 @@ static const contract_fs_profile_t fs_profiles[] = {
 	    .metadata_case_count = COUNT(hfsplus_metadata),
 	    .materialize = materialize_hfsplus, .max_fixture_bytes = 2 * MIB },
 	{ .id = "apfs", .format = "apfs", .coverage_profile = true,
-	    .expected_capabilities = FSIMG_CAP_READ | FSIMG_CAP_VERIFY,
-	    .materialize = materialize_apfs, .max_fixture_bytes = 4 * MIB },
+	    .expected_capabilities = ALL_CAPABILITIES,
+	    .write = { .flags = WRITE_FLAGS, .volume_uuid = { 1 } },
+	    .metadata_cases = apfs_metadata,
+	    .metadata_case_count = COUNT(apfs_metadata),
+	    .materialize = materialize_apfs, .max_fixture_bytes = 8 * MIB },
+	/* The reader scenarios on the writer's own output. */
+	{ .id = "apfs-round-trip", .format = "apfs", .coverage_profile = false,
+	    .expected_capabilities = ALL_CAPABILITIES,
+	    .write = { .flags = WRITE_FLAGS, .volume_uuid = { 1 } },
+	    .metadata_cases = apfs_metadata,
+	    .metadata_case_count = COUNT(apfs_metadata),
+	    .max_fixture_bytes = 8 * MIB },
 	{ .id = "hfsx", .format = "hfsx", .coverage_profile = true,
 	    .expected_capabilities = ALL_CAPABILITIES,
 	    .write = { .flags = WRITE_FLAGS },
@@ -511,13 +519,6 @@ static const contract_fs_profile_t fs_profiles[] = {
 	    .write = { .flags = WRITE_FLAGS },
 	    .metadata_cases = ifs_metadata,
 	    .metadata_case_count = COUNT(ifs_metadata),
-	    .max_fixture_bytes = 8 * MIB },
-	{ .id = "apfs-writer", .format = "apfs",
-	    .descriptor = &fsimg_apfs_write_format,
-	    .expected_capabilities = ALL_CAPABILITIES,
-	    .write = { .flags = WRITE_FLAGS, .volume_uuid = { 1 } },
-	    .metadata_cases = apfs_metadata,
-	    .metadata_case_count = COUNT(apfs_metadata),
 	    .max_fixture_bytes = 8 * MIB },
 };
 
@@ -1112,14 +1113,8 @@ writer_collect(fixture_t *fixture, const contract_metadata_case_t *test,
 			options.flags &= ~FSIMG_WRITE_ALLOW_LOSS;
 	}
 	fixture->metadata = test;
-	if (fixture->profile->descriptor != NULL)
-		status = fsimg_writer_new_variant(fixture->ctx,
-		    fixture->profile->descriptor,
-		    &fixture->profile->descriptor->variants[0], &options,
-		    &fixture->writer, error);
-	else
-		status = fsimg_writer_new(fixture->ctx, fixture->profile->format,
-		    &options, &fixture->writer, error);
+	status = fsimg_writer_new(fixture->ctx, fixture->profile->format,
+	    &options, &fixture->writer, error);
 	if (status != FSIMG_OK)
 		return (status);
 	fsimg_source_ops_init(&source_ops);
@@ -3091,11 +3086,7 @@ reader_extraction(const contract_fs_profile_t *profile)
 /*
  * Registry reconciliation before any fixture runs: every advertised variant
  * has exactly one coverage profile; every profile names an advertised variant
- * and has a unique ID. A descriptor profile names its descriptor's one variant
- * and shares the registered reader, and any registered writer is the
- * descriptor's. Each declared mask
- * equals the advertised mask or the descriptor's operations, which include
- * every advertised bit.
+ * and has a unique ID, and each declares the advertised capability mask.
  * Profiles also carry the fixture facts their capabilities oblige.
  */
 static void
@@ -3115,12 +3106,8 @@ check_registry(void)
 		for (size_t i = 0; i < COUNT(fs_profiles); i++) {
 			if (strcmp(fs_profiles[i].format, info.name) != 0)
 				continue;
-			if (fs_profiles[i].descriptor == NULL)
-				CONTRACT_CHECK(fs_profiles[i].expected_capabilities ==
-				    info.capabilities);
-			else
-				CONTRACT_CHECK((fs_profiles[i].expected_capabilities &
-				    info.capabilities) == info.capabilities);
+			CONTRACT_CHECK(fs_profiles[i].expected_capabilities ==
+			    info.capabilities);
 			coverage += fs_profiles[i].coverage_profile;
 		}
 		if (coverage != 1)
@@ -3158,32 +3145,6 @@ check_registry(void)
 			fprintf(stderr, "profile %s names unadvertised %s\n",
 			    profile->id, profile->format);
 		CONTRACT_CHECK(found);
-		if (profile->descriptor != NULL) {
-			const fsimg_format_t *descriptor = profile->descriptor;
-			const fsimg_format_t *registered;
-			const fsimg_format_variant_t *variant;
-			unsigned capabilities = 0;
-
-			registered = fsimg_format_find(profile->format, &variant);
-			/* Reader scenarios open the public name. Prove that this
-			 * reaches the additional descriptor's reader operations.
-			 */
-			CONTRACT_CHECK(registered != NULL &&
-			    registered->reader == descriptor->reader);
-			CONTRACT_CHECK(registered->writer == NULL ||
-			    registered->writer == descriptor->writer);
-			CONTRACT_CHECK(descriptor->variant_count == 1 &&
-			    strcmp(descriptor->variants[0].info.name,
-			    profile->format) == 0);
-			if (descriptor->reader != NULL) {
-				capabilities |= FSIMG_CAP_READ;
-				if (descriptor->reader->verify != NULL)
-					capabilities |= FSIMG_CAP_VERIFY;
-			}
-			if (descriptor->writer != NULL)
-				capabilities |= FSIMG_CAP_WRITE;
-			CONTRACT_CHECK(capabilities == profile->expected_capabilities);
-		}
 		CONTRACT_CHECK(profile->max_fixture_bytes != 0);
 		if ((profile->expected_capabilities & FSIMG_CAP_WRITE) != 0)
 			CONTRACT_CHECK(profile->metadata_case_count != 0);

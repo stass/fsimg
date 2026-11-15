@@ -86,7 +86,7 @@ create_writer(fixture_t *fixture, const fsimg_write_options_t *options)
 	fixture->memory_baseline = stats.memory_bytes;
 	fixture->descriptor_baseline = stats.descriptors;
 	return (fsimg_writer_new_variant(fixture->ctx,
-	    &fsimg_apfs_write_format, &fsimg_apfs_write_format.variants[0],
+	    &fsimg_apfs_format, &fsimg_apfs_format.variants[0],
 	    options, &fixture->writer, &fixture->error));
 }
 
@@ -1175,8 +1175,8 @@ prepare_catalog(fixture_t *fixture, const emit_catalog_t *catalog,
 	CHECK(fsimg_ctx_get_stats(fixture->ctx, &stats, NULL) == FSIMG_OK);
 	fixture->memory_baseline = stats.memory_bytes;
 	fixture->descriptor_baseline = stats.descriptors;
-	CHECK(fsimg_writer_new_variant(fixture->ctx, &fsimg_apfs_write_format,
-	    &fsimg_apfs_write_format.variants[0], options, &fixture->writer,
+	CHECK(fsimg_writer_new_variant(fixture->ctx, &fsimg_apfs_format,
+	    &fsimg_apfs_format.variants[0], options, &fixture->writer,
 	    &fixture->error) == FSIMG_OK);
 	fsimg_source_ops_init(&sources);
 	sources.validate = link_validate;
@@ -1825,6 +1825,32 @@ check_time(fsimg_timestamp_t actual, fsimg_timestamp_t expected)
 	EXPECT(actual.basis == FSIMG_TIME_UTC);
 }
 
+/* The verifier, payload included, accepts the emitted image in full. */
+static void
+check_verified(fixture_t *fixture, memory_sink_t *sink)
+{
+	fsimg_verify_report_t report;
+	fsimg_reader_t *reader = NULL;
+	fsimg_io_t *io;
+	fsimg_status_t status;
+
+	CHECK(memory_io(fixture, sink, &io) == FSIMG_OK);
+	CHECK(fsimg_reader_open(fixture->ctx, io, NULL, &reader,
+	    &fixture->error) == FSIMG_OK);
+	status = fsimg_verify(reader, FSIMG_VERIFY_PAYLOAD, &report,
+	    &fixture->error);
+	if (status != FSIMG_OK)
+		fprintf(stderr, "%s: verify returned %d: %s (%s)\n", scenario,
+		    status, fixture->error.message, fixture->error.path);
+	EXPECT(status == FSIMG_OK);
+	EXPECT(report.complete);
+	/* Every non-directory entry is a delivered file of the report. */
+	EXPECT(report.files == fixture->plan->files + fixture->plan->symlinks +
+	    fixture->plan->others);
+	fsimg_reader_free(reader);
+	fsimg_io_free(io);
+}
+
 static void
 check_reader_catalog(fixture_t *fixture, memory_sink_t *sink,
     const emit_catalog_t *catalog)
@@ -1928,6 +1954,7 @@ check_reader_catalog(fixture_t *fixture, memory_sink_t *sink,
 	free(seen);
 	fsimg_reader_free(reader);
 	fsimg_io_free(io);
+	check_verified(fixture, sink);
 }
 
 static void

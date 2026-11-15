@@ -1492,8 +1492,9 @@ test_registered_writers_refuse_unsupported_settings(void)
 			CHECK(status == FSIMG_EINVAL);
 			CHECK(strcmp(error.path, "view") == 0);
 		}
-		/* No format takes case_sensitive yet, so every writer refuses it. */
-		CHECK((info.write_settings & FSIMG_SETTING_CASE_SENSITIVE) == 0);
+		/* APFS alone takes case_sensitive; every other writer refuses it. */
+		CHECK(((info.write_settings & FSIMG_SETTING_CASE_SENSITIVE) != 0) ==
+		    (strcmp(info.name, "apfs") == 0));
 		if ((info.capabilities & FSIMG_CAP_WRITE) == 0)
 			continue;
 		for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {

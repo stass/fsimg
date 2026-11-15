@@ -111,7 +111,7 @@ typedef struct apfs_planner {
 
 /*
  * The writer's operations: this module validates and plans, write-emit.c
- * emits. The writer's descriptor is outside the registry.
+ * emits.
  */
 const fsimg_writer_ops_t fsimg_apfs_writer_ops = {
 	.validate = apfs_write_validate,
