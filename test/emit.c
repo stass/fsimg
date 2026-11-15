@@ -151,8 +151,9 @@ provider_validate(void *argument, uint64_t id, fsimg_error_t *error)
 		return (FSIMG_OK);
 	if (fixture->changed_after_read && !fixture->read_seen[id])
 		return (FSIMG_OK);
+	/* A provider may tag its failure with any operation. */
 	return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
-	    FSIMG_OP_SOURCE, "test source changed"));
+	    FSIMG_OP_IO, "test source changed"));
 }
 
 static fsimg_status_t
@@ -544,6 +545,9 @@ test_source_faults(const char *format)
 		status = emit_to(&fixture, &sink, &error);
 		check_failed(&fixture, &sink, status, cases[i].expected, &error,
 		    cases[i].name);
+		/* Every case is a source failure, which names its entry. */
+		CHECK(strcmp(error.path, tree[cases[i].short_read_id != 0 ?
+		    cases[i].short_read_id : cases[i].changed_id].path) == 0);
 		CHECK(fixture.zero_range_reads == 0);
 		fixture_close(&fixture);
 		free(sink.bytes);

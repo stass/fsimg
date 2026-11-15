@@ -1289,10 +1289,10 @@ test_link_read_failures_during_planning_publish_nothing(void)
 			fprintf(stderr, "%s: expected %d, got %d\n",
 			    names[fault], expected, status);
 		CHECK(status == expected);
-		if (fault != SHORT_READ)
-			CHECK(strcmp(error.path, "/provider") == 0);
-		CHECK(run.validations == (fault == SHORT_READ ? 0u :
-		    (fault == FAIL_FINISH ? 2u : 1u)));
+		/* A short read validates the source once to tell a changed
+		 * source from an I/O failure; every failure names the source. */
+		CHECK(strcmp(error.path, "/provider") == 0);
+		CHECK(run.validations == (fault == FAIL_FINISH ? 2u : 1u));
 		CHECK(run.reads == 1);
 		CHECK(!writer->source.active);
 		CHECK(writer->source.io == NULL && writer->source.fd == -1);

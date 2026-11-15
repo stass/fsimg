@@ -47,6 +47,12 @@ struct fsimg_source_root {
  * buffer, so source operations preserve the catalog's current snapshot.
  * Reads within the declared length are exact or fail; a request crossing it
  * is clipped there and reports the confirmed bytes. Past-EOF offsets fail.
+ * A transfer that fails with FSIMG_EIO is checked against the source and
+ * reported as FSIMG_ESOURCE_CHANGED if it changed. Every failure of a
+ * transfer or a provider callback reports FSIMG_OP_SOURCE, so the writer
+ * names the entry, except cancellation and budget failures, which keep
+ * FSIMG_OP_CONTEXT. Opening a provider link reads its target under these
+ * rules.
  * Close releases the current source without validating it and is a no-op
  * when none is open; release also closes every source root.
  */

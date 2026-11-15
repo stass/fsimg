@@ -43,6 +43,8 @@ static fsimg_status_t open_failure(int, fsimg_source_walk_t, fsimg_error_t *);
 static fsimg_status_t open_generated(fsimg_writer_t *, uint64_t,
     fsimg_entry_kind_t, fsimg_source_cursor_t *, fsimg_error_t *);
 static fsimg_status_t check_digest(fsimg_source_cursor_t *, fsimg_error_t *);
+static fsimg_status_t read_source_bytes(fsimg_source_cursor_t *,
+    fsimg_io_t *, uint64_t, void *, size_t, size_t *, fsimg_error_t *);
 static bool generated_content(const fsimg_source_cursor_t *);
 static int64_t source_signed(uint64_t);
 
@@ -289,6 +291,10 @@ link_failure(int saved, bool changed, fsimg_error_t *error)
 	    "source link inspection failed"));
 }
 
+/* A provider callback's failure is its source's, whatever operation the
+ * provider recorded, so the writer names the entry; cancellation and
+ * budget failures keep FSIMG_OP_CONTEXT, as a transfer's do.
+ */
 static fsimg_status_t
 callback_status(fsimg_status_t status, fsimg_error_t *error)
 {
@@ -302,6 +308,8 @@ callback_status(fsimg_status_t status, fsimg_error_t *error)
 	if (error != NULL && error->status != status)
 		fsimg_error_set(error, status, 0, FSIMG_OP_SOURCE,
 		    "source callback failed");
+	else if (error != NULL && error->operation != FSIMG_OP_CONTEXT)
+		error->operation = FSIMG_OP_SOURCE;
 	return (status);
 }
 
@@ -415,7 +423,7 @@ open_provider_link(fsimg_writer_t *writer, fsimg_source_cursor_t *source,
 	if (status != FSIMG_OK)
 		return (status);
 	fsimg_io_bind_session(io, &writer->session);
-	status = fsimg_io_read_exact(io, 0, source->link_target,
+	status = read_source_bytes(source, io, 0, source->link_target,
 	    (size_t)source->length, &transferred, error);
 	fsimg_io_free(io);
 	if (status != FSIMG_OK)
@@ -847,7 +855,6 @@ fsimg_source_read(fsimg_writer_t *writer, uint64_t offset, void *buffer,
     size_t length, size_t *transferred, fsimg_error_t *error)
 {
 	fsimg_source_cursor_t *source;
-	fsimg_error_t detail;
 	fsimg_status_t status;
 	size_t remaining;
 
@@ -882,25 +889,8 @@ fsimg_source_read(fsimg_writer_t *writer, uint64_t offset, void *buffer,
 			    remaining);
 		*transferred = remaining;
 	} else {
-		status = fsimg_io_read_exact(source->io, offset, buffer, remaining,
-		    transferred, error);
-		/* Identity is validated at open and at finish, not around each
-		 * read, so the bytes read are trusted only once finish succeeds.
-		 * A read that fails with an I/O error, such as one cut short by
-		 * truncation, reports a changed file as changed instead, keeping
-		 * where the read stopped.
-		 */
-		if (status == FSIMG_EIO) {
-			fsimg_error_clear(&detail);
-			if (source_validate(source, &detail) == FSIMG_ESOURCE_CHANGED) {
-				status = FSIMG_ESOURCE_CHANGED;
-				if (error != NULL) {
-					detail.offset = error->offset;
-					detail.offset_valid = error->offset_valid;
-					*error = detail;
-				}
-			}
-		}
+		status = read_source_bytes(source, source->io, offset, buffer,
+		    remaining, transferred, error);
 		if (status != FSIMG_OK)
 			return (source_abort(source, status));
 	}
@@ -984,6 +974,47 @@ fsimg_source_finish(fsimg_writer_t *writer, fsimg_error_t *error)
 	if (status == FSIMG_OK)
 		status = check_digest(source, error);
 	fsimg_source_close(writer);
+	return (status);
+}
+
+/*
+ * Read source bytes through io under the source's error rules. Every read
+ * of a file's content, and the read of a provider link's target when the
+ * link is opened, comes through here. Two rules apply to a failed transfer:
+ *
+ * - One that fails with FSIMG_EIO, such as a read cut short by
+ *   truncation, is checked against the source and reported as
+ *   FSIMG_ESOURCE_CHANGED if it changed, keeping where it stopped.
+ *   Otherwise the source is validated only at open and finish, so the
+ *   bytes read are trusted only once finish succeeds.
+ * - Every failure, a premature EOF included, is the source's and reports
+ *   FSIMG_OP_SOURCE, so the writer names the entry; cancellation and
+ *   budget failures keep FSIMG_OP_CONTEXT.
+ */
+static fsimg_status_t
+read_source_bytes(fsimg_source_cursor_t *source, fsimg_io_t *io,
+    uint64_t offset, void *buffer, size_t length, size_t *transferred,
+    fsimg_error_t *error)
+{
+	fsimg_error_t detail;
+	fsimg_status_t status;
+
+	status = fsimg_io_read_exact(io, offset, buffer, length, transferred,
+	    error);
+	if (status == FSIMG_EIO) {
+		fsimg_error_clear(&detail);
+		if (source_validate(source, &detail) == FSIMG_ESOURCE_CHANGED) {
+			status = FSIMG_ESOURCE_CHANGED;
+			if (error != NULL) {
+				detail.offset = error->offset;
+				detail.offset_valid = error->offset_valid;
+				*error = detail;
+			}
+		}
+	}
+	if (status != FSIMG_OK && error != NULL &&
+	    error->operation != FSIMG_OP_CONTEXT)
+		error->operation = FSIMG_OP_SOURCE;
 	return (status);
 }
 

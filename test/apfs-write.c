@@ -5,6 +5,7 @@
 
 #include <sys/stat.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -1026,10 +1027,20 @@ typedef struct emit_entry {
 	char		 target[1024];
 } emit_entry_t;
 
+typedef enum source_fault {
+	SOURCE_NONE, SOURCE_SHORT, SOURCE_EOF, SOURCE_ERROR, SOURCE_SIZE
+} source_fault_t;
+
 typedef struct emit_catalog {
 	emit_entry_t	*entries;
 	size_t		 count;
 	bool		 changed_link;
+	uint64_t	 reads;
+	uint64_t	 fault_read;
+	uint64_t	 fault_id;
+	uint64_t	 observed_size;
+	source_fault_t	 source_fault;
+	bool		 size_changed;
 } emit_catalog_t;
 
 typedef struct memory_sink {
@@ -1134,14 +1145,35 @@ catalog_many(emit_catalog_t *catalog, bool wide)
 
 static fsimg_status_t
 catalog_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
-    size_t length, size_t *transferred, fsimg_error_t *error FSIMG_UNUSED)
+    size_t length, size_t *transferred, fsimg_error_t *error)
 {
-	const emit_catalog_t *catalog = argument;
+	emit_catalog_t *catalog = argument;
 	const emit_entry_t *spec;
 	unsigned char *out = buffer;
 
 	CHECK(id < catalog->count);
 	spec = &catalog->entries[id];
+	*transferred = 0;
+	if (++catalog->reads == catalog->fault_read) {
+		catalog->fault_id = id;
+		switch (catalog->source_fault) {
+		case SOURCE_SHORT:
+			CHECK(length > 1);
+			length /= 2;
+			break;
+		case SOURCE_SIZE:
+			catalog->size_changed = true;
+			catalog->observed_size = spec->entry.size - 1;
+			return (FSIMG_OK);
+		case SOURCE_EOF:
+			return (FSIMG_OK);
+		case SOURCE_ERROR:
+			return (fsimg_error_set(error, FSIMG_EIO, EIO,
+			    FSIMG_OP_SOURCE, "injected source read failure"));
+		case SOURCE_NONE:
+			break;
+		}
+	}
 	CHECK(offset <= spec->entry.size);
 	if (length > spec->entry.size - offset)
 		length = (size_t)(spec->entry.size - offset);
@@ -1154,6 +1186,19 @@ catalog_read(void *argument, uint64_t id, uint64_t offset, void *buffer,
 			out[i] = content_byte(offset + i);
 	}
 	*transferred = length;
+	return (FSIMG_OK);
+}
+
+static fsimg_status_t
+catalog_validate(void *argument, uint64_t id, fsimg_error_t *error)
+{
+	const emit_catalog_t *catalog = argument;
+
+	CHECK(id < catalog->count);
+	if (catalog->size_changed && id == catalog->fault_id &&
+	    catalog->observed_size != catalog->entries[id].entry.size)
+		return (fsimg_error_set(error, FSIMG_ESOURCE_CHANGED, 0,
+		    FSIMG_OP_SOURCE, "source size differs from declared size"));
 	return (FSIMG_OK);
 }
 
@@ -1179,7 +1224,7 @@ prepare_catalog(fixture_t *fixture, const emit_catalog_t *catalog,
 	    &fsimg_apfs_format.variants[0], options, &fixture->writer,
 	    &fixture->error) == FSIMG_OK);
 	fsimg_source_ops_init(&sources);
-	sources.validate = link_validate;
+	sources.validate = catalog_validate;
 	sources.read_at = catalog_read;
 	CHECK(fsimg_writer_set_sources(fixture->writer, &sources,
 	    (void *)catalog, &fixture->error) == FSIMG_OK);
@@ -2377,39 +2422,306 @@ test_emission_write_and_flush_failures_release_resources(void)
 	free(catalog.entries);
 }
 
-static void
-test_emission_allocation_failure_at_each_allocation_is_clean(void)
+typedef enum writer_fault {
+	WRITER_ALLOC, WRITER_CANCEL, WRITER_SCRATCH_OPEN,
+	WRITER_SCRATCH_RESIZE, WRITER_SCRATCH_READ, WRITER_SCRATCH_WRITE
+} writer_fault_t;
+
+typedef struct cancel_fault {
+	uint64_t polls;
+	uint64_t cancel_at;
+} cancel_fault_t;
+
+static bool
+writer_cancelled(void *argument)
 {
+	cancel_fault_t *cancel = argument;
+
+	return (++cancel->polls == cancel->cancel_at);
+}
+
+static void
+writer_fault_arm(fixture_t *fixture, cancel_fault_t *cancel,
+    writer_fault_t fault, uint64_t point)
+{
+	const fsimg_meta_fault_t scratch_faults[] = { FSIMG_META_OPEN,
+	    FSIMG_META_RESIZE, FSIMG_META_READ, FSIMG_META_WRITE };
+
+	cancel->polls = 0;
+	cancel->cancel_at = fault == WRITER_CANCEL ? point : 0;
+	fsimg_test_fail_alloc_after(fixture->ctx,
+	    fault == WRITER_ALLOC ? point : 0);
+	if (fault >= WRITER_SCRATCH_OPEN)
+		fsimg_test_meta_fail_after(fixture->ctx,
+		    scratch_faults[fault - WRITER_SCRATCH_OPEN], point, EIO);
+}
+
+static uint64_t
+writer_fault_count(const fixture_t *fixture, const cancel_fault_t *cancel,
+    writer_fault_t fault)
+{
+	if (fault == WRITER_ALLOC)
+		return (fixture->ctx->allocation_attempts);
+	if (fault == WRITER_CANCEL)
+		return (cancel->polls);
+	return (UINT64_MAX - fixture->ctx->meta_fault_after);
+}
+
+static void
+writer_fault_disarm(fixture_t *fixture, cancel_fault_t *cancel)
+{
+	fsimg_test_fail_alloc_after(fixture->ctx, 0);
+	fsimg_test_meta_fail_after(fixture->ctx, FSIMG_META_OPEN, 0, 0);
+	cancel->cancel_at = 0;
+}
+
+static void
+check_scratch_empty(int scratch)
+{
+	struct dirent *entry;
+	DIR *directory;
+	int fd;
+
+	/* A separate description starts each scan at the beginning. */
+	fd = openat(scratch, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(fd != -1);
+	directory = fdopendir(fd);
+	CHECK(directory != NULL);
+	errno = 0;
+	while ((entry = readdir(directory)) != NULL) {
+		EXPECT(strcmp(entry->d_name, ".") == 0 ||
+		    strcmp(entry->d_name, "..") == 0);
+		errno = 0;
+	}
+	CHECK(errno == 0);
+	CHECK(closedir(directory) == 0);
+}
+
+static void
+close_fault_writer(fixture_t *fixture, cancel_fault_t *cancel,
+    int scratch, int descriptors)
+{
+	writer_fault_disarm(fixture, cancel);
+	close_writer(fixture);
+	check_scratch_empty(scratch);
+	EXPECT(fsimg_test_open_descriptors() == descriptors);
+}
+
+/* The mixed tree has several nodes and a multi-chunk payload. Two bytes
+ * instead of one let any source callback return a positive short read.
+ */
+static void
+catalog_faults(emit_catalog_t *catalog)
+{
+	catalog_init(catalog);
+	catalog_mixed(catalog);
+	for (size_t i = 0; i < catalog->count; i++) {
+		if (catalog->entries[i].entry.size == 1) {
+			catalog->entries[i].entry.size = 2;
+			catalog->entries[i].target[1] = 'x';
+		}
+	}
+}
+
+static void
+check_writer_fault(fixture_t *fixture, fsimg_status_t status,
+    fsimg_status_t expected)
+{
+	if (status != expected)
+		fprintf(stderr, "%s: returned %d, expected %d: %s (%s)\n",
+		    scenario, status, expected, fixture->error.message,
+		    fixture->error.path);
+	EXPECT(status == expected);
+	EXPECT(fixture->error.status == expected);
+	EXPECT(fixture->error.message[0] != '\0');
+	EXPECT(fixture->error.output_state != FSIMG_OUTPUT_PUBLISHED);
+	EXPECT(fixture->writer->state != FSIMG_WRITER_FINISHED);
+}
+
+static void
+test_planning_and_emission_faults_release_resources(void)
+{
+	const char *names[] = { "allocation", "cancellation", "scratch open",
+	    "scratch resize", "scratch read", "scratch write" };
+	const char *saved_scenario = scenario;
+	char directory[] = "/tmp/fsimg-apfs-writer-faults.XXXXXX";
+	char description[160];
 	emit_catalog_t catalog;
 	fsimg_write_options_t options;
+	fsimg_options_t context;
 	fixture_t fixture;
-	memory_sink_t sink;
-	fsimg_status_t status;
-	bool succeeded = false;
-	unsigned failed = 0;
+	memory_sink_t sink = { 0 };
+	cancel_fault_t cancel = { 0 };
+	fsimg_status_t status, expected;
+	uint64_t count, samples, point;
+	int scratch, descriptors;
 
-	catalog_init(&catalog);
-	catalog_add(&catalog, "/file", FSIMG_ENTRY_FILE, 4097);
-	catalog_add(&catalog, "/link", FSIMG_ENTRY_SYMLINK, 1);
+	CHECK(mkdtemp(directory) != NULL);
+	scratch = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(scratch != -1);
+	descriptors = fsimg_test_open_descriptors();
+	catalog_faults(&catalog);
 	base_options(&options);
-	for (uint64_t attempt = 1; attempt < 4096 && !succeeded; attempt++) {
-		plan_catalog(&fixture, &catalog, &options, NULL, false);
-		sink_open(&fixture, &sink);
-		fsimg_test_fail_alloc_after(fixture.ctx, attempt);
-		status = emit_into(&fixture, &sink);
-		fsimg_test_fail_alloc_after(fixture.ctx, 0);
-		if (status != FSIMG_ENOMEM && status != FSIMG_OK)
-			fprintf(stderr, "%s: allocation %llu returned %d: %s\n",
-			    scenario, (unsigned long long)attempt, status,
-			    fixture.error.message);
-		EXPECT(status == FSIMG_ENOMEM || status == FSIMG_OK);
-		succeeded = status == FSIMG_OK;
-		failed += status != FSIMG_OK;
-		free(sink.bytes);
-		close_writer(&fixture);
+	fsimg_options_init(&context);
+	context.scratch_directory_fd = scratch;
+	context.cancelled = writer_cancelled;
+	context.cancel_argument = &cancel;
+	for (unsigned emission = 0; emission < 2; emission++) {
+		for (writer_fault_t fault = WRITER_ALLOC;
+		    fault <= WRITER_SCRATCH_WRITE; fault++) {
+			/* Count only the stage under test, after catalog collection. */
+			prepare_catalog(&fixture, &catalog, &options, &context, false);
+			if (emission)
+				plan_ok(&fixture);
+			writer_fault_arm(&fixture, &cancel, fault, UINT64_MAX);
+			if (emission) {
+				sink_open(&fixture, &sink);
+				status = emit_into(&fixture, &sink);
+			} else
+				status = plan_writer(&fixture);
+			CHECK(status == FSIMG_OK);
+			EXPECT(fixture.plan->trees[APFS_TREE_FS].shape.node_count > 1);
+			count = writer_fault_count(&fixture, &cancel, fault);
+			CHECK(count < 10000000);
+			if (emission)
+				free(sink.bytes);
+			close_fault_writer(&fixture, &cancel, scratch, descriptors);
+			/* Sweep every allocation and scratch operation. Thousands
+			 * of cancellation polls would exceed the runtime budget;
+			 * sample 24 evenly spaced polls, including first and last,
+			 * to keep the test below a minute at -O2. No emission scratch
+			 * open or resize is required when the plan owns storage.
+			 */
+			samples = fault == WRITER_CANCEL && count > 24 ? 24 : count;
+			CHECK(samples < 4096);
+			fprintf(stderr, "APFS %s %s: %llu points, %llu injected\n",
+			    emission ? "emission" : "planning", names[fault],
+			    (unsigned long long)count, (unsigned long long)samples);
+			if (fault <= WRITER_CANCEL)
+				EXPECT(count > 0);
+			for (uint64_t sample = 0; sample < samples; sample++) {
+				point = samples == 1 ? 1 :
+				    1 + sample * (count - 1) / (samples - 1);
+				snprintf(description, sizeof(description),
+				    "APFS %s %s point %llu/%llu",
+				    emission ? "emission" : "planning", names[fault],
+				    (unsigned long long)point, (unsigned long long)count);
+				scenario = description;
+				prepare_catalog(&fixture, &catalog, &options, &context, false);
+				if (emission)
+					plan_ok(&fixture);
+				writer_fault_arm(&fixture, &cancel, fault, point);
+				if (emission) {
+					sink_open(&fixture, &sink);
+					status = emit_into(&fixture, &sink);
+				} else
+					status = plan_writer(&fixture);
+				expected = fault == WRITER_ALLOC ? FSIMG_ENOMEM :
+				    fault == WRITER_CANCEL ? FSIMG_ECANCELLED : FSIMG_EIO;
+				check_writer_fault(&fixture, status, expected);
+				if (fault >= WRITER_SCRATCH_OPEN) {
+					EXPECT(fixture.ctx->meta_fault_after == 0);
+					EXPECT(strstr(fixture.error.message,
+					    "injected scratch failure") != NULL);
+				}
+				if (emission)
+					free(sink.bytes);
+				close_fault_writer(&fixture, &cancel, scratch, descriptors);
+			}
+		}
 	}
-	EXPECT(succeeded && failed > 0);
+	scenario = saved_scenario;
 	free(catalog.entries);
+	CHECK(close(scratch) == 0);
+	CHECK(rmdir(directory) == 0);
+}
+
+static void
+test_emission_source_faults_at_first_middle_and_last_read(void)
+{
+	const char *names[] = { "none", "short read", "EOF", "read error",
+	    "size change" };
+	const char *saved_scenario = scenario;
+	char directory[] = "/tmp/fsimg-apfs-source-faults.XXXXXX";
+	char description[160];
+	emit_catalog_t catalog;
+	fsimg_write_options_t options;
+	fsimg_options_t context;
+	fixture_t fixture;
+	memory_sink_t reference, sink;
+	cancel_fault_t cancel = { 0 };
+	fsimg_status_t status, expected;
+	uint64_t reads, points[3];
+	int scratch, descriptors;
+
+	CHECK(mkdtemp(directory) != NULL);
+	scratch = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK(scratch != -1);
+	descriptors = fsimg_test_open_descriptors();
+	catalog_faults(&catalog);
+	base_options(&options);
+	fsimg_options_init(&context);
+	context.scratch_directory_fd = scratch;
+	plan_catalog(&fixture, &catalog, &options, &context, false);
+	catalog.reads = 0;
+	CHECK(emit_ok(&fixture, &reference));
+	reads = catalog.reads;
+	CHECK(reads >= 3);
+	close_fault_writer(&fixture, &cancel, scratch, descriptors);
+	points[0] = 1;
+	points[1] = 1 + (reads - 1) / 2;
+	points[2] = reads;
+	fprintf(stderr, "APFS emission source: %llu reads, 4 faults at 3 points\n",
+	    (unsigned long long)reads);
+	for (source_fault_t fault = SOURCE_SHORT; fault <= SOURCE_SIZE; fault++) {
+		for (unsigned sample = 0; sample < 3; sample++) {
+			snprintf(description, sizeof(description),
+			    "APFS emission source %s read %llu/%llu", names[fault],
+			    (unsigned long long)points[sample], (unsigned long long)reads);
+			scenario = description;
+			catalog.source_fault = SOURCE_NONE;
+			catalog.fault_read = 0;
+			catalog.size_changed = false;
+			plan_catalog(&fixture, &catalog, &options, &context, false);
+			catalog.reads = 0;
+			catalog.source_fault = fault;
+			catalog.fault_read = points[sample];
+			sink_open(&fixture, &sink);
+			status = emit_into(&fixture, &sink);
+			EXPECT(catalog.reads >= points[sample]);
+			/* Positive short reads are retried by bounded I/O. They
+			 * must complete the same image, rather than fail emission.
+			 */
+			if (fault == SOURCE_SHORT) {
+				EXPECT(status == FSIMG_OK);
+				EXPECT(catalog.reads == reads + 1);
+				EXPECT(fixture.writer->state == FSIMG_WRITER_FINISHED);
+				EXPECT(sink.length == reference.length);
+				if (sink.length == reference.length)
+					EXPECT(bcmp(sink.bytes, reference.bytes,
+					    (size_t)sink.length) == 0);
+			} else {
+				expected = fault == SOURCE_SIZE ?
+				    FSIMG_ESOURCE_CHANGED : FSIMG_EIO;
+				check_writer_fault(&fixture, status, expected);
+				EXPECT(catalog.reads == points[sample]);
+				if (strcmp(fixture.error.path,
+				    catalog.entries[catalog.fault_id].path) != 0)
+					fprintf(stderr, "%s: error path '%s', expected '%s'\n",
+					    scenario, fixture.error.path,
+					    catalog.entries[catalog.fault_id].path);
+				EXPECT(strcmp(fixture.error.path,
+				    catalog.entries[catalog.fault_id].path) == 0);
+			}
+			free(sink.bytes);
+			close_fault_writer(&fixture, &cancel, scratch, descriptors);
+		}
+	}
+	scenario = saved_scenario;
+	free(reference.bytes);
+	free(catalog.entries);
+	CHECK(close(scratch) == 0);
+	CHECK(rmdir(directory) == 0);
 }
 
 static void
@@ -2612,7 +2924,8 @@ main(int argc, char **argv)
 	RUN(test_emission_is_identical_across_order_budget_scratch_and_timezone);
 	failures += apfs_native_test_decoder();
 	RUN(test_emission_write_and_flush_failures_release_resources);
-	RUN(test_emission_allocation_failure_at_each_allocation_is_clean);
+	RUN(test_planning_and_emission_faults_release_resources);
+	RUN(test_emission_source_faults_at_first_middle_and_last_read);
 	RUN(test_same_length_changed_link_fails_emission_and_names_path);
 	RUN(test_sector_and_allocation_units_are_4096_bytes);
 	RUN(test_label_is_utf8_of_at_most_255_bytes);
