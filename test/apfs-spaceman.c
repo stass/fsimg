@@ -670,7 +670,18 @@ native_fields(json_span_t root, apfs_nx_t *nx, apfs_spaceman_t *sm,
 	SM_FIELD(ip_bm_xid_offset);
 	SM_FIELD(ip_bitmap_offset);
 	SM_FIELD(ip_bm_free_next_offset);
+	SM_FIELD(struct_size);
 #undef SM_FIELD
+	/*
+	 * Every native capture has the current layout; the decoder derives
+	 * the end of the fixed structure from it, so the dump must state it.
+	 */
+	if (sm->struct_size != APFS_SM_BYTES) {
+		expect(false,
+		    "native capture has the current space-manager layout");
+		return (false);
+	}
+	sm->structure_end = APFS_SM_BYTES;
 	for (unsigned i = 0; i < 2; i++) {
 		device = json_item(json_member(space, "devices"), i);
 #define DEVICE_FIELD(field) JSON_FIELD(device, #field, sm->devices[i].field)

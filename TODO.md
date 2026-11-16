@@ -173,12 +173,6 @@
   chunk-information blocks, node free space and unused ring slots are not
   checked zero. The I/O sink's `REQUIRE` jumps out of `fsimg_writer_emit`
   and leaks the writer.
-* [Medium] **APFS space-manager native dump check fails**
-  (`test/apfs-spaceman.c`): with `FSIMG_APFS_NATIVE` set, every
-  `e1-sweep/*/apfsdump.json` geometry is refused with "space manager has an
-  array past its packed extent" (155 dumps); the test passes only because
-  it skips when the variable is unset. Decide whether the dumps or the
-  packed-extent rule is wrong.
 * [Low] **APFS sealed verification untested cases** (`test/apfs-verify.c`,
   `test/apfs-gen.c`): a sealed volume with snapshots, which verification
   reports incomplete, and a sealed extent whose private ID exceeds 60 bits,
