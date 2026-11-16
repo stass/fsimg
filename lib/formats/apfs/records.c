@@ -20,6 +20,14 @@
  * directory's records (9). Checks local to one owner run as its records
  * arrive and when the next owner begins.
  *
+ * A sealed volume's filesystem tree is read through its seal, every node
+ * checked against its parent's digest, and holds no file extents: they lie
+ * in the sealed file-extent tree, keyed by private ID and offset, the order
+ * of the filesystem tree's (owner, kind 8). A second cursor walks that tree
+ * beside the first, and each extent is checked where a file-extent record
+ * of its owner would stand, so the owner's checks are those of an unsealed
+ * volume.
+ *
  * Facts that join different owners go to streams in metadata scratch, each
  * sorted once after the scan and merged with its partner:
  *
@@ -153,12 +161,19 @@ typedef struct scan {
 	fsimg_stream_t	*forms;
 	apfs_map_t	 map;
 	apfs_cursor_t	 cursor;
+	/* A sealed volume's sealed file-extent tree, whether it stands on a
+	 * record, and the records it has visited.
+	 */
+	apfs_cursor_t	 fext_cursor;
+	bool		 fext_found;
+	uint64_t	 fext_keys;
 	object_t	 object;
 	uint64_t	 counts[COUNTS];
 	uint64_t	 inode_min;	/* the least ordinary inode number */
 	apfs_name_rule_t rule;
 	uint32_t	 volume;
 	bool		 hashed;
+	bool		 sealed;
 	bool		 map_open;
 	bool		 root;		/* the root directory's inode seen */
 } scan_t;
@@ -197,15 +212,24 @@ static fsimg_status_t	sibling_record(scan_t *, const apfs_record_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	stream_id_record(scan_t *, const apfs_record_t *,
 			    fsimg_error_t *);
+static fsimg_status_t	extent_check(scan_t *, const apfs_extent_key_t *,
+			    const apfs_extent_val_t *, fsimg_error_t *);
+static bool		extent_follows(const apfs_extent_key_t *,
+			    const apfs_jkey_t *);
+static fsimg_status_t	sealed_extents(scan_t *, const apfs_jkey_t *,
+			    fsimg_error_t *);
 static fsimg_status_t	extent_record(scan_t *, const apfs_record_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	drec_record(scan_t *, const apfs_record_t *,
+			    fsimg_error_t *);
+static fsimg_status_t	file_info_record(scan_t *, const apfs_record_t *,
 			    fsimg_error_t *);
 static fsimg_status_t	map_record(scan_t *, const apfs_jkey_t *,
 			    const apfs_record_t *, fsimg_error_t *);
 static fsimg_status_t	record_check(scan_t *, const apfs_jkey_t *,
 			    const apfs_record_t *, fsimg_error_t *);
 static fsimg_status_t	object_end(scan_t *, fsimg_error_t *);
+static fsimg_status_t	owner_begin(scan_t *, uint64_t, fsimg_error_t *);
 static fsimg_status_t	scan_records(scan_t *, fsimg_error_t *);
 static fsimg_status_t	inode_names_check(const fact_t *, uint64_t,
 			    uint64_t, fsimg_error_t *);
@@ -610,45 +634,39 @@ stream_id_record(scan_t *s, const apfs_record_t *record,
 }
 
 /*
- * A file extent of the stream the owner names: extents tile the stream
- * from offset zero in whole blocks, and a mapped one, whose blocks lie in
- * [1, N), is appended for the allocation merge.
+ * A file extent of the stream the owner names, from either tree: extents
+ * tile the stream from offset zero in whole blocks, and a mapped one, whose
+ * blocks lie in [1, N), is appended for the allocation merge.
  */
 static fsimg_status_t
-extent_record(scan_t *s, const apfs_record_t *record, fsimg_error_t *error)
+extent_check(scan_t *s, const apfs_extent_key_t *key,
+    const apfs_extent_val_t *val, fsimg_error_t *error)
 {
 	object_t *o = &s->object;
 	uint32_t block_size = s->container->block_size;
 	uint64_t block_count = s->container->block_count;
 	unsigned char raw[APFS_FEXT_CLAIM_BYTES];
-	apfs_extent_key_t key;
-	apfs_extent_val_t val;
 	apfs_fext_claim_t claim;
 
-	if (record->ghost ||
-	    !apfs_extent_key_decode(record->key, record->key_len, &key) ||
-	    !apfs_extent_val_decode(record->val, record->val_len, &val))
-		return (apfs_corrupt(error, ROLE_STREAM,
-		    "file extent is malformed"));
-	if (key.logical != o->extent_end)
+	if (key->logical != o->extent_end)
 		return (apfs_corrupt(error, ROLE_STREAM,
 		    "extents do not tile their stream"));
-	if (val.length == 0 || val.length % block_size != 0 ||
-	    val.length > UINT64_MAX - o->extent_end)
+	if (val->length == 0 || val->length % block_size != 0 ||
+	    val->length > UINT64_MAX - o->extent_end)
 		return (apfs_corrupt(error, ROLE_STREAM,
 		    "file extent has an invalid length"));
-	if (val.flags != 0)
-		return (apfs_corrupt(error, ROLE_STREAM,
-		    "file extent has flags"));
-	if (val.crypto_id != 0)
+	if (val->flags != 0)
+		return (apfs_unsupported(error, ROLE_STREAM,
+		    "file extent has unsupported flags"));
+	if (val->crypto_id != 0)
 		return (apfs_unsupported(error, ROLE_STREAM,
 		    "file extent may be encrypted"));
-	o->extent_end += val.length;
+	o->extent_end += val->length;
 	o->extents = true;
-	if (val.phys_block == 0)
+	if (val->phys_block == 0)
 		return (FSIMG_OK);
-	claim = (apfs_fext_claim_t){ .first = val.phys_block,
-	    .count = val.length / block_size, .stream = key.private_id,
+	claim = (apfs_fext_claim_t){ .first = val->phys_block,
+	    .count = val->length / block_size, .stream = key->private_id,
 	    .volume = s->volume };
 	if (claim.first >= block_count || claim.count > block_count -
 	    claim.first)
@@ -657,6 +675,74 @@ extent_record(scan_t *s, const apfs_record_t *record, fsimg_error_t *error)
 	apfs_fext_claim_encode(raw, &claim);
 	return (fsimg_stream_append(s->records->extents, raw, sizeof(raw),
 	    NULL, error));
+}
+
+/* A file-extent record of the filesystem tree; a sealed one holds none. */
+static fsimg_status_t
+extent_record(scan_t *s, const apfs_record_t *record, fsimg_error_t *error)
+{
+	apfs_extent_key_t key;
+	apfs_extent_val_t val;
+
+	if (s->sealed)
+		return (apfs_corrupt(error, ROLE_TREE,
+		    "is sealed and holds a file extent"));
+	if (record->ghost ||
+	    !apfs_extent_key_decode(record->key, record->key_len, &key) ||
+	    !apfs_extent_val_decode(record->val, record->val_len, &val))
+		return (apfs_corrupt(error, ROLE_STREAM,
+		    "file extent is malformed"));
+	return (extent_check(s, &key, &val, error));
+}
+
+/*
+ * Whether a sealed extent, standing as its owner's (private ID, kind 8)
+ * record, sorts after the filesystem tree's record key. Both owners are
+ * 60-bit, so the order is the filesystem tree's own; a filesystem tree of a
+ * sealed volume holds no kind 8, so the two are never equal.
+ */
+static bool
+extent_follows(const apfs_extent_key_t *extent, const apfs_jkey_t *key)
+{
+	if (extent->private_id != key->oid)
+		return (extent->private_id > key->oid);
+	return (key->kind < APFS_J_FILE_EXTENT);
+}
+
+/*
+ * The sealed file-extent tree's records that sort before the filesystem
+ * tree's record key, or every remaining one when key is NULL: each takes
+ * the place of its owner's (private ID, kind 8) record, ending the current
+ * owner when its private ID differs.
+ */
+static fsimg_status_t
+sealed_extents(scan_t *s, const apfs_jkey_t *key, fsimg_error_t *error)
+{
+	apfs_record_t record;
+	apfs_extent_key_t extent;
+	apfs_extent_val_t val;
+	fsimg_status_t status = FSIMG_OK;
+
+	while (status == FSIMG_OK && s->fext_found) {
+		apfs_cursor_record(&s->fext_cursor, &record);
+		if (record.ghost || !apfs_sealed_extent_key_decode(record.key,
+		    record.key_len, &extent) ||
+		    extent.private_id > APFS_JKEY_OID_MASK ||
+		    !apfs_sealed_extent_val_decode(record.val, record.val_len,
+		    &val))
+			return (apfs_corrupt(error, ROLE_STREAM,
+			    "sealed file extent is malformed"));
+		if (key != NULL && extent_follows(&extent, key))
+			return (FSIMG_OK);
+		s->fext_keys++;
+		status = owner_begin(s, extent.private_id, error);
+		if (status == FSIMG_OK)
+			status = extent_check(s, &extent, &val, error);
+		if (status == FSIMG_OK)
+			status = apfs_cursor_next(&s->fext_cursor,
+			    &s->fext_found, error);
+	}
+	return (status);
 }
 
 /*
@@ -735,6 +821,29 @@ map_record(scan_t *s, const apfs_jkey_t *key, const apfs_record_t *record,
 	    .inode = inode } }, error));
 }
 
+/*
+ * A file-information record, which only a sealed volume holds: it must be
+ * well formed, and its hash of the file's content is not checked
+ * (specs/design-apfs.md, "Sealed volumes").
+ */
+static fsimg_status_t
+file_info_record(scan_t *s, const apfs_record_t *record,
+    fsimg_error_t *error)
+{
+	apfs_file_info_key_t key;
+	apfs_file_info_val_t val;
+
+	if (!s->sealed)
+		return (apfs_unsupported(error, ROLE_TREE,
+		    "holds records verification does not read"));
+	if (record->ghost ||
+	    !apfs_file_info_key_decode(record->key, record->key_len, &key) ||
+	    !apfs_file_info_val_decode(record->val, record->val_len, &val))
+		return (apfs_corrupt(error, ROLE_TREE,
+		    "has a malformed file-information record"));
+	return (FSIMG_OK);
+}
+
 static fsimg_status_t
 record_check(scan_t *s, const apfs_jkey_t *key, const apfs_record_t *record,
     fsimg_error_t *error)
@@ -762,6 +871,8 @@ record_check(scan_t *s, const apfs_jkey_t *key, const apfs_record_t *record,
 		return (FSIMG_OK);
 	case APFS_J_SIBLING_MAP:
 		return (map_record(s, key, record, error));
+	case APFS_J_FILE_INFO:
+		return (file_info_record(s, record, error));
 	case APFS_J_CRYPTO_STATE:
 		return (apfs_unsupported(error, ROLE_TREE,
 		    "holds encryption state"));
@@ -809,6 +920,20 @@ object_end(scan_t *s, fsimg_error_t *error)
 	    .end = o->extent_end } }, error));
 }
 
+/* A record of owner oid: when it is a new owner, the current one ends. */
+static fsimg_status_t
+owner_begin(scan_t *s, uint64_t oid, fsimg_error_t *error)
+{
+	fsimg_status_t status;
+
+	if (oid == s->object.oid)
+		return (FSIMG_OK);
+	status = object_end(s, error);
+	if (status == FSIMG_OK)
+		s->object = (object_t){ .oid = oid };
+	return (status);
+}
+
 /* The scan: every record in key order, owner by owner. */
 static fsimg_status_t
 scan_records(scan_t *s, fsimg_error_t *error)
@@ -820,26 +945,32 @@ scan_records(scan_t *s, fsimg_error_t *error)
 	fsimg_status_t status;
 
 	status = apfs_cursor_first(&s->cursor, &found, error);
+	if (status == FSIMG_OK && s->sealed)
+		status = apfs_cursor_first(&s->fext_cursor, &s->fext_found,
+		    error);
 	while (status == FSIMG_OK && found) {
 		keys++;
 		apfs_cursor_record(&s->cursor, &record);
 		if (!apfs_jkey_decode(record.key, record.key_len, &key))
 			return (apfs_corrupt(error, ROLE_TREE,
 			    "has a malformed key"));
-		if (key.oid != s->object.oid) {
-			status = object_end(s, error);
-			if (status != FSIMG_OK)
-				return (status);
-			s->object = (object_t){ .oid = key.oid };
-		}
-		status = record_check(s, &key, &record, error);
+		status = sealed_extents(s, &key, error);
+		if (status == FSIMG_OK)
+			status = owner_begin(s, key.oid, error);
+		if (status == FSIMG_OK)
+			status = record_check(s, &key, &record, error);
 		if (status == FSIMG_OK)
 			status = apfs_cursor_next(&s->cursor, &found, error);
 	}
 	if (status == FSIMG_OK)
+		status = sealed_extents(s, NULL, error);
+	if (status == FSIMG_OK)
 		status = object_end(s, error);
 	if (status == FSIMG_OK)
 		status = apfs_cursor_counts_check(&s->cursor, keys, error);
+	if (status == FSIMG_OK && s->sealed)
+		status = apfs_cursor_counts_check(&s->fext_cursor, s->fext_keys,
+		    error);
 	return (status);
 }
 
@@ -1185,8 +1316,9 @@ counts_check(const scan_t *s, fsimg_error_t *error)
 
 /*
  * Open the volume's object map, at the checkpoint's XID like every other
- * structure verification reads, a cursor on the filesystem tree, the
- * scratch streams and the record buffers.
+ * structure verification reads, a cursor on the filesystem tree, bound in a
+ * sealed volume to its integrity object's root hash, with one on the sealed
+ * file-extent tree, the scratch streams and the record buffers.
  */
 static fsimg_status_t
 scan_open(scan_t *s, unsigned char *window, fsimg_error_t *error)
@@ -1197,10 +1329,12 @@ scan_open(scan_t *s, unsigned char *window, fsimg_error_t *error)
 	fsimg_stream_t **named[] = { &s->names, &s->inodes };
 	fsimg_stream_t **bytes[] = { &s->links, &s->tags, &s->forms };
 	const apfs_tree_profile_t *profile;
+	unsigned char root_hash[APFS_SEAL_HASH_BYTES];
 	fsimg_error_t detail;
 	fsimg_status_t status;
 
 	s->rule = apfs_volume_rule(s->fs);
+	s->sealed = (s->fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0;
 	s->inode_min = apfs_inode_min(s->fs);
 	s->hashed = s->rule != APFS_NAMES_BYTES;
 	profile = apfs_fs_tree_profile(s->hashed);
@@ -1211,6 +1345,16 @@ scan_open(scan_t *s, unsigned char *window, fsimg_error_t *error)
 	s->map_open = true;
 	apfs_cursor_init(&s->cursor, container, profile, APFS_OBJ_VIRTUAL,
 	    s->fs->root_tree_oid, container->xid, &s->map);
+	if (s->sealed) {
+		apfs_cursor_init(&s->fext_cursor, container,
+		    apfs_sealed_extent_tree_profile(), APFS_OBJ_PHYSICAL,
+		    s->fs->fext_tree_oid, container->xid, NULL);
+		status = apfs_integrity_read(container, &s->map, s->fs,
+		    container->xid, window, root_hash, error);
+		if (status != FSIMG_OK)
+			return (status);
+		apfs_cursor_seal(&s->cursor, root_hash);
+	}
 	s->form = fsimg_alloc(container->reader->ctx, sizeof(*s->form),
 	    &detail);
 	if (s->form != NULL)
@@ -1248,6 +1392,7 @@ scan_close(scan_t *s)
 	fsimg_dealloc(s->form);
 	if (s->map_open) {
 		apfs_cursor_free(&s->cursor);
+		apfs_cursor_free(&s->fext_cursor);
 		apfs_map_close(&s->map);
 	}
 }

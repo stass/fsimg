@@ -1063,46 +1063,54 @@ test_incomplete_containers_preserve_corruption_errors(void)
 	}
 }
 
-/* Without the sealed bit these fields do not change verification's scope. */
+/*
+ * Without the sealed bit an integrity OID, a mapped object's, changes no
+ * check, while a sealed file-extent tree's nodes would be claimed by nothing,
+ * so naming one makes the report incomplete.
+ */
 static void
 test_unsealed_integrity_fields_preserve_allocation_checks(void)
 {
 	static const struct {
 		const char *name;
+		unsigned offset;
 		bool leak;
 		bool double_claim;
 		fsimg_status_t status;
 		const char *message;
 	} cases[] = {
-		{ .name = "unsealed auxiliary OID", .status = FSIMG_OK, .message = "" },
-		{ .name = "unsealed auxiliary OID with leak", .leak = true,
-		    .status = FSIMG_ECORRUPT, .message = "allocated but claimed by nothing" },
-		{ .name = "unsealed auxiliary OID with double claim", .double_claim = true,
-		    .status = FSIMG_ECORRUPT, .message = "claimed by both" }
+		{ .name = "unsealed integrity OID", .offset = 1024,
+		    .status = FSIMG_OK, .message = "" },
+		{ .name = "unsealed integrity OID with leak", .offset = 1024,
+		    .leak = true, .status = FSIMG_ECORRUPT,
+		    .message = "allocated but claimed by nothing" },
+		{ .name = "unsealed integrity OID with double claim",
+		    .offset = 1024, .double_claim = true,
+		    .status = FSIMG_ECORRUPT, .message = "claimed by both" },
+		{ .name = "unsealed sealed-extent tree OID", .offset = 1032,
+		    .status = FSIMG_EUNSUPPORTED,
+		    .message = "holds structures verification does not read" }
 	};
-	static const unsigned offsets[] = { 1024, 1032 };
 	fixture_t f;
 
-	for (size_t i = 0; i < ARRAY_COUNT(offsets); i++) {
-		for (size_t j = 0; j < ARRAY_COUNT(cases); j++) {
-			scenario = cases[j].name;
-			fixture_init(&f, 1);
-			fsimg_store_le64(block_at(&f, VOLUME_BASE) + offsets[i], 300);
-			CHECK(apfs_gen_seal(block_at(&f, VOLUME_BASE), BLOCK));
-			if (cases[j].leak)
-				bit_set(block_at(&f, BITMAP_BLOCK), 300, true);
-			if (cases[j].double_claim)
-				extents_build(&f, 105, 102, 2);
-			allocation_build(&f);
-			verify_fixture(&f, 0, cases[j].status, cases[j].message);
-			fixture_close(&f);
-		}
+	for (size_t i = 0; i < ARRAY_COUNT(cases); i++) {
+		scenario = cases[i].name;
+		fixture_init(&f, 1);
+		fsimg_store_le64(block_at(&f, VOLUME_BASE) + cases[i].offset, 300);
+		CHECK(apfs_gen_seal(block_at(&f, VOLUME_BASE), BLOCK));
+		if (cases[i].leak)
+			bit_set(block_at(&f, BITMAP_BLOCK), 300, true);
+		if (cases[i].double_claim)
+			extents_build(&f, 105, 102, 2);
+		allocation_build(&f);
+		verify_fixture(&f, 0, cases[i].status, cases[i].message);
+		fixture_close(&f);
 	}
 }
 
-/* Incomplete ownership skips allocation judgments; malformed records fail. */
+/* Sealed trees participate in the same allocation merge as ordinary trees. */
 static void
-test_generated_sealed_verification_is_incomplete(void)
+test_generated_sealed_verification_checks_allocation(void)
 {
 	typedef enum sealed_verify_damage {
 		SEALED_VERIFY_INTACT,
@@ -1119,17 +1127,13 @@ test_generated_sealed_verification_is_incomplete(void)
 		const char *message;
 	} cases[] = {
 		{ .name = "sealed intact", .damage = SEALED_VERIFY_INTACT,
-		    .status = FSIMG_EUNSUPPORTED,
-		    .message = "holds structures verification does not read" },
+		    .status = FSIMG_OK, .message = "" },
 		{ .name = "sealed leak", .damage = SEALED_VERIFY_LEAK,
-		    .status = FSIMG_EUNSUPPORTED,
-		    .message = "holds structures verification does not read" },
+		    .status = FSIMG_ECORRUPT, .message = "allocated but claimed by nothing" },
 		{ .name = "sealed free claim", .damage = SEALED_VERIFY_FREE_CLAIM,
-		    .status = FSIMG_EUNSUPPORTED,
-		    .message = "holds structures verification does not read" },
+		    .status = FSIMG_ECORRUPT, .message = "claimed but free" },
 		{ .name = "sealed double claim", .damage = SEALED_VERIFY_DOUBLE_CLAIM,
-		    .status = FSIMG_EUNSUPPORTED,
-		    .message = "holds structures verification does not read" },
+		    .status = FSIMG_ECORRUPT, .message = "claimed by both" },
 		{ .name = "sealed out-of-domain extent",
 		    .damage = SEALED_VERIFY_OUT_OF_DOMAIN,
 		    .status = FSIMG_ECORRUPT, .message = "outside the container" },
@@ -1177,6 +1181,10 @@ test_generated_sealed_verification_is_incomplete(void)
 		free_count = 0;
 		for (unsigned j = 0; j < BLOCKS; j++)
 			free_count += (block_at(&f, BITMAP_BLOCK)[j / 8] & (1u << (j % 8))) == 0;
+		f.expected_files = 1;
+		f.expected_directories = 1;
+		f.expected_logical_bytes = sizeof(source);
+		f.sm.devices[0].free_count = free_count;
 		fsimg_store_le32(block_at(&f, CIB_BLOCK) + 60, (uint32_t)free_count);
 		fsimg_store_le64(block_at(&f, 9) + 72, free_count);
 		CHECK(apfs_gen_seal(block_at(&f, CIB_BLOCK), BLOCK));
@@ -1184,6 +1192,196 @@ test_generated_sealed_verification_is_incomplete(void)
 		verify_fixture(&f, 0, cases[i].status, cases[i].message);
 		fixture_close(&f);
 		apfs_gen_volume_free(volume);
+	}
+}
+
+/* Change only unused bytes, so a failure establishes integrity checking. */
+static void
+sealed_free_space_tamper(unsigned char *raw)
+{
+	size_t start = 56 + fsimg_load_le16(raw + 40) +
+	    fsimg_load_le16(raw + 42) + fsimg_load_le16(raw + 44);
+	size_t length = fsimg_load_le16(raw + 46);
+
+	CHECK(length > 0 && start + length <= BLOCK);
+	raw[start + length / 2] ^= 0x5a;
+}
+
+static void
+test_sealed_verification_rejects_tree_damage_and_wrong_block_counts(void)
+{
+	typedef enum sealed_damage {
+		SEALED_INDEX_DIGEST,
+		SEALED_LEAF_DIGEST,
+		SEALED_EXTENT_CHECKSUM,
+		SEALED_EXTENT_UNCOVERED,
+		SEALED_EXTENT_FOOTER,
+		SEALED_ALLOCATED_HIGH,
+		SEALED_ALLOCATED_LOW,
+		SEALED_FS_EXTENT,
+		SEALED_FILE_INFO
+	} sealed_damage_t;
+	static const struct {
+		const char *name;
+		sealed_damage_t damage;
+		const char *message;
+	} cases[] = {
+		{ "sealed index free space", SEALED_INDEX_DIGEST,
+		    "does not match its digest" },
+		{ "sealed leaf free space", SEALED_LEAF_DIGEST,
+		    "does not match its digest" },
+		{ "sealed extent free space", SEALED_EXTENT_CHECKSUM,
+		    "bad checksum" },
+		{ "sealed extent without physical record", SEALED_EXTENT_UNCOVERED,
+		    "file extent outside every physical-extent record" },
+		{ "sealed extent footer count", SEALED_EXTENT_FOOTER,
+		    "key count differs from its footer" },
+		{ "sealed allocated count too high", SEALED_ALLOCATED_HIGH,
+		    "allocated block count differs from its trees" },
+		{ "sealed allocated count too low", SEALED_ALLOCATED_LOW,
+		    "allocated block count differs from its trees" },
+		{ "sealed filesystem holds extent", SEALED_FS_EXTENT,
+		    "is sealed and holds a file extent" },
+		{ "sealed malformed file information", SEALED_FILE_INFO,
+		    "has a malformed file-information record" }
+	};
+	unsigned char source[BLOCK] = { 1 };
+	apfs_gen_sealed_info_t info;
+	apfs_gen_volume_t *volume;
+	fixture_t f;
+	unsigned char *raw;
+	uint64_t leaf, count;
+	size_t size, toc, end, key;
+
+	for (size_t i = 0; i < ARRAY_COUNT(cases); i++) {
+		scenario = cases[i].name;
+		fixture_init(&f, 1);
+		free(f.bytes);
+		volume = apfs_gen_volume_new();
+		CHECK(volume != NULL);
+		CHECK(apfs_gen_volume_sealed(volume));
+		CHECK(apfs_gen_volume_layout(volume, 1, 1));
+		CHECK(apfs_gen_volume_directory(volume, 16, 2, "dir"));
+		CHECK(apfs_gen_volume_file(volume, 17, 16, "file", source, sizeof(source)));
+		CHECK(apfs_gen_volume_file(volume, 18, 2, "hole", NULL, BLOCK));
+		CHECK(apfs_gen_volume_file(volume, 19, 2, "empty", NULL, 0));
+		CHECK(apfs_gen_volume_build(volume, &f.bytes, &size));
+		CHECK(size == f.length);
+		CHECK(apfs_gen_volume_sealed_info(volume, &info));
+		CHECK(info.index != info.root);
+		CHECK(fsimg_load_le16(block_at(&f, info.root) + 34) >= 2);
+		raw = block_at(&f, info.extent_leaf);
+		toc = 56 + fsimg_load_le16(raw + 40);
+		end = BLOCK - 40; /* The single extent is in a root leaf. */
+		CHECK((fsimg_load_le16(raw + 32) & 7) == 7);
+		CHECK(fsimg_load_le32(raw + 36) == 1);
+		if (i == 0) {
+			scenario = "sealed indexed intact";
+			f.expected_files = 3;
+			f.expected_directories = 2;
+			f.expected_logical_bytes = 2 * BLOCK;
+			f.sm.devices[0].free_count =
+			    fsimg_load_le64(block_at(&f, 9) + 72);
+			verify_fixture(&f, 0, FSIMG_OK, "");
+			scenario = cases[i].name;
+		}
+		switch (cases[i].damage) {
+		case SEALED_INDEX_DIGEST:
+			sealed_free_space_tamper(block_at(&f, info.index));
+			break;
+		case SEALED_LEAF_DIGEST:
+			sealed_free_space_tamper(block_at(&f, info.leaf));
+			break;
+		case SEALED_EXTENT_CHECKSUM:
+			sealed_free_space_tamper(raw);
+			break;
+		case SEALED_EXTENT_UNCOVERED:
+			/* Block 900 is inside the container, outside every pext. */
+			fsimg_store_le64(raw + end - fsimg_load_le16(raw + toc + 2) + 8, 900);
+			CHECK(apfs_gen_seal(raw, BLOCK));
+			break;
+		case SEALED_EXTENT_FOOTER:
+			count = fsimg_load_le64(raw + BLOCK - 16);
+			fsimg_store_le64(raw + BLOCK - 16, count + 1);
+			CHECK(apfs_gen_seal(raw, BLOCK));
+			break;
+		case SEALED_ALLOCATED_HIGH:
+		case SEALED_ALLOCATED_LOW:
+			raw = block_at(&f, info.superblock);
+			count = fsimg_load_le64(raw + 88);
+			CHECK(count > 0);
+			fsimg_store_le64(raw + 88,
+			    cases[i].damage == SEALED_ALLOCATED_HIGH ? count + 1 : count - 1);
+			CHECK(apfs_gen_seal(raw, BLOCK));
+			break;
+		case SEALED_FS_EXTENT:
+		case SEALED_FILE_INFO:
+			/* The final stream-ID record follows this file's inode.
+			 * Replacing its kind preserves ordering. Grow its key into
+			 * free space and leave its four-byte value in place.
+			 */
+			CHECK(apfs_gen_volume_record_block(volume, 17,
+			    APFS_GEN_KIND_DSTREAM_ID, 0, &leaf));
+			raw = block_at(&f, leaf);
+			toc = 56 + fsimg_load_le16(raw + 40);
+			CHECK(fsimg_load_le32(raw + 36) == 1);
+			key = 56 + fsimg_load_le16(raw + 40) +
+			    fsimg_load_le16(raw + 42) + fsimg_load_le16(raw + toc);
+			CHECK(apfs_gen_jkey_build(raw + key, 8, 17,
+			    cases[i].damage == SEALED_FS_EXTENT ? 8 : 13));
+			CHECK(fsimg_load_le16(raw + 46) >= 8);
+			fsimg_store_le64(raw + key + 8, 0);
+			fsimg_store_le16(raw + toc + 2, 16);
+			fsimg_store_le16(raw + 44, fsimg_load_le16(raw + 44) + 8);
+			fsimg_store_le16(raw + 46, fsimg_load_le16(raw + 46) - 8);
+			if (cases[i].damage == SEALED_FILE_INFO) {
+				/* Four value bytes cannot hold a three-byte header
+				 * followed by a two-byte hash.
+				 */
+				raw[BLOCK - fsimg_load_le16(raw + toc + 4) + 2] = 2;
+			}
+			CHECK(apfs_gen_volume_reseal(volume, f.bytes, size));
+			break;
+		}
+		verify_fixture(&f, 0, FSIMG_ECORRUPT, cases[i].message);
+		fixture_close(&f);
+		apfs_gen_volume_free(volume);
+	}
+}
+
+static void
+test_headerless_mappings_require_a_sealed_volume(void)
+{
+	static const struct {
+		const char *name;
+		uint64_t map;
+		uint64_t oid;
+		uint64_t address;
+	} cases[] = {
+		{ "headerless container mapping", 90, 1000, VOLUME_BASE },
+		{ "headerless unsealed volume mapping", 101, 2000, 103 }
+	};
+	fixture_t f;
+
+	for (size_t i = 0; i < ARRAY_COUNT(cases); i++) {
+		apfs_gen_omap_record_t mapping = {
+			.key = { .oid = cases[i].oid, .xid = 10 },
+			.value = { .size = BLOCK, .address = cases[i].address }
+		};
+		apfs_gen_omap_record_t maps[] = { mapping, {
+			.key = { .oid = cases[i].oid + 1, .xid = 10 },
+			.value = { .flags = APFS_OMAP_VAL_NOHEADER,
+			    .size = BLOCK, .address = 300 }
+		} };
+
+		scenario = cases[i].name;
+		fixture_init(&f, 1);
+		map_build(&f, cases[i].map, maps, ARRAY_COUNT(maps));
+		bit_set(block_at(&f, BITMAP_BLOCK), 300, true);
+		allocation_build(&f);
+		verify_fixture(&f, 0, FSIMG_ECORRUPT,
+		    "maps a headerless object outside a sealed volume");
+		fixture_close(&f);
 	}
 }
 
@@ -1289,7 +1487,7 @@ test_unsupported_container_mapping_preserves_queue_damage(void)
 	bit_set(block_at(&f, BITMAP_BLOCK), 300, true);
 	allocation_build(&f);
 	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
-	    "maps an encrypted or headerless object");
+	    "maps an encrypted object");
 
 	scenario = "unsupported container mapping preserves future queue record";
 	bit_set(block_at(&f, BITMAP_BLOCK), 301, true);
@@ -1355,7 +1553,7 @@ test_unsupported_mapped_object_preserves_later_damage(void)
 	extents_build(&f, 115, 112, 2);
 	allocation_build(&f);
 	verify_fixture(&f, 0, FSIMG_EUNSUPPORTED,
-	    "maps an encrypted or headerless object");
+	    "maps an encrypted object");
 
 	scenario = "unsupported mapped object preserves later volume damage";
 	extents_build(&f, 115, BLOCKS - 1, 2);
@@ -1664,6 +1862,34 @@ test_collision_in_nonselected_volume_is_corrupt(void)
 	verify_fixture(&f, 0, FSIMG_ECORRUPT,
 	    "directory holds names the volume treats as equal");
 	fixture_close(&f);
+}
+
+static void
+test_file_extent_flags_and_crypto_are_unsupported(void)
+{
+	static const struct {
+		const char *name;
+		size_t offset;
+		const char *message;
+	} cases[] = {
+		{ .name = "file extent with nonzero flags", .offset = 7,
+		    .message = "file extent has unsupported flags" },
+		{ .name = "file extent with nonzero crypto ID", .offset = 16,
+		    .message = "may be encrypted" }
+	};
+	fixture_t f;
+	fs_record_t *r;
+
+	for (size_t i = 0; i < ARRAY_COUNT(cases); i++) {
+		scenario = cases[i].name;
+		fixture_init(&f, 1);
+		r = record_find(&f.trees[0], 16, 8);
+		CHECK(r->value_size == GEN_EXTENT_VAL_BYTES);
+		r->value[cases[i].offset] = 1;
+		filesystem_build(&f, 0);
+		verify_fixture(&f, 0, FSIMG_EUNSUPPORTED, cases[i].message);
+		fixture_close(&f);
+	}
 }
 
 static void
@@ -2812,7 +3038,9 @@ main(void)
 	test_extent_records_in_one_tree_must_not_overlap();
 	test_free_count_mismatches();
 	test_incomplete_containers_preserve_corruption_errors();
-	test_generated_sealed_verification_is_incomplete();
+	test_generated_sealed_verification_checks_allocation();
+	test_sealed_verification_rejects_tree_damage_and_wrong_block_counts();
+	test_headerless_mappings_require_a_sealed_volume();
 	test_unsealed_integrity_fields_preserve_allocation_checks();
 	test_free_queues();
 	test_empty_free_queues_reject_future_oldest_xid();
@@ -2833,6 +3061,7 @@ main(void)
 	test_case_equivalent_names_in_one_directory_is_corrupt();
 	test_normalization_equivalent_stored_spellings_is_corrupt();
 	test_collision_in_nonselected_volume_is_corrupt();
+	test_file_extent_flags_and_crypto_are_unsupported();
 	test_extent_gap_is_corrupt();
 	test_first_extent_after_zero_is_corrupt();
 	test_file_extent_outside_physical_records_is_corrupt();

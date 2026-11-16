@@ -148,6 +148,17 @@
   chunk-information blocks, node free space and unused ring slots are not
   checked zero. The I/O sink's `REQUIRE` jumps out of `fsimg_writer_emit`
   and leaks the writer.
+* [Medium] **APFS space-manager native dump check fails**
+  (`test/apfs-spaceman.c`): with `FSIMG_APFS_NATIVE` set, every
+  `e1-sweep/*/apfsdump.json` geometry is refused with "space manager has an
+  array past its packed extent" (155 dumps); the test passes only because
+  it skips when the variable is unset. Decide whether the dumps or the
+  packed-extent rule is wrong.
+* [Low] **APFS sealed verification untested cases** (`test/apfs-verify.c`,
+  `test/apfs-gen.c`): a sealed volume with snapshots, which verification
+  reports incomplete, and a sealed extent whose private ID exceeds 60 bits,
+  which it rejects as malformed, have no test; the sealed generator builds
+  no snapshots and no out-of-range sealed keys.
 * [Low] **APFS writer large-container paths** (`lib/formats/apfs/write-emit.c`,
   `test/apfs-write.c`): the tests' largest container is 256 MiB, one
   chunk-information block, one pool-bitmap block and a one-block space
@@ -947,6 +958,15 @@
   linking the convenience library for internals).
 
 ## Planned features
+
+* [Low] **LZBITMAP decmpfs decoder** (`lib/codec/`,
+  `lib/formats/apfs/content.c`, `specs/design-apfs.md` compression table):
+  types 13 and 14 are refused as unsupported for lack of a public decoder,
+  and 1394 of the 2632 regular files of E11's sealed application cryptex
+  use type 14, so a macOS system or cryptex volume extracts only in part. A
+  decoder needs its own design from published reverse-engineering notes, a
+  clean-room implementation, a fuzz target, and those 1394 files with their
+  manifest digests as the oracle.
 
 * [Low] **Salvage ranges after interior damage** (`lib/read`, `lib/formats/`):
   deferred extension to the prefix-only [salvage policy](specs/design-salvage.md).

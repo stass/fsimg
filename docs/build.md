@@ -1330,8 +1330,10 @@ FSIMG_APFS_CORPUS=$HOME/fsimg-corpus/apfs \
 * **manifests**: `test/apfs-native/listing_test.rb` and `content_test.rb`,
   which only this script runs, over the captures of `FSIMG_APFS_NATIVE`:
   `t --json`, `x -O` and `x` agree with each native manifest (paths, kinds,
-  sizes, modes, times, owners, SHA-256) and `W` verifies the compressed
-  captures. A run whose tests all skip is a skip. The `diskutil` comparison
+  sizes, modes, times, owners, SHA-256), `W` verifies the compressed
+  captures and the sealed one, and fails copies of the sealed capture
+  with one byte changed in an index node, a leaf or a sealed file-extent
+  node. A run whose tests all skip is a skip. The `diskutil` comparison
   of `i` stays in `test/cli/apfs_info_test.rb`.
 * **captures**: each `apfs-*/image.img` of at most 16 GiB. A larger one
   (the 100 GiB to 128 TiB sparse captures) is skipped, never attached or

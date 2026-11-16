@@ -26,6 +26,35 @@ class ApfsContentNativeTest < Minitest::Test
     text.lstrip.start_with?("[") ? JSON.parse(text) : text.lines.reject { _1.strip.empty? }.map { JSON.parse(_1) }
   end
 
+  def clone_or_copy_image(source:, destination:)
+    if RUBY_PLATFORM.include?("darwin")
+      begin
+        system("cp", "-c", source, destination, exception: true)
+        return
+      rescue RuntimeError
+        # The temporary filesystem may not support cloning.
+      end
+    end
+    File.open(source, "rb") do |input|
+      File.open(destination, "wb") { IO.copy_stream(input, _1) }
+    end
+  end
+
+  def tamper_node_free_space(path:, block:)
+    File.open(path, "r+b") do |image|
+      image.seek(block * 4096 + 40)
+      toc_offset, toc_length, free_offset, free_length = image.read(8).unpack("v4")
+      free_start = 56 + toc_offset + toc_length + free_offset
+      assert_operator(free_length, :>, 0, "block #{block} has free space")
+      assert_operator(free_start + free_length, :<=, 4096, "block #{block} free space is in bounds")
+      position = block * 4096 + free_start + free_length / 2
+      image.seek(position)
+      byte = image.read(1).unpack1("C")
+      image.seek(position)
+      image.write([byte ^ 0x5a].pack("C"))
+    end
+  end
+
   def image_path(path)
     relative = path.delete_prefix("/").delete_prefix("./")
     ["", "."].include?(relative) ? "/" : "/#{relative}"
@@ -286,6 +315,40 @@ class ApfsContentNativeTest < Minitest::Test
       result = invoke(arguments: ["W", "-f", image], expected: nil, timeout: 180)
       assert_equal(0, result.status, "#{capture}: #{result.stdout}\n#{result.stderr}")
       refute_match(/chunk tables|incomplete/i, result.stdout + result.stderr, capture)
+    end
+  end
+
+  def test_sealed_capture_structural_verification_completes
+    image = File.join(native_directory, "e11-sealed", "app.dmg")
+    skip("sealed capture unavailable: #{image}") unless File.file?(image)
+
+    result = invoke(arguments: ["W", "-f", image], expected: 0, timeout: 180)
+    assert_includes(result.stdout, "filesystem structure verified")
+    refute_match(/incomplete/i, result.stdout + result.stderr)
+    report = invoke(arguments: ["W", "--json", "-f", image], expected: 0, timeout: 180)
+    verification = report.stdout.lines.map { JSON.parse(_1) }.find { _1.fetch("type") == "verify" }
+    refute_nil(verification, "structural verification emits a report")
+    assert_equal(true, verification.fetch("complete"))
+  end
+
+  def test_sealed_capture_structural_verification_rejects_tampered_nodes
+    source = File.join(native_directory, "e11-sealed", "app.dmg")
+    skip("sealed capture unavailable: #{source}") unless File.file?(source)
+
+    cases = [
+      { name: "index", block: 692, message: "does not match its digest" },
+      { name: "leaf", block: 366, message: "does not match its digest" },
+      { name: "sealed extents", block: 233, message: "bad checksum" }
+    ]
+    cases.each do |damage|
+      image = (@root / "tampered-#{damage.fetch(:block)}.img").to_s
+      clone_or_copy_image(source: source, destination: image)
+      tamper_node_free_space(path: image, block: damage.fetch(:block))
+      result = invoke(arguments: ["W", "--json", "-f", image], expected: 1, timeout: 180)
+      error = result.stdout.lines.map { JSON.parse(_1) }.find { _1.fetch("type") == "error" }
+      refute_nil(error, damage.fetch(:name))
+      assert_equal(-5, error.fetch("code"), "#{damage.fetch(:name)}: FSIMG_ECORRUPT")
+      assert_includes(error.fetch("message"), damage.fetch(:message), damage.fetch(:name))
     end
   end
 

@@ -46,8 +46,6 @@
 static fsimg_status_t	free_count_read(apfs_reader_t *, unsigned char *,
 			    fsimg_error_t *);
 static void		cursors_init(apfs_reader_t *, uint64_t, uint64_t);
-static fsimg_status_t	integrity_read(apfs_reader_t *, unsigned char *,
-			    fsimg_error_t *);
 static fsimg_status_t	fs_check(const apfs_fs_t *, uint32_t, size_t *,
 			    fsimg_error_t *);
 static int		map_snapshot_compare(const unsigned char *, size_t,
@@ -332,9 +330,11 @@ apfs_volume_open(fsimg_reader_t *reader, apfs_reader_t *apfs,
 		if (reader->options.snapshot != NULL)
 			return (apfs_unsupported(error, ROLE_VOLUME,
 			    "is sealed, and its snapshots are not read"));
-		status = integrity_read(apfs, window, error);
+		status = apfs_integrity_read(container, &apfs->volume_map,
+		    &apfs->fs, container->xid, window, apfs->root_hash, error);
 		if (status != FSIMG_OK)
 			return (status);
+		apfs->sealed = true;
 	}
 	if (reader->options.snapshot != NULL) {
 		status = snapshot_select(apfs, reader->options.snapshot, window,
@@ -349,23 +349,23 @@ apfs_volume_open(fsimg_reader_t *reader, apfs_reader_t *apfs,
 }
 
 /*
- * The integrity object of the selected sealed volume (specs/design-apfs.md,
- * "Sealed volumes"), read through the live volume object map at the read
- * XID: its version, flags, hash type and broken-seal XID from the closed
- * tables, and the root hash, which must lie inside the object past its
- * fixed fields, kept for the filesystem tree's cursors.
+ * A sealed volume's integrity object (specs/design-apfs.md, "Sealed
+ * volumes"), read through the volume's object map at xid: its version,
+ * flags, hash type and broken-seal XID from the closed tables, and the root
+ * hash, which must lie inside the object past its fixed fields, copied to
+ * root_hash for the filesystem tree's sealed cursors.
  */
-static fsimg_status_t
-integrity_read(apfs_reader_t *apfs, unsigned char *window,
-    fsimg_error_t *error)
+fsimg_status_t
+apfs_integrity_read(apfs_container_t *container, apfs_map_t *map,
+    const apfs_fs_t *fs, uint64_t xid, unsigned char *window,
+    unsigned char *root_hash, fsimg_error_t *error)
 {
-	apfs_container_t *container = &apfs->container;
 	apfs_integrity_t integrity;
 	apfs_ref_t ref;
 	fsimg_status_t status;
 
-	ref = (apfs_ref_t){ .map = &apfs->volume_map, .role = ROLE_INTEGRITY,
-	    .oid = apfs->fs.integrity_oid, .xid = apfs->read_xid,
+	ref = (apfs_ref_t){ .map = map, .role = ROLE_INTEGRITY,
+	    .oid = fs->integrity_oid, .xid = xid,
 	    .storage = APFS_OBJ_VIRTUAL, .subtype = APFS_SUBTYPE_NONE,
 	    .kind = APFS_KIND_INTEGRITY_META };
 	status = apfs_object_read(container, &ref, window, NULL, error);
@@ -391,9 +391,8 @@ integrity_read(apfs_reader_t *apfs, unsigned char *window,
 	    APFS_SEAL_HASH_BYTES)
 		return (apfs_corrupt(error, ROLE_INTEGRITY,
 		    "has its root hash outside the object"));
-	bcopy(window + integrity.root_hash_offset, apfs->root_hash,
+	bcopy(window + integrity.root_hash_offset, root_hash,
 	    APFS_SEAL_HASH_BYTES);
-	apfs->sealed = true;
 	return (FSIMG_OK);
 }
 

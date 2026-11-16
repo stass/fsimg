@@ -737,7 +737,18 @@ extents (8) lie together under its stream ID, which a clone or a written
 clone branch can make differ from the inode number, so extents tile their
 stream wherever it
 lies; attributes and extended fields are well formed; counts by kind
-accumulate for the superblock. Facts that join different owners go to
+accumulate for the superblock. A sealed volume's filesystem tree is
+scanned through its seal, every node checked against its parent's digest
+and the root against the integrity object's root hash, and holds no file
+extent, one there being `FSIMG_ECORRUPT`. A second cursor walks its sealed
+file-extent tree beside it: the tree's keys order as the filesystem tree's
+`(private ID, kind 8)` would, so each extent is checked where that record
+would stand and the stream checks are those of an unsealed volume. Its
+file-information records (13) must have the codec's shape, a hash ending
+the value; their hashes, which cover file content, are not checked, nor
+their types or hash sizes, which no rule fixes. The container pass walks
+the sealed file-extent tree once more on its own, as it walks every
+physical tree, to claim its nodes. Facts that join different owners go to
 streams that are sorted once:
 
 * name references `(child, parent, sibling ID, type, name)`, joined with
@@ -885,8 +896,11 @@ read-only-compatible feature bit, or a reaper that is not idle makes the
 report incomplete with `FSIMG_EUNSUPPORTED`; the walk is never reported
 complete after skipping an object. So do structures whose blocks no claim
 describes, or whose rules no capture shows: a nonzero EFI jumpstart; a
-volume's sealed file-extent tree or integrity object in a profile that
-does not read them; and a snapshot with nonzero flags, an object-map
+sealed file-extent tree named by a volume without the sealed feature, whose
+nodes no part claims (its integrity object, a mapped object, is claimed
+with the object map and otherwise ignored); a sealed volume with
+snapshots, whose copies may name sealed trees of their own; and a
+snapshot with nonzero flags, an object-map
 snapshot record with a nonzero flag, or a snapshot of a dataless-snapshot
 volume. Such
 blocks cannot be told from damage, so an incomplete container pass makes

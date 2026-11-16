@@ -48,7 +48,10 @@ with zlib, LZVN or LZFSE, and delivers no extended attributes.
 A sealed volume is read with each filesystem-tree node checked against the
 seal's stored root hash, which checks the metadata's integrity and never its
 authenticity; file contents and their extent map are not checked against the
-seal, and verification of the volume is incomplete.
+seal.
+Verification checks every filesystem-tree node against the seal, and
+checks the volume's records and blocks as for any other volume; a sealed
+volume with snapshots makes it incomplete.
 Its snapshots, a broken seal and a seal hashed other than with SHA-256 are
 refused with FSIMG_EUNSUPPORTED.
 Encrypted and Fusion volumes, and files compressed with LZBITMAP, are

@@ -304,6 +304,7 @@ static fsimg_status_t	volume_identity(verify_t *, uint32_t, apfs_fs_t *,
 static fsimg_status_t	volume_map_claims(verify_t *, fsimg_error_t *);
 static fsimg_status_t	snapshot_claims(verify_t *, fsimg_error_t *);
 static fsimg_status_t	live_extent_claims(verify_t *, fsimg_error_t *);
+static fsimg_status_t	sealed_extent_claims(verify_t *, fsimg_error_t *);
 static fsimg_status_t	volume_records(verify_t *, fsimg_error_t *);
 static int		event_compare(const void *, size_t, const void *,
 			    size_t, void *);
@@ -563,10 +564,13 @@ tree_walk(verify_t *v, apfs_cursor_t *cursor, record_fn_t fn, void *arg,
 /*
  * Every live version an object map maps, at its size: tombstones are
  * skipped. A full scan has no lookup XID to stop at, so every record's XID,
- * a tombstone's too, must be nonzero and not above the checkpoint's. An
- * encrypted or headerless object, which a read refuses outside a sealed
- * filesystem tree, is still judged and claimed at its size, and makes the
- * report incomplete.
+ * a tombstone's too, must be nonzero and not above the checkpoint's. The
+ * no-header flag belongs to a sealed filesystem tree's nodes, which record
+ * reconciliation reads through the seal: it is forbidden outside a sealed
+ * volume's map, and inside one it is judged only on the objects a part
+ * reads, the nodes and the integrity object, whose read requires it absent.
+ * An encrypted object, which a read refuses, is still judged and claimed at
+ * its size, and makes the report incomplete.
  */
 static fsimg_status_t
 mapped_record(verify_t *v, const apfs_record_t *record, void *arg,
@@ -574,6 +578,8 @@ mapped_record(verify_t *v, const apfs_record_t *record, void *arg,
 {
 	const char *role = arg;
 	uint32_t block_size = v->container->block_size;
+	bool sealed = v->volume != NULL &&
+	    (v->volume->fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0;
 	apfs_omap_key_t key;
 	apfs_omap_val_t value;
 
@@ -594,10 +600,11 @@ mapped_record(verify_t *v, const apfs_record_t *record, void *arg,
 	if (value.size == 0 || value.size % block_size != 0)
 		return (apfs_corrupt(error, role,
 		    "maps an object of an invalid size"));
-	if ((value.flags & (APFS_OMAP_VAL_ENCRYPTED |
-	    APFS_OMAP_VAL_NOHEADER)) != 0)
-		incomplete_reason(v, role,
-		    "maps an encrypted or headerless object");
+	if ((value.flags & APFS_OMAP_VAL_NOHEADER) != 0 && !sealed)
+		return (apfs_corrupt(error, role,
+		    "maps a headerless object outside a sealed volume"));
+	if ((value.flags & APFS_OMAP_VAL_ENCRYPTED) != 0)
+		incomplete_reason(v, role, "maps an encrypted object");
 	return (metadata_claim(v, &v->main, SOURCE_MAPPED, value.address,
 	    value.size / block_size, error));
 }
@@ -986,11 +993,32 @@ live_extent_claims(verify_t *v, fsimg_error_t *error)
 }
 
 /*
- * The volume's filesystem records (records.c). A sealed volume keeps its
- * file extents in a tree this pass does not read, which already makes the
- * report incomplete, so its records are not reconciled. With payload
- * read-through the selected volume lists its inodes of several names for
- * the walk.
+ * A sealed volume's sealed file-extent tree, a physical tree whose nodes
+ * this walk claims; its records are checked, and their blocks joined with
+ * the physical-extent records, by record reconciliation, which reads them
+ * beside the filesystem tree's.
+ */
+static fsimg_status_t
+sealed_extent_claims(verify_t *v, fsimg_error_t *error)
+{
+	apfs_cursor_t cursor;
+	fsimg_status_t status;
+
+	if ((v->volume->fs->incompat_features & APFS_FS_INCOMPAT_SEALED) == 0)
+		return (FSIMG_OK);
+	apfs_cursor_init(&cursor, v->container,
+	    apfs_sealed_extent_tree_profile(), APFS_OBJ_PHYSICAL,
+	    v->volume->fs->fext_tree_oid, v->container->xid, NULL);
+	status = tree_walk(v, &cursor, NULL, NULL, error);
+	apfs_cursor_free(&cursor);
+	return (status);
+}
+
+/*
+ * The volume's filesystem records (records.c), which in a sealed volume
+ * are read through the seal with the sealed file-extent tree's. With
+ * payload read-through the selected volume lists its inodes of several
+ * names for the walk.
  */
 static fsimg_status_t
 volume_records(verify_t *v, fsimg_error_t *error)
@@ -1000,8 +1028,6 @@ volume_records(verify_t *v, fsimg_error_t *error)
 	apfs_records_t records = { .extents = v->file_extents };
 	fsimg_status_t status;
 
-	if ((volume->fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0)
-		return (FSIMG_OK);
 	if (selected && (v->flags & FSIMG_VERIFY_PAYLOAD) != 0)
 		records.shared = v->shared;
 	status = apfs_records_check(v->container, volume->fs, volume->index,
@@ -1017,14 +1043,14 @@ volume_records(verify_t *v, fsimg_error_t *error)
 /*
  * A volume's trees: its object map with the map's snapshot tree, its
  * snapshot metadata tree with each snapshot's superblock and
- * extent-reference tree, its live extent-reference tree and its filesystem
- * records, each a part of its own, so a refusal in one leaves the others
- * read. The checks that join the trees need these parts whole, but not a
- * snapshot's own parts, whose refusal has made the report incomplete; the
- * live records' rule needs only the snapshot and live extent walks, so
- * damage it finds outranks a refusal elsewhere in the volume. A
- * snapshot of a dataless-snapshot volume, whose blocks no capture shows,
- * makes it incomplete too. The extended-metadata object is read by no
+ * extent-reference tree, its live extent-reference tree, a sealed volume's
+ * sealed file-extent tree and its filesystem records, each a part of its
+ * own, so a refusal in one leaves the others read. The checks that join
+ * the trees need these parts whole, but not a snapshot's own parts, whose
+ * refusal has made the report incomplete; the live records' rule needs only
+ * the snapshot and live extent walks, so damage it finds outranks a refusal
+ * elsewhere in the volume. A snapshot of a dataless-snapshot volume, whose
+ * blocks no capture shows, makes it incomplete too. The extended-metadata object is read by no
  * part: its versions are mapped objects, claimed with the object map.
  *
  * The object map's snapshot count and newest XID and the live
@@ -1033,22 +1059,31 @@ volume_records(verify_t *v, fsimg_error_t *error)
  * Without snapshots every live physical-extent record is of kind new with
  * a positive count, and the allocated block count must equal the blocks
  * the volume's claims cover, the object-map object, which E3 counts as the
- * one block more, among them. With snapshots, which blocks that count
- * leaves out is provisional (E9), so it is not checked.
+ * one block more, among them, and in a sealed volume the nodes of its
+ * sealed file-extent tree and its integrity object, a mapped object. With
+ * snapshots, which blocks that count leaves out is provisional (E9), so it
+ * is not checked.
+ *
+ * Two cases no capture shows make the report incomplete: a sealed volume
+ * with snapshots, whose copies may name sealed trees of their own, and a
+ * volume without the sealed feature that names a sealed file-extent tree,
+ * whose nodes no part claims. Its integrity object needs no such rule: it
+ * is a mapped object, claimed with the object map, and no part reads it.
  */
 static fsimg_status_t
 volume_trees(verify_t *v, uint32_t index, const apfs_fs_t *fs,
     fsimg_error_t *error)
 {
-	enum { MAP, SNAPSHOTS, LIVE, RECORDS, PARTS };
+	enum { MAP, SNAPSHOTS, LIVE, SEALED, RECORDS, PARTS };
 	static const part_fn_t parts[PARTS] = { [MAP] = volume_map_claims,
 	    [SNAPSHOTS] = snapshot_claims, [LIVE] = live_extent_claims,
-	    [RECORDS] = volume_records };
+	    [SEALED] = sealed_extent_claims, [RECORDS] = volume_records };
 	volume_walk_t walk = { .fs = fs, .index = index };
+	bool sealed = (fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0;
 	fsimg_status_t status;
 	unsigned refused;
 
-	if ((fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0)
+	if (!sealed && fs->fext_tree_oid != 0)
 		incomplete_reason(v, ROLE_VOLUME,
 		    "holds structures verification does not read");
 	v->volume = &walk;
@@ -1058,6 +1093,9 @@ volume_trees(verify_t *v, uint32_t index, const apfs_fs_t *fs,
 	v->volume = NULL;
 	if (status != FSIMG_OK)
 		return (status);
+	if (sealed && walk.snapshots.count != 0)
+		incomplete_reason(v, ROLE_VOLUME,
+		    "is sealed and has snapshots");
 	if ((refused & (1u << SNAPSHOTS | 1u << LIVE)) == 0 &&
 	    walk.snapshots.count == 0 && walk.released)
 		return (apfs_corrupt(error, ROLE_EXTENTREF,
@@ -1081,11 +1119,6 @@ volume_trees(verify_t *v, uint32_t index, const apfs_fs_t *fs,
 			    "has dataless snapshots");
 		return (FSIMG_OK);
 	}
-	/* A sealed volume's file-extent tree, which made the report
-	 * incomplete above, counts blocks no walk claimed.
-	 */
-	if ((fs->incompat_features & APFS_FS_INCOMPAT_SEALED) != 0)
-		return (FSIMG_OK);
 	if (fs->alloc_blocks != walk.blocks)
 		return (apfs_corrupt(error, ROLE_VOLUME,
 		    "allocated block count differs from its trees"));

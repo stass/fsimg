@@ -1571,11 +1571,12 @@ also read as zero: a policy, since such a tail delivers no stored bytes and
 reads like a trailing hole.
 A sparse native file has the internal flag `0x200` and a sparse-bytes field
 equal to the total length of its hole extents (E3, E6).
-A mapped extent's blocks lie inside `[1, N)`. Extent flags must be zero, and
-crypto IDs follow a closed table for unencrypted volumes. The table is
-provisional (E16) and holds zero alone, the only value on every E3 extent,
-until a capture adds a value, so
-no extent that might be encrypted is delivered. Content past the size,
+A mapped extent's blocks lie inside `[1, N)`. Extent flags must be zero: a
+nonzero flag is a content-changing flag outside the profile,
+`FSIMG_EUNSUPPORTED` in every stage. Crypto IDs follow a closed table for
+unencrypted volumes. The table is provisional (E16) and holds zero alone,
+the only value on every E3 extent, until a capture adds a value, so no
+extent that might be encrypted is delivered. Content past the size,
 including preallocated extents, is never delivered. Two streams may name the same blocks: that is a clone, legal
 when the extent-reference tree accounts for it.
 

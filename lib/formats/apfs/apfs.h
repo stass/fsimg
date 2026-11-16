@@ -1840,6 +1840,12 @@ typedef struct apfs_window apfs_window_t;
  * rules and refusal tables: open runs it on the selected volume and
  * verification on every volume. name_bytes receives the name's length.
  *
+ * apfs_integrity_read(container, map, fs, xid, window, root_hash, error)
+ * reads the integrity object of the sealed volume fs through its object
+ * map at xid, judges its fields (specs/design-apfs.md, "Sealed volumes")
+ * and copies its root hash, APFS_SEAL_HASH_BYTES, to root_hash: open runs
+ * it on a selected sealed volume and record reconciliation on every one.
+ *
  * apfs_volume_rule(fs) is the name rule a volume's incompatible features
  * select; a volume of any rule but APFS_NAMES_BYTES hashes its
  * directory-record keys. apfs_inode_min(fs) is its least ordinary inode
@@ -1893,6 +1899,9 @@ void		apfs_volume_close(apfs_reader_t *);
 fsimg_status_t	apfs_volume_read(apfs_container_t *, apfs_map_t *, uint32_t,
 		    uint64_t, unsigned char *, apfs_fs_t *, size_t *,
 		    fsimg_error_t *);
+fsimg_status_t	apfs_integrity_read(apfs_container_t *, apfs_map_t *,
+		    const apfs_fs_t *, uint64_t, unsigned char *,
+		    unsigned char *, fsimg_error_t *);
 void		apfs_volume_live(apfs_reader_t *);
 const apfs_tree_profile_t *apfs_snapshot_tree_profile(void);
 const apfs_tree_profile_t *apfs_map_snapshot_tree_profile(void);
@@ -1910,7 +1919,9 @@ fsimg_status_t	apfs_verify(fsimg_reader_t *, unsigned,
  * Record reconciliation (records.c; specs/design-apfs-driver.md,
  * "Verification"). apfs_records_check(container, fs, volume, window,
  * records, error) scans the filesystem tree of the volume in slot volume,
- * whose superblock fs verification has read, and reconciles its records.
+ * whose superblock fs verification has read, and reconciles its records; a
+ * sealed volume's tree is read through its seal, beside the sealed
+ * file-extent tree that holds its file extents.
  * Each mapped file extent appends an apfs_fext_claim_t of
  * APFS_FEXT_CLAIM_BYTES to records->extents, for the allocation merge to
  * join with the live physical-extent records; when records->shared is not

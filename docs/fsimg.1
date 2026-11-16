@@ -102,9 +102,11 @@ the volume's comparison.
 A sealed volume is listed and extracted with every filesystem-tree node it
 reads checked against the seal's stored root hash, a check of the metadata's
 integrity, never of authenticity; file contents and their extent map are not
-checked against the seal, and
+checked against the seal.
 .Cm W
-reports its verification incomplete.
+checks every node of a sealed volume's filesystem tree against the seal.
+It checks the volume's records and blocks as for any other volume, and
+reports a sealed volume with snapshots incomplete.
 A sealed volume's snapshots, a broken seal and a seal hashed other than with
 SHA-256 are refused as not supported.
 Encrypted and Fusion volumes are refused as not supported.
