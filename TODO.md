@@ -49,96 +49,78 @@
   The [work breakdown](docs/todo-qnx6.md) owns experiments and implementation;
   [research evidence](docs/qnx6-research.md) owns source provenance.
 
-* [Medium] **APFS reader, verifier and writer** (`lib/formats/apfs/`,
-  `lib/read/`, `lib/core/`, `lib/layers/`, `cmd/fsimg/`, `tools/apfs/`,
-  `test/spec/`): implement the [format design](specs/design-apfs.md) and
-  [driver design](specs/design-apfs-driver.md) in the stages of the
-  [APFS plan](docs/apfs-plan.md). Native macOS evidence comes first and
-  confirms the reference's tables, the name-hash conventions and the native
-  empty-container layout, closing the designs' provisional values; then the
-  common changes (`volume=` and `snapshot=` read settings, the `case=`
-  write setting, the `apfs` registration rows); the reader, verifier and
-  compression over the existing zero and held extents, CRC-32C and `lzfse`
-  decoders, with normalization tables the driver owns; a writer registered
-  only after `fsck_apfs -n`, mount and write-after-create pass; then snapshots,
-  sealed volumes and the specification harness model. Socket and device
-  entries are the read-only kinds of `specs/design-device-nodes.md`; the
-  plan's evidence decides whether macOS always writes the device number
-  extended field, which would tighten the APFS rule for a device without it.
-  Whether an object-map value flag `0x10` (crypto
-  generation) is accepted like the map flag or refused as corrupt, as the
-  format design's value rule says, waits on E1's volume records.
-  [Low] The snapshot rules a native capture alone decides stay provisional
-  with safe defaults (name folding, nonzero flags, dataless snapshots,
-  record shapes of clones made between snapshots): `e9-snap` needs a
-  snapshot of a disk-image volume, which only a host with SIP and AMFI off
-  can take; the E9 section of `docs/apfs-research.md` lists the ways.
-  [Low] A volume whose snapshots were all deleted but whose object map
-  keeps an empty snapshot tree has its allocated block count checked with
-  that tree's node counted; no capture shows whether macOS counts it, so
-  `e9-snap` should delete its snapshots once and record the count. A
-  refusal in a volume object map's own tree leaves the map's snapshot tree
-  unwalked, so damage there is not reported.
-  [Medium] The reference-count sweep counts file extents, so a stream whose
-  extents name one block twice counts twice where the format design counts
-  distinct streams; no capture holds such a stream.
-  Record reconciliation (`records.c`) leaves open, from review: an unnamed
-  inode in the private directory is not held to a link count (no capture
-  has one; E16); symbolic-link targets and `com.apple.decmpfs` headers
-  of non-selected volumes are not judged; and `apfs_inode_get()` judges
-  the inode's flags before its type against the directory record, so such
-  an inode with both faults reports unsupported. [Low] A directory cycle the root
-  cannot reach passes in a volume verification does not walk: the
-  selected volume's walk must reach every directory, but no single sorted
-  join finds such a cycle; joining each directory's parent chain by
-  repeated doubling would, at about the logarithm of the deepest path in
-  sorts of the directory records.
-  In the specification harness's APFS model (`test/spec/lib/fsimg_spec/apfs/`),
-  `apfs.sm.address_blocks_unmeasured` has no targeted witness: no native
-  capture and no writer output has a block size other than 4096 or 16384,
-  so only an independent builder of another block size could target it.
-  The writer's creation cases (`apfs/cases.rb`) copy ISO 9660's creation
-  plumbing (`Classified`, the source model whose explicit size leaves input
-  unclassified, the promoted-recipe reader) and its `extract.safe_kinds`
-  rule; one shared creation source model and safe-kinds rule beside
-  `DestinationRules` would serve both. An explicit size stays unclassified
-  at create although `WriterLayout.regions` and a bound on the run could
-  prove a small tree fits, and `WriterLayout` does not yet judge the run's
-  order (the container object map at the prefix's end) or the container
-  UUID's derivation from the volume UUID.
-  Coverage reports `apfs.extract.safe_kinds` as not exercised although its
-  creation runs and passes: a creation's destination violations come from
-  the created image, classified after create, while coverage counts the
-  classification made before it.
-  The record level models inodes, directory
-  records, file extents and data-stream ID records; attributes beyond their
-  stream IDs, sibling links and maps, symbolic links, compression,
-  directory statistics, the extent-reference and snapshot trees, sealed
-  volumes and the namespace walk's reachability have no rules yet. Volume
-  and record rules judge every resolved volume with the selected volume's
-  scopes, where a non-selected volume's faults are verification's.
-  `apfsck` is not installed on the development host, so its adapter has
-  only reported unavailable. Rules the volume and record review listed as
-  missing: distinct volume UUIDs, the volume map's
-  pending revert range, the device-number field on a non-device, the
-  sparse-bytes field and flag, a plain name over 1022 bytes, attribute
-  streams' size limits, hashed and no-header node flags in an unsealed
-  tree; and the record model's readability items: positional
-  `[type, flags, data]` and `[key, value]` tuples, single-letter rule
-  lambda parameters and reflective policy dispatch in
-  `volume_rules.rb` and `record_rules.rb`, and object-map lookup by scan
-  rather than seek. The format design does not say whether open or full verification
-  checks the space manager's count relations, the keylocker ranges and the
-  container map's snapshot fields; the model places them as `rules.rb` states.
-  Review findings left for the next part: open-scope object-map rules judge
-  every record and node rather than the lookup paths open visits; encrypted
-  and nonpersistent flags outside checkpoint mappings classify as corrupt
-  rather than unsupported; the selected checkpoint's feature masks are not
-  judged, only block 0's; chunk-structure expansion is capped by names, not
-  records; a mapped object past the read bound classifies as corrupt rather
-  than unclassified; the object-map, address-block and bitmap addresses are
-  not judged against `N`, nor is the data run's highest block read; the
-  height and object-flag witnesses also fire corrupt rules.
+* [Low] **APFS provisional native rules** (`lib/formats/apfs/`,
+  `specs/design-apfs.md`): rules no native capture has decided keep their
+  safe defaults. Whether macOS always writes the device-number extended
+  field, which would tighten the rule for a device without it; whether an
+  object-map value flag `0x10` (crypto generation) is accepted like the map
+  flag or refused as corrupt; and the snapshot rules (name folding, nonzero
+  flags, dataless snapshots, record shapes of clones made between
+  snapshots), which need `e9-snap`: a snapshot of a disk-image volume, which
+  only a host with SIP and AMFI off can take (the E9 section of
+  `docs/apfs-research.md` lists the ways). `e9-snap` should also delete its
+  snapshots once and record whether macOS counts an empty snapshot tree's
+  node in the volume's allocated block count.
+* [Medium] **APFS verifier gaps** (`lib/formats/apfs/verify.c`,
+  `lib/formats/apfs/records.c`):
+  * The reference-count sweep counts file extents, so a stream whose
+    extents name one block twice counts twice where the format design
+    counts distinct streams; no capture holds such a stream.
+  * A refusal in a volume object map's own tree leaves the map's snapshot
+    tree unwalked, so damage there is not reported.
+  * An unnamed inode in the private directory is not held to a link count
+    (no capture has one; E16). Symbolic-link targets and
+    `com.apple.decmpfs` headers of non-selected volumes are not judged.
+    `apfs_inode_get()` judges the inode's flags before its type against the
+    directory record, so an inode with both faults reports unsupported.
+  * [Low] A directory cycle the root cannot reach passes in a volume
+    verification does not walk: no single sorted join finds it; joining
+    each directory's parent chain by repeated doubling would, at about the
+    logarithm of the deepest path in sorts of the directory records.
+* [Medium] **APFS specification-harness model gaps**
+  (`test/spec/lib/fsimg_spec/apfs/`):
+  * Missing rules: attributes beyond their stream IDs, sibling links and
+    maps, symbolic links, compression, directory statistics, the
+    extent-reference and snapshot trees, sealed volumes and the namespace
+    walk's reachability; distinct volume UUIDs, the volume map's pending
+    revert range, the device-number field on a non-device, the sparse-bytes
+    field and flag, a plain name over 1022 bytes, attribute streams' size
+    limits, hashed and no-header node flags in an unsealed tree. Volume and
+    record rules judge every resolved volume with the selected volume's
+    scopes, where a non-selected volume's faults are verification's.
+  * Misclassifications: open-scope object-map rules judge every record and
+    node rather than the lookup paths open visits; encrypted and
+    nonpersistent flags outside checkpoint mappings classify as corrupt
+    rather than unsupported; the selected checkpoint's feature masks are
+    not judged, only block 0's; chunk-structure expansion is capped by
+    names, not records; a mapped object past the read bound classifies as
+    corrupt rather than unclassified; the object-map, address-block and
+    bitmap addresses are not judged against `N`, nor is the data run's
+    highest block read; the height and object-flag witnesses also fire
+    corrupt rules. The format design does not say whether open or full
+    verification checks the space manager's count relations, the keylocker
+    ranges and the container map's snapshot fields; the model places them
+    as `rules.rb` states.
+  * Writer cases: `apfs/cases.rb` copies ISO 9660's creation plumbing
+    (`Classified`, the source model whose explicit size leaves input
+    unclassified, the promoted-recipe reader) and its `extract.safe_kinds`
+    rule; one shared creation source model and safe-kinds rule beside
+    `DestinationRules` would serve both. An explicit size stays
+    unclassified at create although `WriterLayout.regions` and a bound on
+    the run could prove a small tree fits, and `WriterLayout` does not
+    judge the run's order (the container object map at the prefix's end)
+    or the container UUID's derivation from the volume UUID. Coverage
+    reports `apfs.extract.safe_kinds` as not exercised although its
+    creation runs and passes, because it counts the classification made
+    before create.
+  * [Low] `apfs.sm.address_blocks_unmeasured` has no targeted witness: no
+    capture or writer output has a block size other than 4096 or 16384.
+    `apfsck` is not installed on the development host, so the harness's
+    adapter reports unavailable there.
+  * [Low] Readability: positional `[type, flags, data]` and `[key, value]`
+    tuples, single-letter rule lambda parameters and reflective policy
+    dispatch in `volume_rules.rb` and `record_rules.rb`, and object-map
+    lookup by scan rather than seek.
 
 * [Medium] **APFS verifier refuses `dissect-apfs-snapshot`**
   (`lib/formats/apfs/verify.c`): `i`, `t` and `x -O` read it, `W` refuses it
